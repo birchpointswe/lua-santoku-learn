@@ -187,11 +187,10 @@ static void tm_update (struct TsetlinMachine *tm, unsigned int *Xi, unsigned int
 			tm_initialize_random_streams(tm, specificity);
 			if (((*tm).clause_output[clause_chunk] & (1 << clause_chunk_pos)) > 0) {
 				for (long int k = 0; k < tm->la_chunks; ++k) {
-					#ifdef _BOOST_TRUE_POSITIVE_FEEDBACK
-          tm_inc(tm, j, k, Xi[k]);
-					#else
-          tm_inc(tm, j, k, Xi[k] & (~tm->feedback_to_la[k]));
-					#endif
+          if (tm->boost_true_positive)
+            tm_inc(tm, j, k, Xi[k]);
+          else
+            tm_inc(tm, j, k, Xi[k] & (~tm->feedback_to_la[k]));
 		 			tm_dec(tm, j, k, (~Xi[k]) & tm->feedback_to_la[k]);
 				}
 			} else {
