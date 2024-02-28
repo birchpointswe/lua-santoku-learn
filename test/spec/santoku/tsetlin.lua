@@ -56,23 +56,23 @@ test("tsetlin", function ()
 
     tm.train(t, train_problems, train_solutions, SPECIFICITY)
 
-    local test_score  = tm.evaluate(t, test_problems, test_solutions, true)
+    local test_score, confusion = tm.evaluate(t, test_problems, test_solutions, epoch == MAX_EPOCHS)
     local train_score = tm.evaluate(t, train_problems, train_solutions)
 
     str.printf("Epoch\t%-4d\tTest\t%4.2f\tTrain\t%4.2f\n", epoch, test_score, train_score)
 
-
-
-
-
-
-
-
-
-
-
-
-
+    if epoch == MAX_EPOCHS then
+      if #confusion == 0 then
+        print("No confusion")
+      else
+        print()
+        print("  Expected / Predicted  Ratio")
+        print()
+        for s in it.ivals(confusion) do
+          str.printf("%10d / %-10d %-.2f\n", s.expected, s.predicted, s.ratio, s.count)
+        end
+      end
+    end
 
   end
 
