@@ -1,3 +1,4 @@
+local serialize = require("santoku.serialize") -- luacheck: ignore
 local test = require("santoku.test")
 local tm = require("santoku.tsetlin")
 local bm = require("santoku.bitmap")
@@ -52,10 +53,27 @@ test("tsetlin", function ()
   local t = tm.create(CLASSES, FEATURES, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
 
   for epoch = 1, MAX_EPOCHS do
+
     tm.train(t, train_problems, train_solutions, SPECIFICITY)
-    local test_score = tm.evaluate(t, test_problems, test_solutions)
+
+    local test_score --[[, cfx]] = tm.evaluate(t, test_problems, test_solutions, true)
     local train_score = tm.evaluate(t, train_problems, train_solutions)
+
     str.printf("Epoch\t%-4d\tTest\t%4.2f\tTrain\t%4.2f\n", epoch, test_score, train_score)
+
+    -- print()
+    -- for i = 0, CLASSES - 1 do
+    --   for j = 0, CLASSES - 1 do
+    --     if cfx[i] and cfx[i][j] then
+    --       str.printf("%4d\t", cfx[i][j])
+    --     else
+    --       str.printf("%4d\t", 0)
+    --     end
+    --   end
+    --   print()
+    -- end
+    -- print()
+
   end
 
 end)
