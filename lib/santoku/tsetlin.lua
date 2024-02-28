@@ -11,14 +11,19 @@ local function train (t, ps, ss, s)
   end
 end
 
-local function evaluate (t, ps, ss)
+local function evaluate (t, ps, ss, generate_confusion)
+  local confusion = {}
   local correct = 0
   for i = 1, #ps do
-    if tm_predict(t, ps[i]) == ss[i] then
+    local guess = tm_predict(t, ps[i])
+    if guess == ss[i] then
       correct = correct + 1
+    elseif generate_confusion then
+      confusion[ss[i]] = confusion[ss[i]] or {}
+      confusion[ss[i]][guess] = (confusion[ss[i]][guess] or 0) + 1
     end
   end
-  return correct / #ps
+  return correct / #ps, confusion
 end
 
 return t_assign({
