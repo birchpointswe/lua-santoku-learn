@@ -56,12 +56,13 @@ test("tsetlin", function ()
 
     tm.train(t, train_problems, train_solutions, SPECIFICITY)
 
-    local test_score, confusion = tm.evaluate(t, test_problems, test_solutions, epoch == MAX_EPOCHS)
+    local test_score, confusion, predictions = tm.evaluate(t, test_problems, test_solutions, epoch == MAX_EPOCHS)
     local train_score = tm.evaluate(t, train_problems, train_solutions)
 
     str.printf("Epoch\t%-4d\tTest\t%4.2f\tTrain\t%4.2f\n", epoch, test_score, train_score)
 
     if epoch == MAX_EPOCHS then
+
       if #confusion == 0 then
         print("No confusion")
       else
@@ -72,6 +73,14 @@ test("tsetlin", function ()
           str.printf("%10d / %-10d %-.2f\n", s.expected, s.predicted, s.ratio, s.count)
         end
       end
+
+      print()
+      print("  Class frequency (observed / predicted)")
+      print()
+      for p in it.ivals(predictions) do
+        str.printf("  %-30s  %.4f / %-.4f\n", p.class, p.frequency_observed, p.frequency_predicted)
+      end
+
     end
 
   end
