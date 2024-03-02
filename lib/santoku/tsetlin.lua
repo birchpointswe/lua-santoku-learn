@@ -20,23 +20,30 @@ local function train (t, ps, ss, s)
   end
 end
 
-local function evaluate (t, ps, ss, track_confusion)
+local function evaluate (t, ps, ss, track_stats)
 
-  local confusion = track_confusion and {}
+  local confusion = track_stats and {}
+  local predictions = track_stats and {}
+  local observations = track_stats and {}
   local correct = 0
 
   for i = 1, #ps do
     local guess = tm_predict(t, ps[i])
+    if track_stats then
+      predictions[guess] = (predictions[guess] or 0) + 1
+    end
+    if track_stats then
+      observations[ss[i]] = (observations[ss[i]] or 0) + 1
+    end
     if guess == ss[i] then
       correct = correct + 1
-    elseif track_confusion then
+    elseif track_stats then
       confusion[ss[i]] = confusion[ss[i]] or {}
       confusion[ss[i]][guess] = (confusion[ss[i]][guess] or 0) + 1
     end
   end
 
-
-  local confusion_ranked = track_confusion and a_sort(it_collect(it_flatten(it_map(function (e, ps)
+  local confusion_ranked = track_stats and a_sort(it_collect(it_flatten(it_map(function (e, ps)
     return it_map(function (p, c)
       return { expected = e, predicted = p, count = c, ratio = c / (#ss - correct) }
     end, it_pairs(ps))
@@ -44,7 +51,17 @@ local function evaluate (t, ps, ss, track_confusion)
     return a.ratio > b.ratio
   end)
 
-  return correct / #ps, confusion_ranked or nil
+  local predictions_ranked = track_stats and a_sort(it_collect(it_map(function (c, n)
+    return {
+      class = c,
+      count = n, frequency_predicted = n / #ps,
+      frequency_observed = observations[c] / #ps
+    }
+  end, it_pairs(predictions))), function (a, b)
+    return a.count > b.count
+  end)
+
+  return correct / #ps, confusion_ranked or nil, predictions_ranked or nil
 
 end
 
