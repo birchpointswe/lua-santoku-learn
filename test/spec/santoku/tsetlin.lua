@@ -6,9 +6,10 @@ local fs = require("santoku.fs")
 local it = require("santoku.iter")
 local str = require("santoku.string")
 local arr = require("santoku.array")
+local rand = require("santoku.random")
 
 local CLASSES = 2
-local FEATURES = 12
+local FEATURES = 384
 local CLAUSES = 10
 local STATE_BITS = 8
 local THRESHOLD = 40
@@ -50,6 +51,10 @@ test("tsetlin", function ()
   local test_problems, test_solutions =
     read_data("test/res/santoku/tsetlin/NoisyXORTestData.txt")
 
+  rand.seed()
+  arr.shuffle(train_problems, train_solutions)
+  arr.shuffle(test_problems, test_solutions)
+
   local t = tm.create(CLASSES, FEATURES, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
 
   for epoch = 1, MAX_EPOCHS do
@@ -64,10 +69,11 @@ test("tsetlin", function ()
     if epoch == MAX_EPOCHS then
 
       if #confusion == 0 then
-        print("No confusion")
+        print()
+        print("  No confusion")
       else
         print()
-        print("  Expected / Predicted  Ratio")
+        print("  Observed / Predicted  Ratio")
         print()
         for s in it.ivals(confusion) do
           str.printf("%10d / %-10d %-.2f\n", s.expected, s.predicted, s.ratio, s.count)
@@ -75,10 +81,10 @@ test("tsetlin", function ()
       end
 
       print()
-      print("  Class frequency (observed / predicted)")
+      print("  Observed / Predicted  Class Frequency")
       print()
       for p in it.ivals(predictions) do
-        str.printf("  %-30s  %.4f / %-.4f\n", p.class, p.frequency_observed, p.frequency_predicted)
+        str.printf("    %.4f / %-6.4f     %s \n", p.frequency_observed, p.frequency_predicted, p.class)
       end
 
     end
