@@ -1,6 +1,5 @@
 # Now
 
-- Confusion matrix
 - Throw an error if length of input bitmaps isn't correct (2 x features /
   sizeof(unsigned int))
 - Classes in Lua must always be 1 indexed to avoid confusion. In C they're
@@ -8,7 +7,7 @@
 
 - Persist model weights
 - Allow batch updates passed as a row-major bitmatrix
-- Leverage SIMD where possible
+- NEON, AVX, AVX-512
 
 - Tsetlin Machine advancements
   - Drop clause (increases accuracy and learning speed)
