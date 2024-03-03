@@ -60,21 +60,21 @@ struct TsetlinMachine {
 static uint64_t const multiplier = 6364136223846793005u;
 static uint64_t mcg_state = 0xcafef00dd15ea5e5u;
 
-static uint32_t fast_rand () {
+static inline uint32_t fast_rand () {
   uint64_t x = mcg_state;
   unsigned int count = (unsigned int) (x >> 61);
   mcg_state = x * multiplier;
   return (uint32_t) ((x ^ x >> 22) >> (22 + count));
 }
 
-static int normal (double mean, double variance) {
+static inline int normal (double mean, double variance) {
   double u1 = (double) (fast_rand() + 1) / ((double) UINT32_MAX + 1);
   double u2 = (double) fast_rand() / UINT32_MAX;
   double n1 = sqrt(-2 * log(u1)) * sin(8 * atan(1) * u2);
   return (int) round(mean + sqrt(variance) * n1);
 }
 
-static void tm_initialize_random_streams (struct TsetlinMachine *tm, double specificity)
+static inline void tm_initialize_random_streams (struct TsetlinMachine *tm, double specificity)
 {
   memset((*tm).feedback_to_la, 0, tm->la_chunks*sizeof(unsigned int));
   int n = 2 * tm->features;
@@ -126,8 +126,8 @@ static inline int sum_up_class_votes (struct TsetlinMachine *tm)
 {
 	int class_sum = 0;
 	for (long int j = 0; j < tm->clause_chunks; j++) {
-		class_sum += __builtin_popcount((*tm).clause_output[j] & 0x55555555); // 0101
-		class_sum -= __builtin_popcount((*tm).clause_output[j] & 0xaaaaaaaa); // 1010
+    class_sum += __builtin_popcount((*tm).clause_output[j] & 0x55555555); // 0101
+    class_sum -= __builtin_popcount((*tm).clause_output[j] & 0xaaaaaaaa); // 1010
 	}
   long int threshold = tm->threshold;
 	class_sum = (class_sum > threshold) ? threshold : class_sum;
@@ -160,7 +160,7 @@ static inline void tm_calculate_clause_output(struct TsetlinMachine *tm, unsigne
  	}
 }
 
-static void tm_update (struct TsetlinMachine *tm, unsigned int *Xi, unsigned int target, double specificity)
+static inline void tm_update (struct TsetlinMachine *tm, unsigned int *Xi, unsigned int target, double specificity)
 {
   tm_calculate_clause_output(tm, Xi, false);
   long int tgt = target;
@@ -202,7 +202,7 @@ static void tm_update (struct TsetlinMachine *tm, unsigned int *Xi, unsigned int
 	}
 }
 
-static int tm_score (struct TsetlinMachine *tm, unsigned int *Xi) {
+static inline int tm_score (struct TsetlinMachine *tm, unsigned int *Xi) {
 	tm_calculate_clause_output(tm, Xi, true);
 	return sum_up_class_votes(tm);
 }
@@ -212,7 +212,7 @@ struct MultiClassTsetlinMachine {
 	struct TsetlinMachine **tsetlin_machines;
 };
 
-static void mc_tm_initialize (struct MultiClassTsetlinMachine *mc_tm)
+static inline void mc_tm_initialize (struct MultiClassTsetlinMachine *mc_tm)
 {
 	for (long int i = 0; i < mc_tm->classes; i++)
   {
@@ -227,7 +227,7 @@ static void mc_tm_initialize (struct MultiClassTsetlinMachine *mc_tm)
   }
 }
 
-static unsigned int mc_tm_predict (struct MultiClassTsetlinMachine *tm, unsigned int *X)
+static inline unsigned int mc_tm_predict (struct MultiClassTsetlinMachine *tm, unsigned int *X)
 {
 	long int max_class = 0;
 	long int max_class_sum = tm_score(tm->tsetlin_machines[0], X);
@@ -241,7 +241,7 @@ static unsigned int mc_tm_predict (struct MultiClassTsetlinMachine *tm, unsigned
 	return max_class;
 }
 
-static void mc_tm_update (struct MultiClassTsetlinMachine *tm, unsigned int *Xi, unsigned int target_class, double specificity)
+static inline void mc_tm_update (struct MultiClassTsetlinMachine *tm, unsigned int *Xi, unsigned int target_class, double specificity)
 {
 	tm_update(tm->tsetlin_machines[target_class], Xi, 1, specificity);
 	unsigned int negative_target_class =
@@ -262,7 +262,7 @@ struct MultiClassTsetlinMachine *tk_tsetlin_peek (lua_State *L, int i)
   return *tk_tsetlin_peekp(L, i);
 }
 
-static unsigned int tk_tsetlin_checkunsigned (lua_State *L, int i)
+static inline unsigned int tk_tsetlin_checkunsigned (lua_State *L, int i)
 {
   lua_Integer l = luaL_checkinteger(L, i);
   if (l < 0)
@@ -272,7 +272,7 @@ static unsigned int tk_tsetlin_checkunsigned (lua_State *L, int i)
   return (unsigned int) l;
 }
 
-static void tk_tsetlin_register (lua_State *L, luaL_Reg *regs, int nup)
+static inline void tk_tsetlin_register (lua_State *L, luaL_Reg *regs, int nup)
 {
   while (true) {
     if ((*regs).name == NULL)
@@ -286,7 +286,7 @@ static void tk_tsetlin_register (lua_State *L, luaL_Reg *regs, int nup)
   lua_pop(L, nup);
 }
 
-static int tk_tsetlin_create (lua_State *L)
+static inline int tk_tsetlin_create (lua_State *L)
 {
   lua_settop(L, 6);
 	struct MultiClassTsetlinMachine *mc_tm;
@@ -322,7 +322,7 @@ static int tk_tsetlin_create (lua_State *L)
   return 1;
 }
 
-static int tk_tsetlin_destroy (lua_State *L)
+static inline int tk_tsetlin_destroy (lua_State *L)
 {
   lua_settop(L, 1);
   struct MultiClassTsetlinMachine **mc_tmp = tk_tsetlin_peekp(L, 1);
@@ -343,7 +343,7 @@ static int tk_tsetlin_destroy (lua_State *L)
   return 0;
 }
 
-static int tk_tsetlin_predict (lua_State *L)
+static inline int tk_tsetlin_predict (lua_State *L)
 {
   lua_settop(L, 3);
   struct MultiClassTsetlinMachine *tm = tk_tsetlin_peek(L, 1);
@@ -353,7 +353,7 @@ static int tk_tsetlin_predict (lua_State *L)
   return 1;
 }
 
-static int tk_tsetlin_update (lua_State *L)
+static inline int tk_tsetlin_update (lua_State *L)
 {
   lua_settop(L, 4);
   struct MultiClassTsetlinMachine *tm = tk_tsetlin_peek(L, 1);
