@@ -55,7 +55,7 @@ local function evaluate (t, ps, ss, track_stats)
     return {
       class = c,
       count = n, frequency_predicted = n / #ps,
-      frequency_observed = observations[c] / #ps
+      frequency_observed = observations[c] and (observations[c] / #ps) or 0
     }
   end, it_pairs(predictions))), function (a, b)
     return a.count > b.count
