@@ -59,12 +59,14 @@ test("tsetlin", function ()
 
   for epoch = 1, MAX_EPOCHS do
 
+    local start = os.clock()
     tm.train(t, train_problems, train_solutions, SPECIFICITY)
+    local stop = os.clock()
 
     local test_score, confusion, predictions = tm.evaluate(t, test_problems, test_solutions, epoch == MAX_EPOCHS)
     local train_score = tm.evaluate(t, train_problems, train_solutions)
 
-    str.printf("Epoch\t%-4d\tTest\t%4.2f\tTrain\t%4.2f\n", epoch, test_score, train_score)
+    str.printf("Epoch\t%-4d\tTest\t%4.2f\tTrain\t%4.2f\tTime\t%f\n", epoch, test_score, train_score, stop - start)
 
     if epoch == MAX_EPOCHS then
 
