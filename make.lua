@@ -5,11 +5,11 @@ local env = {
   variable_prefix = "TK_TSETLIN",
   public = true,
 
-  cflags = "-O3 -Wall",
+  cflags = "-march=native -O3 -Wall",
 
   dependencies = {
     "lua == 5.1",
-    "santoku >= 0.0.196-1",
+    "santoku >= 0.0.200-1",
   },
 
   test = {
