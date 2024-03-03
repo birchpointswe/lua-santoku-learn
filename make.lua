@@ -5,7 +5,7 @@ local env = {
   variable_prefix = "TK_TSETLIN",
   public = true,
 
-  cflags = "-march=native -O3 -Wall",
+  cflags = "-O3 -march=native -ffast-math",
 
   dependencies = {
     "lua == 5.1",
