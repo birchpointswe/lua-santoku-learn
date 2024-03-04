@@ -1,6 +1,5 @@
 # Now
 
-- Allow batch updates passed as a row-major bitmatrix
 - Drop clause (increases accuracy and learning speed)
 - NEON, AVX, AVX-512
 
