@@ -49,6 +49,7 @@ struct TsetlinMachine {
 	unsigned int *ta_state;
 	unsigned int *clause_output;
 	unsigned int *feedback_to_la;
+  unsigned int *drop_clause;
 	int *feedback_to_clauses;
 };
 
@@ -122,12 +123,13 @@ static inline void tm_dec (struct TsetlinMachine *tm, int clause, int chunk, uns
 			tm_state_idx(tm, clause, chunk, b) &= ~carry;
 }
 
-static inline int sum_up_class_votes (struct TsetlinMachine *tm)
+static inline int sum_up_class_votes (struct TsetlinMachine *tm, bool predict)
 {
 	int class_sum = 0;
 	for (long int j = 0; j < tm->clause_chunks; j++) {
-    class_sum += __builtin_popcount((*tm).clause_output[j] & 0x55555555); // 0101
-    class_sum -= __builtin_popcount((*tm).clause_output[j] & 0xaaaaaaaa); // 1010
+    unsigned int drop = predict ? ~0 : (*tm).drop_clause[j];
+    class_sum += __builtin_popcount((*tm).clause_output[j] & drop & 0x55555555); // 0101
+    class_sum -= __builtin_popcount((*tm).clause_output[j] & drop & 0xaaaaaaaa); // 1010
 	}
   long int threshold = tm->threshold;
 	class_sum = (class_sum > threshold) ? threshold : class_sum;
@@ -164,13 +166,14 @@ static inline void tm_update (struct TsetlinMachine *tm, unsigned int *Xi, unsig
 {
   tm_calculate_clause_output(tm, Xi, false);
   long int tgt = target;
-  int class_sum = sum_up_class_votes(tm);
+  int class_sum = sum_up_class_votes(tm, false);
   float p = (1.0/(tm->threshold*2))*(tm->threshold + (1 - 2*tgt)*class_sum);
   memset((*tm).feedback_to_clauses, 0, tm->clause_chunks * sizeof(unsigned int));
-  for (long int j = 0; j < tm->clauses; j++) {
-    unsigned int clause_chunk = j / (sizeof(unsigned int) * CHAR_BIT);
-    unsigned int clause_chunk_pos = j % (sizeof(unsigned int) * CHAR_BIT);
-    (*tm).feedback_to_clauses[clause_chunk] |= (((float)fast_rand())/((float)UINT32_MAX) <= p) << clause_chunk_pos;
+  for (unsigned int i = 0; i < tm->clause_chunks; i ++)
+  {
+    for (unsigned int j = 0; j < sizeof(unsigned int) * CHAR_BIT; j ++)
+      (*tm).feedback_to_clauses[i] |= (((float)fast_rand())/((float)UINT32_MAX) <= p) << j;
+    (*tm).feedback_to_clauses[i] &= tm->drop_clause[i];
   }
 	for (long int j = 0; j < tm->clauses; j++) {
 		unsigned int clause_chunk = j / (sizeof(unsigned int) * CHAR_BIT);
@@ -204,13 +207,16 @@ static inline void tm_update (struct TsetlinMachine *tm, unsigned int *Xi, unsig
 
 static inline int tm_score (struct TsetlinMachine *tm, unsigned int *Xi) {
 	tm_calculate_clause_output(tm, Xi, true);
-	return sum_up_class_votes(tm);
+	return sum_up_class_votes(tm, true);
 }
 
 struct MultiClassTsetlinMachine {
   unsigned int classes;
   unsigned int features;
   unsigned int la_chunks;
+  unsigned int clauses;
+  unsigned int clause_chunks;
+  unsigned int *drop_clause;
 	struct TsetlinMachine **tsetlin_machines;
 };
 
@@ -254,6 +260,15 @@ static inline void mc_tm_update (struct MultiClassTsetlinMachine *tm, unsigned i
 	tm_update(tm->tsetlin_machines[negative_target_class], Xi, 0, specificity);
 }
 
+static inline void mc_tm_initialize_drop_clause (struct MultiClassTsetlinMachine *tm, double drop_clause)
+{
+  memset(tm->drop_clause, 0, sizeof(unsigned int) * tm->clause_chunks);
+  for (unsigned int i = 0; i < tm->clause_chunks; i ++)
+    for (unsigned int j = 0; j < sizeof(unsigned int) * CHAR_BIT; j ++)
+      if (((float)fast_rand())/((float)UINT32_MAX) <= drop_clause)
+        tm->drop_clause[i] |= (1 << j);
+}
+
 struct MultiClassTsetlinMachine **tk_tsetlin_peekp (lua_State *L, int i)
 {
   return (struct MultiClassTsetlinMachine **) luaL_checkudata(L, i, TK_TSETLIN_MT);
@@ -295,20 +310,24 @@ static inline int tk_tsetlin_create (lua_State *L)
 	mc_tm = (void *)malloc(sizeof(struct MultiClassTsetlinMachine));
   mc_tm->classes = tk_tsetlin_checkunsigned(L, 1);
   mc_tm->features = tk_tsetlin_checkunsigned(L, 2);
+  mc_tm->clauses = tk_tsetlin_checkunsigned(L, 3);
   mc_tm->la_chunks = (2 * mc_tm->features - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
+  mc_tm->clause_chunks = (mc_tm->clauses - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
+  mc_tm->drop_clause = malloc(sizeof(unsigned int) * mc_tm->clause_chunks);
   mc_tm->tsetlin_machines = malloc(sizeof(struct TsetlinMachine *) * mc_tm->classes);
 	for (long int i = 0; i < mc_tm->classes; i++)
   {
     struct TsetlinMachine *tm = (void *)malloc(sizeof(struct TsetlinMachine));
 		mc_tm->tsetlin_machines[i] = tm;
     tm->features = mc_tm->features;
-    tm->clauses = tk_tsetlin_checkunsigned(L, 3);
+    tm->clauses = mc_tm->clauses;
     tm->state_bits = tk_tsetlin_checkunsigned(L, 4);
     tm->threshold = tk_tsetlin_checkunsigned(L, 5);
     luaL_checktype(L, 6, LUA_TBOOLEAN);
     tm->boost_true_positive = lua_toboolean(L, 6);
     tm->la_chunks = mc_tm->la_chunks;
-    tm->clause_chunks = (tm->clauses-  1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
+    tm->clause_chunks = mc_tm->clause_chunks;
+    tm->drop_clause = mc_tm->drop_clause;
     tm->filter = (tm->features * 2) % (sizeof(unsigned int) * CHAR_BIT) != 0
       ? ~(((unsigned int) ~0) << ((tm->features * 2) % (sizeof(unsigned int) * CHAR_BIT)))
       : (unsigned int) ~0;
@@ -359,24 +378,29 @@ static inline int tk_tsetlin_predict (lua_State *L)
 
 static inline int tk_tsetlin_update (lua_State *L)
 {
-  lua_settop(L, 4);
+  lua_settop(L, 5);
   struct MultiClassTsetlinMachine *tm = tk_tsetlin_peek(L, 1);
   const char *bm = luaL_checkstring(L, 2);
   lua_Integer tgt = luaL_checkinteger(L, 3);
   if (tgt < 0)
     luaL_error(L, "target class must be greater than zero");
-  mc_tm_update(tm, (unsigned int *) bm, tgt, luaL_checknumber(L, 4));
+  double specificity = luaL_checknumber(L, 4);
+  double drop_clause = luaL_optnumber(L, 5, 1);
+  mc_tm_initialize_drop_clause(tm, drop_clause);
+  mc_tm_update(tm, (unsigned int *) bm, tgt, specificity);
   return 0;
 }
 
 static inline int tk_tsetlin_train (lua_State *L)
 {
-  lua_settop(L, 5);
+  lua_settop(L, 6);
   struct MultiClassTsetlinMachine *tm = tk_tsetlin_peek(L, 1);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *ss = (unsigned int *) luaL_checkstring(L, 4);
   double specificity = luaL_checknumber(L, 5);
+  double drop_clause = luaL_optnumber(L, 6, 1);
+  mc_tm_initialize_drop_clause(tm, drop_clause);
   for (unsigned int i = 0; i < n; i ++)
     mc_tm_update(tm, &ps[i * tm->la_chunks], ss[i], specificity);
   return 0;
