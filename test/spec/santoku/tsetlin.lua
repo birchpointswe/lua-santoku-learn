@@ -15,6 +15,7 @@ local CLAUSES = 40
 local STATE_BITS = 8
 local THRESHOLD = 40
 local SPECIFICITY = 3.9
+local DROP_CLAUSE = 0.85
 local BOOST_TRUE_POSITIVE = false
 local MAX_EPOCHS = 10
 
@@ -78,7 +79,7 @@ test("tsetlin", function ()
   for epoch = 1, MAX_EPOCHS do
 
     local start = os.clock()
-    tm.train(t, #train_problems, train_problems_packed, train_solutions_packed, SPECIFICITY)
+    tm.train(t, #train_problems, train_problems_packed, train_solutions_packed, SPECIFICITY, DROP_CLAUSE)
     local stop = os.clock()
 
     local test_score, confusion, predictions = tm.evaluate(t, #test_problems, test_problems_packed, test_solutions_packed, epoch == MAX_EPOCHS)
