@@ -4,6 +4,8 @@
 - Drop clause (increases accuracy and learning speed)
 - NEON, AVX, AVX-512
 
+- Titanic dataset
+
 - Throw an error if length of input bitmaps isn't correct (2 x features /
   sizeof(unsigned int))
 - Classes in Lua must always be 1 indexed to avoid confusion. In C they're

@@ -2,6 +2,7 @@ local serialize = require("santoku.serialize") -- luacheck: ignore
 local test = require("santoku.test")
 local tm = require("santoku.tsetlin")
 local bm = require("santoku.bitmap")
+local mtx = require("santoku.matrix")
 local fs = require("santoku.fs")
 local it = require("santoku.iter")
 local str = require("santoku.string")
@@ -21,7 +22,9 @@ local function read_data (fp, max)
   local problems = {}
   local solutions = {}
   local records = it.map(function (l, s, e)
-    return it.map(str.number, str.match(l, "%S+", false, s, e))
+    return it.map(function (t, s, e)
+      return str.equals("1", t, s, e)
+    end, str.match(l, "%S+", false, s, e))
   end, fs.lines(fp))
   if max then
     records = it.take(max, records)
@@ -29,7 +32,7 @@ local function read_data (fp, max)
   for bits in records do
     local b = bm.create()
     for i = 1, FEATURES do
-      if bits() == 1 then
+      if bits() then
         bm.set(b, i)
       else
         -- NOTE: Setting the inverted features here. This is essential!
@@ -37,34 +40,54 @@ local function read_data (fp, max)
         bm.set(b, i + FEATURES)
       end
     end
-    arr.push(problems, bm.raw(b, FEATURES * 2))
-    arr.push(solutions, bits())
+    arr.push(problems, b)
+    arr.push(solutions, bits() and 1 or 0)
   end
   return problems, solutions
 end
 
+local function merge_bitmaps (bms)
+  local b0 = bm.create()
+  local idx = 1
+  for b1 in it.ivals(bms) do
+    bm.extend(b0, b1, idx)
+    idx = idx + (FEATURES * 2)
+  end
+  return b0
+end
+
 test("tsetlin", function ()
 
+  print("Reading data")
   local train_problems, train_solutions =
     read_data("test/res/santoku/tsetlin/NoisyXORTrainingData.txt")
-
   local test_problems, test_solutions =
     read_data("test/res/santoku/tsetlin/NoisyXORTestData.txt")
 
+  print("Shuffling")
   rand.seed()
   arr.shuffle(train_problems, train_solutions)
   arr.shuffle(test_problems, test_solutions)
 
+  print("Packing problems")
+  local train_problems_bm = bm.raw(merge_bitmaps(train_problems))
+  local test_problems_bm = bm.raw(merge_bitmaps(test_problems))
+
+  print("Packing solutions")
+  local train_solutions_mtx = mtx.raw(mtx.set(mtx.create(1, #train_solutions), 1, train_solutions), 1, 1, "u32")
+  local test_solutions_mtx = mtx.raw(mtx.set(mtx.create(1, #test_solutions), 1, test_solutions), 1, 1, "u32")
+
   local t = tm.create(CLASSES, FEATURES, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
 
+  print("Training")
   for epoch = 1, MAX_EPOCHS do
 
     local start = os.clock()
-    tm.train(t, train_problems, train_solutions, SPECIFICITY)
+    tm.train(t, #train_problems, train_problems_bm, train_solutions_mtx, SPECIFICITY)
     local stop = os.clock()
 
-    local test_score, confusion, predictions = tm.evaluate(t, test_problems, test_solutions, epoch == MAX_EPOCHS)
-    local train_score = tm.evaluate(t, train_problems, train_solutions)
+    local test_score, confusion, predictions = tm.evaluate(t, #test_problems, test_problems_bm, test_solutions_mtx, epoch == MAX_EPOCHS)
+    local train_score = tm.evaluate(t, #train_problems, train_problems_bm, train_solutions_mtx)
 
     str.printf("Epoch\t%-4d\tTest\t%4.2f\tTrain\t%4.2f\tTime\t%f\n", epoch, test_score, train_score, stop - start)
 
@@ -78,7 +101,7 @@ test("tsetlin", function ()
         print("  Observed / Predicted  Ratio")
         print()
         for s in it.ivals(confusion) do
-          str.printf("%10d / %-10d %-.2f\n", s.expected, s.predicted, s.ratio, s.count)
+          str.printf("%10d / %-10d %-.4f\n", s.expected, s.predicted, s.ratio, s.count)
         end
       end
 
