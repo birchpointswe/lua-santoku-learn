@@ -46,14 +46,16 @@ local function read_data (fp, max)
   return problems, solutions
 end
 
-local function merge_bitmaps (bms)
+local function pack_data (ps, ss)
   local b0 = bm.create()
   local idx = 1
-  for b1 in it.ivals(bms) do
-    bm.extend(b0, b1, idx)
+  for p in it.ivals(ps) do
+    bm.extend(b0, p, idx)
     idx = idx + (FEATURES * 2)
   end
-  return b0
+  local m0 = mtx.create(1, #ss)
+  mtx.set(m0, 1, ss)
+  return bm.raw(b0, #ps * FEATURES * 2), mtx.raw(m0, 1, 1, "u32")
 end
 
 test("tsetlin", function ()
@@ -69,13 +71,9 @@ test("tsetlin", function ()
   arr.shuffle(train_problems, train_solutions)
   arr.shuffle(test_problems, test_solutions)
 
-  print("Packing problems")
-  local train_problems_bm = bm.raw(merge_bitmaps(train_problems))
-  local test_problems_bm = bm.raw(merge_bitmaps(test_problems))
-
-  print("Packing solutions")
-  local train_solutions_mtx = mtx.raw(mtx.set(mtx.create(1, #train_solutions), 1, train_solutions), 1, 1, "u32")
-  local test_solutions_mtx = mtx.raw(mtx.set(mtx.create(1, #test_solutions), 1, test_solutions), 1, 1, "u32")
+  print("Packing data")
+  local train_problems_packed, train_solutions_packed = pack_data(train_problems, train_solutions)
+  local test_problems_packed, test_solutions_packed = pack_data(test_problems, test_solutions)
 
   local t = tm.create(CLASSES, FEATURES, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
 
@@ -83,11 +81,11 @@ test("tsetlin", function ()
   for epoch = 1, MAX_EPOCHS do
 
     local start = os.clock()
-    tm.train(t, #train_problems, train_problems_bm, train_solutions_mtx, SPECIFICITY)
+    tm.train(t, #train_problems, train_problems_packed, train_solutions_packed, SPECIFICITY)
     local stop = os.clock()
 
-    local test_score, confusion, predictions = tm.evaluate(t, #test_problems, test_problems_bm, test_solutions_mtx, epoch == MAX_EPOCHS)
-    local train_score = tm.evaluate(t, #train_problems, train_problems_bm, train_solutions_mtx)
+    local test_score, confusion, predictions = tm.evaluate(t, #test_problems, test_problems_packed, test_solutions_packed, epoch == MAX_EPOCHS)
+    local train_score = tm.evaluate(t, #train_problems, train_problems_packed, train_solutions_packed)
 
     str.printf("Epoch\t%-4d\tTest\t%4.2f\tTrain\t%4.2f\tTime\t%f\n", epoch, test_score, train_score, stop - start)
 
