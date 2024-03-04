@@ -10,13 +10,13 @@ local arr = require("santoku.array")
 local rand = require("santoku.random")
 
 local CLASSES = 2
-local FEATURES = 768
+local FEATURES = 607
 local CLAUSES = 40
 local STATE_BITS = 8
 local THRESHOLD = 40
 local SPECIFICITY = 3.9
 local BOOST_TRUE_POSITIVE = false
-local MAX_EPOCHS = 20
+local MAX_EPOCHS = 10
 
 local function read_data (fp, max)
   local problems = {}
@@ -47,24 +47,21 @@ local function read_data (fp, max)
 end
 
 local function pack_data (ps, ss)
-  local b0 = bm.create()
-  local idx = 1
-  for p in it.ivals(ps) do
-    bm.extend(b0, p, idx)
-    idx = idx + (FEATURES * 2)
-  end
+  local b = bm.raw_matrix(ps, FEATURES * 2)
   local m0 = mtx.create(1, #ss)
   mtx.set(m0, 1, ss)
-  return bm.raw(b0, #ps * FEATURES * 2), mtx.raw(m0, 1, 1, "u32")
+  return b, mtx.raw(m0, 1, 1, "u32")
 end
 
 test("tsetlin", function ()
 
+  local MAX = nil
+
   print("Reading data")
   local train_problems, train_solutions =
-    read_data("test/res/santoku/tsetlin/NoisyXORTrainingData.txt")
+    read_data("test/res/santoku/tsetlin/NoisyXORTrainingData.txt", MAX)
   local test_problems, test_solutions =
-    read_data("test/res/santoku/tsetlin/NoisyXORTestData.txt")
+    read_data("test/res/santoku/tsetlin/NoisyXORTestData.txt", MAX)
 
   print("Shuffling")
   rand.seed()
