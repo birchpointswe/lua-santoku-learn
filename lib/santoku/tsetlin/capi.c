@@ -1,6 +1,6 @@
 /*
 
-Copyright (C) 2024 Birch Point SWE (Lua integration, train/evaluate stats)
+Copyright (C) 2024 Birch Point SWE (Lua integration, train/evaluate stats, drop clause)
 Copyright (C) 2019 Ole-Christoffer Granmo (Original C implementation)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
