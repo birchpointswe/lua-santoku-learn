@@ -1,6 +1,6 @@
 /*
 
-Copyright (C) 2024 Birch Point SWE (Lua integration)
+Copyright (C) 2024 Birch Point SWE (Lua integration, train/evaluate stats)
 Copyright (C) 2019 Ole-Christoffer Granmo (Original C implementation)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -209,6 +209,8 @@ static inline int tm_score (struct TsetlinMachine *tm, unsigned int *Xi) {
 
 struct MultiClassTsetlinMachine {
   unsigned int classes;
+  unsigned int features;
+  unsigned int la_chunks;
 	struct TsetlinMachine **tsetlin_machines;
 };
 
@@ -292,18 +294,20 @@ static inline int tk_tsetlin_create (lua_State *L)
 	struct MultiClassTsetlinMachine *mc_tm;
 	mc_tm = (void *)malloc(sizeof(struct MultiClassTsetlinMachine));
   mc_tm->classes = tk_tsetlin_checkunsigned(L, 1);
+  mc_tm->features = tk_tsetlin_checkunsigned(L, 2);
+  mc_tm->la_chunks = (2 * mc_tm->features - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
   mc_tm->tsetlin_machines = malloc(sizeof(struct TsetlinMachine *) * mc_tm->classes);
 	for (long int i = 0; i < mc_tm->classes; i++)
   {
     struct TsetlinMachine *tm = (void *)malloc(sizeof(struct TsetlinMachine));
 		mc_tm->tsetlin_machines[i] = tm;
-    tm->features = tk_tsetlin_checkunsigned(L, 2);
+    tm->features = mc_tm->features;
     tm->clauses = tk_tsetlin_checkunsigned(L, 3);
     tm->state_bits = tk_tsetlin_checkunsigned(L, 4);
     tm->threshold = tk_tsetlin_checkunsigned(L, 5);
     luaL_checktype(L, 6, LUA_TBOOLEAN);
     tm->boost_true_positive = lua_toboolean(L, 6);
-    tm->la_chunks = (2 * tm->features - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
+    tm->la_chunks = mc_tm->la_chunks;
     tm->clause_chunks = (tm->clauses-  1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
     tm->filter = (tm->features * 2) % (sizeof(unsigned int) * CHAR_BIT) != 0
       ? ~(((unsigned int) ~0) << ((tm->features * 2) % (sizeof(unsigned int) * CHAR_BIT)))
@@ -365,12 +369,105 @@ static inline int tk_tsetlin_update (lua_State *L)
   return 0;
 }
 
+static inline int tk_tsetlin_train (lua_State *L)
+{
+  lua_settop(L, 5);
+  struct MultiClassTsetlinMachine *tm = tk_tsetlin_peek(L, 1);
+  unsigned int n = tk_tsetlin_checkunsigned(L, 2);
+  unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
+  unsigned int *ss = (unsigned int *) luaL_checkstring(L, 4);
+  double specificity = luaL_checknumber(L, 5);
+  for (unsigned int i = 0; i < n; i ++)
+    mc_tm_update(tm, &ps[i * tm->la_chunks], ss[i], specificity);
+  return 0;
+}
+
+static inline int tk_tsetlin_evaluate (lua_State *L)
+{
+  lua_settop(L, 5);
+  struct MultiClassTsetlinMachine *tm = tk_tsetlin_peek(L, 1);
+  unsigned int n = tk_tsetlin_checkunsigned(L, 2);
+  unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
+  unsigned int *ss = (unsigned int *) luaL_checkstring(L, 4);
+  bool track_stats = lua_toboolean(L, 5);
+  unsigned int correct = 0;
+  unsigned int *confusion;
+  unsigned int *predictions;
+  unsigned int *observations;
+  if (track_stats) {
+    confusion = malloc(sizeof(unsigned int) * tm->classes * tm->classes);
+    predictions = malloc(sizeof(unsigned int) * tm->classes);
+    observations = malloc(sizeof(unsigned int) * tm->classes);
+    if (!(confusion && predictions && observations))
+      luaL_error(L, "error in malloc during evaluation");
+    memset(confusion, 0, sizeof(unsigned int) * tm->classes * tm->classes);
+    memset(predictions, 0, sizeof(unsigned int) * tm->classes);
+    memset(observations, 0, sizeof(unsigned int) * tm->classes);
+  }
+  for (unsigned int i = 0; i < n; i ++) {
+    unsigned int expected = ss[i];
+    unsigned int predicted = mc_tm_predict(tm, &ps[i * tm->la_chunks]);
+    if (expected == predicted)
+      correct ++;
+    if (track_stats) {
+      observations[expected] ++;
+      predictions[predicted] ++;
+      if (expected != predicted)
+        confusion[expected * tm->classes + predicted] ++;
+    }
+  }
+  lua_pushnumber(L, correct);
+  if (track_stats) {
+    lua_newtable(L); // ct
+    for (unsigned int i = 0; i < tm->classes; i ++) {
+      for (unsigned int j = 0; j < tm->classes; j ++) {
+        unsigned int c = confusion[i * tm->classes + j];
+        if (c > 0) {
+          lua_pushinteger(L, i); // ct i
+          lua_gettable(L, -2); // ct t
+          if (lua_type(L, -1) == LUA_TNIL) {
+            lua_pop(L, 1); // ct
+            lua_newtable(L); // ct t
+            lua_pushinteger(L, i); // ct t i
+            lua_pushvalue(L, -2); // ct t i t
+            lua_settable(L, -4); // ct t
+          }
+          lua_pushinteger(L, j); // ct t j
+          lua_pushinteger(L, c); // ct t j c
+          lua_settable(L, -3); // ct t
+          lua_pop(L, 1);
+        }
+      }
+    }
+    lua_newtable(L); // pt
+    for (unsigned int i = 0; i < tm->classes; i ++) {
+      lua_pushinteger(L, i); // pt i
+      lua_pushinteger(L, predictions[i]); // pt i p
+      lua_settable(L, -3); // pt
+    }
+    lua_newtable(L); // ot
+    for (unsigned int i = 0; i < tm->classes; i ++) {
+      lua_pushinteger(L, i); // ot i
+      lua_pushinteger(L, observations[i]); // ot i o
+      lua_settable(L, -3); // ot
+    }
+    free(confusion);
+    free(predictions);
+    free(observations);
+    return 4;
+  } else {
+    return 1;
+  }
+}
+
 static luaL_Reg tk_tsetlin_fns[] =
 {
   { "create", tk_tsetlin_create },
   { "destroy", tk_tsetlin_destroy },
   { "update", tk_tsetlin_update },
   { "predict", tk_tsetlin_predict },
+  { "train", tk_tsetlin_train },
+  { "evaluate", tk_tsetlin_evaluate },
   { NULL, NULL }
 };
 
