@@ -11,7 +11,7 @@ local rand = require("santoku.random")
 
 local CLASSES = 2
 local FEATURES = 607
-local CLAUSES = 40
+local CLAUSES = 200
 local STATE_BITS = 8
 local THRESHOLD = 40
 local SPECIFICITY = 3.9
@@ -82,8 +82,11 @@ test("tsetlin", function ()
     tm.train(t, #train_problems, train_problems_packed, train_solutions_packed, SPECIFICITY, DROP_CLAUSE)
     local stop = os.clock()
 
-    local test_score, confusion, predictions = tm.evaluate(t, #test_problems, test_problems_packed, test_solutions_packed, epoch == MAX_EPOCHS)
-    local train_score = tm.evaluate(t, #train_problems, train_problems_packed, train_solutions_packed)
+    local test_score, confusion, predictions =
+      tm.evaluate(t, #test_problems, test_problems_packed, test_solutions_packed, epoch == MAX_EPOCHS)
+
+    local train_score =
+      tm.evaluate(t, #train_problems, train_problems_packed, train_solutions_packed)
 
     str.printf("Epoch\t%-4d\tTest\t%4.2f\tTrain\t%4.2f\tTime\t%f\n", epoch, test_score, train_score, stop - start)
 
