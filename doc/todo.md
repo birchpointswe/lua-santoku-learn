@@ -1,6 +1,5 @@
 # Now
 
-- Drop clause (increases accuracy and learning speed)
 - NEON, AVX, AVX-512
 
 - Titanic dataset
