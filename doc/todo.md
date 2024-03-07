@@ -1,6 +1,7 @@
 # Now
 
 - NEON, AVX, AVX-512
+- Experiment with data layout for better cache performance
 
 - Titanic dataset
 
