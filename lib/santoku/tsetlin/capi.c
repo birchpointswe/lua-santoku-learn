@@ -128,11 +128,17 @@ static inline void tm_dec (struct TsetlinMachine *tm, int class, int clause, int
 static inline int sum_up_class_votes (struct TsetlinMachine *tm, bool predict)
 {
 	int class_sum = 0;
-	for (long int j = 0; j < tm->clause_chunks; j++) {
-    unsigned int drop = predict ? ~0 : (*tm).drop_clause[j];
-    class_sum += __builtin_popcount((*tm).clause_output[j] & drop & 0x55555555); // 0101
-    class_sum -= __builtin_popcount((*tm).clause_output[j] & drop & 0xaaaaaaaa); // 1010
-	}
+  if (predict) {
+    for (long int j = 0; j < tm->clause_chunks; j++) {
+      class_sum += __builtin_popcount((*tm).clause_output[j] & 0x55555555); // 0101
+      class_sum -= __builtin_popcount((*tm).clause_output[j] & 0xaaaaaaaa); // 1010
+    }
+  } else {
+    for (long int j = 0; j < tm->clause_chunks; j++) {
+      class_sum += __builtin_popcount((*tm).clause_output[j] & (*tm).drop_clause[j] & 0x55555555); // 0101
+      class_sum -= __builtin_popcount((*tm).clause_output[j] & (*tm).drop_clause[j] & 0xaaaaaaaa); // 1010
+    }
+  }
   long int threshold = tm->threshold;
 	class_sum = (class_sum > threshold) ? threshold : class_sum;
 	class_sum = (class_sum < -threshold) ? -threshold : class_sum;
