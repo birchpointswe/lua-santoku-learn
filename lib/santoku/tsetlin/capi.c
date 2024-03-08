@@ -37,7 +37,7 @@ SOFTWARE.
 
 #define TK_TSETLIN_MT "santoku_tsetlin"
 
-struct TsetlinMachine {
+typedef struct {
   unsigned int classes;
   unsigned int features;
   unsigned int clauses;
@@ -52,7 +52,7 @@ struct TsetlinMachine {
 	unsigned int *feedback_to_la;
 	unsigned int *feedback_to_clauses;
   unsigned int *drop_clause;
-};
+} tsetlin_t;
 
 #define tm_state_idx(tm, class, clause, la_chunk, bit) \
   ((tm)->ta_state[(class) * (tm)->clauses * (tm)->la_chunks * (tm)->state_bits + \
@@ -63,21 +63,23 @@ struct TsetlinMachine {
 static uint64_t const multiplier = 6364136223846793005u;
 static uint64_t mcg_state = 0xcafef00dd15ea5e5u;
 
-static inline uint32_t fast_rand () {
+static inline uint32_t fast_rand ()
+{
   uint64_t x = mcg_state;
   unsigned int count = (unsigned int) (x >> 61);
   mcg_state = x * multiplier;
   return (uint32_t) ((x ^ x >> 22) >> (22 + count));
 }
 
-static inline int normal (double mean, double variance) {
+static inline int normal (double mean, double variance)
+{
   double u1 = (double) (fast_rand() + 1) / ((double) UINT32_MAX + 1);
   double u2 = (double) fast_rand() / UINT32_MAX;
   double n1 = sqrt(-2 * log(u1)) * sin(8 * atan(1) * u2);
   return (int) round(mean + sqrt(variance) * n1);
 }
 
-static inline void tm_initialize_random_streams (struct TsetlinMachine *tm, double specificity)
+static inline void tm_initialize_random_streams (tsetlin_t *tm, double specificity)
 {
   memset((*tm).feedback_to_la, 0, tm->la_chunks*sizeof(unsigned int));
   int n = 2 * tm->features;
@@ -93,7 +95,7 @@ static inline void tm_initialize_random_streams (struct TsetlinMachine *tm, doub
   }
 }
 
-static inline void tm_inc (struct TsetlinMachine *tm, int class, int clause, int chunk, unsigned int active)
+static inline void tm_inc (tsetlin_t *tm, int class, int clause, int chunk, unsigned int active)
 {
 	unsigned int carry, carry_next;
 	carry = active;
@@ -109,7 +111,7 @@ static inline void tm_inc (struct TsetlinMachine *tm, int class, int clause, int
 			tm_state_idx(tm, class, clause, chunk, b) |= carry;
 }
 
-static inline void tm_dec (struct TsetlinMachine *tm, int class, int clause, int chunk, unsigned int active)
+static inline void tm_dec (tsetlin_t *tm, int class, int clause, int chunk, unsigned int active)
 {
 	unsigned int carry, carry_next;
 	carry = active;
@@ -125,7 +127,7 @@ static inline void tm_dec (struct TsetlinMachine *tm, int class, int clause, int
 			tm_state_idx(tm, class, clause, chunk, b) &= ~carry;
 }
 
-static inline int sum_up_class_votes (struct TsetlinMachine *tm, bool predict)
+static inline int sum_up_class_votes (tsetlin_t *tm, bool predict)
 {
 	int class_sum = 0;
   if (predict) {
@@ -145,7 +147,7 @@ static inline int sum_up_class_votes (struct TsetlinMachine *tm, bool predict)
 	return class_sum;
 }
 
-static inline void tm_calculate_clause_output (struct TsetlinMachine *tm, int class, unsigned int *Xi, bool predict)
+static inline void tm_calculate_clause_output (tsetlin_t *tm, int class, unsigned int *Xi, bool predict)
 {
   memset((*tm).clause_output, 0, tm->clause_chunks * sizeof(unsigned int));
   for (long int j = 0; j < tm->clauses; j++) {
@@ -170,7 +172,7 @@ static inline void tm_calculate_clause_output (struct TsetlinMachine *tm, int cl
  	}
 }
 
-static inline void tm_update (struct TsetlinMachine *tm, int class, unsigned int *Xi, unsigned int target, double specificity)
+static inline void tm_update (tsetlin_t *tm, int class, unsigned int *Xi, unsigned int target, double specificity)
 {
   tm_calculate_clause_output(tm, class, Xi, false);
   long int tgt = target;
@@ -213,12 +215,12 @@ static inline void tm_update (struct TsetlinMachine *tm, int class, unsigned int
 	}
 }
 
-static inline int tm_score (struct TsetlinMachine *tm, int class, unsigned int *Xi) {
+static inline int tm_score (tsetlin_t *tm, int class, unsigned int *Xi) {
 	tm_calculate_clause_output(tm, class, Xi, true);
 	return sum_up_class_votes(tm, true);
 }
 
-static inline unsigned int mc_tm_predict (struct TsetlinMachine *tm, unsigned int *X)
+static inline unsigned int mc_tm_predict (tsetlin_t *tm, unsigned int *X)
 {
 	long int max_class = 0;
 	long int max_class_sum = tm_score(tm, 0, X);
@@ -232,7 +234,7 @@ static inline unsigned int mc_tm_predict (struct TsetlinMachine *tm, unsigned in
 	return max_class;
 }
 
-static inline void mc_tm_update (struct TsetlinMachine *tm, unsigned int *Xi, unsigned int target_class, double specificity)
+static inline void mc_tm_update (tsetlin_t *tm, unsigned int *Xi, unsigned int target_class, double specificity)
 {
 	tm_update(tm, target_class, Xi, 1, specificity);
 	unsigned int negative_target_class =
@@ -243,7 +245,7 @@ static inline void mc_tm_update (struct TsetlinMachine *tm, unsigned int *Xi, un
 	tm_update(tm, negative_target_class, Xi, 0, specificity);
 }
 
-static inline void mc_tm_initialize_drop_clause (struct TsetlinMachine *tm, double drop_clause)
+static inline void mc_tm_initialize_drop_clause (tsetlin_t *tm, double drop_clause)
 {
   memset(tm->drop_clause, 0, sizeof(unsigned int) * tm->clause_chunks);
   for (unsigned int i = 0; i < tm->clause_chunks; i ++)
@@ -252,12 +254,12 @@ static inline void mc_tm_initialize_drop_clause (struct TsetlinMachine *tm, doub
         tm->drop_clause[i] |= (1 << j);
 }
 
-struct TsetlinMachine **tk_tsetlin_peekp (lua_State *L, int i)
+tsetlin_t **tk_tsetlin_peekp (lua_State *L, int i)
 {
-  return (struct TsetlinMachine **) luaL_checkudata(L, i, TK_TSETLIN_MT);
+  return (tsetlin_t **) luaL_checkudata(L, i, TK_TSETLIN_MT);
 }
 
-struct TsetlinMachine *tk_tsetlin_peek (lua_State *L, int i)
+tsetlin_t *tk_tsetlin_peek (lua_State *L, int i)
 {
   return *tk_tsetlin_peekp(L, i);
 }
@@ -289,8 +291,8 @@ static inline void tk_tsetlin_register (lua_State *L, luaL_Reg *regs, int nup)
 static inline int tk_tsetlin_create (lua_State *L)
 {
   lua_settop(L, 6);
-	struct TsetlinMachine *tm;
-	tm = (void *)malloc(sizeof(struct TsetlinMachine));
+	tsetlin_t *tm;
+	tm = (void *)malloc(sizeof(tsetlin_t));
   if (!tm)
     luaL_error(L, "error in malloc during creation");
   tm->classes = tk_tsetlin_checkunsigned(L, 1);
@@ -320,8 +322,8 @@ static inline int tk_tsetlin_create (lua_State *L)
         tm_state_idx(tm, i, j, k, tm->state_bits - 1) = 0;
       }
     }
-  struct TsetlinMachine **tmp = (struct TsetlinMachine **)
-    lua_newuserdata(L, sizeof(struct TsetlinMachine *));
+  tsetlin_t **tmp = (tsetlin_t **)
+    lua_newuserdata(L, sizeof(tsetlin_t *));
   *tmp = tm;
   luaL_getmetatable(L, TK_TSETLIN_MT);
   lua_setmetatable(L, -2);
@@ -331,8 +333,8 @@ static inline int tk_tsetlin_create (lua_State *L)
 static inline int tk_tsetlin_destroy (lua_State *L)
 {
   lua_settop(L, 1);
-  struct TsetlinMachine **tmp = tk_tsetlin_peekp(L, 1);
-  struct TsetlinMachine *tm = *tmp;
+  tsetlin_t **tmp = tk_tsetlin_peekp(L, 1);
+  tsetlin_t *tm = *tmp;
   if (tm == NULL)
     return 0;
   free(tm->ta_state);
@@ -348,7 +350,7 @@ static inline int tk_tsetlin_destroy (lua_State *L)
 static inline int tk_tsetlin_predict (lua_State *L)
 {
   lua_settop(L, 3);
-  struct TsetlinMachine *tm = tk_tsetlin_peek(L, 1);
+  tsetlin_t *tm = tk_tsetlin_peek(L, 1);
   const char *bm = luaL_checkstring(L, 2);
   unsigned int class = mc_tm_predict(tm, (unsigned int *) bm);
   lua_pushinteger(L, class);
@@ -358,7 +360,7 @@ static inline int tk_tsetlin_predict (lua_State *L)
 static inline int tk_tsetlin_update (lua_State *L)
 {
   lua_settop(L, 5);
-  struct TsetlinMachine *tm = tk_tsetlin_peek(L, 1);
+  tsetlin_t *tm = tk_tsetlin_peek(L, 1);
   const char *bm = luaL_checkstring(L, 2);
   lua_Integer tgt = luaL_checkinteger(L, 3);
   if (tgt < 0)
@@ -373,7 +375,7 @@ static inline int tk_tsetlin_update (lua_State *L)
 static inline int tk_tsetlin_train (lua_State *L)
 {
   lua_settop(L, 6);
-  struct TsetlinMachine *tm = tk_tsetlin_peek(L, 1);
+  tsetlin_t *tm = tk_tsetlin_peek(L, 1);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *ss = (unsigned int *) luaL_checkstring(L, 4);
@@ -388,7 +390,7 @@ static inline int tk_tsetlin_train (lua_State *L)
 static inline int tk_tsetlin_evaluate (lua_State *L)
 {
   lua_settop(L, 5);
-  struct TsetlinMachine *tm = tk_tsetlin_peek(L, 1);
+  tsetlin_t *tm = tk_tsetlin_peek(L, 1);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *ss = (unsigned int *) luaL_checkstring(L, 4);
