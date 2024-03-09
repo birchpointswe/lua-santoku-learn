@@ -5,7 +5,8 @@ local env = {
   variable_prefix = "TK_TSETLIN",
   public = true,
 
-  cflags = "-O3 -march=native -ffast-math -Wall -Wextra -Wsign-compare -Wsign-conversion -Wstrict-overflow -Wpointer-sign",
+  cflags = "-Ofast -march=native -ffast-math -Wall -Wextra -Wsign-compare -Wsign-conversion -Wstrict-overflow -Wpointer-sign -fopt-info-all=optimize.txt",
+  ldflags = "-Ofast",
 
   dependencies = {
     "lua == 5.1",
