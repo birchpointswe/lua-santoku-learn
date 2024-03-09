@@ -47,7 +47,7 @@ typedef struct {
   unsigned int la_chunks;
   unsigned int clause_chunks;
   unsigned int filter;
-	unsigned int *ta_state;
+	unsigned int *ta_state; // class clause bit chunk
 	unsigned int *clause_output;
 	unsigned int *feedback_to_la;
 	unsigned int *feedback_to_clauses;
@@ -55,10 +55,15 @@ typedef struct {
 } tsetlin_t;
 
 #define tm_state_idx(tm, class, clause, la_chunk, bit) \
-  ((tm)->ta_state[(class) * (tm)->clauses * (tm)->la_chunks * (tm)->state_bits + \
-                  (clause) * (tm)->la_chunks * (tm)->state_bits + \
-                  (la_chunk) * (tm)->state_bits + \
-                  (bit)])
+  ((tm)->ta_state[(class) * (tm)->clauses * (tm)->state_bits * (tm)->la_chunks + \
+                  (clause) * (tm)->state_bits * (tm)->la_chunks + \
+                  (bit) * (tm)->la_chunks + \
+                  (la_chunk)])
+
+#define tm_state_idx_actions(tm, class, clause, bit) \
+  (&(tm)->ta_state[(class) * (tm)->clauses * (tm)->state_bits * (tm)->la_chunks + \
+                   (clause) * (tm)->state_bits * (tm)->la_chunks + \
+                   (bit) * (tm)->la_chunks])
 
 static uint64_t const multiplier = 6364136223846793005u;
 static uint64_t mcg_state = 0xcafef00dd15ea5e5u;
@@ -149,25 +154,32 @@ static inline long int sum_up_class_votes (tsetlin_t *tm, bool predict)
 
 static inline void tm_calculate_clause_output (tsetlin_t *tm, unsigned int class, unsigned int *Xi, bool predict)
 {
-  memset((*tm).clause_output, 0, tm->clause_chunks * sizeof(unsigned int));
-  for (unsigned int j = 0; j < tm->clauses; j ++) {
-    unsigned int output = 1;
-    unsigned int all_exclude = 1;
-    for (unsigned int k = 0; k < tm->la_chunks - 1; k ++) {
-      output = output && (tm_state_idx(tm, class, j, k, tm->state_bits-1) & Xi[k]) == tm_state_idx(tm, class, j, k, tm->state_bits-1);
-      if (!output)
-        break;
-      all_exclude = all_exclude && (tm_state_idx(tm, class, j, k, tm->state_bits-1) == 0);
+  unsigned int clauses = tm->clauses;
+  unsigned int clause_chunks = tm->clause_chunks;
+  unsigned int state_bits = tm->state_bits;
+  unsigned int filter = tm->filter;
+  unsigned int *clause_output = tm->clause_output;
+  memset(clause_output, 0, clause_chunks * sizeof(unsigned int));
+  for (unsigned int j = 0; j < clauses; j ++) {
+    unsigned int output = 0;
+    unsigned int all_exclude = 0;
+    unsigned int la_chunks = tm->la_chunks;
+    unsigned int *actions = tm_state_idx_actions(tm, class, j, state_bits - 1);
+    for (unsigned int k = 0; k < la_chunks - 1; k ++) {
+      output |= ((actions[k] & Xi[k]) ^ actions[k]);
+      all_exclude |= actions[k];
     }
-		output = output &&
-			(tm_state_idx(tm, class, j, tm->la_chunks-1, tm->state_bits-1) & Xi[tm->la_chunks-1] & tm->filter) ==
-			(tm_state_idx(tm, class, j, tm->la_chunks-1, tm->state_bits-1) & tm->filter);
-		all_exclude = all_exclude && ((tm_state_idx(tm, class, j, tm->la_chunks-1, tm->state_bits-1) & tm->filter) == 0);
+		output |=
+			(actions[la_chunks - 1] & Xi[la_chunks - 1] & filter) ^
+			(actions[la_chunks - 1] & filter);
+		all_exclude |= ((actions[la_chunks - 1] & filter) ^ 0);
+    output = output == 0;
+    all_exclude = all_exclude == 0;
 		output = output && !(predict && all_exclude == 1);
 		if (output) {
 			unsigned int clause_chunk = j / (sizeof(unsigned int) * CHAR_BIT);
 			unsigned int clause_chunk_pos = j % (sizeof(unsigned int) * CHAR_BIT);
- 			(*tm).clause_output[clause_chunk] |= (1 << clause_chunk_pos);
+ 			clause_output[clause_chunk] |= (1 << clause_chunk_pos);
  		}
  	}
 }

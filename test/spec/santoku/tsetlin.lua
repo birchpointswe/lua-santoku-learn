@@ -10,7 +10,7 @@ local arr = require("santoku.array")
 local rand = require("santoku.random")
 
 local CLASSES = 2
-local FEATURES = 607
+local FEATURES = 1214
 local CLAUSES = 200
 local STATE_BITS = 8
 local THRESHOLD = 40
@@ -75,12 +75,16 @@ test("tsetlin", function ()
 
   local t = tm.create(CLASSES, FEATURES, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
 
+  local times = {}
+
   print("Training")
   for epoch = 1, MAX_EPOCHS do
 
     local start = os.clock()
     tm.train(t, #train_problems, train_problems_packed, train_solutions_packed, SPECIFICITY, DROP_CLAUSE)
     local stop = os.clock()
+    arr.push(times, stop - start)
+    local avg_duration = arr.mean(times)
 
     local test_score, confusion, predictions =
       tm.evaluate(t, #test_problems, test_problems_packed, test_solutions_packed, epoch == MAX_EPOCHS)
@@ -88,7 +92,7 @@ test("tsetlin", function ()
     local train_score =
       tm.evaluate(t, #train_problems, train_problems_packed, train_solutions_packed)
 
-    str.printf("Epoch\t%-4d\tTest\t%4.2f\tTrain\t%4.2f\tTime\t%f\n", epoch, test_score, train_score, stop - start)
+    str.printf("Epoch\t%-4d\tTest\t%4.2f\tTrain\t%4.2f\tTime\t%f\n", epoch, test_score, train_score, avg_duration)
 
     if epoch == MAX_EPOCHS then
 
