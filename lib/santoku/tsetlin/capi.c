@@ -227,7 +227,7 @@ static inline unsigned int mc_tm_predict (tsetlin_t *tm, unsigned int *X)
 	long int max_class = 0;
 	long int max_class_sum = tm_score(tm, 0, X);
   for (long int i = 1; i < tm->classes; i ++) {
-    int class_sum = tm_score(tm, i, X);
+    long int class_sum = tm_score(tm, i, X);
     if (max_class_sum < class_sum) {
       max_class_sum = class_sum;
       max_class = i;
