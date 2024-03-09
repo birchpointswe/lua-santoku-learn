@@ -82,24 +82,24 @@ static inline int normal (double mean, double variance)
 static inline void tm_initialize_random_streams (tsetlin_t *tm, double specificity)
 {
   memset((*tm).feedback_to_la, 0, tm->la_chunks*sizeof(unsigned int));
-  int n = 2 * tm->features;
+  long int n = 2 * tm->features;
   double p = 1.0 / specificity;
-  int active = normal(n * p, n * p * (1 - p));
+  long int active = normal(n * p, n * p * (1 - p));
   active = active >= n ? n : active;
   active = active < 0 ? 0 : active;
   while (active--) {
-    int f = fast_rand() % (2 * tm->features);
+    unsigned int f = fast_rand() % (2 * tm->features);
     while ((*tm).feedback_to_la[f / (sizeof(unsigned int) * CHAR_BIT)] & (1 << (f % (sizeof(unsigned int) * CHAR_BIT))))
       f = fast_rand() % (2 * tm->features);
     (*tm).feedback_to_la[f / (sizeof(unsigned int) * CHAR_BIT)] |= 1 << (f % (sizeof(unsigned int) * CHAR_BIT));
   }
 }
 
-static inline void tm_inc (tsetlin_t *tm, int class, int clause, int chunk, unsigned int active)
+static inline void tm_inc (tsetlin_t *tm, unsigned int class, unsigned int clause, unsigned int chunk, unsigned int active)
 {
 	unsigned int carry, carry_next;
 	carry = active;
-	for (long int b = 0; b < tm->state_bits; ++b) {
+	for (unsigned int b = 0; b < tm->state_bits; b ++) {
 		if (carry == 0)
 			break;
 		carry_next = tm_state_idx(tm, class, clause, chunk, b) & carry;
@@ -107,15 +107,15 @@ static inline void tm_inc (tsetlin_t *tm, int class, int clause, int chunk, unsi
 		carry = carry_next;
 	}
 	if (carry > 0)
-		for (long int b = 0; b < tm->state_bits; ++b)
+		for (unsigned int b = 0; b < tm->state_bits; b ++)
 			tm_state_idx(tm, class, clause, chunk, b) |= carry;
 }
 
-static inline void tm_dec (tsetlin_t *tm, int class, int clause, int chunk, unsigned int active)
+static inline void tm_dec (tsetlin_t *tm, unsigned int class, unsigned int clause, unsigned int chunk, unsigned int active)
 {
 	unsigned int carry, carry_next;
 	carry = active;
-	for (long int b = 0; b < tm->state_bits; ++b) {
+	for (unsigned int b = 0; b < tm->state_bits; b ++) {
 		if (carry == 0)
 			break;
 		carry_next = (~tm_state_idx(tm, class, clause, chunk, b)) & carry; // Sets carry bits (overflow) passing on to next bit
@@ -123,20 +123,20 @@ static inline void tm_dec (tsetlin_t *tm, int class, int clause, int chunk, unsi
 		carry = carry_next;
 	}
 	if (carry > 0)
-		for (long int b = 0; b < tm->state_bits; ++b)
+		for (unsigned int b = 0; b < tm->state_bits; b ++)
 			tm_state_idx(tm, class, clause, chunk, b) &= ~carry;
 }
 
-static inline int sum_up_class_votes (tsetlin_t *tm, bool predict)
+static inline long int sum_up_class_votes (tsetlin_t *tm, bool predict)
 {
-	int class_sum = 0;
+	long int class_sum = 0;
   if (predict) {
-    for (long int j = 0; j < tm->clause_chunks; j++) {
+    for (unsigned int j = 0; j < tm->clause_chunks; j ++) {
       class_sum += __builtin_popcount((*tm).clause_output[j] & 0x55555555); // 0101
       class_sum -= __builtin_popcount((*tm).clause_output[j] & 0xaaaaaaaa); // 1010
     }
   } else {
-    for (long int j = 0; j < tm->clause_chunks; j++) {
+    for (unsigned int j = 0; j < tm->clause_chunks; j ++) {
       class_sum += __builtin_popcount((*tm).clause_output[j] & (*tm).drop_clause[j] & 0x55555555); // 0101
       class_sum -= __builtin_popcount((*tm).clause_output[j] & (*tm).drop_clause[j] & 0xaaaaaaaa); // 1010
     }
@@ -147,13 +147,13 @@ static inline int sum_up_class_votes (tsetlin_t *tm, bool predict)
 	return class_sum;
 }
 
-static inline void tm_calculate_clause_output (tsetlin_t *tm, int class, unsigned int *Xi, bool predict)
+static inline void tm_calculate_clause_output (tsetlin_t *tm, unsigned int class, unsigned int *Xi, bool predict)
 {
   memset((*tm).clause_output, 0, tm->clause_chunks * sizeof(unsigned int));
-  for (long int j = 0; j < tm->clauses; j++) {
+  for (unsigned int j = 0; j < tm->clauses; j ++) {
     unsigned int output = 1;
     unsigned int all_exclude = 1;
-    for (long int k = 0; k < tm->la_chunks - 1; k++) {
+    for (unsigned int k = 0; k < tm->la_chunks - 1; k ++) {
       output = output && (tm_state_idx(tm, class, j, k, tm->state_bits-1) & Xi[k]) == tm_state_idx(tm, class, j, k, tm->state_bits-1);
       if (!output)
         break;
@@ -172,34 +172,36 @@ static inline void tm_calculate_clause_output (tsetlin_t *tm, int class, unsigne
  	}
 }
 
-static inline void tm_update (tsetlin_t *tm, int class, unsigned int *Xi, unsigned int target, double specificity)
+static inline void tm_update (tsetlin_t *tm, unsigned int class, unsigned int *Xi, unsigned int target, double specificity)
 {
   tm_calculate_clause_output(tm, class, Xi, false);
   long int tgt = target;
-  int class_sum = sum_up_class_votes(tm, false);
+  long int class_sum = sum_up_class_votes(tm, false);
   float p = (1.0/(tm->threshold*2))*(tm->threshold + (1 - 2*tgt)*class_sum);
   memset((*tm).feedback_to_clauses, 0, tm->clause_chunks * sizeof(unsigned int));
   for (unsigned int i = 0; i < tm->clause_chunks; i ++)
   {
     for (unsigned int j = 0; j < sizeof(unsigned int) * CHAR_BIT; j ++)
-      (*tm).feedback_to_clauses[i] |= (((float)fast_rand())/((float)UINT32_MAX) <= p) << j;
+      (*tm).feedback_to_clauses[i] |= (unsigned int)
+        (((float) fast_rand()) / ((float) UINT32_MAX) <= p) << j;
     (*tm).feedback_to_clauses[i] &= tm->drop_clause[i];
   }
-	for (long int j = 0; j < tm->clauses; j++) {
+	for (unsigned int j = 0; j < tm->clauses; j ++) {
+    long int jl = (long int) j;
 		unsigned int clause_chunk = j / (sizeof(unsigned int) * CHAR_BIT);
 		unsigned int clause_chunk_pos = j % (sizeof(unsigned int) * CHAR_BIT);
 		if (!((*tm).feedback_to_clauses[clause_chunk] & (1 << clause_chunk_pos)))
 			continue;
-		if ((2*tgt-1) * (1 - 2 * (j & 1)) == -1) {
+		if ((2*tgt-1) * (1 - 2 * (jl & 1)) == -1) {
       // Type II feedback
 			if (((*tm).clause_output[clause_chunk] & (1 << clause_chunk_pos)) > 0)
-				for (long int k = 0; k < tm->la_chunks; ++k)
+				for (unsigned int k = 0; k < tm->la_chunks; k ++)
 					tm_inc(tm, class, j, k, (~Xi[k]) & (~tm_state_idx(tm, class, j, k, tm->state_bits-1)));
-		} else if ((2*tgt-1) * (1 - 2 * (j & 1)) == 1) {
+		} else if ((2*tgt-1) * (1 - 2 * (jl & 1)) == 1) {
 			// Type I Feedback
 			tm_initialize_random_streams(tm, specificity);
 			if (((*tm).clause_output[clause_chunk] & (1 << clause_chunk_pos)) > 0) {
-				for (long int k = 0; k < tm->la_chunks; ++k) {
+				for (unsigned int k = 0; k < tm->la_chunks; k ++) {
           if (tm->boost_true_positive)
             tm_inc(tm, class, j, k, Xi[k]);
           else
@@ -207,7 +209,7 @@ static inline void tm_update (tsetlin_t *tm, int class, unsigned int *Xi, unsign
 		 			tm_dec(tm, class, j, k, (~Xi[k]) & tm->feedback_to_la[k]);
 				}
 			} else {
-				for (long int k = 0; k < tm->la_chunks; ++k) {
+				for (unsigned int k = 0; k < tm->la_chunks; k ++) {
 					tm_dec(tm, class, j, k, tm->feedback_to_la[k]);
 				}
 			}
@@ -215,7 +217,7 @@ static inline void tm_update (tsetlin_t *tm, int class, unsigned int *Xi, unsign
 	}
 }
 
-static inline int tm_score (tsetlin_t *tm, int class, unsigned int *Xi) {
+static inline int tm_score (tsetlin_t *tm, unsigned int class, unsigned int *Xi) {
 	tm_calculate_clause_output(tm, class, Xi, true);
 	return sum_up_class_votes(tm, true);
 }
@@ -224,7 +226,7 @@ static inline unsigned int mc_tm_predict (tsetlin_t *tm, unsigned int *X)
 {
 	long int max_class = 0;
 	long int max_class_sum = tm_score(tm, 0, X);
-  for (long int i = 1; i < tm->classes; i++) {
+  for (long int i = 1; i < tm->classes; i ++) {
     int class_sum = tm_score(tm, i, X);
     if (max_class_sum < class_sum) {
       max_class_sum = class_sum;
@@ -237,11 +239,9 @@ static inline unsigned int mc_tm_predict (tsetlin_t *tm, unsigned int *X)
 static inline void mc_tm_update (tsetlin_t *tm, unsigned int *Xi, unsigned int target_class, double specificity)
 {
 	tm_update(tm, target_class, Xi, 1, specificity);
-	unsigned int negative_target_class =
-    ((unsigned int) tm->classes * 1.0 * rand()) /
-    ((unsigned int) RAND_MAX + 1);
+	unsigned int negative_target_class = (unsigned int) fast_rand() % tm->classes;
 	while (negative_target_class == target_class)
-		negative_target_class = (unsigned int)tm->classes * 1.0*rand()/((unsigned int)RAND_MAX + 1);
+		negative_target_class = (unsigned int) fast_rand() % tm->classes;
 	tm_update(tm, negative_target_class, Xi, 0, specificity);
 }
 
@@ -314,11 +314,11 @@ static inline int tk_tsetlin_create (lua_State *L)
   tm->feedback_to_clauses = malloc(sizeof(unsigned int) * tm->clause_chunks);
   if (!(tm->drop_clause && tm->ta_state && tm->clause_output && tm->feedback_to_la && tm->feedback_to_clauses))
     luaL_error(L, "error in malloc during creation");
-	for (long int i = 0; i < tm->classes; i++)
-    for (long int j = 0; j < tm->clauses; ++j) {
-      for (long int k = 0; k < tm->la_chunks; ++k) {
-        for (long int b = 0; b < tm->state_bits - 1; ++b)
-          tm_state_idx(tm, i, j, k, b) = ~0;
+	for (unsigned int i = 0; i < tm->classes; i ++)
+    for (unsigned int j = 0; j < tm->clauses; j ++) {
+      for (unsigned int k = 0; k < tm->la_chunks; k ++) {
+        for (unsigned int b = 0; b < tm->state_bits - 1; b ++)
+          tm_state_idx(tm, i, j, k, b) = ~((unsigned int) 0);
         tm_state_idx(tm, i, j, k, tm->state_bits - 1) = 0;
       }
     }
