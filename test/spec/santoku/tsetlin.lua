@@ -3,8 +3,6 @@ local test = require("santoku.test")
 local tm = require("santoku.tsetlin")
 local bm = require("santoku.bitmap")
 local mtx = require("santoku.matrix")
-local fs = require("santoku.fs")
-local it = require("santoku.iter")
 local str = require("santoku.string")
 local arr = require("santoku.array")
 local rand = require("santoku.random")
@@ -22,36 +20,41 @@ local MAX_EPOCHS = 10
 local function read_data (fp, max)
   local problems = {}
   local solutions = {}
-  local records = it.map(function (l, s, e)
-    return it.map(function (t, s, e)
-      return str.equals("1", t, s, e)
-    end, str.match(l, "%S+", false, s, e))
-  end, fs.lines(fp))
-  if max then
-    records = it.take(max, records)
-  end
-  for bits in records do
-    local b = bm.create()
-    for i = 1, FEATURES do
-      if bits() then
-        bm.set(b, i)
+  local bits = {}
+  for l in io.lines(fp) do
+    local n = 0
+    for bit in l:gmatch("%S+") do
+      n = n + 1
+      bit = bit == "1"
+      if n == FEATURES + 1 then
+        solutions[#solutions + 1] = bit and 1 or 0
+        break
+      elseif bit then
+        bits[n] = true
+        bits[n + FEATURES] = nil
       else
-        -- NOTE: Setting the inverted features here. This is essential!
-        -- TODO: Consider throwing an error if this is not done.
-        bm.set(b, i + FEATURES)
+        bits[n] = nil
+        bits[n + FEATURES] = true
+      end
+      if max and n > max then
+        break
       end
     end
-    arr.push(problems, b)
-    arr.push(solutions, bits() and 1 or 0)
+    if n ~= FEATURES + 1 then
+      error("bitmap length mismatch")
+    else
+      problems[#problems + 1] = bm.create(bits, FEATURES * 2)
+    end
   end
   return problems, solutions
 end
 
 local function pack_data (ps, ss)
   local b = bm.raw_matrix(ps, FEATURES * 2)
-  local m0 = mtx.create(1, #ss)
-  mtx.set(m0, 1, ss)
-  return b, mtx.raw(m0, 1, 1, "u32")
+  -- TODO: Simply `local m = mtx.raw(ss)` would be nice
+  local m = mtx.create(1, #ss)
+  mtx.set(m, 1, ss)
+  return b, mtx.raw(m, 1, 1, "u32")
 end
 
 test("tsetlin", function ()
@@ -103,7 +106,8 @@ test("tsetlin", function ()
         print()
         print("  Observed / Predicted  Ratio")
         print()
-        for s in it.ivals(confusion) do
+        for i = 1, #confusion do
+          local s = confusion[i]
           str.printf("%10d / %-10d %-.4f\n", s.expected, s.predicted, s.ratio, s.count)
         end
       end
@@ -111,7 +115,8 @@ test("tsetlin", function ()
       print()
       print("  Observed / Predicted  Class Frequency")
       print()
-      for p in it.ivals(predictions) do
+      for i = 1, #predictions do
+        local p = predictions[i]
         str.printf("    %.4f / %-6.4f     %s \n", p.frequency_observed, p.frequency_predicted, p.class)
       end
 

@@ -135,15 +135,18 @@ static inline void tm_dec (tsetlin_t *tm, unsigned int class, unsigned int claus
 static inline long int sum_up_class_votes (tsetlin_t *tm, bool predict)
 {
   long int class_sum = 0;
+  unsigned int *output = tm->clause_output;
+  unsigned int *drop = tm->drop_clause;
+  unsigned int clause_chunks = tm->clause_chunks;
   if (predict) {
-    for (unsigned int j = 0; j < tm->clause_chunks; j ++) {
-      class_sum += __builtin_popcount((*tm).clause_output[j] & 0x55555555); // 0101
-      class_sum -= __builtin_popcount((*tm).clause_output[j] & 0xaaaaaaaa); // 1010
+    for (unsigned int i = 0; i < clause_chunks * 32; i ++) {
+      class_sum += (output[i / 32] & 0x55555555) << (31 - (i % 32)) >> 31; // 0101
+      class_sum -= (output[i / 32] & 0xaaaaaaaa) << (31 - (i % 32)) >> 31; // 1010
     }
   } else {
-    for (unsigned int j = 0; j < tm->clause_chunks; j ++) {
-      class_sum += __builtin_popcount((*tm).clause_output[j] & (*tm).drop_clause[j] & 0x55555555); // 0101
-      class_sum -= __builtin_popcount((*tm).clause_output[j] & (*tm).drop_clause[j] & 0xaaaaaaaa); // 1010
+    for (unsigned int i = 0; i < clause_chunks * 32; i ++) {
+      class_sum += (output[i / 32] & drop[i / 32] & 0x55555555) << (31 - (i % 32)) >> 31; // 0101
+      class_sum -= (output[i / 32] & drop[i / 32] & 0xaaaaaaaa) << (31 - (i % 32)) >> 31; // 1010
     }
   }
   long int threshold = tm->threshold;
@@ -155,14 +158,9 @@ static inline long int sum_up_class_votes (tsetlin_t *tm, bool predict)
 static inline void tm_calculate_clause_output (tsetlin_t *tm, unsigned int class, unsigned int *Xi, bool predict)
 {
   unsigned int clauses = tm->clauses;
-  unsigned int clause_chunks = tm->clause_chunks;
   unsigned int state_bits = tm->state_bits;
   unsigned int filter = tm->filter;
   unsigned int *clause_output = tm->clause_output;
-  // // NOTE: replaced memset with loop for GCCs auto-vectorizer
-  // memset(clause_output, 0, clause_chunks * sizeof(unsigned int));
-  for (unsigned int i = 0; i < clause_chunks; i ++)
-    clause_output[i] = 0;
   for (unsigned int j = 0; j < clauses; j ++) {
     unsigned int output = 0;
     unsigned int all_exclude = 0;
@@ -180,7 +178,9 @@ static inline void tm_calculate_clause_output (tsetlin_t *tm, unsigned int class
     all_exclude |= ((actions[la_chunks - 1] & filter) ^ 0);
     output = !output && !(predict && !all_exclude);
     if (output)
-      clause_output[clause_chunk] |= (1 << clause_chunk_pos);
+      clause_output[clause_chunk] |= (1U << clause_chunk_pos);
+    else
+      clause_output[clause_chunk] &= ~(1U << clause_chunk_pos);
    }
 }
 
