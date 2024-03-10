@@ -48,22 +48,21 @@ typedef struct {
   unsigned int clause_chunks;
   unsigned int filter;
   unsigned int *ta_state; // class clause bit chunk
+  unsigned int *actions; // class clause chunk
   unsigned int *clause_output;
   unsigned int *feedback_to_la;
   unsigned int *feedback_to_clauses;
   unsigned int *drop_clause;
 } tsetlin_t;
 
-#define tm_state_idx(tm, class, clause, la_chunk, bit) \
-  ((tm)->ta_state[(class) * (tm)->clauses * (tm)->state_bits * (tm)->la_chunks + \
-                  (clause) * (tm)->state_bits * (tm)->la_chunks + \
-                  (bit) * (tm)->la_chunks + \
-                  (la_chunk)])
+#define tm_state_idx_counts(tm, class, clause, la_chunk) \
+  (&(tm)->ta_state[(class) * (tm)->clauses * (tm)->la_chunks * ((tm)->state_bits - 1) + \
+                   (clause) * (tm)->la_chunks * ((tm)->state_bits - 1) + \
+                   (la_chunk) * ((tm)->state_bits - 1)])
 
-#define tm_state_idx_actions(tm, class, clause, bit) \
-  (&(tm)->ta_state[(class) * (tm)->clauses * (tm)->state_bits * (tm)->la_chunks + \
-                   (clause) * (tm)->state_bits * (tm)->la_chunks + \
-                   (bit) * (tm)->la_chunks])
+#define tm_state_idx_actions(tm, class, clause) \
+  (&(tm)->actions[(class) * (tm)->clauses *  (tm)->la_chunks + \
+                  (clause) * (tm)->la_chunks])
 
 static uint64_t const multiplier = 6364136223846793005u;
 static uint64_t mcg_state = 0xcafef00dd15ea5e5u;
@@ -102,34 +101,42 @@ static inline void tm_initialize_random_streams (tsetlin_t *tm, double specifici
 
 static inline void tm_inc (tsetlin_t *tm, unsigned int class, unsigned int clause, unsigned int chunk, unsigned int active)
 {
+  unsigned int m = tm->state_bits - 1;
+  unsigned int *counts = tm_state_idx_counts(tm, class, clause, chunk);
   unsigned int carry, carry_next;
   carry = active;
-  for (unsigned int b = 0; b < tm->state_bits; b ++) {
-    if (carry == 0)
-      break;
-    carry_next = tm_state_idx(tm, class, clause, chunk, b) & carry;
-    tm_state_idx(tm, class, clause, chunk, b) = tm_state_idx(tm, class, clause, chunk, b) ^ carry;
+  for (unsigned int b = 0; b < m; b ++) {
+    carry_next = counts[b] & carry;
+    counts[b] ^= carry;
     carry = carry_next;
   }
-  if (carry > 0)
-    for (unsigned int b = 0; b < tm->state_bits; b ++)
-      tm_state_idx(tm, class, clause, chunk, b) |= carry;
+  unsigned int *actions = tm_state_idx_actions(tm, class, clause);
+  carry_next = actions[chunk] & carry;
+  actions[chunk] ^= carry;
+  carry = carry_next;
+  for (unsigned int b = 0; b < m; b ++)
+    counts[b] |= carry;
+  actions[chunk] |= carry;
 }
 
 static inline void tm_dec (tsetlin_t *tm, unsigned int class, unsigned int clause, unsigned int chunk, unsigned int active)
 {
+  unsigned int m = tm->state_bits - 1;
+  unsigned int *counts = tm_state_idx_counts(tm, class, clause, chunk);
   unsigned int carry, carry_next;
   carry = active;
-  for (unsigned int b = 0; b < tm->state_bits; b ++) {
-    if (carry == 0)
-      break;
-    carry_next = (~tm_state_idx(tm, class, clause, chunk, b)) & carry; // Sets carry bits (overflow) passing on to next bit
-    tm_state_idx(tm, class, clause, chunk, b) = tm_state_idx(tm, class, clause, chunk, b) ^ carry; // Performs increments with XOR
+  for (unsigned int b = 0; b < m; b ++) {
+    carry_next = (~counts[b]) & carry;
+    counts[b] ^= carry;
     carry = carry_next;
   }
-  if (carry > 0)
-    for (unsigned int b = 0; b < tm->state_bits; b ++)
-      tm_state_idx(tm, class, clause, chunk, b) &= ~carry;
+  unsigned int *actions = tm_state_idx_actions(tm, class, clause);
+  carry_next = (~actions[chunk]) & carry;
+  actions[chunk] ^= carry;
+  carry = carry_next;
+  for (unsigned int b = 0; b < m; b ++)
+    counts[b] &= ~carry;
+  actions[chunk] &= ~carry;
 }
 
 static inline long int sum_up_class_votes (tsetlin_t *tm, bool predict)
@@ -158,7 +165,6 @@ static inline long int sum_up_class_votes (tsetlin_t *tm, bool predict)
 static inline void tm_calculate_clause_output (tsetlin_t *tm, unsigned int class, unsigned int *Xi, bool predict)
 {
   unsigned int clauses = tm->clauses;
-  unsigned int state_bits = tm->state_bits;
   unsigned int filter = tm->filter;
   unsigned int *clause_output = tm->clause_output;
   for (unsigned int j = 0; j < clauses; j ++) {
@@ -167,7 +173,7 @@ static inline void tm_calculate_clause_output (tsetlin_t *tm, unsigned int class
     unsigned int la_chunks = tm->la_chunks;
     unsigned int clause_chunk = j / (sizeof(unsigned int) * CHAR_BIT);
     unsigned int clause_chunk_pos = j % (sizeof(unsigned int) * CHAR_BIT);
-    unsigned int *actions = tm_state_idx_actions(tm, class, j, state_bits - 1);
+    unsigned int *actions = tm_state_idx_actions(tm, class, j);
     for (unsigned int k = 0; k < la_chunks - 1; k ++) {
       output |= ((actions[k] & Xi[k]) ^ actions[k]);
       all_exclude |= actions[k];
@@ -189,41 +195,47 @@ static inline void tm_update (tsetlin_t *tm, unsigned int class, unsigned int *X
   tm_calculate_clause_output(tm, class, Xi, false);
   long int tgt = target;
   long int class_sum = sum_up_class_votes(tm, false);
-  float p = (1.0/(tm->threshold*2))*(tm->threshold + (1 - 2*tgt)*class_sum);
-  memset((*tm).feedback_to_clauses, 0, tm->clause_chunks * sizeof(unsigned int));
-  for (unsigned int i = 0; i < tm->clause_chunks; i ++)
-  {
+  unsigned int la_chunks = tm->la_chunks;
+  unsigned int clause_chunks = tm->clause_chunks;
+  unsigned int *clause_output = tm->clause_output;
+  unsigned int *drop_clause = tm->drop_clause;
+  unsigned int *feedback_to_la = tm->feedback_to_la;
+  unsigned int *feedback_to_clauses = tm->feedback_to_clauses;
+  float p = (1.0 / (tm->threshold * 2)) * (tm->threshold + (1 - 2 * tgt) * class_sum);
+  memset(feedback_to_clauses, 0, clause_chunks * sizeof(unsigned int));
+  for (unsigned int i = 0; i < clause_chunks; i ++)
     for (unsigned int j = 0; j < sizeof(unsigned int) * CHAR_BIT; j ++)
-      (*tm).feedback_to_clauses[i] |= (unsigned int)
+      feedback_to_clauses[i] |= (unsigned int)
         (((float) fast_rand()) / ((float) UINT32_MAX) <= p) << j;
-    (*tm).feedback_to_clauses[i] &= tm->drop_clause[i];
-  }
+  for (unsigned int i = 0; i < clause_chunks; i ++)
+    feedback_to_clauses[i] &= drop_clause[i];
   for (unsigned int j = 0; j < tm->clauses; j ++) {
     long int jl = (long int) j;
     unsigned int clause_chunk = j / (sizeof(unsigned int) * CHAR_BIT);
     unsigned int clause_chunk_pos = j % (sizeof(unsigned int) * CHAR_BIT);
-    if (!((*tm).feedback_to_clauses[clause_chunk] & (1 << clause_chunk_pos)))
+    unsigned int *actions = tm_state_idx_actions(tm, class, j);
+    if (!(feedback_to_clauses[clause_chunk] & (1 << clause_chunk_pos)))
       continue;
-    if ((2*tgt-1) * (1 - 2 * (jl & 1)) == -1) {
+    if ((2 * tgt - 1) * (1 - 2 * (jl & 1)) == -1) {
       // Type II feedback
-      if (((*tm).clause_output[clause_chunk] & (1 << clause_chunk_pos)) > 0)
-        for (unsigned int k = 0; k < tm->la_chunks; k ++)
-          tm_inc(tm, class, j, k, (~Xi[k]) & (~tm_state_idx(tm, class, j, k, tm->state_bits-1)));
-    } else if ((2*tgt-1) * (1 - 2 * (jl & 1)) == 1) {
+      if ((clause_output[clause_chunk] & (1 << clause_chunk_pos)) > 0)
+        for (unsigned int k = 0; k < la_chunks; k ++)
+          tm_inc(tm, class, j, k, (~Xi[k]) & (~actions[k]));
+    } else if ((2 * tgt - 1) * (1 - 2 * (jl & 1)) == 1) {
       // Type I Feedback
       tm_initialize_random_streams(tm, specificity);
-      if (((*tm).clause_output[clause_chunk] & (1 << clause_chunk_pos)) > 0) {
-        for (unsigned int k = 0; k < tm->la_chunks; k ++) {
-          if (tm->boost_true_positive)
+      if ((clause_output[clause_chunk] & (1 << clause_chunk_pos)) > 0) {
+        if (tm->boost_true_positive)
+          for (unsigned int k = 0; k < la_chunks; k ++)
             tm_inc(tm, class, j, k, Xi[k]);
-          else
-            tm_inc(tm, class, j, k, Xi[k] & (~tm->feedback_to_la[k]));
-           tm_dec(tm, class, j, k, (~Xi[k]) & tm->feedback_to_la[k]);
-        }
+        else
+          for (unsigned int k = 0; k < la_chunks; k ++)
+            tm_inc(tm, class, j, k, Xi[k] & (~feedback_to_la[k]));
+        for (unsigned int k = 0; k < la_chunks; k ++)
+          tm_dec(tm, class, j, k, (~Xi[k]) & feedback_to_la[k]);
       } else {
-        for (unsigned int k = 0; k < tm->la_chunks; k ++) {
-          tm_dec(tm, class, j, k, tm->feedback_to_la[k]);
-        }
+        for (unsigned int k = 0; k < la_chunks; k ++)
+          tm_dec(tm, class, j, k, feedback_to_la[k]);
       }
     }
   }
@@ -320,20 +332,23 @@ static inline int tk_tsetlin_create (lua_State *L)
     ? ~(((unsigned int) ~0) << ((tm->features * 2) % (sizeof(unsigned int) * CHAR_BIT)))
     : (unsigned int) ~0;
   tm->drop_clause = malloc(sizeof(unsigned int) * tm->clause_chunks);
-  tm->ta_state = malloc(sizeof(unsigned int) * tm->classes * tm->clauses * tm->la_chunks * tm->state_bits);
+  tm->ta_state = malloc(sizeof(unsigned int) * tm->classes * tm->clauses * (tm->state_bits - 1) * tm->la_chunks);
+  tm->actions = malloc(sizeof(unsigned int) * tm->classes * tm->clauses * tm->la_chunks);
   tm->clause_output = malloc(sizeof(unsigned int) * tm->clause_chunks);
   tm->feedback_to_la = malloc(sizeof(unsigned int) * tm->la_chunks);
   tm->feedback_to_clauses = malloc(sizeof(unsigned int) * tm->clause_chunks);
   if (!(tm->drop_clause && tm->ta_state && tm->clause_output && tm->feedback_to_la && tm->feedback_to_clauses))
     luaL_error(L, "error in malloc during creation");
   for (unsigned int i = 0; i < tm->classes; i ++)
-    for (unsigned int j = 0; j < tm->clauses; j ++) {
+    for (unsigned int j = 0; j < tm->clauses; j ++)
       for (unsigned int k = 0; k < tm->la_chunks; k ++) {
-        for (unsigned int b = 0; b < tm->state_bits - 1; b ++)
-          tm_state_idx(tm, i, j, k, b) = ~((unsigned int) 0);
-        tm_state_idx(tm, i, j, k, tm->state_bits - 1) = 0;
+        unsigned int m = tm->state_bits - 1;
+        unsigned int *actions = tm_state_idx_actions(tm, i, j);
+        unsigned int *counts = tm_state_idx_counts(tm, i, j, k);
+        actions[k] = 0U;
+        for (unsigned int b = 0; b < m; b ++)
+          counts[b] = ~0U;
       }
-    }
   tsetlin_t **tmp = (tsetlin_t **)
     lua_newuserdata(L, sizeof(tsetlin_t *));
   *tmp = tm;
@@ -350,6 +365,7 @@ static inline int tk_tsetlin_destroy (lua_State *L)
   if (tm == NULL)
     return 0;
   free(tm->ta_state);
+  free(tm->actions);
   free(tm->clause_output);
   free(tm->drop_clause);
   free(tm->feedback_to_la);
