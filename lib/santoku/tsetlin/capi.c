@@ -187,7 +187,7 @@ static inline void tm_calculate_clause_output (tsetlin_t *tm, unsigned int class
       clause_output[clause_chunk] |= (1U << clause_chunk_pos);
     else
       clause_output[clause_chunk] &= ~(1U << clause_chunk_pos);
-   }
+  }
 }
 
 static inline void tm_update (tsetlin_t *tm, unsigned int class, unsigned int *Xi, unsigned int target, double specificity)
@@ -248,9 +248,10 @@ static inline int tm_score (tsetlin_t *tm, unsigned int class, unsigned int *Xi)
 
 static inline unsigned int mc_tm_predict (tsetlin_t *tm, unsigned int *X)
 {
-  long int max_class = 0;
+  unsigned int m = tm->classes;
+  unsigned int max_class = 0;
   long int max_class_sum = tm_score(tm, 0, X);
-  for (long int i = 1; i < tm->classes; i ++) {
+  for (long int i = 1; i < m; i ++) {
     long int class_sum = tm_score(tm, i, X);
     if (max_class_sum < class_sum) {
       max_class_sum = class_sum;
