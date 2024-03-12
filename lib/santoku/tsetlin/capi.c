@@ -1,7 +1,7 @@
 /*
 
-Copyright (C) 2024 Birch Point SWE (Lua integration, train/evaluate stats, drop clause)
-Copyright (C) 2019 Ole-Christoffer Granmo (Original C implementation)
+Copyright (C) 2024 Birch Point SWE (Lua integration, train/evaluate, drop clause, autoencoder, regressor)
+Copyright (C) 2019 Ole-Christoffer Granmo (Original classifier C implementation)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -37,6 +37,12 @@ SOFTWARE.
 
 #define TK_TSETLIN_MT "santoku_tsetlin"
 
+typedef enum {
+  TM_CLASSIFIER,
+  TM_AUTOENCODER,
+  TM_REGRESSOR
+} tsetlin_type_t;
+
 typedef struct {
   unsigned int classes;
   unsigned int features;
@@ -53,6 +59,24 @@ typedef struct {
   unsigned int *feedback_to_la;
   unsigned int *feedback_to_clauses;
   unsigned int *drop_clause;
+} tsetlin_classifier_t;
+
+typedef struct {
+  tsetlin_classifier_t encoder;
+  tsetlin_classifier_t decoder;
+} tsetlin_autoencoder_t;
+
+typedef struct {
+  tsetlin_classifier_t classifier;
+} tsetlin_regressor_t;
+
+typedef struct {
+  tsetlin_type_t type;
+  union {
+    tsetlin_classifier_t *classifier;
+    tsetlin_autoencoder_t *autoencoder;
+    tsetlin_regressor_t *regressor;
+  };
 } tsetlin_t;
 
 #define tm_state_idx_counts(tm, class, clause, la_chunk) \
@@ -83,7 +107,7 @@ static inline int normal (double mean, double variance)
   return (int) round(mean + sqrt(variance) * n1);
 }
 
-static inline void tm_initialize_random_streams (tsetlin_t *tm, double specificity)
+static inline void tm_initialize_random_streams (tsetlin_classifier_t *tm, double specificity)
 {
   memset((*tm).feedback_to_la, 0, tm->la_chunks*sizeof(unsigned int));
   long int n = 2 * tm->features;
@@ -99,7 +123,7 @@ static inline void tm_initialize_random_streams (tsetlin_t *tm, double specifici
   }
 }
 
-static inline void tm_inc (tsetlin_t *tm, unsigned int class, unsigned int clause, unsigned int chunk, unsigned int active)
+static inline void tm_inc (tsetlin_classifier_t *tm, unsigned int class, unsigned int clause, unsigned int chunk, unsigned int active)
 {
   unsigned int m = tm->state_bits - 1;
   unsigned int *counts = tm_state_idx_counts(tm, class, clause, chunk);
@@ -119,7 +143,7 @@ static inline void tm_inc (tsetlin_t *tm, unsigned int class, unsigned int claus
   actions[chunk] |= carry;
 }
 
-static inline void tm_dec (tsetlin_t *tm, unsigned int class, unsigned int clause, unsigned int chunk, unsigned int active)
+static inline void tm_dec (tsetlin_classifier_t *tm, unsigned int class, unsigned int clause, unsigned int chunk, unsigned int active)
 {
   unsigned int m = tm->state_bits - 1;
   unsigned int *counts = tm_state_idx_counts(tm, class, clause, chunk);
@@ -139,7 +163,7 @@ static inline void tm_dec (tsetlin_t *tm, unsigned int class, unsigned int claus
   actions[chunk] &= ~carry;
 }
 
-static inline long int sum_up_class_votes (tsetlin_t *tm, bool predict)
+static inline long int sum_up_class_votes (tsetlin_classifier_t *tm, bool predict)
 {
   long int class_sum = 0;
   unsigned int *output = tm->clause_output;
@@ -162,7 +186,7 @@ static inline long int sum_up_class_votes (tsetlin_t *tm, bool predict)
   return class_sum;
 }
 
-static inline void tm_calculate_clause_output (tsetlin_t *tm, unsigned int class, unsigned int *Xi, bool predict)
+static inline void tm_calculate_clause_output (tsetlin_classifier_t *tm, unsigned int class, unsigned int *Xi, bool predict)
 {
   unsigned int clauses = tm->clauses;
   unsigned int filter = tm->filter;
@@ -190,7 +214,7 @@ static inline void tm_calculate_clause_output (tsetlin_t *tm, unsigned int class
   }
 }
 
-static inline void tm_update (tsetlin_t *tm, unsigned int class, unsigned int *Xi, unsigned int target, double specificity)
+static inline void tm_update (tsetlin_classifier_t *tm, unsigned int class, unsigned int *Xi, unsigned int target, double specificity)
 {
   tm_calculate_clause_output(tm, class, Xi, false);
   long int tgt = target;
@@ -241,12 +265,12 @@ static inline void tm_update (tsetlin_t *tm, unsigned int class, unsigned int *X
   }
 }
 
-static inline int tm_score (tsetlin_t *tm, unsigned int class, unsigned int *Xi) {
+static inline int tm_score (tsetlin_classifier_t *tm, unsigned int class, unsigned int *Xi) {
   tm_calculate_clause_output(tm, class, Xi, true);
   return sum_up_class_votes(tm, true);
 }
 
-static inline unsigned int mc_tm_predict (tsetlin_t *tm, unsigned int *X)
+static inline unsigned int mc_tm_predict (tsetlin_classifier_t *tm, unsigned int *X)
 {
   unsigned int m = tm->classes;
   unsigned int max_class = 0;
@@ -261,7 +285,7 @@ static inline unsigned int mc_tm_predict (tsetlin_t *tm, unsigned int *X)
   return max_class;
 }
 
-static inline void mc_tm_update (tsetlin_t *tm, unsigned int *Xi, unsigned int target_class, double specificity)
+static inline void mc_tm_update (tsetlin_classifier_t *tm, unsigned int *Xi, unsigned int target_class, double specificity)
 {
   tm_update(tm, target_class, Xi, 1, specificity);
   unsigned int negative_target_class = (unsigned int) fast_rand() % tm->classes;
@@ -270,7 +294,7 @@ static inline void mc_tm_update (tsetlin_t *tm, unsigned int *Xi, unsigned int t
   tm_update(tm, negative_target_class, Xi, 0, specificity);
 }
 
-static inline void mc_tm_initialize_drop_clause (tsetlin_t *tm, double drop_clause)
+static inline void mc_tm_initialize_drop_clause (tsetlin_classifier_t *tm, double drop_clause)
 {
   memset(tm->drop_clause, 0, sizeof(unsigned int) * tm->clause_chunks);
   for (unsigned int i = 0; i < tm->clause_chunks; i ++)
@@ -279,14 +303,9 @@ static inline void mc_tm_initialize_drop_clause (tsetlin_t *tm, double drop_clau
         tm->drop_clause[i] |= (1 << j);
 }
 
-tsetlin_t **tk_tsetlin_peekp (lua_State *L, int i)
-{
-  return (tsetlin_t **) luaL_checkudata(L, i, TK_TSETLIN_MT);
-}
-
 tsetlin_t *tk_tsetlin_peek (lua_State *L, int i)
 {
-  return *tk_tsetlin_peekp(L, i);
+  return (tsetlin_t *) luaL_checkudata(L, i, TK_TSETLIN_MT);
 }
 
 static inline unsigned int tk_tsetlin_checkunsigned (lua_State *L, int i)
@@ -313,13 +332,8 @@ static inline void tk_tsetlin_register (lua_State *L, luaL_Reg *regs, int nup)
   lua_pop(L, nup);
 }
 
-static inline int tk_tsetlin_create (lua_State *L)
+static inline int tk_tsetlin_create_classifier (lua_State *L, tsetlin_classifier_t *tm)
 {
-  lua_settop(L, 6);
-  tsetlin_t *tm;
-  tm = (void *)malloc(sizeof(tsetlin_t));
-  if (!tm)
-    luaL_error(L, "error in malloc during creation");
   tm->classes = tk_tsetlin_checkunsigned(L, 1);
   tm->features = tk_tsetlin_checkunsigned(L, 2);
   tm->clauses = tk_tsetlin_checkunsigned(L, 3);
@@ -350,46 +364,150 @@ static inline int tk_tsetlin_create (lua_State *L)
         for (unsigned int b = 0; b < m; b ++)
           counts[b] = ~0U;
       }
-  tsetlin_t **tmp = (tsetlin_t **)
-    lua_newuserdata(L, sizeof(tsetlin_t *));
-  *tmp = tm;
-  luaL_getmetatable(L, TK_TSETLIN_MT);
-  lua_setmetatable(L, -2);
-  return 1;
+  return 0;
 }
 
-static inline int tk_tsetlin_destroy (lua_State *L)
+static inline int tk_tsetlin_create_autoencoder (lua_State *L, tsetlin_autoencoder_t *tm)
 {
-  lua_settop(L, 1);
-  tsetlin_t **tmp = tk_tsetlin_peekp(L, 1);
-  tsetlin_t *tm = *tmp;
-  if (tm == NULL)
+  // TODO
+  return 0;
+}
+
+static inline int tk_tsetlin_create_regressor (lua_State *L, tsetlin_regressor_t *tm)
+{
+  // TODO
+  return 0;
+}
+
+static inline int tk_tsetlin_create (lua_State *L)
+{
+  const char *type = luaL_checkstring(L, 1);
+  if (!strcmp(type, "classifier")) {
+
+    lua_remove(L, 1);
+    tsetlin_t *tm = lua_newuserdata(L, sizeof(tsetlin_t *));
+    if (!tm) goto err_mem;
+    luaL_getmetatable(L, TK_TSETLIN_MT);
+    lua_setmetatable(L, -2);
+    tm->type = TM_CLASSIFIER;
+    tm->classifier = (void *)malloc(sizeof(tsetlin_classifier_t));
+    if (!tm->classifier) goto err_mem;
+    tk_tsetlin_create_classifier(L, tm->classifier);
+    return 1;
+
+  } else if (!strcmp(type, "autoencoder")) {
+
+    lua_remove(L, 1);
+    tsetlin_t *tm = lua_newuserdata(L, sizeof(tsetlin_t *));
+    if (!tm) goto err_mem;
+    luaL_getmetatable(L, TK_TSETLIN_MT);
+    lua_setmetatable(L, -2);
+    tm->type = TM_AUTOENCODER;
+    tm->autoencoder = (void *)malloc(sizeof(tsetlin_autoencoder_t));
+    if (!tm->autoencoder) goto err_mem;
+    tk_tsetlin_create_autoencoder(L, tm->autoencoder);
+    return 1;
+
+  } else if (!strcmp(type, "regressor")) {
+
+    lua_remove(L, 1);
+    tsetlin_t *tm = lua_newuserdata(L, sizeof(tsetlin_t *));
+    if (!tm) goto err_mem;
+    luaL_getmetatable(L, TK_TSETLIN_MT);
+    lua_setmetatable(L, -2);
+    tm->type = TM_REGRESSOR;
+    tm->regressor = (void *)malloc(sizeof(tsetlin_regressor_t));
+    if (!tm->regressor) goto err_mem;
+    tk_tsetlin_create_regressor(L, tm->regressor);
+    return 1;
+
+  } else {
+
+    luaL_error(L, "unexpected tsetlin machine type in create");
     return 0;
+
+  }
+
+err_mem:
+  return luaL_error(L, "error in malloc during creation");
+}
+
+static inline void tk_tsetlin_destroy_classifier (tsetlin_classifier_t *tm)
+{
+  if (tm == NULL)
+    return;
   free(tm->ta_state);
   free(tm->actions);
   free(tm->clause_output);
   free(tm->drop_clause);
   free(tm->feedback_to_la);
   free(tm->feedback_to_clauses);
-  free(tm);
-  *tmp = NULL;
+}
+
+static inline int tk_tsetlin_destroy (lua_State *L)
+{
+  lua_settop(L, 1);
+  tsetlin_t *tm = (tsetlin_t *) tk_tsetlin_peek(L, 1);
+  switch (tm->type) {
+    case TM_CLASSIFIER:
+      tk_tsetlin_destroy_classifier(tm->classifier);
+      free(tm->classifier);
+      break;
+    case TM_AUTOENCODER:
+      tk_tsetlin_destroy_classifier(&tm->autoencoder->encoder);
+      tk_tsetlin_destroy_classifier(&tm->autoencoder->decoder);
+      free(tm->autoencoder);
+      break;
+    case TM_REGRESSOR:
+      tk_tsetlin_destroy_classifier(&tm->regressor->classifier);
+      free(tm->regressor);
+      break;
+    default:
+      return luaL_error(L, "unexpected tsetlin machine type in destroy");
+  }
   return 0;
 }
 
-static inline int tk_tsetlin_predict (lua_State *L)
+static inline int tk_tsetlin_predict_classifier (lua_State *L, tsetlin_classifier_t *tm)
 {
-  lua_settop(L, 3);
-  tsetlin_t *tm = tk_tsetlin_peek(L, 1);
+  lua_settop(L, 2);
   const char *bm = luaL_checkstring(L, 2);
   unsigned int class = mc_tm_predict(tm, (unsigned int *) bm);
   lua_pushinteger(L, class);
   return 1;
 }
 
-static inline int tk_tsetlin_update (lua_State *L)
+static inline int tk_tsetlin_predict_autoencoder (lua_State *L, tsetlin_autoencoder_t *tm)
+{
+  // TODO
+  return 0;
+}
+
+static inline int tk_tsetlin_predict_regressor (lua_State *L, tsetlin_regressor_t *tm)
+{
+  // TODO
+  return 0;
+}
+
+static inline int tk_tsetlin_predict (lua_State *L)
+{
+  tsetlin_t *tm = (tsetlin_t *) tk_tsetlin_peek(L, 1);
+  switch (tm->type) {
+    case TM_CLASSIFIER:
+      return tk_tsetlin_predict_classifier(L, tm->classifier);
+    case TM_AUTOENCODER:
+      return tk_tsetlin_predict_autoencoder(L, tm->autoencoder);
+    case TM_REGRESSOR:
+      return tk_tsetlin_predict_regressor(L, tm->regressor);
+    default:
+      return luaL_error(L, "unexpected tsetlin machine type in predict");
+  }
+  return 0;
+}
+
+static inline int tk_tsetlin_update_classifier (lua_State *L, tsetlin_classifier_t *tm)
 {
   lua_settop(L, 5);
-  tsetlin_t *tm = tk_tsetlin_peek(L, 1);
   const char *bm = luaL_checkstring(L, 2);
   lua_Integer tgt = luaL_checkinteger(L, 3);
   if (tgt < 0)
@@ -401,10 +519,37 @@ static inline int tk_tsetlin_update (lua_State *L)
   return 0;
 }
 
-static inline int tk_tsetlin_train (lua_State *L)
+static inline int tk_tsetlin_update_autoencoder (lua_State *L, tsetlin_autoencoder_t *tm)
+{
+  // TODO
+  return 0;
+}
+
+static inline int tk_tsetlin_update_regressor (lua_State *L, tsetlin_regressor_t *tm)
+{
+  // TODO
+  return 0;
+}
+
+static inline int tk_tsetlin_update (lua_State *L)
+{
+  tsetlin_t *tm = (tsetlin_t *) tk_tsetlin_peek(L, 1);
+  switch (tm->type) {
+    case TM_CLASSIFIER:
+      return tk_tsetlin_update_classifier(L, tm->classifier);
+    case TM_AUTOENCODER:
+      return tk_tsetlin_update_autoencoder(L, tm->autoencoder);
+    case TM_REGRESSOR:
+      return tk_tsetlin_update_regressor(L, tm->regressor);
+    default:
+      return luaL_error(L, "unexpected tsetlin machine type in update");
+  }
+  return 0;
+}
+
+static inline int tk_tsetlin_train_classifier (lua_State *L, tsetlin_classifier_t *tm)
 {
   lua_settop(L, 6);
-  tsetlin_t *tm = tk_tsetlin_peek(L, 1);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *ss = (unsigned int *) luaL_checkstring(L, 4);
@@ -416,10 +561,36 @@ static inline int tk_tsetlin_train (lua_State *L)
   return 0;
 }
 
-static inline int tk_tsetlin_evaluate (lua_State *L)
+static inline int tk_tsetlin_train_autoencoder (lua_State *L, tsetlin_autoencoder_t *tm)
+{
+  // TODO
+  return 0;
+}
+
+static inline int tk_tsetlin_train_regressor (lua_State *L, tsetlin_regressor_t *tm)
+{
+  // TODO
+  return 0;
+}
+
+static inline int tk_tsetlin_train (lua_State *L)
+{
+  tsetlin_t *tm = tk_tsetlin_peek(L, 1);
+  switch (tm->type) {
+    case TM_CLASSIFIER:
+      return tk_tsetlin_train_classifier(L, tm->classifier);
+    case TM_AUTOENCODER:
+      return tk_tsetlin_train_autoencoder(L, tm->autoencoder);
+    case TM_REGRESSOR:
+      return tk_tsetlin_train_regressor(L, tm->regressor);
+    default:
+      return luaL_error(L, "unexpected tsetlin machine type in train");
+  }
+}
+
+static inline int tk_tsetlin_evaluate_classifier (lua_State *L, tsetlin_classifier_t *tm)
 {
   lua_settop(L, 5);
-  tsetlin_t *tm = tk_tsetlin_peek(L, 1);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *ss = (unsigned int *) luaL_checkstring(L, 4);
@@ -494,6 +665,52 @@ static inline int tk_tsetlin_evaluate (lua_State *L)
   }
 }
 
+static inline int tk_tsetlin_evaluate_autoencoder (lua_State *L, tsetlin_autoencoder_t *tm)
+{
+  // TODO
+  return 0;
+}
+
+static inline int tk_tsetlin_evaluate_regressor (lua_State *L, tsetlin_regressor_t *tm)
+{
+  // TODO
+  return 0;
+}
+
+static inline int tk_tsetlin_evaluate (lua_State *L)
+{
+  tsetlin_t *tm = tk_tsetlin_peek(L, 1);
+  switch (tm->type) {
+    case TM_CLASSIFIER:
+      return tk_tsetlin_evaluate_classifier(L, tm->classifier);
+    case TM_AUTOENCODER:
+      return tk_tsetlin_evaluate_autoencoder(L, tm->autoencoder);
+    case TM_REGRESSOR:
+      return tk_tsetlin_evaluate_regressor(L, tm->regressor);
+    default:
+      return luaL_error(L, "unexpected tsetlin machine type in evaluate");
+  }
+}
+
+static inline int tk_tsetlin_type (lua_State *L)
+{
+  tsetlin_t *tm = tk_tsetlin_peek(L, 1);
+  switch (tm->type) {
+    case TM_CLASSIFIER:
+      lua_pushstring(L, "classifier");
+      break;
+    case TM_AUTOENCODER:
+      lua_pushstring(L, "autoencoder");
+      break;
+    case TM_REGRESSOR:
+      lua_pushstring(L, "regressor");
+      break;
+    default:
+      return luaL_error(L, "unexpected tsetlin machine type in type");
+  }
+  return 1;
+}
+
 static luaL_Reg tk_tsetlin_fns[] =
 {
   { "create", tk_tsetlin_create },
@@ -502,6 +719,7 @@ static luaL_Reg tk_tsetlin_fns[] =
   { "predict", tk_tsetlin_predict },
   { "train", tk_tsetlin_train },
   { "evaluate", tk_tsetlin_evaluate },
+  { "type", tk_tsetlin_type },
   { NULL, NULL }
 };
 
