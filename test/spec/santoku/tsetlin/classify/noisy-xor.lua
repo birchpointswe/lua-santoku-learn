@@ -76,7 +76,7 @@ test("tsetlin", function ()
   local train_problems_packed, train_solutions_packed = pack_data(train_problems, train_solutions)
   local test_problems_packed, test_solutions_packed = pack_data(test_problems, test_solutions)
 
-  local t = tm.create(CLASSES, FEATURES, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
+  local t = tm.classifier(CLASSES, FEATURES, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
 
   local times = {}
 

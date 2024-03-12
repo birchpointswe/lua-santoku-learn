@@ -17,7 +17,7 @@ local env = {
     cflags = "-fopt-info-all=optimize.txt",
     dependencies = {
       "luacov == 0.15.0-1",
-      "santoku-bitmap == 0.0.5-1",
+      "santoku-bitmap == 0.0.6-1",
       "santoku-matrix == 0.0.5-1",
       "santoku-fs == 0.0.30-1",
     }
