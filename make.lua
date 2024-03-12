@@ -1,11 +1,11 @@
 local env = {
 
   name = "santoku-tsetlin",
-  version = "0.0.17-1",
+  version = "0.0.18-1",
   variable_prefix = "TK_TSETLIN",
   public = true,
 
-  cflags = "-Ofast -march=native -ffast-math -Wall -Wextra -Wsign-compare -Wsign-conversion -Wstrict-overflow -Wpointer-sign -fopt-info-all=optimize.txt",
+  cflags = "-Ofast -march=native -ffast-math -Wall -Wextra -Wsign-compare -Wsign-conversion -Wstrict-overflow -Wpointer-sign",
   ldflags = "-Ofast",
 
   dependencies = {
@@ -14,6 +14,7 @@ local env = {
   },
 
   test = {
+    cflags = "-fopt-info-all=optimize.txt",
     dependencies = {
       "luacov == 0.15.0-1",
       "santoku-bitmap == 0.0.5-1",
