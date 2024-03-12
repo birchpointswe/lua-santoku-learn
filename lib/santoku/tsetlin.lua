@@ -2,7 +2,7 @@ local tm = require("santoku.tsetlin.capi")
 local tm_evaluate = tm.evaluate
 
 local tbl = require("santoku.table")
-local t_assign = tbl.assign
+local t_merge = tbl.merge
 
 local arr = require("santoku.array")
 local a_sort = arr.sort
@@ -40,6 +40,6 @@ local function evaluate (t, n, ps, ss, track_stats)
 
 end
 
-return t_assign({
+return t_merge({
   evaluate = evaluate,
-}, tm, false)
+}, tm)
