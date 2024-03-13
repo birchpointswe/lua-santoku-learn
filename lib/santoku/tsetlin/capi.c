@@ -269,7 +269,8 @@ static inline void tm_update (tsetlin_classifier_t *tm, unsigned int class, unsi
 
 static inline int tm_score (tsetlin_classifier_t *tm, unsigned int class, unsigned int *Xi) {
   tm_calculate_clause_output(tm, class, Xi, true);
-  return sum_up_class_votes(tm, true);
+  int r = sum_up_class_votes(tm, true); 
+  return r;
 }
 
 static inline unsigned int mc_tm_predict (tsetlin_classifier_t *tm, unsigned int *X)
@@ -312,6 +313,8 @@ static inline void ae_tm_decode (tsetlin_autoencoder_t *tm)
     else
       decoding[chunk] &= ~(1U << pos);
   }
+
+  decoding[decoder_classes / (sizeof(unsigned int) * CHAR_BIT)] &= tm->encoder.filter;
 }
 
 static inline void ae_tm_encode (tsetlin_autoencoder_t *tm, unsigned int *input)
@@ -329,6 +332,8 @@ static inline void ae_tm_encode (tsetlin_autoencoder_t *tm, unsigned int *input)
     else
       encoding[chunk] &= ~(1U << pos);
   }
+
+  encoding[encoder_classes / (sizeof(unsigned int) * CHAR_BIT)] &= tm->decoder.filter;
 }
 
 static inline void ae_tm_update (tsetlin_autoencoder_t *tm, unsigned int *input, double specificity)
@@ -463,14 +468,14 @@ static inline int tk_tsetlin_create_autoencoder (lua_State *L, tsetlin_autoencod
   unsigned int state_bits = tk_tsetlin_checkunsigned(L, 4);
   unsigned int threshold = tk_tsetlin_checkunsigned(L, 5);
   bool boost_true_positive = tk_tsetlin_checkboolean(L, 6);
-  tm->encoding = malloc(encoded_bits / sizeof(unsigned int) * CHAR_BIT);
-  tm->decoding = malloc((2 * features - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1);
   if (!tm->encoding)
     luaL_error(L, "error in malloc during creation of autoencoder");
   tk_tsetlin_init_classifier(L, &tm->encoder,
       encoded_bits, features, clauses, state_bits, threshold, boost_true_positive);
   tk_tsetlin_init_classifier(L, &tm->decoder,
       features, encoded_bits, clauses, state_bits, threshold, boost_true_positive);
+  tm->encoding = malloc(sizeof(unsigned int) * tm->decoder.input_chunks);
+  tm->decoding = malloc(sizeof(unsigned int) * tm->encoder.input_chunks);
   return 0;
 }
 
