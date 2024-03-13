@@ -1,8 +1,9 @@
 # Now
 
-- NEON, AVX, AVX-512
-- Faster initialize random streams, initialize drop clause
-- Experiment with data layout for better cache performance
+- Stacked auto-encoders, configurable layers
+- Regressor
+- Threadpool-based classifier, all classifiers share the same threadpool in the
+  autoencoder
 
 - Evaluate without malloc/etc consider using caller-passed tables or other
   data structures to store evaluate results
