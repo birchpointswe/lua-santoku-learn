@@ -269,7 +269,7 @@ static inline void tm_update (tsetlin_classifier_t *tm, unsigned int class, unsi
 
 static inline int tm_score (tsetlin_classifier_t *tm, unsigned int class, unsigned int *Xi) {
   tm_calculate_clause_output(tm, class, Xi, true);
-  int r = sum_up_class_votes(tm, true); 
+  int r = sum_up_class_votes(tm, true);
   return r;
 }
 
@@ -479,7 +479,7 @@ static inline int tk_tsetlin_create_autoencoder (lua_State *L, tsetlin_autoencod
   return 0;
 }
 
-static inline int tk_tsetlin_create_regressor (lua_State *L, tsetlin_regressor_t *tm)
+static inline int tk_tsetlin_create_regressor (lua_State *L, tsetlin_regressor_t *)
 {
   // TODO
   luaL_error(L, "unimplemented: create regressor");
@@ -595,7 +595,7 @@ static inline int tk_tsetlin_predict_autoencoder (lua_State *L, tsetlin_autoenco
   return 1;
 }
 
-static inline int tk_tsetlin_predict_regressor (lua_State *L, tsetlin_regressor_t *tm)
+static inline int tk_tsetlin_predict_regressor (lua_State *L, tsetlin_regressor_t *)
 {
   // TODO
   luaL_error(L, "unimplemented: predict regressor");
@@ -644,7 +644,7 @@ static inline int tk_tsetlin_update_autoencoder (lua_State *L, tsetlin_autoencod
   return 0;
 }
 
-static inline int tk_tsetlin_update_regressor (lua_State *L, tsetlin_regressor_t *tm)
+static inline int tk_tsetlin_update_regressor (lua_State *L, tsetlin_regressor_t *)
 {
   // TODO
   luaL_error(L, "unimplemented: update regressor");
@@ -697,7 +697,7 @@ static inline int tk_tsetlin_train_autoencoder (lua_State *L, tsetlin_autoencode
   return 0;
 }
 
-static inline int tk_tsetlin_train_regressor (lua_State *L, tsetlin_regressor_t *tm)
+static inline int tk_tsetlin_train_regressor (lua_State *L, tsetlin_regressor_t *)
 {
   // TODO
   luaL_error(L, "unimplemented: train regressor");
@@ -833,7 +833,7 @@ static inline int tk_tsetlin_evaluate_autoencoder (lua_State *L, tsetlin_autoenc
   return 1;
 }
 
-static inline int tk_tsetlin_evaluate_regressor (lua_State *L, tsetlin_regressor_t *tm)
+static inline int tk_tsetlin_evaluate_regressor (lua_State *L, tsetlin_regressor_t *)
 {
   // TODO
   luaL_error(L, "unimplemented: evaluate regressor");
