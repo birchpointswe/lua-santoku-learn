@@ -46,7 +46,7 @@ local function evaluate (t, ...)
 
   else
 
-    return tm_evaluate(t)
+    return tm_evaluate(t, ...)
 
   end
 
@@ -67,5 +67,6 @@ end
 return t_merge({
   evaluate = evaluate,
   classifier = classifier,
+  autoencoder = autoencoder,
   regressor = regressor,
 }, tm)
