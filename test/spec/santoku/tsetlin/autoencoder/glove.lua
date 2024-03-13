@@ -108,7 +108,7 @@ test("tsetlin", function ()
     tm.train(t, n_train, train, SPECIFICITY, DROP_CLAUSE)
     local duration = os.clock() - start
 
-    if epoch % EVALUATE_EVERY == 0 then
+    if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
       local test_score = tm.evaluate(t, n_test, test)
       local train_score = tm.evaluate(t, n_train, train)
       str.printf("Epoch\t%-4d\tTime\t%f\tTest\t%4.2f\tTrain\t%4.2f\n", epoch, duration, test_score, train_score)
