@@ -806,41 +806,25 @@ static inline unsigned int hamming (unsigned int *a, unsigned int *b, unsigned i
 static inline int tk_tsetlin_evaluate_autoencoder (lua_State *L, tsetlin_autoencoder_t *tm)
 {
   lua_settop(L, 3);
-  fprintf(stderr, "test 1\n");
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
-  fprintf(stderr, "test 2\n");
   unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
-  fprintf(stderr, "test 3\n");
   tsetlin_classifier_t *encoder = &tm->encoder;
-  fprintf(stderr, "test 4\n");
   unsigned int *decoding = tm->decoding;
-  fprintf(stderr, "test 5\n");
   unsigned int input_chunks = encoder->input_chunks;
-  fprintf(stderr, "test 6\n");
   unsigned int features = encoder->features;
-  fprintf(stderr, "test 7\n");
 
   long unsigned int total_bits = n * features * 2 * CHAR_BIT;
-  fprintf(stderr, "test 8\n");
   long unsigned int total_diff = 0;
-  fprintf(stderr, "test 9\n");
 
   for (unsigned int i = 0; i < n; i ++)
   {
-    fprintf(stderr, "test 10\n");
     unsigned int *input = &ps[i * input_chunks];
-    fprintf(stderr, "test 11\n");
     ae_tm_encode(tm, input);
-    fprintf(stderr, "test 12\n");
     ae_tm_decode(tm);
-    fprintf(stderr, "test 13\n");
     total_diff += hamming(input, decoding, input_chunks);
-    fprintf(stderr, "test 14\n");
   }
 
-  fprintf(stderr, "test 15\n");
   lua_pushnumber(L, (double) (total_bits - total_diff) / total_bits);
-  fprintf(stderr, "test 16\n");
   return 1;
 }
 
