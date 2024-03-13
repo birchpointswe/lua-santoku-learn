@@ -3,7 +3,6 @@ local test = require("santoku.test")
 local tm = require("santoku.tsetlin")
 local booleanizer = require("santoku.tsetlin.booleanizer")
 local bm = require("santoku.bitmap")
-local mtx = require("santoku.matrix")
 local it = require("santoku.iter")
 local fs = require("santoku.fs")
 local str = require("santoku.string")
@@ -12,18 +11,18 @@ local rand = require("santoku.random")
 local num = require("santoku.num")
 local err = require("santoku.error")
 
-local ENCODED_BITS = 1024 * 8 -- 1kb in bits
-local THRESHOLD_LEVELS = 10
+local ENCODED_BITS = 10
+local THRESHOLD_LEVELS = 2
 local TRAIN_TEST_RATIO = 0.5
 
-local CLAUSES = 200
+local CLAUSES = 40
 local STATE_BITS = 8
-local THRESHOLD = 40
-local SPECIFICITY = 3.9
-local DROP_CLAUSE = 0.85
+local THRESHOLD = 10
+local SPECIFICITY = 2
+local DROP_CLAUSE = 0.75
 local BOOST_TRUE_POSITIVE = false
 
-local MAX_RECORDS = nil
+local MAX_RECORDS = 100
 local MAX_EPOCHS = 10
 
 local function read_data (fp, max)
@@ -32,6 +31,12 @@ local function read_data (fp, max)
   local bits = {}
   local observations = {}
   local n_dims = nil
+
+  local lines = fs.lines(fp)
+
+  if max then
+    lines = it.take(max, lines)
+  end
 
   local data = it.collect(it.map(function (l, s, e)
 
@@ -49,7 +54,7 @@ local function read_data (fp, max)
 
     return floats
 
-  end, fs.lines(fp)))
+  end, lines))
 
   local thresholds = booleanizer.thresholds(observations, THRESHOLD_LEVELS)
 
@@ -58,18 +63,18 @@ local function read_data (fp, max)
       for k = 1, #thresholds do
         local t = thresholds[k]
         if data[i][j] <= t.value then
-          bits[t.bit] = true
-          bits[t.bit + #thresholds] = false
+          bits[(j - 1) * #thresholds * 2 + t.bit] = true
+          bits[(j - 1) * #thresholds * 2 + t.bit + #thresholds] = false
         else
-          bits[t.bit] = false
-          bits[t.bit + #thresholds] = true
+          bits[(j - 1) * #thresholds * 2 + t.bit] = false
+          bits[(j - 1) * #thresholds * 2 + t.bit + #thresholds] = true
         end
       end
     end
-    arr.push(problems, bm.create(bits, #thresholds * 2))
+    arr.push(problems, bm.create(bits, 2 * #thresholds * n_dims))
   end
 
-  return problems, #thresholds
+  return problems, #thresholds * 2 * n_dims
 
 end
 
@@ -88,6 +93,10 @@ test("tsetlin", function ()
   local train = bm.raw_matrix(data, n_features * 2, 1, n_train)
   local test = bm.raw_matrix(data, n_features * 2, n_train + 1, #data)
 
+  print("Features", n_features)
+  print("Train", n_train)
+  print("Test", n_test)
+
   local t = tm.autoencoder(ENCODED_BITS, n_features, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
 
   local times = {}
@@ -101,7 +110,7 @@ test("tsetlin", function ()
     arr.push(times, stop - start)
     local avg_duration = arr.mean(times)
 
-    local test_score = tm.evaluate(t, n_test, test, epoch)
+    local test_score = tm.evaluate(t, n_test, test)
     local train_score = tm.evaluate(t, n_train, train)
 
     str.printf("Epoch\t%-4d\tTest\t%4.2f\tTrain\t%4.2f\tTime\t%f\n", epoch, test_score, train_score, avg_duration)
