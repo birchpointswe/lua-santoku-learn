@@ -94,7 +94,7 @@ test("tsetlin", function ()
   local train = bm.raw_matrix(data, n_features * 2, 1, n_train)
   local test = bm.raw_matrix(data, n_features * 2, n_train + 1, #data)
 
-  print("Input Features", n_features)
+  print("Input Features", n_features * 2)
   print("Encoded Features", ENCODED_BITS)
   print("Train", n_train)
   print("Test", n_test)
