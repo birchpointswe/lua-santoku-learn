@@ -11,7 +11,7 @@ local rand = require("santoku.random")
 local num = require("santoku.num")
 local err = require("santoku.error")
 
-local ENCODED_BITS = 10
+local ENCODED_BITS = 20
 local THRESHOLD_LEVELS = 2
 local TRAIN_TEST_RATIO = 0.5
 
@@ -22,7 +22,8 @@ local SPECIFICITY = 2
 local DROP_CLAUSE = 0.75
 local BOOST_TRUE_POSITIVE = false
 
-local MAX_RECORDS = 100
+local EVALUATE_EVERY = 5
+local MAX_RECORDS = 500
 local MAX_EPOCHS = 10
 
 local function read_data (fp, max)
@@ -74,7 +75,7 @@ local function read_data (fp, max)
     arr.push(problems, bm.create(bits, 2 * #thresholds * n_dims))
   end
 
-  return problems, #thresholds * 2 * n_dims
+  return problems, #thresholds * n_dims
 
 end
 
@@ -93,27 +94,27 @@ test("tsetlin", function ()
   local train = bm.raw_matrix(data, n_features * 2, 1, n_train)
   local test = bm.raw_matrix(data, n_features * 2, n_train + 1, #data)
 
-  print("Features", n_features)
+  print("Input Features", n_features)
+  print("Encoded Features", ENCODED_BITS)
   print("Train", n_train)
   print("Test", n_test)
 
   local t = tm.autoencoder(ENCODED_BITS, n_features, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
-
-  local times = {}
 
   print("Training")
   for epoch = 1, MAX_EPOCHS do
 
     local start = os.clock()
     tm.train(t, n_train, train, SPECIFICITY, DROP_CLAUSE)
-    local stop = os.clock()
-    arr.push(times, stop - start)
-    local avg_duration = arr.mean(times)
+    local duration = os.clock() - start
 
-    local test_score = tm.evaluate(t, n_test, test)
-    local train_score = tm.evaluate(t, n_train, train)
-
-    str.printf("Epoch\t%-4d\tTest\t%4.2f\tTrain\t%4.2f\tTime\t%f\n", epoch, test_score, train_score, avg_duration)
+    if epoch % EVALUATE_EVERY == 0 then
+      local test_score = tm.evaluate(t, n_test, test)
+      local train_score = tm.evaluate(t, n_train, train)
+      str.printf("Epoch\t%-4d\tTime\t%f\tTest\t%4.2f\tTrain\t%4.2f\n", epoch, duration, test_score, train_score)
+    else
+      str.printf("Epoch\t%-4d\tTime\t%f\n", epoch, duration)
+    end
 
   end
 
