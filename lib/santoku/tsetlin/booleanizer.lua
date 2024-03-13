@@ -10,7 +10,7 @@ local function thresholds (observations, samples, bit)
   arr.sort(thresholds)
   bit = bit or 1
   local n = 1
-  local step = num.floor(#thresholds / samples)
+  local step = num.ceil(#thresholds / samples)
   for i = 1, #thresholds, step do
     thresholds[n] = { value = thresholds[i], bit = bit }
     n = n + 1
