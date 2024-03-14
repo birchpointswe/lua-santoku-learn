@@ -60,6 +60,10 @@ local function autoencoder (...)
   return tm_create("autoencoder", ...)
 end
 
+local function encoder (...)
+  return tm_create("encoder", ...)
+end
+
 local function regressor (...)
   return tm_create("regressor", ...)
 end
@@ -68,5 +72,6 @@ return t_merge({
   evaluate = evaluate,
   classifier = classifier,
   autoencoder = autoencoder,
+  encoder = encoder,
   regressor = regressor,
 }, tm)
