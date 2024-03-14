@@ -407,7 +407,6 @@ static inline void en_tm_update (tsetlin_encoder_t *tm, unsigned int *a, unsigne
 {
   tsetlin_classifier_t *encoder = &tm->encoder;
   unsigned int classes = encoder->classes;
-  unsigned int input_chunks = encoder->input_chunks;
   unsigned int encoding_chunks = tm->encoding_chunks;
   unsigned int encoding_bits = tm->encoding_bits;
 
