@@ -408,6 +408,7 @@ static inline void en_tm_update (tsetlin_encoder_t *tm, unsigned int *a, unsigne
   tsetlin_classifier_t *encoder = &tm->encoder;
   unsigned int classes = encoder->classes;
   unsigned int input_chunks = encoder->input_chunks;
+  unsigned int encoding_chunks = tm->encoding_chunks;
   unsigned int encoding_bits = tm->encoding_bits;
 
   unsigned int *a_enc = malloc(encoding_bits * sizeof(unsigned int) / CHAR_BIT);
@@ -419,7 +420,7 @@ static inline void en_tm_update (tsetlin_encoder_t *tm, unsigned int *a, unsigne
   tm->encoding = b_enc;
   en_tm_encode(tm, b);
 
-  double similarity0 = (double) hamming(a_enc, b_enc, input_chunks) / (double) encoding_bits;
+  double similarity0 = (double) hamming(a_enc, b_enc, encoding_chunks) / (double) encoding_bits;
 
   if (similarity0 > similarity)
     for (unsigned int i = 0; i < classes; i ++) {
