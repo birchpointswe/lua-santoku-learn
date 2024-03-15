@@ -49,13 +49,13 @@ local TRAIN_TEST_RATIO = 0.5
 
 local CLAUSES = 40
 local STATE_BITS = 8
-local THRESHOLD = 40
+local THRESHOLD = 80
 local SPECIFICITY = 3
 local DROP_CLAUSE = 0.75
 local BOOST_TRUE_POSITIVE = true
 
 local EVALUATE_EVERY = 5
-local MAX_RECORDS = 2000
+local MAX_RECORDS = nil
 local MAX_EPOCHS = 1000
 
 local function read_data (fp, max)
