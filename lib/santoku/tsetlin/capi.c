@@ -428,6 +428,7 @@ static inline void en_tm_update (tsetlin_encoder_t *tm, unsigned int *a, unsigne
   en_tm_encode(tm, a, encoding_a);
   en_tm_encode(tm, b, encoding_b);
 
+  // double similarity0 = hamming(encoding_a, encoding_b, encoding_chunks) / (double) tm->encoding_bits;
   double similarity0 = jaccard(encoding_a, encoding_b, encoding_chunks);
 
   if (similarity0 < similarity) {
