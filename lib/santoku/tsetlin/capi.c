@@ -73,7 +73,8 @@ typedef struct {
   unsigned int encoding_bits;
   unsigned int encoding_chunks;
   unsigned int encoding_filter;
-  unsigned int *encoding;
+  unsigned int *encoding_a;
+  unsigned int *encoding_b;
   tsetlin_classifier_t encoder;
 } tsetlin_encoder_t;
 
@@ -117,6 +118,19 @@ static inline int normal (double mean, double variance)
   double u2 = (double) fast_rand() / UINT32_MAX;
   double n1 = sqrt(-2 * log(u1)) * sin(8 * atan(1) * u2);
   return (int) round(mean + sqrt(variance) * n1);
+}
+
+double jaccard (unsigned int *a, unsigned int *b, unsigned int n) {
+  int n_intersection = 0;
+  int n_union = 0;
+  for (unsigned int i = 0; i < n; i++) {
+    n_intersection += __builtin_popcount(a[i] & b[i]);
+    n_union += __builtin_popcount(a[i] | b[i]);
+  }
+  if (n_union == 0)
+    return 0.0;
+  else
+    return (double) n_intersection / n_union;
 }
 
 static inline unsigned int hamming (unsigned int *a, unsigned int *b, unsigned int n) {
@@ -358,10 +372,9 @@ static inline void ae_tm_encode (tsetlin_autoencoder_t *tm, unsigned int *input)
   encoding[encoder_classes / (sizeof(unsigned int) * CHAR_BIT)] &= tm->decoder.filter;
 }
 
-static inline void en_tm_encode (tsetlin_encoder_t *tm, unsigned int *input)
+static inline void en_tm_encode (tsetlin_encoder_t *tm, unsigned int *input, unsigned int *encoding)
 {
   unsigned int encoder_classes = tm->encoder.classes;
-  unsigned int *encoding = tm->encoding;
 
   for (unsigned int i = 0; i < encoder_classes; i ++)
   {
@@ -408,29 +421,42 @@ static inline void en_tm_update (tsetlin_encoder_t *tm, unsigned int *a, unsigne
   tsetlin_classifier_t *encoder = &tm->encoder;
   unsigned int classes = encoder->classes;
   unsigned int encoding_chunks = tm->encoding_chunks;
-  unsigned int encoding_bits = tm->encoding_bits;
 
-  unsigned int *a_enc = malloc(encoding_bits * sizeof(unsigned int) / CHAR_BIT);
-  unsigned int *b_enc = tm->encoding;
+  unsigned int *encoding_a = tm->encoding_a;
+  unsigned int *encoding_b = tm->encoding_b;
 
-  tm->encoding = a_enc;
-  en_tm_encode(tm, a);
+  en_tm_encode(tm, a, encoding_a);
+  en_tm_encode(tm, b, encoding_b);
 
-  tm->encoding = b_enc;
-  en_tm_encode(tm, b);
+  double similarity0 = jaccard(encoding_a, encoding_b, encoding_chunks);
 
-  double similarity0 = (double) hamming(a_enc, b_enc, encoding_chunks) / (double) encoding_bits;
+  if (similarity0 < similarity) {
 
-  if (similarity0 > similarity)
     for (unsigned int i = 0; i < classes; i ++) {
-      tm_update(encoder, i, a, 0, specificity);
-      tm_update(encoder, i, b, 0, specificity);
+      unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
+      unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
+      unsigned int bit_a = encoding_a[chunk] & (1 << pos);
+      unsigned int bit_b = encoding_b[chunk] & (1 << pos);
+      if (!bit_a && !bit_b) {
+        tm_update(encoder, i, a, 1, specificity);
+        tm_update(encoder, i, b, 1, specificity);
+      }
     }
-  else
+
+  } else if (similarity0 > similarity) {
+
     for (unsigned int i = 0; i < classes; i ++) {
-      tm_update(encoder, i, a, 1, specificity);
-      tm_update(encoder, i, b, 1, specificity);
+      unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
+      unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
+      unsigned int bit_a = encoding_a[chunk] & (1 << pos);
+      unsigned int bit_b = encoding_b[chunk] & (1 << pos);
+      if (bit_a && bit_b) {
+        tm_update(encoder, i, a, 0, specificity);
+        tm_update(encoder, i, b, 0, specificity);
+      }
     }
+
+  }
 }
 
 static inline void mc_tm_initialize_drop_clause (tsetlin_classifier_t *tm, double drop_clause)
@@ -562,12 +588,14 @@ static inline int tk_tsetlin_create_encoder (lua_State *L, tsetlin_encoder_t *tm
   bool boost_true_positive = tk_tsetlin_checkboolean(L, 6);
   tk_tsetlin_init_classifier(L, &tm->encoder,
       encoding_bits, features, clauses, state_bits, threshold, boost_true_positive);
+  tm->encoding_bits = encoding_bits;
   tm->encoding_chunks = (encoding_bits - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
-  tm->encoding = malloc(tm->encoding_chunks * sizeof(unsigned int) * CHAR_BIT);
+  tm->encoding_a = malloc(tm->encoding_chunks * sizeof(unsigned int) * CHAR_BIT);
+  tm->encoding_b = malloc(tm->encoding_chunks * sizeof(unsigned int) * CHAR_BIT);
   tm->encoding_filter = encoding_bits % (sizeof(unsigned int) * CHAR_BIT) != 0
     ? ~(((unsigned int) ~0) << (encoding_bits % (sizeof(unsigned int) * CHAR_BIT)))
     : (unsigned int) ~0;
-  if (!tm->encoding)
+  if (!(tm->encoding_a && tm->encoding_b))
     luaL_error(L, "error in malloc during creation of encoder");
   return 0;
 }
@@ -675,7 +703,8 @@ static inline int tk_tsetlin_destroy (lua_State *L)
       break;
     case TM_ENCODER:
       tk_tsetlin_destroy_classifier(&tm->encoder->encoder);
-      free(tm->encoder->encoding);
+      free(tm->encoder->encoding_a);
+      free(tm->encoder->encoding_b);
       free(tm->encoder);
       break;
     case TM_REGRESSOR:
@@ -710,8 +739,8 @@ static inline int tk_tsetlin_predict_encoder (lua_State *L, tsetlin_encoder_t *t
 {
   lua_settop(L, 2);
   unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
-  en_tm_encode(tm, bm);
-  lua_pushlstring(L, (char *) tm->encoding, sizeof(unsigned int) * tm->encoder.input_chunks);
+  en_tm_encode(tm, bm, tm->encoding_a);
+  lua_pushlstring(L, (char *) tm->encoding_a, sizeof(unsigned int) * tm->encoder.input_chunks);
   return 1;
 }
 
@@ -836,7 +865,7 @@ static inline int tk_tsetlin_train_autoencoder (lua_State *L, tsetlin_autoencode
 
 static inline int tk_tsetlin_train_encoder (lua_State *L, tsetlin_encoder_t *tm)
 {
-  lua_settop(L, 6);
+  lua_settop(L, 7);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *as = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *bs = (unsigned int *) luaL_checkstring(L, 4);
@@ -988,33 +1017,39 @@ static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *
   double *scores = (double *) luaL_checkstring(L, 5);
   tsetlin_classifier_t *encoder = &tm->encoder;
   unsigned int encoding_chunks = tm->encoding_chunks;
-  unsigned int encoding_bits = tm->encoding_bits;
   unsigned int input_chunks = encoder->input_chunks;
+
+  unsigned int n_high = 0;
+  unsigned int n_low = 0;
 
   double total_diff = 0;
 
-  unsigned int *a_enc = malloc(encoding_bits * sizeof(unsigned int) / CHAR_BIT);
-  unsigned int *b_enc = tm->encoding;
+  unsigned int *encoding_a = tm->encoding_a;
+  unsigned int *encoding_b = tm->encoding_b;
 
   for (unsigned int i = 0; i < n; i ++)
   {
-    tm->encoding = a_enc;
     unsigned int *a = &as[i * input_chunks];
-    en_tm_encode(tm, a);
+    en_tm_encode(tm, a, encoding_a);
 
-    tm->encoding = b_enc;
     unsigned int *b = &bs[i * input_chunks];
-    en_tm_encode(tm, b);
+    en_tm_encode(tm, b, encoding_b);
 
     double similarity = scores[i];
-    double similarity0 = (double) hamming(a_enc, b_enc, encoding_chunks) / (double) encoding_bits;
+    double similarity0 = jaccard(encoding_a, encoding_b, encoding_chunks);
 
     total_diff += fabs(similarity - similarity0);
+
+    if (similarity0 > similarity)
+      n_high ++;
+    else if (similarity0 < similarity)
+      n_low ++;
   }
 
-  free(a_enc);
-  lua_pushnumber(L, total_diff / n);
-  return 1;
+  lua_pushnumber(L, (double) (n - total_diff) / n);
+  lua_pushinteger(L, n_high);
+  lua_pushinteger(L, n_low);
+  return 3;
 }
 
 static inline int tk_tsetlin_evaluate_regressor (lua_State *L, tsetlin_regressor_t *)
