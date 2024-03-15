@@ -49,14 +49,14 @@ local TRAIN_TEST_RATIO = 0.5
 
 local CLAUSES = 40
 local STATE_BITS = 8
-local THRESHOLD = 10
-local SPECIFICITY = 2
+local THRESHOLD = 40
+local SPECIFICITY = 3
 local DROP_CLAUSE = 0.75
-local BOOST_TRUE_POSITIVE = false
+local BOOST_TRUE_POSITIVE = true
 
 local EVALUATE_EVERY = 5
-local MAX_RECORDS = nil
-local MAX_EPOCHS = 100
+local MAX_RECORDS = 2000
+local MAX_EPOCHS = 1000
 
 local function read_data (fp, max)
 
@@ -169,9 +169,9 @@ test("tsetlin", function ()
     local duration = os.clock() - start
 
     if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
-      local test_score = tm.evaluate(t, n_test, test_as, test_bs, test_scores)
+      local test_score, nh, nl = tm.evaluate(t, n_test, test_as, test_bs, test_scores)
       local train_score = tm.evaluate(t, n_train, train_as, train_bs, train_scores)
-      str.printf("Epoch\t%-4d\tTime\t%f\tTest\t%4.2f\tTrain\t%4.2f\n", epoch, duration, test_score, train_score)
+      str.printf("Epoch\t%-4d\tTime\t%f\tTest\t%4.2f\tTrain\t%4.2f\tHigh\t%d\tLow\t%d\n", epoch, duration, test_score, train_score, nh, nl)
     else
       str.printf("Epoch\t%-4d\tTime\t%f\n", epoch, duration)
     end
