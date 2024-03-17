@@ -1,20 +1,21 @@
 -- Step 1: Train a TM to convert a word embedding vector to a bitmap where
--- hamming distance approximates cosine similarity.
+-- jaccard similarity approximates cosine similarity.
 --
 -- Dataset & training:
 -- - Randomly sample a subset of vector pairs and calculate cosine similarity
--- - Run each vector through and calculate hamming distance
--- - Compare the hamming distance of the bitmaps to the cosine similarity of the
---   vectors
+-- - Run each vector through and calculate jaccard similarity
+-- - Compare the jaccard similarity of the bitmaps to the cosine similarity of
+--   the vectors
 -- - If too high, reinforce outputting 0s
 -- - If too low, reinforce outputting 1s
 --
 -- Testing:
 -- - Convert all word vectors to bitmaps, building a hash table from word to
---   bitmap (many words will have a hamming distance of zero, allowing for
+--   bitmap (many words will have a jaccard similarity of zero, allowing for
 --   re-use of bitmaps)
 -- - Evaluate sentence similarity using the sts-benchmark dataset, representing
---   sentences as a word-bitmap bloom filter and similarity as hamming distance
+--   sentences as a word-bitmap bloom filter and similarity as jaccard
+--   similarity
 
 -- Step 2: Train a TM to add semantic understanding to the sentence bloom
 -- filters using the sts-benchmark dataset
@@ -22,8 +23,8 @@
 -- Datset & training:
 -- - Convert the [sentence, sentence, score] records in the sts-benchmark
 --   dataset to [sentence-bloom, sentence-bloom, score]
--- - Perform the same training as in Step 1, this time comparing hamming
---   distance to the similarity score
+-- - Perform the same training as in Step 1, this time comparing jaccard
+--   similarity to the similarity score
 --
 -- Usage:
 -- - Evaluate sentence similarity as in Step 1, representing sentences as
