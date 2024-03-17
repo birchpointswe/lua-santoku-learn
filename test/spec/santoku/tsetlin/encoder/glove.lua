@@ -29,6 +29,7 @@
 
 
 
+
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local test = require("santoku.test")
 local tm = require("santoku.tsetlin")
