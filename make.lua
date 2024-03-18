@@ -1,7 +1,7 @@
 local env = {
 
   name = "santoku-tsetlin",
-  version = "0.0.20-1",
+  version = "0.0.21-1",
   variable_prefix = "TK_TSETLIN",
   public = true,
 
@@ -9,17 +9,17 @@ local env = {
   ldflags = "-Ofast",
 
   dependencies = {
-    "lua == 5.1",
-    "santoku == 0.0.203-1",
+    "lua >= 5.1",
+    "santoku >= 0.0.203-1",
   },
 
   test = {
     cflags = "-fopt-info-all=optimize.txt",
     dependencies = {
-      "luacov == 0.15.0-1",
-      "santoku-bitmap == 0.0.6-1",
-      "santoku-matrix == 0.0.7-1",
-      "santoku-fs == 0.0.30-1",
+      "luacov >= 0.15.0-1",
+      "santoku-bitmap >= 0.0.6-1",
+      "santoku-matrix >= 0.0.7-1",
+      "santoku-fs >= 0.0.30-1",
     }
   },
 
