@@ -416,7 +416,7 @@ static inline void ae_tm_update (tsetlin_autoencoder_t *tm, unsigned int *input,
   }
 }
 
-static inline void en_tm_update (tsetlin_encoder_t *tm, unsigned int *a, unsigned int *b, double similarity, double specificity)
+static inline void en_tm_update (tsetlin_encoder_t *tm, unsigned int *a, unsigned int *b, double similarity, double specificity, double update_pm)
 {
   tsetlin_classifier_t *encoder = &tm->encoder;
   unsigned int classes = encoder->classes;
@@ -430,6 +430,7 @@ static inline void en_tm_update (tsetlin_encoder_t *tm, unsigned int *a, unsigne
 
   // double similarity0 = hamming(encoding_a, encoding_b, encoding_chunks) / (double) tm->encoding_bits;
   double similarity0 = jaccard(encoding_a, encoding_b, encoding_chunks);
+  double update_p = fabs(similarity - similarity0) * update_pm;
 
   if (similarity0 < similarity) {
 
@@ -438,7 +439,7 @@ static inline void en_tm_update (tsetlin_encoder_t *tm, unsigned int *a, unsigne
       unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
       unsigned int bit_a = encoding_a[chunk] & (1 << pos);
       unsigned int bit_b = encoding_b[chunk] & (1 << pos);
-      if (!bit_a && !bit_b) {
+      if (!bit_a && !bit_b && (((float) fast_rand()) / ((float) UINT32_MAX) <= update_p)) {
         tm_update(encoder, i, a, 1, specificity);
         tm_update(encoder, i, b, 1, specificity);
       }
@@ -451,7 +452,7 @@ static inline void en_tm_update (tsetlin_encoder_t *tm, unsigned int *a, unsigne
       unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
       unsigned int bit_a = encoding_a[chunk] & (1 << pos);
       unsigned int bit_b = encoding_b[chunk] & (1 << pos);
-      if (bit_a && bit_b) {
+      if (bit_a && bit_b && (((float) fast_rand()) / ((float) UINT32_MAX) <= update_p)) {
         tm_update(encoder, i, a, 0, specificity);
         tm_update(encoder, i, b, 0, specificity);
       }
@@ -798,14 +799,15 @@ static inline int tk_tsetlin_update_autoencoder (lua_State *L, tsetlin_autoencod
 
 static inline int tk_tsetlin_update_encoder (lua_State *L, tsetlin_encoder_t *tm)
 {
-  lua_settop(L, 6);
+  lua_settop(L, 7);
   unsigned int *a = (unsigned int *) luaL_checkstring(L, 2);
   unsigned int *b = (unsigned int *) luaL_checkstring(L, 3);
   double expected = luaL_checknumber(L, 4);
   double specificity = luaL_checknumber(L, 5);
-  double drop_clause = luaL_optnumber(L, 6, 1);
+  double update_pm = luaL_checknumber(L, 6);
+  double drop_clause = luaL_optnumber(L, 7, 1);
   mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
-  en_tm_update(tm, a, b, expected, specificity);
+  en_tm_update(tm, a, b, expected, specificity, update_pm);
   return 0;
 }
 
@@ -866,19 +868,20 @@ static inline int tk_tsetlin_train_autoencoder (lua_State *L, tsetlin_autoencode
 
 static inline int tk_tsetlin_train_encoder (lua_State *L, tsetlin_encoder_t *tm)
 {
-  lua_settop(L, 7);
+  lua_settop(L, 8);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *as = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *bs = (unsigned int *) luaL_checkstring(L, 4);
   double *expected = (double *) luaL_checkstring(L, 5);
   double specificity = luaL_checknumber(L, 6);
-  double drop_clause = luaL_optnumber(L, 7, 1);
+  double update_pm = luaL_checknumber(L, 7);
+  double drop_clause = luaL_optnumber(L, 8, 1);
   unsigned int input_chunks = tm->encoder.input_chunks;
   mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
   for (unsigned int i = 0; i < n; i ++) {
     unsigned int *a = &as[i * input_chunks];
     unsigned int *b = &bs[i * input_chunks];
-    en_tm_update(tm, a, b, expected[i], specificity);
+    en_tm_update(tm, a, b, expected[i], specificity, update_pm);
   }
   return 0;
 }
