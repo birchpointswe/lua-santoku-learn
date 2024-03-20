@@ -44,20 +44,21 @@ local rand = require("santoku.random")
 local num = require("santoku.num")
 local err = require("santoku.error")
 
-local ENCODED_BITS = 64
+local ENCODED_BITS = 256
 local THRESHOLD_LEVELS = 10
-local TRAIN_TEST_RATIO = 0.5
+local TRAIN_TEST_RATIO = 0.1
 
 local CLAUSES = 40
 local STATE_BITS = 8
 local THRESHOLD = 80
 local SPECIFICITY = 3
+local UPDATE_PM = 2
 local DROP_CLAUSE = 0.75
 local BOOST_TRUE_POSITIVE = true
 
 local EVALUATE_EVERY = 5
 local MAX_RECORDS = nil
-local MAX_EPOCHS = 1000
+local MAX_EPOCHS = 50
 
 local function read_data (fp, max)
 
@@ -166,15 +167,17 @@ test("tsetlin", function ()
   for epoch = 1, MAX_EPOCHS do
 
     local start = os.clock()
-    tm.train(t, n_train, train_as, train_bs, train_scores, SPECIFICITY, DROP_CLAUSE)
+    tm.train(t, n_train, train_as, train_bs, train_scores, SPECIFICITY, UPDATE_PM, DROP_CLAUSE)
     local duration = os.clock() - start
 
     if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
       local test_score, nh, nl = tm.evaluate(t, n_test, test_as, test_bs, test_scores)
       local train_score = tm.evaluate(t, n_train, train_as, train_bs, train_scores)
-      str.printf("Epoch\t%-4d\tTime\t%f\tTest\t%4.2f\tTrain\t%4.2f\tHigh\t%d\tLow\t%d\n", epoch, duration, test_score, train_score, nh, nl)
+      str.printf("Epoch %-4d  Time %f  Test %4.2f  Train %4.2f  High %d  Low %d\n",
+        epoch, duration, test_score, train_score, nh, nl)
     else
-      str.printf("Epoch\t%-4d\tTime\t%f\n", epoch, duration)
+      str.printf("Epoch %-4d  Time %f\n",
+        epoch, duration)
     end
 
   end
