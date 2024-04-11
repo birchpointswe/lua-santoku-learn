@@ -324,13 +324,17 @@ static inline int tm_score (tsetlin_classifier_t *tm, unsigned int class, unsign
   return r;
 }
 
-static inline unsigned int mc_tm_predict (tsetlin_classifier_t *tm, unsigned int *X)
+static inline unsigned int mc_tm_predict (tsetlin_classifier_t *tm, unsigned int *X, long int *scores)
 {
   unsigned int m = tm->classes;
   unsigned int max_class = 0;
   long int max_class_sum = tm_score(tm, 0, X);
+  if (scores)
+    scores[0] = max_class_sum;
   for (long int i = 1; i < m; i ++) {
     long int class_sum = tm_score(tm, i, X);
+    if (scores)
+      scores[i] = class_sum;
     if (max_class_sum < class_sum) {
       max_class_sum = class_sum;
       max_class = i;
@@ -759,10 +763,21 @@ static inline int tk_tsetlin_destroy (lua_State *L)
 
 static inline int tk_tsetlin_predict_classifier (lua_State *L, tsetlin_classifier_t *tm)
 {
-  lua_settop(L, 2);
+  lua_settop(L, 3);
   unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
-  unsigned int class = mc_tm_predict(tm, bm);
-  lua_pushinteger(L, class);
+  bool all_scores = lua_toboolean(L, 3);
+  if (!all_scores) {
+    lua_pushinteger(L, mc_tm_predict(tm, bm, NULL));
+  } else {
+    long int scores[tm->classes];
+    mc_tm_predict(tm, bm, scores);
+    lua_newtable(L);
+    for (unsigned int i = 0; i < tm->classes; i ++) {
+      lua_pushinteger(L, i + 1);
+      lua_pushinteger(L, scores[i]);
+      lua_settable(L, -3);
+    }
+  }
   return 1;
 }
 
@@ -971,7 +986,7 @@ static inline int tk_tsetlin_evaluate_classifier (lua_State *L, tsetlin_classifi
   }
   for (unsigned int i = 0; i < n; i ++) {
     unsigned int expected = ss[i];
-    unsigned int predicted = mc_tm_predict(tm, &ps[i * tm->input_chunks]);
+    unsigned int predicted = mc_tm_predict(tm, &ps[i * tm->input_chunks], NULL);
     if (expected == predicted)
       correct ++;
     if (track_stats) {
