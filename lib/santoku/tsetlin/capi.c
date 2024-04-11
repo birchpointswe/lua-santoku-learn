@@ -1167,7 +1167,7 @@ static inline void tk_lua_fread (lua_State *L, void *data, size_t size, size_t m
   tk_lua_callmod(L, 3, 0, "santoku.error", "error");
 }
 
-static inline int _tk_tsetlin_persist_classifier (lua_State *L, tsetlin_classifier_t *tm, FILE *fh)
+static inline void _tk_tsetlin_persist_classifier (lua_State *L, tsetlin_classifier_t *tm, FILE *fh)
 {
   tk_lua_fwrite(L, &tm->classes, sizeof(tm->classes), 1, fh);
   tk_lua_fwrite(L, &tm->features, sizeof(tm->features), 1, fh);
@@ -1177,6 +1177,8 @@ static inline int _tk_tsetlin_persist_classifier (lua_State *L, tsetlin_classifi
   tk_lua_fwrite(L, &tm->boost_true_positive, sizeof(tm->boost_true_positive), 1, fh);
   tk_lua_fwrite(L, &tm->input_chunks, sizeof(tm->input_chunks), 1, fh);
   tk_lua_fwrite(L, &tm->clause_chunks, sizeof(tm->clause_chunks), 1, fh);
+  tk_lua_fwrite(L, &tm->state_chunks, sizeof(tm->state_chunks), 1, fh);
+  tk_lua_fwrite(L, &tm->action_chunks, sizeof(tm->action_chunks), 1, fh);
   tk_lua_fwrite(L, &tm->filter, sizeof(tm->filter), 1, fh);
   tk_lua_fwrite(L, tm->state, sizeof(*tm->state), tm->state_chunks, fh);
   tk_lua_fwrite(L, tm->actions, sizeof(*tm->actions), tm->action_chunks, fh);
@@ -1184,45 +1186,32 @@ static inline int _tk_tsetlin_persist_classifier (lua_State *L, tsetlin_classifi
   tk_lua_fwrite(L, tm->feedback_to_la, sizeof(*tm->feedback_to_la), tm->input_chunks, fh);
   tk_lua_fwrite(L, tm->feedback_to_clauses, sizeof(*tm->feedback_to_clauses), tm->clause_chunks, fh);
   tk_lua_fwrite(L, tm->drop_clause, sizeof(*tm->drop_clause), tm->clause_chunks, fh);
-  return 0;
 }
 
-static inline int tk_tsetlin_persist_classifier (lua_State *L, tsetlin_classifier_t *tm, const char *fp)
+static inline void tk_tsetlin_persist_classifier (lua_State *L, tsetlin_classifier_t *tm, FILE *fh)
 {
-  FILE *fh = tk_lua_fopen(L, fp, "w");
   _tk_tsetlin_persist_classifier(L, tm, fh);
-  tk_lua_fclose(L, fh);
-  return 0;
 }
 
-static inline int tk_tsetlin_persist_autoencoder (lua_State *L, tsetlin_autoencoder_t *tm, const char *fp)
+static inline void tk_tsetlin_persist_autoencoder (lua_State *L, tsetlin_autoencoder_t *tm, FILE *fh)
 {
-  FILE *fh = tk_lua_fopen(L, fp, "w");
   tk_lua_fwrite(L, &tm->encoding, sizeof(tm->encoding), 1, fh);
   tk_lua_fwrite(L, &tm->decoding, sizeof(tm->decoding), 1, fh);
   _tk_tsetlin_persist_classifier(L, &tm->encoder, fh);
   _tk_tsetlin_persist_classifier(L, &tm->decoder, fh);
-  tk_lua_fclose(L, fh);
-  return 0;
 }
 
-static inline int tk_tsetlin_persist_encoder (lua_State *L, tsetlin_encoder_t *tm, const char *fp)
+static inline void tk_tsetlin_persist_encoder (lua_State *L, tsetlin_encoder_t *tm, FILE *fh)
 {
-  FILE *fh = tk_lua_fopen(L, fp, "w");
   tk_lua_fwrite(L, &tm->encoding_bits, sizeof(tm->encoding_bits), 1, fh);
   tk_lua_fwrite(L, &tm->encoding_chunks, sizeof(tm->encoding_chunks), 1, fh);
   tk_lua_fwrite(L, &tm->encoding_filter, sizeof(tm->encoding_filter), 1, fh);
   _tk_tsetlin_persist_classifier(L, &tm->encoder, fh);
-  tk_lua_fclose(L, fh);
-  return 0;
 }
 
-static inline int tk_tsetlin_persist_regressor (lua_State *L, tsetlin_regressor_t *tm, const char *fp)
+static inline void tk_tsetlin_persist_regressor (lua_State *L, tsetlin_regressor_t *tm, FILE *fh)
 {
-  FILE *fh = tk_lua_fopen(L, fp, "w");
   _tk_tsetlin_persist_classifier(L, &tm->classifier, fh);
-  tk_lua_fclose(L, fh);
-  return 0;
 }
 
 static inline int tk_tsetlin_persist (lua_State *L)
@@ -1230,18 +1219,26 @@ static inline int tk_tsetlin_persist (lua_State *L)
   lua_settop(L, 2);
   tsetlin_t *tm = tk_tsetlin_peek(L, 1);
   const char *fp = luaL_checkstring(L, 2);
+  FILE *fh = tk_lua_fopen(L, fp, "w");
+  tk_lua_fwrite(L, &tm->type, sizeof(tm->type), 1, fh);
   switch (tm->type) {
     case TM_CLASSIFIER:
-      return tk_tsetlin_persist_classifier(L, tm->classifier, fp);
+      tk_tsetlin_persist_classifier(L, tm->classifier, fh);
+      break;
     case TM_AUTOENCODER:
-      return tk_tsetlin_persist_autoencoder(L, tm->autoencoder, fp);
+      tk_tsetlin_persist_autoencoder(L, tm->autoencoder, fh);
+      break;
     case TM_ENCODER:
-      return tk_tsetlin_persist_encoder(L, tm->encoder, fp);
+      tk_tsetlin_persist_encoder(L, tm->encoder, fh);
+      break;
     case TM_REGRESSOR:
-      return tk_tsetlin_persist_regressor(L, tm->regressor, fp);
+      tk_tsetlin_persist_regressor(L, tm->regressor, fh);
+      break;
     default:
       return luaL_error(L, "unexpected tsetlin machine type in persist");
   }
+  tk_lua_fclose(L, fh);
+  return 0;
 }
 
 static inline void _tk_tsetlin_load_classifier (lua_State *L, tsetlin_classifier_t *tm, FILE *fh)
@@ -1254,23 +1251,19 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tsetlin_classifier
   tk_lua_fread(L, &tm->boost_true_positive, sizeof(tm->boost_true_positive), 1, fh);
   tk_lua_fread(L, &tm->input_chunks, sizeof(tm->input_chunks), 1, fh);
   tk_lua_fread(L, &tm->clause_chunks, sizeof(tm->clause_chunks), 1, fh);
+  tk_lua_fread(L, &tm->state_chunks, sizeof(tm->state_chunks), 1, fh);
+  tk_lua_fread(L, &tm->action_chunks, sizeof(tm->action_chunks), 1, fh);
   tk_lua_fread(L, &tm->filter, sizeof(tm->filter), 1, fh);
-
   tm->state = malloc(sizeof(*tm->state) * tm->state_chunks);
   tk_lua_fread(L, tm->state, sizeof(*tm->state), tm->state_chunks, fh);
-
   tm->actions = malloc(sizeof(*tm->actions) * tm->action_chunks);
   tk_lua_fread(L, tm->actions, sizeof(*tm->actions), tm->action_chunks, fh);
-
   tm->clause_output = malloc(sizeof(*tm->clause_output) * tm->clause_chunks);
   tk_lua_fread(L, tm->clause_output, sizeof(*tm->clause_output), tm->clause_chunks, fh);
-
   tm->feedback_to_la = malloc(sizeof(*tm->feedback_to_la) * tm->input_chunks);
   tk_lua_fread(L, tm->feedback_to_la, sizeof(*tm->feedback_to_la), tm->input_chunks, fh);
-
   tm->feedback_to_clauses = malloc(sizeof(*tm->feedback_to_clauses) * tm->clause_chunks);
   tk_lua_fread(L, tm->feedback_to_clauses, sizeof(*tm->feedback_to_clauses), tm->clause_chunks, fh);
-
   tm->drop_clause = malloc(sizeof(*tm->drop_clause) * tm->clause_chunks);
   tk_lua_fread(L, tm->drop_clause, sizeof(*tm->drop_clause), tm->clause_chunks, fh);
 }
