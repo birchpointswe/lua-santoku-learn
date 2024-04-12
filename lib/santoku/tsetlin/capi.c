@@ -1172,7 +1172,7 @@ static inline void tk_lua_fwrite (lua_State *L, void *data, size_t size, size_t 
 
 static inline void tk_lua_fread (lua_State *L, void *data, size_t size, size_t memb, FILE *fh)
 {
-  fread(data, size, memb, fh);
+  (void) fread(data, size, memb, fh);
   if (!ferror(fh)) return;
   int e = errno;
   lua_settop(L, 0);
