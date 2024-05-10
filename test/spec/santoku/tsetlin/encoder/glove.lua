@@ -1,35 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local test = require("santoku.test")
 local tm = require("santoku.tsetlin")
@@ -45,20 +13,20 @@ local num = require("santoku.num")
 local err = require("santoku.error")
 
 local ENCODED_BITS = 256
-local THRESHOLD_LEVELS = 10
-local TRAIN_TEST_RATIO = 0.1
+local THRESHOLD_LEVELS = 20
+local TRAIN_TEST_RATIO = 0.5
 
 local CLAUSES = 40
 local STATE_BITS = 8
 local THRESHOLD = 80
-local SPECIFICITY = 3
+local SPECIFICITY = 2
 local UPDATE_PM = 2
 local DROP_CLAUSE = 0.75
-local BOOST_TRUE_POSITIVE = true
+local BOOST_TRUE_POSITIVE = false
 
 local EVALUATE_EVERY = 5
 local MAX_RECORDS = nil
-local MAX_EPOCHS = 50
+local MAX_EPOCHS = 5
 
 local function read_data (fp, max)
 
