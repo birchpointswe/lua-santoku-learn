@@ -1,5 +1,11 @@
 # Now
 
+- User-specified hamming vs jaccard similarity metric for encoder,
+  recurrent_encoder, autoencoder (requires different feedback logic)
+
+- Implement regressor
+- Add recurrent classifier, regressor
+
 - Stacked auto-encoders, configurable layers
 - Regressor
 - Threadpool-based classifier, all classifiers share the same threadpool in the

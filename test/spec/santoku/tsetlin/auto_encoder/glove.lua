@@ -24,7 +24,7 @@ local BOOST_TRUE_POSITIVE = false
 
 local EVALUATE_EVERY = 5
 local MAX_RECORDS = 500
-local MAX_EPOCHS = 10
+local MAX_EPOCHS = 5
 
 local function read_data (fp, max)
 
@@ -99,7 +99,7 @@ test("tsetlin", function ()
   print("Train", n_train)
   print("Test", n_test)
 
-  local t = tm.autoencoder(ENCODED_BITS, n_features, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
+  local t = tm.auto_encoder(ENCODED_BITS, n_features, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
 
   print("Training")
   for epoch = 1, MAX_EPOCHS do
