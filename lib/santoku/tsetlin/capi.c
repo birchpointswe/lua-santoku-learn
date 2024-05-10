@@ -40,9 +40,12 @@ SOFTWARE.
 
 typedef enum {
   TM_CLASSIFIER,
-  TM_AUTOENCODER,
-  TM_REGRESSOR,
+  TM_RECURRENT_CLASSIFIER,
   TM_ENCODER,
+  TM_RECURRENT_ENCODER,
+  TM_AUTO_ENCODER,
+  TM_REGRESSOR,
+  TM_RECURRENT_REGRESSOR,
 } tsetlin_type_t;
 
 typedef struct {
@@ -66,11 +69,8 @@ typedef struct {
 } tsetlin_classifier_t;
 
 typedef struct {
-  unsigned int *encoding;
-  unsigned int *decoding;
-  tsetlin_classifier_t encoder;
-  tsetlin_classifier_t decoder;
-} tsetlin_autoencoder_t;
+  tsetlin_classifier_t classifier;
+} tsetlin_recurrent_classifier_t;
 
 typedef struct {
   unsigned int encoding_bits;
@@ -82,16 +82,34 @@ typedef struct {
 } tsetlin_encoder_t;
 
 typedef struct {
+  tsetlin_encoder_t encoder;
+} tsetlin_recurrent_encoder_t;
+
+typedef struct {
+  unsigned int *encoding;
+  unsigned int *decoding;
+  tsetlin_classifier_t encoder;
+  tsetlin_classifier_t decoder;
+} tsetlin_auto_encoder_t;
+
+typedef struct {
   tsetlin_classifier_t classifier;
 } tsetlin_regressor_t;
+
+typedef struct {
+  tsetlin_classifier_t recurrent_classifier;
+} tsetlin_recurrent_regressor_t;
 
 typedef struct {
   tsetlin_type_t type;
   union {
     tsetlin_classifier_t *classifier;
-    tsetlin_autoencoder_t *autoencoder;
+    tsetlin_recurrent_classifier_t *recurrent_classifier;
     tsetlin_encoder_t *encoder;
+    tsetlin_recurrent_encoder_t *recurrent_encoder;
+    tsetlin_auto_encoder_t *auto_encoder;
     tsetlin_regressor_t *regressor;
+    tsetlin_recurrent_regressor_t *recurrent_regressor;
   };
 } tsetlin_t;
 
@@ -352,7 +370,7 @@ static inline void mc_tm_update (tsetlin_classifier_t *tm, unsigned int *Xi, uns
   tm_update(tm, negative_target_class, Xi, 0, specificity);
 }
 
-static inline void ae_tm_decode (tsetlin_autoencoder_t *tm)
+static inline void ae_tm_decode (tsetlin_auto_encoder_t *tm)
 {
   unsigned int decoder_classes = tm->decoder.classes;
   unsigned int *encoding = tm->encoding;
@@ -372,7 +390,7 @@ static inline void ae_tm_decode (tsetlin_autoencoder_t *tm)
   decoding[decoder_classes / (sizeof(unsigned int) * CHAR_BIT)] &= tm->encoder.filter;
 }
 
-static inline void ae_tm_encode (tsetlin_autoencoder_t *tm, unsigned int *input)
+static inline void ae_tm_encode (tsetlin_auto_encoder_t *tm, unsigned int *input)
 {
   unsigned int encoder_classes = tm->encoder.classes;
   unsigned int *encoding = tm->encoding;
@@ -409,7 +427,7 @@ static inline void en_tm_encode (tsetlin_encoder_t *tm, unsigned int *input, uns
   encoding[encoder_classes / (sizeof(unsigned int) * CHAR_BIT)] &= tm->encoding_filter;
 }
 
-static inline void ae_tm_update (tsetlin_autoencoder_t *tm, unsigned int *input, double specificity)
+static inline void ae_tm_update (tsetlin_auto_encoder_t *tm, unsigned int *input, double specificity)
 {
   ae_tm_encode(tm, input);
   unsigned int decoder_classes = tm->decoder.classes;
@@ -458,9 +476,11 @@ static inline void en_tm_update (tsetlin_encoder_t *tm, unsigned int *a, unsigne
       unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
       unsigned int bit_a = encoding_a[chunk] & (1 << pos);
       unsigned int bit_b = encoding_b[chunk] & (1 << pos);
-      if (!bit_a && !bit_b && (((float) fast_rand()) / ((float) UINT32_MAX) <= update_p)) {
-        tm_update(encoder, i, a, 1, specificity);
-        tm_update(encoder, i, b, 1, specificity);
+      if (!bit_a && !bit_b) {
+        if (((float) fast_rand()) / ((float) UINT32_MAX) <= update_p) {
+          tm_update(encoder, i, a, 1, specificity);
+          tm_update(encoder, i, b, 1, specificity);
+        }
       }
     }
 
@@ -471,9 +491,11 @@ static inline void en_tm_update (tsetlin_encoder_t *tm, unsigned int *a, unsigne
       unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
       unsigned int bit_a = encoding_a[chunk] & (1 << pos);
       unsigned int bit_b = encoding_b[chunk] & (1 << pos);
-      if (bit_a && bit_b && (((float) fast_rand()) / ((float) UINT32_MAX) <= update_p)) {
-        tm_update(encoder, i, a, 0, specificity);
-        tm_update(encoder, i, b, 0, specificity);
+      if (bit_a && bit_b) {
+        if (((float) fast_rand()) / ((float) UINT32_MAX) <= update_p) {
+          tm_update(encoder, i, a, 0, specificity);
+          tm_update(encoder, i, b, 0, specificity);
+        }
       }
     }
 
@@ -580,24 +602,10 @@ static inline void tk_tsetlin_create_classifier (lua_State *L, tsetlin_classifie
       tk_tsetlin_checkboolean(L, 6));
 }
 
-static inline int tk_tsetlin_create_autoencoder (lua_State *L, tsetlin_autoencoder_t *tm)
+static inline int tk_tsetlin_create_recurrent_classifier (lua_State *L, tsetlin_recurrent_classifier_t *)
 {
-  unsigned int encoding_bits = tk_tsetlin_checkunsigned(L, 1);
-  unsigned int features = tk_tsetlin_checkunsigned(L, 2);
-  unsigned int clauses = tk_tsetlin_checkunsigned(L, 3);
-  unsigned int state_bits = tk_tsetlin_checkunsigned(L, 4);
-  unsigned int threshold = tk_tsetlin_checkunsigned(L, 5);
-  bool boost_true_positive = tk_tsetlin_checkboolean(L, 6);
-  tk_tsetlin_init_classifier(L, &tm->encoder,
-      encoding_bits, features, clauses, state_bits, threshold, boost_true_positive);
-  tk_tsetlin_init_classifier(L, &tm->decoder,
-      features, encoding_bits, clauses, state_bits, threshold, boost_true_positive);
-  tm->encoding = malloc(sizeof(unsigned int) * tm->decoder.input_chunks);
-  tm->decoding = malloc(sizeof(unsigned int) * tm->encoder.input_chunks);
-  if (!tm->encoding)
-    luaL_error(L, "error in malloc during creation of autoencoder");
-  if (!tm->decoding)
-    luaL_error(L, "error in malloc during creation of autoencoder");
+  // TODO
+  luaL_error(L, "unimplemented: create recurrent classifier");
   return 0;
 }
 
@@ -623,10 +631,45 @@ static inline int tk_tsetlin_create_encoder (lua_State *L, tsetlin_encoder_t *tm
   return 0;
 }
 
+static inline int tk_tsetlin_create_recurrent_encoder (lua_State *L, tsetlin_recurrent_encoder_t *)
+{
+  // TODO
+  luaL_error(L, "unimplemented: create recurrent encoder");
+  return 0;
+}
+
+static inline int tk_tsetlin_create_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
+{
+  unsigned int encoding_bits = tk_tsetlin_checkunsigned(L, 1);
+  unsigned int features = tk_tsetlin_checkunsigned(L, 2);
+  unsigned int clauses = tk_tsetlin_checkunsigned(L, 3);
+  unsigned int state_bits = tk_tsetlin_checkunsigned(L, 4);
+  unsigned int threshold = tk_tsetlin_checkunsigned(L, 5);
+  bool boost_true_positive = tk_tsetlin_checkboolean(L, 6);
+  tk_tsetlin_init_classifier(L, &tm->encoder,
+      encoding_bits, features, clauses, state_bits, threshold, boost_true_positive);
+  tk_tsetlin_init_classifier(L, &tm->decoder,
+      features, encoding_bits, clauses, state_bits, threshold, boost_true_positive);
+  tm->encoding = malloc(sizeof(unsigned int) * tm->decoder.input_chunks);
+  tm->decoding = malloc(sizeof(unsigned int) * tm->encoder.input_chunks);
+  if (!tm->encoding)
+    luaL_error(L, "error in malloc during creation of auto_encoder");
+  if (!tm->decoding)
+    luaL_error(L, "error in malloc during creation of auto_encoder");
+  return 0;
+}
+
 static inline int tk_tsetlin_create_regressor (lua_State *L, tsetlin_regressor_t *)
 {
   // TODO
   luaL_error(L, "unimplemented: create regressor");
+  return 0;
+}
+
+static inline int tk_tsetlin_create_recurrent_regressor (lua_State *L, tsetlin_recurrent_regressor_t *)
+{
+  // TODO
+  luaL_error(L, "unimplemented: create recurrent regressor");
   return 0;
 }
 
@@ -648,12 +691,12 @@ static inline tsetlin_t *tk_tsetlin_alloc_classifier (lua_State *L)
   return tm;
 }
 
-static inline tsetlin_t *tk_tsetlin_alloc_autoencoder (lua_State *L)
+static inline tsetlin_t *tk_tsetlin_alloc_recurrent_classifier (lua_State *L)
 {
   tsetlin_t *tm = tk_tsetlin_alloc(L);
-  tm->type = TM_AUTOENCODER;
-  tm->autoencoder = malloc(sizeof(tsetlin_autoencoder_t));
-  if (!tm->autoencoder) luaL_error(L, "error in malloc during creation");
+  tm->type = TM_RECURRENT_CLASSIFIER;
+  tm->recurrent_classifier = malloc(sizeof(tsetlin_recurrent_classifier_t));
+  if (!tm->recurrent_classifier) luaL_error(L, "error in malloc during creation");
   return tm;
 }
 
@@ -666,12 +709,39 @@ static inline tsetlin_t *tk_tsetlin_alloc_encoder (lua_State *L)
   return tm;
 }
 
+static inline tsetlin_t *tk_tsetlin_alloc_recurrent_encoder (lua_State *L)
+{
+  tsetlin_t *tm = tk_tsetlin_alloc(L);
+  tm->type = TM_RECURRENT_ENCODER;
+  tm->recurrent_encoder = malloc(sizeof(tsetlin_recurrent_encoder_t));
+  if (!tm->recurrent_encoder) luaL_error(L, "error in malloc during creation");
+  return tm;
+}
+
+static inline tsetlin_t *tk_tsetlin_alloc_auto_encoder (lua_State *L)
+{
+  tsetlin_t *tm = tk_tsetlin_alloc(L);
+  tm->type = TM_AUTO_ENCODER;
+  tm->auto_encoder = malloc(sizeof(tsetlin_auto_encoder_t));
+  if (!tm->auto_encoder) luaL_error(L, "error in malloc during creation");
+  return tm;
+}
+
 static inline tsetlin_t *tk_tsetlin_alloc_regressor (lua_State *L)
 {
   tsetlin_t *tm = tk_tsetlin_alloc(L);
   tm->type = TM_REGRESSOR;
   tm->regressor = malloc(sizeof(tsetlin_regressor_t));
   if (!tm->regressor) luaL_error(L, "error in malloc during creation");
+  return tm;
+}
+
+static inline tsetlin_t *tk_tsetlin_alloc_recurrent_regressor (lua_State *L)
+{
+  tsetlin_t *tm = tk_tsetlin_alloc(L);
+  tm->type = TM_RECURRENT_REGRESSOR;
+  tm->recurrent_regressor = malloc(sizeof(tsetlin_recurrent_regressor_t));
+  if (!tm->recurrent_regressor) luaL_error(L, "error in malloc during creation");
   return tm;
 }
 
@@ -688,11 +758,11 @@ static inline int tk_tsetlin_create (lua_State *L)
     tk_tsetlin_create_classifier(L, tm->classifier);
     return 1;
 
-  } else if (!strcmp(type, "autoencoder")) {
+  } else if (!strcmp(type, "recurrent_classifier")) {
 
     lua_remove(L, 1);
-    tsetlin_t *tm = tk_tsetlin_alloc_autoencoder(L);
-    tk_tsetlin_create_autoencoder(L, tm->autoencoder);
+    tsetlin_t *tm = tk_tsetlin_alloc_recurrent_classifier(L);
+    tk_tsetlin_create_recurrent_classifier(L, tm->recurrent_classifier);
     return 1;
 
   } else if (!strcmp(type, "encoder")) {
@@ -702,11 +772,32 @@ static inline int tk_tsetlin_create (lua_State *L)
     tk_tsetlin_create_encoder(L, tm->encoder);
     return 1;
 
+  } else if (!strcmp(type, "recurrent_encoder")) {
+
+    lua_remove(L, 1);
+    tsetlin_t *tm = tk_tsetlin_alloc_recurrent_encoder(L);
+    tk_tsetlin_create_recurrent_encoder(L, tm->recurrent_encoder);
+    return 1;
+
+  } else if (!strcmp(type, "auto_encoder")) {
+
+    lua_remove(L, 1);
+    tsetlin_t *tm = tk_tsetlin_alloc_auto_encoder(L);
+    tk_tsetlin_create_auto_encoder(L, tm->auto_encoder);
+    return 1;
+
   } else if (!strcmp(type, "regressor")) {
 
     lua_remove(L, 1);
     tsetlin_t *tm = tk_tsetlin_alloc_regressor(L);
     tk_tsetlin_create_regressor(L, tm->regressor);
+    return 1;
+
+  } else if (!strcmp(type, "recurrent_regressor")) {
+
+    lua_remove(L, 1);
+    tsetlin_t *tm = tk_tsetlin_alloc_recurrent_regressor(L);
+    tk_tsetlin_create_recurrent_regressor(L, tm->recurrent_regressor);
     return 1;
 
   } else {
@@ -738,12 +829,12 @@ static inline int tk_tsetlin_destroy (lua_State *L)
       tk_tsetlin_destroy_classifier(tm->classifier);
       free(tm->classifier);
       break;
-    case TM_AUTOENCODER:
-      tk_tsetlin_destroy_classifier(&tm->autoencoder->encoder);
-      tk_tsetlin_destroy_classifier(&tm->autoencoder->decoder);
-      free(tm->autoencoder->encoding);
-      free(tm->autoencoder->decoding);
-      free(tm->autoencoder);
+    case TM_AUTO_ENCODER:
+      tk_tsetlin_destroy_classifier(&tm->auto_encoder->encoder);
+      tk_tsetlin_destroy_classifier(&tm->auto_encoder->decoder);
+      free(tm->auto_encoder->encoding);
+      free(tm->auto_encoder->decoding);
+      free(tm->auto_encoder);
       break;
     case TM_ENCODER:
       tk_tsetlin_destroy_classifier(&tm->encoder->encoder);
@@ -781,7 +872,7 @@ static inline int tk_tsetlin_predict_classifier (lua_State *L, tsetlin_classifie
   return 1;
 }
 
-static inline int tk_tsetlin_predict_autoencoder (lua_State *L, tsetlin_autoencoder_t *tm)
+static inline int tk_tsetlin_predict_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
 {
   lua_settop(L, 2);
   unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
@@ -806,14 +897,21 @@ static inline int tk_tsetlin_predict_regressor (lua_State *L, tsetlin_regressor_
   return 0;
 }
 
+static inline int tk_tsetlin_predict_recurrent_regressor (lua_State *L, tsetlin_recurrent_regressor_t *)
+{
+  // TODO
+  luaL_error(L, "unimplemented: predict recurrent regressor");
+  return 0;
+}
+
 static inline int tk_tsetlin_predict (lua_State *L)
 {
   tsetlin_t *tm = (tsetlin_t *) tk_tsetlin_peek(L, 1);
   switch (tm->type) {
     case TM_CLASSIFIER:
       return tk_tsetlin_predict_classifier(L, tm->classifier);
-    case TM_AUTOENCODER:
-      return tk_tsetlin_predict_autoencoder(L, tm->autoencoder);
+    case TM_AUTO_ENCODER:
+      return tk_tsetlin_predict_auto_encoder(L, tm->auto_encoder);
     case TM_ENCODER:
       return tk_tsetlin_predict_encoder(L, tm->encoder);
     case TM_REGRESSOR:
@@ -838,15 +936,10 @@ static inline int tk_tsetlin_update_classifier (lua_State *L, tsetlin_classifier
   return 0;
 }
 
-static inline int tk_tsetlin_update_autoencoder (lua_State *L, tsetlin_autoencoder_t *tm)
+static inline int tk_tsetlin_update_recurrent_classifier (lua_State *L, tsetlin_recurrent_classifier_t *)
 {
-  lua_settop(L, 4);
-  unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
-  double specificity = luaL_checknumber(L, 3);
-  double drop_clause = luaL_optnumber(L, 4, 1);
-  mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
-  mc_tm_initialize_drop_clause(&tm->decoder, drop_clause);
-  ae_tm_update(tm, bm, specificity);
+  // TODO
+  luaL_error(L, "unimplemented: update recurrent classifier");
   return 0;
 }
 
@@ -864,10 +957,36 @@ static inline int tk_tsetlin_update_encoder (lua_State *L, tsetlin_encoder_t *tm
   return 0;
 }
 
+static inline int tk_tsetlin_update_recurrent_encoder (lua_State *L, tsetlin_recurrent_encoder_t *)
+{
+  // TODO
+  luaL_error(L, "unimplemented: update recurrent encoder");
+  return 0;
+}
+
+static inline int tk_tsetlin_update_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
+{
+  lua_settop(L, 4);
+  unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
+  double specificity = luaL_checknumber(L, 3);
+  double drop_clause = luaL_optnumber(L, 4, 1);
+  mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
+  mc_tm_initialize_drop_clause(&tm->decoder, drop_clause);
+  ae_tm_update(tm, bm, specificity);
+  return 0;
+}
+
 static inline int tk_tsetlin_update_regressor (lua_State *L, tsetlin_regressor_t *)
 {
   // TODO
   luaL_error(L, "unimplemented: update regressor");
+  return 0;
+}
+
+static inline int tk_tsetlin_update_recurrent_regressor (lua_State *L, tsetlin_recurrent_regressor_t *)
+{
+  // TODO
+  luaL_error(L, "unimplemented: update recurrent regressor");
   return 0;
 }
 
@@ -877,12 +996,18 @@ static inline int tk_tsetlin_update (lua_State *L)
   switch (tm->type) {
     case TM_CLASSIFIER:
       return tk_tsetlin_update_classifier(L, tm->classifier);
-    case TM_AUTOENCODER:
-      return tk_tsetlin_update_autoencoder(L, tm->autoencoder);
+    case TM_RECURRENT_CLASSIFIER:
+      return tk_tsetlin_update_recurrent_classifier(L, tm->recurrent_classifier);
     case TM_ENCODER:
       return tk_tsetlin_update_encoder(L, tm->encoder);
+    case TM_RECURRENT_ENCODER:
+      return tk_tsetlin_update_recurrent_encoder(L, tm->recurrent_encoder);
+    case TM_AUTO_ENCODER:
+      return tk_tsetlin_update_auto_encoder(L, tm->auto_encoder);
     case TM_REGRESSOR:
       return tk_tsetlin_update_regressor(L, tm->regressor);
+    case TM_RECURRENT_REGRESSOR:
+      return tk_tsetlin_update_recurrent_regressor(L, tm->recurrent_regressor);
     default:
       return luaL_error(L, "unexpected tsetlin machine type in update");
   }
@@ -903,19 +1028,10 @@ static inline int tk_tsetlin_train_classifier (lua_State *L, tsetlin_classifier_
   return 0;
 }
 
-static inline int tk_tsetlin_train_autoencoder (lua_State *L, tsetlin_autoencoder_t *tm)
+static inline int tk_tsetlin_train_recurrent_classifier (lua_State *L, tsetlin_recurrent_classifier_t *)
 {
-  lua_settop(L, 5);
-  unsigned int n = tk_tsetlin_checkunsigned(L, 2);
-  unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
-  double specificity = luaL_checknumber(L, 4);
-  double drop_clause = luaL_optnumber(L, 5, 1);
-  // TODO: Should the drop clause be shared? Does that make more sense for an
-  // autoencoder?
-  mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
-  mc_tm_initialize_drop_clause(&tm->decoder, drop_clause);
-  for (unsigned int i = 0; i < n; i ++)
-    ae_tm_update(tm, &ps[i * tm->encoder.input_chunks], specificity);
+  // TODO
+  luaL_error(L, "unimplemented: train recurrent classifier");
   return 0;
 }
 
@@ -939,10 +1055,40 @@ static inline int tk_tsetlin_train_encoder (lua_State *L, tsetlin_encoder_t *tm)
   return 0;
 }
 
+static inline int tk_tsetlin_train_recurrent_encoder (lua_State *L, tsetlin_recurrent_encoder_t *)
+{
+  // TODO
+  luaL_error(L, "unimplemented: train recurrent encoder");
+  return 0;
+}
+
+static inline int tk_tsetlin_train_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
+{
+  lua_settop(L, 5);
+  unsigned int n = tk_tsetlin_checkunsigned(L, 2);
+  unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
+  double specificity = luaL_checknumber(L, 4);
+  double drop_clause = luaL_optnumber(L, 5, 1);
+  // TODO: Should the drop clause be shared? Does that make more sense for an
+  // auto_encoder?
+  mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
+  mc_tm_initialize_drop_clause(&tm->decoder, drop_clause);
+  for (unsigned int i = 0; i < n; i ++)
+    ae_tm_update(tm, &ps[i * tm->encoder.input_chunks], specificity);
+  return 0;
+}
+
 static inline int tk_tsetlin_train_regressor (lua_State *L, tsetlin_regressor_t *)
 {
   // TODO
   luaL_error(L, "unimplemented: train regressor");
+  return 0;
+}
+
+static inline int tk_tsetlin_train_recurrent_regressor (lua_State *L, tsetlin_recurrent_regressor_t *)
+{
+  // TODO
+  luaL_error(L, "unimplemented: train recurrent regressor");
   return 0;
 }
 
@@ -952,12 +1098,18 @@ static inline int tk_tsetlin_train (lua_State *L)
   switch (tm->type) {
     case TM_CLASSIFIER:
       return tk_tsetlin_train_classifier(L, tm->classifier);
-    case TM_AUTOENCODER:
-      return tk_tsetlin_train_autoencoder(L, tm->autoencoder);
+    case TM_RECURRENT_CLASSIFIER:
+      return tk_tsetlin_train_recurrent_classifier(L, tm->recurrent_classifier);
     case TM_ENCODER:
       return tk_tsetlin_train_encoder(L, tm->encoder);
+    case TM_RECURRENT_ENCODER:
+      return tk_tsetlin_train_recurrent_encoder(L, tm->recurrent_encoder);
+    case TM_AUTO_ENCODER:
+      return tk_tsetlin_train_auto_encoder(L, tm->auto_encoder);
     case TM_REGRESSOR:
       return tk_tsetlin_train_regressor(L, tm->regressor);
+    case TM_RECURRENT_REGRESSOR:
+      return tk_tsetlin_train_recurrent_regressor(L, tm->recurrent_regressor);
     default:
       return luaL_error(L, "unexpected tsetlin machine type in train");
   }
@@ -1040,29 +1192,11 @@ static inline int tk_tsetlin_evaluate_classifier (lua_State *L, tsetlin_classifi
   }
 }
 
-static inline int tk_tsetlin_evaluate_autoencoder (lua_State *L, tsetlin_autoencoder_t *tm)
+static inline int tk_tsetlin_evaluate_recurrent_classifier (lua_State *L, tsetlin_recurrent_classifier_t *)
 {
-  lua_settop(L, 3);
-  unsigned int n = tk_tsetlin_checkunsigned(L, 2);
-  unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
-  tsetlin_classifier_t *encoder = &tm->encoder;
-  unsigned int *decoding = tm->decoding;
-  unsigned int input_chunks = encoder->input_chunks;
-  unsigned int features = encoder->features;
-
-  long unsigned int total_bits = n * features * 2 * CHAR_BIT;
-  long unsigned int total_diff = 0;
-
-  for (unsigned int i = 0; i < n; i ++)
-  {
-    unsigned int *input = &ps[i * input_chunks];
-    ae_tm_encode(tm, input);
-    ae_tm_decode(tm);
-    total_diff += hamming(input, decoding, input_chunks);
-  }
-
-  lua_pushnumber(L, (double) (total_bits - total_diff) / total_bits);
-  return 1;
+  // TODO
+  luaL_error(L, "unimplemented: evaluate recurrent classifier");
+  return 0;
 }
 
 static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *tm)
@@ -1093,6 +1227,7 @@ static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *
     en_tm_encode(tm, b, encoding_b);
 
     double similarity = scores[i];
+    // double similarity0 = hamming(encoding_a, encoding_b, encoding_chunks) / (double) tm->encoding_bits;
     double similarity0 = jaccard(encoding_a, encoding_b, encoding_chunks);
 
     total_diff += fabs(similarity - similarity0);
@@ -1109,10 +1244,49 @@ static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *
   return 3;
 }
 
+static inline int tk_tsetlin_evaluate_recurrent_encoder (lua_State *L, tsetlin_recurrent_encoder_t *)
+{
+  // TODO
+  luaL_error(L, "unimplemented: evaluate recurrent encoder");
+  return 0;
+}
+
+static inline int tk_tsetlin_evaluate_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
+{
+  lua_settop(L, 3);
+  unsigned int n = tk_tsetlin_checkunsigned(L, 2);
+  unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
+  tsetlin_classifier_t *encoder = &tm->encoder;
+  unsigned int *decoding = tm->decoding;
+  unsigned int input_chunks = encoder->input_chunks;
+  unsigned int features = encoder->features;
+
+  long unsigned int total_bits = n * features * 2 * CHAR_BIT;
+  long unsigned int total_diff = 0;
+
+  for (unsigned int i = 0; i < n; i ++)
+  {
+    unsigned int *input = &ps[i * input_chunks];
+    ae_tm_encode(tm, input);
+    ae_tm_decode(tm);
+    total_diff += hamming(input, decoding, input_chunks);
+  }
+
+  lua_pushnumber(L, (double) (total_bits - total_diff) / total_bits);
+  return 1;
+}
+
 static inline int tk_tsetlin_evaluate_regressor (lua_State *L, tsetlin_regressor_t *)
 {
   // TODO
   luaL_error(L, "unimplemented: evaluate regressor");
+  return 0;
+}
+
+static inline int tk_tsetlin_evaluate_recurrent_regressor (lua_State *L, tsetlin_recurrent_regressor_t *)
+{
+  // TODO
+  luaL_error(L, "unimplemented: evaluate recurrent regressor");
   return 0;
 }
 
@@ -1122,12 +1296,18 @@ static inline int tk_tsetlin_evaluate (lua_State *L)
   switch (tm->type) {
     case TM_CLASSIFIER:
       return tk_tsetlin_evaluate_classifier(L, tm->classifier);
-    case TM_AUTOENCODER:
-      return tk_tsetlin_evaluate_autoencoder(L, tm->autoencoder);
+    case TM_RECURRENT_CLASSIFIER:
+      return tk_tsetlin_evaluate_recurrent_classifier(L, tm->recurrent_classifier);
     case TM_ENCODER:
       return tk_tsetlin_evaluate_encoder(L, tm->encoder);
+    case TM_RECURRENT_ENCODER:
+      return tk_tsetlin_evaluate_recurrent_encoder(L, tm->recurrent_encoder);
+    case TM_AUTO_ENCODER:
+      return tk_tsetlin_evaluate_auto_encoder(L, tm->auto_encoder);
     case TM_REGRESSOR:
       return tk_tsetlin_evaluate_regressor(L, tm->regressor);
+    case TM_RECURRENT_REGRESSOR:
+      return tk_tsetlin_evaluate_recurrent_regressor(L, tm->recurrent_regressor);
     default:
       return luaL_error(L, "unexpected tsetlin machine type in evaluate");
   }
@@ -1208,7 +1388,7 @@ static inline void tk_tsetlin_persist_classifier (lua_State *L, tsetlin_classifi
   _tk_tsetlin_persist_classifier(L, tm, fh);
 }
 
-static inline void tk_tsetlin_persist_autoencoder (lua_State *L, tsetlin_autoencoder_t *tm, FILE *fh)
+static inline void tk_tsetlin_persist_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm, FILE *fh)
 {
   tk_lua_fwrite(L, &tm->encoding, sizeof(tm->encoding), 1, fh);
   tk_lua_fwrite(L, &tm->decoding, sizeof(tm->decoding), 1, fh);
@@ -1240,8 +1420,8 @@ static inline int tk_tsetlin_persist (lua_State *L)
     case TM_CLASSIFIER:
       tk_tsetlin_persist_classifier(L, tm->classifier, fh);
       break;
-    case TM_AUTOENCODER:
-      tk_tsetlin_persist_autoencoder(L, tm->autoencoder, fh);
+    case TM_AUTO_ENCODER:
+      tk_tsetlin_persist_auto_encoder(L, tm->auto_encoder, fh);
       break;
     case TM_ENCODER:
       tk_tsetlin_persist_encoder(L, tm->encoder, fh);
@@ -1289,14 +1469,10 @@ static inline void tk_tsetlin_load_classifier (lua_State *L, FILE *fh)
   _tk_tsetlin_load_classifier(L, tm->classifier, fh);
 }
 
-static inline void tk_tsetlin_load_autoencoder (lua_State *L, FILE *fh)
+static inline void tk_tsetlin_load_recurrent_classifier (lua_State *L, FILE *)
 {
-  tsetlin_t *tm = tk_tsetlin_alloc_autoencoder(L);
-  tsetlin_autoencoder_t *ae = tm->autoencoder;
-  ae->encoding = malloc(sizeof(*ae->encoding) * ae->decoder.input_chunks);
-  ae->decoding = malloc(sizeof(*ae->decoding) * ae->encoder.input_chunks);
-  _tk_tsetlin_load_classifier(L, &ae->encoder, fh);
-  _tk_tsetlin_load_classifier(L, &ae->decoder, fh);
+  // TODO
+  luaL_error(L, "unimplemented: load recurrent classifier");
 }
 
 static inline void tk_tsetlin_load_encoder (lua_State *L, FILE *fh)
@@ -1311,11 +1487,33 @@ static inline void tk_tsetlin_load_encoder (lua_State *L, FILE *fh)
   _tk_tsetlin_load_classifier(L, &en->encoder, fh);
 }
 
+static inline void tk_tsetlin_load_recurrent_encoder (lua_State *L, FILE *)
+{
+  // TODO
+  luaL_error(L, "unimplemented: load recurrent encoder");
+}
+
+static inline void tk_tsetlin_load_auto_encoder (lua_State *L, FILE *fh)
+{
+  tsetlin_t *tm = tk_tsetlin_alloc_auto_encoder(L);
+  tsetlin_auto_encoder_t *ae = tm->auto_encoder;
+  ae->encoding = malloc(sizeof(*ae->encoding) * ae->decoder.input_chunks);
+  ae->decoding = malloc(sizeof(*ae->decoding) * ae->encoder.input_chunks);
+  _tk_tsetlin_load_classifier(L, &ae->encoder, fh);
+  _tk_tsetlin_load_classifier(L, &ae->decoder, fh);
+}
+
 static inline void tk_tsetlin_load_regressor (lua_State *L, FILE *fh)
 {
   tsetlin_t *tm = tk_tsetlin_alloc_regressor(L);
   tsetlin_regressor_t *rg = tm->regressor;
   _tk_tsetlin_load_classifier(L, &rg->classifier, fh);
+}
+
+static inline void tk_tsetlin_load_recurrent_regressor (lua_State *L, FILE *)
+{
+  // TODO
+  luaL_error(L, "unimplemented: load recurrent regressor");
 }
 
 // TODO: Merge malloc/assignment logic from load_* and create_* to reduce
@@ -1333,16 +1531,28 @@ static inline int tk_tsetlin_load (lua_State *L)
       tk_tsetlin_load_classifier(L, fh);
       tk_lua_fclose(L, fh);
       return 1;
-    case TM_AUTOENCODER:
-      tk_tsetlin_load_autoencoder(L, fh);
+    case TM_RECURRENT_CLASSIFIER:
+      tk_tsetlin_load_recurrent_classifier(L, fh);
       tk_lua_fclose(L, fh);
       return 1;
     case TM_ENCODER:
       tk_tsetlin_load_encoder(L, fh);
       tk_lua_fclose(L, fh);
       return 1;
+    case TM_RECURRENT_ENCODER:
+      tk_tsetlin_load_recurrent_encoder(L, fh);
+      tk_lua_fclose(L, fh);
+      return 1;
+    case TM_AUTO_ENCODER:
+      tk_tsetlin_load_auto_encoder(L, fh);
+      tk_lua_fclose(L, fh);
+      return 1;
     case TM_REGRESSOR:
       tk_tsetlin_load_regressor(L, fh);
+      tk_lua_fclose(L, fh);
+      return 1;
+    case TM_RECURRENT_REGRESSOR:
+      tk_tsetlin_load_recurrent_regressor(L, fh);
       tk_lua_fclose(L, fh);
       return 1;
     default:
@@ -1357,8 +1567,8 @@ static inline int tk_tsetlin_type (lua_State *L)
     case TM_CLASSIFIER:
       lua_pushstring(L, "classifier");
       break;
-    case TM_AUTOENCODER:
-      lua_pushstring(L, "autoencoder");
+    case TM_AUTO_ENCODER:
+      lua_pushstring(L, "auto_encoder");
       break;
     case TM_ENCODER:
       lua_pushstring(L, "encoder");
