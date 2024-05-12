@@ -995,7 +995,7 @@ static inline int tk_tsetlin_predict_encoder (lua_State *L, tsetlin_encoder_t *t
   lua_settop(L, 2);
   unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
   en_tm_encode(tm, bm, tm->encoding_a);
-  lua_pushlstring(L, (char *) tm->encoding_a, sizeof(unsigned int) * tm->encoder.input_chunks);
+  lua_pushlstring(L, (char *) tm->encoding_a, sizeof(unsigned int) * tm->encoding_chunks);
   return 1;
 }
 
@@ -1004,7 +1004,7 @@ static inline int tk_tsetlin_predict_recurrent_encoder (lua_State *L, tsetlin_re
   lua_settop(L, 2);
   luaL_checktype(L, 2, LUA_TTABLE);
   re_tm_encode(L, tm, 2, tm->input_a, tm->state);
-  lua_pushlstring(L, (char *) tm->state, sizeof(unsigned int) * tm->encoder.encoder.input_chunks);
+  lua_pushlstring(L, (char *) tm->state, sizeof(unsigned int) * tm->encoder.encoding_chunks);
   return 1;
 }
 
