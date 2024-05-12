@@ -13,26 +13,32 @@ local num = require("santoku.num")
 local err = require("santoku.error")
 
 local ENCODED_BITS = 256
-local THRESHOLD_LEVELS = 20
+local THRESHOLD_LEVELS = 10
 local TRAIN_TEST_RATIO = 0.5
+local MARGIN = 0.1
+local SIMILARITY_CUTOFF = 0.75
+local DISTANCE_CUTOFF = 0.5
 
 local CLAUSES = 40
 local STATE_BITS = 8
-local THRESHOLD = 80
+local THRESHOLD = 160
 local SPECIFICITY = 2
-local UPDATE_PM = 2
-local DROP_CLAUSE = 0.75
+local LOSS_SCALE = 0.5
+local DROP_CLAUSE = 0.5
 local BOOST_TRUE_POSITIVE = false
 
-local EVALUATE_EVERY = 5
+local EVALUATE_EVERY = 10
 local MAX_RECORDS = nil
-local MAX_EPOCHS = 5
+-- local MAX_EPOCHS = 5
+local MAX_EPOCHS = 100
 
 local function read_data (fp, max)
 
+  local recs = {}
+
   local as = {}
-  local bs = {}
-  local scores = {}
+  local ns = {}
+  local ps = {}
 
   local bits = {}
   local floats = {}
@@ -69,7 +75,9 @@ local function read_data (fp, max)
   local thresholds = booleanizer.thresholds(observations, THRESHOLD_LEVELS)
 
   for i = 1, #ms do
+
     mtx.normalize(ms[i])
+
     for j = 1, mtx.columns(ms[i]) do
       for k = 1, #thresholds do
         local t = thresholds[k]
@@ -83,30 +91,60 @@ local function read_data (fp, max)
         end
       end
     end
-    arr.push(as, bm.create(bits, 2 * #thresholds * n_dims))
+
+    arr.push(recs, bm.create(bits, 2 * #thresholds * n_dims))
+
   end
 
-  for i = 1, #as do
-    local i0 = rand.fast_random() % #as + 1
-    bs[i] = as[i0]
-    scores[i] = mtx.dot(ms[i], ms[i0])
+  for i = 1, #recs do
+
+    local i_n, i_p
+
+    for _ = 1, #recs do
+      local i0 = rand.fast_random() % #recs + 1
+      if mtx.dot(ms[i], ms[i0]) < DISTANCE_CUTOFF then
+        i_n = i0
+        break
+      end
+    end
+
+    if not i_n then
+      break
+    end
+
+    for _ = 1, #recs do
+      local i0 = rand.fast_random() % #recs + 1
+      if mtx.dot(ms[i], ms[i0]) > SIMILARITY_CUTOFF then
+        i_p = i0
+        break
+      end
+    end
+
+    if not i_p then
+      break
+    end
+
+    as[#as + 1] = recs[i]
+    ns[#as] = recs[i_n]
+    ps[#as] = recs[i_p]
+
   end
 
   return {
     as = as,
-    bs = bs,
-    scores = scores,
+    ns = ns,
+    ps = ps,
     n_features = #thresholds * n_dims,
-    n_pairs = #as,
+    n_triplets = #as,
   }
 
 end
 
 local function split_dataset (dataset, s, e)
   local as = bm.raw_matrix(dataset.as, dataset.n_features * 2, s, e)
-  local bs = bm.raw_matrix(dataset.bs, dataset.n_features * 2, s, e)
-  local scores = mtx.raw(mtx.create(dataset.scores, s, e))
-  return as, bs, scores
+  local ns = bm.raw_matrix(dataset.ns, dataset.n_features * 2, s, e)
+  local ps = bm.raw_matrix(dataset.ps, dataset.n_features * 2, s, e)
+  return as, ns, ps
 end
 
 test("tsetlin", function ()
@@ -116,13 +154,13 @@ test("tsetlin", function ()
 
   print("Shuffling")
   rand.seed()
-  arr.shuffle(dataset.as, dataset.bs, dataset.scores)
+  arr.shuffle(dataset.as, dataset.ns, dataset.ps)
 
   print("Splitting & packing")
-  local n_train = num.floor(dataset.n_pairs * TRAIN_TEST_RATIO)
-  local n_test = dataset.n_pairs - n_train
-  local train_as, train_bs, train_scores = split_dataset(dataset, 1, n_train)
-  local test_as, test_bs, test_scores = split_dataset(dataset, n_train + 1, n_train + n_test)
+  local n_train = num.floor(dataset.n_triplets * TRAIN_TEST_RATIO)
+  local n_test = dataset.n_triplets - n_train
+  local train_as, train_ns, train_ps = split_dataset(dataset, 1, n_train)
+  local test_as, test_ns, test_ps = split_dataset(dataset, n_train + 1, n_train + n_test)
 
   print("Input Features", dataset.n_features * 2)
   print("Encoded Features", ENCODED_BITS)
@@ -135,14 +173,14 @@ test("tsetlin", function ()
   for epoch = 1, MAX_EPOCHS do
 
     local start = os.clock()
-    tm.train(t, n_train, train_as, train_bs, train_scores, SPECIFICITY, UPDATE_PM, DROP_CLAUSE)
+    tm.train(t, n_train, train_as, train_ns, train_ps, SPECIFICITY, DROP_CLAUSE, MARGIN, LOSS_SCALE)
     local duration = os.clock() - start
 
     if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
-      local test_score, nh, nl = tm.evaluate(t, n_test, test_as, test_bs, test_scores)
-      local train_score = tm.evaluate(t, n_train, train_as, train_bs, train_scores)
-      str.printf("Epoch %-4d  Time %f  Test %4.2f  Train %4.2f  High %d  Low %d\n",
-        epoch, duration, test_score, train_score, nh, nl)
+      local test_score = tm.evaluate(t, n_test, test_as, test_ns, test_ps, MARGIN)
+      local train_score = tm.evaluate(t, n_train, train_as, train_ns, train_ps, MARGIN)
+      str.printf("Epoch %-4d  Time %f  Test %4.2f  Train %4.2f\n",
+        epoch, duration, test_score, train_score)
     else
       str.printf("Epoch %-4d  Time %f\n",
         epoch, duration)
