@@ -3,6 +3,8 @@
 - User-specified hamming vs jaccard similarity metric for encoder,
   recurrent_encoder, autoencoder (requires different feedback logic)
 
+- Push training epoch loop into C so thread pool can be reused
+
 - Implement regressor
 - Add recurrent classifier, regressor
 
