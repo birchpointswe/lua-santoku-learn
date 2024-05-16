@@ -1123,15 +1123,10 @@ static inline int tk_tsetlin_predict_recurrent_classifier (lua_State *L, tsetlin
 
 static inline int tk_tsetlin_predict_encoder (lua_State *L, tsetlin_encoder_t *tm)
 {
-  fprintf(stderr, "test 1\n");
   lua_settop(L, 2);
-  fprintf(stderr, "test 2\n");
   unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
-  fprintf(stderr, "test 3\n");
   en_tm_encode(tm, bm, tm->encoding_a);
-  fprintf(stderr, "test 4\n");
   lua_pushlstring(L, (char *) tm->encoding_a, sizeof(unsigned int) * tm->encoding_chunks);
-  fprintf(stderr, "test 5\n");
   return 1;
 }
 
