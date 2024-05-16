@@ -1,7 +1,6 @@
 # Now
 
-- OpenMP
-- Push training epoch loop into C so thread pool can be reused
+- Consider pushing train & evaluate loops to C
 - Shuffle every epoch
 - Destroy, persist, load segfaults
 
@@ -23,6 +22,7 @@
     - Triples memory usage
 
 - Titanic dataset
+- Mini batches
 
 # Old, Reconsider
 
