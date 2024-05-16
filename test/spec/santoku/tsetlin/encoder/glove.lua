@@ -19,7 +19,7 @@ local MARGIN = 0.1
 local SIMILARITY_CUTOFF = 0.75
 local DISTANCE_CUTOFF = 0.5
 
-local CLAUSES = 40
+local CLAUSES = 80
 local STATE_BITS = 8
 local THRESHOLD = 160
 local SPECIFICITY = 2

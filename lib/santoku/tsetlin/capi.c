@@ -1,6 +1,6 @@
 /*
 
-Copyright (C) 2024 Birch Point SWE (Lua integration, train/evaluate, drop clause, autoencoder, regressor)
+Copyright (C) 20e4 Birch Point SWE (Lua integration, train/evaluate, drop clause, autoencoder, regressor)
 Copyright (C) 2019 Ole-Christoffer Granmo (Original classifier C implementation)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -30,6 +30,7 @@ SOFTWARE.
 #include <math.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,6 +68,7 @@ typedef struct {
   unsigned int *feedback_to_la;
   unsigned int *feedback_to_clauses;
   unsigned int *drop_clause;
+  long int *scores;
 } tsetlin_classifier_t;
 
 typedef struct {
@@ -87,7 +89,15 @@ typedef struct {
   unsigned int *input_a;
   unsigned int *input_n;
   unsigned int *input_p;
-  unsigned int *state;
+  unsigned int *state_a;
+  unsigned int *state_n;
+  unsigned int *state_p;
+  unsigned int state_a_size;
+  unsigned int state_n_size;
+  unsigned int state_p_size;
+  unsigned int state_a_max;
+  unsigned int state_n_max;
+  unsigned int state_p_max;
   unsigned int token_bits;
   unsigned int token_chunks;
   tsetlin_encoder_t encoder;
@@ -264,8 +274,12 @@ static inline long int sum_up_class_votes (tsetlin_classifier_t *tm, bool predic
   return class_sum;
 }
 
-static inline void tm_calculate_clause_output (tsetlin_classifier_t *tm, unsigned int class, unsigned int *Xi, bool predict)
-{
+static inline void tm_calculate_clause_output (
+  tsetlin_classifier_t *tm,
+  unsigned int class,
+  unsigned int *Xi,
+  bool predict
+) {
   unsigned int clauses = tm->clauses;
   unsigned int filter = tm->filter;
   unsigned int *clause_output = tm->clause_output;
@@ -292,8 +306,13 @@ static inline void tm_calculate_clause_output (tsetlin_classifier_t *tm, unsigne
   }
 }
 
-static inline void tm_update (tsetlin_classifier_t *tm, unsigned int class, unsigned int *Xi, unsigned int target, double specificity)
-{
+static inline void tm_update (
+  tsetlin_classifier_t *tm,
+  unsigned int class,
+  unsigned int *Xi,
+  unsigned int target,
+  double specificity
+) {
   tm_calculate_clause_output(tm, class, Xi, false);
   long int tgt = target ? 1 : 0;
   long int class_sum = sum_up_class_votes(tm, false);
@@ -343,29 +362,36 @@ static inline void tm_update (tsetlin_classifier_t *tm, unsigned int class, unsi
   }
 }
 
-static inline int tm_score (tsetlin_classifier_t *tm, unsigned int class, unsigned int *Xi) {
-  tm_calculate_clause_output(tm, class, Xi, true);
-  int r = sum_up_class_votes(tm, true);
-  return r;
-}
-
-static inline unsigned int mc_tm_predict (tsetlin_classifier_t *tm, unsigned int *X, long int *scores)
+static inline unsigned int tm_score_max (tsetlin_classifier_t *tm)
 {
-  unsigned int m = tm->classes;
+  long int *scores = tm->scores;
+  unsigned int n_classes = tm->classes;
   unsigned int max_class = 0;
-  long int max_class_sum = tm_score(tm, 0, X);
-  if (scores)
-    scores[0] = max_class_sum;
-  for (long int i = 1; i < m; i ++) {
-    long int class_sum = tm_score(tm, i, X);
-    if (scores)
-      scores[i] = class_sum;
-    if (max_class_sum < class_sum) {
-      max_class_sum = class_sum;
-      max_class = i;
+  long int max_score = scores[0];
+  for (unsigned int class = 1; class < n_classes; class ++) {
+    if (scores[class] > max_score) {
+      max_class = class;
+      max_score = scores[class];
     }
   }
   return max_class;
+}
+
+static inline void tm_score (tsetlin_classifier_t *tm, unsigned int *Xi) {
+  long int *scores = tm->scores;
+  unsigned int n_classes = tm->classes;
+  for (unsigned int class = 0; class < n_classes; class ++) {
+    tm_calculate_clause_output(tm, class, Xi, true);
+    scores[class] = sum_up_class_votes(tm, true);
+  }
+}
+
+static inline unsigned int mc_tm_predict (
+  tsetlin_classifier_t *tm,
+  unsigned int *X
+) {
+  tm_score(tm, X);
+  return tm_score_max(tm);
 }
 
 static inline void mc_tm_update (tsetlin_classifier_t *tm, unsigned int *Xi, unsigned int target_class, double specificity)
@@ -388,7 +414,8 @@ static inline void ae_tm_decode (tsetlin_auto_encoder_t *tm)
     unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
     unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
 
-    if (tm_score(&tm->decoder, i, encoding) > 0)
+    tm_score(&tm->decoder, encoding);
+    if (tm_score_max(&tm->decoder) > 0)
       decoding[chunk] |= (1U << pos);
     else
       decoding[chunk] &= ~(1U << pos);
@@ -397,17 +424,19 @@ static inline void ae_tm_decode (tsetlin_auto_encoder_t *tm)
   decoding[decoder_classes / (sizeof(unsigned int) * CHAR_BIT)] &= tm->encoder.filter;
 }
 
-static inline void ae_tm_encode (tsetlin_auto_encoder_t *tm, unsigned int *input)
-{
+static inline void ae_tm_encode (
+  tsetlin_auto_encoder_t *tm,
+  unsigned int *input
+) {
   unsigned int encoder_classes = tm->encoder.classes;
   unsigned int *encoding = tm->encoding;
-
+  long int *scores = tm->encoder.scores;
+  tm_score(&tm->encoder, input);
   for (unsigned int i = 0; i < encoder_classes; i ++)
   {
     unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
     unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
-
-    if (tm_score(&tm->encoder, i, input) > 0)
+    if (scores[i] > 0)
       encoding[chunk] |= (1U << pos);
     else
       encoding[chunk] &= ~(1U << pos);
@@ -416,14 +445,19 @@ static inline void ae_tm_encode (tsetlin_auto_encoder_t *tm, unsigned int *input
   encoding[encoder_classes / (sizeof(unsigned int) * CHAR_BIT)] &= tm->decoder.filter;
 }
 
-static inline void en_tm_encode (tsetlin_encoder_t *tm, unsigned int *input, unsigned int *encoding)
-{
+static inline void en_tm_encode (
+  tsetlin_encoder_t *tm,
+  unsigned int *input,
+  unsigned int *encoding
+) {
   unsigned int encoder_classes = tm->encoder.classes;
+  long int *scores = tm->encoder.scores;
+  tm_score(&tm->encoder, input);
   for (unsigned int i = 0; i < encoder_classes; i ++)
   {
     unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
     unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
-    if (tm_score(&tm->encoder, i, input) > 0)
+    if (scores[i] > 0)
       encoding[chunk] |= (1U << pos);
     else
       encoding[chunk] &= ~(1U << pos);
@@ -431,16 +465,31 @@ static inline void en_tm_encode (tsetlin_encoder_t *tm, unsigned int *input, uns
   encoding[encoder_classes / (sizeof(unsigned int) * CHAR_BIT)] &= tm->encoding_filter;
 }
 
-static inline void re_tm_encode (lua_State *L, tsetlin_recurrent_encoder_t *tm, int i_xs, unsigned int *input, unsigned int *xo)
-{
+static inline void re_tm_encode (
+  lua_State *L,
+  tsetlin_recurrent_encoder_t *tm,
+  unsigned int first_word,
+  unsigned int n_words,
+  int i_xs,
+  unsigned int **states,
+  unsigned int *states_size,
+  unsigned int *states_max,
+  unsigned int *input
+) {
   lua_pushvalue(L, i_xs); // t
-  memset(tm->state, 0, tm->encoder.encoding_chunks * sizeof(unsigned int));
+  *states_size = n_words + 1;
+  if (*states_size > *states_max) {
+    *states_max = *states_size;
+    *states = realloc(*states, tm->encoder.encoding_chunks * (*states_size) * sizeof(unsigned int));
+  }
+  if (first_word == 1)  {
+    memset((*states), 0, tm->encoder.encoding_chunks * sizeof(unsigned int));
+  }
   unsigned int off_token0 = 0;
   unsigned int off_token1 = off_token0 + tm->token_chunks;
   unsigned int off_state0 = off_token1 + tm->token_chunks;
   unsigned int off_state1 = off_state0 + tm->encoder.encoding_chunks;
-  unsigned int e = lua_objlen(L, -1);
-  for (unsigned int i = 1; i <= e; i ++) {
+  for (unsigned int i = first_word; i <= n_words; i ++) {
     lua_pushinteger(L, i); // t i
     lua_gettable(L, -2); // t v
     unsigned int *x = (unsigned int *) luaL_checkstring(L, -1);
@@ -448,17 +497,20 @@ static inline void re_tm_encode (lua_State *L, tsetlin_recurrent_encoder_t *tm, 
     memcpy(input + off_token0, x, tm->token_chunks * sizeof(unsigned int));
     memcpy(input + off_token1, x, tm->token_chunks * sizeof(unsigned int));
     flip_bits(input + off_token1, tm->token_chunks);
-    memcpy(input + off_state0, tm->state, tm->encoder.encoding_chunks * sizeof(unsigned int));
-    memcpy(input + off_state1, tm->state, tm->encoder.encoding_chunks * sizeof(unsigned int));
+    memcpy(input + off_state0, (*states) + (tm->encoder.encoding_chunks * (i - 1)), tm->encoder.encoding_chunks * sizeof(unsigned int));
+    memcpy(input + off_state1, (*states) + (tm->encoder.encoding_chunks * (i - 1)), tm->encoder.encoding_chunks * sizeof(unsigned int));
     flip_bits(input + off_state1, tm->encoder.encoding_chunks);
-    en_tm_encode(&tm->encoder, input,
-      i == e ? xo : tm->state);
+    en_tm_encode(&tm->encoder, input, (*states) + (tm->encoder.encoding_chunks * i));
   }
   lua_pop(L, 1); //
 }
 
-static inline void ae_tm_update (tsetlin_auto_encoder_t *tm, unsigned int *input, double specificity)
-{
+static inline void ae_tm_update (
+  tsetlin_auto_encoder_t *tm,
+  unsigned int *input,
+  double specificity
+) {
+
   ae_tm_encode(tm, input);
   unsigned int decoder_classes = tm->decoder.classes;
   unsigned int encoder_classes = tm->encoder.classes;
@@ -483,8 +535,17 @@ static inline void ae_tm_update (tsetlin_auto_encoder_t *tm, unsigned int *input
   }
 }
 
-static inline void en_tm_update (tsetlin_encoder_t *tm, unsigned int *a, unsigned int *n, unsigned int *p, double specificity, double margin, double loss_scale)
-{
+static inline void en_tm_update (
+  tsetlin_encoder_t *tm,
+  unsigned int *a,
+  unsigned int *n,
+  unsigned int *p,
+  double specificity,
+  double margin,
+  double loss_scale,
+  double loss_scale_min,
+  double loss_scale_max
+) {
   tsetlin_classifier_t *encoder = &tm->encoder;
   unsigned int classes = encoder->classes;
   unsigned int encoding_bits = tm->encoding_bits;
@@ -500,6 +561,9 @@ static inline void en_tm_update (tsetlin_encoder_t *tm, unsigned int *a, unsigne
 
   double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_bits, encoding_chunks, margin);
   double loss_p = pow(loss, loss_scale);
+  loss_p =
+    loss_p > loss_scale_max ? loss_scale_max :
+    loss_p < loss_scale_min ? loss_scale_min : loss_p;
 
   if (loss > 0) {
     for (unsigned int i = 0; i < classes; i ++) {
@@ -520,40 +584,95 @@ static inline void en_tm_update (tsetlin_encoder_t *tm, unsigned int *a, unsigne
   }
 }
 
-static inline void re_tm_update (lua_State *L, tsetlin_recurrent_encoder_t *tm, int i_as, int i_ns, int i_ps, double specificity, double margin, double loss_scale)
-{
+static inline void re_tm_update_recompute (
+  lua_State *L,
+  tsetlin_recurrent_encoder_t *tm,
+  tsetlin_classifier_t *encoder,
+  int i_xs,
+  unsigned int **state_x,
+  unsigned int *state_x_size,
+  unsigned int *state_x_max,
+  unsigned int *input_x,
+  unsigned int encoding_bits,
+  unsigned int encoding_chunks,
+  double specificity,
+  double margin,
+  double loss,
+  double loss_p,
+  unsigned int *encoding_a,
+  unsigned int *encoding_n,
+  unsigned int *encoding_p
+) {
+  unsigned int n_words = lua_objlen(L, i_xs);
+  for (unsigned int word = 1; word <= n_words; word ++) {
+    for (unsigned int bit = 0; bit < encoding_bits; bit ++) {
+      if (((float) fast_rand()) / ((float) UINT32_MAX) < loss_p) {
+        unsigned int chunk = bit / (sizeof(unsigned int) * CHAR_BIT);
+        unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
+        unsigned int *chunkp = (*state_x) + (word * encoding_chunks) + chunk;
+        unsigned int bit_x = (*chunkp) & (1 << pos);
+        (*chunkp) ^= (1 << pos);
+        unsigned int bit_x_flipped = (*chunkp) & (1 << pos);
+        re_tm_encode(L, tm, word + 1, n_words, i_xs, state_x, state_x_size, state_x_max, input_x);
+        unsigned int *encoding_x = (*state_x) + (*state_x_size - 1) * encoding_chunks;
+        double loss0 = triplet_loss(
+          encoding_a ? encoding_a : encoding_x,
+          encoding_n ? encoding_n : encoding_x,
+          encoding_p ? encoding_p : encoding_x,
+          encoding_bits, encoding_chunks, margin);
+        if (loss0 < loss) {
+          tm_update(encoder, bit, input_x, bit_x_flipped, specificity);
+        } else if (loss0 > loss) {
+          tm_update(encoder, bit, input_x, bit_x, specificity);
+        }
+        (*chunkp) ^= (1 << pos);
+      }
+    }
+  }
+}
+
+static inline void re_tm_update (
+  lua_State *L,
+  tsetlin_recurrent_encoder_t *tm,
+  int i_as,
+  int i_ns,
+  int i_ps,
+  double specificity,
+  double margin,
+  double loss_scale,
+  double loss_scale_min,
+  double loss_scale_max
+) {
   tsetlin_classifier_t *encoder = &tm->encoder.encoder;
-  unsigned int classes = encoder->classes;
   unsigned int encoding_bits = tm->encoder.encoding_bits;
   unsigned int encoding_chunks = tm->encoder.encoding_chunks;
 
-  unsigned int *encoding_a = tm->encoder.encoding_a;
-  unsigned int *encoding_n = tm->encoder.encoding_n;
-  unsigned int *encoding_p = tm->encoder.encoding_p;
+  re_tm_encode(L, tm, 1, lua_objlen(L, i_as), i_as, &tm->state_a, &tm->state_a_size, &tm->state_a_max, tm->input_a);
+  re_tm_encode(L, tm, 1, lua_objlen(L, i_ns), i_ns, &tm->state_n, &tm->state_n_size, &tm->state_n_max, tm->input_n);
+  re_tm_encode(L, tm, 1, lua_objlen(L, i_ps), i_ps, &tm->state_p, &tm->state_p_size, &tm->state_p_max, tm->input_p);
 
-  re_tm_encode(L, tm, i_as, tm->input_a, encoding_a);
-  re_tm_encode(L, tm, i_ns, tm->input_n, encoding_n);
-  re_tm_encode(L, tm, i_ps, tm->input_p, encoding_p);
+  unsigned int *encoding_a = tm->state_a + (tm->state_a_size * encoding_chunks);
+  unsigned int *encoding_n = tm->state_n + (tm->state_n_size * encoding_chunks);
+  unsigned int *encoding_p = tm->state_p + (tm->state_p_size * encoding_chunks);
 
   double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_bits, encoding_chunks, margin);
   double loss_p = pow(loss, loss_scale);
+  loss_p =
+    loss_p > loss_scale_max ? loss_scale_max :
+    loss_p < loss_scale_min ? loss_scale_min : loss_p;
 
+  // TODO: Provide a scale_previous that reduces the chance that earlier
+  // states have bits flipped during back propagation of feedback
   if (loss > 0) {
-    for (unsigned int i = 0; i < classes; i ++) {
-      unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
-      unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
-      unsigned int bit_n = encoding_n[chunk] & (1 << pos);
-      unsigned int bit_p = encoding_p[chunk] & (1 << pos);
-      if (((float) fast_rand()) / ((float) UINT32_MAX) < loss_p) {
-        if ((!bit_n && !bit_p) || (bit_n && bit_p)) {
-          tm_update(encoder, i, tm->input_n, !bit_n, specificity);
-          tm_update(encoder, i, tm->input_p, !bit_p, specificity);
-        } else {
-          tm_update(encoder, i, tm->input_n, bit_n, specificity);
-          tm_update(encoder, i, tm->input_p, bit_p, specificity);
-        }
-      }
+    if (((float) fast_rand()) / ((float) UINT32_MAX) < 0.5) {
+      // update negative
+      re_tm_update_recompute(L, tm, encoder, i_ns, &tm->state_n, &tm->state_n_size, &tm->state_n_max, tm->input_n, encoding_bits, encoding_chunks, specificity, margin, loss, loss_p, encoding_a, NULL, encoding_p);
+    } else {
+      // update positive
+      re_tm_update_recompute(L, tm, encoder, i_ps, &tm->state_p, &tm->state_p_size, &tm->state_p_max, tm->input_p, encoding_bits, encoding_chunks, specificity, margin, loss, loss_p, encoding_a, encoding_n, NULL);
     }
+  } else {
+    // No loss
   }
 }
 
@@ -633,6 +752,7 @@ static inline void tk_tsetlin_init_classifier (
   tm->feedback_to_la = malloc(sizeof(unsigned int) * tm->input_chunks);
   tm->feedback_to_clauses = malloc(sizeof(unsigned int) * tm->clause_chunks);
   tm->drop_clause = malloc(sizeof(unsigned int) * tm->clause_chunks);
+  tm->scores = malloc(sizeof(long int) * classes);
   if (!(tm->drop_clause && tm->state && tm->clause_output && tm->feedback_to_la && tm->feedback_to_clauses))
     luaL_error(L, "error in malloc during creation of classifier");
   for (unsigned int i = 0; i < tm->classes; i ++)
@@ -719,10 +839,18 @@ static inline int tk_tsetlin_create_recurrent_encoder (lua_State *L, tsetlin_rec
   tm->input_a = malloc(sizeof(unsigned int) * tm->encoder.encoder.input_chunks);
   tm->input_n = malloc(sizeof(unsigned int) * tm->encoder.encoder.input_chunks);
   tm->input_p = malloc(sizeof(unsigned int) * tm->encoder.encoder.input_chunks);
-  tm->state = malloc(sizeof(unsigned int) * tm->encoder.encoding_chunks);
+  tm->state_a_size = 0;
+  tm->state_n_size = 0;
+  tm->state_p_size = 0;
+  tm->state_a_max = 0;
+  tm->state_n_max = 0;
+  tm->state_p_max = 0;
+  tm->state_a = NULL;
+  tm->state_n = NULL;
+  tm->state_p = NULL;
   tm->token_bits = token_bits;
   tm->token_chunks = (tm->token_bits - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
-  if (!(tm->input_a && tm->input_n && tm->input_p && tm->state))
+  if (!(tm->input_a && tm->input_n && tm->input_p))
     luaL_error(L, "error in malloc during creation of recurrent encoder");
   return 0;
 }
@@ -913,6 +1041,7 @@ static inline void tk_tsetlin_destroy_classifier (tsetlin_classifier_t *tm)
   free(tm->actions);
   free(tm->clause_output);
   free(tm->drop_clause);
+  free(tm->scores);
   free(tm->feedback_to_la);
   free(tm->feedback_to_clauses);
 }
@@ -941,7 +1070,9 @@ static inline int tk_tsetlin_destroy (lua_State *L)
       free(tm->recurrent_encoder->input_a);
       free(tm->recurrent_encoder->input_n);
       free(tm->recurrent_encoder->input_p);
-      free(tm->recurrent_encoder->state);
+      free(tm->recurrent_encoder->state_a);
+      free(tm->recurrent_encoder->state_n);
+      free(tm->recurrent_encoder->state_p);
       free(tm->recurrent_encoder);
       break;
     case TM_AUTO_ENCODER:
@@ -968,11 +1099,11 @@ static inline int tk_tsetlin_predict_classifier (lua_State *L, tsetlin_classifie
   lua_settop(L, 3);
   unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
   bool all_scores = lua_toboolean(L, 3);
+  long int *scores = tm->scores;
   if (!all_scores) {
-    lua_pushinteger(L, mc_tm_predict(tm, bm, NULL));
+    lua_pushinteger(L, mc_tm_predict(tm, bm));
   } else {
-    long int scores[tm->classes];
-    mc_tm_predict(tm, bm, scores);
+    mc_tm_predict(tm, bm);
     lua_newtable(L);
     for (unsigned int i = 0; i < tm->classes; i ++) {
       lua_pushinteger(L, i + 1);
@@ -992,10 +1123,15 @@ static inline int tk_tsetlin_predict_recurrent_classifier (lua_State *L, tsetlin
 
 static inline int tk_tsetlin_predict_encoder (lua_State *L, tsetlin_encoder_t *tm)
 {
+  fprintf(stderr, "test 1\n");
   lua_settop(L, 2);
+  fprintf(stderr, "test 2\n");
   unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
+  fprintf(stderr, "test 3\n");
   en_tm_encode(tm, bm, tm->encoding_a);
+  fprintf(stderr, "test 4\n");
   lua_pushlstring(L, (char *) tm->encoding_a, sizeof(unsigned int) * tm->encoding_chunks);
+  fprintf(stderr, "test 5\n");
   return 1;
 }
 
@@ -1003,8 +1139,10 @@ static inline int tk_tsetlin_predict_recurrent_encoder (lua_State *L, tsetlin_re
 {
   lua_settop(L, 2);
   luaL_checktype(L, 2, LUA_TTABLE);
-  re_tm_encode(L, tm, 2, tm->input_a, tm->state);
-  lua_pushlstring(L, (char *) tm->state, sizeof(unsigned int) * tm->encoder.encoding_chunks);
+  re_tm_encode(L, tm, 1, lua_objlen(L, 2), 2, &tm->state_a, &tm->state_a_size, &tm->state_a_max, tm->input_a);
+  unsigned int encoding_chunks = tm->encoder.encoding_chunks;
+  unsigned int *encoding_a = tm->state_a + (tm->state_a_size * encoding_chunks);
+  lua_pushlstring(L, (char *) encoding_a, sizeof(unsigned int) * encoding_chunks);
   return 1;
 }
 
@@ -1078,7 +1216,7 @@ static inline int tk_tsetlin_update_recurrent_classifier (lua_State *L, tsetlin_
 
 static inline int tk_tsetlin_update_encoder (lua_State *L, tsetlin_encoder_t *tm)
 {
-  lua_settop(L, 8);
+  lua_settop(L, 10);
   unsigned int *a = (unsigned int *) luaL_checkstring(L, 2);
   unsigned int *n = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *p = (unsigned int *) luaL_checkstring(L, 4);
@@ -1086,8 +1224,10 @@ static inline int tk_tsetlin_update_encoder (lua_State *L, tsetlin_encoder_t *tm
   double drop_clause = luaL_checknumber(L, 6);
   double margin = luaL_checknumber(L, 7);
   double loss_scale = luaL_checknumber(L, 8);
+  double loss_scale_min = luaL_checknumber(L, 9);
+  double loss_scale_max = luaL_checknumber(L, 10);
   mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
-  en_tm_update(tm, a, n, p, specificity, margin, loss_scale);
+  en_tm_update(tm, a, n, p, specificity, margin, loss_scale, loss_scale_min, loss_scale_max);
   return 0;
 }
 
@@ -1171,7 +1311,7 @@ static inline int tk_tsetlin_train_recurrent_classifier (lua_State *L, tsetlin_r
 
 static inline int tk_tsetlin_train_encoder (lua_State *L, tsetlin_encoder_t *tm)
 {
-  lua_settop(L, 9);
+  lua_settop(L, 11);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *as = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *ns = (unsigned int *) luaL_checkstring(L, 4);
@@ -1180,20 +1320,24 @@ static inline int tk_tsetlin_train_encoder (lua_State *L, tsetlin_encoder_t *tm)
   double drop_clause = luaL_checknumber(L, 7);
   double margin = luaL_checknumber(L, 8);
   double loss_scale = luaL_checknumber(L, 9);
+  double loss_scale_min = luaL_checknumber(L, 10);
+  double loss_scale_max = luaL_checknumber(L, 11);
   unsigned int input_chunks = tm->encoder.input_chunks;
   mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
   for (unsigned int i = 0; i < n; i ++) {
     unsigned int *a = &as[i * input_chunks];
     unsigned int *n = &ns[i * input_chunks];
     unsigned int *p = &ps[i * input_chunks];
-    en_tm_update(tm, a, n, p, specificity, margin, loss_scale);
+    en_tm_update(tm, a, n, p, specificity, margin, loss_scale, loss_scale_min, loss_scale_max);
   }
   return 0;
 }
 
-static inline int tk_tsetlin_train_recurrent_encoder (lua_State *L, tsetlin_recurrent_encoder_t *tm)
-{
-  lua_settop(L, 8);
+static inline int tk_tsetlin_train_recurrent_encoder (
+  lua_State *L,
+  tsetlin_recurrent_encoder_t *tm
+) {
+  lua_settop(L, 10);
   int i_aas = 2;
   int i_nns = 3;
   int i_pps = 4;
@@ -1204,12 +1348,14 @@ static inline int tk_tsetlin_train_recurrent_encoder (lua_State *L, tsetlin_recu
   double drop_clause = luaL_checknumber(L, 6);
   double margin = luaL_checknumber(L, 7);
   double loss_scale = luaL_checknumber(L, 8);
+  double loss_scale_min = luaL_checknumber(L, 9);
+  double loss_scale_max = luaL_checknumber(L, 10);
   mc_tm_initialize_drop_clause(&tm->encoder.encoder, drop_clause);
   for (unsigned int i = 1; i <= lua_objlen(L, i_aas); i ++) {
     lua_pushinteger(L, i); lua_gettable(L, i_aas);
     lua_pushinteger(L, i); lua_gettable(L, i_nns);
     lua_pushinteger(L, i); lua_gettable(L, i_pps);
-    re_tm_update(L, tm, -3, -2, -1, specificity, margin, loss_scale);
+    re_tm_update(L, tm, -3, -2, -1, specificity, margin, loss_scale, loss_scale_min, loss_scale_max);
     lua_pop(L, 3);
   }
   return 0;
@@ -1276,9 +1422,9 @@ static inline int tk_tsetlin_evaluate_classifier (lua_State *L, tsetlin_classifi
   unsigned int *ss = (unsigned int *) luaL_checkstring(L, 4);
   bool track_stats = tk_tsetlin_checkboolean(L, 5);
   unsigned int correct = 0;
-  unsigned int *confusion;
-  unsigned int *predictions;
-  unsigned int *observations;
+  unsigned int *confusion = NULL;
+  unsigned int *predictions = NULL;
+  unsigned int *observations = NULL;
   if (track_stats) {
     confusion = malloc(sizeof(unsigned int) * tm->classes * tm->classes);
     predictions = malloc(sizeof(unsigned int) * tm->classes);
@@ -1291,7 +1437,7 @@ static inline int tk_tsetlin_evaluate_classifier (lua_State *L, tsetlin_classifi
   }
   for (unsigned int i = 0; i < n; i ++) {
     unsigned int expected = ss[i];
-    unsigned int predicted = mc_tm_predict(tm, &ps[i * tm->input_chunks], NULL);
+    unsigned int predicted = mc_tm_predict(tm, &ps[i * tm->input_chunks]);
     if (expected == predicted)
       correct ++;
     if (track_stats) {
@@ -1401,9 +1547,6 @@ static inline int tk_tsetlin_evaluate_recurrent_encoder (lua_State *L, tsetlin_r
 
   unsigned int encoding_bits = tm->encoder.encoding_bits;
   unsigned int encoding_chunks = tm->encoder.encoding_chunks;
-  unsigned int *encoding_a = tm->encoder.encoding_a;
-  unsigned int *encoding_n = tm->encoder.encoding_n;
-  unsigned int *encoding_p = tm->encoder.encoding_p;
 
   unsigned int correct = 0;
   unsigned int n = lua_objlen(L, i_aas);
@@ -1413,9 +1556,12 @@ static inline int tk_tsetlin_evaluate_recurrent_encoder (lua_State *L, tsetlin_r
     lua_pushinteger(L, i); lua_gettable(L, i_aas);
     lua_pushinteger(L, i); lua_gettable(L, i_nns);
     lua_pushinteger(L, i); lua_gettable(L, i_pps);
-    re_tm_encode(L, tm, -3, tm->input_a, encoding_a);
-    re_tm_encode(L, tm, -2, tm->input_n, encoding_n);
-    re_tm_encode(L, tm, -1, tm->input_p, encoding_p);
+    re_tm_encode(L, tm, 1, lua_objlen(L, -3), -3, &tm->state_a, &tm->state_a_size, &tm->state_a_max, tm->input_a);
+    re_tm_encode(L, tm, 1, lua_objlen(L, -2), -2, &tm->state_n, &tm->state_n_size, &tm->state_n_max, tm->input_n);
+    re_tm_encode(L, tm, 1, lua_objlen(L, -1), -1, &tm->state_p, &tm->state_p_size, &tm->state_p_max, tm->input_p);
+    unsigned int *encoding_a = tm->state_a + (tm->state_a_size * encoding_chunks);
+    unsigned int *encoding_n = tm->state_n + (tm->state_n_size * encoding_chunks);
+    unsigned int *encoding_p = tm->state_p + (tm->state_p_size * encoding_chunks);
     lua_pop(L, 3);
     double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_bits, encoding_chunks, margin);
     if (loss == 0)
@@ -1703,7 +1849,15 @@ static inline void tk_tsetlin_load_recurrent_encoder (lua_State *L, FILE *fh)
   en->input_a = malloc(sizeof(unsigned int) * en->encoder.encoder.input_chunks);
   en->input_n = malloc(sizeof(unsigned int) * en->encoder.encoder.input_chunks);
   en->input_p = malloc(sizeof(unsigned int) * en->encoder.encoder.input_chunks);
-  en->state = malloc(sizeof(unsigned int) * en->encoder.encoding_chunks);
+  en->state_a_size = 0;
+  en->state_n_size = 0;
+  en->state_p_size = 0;
+  en->state_a_max = 0;
+  en->state_n_max = 0;
+  en->state_p_max = 0;
+  en->state_a = NULL;
+  en->state_n = NULL;
+  en->state_p = NULL;
   _tk_tsetlin_load_encoder(L, &en->encoder, fh);
 }
 
