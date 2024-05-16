@@ -4,6 +4,7 @@
   recurrent_encoder, autoencoder (requires different feedback logic)
 
 - Push training epoch loop into C so thread pool can be reused
+- Destroy, persist, load segfaults
 
 - Implement regressor
 - Add recurrent classifier, regressor
