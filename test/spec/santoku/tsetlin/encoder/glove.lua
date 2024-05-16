@@ -16,7 +16,7 @@ local ENCODED_BITS = 256
 local THRESHOLD_LEVELS = 10
 local TRAIN_TEST_RATIO = 0.5
 local MARGIN = 0.1
-local SIMILARITY_CUTOFF = 0.75
+local SIMILARITY_CUTOFF = 0.5
 local DISTANCE_CUTOFF = 0.5
 
 local CLAUSES = 80
@@ -24,6 +24,8 @@ local STATE_BITS = 8
 local THRESHOLD = 160
 local SPECIFICITY = 2
 local LOSS_SCALE = 0.5
+local LOSS_SCALE_MIN = 0
+local LOSS_SCALE_MAX = 1
 local DROP_CLAUSE = 0.5
 local BOOST_TRUE_POSITIVE = false
 
@@ -152,9 +154,9 @@ test("tsetlin", function ()
   print("Reading data")
   local dataset = read_data("test/res/santoku/tsetlin/glove.2500.txt", MAX_RECORDS)
 
-  print("Shuffling")
-  rand.seed()
-  arr.shuffle(dataset.as, dataset.ns, dataset.ps)
+  -- print("Shuffling")
+  -- rand.seed()
+  -- arr.shuffle(dataset.as, dataset.ns, dataset.ps)
 
   print("Splitting & packing")
   local n_train = num.floor(dataset.n_triplets * TRAIN_TEST_RATIO)
@@ -173,7 +175,7 @@ test("tsetlin", function ()
   for epoch = 1, MAX_EPOCHS do
 
     local start = os.clock()
-    tm.train(t, n_train, train_as, train_ns, train_ps, SPECIFICITY, DROP_CLAUSE, MARGIN, LOSS_SCALE)
+    tm.train(t, n_train, train_as, train_ns, train_ps, SPECIFICITY, DROP_CLAUSE, MARGIN, LOSS_SCALE, LOSS_SCALE_MIN, LOSS_SCALE_MAX)
     local duration = os.clock() - start
 
     if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
