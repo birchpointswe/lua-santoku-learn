@@ -447,7 +447,7 @@ static inline void tm_score (
 ) {
   long int *scores = tm->scores;
   unsigned int n_classes = tm->classes;
-  // #pragma omp parallel for
+  #pragma omp parallel for
   for (unsigned int class = 0; class < n_classes; class ++) {
     tm_calculate_clause_output(tm, class, input, true);
     scores[class] = sum_up_class_votes(tm, class, true);
@@ -725,9 +725,9 @@ static inline void re_tm_update (
   re_tm_encode(L, tm, 1, lua_objlen(L, i_ns), i_ns, &tm->state_n, &tm->state_n_size, &tm->state_n_max, tm->input_n);
   re_tm_encode(L, tm, 1, lua_objlen(L, i_ps), i_ps, &tm->state_p, &tm->state_p_size, &tm->state_p_max, tm->input_p);
 
-  unsigned int *encoding_a = tm->state_a + (tm->state_a_size * encoding_chunks);
-  unsigned int *encoding_n = tm->state_n + (tm->state_n_size * encoding_chunks);
-  unsigned int *encoding_p = tm->state_p + (tm->state_p_size * encoding_chunks);
+  unsigned int *encoding_a = tm->state_a + ((tm->state_a_size - 1) * encoding_chunks);
+  unsigned int *encoding_n = tm->state_n + ((tm->state_n_size - 1) * encoding_chunks);
+  unsigned int *encoding_p = tm->state_p + ((tm->state_p_size - 1) * encoding_chunks);
 
   double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_bits, encoding_chunks, margin);
   double loss_p = pow(loss, loss_scale);
@@ -1146,6 +1146,9 @@ static inline int tk_tsetlin_destroy (lua_State *L)
       break;
     case TM_RECURRENT_ENCODER:
       tk_tsetlin_destroy_classifier(&tm->recurrent_encoder->encoder.encoder);
+      free(tm->recurrent_encoder->encoder.encoding_a);
+      free(tm->recurrent_encoder->encoder.encoding_n);
+      free(tm->recurrent_encoder->encoder.encoding_p);
       free(tm->recurrent_encoder->input_a);
       free(tm->recurrent_encoder->input_n);
       free(tm->recurrent_encoder->input_p);
@@ -1216,7 +1219,7 @@ static inline int tk_tsetlin_predict_recurrent_encoder (lua_State *L, tsetlin_re
   luaL_checktype(L, 2, LUA_TTABLE);
   re_tm_encode(L, tm, 1, lua_objlen(L, 2), 2, &tm->state_a, &tm->state_a_size, &tm->state_a_max, tm->input_a);
   unsigned int encoding_chunks = tm->encoder.encoding_chunks;
-  unsigned int *encoding_a = tm->state_a + (tm->state_a_size * encoding_chunks);
+  unsigned int *encoding_a = tm->state_a + ((tm->state_a_size - 1) * encoding_chunks);
   lua_pushlstring(L, (char *) encoding_a, sizeof(unsigned int) * encoding_chunks);
   return 1;
 }
@@ -1432,7 +1435,7 @@ static inline int tk_tsetlin_train_recurrent_encoder (
     lua_pushinteger(L, i); lua_gettable(L, i_pps);
     re_tm_update(L, tm, -3, -2, -1, specificity, margin, loss_scale, loss_scale_min, loss_scale_max);
     lua_pop(L, 3);
-  }
+  }  
   return 0;
 }
 
@@ -1645,9 +1648,9 @@ static inline int tk_tsetlin_evaluate_recurrent_encoder (lua_State *L, tsetlin_r
     re_tm_encode(L, tm, 1, lua_objlen(L, -3), -3, &tm->state_a, &tm->state_a_size, &tm->state_a_max, tm->input_a);
     re_tm_encode(L, tm, 1, lua_objlen(L, -2), -2, &tm->state_n, &tm->state_n_size, &tm->state_n_max, tm->input_n);
     re_tm_encode(L, tm, 1, lua_objlen(L, -1), -1, &tm->state_p, &tm->state_p_size, &tm->state_p_max, tm->input_p);
-    unsigned int *encoding_a = tm->state_a + (tm->state_a_size * encoding_chunks);
-    unsigned int *encoding_n = tm->state_n + (tm->state_n_size * encoding_chunks);
-    unsigned int *encoding_p = tm->state_p + (tm->state_p_size * encoding_chunks);
+    unsigned int *encoding_a = tm->state_a + ((tm->state_a_size - 1) * encoding_chunks);
+    unsigned int *encoding_n = tm->state_n + ((tm->state_n_size - 1) * encoding_chunks);
+    unsigned int *encoding_p = tm->state_p + ((tm->state_p_size - 1) * encoding_chunks);
     lua_pop(L, 3);
     double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_bits, encoding_chunks, margin);
     if (loss == 0)
@@ -1883,18 +1886,18 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tsetlin_classifier
   tk_lua_fread(L, &tm->action_chunks, sizeof(tm->action_chunks), 1, fh);
   tk_lua_fread(L, &tm->filter, sizeof(tm->filter), 1, fh);
   tm->state = malloc(sizeof(*tm->state) * tm->state_chunks);
-  tk_lua_fread(L, tm->state, sizeof(*tm->state), tm->state_chunks, fh);
   tm->actions = malloc(sizeof(*tm->actions) * tm->action_chunks);
-  tk_lua_fread(L, tm->actions, sizeof(*tm->actions), tm->action_chunks, fh);
   tm->clause_output = malloc(sizeof(*tm->clause_output) * tm->clause_chunks * tm->classes);
-  tk_lua_fread(L, tm->clause_output, sizeof(*tm->clause_output), tm->clause_chunks, fh);
   tm->feedback_to_la = malloc(sizeof(*tm->feedback_to_la) * tm->input_chunks);
-  tk_lua_fread(L, tm->feedback_to_la, sizeof(*tm->feedback_to_la), tm->input_chunks, fh);
   tm->feedback_to_clauses = malloc(sizeof(*tm->feedback_to_clauses) * tm->clause_chunks);
-  tk_lua_fread(L, tm->feedback_to_clauses, sizeof(*tm->feedback_to_clauses), tm->clause_chunks, fh);
   tm->drop_clause = malloc(sizeof(*tm->drop_clause) * tm->clause_chunks);
-  tk_lua_fread(L, tm->drop_clause, sizeof(*tm->drop_clause), tm->clause_chunks, fh);
   tm->scores = malloc(sizeof(long int) * tm->classes);
+  tk_lua_fread(L, tm->state, sizeof(*tm->state), tm->state_chunks, fh);
+  tk_lua_fread(L, tm->actions, sizeof(*tm->actions), tm->action_chunks, fh);
+  tk_lua_fread(L, tm->clause_output, sizeof(*tm->clause_output), tm->clause_chunks, fh);
+  tk_lua_fread(L, tm->feedback_to_la, sizeof(*tm->feedback_to_la), tm->input_chunks, fh);
+  tk_lua_fread(L, tm->feedback_to_clauses, sizeof(*tm->feedback_to_clauses), tm->clause_chunks, fh);
+  tk_lua_fread(L, tm->drop_clause, sizeof(*tm->drop_clause), tm->clause_chunks, fh);
 }
 
 static inline void tk_tsetlin_load_classifier (lua_State *L, FILE *fh)
@@ -1914,9 +1917,9 @@ static inline void _tk_tsetlin_load_encoder (lua_State *L, tsetlin_encoder_t *en
   tk_lua_fread(L, &en->encoding_bits, sizeof(en->encoding_bits), 1, fh);
   tk_lua_fread(L, &en->encoding_chunks, sizeof(en->encoding_chunks), 1, fh);
   tk_lua_fread(L, &en->encoding_filter, sizeof(en->encoding_filter), 1, fh);
-  en->encoding_a = malloc(en->encoding_chunks * sizeof(*en->encoding_a) * CHAR_BIT);
-  en->encoding_n = malloc(en->encoding_chunks * sizeof(*en->encoding_n) * CHAR_BIT);
-  en->encoding_p = malloc(en->encoding_chunks * sizeof(*en->encoding_p) * CHAR_BIT);
+  en->encoding_a = malloc(en->encoding_chunks * sizeof(unsigned int));
+  en->encoding_n = malloc(en->encoding_chunks * sizeof(unsigned int));
+  en->encoding_p = malloc(en->encoding_chunks * sizeof(unsigned int));
   _tk_tsetlin_load_classifier(L, &en->encoder, fh);
 }
 
@@ -1933,9 +1936,7 @@ static inline void tk_tsetlin_load_recurrent_encoder (lua_State *L, FILE *fh)
   tsetlin_recurrent_encoder_t *en = tm->recurrent_encoder;
   tk_lua_fread(L, &en->token_bits, sizeof(en->token_bits), 1, fh);
   tk_lua_fread(L, &en->token_chunks, sizeof(en->token_chunks), 1, fh);
-  en->input_a = malloc(sizeof(unsigned int) * en->encoder.encoder.input_chunks);
-  en->input_n = malloc(sizeof(unsigned int) * en->encoder.encoder.input_chunks);
-  en->input_p = malloc(sizeof(unsigned int) * en->encoder.encoder.input_chunks);
+  _tk_tsetlin_load_encoder(L, &en->encoder, fh);
   en->state_a_size = 0;
   en->state_n_size = 0;
   en->state_p_size = 0;
@@ -1945,7 +1946,9 @@ static inline void tk_tsetlin_load_recurrent_encoder (lua_State *L, FILE *fh)
   en->state_a = NULL;
   en->state_n = NULL;
   en->state_p = NULL;
-  _tk_tsetlin_load_encoder(L, &en->encoder, fh);
+  en->input_a = malloc(sizeof(unsigned int) * en->encoder.encoder.input_chunks);
+  en->input_n = malloc(sizeof(unsigned int) * en->encoder.encoder.input_chunks);
+  en->input_p = malloc(sizeof(unsigned int) * en->encoder.encoder.input_chunks);
 }
 
 static inline void tk_tsetlin_load_auto_encoder (lua_State *L, FILE *fh)
