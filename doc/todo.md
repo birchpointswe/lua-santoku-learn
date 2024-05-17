@@ -3,7 +3,8 @@
 - Pass arguments as a table
 - Consider pushing train & evaluate loops to C
 - Shuffle every epoch
-- Destroy, persist, load segfaults
+- Multi-threaded mini batches: calculate loss for a batch before individually
+  aplying feedback
 
 - Implement regressor
 - Add recurrent classifier, regressor
@@ -23,7 +24,6 @@
     - Triples memory usage
 
 - Titanic dataset
-- Mini batches
 
 # Old, Reconsider
 
