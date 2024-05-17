@@ -1,5 +1,6 @@
 # Now
 
+- Pass arguments as a table
 - Consider pushing train & evaluate loops to C
 - Shuffle every epoch
 - Destroy, persist, load segfaults
