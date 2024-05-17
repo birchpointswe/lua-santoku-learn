@@ -482,7 +482,6 @@ static inline void ae_tm_decode (
   unsigned int *encoding = tm->encoding;
   unsigned int *decoding = tm->decoding;
 
-  // TODO: #pragma omp parallel for
   for (unsigned int i = 0; i < decoder_classes; i ++)
   {
     unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
@@ -505,7 +504,6 @@ static inline void ae_tm_encode (
   unsigned int *encoding = tm->encoding;
   long int *scores = tm->encoder.scores;
   tm_score(&tm->encoder, input);
-  // TODO: #pragma omp parallel for
   for (unsigned int i = 0; i < encoder_classes; i ++)
   {
     unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
@@ -527,7 +525,6 @@ static inline void en_tm_encode (
   unsigned int encoder_classes = tm->encoder.classes;
   long int *scores = tm->encoder.scores;
   tm_score(&tm->encoder, input);
-  // TODO: #pragma omp parallel for
   for (unsigned int i = 0; i < encoder_classes; i ++)
   {
     unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
@@ -593,7 +590,6 @@ static inline void ae_tm_update (
   tsetlin_classifier_t *decoder = &tm->decoder;
   tsetlin_classifier_t *encoder = &tm->encoder;
 
-  // TODO: #pragma omp parallel for
   for (unsigned int i = 0; i < decoder_classes; i ++)
   {
     unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
@@ -606,7 +602,6 @@ static inline void ae_tm_update (
     // encoding? This just uses the expected output.
     // TODO: Should we re-use the existing calculated clause output? This
     // currently re-encodes the input.
-    // TODO: #pragma omp parallel for
     for (unsigned int j = 0; j < encoder_classes; j ++)
       tm_update(encoder, j, input, expected, specificity);
   }
@@ -644,7 +639,6 @@ static inline void en_tm_update (
     loss_p < loss_scale_min ? loss_scale_min : loss_p;
 
   if (loss > 0) {
-    // TODO: #pragma omp parallel for
     for (unsigned int i = 0; i < classes; i ++) {
       unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
       unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
@@ -684,7 +678,7 @@ static inline void re_tm_update_recompute (
 ) {
   unsigned int n_words = lua_objlen(L, i_xs);
   for (unsigned int word = 1; word <= n_words; word ++) {
-    #pragma omp parallel for
+    // #pragma omp parallel for
     for (unsigned int bit = 0; bit < encoding_bits; bit ++) {
       if (((float) fast_rand()) / ((float) UINT32_MAX) < loss_p) {
         unsigned int chunk = bit / (sizeof(unsigned int) * CHAR_BIT);
@@ -1985,6 +1979,7 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tsetlin_classifier
   tk_lua_fread(L, tm->feedback_to_clauses, sizeof(*tm->feedback_to_clauses), tm->clause_chunks, fh);
   tm->drop_clause = malloc(sizeof(*tm->drop_clause) * tm->clause_chunks);
   tk_lua_fread(L, tm->drop_clause, sizeof(*tm->drop_clause), tm->clause_chunks, fh);
+  tm->scores = malloc(sizeof(long int) * tm->classes);
 }
 
 static inline void tk_tsetlin_load_classifier (lua_State *L, FILE *fh)
