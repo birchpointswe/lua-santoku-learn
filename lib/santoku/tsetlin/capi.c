@@ -447,7 +447,7 @@ static inline void tm_score (
 ) {
   long int *scores = tm->scores;
   unsigned int n_classes = tm->classes;
-  #pragma omp parallel for
+  // #pragma omp parallel for
   for (unsigned int class = 0; class < n_classes; class ++) {
     tm_calculate_clause_output(tm, class, input, true);
     scores[class] = sum_up_class_votes(tm, class, true);
@@ -678,7 +678,6 @@ static inline void re_tm_update_recompute (
 ) {
   unsigned int n_words = lua_objlen(L, i_xs);
   for (unsigned int word = 1; word <= n_words; word ++) {
-    // #pragma omp parallel for
     for (unsigned int bit = 0; bit < encoding_bits; bit ++) {
       if (((float) fast_rand()) / ((float) UINT32_MAX) < loss_p) {
         unsigned int chunk = bit / (sizeof(unsigned int) * CHAR_BIT);
@@ -858,7 +857,7 @@ static inline void tk_tsetlin_create_classifier (lua_State *L, tsetlin_classifie
       tk_tsetlin_checkboolean(L, 6));
 }
 
-static inline int tk_tsetlin_create_recurrent_classifier (lua_State *L, tsetlin_recurrent_classifier_t *)
+static inline int tk_tsetlin_create_recurrent_classifier (lua_State *L, tsetlin_recurrent_classifier_t *tm)
 {
   // TODO
   luaL_error(L, "unimplemented: create recurrent classifier");
@@ -956,14 +955,14 @@ static inline int tk_tsetlin_create_auto_encoder (lua_State *L, tsetlin_auto_enc
   return 0;
 }
 
-static inline int tk_tsetlin_create_regressor (lua_State *L, tsetlin_regressor_t *)
+static inline int tk_tsetlin_create_regressor (lua_State *L, tsetlin_regressor_t *tm)
 {
   // TODO
   luaL_error(L, "unimplemented: create regressor");
   return 0;
 }
 
-static inline int tk_tsetlin_create_recurrent_regressor (lua_State *L, tsetlin_recurrent_regressor_t *)
+static inline int tk_tsetlin_create_recurrent_regressor (lua_State *L, tsetlin_recurrent_regressor_t *tm)
 {
   // TODO
   luaL_error(L, "unimplemented: create recurrent regressor");
@@ -1195,7 +1194,7 @@ static inline int tk_tsetlin_predict_classifier (lua_State *L, tsetlin_classifie
   return 1;
 }
 
-static inline int tk_tsetlin_predict_recurrent_classifier (lua_State *L, tsetlin_recurrent_classifier_t *)
+static inline int tk_tsetlin_predict_recurrent_classifier (lua_State *L, tsetlin_recurrent_classifier_t *tm)
 {
   // TODO
   luaL_error(L, "unimplemented: predict recurrent classifier");
@@ -1231,14 +1230,14 @@ static inline int tk_tsetlin_predict_auto_encoder (lua_State *L, tsetlin_auto_en
   return 1;
 }
 
-static inline int tk_tsetlin_predict_regressor (lua_State *L, tsetlin_regressor_t *)
+static inline int tk_tsetlin_predict_regressor (lua_State *L, tsetlin_regressor_t *tm)
 {
   // TODO
   luaL_error(L, "unimplemented: predict regressor");
   return 0;
 }
 
-static inline int tk_tsetlin_predict_recurrent_regressor (lua_State *L, tsetlin_recurrent_regressor_t *)
+static inline int tk_tsetlin_predict_recurrent_regressor (lua_State *L, tsetlin_recurrent_regressor_t *tm)
 {
   // TODO
   luaL_error(L, "unimplemented: predict recurrent regressor");
@@ -1283,7 +1282,7 @@ static inline int tk_tsetlin_update_classifier (lua_State *L, tsetlin_classifier
   return 0;
 }
 
-static inline int tk_tsetlin_update_recurrent_classifier (lua_State *L, tsetlin_recurrent_classifier_t *)
+static inline int tk_tsetlin_update_recurrent_classifier (lua_State *L, tsetlin_recurrent_classifier_t *tm)
 {
   // TODO
   luaL_error(L, "unimplemented: update recurrent classifier");
@@ -1307,7 +1306,7 @@ static inline int tk_tsetlin_update_encoder (lua_State *L, tsetlin_encoder_t *tm
   return 0;
 }
 
-static inline int tk_tsetlin_update_recurrent_encoder (lua_State *L, tsetlin_recurrent_encoder_t *)
+static inline int tk_tsetlin_update_recurrent_encoder (lua_State *L, tsetlin_recurrent_encoder_t *tm)
 {
   // TODO
   luaL_error(L, "unimplemented: update recurrent encoder");
@@ -1326,14 +1325,14 @@ static inline int tk_tsetlin_update_auto_encoder (lua_State *L, tsetlin_auto_enc
   return 0;
 }
 
-static inline int tk_tsetlin_update_regressor (lua_State *L, tsetlin_regressor_t *)
+static inline int tk_tsetlin_update_regressor (lua_State *L, tsetlin_regressor_t *tm)
 {
   // TODO
   luaL_error(L, "unimplemented: update regressor");
   return 0;
 }
 
-static inline int tk_tsetlin_update_recurrent_regressor (lua_State *L, tsetlin_recurrent_regressor_t *)
+static inline int tk_tsetlin_update_recurrent_regressor (lua_State *L, tsetlin_recurrent_regressor_t *tm)
 {
   // TODO
   luaL_error(L, "unimplemented: update recurrent regressor");
@@ -1366,63 +1365,45 @@ static inline int tk_tsetlin_update (lua_State *L)
 
 static inline int tk_tsetlin_train_classifier (lua_State *L, tsetlin_classifier_t *tm)
 {
-  #pragma omp parallel
-  {
-    #pragma omp master
-    {
-      lua_settop(L, 6);
-      unsigned int n = tk_tsetlin_checkunsigned(L, 2);
-      unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
-      unsigned int *ss = (unsigned int *) luaL_checkstring(L, 4);
-      double specificity = luaL_checknumber(L, 5);
-      double drop_clause = luaL_checknumber(L, 6);
-      mc_tm_initialize_drop_clause(tm, drop_clause);
-      for (unsigned int i = 0; i < n; i ++)
-        mc_tm_update(tm, &ps[i * tm->input_chunks], ss[i], specificity);
-    }
-  }
+  lua_settop(L, 6);
+  unsigned int n = tk_tsetlin_checkunsigned(L, 2);
+  unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
+  unsigned int *ss = (unsigned int *) luaL_checkstring(L, 4);
+  double specificity = luaL_checknumber(L, 5);
+  double drop_clause = luaL_checknumber(L, 6);
+  mc_tm_initialize_drop_clause(tm, drop_clause);
+  for (unsigned int i = 0; i < n; i ++)
+    mc_tm_update(tm, &ps[i * tm->input_chunks], ss[i], specificity);
   return 0;
 }
 
-static inline int tk_tsetlin_train_recurrent_classifier (lua_State *L, tsetlin_recurrent_classifier_t *)
+static inline int tk_tsetlin_train_recurrent_classifier (lua_State *L, tsetlin_recurrent_classifier_t *tm)
 {
   // TODO
   luaL_error(L, "unimplemented: train recurrent classifier");
-  #pragma omp parallel
-  {
-    #pragma omp master
-    {
-    }
-  }
   return 0;
 }
 
 static inline int tk_tsetlin_train_encoder (lua_State *L, tsetlin_encoder_t *tm)
 {
-  #pragma omp parallel
-  {
-    #pragma omp master
-    {
-      lua_settop(L, 11);
-      unsigned int n = tk_tsetlin_checkunsigned(L, 2);
-      unsigned int *as = (unsigned int *) luaL_checkstring(L, 3);
-      unsigned int *ns = (unsigned int *) luaL_checkstring(L, 4);
-      unsigned int *ps = (unsigned int *) luaL_checkstring(L, 5);
-      double specificity = luaL_checknumber(L, 6);
-      double drop_clause = luaL_checknumber(L, 7);
-      double margin = luaL_checknumber(L, 8);
-      double loss_scale = luaL_checknumber(L, 9);
-      double loss_scale_min = luaL_checknumber(L, 10);
-      double loss_scale_max = luaL_checknumber(L, 11);
-      unsigned int input_chunks = tm->encoder.input_chunks;
-      mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
-      for (unsigned int i = 0; i < n; i ++) {
-        unsigned int *a = &as[i * input_chunks];
-        unsigned int *n = &ns[i * input_chunks];
-        unsigned int *p = &ps[i * input_chunks];
-        en_tm_update(tm, a, n, p, specificity, margin, loss_scale, loss_scale_min, loss_scale_max);
-      }
-    }
+  lua_settop(L, 11);
+  unsigned int n = tk_tsetlin_checkunsigned(L, 2);
+  unsigned int *as = (unsigned int *) luaL_checkstring(L, 3);
+  unsigned int *ns = (unsigned int *) luaL_checkstring(L, 4);
+  unsigned int *ps = (unsigned int *) luaL_checkstring(L, 5);
+  double specificity = luaL_checknumber(L, 6);
+  double drop_clause = luaL_checknumber(L, 7);
+  double margin = luaL_checknumber(L, 8);
+  double loss_scale = luaL_checknumber(L, 9);
+  double loss_scale_min = luaL_checknumber(L, 10);
+  double loss_scale_max = luaL_checknumber(L, 11);
+  unsigned int input_chunks = tm->encoder.input_chunks;
+  mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
+  for (unsigned int i = 0; i < n; i ++) {
+    unsigned int *a = &as[i * input_chunks];
+    unsigned int *n = &ns[i * input_chunks];
+    unsigned int *p = &ps[i * input_chunks];
+    en_tm_update(tm, a, n, p, specificity, margin, loss_scale, loss_scale_min, loss_scale_max);
   }
   return 0;
 }
@@ -1431,81 +1412,57 @@ static inline int tk_tsetlin_train_recurrent_encoder (
   lua_State *L,
   tsetlin_recurrent_encoder_t *tm
 ) {
-  #pragma omp parallel
-  {
-    #pragma omp master
-    {
-      lua_settop(L, 10);
-      int i_aas = 2;
-      int i_nns = 3;
-      int i_pps = 4;
-      luaL_checktype(L, i_aas, LUA_TTABLE);
-      luaL_checktype(L, i_nns, LUA_TTABLE);
-      luaL_checktype(L, i_pps, LUA_TTABLE);
-      double specificity = luaL_checknumber(L, 5);
-      double drop_clause = luaL_checknumber(L, 6);
-      double margin = luaL_checknumber(L, 7);
-      double loss_scale = luaL_checknumber(L, 8);
-      double loss_scale_min = luaL_checknumber(L, 9);
-      double loss_scale_max = luaL_checknumber(L, 10);
-      mc_tm_initialize_drop_clause(&tm->encoder.encoder, drop_clause);
-      for (unsigned int i = 1; i <= lua_objlen(L, i_aas); i ++) {
-        lua_pushinteger(L, i); lua_gettable(L, i_aas);
-        lua_pushinteger(L, i); lua_gettable(L, i_nns);
-        lua_pushinteger(L, i); lua_gettable(L, i_pps);
-        re_tm_update(L, tm, -3, -2, -1, specificity, margin, loss_scale, loss_scale_min, loss_scale_max);
-        lua_pop(L, 3);
-      }
-    }
+  lua_settop(L, 10);
+  int i_aas = 2;
+  int i_nns = 3;
+  int i_pps = 4;
+  luaL_checktype(L, i_aas, LUA_TTABLE);
+  luaL_checktype(L, i_nns, LUA_TTABLE);
+  luaL_checktype(L, i_pps, LUA_TTABLE);
+  double specificity = luaL_checknumber(L, 5);
+  double drop_clause = luaL_checknumber(L, 6);
+  double margin = luaL_checknumber(L, 7);
+  double loss_scale = luaL_checknumber(L, 8);
+  double loss_scale_min = luaL_checknumber(L, 9);
+  double loss_scale_max = luaL_checknumber(L, 10);
+  mc_tm_initialize_drop_clause(&tm->encoder.encoder, drop_clause);
+  for (unsigned int i = 1; i <= lua_objlen(L, i_aas); i ++) {
+    lua_pushinteger(L, i); lua_gettable(L, i_aas);
+    lua_pushinteger(L, i); lua_gettable(L, i_nns);
+    lua_pushinteger(L, i); lua_gettable(L, i_pps);
+    re_tm_update(L, tm, -3, -2, -1, specificity, margin, loss_scale, loss_scale_min, loss_scale_max);
+    lua_pop(L, 3);
   }
   return 0;
 }
 
 static inline int tk_tsetlin_train_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
 {
-  #pragma omp parallel
-  {
-    #pragma omp master
-    {
-      lua_settop(L, 5);
-      unsigned int n = tk_tsetlin_checkunsigned(L, 2);
-      unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
-      double specificity = luaL_checknumber(L, 4);
-      double drop_clause = luaL_checknumber(L, 5);
-      // TODO: Should the drop clause be shared? Does that make more sense for an
-      // auto_encoder?
-      mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
-      mc_tm_initialize_drop_clause(&tm->decoder, drop_clause);
-      for (unsigned int i = 0; i < n; i ++)
-        ae_tm_update(tm, &ps[i * tm->encoder.input_chunks], specificity);
-    }
-  }
+  lua_settop(L, 5);
+  unsigned int n = tk_tsetlin_checkunsigned(L, 2);
+  unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
+  double specificity = luaL_checknumber(L, 4);
+  double drop_clause = luaL_checknumber(L, 5);
+  // TODO: Should the drop clause be shared? Does that make more sense for an
+  // auto_encoder?
+  mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
+  mc_tm_initialize_drop_clause(&tm->decoder, drop_clause);
+  for (unsigned int i = 0; i < n; i ++)
+    ae_tm_update(tm, &ps[i * tm->encoder.input_chunks], specificity);
   return 0;
 }
 
-static inline int tk_tsetlin_train_regressor (lua_State *L, tsetlin_regressor_t *)
+static inline int tk_tsetlin_train_regressor (lua_State *L, tsetlin_regressor_t *tm)
 {
   // TODO
   luaL_error(L, "unimplemented: train regressor");
-  #pragma omp parallel
-  {
-    #pragma omp master
-    {
-    }
-  }
   return 0;
 }
 
-static inline int tk_tsetlin_train_recurrent_regressor (lua_State *L, tsetlin_recurrent_regressor_t *)
+static inline int tk_tsetlin_train_recurrent_regressor (lua_State *L, tsetlin_recurrent_regressor_t *tm)
 {
   // TODO
   luaL_error(L, "unimplemented: train recurrent regressor");
-  #pragma omp parallel
-  {
-    #pragma omp master
-    {
-    }
-  }
   return 0;
 }
 
@@ -1560,22 +1517,16 @@ static inline int tk_tsetlin_evaluate_classifier (
     memset(observations, 0, sizeof(unsigned int) * classes);
   }
 
-  #pragma omp parallel
-  {
-    #pragma omp master
-    {
-      for (unsigned int i = 0; i < n; i ++) {
-        unsigned int expected = ss[i];
-        unsigned int predicted = mc_tm_predict(tm, &ps[i * input_chunks]);
-        if (expected == predicted)
-          correct ++;
-        if (track_stats) {
-          observations[expected] ++;
-          predictions[predicted] ++;
-          if (expected != predicted)
-            confusion[expected * classes + predicted] ++;
-        }
-      }
+  for (unsigned int i = 0; i < n; i ++) {
+    unsigned int expected = ss[i];
+    unsigned int predicted = mc_tm_predict(tm, &ps[i * input_chunks]);
+    if (expected == predicted)
+      correct ++;
+    if (track_stats) {
+      observations[expected] ++;
+      predictions[predicted] ++;
+      if (expected != predicted)
+        confusion[expected * classes + predicted] ++;
     }
   }
 
@@ -1626,16 +1577,10 @@ static inline int tk_tsetlin_evaluate_classifier (
   }
 }
 
-static inline int tk_tsetlin_evaluate_recurrent_classifier (lua_State *L, tsetlin_recurrent_classifier_t *)
+static inline int tk_tsetlin_evaluate_recurrent_classifier (lua_State *L, tsetlin_recurrent_classifier_t *tm)
 {
   // TODO
   luaL_error(L, "unimplemented: evaluate recurrent classifier");
-  #pragma omp parallel
-  {
-    #pragma omp master
-    {
-    }
-  }
   return 0;
 }
 
@@ -1658,23 +1603,17 @@ static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *
 
   unsigned int correct = 0;
 
-  #pragma omp parallel
+  for (unsigned int i = 0; i < n; i ++)
   {
-    #pragma omp master
-    {
-      for (unsigned int i = 0; i < n; i ++)
-      {
-        unsigned int *a = &as[i * input_chunks];
-        unsigned int *n = &ns[i * input_chunks];
-        unsigned int *p = &ps[i * input_chunks];
-        en_tm_encode(tm, a, encoding_a);
-        en_tm_encode(tm, n, encoding_n);
-        en_tm_encode(tm, p, encoding_p);
-        double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_bits, encoding_chunks, margin);
-        if (loss == 0)
-          correct ++;
-      }
-    }
+    unsigned int *a = &as[i * input_chunks];
+    unsigned int *n = &ns[i * input_chunks];
+    unsigned int *p = &ps[i * input_chunks];
+    en_tm_encode(tm, a, encoding_a);
+    en_tm_encode(tm, n, encoding_n);
+    en_tm_encode(tm, p, encoding_p);
+    double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_bits, encoding_chunks, margin);
+    if (loss == 0)
+      correct ++;
   }
 
   lua_pushnumber(L, (double) correct / n);
@@ -1698,27 +1637,21 @@ static inline int tk_tsetlin_evaluate_recurrent_encoder (lua_State *L, tsetlin_r
   unsigned int correct = 0;
   unsigned int n = lua_objlen(L, i_aas);
 
-  #pragma omp parallel
+  for (unsigned int i = 1; i <= n; i ++)
   {
-    #pragma omp master
-    {
-      for (unsigned int i = 1; i <= n; i ++)
-      {
-        lua_pushinteger(L, i); lua_gettable(L, i_aas);
-        lua_pushinteger(L, i); lua_gettable(L, i_nns);
-        lua_pushinteger(L, i); lua_gettable(L, i_pps);
-        re_tm_encode(L, tm, 1, lua_objlen(L, -3), -3, &tm->state_a, &tm->state_a_size, &tm->state_a_max, tm->input_a);
-        re_tm_encode(L, tm, 1, lua_objlen(L, -2), -2, &tm->state_n, &tm->state_n_size, &tm->state_n_max, tm->input_n);
-        re_tm_encode(L, tm, 1, lua_objlen(L, -1), -1, &tm->state_p, &tm->state_p_size, &tm->state_p_max, tm->input_p);
-        unsigned int *encoding_a = tm->state_a + (tm->state_a_size * encoding_chunks);
-        unsigned int *encoding_n = tm->state_n + (tm->state_n_size * encoding_chunks);
-        unsigned int *encoding_p = tm->state_p + (tm->state_p_size * encoding_chunks);
-        lua_pop(L, 3);
-        double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_bits, encoding_chunks, margin);
-        if (loss == 0)
-          correct ++;
-      }
-    }
+    lua_pushinteger(L, i); lua_gettable(L, i_aas);
+    lua_pushinteger(L, i); lua_gettable(L, i_nns);
+    lua_pushinteger(L, i); lua_gettable(L, i_pps);
+    re_tm_encode(L, tm, 1, lua_objlen(L, -3), -3, &tm->state_a, &tm->state_a_size, &tm->state_a_max, tm->input_a);
+    re_tm_encode(L, tm, 1, lua_objlen(L, -2), -2, &tm->state_n, &tm->state_n_size, &tm->state_n_max, tm->input_n);
+    re_tm_encode(L, tm, 1, lua_objlen(L, -1), -1, &tm->state_p, &tm->state_p_size, &tm->state_p_max, tm->input_p);
+    unsigned int *encoding_a = tm->state_a + (tm->state_a_size * encoding_chunks);
+    unsigned int *encoding_n = tm->state_n + (tm->state_n_size * encoding_chunks);
+    unsigned int *encoding_p = tm->state_p + (tm->state_p_size * encoding_chunks);
+    lua_pop(L, 3);
+    double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_bits, encoding_chunks, margin);
+    if (loss == 0)
+      correct ++;
   }
 
   lua_pushnumber(L, (double) correct / n);
@@ -1738,47 +1671,29 @@ static inline int tk_tsetlin_evaluate_auto_encoder (lua_State *L, tsetlin_auto_e
   unsigned int total_bits = n * input_bits;
   unsigned int total_correct = total_bits;
 
-  #pragma omp parallel
+  for (unsigned int i = 0; i < n; i ++)
   {
-    #pragma omp master
-    {
-      for (unsigned int i = 0; i < n; i ++)
-      {
-        unsigned int *input = &ps[i * input_chunks];
-        ae_tm_encode(tm, input);
-        ae_tm_decode(tm);
-        total_correct -= hamming(input, decoding, input_chunks);
-      }
-    }
+    unsigned int *input = &ps[i * input_chunks];
+    ae_tm_encode(tm, input);
+    ae_tm_decode(tm);
+    total_correct -= hamming(input, decoding, input_chunks);
   }
 
   lua_pushnumber(L, (double) total_correct / (double) total_bits);
   return 1;
 }
 
-static inline int tk_tsetlin_evaluate_regressor (lua_State *L, tsetlin_regressor_t *)
+static inline int tk_tsetlin_evaluate_regressor (lua_State *L, tsetlin_regressor_t *tm)
 {
   // TODO
   luaL_error(L, "unimplemented: evaluate regressor");
-  #pragma omp parallel
-  {
-    #pragma omp master
-    {
-    }
-  }
   return 0;
 }
 
-static inline int tk_tsetlin_evaluate_recurrent_regressor (lua_State *L, tsetlin_recurrent_regressor_t *)
+static inline int tk_tsetlin_evaluate_recurrent_regressor (lua_State *L, tsetlin_recurrent_regressor_t *tm)
 {
   // TODO
   luaL_error(L, "unimplemented: evaluate recurrent regressor");
-  #pragma omp parallel
-  {
-    #pragma omp master
-    {
-    }
-  }
   return 0;
 }
 
@@ -1988,7 +1903,7 @@ static inline void tk_tsetlin_load_classifier (lua_State *L, FILE *fh)
   _tk_tsetlin_load_classifier(L, tm->classifier, fh);
 }
 
-static inline void tk_tsetlin_load_recurrent_classifier (lua_State *L, FILE *)
+static inline void tk_tsetlin_load_recurrent_classifier (lua_State *L, FILE *fh)
 {
   // TODO
   luaL_error(L, "unimplemented: load recurrent classifier");
@@ -2050,7 +1965,7 @@ static inline void tk_tsetlin_load_regressor (lua_State *L, FILE *fh)
   _tk_tsetlin_load_classifier(L, &rg->classifier, fh);
 }
 
-static inline void tk_tsetlin_load_recurrent_regressor (lua_State *L, FILE *)
+static inline void tk_tsetlin_load_recurrent_regressor (lua_State *L, FILE *fh)
 {
   // TODO
   luaL_error(L, "unimplemented: load recurrent regressor");
