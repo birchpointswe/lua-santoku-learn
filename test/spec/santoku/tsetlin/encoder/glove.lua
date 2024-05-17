@@ -32,7 +32,6 @@ local BOOST_TRUE_POSITIVE = false
 local EVALUATE_EVERY = 10
 local MAX_RECORDS = nil
 local MAX_EPOCHS = 5
--- local MAX_EPOCHS = 100
 
 local function read_data (fp, max)
 
@@ -154,9 +153,9 @@ test("tsetlin", function ()
   print("Reading data")
   local dataset = read_data("test/res/santoku/tsetlin/glove.2500.txt", MAX_RECORDS)
 
-  -- print("Shuffling")
-  -- rand.seed()
-  -- arr.shuffle(dataset.as, dataset.ns, dataset.ps)
+  print("Shuffling")
+  rand.seed()
+  arr.shuffle(dataset.as, dataset.ns, dataset.ps)
 
   print("Splitting & packing")
   local n_train = num.floor(dataset.n_triplets * TRAIN_TEST_RATIO)
@@ -174,17 +173,19 @@ test("tsetlin", function ()
   print("Training")
   for epoch = 1, MAX_EPOCHS do
 
-    local start = os.clock()
-    tm.train(t, n_train, train_as, train_ns, train_ps, SPECIFICITY, DROP_CLAUSE, MARGIN, LOSS_SCALE, LOSS_SCALE_MIN, LOSS_SCALE_MAX)
-    local duration = os.clock() - start
+    local start = os.time()
+    tm.train(t, n_train, train_as, train_ns, train_ps,
+      SPECIFICITY, DROP_CLAUSE, MARGIN,
+      LOSS_SCALE, LOSS_SCALE_MIN, LOSS_SCALE_MAX)
+    local duration = os.time() - start
 
     if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
       local test_score = tm.evaluate(t, n_test, test_as, test_ns, test_ps, MARGIN)
       local train_score = tm.evaluate(t, n_train, train_as, train_ns, train_ps, MARGIN)
-      str.printf("Epoch %-4d  Time %f  Test %4.2f  Train %4.2f\n",
+      str.printf("Epoch %-4d  Time %d  Test %4.2f  Train %4.2f\n",
         epoch, duration, test_score, train_score)
     else
-      str.printf("Epoch %-4d  Time %f\n",
+      str.printf("Epoch %-4d  Time %d\n",
         epoch, duration)
     end
 
