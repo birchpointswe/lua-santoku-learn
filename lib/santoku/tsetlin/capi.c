@@ -447,7 +447,6 @@ static inline void tm_score (
 ) {
   long int *scores = tm->scores;
   unsigned int n_classes = tm->classes;
-  #pragma omp parallel for
   for (unsigned int class = 0; class < n_classes; class ++) {
     tm_calculate_clause_output(tm, class, input, true);
     scores[class] = sum_up_class_votes(tm, class, true);
