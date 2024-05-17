@@ -1435,7 +1435,7 @@ static inline int tk_tsetlin_train_recurrent_encoder (
     lua_pushinteger(L, i); lua_gettable(L, i_pps);
     re_tm_update(L, tm, -3, -2, -1, specificity, margin, loss_scale, loss_scale_min, loss_scale_max);
     lua_pop(L, 3);
-  }  
+  }
   return 0;
 }
 
