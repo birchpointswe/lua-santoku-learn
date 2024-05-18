@@ -554,27 +554,30 @@ static inline void re_tm_encode (
   unsigned int *states_max,
   unsigned int *input
 ) {
+  tsetlin_encoder_t *encoder = &tm->encoder;
+  unsigned int token_chunks = tm->token_chunks;
+  unsigned int encoding_chunks = encoder->encoding_chunks;
   *states_size = x_len + 1;
   if (*states_size > *states_max) {
     *states_max = *states_size;
-    *states = realloc(*states, tm->encoder.encoding_chunks * (*states_size) * sizeof(unsigned int));
+    *states = realloc(*states, encoding_chunks * (*states_size) * sizeof(unsigned int));
   }
   if (x_first == 1)  {
-    memset((*states), 0, tm->encoder.encoding_chunks * sizeof(unsigned int));
+    memset((*states), 0, encoding_chunks * sizeof(unsigned int));
   }
   unsigned int off_token0 = 0;
-  unsigned int off_token1 = off_token0 + tm->token_chunks;
-  unsigned int off_state0 = off_token1 + tm->token_chunks;
-  unsigned int off_state1 = off_state0 + tm->encoder.encoding_chunks;
+  unsigned int off_token1 = off_token0 + token_chunks;
+  unsigned int off_state0 = off_token1 + token_chunks;
+  unsigned int off_state1 = off_state0 + encoding_chunks;
   for (unsigned int i = x_first; i <= x_len; i ++) {
-    unsigned int *x = x_data + tm->token_chunks;
-    memcpy(input + off_token0, x, tm->token_chunks * sizeof(unsigned int));
-    memcpy(input + off_token1, x, tm->token_chunks * sizeof(unsigned int));
-    flip_bits(input + off_token1, tm->token_chunks);
-    memcpy(input + off_state0, (*states) + (tm->encoder.encoding_chunks * (i - 1)), tm->encoder.encoding_chunks * sizeof(unsigned int));
-    memcpy(input + off_state1, (*states) + (tm->encoder.encoding_chunks * (i - 1)), tm->encoder.encoding_chunks * sizeof(unsigned int));
-    flip_bits(input + off_state1, tm->encoder.encoding_chunks);
-    en_tm_encode(&tm->encoder, input, (*states) + (tm->encoder.encoding_chunks * i));
+    unsigned int *x = x_data + token_chunks * (i - 1);
+    memcpy(input + off_token0, x, token_chunks * sizeof(unsigned int));
+    memcpy(input + off_token1, x, token_chunks * sizeof(unsigned int));
+    flip_bits(input + off_token1, token_chunks);
+    memcpy(input + off_state0, (*states) + (encoding_chunks * (i - 1)), encoding_chunks * sizeof(unsigned int));
+    memcpy(input + off_state1, (*states) + (encoding_chunks * (i - 1)), encoding_chunks * sizeof(unsigned int));
+    flip_bits(input + off_state1, encoding_chunks);
+    en_tm_encode(encoder, input, (*states) + (encoding_chunks * i));
   }
 }
 
@@ -1393,25 +1396,24 @@ static inline int tk_tsetlin_train_encoder (
   lua_State *L,
   tsetlin_encoder_t *tm
 ) {
-  lua_settop(L, 11);
+  lua_settop(L, 10);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
-  unsigned int *as = (unsigned int *) luaL_checkstring(L, 3);
-  unsigned int *ns = (unsigned int *) luaL_checkstring(L, 4);
-  unsigned int *ps = (unsigned int *) luaL_checkstring(L, 5);
-  double specificity = luaL_checknumber(L, 6);
-  double drop_clause = luaL_checknumber(L, 7);
-  double margin = luaL_checknumber(L, 8);
-  double loss_scale = luaL_checknumber(L, 9);
-  double loss_scale_min = luaL_checknumber(L, 10);
-  double loss_scale_max = luaL_checknumber(L, 11);
+  unsigned int *indices = (unsigned int *) luaL_checkstring(L, 3);
+  unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 4);
+  double specificity = luaL_checknumber(L, 5);
+  double drop_clause = luaL_checknumber(L, 6);
+  double margin = luaL_checknumber(L, 7);
+  double loss_scale = luaL_checknumber(L, 8);
+  double loss_scale_min = luaL_checknumber(L, 9);
+  double loss_scale_max = luaL_checknumber(L, 10);
   mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
   unsigned int clause_chunks = tm->encoder.clause_chunks;
   unsigned int input_chunks = tm->encoder.input_chunks;
   #pragma omp parallel for
   for (unsigned int i = 0; i < n; i ++) {
-    unsigned int *a = as + i * input_chunks;
-    unsigned int *n = ns + i * input_chunks;
-    unsigned int *p = ps + i * input_chunks;
+    unsigned int *a = tokens + (indices[i * 3 + 0] * input_chunks);
+    unsigned int *n = tokens + (indices[i * 3 + 1] * input_chunks);
+    unsigned int *p = tokens + (indices[i * 3 + 2] * input_chunks);
     unsigned int clause_output[clause_chunks];
     unsigned int feedback_to_clauses[clause_chunks];
     unsigned int feedback_to_la[input_chunks];
@@ -1424,23 +1426,16 @@ static inline int tk_tsetlin_train_recurrent_encoder (
   lua_State *L,
   tsetlin_recurrent_encoder_t *tm
 ) {
-  lua_settop(L, 17);
+  lua_settop(L, 10);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
-  unsigned int *a_lens = (unsigned int *) luaL_checkstring(L, 3);
-  unsigned int *a_offsets = (unsigned int *) luaL_checkstring(L, 4);
-  unsigned int *a_bms = (unsigned int *) luaL_checkstring(L, 5);
-  unsigned int *n_lens = (unsigned int *) luaL_checkstring(L, 6);
-  unsigned int *n_offsets = (unsigned int *) luaL_checkstring(L, 7);
-  unsigned int *n_bms = (unsigned int *) luaL_checkstring(L, 8);
-  unsigned int *p_lens = (unsigned int *) luaL_checkstring(L, 9);
-  unsigned int *p_offsets = (unsigned int *) luaL_checkstring(L, 10);
-  unsigned int *p_bms = (unsigned int *) luaL_checkstring(L, 11);
-  double specificity = luaL_checknumber(L, 12);
-  double drop_clause = luaL_checknumber(L, 13);
-  double margin = luaL_checknumber(L, 14);
-  double loss_scale = luaL_checknumber(L, 15);
-  double loss_scale_min = luaL_checknumber(L, 16);
-  double loss_scale_max = luaL_checknumber(L, 17);
+  unsigned int *indices = (unsigned int *) luaL_checkstring(L, 3);
+  unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 4);
+  double specificity = luaL_checknumber(L, 5);
+  double drop_clause = luaL_checknumber(L, 6);
+  double margin = luaL_checknumber(L, 7);
+  double loss_scale = luaL_checknumber(L, 8);
+  double loss_scale_min = luaL_checknumber(L, 9);
+  double loss_scale_max = luaL_checknumber(L, 10);
   unsigned int clause_chunks = tm->encoder.encoder.clause_chunks;
   unsigned int input_chunks = tm->encoder.encoder.input_chunks;
   unsigned int token_chunks = tm->token_chunks;
@@ -1460,15 +1455,15 @@ static inline int tk_tsetlin_train_recurrent_encoder (
     unsigned int state_p_max = 0;
     for (unsigned int i = thread_id; i < n; i += n_threads)
     {
-      unsigned int a_len = a_lens[i];
-      unsigned int n_len = n_lens[i];
-      unsigned int p_len = p_lens[i];
-      unsigned int a_offset = a_offsets[i];
-      unsigned int n_offset = n_offsets[i];
-      unsigned int p_offset = p_offsets[i];
-      unsigned int *a_data = a_bms + a_offset * token_chunks;
-      unsigned int *n_data = n_bms + n_offset * token_chunks;
-      unsigned int *p_data = p_bms + p_offset * token_chunks;
+      unsigned int a_offset = indices[i * 6 + 0];
+      unsigned int a_len = indices[i * 6 + 1];
+      unsigned int *a_data = tokens + a_offset;
+      unsigned int n_offset = indices[i * 6 + 2];
+      unsigned int n_len = indices[i * 6 + 3];
+      unsigned int *n_data = tokens + n_offset;
+      unsigned int p_offset = indices[i * 6 + 4];
+      unsigned int p_len = indices[i * 6 + 5];
+      unsigned int *p_data = tokens + p_offset;
       unsigned int clause_output[clause_chunks];
       unsigned int feedback_to_clauses[clause_chunks];
       unsigned int feedback_to_la[input_chunks];
@@ -1650,12 +1645,11 @@ static inline int tk_tsetlin_evaluate_recurrent_classifier (lua_State *L, tsetli
 
 static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *tm)
 {
-  lua_settop(L, 6);
+  lua_settop(L, 5);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
-  unsigned int *as = (unsigned int *) luaL_checkstring(L, 3);
-  unsigned int *ns = (unsigned int *) luaL_checkstring(L, 4);
-  unsigned int *ps = (unsigned int *) luaL_checkstring(L, 5);
-  double margin = luaL_checknumber(L, 6);
+  unsigned int *indices = (unsigned int *) luaL_checkstring(L, 3);
+  unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 4);
+  double margin = luaL_checknumber(L, 5);
   tsetlin_classifier_t *encoder = &tm->encoder;
   unsigned int encoding_bits = tm->encoding_bits;
   unsigned int encoding_chunks = tm->encoding_chunks;
@@ -1666,9 +1660,9 @@ static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *
   #pragma omp parallel for
   for (unsigned int i = 0; i < n; i ++)
   {
-    unsigned int *a = &as[i * input_chunks];
-    unsigned int *n = &ns[i * input_chunks];
-    unsigned int *p = &ps[i * input_chunks];
+    unsigned int *a = tokens + (indices[i * 3 + 0] * input_chunks);
+    unsigned int *n = tokens + (indices[i * 3 + 1] * input_chunks);
+    unsigned int *p = tokens + (indices[i * 3 + 2] * input_chunks);
     unsigned int encoding_a[encoding_chunks];
     unsigned int encoding_n[encoding_chunks];
     unsigned int encoding_p[encoding_chunks];
@@ -1689,18 +1683,11 @@ static inline int tk_tsetlin_evaluate_recurrent_encoder (
   lua_State *L,
   tsetlin_recurrent_encoder_t *tm
 ) {
-  lua_settop(L, 12);
+  lua_settop(L, 5);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
-  unsigned int *a_lens = (unsigned int *) luaL_checkstring(L, 3);
-  unsigned int *a_offsets = (unsigned int *) luaL_checkstring(L, 4);
-  unsigned int *a_bms = (unsigned int *) luaL_checkstring(L, 5);
-  unsigned int *n_lens = (unsigned int *) luaL_checkstring(L, 6);
-  unsigned int *n_offsets = (unsigned int *) luaL_checkstring(L, 7);
-  unsigned int *n_bms = (unsigned int *) luaL_checkstring(L, 8);
-  unsigned int *p_lens = (unsigned int *) luaL_checkstring(L, 9);
-  unsigned int *p_offsets = (unsigned int *) luaL_checkstring(L, 10);
-  unsigned int *p_bms = (unsigned int *) luaL_checkstring(L, 11);
-  double margin = luaL_checknumber(L, 12);
+  unsigned int *indices = (unsigned int *) luaL_checkstring(L, 3);
+  unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 4);
+  double margin = luaL_checknumber(L, 5);
   unsigned int encoding_bits = tm->encoder.encoding_bits;
   unsigned int encoding_chunks = tm->encoder.encoding_chunks;
   unsigned int input_chunks = tm->encoder.encoder.input_chunks;
@@ -1721,15 +1708,15 @@ static inline int tk_tsetlin_evaluate_recurrent_encoder (
     unsigned int state_p_max = 0;
     for (unsigned int i = thread_id; i < n; i += n_threads)
     {
-      unsigned int a_len = a_lens[i];
-      unsigned int n_len = n_lens[i];
-      unsigned int p_len = p_lens[i];
-      unsigned int a_offset = a_offsets[i];
-      unsigned int n_offset = n_offsets[i];
-      unsigned int p_offset = p_offsets[i];
-      unsigned int *a_data = a_bms + a_offset * token_chunks;
-      unsigned int *n_data = n_bms + n_offset * token_chunks;
-      unsigned int *p_data = p_bms + p_offset * token_chunks;
+      unsigned int a_offset = indices[i * 6 + 0];
+      unsigned int a_len = indices[i * 6 + 1];
+      unsigned int *a_data = tokens + a_offset;
+      unsigned int n_offset = indices[i * 6 + 2];
+      unsigned int n_len = indices[i * 6 + 3];
+      unsigned int *n_data = tokens + n_offset;
+      unsigned int p_offset = indices[i * 6 + 4];
+      unsigned int p_len = indices[i * 6 + 5];
+      unsigned int *p_data = tokens + p_offset;
       unsigned int input_a[input_chunks];
       unsigned int input_n[input_chunks];
       unsigned int input_p[input_chunks];
