@@ -11,7 +11,7 @@ local rand = require("santoku.random")
 local num = require("santoku.num")
 local err = require("santoku.error")
 
-local ENCODED_BITS = 160
+local ENCODED_BITS = 32
 local THRESHOLD_LEVELS = 2
 local TRAIN_TEST_RATIO = 0.5
 
