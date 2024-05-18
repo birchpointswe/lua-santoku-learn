@@ -12,16 +12,16 @@ local rand = require("santoku.random")
 local num = require("santoku.num")
 local err = require("santoku.error")
 
-local ENCODED_BITS = 256
+local ENCODED_BITS = 128
 local THRESHOLD_LEVELS = 10
 local TRAIN_TEST_RATIO = 0.5
 local MARGIN = 0.1
 local SIMILARITY_CUTOFF = 0.75
 local DISTANCE_CUTOFF = 0.5
 
-local CLAUSES = 80
+local CLAUSES = 40
 local STATE_BITS = 8
-local THRESHOLD = 200
+local THRESHOLD = 400
 local SPECIFICITY = 2
 local LOSS_SCALE = 0.75
 local LOSS_SCALE_MIN = 0
@@ -31,7 +31,7 @@ local BOOST_TRUE_POSITIVE = false
 
 local EVALUATE_EVERY = 10
 local MAX_RECORDS = nil
-local MAX_EPOCHS = 100
+local MAX_EPOCHS = 1000
 
 local function read_data (fp, max)
 

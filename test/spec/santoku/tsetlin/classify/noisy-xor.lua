@@ -9,14 +9,14 @@ local arr = require("santoku.array")
 local rand = require("santoku.random")
 
 local CLASSES = 2
-local FEATURES = 1214
-local CLAUSES = 200
+local FEATURES = 12
+local CLAUSES = 80
 local STATE_BITS = 8
 local THRESHOLD = 40
 local SPECIFICITY = 3.9
 local DROP_CLAUSE = 0.85
 local BOOST_TRUE_POSITIVE = false
-local MAX_EPOCHS = 10
+local MAX_EPOCHS = 20
 
 local function read_data (fp, max)
   local problems = {}
@@ -70,10 +70,10 @@ test("tsetlin", function ()
   print("Train", #train_problems)
   print("Test", #test_problems)
 
-  print("Shuffling")
-  rand.seed()
-  arr.shuffle(train_problems, train_solutions)
-  arr.shuffle(test_problems, test_solutions)
+  -- print("Shuffling")
+  -- rand.seed()
+  -- arr.shuffle(train_problems, train_solutions)
+  -- arr.shuffle(test_problems, test_solutions)
 
   print("Packing data")
   local train_problems_packed, train_solutions_packed = pack_data(train_problems, train_solutions)
