@@ -554,6 +554,8 @@ static inline void re_tm_encode (
   unsigned int *states_max,
   unsigned int *input
 ) {
+  if (x_first > x_len)
+    return;
   tsetlin_encoder_t *encoder = &tm->encoder;
   unsigned int token_chunks = tm->token_chunks;
   unsigned int encoding_chunks = encoder->encoding_chunks;
@@ -1455,13 +1457,13 @@ static inline int tk_tsetlin_train_recurrent_encoder (
     unsigned int state_p_max = 0;
     for (unsigned int i = thread_id; i < n; i += n_threads)
     {
-      unsigned int a_offset = indices[i * 6 + 0];
+      unsigned int a_offset = indices[i * 6 + 0] * token_chunks;
       unsigned int a_len = indices[i * 6 + 1];
       unsigned int *a_data = tokens + a_offset;
-      unsigned int n_offset = indices[i * 6 + 2];
+      unsigned int n_offset = indices[i * 6 + 2] * token_chunks;
       unsigned int n_len = indices[i * 6 + 3];
       unsigned int *n_data = tokens + n_offset;
-      unsigned int p_offset = indices[i * 6 + 4];
+      unsigned int p_offset = indices[i * 6 + 4] * token_chunks;
       unsigned int p_len = indices[i * 6 + 5];
       unsigned int *p_data = tokens + p_offset;
       unsigned int clause_output[clause_chunks];
@@ -1708,13 +1710,13 @@ static inline int tk_tsetlin_evaluate_recurrent_encoder (
     unsigned int state_p_max = 0;
     for (unsigned int i = thread_id; i < n; i += n_threads)
     {
-      unsigned int a_offset = indices[i * 6 + 0];
+      unsigned int a_offset = indices[i * 6 + 0] * token_chunks;
       unsigned int a_len = indices[i * 6 + 1];
       unsigned int *a_data = tokens + a_offset;
-      unsigned int n_offset = indices[i * 6 + 2];
+      unsigned int n_offset = indices[i * 6 + 2] * token_chunks;
       unsigned int n_len = indices[i * 6 + 3];
       unsigned int *n_data = tokens + n_offset;
-      unsigned int p_offset = indices[i * 6 + 4];
+      unsigned int p_offset = indices[i * 6 + 4] * token_chunks;
       unsigned int p_len = indices[i * 6 + 5];
       unsigned int *p_data = tokens + p_offset;
       unsigned int input_a[input_chunks];
@@ -1731,11 +1733,11 @@ static inline int tk_tsetlin_evaluate_recurrent_encoder (
         #pragma omp atomic
         correct ++;
     }
+    // Can we do this without heap mem? re_tm_encode uses these
     free(state_a);
     free(state_n);
     free(state_p);
   }
-
   lua_pushnumber(L, (double) correct / n);
   return 1;
 }
