@@ -67,6 +67,8 @@ test("tsetlin", function ()
     read_data("test/res/santoku/tsetlin/NoisyXORTrainingData.txt", MAX)
   local test_problems, test_solutions =
     read_data("test/res/santoku/tsetlin/NoisyXORTestData.txt", MAX)
+  print("Train", #train_problems)
+  print("Test", #test_problems)
 
   print("Shuffling")
   rand.seed()
