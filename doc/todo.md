@@ -1,10 +1,10 @@
 # Now
 
+- Implement scale_loss/min/max for auto_encoder
+
 - Pass arguments as a table
 - Consider pushing train & evaluate loops to C
 - Shuffle every epoch
-- Multi-threaded mini batches: calculate loss for a batch before individually
-  aplying feedback
 
 - Implement regressor
 - Add recurrent classifier, regressor
@@ -24,8 +24,3 @@
     - Triples memory usage
 
 - Titanic dataset
-
-# Old, Reconsider
-
-- User-specified hamming vs jaccard similarity metric for encoder,
-  recurrent_encoder, autoencoder (requires different feedback logic)
