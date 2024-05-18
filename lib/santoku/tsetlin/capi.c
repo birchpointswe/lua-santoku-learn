@@ -840,12 +840,6 @@ static inline void tk_tsetlin_init_classifier (
   tm->state = malloc(sizeof(unsigned int) * tm->state_chunks);
   tm->actions = malloc(sizeof(unsigned int) * tm->action_chunks);
   tm->drop_clause = malloc(sizeof(unsigned int) * tm->clause_chunks);
-  // tm->clause_output = malloc(sizeof(unsigned int) * tm->clause_chunks * classes);
-  // tm->feedback_to_la = malloc(sizeof(unsigned int) * tm->input_chunks);
-  // tm->feedback_to_clauses = malloc(sizeof(unsigned int) * tm->clause_chunks);
-  // tm->scores = malloc(sizeof(long int) * classes);
-  // if (!(tm->drop_clause && tm->state && tm->clause_output && tm->feedback_to_la && tm->feedback_to_clauses))
-  //   luaL_error(L, "error in malloc during creation of classifier");
   if (!(tm->drop_clause && tm->state && tm->actions))
     luaL_error(L, "error in malloc during creation of classifier");
   for (unsigned int i = 0; i < tm->classes; i ++)
