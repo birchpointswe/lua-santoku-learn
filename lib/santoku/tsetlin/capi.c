@@ -741,7 +741,6 @@ static inline void re_tm_update (
   double loss_scale_min,
   double loss_scale_max
 ) {
-
   tsetlin_classifier_t *encoder = &tm->encoder.encoder;
   unsigned int encoding_bits = tm->encoder.encoding_bits;
   unsigned int encoding_chunks = tm->encoder.encoding_chunks;
