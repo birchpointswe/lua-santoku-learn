@@ -1431,6 +1431,7 @@ static inline int tk_tsetlin_train_encoder (
     free(clause_output);
     free(feedback_to_clauses);
     free(feedback_to_la);
+    free(scores);
   }
   return 0;
 }
