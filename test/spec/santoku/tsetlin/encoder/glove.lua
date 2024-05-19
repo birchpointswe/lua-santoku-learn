@@ -31,7 +31,7 @@ local BOOST_TRUE_POSITIVE = false
 
 local EVALUATE_EVERY = 10
 local MAX_RECORDS = nil
-local MAX_EPOCHS = 1000
+local MAX_EPOCHS = 100
 
 local function read_data (fp, max)
 
