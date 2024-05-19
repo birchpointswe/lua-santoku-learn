@@ -1,12 +1,12 @@
 # Now
 
-- Implement scale_loss/min/max for auto_encoder
 - Parallelize classes during predict/update single, parallelize examples during
   training
 
 - Pass arguments as a table
 - Consider pushing train & evaluate loops to C
 - Shuffle every epoch
+- Re-use threads across epochs
 
 - Implement regressor
 - Add recurrent classifier, regressor
