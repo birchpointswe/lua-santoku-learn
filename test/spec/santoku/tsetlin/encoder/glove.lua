@@ -12,7 +12,7 @@ local rand = require("santoku.random")
 local num = require("santoku.num")
 local err = require("santoku.error")
 
-local ENCODED_BITS = 128
+local ENCODED_BITS = 256
 local THRESHOLD_LEVELS = 10
 local TRAIN_TEST_RATIO = 0.5
 local MARGIN = 0.1
@@ -21,9 +21,9 @@ local DISTANCE_CUTOFF = 0.5
 
 local CLAUSES = 40
 local STATE_BITS = 8
-local THRESHOLD = 400
+local THRESHOLD = 200
 local SPECIFICITY = 2
-local LOSS_SCALE = 0.75
+local LOSS_SCALE = 0.825
 local LOSS_SCALE_MIN = 0
 local LOSS_SCALE_MAX = 1
 local DROP_CLAUSE = 0.75
@@ -142,10 +142,11 @@ local function read_data (fp, max)
 end
 
 local function split_dataset (dataset, s, e)
-  local as = bm.raw_matrix(dataset.as, dataset.n_features * 2, s, e)
-  local ns = bm.raw_matrix(dataset.ns, dataset.n_features * 2, s, e)
-  local ps = bm.raw_matrix(dataset.ps, dataset.n_features * 2, s, e)
-  return as, ns, ps
+  local tokens = {}
+  for i = s, e do
+    arr.push(tokens, dataset.as[i], dataset.ns[i], dataset.ps[i])
+  end
+  return bm.raw_matrix(tokens, dataset.n_features * 2)
 end
 
 test("tsetlin", function ()
@@ -160,8 +161,8 @@ test("tsetlin", function ()
   print("Splitting & packing")
   local n_train = num.floor(dataset.n_triplets * TRAIN_TEST_RATIO)
   local n_test = dataset.n_triplets - n_train
-  local train_as, train_ns, train_ps = split_dataset(dataset, 1, n_train)
-  local test_as, test_ns, test_ps = split_dataset(dataset, n_train + 1, n_train + n_test)
+  local train_tokens = split_dataset(dataset, 1, n_train)
+  local test_tokens = split_dataset(dataset, n_train + 1, n_train + n_test)
 
   print("Input Features", dataset.n_features * 2)
   print("Encoded Features", ENCODED_BITS)
@@ -174,14 +175,14 @@ test("tsetlin", function ()
   for epoch = 1, MAX_EPOCHS do
 
     local start = os.time()
-    tm.train(t, n_train, train_as, train_ns, train_ps,
+    tm.train(t, n_train, train_tokens,
       SPECIFICITY, DROP_CLAUSE, MARGIN,
       LOSS_SCALE, LOSS_SCALE_MIN, LOSS_SCALE_MAX)
     local duration = os.time() - start
 
     if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
-      local test_score = tm.evaluate(t, n_test, test_as, test_ns, test_ps, MARGIN)
-      local train_score = tm.evaluate(t, n_train, train_as, train_ns, train_ps, MARGIN)
+      local test_score = tm.evaluate(t, n_test, test_tokens, MARGIN)
+      local train_score = tm.evaluate(t, n_train, train_tokens, MARGIN)
       str.printf("Epoch %-4d  Time %d  Test %4.2f  Train %4.2f\n",
         epoch, duration, test_score, train_score)
     else
