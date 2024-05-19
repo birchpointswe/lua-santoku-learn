@@ -1,9 +1,6 @@
 # Now
 
 - Configurable number of threads. No pthreads at all when 0
-- Queue-based threading: set counter to n, each thread takes a record,
-  decrements the count, processes the record, and repeats. When counter is 0,
-  thread exits.
 - Parallelize classes during predict/update single, parallelize examples during
   training
 
