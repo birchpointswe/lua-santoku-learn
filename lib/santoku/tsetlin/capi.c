@@ -1632,10 +1632,10 @@ static void *evaluate_classifier_thread (void *arg)
     if (expected == predicted)
       (*data->correct) += 1;
     if (data->track_stats) {
-      *data->observations[expected] ++;
-      *data->predictions[predicted] ++;
+      (*data->observations)[expected] ++;
+      (*data->predictions)[predicted] ++;
       if (expected != predicted)
-        *data->confusion[expected * classes + predicted] ++;
+        (*data->confusion)[expected * classes + predicted] ++;
     }
     pthread_mutex_unlock(data->lock);
   }
