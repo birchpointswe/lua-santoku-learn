@@ -1,6 +1,7 @@
 /*
 
-Copyright (C) 20e4 Birch Point SWE (Lua integration, train/evaluate, drop clause, autoencoder, regressor)
+Copyright (C) 2024 Birch Point SWE (Lua integration, train/evaluate, drop clause, autoencoder, regressor)
+Copyright (C) 2024 Birch Point SWE (recurrence, loss scaling, multi-threading, auto-vectorizer support)
 Copyright (C) 2019 Ole-Christoffer Granmo (Original classifier C implementation)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
