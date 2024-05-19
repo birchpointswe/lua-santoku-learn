@@ -1434,6 +1434,7 @@ static inline int tk_tsetlin_train_classifier (lua_State *L, tsetlin_classifier_
       return tk_error(L, "pthread_create", errno);
   }
 
+  // TODO: Ensure these get freed on error above
   for (unsigned int i = 0; i < cores; i++)
     if (pthread_join(threads[i], NULL) != 0)
       return tk_error(L, "pthread_join", errno);
@@ -1694,6 +1695,8 @@ static inline int tk_tsetlin_evaluate_classifier (
       return tk_error(L, "pthread_create", errno);
   }
 
+  // TODO: Ensure these get freed on error above
+  pthread_mutex_destroy(&lock);
   for (unsigned int i = 0; i < cores; i++)
     if (pthread_join(threads[i], NULL) != 0)
       return tk_error(L, "pthread_join", errno);
