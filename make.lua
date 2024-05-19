@@ -5,8 +5,8 @@ local env = {
   variable_prefix = "TK_TSETLIN",
   public = true,
 
-  cflags = { "-march=native", "-Ofast", "-fopenmp", "-ffast-math", "-Wall", "-Wextra", "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow", "-Wpointer-sign" },
-  ldflags = { "-march=native", "-Ofast", "-fopenmp", },
+  cflags = { "-march=native", "-Ofast", "-ffast-math", "-Wall", "-Wextra", "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow", "-Wpointer-sign" },
+  ldflags = { "-march=native", "-Ofast", "-lpthread", },
 
   dependencies = {
     "lua >= 5.1",
@@ -14,8 +14,8 @@ local env = {
   },
 
   test = {
-    cflags = { "-fopt-info-vec=optimize.txt", "-fopt-info-vec-missed=optimize.txt", "-g3", "-O0" },
-    ldflags = { "-fopt-info-vec=optimize.txt", "-fopt-info-vec-missed=optimize.txt", "-g3", "-O0" },
+    cflags = { "-fopt-info-vec=optimize.txt", "-fopt-info-vec-missed=optimize.txt" },
+    ldflags = { "-fopt-info-vec=optimize.txt", "-fopt-info-vec-missed=optimize.txt" },
     dependencies = {
       "luacov >= 0.15.0-1",
       "santoku-bitmap >= 0.0.9-1",
