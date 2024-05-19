@@ -1450,6 +1450,39 @@ static inline int tk_tsetlin_train_recurrent_classifier (lua_State *L, tsetlin_r
   return 0;
 }
 
+typedef struct {
+  tsetlin_encoder_t *tm;
+  unsigned int n;
+  unsigned int *tokens;
+  double specificity;
+  double margin;
+  double loss_scale;
+  double loss_scale_min;
+  double loss_scale_max;
+  unsigned int thread_id;
+  unsigned int n_threads;
+} train_encoder_thread_data_t;
+
+static void *train_encoder_thread (void *arg)
+{
+  train_encoder_thread_data_t *data = (train_encoder_thread_data_t *) arg;
+  unsigned int clause_chunks = data->tm->encoder.clause_chunks;
+  unsigned int encoder_classes = data->tm->encoder.classes;
+  unsigned int input_chunks = data->tm->encoder.input_chunks;
+  unsigned int clause_output[clause_chunks];
+  unsigned int feedback_to_clauses[clause_chunks];
+  unsigned int feedback_to_la[input_chunks];
+  long int scores[encoder_classes];
+  for (unsigned int i = data->thread_id; i < data->n; i += data->n_threads) {
+    unsigned int *a = data->tokens + ((i * 3 + 0) * input_chunks);
+    unsigned int *n = data->tokens + ((i * 3 + 1) * input_chunks);
+    unsigned int *p = data->tokens + ((i * 3 + 2) * input_chunks);
+    en_tm_update(data->tm, a, n, p,
+        clause_output, feedback_to_clauses, feedback_to_la, scores,
+        data->specificity, data->margin, data->loss_scale, data->loss_scale_min, data->loss_scale_max);
+  }
+}
+
 static inline int tk_tsetlin_train_encoder (
   lua_State *L,
   tsetlin_encoder_t *tm
@@ -1463,24 +1496,35 @@ static inline int tk_tsetlin_train_encoder (
   double loss_scale = luaL_checknumber(L, 7);
   double loss_scale_min = luaL_checknumber(L, 8);
   double loss_scale_max = luaL_checknumber(L, 9);
-  unsigned int clause_chunks = tm->encoder.clause_chunks;
-  unsigned int encoder_classes = tm->encoder.classes;
-  unsigned int input_chunks = tm->encoder.input_chunks;
   mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
 
-  // TODO: pthreads
-  // unsigned int thread_id = (unsigned int) omp_get_thread_num();
-  // unsigned int n_threads = (unsigned int) omp_get_num_threads();
-  // unsigned int clause_output[clause_chunks];
-  // unsigned int feedback_to_clauses[clause_chunks];
-  // unsigned int feedback_to_la[input_chunks];
-  // long int scores[encoder_classes];
-  // for (unsigned int i = thread_id; i < n; i += n_threads) {
-  //   unsigned int *a = tokens + ((i * 3 + 0) * input_chunks);
-  //   unsigned int *n = tokens + ((i * 3 + 1) * input_chunks);
-  //   unsigned int *p = tokens + ((i * 3 + 2) * input_chunks);
-  //   en_tm_update(tm, a, n, p, clause_output, feedback_to_clauses, feedback_to_la, scores, specificity, margin, loss_scale, loss_scale_min, loss_scale_max);
-  // }
+  long cores = sysconf(_SC_NPROCESSORS_ONLN);
+  if (cores <= 0)
+    return tk_error(L, "sysconf", errno);
+
+  pthread_t threads[cores];
+  train_encoder_thread_data_t thread_data[cores];
+
+  for (unsigned int i = 0; i < cores; i++) {
+    thread_data[i].tm = tm;
+    thread_data[i].n = n;
+    thread_data[i].tokens = tokens;
+    thread_data[i].specificity = specificity;
+    thread_data[i].margin = margin;
+    thread_data[i].loss_scale = loss_scale;
+    thread_data[i].loss_scale_min = loss_scale_min;
+    thread_data[i].loss_scale_max = loss_scale_max;
+    thread_data[i].thread_id = i;
+    thread_data[i].n_threads = cores;
+    if (pthread_create(&threads[i], NULL, train_encoder_thread, &thread_data[i]) != 0)
+      return tk_error(L, "pthread_create", errno);
+  }
+
+  // TODO: Ensure these get freed on error above
+  for (unsigned int i = 0; i < cores; i++)
+    if (pthread_join(threads[i], NULL) != 0)
+      return tk_error(L, "pthread_join", errno);
+
 
   return 0;
 }
@@ -1701,6 +1745,7 @@ static inline int tk_tsetlin_evaluate_classifier (
   for (unsigned int i = 0; i < cores; i++)
     if (pthread_join(threads[i], NULL) != 0)
       return tk_error(L, "pthread_join", errno);
+
   pthread_mutex_destroy(&lock);
 
   lua_pushnumber(L, correct);
@@ -1757,6 +1802,42 @@ static inline int tk_tsetlin_evaluate_recurrent_classifier (lua_State *L, tsetli
   return 0;
 }
 
+typedef struct {
+  tsetlin_encoder_t *tm;
+  unsigned int n;
+  unsigned int *tokens;
+  double margin;
+  unsigned int thread_id;
+  unsigned int n_threads;
+  unsigned int *correct;
+  pthread_mutex_t *lock;
+} evaluate_encoder_thread_data_t;
+
+static void *evaluate_encoder_thread (void *arg)
+{
+  evaluate_encoder_thread_data_t *data = (evaluate_encoder_thread_data_t *) arg;
+  unsigned int encoding_a[data->tm->encoding_chunks];
+  unsigned int encoding_n[data->tm->encoding_chunks];
+  unsigned int encoding_p[data->tm->encoding_chunks];
+  long int scores[data->tm->encoder.classes];
+  for (unsigned int i = data->thread_id; i < data->n; i += data->n_threads)
+  {
+    unsigned int *a = data->tokens + ((i * 3 + 0) * data->tm->encoder.input_chunks);
+    unsigned int *n = data->tokens + ((i * 3 + 1) * data->tm->encoder.input_chunks);
+    unsigned int *p = data->tokens + ((i * 3 + 2) * data->tm->encoder.input_chunks);
+    en_tm_encode(data->tm, a, encoding_a, scores);
+    en_tm_encode(data->tm, n, encoding_n, scores);
+    en_tm_encode(data->tm, p, encoding_p, scores);
+    double loss = triplet_loss(encoding_a, encoding_n, encoding_p, data->tm->encoding_bits, data->tm->encoding_chunks, data->margin);
+    if (loss == 0)
+    {
+      pthread_mutex_lock(data->lock);
+      (*data->correct) += 1;
+      pthread_mutex_unlock(data->lock);
+    }
+  }
+}
+
 static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *tm)
 {
   lua_settop(L, 4);
@@ -1770,26 +1851,34 @@ static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *
 
   unsigned int correct = 0;
 
-  // TODO: pthreads
-  // unsigned int thread_id = (unsigned int) omp_get_thread_num();
-  // unsigned int n_threads = (unsigned int) omp_get_num_threads();
-  // unsigned int encoding_a[tm->encoding_chunks];
-  // unsigned int encoding_n[tm->encoding_chunks];
-  // unsigned int encoding_p[tm->encoding_chunks];
-  // long int scores[tm->encoder.classes];
-  // for (unsigned int i = thread_id; i < n; i += n_threads)
-  // {
-  //   unsigned int *a = tokens + ((i * 3 + 0) * input_chunks);
-  //   unsigned int *n = tokens + ((i * 3 + 1) * input_chunks);
-  //   unsigned int *p = tokens + ((i * 3 + 2) * input_chunks);
-  //   en_tm_encode(tm, a, encoding_a, scores);
-  //   en_tm_encode(tm, n, encoding_n, scores);
-  //   en_tm_encode(tm, p, encoding_p, scores);
-  //   double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_bits, encoding_chunks, margin);
-  //   if (loss == 0)
-  //     #pragma omp atomic
-  //     correct ++;
-  // }
+  long cores = sysconf(_SC_NPROCESSORS_ONLN);
+  if (cores <= 0)
+    return tk_error(L, "sysconf", errno);
+
+  pthread_t threads[cores];
+  pthread_mutex_t lock;
+  pthread_mutex_init(&lock, NULL);
+  evaluate_encoder_thread_data_t thread_data[cores];
+
+  for (unsigned int i = 0; i < cores; i++) {
+    thread_data[i].tm = tm;
+    thread_data[i].n = n;
+    thread_data[i].tokens = tokens;
+    thread_data[i].margin = margin;
+    thread_data[i].thread_id = i;
+    thread_data[i].n_threads = cores;
+    thread_data[i].correct = &correct;
+    thread_data[i].lock = &lock;
+    if (pthread_create(&threads[i], NULL, evaluate_encoder_thread, &thread_data[i]) != 0)
+      return tk_error(L, "pthread_create", errno);
+  }
+
+  // TODO: Ensure these get freed on error above
+  for (unsigned int i = 0; i < cores; i++)
+    if (pthread_join(threads[i], NULL) != 0)
+      return tk_error(L, "pthread_join", errno);
+
+  pthread_mutex_destroy(&lock);
 
   lua_pushnumber(L, (double) correct / n);
   return 1;
