@@ -593,25 +593,67 @@ static inline void ae_tm_update (
   unsigned int *input,
   unsigned int *clause_output,
   unsigned int *feedback_to_clauses,
-  unsigned int *feedback_to_la,
+  unsigned int *feedback_to_la_e,
+  unsigned int *feedback_to_la_d,
   long int *scores_e,
   long int *scores_d,
-  double specificity
+  double specificity,
+  double loss_scale,
+  double loss_scale_min,
+  double loss_scale_max
 ) {
-  tsetlin_classifier_t *encoder = &tm->encoder.encoder;
-  tsetlin_classifier_t *decoder = &tm->decoder.encoder;
-  unsigned int encoder_classes = encoder->classes;
-  unsigned int decoder_classes = decoder->classes;
   unsigned int encoding[tm->encoder.encoding_chunks * 2]; // encoding + flipped bits for input to decoder
   unsigned int decoding[tm->decoder.encoding_chunks * 2]; // decoding + flipped bits to compare to input
+
+  // encode input, copy, flip bits
   ae_tm_encode(tm, input, encoding, scores_e);
   memcpy(encoding + tm->encoder.encoding_chunks, encoding, tm->encoder.encoding_chunks * sizeof(unsigned int));
   flip_bits(encoding + tm->encoder.encoding_chunks, tm->encoder.encoding_chunks);
+
+  // decode encoding, copy, flip bits
   ae_tm_decode(tm, encoding, decoding, scores_d);
   memcpy(decoding + tm->decoder.encoding_chunks, decoding, tm->decoder.encoding_chunks * sizeof(unsigned int));
   flip_bits(decoding + tm->decoder.encoding_chunks, tm->decoder.encoding_chunks);
 
-  double loss = (double) hamming(input, decoding, encoder->input_chunks) / encoder->input_bits;
+  // compare input to decoding
+  double loss = (double) hamming(input, decoding, tm->encoder.encoder.input_chunks) / tm->encoder.encoder.input_bits;
+  double loss_p = pow(loss, loss_scale);
+  loss_p =
+    loss_p > loss_scale_max ? loss_scale_max :
+    loss_p < loss_scale_min ? loss_scale_min : loss_p;
+
+  for (unsigned int bit = 0; bit < tm->encoder.encoding_bits; bit ++)
+  {
+    if (((float) fast_rand()) / ((float) UINT32_MAX) < loss_p) {
+      unsigned int chunk = bit / (sizeof(unsigned int) * CHAR_BIT);
+      unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
+      unsigned int bit_x = encoding[chunk] & (1U << pos);
+      unsigned int bit_x_flipped = !bit_x;
+      encoding[chunk] ^= (1U << pos);
+      encoding[chunk + tm->encoder.encoding_chunks] ^= (1U << pos);
+      ae_tm_decode(tm, encoding, decoding, scores_d);
+      memcpy(decoding + tm->decoder.encoding_chunks, decoding, tm->decoder.encoding_chunks * sizeof(unsigned int));
+      flip_bits(decoding + tm->decoder.encoding_chunks, tm->decoder.encoding_chunks);
+      double loss0 = (double) hamming(input, decoding, tm->encoder.encoder.input_chunks) / tm->encoder.encoder.input_bits;
+      encoding[chunk] ^= (1U << pos);
+      encoding[chunk + tm->encoder.encoding_chunks] ^= (1U << pos);
+      if (loss0 < loss) {
+        tm_update(&tm->encoder.encoder, bit, input, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la_e, specificity);
+      } else {
+        tm_update(&tm->encoder.encoder, bit, input, bit_x, clause_output, feedback_to_clauses, feedback_to_la_e, specificity);
+      }
+    }
+  }
+
+  for (unsigned int bit = 0; bit < tm->encoder.encoder.input_bits; bit ++)
+  {
+    if (((float) fast_rand()) / ((float) UINT32_MAX) < loss_p) {
+      unsigned int chunk = bit / (sizeof(unsigned int) * CHAR_BIT);
+      unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
+      unsigned int bit_i = input[chunk] & (1U << pos);
+      tm_update(&tm->decoder.encoder, bit, encoding, bit_i, clause_output, feedback_to_clauses, feedback_to_la_d, specificity);
+    }
+  }
 
   // TODO: Train both the encoder and decoder
   //
@@ -664,11 +706,11 @@ static inline void en_tm_update (
 
   if (loss > 0) {
     for (unsigned int i = 0; i < classes; i ++) {
-      unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
-      unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
-      unsigned int bit_n = encoding_n[chunk] & (1U << pos);
-      unsigned int bit_p = encoding_p[chunk] & (1U << pos);
       if (((float) fast_rand()) / ((float) UINT32_MAX) < loss_p) {
+        unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
+        unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
+        unsigned int bit_n = encoding_n[chunk] & (1U << pos);
+        unsigned int bit_p = encoding_p[chunk] & (1U << pos);
         if ((!bit_n && !bit_p) || (bit_n && bit_p)) {
           tm_update(encoder, i, n, !bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
           tm_update(encoder, i, p, !bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
@@ -704,6 +746,8 @@ static inline void re_tm_update_recompute (
   unsigned int *encoding_n,
   unsigned int *encoding_p
 ) {
+  // TODO: Are we correctly handling flipping of both the original and complemet
+  // bit?
   for (unsigned int word = 1; word <= x_len; word ++) {
     for (unsigned int bit = 0; bit < encoding_bits; bit ++) {
       if (((float) fast_rand()) / ((float) UINT32_MAX) < loss_p) {
@@ -1327,18 +1371,24 @@ static inline int tk_tsetlin_update_recurrent_encoder (lua_State *L, tsetlin_rec
 
 static inline int tk_tsetlin_update_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
 {
-  lua_settop(L, 4);
+  lua_settop(L, 7);
   unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
   double specificity = luaL_checknumber(L, 3);
   double drop_clause = luaL_checknumber(L, 4);
+  double loss_scale = luaL_checknumber(L, 5);
+  double loss_scale_min = luaL_checknumber(L, 6);
+  double loss_scale_max = luaL_checknumber(L, 7);
   unsigned int clause_output[tm->encoder.encoder.clause_chunks];
   unsigned int feedback_to_clauses[tm->encoder.encoder.clause_chunks];
-  unsigned int feedback_to_la[tm->encoder.encoder.input_chunks];
+  unsigned int feedback_to_la_e[tm->encoder.encoder.input_chunks];
+  unsigned int feedback_to_la_d[tm->encoder.encoding_chunks * 2];
   long int scores_e[tm->encoder.encoder.classes];
   long int scores_d[tm->decoder.encoder.classes];
   mc_tm_initialize_drop_clause(&tm->encoder.encoder, drop_clause);
   mc_tm_initialize_drop_clause(&tm->decoder.encoder, drop_clause);
-  ae_tm_update(tm, bm, clause_output, feedback_to_clauses, feedback_to_la, scores_e, scores_d, specificity);
+  ae_tm_update(tm, bm,
+      clause_output, feedback_to_clauses, feedback_to_la_e, feedback_to_la_d, scores_e, scores_d,
+      specificity, loss_scale, loss_scale_min, loss_scale_max);
   return 0;
 }
 
@@ -1481,6 +1531,7 @@ static void *train_encoder_thread (void *arg)
         clause_output, feedback_to_clauses, feedback_to_la, scores,
         data->specificity, data->margin, data->loss_scale, data->loss_scale_min, data->loss_scale_max);
   }
+  return NULL;
 }
 
 static inline int tk_tsetlin_train_encoder (
@@ -1524,7 +1575,6 @@ static inline int tk_tsetlin_train_encoder (
   for (unsigned int i = 0; i < cores; i++)
     if (pthread_join(threads[i], NULL) != 0)
       return tk_error(L, "pthread_join", errno);
-
 
   return 0;
 }
@@ -1591,28 +1641,75 @@ static inline int tk_tsetlin_train_recurrent_encoder (
   return 0;
 }
 
+typedef struct {
+  tsetlin_auto_encoder_t *tm;
+  unsigned int n;
+  unsigned int *ps;
+  double specificity;
+  double loss_scale;
+  double loss_scale_min;
+  double loss_scale_max;
+  unsigned int thread_id;
+  unsigned int n_threads;
+} train_auto_encoder_thread_data_t;
+
+static void *train_auto_encoder_thread (void *arg)
+{
+  train_auto_encoder_thread_data_t *data = (train_auto_encoder_thread_data_t *) arg;
+  unsigned int clause_output[data->tm->encoder.encoder.clause_chunks];
+  unsigned int feedback_to_clauses[data->tm->encoder.encoder.clause_chunks];
+  unsigned int feedback_to_la_e[data->tm->encoder.encoder.input_chunks];
+  unsigned int feedback_to_la_d[data->tm->encoder.encoding_chunks * 2];
+  long int scores_e[data->tm->encoder.encoder.classes];
+  long int scores_d[data->tm->decoder.encoder.classes];
+  for (unsigned int i = data->thread_id; i < data->n; i += data->n_threads)
+    ae_tm_update(data->tm, data->ps + i * data->tm->encoder.encoder.input_chunks,
+        clause_output, feedback_to_clauses, feedback_to_la_e, feedback_to_la_d, scores_e, scores_d,
+        data->specificity, data->loss_scale, data->loss_scale_min, data->loss_scale_max);
+  return NULL;
+}
+
 static inline int tk_tsetlin_train_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
 {
-  lua_settop(L, 5);
+  lua_settop(L, 8);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
   double specificity = luaL_checknumber(L, 4);
   double drop_clause = luaL_checknumber(L, 5);
+  double loss_scale = luaL_checknumber(L, 6);
+  double loss_scale_min = luaL_checknumber(L, 7);
+  double loss_scale_max = luaL_checknumber(L, 8);
+
   // TODO: Should the drop clause be shared? Does that make more sense for an
   // auto_encoder?
   mc_tm_initialize_drop_clause(&tm->encoder.encoder, drop_clause);
   mc_tm_initialize_drop_clause(&tm->decoder.encoder, drop_clause);
 
-  // TODO: pthreads
-  // unsigned int thread_id = (unsigned int) omp_get_thread_num();
-  // unsigned int n_threads = (unsigned int) omp_get_num_threads();
-  // unsigned int clause_output[tm->encoder.encoder.clause_chunks];
-  // unsigned int feedback_to_clauses[tm->encoder.encoder.clause_chunks];
-  // unsigned int feedback_to_la[tm->encoder.encoder.input_chunks];
-  // long int scores_e[tm->encoder.encoder.classes];
-  // long int scores_d[tm->decoder.encoder.classes];
-  // for (unsigned int i = thread_id; i < n; i += n_threads)
-  //   ae_tm_update(tm, &ps[i * tm->encoder.encoder.input_chunks], clause_output, feedback_to_clauses, feedback_to_la, scores_e, scores_d, specificity);
+  long cores = sysconf(_SC_NPROCESSORS_ONLN);
+  if (cores <= 0)
+    return tk_error(L, "sysconf", errno);
+
+  pthread_t threads[cores];
+  train_auto_encoder_thread_data_t thread_data[cores];
+
+  for (unsigned int i = 0; i < cores; i++) {
+    thread_data[i].tm = tm;
+    thread_data[i].n = n;
+    thread_data[i].ps = ps;
+    thread_data[i].specificity = specificity;
+    thread_data[i].loss_scale = loss_scale;
+    thread_data[i].loss_scale_min = loss_scale_min;
+    thread_data[i].loss_scale_max = loss_scale_max;
+    thread_data[i].thread_id = i;
+    thread_data[i].n_threads = cores;
+    if (pthread_create(&threads[i], NULL, train_auto_encoder_thread, &thread_data[i]) != 0)
+      return tk_error(L, "pthread_create", errno);
+  }
+
+  // TODO: Ensure these get freed on error above
+  for (unsigned int i = 0; i < cores; i++)
+    if (pthread_join(threads[i], NULL) != 0)
+      return tk_error(L, "pthread_join", errno);
 
   return 0;
 }
@@ -1686,6 +1783,7 @@ static void *evaluate_classifier_thread (void *arg)
     }
     pthread_mutex_unlock(data->lock);
   }
+  return NULL;
 }
 
 static inline int tk_tsetlin_evaluate_classifier (
@@ -1836,6 +1934,7 @@ static void *evaluate_encoder_thread (void *arg)
       pthread_mutex_unlock(data->lock);
     }
   }
+  return NULL;
 }
 
 static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *tm)
@@ -1948,39 +2047,74 @@ static inline int tk_tsetlin_evaluate_recurrent_encoder (
   return 1;
 }
 
+typedef struct {
+  tsetlin_auto_encoder_t *tm;
+  unsigned int n;
+  unsigned int *ps;
+  unsigned int thread_id;
+  unsigned int n_threads;
+  unsigned int *total_diff;
+  pthread_mutex_t *lock;
+} evaluate_auto_encoder_thread_data_t;
+
+static void *evaluate_auto_encoder_thread (void *arg)
+{
+  evaluate_auto_encoder_thread_data_t *data = (evaluate_auto_encoder_thread_data_t *) arg;
+  unsigned int encoding[data->tm->encoder.encoding_chunks * 2];
+  unsigned int decoding[data->tm->decoder.encoding_chunks * 2];
+  long int scores_e[data->tm->encoder.encoder.classes];
+  long int scores_d[data->tm->decoder.encoder.classes];
+  for (unsigned int i = data->thread_id; i < data->n; i += data->n_threads)
+  {
+    unsigned int *input = data->ps + i * data->tm->encoder.encoder.input_chunks;
+    ae_tm_encode(data->tm, input, encoding, scores_e);
+    memcpy(encoding + data->tm->encoder.encoding_chunks, encoding, data->tm->encoder.encoding_chunks * sizeof(unsigned int));
+    flip_bits(encoding + data->tm->encoder.encoding_chunks, data->tm->encoder.encoding_chunks);
+    ae_tm_decode(data->tm, encoding, decoding, scores_d);
+    memcpy(decoding + data->tm->decoder.encoding_chunks, decoding, data->tm->decoder.encoding_chunks * sizeof(unsigned int));
+    flip_bits(decoding + data->tm->decoder.encoding_chunks, data->tm->decoder.encoding_chunks);
+    (*data->total_diff) += hamming(input, decoding, data->tm->encoder.encoder.input_chunks);
+  }
+  return NULL;
+}
+
 static inline int tk_tsetlin_evaluate_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
 {
   lua_settop(L, 3);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
-  tsetlin_classifier_t *encoder = &tm->encoder.encoder;
-  tsetlin_classifier_t *decoder = &tm->decoder.encoder;
-  unsigned int encoder_classes = encoder->classes;
-  unsigned int decoder_classes = decoder->classes;
-  unsigned int input_chunks = encoder->input_chunks;
-  unsigned int input_bits = encoder->input_bits;
+  unsigned int input_bits = tm->encoder.encoder.input_bits;
 
   unsigned int total_bits = n * input_bits;
   unsigned int total_diff = 0;
 
-  // TODO: pthread
-  // unsigned int thread_id = (unsigned int) omp_get_thread_num();
-  // unsigned int n_threads = (unsigned int) omp_get_num_threads();
-  // unsigned int encoding[tm->encoder.encoding_chunks * 2];
-  // unsigned int decoding[tm->decoder.encoding_chunks * 2];
-  // long int scores_e[encoder_classes];
-  // long int scores_d[decoder_classes];
-  // for (unsigned int i = thread_id; i < n; i += n_threads)
-  // {
-  //   unsigned int *input = &ps[i * input_chunks];
-  //   ae_tm_encode(tm, input, encoding, scores_e);
-  //   memcpy(encoding + tm->encoder.encoding_chunks, encoding, tm->encoder.encoding_chunks * sizeof(unsigned int));
-  //   flip_bits(encoding + tm->encoder.encoding_chunks, tm->encoder.encoding_chunks);
-  //   ae_tm_decode(tm, encoding, decoding, scores_d);
-  //   memcpy(decoding + tm->decoder.encoding_chunks, decoding, tm->decoder.encoding_chunks * sizeof(unsigned int));
-  //   flip_bits(decoding + tm->decoder.encoding_chunks, tm->decoder.encoding_chunks);
-  //   total_diff += hamming(input, decoding, input_chunks);
-  // }
+  long cores = sysconf(_SC_NPROCESSORS_ONLN);
+  if (cores <= 0)
+    return tk_error(L, "sysconf", errno);
+
+  pthread_t threads[cores];
+  pthread_mutex_t lock;
+  pthread_mutex_init(&lock, NULL);
+  evaluate_auto_encoder_thread_data_t thread_data[cores];
+
+  for (unsigned int i = 0; i < cores; i++) {
+    thread_data[i].tm = tm;
+    thread_data[i].n = n;
+    thread_data[i].ps = ps;
+    thread_data[i].thread_id = i;
+    thread_data[i].n_threads = cores;
+    thread_data[i].total_diff = &total_diff;
+    thread_data[i].lock = &lock;
+    if (pthread_create(&threads[i], NULL, evaluate_auto_encoder_thread, &thread_data[i]) != 0)
+      return tk_error(L, "pthread_create", errno);
+  }
+
+  // TODO: Ensure these get freed on error above
+  for (unsigned int i = 0; i < cores; i++)
+    if (pthread_join(threads[i], NULL) != 0)
+      return tk_error(L, "pthread_join", errno);
+
+  pthread_mutex_destroy(&lock);
 
   lua_pushnumber(L, 1 - (double) total_diff / (double) total_bits);
   return 1;
