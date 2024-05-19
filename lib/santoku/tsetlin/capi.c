@@ -1137,7 +1137,9 @@ static inline void tk_tsetlin_destroy_classifier (tsetlin_classifier_t *tm)
   free(tm->state);
   free(tm->actions);
   free(tm->drop_clause);
-  // free(tm->locks);
+  for (unsigned int i = 0; i < tm->action_chunks; i ++)
+    pthread_mutex_destroy(&tm->locks[i]);
+  free(tm->locks);
 }
 
 static inline int tk_tsetlin_destroy (lua_State *L)
@@ -1696,10 +1698,10 @@ static inline int tk_tsetlin_evaluate_classifier (
   }
 
   // TODO: Ensure these get freed on error above
-  pthread_mutex_destroy(&lock);
   for (unsigned int i = 0; i < cores; i++)
     if (pthread_join(threads[i], NULL) != 0)
       return tk_error(L, "pthread_join", errno);
+  pthread_mutex_destroy(&lock);
 
   lua_pushnumber(L, correct);
   if (track_stats) {
