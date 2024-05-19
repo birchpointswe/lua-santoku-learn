@@ -1,5 +1,6 @@
 # Now
 
+- Configurable number of threads. No pthreads at all when 0
 - Parallelize classes during predict/update single, parallelize examples during
   training
 
