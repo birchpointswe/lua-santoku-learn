@@ -824,8 +824,6 @@ static inline void re_tm_update (
     loss_p > loss_scale_max ? loss_scale_max :
     loss_p < loss_scale_min ? loss_scale_min : loss_p;
 
-  fprintf(stderr, "> %lf, %lf\n", loss, loss_p);
-
   // TODO: Provide a scale_previous that reduces the chance that earlier
   // states have bits flipped during back propagation of feedback
   if (loss > 0) {
