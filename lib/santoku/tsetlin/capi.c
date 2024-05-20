@@ -655,19 +655,6 @@ static inline void ae_tm_update (
       tm_update(&tm->decoder.encoder, bit, encoding, bit_i, clause_output, feedback_to_clauses, feedback_to_la_d, specificity);
     }
   }
-
-  // TODO: Train both the encoder and decoder
-  //
-  // For each encoding bit
-  //   If < loss_p
-  //     If flipped bit results in lower decoded loss
-  //       Reinforce encoder: original input to flipped bit
-  //     Otherwise
-  //       Reinforce encoder: original input to original bit
-  // For each decoded bit
-  //   If < loss_p
-  //     If matches original, reinforce encoding to original
-  //     Otherwise, reinforce encoding to flipped
 }
 
 static inline void en_tm_update (
