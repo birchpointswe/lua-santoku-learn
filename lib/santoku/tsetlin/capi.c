@@ -626,18 +626,19 @@ static inline void ae_tm_update (
   for (unsigned int bit = 0; bit < tm->encoder.encoding_bits; bit ++)
   {
     if (((float) fast_rand()) / ((float) UINT32_MAX) < loss_p) {
-      unsigned int chunk = bit / (sizeof(unsigned int) * CHAR_BIT);
+      unsigned int chunk0 = bit / (sizeof(unsigned int) * CHAR_BIT);
+      unsigned int chunk1 = chunk0 + tm->encoder.encoding_chunks;
       unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
-      unsigned int bit_x = encoding[chunk] & (1U << pos);
+      unsigned int bit_x = encoding[chunk0] & (1U << pos);
       unsigned int bit_x_flipped = !bit_x;
-      encoding[chunk] ^= (1U << pos);
-      encoding[chunk + tm->encoder.encoding_chunks] ^= (1U << pos);
+      encoding[chunk0] ^= (1U << pos);
+      encoding[chunk1] ^= (1U << pos);
       ae_tm_decode(tm, encoding, decoding, scores_d);
       memcpy(decoding + tm->decoder.encoding_chunks, decoding, tm->decoder.encoding_chunks * sizeof(unsigned int));
       flip_bits(decoding + tm->decoder.encoding_chunks, tm->decoder.encoding_chunks);
       double loss0 = (double) hamming(input, decoding, tm->encoder.encoder.input_chunks) / tm->encoder.encoder.input_bits;
-      encoding[chunk] ^= (1U << pos);
-      encoding[chunk + tm->encoder.encoding_chunks] ^= (1U << pos);
+      encoding[chunk0] ^= (1U << pos);
+      encoding[chunk1] ^= (1U << pos);
       if (loss0 < loss) {
         tm_update(&tm->encoder.encoder, bit, input, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la_e, specificity);
       } else {
@@ -734,18 +735,17 @@ static inline void re_tm_update_recompute (
   unsigned int *encoding_n,
   unsigned int *encoding_p
 ) {
-  // TODO: Are we correctly handling flipping of both the original and complemet
-  // bit?
   for (unsigned int word = 1; word <= x_len; word ++) {
     for (unsigned int bit = 0; bit < encoding_bits; bit ++) {
       if (((float) fast_rand()) / ((float) UINT32_MAX) < loss_p) {
         unsigned int chunk = bit / (sizeof(unsigned int) * CHAR_BIT);
         unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
-        unsigned int *chunkp = (*state_x) + (word * encoding_chunks) + chunk;
-        unsigned int bit_x = (*chunkp) & (1U << pos);
-        (*chunkp) ^= (1U << pos);
-        unsigned int bit_x_flipped = (*chunkp) & (1U << pos);
+        unsigned chunk0 = word * encoding_chunks + chunk;
+        unsigned int bit_x = (*state_x)[chunk0] & (1U << pos);
+        unsigned int bit_x_flipped = !bit_x;
+        (*state_x)[chunk0] ^= (1U << pos);
         re_tm_encode(tm, word + 1, x_len, x_data, state_x, state_x_size, state_x_max, input_x, scores);
+        (*state_x)[chunk0] ^= (1U << pos);
         unsigned int *encoding_x = (*state_x) + (*state_x_size - 1) * encoding_chunks;
         double loss0 = triplet_loss(
           encoding_a ? encoding_a : encoding_x,
@@ -757,7 +757,6 @@ static inline void re_tm_update_recompute (
         } else if (loss0 > loss) {
           tm_update(encoder, bit, input_x, bit_x, clause_output, feedback_to_clauses, feedback_to_la, specificity);
         }
-        (*chunkp) ^= (1U << pos);
       }
     }
   }
@@ -2018,8 +2017,9 @@ static void *evaluate_encoder_thread (void *arg)
     en_tm_encode(data->tm, a, encoding_a, scores);
     en_tm_encode(data->tm, n, encoding_n, scores);
     en_tm_encode(data->tm, p, encoding_p, scores);
-    double loss = triplet_loss(encoding_a, encoding_n, encoding_p, data->tm->encoding_bits, data->tm->encoding_chunks, data->margin);
-    if (loss == 0) {
+    unsigned int dist_an = hamming(encoding_a, encoding_n, data->tm->encoding_chunks);
+    unsigned int dist_ap = hamming(encoding_a, encoding_p, data->tm->encoding_chunks);
+    if (dist_ap < dist_an) {
       pthread_mutex_lock(data->lock);
       (*data->correct) += 1;
       pthread_mutex_unlock(data->lock);
@@ -2129,8 +2129,9 @@ static void *evaluate_recurrent_encoder_thread (void *arg)
     unsigned int *encoding_a = state_a + ((state_a_size - 1) * data->tm->encoder.encoding_chunks);
     unsigned int *encoding_n = state_n + ((state_n_size - 1) * data->tm->encoder.encoding_chunks);
     unsigned int *encoding_p = state_p + ((state_p_size - 1) * data->tm->encoder.encoding_chunks);
-    double loss = triplet_loss(encoding_a, encoding_n, encoding_p, data->tm->encoder.encoding_bits, data->tm->encoder.encoding_chunks, data->margin);
-    if (loss == 0)
+    unsigned int dist_an = hamming(encoding_a, encoding_n, data->tm->encoder.encoding_chunks);
+    unsigned int dist_ap = hamming(encoding_a, encoding_p, data->tm->encoder.encoding_chunks);
+    if (dist_ap < dist_an)
     {
       pthread_mutex_lock(data->lock);
       (*data->correct) += 1;

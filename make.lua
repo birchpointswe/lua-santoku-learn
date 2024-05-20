@@ -5,7 +5,7 @@ local env = {
   variable_prefix = "TK_TSETLIN",
   public = true,
 
-  cflags = { "-march=native", "-Ofast", "-ffast-math", "-Wall", "-Wextra", "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow", "-Wpointer-sign" },
+  cflags = { "-march=native", "-Ofast", "-ffast-math", "-Wall", "-Wextra", "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow", "-Wpointer-sign", "-Wno-unused-parameter" },
   ldflags = { "-march=native", "-Ofast", "-lpthread", },
 
   dependencies = {
