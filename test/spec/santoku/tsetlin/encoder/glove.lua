@@ -14,11 +14,11 @@ local err = require("santoku.error")
 
 local ENCODED_BITS = 128
 local THRESHOLD_LEVELS = 2
-local TRAIN_TEST_RATIO = 0.5
-local MARGIN = 0.1
+local TRAIN_TEST_RATIO = 0.8
 local SIMILARITY_CUTOFF = 0.75
 local DISTANCE_CUTOFF = 0.5
 
+local MARGIN = 0.1
 local CLAUSES = 80
 local STATE_BITS = 8
 local THRESHOLD = 200
@@ -30,7 +30,7 @@ local DROP_CLAUSE = 0.75
 local BOOST_TRUE_POSITIVE = false
 
 local EVALUATE_EVERY = 5
-local MAX_RECORDS = 500
+local MAX_RECORDS = nil
 local MAX_EPOCHS = 100
 
 local function read_data (fp, max)
