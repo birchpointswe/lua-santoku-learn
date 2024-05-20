@@ -10,7 +10,7 @@ local rand = require("santoku.random")
 
 local CLASSES = 2
 local FEATURES = 12
-local CLAUSES = 400
+local CLAUSES = 80
 local STATE_BITS = 8
 local THRESHOLD = 40
 local SPECIFICITY = 3.9
