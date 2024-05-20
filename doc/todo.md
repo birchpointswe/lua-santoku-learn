@@ -1,5 +1,11 @@
 # Now
 
+- Figure out why recurrent encoder accuracy decreases or bounces around.
+
+- Flipping input bits should be done in TM library, not required by the user.
+  It's too easy to forget the complement bits.
+- Experiment with dynamic margin for encoder, based on relative distances of N
+  and P
 - Standard test dataset for recurrent encoder
 - Configurable number of threads. No pthreads at all when 0
 - Parallelize classes during predict/update single, parallelize examples during
