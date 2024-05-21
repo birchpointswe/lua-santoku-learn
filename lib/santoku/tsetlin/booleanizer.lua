@@ -8,6 +8,9 @@ local function thresholds (observations, samples, bit)
     arr.push(thresholds, o)
   end
   arr.sort(thresholds)
+  if #thresholds <= 0 then
+    return {}, 0
+  end
   bit = bit or 1
   local n = 1
   local step = num.ceil(#thresholds / samples)

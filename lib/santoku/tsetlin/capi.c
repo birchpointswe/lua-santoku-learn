@@ -2047,10 +2047,9 @@ static void *evaluate_encoder_thread (void *arg)
 
 static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *tm)
 {
-  lua_settop(L, 4);
+  lua_settop(L, 3);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 3);
-  double margin = luaL_checknumber(L, 4);
 
   unsigned int correct = 0;
 
@@ -2072,7 +2071,6 @@ static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *
     thread_data[i].n = n;
     thread_data[i].next = &next;
     thread_data[i].tokens = tokens;
-    thread_data[i].margin = margin;
     thread_data[i].correct = &correct;
     thread_data[i].lock = &lock;
     thread_data[i].qlock = &qlock;
@@ -2098,7 +2096,6 @@ typedef struct {
   unsigned int *next;
   unsigned int *indices;
   unsigned int *tokens;
-  double margin;
   unsigned int *correct;
   pthread_mutex_t *lock;
   pthread_mutex_t *qlock;
@@ -2161,11 +2158,10 @@ static inline int tk_tsetlin_evaluate_recurrent_encoder (
   lua_State *L,
   tsetlin_recurrent_encoder_t *tm
 ) {
-  lua_settop(L, 5);
+  lua_settop(L, 4);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *indices = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 4);
-  double margin = luaL_checknumber(L, 5);
   unsigned int correct = 0;
 
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
@@ -2187,7 +2183,6 @@ static inline int tk_tsetlin_evaluate_recurrent_encoder (
     thread_data[i].next = &next;
     thread_data[i].indices = indices;
     thread_data[i].tokens = tokens;
-    thread_data[i].margin = margin;
     thread_data[i].correct = &correct;
     thread_data[i].lock = &lock;
     thread_data[i].qlock = &qlock;
