@@ -19,12 +19,12 @@ local CLAUSES = 80
 local STATE_BITS = 8
 local THRESHOLD = 200
 local SPECIFICITY = 1.003
-local LOSS_ALPHA = 0.9
+local LOSS_ALPHA = 0.01
 local DROP_CLAUSE = 0.75
 local BOOST_TRUE_POSITIVE = false
 
 local EVALUATE_EVERY = 5
-local MAX_RECORDS = nil
+local MAX_RECORDS = 1000
 local MAX_EPOCHS = 40
 
 local function read_data (fp, max)
