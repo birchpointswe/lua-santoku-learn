@@ -19,15 +19,15 @@ local CLAUSES = 80
 local STATE_BITS = 8
 local THRESHOLD = 200
 local SPECIFICITY = 1.003
-local LOSS_SCALE = 0.625
+local LOSS_SCALE = 0.9
 local LOSS_SCALE_MIN = 0
 local LOSS_SCALE_MAX = 0.4
 local DROP_CLAUSE = 0.75
 local BOOST_TRUE_POSITIVE = false
 
 local EVALUATE_EVERY = 5
-local MAX_RECORDS = nil
-local MAX_EPOCHS = 20
+local MAX_RECORDS = 4000
+local MAX_EPOCHS = 100
 
 local function read_data (fp, max)
 
@@ -85,7 +85,7 @@ end
 test("tsetlin", function ()
 
   print("Reading data")
-  local data, n_features = read_data("test/res/santoku/tsetlin/glove.2500.txt", MAX_RECORDS)
+  local data, n_features = read_data("test/res/santoku/tsetlin/glove.txt", MAX_RECORDS)
 
   print("Shuffling")
   rand.seed()

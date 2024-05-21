@@ -1,5 +1,6 @@
 # Now
 
+- Release recent changes
 - Figure out why recurrent encoder accuracy decreases or bounces around.
 
 - Flipping input bits should be done in TM library, not required by the user.
