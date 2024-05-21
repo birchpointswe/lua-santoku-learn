@@ -1,6 +1,9 @@
 # Now
 
 - Release recent changes
+- Need predict_many (one use case is rapidly encoding bitmaps in tbhss).
+  Consider merging train/update and requiring an "n" param. Consider changing
+  predict API to always accept a matrix and an "n" param instead of single.
 - Error handling: features == 0
 - Optimially space threshold levels: insetad of splitting evenly, split by
   value?
