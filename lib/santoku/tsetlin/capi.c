@@ -179,10 +179,9 @@ static inline double hamming_loss (
   unsigned int *a,
   unsigned int *b,
   unsigned int chunks,
-  unsigned int bits,
   double alpha
 ) {
-  double loss = (double) hamming(a, b, chunks) / bits;
+  double loss = hamming(a, b, chunks);
   return sigmoid(alpha * loss);
 }
 
@@ -190,7 +189,6 @@ static inline double triplet_loss (
   unsigned int *a,
   unsigned int *n,
   unsigned int *p,
-  unsigned int bits,
   unsigned int chunks,
   double margin,
   double alpha
@@ -633,7 +631,7 @@ static inline void ae_tm_update (
   flip_bits(decoding + tm->decoder.encoding_chunks, tm->decoder.encoding_chunks);
 
   // compare input to decoding
-  double loss = (double) hamming_loss(input, decoding, tm->encoder.encoder.input_chunks, tm->encoder.encoder.input_bits, loss_alpha);
+  double loss = hamming_loss(input, decoding, tm->encoder.encoder.input_chunks, loss_alpha);
 
   for (unsigned int bit = 0; bit < tm->encoder.encoding_bits; bit ++)
   {
@@ -686,7 +684,6 @@ static inline void en_tm_update (
 
   tsetlin_classifier_t *encoder = &tm->encoder;
   unsigned int classes = encoder->classes;
-  unsigned int encoding_bits = tm->encoding_bits;
   unsigned int encoding_chunks = tm->encoding_chunks;
 
   unsigned int encoding_a[encoding_chunks];
@@ -697,37 +694,35 @@ static inline void en_tm_update (
   en_tm_encode(tm, n, encoding_n, scores);
   en_tm_encode(tm, p, encoding_p, scores);
 
-  double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_bits, encoding_chunks, margin, loss_alpha);
+  double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_chunks, margin, loss_alpha);
 
-  if (loss > 0) {
-    for (unsigned int i = 0; i < classes; i ++) {
-      if (((float) fast_rand()) / ((float) UINT32_MAX) < loss) {
-        unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
-        unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
-        unsigned int bit_a = encoding_a[chunk] & (1U << pos);
-        unsigned int bit_n = encoding_n[chunk] & (1U << pos);
-        unsigned int bit_p = encoding_p[chunk] & (1U << pos);
-        if ((bit_a && bit_n && bit_p) || (!bit_a && !bit_n && !bit_p)) {
-          // flip n, keep a and p
-          tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-          tm_update(encoder, i, n, !bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-          tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-        } else if ((bit_a && bit_n && !bit_p) || (!bit_a && !bit_n && bit_p)) {
-          // flip a, keep n and p
-          tm_update(encoder, i, a, !bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-          tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-          tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-        } else if ((bit_a && !bit_n && bit_p) || (!bit_a && bit_n && !bit_p)) {
-          // keep all
-          tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-          tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-          tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-        } else if ((bit_a && !bit_n && !bit_p) || (!bit_a && bit_n && bit_p)) {
-          // flip p, keep a and n
-          tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-          tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-          tm_update(encoder, i, p, !bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-        }
+  for (unsigned int i = 0; i < classes; i ++) {
+    if (((float) fast_rand()) / ((float) UINT32_MAX) < loss) {
+      unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
+      unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
+      unsigned int bit_a = encoding_a[chunk] & (1U << pos);
+      unsigned int bit_n = encoding_n[chunk] & (1U << pos);
+      unsigned int bit_p = encoding_p[chunk] & (1U << pos);
+      if ((bit_a && bit_n && bit_p) || (!bit_a && !bit_n && !bit_p)) {
+        // flip n, keep a and p
+        tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+        tm_update(encoder, i, n, !bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+        tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+      } else if ((bit_a && bit_n && !bit_p) || (!bit_a && !bit_n && bit_p)) {
+        // flip a, keep n and p
+        tm_update(encoder, i, a, !bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+        tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+        tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+      } else if ((bit_a && !bit_n && bit_p) || (!bit_a && bit_n && !bit_p)) {
+        // keep all
+        tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+        tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+        tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+      } else if ((bit_a && !bit_n && !bit_p) || (!bit_a && bit_n && bit_p)) {
+        // flip p, keep a and n
+        tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+        tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+        tm_update(encoder, i, p, !bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
       }
     }
   }
@@ -773,7 +768,7 @@ static inline void re_tm_update_recompute (
           encoding_a ? encoding_a : encoding_x,
           encoding_n ? encoding_n : encoding_x,
           encoding_p ? encoding_p : encoding_x,
-          encoding_bits, encoding_chunks, margin, loss_alpha);
+          encoding_chunks, margin, loss_alpha);
         if (loss0 < loss) {
           tm_update(encoder, bit, input_x, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la, specificity);
         } else if (loss0 > loss) {
@@ -824,21 +819,10 @@ static inline void re_tm_update (
   unsigned int *encoding_n = *state_n + ((*state_n_size - 1) * encoding_chunks);
   unsigned int *encoding_p = *state_p + ((*state_p_size - 1) * encoding_chunks);
 
-  double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_bits, encoding_chunks, margin, loss_alpha);
+  double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_chunks, margin, loss_alpha);
 
-  // TODO: Provide a scale_previous that reduces the chance that earlier
-  // states have bits flipped during back propagation of feedback
-  if (loss > 0) {
-    if (((float) fast_rand()) / ((float) UINT32_MAX) < 0.5) {
-      // update negative
-      re_tm_update_recompute(tm, encoder, n_len, n_data, state_n, state_n_size, state_n_max, input_n, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, NULL, encoding_p);
-    } else {
-      // update positive
-      re_tm_update_recompute(tm, encoder, p_len, p_data, state_p, state_p_size, state_p_max, input_p, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, encoding_n, NULL);
-    }
-  } else {
-    // No loss
-  }
+  re_tm_update_recompute(tm, encoder, n_len, n_data, state_n, state_n_size, state_n_max, input_n, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, NULL, encoding_p);
+  re_tm_update_recompute(tm, encoder, p_len, p_data, state_p, state_p_size, state_p_max, input_p, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, encoding_n, NULL);
 }
 
 static inline void mc_tm_initialize_drop_clause (
