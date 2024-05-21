@@ -152,7 +152,7 @@ end
 test("tsetlin", function ()
 
   print("Reading data")
-  local dataset = read_data("test/res/santoku/tsetlin/glove.txt", MAX_RECORDS)
+  local dataset = read_data(os.getenv("GLOVE") or "test/res/santoku/tsetlin/glove.txt", MAX_RECORDS)
 
   print("Shuffling")
   rand.seed()
