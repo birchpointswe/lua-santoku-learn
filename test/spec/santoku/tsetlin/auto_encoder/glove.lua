@@ -26,8 +26,8 @@ local DROP_CLAUSE = 0.75
 local BOOST_TRUE_POSITIVE = false
 
 local EVALUATE_EVERY = 5
-local MAX_RECORDS = 4000
-local MAX_EPOCHS = 100
+local MAX_RECORDS = nil
+local MAX_EPOCHS = 40
 
 local function read_data (fp, max)
 
@@ -85,7 +85,7 @@ end
 test("tsetlin", function ()
 
   print("Reading data")
-  local data, n_features = read_data("test/res/santoku/tsetlin/glove.txt", MAX_RECORDS)
+  local data, n_features = read_data(os.getenv("GLOVE") or "test/res/santoku/tsetlin/glove.txt", MAX_RECORDS)
 
   print("Shuffling")
   rand.seed()
