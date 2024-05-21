@@ -13,25 +13,25 @@ local num = require("santoku.num")
 local err = require("santoku.error")
 
 local ENCODED_BITS = 128
-local THRESHOLD_LEVELS = 2
+local THRESHOLD_LEVELS = 3
 local TRAIN_TEST_RATIO = 0.8
-local SIMILARITY_CUTOFF = 0.75
-local DISTANCE_CUTOFF = 0.5
+local SIM_POS = 0.7
+local SIM_NEG = 0.5
 
-local MARGIN = 0.1
+local MARGIN = ENCODED_BITS * 0.1
 local CLAUSES = 80
 local STATE_BITS = 8
 local THRESHOLD = 200
 local SPECIFICITY = 2
-local LOSS_SCALE = 0.5
+local LOSS_SCALE = 0.9
 local LOSS_SCALE_MIN = 0
 local LOSS_SCALE_MAX = 0.5
 local DROP_CLAUSE = 0.75
 local BOOST_TRUE_POSITIVE = false
 
-local EVALUATE_EVERY = 5
+local EVALUATE_EVERY = 1
 local MAX_RECORDS = nil
-local MAX_EPOCHS = 100
+local MAX_EPOCHS = 40
 
 local function read_data (fp, max)
 
@@ -103,7 +103,7 @@ local function read_data (fp, max)
 
     for _ = 1, #recs do
       local i0 = rand.fast_random() % #recs + 1
-      if mtx.dot(ms[i], ms[i0]) < DISTANCE_CUTOFF then
+      if mtx.dot(ms[i], ms[i0]) < SIM_NEG then
         i_n = i0
         break
       end
@@ -115,7 +115,7 @@ local function read_data (fp, max)
 
     for _ = 1, #recs do
       local i0 = rand.fast_random() % #recs + 1
-      if mtx.dot(ms[i], ms[i0]) > SIMILARITY_CUTOFF then
+      if mtx.dot(ms[i], ms[i0]) > SIM_POS then
         i_p = i0
         break
       end
@@ -152,7 +152,7 @@ end
 test("tsetlin", function ()
 
   print("Reading data")
-  local dataset = read_data("test/res/santoku/tsetlin/glove.2500.txt", MAX_RECORDS)
+  local dataset = read_data("test/res/santoku/tsetlin/glove.txt", MAX_RECORDS)
 
   print("Shuffling")
   rand.seed()
