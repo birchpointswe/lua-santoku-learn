@@ -179,7 +179,7 @@ static inline void flip_bits (
     a[i] = ~a[i];
 }
 
-static inline unsigned int triplet_loss (
+static inline double triplet_loss (
   unsigned int *a,
   unsigned int *n,
   unsigned int *p,
