@@ -634,7 +634,6 @@ static inline void ae_tm_update (
   double loss = hamming_loss(input, decoding, tm->encoder.encoder.input_chunks, loss_alpha);
 
   for (unsigned int bit = 0; bit < tm->encoder.encoding_bits; bit ++)
-  {
     if (((float) fast_rand()) / ((float) UINT32_MAX) < loss) {
       unsigned int chunk0 = bit / (sizeof(unsigned int) * CHAR_BIT);
       unsigned int chunk1 = chunk0 + tm->encoder.encoding_chunks;
@@ -649,23 +648,19 @@ static inline void ae_tm_update (
       double loss0 = hamming_loss(input, decoding, tm->encoder.encoder.input_chunks, loss_alpha);
       encoding[chunk0] ^= (1U << pos);
       encoding[chunk1] ^= (1U << pos);
-      if (loss0 < loss) {
+      if (loss0 < loss)
         tm_update(&tm->encoder.encoder, bit, input, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la_e, specificity);
-      } else {
+      else
         tm_update(&tm->encoder.encoder, bit, input, bit_x, clause_output, feedback_to_clauses, feedback_to_la_e, specificity);
-      }
     }
-  }
 
   for (unsigned int bit = 0; bit < tm->encoder.encoder.input_bits; bit ++)
-  {
     if (((float) fast_rand()) / ((float) UINT32_MAX) < loss) {
       unsigned int chunk = bit / (sizeof(unsigned int) * CHAR_BIT);
       unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
       unsigned int bit_i = input[chunk] & (1U << pos);
       tm_update(&tm->decoder.encoder, bit, encoding, bit_i, clause_output, feedback_to_clauses, feedback_to_la_d, specificity);
     }
-  }
 }
 
 static inline void en_tm_update (
@@ -753,26 +748,33 @@ static inline void re_tm_update_recompute (
   unsigned int *encoding_p
 ) {
   for (unsigned int word = 1; word <= x_len; word ++) {
-    for (unsigned int bit = 0; bit < encoding_bits; bit ++) {
-      if (((float) fast_rand()) / ((float) UINT32_MAX) < loss) {
-        unsigned int chunk = bit / (sizeof(unsigned int) * CHAR_BIT);
-        unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
-        unsigned chunk0 = word * encoding_chunks + chunk;
-        unsigned int bit_x = (*state_x)[chunk0] & (1U << pos);
-        unsigned int bit_x_flipped = !bit_x;
-        (*state_x)[chunk0] ^= (1U << pos);
-        re_tm_encode(tm, word + 1, x_len, x_data, state_x, state_x_size, state_x_max, input_x, scores);
-        (*state_x)[chunk0] ^= (1U << pos);
-        unsigned int *encoding_x = (*state_x) + (*state_x_size - 1) * encoding_chunks;
-        double loss0 = triplet_loss(
-          encoding_a ? encoding_a : encoding_x,
-          encoding_n ? encoding_n : encoding_x,
-          encoding_p ? encoding_p : encoding_x,
-          encoding_chunks, margin, loss_alpha);
-        if (loss0 < loss) {
-          tm_update(encoder, bit, input_x, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-        } else if (loss0 > loss) {
-          tm_update(encoder, bit, input_x, bit_x, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+    if (((float) fast_rand()) / ((float) UINT32_MAX) < loss) {
+      for (unsigned int bit = 0; bit < encoding_bits; bit ++) {
+        if (((float) fast_rand()) / ((float) UINT32_MAX) < loss) {
+          unsigned int chunk = bit / (sizeof(unsigned int) * CHAR_BIT);
+          unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
+          unsigned chunk0 = word * encoding_chunks + chunk;
+          unsigned int bit_x = (*state_x)[chunk0] & (1U << pos);
+          unsigned int bit_x_flipped = !bit_x;
+          (*state_x)[chunk0] ^= (1U << pos);
+          re_tm_encode(tm, word + 1, x_len, x_data, state_x, state_x_size, state_x_max, input_x, scores);
+          (*state_x)[chunk0] ^= (1U << pos);
+          unsigned int *encoding_x = (*state_x) + (*state_x_size - 1) * encoding_chunks;
+          double loss0 = triplet_loss(
+            encoding_a ? encoding_a : encoding_x,
+            encoding_n ? encoding_n : encoding_x,
+            encoding_p ? encoding_p : encoding_x,
+            encoding_chunks, margin, loss_alpha);
+          if (loss0 < loss) {
+            tm_update(encoder, bit, input_x, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+          } else if (loss0 > loss) {
+            tm_update(encoder, bit, input_x, bit_x, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+          // } else {
+          //   // TODO: Does this make sense? Idea being that if the bit flip
+          //   // didn't change anything, we want to add some entropy
+          //   tm_update(encoder, bit, input_x, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+          //   tm_update(encoder, bit, input_x, bit_x, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+          }
         }
       }
     }
