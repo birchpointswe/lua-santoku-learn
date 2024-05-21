@@ -699,7 +699,7 @@ static inline void en_tm_update (
       if (((float) fast_rand()) / ((float) UINT32_MAX) < loss_p) {
         unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
         unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
-        unsigned int bit_a = encoding_n[chunk] & (1U << pos);
+        unsigned int bit_a = encoding_a[chunk] & (1U << pos);
         unsigned int bit_n = encoding_n[chunk] & (1U << pos);
         unsigned int bit_p = encoding_p[chunk] & (1U << pos);
         if ((bit_a && bit_n && bit_p) || (!bit_a && !bit_n && !bit_p)) {
