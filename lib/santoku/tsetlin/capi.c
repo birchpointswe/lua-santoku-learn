@@ -190,7 +190,7 @@ static inline double triplet_loss (
   unsigned int *n,
   unsigned int *p,
   unsigned int chunks,
-  double margin,
+  unsigned int margin,
   double alpha
 ) {
   unsigned int dist_an = hamming(a, n, chunks);
@@ -678,7 +678,7 @@ static inline void en_tm_update (
   unsigned int *feedback_to_la,
   long int *scores,
   double specificity,
-  double margin,
+  unsigned int margin,
   double loss_alpha
 ) {
 
@@ -745,7 +745,7 @@ static inline void re_tm_update_recompute (
   unsigned int encoding_bits,
   unsigned int encoding_chunks,
   double specificity,
-  double margin,
+  unsigned int margin,
   double loss,
   double loss_alpha,
   unsigned int *encoding_a,
@@ -804,7 +804,7 @@ static inline void re_tm_update (
   unsigned int *feedback_to_la,
   long int *scores,
   double specificity,
-  double margin,
+  unsigned int margin,
   double loss_alpha
 ) {
   tsetlin_classifier_t *encoder = &tm->encoder.encoder;
@@ -851,6 +851,14 @@ static inline unsigned int tk_tsetlin_checkunsigned (lua_State *L, int i)
   if (l > UINT_MAX)
     luaL_error(L, "value is too large");
   return (unsigned int) l;
+}
+
+static inline double tk_tsetlin_checkposfloat (lua_State *L, int i)
+{
+  lua_Number l = luaL_checknumber(L, i);
+  if (l < 0)
+    luaL_error(L, "value can't be negative");
+  return (double) l;
 }
 
 static inline bool tk_tsetlin_checkboolean (lua_State *L, int i)
@@ -1307,8 +1315,8 @@ static inline int tk_tsetlin_update_classifier (lua_State *L, tsetlin_classifier
   lua_Integer tgt = luaL_checkinteger(L, 3);
   if (tgt < 0)
     luaL_error(L, "target class must be greater than zero");
-  double specificity = luaL_checknumber(L, 4);
-  double drop_clause = luaL_checknumber(L, 5);
+  double specificity = tk_tsetlin_checkposfloat(L, 4);
+  double drop_clause = tk_tsetlin_checkposfloat(L, 5);
   mc_tm_initialize_drop_clause(tm, drop_clause);
   unsigned int clause_chunks = tm->clause_chunks;
   unsigned int input_chunks = tm->input_chunks;
@@ -1333,10 +1341,10 @@ static inline int tk_tsetlin_update_encoder (
   unsigned int *a = (unsigned int *) luaL_checkstring(L, 2);
   unsigned int *n = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *p = (unsigned int *) luaL_checkstring(L, 4);
-  double specificity = luaL_checknumber(L, 5);
-  double drop_clause = luaL_checknumber(L, 6);
-  double margin = luaL_checknumber(L, 7);
-  double loss_alpha = luaL_checknumber(L, 8);
+  double specificity = tk_tsetlin_checkposfloat(L, 5);
+  double drop_clause = tk_tsetlin_checkposfloat(L, 6);
+  unsigned int margin = tk_tsetlin_checkposfloat(L, 7) * tm->encoding_bits;
+  double loss_alpha = tk_tsetlin_checkposfloat(L, 8);
   mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
   unsigned int clause_output[tm->encoder.clause_chunks];
   unsigned int feedback_to_clauses[tm->encoder.clause_chunks];
@@ -1356,9 +1364,9 @@ static inline int tk_tsetlin_update_auto_encoder (lua_State *L, tsetlin_auto_enc
 {
   lua_settop(L, 5);
   unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
-  double specificity = luaL_checknumber(L, 3);
-  double drop_clause = luaL_checknumber(L, 4);
-  double loss_alpha = luaL_checknumber(L, 5);
+  double specificity = tk_tsetlin_checkposfloat(L, 3);
+  double drop_clause = tk_tsetlin_checkposfloat(L, 4);
+  double loss_alpha = tk_tsetlin_checkposfloat(L, 5);
   unsigned int clause_output[tm->encoder.encoder.clause_chunks];
   unsigned int feedback_to_clauses[tm->encoder.encoder.clause_chunks];
   unsigned int feedback_to_la_e[tm->encoder.encoder.input_chunks];
@@ -1451,8 +1459,8 @@ static inline int tk_tsetlin_train_classifier (lua_State *L, tsetlin_classifier_
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *ps = (unsigned int *)luaL_checkstring(L, 3);
   unsigned int *ss = (unsigned int *)luaL_checkstring(L, 4);
-  double specificity = luaL_checknumber(L, 5);
-  double drop_clause = luaL_checknumber(L, 6);
+  double specificity = tk_tsetlin_checkposfloat(L, 5);
+  double drop_clause = tk_tsetlin_checkposfloat(L, 6);
   mc_tm_initialize_drop_clause(tm, drop_clause);
 
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
@@ -1500,7 +1508,7 @@ typedef struct {
   unsigned int *next;
   unsigned int *tokens;
   double specificity;
-  double margin;
+  unsigned int margin;
   double loss_alpha;
   pthread_mutex_t *qlock;
 } train_encoder_thread_data_t;
@@ -1539,10 +1547,10 @@ static inline int tk_tsetlin_train_encoder (
   lua_settop(L, 7);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 3);
-  double specificity = luaL_checknumber(L, 4);
-  double drop_clause = luaL_checknumber(L, 5);
-  double margin = luaL_checknumber(L, 6);
-  double loss_alpha = luaL_checknumber(L, 7);
+  double specificity = tk_tsetlin_checkposfloat(L, 4);
+  double drop_clause = tk_tsetlin_checkposfloat(L, 5);
+  unsigned int margin = tk_tsetlin_checkposfloat(L, 6) * tm->encoding_bits;
+  double loss_alpha = tk_tsetlin_checkposfloat(L, 7);
   mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
 
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
@@ -1586,7 +1594,7 @@ typedef struct {
   unsigned int *indices;
   unsigned int *tokens;
   double specificity;
-  double margin;
+  unsigned int margin;
   double loss_alpha;
   pthread_mutex_t *qlock;
 } train_recurrent_encoder_thread_data_t;
@@ -1649,10 +1657,10 @@ static inline int tk_tsetlin_train_recurrent_encoder (
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *indices = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 4);
-  double specificity = luaL_checknumber(L, 5);
-  double drop_clause = luaL_checknumber(L, 6);
-  double margin = luaL_checknumber(L, 7);
-  double loss_alpha = luaL_checknumber(L, 8);
+  double specificity = tk_tsetlin_checkposfloat(L, 5);
+  double drop_clause = tk_tsetlin_checkposfloat(L, 6);
+  unsigned int margin = tk_tsetlin_checkposfloat(L, 7) * tm->encoder.encoding_bits;
+  double loss_alpha = tk_tsetlin_checkposfloat(L, 8);
   mc_tm_initialize_drop_clause(&tm->encoder.encoder, drop_clause);
 
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
@@ -1728,9 +1736,9 @@ static inline int tk_tsetlin_train_auto_encoder (lua_State *L, tsetlin_auto_enco
   lua_settop(L, 6);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
-  double specificity = luaL_checknumber(L, 4);
-  double drop_clause = luaL_checknumber(L, 5);
-  double loss_alpha = luaL_checknumber(L, 6);
+  double specificity = tk_tsetlin_checkposfloat(L, 4);
+  double drop_clause = tk_tsetlin_checkposfloat(L, 5);
+  double loss_alpha = tk_tsetlin_checkposfloat(L, 6);
 
   // TODO: Should the drop clause be shared? Does that make more sense for an
   // auto_encoder?
@@ -1969,7 +1977,7 @@ typedef struct {
   unsigned int n;
   unsigned int *next;
   unsigned int *tokens;
-  double margin;
+  unsigned int margin;
   unsigned int *correct;
   pthread_mutex_t *lock;
   pthread_mutex_t *qlock;
