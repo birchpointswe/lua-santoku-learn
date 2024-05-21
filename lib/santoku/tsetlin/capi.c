@@ -179,7 +179,7 @@ static inline void flip_bits (
     a[i] = ~a[i];
 }
 
-static inline double triplet_loss (
+static inline unsigned int triplet_loss (
   unsigned int *a,
   unsigned int *n,
   unsigned int *p,
@@ -187,9 +187,10 @@ static inline double triplet_loss (
   unsigned int chunks,
   double margin
 ) {
-  double dist_an = (double) hamming(a, n, chunks) / bits;
-  double dist_ap = (double) hamming(a, p, chunks) / bits;
-  return fmax(0.0, dist_ap - dist_an + margin);
+  unsigned int dist_an = hamming(a, n, chunks);
+  unsigned int dist_ap = hamming(a, p, chunks);
+  double loss = (double) dist_ap - (double) dist_an + margin;
+  return loss > 0 ? loss : 0;
 }
 
 static inline void tk_lua_callmod (
@@ -698,18 +699,22 @@ static inline void en_tm_update (
       if (((float) fast_rand()) / ((float) UINT32_MAX) < loss_p) {
         unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
         unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
+        unsigned int bit_a = encoding_n[chunk] & (1U << pos);
         unsigned int bit_n = encoding_n[chunk] & (1U << pos);
         unsigned int bit_p = encoding_p[chunk] & (1U << pos);
-        if ((!bit_n && !bit_p) || (bit_n && bit_p)) {
+        if (bit_n == bit_p) {
+          tm_update(encoder, i, n, !bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
           tm_update(encoder, i, n, !bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
           tm_update(encoder, i, p, !bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
         } else {
+          tm_update(encoder, i, n, bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
           tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
           tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
         }
       }
     }
   }
+
 }
 
 static inline void re_tm_update_recompute (
