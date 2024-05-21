@@ -702,14 +702,26 @@ static inline void en_tm_update (
         unsigned int bit_a = encoding_n[chunk] & (1U << pos);
         unsigned int bit_n = encoding_n[chunk] & (1U << pos);
         unsigned int bit_p = encoding_p[chunk] & (1U << pos);
-        if (bit_n == bit_p) {
-          tm_update(encoder, i, n, !bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+        if ((bit_a && bit_n && bit_p) || (!bit_a && !bit_n && !bit_p)) {
+          // flip n, keep a and p
+          tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
           tm_update(encoder, i, n, !bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-          tm_update(encoder, i, p, !bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-        } else {
-          tm_update(encoder, i, n, bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+          tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+        } else if ((bit_a && bit_n && !bit_p) || (!bit_a && !bit_n && bit_p)) {
+          // flip a, keep n and p
+          tm_update(encoder, i, a, !bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
           tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
           tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+        } else if ((bit_a && !bit_n && bit_p) || (!bit_a && bit_n && !bit_p)) {
+          // keep all
+          tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+          tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+          tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+        } else if ((bit_a && !bit_n && !bit_p) || (!bit_a && bit_n && bit_p)) {
+          // flip p, keep a and n
+          tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+          tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+          tm_update(encoder, i, p, !bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
         }
       }
     }
