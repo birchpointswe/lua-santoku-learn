@@ -30,6 +30,7 @@
 
 - Implement regressor
 - Add recurrent classifier, regressor
+- Recurrent auto-encoder
 
 - Throw an error if length of input bitmaps isn't correct (2 x features /
   sizeof(unsigned int))
