@@ -12,18 +12,18 @@ local rand = require("santoku.random")
 local num = require("santoku.num")
 local err = require("santoku.error")
 
-local ENCODED_BITS = 256
+local ENCODED_BITS = 128
 local THRESHOLD_LEVELS = 3
 local TRAIN_TEST_RATIO = 0.8
 local SIM_POS = 0.7
 local SIM_NEG = 0.5
 
 local MARGIN = ENCODED_BITS * 0.1
-local CLAUSES = 160
+local CLAUSES = 80
 local STATE_BITS = 8
-local THRESHOLD = 100
+local THRESHOLD = 200
 local SPECIFICITY = 5
-local LOSS_SCALE = 0.4
+local LOSS_SCALE = 0.9
 local LOSS_SCALE_MIN = 0
 local LOSS_SCALE_MAX = 0.5
 local DROP_CLAUSE = 0.75
