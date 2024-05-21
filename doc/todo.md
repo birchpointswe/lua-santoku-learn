@@ -1,6 +1,9 @@
 # Now
 
 - Release recent changes
+- Error handling: features == 0
+- Optimially space threshold levels: insetad of splitting evenly, split by
+  value?
 - Figure out why recurrent encoder accuracy decreases or bounces around.
 
 - Flipping input bits should be done in TM library, not required by the user.
