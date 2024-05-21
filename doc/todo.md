@@ -1,6 +1,11 @@
 # Now
 
+- Use scaled loss_alpha based on max observed loss while training
 - Release recent changes
+- Fast booleanize matrix function (input: embedding matrix, output: thresholds
+  and #bits)
+- If threshold levels is 1, pick the middle number, if 2, use the 1/3 and 2/3s
+  break points, and so on
 - Need predict_many (one use case is rapidly encoding bitmaps in tbhss).
   Consider merging train/update and requiring an "n" param. Consider changing
   predict API to always accept a matrix and an "n" param instead of single.
