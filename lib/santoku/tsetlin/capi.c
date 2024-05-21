@@ -646,7 +646,7 @@ static inline void ae_tm_update (
       ae_tm_decode(tm, encoding, decoding, scores_d);
       memcpy(decoding + tm->decoder.encoding_chunks, decoding, tm->decoder.encoding_chunks * sizeof(unsigned int));
       flip_bits(decoding + tm->decoder.encoding_chunks, tm->decoder.encoding_chunks);
-      double loss0 = hamming_loss(input, decoding, tm->encoder.encoder.input_chunks);
+      double loss0 = hamming_loss(input, decoding, tm->encoder.encoder.input_chunks, loss_alpha);
       encoding[chunk0] ^= (1U << pos);
       encoding[chunk1] ^= (1U << pos);
       if (loss0 < loss) {
