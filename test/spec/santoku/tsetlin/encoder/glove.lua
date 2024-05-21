@@ -18,13 +18,13 @@ local TRAIN_TEST_RATIO = 0.8
 local SIM_POS = 0.7
 local SIM_NEG = 0.5
 
-local MARGIN = ENCODED_BITS * 0.1
+local MARGIN = 0.1
 local CLAUSES = 80
 local STATE_BITS = 8
 local THRESHOLD = 200
-local SPECIFICITY = 5
+local SPECIFICITY = 2
 local DROP_CLAUSE = 0.75
-local LOSS_ALPHA = 2
+local LOSS_ALPHA = 0.01
 local BOOST_TRUE_POSITIVE = false
 
 local EVALUATE_EVERY = 1
