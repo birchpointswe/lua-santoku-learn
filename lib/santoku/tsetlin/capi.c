@@ -158,6 +158,10 @@ static inline unsigned int popcount (
   return x & 0x0000003F;
 }
 
+static inline double sigmoid (double x) {
+  return 1.0 / (1.0 + exp(-x));
+}
+
 static inline unsigned int hamming (
   unsigned int *a,
   unsigned int *b,
@@ -171,12 +175,15 @@ static inline unsigned int hamming (
   return distance;
 }
 
-static inline void flip_bits (
+static inline double hamming_loss (
   unsigned int *a,
-  unsigned int n
+  unsigned int *b,
+  unsigned int chunks,
+  unsigned int bits,
+  double alpha
 ) {
-  for (unsigned int i = 0; i < n; i ++)
-    a[i] = ~a[i];
+  double loss = (double) hamming(a, b, chunks) / bits;
+  return sigmoid(alpha * loss);
 }
 
 static inline double triplet_loss (
@@ -185,12 +192,22 @@ static inline double triplet_loss (
   unsigned int *p,
   unsigned int bits,
   unsigned int chunks,
-  double margin
+  double margin,
+  double alpha
 ) {
   unsigned int dist_an = hamming(a, n, chunks);
   unsigned int dist_ap = hamming(a, p, chunks);
   double loss = (double) dist_ap - (double) dist_an + margin;
-  return loss > 0 ? loss : 0;
+  loss = loss > 0 ? loss : 0;
+  return sigmoid(alpha * loss);
+}
+
+static inline void flip_bits (
+  unsigned int *a,
+  unsigned int n
+) {
+  for (unsigned int i = 0; i < n; i ++)
+    a[i] = ~a[i];
 }
 
 static inline void tk_lua_callmod (
@@ -600,9 +617,7 @@ static inline void ae_tm_update (
   long int *scores_e,
   long int *scores_d,
   double specificity,
-  double loss_scale,
-  double loss_scale_min,
-  double loss_scale_max
+  double loss_alpha
 ) {
   unsigned int encoding[tm->encoder.encoding_chunks * 2]; // encoding + flipped bits for input to decoder
   unsigned int decoding[tm->decoder.encoding_chunks * 2]; // decoding + flipped bits to compare to input
@@ -618,15 +633,11 @@ static inline void ae_tm_update (
   flip_bits(decoding + tm->decoder.encoding_chunks, tm->decoder.encoding_chunks);
 
   // compare input to decoding
-  double loss = (double) hamming(input, decoding, tm->encoder.encoder.input_chunks) / tm->encoder.encoder.input_bits;
-  double loss_p = pow(loss, loss_scale);
-  loss_p =
-    loss_p > loss_scale_max ? loss_scale_max :
-    loss_p < loss_scale_min ? loss_scale_min : loss_p;
+  double loss = (double) hamming_loss(input, decoding, tm->encoder.encoder.input_chunks, tm->encoder.encoder.input_bits, loss_alpha);
 
   for (unsigned int bit = 0; bit < tm->encoder.encoding_bits; bit ++)
   {
-    if (((float) fast_rand()) / ((float) UINT32_MAX) < loss_p) {
+    if (((float) fast_rand()) / ((float) UINT32_MAX) < loss) {
       unsigned int chunk0 = bit / (sizeof(unsigned int) * CHAR_BIT);
       unsigned int chunk1 = chunk0 + tm->encoder.encoding_chunks;
       unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
@@ -650,7 +661,7 @@ static inline void ae_tm_update (
 
   for (unsigned int bit = 0; bit < tm->encoder.encoder.input_bits; bit ++)
   {
-    if (((float) fast_rand()) / ((float) UINT32_MAX) < loss_p) {
+    if (((float) fast_rand()) / ((float) UINT32_MAX) < loss) {
       unsigned int chunk = bit / (sizeof(unsigned int) * CHAR_BIT);
       unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
       unsigned int bit_i = input[chunk] & (1U << pos);
@@ -670,9 +681,7 @@ static inline void en_tm_update (
   long int *scores,
   double specificity,
   double margin,
-  double loss_scale,
-  double loss_scale_min,
-  double loss_scale_max
+  double loss_alpha
 ) {
 
   tsetlin_classifier_t *encoder = &tm->encoder;
@@ -688,15 +697,11 @@ static inline void en_tm_update (
   en_tm_encode(tm, n, encoding_n, scores);
   en_tm_encode(tm, p, encoding_p, scores);
 
-  double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_bits, encoding_chunks, margin);
-  double loss_p = pow(loss, loss_scale);
-  loss_p =
-    loss_p > loss_scale_max ? loss_scale_max :
-    loss_p < loss_scale_min ? loss_scale_min : loss_p;
+  double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_bits, encoding_chunks, margin, loss_alpha);
 
   if (loss > 0) {
     for (unsigned int i = 0; i < classes; i ++) {
-      if (((float) fast_rand()) / ((float) UINT32_MAX) < loss_p) {
+      if (((float) fast_rand()) / ((float) UINT32_MAX) < loss) {
         unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
         unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
         unsigned int bit_a = encoding_a[chunk] & (1U << pos);
@@ -747,14 +752,14 @@ static inline void re_tm_update_recompute (
   double specificity,
   double margin,
   double loss,
-  double loss_p,
+  double loss_alpha,
   unsigned int *encoding_a,
   unsigned int *encoding_n,
   unsigned int *encoding_p
 ) {
   for (unsigned int word = 1; word <= x_len; word ++) {
     for (unsigned int bit = 0; bit < encoding_bits; bit ++) {
-      if (((float) fast_rand()) / ((float) UINT32_MAX) < loss_p) {
+      if (((float) fast_rand()) / ((float) UINT32_MAX) < loss) {
         unsigned int chunk = bit / (sizeof(unsigned int) * CHAR_BIT);
         unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
         unsigned chunk0 = word * encoding_chunks + chunk;
@@ -768,7 +773,7 @@ static inline void re_tm_update_recompute (
           encoding_a ? encoding_a : encoding_x,
           encoding_n ? encoding_n : encoding_x,
           encoding_p ? encoding_p : encoding_x,
-          encoding_bits, encoding_chunks, margin);
+          encoding_bits, encoding_chunks, margin, loss_alpha);
         if (loss0 < loss) {
           tm_update(encoder, bit, input_x, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la, specificity);
         } else if (loss0 > loss) {
@@ -805,9 +810,7 @@ static inline void re_tm_update (
   long int *scores,
   double specificity,
   double margin,
-  double loss_scale,
-  double loss_scale_min,
-  double loss_scale_max
+  double loss_alpha
 ) {
   tsetlin_classifier_t *encoder = &tm->encoder.encoder;
   unsigned int encoding_bits = tm->encoder.encoding_bits;
@@ -821,21 +824,17 @@ static inline void re_tm_update (
   unsigned int *encoding_n = *state_n + ((*state_n_size - 1) * encoding_chunks);
   unsigned int *encoding_p = *state_p + ((*state_p_size - 1) * encoding_chunks);
 
-  double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_bits, encoding_chunks, margin);
-  double loss_p = pow(loss, loss_scale);
-  loss_p =
-    loss_p > loss_scale_max ? loss_scale_max :
-    loss_p < loss_scale_min ? loss_scale_min : loss_p;
+  double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_bits, encoding_chunks, margin, loss_alpha);
 
   // TODO: Provide a scale_previous that reduces the chance that earlier
   // states have bits flipped during back propagation of feedback
   if (loss > 0) {
     if (((float) fast_rand()) / ((float) UINT32_MAX) < 0.5) {
       // update negative
-      re_tm_update_recompute(tm, encoder, n_len, n_data, state_n, state_n_size, state_n_max, input_n, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_p, encoding_a, NULL, encoding_p);
+      re_tm_update_recompute(tm, encoder, n_len, n_data, state_n, state_n_size, state_n_max, input_n, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, NULL, encoding_p);
     } else {
       // update positive
-      re_tm_update_recompute(tm, encoder, p_len, p_data, state_p, state_p_size, state_p_max, input_p, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_p, encoding_a, encoding_n, NULL);
+      re_tm_update_recompute(tm, encoder, p_len, p_data, state_p, state_p_size, state_p_max, input_p, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, encoding_n, NULL);
     }
   } else {
     // No loss
@@ -1346,22 +1345,20 @@ static inline int tk_tsetlin_update_encoder (
   lua_State *L,
   tsetlin_encoder_t *tm
 ) {
-  lua_settop(L, 10);
+  lua_settop(L, 8);
   unsigned int *a = (unsigned int *) luaL_checkstring(L, 2);
   unsigned int *n = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *p = (unsigned int *) luaL_checkstring(L, 4);
   double specificity = luaL_checknumber(L, 5);
   double drop_clause = luaL_checknumber(L, 6);
   double margin = luaL_checknumber(L, 7);
-  double loss_scale = luaL_checknumber(L, 8);
-  double loss_scale_min = luaL_checknumber(L, 9);
-  double loss_scale_max = luaL_checknumber(L, 10);
+  double loss_alpha = luaL_checknumber(L, 8);
   mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
   unsigned int clause_output[tm->encoder.clause_chunks];
   unsigned int feedback_to_clauses[tm->encoder.clause_chunks];
   unsigned int feedback_to_la[tm->encoder.input_chunks];
   long int scores[tm->encoder.classes];
-  en_tm_update(tm, a, n, p, clause_output, feedback_to_clauses, feedback_to_la, scores, specificity, margin, loss_scale, loss_scale_min, loss_scale_max);
+  en_tm_update(tm, a, n, p, clause_output, feedback_to_clauses, feedback_to_la, scores, specificity, margin, loss_alpha);
   return 0;
 }
 
@@ -1373,13 +1370,11 @@ static inline int tk_tsetlin_update_recurrent_encoder (lua_State *L, tsetlin_rec
 
 static inline int tk_tsetlin_update_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
 {
-  lua_settop(L, 7);
+  lua_settop(L, 5);
   unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
   double specificity = luaL_checknumber(L, 3);
   double drop_clause = luaL_checknumber(L, 4);
-  double loss_scale = luaL_checknumber(L, 5);
-  double loss_scale_min = luaL_checknumber(L, 6);
-  double loss_scale_max = luaL_checknumber(L, 7);
+  double loss_alpha = luaL_checknumber(L, 5);
   unsigned int clause_output[tm->encoder.encoder.clause_chunks];
   unsigned int feedback_to_clauses[tm->encoder.encoder.clause_chunks];
   unsigned int feedback_to_la_e[tm->encoder.encoder.input_chunks];
@@ -1390,7 +1385,7 @@ static inline int tk_tsetlin_update_auto_encoder (lua_State *L, tsetlin_auto_enc
   mc_tm_initialize_drop_clause(&tm->decoder.encoder, drop_clause);
   ae_tm_update(tm, bm,
       clause_output, feedback_to_clauses, feedback_to_la_e, feedback_to_la_d, scores_e, scores_d,
-      specificity, loss_scale, loss_scale_min, loss_scale_max);
+      specificity, loss_alpha);
   return 0;
 }
 
@@ -1522,9 +1517,7 @@ typedef struct {
   unsigned int *tokens;
   double specificity;
   double margin;
-  double loss_scale;
-  double loss_scale_min;
-  double loss_scale_max;
+  double loss_alpha;
   pthread_mutex_t *qlock;
 } train_encoder_thread_data_t;
 
@@ -1550,7 +1543,7 @@ static void *train_encoder_thread (void *arg)
     unsigned int *p = data->tokens + ((next * 3 + 2) * input_chunks);
     en_tm_update(data->tm, a, n, p,
         clause_output, feedback_to_clauses, feedback_to_la, scores,
-        data->specificity, data->margin, data->loss_scale, data->loss_scale_min, data->loss_scale_max);
+        data->specificity, data->margin, data->loss_alpha);
   }
   return NULL;
 }
@@ -1559,15 +1552,13 @@ static inline int tk_tsetlin_train_encoder (
   lua_State *L,
   tsetlin_encoder_t *tm
 ) {
-  lua_settop(L, 9);
+  lua_settop(L, 7);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 3);
   double specificity = luaL_checknumber(L, 4);
   double drop_clause = luaL_checknumber(L, 5);
   double margin = luaL_checknumber(L, 6);
-  double loss_scale = luaL_checknumber(L, 7);
-  double loss_scale_min = luaL_checknumber(L, 8);
-  double loss_scale_max = luaL_checknumber(L, 9);
+  double loss_alpha = luaL_checknumber(L, 7);
   mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
 
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
@@ -1588,9 +1579,7 @@ static inline int tk_tsetlin_train_encoder (
     thread_data[i].tokens = tokens;
     thread_data[i].specificity = specificity;
     thread_data[i].margin = margin;
-    thread_data[i].loss_scale = loss_scale;
-    thread_data[i].loss_scale_min = loss_scale_min;
-    thread_data[i].loss_scale_max = loss_scale_max;
+    thread_data[i].loss_alpha = loss_alpha;
     thread_data[i].qlock = &qlock;
     if (pthread_create(&threads[i], NULL, train_encoder_thread, &thread_data[i]) != 0)
       return tk_error(L, "pthread_create", errno);
@@ -1614,9 +1603,7 @@ typedef struct {
   unsigned int *tokens;
   double specificity;
   double margin;
-  double loss_scale;
-  double loss_scale_min;
-  double loss_scale_max;
+  double loss_alpha;
   pthread_mutex_t *qlock;
 } train_recurrent_encoder_thread_data_t;
 
@@ -1666,7 +1653,7 @@ static void *train_recurrent_encoder_thread (void *arg)
         &state_n, &state_n_size, &state_n_max,
         &state_p, &state_p_size, &state_p_max,
         clause_output, feedback_to_clauses, feedback_to_la, scores,
-        data->specificity, data->margin, data->loss_scale, data->loss_scale_min, data->loss_scale_max);
+        data->specificity, data->margin, data->loss_alpha);
   }
 }
 
@@ -1674,16 +1661,14 @@ static inline int tk_tsetlin_train_recurrent_encoder (
   lua_State *L,
   tsetlin_recurrent_encoder_t *tm
 ) {
-  lua_settop(L, 10);
+  lua_settop(L, 8);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *indices = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 4);
   double specificity = luaL_checknumber(L, 5);
   double drop_clause = luaL_checknumber(L, 6);
   double margin = luaL_checknumber(L, 7);
-  double loss_scale = luaL_checknumber(L, 8);
-  double loss_scale_min = luaL_checknumber(L, 9);
-  double loss_scale_max = luaL_checknumber(L, 10);
+  double loss_alpha = luaL_checknumber(L, 8);
   mc_tm_initialize_drop_clause(&tm->encoder.encoder, drop_clause);
 
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
@@ -1705,9 +1690,7 @@ static inline int tk_tsetlin_train_recurrent_encoder (
     thread_data[i].tokens = tokens;
     thread_data[i].specificity = specificity;
     thread_data[i].margin = margin;
-    thread_data[i].loss_scale = loss_scale;
-    thread_data[i].loss_scale_min = loss_scale_min;
-    thread_data[i].loss_scale_max = loss_scale_max;
+    thread_data[i].loss_alpha = loss_alpha;
     thread_data[i].qlock = &qlock;
     if (pthread_create(&threads[i], NULL, train_recurrent_encoder_thread, &thread_data[i]) != 0)
       return tk_error(L, "pthread_create", errno);
@@ -1729,9 +1712,7 @@ typedef struct {
   unsigned int *next;
   unsigned int *ps;
   double specificity;
-  double loss_scale;
-  double loss_scale_min;
-  double loss_scale_max;
+  double loss_alpha;
   pthread_mutex_t *qlock;
 } train_auto_encoder_thread_data_t;
 
@@ -1753,21 +1734,19 @@ static void *train_auto_encoder_thread (void *arg)
       return NULL;
     ae_tm_update(data->tm, data->ps + next * data->tm->encoder.encoder.input_chunks,
         clause_output, feedback_to_clauses, feedback_to_la_e, feedback_to_la_d, scores_e, scores_d,
-        data->specificity, data->loss_scale, data->loss_scale_min, data->loss_scale_max);
+        data->specificity, data->loss_alpha);
   }
   return NULL;
 }
 
 static inline int tk_tsetlin_train_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
 {
-  lua_settop(L, 8);
+  lua_settop(L, 6);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
   double specificity = luaL_checknumber(L, 4);
   double drop_clause = luaL_checknumber(L, 5);
-  double loss_scale = luaL_checknumber(L, 6);
-  double loss_scale_min = luaL_checknumber(L, 7);
-  double loss_scale_max = luaL_checknumber(L, 8);
+  double loss_alpha = luaL_checknumber(L, 6);
 
   // TODO: Should the drop clause be shared? Does that make more sense for an
   // auto_encoder?
@@ -1791,9 +1770,7 @@ static inline int tk_tsetlin_train_auto_encoder (lua_State *L, tsetlin_auto_enco
     thread_data[i].next = &next;
     thread_data[i].ps = ps;
     thread_data[i].specificity = specificity;
-    thread_data[i].loss_scale = loss_scale;
-    thread_data[i].loss_scale_min = loss_scale_min;
-    thread_data[i].loss_scale_max = loss_scale_max;
+    thread_data[i].loss_alpha = loss_alpha;
     thread_data[i].qlock = &qlock;
     if (pthread_create(&threads[i], NULL, train_auto_encoder_thread, &thread_data[i]) != 0)
       return tk_error(L, "pthread_create", errno);
