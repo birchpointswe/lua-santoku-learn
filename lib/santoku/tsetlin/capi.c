@@ -244,12 +244,12 @@ static inline double triplet_loss_jaccard (
   unsigned int *n,
   unsigned int *p,
   unsigned int bits,
-  unsigned int margin,
+  double margin,
   double alpha
 ) {
   double dist_an = 1 - jaccard(a, n, bits);
   double dist_ap = 1 - jaccard(a, p, bits);
-  double loss = dist_ap - dist_an + ((double) margin / (double) bits);
+  double loss = dist_ap - dist_an + margin;
   loss = loss > 1 ? 1 : loss < 0 ? 0 : loss;
   // return sigmoid(alpha * loss);
   return pow(loss, alpha);
@@ -731,7 +731,7 @@ static inline void en_tm_update (
   unsigned int *feedback_to_la,
   long int *scores,
   double specificity,
-  unsigned int margin,
+  double margin,
   double loss_alpha
 ) {
 
@@ -799,7 +799,7 @@ static inline void re_tm_update_recompute (
   unsigned int encoding_bits,
   unsigned int encoding_chunks,
   double specificity,
-  unsigned int margin,
+  double margin,
   double loss,
   double loss_alpha,
   unsigned int *encoding_a,
@@ -860,7 +860,7 @@ static inline void re_tm_update (
   unsigned int *feedback_to_la,
   long int *scores,
   double specificity,
-  unsigned int margin,
+  double margin,
   double loss_alpha
 ) {
   tsetlin_classifier_t *encoder = &tm->encoder.encoder;
@@ -1655,7 +1655,7 @@ typedef struct {
   unsigned int *indices;
   unsigned int *tokens;
   double specificity;
-  unsigned int margin;
+  double margin;
   double loss_alpha;
   pthread_mutex_t *qlock;
 } train_recurrent_encoder_thread_data_t;
@@ -1720,7 +1720,7 @@ static inline int tk_tsetlin_train_recurrent_encoder (
   unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 4);
   double specificity = tk_tsetlin_checkposfloat(L, 5);
   double drop_clause = tk_tsetlin_checkposfloat(L, 6);
-  unsigned int margin = tk_tsetlin_checkposfloat(L, 7) * tm->encoder.encoding_bits;
+  double margin = tk_tsetlin_checkposfloat(L, 7);
   double loss_alpha = tk_tsetlin_checkposfloat(L, 8);
   mc_tm_initialize_drop_clause(&tm->encoder.encoder, drop_clause);
 
