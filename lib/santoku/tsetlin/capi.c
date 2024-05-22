@@ -829,9 +829,6 @@ static inline void re_tm_update_recompute (
         } else {
           tm_update(encoder, bit, input_x, bit_x,
               clause_output, feedback_to_clauses, feedback_to_la, specificity);
-        // } else {
-        //   tm_update(encoder, bit, input_x, 1,
-        //       clause_output, feedback_to_clauses, feedback_to_la, specificity);
         }
       }
     }
