@@ -175,8 +175,9 @@ static inline double sigmoid (double x) {
 static inline unsigned int hamming (
   unsigned int *a,
   unsigned int *b,
-  unsigned int chunks
+  unsigned int bits
 ) {
+  unsigned int chunks = (bits - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
   unsigned int distance = 0;
   for (unsigned int i = 0; i < chunks; i ++) {
     unsigned int diff = a[i] ^ b[i];
@@ -188,26 +189,70 @@ static inline unsigned int hamming (
 static inline double hamming_loss (
   unsigned int *a,
   unsigned int *b,
-  unsigned int chunks,
+  unsigned int bits,
   double alpha
 ) {
-  double loss = hamming(a, b, chunks);
-  return sigmoid(alpha * loss);
+  double loss = hamming(a, b, bits);
+  // return sigmoid(alpha * loss);
+  return pow(loss / (double) bits, alpha);
 }
 
-static inline double triplet_loss (
+static inline double jaccard (
+  unsigned int *a,
+  unsigned int *b,
+  unsigned int bits
+) {
+  unsigned int chunks = (bits - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
+  unsigned int n_union = 0;
+  unsigned int n_intersection = 0;
+  for (unsigned int i = 0; i < chunks; i ++)
+    n_union += popcount(a[i] | b[i]);
+  for (unsigned int i = 0; i < chunks; i ++)
+    n_intersection += popcount(a[i] & b[i]);
+  return (double) n_intersection / (double) n_union;
+}
+
+static inline double jaccard_loss (
+  unsigned int *a,
+  unsigned int *b,
+  unsigned int bits,
+  double alpha
+) {
+  double loss = jaccard(a, b, bits);
+  // return sigmoid(alpha * loss);
+  return pow(1 - loss, alpha);
+}
+
+static inline double triplet_loss_hamming (
   unsigned int *a,
   unsigned int *n,
   unsigned int *p,
-  unsigned int chunks,
+  unsigned int bits,
   unsigned int margin,
   double alpha
 ) {
-  unsigned int dist_an = hamming(a, n, chunks);
-  unsigned int dist_ap = hamming(a, p, chunks);
+  unsigned int dist_an = hamming(a, n, bits);
+  unsigned int dist_ap = hamming(a, p, bits);
   double loss = (double) dist_ap - (double) dist_an + margin;
   loss = loss > 0 ? loss : 0;
-  return sigmoid(alpha * loss);
+  // return sigmoid(alpha * loss);
+  return pow(loss / (double) bits, alpha);
+}
+
+static inline double triplet_loss_jaccard (
+  unsigned int *a,
+  unsigned int *n,
+  unsigned int *p,
+  unsigned int bits,
+  unsigned int margin,
+  double alpha
+) {
+  double dist_an = 1 - jaccard(a, n, bits);
+  double dist_ap = 1 - jaccard(a, p, bits);
+  double loss = dist_ap - dist_an + ((double) margin / (double) bits);
+  loss = loss > 1 ? 1 : loss < 0 ? 0 : loss;
+  // return sigmoid(alpha * loss);
+  return pow(loss, alpha);
 }
 
 static inline void flip_bits (
@@ -588,31 +633,32 @@ static inline void re_tm_encode (
 ) {
   if (x_first > x_len)
     return;
+
   tsetlin_encoder_t *encoder = &tm->encoder;
+
   unsigned int token_chunks = tm->token_chunks;
   unsigned int encoding_chunks = encoder->encoding_chunks;
+
   *states_size = x_len + 1;
+
   if (*states_size > *states_max) {
     *states_max = *states_size;
     *states = realloc(*states, encoding_chunks * (*states_size) * sizeof(unsigned int));
   }
-  if (x_first == 1) {
+
+  if (x_first == 1)
     memset((*states), 0, encoding_chunks * sizeof(unsigned int));
-  }
 
   unsigned int off_token0 = 0;
-  unsigned int off_token1 = off_token0 + token_chunks;
-  unsigned int off_state0 = off_token1 + token_chunks;
-  unsigned int off_state1 = off_state0 + encoding_chunks;
+  unsigned int off_state0 = off_token0 + token_chunks;
+  unsigned int off_flipped = off_state0 + encoding_chunks;
 
   for (unsigned int i = x_first; i <= x_len; i ++) {
     unsigned int *x = x_data + token_chunks * (i - 1);
     memcpy(input + off_token0, x, token_chunks * sizeof(unsigned int));
-    memcpy(input + off_token1, x, token_chunks * sizeof(unsigned int));
-    flip_bits(input + off_token1, token_chunks);
     memcpy(input + off_state0, (*states) + (encoding_chunks * (i - 1)), encoding_chunks * sizeof(unsigned int));
-    memcpy(input + off_state1, (*states) + (encoding_chunks * (i - 1)), encoding_chunks * sizeof(unsigned int));
-    flip_bits(input + off_state1, encoding_chunks);
+    memcpy(input + off_token0, input + off_flipped, token_chunks * sizeof(unsigned int) + encoding_chunks * sizeof(unsigned int));
+    flip_bits(input + off_flipped, token_chunks + encoding_chunks);
     en_tm_encode(encoder, input, (*states) + (encoding_chunks * i), scores);
   }
 }
@@ -643,7 +689,7 @@ static inline void ae_tm_update (
   flip_bits(decoding + tm->decoder.encoding_chunks, tm->decoder.encoding_chunks);
 
   // compare input to decoding
-  double loss = hamming_loss(input, decoding, tm->encoder.encoder.input_chunks, loss_alpha);
+  double loss = hamming_loss(input, decoding, tm->encoder.encoder.input_bits, loss_alpha);
 
   for (unsigned int bit = 0; bit < tm->encoder.encoding_bits; bit ++)
     if (fast_chance(loss)) {
@@ -657,7 +703,7 @@ static inline void ae_tm_update (
       ae_tm_decode(tm, encoding, decoding, scores_d);
       memcpy(decoding + tm->decoder.encoding_chunks, decoding, tm->decoder.encoding_chunks * sizeof(unsigned int));
       flip_bits(decoding + tm->decoder.encoding_chunks, tm->decoder.encoding_chunks);
-      double loss0 = hamming_loss(input, decoding, tm->encoder.encoder.input_chunks, loss_alpha);
+      double loss0 = hamming_loss(input, decoding, tm->encoder.encoder.input_bits, loss_alpha);
       encoding[chunk0] ^= (1U << pos);
       encoding[chunk1] ^= (1U << pos);
       if (loss0 < loss)
@@ -692,6 +738,7 @@ static inline void en_tm_update (
   tsetlin_classifier_t *encoder = &tm->encoder;
   unsigned int classes = encoder->classes;
   unsigned int encoding_chunks = tm->encoding_chunks;
+  unsigned int encoding_bits = tm->encoding_bits;
 
   unsigned int encoding_a[encoding_chunks];
   unsigned int encoding_n[encoding_chunks];
@@ -701,7 +748,7 @@ static inline void en_tm_update (
   en_tm_encode(tm, n, encoding_n, scores);
   en_tm_encode(tm, p, encoding_p, scores);
 
-  double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_chunks, margin, loss_alpha);
+  double loss = triplet_loss_hamming(encoding_a, encoding_n, encoding_p, encoding_bits, margin, loss_alpha);
 
   for (unsigned int i = 0; i < classes; i ++) {
     if (fast_chance(loss)) {
@@ -771,15 +818,20 @@ static inline void re_tm_update_recompute (
         re_tm_encode(tm, word + 1, x_len, x_data, state_x, state_x_size, state_x_max, input_x, scores);
         (*state_x)[chunk0] ^= (1U << pos);
         unsigned int *encoding_x = (*state_x) + (*state_x_size - 1) * encoding_chunks;
-        double loss0 = triplet_loss(
+        double loss0 = triplet_loss_jaccard(
           encoding_a ? encoding_a : encoding_x,
           encoding_n ? encoding_n : encoding_x,
           encoding_p ? encoding_p : encoding_x,
-          encoding_chunks, margin, loss_alpha);
-        if (loss0 <= loss) {
-          tm_update(encoder, bit, input_x, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+          encoding_bits, margin, loss_alpha);
+        if (loss0 < loss && bit_x_flipped) {
+          tm_update(encoder, bit, input_x, bit_x_flipped,
+              clause_output, feedback_to_clauses, feedback_to_la, specificity);
         } else {
-          tm_update(encoder, bit, input_x, bit_x, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+          tm_update(encoder, bit, input_x, bit_x,
+              clause_output, feedback_to_clauses, feedback_to_la, specificity);
+        // } else {
+        //   tm_update(encoder, bit, input_x, 1,
+        //       clause_output, feedback_to_clauses, feedback_to_la, specificity);
         }
       }
     }
@@ -826,10 +878,15 @@ static inline void re_tm_update (
   unsigned int *encoding_n = *state_n + ((*state_n_size - 1) * encoding_chunks);
   unsigned int *encoding_p = *state_p + ((*state_p_size - 1) * encoding_chunks);
 
-  double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_chunks, margin, loss_alpha);
+  double loss = triplet_loss_jaccard(encoding_a, encoding_n, encoding_p, encoding_bits, margin, loss_alpha);
+  double r = fast_drand();
 
-  re_tm_update_recompute(tm, encoder, n_len, n_data, state_n, state_n_size, state_n_max, input_n, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, NULL, encoding_p);
-  re_tm_update_recompute(tm, encoder, p_len, p_data, state_p, state_p_size, state_p_max, input_p, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, encoding_n, NULL);
+  if (r < 1.0 / 3)
+    re_tm_update_recompute(tm, encoder, a_len, a_data, state_a, state_a_size, state_a_max, input_a, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, NULL, encoding_n, encoding_p);
+  else if (r > 2.0 / 3)
+    re_tm_update_recompute(tm, encoder, n_len, n_data, state_n, state_n_size, state_n_max, input_n, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, NULL, encoding_p);
+  else
+    re_tm_update_recompute(tm, encoder, p_len, p_data, state_p, state_p_size, state_p_max, input_p, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, encoding_n, NULL);
 }
 
 static inline void mc_tm_initialize_drop_clause (
@@ -2010,8 +2067,8 @@ static void *evaluate_encoder_thread (void *arg)
     en_tm_encode(data->tm, a, encoding_a, scores);
     en_tm_encode(data->tm, n, encoding_n, scores);
     en_tm_encode(data->tm, p, encoding_p, scores);
-    unsigned int dist_an = hamming(encoding_a, encoding_n, data->tm->encoding_chunks);
-    unsigned int dist_ap = hamming(encoding_a, encoding_p, data->tm->encoding_chunks);
+    unsigned int dist_an = hamming(encoding_a, encoding_n, data->tm->encoding_bits);
+    unsigned int dist_ap = hamming(encoding_a, encoding_p, data->tm->encoding_bits);
     if (dist_ap < dist_an) {
       pthread_mutex_lock(data->lock);
       (*data->correct) += 1;
@@ -2119,9 +2176,9 @@ static void *evaluate_recurrent_encoder_thread (void *arg)
     unsigned int *encoding_a = state_a + ((state_a_size - 1) * data->tm->encoder.encoding_chunks);
     unsigned int *encoding_n = state_n + ((state_n_size - 1) * data->tm->encoder.encoding_chunks);
     unsigned int *encoding_p = state_p + ((state_p_size - 1) * data->tm->encoder.encoding_chunks);
-    unsigned int dist_an = hamming(encoding_a, encoding_n, data->tm->encoder.encoding_chunks);
-    unsigned int dist_ap = hamming(encoding_a, encoding_p, data->tm->encoder.encoding_chunks);
-    if (dist_ap < dist_an)
+    double sim_an = jaccard(encoding_a, encoding_n, data->tm->encoder.encoding_bits);
+    double sim_ap = jaccard(encoding_a, encoding_p, data->tm->encoder.encoding_bits);
+    if (sim_ap > sim_an)
     {
       pthread_mutex_lock(data->lock);
       (*data->correct) += 1;
@@ -2210,7 +2267,7 @@ static void *evaluate_auto_encoder_thread (void *arg)
     memcpy(decoding + data->tm->decoder.encoding_chunks, decoding, data->tm->decoder.encoding_chunks * sizeof(unsigned int));
     flip_bits(decoding + data->tm->decoder.encoding_chunks, data->tm->decoder.encoding_chunks);
     pthread_mutex_lock(data->lock);
-    (*data->total_diff) += hamming(input, decoding, data->tm->encoder.encoder.input_chunks);
+    (*data->total_diff) += hamming(input, decoding, data->tm->encoder.encoder.input_bits);
     pthread_mutex_unlock(data->lock);
   }
 }
