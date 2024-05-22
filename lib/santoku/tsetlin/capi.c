@@ -139,6 +139,16 @@ static inline uint32_t fast_rand ()
   return (uint32_t) ((x ^ x >> 22) >> (22 + count));
 }
 
+static inline double fast_drand ()
+{
+  return ((float)fast_rand())/((float)UINT32_MAX);
+}
+
+static inline bool fast_chance (double p)
+{
+  return fast_drand() < p;
+}
+
 static inline int normal (double mean, double variance)
 {
   double u1 = (double) (fast_rand() + 1) / ((double) UINT32_MAX + 1);
@@ -398,7 +408,7 @@ static inline void tm_update (
   for (unsigned int i = 0; i < clause_chunks; i ++)
     for (unsigned int j = 0; j < sizeof(unsigned int) * CHAR_BIT; j ++)
       feedback_to_clauses[i] |= (unsigned int)
-        (((float) fast_rand()) / ((float) UINT32_MAX) <= p) << j;
+        fast_chance(p) << j;
   for (unsigned int i = 0; i < clause_chunks; i ++)
     feedback_to_clauses[i] &= drop_clause[i];
   for (unsigned int j = 0; j < clauses; j ++) {
@@ -586,13 +596,15 @@ static inline void re_tm_encode (
     *states_max = *states_size;
     *states = realloc(*states, encoding_chunks * (*states_size) * sizeof(unsigned int));
   }
-  if (x_first == 1)  {
+  if (x_first == 1) {
     memset((*states), 0, encoding_chunks * sizeof(unsigned int));
   }
+
   unsigned int off_token0 = 0;
   unsigned int off_token1 = off_token0 + token_chunks;
   unsigned int off_state0 = off_token1 + token_chunks;
   unsigned int off_state1 = off_state0 + encoding_chunks;
+
   for (unsigned int i = x_first; i <= x_len; i ++) {
     unsigned int *x = x_data + token_chunks * (i - 1);
     memcpy(input + off_token0, x, token_chunks * sizeof(unsigned int));
@@ -634,7 +646,7 @@ static inline void ae_tm_update (
   double loss = hamming_loss(input, decoding, tm->encoder.encoder.input_chunks, loss_alpha);
 
   for (unsigned int bit = 0; bit < tm->encoder.encoding_bits; bit ++)
-    if (((float) fast_rand()) / ((float) UINT32_MAX) < loss) {
+    if (fast_chance(loss)) {
       unsigned int chunk0 = bit / (sizeof(unsigned int) * CHAR_BIT);
       unsigned int chunk1 = chunk0 + tm->encoder.encoding_chunks;
       unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
@@ -655,7 +667,7 @@ static inline void ae_tm_update (
     }
 
   for (unsigned int bit = 0; bit < tm->encoder.encoder.input_bits; bit ++)
-    if (((float) fast_rand()) / ((float) UINT32_MAX) < loss) {
+    if (fast_chance(loss)) {
       unsigned int chunk = bit / (sizeof(unsigned int) * CHAR_BIT);
       unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
       unsigned int bit_i = input[chunk] & (1U << pos);
@@ -692,7 +704,7 @@ static inline void en_tm_update (
   double loss = triplet_loss(encoding_a, encoding_n, encoding_p, encoding_chunks, margin, loss_alpha);
 
   for (unsigned int i = 0; i < classes; i ++) {
-    if (((float) fast_rand()) / ((float) UINT32_MAX) < loss) {
+    if (fast_chance(loss)) {
       unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
       unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
       unsigned int bit_a = encoding_a[chunk] & (1U << pos);
@@ -748,33 +760,26 @@ static inline void re_tm_update_recompute (
   unsigned int *encoding_p
 ) {
   for (unsigned int word = 1; word <= x_len; word ++) {
-    if (((float) fast_rand()) / ((float) UINT32_MAX) < loss) {
-      for (unsigned int bit = 0; bit < encoding_bits; bit ++) {
-        if (((float) fast_rand()) / ((float) UINT32_MAX) < loss) {
-          unsigned int chunk = bit / (sizeof(unsigned int) * CHAR_BIT);
-          unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
-          unsigned chunk0 = word * encoding_chunks + chunk;
-          unsigned int bit_x = (*state_x)[chunk0] & (1U << pos);
-          unsigned int bit_x_flipped = !bit_x;
-          (*state_x)[chunk0] ^= (1U << pos);
-          re_tm_encode(tm, word + 1, x_len, x_data, state_x, state_x_size, state_x_max, input_x, scores);
-          (*state_x)[chunk0] ^= (1U << pos);
-          unsigned int *encoding_x = (*state_x) + (*state_x_size - 1) * encoding_chunks;
-          double loss0 = triplet_loss(
-            encoding_a ? encoding_a : encoding_x,
-            encoding_n ? encoding_n : encoding_x,
-            encoding_p ? encoding_p : encoding_x,
-            encoding_chunks, margin, loss_alpha);
-          if (loss0 < loss) {
-            tm_update(encoder, bit, input_x, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-          } else if (loss0 > loss) {
-            tm_update(encoder, bit, input_x, bit_x, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-          // } else {
-          //   // TODO: Does this make sense? Idea being that if the bit flip
-          //   // didn't change anything, we want to add some entropy
-          //   tm_update(encoder, bit, input_x, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-          //   tm_update(encoder, bit, input_x, bit_x, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-          }
+    for (unsigned int bit = 0; bit < encoding_bits; bit ++) {
+      if (fast_chance(loss)) {
+        unsigned int chunk = bit / (sizeof(unsigned int) * CHAR_BIT);
+        unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
+        unsigned chunk0 = word * encoding_chunks + chunk;
+        unsigned int bit_x = (*state_x)[chunk0] & (1U << pos);
+        unsigned int bit_x_flipped = !bit_x;
+        (*state_x)[chunk0] ^= (1U << pos);
+        re_tm_encode(tm, word + 1, x_len, x_data, state_x, state_x_size, state_x_max, input_x, scores);
+        (*state_x)[chunk0] ^= (1U << pos);
+        unsigned int *encoding_x = (*state_x) + (*state_x_size - 1) * encoding_chunks;
+        double loss0 = triplet_loss(
+          encoding_a ? encoding_a : encoding_x,
+          encoding_n ? encoding_n : encoding_x,
+          encoding_p ? encoding_p : encoding_x,
+          encoding_chunks, margin, loss_alpha);
+        if (loss0 <= loss) {
+          tm_update(encoder, bit, input_x, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+        } else {
+          tm_update(encoder, bit, input_x, bit_x, clause_output, feedback_to_clauses, feedback_to_la, specificity);
         }
       }
     }
@@ -836,7 +841,7 @@ static inline void mc_tm_initialize_drop_clause (
   memset(drop_clauses, 0, clause_chunks * sizeof(unsigned int));
   for (unsigned int i = 0; i < clause_chunks; i ++)
     for (unsigned int j = 0; j < sizeof(unsigned int) * CHAR_BIT; j ++)
-      if (((float)fast_rand())/((float)UINT32_MAX) <= drop_clause)
+      if (fast_chance(drop_clause))
         drop_clauses[i] |= (1U << j);
 }
 
@@ -989,7 +994,7 @@ static inline int tk_tsetlin_create_recurrent_encoder (lua_State *L, tsetlin_rec
   unsigned int boost_true_positive = tk_tsetlin_checkboolean(L, 6);
   tk_tsetlin_init_encoder(L, &tm->encoder,
     output_bits,
-    (token_bits + output_bits) * 2,
+    (token_bits + output_bits),
     clauses,
     state_bits,
     threshold,
