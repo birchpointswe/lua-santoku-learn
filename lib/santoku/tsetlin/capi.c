@@ -876,6 +876,10 @@ static inline void re_tm_update (
   unsigned int *encoding_p = *state_p + ((*state_p_size - 1) * encoding_chunks);
 
   double loss = triplet_loss_jaccard(encoding_a, encoding_n, encoding_p, encoding_bits, margin, loss_alpha);
+
+  if (loss == 0)
+    return;
+
   double r = fast_drand();
 
   if (r < 1.0 / 3)
