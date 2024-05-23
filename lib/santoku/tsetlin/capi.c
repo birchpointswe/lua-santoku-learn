@@ -197,6 +197,17 @@ static inline double hamming_loss (
   return pow(loss / (double) bits, alpha);
 }
 
+static inline unsigned int cardinality (
+  unsigned int *a,
+  unsigned int bits
+) {
+  unsigned int chunks = (bits - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
+  unsigned int total = 0;
+  for (unsigned int i = 0; i < chunks; i ++)
+    total += popcount(a[i]);
+  return total;
+}
+
 static inline double jaccard (
   unsigned int *a,
   unsigned int *b,
@@ -802,6 +813,7 @@ static inline void re_tm_update_recompute (
   double margin,
   double loss,
   double loss_alpha,
+  double sparsity_alpha,
   unsigned int *encoding_a,
   unsigned int *encoding_n,
   unsigned int *encoding_p
@@ -823,13 +835,14 @@ static inline void re_tm_update_recompute (
           encoding_n ? encoding_n : encoding_x,
           encoding_p ? encoding_p : encoding_x,
           encoding_bits, margin, loss_alpha);
-        if (loss0 < loss && bit_x_flipped) {
+        double sparsity = (double) cardinality(encoding_x, encoding_bits) / encoding_bits;
+        double sparse_factor = pow(fabs(sparsity - 0.5) / 0.5, sparsity_alpha);
+        if (loss0 < loss && bit_x_flipped)
           tm_update(encoder, bit, input_x, bit_x_flipped,
               clause_output, feedback_to_clauses, feedback_to_la, specificity);
-        } else {
+        else if (!bit_x || fast_chance(sparse_factor))
           tm_update(encoder, bit, input_x, bit_x,
               clause_output, feedback_to_clauses, feedback_to_la, specificity);
-        }
       }
     }
   }
@@ -861,7 +874,8 @@ static inline void re_tm_update (
   long int *scores,
   double specificity,
   double margin,
-  double loss_alpha
+  double loss_alpha,
+  double sparsity_alpha
 ) {
   tsetlin_classifier_t *encoder = &tm->encoder.encoder;
   unsigned int encoding_bits = tm->encoder.encoding_bits;
@@ -883,11 +897,11 @@ static inline void re_tm_update (
   double r = fast_drand();
 
   if (r < 1.0 / 3)
-    re_tm_update_recompute(tm, encoder, a_len, a_data, state_a, state_a_size, state_a_max, input_a, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, NULL, encoding_n, encoding_p);
+    re_tm_update_recompute(tm, encoder, a_len, a_data, state_a, state_a_size, state_a_max, input_a, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, sparsity_alpha, NULL, encoding_n, encoding_p);
   else if (r > 2.0 / 3)
-    re_tm_update_recompute(tm, encoder, n_len, n_data, state_n, state_n_size, state_n_max, input_n, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, NULL, encoding_p);
+    re_tm_update_recompute(tm, encoder, n_len, n_data, state_n, state_n_size, state_n_max, input_n, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, sparsity_alpha, encoding_a, NULL, encoding_p);
   else
-    re_tm_update_recompute(tm, encoder, p_len, p_data, state_p, state_p_size, state_p_max, input_p, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, encoding_n, NULL);
+    re_tm_update_recompute(tm, encoder, p_len, p_data, state_p, state_p_size, state_p_max, input_p, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, sparsity_alpha, encoding_a, encoding_n, NULL);
 }
 
 static inline void mc_tm_initialize_drop_clause (
@@ -1661,6 +1675,7 @@ typedef struct {
   double specificity;
   double margin;
   double loss_alpha;
+  double sparsity_alpha;
   pthread_mutex_t *qlock;
 } train_recurrent_encoder_thread_data_t;
 
@@ -1710,7 +1725,7 @@ static void *train_recurrent_encoder_thread (void *arg)
         &state_n, &state_n_size, &state_n_max,
         &state_p, &state_p_size, &state_p_max,
         clause_output, feedback_to_clauses, feedback_to_la, scores,
-        data->specificity, data->margin, data->loss_alpha);
+        data->specificity, data->margin, data->loss_alpha, data->sparsity_alpha);
   }
 }
 
@@ -1718,7 +1733,7 @@ static inline int tk_tsetlin_train_recurrent_encoder (
   lua_State *L,
   tsetlin_recurrent_encoder_t *tm
 ) {
-  lua_settop(L, 8);
+  lua_settop(L, 9);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *indices = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 4);
@@ -1726,6 +1741,7 @@ static inline int tk_tsetlin_train_recurrent_encoder (
   double drop_clause = tk_tsetlin_checkposfloat(L, 6);
   double margin = tk_tsetlin_checkposfloat(L, 7);
   double loss_alpha = tk_tsetlin_checkposfloat(L, 8);
+  double sparsity_alpha = tk_tsetlin_checkposfloat(L, 9);
   mc_tm_initialize_drop_clause(&tm->encoder.encoder, drop_clause);
 
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
@@ -1748,6 +1764,7 @@ static inline int tk_tsetlin_train_recurrent_encoder (
     thread_data[i].specificity = specificity;
     thread_data[i].margin = margin;
     thread_data[i].loss_alpha = loss_alpha;
+    thread_data[i].sparsity_alpha = sparsity_alpha;
     thread_data[i].qlock = &qlock;
     if (pthread_create(&threads[i], NULL, train_recurrent_encoder_thread, &thread_data[i]) != 0)
       return tk_error(L, "pthread_create", errno);
