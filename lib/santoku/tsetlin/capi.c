@@ -261,7 +261,7 @@ static inline double triplet_loss_jaccard (
   double dist_an = 1 - jaccard(a, n, bits);
   double dist_ap = 1 - jaccard(a, p, bits);
   double loss = dist_ap - dist_an + margin;
-  loss = loss > 1 ? 1 : loss < 0 ? 0 : loss;
+  loss = loss > 1 ? 1 : loss < 0 ? margin : loss;
   // return sigmoid(alpha * loss);
   return pow(loss, alpha);
 }
@@ -836,11 +836,15 @@ static inline void re_tm_update_recompute (
           encoding_p ? encoding_p : encoding_x,
           encoding_bits, margin, loss_alpha);
         double sparsity = (double) cardinality(encoding_x, encoding_bits) / encoding_bits;
-        double sparse_factor = pow(fabs(sparsity - 0.5) / 0.5, sparsity_alpha);
-        if (loss0 < loss && bit_x_flipped)
+        double sparse_factor = 1 - pow(fabs(sparsity - 0.5) / 0.5, sparsity_alpha);
+        if (loss0 < loss &&
+            ((bit_x_flipped && (sparsity < 0.5 || fast_chance(sparse_factor))) ||
+             (!bit_x_flipped && (sparsity > 0.5 || fast_chance(sparse_factor)))))
           tm_update(encoder, bit, input_x, bit_x_flipped,
               clause_output, feedback_to_clauses, feedback_to_la, specificity);
-        else if (!bit_x || fast_chance(sparse_factor))
+        else if (loss0 > loss ||
+            ((bit_x && (sparsity < 0.5 || fast_chance(sparse_factor))) ||
+             (!bit_x && (sparsity > 0.5 || fast_chance(sparse_factor)))))
           tm_update(encoder, bit, input_x, bit_x,
               clause_output, feedback_to_clauses, feedback_to_la, specificity);
       }
