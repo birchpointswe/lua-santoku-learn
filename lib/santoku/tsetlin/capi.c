@@ -835,16 +835,12 @@ static inline void re_tm_update_recompute (
           encoding_n ? encoding_n : encoding_x,
           encoding_p ? encoding_p : encoding_x,
           encoding_bits, margin, loss_alpha);
-        double sparsity = (double) cardinality(encoding_x, encoding_bits) / encoding_bits;
-        double sparse_factor = 1 - pow(fabs(sparsity - 0.5) / 0.5, sparsity_alpha);
-        if (loss0 < loss &&
-            ((bit_x_flipped && (sparsity < 0.5 || fast_chance(sparse_factor))) ||
-             (!bit_x_flipped && (sparsity > 0.5 || fast_chance(sparse_factor)))))
+        // double sparsity = (double) cardinality(encoding_x, encoding_bits) / encoding_bits;
+        // double sparse_factor = pow(1 - fabs(sparsity - 0.5) / 0.5, sparsity_alpha);
+        if (loss0 < loss)
           tm_update(encoder, bit, input_x, bit_x_flipped,
               clause_output, feedback_to_clauses, feedback_to_la, specificity);
-        else if (loss0 > loss ||
-            ((bit_x && (sparsity < 0.5 || fast_chance(sparse_factor))) ||
-             (!bit_x && (sparsity > 0.5 || fast_chance(sparse_factor)))))
+        else
           tm_update(encoder, bit, input_x, bit_x,
               clause_output, feedback_to_clauses, feedback_to_la, specificity);
       }
