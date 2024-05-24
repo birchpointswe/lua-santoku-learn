@@ -1,7 +1,9 @@
 # Now
 
-- Recurrent encoder minimal test case: that IQ test problem where you're given a
-  a sequence of shapes and have to predict the next one.
+- Add a "loss alpha" concept to classifier
+
+- Recurrent classifier with MNIST
+- Recurrent classifier with noisy xor
 
 - Use scaled loss_alpha based on max observed loss while training
 - Release recent changes
