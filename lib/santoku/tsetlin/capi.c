@@ -192,82 +192,6 @@ static inline double hamming_loss (
   return pow(loss / (double) bits, alpha);
 }
 
-static inline unsigned int cardinality (
-  unsigned int *a,
-  unsigned int bits
-) {
-  unsigned int chunks = (bits - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
-  unsigned int total = 0;
-  for (unsigned int i = 0; i < chunks; i ++)
-    total += popcount(a[i]);
-  return total;
-}
-
-static inline double jaccard (
-  unsigned int *a,
-  unsigned int *b,
-  unsigned int bits
-) {
-  unsigned int chunks = (bits - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
-  unsigned int n_or = 0;
-  unsigned int n_and = 0;
-  for (unsigned int i = 0; i < chunks; i ++)
-    n_or += popcount(a[i] | b[i]);
-  if (n_or == 0)
-    return 0;
-  for (unsigned int i = 0; i < chunks; i ++)
-    n_and += popcount(a[i] & b[i]);
-  return (double) n_and / (double) n_or;
-}
-
-static inline double dice (
-  unsigned int *a,
-  unsigned int *b,
-  unsigned int bits
-) {
-  unsigned int chunks = (bits - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
-  unsigned int n_total = 0;
-  unsigned int n_and = 0;
-  for (unsigned int i = 0; i < chunks; i ++)
-    n_total += popcount(a[i]) + popcount(b[i]);
-  if (n_total == 0)
-    return 0;
-  for (unsigned int i = 0; i < chunks; i ++)
-    n_and += popcount(a[i] & b[i]);
-  return (double) 2.0 * n_and / (double) n_total;
-}
-
-static inline double overlap (
-  unsigned int *a,
-  unsigned int *b,
-  unsigned int bits
-) {
-  unsigned int chunks = (bits - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
-  unsigned int n_a = 0;
-  unsigned int n_b = 0;
-  unsigned int n_and = 0;
-  for (unsigned int i = 0; i < chunks; i ++) {
-    n_a += popcount(a[i]);
-    n_b += popcount(b[i]);
-  }
-  unsigned int n_min = n_a < n_b ? n_a : n_b;
-  if (n_min == 0)
-    return 0;
-  for (unsigned int i = 0; i < chunks; i ++)
-    n_and += popcount(a[i] & b[i]);
-  return (double) n_and / (double) n_min;
-}
-
-static inline double jaccard_loss (
-  unsigned int *a,
-  unsigned int *b,
-  unsigned int bits,
-  double alpha
-) {
-  double loss = jaccard(a, b, bits);
-  return pow(1 - loss, alpha);
-}
-
 static inline double triplet_loss_hamming (
   unsigned int *a,
   unsigned int *n,
@@ -279,45 +203,6 @@ static inline double triplet_loss_hamming (
   unsigned int dist_an = hamming(a, n, bits);
   unsigned int dist_ap = hamming(a, p, bits);
   return fminf(1.0f, fmaxf(0.0f, (double) dist_ap - dist_an + margin) * alpha / bits);
-}
-
-static inline double triplet_loss_jaccard (
-  unsigned int *a,
-  unsigned int *n,
-  unsigned int *p,
-  unsigned int bits,
-  double margin,
-  double alpha
-) {
-  double dist_an = 1 - jaccard(a, n, bits);
-  double dist_ap = 1 - jaccard(a, p, bits);
-  return fminf(1.0f, fmaxf(0.0f, dist_ap - dist_an + margin) * alpha);
-}
-
-static inline double triplet_loss_dice (
-  unsigned int *a,
-  unsigned int *n,
-  unsigned int *p,
-  unsigned int bits,
-  double margin,
-  double alpha
-) {
-  double dist_an = 1 - dice(a, n, bits);
-  double dist_ap = 1 - dice(a, p, bits);
-  return fminf(1.0f, fmaxf(0.0f, dist_ap - dist_an + margin) * alpha);
-}
-
-static inline double triplet_loss_overlap (
-  unsigned int *a,
-  unsigned int *n,
-  unsigned int *p,
-  unsigned int bits,
-  double margin,
-  double alpha
-) {
-  double dist_an = 1 - overlap(a, n, bits);
-  double dist_ap = 1 - overlap(a, p, bits);
-  return fminf(1.0f, fmaxf(0.0f, dist_ap - dist_an + margin) * alpha);
 }
 
 static inline void flip_bits (
@@ -891,7 +776,7 @@ static inline void re_tm_update_recompute (
         if (loss0 < loss)
           tm_update(encoder, bit, input_x, bit_x_flipped,
               clause_output, feedback_to_clauses, feedback_to_la, specificity);
-        else if (loss0 > loss)
+        else if (loss0 >= loss)
           tm_update(encoder, bit, input_x, bit_x,
               clause_output, feedback_to_clauses, feedback_to_la, specificity);
       }
@@ -941,9 +826,16 @@ static inline void re_tm_update (
 
   double loss = triplet_loss_hamming(encoding_a, encoding_n, encoding_p, encoding_bits, margin, loss_alpha);
 
-  re_tm_update_recompute(tm, encoder, a_len, a_data, state_a, state_a_size, state_a_max, input_a, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, NULL, encoding_n, encoding_p);
-  re_tm_update_recompute(tm, encoder, n_len, n_data, state_n, state_n_size, state_n_max, input_n, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, NULL, encoding_p);
-  re_tm_update_recompute(tm, encoder, p_len, p_data, state_p, state_p_size, state_p_max, input_p, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, encoding_n, NULL);
+  unsigned int r = fast_rand() % 3;
+
+  if (r == 1)
+    re_tm_update_recompute(tm, encoder, a_len, a_data, state_a, state_a_size, state_a_max, input_a, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, NULL, encoding_n, encoding_p);
+
+  else if (r == 2)
+    re_tm_update_recompute(tm, encoder, n_len, n_data, state_n, state_n_size, state_n_max, input_n, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, NULL, encoding_p);
+
+  else if (r == 3)
+    re_tm_update_recompute(tm, encoder, p_len, p_data, state_p, state_p_size, state_p_max, input_p, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, encoding_n, NULL);
 }
 
 static inline void mc_tm_initialize_drop_clause (
@@ -2235,9 +2127,9 @@ static void *evaluate_recurrent_encoder_thread (void *arg)
     unsigned int *encoding_a = state_a + ((state_a_size - 1) * encoding_chunks);
     unsigned int *encoding_n = state_n + ((state_n_size - 1) * encoding_chunks);
     unsigned int *encoding_p = state_p + ((state_p_size - 1) * encoding_chunks);
-    double sim_an = 1 - hamming(encoding_a, encoding_n, encoding_bits);
-    double sim_ap = 1 - hamming(encoding_a, encoding_p, encoding_bits);
-    if (sim_ap > sim_an)
+    unsigned int dist_an = hamming(encoding_a, encoding_n, encoding_bits);
+    unsigned int dist_ap = hamming(encoding_a, encoding_p, encoding_bits);
+    if (dist_ap < dist_an)
     {
       pthread_mutex_lock(data->lock);
       (*data->correct) += 1;
