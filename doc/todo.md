@@ -1,5 +1,8 @@
 # Now
 
+- Recurrent encoder minimal test case: that IQ test problem where you're given a
+  a sequence of shapes and have to predict the next one.
+
 - Use scaled loss_alpha based on max observed loss while training
 - Release recent changes
 - Fast booleanize matrix function (input: embedding matrix, output: thresholds
