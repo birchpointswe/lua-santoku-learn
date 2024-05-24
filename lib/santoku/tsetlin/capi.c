@@ -42,6 +42,8 @@ SOFTWARE.
 
 #define TK_TSETLIN_MT "santoku_tsetlin"
 
+#define BITS (sizeof(unsigned int) * CHAR_BIT)
+
 typedef enum {
   TM_CLASSIFIER,
   TM_RECURRENT_CLASSIFIER,
@@ -119,13 +121,13 @@ typedef struct {
                 (clause) * (tm)->input_chunks + \
                 (input_chunk)])
 
-#define tm_state_idx_counts(tm, class, clause, input_chunk) \
+#define tm_state_counts(tm, class, clause, input_chunk) \
   (&(tm)->state[(class) * (tm)->clauses * (tm)->input_chunks * ((tm)->state_bits - 1) + \
                 (clause) * (tm)->input_chunks * ((tm)->state_bits - 1) + \
                 (input_chunk) * ((tm)->state_bits - 1)])
 
-#define tm_state_idx_actions(tm, class, clause) \
-  (&(tm)->actions[(class) * (tm)->clauses *  (tm)->input_chunks + \
+#define tm_state_actions(tm, class, clause) \
+  (&(tm)->actions[(class) * (tm)->clauses * (tm)->input_chunks + \
                   (clause) * (tm)->input_chunks])
 
 static uint64_t const multiplier = 6364136223846793005u;
@@ -141,7 +143,7 @@ static inline uint32_t fast_rand ()
 
 static inline double fast_drand ()
 {
-  return ((double)fast_rand())/((double)UINT32_MAX);
+  return ((double)fast_rand()) / ((double)UINT32_MAX);
 }
 
 static inline bool fast_chance (double p)
@@ -173,7 +175,7 @@ static inline unsigned int hamming (
   unsigned int *b,
   unsigned int bits
 ) {
-  unsigned int chunks = (bits - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
+  unsigned int chunks = (bits - 1) / BITS + 1;
   unsigned int distance = 0;
   for (unsigned int i = 0; i < chunks; i ++) {
     unsigned int diff = a[i] ^ b[i];
@@ -256,9 +258,9 @@ static inline void tm_initialize_random_streams (
   active = active < 0 ? 0 : active;
   for (unsigned int i = 0; i < active; i ++) {
     unsigned int f = fast_rand() % (2 * features);
-    while (feedback_to_la[f / (sizeof(unsigned int) * CHAR_BIT)] & (1U << (f % (sizeof(unsigned int) * CHAR_BIT))))
+    while (feedback_to_la[f / BITS] & (1U << (f % BITS)))
       f = fast_rand() % (2 * features);
-    feedback_to_la[f / (sizeof(unsigned int) * CHAR_BIT)] |= 1U << (f % (sizeof(unsigned int) * CHAR_BIT));
+    feedback_to_la[f / BITS] |= 1U << (f % BITS);
   }
 }
 
@@ -273,7 +275,7 @@ static inline void tm_inc (
   pthread_mutex_lock(lock);
 
   unsigned int m = tm->state_bits - 1;
-  unsigned int *counts = tm_state_idx_counts(tm, class, clause, chunk);
+  unsigned int *counts = tm_state_counts(tm, class, clause, chunk);
   unsigned int carry, carry_next;
   carry = active;
   for (unsigned int b = 0; b < m; b ++) {
@@ -281,7 +283,7 @@ static inline void tm_inc (
     counts[b] ^= carry;
     carry = carry_next;
   }
-  unsigned int *actions = tm_state_idx_actions(tm, class, clause);
+  unsigned int *actions = tm_state_actions(tm, class, clause);
   carry_next = actions[chunk] & carry;
   actions[chunk] ^= carry;
   carry = carry_next;
@@ -303,7 +305,7 @@ static inline void tm_dec (
   pthread_mutex_lock(lock);
 
   unsigned int m = tm->state_bits - 1;
-  unsigned int *counts = tm_state_idx_counts(tm, class, clause, chunk);
+  unsigned int *counts = tm_state_counts(tm, class, clause, chunk);
   unsigned int carry, carry_next;
   carry = active;
   for (unsigned int b = 0; b < m; b ++) {
@@ -311,7 +313,7 @@ static inline void tm_dec (
     counts[b] ^= carry;
     carry = carry_next;
   }
-  unsigned int *actions = tm_state_idx_actions(tm, class, clause);
+  unsigned int *actions = tm_state_actions(tm, class, clause);
   carry_next = (~actions[chunk]) & carry;
   actions[chunk] ^= carry;
   carry = carry_next;
@@ -331,14 +333,14 @@ static inline long int sum_up_class_votes (
   unsigned int *drop = tm->drop_clause;
   unsigned int clause_chunks = tm->clause_chunks;
   if (predict) {
-    for (unsigned int i = 0; i < clause_chunks * 32; i ++) {
-      class_sum += (clause_output[i / 32] & 0x55555555) << (31 - (i % 32)) >> 31; // 0101
-      class_sum -= (clause_output[i / 32] & 0xaaaaaaaa) << (31 - (i % 32)) >> 31; // 1010
+    for (unsigned int i = 0; i < clause_chunks * BITS; i ++) {
+      class_sum += (clause_output[i / BITS] & 0x55555555) << ((BITS - 1) - (i % BITS)) >> (BITS - 1); // 0101
+      class_sum -= (clause_output[i / BITS] & 0xaaaaaaaa) << ((BITS - 1) - (i % BITS)) >> (BITS - 1); // 1010
     }
   } else {
-    for (unsigned int i = 0; i < clause_chunks * 32; i ++) {
-      class_sum += (clause_output[i / 32] & drop[i / 32] & 0x55555555) << (31 - (i % 32)) >> 31; // 0101
-      class_sum -= (clause_output[i / 32] & drop[i / 32] & 0xaaaaaaaa) << (31 - (i % 32)) >> 31; // 1010
+    for (unsigned int i = 0; i < clause_chunks * BITS; i ++) {
+      class_sum += (clause_output[i / BITS] & drop[i / BITS] & 0x55555555) << ((BITS - 1) - (i % BITS)) >> (BITS - 1); // 0101
+      class_sum -= (clause_output[i / BITS] & drop[i / BITS] & 0xaaaaaaaa) << ((BITS - 1) - (i % BITS)) >> (BITS - 1); // 1010
     }
   }
   long int threshold = tm->threshold;
@@ -360,9 +362,9 @@ static inline void tm_calculate_clause_output (
     unsigned int output = 0;
     unsigned int all_exclude = 0;
     unsigned int input_chunks = tm->input_chunks;
-    unsigned int clause_chunk = j / (sizeof(unsigned int) * CHAR_BIT);
-    unsigned int clause_chunk_pos = j % (sizeof(unsigned int) * CHAR_BIT);
-    unsigned int *actions = tm_state_idx_actions(tm, class, j);
+    unsigned int clause_chunk = j / BITS;
+    unsigned int clause_chunk_pos = j % BITS;
+    unsigned int *actions = tm_state_actions(tm, class, j);
     for (unsigned int k = 0; k < input_chunks - 1; k ++) {
       output |= ((actions[k] & input[k]) ^ actions[k]);
       all_exclude |= actions[k];
@@ -401,8 +403,8 @@ static inline void tm_update (
   double p = (1.0 / (threshold * 2)) * (threshold + (1 - 2 * tgt) * class_sum);
   memset(feedback_to_clauses, 0, clause_chunks * sizeof(unsigned int));
   for (unsigned int i = 0; i < clauses; i ++) {
-    unsigned int clause_chunk = i / (sizeof(unsigned int) * CHAR_BIT);
-    unsigned int clause_chunk_pos = i % (sizeof(unsigned int) * CHAR_BIT);
+    unsigned int clause_chunk = i / BITS;
+    unsigned int clause_chunk_pos = i % BITS;
     feedback_to_clauses[clause_chunk] |= (unsigned int)
       fast_chance(p) << clause_chunk_pos;
   }
@@ -410,9 +412,9 @@ static inline void tm_update (
     feedback_to_clauses[i] &= drop_clause[i];
   for (unsigned int j = 0; j < clauses; j ++) {
     long int jl = (long int) j;
-    unsigned int clause_chunk = j / (sizeof(unsigned int) * CHAR_BIT);
-    unsigned int clause_chunk_pos = j % (sizeof(unsigned int) * CHAR_BIT);
-    unsigned int *actions = tm_state_idx_actions(tm, class, j);
+    unsigned int clause_chunk = j / BITS;
+    unsigned int clause_chunk_pos = j % BITS;
+    unsigned int *actions = tm_state_actions(tm, class, j);
     if (!(feedback_to_clauses[clause_chunk] & (1U << clause_chunk_pos)))
       continue;
     if ((2 * tgt - 1) * (1 - 2 * (jl & 1)) == -1) {
@@ -518,8 +520,8 @@ static inline void ae_tm_decode (
 
   for (unsigned int i = 0; i < decoder_classes; i ++)
   {
-    unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
-    unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
+    unsigned int chunk = i / BITS;
+    unsigned int pos = i % BITS;
     if (scores[i] > 0)
       decoding[chunk] |= (1U << pos);
     else
@@ -541,8 +543,8 @@ static inline void ae_tm_encode (
 
   for (unsigned int i = 0; i < encoder_classes; i ++)
   {
-    unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
-    unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
+    unsigned int chunk = i / BITS;
+    unsigned int pos = i % BITS;
     if (scores[i] > 0)
       encoding[chunk] |= (1U << pos);
     else
@@ -562,8 +564,8 @@ static inline void en_tm_encode (
   tm_score(&tm->encoder, input, clause_output, scores);
   for (unsigned int i = 0; i < encoder_classes; i ++)
   {
-    unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
-    unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
+    unsigned int chunk = i / BITS;
+    unsigned int pos = i % BITS;
     if (scores[i] > 0)
       encoding[chunk] |= (1U << pos);
     else
@@ -645,9 +647,9 @@ static inline void ae_tm_update (
 
   for (unsigned int bit = 0; bit < tm->encoder.encoding_bits; bit ++)
     if (fast_chance(loss)) {
-      unsigned int chunk0 = bit / (sizeof(unsigned int) * CHAR_BIT);
+      unsigned int chunk0 = bit / BITS;
       unsigned int chunk1 = chunk0 + tm->encoder.encoding_chunks;
-      unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
+      unsigned int pos = bit % BITS;
       unsigned int bit_x = encoding[chunk0] & (1U << pos);
       unsigned int bit_x_flipped = !bit_x;
       encoding[chunk0] ^= (1U << pos);
@@ -666,8 +668,8 @@ static inline void ae_tm_update (
 
   for (unsigned int bit = 0; bit < tm->encoder.encoder.input_bits; bit ++)
     if (fast_chance(loss)) {
-      unsigned int chunk = bit / (sizeof(unsigned int) * CHAR_BIT);
-      unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
+      unsigned int chunk = bit / BITS;
+      unsigned int pos = bit % BITS;
       unsigned int bit_i = input[chunk] & (1U << pos);
       tm_update(&tm->decoder.encoder, bit, encoding, bit_i, clause_output, feedback_to_clauses, feedback_to_la_d, specificity);
     }
@@ -704,8 +706,8 @@ static inline void en_tm_update (
 
   for (unsigned int i = 0; i < classes; i ++) {
     if (fast_chance(loss)) {
-      unsigned int chunk = i / (sizeof(unsigned int) * CHAR_BIT);
-      unsigned int pos = i % (sizeof(unsigned int) * CHAR_BIT);
+      unsigned int chunk = i / BITS;
+      unsigned int pos = i % BITS;
       unsigned int bit_a = encoding_a[chunk] & (1U << pos);
       unsigned int bit_n = encoding_n[chunk] & (1U << pos);
       unsigned int bit_p = encoding_p[chunk] & (1U << pos);
@@ -761,8 +763,8 @@ static inline void re_tm_update_recompute (
   for (unsigned int word = 1; word <= x_len; word ++) {
     for (unsigned int bit = 0; bit < encoding_bits; bit ++) {
       if (fast_chance(loss)) {
-        unsigned int chunk = bit / (sizeof(unsigned int) * CHAR_BIT);
-        unsigned int pos = bit % (sizeof(unsigned int) * CHAR_BIT);
+        unsigned int chunk = bit / BITS;
+        unsigned int pos = bit % BITS;
         unsigned chunk0 = word * encoding_chunks + chunk;
         unsigned int bit_x = (*state_x)[chunk0] & (1U << pos);
         unsigned int bit_x_flipped = !bit_x;
@@ -848,7 +850,7 @@ static inline void mc_tm_initialize_drop_clause (
   unsigned int *drop_clauses = tm->drop_clause;
   memset(drop_clauses, 0, clause_chunks * sizeof(unsigned int));
   for (unsigned int i = 0; i < clause_chunks; i ++)
-    for (unsigned int j = 0; j < sizeof(unsigned int) * CHAR_BIT; j ++)
+    for (unsigned int j = 0; j < BITS; j ++)
       if (fast_chance(drop_clause))
         drop_clauses[i] |= (1U << j);
 }
@@ -915,12 +917,12 @@ static inline void tk_tsetlin_init_classifier (
   tm->threshold = threshold;
   tm->boost_true_positive = boost_true_positive;
   tm->input_bits = 2 * tm->features;
-  tm->input_chunks = (tm->input_bits - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
-  tm->clause_chunks = (tm->clauses - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
+  tm->input_chunks = (tm->input_bits - 1) / BITS + 1;
+  tm->clause_chunks = (tm->clauses - 1) / BITS + 1;
   tm->state_chunks = tm->classes * tm->clauses * (tm->state_bits - 1) * tm->input_chunks;
   tm->action_chunks = tm->classes * tm->clauses * tm->input_chunks;
-  tm->filter = tm->input_bits % (sizeof(unsigned int) * CHAR_BIT) != 0
-    ? ~(((unsigned int) ~0) << (tm->input_bits % (sizeof(unsigned int) * CHAR_BIT)))
+  tm->filter = tm->input_bits % BITS != 0
+    ? ~(((unsigned int) ~0) << (tm->input_bits % BITS))
     : (unsigned int) ~0;
   tm->state = malloc(sizeof(unsigned int) * tm->state_chunks);
   tm->actions = malloc(sizeof(unsigned int) * tm->action_chunks);
@@ -936,8 +938,8 @@ static inline void tk_tsetlin_init_classifier (
     for (unsigned int j = 0; j < tm->clauses; j ++)
       for (unsigned int k = 0; k < tm->input_chunks; k ++) {
         unsigned int m = tm->state_bits - 1;
-        unsigned int *actions = tm_state_idx_actions(tm, i, j);
-        unsigned int *counts = tm_state_idx_counts(tm, i, j, k);
+        unsigned int *actions = tm_state_actions(tm, i, j);
+        unsigned int *counts = tm_state_counts(tm, i, j, k);
         actions[k] = 0U;
         for (unsigned int b = 0; b < m; b ++)
           counts[b] = ~0U;
@@ -974,9 +976,9 @@ static inline int tk_tsetlin_init_encoder (
   tk_tsetlin_init_classifier(L, &tm->encoder,
       encoding_bits, features, clauses, state_bits, threshold, boost_true_positive);
   tm->encoding_bits = encoding_bits;
-  tm->encoding_chunks = (encoding_bits - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
-  tm->encoding_filter = encoding_bits % (sizeof(unsigned int) * CHAR_BIT) != 0
-    ? ~(((unsigned int) ~0) << (encoding_bits % (sizeof(unsigned int) * CHAR_BIT)))
+  tm->encoding_chunks = (encoding_bits - 1) / BITS + 1;
+  tm->encoding_filter = encoding_bits % BITS != 0
+    ? ~(((unsigned int) ~0) << (encoding_bits % BITS))
     : (unsigned int) ~0;
   return 0;
 }
@@ -1008,7 +1010,7 @@ static inline int tk_tsetlin_create_recurrent_encoder (lua_State *L, tsetlin_rec
     threshold,
     boost_true_positive);
   tm->token_bits = token_bits;
-  tm->token_chunks = (tm->token_bits - 1) / (sizeof(unsigned int) * CHAR_BIT) + 1;
+  tm->token_chunks = (tm->token_bits - 1) / BITS + 1;
   return 0;
 }
 

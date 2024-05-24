@@ -12,14 +12,14 @@ local rand = require("santoku.random")
 local CLASSES = 10
 local FEATURES = 784
 local TRAIN_TEST_RATIO = 0.5
-local CLAUSES = 40000
+local CLAUSES = 2000
 local STATE_BITS = 8
-local THRESHOLD = 200
+local THRESHOLD = 50
 local SPECIFICITY = { 10, 10, 1 }
 local DROP_CLAUSE = 0.75
-local BOOST_TRUE_POSITIVE = false
+local BOOST_TRUE_POSITIVE = true
 local EVALUATE_EVERY = 1
-local MAX_EPOCHS = 40
+local MAX_EPOCHS = 400
 
 local function read_data (fp, max)
   local problems = {}
@@ -76,9 +76,9 @@ test("tsetlin", function ()
   print("Reading data")
   local dataset = read_data("test/res/santoku/tsetlin/BinarizedMNISTData/MNISTTest.txt", MAX)
 
-  print("Shuffling")
-  rand.seed()
-  arr.shuffle(dataset.problems, dataset.solutions)
+  -- print("Shuffling")
+  -- rand.seed()
+  -- arr.shuffle(dataset.problems, dataset.solutions)
 
   print("Splitting & packing")
   local n_train = num.floor(#dataset.problems * TRAIN_TEST_RATIO)
