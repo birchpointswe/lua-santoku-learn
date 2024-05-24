@@ -19,7 +19,7 @@ local SPECIFICITY = { 10, 10, 1 }
 local DROP_CLAUSE = 0.75
 local BOOST_TRUE_POSITIVE = false
 local EVALUATE_EVERY = 1
-local MAX_EPOCHS = 10
+local MAX_EPOCHS = 40
 
 local function read_data (fp, max)
   local problems = {}
@@ -29,11 +29,12 @@ local function read_data (fp, max)
     local n = 0
     for bit in str.gmatch(l, "%S+") do
       n = n + 1
-      bit = bit == "1"
       if n == FEATURES + 1 then
-        solutions[#solutions + 1] = bit and 1 or 0
+        solutions[#solutions + 1] = tonumber(bit)
         break
-      elseif bit then
+      end
+      bit = bit == "1"
+      if bit then
         bits[n] = true
         bits[n + FEATURES] = false
       else
