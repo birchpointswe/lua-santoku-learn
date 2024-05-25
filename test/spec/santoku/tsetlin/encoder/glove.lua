@@ -13,7 +13,7 @@ local num = require("santoku.num")
 local err = require("santoku.error")
 
 local ENCODED_BITS = 128
-local THRESHOLD_LEVELS = 3
+local THRESHOLD_LEVELS = 20
 local TRAIN_TEST_RATIO = 0.8
 local SIM_POS = 0.7
 local SIM_NEG = 0.5
@@ -22,7 +22,7 @@ local MARGIN = 0.1
 local CLAUSES = 80
 local STATE_BITS = 8
 local THRESHOLD = 200
-local SPECIFICITY = { 1, 1, 0.1 }
+local SPECIFICITY = { 1, 1, 1 }
 local ACTIVE_CLAUSE = 0.75
 local LOSS_ALPHA = 1
 local BOOST_TRUE_POSITIVE = false
