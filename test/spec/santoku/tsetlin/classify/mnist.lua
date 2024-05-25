@@ -7,7 +7,6 @@ local mtx = require("santoku.matrix")
 local fs = require("santoku.fs")
 local str = require("santoku.string")
 local arr = require("santoku.array")
-local rand = require("santoku.random")
 
 local CLASSES = 10
 local FEATURES = 784
@@ -16,39 +15,44 @@ local CLAUSES = 2000
 local STATE_BITS = 8
 local THRESHOLD = 50
 local SPECIFICITY = { 10, 10, 1 }
-local DROP_CLAUSE = 0.75
+local ACTIVE_CLAUSE = 1 --0.75
 local BOOST_TRUE_POSITIVE = true
 local EVALUATE_EVERY = 1
-local MAX_EPOCHS = 400
+local MAX_EPOCHS = 20
 
-local function read_data (fp, max)
+local function read_data (fp, skip, max)
   local problems = {}
   local solutions = {}
   local bits = {}
+  local skip = skip or 0
   for l in fs.lines(fp) do
-    local n = 0
-    for bit in str.gmatch(l, "%S+") do
-      n = n + 1
-      if n == FEATURES + 1 then
-        solutions[#solutions + 1] = tonumber(bit)
-        break
-      end
-      bit = bit == "1"
-      if bit then
-        bits[n] = true
-        bits[n + FEATURES] = false
-      else
-        bits[n] = false
-        bits[n + FEATURES] = true
-      end
-      if max and n > max then
-        break
-      end
-    end
-    if n ~= FEATURES + 1 then
-      error("bitmap length mismatch")
+    if skip > 0 then
+      skip = skip - 1
     else
-      problems[#problems + 1] = bm.create(bits, FEATURES * 2)
+      local n = 0
+      for bit in str.gmatch(l, "%S+") do
+        n = n + 1
+        if n == FEATURES + 1 then
+          solutions[#solutions + 1] = tonumber(bit)
+          break
+        end
+        bit = bit == "1"
+        if bit then
+          bits[n] = true
+          bits[n + FEATURES] = nil
+        else
+          bits[n] = nil
+          bits[n + FEATURES] = true
+        end
+      end
+      if n ~= FEATURES + 1 then
+        error("bitmap length mismatch")
+      else
+        problems[#problems + 1] = bm.create(bits, FEATURES * 2)
+      end
+      if max and #problems >= max then
+        break
+      end
     end
   end
   return {
@@ -71,14 +75,11 @@ end
 
 test("tsetlin", function ()
 
-  local MAX = nil
+  local SKIP = 0
+  local MAX = 10000
 
   print("Reading data")
-  local dataset = read_data("test/res/santoku/tsetlin/BinarizedMNISTData/MNISTTest.txt", MAX)
-
-  -- print("Shuffling")
-  -- rand.seed()
-  -- arr.shuffle(dataset.problems, dataset.solutions)
+  local dataset = read_data("test/res/santoku/tsetlin/BinarizedMNISTData/MNISTTest.txt", SKIP, MAX)
 
   print("Splitting & packing")
   local n_train = num.floor(#dataset.problems * TRAIN_TEST_RATIO)
@@ -96,7 +97,7 @@ test("tsetlin", function ()
 
     for epoch = 1, MAX_EPOCHS do
       local start = os.time()
-      tm.train(t, n_train, train_problems, train_solutions, SPEC, DROP_CLAUSE)
+      tm.train(t, n_train, train_problems, train_solutions, SPEC, ACTIVE_CLAUSE)
       local stop = os.time()
       local duration = stop - start
       if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
