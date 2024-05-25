@@ -420,7 +420,7 @@ static inline void tm_update (
   for (unsigned int i = 0; i < clauses; i ++) {
     unsigned int clause_chunk = i / BITS;
     unsigned int clause_chunk_pos = i % BITS;
-    feedback_to_clauses[clause_chunk] |= (fast_chance(p) << clause_chunk_pos);
+    feedback_to_clauses[clause_chunk] |= ((unsigned int) fast_chance(p) << clause_chunk_pos);
   }
   for (unsigned int i = 0; i < clause_chunks; i ++)
     feedback_to_clauses[i] &= active_clause[i];
@@ -429,7 +429,7 @@ static inline void tm_update (
     unsigned int clause_chunk = j / BITS;
     unsigned int clause_chunk_pos = j % BITS;
     unsigned int *actions = tm_state_actions(tm, class, j);
-    if (!(feedback_to_clauses[clause_chunk] & (1 << clause_chunk_pos)))
+    if (!(feedback_to_clauses[clause_chunk] & (1U << clause_chunk_pos)))
       continue;
     if ((2 * tgt - 1) * (1 - 2 * (jl & 1)) == -1) {
       // Type II feedback
@@ -2380,8 +2380,8 @@ static inline void tk_lua_fwrite (lua_State *L, void *data, size_t size, size_t 
 
 static inline void tk_lua_fread (lua_State *L, void *data, size_t size, size_t memb, FILE *fh)
 {
-  (void) fread(data, size, memb, fh);
-  if (!ferror(fh)) return;
+  size_t r = fread(data, size, memb, fh);
+  if (!ferror(fh) || !r) return;
   int e = errno;
   lua_settop(L, 0);
   lua_pushstring(L, "Error reading from file");
