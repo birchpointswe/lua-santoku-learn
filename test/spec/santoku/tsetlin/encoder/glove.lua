@@ -13,7 +13,7 @@ local num = require("santoku.num")
 local err = require("santoku.error")
 
 local ENCODED_BITS = 128
-local THRESHOLD_LEVELS = 20
+local THRESHOLD_LEVELS = 3
 local TRAIN_TEST_RATIO = 0.8
 local SIM_POS = 0.7
 local SIM_NEG = 0.5
@@ -23,7 +23,7 @@ local CLAUSES = 80
 local STATE_BITS = 8
 local THRESHOLD = 200
 local SPECIFICITY = { 1, 1, 0.1 }
-local DROP_CLAUSE = 0.75
+local ACTIVE_CLAUSE = 0.75
 local LOSS_ALPHA = 1
 local BOOST_TRUE_POSITIVE = false
 
@@ -173,13 +173,13 @@ test("tsetlin", function ()
     local t = tm.encoder(ENCODED_BITS, dataset.n_features, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
 
     for epoch = 1, MAX_EPOCHS do
-  
+
       local start = os.time()
       tm.train(t, n_train, train_tokens,
-        SPEC, DROP_CLAUSE, MARGIN,
+        SPEC, ACTIVE_CLAUSE, MARGIN,
         LOSS_ALPHA)
       local duration = os.time() - start
-  
+
       if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
         local test_score = tm.evaluate(t, n_test, test_tokens, MARGIN)
         local train_score = tm.evaluate(t, n_train, train_tokens, MARGIN)
@@ -189,7 +189,7 @@ test("tsetlin", function ()
         str.printf("Epoch %-4d  Spec %.2f Time %d\n",
           epoch, SPEC, duration)
       end
-  
+
     end
   end
 
