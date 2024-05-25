@@ -116,10 +116,16 @@ typedef struct {
   };
 } tsetlin_t;
 
-#define tm_state_lock(tm, class, clause, input_chunk) \
+#define tm_state_get_lock(tm, class, clause, chunk) \
   (&(tm)->locks[(class) * (tm)->clauses * (tm)->input_chunks + \
                 (clause) * (tm)->input_chunks + \
-                (input_chunk)])
+                (chunk)])
+
+#define tm_state_lock(tm, class, clause, chunk) \
+	pthread_mutex_lock(tm_state_get_lock(tm, class, clause, chunk));
+
+#define tm_state_unlock(tm, class, clause, chunk) \
+	pthread_mutex_unlock(tm_state_get_lock(tm, class, clause, chunk));
 
 #define tm_state_counts(tm, class, clause, input_chunk) \
   (&(tm)->state[(class) * (tm)->clauses * (tm)->input_chunks * ((tm)->state_bits - 1) + \
@@ -131,7 +137,7 @@ typedef struct {
                   (clause) * (tm)->input_chunks])
 
 static uint64_t const multiplier = 6364136223846793005u;
-__thread uint64_t mcg_state = 0xcafef00dd15ea5e5u;
+static uint64_t mcg_state = 0xcafef00dd15ea5e5u;
 
 static inline uint32_t fast_rand ()
 {
@@ -287,8 +293,7 @@ static inline void tm_inc (
   unsigned int chunk,
   unsigned int active
 ) {
-  pthread_mutex_t *lock = tm_state_lock(tm, class, clause, chunk);
-  pthread_mutex_lock(lock);
+  tm_state_lock(tm, class, clause, chunk);
 
   unsigned int m = tm->state_bits - 1;
   unsigned int *counts = tm_state_counts(tm, class, clause, chunk);
@@ -307,7 +312,7 @@ static inline void tm_inc (
     counts[b] |= carry;
   actions[chunk] |= carry;
 
-  pthread_mutex_unlock(lock);
+  tm_state_unlock(tm, class, clause, chunk);
 }
 
 static inline void tm_dec (
@@ -317,8 +322,7 @@ static inline void tm_dec (
   unsigned int chunk,
   unsigned int active
 ) {
-  pthread_mutex_t *lock = tm_state_lock(tm, class, clause, chunk);
-  pthread_mutex_lock(lock);
+  tm_state_lock(tm, class, clause, chunk);
 
   unsigned int m = tm->state_bits - 1;
   unsigned int *counts = tm_state_counts(tm, class, clause, chunk);
@@ -337,7 +341,7 @@ static inline void tm_dec (
     counts[b] &= ~carry;
   actions[chunk] &= ~carry;
 
-  pthread_mutex_unlock(lock);
+  tm_state_unlock(tm, class, clause, chunk);
 }
 
 static inline long int sum_up_class_votes (
@@ -2655,7 +2659,6 @@ static luaL_Reg tk_tsetlin_fns[] =
 
 int luaopen_santoku_tsetlin_capi (lua_State *L)
 {
-  srand(0);
   lua_newtable(L); // t
   tk_tsetlin_register(L, tk_tsetlin_fns, 0); // t
   luaL_newmetatable(L, TK_TSETLIN_MT); // t mt
