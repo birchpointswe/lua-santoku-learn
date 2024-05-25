@@ -226,7 +226,8 @@ static inline double triplet_loss_hamming (
 ) {
   unsigned int dist_an = hamming(a, n, bits);
   unsigned int dist_ap = hamming(a, p, bits);
-  return fminf(1.0f, fmaxf(0.0f, (double) dist_ap - dist_an + margin) * alpha / bits);
+  return pow(fmin(1.0, fmax(0.0,
+          (double) dist_ap - dist_an + margin) / bits), alpha);
 }
 
 static inline void flip_bits (
@@ -798,8 +799,11 @@ static inline void re_tm_update_recompute (
         if (loss0 < loss)
           tm_update(encoder, bit, input_x, bit_x_flipped,
               clause_output, feedback_to_clauses, feedback_to_la, specificity);
-        else if (loss0 >= loss)
+        else if (loss0 > loss)
           tm_update(encoder, bit, input_x, bit_x,
+              clause_output, feedback_to_clauses, feedback_to_la, specificity);
+        else if (fast_chance(loss))
+          tm_update(encoder, bit, input_x, fast_chance(0.5),
               clause_output, feedback_to_clauses, feedback_to_la, specificity);
       }
     }
