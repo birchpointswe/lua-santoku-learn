@@ -1,5 +1,7 @@
 # Now
 
+- Try `__thread` on `mcg_state` with random seed for each thread (if they all
+  start the same, accuracy worsens dramatically)
 - Add a "loss alpha" concept to classifier
 
 - Recurrent classifier with MNIST
