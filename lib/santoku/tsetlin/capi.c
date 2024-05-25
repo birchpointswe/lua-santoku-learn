@@ -1941,8 +1941,6 @@ static inline int tk_tsetlin_evaluate_classifier (
   evaluate_classifier_thread_data_t thread_data[cores];
 
   unsigned int next = 0;
-  unsigned int shuffle[n];
-  init_shuffle(shuffle, n);
 
   for (unsigned int i = 0; i < cores; i++) {
     thread_data[i].tm = tm;
@@ -2027,7 +2025,6 @@ typedef struct {
   tsetlin_encoder_t *tm;
   unsigned int n;
   unsigned int *next;
-  unsigned int *shuffle;
   unsigned int *tokens;
   double margin;
   unsigned int *correct;
@@ -2086,14 +2083,11 @@ static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *
   evaluate_encoder_thread_data_t thread_data[cores];
 
   unsigned int next = 0;
-  unsigned int shuffle[n];
-  init_shuffle(shuffle, n);
 
   for (unsigned int i = 0; i < cores; i++) {
     thread_data[i].tm = tm;
     thread_data[i].n = n;
     thread_data[i].next = &next;
-    thread_data[i].shuffle = shuffle;
     thread_data[i].tokens = tokens;
     thread_data[i].correct = &correct;
     thread_data[i].lock = &lock;
@@ -2118,7 +2112,6 @@ typedef struct {
   tsetlin_recurrent_encoder_t *tm;
   unsigned int n;
   unsigned int *next;
-  unsigned int *shuffle;
   unsigned int *indices;
   unsigned int *tokens;
   unsigned int *correct;
@@ -2203,14 +2196,11 @@ static inline int tk_tsetlin_evaluate_recurrent_encoder (
   evaluate_recurrent_encoder_thread_data_t thread_data[cores];
 
   unsigned int next = 0;
-  unsigned int shuffle[n];
-  init_shuffle(shuffle, n);
 
   for (unsigned int i = 0; i < cores; i++) {
     thread_data[i].tm = tm;
     thread_data[i].n = n;
     thread_data[i].next = &next;
-    thread_data[i].shuffle = shuffle;
     thread_data[i].indices = indices;
     thread_data[i].tokens = tokens;
     thread_data[i].correct = &correct;
@@ -2236,7 +2226,6 @@ typedef struct {
   tsetlin_auto_encoder_t *tm;
   unsigned int n;
   unsigned int *next;
-  unsigned int *shuffle;
   unsigned int *ps;
   unsigned int *total_diff;
   pthread_mutex_t *lock;
@@ -2292,14 +2281,11 @@ static inline int tk_tsetlin_evaluate_auto_encoder (lua_State *L, tsetlin_auto_e
   evaluate_auto_encoder_thread_data_t thread_data[cores];
 
   unsigned int next = 0;
-  unsigned int shuffle[n];
-  init_shuffle(shuffle, n);
 
   for (unsigned int i = 0; i < cores; i++) {
     thread_data[i].tm = tm;
     thread_data[i].n = n;
     thread_data[i].next = &next;
-    thread_data[i].shuffle = shuffle;
     thread_data[i].ps = ps;
     thread_data[i].total_diff = &total_diff;
     thread_data[i].lock = &lock;

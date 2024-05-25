@@ -1,6 +1,5 @@
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local test = require("santoku.test")
-local num = require("santoku.num")
 local tm = require("santoku.tsetlin")
 local bm = require("santoku.bitmap")
 local mtx = require("santoku.matrix")
@@ -10,14 +9,13 @@ local arr = require("santoku.array")
 
 local CLASSES = 2
 local FEATURES = 12
-local TRAIN_TEST_RATIO = 0.5
 local CLAUSES = 80
 local STATE_BITS = 8
 local THRESHOLD = 200
 local SPECIFICITY = 3.9
 local ACTIVE_CLAUSE = 1
 local BOOST_TRUE_POSITIVE = false
-local MAX_EPOCHS = 20
+local MAX_EPOCHS = 50
 local MAX_RECORDS = nil
 
 local function read_data (fp, max)
@@ -69,13 +67,14 @@ end
 test("tsetlin", function ()
 
   print("Reading data")
-  local dataset = read_data("test/res/santoku/tsetlin/NoisyXORTrainingData.txt", MAX_RECORDS)
+  local train_dataset = read_data("test/res/santoku/tsetlin/NoisyXORTrainingData.txt", MAX_RECORDS)
+  local test_dataset = read_data("test/res/santoku/tsetlin/NoisyXORTestData.txt", MAX_RECORDS)
 
   print("Splitting & packing")
-  local n_train = num.floor(#dataset.problems * TRAIN_TEST_RATIO)
-  local n_test = #dataset.problems - n_train
-  local train_problems, train_solutions = split_dataset(dataset, 1, n_train)
-  local test_problems, test_solutions = split_dataset(dataset, n_train + 1, n_train + n_test)
+  local n_train = #train_dataset.problems
+  local n_test = #test_dataset.problems
+  local train_problems, train_solutions = split_dataset(train_dataset, 1, n_train)
+  local test_problems, test_solutions = split_dataset(test_dataset, 1, n_test)
 
   print("Train", n_train)
   print("Test", n_test)
