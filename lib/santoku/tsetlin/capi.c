@@ -1,6 +1,6 @@
 /*
 
-Copyright (C) 2024 Birch Point SWE (Lua integration, train/evaluate, drop clause, autoencoder, regressor)
+Copyright (C) 2024 Birch Point SWE (Lua integration, train/evaluate, active clause, autoencoder, regressor)
 Copyright (C) 2024 Birch Point SWE (recurrence, loss scaling, multi-threading, auto-vectorizer support)
 Copyright (C) 2019 Ole-Christoffer Granmo (Original classifier C implementation)
 
@@ -69,7 +69,7 @@ typedef struct {
   unsigned int filter;
   unsigned int *state; // class clause bit chunk
   unsigned int *actions; // class clause chunk
-  unsigned int *drop_clause; // class clause chunk
+  unsigned int *active_clause; // class clause chunk
   pthread_mutex_t *locks;
 } tsetlin_classifier_t;
 
@@ -131,7 +131,7 @@ typedef struct {
                   (clause) * (tm)->input_chunks])
 
 static uint64_t const multiplier = 6364136223846793005u;
-static uint64_t mcg_state = 0xcafef00dd15ea5e5u;
+__thread uint64_t mcg_state = 0xcafef00dd15ea5e5u;
 
 static inline uint32_t fast_rand ()
 {
@@ -148,7 +148,7 @@ static inline double fast_drand ()
 
 static inline bool fast_chance (double p)
 {
-  return fast_drand() < p;
+  return fast_drand() <= p;
 }
 
 static inline int normal (double mean, double variance)
@@ -168,6 +168,22 @@ static inline unsigned int popcount (
   x = x + (x >> 8);
   x = x + (x >> 16);
   return x & 0x0000003F;
+}
+
+static inline void init_shuffle (
+  unsigned int *shuffle,
+  unsigned int n
+) {
+  // TODO: Can we do this without two loop? Initialize and shuffle at the same
+  // time?
+  for (unsigned int i = 0; i < n; i ++)
+    shuffle[i] = i;
+  for (unsigned i = 0; i < n - 1; i ++) {
+    unsigned int j = i + fast_rand() / (UINT32_MAX / (n - i) + 1);
+    unsigned int t = shuffle[j];
+    shuffle[j] = shuffle[i];
+    shuffle[i] = t;
+  }
 }
 
 static inline unsigned int hamming (
@@ -330,17 +346,17 @@ static inline long int sum_up_class_votes (
   bool predict
 ) {
   long int class_sum = 0;
-  unsigned int *drop = tm->drop_clause;
+  unsigned int *active = tm->active_clause;
   unsigned int clause_chunks = tm->clause_chunks;
   if (predict) {
-    for (unsigned int i = 0; i < clause_chunks * BITS; i ++) {
-      class_sum += (clause_output[i / BITS] & 0x55555555) << ((BITS - 1) - (i % BITS)) >> (BITS - 1); // 0101
-      class_sum -= (clause_output[i / BITS] & 0xaaaaaaaa) << ((BITS - 1) - (i % BITS)) >> (BITS - 1); // 1010
+    for (unsigned int i = 0; i < clause_chunks; i ++) {
+      class_sum += popcount(clause_output[i] & 0x55555555); // 0101
+      class_sum -= popcount(clause_output[i] & 0xaaaaaaaa); // 1010
     }
   } else {
-    for (unsigned int i = 0; i < clause_chunks * BITS; i ++) {
-      class_sum += (clause_output[i / BITS] & drop[i / BITS] & 0x55555555) << ((BITS - 1) - (i % BITS)) >> (BITS - 1); // 0101
-      class_sum -= (clause_output[i / BITS] & drop[i / BITS] & 0xaaaaaaaa) << ((BITS - 1) - (i % BITS)) >> (BITS - 1); // 1010
+    for (unsigned int i = 0; i < clause_chunks; i ++) {
+      class_sum += popcount(clause_output[i] & 0x55555555 & active[i]); // 0101
+      class_sum -= popcount(clause_output[i] & 0xaaaaaaaa & active[i]); // 1010
     }
   }
   long int threshold = tm->threshold;
@@ -356,6 +372,7 @@ static inline void tm_calculate_clause_output (
   unsigned int *clause_output,
   bool predict
 ) {
+	memset(clause_output, 0, tm->clause_chunks * sizeof(unsigned int));
   unsigned int clauses = tm->clauses;
   unsigned int filter = tm->filter;
   for (unsigned int j = 0; j < clauses; j ++) {
@@ -376,8 +393,6 @@ static inline void tm_calculate_clause_output (
     output = !output && !(predict && !all_exclude);
     if (output)
       clause_output[clause_chunk] |= (1U << clause_chunk_pos);
-    else
-      clause_output[clause_chunk] &= ~(1U << clause_chunk_pos);
   }
 }
 
@@ -399,23 +414,22 @@ static inline void tm_update (
   unsigned int boost_true_positive = tm->boost_true_positive;
   unsigned int clauses = tm->clauses;
   unsigned int threshold = tm->threshold;
-  unsigned int *drop_clause = tm->drop_clause;
-  double p = (1.0 / (threshold * 2)) * (threshold + (1 - 2 * tgt) * class_sum);
+  unsigned int *active_clause = tm->active_clause;
+  float p = (1.0 / (threshold * 2)) * (threshold + (1 - 2 * tgt) * class_sum);
   memset(feedback_to_clauses, 0, clause_chunks * sizeof(unsigned int));
   for (unsigned int i = 0; i < clauses; i ++) {
     unsigned int clause_chunk = i / BITS;
     unsigned int clause_chunk_pos = i % BITS;
-    feedback_to_clauses[clause_chunk] |= (unsigned int)
-      fast_chance(p) << clause_chunk_pos;
+    feedback_to_clauses[clause_chunk] |= (fast_chance(p) << clause_chunk_pos);
   }
   for (unsigned int i = 0; i < clause_chunks; i ++)
-    feedback_to_clauses[i] &= drop_clause[i];
+    feedback_to_clauses[i] &= active_clause[i];
   for (unsigned int j = 0; j < clauses; j ++) {
     long int jl = (long int) j;
     unsigned int clause_chunk = j / BITS;
     unsigned int clause_chunk_pos = j % BITS;
     unsigned int *actions = tm_state_actions(tm, class, j);
-    if (!(feedback_to_clauses[clause_chunk] & (1U << clause_chunk_pos)))
+    if (!(feedback_to_clauses[clause_chunk] & (1 << clause_chunk_pos)))
       continue;
     if ((2 * tgt - 1) * (1 - 2 * (jl & 1)) == -1) {
       // Type II feedback
@@ -842,17 +856,17 @@ static inline void re_tm_update (
     re_tm_update_recompute(tm, encoder, p_len, p_data, state_p, state_p_size, state_p_max, input_p, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, encoding_n, NULL);
 }
 
-static inline void mc_tm_initialize_drop_clause (
+static inline void mc_tm_initialize_active_clause (
   tsetlin_classifier_t *tm,
-  double drop_clause
+  double active_clause
 ) {
   unsigned int clause_chunks = tm->clause_chunks;
-  unsigned int *drop_clauses = tm->drop_clause;
-  memset(drop_clauses, 0, clause_chunks * sizeof(unsigned int));
+  unsigned int *active_clauses = tm->active_clause;
+  memset(active_clauses, 0xFF, clause_chunks * sizeof(unsigned int));
   for (unsigned int i = 0; i < clause_chunks; i ++)
     for (unsigned int j = 0; j < BITS; j ++)
-      if (fast_chance(drop_clause))
-        drop_clauses[i] |= (1U << j);
+      if (!fast_chance(active_clause))
+        active_clauses[i] &= ~(1U << j);
 }
 
 tsetlin_t *tk_tsetlin_peek (lua_State *L, int i)
@@ -926,13 +940,11 @@ static inline void tk_tsetlin_init_classifier (
     : (unsigned int) ~0;
   tm->state = malloc(sizeof(unsigned int) * tm->state_chunks);
   tm->actions = malloc(sizeof(unsigned int) * tm->action_chunks);
-  tm->drop_clause = malloc(sizeof(unsigned int) * tm->clause_chunks);
-  // TODO: Consider using a hash function instead of allocating all possible
-  // locks
+  tm->active_clause = malloc(sizeof(unsigned int) * tm->clause_chunks);
   tm->locks = malloc(sizeof(pthread_mutex_t) * tm->action_chunks);
   for (unsigned int i = 0; i < tm->action_chunks; i ++)
     pthread_mutex_init(&tm->locks[i], NULL);
-  if (!(tm->drop_clause && tm->state && tm->actions))
+  if (!(tm->active_clause && tm->state && tm->actions))
     luaL_error(L, "error in malloc during creation of classifier");
   for (unsigned int i = 0; i < tm->classes; i ++)
     for (unsigned int j = 0; j < tm->clauses; j ++)
@@ -1190,7 +1202,7 @@ static inline void tk_tsetlin_destroy_classifier (tsetlin_classifier_t *tm)
     return;
   free(tm->state);
   free(tm->actions);
-  free(tm->drop_clause);
+  free(tm->active_clause);
   for (unsigned int i = 0; i < tm->action_chunks; i ++)
     pthread_mutex_destroy(&tm->locks[i]);
   free(tm->locks);
@@ -1333,8 +1345,8 @@ static inline int tk_tsetlin_update_classifier (lua_State *L, tsetlin_classifier
   if (tgt < 0)
     luaL_error(L, "target class must be greater than zero");
   double specificity = tk_tsetlin_checkposdouble(L, 4);
-  double drop_clause = tk_tsetlin_checkposdouble(L, 5);
-  mc_tm_initialize_drop_clause(tm, drop_clause);
+  double active_clause = tk_tsetlin_checkposdouble(L, 5);
+  mc_tm_initialize_active_clause(tm, active_clause);
   unsigned int clause_chunks = tm->clause_chunks;
   unsigned int input_chunks = tm->input_chunks;
   unsigned int clause_output[clause_chunks];
@@ -1359,10 +1371,10 @@ static inline int tk_tsetlin_update_encoder (
   unsigned int *n = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *p = (unsigned int *) luaL_checkstring(L, 4);
   double specificity = tk_tsetlin_checkposdouble(L, 5);
-  double drop_clause = tk_tsetlin_checkposdouble(L, 6);
+  double active_clause = tk_tsetlin_checkposdouble(L, 6);
   double margin = tk_tsetlin_checkposdouble(L, 7);
   double loss_alpha = tk_tsetlin_checkposdouble(L, 8);
-  mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
+  mc_tm_initialize_active_clause(&tm->encoder, active_clause);
   unsigned int clause_output[tm->encoder.clause_chunks];
   unsigned int feedback_to_clauses[tm->encoder.clause_chunks];
   unsigned int feedback_to_la[tm->encoder.input_chunks];
@@ -1382,7 +1394,7 @@ static inline int tk_tsetlin_update_auto_encoder (lua_State *L, tsetlin_auto_enc
   lua_settop(L, 5);
   unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
   double specificity = tk_tsetlin_checkposdouble(L, 3);
-  double drop_clause = tk_tsetlin_checkposdouble(L, 4);
+  double active_clause = tk_tsetlin_checkposdouble(L, 4);
   double loss_alpha = tk_tsetlin_checkposdouble(L, 5);
   unsigned int clause_output[tm->encoder.encoder.clause_chunks];
   unsigned int feedback_to_clauses[tm->encoder.encoder.clause_chunks];
@@ -1390,8 +1402,8 @@ static inline int tk_tsetlin_update_auto_encoder (lua_State *L, tsetlin_auto_enc
   unsigned int feedback_to_la_d[tm->encoder.encoding_chunks * 2];
   long int scores_e[tm->encoder.encoder.classes];
   long int scores_d[tm->decoder.encoder.classes];
-  mc_tm_initialize_drop_clause(&tm->encoder.encoder, drop_clause);
-  mc_tm_initialize_drop_clause(&tm->decoder.encoder, drop_clause);
+  mc_tm_initialize_active_clause(&tm->encoder.encoder, active_clause);
+  mc_tm_initialize_active_clause(&tm->decoder.encoder, active_clause);
   ae_tm_update(tm, bm,
       clause_output, feedback_to_clauses, feedback_to_la_e, feedback_to_la_d, scores_e, scores_d,
       specificity, loss_alpha);
@@ -1444,6 +1456,7 @@ typedef struct {
   tsetlin_classifier_t *tm;
   unsigned int n;
   unsigned int *next;
+  unsigned int *shuffle;
   unsigned int *ps;
   unsigned int *ss;
   double specificity;
@@ -1465,7 +1478,8 @@ static void *train_classifier_thread (void *arg)
     pthread_mutex_unlock(data->qlock);
     if (next >= data->n)
       return NULL;
-    mc_tm_update(data->tm, data->ps + next * input_chunks, data->ss[next],
+    unsigned int idx = data->shuffle[next];
+    mc_tm_update(data->tm, data->ps + idx * input_chunks, data->ss[idx],
         clause_output, feedback_to_clauses, feedback_to_la, data->specificity);
   }
 }
@@ -1477,24 +1491,27 @@ static inline int tk_tsetlin_train_classifier (lua_State *L, tsetlin_classifier_
   unsigned int *ps = (unsigned int *)luaL_checkstring(L, 3);
   unsigned int *ss = (unsigned int *)luaL_checkstring(L, 4);
   double specificity = tk_tsetlin_checkposdouble(L, 5);
-  double drop_clause = tk_tsetlin_checkposdouble(L, 6);
-  mc_tm_initialize_drop_clause(tm, drop_clause);
+  double active_clause = tk_tsetlin_checkposdouble(L, 6);
+  mc_tm_initialize_active_clause(tm, active_clause);
 
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
   if (cores <= 0)
     return tk_error(L, "sysconf", errno);
+
+  unsigned int next = 0;
+  unsigned int shuffle[n];
+  init_shuffle(shuffle, n);
 
   pthread_t threads[cores];
   pthread_mutex_t qlock;
   pthread_mutex_init(&qlock, NULL);
   train_classifier_thread_data_t thread_data[cores];
 
-  unsigned int next = 0;
-
   for (unsigned int i = 0; i < cores; i++) {
     thread_data[i].tm = tm;
     thread_data[i].n = n;
     thread_data[i].next = &next;
+    thread_data[i].shuffle = shuffle;
     thread_data[i].ps = ps;
     thread_data[i].ss = ss;
     thread_data[i].specificity = specificity;
@@ -1523,6 +1540,7 @@ typedef struct {
   tsetlin_encoder_t *tm;
   unsigned int n;
   unsigned int *next;
+  unsigned int *shuffle;
   unsigned int *tokens;
   double specificity;
   double margin;
@@ -1547,9 +1565,10 @@ static void *train_encoder_thread (void *arg)
     pthread_mutex_unlock(data->qlock);
     if (next >= data->n)
       return NULL;
-    unsigned int *a = data->tokens + ((next * 3 + 0) * input_chunks);
-    unsigned int *n = data->tokens + ((next * 3 + 1) * input_chunks);
-    unsigned int *p = data->tokens + ((next * 3 + 2) * input_chunks);
+    unsigned int idx = data->shuffle[next];
+    unsigned int *a = data->tokens + ((idx * 3 + 0) * input_chunks);
+    unsigned int *n = data->tokens + ((idx * 3 + 1) * input_chunks);
+    unsigned int *p = data->tokens + ((idx * 3 + 2) * input_chunks);
     en_tm_update(data->tm, a, n, p,
         clause_output, feedback_to_clauses, feedback_to_la, scores,
         data->specificity, data->margin, data->loss_alpha);
@@ -1565,10 +1584,10 @@ static inline int tk_tsetlin_train_encoder (
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 3);
   double specificity = tk_tsetlin_checkposdouble(L, 4);
-  double drop_clause = tk_tsetlin_checkposdouble(L, 5);
+  double active_clause = tk_tsetlin_checkposdouble(L, 5);
   double margin = tk_tsetlin_checkposdouble(L, 6);
   double loss_alpha = tk_tsetlin_checkposdouble(L, 7);
-  mc_tm_initialize_drop_clause(&tm->encoder, drop_clause);
+  mc_tm_initialize_active_clause(&tm->encoder, active_clause);
 
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
   if (cores <= 0)
@@ -1580,11 +1599,14 @@ static inline int tk_tsetlin_train_encoder (
   train_encoder_thread_data_t thread_data[cores];
 
   unsigned int next = 0;
+  unsigned int shuffle[n];
+  init_shuffle(shuffle, n);
 
   for (unsigned int i = 0; i < cores; i++) {
     thread_data[i].tm = tm;
     thread_data[i].n = n;
     thread_data[i].next = &next;
+    thread_data[i].shuffle = shuffle;
     thread_data[i].tokens = tokens;
     thread_data[i].specificity = specificity;
     thread_data[i].margin = margin;
@@ -1608,6 +1630,7 @@ typedef struct {
   tsetlin_recurrent_encoder_t *tm;
   unsigned int n;
   unsigned int *next;
+  unsigned int *shuffle;
   unsigned int *indices;
   unsigned int *tokens;
   double specificity;
@@ -1647,14 +1670,15 @@ static void *train_recurrent_encoder_thread (void *arg)
       free(state_p);
       return NULL;
     }
-    unsigned int a_offset = data->indices[next * 6 + 0] * data->tm->token_chunks;
-    unsigned int a_len = data->indices[next * 6 + 1];
+    unsigned int idx = data->shuffle[next];
+    unsigned int a_offset = data->indices[idx * 6 + 0] * data->tm->token_chunks;
+    unsigned int a_len = data->indices[idx * 6 + 1];
     unsigned int *a_data = data->tokens + a_offset;
-    unsigned int n_offset = data->indices[next * 6 + 2] * data->tm->token_chunks;
-    unsigned int n_len = data->indices[next * 6 + 3];
+    unsigned int n_offset = data->indices[idx * 6 + 2] * data->tm->token_chunks;
+    unsigned int n_len = data->indices[idx * 6 + 3];
     unsigned int *n_data = data->tokens + n_offset;
-    unsigned int p_offset = data->indices[next * 6 + 4] * data->tm->token_chunks;
-    unsigned int p_len = data->indices[next * 6 + 5];
+    unsigned int p_offset = data->indices[idx * 6 + 4] * data->tm->token_chunks;
+    unsigned int p_len = data->indices[idx * 6 + 5];
     unsigned int *p_data = data->tokens + p_offset;
     re_tm_update(data->tm, a_len, a_data, n_len, n_data, p_len, p_data,
         input_a, input_n, input_p,
@@ -1675,10 +1699,10 @@ static inline int tk_tsetlin_train_recurrent_encoder (
   unsigned int *indices = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 4);
   double specificity = tk_tsetlin_checkposdouble(L, 5);
-  double drop_clause = tk_tsetlin_checkposdouble(L, 6);
+  double active_clause = tk_tsetlin_checkposdouble(L, 6);
   double margin = tk_tsetlin_checkposdouble(L, 7);
   double loss_alpha = tk_tsetlin_checkposdouble(L, 8);
-  mc_tm_initialize_drop_clause(&tm->encoder.encoder, drop_clause);
+  mc_tm_initialize_active_clause(&tm->encoder.encoder, active_clause);
 
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
   if (cores <= 0)
@@ -1690,11 +1714,14 @@ static inline int tk_tsetlin_train_recurrent_encoder (
   train_recurrent_encoder_thread_data_t thread_data[cores];
 
   unsigned int next = 0;
+  unsigned int shuffle[n];
+  init_shuffle(shuffle, n);
 
   for (unsigned int i = 0; i < cores; i++) {
     thread_data[i].tm = tm;
     thread_data[i].n = n;
     thread_data[i].next = &next;
+    thread_data[i].shuffle = shuffle;
     thread_data[i].indices = indices;
     thread_data[i].tokens = tokens;
     thread_data[i].specificity = specificity;
@@ -1719,6 +1746,7 @@ typedef struct {
   tsetlin_auto_encoder_t *tm;
   unsigned int n;
   unsigned int *next;
+  unsigned int *shuffle;
   unsigned int *ps;
   double specificity;
   double loss_alpha;
@@ -1741,7 +1769,8 @@ static void *train_auto_encoder_thread (void *arg)
     pthread_mutex_unlock(data->qlock);
     if (next >= data->n)
       return NULL;
-    ae_tm_update(data->tm, data->ps + next * data->tm->encoder.encoder.input_chunks,
+    unsigned int idx = data->shuffle[next];
+    ae_tm_update(data->tm, data->ps + idx * data->tm->encoder.encoder.input_chunks,
         clause_output, feedback_to_clauses, feedback_to_la_e, feedback_to_la_d, scores_e, scores_d,
         data->specificity, data->loss_alpha);
   }
@@ -1754,13 +1783,13 @@ static inline int tk_tsetlin_train_auto_encoder (lua_State *L, tsetlin_auto_enco
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
   double specificity = tk_tsetlin_checkposdouble(L, 4);
-  double drop_clause = tk_tsetlin_checkposdouble(L, 5);
+  double active_clause = tk_tsetlin_checkposdouble(L, 5);
   double loss_alpha = tk_tsetlin_checkposdouble(L, 6);
 
-  // TODO: Should the drop clause be shared? Does that make more sense for an
+  // TODO: Should the active clause be shared? Does that make more sense for an
   // auto_encoder?
-  mc_tm_initialize_drop_clause(&tm->encoder.encoder, drop_clause);
-  mc_tm_initialize_drop_clause(&tm->decoder.encoder, drop_clause);
+  mc_tm_initialize_active_clause(&tm->encoder.encoder, active_clause);
+  mc_tm_initialize_active_clause(&tm->decoder.encoder, active_clause);
 
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
   if (cores <= 0)
@@ -1772,11 +1801,14 @@ static inline int tk_tsetlin_train_auto_encoder (lua_State *L, tsetlin_auto_enco
   train_auto_encoder_thread_data_t thread_data[cores];
 
   unsigned int next = 0;
+  unsigned int shuffle[n];
+  init_shuffle(shuffle, n);
 
   for (unsigned int i = 0; i < cores; i++) {
     thread_data[i].tm = tm;
     thread_data[i].n = n;
     thread_data[i].next = &next;
+    thread_data[i].shuffle = shuffle;
     thread_data[i].ps = ps;
     thread_data[i].specificity = specificity;
     thread_data[i].loss_alpha = loss_alpha;
@@ -1909,6 +1941,8 @@ static inline int tk_tsetlin_evaluate_classifier (
   evaluate_classifier_thread_data_t thread_data[cores];
 
   unsigned int next = 0;
+  unsigned int shuffle[n];
+  init_shuffle(shuffle, n);
 
   for (unsigned int i = 0; i < cores; i++) {
     thread_data[i].tm = tm;
@@ -1993,6 +2027,7 @@ typedef struct {
   tsetlin_encoder_t *tm;
   unsigned int n;
   unsigned int *next;
+  unsigned int *shuffle;
   unsigned int *tokens;
   double margin;
   unsigned int *correct;
@@ -2051,11 +2086,14 @@ static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *
   evaluate_encoder_thread_data_t thread_data[cores];
 
   unsigned int next = 0;
+  unsigned int shuffle[n];
+  init_shuffle(shuffle, n);
 
   for (unsigned int i = 0; i < cores; i++) {
     thread_data[i].tm = tm;
     thread_data[i].n = n;
     thread_data[i].next = &next;
+    thread_data[i].shuffle = shuffle;
     thread_data[i].tokens = tokens;
     thread_data[i].correct = &correct;
     thread_data[i].lock = &lock;
@@ -2080,6 +2118,7 @@ typedef struct {
   tsetlin_recurrent_encoder_t *tm;
   unsigned int n;
   unsigned int *next;
+  unsigned int *shuffle;
   unsigned int *indices;
   unsigned int *tokens;
   unsigned int *correct;
@@ -2164,11 +2203,14 @@ static inline int tk_tsetlin_evaluate_recurrent_encoder (
   evaluate_recurrent_encoder_thread_data_t thread_data[cores];
 
   unsigned int next = 0;
+  unsigned int shuffle[n];
+  init_shuffle(shuffle, n);
 
   for (unsigned int i = 0; i < cores; i++) {
     thread_data[i].tm = tm;
     thread_data[i].n = n;
     thread_data[i].next = &next;
+    thread_data[i].shuffle = shuffle;
     thread_data[i].indices = indices;
     thread_data[i].tokens = tokens;
     thread_data[i].correct = &correct;
@@ -2194,6 +2236,7 @@ typedef struct {
   tsetlin_auto_encoder_t *tm;
   unsigned int n;
   unsigned int *next;
+  unsigned int *shuffle;
   unsigned int *ps;
   unsigned int *total_diff;
   pthread_mutex_t *lock;
@@ -2249,11 +2292,14 @@ static inline int tk_tsetlin_evaluate_auto_encoder (lua_State *L, tsetlin_auto_e
   evaluate_auto_encoder_thread_data_t thread_data[cores];
 
   unsigned int next = 0;
+  unsigned int shuffle[n];
+  init_shuffle(shuffle, n);
 
   for (unsigned int i = 0; i < cores; i++) {
     thread_data[i].tm = tm;
     thread_data[i].n = n;
     thread_data[i].next = &next;
+    thread_data[i].shuffle = shuffle;
     thread_data[i].ps = ps;
     thread_data[i].total_diff = &total_diff;
     thread_data[i].lock = &lock;
@@ -2469,7 +2515,7 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tsetlin_classifier
   tk_lua_fread(L, &tm->filter, sizeof(unsigned int), 1, fh);
   tm->state = malloc(sizeof(unsigned int) * tm->state_chunks);
   tm->actions = malloc(sizeof(unsigned int) * tm->action_chunks);
-  tm->drop_clause = malloc(sizeof(unsigned int) * tm->clause_chunks);
+  tm->active_clause = malloc(sizeof(unsigned int) * tm->clause_chunks);
   tm->locks = malloc(sizeof(pthread_mutex_t) * tm->action_chunks);
   for (unsigned int i = 0; i < tm->action_chunks; i ++)
     pthread_mutex_init(&tm->locks[i], NULL);
@@ -2623,6 +2669,7 @@ static luaL_Reg tk_tsetlin_fns[] =
 
 int luaopen_santoku_tsetlin_capi (lua_State *L)
 {
+  srand(0);
   lua_newtable(L); // t
   tk_tsetlin_register(L, tk_tsetlin_fns, 0); // t
   luaL_newmetatable(L, TK_TSETLIN_MT); // t mt
