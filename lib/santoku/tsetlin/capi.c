@@ -802,8 +802,8 @@ static inline void re_tm_update_recompute (
         else if (loss0 > loss)
           tm_update(encoder, bit, input_x, bit_x,
               clause_output, feedback_to_clauses, feedback_to_la, specificity);
-        else if (fast_chance(loss))
-          tm_update(encoder, bit, input_x, fast_chance(0.5),
+        else
+          tm_update(encoder, bit, input_x, bit_x,
               clause_output, feedback_to_clauses, feedback_to_la, specificity);
       }
     }
@@ -1024,7 +1024,7 @@ static inline int tk_tsetlin_create_recurrent_encoder (lua_State *L, tsetlin_rec
   unsigned int boost_true_positive = tk_tsetlin_checkboolean(L, 6);
   tk_tsetlin_init_encoder(L, &tm->encoder,
     output_bits,
-    (token_bits + output_bits),
+    token_bits + output_bits,
     clauses,
     state_bits,
     threshold,
