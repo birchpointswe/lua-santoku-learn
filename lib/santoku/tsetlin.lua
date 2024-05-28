@@ -56,16 +56,8 @@ local function classifier (...)
   return tm_create("classifier", ...)
 end
 
-local function recurrent_classifier (...)
-  return tm_create("recurrent_classifier", ...)
-end
-
 local function encoder (...)
   return tm_create("encoder", ...)
-end
-
-local function recurrent_encoder (...)
-  return tm_create("recurrent_encoder", ...)
 end
 
 local function auto_encoder (...)
@@ -76,22 +68,13 @@ local function regressor (...)
   return tm_create("regressor", ...)
 end
 
-local function recurrent_regressor (...)
-  return tm_create("recurrent_regressor", ...)
-end
-
 return t_merge({
 
   evaluate = evaluate,
 
   classifier = classifier,
-  recurrent_classifier = recurrent_classifier,
-
   encoder = encoder,
-  recurrent_encoder = recurrent_encoder,
   auto_encoder = auto_encoder,
-
   regressor = regressor,
-  recurrent_regressor = recurrent_regressor,
 
 }, tm)
