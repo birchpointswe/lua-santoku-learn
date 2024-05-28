@@ -15,13 +15,12 @@ local ENCODED_BITS = 128
 local THRESHOLD_LEVELS = 2
 local TRAIN_TEST_RATIO = 0.2
 
-local CLAUSES = 128
+local CLAUSES = 512
 local STATE_BITS = 8
 local THRESHOLD = 256
 local BOOST_TRUE_POSITIVE = false
 local ACTIVE_CLAUSE = 0.85
 local LOSS_ALPHA = 0.5
-local SPECIFICITY = 1.25
 
 local EVALUATE_EVERY = 5
 local MAX_RECORDS = 1000
@@ -106,7 +105,7 @@ test("tsetlin", function ()
   for epoch = 1, MAX_EPOCHS do
 
     local start = os.time()
-    tm.train(t, n_train, train, ACTIVE_CLAUSE, LOSS_ALPHA, SPECIFICITY)
+    tm.train(t, n_train, train, ACTIVE_CLAUSE, LOSS_ALPHA)
     local duration = os.time() - start
 
     if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
