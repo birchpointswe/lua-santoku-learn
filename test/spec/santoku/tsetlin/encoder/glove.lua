@@ -173,8 +173,7 @@ test("tsetlin", function ()
   for epoch = 1, MAX_EPOCHS do
 
     local start = os.time()
-    tm.train(t, n_train, train_tokens,
-      ACTIVE_CLAUSE, MARGIN, LOSS_ALPHA, SKIP_ALPHA, SPECIFICITY)
+    tm.train(t, n_train, train_tokens, ACTIVE_CLAUSE, MARGIN, LOSS_ALPHA, SPECIFICITY)
     local duration = os.time() - start
 
     if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
