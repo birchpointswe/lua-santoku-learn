@@ -24,10 +24,8 @@ local THRESHOLD = 512
 local BOOST_TRUE_POSITIVE = false
 local ACTIVE_CLAUSE = 0.75
 local MARGIN = 0.05
-local LOSS_ALPHA = 1.25
-local SPEC_MIN = 10
-local SPEC_MAX = 40
-local SPEC_ALPHA = 0.75
+local LOSS_ALPHA = 0.125
+local SPECIFICITY = 10
 
 local EVALUATE_EVERY = 1
 local MAX_RECORDS = 1000
@@ -176,7 +174,7 @@ test("tsetlin", function ()
 
     local start = os.time()
     tm.train(t, n_train, train_tokens,
-      ACTIVE_CLAUSE, MARGIN, LOSS_ALPHA, SPEC_MIN, SPEC_MAX, SPEC_ALPHA)
+      ACTIVE_CLAUSE, MARGIN, LOSS_ALPHA, SKIP_ALPHA, SPECIFICITY)
     local duration = os.time() - start
 
     if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
