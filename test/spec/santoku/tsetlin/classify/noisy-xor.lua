@@ -12,11 +12,11 @@ local FEATURES = 12
 local CLAUSES = 80
 local STATE_BITS = 8
 local THRESHOLD = 200
-local SPECIFICITY = 3.9
 local BOOST_TRUE_POSITIVE = false
 local ACTIVE_CLAUSE = 1
 local MAX_EPOCHS = 50
 local MAX_RECORDS = nil
+local SPEC = 3.9
 
 local function read_data (fp, max)
   local problems = {}
@@ -79,7 +79,7 @@ test("tsetlin", function ()
   print("Train", n_train)
   print("Test", n_test)
 
-  local t = tm.classifier(CLASSES, FEATURES, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
+  local t = tm.classifier(CLASSES, FEATURES, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE, SPEC, SPEC)
 
   local times = {}
 
@@ -87,7 +87,7 @@ test("tsetlin", function ()
   for epoch = 1, MAX_EPOCHS do
 
     local start = os.time()
-    tm.train(t, n_train, train_problems, train_solutions, ACTIVE_CLAUSE, SPECIFICITY)
+    tm.train(t, n_train, train_problems, train_solutions, ACTIVE_CLAUSE)
     local stop = os.time()
     arr.push(times, stop - start)
     local avg_duration = arr.mean(times)

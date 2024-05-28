@@ -16,7 +16,7 @@ local STATE_BITS = 8
 local THRESHOLD = 50
 local BOOST_TRUE_POSITIVE = true
 local ACTIVE_CLAUSE = 1 --0.75
-local SPECIFICITY = 10
+local SPEC = 10
 local EVALUATE_EVERY = 1
 local MAX_EPOCHS = 20
 
@@ -91,11 +91,11 @@ test("tsetlin", function ()
   print("Test", n_test)
 
   print("Training")
-  local t = tm.classifier(CLASSES, FEATURES, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
+  local t = tm.classifier(CLASSES, FEATURES, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE, SPEC, SPEC)
 
   for epoch = 1, MAX_EPOCHS do
     local start = os.time()
-    tm.train(t, n_train, train_problems, train_solutions, ACTIVE_CLAUSE, SPECIFICITY)
+    tm.train(t, n_train, train_problems, train_solutions, ACTIVE_CLAUSE)
     local stop = os.time()
     local duration = stop - start
     if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then

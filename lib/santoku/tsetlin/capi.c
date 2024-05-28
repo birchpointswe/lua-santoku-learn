@@ -43,6 +43,8 @@ SOFTWARE.
 #define TK_TSETLIN_MT "santoku_tsetlin"
 
 #define BITS (sizeof(unsigned int) * CHAR_BIT)
+#define DEF_SPEC_LOW 2
+#define DEF_SPEC_HIGH 200
 
 typedef enum {
   TM_CLASSIFIER,
@@ -67,6 +69,9 @@ typedef struct {
   unsigned int *state; // class clause bit chunk
   unsigned int *actions; // class clause chunk
   unsigned int *active_clause; // class clause chunk
+  double specificity_low;
+  double specificity_high;
+  double *specificity;
   pthread_mutex_t *locks;
 } tsetlin_classifier_t;
 
@@ -100,6 +105,8 @@ typedef struct {
   (&(tm)->locks[(class) * (tm)->clauses * (tm)->input_chunks + \
                 (clause) * (tm)->input_chunks + \
                 (chunk)])
+
+#define tm_specificity(tm, j) ((tm)->specificity[j])
 
 #define tm_state_lock(tm, class, clause, chunk) \
 	pthread_mutex_lock(tm_state_get_lock(tm, class, clause, chunk));
@@ -387,8 +394,7 @@ static inline void tm_update (
   unsigned int target,
   unsigned int *clause_output,
   unsigned int *feedback_to_clauses,
-  unsigned int *feedback_to_la,
-  double specificity
+  unsigned int *feedback_to_la
 ) {
   tm_calculate_clause_output(tm, class, input, clause_output, false);
   long int class_sum = sum_up_class_votes(tm, clause_output, false);
@@ -413,6 +419,7 @@ static inline void tm_update (
     unsigned int clause_chunk = j / BITS;
     unsigned int clause_chunk_pos = j % BITS;
     unsigned int *actions = tm_state_actions(tm, class, j);
+    double specificity = tm_specificity(tm, j);
     if (!(feedback_to_clauses[clause_chunk] & (1U << clause_chunk_pos)))
       continue;
     if ((2 * tgt - 1) * (1 - 2 * (jl & 1)) == -1) {
@@ -493,16 +500,15 @@ static inline void mc_tm_update (
   unsigned int class,
   unsigned int *clause_output,
   unsigned int *feedback_to_clauses,
-  unsigned int *feedback_to_la,
-  double specificity
+  unsigned int *feedback_to_la
 ) {
-  tm_update(tm, class, input, 1, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+  tm_update(tm, class, input, 1, clause_output, feedback_to_clauses, feedback_to_la);
   // TODO: Is there a faster way to do negative class selection? Is negative
   // class selection even worth it?
   unsigned int negative_class = (unsigned int) fast_rand() % tm->classes;
   while (negative_class == class)
     negative_class = (unsigned int) fast_rand() % tm->classes;
-  tm_update(tm, negative_class, input, 0, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+  tm_update(tm, negative_class, input, 0, clause_output, feedback_to_clauses, feedback_to_la);
 }
 
 static inline void ae_tm_decode (
@@ -581,8 +587,7 @@ static inline void ae_tm_update (
   unsigned int *feedback_to_la_d,
   long int *scores_e,
   long int *scores_d,
-  double loss_alpha,
-  double specificity
+  double loss_alpha
 ) {
   unsigned int encoding[tm->encoder.encoding_chunks * 2]; // encoding + flipped bits for input to decoder
   unsigned int decoding[tm->decoder.encoding_chunks * 2]; // decoding + flipped bits to compare to input
@@ -618,16 +623,16 @@ static inline void ae_tm_update (
     encoding[chunk0] ^= (1U << pos);
     encoding[chunk1] ^= (1U << pos);
     if (loss0 < loss)
-      tm_update(&tm->encoder.encoder, bit, input, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la_e, specificity);
+      tm_update(&tm->encoder.encoder, bit, input, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la_e);
     else if (loss0 > loss)
-      tm_update(&tm->encoder.encoder, bit, input, bit_x, clause_output, feedback_to_clauses, feedback_to_la_e, specificity);
+      tm_update(&tm->encoder.encoder, bit, input, bit_x, clause_output, feedback_to_clauses, feedback_to_la_e);
   }
 
   for (unsigned int bit = 0; bit < tm->encoder.encoder.input_bits; bit ++) {
     unsigned int chunk = bit / BITS;
     unsigned int pos = bit % BITS;
     unsigned int bit_i = input[chunk] & (1U << pos);
-    tm_update(&tm->decoder.encoder, bit, encoding, bit_i, clause_output, feedback_to_clauses, feedback_to_la_d, specificity);
+    tm_update(&tm->decoder.encoder, bit, encoding, bit_i, clause_output, feedback_to_clauses, feedback_to_la_d);
   }
 }
 
@@ -641,8 +646,7 @@ static inline void en_tm_update (
   unsigned int *feedback_to_la,
   long int *scores,
   double margin,
-  double loss_alpha,
-  double specificity
+  double loss_alpha
 ) {
 
   tsetlin_classifier_t *encoder = &tm->encoder;
@@ -671,24 +675,24 @@ static inline void en_tm_update (
     unsigned int bit_p = encoding_p[chunk] & (1U << pos);
     if ((bit_a && bit_n && bit_p) || (!bit_a && !bit_n && !bit_p)) {
       // flip n, keep a and p
-      tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-      tm_update(encoder, i, n, !bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-      tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+      tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la);
+      tm_update(encoder, i, n, !bit_n, clause_output, feedback_to_clauses, feedback_to_la);
+      tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la);
     } else if ((bit_a && bit_n && !bit_p) || (!bit_a && !bit_n && bit_p)) {
       // flip a, keep n and p
-      tm_update(encoder, i, a, !bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-      tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-      tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+      tm_update(encoder, i, a, !bit_a, clause_output, feedback_to_clauses, feedback_to_la);
+      tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la);
+      tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la);
     } else if ((bit_a && !bit_n && bit_p) || (!bit_a && bit_n && !bit_p)) {
       // keep all
-      tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-      tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-      tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+      tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la);
+      tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la);
+      tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la);
     } else if ((bit_a && !bit_n && !bit_p) || (!bit_a && bit_n && bit_p)) {
       // flip p, keep a and n
-      tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-      tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, specificity);
-      tm_update(encoder, i, p, !bit_p, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+      tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la);
+      tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la);
+      tm_update(encoder, i, p, !bit_p, clause_output, feedback_to_clauses, feedback_to_la);
     }
   }
 
@@ -730,6 +734,16 @@ static inline double tk_tsetlin_checkposdouble (lua_State *L, int i)
   return (double) l;
 }
 
+static inline double tk_tsetlin_optposdouble (lua_State *L, int i, double def)
+{
+  if (lua_type(L, i) < 1)
+    return def;
+  lua_Number l = luaL_checknumber(L, i);
+  if (l < 0)
+    luaL_error(L, "value can't be negative");
+  return (double) l;
+}
+
 static inline bool tk_tsetlin_checkboolean (lua_State *L, int i)
 {
   if (lua_type(L, i) == LUA_TNIL)
@@ -752,120 +766,13 @@ static inline void tk_tsetlin_register (lua_State *L, luaL_Reg *regs, int nup)
   lua_pop(L, nup);
 }
 
-static inline void tk_tsetlin_init_classifier (
-  lua_State *L,
-  tsetlin_classifier_t *tm,
-  unsigned int classes,
-  unsigned int features,
-  unsigned int clauses,
-  unsigned int state_bits,
-  unsigned int threshold,
-  bool boost_true_positive
-) {
-  tm->classes = classes;
-  tm->features = features;
-  tm->clauses = clauses;
-  tm->state_bits = state_bits;
-  tm->threshold = threshold;
-  tm->boost_true_positive = boost_true_positive;
-  tm->input_bits = 2 * tm->features;
-  tm->input_chunks = (tm->input_bits - 1) / BITS + 1;
-  tm->clause_chunks = (tm->clauses - 1) / BITS + 1;
-  tm->state_chunks = tm->classes * tm->clauses * (tm->state_bits - 1) * tm->input_chunks;
-  tm->action_chunks = tm->classes * tm->clauses * tm->input_chunks;
-  tm->filter = tm->input_bits % BITS != 0
-    ? ~(((unsigned int) ~0) << (tm->input_bits % BITS))
-    : (unsigned int) ~0;
-  tm->state = malloc(sizeof(unsigned int) * tm->state_chunks);
-  tm->actions = malloc(sizeof(unsigned int) * tm->action_chunks);
-  tm->active_clause = malloc(sizeof(unsigned int) * tm->clause_chunks);
-  tm->locks = malloc(sizeof(pthread_mutex_t) * tm->action_chunks);
-  for (unsigned int i = 0; i < tm->action_chunks; i ++)
-    pthread_mutex_init(&tm->locks[i], NULL);
-  if (!(tm->active_clause && tm->state && tm->actions))
-    luaL_error(L, "error in malloc during creation of classifier");
-  for (unsigned int i = 0; i < tm->classes; i ++)
-    for (unsigned int j = 0; j < tm->clauses; j ++)
-      for (unsigned int k = 0; k < tm->input_chunks; k ++) {
-        unsigned int m = tm->state_bits - 1;
-        unsigned int *actions = tm_state_actions(tm, i, j);
-        unsigned int *counts = tm_state_counts(tm, i, j, k);
-        actions[k] = 0U;
-        for (unsigned int b = 0; b < m; b ++)
-          counts[b] = ~0U;
-      }
-}
-
-static inline void tk_tsetlin_create_classifier (lua_State *L, tsetlin_classifier_t *tm)
-{
-  tk_tsetlin_init_classifier(L, tm,
-      tk_tsetlin_checkunsigned(L, 1),
-      tk_tsetlin_checkunsigned(L, 2),
-      tk_tsetlin_checkunsigned(L, 3),
-      tk_tsetlin_checkunsigned(L, 4),
-      tk_tsetlin_checkunsigned(L, 5),
-      tk_tsetlin_checkboolean(L, 6));
-}
-
-static inline int tk_tsetlin_init_encoder (
-  lua_State *L,
-  tsetlin_encoder_t *tm,
-  unsigned int encoding_bits,
-  unsigned int features,
-  unsigned int clauses,
-  unsigned int state_bits,
-  unsigned int threshold,
-  bool boost_true_positive
-) {
-  tk_tsetlin_init_classifier(L, &tm->encoder,
-      encoding_bits, features, clauses, state_bits, threshold, boost_true_positive);
-  tm->encoding_bits = encoding_bits;
-  tm->encoding_chunks = (encoding_bits - 1) / BITS + 1;
-  tm->encoding_filter = encoding_bits % BITS != 0
-    ? ~(((unsigned int) ~0) << (encoding_bits % BITS))
-    : (unsigned int) ~0;
-  return 0;
-}
-
-static inline int tk_tsetlin_create_encoder (lua_State *L, tsetlin_encoder_t *tm)
-{
-  return tk_tsetlin_init_encoder(L, tm,
-      tk_tsetlin_checkunsigned(L, 1),
-      tk_tsetlin_checkunsigned(L, 2),
-      tk_tsetlin_checkunsigned(L, 3),
-      tk_tsetlin_checkunsigned(L, 4),
-      tk_tsetlin_checkunsigned(L, 5),
-      tk_tsetlin_checkboolean(L, 6));
-}
-
-static inline int tk_tsetlin_create_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
-{
-  unsigned int encoding_bits = tk_tsetlin_checkunsigned(L, 1);
-  unsigned int features = tk_tsetlin_checkunsigned(L, 2);
-  unsigned int clauses = tk_tsetlin_checkunsigned(L, 3);
-  unsigned int state_bits = tk_tsetlin_checkunsigned(L, 4);
-  unsigned int threshold = tk_tsetlin_checkunsigned(L, 5);
-  bool boost_true_positive = tk_tsetlin_checkboolean(L, 6);
-  tk_tsetlin_init_encoder(L, &tm->encoder,
-      encoding_bits, features, clauses, state_bits, threshold, boost_true_positive);
-  tk_tsetlin_init_encoder(L, &tm->decoder,
-      tm->encoder.encoder.input_bits, encoding_bits, clauses, state_bits, threshold, boost_true_positive);
-  return 0;
-}
-
-static inline int tk_tsetlin_create_regressor (lua_State *L, tsetlin_regressor_t *tm)
-{
-  luaL_error(L, "unimplemented: create regressor");
-  return 0;
-}
-
 static inline tsetlin_t *tk_tsetlin_alloc (lua_State *L)
 {
-  tsetlin_t *tm = lua_newuserdata(L, sizeof(tsetlin_t));
+  tsetlin_t *tm = lua_newuserdata(L, sizeof(tsetlin_t)); // ud
   if (!tm) luaL_error(L, "error in malloc during creation");
   memset(tm, 0, sizeof(tsetlin_t));
-  luaL_getmetatable(L, TK_TSETLIN_MT);
-  lua_setmetatable(L, -2);
+  luaL_getmetatable(L, TK_TSETLIN_MT); // ud mt
+  lua_setmetatable(L, -2); // ud
   return tm;
 }
 
@@ -909,6 +816,144 @@ static inline tsetlin_t *tk_tsetlin_alloc_regressor (lua_State *L)
   return tm;
 }
 
+static inline void tk_tsetlin_init_classifier (
+  lua_State *L,
+  tsetlin_classifier_t *tm,
+  unsigned int classes,
+  unsigned int features,
+  unsigned int clauses,
+  unsigned int state_bits,
+  unsigned int threshold,
+  bool boost_true_positive,
+  double specificity_low,
+  double specificity_high
+) {
+  tm->classes = classes;
+  tm->features = features;
+  tm->clauses = clauses;
+  tm->state_bits = state_bits;
+  tm->threshold = threshold;
+  tm->boost_true_positive = boost_true_positive;
+  tm->input_bits = 2 * tm->features;
+  tm->input_chunks = (tm->input_bits - 1) / BITS + 1;
+  tm->clause_chunks = (tm->clauses - 1) / BITS + 1;
+  tm->state_chunks = tm->classes * tm->clauses * (tm->state_bits - 1) * tm->input_chunks;
+  tm->action_chunks = tm->classes * tm->clauses * tm->input_chunks;
+  tm->filter = tm->input_bits % BITS != 0
+    ? ~(((unsigned int) ~0) << (tm->input_bits % BITS))
+    : (unsigned int) ~0;
+  tm->state = malloc(sizeof(unsigned int) * tm->state_chunks);
+  tm->actions = malloc(sizeof(unsigned int) * tm->action_chunks);
+  tm->active_clause = malloc(sizeof(unsigned int) * tm->clause_chunks);
+  tm->specificity_low = specificity_low;
+  tm->specificity_high = specificity_high;
+  tm->specificity = malloc(sizeof(double) * tm->clauses);
+  for (unsigned int i = 0; i < tm->clauses; i ++)
+    tm->specificity[i] = (1.0 * i / tm->clauses) * (tm->specificity_high - tm->specificity_low) + tm->specificity_low;
+  tm->locks = malloc(sizeof(pthread_mutex_t) * tm->action_chunks);
+  for (unsigned int i = 0; i < tm->action_chunks; i ++)
+    pthread_mutex_init(&tm->locks[i], NULL);
+  if (!(tm->active_clause && tm->state && tm->actions))
+    luaL_error(L, "error in malloc during creation of classifier");
+  for (unsigned int i = 0; i < tm->classes; i ++)
+    for (unsigned int j = 0; j < tm->clauses; j ++)
+      for (unsigned int k = 0; k < tm->input_chunks; k ++) {
+        unsigned int m = tm->state_bits - 1;
+        unsigned int *actions = tm_state_actions(tm, i, j);
+        unsigned int *counts = tm_state_counts(tm, i, j, k);
+        actions[k] = 0U;
+        for (unsigned int b = 0; b < m; b ++)
+          counts[b] = ~0U;
+      }
+}
+
+static inline int tk_tsetlin_init_encoder (
+  lua_State *L,
+  tsetlin_encoder_t *tm,
+  unsigned int encoding_bits,
+  unsigned int features,
+  unsigned int clauses,
+  unsigned int state_bits,
+  unsigned int threshold,
+  bool boost_true_positive,
+  double specificity_low,
+  double specificity_high
+) {
+  tk_tsetlin_init_classifier(L, &tm->encoder,
+      encoding_bits, features, clauses, state_bits, threshold,
+      boost_true_positive, specificity_low, specificity_high);
+  tm->encoding_bits = encoding_bits;
+  tm->encoding_chunks = (encoding_bits - 1) / BITS + 1;
+  tm->encoding_filter = encoding_bits % BITS != 0
+    ? ~(((unsigned int) ~0) << (encoding_bits % BITS))
+    : (unsigned int) ~0;
+  return 0;
+}
+
+static inline void tk_tsetlin_create_classifier (lua_State *L)
+{
+  tsetlin_t *tm = tk_tsetlin_alloc_classifier(L);
+  lua_insert(L, 1);
+
+  tk_tsetlin_init_classifier(L, tm->classifier,
+      tk_tsetlin_checkunsigned(L, 2),
+      tk_tsetlin_checkunsigned(L, 3),
+      tk_tsetlin_checkunsigned(L, 4),
+      tk_tsetlin_checkunsigned(L, 5),
+      tk_tsetlin_checkunsigned(L, 6),
+      tk_tsetlin_checkboolean(L, 7),
+      tk_tsetlin_optposdouble(L, 8, DEF_SPEC_LOW),
+      tk_tsetlin_optposdouble(L, 9, DEF_SPEC_HIGH));
+
+  lua_settop(L, 1);
+}
+
+static inline void tk_tsetlin_create_encoder (lua_State *L)
+{
+  tsetlin_t *tm = tk_tsetlin_alloc_encoder(L);
+  lua_insert(L, 1);
+
+  tk_tsetlin_init_encoder(L, tm->encoder,
+      tk_tsetlin_checkunsigned(L, 2),
+      tk_tsetlin_checkunsigned(L, 3),
+      tk_tsetlin_checkunsigned(L, 4),
+      tk_tsetlin_checkunsigned(L, 5),
+      tk_tsetlin_checkunsigned(L, 6),
+      tk_tsetlin_checkboolean(L, 7),
+      tk_tsetlin_optposdouble(L, 8, DEF_SPEC_LOW),
+      tk_tsetlin_optposdouble(L, 9, DEF_SPEC_HIGH));
+
+  lua_settop(L, 1);
+}
+
+static inline void tk_tsetlin_create_auto_encoder (lua_State *L)
+{
+  tsetlin_t *tm = tk_tsetlin_alloc_auto_encoder(L);
+  lua_insert(L, 1);
+
+  unsigned int encoding_bits = tk_tsetlin_checkunsigned(L, 2);
+  unsigned int features = tk_tsetlin_checkunsigned(L, 3);
+  unsigned int clauses = tk_tsetlin_checkunsigned(L, 4);
+  unsigned int state_bits = tk_tsetlin_checkunsigned(L, 5);
+  unsigned int threshold = tk_tsetlin_checkunsigned(L, 6);
+  bool boost_true_positive = tk_tsetlin_checkboolean(L, 7);
+  double specificity_low = tk_tsetlin_optposdouble(L, 8, DEF_SPEC_LOW);
+  double specificity_high = tk_tsetlin_optposdouble(L, 9, DEF_SPEC_HIGH);
+
+  tk_tsetlin_init_encoder(L, &tm->auto_encoder->encoder,
+      encoding_bits, features, clauses, state_bits, threshold, boost_true_positive, specificity_low, specificity_high);
+  tk_tsetlin_init_encoder(L, &tm->auto_encoder->decoder,
+      tm->auto_encoder->encoder.encoder.input_bits, encoding_bits, clauses, state_bits, threshold, boost_true_positive, specificity_low, specificity_high);
+
+  lua_settop(L, 1);
+}
+
+static inline void tk_tsetlin_create_regressor (lua_State *L)
+{
+  luaL_error(L, "unimplemented: create regressor");
+  lua_settop(L, 0);
+}
+
 // TODO: Instead of the user passing in a string name for the type, pass in the
 // enum value (TM_CLASSIFIER, TM_ENCODER, etc.). Expose these enum values via
 // the library table.
@@ -918,29 +963,25 @@ static inline int tk_tsetlin_create (lua_State *L)
   if (!strcmp(type, "classifier")) {
 
     lua_remove(L, 1);
-    tsetlin_t *tm = tk_tsetlin_alloc_classifier(L);
-    tk_tsetlin_create_classifier(L, tm->classifier);
+    tk_tsetlin_create_classifier(L);
     return 1;
 
   } else if (!strcmp(type, "encoder")) {
 
     lua_remove(L, 1);
-    tsetlin_t *tm = tk_tsetlin_alloc_encoder(L);
-    tk_tsetlin_create_encoder(L, tm->encoder);
+    tk_tsetlin_create_encoder(L);
     return 1;
 
   } else if (!strcmp(type, "auto_encoder")) {
 
     lua_remove(L, 1);
-    tsetlin_t *tm = tk_tsetlin_alloc_auto_encoder(L);
-    tk_tsetlin_create_auto_encoder(L, tm->auto_encoder);
+    tk_tsetlin_create_auto_encoder(L);
     return 1;
 
   } else if (!strcmp(type, "regressor")) {
 
     lua_remove(L, 1);
-    tsetlin_t *tm = tk_tsetlin_alloc_regressor(L);
-    tk_tsetlin_create_regressor(L, tm->regressor);
+    tk_tsetlin_create_regressor(L);
     return 1;
 
   } else {
@@ -1052,14 +1093,13 @@ static inline int tk_tsetlin_update_classifier (lua_State *L, tsetlin_classifier
   if (tgt < 0)
     luaL_error(L, "target class must be greater than zero");
   double active_clause = tk_tsetlin_checkposdouble(L, 4);
-  double specificity = tk_tsetlin_checkposdouble(L, 5);
   mc_tm_initialize_active_clause(tm, active_clause);
   unsigned int clause_chunks = tm->clause_chunks;
   unsigned int input_chunks = tm->input_chunks;
   unsigned int clause_output[clause_chunks];
   unsigned int feedback_to_clauses[clause_chunks];
   unsigned int feedback_to_la[input_chunks];
-  mc_tm_update(tm, bm, tgt, clause_output, feedback_to_clauses, feedback_to_la, specificity);
+  mc_tm_update(tm, bm, tgt, clause_output, feedback_to_clauses, feedback_to_la);
   return 0;
 }
 
@@ -1073,13 +1113,12 @@ static inline int tk_tsetlin_update_encoder (
   double active_clause = tk_tsetlin_checkposdouble(L, 5);
   double margin = tk_tsetlin_checkposdouble(L, 6);
   double loss_alpha = tk_tsetlin_checkposdouble(L, 7);
-  double specificity = luaL_checknumber(L, 8);
   mc_tm_initialize_active_clause(&tm->encoder, active_clause);
   unsigned int clause_output[tm->encoder.clause_chunks];
   unsigned int feedback_to_clauses[tm->encoder.clause_chunks];
   unsigned int feedback_to_la[tm->encoder.input_chunks];
   long int scores[tm->encoder.classes];
-  en_tm_update(tm, a, n, p, clause_output, feedback_to_clauses, feedback_to_la, scores, margin, loss_alpha, specificity);
+  en_tm_update(tm, a, n, p, clause_output, feedback_to_clauses, feedback_to_la, scores, margin, loss_alpha);
   return 0;
 }
 
@@ -1088,7 +1127,6 @@ static inline int tk_tsetlin_update_auto_encoder (lua_State *L, tsetlin_auto_enc
   unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
   double active_clause = tk_tsetlin_checkposdouble(L, 3);
   double loss_alpha = tk_tsetlin_checkposdouble(L, 4);
-  double specificity = luaL_checknumber(L, 5);
   unsigned int clause_output[tm->encoder.encoder.clause_chunks];
   unsigned int feedback_to_clauses[tm->encoder.encoder.clause_chunks];
   unsigned int feedback_to_la_e[tm->encoder.encoder.input_chunks];
@@ -1099,7 +1137,7 @@ static inline int tk_tsetlin_update_auto_encoder (lua_State *L, tsetlin_auto_enc
   mc_tm_initialize_active_clause(&tm->decoder.encoder, active_clause);
   ae_tm_update(tm, bm,
       clause_output, feedback_to_clauses, feedback_to_la_e, feedback_to_la_d, scores_e, scores_d,
-      loss_alpha, specificity);
+      loss_alpha);
   return 0;
 }
 
@@ -1140,7 +1178,6 @@ typedef struct {
   unsigned int *shuffle;
   unsigned int *ps;
   unsigned int *ss;
-  double specificity;
   pthread_mutex_t *qlock;
 } train_classifier_thread_data_t;
 
@@ -1161,7 +1198,7 @@ static void *train_classifier_thread (void *arg)
       return NULL;
     unsigned int idx = data->shuffle[next];
     mc_tm_update(data->tm, data->ps + idx * input_chunks, data->ss[idx],
-        clause_output, feedback_to_clauses, feedback_to_la, data->specificity);
+        clause_output, feedback_to_clauses, feedback_to_la);
   }
 }
 
@@ -1171,7 +1208,6 @@ static inline int tk_tsetlin_train_classifier (lua_State *L, tsetlin_classifier_
   unsigned int *ps = (unsigned int *)luaL_checkstring(L, 3);
   unsigned int *ss = (unsigned int *)luaL_checkstring(L, 4);
   double active_clause = tk_tsetlin_checkposdouble(L, 5);
-  double specificity = tk_tsetlin_checkposdouble(L, 6);
   mc_tm_initialize_active_clause(tm, active_clause);
 
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
@@ -1194,7 +1230,6 @@ static inline int tk_tsetlin_train_classifier (lua_State *L, tsetlin_classifier_
     thread_data[i].shuffle = shuffle;
     thread_data[i].ps = ps;
     thread_data[i].ss = ss;
-    thread_data[i].specificity = specificity;
     thread_data[i].qlock = &qlock;
     if (pthread_create(&threads[i], NULL, train_classifier_thread, &thread_data[i]) != 0)
       return tk_error(L, "pthread_create", errno);
@@ -1218,7 +1253,6 @@ typedef struct {
   unsigned int *tokens;
   double margin;
   double loss_alpha;
-  double specificity;
   pthread_mutex_t *qlock;
 } train_encoder_thread_data_t;
 
@@ -1245,7 +1279,7 @@ static void *train_encoder_thread (void *arg)
     unsigned int *p = data->tokens + ((idx * 3 + 2) * input_chunks);
     en_tm_update(data->tm, a, n, p,
         clause_output, feedback_to_clauses, feedback_to_la, scores,
-        data->margin, data->loss_alpha, data->specificity);
+        data->margin, data->loss_alpha);
   }
   return NULL;
 }
@@ -1259,7 +1293,6 @@ static inline int tk_tsetlin_train_encoder (
   double active_clause = tk_tsetlin_checkposdouble(L, 4);
   double margin = tk_tsetlin_checkposdouble(L, 5);
   double loss_alpha = tk_tsetlin_checkposdouble(L, 6);
-  double specificity = luaL_checknumber(L, 7);
   mc_tm_initialize_active_clause(&tm->encoder, active_clause);
 
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
@@ -1283,7 +1316,6 @@ static inline int tk_tsetlin_train_encoder (
     thread_data[i].tokens = tokens;
     thread_data[i].margin = margin;
     thread_data[i].loss_alpha = loss_alpha;
-    thread_data[i].specificity = specificity;
     thread_data[i].qlock = &qlock;
     if (pthread_create(&threads[i], NULL, train_encoder_thread, &thread_data[i]) != 0)
       return tk_error(L, "pthread_create", errno);
@@ -1306,7 +1338,6 @@ typedef struct {
   unsigned int *shuffle;
   unsigned int *ps;
   double loss_alpha;
-  double specificity;
   pthread_mutex_t *qlock;
 } train_auto_encoder_thread_data_t;
 
@@ -1329,7 +1360,7 @@ static void *train_auto_encoder_thread (void *arg)
     unsigned int idx = data->shuffle[next];
     ae_tm_update(data->tm, data->ps + idx * data->tm->encoder.encoder.input_chunks,
         clause_output, feedback_to_clauses, feedback_to_la_e, feedback_to_la_d, scores_e, scores_d,
-        data->loss_alpha, data->specificity);
+        data->loss_alpha);
   }
   return NULL;
 }
@@ -1340,7 +1371,6 @@ static inline int tk_tsetlin_train_auto_encoder (lua_State *L, tsetlin_auto_enco
   unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
   double active_clause = tk_tsetlin_checkposdouble(L, 4);
   double loss_alpha = tk_tsetlin_checkposdouble(L, 5);
-  double specificity = tk_tsetlin_checkposdouble(L, 6);
 
   // TODO: Should the active clause be shared? Does that make more sense for an
   // auto_encoder?
@@ -1367,7 +1397,6 @@ static inline int tk_tsetlin_train_auto_encoder (lua_State *L, tsetlin_auto_enco
     thread_data[i].shuffle = shuffle;
     thread_data[i].ps = ps;
     thread_data[i].loss_alpha = loss_alpha;
-    thread_data[i].specificity = specificity;
     thread_data[i].qlock = &qlock;
     if (pthread_create(&threads[i], NULL, train_auto_encoder_thread, &thread_data[i]) != 0)
       return tk_error(L, "pthread_create", errno);
@@ -1816,6 +1845,8 @@ static inline void _tk_tsetlin_persist_classifier (lua_State *L, tsetlin_classif
   tk_lua_fwrite(L, &tm->state_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->action_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->filter, sizeof(unsigned int), 1, fh);
+  tk_lua_fwrite(L, &tm->specificity_low, sizeof(double), 1, fh);
+  tk_lua_fwrite(L, &tm->specificity_high, sizeof(double), 1, fh);
   tk_lua_fwrite(L, tm->state, sizeof(unsigned int), tm->state_chunks, fh);
   tk_lua_fwrite(L, tm->actions, sizeof(unsigned int), tm->action_chunks, fh);
 }
@@ -1885,9 +1916,14 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tsetlin_classifier
   tk_lua_fread(L, &tm->state_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->action_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->filter, sizeof(unsigned int), 1, fh);
+  tk_lua_fread(L, &tm->specificity_low, sizeof(double), 1, fh);
+  tk_lua_fread(L, &tm->specificity_high, sizeof(double), 1, fh);
   tm->state = malloc(sizeof(unsigned int) * tm->state_chunks);
   tm->actions = malloc(sizeof(unsigned int) * tm->action_chunks);
   tm->active_clause = malloc(sizeof(unsigned int) * tm->clause_chunks);
+  tm->specificity = malloc(sizeof(double) * tm->clauses);
+  for (unsigned int i = 0; i < tm->clauses; i ++)
+    tm->specificity[i] = (1.0 * i / tm->clauses) * (tm->specificity_high - tm->specificity_low) + tm->specificity_low;
   tm->locks = malloc(sizeof(pthread_mutex_t) * tm->action_chunks);
   for (unsigned int i = 0; i < tm->action_chunks; i ++)
     pthread_mutex_init(&tm->locks[i], NULL);
