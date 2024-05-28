@@ -780,8 +780,9 @@ static inline void re_tm_update_recompute (
   unsigned int *encoding_p
 ) {
   for (unsigned int word = 1; word <= x_len; word ++) {
+    double loss_alloc = word / x_len * loss;
     for (unsigned int bit = 0; bit < encoding_bits; bit ++) {
-      if (fast_chance(loss)) {
+      if (fast_chance(loss_alloc)) {
         unsigned int chunk = bit / BITS;
         unsigned int pos = bit % BITS;
         unsigned chunk0 = word * encoding_chunks + chunk;
@@ -802,8 +803,8 @@ static inline void re_tm_update_recompute (
         else if (loss0 > loss)
           tm_update(encoder, bit, input_x, bit_x,
               clause_output, feedback_to_clauses, feedback_to_la, specificity);
-        else
-          tm_update(encoder, bit, input_x, bit_x,
+        else if (fast_chance(loss_alloc))
+          tm_update(encoder, bit, input_x, fast_chance(0.5),
               clause_output, feedback_to_clauses, feedback_to_la, specificity);
       }
     }
@@ -852,16 +853,9 @@ static inline void re_tm_update (
 
   double loss = triplet_loss_hamming(encoding_a, encoding_n, encoding_p, encoding_bits, margin, loss_alpha);
 
-  unsigned int r = fast_rand() % 3;
-
-  if (r == 1)
-    re_tm_update_recompute(tm, encoder, a_len, a_data, state_a, state_a_size, state_a_max, input_a, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, NULL, encoding_n, encoding_p);
-
-  else if (r == 2)
-    re_tm_update_recompute(tm, encoder, n_len, n_data, state_n, state_n_size, state_n_max, input_n, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, NULL, encoding_p);
-
-  else if (r == 3)
-    re_tm_update_recompute(tm, encoder, p_len, p_data, state_p, state_p_size, state_p_max, input_p, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, encoding_n, NULL);
+  re_tm_update_recompute(tm, encoder, a_len, a_data, state_a, state_a_size, state_a_max, input_a, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, NULL, encoding_n, encoding_p);
+  re_tm_update_recompute(tm, encoder, n_len, n_data, state_n, state_n_size, state_n_max, input_n, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, NULL, encoding_p);
+  re_tm_update_recompute(tm, encoder, p_len, p_data, state_p, state_p_size, state_p_max, input_p, clause_output, feedback_to_clauses, feedback_to_la, scores, encoding_bits, encoding_chunks, specificity, margin, loss, loss_alpha, encoding_a, encoding_n, NULL);
 }
 
 static inline void mc_tm_initialize_active_clause (
