@@ -602,38 +602,34 @@ static inline void ae_tm_update (
   // compare input to decoding
   double loss = hamming_loss(input, decoding, tm->encoder.encoder.input_bits, loss_alpha);
 
-  double spec = spec_alpha > 0
-    ? pow((1 - loss), spec_alpha) * (spec_max - spec_min) + spec_min
-    : pow(loss, -spec_alpha) * (spec_max - spec_min) + spec_min;
+  double spec = (1 - loss) * (spec_max - spec_min) + spec_min;
 
-  for (unsigned int bit = 0; bit < tm->encoder.encoding_bits; bit ++)
-    if (fast_chance(loss)) {
-      unsigned int chunk0 = bit / BITS;
-      unsigned int chunk1 = chunk0 + tm->encoder.encoding_chunks;
-      unsigned int pos = bit % BITS;
-      unsigned int bit_x = encoding[chunk0] & (1U << pos);
-      unsigned int bit_x_flipped = !bit_x;
-      encoding[chunk0] ^= (1U << pos);
-      encoding[chunk1] ^= (1U << pos);
-      ae_tm_decode(tm, encoding, decoding, scores_d);
-      memcpy(decoding + tm->decoder.encoding_chunks, decoding, tm->decoder.encoding_chunks * sizeof(unsigned int));
-      flip_bits(decoding + tm->decoder.encoding_chunks, tm->decoder.encoding_chunks);
-      double loss0 = hamming_loss(input, decoding, tm->encoder.encoder.input_bits, loss_alpha);
-      encoding[chunk0] ^= (1U << pos);
-      encoding[chunk1] ^= (1U << pos);
-      if (loss0 < loss)
-        tm_update(&tm->encoder.encoder, bit, input, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la_e, spec);
-      else if (loss0 > loss)
-        tm_update(&tm->encoder.encoder, bit, input, bit_x, clause_output, feedback_to_clauses, feedback_to_la_e, spec);
-    }
+  for (unsigned int bit = 0; bit < tm->encoder.encoding_bits; bit ++) {
+    unsigned int chunk0 = bit / BITS;
+    unsigned int chunk1 = chunk0 + tm->encoder.encoding_chunks;
+    unsigned int pos = bit % BITS;
+    unsigned int bit_x = encoding[chunk0] & (1U << pos);
+    unsigned int bit_x_flipped = !bit_x;
+    encoding[chunk0] ^= (1U << pos);
+    encoding[chunk1] ^= (1U << pos);
+    ae_tm_decode(tm, encoding, decoding, scores_d);
+    memcpy(decoding + tm->decoder.encoding_chunks, decoding, tm->decoder.encoding_chunks * sizeof(unsigned int));
+    flip_bits(decoding + tm->decoder.encoding_chunks, tm->decoder.encoding_chunks);
+    double loss0 = hamming_loss(input, decoding, tm->encoder.encoder.input_bits, loss_alpha);
+    encoding[chunk0] ^= (1U << pos);
+    encoding[chunk1] ^= (1U << pos);
+    if (loss0 < loss)
+      tm_update(&tm->encoder.encoder, bit, input, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la_e, spec);
+    else if (loss0 > loss)
+      tm_update(&tm->encoder.encoder, bit, input, bit_x, clause_output, feedback_to_clauses, feedback_to_la_e, spec);
+  }
 
-  for (unsigned int bit = 0; bit < tm->encoder.encoder.input_bits; bit ++)
-    if (fast_chance(loss)) {
-      unsigned int chunk = bit / BITS;
-      unsigned int pos = bit % BITS;
-      unsigned int bit_i = input[chunk] & (1U << pos);
-      tm_update(&tm->decoder.encoder, bit, encoding, bit_i, clause_output, feedback_to_clauses, feedback_to_la_d, spec);
-    }
+  for (unsigned int bit = 0; bit < tm->encoder.encoder.input_bits; bit ++) {
+    unsigned int chunk = bit / BITS;
+    unsigned int pos = bit % BITS;
+    unsigned int bit_i = input[chunk] & (1U << pos);
+    tm_update(&tm->decoder.encoder, bit, encoding, bit_i, clause_output, feedback_to_clauses, feedback_to_la_d, spec);
+  }
 }
 
 static inline void en_tm_update (
@@ -668,36 +664,32 @@ static inline void en_tm_update (
   double loss = triplet_loss_hamming(encoding_a, encoding_n, encoding_p, encoding_bits, margin, loss_alpha);
 
   for (unsigned int i = 0; i < classes; i ++) {
-    if (fast_chance(loss)) {
-      unsigned int chunk = i / BITS;
-      unsigned int pos = i % BITS;
-      unsigned int bit_a = encoding_a[chunk] & (1U << pos);
-      unsigned int bit_n = encoding_n[chunk] & (1U << pos);
-      unsigned int bit_p = encoding_p[chunk] & (1U << pos);
-      unsigned int spec = spec_alpha > 0
-        ? pow((1 - loss), spec_alpha) * (spec_max - spec_min) + spec_min
-        : pow(loss, -spec_alpha) * (spec_max - spec_min) + spec_min;
-      if ((bit_a && bit_n && bit_p) || (!bit_a && !bit_n && !bit_p)) {
-        // flip n, keep a and p
-        tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, spec);
-        tm_update(encoder, i, n, !bit_n, clause_output, feedback_to_clauses, feedback_to_la, spec);
-        tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, spec);
-      } else if ((bit_a && bit_n && !bit_p) || (!bit_a && !bit_n && bit_p)) {
-        // flip a, keep n and p
-        tm_update(encoder, i, a, !bit_a, clause_output, feedback_to_clauses, feedback_to_la, spec);
-        tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, spec);
-        tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, spec);
-      } else if ((bit_a && !bit_n && bit_p) || (!bit_a && bit_n && !bit_p)) {
-        // keep all
-        tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, spec);
-        tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, spec);
-        tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, spec);
-      } else if ((bit_a && !bit_n && !bit_p) || (!bit_a && bit_n && bit_p)) {
-        // flip p, keep a and n
-        tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, spec);
-        tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, spec);
-        tm_update(encoder, i, p, !bit_p, clause_output, feedback_to_clauses, feedback_to_la, spec);
-      }
+    unsigned int chunk = i / BITS;
+    unsigned int pos = i % BITS;
+    unsigned int bit_a = encoding_a[chunk] & (1U << pos);
+    unsigned int bit_n = encoding_n[chunk] & (1U << pos);
+    unsigned int bit_p = encoding_p[chunk] & (1U << pos);
+    double spec = (1 - loss) * (spec_max - spec_min) + spec_min;
+    if ((bit_a && bit_n && bit_p) || (!bit_a && !bit_n && !bit_p)) {
+      // flip n, keep a and p
+      tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, spec);
+      tm_update(encoder, i, n, !bit_n, clause_output, feedback_to_clauses, feedback_to_la, spec);
+      tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, spec);
+    } else if ((bit_a && bit_n && !bit_p) || (!bit_a && !bit_n && bit_p)) {
+      // flip a, keep n and p
+      tm_update(encoder, i, a, !bit_a, clause_output, feedback_to_clauses, feedback_to_la, spec);
+      tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, spec);
+      tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, spec);
+    } else if ((bit_a && !bit_n && bit_p) || (!bit_a && bit_n && !bit_p)) {
+      // keep all
+      tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, spec);
+      tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, spec);
+      tm_update(encoder, i, p, bit_p, clause_output, feedback_to_clauses, feedback_to_la, spec);
+    } else if ((bit_a && !bit_n && !bit_p) || (!bit_a && bit_n && bit_p)) {
+      // flip p, keep a and n
+      tm_update(encoder, i, a, bit_a, clause_output, feedback_to_clauses, feedback_to_la, spec);
+      tm_update(encoder, i, n, bit_n, clause_output, feedback_to_clauses, feedback_to_la, spec);
+      tm_update(encoder, i, p, !bit_p, clause_output, feedback_to_clauses, feedback_to_la, spec);
     }
   }
 
@@ -1187,8 +1179,8 @@ static inline int tk_tsetlin_train_classifier (lua_State *L, tsetlin_classifier_
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *ps = (unsigned int *)luaL_checkstring(L, 3);
   unsigned int *ss = (unsigned int *)luaL_checkstring(L, 4);
-  double specificity = tk_tsetlin_checkposdouble(L, 5);
-  double active_clause = tk_tsetlin_checkposdouble(L, 6);
+  double active_clause = tk_tsetlin_checkposdouble(L, 5);
+  double specificity = tk_tsetlin_checkposdouble(L, 6);
   mc_tm_initialize_active_clause(tm, active_clause);
 
   long cores = sysconf(_SC_NPROCESSORS_ONLN);

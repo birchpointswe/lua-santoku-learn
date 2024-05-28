@@ -13,8 +13,8 @@ local CLAUSES = 80
 local STATE_BITS = 8
 local THRESHOLD = 200
 local SPECIFICITY = 3.9
-local ACTIVE_CLAUSE = 1
 local BOOST_TRUE_POSITIVE = false
+local ACTIVE_CLAUSE = 1
 local MAX_EPOCHS = 50
 local MAX_RECORDS = nil
 
@@ -87,7 +87,7 @@ test("tsetlin", function ()
   for epoch = 1, MAX_EPOCHS do
 
     local start = os.time()
-    tm.train(t, n_train, train_problems, train_solutions, SPECIFICITY, ACTIVE_CLAUSE)
+    tm.train(t, n_train, train_problems, train_solutions, ACTIVE_CLAUSE, SPECIFICITY)
     local stop = os.time()
     arr.push(times, stop - start)
     local avg_duration = arr.mean(times)
