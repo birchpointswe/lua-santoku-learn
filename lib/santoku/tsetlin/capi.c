@@ -204,10 +204,9 @@ static inline double triplet_loss_hamming (
   double margin,
   double alpha
 ) {
-  unsigned int dist_an = hamming(a, n, bits);
-  unsigned int dist_ap = hamming(a, p, bits);
-  return pow(fmin(1.0, fmax(0.0,
-          (double) dist_ap - dist_an + margin) / bits), alpha);
+  double dist_an = (double) hamming(a, n, bits) / (double) bits;
+  double dist_ap = (double) hamming(a, p, bits) / (double) bits;
+  return pow(fmin(1.0, fmax(0.0, (double) dist_ap - dist_an + margin)), alpha);
 }
 
 static inline void flip_bits (
