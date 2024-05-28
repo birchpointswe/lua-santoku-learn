@@ -4,9 +4,6 @@
   start the same, accuracy worsens dramatically)
 - Add a "loss alpha" concept to classifier
 
-- Recurrent classifier with MNIST
-- Recurrent classifier with noisy xor
-
 - Use scaled loss_alpha based on max observed loss while training
 - Release recent changes
 - Fast booleanize matrix function (input: embedding matrix, output: thresholds
@@ -19,13 +16,11 @@
 - Error handling: features == 0
 - Optimially space threshold levels: insetad of splitting evenly, split by
   value?
-- Figure out why recurrent encoder accuracy decreases or bounces around.
 
 - Flipping input bits should be done in TM library, not required by the user.
   It's too easy to forget the complement bits.
 - Experiment with dynamic margin for encoder, based on relative distances of N
   and P
-- Standard test dataset for recurrent encoder
 - Configurable number of threads. No pthreads at all when 0
 - Parallelize classes during predict/update single, parallelize examples during
   training
@@ -36,8 +31,6 @@
 - Re-use threads across epochs
 
 - Implement regressor
-- Add recurrent classifier, regressor
-- Recurrent auto-encoder
 
 - Throw an error if length of input bitmaps isn't correct (2 x features /
   sizeof(unsigned int))
