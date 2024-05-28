@@ -1,5 +1,8 @@
 # Now
 
+- Explore threading at class level and clause level. Consider different
+  threading approaches during training vs one-shot predict/update.
+
 - Pretrained models
     - Embeddings to bitmap: cosine similarity to hamming
     - Embeddings to bitmap: auto-encoded
