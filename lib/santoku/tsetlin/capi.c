@@ -1047,7 +1047,6 @@ static inline int tk_tsetlin_predict (lua_State *L)
 
 static inline int tk_tsetlin_update_classifier (lua_State *L, tsetlin_classifier_t *tm)
 {
-  lua_settop(L, 5);
   unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
   lua_Integer tgt = luaL_checkinteger(L, 3);
   if (tgt < 0)
@@ -1168,7 +1167,6 @@ static void *train_classifier_thread (void *arg)
 
 static inline int tk_tsetlin_train_classifier (lua_State *L, tsetlin_classifier_t *tm)
 {
-  lua_settop(L, 6);
   unsigned int n = tk_tsetlin_checkunsigned(L, 2);
   unsigned int *ps = (unsigned int *)luaL_checkstring(L, 3);
   unsigned int *ss = (unsigned int *)luaL_checkstring(L, 4);
@@ -1261,7 +1259,7 @@ static inline int tk_tsetlin_train_encoder (
   double active_clause = tk_tsetlin_checkposdouble(L, 4);
   double margin = tk_tsetlin_checkposdouble(L, 5);
   double loss_alpha = tk_tsetlin_checkposdouble(L, 6);
-  double specificity = luaL_checknumber(L, 8);
+  double specificity = luaL_checknumber(L, 7);
   mc_tm_initialize_active_clause(&tm->encoder, active_clause);
 
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
