@@ -1,8 +1,12 @@
 # Now
 
+- Pretrained models
+    - Embeddings to bitmap: cosine similarity to hamming
+    - Embeddings to bitmap: auto-encoded
+
 - Try `__thread` on `mcg_state` with random seed for each thread (if they all
   start the same, accuracy worsens dramatically)
-- Add a "loss alpha" concept to classifier
+- Add dynamic skipping and specificity to classifier
 
 - Use scaled loss_alpha based on max observed loss while training
 - Release recent changes
