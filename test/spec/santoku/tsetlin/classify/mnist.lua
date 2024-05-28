@@ -14,9 +14,9 @@ local TRAIN_TEST_RATIO = 0.5
 local CLAUSES = 2000
 local STATE_BITS = 8
 local THRESHOLD = 50
-local SPECIFICITY = { 10, 10, 1 }
-local ACTIVE_CLAUSE = 1 --0.75
 local BOOST_TRUE_POSITIVE = true
+local ACTIVE_CLAUSE = 1 --0.75
+local SPECIFICITY = 10
 local EVALUATE_EVERY = 1
 local MAX_EPOCHS = 20
 
@@ -91,28 +91,24 @@ test("tsetlin", function ()
   print("Test", n_test)
 
   print("Training")
-  for SPEC = SPECIFICITY[1], SPECIFICITY[2], SPECIFICITY[3] do
+  local t = tm.classifier(CLASSES, FEATURES, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
 
-    local t = tm.classifier(CLASSES, FEATURES, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
-
-    for epoch = 1, MAX_EPOCHS do
-      local start = os.time()
-      tm.train(t, n_train, train_problems, train_solutions, SPEC, ACTIVE_CLAUSE)
-      local stop = os.time()
-      local duration = stop - start
-      if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
-        local test_score =
-          tm.evaluate(t, n_test, test_problems, test_solutions, epoch == MAX_EPOCHS)
-        local train_score =
-          tm.evaluate(t, n_train, train_problems, train_solutions)
-        str.printf("Epoch %-4d  Spec %.2f Time %d  Test %4.2f  Train %4.2f\n",
-          epoch, SPEC, duration, test_score, train_score)
-      else
-        str.printf("Epoch %-4d  Spec %.2f Time %d\n",
-          epoch, SPEC, duration)
-      end
+  for epoch = 1, MAX_EPOCHS do
+    local start = os.time()
+    tm.train(t, n_train, train_problems, train_solutions, ACTIVE_CLAUSE, SPECIFICITY)
+    local stop = os.time()
+    local duration = stop - start
+    if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
+      local test_score =
+        tm.evaluate(t, n_test, test_problems, test_solutions, epoch == MAX_EPOCHS)
+      local train_score =
+        tm.evaluate(t, n_train, train_problems, train_solutions)
+      str.printf("Epoch %-4d  Time %d  Test %4.2f  Train %4.2f\n",
+        epoch, duration, test_score, train_score)
+    else
+      str.printf("Epoch %-4d  Time %d\n",
+        epoch, duration)
     end
-
   end
 
 end)
