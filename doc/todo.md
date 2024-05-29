@@ -46,7 +46,6 @@
 
 # Eventually
 
-- Multi-granular (eliminates hyper-parameter S(ensitivity))
 - Coalesced (reduces memory footprint for multi-output configurations)
 - Weighted (reduces memory footprint)
 - Integer-Weighted (see weighted))
