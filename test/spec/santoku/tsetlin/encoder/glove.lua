@@ -24,7 +24,7 @@ local THRESHOLD = 512
 local BOOST_TRUE_POSITIVE = false
 local ACTIVE_CLAUSE = 0.75
 local MARGIN = 0.05
-local LOSS_ALPHA = 0.5
+local LOSS_ALPHA = 0
 
 local EVALUATE_EVERY = 1
 local MAX_RECORDS = 1000

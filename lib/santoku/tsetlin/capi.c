@@ -363,7 +363,7 @@ static inline void tm_calculate_clause_output (
   unsigned int *clause_output,
   bool predict
 ) {
-	memset(clause_output, 0, tm->clause_chunks * sizeof(unsigned int));
+  memset(clause_output, 0, tm->clause_chunks * sizeof(unsigned int));
   unsigned int clauses = tm->clauses;
   unsigned int filter = tm->filter;
   for (unsigned int j = 0; j < clauses; j ++) {
