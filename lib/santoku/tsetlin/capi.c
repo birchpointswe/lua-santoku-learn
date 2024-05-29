@@ -124,7 +124,7 @@ typedef struct {
                   (clause) * (tm)->input_chunks])
 
 static uint64_t const multiplier = 6364136223846793005u;
-static uint64_t mcg_state = 0xcafef00dd15ea5e5u;
+__thread uint64_t mcg_state = 0xcafef00dd15ea5e5u;
 
 static inline uint32_t fast_rand ()
 {
@@ -132,6 +132,11 @@ static inline uint32_t fast_rand ()
   unsigned int count = (unsigned int) (x >> 61);
   mcg_state = x * multiplier;
   return (uint32_t) ((x ^ x >> 22) >> (22 + count));
+}
+
+static inline void seed_rand ()
+{
+  mcg_state = (uint64_t) pthread_self() ^ (uint64_t) time(NULL);
 }
 
 static inline double fast_drand ()
@@ -1183,6 +1188,7 @@ typedef struct {
 
 static void *train_classifier_thread (void *arg)
 {
+  seed_rand();
   train_classifier_thread_data_t *data = (train_classifier_thread_data_t *) arg;
   unsigned int clause_chunks = data->tm->clause_chunks;
   unsigned int input_chunks = data->tm->input_chunks;
@@ -1258,6 +1264,7 @@ typedef struct {
 
 static void *train_encoder_thread (void *arg)
 {
+  seed_rand();
   train_encoder_thread_data_t *data = (train_encoder_thread_data_t *) arg;
   unsigned int clause_chunks = data->tm->encoder.clause_chunks;
   unsigned int encoder_classes = data->tm->encoder.classes;
@@ -1343,6 +1350,7 @@ typedef struct {
 
 static void *train_auto_encoder_thread (void *arg)
 {
+  seed_rand();
   train_auto_encoder_thread_data_t *data = (train_auto_encoder_thread_data_t *) arg;
   unsigned int clause_output[data->tm->encoder.encoder.clause_chunks];
   unsigned int feedback_to_clauses[data->tm->encoder.encoder.clause_chunks];
@@ -1450,6 +1458,7 @@ typedef struct {
 
 static void *evaluate_classifier_thread (void *arg)
 {
+  seed_rand();
   evaluate_classifier_thread_data_t *data = (evaluate_classifier_thread_data_t *) arg;
   unsigned int classes = data->tm->classes;
   unsigned int input_chunks = data->tm->input_chunks;
@@ -1601,6 +1610,7 @@ typedef struct {
 
 static void *evaluate_encoder_thread (void *arg)
 {
+  seed_rand();
   evaluate_encoder_thread_data_t *data = (evaluate_encoder_thread_data_t *) arg;
   unsigned int encoding_a[data->tm->encoding_chunks];
   unsigned int encoding_n[data->tm->encoding_chunks];
@@ -1687,6 +1697,7 @@ typedef struct {
 
 static void *evaluate_auto_encoder_thread (void *arg)
 {
+  seed_rand();
   evaluate_auto_encoder_thread_data_t *data = (evaluate_auto_encoder_thread_data_t *) arg;
   unsigned int encoding[data->tm->encoder.encoding_chunks * 2];
   unsigned int decoding[data->tm->decoder.encoding_chunks * 2];
