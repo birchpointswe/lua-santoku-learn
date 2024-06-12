@@ -721,7 +721,7 @@ tsetlin_t *tk_tsetlin_peek (lua_State *L, int i)
   return (tsetlin_t *) luaL_checkudata(L, i, TK_TSETLIN_MT);
 }
 
-static inline unsigned int tk_tsetlin_checkunsigned (lua_State *L, int i)
+static inline unsigned int tk_lua_checkunsigned (lua_State *L, int i)
 {
   lua_Integer l = luaL_checkinteger(L, i);
   if (l < 0)
@@ -731,7 +731,7 @@ static inline unsigned int tk_tsetlin_checkunsigned (lua_State *L, int i)
   return (unsigned int) l;
 }
 
-static inline double tk_tsetlin_checkposdouble (lua_State *L, int i)
+static inline double tk_lua_checkposdouble (lua_State *L, int i)
 {
   lua_Number l = luaL_checknumber(L, i);
   if (l < 0)
@@ -739,7 +739,7 @@ static inline double tk_tsetlin_checkposdouble (lua_State *L, int i)
   return (double) l;
 }
 
-static inline double tk_tsetlin_optposdouble (lua_State *L, int i, double def)
+static inline double tk_lua_optposdouble (lua_State *L, int i, double def)
 {
   if (lua_type(L, i) < 1)
     return def;
@@ -749,7 +749,7 @@ static inline double tk_tsetlin_optposdouble (lua_State *L, int i, double def)
   return (double) l;
 }
 
-static inline bool tk_tsetlin_checkboolean (lua_State *L, int i)
+static inline bool tk_lua_checkboolean (lua_State *L, int i)
 {
   if (lua_type(L, i) == LUA_TNIL)
     return false;
@@ -757,7 +757,7 @@ static inline bool tk_tsetlin_checkboolean (lua_State *L, int i)
   return lua_toboolean(L, i);
 }
 
-static inline void tk_tsetlin_register (lua_State *L, luaL_Reg *regs, int nup)
+static inline void tk_lua_register (lua_State *L, luaL_Reg *regs, int nup)
 {
   while (true) {
     if ((*regs).name == NULL)
@@ -901,14 +901,14 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
   lua_insert(L, 1);
 
   tk_tsetlin_init_classifier(L, tm->classifier,
-      tk_tsetlin_checkunsigned(L, 2),
-      tk_tsetlin_checkunsigned(L, 3),
-      tk_tsetlin_checkunsigned(L, 4),
-      tk_tsetlin_checkunsigned(L, 5),
-      tk_tsetlin_checkunsigned(L, 6),
-      tk_tsetlin_checkboolean(L, 7),
-      tk_tsetlin_optposdouble(L, 8, DEF_SPEC_LOW),
-      tk_tsetlin_optposdouble(L, 9, DEF_SPEC_HIGH));
+      tk_lua_checkunsigned(L, 2),
+      tk_lua_checkunsigned(L, 3),
+      tk_lua_checkunsigned(L, 4),
+      tk_lua_checkunsigned(L, 5),
+      tk_lua_checkunsigned(L, 6),
+      tk_lua_checkboolean(L, 7),
+      tk_lua_optposdouble(L, 8, DEF_SPEC_LOW),
+      tk_lua_optposdouble(L, 9, DEF_SPEC_HIGH));
 
   lua_settop(L, 1);
 }
@@ -919,14 +919,14 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
   lua_insert(L, 1);
 
   tk_tsetlin_init_encoder(L, tm->encoder,
-      tk_tsetlin_checkunsigned(L, 2),
-      tk_tsetlin_checkunsigned(L, 3),
-      tk_tsetlin_checkunsigned(L, 4),
-      tk_tsetlin_checkunsigned(L, 5),
-      tk_tsetlin_checkunsigned(L, 6),
-      tk_tsetlin_checkboolean(L, 7),
-      tk_tsetlin_optposdouble(L, 8, DEF_SPEC_LOW),
-      tk_tsetlin_optposdouble(L, 9, DEF_SPEC_HIGH));
+      tk_lua_checkunsigned(L, 2),
+      tk_lua_checkunsigned(L, 3),
+      tk_lua_checkunsigned(L, 4),
+      tk_lua_checkunsigned(L, 5),
+      tk_lua_checkunsigned(L, 6),
+      tk_lua_checkboolean(L, 7),
+      tk_lua_optposdouble(L, 8, DEF_SPEC_LOW),
+      tk_lua_optposdouble(L, 9, DEF_SPEC_HIGH));
 
   lua_settop(L, 1);
 }
@@ -936,14 +936,14 @@ static inline void tk_tsetlin_create_auto_encoder (lua_State *L)
   tsetlin_t *tm = tk_tsetlin_alloc_auto_encoder(L);
   lua_insert(L, 1);
 
-  unsigned int encoding_bits = tk_tsetlin_checkunsigned(L, 2);
-  unsigned int features = tk_tsetlin_checkunsigned(L, 3);
-  unsigned int clauses = tk_tsetlin_checkunsigned(L, 4);
-  unsigned int state_bits = tk_tsetlin_checkunsigned(L, 5);
-  unsigned int threshold = tk_tsetlin_checkunsigned(L, 6);
-  bool boost_true_positive = tk_tsetlin_checkboolean(L, 7);
-  double specificity_low = tk_tsetlin_optposdouble(L, 8, DEF_SPEC_LOW);
-  double specificity_high = tk_tsetlin_optposdouble(L, 9, DEF_SPEC_HIGH);
+  unsigned int encoding_bits = tk_lua_checkunsigned(L, 2);
+  unsigned int features = tk_lua_checkunsigned(L, 3);
+  unsigned int clauses = tk_lua_checkunsigned(L, 4);
+  unsigned int state_bits = tk_lua_checkunsigned(L, 5);
+  unsigned int threshold = tk_lua_checkunsigned(L, 6);
+  bool boost_true_positive = tk_lua_checkboolean(L, 7);
+  double specificity_low = tk_lua_optposdouble(L, 8, DEF_SPEC_LOW);
+  double specificity_high = tk_lua_optposdouble(L, 9, DEF_SPEC_HIGH);
 
   tk_tsetlin_init_encoder(L, &tm->auto_encoder->encoder,
       encoding_bits, features, clauses, state_bits, threshold, boost_true_positive, specificity_low, specificity_high);
@@ -1097,7 +1097,7 @@ static inline int tk_tsetlin_update_classifier (lua_State *L, tsetlin_classifier
   lua_Integer tgt = luaL_checkinteger(L, 3);
   if (tgt < 0)
     luaL_error(L, "target class must be greater than zero");
-  double active_clause = tk_tsetlin_checkposdouble(L, 4);
+  double active_clause = tk_lua_checkposdouble(L, 4);
   mc_tm_initialize_active_clause(tm, active_clause);
   unsigned int clause_chunks = tm->clause_chunks;
   unsigned int input_chunks = tm->input_chunks;
@@ -1115,9 +1115,9 @@ static inline int tk_tsetlin_update_encoder (
   unsigned int *a = (unsigned int *) luaL_checkstring(L, 2);
   unsigned int *n = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *p = (unsigned int *) luaL_checkstring(L, 4);
-  double active_clause = tk_tsetlin_checkposdouble(L, 5);
-  double margin = tk_tsetlin_checkposdouble(L, 6);
-  double loss_alpha = tk_tsetlin_checkposdouble(L, 7);
+  double active_clause = tk_lua_checkposdouble(L, 5);
+  double margin = tk_lua_checkposdouble(L, 6);
+  double loss_alpha = tk_lua_checkposdouble(L, 7);
   mc_tm_initialize_active_clause(&tm->encoder, active_clause);
   unsigned int clause_output[tm->encoder.clause_chunks];
   unsigned int feedback_to_clauses[tm->encoder.clause_chunks];
@@ -1130,8 +1130,8 @@ static inline int tk_tsetlin_update_encoder (
 static inline int tk_tsetlin_update_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
 {
   unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
-  double active_clause = tk_tsetlin_checkposdouble(L, 3);
-  double loss_alpha = tk_tsetlin_checkposdouble(L, 4);
+  double active_clause = tk_lua_checkposdouble(L, 3);
+  double loss_alpha = tk_lua_checkposdouble(L, 4);
   unsigned int clause_output[tm->encoder.encoder.clause_chunks];
   unsigned int feedback_to_clauses[tm->encoder.encoder.clause_chunks];
   unsigned int feedback_to_la_e[tm->encoder.encoder.input_chunks];
@@ -1210,10 +1210,10 @@ static void *train_classifier_thread (void *arg)
 
 static inline int tk_tsetlin_train_classifier (lua_State *L, tsetlin_classifier_t *tm)
 {
-  unsigned int n = tk_tsetlin_checkunsigned(L, 2);
+  unsigned int n = tk_lua_checkunsigned(L, 2);
   unsigned int *ps = (unsigned int *)luaL_checkstring(L, 3);
   unsigned int *ss = (unsigned int *)luaL_checkstring(L, 4);
-  double active_clause = tk_tsetlin_checkposdouble(L, 5);
+  double active_clause = tk_lua_checkposdouble(L, 5);
   mc_tm_initialize_active_clause(tm, active_clause);
 
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
@@ -1295,11 +1295,11 @@ static inline int tk_tsetlin_train_encoder (
   lua_State *L,
   tsetlin_encoder_t *tm
 ) {
-  unsigned int n = tk_tsetlin_checkunsigned(L, 2);
+  unsigned int n = tk_lua_checkunsigned(L, 2);
   unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 3);
-  double active_clause = tk_tsetlin_checkposdouble(L, 4);
-  double margin = tk_tsetlin_checkposdouble(L, 5);
-  double loss_alpha = tk_tsetlin_checkposdouble(L, 6);
+  double active_clause = tk_lua_checkposdouble(L, 4);
+  double margin = tk_lua_checkposdouble(L, 5);
+  double loss_alpha = tk_lua_checkposdouble(L, 6);
   mc_tm_initialize_active_clause(&tm->encoder, active_clause);
 
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
@@ -1375,10 +1375,10 @@ static void *train_auto_encoder_thread (void *arg)
 
 static inline int tk_tsetlin_train_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
 {
-  unsigned int n = tk_tsetlin_checkunsigned(L, 2);
+  unsigned int n = tk_lua_checkunsigned(L, 2);
   unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
-  double active_clause = tk_tsetlin_checkposdouble(L, 4);
-  double loss_alpha = tk_tsetlin_checkposdouble(L, 5);
+  double active_clause = tk_lua_checkposdouble(L, 4);
+  double loss_alpha = tk_lua_checkposdouble(L, 5);
 
   // TODO: Should the active clause be shared? Does that make more sense for an
   // auto_encoder?
@@ -1490,10 +1490,10 @@ static inline int tk_tsetlin_evaluate_classifier (
 ) {
 
   lua_settop(L, 5);
-  unsigned int n = tk_tsetlin_checkunsigned(L, 2);
+  unsigned int n = tk_lua_checkunsigned(L, 2);
   unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int *ss = (unsigned int *) luaL_checkstring(L, 4);
-  bool track_stats = tk_tsetlin_checkboolean(L, 5);
+  bool track_stats = tk_lua_checkboolean(L, 5);
   unsigned int correct = 0;
   unsigned int *confusion = NULL;
   unsigned int *predictions = NULL;
@@ -1643,7 +1643,7 @@ static void *evaluate_encoder_thread (void *arg)
 static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *tm)
 {
   lua_settop(L, 3);
-  unsigned int n = tk_tsetlin_checkunsigned(L, 2);
+  unsigned int n = tk_lua_checkunsigned(L, 2);
   unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 3);
 
   unsigned int correct = 0;
@@ -1726,7 +1726,7 @@ static void *evaluate_auto_encoder_thread (void *arg)
 static inline int tk_tsetlin_evaluate_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
 {
   lua_settop(L, 3);
-  unsigned int n = tk_tsetlin_checkunsigned(L, 2);
+  unsigned int n = tk_lua_checkunsigned(L, 2);
   unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
   unsigned int input_bits = tm->encoder.encoder.input_bits;
 
@@ -2049,7 +2049,7 @@ static luaL_Reg tk_tsetlin_fns[] =
 int luaopen_santoku_tsetlin_capi (lua_State *L)
 {
   lua_newtable(L); // t
-  tk_tsetlin_register(L, tk_tsetlin_fns, 0); // t
+  tk_lua_register(L, tk_tsetlin_fns, 0); // t
   luaL_newmetatable(L, TK_TSETLIN_MT); // t mt
   lua_pushcfunction(L, tk_tsetlin_destroy); // t mt fn
   lua_setfield(L, -2, "__gc"); // t mt
