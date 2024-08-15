@@ -1,5 +1,7 @@
 # Now
 
+- Rename "threshold" to "target"
+
 - When iterating bits and re-computing loss, stop after loss reaches 0. In other
   words, randomly select bits to look at, flip them, recompute loss, and if loss
   improves, decrement it. When loss is zero, stop flipping bits.
