@@ -25,6 +25,8 @@ local BOOST_TRUE_POSITIVE = false
 local ACTIVE_CLAUSE = 0.75
 local MARGIN = 0.05
 local LOSS_ALPHA = 0
+local SPEC_LOW = 2
+local SPEC_HIGH = 200
 
 local EVALUATE_EVERY = 1
 local MAX_RECORDS = 1000
@@ -167,7 +169,7 @@ test("tsetlin", function ()
   print("Test", n_test)
 
   print("Training")
-  local t = tm.encoder(ENCODED_BITS, dataset.n_features, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
+  local t = tm.encoder(ENCODED_BITS, dataset.n_features, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE, SPEC_LOW, SPEC_HIGH)
 
   for epoch = 1, MAX_EPOCHS do
 
