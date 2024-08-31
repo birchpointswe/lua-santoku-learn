@@ -43,8 +43,6 @@ SOFTWARE.
 #define TK_TSETLIN_MT "santoku_tsetlin"
 
 #define BITS (sizeof(unsigned int) * CHAR_BIT)
-#define DEF_SPEC_LOW 2
-#define DEF_SPEC_HIGH 200
 
 typedef enum {
   TM_CLASSIFIER,
@@ -907,8 +905,8 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
       tk_lua_checkunsigned(L, 5),
       tk_lua_checkunsigned(L, 6),
       tk_lua_checkboolean(L, 7),
-      tk_lua_optposdouble(L, 8, DEF_SPEC_LOW),
-      tk_lua_optposdouble(L, 9, DEF_SPEC_HIGH));
+      tk_lua_checkposdouble(L, 8),
+      tk_lua_checkposdouble(L, 9));
 
   lua_settop(L, 1);
 }
@@ -925,8 +923,8 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
       tk_lua_checkunsigned(L, 5),
       tk_lua_checkunsigned(L, 6),
       tk_lua_checkboolean(L, 7),
-      tk_lua_optposdouble(L, 8, DEF_SPEC_LOW),
-      tk_lua_optposdouble(L, 9, DEF_SPEC_HIGH));
+      tk_lua_checkposdouble(L, 8),
+      tk_lua_checkposdouble(L, 9));
 
   lua_settop(L, 1);
 }
@@ -942,8 +940,8 @@ static inline void tk_tsetlin_create_auto_encoder (lua_State *L)
   unsigned int state_bits = tk_lua_checkunsigned(L, 5);
   unsigned int threshold = tk_lua_checkunsigned(L, 6);
   bool boost_true_positive = tk_lua_checkboolean(L, 7);
-  double specificity_low = tk_lua_optposdouble(L, 8, DEF_SPEC_LOW);
-  double specificity_high = tk_lua_optposdouble(L, 9, DEF_SPEC_HIGH);
+  double specificity_low = tk_lua_checkposdouble(L, 8);
+  double specificity_high = tk_lua_checkposdouble(L, 9);
 
   tk_tsetlin_init_encoder(L, &tm->auto_encoder->encoder,
       encoding_bits, features, clauses, state_bits, threshold, boost_true_positive, specificity_low, specificity_high);
@@ -1002,11 +1000,16 @@ static inline void tk_tsetlin_destroy_classifier (tsetlin_classifier_t *tm)
   if (tm == NULL)
     return;
   free(tm->state);
+  tm->state = NULL;
   free(tm->actions);
+  tm->actions = NULL;
   free(tm->active_clause);
-  for (unsigned int i = 0; i < tm->action_chunks; i ++)
-    pthread_mutex_destroy(&tm->locks[i]);
+  tm->active_clause = NULL;
+  if (tm->locks)
+    for (unsigned int i = 0; i < tm->action_chunks; i ++)
+      pthread_mutex_destroy(&tm->locks[i]);
   free(tm->locks);
+  tm->locks = NULL;
 }
 
 static inline int tk_tsetlin_destroy (lua_State *L)
@@ -1017,15 +1020,18 @@ static inline int tk_tsetlin_destroy (lua_State *L)
     case TM_CLASSIFIER:
       tk_tsetlin_destroy_classifier(tm->classifier);
       free(tm->classifier);
+      tm->classifier = NULL;
       break;
     case TM_ENCODER:
       tk_tsetlin_destroy_classifier(&tm->encoder->encoder);
       free(tm->encoder);
+      tm->encoder = NULL;
       break;
     case TM_AUTO_ENCODER:
       tk_tsetlin_destroy_classifier(&tm->auto_encoder->encoder.encoder);
       tk_tsetlin_destroy_classifier(&tm->auto_encoder->decoder.encoder);
       free(tm->auto_encoder);
+      tm->auto_encoder = NULL;
       break;
     case TM_REGRESSOR:
       luaL_error(L, "unimplemented: destroy regressor");
@@ -1842,6 +1848,18 @@ static inline void tk_lua_fread (lua_State *L, void *data, size_t size, size_t m
   tk_lua_callmod(L, 3, 0, "santoku.error", "error");
 }
 
+static inline void tk_lua_fseek (lua_State *L, size_t size, size_t memb, FILE *fh)
+{
+  int r = fseek(fh, (long) (size * memb), SEEK_CUR);
+  if (!ferror(fh) || !r) return;
+  int e = errno;
+  lua_settop(L, 0);
+  lua_pushstring(L, "Error reading from file");
+  lua_pushstring(L, strerror(e));
+  lua_pushinteger(L, e);
+  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
+}
+
 static inline void _tk_tsetlin_persist_classifier (lua_State *L, tsetlin_classifier_t *tm, FILE *fh)
 {
   tk_lua_fwrite(L, &tm->classes, sizeof(unsigned int), 1, fh);
@@ -1913,7 +1931,7 @@ static inline int tk_tsetlin_persist (lua_State *L)
   return 0;
 }
 
-static inline void _tk_tsetlin_load_classifier (lua_State *L, tsetlin_classifier_t *tm, FILE *fh)
+static inline void _tk_tsetlin_load_classifier (lua_State *L, tsetlin_classifier_t *tm, FILE *fh, bool inference_only)
 {
   tk_lua_fread(L, &tm->classes, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->features, sizeof(unsigned int), 1, fh);
@@ -1929,80 +1947,86 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tsetlin_classifier
   tk_lua_fread(L, &tm->filter, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->specificity_low, sizeof(double), 1, fh);
   tk_lua_fread(L, &tm->specificity_high, sizeof(double), 1, fh);
-  tm->state = malloc(sizeof(unsigned int) * tm->state_chunks);
+  tm->state = inference_only ? NULL : malloc(sizeof(unsigned int) * tm->state_chunks);
   tm->actions = malloc(sizeof(unsigned int) * tm->action_chunks);
-  tm->active_clause = malloc(sizeof(unsigned int) * tm->clause_chunks);
-  tm->specificity = malloc(sizeof(double) * tm->clauses);
-  for (unsigned int i = 0; i < tm->clauses; i ++)
-    tm->specificity[i] = (1.0 * i / tm->clauses) * (tm->specificity_high - tm->specificity_low) + tm->specificity_low;
-  tm->locks = malloc(sizeof(pthread_mutex_t) * tm->action_chunks);
-  for (unsigned int i = 0; i < tm->action_chunks; i ++)
-    pthread_mutex_init(&tm->locks[i], NULL);
-  tk_lua_fread(L, tm->state, sizeof(unsigned int), tm->state_chunks, fh);
+  tm->active_clause = inference_only ? NULL: malloc(sizeof(unsigned int) * tm->clause_chunks);
+  tm->specificity = inference_only ? NULL : malloc(sizeof(double) * tm->clauses);
+  if (!inference_only)
+    for (unsigned int i = 0; i < tm->clauses; i ++)
+      tm->specificity[i] = (1.0 * i / tm->clauses) * (tm->specificity_high - tm->specificity_low) + tm->specificity_low;
+  tm->locks = inference_only ? NULL : malloc(sizeof(pthread_mutex_t) * tm->action_chunks);
+  if (!inference_only)
+    for (unsigned int i = 0; i < tm->action_chunks; i ++)
+      pthread_mutex_init(&tm->locks[i], NULL);
+  if (!inference_only)
+    tk_lua_fread(L, tm->state, sizeof(unsigned int), tm->state_chunks, fh);
+  else
+    tk_lua_fseek(L, sizeof(unsigned int), tm->state_chunks, fh);
   tk_lua_fread(L, tm->actions, sizeof(unsigned int), tm->action_chunks, fh);
 }
 
-static inline void tk_tsetlin_load_classifier (lua_State *L, FILE *fh)
+static inline void tk_tsetlin_load_classifier (lua_State *L, FILE *fh, bool inference_only)
 {
   tsetlin_t *tm = tk_tsetlin_alloc_classifier(L);
-  _tk_tsetlin_load_classifier(L, tm->classifier, fh);
+  _tk_tsetlin_load_classifier(L, tm->classifier, fh, inference_only);
 }
 
-static inline void _tk_tsetlin_load_encoder (lua_State *L, tsetlin_encoder_t *en, FILE *fh)
+static inline void _tk_tsetlin_load_encoder (lua_State *L, tsetlin_encoder_t *en, FILE *fh, bool inference_only)
 {
   tk_lua_fread(L, &en->encoding_bits, sizeof(en->encoding_bits), 1, fh);
   tk_lua_fread(L, &en->encoding_chunks, sizeof(en->encoding_chunks), 1, fh);
   tk_lua_fread(L, &en->encoding_filter, sizeof(en->encoding_filter), 1, fh);
-  _tk_tsetlin_load_classifier(L, &en->encoder, fh);
+  _tk_tsetlin_load_classifier(L, &en->encoder, fh, inference_only);
 }
 
-static inline void tk_tsetlin_load_encoder (lua_State *L, FILE *fh)
+static inline void tk_tsetlin_load_encoder (lua_State *L, FILE *fh, bool inference_only)
 {
   tsetlin_t *tm = tk_tsetlin_alloc_encoder(L);
   tsetlin_encoder_t *en = tm->encoder;
-  _tk_tsetlin_load_encoder(L, en, fh);
+  _tk_tsetlin_load_encoder(L, en, fh, inference_only);
 }
 
-static inline void tk_tsetlin_load_auto_encoder (lua_State *L, FILE *fh)
+static inline void tk_tsetlin_load_auto_encoder (lua_State *L, FILE *fh, bool inference_only)
 {
   tsetlin_t *tm = tk_tsetlin_alloc_auto_encoder(L);
   tsetlin_auto_encoder_t *ae = tm->auto_encoder;
-  _tk_tsetlin_load_encoder(L, &ae->encoder, fh);
-  _tk_tsetlin_load_encoder(L, &ae->decoder, fh);
+  _tk_tsetlin_load_encoder(L, &ae->encoder, fh, inference_only);
+  _tk_tsetlin_load_encoder(L, &ae->decoder, fh, inference_only);
 }
 
-static inline void tk_tsetlin_load_regressor (lua_State *L, FILE *fh)
+static inline void tk_tsetlin_load_regressor (lua_State *L, FILE *fh, bool inference_only)
 {
   tsetlin_t *tm = tk_tsetlin_alloc_regressor(L);
   tsetlin_regressor_t *rg = tm->regressor;
-  _tk_tsetlin_load_classifier(L, &rg->classifier, fh);
+  _tk_tsetlin_load_classifier(L, &rg->classifier, fh, inference_only);
 }
 
 // TODO: Merge malloc/assignment logic from load_* and create_* to reduce
 // changes for coding errors
 static inline int tk_tsetlin_load (lua_State *L)
 {
-  lua_settop(L, 1);
+  lua_settop(L, 2);
   const char *fp = luaL_checkstring(L, 1);
-  lua_pop(L, 1);
+  bool inference_only = lua_toboolean(L, 2);
+  lua_pop(L, 2);
   FILE *fh = tk_lua_fopen(L, fp, "r");
   tsetlin_type_t type;
   tk_lua_fread(L, &type, sizeof(type), 1, fh);
   switch (type) {
     case TM_CLASSIFIER:
-      tk_tsetlin_load_classifier(L, fh);
+      tk_tsetlin_load_classifier(L, fh, inference_only);
       tk_lua_fclose(L, fh);
       return 1;
     case TM_ENCODER:
-      tk_tsetlin_load_encoder(L, fh);
+      tk_tsetlin_load_encoder(L, fh, inference_only);
       tk_lua_fclose(L, fh);
       return 1;
     case TM_AUTO_ENCODER:
-      tk_tsetlin_load_auto_encoder(L, fh);
+      tk_tsetlin_load_auto_encoder(L, fh, inference_only);
       tk_lua_fclose(L, fh);
       return 1;
     case TM_REGRESSOR:
-      tk_tsetlin_load_regressor(L, fh);
+      tk_tsetlin_load_regressor(L, fh, inference_only);
       tk_lua_fclose(L, fh);
       return 1;
     default:
