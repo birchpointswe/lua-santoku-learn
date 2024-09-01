@@ -1018,20 +1018,26 @@ static inline int tk_tsetlin_destroy (lua_State *L)
   tsetlin_t *tm = tk_tsetlin_peek(L, 1);
   switch (tm->type) {
     case TM_CLASSIFIER:
-      tk_tsetlin_destroy_classifier(tm->classifier);
-      free(tm->classifier);
-      tm->classifier = NULL;
+      if (tm->classifier) {
+        tk_tsetlin_destroy_classifier(tm->classifier);
+        free(tm->classifier);
+        tm->classifier = NULL;
+      }
       break;
     case TM_ENCODER:
-      tk_tsetlin_destroy_classifier(&tm->encoder->encoder);
-      free(tm->encoder);
-      tm->encoder = NULL;
+      if (tm->encoder) {
+        tk_tsetlin_destroy_classifier(&tm->encoder->encoder);
+        free(tm->encoder);
+        tm->encoder = NULL;
+      }
       break;
     case TM_AUTO_ENCODER:
-      tk_tsetlin_destroy_classifier(&tm->auto_encoder->encoder.encoder);
-      tk_tsetlin_destroy_classifier(&tm->auto_encoder->decoder.encoder);
-      free(tm->auto_encoder);
-      tm->auto_encoder = NULL;
+      if (tm->auto_encoder) {
+        tk_tsetlin_destroy_classifier(&tm->auto_encoder->encoder.encoder);
+        tk_tsetlin_destroy_classifier(&tm->auto_encoder->decoder.encoder);
+        free(tm->auto_encoder);
+        tm->auto_encoder = NULL;
+      }
       break;
     case TM_REGRESSOR:
       luaL_error(L, "unimplemented: destroy regressor");
@@ -1973,9 +1979,9 @@ static inline void tk_tsetlin_load_classifier (lua_State *L, FILE *fh, bool infe
 
 static inline void _tk_tsetlin_load_encoder (lua_State *L, tsetlin_encoder_t *en, FILE *fh, bool inference_only)
 {
-  tk_lua_fread(L, &en->encoding_bits, sizeof(en->encoding_bits), 1, fh);
-  tk_lua_fread(L, &en->encoding_chunks, sizeof(en->encoding_chunks), 1, fh);
-  tk_lua_fread(L, &en->encoding_filter, sizeof(en->encoding_filter), 1, fh);
+  tk_lua_fread(L, &en->encoding_bits, sizeof(unsigned int), 1, fh);
+  tk_lua_fread(L, &en->encoding_chunks, sizeof(unsigned int), 1, fh);
+  tk_lua_fread(L, &en->encoding_filter, sizeof(unsigned int), 1, fh);
   _tk_tsetlin_load_classifier(L, &en->encoder, fh, inference_only);
 }
 
