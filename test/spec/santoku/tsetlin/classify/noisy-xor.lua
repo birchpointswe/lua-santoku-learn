@@ -127,17 +127,17 @@ test("tsetlin", function ()
 
   end
 
-  --print("Persisting")
-  --fs.rm("model.bin", true)
-  --tm.persist(t, "model.bin")
+  print()
+  print("Persisting")
+  fs.rm("model.bin", true)
+  tm.persist(t, "model.bin")
 
-  --print("Testing restore")
-  --t = tm.load("model.bin")
-  --local test_score =
-  --  tm.evaluate(t, #test_problems, test_problems, test_solutions)
-  --local train_score =
-  --  tm.evaluate(t, #train_problems, train_problems, train_solutions)
-  --str.printf("Evaluate\tTest\t%4.2f\tTrain\t%4.2f\n", test_score, train_score)
-
+  print("Testing restore")
+  t = tm.load("model.bin", true)
+  local test_score =
+    tm.evaluate(t, n_test, test_problems, test_solutions)
+  local train_score =
+    tm.evaluate(t, n_train, train_problems, train_solutions)
+  str.printf("Evaluate\tTest\t%4.2f\tTrain\t%4.2f\n", test_score, train_score)
 
 end)
