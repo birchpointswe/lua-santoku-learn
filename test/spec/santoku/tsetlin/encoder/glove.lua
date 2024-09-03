@@ -12,25 +12,25 @@ local rand = require("santoku.random")
 local num = require("santoku.num")
 local err = require("santoku.error")
 
-local ENCODED_BITS = 128
-local THRESHOLD_LEVELS = 20
+local ENCODED_BITS = 64
+local THRESHOLD_LEVELS = 8
 local TRAIN_TEST_RATIO = 0.8
 local SIM_POS = 0.7
 local SIM_NEG = 0.5
 
-local CLAUSES = 512
+local CLAUSES = 128
 local STATE_BITS = 8
-local THRESHOLD = 512
-local BOOST_TRUE_POSITIVE = false
+local THRESHOLD = 16
+local BOOST_TRUE_POSITIVE = true
 local ACTIVE_CLAUSE = 0.75
-local MARGIN = 0.05
-local LOSS_ALPHA = 0
+local MARGIN = 0.2
+local LOSS_ALPHA = 0.5
 local SPEC_LOW = 2
 local SPEC_HIGH = 200
 
 local EVALUATE_EVERY = 1
 local MAX_RECORDS = 1000
-local MAX_EPOCHS = 200
+local MAX_EPOCHS = 20
 
 local function read_data (fp, max)
 
@@ -169,7 +169,10 @@ test("tsetlin", function ()
   print("Test", n_test)
 
   print("Training")
-  local t = tm.encoder(ENCODED_BITS, dataset.n_features, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE, SPEC_LOW, SPEC_HIGH)
+  local t = tm.encoder(
+    ENCODED_BITS, dataset.n_features,
+    CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE,
+    SPEC_LOW, SPEC_HIGH)
 
   for epoch = 1, MAX_EPOCHS do
 
@@ -188,5 +191,17 @@ test("tsetlin", function ()
     end
 
   end
+
+  print()
+  print("Persisting")
+  fs.rm("model.bin", true)
+  tm.persist(t, "model.bin")
+
+  print("Testing restore")
+  t = tm.load("model.bin")
+  local test_score = tm.evaluate(t, n_test, test_tokens, MARGIN)
+  local train_score = tm.evaluate(t, n_train, train_tokens, MARGIN)
+  str.printf("Evaluate             Test %4.2f  Train %4.2f\n",
+    test_score, train_score)
 
 end)
