@@ -46,6 +46,11 @@
   Indexing from 1 makes sense for multi-class, but gets odd when doing 0/1
   classification and having to increment to 1/2.
 
+- "Anchor Knowledge," For the encoder, for a new text representation, find the
+  nearest observed text representation where the encoder is confidently accurate.
+  Somehow use this "well understood sample" to improve the encoding of the new
+  text.
+
 # Eventually
 
 - Coalesced (reduces memory footprint for multi-output configurations)
