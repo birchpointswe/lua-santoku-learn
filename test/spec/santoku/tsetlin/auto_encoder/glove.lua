@@ -21,6 +21,8 @@ local THRESHOLD = 256
 local BOOST_TRUE_POSITIVE = false
 local ACTIVE_CLAUSE = 0.85
 local LOSS_ALPHA = 0.5
+local SPECIFICITY_LOW = 2
+local SPECIFICITY_HIGH = 200
 
 local EVALUATE_EVERY = 5
 local MAX_RECORDS = 1000
@@ -99,7 +101,10 @@ test("tsetlin", function ()
   print("Train", n_train)
   print("Test", n_test)
 
-  local t = tm.auto_encoder(ENCODED_BITS, n_features, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE)
+  local t = tm.auto_encoder(
+    ENCODED_BITS, n_features, CLAUSES,
+    STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE,
+    SPECIFICITY_LOW, SPECIFICITY_HIGH)
 
   print("Training")
   for epoch = 1, MAX_EPOCHS do
