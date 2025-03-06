@@ -130,7 +130,7 @@ test("tsetlin", function ()
   print()
   print("Persisting")
   fs.rm("model.bin", true)
-  tm.persist(t, "model.bin")
+  tm.persist(t, "model.bin", true)
 
   print("Testing restore")
   t = tm.load("model.bin", true)
