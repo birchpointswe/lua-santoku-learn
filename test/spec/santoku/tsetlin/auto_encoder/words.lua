@@ -11,11 +11,13 @@ local rand = require("santoku.random")
 local num = require("santoku.num")
 local err = require("santoku.error")
 
-local ENCODED_BITS = 128
-local THRESHOLD_LEVELS = 2
+local MAX_RECORDS = 1000
+local MAX_VOCAB = 512
+
+local ENCODED_BITS = 64
 local TRAIN_TEST_RATIO = 0.8
 
-local CLAUSES = 512
+local CLAUSES = 1024
 local STATE_BITS = 8
 local THRESHOLD = 256
 local BOOST_TRUE_POSITIVE = false
@@ -24,67 +26,49 @@ local LOSS_ALPHA = 0.5
 local SPECIFICITY_LOW = 2
 local SPECIFICITY_HIGH = 200
 
-local EVALUATE_EVERY = 5
-local MAX_RECORDS = 1000
+local EVALUATE_EVERY = 1
 local MAX_EPOCHS = 400
 
-local function read_data (fp, max)
+local function read_data (fp, max, max_vocab)
 
+  local next_id = 1
+  local ids = {}
   local problems = {}
-  local bits = {}
-  local observations = {}
-  local n_dims = nil
 
-  local lines = fs.lines(fp)
-
-  if max then
-    lines = it.take(max, lines)
-  end
-
-  local data = it.collect(it.map(function (l, s, e)
-
-    local floats = it.collect(it.map(str.number, it.drop(1, str.matches(l, "%S+", false, s, e))))
-
-    if n_dims == nil then
-      n_dims = #floats
-    elseif #floats ~= n_dims then
-      err.error("mismatch in number of dimensions", #floats, n_dims)
-    end
-
-    for i = 1, #floats do
-      observations[floats[i]] = true
-    end
-
-    return floats
-
-  end, lines))
-
-  local thresholds = booleanizer.thresholds(observations, THRESHOLD_LEVELS)
-
-  for i = 1, #data do
-    for j = 1, #data[i] do
-      for k = 1, #thresholds do
-        local t = thresholds[k]
-        if data[i][j] <= t.value then
-          bits[(j - 1) * #thresholds * 2 + t.bit] = true
-          bits[(j - 1) * #thresholds * 2 + t.bit + #thresholds] = false
-        else
-          bits[(j - 1) * #thresholds * 2 + t.bit] = false
-          bits[(j - 1) * #thresholds * 2 + t.bit + #thresholds] = true
-        end
+  for line in fs.lines(fp) do
+    line = str.lower(line)
+    line = str.gsub(line, "[%s%p]+", " ")
+    line = str.gsub(line, "[^a-zA-Z0-9 ]", "")
+    local p = {}
+    arr.push(problems, p)
+    for word in str.gmatch(line, "%S+") do
+      local id = ids[word]
+      if not id and (not max_vocab or next_id <= max_vocab) then
+        id = next_id
+        ids[word] = id
+        next_id = next_id + 1
+      end
+      if id then
+        p[id] = true
       end
     end
-    arr.push(problems, bm.create(bits, 2 * #thresholds * n_dims))
+    if max and #problems > max then
+      break
+    end
   end
 
-  return problems, #thresholds * n_dims
+  for i = 1, #problems do
+    problems[i] = bm.create(problems[i], next_id - 1)
+  end
+
+  return problems, next_id - 1
 
 end
 
 test("tsetlin", function ()
 
   print("Reading data")
-  local data, n_features = read_data(os.getenv("GLOVE") or "test/res/santoku/tsetlin/glove.txt", MAX_RECORDS)
+  local data, n_features = read_data(os.getenv("CORPUS") or "test/res/santoku/tsetlin/corpus.txt", MAX_RECORDS, MAX_VOCAB)
 
   print("Shuffling")
   rand.seed()
@@ -113,11 +97,18 @@ test("tsetlin", function ()
     tm.train(t, n_train, train, ACTIVE_CLAUSE, LOSS_ALPHA)
     local duration = os.time() - start
 
+    local total_weight_n = (#data - (n_train + 1)) * ENCODED_BITS
+    local total_weight = 0
+    for i = n_train + 1, #data do
+      local x = bm.from_raw(tm.predict(t, bm.raw(data[i])), ENCODED_BITS)
+      total_weight = total_weight + bm.cardinality(x)
+    end
+
     if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
       local test_score = tm.evaluate(t, n_test, test)
       local train_score = tm.evaluate(t, n_train, train)
-      str.printf("Epoch  %-4d  Time  %d  Test  %4.2f  Train  %4.2f\n",
-        epoch, duration, test_score, train_score)
+      str.printf("Epoch  %-4d  Time  %d  Test  %4.4f  Train  %4.4f  Avg. Weight  %4.4f\n",
+        epoch, duration, test_score, train_score, total_weight / total_weight_n)
     else
       str.printf("Epoch  %-4d  Time  %d\n",
         epoch, duration)

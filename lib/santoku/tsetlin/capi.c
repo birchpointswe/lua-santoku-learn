@@ -208,6 +208,14 @@ static inline double hamming_loss (
   return pow(loss / (double) bits, alpha);
 }
 
+static inline double hamming_to_loss (
+  unsigned int diff,
+  unsigned int bits,
+  double alpha
+) {
+  return pow((double) diff / (double) bits, alpha);
+}
+
 static inline double triplet_loss_hamming (
   unsigned int *a,
   unsigned int *n,
@@ -607,8 +615,8 @@ static inline void ae_tm_update (
   memcpy(decoding + tm->decoder.encoding_chunks, decoding, tm->decoder.encoding_chunks * sizeof(unsigned int));
   flip_bits(decoding + tm->decoder.encoding_chunks, tm->decoder.encoding_chunks);
 
-  // compare input to decoding
-  double loss = hamming_loss(input, decoding, tm->encoder.encoder.input_bits, loss_alpha);
+  unsigned int diff = hamming(input, decoding, tm->encoder.encoder.input_bits);
+  double loss = hamming_to_loss(diff, tm->encoder.encoder.input_bits, loss_alpha);
 
   if (fast_chance(1 - loss))
     return;
@@ -624,12 +632,12 @@ static inline void ae_tm_update (
     ae_tm_decode(tm, encoding, decoding, scores_d);
     memcpy(decoding + tm->decoder.encoding_chunks, decoding, tm->decoder.encoding_chunks * sizeof(unsigned int));
     flip_bits(decoding + tm->decoder.encoding_chunks, tm->decoder.encoding_chunks);
-    double loss0 = hamming_loss(input, decoding, tm->encoder.encoder.input_bits, loss_alpha);
+    unsigned int diff0 = hamming(input, decoding, tm->encoder.encoder.input_bits);
     encoding[chunk0] ^= (1U << pos);
     encoding[chunk1] ^= (1U << pos);
-    if (loss0 < loss)
+    if (diff0 <= diff)
       tm_update(&tm->encoder.encoder, bit, input, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la_e);
-    else if (loss0 > loss)
+    else if (diff0 > diff)
       tm_update(&tm->encoder.encoder, bit, input, bit_x, clause_output, feedback_to_clauses, feedback_to_la_e);
   }
 
