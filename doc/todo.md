@@ -55,7 +55,7 @@
 
 - Coalesced (reduces memory footprint for multi-output configurations)
 - Weighted (reduces memory footprint)
-- Integer-Weighted (see weighted))
+- Integer-Weighted (see weighted)
 - Indexed (improves learning and classification speed)
     - Triples memory usage
 
