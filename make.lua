@@ -18,7 +18,7 @@ local env = {
     ldflags = { "-fopt-info-vec=optimize.txt", "-fopt-info-vec-missed=optimize.txt", "-g3" },
     dependencies = {
       "luacov >= 0.15.0-1",
-      "santoku-bitmap >= 0.0.18-1",
+      "santoku-bitmap >= 0.0.22-1",
       "santoku-matrix >= 0.0.13-1",
       "santoku-fs >= 0.0.33-1",
     }

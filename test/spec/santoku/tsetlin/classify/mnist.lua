@@ -7,18 +7,26 @@ local mtx = require("santoku.matrix")
 local fs = require("santoku.fs")
 local str = require("santoku.string")
 local arr = require("santoku.array")
+local it = require("santoku.iter")
 
 local CLASSES = 10
 local FEATURES = 784
-local TRAIN_TEST_RATIO = 0.5
+local TRAIN_TEST_RATIO = 0.9
 local CLAUSES = 2000
 local STATE_BITS = 8
 local THRESHOLD = 50
 local BOOST_TRUE_POSITIVE = true
 local ACTIVE_CLAUSE = 1 --0.75
-local SPEC = 10
+local SPECL, SPECH = 8, 12
 local EVALUATE_EVERY = 1
-local MAX_EPOCHS = 20
+local MAX_EPOCHS = 100
+
+local function prep_fingerprint (fingerprint, bits)
+  local flipped = bm.copy(fingerprint)
+  bm.flip(flipped, 1, bits)
+  bm.extend(fingerprint, flipped, bits + 1)
+  return fingerprint
+end
 
 local function read_data (fp, skip, max)
   local problems = {}
@@ -39,16 +47,14 @@ local function read_data (fp, skip, max)
         bit = bit == "1"
         if bit then
           bits[n] = true
-          bits[n + FEATURES] = nil
         else
           bits[n] = nil
-          bits[n + FEATURES] = true
         end
       end
       if n ~= FEATURES + 1 then
         error("bitmap length mismatch")
       else
-        problems[#problems + 1] = bm.create(bits, FEATURES * 2)
+        problems[#problems + 1] = bm.create(bits, FEATURES)
       end
       if max and #problems >= max then
         break
@@ -81,6 +87,43 @@ test("tsetlin", function ()
   print("Reading data")
   local dataset = read_data("test/res/santoku/tsetlin/BinarizedMNISTData/MNISTTest.txt", SKIP, MAX)
 
+  do
+    print("Running compress")
+    local function split_compress (i0, i1)
+      print("Splitting")
+      local out = {}
+      for i = i0, i1 do
+        arr.push(out, dataset.problems[i])
+      end
+      return bm.matrix(out, FEATURES)
+    end
+    local n_train = num.floor(#dataset.problems * TRAIN_TEST_RATIO)
+    local n_test = #dataset.problems - n_train
+    local cmp_train = split_compress(1, n_train)
+    local cmp_test = split_compress(n_train + 1, #dataset.problems)
+    print("Fitting")
+    local compress = bm.compressor(cmp_train, n_train, FEATURES, 32, 10)
+    print("Transforming train")
+    cmp_train = compress(cmp_train, n_train)
+    print(">", bm.tostring(cmp_train, 32))
+    print("Transforming test")
+    cmp_test = compress(cmp_test, n_test)
+    print("Recreating bitmaps")
+    local cmp_all = bm.copy(cmp_train)
+    bm.extend(cmp_all, cmp_test, n_train * 32 + 1)
+    for i = 1, #dataset.problems do
+      bm.clear(dataset.problems[i])
+      for j = 1, 32 do
+        if bm.get(cmp_all, (i - 1) * 32 + j) then
+          bm.set(dataset.problems[i], j)
+        end
+      end
+      dataset.problems[i] = prep_fingerprint(dataset.problems[i], 32)
+    end
+  end
+  FEATURES = 32
+
+
   print("Splitting & packing")
   local n_train = num.floor(#dataset.problems * TRAIN_TEST_RATIO)
   local n_test = #dataset.problems - n_train
@@ -91,7 +134,7 @@ test("tsetlin", function ()
   print("Test", n_test)
 
   print("Training")
-  local t = tm.classifier(CLASSES, FEATURES, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE, SPEC, SPEC)
+  local t = tm.classifier(CLASSES, FEATURES, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE, SPECL, SPECH)
 
   for epoch = 1, MAX_EPOCHS do
     local start = os.time()

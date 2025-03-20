@@ -1,5 +1,9 @@
 # Now
 
+- Consider adding metatable fns to returned userdata so we can do
+    - classifier.predict(x)
+    - encoder.encode(x), etc..
+
 - Rename "threshold" to "target"
 
 - When iterating bits and re-computing loss, stop after loss reaches 0. In other
