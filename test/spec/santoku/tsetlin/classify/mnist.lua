@@ -1,5 +1,6 @@
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local test = require("santoku.test")
+local utc = require("santoku.utc")
 local tm = require("santoku.tsetlin")
 local num = require("santoku.num")
 local bm = require("santoku.bitmap")
@@ -10,16 +11,19 @@ local arr = require("santoku.array")
 local it = require("santoku.iter")
 
 local CLASSES = 10
-local FEATURES = 784
+local FEATURES = 784 * 4
+local FEATURES_CMP = 256
+local CMP_ITERS = 10
+local CMP_EPS = 1e-6
 local TRAIN_TEST_RATIO = 0.9
-local CLAUSES = 2000
+local CLAUSES = 4096
 local STATE_BITS = 8
 local THRESHOLD = 50
 local BOOST_TRUE_POSITIVE = true
 local ACTIVE_CLAUSE = 1 --0.75
 local SPECL, SPECH = 8, 12
 local EVALUATE_EVERY = 1
-local MAX_EPOCHS = 100
+local MAX_EPOCHS = 20
 
 local function prep_fingerprint (fingerprint, bits)
   local flipped = bm.copy(fingerprint)
@@ -102,26 +106,34 @@ test("tsetlin", function ()
     local cmp_train = split_compress(1, n_train)
     local cmp_test = split_compress(n_train + 1, #dataset.problems)
     print("Fitting")
-    local compress = bm.compressor(cmp_train, n_train, FEATURES, 32, 10)
+    local start = utc.time(true)
+    local last = start
+    local compress = bm.compressor(cmp_train, n_train, FEATURES, FEATURES_CMP, CMP_ITERS, CMP_EPS, function (i, tc)
+      local now = utc.time(true)
+      str.printf("Epoch %-4d   Time  %-4.4fs   Convergence   %-4.6f\n", i, now - last, tc)
+      last = now
+    end)
+    local stop = utc.time(true)
+    print("Fit", stop - start)
     print("Transforming train")
     cmp_train = compress(cmp_train, n_train)
-    print(">", bm.tostring(cmp_train, 32))
+    print(">", bm.tostring(cmp_train, FEATURES_CMP))
     print("Transforming test")
     cmp_test = compress(cmp_test, n_test)
     print("Recreating bitmaps")
     local cmp_all = bm.copy(cmp_train)
-    bm.extend(cmp_all, cmp_test, n_train * 32 + 1)
+    bm.extend(cmp_all, cmp_test, n_train * FEATURES_CMP + 1)
     for i = 1, #dataset.problems do
       bm.clear(dataset.problems[i])
-      for j = 1, 32 do
-        if bm.get(cmp_all, (i - 1) * 32 + j) then
+      for j = 1, FEATURES_CMP do
+        if bm.get(cmp_all, (i - 1) * FEATURES_CMP + j) then
           bm.set(dataset.problems[i], j)
         end
       end
-      dataset.problems[i] = prep_fingerprint(dataset.problems[i], 32)
+      dataset.problems[i] = prep_fingerprint(dataset.problems[i], FEATURES_CMP)
     end
   end
-  FEATURES = 32
+  FEATURES = FEATURES_CMP
 
 
   print("Splitting & packing")
