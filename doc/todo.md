@@ -1,10 +1,20 @@
 # Now
 
+- Persist to string or chunked callbacks
+
+- Reusable threadpool
+    - Threaded batch encode
+
+# Later
+
+- Explore batched updates to tm state instead of locking
+    - Thread-local inc/dec amounts
+    - After iter, threaded update to set tm states
+
+- Consider migrating bitmap compressor here
 - Consider adding metatable fns to returned userdata so we can do
     - classifier.predict(x)
     - encoder.encode(x), etc..
-
-- Rename "threshold" to "target"
 
 - When iterating bits and re-computing loss, stop after loss reaches 0. In other
   words, randomly select bits to look at, flip them, recompute loss, and if loss
@@ -14,19 +24,16 @@
     - Embeddings to bitmap: cosine similarity to hamming
     - Embeddings to bitmap: auto-encoded
 
-- Merge train/update, allowing single updates by calling train on a bit matrix
-  with one row
-- Predict should accept a bit matrix and n, allowing multi-threaded predictions
-
-- Configurable number of threads. No pthreads at all when 0. Allow compile
-  without threads
-
 - Implement regressor
 
 - Throw an error if length of input bitmaps isn't correct (2 x features /
   sizeof(unsigned int)) or if features is 0
 
 # Consider
+
+- Can we thread this by the mc output instead of by sample? Does that make
+  sense? I'm thinking it would minimize locking. Problem is, only when
+  n_classes > n_cores would there be a benefit.
 
 - Explore threading at class level and clause level. Consider different
   threading approaches during training vs one-shot predict/update.

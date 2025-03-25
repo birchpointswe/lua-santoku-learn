@@ -1,4 +1,5 @@
 local serialize = require("santoku.serialize") -- luacheck: ignore
+local utc = require("santoku.utc")
 local test = require("santoku.test")
 local tm = require("santoku.tsetlin")
 local booleanizer = require("santoku.tsetlin.booleanizer")
@@ -11,13 +12,13 @@ local rand = require("santoku.random")
 local num = require("santoku.num")
 local err = require("santoku.error")
 
-local ENCODED_BITS = 128
+local ENCODED_BITS = 32
 local THRESHOLD_LEVELS = 2
 local TRAIN_TEST_RATIO = 0.8
 
 local CLAUSES = 512
 local STATE_BITS = 8
-local THRESHOLD = 256
+local TARGET = 256
 local BOOST_TRUE_POSITIVE = false
 local ACTIVE_CLAUSE = 0.85
 local LOSS_ALPHA = 0.5
@@ -25,8 +26,8 @@ local SPECIFICITY_LOW = 2
 local SPECIFICITY_HIGH = 200
 
 local EVALUATE_EVERY = 5
-local MAX_RECORDS = 1000
-local MAX_EPOCHS = 400
+local MAX_RECORDS = 200
+local MAX_EPOCHS = 20
 
 local function read_data (fp, max)
 
@@ -101,28 +102,38 @@ test("tsetlin", function ()
   print("Train", n_train)
   print("Test", n_test)
 
-  local t = tm.auto_encoder(
-    ENCODED_BITS, n_features, CLAUSES,
-    STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE,
-    SPECIFICITY_LOW, SPECIFICITY_HIGH)
+  local t = tm.auto_encoder({
+    visible = n_features,
+    hidden = ENCODED_BITS,
+    clauses = CLAUSES,
+    state_bits = STATE_BITS,
+    target = TARGET,
+    boost_true_positive = BOOST_TRUE_POSITIVE,
+    spec_low = SPECIFICITY_LOW,
+    spec_high = SPECIFICITY_HIGH,
+    threads = 4
+  })
 
+  local stopwatch = utc.stopwatch()
   print("Training")
-  for epoch = 1, MAX_EPOCHS do
-
-    local start = os.time()
-    tm.train(t, n_train, train, ACTIVE_CLAUSE, LOSS_ALPHA)
-    local duration = os.time() - start
-
-    if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
-      local test_score = tm.evaluate(t, n_test, test)
-      local train_score = tm.evaluate(t, n_train, train)
-      str.printf("Epoch  %-4d  Time  %d  Test  %4.2f  Train  %4.2f\n",
-        epoch, duration, test_score, train_score)
-    else
-      str.printf("Epoch  %-4d  Time  %d\n",
-        epoch, duration)
+  t.train({
+    corpus = train,
+    samples = n_train,
+    active_clause = ACTIVE_CLAUSE,
+    loss_alpha = LOSS_ALPHA,
+    iterations = MAX_EPOCHS,
+    each = function (epoch)
+      local duration, avg_duration = stopwatch(0.1)
+      if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
+        local test_score = t.evaluate({ corpus = test, samples = n_test })
+        local train_score = t.evaluate({ corpus = train, samples = n_train })
+        str.printf("Epoch %-4d  Time %6.3f (%6.3f)  Test %4.2f  Train %4.2f\n",
+          epoch, duration, avg_duration, test_score, train_score)
+      else
+        str.printf("Epoch %-4d  Time %6.3f (%6.3f)\n",
+          epoch, duration, avg_duration)
+      end
     end
-
-  end
+  })
 
 end)
