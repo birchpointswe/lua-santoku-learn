@@ -1,5 +1,6 @@
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local test = require("santoku.test")
+local utc = require("santoku.utc")
 local tm = require("santoku.tsetlin")
 local booleanizer = require("santoku.tsetlin.booleanizer")
 local bm = require("santoku.bitmap")
@@ -20,7 +21,7 @@ local SIM_NEG = 0.5
 
 local CLAUSES = 128
 local STATE_BITS = 8
-local THRESHOLD = 16
+local TARGET = 16
 local BOOST_TRUE_POSITIVE = true
 local ACTIVE_CLAUSE = 0.75
 local MARGIN = 0.2
@@ -168,40 +169,50 @@ test("tsetlin", function ()
   print("Train", n_train)
   print("Test", n_test)
 
+  print("Creating")
+  local t = tm.encoder({
+    visible = dataset.n_features,
+    hidden = ENCODED_BITS,
+    clauses = CLAUSES,
+    state_bits = STATE_BITS,
+    target = TARGET,
+    boost_true_positive = BOOST_TRUE_POSITIVE,
+    spec_low = SPEC_LOW,
+    spec_high = SPEC_HIGH,
+    threads = 4,
+  })
+
   print("Training")
-  local t = tm.encoder(
-    ENCODED_BITS, dataset.n_features,
-    CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE,
-    SPEC_LOW, SPEC_HIGH)
-
-  for epoch = 1, MAX_EPOCHS do
-
-    local start = os.time()
-    tm.train(t, n_train, train_tokens, ACTIVE_CLAUSE, MARGIN, LOSS_ALPHA)
-    local duration = os.time() - start
-
-    if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
-      local test_score = tm.evaluate(t, n_test, test_tokens, MARGIN)
-      local train_score = tm.evaluate(t, n_train, train_tokens, MARGIN)
-      str.printf("Epoch %-4d  Time %d  Test %4.2f  Train %4.2f\n",
-        epoch, duration, test_score, train_score)
-    else
-      str.printf("Epoch %-4d  Time %d\n",
-        epoch, duration)
+  local stopwatch = utc.stopwatch()
+  t.train({
+    corpus = train_tokens,
+    samples = n_train,
+    active_clause = ACTIVE_CLAUSE,
+    margin = MARGIN,
+    loss_alpha = LOSS_ALPHA,
+    iterations = MAX_EPOCHS,
+    each = function (epoch)
+      local duration, avg_duration = stopwatch(0.1)
+      if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
+        local test_score = t.evaluate({ corpus = test_tokens, samples = n_test })
+        local train_score = t.evaluate({ corpus = train_tokens, samples = n_train })
+        str.printf("Epoch %-4d  Time %6.3f (%6.3f)  Test %4.2f  Train %4.2f\n",
+          epoch, duration, avg_duration, test_score, train_score)
+      else
+        str.printf("Epoch %-4d  Time %6.3f (%6.3f)\n",
+          epoch, duration, avg_duration)
+      end
     end
-
-  end
+  })
 
   print()
   print("Persisting")
   fs.rm("model.bin", true)
-  tm.persist(t, "model.bin")
-
-  print("Testing restore")
+  t.persist("model.bin")
+  print("Restoring")
   t = tm.load("model.bin")
-  local test_score = tm.evaluate(t, n_test, test_tokens, MARGIN)
-  local train_score = tm.evaluate(t, n_train, train_tokens, MARGIN)
-  str.printf("Evaluate             Test %4.2f  Train %4.2f\n",
-    test_score, train_score)
+  local test_score = t.evaluate({ corpus = test_tokens, samples = n_test })
+  local train_score = t.evaluate({ corpus = train_tokens, samples = n_train })
+  str.printf("Evaluate Test %4.2f  Train %4.2f\n", test_score, train_score)
 
 end)

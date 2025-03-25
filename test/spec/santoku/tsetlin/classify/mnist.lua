@@ -4,21 +4,21 @@ local utc = require("santoku.utc")
 local tm = require("santoku.tsetlin")
 local num = require("santoku.num")
 local bm = require("santoku.bitmap")
+local bmc = require("santoku.bitmap.compressor")
 local mtx = require("santoku.matrix")
 local fs = require("santoku.fs")
 local str = require("santoku.string")
 local arr = require("santoku.array")
-local it = require("santoku.iter")
 
 local CLASSES = 10
-local FEATURES = 784 * 4
+local FEATURES = 784
 local FEATURES_CMP = 256
 local CMP_ITERS = 10
 local CMP_EPS = 1e-6
 local TRAIN_TEST_RATIO = 0.9
 local CLAUSES = 4096
 local STATE_BITS = 8
-local THRESHOLD = 50
+local TARGET = 50
 local BOOST_TRUE_POSITIVE = true
 local ACTIVE_CLAUSE = 1 --0.75
 local SPECL, SPECH = 8, 12
@@ -105,21 +105,30 @@ test("tsetlin", function ()
     local n_test = #dataset.problems - n_train
     local cmp_train = split_compress(1, n_train)
     local cmp_test = split_compress(n_train + 1, #dataset.problems)
+    local compressor = bmc.create({
+      visible = FEATURES,
+      hidden = FEATURES_CMP
+    })
     print("Fitting")
-    local start = utc.time(true)
-    local last = start
-    local compress = bm.compressor(cmp_train, n_train, FEATURES, FEATURES_CMP, CMP_ITERS, CMP_EPS, function (i, tc)
-      local now = utc.time(true)
-      str.printf("Epoch %-4d   Time  %-4.4fs   Convergence   %-4.6f\n", i, now - last, tc)
-      last = now
-    end)
-    local stop = utc.time(true)
-    print("Fit", stop - start)
+    local stopwatch = utc.stopwatch(0.1)
+    local mavg = num.mavg(0.2)
+    compressor.train({
+      corpus = cmp_train,
+      samples = n_train,
+      iterations = CMP_ITERS,
+      each = function (epoch, tc)
+        local duration, avg_duration = stopwatch()
+        local tc0 = mavg(tc)
+        str.printf("Epoch  %-4d  Time  %6.3f (%6.3f)  Convergence  %-4.6f (%-4.6f)\n",
+          epoch, duration, avg_duration, tc, tc0)
+        return epoch < 10 or num.abs(tc - tc0) > CMP_EPS
+      end
+    })
     print("Transforming train")
-    cmp_train = compress(cmp_train, n_train)
+    cmp_train = compressor.compress(cmp_train, n_train)
     print(">", bm.tostring(cmp_train, FEATURES_CMP))
     print("Transforming test")
-    cmp_test = compress(cmp_test, n_test)
+    cmp_test = compressor.compress(cmp_test, n_test)
     print("Recreating bitmaps")
     local cmp_all = bm.copy(cmp_train)
     bm.extend(cmp_all, cmp_test, n_train * FEATURES_CMP + 1)
@@ -135,7 +144,6 @@ test("tsetlin", function ()
   end
   FEATURES = FEATURES_CMP
 
-
   print("Splitting & packing")
   local n_train = num.floor(#dataset.problems * TRAIN_TEST_RATIO)
   local n_test = #dataset.problems - n_train
@@ -145,25 +153,70 @@ test("tsetlin", function ()
   print("Train", n_train)
   print("Test", n_test)
 
-  print("Training")
-  local t = tm.classifier(CLASSES, FEATURES, CLAUSES, STATE_BITS, THRESHOLD, BOOST_TRUE_POSITIVE, SPECL, SPECH)
+  print("Creating")
+  local t = tm.classifier({
+    classes = CLASSES,
+    features = FEATURES,
+    clauses = CLAUSES,
+    state_bits = STATE_BITS,
+    target = TARGET,
+    boost_true_positive = BOOST_TRUE_POSITIVE,
+    spec_low = SPECL,
+    spec_high = SPECH,
+    threads = 4,
+  })
 
-  for epoch = 1, MAX_EPOCHS do
-    local start = os.time()
-    tm.train(t, n_train, train_problems, train_solutions, ACTIVE_CLAUSE)
-    local stop = os.time()
-    local duration = stop - start
-    if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
-      local test_score =
-        tm.evaluate(t, n_test, test_problems, test_solutions, epoch == MAX_EPOCHS)
-      local train_score =
-        tm.evaluate(t, n_train, train_problems, train_solutions)
-      str.printf("Epoch %-4d  Time %d  Test %4.2f  Train %4.2f\n",
-        epoch, duration, test_score, train_score)
-    else
-      str.printf("Epoch %-4d  Time %d\n",
-        epoch, duration)
+  print("Training")
+  local stopwatch = utc.stopwatch()
+  t.train({
+    problems = train_problems,
+    solutions = train_solutions,
+    samples = n_train,
+    active_clause = ACTIVE_CLAUSE,
+    iterations = MAX_EPOCHS,
+    each = function (epoch)
+      local duration = stopwatch()
+      if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
+        local test_score =
+          t.evaluate({
+            problems = test_problems,
+            solutions = test_solutions,
+            samples = n_test,
+          })
+        local train_score =
+          t.evaluate({
+            problems = train_problems,
+            solutions = train_solutions,
+            samples = n_train,
+          })
+        str.printf("Epoch %-4d  Time %d  Test %4.2f  Train %4.2f\n",
+          epoch, duration, test_score, train_score)
+      else
+        str.printf("Epoch %-4d  Time %d\n",
+          epoch, duration)
+      end
     end
-  end
+  })
+
+  print()
+  print("Persisting")
+  fs.rm("model.bin", true)
+  t.persist("model.bin", true)
+
+  print("Testing restore")
+  t = tm.load("model.bin", true)
+  local test_score =
+    t.evaluate({
+      problems = test_problems,
+      solutions = test_solutions,
+      samples = n_test
+    })
+  local train_score =
+    t.evaluate({
+      problems = train_problems,
+      solutions = train_solutions,
+      samples = n_train
+    })
+  str.printf("Evaluate\tTest\t%4.2f\tTrain\t%4.2f\n", test_score, train_score)
 
 end)
