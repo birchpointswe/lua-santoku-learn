@@ -28,18 +28,20 @@ SOFTWARE.
 #include "lua.h"
 #include "lauxlib.h"
 
-#include <limits.h>
-#include <unistd.h>
-#include <pthread.h>
-#include <math.h>
-#include <errno.h>
-#include <stdbool.h>
 #include <assert.h>
+#include <errno.h>
+#include <lauxlib.h>
+#include <limits.h>
+#include <lua.h>
+#include <math.h>
+#include <pthread.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define TK_TSETLIN_MT "santoku_tsetlin"
 
@@ -254,6 +256,22 @@ static inline void tk_lua_callmod (
   lua_call(L, nargs, nret); // results
 }
 
+static inline int tk_lua_error (lua_State *L, const char *err)
+{
+  lua_pushstring(L, err);
+  tk_lua_callmod(L, 1, 0, "santoku.error", "error");
+  return 0;
+}
+
+// TODO: include the field name in error
+static inline lua_Integer tk_lua_ftype (lua_State *L, int i, char *field)
+{
+  lua_getfield(L, i, field);
+  int t = lua_type(L, -1);
+  lua_pop(L, 1);
+  return t;
+}
+
 static inline int tk_error (
   lua_State *L,
   const char *label,
@@ -263,6 +281,73 @@ static inline int tk_error (
   lua_pushstring(L, strerror(err));
   tk_lua_callmod(L, 2, 0, "santoku.error", "error");
   return 1;
+}
+
+static inline const char *tk_lua_fcheckstring (lua_State *L, int i, char *field)
+{
+  lua_getfield(L, i, field);
+  const char *s = luaL_checkstring(L, -1);
+  lua_pop(L, 1);
+  return s;
+}
+
+static inline double tk_lua_checkposdouble (lua_State *L, int i)
+{
+  lua_Number l = luaL_checknumber(L, i);
+  if (l < 0)
+    luaL_error(L, "value can't be negative");
+  return (double) l;
+}
+
+static inline double tk_lua_fcheckposdouble (lua_State *L, int i, char *field)
+{
+  lua_getfield(L, i, field);
+  double n = tk_lua_checkposdouble(L, -1);
+  lua_pop(L, 1);
+  return n;
+}
+
+static inline unsigned int tk_lua_checkunsigned (lua_State *L, int i)
+{
+  lua_Integer l = luaL_checkinteger(L, i);
+  if (l < 0)
+    luaL_error(L, "value can't be negative");
+  if (l > UINT_MAX)
+    luaL_error(L, "value is too large");
+  return (unsigned int) l;
+}
+
+static inline lua_Integer tk_lua_fcheckunsigned (lua_State *L, int i, char *field)
+{
+  lua_getfield(L, i, field);
+  lua_Integer n = tk_lua_checkunsigned(L, -1);
+  lua_pop(L, 1);
+  return n;
+}
+
+static inline bool tk_lua_fcheckboolean (lua_State *L, int i, char *field)
+{
+  lua_getfield(L, i, field);
+  luaL_checktype(L, -1, LUA_TBOOLEAN);
+  bool n = lua_toboolean(L, -1);
+  lua_pop(L, 1);
+  return n;
+}
+
+static inline bool tk_lua_optboolean (lua_State *L, int i, bool def)
+{
+  if (lua_type(L, i) == LUA_TNIL)
+    return def;
+  luaL_checktype(L, i, LUA_TBOOLEAN);
+  return lua_toboolean(L, i);
+}
+
+static inline bool tk_lua_foptboolean (lua_State *L, int i, char *field, bool def)
+{
+  lua_getfield(L, i, field);
+  bool b = tk_lua_optboolean(L, -1, def);
+  lua_pop(L, 1);
+  return b;
 }
 
 static inline void tm_initialize_random_streams (
@@ -729,24 +814,6 @@ tsetlin_t *tk_tsetlin_peek (lua_State *L, int i)
   return (tsetlin_t *) luaL_checkudata(L, i, TK_TSETLIN_MT);
 }
 
-static inline unsigned int tk_lua_checkunsigned (lua_State *L, int i)
-{
-  lua_Integer l = luaL_checkinteger(L, i);
-  if (l < 0)
-    luaL_error(L, "value can't be negative");
-  if (l > UINT_MAX)
-    luaL_error(L, "value is too large");
-  return (unsigned int) l;
-}
-
-static inline double tk_lua_checkposdouble (lua_State *L, int i)
-{
-  lua_Number l = luaL_checknumber(L, i);
-  if (l < 0)
-    luaL_error(L, "value can't be negative");
-  return (double) l;
-}
-
 static inline double tk_lua_optposdouble (lua_State *L, int i, double def)
 {
   if (lua_type(L, i) < 1)
@@ -913,14 +980,14 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
   lua_insert(L, 1);
 
   tk_tsetlin_init_classifier(L, tm->classifier,
-      tk_lua_checkunsigned(L, 2),
-      tk_lua_checkunsigned(L, 3),
-      tk_lua_checkunsigned(L, 4),
-      tk_lua_checkunsigned(L, 5),
-      tk_lua_checkunsigned(L, 6),
-      tk_lua_checkboolean(L, 7),
-      tk_lua_checkposdouble(L, 8),
-      tk_lua_checkposdouble(L, 9));
+      tk_lua_fcheckunsigned(L, 2, "classes"),
+      tk_lua_fcheckunsigned(L, 2, "features"),
+      tk_lua_fcheckunsigned(L, 2, "clauses"),
+      tk_lua_fcheckunsigned(L, 2, "state_bits"),
+      tk_lua_fcheckunsigned(L, 2, "target"),
+      tk_lua_fcheckboolean(L, 2, "boost_true_positive"),
+      tk_lua_fcheckposdouble(L, 2, "spec_low"),
+      tk_lua_fcheckposdouble(L, 2, "spec_high"));
 
   lua_settop(L, 1);
 }
@@ -931,14 +998,14 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
   lua_insert(L, 1);
 
   tk_tsetlin_init_encoder(L, tm->encoder,
-      tk_lua_checkunsigned(L, 2),
-      tk_lua_checkunsigned(L, 3),
-      tk_lua_checkunsigned(L, 4),
-      tk_lua_checkunsigned(L, 5),
-      tk_lua_checkunsigned(L, 6),
-      tk_lua_checkboolean(L, 7),
-      tk_lua_checkposdouble(L, 8),
-      tk_lua_checkposdouble(L, 9));
+      tk_lua_fcheckunsigned(L, 2, "hidden"),
+      tk_lua_fcheckunsigned(L, 2, "visible"),
+      tk_lua_fcheckunsigned(L, 2, "clauses"),
+      tk_lua_fcheckunsigned(L, 2, "state_bits"),
+      tk_lua_fcheckunsigned(L, 2, "target"),
+      tk_lua_fcheckboolean(L, 2, "boost_true_positive"),
+      tk_lua_fcheckposdouble(L, 2, "spec_low"),
+      tk_lua_fcheckposdouble(L, 2, "spec_high"));
 
   lua_settop(L, 1);
 }
@@ -948,14 +1015,14 @@ static inline void tk_tsetlin_create_auto_encoder (lua_State *L)
   tsetlin_t *tm = tk_tsetlin_alloc_auto_encoder(L, true);
   lua_insert(L, 1);
 
-  unsigned int encoding_bits = tk_lua_checkunsigned(L, 2);
-  unsigned int features = tk_lua_checkunsigned(L, 3);
-  unsigned int clauses = tk_lua_checkunsigned(L, 4);
-  unsigned int state_bits = tk_lua_checkunsigned(L, 5);
-  unsigned int threshold = tk_lua_checkunsigned(L, 6);
-  bool boost_true_positive = tk_lua_checkboolean(L, 7);
-  double specificity_low = tk_lua_checkposdouble(L, 8);
-  double specificity_high = tk_lua_checkposdouble(L, 9);
+  unsigned int encoding_bits = tk_lua_fcheckunsigned(L, 2, "hidden");
+  unsigned int features = tk_lua_fcheckunsigned(L, 2, "visible");
+  unsigned int clauses = tk_lua_fcheckunsigned(L, 2, "clauses");
+  unsigned int state_bits = tk_lua_fcheckunsigned(L, 2, "state_bits");
+  unsigned int threshold = tk_lua_fcheckunsigned(L, 2, "target");
+  bool boost_true_positive = tk_lua_fcheckboolean(L, 2, "boost_true_positive");
+  double specificity_low = tk_lua_fcheckposdouble(L, 2, "spec_low");
+  double specificity_high = tk_lua_fcheckposdouble(L, 2, "spec_high");
 
   tk_tsetlin_init_encoder(L, &tm->auto_encoder->encoder,
       encoding_bits, features, clauses, state_bits, threshold, boost_true_positive, specificity_low, specificity_high);
@@ -1199,12 +1266,6 @@ static inline int tk_tsetlin_update (lua_State *L)
   return 0;
 }
 
-#include <pthread.h>
-#include <lua.h>
-#include <lauxlib.h>
-#include <stdio.h>
-#include <stdlib.h>
-
 typedef struct {
   tsetlin_classifier_t *tm;
   unsigned int n;
@@ -1237,28 +1298,53 @@ static void *train_classifier_thread (void *arg)
   }
 }
 
+static inline unsigned int tk_tsetlin_get_nthreads (
+  lua_State *L, int i, char *field
+) {
+  unsigned int n_threads;
+  if (field == NULL) {
+    if (lua_type(L, i) == LUA_TNIL)
+      goto sysconf;
+    n_threads = tk_lua_checkunsigned(L, 2);
+  } else if (tk_lua_ftype(L, 2, field) != LUA_TNIL) {
+    n_threads = tk_lua_fcheckunsigned(L, 2, field);
+    goto check;
+  } else {
+    goto sysconf;
+  }
+check:
+  if (!n_threads)
+    return (unsigned int) tk_lua_error(L, "threads must be at least 1\n");
+  return n_threads;
+sysconf:
+  long ts = sysconf(_SC_NPROCESSORS_ONLN) - 1;
+  if (ts <= 0)
+    return (unsigned int) tk_error(L, "sysconf", errno);
+  lua_pushinteger(L, ts);
+  n_threads = tk_lua_checkunsigned(L, -1);
+  lua_pop(L, 1);
+  return n_threads;
+}
+
 static inline int tk_tsetlin_train_classifier (lua_State *L, tsetlin_classifier_t *tm)
 {
-  unsigned int n = tk_lua_checkunsigned(L, 2);
-  unsigned int *ps = (unsigned int *)luaL_checkstring(L, 3);
-  unsigned int *ss = (unsigned int *)luaL_checkstring(L, 4);
-  double active_clause = tk_lua_checkposdouble(L, 5);
+  unsigned int n = tk_lua_fcheckunsigned(L, 2, "samples");
+  unsigned int *ps = (unsigned int *) tk_lua_fcheckstring(L, 2, "problems");
+  unsigned int *ss = (unsigned int *) tk_lua_fcheckstring(L, 2, "solutions");
+  double active_clause = tk_lua_fcheckposdouble(L, 2, "active_clause");
+  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "threads");
   mc_tm_initialize_active_clause(tm, active_clause);
-
-  long cores = sysconf(_SC_NPROCESSORS_ONLN);
-  if (cores <= 0)
-    return tk_error(L, "sysconf", errno);
 
   unsigned int next = 0;
   unsigned int shuffle[n];
   init_shuffle(shuffle, n);
 
-  pthread_t threads[cores];
+  pthread_t threads[n_threads];
   pthread_mutex_t qlock;
   pthread_mutex_init(&qlock, NULL);
-  train_classifier_thread_data_t thread_data[cores];
+  train_classifier_thread_data_t thread_data[n_threads];
 
-  for (unsigned int i = 0; i < cores; i++) {
+  for (unsigned int i = 0; i < n_threads; i++) {
     thread_data[i].tm = tm;
     thread_data[i].n = n;
     thread_data[i].next = &next;
@@ -1271,7 +1357,7 @@ static inline int tk_tsetlin_train_classifier (lua_State *L, tsetlin_classifier_
   }
 
   // TODO: Ensure these get freed on error above
-  for (unsigned int i = 0; i < cores; i++)
+  for (unsigned int i = 0; i < n_threads; i++)
     if (pthread_join(threads[i], NULL) != 0)
       return tk_error(L, "pthread_join", errno);
 
@@ -1305,7 +1391,7 @@ static void *train_encoder_thread (void *arg)
   while (1) {
     pthread_mutex_lock(data->qlock);
     unsigned int next = *data->next;
-    (*data->next) += 1;
+    (*data->next) ++;
     pthread_mutex_unlock(data->qlock);
     if (next >= data->n)
       return NULL;
@@ -1324,27 +1410,24 @@ static inline int tk_tsetlin_train_encoder (
   lua_State *L,
   tsetlin_encoder_t *tm
 ) {
-  unsigned int n = tk_lua_checkunsigned(L, 2);
-  unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 3);
-  double active_clause = tk_lua_checkposdouble(L, 4);
-  double margin = tk_lua_checkposdouble(L, 5);
-  double loss_alpha = tk_lua_checkposdouble(L, 6);
+  unsigned int n = tk_lua_fcheckunsigned(L, 2, "samples");
+  unsigned int *tokens = (unsigned int *) tk_lua_fcheckstring(L, 2, "corpus");
+  double active_clause = tk_lua_fcheckposdouble(L, 2, "active_clause");
+  double margin = tk_lua_fcheckposdouble(L, 2, "margin");
+  double loss_alpha = tk_lua_fcheckposdouble(L, 2, "loss_alpha");
+  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "threads");
   mc_tm_initialize_active_clause(&tm->encoder, active_clause);
 
-  long cores = sysconf(_SC_NPROCESSORS_ONLN);
-  if (cores <= 0)
-    return tk_error(L, "sysconf", errno);
-
-  pthread_t threads[cores];
+  pthread_t threads[n_threads];
   pthread_mutex_t qlock;
   pthread_mutex_init(&qlock, NULL);
-  train_encoder_thread_data_t thread_data[cores];
+  train_encoder_thread_data_t thread_data[n_threads];
 
   unsigned int next = 0;
   unsigned int shuffle[n];
   init_shuffle(shuffle, n);
 
-  for (unsigned int i = 0; i < cores; i++) {
+  for (unsigned int i = 0; i < n_threads; i++) {
     thread_data[i].tm = tm;
     thread_data[i].n = n;
     thread_data[i].next = &next;
@@ -1358,7 +1441,7 @@ static inline int tk_tsetlin_train_encoder (
   }
 
   // TODO: Ensure these get freed on error above
-  for (unsigned int i = 0; i < cores; i++)
+  for (unsigned int i = 0; i < n_threads; i++)
     if (pthread_join(threads[i], NULL) != 0)
       return tk_error(L, "pthread_join", errno);
 
@@ -1404,30 +1487,25 @@ static void *train_auto_encoder_thread (void *arg)
 
 static inline int tk_tsetlin_train_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
 {
-  unsigned int n = tk_lua_checkunsigned(L, 2);
-  unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
-  double active_clause = tk_lua_checkposdouble(L, 4);
-  double loss_alpha = tk_lua_checkposdouble(L, 5);
+  unsigned int n = tk_lua_fcheckunsigned(L, 2, "samples");
+  unsigned int *ps = (unsigned int *) tk_lua_fcheckstring(L, 2, "corpus");
+  double active_clause = tk_lua_fcheckposdouble(L, 2, "active_clause");
+  double loss_alpha = tk_lua_fcheckposdouble(L, 2, "loss_alpha");
+  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "threads");
 
-  // TODO: Should the active clause be shared? Does that make more sense for an
-  // auto_encoder?
   mc_tm_initialize_active_clause(&tm->encoder.encoder, active_clause);
   mc_tm_initialize_active_clause(&tm->decoder.encoder, active_clause);
-
-  long cores = sysconf(_SC_NPROCESSORS_ONLN);
-  if (cores <= 0)
-    return tk_error(L, "sysconf", errno);
-
-  pthread_t threads[cores];
-  pthread_mutex_t qlock;
-  pthread_mutex_init(&qlock, NULL);
-  train_auto_encoder_thread_data_t thread_data[cores];
 
   unsigned int next = 0;
   unsigned int shuffle[n];
   init_shuffle(shuffle, n);
 
-  for (unsigned int i = 0; i < cores; i++) {
+  pthread_t threads[n_threads];
+  pthread_mutex_t qlock;
+  pthread_mutex_init(&qlock, NULL);
+  train_auto_encoder_thread_data_t thread_data[n_threads];
+
+  for (unsigned int i = 0; i < n_threads; i++) {
     thread_data[i].tm = tm;
     thread_data[i].n = n;
     thread_data[i].next = &next;
@@ -1439,8 +1517,7 @@ static inline int tk_tsetlin_train_auto_encoder (lua_State *L, tsetlin_auto_enco
       return tk_error(L, "pthread_create", errno);
   }
 
-  // TODO: Ensure these get freed on error above
-  for (unsigned int i = 0; i < cores; i++)
+  for (unsigned int i = 0; i < n_threads; i++)
     if (pthread_join(threads[i], NULL) != 0)
       return tk_error(L, "pthread_join", errno);
 
@@ -1520,11 +1597,12 @@ static inline int tk_tsetlin_evaluate_classifier (
   tsetlin_classifier_t *tm
 ) {
 
-  lua_settop(L, 5);
-  unsigned int n = tk_lua_checkunsigned(L, 2);
-  unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
-  unsigned int *ss = (unsigned int *) luaL_checkstring(L, 4);
-  bool track_stats = tk_lua_checkboolean(L, 5);
+  lua_settop(L, 2);
+  unsigned int n = tk_lua_fcheckunsigned(L, 2, "samples");
+  unsigned int *ps = (unsigned int *) tk_lua_fcheckstring(L, 2, "problems");
+  unsigned int *ss = (unsigned int *) tk_lua_fcheckstring(L, 2, "solutions");
+  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "threads");
+  bool track_stats = tk_lua_foptboolean(L, 2, "stats", false);
   unsigned int correct = 0;
   unsigned int *confusion = NULL;
   unsigned int *predictions = NULL;
@@ -1542,20 +1620,16 @@ static inline int tk_tsetlin_evaluate_classifier (
     memset(observations, 0, sizeof(unsigned int) * classes);
   }
 
-  long cores = sysconf(_SC_NPROCESSORS_ONLN);
-  if (cores <= 0)
-    return tk_error(L, "sysconf", errno);
-
-  pthread_t threads[cores];
+  pthread_t threads[n_threads];
   pthread_mutex_t lock;
   pthread_mutex_t qlock;
   pthread_mutex_init(&lock, NULL);
   pthread_mutex_init(&qlock, NULL);
-  evaluate_classifier_thread_data_t thread_data[cores];
+  evaluate_classifier_thread_data_t thread_data[n_threads];
 
   unsigned int next = 0;
 
-  for (unsigned int i = 0; i < cores; i++) {
+  for (unsigned int i = 0; i < n_threads; i++) {
     thread_data[i].tm = tm;
     thread_data[i].n = n;
     thread_data[i].next = &next;
@@ -1573,7 +1647,7 @@ static inline int tk_tsetlin_evaluate_classifier (
   }
 
   // TODO: Ensure these get freed on error above
-  for (unsigned int i = 0; i < cores; i++)
+  for (unsigned int i = 0; i < n_threads; i++)
     if (pthread_join(threads[i], NULL) != 0)
       return tk_error(L, "pthread_join", errno);
 
@@ -1673,26 +1747,23 @@ static void *evaluate_encoder_thread (void *arg)
 
 static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *tm)
 {
-  lua_settop(L, 3);
-  unsigned int n = tk_lua_checkunsigned(L, 2);
-  unsigned int *tokens = (unsigned int *) luaL_checkstring(L, 3);
+  lua_settop(L, 2);
+  unsigned int n = tk_lua_fcheckunsigned(L, 2, "samples");
+  unsigned int *tokens = (unsigned int *) tk_lua_fcheckstring(L, 2, "corpus");
+  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "threads");
 
   unsigned int correct = 0;
 
-  long cores = sysconf(_SC_NPROCESSORS_ONLN);
-  if (cores <= 0)
-    return tk_error(L, "sysconf", errno);
-
-  pthread_t threads[cores];
+  pthread_t threads[n_threads];
   pthread_mutex_t lock;
   pthread_mutex_t qlock;
   pthread_mutex_init(&lock, NULL);
   pthread_mutex_init(&qlock, NULL);
-  evaluate_encoder_thread_data_t thread_data[cores];
+  evaluate_encoder_thread_data_t thread_data[n_threads];
 
   unsigned int next = 0;
 
-  for (unsigned int i = 0; i < cores; i++) {
+  for (unsigned int i = 0; i < n_threads; i++) {
     thread_data[i].tm = tm;
     thread_data[i].n = n;
     thread_data[i].next = &next;
@@ -1705,7 +1776,7 @@ static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *
   }
 
   // TODO: Ensure these get freed on error above
-  for (unsigned int i = 0; i < cores; i++)
+  for (unsigned int i = 0; i < n_threads; i++)
     if (pthread_join(threads[i], NULL) != 0)
       return tk_error(L, "pthread_join", errno);
 
@@ -1756,28 +1827,25 @@ static void *evaluate_auto_encoder_thread (void *arg)
 
 static inline int tk_tsetlin_evaluate_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
 {
-  lua_settop(L, 3);
-  unsigned int n = tk_lua_checkunsigned(L, 2);
-  unsigned int *ps = (unsigned int *) luaL_checkstring(L, 3);
+  lua_settop(L, 2);
+  unsigned int n = tk_lua_fcheckunsigned(L, 2, "samples");
+  unsigned int *ps = (unsigned int *) tk_lua_fcheckstring(L, 2, "corpus");
+  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "threads");
   unsigned int input_bits = tm->encoder.encoder.input_bits;
 
   unsigned int total_bits = n * input_bits;
   unsigned int total_diff = 0;
 
-  long cores = sysconf(_SC_NPROCESSORS_ONLN);
-  if (cores <= 0)
-    return tk_error(L, "sysconf", errno);
-
-  pthread_t threads[cores];
+  pthread_t threads[n_threads];
   pthread_mutex_t lock;
   pthread_mutex_t qlock;
   pthread_mutex_init(&lock, NULL);
   pthread_mutex_init(&qlock, NULL);
-  evaluate_auto_encoder_thread_data_t thread_data[cores];
+  evaluate_auto_encoder_thread_data_t thread_data[n_threads];
 
   unsigned int next = 0;
 
-  for (unsigned int i = 0; i < cores; i++) {
+  for (unsigned int i = 0; i < n_threads; i++) {
     thread_data[i].tm = tm;
     thread_data[i].n = n;
     thread_data[i].next = &next;
@@ -1790,7 +1858,7 @@ static inline int tk_tsetlin_evaluate_auto_encoder (lua_State *L, tsetlin_auto_e
   }
 
   // TODO: Ensure these get freed on error above
-  for (unsigned int i = 0; i < cores; i++)
+  for (unsigned int i = 0; i < n_threads; i++)
     if (pthread_join(threads[i], NULL) != 0)
       return tk_error(L, "pthread_join", errno);
 
@@ -2092,15 +2160,18 @@ static inline int tk_tsetlin_type (lua_State *L)
 
 static luaL_Reg tk_tsetlin_fns[] =
 {
-  { "create", tk_tsetlin_create },
-  { "destroy", tk_tsetlin_destroy },
-  { "update", tk_tsetlin_update },
-  { "predict", tk_tsetlin_predict },
+
   { "train", tk_tsetlin_train },
   { "evaluate", tk_tsetlin_evaluate },
+  { "update", tk_tsetlin_update },
+  { "predict", tk_tsetlin_predict },
+  { "destroy", tk_tsetlin_destroy },
   { "persist", tk_tsetlin_persist },
-  { "load", tk_tsetlin_load },
   { "type", tk_tsetlin_type },
+
+  { "create", tk_tsetlin_create },
+  { "load", tk_tsetlin_load },
+
   { NULL, NULL }
 };
 
