@@ -110,17 +110,17 @@ test("tsetlin", function ()
       hidden = FEATURES_CMP
     })
     print("Fitting")
-    local stopwatch = utc.stopwatch(0.1)
+    local stopwatch = utc.stopwatch()
     local mavg = num.mavg(0.2)
     compressor.train({
       corpus = cmp_train,
       samples = n_train,
       iterations = CMP_ITERS,
       each = function (epoch, tc)
-        local duration, avg_duration = stopwatch()
+        local duration, total = stopwatch()
         local tc0 = mavg(tc)
         str.printf("Epoch  %-4d  Time  %6.3f (%6.3f)  Convergence  %-4.6f (%-4.6f)\n",
-          epoch, duration, avg_duration, tc, tc0)
+          epoch, duration, total, tc, tc0)
         return epoch < 10 or num.abs(tc - tc0) > CMP_EPS
       end
     })
@@ -204,7 +204,7 @@ test("tsetlin", function ()
   t.persist("model.bin", true)
 
   print("Testing restore")
-  t = tm.load("model.bin", true)
+  t = tm.load("model.bin", nil, true)
   local test_score =
     t.evaluate({
       problems = test_problems,
