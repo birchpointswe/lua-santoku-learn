@@ -1,5 +1,6 @@
 # Now
 
+- Sanitize
 - Persist to string or chunked callbacks
 
 - Reusable threadpool
@@ -64,6 +65,7 @@
 
 # Eventually
 
+- Absorbing
 - Coalesced (reduces memory footprint for multi-output configurations)
 - Weighted (reduces memory footprint)
 - Integer-Weighted (see weighted)

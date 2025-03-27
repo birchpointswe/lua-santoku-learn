@@ -350,6 +350,137 @@ static inline bool tk_lua_foptboolean (lua_State *L, int i, char *field, bool de
   return b;
 }
 
+static inline int tk_lua_errmalloc (lua_State *L)
+{
+  lua_pushstring(L, "Error in malloc");
+  tk_lua_callmod(L, 1, 0, "santoku.error", "error");
+  return 0;
+}
+
+static inline int tk_lua_errno (lua_State *L, int err)
+{
+  lua_pushstring(L, strerror(errno));
+  lua_pushinteger(L, err);
+  tk_lua_callmod(L, 2, 0, "santoku.error", "error");
+  return 0;
+}
+
+static inline FILE *tk_lua_tmpfile (lua_State *L)
+{
+  FILE *fh = tmpfile();
+  if (fh) return fh;
+  int e = errno;
+  lua_settop(L, 0);
+  lua_pushstring(L, "Error opening tmpfile");
+  lua_pushstring(L, strerror(e));
+  lua_pushinteger(L, e);
+  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
+  return NULL;
+}
+
+static inline FILE *tk_lua_fmemopen (lua_State *L, char *data, size_t size, const char *flag)
+{
+  FILE *fh = fmemopen(data, size, flag);
+  if (fh) return fh;
+  int e = errno;
+  lua_settop(L, 0);
+  lua_pushstring(L, "Error opening string as file");
+  lua_pushstring(L, strerror(e));
+  lua_pushinteger(L, e);
+  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
+  return NULL;
+}
+
+static inline FILE *tk_lua_fopen (lua_State *L, const char *fp, const char *flag)
+{
+  FILE *fh = fopen(fp, flag);
+  if (fh) return fh;
+  int e = errno;
+  lua_settop(L, 0);
+  lua_pushstring(L, "Error opening file");
+  lua_pushstring(L, fp);
+  lua_pushstring(L, strerror(e));
+  lua_pushinteger(L, e);
+  tk_lua_callmod(L, 4, 0, "santoku.error", "error");
+  return NULL;
+}
+
+static inline void tk_lua_fclose (lua_State *L, FILE *fh)
+{
+  if (!fclose(fh)) return;
+  int e = errno;
+  lua_settop(L, 0);
+  lua_pushstring(L, "Error closing file");
+  lua_pushstring(L, strerror(e));
+  lua_pushinteger(L, e);
+  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
+}
+
+static inline void tk_lua_fwrite (lua_State *L, void *data, size_t size, size_t memb, FILE *fh)
+{
+  fwrite(data, size, memb, fh);
+  if (!ferror(fh)) return;
+  int e = errno;
+  lua_settop(L, 0);
+  lua_pushstring(L, "Error writing to file");
+  lua_pushstring(L, strerror(e));
+  lua_pushinteger(L, e);
+  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
+}
+
+static inline void tk_lua_fread (lua_State *L, void *data, size_t size, size_t memb, FILE *fh)
+{
+  size_t r = fread(data, size, memb, fh);
+  if (!ferror(fh) || !r) return;
+  int e = errno;
+  lua_settop(L, 0);
+  lua_pushstring(L, "Error reading from file");
+  lua_pushstring(L, strerror(e));
+  lua_pushinteger(L, e);
+  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
+}
+
+static inline void tk_lua_fseek (lua_State *L, size_t size, size_t memb, FILE *fh)
+{
+  int r = fseek(fh, (long) (size * memb), SEEK_CUR);
+  if (!ferror(fh) || !r) return;
+  int e = errno;
+  lua_settop(L, 0);
+  lua_pushstring(L, "Error reading from file");
+  lua_pushstring(L, strerror(e));
+  lua_pushinteger(L, e);
+  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
+}
+
+static inline char *tk_lua_fslurp (lua_State *L, FILE *fh, size_t *len)
+{
+  if (fseek(fh, 0, SEEK_END) != 0) {
+    tk_lua_errno(L, errno);
+    return NULL;
+  }
+  long size = ftell(fh);
+  if (size < 0) {
+    tk_lua_errno(L, errno);
+    return NULL;
+  }
+  if (fseek(fh, 0, SEEK_SET) != 0) {
+    tk_lua_errno(L, errno);
+    return NULL;
+  }
+  char *buffer = malloc((size_t) size);
+  if (!buffer) {
+    tk_lua_errmalloc(L);
+    return NULL;
+  }
+  if (fread(buffer, 1, (size_t) size, fh) != (size_t) size) {
+    free(buffer);
+    tk_lua_errno(L, errno);
+    return NULL;
+  }
+  *len = (size_t) size;
+  return buffer;
+}
+
 static inline void tm_initialize_random_streams (
   tsetlin_classifier_t *tm,
   unsigned int *feedback_to_la,
@@ -1892,67 +2023,6 @@ static inline int tk_tsetlin_evaluate (lua_State *L)
   }
 }
 
-static inline FILE *tk_lua_fopen (lua_State *L, const char *fp, const char *flag)
-{
-  FILE *fh = fopen(fp, flag);
-  if (fh) return fh;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error opening file");
-  lua_pushstring(L, fp);
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 4, 0, "santoku.error", "error");
-  return NULL;
-}
-
-static inline void tk_lua_fclose (lua_State *L, FILE *fh)
-{
-  if (!fclose(fh)) return;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error closing file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-}
-
-static inline void tk_lua_fwrite (lua_State *L, void *data, size_t size, size_t memb, FILE *fh)
-{
-  fwrite(data, size, memb, fh);
-  if (!ferror(fh)) return;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error writing to file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-}
-
-static inline void tk_lua_fread (lua_State *L, void *data, size_t size, size_t memb, FILE *fh)
-{
-  size_t r = fread(data, size, memb, fh);
-  if (!ferror(fh) || !r) return;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error reading from file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-}
-
-static inline void tk_lua_fseek (lua_State *L, size_t size, size_t memb, FILE *fh)
-{
-  int r = fseek(fh, (long) (size * memb), SEEK_CUR);
-  if (!ferror(fh) || !r) return;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error reading from file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-}
-
 static inline void _tk_tsetlin_persist_classifier (lua_State *L, tsetlin_classifier_t *tm, FILE *fh, bool persist_state)
 {
   tk_lua_fwrite(L, &tm->classes, sizeof(unsigned int), 1, fh);
@@ -2002,11 +2072,11 @@ static inline int tk_tsetlin_persist (lua_State *L)
 {
   lua_settop(L, 3);
   tsetlin_t *tm = tk_tsetlin_peek(L, 1);
-  const char *fp = luaL_checkstring(L, 2);
+  bool tostr = lua_type(L, 2) == LUA_TNIL;
+  FILE *fh = tostr ? tk_lua_tmpfile(L) : tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
   bool persist_state = lua_toboolean(L, 3);
   if (persist_state && !tm->has_state)
     luaL_error(L, "can't persist the state of a model loaded without state");
-  FILE *fh = tk_lua_fopen(L, fp, "w");
   tk_lua_fwrite(L, &tm->type, sizeof(tsetlin_type_t), 1, fh);
   tk_lua_fwrite(L, &persist_state, sizeof(bool), 1, fh);
   switch (tm->type) {
@@ -2025,8 +2095,22 @@ static inline int tk_tsetlin_persist (lua_State *L)
     default:
       return luaL_error(L, "unexpected tsetlin machine type in persist");
   }
-  tk_lua_fclose(L, fh);
-  return 0;
+  if (!tostr) {
+    tk_lua_fclose(L, fh);
+    return 0;
+  } else {
+    size_t len;
+    char *data = tk_lua_fslurp(L, fh, &len);
+    if (data) {
+      lua_pushlstring(L, data, len);
+      free(data);
+      tk_lua_fclose(L, fh);
+      return 1;
+    } else {
+      tk_lua_fclose(L, fh);
+      return 0;
+    }
+  }
 }
 
 static inline void _tk_tsetlin_load_classifier (lua_State *L, tsetlin_classifier_t *tm, FILE *fh, bool read_state, bool has_state)
@@ -2103,11 +2187,12 @@ static inline void tk_tsetlin_load_regressor (lua_State *L, FILE *fh, bool read_
 // changes for coding errors
 static inline int tk_tsetlin_load (lua_State *L)
 {
-  lua_settop(L, 2);
-  const char *fp = luaL_checkstring(L, 1);
-  bool read_state = lua_toboolean(L, 2);
-  lua_pop(L, 2);
-  FILE *fh = tk_lua_fopen(L, fp, "r");
+  lua_settop(L, 3);
+  size_t len;
+  const char *data = luaL_checklstring(L, 1, &len);
+  bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && lua_toboolean(L, 2);
+  FILE *fh = isstr ? tk_lua_fmemopen(L, (char *) data, len, "r") : tk_lua_fopen(L, data, "r");
+  bool read_state = lua_toboolean(L, 3);
   tsetlin_type_t type;
   bool has_state;
   tk_lua_fread(L, &type, sizeof(type), 1, fh);
