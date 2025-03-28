@@ -1,21 +1,13 @@
 # Now
 
 - Sanitize
-- Persist to string or chunked callbacks
-
+- Avoid locking: thread-local inc/dec + merge, separate TMs per thread
 - Reusable threadpool
     - Threaded batch encode
 
 # Later
 
-- Explore batched updates to tm state instead of locking
-    - Thread-local inc/dec amounts
-    - After iter, threaded update to set tm states
-
 - Consider migrating bitmap compressor here
-- Consider adding metatable fns to returned userdata so we can do
-    - classifier.predict(x)
-    - encoder.encode(x), etc..
 
 - When iterating bits and re-computing loss, stop after loss reaches 0. In other
   words, randomly select bits to look at, flip them, recompute loss, and if loss
