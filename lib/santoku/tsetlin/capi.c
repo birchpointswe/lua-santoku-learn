@@ -1432,6 +1432,7 @@ static void *train_classifier_thread (void *arg)
 static inline unsigned int tk_tsetlin_get_nthreads (
   lua_State *L, int i, char *field
 ) {
+  long ts;
   unsigned int n_threads;
   if (field == NULL) {
     if (lua_type(L, i) == LUA_TNIL)
@@ -1448,7 +1449,7 @@ check:
     return (unsigned int) tk_lua_error(L, "threads must be at least 1\n");
   return n_threads;
 sysconf:
-  long ts = sysconf(_SC_NPROCESSORS_ONLN) - 1;
+  ts = sysconf(_SC_NPROCESSORS_ONLN) - 1;
   if (ts <= 0)
     return (unsigned int) tk_error(L, "sysconf", errno);
   lua_pushinteger(L, ts);
