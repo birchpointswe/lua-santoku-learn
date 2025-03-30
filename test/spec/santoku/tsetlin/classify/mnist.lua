@@ -86,7 +86,7 @@ end
 test("tsetlin", function ()
 
   local SKIP = 0
-  local MAX = 1000
+  local MAX = 10000
 
   print("Reading data")
   local dataset = read_data("test/res/santoku/tsetlin/BinarizedMNISTData/MNISTTest.txt", SKIP, MAX)
