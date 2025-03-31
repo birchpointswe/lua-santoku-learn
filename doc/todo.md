@@ -1,7 +1,9 @@
 # Now
 
 - Sanitize
-- Avoid locking: thread-local inc/dec + merge, separate TMs per thread
+- Avoid locking:
+    - Shard based on clause?
+    - Shared based on class/bit?
 - Reusable threadpool
     - Threaded batch encode
 
