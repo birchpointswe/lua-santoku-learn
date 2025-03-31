@@ -1217,6 +1217,8 @@ static inline void tk_tsetlin_destroy_classifier (tsetlin_classifier_t *tm)
   tm->actions = NULL;
   free(tm->active_clause);
   tm->active_clause = NULL;
+  free(tm->specificity);
+  tm->specificity = NULL;
   if (tm->locks)
     for (unsigned int i = 0; i < tm->action_chunks; i ++)
       pthread_mutex_destroy(&tm->locks[i]);

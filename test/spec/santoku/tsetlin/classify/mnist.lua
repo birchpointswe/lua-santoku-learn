@@ -12,18 +12,18 @@ local arr = require("santoku.array")
 
 local CLASSES = 10
 local FEATURES = 784
-local FEATURES_CMP = 256
+local FEATURES_CMP = 128
 local CMP_ITERS = 10
 local CMP_EPS = 1e-6
 local TRAIN_TEST_RATIO = 0.9
-local CLAUSES = 4096
+local CLAUSES = 1024
 local STATE_BITS = 8
 local TARGET = 50
 local BOOST_TRUE_POSITIVE = true
 local ACTIVE_CLAUSE = 1 --0.75
 local SPECL, SPECH = 8, 12
 local EVALUATE_EVERY = 1
-local MAX_EPOCHS = 20
+local MAX_EPOCHS = 5
 
 local function prep_fingerprint (fingerprint, bits)
   local flipped = bm.copy(fingerprint)
