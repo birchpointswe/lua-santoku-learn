@@ -13,18 +13,20 @@ local arr = require("santoku.array")
 local CLASSES = 10
 local FEATURES = 784
 local FEATURES_CMP = 128
-local CMP_ITERS = 10
+local CMP_ITERS = 100
 local CMP_EPS = 1e-6
 local TRAIN_TEST_RATIO = 0.9
 local CLAUSES = 4096
+local REPLICAS = 0
 local STATE_BITS = 8
 local TARGET = 32
+local SPECIFICITY = 20
 local BOOST_TRUE_POSITIVE = true
 local ACTIVE_CLAUSE = 0.75
-local SPECIFICITY = 10
-local THREADS = 7
+local NEGATIVES = 0.25
+local THREADS = nil
 local EVALUATE_EVERY = 1
-local MAX_EPOCHS = 40
+local MAX_EPOCHS = 20
 
 local function prep_fingerprint (fingerprint, bits)
   local flipped = bm.copy(fingerprint)
@@ -109,7 +111,7 @@ test("tsetlin", function ()
     local compressor = bmc.create({
       visible = FEATURES,
       hidden = FEATURES_CMP,
-      threads = THREADS,
+      threads = 8,
     })
     print("Fitting")
     local stopwatch = utc.stopwatch()
@@ -155,75 +157,81 @@ test("tsetlin", function ()
   print("Train", n_train)
   print("Test", n_test)
 
-  for i = 1, 20 do
+  print("Creating")
+  local t = tm.classifier({
+    classes = CLASSES,
+    features = FEATURES,
+    clauses = CLAUSES,
+    state_bits = STATE_BITS,
+    target = TARGET,
+    boost_true_positive = BOOST_TRUE_POSITIVE,
+    specificity = SPECIFICITY,
+    threads = THREADS,
+    replicas = REPLICAS;
+  })
 
-    print("Creating")
-    local t = tm.classifier({
-      classes = CLASSES,
-      features = FEATURES,
-      clauses = CLAUSES,
-      state_bits = STATE_BITS,
-      target = TARGET,
-      boost_true_positive = BOOST_TRUE_POSITIVE,
-      specificity = i,
+  print("Training")
+  local stopwatch = utc.stopwatch()
+  t.train({
+    problems = train_problems,
+    solutions = train_solutions,
+    samples = n_train,
+    negatives = NEGATIVES,
+    active_clause = ACTIVE_CLAUSE, -- remove this, specified as active now, used here for testing old implementation
+    active = ACTIVE_CLAUSE,
+    iterations = MAX_EPOCHS,
+    threads = THREADS, -- remove this, specified in create now, used here for testing old implementation
+    each = function (epoch)
+      local duration = stopwatch()
+      if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
+        local test_score =
+          t.evaluate({
+            problems = test_problems,
+            solutions = test_solutions,
+            samples = n_test,
+          })
+        local train_score, confusion, observed, predicted =
+          t.evaluate({
+            problems = train_problems,
+            solutions = train_solutions,
+            samples = n_train
+          })
+        str.printf("Epoch %-4d  Time %4.2f  Test %4.2f  Train %4.2f\n",
+          epoch, duration, test_score, train_score)
+      else
+        str.printf("Epoch %-4d  Time %4.2f\n",
+          epoch, duration)
+      end
+    end
+  })
+
+  print()
+  print("Persisting")
+  fs.rm("model.bin", true)
+  t.persist("model.bin", true)
+
+  print("Testing restore")
+  t = tm.load("model.bin", nil, true)
+  local test_score  =
+    t.evaluate({
+      problems = test_problems,
+      solutions = test_solutions,
+      samples = n_test,
     })
-
-    print("Training")
-    local stopwatch = utc.stopwatch()
-    t.train({
+  local train_score--[[, confusion, predictions]] =
+    t.evaluate({
       problems = train_problems,
       solutions = train_solutions,
       samples = n_train,
-      active_clause = ACTIVE_CLAUSE,
-      iterations = MAX_EPOCHS,
-      threads = THREADS,
-      each = function (epoch)
-        local duration = stopwatch()
-        if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
-          local test_score =
-            t.evaluate({
-              problems = test_problems,
-              solutions = test_solutions,
-              samples = n_test,
-              threads = THREADS,
-            })
-          local train_score =
-            t.evaluate({
-              problems = train_problems,
-              solutions = train_solutions,
-              samples = n_train,
-              threads = THREADS,
-            })
-          str.printf("S(%d) Epoch %-4d  Time %4.2f  Test %4.2f  Train %4.2f\n",
-            i, epoch, duration, test_score, train_score)
-        else
-          str.printf("S(%d) Epoch %-4d  Time %4.2f\n",
-            i, epoch, duration)
-        end
-      end
+      -- stats = true,
     })
-
-    print()
-    print("Persisting")
-    fs.rm("model.bin", true)
-    t.persist("model.bin", true)
-
-    print("Testing restore")
-    t = tm.load("model.bin", nil, true)
-    local test_score =
-      t.evaluate({
-        problems = test_problems,
-        solutions = test_solutions,
-        samples = n_test
-      })
-    local train_score =
-      t.evaluate({
-        problems = train_problems,
-        solutions = train_solutions,
-        samples = n_train
-      })
-    str.printf("Evaluate\tTest\t%4.2f\tTrain\t%4.2f\n", test_score, train_score)
-
-  end
+  -- print()
+  -- print("Confusion:")
+  -- print(require("santoku.serialize")(confusion))
+  -- print()
+  -- print("Predictions:")
+  -- print(require("santoku.serialize")(predictions))
+  -- print()
+  str.printf("Evaluate\tTest\t%4.2f\tTrain\t%4.2f\n", test_score, train_score)
 
 end)
