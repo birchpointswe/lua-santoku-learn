@@ -1,11 +1,7 @@
 # Now
 
-- Sanitize
-- Avoid locking:
-    - Shard based on clause?
-    - Shared based on class/bit?
-- Reusable threadpool
-    - Threaded batch encode
+- Optimize for NUMA (alloc state in threads, or warmup)
+- Support training encoder via contrastive loss, triplet loss, etc.
 
 # Later
 
@@ -18,6 +14,10 @@
 - Pretrained models
     - Embeddings to bitmap: cosine similarity to hamming
     - Embeddings to bitmap: auto-encoded
+
+- explore applying the multigranular specificity approach to to all parameters,
+  but instead of applying the parameters to to a single clause (as in
+  multigranular, apply the parameters by replica)
 
 - Implement regressor
 
