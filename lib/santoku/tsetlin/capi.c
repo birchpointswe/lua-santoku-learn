@@ -614,13 +614,15 @@ static inline void tm_calculate_clause_output (
   unsigned int *clause_output,
   bool predict
 ) {
-  memset(clause_output, 0, tm->clause_chunks * sizeof(unsigned int));
+  unsigned int clause_chunks = tm->clause_chunks;
   unsigned int clauses = tm->clauses;
   unsigned int filter = tm->filter;
+  unsigned int input_chunks = tm->input_chunks;
+  for (unsigned int i = 0; i < clause_chunks; i ++)
+    clause_output[i] = 0U;
   for (unsigned int j = 0; j < clauses; j ++) {
     unsigned int output = 0;
     unsigned int all_exclude = 0;
-    unsigned int input_chunks = tm->input_chunks;
     unsigned int clause_chunk = j / BITS;
     unsigned int clause_chunk_pos = j % BITS;
     unsigned int *actions = tm_state_actions(tm, replica, j);
@@ -632,9 +634,6 @@ static inline void tm_calculate_clause_output (
       (actions[input_chunks - 1] & input[input_chunks - 1] & filter) ^
       (actions[input_chunks - 1] & filter);
     all_exclude |= ((actions[input_chunks - 1] & filter) ^ 0);
-    // output = (!output) && (all_exclude != 0);
-    // if (output)
-    //   clause_output[clause_chunk] |= (1U << clause_chunk_pos);
     output = !output && !(predict && !all_exclude);
     if (output)
       clause_output[clause_chunk] |= (1U << clause_chunk_pos);
@@ -1030,9 +1029,9 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
       tk_lua_fcheckunsigned(L, 2, "classes"),
       tk_lua_fcheckunsigned(L, 2, "features"),
       tk_lua_fcheckunsigned(L, 2, "clauses"),
-      tk_lua_fcheckunsigned(L, 2, "state_bits"),
+      tk_lua_fcheckunsigned(L, 2, "state"),
       tk_lua_fcheckunsigned(L, 2, "target"),
-      tk_lua_fcheckboolean(L, 2, "boost_true_positive"),
+      tk_lua_fcheckboolean(L, 2, "boost"),
       tk_lua_fcheckposdouble(L, 2, "specificity"),
       tk_tsetlin_get_nthreads(L, 2, "threads"),
       tk_lua_fcheckunsigned(L, 2, "replicas"));

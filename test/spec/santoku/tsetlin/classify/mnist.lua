@@ -13,20 +13,20 @@ local arr = require("santoku.array")
 local CLASSES = 10
 local FEATURES = 784
 local FEATURES_CMP = 128
-local CMP_ITERS = 100
+local CMP_ITERS = 10
 local CMP_EPS = 1e-6
 local TRAIN_TEST_RATIO = 0.9
 local CLAUSES = 4096
 local REPLICAS = 0
-local STATE_BITS = 8
+local STATE = 8
 local TARGET = 32
 local SPECIFICITY = 20
-local BOOST_TRUE_POSITIVE = true
-local ACTIVE_CLAUSE = 0.75
+local BOOST = true
+local ACTIVE = 0.75
 local NEGATIVES = 0.25
 local THREADS = nil
 local EVALUATE_EVERY = 1
-local MAX_EPOCHS = 20
+local ITERATIONS = 20
 
 local function prep_fingerprint (fingerprint, bits)
   local flipped = bm.copy(fingerprint)
@@ -162,9 +162,9 @@ test("tsetlin", function ()
     classes = CLASSES,
     features = FEATURES,
     clauses = CLAUSES,
-    state_bits = STATE_BITS,
+    state = STATE,
     target = TARGET,
-    boost_true_positive = BOOST_TRUE_POSITIVE,
+    boost = BOOST,
     specificity = SPECIFICITY,
     threads = THREADS,
     replicas = REPLICAS;
@@ -173,24 +173,22 @@ test("tsetlin", function ()
   print("Training")
   local stopwatch = utc.stopwatch()
   t.train({
+    samples = n_train,
     problems = train_problems,
     solutions = train_solutions,
-    samples = n_train,
+    iterations = ITERATIONS,
+    active = ACTIVE,
     negatives = NEGATIVES,
-    active_clause = ACTIVE_CLAUSE, -- remove this, specified as active now, used here for testing old implementation
-    active = ACTIVE_CLAUSE,
-    iterations = MAX_EPOCHS,
-    threads = THREADS, -- remove this, specified in create now, used here for testing old implementation
     each = function (epoch)
       local duration = stopwatch()
-      if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
+      if epoch == ITERATIONS or epoch % EVALUATE_EVERY == 0 then
         local test_score =
           t.evaluate({
             problems = test_problems,
             solutions = test_solutions,
             samples = n_test,
           })
-        local train_score, confusion, observed, predicted =
+        local train_score --[[, confusion, observed, predicted]] =
           t.evaluate({
             problems = train_problems,
             solutions = train_solutions,
