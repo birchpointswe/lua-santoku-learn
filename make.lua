@@ -16,6 +16,8 @@ local env = {
   test = {
 
 
+    cflags = { "-g3" },
+    ldflags = { "-g3" },
     dependencies = {
       "luacov >= 0.15.0-1",
       "santoku-bitmap >= 0.0.36-1",

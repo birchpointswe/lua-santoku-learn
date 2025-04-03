@@ -28,28 +28,19 @@ local function evaluate (t, opts, ...)
   end
 end
 
-local function wrap (t, threads)
+local function wrap (t)
   return {
-    train = function (opts, ...)
-      opts.threads = threads
-      for i = 1, opts.iterations do
-        tm.train(t, opts, ...)
-        if opts.each then
-          if opts.each(i) == false then
-            break
-          end
-        end
-      end
+    train = function (...)
+      return tm.train(t, ...)
     end,
-    evaluate = function (opts, ...)
-      opts.threads = threads
-      return evaluate(t, opts, ...)
-    end,
-    update = function (...)
-      return tm.update(t, ...)
+    evaluate = function (...)
+      return evaluate(t, ...)
     end,
     predict = function (...)
       return tm.predict(t, ...)
+    end,
+    shrink = function (...)
+      return tm.shrink(t, ...)
     end,
     destroy = function (...)
       return tm.destroy(t, ...)
@@ -64,19 +55,13 @@ local function wrap (t, threads)
 end
 
 return {
-  load = function (opts, ...)
-    return wrap(tm.load(opts, ...), opts.threads)
+  load = function (...)
+    return wrap(tm.load(...))
   end,
-  classifier = function (opts, ...)
-    return wrap(tm.create("classifier", opts, ...), opts.threads)
+  classifier = function (...)
+    return wrap(tm.create("classifier", ...))
   end,
-  encoder = function (opts, ...)
-    return wrap(tm.create("encoder", opts, ...), opts.threads)
-  end,
-  auto_encoder = function (opts, ...)
-    return wrap(tm.create("auto_encoder", opts, ...), opts.threads)
-  end,
-  regressor = function (opts, ...)
-    return wrap(tm.create("regressor", opts, ...), opts.threads)
+  encoder = function (...)
+    return wrap(tm.create("encoder", ...))
   end,
 }
