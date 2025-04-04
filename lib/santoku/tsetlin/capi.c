@@ -42,6 +42,7 @@ SOFTWARE.
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdarg.h>
 
 #define TK_TSETLIN_MT "santoku_tsetlin"
 
@@ -322,6 +323,18 @@ static inline void *tk_malloc (
   }
 }
 
+static inline int tk_lua_verror (lua_State *L, int n, ...) {
+  va_list args;
+  va_start(args, n);
+  for (int i = 0; i < n; i++) {
+    const char *str = va_arg(args, const char *);
+    lua_pushstring(L, str);
+  }
+  va_end(args);
+  tk_lua_callmod(L, n, 0, "santoku.error", "error");
+  return 0;
+}
+
 static inline int tk_lua_error (lua_State *L, const char *err)
 {
   lua_pushstring(L, err);
@@ -338,69 +351,140 @@ static inline lua_Integer tk_lua_ftype (lua_State *L, int i, char *field)
   return t;
 }
 
-static inline const char *tk_lua_fcheckstring (lua_State *L, int i, char *field)
+static inline const char *tk_lua_checkstring (lua_State *L, int i, char *name)
+{
+  if (lua_type(L, i) != LUA_TSTRING)
+    tk_lua_verror(L, 3, name, "value is not a string");
+  return luaL_checkstring(L, i);
+}
+
+static inline const char *tk_lua_fcheckstring (lua_State *L, int i, char *name, char *field)
 {
   lua_getfield(L, i, field);
+  if (lua_type(L, -1) != LUA_TSTRING)
+    tk_lua_verror(L, 3, name, field, "field is not a string");
   const char *s = luaL_checkstring(L, -1);
   lua_pop(L, 1);
   return s;
 }
 
-static inline double tk_lua_checkposdouble (lua_State *L, int i)
+static inline double tk_lua_checkposdouble (lua_State *L, int i, char *name)
 {
+  if (lua_type(L, i) != LUA_TNUMBER)
+    tk_lua_verror(L, 2, name, "value is not a positive number");
+  lua_Number l = luaL_checknumber(L, i);
+  if (l < 0)
+    tk_lua_verror(L, 2, name, "value is not a positive number");
+  return (double) l;
+}
+
+static inline double tk_lua_optposdouble (lua_State *L, int i, double def, char *name)
+{
+  if (lua_type(L, i) < 1)
+    return def;
   lua_Number l = luaL_checknumber(L, i);
   if (l < 0)
     luaL_error(L, "value can't be negative");
   return (double) l;
 }
 
-static inline double tk_lua_fcheckposdouble (lua_State *L, int i, char *field)
+static inline bool tk_lua_checkboolean (lua_State *L, int i)
 {
-  lua_getfield(L, i, field);
-  double n = tk_lua_checkposdouble(L, -1);
-  lua_pop(L, 1);
-  return n;
+  if (lua_type(L, i) == LUA_TNIL)
+    return false;
+  luaL_checktype(L, i, LUA_TBOOLEAN);
+  return lua_toboolean(L, i);
 }
 
-static inline unsigned int tk_lua_checkunsigned (lua_State *L, int i)
+static inline double tk_lua_fcheckposdouble (lua_State *L, int i, char *name, char *field)
 {
+  lua_getfield(L, i, field);
+  if (lua_type(L, -1) != LUA_TNUMBER)
+    tk_lua_verror(L, 3, name, field, "field is not a positive number");
+  lua_Number l = luaL_checknumber(L, -1);
+  if (l < 0)
+    tk_lua_verror(L, 3, name, field, "field is not a positive number");
+  lua_pop(L, 1);
+  return l;
+}
+
+static inline unsigned int tk_lua_checkunsigned (lua_State *L, int i, char *name)
+{
+  if (lua_type(L, i) != LUA_TNUMBER)
+    tk_lua_verror(L, 2, name, "value is not a positive integer");
   lua_Integer l = luaL_checkinteger(L, i);
   if (l < 0)
-    luaL_error(L, "value can't be negative");
+    tk_lua_verror(L, 2, name, "value is not a positive integer");
   if (l > UINT_MAX)
     luaL_error(L, "value is too large");
   return (unsigned int) l;
 }
 
-static inline lua_Integer tk_lua_fcheckunsigned (lua_State *L, int i, char *field)
+static inline unsigned int tk_lua_fcheckunsigned (lua_State *L, int i, char *name, char *field)
 {
   lua_getfield(L, i, field);
-  lua_Integer n = tk_lua_checkunsigned(L, -1);
+  if (lua_type(L, -1) != LUA_TNUMBER)
+    tk_lua_verror(L, 3, name, field, "field is not a positive integer");
+  lua_Integer l = luaL_checkinteger(L, -1);
+  if (l < 0)
+    tk_lua_verror(L, 3, name, field, "field is not a positive integer");
   lua_pop(L, 1);
-  return n;
+  return l;
 }
 
-static inline bool tk_lua_fcheckboolean (lua_State *L, int i, char *field)
+static inline bool tk_lua_fcheckboolean (lua_State *L, int i, char *name, char *field)
 {
   lua_getfield(L, i, field);
+  if (lua_type(L, -1) != LUA_TBOOLEAN)
+    tk_lua_verror(L, 3, name, field, "field is not a boolean");
   luaL_checktype(L, -1, LUA_TBOOLEAN);
   bool n = lua_toboolean(L, -1);
   lua_pop(L, 1);
   return n;
 }
 
-static inline bool tk_lua_optboolean (lua_State *L, int i, bool def)
+static inline unsigned int tk_lua_foptunsigned (lua_State *L, int i, bool def, char *name, char *field)
+{
+  lua_getfield(L, i, field);
+  if (lua_type(L, -1) == LUA_TNIL) {
+    lua_pop(L, 1);
+    return def;
+  }
+  return tk_lua_fcheckunsigned(L, -1, name, field);
+}
+
+static inline unsigned int tk_lua_optunsigned (lua_State *L, int i, unsigned int def, char *name)
 {
   if (lua_type(L, i) == LUA_TNIL)
     return def;
-  luaL_checktype(L, i, LUA_TBOOLEAN);
+  if (lua_type(L, i) != LUA_TNUMBER)
+    tk_lua_verror(L, 2, name, "value is not a positive integer");
+  lua_Integer l = luaL_checkinteger(L, i);
+  if (l < 0)
+    tk_lua_verror(L, 2, name, "value is not a positive integer");
+  lua_pop(L, 1);
+  return l;
+}
+
+static inline bool tk_lua_optboolean (lua_State *L, int i, bool def, char *name)
+{
+  if (lua_type(L, i) == LUA_TNIL)
+    return def;
+  if (lua_type(L, i) != LUA_TBOOLEAN)
+    tk_lua_verror(L, 3, name, "value is not a boolean");
   return lua_toboolean(L, i);
 }
 
-static inline bool tk_lua_foptboolean (lua_State *L, int i, char *field, bool def)
+static inline bool tk_lua_foptboolean (lua_State *L, int i, bool def, char *name, char *field)
 {
   lua_getfield(L, i, field);
-  bool b = tk_lua_optboolean(L, -1, def);
+  if (lua_type(L, -1) == LUA_TNIL) {
+    lua_pop(L, 1);
+    return def;
+  }
+  if (lua_type(L, -1) != LUA_TBOOLEAN)
+    tk_lua_verror(L, 3, name, field, "field is not a boolean or nil");
+  bool b = lua_toboolean(L, -1);
   lua_pop(L, 1);
   return b;
 }
@@ -534,6 +618,20 @@ static inline char *tk_lua_fslurp (lua_State *L, FILE *fh, size_t *len)
   }
   *len = (size_t) size;
   return buffer;
+}
+
+static inline void tk_lua_register (lua_State *L, luaL_Reg *regs, int nup)
+{
+  while (true) {
+    if ((*regs).name == NULL)
+      break;
+    for (int i = 0; i < nup; i ++)
+      lua_pushvalue(L, -nup); // t upsa upsb
+    lua_pushcclosure(L, (*regs).func, nup); // t upsa fn
+    lua_setfield(L, -nup - 2, (*regs).name); // t
+    regs ++;
+  }
+  lua_pop(L, nup);
 }
 
 static inline void tm_initialize_random_streams (
@@ -762,38 +860,6 @@ tsetlin_t *tk_tsetlin_peek (lua_State *L, int i)
   return (tsetlin_t *) luaL_checkudata(L, i, TK_TSETLIN_MT);
 }
 
-static inline double tk_lua_optposdouble (lua_State *L, int i, double def)
-{
-  if (lua_type(L, i) < 1)
-    return def;
-  lua_Number l = luaL_checknumber(L, i);
-  if (l < 0)
-    luaL_error(L, "value can't be negative");
-  return (double) l;
-}
-
-static inline bool tk_lua_checkboolean (lua_State *L, int i)
-{
-  if (lua_type(L, i) == LUA_TNIL)
-    return false;
-  luaL_checktype(L, i, LUA_TBOOLEAN);
-  return lua_toboolean(L, i);
-}
-
-static inline void tk_lua_register (lua_State *L, luaL_Reg *regs, int nup)
-{
-  while (true) {
-    if ((*regs).name == NULL)
-      break;
-    for (int i = 0; i < nup; i ++)
-      lua_pushvalue(L, -nup); // t upsa upsb
-    lua_pushcclosure(L, (*regs).func, nup); // t upsa fn
-    lua_setfield(L, -nup - 2, (*regs).name); // t
-    regs ++;
-  }
-  lua_pop(L, nup);
-}
-
 static inline tsetlin_t *tk_tsetlin_alloc (lua_State *L)
 {
   tsetlin_t *tm = lua_newuserdata(L, sizeof(tsetlin_t)); // ud
@@ -992,30 +1058,21 @@ static inline void tk_tsetlin_init_classifier (
 }
 
 static inline unsigned int tk_tsetlin_get_nthreads (
-  lua_State *L, int i, char *field
+  lua_State *L, int i, char *name, char *field
 ) {
   long ts;
   unsigned int n_threads;
-  if (field == NULL) {
-    if (lua_type(L, i) == LUA_TNIL)
-      goto sysconf;
-    n_threads = tk_lua_checkunsigned(L, 2);
-  } else if (tk_lua_ftype(L, 2, field) != LUA_TNIL) {
-    n_threads = tk_lua_fcheckunsigned(L, 2, field);
-    goto check;
-  } else {
-    goto sysconf;
-  }
-check:
-  if (!n_threads)
-    return (unsigned int) tk_lua_error(L, "threads must be at least 1\n");
-  return n_threads;
-sysconf:
-  ts = sysconf(_SC_NPROCESSORS_ONLN) - 1;
+  if (field != NULL)
+    n_threads = tk_lua_foptunsigned(L, i, 0, name, field);
+  else
+    n_threads = tk_lua_optunsigned(L, i, 0, name);
+  if (n_threads)
+    return n_threads;
+  ts = sysconf(_SC_NPROCESSORS_ONLN);
   if (ts <= 0)
-    return (unsigned int) tk_error(L, "sysconf", errno);
+    return (unsigned int) tk_lua_verror(L, 3, name, "sysconf", errno);
   lua_pushinteger(L, ts);
-  n_threads = tk_lua_checkunsigned(L, -1);
+  n_threads = tk_lua_checkunsigned(L, -1, "sysconf");
   lua_pop(L, 1);
   return n_threads;
 }
@@ -1026,15 +1083,15 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
   lua_insert(L, 1);
 
   tk_tsetlin_init_classifier(L, tm->classifier,
-      tk_lua_fcheckunsigned(L, 2, "classes"),
-      tk_lua_fcheckunsigned(L, 2, "features"),
-      tk_lua_fcheckunsigned(L, 2, "clauses"),
-      tk_lua_fcheckunsigned(L, 2, "state"),
-      tk_lua_fcheckunsigned(L, 2, "target"),
-      tk_lua_fcheckboolean(L, 2, "boost"),
-      tk_lua_fcheckposdouble(L, 2, "specificity"),
-      tk_tsetlin_get_nthreads(L, 2, "threads"),
-      tk_lua_fcheckunsigned(L, 2, "replicas"));
+      tk_lua_fcheckunsigned(L, 2, "create classifier", "classes"),
+      tk_lua_fcheckunsigned(L, 2, "create classifier", "features"),
+      tk_lua_fcheckunsigned(L, 2, "create classifier", "clauses"),
+      tk_lua_fcheckunsigned(L, 2, "create classifier", "state"),
+      tk_lua_fcheckunsigned(L, 2, "create classifier", "target"),
+      tk_lua_fcheckboolean(L, 2, "create classifier", "boost"),
+      tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity"),
+      tk_tsetlin_get_nthreads(L, 2, "create classifier", "threads"),
+      tk_lua_fcheckunsigned(L, 2, "create classifier", "replicas"));
 
   lua_settop(L, 1);
 }
@@ -1191,8 +1248,8 @@ static inline int tk_tsetlin_predict_classifier (
 ) {
 
   lua_settop(L, 2);
-  unsigned int *ps = (unsigned int *) luaL_checkstring(L, 2);
-  unsigned int n = tk_lua_checkunsigned(L, 3);
+  unsigned int *ps = (unsigned int *) tk_lua_checkstring(L, 2, "argument 1 is not a raw bit-matrix of samples");
+  unsigned int n = tk_lua_checkunsigned(L, 3, "argument 2 is not an integer n_samples");
 
   tm->scores = tk_realloc(L, tm->scores, n * tm->replicas * sizeof(long int));
   tm->results = tk_realloc(L, tm->results, n * sizeof(unsigned int));
@@ -1286,12 +1343,12 @@ static inline int tk_tsetlin_train_classifier (
   tsetlin_classifier_t *tm
 ) {
 
-  unsigned int n = tk_lua_fcheckunsigned(L, 2, "samples");
-  unsigned int *ps = (unsigned int *) tk_lua_fcheckstring(L, 2, "problems");
-  unsigned int *ss = (unsigned int *) tk_lua_fcheckstring(L, 2, "solutions");
-  unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "iterations");
-  tm->active = tk_lua_fcheckposdouble(L, 2, "active");
-  tm->negative_sampling = tk_lua_fcheckposdouble(L, 2, "negatives");
+  unsigned int n = tk_lua_fcheckunsigned(L, 2, "train", "samples");
+  unsigned int *ps = (unsigned int *) tk_lua_fcheckstring(L, 2, "train", "problems");
+  unsigned int *ss = (unsigned int *) tk_lua_fcheckstring(L, 2, "train", "solutions");
+  unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
+  tm->active = tk_lua_fcheckposdouble(L, 2, "train", "active");
+  tm->negative_sampling = tk_lua_fcheckposdouble(L, 2, "train", "negatives");
 
   int i_each = -1;
   if (tk_lua_ftype(L, 2, "each") != LUA_TNIL) {
@@ -1349,10 +1406,10 @@ static inline int tk_tsetlin_evaluate_classifier (
 ) {
 
   lua_settop(L, 2);
-  unsigned int n = tk_lua_fcheckunsigned(L, 2, "samples");
-  unsigned int *ps = (unsigned int *) tk_lua_fcheckstring(L, 2, "problems");
-  unsigned int *ss = (unsigned int *) tk_lua_fcheckstring(L, 2, "solutions");
-  bool track_stats = tk_lua_foptboolean(L, 2, "stats", false);
+  unsigned int n = tk_lua_fcheckunsigned(L, 2, "evaluate", "samples");
+  unsigned int *ps = (unsigned int *) tk_lua_fcheckstring(L, 2, "evaluate", "problems");
+  unsigned int *ss = (unsigned int *) tk_lua_fcheckstring(L, 2, "evaluate", "solutions");
+  bool track_stats = tk_lua_foptboolean(L, 2, false, "evaluate", "stats");
 
   tm->scores = tk_realloc(L, tm->scores, n * tm->replicas * sizeof(long int));
   tm->results = tk_realloc(L, tm->results, n * sizeof(unsigned int));
@@ -1498,7 +1555,7 @@ static inline int tk_tsetlin_persist (lua_State *L)
   lua_settop(L, 3);
   tsetlin_t *tm = tk_tsetlin_peek(L, 1);
   bool tostr = lua_type(L, 2) == LUA_TNIL;
-  FILE *fh = tostr ? tk_lua_tmpfile(L) : tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
+  FILE *fh = tostr ? tk_lua_tmpfile(L) : tk_lua_fopen(L, tk_lua_checkstring(L, 2, "persist path"), "w");
   bool persist_state = lua_toboolean(L, 3);
   if (persist_state && !tm->has_state)
     luaL_error(L, "can't persist the state of a model loaded without state");
@@ -1557,7 +1614,7 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tsetlin_classifier
 static inline void tk_tsetlin_load_classifier (lua_State *L, FILE *fh, bool read_state, bool has_state)
 {
   tsetlin_t *tm = tk_tsetlin_alloc_classifier(L, read_state);
-  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, NULL);
+  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "threads", NULL);
   _tk_tsetlin_load_classifier(L, tm->classifier, fh, read_state, has_state, n_threads);
 }
 
