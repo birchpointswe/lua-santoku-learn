@@ -1,7 +1,7 @@
 local env = {
 
   name = "santoku-tsetlin",
-  version = "0.0.62-1",
+  version = "0.0.64-1",
   variable_prefix = "TK_TSETLIN",
   public = true,
 
@@ -16,6 +16,8 @@ local env = {
   test = {
     -- cflags = { "-fopt-info-vec=optimize.txt", "-fopt-info-vec-missed=optimize.txt", "-g3" },
     -- ldflags = { "-fopt-info-vec=optimize.txt", "-fopt-info-vec-missed=optimize.txt", "-g3" },
+    cflags = { "-g3" },
+    ldflags = { "-g3" },
     dependencies = {
       "luacov >= 0.15.0-1",
       "santoku-bitmap >= 0.0.36-1",

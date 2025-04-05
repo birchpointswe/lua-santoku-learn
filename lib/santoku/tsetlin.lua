@@ -45,9 +45,6 @@ local function wrap (t, threads)
       opts.threads = threads
       return evaluate(t, opts, ...)
     end,
-    update = function (...)
-      return tm.update(t, ...)
-    end,
     predict = function (...)
       return tm.predict(t, ...)
     end,
@@ -72,11 +69,5 @@ return {
   end,
   encoder = function (opts, ...)
     return wrap(tm.create("encoder", opts, ...), opts.threads)
-  end,
-  auto_encoder = function (opts, ...)
-    return wrap(tm.create("auto_encoder", opts, ...), opts.threads)
-  end,
-  regressor = function (opts, ...)
-    return wrap(tm.create("regressor", opts, ...), opts.threads)
   end,
 }
