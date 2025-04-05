@@ -112,7 +112,9 @@ typedef struct tsetlin_classifier_s {
 
   double active;
   double negative_sampling;
-  double specificity;
+  double specificity_low;
+  double specificity_high;
+  double *specificities;
 
   bool created_threads;
 
@@ -406,6 +408,16 @@ static inline double tk_lua_fcheckposdouble (lua_State *L, int i, char *name, ch
     tk_lua_verror(L, 3, name, field, "field is not a positive number");
   lua_pop(L, 1);
   return l;
+}
+
+static inline unsigned int tk_lua_foptposdouble (lua_State *L, int i, bool def, char *name, char *field)
+{
+  lua_getfield(L, i, field);
+  if (lua_type(L, -1) == LUA_TNIL) {
+    lua_pop(L, 1);
+    return def;
+  }
+  return tk_lua_fcheckposdouble(L, -1, name, field);
 }
 
 static inline unsigned int tk_lua_checkunsigned (lua_State *L, int i, char *name)
@@ -782,8 +794,7 @@ static inline void tm_update (
   unsigned int boost_true_positive = tm->boost_true_positive;
   unsigned int clauses = tm->clauses;
   unsigned int threshold = tm->threshold;
-  double specificity = tm->specificity;
-  float p = (1.0 / (threshold * 2)) * (threshold + (1 - 2 * tgt) * replica_sum);
+  double p = (1.0 / (threshold * 2)) * (threshold + (1 - 2 * tgt) * replica_sum);
   memset(feedback_to_clauses, 0, clause_chunks * sizeof(unsigned int));
   for (unsigned int i = 0; i < clauses; i ++) {
     unsigned int clause_chunk = i / BITS;
@@ -797,6 +808,7 @@ static inline void tm_update (
     unsigned int clause_chunk = j / BITS;
     unsigned int clause_chunk_pos = j % BITS;
     unsigned int *actions = tm_state_actions(tm, replica, j);
+    double specificity = tm->specificities[j];
     if (!(feedback_to_clauses[clause_chunk] & (1U << clause_chunk_pos)))
       continue;
     if ((2 * tgt - 1) * (1 - 2 * (jl & 1)) == -1) {
@@ -1016,7 +1028,8 @@ static inline void tk_tsetlin_init_classifier (
   unsigned int state_bits,
   unsigned int threshold,
   bool boost_true_positive,
-  double specificity,
+  double specificity_low,
+  double specificity_high,
   unsigned int n_threads,
   unsigned int replication
 ) {
@@ -1039,9 +1052,13 @@ static inline void tk_tsetlin_init_classifier (
   tm->filter = tm->input_bits % BITS != 0
     ? ~(((unsigned int) ~0) << (tm->input_bits % BITS))
     : (unsigned int) ~0;
-  tm->state = malloc(sizeof(unsigned int) * tm->state_chunks);
-  tm->actions = malloc(sizeof(unsigned int) * tm->action_chunks);
-  tm->specificity = specificity;
+  tm->state = tk_malloc(L, sizeof(unsigned int) * tm->state_chunks);
+  tm->actions = tk_malloc(L, sizeof(unsigned int) * tm->action_chunks);
+  tm->specificity_low = specificity_low;
+  tm->specificity_high = specificity_high;
+  tm->specificities = tk_malloc(L, tm->clauses * sizeof(double));
+  for (unsigned int i = 0; i < tm->clauses; i ++)
+    tm->specificities[i] = (1.0 * i / tm->clauses) * (tm->specificity_high - tm->specificity_low) + tm->specificity_low;
   if (!(tm->state && tm->actions))
     luaL_error(L, "error in malloc during creation of classifier");
   for (unsigned int i = 0; i < tm->replicas; i ++)
@@ -1089,7 +1106,8 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
       tk_lua_fcheckunsigned(L, 2, "create classifier", "state"),
       tk_lua_fcheckunsigned(L, 2, "create classifier", "target"),
       tk_lua_fcheckboolean(L, 2, "create classifier", "boost"),
-      tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity"),
+      tk_lua_foptposdouble(L, 2, 2, "create classifier", "specificity_low"),
+      tk_lua_foptposdouble(L, 2, 200, "create classifier", "specificity_high"),
       tk_tsetlin_get_nthreads(L, 2, "create classifier", "threads"),
       tk_lua_fcheckunsigned(L, 2, "create classifier", "replicas"));
 
@@ -1126,6 +1144,7 @@ static inline int tk_tsetlin_create (lua_State *L)
 static inline void tk_classifier_shrink (tsetlin_classifier_t *tm)
 {
   if (tm == NULL) return;
+  free(tm->specificities); tm->specificities = NULL;
   free(tm->state); tm->state = NULL;
   free(tm->scores); tm->scores = NULL;
   free(tm->results); tm->results = NULL;
@@ -1541,7 +1560,8 @@ static inline void _tk_tsetlin_persist_classifier (lua_State *L, tsetlin_classif
   tk_lua_fwrite(L, &tm->state_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->action_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->filter, sizeof(unsigned int), 1, fh);
-  tk_lua_fwrite(L, &tm->specificity, sizeof(double), 1, fh);
+  tk_lua_fwrite(L, &tm->specificity_low, sizeof(double), 1, fh);
+  tk_lua_fwrite(L, &tm->specificity_high, sizeof(double), 1, fh);
   tk_lua_fwrite(L, tm->actions, sizeof(unsigned int), tm->action_chunks, fh);
 }
 
@@ -1605,7 +1625,8 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tsetlin_classifier
   tk_lua_fread(L, &tm->state_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->action_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->filter, sizeof(unsigned int), 1, fh);
-  tk_lua_fread(L, &tm->specificity, sizeof(double), 1, fh);
+  tk_lua_fread(L, &tm->specificity_low, sizeof(double), 1, fh);
+  tk_lua_fread(L, &tm->specificity_high, sizeof(double), 1, fh);
   tm->actions = tk_malloc(L, sizeof(unsigned int) * tm->action_chunks);
   tk_lua_fread(L, tm->actions, sizeof(unsigned int), tm->action_chunks, fh);
   tk_tsetlin_setup_threads(L, tm, n_threads);
