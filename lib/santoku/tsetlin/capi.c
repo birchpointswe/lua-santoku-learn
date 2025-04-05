@@ -1,7 +1,7 @@
 /*
 
 Copyright (C) 2024 Birch Point SWE (Persist to and restore from disk)
-Copyright (C) 2024 Birch Point SWE (Lua integration, train/evaluate, active clause, autoencoder, regressor)
+Copyright (C) 2024 Birch Point SWE (Lua integration, train/evaluate, active clause)
 Copyright (C) 2024 Birch Point SWE (Loss scaling, multi-threading, auto-vectorizer support)
 Copyright (C) 2019 Ole-Christoffer Granmo (Original classifier C implementation)
 
@@ -42,6 +42,7 @@ SOFTWARE.
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdarg.h>
 
 #define TK_TSETLIN_MT "santoku_tsetlin"
 
@@ -50,11 +51,13 @@ SOFTWARE.
 typedef enum {
   TM_CLASSIFIER,
   TM_ENCODER,
-  TM_AUTO_ENCODER,
-  TM_REGRESSOR,
 } tsetlin_type_t;
 
 typedef struct {
+
+  bool trained;
+  bool destroyed;
+
   unsigned int classes;
   unsigned int features;
   unsigned int clauses;
@@ -70,9 +73,7 @@ typedef struct {
   unsigned int *state; // class clause bit chunk
   unsigned int *actions; // class clause chunk
   unsigned int *active_clause; // class clause chunk
-  double specificity_low;
-  double specificity_high;
-  double *specificity;
+  double specificity;
   pthread_mutex_t *locks;
 } tsetlin_classifier_t;
 
@@ -84,22 +85,11 @@ typedef struct {
 } tsetlin_encoder_t;
 
 typedef struct {
-  tsetlin_encoder_t encoder;
-  tsetlin_encoder_t decoder;
-} tsetlin_auto_encoder_t;
-
-typedef struct {
-  tsetlin_classifier_t classifier;
-} tsetlin_regressor_t;
-
-typedef struct {
   tsetlin_type_t type;
   bool has_state;
   union {
     tsetlin_classifier_t *classifier;
     tsetlin_encoder_t *encoder;
-    tsetlin_auto_encoder_t *auto_encoder;
-    tsetlin_regressor_t *regressor;
   };
 } tsetlin_t;
 
@@ -107,8 +97,6 @@ typedef struct {
   (&(tm)->locks[(class) * (tm)->clauses * (tm)->input_chunks + \
                 (clause) * (tm)->input_chunks + \
                 (chunk)])
-
-#define tm_specificity(tm, j) ((tm)->specificity[j])
 
 #define tm_state_lock(tm, class, clause, chunk) \
 	pthread_mutex_lock(tm_state_get_lock(tm, class, clause, chunk));
@@ -136,9 +124,19 @@ static inline uint32_t fast_rand ()
   return (uint32_t) ((x ^ x >> 22) >> (22 + count));
 }
 
-static inline void seed_rand ()
+static inline uint64_t mix64 (uint64_t x) {
+  x ^= x >> 33;
+  x *= 0xff51afd7ed558ccdULL;
+  x ^= x >> 33;
+  x *= 0xc4ceb9fe1a85ec53ULL;
+  x ^= x >> 33;
+  return x;
+}
+
+static inline void seed_rand (unsigned int c)
 {
-  mcg_state = (uint64_t) pthread_self() ^ (uint64_t) time(NULL);
+  uint64_t raw = (uint64_t)pthread_self() ^ (uint64_t)time(NULL) ^ ((uint64_t) c << 32);
+  mcg_state = mix64(raw);
 }
 
 static inline double fast_drand ()
@@ -256,6 +254,63 @@ static inline void tk_lua_callmod (
   lua_call(L, nargs, nret); // results
 }
 
+static inline int tk_lua_absindex (lua_State *L, int i)
+{
+  if (i < 0 && i > LUA_REGISTRYINDEX)
+    i += lua_gettop(L) + 1;
+  return i;
+}
+
+static inline int tk_error (
+  lua_State *L,
+  const char *label,
+  int err
+) {
+  lua_pushstring(L, label);
+  lua_pushstring(L, strerror(err));
+  tk_lua_callmod(L, 2, 0, "santoku.error", "error");
+  return 1;
+}
+
+static inline void *tk_realloc (
+  lua_State *L,
+  void *p,
+  size_t s
+) {
+  p = realloc(p, s);
+  if (!p) {
+    tk_error(L, "realloc failed", ENOMEM);
+    return NULL;
+  } else {
+    return p;
+  }
+}
+
+static inline void *tk_malloc (
+  lua_State *L,
+  size_t s
+) {
+  void *p = malloc(s);
+  if (!p) {
+    tk_error(L, "malloc failed", ENOMEM);
+    return NULL;
+  } else {
+    return p;
+  }
+}
+
+static inline int tk_lua_verror (lua_State *L, int n, ...) {
+  va_list args;
+  va_start(args, n);
+  for (int i = 0; i < n; i++) {
+    const char *str = va_arg(args, const char *);
+    lua_pushstring(L, str);
+  }
+  va_end(args);
+  tk_lua_callmod(L, n, 0, "santoku.error", "error");
+  return 0;
+}
+
 static inline int tk_lua_error (lua_State *L, const char *err)
 {
   lua_pushstring(L, err);
@@ -272,80 +327,140 @@ static inline lua_Integer tk_lua_ftype (lua_State *L, int i, char *field)
   return t;
 }
 
-static inline int tk_error (
-  lua_State *L,
-  const char *label,
-  int err
-) {
-  lua_pushstring(L, label);
-  lua_pushstring(L, strerror(err));
-  tk_lua_callmod(L, 2, 0, "santoku.error", "error");
-  return 1;
+static inline const char *tk_lua_checkstring (lua_State *L, int i, char *name)
+{
+  if (lua_type(L, i) != LUA_TSTRING)
+    tk_lua_verror(L, 3, name, "value is not a string");
+  return luaL_checkstring(L, i);
 }
 
-static inline const char *tk_lua_fcheckstring (lua_State *L, int i, char *field)
+static inline const char *tk_lua_fcheckstring (lua_State *L, int i, char *name, char *field)
 {
   lua_getfield(L, i, field);
+  if (lua_type(L, -1) != LUA_TSTRING)
+    tk_lua_verror(L, 3, name, field, "field is not a string");
   const char *s = luaL_checkstring(L, -1);
   lua_pop(L, 1);
   return s;
 }
 
-static inline double tk_lua_checkposdouble (lua_State *L, int i)
+static inline double tk_lua_checkposdouble (lua_State *L, int i, char *name)
 {
+  if (lua_type(L, i) != LUA_TNUMBER)
+    tk_lua_verror(L, 2, name, "value is not a positive number");
+  lua_Number l = luaL_checknumber(L, i);
+  if (l < 0)
+    tk_lua_verror(L, 2, name, "value is not a positive number");
+  return (double) l;
+}
+
+static inline double tk_lua_optposdouble (lua_State *L, int i, double def, char *name)
+{
+  if (lua_type(L, i) < 1)
+    return def;
   lua_Number l = luaL_checknumber(L, i);
   if (l < 0)
     luaL_error(L, "value can't be negative");
   return (double) l;
 }
 
-static inline double tk_lua_fcheckposdouble (lua_State *L, int i, char *field)
+static inline bool tk_lua_checkboolean (lua_State *L, int i)
 {
-  lua_getfield(L, i, field);
-  double n = tk_lua_checkposdouble(L, -1);
-  lua_pop(L, 1);
-  return n;
+  if (lua_type(L, i) == LUA_TNIL)
+    return false;
+  luaL_checktype(L, i, LUA_TBOOLEAN);
+  return lua_toboolean(L, i);
 }
 
-static inline unsigned int tk_lua_checkunsigned (lua_State *L, int i)
+static inline double tk_lua_fcheckposdouble (lua_State *L, int i, char *name, char *field)
 {
+  lua_getfield(L, i, field);
+  if (lua_type(L, -1) != LUA_TNUMBER)
+    tk_lua_verror(L, 3, name, field, "field is not a positive number");
+  lua_Number l = luaL_checknumber(L, -1);
+  if (l < 0)
+    tk_lua_verror(L, 3, name, field, "field is not a positive number");
+  lua_pop(L, 1);
+  return l;
+}
+
+static inline unsigned int tk_lua_checkunsigned (lua_State *L, int i, char *name)
+{
+  if (lua_type(L, i) != LUA_TNUMBER)
+    tk_lua_verror(L, 2, name, "value is not a positive integer");
   lua_Integer l = luaL_checkinteger(L, i);
   if (l < 0)
-    luaL_error(L, "value can't be negative");
+    tk_lua_verror(L, 2, name, "value is not a positive integer");
   if (l > UINT_MAX)
     luaL_error(L, "value is too large");
   return (unsigned int) l;
 }
 
-static inline lua_Integer tk_lua_fcheckunsigned (lua_State *L, int i, char *field)
+static inline unsigned int tk_lua_fcheckunsigned (lua_State *L, int i, char *name, char *field)
 {
   lua_getfield(L, i, field);
-  lua_Integer n = tk_lua_checkunsigned(L, -1);
+  if (lua_type(L, -1) != LUA_TNUMBER)
+    tk_lua_verror(L, 3, name, field, "field is not a positive integer");
+  lua_Integer l = luaL_checkinteger(L, -1);
+  if (l < 0)
+    tk_lua_verror(L, 3, name, field, "field is not a positive integer");
   lua_pop(L, 1);
-  return n;
+  return l;
 }
 
-static inline bool tk_lua_fcheckboolean (lua_State *L, int i, char *field)
+static inline bool tk_lua_fcheckboolean (lua_State *L, int i, char *name, char *field)
 {
   lua_getfield(L, i, field);
+  if (lua_type(L, -1) != LUA_TBOOLEAN)
+    tk_lua_verror(L, 3, name, field, "field is not a boolean");
   luaL_checktype(L, -1, LUA_TBOOLEAN);
   bool n = lua_toboolean(L, -1);
   lua_pop(L, 1);
   return n;
 }
 
-static inline bool tk_lua_optboolean (lua_State *L, int i, bool def)
+static inline unsigned int tk_lua_foptunsigned (lua_State *L, int i, bool def, char *name, char *field)
+{
+  lua_getfield(L, i, field);
+  if (lua_type(L, -1) == LUA_TNIL) {
+    lua_pop(L, 1);
+    return def;
+  }
+  return tk_lua_fcheckunsigned(L, -1, name, field);
+}
+
+static inline unsigned int tk_lua_optunsigned (lua_State *L, int i, unsigned int def, char *name)
 {
   if (lua_type(L, i) == LUA_TNIL)
     return def;
-  luaL_checktype(L, i, LUA_TBOOLEAN);
+  if (lua_type(L, i) != LUA_TNUMBER)
+    tk_lua_verror(L, 2, name, "value is not a positive integer");
+  lua_Integer l = luaL_checkinteger(L, i);
+  if (l < 0)
+    tk_lua_verror(L, 2, name, "value is not a positive integer");
+  lua_pop(L, 1);
+  return l;
+}
+
+static inline bool tk_lua_optboolean (lua_State *L, int i, bool def, char *name)
+{
+  if (lua_type(L, i) == LUA_TNIL)
+    return def;
+  if (lua_type(L, i) != LUA_TBOOLEAN)
+    tk_lua_verror(L, 3, name, "value is not a boolean");
   return lua_toboolean(L, i);
 }
 
-static inline bool tk_lua_foptboolean (lua_State *L, int i, char *field, bool def)
+static inline bool tk_lua_foptboolean (lua_State *L, int i, bool def, char *name, char *field)
 {
   lua_getfield(L, i, field);
-  bool b = tk_lua_optboolean(L, -1, def);
+  if (lua_type(L, -1) == LUA_TNIL) {
+    lua_pop(L, 1);
+    return def;
+  }
+  if (lua_type(L, -1) != LUA_TBOOLEAN)
+    tk_lua_verror(L, 3, name, field, "field is not a boolean or nil");
+  bool b = lua_toboolean(L, -1);
   lua_pop(L, 1);
   return b;
 }
@@ -481,6 +596,20 @@ static inline char *tk_lua_fslurp (lua_State *L, FILE *fh, size_t *len)
   return buffer;
 }
 
+static inline void tk_lua_register (lua_State *L, luaL_Reg *regs, int nup)
+{
+  while (true) {
+    if ((*regs).name == NULL)
+      break;
+    for (int i = 0; i < nup; i ++)
+      lua_pushvalue(L, -nup); // t upsa upsb
+    lua_pushcclosure(L, (*regs).func, nup); // t upsa fn
+    lua_setfield(L, -nup - 2, (*regs).name); // t
+    regs ++;
+  }
+  lua_pop(L, nup);
+}
+
 static inline void tm_initialize_random_streams (
   tsetlin_classifier_t *tm,
   unsigned int *feedback_to_la,
@@ -592,9 +721,11 @@ static inline void tm_calculate_clause_output (
   unsigned int *clause_output,
   bool predict
 ) {
-  memset(clause_output, 0, tm->clause_chunks * sizeof(unsigned int));
+  unsigned int clause_chunks = tm->clause_chunks;
   unsigned int clauses = tm->clauses;
   unsigned int filter = tm->filter;
+  for (unsigned int i = 0; i < clause_chunks; i ++)
+    clause_output[i] = 0U;
   for (unsigned int j = 0; j < clauses; j ++) {
     unsigned int output = 0;
     unsigned int all_exclude = 0;
@@ -633,6 +764,7 @@ static inline void tm_update (
   unsigned int boost_true_positive = tm->boost_true_positive;
   unsigned int clauses = tm->clauses;
   unsigned int threshold = tm->threshold;
+  double specificity = tm->specificity;
   unsigned int *active_clause = tm->active_clause;
   float p = (1.0 / (threshold * 2)) * (threshold + (1 - 2 * tgt) * class_sum);
   memset(feedback_to_clauses, 0, clause_chunks * sizeof(unsigned int));
@@ -648,7 +780,6 @@ static inline void tm_update (
     unsigned int clause_chunk = j / BITS;
     unsigned int clause_chunk_pos = j % BITS;
     unsigned int *actions = tm_state_actions(tm, class, j);
-    double specificity = tm_specificity(tm, j);
     if (!(feedback_to_clauses[clause_chunk] & (1U << clause_chunk_pos)))
       continue;
     if ((2 * tgt - 1) * (1 - 2 * (jl & 1)) == -1) {
@@ -732,58 +863,10 @@ static inline void mc_tm_update (
   unsigned int *feedback_to_la
 ) {
   tm_update(tm, class, input, 1, clause_output, feedback_to_clauses, feedback_to_la);
-  // TODO: Is there a faster way to do negative class selection? Is negative
-  // class selection even worth it?
   unsigned int negative_class = (unsigned int) fast_rand() % tm->classes;
   while (negative_class == class)
     negative_class = (unsigned int) fast_rand() % tm->classes;
   tm_update(tm, negative_class, input, 0, clause_output, feedback_to_clauses, feedback_to_la);
-}
-
-static inline void ae_tm_decode (
-  tsetlin_auto_encoder_t *tm,
-  unsigned int *input,
-  unsigned int *decoding,
-  long int *scores
-) {
-  tsetlin_classifier_t *decoder = &tm->decoder.encoder;
-  unsigned int decoder_classes = decoder->classes;
-  unsigned int clause_output[decoder->clause_chunks];
-  tm_score(decoder, input, clause_output, scores);
-
-  for (unsigned int i = 0; i < decoder_classes; i ++)
-  {
-    unsigned int chunk = i / BITS;
-    unsigned int pos = i % BITS;
-    if (scores[i] > 0)
-      decoding[chunk] |= (1U << pos);
-    else
-      decoding[chunk] &= ~(1U << pos);
-  }
-  decoding[tm->decoder.encoding_chunks - 1] &= decoder->filter;
-}
-
-static inline void ae_tm_encode (
-  tsetlin_auto_encoder_t *tm,
-  unsigned int *input,
-  unsigned int *encoding,
-  long int *scores
-) {
-  tsetlin_classifier_t *encoder = &tm->encoder.encoder;
-  unsigned int encoder_classes = encoder->classes;
-  unsigned int clause_output[encoder->clause_chunks];
-  tm_score(encoder, input, clause_output, scores);
-
-  for (unsigned int i = 0; i < encoder_classes; i ++)
-  {
-    unsigned int chunk = i / BITS;
-    unsigned int pos = i % BITS;
-    if (scores[i] > 0)
-      encoding[chunk] |= (1U << pos);
-    else
-      encoding[chunk] &= ~(1U << pos);
-  }
-  encoding[tm->encoder.encoding_chunks - 1] &= encoder->filter;
 }
 
 static inline void en_tm_encode (
@@ -805,64 +888,6 @@ static inline void en_tm_encode (
       encoding[chunk] &= ~(1U << pos);
   }
   encoding[tm->encoding_chunks - 1] &= tm->encoder.filter;
-}
-
-static inline void ae_tm_update (
-  tsetlin_auto_encoder_t *tm,
-  unsigned int *input,
-  unsigned int *clause_output,
-  unsigned int *feedback_to_clauses,
-  unsigned int *feedback_to_la_e,
-  unsigned int *feedback_to_la_d,
-  long int *scores_e,
-  long int *scores_d,
-  double loss_alpha
-) {
-  unsigned int encoding[tm->encoder.encoding_chunks * 2]; // encoding + flipped bits for input to decoder
-  unsigned int decoding[tm->decoder.encoding_chunks * 2]; // decoding + flipped bits to compare to input
-
-  // encode input, copy, flip bits
-  ae_tm_encode(tm, input, encoding, scores_e);
-  memcpy(encoding + tm->encoder.encoding_chunks, encoding, tm->encoder.encoding_chunks * sizeof(unsigned int));
-  flip_bits(encoding + tm->encoder.encoding_chunks, tm->encoder.encoding_chunks);
-
-  // decode encoding, copy, flip bits
-  ae_tm_decode(tm, encoding, decoding, scores_d);
-  memcpy(decoding + tm->decoder.encoding_chunks, decoding, tm->decoder.encoding_chunks * sizeof(unsigned int));
-  flip_bits(decoding + tm->decoder.encoding_chunks, tm->decoder.encoding_chunks);
-
-  unsigned int diff = hamming(input, decoding, tm->encoder.encoder.input_bits);
-  double loss = hamming_to_loss(diff, tm->encoder.encoder.input_bits, loss_alpha);
-
-  if (fast_chance(1 - loss))
-    return;
-
-  for (unsigned int bit = 0; bit < tm->encoder.encoding_bits; bit ++) {
-    unsigned int chunk0 = bit / BITS;
-    unsigned int chunk1 = chunk0 + tm->encoder.encoding_chunks;
-    unsigned int pos = bit % BITS;
-    unsigned int bit_x = encoding[chunk0] & (1U << pos);
-    unsigned int bit_x_flipped = !bit_x;
-    encoding[chunk0] ^= (1U << pos);
-    encoding[chunk1] ^= (1U << pos);
-    ae_tm_decode(tm, encoding, decoding, scores_d);
-    memcpy(decoding + tm->decoder.encoding_chunks, decoding, tm->decoder.encoding_chunks * sizeof(unsigned int));
-    flip_bits(decoding + tm->decoder.encoding_chunks, tm->decoder.encoding_chunks);
-    unsigned int diff0 = hamming(input, decoding, tm->encoder.encoder.input_bits);
-    encoding[chunk0] ^= (1U << pos);
-    encoding[chunk1] ^= (1U << pos);
-    if (diff0 <= diff)
-      tm_update(&tm->encoder.encoder, bit, input, bit_x_flipped, clause_output, feedback_to_clauses, feedback_to_la_e);
-    else if (diff0 > diff)
-      tm_update(&tm->encoder.encoder, bit, input, bit_x, clause_output, feedback_to_clauses, feedback_to_la_e);
-  }
-
-  for (unsigned int bit = 0; bit < tm->encoder.encoder.input_bits; bit ++) {
-    unsigned int chunk = bit / BITS;
-    unsigned int pos = bit % BITS;
-    unsigned int bit_i = input[chunk] & (1U << pos);
-    tm_update(&tm->decoder.encoder, bit, encoding, bit_i, clause_output, feedback_to_clauses, feedback_to_la_d);
-  }
 }
 
 static inline void en_tm_update (
@@ -945,38 +970,6 @@ tsetlin_t *tk_tsetlin_peek (lua_State *L, int i)
   return (tsetlin_t *) luaL_checkudata(L, i, TK_TSETLIN_MT);
 }
 
-static inline double tk_lua_optposdouble (lua_State *L, int i, double def)
-{
-  if (lua_type(L, i) < 1)
-    return def;
-  lua_Number l = luaL_checknumber(L, i);
-  if (l < 0)
-    luaL_error(L, "value can't be negative");
-  return (double) l;
-}
-
-static inline bool tk_lua_checkboolean (lua_State *L, int i)
-{
-  if (lua_type(L, i) == LUA_TNIL)
-    return false;
-  luaL_checktype(L, i, LUA_TBOOLEAN);
-  return lua_toboolean(L, i);
-}
-
-static inline void tk_lua_register (lua_State *L, luaL_Reg *regs, int nup)
-{
-  while (true) {
-    if ((*regs).name == NULL)
-      break;
-    for (int i = 0; i < nup; i ++)
-      lua_pushvalue(L, -nup); // t upsa upsb
-    lua_pushcclosure(L, (*regs).func, nup); // t upsa fn
-    lua_setfield(L, -nup - 2, (*regs).name); // t
-    regs ++;
-  }
-  lua_pop(L, nup);
-}
-
 static inline tsetlin_t *tk_tsetlin_alloc (lua_State *L)
 {
   tsetlin_t *tm = lua_newuserdata(L, sizeof(tsetlin_t)); // ud
@@ -992,8 +985,7 @@ static inline tsetlin_t *tk_tsetlin_alloc_classifier (lua_State *L, bool has_sta
   tsetlin_t *tm = tk_tsetlin_alloc(L);
   tm->type = TM_CLASSIFIER;
   tm->has_state = has_state;
-  tm->classifier = malloc(sizeof(tsetlin_classifier_t));
-  if (!tm->classifier) luaL_error(L, "error in malloc during creation");
+  tm->classifier = tk_malloc(L, sizeof(tsetlin_classifier_t));
   memset(tm->classifier, 0, sizeof(tsetlin_classifier_t));
   return tm;
 }
@@ -1009,28 +1001,6 @@ static inline tsetlin_t *tk_tsetlin_alloc_encoder (lua_State *L, bool has_state)
   return tm;
 }
 
-static inline tsetlin_t *tk_tsetlin_alloc_auto_encoder (lua_State *L, bool has_state)
-{
-  tsetlin_t *tm = tk_tsetlin_alloc(L);
-  tm->type = TM_AUTO_ENCODER;
-  tm->has_state = has_state;
-  tm->auto_encoder = malloc(sizeof(tsetlin_auto_encoder_t));
-  if (!tm->auto_encoder) luaL_error(L, "error in malloc during creation");
-  memset(tm->auto_encoder, 0, sizeof(tsetlin_auto_encoder_t));
-  return tm;
-}
-
-static inline tsetlin_t *tk_tsetlin_alloc_regressor (lua_State *L, bool has_state)
-{
-  tsetlin_t *tm = tk_tsetlin_alloc(L);
-  tm->type = TM_REGRESSOR;
-  tm->has_state = has_state;
-  tm->regressor = malloc(sizeof(tsetlin_regressor_t));
-  if (!tm->regressor) luaL_error(L, "error in malloc during creation");
-  memset(tm->regressor, 0, sizeof(tsetlin_regressor_t));
-  return tm;
-}
-
 static inline void tk_tsetlin_init_classifier (
   lua_State *L,
   tsetlin_classifier_t *tm,
@@ -1040,8 +1010,7 @@ static inline void tk_tsetlin_init_classifier (
   unsigned int state_bits,
   unsigned int threshold,
   bool boost_true_positive,
-  double specificity_low,
-  double specificity_high
+  double specificity
 ) {
   tm->classes = classes;
   tm->features = features;
@@ -1060,11 +1029,7 @@ static inline void tk_tsetlin_init_classifier (
   tm->state = malloc(sizeof(unsigned int) * tm->state_chunks);
   tm->actions = malloc(sizeof(unsigned int) * tm->action_chunks);
   tm->active_clause = malloc(sizeof(unsigned int) * tm->clause_chunks);
-  tm->specificity_low = specificity_low;
-  tm->specificity_high = specificity_high;
-  tm->specificity = malloc(sizeof(double) * tm->clauses);
-  for (unsigned int i = 0; i < tm->clauses; i ++)
-    tm->specificity[i] = (1.0 * i / tm->clauses) * (tm->specificity_high - tm->specificity_low) + tm->specificity_low;
+  tm->specificity = specificity;
   tm->locks = malloc(sizeof(pthread_mutex_t) * tm->action_chunks);
   for (unsigned int i = 0; i < tm->action_chunks; i ++)
     pthread_mutex_init(&tm->locks[i], NULL);
@@ -1091,12 +1056,11 @@ static inline int tk_tsetlin_init_encoder (
   unsigned int state_bits,
   unsigned int threshold,
   bool boost_true_positive,
-  double specificity_low,
-  double specificity_high
+  double specificity
 ) {
   tk_tsetlin_init_classifier(L, &tm->encoder,
       encoding_bits, features, clauses, state_bits, threshold,
-      boost_true_positive, specificity_low, specificity_high);
+      boost_true_positive, specificity);
   tm->encoding_bits = encoding_bits;
   tm->encoding_chunks = (encoding_bits - 1) / BITS + 1;
   tm->encoding_filter = encoding_bits % BITS != 0
@@ -1105,20 +1069,39 @@ static inline int tk_tsetlin_init_encoder (
   return 0;
 }
 
+static inline unsigned int tk_tsetlin_get_nthreads (
+  lua_State *L, int i, char *name, char *field
+) {
+  long ts;
+  unsigned int n_threads;
+  if (field != NULL)
+    n_threads = tk_lua_foptunsigned(L, i, 0, name, field);
+  else
+    n_threads = tk_lua_optunsigned(L, i, 0, name);
+  if (n_threads)
+    return n_threads;
+  ts = sysconf(_SC_NPROCESSORS_ONLN);
+  if (ts <= 0)
+    return (unsigned int) tk_lua_verror(L, 3, name, "sysconf", errno);
+  lua_pushinteger(L, ts);
+  n_threads = tk_lua_checkunsigned(L, -1, "sysconf");
+  lua_pop(L, 1);
+  return n_threads;
+}
+
 static inline void tk_tsetlin_create_classifier (lua_State *L)
 {
   tsetlin_t *tm = tk_tsetlin_alloc_classifier(L, true);
   lua_insert(L, 1);
 
   tk_tsetlin_init_classifier(L, tm->classifier,
-      tk_lua_fcheckunsigned(L, 2, "classes"),
-      tk_lua_fcheckunsigned(L, 2, "features"),
-      tk_lua_fcheckunsigned(L, 2, "clauses"),
-      tk_lua_fcheckunsigned(L, 2, "state_bits"),
-      tk_lua_fcheckunsigned(L, 2, "target"),
-      tk_lua_fcheckboolean(L, 2, "boost_true_positive"),
-      tk_lua_fcheckposdouble(L, 2, "spec_low"),
-      tk_lua_fcheckposdouble(L, 2, "spec_high"));
+      tk_lua_fcheckunsigned(L, 2, "create classifier", "classes"),
+      tk_lua_fcheckunsigned(L, 2, "create classifier", "features"),
+      tk_lua_fcheckunsigned(L, 2, "create classifier", "clauses"),
+      tk_lua_fcheckunsigned(L, 2, "create classifier", "state"),
+      tk_lua_fcheckunsigned(L, 2, "create classifier", "target"),
+      tk_lua_fcheckboolean(L, 2, "create classifier", "boost"),
+      tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity"));
 
   lua_settop(L, 1);
 }
@@ -1129,44 +1112,15 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
   lua_insert(L, 1);
 
   tk_tsetlin_init_encoder(L, tm->encoder,
-      tk_lua_fcheckunsigned(L, 2, "hidden"),
-      tk_lua_fcheckunsigned(L, 2, "visible"),
-      tk_lua_fcheckunsigned(L, 2, "clauses"),
-      tk_lua_fcheckunsigned(L, 2, "state_bits"),
-      tk_lua_fcheckunsigned(L, 2, "target"),
-      tk_lua_fcheckboolean(L, 2, "boost_true_positive"),
-      tk_lua_fcheckposdouble(L, 2, "spec_low"),
-      tk_lua_fcheckposdouble(L, 2, "spec_high"));
+      tk_lua_fcheckunsigned(L, 2, "create encoder", "hidden"),
+      tk_lua_fcheckunsigned(L, 2, "create encoder", "visible"),
+      tk_lua_fcheckunsigned(L, 2, "create encoder", "clauses"),
+      tk_lua_fcheckunsigned(L, 2, "create encoder", "state_bits"),
+      tk_lua_fcheckunsigned(L, 2, "create encoder", "target"),
+      tk_lua_fcheckboolean(L, 2, "create encoder", "boost_true_positive"),
+      tk_lua_fcheckposdouble(L, 2, "create encoder", "specificity"));
 
   lua_settop(L, 1);
-}
-
-static inline void tk_tsetlin_create_auto_encoder (lua_State *L)
-{
-  tsetlin_t *tm = tk_tsetlin_alloc_auto_encoder(L, true);
-  lua_insert(L, 1);
-
-  unsigned int encoding_bits = tk_lua_fcheckunsigned(L, 2, "hidden");
-  unsigned int features = tk_lua_fcheckunsigned(L, 2, "visible");
-  unsigned int clauses = tk_lua_fcheckunsigned(L, 2, "clauses");
-  unsigned int state_bits = tk_lua_fcheckunsigned(L, 2, "state_bits");
-  unsigned int threshold = tk_lua_fcheckunsigned(L, 2, "target");
-  bool boost_true_positive = tk_lua_fcheckboolean(L, 2, "boost_true_positive");
-  double specificity_low = tk_lua_fcheckposdouble(L, 2, "spec_low");
-  double specificity_high = tk_lua_fcheckposdouble(L, 2, "spec_high");
-
-  tk_tsetlin_init_encoder(L, &tm->auto_encoder->encoder,
-      encoding_bits, features, clauses, state_bits, threshold, boost_true_positive, specificity_low, specificity_high);
-  tk_tsetlin_init_encoder(L, &tm->auto_encoder->decoder,
-      tm->auto_encoder->encoder.encoder.input_bits, encoding_bits, clauses, state_bits, threshold, boost_true_positive, specificity_low, specificity_high);
-
-  lua_settop(L, 1);
-}
-
-static inline void tk_tsetlin_create_regressor (lua_State *L)
-{
-  luaL_error(L, "unimplemented: create regressor");
-  lua_settop(L, 0);
 }
 
 // TODO: Instead of the user passing in a string name for the type, pass in the
@@ -1187,18 +1141,6 @@ static inline int tk_tsetlin_create (lua_State *L)
     tk_tsetlin_create_encoder(L);
     return 1;
 
-  } else if (!strcmp(type, "auto_encoder")) {
-
-    lua_remove(L, 1);
-    tk_tsetlin_create_auto_encoder(L);
-    return 1;
-
-  } else if (!strcmp(type, "regressor")) {
-
-    lua_remove(L, 1);
-    tk_tsetlin_create_regressor(L);
-    return 1;
-
   } else {
 
     luaL_error(L, "unexpected tsetlin machine type in create");
@@ -1207,23 +1149,19 @@ static inline int tk_tsetlin_create (lua_State *L)
   }
 }
 
-static inline void tk_tsetlin_destroy_classifier (tsetlin_classifier_t *tm)
+static inline void tk_classifier_destroy (tsetlin_classifier_t *tm)
 {
-  if (tm == NULL)
-    return;
-  free(tm->state);
-  tm->state = NULL;
-  free(tm->actions);
-  tm->actions = NULL;
+  if (tm == NULL) return;
+  if (tm->destroyed) return;
+  tm->destroyed = true;
+  free(tm->state); tm->state = NULL;
+  free(tm->actions); tm->actions = NULL;
   free(tm->active_clause);
   tm->active_clause = NULL;
-  free(tm->specificity);
-  tm->specificity = NULL;
   if (tm->locks)
     for (unsigned int i = 0; i < tm->action_chunks; i ++)
       pthread_mutex_destroy(&tm->locks[i]);
-  free(tm->locks);
-  tm->locks = NULL;
+  free(tm->locks); tm->locks = NULL;
 }
 
 static inline int tk_tsetlin_destroy (lua_State *L)
@@ -1233,28 +1171,17 @@ static inline int tk_tsetlin_destroy (lua_State *L)
   switch (tm->type) {
     case TM_CLASSIFIER:
       if (tm->classifier) {
-        tk_tsetlin_destroy_classifier(tm->classifier);
+        tk_classifier_destroy(tm->classifier);
         free(tm->classifier);
         tm->classifier = NULL;
       }
       break;
     case TM_ENCODER:
       if (tm->encoder) {
-        tk_tsetlin_destroy_classifier(&tm->encoder->encoder);
+        tk_classifier_destroy(&tm->encoder->encoder);
         free(tm->encoder);
         tm->encoder = NULL;
       }
-      break;
-    case TM_AUTO_ENCODER:
-      if (tm->auto_encoder) {
-        tk_tsetlin_destroy_classifier(&tm->auto_encoder->encoder.encoder);
-        tk_tsetlin_destroy_classifier(&tm->auto_encoder->decoder.encoder);
-        free(tm->auto_encoder);
-        tm->auto_encoder = NULL;
-      }
-      break;
-    case TM_REGRESSOR:
-      luaL_error(L, "unimplemented: destroy regressor");
       break;
     default:
       return luaL_error(L, "unexpected tsetlin machine type in destroy");
@@ -1282,24 +1209,6 @@ static inline int tk_tsetlin_predict_encoder (lua_State *L, tsetlin_encoder_t *t
   return 2;
 }
 
-static inline int tk_tsetlin_predict_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
-{
-  lua_settop(L, 2);
-  unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
-  unsigned int encoding_chunks = tm->encoder.encoding_chunks;
-  unsigned int encoding[encoding_chunks];
-  long int scores[tm->encoder.encoder.classes];
-  ae_tm_encode(tm, bm, encoding, scores);
-  lua_pushlstring(L, (char *) encoding, sizeof(unsigned int) * encoding_chunks);
-  return 1;
-}
-
-static inline int tk_tsetlin_predict_regressor (lua_State *L, tsetlin_regressor_t *tm)
-{
-  luaL_error(L, "unimplemented: predict regressor");
-  return 0;
-}
-
 static inline int tk_tsetlin_predict (lua_State *L)
 {
   tsetlin_t *tm = tk_tsetlin_peek(L, 1);
@@ -1308,99 +1217,15 @@ static inline int tk_tsetlin_predict (lua_State *L)
       return tk_tsetlin_predict_classifier(L, tm->classifier);
     case TM_ENCODER:
       return tk_tsetlin_predict_encoder(L, tm->encoder);
-    case TM_AUTO_ENCODER:
-      return tk_tsetlin_predict_auto_encoder(L, tm->auto_encoder);
-    case TM_REGRESSOR:
-      return tk_tsetlin_predict_regressor(L, tm->regressor);
     default:
       return luaL_error(L, "unexpected tsetlin machine type in predict");
   }
   return 0;
 }
 
-static inline int tk_tsetlin_update_classifier (lua_State *L, tsetlin_classifier_t *tm)
-{
-  unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
-  lua_Integer tgt = luaL_checkinteger(L, 3);
-  if (tgt < 0)
-    luaL_error(L, "target class must be greater than zero");
-  double active_clause = tk_lua_checkposdouble(L, 4);
-  mc_tm_initialize_active_clause(tm, active_clause);
-  unsigned int clause_chunks = tm->clause_chunks;
-  unsigned int input_chunks = tm->input_chunks;
-  unsigned int clause_output[clause_chunks];
-  unsigned int feedback_to_clauses[clause_chunks];
-  unsigned int feedback_to_la[input_chunks];
-  mc_tm_update(tm, bm, tgt, clause_output, feedback_to_clauses, feedback_to_la);
-  return 0;
-}
-
-static inline int tk_tsetlin_update_encoder (
-  lua_State *L,
-  tsetlin_encoder_t *tm
-) {
-  unsigned int *a = (unsigned int *) luaL_checkstring(L, 2);
-  unsigned int *n = (unsigned int *) luaL_checkstring(L, 3);
-  unsigned int *p = (unsigned int *) luaL_checkstring(L, 4);
-  double active_clause = tk_lua_checkposdouble(L, 5);
-  double margin = tk_lua_checkposdouble(L, 6);
-  double loss_alpha = tk_lua_checkposdouble(L, 7);
-  mc_tm_initialize_active_clause(&tm->encoder, active_clause);
-  unsigned int clause_output[tm->encoder.clause_chunks];
-  unsigned int feedback_to_clauses[tm->encoder.clause_chunks];
-  unsigned int feedback_to_la[tm->encoder.input_chunks];
-  long int scores[tm->encoder.classes];
-  en_tm_update(tm, a, n, p, clause_output, feedback_to_clauses, feedback_to_la, scores, margin, loss_alpha);
-  return 0;
-}
-
-static inline int tk_tsetlin_update_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
-{
-  unsigned int *bm = (unsigned int *) luaL_checkstring(L, 2);
-  double active_clause = tk_lua_checkposdouble(L, 3);
-  double loss_alpha = tk_lua_checkposdouble(L, 4);
-  unsigned int clause_output[tm->encoder.encoder.clause_chunks];
-  unsigned int feedback_to_clauses[tm->encoder.encoder.clause_chunks];
-  unsigned int feedback_to_la_e[tm->encoder.encoder.input_chunks];
-  unsigned int feedback_to_la_d[tm->encoder.encoding_chunks * 2];
-  long int scores_e[tm->encoder.encoder.classes];
-  long int scores_d[tm->decoder.encoder.classes];
-  mc_tm_initialize_active_clause(&tm->encoder.encoder, active_clause);
-  mc_tm_initialize_active_clause(&tm->decoder.encoder, active_clause);
-  ae_tm_update(tm, bm,
-      clause_output, feedback_to_clauses, feedback_to_la_e, feedback_to_la_d, scores_e, scores_d,
-      loss_alpha);
-  return 0;
-}
-
-static inline int tk_tsetlin_update_regressor (lua_State *L, tsetlin_regressor_t *tm)
-{
-  luaL_error(L, "unimplemented: update regressor");
-  return 0;
-}
-
-static inline int tk_tsetlin_update (lua_State *L)
-{
-  tsetlin_t *tm = tk_tsetlin_peek(L, 1);
-  if (!tm->has_state)
-    luaL_error(L, "can't update a model loaded without state");
-  switch (tm->type) {
-    case TM_CLASSIFIER:
-      return tk_tsetlin_update_classifier(L, tm->classifier);
-    case TM_ENCODER:
-      return tk_tsetlin_update_encoder(L, tm->encoder);
-    case TM_AUTO_ENCODER:
-      return tk_tsetlin_update_auto_encoder(L, tm->auto_encoder);
-    case TM_REGRESSOR:
-      return tk_tsetlin_update_regressor(L, tm->regressor);
-    default:
-      return luaL_error(L, "unexpected tsetlin machine type in update");
-  }
-  return 0;
-}
-
 typedef struct {
   tsetlin_classifier_t *tm;
+  unsigned int id;
   unsigned int n;
   unsigned int *next;
   unsigned int *shuffle;
@@ -1411,8 +1236,8 @@ typedef struct {
 
 static void *train_classifier_thread (void *arg)
 {
-  seed_rand();
   train_classifier_thread_data_t *data = (train_classifier_thread_data_t *) arg;
+  seed_rand(data->id);
   unsigned int clause_chunks = data->tm->clause_chunks;
   unsigned int input_chunks = data->tm->input_chunks;
   unsigned int clause_output[clause_chunks];
@@ -1431,42 +1256,13 @@ static void *train_classifier_thread (void *arg)
   }
 }
 
-static inline unsigned int tk_tsetlin_get_nthreads (
-  lua_State *L, int i, char *field
-) {
-  long ts;
-  unsigned int n_threads;
-  if (field == NULL) {
-    if (lua_type(L, i) == LUA_TNIL)
-      goto sysconf;
-    n_threads = tk_lua_checkunsigned(L, 2);
-  } else if (tk_lua_ftype(L, 2, field) != LUA_TNIL) {
-    n_threads = tk_lua_fcheckunsigned(L, 2, field);
-    goto check;
-  } else {
-    goto sysconf;
-  }
-check:
-  if (!n_threads)
-    return (unsigned int) tk_lua_error(L, "threads must be at least 1\n");
-  return n_threads;
-sysconf:
-  ts = sysconf(_SC_NPROCESSORS_ONLN) - 1;
-  if (ts <= 0)
-    return (unsigned int) tk_error(L, "sysconf", errno);
-  lua_pushinteger(L, ts);
-  n_threads = tk_lua_checkunsigned(L, -1);
-  lua_pop(L, 1);
-  return n_threads;
-}
-
 static inline int tk_tsetlin_train_classifier (lua_State *L, tsetlin_classifier_t *tm)
 {
-  unsigned int n = tk_lua_fcheckunsigned(L, 2, "samples");
-  unsigned int *ps = (unsigned int *) tk_lua_fcheckstring(L, 2, "problems");
-  unsigned int *ss = (unsigned int *) tk_lua_fcheckstring(L, 2, "solutions");
-  double active_clause = tk_lua_fcheckposdouble(L, 2, "active_clause");
-  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "threads");
+  unsigned int n = tk_lua_fcheckunsigned(L, 2, "train", "samples");
+  unsigned int *ps = (unsigned int *) tk_lua_fcheckstring(L, 2, "train", "problems");
+  unsigned int *ss = (unsigned int *) tk_lua_fcheckstring(L, 2, "train", "solutions");
+  double active_clause = tk_lua_fcheckposdouble(L, 2, "train", "active");
+  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "train", "threads");
   mc_tm_initialize_active_clause(tm, active_clause);
 
   unsigned int next = 0;
@@ -1480,6 +1276,7 @@ static inline int tk_tsetlin_train_classifier (lua_State *L, tsetlin_classifier_
 
   for (unsigned int i = 0; i < n_threads; i++) {
     thread_data[i].tm = tm;
+    thread_data[i].id = i;
     thread_data[i].n = n;
     thread_data[i].next = &next;
     thread_data[i].shuffle = shuffle;
@@ -1502,6 +1299,7 @@ static inline int tk_tsetlin_train_classifier (lua_State *L, tsetlin_classifier_
 
 typedef struct {
   tsetlin_encoder_t *tm;
+  unsigned int id;
   unsigned int n;
   unsigned int *next;
   unsigned int *shuffle;
@@ -1513,8 +1311,8 @@ typedef struct {
 
 static void *train_encoder_thread (void *arg)
 {
-  seed_rand();
   train_encoder_thread_data_t *data = (train_encoder_thread_data_t *) arg;
+  seed_rand(data->id);
   unsigned int clause_chunks = data->tm->encoder.clause_chunks;
   unsigned int encoder_classes = data->tm->encoder.classes;
   unsigned int input_chunks = data->tm->encoder.input_chunks;
@@ -1544,12 +1342,12 @@ static inline int tk_tsetlin_train_encoder (
   lua_State *L,
   tsetlin_encoder_t *tm
 ) {
-  unsigned int n = tk_lua_fcheckunsigned(L, 2, "samples");
-  unsigned int *tokens = (unsigned int *) tk_lua_fcheckstring(L, 2, "corpus");
-  double active_clause = tk_lua_fcheckposdouble(L, 2, "active_clause");
-  double margin = tk_lua_fcheckposdouble(L, 2, "margin");
-  double loss_alpha = tk_lua_fcheckposdouble(L, 2, "loss_alpha");
-  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "threads");
+  unsigned int n = tk_lua_fcheckunsigned(L, 2, "train", "samples");
+  unsigned int *tokens = (unsigned int *) tk_lua_fcheckstring(L, 2, "train", "corpus");
+  double active_clause = tk_lua_fcheckposdouble(L, 2, "train", "active");
+  double margin = tk_lua_fcheckposdouble(L, 2, "train", "margin");
+  double loss_alpha = tk_lua_fcheckposdouble(L, 2, "train", "loss");
+  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "train", "threads");
   mc_tm_initialize_active_clause(&tm->encoder, active_clause);
 
   pthread_t threads[n_threads];
@@ -1563,6 +1361,7 @@ static inline int tk_tsetlin_train_encoder (
 
   for (unsigned int i = 0; i < n_threads; i++) {
     thread_data[i].tm = tm;
+    thread_data[i].id = i;
     thread_data[i].n = n;
     thread_data[i].next = &next;
     thread_data[i].shuffle = shuffle;
@@ -1584,86 +1383,6 @@ static inline int tk_tsetlin_train_encoder (
   return 0;
 }
 
-typedef struct {
-  tsetlin_auto_encoder_t *tm;
-  unsigned int n;
-  unsigned int *next;
-  unsigned int *shuffle;
-  unsigned int *ps;
-  double loss_alpha;
-  pthread_mutex_t *qlock;
-} train_auto_encoder_thread_data_t;
-
-static void *train_auto_encoder_thread (void *arg)
-{
-  seed_rand();
-  train_auto_encoder_thread_data_t *data = (train_auto_encoder_thread_data_t *) arg;
-  unsigned int clause_output[data->tm->encoder.encoder.clause_chunks];
-  unsigned int feedback_to_clauses[data->tm->encoder.encoder.clause_chunks];
-  unsigned int feedback_to_la_e[data->tm->encoder.encoder.input_chunks];
-  unsigned int feedback_to_la_d[data->tm->encoder.encoding_chunks * 2];
-  long int scores_e[data->tm->encoder.encoder.classes];
-  long int scores_d[data->tm->decoder.encoder.classes];
-  while (1) {
-    pthread_mutex_lock(data->qlock);
-    unsigned int next = *data->next;
-    (*data->next) += 1;
-    pthread_mutex_unlock(data->qlock);
-    if (next >= data->n)
-      return NULL;
-    unsigned int idx = data->shuffle[next];
-    ae_tm_update(data->tm, data->ps + idx * data->tm->encoder.encoder.input_chunks,
-        clause_output, feedback_to_clauses, feedback_to_la_e, feedback_to_la_d, scores_e, scores_d,
-        data->loss_alpha);
-  }
-  return NULL;
-}
-
-static inline int tk_tsetlin_train_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
-{
-  unsigned int n = tk_lua_fcheckunsigned(L, 2, "samples");
-  unsigned int *ps = (unsigned int *) tk_lua_fcheckstring(L, 2, "corpus");
-  double active_clause = tk_lua_fcheckposdouble(L, 2, "active_clause");
-  double loss_alpha = tk_lua_fcheckposdouble(L, 2, "loss_alpha");
-  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "threads");
-
-  mc_tm_initialize_active_clause(&tm->encoder.encoder, active_clause);
-  mc_tm_initialize_active_clause(&tm->decoder.encoder, active_clause);
-
-  unsigned int next = 0;
-  unsigned int shuffle[n];
-  init_shuffle(shuffle, n);
-
-  pthread_t threads[n_threads];
-  pthread_mutex_t qlock;
-  pthread_mutex_init(&qlock, NULL);
-  train_auto_encoder_thread_data_t thread_data[n_threads];
-
-  for (unsigned int i = 0; i < n_threads; i++) {
-    thread_data[i].tm = tm;
-    thread_data[i].n = n;
-    thread_data[i].next = &next;
-    thread_data[i].shuffle = shuffle;
-    thread_data[i].ps = ps;
-    thread_data[i].loss_alpha = loss_alpha;
-    thread_data[i].qlock = &qlock;
-    if (pthread_create(&threads[i], NULL, train_auto_encoder_thread, &thread_data[i]) != 0)
-      return tk_error(L, "pthread_create", errno);
-  }
-
-  for (unsigned int i = 0; i < n_threads; i++)
-    if (pthread_join(threads[i], NULL) != 0)
-      return tk_error(L, "pthread_join", errno);
-
-  return 0;
-}
-
-static inline int tk_tsetlin_train_regressor (lua_State *L, tsetlin_regressor_t *tm)
-{
-  luaL_error(L, "unimplemented: train regressor");
-  return 0;
-}
-
 static inline int tk_tsetlin_train (lua_State *L)
 {
   tsetlin_t *tm = tk_tsetlin_peek(L, 1);
@@ -1674,10 +1393,6 @@ static inline int tk_tsetlin_train (lua_State *L)
       return tk_tsetlin_train_classifier(L, tm->classifier);
     case TM_ENCODER:
       return tk_tsetlin_train_encoder(L, tm->encoder);
-    case TM_AUTO_ENCODER:
-      return tk_tsetlin_train_auto_encoder(L, tm->auto_encoder);
-    case TM_REGRESSOR:
-      return tk_tsetlin_train_regressor(L, tm->regressor);
     default:
       return luaL_error(L, "unexpected tsetlin machine type in train");
   }
@@ -1685,6 +1400,7 @@ static inline int tk_tsetlin_train (lua_State *L)
 
 typedef struct {
   tsetlin_classifier_t *tm;
+  unsigned int id;
   unsigned int n;
   unsigned int *next;
   unsigned int *ps;
@@ -1700,8 +1416,8 @@ typedef struct {
 
 static void *evaluate_classifier_thread (void *arg)
 {
-  seed_rand();
   evaluate_classifier_thread_data_t *data = (evaluate_classifier_thread_data_t *) arg;
+  seed_rand(data->id);
   unsigned int classes = data->tm->classes;
   unsigned int input_chunks = data->tm->input_chunks;
   while (1) {
@@ -1732,11 +1448,11 @@ static inline int tk_tsetlin_evaluate_classifier (
 ) {
 
   lua_settop(L, 2);
-  unsigned int n = tk_lua_fcheckunsigned(L, 2, "samples");
-  unsigned int *ps = (unsigned int *) tk_lua_fcheckstring(L, 2, "problems");
-  unsigned int *ss = (unsigned int *) tk_lua_fcheckstring(L, 2, "solutions");
-  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "threads");
-  bool track_stats = tk_lua_foptboolean(L, 2, "stats", false);
+  unsigned int n = tk_lua_fcheckunsigned(L, 2, "evaluate", "samples");
+  unsigned int *ps = (unsigned int *) tk_lua_fcheckstring(L, 2, "evaluate", "problems");
+  unsigned int *ss = (unsigned int *) tk_lua_fcheckstring(L, 2, "evaluate", "solutions");
+  bool track_stats = tk_lua_foptboolean(L, 2, false, "evaluate", "stats");
+  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "evaluate", "threads");
   unsigned int correct = 0;
   unsigned int *confusion = NULL;
   unsigned int *predictions = NULL;
@@ -1765,6 +1481,7 @@ static inline int tk_tsetlin_evaluate_classifier (
 
   for (unsigned int i = 0; i < n_threads; i++) {
     thread_data[i].tm = tm;
+    thread_data[i].id = i;
     thread_data[i].n = n;
     thread_data[i].next = &next;
     thread_data[i].ps = ps;
@@ -1838,6 +1555,7 @@ static inline int tk_tsetlin_evaluate_classifier (
 
 typedef struct {
   tsetlin_encoder_t *tm;
+  unsigned int id;
   unsigned int n;
   unsigned int *next;
   unsigned int *tokens;
@@ -1849,8 +1567,8 @@ typedef struct {
 
 static void *evaluate_encoder_thread (void *arg)
 {
-  seed_rand();
   evaluate_encoder_thread_data_t *data = (evaluate_encoder_thread_data_t *) arg;
+  seed_rand(data->id);
   unsigned int encoding_a[data->tm->encoding_chunks];
   unsigned int encoding_n[data->tm->encoding_chunks];
   unsigned int encoding_p[data->tm->encoding_chunks];
@@ -1882,9 +1600,9 @@ static void *evaluate_encoder_thread (void *arg)
 static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *tm)
 {
   lua_settop(L, 2);
-  unsigned int n = tk_lua_fcheckunsigned(L, 2, "samples");
-  unsigned int *tokens = (unsigned int *) tk_lua_fcheckstring(L, 2, "corpus");
-  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "threads");
+  unsigned int n = tk_lua_fcheckunsigned(L, 2, "evaluate", "samples");
+  unsigned int *tokens = (unsigned int *) tk_lua_fcheckstring(L, 2, "evaluate", "corpus");
+  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "evaluate", "threads");
 
   unsigned int correct = 0;
 
@@ -1899,6 +1617,7 @@ static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *
 
   for (unsigned int i = 0; i < n_threads; i++) {
     thread_data[i].tm = tm;
+    thread_data[i].id = i;
     thread_data[i].n = n;
     thread_data[i].next = &next;
     thread_data[i].tokens = tokens;
@@ -1921,94 +1640,6 @@ static inline int tk_tsetlin_evaluate_encoder (lua_State *L, tsetlin_encoder_t *
   return 1;
 }
 
-typedef struct {
-  tsetlin_auto_encoder_t *tm;
-  unsigned int n;
-  unsigned int *next;
-  unsigned int *ps;
-  unsigned int *total_diff;
-  pthread_mutex_t *lock;
-  pthread_mutex_t *qlock;
-} evaluate_auto_encoder_thread_data_t;
-
-static void *evaluate_auto_encoder_thread (void *arg)
-{
-  seed_rand();
-  evaluate_auto_encoder_thread_data_t *data = (evaluate_auto_encoder_thread_data_t *) arg;
-  unsigned int encoding[data->tm->encoder.encoding_chunks * 2];
-  unsigned int decoding[data->tm->decoder.encoding_chunks * 2];
-  long int scores_e[data->tm->encoder.encoder.classes];
-  long int scores_d[data->tm->decoder.encoder.classes];
-  while (1) {
-    pthread_mutex_lock(data->qlock);
-    unsigned int next = *data->next;
-    (*data->next) += 1;
-    pthread_mutex_unlock(data->qlock);
-    if (next >= data->n)
-      return NULL;
-    unsigned int *input = data->ps + next * data->tm->encoder.encoder.input_chunks;
-    ae_tm_encode(data->tm, input, encoding, scores_e);
-    memcpy(encoding + data->tm->encoder.encoding_chunks, encoding, data->tm->encoder.encoding_chunks * sizeof(unsigned int));
-    flip_bits(encoding + data->tm->encoder.encoding_chunks, data->tm->encoder.encoding_chunks);
-    ae_tm_decode(data->tm, encoding, decoding, scores_d);
-    memcpy(decoding + data->tm->decoder.encoding_chunks, decoding, data->tm->decoder.encoding_chunks * sizeof(unsigned int));
-    flip_bits(decoding + data->tm->decoder.encoding_chunks, data->tm->decoder.encoding_chunks);
-    pthread_mutex_lock(data->lock);
-    (*data->total_diff) += hamming(input, decoding, data->tm->encoder.encoder.input_bits);
-    pthread_mutex_unlock(data->lock);
-  }
-}
-
-static inline int tk_tsetlin_evaluate_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm)
-{
-  lua_settop(L, 2);
-  unsigned int n = tk_lua_fcheckunsigned(L, 2, "samples");
-  unsigned int *ps = (unsigned int *) tk_lua_fcheckstring(L, 2, "corpus");
-  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "threads");
-  unsigned int input_bits = tm->encoder.encoder.input_bits;
-
-  unsigned int total_bits = n * input_bits;
-  unsigned int total_diff = 0;
-
-  pthread_t threads[n_threads];
-  pthread_mutex_t lock;
-  pthread_mutex_t qlock;
-  pthread_mutex_init(&lock, NULL);
-  pthread_mutex_init(&qlock, NULL);
-  evaluate_auto_encoder_thread_data_t thread_data[n_threads];
-
-  unsigned int next = 0;
-
-  for (unsigned int i = 0; i < n_threads; i++) {
-    thread_data[i].tm = tm;
-    thread_data[i].n = n;
-    thread_data[i].next = &next;
-    thread_data[i].ps = ps;
-    thread_data[i].total_diff = &total_diff;
-    thread_data[i].lock = &lock;
-    thread_data[i].qlock = &qlock;
-    if (pthread_create(&threads[i], NULL, evaluate_auto_encoder_thread, &thread_data[i]) != 0)
-      return tk_error(L, "pthread_create", errno);
-  }
-
-  // TODO: Ensure these get freed on error above
-  for (unsigned int i = 0; i < n_threads; i++)
-    if (pthread_join(threads[i], NULL) != 0)
-      return tk_error(L, "pthread_join", errno);
-
-  pthread_mutex_destroy(&lock);
-  pthread_mutex_destroy(&qlock);
-
-  lua_pushnumber(L, 1 - (double) total_diff / (double) total_bits);
-  return 1;
-}
-
-static inline int tk_tsetlin_evaluate_regressor (lua_State *L, tsetlin_regressor_t *tm)
-{
-  luaL_error(L, "unimplemented: evaluate regressor");
-  return 0;
-}
-
 static inline int tk_tsetlin_evaluate (lua_State *L)
 {
   tsetlin_t *tm = tk_tsetlin_peek(L, 1);
@@ -2017,10 +1648,6 @@ static inline int tk_tsetlin_evaluate (lua_State *L)
       return tk_tsetlin_evaluate_classifier(L, tm->classifier);
     case TM_ENCODER:
       return tk_tsetlin_evaluate_encoder(L, tm->encoder);
-    case TM_AUTO_ENCODER:
-      return tk_tsetlin_evaluate_auto_encoder(L, tm->auto_encoder);
-    case TM_REGRESSOR:
-      return tk_tsetlin_evaluate_regressor(L, tm->regressor);
     default:
       return luaL_error(L, "unexpected tsetlin machine type in evaluate");
   }
@@ -2040,8 +1667,7 @@ static inline void _tk_tsetlin_persist_classifier (lua_State *L, tsetlin_classif
   tk_lua_fwrite(L, &tm->state_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->action_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->filter, sizeof(unsigned int), 1, fh);
-  tk_lua_fwrite(L, &tm->specificity_low, sizeof(double), 1, fh);
-  tk_lua_fwrite(L, &tm->specificity_high, sizeof(double), 1, fh);
+  tk_lua_fwrite(L, &tm->specificity, sizeof(double), 1, fh);
   if (persist_state)
     tk_lua_fwrite(L, tm->state, sizeof(unsigned int), tm->state_chunks, fh);
   tk_lua_fwrite(L, tm->actions, sizeof(unsigned int), tm->action_chunks, fh);
@@ -2060,23 +1686,12 @@ static inline void tk_tsetlin_persist_encoder (lua_State *L, tsetlin_encoder_t *
   _tk_tsetlin_persist_classifier(L, &tm->encoder, fh, persist_state);
 }
 
-static inline void tk_tsetlin_persist_auto_encoder (lua_State *L, tsetlin_auto_encoder_t *tm, FILE *fh, bool persist_state)
-{
-  tk_tsetlin_persist_encoder(L, &tm->encoder, fh, persist_state);
-  tk_tsetlin_persist_encoder(L, &tm->decoder, fh, persist_state);
-}
-
-static inline void tk_tsetlin_persist_regressor (lua_State *L, tsetlin_regressor_t *tm, FILE *fh, bool persist_state)
-{
-  _tk_tsetlin_persist_classifier(L, &tm->classifier, fh, persist_state);
-}
-
 static inline int tk_tsetlin_persist (lua_State *L)
 {
   lua_settop(L, 3);
   tsetlin_t *tm = tk_tsetlin_peek(L, 1);
   bool tostr = lua_type(L, 2) == LUA_TNIL;
-  FILE *fh = tostr ? tk_lua_tmpfile(L) : tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
+  FILE *fh = tostr ? tk_lua_tmpfile(L) : tk_lua_fopen(L, tk_lua_checkstring(L, 2, "persist path"), "w");
   bool persist_state = lua_toboolean(L, 3);
   if (persist_state && !tm->has_state)
     luaL_error(L, "can't persist the state of a model loaded without state");
@@ -2088,12 +1703,6 @@ static inline int tk_tsetlin_persist (lua_State *L)
       break;
     case TM_ENCODER:
       tk_tsetlin_persist_encoder(L, tm->encoder, fh, persist_state);
-      break;
-    case TM_AUTO_ENCODER:
-      tk_tsetlin_persist_auto_encoder(L, tm->auto_encoder, fh, persist_state);
-      break;
-    case TM_REGRESSOR:
-      tk_tsetlin_persist_regressor(L, tm->regressor, fh, persist_state);
       break;
     default:
       return luaL_error(L, "unexpected tsetlin machine type in persist");
@@ -2130,15 +1739,10 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tsetlin_classifier
   tk_lua_fread(L, &tm->state_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->action_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->filter, sizeof(unsigned int), 1, fh);
-  tk_lua_fread(L, &tm->specificity_low, sizeof(double), 1, fh);
-  tk_lua_fread(L, &tm->specificity_high, sizeof(double), 1, fh);
+  tk_lua_fread(L, &tm->specificity, sizeof(double), 1, fh);
   tm->state = read_state ? malloc(sizeof(unsigned int) * tm->state_chunks) : NULL;
   tm->actions = malloc(sizeof(unsigned int) * tm->action_chunks);
   tm->active_clause = read_state ? malloc(sizeof(unsigned int) * tm->clause_chunks) : NULL;
-  tm->specificity = read_state ? malloc(sizeof(double) * tm->clauses) : NULL;
-  if (read_state)
-    for (unsigned int i = 0; i < tm->clauses; i ++)
-      tm->specificity[i] = (1.0 * i / tm->clauses) * (tm->specificity_high - tm->specificity_low) + tm->specificity_low;
   tm->locks = read_state ? malloc(sizeof(pthread_mutex_t) * tm->action_chunks) : NULL;
   if (read_state)
     for (unsigned int i = 0; i < tm->action_chunks; i ++)
@@ -2171,21 +1775,6 @@ static inline void tk_tsetlin_load_encoder (lua_State *L, FILE *fh, bool read_st
   _tk_tsetlin_load_encoder(L, en, fh, read_state, has_state);
 }
 
-static inline void tk_tsetlin_load_auto_encoder (lua_State *L, FILE *fh, bool read_state, bool has_state)
-{
-  tsetlin_t *tm = tk_tsetlin_alloc_auto_encoder(L, read_state);
-  tsetlin_auto_encoder_t *ae = tm->auto_encoder;
-  _tk_tsetlin_load_encoder(L, &ae->encoder, fh, read_state, has_state);
-  _tk_tsetlin_load_encoder(L, &ae->decoder, fh, read_state, has_state);
-}
-
-static inline void tk_tsetlin_load_regressor (lua_State *L, FILE *fh, bool read_state, bool has_state)
-{
-  tsetlin_t *tm = tk_tsetlin_alloc_regressor(L, read_state);
-  tsetlin_regressor_t *rg = tm->regressor;
-  _tk_tsetlin_load_classifier(L, &rg->classifier, fh, read_state, has_state);
-}
-
 // TODO: Merge malloc/assignment logic from load_* and create_* to reduce
 // changes for coding errors
 static inline int tk_tsetlin_load (lua_State *L)
@@ -2211,14 +1800,6 @@ static inline int tk_tsetlin_load (lua_State *L)
       tk_tsetlin_load_encoder(L, fh, read_state, has_state);
       tk_lua_fclose(L, fh);
       return 1;
-    case TM_AUTO_ENCODER:
-      tk_tsetlin_load_auto_encoder(L, fh, read_state, has_state);
-      tk_lua_fclose(L, fh);
-      return 1;
-    case TM_REGRESSOR:
-      tk_tsetlin_load_regressor(L, fh, read_state, has_state);
-      tk_lua_fclose(L, fh);
-      return 1;
     default:
       return luaL_error(L, "unexpected tsetlin machine type in load");
   }
@@ -2234,12 +1815,6 @@ static inline int tk_tsetlin_type (lua_State *L)
     case TM_ENCODER:
       lua_pushstring(L, "encoder");
       break;
-    case TM_AUTO_ENCODER:
-      lua_pushstring(L, "auto_encoder");
-      break;
-    case TM_REGRESSOR:
-      lua_pushstring(L, "regressor");
-      break;
     default:
       return luaL_error(L, "unexpected tsetlin machine type in type");
   }
@@ -2251,7 +1826,6 @@ static luaL_Reg tk_tsetlin_fns[] =
 
   { "train", tk_tsetlin_train },
   { "evaluate", tk_tsetlin_evaluate },
-  { "update", tk_tsetlin_update },
   { "predict", tk_tsetlin_predict },
   { "destroy", tk_tsetlin_destroy },
   { "persist", tk_tsetlin_persist },

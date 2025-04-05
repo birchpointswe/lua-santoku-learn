@@ -1,13 +1,18 @@
 # Now
 
-- Sanitize
+- Reuse threadpool like compressor
+- Threaded predict classifier/encoder
 - Avoid locking:
-    - Shard based on clause?
-    - Shared based on class/bit?
-- Reusable threadpool
-    - Threaded batch encode
+    - Clause subset + all samples per thread?
+    - Spinlock?
+- Standardize persist/read state + separate shrink across compressor and tsetlin
+- Rescue auto-encoder
+
+- Optimize for NUMA
 
 # Later
+
+- Support training encoder via more than just triplet loss
 
 - Consider migrating bitmap compressor here
 
@@ -18,6 +23,10 @@
 - Pretrained models
     - Embeddings to bitmap: cosine similarity to hamming
     - Embeddings to bitmap: auto-encoded
+
+- explore applying the multigranular specificity approach to to all parameters,
+  but instead of applying the parameters to to a single clause (as in
+  multigranular, apply the parameters by replica)
 
 - Implement regressor
 
