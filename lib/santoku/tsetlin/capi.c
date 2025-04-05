@@ -468,7 +468,13 @@ static inline unsigned int tk_lua_foptunsigned (lua_State *L, int i, bool def, c
     lua_pop(L, 1);
     return def;
   }
-  return tk_lua_fcheckunsigned(L, -1, name, field);
+  if (lua_type(L, -1) != LUA_TNUMBER)
+    tk_lua_verror(L, 3, name, field, "field is not a positive integer");
+  lua_Integer l = luaL_checkinteger(L, -1);
+  if (l < 0)
+    tk_lua_verror(L, 3, name, field, "field is not a positive integer");
+  lua_pop(L, 1);
+  return l;
 }
 
 static inline unsigned int tk_lua_optunsigned (lua_State *L, int i, unsigned int def, char *name)
@@ -1112,8 +1118,8 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
       tk_lua_fcheckunsigned(L, 2, "create classifier", "state"),
       tk_lua_fcheckunsigned(L, 2, "create classifier", "target"),
       tk_lua_fcheckboolean(L, 2, "create classifier", "boost"),
-      tk_lua_foptposdouble(L, 2, 2, "create classifier", "specificity_low"),
-      tk_lua_foptposdouble(L, 2, 200, "create classifier", "specificity_high"),
+      tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity_low"),
+      tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity_high"),
       tk_tsetlin_get_nthreads(L, 2, "create classifier", "threads"),
       tk_lua_fcheckunsigned(L, 2, "create classifier", "replicas"));
 
