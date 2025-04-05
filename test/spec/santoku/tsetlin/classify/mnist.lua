@@ -20,7 +20,6 @@ local CLAUSES = 4096
 local REPLICAS = 0
 local STATE = 8
 local TARGET = 32
-local SPECIFICITY = 20
 local BOOST = true
 local ACTIVE = 0.75
 local NEGATIVES = 0.25
@@ -165,7 +164,6 @@ test("tsetlin", function ()
     state = STATE,
     target = TARGET,
     boost = BOOST,
-    specificity = SPECIFICITY,
     threads = THREADS,
     replicas = REPLICAS;
   })
