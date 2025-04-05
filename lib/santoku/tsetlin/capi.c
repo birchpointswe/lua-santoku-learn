@@ -410,14 +410,20 @@ static inline double tk_lua_fcheckposdouble (lua_State *L, int i, char *name, ch
   return l;
 }
 
-static inline unsigned int tk_lua_foptposdouble (lua_State *L, int i, bool def, char *name, char *field)
+static inline double tk_lua_foptposdouble (lua_State *L, int i, bool def, char *name, char *field)
 {
   lua_getfield(L, i, field);
   if (lua_type(L, -1) == LUA_TNIL) {
     lua_pop(L, 1);
     return def;
   }
-  return tk_lua_fcheckposdouble(L, -1, name, field);
+  if (lua_type(L, -1) != LUA_TNUMBER)
+    tk_lua_verror(L, 3, name, field, "field is not a positive number");
+  lua_Number l = luaL_checknumber(L, -1);
+  if (l < 0)
+    tk_lua_verror(L, 3, name, field, "field is not a positive number");
+  lua_pop(L, 1);
+  return l;
 }
 
 static inline unsigned int tk_lua_checkunsigned (lua_State *L, int i, char *name)
