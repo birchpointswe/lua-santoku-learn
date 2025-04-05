@@ -1,9 +1,18 @@
 # Now
 
-- Optimize for NUMA (alloc state in threads, or warmup)
-- Support training encoder via contrastive loss, triplet loss, etc.
+- Reuse threadpool like compressor
+- Threaded predict classifier/encoder
+- Avoid locking:
+    - Clause subset + all samples per thread?
+    - Spinlock?
+- Standardize persist/read state + separate shrink across compressor and tsetlin
+- Rescue auto-encoder
+
+- Optimize for NUMA
 
 # Later
+
+- Support training encoder via more than just triplet loss
 
 - Consider migrating bitmap compressor here
 

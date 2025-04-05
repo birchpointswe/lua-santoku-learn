@@ -28,19 +28,25 @@ local function evaluate (t, opts, ...)
   end
 end
 
-local function wrap (t)
+local function wrap (t, threads)
   return {
-    train = function (...)
-      return tm.train(t, ...)
+    train = function (opts, ...)
+      opts.threads = threads
+      for i = 1, opts.iterations do
+        tm.train(t, opts, ...)
+        if opts.each then
+          if opts.each(i) == false then
+            break
+          end
+        end
+      end
     end,
-    evaluate = function (...)
-      return evaluate(t, ...)
+    evaluate = function (opts, ...)
+      opts.threads = threads
+      return evaluate(t, opts, ...)
     end,
     predict = function (...)
       return tm.predict(t, ...)
-    end,
-    shrink = function (...)
-      return tm.shrink(t, ...)
     end,
     destroy = function (...)
       return tm.destroy(t, ...)
@@ -55,13 +61,13 @@ local function wrap (t)
 end
 
 return {
-  load = function (...)
-    return wrap(tm.load(...))
+  load = function (opts, ...)
+    return wrap(tm.load(opts, ...), opts.threads)
   end,
-  classifier = function (...)
-    return wrap(tm.create("classifier", ...))
+  classifier = function (opts, ...)
+    return wrap(tm.create("classifier", opts, ...), opts.threads)
   end,
-  encoder = function (...)
-    return wrap(tm.create("encoder", ...))
+  encoder = function (opts, ...)
+    return wrap(tm.create("encoder", opts, ...), opts.threads)
   end,
 }

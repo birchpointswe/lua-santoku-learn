@@ -17,13 +17,11 @@ local CMP_ITERS = 10
 local CMP_EPS = 1e-6
 local TRAIN_TEST_RATIO = 0.9
 local CLAUSES = 4096
-local REPLICAS = 0
 local STATE = 8
 local TARGET = 32
 local SPECIFICITY = 20
 local BOOST = true
-local ACTIVE = 0.75
-local NEGATIVES = 0.25
+local ACTIVE = 0.85
 local THREADS = nil
 local EVALUATE_EVERY = 1
 local ITERATIONS = 20
@@ -167,7 +165,6 @@ test("tsetlin", function ()
     boost = BOOST,
     specificity = SPECIFICITY,
     threads = THREADS,
-    replicas = REPLICAS;
   })
 
   print("Training")
@@ -178,7 +175,6 @@ test("tsetlin", function ()
     solutions = train_solutions,
     iterations = ITERATIONS,
     active = ACTIVE,
-    negatives = NEGATIVES,
     each = function (epoch)
       local duration = stopwatch()
       if epoch == ITERATIONS or epoch % EVALUATE_EVERY == 0 then
