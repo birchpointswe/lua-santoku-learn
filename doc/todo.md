@@ -1,6 +1,6 @@
 # Now
 
-- Optimize for NUMA (alloc state in threads, or warmup)
+- Get encoder and auto-encoder working again
 - Support training encoder via contrastive loss, triplet loss, etc.
 
 # Later

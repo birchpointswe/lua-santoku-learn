@@ -21,6 +21,8 @@ local REPLICAS = 0
 local STATE = 8
 local TARGET = 32
 local BOOST = true
+local SPEC_LOW = 2
+local SPEC_HIGH = 200
 local ACTIVE = 0.75
 local NEGATIVES = 0.25
 local THREADS = nil
@@ -164,6 +166,8 @@ test("tsetlin", function ()
     state = STATE,
     target = TARGET,
     boost = BOOST,
+    specificity_low = SPEC_LOW,
+    specificity_high = SPEC_HIGH,
     threads = THREADS,
     replicas = REPLICAS;
   })
