@@ -1,5 +1,6 @@
 # Now
 
+- Option to scale clauses and threshold by replicas or duplicate
 - Get encoder and auto-encoder working again
 - Support training encoder via contrastive loss, triplet loss, etc.
 
