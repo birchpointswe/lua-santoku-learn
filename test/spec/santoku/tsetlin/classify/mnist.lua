@@ -19,9 +19,10 @@ local TRAIN_TEST_RATIO = 0.9
 local CLAUSES = 4096
 local STATE = 8
 local TARGET = 32
-local SPECIFICITY = 20
 local BOOST = true
-local ACTIVE = 0.85
+local SPEC_LOW = 2
+local SPEC_HIGH = 200
+local ACTIVE = 0.75
 local THREADS = nil
 local EVALUATE_EVERY = 1
 local ITERATIONS = 20
@@ -109,7 +110,7 @@ test("tsetlin", function ()
     local compressor = bmc.create({
       visible = FEATURES,
       hidden = FEATURES_CMP,
-      threads = THREADS,
+      threads = 8,
     })
     print("Fitting")
     local stopwatch = utc.stopwatch()
@@ -163,7 +164,8 @@ test("tsetlin", function ()
     state = STATE,
     target = TARGET,
     boost = BOOST,
-    specificity = SPECIFICITY,
+    specificity_low = SPEC_LOW,
+    specificity_high = SPEC_HIGH,
     threads = THREADS,
   })
 
@@ -210,7 +212,7 @@ test("tsetlin", function ()
     t.evaluate({
       problems = test_problems,
       solutions = test_solutions,
-      samples = n_test
+      samples = n_test,
     })
   local train_score--[[, confusion, predictions]] =
     t.evaluate({
