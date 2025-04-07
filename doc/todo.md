@@ -1,7 +1,8 @@
 # Now
 
+- Shard threads by class with reduce for max
+
 - Ensure alignment/etc to 128 bits
-- Option to scale clauses and threshold by replicas or duplicate
 - Get encoder and auto-encoder working again
 - Support training encoder via contrastive loss, triplet loss, etc.
 
