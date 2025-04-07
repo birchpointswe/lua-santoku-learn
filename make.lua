@@ -6,7 +6,7 @@ local env = {
   public = true,
 
   cflags = { "-march=native", "-std=gnu11", "-O3", "-Wall", "-Wextra", "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow", "-Wpointer-sign", "-Wno-unused-parameter" },
-  ldflags = { "-march=native", "-O3", "-lm", "-lpthread", "-lnuma" },
+  ldflags = { "-march=native", "-O3", "-lm", "-lpthread" },
 
   dependencies = {
     "lua >= 5.1",
