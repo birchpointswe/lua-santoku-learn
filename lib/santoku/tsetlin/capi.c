@@ -1084,7 +1084,7 @@ static inline unsigned int tk_tsetlin_get_nthreads (
     n_threads = tk_lua_optunsigned(L, i, 0, name);
   if (n_threads)
     return n_threads;
-  ts = sysconf(_SC_NPROCESSORS_ONLN);
+  ts = sysconf(_SC_NPROCESSORS_ONLN) - 1;
   if (ts <= 0)
     return (unsigned int) tk_lua_verror(L, 3, name, "sysconf", errno);
   lua_pushinteger(L, ts);
