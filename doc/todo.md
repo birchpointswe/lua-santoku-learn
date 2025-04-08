@@ -1,6 +1,21 @@
 # Now
 
-- Shard threads by class with reduce for max
+- Consider thread group copies of global state with bit block syncing triggered
+  when a certain percentage of the block's action bits flip. Default to only
+  grouping threads by numa node.
+  - Duplicate state for each numa node (or user-defined group)
+  - Pin threads to cores
+  - Map threads to nearest state
+  - Each thread processes subset of samples
+  - When total changes to a block's action bits exceeds a sync target, copy the
+    corresponding state and action bits to the other replicas.
+  - When training completes, which replica do we keep? Perhaps users can specify
+    which replica to use for evaluation, and can subsequently specify which
+    replica to pass to finalize(). By default, both replicas are used for
+    evaluation (with thread sharding by sample for performance).
+  - At any point, users can force a full sync, where all replicas are aligned
+    by setting counters and action bits corresponding to the replica that has
+    the most confidence (highest state value)
 
 - Ensure alignment/etc to 128 bits
 - Get encoder and auto-encoder working again
