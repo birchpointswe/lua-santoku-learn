@@ -25,17 +25,22 @@ SOFTWARE.
 
 */
 
+#define _GNU_SOURCE
+
 #include "lua.h"
 #include "lauxlib.h"
 
 #include <assert.h>
-#include <stdatomic.h>
 #include <errno.h>
 #include <lauxlib.h>
 #include <limits.h>
 #include <lua.h>
 #include <math.h>
+#include <numa.h>
 #include <pthread.h>
+#include <sched.h>
+#include <stdarg.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -43,7 +48,6 @@ SOFTWARE.
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include <stdarg.h>
 
 #define TK_TSETLIN_MT "santoku_tsetlin"
 
@@ -81,10 +85,12 @@ typedef struct tsetlin_classifier_s tsetlin_classifier_t;
 typedef struct {
 
   tsetlin_classifier_t *tm;
-  tsetlin_classifier_stage_t stage;
 
   unsigned int sfirst;
   unsigned int slast;
+
+  unsigned int index;
+  unsigned int sigid;
 
   struct {
     unsigned int n;
@@ -116,12 +122,15 @@ typedef struct tsetlin_classifier_s {
   unsigned int state_chunks;
   unsigned int action_chunks;
   tk_bits_t filter;
+  size_t state_len;
   tk_bits_t *state; // class clause bit chunk
+  size_t actions_len;
   tk_bits_t *actions; // class clause chunk
 
   double active;
   double specificity_low;
   double specificity_high;
+  size_t specificities_len;
   double *specificities;
 
   bool created_threads;
@@ -134,8 +143,11 @@ typedef struct tsetlin_classifier_s {
   pthread_t *threads;
   tsetlin_classifier_stage_t stage;
   tsetlin_classifier_thread_t *thread_data;
+  size_t results_len;
   unsigned int *results;
+  size_t locks_len;
   atomic_flag *locks;
+  unsigned int sigid;
 
 } tsetlin_classifier_t;
 
@@ -308,6 +320,43 @@ static inline void *tk_realloc (
     return NULL;
   } else {
     return p;
+  }
+}
+
+static inline void *tk_malloc_interleaved (
+  lua_State *L,
+  size_t *sp,
+  size_t s
+) {
+  void *p = (numa_available() == -1) ? malloc(s) : numa_alloc_interleaved(s);
+  if (!p) {
+    tk_error(L, "malloc failed", ENOMEM);
+    return NULL;
+  } else {
+    *sp = s;
+    return p;
+  }
+}
+
+static inline void *tk_ensure_interleaved (
+  lua_State *L,
+  size_t *s1p,
+  void *p0,
+  size_t s1,
+  bool copy
+) {
+  size_t s0 = *s1p;
+  if (s1 <= s0)
+    return p0;
+  void *p1 = tk_malloc_interleaved(L, s1p, s1);
+  if (!p1) {
+    tk_error(L, "realloc failed", ENOMEM);
+    return NULL;
+  } else {
+    if (copy)
+      memcpy(p1, p0, s0);
+    numa_free(p0, s0);
+    return p1;
   }
 }
 
@@ -911,8 +960,9 @@ static inline void tk_tsetlin_wait_for_threads (
   pthread_mutex_unlock(mutex);
 }
 
-static inline void tk_compressor_signal (
+static inline void tk_tsetlin_signal (
   int stage,
+  unsigned int *sigid,
   int *stagep,
   pthread_mutex_t *mutex,
   pthread_cond_t *cond_stage,
@@ -921,6 +971,7 @@ static inline void tk_compressor_signal (
   unsigned int n_threads
 ) {
   pthread_mutex_lock(mutex);
+  (*sigid) ++;
   (*stagep) = stage;
   (*n_threads_done) = 0;
   pthread_cond_broadcast(cond_stage);
@@ -943,15 +994,12 @@ static void *tk_tsetlin_classifier_worker (void *datap)
   pthread_mutex_unlock(&data->tm->mutex);
   while (1) {
     pthread_mutex_lock(&data->tm->mutex);
-    while (data->stage == data->tm->stage)
+    while (data->sigid == data->tm->sigid)
       pthread_cond_wait(&data->tm->cond_stage, &data->tm->mutex);
-    data->stage = data->tm->stage;
+    data->sigid = data->tm->sigid;
+    tsetlin_classifier_stage_t stage = data->tm->stage;
     pthread_mutex_unlock(&data->tm->mutex);
-    if (data->stage == TM_DONE)
-      break;
-    switch (data->stage) {
-      case TM_INIT:
-        break;
+    switch (stage) {
       case TM_TRAIN:
         tk_classifier_train_thread(
           data->tm,
@@ -969,6 +1017,8 @@ static void *tk_tsetlin_classifier_worker (void *datap)
           data->sfirst,
           data->slast);
         break;
+      case TM_DONE:
+        break;
       default:
         assert(false);
         break;
@@ -978,8 +1028,55 @@ static void *tk_tsetlin_classifier_worker (void *datap)
     if (data->tm->n_threads_done == data->tm->n_threads)
       pthread_cond_signal(&data->tm->cond_done);
     pthread_mutex_unlock(&data->tm->mutex);
+    if (stage == TM_DONE)
+      break;
   }
   return NULL;
+}
+
+static inline void tk_pin_thread_to_cpu (
+  unsigned int thread_index,
+  unsigned int n_threads
+) {
+  cpu_set_t cpuset;
+  CPU_ZERO(&cpuset);
+  unsigned int n_nodes = (unsigned int) numa_max_node() + 1;
+  unsigned int threads_per_node = n_threads / n_nodes;
+  if (threads_per_node == 0) threads_per_node = 1;
+  unsigned int node = thread_index / threads_per_node;
+  if (node >= n_nodes) node = n_nodes - 1;
+  struct bitmask *cpus = numa_allocate_cpumask();
+  if (numa_node_to_cpus((int) node, cpus) == 0) {
+    unsigned int count = 0;
+    for (unsigned int i = 0; i < cpus->size; ++i) {
+      if (numa_bitmask_isbitset(cpus, i)) {
+        count ++;
+      }
+    }
+    if (count > 0) {
+      unsigned int local_index =
+        (thread_index - node * threads_per_node) % count;
+      unsigned int found = 0;
+      for (unsigned int i = 0; i < cpus->size; ++i) {
+        if (numa_bitmask_isbitset(cpus, i)) {
+          if (found == local_index) {
+            CPU_SET(i, &cpuset);
+            break;
+          }
+          found ++;
+        }
+      }
+    }
+  }
+  numa_free_cpumask(cpus);
+  pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+}
+
+static void *tk_tsetlin_classifier_worker_wrapper (void *arg) {
+  tsetlin_classifier_thread_t *td = (tsetlin_classifier_thread_t *)arg;
+  if (numa_available() != -1 && numa_max_node() > 0)
+    tk_pin_thread_to_cpu(td->index, td->tm->n_threads);
+  return tk_tsetlin_classifier_worker(arg);
 }
 
 static inline void tk_tsetlin_setup_threads (
@@ -1000,8 +1097,9 @@ static inline void tk_tsetlin_setup_threads (
 
   for (unsigned int i = 0; i < tm->n_threads; i ++) {
     tm->thread_data[i].tm = tm;
-    tm->thread_data[i].stage = TM_INIT;
-    if (!tm->created_threads && pthread_create(&tm->threads[i], NULL, tk_tsetlin_classifier_worker, &tm->thread_data[i]) != 0)
+    tm->thread_data[i].sigid = 0;
+    tm->thread_data[i].index = i;
+    if (!tm->created_threads && pthread_create(&tm->threads[i], NULL, tk_tsetlin_classifier_worker_wrapper, &tm->thread_data[i]) != 0)
       tk_error(L, "pthread_create", errno);
   }
 
@@ -1048,12 +1146,13 @@ static inline void tk_tsetlin_init_classifier (
   tm->filter = tm->input_bits % BITS != 0
     ? ~(((tk_bits_t) ~0) << (tm->input_bits % BITS))
     : (tk_bits_t) ~0;
-  tm->state = tk_malloc(L, sizeof(tk_bits_t) * tm->state_chunks);
-  tm->actions = tk_malloc(L, sizeof(tk_bits_t) * tm->action_chunks);
-  tm->locks = tk_malloc(L, sizeof(atomic_flag) * tm->action_chunks);
+  tm->state = tk_malloc_interleaved(L, &tm->state_len, sizeof(tk_bits_t) * tm->state_chunks);
+  tm->actions = tk_malloc_interleaved(L, &tm->actions_len, sizeof(tk_bits_t) * tm->action_chunks);
+  tm->locks = tk_malloc_interleaved(L, &tm->locks_len, sizeof(atomic_flag) * tm->action_chunks);
+  tm->sigid = 0;
   tm->specificity_low = specificity_low;
   tm->specificity_high = specificity_high;
-  tm->specificities = tk_malloc(L, tm->clauses * sizeof(double));
+  tm->specificities = tk_malloc_interleaved(L, &tm->specificities_len, tm->clauses * sizeof(double));
   for (unsigned int i = 0; i < tm->clauses; i ++)
     tm->specificities[i] = (1.0 * i / tm->clauses) * (tm->specificity_high - tm->specificity_low) + tm->specificity_low;
   if (!(tm->state && tm->actions))
@@ -1142,10 +1241,17 @@ static inline int tk_tsetlin_create (lua_State *L)
 static inline void tk_classifier_shrink (tsetlin_classifier_t *tm)
 {
   if (tm == NULL) return;
-  free(tm->specificities); tm->specificities = NULL;
-  free(tm->state); tm->state = NULL;
-  free(tm->results); tm->results = NULL;
-  free(tm->locks); tm->locks = NULL;
+  if (numa_available() == -1) {
+    free(tm->specificities); tm->specificities = NULL;
+    free(tm->state); tm->state = NULL;
+    free(tm->results); tm->results = NULL;
+    free(tm->locks); tm->locks = NULL;
+  } else {
+    numa_free(tm->specificities, tm->specificities_len); tm->specificities = NULL; tm->specificities_len = 0;
+    numa_free(tm->state, tm->state_len); tm->state = NULL; tm->state_len = 0;
+    numa_free(tm->results, tm->results_len); tm->results = NULL; tm->results_len = 0;
+    numa_free(tm->locks, tm->locks_len); tm->locks = NULL; tm->locks_len = 0;
+  }
 }
 
 static inline void tk_classifier_destroy (tsetlin_classifier_t *tm)
@@ -1154,11 +1260,15 @@ static inline void tk_classifier_destroy (tsetlin_classifier_t *tm)
   if (tm->destroyed) return;
   tm->destroyed = true;
   tk_classifier_shrink(tm);
-  free(tm->actions); tm->actions = NULL;
-  pthread_mutex_lock(&tm->mutex);
-  tm->stage = TM_DONE;
-  pthread_cond_broadcast(&tm->cond_stage);
-  pthread_mutex_unlock(&tm->mutex);
+  if (numa_available() == -1) {
+    free(tm->actions); tm->actions = NULL;
+  } else {
+    numa_free(tm->actions, tm->actions_len); tm->actions = NULL; tm->actions_len = 0;
+  }
+  tk_tsetlin_signal(
+    (int) TM_DONE, &tm->sigid,
+    (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
+    &tm->n_threads_done, tm->n_threads);
   // TODO: What is the right way to deal with potential thread errors (or other
   // errors, for that matter) during the finalizer?
   if (tm->created_threads)
@@ -1276,7 +1386,7 @@ static inline int tk_tsetlin_predict_classifier (
   tk_bits_t *ps = (tk_bits_t *) tk_lua_checkstring(L, 2, "argument 1 is not a raw bit-matrix of samples");
   unsigned int n = tk_lua_checkunsigned(L, 3, "argument 2 is not an integer n_samples");
 
-  tm->results = tk_realloc(L, tm->results, n * sizeof(unsigned int));
+  tm->results = tk_ensure_interleaved(L, &tm->results_len, tm->results, n * sizeof(unsigned int), false);
 
   for (unsigned int i = 0; i < tm->n_threads; i ++) {
     tm->thread_data[i].predict.n = n;
@@ -1285,8 +1395,8 @@ static inline int tk_tsetlin_predict_classifier (
 
   tk_tsetlin_setup_thread_samples(tm, n);
 
-  tk_compressor_signal(
-    (int) TM_PREDICT,
+  tk_tsetlin_signal(
+    (int) TM_PREDICT, &tm->sigid,
     (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
     &tm->n_threads_done, tm->n_threads);
 
@@ -1387,13 +1497,8 @@ static inline int tk_tsetlin_train_classifier (
 
   for (unsigned int i = 0; i < max_iter; i ++) {
 
-    tk_compressor_signal(
-      (int) TM_TRAIN,
-      (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
-      &tm->n_threads_done, tm->n_threads);
-
-    tk_compressor_signal(
-      (int) TM_INIT,
+    tk_tsetlin_signal(
+      (int) TM_TRAIN, &tm->sigid,
       (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
       &tm->n_threads_done, tm->n_threads);
 
@@ -1440,7 +1545,7 @@ static inline int tk_tsetlin_evaluate_classifier (
   unsigned int *ss = (unsigned int *) tk_lua_fcheckstring(L, 2, "evaluate", "solutions");
   bool track_stats = tk_lua_foptboolean(L, 2, false, "evaluate", "stats");
 
-  tm->results = tk_realloc(L, tm->results, n * sizeof(unsigned int));
+  tm->results = tk_ensure_interleaved(L, &tm->results_len, tm->results, n * sizeof(unsigned int), false);
 
   for (unsigned int i = 0; i < tm->n_threads; i ++) {
     tm->thread_data[i].predict.n = n;
@@ -1449,13 +1554,8 @@ static inline int tk_tsetlin_evaluate_classifier (
 
   tk_tsetlin_setup_thread_samples(tm, n);
 
-  tk_compressor_signal(
-    (int) TM_PREDICT,
-    (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
-    &tm->n_threads_done, tm->n_threads);
-
-  tk_compressor_signal(
-    (int) TM_INIT,
+  tk_tsetlin_signal(
+    (int) TM_PREDICT, &tm->sigid,
     (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
     &tm->n_threads_done, tm->n_threads);
 
@@ -1632,7 +1732,7 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tsetlin_classifier
   tk_lua_fread(L, &tm->filter, sizeof(tk_bits_t), 1, fh);
   tk_lua_fread(L, &tm->specificity_low, sizeof(double), 1, fh);
   tk_lua_fread(L, &tm->specificity_high, sizeof(double), 1, fh);
-  tm->actions = tk_malloc(L, sizeof(tk_bits_t) * tm->action_chunks);
+  tm->actions = tk_malloc_interleaved(L, &tm->actions_len, sizeof(tk_bits_t) * tm->action_chunks);
   tk_lua_fread(L, tm->actions, sizeof(tk_bits_t), tm->action_chunks, fh);
   tk_tsetlin_setup_threads(L, tm, n_threads);
 }
