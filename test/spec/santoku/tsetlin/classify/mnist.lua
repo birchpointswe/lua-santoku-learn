@@ -23,7 +23,7 @@ local BOOST = true
 local SPEC_LOW = 2
 local SPEC_HIGH = 200
 local ACTIVE = 0.75
-local THREADS = 2
+local THREADS = nil
 local EVALUATE_EVERY = 1
 local ITERATIONS = 20
 
