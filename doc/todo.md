@@ -1,5 +1,8 @@
 # Now
 
+- If target/threshold < 0, treat as % of clauses
+- Get encoder and auto-encoder working again
+
 - Consider thread group copies of global state with bit block syncing triggered
   when a certain percentage of the block's action bits flip. Default to only
   grouping threads by numa node.
@@ -17,11 +20,11 @@
     by setting counters and action bits corresponding to the replica that has
     the most confidence (highest state value)
 
-- Ensure alignment/etc to 128 bits
-- Get encoder and auto-encoder working again
 - Support training encoder via contrastive loss, triplet loss, etc.
 
 # Later
+
+- Convolutional
 
 - Consider migrating bitmap compressor here
 
@@ -77,8 +80,9 @@
 
 # Eventually
 
-- Absorbing
+- Absorbing (speeds up training over time as clauses are dropped)
 - Coalesced (reduces memory footprint for multi-output configurations)
+    - Tried this, didn't really help
 - Weighted (reduces memory footprint)
 - Integer-Weighted (see weighted)
 - Indexed (improves learning and classification speed)

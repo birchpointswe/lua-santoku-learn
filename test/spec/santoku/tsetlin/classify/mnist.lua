@@ -10,12 +10,12 @@ local fs = require("santoku.fs")
 local str = require("santoku.string")
 local arr = require("santoku.array")
 
+local TTR = 0.9
+local THREADS = nil
+local EVALUATE_EVERY = 1
+local ITERATIONS = 100
+
 local CLASSES = 10
-local FEATURES = 784
-local FEATURES_CMP = 128
-local CMP_ITERS = 10
-local CMP_EPS = 1e-6
-local TRAIN_TEST_RATIO = 0.9
 local CLAUSES = 4096
 local STATE = 8
 local TARGET = 32
@@ -23,18 +23,13 @@ local BOOST = true
 local SPEC_LOW = 2
 local SPEC_HIGH = 200
 local ACTIVE = 0.75
-local THREADS = nil
-local EVALUATE_EVERY = 1
-local ITERATIONS = 20
 
-local function prep_fingerprint (fingerprint, bits)
-  local flipped = bm.copy(fingerprint)
-  bm.flip(flipped, 1, bits)
-  bm.extend(fingerprint, flipped, bits + 1)
-  return fingerprint
-end
+local VISIBLE = 784
+local HIDDEN = 128
+local SUPERVISION = 0.2
 
 local function read_data (fp, skip, max)
+  local n_labels = 0
   local problems = {}
   local solutions = {}
   local bits = {}
@@ -46,8 +41,12 @@ local function read_data (fp, skip, max)
       local n = 0
       for bit in str.gmatch(l, "%S+") do
         n = n + 1
-        if n == FEATURES + 1 then
-          solutions[#solutions + 1] = tonumber(bit)
+        if n == VISIBLE + 1 then
+          local s = tonumber(bit)
+          solutions[#solutions + 1] = s
+          if s + 1 > n_labels then
+            n_labels = s + 1
+          end
           break
         end
         bit = bit == "1"
@@ -57,10 +56,10 @@ local function read_data (fp, skip, max)
           bits[n] = nil
         end
       end
-      if n ~= FEATURES + 1 then
+      if n ~= VISIBLE + 1 then
         error("bitmap length mismatch")
       else
-        problems[#problems + 1] = bm.create(bits, FEATURES)
+        problems[#problems + 1] = bm.create(bits, VISIBLE)
       end
       if max and #problems >= max then
         break
@@ -68,6 +67,7 @@ local function read_data (fp, skip, max)
     end
   end
   return {
+    n_labels = n_labels,
     problems = problems,
     solutions = solutions
   }
@@ -79,7 +79,7 @@ local function split_dataset (dataset, s, e)
     arr.push(ps, dataset.problems[i])
     arr.push(ss, dataset.solutions[i])
   end
-  local b = bm.raw_matrix(ps, FEATURES * 2)
+  local b = bm.matrix(ps, VISIBLE)
   local m = mtx.create(1, #ss)
   mtx.set(m, 1, ss)
   return b, mtx.raw(m, 1, 1, "u32")
@@ -88,78 +88,56 @@ end
 test("tsetlin", function ()
 
   local SKIP = 0
-  local MAX = 10000
+  local MAX = 6000
 
   print("Reading data")
-  local dataset = read_data("test/res/santoku/tsetlin/BinarizedMNISTData/MNISTTest.txt", SKIP, MAX)
-
-  do
-    print("Running compress")
-    local function split_compress (i0, i1)
-      print("Splitting")
-      local out = {}
-      for i = i0, i1 do
-        arr.push(out, dataset.problems[i])
-      end
-      return bm.matrix(out, FEATURES)
-    end
-    local n_train = num.floor(#dataset.problems * TRAIN_TEST_RATIO)
-    local n_test = #dataset.problems - n_train
-    local cmp_train = split_compress(1, n_train)
-    local cmp_test = split_compress(n_train + 1, #dataset.problems)
-    local compressor = bmc.create({
-      visible = FEATURES,
-      hidden = FEATURES_CMP,
-      threads = 8,
-    })
-    print("Fitting")
-    local stopwatch = utc.stopwatch()
-    local mavg = num.mavg(0.2)
-    compressor.train({
-      corpus = cmp_train,
-      samples = n_train,
-      iterations = CMP_ITERS,
-      each = function (epoch, tc)
-        local duration, total = stopwatch()
-        local tc0 = mavg(tc)
-        str.printf("Epoch  %-4d  Time  %6.3f (%6.3f)  Convergence  %-4.6f (%-4.6f)\n",
-          epoch, duration, total, tc, tc0)
-        return epoch < 10 or num.abs(tc - tc0) > CMP_EPS
-      end
-    })
-    print("Transforming train")
-    cmp_train = compressor.compress(cmp_train, n_train)
-    print(">", bm.tostring(cmp_train, FEATURES_CMP))
-    print("Transforming test")
-    cmp_test = compressor.compress(cmp_test, n_test)
-    print("Recreating bitmaps")
-    local cmp_all = bm.copy(cmp_train)
-    bm.extend(cmp_all, cmp_test, n_train * FEATURES_CMP + 1)
-    for i = 1, #dataset.problems do
-      bm.clear(dataset.problems[i])
-      for j = 1, FEATURES_CMP do
-        if bm.get(cmp_all, (i - 1) * FEATURES_CMP + j) then
-          bm.set(dataset.problems[i], j)
-        end
-      end
-      dataset.problems[i] = prep_fingerprint(dataset.problems[i], FEATURES_CMP)
-    end
-  end
-  FEATURES = FEATURES_CMP
+  local dataset = read_data("test/res/santoku/tsetlin/BinarizedMNISTData/MNISTTraining.txt", SKIP, MAX)
 
   print("Splitting & packing")
-  local n_train = num.floor(#dataset.problems * TRAIN_TEST_RATIO)
+  local n_train = num.floor(#dataset.problems * TTR)
   local n_test = #dataset.problems - n_train
   local train_problems, train_solutions = split_dataset(dataset, 1, n_train)
   local test_problems, test_solutions = split_dataset(dataset, n_train + 1, n_train + n_test)
+  str.printf("Train %d  Test %d\n", n_train, n_test)
+
+  print("Creating compressor")
+  local compressor = bmc.create({
+    visible = VISIBLE,
+    hidden = HIDDEN,
+    threads = nil,
+  })
+
+  print("Training")
+  local stopwatch = utc.stopwatch()
+  compressor.train({
+    corpus = train_problems,
+    samples = n_train,
+    labels = train_solutions,
+    n_labels = dataset.n_labels,
+    supervision = SUPERVISION,
+    iterations = ITERATIONS,
+    each = function (epoch, tc, dev)
+      local duration, total = stopwatch()
+      str.printf("Epoch  %-4d   Time  %6.3f  %6.3f   Convergence  %4.6f  %4.6f\n",
+        epoch, duration, total, tc, dev)
+    end
+  })
+
+  print("Transforming train")
+  train_problems = bm.raw(bm.flip_interleave(
+    compressor.compress(train_problems, n_train), n_train, HIDDEN), n_train * HIDDEN * 2)
+
+  print("Transforming test")
+  test_problems = bm.raw(bm.flip_interleave(
+    compressor.compress(test_problems, n_test), n_test, HIDDEN), n_test * HIDDEN * 2)
 
   print("Train", n_train)
   print("Test", n_test)
 
   print("Creating")
   local t = tm.classifier({
+    features = HIDDEN,
     classes = CLASSES,
-    features = FEATURES,
     clauses = CLAUSES,
     state = STATE,
     target = TARGET,
