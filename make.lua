@@ -20,7 +20,7 @@ local env = {
     ldflags = { "-g3" },
     dependencies = {
       "luacov >= 0.15.0-1",
-      "santoku-bitmap >= 0.0.44-1",
+      "santoku-bitmap >= 0.0.47-1",
       "santoku-matrix >= 0.0.13-1",
       "santoku-fs >= 0.0.34-1",
     }
