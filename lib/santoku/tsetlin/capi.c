@@ -121,17 +121,13 @@ typedef struct tsetlin_classifier_s {
   unsigned int clause_chunks;
   unsigned int state_chunks;
   unsigned int action_chunks;
-  tk_bits_t filter;
   size_t state_len;
   tk_bits_t *state; // class clause bit chunk
   size_t actions_len;
   tk_bits_t *actions; // class clause chunk
 
   double active;
-  double specificity_low;
-  double specificity_high;
-  size_t specificities_len;
-  double *specificities;
+  double specificity;
 
   bool created_threads;
 
@@ -794,7 +790,6 @@ static inline void tk_tsetlin_calculate (
 ) {
   unsigned int clause_chunks = tm->clause_chunks;
   unsigned int clauses = tm->clauses;
-  tk_bits_t filter = tm->filter;
   unsigned int input_chunks = tm->input_chunks;
   for (unsigned int i = 0; i < clause_chunks; i ++)
     clause_output[i] = 0;
@@ -809,9 +804,9 @@ static inline void tk_tsetlin_calculate (
       all_exclude |= actions[k];
     }
     output |=
-      (actions[input_chunks - 1] & input[input_chunks - 1] & filter) ^
-      (actions[input_chunks - 1] & filter);
-    all_exclude |= ((actions[input_chunks - 1] & filter) ^ 0);
+      (actions[input_chunks - 1] & input[input_chunks - 1]) ^
+      (actions[input_chunks - 1]);
+    all_exclude |= ((actions[input_chunks - 1]) ^ 0);
     output = !output && !(predict && !all_exclude);
     if (output)
       clause_output[clause_chunk] |= ((tk_bits_t)1 << clause_chunk_pos);
@@ -855,6 +850,7 @@ static inline void tm_update (
   tk_tsetlin_calculate(tm, class, input, clause_output, false);
   long int class_sum = tk_tsetlin_sums(tm, clause_output, active_clause);
   long int tgt = target ? 1 : 0;
+  double specificity = tm->specificity;
   unsigned int input_chunks = tm->input_chunks;
   unsigned int clause_chunks = tm->clause_chunks;
   unsigned int boost_true_positive = tm->boost_true_positive;
@@ -874,7 +870,6 @@ static inline void tm_update (
     unsigned int clause_chunk = j / BITS;
     unsigned int clause_chunk_pos = j % BITS;
     tk_bits_t *actions = tm_state_actions(tm, class, j);
-    double specificity = tm->specificities[j];
     if (!(feedback_to_clauses[clause_chunk] & ((tk_bits_t)1 << clause_chunk_pos)))
       continue;
     if ((2 * tgt - 1) * (1 - 2 * (jl & 1)) == -1) {
@@ -1114,10 +1109,9 @@ static inline void tk_tsetlin_init_classifier (
   unsigned int features,
   unsigned int clauses,
   unsigned int state_bits,
-  unsigned int threshold,
+  double thresholdf,
   bool boost_true_positive,
-  double specificity_low,
-  double specificity_high,
+  double specificity,
   unsigned int n_threads
 ) {
   if (!classes)
@@ -1130,11 +1124,11 @@ static inline void tk_tsetlin_init_classifier (
     tk_lua_verror(L, 3, "create classifier", "features", "must be a multiple of " BITS_STR);
   if (state_bits < 2)
     tk_lua_verror(L, 3, "create classifier", "bits", "must be greater than 1");
-  if (!threshold)
+  if (thresholdf <= 0)
     tk_lua_verror(L, 3, "create classifier", "target", "must be greater than 0");
   tm->classes = classes;
   tm->clauses = clauses;
-  tm->threshold = threshold;
+  tm->threshold = ceil(thresholdf >= 1 ? thresholdf : fmaxf(1.0, (double) clauses / thresholdf));
   tm->features = features;
   tm->state_bits = state_bits;
   tm->boost_true_positive = boost_true_positive;
@@ -1143,18 +1137,11 @@ static inline void tk_tsetlin_init_classifier (
   tm->clause_chunks = (tm->clauses - 1) / BITS + 1;
   tm->state_chunks = tm->classes * tm->clauses * (tm->state_bits - 1) * tm->input_chunks;
   tm->action_chunks = tm->classes * tm->clauses * tm->input_chunks;
-  tm->filter = tm->input_bits % BITS != 0
-    ? ~(((tk_bits_t) ~0) << (tm->input_bits % BITS))
-    : (tk_bits_t) ~0;
   tm->state = tk_malloc_interleaved(L, &tm->state_len, sizeof(tk_bits_t) * tm->state_chunks);
   tm->actions = tk_malloc_interleaved(L, &tm->actions_len, sizeof(tk_bits_t) * tm->action_chunks);
   tm->locks = tk_malloc_interleaved(L, &tm->locks_len, sizeof(atomic_flag) * tm->action_chunks);
   tm->sigid = 0;
-  tm->specificity_low = specificity_low;
-  tm->specificity_high = specificity_high;
-  tm->specificities = tk_malloc_interleaved(L, &tm->specificities_len, tm->clauses * sizeof(double));
-  for (unsigned int i = 0; i < tm->clauses; i ++)
-    tm->specificities[i] = (1.0 * i / tm->clauses) * (tm->specificity_high - tm->specificity_low) + tm->specificity_low;
+  tm->specificity = specificity;
   if (!(tm->state && tm->actions))
     luaL_error(L, "error in malloc during creation of classifier");
   tk_tsetlin_setup_threads(L, tm, n_threads);
@@ -1202,10 +1189,9 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
       tk_lua_fcheckunsigned(L, 2, "create classifier", "features"),
       tk_lua_fcheckunsigned(L, 2, "create classifier", "clauses"),
       tk_lua_fcheckunsigned(L, 2, "create classifier", "state"),
-      tk_lua_fcheckunsigned(L, 2, "create classifier", "target"),
+      tk_lua_fcheckposdouble(L, 2, "create classifier", "target"),
       tk_lua_fcheckboolean(L, 2, "create classifier", "boost"),
-      tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity_low"),
-      tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity_high"),
+      tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity"),
       tk_tsetlin_get_nthreads(L, 2, "create classifier", "threads"));
 
   lua_settop(L, 1);
@@ -1242,12 +1228,10 @@ static inline void tk_classifier_shrink (tsetlin_classifier_t *tm)
 {
   if (tm == NULL) return;
   if (numa_available() == -1) {
-    free(tm->specificities); tm->specificities = NULL;
     free(tm->state); tm->state = NULL;
     free(tm->results); tm->results = NULL;
     free(tm->locks); tm->locks = NULL;
   } else {
-    numa_free(tm->specificities, tm->specificities_len); tm->specificities = NULL; tm->specificities_len = 0;
     numa_free(tm->state, tm->state_len); tm->state = NULL; tm->state_len = 0;
     numa_free(tm->results, tm->results_len); tm->results = NULL; tm->results_len = 0;
     numa_free(tm->locks, tm->locks_len); tm->locks = NULL; tm->locks_len = 0;
@@ -1666,9 +1650,7 @@ static inline void _tk_tsetlin_persist_classifier (lua_State *L, tsetlin_classif
   tk_lua_fwrite(L, &tm->clause_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->state_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->action_chunks, sizeof(unsigned int), 1, fh);
-  tk_lua_fwrite(L, &tm->filter, sizeof(tk_bits_t), 1, fh);
-  tk_lua_fwrite(L, &tm->specificity_low, sizeof(double), 1, fh);
-  tk_lua_fwrite(L, &tm->specificity_high, sizeof(double), 1, fh);
+  tk_lua_fwrite(L, &tm->specificity, sizeof(double), 1, fh);
   tk_lua_fwrite(L, tm->actions, sizeof(tk_bits_t), tm->action_chunks, fh);
 }
 
@@ -1729,9 +1711,7 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tsetlin_classifier
   tk_lua_fread(L, &tm->clause_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->state_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->action_chunks, sizeof(unsigned int), 1, fh);
-  tk_lua_fread(L, &tm->filter, sizeof(tk_bits_t), 1, fh);
-  tk_lua_fread(L, &tm->specificity_low, sizeof(double), 1, fh);
-  tk_lua_fread(L, &tm->specificity_high, sizeof(double), 1, fh);
+  tk_lua_fread(L, &tm->specificity, sizeof(double), 1, fh);
   tm->actions = tk_malloc_interleaved(L, &tm->actions_len, sizeof(tk_bits_t) * tm->action_chunks);
   tk_lua_fread(L, tm->actions, sizeof(tk_bits_t), tm->action_chunks, fh);
   tk_tsetlin_setup_threads(L, tm, n_threads);

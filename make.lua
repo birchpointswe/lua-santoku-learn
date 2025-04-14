@@ -1,7 +1,7 @@
 local env = {
 
   name = "santoku-tsetlin",
-  version = "0.0.73-1",
+  version = "0.0.74-1",
   variable_prefix = "TK_TSETLIN",
   public = true,
 
@@ -10,7 +10,7 @@ local env = {
 
   dependencies = {
     "lua >= 5.1",
-    "santoku >= 0.0.248-1",
+    "santoku >= 0.0.257-1",
   },
 
   test = {
@@ -20,7 +20,7 @@ local env = {
     ldflags = { "-g3" },
     dependencies = {
       "luacov >= 0.15.0-1",
-      "santoku-bitmap >= 0.0.47-1",
+      "santoku-bitmap >= 0.0.51-1",
       "santoku-matrix >= 0.0.13-1",
       "santoku-fs >= 0.0.34-1",
     }
