@@ -1,30 +1,38 @@
 # Now
 
-- If target/threshold < 0, treat as % of clauses
 - Get encoder and auto-encoder working again
+- Fix NUMA issues
 
-- Consider thread group copies of global state with bit block syncing triggered
-  when a certain percentage of the block's action bits flip. Default to only
-  grouping threads by numa node.
-  - Duplicate state for each numa node (or user-defined group)
-  - Pin threads to cores
-  - Map threads to nearest state
-  - Each thread processes subset of samples
-  - When total changes to a block's action bits exceeds a sync target, copy the
-    corresponding state and action bits to the other replicas.
-  - When training completes, which replica do we keep? Perhaps users can specify
-    which replica to use for evaluation, and can subsequently specify which
-    replica to pass to finalize(). By default, both replicas are used for
-    evaluation (with thread sharding by sample for performance).
-  - At any point, users can force a full sync, where all replicas are aligned
-    by setting counters and action bits corresponding to the replica that has
-    the most confidence (highest state value)
-
-- Support training encoder via contrastive loss, triplet loss, etc.
+- Thread groups with periodically synced, independent replicas of state and actions:
+  - Default number of groups is the number of numa nodes
+  - Duplicate state for each group
+  - Pin threads to cores by node, splitting as few groups as possible (e.g. with
+    2 groups and 2 nodes, no splitting, with 3 groups and 2 nodes, split the third
+    group's threads across both nodes, and alloc state interleaved)
+  - Each group processes subset of samples for train, evaluate, and predict
+  - During training, when total changes to a block's action bits exceeds a sync
+    target, copy the corresponding state and action bits to the other replicas.
+  - When training completes (or when manual sync is triggered by the user),
+    compare all blocks from all groups, aligning each replica's block such that
+    the highest confidence count and action for a clause is persisted across all
+    replicas
 
 # Later
 
-- Convolutional
+- Convolution/Replicated
+    - See convolution and replicated branches
+    - Rename to "ensemble"
+    - Re-implement convolution in ensemble style, where the user can configure
+      the number of "views" each sample has (like patches in convolution). Each
+      view gets a separate multi-class TM that strictly sees the view it is
+      associated with. Pool view-specific results by summing (consider confidence
+      weighting).
+    - Consider optionally allowing weight sharing (share pointer to same locks,
+      state, and actions between multiple TMs)
+    - Consider implementing multi-granular as having separate multi-class TMs
+      for each granularity, optionally leveraging weight-sharing.
+
+- Support training encoder via contrastive loss, triplet loss, etc.
 
 - Consider migrating bitmap compressor here
 
