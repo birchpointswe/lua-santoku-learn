@@ -1,21 +1,6 @@
 # Now
 
 - Get encoder and auto-encoder working again
-- Fix NUMA issues
-
-- Thread groups with periodically synced, independent replicas of state and actions:
-  - Default number of groups is the number of numa nodes
-  - Duplicate state for each group
-  - Pin threads to cores by node, splitting as few groups as possible (e.g. with
-    2 groups and 2 nodes, no splitting, with 3 groups and 2 nodes, split the third
-    group's threads across both nodes, and alloc state interleaved)
-  - Each group processes subset of samples for train, evaluate, and predict
-  - During training, when total changes to a block's action bits exceeds a sync
-    target, copy the corresponding state and action bits to the other replicas.
-  - When training completes (or when manual sync is triggered by the user),
-    compare all blocks from all groups, aligning each replica's block such that
-    the highest confidence count and action for a clause is persisted across all
-    replicas
 
 # Later
 
@@ -39,10 +24,6 @@
 - When iterating bits and re-computing loss, stop after loss reaches 0. In other
   words, randomly select bits to look at, flip them, recompute loss, and if loss
   improves, decrement it. When loss is zero, stop flipping bits.
-
-- Pretrained models
-    - Embeddings to bitmap: cosine similarity to hamming
-    - Embeddings to bitmap: auto-encoded
 
 - explore applying the multigranular specificity approach to to all parameters,
   but instead of applying the parameters to to a single clause (as in
