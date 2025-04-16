@@ -12,7 +12,7 @@ local arr = require("santoku.array")
 local TTR = 0.9
 local THREADS = nil
 local EVALUATE_EVERY = 1
-local ITERATIONS = 100
+local ITERATIONS = 40
 
 local CLASSES = 10
 local CLAUSES = 4096
@@ -79,7 +79,7 @@ end
 test("tsetlin", function ()
 
   local SKIP = 0
-  local MAX = 6000
+  local MAX = 10000
 
   print("Reading data")
   local dataset = read_data("test/res/santoku/tsetlin/BinarizedMNISTData/MNISTTraining.txt", SKIP, MAX)
