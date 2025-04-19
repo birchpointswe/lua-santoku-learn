@@ -51,26 +51,60 @@ SOFTWARE.
 
 #define TK_TSETLIN_MT "santoku_tsetlin"
 
-typedef __uint128_t tk_bits_t;
+#define _STR(x) #x
+#define STR(x) _STR(x)
 
-#define BITS 128
-#define BITS_DIV(x) ((x) >> 7)
-#define BITS_MOD(x) ((x) & 127)
+// typedef uint32_t tk_bits_t;
+// #define BITS 32
+// #define BITS_DIV(x) ((x) >> 5)
+// #define BITS_MOD(x) ((x) & 31)
+// const tk_bits_t ALL_MASK = ((tk_bits_t)0xFFFFFFFF);
+// const tk_bits_t POS_MASK = ((tk_bits_t)0x55555555);
+// const tk_bits_t NEG_MASK = ((tk_bits_t)0xAAAAAAAA);
+// static inline uint32_t popcount (
+//   uint32_t x
+// ) {
+//   x = x - ((x >> 1) & 0x55555555);
+//   x = (x & 0x33333333) + ((x >> 2) & 0x33333333);
+//   x = (x + (x >> 4)) & 0x0F0F0F0F;
+//   x = x + (x >> 8);
+//   x = x + (x >> 16);
+//   return x & 0x0000003F;
+// }
 
-const tk_bits_t ALL_MASK = ((tk_bits_t)0xFFFFFFFF << 96) |
-                           ((tk_bits_t)0xFFFFFFFF << 64) |
-                           ((tk_bits_t)0xFFFFFFFF << 32) |
-                           ((tk_bits_t)0xFFFFFFFF);
+typedef uint64_t tk_bits_t;
+#define BITS 64
+#define BITS_DIV(x) ((x) >> 6)
+#define BITS_MOD(x) ((x) & 63)
+const tk_bits_t ALL_MASK = ((tk_bits_t)0xFFFFFFFF << 32) | ((tk_bits_t)0xFFFFFFFF);
+const tk_bits_t POS_MASK = ((tk_bits_t)0x55555555 << 32) | ((tk_bits_t)0x55555555);
+const tk_bits_t NEG_MASK = ((tk_bits_t)0xAAAAAAAA << 32) | ((tk_bits_t)0xAAAAAAAA);
+static inline unsigned int popcount (tk_bits_t x) {
+  return (unsigned int) __builtin_popcountll(x);
+}
 
-const tk_bits_t POS_MASK = ((tk_bits_t)0x55555555 << 96) |
-                           ((tk_bits_t)0x55555555 << 64) |
-                           ((tk_bits_t)0x55555555 << 32) |
-                           ((tk_bits_t)0x55555555);
+// typedef __uint128_t tk_bits_t;
+// #define BITS 128
+// #define BITS_DIV(x) ((x) >> 7)
+// #define BITS_MOD(x) ((x) & 127)
+// const tk_bits_t ALL_MASK = ((tk_bits_t)0xFFFFFFFF << 96) |
+//                            ((tk_bits_t)0xFFFFFFFF << 64) |
+//                            ((tk_bits_t)0xFFFFFFFF << 32) |
+//                            ((tk_bits_t)0xFFFFFFFF);
+// const tk_bits_t POS_MASK = ((tk_bits_t)0x55555555 << 96) |
+//                            ((tk_bits_t)0x55555555 << 64) |
+//                            ((tk_bits_t)0x55555555 << 32) |
+//                            ((tk_bits_t)0x55555555);
+// const tk_bits_t NEG_MASK = ((tk_bits_t)0xAAAAAAAA << 96) |
+//                            ((tk_bits_t)0xAAAAAAAA << 64) |
+//                            ((tk_bits_t)0xAAAAAAAA << 32) |
+//                            ((tk_bits_t)0xAAAAAAAA);
+// static inline unsigned int popcount (tk_bits_t x) {
+//   return
+//     (unsigned int) __builtin_popcountll((uint64_t)(x >> 64)) +
+//     (unsigned int) __builtin_popcountll((uint64_t)(x));
+// }
 
-const tk_bits_t NEG_MASK = ((tk_bits_t)0xAAAAAAAA << 96) |
-                           ((tk_bits_t)0xAAAAAAAA << 64) |
-                           ((tk_bits_t)0xAAAAAAAA << 32) |
-                           ((tk_bits_t)0xAAAAAAAA);
 
 typedef enum {
   TM_CLASSIFIER,
@@ -259,12 +293,6 @@ static inline int normal (double mean, double variance)
   double u2 = (double) fast_rand() / UINT32_MAX;
   double n1 = sqrt(-2 * log(u1)) * sin(8 * atan(1) * u2);
   return (int) round(mean + sqrt(variance) * n1);
-}
-
-static inline unsigned int popcount (tk_bits_t x) {
-  return
-    (unsigned int) __builtin_popcountll((uint64_t)(x >> 64)) +
-    (unsigned int) __builtin_popcountll((uint64_t)(x));
 }
 
 static inline unsigned int hamming (
@@ -1269,9 +1297,9 @@ static inline void tk_tsetlin_init_classifier (
   if (!clauses)
     tk_lua_verror(L, 3, "create classifier", "clauses", "must be greater than 0");
   if (BITS_MOD(clauses))
-    tk_lua_verror(L, 3, "create classifier", "clauses", "must be a multiple of 128");
+    tk_lua_verror(L, 3, "create classifier", "clauses", "must be a multiple of " STR(BITS));
   if (BITS_MOD(features))
-    tk_lua_verror(L, 3, "create classifier", "features", "must be a multiple of 128");
+    tk_lua_verror(L, 3, "create classifier", "features", "must be a multiple of " STR(BITS));
   if (state_bits < 2)
     tk_lua_verror(L, 3, "create classifier", "bits", "must be greater than 1");
   if (thresholdf <= 0)
@@ -1974,6 +2002,8 @@ int luaopen_santoku_tsetlin_capi (lua_State *L)
 {
   lua_newtable(L); // t
   tk_lua_register(L, tk_tsetlin_fns, 0); // t
+  lua_pushinteger(L, BITS); // b
+  lua_setfield(L, -2, "align"); // t
   luaL_newmetatable(L, TK_TSETLIN_MT); // t mt
   lua_pushcfunction(L, tk_tsetlin_destroy); // t mt fn
   lua_setfield(L, -2, "__gc"); // t mt
