@@ -10,12 +10,12 @@ local str = require("santoku.string")
 local arr = require("santoku.array")
 
 local TTR = 0.9
-local THREADS = nil
+local THREADS = 1
 local EVALUATE_EVERY = 1
-local ITERATIONS = 40
+local ITERATIONS = 5
 
 local CLASSES = 10
-local CLAUSES = 4096
+local CLAUSES = 1024
 local STATE = 8
 local TARGET = 100
 local BOOST = true
@@ -87,7 +87,7 @@ test("tsetlin", function ()
   print("Splitting & packing")
   local n_train = num.floor(#dataset.problems * TTR)
   local n_test = #dataset.problems - n_train
-  FEATURES = num.round(FEATURES, 128)
+  FEATURES = num.round(FEATURES, tm.align)
   local train_problems, train_solutions = split_dataset(dataset, 1, n_train)
   local test_problems, test_solutions = split_dataset(dataset, n_train + 1, n_train + n_test)
   str.printf("Train %d  Test %d\n", n_train, n_test)

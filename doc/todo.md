@@ -1,6 +1,8 @@
 # Now
 
-- Get encoder and auto-encoder working again
+- Optimize for stragglers, considering cache
+- Get encoder working again
+- Multi-layer classifiers and encoders
 
 # Later
 
