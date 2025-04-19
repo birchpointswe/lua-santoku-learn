@@ -61,4 +61,5 @@ return {
   encoder = function (...)
     return wrap(tm.create("encoder", ...))
   end,
+  align = tm.align
 }
