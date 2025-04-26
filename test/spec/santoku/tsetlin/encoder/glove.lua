@@ -13,25 +13,27 @@ local rand = require("santoku.random")
 local num = require("santoku.num")
 local err = require("santoku.error")
 
-local ENCODED_BITS = 64
 local THRESHOLD_LEVELS = 8
 local TRAIN_TEST_RATIO = 0.8
 local SIM_POS = 0.7
 local SIM_NEG = 0.5
 
+local HIDDEN = 64
 local CLAUSES = 128
-local STATE_BITS = 8
-local TARGET = 16
-local BOOST_TRUE_POSITIVE = true
-local ACTIVE_CLAUSE = 0.75
-local MARGIN = 0.2
-local LOSS_ALPHA = 0.5
-local SPEC_LOW = 2
-local SPEC_HIGH = 200
+local TARGET = 0.1
+local MARGIN = 0.05
+local LOSS = 0.5
+
+local STATE = 8
+local BOOST = true
+local ACTIVE = 0.25
+local NEGATIVE = 0.0
+local SPECIFICITY = 10
+local THREADS = 1
 
 local EVALUATE_EVERY = 1
 local MAX_RECORDS = 1000
-local MAX_EPOCHS = 20
+local MAX_EPOCHS = 40
 
 local function read_data (fp, max)
 
@@ -135,7 +137,7 @@ local function read_data (fp, max)
     as = as,
     ns = ns,
     ps = ps,
-    n_features = #thresholds * n_dims,
+    n_features = num.round(#thresholds * n_dims, tm.align),
     n_triplets = #as,
   }
 
@@ -165,42 +167,42 @@ test("tsetlin", function ()
   local test_tokens = split_dataset(dataset, n_train + 1, n_train + n_test)
 
   print("Input Features", dataset.n_features * 2)
-  print("Encoded Features", ENCODED_BITS)
+  print("Encoded Features", HIDDEN)
   print("Train", n_train)
   print("Test", n_test)
 
   print("Creating")
   local t = tm.encoder({
     visible = dataset.n_features,
-    hidden = ENCODED_BITS,
+    hidden = HIDDEN,
     clauses = CLAUSES,
-    state_bits = STATE_BITS,
+    state = STATE,
     target = TARGET,
-    boost_true_positive = BOOST_TRUE_POSITIVE,
-    spec_low = SPEC_LOW,
-    spec_high = SPEC_HIGH,
-    threads = 4,
+    boost = BOOST,
+    specificity = SPECIFICITY,
+    threads = THREADS,
   })
 
   print("Training")
   local stopwatch = utc.stopwatch()
   t.train({
-    corpus = train_tokens,
+    triplets = train_tokens,
     samples = n_train,
-    active_clause = ACTIVE_CLAUSE,
+    active = ACTIVE,
+    negative = NEGATIVE,
     margin = MARGIN,
-    loss_alpha = LOSS_ALPHA,
+    loss = LOSS,
     iterations = MAX_EPOCHS,
     each = function (epoch)
-      local duration, avg_duration = stopwatch(0.1)
+      local duration, total = stopwatch()
       if epoch == MAX_EPOCHS or epoch % EVALUATE_EVERY == 0 then
-        local test_score = t.evaluate({ corpus = test_tokens, samples = n_test })
-        local train_score = t.evaluate({ corpus = train_tokens, samples = n_train })
-        str.printf("Epoch %-4d  Time %6.3f (%6.3f)  Test %4.2f  Train %4.2f\n",
-          epoch, duration, avg_duration, test_score, train_score)
+        local train_score = t.evaluate({ triplets = train_tokens, samples = n_train, margin = MARGIN })
+        local test_score = t.evaluate({ triplets = test_tokens, samples = n_test, margin = MARGIN })
+        str.printf("Epoch %-4d   Time %6.3f   %6.3f   Test %4.2f   Train %4.2f\n",
+          epoch, duration, total, test_score, train_score)
       else
-        str.printf("Epoch %-4d  Time %6.3f (%6.3f)\n",
-          epoch, duration, avg_duration)
+        str.printf("Epoch %-4d   Time %6.3f   %6.3f\n",
+          epoch, duration, total)
       end
     end
   })
@@ -211,8 +213,8 @@ test("tsetlin", function ()
   t.persist("model.bin")
   print("Restoring")
   t = tm.load("model.bin")
-  local test_score = t.evaluate({ corpus = test_tokens, samples = n_test })
-  local train_score = t.evaluate({ corpus = train_tokens, samples = n_train })
+  local test_score = t.evaluate({ triplets = test_tokens, samples = n_test, margin = MARGIN })
+  local train_score = t.evaluate({ triplets = train_tokens, samples = n_train, margin = MARGIN })
   str.printf("Evaluate Test %4.2f  Train %4.2f\n", test_score, train_score)
 
 end)

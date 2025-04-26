@@ -1,7 +1,15 @@
-# Now
+# Next
+
+- Fix cache thrashing
+- realloc/index sums_local/old according to actual classes covered by thread
+  instead of all classes
+
+- Is it possible to cache encoded sentences and hamming distances initially
+  during SETUP_ENCODER and then update encodings and distances incrementally as
+  encoder training proceeds according to sums updates? This would prevent needing
+  to re-encode and re-compute loss for each sample.
 
 - Optimize for stragglers, considering cache
-- Get encoder working again
 - Multi-layer classifiers and encoders
 
 # Later

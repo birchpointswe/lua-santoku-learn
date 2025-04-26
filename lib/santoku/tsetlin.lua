@@ -3,7 +3,8 @@ local arr = require("santoku.array")
 local it = require("santoku.iter")
 
 local function evaluate (t, opts, ...)
-  if tm.type(t) == "classifier" then
+  local typ = tm.type(t)
+  if typ == "classifier" then
     local correct, confusion, predictions, observations =
       tm.evaluate(t, opts, ...)
     local confusion_ranked = opts.stats and arr.sort(it.collect(it.flatten(it.map(function (e, ps)
@@ -23,6 +24,8 @@ local function evaluate (t, opts, ...)
       return a.count > b.count
     end)
     return correct / opts.samples, confusion_ranked or nil, predictions_ranked or nil
+  elseif typ == "encoder" then
+    return tm.evaluate(t, opts, ...) / opts.samples
   else
     return tm.evaluate(t, opts, ...)
   end
