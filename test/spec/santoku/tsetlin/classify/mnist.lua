@@ -10,9 +10,9 @@ local str = require("santoku.string")
 local arr = require("santoku.array")
 
 local TTR = 0.9
-local THREADS = 1
+local THREADS = nil
 local EVALUATE_EVERY = 1
-local ITERATIONS = 5
+local ITERATIONS = 20
 
 local CLASSES = 10
 local CLAUSES = 1024
@@ -21,6 +21,7 @@ local TARGET = 100
 local BOOST = true
 local SPECIFICITY = 10
 local ACTIVE = 0.75
+local NEGATIVE = 0.1
 
 local FEATURES = 784
 
@@ -121,6 +122,7 @@ test("tsetlin", function ()
     solutions = train_solutions,
     iterations = ITERATIONS,
     active = ACTIVE,
+    negative = NEGATIVE,
     each = function (epoch)
       local duration = stopwatch()
       if epoch == ITERATIONS or epoch % EVALUATE_EVERY == 0 then
