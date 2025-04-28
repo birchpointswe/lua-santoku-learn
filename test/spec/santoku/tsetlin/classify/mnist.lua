@@ -10,7 +10,7 @@ local str = require("santoku.string")
 local arr = require("santoku.array")
 
 local TTR = 0.9
-local THREADS = nil
+local THREADS = 1
 local EVALUATE_EVERY = 1
 local ITERATIONS = 20
 

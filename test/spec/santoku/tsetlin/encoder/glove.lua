@@ -13,27 +13,27 @@ local rand = require("santoku.random")
 local num = require("santoku.num")
 local err = require("santoku.error")
 
-local THRESHOLD_LEVELS = 8
+local THRESHOLD_LEVELS = 16
 local TRAIN_TEST_RATIO = 0.8
 local SIM_POS = 0.7
 local SIM_NEG = 0.5
 
 local HIDDEN = 64
-local CLAUSES = 128
+local CLAUSES = 512
 local TARGET = 0.1
-local MARGIN = 0.05
-local LOSS = 0.5
+local MARGIN = 0.1
+local LOSS = 0.1
 
 local STATE = 8
-local BOOST = true
-local ACTIVE = 0.25
+local BOOST = false
+local ACTIVE = 0.8
 local NEGATIVE = 0.0
-local SPECIFICITY = 10
+local SPECIFICITY = 20
 local THREADS = 1
 
 local EVALUATE_EVERY = 1
-local MAX_RECORDS = 1000
-local MAX_EPOCHS = 40
+local MAX_RECORDS = 10000
+local MAX_EPOCHS = 200
 
 local function read_data (fp, max)
 
