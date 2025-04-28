@@ -142,16 +142,18 @@ typedef enum {
 
 typedef enum {
   TM_INIT,
-  TM_SETUP_CLASSIFIER,
-  TM_SETUP_ENCODER,
   TM_DONE,
-  TM_PRIME,
-  TM_TRAIN_CLASSIFIER,
-  TM_TRAIN_ENCODER,
-  TM_PREDICT,
-  TM_PREDICT_REDUCE,
-  TM_PREDICT_ENCODER_REDUCE,
-  TM_EVALUATE_ENCODER_REDUCE
+  TM_CLASSIFIER_PRIME,
+  TM_CLASSIFIER_SETUP,
+  TM_CLASSIFIER_TRAIN,
+  TM_CLASSIFIER_PREDICT,
+  TM_CLASSIFIER_PREDICT_REDUCE,
+  TM_ENCODER_SETUP,
+  TM_ENCODER_TRAIN_ENCODE,
+  TM_ENCODER_TRAIN_LOSS,
+  TM_ENCODER_TRAIN_UPDATE,
+  TM_ENCODER_PREDICT_REDUCE,
+  TM_ENCODER_EVALUATE_REDUCE
 } tsetlin_classifier_stage_t;
 
 struct tsetlin_classifier_s;
@@ -166,8 +168,6 @@ typedef struct {
 
   unsigned int cfirst;
   unsigned int clast;
-  unsigned int class_first;
-  unsigned int class_last;
 
   unsigned int index;
   unsigned int sigid;
@@ -177,7 +177,6 @@ typedef struct {
     tk_bits_t *ps;
     unsigned int *ss;
     double margin;
-    double loss;
   } train;
 
   struct {
@@ -196,7 +195,6 @@ typedef struct {
   long int *sums_local; // classes x samples
   unsigned int *shuffle; // samples
   tk_bits_t *active_clause; // clause_chunks*
-  tk_bits_t *clause_output; // clause_chunks*
   long int *scores; // classes x samples
 
 } tsetlin_classifier_thread_t;
@@ -238,6 +236,12 @@ typedef struct tsetlin_classifier_s {
   unsigned int *results;
   size_t encodings_len;
   tk_bits_t *encodings;
+  size_t losses_len;
+  atomic_uint *losses;
+  size_t flosses_len;
+  double *flosses;
+  unsigned int max_loss;
+  unsigned int min_loss;
 
   size_t sums_len;
   atomic_long *sums; // samples x classes
@@ -251,9 +255,9 @@ typedef struct {
   tsetlin_classifier_t *classifier;
 } tsetlin_t;
 
-#define tm_state_old_sum(tm, thread, class, sample) \
+#define tm_state_old_sum(tm, thread, chunk, sample) \
   ((tm)->thread_data[thread].sums_old[ \
-    (class) * (tm)->thread_data[(thread)].train.n + \
+    (chunk) * (tm)->thread_data[(thread)].train.n + \
     (sample)])
 
 #define tm_state_sum_local(tm, thread, class, sample) \
@@ -261,18 +265,15 @@ typedef struct {
     (class) * (tm)->thread_data[(thread)].train.n + \
     (sample)])
 
-#define tm_state_clause_output(tm, thread) \
-  ((tm)->thread_data[thread].clause_output)
-
 #define tm_state_active_clause(tm, thread) \
   ((tm)->thread_data[thread].active_clause)
 
 #define tm_state_shuffle(tm, thread) \
   ((tm)->thread_data[thread].shuffle)
 
-#define tm_state_scores(tm, thread, class, sample) \
+#define tm_state_scores(tm, thread, chunk, sample) \
   ((tm)->thread_data[thread].scores[ \
-    ((class) - (tm)->thread_data[thread].class_first) * (tm)->thread_data[(thread)].predict.n + \
+    ((chunk) - (tm)->thread_data[thread].cfirst) * (tm)->thread_data[(thread)].predict.n + \
     (sample)])
 
 #define tm_state_clause_chunks(tm, thread) \
@@ -351,35 +352,16 @@ static inline unsigned int hamming (
   return distance;
 }
 
-static inline double hamming_loss (
-  tk_bits_t *a,
-  tk_bits_t *b,
-  unsigned int bits,
-  double alpha
-) {
-  double loss = hamming(a, b, bits);
-  return pow(loss / (double) bits, alpha);
-}
-
-static inline double hamming_to_loss (
-  unsigned int diff,
-  unsigned int bits,
-  double alpha
-) {
-  return pow((double) diff / (double) bits, alpha);
-}
-
 static inline double triplet_loss_hamming (
   tk_bits_t *a,
   tk_bits_t *n,
   tk_bits_t *p,
   unsigned int bits,
-  double margin,
-  double alpha
+  double margin
 ) {
   double dist_an = (double) hamming(a, n, bits) / (double) bits;
   double dist_ap = (double) hamming(a, p, bits) / (double) bits;
-  return pow(fmin(1.0, fmax(0.0, (double) dist_ap - dist_an + margin)), alpha);
+  return fmin(1.0, fmax(0.0, (double) dist_ap - dist_an + margin));
 }
 
 static inline void tk_lua_callmod (
@@ -495,7 +477,7 @@ static inline void *tk_malloc (
 static inline int tk_lua_verror (lua_State *L, int n, ...) {
   va_list args;
   va_start(args, n);
-  for (int i = 0; i < n; i++) {
+  for (int i = 0; i < n; i ++) {
     const char *str = va_arg(args, const char *);
     lua_pushstring(L, str);
   }
@@ -837,7 +819,7 @@ static inline void tk_tsetlin_init_streams (
   long int active = normal(n * p, n * p * (1 - p));
   if (active >= n) active = n;
   if (active < 0) active = 0;
-  for (unsigned int i = 0; i < active; i++) {
+  for (unsigned int i = 0; i < active; i ++) {
     unsigned int r = fast_rand();
     unsigned int f = ((uint64_t)r * n) >> 32;
     unsigned int chunk = BITS_DIV(f);
@@ -903,81 +885,47 @@ static inline void tm_dec (
   actions[chunk] &= ~carry;
 }
 
-// static inline void tk_tsetlin_calculate (
-//   tsetlin_classifier_t *tm,
-//   tk_bits_t *input,
-//   bool predict,
-//   unsigned int cfirst,
-//   unsigned int clast,
-//   unsigned int thread
-// ) {
-//   tk_bits_t *clause_output = tm_state_clause_output(tm, thread);
-//   unsigned int input_chunks = tm->input_chunks;
-//   for (unsigned int clause_chunk = cfirst; clause_chunk <= clast; clause_chunk ++) {
-//     clause_output[clause_chunk - cfirst] = (tk_bits_t)0;
-//     for (unsigned int clause_chunk_pos = 0; clause_chunk_pos < BITS; clause_chunk_pos ++) {
-//       tk_bits_t output = 0;
-//       tk_bits_t all_exclude = 0;
-//       unsigned int clause = clause_chunk * BITS + clause_chunk_pos;
-//       tk_bits_t *actions = tm_state_actions(tm, clause);
-//       for (unsigned int k = 0; k < input_chunks - 1; k ++) {
-//         output |= ((actions[k] & input[k]) ^ actions[k]);
-//         all_exclude |= actions[k];
-//       }
-//       output |=
-//         (actions[input_chunks - 1] & input[input_chunks - 1]) ^
-//         (actions[input_chunks - 1]);
-//       all_exclude |= ((actions[input_chunks - 1]) ^ 0);
-//       output = !output && !(predict && !all_exclude);
-//       if (output)
-//         clause_output[clause_chunk - cfirst] |= ((tk_bits_t)1 << clause_chunk_pos);
-//     }
-//   }
-// }
-
 static inline void tk_tsetlin_calculate (
   tsetlin_classifier_t *tm,
   tk_bits_t *input,
   bool predict,
+  tk_bits_t *clause_output,
   unsigned int cfirst,
   unsigned int clast,
   unsigned int thread
 ) {
-  tk_bits_t *clause_output = tm_state_clause_output(tm, thread);
   unsigned int input_chunks = tm->input_chunks;
-  for (unsigned int chunk = cfirst; chunk <= clast; ++ chunk) {
-    tk_bits_t out_bits = 0;
-    for (unsigned int pos = 0; pos < BITS; ++ pos) {
-      unsigned int clause = chunk * BITS + pos;
+  for (unsigned int clause_chunk = cfirst; clause_chunk <= clast; clause_chunk ++) {
+    clause_output[clause_chunk - cfirst] = (tk_bits_t)0;
+    for (unsigned int clause_chunk_pos = 0; clause_chunk_pos < BITS; clause_chunk_pos ++) {
+      tk_bits_t output = 0;
+      tk_bits_t all_exclude = 0;
+      unsigned int clause = clause_chunk * BITS + clause_chunk_pos;
       tk_bits_t *actions = tm_state_actions(tm, clause);
-      bool unsat = false;
-      bool any_literal = false;
-      for (unsigned int k = 0; k < input_chunks; ++ k) {
-        tk_bits_t a = actions[k];
-        if (a) {
-          any_literal = true;
-          if ((a & input[k]) != a) {
-            unsat = true;
-            break;
-          }
-        }
+      for (unsigned int k = 0; k < input_chunks - 1; k ++) {
+        output |= ((actions[k] & input[k]) ^ actions[k]);
+        all_exclude |= actions[k];
       }
-      bool bit_out = !unsat && ( !predict || any_literal );
-      if (bit_out) out_bits |= ( (tk_bits_t) 1 ) << pos;
+      output |=
+        (actions[input_chunks - 1] & input[input_chunks - 1]) ^
+        (actions[input_chunks - 1]);
+      all_exclude |= ((actions[input_chunks - 1]) ^ 0);
+      output = !output && !(predict && !all_exclude);
+      if (output)
+        clause_output[clause_chunk - cfirst] |= ((tk_bits_t)1 << clause_chunk_pos);
     }
-    clause_output[chunk - cfirst] = out_bits;
   }
 }
 
 static inline long int tk_tsetlin_sums (
   tsetlin_classifier_t *tm,
+  tk_bits_t *clause_output,
   unsigned int cfirst,
   unsigned int clast,
   unsigned int offset,
   unsigned int thread
 ) {
   long int sum = 0;
-  tk_bits_t *clause_output = tm_state_clause_output(tm, thread);
   for (unsigned int i = cfirst; i <= clast; i ++) {
     sum += popcount(clause_output[i - offset] & POS_MASK); // 0101
     sum -= popcount(clause_output[i - offset] & NEG_MASK); // 1010
@@ -988,116 +936,80 @@ static inline long int tk_tsetlin_sums (
 static inline void tm_update (
   tsetlin_classifier_t *tm,
   tk_bits_t *input,
+  tk_bits_t chunk_output,
   unsigned int s,
   unsigned int target_class,
   unsigned int target_vote,
-  unsigned int cfirst,
-  unsigned int clast,
-  unsigned int class_first,
-  unsigned int class_last,
+  tk_bits_t active,
+  unsigned int class,
+  unsigned int chunk,
   unsigned int thread
 ) {
+  double negative_sampling = tm->negative;
+  if (class != target_class && fast_chance(1 - negative_sampling))
+    return;
   unsigned int features = tm->features;
   long int threshold = (long int) tm->threshold;
   double specificity = tm->specificity;
   unsigned int input_chunks = tm->input_chunks;
   unsigned int boost_true_positive = tm->boost_true_positive;
-  tk_bits_t *clause_output = tm_state_clause_output(tm, thread);
-  tk_bits_t *active_clause = tm_state_active_clause(tm, thread);
   // NOTE: This is much faster given the stack allocation of feedback arrays.
   // Can we somehow achieve the same with heap?
   tk_bits_t feedback_to_la[input_chunks];
-  tk_tsetlin_calculate(tm, input, false, cfirst, clast, thread);
-  double negative_sampling = tm->negative;
-  for (unsigned int tclass = class_first; tclass <= class_last; tclass ++) {
-    if (tclass != target_class && fast_chance(1 - negative_sampling))
-      continue;
-    unsigned int target = tclass == target_class ? target_vote : !target_vote;
-    long int tgt = (long int) target;
-    atomic_long *class_sump = tm_state_sum(tm, tclass, s);
-    unsigned int base = tclass * tm->clause_chunks;
-    unsigned int cfirst_class = base < cfirst ? cfirst : base;
-    unsigned int raw_end = base + tm->clause_chunks - 1;
-    unsigned int clast_class = raw_end > clast ? clast : raw_end;
-    unsigned clause_chunks_class = clast_class - cfirst_class + 1;
-    long int old_sum = tm_state_old_sum(tm, thread, tclass, s);
-    long int new_sum = tk_tsetlin_sums(tm, cfirst_class, clast_class, cfirst, thread);
-    long int diff = new_sum - old_sum;
-    long int class_sum;
-    if (diff != 0) {
-      tm_state_old_sum(tm, thread, tclass, s) = new_sum;
-      class_sum = tm_state_sum_local(tm, thread, tclass, s) = atomic_fetch_add(class_sump, diff) + diff;
-    } else {
-      class_sum = tm_state_sum_local(tm, thread, tclass, s);
-    }
-    class_sum = (class_sum > threshold) ? threshold : class_sum;
-    class_sum = (class_sum < -threshold) ? -threshold : class_sum;
-    long int err = (target == 1) ? (threshold - class_sum) : (threshold + class_sum);
-    double p = (double) err / (2.0 * threshold);
-    tk_bits_t feedback_to_clauses[clause_chunks_class];
-    for (unsigned int i = 0; i < clause_chunks_class; i ++)
-      feedback_to_clauses[i] = (tk_bits_t)0;
-    for (unsigned int i = 0; i < clause_chunks_class * BITS; i ++) {
-      unsigned int clause_chunk = BITS_DIV(i);
-      unsigned int clause_chunk_pos = BITS_MOD(i);
-      feedback_to_clauses[clause_chunk] |= ((tk_bits_t) fast_chance(p) << clause_chunk_pos);
-    }
-    for (unsigned int i = 0; i < clause_chunks_class; i ++)
-      feedback_to_clauses[i] &= active_clause[(cfirst_class - cfirst) + i];
-    for (unsigned int j = 0; j < clause_chunks_class * BITS; j ++) {
-      long int jl = (long int) j;
-      unsigned int clause_chunk = BITS_DIV(j);
-      unsigned int clause_chunk_pos = BITS_MOD(j);
-      tk_bits_t *actions = tm_state_actions(tm, cfirst_class * BITS + j);
-      bool output = (clause_output[(cfirst_class - cfirst) + clause_chunk] & ((tk_bits_t)1 << clause_chunk_pos)) > 0;
-      if (feedback_to_clauses[clause_chunk] & ((tk_bits_t)1 << clause_chunk_pos)) {
-        if ((2 * tgt - 1) * (1 - 2 * (jl & 1)) == -1) {
-          // Type II feedback
-          if (output)
-            for (unsigned int k = 0; k < input_chunks; k ++) {
-              tk_bits_t active = (~input[k]) & (~actions[k]);
-              tm_inc(tm, cfirst_class * BITS + j, k, active);
-            }
-        } else if ((2 * tgt - 1) * (1 - 2 * (jl & 1)) == 1) {
-          // Type I Feedback
-          tk_tsetlin_init_streams(feedback_to_la, 2 * features, specificity);
-          if (output) {
-            if (boost_true_positive)
-              for (unsigned int k = 0; k < input_chunks; k ++) {
-                tk_bits_t chunk = input[k];
-                tm_inc(tm, cfirst_class * BITS + j, k, chunk);
-              }
-            else
-              for (unsigned int k = 0; k < input_chunks; k ++) {
-                tk_bits_t fb = input[k] & (~feedback_to_la[k]);
-                tm_inc(tm, cfirst_class * BITS + j, k, fb);
-              }
-            for (unsigned int k = 0; k < input_chunks; k ++) {
-              tk_bits_t fb = (~input[k]) & feedback_to_la[k];
-              tm_dec(tm, cfirst_class * BITS + j, k, fb);
-            }
-          } else {
-            for (unsigned int k = 0; k < input_chunks; k ++)
-              tm_dec(tm, cfirst_class * BITS + j, k, feedback_to_la[k]);
+  unsigned int target = class == target_class ? target_vote : !target_vote;
+  long int tgt = (long int) target;
+  atomic_long *class_sump = tm_state_sum(tm, class, s);
+  long int old_sum = tm_state_old_sum(tm, thread, chunk, s);
+  long int new_sum = tk_tsetlin_sums(tm, &chunk_output, chunk, chunk, chunk, thread);
+  long int diff = new_sum - old_sum;
+  long int class_sum;
+  if (diff != 0) {
+    tm_state_old_sum(tm, thread, chunk, s) = new_sum;
+    class_sum = tm_state_sum_local(tm, thread, class, s) = atomic_fetch_add(class_sump, diff) + diff;
+  } else {
+    class_sum = tm_state_sum_local(tm, thread, class, s);
+  }
+  class_sum = (class_sum > threshold) ? threshold : class_sum;
+  class_sum = (class_sum < -threshold) ? -threshold : class_sum;
+  long int err = (target == 1) ? (threshold - class_sum) : (threshold + class_sum);
+  double p = (double) err / (2.0 * threshold);
+  for (unsigned int j = 0; j < BITS; j ++) {
+    long int jl = (long int) j;
+    tk_bits_t *actions = tm_state_actions(tm, chunk * BITS + j);
+    bool output = (chunk_output & ((tk_bits_t)1 << j)) > 0;
+    if (fast_chance(p) && (active & ((tk_bits_t)1 << j))) {
+      if ((2 * tgt - 1) * (1 - 2 * (jl & 1)) == -1) {
+        // Type II feedback
+        if (output)
+          for (unsigned int k = 0; k < input_chunks; k ++) {
+            tk_bits_t updated = (~input[k]) & (~actions[k]);
+            tm_inc(tm, chunk * BITS + j, k, updated);
           }
+      } else if ((2 * tgt - 1) * (1 - 2 * (jl & 1)) == 1) {
+        // Type I Feedback
+        tk_tsetlin_init_streams(feedback_to_la, 2 * features, specificity);
+        if (output) {
+          if (boost_true_positive)
+            for (unsigned int k = 0; k < input_chunks; k ++) {
+              tk_bits_t ichunk = input[k];
+              tm_inc(tm, chunk * BITS + j, k, ichunk);
+            }
+          else
+            for (unsigned int k = 0; k < input_chunks; k ++) {
+              tk_bits_t fb = input[k] & (~feedback_to_la[k]);
+              tm_inc(tm, chunk * BITS + j, k, fb);
+            }
+          for (unsigned int k = 0; k < input_chunks; k ++) {
+            tk_bits_t fb = (~input[k]) & feedback_to_la[k];
+            tm_dec(tm, chunk * BITS + j, k, fb);
+          }
+        } else {
+          for (unsigned int k = 0; k < input_chunks; k ++)
+            tm_dec(tm, chunk * BITS + j, k, feedback_to_la[k]);
         }
       }
     }
   }
-}
-
-static inline void mc_tm_update (
-  tsetlin_classifier_t *tm,
-  tk_bits_t *input,
-  unsigned int s,
-  unsigned int target_class,
-  unsigned int cfirst,
-  unsigned int clast,
-  unsigned int class_first,
-  unsigned int class_last,
-  unsigned int thread
-) {
-  tm_update(tm, input, s, target_class, 1, cfirst, clast, class_first, class_last, thread);
 }
 
 static inline void tk_tsetlin_init_active (
@@ -1197,237 +1109,7 @@ static inline void tk_tsetlin_signal (
   pthread_cond_broadcast(cond_stage);
 }
 
-static void tk_classifier_setup_thread (tsetlin_classifier_t *, unsigned int, tk_bits_t *, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int);
-static void tk_classifier_prime_thread (tsetlin_classifier_t *, unsigned int, tk_bits_t *, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int);
-static void tk_classifier_train_thread (tsetlin_classifier_t *, unsigned int, tk_bits_t *, unsigned int *, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int);
-static void tk_classifier_predict_thread (tsetlin_classifier_t *, unsigned int, tk_bits_t *, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int);
-static void tk_classifier_predict_reduce_thread (tsetlin_classifier_t *, unsigned int, unsigned int, unsigned int);
-
-static void tk_encoder_setup_thread (tsetlin_classifier_t *, unsigned int, tk_bits_t *, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int);
-static void tk_encoder_train_thread (tsetlin_classifier_t *, unsigned int, tk_bits_t *, double, double, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int);
-static void tk_encoder_predict_reduce_thread (tsetlin_classifier_t *, unsigned int, unsigned int, unsigned int);
-static void tk_encoder_evaluate_reduce_thread (tsetlin_classifier_t *, unsigned int, atomic_uint *, double, unsigned int, unsigned int);
-
-static void *tk_tsetlin_classifier_worker (void *datap)
-{
-  tsetlin_classifier_thread_t *data =
-    (tsetlin_classifier_thread_t *) datap;
-  pthread_mutex_lock(&data->tm->mutex);
-  data->tm->n_threads_done ++;
-  if (data->tm->n_threads_done == data->tm->n_threads)
-    pthread_cond_signal(&data->tm->cond_done);
-  pthread_mutex_unlock(&data->tm->mutex);
-  while (1) {
-    pthread_mutex_lock(&data->tm->mutex);
-    while (data->sigid == data->tm->sigid)
-      pthread_cond_wait(&data->tm->cond_stage, &data->tm->mutex);
-    data->sigid = data->tm->sigid;
-    tsetlin_classifier_stage_t stage = data->tm->stage;
-    pthread_mutex_unlock(&data->tm->mutex);
-    switch (stage) {
-      case TM_SETUP_CLASSIFIER:
-        tk_classifier_setup_thread(
-          data->tm,
-          data->train.n,
-          data->train.ps,
-          data->cfirst,
-          data->clast,
-          data->class_first,
-          data->class_last,
-          data->index);
-        break;
-      case TM_SETUP_ENCODER:
-        tk_encoder_setup_thread(
-          data->tm,
-          data->train.n,
-          data->train.ps,
-          data->cfirst,
-          data->clast,
-          data->class_first,
-          data->class_last,
-          data->index);
-        break;
-      case TM_PRIME:
-        tk_classifier_prime_thread(
-          data->tm,
-          data->train.n,
-          data->train.ps,
-          data->cfirst,
-          data->clast,
-          data->class_first,
-          data->class_last,
-          data->index);
-        break;
-      case TM_TRAIN_CLASSIFIER:
-        tk_classifier_train_thread(
-          data->tm,
-          data->train.n,
-          data->train.ps,
-          data->train.ss,
-          data->cfirst,
-          data->clast,
-          data->class_first,
-          data->class_last,
-          data->index);
-        break;
-      case TM_TRAIN_ENCODER:
-        tk_encoder_train_thread(
-          data->tm,
-          data->train.n,
-          data->train.ps,
-          data->train.margin,
-          data->train.loss,
-          data->cfirst,
-          data->clast,
-          data->class_first,
-          data->class_last,
-          data->index);
-        break;
-      case TM_PREDICT_ENCODER_REDUCE:
-        tk_encoder_predict_reduce_thread(
-          data->tm,
-          data->predict.n,
-          data->sfirst,
-          data->slast);
-        break;
-      case TM_EVALUATE_ENCODER_REDUCE:
-        tk_encoder_evaluate_reduce_thread(
-          data->tm,
-          data->evaluate.n,
-          data->evaluate.correct,
-          data->evaluate.margin,
-          data->sfirst,
-          data->slast);
-        break;
-      case TM_PREDICT:
-        tk_classifier_predict_thread(
-          data->tm,
-          data->predict.n,
-          data->predict.ps,
-          data->cfirst,
-          data->clast,
-          data->class_first,
-          data->class_last,
-          data->index);
-        break;
-      case TM_PREDICT_REDUCE:
-        tk_classifier_predict_reduce_thread(
-          data->tm,
-          data->predict.n,
-          data->sfirst,
-          data->slast);
-        break;
-      case TM_DONE:
-        break;
-      default:
-        assert(false);
-        break;
-    }
-    pthread_mutex_lock(&data->tm->mutex);
-    data->tm->n_threads_done ++;
-    if (data->tm->n_threads_done == data->tm->n_threads)
-      pthread_cond_signal(&data->tm->cond_done);
-    pthread_mutex_unlock(&data->tm->mutex);
-    if (stage == TM_DONE)
-      break;
-  }
-  return NULL;
-}
-
-static inline void tk_pin_thread_to_cpu (
-  unsigned int thread_index,
-  unsigned int n_threads
-) {
-  cpu_set_t cpuset;
-  CPU_ZERO(&cpuset);
-  unsigned int n_nodes = (unsigned int) numa_max_node() + 1;
-  unsigned int threads_per_node = n_threads / n_nodes;
-  if (threads_per_node == 0) threads_per_node = 1;
-  unsigned int node = thread_index / threads_per_node;
-  if (node >= n_nodes) node = n_nodes - 1;
-  struct bitmask *cpus = numa_allocate_cpumask();
-  if (numa_node_to_cpus((int) node, cpus) == 0) {
-    unsigned int count = 0;
-    for (unsigned int i = 0; i < cpus->size; ++i) {
-      if (numa_bitmask_isbitset(cpus, i)) {
-        count ++;
-      }
-    }
-    if (count > 0) {
-      unsigned int local_index =
-        (thread_index - node * threads_per_node) % count;
-      unsigned int found = 0;
-      for (unsigned int i = 0; i < cpus->size; ++i) {
-        if (numa_bitmask_isbitset(cpus, i)) {
-          if (found == local_index) {
-            CPU_SET(i, &cpuset);
-            break;
-          }
-          found ++;
-        }
-      }
-    }
-  }
-  numa_free_cpumask(cpus);
-  pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
-}
-
-static void *tk_tsetlin_classifier_worker_wrapper (void *arg) {
-  tsetlin_classifier_thread_t *td = (tsetlin_classifier_thread_t *)arg;
-  if (numa_available() != -1 && numa_max_node() > 0)
-    tk_pin_thread_to_cpu(td->index, td->tm->n_threads);
-  return tk_tsetlin_classifier_worker(arg);
-}
-
-static inline void tk_tsetlin_setup_threads (
-  lua_State *L,
-  tsetlin_classifier_t *tm,
-  unsigned int n_threads
-) {
-  tm->n_threads = n_threads;
-  tm->n_threads_done = 0;
-  tm->stage = TM_INIT;
-  tm->threads = tk_malloc(L, tm->n_threads * sizeof(pthread_t));
-  tm->thread_data = tk_malloc(L, tm->n_threads * sizeof(tsetlin_classifier_thread_t));
-  memset(tm->thread_data, 0, tm->n_threads * sizeof(tsetlin_classifier_thread_t));
-
-  // TODO: check errors
-  pthread_mutex_init(&tm->mutex, NULL);
-  pthread_cond_init(&tm->cond_stage, NULL);
-  pthread_cond_init(&tm->cond_done, NULL);
-
-  for (unsigned int i = 0; i < tm->n_threads; i ++) {
-    tm->thread_data[i].tm = tm;
-    tm->thread_data[i].sigid = 0;
-    tm->thread_data[i].index = i;
-    if (!tm->created_threads && pthread_create(&tm->threads[i], NULL, tk_tsetlin_classifier_worker_wrapper, &tm->thread_data[i]) != 0)
-      tk_error(L, "pthread_create", errno);
-  }
-
-  unsigned int total_chunks = tm->clause_chunks * tm->classes;
-  unsigned int cslice = total_chunks / tm->n_threads;
-  unsigned int cremaining = total_chunks % tm->n_threads;
-  unsigned int cfirst = 0;
-  for (unsigned int i = 0; i < tm->n_threads; ++i) {
-    unsigned int extra = cremaining ? 1 : 0;
-    unsigned int count = cslice + extra;
-    if (cremaining) cremaining --;
-    tm->thread_data[i].cfirst = cfirst;
-    tm->thread_data[i].clast = cfirst + count - 1;
-    tm->thread_data[i].class_first = cfirst / tm->clause_chunks;
-    tm->thread_data[i].class_last = tm->thread_data[i].clast / tm->clause_chunks;
-    cfirst += count;
-  }
-
-  for (unsigned int i = 0; i < tm->n_threads; i ++) {
-    unsigned int clause_chunks = tm_state_clause_chunks(tm, i);
-    tm->thread_data[i].active_clause = tk_malloc_aligned(L, sizeof(tk_bits_t) * clause_chunks, BITS);
-    tm->thread_data[i].clause_output = tk_malloc_aligned(L, sizeof(tk_bits_t) * clause_chunks, BITS);
-  }
-
-  tm->created_threads = true;
-  tk_tsetlin_wait_for_threads(&tm->mutex, &tm->cond_done, &tm->n_threads_done, tm->n_threads);
-}
+static inline void tk_tsetlin_setup_threads (lua_State *L, tsetlin_classifier_t *tm, unsigned int n_threads);
 
 static inline void tk_tsetlin_init_classifier (
   lua_State *L,
@@ -1603,9 +1285,13 @@ static inline void tk_classifier_destroy (tsetlin_classifier_t *tm)
   if (numa_available() == -1) {
     free(tm->results); tm->results = NULL;
     free(tm->encodings); tm->encodings = NULL;
+    free(tm->losses); tm->losses = NULL;
+    free(tm->flosses); tm->flosses = NULL;
   } else {
     numa_free(tm->results, tm->results_len); tm->results = NULL; tm->results_len = 0;
     numa_free(tm->encodings, tm->encodings_len); tm->encodings = NULL; tm->encodings_len = 0;
+    numa_free(tm->losses, tm->losses_len); tm->losses = NULL; tm->losses_len = 0;
+    numa_free(tm->flosses, tm->flosses_len); tm->flosses = NULL; tm->flosses_len = 0;
   }
   tk_tsetlin_signal(
     (int) TM_DONE, &tm->sigid,
@@ -1616,7 +1302,6 @@ static inline void tk_classifier_destroy (tsetlin_classifier_t *tm)
   if (tm->created_threads)
     for (unsigned int i = 0; i < tm->n_threads; i ++) {
       free(tm->thread_data[i].scores); tm->thread_data[i].scores = NULL;
-      free(tm->thread_data[i].clause_output); tm->thread_data[i].clause_output = NULL;
       pthread_join(tm->threads[i], NULL);
       // if (pthread_join(tm->threads[i], NULL) != 0)
       //   tk_error(L, "pthread_join", errno);
@@ -1643,14 +1328,17 @@ static void tk_classifier_predict_reduce_thread (
   unsigned int sfirst,
   unsigned int slast
 ) {
+  unsigned int clause_chunks = tm->clause_chunks;
   unsigned int *results = tm->results;
   long int sums[tm->classes];
   for (unsigned int s = sfirst; s <= slast; s ++) {
     for (unsigned int i = 0; i < tm->classes; i ++)
       sums[i] = 0;
     for (unsigned int t = 0; t < tm->n_threads; t ++)
-      for (unsigned int c = tm->thread_data[t].class_first; c <= tm->thread_data[t].class_last; c ++)
-        sums[c] += tm_state_scores(tm, t, c, s);
+      for (unsigned int chunk = tm->thread_data[t].cfirst; chunk <= tm->thread_data[t].clast; chunk ++) {
+        unsigned int class = chunk / clause_chunks;
+        sums[class] += tm_state_scores(tm, t, chunk, s);
+      }
     long int maxval = -INT64_MAX;
     unsigned int maxclass = 0;
     for (unsigned int class = 0; class < tm->classes; class ++) {
@@ -1669,20 +1357,15 @@ static void tk_classifier_predict_thread (
   tk_bits_t *ps,
   unsigned int cfirst,
   unsigned int clast,
-  unsigned int class_first,
-  unsigned int class_last,
   unsigned int thread
 ) {
   unsigned int input_chunks = tm->input_chunks;
-  for (unsigned int s = 0; s < n; s ++) {
-    tk_tsetlin_calculate(tm, ps + s * input_chunks, true, cfirst, clast, thread);
-    for (unsigned int class = class_first; class <= class_last; class ++) {
-      unsigned int base = class * tm->clause_chunks;
-      unsigned int cfirst_class = base < cfirst ? cfirst : base;
-      unsigned int raw_end = base + tm->clause_chunks - 1;
-      unsigned int clast_class = raw_end > clast ? clast : raw_end;
-      long score = tk_tsetlin_sums(tm, cfirst_class, clast_class, cfirst, thread);
-      tm_state_scores(tm, thread, class, s) = score;
+  tk_bits_t clause_output;
+  for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
+    for (unsigned int s = 0; s < n; s ++) {
+      tk_tsetlin_calculate(tm, ps + s * input_chunks, true, &clause_output, chunk, chunk, thread);
+      long int score = tk_tsetlin_sums(tm, &clause_output, chunk, chunk, chunk, thread);
+      tm_state_scores(tm, thread, chunk, s) = score;
     }
   }
 }
@@ -1716,20 +1399,21 @@ static inline int tk_tsetlin_predict_classifier (
   tm->results = tk_ensure_interleaved(L, &tm->results_len, tm->results, n * sizeof(unsigned int), false);
 
   for (unsigned int i = 0; i < tm->n_threads; i ++) {
+    unsigned int chunks = tm_state_clause_chunks(tm, i);
     tm->thread_data[i].predict.n = n;
     tm->thread_data[i].predict.ps = ps;
-    tm->thread_data[i].scores = tk_realloc(L, tm->thread_data[i].scores, tm->classes * n * sizeof(long int));
+    tm->thread_data[i].scores = tk_realloc(L, tm->thread_data[i].scores, chunks * n * sizeof(long int));
   }
 
   tk_tsetlin_setup_thread_samples(tm, n);
 
   tk_tsetlin_signal(
-    (int) TM_PREDICT, &tm->sigid,
+    (int) TM_CLASSIFIER_PREDICT, &tm->sigid,
     (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
     &tm->n_threads_done, tm->n_threads);
 
   tk_tsetlin_signal(
-    (int) TM_PREDICT_REDUCE, &tm->sigid,
+    (int) TM_CLASSIFIER_PREDICT_REDUCE, &tm->sigid,
     (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
     &tm->n_threads_done, tm->n_threads);
 
@@ -1749,20 +1433,21 @@ static inline int tk_tsetlin_predict_encoder (
   tm->encodings = tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * BITS_DIV(tm->classes) * sizeof(tk_bits_t), false);
 
   for (unsigned int i = 0; i < tm->n_threads; i ++) {
+    unsigned int chunks = tm_state_clause_chunks(tm, i);
     tm->thread_data[i].predict.n = n;
     tm->thread_data[i].predict.ps = ps;
-    tm->thread_data[i].scores = tk_realloc(L, tm->thread_data[i].scores, tm->classes * n * sizeof(long int));
+    tm->thread_data[i].scores = tk_realloc(L, tm->thread_data[i].scores, chunks * n * sizeof(long int));
   }
 
   tk_tsetlin_setup_thread_samples(tm, n);
 
   tk_tsetlin_signal(
-    (int) TM_PREDICT, &tm->sigid,
+    (int) TM_CLASSIFIER_PREDICT, &tm->sigid,
     (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
     &tm->n_threads_done, tm->n_threads);
 
   tk_tsetlin_signal(
-    (int) TM_PREDICT_ENCODER_REDUCE, &tm->sigid,
+    (int) TM_ENCODER_PREDICT_REDUCE, &tm->sigid,
     (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
     &tm->n_threads_done, tm->n_threads);
 
@@ -1790,8 +1475,6 @@ static void tk_classifier_setup_thread (
   tk_bits_t *ps,
   unsigned int cfirst,
   unsigned int clast,
-  unsigned int class_first,
-  unsigned int class_last,
   unsigned int thread
 ) {
   for (unsigned int clause_chunk = cfirst; clause_chunk <= clast; clause_chunk ++) {
@@ -1803,21 +1486,21 @@ static void tk_classifier_setup_thread (
         tk_bits_t *counts = tm_state_counts(tm, clause, input_chunk);
         actions[input_chunk] = 0;
         for (unsigned int b = 0; b < m; b ++)
-          counts[b] = (tk_bits_t)~(tk_bits_t)0;
+          counts[b] = ~((tk_bits_t)0);
       }
     }
   }
+  unsigned int clause_chunks = tm->clause_chunks;
+  tk_bits_t clause_output[clast - cfirst + 1];
   for (unsigned int s = 0; s < n; s ++) {
-    tk_tsetlin_calculate(tm, ps + s * tm->input_chunks, false, cfirst, clast, thread);
-    for (unsigned int tclass = class_first; tclass <= class_last; tclass ++) {
-      unsigned int base = tclass * tm->clause_chunks;
-      unsigned int cfirst_class = base < cfirst ? cfirst : base;
-      unsigned int raw_end = base + tm->clause_chunks - 1;
-      unsigned int clast_class = raw_end > clast ? clast : raw_end;
-      atomic_long *class_sump = tm_state_sum(tm, tclass, s);
-      long int sum = tk_tsetlin_sums(tm, cfirst_class, clast_class, cfirst, thread);
+    tk_bits_t *input = ps + s * tm->input_chunks;
+    tk_tsetlin_calculate(tm, input, false, clause_output, cfirst, clast, thread);
+    for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
+      unsigned int class = chunk / clause_chunks;
+      atomic_long *class_sump = tm_state_sum(tm, class, s);
+      long int sum = tk_tsetlin_sums(tm, clause_output + (chunk - cfirst), chunk, chunk, chunk, thread);
       atomic_fetch_add(class_sump, sum);
-      tm_state_old_sum(tm, thread, tclass, s) = sum;
+      tm_state_old_sum(tm, thread, chunk, s) = sum;
     }
   }
 }
@@ -1828,8 +1511,6 @@ static void tk_encoder_setup_thread (
   tk_bits_t *ps,
   unsigned int cfirst,
   unsigned int clast,
-  unsigned int class_first,
-  unsigned int class_last,
   unsigned int thread
 ) {
   for (unsigned int clause_chunk = cfirst; clause_chunk <= clast; clause_chunk ++) {
@@ -1841,22 +1522,22 @@ static void tk_encoder_setup_thread (
         tk_bits_t *counts = tm_state_counts(tm, clause, input_chunk);
         actions[input_chunk] = 0;
         for (unsigned int b = 0; b < m; b ++)
-          counts[b] = (tk_bits_t)~(tk_bits_t)0;
+          counts[b] = ~((tk_bits_t)0);
       }
     }
   }
+  unsigned int clause_chunks = tm->clause_chunks;
+  tk_bits_t clause_output[clast - cfirst + 1];
   for (unsigned int s = 0; s < n; s ++) {
-    tk_tsetlin_calculate(tm, ps + s * tm->input_chunks, false, cfirst, clast, thread);
-    for (unsigned int tclass = class_first; tclass <= class_last; tclass ++) {
-      unsigned int base = tclass * tm->clause_chunks;
-      unsigned int cfirst_class = base < cfirst ? cfirst : base;
-      unsigned int raw_end = base + tm->clause_chunks - 1;
-      unsigned int clast_class = raw_end > clast ? clast : raw_end;
-      for (unsigned int t = 0; t < 3; t ++) {
-        atomic_long *class_sump = tm_state_sum(tm, tclass, s * 3 + t);
-        long int sum = tk_tsetlin_sums(tm, cfirst_class, clast_class, cfirst, thread);
+    for (unsigned int t = 0; t < 3; t ++) {
+      tk_bits_t *input = ps + s * 3 * tm->input_chunks + t * tm->input_chunks;
+      tk_tsetlin_calculate(tm, input, false, clause_output, cfirst, clast, thread);
+      for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
+        unsigned int class = chunk / clause_chunks;
+        atomic_long *class_sump = tm_state_sum(tm, class, s * 3 + t);
+        long int sum = tk_tsetlin_sums(tm, clause_output + (chunk - cfirst), chunk, chunk, chunk, thread);
         atomic_fetch_add(class_sump, sum);
-        tm_state_old_sum(tm, thread, tclass, s * 3 + t) = sum;
+        tm_state_old_sum(tm, thread, chunk, s * 3 + t) = sum;
       }
     }
   }
@@ -1865,15 +1546,13 @@ static void tk_encoder_setup_thread (
 static void tk_classifier_prime_thread (
   tsetlin_classifier_t *tm,
   unsigned int n,
-  tk_bits_t *ps,
   unsigned int cfirst,
   unsigned int clast,
-  unsigned int class_first,
-  unsigned int class_last,
   unsigned int thread
 ) {
+  unsigned int clause_chunks = tm->clause_chunks;
   for (unsigned int s = 0; s < n; s ++) {
-    for (unsigned int class = class_first; class <= class_last; class ++) {
+    for (unsigned int class = cfirst / clause_chunks; class <= clast / clause_chunks; class ++) {
       atomic_long *class_sump = tm_state_sum(tm, class, s);
       tm_state_sum_local(tm, thread, class, s) = atomic_load(class_sump);
     }
@@ -1887,118 +1566,178 @@ static void tk_classifier_train_thread (
   unsigned int *ss,
   unsigned int cfirst,
   unsigned int clast,
-  unsigned int class_first,
-  unsigned int class_last,
   unsigned int thread
 ) {
   seed_rand(thread);
   tk_tsetlin_init_active(tm, thread);
   tk_tsetlin_init_shuffle(tm, thread, n);
+
+  unsigned int clause_chunks = tm->clause_chunks;
+  unsigned int input_chunks = tm->input_chunks;
   unsigned int *shuffle = tm_state_shuffle(tm, thread);
-  for (unsigned int i = 0; i < n; i ++) {
-    unsigned int s = shuffle[i];
-    mc_tm_update(tm, ps + s * tm->input_chunks, s, ss[s], cfirst, clast, class_first, class_last, thread);
+  tk_bits_t *active = tm_state_active_clause(tm, thread);
+  tk_bits_t clause_output;
+
+  for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
+
+    // TODO: vectorized pre-calculation of class?
+    unsigned int class = chunk / clause_chunks;
+    tk_bits_t act = active[chunk - cfirst];
+
+    for (unsigned int i = 0; i < n; i ++) {
+      unsigned int s = shuffle[i];
+      tk_bits_t *input = ps + s * input_chunks;
+      tk_tsetlin_calculate(tm, input, false, &clause_output, chunk, chunk, thread);
+      unsigned int target_class = ss[s];
+      tm_update(tm, input, clause_output, s, target_class, 1, act, class, chunk, thread);
+    }
   }
 }
 
 static inline void en_tm_populate (
   tsetlin_classifier_t *tm,
-  tk_bits_t *input,
   unsigned int s,
-  tk_bits_t *encoding
+  tk_bits_t *encoding,
+  unsigned int t
 ) {
   unsigned int classes = tm->classes;
   for (unsigned int i = 0; i < classes; i ++) {
     unsigned int chunk = BITS_DIV(i);
     unsigned int pos = BITS_MOD(i);
-    if (atomic_load(tm_state_sum(tm, i, s)) > 0)
+    if (tm_state_sum_local(tm, t, i, s) > 0)
       encoding[chunk] |= ((tk_bits_t)1 << pos);
     else
       encoding[chunk] &= ~((tk_bits_t)1 << pos);
   }
 }
 
-static inline void en_tm_update (
+static void tk_encoder_train_encode_thread (
   tsetlin_classifier_t *tm,
-  tk_bits_t *t,
-  unsigned int s,
-  double margin,
-  double loss_alpha,
-  unsigned int cfirst,
-  unsigned int clast,
-  unsigned int class_first,
-  unsigned int class_last,
-  unsigned int thread
+  unsigned int n,
+  unsigned int sfirst,
+  unsigned int slast,
+  unsigned int t
 ) {
-
-  tk_bits_t *a = t + 0 * tm->input_chunks;
-  tk_bits_t *n = t + 1 * tm->input_chunks;
-  tk_bits_t *p = t + 2 * tm->input_chunks;
-
   unsigned int encoding_bits = tm->classes;
-  unsigned int encoding_chunks = BITS_DIV(tm->classes);
-
-  tk_bits_t encoding_a[encoding_chunks];
-  tk_bits_t encoding_n[encoding_chunks];
-  tk_bits_t encoding_p[encoding_chunks];
-  en_tm_populate(tm, a, s * 3 + 0, encoding_a);
-  en_tm_populate(tm, n, s * 3 + 1, encoding_n);
-  en_tm_populate(tm, p, s * 3 + 2, encoding_p);
-
-  double loss = triplet_loss_hamming(encoding_a, encoding_n, encoding_p, encoding_bits, margin, loss_alpha);
-  if (fast_chance(1 - loss))
-    return;
-
-  for (unsigned int i = class_first; i <= class_last; i ++) {
-    unsigned int chunk = BITS_DIV(i);
-    unsigned int pos = BITS_MOD(i);
-    bool bit_a = (encoding_a[chunk] & ((tk_bits_t)1 << pos)) > 0;
-    bool bit_n = (encoding_n[chunk] & ((tk_bits_t)1 << pos)) > 0;
-    bool bit_p = (encoding_p[chunk] & ((tk_bits_t)1 << pos)) > 0;
-    if ((bit_a && bit_n && bit_p) || (!bit_a && !bit_n && !bit_p)) {
-      // flip n, keep a and p
-      tm_update(tm, a, s * 3 + 0, i, bit_a, cfirst, clast, class_first, class_last, thread);
-      tm_update(tm, n, s * 3 + 1, i, !bit_n, cfirst, clast, class_first, class_last, thread);
-      tm_update(tm, p, s * 3 + 2, i, bit_p, cfirst, clast, class_first, class_last, thread);
-    } else if ((bit_a && bit_n && !bit_p) || (!bit_a && !bit_n && bit_p)) {
-      // flip a, keep n and p
-      tm_update(tm, a, s * 3 + 0, i, !bit_a, cfirst, clast, class_first, class_last, thread);
-      tm_update(tm, n, s * 3 + 1, i, bit_n, cfirst, clast, class_first, class_last, thread);
-      tm_update(tm, p, s * 3 + 2, i, bit_p, cfirst, clast, class_first, class_last, thread);
-    } else if ((bit_a && !bit_n && bit_p) || (!bit_a && bit_n && !bit_p)) {
-      // // keep all
-      tm_update(tm, a, s * 3 + 0, i, bit_a, cfirst, clast, class_first, class_last, thread);
-      tm_update(tm, n, s * 3 + 1, i, bit_n, cfirst, clast, class_first, class_last, thread);
-      tm_update(tm, p, s * 3 + 2, i, bit_p, cfirst, clast, class_first, class_last, thread);
-    } else if ((bit_a && !bit_n && !bit_p) || (!bit_a && bit_n && bit_p)) {
-      // flip p, keep a and n
-      tm_update(tm, a, s * 3 + 0, i, bit_a, cfirst, clast, class_first, class_last, thread);
-      tm_update(tm, n, s * 3 + 1, i, bit_n, cfirst, clast, class_first, class_last, thread);
-      tm_update(tm, p, s * 3 + 2, i, !bit_p, cfirst, clast, class_first, class_last, thread);
-    }
+  unsigned int encoding_chunks = BITS_DIV(encoding_bits);
+  tk_bits_t *encodings = tm->encodings;
+  for (unsigned int s = sfirst; s <= slast; s ++) {
+    en_tm_populate(tm, s * 3 + 0, encodings + 0 * encoding_chunks, t);
+    en_tm_populate(tm, s * 3 + 1, encodings + 1 * encoding_chunks, t);
+    en_tm_populate(tm, s * 3 + 2, encodings + 2 * encoding_chunks, t);
   }
-
 }
 
-static void tk_encoder_train_thread (
+static void tk_encoder_train_loss_thread (
+  tsetlin_classifier_t *tm,
+  unsigned int n,
+  unsigned int sfirst,
+  unsigned int slast,
+  double margin
+) {
+  unsigned int encoding_bits = tm->classes;
+  unsigned int encoding_chunks = BITS_DIV(encoding_bits);
+  tk_bits_t *encodings = tm->encodings;
+  atomic_uint *losses = tm->losses;
+  for (unsigned int s = sfirst; s <= slast; s ++) {
+    tk_bits_t *enc_a = encodings + s * 3 * encoding_chunks + 0 * encoding_chunks;
+    tk_bits_t *enc_n = encodings + s * 3 * encoding_chunks + 1 * encoding_chunks;
+    tk_bits_t *enc_p = encodings + s * 3 * encoding_chunks + 2 * encoding_chunks;
+    if (triplet_loss_hamming(enc_a, enc_n, enc_p, encoding_bits, margin) < 1e-6)
+      continue;
+    for (unsigned int i = 0; i < encoding_bits; i ++) {
+      unsigned int enc_chunk = BITS_DIV(i);
+      unsigned int enc_pos = BITS_MOD(i);
+      bool bit_a = (enc_a[enc_chunk] & ((tk_bits_t)1 << enc_pos)) > 0;
+      bool bit_n = (enc_n[enc_chunk] & ((tk_bits_t)1 << enc_pos)) > 0;
+      bool bit_p = (enc_p[enc_chunk] & ((tk_bits_t)1 << enc_pos)) > 0;
+      if (!(bit_a == bit_p && bit_a != bit_n))
+        atomic_fetch_add(losses + i, 1);
+    }
+  }
+}
+
+static void tk_encoder_train_update_thread (
   tsetlin_classifier_t *tm,
   unsigned int n,
   tk_bits_t *ps,
-  double margin,
-  double loss,
   unsigned int cfirst,
   unsigned int clast,
-  unsigned int class_first,
-  unsigned int class_last,
   unsigned int thread
 ) {
   seed_rand(thread);
   tk_tsetlin_init_active(tm, thread);
   tk_tsetlin_init_shuffle(tm, thread, n);
+
+  unsigned int encoding_bits = tm->classes;
+  unsigned int encoding_chunks = BITS_DIV(encoding_bits);
+  unsigned int clause_chunks = tm->clause_chunks;
+  unsigned int input_chunks = tm->input_chunks;
   unsigned int *shuffle = tm_state_shuffle(tm, thread);
-  for (unsigned int i = 0; i < n; i ++) {
-    unsigned int s = shuffle[i];
-    en_tm_update(tm, ps + s * 3 * tm->input_chunks, s, margin, loss, cfirst, clast, class_first, class_last, thread);
+  tk_bits_t *active = tm_state_active_clause(tm, thread);
+  tk_bits_t *encodings = tm->encodings;
+  double *flosses = tm->flosses;
+
+  for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
+
+    unsigned int class = chunk / clause_chunks;
+    if (fast_chance(1.0 - flosses[class]))
+      continue;
+
+    unsigned int enc_chunk = BITS_DIV(class);
+    unsigned int enc_pos = BITS_MOD(class);
+    tk_bits_t act = active[chunk - cfirst];
+
+    for (unsigned int i = 0; i < n; i ++) {
+
+      unsigned int s = shuffle[i];
+
+      tk_bits_t *inputs = ps + s * 3 * input_chunks;
+      tk_bits_t *enc = encodings + s * 3 * encoding_chunks;
+
+      tk_bits_t *inp_a = inputs + 0 * input_chunks;
+      tk_bits_t *inp_n = inputs + 1 * input_chunks;
+      tk_bits_t *inp_p = inputs + 2 * input_chunks;
+
+      tk_bits_t *enc_a = enc + 0 * encoding_chunks;
+      tk_bits_t *enc_n = enc + 1 * encoding_chunks;
+      tk_bits_t *enc_p = enc + 2 * encoding_chunks;
+
+      tk_bits_t out_a;
+      tk_bits_t out_n;
+      tk_bits_t out_p;
+
+      tk_tsetlin_calculate(tm, inp_a, false, &out_a, chunk, chunk, thread);
+      tk_tsetlin_calculate(tm, inp_n, false, &out_n, chunk, chunk, thread);
+      tk_tsetlin_calculate(tm, inp_p, false, &out_p, chunk, chunk, thread);
+
+      bool bit_a = (enc_a[enc_chunk] & ((tk_bits_t)1 << enc_pos)) > 0;
+      bool bit_n = (enc_n[enc_chunk] & ((tk_bits_t)1 << enc_pos)) > 0;
+      bool bit_p = (enc_p[enc_chunk] & ((tk_bits_t)1 << enc_pos)) > 0;
+
+      if ((bit_a && bit_n && bit_p) || (!bit_a && !bit_n && !bit_p)) {
+        // flip n, keep a and p
+        tm_update(tm, inp_a, out_a, s * 3 + 0, class, bit_a, act, class, chunk, thread);
+        tm_update(tm, inp_n, out_n, s * 3 + 1, class, !bit_n, act, class, chunk, thread);
+        tm_update(tm, inp_p, out_p, s * 3 + 2, class, bit_p, act, class, chunk, thread);
+      } else if ((bit_a && bit_n && !bit_p) || (!bit_a && !bit_n && bit_p)) {
+        // flip a, keep n and p
+        tm_update(tm, inp_a, out_a, s * 3 + 0, class, !bit_a, act, class, chunk, thread);
+        tm_update(tm, inp_n, out_n, s * 3 + 1, class, bit_n, act, class, chunk, thread);
+        tm_update(tm, inp_p, out_p, s * 3 + 2, class, bit_p, act, class, chunk, thread);
+      } else if ((bit_a && !bit_n && bit_p) || (!bit_a && bit_n && !bit_p)) {
+        // // keep all
+        tm_update(tm, inp_a, out_a, s * 3 + 0, class, bit_a, act, class, chunk, thread);
+        tm_update(tm, inp_n, out_n, s * 3 + 1, class, bit_n, act, class, chunk, thread);
+        tm_update(tm, inp_p, out_p, s * 3 + 2, class, bit_p, act, class, chunk, thread);
+      } else if ((bit_a && !bit_n && !bit_p) || (!bit_a && bit_n && bit_p)) {
+        // flip p, keep a and n
+        tm_update(tm, inp_a, out_a, s * 3 + 0, class, bit_a, act, class, chunk, thread);
+        tm_update(tm, inp_n, out_n, s * 3 + 1, class, bit_n, act, class, chunk, thread);
+        tm_update(tm, inp_p, out_p, s * 3 + 2, class, !bit_p, act, class, chunk, thread);
+      }
+
+    }
   }
 }
 
@@ -2011,13 +1750,16 @@ static void tk_encoder_predict_reduce_thread (
   tk_bits_t *encodings = tm->encodings;
   unsigned int encoding_bits = tm->classes;
   unsigned int encoding_chunks = BITS_DIV(encoding_bits);
+  unsigned int clause_chunks = tm->clause_chunks;
   long int sums[encoding_bits];
   for (unsigned int s = sfirst; s <= slast; s ++) {
     for (unsigned int i = 0; i < tm->classes; i ++)
       sums[i] = 0;
     for (unsigned int t = 0; t < tm->n_threads; t ++)
-      for (unsigned int c = tm->thread_data[t].class_first; c <= tm->thread_data[t].class_last; c ++)
-        sums[c] += tm_state_scores(tm, t, c, s);
+      for (unsigned int chunk = tm->thread_data[t].cfirst; chunk <= tm->thread_data[t].clast; chunk ++) {
+        unsigned int class = chunk / clause_chunks;
+        sums[class] += tm_state_scores(tm, t, chunk, s);
+      }
     tk_bits_t *e = encodings + s * encoding_chunks;
     for (unsigned int class = 0; class < tm->classes; class ++) {
       unsigned int chunk = BITS_DIV(class);
@@ -2074,7 +1816,7 @@ static inline int tk_tsetlin_train_classifier (
     tm->thread_data[i].train.ps = ps;
     tm->thread_data[i].train.ss = ss;
     tm->thread_data[i].shuffle = tk_realloc(L, tm->thread_data[i].shuffle, n * sizeof(unsigned int));
-    tm->thread_data[i].sums_old = tk_realloc(L, tm->thread_data[i].sums_old, tm->classes * n * sizeof(long int));
+    tm->thread_data[i].sums_old = tk_realloc(L, tm->thread_data[i].sums_old, tm->classes * tm->clause_chunks * n * sizeof(long int));
     tm->thread_data[i].sums_local = tk_realloc(L, tm->thread_data[i].sums_local, tm->classes * n * sizeof(long int));
   }
 
@@ -2086,19 +1828,19 @@ static inline int tk_tsetlin_train_classifier (
   tk_tsetlin_setup_thread_samples(tm, n);
 
   tk_tsetlin_signal(
-    (int) TM_SETUP_CLASSIFIER, &tm->sigid,
+    (int) TM_CLASSIFIER_SETUP, &tm->sigid,
     (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
     &tm->n_threads_done, tm->n_threads);
 
   tk_tsetlin_signal(
-    (int) TM_PRIME, &tm->sigid,
+    (int) TM_CLASSIFIER_PRIME, &tm->sigid,
     (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
     &tm->n_threads_done, tm->n_threads);
 
   for (unsigned int i = 0; i < max_iter; i ++) {
 
     tk_tsetlin_signal(
-      (int) TM_TRAIN_CLASSIFIER, &tm->sigid,
+      (int) TM_CLASSIFIER_TRAIN, &tm->sigid,
       (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
       &tm->n_threads_done, tm->n_threads);
 
@@ -2128,9 +1870,13 @@ static inline int tk_tsetlin_train_encoder (
   tk_bits_t *triplets = (tk_bits_t *) tk_lua_fcheckstring(L, 2, "train", "triplets");
   unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
   double margin = tk_lua_fcheckposdouble(L, 2, "train", "margin");
-  double loss = tk_lua_fcheckposdouble(L, 2, "train", "loss");
+  double loss_alpha = tk_lua_fcheckposdouble(L, 2, "train", "loss");
   tm->active = tk_lua_fcheckposdouble(L, 2, "train", "active");
   tm->negative = tk_lua_fcheckposdouble(L, 2, "train", "negative");
+
+  tm->encodings = tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * 3 * BITS_DIV(tm->classes) * sizeof(tk_bits_t), false);
+  tm->losses = tk_ensure_interleaved(L, &tm->losses_len, tm->losses, tm->classes * sizeof(atomic_uint), false);
+  tm->flosses = tk_ensure_interleaved(L, &tm->flosses_len, tm->flosses, tm->classes * sizeof(double), false);
 
   int i_each = -1;
   if (tk_lua_ftype(L, 2, "each") != LUA_TNIL) {
@@ -2139,12 +1885,15 @@ static inline int tk_tsetlin_train_encoder (
   }
 
   for (unsigned int i = 0; i < tm->n_threads; i ++) {
+    unsigned int chunks = tm_state_clause_chunks(tm, i);
+    tm->thread_data[i].predict.n = n * 3;
+    tm->thread_data[i].predict.ps = triplets;
+    tm->thread_data[i].scores = tk_realloc(L, tm->thread_data[i].scores, chunks * n * 3 * sizeof(long int));
     tm->thread_data[i].train.n = n;
     tm->thread_data[i].train.ps = triplets;
     tm->thread_data[i].train.margin = margin;
-    tm->thread_data[i].train.loss = loss;
     tm->thread_data[i].shuffle = tk_realloc(L, tm->thread_data[i].shuffle, n * sizeof(unsigned int));
-    tm->thread_data[i].sums_old = tk_realloc(L, tm->thread_data[i].sums_old, tm->classes * n * 3 * sizeof(long int));
+    tm->thread_data[i].sums_old = tk_realloc(L, tm->thread_data[i].sums_old, tm->classes * tm->clause_chunks * n * 3 * sizeof(long int));
     tm->thread_data[i].sums_local = tk_realloc(L, tm->thread_data[i].sums_local, tm->classes * n * 3 * sizeof(long int));
   }
 
@@ -2157,19 +1906,55 @@ static inline int tk_tsetlin_train_encoder (
   tk_tsetlin_setup_thread_samples(tm, n);
 
   tk_tsetlin_signal(
-    (int) TM_SETUP_ENCODER, &tm->sigid,
+    (int) TM_ENCODER_SETUP, &tm->sigid,
     (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
     &tm->n_threads_done, tm->n_threads);
 
   tk_tsetlin_signal(
-    (int) TM_PRIME, &tm->sigid,
+    (int) TM_CLASSIFIER_PRIME, &tm->sigid,
     (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
     &tm->n_threads_done, tm->n_threads);
+
+  unsigned int classes = tm->classes;
+  atomic_uint *losses = tm->losses;
+  double *flosses = tm->flosses;
 
   for (unsigned int i = 0; i < max_iter; i ++) {
 
     tk_tsetlin_signal(
-      (int) TM_TRAIN_ENCODER, &tm->sigid,
+      (int) TM_ENCODER_TRAIN_ENCODE, &tm->sigid,
+      (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
+      &tm->n_threads_done, tm->n_threads);
+
+    for (unsigned int j = 0; j < classes; j ++)
+      atomic_init(losses + j, 0);
+
+    tk_tsetlin_signal(
+      (int) TM_ENCODER_TRAIN_LOSS, &tm->sigid,
+      (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
+      &tm->n_threads_done, tm->n_threads);
+
+    tm->max_loss = 0;
+    tm->min_loss = n;
+    for (unsigned int j = 0; j < classes; j ++) {
+      unsigned int l = atomic_load(losses + j);
+      flosses[j] = (double) l;
+      if (l > tm->max_loss)
+        tm->max_loss = l;
+      if (l < tm->min_loss)
+        tm->min_loss = l;
+    }
+    if (tm->max_loss == tm->min_loss) {
+      for (unsigned int j = 0; j < classes; j ++)
+        flosses[j] = fmax(0.0, fmin(1.0, loss_alpha));
+    } else {
+      double range = (double) (tm->max_loss - tm->min_loss);
+      for (unsigned int j = 0; j < classes; j ++)
+        flosses[j] = fmax(0.0, fmin(1.0, (flosses[j] - (double) tm->min_loss) / range * loss_alpha));
+    }
+
+    tk_tsetlin_signal(
+      (int) TM_ENCODER_TRAIN_UPDATE, &tm->sigid,
       (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
       &tm->n_threads_done, tm->n_threads);
 
@@ -2219,20 +2004,21 @@ static inline int tk_tsetlin_evaluate_classifier (
   tm->results = tk_ensure_interleaved(L, &tm->results_len, tm->results, n * sizeof(unsigned int), false);
 
   for (unsigned int i = 0; i < tm->n_threads; i ++) {
+    unsigned int chunks = tm_state_clause_chunks(tm, i);
     tm->thread_data[i].predict.n = n;
     tm->thread_data[i].predict.ps = ps;
-    tm->thread_data[i].scores = tk_realloc(L, tm->thread_data[i].scores, sizeof(long int) * tm->classes * n);
+    tm->thread_data[i].scores = tk_realloc(L, tm->thread_data[i].scores, chunks * n * sizeof(long int));
   }
 
   tk_tsetlin_setup_thread_samples(tm, n);
 
   tk_tsetlin_signal(
-    (int) TM_PREDICT, &tm->sigid,
+    (int) TM_CLASSIFIER_PREDICT, &tm->sigid,
     (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
     &tm->n_threads_done, tm->n_threads);
 
   tk_tsetlin_signal(
-    (int) TM_PREDICT_REDUCE, &tm->sigid,
+    (int) TM_CLASSIFIER_PREDICT_REDUCE, &tm->sigid,
     (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
     &tm->n_threads_done, tm->n_threads);
 
@@ -2325,7 +2111,6 @@ static inline int tk_tsetlin_evaluate_encoder (
   lua_settop(L, 2);
   unsigned int n = tk_lua_fcheckunsigned(L, 2, "evaluate", "samples");
   tk_bits_t *triplets = (tk_bits_t *) tk_lua_fcheckstring(L, 2, "evaluate", "triplets");
-  double margin = tk_lua_fcheckposdouble(L, 2, "evaluate", "margin");
 
   tm->encodings = tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * 3 * BITS_DIV(tm->classes) * sizeof(tk_bits_t), false);
 
@@ -2333,35 +2118,254 @@ static inline int tk_tsetlin_evaluate_encoder (
   atomic_init(&correct, 0);
 
   for (unsigned int i = 0; i < tm->n_threads; i ++) {
+    unsigned int chunks = tm_state_clause_chunks(tm, i);
     tm->thread_data[i].predict.n = n * 3;
     tm->thread_data[i].predict.ps = triplets;
-    tm->thread_data[i].scores = tk_realloc(L, tm->thread_data[i].scores, tm->classes * n * 3 * sizeof(long int));
+    tm->thread_data[i].scores = tk_realloc(L, tm->thread_data[i].scores, chunks * n * 3 * sizeof(long int));
     tm->thread_data[i].evaluate.n = n;
     tm->thread_data[i].evaluate.correct = &correct;
-    tm->thread_data[i].evaluate.margin = margin;
   }
 
   tk_tsetlin_setup_thread_samples(tm, n * 3);
 
   tk_tsetlin_signal(
-    (int) TM_PREDICT, &tm->sigid,
+    (int) TM_CLASSIFIER_PREDICT, &tm->sigid,
     (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
     &tm->n_threads_done, tm->n_threads);
 
   tk_tsetlin_signal(
-    (int) TM_PREDICT_ENCODER_REDUCE, &tm->sigid,
+    (int) TM_ENCODER_PREDICT_REDUCE, &tm->sigid,
     (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
     &tm->n_threads_done, tm->n_threads);
 
   tk_tsetlin_setup_thread_samples(tm, n);
 
   tk_tsetlin_signal(
-    (int) TM_EVALUATE_ENCODER_REDUCE, &tm->sigid,
+    (int) TM_ENCODER_EVALUATE_REDUCE, &tm->sigid,
     (int *) &tm->stage, &tm->mutex, &tm->cond_stage, &tm->cond_done,
     &tm->n_threads_done, tm->n_threads);
 
   lua_pushnumber(L, atomic_load(&correct));
   return 1;
+}
+
+static void *tk_tsetlin_classifier_worker (void *datap)
+{
+  tsetlin_classifier_thread_t *data =
+    (tsetlin_classifier_thread_t *) datap;
+  pthread_mutex_lock(&data->tm->mutex);
+  data->tm->n_threads_done ++;
+  if (data->tm->n_threads_done == data->tm->n_threads)
+    pthread_cond_signal(&data->tm->cond_done);
+  pthread_mutex_unlock(&data->tm->mutex);
+  while (1) {
+    pthread_mutex_lock(&data->tm->mutex);
+    while (data->sigid == data->tm->sigid)
+      pthread_cond_wait(&data->tm->cond_stage, &data->tm->mutex);
+    data->sigid = data->tm->sigid;
+    tsetlin_classifier_stage_t stage = data->tm->stage;
+    pthread_mutex_unlock(&data->tm->mutex);
+    switch (stage) {
+      case TM_CLASSIFIER_SETUP:
+        tk_classifier_setup_thread(
+          data->tm,
+          data->train.n,
+          data->train.ps,
+          data->cfirst,
+          data->clast,
+          data->index);
+        break;
+      case TM_ENCODER_SETUP:
+        tk_encoder_setup_thread(
+          data->tm,
+          data->train.n,
+          data->train.ps,
+          data->cfirst,
+          data->clast,
+          data->index);
+        break;
+      case TM_CLASSIFIER_PRIME:
+        tk_classifier_prime_thread(
+          data->tm,
+          data->train.n,
+          data->cfirst,
+          data->clast,
+          data->index);
+        break;
+      case TM_CLASSIFIER_TRAIN:
+        tk_classifier_train_thread(
+          data->tm,
+          data->train.n,
+          data->train.ps,
+          data->train.ss,
+          data->cfirst,
+          data->clast,
+          data->index);
+        break;
+      case TM_ENCODER_TRAIN_ENCODE:
+        tk_encoder_train_encode_thread(
+          data->tm,
+          data->train.n,
+          data->sfirst,
+          data->slast,
+          data->index);
+        break;
+      case TM_ENCODER_TRAIN_LOSS:
+        tk_encoder_train_loss_thread(
+          data->tm,
+          data->train.n,
+          data->sfirst,
+          data->slast,
+          data->train.margin);
+        break;
+      case TM_ENCODER_TRAIN_UPDATE:
+        tk_encoder_train_update_thread(
+          data->tm,
+          data->train.n,
+          data->train.ps,
+          data->cfirst,
+          data->clast,
+          data->index);
+        break;
+      case TM_ENCODER_PREDICT_REDUCE:
+        tk_encoder_predict_reduce_thread(
+          data->tm,
+          data->predict.n,
+          data->sfirst,
+          data->slast);
+        break;
+      case TM_ENCODER_EVALUATE_REDUCE:
+        tk_encoder_evaluate_reduce_thread(
+          data->tm,
+          data->evaluate.n,
+          data->evaluate.correct,
+          data->evaluate.margin,
+          data->sfirst,
+          data->slast);
+        break;
+      case TM_CLASSIFIER_PREDICT:
+        tk_classifier_predict_thread(
+          data->tm,
+          data->predict.n,
+          data->predict.ps,
+          data->cfirst,
+          data->clast,
+          data->index);
+        break;
+      case TM_CLASSIFIER_PREDICT_REDUCE:
+        tk_classifier_predict_reduce_thread(
+          data->tm,
+          data->predict.n,
+          data->sfirst,
+          data->slast);
+        break;
+      case TM_DONE:
+        break;
+      default:
+        assert(false);
+        break;
+    }
+    pthread_mutex_lock(&data->tm->mutex);
+    data->tm->n_threads_done ++;
+    if (data->tm->n_threads_done == data->tm->n_threads)
+      pthread_cond_signal(&data->tm->cond_done);
+    pthread_mutex_unlock(&data->tm->mutex);
+    if (stage == TM_DONE)
+      break;
+  }
+  return NULL;
+}
+
+static inline void tk_pin_thread_to_cpu (
+  unsigned int thread_index,
+  unsigned int n_threads
+) {
+  cpu_set_t cpuset;
+  CPU_ZERO(&cpuset);
+  unsigned int n_nodes = (unsigned int) numa_max_node() + 1;
+  unsigned int threads_per_node = n_threads / n_nodes;
+  if (threads_per_node == 0) threads_per_node = 1;
+  unsigned int node = thread_index / threads_per_node;
+  if (node >= n_nodes) node = n_nodes - 1;
+  struct bitmask *cpus = numa_allocate_cpumask();
+  if (numa_node_to_cpus((int) node, cpus) == 0) {
+    unsigned int count = 0;
+    for (unsigned int i = 0; i < cpus->size; i ++) {
+      if (numa_bitmask_isbitset(cpus, i)) {
+        count ++;
+      }
+    }
+    if (count > 0) {
+      unsigned int local_index =
+        (thread_index - node * threads_per_node) % count;
+      unsigned int found = 0;
+      for (unsigned int i = 0; i < cpus->size; i ++) {
+        if (numa_bitmask_isbitset(cpus, i)) {
+          if (found == local_index) {
+            CPU_SET(i, &cpuset);
+            break;
+          }
+          found ++;
+        }
+      }
+    }
+  }
+  numa_free_cpumask(cpus);
+  pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+}
+
+static void *tk_tsetlin_classifier_worker_wrapper (void *arg) {
+  tsetlin_classifier_thread_t *td = (tsetlin_classifier_thread_t *)arg;
+  if (numa_available() != -1 && numa_max_node() > 0)
+    tk_pin_thread_to_cpu(td->index, td->tm->n_threads);
+  return tk_tsetlin_classifier_worker(arg);
+}
+
+static inline void tk_tsetlin_setup_threads (
+  lua_State *L,
+  tsetlin_classifier_t *tm,
+  unsigned int n_threads
+) {
+  tm->n_threads = n_threads;
+  tm->n_threads_done = 0;
+  tm->stage = TM_INIT;
+  tm->threads = tk_malloc(L, tm->n_threads * sizeof(pthread_t));
+  tm->thread_data = tk_malloc(L, tm->n_threads * sizeof(tsetlin_classifier_thread_t));
+  memset(tm->thread_data, 0, tm->n_threads * sizeof(tsetlin_classifier_thread_t));
+
+  // TODO: check errors
+  pthread_mutex_init(&tm->mutex, NULL);
+  pthread_cond_init(&tm->cond_stage, NULL);
+  pthread_cond_init(&tm->cond_done, NULL);
+
+  for (unsigned int i = 0; i < tm->n_threads; i ++) {
+    tm->thread_data[i].tm = tm;
+    tm->thread_data[i].sigid = 0;
+    tm->thread_data[i].index = i;
+    if (!tm->created_threads && pthread_create(&tm->threads[i], NULL, tk_tsetlin_classifier_worker_wrapper, &tm->thread_data[i]) != 0)
+      tk_error(L, "pthread_create", errno);
+  }
+
+  unsigned int total_chunks = tm->clause_chunks * tm->classes;
+  unsigned int cslice = total_chunks / tm->n_threads;
+  unsigned int cremaining = total_chunks % tm->n_threads;
+  unsigned int cfirst = 0;
+  for (unsigned int i = 0; i < tm->n_threads; i ++) {
+    unsigned int extra = cremaining ? 1 : 0;
+    unsigned int count = cslice + extra;
+    if (cremaining) cremaining --;
+    tm->thread_data[i].cfirst = cfirst;
+    tm->thread_data[i].clast = cfirst + count - 1;
+    cfirst += count;
+  }
+
+  for (unsigned int i = 0; i < tm->n_threads; i ++) {
+    unsigned int clause_chunks = tm_state_clause_chunks(tm, i);
+    tm->thread_data[i].active_clause = tk_malloc_aligned(L, sizeof(tk_bits_t) * clause_chunks, BITS);
+  }
+
+  tm->created_threads = true;
+  tk_tsetlin_wait_for_threads(&tm->mutex, &tm->cond_done, &tm->n_threads_done, tm->n_threads);
 }
 
 static inline int tk_tsetlin_evaluate (lua_State *L)
