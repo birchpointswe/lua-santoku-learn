@@ -1,8 +1,11 @@
 # Now
 
-- Fix decreasing encoder accuracy over time
-- Fix segfault due to overflow
-- Prove basic unigram semantic encoder
+- Codebook based encoder
+    - bm.codeify on labels using spectral + lfbgs
+    - encoder train on sentences + codes
+
+- After training, prune redundant clauses and features, returning features
+  pruned so that tokenizer/etc can include the whitelist/blacklist
 
 # Next
 
