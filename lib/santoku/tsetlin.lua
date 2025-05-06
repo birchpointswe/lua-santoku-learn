@@ -25,7 +25,8 @@ local function evaluate (t, opts, ...)
     end)
     return correct / opts.samples, confusion_ranked or nil, predictions_ranked or nil
   elseif typ == "encoder" then
-    return tm.evaluate(t, opts, ...) / opts.samples
+    local correct = tm.evaluate(t, opts, ...)
+    return correct / opts.samples
   else
     return tm.evaluate(t, opts, ...)
   end
