@@ -212,15 +212,6 @@ static inline uint32_t fast_rand ()
   return (uint32_t) ((x ^ x >> 22) >> (22 + count));
 }
 
-static inline uint64_t mix64 (uint64_t x) {
-  x ^= x >> 33;
-  x *= 0xff51afd7ed558ccdULL;
-  x ^= x >> 33;
-  x *= 0xc4ceb9fe1a85ec53ULL;
-  x ^= x >> 33;
-  return x;
-}
-
 static inline void seed_rand (unsigned int r) {
   uint64_t raw = (uint64_t)pthread_self() ^ (uint64_t)time(NULL) ^ ((uint64_t) r << 32);
   mcg_state = mix64(raw);
@@ -247,17 +238,6 @@ static inline int normal (double mean, double variance)
   double u2 = (double) fast_rand() / UINT32_MAX;
   double n1 = sqrt(-2 * log(u1)) * sin(8 * atan(1) * u2);
   return (int) round(mean + sqrt(variance) * n1);
-}
-
-static inline unsigned int hamming (
-  tk_bits_t *a,
-  tk_bits_t *b,
-  unsigned int chunks
-) {
-  unsigned int t = 0;
-  for (unsigned int i = 0; i < chunks; i ++)
-    t += (unsigned int) popcount(a[i] ^ b[i]);
-  return t;
 }
 
 static inline unsigned int contrastive_loss (
