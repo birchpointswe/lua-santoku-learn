@@ -1,8 +1,11 @@
 # Now
 
-- Codebook based encoder
-    - bm.codeify on labels using spectral + lfbgs
-    - encoder train on sentences + codes
+- Encoder
+    - Threaded codeify
+    - Add feature negatives during boruvka
+    - Add transitive positives and negatives after
+    - TSH/BQP refinement
+    - Train on codes
 
 - After training, prune redundant clauses and features, returning features
   pruned so that tokenizer/etc can include the whitelist/blacklist
@@ -87,3 +90,43 @@
     - Triples memory usage
 
 - Titanic dataset
+
+- Explore a more-complicated densification process
+
+        Enforce initial symmetry in both pos and neg pairs, sort unique
+        Calculate component membership via dsu
+        If more than one component
+          Create an inverted index (raw features to sentences)
+          Create a cache for the best outward pair per component
+          For each component, c,
+            For each sentence in the cluster, u,
+              Scan all sentences sharing features with u (find via the inverted
+                index), caching the best outward pair for u that has a different
+                root component
+              If the best outward pair for u is also the best for c, update the
+                cached best pair for c
+          Convert the cache of best outward pairs per component to a heap by
+            similarity
+          While the heap has pairs
+            Pop the best pair: u, v
+            If the components of u and v are the same (check via dsu)
+              continue
+            Save the smaller of the components of u and v as c_small
+            Union the components of u and v into a new component, c_new
+            Add this pair (+ symmetric) to the running list of positive pairs
+            If more than one component
+              Add a random negative pair (+ symmetric) to the running list of
+                negative pairs
+            For each sentence in c_small, u2
+              If the component of the best pair for u2 is now in c_new
+                Scan all sentences sharing features with u2 (find via the inverted
+                  index), caching the best outward pair for u2 that has a different
+                  root component
+                If the best outward pair for u2 is also the best for c_new, update the
+                  cached best pair for c_new
+            If a valid best pair for c_new was found
+              Push it to the heap
+            If the heap is now empty and there are still more than one component
+              Push a single random positive edge that connects two components to
+                the heap
+

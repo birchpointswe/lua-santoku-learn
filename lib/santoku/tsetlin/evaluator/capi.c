@@ -2,17 +2,6 @@
 #include "lauxlib.h"
 #include "../conf.h"
 
-static inline unsigned int hamming (
-  tk_bits_t *a,
-  tk_bits_t *b,
-  unsigned int chunks
-) {
-  unsigned int t = 0;
-  for (unsigned int i = 0; i < chunks; i ++)
-    t += (unsigned int) popcount(a[i] ^ b[i]);
-  return t;
-}
-
 static inline void tk_lua_callmod (
   lua_State *L,
   int nargs,
@@ -28,6 +17,15 @@ static inline void tk_lua_callmod (
   lua_remove(L, -2); // args fn
   lua_insert(L, - nargs - 1); // fn args
   lua_call(L, nargs, nret); // results
+}
+
+static inline void *tk_lua_checkuserdata (lua_State *L, int i, char *mt)
+{
+  if (mt == NULL && (lua_islightuserdata(L, i) || lua_isuserdata(L, i)))
+    return lua_touserdata(L, i);
+  void *p = luaL_checkudata(L, -1, mt);
+  lua_pop(L, 1);
+  return p;
 }
 
 static inline int tk_error (
@@ -138,12 +136,17 @@ static inline int tm_class_accuracy (lua_State *L)
     tk_lua_verror(L, 3, "class_accuracy", "n_classes", "number of classes must be greater than 0");
 
   double f1[n_classes];
-  double precision[n_classes];
-  double recall[n_classes];
+  memset(f1, 0, sizeof(double) * n_classes);
 
-  double f1_avg;
-  double precision_avg;
-  double recall_avg;
+  double precision[n_classes];
+  memset(precision, 0, sizeof(double) * n_classes);
+
+  double recall[n_classes];
+  memset(recall, 0, sizeof(double) * n_classes);
+
+  double f1_avg = 0.0;
+  double precision_avg = 0.0;
+  double recall_avg = 0.0;
 
   // TODO: calculate per-class and overall precision, recall, and f1
 
@@ -178,29 +181,34 @@ static inline int tm_encoding_accuracy (lua_State *L)
   size_t predicted_len, expected_len;
   tk_bits_t *codes_predicted = (tk_bits_t *) tk_lua_checklstring(L, 1, &predicted_len, "predicted");
   tk_bits_t *codes_expected = (tk_bits_t *) tk_lua_checklstring(L, 2, &expected_len, "expected");
-  unsigned int n_features = tk_lua_checkunsigned(L, 3, "n_features");
+  unsigned int n_hidden = tk_lua_checkunsigned(L, 3, "n_hidden");
   unsigned int n_codes = tk_lua_checkunsigned(L, 4, "n_codes");
 
-  if (predicted_len != n_codes * BITS_DIV(n_features) * n_codes)
+  if (predicted_len != n_codes * BITS_DIV(n_hidden) * n_codes)
     tk_lua_verror(L, 3, "encoding_accuracy", "predicted", "invalid data length");
 
-  if (expected_len != n_codes * BITS_DIV(n_features) * n_codes)
+  if (expected_len != n_codes * BITS_DIV(n_hidden) * n_codes)
     tk_lua_verror(L, 3, "encoding_accuracy", "expected", "invalid data length");
 
-  double f1[n_features];
-  double precision[n_features];
-  double recall[n_features];
+  double f1[n_hidden];
+  memset(f1, 0, sizeof(double) * n_hidden);
 
-  double f1_avg;
-  double precision_avg;
-  double recall_avg;
+  double precision[n_hidden];
+  memset(precision, 0, sizeof(double) * n_hidden);
+
+  double recall[n_hidden];
+  memset(recall, 0, sizeof(double) * n_hidden);
+
+  double f1_avg = 0.0;
+  double precision_avg = 0.0;
+  double recall_avg = 0.0;
 
   // TODO: calculate per-bit and overall precision, recall, and f1
 
   lua_newtable(L);
 
   lua_newtable(L);
-  for (unsigned int i = 0; i < n_features; i ++) {
+  for (unsigned int i = 0; i < n_hidden; i ++) {
     lua_pushinteger(L, i + 1);
     lua_pushnumber(L, f1[i]);
     lua_setfield(L, -3, "f1");
@@ -223,208 +231,137 @@ static inline int tm_encoding_accuracy (lua_State *L)
   return 1;
 }
 
-typedef struct {
-  unsigned int dist;
-  unsigned char label;
-} tm_dl_t;
-
-static int tm_cmp_dist (const void *a, const void *b)
-{
-  return (((tm_dl_t *) a)->dist < ((tm_dl_t *) b)->dist)
-    ? -1 : (((tm_dl_t *) a)->dist > ((tm_dl_t *) b)->dist);
-}
-
 static inline int tm_encoding_similarity (lua_State *L)
 {
-  size_t codes_len, pairs_len, labels_len;
+  lua_settop(L, 5);
+
+  size_t codes_len;
   tk_bits_t *codes = (tk_bits_t *) tk_lua_checklstring(L, 1, &codes_len, "codes");
-  unsigned int *pairs = (unsigned int *) tk_lua_checklstring(L, 2, &pairs_len, "pairs");
-  tk_bits_t *labels = (tk_bits_t *) tk_lua_checklstring(L, 3, &labels_len, "labels");
-  unsigned int n_features = tk_lua_checkunsigned(L, 4, "n_features");
-  unsigned int n_pairs = tk_lua_checkunsigned(L, 5, "n_pairs");
-  unsigned int n_codes = tk_lua_checkunsigned(L, 6, "n_codes");
 
-  if (codes_len != n_codes * BITS_DIV(n_features) * sizeof(tk_bits_t))
+  lua_pushvalue(L, 2);
+  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
+  tm_pair_t *pos = (tm_pair_t *) tk_lua_checkuserdata(L, -4, NULL);
+  uint64_t n_pos = (uint64_t) luaL_checkinteger(L, -1) / 2;
+
+  lua_pushvalue(L, 3);
+  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
+  tm_pair_t *neg = (tm_pair_t *) tk_lua_checkuserdata(L, -4, NULL);
+  uint64_t n_neg = (uint64_t) luaL_checkinteger(L, -1) / 2;
+
+  uint64_t n_sentences = tk_lua_checkunsigned(L, 4, "n_sentences");
+  uint64_t n_hidden = tk_lua_checkunsigned(L, 5, "n_hidden");
+
+  if (codes_len != n_sentences * BITS_DIV(n_hidden) * sizeof(tk_bits_t))
     tk_lua_verror(L, 3, "encoding_similarity", "codes",  "invalid data length");
-  if (pairs_len != n_pairs * 2 * sizeof(unsigned int))
-    tk_lua_verror(L, 3, "encoding_similarity", "pairs",  "invalid data length");
-  if (labels_len < BYTES_DIV(n_pairs))
-    tk_lua_verror(L, 3, "encoding_similarity", "labels", "invalid data length");
 
-  /* — build (distance, label) array — */
-  tm_dl_t *pl = malloc(n_pairs * sizeof(tm_dl_t));
-  unsigned int chunks = BITS_DIV(n_features);
+  tm_dl_t *pl = malloc((n_pos + n_neg) * sizeof(tm_dl_t));
+  uint64_t chunks = BITS_DIV(n_hidden);
 
-  for (unsigned int k = 0; k < n_pairs; ++k) {
-    unsigned int i = pairs[2*k], j = pairs[2*k+1];
-    /* compute Hamming distance */
-    unsigned int d = 0;
-    for (unsigned int c = 0; c < chunks; ++c) {
-      tk_bits_t x = codes[i*chunks + c] ^ codes[j*chunks + c];
-      d += popcount(x);
-    }
-    pl[k].dist  = d;
-    pl[k].label = (labels[BITS_DIV(k)] & ((tk_bits_t)1 << BITS_MOD(k))) ? 1 : 0;
+  for (uint64_t k = 0; k < n_pos + n_neg; k ++) {
+    tm_pair_t *pairs = k < n_pos ? pos : neg;
+    uint64_t offset = k < n_pos ? 0 : n_pos;
+    int64_t u = pairs[k - offset].u;
+    int64_t v = pairs[k - offset].v;
+    pl[k].dist = hamming(codes + u * chunks, codes + v * chunks, chunks);
+    pl[k].label = k < n_pos ? 1 : 0;
   }
 
-  /* — compute ROC-AUC — */
-  /* sort by ascending distance */
-  qsort(pl, n_pairs, sizeof(tm_dl_t), tm_cmp_dist);
-  unsigned int n_pos = 0, n_neg = 0;
-  for (unsigned int k = 0; k < n_pairs; ++k) {
-    if (pl[k].label) ++n_pos; else ++n_neg;
-  }
-  double auc = 0.5;
-  if (n_pos > 0 && n_neg > 0) {
-    double sum_ranks = 0.0;
-    for (unsigned int k = 0; k < n_pairs; ++k) {
-      if (pl[k].label) sum_ranks += (double)(k + 1);
-    }
-    auc = (sum_ranks - (double)n_pos*(n_pos+1)/2) / ((double)n_pos * n_neg);
-  }
+  ks_introsort(dl, n_pos + n_neg, pl);
 
-  /* — find optimal Hamming margin for max F1 — */
+  double sum_ranks = 0.0;
+  unsigned int rank = 1;
+  for (uint64_t k = 0; k < n_pos + n_neg; k ++, rank ++)
+    if (pl[k].label)
+      sum_ranks += rank;
+  double auc = (sum_ranks - ((double) n_pos * (n_pos + 1) / 2)) / ((double) n_pos * n_neg);
+
   double best_f1 = -1.0, best_prec = 0, best_rec = 0;
-  unsigned int best_margin = 0;
-  for (unsigned int m = 0; m <= n_features; ++m) {
-    unsigned int TP=0, FP=0, FN=0;
-    for (unsigned int k = 0; k < n_pairs; ++k) {
+  uint64_t best_margin = 0;
+  for (uint64_t m = 0; m <= n_hidden; m ++) {
+    uint64_t TP = 0, FP = 0, FN = 0;
+    for (uint64_t k = 0; k < n_pos + n_neg; k ++) {
       int pred = (pl[k].dist <= m);
       int lab  = pl[k].label;
-      if (pred) { if (lab) ++TP; else ++FP; }
-      else      { if (lab) ++FN; }
+      if (pred) { if (lab) TP ++; else FP ++; }
+      else { if (lab) FN ++; }
     }
-    double prec = (TP+FP) ? (double)TP/(TP+FP) : 0.0;
-    double rec  = (TP+FN) ? (double)TP/(TP+FN) : 0.0;
-    double f1   = (prec+rec) ? 2*prec*rec/(prec+rec) : 0.0;
+    double prec = (TP + FP) ? (double) TP / (TP + FP) : 0.0;
+    double rec = (TP + FN) ? (double) TP / (TP + FN) : 0.0;
+    double f1 = (prec  + rec) ? 2 * prec * rec/(prec + rec) : 0.0;
     if (f1 > best_f1) {
-      best_f1     = f1;
-      best_prec   = prec;
-      best_rec    = rec;
+      best_f1 = f1;
+      best_prec = prec;
+      best_rec = rec;
       best_margin = m;
     }
   }
 
-  /* — per-bit precision/recall/F1 — */
-  double f1[n_features], precision[n_features], recall[n_features];
+  double f1[n_hidden], precision[n_hidden], recall[n_hidden];
   double sum_f1 = 0.0, sum_prec = 0.0, sum_rec = 0.0;
-  for (unsigned int f = 0; f < n_features; ++f) {
-    unsigned int TP=0, FP=0, FN=0;
-    unsigned int chunk = f >> 6, pos = f & 63;
-    for (unsigned int k = 0; k < n_pairs; ++k) {
-      unsigned int i = pairs[2*k], j = pairs[2*k+1];
-      int bi = (codes[i*chunks + chunk] >> pos) & 1;
-      int bj = (codes[j*chunks + chunk] >> pos) & 1;
+  for (unsigned int f = 0; f < n_hidden; f ++) {
+    unsigned int TP = 0, FP = 0, FN = 0;
+    unsigned int chunk = BITS_DIV(f);
+    unsigned int bit = BITS_MOD(f);
+    for (unsigned int k = 0; k < n_pos + n_neg; k ++) {
+      tm_pair_t *pairs = k < n_pos ? pos : neg;
+      uint64_t offset = k < n_pos ? 0 : n_pos;
+      unsigned int i = pairs[k - offset].u, j = pairs[k - offset].v;
+      int bi = (codes[i * chunks + chunk] >> bit) & 1;
+      int bj = (codes[j * chunks + chunk] >> bit) & 1;
       int pred = (bi == bj);
-      int lab  = pl[k].label;
-      if (pred) { if (lab) ++TP; else ++FP; }
-      else      { if (lab) ++FN; }
+      int lab = pl[k].label;
+      if (pred) { if (lab) TP ++; else FP ++; }
+      else { if (lab) FN ++; }
     }
-    double prec = (TP+FP) ? (double)TP/(TP+FP) : 0.0;
-    double rec  = (TP+FN) ? (double)TP/(TP+FN) : 0.0;
-    double f1v  = (prec+rec) ? 2*prec*rec/(prec+rec) : 0.0;
+    double prec = (TP + FP) ? (double) TP / (TP + FP) : 0.0;
+    double rec = (TP + FN) ? (double) TP / (TP + FN) : 0.0;
+    double f1v = (prec + rec) ? 2 * prec * rec / (prec + rec) : 0.0;
     precision[f] = prec;
-    recall[f]    = rec;
-    f1[f]        = f1v;
-    sum_prec    += prec;
-    sum_rec     += rec;
-    sum_f1      += f1v;
+    recall[f] = rec;
+    f1[f] = f1v;
+    sum_prec += prec;
+    sum_rec += rec;
+    sum_f1 += f1v;
   }
-  double precision_avg = sum_prec / n_features;
-  double recall_avg    = sum_rec  / n_features;
-  double f1_avg        = sum_f1   / n_features;
+  double precision_avg = sum_prec / n_hidden;
+  double recall_avg = sum_rec / n_hidden;
+  double f1_avg = sum_f1 / n_hidden;
 
   free(pl);
 
-  /* — build return table — */
   lua_newtable(L);
 
-  /* per-bit ("classes") */
   lua_newtable(L);
-  for (unsigned int f = 0; f < n_features; ++f) {
-    lua_pushinteger(L, f+1);
+  for (unsigned int f = 0; f < n_hidden; f ++) {
+    lua_pushinteger(L, f + 1);
     lua_newtable(L);
-    lua_pushnumber(L, f1[f]);         lua_setfield(L, -2, "f1");
-    lua_pushnumber(L, precision[f]);  lua_setfield(L, -2, "precision");
-    lua_pushnumber(L, recall[f]);     lua_setfield(L, -2, "recall");
+    lua_pushnumber(L, f1[f]);
+    lua_setfield(L, -2, "f1");
+    lua_pushnumber(L, precision[f]);
+    lua_setfield(L, -2, "precision");
+    lua_pushnumber(L, recall[f]);
+    lua_setfield(L, -2, "recall");
     lua_settable(L, -3);
   }
   lua_setfield(L, -2, "classes");
 
-  /* overall metrics */
-  lua_pushinteger(L, best_margin);     lua_setfield(L, -2, "margin");
-  lua_pushnumber(L, precision_avg);    lua_setfield(L, -2, "precision");
-  lua_pushnumber(L, recall_avg);       lua_setfield(L, -2, "recall");
-  lua_pushnumber(L, f1_avg);           lua_setfield(L, -2, "f1");
-  lua_pushnumber(L, auc);              lua_setfield(L, -2, "auc");
+  lua_pushinteger(L, (int64_t) best_margin);
+  lua_setfield(L, -2, "margin");
+
+  lua_pushnumber(L, precision_avg);
+  lua_setfield(L, -2, "precision");
+
+  lua_pushnumber(L, recall_avg);
+  lua_setfield(L, -2, "recall");
+
+  lua_pushnumber(L, f1_avg);
+  lua_setfield(L, -2, "f1");
+
+  lua_pushnumber(L, auc);
+  lua_setfield(L, -2, "auc");
 
   return 1;
 }
-
-// static inline int tm_encoding_similarity (lua_State *L)
-// {
-//   size_t codes_len, pairs_len, labels_len;
-//   tk_bits_t *codes = (tk_bits_t *) tk_lua_checklstring(L, 1, &codes_len, "codes");
-//   unsigned int *pairs = (unsigned int *) tk_lua_checklstring(L, 2, &pairs_len, "pairs");
-//   tk_bits_t *labels = (tk_bits_t *) tk_lua_checklstring(L, 3, &labels_len, "labels");
-//   unsigned int n_features = tk_lua_checkunsigned(L, 4, "n_features");
-//   unsigned int n_pairs = tk_lua_checkunsigned(L, 5, "n_pairs");
-//   unsigned int n_codes = tk_lua_checkunsigned(L, 6, "n_codes");
-
-//   if (codes_len != n_codes * BITS_DIV(n_features) * sizeof(tk_bits_t))
-//     tk_lua_verror(L, 3, "encoding_similarity", "codes", "invalid data length");
-
-//   if (pairs_len != n_pairs * 2 * sizeof(unsigned int))
-//     tk_lua_verror(L, 3, "encoding_similarity", "pairs", "invalid data length");
-
-//   if (labels_len < BYTES_DIV(n_pairs))
-//     tk_lua_verror(L, 3, "encoding_similarity", "labels", "invalid data length");
-
-//   double auc;
-
-//   // TODO: calculate ROC-AUC
-
-//   unsigned int margin;
-
-//   // TODO: find optimal margin
-
-//   double f1[n_features];
-//   double precision[n_features];
-//   double recall[n_features];
-
-//   double f1_avg;
-//   double precision_avg;
-//   double recall_avg;
-
-//   // TODO: calculate per-bit and averaged precision, recall, and f1
-
-//   lua_newtable(L);
-
-//   lua_newtable(L);
-//   for (unsigned int i = 0; i < n_features; i ++) {
-//     lua_pushinteger(L, i + 1);
-//     lua_newtable(L);
-//     lua_pushnumber(L, f1[i]);
-//     lua_setfield(L, -2, "f1");
-//     lua_pushnumber(L, precision[i]);
-//     lua_setfield(L, -2, "precision");
-//     lua_pushnumber(L, recall[i]);
-//     lua_setfield(L, -2, "recall");
-//     lua_settable(L, -3);
-//   }
-//   lua_setfield(L, -2, "classes");
-
-//   lua_pushinteger(L, margin);
-//   lua_setfield(L, -2, "margin");
-//   lua_pushnumber(L, precision_avg);
-//   lua_setfield(L, -2, "precision");
-//   lua_pushnumber(L, recall_avg);
-//   lua_setfield(L, -2, "recall");
-//   lua_pushnumber(L, f1_avg);
-//   lua_setfield(L, -2, "f1");
-
-//   return 1;
-// }
 
 static luaL_Reg tm_evaluator_fns[] =
 {
