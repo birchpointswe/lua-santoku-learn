@@ -90,26 +90,66 @@ static inline uint64_t hash128 (
   return x;
 }
 
-#include "ksort.h"
-#include "khash.h"
-#include "kvec.h"
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wsign-compare"
 #pragma GCC diagnostic ignored "-Wsign-conversion"
+#include "ksort.h"
+#include "khash.h"
+#include "kvec.h"
 typedef struct { int64_t u, v; } tm_pair_t;
 #define tm_pair_lt(a, b) ((a).u < (b).u || ((a).u == (b).u && (a).v < (b).v))
 #define tm_pair_eq(a, b) ((a).u == (b).u && ((a).v == (b).v))
 #define tm_pair_hash(a) (hash128(kh_int64_hash_func((a).u), kh_int64_hash_func((a).v)))
+#define tm_pair(u, v) (((u) < (v)) ? ((tm_pair_t) { (u), (v) }) : ((tm_pair_t) { (v), (u) }))
 KSORT_INIT(pair_asc, tm_pair_t, tm_pair_lt)
 KHASH_INIT(pairs, tm_pair_t, bool, 1, tm_pair_hash, tm_pair_eq)
 typedef khash_t(pairs) tm_pairs_t;
-typedef struct { int64_t v; double s; } tm_neighbor_t;
-#define tm_neighbor_lt(a, b) ((a).s < (b).s)
-#define tm_neighbor_gt(a, b) ((a).s > (b).s)
+typedef struct { int64_t v; double d; } tm_neighbor_t;
+#define tm_neighbor_lt(a, b) ((a).d < (b).d)
+#define tm_neighbor_gt(a, b) ((a).d > (b).d)
 KSORT_INIT(neighbors_asc, tm_neighbor_t, tm_neighbor_lt)
 KSORT_INIT(neighbors_desc, tm_neighbor_t, tm_neighbor_gt)
 typedef kvec_t(tm_neighbor_t) tm_neighbors_t;
-typedef struct { uint64_t dist; bool label; } tm_dl_t;
-#define tm_dl_lt(a, b) ((a).dist < (b).dist)
+typedef struct { uint64_t sim; bool label; } tm_dl_t;
+#define tm_dl_lt(a, b) ((a).sim < (b).sim)
 KSORT_INIT(dl, tm_dl_t, tm_dl_lt)
+KSORT_INIT(u64, uint64_t, ks_lt_generic)
+KSORT_INIT(f64, double, ks_lt_generic)
+typedef struct { int64_t u; tm_neighbor_t v; } tm_candidate_t;
+#define tm_candidate_lt(a, b) ((a).v.d > (b).v.d)
+#define tm_candidate(u, v) ((tm_candidate_t) { (u), (v) })
+KSORT_INIT(candidates_asc, tm_candidate_t, tm_candidate_lt)
+KSORT_INIT(candidates_desc, tm_candidate_t, tm_candidate_lt)
+typedef kvec_t(tm_candidate_t) tm_candidates_t;
 #pragma GCC diagnostic pop
+
+static uint64_t const multiplier = 6364136223846793005u;
+__thread uint64_t mcg_state = 0xcafef00dd15ea5e5u;
+
+static inline uint32_t fast_rand ()
+{
+  uint64_t x = mcg_state;
+  unsigned int count = (unsigned int) (x >> 61);
+  mcg_state = x * multiplier;
+  return (uint32_t) ((x ^ x >> 22) >> (22 + count));
+}
+
+static inline void seed_rand (unsigned int r) {
+  uint64_t raw = (uint64_t)pthread_self() ^ (uint64_t)time(NULL) ^ ((uint64_t) r << 32);
+  mcg_state = mix64(raw);
+}
+
+static inline double fast_drand ()
+{
+  return ((double)fast_rand()) / ((double)UINT32_MAX);
+}
+
+static inline double fast_index (unsigned int n)
+{
+  return fast_rand() % n;
+}
+
+static inline bool fast_chance (double p)
+{
+  return fast_drand() <= p;
+}
