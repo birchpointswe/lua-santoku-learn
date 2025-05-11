@@ -1,9 +1,7 @@
 # Now
 
 - Encoder
-    - Threaded codeify
-    - Add feature negatives during boruvka
-    - Add transitive positives and negatives after
+    - Threaded codeify, simpler optimization
     - TSH/BQP refinement
     - Train on codes
 
