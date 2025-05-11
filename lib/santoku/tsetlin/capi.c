@@ -201,37 +201,6 @@ typedef struct {
 #define tm_state_actions(tm, clause) \
   (&(tm)->actions[(clause) * (tm)->input_chunks])
 
-static uint64_t const multiplier = 6364136223846793005u;
-__thread uint64_t mcg_state = 0xcafef00dd15ea5e5u;
-
-static inline uint32_t fast_rand ()
-{
-  uint64_t x = mcg_state;
-  unsigned int count = (unsigned int) (x >> 61);
-  mcg_state = x * multiplier;
-  return (uint32_t) ((x ^ x >> 22) >> (22 + count));
-}
-
-static inline void seed_rand (unsigned int r) {
-  uint64_t raw = (uint64_t)pthread_self() ^ (uint64_t)time(NULL) ^ ((uint64_t) r << 32);
-  mcg_state = mix64(raw);
-}
-
-static inline double fast_drand ()
-{
-  return ((double)fast_rand()) / ((double)UINT32_MAX);
-}
-
-static inline double fast_index (unsigned int n)
-{
-  return fast_rand() % n;
-}
-
-static inline bool fast_chance (double p)
-{
-  return fast_drand() <= p;
-}
-
 static inline int normal (double mean, double variance)
 {
   double u1 = (double) (fast_rand() + 1) / ((double) UINT32_MAX + 1);
@@ -822,8 +791,8 @@ static inline long int tk_tsetlin_sums (
 ) {
   long int sum = 0;
   for (unsigned int i = cfirst; i <= clast; i ++) {
-    sum += popcount(out[i - offset] & POS_MASK); // 0101
-    sum -= popcount(out[i - offset] & NEG_MASK); // 1010
+    sum += (long int) popcount(out[i - offset] & POS_MASK); // 0101
+    sum -= (long int) popcount(out[i - offset] & NEG_MASK); // 1010
   }
   return sum;
 }

@@ -114,35 +114,6 @@ static inline const char *tk_lua_fchecklstring (lua_State *L, int i, size_t *lp,
   return s;
 }
 
-static inline unsigned int tk_lua_foptunsigned (lua_State *L, int i, bool def, char *name, char *field)
-{
-  lua_getfield(L, i, field);
-  if (lua_type(L, -1) == LUA_TNIL) {
-    lua_pop(L, 1);
-    return def;
-  }
-  if (lua_type(L, -1) != LUA_TNUMBER)
-    tk_lua_verror(L, 3, name, field, "field is not a positive integer");
-  lua_Integer l = luaL_checkinteger(L, -1);
-  if (l < 0)
-    tk_lua_verror(L, 3, name, field, "field is not a positive integer");
-  lua_pop(L, 1);
-  return l;
-}
-
-static inline unsigned int tk_lua_optunsigned (lua_State *L, int i, unsigned int def, char *name)
-{
-  if (lua_type(L, i) == LUA_TNIL)
-    return def;
-  if (lua_type(L, i) != LUA_TNUMBER)
-    tk_lua_verror(L, 2, name, "value is not a positive integer");
-  lua_Integer l = luaL_checkinteger(L, i);
-  if (l < 0)
-    tk_lua_verror(L, 2, name, "value is not a positive integer");
-  lua_pop(L, 1);
-  return l;
-}
-
 static inline lua_Integer tk_lua_ftype (lua_State *L, int i, char *field)
 {
   lua_getfield(L, i, field);
@@ -159,6 +130,26 @@ static inline uint64_t tk_lua_checkunsigned (lua_State *L, int i, char *name)
   if (l < 0)
     tk_lua_verror(L, 2, name, "value is not a positive integer");
   return (uint64_t) l;
+}
+
+static inline double tk_lua_checkposdouble (lua_State *L, int i)
+{
+  lua_Number l = luaL_checknumber(L, i);
+  if (l < 0)
+    luaL_error(L, "value can't be negative");
+  return (double) l;
+}
+
+static inline double tk_lua_fcheckposdouble (lua_State *L, int i, char *name, char *field)
+{
+  lua_getfield(L, i, field);
+  if (lua_type(L, -1) != LUA_TNUMBER)
+    tk_lua_verror(L, 3, name, field, "field is not a positive number");
+  lua_Number l = luaL_checknumber(L, -1);
+  if (l < 0)
+    tk_lua_verror(L, 3, name, field, "field is not a positive number");
+  lua_pop(L, 1);
+  return (double) l;
 }
 
 static inline uint64_t tk_lua_fcheckunsigned (lua_State *L, int i, char *name, char *field)
@@ -234,6 +225,60 @@ static double lbfgs_evaluate (
   return loss;
 }
 
+
+// static double lbfgs_evaluate (
+//   void *instance,
+//   const double *x,
+//   double *g,
+//   const int n,
+//   const double step
+// ) {
+//   tm_ctx_t *ctx = (tm_ctx_t *) instance;
+//   const int H = ctx->n_hidden;
+//   const double tau_p = (double) H * 0.9;
+//   const double tau_n = (double) H * 0.3;
+//   const double lambda_p = 1.0;
+//   const double lambda_n = 5.0;
+//   double loss = 0.0;
+//   for (int i = 0; i < n; i ++)
+//     g[i] = 0.0;
+//   for (uint64_t k = 0; k < ctx->n_pos + ctx->n_neg; k ++) {
+//     bool is_pos = (k < ctx->n_pos);
+//     tm_pair_t p = is_pos
+//       ? ctx->pos[k]
+//       : ctx->neg[k - ctx->n_pos];
+//     int u = p.u;
+//     int v = p.v;
+//     const double *zi = x + (size_t) u * (size_t) H;
+//     const double *zj = x + (size_t) v * (size_t) H;
+//     double dot = 0.0;
+//     for (int f = 0; f < H; f ++)
+//       dot += zi[f] * zj[f];
+//     if (is_pos) {
+//       double d = tau_p - dot;
+//       if (d > 0.0) {
+//         loss += lambda_p * d * d;
+//         double c = -2.0 * lambda_p * d;
+//         for (int f = 0; f < H; f ++) {
+//           g[u * H + f] += c * zj[f];
+//           g[v * H + f] += c * zi[f];
+//         }
+//       }
+//     } else {
+//       double d = dot - tau_n;
+//       if (d > 0.0) {
+//         loss += lambda_n * d * d;
+//         double c = 2.0 * lambda_n * d;
+//         for (int f = 0; f < H; f ++) {
+//           g[u * H + f] += c * zj[f];
+//           g[v * H + f] += c * zi[f];
+//         }
+//       }
+//     }
+//   }
+//   return loss;
+// }
+
 static int lbfgs_progress (
   void *instance,
   const double *x,
@@ -247,21 +292,13 @@ static int lbfgs_progress (
   int ls
 ) {
   tm_ctx_t *ctx = (tm_ctx_t*) instance;
-  double *z = (double *)x;
-  for (unsigned int i = 0; i < ctx->n_sentences; i ++) {
-    double norm = 0.0;
-    for (unsigned int f = 0; f < ctx->n_hidden; f ++)
-      norm += z[i * ctx->n_hidden + f] * z[i * ctx->n_hidden + f];
-    norm = sqrt(norm) + 1e-8;
-    for (unsigned int f = 0; f < ctx->n_hidden; f ++)
-      z[i * ctx->n_hidden + f] /= norm;
-  }
   (*ctx->global_iter) ++;
   if (ctx->i_each != -1) {
     lua_pushvalue(ctx->L, ctx->i_each);
     lua_pushinteger(ctx->L, *ctx->global_iter);
+    lua_pushstring(ctx->L, "lbfgs");
     lua_pushnumber(ctx->L, fx);
-    lua_call(ctx->L, 2, 1);
+    lua_call(ctx->L, 3, 1);
     bool stop =
       lua_type(ctx->L, -1) == LUA_TBOOLEAN &&
       lua_toboolean(ctx->L, -1) == 0;
@@ -282,36 +319,6 @@ typedef struct {
   uint64_t *count;
   uint64_t *cap;
 } tm_dsu_t;
-
-static inline void tm_dsu_init_components (lua_State *L, tm_dsu_t *dsu)
-{
-  dsu->components = tk_realloc(L, dsu->components, dsu->n_components * sizeof(int64_t));
-  uint64_t pos = 0;
-  for(uint64_t i = 0; i < dsu->n_original; i ++)
-    if (dsu->members[i] != NULL)
-      dsu->components[pos ++] = (int64_t) i;
-}
-
-static inline void tm_dsu_init (lua_State *L, tm_dsu_t *dsu, uint64_t n)
-{
-  dsu->n_original = n;
-  dsu->n_components = n;
-  dsu->components = tk_malloc(L, (size_t) n * sizeof(int64_t));
-  dsu->parent = tk_malloc(L, (size_t) n * sizeof(int64_t));
-  dsu->rank = tk_malloc(L, (size_t) n * sizeof(int64_t));
-  dsu->members = tk_malloc(L, (size_t) n * sizeof(int64_t *));
-  dsu->count = tk_malloc(L, (size_t) n * sizeof(uint64_t));
-  dsu->cap = tk_malloc(L, (size_t) n * sizeof(uint64_t));
-  for (uint64_t i = 0; i < n; i ++) {
-    dsu->components[i] = (int64_t) i;
-    dsu->parent[i] = (int64_t) i;
-    dsu->rank[i] = 0;
-    dsu->members[i] = tk_malloc(L, sizeof(int64_t));
-    dsu->members[i][0] = (int64_t) i;
-    dsu->count[i] = 1;
-    dsu->cap[i] = 1;
-  }
-}
 
 static inline void tm_dsu_free (tm_dsu_t *dsu)
 {
@@ -371,34 +378,100 @@ static inline void tm_dsu_union (lua_State *L, tm_dsu_t *dsu, int64_t x, int64_t
   }
 }
 
-static inline void tm_canonical_dedup (
+static inline void tm_dsu_init (
   lua_State *L,
-  tm_pair_t **pp,
-  uint64_t *np
+  tm_dsu_t *dsu,
+  tm_pairs_t *pairs,
+  uint64_t n
 ) {
-  uint64_t n = *np;
-  tm_pair_t *p0 = *pp;
-  tm_pair_t *p1 = tk_malloc(L, n * sizeof(tm_pair_t));
-  size_t w = 0;
-  for (size_t i = 0; i < n; i ++) {
-    int64_t u = p0[i].u;
-    int64_t v = p0[i].v;
-    if (u == v)
-      continue;
-    if (u > v) {
-      int64_t tmp = u;
-      u = v; v = tmp;
-    }
-    p1[w ++] = (tm_pair_t) { u, v };
+  dsu->n_original = n;
+  dsu->n_components = n;
+  dsu->components = tk_malloc(L, (size_t) n * sizeof(int64_t));
+  dsu->parent = tk_malloc(L, (size_t) n * sizeof(int64_t));
+  dsu->rank = tk_malloc(L, (size_t) n * sizeof(int64_t));
+  dsu->members = tk_malloc(L, (size_t) n * sizeof(int64_t *));
+  dsu->count = tk_malloc(L, (size_t) n * sizeof(uint64_t));
+  dsu->cap = tk_malloc(L, (size_t) n * sizeof(uint64_t));
+  for (uint64_t i = 0; i < n; i ++) {
+    dsu->components[i] = (int64_t) i;
+    dsu->parent[i] = (int64_t) i;
+    dsu->rank[i] = 0;
+    dsu->members[i] = tk_malloc(L, sizeof(int64_t));
+    dsu->members[i][0] = (int64_t) i;
+    dsu->count[i] = 1;
+    dsu->cap[i] = 1;
   }
-  ks_introsort(pair_asc, w, p1);
-  size_t write = 0;
-  for (size_t i = 0; i < w; i++)
-    if (i == 0 || !tm_pair_eq(p1[i], p1[write - 1]))
-      p1[write ++] = p1[i];
-  free(p0);
-  *pp = p1;
-  *np = write;
+  bool l;
+  tm_pair_t p;
+  kh_foreach(pairs, p, l, ({
+    if (l)
+      tm_dsu_union(L, dsu, p.u, p.v);
+  }))
+}
+
+static inline void tm_render_pairs (
+  lua_State *L,
+  tm_pairs_t *pairs,
+  tm_pair_t *pos,
+  tm_pair_t *neg,
+  uint64_t *n_pos,
+  uint64_t *n_neg
+) {
+  bool l;
+  tm_pair_t p;
+  uint64_t wp = 0, wn = 0;
+  kh_foreach(pairs, p,  l, ({
+    if (l) pos[wp ++] = p;
+    else neg[wn ++] = p;
+  }))
+  *n_pos = wp;
+  *n_neg = wn;
+  ks_introsort(pair_asc, wp, pos);
+  ks_introsort(pair_asc, wn, neg);
+}
+
+static inline void tm_pairs_init (
+  lua_State *L,
+  tm_pairs_t *pairs,
+  tm_pair_t *pos,
+  tm_pair_t *neg,
+  uint64_t *n_pos,
+  uint64_t *n_neg
+) {
+  int kha;
+  khint_t khi;
+
+  uint64_t n_pos_old = *n_pos;
+  uint64_t n_pos_new = 0;
+
+  for (uint64_t i = 0; i < n_pos_old; i ++) {
+    tm_pair_t p = pos[i];
+    if (p.v < p.u)
+      pos[i] = p = tm_pair(p.v, p.u);
+    khi = kh_put(pairs, pairs, p, &kha);
+    if (!kha)
+      continue;
+    kh_value(pairs, khi) = true;
+    n_pos_new ++;
+  }
+
+  uint64_t n_neg_old = *n_neg;
+  uint64_t n_neg_new = 0;
+
+  for (uint64_t i = 0; i < n_neg_old; i ++) {
+    tm_pair_t p = neg[i];
+    if (p.v < p.u)
+      neg[i] = p = tm_pair(p.v, p.u);
+    khi = kh_put(pairs, pairs, p, &kha);
+    if (!kha)
+      continue;
+    kh_value(pairs, khi) = false;
+    n_neg_new ++;
+  }
+
+  *n_pos = n_pos_new;
+  *n_neg = n_neg_new;
+
 }
 
 static inline void tm_index_init (
@@ -420,8 +493,8 @@ static inline void tm_index_init (
 
 static inline void tm_neighbors_init (
   lua_State *L,
-  tm_neighbors_t *pos_neighbors,
-  tm_neighbor_t *neg_neighbors,
+  tm_dsu_t *dsu,
+  tm_neighbors_t *neighbors,
   roaring64_bitmap_t **index,
   roaring64_bitmap_t **sentences,
   uint64_t n_sentences,
@@ -429,47 +502,284 @@ static inline void tm_neighbors_init (
   uint64_t knn
 ) {
   roaring64_bitmap_t *candidates = roaring64_bitmap_create();
-  for (int64_t s = 0; s < (int64_t) n_sentences; s ++) {
-    tm_neighbor_t *worst_neg = neg_neighbors + s;
-    *worst_neg = (tm_neighbor_t) { .v = -1, .s = 1.0 };
+
+  for (int64_t u = 0; u < (int64_t) n_sentences; u ++) {
+
+    tm_neighbors_t nbrs;
+    kv_init(nbrs);
+    int64_t cu = tm_dsu_find(dsu, u);
+
+    // Populate candidate set (those sharing at least one feature)
     roaring64_bitmap_clear(candidates);
-    roaring64_iterator_t *it0 = roaring64_iterator_create(sentences[s]);
+    roaring64_iterator_t *it0 = roaring64_iterator_create(sentences[u]);
     while (roaring64_iterator_has_value(it0)) {
       uint64_t f = roaring64_iterator_value(it0);
       roaring64_bitmap_or_inplace(candidates, index[f]);
       roaring64_iterator_advance(it0);
     }
     roaring64_iterator_free(it0);
-    kv_init(pos_neighbors[s]);
+
+    // Get a sorted list of neighbors by distance
     roaring64_iterator_t *it1 = roaring64_iterator_create(candidates);
     while (roaring64_iterator_has_value(it1)) {
-      int64_t c = (int64_t) roaring64_iterator_value(it1);
+      int64_t v = (int64_t) roaring64_iterator_value(it1);
       roaring64_iterator_advance(it1);
-      if (c == s)
+      if (u == v || cu == tm_dsu_find(dsu, v))
         continue;
-      uint64_t dist = roaring64_bitmap_xor_cardinality(sentences[s], sentences[c]);
-      double sim = 1.0 - (double) dist / (double) n_features;
-      if (sim < worst_neg->s) {
-        worst_neg->v = c;
-        worst_neg->s = sim;
-      }
-      if (sim <= 0.0)
-        continue;
-      tm_neighbor_t cand = { .v = c, .s = sim };
-      kv_push(tm_neighbor_t, pos_neighbors[s], cand);
+      double dist = 1 - roaring64_bitmap_jaccard_index(sentences[u], sentences[v]);
+      kv_push(tm_neighbor_t, nbrs, ((tm_neighbor_t) { .v = v, .d = dist }));
     }
     roaring64_iterator_free(it1);
-    if (pos_neighbors[s].n > knn) {
-      ks_ksmall(neighbors_desc, pos_neighbors[s].n, pos_neighbors[s].a, knn);
-      pos_neighbors[s].n = knn;
-    }
-    ks_introsort(neighbors_asc, pos_neighbors[s].n, pos_neighbors[s].a);
-    kv_resize(tm_neighbor_t, pos_neighbors[s], pos_neighbors[s].n);
+    if (nbrs.n <= knn)
+      ks_introsort(neighbors_asc, nbrs.n, nbrs.a);
+    else
+      ks_ksmall(neighbors_asc, nbrs.n, nbrs.a, knn);
+
+    // Truncate neighbors
+    if (nbrs.n > knn)
+      nbrs.n = knn;
+    kv_resize(tm_neighbor_t, nbrs, nbrs.n);
+
+    // Update refs
+    neighbors[u] = nbrs;
   }
+
+  // Cleanup
   roaring64_bitmap_free(candidates);
 }
 
-static inline void tm_populate_sentences (
+static inline void tm_add_backbone (
+  lua_State *L,
+  tm_dsu_t *dsu,
+  tm_pairs_t *pairs,
+  tm_neighbors_t *neighbors,
+  roaring64_bitmap_t **sentences,
+  uint64_t *n_pos,
+  uint64_t *n_neg,
+  uint64_t n_sentences,
+  uint64_t n_features,
+  int i_each,
+  unsigned int *global_iter
+) {
+  int kha;
+  khint_t khi;
+
+  // Log initial density
+  (*global_iter)++;
+  if (i_each != -1) {
+    lua_pushvalue(L, i_each);
+    lua_pushinteger(L, *global_iter);
+    lua_pushstring(L, "densify");
+    lua_pushinteger(L, (int64_t) dsu->n_components);
+    lua_pushinteger(L, (int64_t) *n_pos);
+    lua_pushinteger(L, (int64_t) *n_neg);
+    lua_call(L, 5, 0);
+  }
+
+  // Gather all inter-component edges
+  tm_candidates_t all_candidates;
+  kv_init(all_candidates);
+  for (int64_t u = 0; u < (int64_t) dsu->n_original; u++) {
+    int64_t cu = tm_dsu_find(dsu, u);
+    tm_neighbors_t nbrs = neighbors[u];
+    for (khint_t i = 0; i < nbrs.n; i ++) {
+      tm_neighbor_t v = nbrs.a[i];
+      if (cu == tm_dsu_find(dsu, v.v))
+        continue;
+      tm_pair_t e = tm_pair(u, v.v);
+      khi = kh_get(pairs, pairs, e);
+      if (khi != kh_end(pairs))
+        continue;
+      kv_push(tm_candidate_t, all_candidates, tm_candidate(u, v));
+    }
+  }
+
+  // Sort all by distance ascending (nearest in feature space)
+  ks_introsort(candidates_asc, all_candidates.n, all_candidates.a);
+
+  // Loop through candidates in order and add if they connect components
+  for (khint_t i = 0; i < all_candidates.n && dsu->n_components > 1; i ++) {
+    tm_candidate_t c = all_candidates.a[i];
+    int64_t cu = tm_dsu_find(dsu, c.u);
+    int64_t cv = tm_dsu_find(dsu, c.v.v);
+    if (cu == cv)
+      continue;
+    tm_pair_t e = tm_pair(c.u, c.v.v);
+    khi = kh_put(pairs, pairs, e, &kha);
+    if (!kha)
+      continue;
+    kh_value(pairs, khi) = true;
+    tm_dsu_union(L, dsu, c.u, c.v.v);
+    (*n_pos)++;
+  }
+
+  // Log final density
+  (*global_iter)++;
+  if (i_each != -1) {
+    lua_pushvalue(L, i_each);
+    lua_pushinteger(L, *global_iter);
+    lua_pushstring(L, "densify");
+    lua_pushinteger(L, (int64_t) dsu->n_components);
+    lua_pushinteger(L, (int64_t) *n_pos);
+    lua_pushinteger(L, (int64_t) *n_neg);
+    lua_call(L, 5, 0);
+  }
+
+  // Cleanup
+  kv_destroy(all_candidates);
+}
+
+static inline void tm_adj_init (
+  tm_pairs_t *pairs,
+  roaring64_bitmap_t **adj_pos,
+  roaring64_bitmap_t **adj_neg,
+  uint64_t n_sentences
+) {
+  khint_t khi;
+
+  // Init
+  for (uint64_t s = 0; s < n_sentences; s ++) {
+    adj_pos[s] = roaring64_bitmap_create();
+    adj_neg[s] = roaring64_bitmap_create();
+  }
+
+  // Populate adj lists
+  for (khi = kh_begin(pairs); khi < kh_end(pairs); khi ++) {
+    if (!kh_exist(pairs, khi))
+      continue;
+    tm_pair_t p = kh_key(pairs, khi);
+    bool l = kh_value(pairs, khi);
+    if (l) {
+      roaring64_bitmap_add(adj_pos[p.u], (uint64_t) p.v);
+      roaring64_bitmap_add(adj_pos[p.v], (uint64_t) p.u);
+    } else {
+      roaring64_bitmap_add(adj_neg[p.u], (uint64_t) p.v);
+      roaring64_bitmap_add(adj_neg[p.v], (uint64_t) p.u);
+    }
+  }
+}
+
+static inline void tm_add_transatives (
+  lua_State *L,
+  tm_pairs_t *pairs,
+  roaring64_bitmap_t **adj_pos,
+  roaring64_bitmap_t **adj_neg,
+  roaring64_bitmap_t **sentences,
+  uint64_t *n_pos,
+  uint64_t *n_neg,
+  uint64_t n_sentences,
+  uint64_t n_hops_pos,
+  uint64_t n_hops_neg,
+  uint64_t n_grow_pos,
+  uint64_t n_grow_neg,
+  int i_each,
+  unsigned int *global_iter
+) {
+  int kha;
+  khint_t khi;
+
+  // Add transative positives
+  tm_candidates_t candidates;
+  kv_init(candidates);
+  for (uint64_t layer = 0; layer < n_hops_pos; layer ++) {
+    bool added_any = false;
+    for (uint32_t u = 0; u < n_sentences; ++u) {
+      kv_size(candidates) = 0;
+      roaring64_iterator_t *it1 = roaring64_iterator_create(adj_pos[u]);
+      while (roaring64_iterator_has_value(it1)) {
+        uint32_t v = roaring64_iterator_value(it1);
+        roaring64_iterator_advance(it1);
+        roaring64_iterator_t *it2 = roaring64_iterator_create(adj_pos[v]);
+        while (roaring64_iterator_has_value(it2)) {
+          uint32_t w = roaring64_iterator_value(it2);
+          roaring64_iterator_advance(it2);
+          if (w == u || roaring64_bitmap_contains(adj_pos[u], w))
+            continue;
+          double dist = 1 - roaring64_bitmap_jaccard_index(sentences[u], sentences[w]);
+          tm_neighbor_t vw = (tm_neighbor_t) { w, dist };
+          kv_push(tm_candidate_t, candidates, tm_candidate(u, vw));
+        }
+        roaring64_iterator_free(it2);
+      }
+      roaring64_iterator_free(it1);
+      // Prefer nearest in feature space first
+      ks_introsort(candidates_asc, candidates.n, candidates.a);
+      for (uint64_t i = 0; i < candidates.n && i < n_grow_pos; i ++) {
+        tm_candidate_t c = candidates.a[i];
+        tm_pair_t e = tm_pair(u, c.v.v);
+        khi = kh_put(pairs, pairs, e, &kha);
+        if (!kha)
+          continue;
+        kh_value(pairs, khi) = true;
+        roaring64_bitmap_add(adj_pos[u], (uint64_t) c.v.v);
+        roaring64_bitmap_add(adj_pos[c.v.v], u);
+        (*n_pos) ++;
+        added_any = true;
+      }
+    }
+    if (!added_any)
+      break;
+  }
+
+  // Add transative negatives
+  for (uint64_t layer = 0; layer < n_hops_neg; layer ++) {
+    bool added_any = false;
+    for (int64_t u = 0; u < (int64_t) n_sentences; u ++) {
+      kv_size(candidates) = 0;
+      roaring64_iterator_t *it1 = roaring64_iterator_create(adj_pos[u]);
+      while (roaring64_iterator_has_value(it1)) {
+        uint64_t v = roaring64_iterator_value(it1);
+        roaring64_iterator_advance(it1);
+        roaring64_iterator_t *it2 = roaring64_iterator_create(adj_neg[v]);
+        while (roaring64_iterator_has_value(it2)) {
+          int64_t w = (int64_t) roaring64_iterator_value(it2);
+          roaring64_iterator_advance(it2);
+          if (w == u)
+            continue;
+          double dist = 1.0 - roaring64_bitmap_jaccard_index(sentences[u], sentences[w]);
+          tm_neighbor_t vw = (tm_neighbor_t) { w, dist };
+          kv_push(tm_candidate_t, candidates, tm_candidate(u, vw));
+        }
+        roaring64_iterator_free(it2);
+      }
+      roaring64_iterator_free(it1);
+      // Prefer nearest in feature space first
+      ks_introsort(candidates_asc, candidates.n, candidates.a);
+      for (uint64_t i = 0; i < candidates.n && i < n_grow_neg; i ++) {
+        tm_candidate_t c = candidates.a[i];
+        tm_pair_t e = tm_pair(u, c.v.v);
+        khi = kh_put(pairs, pairs, e, &kha);
+        if (!kha)
+          continue;
+        kh_value(pairs, khi) = false;
+        roaring64_bitmap_add(adj_neg[u], (uint64_t) c.v.v);
+        roaring64_bitmap_add(adj_neg[c.v.v], (uint64_t) u);
+        (*n_neg) ++;
+        added_any = true;
+      }
+    }
+    if (!added_any)
+      break;
+  }
+
+  // Cleanup
+  kv_destroy(candidates);
+
+  // Progress
+  (*global_iter)++;
+  if (i_each != -1) {
+    lua_pushvalue(L, i_each);
+    lua_pushinteger(L, *global_iter);
+    lua_pushstring(L, "densify");
+    lua_pushinteger(L, (int64_t) 1);
+    lua_pushinteger(L, (int64_t) *n_pos);
+    lua_pushinteger(L, (int64_t) *n_neg);
+    lua_call(L, 5, 0);
+  }
+
+}
+
+static inline void tm_sentences_init (
   roaring64_bitmap_t **sentences,
   int64_t *set_bits,
   uint64_t n_set_bits,
@@ -486,310 +796,134 @@ static inline void tm_populate_sentences (
   }
 }
 
-static inline int tm_codeify (lua_State *L)
-{
-  lua_settop(L, 1);
+static inline void tm_run_tch (
+  lua_State *L,
+  double *z,
+  tk_bits_t *codes,
+  roaring64_bitmap_t **adj_pos,
+  roaring64_bitmap_t **adj_neg,
+  uint64_t n_sentences,
+  uint64_t n_hidden,
+  int i_each,
+  unsigned int *global_iter
+) {
+  int *bitvec = tk_malloc(L, n_sentences * sizeof(int));
+  double *col = malloc(n_sentences * sizeof(double));
 
-  lua_getfield(L, 1, "pos");
-  lua_pushboolean(L, true);
-  tk_lua_callmod(L, 2, 4, "santoku.matrix.integer", "view");
-  tm_pair_t *pos = (tm_pair_t *) tk_lua_checkuserdata(L, -4, NULL);
-  uint64_t n_pos = (uint64_t) luaL_checkinteger(L, -1) / 2;
+  for (uint32_t f = 0; f < n_hidden; f ++) {
 
-  lua_getfield(L, 1, "neg");
-  lua_pushboolean(L, true);
-  tk_lua_callmod(L, 2, 4, "santoku.matrix.integer", "view");
-  tm_pair_t *neg = (tm_pair_t *) tk_lua_checkuserdata(L, -4, NULL);
-  uint64_t n_neg = (uint64_t) luaL_checkinteger(L, -1) / 2;
+    // Find the median
+    for (uint32_t i = 0; i < n_sentences; i ++)
+      col[i] = z[i * n_hidden + f];
+    uint64_t mid = n_sentences / 2;
+    ks_ksmall(f64, n_sentences, col, mid);
+    double med = col[mid];
 
-  lua_getfield(L, 1, "sentences");
-  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
-  int64_t *set_bits = (int64_t *) tk_lua_checkuserdata(L, -4, NULL);
-  uint64_t n_set_bits = (uint64_t) luaL_checkinteger(L, -1);
-  uint64_t n_features = tk_lua_fcheckunsigned(L, 1, "codeify", "n_features");
-  uint64_t n_hidden = tk_lua_fcheckunsigned(L, 1, "codeify", "n_hidden");
-  uint64_t n_sentences = tk_lua_fcheckunsigned(L, 1, "codeify", "n_sentences");
-  uint64_t knn = tk_lua_foptunsigned(L, 1, 32, "codeify", "knn");
-  uint64_t spectral_iterations = tk_lua_fcheckunsigned(L, 1, "codeify", "spectral_iterations");
-  uint64_t lbfgs_iterations = tk_lua_fcheckunsigned(L, 1, "codeify", "lbfgs_iterations");
+    // Threshold around the median
+    for (uint32_t i = 0; i < n_sentences; i++)
+      bitvec[i] = (z[i * n_hidden + f] > med) ? +1 : -1;
 
-  if (BITS_MOD(n_hidden) != 0)
-    tk_lua_verror(L, 3, "codify", "n_hidden", "must be a multiple of " STR(BITS));
+    bool updated;
+    uint32_t steps = 0;
 
-  int i_each = -1;
-  if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
-    lua_getfield(L, 1, "each");
-    i_each = tk_lua_absindex(L, -1);
-  }
+    do {
+      updated = false;
+      steps ++;
 
-  tm_canonical_dedup(L, &pos, &n_pos);
-  tm_canonical_dedup(L, &neg, &n_neg);
-
-  int kha;
-  khint_t khi;
-  tm_pairs_t *pairs = kh_init(pairs);
-
-  for (uint64_t i = 0; i < n_pos; i ++) {
-    khi = kh_put(pairs, pairs, pos[i], &kha);
-    kh_value(pairs, khi) = true;
-  }
-
-  for (uint64_t i = 0; i < n_neg; i ++) {
-    khi = kh_get(pairs, pairs, neg[i]);
-    if (khi != kh_end(pairs))
-      continue;
-    khi = kh_put(pairs, pairs, neg[i], &kha);
-    kh_value(pairs, khi) = false;
-  }
-
-  tm_dsu_t dsu;
-  tm_dsu_init(L, &dsu, n_sentences);
-  for (uint64_t i = 0; i < n_pos; i ++) {
-    tm_pair_t p = pos[i];
-    tm_dsu_union(L, &dsu, p.u, p.v);
-  }
-
-  if (dsu.n_components > 1) {
-
-    roaring64_bitmap_t **sentences = tk_malloc(L, n_sentences *sizeof(roaring64_bitmap_t *));
-    tm_populate_sentences(sentences, set_bits, n_set_bits, n_features, n_sentences);
-
-    roaring64_bitmap_t **index = tk_malloc(L, n_features * sizeof(roaring64_bitmap_t *));
-    tm_index_init(L, index, set_bits, n_set_bits, n_features);
-
-    tm_neighbors_t *pos_neighbors = tk_malloc(L, n_sentences * sizeof(tm_neighbors_t));
-    tm_neighbor_t *neg_neighbors = tk_malloc(L, n_sentences * sizeof(tm_neighbor_t));
-
-    tm_neighbors_init(L, pos_neighbors, neg_neighbors, index, sentences, n_sentences, n_features, knn);
-
-    uint64_t new_neg_added;
-    kvec_t(tm_pair_t) new_pos_pairs;
-    kv_init(new_pos_pairs);
-
-    while (dsu.n_components > 1) {
-
-      new_neg_added = 0;
-      kv_size(new_pos_pairs) = 0;
-
-      for (unsigned int i = 0; i < dsu.n_components; i ++) {
-
-        int64_t component = dsu.components[i];
-
-        int64_t best_u = -1;
-        tm_neighbor_t best_neighbor = (tm_neighbor_t) { .v = -1, .s = -1.0 };
-
-        for (unsigned int j = 0; j < dsu.count[component]; j ++) {
-          int64_t next_u = dsu.members[component][j];
-          while (pos_neighbors[next_u].n > 0) {
-            tm_neighbor_t next_neighbor = pos_neighbors[next_u].a[pos_neighbors[next_u].n - 1];
-            if (tm_dsu_find(&dsu, next_neighbor.v) == component) {
-              pos_neighbors[next_u].n --;
-              continue;
-            } else if (next_neighbor.s > best_neighbor.s) {
-              best_u = next_u;
-              best_neighbor = next_neighbor;
-            }
-            break;
-          }
+      for (uint32_t i = 0; i < n_sentences; i ++) {
+        int delta = 0;
+        // Positive neighbors
+        roaring64_iterator_t *it0 = roaring64_iterator_create(adj_pos[i]);
+        while (roaring64_iterator_has_value(it0)) {
+          uint32_t j = roaring64_iterator_value(it0);
+          roaring64_iterator_advance(it0);
+          delta += bitvec[i] * bitvec[j];
         }
-
-        if (best_u != -1) {
-
-          tm_pair_t x;
-          if (best_u < best_neighbor.v)
-            x = ((tm_pair_t) { best_u, best_neighbor.v });
-          else
-            x = ((tm_pair_t) { best_neighbor.v, best_u });
-
-          khi = kh_put(pairs, pairs, x, &kha);
-          if (kha) {
-            kv_push(tm_pair_t, new_pos_pairs, x);
-            kh_value(pairs, khi) = true;
-          }
-
-          // int64_t worst_u = -1;
-          // tm_neighbor_t worst_neighbor = (tm_neighbor_t) { .v = -1, .s = 1.0 };
-
-          // for (unsigned int j = 0; j < dsu.count[component]; j ++) {
-          //   int64_t next_u = dsu.members[component][j];
-          //   tm_neighbor_t next_neighbor = neg_neighbors[next_u];
-          //   if (next_neighbor.v < 0)
-          //     continue;
-          //   if (tm_dsu_find(&dsu, next_neighbor.v) == component)
-          //     continue;
-          //   if (next_neighbor.s < worst_neighbor.s) {
-          //     worst_u = next_u;
-          //     worst_neighbor = next_neighbor;
-          //   }
-          // }
-
-          // if (worst_u != -1) {
-          //   tm_pair_t x;
-          //   if (worst_u < worst_neighbor.v)
-          //     x = ((tm_pair_t) { worst_u, worst_neighbor.v });
-          //   else
-          //     x = ((tm_pair_t) { worst_neighbor.v, worst_u });
-          //   khi = kh_put(pairs, pairs, x, &kha);
-          //   if (kha) {
-          //     new_neg_added ++;
-          //     kh_value(pairs, khi) = false;
-          //   }
-          // }
-
+        roaring64_iterator_free(it0);
+        // Negative neighbors
+        roaring64_iterator_t *it1 = roaring64_iterator_create(adj_neg[i]);
+        while (roaring64_iterator_has_value(it1)) {
+          uint32_t j = roaring64_iterator_value(it1);
+          roaring64_iterator_advance(it1);
+          delta -= bitvec[i] * bitvec[j];
         }
-
+        roaring64_iterator_free(it1);
+        // Check
+        if (delta < 0){
+          bitvec[i] = -bitvec[i];
+          updated = true;
+        }
       }
 
-      bool done = kv_size(new_pos_pairs) == 0;
-
-      if (done) {
-
-        // // Build adjacency lists for transitives
-        // kvec_t(int64_t) pos_adj[n_sentences];
-        // kvec_t(int64_t) neg_adj[n_sentences];
-        // for (uint64_t i = 0; i < n_sentences; i ++) {
-        //   kv_init(pos_adj[i]);
-        //   kv_init(neg_adj[i]);
-        // }
-        // tm_pair_t p;
-        // bool l;
-        // kh_foreach(pairs, p, l, ({
-        //   int64_t u = p.u, v = p.v;
-        //   if (l) {
-        //     kv_push(int64_t, pos_adj[u], v);
-        //     kv_push(int64_t, pos_adj[v], u);
-        //   } else {
-        //     kv_push(int64_t, neg_adj[u], v);
-        //     kv_push(int64_t, neg_adj[v], u);
-        //   }
-        // }))
-
-        // // Add transitive positives
-        // for (int64_t A = 0; A < (int64_t) n_sentences; A ++) {
-        //   khint_t eB = pos_adj[A].n;
-        //   bool added = false;
-        //   for (khint_t iB = 0; iB < eB; iB ++) {
-        //     int64_t B = pos_adj[A].a[iB];
-        //     khint_t eC = pos_adj[B].n;
-        //     for (khint_t iC = 0; iC < eC; iC ++) {
-        //       int64_t C = pos_adj[B].a[iC];
-        //       if (C == A)
-        //         continue;
-        //       tm_pair_t x;
-        //       if (C < A) x = (tm_pair_t) { C, A };
-        //       else x = (tm_pair_t) { A, C };
-        //       khi = kh_put(pairs, pairs, x, &kha);
-        //       if (!kha)
-        //         continue;
-        //       kh_value(pairs, khi) = true;
-        //       kv_push(int64_t, pos_adj[A], C);
-        //       kv_push(int64_t, pos_adj[C], A);
-        //       kv_push(tm_pair_t, new_pos_pairs, x);
-        //       added = true;
-        //       break;
-        //     }
-        //     if (added)
-        //       break;
-        //   }
-        // }
-
-        // // Add transative negatives
-        // for (int64_t A = 0; A < (int64_t) n_sentences; A ++) {
-        //   khint_t eB = pos_adj[A].n;
-        //   bool added = false;
-        //   for (khint_t iB = 0; iB < eB; iB ++) {
-        //     int64_t B = pos_adj[A].a[iB];
-        //     khint_t eC = neg_adj[B].n;
-        //     for (khint_t iC = 0; iC < eC; iC ++) {
-        //       int64_t C = neg_adj[B].a[iC];
-        //       if (C == A)
-        //         continue;
-        //       tm_pair_t x;
-        //       if (C < A) x = (tm_pair_t) { C, A };
-        //       else x = (tm_pair_t) { A, C };
-        //       khi = kh_put(pairs, pairs, x, &kha);
-        //       if (!kha)
-        //         continue;
-        //       kh_value(pairs, khi) = false;
-        //       kv_push(int64_t, neg_adj[A], C);
-        //       kv_push(int64_t, neg_adj[C], A);
-        //       new_neg_added ++;
-        //       added = true;
-        //       break;
-        //     }
-        //     if (added)
-        //       break;
-        //   }
-        // }
-
-        for (unsigned i = 0; i < dsu.n_components - 1; i ++) {
-          int64_t c0 = dsu.components[i];
-          int64_t c1 = dsu.components[i + 1];
-          int64_t u  = dsu.members[c0][0];
-          int64_t v  = dsu.members[c1][0];
-          tm_pair_t e = (u < v) ? (tm_pair_t) { u , v } : (tm_pair_t) { v, u };
-          if (kh_get(pairs, pairs, e) != kh_end(pairs))
-            continue;
-          khi = kh_put(pairs, pairs, e, &kha);
-          if (kha) {
-            kh_val(pairs, khi) = true;
-            kv_push(tm_pair_t, new_pos_pairs, e);
-          }
-        }
-
+      (*global_iter) ++;
+      if (i_each >= 0) {
+        lua_pushvalue(L, i_each);
+        lua_pushinteger(L, *global_iter);
+        lua_pushstring(L, "tch");
+        lua_pushinteger(L, f);
+        lua_pushinteger(L, steps);
+        lua_call(L, 4, 0);
       }
 
-      n_pos += kv_size(new_pos_pairs);
-      n_neg += new_neg_added;
+    } while (updated);
 
-      for (khint_t k = 0; k < kv_size(new_pos_pairs); k ++)
-        tm_dsu_union(L, &dsu, new_pos_pairs.a[k].u, new_pos_pairs.a[k].v);
-
-      if (done)
-        break;
-
+    // Write out the final bits into your packed codes
+    for (uint32_t i = 0; i < n_sentences; i ++) {
+      if (bitvec[i] > 0){
+        uint32_t chunk = f / BITS;
+        uint32_t b = f % BITS;
+        codes[i * BITS_DIV(n_hidden) + chunk] |= ((tk_bits_t) 1 << b);
+      }
     }
-
-    kv_destroy(new_pos_pairs);
-
-    for (int64_t s = 0; s < (int64_t) n_sentences; s ++)
-      roaring64_bitmap_free(sentences[s]);
-
-    for (int64_t s = 0; s < (int64_t) n_sentences; s ++)
-      kv_destroy(pos_neighbors[s]);
-
-    for (uint64_t f = 0; f < n_features; f ++)
-      roaring64_bitmap_free(index[f]);
-
-    free(sentences);
-    free(pos_neighbors);
-    free(neg_neighbors);
-    free(index);
-
   }
 
-  tm_dsu_free(&dsu);
+  // Cleanup
+  free(bitvec);
+  free(col);
+}
 
-  // free copy pairs back to pos/neg, update counts, free hash
-  uint64_t wp = 0, wn = 0;
-  tm_pair_t p;
-  bool l;
-  pos = tk_realloc(L, pos, n_pos * sizeof(tm_pair_t));
-  neg = tk_realloc(L, neg, n_neg * sizeof(tm_pair_t));
-  kh_foreach(pairs, p, l, ({
-    if (l) pos[wp ++] = p;
-    else neg[wn ++] = p;
-  }))
-  n_pos = wp;
-  n_neg = wn;
-  kh_destroy(pairs, pairs);
-  ks_introsort(pair_asc, n_pos, pos);
-  ks_introsort(pair_asc, n_neg, neg);
+static inline void tm_run_lbfgs (
+  lua_State *L,
+  double *z,
+  tm_pair_t *pos,
+  tm_pair_t *neg,
+  uint64_t n_pos,
+  uint64_t n_neg,
+  uint64_t n_sentences,
+  uint64_t n_hidden,
+  int i_each,
+  unsigned int *global_iter,
+  uint64_t lbfgs_iterations
+) {
+  // Prepare context for LBFGS
+  tm_ctx_t ctx = {
+    pos, neg, n_pos, n_neg, n_sentences, n_hidden,
+    L, i_each, global_iter
+  };
 
-  printf(">  n_neg=%lu  n_pos=%lu\n", n_neg, n_pos);
+  // LBFGS refine
+  int n_vars = n_sentences * n_hidden;
+  if (lbfgs_iterations > 0) {
+    lbfgs_parameter_t param;
+    lbfgs_parameter_init(&param);
+    param.max_iterations = lbfgs_iterations;
+    double fx = 0.0;
+    lbfgs(n_vars, z, &fx, lbfgs_evaluate, lbfgs_progress, &ctx, &param);
+  }
+}
 
-  unsigned int global_iter = 0;
-
+static inline void tm_run_spectral (
+  lua_State *L,
+  double *z,
+  tm_pair_t *pos,
+  tm_pair_t *neg,
+  uint64_t n_pos,
+  uint64_t n_neg,
+  uint64_t n_sentences,
+  uint64_t n_hidden,
+  int i_each,
+  unsigned int *global_iter
+) {
   // Build degree vector for Laplacian
   unsigned int *degree = tk_malloc(L, n_sentences * sizeof(unsigned int));
   memset(degree, 0, (size_t) n_sentences * sizeof(unsigned int));
@@ -804,42 +938,49 @@ static inline int tm_codeify (lua_State *L)
     degree[p.v] ++;
   }
 
+  // Build inv_sqrt vector
+  double *inv_sqrt_deg = tk_malloc(L, n_sentences * sizeof(double));
+  for (uint64_t i = 0; i < n_sentences; i++)
+    inv_sqrt_deg[i] = degree[i] > 0 ? 1.0 / sqrt((double) degree[i]) : 0.0;
+  free(degree);
+
   // ARPACK setup
   a_int ido = 0, info = 0;
   char bmat[] = "I", which[] = "SM";
-  a_int n = (a_int) n_sentences;
-  a_int nev = (a_int) n_hidden;
-  a_int ncv = 2 * nev + 1;
+  a_int nev = (a_int) n_hidden + 1;
+  a_int ncv = (2 * nev + 1 < (a_int) n_sentences) ? 2 * nev + 1 : (a_int) n_sentences;
   double tol = 1e-3;
-  double *resid = tk_malloc(L, (size_t) n * sizeof(double));
-  double *workd = tk_malloc(L, 3 * (size_t) n * sizeof(double));
-  a_int iparam[11] = {1,0,spectral_iterations,0,0,0,1,0,0,0,0};
+  double *resid = tk_malloc(L, (size_t) n_sentences * sizeof(double));
+  double *workd = tk_malloc(L, 3 * (size_t) n_sentences * sizeof(double));
+  a_int iparam[11] = {1,0,3*n_hidden,0,0,0,1,0,0,0,0};
   a_int ipntr[14] = {0};
   int lworkl = ncv * (ncv + 8);
   double *workl = tk_malloc(L, (size_t) lworkl * sizeof(double));
-  double *v = tk_malloc(L, (size_t) n * (size_t) ncv * sizeof(double));
+  double *v = tk_malloc(L, (size_t) n_sentences * (size_t) ncv * sizeof(double));
 
   // Reverse-communication to build Lanczos basis v
   do {
     dsaupd_c(
-      &ido, bmat, n, which, nev, tol, resid, ncv, v, n,
+      &ido, bmat, n_sentences, which, nev, tol, resid, ncv, v, n_sentences,
       iparam, ipntr, workd, workl, (a_int) lworkl, &info);
+    if (info != 0)
+      tk_lua_verror(L, 2, "codeify", "failure calling arpack for spectral refinement");
     if (ido == -1 || ido == 1) {
       double *in  = workd + ipntr[0] - 1;
       double *out = workd + ipntr[1] - 1;
-      memset(out, 0, (size_t) n * sizeof(double));
+      memcpy(out, in, n_sentences * sizeof(double));
       for (unsigned int e = 0; e < n_pos; e ++) {
         tm_pair_t p = pos[e];
-        out[p.u] -= in[p.v];
-        out[p.v] -= in[p.u];
+        double w = inv_sqrt_deg[p.u] * inv_sqrt_deg[p.v];
+        out[p.u] -= w * in[p.v];
+        out[p.v] -= w * in[p.u];
       }
       for (unsigned int e = 0; e < n_neg; e ++) {
         tm_pair_t p = neg[e];
-        out[p.u] += in[p.v];
-        out[p.v] += in[p.u];
+        double w = inv_sqrt_deg[p.u] * inv_sqrt_deg[p.v];
+        out[p.u] += w * in[p.v];
+        out[p.v] += w * in[p.u];
       }
-      for (a_int i = 0; i < n; i ++)
-        out[i] += degree[i] * in[i];
     }
   } while (ido == -1 || ido == 1);
 
@@ -847,81 +988,163 @@ static inline int tm_codeify (lua_State *L)
   a_int rvec = 1;
   char howmny[] = "A";
   a_int select[ncv];
-  double d[nev];
-  double *z = tk_malloc(L, (size_t) n * (size_t) nev * sizeof(double));
+  double d[n_hidden];
   double sigma = 0.0;
+  double *zall = tk_malloc(L, (size_t) n_sentences * (size_t) nev * sizeof(double));
+
+  // Dump modes
   dseupd_c(
-    rvec, howmny, select, d, z, (a_int) n, sigma, bmat, (a_int) n, which, (a_int) nev,
-    tol, resid, (a_int) ncv, v, (a_int) n, iparam, ipntr, workd, workl, (a_int) lworkl, &info);
+    rvec, howmny, select, d, zall,
+    (a_int) n_sentences, sigma,
+    bmat, (a_int) n_sentences, which, nev,
+    tol, resid, (a_int) ncv, v, (a_int) n_sentences,
+    iparam, ipntr, workd, workl, (a_int) lworkl, &info);
+  if (info != 0)
+    tk_lua_verror(L, 2, "codeify", "failure calling arpack for spectral finalization");
 
-  global_iter ++;
-  if (i_each != -1) {
-    lua_pushvalue(L, i_each);
-    lua_pushinteger(L, global_iter);
-    lua_pushinteger(L, iparam[4]);
-    lua_call(L, 2, 0);
-  }
-
-  // Prepare context for LBFGS
-  tm_ctx_t ctx = {
-    pos, neg, n_pos, n_neg, n_sentences, n_hidden,
-    L, i_each, &global_iter
-  };
-
-  // LBFGS refine
-  int n_vars = n_sentences * n_hidden;
-  if (lbfgs_iterations > 0) {
-    lbfgs_parameter_t param;
-    lbfgs_parameter_init(&param);
-    param.max_iterations = lbfgs_iterations;
-    double fx = 0.0;
-    lbfgs(n_vars, z, &fx,
-          lbfgs_evaluate, lbfgs_progress,
-          &ctx, &param);
-  }
-
-  // Threshold
-  //
-  // TODO: TCH discrete optimization, see two-step hashing paper
-  //
-  //   For t from 1 to m:
-  //     Form the A matrix for bit t from pairwise loss
-  //     Solve the small binary‐quadratic problem.
-  //     Update the codebook t-th row with the new +/- 1 vector.
-  //
-  tk_bits_t *codes = tk_malloc(L, (size_t) n_sentences * BITS_DIV(n_hidden) * sizeof(tk_bits_t));
-  memset(codes, 0, (size_t) n_sentences * BITS_DIV(n_hidden) * sizeof(tk_bits_t));
-  for (unsigned int i = 0; i < n_sentences; i ++) {
-    for (unsigned int f = 0; f < n_hidden; f ++) {
-      if (z[i * n_hidden + f] > 0) {
-        unsigned int chunk = BITS_DIV(f);
-        unsigned int b = BITS_MOD(f);
-        codes[i * BITS_DIV(n_hidden) + chunk] |= ((tk_bits_t) 1 << b);
-      }
-    }
-  }
+  // Copy modes to z, skipping the first
+  for (uint64_t i = 0; i < n_sentences; i ++)
+    for (uint64_t f = 0; f < n_hidden; f ++)
+      z[i * n_hidden + f] = zall[i * (uint64_t) nev + (f + 1)];
 
   // Cleanup
+  free(inv_sqrt_deg);
+  free(zall);
   free(resid);
   free(workd);
   free(workl);
   free(v);
-  free(z);
-  free(degree);
 
-  lua_pushlightuserdata(L, pos);
-  lua_pushinteger(L, (int64_t) n_pos);
-  lua_pushinteger(L, 2);
+  (*global_iter) ++;
+  if (i_each != -1) {
+    lua_pushvalue(L, i_each);
+    lua_pushinteger(L, *global_iter);
+    lua_pushstring(L, "spectral");
+    lua_pushinteger(L, iparam[4]);
+    lua_call(L, 3, 0);
+  }
+}
+
+static inline int tm_codeify (lua_State *L)
+{
+  lua_settop(L, 1);
+
   lua_getfield(L, 1, "pos");
-  tk_lua_callmod(L, 4, 0, "santoku.matrix.integer", "from_view");
+  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
+  tm_pair_t *pos_seed = (tm_pair_t *) tk_lua_checkuserdata(L, -4, NULL);
+  uint64_t n_pos_seed = (uint64_t) luaL_checkinteger(L, -1) / 2;
+  tm_pair_t *pos = tk_malloc(L, n_pos_seed * sizeof(tm_pair_t));
+  uint64_t n_pos = n_pos_seed;
+  memcpy(pos, pos_seed, n_pos_seed * sizeof(tm_pair_t));
 
-  lua_pushlightuserdata(L, neg);
-  lua_pushinteger(L, (int64_t) n_neg);
-  lua_pushinteger(L, 2);
   lua_getfield(L, 1, "neg");
-  tk_lua_callmod(L, 4, 0, "santoku.matrix.integer", "from_view");
+  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
+  tm_pair_t *neg_seed = (tm_pair_t *) tk_lua_checkuserdata(L, -4, NULL);
+  uint64_t n_neg_seed = (uint64_t) luaL_checkinteger(L, -1) / 2;
+  tm_pair_t *neg = tk_malloc(L, n_neg_seed * sizeof(tm_pair_t));
+  uint64_t n_neg = n_neg_seed;
+  memcpy(neg, neg_seed, n_neg_seed * sizeof(tm_pair_t));
 
+  lua_getfield(L, 1, "sentences");
+  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
+  int64_t *set_bits = (int64_t *) tk_lua_checkuserdata(L, -4, NULL);
+  uint64_t n_set_bits = (uint64_t) luaL_checkinteger(L, -1);
+  uint64_t n_features = tk_lua_fcheckunsigned(L, 1, "codeify", "n_features");
+  uint64_t n_hidden = tk_lua_fcheckunsigned(L, 1, "codeify", "n_hidden");
+  uint64_t n_sentences = tk_lua_fcheckunsigned(L, 1, "codeify", "n_sentences");
+  uint64_t n_hops_pos = tk_lua_fcheckunsigned(L, 1, "codeify", "n_hops_pos");
+  uint64_t n_hops_neg = tk_lua_fcheckunsigned(L, 1, "codeify", "n_hops_neg");
+  uint64_t n_grow_pos = tk_lua_fcheckunsigned(L, 1, "codeify", "n_grow_pos");
+  uint64_t n_grow_neg = tk_lua_fcheckunsigned(L, 1, "codeify", "n_grow_neg");
+  uint64_t knn = tk_lua_fcheckunsigned(L, 1, "codeify", "knn");
+  uint64_t lbfgs_iterations = tk_lua_fcheckunsigned(L, 1, "codeify", "lbfgs");
+
+  if (BITS_MOD(n_hidden) != 0)
+    tk_lua_verror(L, 3, "codify", "n_hidden", "must be a multiple of " STR(BITS));
+
+  int i_each = -1;
+  if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
+    lua_getfield(L, 1, "each");
+    i_each = tk_lua_absindex(L, -1);
+  }
+
+  tm_pairs_t *pairs = kh_init(pairs);
+  tm_pairs_init(L, pairs, pos, neg, &n_pos, &n_neg);
+
+  tm_dsu_t dsu;
+  tm_dsu_init(L, &dsu, pairs, n_sentences);
+
+  roaring64_bitmap_t **sentences = tk_malloc(L, n_sentences * sizeof(roaring64_bitmap_t *));
+  tm_sentences_init(sentences, set_bits, n_set_bits, n_features, n_sentences);
+
+  roaring64_bitmap_t **index = tk_malloc(L, n_features * sizeof(roaring64_bitmap_t *));
+  tm_index_init(L, index, set_bits, n_set_bits, n_features);
+
+  tm_neighbors_t *neighbors = tk_malloc(L, n_sentences * sizeof(tm_neighbors_t));
+  tm_neighbors_init(L, &dsu, neighbors, index, sentences, n_sentences, n_features, knn);
+
+  unsigned int global_iter = 0;
+
+  // Densify graph
+  tm_add_backbone(L, &dsu, pairs, neighbors, sentences, &n_pos, &n_neg, n_sentences, n_features, i_each, &global_iter);
+
+  // Cleanup
+  tm_dsu_free(&dsu);
+  for (uint64_t f = 0; f < n_features; f ++)
+    roaring64_bitmap_free(index[f]);
+  free(index);
+
+  // Flush to pair lists
+  pos = tk_realloc(L, pos, n_pos * sizeof(tm_pair_t));
+  neg = tk_realloc(L, neg, n_neg * sizeof(tm_pair_t));
+  tm_render_pairs(L, pairs, pos, neg, &n_pos, &n_neg);
+
+  // Spectral hashing
+  double *z = tk_malloc(L, (size_t) n_sentences * (size_t) n_hidden * sizeof(double));
+  tm_run_spectral(L, z, pos, neg, n_pos, n_neg, n_sentences, n_hidden, i_each, &global_iter);
+
+  // Setup adjacency list
+  roaring64_bitmap_t **adj_pos = tk_malloc(L, n_sentences * sizeof(roaring64_bitmap_t *));
+  roaring64_bitmap_t **adj_neg = tk_malloc(L, n_sentences * sizeof(roaring64_bitmap_t *));
+  tm_adj_init(pairs, adj_pos, adj_neg, n_sentences);
+
+  // Densify graph, adding transatives
+  tm_add_transatives(L, pairs, adj_pos, adj_neg, sentences, &n_pos, &n_neg, n_sentences, n_hops_pos, n_hops_neg, n_grow_pos, n_grow_neg, i_each, &global_iter);
+
+  // Cleanup
+  for (int64_t s = 0; s < (int64_t) n_sentences; s ++)
+    roaring64_bitmap_free(sentences[s]);
+  free(sentences);
+
+  // Flush to pair lists
+  pos = tk_realloc(L, pos, n_pos * sizeof(tm_pair_t));
+  neg = tk_realloc(L, neg, n_neg * sizeof(tm_pair_t));
+  tm_render_pairs(L, pairs, pos, neg, &n_pos, &n_neg);
+
+  // Done with pair lists
+  kh_destroy(pairs, pairs);
+
+  // L-BFGS optimization using KSH loss
+  tm_run_lbfgs(L, z, pos, neg, n_pos, n_neg, n_sentences, n_hidden, i_each, &global_iter, lbfgs_iterations);
+
+  // TCH discretization
+  tk_bits_t *codes = tk_malloc(L, (size_t) n_sentences * BITS_DIV(n_hidden) * sizeof(tk_bits_t));
+  memset(codes, 0, (size_t) n_sentences * BITS_DIV(n_hidden) * sizeof(tk_bits_t));
+  tm_run_tch(L, z, codes, adj_pos, adj_neg, n_sentences, n_hidden, i_each, &global_iter);
+
+  // Copy codes to Lualand
   lua_pushlstring(L, (char *) codes, n_sentences * BITS_DIV(n_hidden) * sizeof(tk_bits_t));
+
+  // Cleanup
+  for (uint32_t u = 0; u < n_sentences; u++) {
+    roaring64_bitmap_free(adj_pos[u]);
+    roaring64_bitmap_free(adj_neg[u]);
+  }
+  free(adj_pos);
+  free(adj_neg);
+  free(z);
+  free(pos);
+  free(neg);
   free(codes);
   return 1;
 }
