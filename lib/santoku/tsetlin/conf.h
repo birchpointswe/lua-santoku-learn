@@ -21,6 +21,8 @@
 
 #define _STR(x) #x
 #define STR(x) _STR(x)
+#define MAX(a,b) ((a) > (b) ? (a) : (b))
+#define MIN(a,b) ((a) < (b) ? (a) : (b))
 
 typedef uint64_t tk_bits_t;
 #define BITS 64
@@ -114,12 +116,14 @@ typedef struct { uint64_t sim; bool label; } tm_dl_t;
 #define tm_dl_lt(a, b) ((a).sim < (b).sim)
 KSORT_INIT(dl, tm_dl_t, tm_dl_lt)
 KSORT_INIT(u64, uint64_t, ks_lt_generic)
+KSORT_INIT(i64, int64_t, ks_lt_generic)
 KSORT_INIT(f64, double, ks_lt_generic)
 typedef struct { int64_t u; tm_neighbor_t v; } tm_candidate_t;
-#define tm_candidate_lt(a, b) ((a).v.d > (b).v.d)
+#define tm_candidate_lt(a, b) ((a).v.d < (b).v.d)
+#define tm_candidate_gt(a, b) ((a).v.d > (b).v.d)
 #define tm_candidate(u, v) ((tm_candidate_t) { (u), (v) })
 KSORT_INIT(candidates_asc, tm_candidate_t, tm_candidate_lt)
-KSORT_INIT(candidates_desc, tm_candidate_t, tm_candidate_lt)
+KSORT_INIT(candidates_desc, tm_candidate_t, tm_candidate_gt)
 typedef kvec_t(tm_candidate_t) tm_candidates_t;
 #pragma GCC diagnostic pop
 
@@ -152,4 +156,12 @@ static inline double fast_index (unsigned int n)
 static inline bool fast_chance (double p)
 {
   return fast_drand() <= p;
+}
+
+static inline int fast_norm (double mean, double variance)
+{
+  double u1 = (double) (fast_rand() + 1) / ((double) UINT32_MAX + 1);
+  double u2 = (double) fast_rand() / UINT32_MAX;
+  double n1 = sqrt(-2 * log(u1)) * sin(8 * atan(1) * u2);
+  return (int) round(mean + sqrt(variance) * n1);
 }

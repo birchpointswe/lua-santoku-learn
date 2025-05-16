@@ -1,0 +1,11 @@
+ifndef <% return var("NAME_OPENBLAS") %>
+<% return var("LIBNAME_OPENBLAS") %> = openblas
+endif
+
+results.mk: Makefile
+	truncate -s0 results.mk
+	echo "LIB_CFLAGS += $(shell pkg-config --cflags $(<% return var("PC_NAME_OPENBLAS") %>))" >> results.mk
+	echo "LIB_LDFLAGS += $(shell pkg-config --libs $(<% return var("PC_NAME_OPENBLAS") %>))" >> results.mk
+	echo "LIB_LDFLAGS += -lm" >> results.mk
+	echo "LIB_LDFLAGS += -llapack" >> results.mk
+	echo "LIB_LDFLAGS += -larpack" >> results.mk
