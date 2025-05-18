@@ -1,7 +1,6 @@
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local test = require("santoku.test")
 local utc = require("santoku.utc")
-local json = require("cjson")
 local tm = require("santoku.tsetlin")
 local tokenizer = require("santoku.tsetlin.tokenizer")
 local codes = require("santoku.tsetlin.codebook")
@@ -15,25 +14,19 @@ local num = require("santoku.num")
 local err = require("santoku.error")
 
 local TRAIN_TEST_RATIO = 0.8
-local MAX_EPOCHS = 0
+local MAX_EPOCHS = 100
 local MAX_RECORDS = 1000
 local HIDDEN = 64
-local CLAUSES = 512
-local TARGET = 0.25
-local STATE = 8
-local BOOST = true
-
-local SPECTRAL = true
-local TCH = true
-local COMPRESS = true
+local CLAUSES = 2048
+local TARGET = 0.5
+local SPECIFICITY = 60
 local HOPS = 0
 local GROW_POS = 0
 local GROW_NEG = 1
-local KNN = 32
 
 local TOP_CHI2 = 1024
 local TOKENIZER_CONFIG = {
-  max_df = 0.80,
+  max_df = 0.95,
   min_df = 0.001,
   max_len = 20,
   min_len = 1,
@@ -158,7 +151,7 @@ test("tsetlin", function ()
   local tokenizer = tokenizer.create(TOKENIZER_CONFIG)
 
   print("Reading data")
-  local dataset = read_data("test/res/snli.train.txt", MAX_RECORDS)
+  local dataset = read_data("test/res/snli.10k.txt", MAX_RECORDS)
 
   print("Splitting")
   local train, test = split_dataset(dataset, TRAIN_TEST_RATIO)
@@ -180,7 +173,7 @@ test("tsetlin", function ()
 
   print("Generating codebook\n")
   local stopwatch = utc.stopwatch()
-  train.codes0, train.n_final = codes.codeify({
+  train.codes0 = codes.codeify({
     pos = train.pos,
     neg = train.neg,
     sentences = train.sentences,
@@ -190,10 +183,6 @@ test("tsetlin", function ()
     n_hops = HOPS,
     n_grow_pos = GROW_POS,
     n_grow_neg = GROW_NEG,
-    knn = KNN,
-    tch = TCH,
-    compress = COMPRESS,
-    spectral = SPECTRAL,
     each = function (e, t, s, b, n, dt)
       local d, dd = stopwatch()
       if t == "densify" then
@@ -209,14 +198,14 @@ test("tsetlin", function ()
   })
 
   train.similarity0 = eval.encoding_similarity(
-    train.codes0, train.pos, train.neg, train.n_sentences, train.n_final)
+    train.codes0, train.pos, train.neg, train.n_sentences, HIDDEN)
   str.printi("AUC: %.2f#(auc) | F1: %.2f#(f1) | Precision: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", -- luacheck: ignore
     train.similarity0)
-  train.entropy0 = eval.codebook_stats(train.codes0, train.n_sentences, train.n_final)
+  train.entropy0 = eval.codebook_stats(train.codes0, train.n_sentences, HIDDEN)
   str.printi("Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)\n",
     train.entropy0)
 
-  local top_v = imtx.top_chi2(train.sentences, train.codes0, train.n_sentences, dataset.n_features, train.n_final, TOP_CHI2)
+  local top_v = imtx.top_chi2(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_CHI2)
   local n_top_v = imtx.columns(top_v)
   print("After top Chi2 filter", n_top_v)
 
@@ -239,18 +228,19 @@ test("tsetlin", function ()
 
   print()
   print("Input Features", n_top_v * 2)
-  print("Encoded Features", train.n_final)
+  print("Encoded Features", HIDDEN)
   print("Train Sentences", train.n_sentences)
   print("Test Sentences", test.n_sentences)
 
   print("Creating encoder")
   local t = tm.encoder({
     visible = n_top_v,
-    hidden = train.n_final,
+    hidden = HIDDEN,
     clauses = CLAUSES,
     state = STATE,
     target = TARGET,
     boost = BOOST,
+    specificity = SPECIFICITY,
     threads = THREADS,
   })
 
@@ -266,24 +256,14 @@ test("tsetlin", function ()
         train.codes1 = t.predict(train.sentences, train.n_sentences)
         test.codes1 = t.predict(test.sentences, test.n_sentences)
         train.accuracy0 = eval.encoding_accuracy(
-          train.codes1, train.codes0, train.n_sentences, train.n_final)
-        -- for i = 1, #train.accuracy0.classes do
-        --   str.printf("Bit %d:   F1: %.2f  Precision: %.2f  Recall: %.2f\n", i, train.accuracy0.classes[i].f1, train.accuracy0.classes[i].precision, train.accuracy0.classes[i].recall)
-        -- end
+          train.codes1, train.codes0, train.n_sentences, HIDDEN)
         train.similarity1 = eval.encoding_similarity(
-          train.codes1, train.pos, train.neg, train.n_sentences, train.n_final)
+          train.codes1, train.pos, train.neg, train.n_sentences, HIDDEN)
         test.similarity1 = eval.encoding_similarity(
-          test.codes1, test.pos, test.neg, test.n_sentences, train.n_final)
+          test.codes1, test.pos, test.neg, test.n_sentences, HIDDEN)
         print()
         str.printf("Epoch %3d  Time %3.2f %3.2f\n",
           epoch, stopwatch())
-        -- print()
-        -- for i = 1, train.n_final do
-        --   str.printf("Bit %2d  F1 %.2f  ", i, train.accuracy0.classes[i].f1)
-        --   -- if i % 4 == 0 then
-        --     str.printf("\n")
-        --   -- end
-        -- end
         print()
         str.printi("  Train (acc) |           | F1: %.2f#(f1) | Prec: %.2f#(precision) | Recall: %.2f#(recall) | F1 Spread: %.2f#(f1_min) %.2f#(f1_max) %.2f#(f1_std)", train.accuracy0) -- luacheck: ignore
         str.printi("  Codes (sim) | AUC: %.2f#(auc) | F1: %.2f#(f1) | Prec: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", train.similarity0) -- luacheck: ignore
@@ -302,8 +282,21 @@ test("tsetlin", function ()
   t.persist("model.bin")
   print("Restoring")
   t = tm.load("model.bin")
-  -- local test_score = t.evaluate({ pairs = test_pairs, labels = test_labels, samples = n_test, margin = train_stats.margin }) -- luacheck: ignore
-  -- local train_score = t.evaluate({ pairs = train_pairs, labels = train_labels, samples = n_train, margin = train_stats.margin }) -- luacheck: ignore
-  -- str.printf("Evaluate Test %4.2f  Train %4.2f\n", test_score, train_score)
+
+  do
+    train.codes1 = t.predict(train.sentences, train.n_sentences)
+    test.codes1 = t.predict(test.sentences, test.n_sentences)
+    train.accuracy0 = eval.encoding_accuracy(
+      train.codes1, train.codes0, train.n_sentences, HIDDEN)
+    train.similarity1 = eval.encoding_similarity(
+      train.codes1, train.pos, train.neg, train.n_sentences, HIDDEN)
+    test.similarity1 = eval.encoding_similarity(
+      test.codes1, test.pos, test.neg, test.n_sentences, HIDDEN)
+    print()
+    str.printi("  Train (acc) |           | F1: %.2f#(f1) | Prec: %.2f#(precision) | Recall: %.2f#(recall) | F1 Spread: %.2f#(f1_min) %.2f#(f1_max) %.2f#(f1_std)", train.accuracy0) -- luacheck: ignore
+    str.printi("  Codes (sim) | AUC: %.2f#(auc) | F1: %.2f#(f1) | Prec: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", train.similarity0) -- luacheck: ignore
+    str.printi("  Train (sim) | AUC: %.2f#(auc) | F1: %.2f#(f1) | Prec: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", train.similarity1) -- luacheck: ignore
+    str.printi("  Test (sim)  | AUC: %.2f#(auc) | F1: %.2f#(f1) | Prec: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", test.similarity1) -- luacheck: ignore
+  end
 
 end)
