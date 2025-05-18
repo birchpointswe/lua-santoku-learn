@@ -15,30 +15,25 @@ local num = require("santoku.num")
 local err = require("santoku.error")
 
 local TRAIN_TEST_RATIO = 0.8
-local MAX_EPOCHS = 200
-local MAX_RECORDS = 2000
--- local MAX_RECORDS = 16000
+local MAX_EPOCHS = 0
+local MAX_RECORDS = 1000
 local HIDDEN = 64
 local CLAUSES = 512
--- local CLAUSES = 4096
 local TARGET = 0.25
 local STATE = 8
 local BOOST = true
+
 local SPECTRAL = true
 local TCH = true
+local COMPRESS = true
 local HOPS = 0
 local GROW_POS = 0
 local GROW_NEG = 1
 local KNN = 32
--- local TOP_CHI2 = nil
+
 local TOP_CHI2 = 1024
--- local TOP_CHI2 = 4096
--- local TOP_MI = 1024
-local TOP_MI = nil
-local TOP_STRATEGY = "round-robin"
--- local TOP_STRATEGY = "mi-proportional"
 local TOKENIZER_CONFIG = {
-  max_df = 0.95,
+  max_df = 0.80,
   min_df = 0.001,
   max_len = 20,
   min_len = 1,
@@ -60,13 +55,6 @@ local function read_data (fp, max)
   local pos = {}
   local neg = {}
   local ns = 0
-  -- for line in it.drop(1, fs.lines(fp)) do
-  --   local data = json.decode(line)
-  --   local label = data.label
-  --   local a = data.text1
-  --   local b = data.text1
-  --   err.assert(label and a and b, "unable to parse line", line)
-  --   label = label == 1 and 1 or label == 0 and 0 or nil
   for line in it.drop(1, fs.lines(fp)) do
     local chunks = str.gmatch(line, "[^\t]+")
     local label = chunks()
@@ -128,20 +116,12 @@ local function split_pairs (dataset, split, prop, start, size)
       na = split.n_sentences
       split.raw_sentences[na] = sa
       split.raw_sentences[sa] = na
-      -- -- TODO: implement imtx.extend_add(a, b, v) which copies b to a while
-      -- -- adding v to each of the copied values
-      -- local s0 = imtx.create(dataset.sentences[ia])
-      -- imtx.add(s0, (na - 1) * dataset.n_features)
-      -- imtx.extend(split.sentences, s0)
     end
     if not nb then
       split.n_sentences = split.n_sentences + 1
       nb = split.n_sentences
       split.raw_sentences[nb] = sb
       split.raw_sentences[sb] = nb
-      -- local s0 = imtx.create(dataset.sentences[ib])
-      -- imtx.add(s0, (nb - 1) * dataset.n_features)
-      -- imtx.extend(split.sentences, s0)
     end
     arr.push(pairs_to, na - 1, nb - 1)
   end
@@ -178,7 +158,6 @@ test("tsetlin", function ()
   local tokenizer = tokenizer.create(TOKENIZER_CONFIG)
 
   print("Reading data")
-  -- local dataset = read_data("test/res/qqp.train.jsonl", MAX_RECORDS)
   local dataset = read_data("test/res/snli.train.txt", MAX_RECORDS)
 
   print("Splitting")
@@ -201,7 +180,7 @@ test("tsetlin", function ()
 
   print("Generating codebook\n")
   local stopwatch = utc.stopwatch()
-  train.codes0 = codes.codeify({
+  train.codes0, train.n_final = codes.codeify({
     pos = train.pos,
     neg = train.neg,
     sentences = train.sentences,
@@ -213,49 +192,33 @@ test("tsetlin", function ()
     n_grow_neg = GROW_NEG,
     knn = KNN,
     tch = TCH,
+    compress = COMPRESS,
     spectral = SPECTRAL,
-    learnability = LEARNABILITY,
-    oversample = OVERSAMPLE,
     each = function (e, t, s, b, n, dt)
       local d, dd = stopwatch()
       if t == "densify" then
         str.printf("Epoch: %3d  Time: %6.2f %6.2f  Densify: %-9s  Components: %-6d  Positives: %3d  Negatives: %3d\n", e, d, dd, dt, s, b, n) -- luacheck: ignore
       elseif t == "spectral" then
-        str.printf("Epoch: %3d  Time: %6.2f %6.2f  Spectral Steps: %3d\n", e, d, dd, s) -- luacheck: ignore
+        str.printf("Epoch: %3d  Time: %6.2f %6.2f  Spectral Steps: %3d\n", e, d, dd, s)
       elseif t == "tch" then
-        str.printf("Epoch: %3d  Time: %6.2f %6.2f  TCH Steps: %3d\n", e, d, dd, s) -- luacheck: ignore
+        str.printf("Epoch: %3d  Time: %6.2f %6.2f  TCH Steps: %3d\n", e, d, dd, s)
       elseif t == "downsample" then
-        str.printf("Epoch: %3d  Time: %6.2f %6.2f  Downsample AUC Min: %6.4f Max: %6.4f\n", e, d, dd, s, b) -- luacheck: ignore
+        str.printf("Epoch: %3d  Time: %6.2f %6.2f  Downsample AUC Min: %6.4f Max: %6.4f\n", e, d, dd, s, b)
       end
     end
   })
 
   train.similarity0 = eval.encoding_similarity(
-    train.codes0, train.pos, train.neg, train.n_sentences, HIDDEN)
+    train.codes0, train.pos, train.neg, train.n_sentences, train.n_final)
   str.printi("AUC: %.2f#(auc) | F1: %.2f#(f1) | Precision: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", -- luacheck: ignore
     train.similarity0)
-  train.entropy0 = eval.codebook_stats(train.codes0, train.n_sentences, HIDDEN)
+  train.entropy0 = eval.codebook_stats(train.codes0, train.n_sentences, train.n_final)
   str.printi("Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)\n",
     train.entropy0)
 
-  local top_v, n_top_v
-
-  if TOP_CHI2 then
-    -- chi2 filtering per-bit, round-robin union of per-bit top-k
-    top_v = imtx.top_chi2(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_CHI2, TOP_STRATEGY) -- luacheck: ignore
-    n_top_v = imtx.columns(top_v)
-    print("After top Chi2 filter", n_top_v)
-  elseif TOP_MI then
-    -- mi filtering per-bit, round-robin union of per-bit top-k
-    top_v = imtx.top_mi(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_MI, TOP_STRATEGY) -- luacheck: ignore
-    n_top_v = imtx.columns(top_v)
-    print("After top MI filter", n_top_v)
-  else
-    top_v = imtx.create(1, dataset.n_features)
-    n_top_v = dataset.n_features
-    imtx.fill_indices(top_v)
-    print("Using unfiltered features")
-  end
+  local top_v = imtx.top_chi2(train.sentences, train.codes0, train.n_sentences, dataset.n_features, train.n_final, TOP_CHI2)
+  local n_top_v = imtx.columns(top_v)
+  print("After top Chi2 filter", n_top_v)
 
   -- Show top words
   local words = tokenizer.index()
@@ -276,14 +239,14 @@ test("tsetlin", function ()
 
   print()
   print("Input Features", n_top_v * 2)
-  print("Encoded Features", HIDDEN)
+  print("Encoded Features", train.n_final)
   print("Train Sentences", train.n_sentences)
   print("Test Sentences", test.n_sentences)
 
   print("Creating encoder")
   local t = tm.encoder({
     visible = n_top_v,
-    hidden = HIDDEN,
+    hidden = train.n_final,
     clauses = CLAUSES,
     state = STATE,
     target = TARGET,
@@ -303,19 +266,19 @@ test("tsetlin", function ()
         train.codes1 = t.predict(train.sentences, train.n_sentences)
         test.codes1 = t.predict(test.sentences, test.n_sentences)
         train.accuracy0 = eval.encoding_accuracy(
-          train.codes1, train.codes0, train.n_sentences, HIDDEN)
+          train.codes1, train.codes0, train.n_sentences, train.n_final)
         -- for i = 1, #train.accuracy0.classes do
         --   str.printf("Bit %d:   F1: %.2f  Precision: %.2f  Recall: %.2f\n", i, train.accuracy0.classes[i].f1, train.accuracy0.classes[i].precision, train.accuracy0.classes[i].recall)
         -- end
         train.similarity1 = eval.encoding_similarity(
-          train.codes1, train.pos, train.neg, train.n_sentences, HIDDEN)
+          train.codes1, train.pos, train.neg, train.n_sentences, train.n_final)
         test.similarity1 = eval.encoding_similarity(
-          test.codes1, test.pos, test.neg, test.n_sentences, HIDDEN)
+          test.codes1, test.pos, test.neg, test.n_sentences, train.n_final)
         print()
         str.printf("Epoch %3d  Time %3.2f %3.2f\n",
           epoch, stopwatch())
         -- print()
-        -- for i = 1, HIDDEN do
+        -- for i = 1, train.n_final do
         --   str.printf("Bit %2d  F1 %.2f  ", i, train.accuracy0.classes[i].f1)
         --   -- if i % 4 == 0 then
         --     str.printf("\n")
