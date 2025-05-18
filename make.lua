@@ -22,7 +22,7 @@ local env = {
     dependencies = {
       "luacov >= 0.15.0-1",
       "santoku-bitmap >= 0.0.55-1",
-      "santoku-matrix >= 0.0.31-1",
+      "santoku-matrix >= 0.0.32-1",
       "santoku-fs >= 0.0.34-1",
       "lua-cjson >= 2.1.0.10-1",
     }

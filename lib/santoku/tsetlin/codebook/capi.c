@@ -2,8 +2,13 @@
 #include "lauxlib.h"
 #include "../conf.h"
 #include <arpack/arpack.h>
+#include <float.h>
 #include "roaring.h"
 #include "roaring.c"
+
+#include "khash.h"
+KHASH_SET_INIT_INT64(i64)
+typedef khash_t(i64) i64_hash_t;
 
 static inline void tk_lua_callmod (
   lua_State *L,
@@ -933,6 +938,114 @@ static inline void tm_run_tch_thresholding (
   free(col);
 }
 
+static inline void tm_compress_codes (
+  tk_bits_t *codes,
+  tk_bits_t *selected_mask,
+  uint64_t n_sentences,
+  uint64_t n_hidden,
+  uint64_t n_final
+) {
+  for (uint64_t i = 0; i < n_sentences; i ++) {
+    uint64_t write = 0;
+    for (uint64_t j = 0; j < n_hidden; j ++) {
+      if (!(selected_mask[BITS_DIV(j)] & ((tk_bits_t) 1 << BITS_MOD(j))))
+        continue;
+      uint64_t src_idx = i * BITS_DIV(n_hidden) + BITS_DIV(j);
+      uint64_t dst_idx = i * BITS_DIV(n_final) + BITS_DIV(write);
+      tk_bits_t bit = ((tk_bits_t) 1 << BITS_MOD(j));
+      tk_bits_t dst_bit = ((tk_bits_t) 1 << BITS_MOD(write));
+      if (codes[src_idx] & bit)
+        codes[dst_idx] |= dst_bit;
+      else
+        codes[dst_idx] &= ~dst_bit;
+      write ++;
+    }
+  }
+}
+
+static inline void tm_run_downsampling (
+  lua_State *L,
+  tk_bits_t *codes,
+  uint64_t n_sentences,
+  uint64_t n_features,
+  uint64_t n_hidden,
+  uint64_t *n_finalp,
+  int i_each,
+  unsigned int *global_iter
+) {
+  // Mask for masked auc calculation
+  tk_bits_t *selected_mask = tk_malloc(L, BITS_DIV(n_hidden) * sizeof(tk_bits_t));
+  memset(selected_mask, 0, BITS_DIV(n_hidden) * sizeof(tk_bits_t));
+
+  // Greedy selection
+  double last_auc = 0.0;
+  double *auc_gain = tk_malloc(L, n_hidden * sizeof(double));
+  uint64_t n_final = 0;
+  for (uint64_t i = 0; i < n_hidden; i ++) {
+
+    // Find best scoring bit
+    memset(auc_gain, 0, n_hidden * sizeof(double));
+    for (uint64_t b = 0; b < n_hidden; b ++) {
+      if ((selected_mask[BITS_DIV(b)] & ((tk_bits_t) 1 << BITS_MOD(b))) > 0)
+        continue;
+
+      // Update mask & call evaluator
+      selected_mask[BITS_DIV(b)] |= ((tk_bits_t) 1 << BITS_MOD(b));
+      lua_pushlightuserdata(L, codes);
+      lua_getfield(L, 1, "pos");
+      lua_getfield(L, 1, "neg");
+      lua_pushinteger(L, (int64_t) n_sentences);
+      lua_pushinteger(L, (int64_t) n_hidden);
+      lua_pushlightuserdata(L, selected_mask);
+      tk_lua_callmod(L, 6, 1, "santoku.tsetlin.evaluator", "auc");
+      double test_auc = luaL_checknumber(L, -1);
+      lua_pop(L, 1);
+
+      // Update scores & reset mask
+      auc_gain[b] = test_auc - last_auc;
+      selected_mask[BITS_DIV(b)] &= ~((tk_bits_t) 1 << BITS_MOD(b));
+    }
+
+    // Find the best bit
+    int64_t best_bit = -1;
+    double best_gain = 0.0;
+    for (uint64_t b = 0; b < n_hidden; b ++) {
+      if ((selected_mask[BITS_DIV(b)] & ((tk_bits_t) 1 << BITS_MOD(b))) > 0)
+        continue;
+      if (best_bit != -1 && auc_gain[b] <= best_gain)
+        continue;
+      best_bit = (int64_t) b;
+      best_gain = auc_gain[b];
+    }
+
+    if (best_gain <= 0.0)
+      break;
+
+    // Update mask & last_auc
+    selected_mask[BITS_DIV(best_bit)] |= ((tk_bits_t) 1 << BITS_MOD(best_bit));
+    last_auc = last_auc + best_gain;
+  }
+
+  // Log result
+  (*global_iter) ++;
+  if (i_each >= 0) {
+    lua_pushvalue(L, i_each);
+    lua_pushinteger(L, *global_iter);
+    lua_pushstring(L, "compress");
+    lua_pushnumber(L, last_auc);
+    lua_pushnumber(L, n_final);
+    lua_call(L, 4, 0);
+  }
+
+  // Filter codes in-place
+  tm_compress_codes(codes, selected_mask, n_sentences, n_hidden, n_final);
+  *n_finalp = n_final;
+
+  // Cleanup
+  free(selected_mask);
+  free(auc_gain);
+}
+
 static inline void tm_run_spectral (
   lua_State *L,
   tm_dsu_t *dsu,
@@ -1092,6 +1205,7 @@ static inline int tm_codeify (lua_State *L)
 
   bool do_spectral = tk_lua_foptboolean(L, 1, true, "codeify", "spectral");
   bool do_tch = tk_lua_foptboolean(L, 1, true, "codeify", "tch");
+  bool do_downsample = tk_lua_foptboolean(L, 1, true, "codeify", "compress");
 
   if (BITS_MOD(n_hidden) != 0)
     tk_lua_verror(L, 3, "codify", "n_hidden", "must be a multiple of " STR(BITS));
@@ -1161,11 +1275,17 @@ static inline int tm_codeify (lua_State *L)
   else
     tm_run_median_thresholding(L, z, codes, n_sentences, n_hidden);
 
+  // Prune redundant bits
+  uint64_t n_final = n_hidden;
+  if (do_downsample)
+    tm_run_downsampling(L, codes, n_sentences, n_features, n_hidden, &n_final, i_each, &global_iter);
+
   // Copy codes to Lualand
-  lua_pushlstring(L, (char *) codes, n_sentences * BITS_DIV(n_hidden) * sizeof(tk_bits_t));
+  lua_pushlstring(L, (char *) codes, n_sentences * BITS_DIV(n_final) * sizeof(tk_bits_t));
+  lua_pushinteger(L, (int64_t) n_final);
 
   // Cleanup
-  for (uint64_t u = 0; u < n_sentences; u++) {
+  for (uint64_t u = 0; u < n_sentences; u ++) {
     roaring64_bitmap_free(adj_pos[u]);
     roaring64_bitmap_free(adj_neg[u]);
   }
@@ -1173,7 +1293,7 @@ static inline int tm_codeify (lua_State *L)
   free(adj_neg);
   free(z);
   free(codes);
-  return 1;
+  return 2;
 }
 
 static luaL_Reg tm_codebook_fns[] =
