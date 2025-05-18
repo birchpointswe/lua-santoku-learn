@@ -85,6 +85,17 @@ static inline const char *tk_lua_checkstring (lua_State *L, int i, char *name)
   return luaL_checkstring(L, i);
 }
 
+static inline const void *tk_lua_checkustring (lua_State *L, int i, char *name)
+{
+  if (lua_type(L, i) == LUA_TSTRING)
+    return (void *) luaL_checkstring(L, i);
+  else if (lua_type(L, i) == LUA_TLIGHTUSERDATA)
+    return (void *) lua_touserdata(L, i);
+  else
+    tk_lua_verror(L, 3, name, "value is not a string or light userdata");
+  return NULL;
+}
+
 static inline const char *tk_lua_checklstring (lua_State *L, int i, size_t *lenp, char *name)
 {
   if (lua_type(L, i) != LUA_TSTRING)
@@ -120,17 +131,10 @@ static inline void tk_lua_register (lua_State *L, luaL_Reg *regs, int nup)
 
 static inline int tm_class_accuracy (lua_State *L)
 {
-  size_t predicted_len, expected_len;
-  unsigned int *predicted = (unsigned int *) tk_lua_checklstring(L, 1, &predicted_len, "predicted");
-  unsigned int *expected = (unsigned int *) tk_lua_checklstring(L, 2, &expected_len, "expected");
+  unsigned int *predicted = (unsigned int *) tk_lua_checkustring(L, 1, "predicted");
+  unsigned int *expected = (unsigned int *) tk_lua_checkustring(L, 2, "expected");
   unsigned int n_classes = tk_lua_checkunsigned(L, 3, "n_classes");
   unsigned int n_samples = tk_lua_checkunsigned(L, 4, "n_samples");
-
-  if (predicted_len != n_samples * sizeof(unsigned int))
-    tk_lua_verror(L, 3, "class_accuracy", "predicted", "invalid data length");
-
-  if (expected_len != predicted_len)
-    tk_lua_verror(L, 3, "class_accuracy", "expected", "invalid data length");
 
   if (n_classes == 0)
     tk_lua_verror(L, 3, "class_accuracy", "n_classes", "must be > 0");
@@ -196,13 +200,10 @@ static inline int tm_class_accuracy (lua_State *L)
 static inline int tm_codebook_stats (lua_State *L)
 {
   lua_settop(L, 3);
-  size_t codes_len;
-  tk_bits_t *codes = (tk_bits_t *) tk_lua_checklstring(L, 1, &codes_len, "expected");
+  tk_bits_t *codes = (tk_bits_t *) tk_lua_checkustring(L, 1, "expected");
   unsigned int n_codes = tk_lua_checkunsigned(L, 2, "n_codes");
   unsigned int n_hidden = tk_lua_checkunsigned(L, 3, "n_hidden");
   uint64_t chunks = BITS_DIV(n_hidden);
-  if (codes_len != n_codes * chunks * sizeof(tk_bits_t))
-    tk_lua_verror(L, 3, "codebook_stats", "codes", "invalid data length");
   uint64_t *bit_counts = tk_malloc(L, n_hidden * sizeof(uint64_t));
   memset(bit_counts, 0, n_hidden * sizeof(uint64_t));
   // Count number of 1s per bit across all codes
@@ -259,18 +260,12 @@ static inline int tm_codebook_stats (lua_State *L)
 static inline int tm_encoding_accuracy (lua_State *L)
 {
   lua_settop(L, 4);
-  size_t predicted_len, expected_len;
-  tk_bits_t *codes_predicted = (tk_bits_t *) tk_lua_checklstring(L, 1, &predicted_len, "predicted");
-  tk_bits_t *codes_expected = (tk_bits_t *) tk_lua_checklstring(L, 2, &expected_len, "expected");
+  tk_bits_t *codes_predicted = (tk_bits_t *) tk_lua_checkustring(L, 1, "predicted");
+  tk_bits_t *codes_expected = (tk_bits_t *) tk_lua_checkustring(L, 2, "expected");
   unsigned int n_codes = tk_lua_checkunsigned(L, 3, "n_codes");
   unsigned int n_hidden = tk_lua_checkunsigned(L, 4, "n_hidden");
 
   uint64_t chunks = BITS_DIV(n_hidden);
-  if (predicted_len != n_codes * chunks * sizeof(tk_bits_t))
-    tk_lua_verror(L, 1, "encoding_accuracy", "predicted", "invalid data length");
-
-  if (expected_len != n_codes * chunks * sizeof(tk_bits_t))
-    tk_lua_verror(L, 2, "encoding_accuracy", "expected", "invalid data length");
 
   uint64_t TP[n_hidden], FP[n_hidden], FN[n_hidden];
   memset(TP, 0, sizeof(TP));
@@ -345,52 +340,52 @@ static inline int tm_encoding_accuracy (lua_State *L)
   return 1;
 }
 
-// static inline void tm_print_hamming_histogram (
-//   const tk_bits_t *codes,
-//   const tm_pair_t *pos,
-//   const tm_pair_t *neg,
-//   uint64_t n_pos,
-//   uint64_t n_neg,
-//   uint64_t n_sentences,
-//   uint64_t n_hidden
-// ) {
-//   const uint64_t chunks = BITS_DIV(n_hidden);
-//   const uint64_t max_dist = n_hidden + 1;
-//   uint64_t *hist_pos = calloc(max_dist, sizeof(uint64_t));
-//   uint64_t *hist_neg = calloc(max_dist, sizeof(uint64_t));
-//   for (uint64_t k = 0; k < n_pos; k ++) {
-//     int64_t u = pos[k].u, v = pos[k].v;
-//     uint64_t d = hamming(codes + u * chunks, codes + v * chunks, chunks);
-//     if (d <= n_hidden) hist_pos[d] ++;
-//   }
-//   for (uint64_t k = 0; k < n_neg; k ++) {
-//     int64_t u = neg[k].u, v = neg[k].v;
-//     uint64_t d = hamming(codes + u * chunks, codes + v * chunks, chunks);
-//     if (d <= n_hidden) hist_neg[d] ++;
-//   }
-//   printf("Hamming Distance Histogram (Positive vs. Negative):\n");
-//   for (uint64_t d = 0; d <= n_hidden; d ++)
-//     if (hist_pos[d] || hist_neg[d])
-//       printf("Distance %3lu: Pos %6lu  |  Neg %6lu\n", d, hist_pos[d], hist_neg[d]);
-//   free(hist_pos);
-//   free(hist_neg);
-//   for (uint64_t i = 0; i < ((n_sentences < 16) ? n_sentences : 16); i ++) {
-//     printf("Sample %lu: ", i);
-//     for (uint64_t j = 0; j < n_hidden; j ++) {
-//       uint64_t chunk = BITS_DIV(j);
-//       uint64_t bit = BITS_MOD(j);
-//       printf("%s", (codes[i * BITS_DIV(n_hidden) + chunk] & ((tk_bits_t) 1 << bit)) ? "1" : "0");
-//     }
-//     printf("\n");
-//   }
-// }
+static inline double _tm_auc (
+  lua_State *L,
+  tk_bits_t *codes,
+  tk_bits_t *mask,
+  tm_pair_t *pos,
+  tm_pair_t *neg,
+  uint64_t n_pos,
+  uint64_t n_neg,
+  uint64_t n_sentences,
+  uint64_t n_hidden,
+  tm_dl_t **plp
+) {
+  tm_dl_t *pl = malloc((n_pos + n_neg) * sizeof(tm_dl_t));
+  uint64_t chunks = BITS_DIV(n_hidden);
 
-static inline int tm_encoding_similarity (lua_State *L)
+  // Calculate AUC
+  for (uint64_t k = 0; k < n_pos + n_neg; k ++) {
+    tm_pair_t *pairs = k < n_pos ? pos : neg;
+    uint64_t offset = k < n_pos ? 0 : n_pos;
+    int64_t u = pairs[k - offset].u;
+    int64_t v = pairs[k - offset].v;
+    if (mask != NULL)
+      pl[k].sim = (uint64_t) n_hidden - hamming_mask(codes + (uint64_t) u * chunks, codes + (uint64_t) v * chunks, mask, chunks);
+    else
+      pl[k].sim = (uint64_t) n_hidden - hamming(codes + (uint64_t) u * chunks, codes + (uint64_t) v * chunks, chunks);
+    pl[k].label = k < n_pos ? 1 : 0;
+  }
+  ks_introsort(dl, n_pos + n_neg, pl);
+  double sum_ranks = 0.0;
+  unsigned int rank = 1;
+  for (uint64_t k = 0; k < n_pos + n_neg; k ++, rank ++)
+    if (pl[k].label)
+      sum_ranks += rank;
+  double auc = (sum_ranks - ((double) n_pos * (n_pos + 1) / 2)) / ((double) n_pos * n_neg);
+  if (plp != NULL)
+    *plp = pl;
+  else
+    free(pl);
+  return auc;
+}
+
+static inline int tm_auc (lua_State *L)
 {
-  lua_settop(L, 5);
+  lua_settop(L, 6);
 
-  size_t codes_len;
-  tk_bits_t *codes = (tk_bits_t *) tk_lua_checklstring(L, 1, &codes_len, "codes");
+  tk_bits_t *codes = (tk_bits_t *) tk_lua_checkustring(L, 1, "codes");
 
   lua_pushvalue(L, 2);
   tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
@@ -405,30 +400,37 @@ static inline int tm_encoding_similarity (lua_State *L)
   uint64_t n_sentences = tk_lua_checkunsigned(L, 4, "n_sentences");
   uint64_t n_hidden = tk_lua_checkunsigned(L, 5, "n_hidden");
 
-  // tm_print_hamming_histogram(codes, pos, neg, n_pos, n_neg, n_sentences, n_hidden);
+  tk_bits_t *mask =
+    lua_type(L, 6) == LUA_TSTRING ? (tk_bits_t *) luaL_checkstring(L, 6) :
+    lua_type(L, 6) == LUA_TLIGHTUSERDATA ? (tk_bits_t *) lua_touserdata(L, 6) : NULL;
 
-  if (codes_len != n_sentences * BITS_DIV(n_hidden) * sizeof(tk_bits_t))
-    tk_lua_verror(L, 3, "encoding_similarity", "codes",  "invalid data length");
+  double auc = _tm_auc(L, codes, mask, pos, neg, n_pos, n_neg, n_sentences, n_hidden, NULL);
 
-  tm_dl_t *pl = malloc((n_pos + n_neg) * sizeof(tm_dl_t));
-  uint64_t chunks = BITS_DIV(n_hidden);
+  lua_pushnumber(L, auc);
+  return 1;
+}
 
-  // Calculate AUC
-  for (uint64_t k = 0; k < n_pos + n_neg; k ++) {
-    tm_pair_t *pairs = k < n_pos ? pos : neg;
-    uint64_t offset = k < n_pos ? 0 : n_pos;
-    int64_t u = pairs[k - offset].u;
-    int64_t v = pairs[k - offset].v;
-    pl[k].sim = (uint64_t) n_hidden - hamming(codes + (uint64_t) u * chunks, codes + (uint64_t) v * chunks, chunks);
-    pl[k].label = k < n_pos ? 1 : 0;
-  }
-  ks_introsort(dl, n_pos + n_neg, pl);
-  double sum_ranks = 0.0;
-  unsigned int rank = 1;
-  for (uint64_t k = 0; k < n_pos + n_neg; k ++, rank ++)
-    if (pl[k].label)
-      sum_ranks += rank;
-  double auc = (sum_ranks - ((double) n_pos * (n_pos + 1) / 2)) / ((double) n_pos * n_neg);
+static inline int tm_encoding_similarity (lua_State *L)
+{
+  lua_settop(L, 5);
+
+  tk_bits_t *codes = (tk_bits_t *) tk_lua_checkustring(L, 1, "codes");
+
+  lua_pushvalue(L, 2);
+  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
+  tm_pair_t *pos = (tm_pair_t *) tk_lua_checkuserdata(L, -4, NULL);
+  uint64_t n_pos = (uint64_t) luaL_checkinteger(L, -1) / 2;
+
+  lua_pushvalue(L, 3);
+  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
+  tm_pair_t *neg = (tm_pair_t *) tk_lua_checkuserdata(L, -4, NULL);
+  uint64_t n_neg = (uint64_t) luaL_checkinteger(L, -1) / 2;
+
+  uint64_t n_sentences = tk_lua_checkunsigned(L, 4, "n_sentences");
+  uint64_t n_hidden = tk_lua_checkunsigned(L, 5, "n_hidden");
+
+  tm_dl_t *pl;
+  double auc = _tm_auc(L, codes, NULL, pos, neg, n_pos, n_neg, n_sentences, n_hidden, &pl);
 
   // Calculate total for best margin calculation
   uint64_t hist_pos[n_hidden + 1];
@@ -480,6 +482,7 @@ static inline int tm_encoding_similarity (lua_State *L)
 static luaL_Reg tm_evaluator_fns[] =
 {
   { "class_accuracy", tm_class_accuracy },
+  { "auc", tm_auc },
   { "encoding_accuracy", tm_encoding_accuracy },
   { "encoding_similarity", tm_encoding_similarity },
   { "codebook_stats", tm_codebook_stats },

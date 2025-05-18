@@ -37,6 +37,18 @@ static inline uint64_t popcount (tk_bits_t x) {
   return (uint64_t) __builtin_popcountll(x);
 }
 
+static inline uint64_t hamming_mask (
+  tk_bits_t *a,
+  tk_bits_t *b,
+  tk_bits_t *mask,
+  uint64_t chunks
+) {
+  uint64_t t = 0;
+  for (uint64_t i = 0; i < chunks; i ++)
+    t += (uint64_t) popcount((a[i] ^ b[i]) & mask[i]);
+  return t;
+}
+
 static inline uint64_t hamming (
   tk_bits_t *a,
   tk_bits_t *b,

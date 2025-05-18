@@ -835,7 +835,6 @@ static inline void tm_run_median_thresholding (
 static inline void tm_run_tch_thresholding (
   lua_State *L,
   double *z,
-  double learnability,
   tk_bits_t *codes,
   roaring64_bitmap_t **adj_pos,
   roaring64_bitmap_t **adj_neg,
@@ -1090,7 +1089,6 @@ static inline int tm_codeify (lua_State *L)
   uint64_t n_grow_neg = tk_lua_fcheckunsigned(L, 1, "codeify", "n_grow_neg");
 
   uint64_t knn = tk_lua_fcheckunsigned(L, 1, "codeify", "knn");
-  double learnability = tk_lua_fcheckposdouble(L, 1, "codeify", "learnability");
 
   bool do_spectral = tk_lua_foptboolean(L, 1, true, "codeify", "spectral");
   bool do_tch = tk_lua_foptboolean(L, 1, true, "codeify", "tch");
@@ -1159,7 +1157,7 @@ static inline int tm_codeify (lua_State *L)
   tk_bits_t *codes = tk_malloc(L, (size_t) n_sentences * BITS_DIV(n_hidden) * sizeof(tk_bits_t));
   memset(codes, 0, (size_t) n_sentences * BITS_DIV(n_hidden) * sizeof(tk_bits_t));
   if (do_tch)
-    tm_run_tch_thresholding(L, z, learnability, codes, adj_pos, adj_neg, n_sentences, n_hidden, i_each, &global_iter);
+    tm_run_tch_thresholding(L, z, codes, adj_pos, adj_neg, n_sentences, n_hidden, i_each, &global_iter);
   else
     tm_run_median_thresholding(L, z, codes, n_sentences, n_hidden);
 
