@@ -16,9 +16,7 @@ local ITERATIONS = 20
 
 local CLASSES = 10
 local CLAUSES = 1024
-local STATE = 8
-local TARGET = 100
-local BOOST = true
+local TARGET = 0.1
 local SPECIFICITY = 10
 local NEGATIVE = 0.1
 
@@ -105,9 +103,7 @@ test("tsetlin", function ()
     features = FEATURES,
     classes = CLASSES,
     clauses = CLAUSES,
-    state = STATE,
     target = TARGET,
-    boost = BOOST,
     specificity = SPECIFICITY,
     threads = THREADS,
   })
