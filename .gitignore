@@ -1,3 +1,5 @@
 build
 .old*
 test/res/santoku/tsetlin/BinarizedMNISTData/
+test/res/BinarizedMNISTData/
+tmp/

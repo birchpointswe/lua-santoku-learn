@@ -14,6 +14,12 @@
 
 # Later
 
+- Re-evaluate drop clause and multigranular
+
+- Rescue downsampling/pruning from 2025-05-18/downsampling branch, allow
+  downstream to use codes of length <64
+
+
 - Convolution/Replicated
     - See convolution and replicated branches
     - Rename to "ensemble"
