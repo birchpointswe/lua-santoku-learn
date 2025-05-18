@@ -15,7 +15,7 @@ local num = require("santoku.num")
 local err = require("santoku.error")
 
 local TRAIN_TEST_RATIO = 0.8
-local MAX_EPOCHS = 400
+local MAX_EPOCHS = 200
 local MAX_RECORDS = 2000
 -- local MAX_RECORDS = 16000
 local HIDDEN = 64
@@ -24,8 +24,6 @@ local CLAUSES = 512
 local TARGET = 0.25
 local STATE = 8
 local BOOST = true
--- local SPECIFICITY_HIGH = 100
--- local SPECIFICITY_LOW = 60
 local SPECTRAL = true
 local TCH = true
 local HOPS = 0
@@ -216,6 +214,8 @@ test("tsetlin", function ()
     knn = KNN,
     tch = TCH,
     spectral = SPECTRAL,
+    learnability = LEARNABILITY,
+    oversample = OVERSAMPLE,
     each = function (e, t, s, b, n, dt)
       local d, dd = stopwatch()
       if t == "densify" then
@@ -223,7 +223,9 @@ test("tsetlin", function ()
       elseif t == "spectral" then
         str.printf("Epoch: %3d  Time: %6.2f %6.2f  Spectral Steps: %3d\n", e, d, dd, s) -- luacheck: ignore
       elseif t == "tch" then
-        str.printf("Epoch: %3d  Time: %6.2f %6.2f  Total TCH Steps: %3d\n", e, d, dd, s) -- luacheck: ignore
+        str.printf("Epoch: %3d  Time: %6.2f %6.2f  TCH Steps: %3d\n", e, d, dd, s) -- luacheck: ignore
+      elseif t == "downsample" then
+        str.printf("Epoch: %3d  Time: %6.2f %6.2f  Downsample AUC Min: %6.4f Max: %6.4f\n", e, d, dd, s, b) -- luacheck: ignore
       end
     end
   })
@@ -286,8 +288,6 @@ test("tsetlin", function ()
     state = STATE,
     target = TARGET,
     boost = BOOST,
-    -- specificity_high = SPECIFICITY_HIGH,
-    -- specificity_low = SPECIFICITY_LOW,
     threads = THREADS,
   })
 
@@ -317,9 +317,9 @@ test("tsetlin", function ()
         -- print()
         -- for i = 1, HIDDEN do
         --   str.printf("Bit %2d  F1 %.2f  ", i, train.accuracy0.classes[i].f1)
-        --   if i % 4 == 0 then
+        --   -- if i % 4 == 0 then
         --     str.printf("\n")
-        --   end
+        --   -- end
         -- end
         print()
         str.printi("  Train (acc) |           | F1: %.2f#(f1) | Prec: %.2f#(precision) | Recall: %.2f#(recall) | F1 Spread: %.2f#(f1_min) %.2f#(f1_max) %.2f#(f1_std)", train.accuracy0) -- luacheck: ignore
