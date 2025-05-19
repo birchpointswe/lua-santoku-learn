@@ -5,7 +5,7 @@ local tm = require("santoku.tsetlin")
 local tokenizer = require("santoku.tsetlin.tokenizer")
 local codes = require("santoku.tsetlin.codebook")
 local eval = require("santoku.tsetlin.evaluator")
-local imtx = require("santoku.matrix.integer")
+local mtx = require("santoku.matrix.integer")
 local it = require("santoku.iter")
 local fs = require("santoku.fs")
 local str = require("santoku.string")
@@ -14,8 +14,11 @@ local num = require("santoku.num")
 local err = require("santoku.error")
 
 local TRAIN_TEST_RATIO = 0.8
-local MAX_EPOCHS = 100
+local MAX_EPOCHS = 20
 local MAX_RECORDS = 1000
+local EVALUATE_EVERY = 1
+local THREADS = nil
+
 local HIDDEN = 64
 local CLAUSES = 2048
 local TARGET = 0.5
@@ -24,7 +27,9 @@ local HOPS = 0
 local GROW_POS = 0
 local GROW_NEG = 1
 
-local TOP_CHI2 = 1024
+local TOP_ALGO = "chi2"
+local TOP_K = 1024
+
 local TOKENIZER_CONFIG = {
   max_df = 0.95,
   min_df = 0.001,
@@ -38,9 +43,6 @@ local TOKENIZER_CONFIG = {
   negations = 3,
   align = tm.align
 }
-
-local EVALUATE_EVERY = 1
-local THREADS = nil
 
 local function read_data (fp, max)
   max = max or num.huge
@@ -118,7 +120,7 @@ local function split_pairs (dataset, split, prop, start, size)
     end
     arr.push(pairs_to, na - 1, nb - 1)
   end
-  split[prop] = imtx.create(pairs_to)
+  split[prop] = mtx.create(pairs_to)
 end
 
 local function split_dataset (dataset, ratio)
@@ -205,13 +207,15 @@ test("tsetlin", function ()
   str.printi("Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)\n",
     train.entropy0)
 
-  local top_v = imtx.top_chi2(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_CHI2)
-  local n_top_v = imtx.columns(top_v)
-  print("After top Chi2 filter", n_top_v)
+  local top_v =
+    TOP_ALGO == "chi2" and mtx.top_chi2(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K) or
+    TOP_ALGO == "mi" and mtx.top_mi(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K) or nil
+  local n_top_v = mtx.columns(top_v)
+  print("After top k filter", n_top_v)
 
   -- Show top words
   local words = tokenizer.index()
-  for id in it.take(32, imtx.each(top_v)) do
+  for id in it.take(32, mtx.each(top_v)) do
     print(id, words[id + 1])
   end
 
@@ -221,10 +225,10 @@ test("tsetlin", function ()
   test.sentences = tokenizer.tokenize(test.raw_sentences)
 
   print("Prepping for encoder")
-  imtx.flip_interleave(train.sentences, train.n_sentences, n_top_v)
-  imtx.flip_interleave(test.sentences, test.n_sentences, n_top_v)
-  train.sentences = imtx.raw_bitmap(train.sentences, train.n_sentences, n_top_v * 2)
-  test.sentences = imtx.raw_bitmap(test.sentences, test.n_sentences, n_top_v * 2)
+  mtx.flip_interleave(train.sentences, train.n_sentences, n_top_v)
+  mtx.flip_interleave(test.sentences, test.n_sentences, n_top_v)
+  train.sentences = mtx.raw_bitmap(train.sentences, train.n_sentences, n_top_v * 2)
+  test.sentences = mtx.raw_bitmap(test.sentences, test.n_sentences, n_top_v * 2)
 
   print()
   print("Input Features", n_top_v * 2)

@@ -1047,7 +1047,7 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
       tk_lua_foptunsigned(L, 2, 8, "create encoder", "state"),
       tk_lua_fcheckposdouble(L, 2, "create encoder", "target"),
       tk_lua_foptboolean(L, 2, true, "create encoder", "boost"),
-      tk_lua_fcheckposdouble(L, 2, "create encoder", "negative"),
+      tk_lua_foptposdouble(L, 2, 1.0, "create encoder", "negative"), // note used in encoder
       tk_lua_fcheckposdouble(L, 2, "create encoder", "specificity"),
       tk_tsetlin_get_nthreads(L, 2, "create encoder", "threads"));
 
