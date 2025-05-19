@@ -22,10 +22,11 @@ local CLAUSES = 8192
 local TARGET = 32
 local SPECIFICITY = 29
 local NEGATIVE = 0.5
-
 local FEATURES = 784
 
-local TOP_CHI2 = 1024
+local TOP_ALGO = "mi"
+local TOP_K = 1024
+
 local TOKENIZER_CONFIG = {
   max_df = 0.95,
   min_df = 0.01,
@@ -91,9 +92,11 @@ test("tsetlin", function ()
 
   print("Tokenizing train")
   local train_problems = tokenizer.tokenize(train_problems_raw)
-  local top_v = mtx.top_chi2(train_problems, train_solutions, n_train, dataset.n_features, 2, TOP_CHI2)
+  local top_v =
+    TOP_ALGO == "chi2" and mtx.top_chi2(train_problems, train_solutions, n_train, dataset.n_features, 2, TOP_K) or
+    TOP_ALGO == "mi" and mtx.top_mi(train_problems, train_solutions, n_train, dataset.n_features, 2, TOP_K) or nil
   local n_top_v = mtx.columns(top_v)
-  print("After top Chi2 filter", n_top_v)
+  print("After top k filter", n_top_v)
 
   -- Show top words
   local words = tokenizer.index()
