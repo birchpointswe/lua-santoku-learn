@@ -3,3 +3,4 @@ build
 test/res/santoku/tsetlin/BinarizedMNISTData/
 test/res/BinarizedMNISTData/
 tmp/
+test/res/imdb.dev/
