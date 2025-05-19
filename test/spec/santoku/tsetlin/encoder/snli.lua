@@ -208,8 +208,8 @@ test("tsetlin", function ()
     train.entropy0)
 
   local top_v =
-    TOP_ALGO == "chi2" and mtx.top_chi2(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K) or
-    TOP_ALGO == "mi" and mtx.top_mi(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K) or nil
+    TOP_ALGO == "chi2" and mtx.top_chi2(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K) or -- luacheck: ignore
+    TOP_ALGO == "mi" and mtx.top_mi(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K) or nil -- luacheck: ignore
   local n_top_v = mtx.columns(top_v)
   print("After top k filter", n_top_v)
 
