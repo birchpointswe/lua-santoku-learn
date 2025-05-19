@@ -937,6 +937,7 @@ static inline void tk_tsetlin_init_classifier (
   unsigned int state_bits,
   double thresholdf,
   bool boost_true_positive,
+  double negative,
   double specificity,
   unsigned int n_threads
 ) {
@@ -952,6 +953,7 @@ static inline void tk_tsetlin_init_classifier (
     tk_lua_verror(L, 3, "create classifier", "bits", "must be greater than 1");
   if (thresholdf <= 0)
     tk_lua_verror(L, 3, "create classifier", "target", "must be greater than 0");
+  tm->negative = negative; // Note: unused in encoder
   tm->classes = classes;
   tm->class_chunks = BITS_DIV((tm->classes - 1)) + 1;
   tm->clauses = clauses;
@@ -982,6 +984,7 @@ static inline int tk_tsetlin_init_encoder (
   unsigned int state_bits,
   double thresholdf,
   bool boost_true_positive,
+  double negative,
   double specificity,
   unsigned int n_threads
 ) {
@@ -989,7 +992,7 @@ static inline int tk_tsetlin_init_encoder (
     tk_lua_verror(L, 3, "create encoder", "hidden", "must be a multiple of " STR(BITS));
   tk_tsetlin_init_classifier(L, tm,
       encoding_bits, features, clauses, state_bits, thresholdf,
-      boost_true_positive, specificity, n_threads);
+      boost_true_positive, negative, specificity, n_threads);
   return 0;
 }
 
@@ -1025,7 +1028,8 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
       tk_lua_foptunsigned(L, 2, 8, "create classifier", "state"),
       tk_lua_fcheckposdouble(L, 2, "create classifier", "target"),
       tk_lua_foptboolean(L, 2, true, "create classifier", "boost"),
-      tk_lua_fcheckposdouble(L, 2, "create encoder", "specificity"),
+      tk_lua_fcheckposdouble(L, 2, "create classifier", "negative"),
+      tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity"),
       tk_tsetlin_get_nthreads(L, 2, "create classifier", "threads"));
 
   lua_settop(L, 1);
@@ -1043,6 +1047,7 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
       tk_lua_foptunsigned(L, 2, 8, "create encoder", "state"),
       tk_lua_fcheckposdouble(L, 2, "create encoder", "target"),
       tk_lua_foptboolean(L, 2, true, "create encoder", "boost"),
+      tk_lua_fcheckposdouble(L, 2, "create encoder", "negative"),
       tk_lua_fcheckposdouble(L, 2, "create encoder", "specificity"),
       tk_tsetlin_get_nthreads(L, 2, "create encoder", "threads"));
 
@@ -1487,7 +1492,6 @@ static inline int tk_tsetlin_train_classifier (
   tk_bits_t *ps = (tk_bits_t *) tk_lua_fcheckstring(L, 2, "train", "problems");
   unsigned int *ss = (unsigned int *) tk_lua_fcheckstring(L, 2, "train", "solutions");
   unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
-  tm->negative = tk_lua_fcheckposdouble(L, 2, "train", "negative");
 
   int i_each = -1;
   if (tk_lua_ftype(L, 2, "each") != LUA_TNIL) {
@@ -1556,7 +1560,6 @@ static inline int tk_tsetlin_train_encoder (
   size_t ls_len;
   tk_bits_t *ls = (tk_bits_t *) tk_lua_fchecklstring(L, 2, &ls_len, "train", "codes");
   unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
-  tm->negative = 1.0; // Note: unused in encoder
   tm->encodings = tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * tm->class_chunks * sizeof(tk_bits_t), false);
 
   int i_each = -1;
@@ -1917,7 +1920,6 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tsetlin_classifier
   tk_lua_fread(L, &tm->clause_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->state_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->action_chunks, sizeof(unsigned int), 1, fh);
-  tk_lua_fread(L, &tm->specificity, sizeof(double), 1, fh);
   tk_lua_fread(L, &tm->specificity, sizeof(double), 1, fh);
   tm->actions = tk_malloc_aligned(L, sizeof(tk_bits_t) * tm->action_chunks, BITS);
   tk_lua_fread(L, tm->actions, sizeof(tk_bits_t), tm->action_chunks, fh);

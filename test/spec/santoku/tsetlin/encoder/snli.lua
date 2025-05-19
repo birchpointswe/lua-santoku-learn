@@ -237,9 +237,7 @@ test("tsetlin", function ()
     visible = n_top_v,
     hidden = HIDDEN,
     clauses = CLAUSES,
-    state = STATE,
     target = TARGET,
-    boost = BOOST,
     specificity = SPECIFICITY,
     threads = THREADS,
   })
