@@ -15,19 +15,19 @@ local err = require("santoku.error")
 
 local TRAIN_TEST_RATIO = 0.8
 local MAX_EPOCHS = 20
-local MAX_RECORDS = 1000
+local MAX_RECORDS = 8000
 local EVALUATE_EVERY = 1
 local THREADS = nil
 
 local HIDDEN = 64
-local CLAUSES = 2048
-local TARGET = 0.5
+local CLAUSES = 512
+local TARGET = 0.1
 local SPECIFICITY = 60
 local HOPS = 0
 local GROW_POS = 0
 local GROW_NEG = 1
 
-local TOP_ALGO = "chi2"
+local TOP_ALGO = "mi"
 local TOP_K = 1024
 
 local TOKENIZER_CONFIG = {

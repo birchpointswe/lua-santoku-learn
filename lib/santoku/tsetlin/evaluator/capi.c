@@ -144,15 +144,19 @@ static inline int tm_class_accuracy (lua_State *L)
   memset(FP, 0, sizeof(FP));
   memset(FN, 0, sizeof(FN));
 
+  #pragma omp parallel for
   for (unsigned int i = 0; i < n_samples; i ++) {
     unsigned int y_pred = predicted[i];
     unsigned int y_true = expected[i];
     if (y_pred >= n_classes || y_true >= n_classes)
       continue;
     if (y_pred == y_true)
+      #pragma omp atomic
       TP[y_true] ++;
     else {
+      #pragma omp atomic
       FP[y_pred] ++;
+      #pragma omp atomic
       FN[y_true] ++;
     }
   }
@@ -207,19 +211,22 @@ static inline int tm_codebook_stats (lua_State *L)
   uint64_t *bit_counts = tk_malloc(L, n_hidden * sizeof(uint64_t));
   memset(bit_counts, 0, n_hidden * sizeof(uint64_t));
   // Count number of 1s per bit across all codes
-  for (uint64_t i = 0; i < n_codes; i++) {
-    for (uint64_t j = 0; j < n_hidden; j++) {
+  #pragma omp parallel for
+  for (uint64_t i = 0; i < n_codes; i ++) {
+    for (uint64_t j = 0; j < n_hidden; j ++) {
       uint64_t word = j / BITS;
       uint64_t bit  = j % BITS;
-      if ((codes[i * chunks + word] >> bit) & 1)
-        bit_counts[j]++;
+      if ((codes[i * chunks + word] >> bit) & 1) {
+        #pragma omp atomic
+        bit_counts[j] ++;
+      }
     }
   }
   // Compute per-bit entropy
   double min_entropy = 1.0, max_entropy = 0.0, sum_entropy = 0.0;
   lua_newtable(L); // result
   lua_newtable(L); // per-bit entropy table
-  for (uint64_t j = 0; j < n_hidden; j++) {
+  for (uint64_t j = 0; j < n_hidden; j ++) {
     double p = (double) bit_counts[j] / (double) n_codes;
     double entropy = 0.0;
     if (p > 0.0 && p < 1.0)
@@ -237,7 +244,7 @@ static inline int tm_codebook_stats (lua_State *L)
   // Aggregate stats
   double mean = sum_entropy / n_hidden;
   double variance = 0.0;
-  for (uint64_t j = 0; j < n_hidden; j++) {
+  for (uint64_t j = 0; j < n_hidden; j ++) {
     double p = (double) bit_counts[j] / (double) n_codes;
     double entropy = 0.0;
     if (p > 0.0 && p < 1.0)
@@ -272,15 +279,23 @@ static inline int tm_encoding_accuracy (lua_State *L)
   memset(FP, 0, sizeof(FP));
   memset(FN, 0, sizeof(FN));
 
+  #pragma omp parallel for
   for (uint64_t i = 0; i < n_codes; i ++) {
     for (uint64_t j = 0; j < n_hidden; j ++) {
       uint64_t word = j / (sizeof(tk_bits_t) * CHAR_BIT);
       uint64_t bit = j % (sizeof(tk_bits_t) * CHAR_BIT);
       bool y_true = (codes_expected[i * chunks + word] >> bit) & 1;
       bool y_pred = (codes_predicted[i * chunks + word] >> bit) & 1;
-      if (y_pred && y_true) TP[j] ++;
-      else if (y_pred && !y_true) FP[j] ++;
-      else if (!y_pred && y_true) FN[j] ++;
+      if (y_pred && y_true) {
+        #pragma omp atomic
+        TP[j] ++;
+      } else if (y_pred && !y_true) {
+        #pragma omp atomic
+        FP[j] ++;
+      } else if (!y_pred && y_true) {
+        #pragma omp atomic
+        FN[j] ++;
+      }
     }
   }
 
@@ -324,7 +339,7 @@ static inline int tm_encoding_accuracy (lua_State *L)
   lua_setfield(L, -2, "f1");
   double f1_var = 0.0;
   double min_f1 = 1.0, max_f1 = 0.0;
-  for (uint64_t j = 0; j < n_hidden; j++) {
+  for (uint64_t j = 0; j < n_hidden; j ++) {
     double f = f1[j];
     f1_var += (f - f1_avg) * (f - f1_avg);
     if (f < min_f1) min_f1 = f;
@@ -356,6 +371,7 @@ static inline double _tm_auc (
   uint64_t chunks = BITS_DIV(n_hidden);
 
   // Calculate AUC
+  #pragma omp parallel for
   for (uint64_t k = 0; k < n_pos + n_neg; k ++) {
     tm_pair_t *pairs = k < n_pos ? pos : neg;
     uint64_t offset = k < n_pos ? 0 : n_pos;
@@ -437,11 +453,17 @@ static inline int tm_encoding_similarity (lua_State *L)
   uint64_t hist_neg[n_hidden + 1];
   memset(hist_pos, 0, (n_hidden + 1) * sizeof(uint64_t));
   memset(hist_neg, 0, (n_hidden + 1) * sizeof(uint64_t));
+  #pragma omp parallel for
   for (uint64_t k = 0; k < n_pos + n_neg; k ++) {
     uint64_t s = pl[k].sim;
     if (s > n_hidden) s = n_hidden;
-    if (pl[k].label) hist_pos[s]++;
-    else hist_neg[s] ++;
+    if (pl[k].label) {
+      #pragma omp atomic
+      hist_pos[s] ++;
+    } else {
+      #pragma omp atomic
+      hist_neg[s] ++;
+    }
   }
 
   // Find best margin for f1
