@@ -6,7 +6,7 @@ local env = {
   license = "MIT",
   public = true,
 
-  cflags = { "-march=native", "-std=gnu11", "-O3", "-Wall", "-Wextra", "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow", "-Wpointer-sign", "-Wno-unused-parameter", "-Wno-unused-but-set-variable" },
+  cflags = { "-march=native", "-fopenmp", "-std=gnu11", "-O3", "-Wall", "-Wextra", "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow", "-Wpointer-sign", "-Wno-unused-parameter", "-Wno-unused-but-set-variable" },
   ldflags = { "-march=native", "-O3", "-lm", "-lpthread", "-lnuma" },
 
   dependencies = {
