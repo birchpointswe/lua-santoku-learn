@@ -14,8 +14,6 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wsign-conversion"
 #pragma GCC diagnostic ignored "-Wunused-function"
-#include "roaring.h"
-#include "roaring.c"
 #include "khash.h"
 #include "kbtree.h"
 #include "kvec.h"
