@@ -1,10 +1,12 @@
+#include <float.h>
+
 #include "lua.h"
 #include "lauxlib.h"
 #include "../conf.h"
-#include <arpack/arpack.h>
-#include <float.h>
+
 #include "roaring.h"
 #include "roaring.c"
+#include "primme.h"
 
 #include "khash.h"
 KHASH_SET_INIT_INT64(i64)
@@ -424,52 +426,108 @@ static inline void tm_neighbors_init (
   uint64_t n_features,
   uint64_t knn
 ) {
-  roaring64_iterator_t it;
-  roaring64_bitmap_t *candidates = roaring64_bitmap_create();
-
-  for (int64_t u = 0; u < (int64_t) n_sentences; u ++) {
-
-    tm_neighbors_t nbrs;
-    kv_init(nbrs);
-
-    // Populate candidate set (those sharing at least one feature)
-    roaring64_bitmap_clear(candidates);
-    roaring64_iterator_reinit(sentences[u], &it);
-    while (roaring64_iterator_has_value(&it)) {
-      uint64_t f = roaring64_iterator_value(&it);
-      roaring64_bitmap_or_inplace(candidates, index[f]);
-      roaring64_iterator_advance(&it);
+  #pragma omp parallel
+  {
+    // Each thread gets its own bitmap and iterator
+    roaring64_iterator_t it;
+    roaring64_bitmap_t *candidates = roaring64_bitmap_create();
+    #pragma omp for schedule(dynamic)
+    for (int64_t u = 0; u < (int64_t) n_sentences; u ++) {
+      tm_neighbors_t nbrs;
+      kv_init(nbrs);
+      // Populate candidate set (those sharing at least one feature)
+      roaring64_bitmap_clear(candidates);
+      roaring64_iterator_reinit(sentences[u], &it);
+      while (roaring64_iterator_has_value(&it)) {
+        uint64_t f = roaring64_iterator_value(&it);
+        roaring64_bitmap_or_inplace(candidates, index[f]);
+        roaring64_iterator_advance(&it);
+      }
+      // Get a sorted list of neighbors by distance
+      roaring64_iterator_reinit(candidates, &it);
+      while (roaring64_iterator_has_value(&it)) {
+        int64_t v = (int64_t) roaring64_iterator_value(&it);
+        roaring64_iterator_advance(&it);
+        if (u == v)
+          continue;
+        tm_pair_t p = tm_pair(u, v);
+        if (kh_get(pairs, pairs, p) != kh_end(pairs))
+          continue;
+        double dist = (double) roaring64_bitmap_xor_cardinality(sentences[u], sentences[v]) / (double) n_features;
+        kv_push(tm_neighbor_t, nbrs, ((tm_neighbor_t) { .v = v, .d = dist }));
+      }
+      if (nbrs.n <= knn)
+        ks_introsort(neighbors_asc, nbrs.n, nbrs.a);
+      else {
+        ks_ksmall(neighbors_asc, nbrs.n, nbrs.a, knn);
+        ks_introsort(neighbors_asc, knn, nbrs.a);
+        nbrs.n = knn;
+        kv_resize(tm_neighbor_t, nbrs, nbrs.n);
+      }
+      // Update refs
+      neighbors[u] = nbrs;
     }
-
-    // Get a sorted list of neighbors by distance
-    roaring64_iterator_reinit(candidates, &it);
-    while (roaring64_iterator_has_value(&it)) {
-      int64_t v = (int64_t) roaring64_iterator_value(&it);
-      roaring64_iterator_advance(&it);
-      if (u == v)
-        continue;
-      tm_pair_t p = tm_pair(u, v);
-      if (kh_get(pairs, pairs, p) != kh_end(pairs))
-        continue;
-      double dist = (double) roaring64_bitmap_xor_cardinality(sentences[u], sentences[v]) / (double) n_features;
-      kv_push(tm_neighbor_t, nbrs, ((tm_neighbor_t) { .v = v, .d = dist }));
-    }
-    if (nbrs.n <= knn)
-      ks_introsort(neighbors_asc, nbrs.n, nbrs.a);
-    else {
-      ks_ksmall(neighbors_asc, nbrs.n, nbrs.a, knn);
-      ks_introsort(neighbors_asc, knn, nbrs.a);
-      nbrs.n = knn;
-      kv_resize(tm_neighbor_t, nbrs, nbrs.n);
-    }
-
-    // Update refs
-    neighbors[u] = nbrs;
+    // Cleanup per-thread
+    roaring64_bitmap_free(candidates);
   }
-
-  // Cleanup
-  roaring64_bitmap_free(candidates);
 }
+
+// static inline void tm_neighbors_init (
+//   lua_State *L,
+//   tm_pairs_t *pairs,
+//   tm_neighbors_t *neighbors,
+//   roaring64_bitmap_t **index,
+//   roaring64_bitmap_t **sentences,
+//   uint64_t n_sentences,
+//   uint64_t n_features,
+//   uint64_t knn
+// ) {
+//   roaring64_iterator_t it;
+//   roaring64_bitmap_t *candidates = roaring64_bitmap_create();
+
+//   for (int64_t u = 0; u < (int64_t) n_sentences; u ++) {
+
+//     tm_neighbors_t nbrs;
+//     kv_init(nbrs);
+
+//     // Populate candidate set (those sharing at least one feature)
+//     roaring64_bitmap_clear(candidates);
+//     roaring64_iterator_reinit(sentences[u], &it);
+//     while (roaring64_iterator_has_value(&it)) {
+//       uint64_t f = roaring64_iterator_value(&it);
+//       roaring64_bitmap_or_inplace(candidates, index[f]);
+//       roaring64_iterator_advance(&it);
+//     }
+
+//     // Get a sorted list of neighbors by distance
+//     roaring64_iterator_reinit(candidates, &it);
+//     while (roaring64_iterator_has_value(&it)) {
+//       int64_t v = (int64_t) roaring64_iterator_value(&it);
+//       roaring64_iterator_advance(&it);
+//       if (u == v)
+//         continue;
+//       tm_pair_t p = tm_pair(u, v);
+//       if (kh_get(pairs, pairs, p) != kh_end(pairs))
+//         continue;
+//       double dist = (double) roaring64_bitmap_xor_cardinality(sentences[u], sentences[v]) / (double) n_features;
+//       kv_push(tm_neighbor_t, nbrs, ((tm_neighbor_t) { .v = v, .d = dist }));
+//     }
+//     if (nbrs.n <= knn)
+//       ks_introsort(neighbors_asc, nbrs.n, nbrs.a);
+//     else {
+//       ks_ksmall(neighbors_asc, nbrs.n, nbrs.a, knn);
+//       ks_introsort(neighbors_asc, knn, nbrs.a);
+//       nbrs.n = knn;
+//       kv_resize(tm_neighbor_t, nbrs, nbrs.n);
+//     }
+
+//     // Update refs
+//     neighbors[u] = nbrs;
+//   }
+
+//   // Cleanup
+//   roaring64_bitmap_free(candidates);
+// }
 
 static inline void tm_add_backbone (
   lua_State *L,
@@ -864,80 +922,91 @@ static inline void tm_run_tch_thresholding (
   int i_each,
   unsigned int *global_iter
 ) {
-  int *bitvec = tk_malloc(L, n_sentences * sizeof(int));
-  double *col = tk_malloc(L, n_sentences * sizeof(double));
   uint64_t total_steps = 0;
 
-  // Prep hidden shuffle
+  // Prep hidden shuffle (outside parallel region)
   int64_t *shuf_hidden = tk_malloc(L, n_hidden * sizeof(int64_t));
   for (int64_t i = 0; i < (int64_t) n_hidden; i ++)
     shuf_hidden[i] = i;
   ks_shuffle(i64, n_hidden, shuf_hidden);
 
-  // Prep sentences shuffle
-  int64_t *shuf_sentences = tk_malloc(L, n_sentences * sizeof(int64_t));
+  // Prep sentences shuffle template
+  int64_t *shuf_sentences_template = tk_malloc(L, n_sentences * sizeof(int64_t));
   for (int64_t i = 0; i < (int64_t) n_sentences; i ++)
-    shuf_sentences[i] = i;
-  ks_shuffle(i64, n_sentences, shuf_sentences);
+    shuf_sentences_template[i] = i;
 
-  roaring64_iterator_t it;
-  for (uint64_t sf = 0; sf < n_hidden; sf ++) {
-    uint64_t f = (uint64_t) shuf_hidden[sf];
+  #pragma omp parallel reduction(+:total_steps)
+  {
+    int *bitvec = tk_malloc(L, n_sentences * sizeof(int));
+    double *col = tk_malloc(L, n_sentences * sizeof(double));
+    int64_t *shuf_sentences = tk_malloc(L, n_sentences * sizeof(int64_t));
+    roaring64_iterator_t it;
 
-    // Find the median
-    for (uint64_t i = 0; i < n_sentences; i ++)
-      col[i] = z[i * n_hidden + f];
-    uint64_t mid = n_sentences / 2;
-    ks_ksmall(f64, n_sentences, col, mid);
-    double med = col[mid];
+    #pragma omp for schedule(dynamic)
+    for (uint64_t sf = 0; sf < n_hidden; sf ++) {
+      uint64_t f = (uint64_t) shuf_hidden[sf];
 
-    // Threshold around the median
-    for (uint64_t i = 0; i < n_sentences; i++)
-      bitvec[i] = (z[i * n_hidden + f] > med) ? +1 : -1;
+      // Find the median
+      for (uint64_t i = 0; i < n_sentences; i ++)
+        col[i] = z[i * n_hidden + f];
+      uint64_t mid = n_sentences / 2;
+      ks_ksmall(f64, n_sentences, col, mid);
+      double med = col[mid];
 
-    bool updated;
-    uint64_t steps = 0;
+      // Threshold around the median
+      for (uint64_t i = 0; i < n_sentences; i++)
+        bitvec[i] = (z[i * n_hidden + f] > med) ? +1 : -1;
 
-    ks_shuffle(i64, n_sentences, shuf_sentences);
+      bool updated;
+      uint64_t steps = 0;
 
-    do {
-      updated = false;
-      steps ++;
-      total_steps ++;
+      // Copy and shuffle sentences for this thread
+      memcpy(shuf_sentences, shuf_sentences_template, n_sentences * sizeof(int64_t));
+      ks_shuffle(i64, n_sentences, shuf_sentences);
 
-      for (uint64_t si = 0; si < n_sentences; si ++) {
-        uint64_t i = (uint64_t) shuf_sentences[si];
-        int delta = 0;
-        // Positive neighbors
-        roaring64_iterator_reinit(adj_pos[i], &it);
-        while (roaring64_iterator_has_value(&it)) {
-          uint64_t j = roaring64_iterator_value(&it);
-          roaring64_iterator_advance(&it);
-          delta += bitvec[i] * bitvec[j];
+      do {
+        updated = false;
+        steps ++;
+        #pragma omp atomic
+        total_steps ++;
+
+        for (uint64_t si = 0; si < n_sentences; si ++) {
+          uint64_t i = (uint64_t) shuf_sentences[si];
+          int delta = 0;
+          // Positive neighbors
+          roaring64_iterator_reinit(adj_pos[i], &it);
+          while (roaring64_iterator_has_value(&it)) {
+            uint64_t j = roaring64_iterator_value(&it);
+            roaring64_iterator_advance(&it);
+            delta += bitvec[i] * bitvec[j];
+          }
+          // Negative neighbors
+          roaring64_iterator_reinit(adj_neg[i], &it);
+          while (roaring64_iterator_has_value(&it)) {
+            uint64_t j = roaring64_iterator_value(&it);
+            roaring64_iterator_advance(&it);
+            delta -= bitvec[i] * bitvec[j];
+          }
+          // Check
+          if (delta < 0){
+            bitvec[i] = -bitvec[i];
+            updated = true;
+          }
         }
-        // Negative neighbors
-        roaring64_iterator_reinit(adj_neg[i], &it);
-        while (roaring64_iterator_has_value(&it)) {
-          uint64_t j = roaring64_iterator_value(&it);
-          roaring64_iterator_advance(&it);
-          delta -= bitvec[i] * bitvec[j];
-        }
-        // Check
-        if (delta < 0){
-          bitvec[i] = -bitvec[i];
-          updated = true;
-        }
-      }
+      } while (updated);
 
-    } while (updated);
+      // Write out the final bits into your packed codes
+      for (uint64_t i = 0; i < n_sentences; i ++)
+        if (bitvec[i] > 0) {
+          uint64_t chunk = BITS_DIV(f);
+          uint64_t b = BITS_MOD(f);
+          codes[i * BITS_DIV(n_hidden) + chunk] |= ((tk_bits_t) 1 << b);
+        }
+    }
 
-    // Write out the final bits into your packed codes
-    for (uint64_t i = 0; i < n_sentences; i ++)
-      if (bitvec[i] > 0){
-        uint64_t chunk = BITS_DIV(f);
-        uint64_t b = BITS_MOD(f);
-        codes[i * BITS_DIV(n_hidden) + chunk] |= ((tk_bits_t) 1 << b);
-      }
+    free(bitvec);
+    free(col);
+    free(shuf_sentences);
   }
 
   (*global_iter) ++;
@@ -949,9 +1018,59 @@ static inline void tm_run_tch_thresholding (
     lua_call(L, 3, 0);
   }
 
-  // Cleanup
-  free(bitvec);
-  free(col);
+  free(shuf_hidden);
+  free(shuf_sentences_template);
+}
+
+typedef struct {
+  roaring64_bitmap_t **adj_pos;
+  roaring64_bitmap_t **adj_neg;
+  double *inv_sqrt_deg;
+  uint64_t n_sentences;
+} laplacian_ctx_t;
+
+static inline void laplacian_matvec (
+  void *vx,
+  PRIMME_INT *ldx,
+  void *vy,
+  PRIMME_INT *ldy,
+  int *blockSize,
+  struct primme_params *primme,
+  int *ierr
+) {
+  // Get context from primme struct
+  laplacian_ctx_t *data = (laplacian_ctx_t*)primme->matrix;
+  const double *x = (const double*)vx;
+  double *y = (double*)vy;
+  uint64_t n = data->n_sentences;
+  double *inv_sqrt_deg = data->inv_sqrt_deg;
+  roaring64_bitmap_t **adj_pos = data->adj_pos;
+  roaring64_bitmap_t **adj_neg = data->adj_neg;
+  // Only support blockSize=1 for clarity
+  #pragma omp parallel for schedule(dynamic)
+  for (uint64_t u = 0; u < n; u++) {
+    double scale_u = inv_sqrt_deg[u];
+    double sum = x[u];
+    roaring64_iterator_t it;
+    // Positive neighbors
+    roaring64_iterator_reinit(adj_pos[u], &it);
+    while (roaring64_iterator_has_value(&it)) {
+      uint64_t v = roaring64_iterator_value(&it);
+      roaring64_iterator_advance(&it);
+      double w = scale_u * inv_sqrt_deg[v];
+      sum -= w * x[v];
+    }
+    // Negative neighbors
+    roaring64_iterator_reinit(adj_neg[u], &it);
+    while (roaring64_iterator_has_value(&it)) {
+      uint64_t v = roaring64_iterator_value(&it);
+      roaring64_iterator_advance(&it);
+      double w = scale_u * inv_sqrt_deg[v];
+      sum += w * x[v];
+    }
+    y[u] = sum;
+  }
+  *ierr = 0;
 }
 
 static inline void tm_run_spectral (
@@ -965,107 +1084,45 @@ static inline void tm_run_spectral (
   int i_each,
   unsigned int *global_iter
 ) {
-  // Build degree vector for Laplacian
   unsigned int *degree = tk_malloc(L, n_sentences * sizeof(unsigned int));
-  for (uint64_t i = 0; i < n_sentences; i ++) {
-    degree[i] =
-      (unsigned int) roaring64_bitmap_get_cardinality(adj_pos[i]) +
-      (unsigned int) roaring64_bitmap_get_cardinality(adj_neg[i]);
-  }
-
-  // Build inv_sqrt vector
+  for (uint64_t i = 0; i < n_sentences; i++)
+    degree[i] = (unsigned int)roaring64_bitmap_get_cardinality(adj_pos[i]) +
+      (unsigned int)roaring64_bitmap_get_cardinality(adj_neg[i]);
   double *inv_sqrt_deg = tk_malloc(L, n_sentences * sizeof(double));
-  for (uint64_t i = 0; i < n_sentences; i ++)
+  for (uint64_t i = 0; i < n_sentences; i++)
     inv_sqrt_deg[i] = degree[i] > 0 ? 1.0 / sqrt((double) degree[i]) : 0.0;
   free(degree);
-
-  // ARPACK setup
-  a_int ido = 0, info = 0;
-  char bmat[] = "I", which[] = "SM";
-  a_int nev = n_hidden + 1;
-  a_int ncv = (4 * nev < (a_int) n_sentences) ? 4 * nev : (a_int) n_sentences;
-  double tol = 1e-3;
-  double *resid = tk_malloc(L, (size_t) n_sentences * sizeof(double));
-  double *workd = tk_malloc(L, 3 * (size_t) n_sentences * sizeof(double));
-  a_int iparam[11] = {1,0,999999,0,0,0,1,0,0,0,0};
-  a_int ipntr[14] = {0};
-  int lworkl = ncv * (ncv + 8);
-  double *workl = tk_malloc(L, (size_t) lworkl * sizeof(double));
-  double *v = tk_malloc(L, (size_t) n_sentences * (size_t) ncv * sizeof(double));
-
-  // Reverse-communication to build Lanczos basis v
-  roaring64_iterator_t it;
-  do {
-    dsaupd_c(
-      &ido, bmat, n_sentences, which, nev, tol, resid, ncv, v, n_sentences,
-      iparam, ipntr, workd, workl, (a_int) lworkl, &info);
-    if (info != 0)
-      tk_lua_verror(L, 2, "codeify", "failure calling arpack for spectral refinement");
-    if (ido == -1 || ido == 1) {
-      double *in  = workd + ipntr[0] - 1;
-      double *out = workd + ipntr[1] - 1;
-      memcpy(out, in, n_sentences * sizeof(double));
-      for (uint64_t u = 0; u < n_sentences; u ++) {
-        double scale_u = inv_sqrt_deg[u];
-        // Positive neighbors
-        roaring64_iterator_reinit(adj_pos[u], &it);
-        while (roaring64_iterator_has_value(&it)) {
-          uint64_t v = roaring64_iterator_value(&it);
-          roaring64_iterator_advance(&it);
-          double w = scale_u * inv_sqrt_deg[v];
-          out[u] -= w * in[v];
-          out[v] -= w * in[u];
-        }
-        // Negative neighbors
-        roaring64_iterator_reinit(adj_neg[u], &it);
-        while (roaring64_iterator_has_value(&it)) {
-          uint64_t v = roaring64_iterator_value(&it);
-          roaring64_iterator_advance(&it);
-          double w = scale_u * inv_sqrt_deg[v];
-          out[u] += w * in[v];
-          out[v] += w * in[u];
-        }
-      }
-    }
-  } while (ido == -1 || ido == 1);
-
-  // Prepare containers
-  a_int rvec = 1;
-  char howmny[] = "A";
-  a_int select[ncv];
-  double d[n_hidden];
-  double sigma = 0.0;
-  double *zall = tk_malloc(L, (size_t) n_sentences * (size_t) nev * sizeof(double));
-
-  // Dump modes
-  dseupd_c(
-    rvec, howmny, select, d, zall,
-    (a_int) n_sentences, sigma,
-    bmat, (a_int) n_sentences, which, nev,
-    tol, resid, (a_int) ncv, v, (a_int) n_sentences,
-    iparam, ipntr, workd, workl, (a_int) lworkl, &info);
-  if (info != 0)
-    tk_lua_verror(L, 2, "codeify", "failure calling arpack for spectral finalization");
-
-  // Copy modes to z, skipping the first
-  for (uint64_t i = 0; i < n_sentences; i ++)
-    for (uint64_t f = 0; f < n_hidden; f ++)
-      z[i * n_hidden + f] = zall[i * (uint64_t) nev + (f + 1)];
-
-  // Cleanup
+  laplacian_ctx_t ctx = { adj_pos, adj_neg, inv_sqrt_deg, n_sentences };
+  primme_params params;
+  primme_initialize(&params);
+  params.n = (int64_t) n_sentences;
+  params.numEvals = n_hidden + 1;
+  params.matrixMatvec = laplacian_matvec;
+  params.matrix = &ctx;
+  params.maxBlockSize = 1;
+  params.printLevel = 0;
+  params.eps = 1e-3;
+  params.target = primme_smallest;
+  double *evals = tk_malloc(L, (size_t) params.numEvals * sizeof(double));
+  double *evecs = tk_malloc(L, (size_t) params.n * (size_t) params.numEvals * sizeof(double));
+  double *resNorms = tk_malloc(L, (size_t) params.numEvals * sizeof(double));
+  int ret = dprimme(evals, evecs, resNorms, &params);
+  if (ret != 0)
+    tk_lua_verror(L, 2, "codeify", "failure calling PRIMME (code %d)", ret);
+  for (uint64_t i = 0; i < n_sentences; i++)
+    for (uint64_t f = 0; f < n_hidden; f++)
+      z[i * n_hidden + f] = evecs[i + (f+1) * n_sentences];
   free(inv_sqrt_deg);
-  free(zall);
-  free(resid);
-  free(workd);
-  free(workl);
-  free(v);
-
-  (*global_iter) ++;
+  free(evals);
+  free(evecs);
+  free(resNorms);
+  primme_free(&params);
+  (*global_iter)++;
   if (i_each != -1) {
     lua_pushvalue(L, i_each);
     lua_pushinteger(L, *global_iter);
     lua_pushstring(L, "spectral");
-    lua_pushinteger(L, iparam[4]);
+    lua_pushinteger(L, params.stats.numMatvecs);
     lua_call(L, 3, 0);
   }
 }
