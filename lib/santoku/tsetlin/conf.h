@@ -1,3 +1,8 @@
+#ifndef TK_CONF_H
+#define TK_CONF_H
+
+#include <santoku/lua/utils.h>
+
 #include <assert.h>
 #include <errno.h>
 #include <lauxlib.h>
@@ -177,3 +182,65 @@ static inline int fast_norm (double mean, double variance)
   double n1 = sqrt(-2 * log(u1)) * sin(8 * atan(1) * u2);
   return (int) round(mean + sqrt(variance) * n1);
 }
+
+static inline void *tk_malloc_interleaved (
+  lua_State *L,
+  size_t *sp,
+  size_t s
+) {
+  void *p = (numa_available() == -1) ? malloc(s) : numa_alloc_interleaved(s);
+  if (!p) {
+    tk_error(L, "malloc failed", ENOMEM);
+    return NULL;
+  } else {
+    *sp = s;
+    return p;
+  }
+}
+
+static inline void *tk_ensure_interleaved (
+  lua_State *L,
+  size_t *s1p,
+  void *p0,
+  size_t s1,
+  bool copy
+) {
+  size_t s0 = *s1p;
+  if (s1 <= s0)
+    return p0;
+  void *p1 = tk_malloc_interleaved(L, s1p, s1);
+  if (!p1) {
+    tk_error(L, "realloc failed", ENOMEM);
+    return NULL;
+  } else {
+    if (copy)
+      memcpy(p1, p0, s0);
+    if (numa_available() == -1)
+      free(p0);
+    else
+      numa_free(p0, s0);
+    return p1;
+  }
+}
+
+static inline unsigned int tk_tsetlin_get_nthreads (
+  lua_State *L, int i, char *name, char *field
+) {
+  long ts;
+  unsigned int n_threads;
+  if (field != NULL)
+    n_threads = tk_lua_foptunsigned(L, i, name, field, 0);
+  else
+    n_threads = tk_lua_optunsigned(L, i, name, 0);
+  if (n_threads)
+    return n_threads;
+  ts = sysconf(_SC_NPROCESSORS_ONLN) - 1;
+  if (ts <= 0)
+    return (unsigned int) tk_lua_verror(L, 3, name, "sysconf", errno);
+  lua_pushinteger(L, ts);
+  n_threads = tk_lua_checkunsigned(L, -1, "sysconf");
+  lua_pop(L, 1);
+  return n_threads;
+}
+
+#endif

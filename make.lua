@@ -7,22 +7,40 @@ local env = {
   public = true,
 
   cflags = { "-march=native", "-fopenmp", "-std=gnu11", "-O3", "-Wall", "-Wextra", "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow", "-Wpointer-sign", "-Wno-unused-parameter", "-Wno-unused-but-set-variable" },
-  ldflags = { "-march=native", "-O3", "-lm", "-lpthread", "-lnuma" },
+  ldflags = { "-march=native", "-fopenmp", "-O3", "-lm", "-lpthread", "-lnuma" },
+
+  rules = {
+    ["tsetlin/capi.c$"] = {
+      cflags = { "-I$(shell luarocks show santoku --rock-dir)/include/" }
+    },
+    ["evaluator/capi.c$"] = {
+      cflags = { "-I$(shell luarocks show santoku --rock-dir)/include/" }
+    },
+    ["threshold.c$"] = {
+      cflags = { "-I$(shell luarocks show santoku --rock-dir)/include/" }
+    },
+    ["graph.c$"] = {
+      cflags = { "-I$(shell luarocks show santoku --rock-dir)/include/" }
+    },
+    ["spectral.c$"] = {
+      cflags = { "-I$(shell luarocks show santoku --rock-dir)/include/" }
+    },
+    ["corex.c$"] = {
+      cflags = { "-I$(shell luarocks show santoku --rock-dir)/include/" }
+    }
+  },
 
   dependencies = {
     "lua >= 5.1",
-    "santoku >= 0.0.257-1",
+    "santoku >= 0.0.258-1",
   },
 
   test = {
-    -- cflags = { "-fopt-info-vec=optimize.txt", "-fopt-info-vec-missed=optimize.txt", "-g3" },
-    -- ldflags = { "-fopt-info-vec=optimize.txt", "-fopt-info-vec-missed=optimize.txt", "-g3" },
     cflags = { "-g3" },
     ldflags = { "-g3" },
     dependencies = {
       "luacov >= 0.15.0-1",
-      "santoku-bitmap >= 0.0.55-1",
-      "santoku-matrix >= 0.0.34-1",
+      "santoku-matrix >= 0.0.36-1",
       "santoku-fs >= 0.0.34-1",
       "lua-cjson >= 2.1.0.10-1",
     }

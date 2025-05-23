@@ -9,6 +9,13 @@
 
 # Consider
 
+- Anchored CorEx for codebook learnability refinement and/or feature selection.
+    - Interpret codebook bits as an anchor matrix/vector A_i in CorEx, and for
+      each latent Y_i, add MI(Y_i, A_i) to the objective (weighted by alpha). This
+      pulls the codebook into alignment with sparse features while preserving
+      disentanglement.
+    - Spectral -> TCH -> CorEx (raw features + anchors) -> refined codebook
+
 - Better booleanizer:
     - If threshold levels is 1, pick the middle number, if 2, use the 1/3 and
       2/3s break points, and so on. Consider selecting levels dynamically instead

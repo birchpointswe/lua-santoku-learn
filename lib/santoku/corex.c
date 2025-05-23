@@ -1,24 +1,25 @@
 #define _GNU_SOURCE
 
-#include "lua.h"
-#include "lauxlib.h"
-#include "roaring.h"
-#include "roaring.c"
+#include <santoku/tsetlin/conf.h>
 
-#include <errno.h>
 #include <float.h>
-#include <math.h>
-#include <numa.h>
 #include <pthread.h>
+#include <numa.h>
+#include <math.h>
 #include <sched.h>
-#include <string.h>
 #include <time.h>
-#include <unistd.h>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wsign-conversion"
+#pragma GCC diagnostic ignored "-Wsign-compare"
 #pragma GCC diagnostic ignored "-Wunused-function"
+#include "khash.h"
 #include "kvec.h"
+KHASH_SET_INIT_INT64(i64)
+typedef khash_t(i64) i64_hash_t;
+#define tk_score_score_lt(a, b) ((a).score > (b).score)
+typedef struct { uint64_t v; double score; } tk_corex_score_t;
+KSORT_INIT(scores, tk_corex_score_t, tk_score_score_lt)
 #pragma GCC diagnostic pop
 
 #define MT_COREX "santoku_corex"
@@ -90,6 +91,8 @@ typedef struct tk_corex_s {
   double spa;
   double tmin;
   double ttc;
+  unsigned int tile_sblock;
+  unsigned int tile_vblock;
   double smoothing;
   unsigned int n_visible;
   unsigned int n_hidden;
@@ -104,330 +107,6 @@ typedef struct tk_corex_s {
   bool created_threads;
   unsigned int sigid;
 } tk_corex_t;
-
-static inline void tk_lua_callmod (
-  lua_State *L,
-  int nargs,
-  int nret,
-  const char *smod,
-  const char *sfn
-) {
-  lua_getglobal(L, "require"); // arg req
-  lua_pushstring(L, smod); // arg req smod
-  lua_call(L, 1, 1); // arg mod
-  lua_pushstring(L, sfn); // args mod sfn
-  lua_gettable(L, -2); // args mod fn
-  lua_remove(L, -2); // args fn
-  lua_insert(L, - nargs - 1); // fn args
-  lua_call(L, nargs, nret); // results
-}
-
-static inline void *tk_lua_checkuserdata (lua_State *L, int i, char *mt)
-{
-  if (mt == NULL && (lua_islightuserdata(L, i) || lua_isuserdata(L, i)))
-    return lua_touserdata(L, i);
-  void *p = luaL_checkudata(L, -1, mt);
-  lua_pop(L, 1);
-  return p;
-}
-
-static inline int tk_lua_error (lua_State *L, const char *err)
-{
-  lua_pushstring(L, err);
-  tk_lua_callmod(L, 1, 0, "santoku.error", "error");
-  return 0;
-}
-
-static inline FILE *tk_lua_fmemopen (lua_State *L, char *data, size_t size, const char *flag)
-{
-  FILE *fh = fmemopen(data, size, flag);
-  if (fh) return fh;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error opening string as file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-  return NULL;
-}
-
-static inline FILE *tk_lua_fopen (lua_State *L, const char *fp, const char *flag)
-{
-  FILE *fh = fopen(fp, flag);
-  if (fh) return fh;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error opening file");
-  lua_pushstring(L, fp);
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 4, 0, "santoku.error", "error");
-  return NULL;
-}
-
-static inline void tk_lua_fclose (lua_State *L, FILE *fh)
-{
-  if (!fclose(fh)) return;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error closing file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-}
-
-static inline void tk_lua_fwrite (lua_State *L, void *data, size_t size, size_t memb, FILE *fh)
-{
-  fwrite(data, size, memb, fh);
-  if (!ferror(fh)) return;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error writing to file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-}
-
-static inline void tk_lua_fread (lua_State *L, void *data, size_t size, size_t memb, FILE *fh)
-{
-  size_t r = fread(data, size, memb, fh);
-  if (!ferror(fh) || !r) return;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error reading from file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-}
-
-static inline int tk_lua_errno (lua_State *L, int err)
-{
-  lua_pushstring(L, strerror(errno));
-  lua_pushinteger(L, err);
-  tk_lua_callmod(L, 2, 0, "santoku.error", "error");
-  return 0;
-}
-
-static inline int tk_lua_errmalloc (lua_State *L)
-{
-  lua_pushstring(L, "Error in malloc");
-  tk_lua_callmod(L, 1, 0, "santoku.error", "error");
-  return 0;
-}
-
-static inline FILE *tk_lua_tmpfile (lua_State *L)
-{
-  FILE *fh = tmpfile();
-  if (fh) return fh;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error opening tmpfile");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-  return NULL;
-}
-
-static inline char *tk_lua_fslurp (lua_State *L, FILE *fh, size_t *len)
-{
-  if (fseek(fh, 0, SEEK_END) != 0) {
-    tk_lua_errno(L, errno);
-    return NULL;
-  }
-  long size = ftell(fh);
-  if (size < 0) {
-    tk_lua_errno(L, errno);
-    return NULL;
-  }
-  if (fseek(fh, 0, SEEK_SET) != 0) {
-    tk_lua_errno(L, errno);
-    return NULL;
-  }
-  char *buffer = malloc((size_t) size);
-  if (!buffer) {
-    tk_lua_errmalloc(L);
-    return NULL;
-  }
-  if (fread(buffer, 1, (size_t) size, fh) != (size_t) size) {
-    free(buffer);
-    tk_lua_errno(L, errno);
-    return NULL;
-  }
-  *len = (size_t) size;
-  return buffer;
-}
-
-static inline const char *tk_lua_fchecklstring (lua_State *L, int i, char *field, size_t *len)
-{
-  lua_getfield(L, i, field);
-  const char *s = luaL_checklstring(L, -1, len);
-  lua_pop(L, 1);
-  return s;
-}
-
-static inline unsigned int tk_lua_checkunsigned (lua_State *L, int i)
-{
-  lua_Integer l = luaL_checkinteger(L, i);
-  if (l < 0)
-    luaL_error(L, "value can't be negative");
-  if (l > UINT_MAX)
-    luaL_error(L, "value is too large");
-  return (unsigned int) l;
-}
-
-static inline lua_Number tk_lua_foptnumber (lua_State *L, int i, char *field, double d)
-{
-  lua_getfield(L, i, field);
-  lua_Number n = luaL_optnumber(L, -1, d);
-  lua_pop(L, 1);
-  return n;
-}
-
-static inline double tk_lua_checkposdouble (lua_State *L, int i)
-{
-  lua_Number l = luaL_checknumber(L, i);
-  if (l < 0)
-    luaL_error(L, "value can't be negative");
-  return (double) l;
-}
-
-static inline double tk_lua_fcheckposdouble (lua_State *L, int i, char *field)
-{
-  lua_getfield(L, i, field);
-  double n = tk_lua_checkposdouble(L, -1);
-  lua_pop(L, 1);
-  return n;
-}
-
-static inline lua_Integer tk_lua_fcheckunsigned (lua_State *L, int i, char *field)
-{
-  lua_getfield(L, i, field);
-  lua_Integer n = tk_lua_checkunsigned(L, -1);
-  lua_pop(L, 1);
-  return n;
-}
-
-static inline unsigned int tk_lua_optunsigned (lua_State *L, int i, unsigned int def)
-{
-  if (lua_type(L, i) < 1)
-    return def;
-  return tk_lua_checkunsigned(L, i);
-}
-
-static inline lua_Integer tk_lua_ftype (lua_State *L, int i, char *field)
-{
-  lua_getfield(L, i, field);
-  int t = lua_type(L, -1);
-  lua_pop(L, 1);
-  return t;
-}
-
-static inline void *tk_lua_fcheckuserdata (lua_State *L, int i, char *field, char *mt)
-{
-  lua_getfield(L, i, field);
-  void *p = luaL_checkudata(L, -1, mt);
-  lua_pop(L, 1);
-  return p;
-}
-
-static inline int tk_error (
-  lua_State *L,
-  const char *label,
-  int err
-) {
-  lua_pushstring(L, label);
-  lua_pushstring(L, strerror(err));
-  tk_lua_callmod(L, 2, 0, "santoku.error", "error");
-  return 1;
-}
-
-static inline void *tk_malloc_interleaved (
-  lua_State *L,
-  size_t *sp,
-  size_t s
-) {
-  void *p = (numa_available() == -1) ? malloc(s) : numa_alloc_interleaved(s);
-  if (!p) {
-    tk_error(L, "malloc failed", ENOMEM);
-    return NULL;
-  } else {
-    *sp = s;
-    return p;
-  }
-}
-
-static inline void *tk_ensure_interleaved (
-  lua_State *L,
-  size_t *s1p,
-  void *p0,
-  size_t s1,
-  bool copy
-) {
-  size_t s0 = *s1p;
-  if (s1 <= s0)
-    return p0;
-  void *p1 = tk_malloc_interleaved(L, s1p, s1);
-  if (!p1) {
-    tk_error(L, "realloc failed", ENOMEM);
-    return NULL;
-  } else {
-    if (copy)
-      memcpy(p1, p0, s0);
-    if (numa_available() == -1)
-      free(p0);
-    else
-      numa_free(p0, s0);
-    return p1;
-  }
-}
-
-static inline void *tk_malloc (
-  lua_State *L,
-  size_t s
-) {
-  void *p = malloc(s);
-  if (!p) {
-    tk_error(L, "malloc failed", ENOMEM);
-    return NULL;
-  } else {
-    return p;
-  }
-}
-
-static inline void *tk_realloc (
-  lua_State *L,
-  void *p,
-  size_t s
-) {
-  p = realloc(p, s);
-  if (!p) {
-    tk_error(L, "realloc failed", ENOMEM);
-    return NULL;
-  } else {
-    return p;
-  }
-}
-
-static inline int tk_lua_absindex (lua_State *L, int i)
-{
-  if (i < 0 && i > LUA_REGISTRYINDEX)
-    i += lua_gettop(L) + 1;
-  return i;
-}
-
-static inline void tk_lua_register (lua_State *L, luaL_Reg *regs, int nup)
-{
-  while (true) {
-    if ((*regs).name == NULL)
-      break;
-    for (int i = 0; i < nup; i ++)
-      lua_pushvalue(L, -nup); // t upsa upsb
-    lua_pushcclosure(L, (*regs).func, nup); // t upsa fn
-    lua_setfield(L, -nup - 2, (*regs).name); // t
-    regs ++;
-  }
-  lua_pop(L, nup);
-}
 
 static tk_corex_t *peek_corex (lua_State *L, int i)
 {
@@ -529,27 +208,6 @@ static inline int tk_corex_destroy (lua_State *L)
   lua_settop(L, 0);
   lua_pushvalue(L, lua_upvalueindex(1));
   return tk_corex_gc(L);
-}
-
-static uint64_t const multiplier = 6364136223846793005u;
-__thread uint64_t mcg_state = 0xcafef00dd15ea5e5u;
-
-static inline uint32_t fast_rand ()
-{
-  uint64_t x = mcg_state;
-  unsigned int count = (unsigned int) (x >> 61);
-  mcg_state = x * multiplier;
-  return (uint32_t) ((x ^ x >> 22) >> (22 + count));
-}
-
-static inline double fast_drand ()
-{
-  return ((double)fast_rand()) / ((double)UINT32_MAX);
-}
-
-static inline void seed_rand ()
-{
-  mcg_state = (uint64_t) pthread_self() ^ (uint64_t) time(NULL);
 }
 
 static inline int tk_corex_compress (lua_State *);
@@ -932,10 +590,6 @@ static inline int tk_corex_sort_lt (tk_corex_sort_t a, tk_corex_sort_t b)
 KSORT_INIT(pairs, tk_corex_sort_t, tk_corex_sort_lt);
 #pragma GCC diagnostic pop
 
-// TODO: Consider making this configurable
-#define S_BLOCK 1024
-#define V_BLOCK 2048
-
 typedef struct {
   tk_corex_sort_t *pairs;
   size_t capacity;
@@ -960,18 +614,20 @@ static void tk_corex_tile_pairs (
   lua_State *L,
   tk_corex_sort_t *pairs,
   size_t n_pairs,
-  unsigned int max_v
+  unsigned int max_v,
+  unsigned int tile_sblock,
+  unsigned int tile_vblock
 ) {
-  size_t num_s_tiles = ((n_pairs - 1) / S_BLOCK) + 1;
-  size_t num_v_tiles = (max_v / V_BLOCK) + 1;
+  size_t num_s_tiles = ((n_pairs - 1) / tile_sblock) + 1;
+  size_t num_v_tiles = (max_v / tile_vblock) + 1;
   size_t total_tiles = num_s_tiles * num_v_tiles;
   tk_corex_tile_t *tiles = tk_malloc(L, total_tiles * sizeof(tk_corex_tile_t));
   memset(tiles, 0, sizeof(tk_corex_tile_t) * total_tiles);
   for (size_t i = 0; i < n_pairs; i ++) {
     uint64_t s = pairs[i].s;
     unsigned int v = pairs[i].v;
-    size_t tile_s = (size_t)(s / S_BLOCK);
-    size_t tile_v = (size_t)(v / V_BLOCK);
+    size_t tile_s = (size_t)(s / tile_sblock);
+    size_t tile_v = (size_t)(v / tile_vblock);
     size_t tile_index = tile_s * num_v_tiles + tile_v;
     tk_corex_tile_push(L, &tiles[tile_index], pairs[i]);
   }
@@ -995,7 +651,9 @@ static inline uint64_t tk_corex_setup_bits (
   uint64_t *samples,
   unsigned int *visibles,
   unsigned int n_visible,
-  bool tile
+  bool tile,
+  unsigned int tile_sblock,
+  unsigned int tile_vblock
 ) {
   uint64_t n = 0;
   for (uint64_t i = 0; i < n_set_bits; i ++) {
@@ -1011,7 +669,7 @@ static inline uint64_t tk_corex_setup_bits (
   if (!tile)
     ks_introsort(pairs, n, pairs);
   else
-    tk_corex_tile_pairs(L, pairs, n, n_visible);
+    tk_corex_tile_pairs(L, pairs, n, n_visible, tile_sblock, tile_vblock);
   for (size_t i = 0; i < n; i ++) {
     samples[i]  = pairs[i].s;
     visibles[i] = pairs[i].v;
@@ -1080,9 +738,9 @@ static inline void tk_corex_init_log_pyx_unnorm_thread (
 
 static void *tk_corex_worker (void *datap)
 {
-  seed_rand();
   tk_corex_thread_data_t *data =
     (tk_corex_thread_data_t *) datap;
+  seed_rand(data->index);
   pthread_mutex_lock(&data->C->mutex);
   data->C->n_threads_done ++;
   if (data->C->n_threads_done == data->C->n_threads)
@@ -1367,16 +1025,19 @@ static inline int tk_corex_compress (lua_State *L)
 {
   tk_corex_t *C = peek_corex(L, lua_upvalueindex(1));
   lua_pushvalue(L, 1);
-  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
+  lua_pushboolean(L, true);
+  tk_lua_callmod(L, 2, 4, "santoku.matrix.integer", "view");
   int64_t *set_bits = (int64_t *) tk_lua_checkuserdata(L, -4, NULL);
   uint64_t n_set_bits = (uint64_t) luaL_checkinteger(L, -1);
-  unsigned int n_samples = tk_lua_optunsigned(L, 2, 1);
+  unsigned int n_samples = tk_lua_optunsigned(L, 2, "n_samples", 1);
+
+  kvec_t(int64_t) out = { 0, n_set_bits, set_bits };
 
   // TODO: Expose shrink via the api, and only realloc if new size is larger than old
   C->sort = tk_realloc(L, C->sort, n_set_bits * sizeof(tk_corex_sort_t));
   C->samples = tk_ensure_interleaved(L, &C->samples_len, C->samples, n_set_bits * sizeof(uint64_t), false);
   C->visibles = tk_ensure_interleaved(L, &C->visibles_len, C->visibles, n_set_bits * sizeof(unsigned int), false);
-  n_set_bits = tk_corex_setup_bits(L, set_bits, n_set_bits, C->sort, C->samples, C->visibles, C->n_visible, false);
+  n_set_bits = tk_corex_setup_bits(L, set_bits, n_set_bits, C->sort, C->samples, C->visibles, C->n_visible, false, 0, 0);
   tk_corex_setup_threads(L, C, n_set_bits, n_samples);
   C->mis = tk_realloc(L, C->mis, C->n_hidden * n_samples * sizeof(double));
   C->pyx = tk_realloc(L, C->pyx, C->n_hidden * n_samples * sizeof(double));
@@ -1387,21 +1048,21 @@ static inline int tk_corex_compress (lua_State *L)
     &C->stage, &C->mutex, &C->cond_stage, &C->cond_done,
     &C->n_threads_done, C->n_threads);
   // TODO: Parallelize output
-  size_t write = 0;
   for (unsigned int h = 0; h < C->n_hidden; h ++) {
     for (unsigned int s = 0; s < n_samples; s ++) {
       double py0 = C->pyx[h * n_samples + s];
       // TODO: should this be reversed?
       if (py0 < 0.5)
-        set_bits[write ++] = s * C->n_hidden + h;
+        kv_push(int64_t, out, s * C->n_hidden + h);
     }
   }
-  lua_pushlightuserdata(L, set_bits);
+  kv_resize(int64_t, out, out.n);
+  lua_pushlightuserdata(L, out.a);
   lua_pushinteger(L, 1);
-  lua_pushinteger(L, (int64_t) write);
+  lua_pushinteger(L, (int64_t) out.n);
   lua_pushvalue(L, 1);
   tk_lua_callmod(L, 4, 1, "santoku.matrix.integer", "from_view");
-  return 0;
+  return 1;
 }
 
 static inline void _tk_corex_train (
@@ -1424,7 +1085,7 @@ static inline void _tk_corex_train (
   C->sort = tk_malloc(L, n_set_bits * sizeof(tk_corex_sort_t));
   C->samples = tk_malloc_interleaved(L, &C->samples_len, n_set_bits * sizeof(uint64_t));
   C->visibles = tk_malloc_interleaved(L, &C->visibles_len, n_set_bits * sizeof(unsigned int));
-  n_set_bits = tk_corex_setup_bits(L, set_bits, n_set_bits, C->sort, C->samples, C->visibles, C->n_visible, true);
+  n_set_bits = tk_corex_setup_bits(L, set_bits, n_set_bits, C->sort, C->samples, C->visibles, C->n_visible, true, C->tile_sblock, C->tile_vblock);
   tk_corex_data_stats(
     n_set_bits,
     C->visibles,
@@ -1489,6 +1150,8 @@ static inline void tk_corex_init (
   double spa,
   double tmin,
   double ttc,
+  unsigned int tile_sblock,
+  unsigned int tile_vblock,
   unsigned int n_visible,
   unsigned int n_hidden,
   unsigned int n_threads
@@ -1500,6 +1163,8 @@ static inline void tk_corex_init (
   C->spa = spa;
   C->tmin = tmin;
   C->ttc = ttc;
+  C->tile_sblock = tile_sblock;
+  C->tile_vblock = tile_vblock;
   C->tcs = tk_malloc(L, C->n_hidden * sizeof(double));
   C->alpha = tk_malloc(L, C->n_hidden * C->n_visible * sizeof(double));
   C->log_py = tk_malloc(L, C->n_hidden * sizeof(double));
@@ -1549,8 +1214,8 @@ static inline int tk_corex_train (lua_State *L) {
   tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
   int64_t *set_bits = (int64_t *) tk_lua_checkuserdata(L, -4, NULL);
   uint64_t n_set_bits = (uint64_t) luaL_checkinteger(L, -1);
-  unsigned int n_samples = tk_lua_fcheckunsigned(L, 1, "samples");
-  unsigned int max_iter = tk_lua_fcheckunsigned(L, 1, "iterations");
+  unsigned int n_samples = tk_lua_fcheckunsigned(L, 1, "train", "samples");
+  unsigned int max_iter = tk_lua_fcheckunsigned(L, 1, "train", "iterations");
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
     lua_getfield(L, 1, "each");
@@ -1620,20 +1285,7 @@ static inline int tk_corex_load (lua_State *L)
   lua_pushvalue(L, -2); // fp ts c t c
   tk_lua_register(L, mt_fns, 1); // fp ts c t
   lua_remove(L, -2); // fp ts t
-  unsigned int n_threads;
-  if (lua_type(L, 2) != LUA_TNIL) {
-    // TODO: allow passing 0 to run everything on the main thread.
-    n_threads = tk_lua_checkunsigned(L, 2);
-    if (!n_threads)
-      return tk_lua_error(L, "threads must be at least 1\n");
-  } else {
-    long ts = sysconf(_SC_NPROCESSORS_ONLN) - 1;
-    if (ts <= 0)
-      return tk_error(L, "sysconf", errno);
-    lua_pushinteger(L, ts);
-    n_threads = tk_lua_checkunsigned(L, -1);
-    lua_pop(L, 1);
-  }
+  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 2, "threads", NULL);
   size_t len;
   const char *data = luaL_checklstring(L, 1, &len);
   bool isstr = lua_type(L, 3) == LUA_TBOOLEAN && lua_toboolean(L, 3);
@@ -1669,31 +1321,22 @@ static inline int tk_corex_load (lua_State *L)
 static inline int tk_corex_create (lua_State *L)
 {
   lua_settop(L, 1);
-  unsigned int n_visible = tk_lua_fcheckunsigned(L, 1, "visible");
-  unsigned int n_hidden = tk_lua_fcheckunsigned(L, 1, "hidden");
-  double lam = tk_lua_foptnumber(L, 1, "lam", 0.3);
-  double spa = tk_lua_foptnumber(L, 1, "spa", 10.0);
-  double tmin = tk_lua_foptnumber(L, 1, "tmin", 1.0);
-  double ttc = tk_lua_foptnumber(L, 1, "ttc", 500.0);
-  unsigned int n_threads;
-  if (tk_lua_ftype(L, 1, "threads") != LUA_TNIL) {
-    // TODO: allow passing 0 to run everything on the main thread.
-    n_threads = tk_lua_fcheckunsigned(L, 1, "threads");
-    if (!n_threads)
-      return tk_lua_error(L, "threads must be at least 1\n");
-  } else {
-    long ts = sysconf(_SC_NPROCESSORS_ONLN) - 1;
-    if (ts <= 0)
-      return tk_error(L, "sysconf", errno);
-    lua_pushinteger(L, ts);
-    n_threads = tk_lua_checkunsigned(L, -1);
-    lua_pop(L, 1);
-  }
+  unsigned int n_visible = tk_lua_fcheckunsigned(L, 1, "create", "visible");
+  unsigned int n_hidden = tk_lua_fcheckunsigned(L, 1, "create", "hidden");
+  if (n_hidden < BITS || BITS_MOD(n_hidden) != 0)
+    luaL_error(L, "n_hidden must be a multiple of " STR(BITS));
+  double lam = tk_lua_foptnumber(L, 1, "create", "lam", 0.3);
+  double spa = tk_lua_foptnumber(L, 1, "create", "spa", 10.0);
+  double tmin = tk_lua_foptnumber(L, 1, "create", "tmin", 1.0);
+  double ttc = tk_lua_foptnumber(L, 1, "create", "ttc", 500.0);
+  unsigned int tile_sblock = tk_lua_foptunsigned(L, 1, "create", "tile_s", 1024);
+  unsigned int tile_vblock = tk_lua_foptunsigned(L, 1, "create", "tile_v", 2048);
+  unsigned int n_threads = tk_tsetlin_get_nthreads(L, 1, "create", "threads");
   tk_corex_t *C = (tk_corex_t *)
     lua_newuserdata(L, sizeof(tk_corex_t)); // c
   luaL_getmetatable(L, MT_COREX); // c mt
   lua_setmetatable(L, -2); // c
-  tk_corex_init(L, C, lam, spa, tmin, ttc, n_visible, n_hidden, n_threads); // c
+  tk_corex_init(L, C, lam, spa, tmin, ttc, tile_sblock, tile_vblock, n_visible, n_hidden, n_threads); // c
   lua_newtable(L); // c t
   lua_pushvalue(L, -2); // c t c
   tk_lua_register(L, mt_fns, 1); // t

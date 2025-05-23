@@ -27,9 +27,8 @@ SOFTWARE.
 
 #define _GNU_SOURCE
 
-#include "lua.h"
-#include "lauxlib.h"
-#include "conf.h"
+#include <santoku/lua/utils.h>
+#include <santoku/tsetlin/conf.h>
 
 #define TK_TSETLIN_MT "santoku_tsetlin"
 
@@ -174,478 +173,6 @@ typedef struct {
 
 #define tm_state_actions(tm, clause) \
   (&(tm)->actions[(clause) * (tm)->input_chunks])
-
-static inline unsigned int contrastive_loss (
-  tk_bits_t *enc_a,
-  tk_bits_t *enc_b,
-  unsigned int margin,
-  unsigned int chunks,
-  bool label
-) {
-  unsigned int dist = hamming(enc_a, enc_b, chunks);
-  if (label) {
-    if (dist < margin)
-      return 0;
-    return margin - dist;
-  } else {
-    if (dist > margin)
-      return 0;
-    return dist - margin;
-  }
-}
-
-static inline void tk_lua_callmod (
-  lua_State *L,
-  int nargs,
-  int nret,
-  const char *smod,
-  const char *sfn
-) {
-  lua_getglobal(L, "require"); // arg req
-  lua_pushstring(L, smod); // arg req smod
-  lua_call(L, 1, 1); // arg mod
-  lua_pushstring(L, sfn); // args mod sfn
-  lua_gettable(L, -2); // args mod fn
-  lua_remove(L, -2); // args fn
-  lua_insert(L, - nargs - 1); // fn args
-  lua_call(L, nargs, nret); // results
-}
-
-static inline int tk_lua_absindex (lua_State *L, int i)
-{
-  if (i < 0 && i > LUA_REGISTRYINDEX)
-    i += lua_gettop(L) + 1;
-  return i;
-}
-
-static inline int tk_error (
-  lua_State *L,
-  const char *label,
-  int err
-) {
-  lua_pushstring(L, label);
-  lua_pushstring(L, strerror(err));
-  tk_lua_callmod(L, 2, 0, "santoku.error", "error");
-  return 1;
-}
-
-static inline void *tk_realloc (
-  lua_State *L,
-  void *p,
-  size_t s
-) {
-  p = realloc(p, s);
-  if (!p) {
-    tk_error(L, "realloc failed", ENOMEM);
-    return NULL;
-  } else {
-    return p;
-  }
-}
-
-static inline void *tk_malloc_interleaved (
-  lua_State *L,
-  size_t *sp,
-  size_t s
-) {
-  void *p = (numa_available() == -1) ? malloc(s) : numa_alloc_interleaved(s);
-  if (!p) {
-    tk_error(L, "malloc failed", ENOMEM);
-    return NULL;
-  } else {
-    *sp = s;
-    return p;
-  }
-}
-
-static inline void *tk_ensure_interleaved (
-  lua_State *L,
-  size_t *s1p,
-  void *p0,
-  size_t s1,
-  bool copy
-) {
-  size_t s0 = *s1p;
-  if (s1 <= s0)
-    return p0;
-  void *p1 = tk_malloc_interleaved(L, s1p, s1);
-  if (!p1) {
-    tk_error(L, "realloc failed", ENOMEM);
-    return NULL;
-  } else {
-    if (copy)
-      memcpy(p1, p0, s0);
-    numa_free(p0, s0);
-    return p1;
-  }
-}
-
-static inline void *tk_malloc_aligned (
-  lua_State *L,
-  size_t s,
-  size_t a
-) {
-  void *p = NULL;
-  if (posix_memalign((void **)&p, a, s) != 0)
-    tk_error(L, "malloc failed", ENOMEM);
-  return p;
-}
-
-static inline void *tk_malloc (
-  lua_State *L,
-  size_t s
-) {
-  void *p = malloc(s);
-  if (!p) {
-    tk_error(L, "malloc failed", ENOMEM);
-    return NULL;
-  } else {
-    return p;
-  }
-}
-
-static inline int tk_lua_verror (lua_State *L, int n, ...) {
-  va_list args;
-  va_start(args, n);
-  for (int i = 0; i < n; i ++) {
-    const char *str = va_arg(args, const char *);
-    lua_pushstring(L, str);
-  }
-  va_end(args);
-  tk_lua_callmod(L, n, 0, "santoku.error", "error");
-  return 0;
-}
-
-static inline int tk_lua_error (lua_State *L, const char *err)
-{
-  lua_pushstring(L, err);
-  tk_lua_callmod(L, 1, 0, "santoku.error", "error");
-  return 0;
-}
-
-// TODO: include the field name in error
-static inline lua_Integer tk_lua_ftype (lua_State *L, int i, char *field)
-{
-  lua_getfield(L, i, field);
-  int t = lua_type(L, -1);
-  lua_pop(L, 1);
-  return t;
-}
-
-static inline const char *tk_lua_checkstring (lua_State *L, int i, char *name)
-{
-  if (lua_type(L, i) != LUA_TSTRING)
-    tk_lua_verror(L, 3, name, "value is not a string");
-  return luaL_checkstring(L, i);
-}
-
-static inline const char *tk_lua_fchecklstring (lua_State *L, int i, size_t *lp, char *name, char *field)
-{
-  lua_getfield(L, i, field);
-  if (lua_type(L, -1) != LUA_TSTRING)
-    tk_lua_verror(L, 3, name, field, "field is not a string");
-  const char *s = luaL_checklstring(L, -1, lp);
-  lua_pop(L, 1);
-  return s;
-}
-
-static inline const char *tk_lua_fcheckstring (lua_State *L, int i, char *name, char *field)
-{
-  lua_getfield(L, i, field);
-  if (lua_type(L, -1) != LUA_TSTRING)
-    tk_lua_verror(L, 3, name, field, "field is not a string");
-  const char *s = luaL_checkstring(L, -1);
-  lua_pop(L, 1);
-  return s;
-}
-
-static inline double tk_lua_checkposdouble (lua_State *L, int i, char *name)
-{
-  if (lua_type(L, i) != LUA_TNUMBER)
-    tk_lua_verror(L, 2, name, "value is not a positive number");
-  lua_Number l = luaL_checknumber(L, i);
-  if (l < 0)
-    tk_lua_verror(L, 2, name, "value is not a positive number");
-  return (double) l;
-}
-
-static inline double tk_lua_optposdouble (lua_State *L, int i, double def, char *name)
-{
-  if (lua_type(L, i) < 1)
-    return def;
-  lua_Number l = luaL_checknumber(L, i);
-  if (l < 0)
-    luaL_error(L, "value can't be negative");
-  return (double) l;
-}
-
-static inline bool tk_lua_checkboolean (lua_State *L, int i)
-{
-  if (lua_type(L, i) == LUA_TNIL)
-    return false;
-  luaL_checktype(L, i, LUA_TBOOLEAN);
-  return lua_toboolean(L, i);
-}
-
-static inline double tk_lua_fcheckposdouble (lua_State *L, int i, char *name, char *field)
-{
-  lua_getfield(L, i, field);
-  if (lua_type(L, -1) != LUA_TNUMBER)
-    tk_lua_verror(L, 3, name, field, "field is not a positive number");
-  lua_Number l = luaL_checknumber(L, -1);
-  if (l < 0)
-    tk_lua_verror(L, 3, name, field, "field is not a positive number");
-  lua_pop(L, 1);
-  return l;
-}
-
-static inline double tk_lua_foptposdouble (lua_State *L, int i, double def, char *name, char *field)
-{
-  lua_getfield(L, i, field);
-  if (lua_type(L, -1) == LUA_TNIL) {
-    lua_pop(L, 1);
-    return def;
-  }
-  if (lua_type(L, -1) != LUA_TNUMBER)
-    tk_lua_verror(L, 3, name, field, "field is not a positive number");
-  lua_Number l = luaL_checknumber(L, -1);
-  if (l < 0)
-    tk_lua_verror(L, 3, name, field, "field is not a positive number");
-  lua_pop(L, 1);
-  return l;
-}
-
-static inline unsigned int tk_lua_checkunsigned (lua_State *L, int i, char *name)
-{
-  if (lua_type(L, i) != LUA_TNUMBER)
-    tk_lua_verror(L, 2, name, "value is not a positive integer");
-  lua_Integer l = luaL_checkinteger(L, i);
-  if (l < 0)
-    tk_lua_verror(L, 2, name, "value is not a positive integer");
-  if (l > UINT_MAX)
-    luaL_error(L, "value is too large");
-  return (unsigned int) l;
-}
-
-static inline unsigned int tk_lua_fcheckunsigned (lua_State *L, int i, char *name, char *field)
-{
-  lua_getfield(L, i, field);
-  if (lua_type(L, -1) != LUA_TNUMBER)
-    tk_lua_verror(L, 3, name, field, "field is not a positive integer");
-  lua_Integer l = luaL_checkinteger(L, -1);
-  if (l < 0)
-    tk_lua_verror(L, 3, name, field, "field is not a positive integer");
-  lua_pop(L, 1);
-  return l;
-}
-
-static inline bool tk_lua_fcheckboolean (lua_State *L, int i, char *name, char *field)
-{
-  lua_getfield(L, i, field);
-  if (lua_type(L, -1) != LUA_TBOOLEAN)
-    tk_lua_verror(L, 3, name, field, "field is not a boolean");
-  luaL_checktype(L, -1, LUA_TBOOLEAN);
-  bool n = lua_toboolean(L, -1);
-  lua_pop(L, 1);
-  return n;
-}
-
-static inline unsigned int tk_lua_foptunsigned (lua_State *L, int i, unsigned int def, char *name, char *field)
-{
-  lua_getfield(L, i, field);
-  if (lua_type(L, -1) == LUA_TNIL) {
-    lua_pop(L, 1);
-    return def;
-  }
-  if (lua_type(L, -1) != LUA_TNUMBER)
-    tk_lua_verror(L, 3, name, field, "field is not a positive integer");
-  lua_Integer l = luaL_checkinteger(L, -1);
-  if (l < 0)
-    tk_lua_verror(L, 3, name, field, "field is not a positive integer");
-  lua_pop(L, 1);
-  return l;
-}
-
-static inline unsigned int tk_lua_optunsigned (lua_State *L, int i, unsigned int def, char *name)
-{
-  if (lua_type(L, i) == LUA_TNIL)
-    return def;
-  if (lua_type(L, i) != LUA_TNUMBER)
-    tk_lua_verror(L, 2, name, "value is not a positive integer");
-  lua_Integer l = luaL_checkinteger(L, i);
-  if (l < 0)
-    tk_lua_verror(L, 2, name, "value is not a positive integer");
-  lua_pop(L, 1);
-  return l;
-}
-
-static inline bool tk_lua_optboolean (lua_State *L, int i, bool def, char *name)
-{
-  if (lua_type(L, i) == LUA_TNIL)
-    return def;
-  if (lua_type(L, i) != LUA_TBOOLEAN)
-    tk_lua_verror(L, 3, name, "value is not a boolean");
-  return lua_toboolean(L, i);
-}
-
-static inline bool tk_lua_foptboolean (lua_State *L, int i, bool def, char *name, char *field)
-{
-  lua_getfield(L, i, field);
-  if (lua_type(L, -1) == LUA_TNIL) {
-    lua_pop(L, 1);
-    return def;
-  }
-  if (lua_type(L, -1) != LUA_TBOOLEAN)
-    tk_lua_verror(L, 3, name, field, "field is not a boolean or nil");
-  bool b = lua_toboolean(L, -1);
-  lua_pop(L, 1);
-  return b;
-}
-
-static inline int tk_lua_errmalloc (lua_State *L)
-{
-  lua_pushstring(L, "Error in malloc");
-  tk_lua_callmod(L, 1, 0, "santoku.error", "error");
-  return 0;
-}
-
-static inline int tk_lua_errno (lua_State *L, int err)
-{
-  lua_pushstring(L, strerror(errno));
-  lua_pushinteger(L, err);
-  tk_lua_callmod(L, 2, 0, "santoku.error", "error");
-  return 0;
-}
-
-static inline FILE *tk_lua_tmpfile (lua_State *L)
-{
-  FILE *fh = tmpfile();
-  if (fh) return fh;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error opening tmpfile");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-  return NULL;
-}
-
-static inline FILE *tk_lua_fmemopen (lua_State *L, char *data, size_t size, const char *flag)
-{
-  FILE *fh = fmemopen(data, size, flag);
-  if (fh) return fh;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error opening string as file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-  return NULL;
-}
-
-static inline FILE *tk_lua_fopen (lua_State *L, const char *fp, const char *flag)
-{
-  FILE *fh = fopen(fp, flag);
-  if (fh) return fh;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error opening file");
-  lua_pushstring(L, fp);
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 4, 0, "santoku.error", "error");
-  return NULL;
-}
-
-static inline void tk_lua_fclose (lua_State *L, FILE *fh)
-{
-  if (!fclose(fh)) return;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error closing file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-}
-
-static inline void tk_lua_fwrite (lua_State *L, void *data, size_t size, size_t memb, FILE *fh)
-{
-  fwrite(data, size, memb, fh);
-  if (!ferror(fh)) return;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error writing to file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-}
-
-static inline void tk_lua_fread (lua_State *L, void *data, size_t size, size_t memb, FILE *fh)
-{
-  size_t r = fread(data, size, memb, fh);
-  if (!ferror(fh) || !r) return;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error reading from file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-}
-
-static inline void tk_lua_fseek (lua_State *L, size_t size, size_t memb, FILE *fh)
-{
-  int r = fseek(fh, (long) (size * memb), SEEK_CUR);
-  if (!ferror(fh) || !r) return;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error reading from file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-}
-
-static inline char *tk_lua_fslurp (lua_State *L, FILE *fh, size_t *len)
-{
-  if (fseek(fh, 0, SEEK_END) != 0) {
-    tk_lua_errno(L, errno);
-    return NULL;
-  }
-  long size = ftell(fh);
-  if (size < 0) {
-    tk_lua_errno(L, errno);
-    return NULL;
-  }
-  if (fseek(fh, 0, SEEK_SET) != 0) {
-    tk_lua_errno(L, errno);
-    return NULL;
-  }
-  char *buffer = malloc((size_t) size);
-  if (!buffer) {
-    tk_lua_errmalloc(L);
-    return NULL;
-  }
-  if (fread(buffer, 1, (size_t) size, fh) != (size_t) size) {
-    free(buffer);
-    tk_lua_errno(L, errno);
-    return NULL;
-  }
-  *len = (size_t) size;
-  return buffer;
-}
-
-static inline void tk_lua_register (lua_State *L, luaL_Reg *regs, int nup)
-{
-  while (true) {
-    if ((*regs).name == NULL)
-      break;
-    for (int i = 0; i < nup; i ++)
-      lua_pushvalue(L, -nup); // t upsa upsb
-    lua_pushcclosure(L, (*regs).func, nup); // t upsa fn
-    lua_setfield(L, -nup - 2, (*regs).name); // t
-    regs ++;
-  }
-  lua_pop(L, nup);
-}
 
 static inline void tk_tsetlin_init_streams (
   tk_bits_t *mask,
@@ -996,26 +523,6 @@ static inline int tk_tsetlin_init_encoder (
   return 0;
 }
 
-static inline unsigned int tk_tsetlin_get_nthreads (
-  lua_State *L, int i, char *name, char *field
-) {
-  long ts;
-  unsigned int n_threads;
-  if (field != NULL)
-    n_threads = tk_lua_foptunsigned(L, i, 0, name, field);
-  else
-    n_threads = tk_lua_optunsigned(L, i, 0, name);
-  if (n_threads)
-    return n_threads;
-  ts = sysconf(_SC_NPROCESSORS_ONLN) - 1;
-  if (ts <= 0)
-    return (unsigned int) tk_lua_verror(L, 3, name, "sysconf", errno);
-  lua_pushinteger(L, ts);
-  n_threads = tk_lua_checkunsigned(L, -1, "sysconf");
-  lua_pop(L, 1);
-  return n_threads;
-}
-
 static inline void tk_tsetlin_create_classifier (lua_State *L)
 {
   tsetlin_t *tm = tk_tsetlin_alloc_classifier(L, true);
@@ -1025,9 +532,9 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
       tk_lua_fcheckunsigned(L, 2, "create classifier", "classes"),
       tk_lua_fcheckunsigned(L, 2, "create classifier", "features"),
       tk_lua_fcheckunsigned(L, 2, "create classifier", "clauses"),
-      tk_lua_foptunsigned(L, 2, 8, "create classifier", "state"),
+      tk_lua_foptunsigned(L, 2, "create classifier", "state", 8),
       tk_lua_fcheckposdouble(L, 2, "create classifier", "target"),
-      tk_lua_foptboolean(L, 2, true, "create classifier", "boost"),
+      tk_lua_foptboolean(L, 2, "create classifier", "boost", true),
       tk_lua_fcheckposdouble(L, 2, "create classifier", "negative"),
       tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity"),
       tk_tsetlin_get_nthreads(L, 2, "create classifier", "threads"));
@@ -1044,10 +551,10 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
       tk_lua_fcheckunsigned(L, 2, "create encoder", "hidden"),
       tk_lua_fcheckunsigned(L, 2, "create encoder", "visible"),
       tk_lua_fcheckunsigned(L, 2, "create encoder", "clauses"),
-      tk_lua_foptunsigned(L, 2, 8, "create encoder", "state"),
+      tk_lua_foptunsigned(L, 2, "create encoder", "state", 8),
       tk_lua_fcheckposdouble(L, 2, "create encoder", "target"),
-      tk_lua_foptboolean(L, 2, true, "create encoder", "boost"),
-      tk_lua_foptposdouble(L, 2, 1.0, "create encoder", "negative"), // note used in encoder
+      tk_lua_foptboolean(L, 2, "create encoder", "boost", true),
+      tk_lua_foptposdouble(L, 2, "create encoder", "negative", 1.0), // note used in encoder
       tk_lua_fcheckposdouble(L, 2, "create encoder", "specificity"),
       tk_tsetlin_get_nthreads(L, 2, "create encoder", "threads"));
 
@@ -1489,7 +996,7 @@ static inline int tk_tsetlin_train_classifier (
 ) {
 
   unsigned int n = tk_lua_fcheckunsigned(L, 2, "train", "samples");
-  tk_bits_t *ps = (tk_bits_t *) tk_lua_fcheckstring(L, 2, "train", "problems");
+  tk_bits_t *ps = (tk_bits_t *) tk_lua_fcheckustring(L, 2, "train", "problems");
   unsigned int *ss = (unsigned int *) tk_lua_fcheckstring(L, 2, "train", "solutions");
   unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
 
@@ -1555,10 +1062,8 @@ static inline int tk_tsetlin_train_encoder (
 ) {
 
   unsigned int n = tk_lua_fcheckunsigned(L, 2, "train", "samples");
-  size_t ps_len;
-  tk_bits_t *ps = (tk_bits_t *) tk_lua_fchecklstring(L, 2, &ps_len, "train", "sentences");
-  size_t ls_len;
-  tk_bits_t *ls = (tk_bits_t *) tk_lua_fchecklstring(L, 2, &ls_len, "train", "codes");
+  tk_bits_t *ps = (tk_bits_t *) tk_lua_fcheckustring(L, 2, "train", "sentences");
+  tk_bits_t *ls = (tk_bits_t *) tk_lua_fcheckustring(L, 2, "train", "codes");
   unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
   tm->encodings = tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * tm->class_chunks * sizeof(tk_bits_t), false);
 
