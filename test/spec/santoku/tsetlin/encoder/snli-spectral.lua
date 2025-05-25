@@ -4,6 +4,7 @@ local threshold = require("santoku.tsetlin.threshold")
 local utc = require("santoku.utc")
 local tm = require("santoku.tsetlin")
 local ds = require("santoku.tsetlin.dataset")
+local corex = require("santoku.corex")
 local tokenizer = require("santoku.tsetlin.tokenizer")
 local graph = require("santoku.tsetlin.graph")
 local spectral = require("santoku.tsetlin.spectral")
@@ -14,18 +15,23 @@ local fs = require("santoku.fs")
 local str = require("santoku.string")
 
 local TRAIN_TEST_RATIO = 0.8
-local TM_ITERS = 20
-local MAX_RECORDS = nil
+local TM_ITERS = 10
+local MAX_RECORDS = 1000
 local EVALUATE_EVERY = 1
 local THREADS = nil
 
 local HIDDEN = 64
-local CLAUSES = 512
+local CLAUSES = 1024
 local TARGET = 0.1
 local SPECIFICITY = 60
 
-local GRAPH_KNN = 2
-local TOP_ALGO = "chi2"
+local GRAPH_KNN = 1
+local TRANS_HOPS = 1
+local TRANS_POS = 1
+local TRANS_NEG = 1
+local COREX_TOP_ITERS = 300
+local COREX_TOP_ANCHOR = 1000.0
+local TOP_ALGO = "chi2" -- mi, chi2, or corex
 local TOP_K = 1024
 
 local TOKENIZER_CONFIG = {
@@ -80,9 +86,12 @@ test("tsetlin", function ()
     pos = train.pos_enriched,
     neg = train.neg_enriched,
     knn = GRAPH_KNN,
-    each = function (e, s, b, n, dt)
+    trans_hops = TRANS_HOPS,
+    trans_pos = TRANS_POS,
+    trans_neg = TRANS_NEG,
+    each = function (s, b, n, dt)
       local d, dd = stopwatch()
-      str.printf("Epoch: %3d  Time: %6.2f %6.2f  Graph: %-9s  Components: %-6d  Positives: %3d  Negatives: %3d\n", e, d, dd, dt, s, b, n) -- luacheck: ignore
+      str.printf("Time: %6.2f %6.2f  Graph: %-9s  Components: %-6d  Positives: %3d  Negatives: %3d\n", d, dd, dt, s, b, n) -- luacheck: ignore
     end
   })
 
@@ -113,19 +122,43 @@ test("tsetlin", function ()
     end
   })
 
-  train.codes0 = mtx.raw_bitmap(train.codes0, train.n_sentences, HIDDEN)
+  train.codes0_raw = mtx.raw_bitmap(train.codes0, train.n_sentences, HIDDEN)
   train.similarity0 = eval.encoding_similarity(
-    train.codes0, train.pos, train.neg, train.n_sentences, HIDDEN)
+    train.codes0_raw, train.pos, train.neg, train.n_sentences, HIDDEN)
   str.printi("AUC: %.2f#(auc) | F1: %.2f#(f1) | Precision: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", -- luacheck: ignore
     train.similarity0)
 
-  train.entropy0 = eval.codebook_stats(train.codes0, train.n_sentences, HIDDEN)
+  train.entropy0 = eval.codebook_stats(train.codes0_raw, train.n_sentences, HIDDEN)
   str.printi("Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)\n",
     train.entropy0)
 
   local top_v =
-    TOP_ALGO == "chi2" and mtx.top_chi2(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K) or -- luacheck: ignore
-    TOP_ALGO == "mi" and mtx.top_mi(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K) or (function () -- luacheck: ignore
+    TOP_ALGO == "chi2" and mtx.top_chi2(train.sentences, train.codes0_raw, train.n_sentences, dataset.n_features, HIDDEN, TOP_K) or -- luacheck: ignore
+    TOP_ALGO == "mi" and mtx.top_mi(train.sentences, train.codes0_raw, train.n_sentences, dataset.n_features, HIDDEN, TOP_K) or -- luacheck: ignore
+    TOP_ALGO == "corex" and (function ()
+      print("Creating Corex")
+      train.sel_corpus = mtx.create(train.sentences)
+      mtx.extend_bits(train.sel_corpus, train.codes0, dataset.n_features, HIDDEN)
+      local cor = corex.create({
+        visible = dataset.n_features + HIDDEN,
+        hidden = HIDDEN,
+        anchor = COREX_TOP_ANCHOR,
+        threads = THREADS,
+      })
+      print("Training Corex")
+      cor.train({
+        corpus = train.sel_corpus,
+        samples = train.n_sentences,
+        iterations = COREX_TOP_ITERS,
+        each = function (epoch, tc, dev)
+          local duration, total = stopwatch()
+          str.printf("Epoch  %-4d   Time  %6.3f  %6.3f   Convergence  %4.6f  %4.6f\n",
+            epoch, duration, total, tc, dev)
+        end
+      })
+      print("Extracting top features")
+      return cor.top_visible(TOP_K)
+    end)() or (function ()
       -- Fallback to all words
       local t = mtx.create(1, dataset.n_features)
       mtx.fill_indices(t)
@@ -135,11 +168,11 @@ test("tsetlin", function ()
   local n_top_v = mtx.columns(top_v)
   print("After top k filter", n_top_v)
 
-  -- -- Show top words
-  -- local words = tokenizer.index()
-  -- for id in it.take(32, mtx.each(top_v)) do
-  --   print(id, words[id + 1])
-  -- end
+  -- Show top words
+  local words = tokenizer.index()
+  for id in it.take(32, mtx.each(top_v)) do
+    print(id, words[id + 1])
+  end
 
   print("Re-encoding train/test with top features")
   tokenizer.restrict(top_v)
@@ -172,7 +205,7 @@ test("tsetlin", function ()
   stopwatch = utc.stopwatch()
   t.train({
     sentences = train.sentences,
-    codes = train.codes0,
+    codes = train.codes0_raw,
     samples = train.n_sentences,
     iterations = TM_ITERS,
     each = function (epoch)
@@ -180,7 +213,7 @@ test("tsetlin", function ()
         train.codes1 = t.predict(train.sentences, train.n_sentences)
         test.codes1 = t.predict(test.sentences, test.n_sentences)
         train.accuracy0 = eval.encoding_accuracy(
-          train.codes1, train.codes0, train.n_sentences, HIDDEN)
+          train.codes1, train.codes0_raw, train.n_sentences, HIDDEN)
         train.similarity1 = eval.encoding_similarity(
           train.codes1, train.pos, train.neg, train.n_sentences, HIDDEN)
         test.similarity1 = eval.encoding_similarity(
@@ -215,7 +248,7 @@ test("tsetlin", function ()
     train.codes1 = t.predict(train.sentences, train.n_sentences)
     test.codes1 = t.predict(test.sentences, test.n_sentences)
     train.accuracy0 = eval.encoding_accuracy(
-      train.codes1, train.codes0, train.n_sentences, HIDDEN)
+      train.codes1, train.codes0_raw, train.n_sentences, HIDDEN)
     train.similarity1 = eval.encoding_similarity(
       train.codes1, train.pos, train.neg, train.n_sentences, HIDDEN)
     test.similarity1 = eval.encoding_similarity(

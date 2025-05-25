@@ -1,5 +1,6 @@
-#include "lua.h"
-#include "lauxlib.h"
+#include <santoku/klib.h>
+#include <lua.h>
+#include <lauxlib.h>
 #include <stdint.h>
 #include <assert.h>
 #include <errno.h>
@@ -10,14 +11,6 @@
 #include <math.h>
 #include <assert.h>
 #include <ctype.h>
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wsign-conversion"
-#pragma GCC diagnostic ignored "-Wunused-function"
-#include "khash.h"
-#include "kbtree.h"
-#include "kvec.h"
-#pragma GCC diagnostic pop
 
 #define MT_BITMAP "santoku_bitmap"
 #define MT_TOKENIZER "santoku_tokenizer"
@@ -276,22 +269,14 @@ typedef struct {
   int df;
 } tk_sort_pair_t;
 
-static inline int tk_sort_pair_cmp (tk_sort_pair_t a, tk_sort_pair_t b)
-{
-  return (int) (a.df < b.df) - (int) (b.df < a.df);
-}
+#define tk_sort_pair_lt(a, b) ((a).df < (b).df)
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wsign-conversion"
-#pragma GCC diagnostic ignored "-Wunused-function"
-KBTREE_INIT(sort, tk_sort_pair_t, tk_sort_pair_cmp);
-#pragma GCC diagnostic pop
+KSORT_INIT(sort_pair, tk_sort_pair_t, tk_sort_pair_lt);
 KHASH_MAP_INIT_STR(ids, int);
 KHASH_MAP_INIT_INT(strs, char *);
 KHASH_MAP_INIT_INT(dfs, int);
 KHASH_SET_INIT_INT(seen);
 
-typedef kbtree_t(sort) tb_sort_t;
 typedef khash_t(ids) tb_ids_t;
 typedef khash_t(strs) tb_strs_t;
 typedef khash_t(dfs) tb_df_t;
@@ -320,6 +305,8 @@ typedef struct {
   tb_tokens_t tokens;
   tb_tokens_t window;
   tb_token_t tmp_token;
+  tb_token_t tmp_skipgram;
+  tb_token_t tmp_append;
   int window_size;
   bool collected;
   bool finalized;
@@ -341,6 +328,8 @@ static inline int tb_tokenizer_gc (lua_State *L)
       free((char *) kh_value(tokenizer->strs, k));
   kv_destroy(tokenizer->tokens);
   kv_destroy(tokenizer->tmp_token);
+  kv_destroy(tokenizer->tmp_append);
+  kv_destroy(tokenizer->tmp_skipgram);
   kv_destroy(tokenizer->window);
   kh_destroy(ids, tokenizer->ids);
   kh_destroy(strs, tokenizer->strs);
@@ -441,10 +430,10 @@ static inline int tb_tokenizer_str_id (
 static inline int tb_tokenizer_new_token (
   tb_tokenizer_t *tokenizer,
   char **tokp,
-  bool train
+  bool train,
+  size_t len
 ) {
   char *tok = *tokp;
-  size_t len = strlen(tok);
   int id, absent;
   khint_t k = kh_get(ids, tokenizer->ids, tok);
   if (k != kh_end(tokenizer->ids)) {
@@ -453,14 +442,15 @@ static inline int tb_tokenizer_new_token (
   } else if (!train) {
     return -1;
   } else {
-    *tokp = strndup(tok, len);
+    char *tmp = strdup(tok);
     id = tokenizer->next_id ++;
-    k = kh_put(ids, tokenizer->ids, *tokp, &absent);
+    k = kh_put(ids, tokenizer->ids, tmp, &absent);
     assert(absent);
     kh_value(tokenizer->ids, k) = id;
     k = kh_put(strs, tokenizer->strs, (uint32_t) id, &absent);
     assert(absent);
-    kh_value(tokenizer->strs, k) = *tokp;
+    kh_value(tokenizer->strs, k) = tmp;
+    *tokp = tmp;
   }
   if (train) {
     k = kh_put(seen, tokenizer->tmp_seen, (uint32_t) id, &absent);
@@ -488,7 +478,7 @@ static inline void tb_tokenizer_append_cgrams (
       memcpy(buf, tok + s, (size_t) k);
       buf[k] = '\0';
       char *bufp = buf;
-      int id = tb_tokenizer_new_token(tokenizer, &bufp, train);
+      int id = tb_tokenizer_new_token(tokenizer, &bufp, train, (khint_t) k + 1);
       if (id != -1)
         kv_push(int, tokenizer->tokens, id);
     }
@@ -824,19 +814,17 @@ static void tb_tokenizer_append_skipgram (
     char *first = tb_tokenizer_id_str(tok, tok->window.a[skipgram[0]]);
     if (strlen(first) == 1)
       return;
-    char buf[rfirst * (tok->max_len + 2) + 1];
-    char *p = buf;
+    tok->tmp_skipgram.n = 0;
     for (int i = 0; i < rfirst; i ++) {
       int win_idx = skipgram[i];
       char *s = tb_tokenizer_id_str(tok, tok->window.a[win_idx]);
-      size_t L = strlen(s);
-      memcpy(p, s, L);
-      p += L;
-      if (i + 1 < rfirst) *p ++ = ' ';
+      kv_push_str(char, tok->tmp_skipgram, s);
+      if (i + 1 < rfirst)
+        kv_push(char, tok->tmp_skipgram, ' ');
     }
-    *p = '\0';
-    char *bufp = buf;
-    int nid = tb_tokenizer_new_token(tok, &bufp, train);
+    kv_push(char, tok->tmp_skipgram, '\0');
+    char *bufp = tok->tmp_skipgram.a;
+    int nid = tb_tokenizer_new_token(tok, &bufp, train, tok->tmp_skipgram.n);
     if (nid != -1)
       kv_push(int, tok->tokens, nid);
     return;
@@ -866,22 +854,22 @@ static inline void tb_tokenizer_append_token (
     (*negation) --;
   if (!word || word[0] == '\0')
     return;
-  char buf0[tokenizer->max_len * 2];
+  tokenizer->tmp_append.n = 0;
   if (tb_tokenizer_is_number_token(word)) {
     if (is_negated) {
-      strcpy(buf0, "-#number");
+      kv_push_str(char, tokenizer->tmp_append, "-#number");
     } else {
-      strcpy(buf0, "#number");
+      kv_push_str(char, tokenizer->tmp_append, "#number");
     }
   } else if (is_negated && !tb_tokenizer_is_negation_token(word) && isalnum(word[0])) {
-    buf0[0] = '-';
-    buf0[1] = '\0';
-    strcat(buf0, word);
+    kv_push(char, tokenizer->tmp_append, '-');
+    kv_push_str(char, tokenizer->tmp_append, word);
   } else {
-    strcpy(buf0, word);
+    kv_push_str(char, tokenizer->tmp_append, word);
   }
-  char *bufp0 = buf0;
-  int id0 = tb_tokenizer_new_token(tokenizer, &bufp0, train);
+  kv_push(char, tokenizer->tmp_append, '\0');
+  char *bufp0 = tokenizer->tmp_append.a;
+  int id0 = tb_tokenizer_new_token(tokenizer, &bufp0, train, tokenizer->tmp_append.n);
   if (id0 == -1) return;
   kv_push(int, tokenizer->tokens, id0);
   if (tb_tokenizer_is_negation_token(word)) {
@@ -1065,6 +1053,8 @@ static inline int tb_tokenizer_restrict (lua_State *L)
   int64_t *top_v = (int64_t *) tk_lua_checkuserdata(L, -4, NULL);
   uint64_t n_top_v = (uint64_t) luaL_checkinteger(L, -1);
 
+  // TODO: Can we do this without strdup? Just don't free the ones we're
+  // keeping?
   tb_tokenizer_t *tokenizer = peek_tokenizer(L, lua_upvalueindex(1));
   char *tok;
   int64_t id, id0;
@@ -1079,7 +1069,7 @@ static inline int tb_tokenizer_restrict (lua_State *L)
     k = kh_get(strs, tokenizer->strs, (uint32_t) id);
     if (k == kh_end(tokenizer->strs))
       continue;
-    tok = (char *) kh_value(tokenizer->strs, k);
+    tok = (char *) strdup(kh_value(tokenizer->strs, k));
     id0 = tokenizer->next_id ++;
     k = kh_put(ids, ids0, tok, &absent);
     assert(absent);
@@ -1088,6 +1078,9 @@ static inline int tb_tokenizer_restrict (lua_State *L)
     assert(absent);
     kh_value(strs0, k) = tok;
   }
+  for (khint_t k = kh_begin(tokenizer->strs); k < kh_end(tokenizer->strs); k ++)
+    if (kh_exist(tokenizer->strs, k))
+      free((char *) kh_value(tokenizer->strs, k));
   kh_destroy(ids, tokenizer->ids);
   kh_destroy(strs, tokenizer->strs);
   tokenizer->ids = ids0;
@@ -1111,7 +1104,8 @@ static inline int tb_tokenizer_finalize (lua_State *L)
   tb_ids_t *ids0 = kh_init(ids);
   tb_strs_t *strs0 = kh_init(strs);
 
-  tb_sort_t *sort = kb_init(sort, KB_DEFAULT_SIZE);
+  kvec_t(tk_sort_pair_t) sort;
+  kv_init(sort);
 
   // Delete tokens with df > max_df
   for (i = kh_begin(tokenizer->ids); i < kh_end(tokenizer->ids); i ++)
@@ -1129,7 +1123,7 @@ static inline int tb_tokenizer_finalize (lua_State *L)
         free(tok);
       } else {
         tk_sort_pair_t p = { .id = id, .df = df };
-        kb_put(sort, sort, p);
+        kv_push(tk_sort_pair_t, sort, p);
       }
     }
   kh_destroy(dfs, tokenizer->dfs);
@@ -1138,11 +1132,10 @@ static inline int tb_tokenizer_finalize (lua_State *L)
   tokenizer->tmp_seen = NULL;
 
   // Renumber tokens
+  ks_introsort(sort_pair, sort.n, sort.a);
   tokenizer->next_id = 0;
-  kbitr_t itr;
-  kb_itr_first(sort, sort, &itr);
-  for (; kb_itr_valid(&itr); kb_itr_next(sort, sort, &itr)) {
-    id = kb_itr_key(tk_sort_pair_t, &itr).id;
+  for (khint_t i = 0; i < sort.n; i ++) {
+    id = sort.a[i].id;
     k = kh_get(strs, tokenizer->strs, (uint32_t) id);
     assert(k != kh_end(tokenizer->strs));
     tok = (char *) kh_value(tokenizer->strs, k);
@@ -1155,13 +1148,7 @@ static inline int tb_tokenizer_finalize (lua_State *L)
     kh_value(strs0, k) = tok;
   }
 
-  // TODO: fork klib to fix this
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wsign-conversion"
-#pragma GCC diagnostic ignored "-Wunused-function"
-  kb_destroy(sort, sort);
-#pragma GCC diagnostic pop
-
+  kv_destroy(sort);
   kh_destroy(ids, tokenizer->ids);
   kh_destroy(strs, tokenizer->strs);
   tokenizer->ids = ids0;
@@ -1265,6 +1252,8 @@ static inline int tb_tokenizer_create (lua_State *L)
   lua_setmetatable(L, -2);
   kv_init(tokenizer->tokens);
   kv_init(tokenizer->tmp_token);
+  kv_init(tokenizer->tmp_append);
+  kv_init(tokenizer->tmp_skipgram);
   kv_init(tokenizer->window);
   tokenizer->ids = kh_init(ids);
   tokenizer->strs = kh_init(strs);
@@ -1304,6 +1293,8 @@ static inline int tb_tokenizer_load (lua_State *L)
   lua_setmetatable(L, -2);
   kv_init(tokenizer->tokens);
   kv_init(tokenizer->tmp_token);
+  kv_init(tokenizer->tmp_append);
+  kv_init(tokenizer->tmp_skipgram);
   kv_init(tokenizer->window);
   tokenizer->ids = kh_init(ids);
   tokenizer->strs = kh_init(strs);

@@ -1,4 +1,45 @@
+#define _GNU_SOURCE
+
 #include <santoku/tsetlin/conf.h>
+#include <santoku/tsetlin/threads.h>
+
+typedef enum {
+  TK_EVAL_CLASS_ACCURACY,
+} tk_eval_stage_t;
+
+typedef struct {
+  atomic_ulong *TP, *FP, *FN;
+  double *f1, *precision, *recall;
+  unsigned int *predicted, *expected;
+  unsigned int n_classes;
+} tk_eval_t;
+
+typedef struct {
+  tk_eval_t *state;
+  uint64_t sfirst, slast;
+} tk_eval_thread_t;
+
+static void tk_eval_worker (void *dp, int sig)
+{
+  tk_eval_thread_t *data = (tk_eval_thread_t *) dp;
+  tk_eval_t *state = data->state;
+  switch ((tk_eval_stage_t) sig) {
+    case TK_EVAL_CLASS_ACCURACY:
+      for (unsigned int i = data->sfirst; i <= data->slast; i ++) {
+        unsigned int y_pred = state->predicted[i];
+        unsigned int y_true = state->expected[i];
+        if (y_pred >= state->n_classes || y_true >= state->n_classes)
+          continue;
+        if (y_pred == y_true) {
+          atomic_fetch_add(state->TP + y_true, 1.0);
+        } else {
+          atomic_fetch_add(state->FP + y_pred, 1.0);
+          atomic_fetch_add(state->FN + y_true, 1.0);
+        }
+      }
+      break;
+  }
+}
 
 static inline int tm_class_accuracy (lua_State *L)
 {
@@ -6,43 +47,56 @@ static inline int tm_class_accuracy (lua_State *L)
   unsigned int *expected = (unsigned int *) tk_lua_checkustring(L, 2, "expected");
   unsigned int n_classes = tk_lua_checkunsigned(L, 3, "n_classes");
   unsigned int n_samples = tk_lua_checkunsigned(L, 4, "n_samples");
+  unsigned int n_threads = tk_threads_getn(L, 5, "n_threads", NULL);
 
   if (n_classes == 0)
     tk_lua_verror(L, 3, "class_accuracy", "n_classes", "must be > 0");
 
-  uint64_t TP[n_classes], FP[n_classes], FN[n_classes];
-  memset(TP, 0, sizeof(TP));
-  memset(FP, 0, sizeof(FP));
-  memset(FN, 0, sizeof(FN));
-
-  #pragma omp parallel for
-  for (unsigned int i = 0; i < n_samples; i ++) {
-    unsigned int y_pred = predicted[i];
-    unsigned int y_true = expected[i];
-    if (y_pred >= n_classes || y_true >= n_classes)
-      continue;
-    if (y_pred == y_true)
-      #pragma omp atomic
-      TP[y_true] ++;
-    else {
-      #pragma omp atomic
-      FP[y_pred] ++;
-      #pragma omp atomic
-      FN[y_true] ++;
-    }
+  tk_eval_t state;
+  state.n_classes = n_classes;
+  state.expected = expected;
+  state.predicted = predicted;
+  state.TP = tk_malloc(L, n_classes * sizeof(atomic_ulong));
+  state.FP = tk_malloc(L, n_classes * sizeof(atomic_ulong));
+  state.FN = tk_malloc(L, n_classes * sizeof(atomic_ulong));
+  state.precision = tk_malloc(L, n_classes * sizeof(double));
+  state.recall = tk_malloc(L, n_classes * sizeof(double));
+  state.f1 = tk_malloc(L, n_classes * sizeof(double));
+  for (uint64_t i = 0; i < n_classes; i ++) {
+    atomic_init(state.TP + i, 0);
+    atomic_init(state.FP + i, 0);
+    atomic_init(state.FN + i, 0);
   }
 
-  double precision[n_classes], recall[n_classes], f1[n_classes];
+  tk_eval_thread_t data[n_threads];
+  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
+  for (unsigned int i = 0; i < n_threads; i ++) {
+    pool->threads[i].data = data + i;
+    data[i].state = &state;
+    tk_thread_range(i, n_threads, n_samples, &data[i].sfirst, &data[i].slast);
+  }
+
+  // Eval
+  tk_threads_signal(pool, TK_EVAL_CLASS_ACCURACY);
+  tk_threads_signal(pool, -1);
+  tk_threads_destroy(pool);
+
+  // Reduce
   double precision_avg = 0.0, recall_avg = 0.0, f1_avg = 0.0;
   for (unsigned int c = 0; c < n_classes; c ++) {
-    uint64_t tp = TP[c], fp = FP[c], fn = FN[c];
-    precision[c] = (tp + fp) > 0 ? (double)tp / (tp + fp) : 0.0;
-    recall[c] = (tp + fn) > 0 ? (double)tp / (tp + fn) : 0.0;
-    f1[c] = (precision[c] + recall[c]) > 0 ? 2.0 * precision[c] * recall[c] / (precision[c] + recall[c]) : 0.0;
-    precision_avg += precision[c];
-    recall_avg += recall[c];
-    f1_avg += f1[c];
+    uint64_t tp = state.TP[c], fp = state.FP[c], fn = state.FN[c];
+    state.precision[c] = (tp + fp) > 0 ? (double)tp / (tp + fp) : 0.0;
+    state.recall[c] = (tp + fn) > 0 ? (double)tp / (tp + fn) : 0.0;
+    state.f1[c] = (state.precision[c] + state.recall[c]) > 0 ?
+      2.0 * state.precision[c] * state.recall[c] / (state.precision[c] + state.recall[c]) : 0.0;
+    precision_avg += state.precision[c];
+    recall_avg += state.recall[c];
+    f1_avg += state.f1[c];
   }
+
+  free(state.TP);
+  free(state.FP);
+  free(state.FN);
 
   precision_avg /= n_classes;
   recall_avg /= n_classes;
@@ -54,11 +108,11 @@ static inline int tm_class_accuracy (lua_State *L)
   for (unsigned int c = 0; c < n_classes; c ++) {
     lua_pushinteger(L, c + 1);
     lua_newtable(L);
-    lua_pushnumber(L, precision[c]);
+    lua_pushnumber(L, state.precision[c]);
     lua_setfield(L, -2, "precision");
-    lua_pushnumber(L, recall[c]);
+    lua_pushnumber(L, state.recall[c]);
     lua_setfield(L, -2, "recall");
-    lua_pushnumber(L, f1[c]);
+    lua_pushnumber(L, state.f1[c]);
     lua_setfield(L, -2, "f1");
     lua_settable(L, -3);  // result.classes[c+1] = {...}
   }
@@ -69,6 +123,11 @@ static inline int tm_class_accuracy (lua_State *L)
   lua_setfield(L, -2, "recall");
   lua_pushnumber(L, f1_avg);
   lua_setfield(L, -2, "f1");
+
+  free(state.precision);
+  free(state.recall);
+  free(state.f1);
+
   return 1;
 }
 
@@ -145,10 +204,12 @@ static inline int tm_encoding_accuracy (lua_State *L)
 
   uint64_t chunks = BITS_DIV(n_hidden);
 
-  uint64_t TP[n_hidden], FP[n_hidden], FN[n_hidden];
-  memset(TP, 0, sizeof(TP));
-  memset(FP, 0, sizeof(FP));
-  memset(FN, 0, sizeof(FN));
+  uint64_t *TP = tk_malloc(L, n_hidden * sizeof(uint64_t));
+  uint64_t *FP = tk_malloc(L, n_hidden * sizeof(uint64_t));
+  uint64_t *FN = tk_malloc(L, n_hidden * sizeof(uint64_t));
+  memset(TP, 0, n_hidden * sizeof(uint64_t));
+  memset(FP, 0, n_hidden * sizeof(uint64_t));
+  memset(FN, 0, n_hidden * sizeof(uint64_t));
 
   #pragma omp parallel for
   for (uint64_t i = 0; i < n_codes; i ++) {
@@ -170,7 +231,9 @@ static inline int tm_encoding_accuracy (lua_State *L)
     }
   }
 
-  double f1[n_hidden], precision[n_hidden], recall[n_hidden];
+  double *precision = tk_malloc(L, n_hidden * sizeof(double));
+  double *recall = tk_malloc(L, n_hidden * sizeof(double));
+  double *f1 = tk_malloc(L, n_hidden * sizeof(double));
   double precision_avg = 0.0, recall_avg = 0.0, f1_avg = 0.0;
 
   for (uint64_t j = 0; j < n_hidden; j ++) {
@@ -182,6 +245,10 @@ static inline int tm_encoding_accuracy (lua_State *L)
     recall_avg += recall[j];
     f1_avg += f1[j];
   }
+
+  free(TP);
+  free(FP);
+  free(FN);
 
   precision_avg /= n_hidden;
   recall_avg /= n_hidden;
@@ -223,6 +290,11 @@ static inline int tm_encoding_accuracy (lua_State *L)
   lua_setfield(L, -2, "f1_max");
   lua_pushnumber(L, sqrt(f1_var));
   lua_setfield(L, -2, "f1_std");
+
+  free(precision);
+  free(recall);
+  free(f1);
+
   return 1;
 }
 

@@ -5,7 +5,6 @@
 #include <lauxlib.h>
 #include <lua.h>
 
-#include "khash.h"
 KHASH_SET_INIT_INT64(i64)
 typedef khash_t(i64) i64_hash_t;
 
@@ -225,23 +224,10 @@ static inline void tm_add_knn (
   uint64_t n_sentences,
   uint64_t n_features,
   uint64_t knn,
-  int i_each,
-  unsigned int *global_iter
+  int i_each
 ) {
   int kha;
   khint_t khi;
-
-  // Log initial density
-  (*global_iter) ++;
-  if (i_each != -1) {
-    lua_pushvalue(L, i_each);
-    lua_pushinteger(L, *global_iter);
-    lua_pushinteger(L, tm_dsu_components(dsu));
-    lua_pushinteger(L, (int64_t) *n_pos);
-    lua_pushinteger(L, (int64_t) *n_neg);
-    lua_pushstring(L, "initial");
-    lua_call(L, 5, 0);
-  }
 
   // Prep shuffle
   int64_t *shuf = tk_malloc(L, (uint64_t) n_sentences * sizeof(int64_t));
@@ -249,16 +235,17 @@ static inline void tm_add_knn (
     shuf[i] = i;
   ks_shuffle(i64, n_sentences, shuf);
 
-  // Gather all inter-component edges
   for (int64_t su = 0; su < (int64_t) n_sentences; su ++) {
     int64_t u = shuf[su];
     tm_neighbors_t nbrs = neighbors[u];
-    for (khint_t i = 0; i < nbrs.n && i < knn; i ++) {
+    uint64_t added = 0;
+    for (khint_t i = 0; i < nbrs.n && added < knn; i ++) {
       tm_neighbor_t v = nbrs.a[i];
       tm_pair_t e = tm_pair(u, v.v);
       khi = kh_put(pairs, pairs, e, &kha);
       if (!kha)
         continue;
+      added ++;
       kh_value(pairs, khi) = true;
       tm_dsu_union(L, dsu, u, v.v);
       (*n_pos)++;
@@ -269,15 +256,13 @@ static inline void tm_add_knn (
   free(shuf);
 
   // Log final density
-  (*global_iter) ++;
   if (i_each != -1) {
     lua_pushvalue(L, i_each);
-    lua_pushinteger(L, *global_iter);
     lua_pushinteger(L, tm_dsu_components(dsu));
     lua_pushinteger(L, (int64_t) *n_pos);
     lua_pushinteger(L, (int64_t) *n_neg);
     lua_pushstring(L, "knn");
-    lua_call(L, 5, 0);
+    lua_call(L, 4, 0);
   }
 }
 
@@ -291,23 +276,10 @@ static inline void tm_add_mst (
   uint64_t *n_neg,
   uint64_t n_sentences,
   uint64_t n_features,
-  int i_each,
-  unsigned int *global_iter
+  int i_each
 ) {
   int kha;
   khint_t khi;
-
-  // Log initial density
-  (*global_iter) ++;
-  if (i_each != -1) {
-    lua_pushvalue(L, i_each);
-    lua_pushinteger(L, *global_iter);
-    lua_pushinteger(L, tm_dsu_components(dsu));
-    lua_pushinteger(L, (int64_t) *n_pos);
-    lua_pushinteger(L, (int64_t) *n_neg);
-    lua_pushstring(L, "initial");
-    lua_call(L, 5, 0);
-  }
 
   // Prep shuffle
   int64_t *shuf = tk_malloc(L, dsu->n_original * sizeof(int64_t));
@@ -357,15 +329,13 @@ static inline void tm_add_mst (
   }
 
   // Log final density
-  (*global_iter) ++;
   if (i_each != -1) {
     lua_pushvalue(L, i_each);
-    lua_pushinteger(L, *global_iter);
     lua_pushinteger(L, tm_dsu_components(dsu));
     lua_pushinteger(L, (int64_t) *n_pos);
     lua_pushinteger(L, (int64_t) *n_neg);
     lua_pushstring(L, "kruskal");
-    lua_call(L, 5, 0);
+    lua_call(L, 4, 0);
   }
 
   // Connect unseen by neighbor first, if possible
@@ -426,160 +396,155 @@ static inline void tm_add_mst (
   }
 
   // Log final density
-  (*global_iter) ++;
   if (i_each != -1) {
     lua_pushvalue(L, i_each);
-    lua_pushinteger(L, *global_iter);
     lua_pushinteger(L, tm_dsu_components(dsu));
     lua_pushinteger(L, (int64_t) *n_pos);
     lua_pushinteger(L, (int64_t) *n_neg);
     lua_pushstring(L, "fallback");
-    lua_call(L, 5, 0);
+    lua_call(L, 4, 0);
   }
 
   // Cleanup
   kv_destroy(all_candidates);
 }
 
-// static inline void tm_add_transatives (
-//   lua_State *L,
-//   tm_dsu_t *dsu,
-//   tm_pairs_t *pairs,
-//   tm_neighbors_t *neighbors,
-//   roaring64_bitmap_t **adj_pos,
-//   roaring64_bitmap_t **adj_neg,
-//   roaring64_bitmap_t **sentences,
-//   uint64_t *n_pos,
-//   uint64_t *n_neg,
-//   uint64_t n_sentences,
-//   uint64_t n_features,
-//   uint64_t n_hops,
-//   uint64_t n_grow_pos,
-//   uint64_t n_grow_neg,
-//   int i_each,
-//   unsigned int *global_iter
-// ) {
-//   int kha;
-//   khint_t khi;
-//   roaring64_iterator_t it0;
-//   roaring64_iterator_t it1;
+static inline void tm_add_transatives (
+  lua_State *L,
+  tm_dsu_t *dsu,
+  tm_pairs_t *pairs,
+  tm_neighbors_t *neighbors,
+  roaring64_bitmap_t **adj_pos,
+  roaring64_bitmap_t **adj_neg,
+  roaring64_bitmap_t **sentences,
+  uint64_t *n_pos,
+  uint64_t *n_neg,
+  uint64_t n_sentences,
+  uint64_t n_features,
+  uint64_t n_hops,
+  uint64_t n_grow_pos,
+  uint64_t n_grow_neg,
+  int i_each
+) {
+  int kha;
+  khint_t khi;
+  roaring64_iterator_t it0;
+  roaring64_iterator_t it1;
 
-//   // Transitive positive expansion
-//   tm_candidates_t candidates;
-//   kv_init(candidates);
-//   for (int64_t u = 0; u < (int64_t) n_sentences; u ++) {
-//     // Init closure
-//     roaring64_bitmap_t *reachable = roaring64_bitmap_create();
-//     roaring64_bitmap_t *frontier = roaring64_bitmap_create();
-//     roaring64_bitmap_t *next = roaring64_bitmap_create();
-//     // Start from direct neighbors
-//     roaring64_bitmap_or_inplace(frontier, adj_pos[u]);
-//     roaring64_bitmap_or_inplace(reachable, frontier);
-//     for (uint64_t hop = 1; hop < n_hops; hop ++) {
-//       roaring64_bitmap_clear(next);
-//       roaring64_iterator_reinit(frontier, &it0);
-//       while (roaring64_iterator_has_value(&it0)) {
-//         uint64_t v = roaring64_iterator_value(&it0);
-//         roaring64_bitmap_or_inplace(next, adj_pos[v]);
-//         roaring64_iterator_advance(&it0);
-//       }
-//       roaring64_bitmap_or_inplace(reachable, next);
-//       roaring64_bitmap_clear(frontier); // advance
-//       roaring64_bitmap_or_inplace(frontier, next); // advance
-//     }
-//     // Filter out self, known links, and unseen
-//     roaring64_bitmap_remove(reachable, (uint64_t) u);
-//     roaring64_iterator_reinit(reachable, &it0);
-//     kv_size(candidates) = 0;
-//     while (roaring64_iterator_has_value(&it0)) {
-//       int64_t w = (int64_t) roaring64_iterator_value(&it0);
-//       roaring64_iterator_advance(&it0);
-//       if (roaring64_bitmap_contains(adj_pos[u], (uint64_t) w))
-//         continue;
-//       if (roaring64_bitmap_contains(adj_neg[u], (uint64_t) w))
-//         continue;
-//       double dist = (double) roaring64_bitmap_xor_cardinality(sentences[u], sentences[w]) / (double) n_features;
-//       tm_neighbor_t vw = (tm_neighbor_t){w, dist};
-//       kv_push(tm_candidate_t, candidates, tm_candidate(u, vw));
-//     }
-//     // Sort and add top-k
-//     ks_introsort(candidates_asc, candidates.n, candidates.a);
-//     for (uint64_t i = 0; i < candidates.n && i < n_grow_pos; i++) {
-//       tm_candidate_t c = candidates.a[i];
-//       tm_pair_t e = tm_pair(u, c.v.v);
-//       khi = kh_put(pairs, pairs, e, &kha);
-//       if (!kha)
-//         continue;
-//       kh_value(pairs, khi) = true;
-//       tm_dsu_union(L, dsu, u, c.v.v);
-//       roaring64_bitmap_add(adj_pos[u], (uint64_t)c.v.v);
-//       roaring64_bitmap_add(adj_pos[c.v.v], (uint64_t)u);
-//       (*n_pos)++;
-//     }
-//     // Cleanup
-//     roaring64_bitmap_free(reachable);
-//     roaring64_bitmap_free(frontier);
-//     roaring64_bitmap_free(next);
-//   }
+  // Transitive positive expansion
+  tm_candidates_t candidates;
+  kv_init(candidates);
+  for (int64_t u = 0; u < (int64_t) n_sentences; u ++) {
+    // Init closure
+    roaring64_bitmap_t *reachable = roaring64_bitmap_create();
+    roaring64_bitmap_t *frontier = roaring64_bitmap_create();
+    roaring64_bitmap_t *next = roaring64_bitmap_create();
+    // Start from direct neighbors
+    roaring64_bitmap_or_inplace(frontier, adj_pos[u]);
+    roaring64_bitmap_or_inplace(reachable, frontier);
+    for (uint64_t hop = 1; hop < n_hops; hop ++) {
+      roaring64_bitmap_clear(next);
+      roaring64_iterator_reinit(frontier, &it0);
+      while (roaring64_iterator_has_value(&it0)) {
+        uint64_t v = roaring64_iterator_value(&it0);
+        roaring64_bitmap_or_inplace(next, adj_pos[v]);
+        roaring64_iterator_advance(&it0);
+      }
+      roaring64_bitmap_or_inplace(reachable, next);
+      roaring64_bitmap_clear(frontier); // advance
+      roaring64_bitmap_or_inplace(frontier, next); // advance
+    }
+    // Filter out self, known links, and unseen
+    roaring64_bitmap_remove(reachable, (uint64_t) u);
+    roaring64_iterator_reinit(reachable, &it0);
+    kv_size(candidates) = 0;
+    while (roaring64_iterator_has_value(&it0)) {
+      int64_t w = (int64_t) roaring64_iterator_value(&it0);
+      roaring64_iterator_advance(&it0);
+      if (roaring64_bitmap_contains(adj_pos[u], (uint64_t) w))
+        continue;
+      if (roaring64_bitmap_contains(adj_neg[u], (uint64_t) w))
+        continue;
+      double dist = (double) roaring64_bitmap_xor_cardinality(sentences[u], sentences[w]) / (double) n_features;
+      tm_neighbor_t vw = (tm_neighbor_t){w, dist};
+      kv_push(tm_candidate_t, candidates, tm_candidate(u, vw));
+    }
+    // Sort and add top-k
+    ks_introsort(candidates_asc, candidates.n, candidates.a);
+    for (uint64_t i = 0; i < candidates.n && i < n_grow_pos; i++) {
+      tm_candidate_t c = candidates.a[i];
+      tm_pair_t e = tm_pair(u, c.v.v);
+      khi = kh_put(pairs, pairs, e, &kha);
+      if (!kha)
+        continue;
+      kh_value(pairs, khi) = true;
+      tm_dsu_union(L, dsu, u, c.v.v);
+      roaring64_bitmap_add(adj_pos[u], (uint64_t)c.v.v);
+      roaring64_bitmap_add(adj_pos[c.v.v], (uint64_t)u);
+      (*n_pos)++;
+    }
+    // Cleanup
+    roaring64_bitmap_free(reachable);
+    roaring64_bitmap_free(frontier);
+    roaring64_bitmap_free(next);
+  }
 
-//   // Contrastive negative expansion
-//   for (int64_t u = 0; u < (int64_t) n_sentences; u ++) {
-//     roaring64_bitmap_t *seen = roaring64_bitmap_create();
-//     kv_size(candidates) = 0;
-//     // One-hop contrastive expansion from adj_pos[u] to adj_neg[v]
-//     roaring64_iterator_reinit(adj_pos[u], &it0);
-//     while (roaring64_iterator_has_value(&it0)) {
-//       int64_t v = (int64_t) roaring64_iterator_value(&it0);
-//       roaring64_iterator_advance(&it0);
-//       roaring64_iterator_reinit(adj_neg[v], &it1);
-//       while (roaring64_iterator_has_value(&it1)) {
-//         int64_t w = (int64_t) roaring64_iterator_value(&it1);
-//         roaring64_iterator_advance(&it1);
-//         if (w == u)
-//           continue;
-//         if (roaring64_bitmap_contains(adj_pos[u], (uint64_t) w))
-//           continue;
-//         if (roaring64_bitmap_contains(adj_neg[u], (uint64_t) w))
-//           continue;
-//         if (roaring64_bitmap_contains(seen, (uint64_t) w))
-//           continue;
-//         roaring64_bitmap_add(seen, (uint64_t) w);
-//         double dist = (double) roaring64_bitmap_xor_cardinality(sentences[u], sentences[w]) / (double) n_features;
-//         tm_neighbor_t nw = (tm_neighbor_t) { w, dist };
-//         kv_push(tm_candidate_t, candidates, tm_candidate(u, nw));
-//       }
-//     }
-//     // Select furthest in feature space
-//     ks_introsort(candidates_desc, candidates.n, candidates.a);  // sort by descending distance
-//     for (uint64_t i = 0; i < candidates.n && i < n_grow_neg; i ++) {
-//       tm_candidate_t c = candidates.a[i];
-//       tm_pair_t e = tm_pair(u, c.v.v);
-//       khi = kh_put(pairs, pairs, e, &kha);
-//       if (!kha)
-//         continue;
-//       kh_value(pairs, khi) = false;
-//       roaring64_bitmap_add(adj_neg[u], (uint64_t) c.v.v);
-//       roaring64_bitmap_add(adj_neg[c.v.v], (uint64_t) u);
-//       (*n_neg) ++;
-//     }
-//     roaring64_bitmap_free(seen);
-//   }
+  // Contrastive negative expansion
+  for (int64_t u = 0; u < (int64_t) n_sentences; u ++) {
+    roaring64_bitmap_t *seen = roaring64_bitmap_create();
+    kv_size(candidates) = 0;
+    // One-hop contrastive expansion from adj_pos[u] to adj_neg[v]
+    roaring64_iterator_reinit(adj_pos[u], &it0);
+    while (roaring64_iterator_has_value(&it0)) {
+      int64_t v = (int64_t) roaring64_iterator_value(&it0);
+      roaring64_iterator_advance(&it0);
+      roaring64_iterator_reinit(adj_neg[v], &it1);
+      while (roaring64_iterator_has_value(&it1)) {
+        int64_t w = (int64_t) roaring64_iterator_value(&it1);
+        roaring64_iterator_advance(&it1);
+        if (w == u)
+          continue;
+        if (roaring64_bitmap_contains(adj_pos[u], (uint64_t) w))
+          continue;
+        if (roaring64_bitmap_contains(adj_neg[u], (uint64_t) w))
+          continue;
+        if (roaring64_bitmap_contains(seen, (uint64_t) w))
+          continue;
+        roaring64_bitmap_add(seen, (uint64_t) w);
+        double dist = (double) roaring64_bitmap_xor_cardinality(sentences[u], sentences[w]) / (double) n_features;
+        tm_neighbor_t nw = (tm_neighbor_t) { w, dist };
+        kv_push(tm_candidate_t, candidates, tm_candidate(u, nw));
+      }
+    }
+    // Select furthest in feature space
+    ks_introsort(candidates_desc, candidates.n, candidates.a);  // sort by descending distance
+    for (uint64_t i = 0; i < candidates.n && i < n_grow_neg; i ++) {
+      tm_candidate_t c = candidates.a[i];
+      tm_pair_t e = tm_pair(u, c.v.v);
+      khi = kh_put(pairs, pairs, e, &kha);
+      if (!kha)
+        continue;
+      kh_value(pairs, khi) = false;
+      roaring64_bitmap_add(adj_neg[u], (uint64_t) c.v.v);
+      roaring64_bitmap_add(adj_neg[c.v.v], (uint64_t) u);
+      (*n_neg) ++;
+    }
+    roaring64_bitmap_free(seen);
+  }
 
-//   // Cleanup
-//   kv_destroy(candidates);
+  // Cleanup
+  kv_destroy(candidates);
 
-//   // Progress
-//   (*global_iter)++;
-//   if (i_each != -1) {
-//     lua_pushvalue(L, i_each);
-//     lua_pushinteger(L, *global_iter);
-//     lua_pushinteger(L, tm_dsu_components(dsu));
-//     lua_pushinteger(L, (int64_t) *n_pos);
-//     lua_pushinteger(L, (int64_t) *n_neg);
-//     lua_pushstring(L, "transitives");
-//     lua_call(L, 5, 0);
-//   }
-// }
+  // Progress
+  if (i_each != -1) {
+    lua_pushvalue(L, i_each);
+    lua_pushinteger(L, tm_dsu_components(dsu));
+    lua_pushinteger(L, (int64_t) *n_pos);
+    lua_pushinteger(L, (int64_t) *n_neg);
+    lua_pushstring(L, "transitives");
+    lua_call(L, 4, 0);
+  }
+}
 
 static inline void tm_sentences_init (
   roaring64_bitmap_t **sentences,
@@ -652,6 +617,9 @@ static inline int tm_enrich (lua_State *L)
   uint64_t n_features = tk_lua_fcheckunsigned(L, 1, "enrich", "n_features");
   uint64_t knn_cache = tk_lua_foptunsigned(L, 1, "enrich", "knn_cache", 32);
   uint64_t knn = tk_lua_foptunsigned(L, 1, "enrich", "knn", 0);
+  uint64_t n_hops = tk_lua_foptunsigned(L, 1, "enrich", "trans_hops", 0);
+  uint64_t n_grow_pos = tk_lua_foptunsigned(L, 1, "enrich", "trans_pos", 0);
+  uint64_t n_grow_neg = tk_lua_foptunsigned(L, 1, "enrich", "trans_neg", 0);
   bool do_mst = tk_lua_foptboolean(L, 1, "enrich", "mst", true);
 
   int i_each = -1;
@@ -684,24 +652,35 @@ static inline int tm_enrich (lua_State *L)
   tm_dsu_t dsu;
   tm_dsu_init(L, &dsu, pairs, n_sentences);
 
-  unsigned int global_iter = 0;
+  // Log initial density
+  if (i_each != -1) {
+    lua_pushvalue(L, i_each);
+    lua_pushinteger(L, tm_dsu_components(&dsu));
+    lua_pushinteger(L, (int64_t) n_pos);
+    lua_pushinteger(L, (int64_t) n_neg);
+    lua_pushstring(L, "initial");
+    lua_call(L, 4, 0);
+  }
 
   // Add knn
   if (knn > 0)
-    tm_add_knn(L, &dsu, pairs, neighbors, sentences, &n_pos, &n_neg, n_sentences, n_features, knn, i_each, &global_iter);
+    tm_add_knn(L, &dsu, pairs, neighbors, sentences, &n_pos, &n_neg, n_sentences, n_features, knn, i_each);
 
   // Add mst
   if (do_mst)
-    tm_add_mst(L, &dsu, pairs, neighbors, sentences, &n_pos, &n_neg, n_sentences, n_features, i_each, &global_iter);
+    tm_add_mst(L, &dsu, pairs, neighbors, sentences, &n_pos, &n_neg, n_sentences, n_features, i_each);
 
-  // // Densify graph, adding transatives
-  // if (do_transitives)
-  //   tm_add_transatives(L, &dsu, pairs, neighbors, adj_pos, adj_neg, sentences, &n_pos, &n_neg, n_sentences, n_features, n_hops, n_grow_pos, n_grow_neg, i_each, &global_iter);
+  // Densify graph, adding transatives
+  if (n_hops > 0 && (n_grow_pos > 0 || n_grow_neg > 0))
+    tm_add_transatives(L, &dsu, pairs, neighbors, adj_pos, adj_neg, sentences, &n_pos, &n_neg, n_sentences, n_features, n_hops, n_grow_pos, n_grow_neg, i_each);
 
   // Cleanup
   for (int64_t s = 0; s < (int64_t) n_sentences; s ++)
     roaring64_bitmap_free(sentences[s]);
   free(sentences);
+  for (int64_t s = 0; s < (int64_t) n_sentences; s ++)
+    kv_destroy(neighbors[s]);
+  free(neighbors);
 
   // Cleanup
   tm_dsu_free(&dsu);
