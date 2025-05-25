@@ -6,41 +6,31 @@ local env = {
   license = "MIT",
   public = true,
 
-  cflags = { "-march=native", "-fopenmp", "-std=gnu11", "-O3", "-Wall", "-Wextra", "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow", "-Wpointer-sign", "-Wno-unused-parameter", "-Wno-unused-but-set-variable" },
-  ldflags = { "-march=native", "-fopenmp", "-O3", "-lm", "-lpthread", "-lnuma" },
+  cflags = {
+    "-march=native", "-std=gnu11", "-O3", "-Wall", "-Wextra",
+    "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow",
+    "-Wpointer-sign", "-Wno-unused-parameter", "-Wno-unused-but-set-variable",
+    "-I$(shell luarocks show santoku --rock-dir)/include/",
+    "-I$(shell luarocks show santoku-matrix --rock-dir)/include/",
+  },
 
-  rules = {
-    ["tsetlin/capi.c$"] = {
-      cflags = { "-I$(shell luarocks show santoku --rock-dir)/include/" }
-    },
-    ["evaluator/capi.c$"] = {
-      cflags = { "-I$(shell luarocks show santoku --rock-dir)/include/" }
-    },
-    ["threshold.c$"] = {
-      cflags = { "-I$(shell luarocks show santoku --rock-dir)/include/" }
-    },
-    ["graph.c$"] = {
-      cflags = { "-I$(shell luarocks show santoku --rock-dir)/include/" }
-    },
-    ["spectral.c$"] = {
-      cflags = { "-I$(shell luarocks show santoku --rock-dir)/include/" }
-    },
-    ["corex.c$"] = {
-      cflags = { "-I$(shell luarocks show santoku --rock-dir)/include/" }
-    }
+  ldflags = {
+    "-march=native", "-O3", "-lm", "-lpthread", "-lnuma"
   },
 
   dependencies = {
     "lua >= 5.1",
-    "santoku >= 0.0.258-1",
+    "santoku >= 0.0.266-1",
   },
 
   test = {
-    cflags = { "-g3" },
-    ldflags = { "-g3" },
+    sanitize = {
+      cflags = { "-fsanitize=address,undefined" },
+      ldflags = { "-fsanitize=address,undefined" },
+    },
     dependencies = {
       "luacov >= 0.15.0-1",
-      "santoku-matrix >= 0.0.36-1",
+      "santoku-matrix >= 0.0.43-1",
       "santoku-fs >= 0.0.34-1",
       "lua-cjson >= 2.1.0.10-1",
     }

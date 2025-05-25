@@ -2,6 +2,7 @@
 #define TK_CONF_H
 
 #include <santoku/lua/utils.h>
+#include <santoku/klib.h>
 
 #include <assert.h>
 #include <errno.h>
@@ -109,21 +110,15 @@ static inline uint64_t hash128 (
   return x;
 }
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wsign-compare"
-#pragma GCC diagnostic ignored "-Wsign-conversion"
-#include "ksort.h"
-#include "khash.h"
-#include "kvec.h"
 typedef struct { int64_t u, v; } tm_pair_t;
 #define tm_pair_lt(a, b) ((a).u < (b).u || ((a).u == (b).u && (a).v < (b).v))
+#define tm_pair(u, v) (((u) < (v)) ? ((tm_pair_t) { (u), (v) }) : ((tm_pair_t) { (v), (u) }))
 #define tm_pair_eq(a, b) ((a).u == (b).u && ((a).v == (b).v))
 #define tm_pair_hash(a) (hash128(kh_int64_hash_func((a).u), kh_int64_hash_func((a).v)))
-#define tm_pair(u, v) (((u) < (v)) ? ((tm_pair_t) { (u), (v) }) : ((tm_pair_t) { (v), (u) }))
-KSORT_INIT(pair_asc, tm_pair_t, tm_pair_lt)
 KHASH_INIT(pairs, tm_pair_t, bool, 1, tm_pair_hash, tm_pair_eq)
 typedef khash_t(pairs) tm_pairs_t;
 typedef struct { int64_t v; double d; } tm_neighbor_t;
+KSORT_INIT(pair_asc, tm_pair_t, tm_pair_lt)
 #define tm_neighbor_lt(a, b) ((a).d < (b).d)
 #define tm_neighbor_gt(a, b) ((a).d > (b).d)
 KSORT_INIT(neighbors_asc, tm_neighbor_t, tm_neighbor_lt)
@@ -132,7 +127,6 @@ typedef kvec_t(tm_neighbor_t) tm_neighbors_t;
 typedef struct { uint64_t sim; bool label; } tm_dl_t;
 #define tm_dl_lt(a, b) ((a).sim < (b).sim)
 KSORT_INIT(dl, tm_dl_t, tm_dl_lt)
-KSORT_INIT(u64, uint64_t, ks_lt_generic)
 KSORT_INIT(i64, int64_t, ks_lt_generic)
 KSORT_INIT(f64, double, ks_lt_generic)
 typedef struct { int64_t u; tm_neighbor_t v; } tm_candidate_t;
@@ -142,7 +136,6 @@ typedef struct { int64_t u; tm_neighbor_t v; } tm_candidate_t;
 KSORT_INIT(candidates_asc, tm_candidate_t, tm_candidate_lt)
 KSORT_INIT(candidates_desc, tm_candidate_t, tm_candidate_gt)
 typedef kvec_t(tm_candidate_t) tm_candidates_t;
-#pragma GCC diagnostic pop
 
 static uint64_t const multiplier = 6364136223846793005u;
 __thread uint64_t mcg_state = 0xcafef00dd15ea5e5u;
@@ -221,26 +214,6 @@ static inline void *tk_ensure_interleaved (
       numa_free(p0, s0);
     return p1;
   }
-}
-
-static inline unsigned int tk_tsetlin_get_nthreads (
-  lua_State *L, int i, char *name, char *field
-) {
-  long ts;
-  unsigned int n_threads;
-  if (field != NULL)
-    n_threads = tk_lua_foptunsigned(L, i, name, field, 0);
-  else
-    n_threads = tk_lua_optunsigned(L, i, name, 0);
-  if (n_threads)
-    return n_threads;
-  ts = sysconf(_SC_NPROCESSORS_ONLN) - 1;
-  if (ts <= 0)
-    return (unsigned int) tk_lua_verror(L, 3, name, "sysconf", errno);
-  lua_pushinteger(L, ts);
-  n_threads = tk_lua_checkunsigned(L, -1, "sysconf");
-  lua_pop(L, 1);
-  return n_threads;
 }
 
 #endif

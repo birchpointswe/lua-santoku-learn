@@ -117,9 +117,8 @@ M.read_binary_mnist = function (fp, n_features, max)
   local n_features_aligned = num.round(n_features, tm.align)
   local problems = {}
   local solutions = {}
-  local bits = {}
   for l in fs.lines(fp) do
-    arr.clear(bits)
+    local bits = {}
     local n = 0
     for bit in str.gmatch(l, "%S+") do
       if n == n_features then
@@ -129,7 +128,7 @@ M.read_binary_mnist = function (fp, n_features, max)
       end
       bit = bit == "1"
       if bit then
-        arr.push(bits, n)
+        bits[#bits + 1] = n
       end
       n = n + 1
     end
