@@ -7,7 +7,6 @@
 #include <lua.h>
 #include <primme.h>
 
-#include "khash.h"
 KHASH_SET_INIT_INT64(i64)
 typedef khash_t(i64) i64_hash_t;
 

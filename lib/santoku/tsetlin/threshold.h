@@ -1,5 +1,5 @@
-#ifndef TK_TCH_H
-#define TK_TCH_H
+#ifndef TK_THRESHOLD_H
+#define TK_THRESHOLD_H
 
 #include <santoku/tsetlin/conf.h>
 #include <santoku/tsetlin/roaring.h>

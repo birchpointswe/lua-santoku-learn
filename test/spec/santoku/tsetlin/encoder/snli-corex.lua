@@ -14,9 +14,9 @@ local fs = require("santoku.fs")
 local str = require("santoku.string")
 
 local TRAIN_TEST_RATIO = 0.8
-local TM_ITERS = 20
+local TM_ITERS = 10
 local COREX_ITERS = 100
-local MAX_RECORDS = nil
+local MAX_RECORDS = 1000
 local EVALUATE_EVERY = 1
 local THREADS = nil
 
@@ -25,7 +25,10 @@ local CLAUSES = 512
 local TARGET = 0.1
 local SPECIFICITY = 60
 
-local GRAPH_KNN = 2
+local GRAPH_KNN = 1
+local TRANS_HOPS = 1
+local TRANS_POS = 1
+local TRANS_NEG = 1
 local TOP_ALGO = "chi2"
 local TOP_K = 1024
 
@@ -34,12 +37,12 @@ local TOKENIZER_CONFIG = {
   min_df = 0.001,
   max_len = 20,
   min_len = 1,
-  max_run = 2,
+  max_run = 1,
   ngrams = 3,
-  cgrams_min = 4,
+  cgrams_min = 3,
   cgrams_max = 4,
   skips = 2,
-  negations = 3,
+  negations = 4,
   align = tm.align
 }
 
@@ -79,21 +82,24 @@ test("tsetlin", function ()
     pos = train.pos_enriched,
     neg = train.neg_enriched,
     knn = GRAPH_KNN,
-    each = function (e, s, b, n, dt)
+    trans_hops = TRANS_HOPS,
+    trans_pos = TRANS_POS,
+    trans_neg = TRANS_NEG,
+    each = function (s, b, n, dt)
       local d, dd = stopwatch()
-      str.printf("Epoch: %3d  Time: %6.2f %6.2f  Graph: %-9s  Components: %-6d  Positives: %3d  Negatives: %3d\n", e, d, dd, dt, s, b, n) -- luacheck: ignore
+      str.printf("Time: %6.2f %6.2f  Graph: %-9s  Components: %-6d  Positives: %3d  Negatives: %3d\n", d, dd, dt, s, b, n) -- luacheck: ignore
     end
   })
 
   print("Creating Corex")
+  train.graph_corpus = graph.render(train.pos_enriched, train.n_sentences)
   local cor = corex.create({
-    visible = dataset.n_features,
+    visible = train.n_sentences,
     hidden = HIDDEN,
-    threads = nil,
+    threads = THREADS,
   })
 
   print("Training Corex")
-  train.graph_corpus = graph.render(train.pos_enriched, train.n_sentences)
   cor.train({
     corpus = train.graph_corpus,
     samples = train.n_sentences,
@@ -143,11 +149,11 @@ test("tsetlin", function ()
   local n_top_v = mtx.values(top_v)
   print("After top k filter", n_top_v)
 
-  -- -- Show top words
-  -- local words = tokenizer.index()
-  -- for id in it.take(32, mtx.each(top_v)) do
-  --   print(id, words[id + 1])
-  -- end
+  -- Show top words
+  local words = tokenizer.index()
+  for id in it.take(32, mtx.each(top_v)) do
+    print(id, words[id + 1])
+  end
 
   print("Re-encoding train/test with top features")
   tokenizer.restrict(top_v)
