@@ -140,8 +140,8 @@ test("tsetlin", function ()
       local test_pred = t.predict(test_problems, n_test)
       local duration = stopwatch()
       if epoch == ITERATIONS or epoch % EVALUATE_EVERY == 0 then
-        local train_stats = eval.class_accuracy(train_pred, train_solutions, CLASSES, n_train)
-        local test_stats = eval.class_accuracy(test_pred, test_solutions, CLASSES, n_test)
+        local train_stats = eval.class_accuracy(train_pred, train_solutions, n_train, CLASSES)
+        local test_stats = eval.class_accuracy(test_pred, test_solutions, n_test, CLASSES)
         str.printf("Epoch %-4d  Time %4.2f  Test %4.2f  Train %4.2f\n",
           epoch, duration, test_stats.f1, train_stats.f1)
       else
@@ -160,8 +160,8 @@ test("tsetlin", function ()
   t = tm.load("model.bin", nil, true)
   local train_pred = t.predict(train_problems, n_train)
   local test_pred = t.predict(test_problems, n_test)
-  local train_stats = eval.class_accuracy(train_pred, train_solutions, CLASSES, n_train)
-  local test_stats = eval.class_accuracy(test_pred, test_solutions, CLASSES, n_test)
+  local train_stats = eval.class_accuracy(train_pred, train_solutions, n_train, CLASSES)
+  local test_stats = eval.class_accuracy(test_pred, test_solutions, n_test, CLASSES)
   str.printf("Evaluate\tTest\t%4.2f\tTrain\t%4.2f\n", test_stats.f1, train_stats.f1)
 
 end)

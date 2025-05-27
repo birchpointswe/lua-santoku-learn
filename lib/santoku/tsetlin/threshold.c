@@ -1,20 +1,21 @@
+#define _GNU_SOURCE
+
 #include <santoku/tsetlin/conf.h>
-#include <santoku/tsetlin/pairs.h>
 #include <santoku/tsetlin/threshold.h>
+#include <santoku/tsetlin/graph.h>
 
 #include <float.h>
 #include <lauxlib.h>
 #include <lua.h>
 #include <primme.h>
 
-KHASH_SET_INIT_INT64(i64)
-typedef khash_t(i64) i64_hash_t;
-
 static inline int tm_threshold_tch (lua_State *L)
 {
   lua_settop(L, 1);
 
-  uint64_t n_sentences = tk_lua_fcheckunsigned(L, 1, "threshold_tch", "n_sentences");
+  lua_getfield(L, 1, "graph");
+  tk_graph_t *graph = tk_graph_peek(L, -1);
+
   uint64_t n_hidden = tk_lua_fcheckunsigned(L, 1, "threshold_tch", "n_hidden");
 
   int64_t *codes_bits = NULL;
@@ -34,16 +35,6 @@ static inline int tm_threshold_tch (lua_State *L)
     z = (double *) tk_lua_checkuserdata(L, -1, NULL);
   }
 
-  lua_getfield(L, 1, "pos");
-  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
-  tm_pair_t *pos = (tm_pair_t *) tk_lua_checkuserdata(L, -4, NULL);
-  uint64_t n_pos = (uint64_t) luaL_checkinteger(L, -1) / 2;
-
-  lua_getfield(L, 1, "neg");
-  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
-  tm_pair_t *neg = (tm_pair_t *) tk_lua_checkuserdata(L, -4, NULL);
-  uint64_t n_neg = (uint64_t) luaL_checkinteger(L, -1) / 2;
-
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
     lua_getfield(L, 1, "each");
@@ -51,23 +42,11 @@ static inline int tm_threshold_tch (lua_State *L)
   }
 
   // Setup pairs & adjacency lists
-  tm_pairs_t *pairs = kh_init(pairs);
-  roaring64_bitmap_t **adj_pos = tk_malloc(L, n_sentences * sizeof(roaring64_bitmap_t *));
-  roaring64_bitmap_t **adj_neg = tk_malloc(L, n_sentences * sizeof(roaring64_bitmap_t *));
-  tm_pairs_init(L, pairs, pos, neg, &n_pos, &n_neg);
-  tm_adj_init(pairs, adj_pos, adj_neg, n_sentences);
+  roaring64_bitmap_t **adj_pos = graph->adj_pos;
+  roaring64_bitmap_t **adj_neg = graph->adj_neg;
 
-  unsigned int global_iter = 0;
-  tm_run_tch_thresholding(L, z, &codes_bits, &n_codes_bits, adj_pos, adj_neg, n_sentences, n_hidden, i_each, &global_iter);
-
-  // Cleanup
-  kh_destroy(pairs, pairs);
-  for (uint64_t u = 0; u < n_sentences; u ++) {
-    roaring64_bitmap_free(adj_pos[u]);
-    roaring64_bitmap_free(adj_neg[u]);
-  }
-  free(adj_pos);
-  free(adj_neg);
+  // Run tch
+  tm_run_tch_thresholding(L, z, &codes_bits, &n_codes_bits, adj_pos, adj_neg, graph->n_nodes, n_hidden, i_each);
 
   // Update codes
   lua_pushlightuserdata(L, codes_bits);

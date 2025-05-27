@@ -1,12 +1,14 @@
 # Now
 
-- Fix openmp sanitizer issues
-- Replace roaring with kbtree/khash
 - Matrix as extension to kvec
+- Parallelize threshold tch, median
+- Parallelize graph adj_init, to_bits, render_pairs,
 - ANN via multi-probe LSH
-- Add learnability to tch optimization
 
 # Consider
+
+- Add learnability to tch optimization
+- Replace roaring with kbtree/khash
 
 - Corex anchor should multiply feature MI instead of hard boost?
 - Corex allow explicit anchor feature list instead of last n_hidden, handle

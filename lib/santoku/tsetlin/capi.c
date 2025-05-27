@@ -29,7 +29,7 @@ SOFTWARE.
 
 #include <santoku/lua/utils.h>
 #include <santoku/tsetlin/conf.h>
-#include <santoku/tsetlin/threads.h>
+#include <santoku/threads.h>
 
 #define TK_TSETLIN_MT "santoku_tsetlin"
 
@@ -896,7 +896,6 @@ static inline void _tk_tsetlin_destroy (tk_tsetlin_t *tm)
     numa_free(tm->results, tm->results_len); tm->results = NULL; tm->results_len = 0;
     numa_free(tm->encodings, tm->encodings_len); tm->encodings = NULL; tm->encodings_len = 0;
   }
-  tk_threads_signal(tm->pool, -1);
   for (unsigned int i = 0; i < tm->pool->n_threads; i ++)
     free(tm->pool->threads[i].data);
   tk_threads_destroy(tm->pool);

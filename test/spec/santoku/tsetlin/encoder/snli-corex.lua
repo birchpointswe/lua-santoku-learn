@@ -69,22 +69,20 @@ test("tsetlin", function ()
 
   print("\nTokenizing train")
   train.sentences = tokenizer.tokenize(train.raw_sentences)
-
   local stopwatch = utc.stopwatch()
-  train.pos_enriched = mtx.create(train.pos)
-  train.neg_enriched = mtx.create(train.neg)
 
-  print("Enriching graph")
-  graph.enrich({
-    sentences = train.sentences,
-    n_sentences = train.n_sentences,
+  print("Creating graph")
+  train.graph = graph.create({
+    nodes = train.sentences,
+    n_nodes = train.n_sentences,
     n_features = dataset.n_features,
-    pos = train.pos_enriched,
-    neg = train.neg_enriched,
+    pos = train.pos,
+    neg = train.neg,
     knn = GRAPH_KNN,
     trans_hops = TRANS_HOPS,
     trans_pos = TRANS_POS,
     trans_neg = TRANS_NEG,
+    threads = THREADS,
     each = function (s, b, n, dt)
       local d, dd = stopwatch()
       str.printf("Time: %6.2f %6.2f  Graph: %-9s  Components: %-6d  Positives: %3d  Negatives: %3d\n", d, dd, dt, s, b, n) -- luacheck: ignore
@@ -92,7 +90,8 @@ test("tsetlin", function ()
   })
 
   print("Creating Corex")
-  train.graph_corpus = graph.render(train.pos_enriched, train.n_sentences)
+  train.pos_enriched, train.neg_enriched = graph.pairs(train.graph)
+  train.graph_corpus = graph.to_bits(train.pos_enriched, train.n_sentences)
   local cor = corex.create({
     visible = train.n_sentences,
     hidden = HIDDEN,
@@ -117,29 +116,27 @@ test("tsetlin", function ()
   print("Finetuning codes\n")
   threshold.tch({
     codes = train.codes0, -- NOTE: updated in-place
-    pos = train.pos_enriched,
-    neg = train.neg_enriched,
-    n_sentences = train.n_sentences,
+    graph = train.graph,
     n_hidden = HIDDEN,
-    each = function (e, s)
+    each = function (s)
       local d, dd = stopwatch()
-      str.printf("Epoch: %3d  Time: %6.2f %6.2f  TCH Steps: %3d\n", e, d, dd, s)
+      str.printf("Time: %6.2f %6.2f  TCH Steps: %3d\n", d, dd, s)
     end
   })
 
   train.codes0 = mtx.raw_bitmap(train.codes0, train.n_sentences, HIDDEN)
   train.similarity0 = eval.encoding_similarity(
-    train.codes0, train.pos, train.neg, train.n_sentences, HIDDEN)
+    train.codes0, train.pos, train.neg, HIDDEN, THREADS)
   str.printi("AUC: %.2f#(auc) | F1: %.2f#(f1) | Precision: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", -- luacheck: ignore
     train.similarity0)
 
-  train.entropy0 = eval.codebook_stats(train.codes0, train.n_sentences, HIDDEN)
+  train.entropy0 = eval.codebook_stats(train.codes0, train.n_sentences, HIDDEN, THREADS)
   str.printi("Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)\n",
     train.entropy0)
 
   local top_v =
-    TOP_ALGO == "chi2" and mtx.top_chi2(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K) or -- luacheck: ignore
-    TOP_ALGO == "mi" and mtx.top_mi(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K) or (function () -- luacheck: ignore
+    TOP_ALGO == "chi2" and mtx.top_chi2(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K, THREADS) or -- luacheck: ignore
+    TOP_ALGO == "mi" and mtx.top_mi(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K, THREADS) or (function () -- luacheck: ignore
       -- Fallback to all words
       local t = mtx.create(1, dataset.n_features)
       mtx.fill_indices(t)
@@ -194,11 +191,11 @@ test("tsetlin", function ()
         train.codes1 = t.predict(train.sentences, train.n_sentences)
         test.codes1 = t.predict(test.sentences, test.n_sentences)
         train.accuracy0 = eval.encoding_accuracy(
-          train.codes1, train.codes0, train.n_sentences, HIDDEN)
+          train.codes1, train.codes0, train.n_sentences, HIDDEN, THREADS)
         train.similarity1 = eval.encoding_similarity(
-          train.codes1, train.pos, train.neg, train.n_sentences, HIDDEN)
+          train.codes1, train.pos, train.neg, HIDDEN, THREADS)
         test.similarity1 = eval.encoding_similarity(
-          test.codes1, test.pos, test.neg, test.n_sentences, HIDDEN)
+          test.codes1, test.pos, test.neg, HIDDEN, THREADS)
         print()
         str.printf("Epoch %3d  Time %3.2f %3.2f\n",
           epoch, stopwatch())
@@ -225,11 +222,11 @@ test("tsetlin", function ()
     train.codes1 = t.predict(train.sentences, train.n_sentences)
     test.codes1 = t.predict(test.sentences, test.n_sentences)
     train.accuracy0 = eval.encoding_accuracy(
-      train.codes1, train.codes0, train.n_sentences, HIDDEN)
+      train.codes1, train.codes0, train.n_sentences, HIDDEN, THREADS)
     train.similarity1 = eval.encoding_similarity(
-      train.codes1, train.pos, train.neg, train.n_sentences, HIDDEN)
+      train.codes1, train.pos, train.neg, HIDDEN, THREADS)
     test.similarity1 = eval.encoding_similarity(
-      test.codes1, test.pos, test.neg, test.n_sentences, HIDDEN)
+      test.codes1, test.pos, test.neg, HIDDEN, THREADS)
     print()
     str.printi("  Train (acc) |           | F1: %.2f#(f1) | Prec: %.2f#(precision) | Recall: %.2f#(recall) | F1 Spread: %.2f#(f1_min) %.2f#(f1_max) %.2f#(f1_std)", train.accuracy0) -- luacheck: ignore
     str.printi("  Codes (sim) | AUC: %.2f#(auc) | F1: %.2f#(f1) | Prec: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", train.similarity0) -- luacheck: ignore
