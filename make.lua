@@ -1,7 +1,7 @@
 local env = {
 
   name = "santoku-tsetlin",
-  version = "0.0.77-1",
+  version = "0.0.78-1",
   variable_prefix = "TK_TSETLIN",
   license = "MIT",
   public = true,
@@ -11,6 +11,7 @@ local env = {
     "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow",
     "-Wpointer-sign", "-Wno-unused-parameter", "-Wno-unused-but-set-variable",
     "-I$(shell luarocks show santoku --rock-dir)/include/",
+    "-I$(shell luarocks show santoku-threads --rock-dir)/include/",
     "-I$(shell luarocks show santoku-matrix --rock-dir)/include/",
   },
 
@@ -21,16 +22,13 @@ local env = {
   dependencies = {
     "lua >= 5.1",
     "santoku >= 0.0.266-1",
+    "santoku-threads >= 0.0.1-1",
   },
 
   test = {
-    sanitize = {
-      cflags = { "-fsanitize=address,undefined" },
-      ldflags = { "-fsanitize=address,undefined" },
-    },
     dependencies = {
       "luacov >= 0.15.0-1",
-      "santoku-matrix >= 0.0.43-1",
+      "santoku-matrix >= 0.0.44-1",
       "santoku-fs >= 0.0.34-1",
       "lua-cjson >= 2.1.0.10-1",
     }

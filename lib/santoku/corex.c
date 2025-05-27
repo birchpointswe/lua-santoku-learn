@@ -1,7 +1,7 @@
 #define _GNU_SOURCE
 
 #include <santoku/tsetlin/conf.h>
-#include <santoku/tsetlin/threads.h>
+#include <santoku/threads.h>
 #include <santoku/matrix/integer.h>
 
 #include <float.h>
@@ -32,10 +32,10 @@ typedef struct tk_corex_thread_s {
   tk_corex_t *C;
   uint64_t n_set_bits;
   unsigned int n_samples;
-  unsigned int hfirst;
-  unsigned int hlast;
-  unsigned int vfirst;
-  unsigned int vlast;
+  uint64_t hfirst;
+  uint64_t hlast;
+  uint64_t vfirst;
+  uint64_t vlast;
   unsigned int index;
 } tk_corex_thread_t;
 
@@ -132,7 +132,6 @@ static int tk_corex_gc (lua_State *L)
     numa_free(C->samples, C->samples_len); C->samples = NULL;
     numa_free(C->visibles, C->visibles_len); C->visibles = NULL;
   }
-  tk_threads_signal(C->pool, -1);
   for (unsigned int i = 0; i < C->pool->n_threads; i ++)
     free(C->pool->threads[i].data);
   tk_threads_destroy(C->pool);
@@ -838,31 +837,13 @@ static inline void tk_corex_setup_threads (
 ) {
   tk_threadpool_t *pool = C->pool;
   if (!C->initialized_threads) {
-    unsigned int hslice = C->n_hidden / C->pool->n_threads;
-    unsigned int hremaining = C->n_hidden % C->pool->n_threads;
-    unsigned int hfirst = 0;
-    unsigned int vslice = C->n_visible / C->pool->n_threads;
-    unsigned int vremaining = C->n_visible % C->pool->n_threads;
-    unsigned int vfirst = 0;
     for (unsigned int i = 0; i < C->pool->n_threads; i ++) {
       tk_corex_thread_t *data = tk_malloc(L, sizeof(tk_corex_thread_t));
       pool->threads[i].data = data;
       data->C = C;
       data->index = i;
-      data->hfirst = hfirst;
-      data->hlast = hfirst + hslice - 1;
-      if (hremaining) {
-        data->hlast ++;
-        hremaining --;
-      }
-      hfirst = data->hlast + 1;
-      data->vfirst = vfirst;
-      data->vlast = vfirst + vslice - 1;
-      if (vremaining) {
-        data->vlast ++;
-        vremaining --;
-      }
-      vfirst = data->vlast + 1;
+      tk_thread_range(i, C->pool->n_threads, C->n_hidden, &data->hfirst, &data->hlast);
+      tk_thread_range(i, C->pool->n_threads, C->n_visible, &data->vfirst, &data->vlast);
     }
     C->initialized_threads = true;
   }
