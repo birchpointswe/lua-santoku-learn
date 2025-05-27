@@ -50,10 +50,9 @@ static inline void tm_run_tch_thresholding (
   uint64_t *n_codes_bitsp,
   roaring64_bitmap_t **adj_pos,
   roaring64_bitmap_t **adj_neg,
-  uint64_t n_sentences,
+  uint64_t n_nodes,
   uint64_t n_hidden,
-  int i_each,
-  unsigned int *global_iter
+  int i_each
 ) {
   uint64_t total_steps = 0;
 
@@ -63,10 +62,10 @@ static inline void tm_run_tch_thresholding (
     shuf_hidden[i] = i;
   ks_shuffle(i64, n_hidden, shuf_hidden);
 
-  // Prep sentences shuffle
-  int64_t *shuf_sentences = tk_malloc(L, n_sentences * sizeof(int64_t));
-  for (int64_t i = 0; i < (int64_t) n_sentences; i ++)
-    shuf_sentences[i] = i;
+  // Prep nodes shuffle
+  int64_t *shuf_nodes = tk_malloc(L, n_nodes * sizeof(int64_t));
+  for (int64_t i = 0; i < (int64_t) n_nodes; i ++)
+    shuf_nodes[i] = i;
 
   kvec_t(int64_t) out;
   if (codes_bitsp != NULL && (*codes_bitsp) != NULL) {
@@ -76,8 +75,8 @@ static inline void tm_run_tch_thresholding (
     kv_init(out);
   }
 
-  double *col = z == NULL ? NULL : tk_malloc(L, n_sentences * sizeof(double));
-  int *bitvecs = tk_malloc(L, n_hidden * n_sentences * sizeof(int));
+  double *col = z == NULL ? NULL : tk_malloc(L, n_nodes * sizeof(double));
+  int *bitvecs = tk_malloc(L, n_hidden * n_nodes * sizeof(int));
   roaring64_iterator_t it;
 
   // If z provided, initialize codes from z thresholded at median. If z not
@@ -85,17 +84,17 @@ static inline void tm_run_tch_thresholding (
   if (z != NULL) {
     for (uint64_t f = 0; f < n_hidden; f ++) {
       // Find the median
-      for (uint64_t i = 0; i < n_sentences; i ++)
+      for (uint64_t i = 0; i < n_nodes; i ++)
         col[i] = z[i * n_hidden + f];
-      uint64_t mid = n_sentences / 2;
-      ks_ksmall(f64, n_sentences, col, mid);
+      uint64_t mid = n_nodes / 2;
+      ks_ksmall(f64, n_nodes, col, mid);
       double med = col[mid];
       // Threshold around the median
-      for (uint64_t i = 0; i < n_sentences; i ++)
-        bitvecs[f * n_sentences + i] = (z[i * n_hidden + f] > med) ? +1 : -1;
+      for (uint64_t i = 0; i < n_nodes; i ++)
+        bitvecs[f * n_nodes + i] = (z[i * n_hidden + f] > med) ? +1 : -1;
     }
   } else {
-    for (uint64_t i = 0; i < n_hidden * n_sentences; i ++)
+    for (uint64_t i = 0; i < n_hidden * n_nodes; i ++)
       bitvecs[i] = -1;
     for (uint64_t i = 0; i < out.n; i ++) {
       int64_t v = out.a[i];
@@ -103,7 +102,7 @@ static inline void tm_run_tch_thresholding (
         continue;
       uint64_t s = (uint64_t) v / n_hidden;
       uint64_t f = (uint64_t) v % n_hidden;
-      bitvecs[f * n_sentences + s] = +1;
+      bitvecs[f * n_nodes + s] = +1;
     }
   }
 
@@ -112,10 +111,10 @@ static inline void tm_run_tch_thresholding (
   for (uint64_t sf = 0; sf < n_hidden; sf ++) {
 
     uint64_t f = (uint64_t) shuf_hidden[sf];
-    int *bitvec = bitvecs + f * n_sentences;
+    int *bitvec = bitvecs + f * n_nodes;
 
-    // Shuffle sentences
-    ks_shuffle(i64, n_sentences, shuf_sentences);
+    // Shuffle nodes
+    ks_shuffle(i64, n_nodes, shuf_nodes);
 
     bool updated;
     uint64_t steps = 0;
@@ -125,8 +124,8 @@ static inline void tm_run_tch_thresholding (
       steps ++;
       total_steps ++;
 
-      for (uint64_t si = 0; si < n_sentences; si ++) {
-        uint64_t i = (uint64_t) shuf_sentences[si];
+      for (uint64_t si = 0; si < n_nodes; si ++) {
+        uint64_t i = (uint64_t) shuf_nodes[si];
         int delta = 0;
         // Positive neighbors
         roaring64_iterator_reinit(adj_pos[i], &it);
@@ -151,22 +150,20 @@ static inline void tm_run_tch_thresholding (
     } while (updated);
 
     // Write out the final bits into your packed codes
-    for (uint64_t i = 0; i < n_sentences; i ++)
+    for (uint64_t i = 0; i < n_nodes; i ++)
       if (bitvec[i] > 0)
         kv_push(int64_t, out, (int64_t) i * (int64_t) n_hidden + (int64_t) f);
   }
 
-  (*global_iter) ++;
   if (i_each >= 0) {
     lua_pushvalue(L, i_each);
-    lua_pushinteger(L, *global_iter);
     lua_pushinteger(L, (int64_t) total_steps);
-    lua_call(L, 2, 0);
+    lua_call(L, 1, 0);
   }
 
   free(bitvecs);
   free(col);
-  free(shuf_sentences);
+  free(shuf_nodes);
   free(shuf_hidden);
 
   kv_resize(int64_t, out, out.n);
