@@ -2,6 +2,7 @@
 
 #include <santoku/tsetlin/conf.h>
 #include <santoku/threads.h>
+#include <santoku/ivec.h>
 
 typedef enum {
   TK_EVAL_CLASS_ACCURACY,
@@ -14,7 +15,7 @@ typedef enum {
 typedef struct {
   tm_dl_t *pl;
   atomic_ulong *TP, *FP, *FN, *bit_counts, *hist_pos, *hist_neg;
-  tm_pair_t *pos, *neg;
+  tk_ivec_t *pos, *neg;
   uint64_t n_pos, n_neg;
   double *f1, *precision, *recall;
   unsigned int *predicted, *expected;
@@ -80,10 +81,10 @@ static void tk_eval_worker (void *dp, int sig)
 
     case TK_EVAL_ENCODING_AUC:
       for (uint64_t k = data->pfirst; k <= data->plast; k ++) {
-        tm_pair_t *pairs = k < state->n_pos ? state->pos : state->neg;
+        tk_ivec_t *pairs = k < state->n_pos ? state->pos : state->neg;
         uint64_t offset = k < state->n_pos ? 0 : state->n_pos;
-        int64_t u = pairs[k - offset].u;
-        int64_t v = pairs[k - offset].v;
+        int64_t u = pairs->a[(k - offset) * 2 + 0];
+        int64_t v = pairs->a[(k - offset) * 2 + 1];
         if (state->mask != NULL)
           state->pl[k].sim = (uint64_t) state->n_classes - hamming_mask(
             state->codes + (uint64_t) u * state->chunks,
@@ -408,18 +409,11 @@ static inline int tm_auc (lua_State *L)
   lua_settop(L, 6);
 
   tk_bits_t *codes = (tk_bits_t *) tk_lua_checkustring(L, 1, "codes");
-
-  lua_pushvalue(L, 2);
-  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
-  tm_pair_t *pos = (tm_pair_t *) tk_lua_checkuserdata(L, -4, NULL);
-  uint64_t n_pos = (uint64_t) luaL_checkinteger(L, -1) / 2;
-
-  lua_pushvalue(L, 3);
-  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
-  tm_pair_t *neg = (tm_pair_t *) tk_lua_checkuserdata(L, -4, NULL);
-  uint64_t n_neg = (uint64_t) luaL_checkinteger(L, -1) / 2;
-
+  tk_ivec_t *pos = tk_ivec_peek(L, 2);
+  tk_ivec_t *neg = tk_ivec_peek(L, 3);
   uint64_t n_classes = tk_lua_checkunsigned(L, 4, "n_hidden");
+  uint64_t n_pos = pos->n / 2;
+  uint64_t n_neg = neg->n / 2;
 
   tk_bits_t *mask =
     lua_type(L, 5) == LUA_TSTRING ? (tk_bits_t *) luaL_checkstring(L, 5) :
@@ -461,19 +455,12 @@ static inline int tm_encoding_similarity (lua_State *L)
   lua_settop(L, 5);
 
   tk_bits_t *codes = (tk_bits_t *) tk_lua_checkustring(L, 1, "codes");
-
-  lua_pushvalue(L, 2);
-  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
-  tm_pair_t *pos = (tm_pair_t *) tk_lua_checkuserdata(L, -4, NULL);
-  uint64_t n_pos = (uint64_t) luaL_checkinteger(L, -1) / 2;
-
-  lua_pushvalue(L, 3);
-  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
-  tm_pair_t *neg = (tm_pair_t *) tk_lua_checkuserdata(L, -4, NULL);
-  uint64_t n_neg = (uint64_t) luaL_checkinteger(L, -1) / 2;
-
+  tk_ivec_t *pos = tk_ivec_peek(L, 2);
+  tk_ivec_t *neg = tk_ivec_peek(L, 3);
   uint64_t n_classes = tk_lua_checkunsigned(L, 4, "n_hidden");
   unsigned int n_threads = tk_threads_getn(L, 5, "n_threads", NULL);
+  uint64_t n_pos = pos->n / 2;
+  uint64_t n_neg = neg->n / 2;
 
   tk_eval_t state;
   state.n_classes = n_classes;

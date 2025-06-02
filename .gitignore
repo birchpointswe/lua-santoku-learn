@@ -4,3 +4,5 @@ test/res/santoku/tsetlin/BinarizedMNISTData/
 test/res/BinarizedMNISTData/
 tmp/
 test/res/imdb.dev/
+test/res/glove.10k.txt
+test/res/snli.10k.txt

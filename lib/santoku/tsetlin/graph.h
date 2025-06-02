@@ -4,6 +4,7 @@
 #include <santoku/tsetlin/roaring.h>
 #include <santoku/tsetlin/conf.h>
 #include <santoku/threads.h>
+#include <santoku/ivec.h>
 #include <float.h>
 
 KHASH_SET_INIT_INT64(i64)
@@ -37,10 +38,9 @@ typedef struct tk_graph_s {
   tm_pairs_t *pairs;
   tm_neighbors_t *neighbors;
   roaring64_bitmap_t **nodes;
-  int64_t *set_bits;
-  uint64_t n_set_bits;
+  tk_ivec_t *set_bits;
   uint64_t knn_cache;
-  tm_pair_t *pos, *neg;
+  tk_ivec_t *pos, *neg;
   uint64_t n_pos, n_neg;
   roaring64_bitmap_t **adj_pos, **adj_neg, **index;
   tm_dsu_t dsu;

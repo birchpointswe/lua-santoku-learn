@@ -1,9 +1,59 @@
 # Now
 
-- Matrix as extension to kvec
+- Refactor booleanizer/thresholding
+    - santoku.booleanize
+        - Focused on converting a set of feature observations across many
+          samples to a fixed-width bit-matrix representation
+        - Accepts either dense matrix of floats and converts via thresholding or
+          a table of tables of feature observations and converts via
+          thresholding or multi-hot encoding
+        - Returns the encoded input and a function for converting new samples
+        - Takes either a matrix of floats or lua table of tables and produces:
+            - A bit-matrix representing the input
+            - An encoder function for converting new samples
+        - User-specified `n_thresholds` for continuous features
+            - `n_thresholds = 1`: median thresholding
+            - `n_thresholds > 1`: percentile binning
+        - For table input:
+            - Optional `feature_types` table can be provided: `{ feature_name = "categorical" | "continuous" }`
+            - Otherwise, features are automatically classified:
+                - Numeric → continuous
+                - Strings, booleans → categorical
+                - Mixed types → categorical
+            - Manual type annotations take precedence
+            - Continuous features are binarized as above
+            - Categorical features are one-hot or multi-hot encoded
+    - santoku.refine
+        - Focused on embedding-level bit revision/optimization
+        - Takes a bitmatrix and refines it in some way, producing another bit
+          matrix
+        - Currently only supports tch greedy flipping
+        - Could expose an auc/entropy/etc-based pruning/selection process
+        - Takes a corpus of bitmaps or floats and produces a new corpus of
+          bitmaps
+
+- Bitmap clustering (k-medoids or dbscan)
+- Multi-probe LSH ANN
+- Graph.pairs should show modifications (seed, removed, added by phase)
+- Support KF(urthest)N in addition to KNN (random zero-overlap nodes first, then
+  furthest in feature space)
+
+# Next
+
+- Automatically handle clause numbers, feature numbers, etc. of arbitrary
+  numbers (i.e. support for non-multiples of 64)
+
+- Expose tk_bits_t API to Lua
+    - Consider using tk_cvec_t
+
+# Later
+
+- Double-check auto-vectorization and paralellization across the board
+    - Especially corex, given added branching/etc logic added
 - Parallelize threshold tch, median
 - Parallelize graph adj_init, to_bits, render_pairs,
 - ANN via multi-probe LSH
+- Hamming DBSCAN & K-Medoids
 
 # Consider
 

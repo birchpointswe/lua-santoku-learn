@@ -1,6 +1,7 @@
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local tm = require("santoku.tsetlin")
-local mtx = require("santoku.matrix.integer")
+local ivec = require("santoku.ivec")
+local dvec = require("santoku.dvec")
 local it = require("santoku.iter")
 local fs = require("santoku.fs")
 local str = require("santoku.string")
@@ -86,7 +87,7 @@ local function _split_snli_pairs (dataset, split, prop, start, size)
     end
     arr.push(pairs_to, na - 1, nb - 1)
   end
-  split[prop] = mtx.create(pairs_to)
+  split[prop] = ivec.create(pairs_to)
 end
 
 M.split_snli_pairs = function (dataset, ratio)
@@ -135,8 +136,7 @@ M.read_binary_mnist = function (fp, n_features, max)
     if n ~= n_features then
       error("bitmap length mismatch")
     else
-      local p = mtx.create(bits)
-      mtx.reshape(p, mtx.values(p), 1);
+      local p = ivec.create(bits)
       problems[#problems + 1] = p
     end
     if max and #problems >= max then
@@ -152,15 +152,15 @@ end
 
 local function _split_binary_mnist (dataset, s, e)
   local n = e - s + 1
-  local ps = mtx.create(0, 1)
+  local ps = ivec.create()
   local ss = {}
   for i = s, e do
-    local p = mtx.create(dataset.problems[i])
-    mtx.add(p, (i - s) * dataset.n_features)
-    mtx.extend(ps, p)
+    local p = ivec.create(dataset.problems[i])
+    ivec.add(p, (i - s) * dataset.n_features)
+    ivec.copy(ps, p)
     arr.push(ss, dataset.solutions[i])
   end
-  ss = mtx.create(ss)
+  ss = ivec.create(ss)
   return {
     problems = ps,
     solutions = ss,
@@ -173,6 +173,74 @@ M.split_binary_mnist = function (dataset, ratio)
   return
     _split_binary_mnist(dataset, 1, n_train),
     _split_binary_mnist(dataset, n_train + 1, #dataset.problems)
+end
+
+M.read_imdb = function (dir, max)
+  local problems = {}
+  local solutions = {}
+  local pos = it.paste(1, it.take(max or math.huge, fs.files(dir .. "/pos")))
+  local neg = it.paste(0, it.take(max or math.huge, fs.files(dir .. "/neg")))
+  local samples = it.map(function (label, text)
+    return label, fs.readfile(text)
+  end, it.chain(pos, neg))
+  for label, review in samples do
+    solutions[#solutions + 1] = label
+    problems[#problems + 1] = review
+  end
+  arr.shuffle(problems, solutions)
+  return {
+    n = #problems,
+    problems = problems,
+    solutions = solutions
+  }
+end
+
+local function _split_imdb (dataset, s, e)
+  local ps = arr.copy({}, dataset.problems, 1, s, e)
+  local ss = arr.copy({}, dataset.solutions, 1, s, e)
+  ss = ivec.create(ss)
+  return {
+    n = #ps,
+    problems = ps,
+    solutions = ss
+  }
+end
+
+M.split_imdb = function (dataset, ratio)
+  local n_train = num.floor(#dataset.problems * ratio)
+  return
+    _split_imdb(dataset, 1, n_train),
+    _split_imdb(dataset, n_train + 1, #dataset.problems)
+end
+
+M.read_glove = function (fp, max)
+  local n_dims = nil
+  local embeddings = dvec.create()
+  local words = {}
+  local added = 0
+  for l in fs.lines(fp) do
+    local chunks = str.gmatch(l, "%S+")
+    local word = chunks()
+    words[#words + 1] = word
+    words[word] = #words
+    for n in chunks do
+      n = err.assert(tonumber(n), "error parsing dimension")
+      dvec.push(embeddings, n)
+      added = added + 1
+    end
+    if not n_dims then
+      n_dims = added
+    end
+    err.assert(added == n_dims, "dimension mismatch", "expected", n_dims, "found", added)
+    added = 0
+  end
+  dvec.shrink(embeddings)
+  return {
+    n_embeddings = #words,
+    embeddings = embeddings,
+    n_dims = n_dims,
+    words = words
+  }
 end
 
 return M
