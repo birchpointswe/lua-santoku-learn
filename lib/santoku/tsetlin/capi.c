@@ -39,6 +39,7 @@ typedef enum {
 } tk_tsetlin_type_t;
 
 typedef enum {
+  TM_SEED,
   TM_CLASSIFIER_PRIME,
   TM_CLASSIFIER_SETUP,
   TM_CLASSIFIER_TRAIN,
@@ -484,8 +485,9 @@ static void tk_classifier_setup_thread (
     }
   }
   unsigned int clause_chunks = tm->clause_chunks;
+  unsigned int input_chunks = tm->input_chunks;
   for (unsigned int s = 0; s < n; s ++) {
-    tk_bits_t *input = ps + s * tm->input_chunks;
+    tk_bits_t *input = ps + s * input_chunks;
     tk_bits_t out;
     for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
       tk_tsetlin_calculate(tm, input, false, &out, chunk, chunk);
@@ -546,7 +548,6 @@ static void tk_classifier_train_thread (
   unsigned int clast,
   unsigned int thread
 ) {
-  seed_rand(thread);
   tk_tsetlin_init_shuffle(tm_state_shuffle(tm, thread), n);
 
   unsigned int clause_chunks = tm->clause_chunks;
@@ -578,7 +579,6 @@ static void tk_encoder_train_thread (
   unsigned int clast,
   unsigned int thread
 ) {
-  seed_rand(thread);
   tk_tsetlin_init_shuffle(tm_state_shuffle(tm, thread), n);
 
   unsigned int class_chunks = tm->class_chunks;
@@ -640,6 +640,9 @@ static void tk_tsetlin_worker (void *dp, int sig)
   tk_tsetlin_stage_t stage = (tk_tsetlin_stage_t) sig;
   tk_tsetlin_thread_t *data = (tk_tsetlin_thread_t *) dp;
   switch (stage) {
+    case TM_SEED:
+      seed_rand(data->index);
+      break;
     case TM_CLASSIFIER_SETUP:
       tk_classifier_setup_thread(
         data->tm,
@@ -775,6 +778,7 @@ static inline void tk_tsetlin_init_classifier (
     luaL_error(L, "error in malloc during creation of classifier");
   tm->pool = tk_threads_create(L, n_threads, tk_tsetlin_worker);
   tk_tsetlin_setup_threads(L, tm, n_threads);
+  tk_threads_signal(tm->pool, TM_SEED);
 }
 
 static inline int tk_tsetlin_init_encoder (
@@ -1005,7 +1009,7 @@ static inline int tk_tsetlin_train_classifier (
   tk_tsetlin_t *tm
 ) {
   unsigned int n = tk_lua_fcheckunsigned(L, 2, "train", "samples");
-  tk_bits_t *ps = (tk_bits_t *) tk_lua_fcheckustring(L, 2, "train", "problems");
+  tk_bits_t *ps = (tk_bits_t *) tk_lua_fcheckstring(L, 2, "train", "problems");
   unsigned int *ss = (unsigned int *) tk_lua_fcheckstring(L, 2, "train", "solutions");
   unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
 
@@ -1223,6 +1227,7 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, 
   tk_lua_fread(L, tm->actions, sizeof(tk_bits_t), tm->action_chunks, fh);
   tm->pool = tk_threads_create(L, n_threads, tk_tsetlin_worker);
   tk_tsetlin_setup_threads(L, tm, n_threads);
+  tk_threads_signal(tm->pool, TM_SEED);
 }
 
 static inline void tk_tsetlin_load_classifier (lua_State *L, FILE *fh, bool read_state, bool has_state)

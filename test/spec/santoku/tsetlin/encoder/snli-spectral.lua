@@ -1,18 +1,19 @@
+local corex = require("santoku.corex")
+local fs = require("santoku.fs")
+local it = require("santoku.iter")
+local ivec = require("santoku.ivec")
 local serialize = require("santoku.serialize") -- luacheck: ignore
+local str = require("santoku.string")
 local test = require("santoku.test")
-local threshold = require("santoku.tsetlin.threshold")
 local utc = require("santoku.utc")
+
 local tm = require("santoku.tsetlin")
 local ds = require("santoku.tsetlin.dataset")
-local corex = require("santoku.corex")
-local tokenizer = require("santoku.tsetlin.tokenizer")
-local graph = require("santoku.tsetlin.graph")
-local spectral = require("santoku.tsetlin.spectral")
 local eval = require("santoku.tsetlin.evaluator")
-local mtx = require("santoku.matrix.integer")
-local it = require("santoku.iter")
-local fs = require("santoku.fs")
-local str = require("santoku.string")
+local graph = require("santoku.tsetlin.graph")
+local threshold = require("santoku.tsetlin.threshold")
+local tokenizer = require("santoku.tsetlin.tokenizer")
+local spectral = require("santoku.tsetlin.spectral")
 
 local TRAIN_TEST_RATIO = 0.8
 local TM_ITERS = 10
@@ -21,14 +22,14 @@ local EVALUATE_EVERY = 1
 local THREADS = nil
 
 local HIDDEN = 64
-local CLAUSES = 1024
+local CLAUSES = 512
 local TARGET = 0.1
 local SPECIFICITY = 60
 
 local GRAPH_KNN = 1
 local TRANS_HOPS = 1
 local TRANS_POS = 1
-local TRANS_NEG = 4
+local TRANS_NEG = 1
 local COREX_TOP_ITERS = 300
 local COREX_TOP_ANCHOR = 1000.0
 local TOP_ALGO = "chi2" -- mi, chi2, or corex
@@ -107,7 +108,6 @@ test("tsetlin", function ()
     z = train.codes0,
     graph = train.graph,
     n_hidden = HIDDEN,
-    -- TODO: not threaded yet
     threads = THREADS,
     each = function (s)
       local d, dd = stopwatch()
@@ -115,7 +115,7 @@ test("tsetlin", function ()
     end
   })
 
-  train.codes0_raw = mtx.raw_bitmap(train.codes0, train.n_sentences, HIDDEN)
+  train.codes0_raw = ivec.raw_bitmap(train.codes0, train.n_sentences, HIDDEN)
   train.similarity0 = eval.encoding_similarity(train.codes0_raw, train.pos, train.neg, HIDDEN, THREADS)
   str.printi("AUC: %.2f#(auc) | F1: %.2f#(f1) | Precision: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", -- luacheck: ignore
     train.similarity0)
@@ -125,12 +125,12 @@ test("tsetlin", function ()
     train.entropy0)
 
   local top_v =
-    TOP_ALGO == "chi2" and mtx.top_chi2(train.sentences, train.codes0_raw, train.n_sentences, dataset.n_features, HIDDEN, TOP_K, THREADS) or -- luacheck: ignore
-    TOP_ALGO == "mi" and mtx.top_mi(train.sentences, train.codes0_raw, train.n_sentences, dataset.n_features, HIDDEN, TOP_K, THREADS) or -- luacheck: ignore
+    TOP_ALGO == "chi2" and ivec.top_chi2(train.sentences, train.codes0_raw, train.n_sentences, dataset.n_features, HIDDEN, TOP_K, THREADS) or -- luacheck: ignore
+    TOP_ALGO == "mi" and ivec.top_mi(train.sentences, train.codes0_raw, train.n_sentences, dataset.n_features, HIDDEN, TOP_K, THREADS) or -- luacheck: ignore
     TOP_ALGO == "corex" and (function ()
       print("Creating Corex")
-      train.sel_corpus = mtx.create(train.sentences)
-      mtx.extend_bits(train.sel_corpus, train.codes0, dataset.n_features, HIDDEN)
+      train.sel_corpus = ivec.create(train.sentences)
+      ivec.extend_bits(train.sel_corpus, train.codes0, dataset.n_features, HIDDEN)
       local cor = corex.create({
         visible = dataset.n_features + HIDDEN,
         hidden = HIDDEN,
@@ -152,17 +152,17 @@ test("tsetlin", function ()
       return cor.top_visible(TOP_K)
     end)() or (function ()
       -- Fallback to all words
-      local t = mtx.create(1, dataset.n_features)
-      mtx.fill_indices(t)
+      local t = ivec.create(dataset.n_features)
+      ivec.fill_indices(t)
       return t
     end)()
 
-  local n_top_v = mtx.columns(top_v)
+  local n_top_v = ivec.size(top_v)
   print("After top k filter", n_top_v)
 
   -- Show top words
   local words = tokenizer.index()
-  for id in it.take(32, mtx.each(top_v)) do
+  for id in it.take(32, ivec.each(top_v)) do
     print(id, words[id + 1])
   end
 
@@ -172,11 +172,10 @@ test("tsetlin", function ()
   test.sentences = tokenizer.tokenize(test.raw_sentences)
 
   print("Prepping for encoder")
-  -- TODO: parallelize
-  mtx.flip_interleave(train.sentences, train.n_sentences, n_top_v)
-  mtx.flip_interleave(test.sentences, test.n_sentences, n_top_v)
-  train.sentences = mtx.raw_bitmap(train.sentences, train.n_sentences, n_top_v * 2)
-  test.sentences = mtx.raw_bitmap(test.sentences, test.n_sentences, n_top_v * 2)
+  ivec.flip_interleave(train.sentences, train.n_sentences, n_top_v)
+  ivec.flip_interleave(test.sentences, test.n_sentences, n_top_v)
+  train.sentences = ivec.raw_bitmap(train.sentences, train.n_sentences, n_top_v * 2)
+  test.sentences = ivec.raw_bitmap(test.sentences, test.n_sentences, n_top_v * 2)
 
   print()
   print("Input Features", n_top_v * 2)
@@ -205,16 +204,14 @@ test("tsetlin", function ()
       if epoch == TM_ITERS or epoch % EVALUATE_EVERY == 0 then
         train.codes1 = t.predict(train.sentences, train.n_sentences)
         test.codes1 = t.predict(test.sentences, test.n_sentences)
-        train.accuracy0 = eval.encoding_accuracy(
-          train.codes1, train.codes0_raw, train.n_sentences, HIDDEN, THREADS)
-        train.similarity1 = eval.encoding_similarity(
-          train.codes1, train.pos, train.neg, HIDDEN, THREADS)
-        test.similarity1 = eval.encoding_similarity(
-          test.codes1, test.pos, test.neg, HIDDEN, THREADS)
+        train.accuracy0 = eval.encoding_accuracy(train.codes1, train.codes0_raw, train.n_sentences, HIDDEN, THREADS)
+        train.similarity1 = eval.encoding_similarity(train.codes1, train.pos, train.neg, HIDDEN, THREADS)
+        test.similarity1 = eval.encoding_similarity(test.codes1, test.pos, test.neg, HIDDEN, THREADS)
         print()
         str.printf("Epoch %3d  Time %3.2f %3.2f\n",
           epoch, stopwatch())
         print()
+        -- print(serialize(train.accuracy0))
         str.printi("  Train (acc) |           | F1: %.2f#(f1) | Prec: %.2f#(precision) | Recall: %.2f#(recall) | F1 Spread: %.2f#(f1_min) %.2f#(f1_max) %.2f#(f1_std)", train.accuracy0) -- luacheck: ignore
         str.printi("  Codes (sim) | AUC: %.2f#(auc) | F1: %.2f#(f1) | Prec: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", train.similarity0) -- luacheck: ignore
         str.printi("  Train (sim) | AUC: %.2f#(auc) | F1: %.2f#(f1) | Prec: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", train.similarity1) -- luacheck: ignore

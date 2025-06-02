@@ -1,9 +1,8 @@
-local arr = require("santoku.array")
+local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
 local fs = require("santoku.fs")
 local it = require("santoku.iter")
-local mtx = require("santoku.matrix.integer")
-local num = require("santoku.num")
+local ivec = require("santoku.ivec")
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local str = require("santoku.string")
 local test = require("santoku.test")
@@ -22,7 +21,6 @@ local CLAUSES = 8192
 local TARGET = 32
 local SPECIFICITY = 29
 local NEGATIVE = 0.5
-local FEATURES = 784
 
 local TOP_ALGO = "mi"
 local TOP_K = 1024
@@ -36,90 +34,62 @@ local TOKENIZER_CONFIG = {
   ngrams = 2,
   cgrams_min = 0,
   cgrams_max = 0,
-  skips = 1,
+  skips = 2,
   negations = 4,
   align = tm.align
 }
 
-local function read_data (dir, max)
-  local problems = {}
-  local solutions = {}
-  local pos = it.paste(1, it.take(max or math.huge, fs.files(dir .. "/pos")))
-  local neg = it.paste(0, it.take(max or math.huge, fs.files(dir .. "/neg")))
-  local samples = it.map(function (label, text)
-    return label, fs.readfile(text)
-  end, it.chain(pos, neg))
-  for label, review in samples do
-    solutions[#solutions + 1] = label
-    problems[#problems + 1] = review
-  end
-  arr.shuffle(problems, solutions)
-  return {
-    problems = problems,
-    solutions = solutions
-  }
-end
-
-local function split_dataset (dataset, s, e)
-  local ps = arr.copy({}, dataset.problems, 1, s, e)
-  local ss = arr.copy({}, dataset.solutions, 1, s, e)
-  ss = mtx.create({ ss })
-  return ps, ss
-end
-
 test("tsetlin", function ()
 
   print("Reading data")
-  local dataset = read_data("test/res/imdb.dev", MAX)
+  local dataset = ds.read_imdb("test/res/imdb.dev", MAX)
+  local train, test = ds.split_imdb(dataset, TTR)
 
-  print("Splitting & packing")
-  local n_train = num.floor(#dataset.problems * TTR)
-  local n_test = #dataset.problems - n_train
-  FEATURES = num.round(FEATURES, tm.align)
-  local train_problems_raw, train_solutions = split_dataset(dataset, 1, n_train)
-  local test_problems_raw, test_solutions = split_dataset(dataset, n_train + 1, n_train + n_test)
-  str.printf("Train %d  Test %d\n", n_train, n_test)
+  print("Train", train.n)
+  print("Test", test.n)
 
-  print("Train", n_train)
-  print("Test", n_test)
-
-  print("Creating tokenizer")
+  print("\nTraining tokenizer\n")
   local tokenizer = tokenizer.create(TOKENIZER_CONFIG)
-  tokenizer.train({ corpus = train_problems_raw })
+  tokenizer.train({ corpus = train.problems })
   tokenizer.finalize()
   dataset.n_features = tokenizer.features()
   str.printf("Feat\t\t%d\t\t\n", dataset.n_features)
 
   print("Tokenizing train")
-  local train_problems = tokenizer.tokenize(train_problems_raw)
+  train.problems0 = tokenizer.tokenize(train.problems)
   local top_v =
-    TOP_ALGO == "chi2" and mtx.top_chi2(train_problems, train_solutions, n_train, dataset.n_features, 2, TOP_K) or
-    TOP_ALGO == "mi" and mtx.top_mi(train_problems, train_solutions, n_train, dataset.n_features, 2, TOP_K) or nil
-  local n_top_v = mtx.columns(top_v)
+    TOP_ALGO == "chi2" and ivec.top_chi2(train.problems0, train.solutions, train.n, dataset.n_features, 2, TOP_K, THREADS) or -- luacheck: ignore
+    TOP_ALGO == "mi" and ivec.top_mi(train.problems0, train.solutions, train.n, dataset.n_features, 2, TOP_K, THREADS) or (function () -- luacheck: ignore
+      -- Fallback to all words
+      local t = ivec.create(dataset.n_features)
+      ivec.fill_indices(t)
+      return t
+    end)()
+  local n_top_v = ivec.size(top_v)
   print("After top k filter", n_top_v)
 
   -- Show top words
   local words = tokenizer.index()
-  for id in it.take(32, mtx.each(top_v)) do
+  for id in it.take(32, ivec.each(top_v)) do
     print(id, words[id + 1])
   end
 
   print("Re-encoding train/test with top features")
   tokenizer.restrict(top_v)
-  local train_problems = tokenizer.tokenize(train_problems_raw);
-  local test_problems = tokenizer.tokenize(test_problems_raw);
+  train.problems = tokenizer.tokenize(train.problems);
+  test.problems = tokenizer.tokenize(test.problems);
 
   print("Prepping for classifier")
-  mtx.flip_interleave(train_problems, n_train, n_top_v)
-  train_problems = mtx.raw_bitmap(train_problems, n_train, n_top_v * 2)
-  train_solutions = mtx.raw(train_solutions, nil, nil, "u32");
-  mtx.flip_interleave(test_problems, n_test, n_top_v)
-  test_problems = mtx.raw_bitmap(test_problems, n_test, n_top_v * 2)
-  test_solutions = mtx.raw(test_solutions, nil, nil, "u32");
+  ivec.flip_interleave(train.problems, train.n, n_top_v)
+  ivec.flip_interleave(test.problems, test.n, n_top_v)
+  train.problems = ivec.raw_bitmap(train.problems, train.n, n_top_v * 2)
+  test.problems = ivec.raw_bitmap(test.problems, test.n, n_top_v * 2)
+  train.solutions = ivec.raw(train.solutions, "u32")
+  test.solutions = ivec.raw(test.solutions, "u32")
 
   print("Creating")
   local t = tm.classifier({
-    features = FEATURES,
+    features = n_top_v,
     classes = CLASSES,
     clauses = CLAUSES,
     target = TARGET,
@@ -131,17 +101,17 @@ test("tsetlin", function ()
   print("Training")
   local stopwatch = utc.stopwatch()
   t.train({
-    samples = n_train,
-    problems = train_problems,
-    solutions = train_solutions,
+    samples = train.n,
+    problems = train.problems,
+    solutions = train.solutions,
     iterations = ITERATIONS,
     each = function (epoch)
-      local train_pred = t.predict(train_problems, n_train)
-      local test_pred = t.predict(test_problems, n_test)
+      local train_pred = t.predict(train.problems, train.n)
+      local test_pred = t.predict(test.problems, test.n)
       local duration = stopwatch()
       if epoch == ITERATIONS or epoch % EVALUATE_EVERY == 0 then
-        local train_stats = eval.class_accuracy(train_pred, train_solutions, n_train, CLASSES)
-        local test_stats = eval.class_accuracy(test_pred, test_solutions, n_test, CLASSES)
+        local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, CLASSES)
+        local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, CLASSES)
         str.printf("Epoch %-4d  Time %4.2f  Test %4.2f  Train %4.2f\n",
           epoch, duration, test_stats.f1, train_stats.f1)
       else
@@ -158,10 +128,10 @@ test("tsetlin", function ()
 
   print("Testing restore")
   t = tm.load("model.bin", nil, true)
-  local train_pred = t.predict(train_problems, n_train)
-  local test_pred = t.predict(test_problems, n_test)
-  local train_stats = eval.class_accuracy(train_pred, train_solutions, n_train, CLASSES)
-  local test_stats = eval.class_accuracy(test_pred, test_solutions, n_test, CLASSES)
+  local train_pred = t.predict(train.problems, train.n)
+  local test_pred = t.predict(test.problems, test.n)
+  local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, CLASSES)
+  local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, CLASSES)
   str.printf("Evaluate\tTest\t%4.2f\tTrain\t%4.2f\n", test_stats.f1, train_stats.f1)
 
 end)

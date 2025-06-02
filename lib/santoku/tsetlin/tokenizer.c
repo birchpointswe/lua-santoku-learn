@@ -1,268 +1,11 @@
+#include <santoku/lua/utils.h>
 #include <santoku/klib.h>
-#include <lua.h>
-#include <lauxlib.h>
-#include <stdint.h>
-#include <assert.h>
-#include <errno.h>
-#include <stdbool.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <math.h>
+#include <santoku/iuset.h>
+#include <santoku/ivec.h>
 #include <assert.h>
 #include <ctype.h>
 
-#define MT_BITMAP "santoku_bitmap"
 #define MT_TOKENIZER "santoku_tokenizer"
-
-static inline void tk_lua_callmod (lua_State *L, int nargs, int nret, const char *smod, const char *sfn)
-{
-  lua_getglobal(L, "require");
-  lua_pushstring(L, smod);
-  lua_call(L, 1, 1);
-  lua_pushstring(L, sfn);
-  lua_gettable(L, -2);
-  lua_remove(L, -2);
-  lua_insert(L, - nargs - 1);
-  lua_call(L, nargs, nret);
-}
-
-static inline int tk_lua_errno (lua_State *L, int err)
-{
-  lua_pushstring(L, strerror(errno));
-  lua_pushinteger(L, err);
-  tk_lua_callmod(L, 2, 0, "santoku.error", "error");
-  return 0;
-}
-
-static inline int tk_lua_error (lua_State *L, const char *err)
-{
-  lua_pushstring(L, err);
-  tk_lua_callmod(L, 1, 0, "santoku.error", "error");
-  return 0;
-}
-
-static inline int tk_lua_errmalloc (lua_State *L)
-{
-  lua_pushstring(L, "Error in malloc");
-  tk_lua_callmod(L, 1, 0, "santoku.error", "error");
-  return 0;
-}
-
-static inline FILE *tk_lua_tmpfile (lua_State *L)
-{
-  FILE *fh = tmpfile();
-  if (fh) return fh;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error opening tmpfile");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-  return NULL;
-}
-
-static inline FILE *tk_lua_fmemopen (lua_State *L, char *data, size_t size, const char *flag)
-{
-  FILE *fh = fmemopen(data, size, flag);
-  if (fh) return fh;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error opening string as file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-  return NULL;
-}
-
-static inline FILE *tk_lua_fopen (lua_State *L, const char *fp, const char *flag)
-{
-  FILE *fh = fopen(fp, flag);
-  if (fh) return fh;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error opening file");
-  lua_pushstring(L, fp);
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 4, 0, "santoku.error", "error");
-  return NULL;
-}
-
-static inline void tk_lua_fclose (lua_State *L, FILE *fh)
-{
-  if (!fclose(fh)) return;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error closing file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-}
-
-static inline void tk_lua_fwrite (lua_State *L, char *data, size_t size, size_t memb, FILE *fh)
-{
-  size_t bytes = fwrite(data, size, memb, fh);
-  if (!ferror(fh) && bytes) return;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error writing to file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-}
-
-static inline void tk_lua_fread (lua_State *L, void *data, size_t size, size_t memb, FILE *fh)
-{
-  size_t r = fread(data, size, memb, fh);
-  if (!(ferror(fh) || r < memb)) return;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error reading from file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-}
-
-static inline void tk_lua_fseek (lua_State *L, size_t size, size_t memb, FILE *fh)
-{
-  int r = fseek(fh, (long) (size * memb), SEEK_CUR);
-  if (!ferror(fh) || !r) return;
-  int e = errno;
-  lua_settop(L, 0);
-  lua_pushstring(L, "Error reading from file");
-  lua_pushstring(L, strerror(e));
-  lua_pushinteger(L, e);
-  tk_lua_callmod(L, 3, 0, "santoku.error", "error");
-}
-
-static inline char *tk_lua_fslurp (lua_State *L, FILE *fh, size_t *len)
-{
-  if (fseek(fh, 0, SEEK_END) != 0) {
-    tk_lua_errno(L, errno);
-    return NULL;
-  }
-  long size = ftell(fh);
-  if (size < 0) {
-    tk_lua_errno(L, errno);
-    return NULL;
-  }
-  if (fseek(fh, 0, SEEK_SET) != 0) {
-    tk_lua_errno(L, errno);
-    return NULL;
-  }
-  char *buffer = malloc((size_t) size);
-  if (!buffer) {
-    tk_lua_errmalloc(L);
-    return NULL;
-  }
-  if (fread(buffer, 1, (size_t) size, fh) != (size_t) size) {
-    free(buffer);
-    tk_lua_errno(L, errno);
-    return NULL;
-  }
-  *len = (size_t) size;
-  return buffer;
-}
-
-static inline void tk_lua_register (lua_State *L, luaL_Reg *regs, int nup)
-{
-  while (true) {
-    if ((*regs).name == NULL)
-      break;
-    for (int i = 0; i < nup; i ++)
-      lua_pushvalue(L, -nup);
-    lua_pushcclosure(L, (*regs).func, nup);
-    lua_setfield(L, -nup - 2, (*regs).name);
-    regs ++;
-  }
-  lua_pop(L, nup);
-}
-
-static inline void *tk_lua_checkuserdata (lua_State *L, int i, char *mt)
-{
-  if (mt == NULL && (lua_islightuserdata(L, i) || lua_isuserdata(L, i)))
-    return lua_touserdata(L, i);
-  void *p = luaL_checkudata(L, -1, mt);
-  lua_pop(L, 1);
-  return p;
-}
-
-static inline unsigned int tk_lua_checkunsigned (lua_State *L, int i)
-{
-  lua_Integer l = luaL_checkinteger(L, i);
-  if (l < 0)
-    luaL_error(L, "value can't be negative");
-  if (l > UINT_MAX)
-    luaL_error(L, "value is too large");
-  return (unsigned int) l;
-}
-
-static inline double tk_lua_checkposdouble (lua_State *L, int i)
-{
-  lua_Number l = luaL_checknumber(L, i);
-  if (l < 0)
-    luaL_error(L, "value can't be negative");
-  return (double) l;
-}
-
-static inline double tk_lua_fcheckposdouble (lua_State *L, int i, char *field)
-{
-  lua_getfield(L, i, field);
-  double n = tk_lua_checkposdouble(L, -1);
-  lua_pop(L, 1);
-  return n;
-}
-
-static inline void tk_lua_fchecktype (lua_State *L, int i, char *field, int t)
-{
-  lua_getfield(L, i, field);
-  luaL_checktype(L, -1, t);
-  lua_pop(L, 1);
-}
-
-static inline lua_Number tk_lua_fchecknumber (lua_State *L, int i, char *field)
-{
-  lua_getfield(L, i, field);
-  lua_Number n = luaL_checknumber(L, -1);
-  lua_pop(L, 1);
-  return n;
-}
-
-static inline const char *tk_lua_fchecklstring (lua_State *L, int i, char *field, size_t *len)
-{
-  lua_getfield(L, i, field);
-  const char *s = luaL_checklstring(L, -1, len);
-  lua_pop(L, 1);
-  return s;
-}
-
-static inline bool tk_lua_fcheckboolean (lua_State *L, int i, char *field)
-{
-  lua_getfield(L, i, field);
-  luaL_checktype(L, -1, LUA_TBOOLEAN);
-  bool n = lua_toboolean(L, -1);
-  lua_pop(L, 1);
-  return n;
-}
-
-static inline lua_Integer tk_lua_fcheckunsigned (lua_State *L, int i, char *field)
-{
-  lua_getfield(L, i, field);
-  lua_Integer n = tk_lua_checkunsigned(L, -1);
-  lua_pop(L, 1);
-  return n;
-}
-
-static inline unsigned int tk_lua_foptunsigned (lua_State *L, int i, unsigned int def, char *field)
-{
-  lua_getfield(L, i, field);
-  if (lua_type(L, -1) == LUA_TNIL)
-    return def;
-  unsigned int m = tk_lua_checkunsigned(L, -1);
-  lua_pop(L, 1);
-  return m;
-}
 
 typedef struct {
   int id;
@@ -1004,15 +747,15 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
   tb_tokenizer_t *tokenizer = peek_tokenizer(L, lua_upvalueindex(1));
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
-  size_t n = (size_t) lua_objlen(L, 1);
-  uint32_t n_features = (uint32_t) tb_tokenizer_features_aligned(tokenizer);
-  khint_t khi;
+  uint64_t n = (uint64_t) lua_objlen(L, 1);
+  uint64_t n_features = (uint64_t) tb_tokenizer_features_aligned(tokenizer);
   int kha;
+  uint64_t khi;
 
-  kvec_t(int64_t) out;
-  kv_init(out);
-  khash_t(seen) *seen = kh_init(seen);
+  tk_iuset_t *seen = tk_iuset_create(); // seen
+  tk_ivec_t *out = tk_ivec_create(L, 0, 0, 0); // seen, out
 
+  // TODO: parallelize
   for (size_t i = 1; i <= n; i ++) {
     lua_pushinteger(L, (int64_t) i); // t n
     lua_gettable(L, 1); // t s
@@ -1022,26 +765,21 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
     tb_tokenizer_populate_tokens(tokenizer, doc, doclen, false);
     free(doc);
 
-    kh_clear(seen, seen);
+    tk_iuset_clear(seen);
     for (khint_t j = 0; j < tokenizer->tokens.n; j ++) {
       int id = tokenizer->tokens.a[j];
       if (id < 0)
         continue;
-      khi = kh_put(seen, seen, (uint32_t) id, &kha);
+      khi = tk_iuset_put(seen, id, &kha);
       if (!kha)
         continue;
-      kv_push(int64_t, out, (int64_t) id + ((int64_t) i - 1) * n_features);
+      tk_ivec_push(out, (int64_t) id + ((int64_t) i - 1) * (int64_t) n_features);
     }
     lua_pop(L, 1); // t
   }
 
-  kh_destroy(seen, seen);
-  kv_resize(int64_t, out, out.n);
-
-  lua_pushlightuserdata(L, out.a);
-  lua_pushinteger(L, 1);
-  lua_pushinteger(L, (int64_t) out.n);
-  tk_lua_callmod(L, 3, 1, "santoku.matrix.integer", "from_view");
+  tk_iuset_destroy(seen);
+  tk_ivec_shrink(L, out);
   return 1;
 }
 
@@ -1049,9 +787,7 @@ static inline int tb_tokenizer_restrict (lua_State *L)
 {
   lua_settop(L, 1);
 
-  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
-  int64_t *top_v = (int64_t *) tk_lua_checkuserdata(L, -4, NULL);
-  uint64_t n_top_v = (uint64_t) luaL_checkinteger(L, -1);
+  tk_ivec_t *top_v = tk_ivec_peek(L, 1);
 
   // TODO: Can we do this without strdup? Just don't free the ones we're
   // keeping?
@@ -1063,8 +799,8 @@ static inline int tb_tokenizer_restrict (lua_State *L)
   tb_ids_t *ids0 = kh_init(ids);
   tb_strs_t *strs0 = kh_init(strs);
   tokenizer->next_id = 0;
-  for (lua_Integer i = 0; i < (int64_t) n_top_v; i ++) {
-    id = top_v[i];
+  for (lua_Integer i = 0; i < (int64_t) top_v->n; i ++) {
+    id = top_v->a[i];
     lua_pop(L, 1);
     k = kh_get(strs, tokenizer->strs, (uint32_t) id);
     if (k == kh_end(tokenizer->strs))
@@ -1189,7 +925,7 @@ static inline int tb_tokenizer_train (lua_State *L)
   tb_tokenizer_t *tokenizer = peek_tokenizer(L, lua_upvalueindex(1));
   if (tokenizer->finalized)
     return tk_lua_error(L, "already finalized");
-  tk_lua_fchecktype(L, 1, "corpus", LUA_TTABLE);
+  tk_lua_fchecktype(L, 1, "train", "corpus", LUA_TTABLE);
   lua_getfield(L, 1, "corpus");
   lua_remove(L, 1);
   int n = lua_objlen(L, 1);
@@ -1222,17 +958,17 @@ static luaL_Reg tb_mt_fns[] =
 
 static inline int tb_tokenizer_create (lua_State *L)
 {
-  double max_df = tk_lua_fcheckposdouble(L, 1, "max_df");
-  double min_df = tk_lua_fcheckposdouble(L, 1, "min_df");
-  int max_len = (int) tk_lua_fcheckunsigned(L, 1, "max_len");
-  int min_len = (int) tk_lua_fcheckunsigned(L, 1, "min_len");
-  int max_run = (int) tk_lua_fcheckunsigned(L, 1, "max_run");
-  int ngrams = (int) tk_lua_fcheckunsigned(L, 1, "ngrams");
-  int cgrams_min = (int) tk_lua_fcheckunsigned(L, 1, "cgrams_min");
-  int cgrams_max = (int) tk_lua_fcheckunsigned(L, 1, "cgrams_max");
-  int skips = (int) tk_lua_fcheckunsigned(L, 1, "skips");
-  int negations = (int) tk_lua_fcheckunsigned(L, 1, "negations");
-  int align = (int) tk_lua_foptunsigned(L, 1, 1, "align");
+  double max_df = tk_lua_fcheckposdouble(L, 1, "create", "max_df");
+  double min_df = tk_lua_fcheckposdouble(L, 1, "create", "min_df");
+  int max_len = (int) tk_lua_fcheckunsigned(L, 1, "create", "max_len");
+  int min_len = (int) tk_lua_fcheckunsigned(L, 1, "create", "min_len");
+  int max_run = (int) tk_lua_fcheckunsigned(L, 1, "create", "max_run");
+  int ngrams = (int) tk_lua_fcheckunsigned(L, 1, "create", "ngrams");
+  int cgrams_min = (int) tk_lua_fcheckunsigned(L, 1, "create", "cgrams_min");
+  int cgrams_max = (int) tk_lua_fcheckunsigned(L, 1, "create", "cgrams_max");
+  int skips = (int) tk_lua_fcheckunsigned(L, 1, "create", "skips");
+  int negations = (int) tk_lua_fcheckunsigned(L, 1, "create", "negations");
+  int align = (int) tk_lua_foptunsigned(L, 1, "create", "align", 1);
   // TODO: Get nthreads
   if (max_run < 1)
     luaL_error(L, "max_run must be greater than or equal to 1");

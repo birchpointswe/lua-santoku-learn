@@ -8,7 +8,7 @@ local graph = require("santoku.tsetlin.graph")
 local threshold = require("santoku.tsetlin.threshold")
 local corex = require("santoku.corex")
 local eval = require("santoku.tsetlin.evaluator")
-local mtx = require("santoku.matrix.integer")
+local ivec = require("santoku.ivec")
 local it = require("santoku.iter")
 local fs = require("santoku.fs")
 local str = require("santoku.string")
@@ -30,7 +30,7 @@ local TRANS_HOPS = 1
 local TRANS_POS = 1
 local TRANS_NEG = 1
 local TOP_ALGO = "chi2"
-local TOP_K = 1024
+local TOP_K = 4096
 
 local TOKENIZER_CONFIG = {
   max_df = 0.95,
@@ -124,7 +124,7 @@ test("tsetlin", function ()
     end
   })
 
-  train.codes0 = mtx.raw_bitmap(train.codes0, train.n_sentences, HIDDEN)
+  train.codes0 = ivec.raw_bitmap(train.codes0, train.n_sentences, HIDDEN)
   train.similarity0 = eval.encoding_similarity(
     train.codes0, train.pos, train.neg, HIDDEN, THREADS)
   str.printi("AUC: %.2f#(auc) | F1: %.2f#(f1) | Precision: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", -- luacheck: ignore
@@ -135,20 +135,20 @@ test("tsetlin", function ()
     train.entropy0)
 
   local top_v =
-    TOP_ALGO == "chi2" and mtx.top_chi2(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K, THREADS) or -- luacheck: ignore
-    TOP_ALGO == "mi" and mtx.top_mi(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K, THREADS) or (function () -- luacheck: ignore
+    TOP_ALGO == "chi2" and ivec.top_chi2(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K, THREADS) or -- luacheck: ignore
+    TOP_ALGO == "mi" and ivec.top_mi(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K, THREADS) or (function () -- luacheck: ignore
       -- Fallback to all words
-      local t = mtx.create(1, dataset.n_features)
-      mtx.fill_indices(t)
+      local t = ivec.create(1, dataset.n_features)
+      ivec.fill_indices(t)
       return t
     end)()
 
-  local n_top_v = mtx.values(top_v)
+  local n_top_v = ivec.size(top_v)
   print("After top k filter", n_top_v)
 
   -- Show top words
   local words = tokenizer.index()
-  for id in it.take(32, mtx.each(top_v)) do
+  for id in it.take(32, ivec.each(top_v)) do
     print(id, words[id + 1])
   end
 
@@ -158,10 +158,10 @@ test("tsetlin", function ()
   test.sentences = tokenizer.tokenize(test.raw_sentences)
 
   print("Prepping for encoder")
-  mtx.flip_interleave(train.sentences, train.n_sentences, n_top_v)
-  mtx.flip_interleave(test.sentences, test.n_sentences, n_top_v)
-  train.sentences = mtx.raw_bitmap(train.sentences, train.n_sentences, n_top_v * 2)
-  test.sentences = mtx.raw_bitmap(test.sentences, test.n_sentences, n_top_v * 2)
+  ivec.flip_interleave(train.sentences, train.n_sentences, n_top_v)
+  ivec.flip_interleave(test.sentences, test.n_sentences, n_top_v)
+  train.sentences = ivec.raw_bitmap(train.sentences, train.n_sentences, n_top_v * 2)
+  test.sentences = ivec.raw_bitmap(test.sentences, test.n_sentences, n_top_v * 2)
 
   print()
   print("Input Features", n_top_v * 2)
@@ -190,12 +190,9 @@ test("tsetlin", function ()
       if epoch == TM_ITERS or epoch % EVALUATE_EVERY == 0 then
         train.codes1 = t.predict(train.sentences, train.n_sentences)
         test.codes1 = t.predict(test.sentences, test.n_sentences)
-        train.accuracy0 = eval.encoding_accuracy(
-          train.codes1, train.codes0, train.n_sentences, HIDDEN, THREADS)
-        train.similarity1 = eval.encoding_similarity(
-          train.codes1, train.pos, train.neg, HIDDEN, THREADS)
-        test.similarity1 = eval.encoding_similarity(
-          test.codes1, test.pos, test.neg, HIDDEN, THREADS)
+        train.accuracy0 = eval.encoding_accuracy(train.codes1, train.codes0, train.n_sentences, HIDDEN, THREADS)
+        train.similarity1 = eval.encoding_similarity(train.codes1, train.pos, train.neg, HIDDEN, THREADS)
+        test.similarity1 = eval.encoding_similarity(test.codes1, test.pos, test.neg, HIDDEN, THREADS)
         print()
         str.printf("Epoch %3d  Time %3.2f %3.2f\n",
           epoch, stopwatch())
