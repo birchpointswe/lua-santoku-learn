@@ -1,9 +1,23 @@
-ifndef <% return var("NAME_OPENBLAS") %>
-<% return var("LIBNAME_OPENBLAS") %> = openblas
+ifndef <% return var("OPENBLAS") %>
+<% return var("OPENBLAS") %> = auto
+endif
+
+ifndef <% return var("PTHREAD") %>
+<% return var("PTHREAD") %> = auto
 endif
 
 results.mk: Makefile
 	truncate -s0 results.mk
-	echo "LIB_CFLAGS += $(shell pkg-config --cflags $(<% return var("PC_NAME_OPENBLAS") %>))" >> results.mk
-	echo "LIB_LDFLAGS += $(shell pkg-config --libs $(<% return var("PC_NAME_OPENBLAS") %>))" >> results.mk
-	echo "LIB_LDFLAGS += -lm -llapack" >> results.mk
+	@if [ $(<% return var("OPENBLAS") %>) = "auto" ]; then \
+	  if pkg-config --exists openblas; then \
+	    echo "LIB_CFLAGS += $$(pkg-config --cflags openblas)" >> results.mk; \
+	    echo "LIB_CFLAGS += -D<% return var("HAS_OPENBLAS") %>" >> results.mk; \
+	    echo "LIB_LDFLAGS += -Wl,--no-as-needed -lm -llapack $$(pkg-config --libs openblas)" >> results.mk; \
+	  fi; \
+	fi
+	@if [ $(<% return var("PTHREAD") %>) = "auto" ]; then \
+	  if echo 'int main() { return 0; }' | cc -x c - -o /dev/null -lpthread >/dev/null 2>&1; then \
+	    echo "LIB_CFLAGS += -D<% return var("HAS_PTHREAD") %>" >> results.mk; \
+	    echo "LIB_LDFLAGS += -lpthread" >> results.mk; \
+	  fi; \
+	fi

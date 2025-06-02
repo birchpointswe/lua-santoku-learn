@@ -4,6 +4,7 @@
 #include <santoku/tsetlin/conf.h>
 #include <santoku/tsetlin/threshold.h>
 #include <santoku/threads.h>
+#include <santoku/dvec.h>
 #include <float.h>
 #include <primme.h>
 
@@ -112,7 +113,7 @@ static inline void tk_spectral_matvec (
 static inline void tm_run_spectral (
   lua_State *L,
   tk_threadpool_t *pool,
-  double *z,
+  tk_dvec_t *z,
   roaring64_bitmap_t **adj_pos,
   roaring64_bitmap_t **adj_neg,
   uint64_t n_sentences,
@@ -123,7 +124,7 @@ static inline void tm_run_spectral (
   // Init
   tk_spectral_t spec;
   tk_spectral_thread_t threads[pool->n_threads];
-  spec.z = z;
+  spec.z = z->a;
   spec.laplacian = tk_malloc(L, n_sentences * sizeof(double));
   spec.adj_pos = adj_pos;
   spec.adj_neg = adj_neg;
@@ -201,14 +202,8 @@ static inline int tm_encode (lua_State *L)
   uint64_t n_nodes = graph->n_nodes;
 
   // Spectral hashing
-  double *z = tk_malloc(L, (size_t) graph->n_nodes * (size_t) n_hidden * sizeof(double));
+  tk_dvec_t *z = tk_dvec_create(L, graph->n_nodes * n_hidden, 0, 0);
   tm_run_spectral(L, pool, z, adj_pos, adj_neg, n_nodes, n_hidden, i_each);
-
-  // Push floats
-  lua_pushlightuserdata(L, z);
-  lua_pushinteger(L, (int64_t) n_nodes);
-  lua_pushinteger(L, (int64_t) n_hidden);
-  tk_lua_callmod(L, 3, 1, "santoku.matrix.number", "from_view");
 
   // Cleanup
   tk_threads_destroy(pool);

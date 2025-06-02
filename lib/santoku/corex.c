@@ -2,7 +2,7 @@
 
 #include <santoku/tsetlin/conf.h>
 #include <santoku/threads.h>
-#include <santoku/matrix/integer.h>
+#include <santoku/ivec.h>
 
 #include <float.h>
 #include <math.h>
@@ -11,6 +11,7 @@
 #define MT_COREX "santoku_corex"
 
 typedef enum {
+  TK_CMP_INIT_SEED,
   TK_CMP_INIT_ALPHA,
   TK_CMP_INIT_TCS,
   TK_CMP_INIT_PYX_UNNORM,
@@ -30,8 +31,6 @@ typedef struct tk_corex_thread_s tk_corex_thread_t;
 
 typedef struct tk_corex_thread_s {
   tk_corex_t *C;
-  uint64_t n_set_bits;
-  unsigned int n_samples;
   uint64_t hfirst;
   uint64_t hlast;
   uint64_t vfirst;
@@ -58,6 +57,8 @@ typedef struct tk_corex_s {
   double *sums;
   double *baseline;
   tk_corex_sort_t *sort;
+  uint64_t n_set_bits;
+  unsigned int n_samples;
   size_t samples_len;
   uint64_t *samples;
   size_t visibles_len;
@@ -148,7 +149,6 @@ static inline int tk_corex_destroy (lua_State *L)
 static inline int tk_corex_compress (lua_State *);
 
 static inline void tk_corex_marginals_thread (
-  uint64_t n_set_bits,
   uint64_t *restrict samples,
   unsigned int *restrict visibles,
   double *restrict log_py,
@@ -164,6 +164,7 @@ static inline void tk_corex_marginals_thread (
   double tmin,
   double ttc,
   double anchor,
+  uint64_t n_set_bits,
   unsigned int n_samples,
   unsigned int n_visible,
   unsigned int n_hidden,
@@ -192,14 +193,14 @@ static inline void tk_corex_marginals_thread (
   for (unsigned int h = hfirst; h <= hlast; h ++) {
     double sum_py0 = 0.0;
     double *py0_h = pyx + h * n_samples;
-    for (unsigned int s = 0; s < n_samples; ++s)
+    for (unsigned int s = 0; s < n_samples; s ++)
       sum_py0 += py0_h[s];
     double sum_py1 = n_samples - sum_py0;
     double *pc10h = pc10 + h * n_visible;
     double *pc11h = pc11 + h * n_visible;
     memset(pc10h, 0, n_visible * sizeof(double));
     memset(pc11h, 0, n_visible * sizeof(double));
-    for (uint64_t c = 0; c < n_set_bits; ++c) {
+    for (uint64_t c = 0; c < n_set_bits; c ++) {
       unsigned int v = visibles[c];
       uint64_t s = samples[c];
       double py0 = py0_h[s];
@@ -209,7 +210,7 @@ static inline void tk_corex_marginals_thread (
     double *pc00h = pc00 + h * n_visible;
     double *pc01h = pc01 + h * n_visible;
     // TODO: can we avoid the inner if statements?
-    for (unsigned int v = 0; v < n_visible; ++v) {
+    for (unsigned int v = 0; v < n_visible; v ++) {
       pc00h[v] = (sum_py0 - pc10h[v]) + smoothing;
       if (pc00h[v] < smoothing)
         pc00h[v] = smoothing;
@@ -322,23 +323,23 @@ static inline void tk_corex_alpha_thread (
   double *restrict baseline1 = baseline + 1 * n_hidden;
   double *restrict lm00 = log_marg + 0 * n_hidden * n_visible;
   double *restrict lm01 = log_marg + 1 * n_hidden * n_visible;
-  for (unsigned int h = hfirst; h <= hlast; ++h) {
+  for (unsigned int h = hfirst; h <= hlast; h ++) {
     double scale = tcs_temp[h] / spa;
     double *restrict alphah = alpha + h * n_visible;
     double *restrict mish = mis + h * n_visible;
-    for (unsigned int v = 0; v < n_visible; ++v) {
+    for (unsigned int v = 0; v < n_visible; v ++) {
       double update = exp(scale * (mish[v] - maxmis[v]));
       alphah[v] = (1.0 - lam) * alphah[v] + lam * update;
       if (alphah[v] < 0.0) alphah[v] = 0.0;
       else if (alphah[v] > 1.0) alphah[v] = 1.0;
     }
   }
-  for (unsigned int h = hfirst; h <= hlast; ++h) {
+  for (unsigned int h = hfirst; h <= hlast; h ++) {
     double s0 = 0.0, s1 = 0.0;
     double *restrict lm00h = lm00 + h * n_visible;
     double *restrict lm01h = lm01 + h * n_visible;
     double *restrict alphah = alpha + h * n_visible;
-    for (unsigned int v = 0; v < n_visible; ++v) {
+    for (unsigned int v = 0; v < n_visible; v ++) {
       s0 += alphah[v] * lm00h[v];
       s1 += alphah[v] * lm01h[v];
     }
@@ -377,12 +378,12 @@ static inline void tk_corex_latent_sums_thread (
   double *restrict alpha,
   double *restrict log_marg,
   double *restrict sums,
+  uint64_t n_set_bits,
   unsigned int n_samples,
   unsigned int n_visible,
   unsigned int n_hidden,
   unsigned int hfirst,
-  unsigned int hlast,
-  uint64_t n_set_bits
+  unsigned int hlast
 ) {
   double *restrict sums0 = sums + 0 * n_hidden * n_samples;
   double *restrict sums1 = sums + 1 * n_hidden * n_samples;
@@ -562,8 +563,7 @@ static void tk_corex_tile_pairs (
 
 static inline uint64_t tk_corex_setup_bits (
   lua_State *L,
-  int64_t *set_bits,
-  uint64_t n_set_bits,
+  tk_ivec_t *set_bits,
   tk_corex_sort_t *pairs,
   uint64_t *samples,
   unsigned int *visibles,
@@ -573,8 +573,8 @@ static inline uint64_t tk_corex_setup_bits (
   unsigned int tile_vblock
 ) {
   uint64_t n = 0;
-  for (uint64_t i = 0; i < n_set_bits; i ++) {
-    int64_t val = set_bits[i];
+  for (uint64_t i = 0; i < set_bits->n; i ++) {
+    int64_t val = set_bits->a[i];
     if (val < 0)
       continue;
     pairs[n] = (tk_corex_sort_t) {
@@ -665,6 +665,9 @@ static void tk_corex_worker (void *dp, int sig)
   tk_corex_thread_t *data = (tk_corex_thread_t *) dp;
   tk_corex_t *C = data->C;
   switch (stage) {
+    case TK_CMP_INIT_SEED:
+      seed_rand(data->index);
+      break;
     case TK_CMP_INIT_ALPHA:
       tk_corex_init_alpha_thread(
         C->alpha,
@@ -682,14 +685,13 @@ static void tk_corex_worker (void *dp, int sig)
     case TK_CMP_INIT_PYX_UNNORM:
       tk_corex_init_log_pyx_unnorm_thread(
         C->log_pyx_unnorm,
-        data->n_samples,
+        C->n_samples,
         C->n_hidden,
         data->hfirst,
         data->hlast);
       break;
     case TK_CMP_MARGINALS:
       tk_corex_marginals_thread(
-        data->n_set_bits,
         C->samples,
         C->visibles,
         C->log_py,
@@ -705,7 +707,8 @@ static void tk_corex_worker (void *dp, int sig)
         C->tmin,
         C->ttc,
         C->anchor,
-        data->n_samples,
+        C->n_set_bits,
+        C->n_samples,
         C->n_visible,
         C->n_hidden,
         data->hfirst,
@@ -739,7 +742,7 @@ static void tk_corex_worker (void *dp, int sig)
       tk_corex_latent_baseline_thread(
         C->sums,
         C->baseline,
-        data->n_samples,
+        C->n_samples,
         C->n_hidden,
         data->hfirst,
         data->hlast);
@@ -749,17 +752,17 @@ static void tk_corex_worker (void *dp, int sig)
         C->alpha,
         C->log_marg,
         C->sums,
-        data->n_samples,
+        C->n_set_bits,
+        C->n_samples,
         C->n_visible,
         C->n_hidden,
         data->hfirst,
-        data->hlast,
-        data->n_set_bits);
+        data->hlast);
       tk_corex_latent_py_thread(
         C->log_py,
         C->log_pyx_unnorm,
         C->sums,
-        data->n_samples,
+        C->n_samples,
         C->n_hidden,
         data->hfirst,
         data->hlast);
@@ -767,7 +770,7 @@ static void tk_corex_worker (void *dp, int sig)
         C->log_z,
         C->pyx,
         C->log_pyx_unnorm,
-        data->n_samples,
+        C->n_samples,
         C->n_hidden,
         data->hfirst,
         data->hlast);
@@ -776,7 +779,7 @@ static void tk_corex_worker (void *dp, int sig)
       tk_corex_latent_baseline_thread(
         C->sums,
         C->baseline,
-        data->n_samples,
+        C->n_samples,
         C->n_hidden,
         data->hfirst,
         data->hlast);
@@ -788,19 +791,19 @@ static void tk_corex_worker (void *dp, int sig)
         C->alpha,
         C->log_marg,
         C->sums,
-        data->n_samples,
+        C->n_set_bits,
+        C->n_samples,
         C->n_visible,
         C->n_hidden,
         data->hfirst,
-        data->hlast,
-        data->n_set_bits);
+        data->hlast);
       break;
     case TK_CMP_LATENT_PY:
       tk_corex_latent_py_thread(
         C->log_py,
         C->log_pyx_unnorm,
         C->sums,
-        data->n_samples,
+        C->n_samples,
         C->n_hidden,
         data->hfirst,
         data->hlast);
@@ -810,7 +813,7 @@ static void tk_corex_worker (void *dp, int sig)
         C->log_z,
         C->pyx,
         C->log_pyx_unnorm,
-        data->n_samples,
+        C->n_samples,
         C->n_hidden,
         data->hfirst,
         data->hlast);
@@ -819,7 +822,7 @@ static void tk_corex_worker (void *dp, int sig)
       tk_corex_update_tc_thread(
         C->log_z,
         C->tcs,
-        data->n_samples,
+        C->n_samples,
         data->hfirst,
         data->hlast);
       break;
@@ -847,11 +850,6 @@ static inline void tk_corex_setup_threads (
     }
     C->initialized_threads = true;
   }
-  for (unsigned int i = 0; i < C->pool->n_threads; i ++) {
-    tk_corex_thread_t *data = (tk_corex_thread_t *) pool->threads[i].data;
-    data->n_set_bits = n_set_bits;
-    data->n_samples = n_samples;
-  }
 }
 
 static inline int tk_corex_top_visible (lua_State *L)
@@ -860,56 +858,48 @@ static inline int tk_corex_top_visible (lua_State *L)
   if (!C->trained)
     return tk_lua_verror(L, 1, "Can't extract features from untrained model!");
   unsigned int top_k = tk_lua_checkunsigned(L, 1, "top_k");
-  tk_matrix_top_generic(L, C->mis, C->n_visible, C->n_hidden, top_k, C->anchor > 0.0 ? C->n_hidden : 0);
+  tk_dvec_t scores = tk_dvec(C->mis, C->n_hidden * C->n_visible);
+  tk_ivec_top_generic(L, &scores, C->n_visible, C->n_hidden, top_k, C->anchor > 0.0 ? C->n_hidden : 0);
   return 1;
 }
 
 static inline int tk_corex_compress (lua_State *L)
 {
   tk_corex_t *C = peek_corex(L, lua_upvalueindex(1));
-  lua_pushvalue(L, 1);
-  lua_pushboolean(L, true);
-  tk_lua_callmod(L, 2, 4, "santoku.matrix.integer", "view");
-  int64_t *set_bits = (int64_t *) tk_lua_checkuserdata(L, -4, NULL);
-  uint64_t n_set_bits = (uint64_t) luaL_checkinteger(L, -1);
+  tk_ivec_t *set_bits = tk_ivec_peek(L, 1);
   unsigned int n_samples = tk_lua_optunsigned(L, 2, "n_samples", 1);
 
-  kvec_t(int64_t) out = { 0, n_set_bits, set_bits };
-
   // TODO: Expose shrink via the api, and only realloc if new size is larger than old
-  C->sort = tk_realloc(L, C->sort, n_set_bits * sizeof(tk_corex_sort_t));
-  C->samples = tk_ensure_interleaved(L, &C->samples_len, C->samples, n_set_bits * sizeof(uint64_t), false);
-  C->visibles = tk_ensure_interleaved(L, &C->visibles_len, C->visibles, n_set_bits * sizeof(unsigned int), false);
-  n_set_bits = tk_corex_setup_bits(L, set_bits, n_set_bits, C->sort, C->samples, C->visibles, C->n_visible, false, 0, 0);
-  tk_corex_setup_threads(L, C, n_set_bits, n_samples);
+  C->sort = tk_realloc(L, C->sort, set_bits->n * sizeof(tk_corex_sort_t));
+  C->samples = tk_ensure_interleaved(L, &C->samples_len, C->samples, set_bits->n * sizeof(uint64_t), false);
+  C->visibles = tk_ensure_interleaved(L, &C->visibles_len, C->visibles, set_bits->n * sizeof(unsigned int), false);
+  set_bits->n = tk_corex_setup_bits(L, set_bits, C->sort, C->samples, C->visibles, C->n_visible, false, 0, 0);
+  C->n_samples = n_samples;
+  C->n_set_bits = set_bits->n;
+  tk_corex_setup_threads(L, C, set_bits->n, n_samples);
   C->log_z = tk_realloc(L, C->log_z, C->n_hidden * n_samples * sizeof(double));
   C->pyx = tk_realloc(L, C->pyx, C->n_hidden * n_samples * sizeof(double));
   C->log_pyx_unnorm = tk_realloc(L, C->log_pyx_unnorm, 2 * C->n_hidden * n_samples * sizeof(double));
   C->sums = tk_realloc(L, C->sums, 2 * C->n_hidden * n_samples * sizeof(double));
   tk_threads_signal(C->pool, TK_CMP_LATENT_ALL);
   // TODO: Parallelize output
+  tk_ivec_clear(set_bits);
   for (unsigned int h = 0; h < C->n_hidden; h ++) {
     for (unsigned int s = 0; s < n_samples; s ++) {
       double py0 = C->pyx[h * n_samples + s];
       // TODO: should this be reversed?
       if (py0 < 0.5)
-        kv_push(int64_t, out, s * C->n_hidden + h);
+        tk_ivec_push(set_bits, s * C->n_hidden + h);
     }
   }
-  kv_resize(int64_t, out, out.n);
-  lua_pushlightuserdata(L, out.a);
-  lua_pushinteger(L, 1);
-  lua_pushinteger(L, (int64_t) out.n);
-  lua_pushvalue(L, 1);
-  tk_lua_callmod(L, 4, 1, "santoku.matrix.integer", "from_view");
+  tk_ivec_shrink(L, set_bits);
   return 1;
 }
 
 static inline void _tk_corex_train (
   lua_State *L,
   tk_corex_t *C,
-  int64_t *set_bits,
-  uint64_t n_set_bits,
+  tk_ivec_t *set_bits,
   unsigned int n_samples,
   unsigned int max_iter,
   int i_each
@@ -921,18 +911,20 @@ static inline void _tk_corex_train (
   C->sums = tk_malloc(L, 2 * C->n_hidden * n_samples * sizeof(double));
   C->mis = tk_malloc(L, C->n_hidden * C->n_visible * sizeof(double));
   C->log_z = tk_malloc(L, C->n_hidden * n_samples * sizeof(double));
-  C->sort = tk_malloc(L, n_set_bits * sizeof(tk_corex_sort_t));
-  C->samples = tk_malloc_interleaved(L, &C->samples_len, n_set_bits * sizeof(uint64_t));
-  C->visibles = tk_malloc_interleaved(L, &C->visibles_len, n_set_bits * sizeof(unsigned int));
-  n_set_bits = tk_corex_setup_bits(L, set_bits, n_set_bits, C->sort, C->samples, C->visibles, C->n_visible, true, C->tile_sblock, C->tile_vblock);
+  C->sort = tk_malloc(L, set_bits->n * sizeof(tk_corex_sort_t));
+  C->samples = tk_malloc_interleaved(L, &C->samples_len, set_bits->n * sizeof(uint64_t));
+  C->visibles = tk_malloc_interleaved(L, &C->visibles_len, set_bits->n * sizeof(unsigned int));
+  set_bits->n = tk_corex_setup_bits(L, set_bits, C->sort, C->samples, C->visibles, C->n_visible, true, C->tile_sblock, C->tile_vblock);
+  C->n_samples = n_samples;
+  C->n_set_bits = set_bits->n;
   tk_corex_data_stats(
-    n_set_bits,
+    C->n_set_bits,
     C->visibles,
     C->px,
     C->entropy_x,
-    n_samples,
+    C->n_samples,
     C->n_visible);
-  tk_corex_setup_threads(L, C, n_set_bits, n_samples);
+  tk_corex_setup_threads(L, C, C->n_set_bits, n_samples);
   tk_threads_signal(C->pool, TK_CMP_INIT_PYX_UNNORM);
   tk_threads_signal(C->pool, TK_CMP_LATENT_NORM);
   for (unsigned int i = 0; i < max_iter; i ++) {
@@ -997,6 +989,7 @@ static inline void tk_corex_init (
   C->maxmis = tk_malloc_interleaved(L, &C->maxmis_len, C->n_visible * sizeof(double));
   C->pool = tk_threads_create(L, n_threads, tk_corex_worker);
   tk_corex_setup_threads(L, C, 0, 0);
+  tk_threads_signal(C->pool, TK_CMP_INIT_SEED);
   tk_threads_signal(C->pool, TK_CMP_INIT_TCS);
   tk_threads_signal(C->pool, TK_CMP_INIT_ALPHA);
 }
@@ -1018,9 +1011,7 @@ static inline int tk_corex_train (lua_State *L) {
   if (C->trained)
     return tk_lua_error(L, "Already trained!\n");
   lua_getfield(L, 1, "corpus");
-  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
-  int64_t *set_bits = (int64_t *) tk_lua_checkuserdata(L, -4, NULL);
-  uint64_t n_set_bits = (uint64_t) luaL_checkinteger(L, -1);
+  tk_ivec_t *set_bits = tk_ivec_peek(L, -1);
   unsigned int n_samples = tk_lua_fcheckunsigned(L, 1, "train", "samples");
   unsigned int max_iter = tk_lua_fcheckunsigned(L, 1, "train", "iterations");
   int i_each = -1;
@@ -1028,7 +1019,7 @@ static inline int tk_corex_train (lua_State *L) {
     lua_getfield(L, 1, "each");
     i_each = tk_lua_absindex(L, -1);
   }
-  _tk_corex_train(L, C, set_bits, n_set_bits, n_samples, max_iter, i_each); // c
+  _tk_corex_train(L, C, set_bits, n_samples, max_iter, i_each); // c
   return 0;
 }
 

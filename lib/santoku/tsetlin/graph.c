@@ -157,35 +157,34 @@ static inline void tm_dsu_init (
 static inline void tm_render_pairs (
   lua_State *L,
   tk_graph_t *graph,
-  tm_pair_t *pos,
-  tm_pair_t *neg,
-  uint64_t *n_pos,
-  uint64_t *n_neg
+  tk_ivec_t *pos,
+  tk_ivec_t *neg
 ) {
   bool l;
   tm_pair_t p;
-  uint64_t wp = 0, wn = 0;
   kh_foreach(graph->pairs, p,  l, ({
-    if (l) pos[wp ++] = p;
-    else neg[wn ++] = p;
+    if (l) {
+      tk_ivec_push(pos, p.u);
+      tk_ivec_push(pos, p.v);
+    } else {
+      tk_ivec_push(neg, p.u);
+      tk_ivec_push(neg, p.v);
+    }
   }))
-  *n_pos = wp;
-  *n_neg = wn;
-  ks_introsort(pair_asc, wp, pos);
-  ks_introsort(pair_asc, wn, neg);
+  tk_ivec_asc(pos, 0, pos->n);
+  tk_ivec_asc(neg, 0, neg->n);
 }
 
 static inline void tm_index_init (
   lua_State *L,
   roaring64_bitmap_t **index,
-  int64_t *set_bits,
-  uint64_t n_set_bits,
+  tk_ivec_t *set_bits,
   uint64_t n_features
 ) {
   for (uint64_t i = 0; i < n_features; i ++)
     index[i] = roaring64_bitmap_create();
-  for (uint64_t i = 0; i < n_set_bits; i ++) {
-    int64_t id = set_bits[i];
+  for (uint64_t i = 0; i < set_bits->n; i ++) {
+    int64_t id = set_bits->a[i];
     int64_t sid = id / (int64_t) n_features;
     int64_t fid = id % (int64_t) n_features;
     roaring64_bitmap_add(index[fid], (uint64_t) sid);
@@ -194,13 +193,12 @@ static inline void tm_index_init (
 
 static inline void tm_nodes_init (
   roaring64_bitmap_t **nodes,
-  int64_t *set_bits,
-  uint64_t n_set_bits,
+  tk_ivec_t *set_bits,
   uint64_t n_features,
   uint64_t n_nodes
 ) {
-  for (uint64_t b = 0; b < n_set_bits; b ++) {
-    int64_t v = set_bits[b];
+  for (uint64_t b = 0; b < set_bits->n; b ++) {
+    int64_t v = set_bits->a[b];
     int64_t s = v / (int64_t) n_features;
     int64_t f = v % (int64_t) n_features;
     roaring64_bitmap_add(nodes[s], (uint64_t) f);
@@ -212,8 +210,8 @@ static inline void tm_index_neighbors (
   tk_graph_t *graph
 ) {
   graph->index = tk_malloc(L, graph->n_features * sizeof(roaring64_bitmap_t *));
-  tm_nodes_init(graph->nodes, graph->set_bits, graph->n_set_bits, graph->n_features, graph->n_nodes);
-  tm_index_init(L, graph->index, graph->set_bits, graph->n_set_bits, graph->n_features);
+  tm_nodes_init(graph->nodes, graph->set_bits, graph->n_features, graph->n_nodes);
+  tm_index_init(L, graph->index, graph->set_bits, graph->n_features);
   for (unsigned int i = 0; i < graph->pool->n_threads; i ++) {
     tk_graph_thread_t *data = (tk_graph_thread_t *) graph->pool->threads[i].data;
     tk_thread_range(i, graph->pool->n_threads, graph->n_nodes, &data->ufirst, &data->ulast);
@@ -560,28 +558,38 @@ static inline void tm_add_pairs (
   int kha;
   khint_t khi;
 
-  uint64_t n_pos_old = graph->n_pos;
+  uint64_t n_pos_old = graph->pos->n;
   uint64_t n_pos_new = 0;
 
-  for (uint64_t i = 0; i < n_pos_old; i ++) {
-    tm_pair_t p = graph->pos[i];
-    if (p.v < p.u)
-      graph->pos[i] = p = tm_pair(p.v, p.u);
-    khi = kh_put(pairs, graph->pairs, p, &kha);
+  for (uint64_t i = 0; i < n_pos_old; i += 2) {
+    int64_t u = graph->pos->a[i];
+    int64_t v = graph->pos->a[i + 1];
+    if (v < u) {
+      graph->pos->a[i] = v;
+      graph->pos->a[i + 1] = u;
+      u = graph->pos->a[i];
+      v = graph->pos->a[i + 1];
+    }
+    khi = kh_put(pairs, graph->pairs, tm_pair(u, v), &kha);
     if (!kha)
       continue;
     kh_value(graph->pairs, khi) = true;
     n_pos_new ++;
   }
 
-  uint64_t n_neg_old = graph->n_neg;
+  uint64_t n_neg_old = graph->neg->n;
   uint64_t n_neg_new = 0;
 
-  for (uint64_t i = 0; i < n_neg_old; i ++) {
-    tm_pair_t p = graph->neg[i];
-    if (p.v < p.u)
-      graph->neg[i] = p = tm_pair(p.v, p.u);
-    khi = kh_put(pairs, graph->pairs, p, &kha);
+  for (uint64_t i = 0; i < n_neg_old; i += 2) {
+    int64_t u = graph->neg->a[i];
+    int64_t v = graph->neg->a[i + 1];
+    if (v < u) {
+      graph->neg->a[i] = v;
+      graph->neg->a[i + 1] = u;
+      u = graph->neg->a[i];
+      v = graph->neg->a[i + 1];
+    }
+    khi = kh_put(pairs, graph->pairs, tm_pair(u, v), &kha);
     if (!kha)
       continue;
     kh_value(graph->pairs, khi) = false;
@@ -598,38 +606,24 @@ static inline void tm_add_pairs (
 static inline int tm_to_bits (lua_State *L)
 {
   lua_settop(L, 2);
-  lua_pushvalue(L, 1);
-  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
-  tm_pair_t *pairs = (tm_pair_t *) tk_lua_checkuserdata(L, -4, NULL);
-  uint64_t n_pairs = (uint64_t) luaL_checkinteger(L, -1) / 2;
+  tk_ivec_t *pairs = tk_ivec_peek(L, 1);
   uint64_t n_nodes = tk_lua_checkunsigned(L, 2, "n_nodes");
-
-  kvec_t(int64_t) out;
-  kv_init(out);
-
-  for (uint64_t i = 0; i < n_pairs; i ++) {
-    tm_pair_t p = pairs[i];
-    int64_t u = p.u, v = p.v;
-    kv_push(int64_t, out, u * (int64_t) n_nodes + v);
-    kv_push(int64_t, out, v * (int64_t) n_nodes + u);
+  tk_ivec_t *out = tk_ivec_create(L, 0, 0, 0);
+  for (uint64_t i = 0; i < pairs->n; i += 2) {
+    int64_t u = pairs->a[i];
+    int64_t v = pairs->a[i + 1];
+    tk_ivec_push(out, u * (int64_t) n_nodes + v);
+    tk_ivec_push(out, v * (int64_t) n_nodes + u);
   }
-
-  kv_resize(int64_t, out, out.n);
-  lua_pushlightuserdata(L, out.a);
-  lua_pushinteger(L, 1);
-  lua_pushinteger(L, (int64_t) out.n);
-  tk_lua_callmod(L, 3, 1, "santoku.matrix.integer", "from_view");
+  tk_ivec_shrink(L, out);
   return 1;
 }
 
 static tk_graph_t *tm_graph_create (
   lua_State *L,
-  tm_pair_t *pos,
-  tm_pair_t *neg,
-  uint64_t n_pos,
-  uint64_t n_neg,
-  int64_t *set_bits,
-  uint64_t n_set_bits,
+  tk_ivec_t *pos,
+  tk_ivec_t *neg,
+  tk_ivec_t *set_bits,
   uint64_t n_nodes,
   uint64_t n_features,
   uint64_t knn_cache,
@@ -645,15 +639,14 @@ static tk_graph_t *tm_graph_create (
   graph->neighbors = tk_malloc(L, n_nodes * sizeof(tm_neighbors_t));
   graph->nodes = tk_malloc(L, n_nodes * sizeof(roaring64_bitmap_t *));
   graph->set_bits = set_bits;
-  graph->n_set_bits = n_set_bits;
   graph->n_nodes = n_nodes;
   graph->n_features = n_features;
   graph->knn_cache = knn_cache;
   graph->pairs = kh_init(pairs);
   graph->pos = pos;
   graph->neg = neg;
-  graph->n_pos = n_pos;
-  graph->n_neg = n_neg;
+  graph->n_pos = pos->n / 2;
+  graph->n_neg = neg->n / 2;
   graph->adj_pos = tk_malloc(L, n_nodes * sizeof(roaring64_bitmap_t *));
   graph->adj_neg = tk_malloc(L, n_nodes * sizeof(roaring64_bitmap_t *));
   for (uint64_t s = 0; s < graph->n_nodes; s ++) {
@@ -707,19 +700,13 @@ static inline int tm_create (lua_State *L)
   lua_settop(L, 1);
 
   lua_getfield(L, 1, "pos");
-  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
-  tm_pair_t *pos = (tm_pair_t *) tk_lua_checkuserdata(L, -4, NULL);
-  uint64_t n_pos = (uint64_t) luaL_checkinteger(L, -1) / 2;
+  tk_ivec_t *pos = tk_ivec_peek(L, -1);
 
   lua_getfield(L, 1, "neg");
-  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
-  tm_pair_t *neg = (tm_pair_t *) tk_lua_checkuserdata(L, -4, NULL);
-  uint64_t n_neg = (uint64_t) luaL_checkinteger(L, -1) / 2;
+  tk_ivec_t *neg = tk_ivec_peek(L, -1);
 
   lua_getfield(L, 1, "nodes");
-  tk_lua_callmod(L, 1, 4, "santoku.matrix.integer", "view");
-  int64_t *set_bits = (int64_t *) tk_lua_checkuserdata(L, -4, NULL);
-  uint64_t n_set_bits = (uint64_t) luaL_checkinteger(L, -1);
+  tk_ivec_t *set_bits = tk_ivec_peek(L, -1);
 
   uint64_t n_nodes = tk_lua_fcheckunsigned(L, 1, "enrich", "n_nodes");
   uint64_t n_features = tk_lua_fcheckunsigned(L, 1, "enrich", "n_features");
@@ -739,7 +726,7 @@ static inline int tm_create (lua_State *L)
   }
 
   // Init graph
-  tk_graph_t *graph = tm_graph_create(L, pos, neg, n_pos, n_neg, set_bits, n_set_bits, n_nodes, n_features, knn_cache, n_threads);
+  tk_graph_t *graph = tm_graph_create(L, pos, neg, set_bits, n_nodes, n_features, knn_cache, n_threads);
 
   // Add base pairs
   tm_add_pairs(L, graph);
@@ -809,24 +796,9 @@ static inline int tm_graph_pairs (lua_State *L)
   tk_graph_t *graph = tk_graph_peek(L, 1);
 
   // Render pairs
-  tm_pair_t *pos = tk_malloc(L, graph->n_pos * sizeof(tm_pair_t));
-  tm_pair_t *neg = tk_malloc(L, graph->n_neg * sizeof(tm_pair_t));
-  uint64_t n_pos, n_neg;
-  tm_render_pairs(L, graph, pos, neg, &n_pos, &n_neg);
-
-  // Push positives
-  lua_pushlightuserdata(L, pos);
-  lua_pushinteger(L, (int64_t) n_pos);
-  lua_pushinteger(L, 2);
-  tk_lua_callmod(L, 3, 1, "santoku.matrix.integer", "from_view");
-
-  // Push updated negatives
-  lua_pushlightuserdata(L, neg);
-  lua_pushinteger(L, (int64_t) n_neg);
-  lua_pushinteger(L, 2);
-  tk_lua_callmod(L, 3, 1, "santoku.matrix.integer", "from_view");
-
-  // Return new pos/neg pair lists
+  tk_ivec_t *pos = tk_ivec_create(L, 0, 0, 0);
+  tk_ivec_t *neg = tk_ivec_create(L, 0, 0, 0);
+  tm_render_pairs(L, graph, pos, neg);
   return 2;
 }
 
