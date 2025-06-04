@@ -1,80 +1,92 @@
 # Now
 
-- Refactor booleanizer/thresholding
-    - santoku.booleanize
-        - Focused on converting a set of feature observations across many
-          samples to a fixed-width bit-matrix representation
-        - Accepts either dense matrix of floats and converts via thresholding or
-          a table of tables of feature observations and converts via
-          thresholding or multi-hot encoding
-        - Returns the encoded input and a function for converting new samples
-        - Takes either a matrix of floats or lua table of tables and produces:
-            - A bit-matrix representing the input
-            - An encoder function for converting new samples
-        - User-specified `n_thresholds` for continuous features
-            - `n_thresholds = 1`: median thresholding
-            - `n_thresholds > 1`: percentile binning
-        - For table input:
-            - Optional `feature_types` table can be provided: `{ feature_name = "categorical" | "continuous" }`
-            - Otherwise, features are automatically classified:
-                - Numeric → continuous
-                - Strings, booleans → categorical
-                - Mixed types → categorical
-            - Manual type annotations take precedence
-            - Continuous features are binarized as above
-            - Categorical features are one-hot or multi-hot encoded
-    - santoku.refine
-        - Focused on embedding-level bit revision/optimization
-        - Takes a bitmatrix and refines it in some way, producing another bit
-          matrix
-        - Currently only supports tch greedy flipping
-        - Could expose an auc/entropy/etc-based pruning/selection process
-        - Takes a corpus of bitmaps or floats and produces a new corpus of
-          bitmaps
+- tk_ann_t
+    - Strictly dense, no templating
+    - Based on tk_cvec_t
+    - Uses multi-probe LSH with hamming distance
 
-- Bitmap clustering (k-medoids or dbscan)
-- Multi-probe LSH ANN
-- Graph.pairs should show modifications (seed, removed, added by phase)
-- Support KF(urthest)N in addition to KNN (random zero-overlap nodes first, then
-  furthest in feature space)
+- tk_ivec_t
+    - Move top_entropy here from eval
+
+- Clustering
+    - Basic K-medoids and DBSCAN using tk_ann_t
 
 # Next
 
-- Automatically handle clause numbers, feature numbers, etc. of arbitrary
-  numbers (i.e. support for non-multiples of 64)
+- tk_inv_t
+    - Strictly sparse, no templating
+    - Based on tk_iuset_t
+    - Uses inverted index with jaccard similarity
 
-- Expose tk_bits_t API to Lua
-    - Consider using tk_cvec_t
+- tk_graph_t
+    - Accept tk_inv_t instead of sentences/nodes
+
+- tk_ivec_t
+    - Proper Lua/C pattern for ext.h
+
+- Clustering
+    - Move implementation to C
+
+- tk_xxmap_t:
+    - Templatize over khash/kbtree
+    - Replace use of roaring with this
+    - Proper Lua/C API like tk_xvec_t
+
+- tk_cvec_t
+    - Use for Corex output, TM input/output, ANN input/output, TCH input/output
+    - Move dense bit operations here (hamming, xor, etc, etc)
+    - Allow dense bit operations on arbitrary-length input (non-multiples of 64,
+      see the filter pattern from initial TM implementation)
+    - Standardize bits APIs between cvec and ivec
+        - Rename to tk_ivec/tk_cvec_bits_xxx
+        - Convert between ivec/cvec with tk_ivec_bits_cvec and tk_cvec_bits_ivec
+        - Special ivec_bits_xxx methods
+            - top_chi2/mi, score chi2/mi, filter, extend, cvec
+        - Special cvec_bitx_xxx methods
+            - flip_interleave, filter, extend, ivec
+
+- vec/tpl.h
+      Allow tk_vec_noundef to skip undefs
+
+- tk_rvec_t
+    - Add Lua API
+    - Generalize template to allow push/peekbase to work with composite types
+
+- tk_tokenizer_t
+    - Proper Lua/C API and tk naming
+    - Use booleanizer under the hood
+    - Include text statistics as continuous/thresholded values
+
+- tk_graph_t
+    - Proper Lua/C API and tk naming
+    - Support querying for changes made to seed list over time (removed during
+      dedupe, added by phase)
+    - Support KFN (furthest neighbors) in addition to KNN for densification of
+      negatives (random zero-overlap nodes first, then furthest in feature
+      space)
+
+- clustering
+    - Search for best K for K-medoids
 
 # Later
 
+- tk_roaring_t
+    - Separate library that uses the tk_xxmap_t API to wrap roaring bitmaps
+
 - Double-check auto-vectorization and paralellization across the board
     - Especially corex, given added branching/etc logic added
-- Parallelize threshold tch, median
-- Parallelize graph adj_init, to_bits, render_pairs,
-- ANN via multi-probe LSH
-- Hamming DBSCAN & K-Medoids
+
+- Parallelize!
 
 # Consider
 
-- Add learnability to tch optimization
-- Replace roaring with kbtree/khash
+- TCH
+    - Add learnability to optimization?
 
-- Corex anchor should multiply feature MI instead of hard boost?
-- Corex allow explicit anchor feature list instead of last n_hidden, handle
-  multiple assigned to same latent, etc.
-
-- Better booleanizer:
-    - If threshold levels is 1, pick the middle number, if 2, use the 1/3 and
-      2/3s break points, and so on. Consider selecting levels dynamically instead
-      of by fixed increments. Mini clustering algorithm?
-
-- Flip/interleave input bits should be done in TM library, not required by the
-  user. It's too easy to forget the complement bits.
-
-- Should classes in Lua always be 1 indexed? Currently they're 0 indexed.
-  Indexing from 1 makes sense for multi-class, but gets odd when doing 0/1
-  classification and having to increment to 1/2.
+- Corex
+    - Should anchor multiply feature MI instead of hard-boosting it?
+    - Allow explicit anchor feature list instead of last n_hidden, supporting
+      multiple assigned to same latent, etc.
 
 # Eventually
 

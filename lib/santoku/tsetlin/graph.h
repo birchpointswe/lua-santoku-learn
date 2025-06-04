@@ -10,7 +10,7 @@
 KHASH_SET_INIT_INT64(i64)
 typedef khash_t(i64) i64_hash_t;
 
-#define TK_MT_GRAPH "santoku_tsetlin_graph"
+#define TK_GRAPH_MT "santoku_tsetlin_graph"
 
 typedef enum {
   TK_GRAPH_KNN
@@ -56,7 +56,7 @@ typedef struct tk_graph_thread_s {
 
 static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
 {
-  return (tk_graph_t *) luaL_checkudata(L, i, TK_MT_GRAPH);
+  return (tk_graph_t *) luaL_checkudata(L, i, TK_GRAPH_MT);
 }
 
 #endif

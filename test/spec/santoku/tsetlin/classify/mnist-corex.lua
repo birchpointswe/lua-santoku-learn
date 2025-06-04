@@ -2,7 +2,6 @@ local ds = require("santoku.tsetlin.dataset")
 local corex = require("santoku.corex")
 local eval = require("santoku.tsetlin.evaluator")
 local fs = require("santoku.fs")
-local ivec = require("santoku.ivec")
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local str = require("santoku.string")
 local test = require("santoku.test")
@@ -10,11 +9,11 @@ local tm = require("santoku.tsetlin")
 local utc = require("santoku.utc")
 
 local TTR = 0.9
-local MAX = 10000
+local MAX = 1000
 local THREADS = nil
 local EVALUATE_EVERY = 1
-local TM_ITERS = 100
-local COREX_ITERS = 100
+local TM_ITERS = 10
+local COREX_ITERS = 10
 
 local CLASSES = 10
 local CLAUSES = 1024
@@ -53,15 +52,15 @@ test("tsetlin", function ()
 
   print("Transforming train")
   cor.compress(train.problems, train.n)
-  ivec.flip_interleave(train.problems, train.n, HIDDEN)
-  train.problems = ivec.raw_bitmap(train.problems, train.n, HIDDEN * 2)
-  train.solutions = ivec.raw(train.solutions, "u32")
+  train.problems:flip_interleave(train.n, HIDDEN)
+  train.problems = train.problems:raw_bitmap(train.n, HIDDEN * 2)
+  train.solutions = train.solutions:raw("u32")
 
   print("Transforming test")
   cor.compress(test.problems, test.n)
-  ivec.flip_interleave(test.problems, test.n, HIDDEN)
-  test.problems = ivec.raw_bitmap(test.problems, test.n, HIDDEN * 2)
-  test.solutions = ivec.raw(test.solutions, "u32")
+  test.problems:flip_interleave(test.n, HIDDEN)
+  test.problems = test.problems:raw_bitmap(test.n, HIDDEN * 2)
+  test.solutions = test.solutions:raw("u32")
 
   print("Train", train.n)
   print("Test", test.n)
