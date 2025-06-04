@@ -9,9 +9,11 @@ local utc = require("santoku.utc")
 
 local tm = require("santoku.tsetlin")
 local ds = require("santoku.tsetlin.dataset")
+-- local inv = require("santoku.tsetlin.inv")
+local booleanizer = require("santoku.tsetlin.booleanizer")
 local eval = require("santoku.tsetlin.evaluator")
 local graph = require("santoku.tsetlin.graph")
-local threshold = require("santoku.tsetlin.threshold")
+local tch = require("santoku.tsetlin.tch")
 local tokenizer = require("santoku.tsetlin.tokenizer")
 local spectral = require("santoku.tsetlin.spectral")
 
@@ -74,13 +76,18 @@ test("tsetlin", function ()
   train.sentences = tokenizer.tokenize(train.raw_sentences)
   local stopwatch = utc.stopwatch()
 
+  -- print("\nIndexing train")
+  -- train.index = inv.create({ features = dataset.n_features })
+  -- train.index:add(train.sentences)
+
   print("Creating graph")
   train.graph = graph.create({
+    pos = train.pos,
+    neg = train.neg,
+    -- index = train.index,
     nodes = train.sentences,
     n_nodes = train.n_sentences,
     n_features = dataset.n_features,
-    pos = train.pos,
-    neg = train.neg,
     knn = GRAPH_KNN,
     trans_hops = TRANS_HOPS,
     trans_pos = TRANS_POS,
@@ -103,11 +110,18 @@ test("tsetlin", function ()
     end
   })
 
-  print("\nThresholding\n")
-  train.codes0 = threshold.tch({
-    z = train.codes0,
+  print("\nBooleanizing\n")
+  local bzr = booleanizer.create({ n_thresholds = 1 })
+  bzr:observe(train.codes0, HIDDEN)
+  bzr:finalize()
+  train.codes0 = bzr:encode(train.codes0, HIDDEN)
+  train.n_hidden = bzr:bits()
+
+  print("\nRefining\n")
+  tch.refine({
+    codes = train.codes0,
     graph = train.graph,
-    n_hidden = HIDDEN,
+    n_hidden = train.n_hidden,
     threads = THREADS,
     each = function (s)
       local d, dd = stopwatch()
@@ -115,25 +129,25 @@ test("tsetlin", function ()
     end
   })
 
-  train.codes0_raw = ivec.raw_bitmap(train.codes0, train.n_sentences, HIDDEN)
-  train.similarity0 = eval.encoding_similarity(train.codes0_raw, train.pos, train.neg, HIDDEN, THREADS)
+  train.codes0_raw = train.codes0:raw_bitmap(train.n_sentences, train.n_hidden)
+  train.similarity0 = eval.encoding_similarity(train.codes0_raw, train.pos, train.neg, train.n_hidden, THREADS)
   str.printi("AUC: %.2f#(auc) | F1: %.2f#(f1) | Precision: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", -- luacheck: ignore
     train.similarity0)
 
-  train.entropy0 = eval.codebook_stats(train.codes0_raw, train.n_sentences, HIDDEN, THREADS)
+  train.entropy0 = eval.codebook_stats(train.codes0_raw, train.n_sentences, train.n_hidden, THREADS)
   str.printi("Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)\n",
     train.entropy0)
 
   local top_v =
-    TOP_ALGO == "chi2" and ivec.top_chi2(train.sentences, train.codes0_raw, train.n_sentences, dataset.n_features, HIDDEN, TOP_K, THREADS) or -- luacheck: ignore
-    TOP_ALGO == "mi" and ivec.top_mi(train.sentences, train.codes0_raw, train.n_sentences, dataset.n_features, HIDDEN, TOP_K, THREADS) or -- luacheck: ignore
+    TOP_ALGO == "chi2" and train.sentences:top_chi2(train.codes0_raw, train.n_sentences, dataset.n_features, train.n_hidden, TOP_K, THREADS) or -- luacheck: ignore
+    TOP_ALGO == "mi" and train.sentences:top_mi(train.codes0_raw, train.n_sentences, dataset.n_features, train.n_hidden, TOP_K, THREADS) or -- luacheck: ignore
     TOP_ALGO == "corex" and (function ()
       print("Creating Corex")
       train.sel_corpus = ivec.create(train.sentences)
-      ivec.extend_bits(train.sel_corpus, train.codes0, dataset.n_features, HIDDEN)
+      train.sel_corpus:extend_bits(train.codes0, dataset.n_features, train.n_hidden)
       local cor = corex.create({
-        visible = dataset.n_features + HIDDEN,
-        hidden = HIDDEN,
+        visible = dataset.n_features + train.n_hidden,
+        hidden = train.n_hidden,
         anchor = COREX_TOP_ANCHOR,
         threads = THREADS,
       })
@@ -153,16 +167,16 @@ test("tsetlin", function ()
     end)() or (function ()
       -- Fallback to all words
       local t = ivec.create(dataset.n_features)
-      ivec.fill_indices(t)
+      t:fill_indices()
       return t
     end)()
 
-  local n_top_v = ivec.size(top_v)
+  local n_top_v = top_v:size()
   print("After top k filter", n_top_v)
 
   -- Show top words
   local words = tokenizer.index()
-  for id in it.take(32, ivec.each(top_v)) do
+  for id in it.take(32, top_v:each()) do
     print(id, words[id + 1])
   end
 
@@ -172,21 +186,21 @@ test("tsetlin", function ()
   test.sentences = tokenizer.tokenize(test.raw_sentences)
 
   print("Prepping for encoder")
-  ivec.flip_interleave(train.sentences, train.n_sentences, n_top_v)
-  ivec.flip_interleave(test.sentences, test.n_sentences, n_top_v)
-  train.sentences = ivec.raw_bitmap(train.sentences, train.n_sentences, n_top_v * 2)
-  test.sentences = ivec.raw_bitmap(test.sentences, test.n_sentences, n_top_v * 2)
+  train.sentences:flip_interleave(train.n_sentences, n_top_v)
+  test.sentences:flip_interleave(test.n_sentences, n_top_v)
+  train.sentences = train.sentences:raw_bitmap(train.n_sentences, n_top_v * 2)
+  test.sentences = test.sentences:raw_bitmap(test.n_sentences, n_top_v * 2)
 
   print()
   print("Input Features", n_top_v * 2)
-  print("Encoded Features", HIDDEN)
+  print("Encoded Features", train.n_hidden)
   print("Train Sentences", train.n_sentences)
   print("Test Sentences", test.n_sentences)
 
   print("Creating encoder")
   local t = tm.encoder({
     visible = n_top_v,
-    hidden = HIDDEN,
+    hidden = train.n_hidden,
     clauses = CLAUSES,
     target = TARGET,
     specificity = SPECIFICITY,
@@ -204,9 +218,9 @@ test("tsetlin", function ()
       if epoch == TM_ITERS or epoch % EVALUATE_EVERY == 0 then
         train.codes1 = t.predict(train.sentences, train.n_sentences)
         test.codes1 = t.predict(test.sentences, test.n_sentences)
-        train.accuracy0 = eval.encoding_accuracy(train.codes1, train.codes0_raw, train.n_sentences, HIDDEN, THREADS)
-        train.similarity1 = eval.encoding_similarity(train.codes1, train.pos, train.neg, HIDDEN, THREADS)
-        test.similarity1 = eval.encoding_similarity(test.codes1, test.pos, test.neg, HIDDEN, THREADS)
+        train.accuracy0 = eval.encoding_accuracy(train.codes1, train.codes0_raw, train.n_sentences, train.n_hidden, THREADS) -- luacheck: ignore
+        train.similarity1 = eval.encoding_similarity(train.codes1, train.pos, train.neg, train.n_hidden, THREADS) -- luacheck: ignore
+        test.similarity1 = eval.encoding_similarity(test.codes1, test.pos, test.neg, train.n_hidden, THREADS) -- luacheck: ignore
         print()
         str.printf("Epoch %3d  Time %3.2f %3.2f\n",
           epoch, stopwatch())
@@ -238,11 +252,11 @@ test("tsetlin", function ()
     train.codes1 = t.predict(train.sentences, train.n_sentences)
     test.codes1 = t.predict(test.sentences, test.n_sentences)
     train.accuracy0 = eval.encoding_accuracy(
-      train.codes1, train.codes0_raw, train.n_sentences, HIDDEN, THREADS)
+      train.codes1, train.codes0_raw, train.n_sentences, train.n_hidden, THREADS)
     train.similarity1 = eval.encoding_similarity(
-      train.codes1, train.pos, train.neg, HIDDEN, THREADS)
+      train.codes1, train.pos, train.neg, train.n_hidden, THREADS)
     test.similarity1 = eval.encoding_similarity(
-      test.codes1, test.pos, test.neg, HIDDEN, THREADS)
+      test.codes1, test.pos, test.neg, train.n_hidden, THREADS)
     print()
     str.printi("  Train (acc) |           | F1: %.2f#(f1) | Prec: %.2f#(precision) | Recall: %.2f#(recall) | F1 Spread: %.2f#(f1_min) %.2f#(f1_max) %.2f#(f1_std)", train.accuracy0) -- luacheck: ignore
     str.printi("  Codes (sim) | AUC: %.2f#(auc) | F1: %.2f#(f1) | Prec: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", train.similarity0) -- luacheck: ignore

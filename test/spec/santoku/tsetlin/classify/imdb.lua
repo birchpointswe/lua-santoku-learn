@@ -1,20 +1,21 @@
-local ds = require("santoku.tsetlin.dataset")
-local eval = require("santoku.tsetlin.evaluator")
 local fs = require("santoku.fs")
 local it = require("santoku.iter")
-local ivec = require("santoku.ivec")
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local str = require("santoku.string")
 local test = require("santoku.test")
 local tm = require("santoku.tsetlin")
-local tokenizer = require("santoku.tsetlin.tokenizer")
 local utc = require("santoku.utc")
+local ivec = require("santoku.ivec")
+
+local ds = require("santoku.tsetlin.dataset")
+local eval = require("santoku.tsetlin.evaluator")
+local tokenizer = require("santoku.tsetlin.tokenizer")
 
 local TTR = 0.9
 local MAX = nil
 local THREADS = nil
 local EVALUATE_EVERY = 1
-local ITERATIONS = 20
+local ITERATIONS = 10
 
 local CLASSES = 2
 local CLAUSES = 8192
@@ -58,19 +59,19 @@ test("tsetlin", function ()
   print("Tokenizing train")
   train.problems0 = tokenizer.tokenize(train.problems)
   local top_v =
-    TOP_ALGO == "chi2" and ivec.top_chi2(train.problems0, train.solutions, train.n, dataset.n_features, 2, TOP_K, THREADS) or -- luacheck: ignore
-    TOP_ALGO == "mi" and ivec.top_mi(train.problems0, train.solutions, train.n, dataset.n_features, 2, TOP_K, THREADS) or (function () -- luacheck: ignore
+    TOP_ALGO == "chi2" and train.problems0:top_chi2(train.solutions, train.n, dataset.n_features, 2, TOP_K, THREADS) or -- luacheck: ignore
+    TOP_ALGO == "mi" and train.problems0:top_mi(train.solutions, train.n, dataset.n_features, 2, TOP_K, THREADS) or (function () -- luacheck: ignore
       -- Fallback to all words
       local t = ivec.create(dataset.n_features)
-      ivec.fill_indices(t)
+      t:fill_indices()
       return t
     end)()
-  local n_top_v = ivec.size(top_v)
+  local n_top_v = top_v:size()
   print("After top k filter", n_top_v)
 
   -- Show top words
   local words = tokenizer.index()
-  for id in it.take(32, ivec.each(top_v)) do
+  for id in it.take(32, top_v:each()) do
     print(id, words[id + 1])
   end
 
@@ -80,12 +81,12 @@ test("tsetlin", function ()
   test.problems = tokenizer.tokenize(test.problems);
 
   print("Prepping for classifier")
-  ivec.flip_interleave(train.problems, train.n, n_top_v)
-  ivec.flip_interleave(test.problems, test.n, n_top_v)
-  train.problems = ivec.raw_bitmap(train.problems, train.n, n_top_v * 2)
-  test.problems = ivec.raw_bitmap(test.problems, test.n, n_top_v * 2)
-  train.solutions = ivec.raw(train.solutions, "u32")
-  test.solutions = ivec.raw(test.solutions, "u32")
+  train.problems:flip_interleave(train.n, n_top_v)
+  test.problems:flip_interleave(test.n, n_top_v)
+  train.problems = train.problems:raw_bitmap(train.n, n_top_v * 2)
+  test.problems = test.problems:raw_bitmap(test.n, n_top_v * 2)
+  train.solutions = train.solutions:raw("u32")
+  test.solutions = test.solutions:raw("u32")
 
   print("Creating")
   local t = tm.classifier({

@@ -1,7 +1,6 @@
 local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
 local fs = require("santoku.fs")
-local ivec = require("santoku.ivec")
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local str = require("santoku.string")
 local test = require("santoku.test")
@@ -9,10 +8,10 @@ local tm = require("santoku.tsetlin")
 local utc = require("santoku.utc")
 
 local TTR = 0.9
-local MAX = 10000
+local MAX = 1000
 local THREADS = nil
 local EVALUATE_EVERY = 1
-local ITERATIONS = 100
+local ITERATIONS = 10
 
 local CLASSES = 10
 local CLAUSES = 4096
@@ -29,14 +28,14 @@ test("tsetlin", function ()
   local train, test = ds.split_binary_mnist(dataset, TTR, true)
 
   print("Transforming train")
-  ivec.flip_interleave(train.problems, train.n, dataset.n_features)
-  train.problems = ivec.raw_bitmap(train.problems, train.n, dataset.n_features * 2)
-  train.solutions = ivec.raw(train.solutions, "u32")
+  train.problems:flip_interleave(train.n, dataset.n_features)
+  train.problems = train.problems:raw_bitmap(train.n, dataset.n_features * 2)
+  train.solutions = train.solutions:raw("u32")
 
   print("Transforming test")
-  ivec.flip_interleave(test.problems, test.n, dataset.n_features)
-  test.problems = ivec.raw_bitmap(test.problems, test.n, dataset.n_features * 2)
-  test.solutions = ivec.raw(test.solutions, "u32")
+  test.problems:flip_interleave(test.n, dataset.n_features)
+  test.problems = test.problems:raw_bitmap(test.n, dataset.n_features * 2)
+  test.solutions = test.solutions:raw("u32")
 
   print("Creating")
   local t = tm.classifier({
