@@ -2,6 +2,17 @@
 
 #include <santoku/tsetlin/graph.h>
 
+static inline tk_graph_t *tm_graph_create (
+  lua_State *L,
+  tk_ivec_t *pos,
+  tk_ivec_t *neg,
+  tk_ivec_t *set_bits,
+  uint64_t n_nodes,
+  uint64_t n_features,
+  uint64_t knn_cache,
+  unsigned int n_threads
+);
+
 static inline void tk_graph_worker (void *dp, int sig)
 {
   tk_graph_stage_t stage = (tk_graph_stage_t) sig;
@@ -619,51 +630,6 @@ static inline int tm_to_bits (lua_State *L)
   return 1;
 }
 
-static tk_graph_t *tm_graph_create (
-  lua_State *L,
-  tk_ivec_t *pos,
-  tk_ivec_t *neg,
-  tk_ivec_t *set_bits,
-  uint64_t n_nodes,
-  uint64_t n_features,
-  uint64_t knn_cache,
-  unsigned int n_threads
-) {
-  tk_graph_t *graph = (tk_graph_t *) lua_newuserdata(L, sizeof(tk_graph_t)); // ud
-  luaL_getmetatable(L, TK_MT_GRAPH); // ud mt
-  lua_setmetatable(L, -2); // ud
-  memset(graph, 0, sizeof(tk_graph_t));
-  graph->threads = tk_malloc(L, n_threads * sizeof(tk_graph_t));
-  memset(graph->threads, 0, n_threads * sizeof(tk_graph_thread_t));
-  graph->pool = tk_threads_create(L, n_threads, tk_graph_worker);
-  graph->neighbors = tk_malloc(L, n_nodes * sizeof(tm_neighbors_t));
-  graph->nodes = tk_malloc(L, n_nodes * sizeof(roaring64_bitmap_t *));
-  graph->set_bits = set_bits;
-  graph->n_nodes = n_nodes;
-  graph->n_features = n_features;
-  graph->knn_cache = knn_cache;
-  graph->pairs = kh_init(pairs);
-  graph->pos = pos;
-  graph->neg = neg;
-  graph->n_pos = pos->n / 2;
-  graph->n_neg = neg->n / 2;
-  graph->adj_pos = tk_malloc(L, n_nodes * sizeof(roaring64_bitmap_t *));
-  graph->adj_neg = tk_malloc(L, n_nodes * sizeof(roaring64_bitmap_t *));
-  for (uint64_t s = 0; s < graph->n_nodes; s ++) {
-    graph->nodes[s] = roaring64_bitmap_create();
-    graph->adj_pos[s] = roaring64_bitmap_create();
-    graph->adj_neg[s] = roaring64_bitmap_create();
-  }
-  for (unsigned int i = 0; i < n_threads; i ++) {
-    tk_graph_thread_t *data = graph->threads + i;
-    graph->pool->threads[i].data = data;
-    data->graph = graph;
-    data->candidates = roaring64_bitmap_create();
-    tk_thread_range(i, n_threads, n_nodes, &data->ufirst, &data->ulast);
-  }
-  return graph;
-}
-
 static void tm_graph_destroy (tk_graph_t *graph)
 {
   for (int64_t s = 0; s < (int64_t) graph->n_nodes; s ++)
@@ -678,14 +644,14 @@ static void tm_graph_destroy (tk_graph_t *graph)
     roaring64_bitmap_free(data->candidates);
   }
   tk_threads_destroy(graph->pool);
-  kh_destroy(pairs, graph->pairs);
   for (uint64_t u = 0; u < graph->n_nodes; u ++) {
     roaring64_bitmap_free(graph->adj_pos[u]);
     roaring64_bitmap_free(graph->adj_neg[u]);
   }
+  free(graph->threads);
+  kh_destroy(pairs, graph->pairs);
   free(graph->adj_pos);
   free(graph->adj_neg);
-  free(graph->threads);
 }
 
 static inline int tm_graph_gc (lua_State *L)
@@ -802,9 +768,56 @@ static inline int tm_graph_pairs (lua_State *L)
   return 2;
 }
 
-static luaL_Reg tm_graph_fns[] =
+static luaL_Reg tm_graph_mt_fns[] =
 {
   { "pairs", tm_graph_pairs },
+  { NULL, NULL }
+};
+
+static inline tk_graph_t *tm_graph_create (
+  lua_State *L,
+  tk_ivec_t *pos,
+  tk_ivec_t *neg,
+  tk_ivec_t *set_bits,
+  uint64_t n_nodes,
+  uint64_t n_features,
+  uint64_t knn_cache,
+  unsigned int n_threads
+) {
+  tk_graph_t *graph = tk_lua_newuserdata(L, tk_graph_t, TK_GRAPH_MT, tm_graph_mt_fns, tm_graph_gc); // ud
+  graph->threads = tk_malloc(L, n_threads * sizeof(tk_graph_thread_t));
+  memset(graph->threads, 0, n_threads * sizeof(tk_graph_thread_t));
+  graph->pool = tk_threads_create(L, n_threads, tk_graph_worker);
+  graph->neighbors = tk_malloc(L, n_nodes * sizeof(tm_neighbors_t));
+  graph->nodes = tk_malloc(L, n_nodes * sizeof(roaring64_bitmap_t *));
+  graph->set_bits = set_bits;
+  graph->n_nodes = n_nodes;
+  graph->n_features = n_features;
+  graph->knn_cache = knn_cache;
+  graph->pairs = kh_init(pairs);
+  graph->pos = pos;
+  graph->neg = neg;
+  graph->n_pos = pos->n / 2;
+  graph->n_neg = neg->n / 2;
+  graph->adj_pos = tk_malloc(L, n_nodes * sizeof(roaring64_bitmap_t *));
+  graph->adj_neg = tk_malloc(L, n_nodes * sizeof(roaring64_bitmap_t *));
+  for (uint64_t s = 0; s < graph->n_nodes; s ++) {
+    graph->nodes[s] = roaring64_bitmap_create();
+    graph->adj_pos[s] = roaring64_bitmap_create();
+    graph->adj_neg[s] = roaring64_bitmap_create();
+  }
+  for (unsigned int i = 0; i < n_threads; i ++) {
+    tk_graph_thread_t *data = graph->threads + i;
+    graph->pool->threads[i].data = data;
+    data->graph = graph;
+    data->candidates = roaring64_bitmap_create();
+    tk_thread_range(i, n_threads, n_nodes, &data->ufirst, &data->ulast);
+  }
+  return graph;
+}
+
+static luaL_Reg tm_graph_fns[] =
+{
   { "create", tm_create },
   { "to_bits", tm_to_bits },
   { NULL, NULL }
@@ -812,12 +825,7 @@ static luaL_Reg tm_graph_fns[] =
 
 int luaopen_santoku_tsetlin_graph (lua_State *L)
 {
-  lua_settop(L, 0);
-  lua_newtable(L); // t
-  tk_lua_register(L, tm_graph_fns, 0); // t
-  luaL_newmetatable(L, TK_MT_GRAPH); // t mt
-  lua_pushcfunction(L, tm_graph_gc); // t mt gc
-  lua_setfield(L, -2, "__gc"); // t mt
-  lua_pop(L, 1); // t
+  lua_newtable(L);
+  tk_lua_register(L, tm_graph_fns, 0);
   return 1;
 }

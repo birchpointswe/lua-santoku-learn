@@ -1,17 +1,19 @@
+local fs = require("santoku.fs")
+local it = require("santoku.iter")
+local ivec = require("santoku.ivec")
 local serialize = require("santoku.serialize") -- luacheck: ignore
+local str = require("santoku.string")
 local test = require("santoku.test")
 local utc = require("santoku.utc")
+
 local tm = require("santoku.tsetlin")
-local ds = require("santoku.tsetlin.dataset")
-local tokenizer = require("santoku.tsetlin.tokenizer")
-local graph = require("santoku.tsetlin.graph")
-local threshold = require("santoku.tsetlin.threshold")
 local corex = require("santoku.corex")
+-- local inv = require("santoku.tsetlin.inv")
+local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
-local ivec = require("santoku.ivec")
-local it = require("santoku.iter")
-local fs = require("santoku.fs")
-local str = require("santoku.string")
+local graph = require("santoku.tsetlin.graph")
+local tch = require("santoku.tsetlin.tch")
+local tokenizer = require("santoku.tsetlin.tokenizer")
 
 local TRAIN_TEST_RATIO = 0.8
 local TM_ITERS = 10
@@ -71,13 +73,18 @@ test("tsetlin", function ()
   train.sentences = tokenizer.tokenize(train.raw_sentences)
   local stopwatch = utc.stopwatch()
 
+  -- print("\nIndexing train")
+  -- train.index = inv.create({ features = dataset.n_features })
+  -- train.index:add(train.sentences)
+
   print("Creating graph")
   train.graph = graph.create({
+    pos = train.pos,
+    neg = train.neg,
+    -- index = train.index,
     nodes = train.sentences,
     n_nodes = train.n_sentences,
     n_features = dataset.n_features,
-    pos = train.pos,
-    neg = train.neg,
     knn = GRAPH_KNN,
     trans_hops = TRANS_HOPS,
     trans_pos = TRANS_POS,
@@ -90,7 +97,7 @@ test("tsetlin", function ()
   })
 
   print("Creating Corex")
-  train.pos_enriched, train.neg_enriched = graph.pairs(train.graph)
+  train.pos_enriched, train.neg_enriched = train.graph:pairs()
   train.graph_corpus = graph.to_bits(train.pos_enriched, train.n_sentences)
   local cor = corex.create({
     visible = train.n_sentences,
@@ -114,8 +121,8 @@ test("tsetlin", function ()
   train.codes0 = cor.compress(train.graph_corpus, train.n_sentences)
 
   print("Finetuning codes\n")
-  threshold.tch({
-    codes = train.codes0, -- NOTE: updated in-place
+  tch.refine({
+    codes = train.codes0,
     graph = train.graph,
     n_hidden = HIDDEN,
     each = function (s)
@@ -124,7 +131,7 @@ test("tsetlin", function ()
     end
   })
 
-  train.codes0 = ivec.raw_bitmap(train.codes0, train.n_sentences, HIDDEN)
+  train.codes0 = train.codes0:raw_bitmap(train.n_sentences, HIDDEN)
   train.similarity0 = eval.encoding_similarity(
     train.codes0, train.pos, train.neg, HIDDEN, THREADS)
   str.printi("AUC: %.2f#(auc) | F1: %.2f#(f1) | Precision: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", -- luacheck: ignore
@@ -135,20 +142,20 @@ test("tsetlin", function ()
     train.entropy0)
 
   local top_v =
-    TOP_ALGO == "chi2" and ivec.top_chi2(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K, THREADS) or -- luacheck: ignore
-    TOP_ALGO == "mi" and ivec.top_mi(train.sentences, train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K, THREADS) or (function () -- luacheck: ignore
+    TOP_ALGO == "chi2" and train.sentences:top_chi2(train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K, THREADS) or -- luacheck: ignore
+    TOP_ALGO == "mi" and train.sentences:top_mi(train.codes0, train.n_sentences, dataset.n_features, HIDDEN, TOP_K, THREADS) or (function () -- luacheck: ignore
       -- Fallback to all words
-      local t = ivec.create(1, dataset.n_features)
-      ivec.fill_indices(t)
+      local t = ivec.create(dataset.n_features)
+      t:fill_indices()
       return t
     end)()
 
-  local n_top_v = ivec.size(top_v)
+  local n_top_v = top_v:size()
   print("After top k filter", n_top_v)
 
   -- Show top words
   local words = tokenizer.index()
-  for id in it.take(32, ivec.each(top_v)) do
+  for id in it.take(32, top_v:each()) do
     print(id, words[id + 1])
   end
 
@@ -158,10 +165,10 @@ test("tsetlin", function ()
   test.sentences = tokenizer.tokenize(test.raw_sentences)
 
   print("Prepping for encoder")
-  ivec.flip_interleave(train.sentences, train.n_sentences, n_top_v)
-  ivec.flip_interleave(test.sentences, test.n_sentences, n_top_v)
-  train.sentences = ivec.raw_bitmap(train.sentences, train.n_sentences, n_top_v * 2)
-  test.sentences = ivec.raw_bitmap(test.sentences, test.n_sentences, n_top_v * 2)
+  train.sentences:flip_interleave(train.n_sentences, n_top_v)
+  test.sentences:flip_interleave(test.n_sentences, n_top_v)
+  train.sentences = train.sentences:raw_bitmap(train.n_sentences, n_top_v * 2)
+  test.sentences = test.sentences:raw_bitmap(test.n_sentences, n_top_v * 2)
 
   print()
   print("Input Features", n_top_v * 2)

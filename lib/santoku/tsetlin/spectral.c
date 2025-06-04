@@ -2,7 +2,6 @@
 
 #include <santoku/tsetlin/graph.h>
 #include <santoku/tsetlin/conf.h>
-#include <santoku/tsetlin/threshold.h>
 #include <santoku/threads.h>
 #include <santoku/dvec.h>
 #include <float.h>

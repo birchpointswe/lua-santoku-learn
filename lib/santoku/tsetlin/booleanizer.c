@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
 #include <santoku/duset.h>
@@ -64,8 +65,9 @@ static inline bool tk_booleanizer_is_categorical (
     return true;
   if (tk_iuset_contains(B->continuous, id_feature))
     return false;
-  return kh_get(tk_observed_strings, B->observed_strings, id_feature)
-    != kh_end(B->observed_strings);
+  if (!B->finalized && B->observed_strings != NULL)
+    return kh_get(tk_observed_strings, B->observed_strings, id_feature) != kh_end(B->observed_strings);
+  return false;
 }
 
 static inline void tk_booleanizer_encode_string (
@@ -164,7 +166,7 @@ static inline void tk_booleanizer_encode_dvec (
         int64_t bit_base = kh_value(B->cont_bits, k_bits);
         for (uint64_t t = 0; t < thresholds->n; t ++)
           if (value > thresholds->a[t])
-            tk_ivec_push(out, bit_base + (int64_t) t);
+            tk_ivec_push(out, (int64_t) i * (int64_t) B->next_bit + bit_base + (int64_t) t);
       }
     }
   }
@@ -298,7 +300,7 @@ static inline void tk_booleanizer_add_thresholds (
   int kha;
   khint_t khi;
   uint64_t n = value_vec->n;
-  tk_dvec_t *thresholds = tk_dvec_create(L, B->n_thresholds, 0, 0);
+  tk_dvec_t *thresholds = tk_dvec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPHEMERON, Bi, tk_lua_absindex(L, -1));
   lua_pop(L, 1);
   if (n == 0) {
@@ -312,16 +314,17 @@ static inline void tk_booleanizer_add_thresholds (
       size_t left = (size_t) idx;
       size_t right = left + 1;
       double frac = idx - left;
-      thresholds->a[i] = (right < n)
+      tk_dvec_push(thresholds, (right < n)
         ? value_vec->a[left] * (1.0 - frac) + value_vec->a[right] * frac
-        : value_vec->a[left];
+        : value_vec->a[left]);
     }
   }
+  tk_dvec_shrink(L, thresholds);
   khi = kh_put(tk_cont_thresholds, B->cont_thresholds, id_feature, &kha);
   kh_value(B->cont_thresholds, khi) = thresholds;
   khi = kh_put(tk_iumap, B->cont_bits, id_feature, &kha);
   kh_value(B->cont_bits, khi) = (int64_t) B->next_bit;
-  B->next_bit += (uint64_t) B->n_thresholds;
+  B->next_bit += (uint64_t) thresholds->n;
 }
 
 static inline void tk_booleanizer_shrink (
@@ -330,18 +333,22 @@ static inline void tk_booleanizer_shrink (
   if (B->destroyed)
     return;
   tk_duset_t *du;
-  int64_t f;
-  kh_foreach(B->observed_doubles, f, du, ({
-    tk_duset_destroy(du);
-  }));
-  kh_destroy(tk_observed_doubles, B->observed_doubles);
-  B->observed_doubles = NULL;
   tk_cuset_t *cu;
-  kh_foreach(B->observed_strings, f, cu, ({
-    tk_cuset_destroy(cu);
-  }))
-  kh_destroy(tk_observed_strings, B->observed_strings);
-  B->observed_strings = NULL;
+  int64_t f;
+  if (B->observed_doubles != NULL) {
+    kh_foreach(B->observed_doubles, f, du, ({
+      tk_duset_destroy(du);
+    }));
+    kh_destroy(tk_observed_doubles, B->observed_doubles);
+    B->observed_doubles = NULL;
+  }
+  if (B->observed_strings != NULL) {
+    kh_foreach(B->observed_strings, f, cu, ({
+      tk_cuset_destroy(cu);
+    }))
+    kh_destroy(tk_observed_strings, B->observed_strings);
+    B->observed_strings = NULL;
+  }
 }
 
 static inline void tk_booleanizer_finalize (
@@ -378,6 +385,7 @@ static inline void tk_booleanizer_finalize (
       continue;
     id_feature = tk_iuset_key(seen_features, khi);
     if (tk_booleanizer_is_categorical(B, id_feature)) {
+      tk_iuset_put(B->categorical, id_feature, &kha);
       kho = kh_get(tk_observed_strings, B->observed_strings, id_feature);
       if (kho != kh_end(B->observed_strings)) {
         tk_cuset_t *values = kh_value(B->observed_strings, kho);
@@ -403,6 +411,7 @@ static inline void tk_booleanizer_finalize (
         }
       }
     } else {
+      tk_iuset_put(B->continuous, id_feature, &kha);
       kho = kh_get(tk_observed_doubles, B->observed_doubles, id_feature);
       if (kho == kh_end(B->observed_doubles))
         continue;
@@ -418,6 +427,7 @@ static inline void tk_booleanizer_finalize (
   lua_remove(L, i_value_vec);
   tk_iuset_destroy(seen_features);
 }
+
 static inline int64_t tk_booleanizer_features (
   lua_State *L,
   tk_booleanizer_t *B
@@ -709,7 +719,7 @@ static inline int tk_booleanizer_encode_lua (lua_State *L)
   tk_dvec_t *D = tk_dvec_peekopt(L, 2);
   tk_ivec_t *out = NULL;
   if (D != NULL) {
-    uint64_t n_dims = tk_lua_optunsigned(L, 3, "n_dims", 0);
+    uint64_t n_dims = tk_lua_checkunsigned(L, 3, "n_dims");
     uint64_t id_dim0 = tk_lua_optunsigned(L, 4, "id_dim0", 0);
     out = tk_ivec_peekopt(L, 5);
     if (out == NULL)
@@ -997,7 +1007,9 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
 static inline int tk_booleanizer_create_lua (lua_State *L)
 {
   lua_settop(L, 1);
-  uint64_t n_thresholds = tk_lua_fcheckunsigned(L, 1, "create", "n_thresholds");
+  if (lua_isnil(L, 1))
+    lua_newtable(L);
+  uint64_t n_thresholds = tk_lua_foptunsigned(L, 1, "create", "n_thresholds", 0);
   lua_getfield(L, 1, "continuous");
   tk_ivec_t *continuous = lua_isnil(L, -1) ? NULL : tk_ivec_peekopt(L, -1);
   lua_getfield(L, 1, "categorical");
@@ -1013,6 +1025,7 @@ static inline int tk_booleanizer_load_lua (lua_State *L)
   bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && tk_lua_checkboolean(L, 2);
   FILE *fh = isstr ? tk_lua_fmemopen(L, (char *) data, len, "r") : tk_lua_fopen(L, data, "r");
   tk_booleanizer_load(L, fh);
+  tk_lua_fclose(L, fh);
   return 1;
 }
 

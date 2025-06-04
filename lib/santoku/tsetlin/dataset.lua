@@ -156,8 +156,8 @@ local function _split_binary_mnist (dataset, s, e)
   local ss = {}
   for i = s, e do
     local p = ivec.create(dataset.problems[i])
-    ivec.add(p, (i - s) * dataset.n_features)
-    ivec.copy(ps, p)
+    p:add((i - s) * dataset.n_features)
+    ps:copy(p)
     arr.push(ss, dataset.solutions[i])
   end
   ss = ivec.create(ss)
@@ -218,14 +218,14 @@ M.read_glove = function (fp, max)
   local embeddings = dvec.create()
   local words = {}
   local added = 0
-  for l in fs.lines(fp) do
+  for l in it.take(max or math.huge, fs.lines(fp)) do
     local chunks = str.gmatch(l, "%S+")
     local word = chunks()
     words[#words + 1] = word
     words[word] = #words
     for n in chunks do
       n = err.assert(tonumber(n), "error parsing dimension")
-      dvec.push(embeddings, n)
+      embeddings:push(n)
       added = added + 1
     end
     if not n_dims then
@@ -234,7 +234,7 @@ M.read_glove = function (fp, max)
     err.assert(added == n_dims, "dimension mismatch", "expected", n_dims, "found", added)
     added = 0
   end
-  dvec.shrink(embeddings)
+  embeddings:shrink()
   return {
     n_embeddings = #words,
     embeddings = embeddings,
