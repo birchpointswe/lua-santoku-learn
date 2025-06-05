@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <assert.h>
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
@@ -820,7 +822,7 @@ static inline int tk_booleanizer_bits_lua (lua_State *L)
 static inline int tk_booleanizer_restrict_lua (lua_State *L)
 {
   tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
-  tk_ivec_t *ids = tk_ivec_peek(L, 2);
+  tk_ivec_t *ids = tk_ivec_peek(L, 2, "top_v");
   tk_booleanizer_restrict(L, B, ids);
   return 0;
 }

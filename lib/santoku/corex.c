@@ -866,7 +866,7 @@ static inline int tk_corex_top_visible (lua_State *L)
 static inline int tk_corex_compress (lua_State *L)
 {
   tk_corex_t *C = peek_corex(L, lua_upvalueindex(1));
-  tk_ivec_t *set_bits = tk_ivec_peek(L, 1);
+  tk_ivec_t *set_bits = tk_ivec_peek(L, 1, "set_bits");
   unsigned int n_samples = tk_lua_optunsigned(L, 2, "n_samples", 1);
 
   // TODO: Expose shrink via the api, and only realloc if new size is larger than old
@@ -1011,7 +1011,7 @@ static inline int tk_corex_train (lua_State *L) {
   if (C->trained)
     return tk_lua_error(L, "Already trained!\n");
   lua_getfield(L, 1, "corpus");
-  tk_ivec_t *set_bits = tk_ivec_peek(L, -1);
+  tk_ivec_t *set_bits = tk_ivec_peek(L, -1, "set_bits");
   unsigned int n_samples = tk_lua_fcheckunsigned(L, 1, "train", "samples");
   unsigned int max_iter = tk_lua_fcheckunsigned(L, 1, "train", "iterations");
   int i_each = -1;
