@@ -1,5 +1,14 @@
 # Now
 
+- Clustering
+    - Implement eval.clustering_accuracy, similar to encoding_similarity, which
+      sweeps for best margin for optimal F1 but using same cluster membership as
+      the target.
+        - TP: similar and same cluster
+        - FP: dissimilar but same cluster
+        - TN: dissimilar but diff cluster or both noise
+        - FN: similar but diff cluster or both noise
+
 - ANN search
     - After spectral, demo search on train/test codes
 
@@ -45,7 +54,7 @@
     - Precompute probes
 
 - Clustering
-    - Move implementation to C
+    - Move implementation to C with proper Lua/C APIs
 
 - tk_cvec_t
     - Move dense bit operations here (hamming, xor, etc, etc)
