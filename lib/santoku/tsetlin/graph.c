@@ -617,7 +617,7 @@ static inline void tm_add_pairs (
 static inline int tm_to_bits (lua_State *L)
 {
   lua_settop(L, 2);
-  tk_ivec_t *pairs = tk_ivec_peek(L, 1);
+  tk_ivec_t *pairs = tk_ivec_peek(L, 1, "pairs");
   uint64_t n_nodes = tk_lua_checkunsigned(L, 2, "n_nodes");
   tk_ivec_t *out = tk_ivec_create(L, 0, 0, 0);
   for (uint64_t i = 0; i < pairs->n; i += 2) {
@@ -666,13 +666,13 @@ static inline int tm_create (lua_State *L)
   lua_settop(L, 1);
 
   lua_getfield(L, 1, "pos");
-  tk_ivec_t *pos = tk_ivec_peek(L, -1);
+  tk_ivec_t *pos = tk_ivec_peek(L, -1, "pos");
 
   lua_getfield(L, 1, "neg");
-  tk_ivec_t *neg = tk_ivec_peek(L, -1);
+  tk_ivec_t *neg = tk_ivec_peek(L, -1, "neg");
 
   lua_getfield(L, 1, "nodes");
-  tk_ivec_t *set_bits = tk_ivec_peek(L, -1);
+  tk_ivec_t *set_bits = tk_ivec_peek(L, -1, "set_bits");
 
   uint64_t n_nodes = tk_lua_fcheckunsigned(L, 1, "enrich", "n_nodes");
   uint64_t n_features = tk_lua_fcheckunsigned(L, 1, "enrich", "n_features");

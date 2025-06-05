@@ -5,14 +5,33 @@
 
 static inline int tk_ann_create_lua (lua_State *L)
 {
-  lua_getfield(L, 1, "guidance");
-  tk_ivec_t *guidance = tk_ivec_peek(L, -1);
-  uint64_t bucket_target = tk_lua_fcheckunsigned(L, 1, "create", "bucket_target");
-  uint64_t features = tk_lua_fcheckunsigned(L, 1, "create", "features");
-  uint64_t probe_radius = tk_lua_foptunsigned(L, 1, "create", "probe_radius", 2);
-  uint64_t n_threads = tk_threads_getn(L, 1, "create", "threads");
-  tk_ann_create(L, features, bucket_target, probe_radius, guidance, n_threads);
-  return 1;
+  if (tk_lua_foptboolean(L, 1, "create", "exhaustive", false)) {
+    uint64_t features = tk_lua_fcheckunsigned(L, 1, "create", "features");
+    uint64_t n_threads = tk_threads_getn(L, 1, "create", "threads");
+    tk_ann_create_exhaustive(L, features, n_threads);
+    return 1;
+  }
+  if (tk_lua_ftype(L, 1, "guidance") != LUA_TNIL) {
+    char *guidance = (char *) tk_lua_foptustring(L, 1, "create", "guidance", NULL);
+    uint64_t n_samples = tk_lua_fcheckunsigned(L, 1, "create", "samples");
+    uint64_t features = tk_lua_fcheckunsigned(L, 1, "create", "features");
+    uint64_t bucket_target = tk_lua_foptunsigned(L, 1, "create", "bucket_target", 30);
+    uint64_t probe_radius = tk_lua_foptunsigned(L, 1, "create", "probe_radius", 2);
+    uint64_t n_threads = tk_threads_getn(L, 1, "create", "threads");
+    tk_ann_create_guided(L, features, bucket_target, probe_radius, guidance, n_samples, n_threads);
+    return 1;
+  }
+  if (tk_lua_ftype(L, 1, "hash_bits") != LUA_TNIL) {
+    uint64_t expected = tk_lua_fcheckunsigned(L, 1, "create", "expected_size");
+    uint64_t features = tk_lua_fcheckunsigned(L, 1, "create", "features");
+    uint64_t bucket_target = tk_lua_foptunsigned(L, 1, "create", "bucket_target", 30);
+    uint64_t probe_radius = tk_lua_foptunsigned(L, 1, "create", "probe_radius", 2);
+    uint64_t n_threads = tk_threads_getn(L, 1, "create", "threads");
+    tk_ann_create_randomized(L, features, bucket_target, probe_radius, expected, n_threads);
+    return 1;
+  }
+  tk_lua_verror(L, 2, "create", "missing expected arguments (either exhaustive, guidance, or hash_bits)");
+  return 0;
 }
 
 static inline int tk_ann_load_lua (lua_State *L)

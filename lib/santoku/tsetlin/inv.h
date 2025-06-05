@@ -115,20 +115,6 @@ static inline int tk_inv_neighbors_lua (lua_State *L)
   return 0;
 }
 
-static inline int tk_inv_centroids_lua (lua_State *L)
-{
-  tk_inv_t *A = tk_inv_peek(L, 1);
-  #warning todo
-  return 0;
-}
-
-static inline int tk_inv_import_lua (lua_State *L)
-{
-  tk_inv_t *A = tk_inv_peek(L, 1);
-  #warning todo
-  return 0;
-}
-
 static inline int tk_inv_size_lua (lua_State *L)
 {
   tk_inv_t *A = tk_inv_peek(L, 1);
@@ -193,12 +179,9 @@ static luaL_Reg tk_inv_lua_mt_fns[] =
 {
   { "add", tk_inv_add_lua },
   { "remove", tk_inv_remove_lua },
-  { "import", tk_inv_import_lua },
   { "get", tk_inv_get_lua },
   { "neighborhoods", tk_inv_neighborhoods_lua },
   { "neighbors", tk_inv_neighbors_lua },
-  { "centroids", tk_inv_centroids_lua },
-  { "import", tk_inv_import_lua },
   { "size", tk_inv_size_lua },
   { "threads", tk_inv_threads_lua },
   { "features", tk_inv_features_lua },
