@@ -9,12 +9,11 @@ typedef enum {
   TK_EVAL_ENCODING_ACCURACY,
   TK_EVAL_ENCODING_SIMILARITY,
   TK_EVAL_ENCODING_AUC,
-  TK_EVAL_CODEBOOK_STATS
 } tk_eval_stage_t;
 
 typedef struct {
   tm_dl_t *pl;
-  atomic_ulong *TP, *FP, *FN, *bit_counts, *hist_pos, *hist_neg;
+  atomic_ulong *TP, *FP, *FN, *hist_pos, *hist_neg;
   tk_ivec_t *pos, *neg;
   uint64_t n_pos, n_neg;
   double *f1, *precision, *recall;
@@ -94,17 +93,6 @@ static void tk_eval_worker (void *dp, int sig)
             state->codes + (uint64_t) u * state->chunks,
             state->codes + (uint64_t) v * state->chunks, state->chunks);
         state->pl[k].label = k < state->n_pos ? 1 : 0;
-      }
-      break;
-
-    case TK_EVAL_CODEBOOK_STATS:
-      for (uint64_t i = data->sfirst; i <= data->slast; i ++) {
-        for (uint64_t j = 0; j < state->n_classes; j ++) {
-          uint64_t word = j / BITS;
-          uint64_t bit = j % BITS;
-          if ((state->codes[i * state->chunks + word] >> bit) & 1)
-            atomic_fetch_add(state->bit_counts + j, 1);
-        }
       }
       break;
 
@@ -210,38 +198,15 @@ static inline int tm_codebook_stats (lua_State *L)
   unsigned int n_samples = tk_lua_checkunsigned(L, 2, "n_samples");
   unsigned int n_classes = tk_lua_checkunsigned(L, 3, "n_hidden");
   unsigned int n_threads = tk_threads_getn(L, 4, "n_threads", NULL);
-  uint64_t chunks = BITS_DIV(n_classes);
 
-  tk_eval_t state;
-  state.n_classes = n_classes;
-  state.codes = codes;
-  state.chunks = chunks;
-  state.bit_counts = tk_malloc(L, n_classes * sizeof(atomic_ulong));
-  for (uint64_t i = 0; i < n_classes; i ++)
-    atomic_init(state.bit_counts + i, 0);
-
-  // Setup pool
-  tk_eval_thread_t data[n_threads];
-  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
-  for (unsigned int i = 0; i < n_threads; i ++) {
-    pool->threads[i].data = data + i;
-    data[i].state = &state;
-    tk_thread_range(i, n_threads, n_samples, &data[i].sfirst, &data[i].slast);
-  }
-
-  // Run counts via pool
-  tk_threads_signal(pool, TK_EVAL_CODEBOOK_STATS);
-  tk_threads_destroy(pool);
+  tk_dvec_t *entropies = tk_ivec_score_entropy(L, (char *) codes, n_samples, n_classes, n_threads);
 
   // Compute per-bit entropy
   double min_entropy = 1.0, max_entropy = 0.0, sum_entropy = 0.0;
   lua_newtable(L); // result
   lua_newtable(L); // per-bit entropy table
   for (uint64_t j = 0; j < n_classes; j ++) {
-    double p = (double) state.bit_counts[j] / (double) n_samples;
-    double entropy = 0.0;
-    if (p > 0.0 && p < 1.0)
-      entropy = -(p * log2(p) + (1.0 - p) * log2(1.0 - p));
+    double entropy = entropies->a[j];
     lua_pushinteger(L, (int64_t) j + 1);
     lua_pushnumber(L, entropy);
     lua_settable(L, -3);
@@ -257,14 +222,9 @@ static inline int tm_codebook_stats (lua_State *L)
   double mean = sum_entropy / n_classes;
   double variance = 0.0;
   for (uint64_t j = 0; j < n_classes; j ++) {
-    double p = (double) state.bit_counts[j] / (double) n_samples;
-    double entropy = 0.0;
-    if (p > 0.0 && p < 1.0)
-      entropy = -(p * log2(p) + (1.0 - p) * log2(1.0 - p));
+    double entropy = entropies->a[j];
     variance += (entropy - mean) * (entropy - mean);
   }
-
-  free(state.bit_counts);
 
   variance /= n_classes;
   lua_pushnumber(L, mean);
@@ -409,8 +369,8 @@ static inline int tm_auc (lua_State *L)
   lua_settop(L, 6);
 
   tk_bits_t *codes = (tk_bits_t *) tk_lua_checkustring(L, 1, "codes");
-  tk_ivec_t *pos = tk_ivec_peek(L, 2);
-  tk_ivec_t *neg = tk_ivec_peek(L, 3);
+  tk_ivec_t *pos = tk_ivec_peek(L, 2, "pos");
+  tk_ivec_t *neg = tk_ivec_peek(L, 3, "neg");
   uint64_t n_classes = tk_lua_checkunsigned(L, 4, "n_hidden");
   uint64_t n_pos = pos->n / 2;
   uint64_t n_neg = neg->n / 2;
@@ -455,8 +415,8 @@ static inline int tm_encoding_similarity (lua_State *L)
   lua_settop(L, 5);
 
   tk_bits_t *codes = (tk_bits_t *) tk_lua_checkustring(L, 1, "codes");
-  tk_ivec_t *pos = tk_ivec_peek(L, 2);
-  tk_ivec_t *neg = tk_ivec_peek(L, 3);
+  tk_ivec_t *pos = tk_ivec_peek(L, 2, "pos");
+  tk_ivec_t *neg = tk_ivec_peek(L, 3, "neg");
   uint64_t n_classes = tk_lua_checkunsigned(L, 4, "n_hidden");
   unsigned int n_threads = tk_threads_getn(L, 5, "n_threads", NULL);
   uint64_t n_pos = pos->n / 2;

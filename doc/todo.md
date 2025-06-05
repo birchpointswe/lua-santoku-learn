@@ -1,15 +1,7 @@
 # Now
 
-- tk_ann_t
-    - Strictly dense, no templating
-    - Based on tk_cvec_t
-    - Uses multi-probe LSH with hamming distance
-
-- tk_ivec_t
-    - Move top_entropy here from eval
-
-- Clustering
-    - Basic K-medoids and DBSCAN using tk_ann_t
+- ANN search
+    - After spectral, demo search on train/test codes
 
 # Next
 
@@ -20,33 +12,45 @@
 
 - tk_graph_t
     - Accept tk_inv_t instead of sentences/nodes
-
-- tk_ivec_t
-    - Proper Lua/C pattern for ext.h
-
-- Clustering
-    - Move implementation to C
+    - Replace roaring with tk_iuset_t
 
 - tk_xxmap_t:
     - Templatize over khash/kbtree
     - Replace use of roaring with this
     - Proper Lua/C API like tk_xvec_t
+    - Replace all tk_malloc and manual kh_x initializations with vec/map
+      templates across libraries
+    - Automatically add parent ephemeron and pop on create
 
 - tk_cvec_t
     - Use for Corex output, TM input/output, ANN input/output, TCH input/output
-    - Move dense bit operations here (hamming, xor, etc, etc)
-    - Allow dense bit operations on arbitrary-length input (non-multiples of 64,
-      see the filter pattern from initial TM implementation)
     - Standardize bits APIs between cvec and ivec
         - Rename to tk_ivec/tk_cvec_bits_xxx
         - Convert between ivec/cvec with tk_ivec_bits_cvec and tk_cvec_bits_ivec
         - Special ivec_bits_xxx methods
             - top_chi2/mi, score chi2/mi, filter, extend, cvec
         - Special cvec_bitx_xxx methods
-            - flip_interleave, filter, extend, ivec
+            - top_entropy, score_entropy, flip_interleave, filter, extend, ivec
 
-- vec/tpl.h
-      Allow tk_vec_noundef to skip undefs
+- TBHSS
+    - Rename
+    - Integrate latest TM updates
+    - Explore classify
+    - Explore encode
+    - Index & search
+
+# Later
+
+- tk_ann_t
+    - Precompute probes
+
+- Clustering
+    - Move implementation to C
+
+- tk_cvec_t
+    - Move dense bit operations here (hamming, xor, etc, etc)
+    - Allow dense bit operations on arbitrary-length input (non-multiples of 64,
+      see the filter pattern from initial TM implementation)
 
 - tk_rvec_t
     - Add Lua API
@@ -65,13 +69,8 @@
       negatives (random zero-overlap nodes first, then furthest in feature
       space)
 
-- clustering
-    - Search for best K for K-medoids
-
-# Later
-
-- tk_roaring_t
-    - Separate library that uses the tk_xxmap_t API to wrap roaring bitmaps
+- Clustering
+    - K-means, k-medoids, hierarchical?
 
 - Double-check auto-vectorization and paralellization across the board
     - Especially corex, given added branching/etc logic added
@@ -79,6 +78,12 @@
 - Parallelize!
 
 # Consider
+
+- vec/tpl.h
+      Allow tk_vec_noundef to skip undefs
+
+- tk_roaring_t
+    - Separate library that uses the tk_xxmap_t API to wrap roaring bitmaps
 
 - TCH
     - Add learnability to optimization?

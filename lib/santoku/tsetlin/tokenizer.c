@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <santoku/lua/utils.h>
 #include <santoku/klib.h>
 #include <santoku/iuset.h>
@@ -787,7 +789,7 @@ static inline int tb_tokenizer_restrict (lua_State *L)
 {
   lua_settop(L, 1);
 
-  tk_ivec_t *top_v = tk_ivec_peek(L, 1);
+  tk_ivec_t *top_v = tk_ivec_peek(L, 1, "top_v");
 
   // TODO: Can we do this without strdup? Just don't free the ones we're
   // keeping?
