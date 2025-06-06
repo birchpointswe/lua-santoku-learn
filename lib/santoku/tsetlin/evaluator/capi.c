@@ -1,11 +1,13 @@
 #define _GNU_SOURCE
 
 #include <santoku/tsetlin/conf.h>
+#include <santoku/tsetlin/graph.h>
 #include <santoku/threads.h>
 #include <santoku/ivec.h>
 
 typedef enum {
   TK_EVAL_CLASS_ACCURACY,
+  TK_EVAL_CLUSTERING_ACCURACY,
   TK_EVAL_ENCODING_ACCURACY,
   TK_EVAL_ENCODING_SIMILARITY,
   TK_EVAL_ENCODING_AUC,
@@ -20,6 +22,8 @@ typedef struct {
   unsigned int *predicted, *expected;
   tk_bits_t *codes, *codes_predicted, *codes_expected, *mask;
   unsigned int n_classes, chunks;
+  tk_ivec_t *assignments;
+  tk_graph_t *graph;
 } tk_eval_t;
 
 typedef struct {
@@ -45,6 +49,26 @@ static void tk_eval_worker (void *dp, int sig)
         else {
           atomic_fetch_add(state->FP + y_pred, 1);
           atomic_fetch_add(state->FN + y_true, 1);
+        }
+      }
+      break;
+
+    case TK_EVAL_CLUSTERING_ACCURACY:
+      for (unsigned int i = data->pfirst; i <= data->plast; i ++) {
+        tk_ivec_t *pairs = i < state->n_pos ? state->pos : state->neg;
+        uint64_t offset = i < state->n_pos ? 0 : state->n_pos;
+        int64_t u = pairs->a[(i - offset) * 2 + 0];
+        int64_t v = pairs->a[(i - offset) * 2 + 1];
+        int64_t cu = state->assignments->a[u];
+        int64_t cv = state->assignments->a[v];
+        if (i < state->n_pos) {
+          if (cu == cv && cu != -1)
+            atomic_fetch_add(state->TP, 1);
+          else
+            atomic_fetch_add(state->FN, 1);
+        } else {
+          if (cu == cv && cu != -1)
+            atomic_fetch_add(state->FP, 1);
         }
       }
       break;
@@ -191,7 +215,7 @@ static inline int tm_class_accuracy (lua_State *L)
   return 1;
 }
 
-static inline int tm_codebook_stats (lua_State *L)
+static inline int tm_entropy_stats (lua_State *L)
 {
   lua_settop(L, 4);
   tk_bits_t *codes = (tk_bits_t *) tk_lua_checkustring(L, 1, "expected");
@@ -235,6 +259,63 @@ static inline int tm_codebook_stats (lua_State *L)
   lua_setfield(L, -2, "max");
   lua_pushnumber(L, sqrt(variance));
   lua_setfield(L, -2, "std");
+
+  return 1;
+}
+
+static inline int tm_clustering_accuracy (lua_State *L)
+{
+  lua_settop(L, 4);
+  tk_ivec_t *assignments = tk_ivec_peek(L, 1, "assignments");
+  tk_ivec_t *pos = tk_ivec_peek(L, 2, "pos");
+  tk_ivec_t *neg = tk_ivec_peek(L, 3, "neg");
+  uint64_t n_pos = pos->n / 2;
+  uint64_t n_neg = neg->n / 2;
+  unsigned int n_threads = tk_threads_getn(L, 4, "n_threads", NULL);
+
+  tk_eval_t state;
+  atomic_ulong TP, FP, FN;
+  double precision, recall, f1;
+  state.assignments = assignments;
+  state.pos = pos;
+  state.neg = neg;
+  state.n_pos = n_pos;
+  state.n_neg = n_neg;
+  state.TP = &TP;
+  state.FP = &FP;
+  state.FN = &FN;
+  atomic_init(&TP, 0);
+  atomic_init(&FP, 0);
+  atomic_init(&FN, 0);
+
+  // Setup pool
+  tk_eval_thread_t data[n_threads];
+  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
+  for (unsigned int i = 0; i < n_threads; i ++) {
+    pool->threads[i].data = data + i;
+    data[i].state = &state;
+    tk_thread_range(i, n_threads, n_pos + n_neg, &data[i].pfirst, &data[i].plast);
+  }
+
+  // Run eval via pool
+  tk_threads_signal(pool, TK_EVAL_CLUSTERING_ACCURACY);
+  tk_threads_destroy(pool);
+
+  // Reduce
+  uint64_t tp = atomic_load(&TP), fp = atomic_load(&FP), fn = atomic_load(&FN);
+  precision = (tp + fp) > 0 ? (double) tp / (tp + fp) : 0.0;
+  recall = (tp + fn) > 0 ? (double) tp / (tp + fn) : 0.0;
+  f1 = (precision + recall) > 0 ?
+    2.0 * precision * recall / (precision + recall) : 0.0;
+
+  // Lua output
+  lua_newtable(L);
+  lua_pushnumber(L, precision);
+  lua_setfield(L, -2, "precision");
+  lua_pushnumber(L, recall);
+  lua_setfield(L, -2, "recall");
+  lua_pushnumber(L, f1);
+  lua_setfield(L, -2, "f1");
 
   return 1;
 }
@@ -410,7 +491,7 @@ static inline int tm_auc (lua_State *L)
   return 1;
 }
 
-static inline int tm_encoding_similarity (lua_State *L)
+static inline int tm_optimize_retrieval (lua_State *L)
 {
   lua_settop(L, 5);
 
@@ -496,8 +577,9 @@ static luaL_Reg tm_evaluator_fns[] =
   { "class_accuracy", tm_class_accuracy },
   { "auc", tm_auc },
   { "encoding_accuracy", tm_encoding_accuracy },
-  { "encoding_similarity", tm_encoding_similarity },
-  { "codebook_stats", tm_codebook_stats },
+  { "clustering_accuracy", tm_clustering_accuracy },
+  { "optimize_retrieval", tm_optimize_retrieval },
+  { "entropy_stats", tm_entropy_stats },
   { NULL, NULL }
 };
 

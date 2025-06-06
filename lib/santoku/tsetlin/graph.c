@@ -13,23 +13,62 @@ static inline tk_graph_t *tm_graph_create (
   unsigned int n_threads
 );
 
+static inline void tm_sample_zero_overlap (
+  roaring64_bitmap_t *candidates,
+  roaring64_bitmap_t *seen,
+  tm_neighbors_t *fnbrsp,
+  uint64_t knn_cache
+) {
+  tm_neighbors_t fnbrs = *fnbrsp;
+  uint64_t card = roaring64_bitmap_get_cardinality(candidates);
+
+  // If fewer than knn_cache, take all of them
+  if (card <= knn_cache) {
+    roaring64_iterator_t it;
+    roaring64_iterator_reinit(candidates, &it);
+    while (roaring64_iterator_has_value(&it)) {
+      uint64_t v = roaring64_iterator_value(&it);
+      kv_push(tm_neighbor_t, fnbrs, ((tm_neighbor_t) { .v =  (int64_t) v, .d = 1.0 }));
+    }
+    return;
+  }
+
+  // Otherwise, randomly sample
+  roaring64_bitmap_clear(seen);
+  size_t base = fnbrs.n;
+  for (uint64_t i = base; i < knn_cache; i ++) {
+    uint64_t rank = fast_rand() % card;
+    uint64_t val;
+    roaring64_bitmap_select(candidates, rank, &val);
+    if (!roaring64_bitmap_contains(seen, val)) {
+      roaring64_bitmap_add(seen, val);
+      kv_push(tm_neighbor_t, fnbrs, ((tm_neighbor_t) { .v = (int64_t) val, .d = 1.0 }));
+    }
+  }
+
+  *fnbrsp = fnbrs;
+}
+
 static inline void tk_graph_worker (void *dp, int sig)
 {
   tk_graph_stage_t stage = (tk_graph_stage_t) sig;
   tk_graph_thread_t *data = (tk_graph_thread_t *) dp;
   roaring64_bitmap_t *candidates = data->candidates;
+  roaring64_bitmap_t *seen = data->seen;
   roaring64_bitmap_t **nodes = data->graph->nodes;
   tm_pairs_t *pairs = data->graph->pairs;
   tm_neighbors_t *neighbors = data->graph->neighbors;
+  tm_neighbors_t *fneighbors = data->graph->fneighbors;
   roaring64_bitmap_t **index = data->graph->index;
-  uint64_t n_features = data->graph->n_features;
   uint64_t knn_cache = data->graph->knn_cache;
   roaring64_iterator_t it;
   switch (stage) {
     case TK_GRAPH_KNN:
       for (int64_t u = (int64_t) data->ufirst; u <= (int64_t) data->ulast; u ++) {
         tm_neighbors_t nbrs;
+        tm_neighbors_t fnbrs;
         kv_init(nbrs);
+        kv_init(fnbrs);
         // Populate candidate set (those sharing at least one feature)
         roaring64_bitmap_clear(candidates);
         roaring64_iterator_reinit(nodes[u], &it);
@@ -48,19 +87,20 @@ static inline void tk_graph_worker (void *dp, int sig)
           tm_pair_t p = tm_pair(u, v);
           if (kh_get(pairs, pairs, p) != kh_end(pairs))
             continue;
-          double dist = (double) roaring64_bitmap_xor_cardinality(nodes[u], nodes[v]) / (double) n_features;
+          double dist = 1.0 - roaring64_bitmap_jaccard_index(nodes[u], nodes[v]);
           kv_push(tm_neighbor_t, nbrs, ((tm_neighbor_t) { .v = v, .d = dist }));
         }
-        if (nbrs.n <= knn_cache)
-          ks_introsort(neighbors_asc, nbrs.n, nbrs.a);
-        else {
-          ks_ksmall(neighbors_asc, nbrs.n, nbrs.a, knn_cache);
-          ks_introsort(neighbors_asc, knn_cache, nbrs.a);
+        ks_introsort(neighbors_asc, nbrs.n, nbrs.a);
+        // Add fneighbors
+        tm_sample_zero_overlap(candidates, seen, &fnbrs, knn_cache);
+        // Truncate
+        if (nbrs.n > knn_cache) {
           nbrs.n = knn_cache;
           kv_resize(tm_neighbor_t, nbrs, nbrs.n);
         }
         // Update refs
         neighbors[u] = nbrs;
+        fneighbors[u] = fnbrs;
       }
       break;
   }
@@ -275,6 +315,43 @@ static inline void tm_add_knn (
   free(shuf);
 }
 
+static inline void tm_add_kfn (
+  lua_State *L,
+  tk_graph_t *graph,
+  uint64_t kfn
+) {
+  int kha;
+  khint_t khi;
+
+  // Prep shuffle
+  int64_t *shuf = tk_malloc(L, (uint64_t) graph->n_nodes * sizeof(int64_t));
+  for (int64_t i = 0; i < (int64_t) graph->n_nodes; i ++)
+    shuf[i] = i;
+  ks_shuffle(i64, graph->n_nodes, shuf);
+
+  // Add neighbors
+  for (int64_t su = 0; su < (int64_t) graph->n_nodes; su ++) {
+    int64_t u = shuf[su];
+    tm_neighbors_t fnbrs = graph->fneighbors[u];
+    uint64_t added = 0;
+    for (khint_t i = 0; i < fnbrs.n && added < kfn; i ++) {
+      tm_neighbor_t v = fnbrs.a[i];
+      tm_pair_t e = tm_pair(u, v.v);
+      khi = kh_put(pairs, graph->pairs, e, &kha);
+      if (!kha)
+        continue;
+      added ++;
+      kh_value(graph->pairs, khi) = false;
+      roaring64_bitmap_add(graph->adj_neg[u], (uint64_t) v.v);
+      roaring64_bitmap_add(graph->adj_neg[v.v], (uint64_t) u);
+      graph->n_neg ++;
+    }
+  }
+
+  // Cleanup
+  free(shuf);
+}
+
 static inline void tm_add_mst (
   lua_State *L,
   tk_graph_t *graph
@@ -449,7 +526,7 @@ static inline void tm_add_transatives (
         continue;
       if (roaring64_bitmap_contains(graph->adj_neg[u], (uint64_t) w))
         continue;
-      double dist = (double) roaring64_bitmap_xor_cardinality(graph->nodes[u], graph->nodes[w]) / (double) graph->n_features;
+      double dist = 1.0 - roaring64_bitmap_jaccard_index(graph->nodes[u], graph->nodes[w]);
       tm_neighbor_t vw = (tm_neighbor_t) { w, dist };
       kv_push(tm_candidate_t, candidates, tm_candidate(u, vw));
     }
@@ -495,7 +572,7 @@ static inline void tm_add_transatives (
         if (roaring64_bitmap_contains(seen, (uint64_t) w))
           continue;
         roaring64_bitmap_add(seen, (uint64_t) w);
-        double dist = (double) roaring64_bitmap_xor_cardinality(graph->nodes[u], graph->nodes[w]) / (double) graph->n_features;
+        double dist = 1.0 - roaring64_bitmap_jaccard_index(graph->nodes[u], graph->nodes[w]);
         tm_neighbor_t nw = (tm_neighbor_t) { w, dist };
         kv_push(tm_candidate_t, candidates, tm_candidate(u, nw));
       }
@@ -638,10 +715,14 @@ static void tm_graph_destroy (tk_graph_t *graph)
   for (int64_t s = 0; s < (int64_t) graph->n_nodes; s ++)
     kv_destroy(graph->neighbors[s]);
   free(graph->neighbors);
+  for (int64_t s = 0; s < (int64_t) graph->n_nodes; s ++)
+    kv_destroy(graph->fneighbors[s]);
+  free(graph->fneighbors);
   tm_dsu_free(&graph->dsu);
   for (unsigned int i = 0; i < graph->pool->n_threads; i ++) {
     tk_graph_thread_t *data = (tk_graph_thread_t *) graph->pool->threads[i].data;
     roaring64_bitmap_free(data->candidates);
+    roaring64_bitmap_free(data->seen);
   }
   tk_threads_destroy(graph->pool);
   for (uint64_t u = 0; u < graph->n_nodes; u ++) {
@@ -674,16 +755,19 @@ static inline int tm_create (lua_State *L)
   lua_getfield(L, 1, "nodes");
   tk_ivec_t *set_bits = tk_ivec_peek(L, -1, "set_bits");
 
-  uint64_t n_nodes = tk_lua_fcheckunsigned(L, 1, "enrich", "n_nodes");
-  uint64_t n_features = tk_lua_fcheckunsigned(L, 1, "enrich", "n_features");
-  uint64_t knn_cache = tk_lua_foptunsigned(L, 1, "enrich", "knn_cache", 32);
-  uint64_t knn = tk_lua_foptunsigned(L, 1, "enrich", "knn", 0);
-  uint64_t n_hops = tk_lua_foptunsigned(L, 1, "enrich", "trans_hops", 0);
-  uint64_t n_grow_pos = tk_lua_foptunsigned(L, 1, "enrich", "trans_pos", 0);
-  uint64_t n_grow_neg = tk_lua_foptunsigned(L, 1, "enrich", "trans_neg", 0);
-  bool do_mst = tk_lua_foptboolean(L, 1, "enrich", "mst", true);
+  uint64_t n_nodes = tk_lua_fcheckunsigned(L, 1, "graph", "n_nodes");
+  uint64_t n_features = tk_lua_fcheckunsigned(L, 1, "graph", "n_features");
+  uint64_t knn = tk_lua_foptunsigned(L, 1, "graph", "knn", 0);
+  uint64_t kfn = tk_lua_foptunsigned(L, 1, "graph", "kfn", 0);
+  uint64_t knn_cache = tk_lua_foptunsigned(L, 1, "graph", "knn_cache", 4);
+  if (knn + kfn > knn_cache)
+    knn_cache = knn + kfn;
+  uint64_t n_hops = tk_lua_foptunsigned(L, 1, "graph", "trans_hops", 0);
+  uint64_t n_grow_pos = tk_lua_foptunsigned(L, 1, "graph", "trans_pos", 0);
+  uint64_t n_grow_neg = tk_lua_foptunsigned(L, 1, "graph", "trans_neg", 0);
+  bool do_mst = tk_lua_foptboolean(L, 1, "graph", "mst", true);
 
-  unsigned int n_threads = tk_threads_getn(L, 1, "enrich", "threads");
+  unsigned int n_threads = tk_threads_getn(L, 1, "graph", "threads");
 
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
@@ -721,6 +805,20 @@ static inline int tm_create (lua_State *L)
     lua_pushinteger(L, (int64_t) graph->n_pos);
     lua_pushinteger(L, (int64_t) graph->n_neg);
     lua_pushstring(L, "knn");
+    lua_call(L, 4, 0);
+  }
+
+  // Add kfn
+  if (kfn > 0)
+    tm_add_kfn(L, graph, kfn);
+
+  // Log density
+  if (i_each != -1) {
+    lua_pushvalue(L, i_each);
+    lua_pushinteger(L, tm_dsu_components(&graph->dsu));
+    lua_pushinteger(L, (int64_t) graph->n_pos);
+    lua_pushinteger(L, (int64_t) graph->n_neg);
+    lua_pushstring(L, "kfn");
     lua_call(L, 4, 0);
   }
 
@@ -789,6 +887,7 @@ static inline tk_graph_t *tm_graph_create (
   memset(graph->threads, 0, n_threads * sizeof(tk_graph_thread_t));
   graph->pool = tk_threads_create(L, n_threads, tk_graph_worker);
   graph->neighbors = tk_malloc(L, n_nodes * sizeof(tm_neighbors_t));
+  graph->fneighbors = tk_malloc(L, n_nodes * sizeof(tm_neighbors_t));
   graph->nodes = tk_malloc(L, n_nodes * sizeof(roaring64_bitmap_t *));
   graph->set_bits = set_bits;
   graph->n_nodes = n_nodes;
@@ -811,6 +910,7 @@ static inline tk_graph_t *tm_graph_create (
     graph->pool->threads[i].data = data;
     data->graph = graph;
     data->candidates = roaring64_bitmap_create();
+    data->seen = roaring64_bitmap_create();
     tk_thread_range(i, n_threads, n_nodes, &data->ufirst, &data->ulast);
   }
   return graph;

@@ -103,7 +103,7 @@ static inline uint64_t tk_ann_hamming (
   n = (n + CHAR_BIT - 1) / CHAR_BIT;
   uint64_t t = 0;
   for (uint64_t i = 0; i < n; i ++)
-    t += (uint64_t) __builtin_popcount((unsigned int) a[i] ^ (unsigned int) b[i]);
+    t += (uint64_t) __builtin_popcount((unsigned char) a[i] ^ (unsigned char) b[i]);
   return t;
 }
 
@@ -455,7 +455,7 @@ static inline void tk_ann_worker (void *dp, int sig)
       }
       break;
     case TK_ANN_NEIGHBORS:
-      // TODO
+      #warning todo
       break;
   }
 }
@@ -479,34 +479,20 @@ static luaL_Reg tk_ann_lua_mt_fns[] =
 static inline void tk_ann_suppress_unused_lua_mt_fns (void)
   { (void) tk_ann_lua_mt_fns; }
 
-static inline void tk_ann_setup_hash_bits_guided (
-  lua_State *L,
-  tk_ann_t *A,
-  int Ai,
-  char *guidance,
-  uint64_t n_samples,
-  uint64_t n_threads
-) {
-  uint64_t n_hash_bits = log(n_samples / A->bucket_target);
-  n_hash_bits = n_hash_bits > TK_ANN_BITS ? TK_ANN_BITS : n_hash_bits;
-  A->hash_bits = tk_ivec_top_entropy(L, (char *) guidance, n_samples, A->features, n_hash_bits, n_threads);
-  tk_lua_add_ephemeron(L, TK_ANN_EPH, Ai, -1);
-  lua_pop(L, 1);
-}
-
 static inline void tk_ann_setup_hash_bits_random (
   lua_State *L,
   tk_ann_t *A,
   int Ai,
   uint64_t expected
 ) {
-  uint64_t n_hash_bits = log(expected / A->bucket_target);
+  uint64_t n_hash_bits = (uint64_t) ceil(log2((double) expected / (double) A->bucket_target));
   n_hash_bits = n_hash_bits > TK_ANN_BITS ? TK_ANN_BITS : n_hash_bits;
   A->hash_bits = tk_ivec_create(L, A->features, 0, 0);
   tk_lua_add_ephemeron(L, TK_ANN_EPH, Ai, -1);
   lua_pop(L, 1);
   tk_ivec_fill_indices(A->hash_bits);
   tk_ivec_shuffle(A->hash_bits);
+  A->hash_bits->n = n_hash_bits;
   tk_ivec_resize(L, A->hash_bits, n_hash_bits);
 }
 
@@ -518,6 +504,7 @@ static inline void tk_ann_setup_hash_bits_exhaustive (
   A->hash_bits = tk_ivec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_ANN_EPH, Ai, -1);
   lua_pop(L, 1);
+  printf("> Exhaustive: 0 hash bits\n");
 }
 
 static inline tk_ann_t *tk_ann_create_base (
@@ -551,20 +538,6 @@ static inline tk_ann_t *tk_ann_create_base (
   return A;
 }
 
-static inline tk_ann_t *tk_ann_create_guided (
-  lua_State *L,
-  uint64_t features,
-  uint64_t bucket_target,
-  uint64_t probe_radius,
-  char *guidance,
-  uint64_t n_samples,
-  uint64_t n_threads
-) {
-  tk_ann_t *A = tk_ann_create_base(L, features, bucket_target, probe_radius, n_threads);
-  tk_ann_setup_hash_bits_guided(L, A, tk_lua_absindex(L, -1), guidance, n_samples, n_threads);
-  return A;
-}
-
 static inline tk_ann_t *tk_ann_create_randomized (
   lua_State *L,
   uint64_t features,
@@ -575,16 +548,6 @@ static inline tk_ann_t *tk_ann_create_randomized (
 ) {
   tk_ann_t *A = tk_ann_create_base(L, features, bucket_target, probe_radius, n_threads);
   tk_ann_setup_hash_bits_random(L, A, tk_lua_absindex(L, -1), expected);
-  return A;
-}
-
-static inline tk_ann_t *tk_ann_create_exhaustive (
-  lua_State *L,
-  uint64_t features,
-  uint64_t n_threads
-) {
-  tk_ann_t *A = tk_ann_create_base(L, features, 0, 0, n_threads);
-  tk_ann_setup_hash_bits_exhaustive(L, A, tk_lua_absindex(L, -1));
   return A;
 }
 

@@ -1,19 +1,5 @@
 # Now
 
-- Clustering
-    - Implement eval.clustering_accuracy, similar to encoding_similarity, which
-      sweeps for best margin for optimal F1 but using same cluster membership as
-      the target.
-        - TP: similar and same cluster
-        - FP: dissimilar but same cluster
-        - TN: dissimilar but diff cluster or both noise
-        - FN: similar but diff cluster or both noise
-
-- ANN search
-    - After spectral, demo search on train/test codes
-
-# Next
-
 - tk_inv_t
     - Strictly sparse, no templating
     - Based on tk_iuset_t
@@ -23,13 +9,21 @@
     - Accept tk_inv_t instead of sentences/nodes
     - Replace roaring with tk_iuset_t
 
-- tk_xxmap_t:
+- tk_xxmap/set_t:
     - Templatize over khash/kbtree
-    - Replace use of roaring with this
     - Proper Lua/C API like tk_xvec_t
-    - Replace all tk_malloc and manual kh_x initializations with vec/map
-      templates across libraries
     - Automatically add parent ephemeron and pop on create
+
+- Chores
+    - Table input to entropy_stats and optimize_retrieval
+    - Reorganize optimize_retrieval as per optimize_clustering
+    - Parallelize
+    - Sanitize
+
+# Next
+
+- Chores
+    - Documentation
 
 - tk_cvec_t
     - Use for Corex output, TM input/output, ANN input/output, TCH input/output
@@ -41,6 +35,9 @@
         - Special cvec_bitx_xxx methods
             - top_entropy, score_entropy, flip_interleave, filter, extend, ivec
 
+- tk_ann_t
+    - After spectral, demo search on train/test codes
+
 - TBHSS
     - Rename
     - Integrate latest TM updates
@@ -50,18 +47,31 @@
 
 # Later
 
+- Spectral
+    - Weighted laplacian (ground truths, transitives, knn, kfn, etc.)
+
 - tk_ann_t
     - Precompute probes
 
+- tk_ann_t
+    - Allow user-provided list of hash bits and enable easy mi, chi2 or
+      corex-based feature bit-selection.
+      - mi, chi2, and corex could be run over all pairs using 1/pos 0/neg as the
+        binary label and the XOR of the nodes' features as the set of features
+
 - Clustering
     - Move implementation to C with proper Lua/C APIs
+
+- General
+    - replace most tk_malloc/realloc/numa with tk_xvec operations across
+      libraries
 
 - tk_cvec_t
     - Move dense bit operations here (hamming, xor, etc, etc)
     - Allow dense bit operations on arbitrary-length input (non-multiples of 64,
       see the filter pattern from initial TM implementation)
 
-- tk_rvec_t
+- tk_r/pvec_t
     - Add Lua API
     - Generalize template to allow push/peekbase to work with composite types
 
@@ -74,17 +84,12 @@
     - Proper Lua/C API and tk naming
     - Support querying for changes made to seed list over time (removed during
       dedupe, added by phase)
-    - Support KFN (furthest neighbors) in addition to KNN for densification of
-      negatives (random zero-overlap nodes first, then furthest in feature
-      space)
 
 - Clustering
     - K-means, k-medoids, hierarchical?
 
-- Double-check auto-vectorization and paralellization across the board
+- Double-check auto-vectorization across the board
     - Especially corex, given added branching/etc logic added
-
-- Parallelize!
 
 # Consider
 

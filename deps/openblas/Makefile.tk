@@ -1,5 +1,0 @@
-results.mk: Makefile
-	truncate -s0 results.mk
-	pkg-config --exists openblas
-	echo "LIB_CFLAGS += $$(pkg-config --cflags openblas)" >> results.mk
-	echo "LIB_LDFLAGS += -lm -llapack $$(pkg-config --libs openblas)" >> results.mk
