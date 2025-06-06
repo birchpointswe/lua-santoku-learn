@@ -148,13 +148,13 @@ static inline void tm_run_spectral (
   params.numEvals = n_hidden + 1;
   params.matrixMatvec = tk_spectral_matvec;
   params.matrix = &spec;
-  params.maxBlockSize = 1;
   params.printLevel = 0;
   params.eps = 1e-3;
   params.target = primme_smallest;
   spec.evals = tk_malloc(L, (size_t) params.numEvals * sizeof(double));
   spec.evecs = tk_malloc(L, (size_t) params.n * (size_t) params.numEvals * sizeof(double));
   spec.resNorms = tk_malloc(L, (size_t) params.numEvals * sizeof(double));
+  primme_set_method(PRIMME_DEFAULT_MIN_TIME, &params);
   int ret = dprimme(spec.evals, spec.evecs, spec.resNorms, &params);
   if (ret != 0)
     tk_lua_verror(L, 2, "spectral", "failure calling PRIMME");

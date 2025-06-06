@@ -1,4 +1,5 @@
 local serialize = require("santoku.serialize") -- luacheck: ignore
+local tbl = require("santoku.table")
 local tm = require("santoku.tsetlin")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
@@ -11,7 +12,7 @@ local err = require("santoku.error")
 
 local M = {}
 
-M.read_snli_pairs = function (fp, max)
+M.read_snli_pairs = function (fp, max, single_split)
   max = max or num.huge
   local sentences = {}
   local pos = {}
@@ -50,7 +51,7 @@ M.read_snli_pairs = function (fp, max)
       end
     end
   end
-  return {
+  local ds = {
     pos = pos,
     neg = neg,
     n_pos = #pos / 2,
@@ -58,6 +59,11 @@ M.read_snli_pairs = function (fp, max)
     raw_sentences = sentences,
     n_sentences = ns,
   }
+  if single_split then
+    return M.split_snli_pairs(ds)
+  else
+    return ds
+  end
 end
 
 local function _split_snli_pairs (dataset, split, prop, start, size)
@@ -91,6 +97,17 @@ local function _split_snli_pairs (dataset, split, prop, start, size)
 end
 
 M.split_snli_pairs = function (dataset, ratio)
+
+  if not ratio then
+    local train = tbl.merge({}, dataset)
+    train.n_pos = dataset.n_pos
+    train.n_neg = dataset.n_neg
+    train.n_sentences = 0
+    train.raw_sentences = {}
+    _split_snli_pairs(dataset, train, "pos", 1, train.n_pos)
+    _split_snli_pairs(dataset, train, "neg", 1, train.n_neg)
+    return train
+  end
 
   local test, train = {}, {}
 
