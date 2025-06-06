@@ -140,6 +140,7 @@ typedef kvec_t(tm_candidate_t) tm_candidates_t;
 static uint64_t const multiplier = 6364136223846793005u;
 __thread uint64_t mcg_state = 0xcafef00dd15ea5e5u;
 
+// TODO: make this 64-bit
 static inline uint32_t fast_rand ()
 {
   uint64_t x = mcg_state;

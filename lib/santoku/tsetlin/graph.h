@@ -37,6 +37,7 @@ typedef struct tk_graph_s {
   uint64_t n_nodes, n_hidden, n_features;
   tm_pairs_t *pairs;
   tm_neighbors_t *neighbors;
+  tm_neighbors_t *fneighbors;
   roaring64_bitmap_t **nodes;
   tk_ivec_t *set_bits;
   uint64_t knn_cache;
@@ -51,6 +52,7 @@ typedef struct tk_graph_s {
 typedef struct tk_graph_thread_s {
   tk_graph_t *graph;
   roaring64_bitmap_t *candidates;
+  roaring64_bitmap_t *seen;
   uint64_t ufirst, ulast;
 } tk_graph_thread_t;
 
