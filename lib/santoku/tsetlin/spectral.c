@@ -201,7 +201,7 @@ static inline int tm_encode (lua_State *L)
   uint64_t n_nodes = graph->n_nodes;
 
   // Spectral hashing
-  tk_dvec_t *z = tk_dvec_create(L, graph->n_nodes * n_hidden, 0, 0);
+  tk_dvec_t *z = tk_dvec_create(L, n_nodes * n_hidden, 0, 0);
   tm_run_spectral(L, pool, z, adj_pos, adj_neg, n_nodes, n_hidden, i_each);
 
   // Cleanup

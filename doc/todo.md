@@ -1,10 +1,5 @@
 # Now
 
-- tk_inv_t
-    - Strictly sparse, no templating
-    - Based on tk_iuset_t
-    - Uses inverted index with jaccard similarity
-
 - tk_graph_t
     - Accept tk_inv_t instead of sentences/nodes
     - Replace roaring with tk_iuset_t
@@ -14,7 +9,14 @@
     - Proper Lua/C API like tk_xvec_t
     - Automatically add parent ephemeron and pop on create
 
+- tk_inv_t
+    - Use heap for candidates
+
+- tk_ann_t
+    - Use heap here like in inv
+
 - Chores
+    - Standardize API between tk_ann_t and tk_inv_t
     - Table input to entropy_stats and optimize_retrieval
     - Reorganize optimize_retrieval as per optimize_clustering
     - Parallelize
