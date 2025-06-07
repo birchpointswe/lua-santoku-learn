@@ -62,7 +62,7 @@ test("tsetlin", function ()
 
   -- print("\nIndexing train")
   -- dataset.index = inv.create({ features = dataset.n_features })
-  -- dataset.index:add(dataset.sentences)
+  -- dataset.index:add(0, dataset.sentences, dataset.n_sentences)
 
   print("Creating graph")
   dataset.graph = graph.create({
