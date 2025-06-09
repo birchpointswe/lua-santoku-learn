@@ -1,31 +1,13 @@
 # Now
 
-- tk_graph_t
-    - Accept tk_inv_t instead of sentences/nodes
-    - Replace roaring with tk_iuset_t
-
-- tk_xxmap/set_t:
-    - Templatize over khash/kbtree
-    - Proper Lua/C API like tk_xvec_t
-    - Automatically add parent ephemeron and pop on create
-
-- tk_inv_t
-    - Use heap for candidates
-
-- tk_ann_t
-    - Use heap here like in inv
-
 - Chores
-    - Standardize API between tk_ann_t and tk_inv_t
+    - Sanitize
+    - Refactor other tests
+    - Commit
+
+- Eval
     - Table input to entropy_stats and optimize_retrieval
     - Reorganize optimize_retrieval as per optimize_clustering
-    - Parallelize
-    - Sanitize
-
-# Next
-
-- Chores
-    - Documentation
 
 - tk_cvec_t
     - Use for Corex output, TM input/output, ANN input/output, TCH input/output
@@ -37,8 +19,9 @@
         - Special cvec_bitx_xxx methods
             - top_entropy, score_entropy, flip_interleave, filter, extend, ivec
 
-- tk_ann_t
-    - After spectral, demo search on train/test codes
+- tk_inv/ann_t
+    - Persist/load to string and disk
+    - Demo search on train/test codes (for ann) and raw features (for inv)
 
 - TBHSS
     - Rename
@@ -47,7 +30,38 @@
     - Explore encode
     - Index & search
 
+# Next
+
+- tk_xxmap/set_t:
+    - Templatize over khash/kbtree
+    - Proper Lua/C API like tk_xvec_t
+
+- tk_xvec_t
+    - Align Lua/C APIs (currently out of sync for pvec, rvec, etc)
+
+- tk_booleanizer_t
+    - When both double and string observations found, split into two different
+      features, one for continuous and the other for categorical
+
+- tk_tokenizer_t
+    - Proper Lua/C API and tk naming
+    - Use booleanizer under the hood
+    - Include text statistics as continuous/thresholded values
+
+- Chores
+    - Parallelize
+    - Vectorize
+    - Document
+
 # Later
+
+- tk_tsetlin_t
+    - Regression
+
+- tk_graph_t
+    - Proper Lua/C API and tk naming
+    - Support querying for changes made to seed list over time (removed during
+      dedupe, added by phase)
 
 - Spectral
     - Weighted laplacian (ground truths, transitives, knn, kfn, etc.)
@@ -65,7 +79,7 @@
     - Move implementation to C with proper Lua/C APIs
 
 - General
-    - replace most tk_malloc/realloc/numa with tk_xvec operations across
+    - Replace most tk_malloc/realloc/numa with tk_xvec operations across
       libraries
 
 - tk_cvec_t
@@ -73,33 +87,20 @@
     - Allow dense bit operations on arbitrary-length input (non-multiples of 64,
       see the filter pattern from initial TM implementation)
 
-- tk_r/pvec_t
-    - Add Lua API
+- tk_xvec_t
     - Generalize template to allow push/peekbase to work with composite types
-
-- tk_tokenizer_t
-    - Proper Lua/C API and tk naming
-    - Use booleanizer under the hood
-    - Include text statistics as continuous/thresholded values
-
-- tk_graph_t
-    - Proper Lua/C API and tk naming
-    - Support querying for changes made to seed list over time (removed during
-      dedupe, added by phase)
 
 - Clustering
     - K-means, k-medoids, hierarchical?
 
-- Double-check auto-vectorization across the board
-    - Especially corex, given added branching/etc logic added
-
 # Consider
 
-- vec/tpl.h
-      Allow tk_vec_noundef to skip undefs
+- tk_dsu_t
+    - Split from graph for other uses?
+    - Full Lua/C API?
 
-- tk_roaring_t
-    - Separate library that uses the tk_xxmap_t API to wrap roaring bitmaps
+- vec/tpl.h
+      Allow tk_vec_noundef to skip undefs?
 
 - TCH
     - Add learnability to optimization?
