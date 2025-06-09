@@ -21,6 +21,7 @@ typedef struct {
   double *f1, *precision, *recall;
   unsigned int *predicted, *expected;
   tk_bits_t *codes, *codes_predicted, *codes_expected, *mask;
+  tk_iumap_t *id_code, *id_assignment;
   unsigned int n_classes, chunks;
   tk_ivec_t *assignments;
   tk_graph_t *graph;
@@ -36,6 +37,7 @@ static void tk_eval_worker (void *dp, int sig)
 {
   tk_eval_thread_t *data = (tk_eval_thread_t *) dp;
   tk_eval_t *state = data->state;
+  khint_t khi;
   switch ((tk_eval_stage_t) sig) {
 
     case TK_EVAL_CLASS_ACCURACY:
@@ -59,8 +61,16 @@ static void tk_eval_worker (void *dp, int sig)
         uint64_t offset = i < state->n_pos ? 0 : state->n_pos;
         int64_t u = pairs->a[(i - offset) * 2 + 0];
         int64_t v = pairs->a[(i - offset) * 2 + 1];
-        int64_t cu = state->assignments->a[u];
-        int64_t cv = state->assignments->a[v];
+        khi = tk_iumap_get(state->id_assignment, u);
+        if (khi == tk_iumap_end(state->id_assignment))
+          continue;
+        int64_t iu = tk_iumap_value(state->id_assignment, khi);
+        khi = tk_iumap_get(state->id_assignment, v);
+        if (khi == tk_iumap_end(state->id_assignment))
+          continue;
+        int64_t iv = tk_iumap_value(state->id_assignment, khi);
+        int64_t cu = state->assignments->a[iu];
+        int64_t cv = state->assignments->a[iv];
         if (i < state->n_pos) {
           if (cu == cv && cu != -1)
             atomic_fetch_add(state->TP, 1);
@@ -92,7 +102,9 @@ static void tk_eval_worker (void *dp, int sig)
 
     case TK_EVAL_ENCODING_SIMILARITY:
       for (uint64_t k = data->pfirst; k <= data->plast; k ++) {
-        uint64_t s = state->pl[k].sim;
+        if (state->pl[k].sim == -1)
+          continue;
+        int64_t s = state->pl[k].sim;
         if (s > state->n_classes)
           s = state->n_classes;
         if (state->pl[k].label)
@@ -108,14 +120,26 @@ static void tk_eval_worker (void *dp, int sig)
         uint64_t offset = k < state->n_pos ? 0 : state->n_pos;
         int64_t u = pairs->a[(k - offset) * 2 + 0];
         int64_t v = pairs->a[(k - offset) * 2 + 1];
+        khi = tk_iumap_get(state->id_code, u);
+        if (khi == tk_iumap_end(state->id_code)) {
+          state->pl[k].sim = -1;
+          continue;
+        }
+        int64_t iu = tk_iumap_value(state->id_code, khi);
+        khi = tk_iumap_get(state->id_code, v);
+        if (khi == tk_iumap_end(state->id_code)) {
+          state->pl[k].sim = -1;
+          continue;
+        }
+        int64_t iv = tk_iumap_value(state->id_code, khi);
         if (state->mask != NULL)
-          state->pl[k].sim = (uint64_t) state->n_classes - hamming_mask(
-            state->codes + (uint64_t) u * state->chunks,
-            state->codes + (uint64_t) v * state->chunks, state->mask, state->chunks);
+          state->pl[k].sim = (int64_t) (state->n_classes - hamming_mask(
+            state->codes + (uint64_t) iu * state->chunks,
+            state->codes + (uint64_t) iv * state->chunks, state->mask, state->chunks));
         else
-          state->pl[k].sim = (uint64_t) state->n_classes - hamming(
-            state->codes + (uint64_t) u * state->chunks,
-            state->codes + (uint64_t) v * state->chunks, state->chunks);
+          state->pl[k].sim = (int64_t) (state->n_classes - hamming(
+            state->codes + (uint64_t) iu * state->chunks,
+            state->codes + (uint64_t) iv * state->chunks, state->chunks));
         state->pl[k].label = k < state->n_pos ? 1 : 0;
       }
       break;
@@ -265,18 +289,20 @@ static inline int tm_entropy_stats (lua_State *L)
 
 static inline int tm_clustering_accuracy (lua_State *L)
 {
-  lua_settop(L, 4);
+  lua_settop(L, 5);
   tk_ivec_t *assignments = tk_ivec_peek(L, 1, "assignments");
-  tk_ivec_t *pos = tk_ivec_peek(L, 2, "pos");
-  tk_ivec_t *neg = tk_ivec_peek(L, 3, "neg");
+  tk_ivec_t *ids = tk_ivec_peek(L, 2, "ids");
+  tk_ivec_t *pos = tk_ivec_peek(L, 3, "pos");
+  tk_ivec_t *neg = tk_ivec_peek(L, 4, "neg");
   uint64_t n_pos = pos->n / 2;
   uint64_t n_neg = neg->n / 2;
-  unsigned int n_threads = tk_threads_getn(L, 4, "n_threads", NULL);
+  unsigned int n_threads = tk_threads_getn(L, 5, "n_threads", NULL);
 
   tk_eval_t state;
   atomic_ulong TP, FP, FN;
   double precision, recall, f1;
   state.assignments = assignments;
+  state.id_assignment = tk_iumap_from_ivec(ids); // TODO: Pass id_assignment (aka uid_hood) in instead of recomputing
   state.pos = pos;
   state.neg = neg;
   state.n_pos = n_pos;
@@ -317,6 +343,7 @@ static inline int tm_clustering_accuracy (lua_State *L)
   lua_pushnumber(L, f1);
   lua_setfield(L, -2, "f1");
 
+  tk_iumap_destroy(state.id_assignment);
   return 1;
 }
 
@@ -437,11 +464,19 @@ static inline double _tm_auc (
   ks_introsort(dl, state->n_pos + state->n_neg, state->pl);
   double sum_ranks = 0.0;
   unsigned int rank = 1;
-  // TODO: Parallelize?
-  for (uint64_t k = 0; k < state->n_pos + state->n_neg; k ++, rank ++)
+  uint64_t n_pos_valid = 0, n_neg_valid = 0;
+  for (uint64_t k = 0; k < state->n_pos + state->n_neg; k ++) {
+    if (state->pl[k].sim == -1)
+      continue;
     if (state->pl[k].label)
-      sum_ranks += rank;
-  double auc = (sum_ranks - ((double) state->n_pos * (state->n_pos + 1) / 2)) / ((double) state->n_pos * state->n_neg);
+      sum_ranks += rank, n_pos_valid ++;
+    else
+      n_neg_valid ++;
+    rank ++;
+  }
+  if (n_pos_valid == 0 || n_neg_valid == 0)
+    return 0.0;
+  double auc = (sum_ranks - ((double) n_pos_valid * (n_pos_valid + 1) / 2)) / ((double) n_pos_valid * n_neg_valid);
   return auc;
 }
 
@@ -493,13 +528,14 @@ static inline int tm_auc (lua_State *L)
 
 static inline int tm_optimize_retrieval (lua_State *L)
 {
-  lua_settop(L, 5);
+  lua_settop(L, 6);
 
   tk_bits_t *codes = (tk_bits_t *) tk_lua_checkustring(L, 1, "codes");
-  tk_ivec_t *pos = tk_ivec_peek(L, 2, "pos");
-  tk_ivec_t *neg = tk_ivec_peek(L, 3, "neg");
-  uint64_t n_classes = tk_lua_checkunsigned(L, 4, "n_hidden");
-  unsigned int n_threads = tk_threads_getn(L, 5, "n_threads", NULL);
+  tk_ivec_t *ids = tk_ivec_peek(L, 2, "ids");
+  tk_ivec_t *pos = tk_ivec_peek(L, 3, "pos");
+  tk_ivec_t *neg = tk_ivec_peek(L, 4, "neg");
+  uint64_t n_classes = tk_lua_checkunsigned(L, 5, "n_hidden");
+  unsigned int n_threads = tk_threads_getn(L, 6, "n_threads", NULL);
   uint64_t n_pos = pos->n / 2;
   uint64_t n_neg = neg->n / 2;
 
@@ -509,6 +545,7 @@ static inline int tm_optimize_retrieval (lua_State *L)
   state.pl = malloc((n_pos + n_neg) * sizeof(tm_dl_t));
   state.mask = NULL;
   state.codes = codes;
+  state.id_code = tk_iumap_from_ivec(ids); // TODO: Pass id_code (aka uid_hood) in instead of recomputing
   state.pos = pos;
   state.neg = neg;
   state.n_pos = n_pos;
@@ -556,6 +593,7 @@ static inline int tm_optimize_retrieval (lua_State *L)
   free(state.pl);
   free(state.hist_pos);
   free(state.hist_neg);
+  tk_iumap_destroy(state.id_code);
 
   // Output
   lua_newtable(L);

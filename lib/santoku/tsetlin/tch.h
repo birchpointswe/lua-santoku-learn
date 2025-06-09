@@ -2,15 +2,15 @@
 #define TK_TCH_H
 
 #include <santoku/tsetlin/conf.h>
-#include <santoku/tsetlin/roaring.h>
+#include <santoku/tsetlin/graph.h>
 #include <santoku/dvec.h>
 
 // TODO: parallelize
 static inline void tk_tch_refine (
   lua_State *L,
   tk_ivec_t *codes,
-  roaring64_bitmap_t **adj_pos,
-  roaring64_bitmap_t **adj_neg,
+  tk_graph_adj_t *adj_pos,
+  tk_graph_adj_t *adj_neg,
   uint64_t n_nodes,
   uint64_t n_hidden,
   int i_each
@@ -18,18 +18,16 @@ static inline void tk_tch_refine (
   uint64_t total_steps = 0;
 
   // Prep hidden shuffle (outside parallel region)
-  int64_t *shuf_hidden = tk_malloc(L, n_hidden * sizeof(int64_t));
-  for (int64_t i = 0; i < (int64_t) n_hidden; i ++)
-    shuf_hidden[i] = i;
-  ks_shuffle(i64, n_hidden, shuf_hidden);
+  tk_ivec_t *shuf_hidden = tk_ivec_create(L, n_hidden, 0, 0);
+  tk_ivec_fill_indices(shuf_hidden);
+  tk_ivec_shuffle(shuf_hidden);
 
   // Prep nodes shuffle
-  int64_t *shuf_nodes = tk_malloc(L, n_nodes * sizeof(int64_t));
-  for (int64_t i = 0; i < (int64_t) n_nodes; i ++)
-    shuf_nodes[i] = i;
+  tk_ivec_t *shuf_nodes = tk_ivec_create(L, n_nodes, 0, 0);
+  tk_ivec_fill_indices(shuf_nodes);
+  tk_ivec_shuffle(shuf_nodes);
 
   int *bitvecs = tk_malloc(L, n_hidden * n_nodes * sizeof(int));
-  roaring64_iterator_t it;
 
   for (uint64_t i = 0; i < n_hidden * n_nodes; i ++)
     bitvecs[i] = -1;
@@ -47,14 +45,15 @@ static inline void tk_tch_refine (
 
   for (uint64_t sf = 0; sf < n_hidden; sf ++) {
 
-    uint64_t f = (uint64_t) shuf_hidden[sf];
+    uint64_t f = (uint64_t) shuf_hidden->a[sf];
     int *bitvec = bitvecs + f * n_nodes;
 
     // Shuffle nodes
-    ks_shuffle(i64, n_nodes, shuf_nodes);
+    tk_ivec_shuffle(shuf_nodes);
 
     bool updated;
     uint64_t steps = 0;
+    int64_t i, j, delta;
 
     do {
       updated = false;
@@ -62,22 +61,16 @@ static inline void tk_tch_refine (
       total_steps ++;
 
       for (uint64_t si = 0; si < n_nodes; si ++) {
-        uint64_t i = (uint64_t) shuf_nodes[si];
-        int delta = 0;
+        i = shuf_nodes->a[si];
+        delta = 0;
         // Positive neighbors
-        roaring64_iterator_reinit(adj_pos[i], &it);
-        while (roaring64_iterator_has_value(&it)) {
-          uint64_t j = roaring64_iterator_value(&it);
-          roaring64_iterator_advance(&it);
+        tk_iuset_foreach(adj_pos->a[i], j, ({
           delta += bitvec[i] * bitvec[j];
-        }
+        }))
         // Negative neighbors
-        roaring64_iterator_reinit(adj_neg[i], &it);
-        while (roaring64_iterator_has_value(&it)) {
-          uint64_t j = roaring64_iterator_value(&it);
-          roaring64_iterator_advance(&it);
+        tk_iuset_foreach(adj_neg->a[i], j, ({
           delta -= bitvec[i] * bitvec[j];
-        }
+        }))
         // Check
         if (delta < 0){
           bitvec[i] = -bitvec[i];
@@ -99,8 +92,7 @@ static inline void tk_tch_refine (
   }
 
   free(bitvecs);
-  free(shuf_nodes);
-  free(shuf_hidden);
+  lua_pop(L, 2); // shuf_hidden, shuf_nodes
 
   tk_ivec_shrink(L, codes);
   tk_ivec_asc(codes, 0, codes->n);

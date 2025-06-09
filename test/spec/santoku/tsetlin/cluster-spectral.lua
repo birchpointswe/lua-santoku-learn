@@ -5,7 +5,7 @@ local utc = require("santoku.utc")
 
 local tm = require("santoku.tsetlin")
 local ds = require("santoku.tsetlin.dataset")
--- local inv = require("santoku.tsetlin.inv")
+local inv = require("santoku.tsetlin.inv")
 local booleanizer = require("santoku.tsetlin.booleanizer")
 local ann = require("santoku.tsetlin.ann")
 local eval = require("santoku.tsetlin.evaluator")
@@ -60,18 +60,15 @@ test("tsetlin", function ()
   dataset.sentences = tokenizer.tokenize(dataset.raw_sentences)
   local stopwatch = utc.stopwatch()
 
-  -- print("\nIndexing train")
-  -- dataset.index = inv.create({ features = dataset.n_features })
-  -- dataset.index:add(0, dataset.sentences, dataset.n_sentences)
+  print("\nIndexing train")
+  dataset.index = inv.create({ features = dataset.n_features })
+  dataset.index:add(dataset.sentences, 0, dataset.n_sentences)
 
-  print("Creating graph")
+  print("Creating graph\n")
   dataset.graph = graph.create({
     pos = dataset.pos,
     neg = dataset.neg,
-    -- index = dataset.index,
-    nodes = dataset.sentences,
-    n_nodes = dataset.n_sentences,
-    n_features = dataset.n_features,
+    index = dataset.index,
     trans_hops = TRANS_HOPS,
     trans_pos = TRANS_POS,
     trans_neg = TRANS_NEG,
@@ -83,7 +80,7 @@ test("tsetlin", function ()
   })
 
   print("\nSpectral hashing\n")
-  dataset.codes0 = spectral.encode({
+  dataset.ids_spectral, dataset.codes_spectral = spectral.encode({
     graph = dataset.graph,
     n_hidden = HIDDEN,
     threads = THREADS,
@@ -95,14 +92,14 @@ test("tsetlin", function ()
 
   print("\nBooleanizing\n")
   local bzr = booleanizer.create({ n_thresholds = 1, threads = THREADS })
-  bzr:observe(dataset.codes0, HIDDEN)
+  bzr:observe(dataset.codes_spectral, HIDDEN)
   bzr:finalize()
-  dataset.codes0 = bzr:encode(dataset.codes0, HIDDEN)
+  dataset.codes_spectral = bzr:encode(dataset.codes_spectral, HIDDEN)
   dataset.n_hidden = bzr:bits()
 
   print("\nRefining\n")
   tch.refine({
-    codes = dataset.codes0,
+    codes = dataset.codes_spectral,
     graph = dataset.graph,
     n_hidden = dataset.n_hidden,
     threads = THREADS,
@@ -112,11 +109,11 @@ test("tsetlin", function ()
     end
   })
 
-  dataset.codes0_raw = dataset.codes0:raw_bitmap(dataset.n_sentences, dataset.n_hidden)
-  dataset.similarity0 = eval.optimize_retrieval(dataset.codes0_raw, dataset.pos, dataset.neg, dataset.n_hidden, THREADS)
+  dataset.codes_raw = dataset.codes_spectral:raw_bitmap(dataset.n_sentences, dataset.n_hidden)
+  dataset.similarity0 = eval.optimize_retrieval(dataset.codes_raw, dataset.ids_spectral, dataset.pos, dataset.neg, dataset.n_hidden, THREADS) -- luacheck: ignore
   str.printi("AUC: %.2f#(auc) | F1: %.2f#(f1) | Precision: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", -- luacheck: ignore
     dataset.similarity0)
-  dataset.entropy0 = eval.entropy_stats(dataset.codes0_raw, dataset.n_sentences, dataset.n_hidden, THREADS)
+  dataset.entropy0 = eval.entropy_stats(dataset.codes_raw, dataset.n_sentences, dataset.n_hidden, THREADS)
   str.printi("Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)\n",
     dataset.entropy0)
 
@@ -127,11 +124,11 @@ test("tsetlin", function ()
     features = dataset.n_hidden,
     threads = THREADS,
   })
-  index:add(0, dataset.codes0_raw, dataset.n_sentences)
+  index:add(dataset.codes_raw, dataset.ids_spectral)
 
-  print("Clustering")
+  print("Clustering\n")
   stopwatch()
-  dataset.cluster_score, dataset.clusters = eval.optimize_clustering({
+  dataset.cluster_score, dataset.ids_cluster, dataset.clusters = eval.optimize_clustering({
     index = index,
     pos = dataset.pos,
     neg = dataset.neg,
@@ -147,23 +144,23 @@ test("tsetlin", function ()
   str.printi("\nBest | F1: %.2f#(f1) | Precision: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin) | Clusters: %d#(n_clusters)\n", -- luacheck: ignore
     dataset.cluster_score)
 
-  -- local avg_size = 0
-  -- for i = 1, #dataset.clusters do
-  --   if i < 10 then
-  --     str.printf("Cluster %d, (%d members)\n", i, dataset.clusters[i]:size())
-  --     local n = 0
-  --     for m in dataset.clusters[i]:each() do
-  --       m = m + 1
-  --       n = n + 1
-  --       if n > 10 then
-  --         break
-  --       end
-  --       str.printf("  %s\n", dataset.raw_sentences[m])
-  --     end
-  --   end
-  --   avg_size = avg_size + dataset.clusters[i]:size()
-  -- end
-  -- avg_size = avg_size / #dataset.clusters
-  -- str.printf("Average size %d\n", avg_size)
+  local avg_size = 0
+  for i = 1, #dataset.clusters do
+    if i < 10 then
+      str.printf("Cluster %d, (%d members)\n", i, dataset.clusters[i]:size())
+      local n = 0
+      for m in dataset.clusters[i]:each() do
+        m = m + 1
+        n = n + 1
+        if n > 10 then
+          break
+        end
+        str.printf("  %s\n", dataset.raw_sentences[m])
+      end
+    end
+    avg_size = avg_size + dataset.clusters[i]:size()
+  end
+  avg_size = avg_size / #dataset.clusters
+  str.printf("Average size %d\n", avg_size)
 
 end)

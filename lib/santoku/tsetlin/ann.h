@@ -5,24 +5,23 @@
 #include <santoku/lua/utils.h>
 #include <santoku/tsetlin/conf.h>
 #include <santoku/ivec.h>
-#include <santoku/iuset.h>
 #include <santoku/iumap.h>
 #include <santoku/threads.h>
 
 #define TK_ANN_BITS 32
 #define tk_ann_hash_t uint32_t
 
-KHASH_INIT(tk_ann_buckets, tk_ann_hash_t, tk_iuset_t *, 1, kh_int_hash_func, kh_int_hash_equal)
+KHASH_INIT(tk_ann_buckets, tk_ann_hash_t, tk_ivec_t *, 1, kh_int_hash_func, kh_int_hash_equal)
 typedef khash_t(tk_ann_buckets) tk_ann_buckets_t;
 
 #define TK_ANN_MT "tk_ann_t"
 #define TK_ANN_EPH "tk_ann_eph"
 
-typedef tk_ivec_t * tk_ann_hood_t;
+typedef tk_pvec_t * tk_ann_hood_t;
 #define tk_vec_name tk_ann_hoods
 #define tk_vec_base tk_ann_hood_t
 #define tk_vec_pushbase(L, x) tk_lua_get_ephemeron(L, TK_ANN_EPH, x)
-#define tk_vec_peekbase(L, i) tk_ivec_peek(L, i, "hood")
+#define tk_vec_peekbase(L, i) tk_pvec_peek(L, i, "hood")
 #define tk_vec_limited
 #include <santoku/vec/tpl.h>
 
@@ -35,14 +34,14 @@ typedef struct tk_ann_thread_s tk_ann_thread_t;
 
 typedef struct tk_ann_s {
   bool destroyed;
-  uint64_t size;
+  uint64_t next_sid;
   uint64_t bucket_target;
   uint64_t features;
   uint64_t probe_radius;
   tk_ivec_t *hash_bits;
   tk_ann_buckets_t *buckets;
-  tk_iumap_t *deleted;
-  tk_iumap_t *ids;
+  tk_iumap_t *uid_sid;
+  tk_iumap_t *sid_uid;
   tk_cvec_t *vectors;
   tk_ann_thread_t *threads;
   tk_threadpool_t *pool;
@@ -51,9 +50,12 @@ typedef struct tk_ann_s {
 typedef struct tk_ann_thread_s {
   tk_ann_t *A;
   tk_ann_hoods_t *hoods;
-  tk_ivec_t *ids_storage;
+  tk_iumap_t *sid_idx;
+  tk_ivec_t *uids;
+  tk_ivec_t *sids;
   uint64_t ifirst, ilast;
   uint64_t eps;
+  uint64_t k;
 } tk_ann_thread_t;
 
 static inline tk_ann_t *tk_ann_peek (lua_State *L, int i)
@@ -66,7 +68,6 @@ static inline void tk_ann_shrink (
 ) {
   if (A->destroyed)
     return;
-  // TODO: compaction will require a mapping from internal ids to user ids.
   #warning todo
 }
 
@@ -75,24 +76,12 @@ static inline void tk_ann_destroy (
 ) {
   if (A->destroyed)
     return;
+  A->destroyed = true;
+  tk_iumap_destroy(A->uid_sid);
+  tk_iumap_destroy(A->sid_uid);
+  kh_destroy(tk_ann_buckets, A->buckets);
   tk_threads_destroy(A->pool);
   free(A->threads);
-  tk_ann_hash_t h;
-  tk_iuset_t *b;
-  kh_foreach(A->buckets, h, b, ({
-    tk_iuset_destroy(b);
-  }));
-  kh_destroy(tk_ann_buckets, A->buckets);
-  tk_iumap_destroy(A->deleted);
-  tk_iumap_destroy(A->ids);
-  memset(A, 0, sizeof(tk_ann_t));
-  A->destroyed = true;
-}
-
-static inline uint64_t tk_ann_size (
-  tk_ann_t *A
-) {
-  return tk_iumap_size(A->ids);
 }
 
 static inline uint64_t tk_ann_hamming (
@@ -105,39 +94,6 @@ static inline uint64_t tk_ann_hamming (
   for (uint64_t i = 0; i < n; i ++)
     t += (uint64_t) __builtin_popcount((unsigned char) a[i] ^ (unsigned char) b[i]);
   return t;
-}
-
-static inline void tk_ann_persist (
-  lua_State *L,
-  tk_ann_t *A,
-  FILE *fh
-) {
-  if (A->destroyed) {
-    tk_lua_verror(L, 2, "persist", "can't persist a destroyed index");
-    return;
-  }
-  #warning todo
-}
-
-static inline int64_t tk_ann_id_storage (
-  tk_ann_t *A,
-  int64_t id,
-  bool create
-) {
-  int kha;
-  khint_t khi;
-  if (create) {
-    khi = tk_iumap_put(A->ids, id, &kha);
-    if (kha)
-      tk_iumap_value(A->ids, khi) = (int64_t) A->size ++;
-    return tk_iumap_value(A->ids, khi);
-  } else {
-    khi = tk_iumap_get(A->ids, id);
-    if (khi == kh_end(A->ids))
-      return -1;
-    else
-      return tk_iumap_value(A->ids, khi);
-  }
 }
 
 static inline tk_ann_hash_t tk_ann_hash (
@@ -159,103 +115,189 @@ static inline tk_ann_hash_t tk_ann_hash (
   return h;
 }
 
+static inline void tk_ann_persist (
+  lua_State *L,
+  tk_ann_t *A,
+  FILE *fh
+) {
+  if (A->destroyed) {
+    tk_lua_verror(L, 2, "persist", "can't persist a destroyed index");
+    return;
+  }
+  #warning todo
+}
+
+static inline uint64_t tk_ann_size (
+  tk_ann_t *A
+) {
+  return tk_iumap_size(A->uid_sid);
+}
+
+static inline void tk_ann_uid_remove (
+  tk_ann_t *A,
+  int64_t uid
+) {
+  khint_t khi;
+  khi = tk_iumap_get(A->uid_sid, uid);
+  if (khi == kh_end(A->uid_sid))
+    return;
+  tk_iumap_del(A->uid_sid, khi);
+  khi = tk_iumap_get(A->sid_uid, uid);
+  if (khi == kh_end(A->sid_uid))
+    return;
+  tk_iumap_del(A->sid_uid, khi);
+}
+
+static inline int64_t tk_ann_uid_sid (
+  tk_ann_t *A,
+  int64_t uid,
+  bool create
+) {
+  int kha;
+  khint_t khi;
+  if (create) {
+    int64_t sid = (int64_t) (A->next_sid ++);
+    khi = tk_iumap_put(A->uid_sid, uid, &kha);
+    if (!kha) {
+      int64_t sid0 = tk_iumap_value(A->uid_sid, khi);
+      khi = tk_iumap_get(A->sid_uid, sid0);
+      if (khi != tk_iumap_end(A->sid_uid))
+        tk_iumap_del(A->sid_uid, khi);
+    }
+    tk_iumap_value(A->uid_sid, khi) = sid;
+    khi = tk_iumap_put(A->sid_uid, sid, &kha);
+    tk_iumap_value(A->sid_uid, khi) = uid;
+    return sid;
+  } else {
+    khi = tk_iumap_get(A->uid_sid, uid);
+    if (khi == kh_end(A->uid_sid))
+      return -1;
+    else
+      return tk_iumap_value(A->uid_sid, khi);
+  }
+}
+
+static inline int64_t tk_ann_sid_uid (
+  tk_ann_t *A,
+  int64_t sid
+) {
+  khint_t khi = tk_iumap_get(A->sid_uid, sid);
+  if (khi == kh_end(A->sid_uid))
+    return -1;
+  else
+    return tk_iumap_value(A->sid_uid, khi);
+}
+
+static inline char *tk_ann_sget (
+  tk_ann_t *A,
+  int64_t sid
+) {
+  return A->vectors->a + (uint64_t) sid * ((A->features + CHAR_BIT - 1) / CHAR_BIT);
+}
+
 static inline char *tk_ann_get (
   tk_ann_t *A,
-  int64_t id
+  int64_t uid
 ) {
-  if (A->destroyed)
+  int64_t sid = tk_ann_uid_sid(A, uid, false);
+  if (sid < 0)
     return NULL;
-  int64_t id_storage = tk_ann_id_storage(A, id, false);
-  if (id_storage < 0 || id_storage >= (int64_t) A->size)
-    return NULL;
-  return (A->vectors->a + (uint64_t) id_storage * ((A->features + CHAR_BIT - 1) / CHAR_BIT));
+  return tk_ann_sget(A, sid);
 }
 
 static inline void tk_ann_add (
   lua_State *L,
   tk_ann_t *A,
-  int64_t id,
-  char *data,
-  uint64_t n_samples
+  int Ai,
+  tk_ivec_t *ids,
+  char *data
 ) {
   if (A->destroyed) {
-    tk_lua_verror(L, 2, "persist", "can't add to a destroyed index");
+    tk_lua_verror(L, 2, "add", "can't add to a destroyed index");
     return;
   }
-  if (n_samples == 0)
+  if (ids->n == 0)
     return;
   int kha;
   khint_t khi;
-  for (uint64_t s = 0; s < n_samples; s ++) {
-    int64_t id_storage = tk_ann_id_storage(A, id + (int64_t) s, true);
-    if (id_storage < 0)
-      continue;
-    tk_ann_hash_t h = tk_ann_hash(A, data + s * ((A->features + CHAR_BIT - 1) / CHAR_BIT));
+  for (uint64_t i = 0; i < ids->n; i ++) {
+    int64_t sid = tk_ann_uid_sid(A, ids->a[i], true);
+    tk_ivec_t *bucket;
+    tk_ann_hash_t h = tk_ann_hash(A, data + i * ((A->features + CHAR_BIT - 1) / CHAR_BIT));
     khi = kh_put(tk_ann_buckets, A->buckets, h, &kha);
-    if (kha)
-      kh_value(A->buckets, khi) = tk_iuset_create();
-    tk_iuset_put(kh_value(A->buckets, khi), id_storage, &kha);
-    khi = tk_iumap_get(A->deleted, id + (int64_t) s);
-    tk_iumap_del(A->deleted, khi);
+    if (kha) {
+      bucket = kh_value(A->buckets, khi) = tk_ivec_create(L, 0, 0, 0);
+      tk_lua_add_ephemeron(L, TK_ANN_EPH, Ai, -1);
+      lua_pop(L, 1);
+    } else {
+      bucket = kh_value(A->buckets, khi);
+    }
+    tk_ivec_push(bucket, sid);
     tk_cvec_t datavec = {
-      .n = ((A->features + CHAR_BIT - 1) / CHAR_BIT),
-      .m = ((A->features + CHAR_BIT - 1) / CHAR_BIT),
-      .a = (char *) data + s * ((A->features + CHAR_BIT - 1) / CHAR_BIT) };
-    tk_cvec_copy(L, A->vectors, &datavec, 0, (int64_t) datavec.n, id_storage * (int64_t) ((A->features + CHAR_BIT - 1) / CHAR_BIT));
+      .n = (A->features + CHAR_BIT - 1) / CHAR_BIT,
+      .m = (A->features + CHAR_BIT - 1) / CHAR_BIT,
+      .a = (char *) data + i * ((A->features + CHAR_BIT - 1) / CHAR_BIT) };
+    tk_cvec_copy(L, A->vectors, &datavec, 0, (int64_t) datavec.n, sid * (int64_t) ((A->features + CHAR_BIT - 1) / CHAR_BIT));
   }
 }
 
 static inline void tk_ann_remove (
   lua_State *L,
   tk_ann_t *A,
-  int64_t id
+  int64_t uid
 ) {
   if (A->destroyed) {
-    tk_lua_verror(L, 2, "persist", "can't remove from a destroyed index");
+    tk_lua_verror(L, 2, "remove", "can't remove from a destroyed index");
     return;
   }
-  int64_t id_storage = tk_ann_id_storage(A, id, false);
-  if (id_storage < 0)
-    return;
-  int kha;
-  khint_t khi = tk_iumap_put(A->deleted, id, &kha);
-  tk_iumap_value(A->deleted, khi) = id_storage;
+  tk_ann_uid_remove(A, uid);
 }
-
-uint64_t cnt = 0;
 
 static inline void _tk_ann_extend_neighborhood (
   tk_ann_t *A,
-  int64_t id0,
+  uint64_t i,
+  int64_t sid,
   char *V,
   tk_ann_hash_t h,
-  tk_ivec_t *hood,
+  tk_pvec_t *hood,
+  tk_iumap_t *sid_idx,
+  uint64_t k,
   uint64_t eps
 ) {
   khint_t khi = kh_get(tk_ann_buckets, A->buckets, h);
   if (khi != kh_end(A->buckets)) {
-    int64_t id1;
-    tk_iuset_t *bucket = kh_value(A->buckets, khi);
-    tk_iuset_foreach(bucket, id1, ({
-      if (id0 == id1)
+    tk_ivec_t *bucket = kh_value(A->buckets, khi);
+    for (uint64_t i = 0; i < bucket->n; i ++) {
+      int64_t sid1 = bucket->a[i];
+      if (sid == sid1)
         continue;
-      const char *V1 = tk_ann_get(A, id1);
+      int64_t uid1 = tk_ann_sid_uid(A, sid1);
+      if (uid1 < 0)
+        continue;
+      khi = tk_iumap_get(sid_idx, sid1);
+      if (khi == tk_iumap_end(sid_idx))
+        continue;
+      int64_t idx = tk_iumap_value(sid_idx, khi);
+      const char *V1 = tk_ann_sget(A, sid1);
       uint64_t m = tk_ann_hamming(V, V1, A->features);
       if (m < eps)
-        tk_ivec_push(hood, id1);
-    }))
+        tk_pvec_hasc(hood, tk_pair(idx, (int64_t) m));
+    }
   }
 }
 
 static inline void _tk_ann_populate_neighborhood (
   tk_ann_t *A,
-  int64_t id,
+  uint64_t i,
+  int64_t sid,
   char *V,
-  tk_ivec_t *hood,
+  tk_pvec_t *hood,
+  tk_iumap_t *sid_idx,
+  uint64_t k,
   uint64_t eps
 ) {
   tk_ann_hash_t h = tk_ann_hash(A, V);
-  _tk_ann_extend_neighborhood(A, id, V, h, hood, eps);
+  _tk_ann_extend_neighborhood(A, i, sid, V, h, hood, sid_idx, k, eps);
   int pos[TK_ANN_BITS];
   for (int r = 1; r <= (int) A->probe_radius; r ++) {
     for (int i = 0; i < r; i ++)
@@ -264,7 +306,7 @@ static inline void _tk_ann_populate_neighborhood (
       tk_ann_hash_t mask = 0;
       for (int i = 0; i < r; i ++)
         mask |= (1U << pos[i]);
-      _tk_ann_extend_neighborhood(A, id, V, h ^ mask, hood, eps);
+      _tk_ann_extend_neighborhood(A, i, sid, V, h ^ mask, hood, sid_idx, k, eps);
       int i;
       for (i = r - 1; i >= 0; i--) {
         if (pos[i] != i + TK_ANN_BITS - r) {
@@ -280,33 +322,52 @@ static inline void _tk_ann_populate_neighborhood (
   }
 }
 
-static inline tk_ann_hoods_t *tk_ann_neighborhoods (
+static inline void tk_ann_neighborhoods (
   lua_State *L,
   tk_ann_t *A,
-  uint64_t eps
+  uint64_t k,
+  uint64_t eps,
+  tk_ann_hoods_t **hoodsp,
+  tk_ivec_t **uidsp
 ) {
   if (A->destroyed) {
-    tk_lua_verror(L, 2, "persist", "can't query a destroyed index");
-    return NULL;
+    tk_lua_verror(L, 2, "neighborhoods", "can't query a destroyed index");
+    return;
   }
-  tk_ivec_t *ids_storage = tk_iumap_values(L, A->ids);
-  tk_ivec_asc(ids_storage, 0, ids_storage->n); // sort for cache locality
-  tk_ann_hoods_t *hoods = tk_ann_hoods_create(L, ids_storage->n, 0, 0);
+  int kha;
+  khint_t khi;
+  tk_ivec_t *sids = tk_iumap_values(L, A->uid_sid);
+  tk_ivec_asc(sids, 0, sids->n); // sort for cache locality
+  tk_iumap_t *sid_idx = tk_iumap_create();
+  for (uint64_t i = 0; i < sids->n; i ++) {
+    khi = tk_iumap_put(sid_idx, sids->a[i], &kha);
+    tk_iumap_value(sid_idx, khi) = (int64_t) i;
+  }
+  tk_ivec_t *uids = tk_ivec_create(L, sids->n, 0, 0);
+  for (uint64_t i = 0; i < sids->n; i ++) {
+    uids->a[i] = tk_ann_sid_uid(A, sids->a[i]);
+  }
+  tk_ann_hoods_t *hoods = tk_ann_hoods_create(L, uids->n, 0, 0);
   for (uint64_t i = 0; i < hoods->n; i ++) {
-    hoods->a[i] = tk_ivec_create(L, 0, 0, 0);
+    hoods->a[i] = tk_pvec_create(L, k, 0, 0);
+    hoods->a[i]->n = 0;
     tk_lua_add_ephemeron(L, TK_ANN_EPH, -2, -1);
     lua_pop(L, 1);
   }
   for (uint64_t i = 0; i < A->pool->n_threads; i ++) {
     tk_ann_thread_t *data = A->threads + i;
-    data->ids_storage = ids_storage;
+    data->uids = uids;
+    data->sids = sids;
     data->hoods = hoods;
+    data->sid_idx = sid_idx;
     data->eps = eps;
+    data->k = k;
     tk_thread_range(i, A->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
   }
   tk_threads_signal(A->pool, TK_ANN_NEIGHBORHOODS);
-  lua_remove(L, -2); // pop ids_storage
-  return hoods;
+  tk_iumap_destroy(sid_idx);
+  if (hoodsp) *hoodsp = hoods;
+  if (uidsp) *uidsp = uids;
 }
 
 static inline tk_pvec_t *tk_ann_neighbors (
@@ -315,7 +376,7 @@ static inline tk_pvec_t *tk_ann_neighbors (
   char *vec
 ) {
   if (A->destroyed) {
-    tk_lua_verror(L, 2, "persist", "can't query a destroyed index");
+    tk_lua_verror(L, 2, "neighbors", "can't query a destroyed index");
     return NULL;
   }
   #warning todo
@@ -332,11 +393,20 @@ static inline int tk_ann_gc_lua (lua_State *L)
 
 static inline int tk_ann_add_lua (lua_State *L)
 {
-  tk_ann_t *A = tk_ann_peek(L, 1);
-  int64_t id = tk_lua_checkinteger(L, 2, "id");
-  const char *data = tk_lua_checkustring(L, 3, "data");
-  uint64_t n_samples = tk_lua_optunsigned(L, 4, "n_samples", 1);
-  tk_ann_add(L, A, id, (char *) data, n_samples);
+  int Ai = 1;
+  tk_ann_t *A = tk_ann_peek(L, Ai);
+  const char *data = tk_lua_checkustring(L, 2, "data");
+  if (lua_type(L, 3) == LUA_TNUMBER) {
+    int64_t s = (int64_t) tk_lua_checkunsigned(L, 3, "base_id");
+    uint64_t n = tk_lua_optunsigned(L, 4, "n_nodes", 1);
+    tk_ivec_t *ids = tk_ivec_create(L, n, 0, 0);
+    tk_ivec_fill_indices(ids);
+    tk_ivec_add(ids, s, 0, ids->n);
+    tk_ann_add(L, A, Ai, ids, (char *) data);
+  } else {
+    tk_ivec_t *ids = tk_ivec_peek(L, 3, "ids");
+    tk_ann_add(L, A, Ai, ids, (char *) data);
+  }
   return 0;
 }
 
@@ -362,17 +432,16 @@ static inline int tk_ann_get_lua (lua_State *L)
 static inline int tk_ann_neighborhoods_lua (lua_State *L)
 {
   tk_ann_t *A = tk_ann_peek(L, 1);
-  double epsf = tk_lua_checkposdouble(L, 2, "eps");
+  uint64_t k = tk_lua_checkunsigned(L, 2, "k");
+  double epsf = tk_lua_checkposdouble(L, 3, "eps");
   uint64_t eps = (uint64_t) (epsf < 1.0 ? (double) A->features * epsf : epsf);
-  tk_ann_neighborhoods(L, A, eps);
-  return 1;
+  tk_ann_neighborhoods(L, A, k, eps, 0, 0);
+  return 2;
 }
 
 static inline int tk_ann_neighbors_lua (lua_State *L)
 {
-  tk_ann_t *A = tk_ann_peek(L, 1);
-  const char *v = tk_lua_checkustring(L, 2, "data");
-  tk_ann_neighbors(L, A, (char *) v);
+  #warning todo
   return 0;
 }
 
@@ -446,14 +515,18 @@ static inline void tk_ann_worker (void *dp, int sig)
 {
   tk_ann_stage_t stage = (tk_ann_stage_t) sig;
   tk_ann_thread_t *data = (tk_ann_thread_t *) dp;
+
   switch (stage) {
+
     case TK_ANN_NEIGHBORHOODS:
       for (uint64_t i = data->ifirst; i <= data->ilast; i ++) {
-        tk_ivec_t *hood = data->hoods->a[i];
-        int64_t id = data->ids_storage->a[i];
-        _tk_ann_populate_neighborhood(data->A, id, tk_ann_get(data->A, id), hood, data->eps);
+        tk_pvec_t *hood = data->hoods->a[i];
+        int64_t sid = data->sids->a[i];
+        _tk_ann_populate_neighborhood(data->A, i, sid, tk_ann_sget(data->A, sid), hood, data->sid_idx, data->k, data->eps);
+        tk_pvec_asc(hood, 0, hood->n);
       }
       break;
+
     case TK_ANN_NEIGHBORS:
       #warning todo
       break;
@@ -504,7 +577,6 @@ static inline void tk_ann_setup_hash_bits_exhaustive (
   A->hash_bits = tk_ivec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_ANN_EPH, Ai, -1);
   lua_pop(L, 1);
-  printf("> Exhaustive: 0 hash bits\n");
 }
 
 static inline tk_ann_t *tk_ann_create_base (
@@ -526,13 +598,13 @@ static inline tk_ann_t *tk_ann_create_base (
   }
   A->features = features;
   A->buckets = kh_init(tk_ann_buckets);
-  A->deleted = tk_iumap_create();
-  A->ids = tk_iumap_create();
+  A->uid_sid = tk_iumap_create();
+  A->sid_uid = tk_iumap_create();
   A->vectors = tk_cvec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_ANN_EPH, Ai, -1);
   lua_pop(L, 1);
   A->destroyed = false;
-  A->size = 0;
+  A->next_sid = 0;
   A->probe_radius = probe_radius;
   A->bucket_target = bucket_target;
   return A;
