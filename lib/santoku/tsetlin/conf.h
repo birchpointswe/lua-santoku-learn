@@ -66,28 +66,6 @@ static inline uint64_t hamming (
   return t;
 }
 
-// typedef __uint128_t tk_bits_t;
-// #define BITS 128
-// #define BITS_DIV(x) ((x) >> 7)
-// #define BITS_MOD(x) ((x) & 127)
-// const tk_bits_t ALL_MASK = ((tk_bits_t)0xFFFFFFFF << 96) |
-//                            ((tk_bits_t)0xFFFFFFFF << 64) |
-//                            ((tk_bits_t)0xFFFFFFFF << 32) |
-//                            ((tk_bits_t)0xFFFFFFFF);
-// const tk_bits_t POS_MASK = ((tk_bits_t)0x55555555 << 96) |
-//                            ((tk_bits_t)0x55555555 << 64) |
-//                            ((tk_bits_t)0x55555555 << 32) |
-//                            ((tk_bits_t)0x55555555);
-// const tk_bits_t NEG_MASK = ((tk_bits_t)0xAAAAAAAA << 96) |
-//                            ((tk_bits_t)0xAAAAAAAA << 64) |
-//                            ((tk_bits_t)0xAAAAAAAA << 32) |
-//                            ((tk_bits_t)0xAAAAAAAA);
-// static inline unsigned int popcount (tk_bits_t x) {
-//   return
-//     (unsigned int) __builtin_popcountll((uint64_t)(x >> 64)) +
-//     (unsigned int) __builtin_popcountll((uint64_t)(x));
-// }
-
 static inline uint64_t mix64 (uint64_t x) {
   x ^= x >> 33;
   x *= 0xff51afd7ed558ccdULL;
@@ -117,22 +95,15 @@ typedef struct { int64_t u, v; } tm_pair_t;
 #define tm_pair_hash(a) (hash128(kh_int64_hash_func((a).u), kh_int64_hash_func((a).v)))
 KHASH_INIT(pairs, tm_pair_t, bool, 1, tm_pair_hash, tm_pair_eq)
 typedef khash_t(pairs) tm_pairs_t;
-typedef struct { int64_t v; double d; } tm_neighbor_t;
 KSORT_INIT(pair_asc, tm_pair_t, tm_pair_lt)
-#define tm_neighbor_lt(a, b) ((a).d < (b).d)
-#define tm_neighbor_gt(a, b) ((a).d > (b).d)
-KSORT_INIT(neighbors_asc, tm_neighbor_t, tm_neighbor_lt)
-KSORT_INIT(neighbors_desc, tm_neighbor_t, tm_neighbor_gt)
-typedef kvec_t(tm_neighbor_t) tm_neighbors_t;
-typedef struct { uint64_t sim; bool label; } tm_dl_t;
+typedef struct { int64_t sim; bool label; } tm_dl_t;
 #define tm_dl_lt(a, b) ((a).sim < (b).sim)
 KSORT_INIT(dl, tm_dl_t, tm_dl_lt)
-KSORT_INIT(i64, int64_t, ks_lt_generic)
-KSORT_INIT(f64, double, ks_lt_generic)
-typedef struct { int64_t u; tm_neighbor_t v; } tm_candidate_t;
-#define tm_candidate_lt(a, b) ((a).v.d < (b).v.d)
-#define tm_candidate_gt(a, b) ((a).v.d > (b).v.d)
-#define tm_candidate(u, v) ((tm_candidate_t) { (u), (v) })
+typedef kvec_t(tm_dl_t) tm_dls_t;
+typedef struct { int64_t u, v; double d; } tm_candidate_t;
+#define tm_candidate_lt(a, b) ((a).d < (b).d)
+#define tm_candidate_gt(a, b) ((a).d > (b).d)
+#define tm_candidate(u, v, d) ((tm_candidate_t) { (u), (v), (d) })
 KSORT_INIT(candidates_asc, tm_candidate_t, tm_candidate_lt)
 KSORT_INIT(candidates_desc, tm_candidate_t, tm_candidate_gt)
 typedef kvec_t(tm_candidate_t) tm_candidates_t;

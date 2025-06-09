@@ -12,8 +12,8 @@ local function score_clustering (opts, margin, cache, fast)
     if c then
       return c.score, c.n_clusters
     else
-      local clusters, assignments = cluster.dbscan(opts.index, opts.min, margin)
-      local score = eval.clustering_accuracy(assignments, opts.pos, opts.neg, opts.threads)
+      local ids, clusters, assignments = cluster.dbscan(opts.index, opts.min, margin)
+      local score = eval.clustering_accuracy(assignments, ids, opts.pos, opts.neg, opts.threads)
       cache[margin] = { score = score.f1, n_clusters = #clusters }
       if opts.each then
         opts.each(score.f1, score.precision, score.recall, margin, #clusters)
@@ -21,9 +21,9 @@ local function score_clustering (opts, margin, cache, fast)
       return score.f1, #clusters
     end
   else
-    local clusters, assignments = cluster.dbscan(opts.index, opts.min, margin)
-    local score = eval.clustering_accuracy(assignments, opts.pos, opts.neg, opts.threads)
-    return score.f1, score, clusters
+    local ids, clusters, assignments = cluster.dbscan(opts.index, opts.min, margin)
+    local score = eval.clustering_accuracy(assignments, ids, opts.pos, opts.neg, opts.threads)
+    return score.f1, score, ids, clusters
   end
 end
 
@@ -81,9 +81,9 @@ M.optimize_clustering = function (opts)
 
   end
 
-  local _, score, clusters = score_clustering(opts, best_margin, cache, false)
+  local _, score, ids, clusters = score_clustering(opts, best_margin, cache, false)
   score.margin = best_margin
-  return score, clusters
+  return score, ids, clusters
 
 end
 

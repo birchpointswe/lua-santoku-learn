@@ -1,59 +1,57 @@
 #ifndef TK_GRAPH_H
 #define TK_GRAPH_H
 
-#include <santoku/tsetlin/roaring.h>
 #include <santoku/tsetlin/conf.h>
 #include <santoku/threads.h>
 #include <santoku/ivec.h>
+#include <santoku/iumap.h>
+#include <santoku/tsetlin/inv.h>
 #include <float.h>
 
-KHASH_SET_INIT_INT64(i64)
-typedef khash_t(i64) i64_hash_t;
+#define TK_GRAPH_MT "tk_graph_t"
+#define TK_GRAPH_EPH "tk_graph_eph"
 
-#define TK_GRAPH_MT "santoku_tsetlin_graph"
+KHASH_INIT(tk_dsu_members, int64_t, tk_iuset_t *, 1, kh_int64_hash_func, kh_int64_hash_equal)
+typedef khash_t(tk_dsu_members) tk_dsu_members_t;
+
+typedef tk_iuset_t * tk_graph_adj_item_t;
+#define tk_vec_name tk_graph_adj
+#define tk_vec_base tk_graph_adj_item_t
+#define tk_vec_destroy_item(...) tk_iuset_destroy(__VA_ARGS__)
+#define tk_vec_limited
+#include <santoku/vec/tpl.h>
 
 typedef enum {
-  TK_GRAPH_KNN
+  TK_GRAPH_TODO
 } tk_graph_stage_t;
 
 typedef struct {
-  uint64_t n_original;
-  uint64_t n_components;
-  int64_t *components;
-  int64_t *parent;
-  int64_t *rank;
-  int64_t **members;
-  uint64_t *count;
-  uint64_t *cap;
-  roaring64_bitmap_t *unseen;
-} tm_dsu_t;
+  tk_iumap_t *node_component;
+  tk_iumap_t *node_parent;
+  tk_iumap_t *component_rank;
+  tk_dsu_members_t *component_members;
+} tk_dsu_t;
 
 typedef struct tk_graph_thread_s tk_graph_thread_t;
 
 typedef struct tk_graph_s {
-  double *x, *y, *z;
-  double *evals, *evecs, *resNorms;
-  double *laplacian;
-  uint64_t n_nodes, n_hidden, n_features;
   tm_pairs_t *pairs;
-  tm_neighbors_t *neighbors;
-  tm_neighbors_t *fneighbors;
-  roaring64_bitmap_t **nodes;
-  tk_ivec_t *set_bits;
+  tk_inv_hoods_t *hoods;
+  tk_ivec_t *uids;
+  tk_iumap_t *uid_hood;
+  tk_graph_adj_t *adj_pos, *adj_neg;
+  tk_inv_t *inv;
   uint64_t knn_cache;
+  double knn_eps;
   tk_ivec_t *pos, *neg;
   uint64_t n_pos, n_neg;
-  roaring64_bitmap_t **adj_pos, **adj_neg, **index;
-  tm_dsu_t dsu;
+  tk_dsu_t dsu;
   tk_graph_thread_t *threads;
   tk_threadpool_t *pool;
 } tk_graph_t;
 
 typedef struct tk_graph_thread_s {
   tk_graph_t *graph;
-  roaring64_bitmap_t *candidates;
-  roaring64_bitmap_t *seen;
-  uint64_t ufirst, ulast;
 } tk_graph_thread_t;
 
 static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
