@@ -1,13 +1,14 @@
 # Now
 
 - Chores
-    - Sanitize
-    - Refactor other tests
-    - Commit
+    - Encoder feature selection seemingly not working
 
 - Eval
     - Table input to entropy_stats and optimize_retrieval
     - Reorganize optimize_retrieval as per optimize_clustering
+
+- tk_xvec_t
+    - Align Lua/C APIs (currently out of sync for pvec, rvec, etc)
 
 - tk_cvec_t
     - Use for Corex output, TM input/output, ANN input/output, TCH input/output
@@ -18,6 +19,10 @@
             - top_chi2/mi, score chi2/mi, filter, extend, cvec
         - Special cvec_bitx_xxx methods
             - top_entropy, score_entropy, flip_interleave, filter, extend, ivec
+
+- tk_xxmap/set_t:
+    - Templatize over khash/kbtree
+    - Proper Lua/C API like tk_xvec_t
 
 - tk_inv/ann_t
     - Persist/load to string and disk
@@ -32,14 +37,8 @@
 
 # Next
 
-- tk_xxmap/set_t:
-    - Templatize over khash/kbtree
-    - Proper Lua/C API like tk_xvec_t
-
-- tk_xvec_t
-    - Align Lua/C APIs (currently out of sync for pvec, rvec, etc)
-
 - tk_booleanizer_t
+    - encode_sparse/dense for ivec/cvec
     - When both double and string observations found, split into two different
       features, one for continuous and the other for categorical
 

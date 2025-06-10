@@ -8,7 +8,7 @@ local utc = require("santoku.utc")
 
 local tm = require("santoku.tsetlin")
 local corex = require("santoku.corex")
--- local inv = require("santoku.tsetlin.inv")
+local inv = require("santoku.tsetlin.inv")
 local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
 local graph = require("santoku.tsetlin.graph")
@@ -18,7 +18,7 @@ local tokenizer = require("santoku.tsetlin.tokenizer")
 local TRAIN_TEST_RATIO = 0.8
 local TM_ITERS = 10
 local COREX_ITERS = 100
-local MAX_RECORDS = 1000
+local MAX_RECORDS = nil
 local EVALUATE_EVERY = 1
 local THREADS = nil
 
@@ -31,7 +31,7 @@ local TRANS_HOPS = 2
 local TRANS_POS = 0
 local TRANS_NEG = 2
 local TOP_ALGO = "chi2"
-local TOP_K = 4096
+local TOP_K = 1024
 
 local TOKENIZER_CONFIG = {
   max_df = 0.95,
@@ -72,18 +72,15 @@ test("tsetlin", function ()
   train.sentences = tokenizer.tokenize(train.raw_sentences)
   local stopwatch = utc.stopwatch()
 
-  -- print("\nIndexing train")
-  -- train.index = inv.create({ features = dataset.n_features })
-  -- train.index:add(train.sentences)
+  print("\nIndexing train")
+  train.index = inv.create({ features = dataset.n_features })
+  train.index:add(train.sentences, 0, train.n_sentences)
 
   print("Creating graph")
   train.graph = graph.create({
     pos = train.pos,
     neg = train.neg,
-    -- index = train.index,
-    nodes = train.sentences,
-    n_nodes = train.n_sentences,
-    n_features = dataset.n_features,
+    index = train.index,
     trans_hops = TRANS_HOPS,
     trans_pos = TRANS_POS,
     trans_neg = TRANS_NEG,
@@ -131,7 +128,7 @@ test("tsetlin", function ()
 
   train.codes0 = train.codes0:raw_bitmap(train.n_sentences, HIDDEN)
   train.similarity0 = eval.optimize_retrieval(
-    train.codes0, train.pos, train.neg, HIDDEN, THREADS)
+    train.codes0, nil, train.pos, train.neg, HIDDEN, THREADS)
   str.printi("AUC: %.2f#(auc) | F1: %.2f#(f1) | Precision: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", -- luacheck: ignore
     train.similarity0)
 
@@ -196,8 +193,8 @@ test("tsetlin", function ()
         train.codes1 = t.predict(train.sentences, train.n_sentences)
         test.codes1 = t.predict(test.sentences, test.n_sentences)
         train.accuracy0 = eval.encoding_accuracy(train.codes1, train.codes0, train.n_sentences, HIDDEN, THREADS)
-        train.similarity1 = eval.optimize_retrieval(train.codes1, train.pos, train.neg, HIDDEN, THREADS)
-        test.similarity1 = eval.optimize_retrieval(test.codes1, test.pos, test.neg, HIDDEN, THREADS)
+        train.similarity1 = eval.optimize_retrieval(train.codes1, nil, train.pos, train.neg, HIDDEN, THREADS)
+        test.similarity1 = eval.optimize_retrieval(test.codes1, nil, test.pos, test.neg, HIDDEN, THREADS)
         print()
         str.printf("Epoch %3d  Time %3.2f %3.2f\n",
           epoch, stopwatch())
@@ -226,9 +223,9 @@ test("tsetlin", function ()
     train.accuracy0 = eval.encoding_accuracy(
       train.codes1, train.codes0, train.n_sentences, HIDDEN, THREADS)
     train.similarity1 = eval.optimize_retrieval(
-      train.codes1, train.pos, train.neg, HIDDEN, THREADS)
+      train.codes1, nil, train.pos, train.neg, HIDDEN, THREADS)
     test.similarity1 = eval.optimize_retrieval(
-      test.codes1, test.pos, test.neg, HIDDEN, THREADS)
+      test.codes1, nil, test.pos, test.neg, HIDDEN, THREADS)
     print()
     str.printi("  Train (acc) |           | F1: %.2f#(f1) | Prec: %.2f#(precision) | Recall: %.2f#(recall) | F1 Spread: %.2f#(f1_min) %.2f#(f1_max) %.2f#(f1_std)", train.accuracy0) -- luacheck: ignore
     str.printi("  Codes (sim) | AUC: %.2f#(auc) | F1: %.2f#(f1) | Prec: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", train.similarity0) -- luacheck: ignore
