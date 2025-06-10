@@ -120,18 +120,24 @@ static void tk_eval_worker (void *dp, int sig)
         uint64_t offset = k < state->n_pos ? 0 : state->n_pos;
         int64_t u = pairs->a[(k - offset) * 2 + 0];
         int64_t v = pairs->a[(k - offset) * 2 + 1];
-        khi = tk_iumap_get(state->id_code, u);
-        if (khi == tk_iumap_end(state->id_code)) {
-          state->pl[k].sim = -1;
-          continue;
+        int64_t iu, iv;
+        if (state->id_code == NULL) {
+          iu = u;
+          iv = v;
+        } else {
+          khi = tk_iumap_get(state->id_code, u);
+          if (khi == tk_iumap_end(state->id_code)) {
+            state->pl[k].sim = -1;
+            continue;
+          }
+          iu = tk_iumap_value(state->id_code, khi);
+          khi = tk_iumap_get(state->id_code, v);
+          if (khi == tk_iumap_end(state->id_code)) {
+            state->pl[k].sim = -1;
+            continue;
+          }
+          iv = tk_iumap_value(state->id_code, khi);
         }
-        int64_t iu = tk_iumap_value(state->id_code, khi);
-        khi = tk_iumap_get(state->id_code, v);
-        if (khi == tk_iumap_end(state->id_code)) {
-          state->pl[k].sim = -1;
-          continue;
-        }
-        int64_t iv = tk_iumap_value(state->id_code, khi);
         if (state->mask != NULL)
           state->pl[k].sim = (int64_t) (state->n_classes - hamming_mask(
             state->codes + (uint64_t) iu * state->chunks,
@@ -531,7 +537,7 @@ static inline int tm_optimize_retrieval (lua_State *L)
   lua_settop(L, 6);
 
   tk_bits_t *codes = (tk_bits_t *) tk_lua_checkustring(L, 1, "codes");
-  tk_ivec_t *ids = tk_ivec_peek(L, 2, "ids");
+  tk_ivec_t *ids = tk_ivec_peekopt(L, 2);
   tk_ivec_t *pos = tk_ivec_peek(L, 3, "pos");
   tk_ivec_t *neg = tk_ivec_peek(L, 4, "neg");
   uint64_t n_classes = tk_lua_checkunsigned(L, 5, "n_hidden");
@@ -545,7 +551,7 @@ static inline int tm_optimize_retrieval (lua_State *L)
   state.pl = malloc((n_pos + n_neg) * sizeof(tm_dl_t));
   state.mask = NULL;
   state.codes = codes;
-  state.id_code = tk_iumap_from_ivec(ids); // TODO: Pass id_code (aka uid_hood) in instead of recomputing
+  state.id_code = ids == NULL ? NULL : tk_iumap_from_ivec(ids); // TODO: Pass id_code (aka uid_hood) in instead of recomputing
   state.pos = pos;
   state.neg = neg;
   state.n_pos = n_pos;
@@ -593,7 +599,8 @@ static inline int tm_optimize_retrieval (lua_State *L)
   free(state.pl);
   free(state.hist_pos);
   free(state.hist_neg);
-  tk_iumap_destroy(state.id_code);
+  if (state.id_code != NULL)
+    tk_iumap_destroy(state.id_code);
 
   // Output
   lua_newtable(L);
