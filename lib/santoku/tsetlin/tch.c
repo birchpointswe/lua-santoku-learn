@@ -29,12 +29,8 @@ static inline int tk_tch_refine_lua (lua_State *L)
     i_each = tk_lua_absindex(L, -1);
   }
 
-  // Setup pairs & adjacency lists
-  tk_graph_adj_t *adj_pos = graph->adj_pos;
-  tk_graph_adj_t *adj_neg = graph->adj_neg;
-
   // Run tch
-  tk_tch_refine(L, codes, adj_pos, adj_neg, graph->uids->n, n_hidden, i_each);
+  tk_tch_refine(L, codes, graph, n_hidden, i_each);
   lua_pushvalue(L, i_out);
   return 1;
 }

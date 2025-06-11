@@ -307,6 +307,23 @@ static inline void tk_booleanizer_add_thresholds (
   lua_pop(L, 1);
   if (n == 0) {
     // Nothing to do
+  } else if (B->n_thresholds == 0) {
+    // Otso
+    double best_gap = -1.0, thr = 0.0;
+    for (uint64_t i = 1; i < value_vec->n; i ++) {
+      double gap = value_vec->a[i] - value_vec->a[i - 1];
+      if (gap > best_gap) {
+        best_gap = gap;
+        thr = 0.5 * (value_vec->a[i] + value_vec->a[i - 1]);
+      }
+    }
+    if (best_gap <= 0.0) {
+      double sum = 0.0;
+      for (uint64_t i = 0; i < value_vec->n; i ++)
+        sum += value_vec->a[i];
+      thr = sum / (double) value_vec->n;
+    }
+    tk_dvec_push(thresholds, thr);
   } else if (n <= B->n_thresholds) {
     tk_dvec_copy(L, thresholds, value_vec, 0, (int64_t) value_vec->n, 0);
   } else {
