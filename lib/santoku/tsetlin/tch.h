@@ -9,13 +9,14 @@
 static inline void tk_tch_refine (
   lua_State *L,
   tk_ivec_t *codes,
-  tk_graph_adj_t *adj_pos,
-  tk_graph_adj_t *adj_neg,
-  uint64_t n_nodes,
+  tk_graph_t *graph,
   uint64_t n_hidden,
   int i_each
 ) {
   uint64_t total_steps = 0;
+  tk_graph_adj_t *adj_pos = graph->adj_pos;
+  tk_graph_adj_t *adj_neg = graph->adj_neg;
+  uint64_t n_nodes = graph->uids->n;
 
   // Prep hidden shuffle (outside parallel region)
   tk_ivec_t *shuf_hidden = tk_ivec_create(L, n_hidden, 0, 0);

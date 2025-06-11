@@ -1,7 +1,8 @@
 # Now
 
-- Chores
-    - Encoder feature selection seemingly not working
+- Chore
+    - Sanity check older version to confirm encoder accuracy is as expected
+    - Set num threads for blas in ITQ
 
 - Eval
     - Table input to entropy_stats and optimize_retrieval
@@ -20,12 +21,16 @@
         - Special cvec_bitx_xxx methods
             - top_entropy, score_entropy, flip_interleave, filter, extend, ivec
 
+- tk_graph_t
+    - Parallelize transitive expansion
+
 - tk_xxmap/set_t:
     - Templatize over khash/kbtree
     - Proper Lua/C API like tk_xvec_t
 
 - tk_inv/ann_t
-    - Persist/load to string and disk
+    - Shrink
+    - Persist/load to/from string/file
     - Demo search on train/test codes (for ann) and raw features (for inv)
 
 - TBHSS
@@ -36,6 +41,45 @@
     - Index & search
 
 # Next
+
+- Supervised discrete hashing:
+    - Phase 0: Form a fully connected graph and adjacency lists from
+      ground-truth similar/dissimilar pairs and performing graph enrichment
+      (KNN, Kruskal MST, transitive positives/negatives).
+    - Phase 1: Initialize your projection matrix P by running your
+      signed-normalized graph Laplacian through PRIMME to get the top K
+      eigenvectors or by filling P with random normals and orthonormalizing its
+      columns.
+    - Phase 2: Hand-code two sparse×dense routines. One streams each sample’s
+      nonzero feature indices into P to produce a dense N×K output. The other
+      streams that N×K dense matrix back through the same sparsity pattern to form
+      a D×K right-hand side. Parallelize both over samples with OpenMP.
+    - Phase 3: Solve for P in the ridge system without ever forming XᵀX. Use Conjugate
+      Gradient on each column (or a block variant) where the “A·v” call is implemented
+      as a sparse×dense multiply into X and back into Xᵀ, plus adding λ·v.
+      Precondition each solve with Jacobi: compute diag(A) as feature-nonzero-counts+λ
+      once, invert those scalars, and scale the CG residual coordinate-wise by them. λ
+      and μ are hyperparams on a positive log scale (λ from 1e-4 to 1e3 and μ from
+      1e-2 to 1e4).
+    - Phase 4: Compute V=X·P with your sparse×dense kernel. For each bit-column,
+      scan V and greedily flip signs in B (initialized to the sign of V) to
+      reduce reconstruction error plus a Laplacian smoothness penalty. Repeat
+      flips until no further gain or you hit an iteration limit.
+    - Phase 5: After each ridge-solve and flip cycle, evaluate the combined
+      objective on B and V and stop when improvements fall below a small
+      threshold.
+    - Phase 6: Deploy by hashing new sparse samples through P: iterate their
+      nonzeros, accumulate into a K-vector, then take the sign of each entry as
+      your K-bit code. Optionally, train K sparse binary classifiers on your final
+      B if you need non-linear bit boundaries.
+    --
+    - For graphs with a single node type, X is the expected format for a
+      binarized sparse feature matrix (e.g. list of set bits). For graphs with
+      multiple node types, each with different feature spaces, we represent all
+      nodes in X using a globally concatenated binary feature spaces (e.g. if each
+      of our 10 node types have 500 unique features, our combined X would have
+      5000 columns). Nodes without any features are still considered as part of X
+      and considered as part of the total N throughout SDH.
 
 - tk_booleanizer_t
     - encode_sparse/dense for ivec/cvec

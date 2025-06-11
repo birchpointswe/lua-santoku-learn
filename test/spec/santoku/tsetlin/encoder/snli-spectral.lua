@@ -14,26 +14,31 @@ local booleanizer = require("santoku.tsetlin.booleanizer")
 local eval = require("santoku.tsetlin.evaluator")
 local graph = require("santoku.tsetlin.graph")
 local tch = require("santoku.tsetlin.tch")
+local itq = require("santoku.tsetlin.itq")
 local tokenizer = require("santoku.tsetlin.tokenizer")
 local spectral = require("santoku.tsetlin.spectral")
 
 local TRAIN_TEST_RATIO = 0.8
-local TM_ITERS = 10
+local TM_ITERS = 100
 local MAX_RECORDS = nil
 local EVALUATE_EVERY = 1
 local THREADS = nil
 
 local HIDDEN = 64
 local CLAUSES = 512
-local TARGET = 0.1
+local TARGET = 64
 local SPECIFICITY = 60
 
-local TRANS_HOPS = 2
+local ITQ = false
+local ITQ_ITERS = 100
+local TCH = true
+local KNN = 1
+local TRANS_HOPS = 1
 local TRANS_POS = 0
 local TRANS_NEG = 2
 local COREX_TOP_ITERS = 300
 local COREX_TOP_ANCHOR = 1000.0
-local TOP_ALGO = "chi2" -- mi, chi2, or corex
+local TOP_ALGO = "chi2" -- random, mi, chi2, or corex
 local TOP_K = 1024
 
 local TOKENIZER_CONFIG = {
@@ -41,10 +46,10 @@ local TOKENIZER_CONFIG = {
   min_df = 0.001,
   max_len = 20,
   min_len = 1,
-  max_run = 1,
-  ngrams = 3,
-  cgrams_min = 3,
-  cgrams_max = 4,
+  max_run = 2,
+  ngrams = 2,
+  cgrams_min = 0,
+  cgrams_max = 0,
   skips = 2,
   negations = 4,
   align = tm.align
@@ -84,6 +89,7 @@ test("tsetlin", function ()
     pos = train.pos,
     neg = train.neg,
     index = train.index,
+    knn = KNN,
     trans_hops = TRANS_HOPS,
     trans_pos = TRANS_POS,
     trans_neg = TRANS_NEG,
@@ -106,23 +112,39 @@ test("tsetlin", function ()
   })
 
   print("\nBooleanizing\n")
-  local bzr = booleanizer.create({ n_thresholds = 1 })
-  bzr:observe(train.codes0, HIDDEN)
-  bzr:finalize()
-  train.codes0 = bzr:encode(train.codes0, HIDDEN)
-  train.n_hidden = bzr:bits()
+  if ITQ then
+    train.n_hidden = HIDDEN
+    train.codes0 = itq.encode({
+      codes = train.codes0,
+      n_hidden = HIDDEN,
+      iterations = ITQ_ITERS,
+      threads = THREADS,
+      each = function (i, j)
+        local d, dd = stopwatch()
+        str.printf("Time: %6.2f %6.2f  ITQ Iter %d  Objective: %6.2f\n", d, dd, i, j)
+      end
+    })
+  else
+    local bzr = booleanizer.create({ n_thresholds = 1 })
+    bzr:observe(train.codes0, HIDDEN)
+    bzr:finalize()
+    train.codes0 = bzr:encode(train.codes0, HIDDEN)
+    train.n_hidden = bzr:bits()
+  end
 
-  print("\nRefining\n")
-  tch.refine({
-    codes = train.codes0,
-    graph = train.graph,
-    n_hidden = train.n_hidden,
-    threads = THREADS,
-    each = function (s)
-      local d, dd = stopwatch()
-      str.printf("Time: %6.2f %6.2f  TCH Steps: %3d\n", d, dd, s)
-    end
-  })
+  if TCH then
+    print("\nRefining\n")
+    tch.refine({
+      codes = train.codes0,
+      graph = train.graph,
+      n_hidden = train.n_hidden,
+      threads = THREADS,
+      each = function (s)
+        local d, dd = stopwatch()
+        str.printf("Time: %6.2f %6.2f  TCH Steps: %3d\n", d, dd, s)
+      end
+    })
+  end
 
   train.codes0_raw = train.codes0:raw_bitmap(train.n_sentences, train.n_hidden)
   train.similarity0 = eval.optimize_retrieval(train.codes0_raw, train.ids0, train.pos, train.neg, train.n_hidden, THREADS) -- luacheck: ignore
@@ -140,6 +162,13 @@ test("tsetlin", function ()
   local top_v =
     TOP_ALGO == "chi2" and train.sentences:top_chi2(train.codes0_raw, train.n_sentences, dataset.n_features, train.n_hidden, TOP_K, THREADS) or -- luacheck: ignore
     TOP_ALGO == "mi" and train.sentences:top_mi(train.codes0_raw, train.n_sentences, dataset.n_features, train.n_hidden, TOP_K, THREADS) or -- luacheck: ignore
+    TOP_ALGO == "random" and (function ()
+      local v = ivec.create(dataset.n_features)
+      v:fill_indices()
+      v:shuffle()
+      v:setn(TOP_K)
+      return v
+    end)() or -- luacheck: ignore
     TOP_ALGO == "corex" and (function ()
       print("Creating Corex")
       train.sel_corpus = ivec.create(train.sentences)
