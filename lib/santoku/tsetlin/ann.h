@@ -566,7 +566,7 @@ static inline void tk_ann_setup_hash_bits_random (
   tk_ivec_fill_indices(A->hash_bits);
   tk_ivec_shuffle(A->hash_bits);
   A->hash_bits->n = n_hash_bits;
-  tk_ivec_resize(L, A->hash_bits, n_hash_bits);
+  tk_ivec_resize(L, A->hash_bits, n_hash_bits, true);
 }
 
 static inline void tk_ann_setup_hash_bits_exhaustive (

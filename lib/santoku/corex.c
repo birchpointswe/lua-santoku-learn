@@ -944,9 +944,12 @@ static inline void _tk_corex_train (
       lua_pushnumber(L, C->last_tc);
       lua_pushnumber(L, C->tc_dev);
       lua_call(L, 3, 1);
-      if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0)
+      if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0) {
+        lua_pop(L, 1);
         break;
-      lua_pop(L, 1);
+      } else {
+        lua_pop(L, 1);
+      }
     }
   }
   tk_corex_shrink(C);
