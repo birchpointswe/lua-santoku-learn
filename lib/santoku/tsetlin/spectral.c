@@ -157,7 +157,6 @@ static inline void tm_run_spectral (
   tk_threads_signal(pool, TK_SPECTRAL_FINALIZE);
 
   // Cleanup
-  free(spec.laplacian);
   free(spec.evals);
   free(spec.evecs);
   free(spec.resNorms);
@@ -169,6 +168,9 @@ static inline void tm_run_spectral (
     lua_pushinteger(L, params.stats.numMatvecs);
     lua_call(L, 1, 0);
   }
+
+  // Push laplacian
+  tk_dvec_create(L, n_nodes, spec.laplacian, 0);
 }
 
 static inline int tm_encode (lua_State *L)
@@ -202,7 +204,7 @@ static inline int tm_encode (lua_State *L)
 
   // Cleanup
   tk_threads_destroy(pool);
-  return 2;
+  return 3;
 }
 
 static luaL_Reg tm_codebook_fns[] =

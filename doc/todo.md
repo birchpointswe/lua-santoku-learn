@@ -1,47 +1,5 @@
 # Now
 
-- Chore
-    - Sanity check older version to confirm encoder accuracy is as expected
-    - Set num threads for blas in ITQ
-
-- Eval
-    - Table input to entropy_stats and optimize_retrieval
-    - Reorganize optimize_retrieval as per optimize_clustering
-
-- tk_xvec_t
-    - Align Lua/C APIs (currently out of sync for pvec, rvec, etc)
-
-- tk_cvec_t
-    - Use for Corex output, TM input/output, ANN input/output, TCH input/output
-    - Standardize bits APIs between cvec and ivec
-        - Rename to tk_ivec/tk_cvec_bits_xxx
-        - Convert between ivec/cvec with tk_ivec_bits_cvec and tk_cvec_bits_ivec
-        - Special ivec_bits_xxx methods
-            - top_chi2/mi, score chi2/mi, filter, extend, cvec
-        - Special cvec_bitx_xxx methods
-            - top_entropy, score_entropy, flip_interleave, filter, extend, ivec
-
-- tk_graph_t
-    - Parallelize transitive expansion
-
-- tk_xxmap/set_t:
-    - Templatize over khash/kbtree
-    - Proper Lua/C API like tk_xvec_t
-
-- tk_inv/ann_t
-    - Shrink
-    - Persist/load to/from string/file
-    - Demo search on train/test codes (for ann) and raw features (for inv)
-
-- TBHSS
-    - Rename
-    - Integrate latest TM updates
-    - Explore classify
-    - Explore encode
-    - Index & search
-
-# Next
-
 - Supervised discrete hashing:
     - Phase 0: Form a fully connected graph and adjacency lists from
       ground-truth similar/dissimilar pairs and performing graph enrichment
@@ -73,6 +31,13 @@
       your K-bit code. Optionally, train K sparse binary classifiers on your final
       B if you need non-linear bit boundaries.
     --
+    - At each SDH iteration compute V=X·P, threshold to B' for both training and
+      testing samples, running encoding_accuracy and optimize_retrieval to guage
+      performance. Optionally, move on to the K-TMs/classifiers stage if the
+      linear encoder using P is insufficient. When using the separate classifier
+      stage, μ can be dialed up and λ down to prefer laplacian over
+      reconstruction.
+    --
     - For graphs with a single node type, X is the expected format for a
       binarized sparse feature matrix (e.g. list of set bits). For graphs with
       multiple node types, each with different feature spaces, we represent all
@@ -81,12 +46,64 @@
       5000 columns). Nodes without any features are still considered as part of X
       and considered as part of the total N throughout SDH.
 
+- tk_inv/ann_t
+    - Nearest neighbor search
+    - Persist/load to/from disk/string
+
+- Chore
+    - Sanity check older version to confirm encoder accuracy is as expected
+    - Set num threads for blas in spectral, itq, and anywhere else so that
+      THREADS is respected
+
+- Eval
+    - Table input to entropy_stats and optimize_retrieval
+    - Reorganize optimize_retrieval as per optimize_clustering
+
+# Next
+
+- tk_xvec_t
+    - Align Lua/C APIs (currently out of sync for pvec, rvec, etc)
+
+- tk_cvec_t
+    - Use for Corex output, TM input/output, ANN input/output, TCH input/output
+    - Standardize bits APIs between cvec and ivec
+        - Rename to tk_ivec/tk_cvec_bits_xxx
+        - Convert between ivec/cvec with tk_ivec_bits_cvec and tk_cvec_bits_ivec
+        - Special ivec_bits_xxx methods
+            - top_chi2/mi, score chi2/mi, filter, extend, cvec
+        - Special cvec_bitx_xxx methods
+            - top_entropy, score_entropy, flip_interleave, filter, extend, ivec
+
+- tk_xxmap/set_t:
+    - Templatize over khash/kbtree
+    - Proper Lua/C API like tk_xvec_t
+
+- TBHSS
+    - Rename
+    - Integrate latest TM updates
+    - Explore classify
+    - Explore encode
+    - Index & search
+    - Move hyperparameter search/exploration code into TM library
+    - Restrict TBHSS code to cover cli usage, pre-processing, etc.
+
+- tk_graph_t
+    - Parallelize transitive expansion
+
+- TCH, ITQ
+    - Parallelize
+
+- tk_inv/ann_t
+    - Shrink/compaction
+
 - tk_booleanizer_t
+    - Mergable booleanizers, externally paralellized + merged
     - encode_sparse/dense for ivec/cvec
     - When both double and string observations found, split into two different
       features, one for continuous and the other for categorical
 
 - tk_tokenizer_t
+    - Mergable tokenizers parallelized independently
     - Proper Lua/C API and tk naming
     - Use booleanizer under the hood
     - Include text statistics as continuous/thresholded values
@@ -144,9 +161,6 @@
 
 - vec/tpl.h
       Allow tk_vec_noundef to skip undefs?
-
-- TCH
-    - Add learnability to optimization?
 
 - Corex
     - Should anchor multiply feature MI instead of hard-boosting it?

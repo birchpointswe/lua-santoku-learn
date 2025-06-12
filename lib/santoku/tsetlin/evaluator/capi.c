@@ -248,7 +248,9 @@ static inline int tm_class_accuracy (lua_State *L)
 static inline int tm_entropy_stats (lua_State *L)
 {
   lua_settop(L, 4);
-  tk_bits_t *codes = (tk_bits_t *) tk_lua_checkustring(L, 1, "expected");
+  tk_bits_t *codes;
+  tk_cvec_t *pvec = tk_cvec_peekopt(L, 1);
+  codes = pvec != NULL ? (tk_bits_t *) pvec->a : (tk_bits_t *) tk_lua_checkustring(L, 1, "codes");
   unsigned int n_samples = tk_lua_checkunsigned(L, 2, "n_samples");
   unsigned int n_classes = tk_lua_checkunsigned(L, 3, "n_hidden");
   unsigned int n_threads = tk_threads_getn(L, 4, "n_threads", NULL);
@@ -356,8 +358,11 @@ static inline int tm_clustering_accuracy (lua_State *L)
 static inline int tm_encoding_accuracy (lua_State *L)
 {
   lua_settop(L, 5);
-  tk_bits_t *codes_predicted = (tk_bits_t *) tk_lua_checkustring(L, 1, "predicted");
-  tk_bits_t *codes_expected = (tk_bits_t *) tk_lua_checkustring(L, 2, "expected");
+  tk_bits_t *codes_predicted, *codes_expected;
+  tk_cvec_t *pvec = tk_cvec_peekopt(L, 1);
+  tk_cvec_t *evec = tk_cvec_peekopt(L, 2);
+  codes_predicted = pvec != NULL ? (tk_bits_t *) pvec->a : (tk_bits_t *) tk_lua_checkustring(L, 1, "predicted");
+  codes_expected = evec != NULL ? (tk_bits_t *) evec->a : (tk_bits_t *) tk_lua_checkustring(L, 2, "expected");
   unsigned int n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
   unsigned int n_classes = tk_lua_checkunsigned(L, 4, "n_hidden");
   unsigned int n_threads = tk_threads_getn(L, 5, "n_threads", NULL);
@@ -536,7 +541,9 @@ static inline int tm_optimize_retrieval (lua_State *L)
 {
   lua_settop(L, 6);
 
-  tk_bits_t *codes = (tk_bits_t *) tk_lua_checkustring(L, 1, "codes");
+  tk_bits_t *codes;
+  tk_cvec_t *pvec = tk_cvec_peekopt(L, 1);
+  codes = pvec != NULL ? (tk_bits_t *) pvec->a : (tk_bits_t *) tk_lua_checkustring(L, 1, "codes");
   tk_ivec_t *ids = tk_ivec_peekopt(L, 2);
   tk_ivec_t *pos = tk_ivec_peek(L, 3, "pos");
   tk_ivec_t *neg = tk_ivec_peek(L, 4, "neg");
