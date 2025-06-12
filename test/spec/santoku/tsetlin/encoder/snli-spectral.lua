@@ -29,9 +29,9 @@ local CLAUSES = 512
 local TARGET = 64
 local SPECIFICITY = 60
 
-local ITQ = false
+local ITQ = true
 local ITQ_ITERS = 100
-local TCH = true
+local TCH = false
 local KNN = 1
 local TRANS_HOPS = 1
 local TRANS_POS = 0
