@@ -67,6 +67,11 @@ static inline tk_inv_t *tk_inv_peek (lua_State *L, int i)
   return (tk_inv_t *) luaL_checkudata(L, i, TK_INV_MT);
 }
 
+static inline tk_inv_t *tk_inv_peekopt (lua_State *L, int i)
+{
+  return (tk_inv_t *) tk_lua_testuserdata(L, i, TK_INV_MT);
+}
+
 static inline void tk_inv_shrink (
   tk_inv_t *I
 ) {

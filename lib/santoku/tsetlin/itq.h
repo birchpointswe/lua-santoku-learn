@@ -75,11 +75,11 @@ static inline void tk_itq_encode (
     }
 
 
-    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    cblas_dgemm(CblasRowMajor, CblasTrans, CblasTrans,
                 n_hidden, n_hidden, n_hidden,
-                1.0, U, n_hidden,
-                VT, n_hidden,
-                0.0, R, n_hidden);
+                1.0, VT, n_hidden,
+                U,  n_hidden,
+                0.0, R,  n_hidden);
 
 
     if (i_each >= 0) {

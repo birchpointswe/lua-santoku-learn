@@ -23,7 +23,7 @@ local env = {
     "lua >= 5.1",
     "santoku >= 0.0.272-1",
     "santoku-threads >= 0.0.5-1",
-    "santoku-matrix >= 0.0.68-1",
+    "santoku-matrix >= 0.0.70-1",
   },
 
   test = {
