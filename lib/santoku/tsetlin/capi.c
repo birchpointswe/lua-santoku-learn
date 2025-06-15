@@ -478,9 +478,9 @@ static void tk_classifier_setup_thread (
         unsigned int m = tm->state_bits - 1;
         tk_bits_t *actions = tm_state_actions(tm, clause);
         tk_bits_t *counts = tm_state_counts(tm, clause, input_chunk);
-        actions[input_chunk] = 0;
+        actions[input_chunk] = ZERO_MASK;
         for (unsigned int b = 0; b < m; b ++)
-          counts[b] = ~((tk_bits_t)0);
+          counts[b] = ALL_MASK;
       }
     }
   }

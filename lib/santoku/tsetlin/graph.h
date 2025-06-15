@@ -6,6 +6,7 @@
 #include <santoku/ivec.h>
 #include <santoku/iumap.h>
 #include <santoku/tsetlin/inv.h>
+#include <santoku/tsetlin/ann.h>
 #include <float.h>
 
 #define TK_GRAPH_MT "tk_graph_t"
@@ -36,11 +37,20 @@ typedef struct tk_graph_thread_s tk_graph_thread_t;
 
 typedef struct tk_graph_s {
   tm_pairs_t *pairs;
-  tk_inv_hoods_t *hoods;
   tk_ivec_t *uids;
   tk_iumap_t *uid_hood;
   tk_graph_adj_t *adj_pos, *adj_neg;
-  tk_inv_t *inv;
+  struct {
+    bool is_inv;
+    union {
+      tk_inv_t *inv;
+      tk_ann_t *ann;
+    };
+    union {
+      tk_inv_hoods_t *inv_hoods;
+      tk_ann_hoods_t *ann_hoods;
+    };
+  } index;
   uint64_t knn_cache;
   double knn_eps;
   tk_ivec_t *pos, *neg;

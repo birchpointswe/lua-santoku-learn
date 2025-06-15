@@ -29,7 +29,7 @@ end
 
 M.optimize_clustering = function (opts)
 
-  local margins = ivec.create(opts.index:features())
+  local margins = ivec.create(opts.index:features() + 1)
   margins:fill_indices()
 
   local cache = {}

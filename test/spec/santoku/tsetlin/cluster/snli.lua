@@ -6,20 +6,21 @@ local utc = require("santoku.utc")
 local tm = require("santoku.tsetlin")
 local ds = require("santoku.tsetlin.dataset")
 local inv = require("santoku.tsetlin.inv")
-local booleanizer = require("santoku.tsetlin.booleanizer")
 local ann = require("santoku.tsetlin.ann")
 local eval = require("santoku.tsetlin.evaluator")
 local graph = require("santoku.tsetlin.graph")
 local tch = require("santoku.tsetlin.tch")
+local itq = require("santoku.tsetlin.itq")
 local tokenizer = require("santoku.tsetlin.tokenizer")
 local spectral = require("santoku.tsetlin.spectral")
 
 local MAX_RECORDS = nil
 local THREADS = nil
 local HIDDEN = 64
-local TRANS_HOPS = 2
+local KNN = 0
+local TRANS_HOPS = 0
 local TRANS_POS = 0
-local TRANS_NEG = 2
+local TRANS_NEG = 0
 local ANN_BUCKET_TARGET = 10
 local DBSCAN_MIN = 1
 
@@ -69,6 +70,7 @@ test("tsetlin", function ()
     pos = dataset.pos,
     neg = dataset.neg,
     index = dataset.index,
+    knn = KNN,
     trans_hops = TRANS_HOPS,
     trans_pos = TRANS_POS,
     trans_neg = TRANS_NEG,
@@ -91,17 +93,21 @@ test("tsetlin", function ()
   })
 
   print("\nBooleanizing\n")
-  local bzr = booleanizer.create({ n_thresholds = 1, threads = THREADS })
-  bzr:observe(dataset.codes_spectral, HIDDEN)
-  bzr:finalize()
-  dataset.codes_spectral = bzr:encode(dataset.codes_spectral, HIDDEN)
-  dataset.n_hidden = bzr:bits()
+  dataset.codes_spectral = itq.encode({
+    codes = dataset.codes_spectral,
+    n_hidden = HIDDEN,
+    threads = THREADS,
+    each = function (i, j)
+      local d, dd = stopwatch()
+      str.printf("Time: %6.2f %6.2f  ITQ Iter %d  Objective: %6.2f\n", d, dd, i, j)
+    end
+  })
 
   print("\nRefining\n")
   tch.refine({
     codes = dataset.codes_spectral,
     graph = dataset.graph,
-    n_hidden = dataset.n_hidden,
+    n_hidden = HIDDEN,
     threads = THREADS,
     each = function (s)
       local d, dd = stopwatch()
@@ -109,11 +115,17 @@ test("tsetlin", function ()
     end
   })
 
-  dataset.codes_raw = dataset.codes_spectral:raw_bitmap(dataset.n_sentences, dataset.n_hidden)
-  dataset.similarity0 = eval.optimize_retrieval(dataset.codes_raw, dataset.ids_spectral, dataset.pos, dataset.neg, dataset.n_hidden, THREADS) -- luacheck: ignore
+  dataset.codes_raw = dataset.codes_spectral:raw_bitmap(dataset.n_sentences, HIDDEN)
+  dataset.similarity0 = eval.optimize_retrieval({
+    codes = dataset.codes_raw,
+    ids = dataset.ids_spectral,
+    pos = dataset.pos,
+    neg = dataset.neg,
+    n_hidden = HIDDEN, THREADS
+  })
   str.printi("AUC: %.2f#(auc) | F1: %.2f#(f1) | Precision: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", -- luacheck: ignore
     dataset.similarity0)
-  dataset.entropy0 = eval.entropy_stats(dataset.codes_raw, dataset.n_sentences, dataset.n_hidden, THREADS)
+  dataset.entropy0 = eval.entropy_stats(dataset.codes_raw, dataset.n_sentences, HIDDEN, THREADS)
   str.printi("Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)\n",
     dataset.entropy0)
 
@@ -121,7 +133,7 @@ test("tsetlin", function ()
   local index = ann.create({
     expected_size = dataset.n_sentences,
     bucket_target = ANN_BUCKET_TARGET,
-    features = dataset.n_hidden,
+    features = HIDDEN,
     threads = THREADS,
   })
   index:add(dataset.codes_raw, dataset.ids_spectral)

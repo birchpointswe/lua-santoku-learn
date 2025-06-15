@@ -7,6 +7,7 @@ static inline tk_graph_t *tm_graph_create (
   tk_ivec_t *pos,
   tk_ivec_t *neg,
   tk_inv_t *inv,
+  tk_ann_t *ann,
   uint64_t knn_cache,
   double knn_eps,
   unsigned int n_threads
@@ -120,8 +121,7 @@ static inline void tk_dsu_init (
   bool l;
   tm_pair_t p;
   kh_foreach(pairs, p, l, ({
-    if (l)
-      tk_dsu_union(L, dsu, p.u, p.v);
+    tk_dsu_union(L, dsu, p.u, p.v);
   }))
 }
 
@@ -194,25 +194,50 @@ static inline void tm_add_knn (
   tk_ivec_shuffle(shuf);
 
   // Add neighbors
-  for (uint64_t su = 0; su < shuf->n; su ++) {
-    int64_t i = shuf->a[su];
-    int64_t u = graph->uids->a[i];
-    tk_rvec_t *ns = graph->hoods->a[i];
-    uint64_t added = 0;
-    for (khint_t j = 0; j < ns->n && added < knn; j ++) {
-      tk_rank_t r = ns->a[j];
-      if (r.i > (int64_t) graph->uids->n || r.i < 0)
-        continue;
-      int64_t v = graph->uids->a[r.i];
-      tm_pair_t e = tm_pair(u, v);
-      khi = kh_put(pairs, graph->pairs, e, &kha);
-      if (!kha)
-        continue;
-      added ++;
-      kh_value(graph->pairs, khi) = true;
-      tk_graph_add_adj(graph, u, v, true);
-      tk_dsu_union(L, &graph->dsu, u, v);
-      graph->n_pos ++;
+  // TODO: Unified/generalized INV/ANN wrapper
+  if (graph->index.is_inv) {
+    for (uint64_t su = 0; su < shuf->n; su ++) {
+      int64_t i = shuf->a[su];
+      int64_t u = graph->uids->a[i];
+      tk_rvec_t *ns = graph->index.inv_hoods->a[i];
+      uint64_t added = 0;
+      for (khint_t j = 0; j < ns->n && added < knn; j ++) {
+        tk_rank_t r = ns->a[j];
+        if (r.i > (int64_t) graph->uids->n || r.i < 0)
+          continue;
+        int64_t v = graph->uids->a[r.i];
+        tm_pair_t e = tm_pair(u, v);
+        khi = kh_put(pairs, graph->pairs, e, &kha);
+        if (!kha)
+          continue;
+        added ++;
+        kh_value(graph->pairs, khi) = true;
+        tk_graph_add_adj(graph, u, v, true);
+        tk_dsu_union(L, &graph->dsu, u, v);
+        graph->n_pos ++;
+      }
+    }
+  } else {
+    for (uint64_t su = 0; su < shuf->n; su ++) {
+      int64_t i = shuf->a[su];
+      int64_t u = graph->uids->a[i];
+      tk_pvec_t *ns = graph->index.ann_hoods->a[i];
+      uint64_t added = 0;
+      for (khint_t j = 0; j < ns->n && added < knn; j ++) {
+        tk_pair_t r = ns->a[j];
+        if (r.i > (int64_t) graph->uids->n || r.i < 0)
+          continue;
+        int64_t v = graph->uids->a[r.i];
+        tm_pair_t e = tm_pair(u, v);
+        khi = kh_put(pairs, graph->pairs, e, &kha);
+        if (!kha)
+          continue;
+        added ++;
+        kh_value(graph->pairs, khi) = true;
+        tk_graph_add_adj(graph, u, v, true);
+        tk_dsu_union(L, &graph->dsu, u, v);
+        graph->n_pos ++;
+      }
     }
   }
 
@@ -233,29 +258,56 @@ static inline void tm_add_mst (
   tk_ivec_shuffle(shuf);
 
   // Gather all inter-component edges
+  // TODO: Unified/generalized INV/ANN wrapper
   tm_candidates_t all_candidates;
   kv_init(all_candidates);
-  for (uint64_t su = 0; su < shuf->n; su ++) {
-    int64_t u = shuf->a[su];
-    khi = tk_iumap_get(graph->uid_hood, u);
-    if (khi == tk_iumap_end(graph->uid_hood))
-      continue;
-    int64_t i = tk_iumap_value(graph->uid_hood,  khi);
-    tk_rvec_t *ns = graph->hoods->a[i];
-    int64_t cu = tk_dsu_find(&graph->dsu, u);
-    for (khint_t j = 0; j < ns->n; j ++) {
-      tk_rank_t r = ns->a[j];
-      if (r.i > (int64_t) graph->uids->n || r.i < 0)
+  if (graph->index.is_inv) {
+    for (uint64_t su = 0; su < shuf->n; su ++) {
+      int64_t u = shuf->a[su];
+      khi = tk_iumap_get(graph->uid_hood, u);
+      if (khi == tk_iumap_end(graph->uid_hood))
         continue;
-      int64_t v = graph->uids->a[r.i];
-      if (cu == tk_dsu_find(&graph->dsu, v))
+      int64_t i = tk_iumap_value(graph->uid_hood,  khi);
+      tk_rvec_t *ns = graph->index.inv_hoods->a[i];
+      int64_t cu = tk_dsu_find(&graph->dsu, u);
+      for (khint_t j = 0; j < ns->n; j ++) {
+        tk_rank_t r = ns->a[j];
+        if (r.i > (int64_t) graph->uids->n || r.i < 0)
+          continue;
+        int64_t v = graph->uids->a[r.i];
+        if (cu == tk_dsu_find(&graph->dsu, v))
+          continue;
+        tm_pair_t e = tm_pair(u, v);
+        khi = kh_get(pairs, graph->pairs, e);
+        if (khi != kh_end(graph->pairs))
+          continue;
+        // TODO: Can we use heap?
+        kv_push(tm_candidate_t, all_candidates, tm_candidate(u, v, r.d));
+      }
+    }
+  } else {
+    for (uint64_t su = 0; su < shuf->n; su ++) {
+      int64_t u = shuf->a[su];
+      khi = tk_iumap_get(graph->uid_hood, u);
+      if (khi == tk_iumap_end(graph->uid_hood))
         continue;
-      tm_pair_t e = tm_pair(u, v);
-      khi = kh_get(pairs, graph->pairs, e);
-      if (khi != kh_end(graph->pairs))
-        continue;
-      // TODO: Can we use heap?
-      kv_push(tm_candidate_t, all_candidates, tm_candidate(u, v, r.d));
+      int64_t i = tk_iumap_value(graph->uid_hood,  khi);
+      tk_pvec_t *ns = graph->index.ann_hoods->a[i];
+      int64_t cu = tk_dsu_find(&graph->dsu, u);
+      for (khint_t j = 0; j < ns->n; j ++) {
+        tk_pair_t r = ns->a[j];
+        if (r.i > (int64_t) graph->uids->n || r.i < 0)
+          continue;
+        int64_t v = graph->uids->a[r.i];
+        if (cu == tk_dsu_find(&graph->dsu, v))
+          continue;
+        tm_pair_t e = tm_pair(u, v);
+        khi = kh_get(pairs, graph->pairs, e);
+        if (khi != kh_end(graph->pairs))
+          continue;
+        // TODO: Can we use heap?
+        kv_push(tm_candidate_t, all_candidates, tm_candidate(u, v, (double) r.p));
+      }
     }
   }
 
@@ -282,6 +334,29 @@ static inline void tm_add_mst (
   // Cleanup
   kv_destroy(all_candidates);
   lua_pop(L, 1);
+}
+
+static inline double tm_dist (tk_graph_t *graph, int64_t u, int64_t v)
+{
+  if (graph->index.is_inv) {
+    size_t un;
+    int64_t *uset = tk_inv_get(graph->index.inv, u, &un);
+    if (uset == NULL)
+      return -1;
+    size_t wn;
+    int64_t *wset = tk_inv_get(graph->index.inv, v, &wn);
+    if (wset == NULL)
+      return -1;
+    return 1.0 - tk_inv_jaccard(uset, un, wset, wn);
+  } else {
+    char *uset = tk_ann_get(graph->index.ann, u);
+    if (uset == NULL)
+      return -1;
+    char *wset = tk_ann_get(graph->index.ann, v);
+    if (wset == NULL)
+      return -1;
+    return (double) tk_ann_hamming(uset, wset, graph->index.ann->features);
+  }
 }
 
 // TODO: Parallelize
@@ -342,15 +417,9 @@ static inline void tm_add_transatives (
       if (uneg != NULL && tk_iuset_contains(uneg, iw))
         continue;
       w = graph->uids->a[iw];
-      size_t un;
-      int64_t *uset = tk_inv_get(graph->inv, u, &un);
-      if (uset == NULL)
+      double dist = tm_dist(graph, u, w);
+      if (dist < 0)
         continue;
-      size_t wn;
-      int64_t *wset = tk_inv_get(graph->inv, w, &wn);
-      if (wset == NULL)
-        continue;
-      double dist = 1.0 - tk_inv_jaccard(uset, un, wset, wn);
       // TODO: Can we use heap?
       kv_push(tm_candidate_t, candidates, tm_candidate(u, w, dist));
     }))
@@ -400,15 +469,9 @@ static inline void tm_add_transatives (
           continue;
         tk_iuset_put(seen, iw, &kha);
         w = graph->uids->a[iw];
-        size_t un;
-        int64_t *uset = tk_inv_get(graph->inv, u, &un);
-        if (uset == NULL)
+        double dist = tm_dist(graph, u, w);
+        if (dist < 0)
           continue;
-        size_t wn;
-        int64_t *wset = tk_inv_get(graph->inv, w, &wn);
-        if (wset == NULL)
-          continue;
-        double dist = 1.0 - tk_inv_jaccard(uset, un, wset, wn);
         // TODO: Can we use heap?
         kv_push(tm_candidate_t, candidates, tm_candidate(u, w, dist));
       }))
@@ -423,6 +486,7 @@ static inline void tm_add_transatives (
         continue;
       kh_value(graph->pairs, khi) = false;
       kv_push(tm_pair_t, new_neg, tm_pair(u, c.v));
+      tk_dsu_union(L, &graph->dsu, u, c.v);
       graph->n_neg ++;
     }
   }
@@ -554,6 +618,17 @@ static inline int tm_graph_gc (lua_State *L)
   return 0;
 }
 
+static inline void tm_setup_hoods (lua_State *L, int Gi, tk_graph_t *graph)
+{
+  if (graph->index.is_inv)
+    tk_inv_neighborhoods(L, graph->index.inv, graph->knn_cache, graph->knn_eps, &graph->index.inv_hoods, &graph->uids);
+  else
+    tk_ann_neighborhoods(L, graph->index.ann, graph->knn_cache, graph->knn_eps, &graph->index.ann_hoods, &graph->uids);
+  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2); // uids
+  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1); // hoods
+  lua_pop(L, 2);
+}
+
 static inline int tm_create (lua_State *L)
 {
   lua_settop(L, 1);
@@ -567,7 +642,10 @@ static inline int tm_create (lua_State *L)
   tk_ivec_t *neg = tk_ivec_peek(L, -1, "neg");
 
   lua_getfield(L, 1, "index");
-  tk_inv_t *inv = tk_inv_peek(L, -1);
+  tk_inv_t *inv = tk_inv_peekopt(L, -1);
+  tk_ann_t *ann = tk_ann_peekopt(L, -1);
+  if (inv == NULL && ann == NULL)
+    tk_lua_verror(L, 3, "graph", "index", "either tk_ann_t or tk_inv_t must be provided");
 
   uint64_t knn = tk_lua_foptunsigned(L, 1, "graph", "knn", 0);
   uint64_t knn_cache = tk_lua_foptunsigned(L, 1, "graph", "knn_cache", 4);
@@ -588,14 +666,11 @@ static inline int tm_create (lua_State *L)
   }
 
   // Init graph
-  tk_graph_t *graph = tm_graph_create(L, pos, neg, inv, knn_cache, knn_eps, n_threads);
+  tk_graph_t *graph = tm_graph_create(L, pos, neg, inv, ann, knn_cache, knn_eps, n_threads);
   int Gi = tk_lua_absindex(L, -1);
 
   // Query hoods from inv index
-  tk_inv_neighborhoods(L, graph->inv, graph->knn_cache, graph->knn_eps, &graph->hoods, &graph->uids);
-  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2); // uids
-  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1); // hoods
-  lua_pop(L, 2);
+  tm_setup_hoods(L, Gi, graph);
   // TODO: This should be returned by the index
   graph->uid_hood = tk_iumap_create();
   for (uint64_t i = 0; i < graph->uids->n; i ++) {
@@ -685,6 +760,7 @@ static inline tk_graph_t *tm_graph_create (
   tk_ivec_t *pos,
   tk_ivec_t *neg,
   tk_inv_t *inv,
+  tk_ann_t *ann,
   uint64_t knn_cache,
   double knn_eps,
   unsigned int n_threads
@@ -696,7 +772,11 @@ static inline tk_graph_t *tm_graph_create (
   graph->knn_cache = knn_cache;
   graph->knn_eps = knn_eps;
   graph->pairs = kh_init(pairs);
-  graph->inv = inv;
+  graph->index.is_inv = inv != NULL;
+  if (inv == NULL)
+    graph->index.ann = ann;
+  else
+    graph->index.inv = inv;
   graph->pos = pos;
   graph->neg = neg;
   graph->n_pos = pos->n / 2;

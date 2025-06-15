@@ -15,7 +15,7 @@ static inline int tk_itq_encode_lua (lua_State *L)
   tk_dvec_t *codes = tk_dvec_peek(L, -1, "codes");
 
   uint64_t n_hidden = tk_lua_fcheckunsigned(L, 1, "itq", "n_hidden");
-  uint64_t iterations = tk_lua_fcheckunsigned(L, 1, "itq", "iterations");
+  uint64_t iterations = tk_lua_foptunsigned(L, 1, "itq", "iterations", n_hidden);
 
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
