@@ -10,7 +10,8 @@
 typedef enum {
   TK_SPECTRAL_INIT,
   TK_SPECTRAL_MATVEC,
-  TK_SPECTRAL_FINALIZE
+  TK_SPECTRAL_FINALIZE,
+  TK_SPECTRAL_CENTER
 } tk_spectral_stage_t;
 
 typedef struct {
@@ -27,6 +28,7 @@ typedef struct {
 typedef struct {
   tk_spectral_t *spec;
   uint64_t ifirst, ilast;
+  uint64_t hfirst, hlast;
 } tk_spectral_thread_t;
 
 static inline void tk_spectral_worker (void *dp, int sig)
@@ -42,6 +44,8 @@ static inline void tk_spectral_worker (void *dp, int sig)
   uint64_t n_hidden = data->spec->n_hidden;
   uint64_t ifirst = data->ifirst;
   uint64_t ilast = data->ilast;
+  uint64_t hfirst = data->hfirst;
+  uint64_t hlast = data->hlast;
   tk_graph_adj_t *adj_pos = data->spec->adj_pos;
   tk_graph_adj_t *adj_neg = data->spec->adj_neg;
   int64_t iv;
@@ -50,18 +54,22 @@ static inline void tk_spectral_worker (void *dp, int sig)
 
     case TK_SPECTRAL_INIT:
       for (uint64_t i = ifirst; i <= ilast; i ++) {
+        // NOTE: Apparently including negatives in this degree vector is common
+        // in practice but not strictly mathematically justified academically.
         laplacian[i] =
           (double) tk_iuset_size(adj_pos->a[i]) +
           (double) tk_iuset_size(adj_neg->a[i]);
         laplacian[i] =
           laplacian[i] > 0 ? 1.0 / sqrt((double) laplacian[i]) : 0.0;
+        if (!isfinite(laplacian[i]))
+          laplacian[i] = 0.0;
       }
       break;
 
     case TK_SPECTRAL_MATVEC:
       for (uint64_t i = ifirst; i <= ilast; i ++) {
         double scale_i = laplacian[i];
-        double sum = scale_i * x[i];
+        double sum = x[i];
         // Positive neighbors
         tk_iuset_foreach(adj_pos->a[i], iv, ({
           double w = scale_i * laplacian[iv];
@@ -80,6 +88,17 @@ static inline void tk_spectral_worker (void *dp, int sig)
       for (uint64_t i = ifirst; i <= ilast; i ++)
         for (uint64_t f = 0; f < n_hidden; f ++)
           z[i * n_hidden + f] = evecs[i + (f + 1) * n_nodes];
+      break;
+
+    case TK_SPECTRAL_CENTER:
+      for (uint64_t f = hfirst; f <= hlast; f ++) {
+        double mu = 0.0;
+        for (uint64_t i = 0; i < n_nodes; i ++)
+          mu += z[i * n_hidden + f];
+        mu /= n_nodes;
+        for (uint64_t i = 0; i < n_nodes; i ++)
+          z[i * n_hidden + f] -= mu;
+      }
       break;
 
   }
@@ -129,6 +148,7 @@ static inline void tm_run_spectral (
     pool->threads[i].data = data;
     data->spec = &spec;
     tk_thread_range(i, pool->n_threads, n_nodes, &data->ifirst, &data->ilast);
+    tk_thread_range(i, pool->n_threads, n_hidden, &data->hfirst, &data->hlast);
   }
 
   // Init laplacian
@@ -143,8 +163,11 @@ static inline void tm_run_spectral (
   params.matrixMatvec = tk_spectral_matvec;
   params.matrix = &spec;
   params.printLevel = 0;
-  params.eps = 1e-3;
-  params.target = primme_smallest;
+  params.eps = 1e-6;
+  params.target = primme_closest_abs;
+  params.numTargetShifts = 1;
+  params.targetShifts = tk_malloc(L, (size_t) params.numTargetShifts * sizeof(double));
+  params.targetShifts[0] = 0.0;
   spec.evals = tk_malloc(L, (size_t) params.numEvals * sizeof(double));
   spec.evecs = tk_malloc(L, (size_t) params.n * (size_t) params.numEvals * sizeof(double));
   spec.resNorms = tk_malloc(L, (size_t) params.numEvals * sizeof(double));
@@ -156,10 +179,14 @@ static inline void tm_run_spectral (
   // Copy eigenvectors into the output matrix, skipping the first
   tk_threads_signal(pool, TK_SPECTRAL_FINALIZE);
 
+  // Zero-center
+  tk_threads_signal(pool, TK_SPECTRAL_CENTER);
+
   // Cleanup
   free(spec.evals);
   free(spec.evecs);
   free(spec.resNorms);
+  free(params.targetShifts);
   primme_free(&params);
 
   // Log

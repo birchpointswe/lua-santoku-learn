@@ -63,6 +63,11 @@ static inline tk_ann_t *tk_ann_peek (lua_State *L, int i)
   return (tk_ann_t *) luaL_checkudata(L, i, TK_ANN_MT);
 }
 
+static inline tk_ann_t *tk_ann_peekopt (lua_State *L, int i)
+{
+  return (tk_ann_t *) tk_lua_testuserdata(L, i, TK_ANN_MT);
+}
+
 static inline void tk_ann_shrink (
   tk_ann_t *A
 ) {
@@ -368,6 +373,7 @@ static inline void tk_ann_neighborhoods (
   tk_iumap_destroy(sid_idx);
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = uids;
+  lua_remove(L, -3); // sids
 }
 
 static inline tk_pvec_t *tk_ann_neighbors (

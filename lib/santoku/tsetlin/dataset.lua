@@ -1,3 +1,4 @@
+require("santoku.rvec")
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local tbl = require("santoku.table")
 local tm = require("santoku.tsetlin")
@@ -160,6 +161,7 @@ M.read_binary_mnist = function (fp, n_features, max)
       break
     end
   end
+  arr.shuffle(problems, solutions)
   return {
     problems = problems,
     solutions = solutions,
@@ -185,11 +187,70 @@ local function _split_binary_mnist (dataset, s, e)
   }
 end
 
+M.add_binary_mnist_pairs = function (split, n_centers, n_negatives)
+  local pos, neg = ivec.create(), ivec.create()
+  local label = split.solutions
+  local N = split.n
+  local class_to_indices = {}
+  for i = 0, N - 1 do
+    local y = label:get(i)
+    if not class_to_indices[y] then
+      class_to_indices[y] = {}
+    end
+    table.insert(class_to_indices[y], i)
+  end
+  local centers_by_class = {}
+  for class, indices in pairs(class_to_indices) do
+    local count = #indices
+    local centers = {}
+    for _ = 1, math.min(n_centers, count) do
+      local idx = math.random(#indices)
+      table.insert(centers, indices[idx])
+      table.remove(indices, idx)
+    end
+    centers_by_class[class] = centers
+    for _, i in ipairs(indices) do
+      local center = centers[math.random(#centers)]
+      pos:push(i)
+      pos:push(center)
+    end
+  end
+  local classes = {}
+  for class in pairs(centers_by_class) do
+    table.insert(classes, class)
+  end
+  for i = 1, #classes do
+    local class_i = classes[i]
+    local centers_i = centers_by_class[class_i]
+    for _, ci in ipairs(centers_i) do
+      for _ = 1, n_negatives do
+        local other_class
+        repeat
+          other_class = classes[math.random(#classes)]
+        until other_class ~= class_i
+        local cj_list = centers_by_class[other_class]
+        if cj_list and #cj_list > 0 then
+          local cj = cj_list[math.random(#cj_list)]
+          neg:push(ci)
+          neg:push(cj)
+        end
+      end
+    end
+  end
+  split.pos = pos
+  split.neg = neg
+end
+
 M.split_binary_mnist = function (dataset, ratio)
-  local n_train = num.floor(#dataset.problems * ratio)
-  return
-    _split_binary_mnist(dataset, 1, n_train),
-    _split_binary_mnist(dataset, n_train + 1, #dataset.problems)
+  if ratio >= 1 then
+    return
+      _split_binary_mnist(dataset, 1, #dataset.problems)
+  else
+    local n_train = num.floor(#dataset.problems * ratio)
+    return
+      _split_binary_mnist(dataset, 1, n_train),
+      _split_binary_mnist(dataset, n_train + 1, #dataset.problems)
+  end
 end
 
 M.read_imdb = function (dir, max)
