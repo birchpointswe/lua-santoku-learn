@@ -8,13 +8,12 @@ local tm = require("santoku.tsetlin")
 local utc = require("santoku.utc")
 
 local TTR = 0.9
-local MAX = nil
-local THREADS = nil
+local MAX = 10000
 local EVALUATE_EVERY = 1
 local ITERATIONS = 10
 
 local CLASSES = 10
-local CLAUSES = 4096
+local CLAUSES = 1024
 local TARGET = 32
 local SPECIFICITY = 10
 local NEGATIVE = 0.1
@@ -24,8 +23,8 @@ local FEATURES = 784
 test("tsetlin", function ()
 
   print("Reading data")
-  local dataset = ds.read_binary_mnist("test/res/BinarizedMNISTData/MNISTTraining.txt", FEATURES, MAX)
-  local train, test = ds.split_binary_mnist(dataset, TTR, true)
+  local dataset = ds.read_binary_mnist("test/res/mnist.70k.txt", FEATURES, MAX)
+  local train, test = ds.split_binary_mnist(dataset, TTR)
 
   print("Transforming train")
   train.problems:flip_interleave(train.n, dataset.n_features)
@@ -45,7 +44,6 @@ test("tsetlin", function ()
     target = TARGET,
     specificity = SPECIFICITY,
     negative = NEGATIVE,
-    threads = THREADS,
   })
 
   print("Training")

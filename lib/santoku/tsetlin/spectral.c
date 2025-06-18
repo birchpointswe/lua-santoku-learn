@@ -126,6 +126,7 @@ static inline void tm_run_spectral (
   lua_State *L,
   tk_threadpool_t *pool,
   tk_dvec_t *z,
+  tk_dvec_t *lap,
   tk_graph_adj_t *adj_pos,
   tk_graph_adj_t *adj_neg,
   uint64_t n_nodes,
@@ -137,7 +138,7 @@ static inline void tm_run_spectral (
   tk_spectral_t spec;
   tk_spectral_thread_t threads[pool->n_threads];
   spec.z = z->a;
-  spec.laplacian = tk_malloc(L, n_nodes * sizeof(double));
+  spec.laplacian = lap->a;
   spec.adj_pos = adj_pos;
   spec.adj_neg = adj_neg;
   spec.n_nodes = n_nodes;
@@ -175,6 +176,8 @@ static inline void tm_run_spectral (
   int ret = dprimme(spec.evals, spec.evecs, spec.resNorms, &params);
   if (ret != 0)
     tk_lua_verror(L, 2, "spectral", "failure calling PRIMME");
+  // for (uint64_t i = 0; i < params.numEvals; i ++)
+  //   printf("eig%lu = %f\n", i, spec.evals[i]);
 
   // Copy eigenvectors into the output matrix, skipping the first
   tk_threads_signal(pool, TK_SPECTRAL_FINALIZE);
@@ -195,9 +198,6 @@ static inline void tm_run_spectral (
     lua_pushinteger(L, params.stats.numMatvecs);
     lua_call(L, 1, 0);
   }
-
-  // Push laplacian
-  tk_dvec_create(L, n_nodes, spec.laplacian, 0);
 }
 
 static inline int tm_encode (lua_State *L)
@@ -227,7 +227,8 @@ static inline int tm_encode (lua_State *L)
   // Spectral hashing
   tk_lua_get_ephemeron(L, TK_GRAPH_EPH, graph->uids);
   tk_dvec_t *z = tk_dvec_create(L, graph->uids->n * n_hidden, 0, 0);
-  tm_run_spectral(L, pool, z, adj_pos, adj_neg, graph->uids->n, n_hidden, i_each);
+  tk_dvec_t *lap = tk_dvec_create(L, graph->uids->n, 0, 0);
+  tm_run_spectral(L, pool, z, lap, adj_pos, adj_neg, graph->uids->n, n_hidden, i_each);
 
   // Cleanup
   tk_threads_destroy(pool);

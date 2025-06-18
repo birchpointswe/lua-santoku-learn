@@ -12,7 +12,7 @@ local str = require("santoku.string")
 local test = require("santoku.test")
 local utc = require("santoku.utc")
 
-local MAX = nil
+local MAX = 40000
 local FEATURES = 784
 
 local ITQ = true
@@ -21,16 +21,17 @@ local HIDDEN = 8
 local KNN = 0
 local STAR_CENTERS = 1
 local STAR_NEGATIVES = 1
-local ANN_BUCKET_TARGET = 4
 local TRANS_HOPS = 0
 local TRANS_POS = 0
 local TRANS_NEG = 0
-local DBSCAN_MIN = 1
+local DBSCAN_MIN = 0
 
 test("tsetlin", function ()
 
   print("Reading data")
-  local dataset = ds.read_binary_mnist("test/res/BinarizedMNISTData/MNISTTraining.txt", FEATURES, MAX)
+  local dataset = ds.read_binary_mnist("test/res/mnist.70k.txt", FEATURES, MAX)
+
+  print("Splitting")
   dataset = tbl.assign(ds.split_binary_mnist(dataset, 1), dataset)
   dataset.n_features = FEATURES
   dataset.n_hidden = HIDDEN
@@ -38,7 +39,6 @@ test("tsetlin", function ()
   print("\nIndexing raw features")
   dataset.index_raw = ann.create({
     expected_size = dataset.n,
-    bucket_target = ANN_BUCKET_TARGET,
     features = FEATURES,
   })
   dataset.problems_raw = dataset.problems:raw_bitmap(dataset.n, FEATURES)
@@ -55,8 +55,8 @@ test("tsetlin", function ()
     pos = dataset.pos,
     neg = dataset.neg,
     index = dataset.index_raw,
-    knn = KNN,
     labels = dataset.solutions, -- TODO: ensure that alignment agrees with classes
+    knn = KNN,
     trans_hops = TRANS_HOPS,
     trans_pos = TRANS_POS,
     trans_neg = TRANS_NEG,
@@ -66,8 +66,8 @@ test("tsetlin", function ()
     end
   })
 
-  print("\nSpectral hashing")
-  dataset.ids, dataset.codes = spectral.encode({
+  print("\nSpectral eigendecomposition")
+  dataset.ids_spectral, dataset.codes_spectral = spectral.encode({
     graph = dataset.graph,
     n_hidden = HIDDEN,
     each = function (s)
@@ -79,10 +79,9 @@ test("tsetlin", function ()
   print("\nBooleanizing")
   if ITQ then
     dataset.n_hidden = HIDDEN
-    dataset.codes = itq.encode({
-      codes = dataset.codes,
+    dataset.codes_spectral = itq.encode({
+      codes = dataset.codes_spectral,
       n_hidden = HIDDEN,
-      iterations = 40,
       each = function (i, j)
         local d, dd = stopwatch()
         str.printf("  Time: %6.2f %6.2f  ITQ Iter %d  Objective: %6.2f\n", d, dd, i, j)
@@ -92,14 +91,14 @@ test("tsetlin", function ()
     local bzr = booleanizer.create({ n_thresholds = 1 })
     bzr:observe(dataset.codes, HIDDEN)
     bzr:finalize()
-    dataset.codes = bzr:encode(dataset.codes, HIDDEN)
+    dataset.codes_spectral = bzr:encode(dataset.codes_spectral, HIDDEN)
     dataset.n_hidden = bzr:bits()
   end
 
   if TCH then
     print("\nFlipping bits")
     tch.refine({
-      codes = dataset.codes,
+      codes = dataset.codes_spectral,
       graph = dataset.graph,
       n_hidden = dataset.n_hidden,
       each = function (s)
@@ -110,10 +109,10 @@ test("tsetlin", function ()
   end
 
   print("\nCodebook stats")
-  dataset.codes_raw = dataset.codes:raw_bitmap(dataset.n, dataset.n_hidden)
+  dataset.codes_spectral = dataset.codes_spectral:raw_bitmap(dataset.ids_spectral:size(), dataset.n_hidden)
   dataset.similarity = eval.optimize_retrieval({
-    codes = dataset.codes_raw,
-    ids = dataset.ids,
+    codes = dataset.codes_spectral,
+    ids = dataset.ids_spectral,
     pos = dataset.pos,
     neg = dataset.neg,
     n_hidden = dataset.n_hidden,
@@ -125,22 +124,21 @@ test("tsetlin", function ()
   })
   str.printi("\n  Best | AUC: %.2f#(auc) | F1: %.2f#(f1) | Precision: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", -- luacheck: ignore
     dataset.similarity)
-  dataset.entropy = eval.entropy_stats(dataset.codes_raw, dataset.n, dataset.n_hidden)
+  dataset.entropy = eval.entropy_stats(dataset.codes_spectral, dataset.n, dataset.n_hidden)
   str.printi("       | Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)\n",
     dataset.entropy)
 
   print("Creating index")
   dataset.index_codes = ann.create({
-    expected_size = dataset.n,
-    bucket_target = ANN_BUCKET_TARGET,
+    expected_size = dataset.ids_spectral:size(),
     features = dataset.n_hidden,
   })
   print("  Adding codebook")
-  dataset.index_codes:add(dataset.codes_raw, dataset.ids)
+  dataset.index_codes:add(dataset.codes_spectral, dataset.ids_spectral)
 
   print("\nClustering\n")
   stopwatch()
-  dataset.cluster_score, dataset.cluster_ids, dataset.clusters = eval.optimize_clustering({
+  dataset.cluster_score, dataset.cluster_ids, dataset.cluster_assignments, dataset.n_clusters = eval.optimize_clustering({ -- luacheck: ignore
     index = dataset.index_codes,
     pos = dataset.pos,
     neg = dataset.neg,
@@ -151,7 +149,7 @@ test("tsetlin", function ()
         d, dd, f, p, r, m, c)
     end
   })
-  dataset.cluster_score.n_clusters = #dataset.clusters
+  dataset.cluster_score.n_clusters = dataset.n_clusters
   str.printi("\n  Best | F1: %.2f#(f1) | Precision: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin) | Clusters: %d#(n_clusters)\n", -- luacheck: ignore
     dataset.cluster_score)
 

@@ -1,35 +1,35 @@
--- TODO: required to populate pvec metatable. Can we avoid this? Perhaps load
--- from ivec?
-require("santoku.pvec")
-
+local pvec = require("santoku.pvec")
 local ivec = require("santoku.ivec")
 
-local function dbscan (index, min_pts, eps)
-
-  local n = index:size()
-  local ids, neighborhoods = index:neighborhoods(index:size(), eps)
-  local assignments = ivec.create(n)
+local function dbscan (index, min, eps)
+  local ids = index:ids()
+  local uididx = {}
+  for i, uid in ids:ieach() do
+    uididx[uid] = i
+  end
+  local assignments = ivec.create(ids:size())
   local queue = ivec.create()
-
+  local nbrs = pvec.create()
   assignments:fill(-2)
   local next_id = 0
-
-  for i = 0, n - 1 do
+  for i, uid in ids:ieach() do
     if assignments:get(i) ~= -2 then -- luacheck: ignore
       -- Already visitied
     else
-      local neighbors = neighborhoods:get(i)
-      if neighbors:size() < min_pts then
+      nbrs:clear()
+      index:neighbors(uid, nil, eps, nbrs)
+      if nbrs:size() < min then
         assignments:set(i, -1) -- mark as noise
       else
         local cluster_id = next_id
         next_id = next_id + 1
         assignments:set(i, cluster_id)
         queue:clear()
-        queue:copy(neighbors:keys())
+        queue:copy_pkeys(nbrs)
         local qidx = 0
         while qidx < queue:size() do
-          local neighbor = queue:get(qidx)
+          local vid = queue:get(qidx)
+          local neighbor = uididx[vid]
           qidx = qidx + 1
           local na = assignments:get(neighbor)
           if na == -1 then
@@ -39,10 +39,11 @@ local function dbscan (index, min_pts, eps)
             -- Already processed
           else
             assignments:set(neighbor, cluster_id)
-            local nn = neighborhoods:get(neighbor)
-            if nn:size() >= min_pts then
-              for k = 0, nn:size() - 1 do
-                queue:push(nn:get(k))
+            nbrs:clear()
+            index:neighbors(vid, nil, eps, nbrs)
+            if nbrs:size() >= min then
+              for k = 0, nbrs:size() - 1 do
+                queue:push((nbrs:get(k)))
               end
             end
           end
@@ -50,21 +51,7 @@ local function dbscan (index, min_pts, eps)
       end
     end
   end
-
-  -- Collect clusters
-  local clusters = {}
-  for i = 0, n - 1 do
-    local a = assignments:get(i) + 1
-    if a > 0 then
-      if not clusters[a] then
-        clusters[a] = ivec.create()
-      end
-      clusters[a]:push(ids:get(i))
-    end
-  end
-
-  return ids, clusters, assignments
-
+  return ids, assignments, next_id
 end
 
 return {

@@ -13,7 +13,7 @@ local tm = require("santoku.tsetlin")
 local utc = require("santoku.utc")
 
 local TTR = 0.9
-local MAX = nil
+local MAX = 40000
 local TM_ITERS = 10
 
 local ITQ = true
@@ -22,12 +22,11 @@ local HIDDEN = 8
 local KNN = 0
 local STAR_CENTERS = 1
 local STAR_NEGATIVES = 1
-local ANN_BUCKET_TARGET = 4
-local TRANS_HOPS = 1
-local TRANS_POS = 1
-local TRANS_NEG = 1
-local CLAUSES = 256
-local TARGET = 32
+local TRANS_HOPS = 0
+local TRANS_POS = 0
+local TRANS_NEG = 0
+local CLAUSES = 1024
+local TARGET = 0.1
 local SPECIFICITY = 10
 
 local FEATURES = 784
@@ -41,7 +40,6 @@ test("tsetlin", function ()
   str.printf("\nIndexing\tTrain\tTest\n")
   train.index = ann.create({
     expected_size = train.n,
-    bucket_target = ANN_BUCKET_TARGET,
     features = FEATURES,
   })
   train.index:add(train.problems:raw_bitmap(train.n, FEATURES), 0, train.n)
@@ -57,8 +55,8 @@ test("tsetlin", function ()
     pos = train.pos,
     neg = train.neg,
     index = train.index,
-    knn = KNN,
     labels = dataset.solutions, -- TODO: ensure that alignment agrees with classes
+    knn = KNN,
     trans_hops = TRANS_HOPS,
     trans_pos = TRANS_POS,
     trans_neg = TRANS_NEG,
@@ -110,16 +108,20 @@ test("tsetlin", function ()
     })
   end
 
+  print("\nCodebook Stats")
   train.codes0_raw = train.codes0:raw_bitmap(train.n, train.n_hidden)
   train.similarity0 = eval.optimize_retrieval({
     codes = train.codes0_raw,
     ids = train.ids0,
     pos = train.pos,
     neg = train.neg,
-    n_hidden = train.n_hidden
+    n_hidden = train.n_hidden,
+    each = function (a, f, p, r, m)
+      local d, dd = stopwatch()
+      str.printf("  Time: %6.2f %6.2f | AUC: %6.2f | F1: %.2f | Precision: %.2f | Recall: %.2f | Margin: %.2f\n", -- luacheck: ignore
+        d, dd, a, f, p, r, m)
+    end
   })
-
-  print("\nCodebook Stats")
   str.printi("  AUC: %.2f#(auc) | F1: %.2f#(f1) | Precision: %.2f#(precision) | Recall: %.2f#(recall) | Margin: %.2f#(margin)", -- luacheck: ignore
     train.similarity0)
   train.entropy0 = eval.entropy_stats(train.codes0_raw, train.n, train.n_hidden)

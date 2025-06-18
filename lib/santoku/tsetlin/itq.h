@@ -14,8 +14,8 @@
 static inline void tk_itq_encode (
   lua_State *L,
   tk_dvec_t *codes,
-  uint64_t iterations,
   uint64_t n_hidden,
+  uint64_t iterations,
   int i_each
 ) {
   const size_t N = codes->n / n_hidden;
@@ -116,7 +116,7 @@ static inline void tk_itq_encode (
         tk_ivec_push(out, (int64_t) (i * n_hidden + j));
 
   // Cleanup
-  tk_ivec_shrink(L, out);
+  // tk_ivec_shrink(L, out);
   free(superb);
   free(R);
   free(V);

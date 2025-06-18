@@ -29,7 +29,6 @@ typedef tk_rvec_t * tk_inv_hood_t;
 
 typedef enum {
   TK_INV_NEIGHBORHOODS,
-  TK_INV_NEIGHBORS
 } tk_inv_stage_t;
 
 typedef struct tk_inv_thread_s tk_inv_thread_t;
@@ -51,6 +50,7 @@ typedef struct tk_inv_thread_s {
   tk_inv_t *I;
   tk_inv_hoods_t *hoods;
   tk_iuset_t *seen;
+  tk_iumap_t *cnt;
   tk_iumap_t *sid_idx;
   tk_ivec_t *uids;
   tk_ivec_t *sids;
@@ -58,9 +58,6 @@ typedef struct tk_inv_thread_s {
   double eps;
   uint64_t k;
 } tk_inv_thread_t;
-
-#define TK_INV_MT "tk_inv_t"
-#define TK_INV_EPH "tk_inv_eph"
 
 static inline tk_inv_t *tk_inv_peek (lua_State *L, int i)
 {
@@ -91,6 +88,7 @@ static inline void tk_inv_destroy (
   for (uint64_t i = 0; i < I->pool->n_threads; i ++) {
     tk_inv_thread_t *data = I->threads + i;
     tk_iuset_destroy(data->seen);
+    tk_iumap_destroy(data->cnt);
   }
   tk_threads_destroy(I->pool);
   free(I->threads);
@@ -153,11 +151,12 @@ static inline void tk_inv_uid_remove (
 ) {
   khint_t khi;
   khi = tk_iumap_get(I->uid_sid, uid);
-  if (khi == kh_end(I->uid_sid))
+  if (khi == tk_iumap_end(I->uid_sid))
     return;
+  int64_t sid = tk_iumap_value(I->uid_sid, khi);
   tk_iumap_del(I->uid_sid, khi);
-  khi = tk_iumap_get(I->sid_uid, uid);
-  if (khi == kh_end(I->sid_uid))
+  khi = tk_iumap_get(I->sid_uid, sid);
+  if (khi == tk_iumap_end(I->sid_uid))
     return;
   tk_iumap_del(I->sid_uid, khi);
 }
@@ -184,7 +183,7 @@ static inline int64_t tk_inv_uid_sid (
     return sid;
   } else {
     khi = tk_iumap_get(I->uid_sid, uid);
-    if (khi == kh_end(I->uid_sid))
+    if (khi == tk_iumap_end(I->uid_sid))
       return -1;
     else
       return tk_iumap_value(I->uid_sid, khi);
@@ -196,7 +195,7 @@ static inline int64_t tk_inv_sid_uid (
   int64_t sid
 ) {
   khint_t khi = tk_iumap_get(I->sid_uid, sid);
-  if (khi == kh_end(I->sid_uid))
+  if (khi == tk_iumap_end(I->sid_uid))
     return -1;
   else
     return tk_iumap_value(I->sid_uid, khi);
@@ -247,7 +246,7 @@ static inline void tk_inv_add (
     if (b < 0)
       continue;
     int64_t s = b / (int64_t) I->features;
-    if (s > (int64_t) ids->n)
+    if (s >= (int64_t) ids->n)
       continue;
     int64_t fid = b % (int64_t) I->features;
     int64_t uid = ids->a[s];
@@ -277,7 +276,7 @@ static inline void tk_inv_neighborhoods (
   lua_State *L,
   tk_inv_t *I,
   uint64_t k,
-  uint64_t eps,
+  double eps,
   tk_inv_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
@@ -376,7 +375,8 @@ static inline int tk_inv_get_lua (lua_State *L)
   size_t n = 0;
   int64_t *data = tk_inv_get(I, id, &n);
   int64_t *dup = n ? tk_malloc(L, n * sizeof(int64_t)) : NULL;
-  memcpy(dup, data, n * sizeof(int64_t));
+  if (n)
+    memcpy(dup, data, n * sizeof(int64_t));
   tk_ivec_create(L, n, dup, 0);
   return 1;
 }
@@ -385,8 +385,7 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
 {
   tk_inv_t *I = tk_inv_peek(L, 1);
   uint64_t k = tk_lua_checkunsigned(L, 2, "k");
-  double epsf = tk_lua_checkposdouble(L, 3, "eps");
-  uint64_t eps = (uint64_t) (epsf < 1.0 ? (double) I->features * epsf : epsf);
+  double eps = tk_lua_checkposdouble(L, 3, "eps");
   tk_inv_neighborhoods(L, I, k, eps, 0, 0);
   return 2;
 }
@@ -465,65 +464,67 @@ static inline int tk_inv_shrink_lua (lua_State *L)
 
 static inline void tk_inv_worker (void *dp, int sig)
 {
-
   tk_inv_stage_t stage = (tk_inv_stage_t) sig;
   tk_inv_thread_t *data = (tk_inv_thread_t *) dp;
   tk_inv_t *I = data->I;
-  tk_iuset_t *seen = data->seen;
+  tk_iumap_t *cnt = data->cnt;
   tk_inv_hoods_t *hoods = data->hoods;
   tk_ivec_t *sids = data->sids;
   tk_iumap_t *sid_idx = data->sid_idx;
   double eps = data->eps;
-  int kha;
   khint_t khi;
-  double dist;
   int64_t usid, vsid, fid;
   int64_t start, end;
   int64_t *ubits, *vbits;
   size_t nubits, nvbits;
   tk_rvec_t *uhood;
   tk_ivec_t *vsids;
-
   switch (stage) {
-
     case TK_INV_NEIGHBORHOODS:
       for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i ++) {
         usid = sids->a[i];
         if (tk_iumap_get(I->sid_uid, usid) == tk_iumap_end(I->sid_uid))
           continue;
-        uhood = hoods->a[i];
         ubits = tk_inv_sget(I, usid, &nubits);
+        uhood = hoods->a[i];
         start = I->node_offsets->a[usid];
-        end = usid + 1 == (int64_t) I->node_offsets->n ? (int64_t) I->node_bits->n : I->node_offsets->a[usid + 1];
-        tk_iuset_clear(seen);
+        end = (usid + 1 == (int64_t)I->node_offsets->n)
+          ? (int64_t) I->node_bits->n
+          : I->node_offsets->a[usid + 1];
+        tk_iumap_clear(cnt);
         for (int64_t j = start; j < end; j ++) {
           fid = I->node_bits->a[j];
           vsids = I->postings->a[fid];
           for (uint64_t k = 0; k < vsids->n; k ++) {
             vsid = vsids->a[k];
-            khi = tk_iumap_get(sid_idx, vsid);
+            if (vsid == usid)
+              continue;
+            khi = tk_iumap_get(sid_idx, vsid);        // only consider slice
             if (khi == tk_iumap_end(sid_idx))
               continue;
-            int64_t iv = tk_iumap_value(sid_idx, khi);
-            if (usid == vsid)
-              continue;
-            if (tk_iumap_get(I->sid_uid, vsid) == tk_iumap_end(I->sid_uid))
-              continue;
-            khi = tk_iuset_put(seen, vsid, &kha);
-            if (!kha)
-              continue;
-            vbits = tk_inv_sget(I, vsid, &nvbits);
-            dist = 1.0 - tk_inv_jaccard(ubits, nubits, vbits, nvbits);
-            if (dist < eps)
-              tk_rvec_hasc(uhood, tk_rank(iv, dist));
+            int kha;
+            khi = tk_iumap_put(cnt, vsid, &kha);
+            if (kha)                                  // new candidate
+              tk_iumap_value(cnt, khi) = 1;
+            else
+              tk_iumap_value(cnt, khi) ++;
+          }
+        }
+        for (khi = kh_begin(cnt); khi != kh_end(cnt); khi ++) {
+          if (!kh_exist(cnt, khi))
+            continue;
+          vsid = tk_iumap_key(cnt, khi);
+          vbits = tk_inv_sget(I, vsid, &nvbits);
+          size_t inter = (size_t)tk_iumap_value(cnt, khi);
+          size_t uni = nubits + nvbits - inter;
+          double dist = (uni == 0) ? 0.0 : 1.0 - (double)inter / (double)uni;
+          if (dist <= eps) {
+            int64_t iv = tk_iumap_value(sid_idx, tk_iumap_get(sid_idx, vsid));
+            tk_rvec_hasc(uhood, tk_rank(iv, dist));
           }
         }
         tk_rvec_asc(uhood, 0, uhood->n);
       }
-      break;
-
-    case TK_INV_NEIGHBORS:
-      #warning todo
       break;
   }
 }
@@ -580,6 +581,7 @@ static inline tk_inv_t *tk_inv_create (
     I->pool->threads[i].data = data;
     data->I = I;
     data->seen = tk_iuset_create();
+    data->cnt = tk_iumap_create();
   }
   return I;
 }
