@@ -3,5 +3,3 @@ results.mk: Makefile
 	pkg-config --exists openblas
 	test -d primme || git clone https://github.com/primme/primme --depth 1
 	cd primme && make lib
-	echo "LIB_CFLAGS += $$(pkg-config --cflags openblas) -I$(CURDIR)/primme/include" >> results.mk
-	echo "LIB_LDFLAGS += $(CURDIR)/primme/lib/libprimme.a -llapack -llapacke $$(pkg-config --libs openblas) -lm" >> results.mk

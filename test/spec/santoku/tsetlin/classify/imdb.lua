@@ -13,7 +13,6 @@ local tokenizer = require("santoku.tsetlin.tokenizer")
 
 local TTR = 0.9
 local MAX = nil
-local THREADS = nil
 local EVALUATE_EVERY = 1
 local ITERATIONS = 10
 
@@ -59,8 +58,8 @@ test("tsetlin", function ()
   print("Tokenizing train")
   train.problems0 = tokenizer.tokenize(train.problems)
   local top_v =
-    TOP_ALGO == "chi2" and train.problems0:top_chi2(train.solutions, train.n, dataset.n_features, 2, TOP_K, THREADS) or -- luacheck: ignore
-    TOP_ALGO == "mi" and train.problems0:top_mi(train.solutions, train.n, dataset.n_features, 2, TOP_K, THREADS) or
+    TOP_ALGO == "chi2" and train.problems0:top_chi2(train.solutions, train.n, dataset.n_features, 2, TOP_K) or -- luacheck: ignore
+    TOP_ALGO == "mi" and train.problems0:top_mi(train.solutions, train.n, dataset.n_features, 2, TOP_K) or
     TOP_ALGO == "random" and (function ()
       local v = ivec.create(dataset.n_features)
       v:fill_indices()
@@ -102,8 +101,7 @@ test("tsetlin", function ()
     clauses = CLAUSES,
     target = TARGET,
     negative = NEGATIVE,
-    specificity = SPECIFICITY,
-    threads = THREADS,
+    specificity = SPECIFICITY
   })
 
   print("Training")

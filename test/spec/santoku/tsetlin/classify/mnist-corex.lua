@@ -9,8 +9,7 @@ local tm = require("santoku.tsetlin")
 local utc = require("santoku.utc")
 
 local TTR = 0.9
-local MAX = nil
-local THREADS = nil
+local MAX = 10000
 local EVALUATE_EVERY = 1
 local TM_ITERS = 10
 local COREX_ITERS = 10
@@ -27,14 +26,13 @@ local HIDDEN = 128
 test("tsetlin", function ()
 
   print("Reading data")
-  local dataset = ds.read_binary_mnist("test/res/BinarizedMNISTData/MNISTTraining.txt", VISIBLE, MAX)
+  local dataset = ds.read_binary_mnist("test/res/mnist.70k.txt", VISIBLE, MAX)
   local train, test = ds.split_binary_mnist(dataset, TTR)
 
   print("Creating Corex")
   local cor = corex.create({
     visible = dataset.n_features,
     hidden = HIDDEN,
-    threads = THREADS,
   })
 
   print("Training")
@@ -73,7 +71,6 @@ test("tsetlin", function ()
     target = TARGET,
     specificity = SPECIFICITY,
     negative = NEGATIVE,
-    threads = THREADS,
   })
 
   print("Training")

@@ -1,7 +1,6 @@
 require("santoku.rvec")
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local tbl = require("santoku.table")
-local tm = require("santoku.tsetlin")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
 local it = require("santoku.iter")
@@ -133,58 +132,68 @@ M.split_snli_pairs = function (dataset, ratio)
 end
 
 M.read_binary_mnist = function (fp, n_features, max)
-  local n_features_aligned = num.round(n_features, tm.align)
-  local problems = {}
-  local solutions = {}
-  for l in fs.lines(fp) do
-    local bits = {}
-    local n = 0
-    for bit in str.gmatch(l, "%S+") do
-      if n == n_features then
-        local s = tonumber(bit)
-        solutions[#solutions + 1] = s
+  local offsets = ivec.create()
+  local problems = ivec.create()
+  local solutions = ivec.create()
+  local sample = 0
+  local feature = 0
+  offsets:push(0)
+  for s in str.gmatch(fs.readfile(fp), "%S+") do
+    if feature == n_features then
+      solutions:push(tonumber(s))
+      feature = 0
+      sample = sample + 1
+      offsets:push(problems:size())
+      if max and sample >= max then
         break
       end
-      bit = bit == "1"
-      if bit then
-        bits[#bits + 1] = n
-      end
-      n = n + 1
-    end
-    if n ~= n_features then
-      error("bitmap length mismatch")
+    elseif s == "1" then
+      problems:push(feature)
+      feature = feature + 1
+    elseif s == "0" then
+      feature = feature + 1
     else
-      local p = ivec.create(bits)
-      problems[#problems + 1] = p
-    end
-    if max and #problems >= max then
-      break
+      err.error("unexpected string", s)
     end
   end
-  arr.shuffle(problems, solutions)
   return {
+    offsets = offsets,
     problems = problems,
     solutions = solutions,
-    n_features = n_features_aligned
+    n_features = n_features,
+    n = sample,
   }
 end
 
 local function _split_binary_mnist (dataset, s, e)
-  local n = e - s + 1
   local ps = ivec.create()
-  local ss = {}
+  local ss = ivec.create()
   for i = s, e do
-    local p = ivec.create(dataset.problems[i])
-    p:add((i - s) * dataset.n_features)
-    ps:copy(p)
-    arr.push(ss, dataset.solutions[i])
+    local pss = dataset.offsets:get(i - 1)
+    local pse = i == dataset.n and dataset.problems:size() or dataset.offsets:get(i)
+    local m = ps:size()
+    ps:copy(dataset.problems, pss, pse, m)
+    ps:add((i - s) * dataset.n_features, m, ps:size())
   end
-  ss = ivec.create(ss)
+  ss:copy(dataset.solutions, s - 1, e, 0)
   return {
     problems = ps,
     solutions = ss,
-    n = n
+    n_features = dataset.n_features,
+    n = e - s + 1,
   }
+end
+
+M.split_binary_mnist = function (dataset, ratio)
+  if ratio >= 1 then
+    return
+      _split_binary_mnist(dataset, 1, dataset.n)
+  else
+    local n_train = num.floor(dataset.n * ratio)
+    return
+      _split_binary_mnist(dataset, 1, n_train),
+      _split_binary_mnist(dataset, n_train + 1, dataset.n)
+  end
 end
 
 M.add_binary_mnist_pairs = function (split, n_centers, n_negatives)
@@ -194,42 +203,42 @@ M.add_binary_mnist_pairs = function (split, n_centers, n_negatives)
   local class_to_indices = {}
   for i = 0, N - 1 do
     local y = label:get(i)
-    if not class_to_indices[y] then
-      class_to_indices[y] = {}
-    end
+    class_to_indices[y] = class_to_indices[y] or {}
     table.insert(class_to_indices[y], i)
   end
   local centers_by_class = {}
   for class, indices in pairs(class_to_indices) do
-    local count = #indices
-    local centers = {}
-    for _ = 1, math.min(n_centers, count) do
+    local centres = {}
+    for _ = 1, math.min(n_centers, #indices) do
       local idx = math.random(#indices)
-      table.insert(centers, indices[idx])
+      table.insert(centres, indices[idx])
       table.remove(indices, idx)
     end
-    centers_by_class[class] = centers
+    if #centres == 0 then
+      centres[1] = indices[1]
+      table.remove(indices, 1)
+    end
+    centers_by_class[class] = centres
     for _, i in ipairs(indices) do
-      local center = centers[math.random(#centers)]
+      local centre = centres[math.random(#centres)]
       pos:push(i)
-      pos:push(center)
+      pos:push(centre)
     end
   end
   local classes = {}
   for class in pairs(centers_by_class) do
     table.insert(classes, class)
   end
-  for i = 1, #classes do
-    local class_i = classes[i]
-    local centers_i = centers_by_class[class_i]
-    for _, ci in ipairs(centers_i) do
-      for _ = 1, n_negatives do
-        local other_class
-        repeat
-          other_class = classes[math.random(#classes)]
-        until other_class ~= class_i
-        local cj_list = centers_by_class[other_class]
-        if cj_list and #cj_list > 0 then
+  if #classes > 1 then
+    for _, class_i in ipairs(classes) do
+      local centres_i = centers_by_class[class_i]
+      for _, ci in ipairs(centres_i) do
+        for _ = 1, n_negatives do
+          local other_class
+          repeat
+            other_class = classes[math.random(#classes)]
+          until other_class ~= class_i
+          local cj_list = centers_by_class[other_class]
           local cj = cj_list[math.random(#cj_list)]
           neg:push(ci)
           neg:push(cj)
@@ -239,18 +248,6 @@ M.add_binary_mnist_pairs = function (split, n_centers, n_negatives)
   end
   split.pos = pos
   split.neg = neg
-end
-
-M.split_binary_mnist = function (dataset, ratio)
-  if ratio >= 1 then
-    return
-      _split_binary_mnist(dataset, 1, #dataset.problems)
-  else
-    local n_train = num.floor(#dataset.problems * ratio)
-    return
-      _split_binary_mnist(dataset, 1, n_train),
-      _split_binary_mnist(dataset, n_train + 1, #dataset.problems)
-  end
 end
 
 M.read_imdb = function (dir, max)
