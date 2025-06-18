@@ -5,6 +5,7 @@
 #include <santoku/threads.h>
 #include <santoku/ivec.h>
 #include <santoku/iumap.h>
+#include <santoku/pumap.h>
 #include <santoku/tsetlin/inv.h>
 #include <santoku/tsetlin/ann.h>
 #include <float.h>
@@ -27,10 +28,9 @@ typedef enum {
 } tk_graph_stage_t;
 
 typedef struct {
-  tk_iumap_t *node_component;
-  tk_iumap_t *node_parent;
-  tk_iumap_t *component_rank;
-  tk_dsu_members_t *component_members;
+  tk_iumap_t *parent;
+  tk_iumap_t *rank;
+  int64_t components;
 } tk_dsu_t;
 
 typedef struct tk_graph_thread_s tk_graph_thread_t;

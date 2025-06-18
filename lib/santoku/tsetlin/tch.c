@@ -8,7 +8,6 @@
 #include <float.h>
 #include <lauxlib.h>
 #include <lua.h>
-#include <primme.h>
 
 static inline int tk_tch_refine_lua (lua_State *L)
 {

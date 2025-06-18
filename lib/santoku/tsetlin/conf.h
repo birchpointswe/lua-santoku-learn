@@ -1,6 +1,8 @@
 #ifndef TK_CONF_H
 #define TK_CONF_H
 
+// #include <santoku/execinfo.h>
+
 #include <santoku/lua/utils.h>
 #include <santoku/klib.h>
 

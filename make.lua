@@ -7,31 +7,53 @@ local env = {
   public = true,
 
   cflags = {
-    "-march=native", "-std=gnu11", "-O3", "-Wall", "-Wextra",
+    "-march=native", "-O3",
+    "-std=gnu11", "-Wall", "-Wextra",
     "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow",
     "-Wpointer-sign", "-Wno-unused-parameter", "-Wno-unused-but-set-variable",
+    -- TODO: Not all libs likely need these includes
     "-I$(shell luarocks show santoku --rock-dir)/include/",
     "-I$(shell luarocks show santoku-threads --rock-dir)/include/",
     "-I$(shell luarocks show santoku-matrix --rock-dir)/include/",
   },
 
   ldflags = {
-    "-march=native", "-O3", "-lm", "-lpthread", "-lnuma"
+    "-march=native", "-O3",
+    "-lm", "-lpthread", "-lnuma",
+  },
+
+  rules = {
+    ["spectral%.c"] = {
+      cflags = { "$(shell pkg-config --cflags openblas) -I$(PWD)/deps/primme/primme/include" },
+      ldflags = { "$(PWD)/deps/primme/primme/lib/libprimme.a -llapack -llapacke $(shell pkg-config --libs openblas)" },
+    },
+    ["itq%.c"] = {
+      cflags = { "$(shell pkg-config --cflags openblas)" },
+      ldflags = { "$(shell pkg-config --libs openblas) -llapacke" },
+    },
   },
 
   dependencies = {
     "lua >= 5.1",
-    "santoku >= 0.0.272-1",
+    "santoku >= 0.0.276-1",
     "santoku-threads >= 0.0.5-1",
-    "santoku-matrix >= 0.0.70-1",
+    "santoku-matrix >= 0.0.73-1",
   },
 
   test = {
+
+    -- TODO: Support injecting the poor mans signal tracer during test
+    -- cinject = { "<santoku/execinfo.h>" },
+
+    -- cflags = { "-g", "-O0", "-fno-omit-frame-pointer" },
+    -- ldflags = { "-g", "-O0" },
+
     dependencies = {
       "luacov >= 0.15.0-1",
       "santoku-fs >= 0.0.34-1",
       "lua-cjson >= 2.1.0.10-1",
     }
+
   },
 
 }

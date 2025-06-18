@@ -16,7 +16,7 @@ static inline tk_graph_t *tm_graph_create (
 static inline void tk_graph_worker (void *dp, int sig)
 {
   tk_graph_stage_t stage = (tk_graph_stage_t) sig;
-  tk_graph_thread_t *data = (tk_graph_thread_t *) dp;
+  // tk_graph_thread_t *data = (tk_graph_thread_t *) dp;
   switch (stage) {
     case TK_GRAPH_TODO:
       // TODO
@@ -26,86 +26,64 @@ static inline void tk_graph_worker (void *dp, int sig)
 
 static inline void tk_dsu_free (tk_dsu_t *dsu)
 {
-  int64_t u;
-  tk_iuset_t *ms;
-  if (dsu->component_members) {
-    kh_foreach(dsu->component_members, u, ms, ({
-      tk_iuset_destroy(ms);
-    }))
-    kh_destroy(tk_dsu_members, dsu->component_members);
-  }
-  if (dsu->node_component)
-    tk_iumap_destroy(dsu->node_component);
-  if (dsu->node_parent)
-    tk_iumap_destroy(dsu->node_parent);
-  if (dsu->component_rank)
-    tk_iumap_destroy(dsu->component_rank);
-}
-
-static inline int64_t tk_dsu_find (tk_dsu_t *dsu, int64_t x)
-{
-  int kha;
-  khint_t khi = tk_iumap_put(dsu->node_parent, x, &kha);
-  if (kha) {
-    tk_iumap_value(dsu->node_parent, khi) = x;
-    return x;
-  }
-  int64_t p = tk_iumap_value(dsu->node_parent, khi);
-  if (p != x) {
-    int64_t r = tk_dsu_find(dsu, p);
-    tk_iumap_value(dsu->node_parent, khi) = r;
-    return r;
-  }
-  return x;
+  if (dsu->parent)
+    tk_iumap_destroy(dsu->parent);
+  if (dsu->rank)
+    tk_iumap_destroy(dsu->rank);
 }
 
 static inline int64_t tk_dsu_components (tk_dsu_t *dsu)
 {
-  return (int64_t) kh_size(dsu->component_members);
+  return dsu->components;
 }
 
-static inline void tk_dsu_union (lua_State *L, tk_dsu_t *dsu, int64_t x, int64_t y)
-{
+static inline int64_t tk_dsu_find (
+  tk_dsu_t *dsu,
+  int64_t x
+) {
   int kha;
-  khint_t khi, skhi, xkhi, ykhi;
+  khint_t khi = tk_iumap_put(dsu->parent, x, &kha);
+  if (kha) {
+    tk_iumap_value(dsu->parent, khi) = x;
+    khint_t r = tk_iumap_put(dsu->rank, x, &kha);
+    tk_iumap_value(dsu->rank, r) = 0;
+    dsu->components ++;
+    return x;
+  }
+  int64_t p = tk_iumap_value(dsu->parent, khi);
+  if (p != x) {
+    p = tk_dsu_find(dsu, p);
+    tk_iumap_value(dsu->parent, khi) = p;
+  }
+  return p;
+}
+
+static inline void tk_dsu_union (
+  tk_dsu_t *dsu,
+  int64_t x,
+  int64_t y
+) {
   int64_t xr = tk_dsu_find(dsu, x);
   int64_t yr = tk_dsu_find(dsu, y);
   if (xr == yr)
     return;
-  xkhi = tk_iumap_get(dsu->component_rank, xr);
-  ykhi = tk_iumap_get(dsu->component_rank, yr);
-  int64_t xrank = xkhi == kh_end(dsu->component_rank) ? 0 : kh_value(dsu->component_rank, xkhi);
-  int64_t yrank = ykhi == kh_end(dsu->component_rank) ? 0 : kh_value(dsu->component_rank, ykhi);
-  if (xrank == yrank) {
-    if (xkhi == kh_end(dsu->component_rank))
-      xkhi = tk_iumap_put(dsu->component_rank, xr, &kha);
-    kh_value(dsu->component_rank, xkhi) = ++ xrank;
-  }
-  int64_t big = xr, small = yr;
+  dsu->components --;
+  khint_t xkhi = tk_iumap_get(dsu->rank, xr);
+  khint_t ykhi = tk_iumap_get(dsu->rank, yr);
+  int64_t xrank = (xkhi == kh_end(dsu->rank)) ? 0 : tk_iumap_value(dsu->rank, xkhi);
+  int64_t yrank = (ykhi == kh_end(dsu->rank)) ? 0 : tk_iumap_value(dsu->rank, ykhi);
   if (xrank < yrank) {
-    big = yr;
-    small = xr;
+    int64_t tmp = xr; xr = yr; yr = tmp;
+    int64_t tr  = xrank; xrank = yrank; yrank = tr;
+    khint_t tk  = xkhi;  xkhi = ykhi;  ykhi = tk;
   }
-  khi = tk_iumap_put(dsu->node_parent, small, &kha);
-  tk_iumap_value(dsu->node_parent, khi) = big;
-  xkhi = kh_put(tk_dsu_members, dsu->component_members, big, &kha);
-  if (kha)
-    kh_value(dsu->component_members, xkhi) = tk_iuset_create();
-  tk_iuset_t *xmemb = kh_value(dsu->component_members, xkhi);
-  ykhi = kh_get(tk_dsu_members, dsu->component_members, small);
-  if (ykhi != kh_end(dsu->component_members)) {
-    tk_iuset_t *ymemb = kh_value(dsu->component_members, ykhi);
-    tk_iuset_union(xmemb, ymemb);
-    int64_t m;
-    tk_iuset_foreach(ymemb, m, ({
-      khi = tk_iumap_put(dsu->node_component, m, &kha);
-      tk_iumap_value(dsu->node_component, khi) = big;
-    }));
-    tk_iuset_destroy(ymemb);
-    kh_del(tk_dsu_members, dsu->component_members, ykhi);
-    skhi = tk_iumap_get(dsu->component_rank, small);
-    if (skhi != kh_end(dsu->component_rank))
-      tk_iumap_del(dsu->component_rank, skhi);
+  int kha;
+  khint_t khi = tk_iumap_put(dsu->parent, yr, &kha);
+  tk_iumap_value(dsu->parent, khi) = xr;
+  if (xrank == yrank) {
+    if (xkhi == kh_end(dsu->rank))
+      xkhi = tk_iumap_put(dsu->rank, xr, &kha);
+    tk_iumap_value(dsu->rank, xkhi) = xrank + 1;
   }
 }
 
@@ -114,14 +92,13 @@ static inline void tk_dsu_init (
   tk_dsu_t *dsu,
   tm_pairs_t *pairs
 ) {
-  dsu->node_component = tk_iumap_create();
-  dsu->node_parent = tk_iumap_create();
-  dsu->component_rank = tk_iumap_create();
-  dsu->component_members = kh_init(tk_dsu_members);
+  dsu->parent = tk_iumap_create();
+  dsu->rank = tk_iumap_create();
+  dsu->components = 0;
   bool l;
   tm_pair_t p;
   kh_foreach(pairs, p, l, ({
-    tk_dsu_union(L, dsu, p.u, p.v);
+    tk_dsu_union(dsu, p.u, p.v);
   }))
 }
 
@@ -213,7 +190,7 @@ static inline void tm_add_knn (
         added ++;
         kh_value(graph->pairs, khi) = true;
         tk_graph_add_adj(graph, u, v, true);
-        tk_dsu_union(L, &graph->dsu, u, v);
+        tk_dsu_union(&graph->dsu, u, v);
         graph->n_pos ++;
       }
     }
@@ -235,7 +212,7 @@ static inline void tm_add_knn (
         added ++;
         kh_value(graph->pairs, khi) = true;
         tk_graph_add_adj(graph, u, v, true);
-        tk_dsu_union(L, &graph->dsu, u, v);
+        tk_dsu_union(&graph->dsu, u, v);
         graph->n_pos ++;
       }
     }
@@ -327,7 +304,7 @@ static inline void tm_add_mst (
       continue;
     kh_value(graph->pairs, khi) = true;
     tk_graph_add_adj(graph, c.u, c.v, true);
-    tk_dsu_union(L, &graph->dsu, c.u, c.v);
+    tk_dsu_union(&graph->dsu, c.u, c.v);
     graph->n_pos ++;
   }
 
@@ -355,7 +332,7 @@ static inline double tm_dist (tk_graph_t *graph, int64_t u, int64_t v)
     char *wset = tk_ann_get(graph->index.ann, v);
     if (wset == NULL)
       return -1;
-    return (double) tk_ann_hamming(uset, wset, graph->index.ann->features);
+    return (double) tk_ann_hamming(uset, wset, graph->index.ann->features) / (double) graph->index.ann->features;
   }
 }
 
@@ -433,7 +410,7 @@ static inline void tm_add_transatives (
         continue;
       kh_value(graph->pairs, khi) = true;
       kv_push(tm_pair_t, new_pos, tm_pair(u, c.v));
-      tk_dsu_union(L, &graph->dsu, u, c.v);
+      tk_dsu_union(&graph->dsu, u, c.v);
       graph->n_pos ++;
     }
   }
@@ -486,7 +463,7 @@ static inline void tm_add_transatives (
         continue;
       kh_value(graph->pairs, khi) = false;
       kv_push(tm_pair_t, new_neg, tm_pair(u, c.v));
-      tk_dsu_union(L, &graph->dsu, u, c.v);
+      tk_dsu_union(&graph->dsu, u, c.v);
       graph->n_neg ++;
     }
   }
@@ -580,7 +557,6 @@ static inline void tm_add_pairs (
   graph->n_neg = n_neg_new;
 
   tm_adj_init(L, Gi, graph);
-  tk_dsu_init(L, &graph->dsu, graph->pairs);
 }
 
 static inline int tm_to_bits (lua_State *L)
@@ -623,10 +599,64 @@ static inline void tm_setup_hoods (lua_State *L, int Gi, tk_graph_t *graph)
   if (graph->index.is_inv)
     tk_inv_neighborhoods(L, graph->index.inv, graph->knn_cache, graph->knn_eps, &graph->index.inv_hoods, &graph->uids);
   else
-    tk_ann_neighborhoods(L, graph->index.ann, graph->knn_cache, graph->knn_eps, &graph->index.ann_hoods, &graph->uids);
+    tk_ann_neighborhoods(L, graph->index.ann, graph->knn_cache, graph->index.ann->features * graph->knn_eps, &graph->index.ann_hoods, &graph->uids);
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2); // uids
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1); // hoods
   lua_pop(L, 2);
+}
+
+static inline void tm_bridge_islands (tk_graph_t *graph)
+{
+  tk_pumap_t *info = tk_pumap_create();
+  int kha;
+  khint_t h;
+  for (uint64_t i = 0; i < graph->uids->n; ++i) {
+    int64_t uid = graph->uids->a[i];
+    int64_t root = tk_dsu_find(&graph->dsu, uid);
+    h = tk_pumap_put(info, root, &kha);
+    tk_pair_t *iv = &tk_pumap_value(info, h);
+    if (kha) {
+      iv->i = uid;
+      iv->p = 1;
+    } else {
+      iv->p ++;
+    }
+  }
+  int64_t root_big = -1;
+  int64_t big_size = -1;
+  int64_t big_uid = -1;
+  int64_t root;
+  tk_pair_t iv;
+  tk_pumap_foreach(info, root, iv, ({
+    if (iv.p > big_size) {
+      big_size = iv.p;
+      root_big = root;
+      big_uid = iv.i;
+    }
+  }))
+  if (root_big == -1 || tk_pumap_size(info) == 1) {
+    tk_pumap_destroy(info);
+    return;
+  }
+  for (h = tk_pumap_begin(info); h != tk_pumap_end(info); ++h) {
+    if (!tk_pumap_exist(info, h))
+      continue;
+    root = tk_pumap_key(info, h);
+    if (root == root_big)
+      continue;
+    iv = tk_pumap_value(info, h);
+    int64_t u = iv.i;
+    int64_t v = big_uid;
+    tm_pair_t e = tm_pair(u, v);
+    khint_t khi = kh_put(pairs, graph->pairs, e, &kha);
+    if (kha) {
+      kh_value(graph->pairs, khi) = false;
+      tk_graph_add_adj(graph, u, v, false);
+      graph->n_neg ++;
+    }
+    tk_dsu_union(&graph->dsu, u, v);
+  }
+  tk_pumap_destroy(info);
 }
 
 static inline int tm_create (lua_State *L)
@@ -678,8 +708,19 @@ static inline int tm_create (lua_State *L)
     tk_iumap_value(graph->uid_hood, khi) = (int64_t) i;
   }
 
-  // Add base pairs
+  // Log density
+  if (i_each != -1) {
+    lua_pushvalue(L, i_each);
+    lua_pushinteger(L, 0);
+    lua_pushinteger(L, 0);
+    lua_pushinteger(L, 0);
+    lua_pushstring(L, "init");
+    lua_call(L, 4, 0);
+  }
+
+  // Add base pairs, setup dsu
   tm_add_pairs(L, Gi, graph);
+  tk_dsu_init(L, &graph->dsu, graph->pairs);
 
   // Log density
   if (i_each != -1) {
@@ -730,6 +771,19 @@ static inline int tm_create (lua_State *L)
     lua_pushinteger(L, (int64_t) graph->n_pos);
     lua_pushinteger(L, (int64_t) graph->n_neg);
     lua_pushstring(L, "transitives");
+    lua_call(L, 4, 0);
+  }
+
+  if (graph->dsu.components > 1)
+    tm_bridge_islands(graph);
+
+  // Log density
+  if (i_each != -1) {
+    lua_pushvalue(L, i_each);
+    lua_pushinteger(L, tk_dsu_components(&graph->dsu));
+    lua_pushinteger(L, (int64_t) graph->n_pos);
+    lua_pushinteger(L, (int64_t) graph->n_neg);
+    lua_pushstring(L, "bridge");
     lua_call(L, 4, 0);
   }
 
