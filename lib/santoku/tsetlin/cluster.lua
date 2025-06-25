@@ -17,7 +17,7 @@ local function dbscan (index, min, eps)
       -- Already visitied
     else
       nbrs:clear()
-      index:neighbors(uid, nil, eps, nbrs)
+      index:neighbors(uid, eps, nbrs)
       if nbrs:size() < min then
         assignments:set(i, -1) -- mark as noise
       else
@@ -40,7 +40,7 @@ local function dbscan (index, min, eps)
           else
             assignments:set(neighbor, cluster_id)
             nbrs:clear()
-            index:neighbors(vid, nil, eps, nbrs)
+            index:neighbors(vid, eps, nbrs)
             if nbrs:size() >= min then
               for k = 0, nbrs:size() - 1 do
                 queue:push((nbrs:get(k)))

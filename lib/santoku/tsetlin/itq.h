@@ -78,7 +78,7 @@ static inline void tk_itq_encode (
     cblas_dgemm(CblasRowMajor, CblasTrans, CblasTrans,
                 n_hidden, n_hidden, n_hidden,
                 1.0, VT, n_hidden,
-                U,  n_hidden,
+                     U,  n_hidden,
                 0.0, R,  n_hidden);
 
     // Log and check for early exit via Lua callback

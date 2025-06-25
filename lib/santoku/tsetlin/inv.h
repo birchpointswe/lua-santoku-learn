@@ -50,13 +50,14 @@ typedef struct tk_inv_thread_s {
   tk_inv_t *I;
   tk_inv_hoods_t *hoods;
   tk_iuset_t *seen;
-  tk_iumap_t *cnt;
+  tk_ivec_t *cnt;
+  tk_ivec_t *touched;
   tk_iumap_t *sid_idx;
   tk_ivec_t *uids;
   tk_ivec_t *sids;
   uint64_t ifirst, ilast;
   double eps;
-  uint64_t k;
+  uint64_t knn;
 } tk_inv_thread_t;
 
 static inline tk_inv_t *tk_inv_peek (lua_State *L, int i)
@@ -88,7 +89,6 @@ static inline void tk_inv_destroy (
   for (uint64_t i = 0; i < I->pool->n_threads; i ++) {
     tk_inv_thread_t *data = I->threads + i;
     tk_iuset_destroy(data->seen);
-    tk_iumap_destroy(data->cnt);
   }
   tk_threads_destroy(I->pool);
   free(I->threads);
@@ -238,8 +238,6 @@ static inline void tk_inv_add (
     return;
   int kha;
   khint_t khi;
-  tk_ivec_asc(node_bits, 0, node_bits->n);
-  // tk_ivec_dedupe(node_bits, 0, node_bits->n);
   tk_iuset_t *seen = tk_iuset_create();
   for (uint64_t i = 0; i < node_bits->n; i ++) {
     int64_t b = node_bits->a[i];
@@ -275,7 +273,7 @@ static inline void tk_inv_remove (
 static inline void tk_inv_neighborhoods (
   lua_State *L,
   tk_inv_t *I,
-  uint64_t k,
+  uint64_t knn,
   double eps,
   tk_inv_hoods_t **hoodsp,
   tk_ivec_t **uidsp
@@ -298,7 +296,7 @@ static inline void tk_inv_neighborhoods (
     uids->a[i] = tk_inv_sid_uid(I, sids->a[i]);
   tk_inv_hoods_t *hoods = tk_inv_hoods_create(L, uids->n, 0, 0);
   for (uint64_t i = 0; i < hoods->n; i ++) {
-    hoods->a[i] = tk_rvec_create(L, k, 0, 0);
+    hoods->a[i] = tk_rvec_create(L, knn, 0, 0);
     hoods->a[i]->n = 0;
     tk_lua_add_ephemeron(L, TK_INV_EPH, -2, -1);
     lua_pop(L, 1);
@@ -307,10 +305,11 @@ static inline void tk_inv_neighborhoods (
     tk_inv_thread_t *data = I->threads + i;
     data->uids = uids;
     data->sids = sids;
+    tk_ivec_ensure(L, data->cnt, sids->n);
     data->hoods = hoods;
     data->sid_idx = sid_idx;
     data->eps = eps;
-    data->k = k;
+    data->knn = knn;
     tk_thread_range(i, I->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
   }
   tk_threads_signal(I->pool, TK_INV_NEIGHBORHOODS);
@@ -320,7 +319,42 @@ static inline void tk_inv_neighborhoods (
   lua_remove(L, -3); // sids
 }
 
-static inline tk_pvec_t *tk_inv_neighbors (
+static inline tk_rvec_t *tk_inv_neighbors_by_vec (
+  lua_State *L,
+  tk_inv_t *I,
+  int64_t *data,
+  size_t datalen,
+  int64_t sid0,
+  uint64_t knn,
+  uint64_t eps,
+  tk_rvec_t *out
+) {
+  if (!out)
+    out = tk_rvec_create(L, knn, 0, 0);
+  out->n = 0;
+  if (knn == 0)
+    return out;
+  #warning todo
+  return out;
+}
+
+static inline tk_rvec_t *tk_inv_neighbors_by_id (
+  lua_State *L,
+  tk_inv_t *I,
+  int64_t uid,
+  uint64_t knn,
+  double eps,
+  tk_rvec_t *out
+) {
+  int64_t sid0 = tk_inv_uid_sid(I, uid, false);
+  if (sid0 < 0)
+    return out ? (out->n = 0, out) : tk_rvec_create(L, 0, 0, 0);
+  size_t len = 0;
+  int64_t *data = tk_inv_get(I, uid, &len);
+  return tk_inv_neighbors_by_vec(L, I, data, len, sid0, knn, eps, out);
+}
+
+static inline tk_rvec_t *tk_inv_neighbors (
   lua_State *L,
   tk_inv_t *I,
   char *vec
@@ -384,16 +418,27 @@ static inline int tk_inv_get_lua (lua_State *L)
 static inline int tk_inv_neighborhoods_lua (lua_State *L)
 {
   tk_inv_t *I = tk_inv_peek(L, 1);
-  uint64_t k = tk_lua_checkunsigned(L, 2, "k");
-  double eps = tk_lua_checkposdouble(L, 3, "eps");
-  tk_inv_neighborhoods(L, I, k, eps, 0, 0);
+  uint64_t knn = tk_lua_checkunsigned(L, 2, "knn");
+  double eps = tk_lua_optposdouble(L, 3, "eps", 1.0);
+  tk_inv_neighborhoods(L, I, knn, eps, 0, 0);
   return 2;
 }
 
 static inline int tk_inv_neighbors_lua (lua_State *L)
 {
-  #warning todo
-  return 0;
+  lua_settop(L, 5);
+  tk_inv_t *I = tk_inv_peek(L, 1);
+  uint64_t knn = tk_lua_optunsigned(L, 3, "knn", 0);
+  double eps = tk_lua_optposdouble(L, 4, "eps", 1.0);
+  tk_rvec_t *out = tk_rvec_peekopt(L, 5);
+  if (lua_type(L, 2) == LUA_TNUMBER) {
+    int64_t uid = tk_lua_checkinteger(L, 2, "id");
+    tk_inv_neighbors_by_id(L, I, uid, knn, eps, out);
+  } else {
+    tk_ivec_t *vec = tk_ivec_peek(L, 2, "vector");
+    tk_inv_neighbors_by_vec(L, I, vec->a, vec->n, -1, knn, eps, out);
+  }
+  return out == NULL ? 1 : 0;
 }
 
 static inline int tk_inv_size_lua (lua_State *L)
@@ -467,13 +512,15 @@ static inline void tk_inv_worker (void *dp, int sig)
   tk_inv_stage_t stage = (tk_inv_stage_t) sig;
   tk_inv_thread_t *data = (tk_inv_thread_t *) dp;
   tk_inv_t *I = data->I;
-  tk_iumap_t *cnt = data->cnt;
+  tk_ivec_t *cnt = data->cnt;
+  tk_ivec_t *touched = data->touched;
   tk_inv_hoods_t *hoods = data->hoods;
   tk_ivec_t *sids = data->sids;
   tk_iumap_t *sid_idx = data->sid_idx;
   double eps = data->eps;
+  uint64_t knn = data->knn;
   khint_t khi;
-  int64_t usid, vsid, fid;
+  int64_t usid, vsid, fid, iv;
   int64_t start, end;
   int64_t *ubits, *vbits;
   size_t nubits, nvbits;
@@ -481,6 +528,9 @@ static inline void tk_inv_worker (void *dp, int sig)
   tk_ivec_t *vsids;
   switch (stage) {
     case TK_INV_NEIGHBORHOODS:
+      if (knn == 0)
+        return;
+      touched->n = 0;
       for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i ++) {
         usid = sids->a[i];
         if (tk_iumap_get(I->sid_uid, usid) == tk_iumap_end(I->sid_uid))
@@ -491,7 +541,6 @@ static inline void tk_inv_worker (void *dp, int sig)
         end = (usid + 1 == (int64_t)I->node_offsets->n)
           ? (int64_t) I->node_bits->n
           : I->node_offsets->a[usid + 1];
-        tk_iumap_clear(cnt);
         for (int64_t j = start; j < end; j ++) {
           fid = I->node_bits->a[j];
           vsids = I->postings->a[fid];
@@ -502,28 +551,30 @@ static inline void tk_inv_worker (void *dp, int sig)
             khi = tk_iumap_get(sid_idx, vsid);        // only consider slice
             if (khi == tk_iumap_end(sid_idx))
               continue;
-            int kha;
-            khi = tk_iumap_put(cnt, vsid, &kha);
-            if (kha)                                  // new candidate
-              tk_iumap_value(cnt, khi) = 1;
-            else
-              tk_iumap_value(cnt, khi) ++;
+            iv = tk_iumap_value(sid_idx, khi);
+            if (cnt->a[iv] == 0)
+              tk_ivec_push(touched, iv);
+            cnt->a[iv] ++;
           }
         }
-        for (khi = kh_begin(cnt); khi != kh_end(cnt); khi ++) {
-          if (!kh_exist(cnt, khi))
-            continue;
-          vsid = tk_iumap_key(cnt, khi);
+        for (uint64_t ti = 0; ti < touched->n; ti ++) {
+          iv = touched->a[ti];
+          vsid = sids->a[iv];
+          size_t inter = (size_t) cnt->a[iv];
           vbits = tk_inv_sget(I, vsid, &nvbits);
-          size_t inter = (size_t)tk_iumap_value(cnt, khi);
           size_t uni = nubits + nvbits - inter;
           double dist = (uni == 0) ? 0.0 : 1.0 - (double)inter / (double)uni;
           if (dist <= eps) {
-            int64_t iv = tk_iumap_value(sid_idx, tk_iumap_get(sid_idx, vsid));
+            iv = tk_iumap_value(sid_idx, tk_iumap_get(sid_idx, vsid));
             tk_rvec_hasc(uhood, tk_rank(iv, dist));
           }
         }
         tk_rvec_asc(uhood, 0, uhood->n);
+        uhood->m = uhood->n;
+        uhood->a = realloc(uhood->a, uhood->n * sizeof(*uhood->a));
+        for (uint64_t ti = 0; ti < touched->n; ti ++)
+          cnt->a[touched->a[ti]] = 0;
+        touched->n = 0;
       }
       break;
   }
@@ -554,6 +605,7 @@ static inline tk_inv_t *tk_inv_create (
   uint64_t n_threads
 ) {
   tk_inv_t *I = tk_lua_newuserdata(L, tk_inv_t, TK_INV_MT, tk_inv_lua_mt_fns, tk_inv_gc_lua);
+  int Ii = tk_lua_absindex(L, -1);
   I->destroyed = false;
   I->next_sid = 0;
   I->features = features;
@@ -581,7 +633,12 @@ static inline tk_inv_t *tk_inv_create (
     I->pool->threads[i].data = data;
     data->I = I;
     data->seen = tk_iuset_create();
-    data->cnt = tk_iumap_create();
+    data->cnt = tk_ivec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+    lua_pop(L, 1);
+    data->touched = tk_ivec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+    lua_pop(L, 1);
   }
   return I;
 }

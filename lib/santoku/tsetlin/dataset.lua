@@ -1,6 +1,7 @@
 require("santoku.rvec")
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local tbl = require("santoku.table")
+local pvec = require("santoku.pvec")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
 local it = require("santoku.iter")
@@ -196,65 +197,79 @@ M.split_binary_mnist = function (dataset, ratio)
   end
 end
 
-M.add_binary_mnist_pairs = function (split, n_centers, n_negatives)
-  local pos, neg = ivec.create(), ivec.create()
-  local label = split.solutions
-  local N = split.n
-  local class_to_indices = {}
-  for i = 0, N - 1 do
-    local y = label:get(i)
-    class_to_indices[y] = class_to_indices[y] or {}
-    table.insert(class_to_indices[y], i)
-  end
-  local centers_by_class = {}
-  for class, indices in pairs(class_to_indices) do
-    local centres = {}
-    for _ = 1, math.min(n_centers, #indices) do
-      local idx = math.random(#indices)
-      table.insert(centres, indices[idx])
-      table.remove(indices, idx)
+M.multiclass_pairs = function (labels, n_anchors)
+  n_anchors = n_anchors or 1
+  local pos, neg = pvec.create(), pvec.create()
+  local class_to_indices, class_to_anchors = {}, {}
+  local classes = ivec.create()
+  -- Collect indices per class
+  for i, y in labels:ieach() do
+    if not class_to_indices[y] then
+      class_to_indices[y] = ivec.create()
+      classes:push(y)
     end
-    if #centres == 0 then
-      centres[1] = indices[1]
-      table.remove(indices, 1)
-    end
-    centers_by_class[class] = centres
-    for _, i in ipairs(indices) do
-      local centre = centres[math.random(#centres)]
-      pos:push(i)
-      pos:push(centre)
-    end
+    class_to_indices[y]:push(i)
   end
-  local classes = {}
-  for class in pairs(centers_by_class) do
-    table.insert(classes, class)
+  -- Choose anchors per class
+  for class in classes:each() do
+    local indices = class_to_indices[class]
+    local anchors = ivec.create()
+    local used = {}
+    while anchors:size() < num.min(n_anchors, indices:size()) do
+      local candidate = indices:get(num.random(indices:size()) - 1)
+      if not used[candidate] then
+        anchors:push(candidate)
+        used[candidate] = true
+      end
+    end
+    class_to_anchors[class] = anchors
   end
-  if #classes > 1 then
-    for _, class_i in ipairs(classes) do
-      local centres_i = centers_by_class[class_i]
-      for _, ci in ipairs(centres_i) do
-        for _ = 1, n_negatives do
-          local other_class
-          repeat
-            other_class = classes[math.random(#classes)]
-          until other_class ~= class_i
-          local cj_list = centers_by_class[other_class]
-          local cj = cj_list[math.random(#cj_list)]
-          neg:push(ci)
-          neg:push(cj)
+  -- Positive edges: connect each node to its own class anchors
+  for class in classes:each() do
+    local indices = class_to_indices[class]
+    local anchors = class_to_anchors[class]
+    for idx in indices:each() do
+      for anchor in anchors:each() do
+        if idx ~= anchor then
+          pos:push(idx, anchor)
         end
       end
     end
   end
-  split.pos = pos
-  split.neg = neg
+  -- Negative edges: connect each node ONLY to other-class anchors (once!)
+  for class in classes:each() do
+    local indices = class_to_indices[class]
+    local negative_anchors = ivec.create()
+    -- Gather all other-class anchors
+    for other_class in classes:each() do
+      if other_class ~= class then
+        local anchors = class_to_anchors[other_class]
+        for anchor in anchors:each() do
+          negative_anchors:push(anchor)
+        end
+      end
+    end
+    -- Connect each node negatively to selected other-class anchors
+    for idx in indices:each() do
+      local used_neg = {}
+      for _ = 1, n_anchors do
+        local anchor_neg
+        repeat
+          anchor_neg = negative_anchors:get(num.random(negative_anchors:size()) - 1)
+        until not used_neg[anchor_neg]
+        used_neg[anchor_neg] = true
+        neg:push(idx, anchor_neg)
+      end
+    end
+  end
+  return pos, neg
 end
 
 M.read_imdb = function (dir, max)
   local problems = {}
   local solutions = {}
-  local pos = it.paste(1, it.take(max or math.huge, fs.files(dir .. "/pos")))
-  local neg = it.paste(0, it.take(max or math.huge, fs.files(dir .. "/neg")))
+  local pos = it.paste(1, it.take(max or num.huge, fs.files(dir .. "/pos")))
+  local neg = it.paste(0, it.take(max or num.huge, fs.files(dir .. "/neg")))
   local samples = it.map(function (label, text)
     return label, fs.readfile(text)
   end, it.chain(pos, neg))
@@ -293,7 +308,7 @@ M.read_glove = function (fp, max)
   local embeddings = dvec.create()
   local words = {}
   local added = 0
-  for l in it.take(max or math.huge, fs.lines(fp)) do
+  for l in it.take(max or num.huge, fs.lines(fp)) do
     local chunks = str.gmatch(l, "%S+")
     local word = chunks()
     words[#words + 1] = word

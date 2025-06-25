@@ -8,13 +8,12 @@
 #include <santoku/pumap.h>
 #include <santoku/tsetlin/inv.h>
 #include <santoku/tsetlin/ann.h>
+#include <santoku/tsetlin/hbi.h>
+#include <santoku/tsetlin/dsu.h>
 #include <float.h>
 
 #define TK_GRAPH_MT "tk_graph_t"
 #define TK_GRAPH_EPH "tk_graph_eph"
-
-KHASH_INIT(tk_dsu_members, int64_t, tk_iuset_t *, 1, kh_int64_hash_func, kh_int64_hash_equal)
-typedef khash_t(tk_dsu_members) tk_dsu_members_t;
 
 typedef tk_iuset_t * tk_graph_adj_item_t;
 #define tk_vec_name tk_graph_adj
@@ -27,12 +26,6 @@ typedef enum {
   TK_GRAPH_TODO
 } tk_graph_stage_t;
 
-typedef struct {
-  tk_iumap_t *parent;
-  tk_iumap_t *rank;
-  int64_t components;
-} tk_dsu_t;
-
 typedef struct tk_graph_thread_s tk_graph_thread_t;
 
 typedef struct tk_graph_s {
@@ -40,20 +33,16 @@ typedef struct tk_graph_s {
   tk_ivec_t *uids;
   tk_iumap_t *uid_hood;
   tk_graph_adj_t *adj_pos, *adj_neg;
-  struct {
-    bool is_inv;
-    union {
-      tk_inv_t *inv;
-      tk_ann_t *ann;
-    };
-    union {
-      tk_inv_hoods_t *inv_hoods;
-      tk_ann_hoods_t *ann_hoods;
-    };
-  } index;
+  tk_inv_t *inv;
+  tk_ann_t *ann;
+  tk_hbi_t *hbi;
+  tk_inv_hoods_t *inv_hoods;
+  tk_ann_hoods_t *ann_hoods;
+  tk_hbi_hoods_t *hbi_hoods;
   uint64_t knn_cache;
   double knn_eps;
-  tk_ivec_t *pos, *neg;
+  tk_pvec_t *pos, *neg;
+  tk_ivec_t *labels;
   uint64_t n_pos, n_neg;
   tk_dsu_t dsu;
   tk_graph_thread_t *threads;

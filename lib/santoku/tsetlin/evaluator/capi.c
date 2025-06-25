@@ -2,6 +2,7 @@
 
 #include <santoku/tsetlin/conf.h>
 #include <santoku/tsetlin/graph.h>
+#include <santoku/tsetlin/cluster.h>
 #include <santoku/threads.h>
 #include <santoku/ivec.h>
 
@@ -16,7 +17,7 @@ typedef enum {
 typedef struct {
   tm_dl_t *pl;
   atomic_ulong *TP, *FP, *FN, *hist_pos, *hist_neg;
-  tk_ivec_t *pos, *neg;
+  tk_pvec_t *pos, *neg;
   uint64_t n_pos, n_neg;
   double *f1, *precision, *recall;
   unsigned int *predicted, *expected;
@@ -32,6 +33,12 @@ typedef struct {
   uint64_t sfirst, slast;
   uint64_t pfirst, plast;
 } tk_eval_thread_t;
+
+typedef struct {
+  double f1;
+  double precision;
+  double recall;
+} tk_accuracy_t;
 
 static void tk_eval_worker (void *dp, int sig)
 {
@@ -57,10 +64,10 @@ static void tk_eval_worker (void *dp, int sig)
 
     case TK_EVAL_CLUSTERING_ACCURACY:
       for (unsigned int i = data->pfirst; i <= data->plast; i ++) {
-        tk_ivec_t *pairs = i < state->n_pos ? state->pos : state->neg;
+        tk_pvec_t *pairs = i < state->n_pos ? state->pos : state->neg;
         uint64_t offset = i < state->n_pos ? 0 : state->n_pos;
-        int64_t u = pairs->a[(i - offset) * 2 + 0];
-        int64_t v = pairs->a[(i - offset) * 2 + 1];
+        int64_t u = pairs->a[(i - offset)].i;
+        int64_t v = pairs->a[(i - offset)].p;
         khi = tk_iumap_get(state->id_assignment, u);
         if (khi == tk_iumap_end(state->id_assignment))
           continue;
@@ -72,12 +79,12 @@ static void tk_eval_worker (void *dp, int sig)
         int64_t cu = state->assignments->a[iu];
         int64_t cv = state->assignments->a[iv];
         if (i < state->n_pos) {
-          if (cu == cv && cu != -1)
+          if (cu == cv)
             atomic_fetch_add(state->TP, 1);
           else
             atomic_fetch_add(state->FN, 1);
         } else {
-          if (cu == cv && cu != -1)
+          if (cu == cv)
             atomic_fetch_add(state->FP, 1);
         }
       }
@@ -116,10 +123,10 @@ static void tk_eval_worker (void *dp, int sig)
 
     case TK_EVAL_ENCODING_AUC:
       for (uint64_t k = data->pfirst; k <= data->plast; k ++) {
-        tk_ivec_t *pairs = k < state->n_pos ? state->pos : state->neg;
+        tk_pvec_t *pairs = k < state->n_pos ? state->pos : state->neg;
         uint64_t offset = k < state->n_pos ? 0 : state->n_pos;
-        int64_t u = pairs->a[(k - offset) * 2 + 0];
-        int64_t v = pairs->a[(k - offset) * 2 + 1];
+        int64_t u = pairs->a[(k - offset) * 2].i;
+        int64_t v = pairs->a[(k - offset) * 2].p;
         int64_t iu, iv;
         if (state->id_code == NULL) {
           iu = u;
@@ -295,22 +302,22 @@ static inline int tm_entropy_stats (lua_State *L)
   return 1;
 }
 
-static inline int tm_clustering_accuracy (lua_State *L)
-{
-  lua_settop(L, 5);
-  tk_ivec_t *assignments = tk_ivec_peek(L, 1, "assignments");
-  tk_ivec_t *ids = tk_ivec_peek(L, 2, "ids");
-  tk_ivec_t *pos = tk_ivec_peek(L, 3, "pos");
-  tk_ivec_t *neg = tk_ivec_peek(L, 4, "neg");
-  uint64_t n_pos = pos->n / 2;
-  uint64_t n_neg = neg->n / 2;
-  unsigned int n_threads = tk_threads_getn(L, 5, "n_threads", NULL);
+static inline tk_accuracy_t tm_clustering_accuracy (
+  lua_State *L,
+  tk_ivec_t *ids,
+  tk_ivec_t *assignments,
+  tk_pvec_t *pos,
+  tk_pvec_t *neg,
+  unsigned int n_threads
+) {
+  uint64_t n_pos = pos->n;
+  uint64_t n_neg = neg->n;
 
   tk_eval_t state;
   atomic_ulong TP, FP, FN;
   double precision, recall, f1;
   state.assignments = assignments;
-  state.id_assignment = tk_iumap_from_ivec(ids); // TODO: Pass id_assignment (aka uid_hood) in instead of recomputing
+  state.id_assignment = tk_iumap_from_ivec(ids);
   state.pos = pos;
   state.neg = neg;
   state.n_pos = n_pos;
@@ -342,16 +349,35 @@ static inline int tm_clustering_accuracy (lua_State *L)
   f1 = (precision + recall) > 0 ?
     2.0 * precision * recall / (precision + recall) : 0.0;
 
-  // Lua output
-  lua_newtable(L);
-  lua_pushnumber(L, precision);
-  lua_setfield(L, -2, "precision");
-  lua_pushnumber(L, recall);
-  lua_setfield(L, -2, "recall");
-  lua_pushnumber(L, f1);
-  lua_setfield(L, -2, "f1");
+  tk_accuracy_t acc;
+  acc.f1 = f1;
+  acc.precision = precision;
+  acc.recall = recall;
 
   tk_iumap_destroy(state.id_assignment);
+  return acc;
+}
+
+static inline int tm_clustering_accuracy_lua (lua_State *L)
+{
+  lua_settop(L, 5);
+  tk_ivec_t *assignments = tk_ivec_peek(L, 1, "assignments");
+  tk_ivec_t *ids = tk_ivec_peek(L, 2, "ids");
+  tk_pvec_t *pos = tk_pvec_peek(L, 3, "pos");
+  tk_pvec_t *neg = tk_pvec_peek(L, 4, "neg");
+  unsigned int n_threads = tk_threads_getn(L, 5, "n_threads", NULL);
+
+  tk_accuracy_t acc = tm_clustering_accuracy(L, ids, assignments, pos, neg, n_threads);
+
+  // Lua output
+  lua_newtable(L);
+  lua_pushnumber(L, acc.precision);
+  lua_setfield(L, -2, "precision");
+  lua_pushnumber(L, acc.recall);
+  lua_setfield(L, -2, "recall");
+  lua_pushnumber(L, acc.f1);
+  lua_setfield(L, -2, "f1");
+
   return 1;
 }
 
@@ -496,11 +522,11 @@ static inline int tm_auc (lua_State *L)
   lua_settop(L, 6);
 
   tk_bits_t *codes = (tk_bits_t *) tk_lua_checkustring(L, 1, "codes");
-  tk_ivec_t *pos = tk_ivec_peek(L, 2, "pos");
-  tk_ivec_t *neg = tk_ivec_peek(L, 3, "neg");
+  tk_pvec_t *pos = tk_pvec_peek(L, 2, "pos");
+  tk_pvec_t *neg = tk_pvec_peek(L, 3, "neg");
   uint64_t n_classes = tk_lua_checkunsigned(L, 4, "n_hidden");
-  uint64_t n_pos = pos->n / 2;
-  uint64_t n_neg = neg->n / 2;
+  uint64_t n_pos = pos->n;
+  uint64_t n_neg = neg->n;
 
   tk_bits_t *mask =
     lua_type(L, 5) == LUA_TSTRING ? (tk_bits_t *) luaL_checkstring(L, 5) :
@@ -537,6 +563,93 @@ static inline int tm_auc (lua_State *L)
   return 1;
 }
 
+static inline int tm_optimize_clustering (lua_State *L)
+{
+  lua_settop(L, 1);
+
+  lua_getfield(L, 1, "index");
+  // tk_inv_t *inv = tk_inv_peekopt(L, i_index);
+  // tk_ann_t *ann = tk_ann_peekopt(L, i_index);
+  // tk_hbi_t *hbi = tk_hbi_peekopt(L, -1);
+
+  // if (inv == NULL && ann == NULL && hbi == NULL)
+  //   tk_lua_verror(L, 3, "graph", "index", "either tk_inv_t, tk_ann_t, or tk_inv_t must be provided");
+
+  tk_hbi_t *hbi = tk_hbi_peek(L, -1);
+
+  lua_getfield(L, 1, "pos");
+  tk_pvec_t *pos = tk_pvec_peek(L, -1, "pos");
+
+  lua_getfield(L, 1, "neg");
+  tk_pvec_t *neg = tk_pvec_peek(L, -1, "neg");
+
+  uint64_t min_margin = tk_lua_fcheckunsigned(L, 1, "optimize clustering", "min_margin");
+  uint64_t max_margin = tk_lua_fcheckunsigned(L, 1, "optimize clustering", "max_margin");
+
+  if (max_margin < min_margin)
+    max_margin = min_margin;
+
+  unsigned int n_threads = tk_threads_getn(L, 1, "optimize clustering", "threads");
+
+  int i_each = -1;
+  if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
+    lua_getfield(L, 1, "each");
+    i_each = tk_lua_absindex(L, -1);
+  }
+
+  uint64_t n_clusters = 0;
+  tk_ivec_t *ids = NULL;
+  tk_ivec_t *assignments = NULL;
+  tk_accuracy_t best = {0};
+  uint64_t best_n = 0, best_m = 0;
+  int i_ids = LUA_NOREF, i_assign = LUA_NOREF;
+  for (uint64_t m = min_margin; m <= max_margin; m ++) {
+    tk_cluster_dsu(L, hbi, m, &ids, &assignments, &n_clusters); // ids assignments
+    tk_accuracy_t result = tm_clustering_accuracy(L, ids, assignments, pos, neg, n_threads);
+    if (i_each > -1) {
+      lua_pushvalue(L, i_each);
+      lua_pushnumber(L, result.f1);
+      lua_pushnumber(L, result.precision);
+      lua_pushnumber(L, result.recall);
+      lua_pushinteger(L, (int64_t) m);
+      lua_pushinteger(L, (int64_t) n_clusters);
+      lua_call(L, 5, 0);
+    }
+    if (result.f1 > best.f1) {
+      best = result;
+      best_n = n_clusters;
+      best_m = m;
+      luaL_unref(L, LUA_REGISTRYINDEX, i_assign);
+      luaL_unref(L, LUA_REGISTRYINDEX, i_ids);
+      i_assign = luaL_ref(L, LUA_REGISTRYINDEX); // assignments
+      i_ids = luaL_ref(L, LUA_REGISTRYINDEX); // ids
+      // empty
+    } else {
+      lua_pop(L, 2); // empty
+    }
+  }
+
+  lua_newtable(L); // score
+  lua_pushinteger(L, (int64_t) best_m);
+  lua_setfield(L, -2, "margin");
+  lua_pushinteger(L, (int64_t) best_n);
+  lua_setfield(L, -2, "n_clusters");
+  lua_pushnumber(L, best.precision);
+  lua_setfield(L, -2, "precision");
+  lua_pushnumber(L, best.recall);
+  lua_setfield(L, -2, "recall");
+  lua_pushnumber(L, best.f1);
+  lua_setfield(L, -2, "f1");
+
+  lua_rawgeti(L, LUA_REGISTRYINDEX, i_ids); // ids
+  lua_rawgeti(L, LUA_REGISTRYINDEX, i_assign); // assign
+  luaL_unref(L, LUA_REGISTRYINDEX, i_ids);
+  luaL_unref(L, LUA_REGISTRYINDEX, i_assign);
+  lua_pushinteger(L, (int64_t) best_n); // n
+
+  return 4;
+}
+
 static inline int tm_optimize_retrieval (lua_State *L)
 {
   lua_settop(L, 1);
@@ -552,10 +665,10 @@ static inline int tm_optimize_retrieval (lua_State *L)
   tk_ivec_t *ids = tk_ivec_peekopt(L, -1);
 
   lua_getfield(L, 1, "pos");
-  tk_ivec_t *pos = tk_ivec_peek(L, -1, "pos");
+  tk_pvec_t *pos = tk_pvec_peek(L, -1, "pos");
 
   lua_getfield(L, 1, "neg");
-  tk_ivec_t *neg = tk_ivec_peek(L, -1, "neg");
+  tk_pvec_t *neg = tk_pvec_peek(L, -1, "neg");
 
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
@@ -565,8 +678,8 @@ static inline int tm_optimize_retrieval (lua_State *L)
 
   uint64_t n_classes = tk_lua_fcheckunsigned(L, 1, "optimize_retrieval", "n_hidden");
   unsigned int n_threads = tk_threads_getn(L, 1, "optimize_retrieval", "threads");
-  uint64_t n_pos = pos->n / 2;
-  uint64_t n_neg = neg->n / 2;
+  uint64_t n_pos = pos->n;
+  uint64_t n_neg = neg->n;
 
   tk_eval_t state;
   state.n_classes = n_classes;
@@ -668,8 +781,9 @@ static luaL_Reg tm_evaluator_fns[] =
   { "class_accuracy", tm_class_accuracy },
   { "auc", tm_auc },
   { "encoding_accuracy", tm_encoding_accuracy },
-  { "clustering_accuracy", tm_clustering_accuracy },
+  { "clustering_accuracy", tm_clustering_accuracy_lua },
   { "optimize_retrieval", tm_optimize_retrieval },
+  { "optimize_clustering", tm_optimize_clustering },
   { "entropy_stats", tm_entropy_stats },
   { NULL, NULL }
 };
