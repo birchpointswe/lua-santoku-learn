@@ -264,7 +264,7 @@ static inline void tk_ann_remove (
   tk_ann_uid_remove(A, uid);
 }
 
-static inline void _tk_ann_extend_neighborhood (
+static inline void tk_ann_extend_neighborhood (
   tk_ann_t *A,
   uint64_t i,
   int64_t sid,
@@ -272,7 +272,6 @@ static inline void _tk_ann_extend_neighborhood (
   tk_ann_hash_t h,
   tk_pvec_t *hood,
   tk_iumap_t *sid_idx,
-  uint64_t k,
   uint64_t eps
 ) {
   khint_t khi = kh_get(tk_ann_buckets, A->buckets, h);
@@ -291,29 +290,24 @@ static inline void _tk_ann_extend_neighborhood (
       int64_t idx = tk_iumap_value(sid_idx, khi);
       const char *V1 = tk_ann_sget(A, sid1);
       uint64_t m = tk_ann_hamming(V, V1, A->features);
-      if (m <= eps) {
-        if (k > 0)
-          tk_pvec_hasc(hood, tk_pair(idx, (int64_t) m));
-        else
-          tk_pvec_push(hood, tk_pair(idx, (int64_t) m));
-      }
+      if (m <= eps)
+        tk_pvec_hasc(hood, tk_pair(idx, (int64_t) m));
     }
     tk_pvec_asc(hood, 0, hood->n);
   }
 }
 
-static inline void _tk_ann_populate_neighborhood (
+static inline void tk_ann_populate_neighborhood (
   tk_ann_t *A,
   uint64_t i,
   int64_t sid,
   char *V,
   tk_pvec_t *hood,
   tk_iumap_t *sid_idx,
-  uint64_t k,
   uint64_t eps
 ) {
   tk_ann_hash_t h = tk_ann_hash(A, V);
-  _tk_ann_extend_neighborhood(A, i, sid, V, h, hood, sid_idx, k, eps);
+  tk_ann_extend_neighborhood(A, i, sid, V, h, hood, sid_idx, eps);
   int pos[TK_ANN_BITS];
   for (int r = 1; r <= (int) A->probe_radius && r <= TK_ANN_BITS; r ++) {
     for (int i = 0; i < r; i ++)
@@ -322,7 +316,7 @@ static inline void _tk_ann_populate_neighborhood (
       tk_ann_hash_t mask = 0;
       for (int i = 0; i < r; i ++)
         mask |= (1U << pos[i]);
-      _tk_ann_extend_neighborhood(A, i, sid, V, h ^ mask, hood, sid_idx, k, eps);
+      tk_ann_extend_neighborhood(A, i, sid, V, h ^ mask, hood, sid_idx, eps);
       int i;
       for (i = r - 1; i >= 0; i--) {
         if (pos[i] != i + TK_ANN_BITS - r) {
@@ -401,14 +395,16 @@ static inline tk_pvec_t *tk_ann_neighbors_by_vec (
     return NULL;
   }
   if (!out)
-    out = tk_pvec_create(L, knn == 0 ? 16 : knn, 0, 0);
+    out = tk_pvec_create(L, knn, 0, 0);
   out->n = 0;
+  if (knn == 0)
+    return out;
   const tk_ann_hash_t h0 = tk_ann_hash(A, vec);
   int pos[TK_ANN_BITS];
   for (int r = 0; r <= (int) A->probe_radius && r <= TK_ANN_BITS; r ++) {
     for (int i = 0; i < r; i ++)
       pos[i] = i;
-    bool done = (r == 0);           /* r == 0 has a single mask 0        */
+    bool done = (r == 0);
     while (true) {
       tk_ann_hash_t mask = 0;
       for (int i = 0; i < r; i ++)
@@ -426,9 +422,9 @@ static inline tk_pvec_t *tk_ann_neighbors_by_vec (
           uint64_t d = tk_ann_hamming(vec, tk_ann_sget(A, sid1), A->features);
           if (d <= eps) {
             if (knn > 0)
-              tk_pvec_hasc(out, tk_pair(uid1, (int64_t)d));
+              tk_pvec_hasc(out, tk_pair(uid1, (int64_t) d));
             else
-              tk_pvec_push(out, tk_pair(uid1, (int64_t)d));
+              tk_pvec_push(out, tk_pair(uid1, (int64_t) d));
           }
         }
       }
@@ -622,7 +618,7 @@ static inline void tk_ann_worker (void *dp, int sig)
       for (uint64_t i = data->ifirst; i <= data->ilast; i ++) {
         tk_pvec_t *hood = data->hoods->a[i];
         int64_t sid = data->sids->a[i];
-        _tk_ann_populate_neighborhood(data->A, i, sid, tk_ann_sget(data->A, sid), hood, data->sid_idx, data->k, data->eps);
+        tk_ann_populate_neighborhood(data->A, i, sid, tk_ann_sget(data->A, sid), hood, data->sid_idx, data->eps);
         tk_pvec_asc(hood, 0, hood->n);
       }
       break;

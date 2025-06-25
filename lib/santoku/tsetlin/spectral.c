@@ -17,7 +17,7 @@ typedef enum {
 typedef struct {
   double *x, *y, *z;
   double *evals, *evecs, *resNorms;
-  double *laplacian;
+  double *scale;
   tk_graph_adj_t *adj_pos;
   tk_graph_adj_t *adj_neg;
   uint64_t n_nodes;
@@ -39,7 +39,7 @@ static inline void tk_spectral_worker (void *dp, int sig)
   double *y = data->spec->y;
   double *z = data->spec->z;
   double *evecs = data->spec->evecs;
-  double *laplacian = data->spec->laplacian;
+  double *scale = data->spec->scale;
   uint64_t n_nodes = data->spec->n_nodes;
   uint64_t n_hidden = data->spec->n_hidden;
   uint64_t ifirst = data->ifirst;
@@ -54,31 +54,30 @@ static inline void tk_spectral_worker (void *dp, int sig)
 
     case TK_SPECTRAL_INIT:
       for (uint64_t i = ifirst; i <= ilast; i ++) {
-        // NOTE: Apparently including negatives in this degree vector is common
-        // in practice but not strictly mathematically justified academically.
-        laplacian[i] =
+        scale[i] =
           (double) tk_iuset_size(adj_pos->a[i]) +
           (double) tk_iuset_size(adj_neg->a[i]);
-        laplacian[i] =
-          laplacian[i] > 0 ? 1.0 / sqrt((double) laplacian[i]) : 0.0;
-        if (!isfinite(laplacian[i]))
-          laplacian[i] = 0.0;
+        scale[i] =
+          scale[i] > 0 ? 1.0 / sqrt((double) scale[i]) : 0.0;
+        if (!isfinite(scale[i]))
+          scale[i] = 0.0;
       }
       break;
 
     case TK_SPECTRAL_MATVEC:
       for (uint64_t i = ifirst; i <= ilast; i ++) {
-        double scale_i = laplacian[i];
+        double scale_i = scale[i];
         double sum = x[i];
         // Positive neighbors
         tk_iuset_foreach(adj_pos->a[i], iv, ({
-          double w = scale_i * laplacian[iv];
+          double w = scale_i * scale[iv];
           sum -= w * x[iv];
         }))
         // Negative neighbors
         tk_iuset_foreach(adj_neg->a[i], iv, ({
-          double w = scale_i * laplacian[iv];
-          sum += w * x[iv];
+          double w = scale_i * scale[iv];
+          // sum += w * x[iv];
+          sum -= w * x[iv];
         }))
         y[i] = sum;
       }
@@ -87,6 +86,7 @@ static inline void tk_spectral_worker (void *dp, int sig)
     case TK_SPECTRAL_FINALIZE:
       for (uint64_t i = ifirst; i <= ilast; i ++)
         for (uint64_t f = 0; f < n_hidden; f ++)
+          // z[i * n_hidden + f] = evecs[i + f * n_nodes];
           z[i * n_hidden + f] = evecs[i + (f + 1) * n_nodes];
       break;
 
@@ -126,7 +126,7 @@ static inline void tm_run_spectral (
   lua_State *L,
   tk_threadpool_t *pool,
   tk_dvec_t *z,
-  tk_dvec_t *lap,
+  tk_dvec_t *scale,
   tk_graph_adj_t *adj_pos,
   tk_graph_adj_t *adj_neg,
   uint64_t n_nodes,
@@ -138,7 +138,7 @@ static inline void tm_run_spectral (
   tk_spectral_t spec;
   tk_spectral_thread_t threads[pool->n_threads];
   spec.z = z->a;
-  spec.laplacian = lap->a;
+  spec.scale = scale->a;
   spec.adj_pos = adj_pos;
   spec.adj_neg = adj_neg;
   spec.n_nodes = n_nodes;
@@ -155,7 +155,7 @@ static inline void tm_run_spectral (
   // Init laplacian
   tk_threads_signal(pool, TK_SPECTRAL_INIT);
 
-  // Run PRIMME to compute the smallest n_hidden + 1 eigenvectors of the graph
+  // Run PRIMME to compute the smallest eigenvectors of the graph
   // laplacian
   primme_params params;
   primme_initialize(&params);
@@ -165,10 +165,11 @@ static inline void tm_run_spectral (
   params.matrix = &spec;
   params.printLevel = 0;
   params.eps = 1e-6;
-  params.target = primme_closest_abs;
-  params.numTargetShifts = 1;
-  params.targetShifts = tk_malloc(L, (size_t) params.numTargetShifts * sizeof(double));
-  params.targetShifts[0] = 0.0;
+  params.target = primme_smallest;
+  params.numTargetShifts = 0;
+  // params.target = primme_closest_abs;
+  // params.numTargetShifts = 1;
+  // params.targetShifts = (double[]) { 0.0 };
   spec.evals = tk_malloc(L, (size_t) params.numEvals * sizeof(double));
   spec.evecs = tk_malloc(L, (size_t) params.n * (size_t) params.numEvals * sizeof(double));
   spec.resNorms = tk_malloc(L, (size_t) params.numEvals * sizeof(double));
@@ -189,7 +190,6 @@ static inline void tm_run_spectral (
   free(spec.evals);
   free(spec.evecs);
   free(spec.resNorms);
-  free(params.targetShifts);
   primme_free(&params);
 
   // Log
@@ -227,8 +227,8 @@ static inline int tm_encode (lua_State *L)
   // Spectral hashing
   tk_lua_get_ephemeron(L, TK_GRAPH_EPH, graph->uids);
   tk_dvec_t *z = tk_dvec_create(L, graph->uids->n * n_hidden, 0, 0);
-  tk_dvec_t *lap = tk_dvec_create(L, graph->uids->n, 0, 0);
-  tm_run_spectral(L, pool, z, lap, adj_pos, adj_neg, graph->uids->n, n_hidden, i_each);
+  tk_dvec_t *scale = tk_dvec_create(L, graph->uids->n, 0, 0);
+  tm_run_spectral(L, pool, z, scale, adj_pos, adj_neg, graph->uids->n, n_hidden, i_each);
 
   // Cleanup
   tk_threads_destroy(pool);
