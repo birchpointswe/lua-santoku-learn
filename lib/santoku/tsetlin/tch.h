@@ -78,6 +78,7 @@ static inline void tk_tch_refine (
           updated = true;
         }
       }
+
     } while (updated);
 
 

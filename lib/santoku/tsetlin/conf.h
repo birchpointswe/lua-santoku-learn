@@ -105,8 +105,8 @@ static inline uint64_t hash128 (
 }
 
 typedef struct { int64_t u, v; } tm_pair_t;
-#define tm_pair_lt(a, b) ((a).u < (b).u || ((a).u == (b).u && (a).v < (b).v))
 #define tm_pair(u, v) (((u) < (v)) ? ((tm_pair_t) { (u), (v) }) : ((tm_pair_t) { (v), (u) }))
+#define tm_pair_lt(a, b) ((a).u < (b).u || ((a).u == (b).u && (a).v < (b).v))
 #define tm_pair_eq(a, b) ((a).u == (b).u && ((a).v == (b).v))
 #define tm_pair_hash(a) (hash128(kh_int64_hash_func((a).u), kh_int64_hash_func((a).v)))
 KHASH_INIT(pairs, tm_pair_t, bool, 1, tm_pair_hash, tm_pair_eq)

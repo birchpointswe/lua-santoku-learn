@@ -1,46 +1,11 @@
 # Now
 
-- Clustering via: DSU + Hamming Tree
-    - Replace LSH with hamming tree
-      Replace DBSCAN with DSU + Hamming tree
-    - Write in C, scan all margins, parallelized by margin
-    - Re-use DSU from graph
-    - For each code (node) in your dataset:
-      - Initialize a DSU/Union-Find parent array, so every node starts as its own cluster.
-    - For a given Hamming radius (hard-code max of 3 if d <= 64, 2 if greater):
-      - For each code (node):
-        - Use the LSH ANN to query for all neighbors within the Hamming radius (excluding self).
-        - For each neighbor found:
-          - Use DSU to union the current node and its neighbor (i.e., merge their clusters).
-    - To explore all possible radii (from 0 up to the code length, e.g., 0 to 8 or 64):
-      - For each radius:
-        - Repeat the neighbor-finding and union steps as above.
-        - Optionally, after processing, extract cluster labels by finding DSU roots.
-        - Record cluster statistics if desired (e.g., number of clusters, sizes, etc).
-
-- Graph
-    - Avoid precomputing hoods?
-    - Support passing labels to graph to ensure edges respect classes (e.g. dont positively connect between diff classes
-      or negative with same, support multi-labels as cvec and single-labels as ivec)
-    - Move multiclass-to-graph initial setup using star centers/negatives into graph as graph.create({ index, labels,
-      trans_hops/pos/neg, etc }), where seed pos/neg pairs become optional.
-
-- Eval
-    - Parallelize AUC rank accumulation over pairs
-    - When scanning margins and multiple are tied for best, pick the median
-
-- tk_graph_t
-    - Parallelize init & seed phase (slowest phase of entire pipeline)
-    - Parallelize transitive expansion
-    - Restrict trans via trans_pos/neg_k/eps
-
-- tk_inv/ann_t
-    - Implement neighbors for inv
-    - Refactor/DRY both implementations
-    - ANN currently leaves a lot of performance on the table
-    - Parallelize add
+- tk_inv/ann/hbi_t
+    - Implement inv neighbors
+    - DRY up ANN and HBI
     - Persist/load to/from disk/string (note that this will likely first require compaction to ensure contiguous
       vectors)
+    - Final TODOs
 
 - tk_cvec_t
     - Use for Corex output, TM input/output, ANN input/output, TCH input/output
@@ -52,11 +17,9 @@
         - Special cvec_bitx_xxx methods
             - top_entropy, score_entropy, flip_interleave, filter, extend, ivec
 
-- Misc
-    - Sparse/dense linear SVM for sanity checking all tasks
-
 - Chore
     - Set num threads for blas in spectral, itq, and anywhere else so that THREADS is respected
+    - Sanitize everything
 
 - TBHSS
     - Get working with new TM code
@@ -67,19 +30,24 @@
 
 # Next
 
+- tk_xvec_t
+    - Align Lua/C APIs (currently out of sync for pvec, rvec, etc)
+    - Optional lua gc management via tk_xvec_create(NULL, ...), allowing later opt-in via tk_xvec_register(L, xv)
+
 - tk_xxmap/set_t:
     - Templatize over khash/kbtree
     - Proper Lua/C API like tk_xvec_t
 
-- tk_xvec_t
-    - Align Lua/C APIs (currently out of sync for pvec, rvec, etc)
-
-- Chores
-    - Double-check & comment auto-vectorization opportunities
-
 - TBHSS
     - Move hyperparameter search/exploration code into TM library
     - Restrict TBHSS code to cover cli usage, pre-processing, etc.
+
+- Graph
+    - Support passing labels to graph to ensure edges respect classes (e.g. dont positively connect between diff classes
+      or negative with same, support multi-labels as cvec and single-labels as ivec)
+    - Move multiclass-to-graph initial setup using star centers/negatives into graph.create such that seed pos/neg pairs
+      become optional.
+        - E.g. graph.create({ index, labels, trans_hops/pos/neg, etc })
 
 - Misc
     - Generalize the patterns found in tests into:
@@ -91,14 +59,47 @@
              - 1+ epoch restarts (few) doing a grid search or random hill climbing to find best starting point, followed
                by longer training runs on the top contenders
 
+# Later
+
+- Think about
+    - Spectral currently treats neg/pos the same, relying on TCH for the
+      negative handling. Using a true signed laplacian seems to make
+      cluster/mnist worse.
+
+- Eval/optimize
+    - Split optimize_retrieval into separate module
+        - optimize.retrieval: finds best margin for retrieval
+        - optimize.clustering: finds best margin for DSU clustering
+    - When scanning margins and multiple are tied for best, pick the median
+    - Parallelize AUC rank accumulation over pairs
+
+
+- Chores
+    - Rename hasc/hdesc to hmax and hmin
+    - Double-check & comment auto-vectorization opportunities
+
 - TCH, ITQ
     - Parallelize
 
-- tk_inv/ann_t
-    - Parallel add?
-    - Shrink/compaction
+- Misc
+    - Sparse/dense linear SVM for sanity checking all tasks
 
-# Later
+- tk_graph_t
+    - Parallelize init & seed phase (slowest phase of entire pipeline)
+    - Parallelize transitive expansion
+    - Restrict trans via trans_pos/neg_k/eps
+
+- Graph
+    - Avoid precomputing hoods?
+
+- tk_inv/ann/hbi_t
+    - Parallelize add
+
+- INV, ANN, HBI
+    - Try to get INV down to 30s on 40k mnist (if possible)
+
+- Chore
+    - Generalized interface over INV, ANN, and HBI
 
 - tk_booleanizer_t
     - Mergable booleanizers, externally paralellized + merged
