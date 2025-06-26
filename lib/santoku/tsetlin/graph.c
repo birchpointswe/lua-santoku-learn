@@ -89,7 +89,8 @@ static inline bool tk_graph_same_label (
 static inline void tm_add_knn (
   lua_State *L,
   tk_graph_t *graph,
-  uint64_t knn
+  uint64_t knn_pos,
+  uint64_t knn_neg
 ) {
   int kha;
   khint_t khi;
@@ -106,25 +107,30 @@ static inline void tm_add_knn (
       int64_t i = shuf->a[su];
       int64_t u = graph->uids->a[i];
       tk_rvec_t *ns = graph->inv_hoods->a[i];
-      uint64_t added = 0;
-      for (khint_t j = 0; j < ns->n && added < knn; j ++) {
+      uint64_t rem_pos = knn_pos;
+      uint64_t rem_neg = knn_neg;
+      for (khint_t j = 0; j < ns->n && (rem_pos || rem_neg); j ++) {
         tk_rank_t r = ns->a[j];
         if (r.i > (int64_t) graph->uids->n || r.i < 0)
           continue;
         int64_t v = graph->uids->a[r.i];
+        bool w = graph->labels == NULL || tk_graph_same_label(graph, u, v);
+        if (w && !rem_pos) continue;
+        if (!w && !rem_neg) continue;
         tm_pair_t e = tm_pair(u, v);
         khi = kh_put(pairs, graph->pairs, e, &kha);
         if (!kha)
           continue;
-        added ++;
-        bool w = graph->labels == NULL || tk_graph_same_label(graph, u, v);
         kh_value(graph->pairs, khi) = w;
         tk_graph_add_adj(graph, u, v, w);
         tk_dsu_union(&graph->dsu, u, v);
-        if (w)
+        if (w) {
           graph->n_pos ++;
-        else
+          rem_pos --;
+        } else {
           graph->n_neg ++;
+          rem_neg --;
+        }
       }
     }
 
@@ -134,25 +140,30 @@ static inline void tm_add_knn (
       int64_t i = shuf->a[su];
       int64_t u = graph->uids->a[i];
       tk_pvec_t *ns = graph->ann_hoods->a[i];
-      uint64_t added = 0;
-      for (khint_t j = 0; j < ns->n && added < knn; j ++) {
+      uint64_t rem_pos = knn_pos;
+      uint64_t rem_neg = knn_neg;
+      for (khint_t j = 0; j < ns->n && (rem_pos || rem_neg); j ++) {
         tk_pair_t r = ns->a[j];
         if (r.i > (int64_t) graph->uids->n || r.i < 0)
           continue;
         int64_t v = graph->uids->a[r.i];
+        bool w = graph->labels == NULL || tk_graph_same_label(graph, u, v);
+        if (w && !rem_pos) continue;
+        if (!w && !rem_neg) continue;
         tm_pair_t e = tm_pair(u, v);
         khi = kh_put(pairs, graph->pairs, e, &kha);
         if (!kha)
           continue;
-        added ++;
-        bool w = graph->labels == NULL || tk_graph_same_label(graph, u, v);
         kh_value(graph->pairs, khi) = w;
         tk_graph_add_adj(graph, u, v, w);
         tk_dsu_union(&graph->dsu, u, v);
-        if (w)
+        if (w) {
           graph->n_pos ++;
-        else
+          rem_pos --;
+        } else {
           graph->n_neg ++;
+          rem_neg --;
+        }
       }
     }
 
@@ -162,25 +173,30 @@ static inline void tm_add_knn (
       int64_t i = shuf->a[su];
       int64_t u = graph->uids->a[i];
       tk_pvec_t *ns = graph->hbi_hoods->a[i];
-      uint64_t added = 0;
-      for (khint_t j = 0; j < ns->n && added < knn; j ++) {
+      uint64_t rem_pos = knn_pos;
+      uint64_t rem_neg = knn_neg;
+      for (khint_t j = 0; j < ns->n && (rem_pos || rem_neg); j ++) {
         tk_pair_t r = ns->a[j];
         if (r.i > (int64_t) graph->uids->n || r.i < 0)
           continue;
         int64_t v = graph->uids->a[r.i];
+        bool w = graph->labels == NULL || tk_graph_same_label(graph, u, v);
+        if (w && !rem_pos) continue;
+        if (!w && !rem_neg) continue;
         tm_pair_t e = tm_pair(u, v);
         khi = kh_put(pairs, graph->pairs, e, &kha);
         if (!kha)
           continue;
-        added ++;
-        bool w = graph->labels == NULL || tk_graph_same_label(graph, u, v);
-        kh_value(graph->pairs, khi) = true;
-        tk_graph_add_adj(graph, u, v, true);
+        kh_value(graph->pairs, khi) = w;
+        tk_graph_add_adj(graph, u, v, w);
         tk_dsu_union(&graph->dsu, u, v);
-        if (w)
+        if (w) {
           graph->n_pos ++;
-        else
+          rem_pos --;
+        } else {
           graph->n_neg ++;
+          rem_neg --;
+        }
       }
     }
 
@@ -311,10 +327,15 @@ static inline void tm_add_mst (
     khi = kh_put(pairs, graph->pairs, e, &kha);
     if (!kha)
       continue;
-    kh_value(graph->pairs, khi) = true;
-    tk_graph_add_adj(graph, c.u, c.v, true);
+    bool w = graph->labels == NULL || tk_graph_same_label(graph, c.u, c.v);
+    kh_value(graph->pairs, khi) = w;
+    tk_graph_add_adj(graph, c.u, c.v, w);
     tk_dsu_union(&graph->dsu, c.u, c.v);
-    graph->n_pos ++;
+    if (w) {
+      graph->n_pos ++;
+    } else {
+      graph->n_neg ++;
+    }
   }
 
   // Cleanup
@@ -720,10 +741,12 @@ static inline int tm_create (lua_State *L)
     tk_lua_verror(L, 3, "graph", "index", "either tk_ann_t, tk_inv_t, or tk_hbi_t must be provided");
 
   uint64_t knn = tk_lua_foptunsigned(L, 1, "graph", "knn", 0);
-  uint64_t knn_cache = tk_lua_foptunsigned(L, 1, "graph", "knn_cache", 4);
+  uint64_t knn_pos = tk_lua_foptunsigned(L, 1, "graph", "knn_pos", knn);
+  uint64_t knn_neg = tk_lua_foptunsigned(L, 1, "graph", "knn_neg", knn);
+  uint64_t knn_cache = tk_lua_foptunsigned(L, 1, "graph", "knn_cache", 0);
   double knn_eps = tk_lua_foptunsigned(L, 1, "graph", "knn_eps", 1.0);
-  if (knn > knn_cache)
-    knn_cache = knn;
+  if ((knn_pos + knn_neg) > knn_cache)
+    knn_cache = knn_pos + knn_neg;
   uint64_t n_hops = tk_lua_foptunsigned(L, 1, "graph", "trans_hops", 0);
   uint64_t n_grow_pos = tk_lua_foptunsigned(L, 1, "graph", "trans_pos", 0);
   uint64_t n_grow_neg = tk_lua_foptunsigned(L, 1, "graph", "trans_neg", 0);
@@ -775,8 +798,8 @@ static inline int tm_create (lua_State *L)
   }
 
   // Add knn
-  if (knn > 0)
-    tm_add_knn(L, graph, knn);
+  if (knn_pos > 0 || knn_neg > 0)
+    tm_add_knn(L, graph, knn_pos, knn_neg);
 
   // Log density
   if (i_each != -1) {

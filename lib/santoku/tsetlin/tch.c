@@ -17,6 +17,9 @@ static inline int tk_tch_refine_lua (lua_State *L)
   tk_ivec_t *codes = tk_ivec_peek(L, -1, "codes");
   int i_out = tk_lua_absindex(L, -1);
 
+  lua_getfield(L, 1, "scale");
+  tk_dvec_t *scale = tk_dvec_peekopt(L, -1);
+
   lua_getfield(L, 1, "graph");
   tk_graph_t *graph = tk_graph_peek(L, -1);
 
@@ -29,7 +32,7 @@ static inline int tk_tch_refine_lua (lua_State *L)
   }
 
   // Run tch
-  tk_tch_refine(L, codes, graph, n_hidden, i_each);
+  tk_tch_refine(L, codes, scale, graph, n_hidden, i_each);
   lua_pushvalue(L, i_out);
   return 1;
 }

@@ -30,6 +30,10 @@
 
 # Next
 
+- tk_ann_t
+    - Allow user to pass dataset in, which then uses top_entropy to select bits
+      internally
+
 - tk_xvec_t
     - Align Lua/C APIs (currently out of sync for pvec, rvec, etc)
     - Optional lua gc management via tk_xvec_create(NULL, ...), allowing later opt-in via tk_xvec_register(L, xv)
@@ -64,7 +68,7 @@
 - Think about
     - Spectral currently treats neg/pos the same, relying on TCH for the
       negative handling. Using a true signed laplacian seems to make
-      cluster/mnist worse.
+      cluster/mnist worse. How should this be?
 
 - Eval/optimize
     - Split optimize_retrieval into separate module
