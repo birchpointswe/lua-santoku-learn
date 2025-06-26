@@ -1,7 +1,6 @@
 local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
-local inv = require("santoku.tsetlin.inv")
--- local ann = require("santoku.tsetlin.ann")
+local ann = require("santoku.tsetlin.ann")
 local hbi = require("santoku.tsetlin.hbi")
 local graph = require("santoku.tsetlin.graph")
 local spectral = require("santoku.tsetlin.spectral")
@@ -20,8 +19,8 @@ local FEATURES = 784
 local ITQ = true
 local TCH = true
 local HIDDEN = 16
-local KNN = 0
-local KNN_CACHE = 0
+local KNN = 4
+local KNN_CACHE = 64
 local TRANS_HOPS = 0
 local TRANS_POS = 0
 local TRANS_NEG = 0
@@ -36,22 +35,20 @@ test("tsetlin", function ()
   dataset.n_features = FEATURES
   dataset.n_hidden = HIDDEN
 
-  -- print("\nIndexing raw features")
-  dataset.index_raw = inv.create({ features = FEATURES })
-  dataset.index_raw:add(dataset.problems, 0, dataset.n)
-  -- dataset.index_raw = ann.create({ expected_size = dataset.n, features = FEATURES, })
-  -- dataset.index_raw:add(dataset.problems:raw_bitmap(dataset.n, FEATURES), 0, dataset.n)
+  print("\nIndexing raw features")
+  dataset.index_raw = ann.create({ expected_size = dataset.n, features = FEATURES, })
+  dataset.index_raw:add(dataset.problems:raw_bitmap(dataset.n, FEATURES), 0, dataset.n)
 
-  dataset.pos, dataset.neg = ds.multiclass_pairs(dataset.solutions, 8)
-  str.printf("  Pos\t%d\n", dataset.pos:size())
-  str.printf("  Neg\t%d\n", dataset.neg:size())
+  -- dataset.pos, dataset.neg = ds.multiclass_pairs(dataset.solutions, 8)
+  -- str.printf("  Pos\t%d\n", dataset.pos:size())
+  -- str.printf("  Neg\t%d\n", dataset.neg:size())
   str.printf("  Sent\t%d\n", dataset.n)
 
   print("\nCreating graph")
   local stopwatch = utc.stopwatch()
   dataset.graph = graph.create({
-    pos = dataset.pos,
-    neg = dataset.neg,
+    -- pos = dataset.pos,
+    -- neg = dataset.neg,
     labels = dataset.solutions,
     index = dataset.index_raw,
     knn = KNN,
@@ -66,7 +63,7 @@ test("tsetlin", function ()
   })
 
   print("\nSpectral eigendecomposition")
-  dataset.ids_spectral, dataset.codes_spectral = spectral.encode({
+  dataset.ids_spectral, dataset.codes_spectral, dataset.scale_spectral = spectral.encode({
     graph = dataset.graph,
     n_hidden = HIDDEN,
     each = function (s)
@@ -98,6 +95,7 @@ test("tsetlin", function ()
     print("\nFlipping bits")
     tch.refine({
       codes = dataset.codes_spectral,
+      scale = dataset.scale_spectral,
       graph = dataset.graph,
       n_hidden = dataset.n_hidden,
       each = function (s)
@@ -112,8 +110,9 @@ test("tsetlin", function ()
   dataset.similarity = eval.optimize_retrieval({
     codes = dataset.codes_spectral,
     ids = dataset.ids_spectral,
-    pos = dataset.pos,
-    neg = dataset.neg,
+    labels = dataset.solutions,
+    -- pos = dataset.pos,
+    -- neg = dataset.neg,
     n_hidden = dataset.n_hidden,
     each = function (a, f, p, r, m)
       local d, dd = stopwatch()
@@ -136,8 +135,9 @@ test("tsetlin", function ()
   stopwatch()
   dataset.cluster_score, dataset.cluster_ids, dataset.cluster_assignments, dataset.n_clusters = eval.optimize_clustering({ -- luacheck: ignore
     index = dataset.index_codes,
-    pos = dataset.pos,
-    neg = dataset.neg,
+    labels = dataset.solutions,
+    -- pos = dataset.pos,
+    -- neg = dataset.neg,
     min_margin = 0,
     max_margin = 2,
     each = function (f, p, r, m, c)

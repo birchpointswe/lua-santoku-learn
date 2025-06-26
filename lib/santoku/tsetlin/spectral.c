@@ -18,10 +18,12 @@ typedef struct {
   double *x, *y, *z;
   double *evals, *evecs, *resNorms;
   double *scale;
+  uint64_t offset;
   tk_graph_adj_t *adj_pos;
   tk_graph_adj_t *adj_neg;
   uint64_t n_nodes;
   uint64_t n_hidden;
+  double neg_weight;
   tk_threadpool_t *pool;
 } tk_spectral_t;
 
@@ -38,10 +40,12 @@ static inline void tk_spectral_worker (void *dp, int sig)
   double *x = data->spec->x;
   double *y = data->spec->y;
   double *z = data->spec->z;
+  uint64_t offset = data->spec->offset;
   double *evecs = data->spec->evecs;
   double *scale = data->spec->scale;
   uint64_t n_nodes = data->spec->n_nodes;
   uint64_t n_hidden = data->spec->n_hidden;
+  double neg_weight = data->spec->neg_weight;
   uint64_t ifirst = data->ifirst;
   uint64_t ilast = data->ilast;
   uint64_t hfirst = data->hfirst;
@@ -56,7 +60,7 @@ static inline void tk_spectral_worker (void *dp, int sig)
       for (uint64_t i = ifirst; i <= ilast; i ++) {
         scale[i] =
           (double) tk_iuset_size(adj_pos->a[i]) +
-          (double) tk_iuset_size(adj_neg->a[i]);
+          (double) tk_iuset_size(adj_neg->a[i]) * neg_weight;
         scale[i] =
           scale[i] > 0 ? 1.0 / sqrt((double) scale[i]) : 0.0;
         if (!isfinite(scale[i]))
@@ -76,8 +80,7 @@ static inline void tk_spectral_worker (void *dp, int sig)
         // Negative neighbors
         tk_iuset_foreach(adj_neg->a[i], iv, ({
           double w = scale_i * scale[iv];
-          // sum += w * x[iv];
-          sum -= w * x[iv];
+          sum += w * x[iv] * neg_weight;
         }))
         y[i] = sum;
       }
@@ -86,8 +89,7 @@ static inline void tk_spectral_worker (void *dp, int sig)
     case TK_SPECTRAL_FINALIZE:
       for (uint64_t i = ifirst; i <= ilast; i ++)
         for (uint64_t f = 0; f < n_hidden; f ++)
-          // z[i * n_hidden + f] = evecs[i + f * n_nodes];
-          z[i * n_hidden + f] = evecs[i + (f + 1) * n_nodes];
+          z[i * n_hidden + f] = evecs[i + (f + offset) * n_nodes];
       break;
 
     case TK_SPECTRAL_CENTER:
@@ -131,6 +133,7 @@ static inline void tm_run_spectral (
   tk_graph_adj_t *adj_neg,
   uint64_t n_nodes,
   uint64_t n_hidden,
+  double neg_weight,
   int i_each
 ) {
 
@@ -143,6 +146,7 @@ static inline void tm_run_spectral (
   spec.adj_neg = adj_neg;
   spec.n_nodes = n_nodes;
   spec.n_hidden = n_hidden;
+  spec.neg_weight = neg_weight;
   spec.pool = pool;
   for (unsigned int i = 0; i < pool->n_threads; i ++) {
     tk_spectral_thread_t *data = threads + i;
@@ -160,16 +164,16 @@ static inline void tm_run_spectral (
   primme_params params;
   primme_initialize(&params);
   params.n = (int64_t) n_nodes;
-  params.numEvals = n_hidden + 1;
+  params.numEvals = n_hidden + 2;
   params.matrixMatvec = tk_spectral_matvec;
   params.matrix = &spec;
   params.printLevel = 0;
   params.eps = 1e-6;
-  params.target = primme_smallest;
-  params.numTargetShifts = 0;
-  // params.target = primme_closest_abs;
-  // params.numTargetShifts = 1;
-  // params.targetShifts = (double[]) { 0.0 };
+  // params.target = primme_smallest;
+  // params.numTargetShifts = 0;
+  params.target = primme_closest_abs;
+  params.numTargetShifts = 1;
+  params.targetShifts = (double[]) { 0.0 };
   spec.evals = tk_malloc(L, (size_t) params.numEvals * sizeof(double));
   spec.evecs = tk_malloc(L, (size_t) params.n * (size_t) params.numEvals * sizeof(double));
   spec.resNorms = tk_malloc(L, (size_t) params.numEvals * sizeof(double));
@@ -177,8 +181,12 @@ static inline void tm_run_spectral (
   int ret = dprimme(spec.evals, spec.evecs, spec.resNorms, &params);
   if (ret != 0)
     tk_lua_verror(L, 2, "spectral", "failure calling PRIMME");
-  // for (uint64_t i = 0; i < params.numEvals; i ++)
-  //   printf("eig%lu = %f\n", i, spec.evals[i]);
+  for (uint64_t i = 0; i < params.numEvals; i ++)
+    printf("eig%lu = %f\n", i, spec.evals[i]);
+
+  spec.offset = 0;
+  while (spec.offset < 2 && spec.evals[spec.offset] < 1e-10)
+    spec.offset ++;
 
   // Copy eigenvectors into the output matrix, skipping the first
   tk_threads_signal(pool, TK_SPECTRAL_FINALIZE);
@@ -208,6 +216,7 @@ static inline int tm_encode (lua_State *L)
   tk_graph_t *graph = tk_graph_peek(L, -1);
   uint64_t n_hidden = tk_lua_fcheckunsigned(L, 1, "spectral", "n_hidden");
   unsigned int n_threads = tk_threads_getn(L, 1, "spectral", "threads");
+  double neg_weight = tk_lua_foptposdouble(L, 1, "spectral", "negatives", 0.1);
 
   if (BITS_MOD(n_hidden) != 0)
     tk_lua_verror(L, 3, "spectral", "n_hidden", "must be a multiple of " STR(BITS));
@@ -228,7 +237,7 @@ static inline int tm_encode (lua_State *L)
   tk_lua_get_ephemeron(L, TK_GRAPH_EPH, graph->uids);
   tk_dvec_t *z = tk_dvec_create(L, graph->uids->n * n_hidden, 0, 0);
   tk_dvec_t *scale = tk_dvec_create(L, graph->uids->n, 0, 0);
-  tm_run_spectral(L, pool, z, scale, adj_pos, adj_neg, graph->uids->n, n_hidden, i_each);
+  tm_run_spectral(L, pool, z, scale, adj_pos, adj_neg, graph->uids->n, n_hidden, neg_weight, i_each);
 
   // Cleanup
   tk_threads_destroy(pool);
