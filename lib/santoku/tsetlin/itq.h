@@ -11,120 +11,150 @@
 #include <cblas.h>
 #include <lapacke.h>
 
+static inline void tk_itq_sign (
+  tk_ivec_t *out,
+  double *X,
+  uint64_t N,
+  uint64_t K
+) {
+  for (uint64_t j = 0; j < K; j++)
+    for (uint64_t i = 0; i < N; i++)
+      if (X[i*K + j] >= 0.0)
+        tk_ivec_push(out, (int64_t)(i * K + j));
+}
+
+static inline void tk_itq_median (
+  tk_ivec_t *out,
+  double *X,
+  uint64_t N,
+  uint64_t K
+) {
+  double *col = malloc(N * sizeof(double));
+  for (uint64_t j = 0; j < K; j++) {
+    for (uint64_t i = 0; i < N; i++)
+      col[i] = X[i*K + j];
+    ks_introsort(tk_dvec_asc, N, col);
+    double med = (N & 1) ? col[N/2] : 0.5 * (col[N/2 - 1] + col[N/2]);
+    for (uint64_t i = 0; i < N; i++) {
+      if (X[i*K + j] >= med) {
+        tk_ivec_push(out, (int64_t)(i * K + j));
+      }
+    }
+  }
+  free(col);
+}
+
 static inline void tk_itq_encode (
   lua_State *L,
   tk_dvec_t *codes,
-  uint64_t n_hidden,
-  uint64_t iterations,
+  uint64_t n_dims,
+  uint64_t max_iterations,
+  double tolerance,
   int i_each
 ) {
-  const size_t N = codes->n / n_hidden;
+  const uint64_t K = n_dims;
+  const size_t N = codes->n / K;
 
 
-  double *X = codes->a;
+  double *X = malloc(N * K * sizeof(double));
+  memcpy(X, codes->a, N * K * sizeof(double));
 
 
-  double *R = tk_malloc(L, n_hidden * n_hidden * sizeof(double));
-  for (uint64_t i = 0; i < n_hidden; i ++)
-    for (uint64_t j = 0; j < n_hidden; j ++)
-      R[i * n_hidden + j] = (i == j) ? 1.0 : 0.0;
-
-
-  double *V = tk_malloc(L, N * n_hidden * sizeof(double));
-  double *B = tk_malloc(L, N * n_hidden * sizeof(double));
-  double *BtV = tk_malloc(L, n_hidden * n_hidden * sizeof(double));
-  double *U = tk_malloc(L, n_hidden * n_hidden * sizeof(double));
-  double *S = tk_malloc(L, n_hidden * sizeof(double));
-  double *VT = tk_malloc(L, n_hidden * n_hidden * sizeof(double));
-  double *superb = tk_malloc(L, (n_hidden - 1) * sizeof(double));
-  lapack_int info;
-
-  tk_ivec_t *out = tk_ivec_create(L, 0, 0, 0);
-
-  for (uint64_t it = 0; it < iterations; it ++)
-  {
-
-    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                N, n_hidden, n_hidden,
-                1.0, X, n_hidden,
-                R, n_hidden,
-                0.0, V, n_hidden);
-
-
-    for (size_t idx = 0; idx < N * n_hidden; idx ++)
-      B[idx] = (V[idx] >= 0.0 ? 1.0 : -1.0);
-
-
-    cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-                n_hidden, n_hidden, N,
-                1.0, B, n_hidden,
-                V, n_hidden,
-                0.0, BtV, n_hidden);
-
-
-
-    info = LAPACKE_dgesvd(LAPACK_ROW_MAJOR, 'A', 'A',
-                          n_hidden, n_hidden,
-                          BtV, n_hidden,
-                          S, U, n_hidden,
-                          VT, n_hidden,
-                          superb);
-    if (info > 0) {
-
-      break;
-    }
-
-
-    cblas_dgemm(CblasRowMajor, CblasTrans, CblasTrans,
-                n_hidden, n_hidden, n_hidden,
-                1.0, VT, n_hidden,
-                     U,  n_hidden,
-                0.0, R,  n_hidden);
-
-
-    if (i_each >= 0) {
-
-      double obj = 0.0;
-      for (size_t idx = 0; idx < N * n_hidden; ++idx) {
-        double diff = B[idx] - V[idx];
-        obj += diff * diff;
-      }
-
-      lua_pushvalue(L, i_each);
-      lua_pushinteger(L, (int64_t) it);
-      lua_pushnumber(L, obj);
-      lua_call(L, 2, 1);
-      if (lua_type(L, -1) == LUA_TBOOLEAN && !lua_toboolean(L, -1)) {
-        lua_pop(L, 1);
-        break;
-      }
-      lua_pop(L, 1);
-    }
+  for (uint64_t f = 0; f < n_dims; f ++) {
+    double mu = 0.0;
+    for (uint64_t i = 0; i < N; i ++)
+      mu += X[i * n_dims + f];
+    mu /= N;
+    for (uint64_t i = 0; i < N; i ++)
+      X[i * n_dims + f] -= mu;
   }
 
 
+  for (uint64_t f = 0; f < n_dims; f++) {
+    double norm = 0;
+    for (uint64_t i = 0; i < N; i++)
+      norm += X[i*n_dims + f] * X[i*n_dims + f];
+    norm = sqrt(norm / N);
+    if (norm > 0) {
+      for (uint64_t i = 0; i < N; i++)
+        X[i*n_dims + f] /= norm;
+    }
+  }
+
+  tk_ivec_t *out = tk_ivec_create(L, 0, 0, 0);
+  double *R = malloc(K*K*sizeof(double));
+  double *V0 = malloc(N*K*sizeof(double));
+  double *V1 = malloc(N*K*sizeof(double));
+  double *B = malloc(N*K*sizeof(double));
+  double *BtV = malloc(K*K*sizeof(double));
+  double *U = malloc(K*K*sizeof(double));
+  double *S = malloc(K  *sizeof(double));
+  double *VT = malloc(K*K*sizeof(double));
+  double *superb= malloc((K-1)*sizeof(double));
+  for (uint64_t i = 0; i < K; i++)
+    for (uint64_t j = 0; j < K; j++)
+      R[i*K + j] = (i==j? 1.0 : 0.0);
+  double last_obj = DBL_MAX, first_obj = 0.0;
+  uint64_t it = 0;
+  for (it = 0; it < max_iterations; it++) {
+
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                N, K, K, 1.0, X, K, R, K, 0.0, V0, K);
+
+    for (size_t idx = 0; idx < N*K; idx++)
+      B[idx] = (V0[idx] >= 0.0 ? 1.0 : -1.0);
+
+    cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                K, K, N, 1.0, B, K, X, K, 0.0, BtV, K);
+    int info = LAPACKE_dgesvd(LAPACK_ROW_MAJOR,'A','A',
+                              K,K,BtV,K,S,U,K,VT,K,superb);
+    if (info != 0)
+      luaL_error(L, "ITQ SVD failed to converge (info=%d)", info);
+
+    cblas_dgemm(CblasRowMajor, CblasTrans, CblasTrans,
+                K, K, K, 1.0, VT, K, U, K, 0.0, R, K);
+
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                N, K, K, 1.0, X, K, R, K, 0.0, V1, K);
+
+    double obj = 0.0;
+    for (size_t idx = 0; idx < N*K; idx++) {
+      double d = B[idx] - V1[idx];
+      obj += d*d;
+    }
+    if (it == 0) first_obj = obj;
+    if (obj > last_obj + 1e-8)
+      fprintf(stderr, "ITQ warning: obj rose %.6f → %.6f at iter %llu\n",
+              last_obj, obj, (unsigned long long)it);
+    if (fabs(last_obj - obj) < tolerance * last_obj)
+      break;
+    last_obj = obj;
+  }
+
+  if (i_each >= 0) {
+    lua_pushvalue(L, i_each);
+    lua_pushinteger(L, (int64_t) it);
+    lua_pushnumber(L, first_obj);
+    lua_pushnumber(L, last_obj);
+    lua_call(L, 3, 0);
+  }
+
   cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-              N, n_hidden, n_hidden,
-              1.0, X, n_hidden,
-              R, n_hidden,
-              0.0, V, n_hidden);
+              N, K, K, 1.0, X, K, R, K, 0.0, V1, K);
+  tk_itq_sign(out, V1, N, K);
 
 
-  for (size_t i = 0; i < N; i ++)
-    for (size_t j = 0; j < n_hidden; j ++)
-      if (V[i * n_hidden + j] >= 0.0)
-        tk_ivec_push(out, (int64_t) (i * n_hidden + j));
-
-
-
+  tk_ivec_shrink(L, out);
   free(superb);
   free(R);
-  free(V);
   free(B);
   free(BtV);
   free(U);
   free(S);
   free(VT);
+  free(V0);
+  free(V1);
+  free(X);
 }
 
 #endif

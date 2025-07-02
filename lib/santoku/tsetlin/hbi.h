@@ -312,8 +312,6 @@ static inline void tk_hbi_neighborhoods (
     tk_lua_verror(L, 2, "neighborhoods", "can't query a destroyed index");
     return;
   }
-  if (eps > 3)
-    eps = 3;
   int kha;
   khint_t khi;
   tk_ivec_t *sids = tk_iumap_values(L, A->uid_sid);

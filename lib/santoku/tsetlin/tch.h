@@ -1,3 +1,5 @@
+
+
 #ifndef TK_TCH_H
 #define TK_TCH_H
 
@@ -5,15 +7,28 @@
 #include <santoku/tsetlin/graph.h>
 #include <santoku/dvec.h>
 
-
 static inline void tk_tch_refine (
+
   lua_State *L,
   tk_ivec_t *codes,
+
+
+
   tk_dvec_t *scale,
+
   tk_graph_t *graph,
-  uint64_t n_hidden,
+  uint64_t n_dims,
+
+
+  double neg_scale,
+
   int i_each
+
 ) {
+
+
+  neg_scale = fabs(neg_scale);
+
   uint64_t total_steps = 0;
   tk_graph_adj_t *adj_pos = graph->adj_pos;
   tk_graph_adj_t *adj_neg = graph->adj_neg;
@@ -21,33 +36,35 @@ static inline void tk_tch_refine (
 
 
   tk_pvec_t *node_order = tk_pvec_create(L, n_nodes, 0, 0);
-  for (uint64_t i = 0; i < n_nodes; i ++)
-    node_order->a[i] = (tk_pair_t) { (int64_t)  i, (int64_t) (tk_iuset_size(adj_pos->a[i]) + tk_iuset_size(adj_neg->a[i])) };
+  for (int64_t i = 0; i < (int64_t) graph->uids->n; i ++) {
+    double pdeg = (double) tk_iuset_size(graph->adj_pos->a[i]);
+    double ndeg = (double) tk_iuset_size(graph->adj_neg->a[i]);
+    node_order->a[i] = tk_pair(i, pdeg + ndeg + tk_fast_random());
+  }
   tk_pvec_desc(node_order, 0, node_order->n);
 
-  int *bitvecs = tk_malloc(L, n_hidden * n_nodes * sizeof(int));
+  int *bitvecs = tk_malloc(L, n_dims * n_nodes * sizeof(int));
 
-  for (uint64_t i = 0; i < n_hidden * n_nodes; i ++)
+  for (uint64_t i = 0; i < n_dims * n_nodes; i ++)
     bitvecs[i] = -1;
 
   for (uint64_t i = 0; i < codes->n; i ++) {
     int64_t v = codes->a[i];
     if (v < 0)
       continue;
-    uint64_t s = (uint64_t) v / n_hidden;
-    uint64_t f = (uint64_t) v % n_hidden;
+    uint64_t s = (uint64_t) v / n_dims;
+    uint64_t f = (uint64_t) v % n_dims;
     bitvecs[f * n_nodes + s] = +1;
   }
 
   codes->n = 0;
 
-  for (uint64_t f = 0; f < n_hidden; f ++) {
+  for (uint64_t f = 0; f < n_dims; f ++) {
     int *bitvec = bitvecs + f * n_nodes;
 
     bool updated;
     uint64_t steps = 0;
     int64_t i, j;
-    double delta;
 
     do {
       updated = false;
@@ -56,17 +73,20 @@ static inline void tk_tch_refine (
 
       for (uint64_t si = 0; si < n_nodes; si ++) {
         i = node_order->a[si].i;
-        delta = 0.0;
+        double delta = 0.0;
 
         tk_iuset_foreach(adj_pos->a[i], j, ({
-          delta += bitvec[i] * bitvec[j] * (scale == NULL ? 1.0 : scale->a[i] * scale->a[j]);
+
+          delta += bitvec[i] * bitvec[j];
         }))
 
         tk_iuset_foreach(adj_neg->a[i], j, ({
-          delta -= bitvec[i] * bitvec[j] * (scale == NULL ? 1.0 : scale->a[i] * scale->a[j]);
+
+
+          delta -= bitvec[i] * bitvec[j];
         }))
 
-        if (delta < 0){
+        if (delta < 0.0){
           bitvec[i] = -bitvec[i];
           updated = true;
         }
@@ -74,10 +94,9 @@ static inline void tk_tch_refine (
 
     } while (updated);
 
-
     for (uint64_t i = 0; i < n_nodes; i ++)
       if (bitvec[i] > 0)
-        tk_ivec_push(codes, (int64_t) i * (int64_t) n_hidden + (int64_t) f);
+        tk_ivec_push(codes, (int64_t) i * (int64_t) n_dims + (int64_t) f);
   }
 
   if (i_each >= 0) {
@@ -87,7 +106,7 @@ static inline void tk_tch_refine (
   }
 
   free(bitvecs);
-  lua_pop(L, 1);
+  lua_pop(L, 2);
 
   tk_ivec_shrink(L, codes);
   tk_ivec_asc(codes, 0, codes->n);

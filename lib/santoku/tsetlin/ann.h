@@ -88,16 +88,35 @@ static inline void tk_ann_destroy (
   free(A->threads);
 }
 
-static inline uint64_t tk_ann_hamming (
-  const char *restrict a,
-  const char *restrict b,
-  uint64_t n
+static inline uint64_t tk_ann_hamming_mask (
+  const unsigned char *a,
+  const unsigned char *b,
+  const unsigned char *mask,
+  uint64_t n_dims
 ) {
-  n = (n + CHAR_BIT - 1) / CHAR_BIT;
+  uint64_t full_bytes = BITS_BYTES(n_dims);
   uint64_t t = 0;
-  for (uint64_t i = 0; i < n; i ++)
-    t += (uint64_t) __builtin_popcount((unsigned char) a[i] ^ (unsigned char) b[i]);
+  for (uint64_t i = 0; i < full_bytes; i ++)
+    t += (uint64_t) popcount((a[i] ^ b[i]) & mask[i]);
   return t;
+}
+
+static inline uint64_t tk_ann_hamming (
+  const unsigned char *a,
+  const unsigned char *b,
+  uint64_t n_dims
+) {
+  uint64_t full_bytes = BITS_BYTES(n_dims) - 1;
+  uint64_t rem_bits = BITS_BIT(n_dims);
+  uint64_t dist = 0;
+  for (uint64_t i = 0; i < full_bytes; i ++)
+    dist += popcount(a[i] ^ b[i]);
+  if (rem_bits) {
+    unsigned char x = a[full_bytes] ^ b[full_bytes];
+    unsigned char mask = (unsigned char) ((1U << rem_bits) - 1);
+    dist += popcount(x & mask);
+  }
+  return dist;
 }
 
 static inline tk_ann_hash_t tk_ann_hash (
@@ -289,7 +308,7 @@ static inline void tk_ann_extend_neighborhood (
         continue;
       int64_t idx = tk_iumap_value(sid_idx, khi);
       const char *V1 = tk_ann_sget(A, sid1);
-      uint64_t m = tk_ann_hamming(V, V1, A->features);
+      uint64_t m = tk_ann_hamming((const unsigned char *) V, (const unsigned char *) V1, A->features);
       if (m <= eps)
         tk_pvec_hasc(hood, tk_pair(idx, (int64_t) m));
     }
@@ -397,8 +416,6 @@ static inline tk_pvec_t *tk_ann_neighbors_by_vec (
   if (!out)
     out = tk_pvec_create(L, knn, 0, 0);
   out->n = 0;
-  if (knn == 0)
-    return out;
   const tk_ann_hash_t h0 = tk_ann_hash(A, vec);
   int pos[TK_ANN_BITS];
   for (int r = 0; r <= (int) A->probe_radius && r <= TK_ANN_BITS; r ++) {
@@ -419,7 +436,7 @@ static inline tk_pvec_t *tk_ann_neighbors_by_vec (
           int64_t uid1 = tk_ann_sid_uid(A, sid1);
           if (uid1 < 0)
             continue;
-          uint64_t d = tk_ann_hamming(vec, tk_ann_sget(A, sid1), A->features);
+          uint64_t d = tk_ann_hamming((const unsigned char *) vec, (const unsigned char *) tk_ann_sget(A, sid1), A->features);
           if (d <= eps) {
             if (knn > 0)
               tk_pvec_hasc(out, tk_pair(uid1, (int64_t) d));
@@ -615,6 +632,8 @@ static inline void tk_ann_worker (void *dp, int sig)
   switch (stage) {
 
     case TK_ANN_NEIGHBORHOODS:
+      if (data->k == 0)
+        return;
       for (uint64_t i = data->ifirst; i <= data->ilast; i ++) {
         tk_pvec_t *hood = data->hoods->a[i];
         int64_t sid = data->sids->a[i];

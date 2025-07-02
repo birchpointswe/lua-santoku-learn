@@ -167,7 +167,7 @@ static inline void tk_booleanizer_encode_dvec (
         tk_dvec_t *thresholds = kh_value(B->cont_thresholds, k_thresh);
         int64_t bit_base = kh_value(B->cont_bits, k_bits);
         for (uint64_t t = 0; t < thresholds->n; t ++)
-          if (value > thresholds->a[t])
+          if (value >= thresholds->a[t])
             tk_ivec_push(out, (int64_t) i * (int64_t) B->next_bit + bit_base + (int64_t) t);
       }
     }
