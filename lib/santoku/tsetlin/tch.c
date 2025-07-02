@@ -23,7 +23,8 @@ static inline int tk_tch_refine_lua (lua_State *L)
   lua_getfield(L, 1, "graph");
   tk_graph_t *graph = tk_graph_peek(L, -1);
 
-  uint64_t n_hidden = tk_lua_fcheckunsigned(L, 1, "tch", "n_hidden");
+  uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "tch", "n_dims");
+  double neg_scale = tk_lua_foptnumber(L, 1, "tch", "negatives", 1.0);
 
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
@@ -32,7 +33,7 @@ static inline int tk_tch_refine_lua (lua_State *L)
   }
 
   // Run tch
-  tk_tch_refine(L, codes, scale, graph, n_hidden, i_each);
+  tk_tch_refine(L, codes, scale, graph, n_dims, neg_scale, i_each);
   lua_pushvalue(L, i_out);
   return 1;
 }

@@ -1120,8 +1120,6 @@ static inline int tk_corex_create (lua_State *L)
   lua_settop(L, 1);
   unsigned int n_visible = tk_lua_fcheckunsigned(L, 1, "create", "visible");
   unsigned int n_hidden = tk_lua_fcheckunsigned(L, 1, "create", "hidden");
-  if (n_hidden < BITS || BITS_MOD(n_hidden) != 0)
-    luaL_error(L, "n_hidden must be a multiple of " STR(BITS));
   double lam = tk_lua_foptnumber(L, 1, "create", "lam", 0.3);
   double spa = tk_lua_foptnumber(L, 1, "create", "spa", 10.0);
   double tmin = tk_lua_foptnumber(L, 1, "create", "tmin", 1.0);

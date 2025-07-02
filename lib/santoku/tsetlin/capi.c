@@ -163,7 +163,7 @@ static inline void tk_tsetlin_init_streams (
   unsigned int n,
   double specificity
 ) {
-  const unsigned int n_chunks = BITS_DIV(n);
+  const unsigned int n_chunks = BITS_BYTES(n);
   for (unsigned int i = 0; i < n_chunks; i ++)
     mask[i] = (tk_bits_t)0;
   const double p = 1.0 / specificity;
@@ -175,8 +175,8 @@ static inline void tk_tsetlin_init_streams (
   for (unsigned int i = 0; i < active; i ++) {
     unsigned int r = fast_rand();
     unsigned int f = ((uint64_t)r * n) >> 32;
-    unsigned int chunk = BITS_DIV(f);
-    unsigned int bit = BITS_MOD(f);
+    unsigned int chunk = BITS_BYTE(f);
+    unsigned int bit = BITS_BIT(f);
     mask[chunk] |= ((tk_bits_t)1 << bit);
   }
 }
@@ -590,8 +590,8 @@ static void tk_encoder_train_thread (
   for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
 
     unsigned int class = chunk / clause_chunks;
-    unsigned int enc_chunk = BITS_DIV(class);
-    unsigned int enc_bit = BITS_MOD(class);
+    unsigned int enc_chunk = BITS_BYTE(class);
+    unsigned int enc_bit = BITS_BIT(class);
 
     for (unsigned int i = 0; i < n; i ++) {
       unsigned int s = shuffle[i];
@@ -625,8 +625,8 @@ static void tk_encoder_predict_reduce_thread (
     }
     tk_bits_t *e = encodings + s * class_chunks;
     for (unsigned int class = 0; class < tm->classes; class ++) {
-      unsigned int chunk = BITS_DIV(class);
-      unsigned int pos = BITS_MOD(class);
+      unsigned int chunk = BITS_BYTE(class);
+      unsigned int pos = BITS_BYTE(class);
       if (sums[class] > 0)
         e[chunk] |= ((tk_bits_t)1 << pos);
       else
@@ -750,25 +750,21 @@ static inline void tk_tsetlin_init_classifier (
     tk_lua_verror(L, 3, "create classifier", "classes", "must be greater than 1");
   if (!clauses)
     tk_lua_verror(L, 3, "create classifier", "clauses", "must be greater than 0");
-  if (BITS_MOD(clauses))
-    tk_lua_verror(L, 3, "create classifier", "clauses", "must be a multiple of " STR(BITS));
-  if (BITS_MOD(features))
-    tk_lua_verror(L, 3, "create classifier", "features", "must be a multiple of " STR(BITS));
   if (state_bits < 2)
     tk_lua_verror(L, 3, "create classifier", "bits", "must be greater than 1");
   if (thresholdf <= 0)
     tk_lua_verror(L, 3, "create classifier", "target", "must be greater than 0");
   tm->negative = negative; // Note: unused in encoder
   tm->classes = classes;
-  tm->class_chunks = BITS_DIV((tm->classes - 1)) + 1;
+  tm->class_chunks = BITS_BYTES(tm->classes);
   tm->clauses = clauses;
   tm->threshold = ceil(thresholdf >= 1 ? thresholdf : fmaxf(1.0, (double) clauses * thresholdf));
   tm->features = features;
   tm->state_bits = state_bits;
   tm->boost_true_positive = boost_true_positive;
   tm->input_bits = 2 * tm->features;
-  tm->input_chunks = BITS_DIV((tm->input_bits - 1)) + 1;
-  tm->clause_chunks = BITS_DIV((tm->clauses - 1)) + 1;
+  tm->input_chunks = BITS_BYTES(tm->input_bits);
+  tm->clause_chunks = BITS_BYTES(tm->clauses);
   tm->state_chunks = tm->classes * tm->clauses * (tm->state_bits - 1) * tm->input_chunks;
   tm->action_chunks = tm->classes * tm->clauses * tm->input_chunks;
   tm->state = tk_malloc_aligned(L, sizeof(tk_bits_t) * tm->state_chunks, BITS);
@@ -794,8 +790,6 @@ static inline int tk_tsetlin_init_encoder (
   double specificity,
   unsigned int n_threads
 ) {
-  if (BITS_MOD(encoding_bits))
-    tk_lua_verror(L, 3, "create encoder", "hidden", "must be a multiple of " STR(BITS));
   tk_tsetlin_init_classifier(L, tm,
       encoding_bits, features, clauses, state_bits, thresholdf,
       boost_true_positive, negative, specificity, n_threads);
@@ -995,8 +989,8 @@ static inline void en_tm_populate (
 ) {
   unsigned int classes = tm->classes;
   for (unsigned int i = 0; i < classes; i ++) {
-    unsigned int chunk = BITS_DIV(i);
-    unsigned int pos = BITS_MOD(i);
+    unsigned int chunk = BITS_BYTE(i);
+    unsigned int pos = BITS_BIT(i);
     if (tm_state_sum_local(tm, t, i, s) > 0)
       encoding[chunk] |= ((tk_bits_t)1 << pos);
     else
@@ -1211,7 +1205,7 @@ static inline int tk_tsetlin_persist (lua_State *L)
 static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, FILE *fh, bool read_state, bool has_state, unsigned int n_threads)
 {
   tk_lua_fread(L, &tm->classes, sizeof(unsigned int), 1, fh);
-  tm->class_chunks = BITS_DIV((tm->classes - 1)) + 1;
+  tm->class_chunks = BITS_BYTES(tm->classes);
   tk_lua_fread(L, &tm->features, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->clauses, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->threshold, sizeof(unsigned int), 1, fh);

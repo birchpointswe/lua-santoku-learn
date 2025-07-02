@@ -132,24 +132,34 @@ M.split_snli_pairs = function (dataset, ratio)
 
 end
 
-M.read_binary_mnist = function (fp, n_features, max)
+M.read_binary_mnist = function (fp, n_features, max, class_max)
+  local class_cnt = {}
   local offsets = ivec.create()
   local problems = ivec.create()
   local solutions = ivec.create()
   local sample = 0
   local feature = 0
+  local tmp = ivec.create()
   offsets:push(0)
   for s in str.gmatch(fs.readfile(fp), "%S+") do
     if feature == n_features then
-      solutions:push(tonumber(s))
-      feature = 0
-      sample = sample + 1
-      offsets:push(problems:size())
-      if max and sample >= max then
-        break
+      class_cnt[s] = (class_cnt[s] or 0) + 1
+      if class_max and class_cnt[s] > class_max then
+        feature = 0
+        -- nothing
+      else
+        solutions:push(tonumber(s))
+        problems:copy(tmp, 0, tmp:size(), problems:size())
+        tmp:clear()
+        feature = 0
+        sample = sample + 1
+        if max and sample >= max then
+          break
+        end
+        offsets:push(problems:size())
       end
     elseif s == "1" then
-      problems:push(feature)
+      tmp:push(feature)
       feature = feature + 1
     elseif s == "0" then
       feature = feature + 1
@@ -197,8 +207,9 @@ M.split_binary_mnist = function (dataset, ratio)
   end
 end
 
-M.multiclass_pairs = function (labels, n_anchors)
-  n_anchors = n_anchors or 1
+M.multiclass_pairs = function (labels, n_anchors_pos, n_anchors_neg)
+  n_anchors_pos = n_anchors_pos or 1
+  n_anchors_neg = n_anchors_neg or n_anchors_pos or 1
   local pos, neg = pvec.create(), pvec.create()
   local class_to_indices, class_to_anchors = {}, {}
   local classes = ivec.create()
@@ -215,7 +226,7 @@ M.multiclass_pairs = function (labels, n_anchors)
     local indices = class_to_indices[class]
     local anchors = ivec.create()
     local used = {}
-    while anchors:size() < num.min(n_anchors, indices:size()) do
+    while anchors:size() < num.min(n_anchors_pos, indices:size()) do
       local candidate = indices:get(num.random(indices:size()) - 1)
       if not used[candidate] then
         anchors:push(candidate)
@@ -252,7 +263,7 @@ M.multiclass_pairs = function (labels, n_anchors)
     -- Connect each node negatively to selected other-class anchors
     for idx in indices:each() do
       local used_neg = {}
-      for _ = 1, n_anchors do
+      for _ = 1, n_anchors_neg do
         local anchor_neg
         repeat
           anchor_neg = negative_anchors:get(num.random(negative_anchors:size()) - 1)
