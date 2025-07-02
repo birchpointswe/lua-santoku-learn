@@ -319,7 +319,7 @@ static inline void tk_inv_neighborhoods (
   lua_remove(L, -3); // sids
 }
 
-static inline tk_rvec_t *tk_inv_neighbors_by_vec (
+static inline tk_rvec_t *tk_inv_neighbors_by_vec(
   lua_State *L,
   tk_inv_t *I,
   int64_t *data,
@@ -332,9 +332,39 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   if (!out)
     out = tk_rvec_create(L, knn, 0, 0);
   out->n = 0;
-  if (knn == 0)
+  if (datalen == 0)
     return out;
-  #warning todo
+  size_t n_sids = I->node_offsets->n;
+  tk_ivec_t *cnt = tk_ivec_create(L, n_sids, 0, 0);
+  cnt->n = n_sids;
+  memset(cnt->a, 0, sizeof(cnt->a[0]) * n_sids);
+  tk_ivec_t *touched = tk_ivec_create(L, 0, 0, 0);
+  for (size_t i = 0; i < datalen; i++) {
+    int64_t fid = data[i];
+    if (fid < 0 || fid >= (int64_t)I->postings->n)
+      continue;
+    tk_ivec_t *vsids = I->postings->a[fid];
+    for (uint64_t j = 0; j < vsids->n; j++) {
+      int64_t vsid = vsids->a[j];
+      if (vsid == sid0)
+        continue;
+      if (cnt->a[vsid] ++ == 0)
+        tk_ivec_push(touched, vsid);
+    }
+  }
+  for (uint64_t i = 0; i < touched->n; i++) {
+    int64_t vsid = touched->a[i];
+    uint64_t c = (uint64_t)cnt->a[vsid];
+    if (c >= eps)
+      tk_rvec_push(out, tk_rank(vsid, (double) c));
+    cnt->a[vsid] = 0;
+  }
+  touched->n = 0;
+  tk_rvec_desc(out, 0, out->n);
+  if (knn > 0 && out->n > knn)
+    out->n = knn;
+  tk_ivec_destroy(cnt);
+  tk_ivec_destroy(touched);
   return out;
 }
 

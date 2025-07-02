@@ -1,5 +1,8 @@
 # Now
 
+- Clustering visualization
+- All tests working without leaks/errors
+
 - tk_inv/ann/hbi_t
     - Implement inv neighbors
     - DRY up ANN and HBI
@@ -53,6 +56,9 @@
       become optional.
         - E.g. graph.create({ index, labels, trans_hops/pos/neg, etc })
 
+- Clustering
+    - Huge opportunities for performance improvement
+
 - Misc
     - Generalize the patterns found in tests into:
         - santoku.tsetlin.encoder: wraps all supported encoder use-cases: graph or labeled data input, generating a
@@ -65,10 +71,7 @@
 
 # Later
 
-- Think about
-    - Spectral currently treats neg/pos the same, relying on TCH for the
-      negative handling. Using a true signed laplacian seems to make
-      cluster/mnist worse. How should this be?
+- QQP
 
 - Eval/optimize
     - Split optimize_retrieval into separate module
@@ -77,16 +80,11 @@
     - When scanning margins and multiple are tied for best, pick the median
     - Parallelize AUC rank accumulation over pairs
 
-
 - Chores
-    - Rename hasc/hdesc to hmax and hmin
     - Double-check & comment auto-vectorization opportunities
 
 - TCH, ITQ
     - Parallelize
-
-- Misc
-    - Sparse/dense linear SVM for sanity checking all tasks
 
 - tk_graph_t
     - Parallelize init & seed phase (slowest phase of entire pipeline)
@@ -126,9 +124,6 @@
 - Encoder
     - Curriculum learning, bit pruning, etc.
 
-- tk_tsetlin_t
-    - Regression
-
 - tk_graph_t
     - Proper Lua/C API and tk naming
     - Support querying for changes made to seed list over time (removed during dedupe, added by phase)
@@ -152,24 +147,6 @@
 - Chore
     - Proper Lua/C APIs across the board
 
-# Consider
-
-- Spectral
-    - Weighted laplacian (ground truths, transitives, knn, kfn, etc.)
-
-- Clustering
-    - K-means, k-medoids, hierarchical, dbscan?
-
-- tk_dsu_t
-    - Split from graph for other uses?
-    - Full Lua/C API?
-
-- vec/tpl.h Allow tk_vec_noundef to skip undefs?
-
-- Corex
-    - Should anchor multiply feature MI instead of hard-boosting it?
-    - Allow explicit anchor feature list instead of last n_hidden, supporting multiple assigned to same latent, etc.
-
 # Eventually
 
 - Multi-layer classifiers and encoders
@@ -189,3 +166,24 @@
     - Triples memory usage
 
 - Titanic dataset
+
+# Consider
+
+- Misc
+    - Sparse/dense linear SVM for sanity checking all tasks
+
+- Spectral
+    - Weighted laplacian (ground truths, transitives, knn, kfn, etc.)
+
+- Clustering
+    - K-means, k-medoids, hierarchical, dbscan?
+
+- tk_dsu_t
+    - Split from graph for other uses?
+    - Full Lua/C API?
+
+- vec/tpl.h Allow tk_vec_noundef to skip undefs?
+
+- Corex
+    - Should anchor multiply feature MI instead of hard-boosting it?
+    - Allow explicit anchor feature list instead of last n_hidden, supporting multiple assigned to same latent, etc.

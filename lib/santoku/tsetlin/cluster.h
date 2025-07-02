@@ -9,24 +9,49 @@
 static inline void tk_cluster_dsu (
   lua_State *L,
   tk_hbi_t *hbi,
+  tk_ann_t *ann,
+  tk_inv_t *inv,
   uint64_t margin,
   tk_ivec_t **idsp,
   tk_ivec_t **assignmentsp,
   uint64_t *n_clustersp
 ) {
-  tk_pvec_t *tmp = tk_pvec_create(L, 0, 0, 0); // tmp
-  tk_ivec_t *ids = (*idsp) = tk_iumap_keys(L, hbi->uid_sid); // tmp ids
+  tk_pvec_t *ptmp = (hbi || ann) ? tk_pvec_create(L, 0, 0, 0) : NULL; // tmp
+  tk_rvec_t *rtmp = (!ptmp && inv) ? tk_rvec_create(L, 0, 0, 0) : NULL; // tmp
+
+  tk_ivec_t *ids = (*idsp) =
+    hbi ? tk_iumap_keys(L, hbi->uid_sid) :
+    ann ? tk_iumap_keys(L, ann->uid_sid) :
+    inv ? tk_iumap_keys(L, inv->uid_sid) : tk_ivec_create(L, 0, 0, 0); // tmp ids
   tk_iumap_t *ididx = tk_iumap_from_ivec(ids);
 
   tk_dsu_t dsu;
   tk_dsu_init(L, &dsu, ids);
 
-  for (uint64_t i = 0; i < ids->n; i ++) {
-    int64_t uid = ids->a[i];
-    tk_pvec_clear(tmp);
-    tk_hbi_neighbors_by_id(L, hbi, uid, 0, margin, tmp);
-    for (uint64_t j = 0; j < tmp->n; j ++)
-      tk_dsu_union(&dsu, uid, tmp->a[j].i);
+  if (hbi != NULL) {
+    for (uint64_t i = 0; i < ids->n; i ++) {
+      int64_t uid = ids->a[i];
+      tk_pvec_clear(ptmp);
+      tk_hbi_neighbors_by_id(L, hbi, uid, 0, margin, ptmp);
+      for (uint64_t j = 0; j < ptmp->n; j ++)
+        tk_dsu_union(&dsu, uid, ptmp->a[j].i);
+    }
+  } else if (ann != NULL) {
+    for (uint64_t i = 0; i < ids->n; i ++) {
+      int64_t uid = ids->a[i];
+      tk_pvec_clear(ptmp);
+      tk_ann_neighbors_by_id(L, ann, uid, 0, margin, ptmp);
+      for (uint64_t j = 0; j < ptmp->n; j ++)
+        tk_dsu_union(&dsu, uid, ptmp->a[j].i);
+    }
+  } else if (inv != NULL) {
+    for (uint64_t i = 0; i < ids->n; i ++) {
+      int64_t uid = ids->a[i];
+      tk_rvec_clear(rtmp);
+      tk_inv_neighbors_by_id(L, inv, uid, 0, margin, rtmp);
+      for (uint64_t j = 0; j < rtmp->n; j ++)
+        tk_dsu_union(&dsu, uid, rtmp->a[j].i);
+    }
   }
 
   tk_iumap_t *cmap = tk_iumap_create();

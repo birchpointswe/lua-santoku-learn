@@ -34,52 +34,16 @@
 
 typedef uint8_t tk_bits_t;
 #define BITS 8
-#define BITS_DIV(x) ((x) >> 3)
-#define BITS_MOD(x) ((x) & 7)
 #define BYTES (BITS / CHAR_BIT)
-#define BYTES_DIV(x) ((x) / BYTES)
+#define BITS_BYTES(x) ((x + CHAR_BIT - 1) / CHAR_BIT)
+#define BITS_BYTE(x) (x / CHAR_BIT)
+#define BITS_BIT(x) ((x % CHAR_BIT))
 const tk_bits_t ZERO_MASK = 0x00;
 const tk_bits_t ALL_MASK = 0xFF;
 const tk_bits_t POS_MASK = 0x55;
 const tk_bits_t NEG_MASK = 0xAA;
 static inline uint8_t popcount (tk_bits_t x) {
   return (uint8_t) __builtin_popcount(x);
-}
-
-// typedef uint64_t tk_bits_t;
-// #define BITS 64
-// #define BITS_DIV(x) ((x) >> 6)
-// #define BITS_MOD(x) ((x) & 63)
-// #define BYTES (BITS / CHAR_BIT)
-// #define BYTES_DIV(x) ((x) / BYTES)
-// const tk_bits_t ALL_MASK = ((tk_bits_t)0xFFFFFFFF << 32) | ((tk_bits_t)0xFFFFFFFF);
-// const tk_bits_t POS_MASK = ((tk_bits_t)0x55555555 << 32) | ((tk_bits_t)0x55555555);
-// const tk_bits_t NEG_MASK = ((tk_bits_t)0xAAAAAAAA << 32) | ((tk_bits_t)0xAAAAAAAA);
-// static inline uint64_t popcount (tk_bits_t x) {
-//   return (uint64_t) __builtin_popcountll(x);
-// }
-
-static inline uint64_t hamming_mask (
-  tk_bits_t *a,
-  tk_bits_t *b,
-  tk_bits_t *mask,
-  uint64_t chunks
-) {
-  uint64_t t = 0;
-  for (uint64_t i = 0; i < chunks; i ++)
-    t += (uint64_t) popcount((a[i] ^ b[i]) & mask[i]);
-  return t;
-}
-
-static inline uint64_t hamming (
-  tk_bits_t *a,
-  tk_bits_t *b,
-  uint64_t chunks
-) {
-  uint64_t t = 0;
-  for (uint64_t i = 0; i < chunks; i ++)
-    t += (uint64_t) popcount(a[i] ^ b[i]);
-  return t;
 }
 
 static inline uint64_t mix64 (uint64_t x) {
@@ -127,7 +91,6 @@ typedef kvec_t(tm_candidate_t) tm_candidates_t;
 static uint64_t const multiplier = 6364136223846793005u;
 __thread uint64_t mcg_state = 0xcafef00dd15ea5e5u;
 
-// TODO: make this 64-bit
 static inline uint32_t fast_rand ()
 {
   uint64_t x = mcg_state;
