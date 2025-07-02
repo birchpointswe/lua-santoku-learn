@@ -70,53 +70,6 @@ test("tsetlin", function ()
     end
   })
 
-  -- Generate evaluation pairs
-  dataset.pos_graph, dataset.neg_graph = dataset.graph:pairs()
-  print("\nEnriched graph:\n")
-  local ids = {}
-  local cnt = {}
-  local npos = {}
-  local nneg = {}
-  for l, a, b in it.chain(
-    it.paste(true, dataset.pos_graph:each()),
-    it.paste(false, dataset.neg_graph:each()))
-  do
-    ids[a] = true
-    ids[b] = true
-    local sa = dataset.solutions:get(a)
-    local sb = dataset.solutions:get(b)
-    if sa > sb then
-      sa, sb = sb, sa
-    end
-    tbl.update(cnt, sa, sb, l, function (x)
-      if l then
-        npos[a] = (npos[a] or 0) + 1
-        npos[b] = (npos[b] or 0) + 1
-      else
-        nneg[a] = (nneg[a] or 0) + 1
-        nneg[b] = (nneg[b] or 0) + 1
-      end
-      return (x or 0) + 1
-    end)
-  end
-  local ids = it.collect(it.take(100, it.keys(ids)))
-  arr.sort(ids)
-  for i in it.ivals(ids) do
-    str.printf("  node:%-4d  pos:%-4d  neg:%-4d  total:%-4d\n", i, npos[i] or 0, nneg[i] or 0, (npos[i] or 0) + (nneg[i] or 0))
-  end
-  str.printf("  ")
-  for i = 0, 9 do
-    str.printf("         %-6d", i)
-  end
-  str.printf("\n")
-  for i = 0, 9 do
-    str.printf("  %1d", i)
-    for j = 0, 9 do
-      str.printf("  %6d %-6d", (tbl.get(cnt, i, j, true) or 0), (tbl.get(cnt, i, j, false) or 0))
-    end
-    str.printf("\n")
-  end
-
   print("\nSpectral eigendecomposition")
   dataset.ids_spectral, dataset.codes_spectral, dataset.scale_spectral, dataset.dims_spectral, dataset.neg_scale = spectral.encode({
     graph = dataset.graph,
@@ -177,6 +130,7 @@ test("tsetlin", function ()
   dataset.codes_spectral = dataset.codes_spectral:raw_bitmap(dataset.ids_spectral:size(), dataset.dims_spectral)
 
   print("\nCodebook stats (general)")
+  dataset.pos_graph, dataset.neg_graph = dataset.graph:pairs()
   dataset.entropy = eval.entropy_stats(dataset.codes_spectral, dataset.n, dataset.dims_spectral)
   str.printi("  Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)",
     dataset.entropy)
