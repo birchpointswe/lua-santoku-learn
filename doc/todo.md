@@ -1,11 +1,11 @@
 # Now
 
-- Clustering visualization
 - All tests working without leaks/errors
+    - Cluster mnist top_k feature selection for codebook learning
+    - Linear SVM
 
 - tk_inv/ann/hbi_t
-    - Implement inv neighbors
-    - DRY up ANN and HBI
+    - DRY them up
     - Persist/load to/from disk/string (note that this will likely first require compaction to ensure contiguous
       vectors)
     - Final TODOs
@@ -22,24 +22,13 @@
 
 - Chore
     - Set num threads for blas in spectral, itq, and anywhere else so that THREADS is respected
+    - When threads = 0 or 1 or no pthreads, don't create any pthreads
     - Sanitize everything
-
-- TBHSS
-    - Get working with new TM code
-    - Explore classify
-    - Explore encode
-    - Confirm accuracy on mnist/imdb is as expected in both classify and encode mode
-    - Index & search
 
 # Next
 
-- tk_ann_t
-    - Allow user to pass dataset in, which then uses top_entropy to select bits
-      internally
-
-- tk_xvec_t
-    - Align Lua/C APIs (currently out of sync for pvec, rvec, etc)
-    - Optional lua gc management via tk_xvec_create(NULL, ...), allowing later opt-in via tk_xvec_register(L, xv)
+- Clustering
+    - Huge opportunities for performance improvement
 
 - tk_xxmap/set_t:
     - Templatize over khash/kbtree
@@ -49,15 +38,20 @@
     - Move hyperparameter search/exploration code into TM library
     - Restrict TBHSS code to cover cli usage, pre-processing, etc.
 
-- Graph
-    - Support passing labels to graph to ensure edges respect classes (e.g. dont positively connect between diff classes
-      or negative with same, support multi-labels as cvec and single-labels as ivec)
-    - Move multiclass-to-graph initial setup using star centers/negatives into graph.create such that seed pos/neg pairs
-      become optional.
-        - E.g. graph.create({ index, labels, trans_hops/pos/neg, etc })
+- TBHSS
+    - Get working with new TM code
+    - Explore classify
+    - Explore encode
+    - Confirm accuracy on mnist/imdb is as expected in both classify and encode mode
+    - Index & search
 
-- Clustering
-    - Huge opportunities for performance improvement
+- tk_ann_t
+    - Allow user to pass dataset in, which then uses top_entropy to select bits
+      internally
+
+- tk_xvec_t
+    - Align Lua/C APIs (currently out of sync for pvec, rvec, etc)
+    - Optional lua gc management via tk_xvec_create(NULL, ...), allowing later opt-in via tk_xvec_register(L, xv)
 
 - Misc
     - Generalize the patterns found in tests into:
