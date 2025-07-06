@@ -16,7 +16,7 @@ typedef enum {
 
 typedef struct {
   tm_dl_t *pl;
-  atomic_ulong *TP, *FP, *FN, *hist_pos, *hist_neg;
+  atomic_ulong *ERR, *TP, *FP, *FN, *hist_pos, *hist_neg;
   tk_pvec_t *pos, *neg;
   uint64_t n_pos, n_neg;
   double *f1, *precision, *recall;
@@ -31,6 +31,8 @@ typedef struct {
 
 typedef struct {
   tk_eval_t *state;
+  uint64_t diff;
+  uint64_t *bdiff;
   uint64_t sfirst, slast;
   uint64_t pfirst, plast;
   uint64_t dfirst, dlast;
@@ -95,16 +97,15 @@ static void tk_eval_worker (void *dp, int sig)
     case TK_EVAL_ENCODING_ACCURACY:
       for (uint64_t i = data->sfirst; i <= data->slast; i ++) {
         for (uint64_t j = 0; j < state->n_dims; j ++) {
-          uint64_t word = j / (sizeof(tk_bits_t) * CHAR_BIT);
-          uint64_t bit = j % (sizeof(tk_bits_t) * CHAR_BIT);
-          bool y_true = (state->codes_expected[i * state->chunks + word] >> bit) & 1;
-          bool y_pred = (state->codes_predicted[i * state->chunks + word] >> bit) & 1;
-          if (y_pred && y_true)
-            atomic_fetch_add(state->TP + j, 1);
-          else if (y_pred && !y_true)
-            atomic_fetch_add(state->FP + j, 1);
-          else if (!y_pred && y_true)
-            atomic_fetch_add(state->FN + j, 1);
+          uint64_t word = BITS_BYTE(j);
+          uint64_t bit = BITS_BIT(j);
+          bool y =
+            (state->codes_expected[i * state->chunks + word] & ((tk_bits_t)1 << bit)) ==
+            (state->codes_predicted[i * state->chunks + word] & ((tk_bits_t)1 << bit));
+          if (y)
+            continue;
+          data->diff ++;
+          data->bdiff[j] ++;
         }
       }
       break;
@@ -360,18 +361,12 @@ static inline tk_accuracy_t tm_clustering_accuracy (
   // Run eval via pool
   tk_threads_signal(pool, TK_EVAL_CLUSTERING_ACCURACY);
   tk_threads_destroy(pool);
-
-  // load your counts
   uint64_t tp = atomic_load(state.TP);
   uint64_t fp = atomic_load(state.FP);
   uint64_t tn = n_neg > fp ? (n_neg - fp) : 0;
-
-  // compute rates
   double tpr = n_pos > 0 ? (double) tp / n_pos : 0.0;
   double tnr = n_neg > 0 ? (double) tn / n_neg : 0.0;
   double bacc = 0.5 * (tpr + tnr);
-
-  // package into your struct
   tk_accuracy_t acc;
   acc.tpr = tpr;
   acc.tnr = tnr;
@@ -421,17 +416,6 @@ static inline int tm_encoding_accuracy (lua_State *L)
   state.chunks = chunks;
   state.codes_expected = codes_expected;
   state.codes_predicted = codes_predicted;
-  state.TP = tk_malloc(L, n_dims * sizeof(atomic_ulong));
-  state.FP = tk_malloc(L, n_dims * sizeof(atomic_ulong));
-  state.FN = tk_malloc(L, n_dims * sizeof(atomic_ulong));
-  state.precision = tk_malloc(L, n_dims * sizeof(double));
-  state.recall = tk_malloc(L, n_dims * sizeof(double));
-  state.f1 = tk_malloc(L, n_dims * sizeof(double));
-  for (uint64_t i = 0; i < n_dims; i ++) {
-    atomic_init(state.TP + i, 0);
-    atomic_init(state.FP + i, 0);
-    atomic_init(state.FN + i, 0);
-  }
 
   // Setup pool
   tk_eval_thread_t data[n_threads];
@@ -439,6 +423,9 @@ static inline int tm_encoding_accuracy (lua_State *L)
   for (unsigned int i = 0; i < n_threads; i ++) {
     pool->threads[i].data = data + i;
     data[i].state = &state;
+    data[i].diff = 0;
+    data[i].bdiff = tk_malloc(L, n_dims * sizeof(uint64_t));
+    memset(data[i].bdiff, 0, sizeof(uint64_t) * n_dims);
     tk_thread_range(i, n_threads, n_samples, &data[i].sfirst, &data[i].slast);
   }
 
@@ -447,69 +434,49 @@ static inline int tm_encoding_accuracy (lua_State *L)
   tk_threads_destroy(pool);
 
   // Reduce
-  double precision_avg = 0.0, recall_avg = 0.0, f1_avg = 0.0;
-  for (uint64_t j = 0; j < n_dims; j ++) {
-    uint64_t tp = state.TP[j], fp = state.FP[j], fn = state.FN[j];
-    state.precision[j] = (tp + fp) > 0 ? (double) tp / (tp + fp) : 0.0;
-    state.recall[j] = (tp + fn) > 0 ? (double) tp / (tp + fn) : 0.0;
-    state.f1[j] = (state.precision[j] + state.recall[j]) > 0 ?
-      2.0 * state.precision[j] * state.recall[j] / (state.precision[j] + state.recall[j]) : 0.0;
-    precision_avg += state.precision[j];
-    recall_avg += state.recall[j];
-    f1_avg += state.f1[j];
+  uint64_t diff_total = 0;
+  uint64_t *bdiff_total = tk_malloc(L, n_dims * sizeof(uint64_t));
+  memset(bdiff_total, 0, n_dims * sizeof(uint64_t));
+  for (unsigned int i = 0; i < n_threads; i ++) {
+    diff_total += data[i].diff;
+    for (uint64_t j = 0; j < n_dims; j ++)
+      bdiff_total[j] += data[i].bdiff[j];
   }
-
-  // Cleanup
-  free(state.TP);
-  free(state.FP);
-  free(state.FN);
 
   // Lua output
-  precision_avg /= n_dims;
-  recall_avg /= n_dims;
-  f1_avg /= n_dims;
   lua_newtable(L);
-  lua_newtable(L); // classes
+  lua_newtable(L); // dims
+  double min_bdiff = 1.0, max_bdiff = 0.0;
   for (uint64_t j = 0; j < n_dims; j ++) {
+    double t = (double) bdiff_total[j] / (double) n_samples;
+    if (t < min_bdiff) min_bdiff = t;
+    if (t > max_bdiff) max_bdiff = t;
     lua_pushinteger(L, (int64_t) j + 1);
-    lua_newtable(L);
-    lua_pushnumber(L, state.precision[j]);
-    lua_setfield(L, -2, "precision");
-    lua_pushnumber(L, state.recall[j]);
-    lua_setfield(L, -2, "recall");
-    lua_pushnumber(L, state.f1[j]);
-    lua_setfield(L, -2, "f1");
+    lua_pushnumber(L, t);
     lua_settable(L, -3);
   }
-  lua_setfield(L, -2, "classes");
-  lua_pushnumber(L, precision_avg);
-  lua_setfield(L, -2, "precision");
-  lua_pushnumber(L, recall_avg);
-  lua_setfield(L, -2, "recall");
-  lua_pushnumber(L, f1_avg);
-  lua_setfield(L, -2, "f1");
 
-  // F1 stats
-  double f1_var = 0.0;
-  double min_f1 = 1.0, max_f1 = 0.0;
-  for (uint64_t j = 0; j < n_dims; j ++) {
-    double f = state.f1[j];
-    f1_var += (f - f1_avg) * (f - f1_avg);
-    if (f < min_f1) min_f1 = f;
-    if (f > max_f1) max_f1 = f;
+  double mean_bdiff = (double) diff_total / (n_samples * n_dims);  /* mean Hamming */
+  double var = 0.0;
+  for (uint64_t j = 0; j < n_dims; ++j) {
+    double ber = (double) bdiff_total[j] / n_samples;
+    var += (ber - mean_bdiff) * (ber - mean_bdiff);
   }
-  f1_var /= n_dims;
-  lua_pushnumber(L, min_f1);
-  lua_setfield(L, -2, "f1_min");
-  lua_pushnumber(L, max_f1);
-  lua_setfield(L, -2, "f1_max");
-  lua_pushnumber(L, sqrt(f1_var));
-  lua_setfield(L, -2, "f1_std");
+  double std_bdiff = n_dims > 1 ? sqrt(var / (n_dims - 1)) : 0.0;
 
-  // Cleanup
-  free(state.precision);
-  free(state.recall);
-  free(state.f1);
+  lua_setfield(L, -2, "bits");
+  lua_pushnumber(L, mean_bdiff);
+  lua_setfield(L, -2, "mean_hamming");
+  lua_pushnumber(L, min_bdiff);
+  lua_setfield(L, -2, "ber_min");
+  lua_pushnumber(L, max_bdiff);
+  lua_setfield(L, -2, "ber_max");
+  lua_pushnumber(L, std_bdiff);
+  lua_setfield(L, -2, "ber_std");
+
+  free(bdiff_total);
+  for (unsigned int i = 0; i < n_threads; i ++)
+    free(data[i].bdiff);
 
   return 1;
 }

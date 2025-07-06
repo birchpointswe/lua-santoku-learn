@@ -1,27 +1,23 @@
 local ds = require("santoku.tsetlin.dataset")
-local varg = require("santoku.varg")
-local err = require("santoku.error")
 local eval = require("santoku.tsetlin.evaluator")
-local it = require("santoku.iter")
 local ann = require("santoku.tsetlin.ann")
+local tm = require("santoku.tsetlin")
+local ivec = require("santoku.ivec")
 local hbi = require("santoku.tsetlin.hbi")
 local graph = require("santoku.tsetlin.graph")
 local spectral = require("santoku.tsetlin.spectral")
-local booleanizer = require("santoku.tsetlin.booleanizer")
 local tch = require("santoku.tsetlin.tch")
 local itq = require("santoku.tsetlin.itq")
 local serialize = require("santoku.serialize") -- luacheck: ignore
-local tbl = require("santoku.table")
 local str = require("santoku.string")
-local arr = require("santoku.array")
 local test = require("santoku.test")
 local utc = require("santoku.utc")
-local fs = require("santoku.fs")
-local sys = require("santoku.system")
 
+local TTR = 0.9
 local MAX = nil
 local MAX_CLASS = nil
 local FEATURES = 784
+local SAMPLED = false
 
 local BINARIZE = "itq"
 local TCH = true
@@ -34,6 +30,15 @@ local BRIDGE = true
 local KNN_POS = 0
 local KNN_NEG = 0
 local KNN_CACHE = 0
+local CLUSTER_MIN = 0
+local CLUSTER_MAX = 1
+local POS_ANCHORS = 2
+local NEG_ANCHORS = 1
+
+local TM_ITERS = 100
+local CLAUSES = 512
+local TARGET = 32
+local SPECIFICITY = 10
 
 test("tsetlin", function ()
 
@@ -41,24 +46,24 @@ test("tsetlin", function ()
   local dataset = ds.read_binary_mnist("test/res/mnist.70k.txt", FEATURES, MAX, MAX_CLASS)
 
   print("Splitting")
-  dataset = tbl.assign(ds.split_binary_mnist(dataset, 1), dataset)
+  local train, test = ds.split_binary_mnist(dataset, TTR)
   dataset.n_features = FEATURES
 
   print("\nIndexing raw features")
-  dataset.index_raw = ann.create({ expected_size = dataset.n, features = dataset.n_features })
-  dataset.index_raw:add(dataset.problems:raw_bitmap(dataset.n, dataset.n_features), 0, dataset.n)
+  train.index_raw = ann.create({ expected_size = train.n, features = dataset.n_features })
+  train.index_raw:add(train.problems:raw_bitmap(train.n, dataset.n_features), 0, train.n)
 
   str.printf("  Classes\t%d\n", 10)
-  str.printf("  Samples\t%d\n", dataset.n)
+  str.printf("  Samples\t%d\n", train.n)
 
   print("\nCreating graph")
   local stopwatch = utc.stopwatch()
-  local spos, sneg = ds.multiclass_pairs(dataset.solutions, 2, 1)
-  dataset.graph = graph.create({
-    labels = dataset.solutions,
+  local spos, sneg = ds.multiclass_pairs(train.solutions, POS_ANCHORS, NEG_ANCHORS)
+  train.graph = graph.create({
+    labels = train.solutions,
     pos = spos,
     neg = sneg,
-    index = dataset.index_raw,
+    index = train.index_raw,
     mst = MST,
     bridge = BRIDGE,
     knn_pos = KNN_POS,
@@ -71,8 +76,12 @@ test("tsetlin", function ()
   })
 
   print("\nSpectral eigendecomposition")
-  dataset.ids_spectral, dataset.codes_spectral, dataset.scale_spectral, dataset.dims_spectral, dataset.neg_scale = spectral.encode({
-    graph = dataset.graph,
+  train.ids_spectral,
+  train.codes_spectral,
+  train.scale_spectral,
+  train.dims_spectral,
+  train.neg_scale = spectral.encode({
+    graph = train.graph,
     n_hidden = HIDDEN,
     n_fixed = FIXED,
     negatives = NEGATIVES,
@@ -87,38 +96,38 @@ test("tsetlin", function ()
     end
   })
 
-  dataset.codes_spectral_cont = dataset.codes_spectral
+  train.codes_spectral_cont = train.codes_spectral
   if BINARIZE == "itq" then
     print("\nIterative Quantization")
-    dataset.codes_spectral = itq.encode({
-      codes = dataset.codes_spectral,
-      n_dims = dataset.dims_spectral,
+    train.codes_spectral = itq.encode({
+      codes = train.codes_spectral,
+      n_dims = train.dims_spectral,
       each = function (i, a, b)
         str.printf("  ITQ completed in %s itrs. Objective %f → %f\n", i, a, b)
       end
     })
   elseif BINARIZE == "median" then
-    print("\nSign thresholding")
-    dataset.codes_spectral = itq.median({
-      codes = dataset.codes_spectral,
-      n_dims = dataset.dims_spectral,
+    print("\nMedian thresholding")
+    train.codes_spectral = itq.median({
+      codes = train.codes_spectral,
+      n_dims = train.dims_spectral,
     })
   elseif BINARIZE == "sign" then
     print("\nSign thresholding")
-    dataset.codes_spectral = itq.sign({
-      codes = dataset.codes_spectral,
-      n_dims = dataset.dims_spectral,
+    train.codes_spectral = itq.sign({
+      codes = train.codes_spectral,
+      n_dims = train.dims_spectral,
     })
   end
 
   if TCH then
     print("\nFlipping bits")
     tch.refine({
-      codes = dataset.codes_spectral,
-      graph = dataset.graph,
-      scale = dataset.scale_spectral,
-      negatives = dataset.neg_scale,
-      n_dims = dataset.dims_spectral,
+      codes = train.codes_spectral,
+      graph = train.graph,
+      scale = train.scale_spectral,
+      negatives = train.neg_scale,
+      n_dims = train.dims_spectral,
       each = function (s)
         local d, dd = stopwatch()
         str.printf("  Time: %6.2f %6.2f  TCH Steps: %3d\n", d, dd, s)
@@ -126,26 +135,24 @@ test("tsetlin", function ()
     })
   end
 
-  dataset.pos_sampled, dataset.neg_sampled = ds.multiclass_pairs(dataset.solutions)
-  dataset.codes_spectral = dataset.codes_spectral:raw_bitmap(dataset.ids_spectral:size(), dataset.dims_spectral)
+  train.codes_spectral = train.codes_spectral:raw_bitmap(train.ids_spectral:size(), train.dims_spectral)
 
   print("\nCodebook stats (general)")
-  dataset.pos_graph, dataset.neg_graph = dataset.graph:pairs()
-  dataset.entropy = eval.entropy_stats(dataset.codes_spectral, dataset.n, dataset.dims_spectral)
+  train.pos_graph, train.neg_graph = train.graph:pairs()
+  train.entropy = eval.entropy_stats(train.codes_spectral, train.n, train.dims_spectral)
   str.printi("  Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)",
-    dataset.entropy)
-  str.printi("  AUC (continuous): %.4f#(auc_continuous) | AUC (binary): %.4f#(auc_binary)",
-    { auc_binary = eval.auc(dataset.codes_spectral, dataset.pos_graph, dataset.neg_graph, dataset.dims_spectral)
-    , auc_continuous = eval.auc(dataset.codes_spectral_cont, dataset.pos_graph, dataset.neg_graph, dataset.dims_spectral)
-    })
+    train.entropy)
+  train.auc_binary = eval.auc(train.codes_spectral, train.pos_graph, train.neg_graph, train.dims_spectral) -- luacheck: ignore
+  train.auc_continuous = eval.auc(train.codes_spectral_cont, train.pos_graph, train.neg_graph, train.dims_spectral) -- luacheck: ignore
+  str.printi("  AUC (continuous): %.4f#(auc_continuous) | AUC (binary): %.4f#(auc_binary)", train)
 
   print("\nRetrieval stats (graph)")
-  dataset.similarity_graph = eval.optimize_retrieval({
-    codes = dataset.codes_spectral,
-    n_dims = dataset.dims_spectral,
-    ids = dataset.ids_spectral,
-    pos = dataset.pos_graph,
-    neg = dataset.neg_graph,
+  train.similarity_graph = eval.optimize_retrieval({
+    codes = train.codes_spectral,
+    n_dims = train.dims_spectral,
+    ids = train.ids_spectral,
+    pos = train.pos_graph,
+    neg = train.neg_graph,
     each = function (f, p, r, m)
       local d, dd = stopwatch()
       str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d\n", -- luacheck: ignore
@@ -153,70 +160,141 @@ test("tsetlin", function ()
     end
   })
   str.printi("\n  Best | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin)", -- luacheck: ignore
-    dataset.similarity_graph)
+    train.similarity_graph)
 
-  print("\nRetrieval stats (sampled)")
-  dataset.similarity_sampled = eval.optimize_retrieval({
-    codes = dataset.codes_spectral,
-    n_dims = dataset.dims_spectral,
-    ids = dataset.ids_spectral,
-    pos = dataset.pos_sampled,
-    neg = dataset.neg_sampled,
-    each = function (a, f, p, r, m)
-      local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d\n", -- luacheck: ignore
-        d, dd, a, f, p, r, m)
-    end
-  })
-  str.printi("\n  Best | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin)", -- luacheck: ignore
-    dataset.similarity_sampled)
+  if SAMPLED then
+    print("\nRetrieval stats (sampled)")
+    train.pos_sampled, train.neg_sampled = ds.multiclass_pairs(train.solutions)
+    train.similarity_sampled = eval.optimize_retrieval({
+      codes = train.codes_spectral,
+      n_dims = train.dims_spectral,
+      ids = train.ids_spectral,
+      pos = train.pos_sampled,
+      neg = train.neg_sampled,
+      each = function (a, f, p, r, m)
+        local d, dd = stopwatch()
+        str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d\n", -- luacheck: ignore
+          d, dd, a, f, p, r, m)
+      end
+    })
+    str.printi("\n  Best | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin)", -- luacheck: ignore
+      train.similarity_sampled)
+  end
 
   print("\nCreating index")
-  dataset.index_codes = hbi.create({ features = dataset.dims_spectral })
-  dataset.index_codes:add(dataset.codes_spectral, dataset.ids_spectral)
-  -- dataset.index_codes = ann.create({ features = dataset.dims_spectral, expected_size = dataset.ids_spectral:size() })
-  -- dataset.index_codes:add(dataset.codes_spectral, dataset.ids_spectral)
+  train.index_codes = hbi.create({ features = train.dims_spectral })
+  train.index_codes:add(train.codes_spectral, train.ids_spectral)
+  -- train.index_codes = ann.create({ features = train.dims_spectral, expected_size = train.ids_spectral:size() })
+  -- train.index_codes:add(train.codes_spectral, train.ids_spectral)
 
   print("\nClustering (graph)\n")
   stopwatch()
-  dataset.cluster_score_graph,
-  dataset.cluster_ids_graph,
-  dataset.cluster_assignments_graph,
-  dataset.n_clusters_graph = eval.optimize_clustering({ -- luacheck: ignore
-    index = dataset.index_codes,
-    pos = dataset.pos_graph,
-    neg = dataset.neg_graph,
-    min_margin = 0,
-    max_margin = 3,
+  train.cluster_score_graph,
+  train.cluster_ids_graph,
+  train.cluster_assignments_graph,
+  train.n_clusters_graph = eval.optimize_clustering({ -- luacheck: ignore
+    index = train.index_codes,
+    pos = train.pos_graph,
+    neg = train.neg_graph,
+    min_margin = CLUSTER_MIN,
+    max_margin = CLUSTER_MAX,
     each = function (f, p, r, m, c)
       local d, dd = stopwatch()
       str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d | Clusters: %d\n", -- luacheck: ignore
         d, dd, f, p, r, m, c)
     end
   })
-  dataset.cluster_score_graph.n_clusters = dataset.n_clusters_graph
+  train.cluster_score_graph.n_clusters = train.n_clusters_graph
   str.printi("\n  Best | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin) | Clusters: %d#(n_clusters)", -- luacheck: ignore
-    dataset.cluster_score_graph)
+    train.cluster_score_graph)
 
   print("\nClustering (sampled)\n")
-  stopwatch()
-  dataset.cluster_score_sampled,
-  dataset.cluster_ids_sampled,
-  dataset.cluster_assignments_sampled,
-  dataset.n_clusters_sampled = eval.optimize_clustering({ -- luacheck: ignore
-    index = dataset.index_codes,
-    pos = dataset.pos_sampled,
-    neg = dataset.neg_sampled,
-    min_margin = 0,
-    max_margin = 3,
-    each = function (f, p, r, m, c)
-      local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d | Clusters: %d\n", -- luacheck: ignore
-        d, dd, f, p, r, m, c)
+  if SAMPLED then
+    stopwatch()
+    train.cluster_score_sampled,
+    train.cluster_ids_sampled,
+    train.cluster_assignments_sampled,
+    train.n_clusters_sampled = eval.optimize_clustering({ -- luacheck: ignore
+      index = train.index_codes,
+      pos = train.pos_sampled,
+      neg = train.neg_sampled,
+      min_margin = CLUSTER_MIN,
+      max_margin = CLUSTER_MAX,
+      each = function (f, p, r, m, c)
+        local d, dd = stopwatch()
+        str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d | Clusters: %d\n", -- luacheck: ignore
+          d, dd, f, p, r, m, c)
+      end
+    })
+    train.cluster_score_sampled.n_clusters = train.n_clusters_sampled
+    str.printi("\n  Best | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin) | Clusters: %d#(n_clusters)", -- luacheck: ignore
+      train.cluster_score_sampled)
+  end
+
+  print("\nPrepping for encoder")
+  train.problems:bits_rearrange(train.ids_spectral, dataset.n_features)
+  train.n = train.ids_spectral:size()
+  train.problems:flip_interleave(train.n, dataset.n_features)
+  train.problems = train.problems:raw_bitmap(train.n, dataset.n_features * 2)
+  test.ids = ivec.create(test.n)
+  test.ids:fill_indices()
+  test.problems:flip_interleave(test.n, dataset.n_features)
+  test.problems = test.problems:raw_bitmap(test.n, dataset.n_features * 2)
+  test.pos_sampled, test.neg_sampled = ds.multiclass_pairs(test.solutions, POS_ANCHORS, NEG_ANCHORS)
+
+  print()
+  str.printf("Input Features    %d\n", dataset.n_features * 2)
+  str.printf("Encoded Features  %d\n", train.dims_spectral)
+  str.printf("Train problems    %d\n", train.n)
+  str.printf("Test problems     %d\n", test.n)
+
+  print("\nCreating encoder")
+  local t = tm.encoder({
+    visible = dataset.n_features,
+    hidden = train.dims_spectral,
+    clauses = CLAUSES,
+    target = TARGET,
+    specificity = SPECIFICITY,
+  })
+  stopwatch = utc.stopwatch()
+  t.train({
+    sentences = train.problems,
+    codes = train.codes_spectral,
+    samples = train.n,
+    iterations = TM_ITERS,
+    each = function (epoch)
+      train.codes_predicted = t.predict(train.problems, train.n)
+      test.codes_predicted = t.predict(test.problems, test.n)
+      train.auc_predicted = eval.auc(train.codes_predicted, train.pos_graph, train.neg_graph, train.dims_spectral)
+      test.auc_predicted = eval.auc(test.codes_predicted, test.pos_sampled, test.neg_sampled, train.dims_spectral)
+      train.accuracy_predicted = eval.encoding_accuracy(train.codes_predicted, train.codes_spectral, train.n, train.dims_spectral) -- luacheck: ignore
+      train.similarity_predicted = eval.optimize_retrieval({
+        codes = train.codes_predicted,
+        n_dims = train.dims_spectral,
+        ids = train.ids_spectral,
+        pos = train.pos_graph,
+        neg = train.neg_graph,
+      })
+      test.similarity_predicted = eval.optimize_retrieval({
+        codes = test.codes_predicted,
+        n_dims = train.dims_spectral,
+        ids = test.ids,
+        pos = test.pos_sampled,
+        neg = test.neg_sampled,
+      })
+      print()
+      str.printf("  Epoch %3d  Time %3.2f %3.2f\n",
+        epoch, stopwatch())
+      print()
+      -- print(serialize(train.accuracy0))
+      train.similarity_graph.auc = train.auc_binary
+      train.similarity_predicted.auc = train.auc_predicted
+      test.similarity_predicted.auc = test.auc_predicted
+      str.printi("    Train (acc) | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)\n", train.accuracy_predicted) -- luacheck: ignore
+      str.printi("    Codes (sim) | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", train.similarity_graph) -- luacheck: ignore
+      str.printi("    Train (sim) | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", train.similarity_predicted) -- luacheck: ignore
+      str.printi("    Test (sim)  | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", test.similarity_predicted) -- luacheck: ignore
     end
   })
-  dataset.cluster_score_sampled.n_clusters = dataset.n_clusters_sampled
-  str.printi("\n  Best | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin) | Clusters: %d#(n_clusters)", -- luacheck: ignore
-    dataset.cluster_score_sampled)
 
 end)
