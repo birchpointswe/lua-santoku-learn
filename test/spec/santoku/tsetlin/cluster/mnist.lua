@@ -36,9 +36,10 @@ local POS_ANCHORS = 2
 local NEG_ANCHORS = 1
 
 local TM_ITERS = 100
-local CLAUSES = 512
-local TARGET = 32
+local CLAUSES = 1024
+local TARGET = 0.1
 local SPECIFICITY = 10
+local TOP_K = 256
 
 test("tsetlin", function ()
 
@@ -231,16 +232,22 @@ test("tsetlin", function ()
       train.cluster_score_sampled)
   end
 
+  print("\nSelecting features")
+  local top_v = train.problems:top_chi2(train.codes_spectral, train.n, dataset.n_features, train.dims_spectral, TOP_K)
+
   print("\nPrepping for encoder")
-  train.problems:bits_rearrange(train.ids_spectral, dataset.n_features)
+  train.problems:filter(top_v, dataset.n_features)
+  train.problems:bits_rearrange(train.ids_spectral, top_v:size())
   train.n = train.ids_spectral:size()
-  train.problems:flip_interleave(train.n, dataset.n_features)
-  train.problems = train.problems:raw_bitmap(train.n, dataset.n_features * 2)
+  train.problems:flip_interleave(train.n, top_v:size())
+  train.problems = train.problems:raw_bitmap(train.n, top_v:size() * 2)
   test.ids = ivec.create(test.n)
   test.ids:fill_indices()
-  test.problems:flip_interleave(test.n, dataset.n_features)
-  test.problems = test.problems:raw_bitmap(test.n, dataset.n_features * 2)
+  test.problems:filter(top_v, dataset.n_features)
+  test.problems:flip_interleave(test.n, top_v:size())
+  test.problems = test.problems:raw_bitmap(test.n, top_v:size() * 2)
   test.pos_sampled, test.neg_sampled = ds.multiclass_pairs(test.solutions, POS_ANCHORS, NEG_ANCHORS)
+  dataset.n_features = top_v:size()
 
   print()
   str.printf("Input Features    %d\n", dataset.n_features * 2)

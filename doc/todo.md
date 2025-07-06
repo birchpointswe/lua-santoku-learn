@@ -1,7 +1,8 @@
 # Now
 
 - All tests working without leaks/errors
-    - Cluster mnist top_k feature selection for codebook learning
+    - Migrate snli test to same pattern as mnist
+    - Implement QQP
     - Linear SVM
 
 - tk_inv/ann/hbi_t
