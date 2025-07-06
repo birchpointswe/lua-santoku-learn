@@ -106,6 +106,7 @@ typedef struct tk_tsetlin_s {
   unsigned int class_chunks;
   unsigned int state_chunks;
   unsigned int action_chunks;
+  tk_bits_t tail_mask;
   tk_bits_t *state; // class clause bit chunk
   tk_bits_t *actions; // class clause chunk
 
@@ -198,12 +199,13 @@ static inline void tm_inc (
     carry = carry_next;
   }
   tk_bits_t *actions = tm_state_actions(tm, clause);
-  carry_next = actions[chunk] & carry;
-  actions[chunk] ^= carry;
+  tk_bits_t carry_masked = carry & ((chunk == tm->input_chunks - 1) ? tm->tail_mask : (tk_bits_t)~0);
+  carry_next = actions[chunk] & carry_masked;
+  actions[chunk] ^= carry_masked;
   carry = carry_next;
   for (unsigned int b = 0; b < m; b ++)
-    counts[b] |= carry;
-  actions[chunk] |= carry;
+    counts[b] |= carry_masked;
+  actions[chunk] |= carry_masked;
 }
 
 static inline void tm_dec (
@@ -223,12 +225,13 @@ static inline void tm_dec (
     carry = carry_next;
   }
   tk_bits_t *actions = tm_state_actions(tm, clause);
-  carry_next = (~actions[chunk]) & carry;
-  actions[chunk] ^= carry;
+  tk_bits_t carry_masked = carry & ((chunk == tm->input_chunks - 1) ? tm->tail_mask : (tk_bits_t) ~0);
+  carry_next = (~actions[chunk]) & carry_masked;
+  actions[chunk] ^= carry_masked;
   carry = carry_next;
   for (unsigned int b = 0; b < m; b ++)
-    counts[b] &= ~carry;
-  actions[chunk] &= ~carry;
+    counts[b] &= ~carry_masked;
+  actions[chunk] &= ~carry_masked;
 }
 
 static inline void tk_tsetlin_calculate (
@@ -254,9 +257,9 @@ static inline void tk_tsetlin_calculate (
         all_exclude |= act;
       }
       output |=
-        (actions[input_chunks - 1] & input[input_chunks - 1]) ^
-        (actions[input_chunks - 1]);
-      all_exclude |= ((actions[input_chunks - 1]) ^ 0);
+        (actions[input_chunks - 1] & input[input_chunks - 1] & tm->tail_mask) ^
+        (actions[input_chunks - 1] & tm->tail_mask);
+      all_exclude |= ((actions[input_chunks - 1]) ^ tm->tail_mask);
       output = !output && !(predict && !all_exclude);
       if (output)
         out[clause_chunk - cfirst] |= ((tk_bits_t)1 << clause_chunk_pos);
@@ -626,7 +629,7 @@ static void tk_encoder_predict_reduce_thread (
     tk_bits_t *e = encodings + s * class_chunks;
     for (unsigned int class = 0; class < tm->classes; class ++) {
       unsigned int chunk = BITS_BYTE(class);
-      unsigned int pos = BITS_BYTE(class);
+      unsigned int pos = BITS_BIT(class);
       if (sums[class] > 0)
         e[chunk] |= ((tk_bits_t)1 << pos);
       else
@@ -763,6 +766,8 @@ static inline void tk_tsetlin_init_classifier (
   tm->state_bits = state_bits;
   tm->boost_true_positive = boost_true_positive;
   tm->input_bits = 2 * tm->features;
+  uint64_t tail_bits = tm->input_bits & (BITS - 1);
+  tm->tail_mask = tail_bits ? (tk_bits_t)((1u << tail_bits) - 1) : (tk_bits_t) ~0;
   tm->input_chunks = BITS_BYTES(tm->input_bits);
   tm->clause_chunks = BITS_BYTES(tm->clauses);
   tm->state_chunks = tm->classes * tm->clauses * (tm->state_bits - 1) * tm->input_chunks;
@@ -1164,6 +1169,7 @@ static inline void _tk_tsetlin_persist_classifier (lua_State *L, tk_tsetlin_t *t
   tk_lua_fwrite(L, &tm->state_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->action_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->specificity, sizeof(double), 1, fh);
+  tk_lua_fwrite(L, &tm->tail_mask, sizeof(tk_bits_t), 1, fh);
   tk_lua_fwrite(L, tm->actions, sizeof(tk_bits_t), tm->action_chunks, fh);
 }
 
@@ -1217,6 +1223,7 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, 
   tk_lua_fread(L, &tm->state_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->action_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->specificity, sizeof(double), 1, fh);
+  tk_lua_fread(L, &tm->tail_mask, sizeof(tk_bits_t), 1, fh);
   tm->actions = tk_malloc_aligned(L, sizeof(tk_bits_t) * tm->action_chunks, BITS);
   tk_lua_fread(L, tm->actions, sizeof(tk_bits_t), tm->action_chunks, fh);
   tm->pool = tk_threads_create(L, n_threads, tk_tsetlin_worker);

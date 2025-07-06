@@ -42,7 +42,6 @@ static inline void tk_spectral_worker (void *dp, int sig)
   tk_spectral_thread_t *data = (tk_spectral_thread_t *) dp;
   double *x = data->spec->x;
   double *y = data->spec->y;
-  double *z = data->spec->z;
   double *scale = data->spec->scale;
   double *degree = data->spec->degree;
   double neg_scale = data->spec->neg_scale;
@@ -53,8 +52,6 @@ static inline void tk_spectral_worker (void *dp, int sig)
   int64_t iv;
 
   bool normalized = data->spec->normalized;
-  double n_pos = (double) data->spec->graph->n_pos;
-  double n_neg = (double) data->spec->graph->n_neg;
 
   double w_pos = 1.0;
   double w_neg = neg_scale;
