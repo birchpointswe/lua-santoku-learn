@@ -26,6 +26,10 @@
 
 # Next
 
+- Tsetlin
+    - Bayesian optimization
+    - Linear SVM comparison
+
 - Clustering
     - Huge opportunities for performance improvement
 
