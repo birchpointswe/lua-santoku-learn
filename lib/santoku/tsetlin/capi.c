@@ -760,7 +760,7 @@ static inline void tk_tsetlin_init_classifier (
   tm->negative = negative; // Note: unused in encoder
   tm->classes = classes;
   tm->class_chunks = BITS_BYTES(tm->classes);
-  tm->clauses = clauses;
+  tm->clauses = BITS_BYTES(clauses) * BITS;
   tm->threshold = ceil(thresholdf >= 1 ? thresholdf : fmaxf(1.0, (double) clauses * thresholdf));
   tm->features = features;
   tm->state_bits = state_bits;
@@ -1046,8 +1046,10 @@ static inline int tk_tsetlin_train_classifier (
       lua_pushvalue(L, i_each);
       lua_pushinteger(L, i + 1);
       lua_call(L, 1, 1);
-      if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0)
+      if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0) {
+        lua_pop(L, 1);
         break;
+      }
       lua_pop(L, 1);
     }
 
@@ -1108,8 +1110,10 @@ static inline int tk_tsetlin_train_encoder (
       lua_pushvalue(L, i_each);
       lua_pushinteger(L, i + 1);
       lua_call(L, 1, 1);
-      if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0)
+      if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0) {
+        lua_pop(L, 1);
         break;
+      }
       lua_pop(L, 1);
     }
 

@@ -36,10 +36,10 @@ local POS_ANCHORS = 2
 local NEG_ANCHORS = 1
 
 local TM_ITERS = 100
-local CLAUSES = 1024
-local TARGET = 0.1
-local SPECIFICITY = 10
-local TOP_K = 256
+-- local CLAUSES = 1024
+-- local TARGET = 0.1
+-- local SPECIFICITY = 10
+local TOP_K = 512
 
 test("tsetlin", function ()
 
@@ -209,8 +209,8 @@ test("tsetlin", function ()
   str.printi("\n  Best | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin) | Clusters: %d#(n_clusters)", -- luacheck: ignore
     train.cluster_score_graph)
 
-  print("\nClustering (sampled)\n")
   if SAMPLED then
+    print("\nClustering (sampled)\n")
     stopwatch()
     train.cluster_score_sampled,
     train.cluster_ids_sampled,
@@ -255,53 +255,72 @@ test("tsetlin", function ()
   str.printf("Train problems    %d\n", train.n)
   str.printf("Test problems     %d\n", test.n)
 
-  print("\nCreating encoder")
-  local t = tm.encoder({
+  print("\nCreating encoder\n")
+  stopwatch = utc.stopwatch()
+  local t = tm.optimize_encoder({
+
     visible = dataset.n_features,
     hidden = train.dims_spectral,
-    clauses = CLAUSES,
-    target = TARGET,
-    specificity = SPECIFICITY,
-  })
-  stopwatch = utc.stopwatch()
-  t.train({
     sentences = train.problems,
     codes = train.codes_spectral,
     samples = train.n,
-    iterations = TM_ITERS,
-    each = function (epoch)
-      train.codes_predicted = t.predict(train.problems, train.n)
-      test.codes_predicted = t.predict(test.problems, test.n)
-      train.auc_predicted = eval.auc(train.codes_predicted, train.pos_graph, train.neg_graph, train.dims_spectral)
-      test.auc_predicted = eval.auc(test.codes_predicted, test.pos_sampled, test.neg_sampled, train.dims_spectral)
-      train.accuracy_predicted = eval.encoding_accuracy(train.codes_predicted, train.codes_spectral, train.n, train.dims_spectral) -- luacheck: ignore
-      train.similarity_predicted = eval.optimize_retrieval({
-        codes = train.codes_predicted,
-        n_dims = train.dims_spectral,
-        ids = train.ids_spectral,
-        pos = train.pos_graph,
-        neg = train.neg_graph,
-      })
-      test.similarity_predicted = eval.optimize_retrieval({
-        codes = test.codes_predicted,
-        n_dims = train.dims_spectral,
-        ids = test.ids,
-        pos = test.pos_sampled,
-        neg = test.neg_sampled,
-      })
-      print()
-      str.printf("  Epoch %3d  Time %3.2f %3.2f\n",
-        epoch, stopwatch())
-      print()
-      -- print(serialize(train.accuracy0))
-      train.similarity_graph.auc = train.auc_binary
-      train.similarity_predicted.auc = train.auc_predicted
-      test.similarity_predicted.auc = test.auc_predicted
+
+    clauses = 256, --{ def = 1024, min = 512, max = 2048, log = true, int = true },
+    target = { def = 0.1, min = 0.05, max = 0.15 },
+    specificity = { def = 6, min = 4, max = 8 },
+
+    search_patience = 1,
+    search_rounds = 4,
+    search_trials = 4,
+    search_iterations = 4,
+    final_iterations = 100,
+    search_metric = function (t)
+      local predicted = t.predict(train.problems, train.n)
+      local accuracy = eval.encoding_accuracy(predicted, train.codes_spectral, train.n, train.dims_spectral)
+      return accuracy.mean_hamming, accuracy
+    end,
+
+    each = function (t, is_final, train_accuracy, params, epoch, round, trial)
+      local d, dd = stopwatch()
+      if is_final then
+        str.printf("  Time %3.2f %3.2f  Finalizing  C=%d T=%.2f S=%.2f  Epoch  %d\n",
+          d, dd, params.clauses, params.target, params.specificity, epoch)
+        print()
+      else
+        str.printf("  Time %3.2f %3.2f  Exploring  C=%d T=%.2f S=%.2f  R=%d T=%d  Epoch  %d\n",
+          d, dd, params.clauses, params.target, params.specificity, round, trial, epoch)
+        print()
+      end
+      train.accuracy_predicted = train_accuracy
       str.printi("    Train (acc) | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)\n", train.accuracy_predicted) -- luacheck: ignore
-      str.printi("    Codes (sim) | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", train.similarity_graph) -- luacheck: ignore
-      str.printi("    Train (sim) | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", train.similarity_predicted) -- luacheck: ignore
-      str.printi("    Test (sim)  | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", test.similarity_predicted) -- luacheck: ignore
-    end
+      if is_final then
+        train.codes_predicted = t.predict(train.problems, train.n)
+        train.auc_predicted = eval.auc(train.codes_predicted, train.pos_graph, train.neg_graph, train.dims_spectral)
+        train.similarity_predicted = eval.optimize_retrieval({
+          codes = train.codes_predicted,
+          n_dims = train.dims_spectral,
+          ids = train.ids_spectral,
+          pos = train.pos_graph,
+          neg = train.neg_graph,
+        })
+        test.codes_predicted = t.predict(test.problems, test.n)
+        test.auc_predicted = eval.auc(test.codes_predicted, test.pos_sampled, test.neg_sampled, train.dims_spectral)
+        test.similarity_predicted = eval.optimize_retrieval({
+          codes = test.codes_predicted,
+          n_dims = train.dims_spectral,
+          ids = test.ids,
+          pos = test.pos_sampled,
+          neg = test.neg_sampled,
+        })
+        train.similarity_graph.auc = train.auc_binary
+        train.similarity_predicted.auc = train.auc_predicted
+        test.similarity_predicted.auc = test.auc_predicted
+        str.printi("    Codes (sim) | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", train.similarity_graph) -- luacheck: ignore
+        str.printi("    Train (sim) | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", train.similarity_predicted) -- luacheck: ignore
+        str.printi("    Test (sim)  | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", test.similarity_predicted) -- luacheck: ignore
+        print()
+      end
+    end,
   })
 
 end)

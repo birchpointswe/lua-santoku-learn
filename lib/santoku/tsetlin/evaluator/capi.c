@@ -465,11 +465,11 @@ static inline int tm_encoding_accuracy (lua_State *L)
   double std_bdiff = n_dims > 1 ? sqrt(var / (n_dims - 1)) : 0.0;
 
   lua_setfield(L, -2, "bits");
-  lua_pushnumber(L, mean_bdiff);
+  lua_pushnumber(L, 1.0 - mean_bdiff);
   lua_setfield(L, -2, "mean_hamming");
-  lua_pushnumber(L, min_bdiff);
+  lua_pushnumber(L, 1.0 - min_bdiff);
   lua_setfield(L, -2, "ber_min");
-  lua_pushnumber(L, max_bdiff);
+  lua_pushnumber(L, 1.0 - max_bdiff);
   lua_setfield(L, -2, "ber_max");
   lua_pushnumber(L, std_bdiff);
   lua_setfield(L, -2, "ber_std");
