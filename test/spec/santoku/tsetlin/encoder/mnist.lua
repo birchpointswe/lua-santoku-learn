@@ -15,7 +15,7 @@ local utc = require("santoku.utc")
 
 local TTR = 0.9
 local MAX = nil
-local MAX_CLASS = nil
+local MAX_CLASS = 1000
 local FEATURES = 784
 local SAMPLED = false
 
@@ -39,7 +39,7 @@ local TM_ITERS = 100
 -- local CLAUSES = 1024
 -- local TARGET = 0.1
 -- local SPECIFICITY = 10
-local TOP_K = 512
+local TOP_K = 1000
 
 test("tsetlin", function ()
 
@@ -257,7 +257,7 @@ test("tsetlin", function ()
 
   print("\nCreating encoder\n")
   stopwatch = utc.stopwatch()
-  local t = tm.optimize_encoder({
+  --[[local t = ]] tm.optimize_encoder({
 
     visible = dataset.n_features,
     hidden = train.dims_spectral,
@@ -265,15 +265,15 @@ test("tsetlin", function ()
     codes = train.codes_spectral,
     samples = train.n,
 
-    clauses = 256, --{ def = 1024, min = 512, max = 2048, log = true, int = true },
-    target = { def = 0.1, min = 0.05, max = 0.15 },
-    specificity = { def = 6, min = 4, max = 8 },
+    clauses = 128, --{ def = 1024, min = 512, max = 2048, log = true, int = true },
+    target = { def = 0.15, min = 0.05, max = 0.25 },
+    specificity = { def = 5.18, min = 2, max = 20 },
 
     search_patience = 1,
     search_rounds = 4,
-    search_trials = 4,
-    search_iterations = 4,
-    final_iterations = 100,
+    search_trials = 10,
+    search_iterations = 10,
+    final_iterations = TM_ITERS,
     search_metric = function (t)
       local predicted = t.predict(train.problems, train.n)
       local accuracy = eval.encoding_accuracy(predicted, train.codes_spectral, train.n, train.dims_spectral)

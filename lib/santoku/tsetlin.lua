@@ -1,6 +1,5 @@
 local tm = require("santoku.tsetlin.capi")
 local num = require("santoku.num")
-local arr = require("santoku.array")
 local str = require("santoku.string")
 local err = require("santoku.error")
 local rand = require("santoku.random")
@@ -46,7 +45,7 @@ M.optimize_classifier = function ()
   return err.error("unimplemented", "optimize_classifier")
 end
 
-local function build_sampler (spec, global_dev, global_shrink)
+local function build_sampler (spec, global_dev)
   if type(spec) == "number" then
     return {
       type = "fixed",
@@ -66,19 +65,10 @@ local function build_sampler (spec, global_dev, global_shrink)
       span = math.log(maxv) - math.log(minv)
       base_center = math.log(def)
     else
-      span = math.min(def - minv, maxv - def)
+      span = math.max(def - minv, maxv - def)
       base_center = def
     end
-    local shrinker
-    if type(spec.shrink) == "function" then
-      shrinker = spec.shrink
-    else
-      local factor = (spec.shrink ~= nil) and spec.shrink or (global_shrink or 0.5)
-      shrinker = function (v)
-        return v * factor
-      end
-    end
-    local jitter = (spec.dev or global_dev or 0.5) * span
+    local jitter = (spec.dev or global_dev or 1.0) * span
     local round = 0
     return {
       type = "range",
@@ -87,13 +77,13 @@ local function build_sampler (spec, global_dev, global_shrink)
         local c = center and (is_log and math.log(center) or center) or base_center
         local x = rand.fast_normal(c, jitter)
         if is_log then x = math.exp(x) end
-        if is_int then x = num.floor(x + 0.5) end
         if x < minv then x = minv elseif x > maxv then x = maxv end
+        if is_int then x = num.floor(x + 0.5) end
         return x
       end,
       shrink = function ()
-        round = round + 1
-        jitter = shrinker(jitter, round)
+        round  = round + 1
+        jitter = jitter / math.sqrt(round)
       end,
     }
   end
@@ -116,8 +106,7 @@ M.optimize_encoder = function (args)
   local rounds = args.search_rounds or 3
   local trials = args.search_trials or 10
   local iters_search = args.search_iterations or 10
-  local global_dev = args.search_dev or 0.5
-  local global_shrink = args.search_shrink or 0.5
+  local global_dev = args.search_dev or 1.0
   local metric_fn = err.assert(args.search_metric, "search_metric required")
   local each_cb = args.each
 
@@ -125,7 +114,7 @@ M.optimize_encoder = function (args)
 
   local samplers = {}
   for _, pname in ipairs(param_names) do
-    samplers[pname] = build_sampler(args[pname], global_dev, global_shrink)
+    samplers[pname] = build_sampler(args[pname], global_dev)
   end
 
   local all_fixed = true
@@ -149,8 +138,7 @@ M.optimize_encoder = function (args)
   end
 
   local best_score = -num.huge
-  local best_params  = nil
-  local best_metrics = nil
+  local best_params = nil
 
   if all_fixed then
     best_params = sample_params()
@@ -164,7 +152,10 @@ M.optimize_encoder = function (args)
 
       for t = 1, trials do
         local params = sample_params()
-        local key = str.format("%d|%f|%f", params.clauses, params.target, params.specificity)
+        local key = str.format("%d|%d|%d",
+          params.clauses,
+          num.floor(params.target * 1e6 + 0.5),
+          num.floor(params.specificity * 1e6 + 0.5))
         if not seen[key] then
           seen[key] = true
           local enc = M.encoder({
@@ -175,7 +166,6 @@ M.optimize_encoder = function (args)
             specificity = params.specificity,
           })
           local best_epoch_score = -num.huge
-          local best_epoch_metrics = nil
           local epochs_since_improve = 0
           enc.train({
             sentences  = args.sentences,
@@ -184,8 +174,12 @@ M.optimize_encoder = function (args)
             iterations = iters_search,
             each = function (epoch)
               local score, metrics = metric_fn(enc)
+              local cb_result = nil
+              if each_cb then
+                cb_result = each_cb(enc, false, metrics, params, epoch, r, t)
+              end
               if score > best_epoch_score + 1e-8 then
-                best_epoch_score, best_epoch_metrics = score, metrics
+                best_epoch_score = score
                 epochs_since_improve = 0
               else
                 epochs_since_improve = epochs_since_improve + 1
@@ -193,20 +187,16 @@ M.optimize_encoder = function (args)
               if use_early_stop and epochs_since_improve >= patience then
                 return false
               end
-              if each_cb then
-                return each_cb(enc, false, metrics, params, epoch, r, t)
-              end
+              return cb_result
             end,
           })
           local trial_score = best_epoch_score
-          local trial_metrics = best_epoch_metrics
           if trial_score > round_best_score then
             round_best_score = trial_score
             round_best_params = params
           end
           if trial_score > best_score then
-            best_score, best_params, best_metrics =
-              trial_score, params, trial_metrics
+            best_score, best_params = trial_score, params
           end
         end
       end
@@ -226,7 +216,6 @@ M.optimize_encoder = function (args)
   end
 
   local final_iters = args.final_iterations or (iters_search * 10)
-  local final_best_score = -num.huge
   local final_enc = M.encoder({
     visible = args.visible,
     hidden = args.hidden,
@@ -241,7 +230,7 @@ M.optimize_encoder = function (args)
     iterations = final_iters,
     each = function (epoch)
       if each_cb then
-        local score, metrics = metric_fn(final_enc)
+        local _, metrics = metric_fn(final_enc)
         return each_cb(final_enc, true, metrics, best_params, epoch)
       end
     end,
