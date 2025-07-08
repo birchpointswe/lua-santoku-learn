@@ -1,3 +1,5 @@
+-- luacheck: push ignore
+
 -- local corex = require("santoku.corex")
 -- local fs = require("santoku.fs")
 -- local it = require("santoku.iter")

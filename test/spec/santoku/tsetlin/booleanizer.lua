@@ -1,7 +1,7 @@
 local booleanizer = require("santoku.tsetlin.booleanizer")
 local dvec = require("santoku.dvec")
 local test = require("santoku.test")
-local serialize = require("santoku.serialize")
+-- local serialize = require("santoku.serialize")
 
 test("booleanizer", function ()
 
