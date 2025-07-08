@@ -2,8 +2,6 @@
 
 - All tests working without leaks/errors
     - Migrate snli test to same pattern as mnist
-    - Implement QQP
-    - Linear SVM
 
 - tk_inv/ann/hbi_t
     - DRY them up
