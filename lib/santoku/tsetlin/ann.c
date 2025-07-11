@@ -20,7 +20,8 @@ static inline int tk_ann_load_lua (lua_State *L)
   const char *data = tk_lua_checklstring(L, 1, &len, "data");
   bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && tk_lua_checkboolean(L, 2);
   FILE *fh = isstr ? tk_lua_fmemopen(L, (char *) data, len, "r") : tk_lua_fopen(L, data, "r");
-  tk_ann_load(L, fh);
+  uint64_t n_threads = tk_threads_getn(L, 3, "create", NULL);
+  tk_ann_load(L, fh, n_threads);
   tk_lua_fclose(L, fh);
   return 1;
 }
