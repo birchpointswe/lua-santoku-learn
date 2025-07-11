@@ -748,8 +748,15 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
 {
   tb_tokenizer_t *tokenizer = peek_tokenizer(L, lua_upvalueindex(1));
   lua_settop(L, 1);
-  luaL_checktype(L, 1, LUA_TTABLE);
-  uint64_t n = (uint64_t) lua_objlen(L, 1);
+  uint64_t n;
+  if (lua_type(L, 1) != LUA_TTABLE) {
+    lua_newtable(L); // x t
+    lua_insert(L, 1); // t x
+    lua_rawseti(L, -2, 1); // t
+    n = 1;
+  } else {
+    n = (uint64_t) lua_objlen(L, 1);
+  }
   uint64_t n_features = (uint64_t) tb_tokenizer_features_aligned(tokenizer);
   int kha;
   uint64_t khi;
@@ -759,8 +766,7 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
 
   // TODO: parallelize
   for (size_t i = 1; i <= n; i ++) {
-    lua_pushinteger(L, (int64_t) i); // t n
-    lua_gettable(L, 1); // t s
+    lua_rawgeti(L, 1, i); // t s
 
     size_t doclen;
     char *doc = tb_tokenizer_normalize((char *) luaL_checklstring(L, -1, &doclen), &doclen, tokenizer->max_run); // s

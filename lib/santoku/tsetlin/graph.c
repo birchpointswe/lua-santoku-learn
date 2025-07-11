@@ -4,6 +4,7 @@
 
 static inline tk_graph_t *tm_graph_create (
   lua_State *L,
+  int i_ids, tk_ivec_t *ids,
   tk_pvec_t *pos,
   tk_pvec_t *neg,
   tk_ivec_t *labels,
@@ -94,6 +95,9 @@ static inline void tm_add_knn (
 ) {
   int kha;
   khint_t khi;
+
+  if (graph->inv == NULL && graph->ann == NULL && graph->hbi == NULL)
+    return;
 
   // Prep shuffle
   tk_ivec_t *shuf = tk_ivec_create(L, graph->uids->n, 0, 0);
@@ -203,8 +207,6 @@ static inline void tm_add_knn (
       }
     }
 
-  } else {
-    assert(false);
   }
 
   // Cleanup
@@ -215,9 +217,10 @@ static inline tm_candidates_t tm_mst_knn_candidates (
   lua_State *L,
   tk_graph_t *graph
 ) {
-  // Gather all inter-component edges
   tm_candidates_t all_candidates;
   kv_init(all_candidates);
+  if (graph->inv == NULL && graph->ann == NULL && graph->hbi == NULL)
+    return all_candidates;
 
   // Prep shuffle
   tk_ivec_t *shuf = tk_ivec_create(L, graph->uids->n, 0, 0);
@@ -379,12 +382,13 @@ static inline void tm_add_mst (
     for (int64_t idx = 0; idx < (int64_t) graph->uids->n; idx++) {
       int64_t u = graph->uids->a[idx];
       int64_t comp = tk_dsu_find(&graph->dsu, u);
-      khint_t   kc; int is_new;
+      khint_t kc;
+      int is_new;
       // degree *only* counts the positive adjacencies
-      int64_t   deg_pos = tk_iuset_size(graph->adj_pos->a[idx]);
+      int64_t deg_pos = tk_iuset_size(graph->adj_pos->a[idx]);
       kc = tk_pumap_put(reps_comp, comp, &is_new);
-      if (is_new || deg_pos > tk_pumap_value(reps_comp,kc).p) {
-        tk_pumap_value(reps_comp,kc) = tk_pair(u, deg_pos);
+      if (is_new || deg_pos > tk_pumap_value(reps_comp, kc).p) {
+        tk_pumap_value(reps_comp, kc) = tk_pair(u, deg_pos);
       }
     }
     tk_pvec_t *centers = tk_pumap_values(L, reps_comp);
@@ -395,9 +399,10 @@ static inline void tm_add_mst (
       tk_pumap_t *reps_class = tk_pumap_create();
       for (uint64_t i = 0; i < centers->n; i++) {
         tk_pair_t pr = centers->a[i];
-        int64_t u   = pr.i;
+        int64_t u = pr.i;
         int64_t lbl = graph->labels->a[u];
-        khint_t   kl; int is_new;
+        khint_t kl;
+        int is_new;
         kl = tk_pumap_put(reps_class, lbl, &is_new);
         if (is_new || pr.p > tk_pumap_value(reps_class,kl).p) {
           tk_pumap_value(reps_class,kl) = pr;
@@ -458,8 +463,7 @@ static inline double tm_dist (tk_graph_t *graph, int64_t u, int64_t v)
     return (double) tk_ann_hamming((const unsigned char *) uset, (const unsigned char *) wset, graph->hbi->features) / (double) graph->hbi->features;
 
   } else {
-    assert(false);
-    return 0;
+    return 1.0;
   }
 }
 
@@ -730,13 +734,13 @@ static inline int tm_graph_gc (lua_State *L)
 static inline void tm_setup_hoods (lua_State *L, int Gi, tk_graph_t *graph)
 {
   if (graph->inv != NULL)
-    tk_inv_neighborhoods(L, graph->inv, graph->knn_cache, graph->knn_eps, &graph->inv_hoods, &graph->uids);
+    tk_inv_neighborhoods(L, graph->inv, graph->knn_cache, graph->knn_eps, TK_INV_JACCARD, &graph->inv_hoods, &graph->uids);
   else if (graph->ann != NULL)
     tk_ann_neighborhoods(L, graph->ann, graph->knn_cache, graph->ann->features * graph->knn_eps, &graph->ann_hoods, &graph->uids);
   else if (graph->hbi != NULL)
     tk_hbi_neighborhoods(L, graph->hbi, graph->knn_cache, graph->hbi->features * graph->knn_eps, &graph->hbi_hoods, &graph->uids);
   else
-    assert(false);
+    return;
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2); // uids
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1); // hoods
   lua_pop(L, 2);
@@ -747,6 +751,10 @@ static inline int tm_create (lua_State *L)
   lua_settop(L, 1);
   int kha;
   khint_t khi;
+
+  lua_getfield(L, 1, "ids");
+  int i_ids = tk_lua_absindex(L, -1);
+  tk_ivec_t *ids = tk_ivec_peekopt(L, -1);
 
   lua_getfield(L, 1, "pos");
   tk_pvec_t *pos = tk_pvec_peekopt(L, -1);
@@ -761,8 +769,6 @@ static inline int tm_create (lua_State *L)
   tk_inv_t *inv = tk_inv_peekopt(L, -1);
   tk_ann_t *ann = tk_ann_peekopt(L, -1);
   tk_hbi_t *hbi = tk_hbi_peekopt(L, -1);
-  if (inv == NULL && ann == NULL && hbi == NULL)
-    tk_lua_verror(L, 3, "graph", "index", "either tk_ann_t, tk_inv_t, or tk_hbi_t must be provided");
 
   uint64_t knn = tk_lua_foptunsigned(L, 1, "graph", "knn", 0);
   uint64_t knn_pos = tk_lua_foptunsigned(L, 1, "graph", "knn_pos", knn);
@@ -786,7 +792,7 @@ static inline int tm_create (lua_State *L)
   }
 
   // Init graph
-  tk_graph_t *graph = tm_graph_create(L, pos, neg, labels, inv, ann, hbi, knn_cache, knn_eps, n_threads);
+  tk_graph_t *graph = tm_graph_create(L, i_ids, ids, pos, neg, labels, inv, ann, hbi, knn_cache, knn_eps, n_threads);
   int Gi = tk_lua_absindex(L, -1);
 
   // Query hoods from inv index
@@ -906,6 +912,7 @@ static luaL_Reg tm_graph_mt_fns[] =
 
 static inline tk_graph_t *tm_graph_create (
   lua_State *L,
+  int i_ids, tk_ivec_t *ids,
   tk_pvec_t *pos,
   tk_pvec_t *neg,
   tk_ivec_t *labels,
@@ -917,20 +924,20 @@ static inline tk_graph_t *tm_graph_create (
   unsigned int n_threads
 ) {
   tk_graph_t *graph = tk_lua_newuserdata(L, tk_graph_t, TK_GRAPH_MT, tm_graph_mt_fns, tm_graph_gc); // ud
+  int Gi = tk_lua_absindex(L, -1);
   graph->threads = tk_malloc(L, n_threads * sizeof(tk_graph_thread_t));
   memset(graph->threads, 0, n_threads * sizeof(tk_graph_thread_t));
   graph->pool = tk_threads_create(L, n_threads, tk_graph_worker);
   graph->knn_cache = knn_cache;
   graph->knn_eps = knn_eps;
   graph->pairs = kh_init(pairs);
-  if (inv != NULL)
-    graph->inv = inv;
-  else if (ann != NULL)
-    graph->ann = ann;
-  else if (hbi != NULL)
-    graph->hbi = hbi;
-  else
-    assert(false);
+  graph->inv = inv;
+  graph->ann = ann;
+  graph->hbi = hbi;
+  if (ids != NULL) {
+    graph->uids = ids;
+    tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, i_ids);
+  }
   graph->pos = pos;
   graph->neg = neg;
   graph->labels = labels;

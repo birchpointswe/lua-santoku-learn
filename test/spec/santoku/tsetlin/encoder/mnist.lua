@@ -1,9 +1,10 @@
 local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
 local ann = require("santoku.tsetlin.ann")
+-- local inv = require("santoku.tsetlin.inv")
+local hbi = require("santoku.tsetlin.hbi")
 local tm = require("santoku.tsetlin")
 local ivec = require("santoku.ivec")
-local hbi = require("santoku.tsetlin.hbi")
 local graph = require("santoku.tsetlin.graph")
 local spectral = require("santoku.tsetlin.spectral")
 local tch = require("santoku.tsetlin.tch")
@@ -15,7 +16,7 @@ local utc = require("santoku.utc")
 
 local TTR = 0.9
 local MAX = nil
-local MAX_CLASS = 1000
+local MAX_CLASS = nil
 local FEATURES = 784
 local SAMPLED = false
 
@@ -51,6 +52,8 @@ test("tsetlin", function ()
   dataset.n_features = FEATURES
 
   print("\nIndexing raw features")
+  -- train.index_raw = inv.create({ features = dataset.n_features })
+  -- train.index_raw:add(train.problems, 0, train.n)
   train.index_raw = ann.create({ expected_size = train.n, features = dataset.n_features })
   train.index_raw:add(train.problems:raw_bitmap(train.n, dataset.n_features), 0, train.n)
 
