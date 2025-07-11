@@ -48,7 +48,7 @@ static inline void tk_cluster_dsu (
     for (uint64_t i = 0; i < ids->n; i ++) {
       int64_t uid = ids->a[i];
       tk_rvec_clear(rtmp);
-      tk_inv_neighbors_by_id(L, inv, uid, 0, margin, rtmp);
+      tk_inv_neighbors_by_id(L, inv, uid, 0, margin, rtmp, TK_INV_JACCARD);
       for (uint64_t j = 0; j < rtmp->n; j ++)
         tk_dsu_union(&dsu, uid, rtmp->a[j].i);
     }

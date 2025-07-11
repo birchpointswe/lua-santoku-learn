@@ -2,6 +2,8 @@
 
 - All tests working without leaks/errors
     - Migrate snli test to same pattern as mnist
+    - Speed up Spectral, ITQ
+    - Parallelize TCH, clustering
 
 - tk_inv/ann/hbi_t
     - DRY them up

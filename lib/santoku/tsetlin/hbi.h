@@ -99,7 +99,51 @@ static inline void tk_hbi_persist (
     tk_lua_verror(L, 2, "persist", "can't persist a destroyed index");
     return;
   }
-  #warning todo
+  // core scalars
+  tk_lua_fwrite(L, (char *) &A->destroyed, sizeof(bool), 1, fh);
+  tk_lua_fwrite(L, (char *) &A->next_sid, sizeof(uint64_t), 1, fh);
+  tk_lua_fwrite(L, (char *) &A->features, sizeof(uint64_t), 1, fh);
+  // buckets map   code → posting list
+  khint_t nb = A->buckets ? kh_size(A->buckets) : 0;
+  tk_lua_fwrite(L, (char *) &nb, sizeof(khint_t), 1, fh);
+  for (khint_t i = kh_begin(A->buckets); i < kh_end(A->buckets); i ++)
+    if (kh_exist(A->buckets, i)) {
+      tk_hbi_code_t code = kh_key(A->buckets, i);
+      tk_ivec_t *list   = kh_val(A->buckets, i);
+      tk_lua_fwrite(L, (char *) &code, sizeof(tk_hbi_code_t), 1, fh);
+      bool has = list && list->n;
+      tk_lua_fwrite(L, (char *) &has, sizeof(bool), 1, fh);
+      if (has) {
+        uint64_t len = list->n;
+        tk_lua_fwrite(L, (char *) &len, sizeof(uint64_t), 1, fh);
+        tk_lua_fwrite(L, (char *) list->a, sizeof(int64_t), len, fh);
+      }
+    }
+  // uid → sid map
+  khint_t nkeys = A->uid_sid ? tk_iumap_size(A->uid_sid) : 0;
+  tk_lua_fwrite(L, (char *) &nkeys, sizeof(khint_t), 1, fh);
+  for (khint_t i = tk_iumap_begin(A->uid_sid); i < tk_iumap_end(A->uid_sid); i ++)
+    if (tk_iumap_exist(A->uid_sid, i)) {
+      int64_t k = (int64_t) tk_iumap_key(A->uid_sid, i);
+      int64_t v = (int64_t) tk_iumap_value(A->uid_sid, i);
+      tk_lua_fwrite(L, (char *) &k, sizeof(int64_t), 1, fh);
+      tk_lua_fwrite(L, (char *) &v, sizeof(int64_t), 1, fh);
+    }
+  // sid → uid map
+  nkeys = A->sid_uid ? tk_iumap_size(A->sid_uid) : 0;
+  tk_lua_fwrite(L, (char *) &nkeys, sizeof(khint_t), 1, fh);
+  for (khint_t i = tk_iumap_begin(A->sid_uid); i < tk_iumap_end(A->sid_uid); i ++)
+    if (tk_iumap_exist(A->sid_uid, i)) {
+      int64_t k = (int64_t) tk_iumap_key(A->sid_uid, i);
+      int64_t v = (int64_t) tk_iumap_value(A->sid_uid, i);
+      tk_lua_fwrite(L, (char *) &k, sizeof(int64_t), 1, fh);
+      tk_lua_fwrite(L, (char *) &v, sizeof(int64_t), 1, fh);
+    }
+  // codes vector
+  uint64_t cnum = A->codes ? A->codes->n : 0;
+  tk_lua_fwrite(L, (char *) &cnum, sizeof(uint64_t), 1, fh);
+  if (cnum)
+    tk_lua_fwrite(L, (char *) A->codes->a, sizeof(tk_hbi_code_t), cnum, fh);
 }
 
 static inline uint64_t tk_hbi_size (
@@ -114,12 +158,12 @@ static inline void tk_hbi_uid_remove (
 ) {
   khint_t khi;
   khi = tk_iumap_get(A->uid_sid, uid);
-  if (khi == kh_end(A->uid_sid))
+  if (khi == tk_iumap_end(A->uid_sid))
     return;
   int64_t sid = tk_iumap_value(A->uid_sid, khi);
   tk_iumap_del(A->uid_sid, khi);
   khi = tk_iumap_get(A->sid_uid, sid);
-  if (khi == kh_end(A->sid_uid))
+  if (khi == tk_iumap_end(A->sid_uid))
     return;
   tk_iumap_del(A->sid_uid, khi);
 }
@@ -146,7 +190,7 @@ static inline int64_t tk_hbi_uid_sid (
     return sid;
   } else {
     khi = tk_iumap_get(A->uid_sid, uid);
-    if (khi == kh_end(A->uid_sid))
+    if (khi == tk_iumap_end(A->uid_sid))
       return -1;
     else
       return tk_iumap_value(A->uid_sid, khi);
@@ -158,7 +202,7 @@ static inline int64_t tk_hbi_sid_uid (
   int64_t sid
 ) {
   khint_t khi = tk_iumap_get(A->sid_uid, sid);
-  if (khi == kh_end(A->sid_uid))
+  if (khi == tk_iumap_end(A->sid_uid))
     return -1;
   else
     return tk_iumap_value(A->sid_uid, khi);
@@ -314,16 +358,26 @@ static inline void tk_hbi_neighborhoods (
   }
   int kha;
   khint_t khi;
-  tk_ivec_t *sids = tk_iumap_values(L, A->uid_sid);
-  tk_ivec_asc(sids, 0, sids->n); // sort for cache locality
+  tk_ivec_t *sids, *uids;
+  if (uidsp && *uidsp) {
+    // TODO: can we avoid copy? Just use uids directly? Need a way to push to
+    // stack
+    sids = tk_ivec_create(L, (*uidsp)->n, 0, 0);
+    uids = tk_ivec_create(L, (*uidsp)->n, 0, 0);
+    tk_ivec_copy(L, uids, *uidsp, 0, (int64_t) (*uidsp)->n, 0);
+    for (uint64_t i = 0; i < uids->n; i ++)
+      sids->a[i] = tk_hbi_uid_sid(A, uids->a[i], false);
+  } else {
+    sids = tk_iumap_values(L, A->uid_sid);
+    tk_ivec_asc(sids, 0, sids->n); // sort for cache locality
+    uids = tk_ivec_create(L, sids->n, 0, 0);
+    for (uint64_t i = 0; i < sids->n; i ++)
+      uids->a[i] = tk_hbi_sid_uid(A, sids->a[i]);
+  }
   tk_iumap_t *sid_idx = tk_iumap_create();
   for (uint64_t i = 0; i < sids->n; i ++) {
     khi = tk_iumap_put(sid_idx, sids->a[i], &kha);
     tk_iumap_value(sid_idx, khi) = (int64_t) i;
-  }
-  tk_ivec_t *uids = tk_ivec_create(L, sids->n, 0, 0);
-  for (uint64_t i = 0; i < sids->n; i ++) {
-    uids->a[i] = tk_hbi_sid_uid(A, sids->a[i]);
   }
   tk_hbi_hoods_t *hoods = tk_hbi_hoods_create(L, uids->n, 0, 0);
   for (uint64_t i = 0; i < hoods->n; i ++) {
@@ -363,7 +417,7 @@ static inline tk_pvec_t *tk_hbi_neighbors_by_vec (
     return NULL;
   }
   if (!out)
-    out = tk_pvec_create(L, knn == 0 ? 16 : knn, 0, 0);
+    out = tk_pvec_create(L, 0, 0, 0);
   out->n = 0;
   tk_hbi_code_t h0 = (tk_hbi_code_t) 0;
   memcpy(&h0, vec, ((A->features + CHAR_BIT - 1) / CHAR_BIT));
@@ -371,7 +425,6 @@ static inline tk_pvec_t *tk_hbi_neighbors_by_vec (
   for (int r = 0; r <= (int) eps && r <= TK_HBI_BITS; r ++) {
     for (int i = 0; i < r; i ++)
       pos[i] = i;
-    bool done = (r == 0);
     while (true) {
       tk_hbi_code_t mask = 0;
       for (int i = 0; i < r; i ++)
@@ -379,7 +432,7 @@ static inline tk_pvec_t *tk_hbi_neighbors_by_vec (
       khint_t khi = kh_get(tk_hbi_buckets, A->buckets, h0 ^ mask);
       if (khi != kh_end(A->buckets)) {
         tk_ivec_t *bucket = kh_value(A->buckets, khi);
-        for (uint64_t bi = 0; bi < bucket->n; bi ++) {
+        for (uint64_t bi = 0; bi < bucket->n && (!knn || out->n < knn); bi ++) {
           int64_t sid1 = bucket->a[bi];
           if (sid1 == sid0)
             continue;
@@ -391,8 +444,6 @@ static inline tk_pvec_t *tk_hbi_neighbors_by_vec (
       }
       if (knn && out->n >= knn)
         return out;
-      if (done)
-        break;
       int j;
       for (j = r - 1; j >= 0; j --) {
         if (pos[j] != j + TK_HBI_BITS - r) {
@@ -483,7 +534,7 @@ static inline int tk_hbi_neighbors_lua (lua_State *L)
   lua_settop(L, 5);
   tk_hbi_t *A = tk_hbi_peek(L, 1);
   uint64_t knn = tk_lua_optunsigned(L, 3, "knn", 0);
-  uint64_t eps = tk_lua_optunsigned(L, 5, "eps", 0);
+  uint64_t eps = tk_lua_optunsigned(L, 4, "eps", 0);
   tk_pvec_t *out = tk_pvec_peekopt(L, 5);
   if (lua_type(L, 2) == LUA_TNUMBER) {
     int64_t uid = tk_lua_checkinteger(L, 2, "id");
@@ -636,10 +687,80 @@ static inline tk_hbi_t *tk_hbi_create (
 
 static inline tk_hbi_t *tk_hbi_load (
   lua_State *L,
-  FILE *fh
+  FILE *fh,
+  uint64_t n_threads
 ) {
+  // userdata + metatable
   tk_hbi_t *A = tk_lua_newuserdata(L, tk_hbi_t, TK_HBI_MT, tk_hbi_lua_mt_fns, tk_hbi_gc_lua);
-  #warning todo
+  int Ai = tk_lua_absindex(L, -1);
+  memset(A, 0, sizeof(tk_hbi_t));
+  // core scalars
+  tk_lua_fread(L, &A->destroyed, sizeof(bool), 1, fh);
+  if (A->destroyed)
+    tk_lua_verror(L, 2, "load", "index was destroyed when saved");
+  tk_lua_fread(L, &A->next_sid,  sizeof(uint64_t), 1, fh);
+  tk_lua_fread(L, &A->features,  sizeof(uint64_t), 1, fh);
+  // buckets map   code → posting list
+  A->buckets = kh_init(tk_hbi_buckets);
+  khint_t nb = 0, k; int absent;
+  tk_lua_fread(L, &nb, sizeof(khint_t), 1, fh);
+  for (khint_t i = 0; i < nb; i ++) {
+    tk_hbi_code_t code;
+    bool has;
+    tk_lua_fread(L, &code, sizeof(tk_hbi_code_t), 1, fh);
+    tk_lua_fread(L, &has, sizeof(bool), 1, fh);
+    k = kh_put(tk_hbi_buckets, A->buckets, code, &absent);
+    if (has) {
+      uint64_t len;
+      tk_lua_fread(L, &len, sizeof(uint64_t), 1, fh);
+      tk_ivec_t *list = tk_ivec_create(L, len, 0, 0);
+      list->n = len;
+      tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
+      if (len)
+        tk_lua_fread(L, list->a, sizeof(int64_t), len, fh);
+      lua_pop(L, 1);
+      kh_val(A->buckets, k) = list;
+    } else {
+      kh_val(A->buckets, k) = NULL;
+    }
+  }
+  // uid → sid map
+  A->uid_sid = tk_iumap_create();
+  khint_t nkeys = 0; int64_t ikey, ival;
+  tk_lua_fread(L, &nkeys, sizeof(khint_t), 1, fh);
+  for (khint_t i = 0; i < nkeys; i ++) {
+    tk_lua_fread(L, &ikey, sizeof(int64_t), 1, fh);
+    tk_lua_fread(L, &ival, sizeof(int64_t), 1, fh);
+    k = tk_iumap_put(A->uid_sid, ikey, &absent);
+    tk_iumap_value(A->uid_sid, k) = ival;
+  }
+  // sid → uid map
+  A->sid_uid = tk_iumap_create();
+  tk_lua_fread(L, &nkeys, sizeof(khint_t), 1, fh);
+  for (khint_t i = 0; i < nkeys; i ++) {
+    tk_lua_fread(L, &ikey, sizeof(int64_t), 1, fh);
+    tk_lua_fread(L, &ival, sizeof(int64_t), 1, fh);
+    k = tk_iumap_put(A->sid_uid, ikey, &absent);
+    tk_iumap_value(A->sid_uid, k) = ival;
+  }
+  // codes vector
+  uint64_t cnum = 0;
+  tk_lua_fread(L, &cnum, sizeof(uint64_t), 1, fh);
+  A->codes = tk_hbi_codes_create(L, cnum, 0, 0);
+  A->codes->n = cnum;
+  tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
+  if (cnum)
+    tk_lua_fread(L, A->codes->a, sizeof(tk_hbi_code_t), cnum, fh);
+  lua_pop(L, 1);
+  // thread pool
+  A->threads = tk_malloc(L, n_threads * sizeof(tk_hbi_thread_t));
+  memset(A->threads, 0, n_threads * sizeof(tk_hbi_thread_t));
+  A->pool = tk_threads_create(L, n_threads, tk_hbi_worker);
+  for (unsigned int t = 0; t < n_threads; t ++) {
+    tk_hbi_thread_t *th = A->threads + t;
+    A->pool->threads[t].data = th;
+    th->A = A;
+  }
   return A;
 }
 
