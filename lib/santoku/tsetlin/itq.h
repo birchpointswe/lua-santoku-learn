@@ -8,8 +8,13 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <math.h>
+#if __has_include(<openblas/cblas.h>)
+#include <openblas/cblas.h>
+#include <openblas/lapacke.h>
+#else
 #include <cblas.h>
 #include <lapacke.h>
+#endif
 
 static inline void tk_itq_sign (
   tk_ivec_t *out,

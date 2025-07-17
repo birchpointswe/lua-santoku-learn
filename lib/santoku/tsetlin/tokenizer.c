@@ -236,6 +236,15 @@ static inline void tb_tokenizer_append_cgrams (
       kv_push(type, vec, *p__); \
   } while (0)
 
+static inline bool tb_tokenizer_is_delim_char (char c)
+{
+  return isspace((unsigned char)c) || (c != '#' && (
+  c == '.' || c == ',' || c == ';' || c == ':'
+  || c == '?' || c == '!' || c == '(' || c == ')'
+  || c == '[' || c == ']' || c == '{' || c == '}'
+  || c == '<' || c == '>' || c == '/' || c == '\\' || c == '\"'));
+}
+
 static inline char *tb_tokenizer_normalize (char *in, size_t *len, int max_run)
 {
   kvec_t(char) out;
@@ -304,6 +313,15 @@ static inline char *tb_tokenizer_normalize (char *in, size_t *len, int max_run)
       kv_push_str(char, out, "#ellipsis");
       kv_push(char, out, ' ');
       i += 3;
+      continue;
+    } else if (in[i] == '\'' && in[i + 1] == 's' &&
+      (in[i + 2] == '\0' || tb_tokenizer_is_delim_char(in[i + 2]))) {
+      kv_push(char, out, ' ');
+      kv_push(char, out, '\'');
+      kv_push(char, out, 's');
+      kv_push(char, out, ' ');
+      i += 2;
+      last = ' ';
       continue;
     }
     unsigned char c = (unsigned char) in[i];
@@ -531,15 +549,6 @@ static inline bool tb_tokenizer_is_negation_boundary_token (char *tok)
     || tb_tokenizer_is_emoji_token(tok));
 }
 
-static inline bool tb_tokenizer_is_delim_char (char c)
-{
-  return isspace((unsigned char)c) || (c != '#' && (
-  c == '.' || c == ',' || c == ';' || c == ':'
-  || c == '?' || c == '!' || c == '(' || c == ')'
-  || c == '[' || c == ']' || c == '{' || c == '}'
-  || c == '<' || c == '>' || c == '/' || c == '\\' || c == '\"'));
-}
-
 static inline bool tb_tokenizer_is_strip_char (char c)
 {
   return c == '\'' || c == '_' || c == '`' || c == '-';
@@ -557,8 +566,6 @@ static void tb_tokenizer_append_skipgram (
 ) {
   if (to_pick == 0) {
     char *first = tb_tokenizer_id_str(tok, tok->window.a[skipgram[0]]);
-    if (strlen(first) == 1)
-      return;
     tok->tmp_skipgram.n = 0;
     for (int i = 0; i < rfirst; i ++) {
       int win_idx = skipgram[i];
@@ -672,8 +679,6 @@ static inline void tb_tokenizer_populate_tokens (
     if (tb_tokenizer_is_negation_boundary_char(c))
       negation = 0;
     if (e < len && !tb_tokenizer_is_delim_char(c)) {
-      if (tb_tokenizer_is_strip_char(c) && (tokenizer->tmp_token.n == 0 || tokenizer->tmp_token.a[0] != '#'))
-        continue;
       kv_push(char, tokenizer->tmp_token, c);
       if ((int) tokenizer->tmp_token.n > tokenizer->max_len
         && tokenizer->tmp_token.a[0] != '#') {

@@ -4,6 +4,7 @@
 // #include <santoku/execinfo.h>
 
 #include <santoku/lua/utils.h>
+#include <santoku/threads.h>
 #include <santoku/klib.h>
 
 #include <assert.h>
@@ -12,7 +13,6 @@
 #include <limits.h>
 #include <lua.h>
 #include <math.h>
-#include <numa.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdarg.h>
