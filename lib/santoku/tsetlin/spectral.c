@@ -289,7 +289,7 @@ static inline int tm_encode (lua_State *L)
   tk_dvec_t *degree = tk_dvec_create(L, graph->uids->n, 0, 0);
   uint64_t n_dims = 0;
   tm_run_spectral(L, pool, z, scale, degree, graph, adj_pos, adj_neg,
-                  graph->uids->n, n_hidden, n_fixed, normalized, eps_primme,
+                  graph->uids->n, n_hidden, n_fixed, eps_primme, normalized,
                   i_each, &neg_scale, &n_dims);
   lua_pop(L, 1); // degrees
   lua_pushinteger(L, (int64_t) n_dims);

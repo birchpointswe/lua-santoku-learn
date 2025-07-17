@@ -137,42 +137,40 @@ M.read_binary_mnist = function (fp, n_features, max, class_max)
   local offsets = ivec.create()
   local problems = ivec.create()
   local solutions = ivec.create()
-  local sample = 0
-  local feature = 0
+  local n = 0
   local tmp = ivec.create()
-  offsets:push(0)
-  for s in str.gmatch(fs.readfile(fp), "%S+") do
-    if feature == n_features then
-      class_cnt[s] = (class_cnt[s] or 0) + 1
-      if class_max and class_cnt[s] > class_max then
-        feature = 0
-        -- nothing
-      else
-        solutions:push(tonumber(s))
-        problems:copy(tmp, 0, tmp:size(), problems:size())
-        tmp:clear()
-        feature = 0
-        sample = sample + 1
-        if max and sample >= max then
+  for l in fs.lines(fp) do
+    local last_size = problems:size()
+    local feature = 0
+    for s in str.gmatch(l, "%S+") do
+      if feature == n_features then
+        class_cnt[s] = (class_cnt[s] or 0) + 1
+        if class_max and class_cnt[s] > class_max then
           break
+        else
+          solutions:push(tonumber(s))
+          problems:copy(tmp, 0, tmp:size(), problems:size())
+          tmp:clear()
+          n = n + 1
+          if max and n >= max then
+            break
+          end
         end
-        offsets:push(problems:size())
+      elseif s == "1" then
+        tmp:push(feature)
+      elseif s ~= "0" then
+        err.error("unexpected string", s)
       end
-    elseif s == "1" then
-      tmp:push(feature)
       feature = feature + 1
-    elseif s == "0" then
-      feature = feature + 1
-    else
-      err.error("unexpected string", s)
     end
+    offsets:push(last_size)
   end
   return {
     offsets = offsets,
     problems = problems,
     solutions = solutions,
     n_features = n_features,
-    n = sample,
+    n = n,
   }
 end
 

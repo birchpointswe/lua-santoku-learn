@@ -40,11 +40,6 @@ end
 
 M.align = tm.align
 
-M.optimize_classifier = function ()
-  -- TODO
-  return err.error("unimplemented", "optimize_classifier")
-end
-
 local function build_sampler (spec, global_dev)
   if type(spec) == "number" then
     return {
@@ -99,7 +94,7 @@ local function build_sampler (spec, global_dev)
   err.error("Bad hyper‑parameter specification: " .. tostring(spec))
 end
 
-M.optimize_encoder = function (args)
+M.optimize = function (args, typ)
 
   local patience = args.search_patience or 0
   local use_early_stop = patience > 0
@@ -158,38 +153,73 @@ M.optimize_encoder = function (args)
           num.floor(params.specificity * 1e6 + 0.5))
         if not seen[key] then
           seen[key] = true
-          local enc = M.encoder({
-            visible = args.visible,
-            hidden = args.hidden,
-            clauses = params.clauses,
-            target = params.target,
-            specificity = params.specificity,
-          })
+
           local best_epoch_score = -num.huge
           local epochs_since_improve = 0
-          enc.train({
-            sentences  = args.sentences,
-            codes = args.codes,
-            samples = args.samples,
-            iterations = iters_search,
-            each = function (epoch)
-              local score, metrics = metric_fn(enc)
-              local cb_result = nil
-              if each_cb then
-                cb_result = each_cb(enc, false, metrics, params, epoch, r, t)
-              end
-              if score > best_epoch_score + 1e-8 then
-                best_epoch_score = score
-                epochs_since_improve = 0
-              else
-                epochs_since_improve = epochs_since_improve + 1
-              end
-              if use_early_stop and epochs_since_improve >= patience then
-                return false
-              end
-              return cb_result
-            end,
-          })
+
+          local function each (epoch, tm)
+            local score, metrics = metric_fn(tm)
+            local cb_result = nil
+            if each_cb then
+              cb_result = each_cb(tm, false, metrics, params, epoch, r, t)
+            end
+            if score > best_epoch_score + 1e-8 then
+              best_epoch_score = score
+              epochs_since_improve = 0
+            else
+              epochs_since_improve = epochs_since_improve + 1
+            end
+            if use_early_stop and epochs_since_improve >= patience then
+              return false
+            end
+            return cb_result
+          end
+
+          if typ == "encoder" then
+
+            local encoder = M.encoder({
+              visible = args.visible,
+              hidden = args.hidden,
+              clauses = params.clauses,
+              target = params.target,
+              specificity = params.specificity,
+            })
+
+            encoder.train({
+              sentences  = args.sentences,
+              codes = args.codes,
+              samples = args.samples,
+              iterations = iters_search,
+              each = function (epoch)
+                return each(epoch, encoder)
+              end,
+            })
+
+          elseif typ == "classifier" then
+
+            local classifier = M.classifier({
+              features = args.features,
+              classes = args.classes,
+              negative = args.negative,
+              clauses = params.clauses,
+              target = params.target,
+              specificity = params.specificity,
+            })
+
+            classifier.train({
+              samples = args.samples,
+              problems = args.problems,
+              solutions = args.solutions,
+              iterations = iters_search,
+              each = function (epoch)
+                return each(epoch, classifier)
+              end,
+            })
+
+          else
+            err.error("unexpected type to optimize", typ)
+          end
+
           local trial_score = best_epoch_score
           if trial_score > round_best_score then
             round_best_score = trial_score
@@ -216,28 +246,72 @@ M.optimize_encoder = function (args)
   end
 
   local final_iters = args.final_iterations or (iters_search * 10)
-  local final_enc = M.encoder({
-    visible = args.visible,
-    hidden = args.hidden,
-    clauses = best_params.clauses,
-    target = best_params.target,
-    specificity = best_params.specificity,
-  })
-  final_enc.train({
-    sentences  = args.sentences,
-    codes = args.codes,
-    samples = args.samples,
-    iterations = final_iters,
-    each = function (epoch)
-      if each_cb then
-        local _, metrics = metric_fn(final_enc)
-        return each_cb(final_enc, true, metrics, best_params, epoch)
-      end
-    end,
-  })
 
-  return final_enc
+  if typ == "encoder" then
 
+    local encoder = M.encoder({
+      visible = args.visible,
+      hidden = args.hidden,
+      clauses = best_params.clauses,
+      target = best_params.target,
+      specificity = best_params.specificity,
+    })
+
+    encoder.train({
+      sentences  = args.sentences,
+      codes = args.codes,
+      samples = args.samples,
+      iterations = final_iters,
+      each = function (epoch)
+        if each_cb then
+          local _, metrics = metric_fn(encoder)
+          return each_cb(encoder, true, metrics, best_params, epoch)
+        end
+      end,
+    })
+
+    collectgarbage("collect")
+    return encoder
+
+  elseif typ == "classifier" then
+
+    local classifier = M.classifier({
+      features = args.features,
+      classes = args.classes,
+      negative = args.negative,
+      clauses = best_params.clauses,
+      target = best_params.target,
+      specificity = best_params.specificity,
+    })
+
+    classifier.train({
+      samples = args.samples,
+      problems = args.problems,
+      solutions = args.solutions,
+      iterations = iters_search,
+      each = function (epoch)
+        if each_cb then
+          local _, metrics = metric_fn(classifier)
+          return each_cb(classifier, true, metrics, best_params, epoch)
+        end
+      end,
+    })
+
+    collectgarbage("collect")
+    return classifier
+
+  else
+    err.error("unexpected type to optimize", typ)
+  end
+
+end
+
+M.optimize_classifier = function (args)
+  return M.optimize(args, "classifier")
+end
+
+M.optimize_encoder = function (args)
+  return M.optimize(args, "encoder")
 end
 
 return M

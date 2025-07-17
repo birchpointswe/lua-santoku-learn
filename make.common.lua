@@ -7,6 +7,7 @@ local env = {
   public = true,
 
   cflags = {
+    "-O3", "-funroll-loops", "-ftree-vectorize", "-fno-math-errno", "-fassociative-math", "-freciprocal-math", "-fno-signed-zeros",
     "-std=gnu11", "-Wall", "-Wextra",
     "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow",
     "-Wpointer-sign", "-Wno-unused-parameter", "-Wno-unused-but-set-variable",
@@ -17,7 +18,7 @@ local env = {
   },
 
   ldflags = {
-    "-lm", "-lpthread", "-lnuma",
+    "-lm", "-lpthread"
   },
 
   rules = {
@@ -33,10 +34,10 @@ local env = {
 
   dependencies = {
     "lua >= 5.1",
-    "santoku >= 0.0.278-1",
-    "santoku-threads >= 0.0.5-1",
-    "santoku-matrix >= 0.0.76-1",
-    "santoku-system >= 0.0.53-1",
+    "santoku >= 0.0.279-1",
+    "santoku-threads >= 0.0.7-1",
+    "santoku-matrix >= 0.0.78-1",
+    "santoku-system >= 0.0.56-1",
   },
 
   test = {
