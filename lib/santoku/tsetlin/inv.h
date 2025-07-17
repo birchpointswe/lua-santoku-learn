@@ -448,6 +448,10 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
 ) {
   if (!out)
     out = tk_rvec_create(L, knn, 0, 0);
+  else
+    tk_rvec_ensure(L, out, knn);
+  if (knn)
+    out->m = knn;
   out->n = 0;
   if (datalen == 0)
     return out;
@@ -476,12 +480,19 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
     tk_inv_sget(I, vsid, &elen);
     double sim = tk_inv_similarity(inter, datalen, elen, cmp);
     double dist = 1.0 - sim;
-    if (dist <= eps)
-      tk_rvec_push(out, tk_rank(vsid, dist));
+    if (dist <= eps) {
+      int64_t vuid = tk_inv_sid_uid(I, vsid);
+      if (vuid >= 0) {
+        if (knn)
+          tk_rvec_hasc(out, tk_rank(vuid, dist));
+        else
+          tk_rvec_push(out, tk_rank(vuid, dist));
+      }
+    }
     cnt->a[vsid] = 0;
   }
   touched->n = 0;
-  tk_rvec_desc(out, 0, out->n);
+  tk_rvec_asc(out, 0, out->n);
   if (knn > 0 && out->n > knn)
     out->n = knn;
   tk_ivec_destroy(cnt);
@@ -725,7 +736,13 @@ static inline void tk_inv_worker (void *dp, int sig)
           double dist = 1.0 - sim;
           if (dist <= eps) {
             iv = tk_iumap_value(sid_idx, tk_iumap_get(sid_idx, vsid));
-            tk_rvec_hasc(uhood, tk_rank(iv, dist));
+            int64_t vuid = tk_inv_sid_uid(I, vsid);
+            if (vuid >= 0) {
+              if (knn)
+                tk_rvec_hasc(uhood, tk_rank(vuid, dist));
+              else
+                tk_rvec_push(uhood, tk_rank(vuid, dist));
+            }
           }
         }
         tk_rvec_asc(uhood, 0, uhood->n);

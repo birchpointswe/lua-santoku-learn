@@ -16,7 +16,7 @@ static inline int tk_itq_encode_lua (lua_State *L)
 
   uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "itq", "n_dims");
   uint64_t max_iterations = tk_lua_foptunsigned(L, 1, "itq", "iterations", 1000);
-  double tolerance = tk_lua_foptposdouble(L, 1, "itq", "tolerance", 1e-8);
+  double tolerance = tk_lua_foptposdouble(L, 1, "itq", "tolerance", 1e-4);
 
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
