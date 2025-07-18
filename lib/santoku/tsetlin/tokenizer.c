@@ -565,7 +565,6 @@ static void tb_tokenizer_append_skipgram (
   bool train
 ) {
   if (to_pick == 0) {
-    char *first = tb_tokenizer_id_str(tok, tok->window.a[skipgram[0]]);
     tok->tmp_skipgram.n = 0;
     for (int i = 0; i < rfirst; i ++) {
       int win_idx = skipgram[i];
