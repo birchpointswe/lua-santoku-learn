@@ -140,22 +140,17 @@ M.read_binary_mnist = function (fp, n_features, max, class_max)
   local n = 0
   local tmp = ivec.create()
   for l in fs.lines(fp) do
-    local last_size = problems:size()
+    if max and n >= max then
+      break
+    end
+    local start = problems:size()
     local feature = 0
+    tmp:clear()
+    local cls = nil
     for s in str.gmatch(l, "%S+") do
       if feature == n_features then
-        class_cnt[s] = (class_cnt[s] or 0) + 1
-        if class_max and class_cnt[s] > class_max then
-          break
-        else
-          solutions:push(tonumber(s))
-          problems:copy(tmp, 0, tmp:size(), problems:size())
-          tmp:clear()
-          n = n + 1
-          if max and n >= max then
-            break
-          end
-        end
+        cls = s
+        break
       elseif s == "1" then
         tmp:push(feature)
       elseif s ~= "0" then
@@ -163,7 +158,17 @@ M.read_binary_mnist = function (fp, n_features, max, class_max)
       end
       feature = feature + 1
     end
-    offsets:push(last_size)
+    if not cls then -- luacheck: ignore
+      -- malformed row: no label; skip silently (or log)
+    else
+      class_cnt[cls] = (class_cnt[cls] or 0) + 1
+      if not (class_max and class_cnt[cls] > class_max) then
+        offsets:push(start)
+        problems:copy(tmp, 0, tmp:size(), problems:size())
+        solutions:push(tonumber(cls))
+        n = n + 1
+      end
+    end
   end
   return {
     offsets = offsets,
