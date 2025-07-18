@@ -288,7 +288,7 @@ M.optimize = function (args, typ)
       samples = args.samples,
       problems = args.problems,
       solutions = args.solutions,
-      iterations = iters_search,
+      iterations = final_iters,
       each = function (epoch)
         if each_cb then
           local _, metrics = metric_fn(classifier)

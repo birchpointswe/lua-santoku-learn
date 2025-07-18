@@ -774,7 +774,7 @@ static inline int tm_create (lua_State *L)
   uint64_t knn_pos = tk_lua_foptunsigned(L, 1, "graph", "knn_pos", knn);
   uint64_t knn_neg = tk_lua_foptunsigned(L, 1, "graph", "knn_neg", knn);
   uint64_t knn_cache = tk_lua_foptunsigned(L, 1, "graph", "knn_cache", 0);
-  double knn_eps = tk_lua_foptunsigned(L, 1, "graph", "knn_eps", 1.0);
+  double knn_eps = tk_lua_foptposdouble(L, 1, "graph", "knn_eps", 1.0);
   if ((knn_pos + knn_neg) > knn_cache)
     knn_cache = knn_pos + knn_neg;
   uint64_t n_hops = tk_lua_foptunsigned(L, 1, "graph", "trans_hops", 0);
