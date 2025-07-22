@@ -106,14 +106,14 @@ static inline uint64_t tk_ann_hamming (
   const unsigned char *b,
   uint64_t n_dims
 ) {
-  uint64_t full_bytes = BITS_BYTES(n_dims) - 1;
+  uint64_t full_bytes = BITS_BYTES(n_dims);
   uint64_t rem_bits = BITS_BIT(n_dims);
   uint64_t dist = 0;
-  for (uint64_t i = 0; i < full_bytes; i ++)
+  for (uint64_t i = 0; i < full_bytes - (rem_bits > 0); i ++)
     dist += popcount(a[i] ^ b[i]);
-  if (rem_bits) {
-    unsigned char x = a[full_bytes] ^ b[full_bytes];
-    unsigned char mask = (unsigned char) ((1U << rem_bits) - 1);
+  if (rem_bits > 0) {
+    unsigned char x = a[full_bytes - 1] ^ b[full_bytes - 1];
+    unsigned char mask = (1U << rem_bits) - 1;
     dist += popcount(x & mask);
   }
   return dist;
