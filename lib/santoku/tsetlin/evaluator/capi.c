@@ -141,12 +141,16 @@ static void tk_eval_worker (void *dp, int sig)
             continue;
           }
           iu = tk_iumap_value(state->id_code, khi);
+          if (iu == -1)
+            continue;
           khi = tk_iumap_get(state->id_code, v);
           if (khi == tk_iumap_end(state->id_code)) {
             state->pl[k].sim = -1;
             continue;
           }
           iv = tk_iumap_value(state->id_code, khi);
+          if (iv == -1)
+            continue;
         }
         if (state->dcodes != NULL) {
           // continuous embedding: dot-product
@@ -160,14 +164,15 @@ static void tk_eval_worker (void *dp, int sig)
           // scale to retain precision in int64
           state->pl[k].sim = (int64_t)(dot * 1e3);
         } else if (state->codes != NULL) {
-          if (state->mask != NULL)
+          if (state->mask != NULL) {
             state->pl[k].sim = (int64_t) (state->n_dims - tk_ann_hamming_mask(
               (const unsigned char *) state->codes + (uint64_t) iu * state->chunks,
               (const unsigned char *) state->codes + (uint64_t) iv * state->chunks, (const unsigned char *) state->mask, state->n_dims));
-          else
+          } else {
             state->pl[k].sim = (int64_t) (state->n_dims - tk_ann_hamming(
               (const unsigned char *) state->codes + (uint64_t) iu * state->chunks,
               (const unsigned char *) state->codes + (uint64_t) iv * state->chunks, state->n_dims));
+          }
         } else {
           state->pl[k].sim = -1;
         }
@@ -508,24 +513,25 @@ static inline double _tm_auc (
 
 static inline int tm_auc (lua_State *L)
 {
-  lua_settop(L, 6);
+  lua_settop(L, 7);
 
-  tk_dvec_t *dcodes = tk_dvec_peekopt(L, 1);
-  tk_bits_t *codes = dcodes == NULL ? (tk_bits_t *) tk_lua_checkstring(L, 1, "codes") : NULL;
+  tk_ivec_t *ids = tk_ivec_peek(L, 1, "ids");
+  tk_dvec_t *dcodes = tk_dvec_peekopt(L, 2);
+  tk_bits_t *codes = dcodes == NULL ? (tk_bits_t *) tk_lua_checkstring(L, 2, "codes") : NULL;
   if (!(dcodes != NULL || codes != NULL))
     tk_lua_verror(L, 3, "auc", "codes", "must be either a string or tk_dvec_t");
 
-  tk_pvec_t *pos = tk_pvec_peek(L, 2, "pos");
-  tk_pvec_t *neg = tk_pvec_peek(L, 3, "neg");
-  uint64_t n_dims = tk_lua_checkunsigned(L, 4, "n_hidden");
+  tk_pvec_t *pos = tk_pvec_peek(L, 3, "pos");
+  tk_pvec_t *neg = tk_pvec_peek(L, 4, "neg");
+  uint64_t n_dims = tk_lua_checkunsigned(L, 5, "n_hidden");
   uint64_t n_pos = pos->n;
   uint64_t n_neg = neg->n;
 
   tk_bits_t *mask =
-    lua_type(L, 5) == LUA_TSTRING ? (tk_bits_t *) luaL_checkstring(L, 5) :
-    lua_type(L, 5) == LUA_TLIGHTUSERDATA ? (tk_bits_t *) lua_touserdata(L, 5) : NULL;
+    lua_type(L, 6) == LUA_TSTRING ? (tk_bits_t *) luaL_checkstring(L, 6) :
+    lua_type(L, 6) == LUA_TLIGHTUSERDATA ? (tk_bits_t *) lua_touserdata(L, 6) : NULL;
 
-  unsigned int n_threads = tk_threads_getn(L, 6, "n_threads", NULL);
+  unsigned int n_threads = tk_threads_getn(L, 7, "n_threads", NULL);
 
   tk_eval_t state;
   memset(&state, 0, sizeof(tk_eval_t));
@@ -533,6 +539,7 @@ static inline int tm_auc (lua_State *L)
   state.chunks = BITS_BYTES(n_dims);
   state.pl = malloc((n_pos + n_neg) * sizeof(tm_dl_t));
   state.mask = mask;
+  state.id_code = tk_iumap_from_ivec(ids);
   state.codes = codes;
   state.dcodes = dcodes != NULL ? dcodes->a : NULL;
   state.pos = pos;
@@ -553,6 +560,7 @@ static inline int tm_auc (lua_State *L)
 
   free(state.pl);
   tk_threads_destroy(pool);
+  tk_iumap_destroy(state.id_code);
 
   lua_pushnumber(L, auc);
   return 1;
