@@ -390,8 +390,6 @@ static inline void tk_inv_neighborhoods (
   khint_t khi;
   tk_ivec_t *sids, *uids;
   if (uidsp && *uidsp) {
-    // TODO: can we avoid copy? Just use uids directly? Need a way to push to
-    // stack
     sids = tk_ivec_create(L, (*uidsp)->n, 0, 0);
     uids = tk_ivec_create(L, (*uidsp)->n, 0, 0);
     tk_ivec_copy(L, uids, *uidsp, 0, (int64_t) (*uidsp)->n, 0);

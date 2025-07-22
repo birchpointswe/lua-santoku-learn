@@ -986,22 +986,22 @@ static inline int tk_tsetlin_predict (lua_State *L)
   return 0;
 }
 
-static inline void en_tm_populate (
-  tk_tsetlin_t *tm,
-  unsigned int s,
-  tk_bits_t *encoding,
-  unsigned int t
-) {
-  unsigned int classes = tm->classes;
-  for (unsigned int i = 0; i < classes; i ++) {
-    unsigned int chunk = BITS_BYTE(i);
-    unsigned int pos = BITS_BIT(i);
-    if (tm_state_sum_local(tm, t, i, s) > 0)
-      encoding[chunk] |= ((tk_bits_t)1 << pos);
-    else
-      encoding[chunk] &= ~((tk_bits_t)1 << pos);
-  }
-}
+// static inline void en_tm_populate (
+//   tk_tsetlin_t *tm,
+//   unsigned int s,
+//   tk_bits_t *encoding,
+//   unsigned int t
+// ) {
+//   unsigned int classes = tm->classes;
+//   for (unsigned int i = 0; i < classes; i ++) {
+//     unsigned int chunk = BITS_BYTE(i);
+//     unsigned int pos = BITS_BIT(i);
+//     if (tm_state_sum_local(tm, t, i, s) > 0)
+//       encoding[chunk] |= ((tk_bits_t)1 << pos);
+//     else
+//       encoding[chunk] &= ~((tk_bits_t)1 << pos);
+//   }
+// }
 
 static inline int tk_tsetlin_train_classifier (
   lua_State *L,

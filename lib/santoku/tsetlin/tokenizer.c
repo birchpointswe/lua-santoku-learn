@@ -163,14 +163,14 @@ static inline char *tb_tokenizer_id_str (
   return (char *) kh_value(tokenizer->strs, k);
 }
 
-static inline int tb_tokenizer_str_id (
-  tb_tokenizer_t *tokenizer,
-  char *str
-) {
-  khint_t k = kh_get(ids, tokenizer->ids, str);
-  assert(k != kh_end(tokenizer->ids));
-  return kh_value(tokenizer->ids, k);
-}
+// static inline int tb_tokenizer_str_id (
+//   tb_tokenizer_t *tokenizer,
+//   char *str
+// ) {
+//   khint_t k = kh_get(ids, tokenizer->ids, str);
+//   assert(k != kh_end(tokenizer->ids));
+//   return kh_value(tokenizer->ids, k);
+// }
 
 static inline int tb_tokenizer_new_token (
   tb_tokenizer_t *tokenizer,
@@ -549,10 +549,10 @@ static inline bool tb_tokenizer_is_negation_boundary_token (char *tok)
     || tb_tokenizer_is_emoji_token(tok));
 }
 
-static inline bool tb_tokenizer_is_strip_char (char c)
-{
-  return c == '\'' || c == '_' || c == '`' || c == '-';
-}
+// static inline bool tb_tokenizer_is_strip_char (char c)
+// {
+//   return c == '\'' || c == '_' || c == '`' || c == '-';
+// }
 
 static void tb_tokenizer_append_skipgram (
   tb_tokenizer_t *tok,

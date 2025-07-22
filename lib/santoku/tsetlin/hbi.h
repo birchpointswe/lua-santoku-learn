@@ -663,6 +663,8 @@ static inline tk_hbi_t *tk_hbi_create (
   uint64_t features,
   uint64_t n_threads
 ) {
+  if (features > TK_HBI_BITS)
+    tk_lua_verror(L, 2, "create", "features", "must be <= " STR(TK_HBI_BITS));
   tk_hbi_t *A = tk_lua_newuserdata(L, tk_hbi_t, TK_HBI_MT, tk_hbi_lua_mt_fns, tk_hbi_gc_lua);
   int Ai = tk_lua_absindex(L, -1);
   A->threads = tk_malloc(L, n_threads * sizeof(tk_hbi_thread_t));

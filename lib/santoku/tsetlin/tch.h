@@ -35,13 +35,8 @@ static inline void tk_tch_refine (
   uint64_t n_nodes = graph->uids->n;
 
   // Order updates by hubbiness, with negatives generally first
-  tk_pvec_t *node_order = tk_pvec_create(L, n_nodes, 0, 0);
-  for (int64_t i = 0; i < (int64_t) graph->uids->n; i ++) {
-    double pdeg = (double) tk_iuset_size(graph->adj_pos->a[i]);
-    double ndeg = (double) tk_iuset_size(graph->adj_neg->a[i]);
-    node_order->a[i] = tk_pair(i, pdeg + ndeg + tk_fast_random());
-  }
-  tk_pvec_desc(node_order, 0, node_order->n);
+  tk_ivec_t *node_order = tk_ivec_create(L, n_nodes, 0, 0);
+  tk_ivec_fill_indices(node_order);
 
   int *bitvecs = tk_malloc(L, n_dims * n_nodes * sizeof(int));
 
@@ -66,13 +61,15 @@ static inline void tk_tch_refine (
     uint64_t steps = 0;
     int64_t i, j;
 
+    tk_ivec_shuffle(node_order);
+
     do {
       updated = false;
       steps ++;
       total_steps ++;
 
       for (uint64_t si = 0; si < n_nodes; si ++) {
-        i = node_order->a[si].i;
+        i = node_order->a[si];
         double delta = 0.0;
         // Positive neighbors
         tk_iuset_foreach(adj_pos->a[i], j, ({
