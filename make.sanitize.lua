@@ -24,10 +24,10 @@ base.env.test.env_vars = {
 }
 base.env.cflags = arr.extend({
   "-fsanitize=address,undefined", "-fno-sanitize-recover=undefined",
-  "-g3", "-O1", "-fno-omit-frame-pointer"
+  "-g3", "-O0", "-fno-omit-frame-pointer",
 }, base.env.cflags)
 base.env.ldflags = arr.extend({
   "-fsanitize=address,undefined",
-  "-g3", "-O1"
+  "-g3", "-O0"
 }, base.env.ldflags)
 return base

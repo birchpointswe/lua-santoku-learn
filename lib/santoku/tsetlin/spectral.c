@@ -272,7 +272,7 @@ static inline int tm_encode (lua_State *L)
   int64_t n_fixed = tk_lua_foptinteger(L, 1, "spectral", "n_fixed", -1);
   unsigned int n_threads = tk_threads_getn(L, 1, "spectral", "threads");
   double neg_scale = tk_lua_foptnumber(L, 1, "spectral", "negatives", -1.0);
-  bool normalized = tk_lua_foptboolean(L, 1, "spectral", "normalized", false);
+  bool normalized = tk_lua_foptboolean(L, 1, "spectral", "normalized", true);
   double eps_primme = tk_lua_foptnumber(L, 1, "spectral", "eps_primme", 1e-4);
   double eps_keep = tk_lua_foptnumber(L, 1, "spectral", "eps_keep", 1e-4);
 

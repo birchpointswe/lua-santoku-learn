@@ -30,6 +30,7 @@ typedef kvec_t(int) tb_tokens_t;
 typedef kvec_t(char) tb_token_t;
 
 typedef struct {
+  uint64_t max_vocab;
   double max_df;
   double min_df;
   int max_len;
@@ -103,6 +104,7 @@ static inline int tb_tokenizer_persist (lua_State *L)
   else
     fh = tk_lua_fopen(L, luaL_checkstring(L, 1), "w");
   tk_lua_fwrite(L, (char *) &tokenizer->finalized, sizeof(bool), 1, fh);
+  tk_lua_fwrite(L, (char *) &tokenizer->max_vocab, sizeof(double), 1, fh);
   tk_lua_fwrite(L, (char *) &tokenizer->max_df, sizeof(double), 1, fh);
   tk_lua_fwrite(L, (char *) &tokenizer->min_df, sizeof(double), 1, fh);
   tk_lua_fwrite(L, (char *) &tokenizer->max_len, sizeof(int), 1, fh);
@@ -855,6 +857,10 @@ static inline int tb_tokenizer_finalize (lua_State *L)
   kvec_t(tk_sort_pair_t) sort;
   kv_init(sort);
 
+  double max_vocab = tokenizer->max_vocab;
+  double max_df = tokenizer->max_df < 0 ? (fabs(tokenizer->max_df) / (double) tokenizer->ndocs) : tokenizer->max_df;
+  double min_df = tokenizer->min_df < 0 ? (fabs(tokenizer->min_df) / (double) tokenizer->ndocs) : tokenizer->min_df;
+
   // Delete tokens with df > max_df
   for (i = kh_begin(tokenizer->ids); i < kh_end(tokenizer->ids); i ++)
     if (kh_exist(tokenizer->ids, i)) {
@@ -863,7 +869,7 @@ static inline int tb_tokenizer_finalize (lua_State *L)
       k = kh_get(dfs, tokenizer->dfs, (uint32_t) id);
       assert(k != kh_end(tokenizer->dfs));
       df = (double) kh_value(tokenizer->dfs, k) / (double) tokenizer->ndocs;
-      if (df > tokenizer->max_df || df < tokenizer->min_df) {
+      if (df > max_df || df < min_df) {
         kh_del(ids, tokenizer->ids, i);
         k = kh_get(strs, tokenizer->strs, (uint32_t) id);
         assert(k != kh_end(tokenizer->strs));
@@ -881,6 +887,8 @@ static inline int tb_tokenizer_finalize (lua_State *L)
 
   // Renumber tokens
   ks_introsort(sort_pair, sort.n, sort.a);
+  if (max_vocab && sort.n > max_vocab)
+    sort.n = max_vocab;
   tokenizer->next_id = 0;
   for (khint_t i = 0; i < sort.n; i ++) {
     id = sort.a[i].id;
@@ -970,8 +978,9 @@ static luaL_Reg tb_mt_fns[] =
 
 static inline int tb_tokenizer_create (lua_State *L)
 {
-  double max_df = tk_lua_fcheckposdouble(L, 1, "create", "max_df");
-  double min_df = tk_lua_fcheckposdouble(L, 1, "create", "min_df");
+  uint64_t max_vocab = tk_lua_foptunsigned(L, 1, "create", "max_vocab", 0);
+  double max_df = tk_lua_foptnumber(L, 1, "create", "max_df", 1.0);
+  double min_df = tk_lua_foptnumber(L, 1, "create", "min_df", 0.0);
   int max_len = (int) tk_lua_fcheckunsigned(L, 1, "create", "max_len");
   int min_len = (int) tk_lua_fcheckunsigned(L, 1, "create", "min_len");
   int max_run = (int) tk_lua_fcheckunsigned(L, 1, "create", "max_run");
@@ -984,8 +993,6 @@ static inline int tb_tokenizer_create (lua_State *L)
   // TODO: Get nthreads
   if (max_run < 1)
     luaL_error(L, "max_run must be greater than or equal to 1");
-  if (min_df < 0 || max_df > 1 || max_df < min_df)
-    luaL_error(L, "min_df and max_df must be an interval between 0 and 1");
   if (min_len == 0)
     luaL_error(L, "min_len must be greater than or equal to 1");
   if (max_len < min_len)
@@ -1009,6 +1016,7 @@ static inline int tb_tokenizer_create (lua_State *L)
   tokenizer->tmp_seen = kh_init(seen);
   tokenizer->next_id = 0;
   tokenizer->ndocs = 0;
+  tokenizer->max_vocab = max_vocab;
   tokenizer->max_df = max_df;
   tokenizer->min_df = min_df;
   tokenizer->max_len = max_len;
@@ -1051,6 +1059,7 @@ static inline int tb_tokenizer_load (lua_State *L)
     tokenizer->tmp_seen = kh_init(seen);
   }
   tk_lua_fread(L, &tokenizer->finalized, sizeof(bool), 1, fh);
+  tk_lua_fread(L, &tokenizer->max_vocab, sizeof(double), 1, fh);
   tk_lua_fread(L, &tokenizer->max_df, sizeof(double), 1, fh);
   tk_lua_fread(L, &tokenizer->min_df, sizeof(double), 1, fh);
   tk_lua_fread(L, &tokenizer->max_len, sizeof(int), 1, fh);
