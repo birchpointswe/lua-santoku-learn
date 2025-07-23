@@ -81,10 +81,23 @@ static inline bool tk_graph_same_label (
   int64_t u,
   int64_t v
 ) {
+  if (graph->labels == NULL)
+    return false;
+  khint_t khi;
+  khi = tk_iumap_get(graph->uids_idx, u);
+  if (khi == tk_iumap_end(graph->uids_idx))
+    return false;
+  int64_t iu = tk_iumap_value(graph->uids_idx, khi);
+  khi = tk_iumap_get(graph->uids_idx, v);
+  if (khi == tk_iumap_end(graph->uids_idx))
+    return false;
+  int64_t iv = tk_iumap_value(graph->uids_idx, khi);
   return graph->labels != NULL
-      && u >= 0 && u < (int64_t) graph->labels->n
-      && v >= 0 && v < (int64_t) graph->labels->n
-      && graph->labels->a[u] == graph->labels->a[v];
+      && iu >= 0 && iu < (int64_t) graph->labels->n
+      && iv >= 0 && iv < (int64_t) graph->labels->n
+      && graph->labels->a[iu] != -1
+      && graph->labels->a[iv] != -1
+      && graph->labels->a[iu] == graph->labels->a[iv];
 }
 
 static inline void tm_add_knn (
@@ -110,6 +123,8 @@ static inline void tm_add_knn (
     for (uint64_t su = 0; su < shuf->n; su ++) {
       int64_t i = shuf->a[su];
       int64_t u = graph->uids_hoods->a[i];
+      if (tk_iumap_get(graph->uids_idx, u) == tk_iumap_end(graph->uids_idx))
+        continue;
       tk_rvec_t *ns = graph->inv_hoods->a[i];
       uint64_t rem_pos = knn_pos;
       uint64_t rem_neg = knn_neg;
@@ -118,6 +133,8 @@ static inline void tm_add_knn (
         if (r.i >= (int64_t) graph->uids_hoods->n || r.i < 0)
           continue;
         int64_t v = graph->uids_hoods->a[r.i];
+        if (tk_iumap_get(graph->uids_idx, v) == tk_iumap_end(graph->uids_idx))
+          continue;
         bool w = graph->labels == NULL || tk_graph_same_label(graph, u, v);
         if (w && !rem_pos) continue;
         if (!w && !rem_neg) continue;
@@ -144,6 +161,8 @@ static inline void tm_add_knn (
     for (uint64_t su = 0; su < shuf->n; su ++) {
       int64_t i = shuf->a[su];
       int64_t u = graph->uids_hoods->a[i];
+      if (tk_iumap_get(graph->uids_idx, u) == tk_iumap_end(graph->uids_idx))
+        continue;
       tk_pvec_t *ns = graph->ann_hoods->a[i];
       uint64_t rem_pos = knn_pos;
       uint64_t rem_neg = knn_neg;
@@ -152,6 +171,8 @@ static inline void tm_add_knn (
         if (r.i >= (int64_t) graph->uids_hoods->n || r.i < 0)
           continue;
         int64_t v = graph->uids_hoods->a[r.i];
+        if (tk_iumap_get(graph->uids_idx, v) == tk_iumap_end(graph->uids_idx))
+          continue;
         bool w = graph->labels == NULL || tk_graph_same_label(graph, u, v);
         if (w && !rem_pos) continue;
         if (!w && !rem_neg) continue;
@@ -178,6 +199,8 @@ static inline void tm_add_knn (
     for (uint64_t su = 0; su < shuf->n; su ++) {
       int64_t i = shuf->a[su];
       int64_t u = graph->uids_hoods->a[i];
+      if (tk_iumap_get(graph->uids_idx, u) == tk_iumap_end(graph->uids_idx))
+        continue;
       tk_pvec_t *ns = graph->hbi_hoods->a[i];
       uint64_t rem_pos = knn_pos;
       uint64_t rem_neg = knn_neg;
@@ -186,6 +209,8 @@ static inline void tm_add_knn (
         if (r.i >= (int64_t) graph->uids_hoods->n || r.i < 0)
           continue;
         int64_t v = graph->uids_hoods->a[r.i];
+        if (tk_iumap_get(graph->uids_idx, v) == tk_iumap_end(graph->uids_idx))
+          continue;
         bool w = graph->labels == NULL || tk_graph_same_label(graph, u, v);
         if (w && !rem_pos) continue;
         if (!w && !rem_neg) continue;
@@ -231,18 +256,19 @@ static inline tm_candidates_t tm_mst_knn_candidates (
   if (graph->inv != NULL) {
 
     for (uint64_t su = 0; su < shuf->n; su ++) {
-      int64_t u = shuf->a[su];
-      khi = tk_iumap_get(graph->uids_hoods_idx, u);
-      if (khi == tk_iumap_end(graph->uids_hoods_idx))
+      int64_t iu = shuf->a[su];
+      int64_t u = graph->uids_hoods->a[iu];
+      if (tk_iumap_get(graph->uids_idx, u) == tk_iumap_end(graph->uids_idx))
         continue;
-      int64_t i = tk_iumap_value(graph->uids_hoods_idx,  khi);
-      tk_rvec_t *ns = graph->inv_hoods->a[i];
+      tk_rvec_t *ns = graph->inv_hoods->a[iu];
       int64_t cu = tk_dsu_find(&graph->dsu, u);
       for (khint_t j = 0; j < ns->n; j ++) {
         tk_rank_t r = ns->a[j];
         if (r.i >= (int64_t) graph->uids_hoods->n || r.i < 0)
           continue;
         int64_t v = graph->uids_hoods->a[r.i];
+        if (tk_iumap_get(graph->uids_idx, v) == tk_iumap_end(graph->uids_idx))
+          continue;
         if (cu == tk_dsu_find(&graph->dsu, v))
           continue;
         tm_pair_t e = tm_pair(u, v);
@@ -257,18 +283,19 @@ static inline tm_candidates_t tm_mst_knn_candidates (
   } else if (graph->ann != NULL) {
 
     for (uint64_t su = 0; su < shuf->n; su ++) {
-      int64_t u = shuf->a[su];
-      khi = tk_iumap_get(graph->uids_hoods_idx, u);
-      if (khi == tk_iumap_end(graph->uids_hoods_idx))
+      int64_t iu = shuf->a[su];
+      int64_t u = graph->uids_hoods->a[iu];
+      if (tk_iumap_get(graph->uids_idx, u) == tk_iumap_end(graph->uids_idx))
         continue;
-      int64_t i = tk_iumap_value(graph->uids_hoods_idx,  khi);
-      tk_pvec_t *ns = graph->ann_hoods->a[i];
+      tk_pvec_t *ns = graph->ann_hoods->a[iu];
       int64_t cu = tk_dsu_find(&graph->dsu, u);
       for (khint_t j = 0; j < ns->n; j ++) {
         tk_pair_t r = ns->a[j];
         if (r.i >= (int64_t) graph->uids_hoods->n || r.i < 0)
           continue;
         int64_t v = graph->uids_hoods->a[r.i];
+        if (tk_iumap_get(graph->uids_idx, v) == tk_iumap_end(graph->uids_idx))
+          continue;
         if (cu == tk_dsu_find(&graph->dsu, v))
           continue;
         tm_pair_t e = tm_pair(u, v);
@@ -283,18 +310,19 @@ static inline tm_candidates_t tm_mst_knn_candidates (
   } else if (graph->hbi != NULL) {
 
     for (uint64_t su = 0; su < shuf->n; su ++) {
-      int64_t u = shuf->a[su];
-      khi = tk_iumap_get(graph->uids_hoods_idx, u);
-      if (khi == tk_iumap_end(graph->uids_hoods_idx))
+      int64_t iu = shuf->a[su];
+      int64_t u = graph->uids_hoods->a[iu];
+      if (tk_iumap_get(graph->uids_idx, u) == tk_iumap_end(graph->uids_idx))
         continue;
-      int64_t i = tk_iumap_value(graph->uids_hoods_idx,  khi);
-      tk_pvec_t *ns = graph->hbi_hoods->a[i];
+      tk_pvec_t *ns = graph->hbi_hoods->a[iu];
       int64_t cu = tk_dsu_find(&graph->dsu, u);
       for (khint_t j = 0; j < ns->n; j ++) {
         tk_pair_t r = ns->a[j];
         if (r.i >= (int64_t) graph->uids_hoods->n || r.i < 0)
           continue;
         int64_t v = graph->uids_hoods->a[r.i];
+        if (tk_iumap_get(graph->uids_idx, v) == tk_iumap_end(graph->uids_idx))
+          continue;
         if (cu == tk_dsu_find(&graph->dsu, v))
           continue;
         tm_pair_t e = tm_pair(u, v);
@@ -352,7 +380,9 @@ static inline void tm_add_mst (
       khint_t k; int is_new;
       for (int64_t idx = 0; idx < (int64_t) graph->uids->n; idx++) {
         int64_t u = graph->uids->a[idx];
-        int64_t lbl = graph->labels->a[u];
+        int64_t lbl = graph->labels->a[idx];
+        if (lbl < 0)
+          continue;
         k = tk_iumap_put(last_in_class, lbl, &is_new);
         if (is_new) {
           // first node of this class, just record it
@@ -388,7 +418,7 @@ static inline void tm_add_mst (
       int64_t deg_pos = tk_iuset_size(graph->adj_pos->a[idx]);
       kc = tk_pumap_put(reps_comp, comp, &is_new);
       if (is_new || deg_pos > tk_pumap_value(reps_comp, kc).p) {
-        tk_pumap_value(reps_comp, kc) = tk_pair(u, deg_pos);
+        tk_pumap_value(reps_comp, kc) = tk_pair(idx, deg_pos);
       }
     }
     tk_pvec_t *centers = tk_pumap_values(L, reps_comp);
@@ -399,25 +429,29 @@ static inline void tm_add_mst (
       tk_pumap_t *reps_class = tk_pumap_create();
       for (uint64_t i = 0; i < centers->n; i++) {
         tk_pair_t pr = centers->a[i];
-        int64_t u = pr.i;
-        int64_t lbl = graph->labels->a[u];
+        int64_t idx = pr.i;
+        int64_t lbl = graph->labels->a[idx];
+        if (lbl < 0)
+          continue;
         khint_t kl;
         int is_new;
         kl = tk_pumap_put(reps_class, lbl, &is_new);
         if (is_new || pr.p > tk_pumap_value(reps_class,kl).p) {
-          tk_pumap_value(reps_class,kl) = pr;
+          tk_pumap_value(reps_class, kl) = pr;
         }
       }
       tk_pvec_t *by_class = tk_pumap_values(L, reps_class);
-      tk_pvec_asc(by_class, 0, centers->n);
+      tk_pvec_asc(by_class, 0, by_class->n);
       tk_pumap_destroy(reps_class);
       lua_remove(L, -2);
       centers = by_class;
     }
     // Add (centers->n - 1) negative edges in a chain
     for (uint64_t i = 1; i < centers->n; i++) {
-      int64_t u = centers->a[i-1].i;
-      int64_t v = centers->a[i].i;
+      int64_t iu = centers->a[i - 1].i;
+      int64_t iv = centers->a[i].i;
+      int64_t u = graph->uids->a[iu];
+      int64_t v = graph->uids->a[iv];
       if (tk_dsu_find(&graph->dsu, u) != tk_dsu_find(&graph->dsu, v)) {
         tm_pair_t e = tm_pair(u, v);
         khint_t kp; int kha;
@@ -429,6 +463,37 @@ static inline void tm_add_mst (
         graph->n_neg++;
       }
     }
+    // Safety: ensure we are down to one component
+    if (tk_dsu_components(&graph->dsu) > 1) {
+      // pick one rep per remaining component (including unlabeled)
+      tk_pumap_t *rem = tk_pumap_create();
+      for (int64_t idx = 0; idx < (int64_t) graph->uids->n; idx++) {
+        int64_t u = graph->uids->a[idx];
+        int64_t comp = tk_dsu_find(&graph->dsu, u);
+        int is_new; khint_t kr = tk_pumap_put(rem, comp, &is_new);
+        if (is_new) tk_pumap_value(rem, kr) = tk_pair(idx, 0);
+      }
+      tk_pvec_t *reps = tk_pumap_values(L, rem);
+      tk_pvec_asc(reps, 0, reps->n);
+      tk_pumap_destroy(rem);
+      for (uint64_t i = 1; i < reps->n; i++) {
+        int64_t iu = reps->a[0].i;
+        int64_t iv = reps->a[i].i;
+        int64_t u = graph->uids->a[iu];
+        int64_t v = graph->uids->a[iv];
+        if (tk_dsu_find(&graph->dsu, u) == tk_dsu_find(&graph->dsu, v))
+          continue;
+        tm_pair_t e = tm_pair(u, v);
+        int kha; khint_t kp = kh_put(pairs, graph->pairs, e, &kha);
+        assert(kha);
+        kh_value(graph->pairs, kp) = false;
+        tk_graph_add_adj(graph, u, v, false);
+        tk_dsu_union(&graph->dsu, u, v);
+        graph->n_neg++;
+      }
+      lua_remove(L, -1); // pop reps vector
+    }
+
     // clean up
     lua_pop(L, 1);
   }
@@ -495,7 +560,7 @@ static inline void tm_add_transatives (
   for (iu = 0; iu < (int64_t) graph->adj_pos->n; iu ++) {
     upos = graph->adj_pos->a[iu];
     uneg = graph->adj_neg->a[iu];
-    u = graph->uids_hoods->a[iu];
+    u = graph->uids->a[iu];
     // Init closure
     tk_iuset_clear(reachable);
     tk_iuset_clear(frontier);
@@ -524,7 +589,7 @@ static inline void tm_add_transatives (
         continue;
       if (uneg != NULL && tk_iuset_contains(uneg, iw))
         continue;
-      w = graph->uids_hoods->a[iw];
+      w = graph->uids->a[iw];
       double dist = tm_dist(graph, u, w);
       if (dist < 0)
         continue;
@@ -563,7 +628,7 @@ static inline void tm_add_transatives (
   for (iu = 0; iu < (int64_t) graph->adj_pos->n; iu ++) {
     upos = graph->adj_pos->a[iu];
     uneg = graph->adj_neg->a[iu];
-    u = graph->uids_hoods->a[iu];
+    u = graph->uids->a[iu];
     tk_iuset_clear(seen);
     kv_size(candidates) = 0;
     // One-hop contrastive expansion from adj_pos[u] to adj_neg[v]
@@ -583,7 +648,7 @@ static inline void tm_add_transatives (
         if (tk_iuset_contains(seen, iw))
           continue;
         tk_iuset_put(seen, iw, &kha);
-        w = graph->uids_hoods->a[iw];
+        w = graph->uids->a[iw];
         double dist = tm_dist(graph, u, w);
         if (dist < 0)
           continue;
@@ -663,8 +728,8 @@ static inline void tm_add_pairs (
     for (uint64_t i = 0; i < n_pos_old; i ++) {
       int64_t u = graph->pos->a[i].i;
       int64_t v = graph->pos->a[i].p;
-      if (graph->labels != NULL && !tk_graph_same_label(graph, u, v))
-        continue;
+      // if (graph->labels != NULL && !tk_graph_same_label(graph, u, v))
+      //   continue;
       khi = kh_put(pairs, graph->pairs, tm_pair(u, v), &kha);
       if (!kha)
         continue;
@@ -682,8 +747,8 @@ static inline void tm_add_pairs (
     for (uint64_t i = 0; i < n_neg_old; i ++) {
       int64_t u = graph->neg->a[i].i;
       int64_t v = graph->neg->a[i].p;
-      if (graph->labels != NULL && tk_graph_same_label(graph, u, v))
-        continue;
+      // if (graph->labels != NULL && tk_graph_same_label(graph, u, v))
+      //   continue;
       khi = kh_put(pairs, graph->pairs, tm_pair(u, v), &kha);
       if (!kha)
         continue;
@@ -824,9 +889,9 @@ static inline int tm_create (lua_State *L)
     tk_iuset_destroy(uids);
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
     lua_pop(L, 1);
-  } else {
-    tk_lua_verror(L, 2, "graph", "either ids, index, pos, and or neg");
   }
+  if (graph->uids == NULL)
+    tk_lua_verror(L, 2, "graph", "either ids, index, pos, and or neg");
   graph->uids_idx = graph->uids == NULL ? tk_iumap_create() : tk_iumap_from_ivec(graph->uids);
 
   // Setup DSU based on uids

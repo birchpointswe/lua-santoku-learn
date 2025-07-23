@@ -211,8 +211,11 @@ M.split_binary_mnist = function (dataset, ratio)
 end
 
 M.multiclass_pairs = function (labels, n_anchors_pos, n_anchors_neg)
-  n_anchors_pos = n_anchors_pos or 1
-  n_anchors_neg = n_anchors_neg or n_anchors_pos or 1
+  -- nil => default; 0 => skip
+  if n_anchors_pos == nil then n_anchors_pos = 1 end
+  if n_anchors_neg == nil then
+    n_anchors_neg = (n_anchors_pos > 0) and n_anchors_pos or 1
+  end
   local pos, neg = pvec.create(), pvec.create()
   local class_to_indices, class_to_anchors = {}, {}
   local classes = ivec.create()
@@ -224,60 +227,162 @@ M.multiclass_pairs = function (labels, n_anchors_pos, n_anchors_neg)
     end
     class_to_indices[y]:push(i)
   end
-  -- Choose anchors per class
-  for class in classes:each() do
-    local indices = class_to_indices[class]
-    local anchors = ivec.create()
-    local used = {}
-    while anchors:size() < num.min(n_anchors_pos, indices:size()) do
-      local candidate = indices:get(num.random(indices:size()) - 1)
-      if not used[candidate] then
-        anchors:push(candidate)
-        used[candidate] = true
-      end
+  -- Helper: Fisher–Yates on a Lua table of 0-based indices
+  local function shuffled_order(n)
+    local t = {}
+    for i = 0, n - 1 do t[i] = i end
+    for i = n - 1, 1, -1 do
+      local j = num.random(i + 1) - 1
+      t[i], t[j] = t[j], t[i]
     end
-    class_to_anchors[class] = anchors
+    return t
   end
-  -- Positive edges: connect each node to its own class anchors
+  -- Anchors for positives
   for class in classes:each() do
-    local indices = class_to_indices[class]
-    local anchors = class_to_anchors[class]
-    for idx in indices:each() do
-      for anchor in anchors:each() do
-        if idx ~= anchor then
-          pos:push(idx, anchor)
+    class_to_anchors[class] = ivec.create()
+  end
+  if n_anchors_pos > 0 then
+    for class in classes:each() do
+      local idxs = class_to_indices[class]
+      local k = num.min(n_anchors_pos, idxs:size())
+      if k > 0 then
+        local order = shuffled_order(idxs:size())
+        local anchors = class_to_anchors[class]
+        for i = 0, k - 1 do
+          anchors:push(idxs:get(order[i]))
         end
       end
     end
   end
-  -- Negative edges: connect each node ONLY to other-class anchors (once!)
-  for class in classes:each() do
-    local indices = class_to_indices[class]
-    local negative_anchors = ivec.create()
-    -- Gather all other-class anchors
-    for other_class in classes:each() do
-      if other_class ~= class then
-        local anchors = class_to_anchors[other_class]
-        for anchor in anchors:each() do
-          negative_anchors:push(anchor)
+  -- Positive edges
+  if n_anchors_pos > 0 then
+    for class in classes:each() do
+      local idxs = class_to_indices[class]
+      local anchors = class_to_anchors[class]
+      for idx in idxs:each() do
+        for a in anchors:each() do
+          if idx ~= a then pos:push(idx, a) end
         end
       end
     end
-    -- Connect each node negatively to selected other-class anchors
-    for idx in indices:each() do
-      local used_neg = {}
-      for _ = 1, n_anchors_neg do
-        local anchor_neg
-        repeat
-          anchor_neg = negative_anchors:get(num.random(negative_anchors:size()) - 1)
-        until not used_neg[anchor_neg]
-        used_neg[anchor_neg] = true
-        neg:push(idx, anchor_neg)
+  end
+  -- Precompute negative pools once per class
+  if n_anchors_neg > 0 then
+    local neg_pool_for = {}
+    local order_for = {}
+    for class in classes:each() do
+      local pool = ivec.create()
+      for other_class in classes:each() do
+        if other_class ~= class then
+          local src = class_to_anchors[other_class]
+          if src:size() == 0 then src = class_to_indices[other_class] end
+          for a in src:each() do pool:push(a) end
+        end
+      end
+      neg_pool_for[class] = pool
+      if pool:size() > 0 then
+        order_for[class] = shuffled_order(pool:size())
+      end
+    end
+    -- Negative edges, reuse shuffled order by sliding window
+    for class in classes:each() do
+      local pool = neg_pool_for[class]
+      local pool_size = pool:size()
+      if pool_size > 0 then
+        local order = order_for[class]
+        local need = n_anchors_neg
+        local wrap = (need > pool_size)
+        local idxs = class_to_indices[class]
+        local offset = 0
+        for idx in idxs:each() do
+          if not wrap then
+            for j = 0, need - 1 do
+              local a = pool:get(order[(offset + j) % pool_size])
+              neg:push(idx, a)
+            end
+            offset = (offset + need) % pool_size
+          else
+            -- with replacement (still cheap)
+            for _ = 1, need do
+              local a = pool:get(order[num.random(pool_size) - 1])
+              neg:push(idx, a)
+            end
+          end
+        end
       end
     end
   end
   return pos, neg
 end
+
+-- M.multiclass_pairs = function (labels, n_anchors_pos, n_anchors_neg)
+--   n_anchors_pos = n_anchors_pos or 1
+--   n_anchors_neg = n_anchors_neg or n_anchors_pos or 1
+--   local pos, neg = pvec.create(), pvec.create()
+--   local class_to_indices, class_to_anchors = {}, {}
+--   local classes = ivec.create()
+--   -- Collect indices per class
+--   for i, y in labels:ieach() do
+--     if not class_to_indices[y] then
+--       class_to_indices[y] = ivec.create()
+--       classes:push(y)
+--     end
+--     class_to_indices[y]:push(i)
+--   end
+--   -- Choose anchors per class
+--   for class in classes:each() do
+--     local indices = class_to_indices[class]
+--     local anchors = ivec.create()
+--     local used = {}
+--     while anchors:size() < num.min(n_anchors_pos, indices:size()) do
+--       local candidate = indices:get(num.random(indices:size()) - 1)
+--       if not used[candidate] then
+--         anchors:push(candidate)
+--         used[candidate] = true
+--       end
+--     end
+--     class_to_anchors[class] = anchors
+--   end
+--   -- Positive edges: connect each node to its own class anchors
+--   for class in classes:each() do
+--     local indices = class_to_indices[class]
+--     local anchors = class_to_anchors[class]
+--     for idx in indices:each() do
+--       for anchor in anchors:each() do
+--         if idx ~= anchor then
+--           pos:push(idx, anchor)
+--         end
+--       end
+--     end
+--   end
+--   -- Negative edges: connect each node ONLY to other-class anchors (once!)
+--   for class in classes:each() do
+--     local indices = class_to_indices[class]
+--     local negative_anchors = ivec.create()
+--     -- Gather all other-class anchors
+--     for other_class in classes:each() do
+--       if other_class ~= class then
+--         local anchors = class_to_anchors[other_class]
+--         for anchor in anchors:each() do
+--           negative_anchors:push(anchor)
+--         end
+--       end
+--     end
+--     -- Connect each node negatively to selected other-class anchors
+--     for idx in indices:each() do
+--       local used_neg = {}
+--       for _ = 1, n_anchors_neg do
+--         local anchor_neg
+--         repeat
+--           anchor_neg = negative_anchors:get(num.random(negative_anchors:size()) - 1)
+--         until not used_neg[anchor_neg]
+--         used_neg[anchor_neg] = true
+--         neg:push(idx, anchor_neg)
+--       end
+--     end
+--   end
+--   return pos, neg
+-- end
 
 M.read_imdb = function (dir, max)
   local problems = {}

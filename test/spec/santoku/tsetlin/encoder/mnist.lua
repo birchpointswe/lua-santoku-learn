@@ -15,7 +15,7 @@ local test = require("santoku.test")
 local utc = require("santoku.utc")
 
 local TTR = 0.9
-local MAX = nil
+local MAX = 2000
 local MAX_CLASS = nil
 local FEATURES = 784
 local SAMPLED = false
@@ -24,7 +24,7 @@ local BINARIZE = "itq"
 local TCH = true
 local HIDDEN = 32
 local FIXED = -1
-local NORMALIZED = false
+local NORMALIZED = true
 local NEGATIVES = -1.0
 local MST = false
 local BRIDGE = true
@@ -146,8 +146,8 @@ test("tsetlin", function ()
   train.entropy = eval.entropy_stats(train.codes_spectral, train.n, train.dims_spectral)
   str.printi("  Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)",
     train.entropy)
-  train.auc_binary = eval.auc(train.codes_spectral, train.pos_graph, train.neg_graph, train.dims_spectral) -- luacheck: ignore
-  train.auc_continuous = eval.auc(train.codes_spectral_cont, train.pos_graph, train.neg_graph, train.dims_spectral) -- luacheck: ignore
+  train.auc_binary = eval.auc(train.ids_spectral, train.codes_spectral, train.pos_graph, train.neg_graph, train.dims_spectral) -- luacheck: ignore
+  train.auc_continuous = eval.auc(train.ids_spectral, train.codes_spectral_cont, train.pos_graph, train.neg_graph, train.dims_spectral) -- luacheck: ignore
   str.printi("  AUC (continuous): %.4f#(auc_continuous) | AUC (binary): %.4f#(auc_binary)", train)
 
   print("\nRetrieval stats (graph)")
