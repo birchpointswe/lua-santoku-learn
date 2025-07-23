@@ -8,7 +8,9 @@
 #include <primme.h>
 
 typedef enum {
-  TK_SPECTRAL_COUNT,
+  TK_SPECTRAL_CSR_OFFSET_LOCAL,
+  TK_SPECTRAL_CSR_OFFSET_GLOBAL,
+  TK_SPECTRAL_CSR_DATA,
   TK_SPECTRAL_SCALE,
   TK_SPECTRAL_MATVEC,
 } tk_spectral_stage_t;
@@ -21,6 +23,10 @@ typedef struct {
   tk_graph_t *graph;
   tk_graph_adj_t *adj_pos;
   tk_graph_adj_t *adj_neg;
+  tk_ivec_t *adj_pos_offset;
+  tk_ivec_t *adj_pos_data;
+  tk_ivec_t *adj_neg_offset;
+  tk_ivec_t *adj_neg_data;
   tk_ivec_t *kept;
   bool normalized;
   uint64_t n_nodes;
@@ -32,8 +38,9 @@ typedef struct {
 
 typedef struct {
   tk_spectral_t *spec;
+  int64_t csr_pos_total;
+  int64_t csr_neg_total;
   uint64_t ifirst, ilast;
-  uint64_t kfirst, klast;
 } tk_spectral_thread_t;
 
 static inline void tk_spectral_worker (void *dp, int sig)
@@ -49,6 +56,8 @@ static inline void tk_spectral_worker (void *dp, int sig)
   uint64_t ilast = data->ilast;
   tk_graph_adj_t *adj_pos = data->spec->adj_pos;
   tk_graph_adj_t *adj_neg = data->spec->adj_neg;
+  int64_t *adj_pos_offset = data->spec->adj_pos_offset->a;
+  int64_t *adj_neg_offset = data->spec->adj_neg_offset->a;
   int64_t iv;
 
   bool normalized = data->spec->normalized;
@@ -56,15 +65,49 @@ static inline void tk_spectral_worker (void *dp, int sig)
   double w_pos = 1.0;
   double w_neg = neg_scale;
 
+  int64_t poffset = 0;
+  int64_t noffset = 0;
+  int64_t csr_pos_total = data->csr_pos_total;
+  int64_t csr_neg_total = data->csr_neg_total;
+
   switch (stage) {
 
-    case TK_SPECTRAL_COUNT:
+    case TK_SPECTRAL_CSR_OFFSET_LOCAL:
       for (uint64_t i = ifirst; i <= ilast; i ++) {
-        double deg_pos = (double) tk_iuset_size(adj_pos->a[i]) * w_pos;
-        double deg_neg = (double) tk_iuset_size(adj_neg->a[i]) * fabs(w_neg);
-        degree[i] = deg_pos + deg_neg;
+        adj_pos_offset[i] = poffset;
+        adj_neg_offset[i] = noffset;
+        int64_t deg_pos = tk_iuset_size(adj_pos->a[i]);
+        int64_t deg_neg = tk_iuset_size(adj_neg->a[i]);
+        poffset += deg_pos;
+        noffset += deg_neg;
+        degree[i] = ((double) deg_pos * w_pos) + ((double) deg_neg * fabs(w_neg));
+      }
+      data->csr_pos_total = poffset;
+      data->csr_neg_total = noffset;
+      break;
+
+    case TK_SPECTRAL_CSR_OFFSET_GLOBAL:
+      for (uint64_t i = ifirst; i <= ilast; i ++) {
+        adj_pos_offset[i] += csr_pos_total;
+        adj_neg_offset[i] += csr_neg_total;
       }
       break;
+
+    case TK_SPECTRAL_CSR_DATA: {
+      int64_t *adj_pos_data = data->spec->adj_pos_data->a;
+      int64_t *adj_neg_data = data->spec->adj_neg_data->a;
+      for (uint64_t i = ifirst; i <= ilast; i ++) {
+        int64_t pwrite = adj_pos_offset[i];
+        int64_t nwrite = adj_neg_offset[i];
+        tk_iuset_foreach(adj_pos->a[i], iv, ({
+          adj_pos_data[pwrite ++] = iv;
+        }))
+        tk_iuset_foreach(adj_neg->a[i], iv, ({
+          adj_neg_data[nwrite ++] = iv;
+        }))
+      }
+      break;
+    }
 
     case TK_SPECTRAL_SCALE:
       if (normalized) {
@@ -80,20 +123,23 @@ static inline void tk_spectral_worker (void *dp, int sig)
       }
       break;
 
-    case TK_SPECTRAL_MATVEC:
+    case TK_SPECTRAL_MATVEC: {
+      int64_t *adj_pos_data = data->spec->adj_pos_data->a;
+      int64_t *adj_neg_data = data->spec->adj_neg_data->a;
       for (uint64_t i = ifirst; i <= ilast; i ++) {
         double sum = 0.0;
-        // Positive edges
-        tk_iuset_foreach(adj_pos->a[i], iv, ({
+        for (int64_t j = adj_pos_offset[i]; j < adj_pos_offset[i + 1]; j ++) {
+          int64_t iv = adj_pos_data[j];
           sum += x[iv] * scale[i] * scale[iv] * w_pos;
-        }))
-        // Negative edges
-        tk_iuset_foreach(adj_neg->a[i], iv, ({
+        }
+        for (int64_t j = adj_neg_offset[i]; j < adj_neg_offset[i + 1]; j ++) {
+          int64_t iv = adj_neg_data[j];
           sum += x[iv] * scale[i] * scale[iv] * w_neg;
-        }))
+        }
         y[i] = x[i] - sum;
       }
       break;
+    }
 
   }
 }
@@ -118,6 +164,7 @@ static inline void tk_spectral_matvec (
 // Consider primme params.method for perf/accuracy tradeoffs
 static inline void tm_run_spectral (
   lua_State *L,
+  int Gi,
   tk_threadpool_t *pool,
   tk_dvec_t *z,
   tk_dvec_t *scale,
@@ -144,6 +191,11 @@ static inline void tm_run_spectral (
   spec.graph = graph;
   spec.adj_pos = adj_pos;
   spec.adj_neg = adj_neg;
+  spec.adj_pos_offset = tk_ivec_create(L, n_nodes + 1, 0, 0);
+  spec.adj_neg_offset = tk_ivec_create(L, n_nodes + 1, 0, 0);
+  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2);
+  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
+  lua_pop(L, 2);
   spec.n_nodes = n_nodes;
   spec.n_hidden = n_hidden;
   spec.n_evals = n_hidden + 1;
@@ -155,11 +207,30 @@ static inline void tm_run_spectral (
     pool->threads[i].data = data;
     data->spec = &spec;
     tk_thread_range(i, pool->n_threads, n_nodes, &data->ifirst, &data->ilast);
-    tk_thread_range(i, pool->n_threads, spec.n_evals, &data->kfirst, &data->klast);
   }
 
-  // Init total pull
-  tk_threads_signal(pool, TK_SPECTRAL_COUNT);
+  // Init csr for fast matvecs
+  tk_threads_signal(pool, TK_SPECTRAL_CSR_OFFSET_LOCAL);
+  int64_t pos_total = 0;
+  int64_t neg_total = 0;
+  for (unsigned int i = 0; i < pool->n_threads; i ++) {
+    tk_spectral_thread_t *data = threads + i;
+    int64_t pos_total0 = pos_total;
+    int64_t neg_total0 = neg_total;
+    pos_total += data->csr_pos_total;
+    neg_total += data->csr_neg_total;
+    data->csr_pos_total = pos_total0;
+    data->csr_neg_total = neg_total0;
+  }
+  tk_threads_signal(pool, TK_SPECTRAL_CSR_OFFSET_GLOBAL);
+  spec.adj_pos_offset->a[spec.adj_pos_offset->n - 1] = pos_total;
+  spec.adj_neg_offset->a[spec.adj_neg_offset->n - 1] = neg_total;
+  spec.adj_pos_data = tk_ivec_create(L, (size_t) pos_total, 0, 0);
+  spec.adj_neg_data = tk_ivec_create(L, (size_t) neg_total, 0, 0);
+  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2);
+  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
+  lua_pop(L, 2);
+  tk_threads_signal(pool, TK_SPECTRAL_CSR_DATA);
 
   // Init scaling/normalization
   tk_threads_signal(pool, TK_SPECTRAL_SCALE);
@@ -268,6 +339,7 @@ static inline int tm_encode (lua_State *L)
 
   lua_getfield(L, 1, "graph");
   tk_graph_t *graph = tk_graph_peek(L, -1);
+  int Gi = tk_lua_absindex(L, -1);
   uint64_t n_hidden = tk_lua_fcheckunsigned(L, 1, "spectral", "n_hidden");
   int64_t n_fixed = tk_lua_foptinteger(L, 1, "spectral", "n_fixed", -1);
   unsigned int n_threads = tk_threads_getn(L, 1, "spectral", "threads");
@@ -293,7 +365,7 @@ static inline int tm_encode (lua_State *L)
   tk_dvec_t *scale = tk_dvec_create(L, graph->uids->n, 0, 0);
   tk_dvec_t *degree = tk_dvec_create(L, graph->uids->n, 0, 0);
   uint64_t n_dims = 0;
-  tm_run_spectral(L, pool, z, scale, degree, graph, adj_pos, adj_neg,
+  tm_run_spectral(L, Gi, pool, z, scale, degree, graph, adj_pos, adj_neg,
                   graph->uids->n, n_hidden, n_fixed, eps_primme, eps_keep,
                   normalized, i_each, &neg_scale, &n_dims);
   lua_pop(L, 1); // degrees
