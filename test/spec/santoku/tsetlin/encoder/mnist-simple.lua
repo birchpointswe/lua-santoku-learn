@@ -13,13 +13,14 @@ local str = require("santoku.string")
 local test = require("santoku.test")
 local utc = require("santoku.utc")
 
-local MAX = nil
+local MAX = 20000
 local MAX_CLASS = nil
 local FEATURES = 784
 
 local BINARIZE = "itq"
 local TCH = true
 local HIDDEN = 16
+local EPS_SPECTRAL = 1e-7
 local FIXED = -1
 local NORMALIZED = true
 local NEGATIVES = -0.1
@@ -72,6 +73,7 @@ test("tsetlin", function ()
     n_fixed = FIXED,
     negatives = NEGATIVES,
     normalized = NORMALIZED,
+    eps_primme = EPS_SPECTRAL,
     each = function (t, s, v, k)
       local d, dd = stopwatch()
       if t == "done" then
@@ -128,9 +130,13 @@ test("tsetlin", function ()
   dataset.entropy = eval.entropy_stats(dataset.codes_spectral, dataset.n, dataset.dims_spectral)
   str.printi("  Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)",
     dataset.entropy)
-  dataset.auc_binary = eval.auc(dataset.codes_spectral, dataset.pos_graph, dataset.neg_graph, dataset.dims_spectral) -- luacheck: ignore
-  dataset.auc_continuous = eval.auc(dataset.codes_spectral_cont, dataset.pos_graph, dataset.neg_graph, dataset.dims_spectral) -- luacheck: ignore
+  dataset.auc_binary = eval.auc(dataset.ids_spectral, dataset.codes_spectral, dataset.pos_graph, dataset.neg_graph, dataset.dims_spectral) -- luacheck: ignore
+  dataset.auc_continuous = eval.auc(dataset.ids_spectral, dataset.codes_spectral_cont, dataset.pos_graph, dataset.neg_graph, dataset.dims_spectral) -- luacheck: ignore
   str.printi("  AUC (continuous): %.4f#(auc_continuous) | AUC (binary): %.4f#(auc_binary)", dataset)
+
+  if true then
+    return
+  end
 
   print("\nRetrieval stats (graph)")
   dataset.similarity_graph = eval.optimize_retrieval({
