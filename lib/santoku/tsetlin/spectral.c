@@ -260,26 +260,33 @@ static inline void tm_run_spectral (
   uint64_t n_dims = 0;
   if (n_fixed == -1) {
     uint64_t elbow_idx = n_hidden;
-    double max_jump = 0.0;
     uint64_t start = 0;
-    while (start < (uint64_t) spec.n_evals && spec.evals[start] < eps_keep)
-      ++ start;
-    for (uint64_t i = start + 1; i < (uint64_t) spec.n_evals; i ++) {
-      double eval = spec.evals[i];
-      double jump = fabs(eval - spec.evals[i - 1]);
-      if (jump > max_jump) {
-        max_jump = jump;
-        elbow_idx = i;
+    while (start < spec.n_evals && spec.evals[start] < eps_keep)
+      start ++;
+    double min_ev = log10(spec.evals[start] + 1e-300);
+    double max_ev = log10(spec.evals[spec.n_evals - 1] + 1e-300);
+    double prev_d = 0.0, max_d = -DBL_MAX;
+    for (uint64_t i = start, m = 0; i < spec.n_evals; i ++, m ++) {
+      double x = (double) m / (double) (spec.n_evals - start - 1);
+      double y = (log10(spec.evals[i] + 1e-300) - min_ev) / (max_ev - min_ev);
+      double d = y - x;
+      double deriv = d - prev_d;
+      if (prev_d > 0.0 && deriv <= 0.0 && d > 0.25 * max_d) {
+        elbow_idx = i - 1;
+        break;
       }
+      if (d > max_d)
+        max_d = d;
+      prev_d = d;
     }
-    for (uint64_t i = 0; i < spec.n_evals; i++) {
-      bool keep = spec.evals[i] > eps_keep && i < elbow_idx;
+    for (uint64_t i = 0; i < spec.n_evals; i ++) {
+      bool keep = (spec.evals[i] > eps_keep) && (i < elbow_idx);
       if (keep)
         tk_ivec_push(spec.kept, (int64_t) i);
       if (i_each != -1) {
         lua_pushvalue(L, i_each);
         lua_pushstring(L, "eig");
-        lua_pushinteger(L, (int64_t) i);
+        lua_pushinteger(L, (int64_t)i);
         lua_pushnumber(L, spec.evals[i]);
         lua_pushboolean(L, keep);
         lua_call(L, 4, 0);
