@@ -13,14 +13,14 @@ local str = require("santoku.string")
 local test = require("santoku.test")
 local utc = require("santoku.utc")
 
-local MAX = 20000
+local MAX = nil
 local MAX_CLASS = nil
 local FEATURES = 784
 
 local BINARIZE = "itq"
 local TCH = true
-local HIDDEN = 16
-local EPS_SPECTRAL = 1e-7
+local HIDDEN = 256
+local EPS_SPECTRAL = 1e-8
 local FIXED = -1
 local NORMALIZED = true
 local NEGATIVES = -0.1

@@ -188,8 +188,12 @@ test("tsetlin", function ()
   print("\nCreating index")
   train.index_codes = hbi.create({ features = train.dims_spectral })
   train.index_codes:add(train.codes_spectral, train.ids_spectral)
+  train.index_codes:persist(".idx.bin")
+  train.index_codes = hbi.load(".idx.bin")
   -- train.index_codes = ann.create({ features = train.dims_spectral, expected_size = train.ids_spectral:size() })
   -- train.index_codes:add(train.codes_spectral, train.ids_spectral)
+  -- train.index_codes:persist(".idx.bin")
+  -- train.index_codes = ann.load(".idx.bin")
 
   print("\nClustering (graph)\n")
   stopwatch()
@@ -211,6 +215,10 @@ test("tsetlin", function ()
   train.cluster_score_graph.n_clusters = train.n_clusters_graph
   str.printi("\n  Best | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin) | Clusters: %d#(n_clusters)", -- luacheck: ignore
     train.cluster_score_graph)
+
+  if true then
+    return
+  end
 
   if SAMPLED then
     print("\nClustering (sampled)\n")
