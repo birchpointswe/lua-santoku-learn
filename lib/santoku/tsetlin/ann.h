@@ -204,7 +204,7 @@ static inline void tk_ann_persist (
   uint64_t vcount = A->vectors ? A->vectors->n : 0;
   tk_lua_fwrite(L, (char *) &vcount, sizeof(uint64_t), 1, fh);
   if (vcount)
-    tk_lua_fwrite(L, (char *) A->vectors->a, sizeof(double), vcount, fh);
+    tk_lua_fwrite(L, (char *) A->vectors->a, 1, vcount, fh);
 }
 
 static inline uint64_t tk_ann_size (
