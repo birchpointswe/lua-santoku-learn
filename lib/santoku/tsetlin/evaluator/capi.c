@@ -696,6 +696,12 @@ static inline int tm_optimize_clustering (lua_State *L)
 
   unsigned int n_threads = tk_threads_getn(L, 1, "optimize clustering", "threads");
 
+  int i_each = -1;
+  if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
+    lua_getfield(L, 1, "each");
+    i_each = tk_lua_absindex(L, -1);
+  }
+
   tk_eval_t state;
   state.inv = inv;
   state.ann = ann;
@@ -704,6 +710,8 @@ static inline int tm_optimize_clustering (lua_State *L)
   state.neg = neg;
   state.min_margin = min_margin;
   state.max_margin = max_margin;
+  lua_newtable(L);
+  int i_eph = tk_lua_absindex(L, -1);
   if (ids != NULL)
     lua_pushvalue(L, i_ids);
   state.ids =
@@ -717,8 +725,6 @@ static inline int tm_optimize_clustering (lua_State *L)
 
   tk_eval_thread_t data[n_threads];
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
-  lua_newtable(L);
-  int i_eph = tk_lua_absindex(L, -1);
   for (unsigned int i = 0; i < n_threads; i ++) {
     pool->threads[i].data = data + i;
     data[i].self = pool->threads + i;
@@ -739,13 +745,6 @@ static inline int tm_optimize_clustering (lua_State *L)
     tk_thread_range(i, n_threads, max_margin - min_margin + 1, &data[i].mfirst, &data[i].mlast);
   }
 
-  int i_each = -1;
-  if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
-    lua_getfield(L, 1, "each");
-    i_each = tk_lua_absindex(L, -1);
-  }
-
-
   unsigned int child;
   while (tk_threads_signal(pool, TK_EVAL_OPTIMIZE_CLUSTERING, &child)) {
     if (i_each > -1) {
@@ -755,7 +754,8 @@ static inline int tm_optimize_clustering (lua_State *L)
       lua_pushnumber(L, data[child].next.tnr);
       lua_pushinteger(L, (lua_Integer) data[child].next_m);
       lua_pushinteger(L, (lua_Integer) data[child].next_n);
-      lua_pcall(L, 5, 0, 0);
+      if (lua_pcall(L, 5, 0, 0))
+        lua_pop(L, 1);
     }
     tk_threads_acknowledge_child(pool, child);
   }
@@ -770,7 +770,6 @@ static inline int tm_optimize_clustering (lua_State *L)
   uint64_t best_n = data[i_best].best_n;
   tk_ivec_t *assignments = data[i_best].best_assignments;
   tk_lua_get_ephemeron(L, TK_EVAL_EPH, assignments);
-  lua_remove(L, -2);
 
 
   tk_threads_destroy(pool);
@@ -790,7 +789,6 @@ static inline int tm_optimize_clustering (lua_State *L)
   lua_insert(L, -3);
   lua_pushinteger(L, (int64_t) best_n);
   return 4;
-
 }
 
 static inline int tm_optimize_retrieval (lua_State *L)
