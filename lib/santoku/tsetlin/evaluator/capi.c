@@ -745,6 +745,7 @@ static inline int tm_optimize_clustering (lua_State *L)
     i_each = tk_lua_absindex(L, -1);
   }
 
+  // tk_threads_signal(pool, TK_EVAL_OPTIMIZE_CLUSTERING, 0);
   unsigned int child;
   while (tk_threads_signal(pool, TK_EVAL_OPTIMIZE_CLUSTERING, &child)) {
     if (i_each > -1) {
@@ -754,7 +755,7 @@ static inline int tm_optimize_clustering (lua_State *L)
       lua_pushnumber(L, data[child].next.tnr);
       lua_pushinteger(L, (lua_Integer) data[child].next_m);
       lua_pushinteger(L, (lua_Integer) data[child].next_n);
-      lua_call(L, 5, 0);
+      lua_pcall(L, 5, 0, 0);
     }
     tk_threads_acknowledge_child(pool, child);
   }
