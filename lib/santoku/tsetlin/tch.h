@@ -1,5 +1,3 @@
-// TODO: DSU-powered bit flipping controlling growth of connected components
-
 #ifndef TK_TCH_H
 #define TK_TCH_H
 
@@ -12,8 +10,7 @@ static inline void tk_tch_refine (
   lua_State *L,
   tk_ivec_t *codes,
 
-  // degree-normalized scale from spectral, currently all 1.0 due to using an
-  // unnormalized laplacian
+  // degree-normalized scale from spectral
   tk_dvec_t *scale,
 
   tk_graph_t *graph,
@@ -34,7 +31,7 @@ static inline void tk_tch_refine (
   tk_graph_adj_t *adj_neg = graph->adj_neg;
   uint64_t n_nodes = graph->uids->n;
 
-  // Order updates by hubbiness, with negatives generally first
+  // Prep node order shuffle
   tk_ivec_t *node_order = tk_ivec_create(L, n_nodes, 0, 0);
   tk_ivec_fill_indices(node_order);
 
@@ -105,7 +102,7 @@ static inline void tk_tch_refine (
   free(bitvecs);
   lua_pop(L, 2); // node_order
 
-  tk_ivec_shrink(L, codes);
+  tk_ivec_shrink(codes);
   tk_ivec_asc(codes, 0, codes->n);
 }
 

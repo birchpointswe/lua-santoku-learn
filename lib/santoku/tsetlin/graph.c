@@ -773,7 +773,7 @@ static inline int tm_to_bits (lua_State *L)
     tk_ivec_push(out, u * (int64_t) n_nodes + v);
     tk_ivec_push(out, v * (int64_t) n_nodes + u);
   }
-  tk_ivec_shrink(L, out);
+  tk_ivec_shrink(out);
   return 1;
 }
 
@@ -895,7 +895,7 @@ static inline int tm_create (lua_State *L)
   graph->uids_idx = graph->uids == NULL ? tk_iumap_create() : tk_iumap_from_ivec(graph->uids);
 
   // Setup DSU based on uids
-  tk_dsu_init(L, &graph->dsu, graph->uids);
+  tk_dsu_init(&graph->dsu, graph->uids);
 
   // Log density
   if (i_each != -1) {

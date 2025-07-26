@@ -392,7 +392,7 @@ static inline void tk_inv_neighborhoods (
   if (uidsp && *uidsp) {
     sids = tk_ivec_create(L, (*uidsp)->n, 0, 0);
     uids = tk_ivec_create(L, (*uidsp)->n, 0, 0);
-    tk_ivec_copy(L, uids, *uidsp, 0, (int64_t) (*uidsp)->n, 0);
+    tk_ivec_copy(uids, *uidsp, 0, (int64_t) (*uidsp)->n, 0);
     for (uint64_t i = 0; i < uids->n; i ++)
       sids->a[i] = tk_inv_uid_sid(I, uids->a[i], false);
   } else {
@@ -418,7 +418,7 @@ static inline void tk_inv_neighborhoods (
     tk_inv_thread_t *data = I->threads + i;
     data->uids = uids;
     data->sids = sids;
-    tk_ivec_ensure(L, data->cnt, sids->n);
+    tk_ivec_ensure(data->cnt, sids->n);
     data->hoods = hoods;
     data->sid_idx = sid_idx;
     data->eps = eps;
@@ -426,7 +426,7 @@ static inline void tk_inv_neighborhoods (
     data->cmp = cmp;
     tk_thread_range(i, I->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
   }
-  tk_threads_signal(I->pool, TK_INV_NEIGHBORHOODS);
+  tk_threads_signal(I->pool, TK_INV_NEIGHBORHOODS, 0);
   tk_iumap_destroy(sid_idx);
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = uids;
@@ -434,7 +434,6 @@ static inline void tk_inv_neighborhoods (
 }
 
 static inline tk_rvec_t *tk_inv_neighbors_by_vec (
-  lua_State *L,
   tk_inv_t *I,
   int64_t *data,
   size_t datalen,
@@ -444,20 +443,17 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   tk_rvec_t *out,
   tk_inv_cmp_type_t cmp
 ) {
-  if (!out)
-    out = tk_rvec_create(L, knn, 0, 0);
-  else
-    tk_rvec_ensure(L, out, knn);
+  tk_rvec_ensure(out, knn);
   if (knn)
     out->m = knn;
   out->n = 0;
   if (datalen == 0)
     return out;
   size_t n_sids = I->node_offsets->n;
-  tk_ivec_t *cnt = tk_ivec_create(L, n_sids, 0, 0);
+  tk_ivec_t *cnt = tk_ivec_create(NULL, n_sids, 0, 0);
   tk_ivec_zero(cnt);
   memset(cnt->a, 0, sizeof(cnt->a[0]) * n_sids);
-  tk_ivec_t *touched = tk_ivec_create(L, 0, 0, 0);
+  tk_ivec_t *touched = tk_ivec_create(NULL, 0, 0, 0);
   for (size_t i = 0; i < datalen; i++) {
     int64_t fid = data[i];
     if (fid < 0 || fid >= (int64_t)I->postings->n)
@@ -499,7 +495,6 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
 }
 
 static inline tk_rvec_t *tk_inv_neighbors_by_id (
-  lua_State *L,
   tk_inv_t *I,
   int64_t uid,
   uint64_t knn,
@@ -508,11 +503,12 @@ static inline tk_rvec_t *tk_inv_neighbors_by_id (
   tk_inv_cmp_type_t cmp
 ) {
   int64_t sid0 = tk_inv_uid_sid(I, uid, false);
+  tk_rvec_clear(out);
   if (sid0 < 0)
-    return out ? (out->n = 0, out) : tk_rvec_create(L, 0, 0, 0);
+    return out;
   size_t len = 0;
   int64_t *data = tk_inv_get(I, uid, &len);
-  return tk_inv_neighbors_by_vec(L, I, data, len, sid0, knn, eps, out, cmp);
+  return tk_inv_neighbors_by_vec(I, data, len, sid0, knn, eps, out, cmp);
 }
 
 static inline int tk_inv_gc_lua (lua_State *L)
@@ -587,7 +583,7 @@ static inline int tk_inv_neighbors_lua (lua_State *L)
   tk_inv_t *I = tk_inv_peek(L, 1);
   uint64_t knn = tk_lua_optunsigned(L, 3, "knn", 0);
   double eps = tk_lua_optposdouble(L, 4, "eps", 1.0);
-  tk_rvec_t *out = tk_rvec_peekopt(L, 5);
+  tk_rvec_t *out = tk_rvec_peek(L, 5, "out");
   const char *typ = tk_lua_optstring(L, 6, "comparator", "jaccard");
   tk_inv_cmp_type_t cmp = TK_INV_JACCARD;
   if (!strcmp(typ, "jaccard"))
@@ -600,12 +596,12 @@ static inline int tk_inv_neighbors_lua (lua_State *L)
     tk_lua_verror(L, 3, "neighbors", "invalid comparator specified", typ);
   if (lua_type(L, 2) == LUA_TNUMBER) {
     int64_t uid = tk_lua_checkinteger(L, 2, "id");
-    tk_inv_neighbors_by_id(L, I, uid, knn, eps, out, cmp);
+    tk_inv_neighbors_by_id(I, uid, knn, eps, out, cmp);
   } else {
     tk_ivec_t *vec = tk_ivec_peek(L, 2, "vector");
-    tk_inv_neighbors_by_vec(L, I, vec->a, vec->n, -1, knn, eps, out, cmp);
+    tk_inv_neighbors_by_vec(I, vec->a, vec->n, -1, knn, eps, out, cmp);
   }
-  return out == NULL ? 1 : 0;
+  return 0;
 }
 
 static inline int tk_inv_size_lua (lua_State *L)
@@ -672,6 +668,13 @@ static inline int tk_inv_shrink_lua (lua_State *L)
   tk_inv_t *I = tk_inv_peek(L, 1);
   tk_inv_shrink(I);
   return 0;
+}
+
+static inline int tk_inv_ids_lua (lua_State *L)
+{
+  tk_inv_t *I = tk_inv_peek(L, 1);
+  tk_iumap_keys(L, I->uid_sid);
+  return 1;
 }
 
 static inline void tk_inv_worker (void *dp, int sig)
@@ -767,6 +770,7 @@ static luaL_Reg tk_inv_lua_mt_fns[] =
   { "persist", tk_inv_persist_lua },
   { "destroy", tk_inv_destroy_lua },
   { "shrink", tk_inv_shrink_lua },
+  { "ids", tk_inv_ids_lua },
   { NULL, NULL }
 };
 

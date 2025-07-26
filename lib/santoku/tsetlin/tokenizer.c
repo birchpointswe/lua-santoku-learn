@@ -793,7 +793,7 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
   }
 
   tk_iuset_destroy(seen);
-  tk_ivec_shrink(L, out);
+  tk_ivec_shrink(out);
   return 1;
 }
 

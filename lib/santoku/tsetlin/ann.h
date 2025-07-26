@@ -88,6 +88,13 @@ static inline void tk_ann_destroy (
   free(A->threads);
 }
 
+static inline int tk_ann_ids_lua (lua_State *L)
+{
+  tk_ann_t *A = tk_ann_peek(L, 1);
+  tk_iumap_keys(L, A->uid_sid);
+  return 1;
+}
+
 static inline uint64_t tk_ann_hamming_mask (
   const unsigned char *a,
   const unsigned char *b,
@@ -318,7 +325,7 @@ static inline void tk_ann_add (
       .n = (A->features + CHAR_BIT - 1) / CHAR_BIT,
       .m = (A->features + CHAR_BIT - 1) / CHAR_BIT,
       .a = (char *) data + i * ((A->features + CHAR_BIT - 1) / CHAR_BIT) };
-    tk_cvec_copy(L, A->vectors, &datavec, 0, (int64_t) datavec.n, sid * (int64_t) ((A->features + CHAR_BIT - 1) / CHAR_BIT));
+    tk_cvec_copy(A->vectors, &datavec, 0, (int64_t) datavec.n, sid * (int64_t) ((A->features + CHAR_BIT - 1) / CHAR_BIT));
   }
 }
 
@@ -422,7 +429,7 @@ static inline void tk_ann_neighborhoods (
     // stack
     sids = tk_ivec_create(L, (*uidsp)->n, 0, 0);
     uids = tk_ivec_create(L, (*uidsp)->n, 0, 0);
-    tk_ivec_copy(L, uids, *uidsp, 0, (int64_t) (*uidsp)->n, 0);
+    tk_ivec_copy(uids, *uidsp, 0, (int64_t) (*uidsp)->n, 0);
     for (uint64_t i = 0; i < uids->n; i ++)
       sids->a[i] = tk_ann_uid_sid(A, uids->a[i], false);
   } else {
@@ -454,7 +461,7 @@ static inline void tk_ann_neighborhoods (
     data->k = k;
     tk_thread_range(i, A->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
   }
-  tk_threads_signal(A->pool, TK_ANN_NEIGHBORHOODS);
+  tk_threads_signal(A->pool, TK_ANN_NEIGHBORHOODS, 0);
   tk_iumap_destroy(sid_idx);
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = uids;
@@ -462,7 +469,6 @@ static inline void tk_ann_neighborhoods (
 }
 
 static inline tk_pvec_t *tk_ann_neighbors_by_vec (
-  lua_State *L,
   tk_ann_t *A,
   char *vec,
   int64_t sid0,
@@ -470,13 +476,9 @@ static inline tk_pvec_t *tk_ann_neighbors_by_vec (
   uint64_t eps,
   tk_pvec_t *out
 ) {
-  if (A->destroyed) {
-    tk_lua_verror(L, 2, "neighbors", "can't query a destroyed index");
+  if (A->destroyed)
     return NULL;
-  }
-  if (!out)
-    out = tk_pvec_create(L, knn, 0, 0);
-  out->n = 0;
+  tk_pvec_clear(out);
   const tk_ann_hash_t h0 = tk_ann_hash(A, vec);
   int pos[TK_ANN_BITS];
   for (int r = 0; r <= (int) A->probe_radius && r <= TK_ANN_BITS; r ++) {
@@ -523,7 +525,6 @@ static inline tk_pvec_t *tk_ann_neighbors_by_vec (
 }
 
 static inline tk_pvec_t *tk_ann_neighbors_by_id (
-  lua_State *L,
   tk_ann_t *A,
   int64_t uid,
   uint64_t knn,
@@ -531,9 +532,10 @@ static inline tk_pvec_t *tk_ann_neighbors_by_id (
   tk_pvec_t *out
 ) {
   int64_t sid0 = tk_ann_uid_sid(A, uid, false);
+  tk_pvec_clear(out);
   if (sid0 < 0)
-    return out ? (out->n = 0, out) : tk_pvec_create(L, 0, 0, 0);
-  return tk_ann_neighbors_by_vec(L, A, tk_ann_get(A, uid), sid0, knn, eps, out);
+    return out;
+  return tk_ann_neighbors_by_vec(A, tk_ann_get(A, uid), sid0, knn, eps, out);
 }
 
 static inline int tk_ann_gc_lua (lua_State *L)
@@ -597,23 +599,15 @@ static inline int tk_ann_neighbors_lua (lua_State *L)
   tk_ann_t *A = tk_ann_peek(L, 1);
   uint64_t knn = tk_lua_optunsigned(L, 3, "knn", 0);
   uint64_t eps = tk_lua_optunsigned(L, 4, "eps", A->features);
-  tk_pvec_t *out = tk_pvec_peekopt(L, 5);
+  tk_pvec_t *out = tk_pvec_peek(L, 5, "out");
   if (lua_type(L, 2) == LUA_TNUMBER) {
     int64_t uid = tk_lua_checkinteger(L, 2, "id");
-    tk_ann_neighbors_by_id(L, A, uid, knn, eps, out);
+    tk_ann_neighbors_by_id(A, uid, knn, eps, out);
   } else {
     char *vec = (char *) tk_lua_checkustring(L, 2, "vector");
-    tk_ann_neighbors_by_vec(L, A, vec, -1, knn, eps, out);
+    tk_ann_neighbors_by_vec(A, vec, -1, knn, eps, out);
   }
-  return out == NULL ? 1 : 0;
-}
-
-static inline int tk_ann_ids_lua (lua_State *L)
-{
-  lua_settop(L, 1);
-  tk_ann_t *A = tk_ann_peek(L, 1);
-  tk_iumap_keys(L, A->uid_sid);
-  return 1;
+  return 0;
 }
 
 static inline int tk_ann_size_lua (lua_State *L)
@@ -710,13 +704,13 @@ static luaL_Reg tk_ann_lua_mt_fns[] =
   { "get", tk_ann_get_lua },
   { "neighborhoods", tk_ann_neighborhoods_lua },
   { "neighbors", tk_ann_neighbors_lua },
-  { "ids", tk_ann_ids_lua },
   { "size", tk_ann_size_lua },
   { "threads", tk_ann_threads_lua },
   { "features", tk_ann_features_lua },
   { "persist", tk_ann_persist_lua },
   { "destroy", tk_ann_destroy_lua },
   { "shrink", tk_ann_shrink_lua },
+  { "ids", tk_ann_ids_lua },
   { NULL, NULL }
 };
 
@@ -738,7 +732,7 @@ static inline void tk_ann_setup_hash_bits_random (
   tk_ivec_shuffle(A->hash_bits);
   if (A->hash_bits->n > n_hash_bits)
     A->hash_bits->n = n_hash_bits;
-  tk_ivec_shrink(L, A->hash_bits);
+  tk_ivec_shrink(A->hash_bits);
 }
 
 static inline tk_ann_t *tk_ann_create_base (

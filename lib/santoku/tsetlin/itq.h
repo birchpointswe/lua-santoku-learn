@@ -55,7 +55,8 @@ static inline void tk_itq_encode (
   uint64_t n_dims,
   uint64_t max_iterations,
   double tolerance,
-  int i_each
+  int i_each,
+  unsigned int n_threads
 ) {
   const uint64_t K = n_dims;
   const size_t N = codes->n / K;
@@ -101,6 +102,7 @@ static inline void tk_itq_encode (
       R[i*K + j] = (i==j? 1.0 : 0.0);
   double last_obj = DBL_MAX, first_obj = 0.0;
   uint64_t it = 0;
+  openblas_set_num_threads((int) n_threads);
   for (it = 0; it < max_iterations; it++) {
     // 1) project with the old rotation
     cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
@@ -149,7 +151,7 @@ static inline void tk_itq_encode (
   tk_itq_sign(out, V1, N, K);
 
   // Cleanup
-  tk_ivec_shrink(L, out);
+  tk_ivec_shrink(out);
   free(superb);
   free(R);
   free(B);

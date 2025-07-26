@@ -4,7 +4,12 @@
 #include <santoku/tsetlin/conf.h>
 #include <santoku/threads.h>
 #include <santoku/dvec.h>
+#include <openblas/cblas.h>
 #include <float.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <assert.h>
 #include <primme.h>
 
 typedef enum {
@@ -157,7 +162,7 @@ static inline void tk_spectral_matvec (
   tk_spectral_t *spec = (tk_spectral_t *) primme->matrix;
   spec->x = (double *) vx;
   spec->y = (double *) vy;
-  tk_threads_signal(spec->pool, TK_SPECTRAL_MATVEC);
+  tk_threads_signal(spec->pool, TK_SPECTRAL_MATVEC, 0);
   *ierr = 0;
 }
 
@@ -210,7 +215,7 @@ static inline void tm_run_spectral (
   }
 
   // Init csr for fast matvecs
-  tk_threads_signal(pool, TK_SPECTRAL_CSR_OFFSET_LOCAL);
+  tk_threads_signal(pool, TK_SPECTRAL_CSR_OFFSET_LOCAL, 0);
   int64_t pos_total = 0;
   int64_t neg_total = 0;
   for (unsigned int i = 0; i < pool->n_threads; i ++) {
@@ -222,7 +227,7 @@ static inline void tm_run_spectral (
     data->csr_pos_total = pos_total0;
     data->csr_neg_total = neg_total0;
   }
-  tk_threads_signal(pool, TK_SPECTRAL_CSR_OFFSET_GLOBAL);
+  tk_threads_signal(pool, TK_SPECTRAL_CSR_OFFSET_GLOBAL, 0);
   spec.adj_pos_offset->a[spec.adj_pos_offset->n - 1] = pos_total;
   spec.adj_neg_offset->a[spec.adj_neg_offset->n - 1] = neg_total;
   spec.adj_pos_data = tk_ivec_create(L, (size_t) pos_total, 0, 0);
@@ -230,14 +235,16 @@ static inline void tm_run_spectral (
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2);
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
   lua_pop(L, 2);
-  tk_threads_signal(pool, TK_SPECTRAL_CSR_DATA);
+  tk_threads_signal(pool, TK_SPECTRAL_CSR_DATA, 0);
 
   // Init scaling/normalization
-  tk_threads_signal(pool, TK_SPECTRAL_SCALE);
+  tk_threads_signal(pool, TK_SPECTRAL_SCALE, 0);
 
   // Run PRIMME to compute the eigenvectors closest to zero
+  openblas_set_num_threads((int) pool->n_threads);
   primme_params params;
   primme_initialize(&params);
+  params.maxBlockSize = 1;
   params.n = (int64_t) n_nodes;
   params.numEvals = spec.n_evals;
   params.matrixMatvec = tk_spectral_matvec;
@@ -250,7 +257,6 @@ static inline void tm_run_spectral (
   spec.evals = tk_malloc(L, (size_t) spec.n_evals * sizeof(double));
   spec.evecs = tk_malloc(L, (size_t) params.n * (size_t) spec.n_evals * sizeof(double));
   spec.resNorms = tk_malloc(L, (size_t) spec.n_evals * sizeof(double));
-  // primme_set_method(PRIMME_DEFAULT_MIN_TIME, &params);
   int ret = dprimme(spec.evals, spec.evecs, spec.resNorms, &params);
   if (ret != 0)
     tk_lua_verror(L, 2, "spectral", "failure calling PRIMME");
@@ -261,14 +267,24 @@ static inline void tm_run_spectral (
   if (n_fixed == -1) {
     uint64_t elbow_idx = n_hidden;
     uint64_t start = 0;
-    while (start < spec.n_evals && spec.evals[start] < eps_keep)
+    // while (start < spec.n_evals && spec.evals[start] < eps_keep)
+    //   start ++;
+    // if (start == spec.n_evals)
+    //   start = 0;
+    // double min_ev = log10(spec.evals[start] + 1e-300);
+    // double max_ev = log10(spec.evals[spec.n_evals - 1] + 1e-300);
+    while (start < spec.n_evals && fabs(spec.evals[start]) < eps_keep)
       start ++;
-    double min_ev = log10(spec.evals[start] + 1e-300);
-    double max_ev = log10(spec.evals[spec.n_evals - 1] + 1e-300);
+    if (start == spec.n_evals)
+      start = 0;
+    double min_ev = log10(fabs(spec.evals[start]) + 1e-300);
+    double max_ev = log10(fabs(spec.evals[spec.n_evals - 1]) + 1e-300);
+    double range = fmax(DBL_MIN, fabs(max_ev - min_ev));
+    double denom = fmax(1.0, (double) (spec.n_evals - start - 1));
     double prev_d = 0.0, max_d = -DBL_MAX;
     for (uint64_t i = start, m = 0; i < spec.n_evals; i ++, m ++) {
-      double x = (double) m / (double) (spec.n_evals - start - 1);
-      double y = (log10(spec.evals[i] + 1e-300) - min_ev) / (max_ev - min_ev);
+      double x = (double) m / denom;
+      double y = (log10(fabs(spec.evals[i]) + 1e-300) - min_ev) / range;
       double d = y - x;
       double deriv = d - prev_d;
       if (prev_d > 0.0 && deriv <= 0.0 && d > 0.25 * max_d) {
@@ -280,7 +296,7 @@ static inline void tm_run_spectral (
       prev_d = d;
     }
     for (uint64_t i = 0; i < spec.n_evals; i ++) {
-      bool keep = (spec.evals[i] > eps_keep) && (i < elbow_idx);
+      bool keep = (fabs(spec.evals[i]) > eps_keep) && (i < elbow_idx);
       if (keep)
         tk_ivec_push(spec.kept, (int64_t) i);
       if (i_each != -1) {
@@ -309,10 +325,12 @@ static inline void tm_run_spectral (
       }
     }
   }
+  if (spec.kept->n == 0)
+    tk_ivec_push(spec.kept, (int64_t) 0);
   n_dims = spec.kept->n;
   // Emit to z (drop unselected)
   // TODO: Multithread this
-  tk_dvec_ensure(L, z, n_nodes * n_dims);
+  tk_dvec_ensure(z, n_nodes * n_dims);
   z->n = n_nodes * n_dims;
   for (uint64_t i = 0; i < n_nodes; i ++) {
     for (uint64_t k = 0; k < n_dims; k ++) {
