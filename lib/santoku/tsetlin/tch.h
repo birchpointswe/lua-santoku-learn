@@ -1,5 +1,3 @@
-
-
 #ifndef TK_TCH_H
 #define TK_TCH_H
 
@@ -11,7 +9,6 @@ static inline void tk_tch_refine (
 
   lua_State *L,
   tk_ivec_t *codes,
-
 
 
   tk_dvec_t *scale,
@@ -105,7 +102,7 @@ static inline void tk_tch_refine (
   free(bitvecs);
   lua_pop(L, 2);
 
-  tk_ivec_shrink(L, codes);
+  tk_ivec_shrink(codes);
   tk_ivec_asc(codes, 0, codes->n);
 }
 

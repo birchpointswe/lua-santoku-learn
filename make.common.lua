@@ -33,9 +33,9 @@ local env = {
 
   dependencies = {
     "lua >= 5.1",
-    "santoku >= 0.0.279-1",
-    "santoku-threads >= 0.0.7-1",
-    "santoku-matrix >= 0.0.83-1",
+    "santoku >= 0.0.280-1",
+    "santoku-threads >= 0.0.9-1",
+    "santoku-matrix >= 0.0.88-1",
     "santoku-system >= 0.0.56-1",
   },
 
