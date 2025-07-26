@@ -20,6 +20,7 @@ typedef enum {
 typedef struct {
   tm_dl_t *pl;
   atomic_ulong *ERR, *TP, *FP, *FN, *hist_pos, *hist_neg;
+  atomic_ulong *valid_pos, *valid_neg;
   tk_ivec_t *ids;
   tk_iumap_t *ididx;
   tk_inv_t *inv;
@@ -130,11 +131,13 @@ static void tk_eval_worker (void *dp, int sig)
         int64_t cu = state->assignments->a[iu];
         int64_t cv = state->assignments->a[iv];
         if (i < state->n_pos) {
+          atomic_fetch_add(state->valid_pos, 1);
           if (cu == cv)
             atomic_fetch_add(state->TP, 1);
           else
             atomic_fetch_add(state->FN, 1);
         } else {
+          atomic_fetch_add(state->valid_neg, 1);
           if (cu == cv)
             atomic_fetch_add(state->FP, 1);
         }
@@ -387,7 +390,7 @@ static inline tk_accuracy_t _tm_clustering_accuracy (
     return (tk_accuracy_t) { 0 };
 
   tk_eval_t state;
-  atomic_ulong TP, FP, FN;
+  atomic_ulong TP, FP, FN, valid_pos, valid_neg;
   state.assignments = assignments;
   state.id_assignment = tk_iumap_from_ivec(ids);
   state.pos = pos;
@@ -397,9 +400,13 @@ static inline tk_accuracy_t _tm_clustering_accuracy (
   state.TP = &TP;
   state.FP = &FP;
   state.FN = &FN;
+  state.valid_pos = &valid_pos;
+  state.valid_neg = &valid_neg;
   atomic_init(&TP, 0);
   atomic_init(&FP, 0);
   atomic_init(&FN, 0);
+  atomic_init(&valid_pos, 0);
+  atomic_init(&valid_neg, 0);
 
   tk_eval_thread_t data;
   data.state = &state;
@@ -409,11 +416,13 @@ static inline tk_accuracy_t _tm_clustering_accuracy (
   // Run eval directly (no threading)
   tk_eval_worker(&data, TK_EVAL_CLUSTERING_ACCURACY);
 
+  uint64_t vpos = atomic_load(state.valid_pos);
+  uint64_t vneg = atomic_load(state.valid_neg);
   uint64_t tp = atomic_load(state.TP);
   uint64_t fp = atomic_load(state.FP);
-  uint64_t tn = n_neg > fp ? (n_neg - fp) : 0;
-  double tpr = n_pos > 0 ? (double) tp / n_pos : 0.0;
-  double tnr = n_neg > 0 ? (double) tn / n_neg : 0.0;
+  uint64_t tn = vneg > fp ? (vneg - fp) : 0;
+  double tpr = vpos > 0 ? (double) tp / vpos : 0.0;
+  double tnr = vneg > 0 ? (double) tn / vneg : 0.0;
   double bacc = 0.5 * (tpr + tnr);
   tk_accuracy_t acc;
   acc.tpr = tpr;
@@ -436,7 +445,7 @@ static inline tk_accuracy_t tm_clustering_accuracy (
   uint64_t n_neg = neg->n;
 
   tk_eval_t state;
-  atomic_ulong TP, FP, FN;
+  atomic_ulong TP, FP, FN, valid_pos, valid_neg;
   state.assignments = assignments;
   state.id_assignment = tk_iumap_from_ivec(ids);
   state.pos = pos;
@@ -446,9 +455,13 @@ static inline tk_accuracy_t tm_clustering_accuracy (
   state.TP = &TP;
   state.FP = &FP;
   state.FN = &FN;
+  state.valid_pos = &valid_pos;
+  state.valid_neg = &valid_neg;
   atomic_init(&TP, 0);
   atomic_init(&FP, 0);
   atomic_init(&FN, 0);
+  atomic_init(&valid_pos, 0);
+  atomic_init(&valid_neg, 0);
 
   // Setup pool
   tk_eval_thread_t data[n_threads];
@@ -462,11 +475,14 @@ static inline tk_accuracy_t tm_clustering_accuracy (
   // Run eval via pool
   tk_threads_signal(pool, TK_EVAL_CLUSTERING_ACCURACY, 0);
   tk_threads_destroy(pool);
+
+  uint64_t vpos = atomic_load(state.valid_pos);
+  uint64_t vneg = atomic_load(state.valid_neg);
   uint64_t tp = atomic_load(state.TP);
   uint64_t fp = atomic_load(state.FP);
-  uint64_t tn = n_neg > fp ? (n_neg - fp) : 0;
-  double tpr = n_pos > 0 ? (double) tp / n_pos : 0.0;
-  double tnr = n_neg > 0 ? (double) tn / n_neg : 0.0;
+  uint64_t tn = vneg > fp ? (vneg - fp) : 0;
+  double tpr = vpos > 0 ? (double) tp / vpos : 0.0;
+  double tnr = vneg > 0 ? (double) tn / vneg : 0.0;
   double bacc = 0.5 * (tpr + tnr);
   tk_accuracy_t acc;
   acc.tpr = tpr;
