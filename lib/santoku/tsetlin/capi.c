@@ -779,7 +779,7 @@ static inline void tk_tsetlin_init_classifier (
     luaL_error(L, "error in malloc during creation of classifier");
   tm->pool = tk_threads_create(L, n_threads, tk_tsetlin_worker);
   tk_tsetlin_setup_threads(L, tm, n_threads);
-  tk_threads_signal(tm->pool, TM_SEED);
+  tk_threads_signal(tm->pool, TM_SEED, 0);
 }
 
 static inline int tk_tsetlin_init_encoder (
@@ -938,8 +938,8 @@ static inline int tk_tsetlin_predict_classifier (
     data->scores = tk_realloc(L, data->scores, chunks * n * sizeof(long int));
   }
   tk_tsetlin_setup_thread_samples(tm, n);
-  tk_threads_signal(tm->pool, TM_CLASSIFIER_PREDICT);
-  tk_threads_signal(tm->pool, TM_CLASSIFIER_PREDICT_REDUCE);
+  tk_threads_signal(tm->pool, TM_CLASSIFIER_PREDICT, 0);
+  tk_threads_signal(tm->pool, TM_CLASSIFIER_PREDICT_REDUCE, 0);
   lua_pushlstring(L, (char *) tm->results, n * sizeof(unsigned int));
   return 1;
 }
@@ -965,8 +965,8 @@ static inline int tk_tsetlin_predict_encoder (
 
   tk_tsetlin_setup_thread_samples(tm, n);
 
-  tk_threads_signal(tm->pool, TM_ENCODER_PREDICT);
-  tk_threads_signal(tm->pool, TM_ENCODER_PREDICT_REDUCE);
+  tk_threads_signal(tm->pool, TM_ENCODER_PREDICT, 0);
+  tk_threads_signal(tm->pool, TM_ENCODER_PREDICT_REDUCE, 0);
 
   lua_pushlstring(L, (char *) tm->encodings, n * tm->class_chunks * sizeof(tk_bits_t));
   return 1;
@@ -1035,12 +1035,12 @@ static inline int tk_tsetlin_train_classifier (
 
   tk_tsetlin_setup_thread_samples(tm, n);
 
-  tk_threads_signal(tm->pool, TM_CLASSIFIER_SETUP);
-  tk_threads_signal(tm->pool, TM_CLASSIFIER_PRIME);
+  tk_threads_signal(tm->pool, TM_CLASSIFIER_SETUP, 0);
+  tk_threads_signal(tm->pool, TM_CLASSIFIER_PRIME, 0);
 
   for (unsigned int i = 0; i < max_iter; i ++) {
 
-    tk_threads_signal(tm->pool, TM_CLASSIFIER_TRAIN);
+    tk_threads_signal(tm->pool, TM_CLASSIFIER_TRAIN, 0);
 
     if (i_each > -1) {
       lua_pushvalue(L, i_each);
@@ -1099,12 +1099,12 @@ static inline int tk_tsetlin_train_encoder (
 
   tk_tsetlin_setup_thread_samples(tm, n);
 
-  tk_threads_signal(tm->pool, TM_ENCODER_SETUP);
-  tk_threads_signal(tm->pool, TM_ENCODER_PRIME);
+  tk_threads_signal(tm->pool, TM_ENCODER_SETUP, 0);
+  tk_threads_signal(tm->pool, TM_ENCODER_PRIME, 0);
 
   for (unsigned int i = 0; i < max_iter; i ++) {
 
-    tk_threads_signal(tm->pool, TM_ENCODER_TRAIN);
+    tk_threads_signal(tm->pool, TM_ENCODER_TRAIN, 0);
 
     if (i_each > -1) {
       lua_pushvalue(L, i_each);
@@ -1232,7 +1232,7 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, 
   tk_lua_fread(L, tm->actions, sizeof(tk_bits_t), tm->action_chunks, fh);
   tm->pool = tk_threads_create(L, n_threads, tk_tsetlin_worker);
   tk_tsetlin_setup_threads(L, tm, n_threads);
-  tk_threads_signal(tm->pool, TM_SEED);
+  tk_threads_signal(tm->pool, TM_SEED, 0);
 }
 
 static inline void tk_tsetlin_load_classifier (lua_State *L, FILE *fh, bool read_state, bool has_state)

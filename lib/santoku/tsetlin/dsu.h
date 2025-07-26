@@ -66,7 +66,6 @@ static inline void tk_dsu_union (
 }
 
 static inline void tk_dsu_init (
-  lua_State *L,
   tk_dsu_t *dsu,
   tk_ivec_t *ids
 ) {

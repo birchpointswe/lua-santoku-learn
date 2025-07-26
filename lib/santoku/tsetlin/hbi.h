@@ -90,6 +90,13 @@ static inline void tk_hbi_destroy (
   free(A->threads);
 }
 
+static inline int tk_hbi_ids_lua (lua_State *L)
+{
+  tk_hbi_t *A = tk_hbi_peek(L, 1);
+  tk_iumap_keys(L, A->uid_sid);
+  return 1;
+}
+
 static inline void tk_hbi_persist (
   lua_State *L,
   tk_hbi_t *A,
@@ -364,7 +371,7 @@ static inline void tk_hbi_neighborhoods (
     // stack
     sids = tk_ivec_create(L, (*uidsp)->n, 0, 0);
     uids = tk_ivec_create(L, (*uidsp)->n, 0, 0);
-    tk_ivec_copy(L, uids, *uidsp, 0, (int64_t) (*uidsp)->n, 0);
+    tk_ivec_copy(uids, *uidsp, 0, (int64_t) (*uidsp)->n, 0);
     for (uint64_t i = 0; i < uids->n; i ++)
       sids->a[i] = tk_hbi_uid_sid(A, uids->a[i], false);
   } else {
@@ -396,7 +403,7 @@ static inline void tk_hbi_neighborhoods (
     data->eps = eps;
     tk_thread_range(i, A->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
   }
-  tk_threads_signal(A->pool, TK_HBI_NEIGHBORHOODS);
+  tk_threads_signal(A->pool, TK_HBI_NEIGHBORHOODS, 0);
   tk_iumap_destroy(sid_idx);
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = uids;
@@ -404,7 +411,6 @@ static inline void tk_hbi_neighborhoods (
 }
 
 static inline tk_pvec_t *tk_hbi_neighbors_by_vec (
-  lua_State *L,
   tk_hbi_t *A,
   char *vec,
   int64_t sid0,
@@ -412,13 +418,9 @@ static inline tk_pvec_t *tk_hbi_neighbors_by_vec (
   uint64_t eps,
   tk_pvec_t *out
 ) {
-  if (A->destroyed) {
-    tk_lua_verror(L, 2, "neighbors", "can't query a destroyed index");
+  if (A->destroyed)
     return NULL;
-  }
-  if (!out)
-    out = tk_pvec_create(L, 0, 0, 0);
-  out->n = 0;
+  tk_pvec_clear(out);
   tk_hbi_code_t h0 = (tk_hbi_code_t) 0;
   memcpy(&h0, vec, ((A->features + CHAR_BIT - 1) / CHAR_BIT));
   int pos[TK_HBI_BITS];
@@ -461,7 +463,6 @@ static inline tk_pvec_t *tk_hbi_neighbors_by_vec (
 }
 
 static inline tk_pvec_t *tk_hbi_neighbors_by_id (
-  lua_State *L,
   tk_hbi_t *A,
   int64_t uid,
   uint64_t knn,
@@ -469,9 +470,10 @@ static inline tk_pvec_t *tk_hbi_neighbors_by_id (
   tk_pvec_t *out
 ) {
   int64_t sid0 = tk_hbi_uid_sid(A, uid, false);
+  tk_pvec_clear(out);
   if (sid0 < 0)
-    return out ? (out->n = 0, out) : tk_pvec_create(L, 0, 0, 0);
-  return tk_hbi_neighbors_by_vec(L, A, tk_hbi_get(A, uid), sid0, knn, eps, out);
+    return out;
+  return tk_hbi_neighbors_by_vec(A, tk_hbi_get(A, uid), sid0, knn, eps, out);
 }
 
 static inline int tk_hbi_gc_lua (lua_State *L)
@@ -535,23 +537,15 @@ static inline int tk_hbi_neighbors_lua (lua_State *L)
   tk_hbi_t *A = tk_hbi_peek(L, 1);
   uint64_t knn = tk_lua_optunsigned(L, 3, "knn", 0);
   uint64_t eps = tk_lua_optunsigned(L, 4, "eps", 0);
-  tk_pvec_t *out = tk_pvec_peekopt(L, 5);
+  tk_pvec_t *out = tk_pvec_peek(L, 5,  "out");
   if (lua_type(L, 2) == LUA_TNUMBER) {
     int64_t uid = tk_lua_checkinteger(L, 2, "id");
-    tk_hbi_neighbors_by_id(L, A, uid, knn, eps, out);
+    tk_hbi_neighbors_by_id(A, uid, knn, eps, out);
   } else {
     char *vec = (char *) tk_lua_checkustring(L, 2, "vector");
-    tk_hbi_neighbors_by_vec(L, A, vec, -1, knn, eps, out);
+    tk_hbi_neighbors_by_vec(A, vec, -1, knn, eps, out);
   }
-  return out == NULL ? 1 : 0;
-}
-
-static inline int tk_hbi_ids_lua (lua_State *L)
-{
-  lua_settop(L, 1);
-  tk_hbi_t *A = tk_hbi_peek(L, 1);
-  tk_iumap_keys(L, A->uid_sid);
-  return 1;
+  return 0;
 }
 
 static inline int tk_hbi_size_lua (lua_State *L)
@@ -645,13 +639,13 @@ static luaL_Reg tk_hbi_lua_mt_fns[] =
   { "get", tk_hbi_get_lua },
   { "neighborhoods", tk_hbi_neighborhoods_lua },
   { "neighbors", tk_hbi_neighbors_lua },
-  { "ids", tk_hbi_ids_lua },
   { "size", tk_hbi_size_lua },
   { "threads", tk_hbi_threads_lua },
   { "features", tk_hbi_features_lua },
   { "persist", tk_hbi_persist_lua },
   { "destroy", tk_hbi_destroy_lua },
   { "shrink", tk_hbi_shrink_lua },
+  { "ids", tk_hbi_ids_lua },
   { NULL, NULL }
 };
 

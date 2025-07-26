@@ -17,6 +17,7 @@ static inline int tk_itq_encode_lua (lua_State *L)
   uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "itq", "n_dims");
   uint64_t max_iterations = tk_lua_foptunsigned(L, 1, "itq", "iterations", 1000);
   double tolerance = tk_lua_foptposdouble(L, 1, "itq", "tolerance", 1e-4);
+  unsigned int n_threads = tk_threads_getn(L, 1, "itq", "threads");
 
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
@@ -25,7 +26,7 @@ static inline int tk_itq_encode_lua (lua_State *L)
   }
 
   // Run itq
-  tk_itq_encode(L, codes, n_dims, max_iterations, tolerance, i_each);
+  tk_itq_encode(L, codes, n_dims, max_iterations, tolerance, i_each, n_threads);
   return 1;
 }
 

@@ -325,7 +325,7 @@ static inline void tk_booleanizer_add_thresholds (
     }
     tk_dvec_push(thresholds, thr);
   } else if (n <= B->n_thresholds) {
-    tk_dvec_copy(L, thresholds, value_vec, 0, (int64_t) value_vec->n, 0);
+    tk_dvec_copy(thresholds, value_vec, 0, (int64_t) value_vec->n, 0);
   } else {
     for (uint64_t i = 0; i < B->n_thresholds; i ++) {
       double q = (double) (i + 1) / (double) (B->n_thresholds + 1);
@@ -338,7 +338,7 @@ static inline void tk_booleanizer_add_thresholds (
         : value_vec->a[left]);
     }
   }
-  tk_dvec_shrink(L, thresholds);
+  tk_dvec_shrink(thresholds);
   khi = kh_put(tk_cont_thresholds, B->cont_thresholds, id_feature, &kha);
   kh_value(B->cont_thresholds, khi) = thresholds;
   khi = kh_put(tk_iumap, B->cont_bits, id_feature, &kha);

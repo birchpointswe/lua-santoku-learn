@@ -881,7 +881,7 @@ static inline int tk_corex_compress (lua_State *L)
   C->pyx = tk_realloc(L, C->pyx, C->n_hidden * n_samples * sizeof(double));
   C->log_pyx_unnorm = tk_realloc(L, C->log_pyx_unnorm, 2 * C->n_hidden * n_samples * sizeof(double));
   C->sums = tk_realloc(L, C->sums, 2 * C->n_hidden * n_samples * sizeof(double));
-  tk_threads_signal(C->pool, TK_CMP_LATENT_ALL);
+  tk_threads_signal(C->pool, TK_CMP_LATENT_ALL, 0);
   // TODO: Parallelize output
   tk_ivec_clear(set_bits);
   for (unsigned int h = 0; h < C->n_hidden; h ++) {
@@ -892,7 +892,7 @@ static inline int tk_corex_compress (lua_State *L)
         tk_ivec_push(set_bits, s * C->n_hidden + h);
     }
   }
-  tk_ivec_shrink(L, set_bits);
+  tk_ivec_shrink(set_bits);
   return 1;
 }
 
@@ -925,14 +925,14 @@ static inline void _tk_corex_train (
     C->n_samples,
     C->n_visible);
   tk_corex_setup_threads(L, C, C->n_set_bits, n_samples);
-  tk_threads_signal(C->pool, TK_CMP_INIT_PYX_UNNORM);
-  tk_threads_signal(C->pool, TK_CMP_LATENT_NORM);
+  tk_threads_signal(C->pool, TK_CMP_INIT_PYX_UNNORM, 0);
+  tk_threads_signal(C->pool, TK_CMP_LATENT_NORM, 0);
   for (unsigned int i = 0; i < max_iter; i ++) {
-    tk_threads_signal(C->pool, TK_CMP_MARGINALS);
-    tk_threads_signal(C->pool, TK_CMP_MAXMIS);
-    tk_threads_signal(C->pool, TK_CMP_ALPHA);
-    tk_threads_signal(C->pool, TK_CMP_LATENT_ALL);
-    tk_threads_signal(C->pool, TK_CMP_UPDATE_TC);
+    tk_threads_signal(C->pool, TK_CMP_MARGINALS, 0);
+    tk_threads_signal(C->pool, TK_CMP_MAXMIS, 0);
+    tk_threads_signal(C->pool, TK_CMP_ALPHA, 0);
+    tk_threads_signal(C->pool, TK_CMP_LATENT_ALL, 0);
+    tk_threads_signal(C->pool, TK_CMP_UPDATE_TC, 0);
     tk_corex_update_last_tc(
       C->tcs,
       &C->last_tc,
@@ -992,9 +992,9 @@ static inline void tk_corex_init (
   C->maxmis = tk_malloc_interleaved(L, &C->maxmis_len, C->n_visible * sizeof(double));
   C->pool = tk_threads_create(L, n_threads, tk_corex_worker);
   tk_corex_setup_threads(L, C, 0, 0);
-  tk_threads_signal(C->pool, TK_CMP_INIT_SEED);
-  tk_threads_signal(C->pool, TK_CMP_INIT_TCS);
-  tk_threads_signal(C->pool, TK_CMP_INIT_ALPHA);
+  tk_threads_signal(C->pool, TK_CMP_INIT_SEED, 0);
+  tk_threads_signal(C->pool, TK_CMP_INIT_TCS, 0);
+  tk_threads_signal(C->pool, TK_CMP_INIT_ALPHA, 0);
 }
 
 static inline int tk_corex_visible (lua_State *L) {
