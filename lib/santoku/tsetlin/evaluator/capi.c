@@ -26,6 +26,7 @@ typedef struct {
   tk_inv_t *inv;
   tk_ann_t *ann;
   tk_hbi_t *hbi;
+  double balance;
   uint64_t min_margin, max_margin;
   tk_pvec_t *pos, *neg;
   uint64_t n_pos, n_neg;
@@ -423,7 +424,7 @@ static inline tk_accuracy_t _tm_clustering_accuracy (
   uint64_t tn = vneg > fp ? (vneg - fp) : 0;
   double tpr = vpos > 0 ? (double) tp / vpos : 0.0;
   double tnr = vneg > 0 ? (double) tn / vneg : 0.0;
-  double bacc = 0.5 * (tpr + tnr);
+  double bacc = (1.0 - state.balance) * tpr + state.balance * tnr;
   tk_accuracy_t acc;
   acc.tpr = tpr;
   acc.tnr = tnr;
@@ -701,6 +702,8 @@ static inline int tm_optimize_clustering (lua_State *L)
   lua_getfield(L, 1, "neg");
   tk_pvec_t *neg = tk_pvec_peek(L, -1, "neg");
 
+  double balance = tk_lua_foptnumber(L, 1, "optimize clustering", "balance", 0.5);
+
   uint64_t min_margin = tk_lua_fcheckunsigned(L, 1, "optimize clustering", "min_margin");
   uint64_t max_margin = tk_lua_fcheckunsigned(L, 1, "optimize clustering", "max_margin");
   uint64_t fs = inv != NULL ? inv->features : ann != NULL ? ann->features : hbi != NULL ? hbi->features : 0;
@@ -726,6 +729,7 @@ static inline int tm_optimize_clustering (lua_State *L)
   state.neg = neg;
   state.min_margin = min_margin;
   state.max_margin = max_margin;
+  state.balance = balance;
   lua_newtable(L); // t -- to track gc for vectors
   int i_eph = tk_lua_absindex(L, -1);
   if (ids != NULL)
@@ -833,6 +837,7 @@ static inline int tm_optimize_retrieval (lua_State *L)
     i_each = tk_lua_absindex(L, -1);
   }
 
+  double balance = tk_lua_foptnumber(L, 1, "optimize_retrieval", "balance", 0.5);
   uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "optimize_retrieval", "n_dims");
   unsigned int n_threads = tk_threads_getn(L, 1, "optimize_retrieval", "threads");
   uint64_t n_pos = pos->n;
@@ -852,6 +857,7 @@ static inline int tm_optimize_retrieval (lua_State *L)
   state.n_neg = n_neg;
   state.hist_pos = tk_malloc(L, (n_dims + 1) * sizeof(atomic_ulong));
   state.hist_neg = tk_malloc(L, (n_dims + 1) * sizeof(atomic_ulong));
+  state.balance = balance;
   for (uint64_t i = 0; i < n_dims + 1; i ++) {
     atomic_init(state.hist_pos + i, 0);
     atomic_init(state.hist_neg + i, 0);
@@ -892,7 +898,7 @@ static inline int tm_optimize_retrieval (lua_State *L)
     uint64_t tn = n_neg - fp;
     double tpr = n_pos > 0 ? (double)tp / (double)n_pos : 0;
     double tnr = n_neg > 0 ? (double)tn / (double)n_neg : 0;
-    double bacc = 0.5 * (tpr + tnr);
+    double bacc = (1.0 - state.balance) * tpr + state.balance * tnr;
     if (i_each > -1) {
       lua_pushvalue(L, i_each);
       lua_pushnumber(L, bacc);
