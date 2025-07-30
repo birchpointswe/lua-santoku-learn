@@ -443,16 +443,16 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   tk_rvec_t *out,
   tk_inv_cmp_type_t cmp
 ) {
-  tk_rvec_ensure(out, knn);
-  if (knn)
+  tk_rvec_clear(out);
+  if (knn) {
+    tk_rvec_ensure(out, knn);
     out->m = knn;
-  out->n = 0;
+  }
   if (datalen == 0)
     return out;
   size_t n_sids = I->node_offsets->n;
   tk_ivec_t *cnt = tk_ivec_create(NULL, n_sids, 0, 0);
   tk_ivec_zero(cnt);
-  memset(cnt->a, 0, sizeof(cnt->a[0]) * n_sids);
   tk_ivec_t *touched = tk_ivec_create(NULL, 0, 0, 0);
   for (size_t i = 0; i < datalen; i++) {
     int64_t fid = data[i];
@@ -478,14 +478,13 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
       int64_t vuid = tk_inv_sid_uid(I, vsid);
       if (vuid >= 0) {
         if (knn)
-          tk_rvec_hasc(out, tk_rank(vuid, dist));
+          tk_rvec_hmax(out, tk_rank(vuid, dist));
         else
           tk_rvec_push(out, tk_rank(vuid, dist));
       }
     }
     cnt->a[vsid] = 0;
   }
-  touched->n = 0;
   tk_rvec_asc(out, 0, out->n);
   if (knn > 0 && out->n > knn)
     out->n = knn;
@@ -699,8 +698,6 @@ static inline void tk_inv_worker (void *dp, int sig)
   tk_ivec_t *vsids;
   switch (stage) {
     case TK_INV_NEIGHBORHOODS:
-      if (knn == 0)
-        return;
       touched->n = 0;
       for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i ++) {
         usid = sids->a[i];
@@ -708,6 +705,11 @@ static inline void tk_inv_worker (void *dp, int sig)
           continue;
         ubits = tk_inv_sget(I, usid, &nubits);
         uhood = hoods->a[i];
+        if (knn) {
+          tk_rvec_clear(uhood);
+          tk_rvec_ensure(uhood, knn);
+          uhood->m = knn;
+        }
         start = I->node_offsets->a[usid];
         end = (usid + 1 == (int64_t)I->node_offsets->n)
           ? (int64_t) I->node_bits->n
@@ -736,11 +738,10 @@ static inline void tk_inv_worker (void *dp, int sig)
           double sim = tk_inv_similarity(inter, nubits, nvbits, cmp);
           double dist = 1.0 - sim;
           if (dist <= eps) {
-            iv = tk_iumap_value(sid_idx, tk_iumap_get(sid_idx, vsid));
             int64_t vuid = tk_inv_sid_uid(I, vsid);
             if (vuid >= 0) {
               if (knn)
-                tk_rvec_hasc(uhood, tk_rank(vuid, dist));
+                tk_rvec_hmax(uhood, tk_rank(vuid, dist));
               else
                 tk_rvec_push(uhood, tk_rank(vuid, dist));
             }
