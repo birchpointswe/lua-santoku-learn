@@ -174,16 +174,16 @@ static inline double tk_inv_similarity (
   switch (cmp) {
     case TK_INV_JACCARD: {
       size_t uni = qlen + elen - inter;
-      return (uni == 0) ? 1.0 : (double) inter / (double) uni;
+      return (uni == 0) ? 0.0 : (double) inter / (double) uni;
     }
     case TK_INV_CONTAINS: { // % entity covered by query
-      return (elen == 0) ? 1.0 : (double) inter / (double) elen;
+      return (elen == 0) ? 0.0 : (double) inter / (double) elen;
     }
     case TK_INV_CONTAINED: { // % query covered by entity
-      return (qlen == 0) ? 1.0 : (double) inter / (double) qlen;
+      return (qlen == 0) ? 0.0 : (double) inter / (double) qlen;
     }
-    default: // raw overlap
-      return (double) inter;
+    default:
+      return tk_inv_similarity(inter, qlen, elen, TK_INV_JACCARD);
   }
 }
 
