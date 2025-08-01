@@ -145,8 +145,9 @@ static inline tk_ann_hash_t tk_ann_hash (
               (unsigned long long)chunk, (unsigned long long)n_chunks, (long long)b, (unsigned long long)A->features);
       abort();
     }
-    if (data[chunk] & (1 << pos))
-      h |= ((uint32_t) 1 << i);
+    const unsigned char *ud = (const unsigned char *) data;
+    if (ud[chunk] & (unsigned char)(1u << pos))
+      h |= ((uint32_t)1 << i);
   }
   return h;
 }
@@ -200,8 +201,8 @@ static inline void tk_ann_persist (
   // sid → uid map
   nkeys = A->sid_uid ? tk_iumap_size(A->sid_uid) : 0;
   tk_lua_fwrite(L, (char *) &nkeys, sizeof(khint_t), 1, fh);
-  for (khint_t i = kh_begin(A->sid_uid); i < kh_end(A->sid_uid); i ++)
-    if (kh_exist(A->sid_uid, i)) {
+  for (khint_t i = tk_iumap_begin(A->sid_uid); i < tk_iumap_end(A->sid_uid); i ++)
+    if (tk_iumap_exist(A->sid_uid, i)) {
       int64_t k = (int64_t) tk_iumap_key(A->sid_uid, i);
       int64_t v = (int64_t) tk_iumap_value(A->sid_uid, i);
       tk_lua_fwrite(L, (char *) &k, sizeof(int64_t), 1, fh);
@@ -231,7 +232,7 @@ static inline void tk_ann_uid_remove (
   int64_t sid = tk_iumap_value(A->uid_sid, khi);
   tk_iumap_del(A->uid_sid, khi);
   khi = tk_iumap_get(A->sid_uid, sid);
-  if (khi == kh_end(A->sid_uid))
+  if (khi == tk_iumap_end(A->sid_uid))
     return;
   tk_iumap_del(A->sid_uid, khi);
 }
@@ -270,7 +271,7 @@ static inline int64_t tk_ann_sid_uid (
   int64_t sid
 ) {
   khint_t khi = tk_iumap_get(A->sid_uid, sid);
-  if (khi == kh_end(A->sid_uid))
+  if (khi == tk_iumap_end(A->sid_uid))
     return -1;
   else
     return tk_iumap_value(A->sid_uid, khi);
@@ -343,7 +344,6 @@ static inline void tk_ann_remove (
 
 static inline void tk_ann_extend_neighborhood (
   tk_ann_t *A,
-  uint64_t i,
   int64_t sid,
   char *V,
   tk_ann_hash_t h,
@@ -352,25 +352,27 @@ static inline void tk_ann_extend_neighborhood (
   uint64_t eps
 ) {
   khint_t khi = kh_get(tk_ann_buckets, A->buckets, h);
-  if (khi != kh_end(A->buckets)) {
-    tk_ivec_t *bucket = kh_value(A->buckets, khi);
-    for (uint64_t i = 0; i < bucket->n; i ++) {
-      int64_t sid1 = bucket->a[i];
-      if (sid == sid1)
-        continue;
-      int64_t uid1 = tk_ann_sid_uid(A, sid1);
-      if (uid1 < 0)
-        continue;
-      khi = tk_iumap_get(sid_idx, sid1);
-      if (khi == tk_iumap_end(sid_idx))
-        continue;
-      int64_t idx = tk_iumap_value(sid_idx, khi);
-      const char *V1 = tk_ann_sget(A, sid1);
-      uint64_t m = tk_ann_hamming((const unsigned char *) V, (const unsigned char *) V1, A->features);
-      if (m <= eps)
-        tk_pvec_hasc(hood, tk_pair(idx, (int64_t) m));
+  if (khi == kh_end(A->buckets))
+    return;
+  tk_ivec_t *bucket = kh_value(A->buckets, khi);
+  for (uint64_t bi = 0; bi < bucket->n; bi ++) {
+    int64_t sid1 = bucket->a[bi];
+    if (sid1 == sid)
+      continue;
+    if (tk_ann_sid_uid(A, sid1) < 0)
+      continue;
+    khi = tk_iumap_get(sid_idx, sid1);
+    if (khi == tk_iumap_end(sid_idx))
+      continue;
+    int64_t j = tk_iumap_value(sid_idx, khi);
+    const char *V1 = tk_ann_sget(A, sid1);
+    uint64_t d = tk_ann_hamming((const unsigned char *) V, (const unsigned char *) V1, A->features);
+    if (d <= eps) {
+      if (hood->m > 0)
+        tk_pvec_hmax(hood, tk_pair(j, (int64_t) d));
+      else
+        tk_pvec_push(hood, tk_pair(j, (int64_t) d));
     }
-    tk_pvec_asc(hood, 0, hood->n);
   }
 }
 
@@ -384,7 +386,7 @@ static inline void tk_ann_populate_neighborhood (
   uint64_t eps
 ) {
   tk_ann_hash_t h = tk_ann_hash(A, V);
-  tk_ann_extend_neighborhood(A, i, sid, V, h, hood, sid_idx, eps);
+  tk_ann_extend_neighborhood(A, sid, V, h, hood, sid_idx, eps);
   int pos[TK_ANN_BITS];
   for (int r = 1; r <= (int) A->probe_radius && r <= TK_ANN_BITS; r ++) {
     for (int i = 0; i < r; i ++)
@@ -393,7 +395,7 @@ static inline void tk_ann_populate_neighborhood (
       tk_ann_hash_t mask = 0;
       for (int i = 0; i < r; i ++)
         mask |= (1U << pos[i]);
-      tk_ann_extend_neighborhood(A, i, sid, V, h ^ mask, hood, sid_idx, eps);
+      tk_ann_extend_neighborhood(A, sid, V, h ^ mask, hood, sid_idx, eps);
       int i;
       for (i = r - 1; i >= 0; i--) {
         if (pos[i] != i + TK_ANN_BITS - r) {
@@ -479,6 +481,10 @@ static inline tk_pvec_t *tk_ann_neighbors_by_vec (
   if (A->destroyed)
     return NULL;
   tk_pvec_clear(out);
+  if (knn) {
+    tk_pvec_ensure(out, knn);
+    out->m = knn;
+  }
   const tk_ann_hash_t h0 = tk_ann_hash(A, vec);
   int pos[TK_ANN_BITS];
   for (int r = 0; r <= (int) A->probe_radius && r <= TK_ANN_BITS; r ++) {
@@ -501,7 +507,7 @@ static inline tk_pvec_t *tk_ann_neighbors_by_vec (
           uint64_t d = tk_ann_hamming((const unsigned char *) vec, (const unsigned char *) tk_ann_sget(A, sid1), A->features);
           if (d <= eps) {
             if (knn > 0)
-              tk_pvec_hasc(out, tk_pair(uid1, (int64_t) d));
+              tk_pvec_hmax(out, tk_pair(uid1, (int64_t) d));
             else
               tk_pvec_push(out, tk_pair(uid1, (int64_t) d));
           }
@@ -532,9 +538,10 @@ static inline tk_pvec_t *tk_ann_neighbors_by_id (
   tk_pvec_t *out
 ) {
   int64_t sid0 = tk_ann_uid_sid(A, uid, false);
-  tk_pvec_clear(out);
-  if (sid0 < 0)
+  if (sid0 < 0) {
+    tk_pvec_clear(out);
     return out;
+  }
   return tk_ann_neighbors_by_vec(A, tk_ann_get(A, uid), sid0, knn, eps, out);
 }
 
@@ -684,11 +691,11 @@ static inline void tk_ann_worker (void *dp, int sig)
   switch (stage) {
 
     case TK_ANN_NEIGHBORHOODS:
-      if (data->k == 0)
-        return;
       for (uint64_t i = data->ifirst; i <= data->ilast; i ++) {
         tk_pvec_t *hood = data->hoods->a[i];
         int64_t sid = data->sids->a[i];
+        tk_pvec_clear(hood);
+        if (data->k > 0) { tk_pvec_ensure(hood, data->k); hood->m = data->k; } // bounded K
         tk_ann_populate_neighborhood(data->A, i, sid, tk_ann_sget(data->A, sid), hood, data->sid_idx, data->eps);
         tk_pvec_asc(hood, 0, hood->n);
       }
@@ -855,7 +862,7 @@ static inline tk_ann_t *tk_ann_load (
   A->vectors->n = vcount;
   tk_lua_add_ephemeron(L, TK_ANN_EPH, Ai, -1);
   if (vcount)
-    tk_lua_fread(L, A->vectors->a, sizeof(double), vcount, fh);
+    tk_lua_fread(L, A->vectors->a, 1, vcount, fh);
   lua_pop(L, 1);
   // thread pool
   A->threads = tk_malloc(L, n_threads * sizeof(tk_ann_thread_t));
