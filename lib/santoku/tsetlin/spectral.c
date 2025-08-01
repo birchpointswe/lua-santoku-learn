@@ -1,5 +1,3 @@
-#define _GNU_SOURCE
-
 #include <santoku/tsetlin/graph.h>
 #include <santoku/tsetlin/conf.h>
 #include <santoku/threads.h>

@@ -1,5 +1,3 @@
-#define _GNU_SOURCE
-
 #include <santoku/tsetlin/conf.h>
 #include <santoku/tsetlin/graph.h>
 #include <santoku/tsetlin/cluster.h>
@@ -772,8 +770,16 @@ static inline int tm_optimize_clustering (lua_State *L)
       lua_pushnumber(L, data[child].next.tnr);
       lua_pushinteger(L, (lua_Integer) data[child].next_m);
       lua_pushinteger(L, (lua_Integer) data[child].next_n);
-      if (lua_pcall(L, 5, 0, 0))
+      lua_pushvalue(L, i_ids);
+      tk_lua_get_ephemeron(L, TK_EVAL_EPH, data[child].next_assignments);
+      if (lua_pcall(L, 7, 0, 0))
+      {
+        luaL_callmeta(L, -1, "__tostring");
+        const char *str = luaL_optstring(L, -1, NULL);
+        if (str)
+          fprintf(stderr, "%s\n", str);
         lua_pop(L, 1);
+      }
     }
     tk_threads_acknowledge_child(pool, child);
   }
