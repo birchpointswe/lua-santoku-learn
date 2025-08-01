@@ -149,6 +149,10 @@
 
 # Consider
 
+- ProNe
+    - Potential alternative to spectral
+    - Also explore various non-neural alternatives to GNNs
+
 - Misc
     - Sparse/dense linear SVM for sanity checking all tasks
 

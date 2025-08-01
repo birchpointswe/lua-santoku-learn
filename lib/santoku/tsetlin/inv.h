@@ -27,10 +27,21 @@ typedef tk_rvec_t * tk_inv_hood_t;
 #define tk_vec_limited
 #include <santoku/vec/tpl.h>
 
+#define TK_INV_LENGTH_BUMP 1e-9
+#define TK_INV_LENGTH_EPS 5e-10
+
+static inline double tk_inv_length_bump (double v, size_t l) {
+  return l > 0 ? v + TK_INV_LENGTH_BUMP * (1.0 / (double) (l + 1)) : v;
+}
+
+static inline double tk_inv_length_unbump (double v, size_t l) {
+  v = l > 0 ? v - TK_INV_LENGTH_BUMP * (1.0 / (double) (l + 1)) : v;
+  return fabs(v) < TK_INV_LENGTH_EPS ? 0 : v;
+}
+
 typedef enum {
   TK_INV_JACCARD,
-  TK_INV_CONTAINS,
-  TK_INV_CONTAINED
+  TK_INV_OVERLAP,
 } tk_inv_cmp_type_t;
 
 typedef enum {
@@ -101,11 +112,25 @@ static inline void tk_inv_destroy (
   free(I->threads);
 }
 
+static inline double overlap (
+  int64_t *a, size_t alen,
+  int64_t *b, size_t blen
+) {
+  if (alen == 0 || blen == 0)
+    return 0.0;
+  size_t i = 0, j = 0, inter = 0;
+  while (i < alen && j < blen) {
+    if (a[i] == b[j]) { inter++; i++; j++; }
+    else if (a[i] < b[j]) i++;
+    else j++;
+  }
+  size_t min_len = (alen < blen) ? alen : blen;
+  return (double) inter / (double) min_len;
+}
+
 static inline double tk_inv_jaccard (
-  int64_t *abits,
-  size_t asize,
-  int64_t *bbits,
-  size_t bsize
+  int64_t *abits, size_t asize,
+  int64_t *bbits, size_t bsize
 ) {
   size_t i = 0, j = 0;
   size_t intersection = 0;
@@ -131,40 +156,6 @@ static inline double tk_inv_jaccard (
   return (double) intersection / (double) union_count;
 }
 
-static inline double tk_inv_contains (
-  int64_t *abits,
-  size_t asize,
-  int64_t *bbits,
-  size_t bsize
-) {
-  if (bsize == 0)
-    return 1.0;
-  size_t i = 0, j = 0, inter = 0;
-  while (i < asize && j < bsize) {
-    if (abits[i] == bbits[j]) { inter ++; i ++; j ++; }
-    else if (abits[i] < bbits[j]) i ++;
-    else j ++;
-  }
-  return (double) inter / (double) bsize;
-}
-
-static inline double tk_inv_contained (
-  int64_t *abits,
-  size_t asize,
-  int64_t *bbits,
-  size_t bsize
-) {
-  if (asize == 0)
-    return 1.0;
-  size_t i = 0, j = 0, inter = 0;
-  while (i < asize && j < bsize) {
-    if (abits[i] == bbits[j]) { inter ++; i ++; j ++; }
-    else if (abits[i] < bbits[j]) i ++;
-    else j ++;
-  }
-  return (double) inter / (double) asize;
-}
-
 static inline double tk_inv_similarity (
   size_t inter,
   size_t qlen,
@@ -176,14 +167,12 @@ static inline double tk_inv_similarity (
       size_t uni = qlen + elen - inter;
       return (uni == 0) ? 1.0 : (double) inter / (double) uni;
     }
-    case TK_INV_CONTAINS: { // % entity covered by query
-      return (elen == 0) ? 1.0 : (double) inter / (double) elen;
+    case TK_INV_OVERLAP: {
+      size_t min_len = (qlen < elen) ? qlen : elen;
+      return (min_len == 0) ? 0.0 : (double) inter / (double) min_len;
     }
-    case TK_INV_CONTAINED: { // % query covered by entity
-      return (qlen == 0) ? 1.0 : (double) inter / (double) qlen;
-    }
-    default: // raw overlap
-      return (double) inter;
+    default:
+      return tk_inv_similarity(inter, qlen, elen, TK_INV_JACCARD);
   }
 }
 
@@ -421,7 +410,7 @@ static inline void tk_inv_neighborhoods (
     tk_ivec_ensure(data->cnt, sids->n);
     data->hoods = hoods;
     data->sid_idx = sid_idx;
-    data->eps = eps;
+    data->eps = eps + TK_INV_LENGTH_EPS;
     data->knn = knn;
     data->cmp = cmp;
     tk_thread_range(i, I->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
@@ -443,6 +432,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   tk_rvec_t *out,
   tk_inv_cmp_type_t cmp
 ) {
+  eps += TK_INV_LENGTH_EPS;
   tk_rvec_ensure(out, knn);
   if (knn)
     out->m = knn;
@@ -472,8 +462,8 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
     uint64_t inter = (uint64_t) cnt->a[vsid];
     size_t elen;
     tk_inv_sget(I, vsid, &elen);
-    double sim = tk_inv_similarity(inter, datalen, elen, cmp);
-    double dist = 1.0 - sim;
+    double sim  = tk_inv_similarity(inter, datalen, elen, cmp);
+    double dist = tk_inv_length_bump(1.0 - sim, elen);
     if (dist <= eps) {
       int64_t vuid = tk_inv_sid_uid(I, vsid);
       if (vuid >= 0) {
@@ -487,6 +477,11 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   }
   touched->n = 0;
   tk_rvec_asc(out, 0, out->n);
+  for (uint64_t i = 0; i < out->n; ++i) {
+    size_t len = 0;
+    tk_inv_sget(I, tk_inv_uid_sid(I, out->a[i].i, false), &len);
+    out->a[i].d = tk_inv_length_unbump(out->a[i].d, len);
+  }
   if (knn > 0 && out->n > knn)
     out->n = knn;
   tk_ivec_destroy(cnt);
@@ -547,14 +542,19 @@ static inline int tk_inv_remove_lua (lua_State *L)
 
 static inline int tk_inv_get_lua (lua_State *L)
 {
+  lua_settop(L, 3);
   tk_inv_t *I = tk_inv_peek(L, 1);
   int64_t id = tk_lua_checkinteger(L, 2, "id");
+  tk_ivec_t *out = tk_ivec_peekopt(L, 3);
+  out = out == NULL ? tk_ivec_create(L, 0, 0, 0) : out; // out
+  tk_ivec_clear(out);
   size_t n = 0;
   int64_t *data = tk_inv_get(I, id, &n);
-  int64_t *dup = n ? tk_malloc(L, n * sizeof(int64_t)) : NULL;
-  if (n)
-    memcpy(dup, data, n * sizeof(int64_t));
-  tk_ivec_create(L, n, dup, 0);
+  if (!n)
+    return 1;
+  tk_ivec_ensure(out, n);
+  memcpy(out->a, data, n * sizeof(int64_t));
+  out->n = n;
   return 1;
 }
 
@@ -567,10 +567,8 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
   tk_inv_cmp_type_t cmp = TK_INV_JACCARD;
   if (!strcmp(typ, "jaccard"))
     cmp = TK_INV_JACCARD;
-  else if (!strcmp(typ, "contains"))
-    cmp = TK_INV_CONTAINS;
-  else if (!strcmp(typ, "contained"))
-    cmp = TK_INV_CONTAINED;
+  else if (!strcmp(typ, "overlap"))
+    cmp = TK_INV_OVERLAP;
   else
     tk_lua_verror(L, 3, "neighbors", "invalid comparator specified", typ);
   tk_inv_neighborhoods(L, I, knn, eps, cmp, 0, 0);
@@ -588,10 +586,8 @@ static inline int tk_inv_neighbors_lua (lua_State *L)
   tk_inv_cmp_type_t cmp = TK_INV_JACCARD;
   if (!strcmp(typ, "jaccard"))
     cmp = TK_INV_JACCARD;
-  else if (!strcmp(typ, "contains"))
-    cmp = TK_INV_CONTAINS;
-  else if (!strcmp(typ, "contained"))
-    cmp = TK_INV_CONTAINED;
+  else if (!strcmp(typ, "overlap"))
+    cmp = TK_INV_OVERLAP;
   else
     tk_lua_verror(L, 3, "neighbors", "invalid comparator specified", typ);
   if (lua_type(L, 2) == LUA_TNUMBER) {
@@ -733,8 +729,8 @@ static inline void tk_inv_worker (void *dp, int sig)
           vsid = sids->a[iv];
           size_t inter = (size_t) cnt->a[iv];
           vbits = tk_inv_sget(I, vsid, &nvbits);
-          double sim = tk_inv_similarity(inter, nubits, nvbits, cmp);
-          double dist = 1.0 - sim;
+          double sim  = tk_inv_similarity(inter, nubits, nvbits, cmp);
+          double dist = tk_inv_length_bump(1.0 - sim, nvbits);
           if (dist <= eps) {
             iv = tk_iumap_value(sid_idx, tk_iumap_get(sid_idx, vsid));
             int64_t vuid = tk_inv_sid_uid(I, vsid);
@@ -747,6 +743,13 @@ static inline void tk_inv_worker (void *dp, int sig)
           }
         }
         tk_rvec_asc(uhood, 0, uhood->n);
+        for (uint64_t i = 0; i < uhood->n; ++i) {
+          size_t len = 0;
+          tk_inv_sget(I,
+            tk_inv_uid_sid(I, uhood->a[i].i, false),
+            &len);
+          uhood->a[i].d = tk_inv_length_unbump(uhood->a[i].d, len);
+        }
         uhood->m = uhood->n;
         uhood->a = realloc(uhood->a, uhood->n * sizeof(*uhood->a));
         for (uint64_t ti = 0; ti < touched->n; ti ++)
