@@ -1,5 +1,3 @@
-#define _GNU_SOURCE
-
 #include <santoku/tsetlin/conf.h>
 #include <santoku/tsetlin/itq.h>
 

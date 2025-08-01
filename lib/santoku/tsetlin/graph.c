@@ -1,5 +1,3 @@
-#define _GNU_SOURCE
-
 #include <santoku/tsetlin/graph.h>
 
 static inline tk_graph_t *tm_graph_create (
