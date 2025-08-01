@@ -165,15 +165,6 @@ static inline char *tb_tokenizer_id_str (
   return (char *) kh_value(tokenizer->strs, k);
 }
 
-// static inline int tb_tokenizer_str_id (
-//   tb_tokenizer_t *tokenizer,
-//   char *str
-// ) {
-//   khint_t k = kh_get(ids, tokenizer->ids, str);
-//   assert(k != kh_end(tokenizer->ids));
-//   return kh_value(tokenizer->ids, k);
-// }
-
 static inline int tb_tokenizer_new_token (
   tb_tokenizer_t *tokenizer,
   char **tokp,
@@ -247,141 +238,194 @@ static inline bool tb_tokenizer_is_delim_char (char c)
   || c == '<' || c == '>' || c == '/' || c == '\\' || c == '\"'));
 }
 
+static inline int tb_have_bytes (const char *in, size_t i, size_t n)
+{
+  for (size_t k = 0; k < n; k++) if (in[i + k] == '\0') return 0;
+  return 1;
+}
+
 static inline char *tb_tokenizer_normalize (char *in, size_t *len, int max_run)
 {
   kvec_t(char) out;
   kv_init(out);
   char last = 0;
   int run = 0;
+
   for (size_t i = 0; in[i];) {
-    if (last && ((isalpha(last) && isdigit(in[i])) || (isdigit(last) && isalpha(in[i])))) {
+    if (last && ((isalpha((unsigned char)last) && isdigit((unsigned char)in[i])) ||
+      (isdigit((unsigned char)last) && isalpha((unsigned char)in[i])))) {
       kv_push(char, out, ' ');
       last = ' ';
     }
-    if (last && isalpha(last) && last == in[i])
+
+    if (last && isalpha((unsigned char)last) && last == in[i])
       run ++;
     else
       run = 0;
-    if (run >= max_run) {
-      last = in[i];
-      i ++;
-      continue;
-    } else {
-      last = in[i];
-    }
+
+    if (run >= max_run) { last = in[i]; i++; continue; }
+    else { last = in[i]; }
+
     if (in[i] == '#') {
       kv_push(char, out, ' ');
       kv_push_str(char, out, "#hash");
       kv_push(char, out, ' ');
       i ++;
-    } else if (in[i] == ':' && in[i + 1] == ')') {
+      last = ' ';
+      run = 0;
+      continue;
+    } else if (tb_have_bytes(in, i, 2) && in[i] == ':' && in[i + 1] == ')') {
       kv_push(char, out, ' ');
       kv_push_str(char, out, "#smiley-positive");
       kv_push(char, out, ' ');
       i += 2;
+      last = ' ';
+      run = 0;
       continue;
-    } else if (in[i] == ':' && in[i + 1] == 'D') {
+    } else if (tb_have_bytes(in, i, 2) && in[i] == ':' && tolower((unsigned char)in[i + 1]) == 'd') {
       kv_push(char, out, ' ');
       kv_push_str(char, out, "#smiley-positive");
       kv_push(char, out, ' ');
       i += 2;
+      last = ' ';
+      run = 0;
       continue;
-    } else if (in[i] == ':' && in[i + 1] == '(') {
+    } else if (tb_have_bytes(in, i, 2) && in[i] == ':' && in[i + 1] == '(') {
       kv_push(char, out, ' ');
       kv_push_str(char, out, "#smiley-negative");
       kv_push(char, out, ' ');
       i += 2;
+      last = ' ';
+      run = 0;
       continue;
-    } else if (in[i] == ';' && in[i + 1] == ')') {
+    } else if (tb_have_bytes(in, i, 2) && in[i] == ';' && in[i + 1] == ')') {
       kv_push(char, out, ' ');
       kv_push_str(char, out, "#smiley-wink");
       kv_push(char, out, ' ');
       i += 2;
+      last = ' ';
+      run = 0;
       continue;
     } else if (in[i] == '!') {
       kv_push(char, out, ' ');
       kv_push_str(char, out, "#exclamation");
       kv_push(char, out, ' ');
       while (in[i] == '!') i ++;
+      last = ' ';
+      run = 0;
       continue;
     } else if (in[i] == '?') {
       kv_push(char, out, ' ');
       kv_push_str(char, out, "#question");
       kv_push(char, out, ' ');
-      while (in[i]=='?') i ++;
+      while (in[i] == '?') i ++;
+      last = ' ';
+      run = 0;
       continue;
-    } else if (in[i] == '.' && in[i + 1] == '.' && in[i + 2] == '.') {
+    } else if (tb_have_bytes(in, i, 3) && in[i] == '.' && in[i + 1] == '.' && in[i + 2] == '.') {
       kv_push(char, out, ' ');
       kv_push_str(char, out, "#ellipsis");
       kv_push(char, out, ' ');
       i += 3;
+      last = ' ';
+      run = 0;
       continue;
-    } else if (in[i] == '\'' && in[i + 1] == 's' &&
-      (in[i + 2] == '\0' || tb_tokenizer_is_delim_char(in[i + 2]))) {
+    } else if (tb_have_bytes(in, i, 2) && in[i] == '\'' && in[i + 1] == 's' &&
+      (!tb_have_bytes(in, i, 3) || in[i + 2] == '\0' || tb_tokenizer_is_delim_char(in[i + 2]))) {
       kv_push(char, out, ' ');
       kv_push(char, out, '\'');
       kv_push(char, out, 's');
       kv_push(char, out, ' ');
       i += 2;
       last = ' ';
+      run = 0;
       continue;
     }
+
     unsigned char c = (unsigned char) in[i];
+
     if (c < 0x80) {
       kv_push(char, out, tolower(c));
       i ++;
-    } else if (c == 0xC2 && (unsigned char) in[i + 1] == 0xA0) {
+      continue;
+    }
+
+    if (tb_have_bytes(in, i, 2) && c == 0xC2 && (unsigned char) in[i + 1] == 0xA0) {
       kv_push(char, out, ' ');
       i += 2;
-    } else if (c == 0xE2 && (unsigned char) in[i + 1] == 0x80) {
+      last = ' ';
+      run = 0;
+      continue;
+    }
+
+    if (tb_have_bytes(in, i, 3) && c == 0xE2 && (unsigned char) in[i + 1] == 0x80) {
       unsigned char b3 = (unsigned char) in[i + 2];
       switch (b3) {
         case 0x93: // en dash
         case 0x94: // em dash
         case 0x90: // hyphen
           kv_push(char, out, '-');
+          last = '-';
           break;
         case 0x98: // left single quote
         case 0x99: // right single quote
+          kv_push(char, out, '\'');     // don't drop; avoid "dont" vs "don't"
+          last = '\'';
           break;
         case 0x9C: // left double quote
         case 0x9D: // right double quote
+          kv_push(char, out, ' ');      // prevent token concatenation
+          last = ' ';
           break;
         case 0xA6: // ellipsis
           kv_push(char, out, ' ');
           kv_push_str(char, out, "#ellipsis");
           kv_push(char, out, ' ');
+          last = ' ';
           break;
         default:
-          // skip unknown
+          // skip unknown, but sync state
+          last = ' ';
           break;
       }
       i += 3;
-    } else if ((unsigned char) c == '.'
-      && (unsigned char) in[i + 1] == '.'
-      && (unsigned char) in[i + 2] == '.') {
+      run = 0;
+      continue;
+    }
+
+    if (tb_have_bytes(in, i, 3) &&
+      (unsigned char) c == '.' &&
+      (unsigned char) in[i + 1] == '.' &&
+      (unsigned char) in[i + 2] == '.') {
       kv_push(char, out, ' ');
       kv_push_str(char, out, "#ellipsis");
       kv_push(char, out, ' ');
       i += 3;
-    } else if ((unsigned char) c == '.'
-      && (unsigned char) in[i + 1] == '.') {
+      last = ' ';
+      run = 0;
+      continue;
+    } else if (tb_have_bytes(in, i, 2) &&
+      (unsigned char) c == '.' &&
+      (unsigned char) in[i + 1] == '.') {
       kv_push(char, out, ' ');
       kv_push_str(char, out, "#ellipsis");
       kv_push(char, out, ' ');
       i += 2;
-    } else if ((unsigned char) c == 0xF0
-      && (unsigned char) in[i + 1] == 0x9F
-      && (unsigned char) in[i + 2] == 0x98) {
+      last = ' ';
+      run = 0;
+      continue;
+    }
+
+    if (tb_have_bytes(in, i, 4) &&
+      (unsigned char) c == 0xF0 &&
+      (unsigned char) in[i + 1] == 0x9F &&
+      (unsigned char) in[i + 2] == 0x98) {
       unsigned char b4 = (unsigned char) in[i + 3];
-      if ((b4 >= 0x80 && b4 <= 0x8B)
-        || (b4 >= 0x8F && b4 <= 0x90)
-        || (b4 == 0x99)) {
+      if ((b4 >= 0x80 && b4 <= 0x8B) || (b4 >= 0x8F && b4 <= 0x90) || (b4 == 0x99)) {
         kv_push(char, out, ' ');
         kv_push_str(char, out, "#emoji-positive");
         kv_push(char, out, ' ');
-      } else if ((b4 >= 0x9E && b4 <= 0xA2)
-        || (b4 >= 0xA3 && b4 <= 0xA6)) {
+      } else if ((b4 >= 0x9E && b4 <= 0xA2) || (b4 >= 0xA3 && b4 <= 0xA6)) {
         kv_push(char, out, ' ');
         kv_push_str(char, out, "#emoji-negative");
         kv_push(char, out, ' ');
@@ -391,13 +435,16 @@ static inline char *tb_tokenizer_normalize (char *in, size_t *len, int max_run)
         kv_push(char, out, ' ');
       }
       i += 4;
+      last = ' ';
+      run = 0;
       continue;
-    } else if ((unsigned char)c == 0xF0
-      && (unsigned char) in[i + 1] == 0x9F
-      && (unsigned char) in[i + 2] == 0x91
-      && ((unsigned char) in[i + 3] == 0x8D
-      ||  (unsigned char) in[i + 3] == 0x8E))
-    {
+    }
+
+    if (tb_have_bytes(in, i, 4) &&
+      (unsigned char)c == 0xF0 &&
+      (unsigned char) in[i + 1] == 0x9F &&
+      (unsigned char) in[i + 2] == 0x91 &&
+      ((unsigned char) in[i + 3] == 0x8D || (unsigned char) in[i + 3] == 0x8E)) {
       if ((unsigned char) in[i + 3] == 0x8D) {
         kv_push(char, out, ' ');
         kv_push_str(char, out, "#emoji-positive");
@@ -408,22 +455,40 @@ static inline char *tb_tokenizer_normalize (char *in, size_t *len, int max_run)
         kv_push(char, out, ' ');
       }
       i += 4;
+      last = ' ';
+      run = 0;
       continue;
-    } else if ((unsigned char)c == 0xE2
-      && (unsigned char) in[i + 1] == 0x9D
-      && (unsigned char) in[i + 2] == 0xA4) {
+    }
+
+    if (tb_have_bytes(in, i, 3) &&
+      (unsigned char)c == 0xE2 &&
+      (unsigned char) in[i + 1] == 0x9D &&
+      (unsigned char) in[i + 2] == 0xA4) {
       kv_push(char, out, ' ');
       kv_push_str(char, out, "#emoji-positive");
       kv_push(char, out, ' ');
-      i += (size_t) (3 + (in[i + 3] == (char)0xEF ? 2 : 0));
+      if (tb_have_bytes(in, i, 6) &&
+        (unsigned char)in[i + 3] == 0xEF &&
+        (unsigned char)in[i + 4] == 0xB8 &&
+        (unsigned char)in[i + 5] == 0x8F) {
+        i += 6;            // ❤︎ (with VS16)
+      } else {
+        i += 3;            // ❤
+      }
+      last = ' ';
+      run = 0;
       continue;
-    } else {
-      if ((c & 0xE0) == 0xC0) i += 2;
-      else if ((c & 0xF0) == 0xE0) i += 3;
-      else if ((c & 0xF8) == 0xF0) i += 4;
-      else i ++;
     }
+
+    // Fallback: skip well-formed multibyte sequences, but keep state sane
+    if      ((c & 0xE0) == 0xC0 && tb_have_bytes(in, i, 2)) i += 2;
+    else if ((c & 0xF0) == 0xE0 && tb_have_bytes(in, i, 3)) i += 3;
+    else if ((c & 0xF8) == 0xF0 && tb_have_bytes(in, i, 4)) i += 4;
+    else i ++;
+    last = ' ';
+    run = 0;
   }
+
   kv_push(char, out, '\0');
   *len = out.n - 1;
   return out.a;
@@ -540,6 +605,12 @@ static inline bool tb_tokenizer_is_negation_token (char *tok)
     !strcmp(tok, "nah");
 }
 
+static inline void tb_copy_without_char (const char *src, char *dst, char ch)
+{
+  while (*src) { if (*src != ch) *dst++ = *src; src++; }
+  *dst = '\0';
+}
+
 static inline bool tb_tokenizer_is_negation_boundary_char (char c)
 {
   return c == '.' || c == '?' || c == '!';
@@ -550,11 +621,6 @@ static inline bool tb_tokenizer_is_negation_boundary_token (char *tok)
   return tok != NULL && (tb_tokenizer_is_negation_boundary_char(tok[0])
     || tb_tokenizer_is_emoji_token(tok));
 }
-
-// static inline bool tb_tokenizer_is_strip_char (char c)
-// {
-//   return c == '\'' || c == '_' || c == '`' || c == '-';
-// }
 
 static void tb_tokenizer_append_skipgram (
   tb_tokenizer_t *tok,
@@ -629,7 +695,7 @@ static inline void tb_tokenizer_append_token (
     *negation = tokenizer->negations;
     return;
   }
-  if (word[0] != '#')
+  if (word[0] != '#' && strcmp(word, "'s") != 0)
     tb_tokenizer_append_cgrams(tokenizer, word, train);
   if ((int) kv_size(tokenizer->window) == tokenizer->window_size) {
     size_t n = kv_size(tokenizer->window);
@@ -690,8 +756,11 @@ static inline void tb_tokenizer_populate_tokens (
       kv_push(char, tokenizer->tmp_token, '\0');
       char *tok = tokenizer->tmp_token.a;
       bool was_contraction = false;
+      char canon_buf[tokenizer->max_len + 1];
+      tb_copy_without_char(tok, canon_buf, '\'');
+      const char *key = canon_buf;
       for (size_t i = 0; i < n_contractions; i ++) {
-        if (strcmp(tok, contractions[i].from) == 0) {
+        if (strcmp(key, contractions[i].from) == 0) {
           tb_tokenizer_append_token(tokenizer, contractions[i].to1, &negation, train);
           tb_tokenizer_append_token(tokenizer, contractions[i].to2, &negation, train);
           tb_tokenizer_append_token(tokenizer, contractions[i].to3, &negation, train);
@@ -711,7 +780,8 @@ static inline void tb_tokenizer_populate_tokens (
 static inline void _tb_tokenizer_parse (lua_State *L, tb_tokenizer_t *tokenizer)
 {
   size_t len;
-  char *doc = tb_tokenizer_normalize((char *) luaL_checklstring(L, 1, &len), &len, tokenizer->max_run);
+  char *str = (char *) luaL_checklstring(L, 1, &len);
+  char *doc = tb_tokenizer_normalize(str, &len, tokenizer->max_run);
   tb_tokenizer_populate_tokens(tokenizer, doc, len, false);
   free(doc);
   lua_Integer n = 1;
