@@ -436,7 +436,6 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   tk_rvec_ensure(out, knn);
   if (knn)
     out->m = knn;
-  }
   if (datalen == 0)
     return out;
   size_t n_sids = I->node_offsets->n;
