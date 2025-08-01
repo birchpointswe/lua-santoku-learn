@@ -423,7 +423,8 @@ static inline tk_accuracy_t _tm_clustering_accuracy (
   uint64_t tn = vneg > fp ? (vneg - fp) : 0;
   double tpr = vpos > 0 ? (double) tp / vpos : 0.0;
   double tnr = vneg > 0 ? (double) tn / vneg : 0.0;
-  double bacc = 0.5 * (tpr + tnr);
+  // double bacc = 0.5 * (tpr + tnr); // true balanced accuracy
+  double bacc = (n_pos && n_neg) ? sqrt(tpr * tnr) : 0.0; // geometric mean
   tk_accuracy_t acc;
   acc.tpr = tpr;
   acc.tnr = tnr;
@@ -483,7 +484,8 @@ static inline tk_accuracy_t tm_clustering_accuracy (
   uint64_t tn = vneg > fp ? (vneg - fp) : 0;
   double tpr = vpos > 0 ? (double) tp / vpos : 0.0;
   double tnr = vneg > 0 ? (double) tn / vneg : 0.0;
-  double bacc = 0.5 * (tpr + tnr);
+  // double bacc = 0.5 * (tpr + tnr); // true balanced accuracy
+  double bacc = (n_pos && n_neg) ? sqrt(tpr * tnr) : 0.0; // geometric mean
   tk_accuracy_t acc;
   acc.tpr = tpr;
   acc.tnr = tnr;
@@ -892,7 +894,8 @@ static inline int tm_optimize_retrieval (lua_State *L)
     uint64_t tn = n_neg - fp;
     double tpr = n_pos > 0 ? (double)tp / (double)n_pos : 0;
     double tnr = n_neg > 0 ? (double)tn / (double)n_neg : 0;
-    double bacc = 0.5 * (tpr + tnr);
+    // double bacc = 0.5 * (tpr + tnr); // true balanced accuracy
+    double bacc = (n_pos && n_neg) ? sqrt(tpr * tnr) : 0.0; // geometric mean
     if (i_each > -1) {
       lua_pushvalue(L, i_each);
       lua_pushnumber(L, bacc);

@@ -281,7 +281,7 @@ static inline char *tk_ann_sget (
   tk_ann_t *A,
   int64_t sid
 ) {
-  return A->vectors->a + (uint64_t) sid * ((A->features + CHAR_BIT - 1) / CHAR_BIT);
+  return A->vectors->a + (uint64_t) sid * BITS_BYTES(A->features);
 }
 
 static inline char *tk_ann_get (
@@ -581,12 +581,34 @@ static inline int tk_ann_remove_lua (lua_State *L)
 
 static inline int tk_ann_get_lua (lua_State *L)
 {
+  lua_settop(L, 3);
   tk_ann_t *A = tk_ann_peek(L, 1);
-  int64_t id = tk_lua_checkinteger(L, 2, "id");
-  char *data = tk_ann_get(A, id);
-  if (data == NULL)
-    return 0;
-  lua_pushlstring(L, (char *) data, ((A->features + CHAR_BIT - 1) / CHAR_BIT));
+  size_t bytes = BITS_BYTES(A->features);
+  int64_t uid = -1;
+  tk_ivec_t *uids = NULL;
+  tk_cvec_t *out = tk_cvec_peekopt(L, 3);
+  out = out == NULL ? tk_cvec_create(L, 0, 0, 0) : out; // out
+  tk_cvec_clear(out);
+  if (lua_type(L, 2) == LUA_TNUMBER) {
+    uid = tk_lua_checkinteger(L, 2, "id");
+    char *data = tk_ann_get(A, uid);
+    if (data == NULL)
+      return 1;
+    tk_cvec_ensure(out, bytes);
+    memcpy(out->a, data, bytes);
+    out->n = bytes;
+  } else {
+    uids = tk_ivec_peek(L, 2, "uids");
+    tk_cvec_ensure(out, uids->n * bytes);
+    for (uint64_t i = 0; i < uids->n; i ++) {
+      uid = uids->a[i];
+      char *data = tk_ann_get(A, uid);
+      if (data == NULL)
+        continue;
+      memcpy(out->a + out->n, data, bytes);
+      out->n += bytes;
+    }
+  }
   return 1;
 }
 
