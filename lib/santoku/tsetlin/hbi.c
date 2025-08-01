@@ -1,5 +1,3 @@
-#define _GNU_SOURCE
-
 #include <santoku/lua/utils.h>
 #include <santoku/tsetlin/hbi.h>
 #include <santoku/threads.h>

@@ -25,8 +25,6 @@ SOFTWARE.
 
 */
 
-#define _GNU_SOURCE
-
 #include <santoku/lua/utils.h>
 #include <santoku/tsetlin/conf.h>
 #include <santoku/threads.h>

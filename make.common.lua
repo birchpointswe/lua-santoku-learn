@@ -1,13 +1,13 @@
 local env = {
 
   name = "santoku-tsetlin",
-  version = "0.0.100-1",
+  version = "0.0.101-1",
   variable_prefix = "TK_TSETLIN",
   license = "MIT",
   public = true,
 
   cflags = {
-    "-std=gnu11", "-Wall", "-Wextra",
+    "-std=gnu11", "-D_GNU_SOURCE", "-Wall", "-Wextra", "-pthread",
     "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow",
     "-Wpointer-sign", "-Wno-unused-parameter", "-Wno-unused-but-set-variable",
     -- TODO: Not all libs likely need these includes
@@ -17,7 +17,7 @@ local env = {
   },
 
   ldflags = {
-    "-lm", "-lpthread"
+    "-lm", "-pthread"
   },
 
   rules = {
@@ -34,8 +34,8 @@ local env = {
   dependencies = {
     "lua >= 5.1",
     "santoku >= 0.0.280-1",
-    "santoku-threads >= 0.0.11-1",
-    "santoku-matrix >= 0.0.92-1",
+    "santoku-threads >= 0.0.12-1",
+    "santoku-matrix >= 0.0.93-1",
     "santoku-system >= 0.0.56-1",
   },
 
