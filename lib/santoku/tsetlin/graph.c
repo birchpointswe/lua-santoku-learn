@@ -491,7 +491,6 @@ static inline void tm_add_mst (
       }
       lua_remove(L, -1); // pop reps vector
     }
-
     // clean up
     lua_pop(L, 1);
   }

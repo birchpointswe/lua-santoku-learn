@@ -30,7 +30,6 @@ typedef struct {
   tk_ivec_t *adj_pos_data;
   tk_ivec_t *adj_neg_offset;
   tk_ivec_t *adj_neg_data;
-  tk_ivec_t *kept;
   bool normalized;
   uint64_t n_nodes;
   uint64_t n_hidden;
@@ -113,17 +112,12 @@ static inline void tk_spectral_worker (void *dp, int sig)
     }
 
     case TK_SPECTRAL_SCALE:
-      if (normalized) {
-        for (uint64_t i = ifirst; i <= ilast; i ++) {
+      if (normalized)
+        for (uint64_t i = ifirst; i <= ilast; i ++)
           scale[i] = degree[i] > 0 ? 1.0 / sqrt(degree[i]) : 0.0;
-          if (!isfinite(scale[i]))
-            scale[i] = 0.0;
-        }
-      } else {
-        for (uint64_t i = ifirst; i <= ilast; i ++) {
+      else
+        for (uint64_t i = ifirst; i <= ilast; i ++)
           scale[i] = 1.0;
-        }
-      }
       break;
 
     case TK_SPECTRAL_MATVEC: {
@@ -177,13 +171,10 @@ static inline void tm_run_spectral (
   tk_graph_adj_t *adj_neg,
   uint64_t n_nodes,
   uint64_t n_hidden,
-  int64_t n_fixed,
   double eps_primme,
-  double eps_keep,
   bool normalized,
   int i_each,
-  double *neg_scalep,
-  uint64_t *n_dimsp
+  double neg_scale
 ) {
   // Init
   tk_spectral_t spec;
@@ -202,7 +193,7 @@ static inline void tm_run_spectral (
   spec.n_nodes = n_nodes;
   spec.n_hidden = n_hidden;
   spec.n_evals = n_hidden + 1;
-  spec.neg_scale = (*neg_scalep);
+  spec.neg_scale = neg_scale;
   assert(spec.n_evals >= 2);
   spec.pool = pool;
   for (unsigned int i = 0; i < pool->n_threads; i ++) {
@@ -256,87 +247,37 @@ static inline void tm_run_spectral (
   spec.evecs = tk_malloc(L, (size_t) params.n * (size_t) spec.n_evals * sizeof(double));
   spec.resNorms = tk_malloc(L, (size_t) spec.n_evals * sizeof(double));
   int ret = dprimme(spec.evals, spec.evecs, spec.resNorms, &params);
-  if (ret != 0)
+  if (ret != 0) {
+    free(spec.evals);
+    free(spec.evecs);
+    free(spec.resNorms);
+    primme_free(&params);
     tk_lua_verror(L, 2, "spectral", "failure calling PRIMME");
+    return;
+  }
 
-  // Determine vectors to keep
-  spec.kept = tk_ivec_create(L, 0, 0, 0);
-  uint64_t n_dims = 0;
-  if (n_fixed == -1) {
-    uint64_t elbow_idx = n_hidden;
-    uint64_t start = 0;
-    // while (start < spec.n_evals && spec.evals[start] < eps_keep)
-    //   start ++;
-    // if (start == spec.n_evals)
-    //   start = 0;
-    // double min_ev = log10(spec.evals[start] + 1e-300);
-    // double max_ev = log10(spec.evals[spec.n_evals - 1] + 1e-300);
-    while (start < spec.n_evals && fabs(spec.evals[start]) < eps_keep)
-      start ++;
-    if (start == spec.n_evals)
-      start = 0;
-    double min_ev = log10(fabs(spec.evals[start]) + 1e-300);
-    double max_ev = log10(fabs(spec.evals[spec.n_evals - 1]) + 1e-300);
-    double range = fmax(DBL_MIN, fabs(max_ev - min_ev));
-    double denom = fmax(1.0, (double) (spec.n_evals - start - 1));
-    double prev_d = 0.0, max_d = -DBL_MAX;
-    for (uint64_t i = start, m = 0; i < spec.n_evals; i ++, m ++) {
-      double x = (double) m / denom;
-      double y = (log10(fabs(spec.evals[i]) + 1e-300) - min_ev) / range;
-      double d = y - x;
-      double deriv = d - prev_d;
-      if (prev_d > 0.0 && deriv <= 0.0 && d > 0.25 * max_d) {
-        elbow_idx = i - 1;
-        break;
-      }
-      if (d > max_d)
-        max_d = d;
-      prev_d = d;
-    }
-    for (uint64_t i = 0; i < spec.n_evals; i ++) {
-      bool keep = (fabs(spec.evals[i]) > eps_keep) && (i < elbow_idx);
-      if (keep)
-        tk_ivec_push(spec.kept, (int64_t) i);
-      if (i_each != -1) {
-        lua_pushvalue(L, i_each);
-        lua_pushstring(L, "eig");
-        lua_pushinteger(L, (int64_t)i);
-        lua_pushnumber(L, spec.evals[i]);
-        lua_pushboolean(L, keep);
-        lua_call(L, 4, 0);
-      }
-    }
-  } else {
-    uint64_t target = !n_fixed ? n_hidden : (uint64_t) llabs(n_fixed);
-    double cut = n_fixed < 0 ? -DBL_MAX : eps_keep;
-    for (uint64_t i = 0; i < spec.n_evals; i++) {
-      bool keep = fabs(spec.evals[i]) > cut && spec.kept->n < target;
-      if (keep)
-        tk_ivec_push(spec.kept, (int64_t) i);
-      if (i_each != -1) {
-        lua_pushvalue(L, i_each);
-        lua_pushstring(L, "eig");
-        lua_pushinteger(L, (int64_t) i);
-        lua_pushnumber(L, spec.evals[i]);
-        lua_pushboolean(L, keep);
-        lua_call(L, 4, 0);
-      }
-    }
-  }
-  if (spec.kept->n == 0)
-    tk_ivec_push(spec.kept, (int64_t) 0);
-  n_dims = spec.kept->n;
-  // Emit to z (drop unselected)
-  // TODO: Multithread this
-  tk_dvec_ensure(z, n_nodes * n_dims);
-  z->n = n_nodes * n_dims;
+  tk_dvec_ensure(z, n_nodes * n_hidden);
+  z->n = n_nodes * n_hidden;
+  bool has_negatives = (spec.neg_scale < 0.0) && (neg_total > 0);
+  double eps_drop = fmax(1e-8, 10.0 * eps_primme);
+  uint64_t start  = !has_negatives || fabs(spec.evals[0]) < eps_drop ? 1 : 0;
   for (uint64_t i = 0; i < n_nodes; i ++) {
-    for (uint64_t k = 0; k < n_dims; k ++) {
-      uint64_t f = (uint64_t) spec.kept->a[k];
-      z->a[i * n_dims + k] = spec.evecs[ i + f * n_nodes ];
+    for (uint64_t k = 0; k < n_hidden; k ++) {
+      uint64_t f = start + k;
+      z->a[i * n_hidden + k] = spec.evecs[i + f * n_nodes];
     }
   }
-  lua_pop(L, 1);
+
+  for (uint64_t i = 0; i < n_hidden; i ++) {
+    if (i_each != -1) {
+      lua_pushvalue(L, i_each);
+      lua_pushstring(L, "eig");
+      lua_pushinteger(L, (int64_t) i);
+      lua_pushnumber(L, spec.evals[i]);
+      lua_pushboolean(L, i >= start);
+      lua_call(L, 4, 0);
+    }
+  }
 
   // Cleanup
   free(spec.evals);
@@ -351,9 +292,6 @@ static inline void tm_run_spectral (
     lua_pushinteger(L, params.stats.numMatvecs);
     lua_call(L, 2, 0);
   }
-
-  *n_dimsp = spec.kept->n;
-  *neg_scalep = spec.neg_scale;
 }
 
 static inline int tm_encode (lua_State *L)
@@ -362,14 +300,15 @@ static inline int tm_encode (lua_State *L)
 
   lua_getfield(L, 1, "graph");
   tk_graph_t *graph = tk_graph_peek(L, -1);
+  if (tk_dsu_components(&graph->dsu) > 1)
+    tk_lua_verror(L, 2, "spectral", "graph is not fully connected");
+
   int Gi = tk_lua_absindex(L, -1);
   uint64_t n_hidden = tk_lua_fcheckunsigned(L, 1, "spectral", "n_hidden");
-  int64_t n_fixed = tk_lua_foptinteger(L, 1, "spectral", "n_fixed", -1);
   unsigned int n_threads = tk_threads_getn(L, 1, "spectral", "threads");
   double neg_scale = tk_lua_foptnumber(L, 1, "spectral", "negatives", -1.0);
   bool normalized = tk_lua_foptboolean(L, 1, "spectral", "normalized", true);
   double eps_primme = tk_lua_foptnumber(L, 1, "spectral", "eps_primme", 1e-4);
-  double eps_keep = tk_lua_foptnumber(L, 1, "spectral", "eps_keep", 1e-4);
 
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
@@ -387,22 +326,17 @@ static inline int tm_encode (lua_State *L)
   tk_dvec_t *z = tk_dvec_create(L, 0, 0, 0);
   tk_dvec_t *scale = tk_dvec_create(L, graph->uids->n, 0, 0);
   tk_dvec_t *degree = tk_dvec_create(L, graph->uids->n, 0, 0);
-  uint64_t n_dims = 0;
   tm_run_spectral(L, Gi, pool, z, scale, degree, graph, adj_pos, adj_neg,
-                  graph->uids->n, n_hidden, n_fixed, eps_primme, eps_keep,
-                  normalized, i_each, &neg_scale, &n_dims);
-  lua_pop(L, 1); // degrees
-  lua_pushinteger(L, (int64_t) n_dims);
-  lua_pushnumber(L, neg_scale);
+                  graph->uids->n, n_hidden, eps_primme, normalized, i_each,
+                  neg_scale);
+  lua_pop(L, 2); // degree, scale
 
   // Cleanup
   tk_threads_destroy(pool);
-  assert(tk_ivec_peekopt(L, -5) == ids);
-  assert(tk_dvec_peekopt(L, -4) == z);
-  assert(tk_dvec_peekopt(L, -3) == scale);
-  assert(lua_tointeger(L, -2) == (int64_t) n_dims);
-  assert(lua_tonumber(L, -1) == neg_scale);
-  return 5; // ids, z, scale, n_dims, neg_scale
+  assert(tk_ivec_peekopt(L, -2) == ids);
+  assert(tk_dvec_peekopt(L, -1) == z);
+
+  return 2; // ids, z
 }
 
 static luaL_Reg tm_codebook_fns[] =
