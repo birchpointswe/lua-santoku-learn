@@ -10,22 +10,14 @@ static inline void tk_tch_refine (
   lua_State *L,
   tk_ivec_t *codes,
 
-
-  tk_dvec_t *scale,
-
   tk_graph_t *graph,
   uint64_t n_dims,
-
 
   double neg_scale,
 
   int i_each
 
 ) {
-
-
-  neg_scale = fabs(neg_scale);
-
   uint64_t total_steps = 0;
   tk_graph_adj_t *adj_pos = graph->adj_pos;
   tk_graph_adj_t *adj_neg = graph->adj_neg;
@@ -70,14 +62,11 @@ static inline void tk_tch_refine (
         double delta = 0.0;
 
         tk_iuset_foreach(adj_pos->a[i], j, ({
-
           delta += bitvec[i] * bitvec[j];
         }))
 
         tk_iuset_foreach(adj_neg->a[i], j, ({
-
-
-          delta -= bitvec[i] * bitvec[j];
+          delta += bitvec[i] * bitvec[j] * neg_scale;
         }))
 
         if (delta < 0.0){

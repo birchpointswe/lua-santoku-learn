@@ -210,103 +210,87 @@ M.split_binary_mnist = function (dataset, ratio)
   end
 end
 
-M.multiclass_pairs = function (labels, n_anchors_pos, n_anchors_neg)
-
-  if n_anchors_pos == nil then n_anchors_pos = 1 end
+M.multiclass_pairs = function (ids, labels, n_anchors_pos, n_anchors_neg, index, eps_pos, eps_neg)
+  err.assert(ids:size() == labels:size(), "ids and labels must align")
+  if n_anchors_pos == nil then
+    n_anchors_pos = 1
+  end
   if n_anchors_neg == nil then
     n_anchors_neg = (n_anchors_pos > 0) and n_anchors_pos or 1
   end
   local pos, neg = pvec.create(), pvec.create()
-  local class_to_indices, class_to_anchors = {}, {}
+  local class_to_ids, class_to_anchors = {}, {}
   local classes = ivec.create()
-
+  local label_of_id   = {}
   for i, y in labels:ieach() do
-    if not class_to_indices[y] then
-      class_to_indices[y] = ivec.create()
-      classes:push(y)
+    local id = ids:get(i)
+    if y ~= -1 then
+      label_of_id[id] = y
+      if not class_to_ids[y] then
+        class_to_ids[y] = ivec.create()
+        classes:push(y)
+      end
+      class_to_ids[y]:push(id)
     end
-    class_to_indices[y]:push(i)
   end
-
-  local function shuffled_order(n)
-    local t = {}
-    for i = 0, n - 1 do t[i] = i end
-    for i = n - 1, 1, -1 do
-      local j = num.random(i + 1) - 1
-      t[i], t[j] = t[j], t[i]
-    end
-    return t
-  end
-
+  local shuffle = ivec.create()
   for class in classes:each() do
     class_to_anchors[class] = ivec.create()
   end
   if n_anchors_pos > 0 then
     for class in classes:each() do
-      local idxs = class_to_indices[class]
-      local k = num.min(n_anchors_pos, idxs:size())
+      local idvec = class_to_ids[class]
+      local k = num.min(n_anchors_pos, idvec:size())
       if k > 0 then
-        local order = shuffled_order(idxs:size())
+        shuffle:resize(idvec:size())
+        shuffle:fill_indices()
+        shuffle:shuffle()
         local anchors = class_to_anchors[class]
         for i = 0, k - 1 do
-          anchors:push(idxs:get(order[i]))
+          anchors:push(idvec:get(shuffle:get(i)))
         end
       end
     end
   end
-
   if n_anchors_pos > 0 then
     for class in classes:each() do
-      local idxs = class_to_indices[class]
-      local anchors = class_to_anchors[class]
-      for idx in idxs:each() do
-        for a in anchors:each() do
-          if idx ~= a then pos:push(idx, a) end
+      local idvec, anchors = class_to_ids[class], class_to_anchors[class]
+      for id in idvec:each() do
+        for a_id in anchors:each() do
+          if id ~= a_id then
+            if index and eps_pos then
+              if index:distance(id, a_id) < eps_pos then
+                pos:push(id, a_id)
+              end
+            else
+              pos:push(id, a_id)
+            end
+          end
         end
       end
     end
   end
-
   if n_anchors_neg > 0 then
-    local neg_pool_for = {}
-    local order_for = {}
-    for class in classes:each() do
-      local pool = ivec.create()
-      for other_class in classes:each() do
-        if other_class ~= class then
-          local src = class_to_anchors[other_class]
-          if src:size() == 0 then src = class_to_indices[other_class] end
-          for a in src:each() do pool:push(a) end
-        end
-      end
-      neg_pool_for[class] = pool
-      if pool:size() > 0 then
-        order_for[class] = shuffled_order(pool:size())
+    local global_pool = ivec.create()
+    for _, vec in pairs(class_to_ids) do
+      for id in vec:each() do
+        global_pool:push(id)
       end
     end
-
+    local gsize = global_pool:size()
     for class in classes:each() do
-      local pool = neg_pool_for[class]
-      local pool_size = pool:size()
-      if pool_size > 0 then
-        local order = order_for[class]
-        local need = n_anchors_neg
-        local wrap = (need > pool_size)
-        local idxs = class_to_indices[class]
-        local offset = 0
-        for idx in idxs:each() do
-          if not wrap then
-            for j = 0, need - 1 do
-              local a = pool:get(order[(offset + j) % pool_size])
-              neg:push(idx, a)
-            end
-            offset = (offset + need) % pool_size
-          else
-
-            for _ = 1, need do
-              local a = pool:get(order[num.random(pool_size) - 1])
-              neg:push(idx, a)
-            end
+      local idvec = class_to_ids[class]
+      for id in idvec:each() do
+        for _ = 1, n_anchors_neg do
+          local tries, max_try, a_id = 0, gsize * 3
+          repeat
+            a_id = global_pool:get(num.random(gsize) - 1)
+            tries = tries + 1
+          until (label_of_id[a_id] ~= class and
+                 (not index or not eps_neg or index:distance(id, a_id) > eps_neg))
+                or tries >= max_try
+          if tries < max_try then
+            neg:push(id, a_id)
           end
         end
       end
@@ -314,75 +298,6 @@ M.multiclass_pairs = function (labels, n_anchors_pos, n_anchors_neg)
   end
   return pos, neg
 end
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 M.read_imdb = function (dir, max)
   local problems = {}
