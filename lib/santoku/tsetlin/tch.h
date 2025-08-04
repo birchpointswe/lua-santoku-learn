@@ -10,22 +10,14 @@ static inline void tk_tch_refine (
   lua_State *L,
   tk_ivec_t *codes,
 
-  // degree-normalized scale from spectral
-  tk_dvec_t *scale,
-
   tk_graph_t *graph,
   uint64_t n_dims,
 
-  // negative weighting/mode from spectral
   double neg_scale,
 
   int i_each
 
 ) {
-  // In spectral, a positive neg_scale causes negatives to be treated like weak
-  // positives. It the bit flipper, negatives are negatives.
-  neg_scale = fabs(neg_scale);
-
   uint64_t total_steps = 0;
   tk_graph_adj_t *adj_pos = graph->adj_pos;
   tk_graph_adj_t *adj_neg = graph->adj_neg;
@@ -70,14 +62,11 @@ static inline void tk_tch_refine (
         double delta = 0.0;
         // Positive neighbors
         tk_iuset_foreach(adj_pos->a[i], j, ({
-          // delta += scale->a[i] * scale->a[j] * bitvec[i] * bitvec[j];
           delta += bitvec[i] * bitvec[j];
         }))
         // Negative neighbors
         tk_iuset_foreach(adj_neg->a[i], j, ({
-          // delta -= scale->a[i] * scale->a[j] * bitvec[i] * bitvec[j];
-          // delta -= scale->a[i] * scale->a[j] * bitvec[i] * bitvec[j] * neg_scale;
-          delta -= bitvec[i] * bitvec[j];
+          delta += bitvec[i] * bitvec[j] * neg_scale;
         }))
         // Check
         if (delta < 0.0){

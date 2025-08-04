@@ -112,7 +112,7 @@ static inline void tk_inv_destroy (
   free(I->threads);
 }
 
-static inline double overlap (
+static inline double tk_inv_overlap (
   int64_t *a, size_t alen,
   int64_t *b, size_t blen
 ) {
@@ -157,6 +157,23 @@ static inline double tk_inv_jaccard (
 }
 
 static inline double tk_inv_similarity (
+  int64_t *abits, size_t asize,
+  int64_t *bbits, size_t bsize,
+  tk_inv_cmp_type_t cmp
+) {
+  switch (cmp) {
+    case TK_INV_JACCARD: {
+      return tk_inv_jaccard(abits, asize, bbits, bsize);
+    }
+    case TK_INV_OVERLAP: {
+      return tk_inv_overlap(abits, asize, bbits, bsize);
+    }
+    default:
+      return tk_inv_similarity(abits, asize, bbits, bsize, TK_INV_JACCARD);
+  }
+}
+
+static inline double tk_inv_similarity_partial (
   size_t inter,
   size_t qlen,
   size_t elen,
@@ -172,7 +189,7 @@ static inline double tk_inv_similarity (
       return (min_len == 0) ? 0.0 : (double) inter / (double) min_len;
     }
     default:
-      return tk_inv_similarity(inter, qlen, elen, TK_INV_JACCARD);
+      return tk_inv_similarity_partial(inter, qlen, elen, TK_INV_JACCARD);
   }
 }
 
@@ -313,6 +330,25 @@ static inline int64_t *tk_inv_get (
   if (sid < 0)
     return NULL;
   return tk_inv_sget(I, sid, np);
+}
+
+static inline double tk_inv_compare_items (
+  tk_inv_t *I,
+  int64_t uid0,
+  int64_t uid1,
+  tk_inv_cmp_type_t cmp,
+  bool is_similarity
+) {
+  size_t n0 = 0;
+  int64_t *v0 = tk_inv_get(I, uid0, &n0);
+  if (v0 == NULL)
+    return is_similarity ? 0.0 : 1.0;
+  size_t n1 = 0;
+  int64_t *v1 = tk_inv_get(I, uid1, &n1);
+  if (v1 == NULL)
+    return is_similarity ? 0.0 : 1.0;
+  double sim = tk_inv_similarity(v0, n0, v1, n1, cmp);
+  return is_similarity ? sim : 1.0 - sim;
 }
 
 static inline void tk_inv_add (
@@ -460,7 +496,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
     uint64_t inter = (uint64_t) cnt->a[vsid];
     size_t elen;
     tk_inv_sget(I, vsid, &elen);
-    double sim  = tk_inv_similarity(inter, datalen, elen, cmp);
+    double sim  = tk_inv_similarity_partial(inter, datalen, elen, cmp);
     double dist = tk_inv_length_bump(1.0 - sim, elen);
     if (dist <= eps) {
       int64_t vuid = tk_inv_sid_uid(I, vsid);
@@ -586,6 +622,42 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
     tk_lua_verror(L, 3, "neighbors", "invalid comparator specified", typ);
   tk_inv_neighborhoods(L, I, knn, eps, cmp, 0, 0);
   return 2;
+}
+
+static inline int tk_inv_similarity_lua (lua_State *L)
+{
+  lua_settop(L, 4);
+  tk_inv_t *I = tk_inv_peek(L, 1);
+  const char *typ = tk_lua_optstring(L, 4, "comparator", "jaccard");
+  tk_inv_cmp_type_t cmp = TK_INV_JACCARD;
+  if (!strcmp(typ, "jaccard"))
+    cmp = TK_INV_JACCARD;
+  else if (!strcmp(typ, "overlap"))
+    cmp = TK_INV_OVERLAP;
+  else
+    tk_lua_verror(L, 3, "similarity", "invalid comparator specified", typ);
+  int64_t uid0 = tk_lua_checkinteger(L, 2, "uid0");
+  int64_t uid1 = tk_lua_checkinteger(L, 3, "uid1");
+  lua_pushnumber(L, tk_inv_compare_items(I, uid0, uid1, cmp, true));
+  return 1;
+}
+
+static inline int tk_inv_distance_lua (lua_State *L)
+{
+  lua_settop(L, 4);
+  tk_inv_t *I = tk_inv_peek(L, 1);
+  const char *typ = tk_lua_optstring(L, 4, "comparator", "jaccard");
+  tk_inv_cmp_type_t cmp = TK_INV_JACCARD;
+  if (!strcmp(typ, "jaccard"))
+    cmp = TK_INV_JACCARD;
+  else if (!strcmp(typ, "overlap"))
+    cmp = TK_INV_OVERLAP;
+  else
+    tk_lua_verror(L, 3, "distance", "invalid comparator specified", typ);
+  int64_t uid0 = tk_lua_checkinteger(L, 2, "uid0");
+  int64_t uid1 = tk_lua_checkinteger(L, 3, "uid1");
+  lua_pushnumber(L, tk_inv_compare_items(I, uid0, uid1, cmp, false));
+  return 1;
 }
 
 static inline int tk_inv_neighbors_lua (lua_State *L)
@@ -745,7 +817,7 @@ static inline void tk_inv_worker (void *dp, int sig)
           vsid = sids->a[iv];
           size_t inter = (size_t) cnt->a[iv];
           vbits = tk_inv_sget(I, vsid, &nvbits);
-          double sim  = tk_inv_similarity(inter, nubits, nvbits, cmp);
+          double sim  = tk_inv_similarity_partial(inter, nubits, nvbits, cmp);
           double dist = tk_inv_length_bump(1.0 - sim, nvbits);
           if (dist <= eps) {
             int64_t vuid = tk_inv_sid_uid(I, vsid);
@@ -782,6 +854,8 @@ static luaL_Reg tk_inv_lua_mt_fns[] =
   { "get", tk_inv_get_lua },
   { "neighborhoods", tk_inv_neighborhoods_lua },
   { "neighbors", tk_inv_neighbors_lua },
+  { "distance", tk_inv_distance_lua },
+  { "similarity", tk_inv_similarity_lua },
   { "size", tk_inv_size_lua },
   { "threads", tk_inv_threads_lua },
   { "features", tk_inv_features_lua },
