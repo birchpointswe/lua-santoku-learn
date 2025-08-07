@@ -23,7 +23,9 @@ typedef tk_iuset_t * tk_graph_adj_item_t;
 #include <santoku/vec/tpl.h>
 
 typedef enum {
-  TK_GRAPH_TODO
+  TK_GRAPH_CSR_OFFSET_LOCAL,
+  TK_GRAPH_CSR_OFFSET_GLOBAL,
+  TK_GRAPH_CSR_DATA,
 } tk_graph_stage_t;
 
 typedef struct tk_graph_thread_s tk_graph_thread_t;
@@ -60,6 +62,12 @@ typedef struct tk_graph_s {
 
 typedef struct tk_graph_thread_s {
   tk_graph_t *graph;
+  tk_ivec_t *adj_offset;
+  tk_ivec_t *adj_data;
+  tk_dvec_t *adj_weights;
+  int64_t csr_base;
+  uint64_t ifirst, ilast;
+  unsigned int index;
 } tk_graph_thread_t;
 
 static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)

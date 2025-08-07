@@ -1,7 +1,6 @@
 # Now
 
-- Function to export csr adjacency to pass in to spectral and TCH instead of
-  passing in the graph
+- Update published version
 - Graph can now use dsu findx and unionx to use indices
 
 - ann/hbi

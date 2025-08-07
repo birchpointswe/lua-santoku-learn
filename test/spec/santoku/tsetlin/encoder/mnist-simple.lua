@@ -19,7 +19,7 @@ local FEATURES = 784
 local THREADS = nil
 
 local BINARIZE = "itq"
-local TCH = true
+local TCH = false
 local HIDDEN = 10
 local EPS_SPECTRAL = 1e-5
 local NORMALIZED = true
@@ -73,10 +73,26 @@ test("tsetlin", function ()
       str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Components: %-6d  Positives: %-6d  Negatives: %-6d\n", d, dd, dt, s, b, n) -- luacheck: ignore
     end
   })
+  dataset.graph_adj_ids,
+  dataset.graph_adj_offsets,
+  dataset.graph_adj_neighbors,
+  dataset.graph_adj_weights =
+    dataset.graph:adjacency()
+
+  -- for i = 0, 15 do
+  --   str.printf("  %6d  %6d  %6d  %6.4f\n",
+  --     dataset.graph_adj_ids:get(i),
+  --     dataset.graph_adj_offsets:get(i),
+  --     dataset.graph_adj_neighbors:get(i),
+  --     dataset.graph_adj_weights:get(i))
+  -- end
 
   print("\nSpectral eigendecomposition")
   dataset.ids_spectral, dataset.codes_spectral = spectral.encode({
-    graph = dataset.graph,
+    ids = dataset.graph_adj_ids,
+    offsets = dataset.graph_adj_offsets,
+    neighbors = dataset.graph_adj_neighbors,
+    weights = dataset.graph_adj_weights,
     n_hidden = HIDDEN,
     normalized = NORMALIZED,
     eps_primme = EPS_SPECTRAL,
@@ -119,11 +135,11 @@ test("tsetlin", function ()
   if TCH then
     print("\nFlipping bits")
     tch.refine({
+      ids = dataset.graph_adj_ids,
+      offsets = dataset.graph_adj_offsets,
+      neighbors = dataset.graph_adj_neighbors,
+      weights = dataset.graph_adj_weights,
       codes = dataset.codes_spectral,
-      graph = dataset.graph,
-      scale = dataset.scale_spectral,
-      pos_scale = POS_SCALE,
-      neg_scale = NEG_SCALE,
       n_dims = HIDDEN,
       each = function (s)
         local d, dd = stopwatch()
