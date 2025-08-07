@@ -1,9 +1,15 @@
 # Now
 
+- Function to export csr adjacency to pass in to spectral and TCH instead of
+  passing in the graph
+- Graph can now use dsu findx and unionx to use indices
+
 - ann/hbi
-    - Add tk_ann/hbi_distance/similarity as in inv
+    - Add tk_ann/hbi_distance/similarity as in inv (take this from the already-generalized
+      tk_graph_distance(...) function)
 
 - Chore
+    - Error checks on dimensions to prevent segfaults
     - Sanitize everything
 
 - tk_xxmap/set_t:

@@ -13,6 +13,7 @@ static inline void tk_tch_refine (
   tk_graph_t *graph,
   uint64_t n_dims,
 
+  double pos_scale,
   double neg_scale,
 
   int i_each
@@ -62,7 +63,7 @@ static inline void tk_tch_refine (
         double delta = 0.0;
         // Positive neighbors
         tk_iuset_foreach(adj_pos->a[i], j, ({
-          delta += bitvec[i] * bitvec[j];
+          delta += bitvec[i] * bitvec[j] * pos_scale;
         }))
         // Negative neighbors
         tk_iuset_foreach(adj_neg->a[i], j, ({

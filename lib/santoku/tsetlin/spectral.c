@@ -28,13 +28,15 @@ typedef struct {
   tk_graph_adj_t *adj_neg;
   tk_ivec_t *adj_pos_offset;
   tk_ivec_t *adj_pos_data;
+  tk_dvec_t *adj_pos_weights;
   tk_ivec_t *adj_neg_offset;
   tk_ivec_t *adj_neg_data;
+  tk_dvec_t *adj_neg_weights;
+  double pos_scale;
   bool normalized;
   uint64_t n_nodes;
   uint64_t n_hidden;
   uint64_t n_evals;
-  double neg_scale;
   tk_threadpool_t *pool;
 } tk_spectral_t;
 
@@ -42,76 +44,105 @@ typedef struct {
   tk_spectral_t *spec;
   int64_t csr_pos_total;
   int64_t csr_neg_total;
+  bool has_negatives;
   uint64_t ifirst, ilast;
+  unsigned int index;
 } tk_spectral_thread_t;
 
 static inline void tk_spectral_worker (void *dp, int sig)
 {
   tk_spectral_stage_t stage = (tk_spectral_stage_t) sig;
   tk_spectral_thread_t *data = (tk_spectral_thread_t *) dp;
-  double *x = data->spec->x;
-  double *y = data->spec->y;
-  double *scale = data->spec->scale;
-  double *degree = data->spec->degree;
-  double neg_scale = data->spec->neg_scale;
-  uint64_t ifirst = data->ifirst;
-  uint64_t ilast = data->ilast;
-  tk_graph_adj_t *adj_pos = data->spec->adj_pos;
-  tk_graph_adj_t *adj_neg = data->spec->adj_neg;
-  int64_t *adj_pos_offset = data->spec->adj_pos_offset->a;
-  int64_t *adj_neg_offset = data->spec->adj_neg_offset->a;
-  int64_t iv;
-
-  bool normalized = data->spec->normalized;
-
-  double w_pos = 1.0;
-  double w_neg = neg_scale;
-
-  int64_t poffset = 0;
-  int64_t noffset = 0;
-  int64_t csr_pos_total = data->csr_pos_total;
-  int64_t csr_neg_total = data->csr_neg_total;
 
   switch (stage) {
 
-    case TK_SPECTRAL_CSR_OFFSET_LOCAL:
+    case TK_SPECTRAL_CSR_OFFSET_LOCAL: {
+      tk_graph_adj_item_t *adj_pos = data->spec->adj_pos->a;
+      tk_graph_adj_item_t *adj_neg = data->spec->adj_neg->a;
+      int64_t *adj_pos_offset = data->spec->adj_pos_offset->a;
+      int64_t *adj_neg_offset = data->spec->adj_neg_offset->a;
+      uint64_t ifirst = data->ifirst;
+      uint64_t ilast = data->ilast;
+      int64_t poffset = 0;
+      int64_t noffset = 0;
       for (uint64_t i = ifirst; i <= ilast; i ++) {
         adj_pos_offset[i] = poffset;
         adj_neg_offset[i] = noffset;
-        int64_t deg_pos = tk_iuset_size(adj_pos->a[i]);
-        int64_t deg_neg = tk_iuset_size(adj_neg->a[i]);
+        int64_t deg_pos = tk_iuset_size(adj_pos[i]);
+        int64_t deg_neg = tk_iuset_size(adj_neg[i]);
         poffset += deg_pos;
         noffset += deg_neg;
-        degree[i] = ((double) deg_pos * w_pos) + ((double) deg_neg * fabs(w_neg));
       }
       data->csr_pos_total = poffset;
       data->csr_neg_total = noffset;
       break;
+    }
 
-    case TK_SPECTRAL_CSR_OFFSET_GLOBAL:
+    case TK_SPECTRAL_CSR_OFFSET_GLOBAL: {
+      uint64_t ifirst = data->ifirst;
+      uint64_t ilast = data->ilast;
+      int64_t *adj_pos_offset = data->spec->adj_pos_offset->a;
+      int64_t *adj_neg_offset = data->spec->adj_neg_offset->a;
+      int64_t csr_pos_total = data->csr_pos_total;
+      int64_t csr_neg_total = data->csr_neg_total;
       for (uint64_t i = ifirst; i <= ilast; i ++) {
         adj_pos_offset[i] += csr_pos_total;
         adj_neg_offset[i] += csr_neg_total;
       }
       break;
+    }
 
     case TK_SPECTRAL_CSR_DATA: {
+      uint64_t ifirst = data->ifirst;
+      uint64_t ilast = data->ilast;
+      double *degree = data->spec->degree;
+      tk_graph_adj_item_t *adj_pos = data->spec->adj_pos->a;
+      tk_graph_adj_item_t *adj_neg = data->spec->adj_neg->a;
       int64_t *adj_pos_data = data->spec->adj_pos_data->a;
       int64_t *adj_neg_data = data->spec->adj_neg_data->a;
+      int64_t *adj_pos_offset = data->spec->adj_pos_offset->a;
+      int64_t *adj_neg_offset = data->spec->adj_neg_offset->a;
+      double *adj_pos_weights = data->spec->adj_pos_weights->a;
+      double *adj_neg_weights = data->spec->adj_neg_weights->a;
+      tk_graph_t *graph = data->spec->graph;
+      int64_t *uids = graph->uids->a;
+      data->has_negatives = false;
       for (uint64_t i = ifirst; i <= ilast; i ++) {
+        int64_t u = uids[i];
         int64_t pwrite = adj_pos_offset[i];
         int64_t nwrite = adj_neg_offset[i];
-        tk_iuset_foreach(adj_pos->a[i], iv, ({
-          adj_pos_data[pwrite ++] = iv;
+        double wsum = 0.0;
+        int64_t iv, v;
+        double w;
+        tk_iuset_foreach(adj_pos[i], iv, ({
+          v = uids[iv];
+          w = tk_graph_get_weight(graph, u, v);
+          adj_pos_data[pwrite] = iv;
+          adj_pos_weights[pwrite] = w;
+          data->has_negatives = data->has_negatives || w < 0;
+          wsum += fabs(w);
+          pwrite ++;
         }))
-        tk_iuset_foreach(adj_neg->a[i], iv, ({
-          adj_neg_data[nwrite ++] = iv;
+        tk_iuset_foreach(adj_neg[i], iv, ({
+          v = uids[iv];
+          w = tk_graph_get_weight(graph, u, v);
+          adj_neg_data[nwrite] = iv;
+          adj_neg_weights[nwrite] = w;
+          data->has_negatives = data->has_negatives || w < 0;
+          wsum += fabs(w);
+          nwrite ++;
         }))
+        degree[i] = wsum;
       }
       break;
     }
 
-    case TK_SPECTRAL_SCALE:
+    case TK_SPECTRAL_SCALE: {
+      uint64_t ifirst = data->ifirst;
+      uint64_t ilast = data->ilast;
+      double *scale = data->spec->scale;
+      double *degree = data->spec->degree;
+      bool normalized = data->spec->normalized;
       if (normalized)
         for (uint64_t i = ifirst; i <= ilast; i ++)
           scale[i] = degree[i] > 0 ? 1.0 / sqrt(degree[i]) : 0.0;
@@ -119,19 +150,33 @@ static inline void tk_spectral_worker (void *dp, int sig)
         for (uint64_t i = ifirst; i <= ilast; i ++)
           scale[i] = 1.0;
       break;
+    }
 
     case TK_SPECTRAL_MATVEC: {
+      uint64_t ifirst = data->ifirst;
+      uint64_t ilast = data->ilast;
+      double *scale = data->spec->scale;
+      double *x = data->spec->x;
+      double *y = data->spec->y;
       int64_t *adj_pos_data = data->spec->adj_pos_data->a;
       int64_t *adj_neg_data = data->spec->adj_neg_data->a;
+      int64_t *adj_pos_offset = data->spec->adj_pos_offset->a;
+      int64_t *adj_neg_offset = data->spec->adj_neg_offset->a;
+      double *adj_pos_weights = data->spec->adj_pos_weights->a;
+      double *adj_neg_weights = data->spec->adj_neg_weights->a;
+      int64_t iv;
+      double w;
       for (uint64_t i = ifirst; i <= ilast; i ++) {
         double sum = 0.0;
         for (int64_t j = adj_pos_offset[i]; j < adj_pos_offset[i + 1]; j ++) {
-          int64_t iv = adj_pos_data[j];
-          sum += x[iv] * scale[i] * scale[iv] * w_pos;
+          iv = adj_pos_data[j];
+          w = adj_pos_weights[j];
+          sum += x[iv] * scale[i] * scale[iv] * w;
         }
         for (int64_t j = adj_neg_offset[i]; j < adj_neg_offset[i + 1]; j ++) {
-          int64_t iv = adj_neg_data[j];
-          sum += x[iv] * scale[i] * scale[iv] * w_neg;
+          iv = adj_neg_data[j];
+          w = adj_neg_weights[j];
+          sum += x[iv] * scale[i] * scale[iv] * w;
         }
         y[i] = x[i] - sum;
       }
@@ -173,12 +218,13 @@ static inline void tm_run_spectral (
   uint64_t n_hidden,
   double eps_primme,
   bool normalized,
-  int i_each,
-  double neg_scale
+  int i_each
 ) {
   // Init
   tk_spectral_t spec;
-  tk_spectral_thread_t threads[pool->n_threads];
+  tk_spectral_thread_t *threads = lua_newuserdata(L, pool->n_threads * sizeof(tk_spectral_thread_t));
+  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
+  lua_pop(L, 1);
   spec.normalized = normalized;
   spec.scale = scale->a;
   spec.degree = degree->a;
@@ -193,13 +239,14 @@ static inline void tm_run_spectral (
   spec.n_nodes = n_nodes;
   spec.n_hidden = n_hidden;
   spec.n_evals = n_hidden + 1;
-  spec.neg_scale = neg_scale;
   assert(spec.n_evals >= 2);
   spec.pool = pool;
   for (unsigned int i = 0; i < pool->n_threads; i ++) {
     tk_spectral_thread_t *data = threads + i;
     pool->threads[i].data = data;
     data->spec = &spec;
+    data->index = i;
+    data->has_negatives = false;
     tk_thread_range(i, pool->n_threads, n_nodes, &data->ifirst, &data->ilast);
   }
 
@@ -221,13 +268,22 @@ static inline void tm_run_spectral (
   spec.adj_neg_offset->a[spec.adj_neg_offset->n - 1] = neg_total;
   spec.adj_pos_data = tk_ivec_create(L, (size_t) pos_total, 0, 0);
   spec.adj_neg_data = tk_ivec_create(L, (size_t) neg_total, 0, 0);
+  spec.adj_pos_weights = tk_dvec_create(L, (size_t) pos_total, 0, 0);
+  spec.adj_neg_weights = tk_dvec_create(L, (size_t) neg_total, 0, 0);
+  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -4);
+  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -3);
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2);
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
-  lua_pop(L, 2);
+  lua_pop(L, 4);
   tk_threads_signal(pool, TK_SPECTRAL_CSR_DATA, 0);
 
   // Init scaling/normalization
   tk_threads_signal(pool, TK_SPECTRAL_SCALE, 0);
+  bool has_negatives = false;
+  for (unsigned int i = 0; !has_negatives && i < pool->n_threads; i ++) {
+    tk_spectral_thread_t *data = threads + i;
+    has_negatives = data->has_negatives;
+  }
 
   // Run PRIMME to compute the eigenvectors closest to zero
   openblas_set_num_threads((int) pool->n_threads);
@@ -258,9 +314,8 @@ static inline void tm_run_spectral (
 
   tk_dvec_ensure(z, n_nodes * n_hidden);
   z->n = n_nodes * n_hidden;
-  bool has_negatives = (spec.neg_scale < 0.0) && (neg_total > 0);
   double eps_drop = fmax(1e-8, 10.0 * eps_primme);
-  uint64_t start  = !has_negatives || fabs(spec.evals[0]) < eps_drop ? 1 : 0;
+  uint64_t start = !has_negatives || fabs(spec.evals[0]) < eps_drop ? 1 : 0;
   for (uint64_t i = 0; i < n_nodes; i ++) {
     for (uint64_t k = 0; k < n_hidden; k ++) {
       uint64_t f = start + k;
@@ -268,7 +323,7 @@ static inline void tm_run_spectral (
     }
   }
 
-  for (uint64_t i = 0; i < n_hidden; i ++) {
+  for (uint64_t i = 0; i < spec.n_evals; i ++) {
     if (i_each != -1) {
       lua_pushvalue(L, i_each);
       lua_pushstring(L, "eig");
@@ -306,7 +361,6 @@ static inline int tm_encode (lua_State *L)
   int Gi = tk_lua_absindex(L, -1);
   uint64_t n_hidden = tk_lua_fcheckunsigned(L, 1, "spectral", "n_hidden");
   unsigned int n_threads = tk_threads_getn(L, 1, "spectral", "threads");
-  double neg_scale = tk_lua_foptnumber(L, 1, "spectral", "negatives", -1.0);
   bool normalized = tk_lua_foptboolean(L, 1, "spectral", "normalized", true);
   double eps_primme = tk_lua_foptnumber(L, 1, "spectral", "eps_primme", 1e-4);
 
@@ -327,8 +381,7 @@ static inline int tm_encode (lua_State *L)
   tk_dvec_t *scale = tk_dvec_create(L, graph->uids->n, 0, 0);
   tk_dvec_t *degree = tk_dvec_create(L, graph->uids->n, 0, 0);
   tm_run_spectral(L, Gi, pool, z, scale, degree, graph, adj_pos, adj_neg,
-                  graph->uids->n, n_hidden, eps_primme, normalized, i_each,
-                  neg_scale);
+                  graph->uids->n, n_hidden, eps_primme, normalized, i_each);
   lua_pop(L, 2); // degree, scale
 
   // Cleanup

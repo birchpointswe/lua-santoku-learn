@@ -210,6 +210,14 @@ M.split_binary_mnist = function (dataset, ratio)
   end
 end
 
+local function canonicalize (a, b)
+  if a < b then
+    return a, b
+  else
+    return b, a
+  end
+end
+
 M.multiclass_pairs = function (ids, labels, n_anchors_pos, n_anchors_neg, index, eps_pos, eps_neg)
   err.assert(ids:size() == labels:size(), "ids and labels must align")
   if n_anchors_pos == nil then
@@ -225,12 +233,17 @@ M.multiclass_pairs = function (ids, labels, n_anchors_pos, n_anchors_neg, index,
   for i, y in labels:ieach() do
     local id = ids:get(i)
     if y ~= -1 then
-      label_of_id[id] = y
-      if not class_to_ids[y] then
-        class_to_ids[y] = ivec.create()
-        classes:push(y)
+      local prev = label_of_id[id]
+      if prev == nil then -- first time we see this id
+        label_of_id[id] = y
+        if not class_to_ids[y] then
+          class_to_ids[y] = ivec.create()
+          classes:push(y)
+        end
+        class_to_ids[y]:push(id)
+      elseif prev ~= y then -- conflicting label
+        err.abort(("id %d has labels %d and %d"):format(id, prev, y))
       end
-      class_to_ids[y]:push(id)               -- store real ID
     end
   end
   local shuffle = ivec.create()
@@ -259,11 +272,11 @@ M.multiclass_pairs = function (ids, labels, n_anchors_pos, n_anchors_neg, index,
         for a_id in anchors:each() do
           if id ~= a_id then
             if index and eps_pos then
-              if index:distance(id, a_id) < eps_pos then
-                pos:push(id, a_id)
+              if index:distance(id, a_id) <= eps_pos then
+                pos:push(canonicalize(id, a_id))
               end
             else
-              pos:push(id, a_id)
+              pos:push(canonicalize(id, a_id))
             end
           end
         end
@@ -287,15 +300,17 @@ M.multiclass_pairs = function (ids, labels, n_anchors_pos, n_anchors_neg, index,
             a_id = global_pool:get(num.random(gsize) - 1)
             tries = tries + 1
           until (label_of_id[a_id] ~= class and
-                 (not index or not eps_neg or index:distance(id, a_id) > eps_neg))
+                 (not index or not eps_neg or index:distance(id, a_id) >= eps_neg))
                 or tries >= max_try
           if tries < max_try then
-            neg:push(id, a_id)
+            neg:push(canonicalize(id, a_id))
           end
         end
       end
     end
   end
+  pos:xasc()
+  neg:xasc()
   return pos, neg
 end
 

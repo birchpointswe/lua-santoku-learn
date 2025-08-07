@@ -376,41 +376,6 @@ static inline void tk_ann_extend_neighborhood (
   }
 }
 
-static inline void tk_ann_populate_neighborhood (
-  tk_ann_t *A,
-  uint64_t i,
-  int64_t sid,
-  char *V,
-  tk_pvec_t *hood,
-  tk_iumap_t *sid_idx,
-  uint64_t eps
-) {
-  tk_ann_hash_t h = tk_ann_hash(A, V);
-  tk_ann_extend_neighborhood(A, sid, V, h, hood, sid_idx, eps);
-  int pos[TK_ANN_BITS];
-  for (int r = 1; r <= (int) A->probe_radius && r <= TK_ANN_BITS; r ++) {
-    for (int i = 0; i < r; i ++)
-      pos[i] = i;
-    while (true) {
-      tk_ann_hash_t mask = 0;
-      for (int i = 0; i < r; i ++)
-        mask |= (1U << pos[i]);
-      tk_ann_extend_neighborhood(A, sid, V, h ^ mask, hood, sid_idx, eps);
-      int i;
-      for (i = r - 1; i >= 0; i--) {
-        if (pos[i] != i + TK_ANN_BITS - r) {
-          pos[i] ++;
-          for (int j = i + 1; j < r; j ++)
-            pos[j] = pos[j - 1] + 1;
-          break;
-        }
-      }
-      if (i < 0)
-        break;
-    }
-  }
-}
-
 static inline void tk_ann_neighborhoods (
   lua_State *L,
   tk_ann_t *A,
@@ -470,6 +435,52 @@ static inline void tk_ann_neighborhoods (
   lua_remove(L, -3); // sids
 }
 
+static inline void tk_ann_probe_bucket (
+  tk_ann_t *A,
+  tk_ann_hash_t h,
+  const unsigned char *v,
+  uint64_t ftr,
+  int64_t skip_sid,
+  tk_iumap_t *sid_idx,
+  uint64_t eps,
+  uint64_t k,
+  tk_pvec_t *out
+) {
+  uint64_t n_bytes = (ftr + CHAR_BIT - 1) / CHAR_BIT;
+  khint_t khi = kh_get(tk_ann_buckets, A->buckets, h);
+  if (khi == kh_end(A->buckets))
+    return;
+  tk_ivec_t *bucket = kh_value(A->buckets, khi);
+  for (uint64_t bi = 0; bi < bucket->n; bi++) {
+    int64_t sid1 = bucket->a[bi];
+    if (sid1 == skip_sid)
+      continue;
+    int64_t id;
+    if (sid_idx) {
+      khint_t k2 = tk_iumap_get(sid_idx, sid1);
+      if (k2 == tk_iumap_end(sid_idx))
+        continue;
+      id = tk_iumap_value(sid_idx, k2);
+    } else {
+      id = tk_ann_sid_uid(A, sid1);
+      if (id < 0)
+        continue;
+    }
+    const unsigned char *p1 = (const unsigned char *)
+      tk_ann_sget(A, sid1);
+    uint64_t dist = 0;
+    for (uint64_t i = 0; i < n_bytes && dist <= eps; i++)
+      if (v[i] != p1[i])
+        dist++;
+    if (dist <= eps) {
+      if (k > 0)
+        tk_pvec_hmax(out, tk_pair(id, (int64_t) dist));
+      else
+        tk_pvec_push(out, tk_pair(id, (int64_t) dist));
+    }
+  }
+}
+
 static inline tk_pvec_t *tk_ann_neighbors_by_vec (
   tk_ann_t *A,
   char *vec,
@@ -486,38 +497,22 @@ static inline tk_pvec_t *tk_ann_neighbors_by_vec (
     out->m = knn;
   }
   const tk_ann_hash_t h0 = tk_ann_hash(A, vec);
+  const unsigned char *v = (const unsigned char *) vec;
+  const uint64_t ftr = A->features;
   int pos[TK_ANN_BITS];
-  for (int r = 0; r <= (int) A->probe_radius && r <= TK_ANN_BITS; r ++) {
-    for (int i = 0; i < r; i ++)
+  for (int r = 0; r <= (int) A->probe_radius && r <= TK_ANN_BITS; r++) {
+    for (int i = 0; i < r; i++)
       pos[i] = i;
     while (true) {
       tk_ann_hash_t mask = 0;
-      for (int i = 0; i < r; i ++)
+      for (int i = 0; i < r; i++)
         mask |= (1U << pos[i]);
-      khint_t khi = kh_get(tk_ann_buckets, A->buckets, h0 ^ mask);
-      if (khi != kh_end(A->buckets)) {
-        tk_ivec_t *bucket = kh_value(A->buckets, khi);
-        for (uint64_t bi = 0; bi < bucket->n; bi ++) {
-          int64_t sid1 = bucket->a[bi];
-          if (sid1 == sid0)
-            continue;
-          int64_t uid1 = tk_ann_sid_uid(A, sid1);
-          if (uid1 < 0)
-            continue;
-          uint64_t d = tk_ann_hamming((const unsigned char *) vec, (const unsigned char *) tk_ann_sget(A, sid1), A->features);
-          if (d <= eps) {
-            if (knn > 0)
-              tk_pvec_hmax(out, tk_pair(uid1, (int64_t) d));
-            else
-              tk_pvec_push(out, tk_pair(uid1, (int64_t) d));
-          }
-        }
-      }
+      tk_ann_probe_bucket(A, h0 ^ mask, v, ftr, sid0, NULL, eps, knn, out);
       int j;
-      for (j = r - 1; j >= 0; j --) {
+      for (j = r - 1; j >= 0; j--) {
         if (pos[j] != j + TK_ANN_BITS - r) {
-          pos[j] ++;
-          for (int k = j + 1; k < r; k ++)
+          pos[j]++;
+          for (int k = j + 1; k < r; k++)
             pos[k] = pos[k - 1] + 1;
           break;
         }
@@ -543,6 +538,42 @@ static inline tk_pvec_t *tk_ann_neighbors_by_id (
     return out;
   }
   return tk_ann_neighbors_by_vec(A, tk_ann_get(A, uid), sid0, knn, eps, out);
+}
+
+static inline void tk_ann_populate_neighborhood (
+  tk_ann_t *A,
+  uint64_t i,
+  int64_t sid,
+  char *V,
+  tk_pvec_t *hood,
+  tk_iumap_t *sid_idx,
+  uint64_t eps
+) {
+  const unsigned char *v_uc = (const unsigned char *) V;
+  tk_ann_hash_t h = tk_ann_hash(A, V);
+  tk_ann_probe_bucket(A, h, v_uc, A->features, sid, sid_idx, eps, hood->m, hood);
+  int pos[TK_ANN_BITS];
+  for (int r = 1; r <= (int) A->probe_radius && r <= TK_ANN_BITS; r++) {
+    for (int i = 0; i < r; i++)
+      pos[i] = i;
+    while (true) {
+      tk_ann_hash_t mask = 0;
+      for (int j = 0; j < r; j++)
+        mask |= (1U << pos[j]);
+      tk_ann_probe_bucket(A, h ^ mask, v_uc, A->features, sid, sid_idx, eps, hood->m, hood);
+      int k;
+      for (k = r - 1; k >= 0; k--) {
+        if (pos[k] != k + TK_ANN_BITS - r) {
+          pos[k]++;
+          for (int j = k + 1; j < r; j++)
+            pos[j] = pos[j - 1] + 1;
+          break;
+        }
+      }
+      if (k < 0)
+        break;
+    }
+  }
 }
 
 static inline int tk_ann_gc_lua (lua_State *L)

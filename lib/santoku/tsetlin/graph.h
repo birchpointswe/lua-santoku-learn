@@ -43,6 +43,13 @@ typedef struct tk_graph_s {
   tk_hbi_hoods_t *hbi_hoods;
   uint64_t knn_cache;
   double knn_eps;
+  double pos_scale;
+  double neg_scale;
+  double pos_flip_threshold;
+  double neg_flip_threshold;
+  double pos_sigma;
+  double neg_sigma;
+  double weight_eps;
   tk_pvec_t *pos, *neg;
   tk_ivec_t *labels;
   uint64_t n_pos, n_neg;
@@ -58,6 +65,19 @@ typedef struct tk_graph_thread_s {
 static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
 {
   return (tk_graph_t *) luaL_checkudata(L, i, TK_GRAPH_MT);
+}
+
+static inline double tk_graph_get_weight (
+  tk_graph_t *graph,
+  int64_t u,
+  int64_t v
+) {
+  khint_t khi;
+  tm_pair_t p = tm_pair(u, v, 0);
+  khi = kh_get(pairs, graph->pairs, p);
+  if (khi == kh_end(graph->pairs))
+    return 0.0;
+  return kh_key(graph->pairs, khi).w;
 }
 
 #endif
