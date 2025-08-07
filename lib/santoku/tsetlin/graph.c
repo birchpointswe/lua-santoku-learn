@@ -24,11 +24,70 @@ static inline tk_graph_t *tm_graph_create (
 static inline void tk_graph_worker (void *dp, int sig)
 {
   tk_graph_stage_t stage = (tk_graph_stage_t) sig;
-  // tk_graph_thread_t *data = (tk_graph_thread_t *) dp;
+  tk_graph_thread_t *data = (tk_graph_thread_t *) dp;
+
   switch (stage) {
-    case TK_GRAPH_TODO:
-      // TODO
+
+    case TK_GRAPH_CSR_OFFSET_LOCAL: {
+      tk_graph_adj_item_t *adj_pos = data->graph->adj_pos->a;
+      tk_graph_adj_item_t *adj_neg = data->graph->adj_neg->a;
+      int64_t *adj_offset = data->adj_offset->a;
+      uint64_t ifirst = data->ifirst;
+      uint64_t ilast = data->ilast;
+      int64_t offset = 0;
+      for (uint64_t i = ifirst; i <= ilast; i ++) {
+        adj_offset[i] = offset;
+        int64_t deg_pos = tk_iuset_size(adj_pos[i]);
+        int64_t deg_neg = tk_iuset_size(adj_neg[i]);
+        offset += deg_pos + deg_neg;
+      }
+      data->csr_base = offset;
       break;
+    }
+
+    case TK_GRAPH_CSR_OFFSET_GLOBAL: {
+      uint64_t ifirst = data->ifirst;
+      uint64_t ilast = data->ilast;
+      int64_t *adj_offset = data->adj_offset->a;
+      int64_t csr_base = data->csr_base;
+      for (uint64_t i = ifirst; i <= ilast; i ++)
+        adj_offset[i] += csr_base;
+      break;
+    }
+
+    case TK_GRAPH_CSR_DATA: {
+      uint64_t ifirst = data->ifirst;
+      uint64_t ilast = data->ilast;
+      tk_graph_adj_item_t *adj_pos = data->graph->adj_pos->a;
+      tk_graph_adj_item_t *adj_neg = data->graph->adj_neg->a;
+      int64_t *adj_data = data->adj_data->a;
+      int64_t *adj_offset = data->adj_offset->a;
+      double *adj_weights = data->adj_weights->a;
+      tk_graph_t *graph = data->graph;
+      int64_t *uids = graph->uids->a;
+      for (uint64_t i = ifirst; i <= ilast; i ++) {
+        int64_t u = uids[i];
+        int64_t write = adj_offset[i];
+        int64_t iv, v;
+        double w;
+        tk_iuset_foreach(adj_pos[i], iv, ({
+          v = uids[iv];
+          w = tk_graph_get_weight(graph, u, v);
+          adj_data[write] = iv;
+          adj_weights[write] = w;
+          write ++;
+        }))
+        tk_iuset_foreach(adj_neg[i], iv, ({
+          v = uids[iv];
+          w = tk_graph_get_weight(graph, u, v);
+          adj_data[write] = iv;
+          adj_weights[write] = w;
+          write ++;
+        }))
+      }
+      break;
+
+    }
   }
 }
 
@@ -1031,6 +1090,50 @@ static inline int tm_create (lua_State *L)
   return 1;
 }
 
+static inline int tm_graph_adjacency (lua_State *L)
+{
+  lua_settop(L, 1);
+  tk_graph_t *graph = tk_graph_peek(L, 1);
+
+  uint64_t n_nodes = graph->uids->n;
+  tk_lua_get_ephemeron(L, TK_GRAPH_EPH, graph->uids); // uids
+
+  // Setup threads
+  tk_ivec_t *adj_offset = tk_ivec_create(L, n_nodes + 1, 0, 0); // uids, off
+  tk_ivec_t *adj_data = tk_ivec_create(L, 0, 0, 0); // uids, off, data
+  tk_dvec_t *adj_weights = tk_dvec_create(L, 0, 0, 0); // uids, off, data, weight
+  for (unsigned int i = 0; i < graph->pool->n_threads; i ++) {
+    tk_graph_thread_t *data = graph->threads + i;
+    data->adj_offset = adj_offset;
+    data->adj_data = adj_data;
+    data->adj_weights = adj_weights;
+    tk_thread_range(i, graph->pool->n_threads, n_nodes, &data->ifirst, &data->ilast);
+  }
+
+  // Populate thread-local offsets
+  tk_threads_signal(graph->pool, TK_GRAPH_CSR_OFFSET_LOCAL, 0);
+
+  // Push base offsets through thread range
+  int64_t total = 0;
+  for (unsigned int i = 0; i < graph->pool->n_threads; i ++) {
+    tk_graph_thread_t *data = graph->threads + i;
+    int64_t tmp = data->csr_base;
+    data->csr_base = total;
+    total += tmp;
+  }
+  adj_offset->a[adj_offset->n - 1] = total;
+
+  // Make local offsets global
+  tk_threads_signal(graph->pool, TK_GRAPH_CSR_OFFSET_GLOBAL, 0);
+  tk_ivec_resize(adj_data, (size_t) total, true);
+  tk_dvec_resize(adj_weights, (size_t) total, true);
+
+  // Populate csr data
+  tk_threads_signal(graph->pool, TK_GRAPH_CSR_DATA, 0);
+
+  return 4; // uids, offset, data, weight
+}
+
 static inline int tm_graph_pairs (lua_State *L)
 {
   lua_settop(L, 1);
@@ -1048,6 +1151,7 @@ static inline int tm_graph_pairs (lua_State *L)
 static luaL_Reg tm_graph_mt_fns[] =
 {
   { "pairs", tm_graph_pairs },
+  { "adjacency", tm_graph_adjacency },
   { NULL, NULL }
 };
 

@@ -10,27 +10,24 @@ static inline void tk_tch_refine (
   lua_State *L,
   tk_ivec_t *codes,
 
-  tk_graph_t *graph,
+  tk_ivec_t *uids,
+  tk_ivec_t *adj_offset,
+  tk_ivec_t *adj_data,
+  tk_dvec_t *adj_weights,
   uint64_t n_dims,
-
-  double pos_scale,
-  double neg_scale,
 
   int i_each
 
 ) {
   uint64_t total_steps = 0;
-  tk_graph_adj_t *adj_pos = graph->adj_pos;
-  tk_graph_adj_t *adj_neg = graph->adj_neg;
-  uint64_t n_nodes = graph->uids->n;
 
   // Prep node order shuffle
-  tk_ivec_t *node_order = tk_ivec_create(L, n_nodes, 0, 0);
+  tk_ivec_t *node_order = tk_ivec_create(L, uids->n, 0, 0);
   tk_ivec_fill_indices(node_order);
 
-  int *bitvecs = tk_malloc(L, n_dims * n_nodes * sizeof(int));
+  int *bitvecs = tk_malloc(L, n_dims * uids->n * sizeof(int));
 
-  for (uint64_t i = 0; i < n_dims * n_nodes; i ++)
+  for (uint64_t i = 0; i < n_dims * uids->n; i ++)
     bitvecs[i] = -1;
 
   for (uint64_t i = 0; i < codes->n; i ++) {
@@ -39,17 +36,16 @@ static inline void tk_tch_refine (
       continue;
     uint64_t s = (uint64_t) v / n_dims;
     uint64_t f = (uint64_t) v % n_dims;
-    bitvecs[f * n_nodes + s] = +1;
+    bitvecs[f * uids->n + s] = +1;
   }
 
   codes->n = 0;
 
   for (uint64_t f = 0; f < n_dims; f ++) {
-    int *bitvec = bitvecs + f * n_nodes;
+    int *bitvec = bitvecs + f * uids->n;
 
     bool updated;
     uint64_t steps = 0;
-    int64_t i, j;
 
     tk_ivec_shuffle(node_order);
 
@@ -57,28 +53,23 @@ static inline void tk_tch_refine (
       updated = false;
       steps ++;
       total_steps ++;
-
-      for (uint64_t si = 0; si < n_nodes; si ++) {
-        i = node_order->a[si];
+      for (uint64_t si = 0; si < uids->n; si ++) {
+        int64_t i = node_order->a[si];
+        int64_t row_start = adj_offset->a[i];
+        int64_t row_end = adj_offset->a[i + 1];
         double delta = 0.0;
-        // Positive neighbors
-        tk_iuset_foreach(adj_pos->a[i], j, ({
-          delta += bitvec[i] * bitvec[j] * pos_scale;
-        }))
-        // Negative neighbors
-        tk_iuset_foreach(adj_neg->a[i], j, ({
-          delta += bitvec[i] * bitvec[j] * neg_scale;
-        }))
-        // Check
+        for (int64_t jj = row_start; jj < row_end; jj++) {
+          int64_t j = adj_data->a[jj];
+          delta += bitvec[i] * bitvec[j] * adj_weights->a[jj];
+        }
         if (delta < 0.0){
           bitvec[i] = -bitvec[i];
           updated = true;
         }
       }
-
     } while (updated);
 
-    for (uint64_t i = 0; i < n_nodes; i ++)
+    for (uint64_t i = 0; i < uids->n; i ++)
       if (bitvec[i] > 0)
         tk_ivec_push(codes, (int64_t) i * (int64_t) n_dims + (int64_t) f);
   }
