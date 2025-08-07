@@ -363,25 +363,33 @@ static inline void tk_inv_add (
   }
   if (node_bits->n == 0)
     return;
-  int kha;
-  khint_t khi;
+  tk_ivec_uasc(node_bits, 0, node_bits->n);
   tk_iuset_t *seen = tk_iuset_create();
-  for (uint64_t i = 0; i < node_bits->n; i ++) {
-    int64_t b = node_bits->a[i];
-    if (b < 0)
-      continue;
-    int64_t s = b / (int64_t) I->features;
-    if (s >= (int64_t) ids->n)
-      continue;
-    int64_t fid = b % (int64_t) I->features;
+  size_t nb = node_bits->n;
+  size_t nsamples = ids->n;
+  size_t i = 0;
+  for (size_t s = 0; s < nsamples; s++) {
     int64_t uid = ids->a[s];
-    khi = tk_iuset_put(seen, uid, &kha);
-    int64_t sid = tk_inv_uid_sid(I, uid, kha);
-    if (kha)
-      tk_ivec_push(I->node_offsets, (int64_t) I->node_bits->n);
-    tk_ivec_push(I->postings->a[fid], sid);
-    tk_ivec_push(I->node_bits, fid);
+    int64_t sid = tk_inv_uid_sid(I, uid, true);
+    tk_ivec_push(I->node_offsets, (int64_t) I->node_bits->n);
+    while (i < nb) {
+      int64_t b = node_bits->a[i];
+      if (b < 0) { i++; continue; }
+      size_t sample_idx = (size_t) b / (size_t) I->features;
+      if (sample_idx != s)
+        break;
+      int64_t fid = b % (int64_t) I->features;
+      tk_ivec_t *post = I->postings->a[fid];
+      bool found = false;
+      for (size_t j = 0; j < post->n; j++)
+        if (post->a[j] == sid) { found = true; break; }
+      if (!found)
+        tk_ivec_push(post, sid);
+      tk_ivec_push(I->node_bits, fid);
+      i++;
+    }
   }
+  // After last sample, node_offsets->a[nsamples] marks end (optional)
   tk_iuset_destroy(seen);
 }
 
