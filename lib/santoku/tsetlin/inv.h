@@ -332,23 +332,22 @@ static inline int64_t *tk_inv_get (
   return tk_inv_sget(I, sid, np);
 }
 
-static inline double tk_inv_compare_items (
+static inline double tk_inv_distance (
   tk_inv_t *I,
   int64_t uid0,
   int64_t uid1,
-  tk_inv_cmp_type_t cmp,
-  bool is_similarity
+  tk_inv_cmp_type_t cmp
 ) {
   size_t n0 = 0;
   int64_t *v0 = tk_inv_get(I, uid0, &n0);
   if (v0 == NULL)
-    return is_similarity ? 0.0 : 1.0;
+    return 1.0;
   size_t n1 = 0;
   int64_t *v1 = tk_inv_get(I, uid1, &n1);
   if (v1 == NULL)
-    return is_similarity ? 0.0 : 1.0;
+    return 1.0;
   double sim = tk_inv_similarity(v0, n0, v1, n1, cmp);
-  return is_similarity ? sim : 1.0 - sim;
+  return 1.0 - sim;
 }
 
 static inline void tk_inv_add (
@@ -638,7 +637,7 @@ static inline int tk_inv_similarity_lua (lua_State *L)
     tk_lua_verror(L, 3, "similarity", "invalid comparator specified", typ);
   int64_t uid0 = tk_lua_checkinteger(L, 2, "uid0");
   int64_t uid1 = tk_lua_checkinteger(L, 3, "uid1");
-  lua_pushnumber(L, tk_inv_compare_items(I, uid0, uid1, cmp, true));
+  lua_pushnumber(L, 1.0 - tk_inv_distance(I, uid0, uid1, cmp));
   return 1;
 }
 
@@ -656,7 +655,7 @@ static inline int tk_inv_distance_lua (lua_State *L)
     tk_lua_verror(L, 3, "distance", "invalid comparator specified", typ);
   int64_t uid0 = tk_lua_checkinteger(L, 2, "uid0");
   int64_t uid1 = tk_lua_checkinteger(L, 3, "uid1");
-  lua_pushnumber(L, tk_inv_compare_items(I, uid0, uid1, cmp, false));
+  lua_pushnumber(L, tk_inv_distance(I, uid0, uid1, cmp));
   return 1;
 }
 
