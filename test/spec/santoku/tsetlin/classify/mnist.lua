@@ -8,15 +8,16 @@ local tm = require("santoku.tsetlin")
 local utc = require("santoku.utc")
 
 local TTR = 0.9
-local MAX = nil
-local EVALUATE_EVERY = 1
-local ITERATIONS = 100
+local MAX = 10000
+local ITERATIONS = 10
 
 local CLASSES = 10
-local CLAUSES = 4096
-local TARGET = 32
-local SPECIFICITY = 10
 local NEGATIVE = 0.1
+
+local SEARCH_PATIENCE = 3
+local SEARCH_ROUNDS = 4
+local SEARCH_TRIALS = 0
+local SEARCH_ITERATIONS = 0
 
 local FEATURES = 784
 
@@ -48,15 +49,16 @@ test("tsetlin", function ()
     problems = train.problems,
     solutions = train.solutions,
 
-    clauses = { def = 1024, min = 512, max = 4096, log = true },
+    clauses = { def = 1024, min = 512, max = 4096, log = true, int = true },
     target = { def = 0.1, min = 0.05, max = 0.25 },
     specificity = { def = 10, min = 2, max = 20 },
 
-    search_patience = 3,
-    search_rounds = 4,
-    search_trials = 10,
-    search_iterations = 10,
+    search_patience = SEARCH_PATIENCE,
+    search_rounds = SEARCH_ROUNDS,
+    search_trials = SEARCH_TRIALS,
+    search_iterations = SEARCH_ITERATIONS,
     final_iterations = ITERATIONS,
+
     search_metric = function (t)
       local predicted = t.predict(train.problems, train.n)
       local accuracy = eval.class_accuracy(predicted, train.solutions, train.n, CLASSES)
@@ -73,7 +75,7 @@ test("tsetlin", function ()
         print()
       else
         str.printf("  Time %3.2f %3.2f  Exploring  C=%d T=%.2f S=%.2f  R=%d T=%d  F1=(%.2f,%.2f)  Epoch  %d\n",
-          d, dd, params.clauses, params.target, params.specificity, round, trial, train_accuracy.f1, test_accuracy.f1, epoch)
+          d, dd, params.clauses, params.target, params.specificity, round, trial, train_accuracy.f1, test_accuracy.f1, epoch) -- luacheck: ignore
         print()
       end
     end

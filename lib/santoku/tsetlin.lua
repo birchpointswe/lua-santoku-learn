@@ -135,7 +135,7 @@ M.optimize = function (args, typ)
   local best_score = -num.huge
   local best_params = nil
 
-  if all_fixed then
+  if all_fixed or not (trials and trials > 0) or not (rounds and rounds > 0) then
     best_params = sample_params()
   else
 

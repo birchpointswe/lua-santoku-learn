@@ -1,7 +1,5 @@
 local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
--- local ann = require("santoku.tsetlin.ann")
--- local inv = require("santoku.tsetlin.inv")
 local hbi = require("santoku.tsetlin.hbi")
 local ivec = require("santoku.ivec")
 local graph = require("santoku.tsetlin.graph")
@@ -19,7 +17,7 @@ local FEATURES = 784
 local THREADS = nil
 
 local BINARIZE = "itq"
-local TCH = false
+local TCH = true
 local HIDDEN = 10
 local EPS_SPECTRAL = 1e-5
 local NORMALIZED = true
@@ -78,14 +76,6 @@ test("tsetlin", function ()
   dataset.graph_adj_neighbors,
   dataset.graph_adj_weights =
     dataset.graph:adjacency()
-
-  -- for i = 0, 15 do
-  --   str.printf("  %6d  %6d  %6d  %6.4f\n",
-  --     dataset.graph_adj_ids:get(i),
-  --     dataset.graph_adj_offsets:get(i),
-  --     dataset.graph_adj_neighbors:get(i),
-  --     dataset.graph_adj_weights:get(i))
-  -- end
 
   print("\nSpectral eigendecomposition")
   dataset.ids_spectral, dataset.codes_spectral = spectral.encode({
