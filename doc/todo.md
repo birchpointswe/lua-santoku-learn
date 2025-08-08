@@ -1,8 +1,14 @@
 # Now
 
 - Update published version
+
 - Graph can now use dsu findx and unionx to use indices
 - Figure out transitive weight diffusiuon
+
+- Clustering indicate how many remain noise/unassigned
+
+- Clustering optional cache parameter to strictly use initial neighborhoods call
+  in clustering
 
 - ann/hbi
     - Add tk_ann/hbi_distance/similarity as in inv (take this from the already-generalized
