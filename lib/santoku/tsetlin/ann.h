@@ -446,7 +446,6 @@ static inline void tk_ann_probe_bucket (
   uint64_t k,
   tk_pvec_t *out
 ) {
-  uint64_t n_bytes = (ftr + CHAR_BIT - 1) / CHAR_BIT;
   khint_t khi = kh_get(tk_ann_buckets, A->buckets, h);
   if (khi == kh_end(A->buckets))
     return;
@@ -466,18 +465,14 @@ static inline void tk_ann_probe_bucket (
       if (id < 0)
         continue;
     }
-    const unsigned char *p1 = (const unsigned char *)
-      tk_ann_sget(A, sid1);
-    uint64_t dist = 0;
-    for (uint64_t i = 0; i < n_bytes && dist <= eps; i++)
-      if (v[i] != p1[i])
-        dist++;
-    if (dist <= eps) {
-      if (k > 0)
-        tk_pvec_hmax(out, tk_pair(id, (int64_t) dist));
-      else
-        tk_pvec_push(out, tk_pair(id, (int64_t) dist));
-    }
+    const unsigned char *p1 = (const unsigned char *) tk_ann_sget(A, sid1);
+    uint64_t dist = tk_ann_hamming(v, p1, ftr);
+    if (dist > eps)
+      continue;
+    if (k > 0)
+      tk_pvec_hmax(out, tk_pair(id, (int64_t) dist));
+    else
+      tk_pvec_push(out, tk_pair(id, (int64_t) dist));
   }
 }
 
@@ -928,6 +923,5 @@ static inline tk_ann_t *tk_ann_load (
   }
   return A;
 }
-
 
 #endif
