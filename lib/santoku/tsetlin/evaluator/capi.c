@@ -24,6 +24,8 @@ typedef struct {
   tk_inv_t *inv;
   tk_ann_t *ann;
   tk_hbi_t *hbi;
+  uint64_t min_pts;
+  bool assign_noise;
   uint64_t min_margin, max_margin;
   tk_pvec_t *pos, *neg;
   uint64_t n_pos, n_neg;
@@ -97,7 +99,7 @@ static void tk_eval_worker (void *dp, int sig)
         uint64_t m = m0 + state->min_margin;
         data->next_m = m;
         tk_ivec_clear(data->next_assignments);
-        tk_cluster_dsu(state->hbi, state->ann, state->inv, data->rtmp, data->ptmp, m, state->ids, data->next_assignments, state->ididx, &data->next_n);
+        tk_cluster_dsu(state->hbi, state->ann, state->inv, data->rtmp, data->ptmp, m, state->min_pts, state->assign_noise, state->ids, data->next_assignments, state->ididx, &data->next_n);
         tk_accuracy_t result = _tm_clustering_accuracy(state->ids, data->next_assignments, state->pos, state->neg);
         data->next = result;
         tk_threads_notify_parent(data->self);
@@ -699,6 +701,9 @@ static inline int tm_optimize_clustering (lua_State *L)
   lua_getfield(L, 1, "neg");
   tk_pvec_t *neg = tk_pvec_peek(L, -1, "neg");
 
+  uint64_t min_pts = tk_lua_foptunsigned(L, 1, "optimize clustering", "min_pts", 0);
+  bool assign_noise = tk_lua_foptboolean(L, 1, "optimize clustering", "assign_noise", true);
+
   uint64_t min_margin = tk_lua_fcheckunsigned(L, 1, "optimize clustering", "min_margin");
   uint64_t max_margin = tk_lua_fcheckunsigned(L, 1, "optimize clustering", "max_margin");
   uint64_t fs = inv != NULL ? inv->features : ann != NULL ? ann->features : hbi != NULL ? hbi->features : 0;
@@ -722,6 +727,8 @@ static inline int tm_optimize_clustering (lua_State *L)
   state.hbi = hbi;
   state.pos = pos;
   state.neg = neg;
+  state.assign_noise = assign_noise;
+  state.min_pts = min_pts;
   state.min_margin = min_margin;
   state.max_margin = max_margin;
   lua_newtable(L); // t -- to track gc for vectors
