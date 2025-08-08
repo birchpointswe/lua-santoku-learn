@@ -1,7 +1,7 @@
 local env = {
 
   name = "santoku-tsetlin",
-  version = "0.0.103-1",
+  version = "0.0.104-1",
   variable_prefix = "TK_TSETLIN",
   license = "MIT",
   public = true,
