@@ -2,6 +2,7 @@
 
 - Update published version
 - Graph can now use dsu findx and unionx to use indices
+- Figure out transitive weight diffusiuon
 
 - ann/hbi
     - Add tk_ann/hbi_distance/similarity as in inv (take this from the already-generalized
