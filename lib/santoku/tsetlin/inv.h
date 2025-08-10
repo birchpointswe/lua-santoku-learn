@@ -46,6 +46,7 @@ typedef enum {
 
 typedef enum {
   TK_INV_NEIGHBORHOODS,
+  TK_INV_MUTUAL,
 } tk_inv_stage_t;
 
 typedef struct tk_inv_thread_s tk_inv_thread_t;
@@ -66,6 +67,7 @@ typedef struct tk_inv_s {
 typedef struct tk_inv_thread_s {
   tk_inv_t *I;
   tk_inv_hoods_t *hoods;
+  tk_iuset_t **hoods_sets;
   tk_iuset_t *seen;
   tk_ivec_t *cnt;
   tk_ivec_t *touched;
@@ -75,6 +77,7 @@ typedef struct tk_inv_thread_s {
   uint64_t ifirst, ilast;
   double eps;
   uint64_t knn;
+  bool mutual;
   tk_inv_cmp_type_t cmp;
 } tk_inv_thread_t;
 
@@ -411,6 +414,7 @@ static inline void tk_inv_neighborhoods (
   uint64_t knn,
   double eps,
   tk_inv_cmp_type_t cmp,
+  bool mutual,
   tk_inv_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
@@ -440,6 +444,12 @@ static inline void tk_inv_neighborhoods (
     tk_iumap_value(sid_idx, khi) = (int64_t) i;
   }
   tk_inv_hoods_t *hoods = tk_inv_hoods_create(L, uids->n, 0, 0);
+  tk_iuset_t **hoods_sets = NULL;
+  if (mutual && knn) {
+    hoods_sets = tk_malloc(L, uids->n * sizeof(tk_iuset_t *));
+    for (uint64_t i = 0; i < uids->n; i ++)
+      hoods_sets[i] = tk_iuset_create();
+  }
   for (uint64_t i = 0; i < hoods->n; i ++) {
     hoods->a[i] = tk_rvec_create(L, knn, 0, 0);
     hoods->a[i]->n = 0;
@@ -452,16 +462,25 @@ static inline void tk_inv_neighborhoods (
     data->sids = sids;
     tk_ivec_ensure(data->cnt, sids->n);
     data->hoods = hoods;
+    data->hoods_sets = hoods_sets;
     data->sid_idx = sid_idx;
     data->eps = eps + TK_INV_LENGTH_EPS;
     data->knn = knn;
+    data->mutual = mutual;
     data->cmp = cmp;
     tk_thread_range(i, I->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
   }
   tk_threads_signal(I->pool, TK_INV_NEIGHBORHOODS, 0);
+  if (mutual && knn)
+    tk_threads_signal(I->pool, TK_INV_MUTUAL, 0);
   tk_iumap_destroy(sid_idx);
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = uids;
+  if (hoods_sets) {
+    for (uint64_t i = 0; i < uids->n; i ++)
+      tk_iuset_destroy(hoods_sets[i]);
+    free(hoods_sets);
+  }
   lua_remove(L, -3); // sids
 }
 
@@ -620,6 +639,7 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
   uint64_t knn = tk_lua_checkunsigned(L, 2, "knn");
   double eps = tk_lua_optposdouble(L, 3, "eps", 1.0);
   const char *typ = tk_lua_optstring(L, 4, "comparator", "jaccard");
+  bool mutual = tk_lua_optboolean(L, 5, "mutual", false);
   tk_inv_cmp_type_t cmp = TK_INV_JACCARD;
   if (!strcmp(typ, "jaccard"))
     cmp = TK_INV_JACCARD;
@@ -627,7 +647,7 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
     cmp = TK_INV_OVERLAP;
   else
     tk_lua_verror(L, 3, "neighbors", "invalid comparator specified", typ);
-  tk_inv_neighborhoods(L, I, knn, eps, cmp, 0, 0);
+  tk_inv_neighborhoods(L, I, knn, eps, cmp, mutual, 0, 0);
   return 2;
 }
 
@@ -773,10 +793,12 @@ static inline void tk_inv_worker (void *dp, int sig)
   tk_ivec_t *cnt = data->cnt;
   tk_ivec_t *touched = data->touched;
   tk_inv_hoods_t *hoods = data->hoods;
+  tk_iuset_t **hoods_sets = data->hoods_sets;
   tk_ivec_t *sids = data->sids;
   tk_iumap_t *sid_idx = data->sid_idx;
   double eps = data->eps;
   uint64_t knn = data->knn;
+  bool mutual = data->mutual;
   tk_inv_cmp_type_t cmp = data->cmp;
   khint_t khi;
   int64_t usid, vsid, fid, iv;
@@ -784,8 +806,11 @@ static inline void tk_inv_worker (void *dp, int sig)
   int64_t *ubits, *vbits;
   size_t nubits, nvbits;
   tk_rvec_t *uhood;
+  tk_iuset_t *uset;
+  tk_iuset_t *vset;
   tk_ivec_t *vsids;
   switch (stage) {
+
     case TK_INV_NEIGHBORHOODS:
       touched->n = 0;
       for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i ++) {
@@ -827,30 +852,48 @@ static inline void tk_inv_worker (void *dp, int sig)
           double sim  = tk_inv_similarity_partial(inter, nubits, nvbits, cmp);
           double dist = tk_inv_length_bump(1.0 - sim, nvbits);
           if (dist <= eps) {
-            int64_t vuid = tk_inv_sid_uid(I, vsid);
-            if (vuid >= 0) {
-              if (knn)
-                tk_rvec_hmax(uhood, tk_rank(vuid, dist));
-              else
-                tk_rvec_push(uhood, tk_rank(vuid, dist));
-            }
+            if (knn)
+              tk_rvec_hmax(uhood, tk_rank(iv, dist));
+            else
+              tk_rvec_push(uhood, tk_rank(iv, dist));
           }
         }
         tk_rvec_asc(uhood, 0, uhood->n);
-        for (uint64_t i = 0; i < uhood->n; ++i) {
+        for (uint64_t qi = 0; qi < uhood->n; ++qi) {
           size_t len = 0;
-          tk_inv_sget(I,
-            tk_inv_uid_sid(I, uhood->a[i].i, false),
-            &len);
-          uhood->a[i].d = tk_inv_length_unbump(uhood->a[i].d, len);
+          int64_t n_sid = sids->a[uhood->a[qi].i];
+          tk_inv_sget(I, n_sid, &len);
+          uhood->a[qi].d = tk_inv_length_unbump(uhood->a[qi].d, len);
         }
         uhood->m = uhood->n;
         uhood->a = realloc(uhood->a, uhood->n * sizeof(*uhood->a));
         for (uint64_t ti = 0; ti < touched->n; ti ++)
           cnt->a[touched->a[ti]] = 0;
         touched->n = 0;
+        if (mutual && knn) {
+          uset = hoods_sets[i];
+          int kha;
+          for (uint64_t i = 0; i < uhood->n; i ++)
+            tk_iuset_put(uset, uhood->a[i].i, &kha);
+        }
       }
       break;
+
+    case TK_INV_MUTUAL: {
+      for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i++) {
+        uhood = hoods->a[i];
+        uint64_t write = 0;
+        for (uint64_t j = 0; j < uhood->n; j ++) {
+          int64_t v = uhood->a[j].i;
+          vset = hoods_sets[v];
+          if (tk_iuset_contains(vset, i))
+            uhood->a[write ++] = uhood->a[j];
+        }
+        uhood->n = write;
+      }
+      break;
+    }
+
   }
 }
 

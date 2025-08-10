@@ -27,6 +27,7 @@ typedef tk_pvec_t * tk_ann_hood_t;
 
 typedef enum {
   TK_ANN_NEIGHBORHOODS,
+  TK_ANN_MUTUAL,
 } tk_ann_stage_t;
 
 typedef struct tk_ann_thread_s tk_ann_thread_t;
@@ -381,6 +382,7 @@ static inline void tk_ann_neighborhoods (
   tk_ann_t *A,
   uint64_t k,
   uint64_t eps,
+  bool mutual,
   tk_ann_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
@@ -429,6 +431,8 @@ static inline void tk_ann_neighborhoods (
     tk_thread_range(i, A->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
   }
   tk_threads_signal(A->pool, TK_ANN_NEIGHBORHOODS, 0);
+  if (mutual && k)
+    tk_threads_signal(A->pool, TK_ANN_MUTUAL, 0);
   tk_iumap_destroy(sid_idx);
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = uids;
@@ -640,11 +644,12 @@ static inline int tk_ann_get_lua (lua_State *L)
 
 static inline int tk_ann_neighborhoods_lua (lua_State *L)
 {
-  lua_settop(L, 3);
+  lua_settop(L, 4);
   tk_ann_t *A = tk_ann_peek(L, 1);
   uint64_t k = tk_lua_optunsigned(L, 2, "k", 0);
   uint64_t eps = tk_lua_optunsigned(L, 3, "eps", A->features);
-  tk_ann_neighborhoods(L, A, k, eps, 0, 0);
+  bool mutual = tk_lua_optboolean(L, 4, "mutual", false);
+  tk_ann_neighborhoods(L, A, k, eps, mutual, 0, 0);
   return 2;
 }
 
@@ -748,6 +753,11 @@ static inline void tk_ann_worker (void *dp, int sig)
         tk_pvec_asc(hood, 0, hood->n);
       }
       break;
+
+    case TK_ANN_MUTUAL: {
+      #warning "todo: mutual"
+      assert(false);
+    }
 
   }
 }

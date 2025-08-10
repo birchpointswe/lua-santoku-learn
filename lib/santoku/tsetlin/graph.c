@@ -13,13 +13,39 @@ static inline tk_graph_t *tm_graph_create (
   double knn_eps,
   double pos_scale,
   double neg_scale,
-  double pos_flip_threshold,
-  double neg_flip_threshold,
+  double repel_at,
+  double attract_at,
   double pos_sigma,
   double neg_sigma,
+  int64_t pos_sigma_k,
+  int64_t neg_sigma_k,
   double weight_eps,
   unsigned int n_threads
 );
+
+static inline bool tk_graph_same_label (
+  tk_graph_t *graph,
+  int64_t u,
+  int64_t v
+) {
+  if (graph->labels == NULL)
+    return false;
+  khint_t khi;
+  khi = tk_iumap_get(graph->uids_idx, u);
+  if (khi == tk_iumap_end(graph->uids_idx))
+    return false;
+  int64_t iu = tk_iumap_value(graph->uids_idx, khi);
+  khi = tk_iumap_get(graph->uids_idx, v);
+  if (khi == tk_iumap_end(graph->uids_idx))
+    return false;
+  int64_t iv = tk_iumap_value(graph->uids_idx, khi);
+  return graph->labels != NULL
+      && iu >= 0 && iu < (int64_t) graph->labels->n
+      && iv >= 0 && iv < (int64_t) graph->labels->n
+      && graph->labels->a[iu] != -1
+      && graph->labels->a[iv] != -1
+      && graph->labels->a[iu] == graph->labels->a[iv];
+}
 
 static inline void tk_graph_worker (void *dp, int sig)
 {
@@ -86,8 +112,104 @@ static inline void tk_graph_worker (void *dp, int sig)
         }))
       }
       break;
-
     }
+
+    case TK_GRAPH_SIGMA: {
+      uint64_t ifirst = data->ifirst;
+      uint64_t ilast = data->ilast;
+      tk_dvec_t *pos_sigma_slice = data->pos_sigma_slice;
+      tk_dvec_t *neg_sigma_slice = data->neg_sigma_slice;
+      tk_graph_t *graph = data->graph;
+      tk_ivec_t *uids_hoods = graph->uids_hoods;
+      tk_ann_t *ann = graph->ann;
+      tk_hbi_t *hbi = graph->hbi;
+      int64_t pos_sigma_k = graph->pos_sigma_k;
+      int64_t neg_sigma_k = graph->neg_sigma_k;
+      tk_inv_hoods_t *inv_hoods = graph->inv_hoods;
+      tk_ann_hoods_t *ann_hoods = graph->ann_hoods;
+      tk_hbi_hoods_t *hbi_hoods = graph->hbi_hoods;
+      for (uint64_t i = ifirst; i <= ilast; i ++) {
+        int64_t u = uids_hoods->a[i];
+        if (inv_hoods != NULL) {
+          uint64_t sp = pos_sigma_slice ? pos_sigma_slice->n : 0;
+          uint64_t sn = neg_sigma_slice ? neg_sigma_slice->n : 0;
+          for (uint64_t j = 0; j < inv_hoods->a[i]->n; j++) {
+            int64_t v = uids_hoods->a[inv_hoods->a[i]->a[j].i];
+            bool same = graph->labels == NULL || tk_graph_same_label(graph, u, v);
+            if (same && pos_sigma_slice)
+              tk_dvec_push(pos_sigma_slice, inv_hoods->a[i]->a[j].d);
+            if (!same && neg_sigma_slice)
+              tk_dvec_push(neg_sigma_slice, inv_hoods->a[i]->a[j].d);
+          }
+          uint64_t dp = pos_sigma_slice ? (pos_sigma_slice->n - sp) : 0;
+          uint64_t dn = neg_sigma_slice ? (neg_sigma_slice->n - sn) : 0;
+          if (dp) {
+            uint64_t k = pos_sigma_k > 0 ? (uint64_t)pos_sigma_k : 0;
+            uint64_t idx = (k && k <= dp) ? (k - 1) : (dp - 1);
+            pos_sigma_slice->a[sp] = pos_sigma_slice->a[sp + idx];
+            pos_sigma_slice->n = sp + 1;
+          }
+          if (dn) {
+            uint64_t k = neg_sigma_k > 0 ? (uint64_t)neg_sigma_k : 0;
+            uint64_t idx = (k && k <= dn) ? (k - 1) : (dn - 1);
+            neg_sigma_slice->a[sn] = neg_sigma_slice->a[sn + idx];
+            neg_sigma_slice->n = sn + 1;
+          }
+        } else if (ann_hoods != NULL) {
+          uint64_t sp = pos_sigma_slice ? pos_sigma_slice->n : 0;
+          uint64_t sn = neg_sigma_slice ? neg_sigma_slice->n : 0;
+          for (uint64_t j = 0; j < ann_hoods->a[i]->n; j++) {
+            int64_t v = uids_hoods->a[ann_hoods->a[i]->a[j].i];
+            bool same = graph->labels == NULL || tk_graph_same_label(graph, u, v);
+            if (same && pos_sigma_slice)
+              tk_dvec_push(pos_sigma_slice, (double) ann_hoods->a[i]->a[j].p / (double) ann->features);
+            if (!same && neg_sigma_slice)
+              tk_dvec_push(neg_sigma_slice, (double) ann_hoods->a[i]->a[j].p / (double) ann->features);
+          }
+          uint64_t dp = pos_sigma_slice ? (pos_sigma_slice->n - sp) : 0;
+          uint64_t dn = neg_sigma_slice ? (neg_sigma_slice->n - sn) : 0;
+          if (dp) {
+            uint64_t k = pos_sigma_k > 0 ? (uint64_t)pos_sigma_k : 0;
+            uint64_t idx = (k && k <= dp) ? (k - 1) : (dp - 1);
+            pos_sigma_slice->a[sp] = pos_sigma_slice->a[sp + idx];
+            pos_sigma_slice->n = sp + 1;
+          }
+          if (dn) {
+            uint64_t k = neg_sigma_k > 0 ? (uint64_t)neg_sigma_k : 0;
+            uint64_t idx = (k && k <= dn) ? (k - 1) : (dn - 1);
+            neg_sigma_slice->a[sn] = neg_sigma_slice->a[sn + idx];
+            neg_sigma_slice->n = sn + 1;
+          }
+        } else if (hbi_hoods != NULL) {
+          uint64_t sp = pos_sigma_slice ? pos_sigma_slice->n : 0;
+          uint64_t sn = neg_sigma_slice ? neg_sigma_slice->n : 0;
+          for (uint64_t j = 0; j < hbi_hoods->a[i]->n; j++) {
+            int64_t v = uids_hoods->a[hbi_hoods->a[i]->a[j].i];
+            bool same = graph->labels == NULL || tk_graph_same_label(graph, u, v);
+            if (same && pos_sigma_slice)
+              tk_dvec_push(pos_sigma_slice, (double) hbi_hoods->a[i]->a[j].p / (double) hbi->features);
+            if (!same && neg_sigma_slice)
+              tk_dvec_push(neg_sigma_slice, (double) hbi_hoods->a[i]->a[j].p / (double) hbi->features);
+          }
+          uint64_t dp = pos_sigma_slice ? (pos_sigma_slice->n - sp) : 0;
+          uint64_t dn = neg_sigma_slice ? (neg_sigma_slice->n - sn) : 0;
+          if (dp) {
+            uint64_t k = pos_sigma_k > 0 ? (uint64_t)pos_sigma_k : 0;
+            uint64_t idx = (k && k <= dp) ? (k - 1) : (dp - 1);
+            pos_sigma_slice->a[sp] = pos_sigma_slice->a[sp + idx];
+            pos_sigma_slice->n = sp + 1;
+          }
+          if (dn) {
+            uint64_t k = neg_sigma_k > 0 ? (uint64_t)neg_sigma_k : 0;
+            uint64_t idx = (k && k <= dn) ? (k - 1) : (dn - 1);
+            neg_sigma_slice->a[sn] = neg_sigma_slice->a[sn + idx];
+            neg_sigma_slice->n = sn + 1;
+          }
+        }
+      }
+      break;
+    }
+
   }
 }
 
@@ -128,67 +250,54 @@ static inline void tk_graph_add_adj (
   tk_iuset_put(adj->a[iv], iu, &kha);
 }
 
-static inline bool tk_graph_same_label (
-  tk_graph_t *graph,
-  int64_t u,
-  int64_t v
-) {
-  if (graph->labels == NULL)
-    return false;
-  khint_t khi;
-  khi = tk_iumap_get(graph->uids_idx, u);
-  if (khi == tk_iumap_end(graph->uids_idx))
-    return false;
-  int64_t iu = tk_iumap_value(graph->uids_idx, khi);
-  khi = tk_iumap_get(graph->uids_idx, v);
-  if (khi == tk_iumap_end(graph->uids_idx))
-    return false;
-  int64_t iv = tk_iumap_value(graph->uids_idx, khi);
-  return graph->labels != NULL
-      && iu >= 0 && iu < (int64_t) graph->labels->n
-      && iv >= 0 && iv < (int64_t) graph->labels->n
-      && graph->labels->a[iu] != -1
-      && graph->labels->a[iv] != -1
-      && graph->labels->a[iu] == graph->labels->a[iv];
-}
-
 static inline double tk_graph_weight (
-  tk_graph_t *graph,
+  const tk_graph_t *g,
   double base,
   bool is_pos
 ) {
-  double scale = is_pos ? graph->pos_scale : graph->neg_scale;
-  double sigma = is_pos ? graph->pos_sigma : graph->neg_sigma;
-  double eps = graph->weight_eps;
-  if (base == DBL_MAX || sigma < 0.0)
-    return scale;
-  bool neg_flip_enabled = graph->neg_flip_threshold >= 0.0;
-  bool pos_flip_enabled = graph->pos_flip_threshold >= 0.0;
-  double flip_neg = neg_flip_enabled
-    ? fmin(fmax(graph->neg_flip_threshold, 0.0), 1.0)
-    : -1.0;
-  double flip_pos = pos_flip_enabled
-    ? fmin(fmax(graph->pos_flip_threshold, 0.0), 1.0)
-    : -1.0;
-  double sim = (sigma == 0)
-    ? 1.0 - base
-    : exp(-0.5 * (base * base) / (sigma * sigma));
-  double w;
-  if (is_pos) {
-    if (pos_flip_enabled && base >= flip_pos)
-      w = -fabs(scale) * (1.0 - sim);  // flip to weak repulsion
-    else
-      w = scale * sim;  // normal attraction
-  } else {
-    if (neg_flip_enabled && base <= flip_neg)
-      w = fabs(scale) * sim;  // flip to weak attraction
-    else
-      w = scale * (1.0 - sim);  // normal repulsion
+  double def_scale = is_pos ? g->pos_scale : g->neg_scale;
+  double sigma = is_pos ? g->pos_sigma : g->neg_sigma;
+  double eps = g->weight_eps;
+  double b = base;
+  if (b == DBL_MAX || isnan(b)) b = 1.0;
+  if (b < 0.0) b = 0.0;
+  if (b > 1.0) b = 1.0;
+  double hi = (g->repel_at >= 0.0) ? fmin(fmax(g->repel_at, 0.0), 1.0) : 2.0;
+  double lo = (g->attract_at >= 0.0) ? fmin(fmax(g->attract_at, 0.0), 1.0) : -1.0;
+  bool forced_attract = (b <= lo);
+  bool forced_repel = (b >= hi) && !forced_attract;
+  bool use_attract = forced_attract ? true : forced_repel ? false : (def_scale >= 0.0);
+  double cap_scale = def_scale;
+  if (forced_attract) {
+    cap_scale = g->pos_scale;
+    sigma = g->pos_sigma;
+  } else if (forced_repel) {
+    cap_scale = g->neg_scale;
+    sigma = g->neg_sigma;
   }
-  if (eps > 0.0)
-    w += (w >= 0.0 ? +eps : -eps);
-  double abs_scale = fabs(scale);
-  w = fmax(fmin(w, abs_scale), -abs_scale);  // clamp to [-|scale|, +|scale|]
+  double cap = fabs(cap_scale);
+  if (cap == 0.0) return 0.0;
+  double mag;
+  if (sigma < 0.0) {
+    mag = 1.0;
+  } else {
+    double sim;
+    if (sigma > 0.0) {
+      double s2 = sigma * sigma;
+      double e1 = exp(-0.5 / s2);
+      double eb = exp(-0.5 * (b * b) / s2);
+      double denom = 1.0 - e1;
+      sim = (denom > 0.0) ? (eb - e1) / denom : (1.0 - b);
+    } else {
+      sim = 1.0 - b;
+    }
+    mag = use_attract ? sim : (1.0 - sim);
+  }
+  double sign = use_attract ? 1.0 : -1.0;
+  double w = sign * mag * cap;
+  if (eps > 0.0 && fabs(w) < eps) w = sign * fmin(eps, cap);
+  if (w > cap) w = cap;
+  if (w < -cap) w = -cap;
   return w;
 }
 
@@ -431,7 +540,7 @@ static inline tm_candidates_t tm_mst_knn_candidates (
         if (khi != kh_end(graph->pairs))
           continue;
         // TODO: Can we use heap?
-        kv_push(tm_candidate_t, all_candidates, tm_candidate(u, v, (double) r.p / (double) graph->hbi->features));
+        kv_push(tm_candidate_t, all_candidates, tm_candidate(u, v, (double) r.p / (double) graph->ann->features));
       }
     }
 
@@ -626,169 +735,6 @@ static inline void tm_add_mst (
   }
 }
 
-// TODO: Parallelize
-static inline void tm_add_transatives (
-  lua_State *L,
-  tk_graph_t *graph,
-  uint64_t n_hops,
-  uint64_t n_grow_pos,
-  uint64_t n_grow_neg
-) {
-  int kha;
-  khint_t khi;
-
-  kvec_t(tm_pair_t) new_pos;
-  kv_init(new_pos);
-
-  kvec_t(tm_pair_t) new_neg;
-  kv_init(new_neg);
-
-  // Transitive positive expansion
-  tm_candidates_t candidates;
-  kv_init(candidates);
-  int64_t u, w, iu, iv, iw;
-  tk_iuset_t *upos, *uneg;
-  tk_iuset_t *reachable = tk_iuset_create();
-  tk_iuset_t *frontier = tk_iuset_create();
-  tk_iuset_t *next = tk_iuset_create();
-  for (iu = 0; iu < (int64_t) graph->adj_pos->n; iu ++) {
-    upos = graph->adj_pos->a[iu];
-    uneg = graph->adj_neg->a[iu];
-    u = graph->uids->a[iu];
-    // Init closure
-    tk_iuset_clear(reachable);
-    tk_iuset_clear(frontier);
-    tk_iuset_clear(next);
-    // Start from direct neighbors
-    tk_iuset_union(frontier, upos);
-    tk_iuset_union(reachable, frontier);
-    for (uint64_t hop = 1; hop < n_hops; hop ++) {
-      tk_iuset_clear(next);
-      tk_iuset_foreach(frontier, iv, ({
-        tk_iuset_t *vpos = graph->adj_pos->a[iv];
-        if (vpos != NULL)
-          tk_iuset_union(next, vpos);
-      }))
-      tk_iuset_union(reachable, next);
-      tk_iuset_clear(frontier); // advance
-      tk_iuset_union(frontier, next); // advance
-    }
-    // Filter out reachable
-    khi = tk_iuset_get(reachable, iu);
-    if (khi != tk_iuset_end(reachable))
-      tk_iuset_del(reachable, khi);
-    kv_size(candidates) = 0;
-    tk_iuset_foreach(reachable, iw, ({
-      if (upos != NULL && tk_iuset_contains(upos, iw))
-        continue;
-      if (uneg != NULL && tk_iuset_contains(uneg, iw))
-        continue;
-      w = graph->uids->a[iw];
-      double dist = tk_graph_distance(graph, u, w);
-      if (dist < 0)
-        continue;
-      // TODO: Can we use heap?
-      kv_push(tm_candidate_t, candidates, tm_candidate(u, w, dist));
-    }))
-    // Sort and add top-k
-    ks_introsort(candidates_asc, candidates.n, candidates.a);
-    for (uint64_t i = 0; i < candidates.n && i < n_grow_pos; i ++) {
-      tm_candidate_t c = candidates.a[i];
-      bool w = graph->labels == NULL || tk_graph_same_label(graph, u, c.v);
-      tm_pair_t e = tm_pair(u, c.v, tk_graph_weight(graph, c.d, w));
-      khi = kh_put(pairs, graph->pairs, e, &kha);
-      if (!kha)
-        continue;
-      kh_value(graph->pairs, khi) = w;
-      if (w) {
-        kv_push(tm_pair_t, new_pos, e);
-        tk_dsu_union(&graph->dsu, u, c.v);
-        graph->n_pos ++;
-      } else {
-        kv_push(tm_pair_t, new_neg, e);
-        tk_dsu_union(&graph->dsu, u, c.v);
-        graph->n_neg ++;
-      }
-    }
-  }
-
-  // Cleanup
-  tk_iuset_destroy(reachable);
-  tk_iuset_destroy(frontier);
-  tk_iuset_destroy(next);
-
-  // Contrastive negative expansion
-  tk_iuset_t *seen = tk_iuset_create();
-  for (iu = 0; iu < (int64_t) graph->adj_pos->n; iu ++) {
-    upos = graph->adj_pos->a[iu];
-    uneg = graph->adj_neg->a[iu];
-    u = graph->uids->a[iu];
-    tk_iuset_clear(seen);
-    kv_size(candidates) = 0;
-    // One-hop contrastive expansion from adj_pos[u] to adj_neg[v]
-    if (upos == NULL)
-      continue;
-    tk_iuset_foreach(upos, iv, ({
-      tk_iuset_t *vneg = graph->adj_neg->a[iv];
-      if (vneg == NULL)
-        continue;
-      tk_iuset_foreach(vneg, iw, ({
-        if (iw == iu)
-          continue;
-        if (upos != NULL && tk_iuset_contains(upos, iw))
-          continue;
-        if (uneg != NULL && tk_iuset_contains(uneg, iw))
-          continue;
-        if (tk_iuset_contains(seen, iw))
-          continue;
-        tk_iuset_put(seen, iw, &kha);
-        w = graph->uids->a[iw];
-        double dist = tk_graph_distance(graph, u, w);
-        if (dist < 0)
-          continue;
-        // TODO: Can we use heap?
-        kv_push(tm_candidate_t, candidates, tm_candidate(u, w, dist));
-      }))
-    }))
-    // Select nearest in feature space
-    ks_introsort(candidates_asc, candidates.n, candidates.a);
-    for (uint64_t i = 0; i < candidates.n && i < n_grow_neg; i ++) {
-      tm_candidate_t c = candidates.a[i];
-      bool w = graph->labels == NULL || tk_graph_same_label(graph, u, c.v);
-      tm_pair_t e = tm_pair(u, c.v, tk_graph_weight(graph, c.d, w));
-      khi = kh_put(pairs, graph->pairs, e, &kha);
-      if (!kha)
-        continue;
-      kh_value(graph->pairs, khi) = w;
-      if (w) {
-        kv_push(tm_pair_t, new_pos, e);
-        tk_dsu_union(&graph->dsu, u, c.v);
-        graph->n_pos ++;
-      } else {
-        kv_push(tm_pair_t, new_neg, e);
-        tk_dsu_union(&graph->dsu, u, c.v);
-        graph->n_neg ++;
-      }
-    }
-  }
-  tk_iuset_destroy(seen);
-
-  // Update adjacency
-  for (size_t i = 0; i < kv_size(new_pos); i ++) {
-    tm_pair_t e = kv_A(new_pos, i);
-    tk_graph_add_adj(graph, e.u, e.v, true);
-  }
-  for (size_t i = 0; i < kv_size(new_neg); i ++) {
-    tm_pair_t e = kv_A(new_neg, i);
-    tk_graph_add_adj(graph, e.u, e.v, false);
-  }
-
-  // Cleanup
-  kv_destroy(new_pos);
-  kv_destroy(new_neg);
-  kv_destroy(candidates);
-}
-
 static inline void tm_adj_init (
   lua_State *L,
   int Gi,
@@ -899,13 +845,54 @@ static inline void tm_setup_hoods (lua_State *L, int Gi, tk_graph_t *graph)
   if (!graph->knn_cache)
     return;
   else if (graph->inv != NULL)
-    tk_inv_neighborhoods(L, graph->inv, graph->knn_cache, graph->knn_eps, TK_INV_JACCARD, &graph->inv_hoods, &graph->uids_hoods);
+    tk_inv_neighborhoods(L, graph->inv, graph->knn_cache, graph->knn_eps, TK_INV_JACCARD, true, &graph->inv_hoods, &graph->uids_hoods);
   else if (graph->ann != NULL)
-    tk_ann_neighborhoods(L, graph->ann, graph->knn_cache, graph->ann->features * graph->knn_eps, &graph->ann_hoods, &graph->uids_hoods);
+    tk_ann_neighborhoods(L, graph->ann, graph->knn_cache, graph->ann->features * graph->knn_eps, true, &graph->ann_hoods, &graph->uids_hoods);
   else if (graph->hbi != NULL)
-    tk_hbi_neighborhoods(L, graph->hbi, graph->knn_cache, graph->hbi->features * graph->knn_eps, &graph->hbi_hoods, &graph->uids_hoods);
+    tk_hbi_neighborhoods(L, graph->hbi, graph->knn_cache, graph->hbi->features * graph->knn_eps, true, &graph->hbi_hoods, &graph->uids_hoods);
   else {
     return;
+  }
+  bool find_pos_sigma = graph->pos_sigma == 0 && graph->pos_sigma_k > 0;
+  bool find_neg_sigma = graph->neg_sigma == 0 && graph->neg_sigma_k > 0;
+  if (find_pos_sigma || find_neg_sigma) {
+    for (unsigned int i = 0; i < graph->pool->n_threads; i ++) {
+      tk_graph_thread_t *data = graph->threads + i;
+      data->pos_sigma_slice = find_pos_sigma ? tk_dvec_create(0, 0, 0, 0) : NULL;
+      data->neg_sigma_slice = find_neg_sigma ? tk_dvec_create(0, 0, 0, 0) : NULL;
+      tk_thread_range(i, graph->pool->n_threads, graph->uids_hoods->n, &data->ifirst, &data->ilast);
+    }
+    tk_threads_signal(graph->pool, TK_GRAPH_SIGMA, 0);
+    tk_graph_thread_t *data0 = graph->threads + 0;
+    for (unsigned int i = 1; i < graph->pool->n_threads; i ++) {
+      tk_graph_thread_t *datai = graph->threads + i;
+      if (find_pos_sigma) {
+        tk_dvec_copy(data0->pos_sigma_slice, datai->pos_sigma_slice, 0, (int64_t) datai->pos_sigma_slice->n, (int64_t) data0->pos_sigma_slice->n);
+        tk_dvec_destroy(datai->pos_sigma_slice);
+      }
+      if (find_neg_sigma) {
+        tk_dvec_copy(data0->neg_sigma_slice, datai->neg_sigma_slice, 0, (int64_t) datai->neg_sigma_slice->n, (int64_t) data0->neg_sigma_slice->n);
+        tk_dvec_destroy(datai->neg_sigma_slice);
+      }
+    }
+    if (find_pos_sigma) {
+      tk_dvec_asc(data0->pos_sigma_slice, 0, data0->pos_sigma_slice->n);
+      size_t n = data0->pos_sigma_slice->n;
+      if (n) {
+        double m = (n & 1) ? data0->pos_sigma_slice->a[n / 2] : 0.5*(data0->pos_sigma_slice->a[n / 2 - 1] + data0->pos_sigma_slice->a[n / 2]);
+        graph->pos_sigma = m > 1e-12 ? m : 1e-12;
+      }
+      tk_dvec_destroy(data0->pos_sigma_slice);
+    }
+    if (find_neg_sigma) {
+      tk_dvec_asc(data0->neg_sigma_slice, 0, data0->neg_sigma_slice->n);
+      size_t n = data0->neg_sigma_slice->n;
+      if (n) {
+        double m = (n & 1) ? data0->neg_sigma_slice->a[n / 2] : 0.5*(data0->neg_sigma_slice->a[n/2 - 1] + data0->neg_sigma_slice->a[n / 2]);
+        graph->neg_sigma = m > 1e-12 ? m : 1e-12;
+      }
+      tk_dvec_destroy(data0->neg_sigma_slice);
+    }
   }
   if (graph->uids == NULL) {
     graph->uids = graph->uids_hoods;
@@ -945,14 +932,13 @@ static inline int tm_create (lua_State *L)
     knn_cache = knn_pos + knn_neg;
   double pos_scale = tk_lua_foptnumber(L, 1, "graph", "pos_scale", 1.0);
   double neg_scale = tk_lua_foptnumber(L, 1, "graph", "neg_scale", -1.0);
-  double pos_flip_threshold = tk_lua_foptnumber(L, 1, "graph", "pos_flip_threshold", -1.0);
-  double neg_flip_threshold = tk_lua_foptnumber(L, 1, "graph", "neg_flip_threshold", -1.0);
-  double pos_sigma = tk_lua_foptnumber(L, 1, "graph", "pos_sigma", -1.0);
-  double neg_sigma = tk_lua_foptnumber(L, 1, "graph", "neg_sigma", -1.0);
-  double weight_eps = tk_lua_foptnumber(L, 1, "graph", "weight_eps", 1e-6);
-  uint64_t n_hops = tk_lua_foptunsigned(L, 1, "graph", "trans_hops", 0);
-  uint64_t n_grow_pos = tk_lua_foptunsigned(L, 1, "graph", "trans_pos", 0);
-  uint64_t n_grow_neg = tk_lua_foptunsigned(L, 1, "graph", "trans_neg", 0);
+  double repel_at = tk_lua_foptnumber(L, 1, "graph", "repel_at", -1.0);
+  double attract_at = tk_lua_foptnumber(L, 1, "graph", "attract_at", -1.0);
+  double pos_sigma = tk_lua_foptnumber(L, 1, "graph", "pos_sigma", 0);
+  double neg_sigma = tk_lua_foptnumber(L, 1, "graph", "neg_sigma", 0);
+  int64_t pos_sigma_k = tk_lua_foptinteger(L, 1, "graph", "pos_sigma_k", 0);
+  int64_t neg_sigma_k = tk_lua_foptinteger(L, 1, "graph", "neg_sigma_k", 0);
+  double weight_eps = tk_lua_foptnumber(L, 1, "graph", "weight_eps", 1e-8);
   bool do_mst = tk_lua_foptboolean(L, 1, "graph", "mst", true);
   bool do_bridge = tk_lua_foptboolean(L, 1, "graph", "bridge", true);
 
@@ -967,7 +953,7 @@ static inline int tm_create (lua_State *L)
   // Init graph
   tk_graph_t *graph = tm_graph_create(
     L, i_ids, ids, pos, neg, labels, inv, ann, hbi, knn_cache, knn_eps,
-    pos_scale, neg_scale, pos_flip_threshold, neg_flip_threshold, pos_sigma, neg_sigma, weight_eps, n_threads);
+    pos_scale, neg_scale, repel_at, attract_at, pos_sigma, neg_sigma, pos_sigma_k, neg_sigma_k, weight_eps, n_threads);
   int Gi = tk_lua_absindex(L, -1);
 
   // Query hoods from inv index
@@ -1056,20 +1042,6 @@ static inline int tm_create (lua_State *L)
     lua_pushinteger(L, (int64_t) graph->n_pos);
     lua_pushinteger(L, (int64_t) graph->n_neg);
     lua_pushstring(L, "kruskal");
-    lua_call(L, 4, 0);
-  }
-
-  // Densify graph, adding transatives
-  if (n_hops > 0 && (n_grow_pos > 0 || n_grow_neg > 0))
-    tm_add_transatives(L, graph, n_hops, n_grow_pos, n_grow_neg);
-
-  // Log density
-  if (i_each != -1) {
-    lua_pushvalue(L, i_each);
-    lua_pushinteger(L, tk_dsu_components(&graph->dsu));
-    lua_pushinteger(L, (int64_t) graph->n_pos);
-    lua_pushinteger(L, (int64_t) graph->n_neg);
-    lua_pushstring(L, "transitives");
     lua_call(L, 4, 0);
   }
 
@@ -1168,10 +1140,12 @@ static inline tk_graph_t *tm_graph_create (
   double knn_eps,
   double pos_scale,
   double neg_scale,
-  double pos_flip_threshold,
-  double neg_flip_threshold,
+  double repel_at,
+  double attract_at,
   double pos_sigma,
   double neg_sigma,
+  int64_t pos_sigma_k,
+  int64_t neg_sigma_k,
   double weight_eps,
   unsigned int n_threads
 ) {
@@ -1184,8 +1158,10 @@ static inline tk_graph_t *tm_graph_create (
   graph->knn_eps = knn_eps;
   graph->pos_scale = pos_scale;
   graph->neg_scale = neg_scale;
-  graph->pos_flip_threshold = pos_flip_threshold;
-  graph->neg_flip_threshold = neg_flip_threshold;
+  graph->repel_at = repel_at;
+  graph->attract_at = attract_at;
+  graph->pos_sigma_k = pos_sigma_k > (int64_t) knn_cache ? (int64_t) knn_cache : pos_sigma_k;
+  graph->neg_sigma_k = neg_sigma_k > (int64_t) knn_cache ? (int64_t) knn_cache : neg_sigma_k;
   graph->pos_sigma = pos_sigma;
   graph->neg_sigma = neg_sigma;
   graph->weight_eps = weight_eps;

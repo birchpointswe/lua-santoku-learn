@@ -11,7 +11,7 @@ local str = require("santoku.string")
 local test = require("santoku.test")
 local utc = require("santoku.utc")
 
-local MAX = 10000
+local MAX = 4000
 local MAX_CLASS = nil
 local FEATURES = 784
 local THREADS = nil
@@ -25,15 +25,15 @@ local POS_SCALE = 1.0
 local NEG_SCALE = -0.1
 local POS_SIGMA = -1
 local NEG_SIGMA = -1
-local MST = false
+local MST = true
 local BRIDGE = true
 local KNN_POS = 0
 local KNN_NEG = 0
 local KNN_CACHE = 0
 local CLUSTER_MIN = 0
 local CLUSTER_MAX = 4
-local POS_ANCHORS = 6
-local NEG_ANCHORS = 2
+local POS_ANCHORS = 4
+local NEG_ANCHORS = 4
 
 test("tsetlin", function ()
 

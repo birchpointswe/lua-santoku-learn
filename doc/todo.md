@@ -1,22 +1,12 @@
 # Now
 
-- Update published version
-
-- Graph can now use dsu findx and unionx to use indices
-- Figure out transitive weight diffusiuon
-
-- Clustering indicate how many remain noise/unassigned
-
-- Clustering optional cache parameter to strictly use initial neighborhoods call
-  in clustering
+- Clustering
+    - Return n_clusters, n_core, n_border, n_noise
 
 - ann/hbi
+    - Implement mutual for ann/hbi
     - Add tk_ann/hbi_distance/similarity as in inv (take this from the already-generalized
       tk_graph_distance(...) function)
-
-- Chore
-    - Error checks on dimensions to prevent segfaults
-    - Sanitize everything
 
 - tk_xxmap/set_t:
     - Templatize over khash/kbtree
@@ -33,6 +23,14 @@
             - top_entropy, score_entropy, flip_interleave, filter, extend, ivec
 
 # Next
+
+- Graph
+    - Use dsu findx/unionx instead of uid-based api when we have indices
+    - Return positive and negative weight totals when creating adjacency
+
+- Chore
+    - Error checks on dimensions to prevent segfaults
+    - Sanitize everything
 
 - TCH
     - Parallelize
