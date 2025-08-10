@@ -26,6 +26,7 @@ typedef enum {
   TK_GRAPH_CSR_OFFSET_LOCAL,
   TK_GRAPH_CSR_OFFSET_GLOBAL,
   TK_GRAPH_CSR_DATA,
+  TK_GRAPH_SIGMA
 } tk_graph_stage_t;
 
 typedef struct tk_graph_thread_s tk_graph_thread_t;
@@ -47,10 +48,12 @@ typedef struct tk_graph_s {
   double knn_eps;
   double pos_scale;
   double neg_scale;
-  double pos_flip_threshold;
-  double neg_flip_threshold;
+  double repel_at;
+  double attract_at;
   double pos_sigma;
   double neg_sigma;
+  int64_t pos_sigma_k;
+  int64_t neg_sigma_k;
   double weight_eps;
   tk_pvec_t *pos, *neg;
   tk_ivec_t *labels;
@@ -65,6 +68,8 @@ typedef struct tk_graph_thread_s {
   tk_ivec_t *adj_offset;
   tk_ivec_t *adj_data;
   tk_dvec_t *adj_weights;
+  tk_dvec_t *pos_sigma_slice;
+  tk_dvec_t *neg_sigma_slice;
   int64_t csr_base;
   uint64_t ifirst, ilast;
   unsigned int index;
