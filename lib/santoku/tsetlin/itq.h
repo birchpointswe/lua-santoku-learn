@@ -55,6 +55,19 @@ static inline void tk_itq_median (
   free(col);
 }
 
+static inline void tk_itq_center (
+  double *M,
+  size_t N,
+  size_t K
+) {
+  for (size_t j = 0; j < K; j++) {
+    double mu = 0.0;
+    for (size_t i = 0; i < N; i++) mu += M[i*K + j];
+    mu /= (double)N;
+    for (size_t i = 0; i < N; i++) M[i*K + j] -= mu;
+  }
+}
+
 static inline void tk_itq_encode (
   lua_State *L,
   tk_dvec_t *codes,
@@ -94,10 +107,13 @@ static inline void tk_itq_encode (
       R[i*K + j] = (i==j? 1.0 : 0.0);
   double last_obj = DBL_MAX, first_obj = 0.0;
   uint64_t it = 0;
+
   openblas_set_num_threads((int) n_threads);
+
   for (it = 0; it < max_iterations; it++) {
     cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                 N, K, K, 1.0, X, K, R, K, 0.0, V0, K);
+    tk_itq_center(V0, N, K);
     for (size_t idx = 0; idx < N*K; idx++)
       B[idx] = (V0[idx] >= 0.0 ? 1.0 : -1.0);
     cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
@@ -132,6 +148,7 @@ static inline void tk_itq_encode (
 
   cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
               N, K, K, 1.0, X, K, R, K, 0.0, V1, K);
+  tk_itq_center(V0, N, K);
   tk_itq_sign(out, V1, N, K);
 
   // Cleanup
