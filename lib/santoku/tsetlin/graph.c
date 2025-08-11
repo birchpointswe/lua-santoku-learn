@@ -254,16 +254,17 @@ static inline void tk_graph_add_adj (
   tk_iuset_put(adj->a[iv], iu, &kha);
 }
 
-static inline double tk_graph_weight (
-  const tk_graph_t *g,
-  double base,
-  bool is_pos
-) {
+static inline double tk_graph_weight (const tk_graph_t *g, double base, bool is_pos) {
   double def_scale = is_pos ? g->pos_scale : g->neg_scale;
   double sigma = is_pos ? g->pos_sigma : g->neg_sigma;
   double eps = g->weight_eps;
+  if (base == DBL_MAX || isnan(base)) {
+    double cap = fabs(def_scale);
+    if (cap == 0.0) return 0.0;
+    double m = (eps > 0.0) ? fmin(eps, cap) : 0.0;
+    return (is_pos ? +m : -m);
+  }
   double b = base;
-  if (b == DBL_MAX || isnan(b)) b = 1.0;
   if (b < 0.0) b = 0.0;
   if (b > 1.0) b = 1.0;
   double hi = (g->repel_at >= 0.0) ? fmin(fmax(g->repel_at, 0.0), 1.0) : 2.0;
@@ -272,19 +273,13 @@ static inline double tk_graph_weight (
   bool forced_repel = (b >= hi) && !forced_attract;
   bool use_attract = forced_attract ? true : forced_repel ? false : (def_scale >= 0.0);
   double cap_scale = def_scale;
-  if (forced_attract) {
-    cap_scale = g->pos_scale;
-    sigma = g->pos_sigma;
-  } else if (forced_repel) {
-    cap_scale = g->neg_scale;
-    sigma = g->neg_sigma;
-  }
+  if (forced_attract) { cap_scale = g->pos_scale; sigma = g->pos_sigma; }
+  else if (forced_repel) { cap_scale = g->neg_scale; sigma = g->neg_sigma; }
   double cap = fabs(cap_scale);
   if (cap == 0.0) return 0.0;
   double mag;
-  if (sigma < 0.0) {
-    mag = 1.0;
-  } else {
+  if (sigma < 0.0) mag = 1.0;
+  else {
     double sim;
     if (sigma > 0.0) {
       double s2 = sigma * sigma;
@@ -292,9 +287,7 @@ static inline double tk_graph_weight (
       double eb = exp(-0.5 * (b * b) / s2);
       double denom = 1.0 - e1;
       sim = (denom > 0.0) ? (eb - e1) / denom : (1.0 - b);
-    } else {
-      sim = 1.0 - b;
-    }
+    } else sim = 1.0 - b;
     mag = use_attract ? sim : (1.0 - sim);
   }
   double sign = use_attract ? 1.0 : -1.0;
@@ -304,6 +297,57 @@ static inline double tk_graph_weight (
   if (w < -cap) w = -cap;
   return w;
 }
+
+// static inline double tk_graph_weight (
+//   const tk_graph_t *g,
+//   double base,
+//   bool is_pos
+// ) {
+//   double def_scale = is_pos ? g->pos_scale : g->neg_scale;
+//   double sigma = is_pos ? g->pos_sigma : g->neg_sigma;
+//   double eps = g->weight_eps;
+//   double b = base;
+//   if (b == DBL_MAX || isnan(b)) b = 1.0;
+//   if (b < 0.0) b = 0.0;
+//   if (b > 1.0) b = 1.0;
+//   double hi = (g->repel_at >= 0.0) ? fmin(fmax(g->repel_at, 0.0), 1.0) : 2.0;
+//   double lo = (g->attract_at >= 0.0) ? fmin(fmax(g->attract_at, 0.0), 1.0) : -1.0;
+//   bool forced_attract = (b <= lo);
+//   bool forced_repel = (b >= hi) && !forced_attract;
+//   bool use_attract = forced_attract ? true : forced_repel ? false : (def_scale >= 0.0);
+//   double cap_scale = def_scale;
+//   if (forced_attract) {
+//     cap_scale = g->pos_scale;
+//     sigma = g->pos_sigma;
+//   } else if (forced_repel) {
+//     cap_scale = g->neg_scale;
+//     sigma = g->neg_sigma;
+//   }
+//   double cap = fabs(cap_scale);
+//   if (cap == 0.0) return 0.0;
+//   double mag;
+//   if (sigma < 0.0) {
+//     mag = 1.0;
+//   } else {
+//     double sim;
+//     if (sigma > 0.0) {
+//       double s2 = sigma * sigma;
+//       double e1 = exp(-0.5 / s2);
+//       double eb = exp(-0.5 * (b * b) / s2);
+//       double denom = 1.0 - e1;
+//       sim = (denom > 0.0) ? (eb - e1) / denom : (1.0 - b);
+//     } else {
+//       sim = 1.0 - b;
+//     }
+//     mag = use_attract ? sim : (1.0 - sim);
+//   }
+//   double sign = use_attract ? 1.0 : -1.0;
+//   double w = sign * mag * cap;
+//   if (eps > 0.0 && fabs(w) < eps) w = sign * fmin(eps, cap);
+//   if (w > cap) w = cap;
+//   if (w < -cap) w = -cap;
+//   return w;
+// }
 
 static inline double tk_graph_distance (
   tk_graph_t *graph,
@@ -784,7 +828,8 @@ static inline void tm_add_pairs (
         continue;
       if (graph->labels != NULL && !tk_graph_same_label(graph, u, v))
         continue;
-      double w = tk_graph_weight(graph, tk_graph_distance(graph, u, v), true);
+      double d = tk_graph_distance(graph, u, v);
+      double w = tk_graph_weight(graph, d == DBL_MAX ? 0.0 : d, true);
       khi = kh_put(pairs, graph->pairs, tm_pair(u, v, w), &kha);
       if (!kha)
         continue;
@@ -808,7 +853,8 @@ static inline void tm_add_pairs (
         continue;
       if (graph->labels != NULL && tk_graph_same_label(graph, u, v))
         continue;
-      double w = tk_graph_weight(graph, tk_graph_distance(graph, u, v), false);
+      double d = tk_graph_distance(graph, u, v);
+      double w = tk_graph_weight(graph, d == DBL_MAX ? 1.0 : d, false);
       khi = kh_put(pairs, graph->pairs, tm_pair(u, v, w), &kha);
       if (!kha)
         continue;
