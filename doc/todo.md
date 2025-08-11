@@ -24,6 +24,9 @@
 
 # Next
 
+- tk_inv/ann/hbi_t
+    - Support feature weights, particularly for inv
+
 - Graph
     - Use dsu findx/unionx instead of uid-based api when we have indices
     - Return positive and negative weight totals when creating adjacency
