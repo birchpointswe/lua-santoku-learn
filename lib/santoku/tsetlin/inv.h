@@ -46,7 +46,8 @@ typedef enum {
 
 typedef enum {
   TK_INV_NEIGHBORHOODS,
-  TK_INV_MUTUAL,
+  TK_INV_MUTUAL_INIT,
+  TK_INV_MUTUAL_FILTER,
 } tk_inv_stage_t;
 
 typedef struct tk_inv_thread_s tk_inv_thread_t;
@@ -408,6 +409,39 @@ static inline void tk_inv_remove (
   tk_inv_uid_remove(I, uid);
 }
 
+static inline void tk_inv_mutualize (
+  lua_State *L,
+  tk_inv_t *I,
+  tk_inv_hoods_t *hoods,
+  tk_ivec_t *uids
+) {
+  if (I->destroyed)
+    return;
+  tk_ivec_t *sids = tk_ivec_create(L, uids->n, 0, 0);
+  for (uint64_t i = 0; i < uids->n; i ++)
+    sids->a[i] = tk_inv_uid_sid(I, uids->a[i], false);
+  tk_iumap_t *sid_idx = tk_iumap_from_ivec(sids);
+  tk_iuset_t **hoods_sets = tk_malloc(L, uids->n * sizeof(tk_iuset_t *));
+  for (uint64_t i = 0; i < uids->n; i ++)
+    hoods_sets[i] = tk_iuset_create();
+  for (uint64_t i = 0; i < I->pool->n_threads; i ++) {
+    tk_inv_thread_t *data = I->threads + i;
+    data->uids = uids;
+    data->sids = sids;
+    data->hoods = hoods;
+    data->hoods_sets = hoods_sets;
+    data->sid_idx = sid_idx;
+    tk_thread_range(i, I->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
+  }
+  tk_threads_signal(I->pool, TK_INV_MUTUAL_INIT, 0);
+  tk_threads_signal(I->pool, TK_INV_MUTUAL_FILTER, 0);
+  tk_iumap_destroy(sid_idx);
+  for (uint64_t i = 0; i < uids->n; i ++)
+    tk_iuset_destroy(hoods_sets[i]);
+  free(hoods_sets);
+  lua_remove(L, -3); // sids
+}
+
 static inline void tk_inv_neighborhoods (
   lua_State *L,
   tk_inv_t *I,
@@ -422,8 +456,6 @@ static inline void tk_inv_neighborhoods (
     tk_lua_verror(L, 2, "neighborhoods", "can't query a destroyed index");
     return;
   }
-  int kha;
-  khint_t khi;
   tk_ivec_t *sids, *uids;
   if (uidsp && *uidsp) {
     sids = tk_ivec_create(L, (*uidsp)->n, 0, 0);
@@ -438,11 +470,7 @@ static inline void tk_inv_neighborhoods (
     for (uint64_t i = 0; i < sids->n; i ++)
       uids->a[i] = tk_inv_sid_uid(I, sids->a[i]);
   }
-  tk_iumap_t *sid_idx = tk_iumap_create();
-  for (uint64_t i = 0; i < sids->n; i ++) {
-    khi = tk_iumap_put(sid_idx, sids->a[i], &kha);
-    tk_iumap_value(sid_idx, khi) = (int64_t) i;
-  }
+  tk_iumap_t *sid_idx = tk_iumap_from_ivec(sids);
   tk_inv_hoods_t *hoods = tk_inv_hoods_create(L, uids->n, 0, 0);
   tk_iuset_t **hoods_sets = NULL;
   if (mutual && knn) {
@@ -472,7 +500,7 @@ static inline void tk_inv_neighborhoods (
   }
   tk_threads_signal(I->pool, TK_INV_NEIGHBORHOODS, 0);
   if (mutual && knn)
-    tk_threads_signal(I->pool, TK_INV_MUTUAL, 0);
+    tk_threads_signal(I->pool, TK_INV_MUTUAL_FILTER, 0);
   tk_iumap_destroy(sid_idx);
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = uids;
@@ -835,7 +863,7 @@ static inline void tk_inv_worker (void *dp, int sig)
             vsid = vsids->a[k];
             if (vsid == usid)
               continue;
-            khi = tk_iumap_get(sid_idx, vsid);        // only consider slice
+            khi = tk_iumap_get(sid_idx, vsid);
             if (khi == tk_iumap_end(sid_idx))
               continue;
             iv = tk_iumap_value(sid_idx, khi);
@@ -879,7 +907,22 @@ static inline void tk_inv_worker (void *dp, int sig)
       }
       break;
 
-    case TK_INV_MUTUAL: {
+    case TK_INV_MUTUAL_INIT: {
+      for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i++) {
+        uhood = hoods->a[i];
+        uint64_t write = 0;
+        for (uint64_t j = 0; j < uhood->n; j ++) {
+          int64_t v = uhood->a[j].i;
+          vset = hoods_sets[v];
+          if (tk_iuset_contains(vset, i))
+            uhood->a[write ++] = uhood->a[j];
+        }
+        uhood->n = write;
+      }
+      break;
+    }
+
+    case TK_INV_MUTUAL_FILTER: {
       for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i++) {
         uhood = hoods->a[i];
         uint64_t write = 0;

@@ -377,6 +377,18 @@ static inline void tk_ann_extend_neighborhood (
   }
 }
 
+static inline void tk_ann_mutualize (
+  lua_State *L,
+  tk_ann_t *A,
+  tk_ann_hoods_t *hoods,
+  tk_ivec_t *uids
+) {
+  if (A->destroyed)
+    return;
+  #warning "todo: mutualize"
+  assert(false);
+}
+
 static inline void tk_ann_neighborhoods (
   lua_State *L,
   tk_ann_t *A,
