@@ -4,7 +4,8 @@
     - Return n_clusters, n_core, n_border, n_noise
 
 - ann/hbi
-    - Implement mutual for ann/hbi
+    - Implement mutual/mutualize for ann/hbi
+    - Add mutualize lua api
     - Add tk_ann/hbi_distance/similarity as in inv (take this from the already-generalized
       tk_graph_distance(...) function)
 

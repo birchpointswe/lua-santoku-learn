@@ -362,6 +362,18 @@ static inline void tk_hbi_populate_neighborhood (
   }
 }
 
+static inline void tk_hbi_mutualize (
+  lua_State *L,
+  tk_hbi_t *A,
+  tk_hbi_hoods_t *hoods,
+  tk_ivec_t *uids
+) {
+  if (A->destroyed)
+    return;
+  #warning "todo: mutualize"
+  assert(false);
+}
+
 static inline void tk_hbi_neighborhoods (
   lua_State *L,
   tk_hbi_t *A,
