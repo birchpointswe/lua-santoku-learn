@@ -13,13 +13,17 @@ static inline tk_graph_t *tm_graph_create (
   double knn_eps,
   double pos_scale,
   double neg_scale,
-  double repel_at,
-  double attract_at,
+  double pos_default,
+  double neg_default,
   double pos_sigma_scale,
   double neg_sigma_scale,
   int64_t sigma_k,
+
+
+
   double bridge_density,
   double weight_eps,
+  bool no_label_is_match,
   unsigned int n_threads
 );
 
@@ -39,7 +43,7 @@ static inline bool tk_graph_same_label (tk_graph_t *graph, int64_t u, int64_t v)
   int64_t lu = graph->labels->a[iu];
   int64_t lv = graph->labels->a[iv];
   if (lu == -1 || lv == -1)
-    return false;
+    return graph->no_label_is_match;
   return lu == lv;
 }
 
@@ -224,111 +228,307 @@ static inline void tk_graph_add_adj (
   tk_iuset_put(adj->a[iv], iu, &kha);
 }
 
-static inline double tk_graph_weight (
+static inline double tk_graph_weight(
   const tk_graph_t *g,
   double base,
   bool is_pos,
   int64_t src_idx,
   int64_t nbr_idx
 ) {
-  double def_scale = is_pos ? g->pos_scale : g->neg_scale;
-  double def_sigma_scale = is_pos ? g->pos_sigma_scale : g->neg_sigma_scale;
-  double eps = g->weight_eps;
-  if (base == DBL_MAX || isnan(base)) {
-    double cap = fabs(def_scale);
-    if (cap == 0.0) return 0.0;
-    double m = (eps > 0.0) ? fmin(eps, cap) : 0.0;
-    return (is_pos ? +m : -m);
+  const double def_base = is_pos ? g->pos_default : g->neg_default;
+  const double scale = is_pos ? g->pos_scale : g->neg_scale;
+  const double sigma_scale = is_pos ? g->pos_sigma_scale : g->neg_sigma_scale;
+  const double eps = g->weight_eps;
+  double cap = fabs(scale);
+  if (cap == 0.0) {
+    return 0.0;
   }
-  double b = base;
-  if (b < 0.0) b = 0.0;
-  if (b > 1.0) b = 1.0;
-  double hi = (g->repel_at >= 0.0) ? fmin(fmax(g->repel_at, 0.0), 1.0) : 2.0;
-  double lo = (g->attract_at >= 0.0) ? fmin(fmax(g->attract_at, 0.0), 1.0) : -1.0;
-  bool forced_attract = (b <= lo);
-  bool forced_repel = (b >= hi) && !forced_attract;
-  bool use_attract = forced_attract ? true : forced_repel ? false : (def_scale >= 0.0);
-  double cap_scale = def_scale;
-  if (forced_attract) cap_scale = g->pos_scale;
-  else if (forced_repel) cap_scale = g->neg_scale;
-  double cap = fabs(cap_scale);
-  if (cap == 0.0) return 0.0;
-  if (def_sigma_scale < 0.0) {
-    double sign = use_attract ? 1.0 : -1.0;
+  double b;
+  if (base == DBL_MAX || isnan(base)) {
+    b = def_base;
+  } else if (base < 0.0) {
+    b = eps;
+  } else {
+    b = base;
+  }
+  if (b < 0.0) {
+    b = 0.0;
+  } else if (b > 1.0) {
+    b = 1.0;
+  }
+  const double sign = (scale >= 0.0) ? 1.0 : -1.0;
+  if (sigma_scale < 0.0) {
     double w = sign * cap;
-    if (eps > 0.0 && fabs(w) < eps) w = sign * fmin(eps, cap);
+    if (eps > 0.0 && fabs(w) < eps) {
+      w = sign * fmin(eps, cap);
+    }
     return w;
   }
-  bool have_sigmas = (g->sigmas && g->sigmas->n > 0);
   double sim;
-  if (def_sigma_scale == 0.0 || !have_sigmas) {
+  const bool have_sigmas = (g->sigmas && g->sigmas->n > 0);
+  if (sigma_scale == 0.0 || !have_sigmas) {
     sim = 1.0 - b;
   } else {
     double si = (src_idx >= 0 && (uint64_t)src_idx < g->sigmas->n) ? g->sigmas->a[src_idx] : eps;
     double sj = (nbr_idx >= 0 && (uint64_t)nbr_idx < g->sigmas->n) ? g->sigmas->a[nbr_idx] : eps;
-    if (si <= 0.0) si = eps;
-    if (sj <= 0.0) sj = eps;
-    double spair = sqrt(si * sj) * def_sigma_scale;
+    if (si <= 0.0) {
+      si = eps;
+    }
+    if (sj <= 0.0) {
+      sj = eps;
+    }
+    double spair = sqrt(si * sj) * sigma_scale;
     if (spair > 0.0) {
       double s2 = spair * spair;
-      double e1 = exp(-0.5 / s2);
-      double eb = exp(-0.5 * (b * b) / s2);
+      double e1 = exp( -0.5 / s2 );
+      double eb = exp( -0.5 * (b * b) / s2 );
       double denom = 1.0 - e1;
-      sim = (denom > 0.0) ? (eb - e1) / denom : (1.0 - b);
+      if (denom > 0.0) {
+        sim = (eb - e1) / denom;
+      } else {
+        sim = 1.0 - b;
+      }
     } else {
       sim = 1.0 - b;
     }
   }
-  double mag = use_attract ? sim : (1.0 - sim);
-  double sign = use_attract ? 1.0 : -1.0;
+  double mag = (scale >= 0.0) ? sim : (1.0 - sim);
   double w = sign * mag * cap;
-  if (eps > 0.0 && fabs(w) < eps) w = sign * fmin(eps, cap);
-  if (w > cap) w = cap;
-  if (w < -cap) w = -cap;
+  if (eps > 0.0 && fabs(w) < eps) {
+    w = sign * fmin(eps, cap);
+  }
+  if (w > cap) {
+    w = cap;
+  } else if (w < -cap) {
+    w = -cap;
+  }
   return w;
 }
 
 static inline double tk_graph_distance (
   tk_graph_t *graph,
   int64_t u,
-  int64_t v
+  int64_t v,
+  bool is_fallback
 ) {
   if (graph->inv != NULL) {
 
     size_t un;
     int64_t *uset = tk_inv_get(graph->inv, u, &un);
     if (uset == NULL)
-      return DBL_MAX;
+      return is_fallback ? -1 : DBL_MAX;
     size_t wn;
     int64_t *wset = tk_inv_get(graph->inv, v, &wn);
     if (wset == NULL)
-      return DBL_MAX;
+      return is_fallback ? -1 : DBL_MAX;
     return 1.0 - tk_inv_jaccard(uset, un, wset, wn);
 
   } else if (graph->ann != NULL) {
 
     char *uset = tk_ann_get(graph->ann, u);
     if (uset == NULL)
-      return DBL_MAX;
+      return is_fallback ? -1 : DBL_MAX;
     char *wset = tk_ann_get(graph->ann, v);
     if (wset == NULL)
-      return DBL_MAX;
+      return is_fallback ? -1 : DBL_MAX;
     return (double) tk_ann_hamming((const unsigned char *) uset, (const unsigned char *) wset, graph->ann->features) / (double) graph->ann->features;
 
   } else if (graph->hbi != NULL) {
 
     char *uset = tk_hbi_get(graph->hbi, u);
     if (uset == NULL)
-      return DBL_MAX;
+      return is_fallback ? -1 : DBL_MAX;
     char *wset = tk_hbi_get(graph->hbi, v);
     if (wset == NULL)
-      return DBL_MAX;
+      return is_fallback ? -1 : DBL_MAX;
     return (double) tk_ann_hamming((const unsigned char *) uset, (const unsigned char *) wset, graph->hbi->features) / (double) graph->hbi->features;
 
   } else {
-    return DBL_MAX;
+    return is_fallback ? -1 : DBL_MAX;
   }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 static inline void tm_add_knn (
   lua_State *L,
@@ -368,11 +568,14 @@ static inline void tm_add_knn (
         bool w = graph->labels == NULL || tk_graph_same_label(graph, u, v);
         if (w && !rem_pos) continue;
         if (!w && !rem_neg) continue;
+
+
         tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, r.d, w, i, r.i));
         khi = kh_put(pairs, graph->pairs, e, &kha);
         if (!kha)
           continue;
         kh_value(graph->pairs, khi) = w;
+
         tk_graph_add_adj(graph, u, v, w);
         if (w) {
           tk_dsu_union(&graph->dsu, u, v);
@@ -406,11 +609,16 @@ static inline void tm_add_knn (
         bool w = graph->labels == NULL || tk_graph_same_label(graph, u, v);
         if (w && !rem_pos) continue;
         if (!w && !rem_neg) continue;
-        tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, (double) r.p / (double) graph->ann->features, w, i, r.i));
+        double d = (double) r.p / (double) graph->ann->features;
+        double weight = tk_graph_weight(graph, d, w, i, r.i);
+
+
+        tm_pair_t e = tm_pair(u, v, weight);
         khi = kh_put(pairs, graph->pairs, e, &kha);
         if (!kha)
           continue;
         kh_value(graph->pairs, khi) = w;
+
         tk_graph_add_adj(graph, u, v, w);
         if (w) {
           tk_dsu_union(&graph->dsu, u, v);
@@ -444,11 +652,16 @@ static inline void tm_add_knn (
         bool w = graph->labels == NULL || tk_graph_same_label(graph, u, v);
         if (w && !rem_pos) continue;
         if (!w && !rem_neg) continue;
-        tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, (double) r.p / (double) graph->hbi->features, w, i, r.i));
+        double d = (double) r.p / (double) graph->hbi->features;
+        double weight = tk_graph_weight(graph, d, w, i, r.i);
+
+
+        tm_pair_t e = tm_pair(u, v, weight);
         khi = kh_put(pairs, graph->pairs, e, &kha);
         if (!kha)
           continue;
         kh_value(graph->pairs, khi) = w;
+
         tk_graph_add_adj(graph, u, v, w);
         if (w) {
           tk_dsu_union(&graph->dsu, u, v);
@@ -590,11 +803,13 @@ static inline void tm_add_mst (
       bool w = graph->labels == NULL || tk_graph_same_label(graph, c.u, c.v);
       int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, c.u));
       int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, c.v));
-      tm_pair_t e = tm_pair(c.u, c.v, tk_graph_weight(graph, c.d, w, iu, iv));
+      double weight = tk_graph_weight(graph, c.d, w, iu, iv);
+      tm_pair_t e = tm_pair(c.u, c.v, weight);
       khi = kh_put(pairs, graph->pairs, e, &kha);
       if (!kha)
         continue;
       kh_value(graph->pairs, khi) = w;
+
       tk_graph_add_adj(graph, c.u, c.v, w);
       tk_dsu_union(&graph->dsu, c.u, c.v);
       if (w)
@@ -604,44 +819,12 @@ static inline void tm_add_mst (
     }
   } else {
 
-    if (graph->labels) {
-      tk_iumap_t *last_in_class = tk_iumap_create();
-      khint_t k; int is_new;
-      for (int64_t idx = 0; idx < (int64_t) graph->uids->n; idx ++) {
-        int64_t u = graph->uids->a[idx];
-        int64_t lbl = graph->labels->a[idx];
-        if (lbl < 0)
-          continue;
-        k = tk_iumap_put(last_in_class, lbl, &is_new);
-        if (is_new) {
-          tk_iumap_value(last_in_class, k) = u;
-        } else {
-          int64_t v = tk_iumap_value(last_in_class, k);
-          int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, u));
-          int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, v));
-          tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, tk_graph_distance(graph, u, v), true, iu, iv));
-          khint_t kp; int kha;
-          kp = kh_put(pairs, graph->pairs, e, &kha);
-          if (!kha)
-            continue;
-          kh_value(graph->pairs, kp) = true;
-          tk_graph_add_adj(graph, u, v, true);
-          tk_dsu_union(&graph->dsu, u, v);
-          graph->n_pos++;
-          tk_iumap_value(last_in_class, k) = u;
-        }
-      }
-      tk_iumap_destroy(last_in_class);
-    }
-
     tk_pumap_t *reps_comp = tk_pumap_create();
-    for (int64_t idx = 0; idx < (int64_t) graph->uids->n; idx ++) {
+    for (int64_t idx = 0; idx < (int64_t)graph->uids->n; idx++) {
       int64_t u = graph->uids->a[idx];
       int64_t comp = tk_dsu_find(&graph->dsu, u);
-      khint_t kc;
-      int is_new;
       int64_t deg = tk_iuset_size(graph->adj_pos->a[idx]) + tk_iuset_size(graph->adj_neg->a[idx]);
-      kc = tk_pumap_put(reps_comp, comp, &is_new);
+      int is_new; khint_t kc = tk_pumap_put(reps_comp, comp, &is_new);
       if (is_new || deg < tk_pumap_value(reps_comp, kc).p)
         tk_pumap_value(reps_comp, kc) = tk_pair(idx, deg);
     }
@@ -650,67 +833,57 @@ static inline void tm_add_mst (
     tk_pumap_destroy(reps_comp);
     tk_pvec_shuffle(centers);
 
+
     if (graph->labels && centers->n >= 2) {
 
       tk_iumap_t *cnt = tk_iumap_create();
-      for (uint64_t i = 0; i < centers->n; i ++) {
+      for (uint64_t i = 0; i < centers->n; i++) {
         int64_t idx_i = centers->a[i].i;
-        int64_t lbl = graph->labels->a[idx_i];
-        if (lbl < 0)
-          continue;
+        int64_t lbl   = graph->labels->a[idx_i];
+        if (lbl < 0) continue;
         int is_new; khint_t kc = tk_iumap_put(cnt, lbl, &is_new);
-        if (is_new) {
-          tk_iumap_value(cnt, kc) = 1;
-        } else {
-          tk_iumap_value(cnt, kc) = tk_iumap_value(cnt, kc) + 1;
-        }
+        tk_iumap_value(cnt, kc) = is_new ? 1 : (tk_iumap_value(cnt, kc) + 1);
       }
+
 
       tk_iumap_t *off = tk_iumap_create();
       uint64_t total = centers->n;
       int64_t *buf = (int64_t *) malloc(total * sizeof(int64_t));
       uint64_t cur = 0;
-      for (khint_t it = 0; it < kh_end(cnt); it ++) {
-        if (!kh_exist(cnt, it))
-          continue;
+      for (khint_t it = 0; it < kh_end(cnt); it++) {
+        if (!kh_exist(cnt, it)) continue;
         int64_t lbl = kh_key(cnt, it);
         khint_t ko = tk_iumap_put(off, lbl, &(int){0});
-        tk_iumap_value(off, ko) = (int64_t) cur;
-        cur += (uint64_t) kh_val(cnt, it);
+        tk_iumap_value(off, ko) = (int64_t)cur;
+        cur += (uint64_t)kh_val(cnt, it);
       }
 
-
       tk_iumap_t *curm = tk_iumap_create();
-      for (khint_t it = 0; it < kh_end(off); it ++) {
-        if (!kh_exist(off, it))
-          continue;
+      for (khint_t it = 0; it < kh_end(off); it++) {
+        if (!kh_exist(off, it)) continue;
         int64_t lbl = kh_key(off, it);
         khint_t kw = tk_iumap_put(curm, lbl, &(int){0});
         tk_iumap_value(curm, kw) = tk_iumap_value(off, it);
       }
-      for (uint64_t i = 0; i < centers->n; i ++) {
+      for (uint64_t i = 0; i < centers->n; i++) {
         int64_t idx_i = centers->a[i].i;
-        int64_t lbl = graph->labels->a[idx_i];
-        if (lbl < 0)
-          continue;
+        int64_t lbl   = (graph->labels ? graph->labels->a[idx_i] : -1);
+        if (lbl < 0) continue;
         khint_t kw = tk_iumap_get(curm, lbl);
         int64_t wpos = tk_iumap_value(curm, kw);
-        buf[wpos] = (int64_t) i;
+        buf[wpos] = (int64_t)i;
         tk_iumap_value(curm, kw) = wpos + 1;
       }
 
-      for (khint_t it = 0; it < kh_end(cnt); it ++) {
-        if (!kh_exist(cnt, it))
-          continue;
+      for (khint_t it = 0; it < kh_end(cnt); it++) {
+        if (!kh_exist(cnt, it)) continue;
         int64_t lbl = kh_key(cnt, it);
         int64_t n_l = kh_val(cnt, it);
-        if (n_l <= 0)
-          continue;
-        khint_t ko = tk_iumap_get(off, lbl);
-        int64_t base = tk_iumap_value(off, ko);
-        if (n_l >= 2) {
+        if (n_l <= 0) continue;
+        int64_t base = tk_iumap_value(off, tk_iumap_get(off, lbl));
 
-          for (int64_t t = 0; t < n_l; t ++) {
+        if (n_l >= 2) {
+          for (int64_t t = 0; t < n_l; t++) {
             int64_t pos_i = buf[base + t];
             int64_t pos_j = buf[base + ((t + 1) % n_l)];
             int64_t iu_uids = centers->a[pos_i].i;
@@ -718,11 +891,9 @@ static inline void tm_add_mst (
             int64_t u = graph->uids->a[iu_uids];
             int64_t v = graph->uids->a[iv_uids];
             if (tk_dsu_find(&graph->dsu, u) != tk_dsu_find(&graph->dsu, v)) {
-              int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, u));
-              int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, v));
-              tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, tk_graph_distance(graph, u, v), true, iu, iv));
-              khint_t kp; int kha;
-              kp = kh_put(pairs, graph->pairs, e, &kha);
+              double d = tk_graph_distance(graph, u, v, true);
+              tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, d, true, -1, -1));
+              int kha; khint_t kp = kh_put(pairs, graph->pairs, e, &kha);
               if (kha) {
                 kh_value(graph->pairs, kp) = true;
                 tk_graph_add_adj(graph, u, v, true);
@@ -733,32 +904,26 @@ static inline void tm_add_mst (
           }
         }
         if (n_l >= 3) {
-          uint64_t C = (uint64_t) llround(graph->bridge_density * (double) n_l);
+          uint64_t C = (uint64_t) llround(graph->bridge_density * (double)n_l);
           if (C > 0) {
-            uint64_t step = (n_l / (int64_t) C) > 0 ? (uint64_t) (n_l / (int64_t) C) : 1;
-            uint64_t jump = (uint64_t) floor(sqrt((double) n_l));
-            if (jump < 2) {
-              jump = 2;
-            }
-            for (uint64_t t = 0; t < C; t ++) {
-              uint64_t s = (t * step) % (uint64_t) n_l;
-              uint64_t s2 = (s + jump) % (uint64_t) n_l;
-              int64_t pos_i = buf[base + (int64_t) s];
-              int64_t pos_j = buf[base + (int64_t) s2];
+            uint64_t step = (n_l / (int64_t)C) > 0 ? (uint64_t)(n_l / (int64_t)C) : 1;
+            uint64_t jump = (uint64_t) floor(sqrt((double)n_l));
+            if (jump < 2) jump = 2;
+            for (uint64_t t = 0; t < C; t++) {
+              uint64_t s  = (t * step) % (uint64_t)n_l;
+              uint64_t s2 = (s + jump) % (uint64_t)n_l;
+              int64_t pos_i = buf[base + (int64_t)s];
+              int64_t pos_j = buf[base + (int64_t)s2];
               int64_t iu_uids = centers->a[pos_i].i;
               int64_t iv_uids = centers->a[pos_j].i;
               int64_t u = graph->uids->a[iu_uids];
               int64_t v = graph->uids->a[iv_uids];
-
-              int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, u));
-              int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, v));
-              tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, tk_graph_distance(graph, u, v), true, iu, iv));
-              khint_t kp; int kha;
-              kp = kh_put(pairs, graph->pairs, e, &kha);
+              double d = tk_graph_distance(graph, u, v, true);
+              tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, d, true, -1, -1));
+              int kha; khint_t kp = kh_put(pairs, graph->pairs, e, &kha);
               if (kha) {
                 kh_value(graph->pairs, kp) = true;
                 tk_graph_add_adj(graph, u, v, true);
-
                 tk_dsu_union(&graph->dsu, u, v);
                 graph->n_pos++;
               }
@@ -772,129 +937,69 @@ static inline void tm_add_mst (
       free(buf);
     }
 
-    if (graph->labels) {
-      tk_pumap_t *reps_class = tk_pumap_create();
-      for (uint64_t i = 0; i < centers->n; i ++) {
-        tk_pair_t pr = centers->a[i];
-        int64_t idx = pr.i;
-        int64_t lbl = graph->labels->a[idx];
-        if (lbl < 0)
-          continue;
-        khint_t kl; int is_new;
-        kl = tk_pumap_put(reps_class, lbl, &is_new);
-        if (is_new || pr.p < tk_pumap_value(reps_class, kl).p)
-          tk_pumap_value(reps_class, kl) = pr;
-      }
-      tk_pvec_t *anchors = tk_pumap_values(L, reps_class);
-      tk_pvec_asc(anchors, 0, anchors->n);
-      tk_pumap_destroy(reps_class);
-      tk_pvec_shuffle(anchors);
 
-      if (anchors->n >= 2) {
-        for (uint64_t i = 0; i < anchors->n; i ++) {
-          uint64_t j = (i + 1) % anchors->n;
-          int64_t iu_uids = anchors->a[i].i;
-          int64_t iv_uids = anchors->a[j].i;
-          int64_t u = graph->uids->a[iu_uids];
-          int64_t v = graph->uids->a[iv_uids];
-          if (tk_dsu_find(&graph->dsu, u) != tk_dsu_find(&graph->dsu, v)) {
-            int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, u));
-            int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, v));
-            tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, tk_graph_distance(graph, u, v), false, iu, iv));
-            int kha; khint_t kp = kh_put(pairs, graph->pairs, e, &kha);
-            if (kha) {
-              kh_value(graph->pairs, kp) = false;
-              tk_graph_add_adj(graph, u, v, false);
-              tk_dsu_union(&graph->dsu, u, v);
-              graph->n_neg++;
-            }
-          }
-        }
-      }
+    tk_pumap_t *reps2 = tk_pumap_create();
+    for (int64_t idx = 0; idx < (int64_t)graph->uids->n; idx++) {
+      int64_t u = graph->uids->a[idx];
+      int64_t comp = tk_dsu_find(&graph->dsu, u);
+      int64_t deg = tk_iuset_size(graph->adj_pos->a[idx]) + tk_iuset_size(graph->adj_neg->a[idx]);
+      int is_new; khint_t kc = tk_pumap_put(reps2, comp, &is_new);
+      if (is_new || deg < tk_pumap_value(reps2, kc).p)
+        tk_pumap_value(reps2, kc) = tk_pair(idx, deg);
+    }
+    tk_pvec_t *centers2 = tk_pumap_values(L, reps2);
+    tk_pvec_asc(centers2, 0, centers2->n);
+    tk_pumap_destroy(reps2);
+    tk_pvec_shuffle(centers2);
 
-      if (anchors->n >= 3) {
-        uint64_t n = anchors->n;
-        uint64_t C = (uint64_t) llround(graph->bridge_density * (double) n);
-        if (C > 0) {
-          uint64_t step = (n / C) > 0 ? (n / C) : 1;
-          uint64_t jump = (uint64_t) floor(sqrt((double) n));
-          if (jump < 2)
-            jump = 2;
-          for (uint64_t t = 0; t < C; t ++) {
-            uint64_t i = (t * step) % n;
-            uint64_t j = (i + jump) % n;
-            int64_t iu_uids = anchors->a[i].i;
-            int64_t iv_uids = anchors->a[j].i;
-            int64_t u = graph->uids->a[iu_uids];
-            int64_t v = graph->uids->a[iv_uids];
-            int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, u));
-            int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, v));
-            tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, tk_graph_distance(graph, u, v), false, iu, iv));
-            int kha; khint_t kp = kh_put(pairs, graph->pairs, e, &kha);
-            if (kha) {
-              kh_value(graph->pairs, kp) = false;
-              tk_graph_add_adj(graph, u, v, false);
-              tk_dsu_union(&graph->dsu, u, v);
-              graph->n_neg++;
-            }
-          }
-        }
-      }
-      lua_remove(L, -1);
-    } else {
 
-      if (centers->n >= 2) {
-        for (uint64_t i = 0; i < centers->n; i ++) {
-          uint64_t j = (i + 1) % centers->n;
-          int64_t iu_uids = centers->a[i].i;
-          int64_t iv_uids = centers->a[j].i;
-          int64_t u = graph->uids->a[iu_uids];
-          int64_t v = graph->uids->a[iv_uids];
-          if (tk_dsu_find(&graph->dsu, u) != tk_dsu_find(&graph->dsu, v)) {
-            int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, u));
-            int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, v));
-            tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, tk_graph_distance(graph, u, v), false, iu, iv));
-            khint_t kp; int kha;
-            kp = kh_put(pairs, graph->pairs, e, &kha);
-            if (kha) {
-              kh_value(graph->pairs, kp) = false;
-              tk_graph_add_adj(graph, u, v, false);
-              tk_dsu_union(&graph->dsu, u, v);
-              graph->n_neg++;
-            }
-          }
-        }
-      }
-      if (centers->n >= 3) {
-        uint64_t n = centers->n;
-        uint64_t C = (uint64_t) llround(graph->bridge_density * (double) n);
-        if (C > 0) {
-          uint64_t step = (n / C) > 0 ? (n / C) : 1;
-          uint64_t jump = (uint64_t) floor(sqrt((double) n));
-          if (jump < 2)
-            jump = 2;
-          for (uint64_t t = 0; t < C; t ++) {
-            uint64_t i = (t * step) % n;
-            uint64_t j = (i + jump) % n;
-            int64_t iu_uids = centers->a[i].i;
-            int64_t iv_uids = centers->a[j].i;
-            int64_t u = graph->uids->a[iu_uids];
-            int64_t v = graph->uids->a[iv_uids];
-            int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, u));
-            int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, v));
-            tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, tk_graph_distance(graph, u, v), false, iu, iv));
-            khint_t kp; int kha;
-            kp = kh_put(pairs, graph->pairs, e, &kha);
-            if (kha) {
-              kh_value(graph->pairs, kp) = false;
-              tk_graph_add_adj(graph, u, v, false);
-              tk_dsu_union(&graph->dsu, u, v);
-              graph->n_neg++;
-            }
+    if (centers2->n >= 2) {
+      for (uint64_t i = 0; i < centers2->n; i++) {
+        uint64_t j = (i + 1) % centers2->n;
+        int64_t iu_uids = centers2->a[i].i;
+        int64_t iv_uids = centers2->a[j].i;
+        int64_t u = graph->uids->a[iu_uids];
+        int64_t v = graph->uids->a[iv_uids];
+        if (tk_dsu_find(&graph->dsu, u) != tk_dsu_find(&graph->dsu, v)) {
+          double d = tk_graph_distance(graph, u, v, true);
+          tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, d, false, -1, -1));
+          int kha; khint_t kp = kh_put(pairs, graph->pairs, e, &kha);
+          if (kha) {
+            kh_value(graph->pairs, kp) = false;
+            tk_graph_add_adj(graph, u, v, false);
+            tk_dsu_union(&graph->dsu, u, v);
+            graph->n_neg++;
           }
         }
       }
     }
+    if (centers2->n >= 3) {
+      uint64_t n = centers2->n;
+      uint64_t C = (uint64_t) llround(graph->bridge_density * (double)n);
+      if (C > 0) {
+        uint64_t step = (n / C) > 0 ? (n / C) : 1;
+        uint64_t jump = (uint64_t) floor(sqrt((double)n));
+        if (jump < 2) jump = 2;
+        for (uint64_t t = 0; t < C; t++) {
+          uint64_t i = (t * step) % n;
+          uint64_t j = (i + jump) % n;
+          int64_t iu_uids = centers2->a[i].i;
+          int64_t iv_uids = centers2->a[j].i;
+          int64_t u = graph->uids->a[iu_uids];
+          int64_t v = graph->uids->a[iv_uids];
+          double d = tk_graph_distance(graph, u, v, true);
+          tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, d, false, -1, -1));
+          int kha; khint_t kp = kh_put(pairs, graph->pairs, e, &kha);
+          if (kha) {
+            kh_value(graph->pairs, kp) = false;
+            tk_graph_add_adj(graph, u, v, false);
+            tk_dsu_union(&graph->dsu, u, v);
+            graph->n_neg++;
+          }
+        }
+      }
+    }
+    lua_pop(L, 1);
     lua_pop(L, 1);
   }
 }
@@ -933,16 +1038,15 @@ static inline void tm_add_pairs (
         continue;
       if (tk_iumap_get(graph->uids_idx, v) == tk_iumap_end(graph->uids_idx))
         continue;
-      if (graph->labels != NULL && !tk_graph_same_label(graph, u, v))
-        continue;
-      double d = tk_graph_distance(graph, u, v);
+      double d = tk_graph_distance(graph, u, v, false);
       int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, u));
       int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, v));
-      double w = tk_graph_weight(graph, d == DBL_MAX ? 0.0 : d, true, iu, iv);
+      double w = tk_graph_weight(graph, d, true, iu, iv);
       khi = kh_put(pairs, graph->pairs, tm_pair(u, v, w), &kha);
       if (!kha)
         continue;
       kh_value(graph->pairs, khi) = true;
+
       tk_dsu_union(&graph->dsu, u, v);
       tk_graph_add_adj(graph, u, v, true);
       n_pos_new ++;
@@ -959,12 +1063,11 @@ static inline void tm_add_pairs (
         continue;
       if (tk_iumap_get(graph->uids_idx, v) == tk_iumap_end(graph->uids_idx))
         continue;
-      if (graph->labels != NULL && tk_graph_same_label(graph, u, v))
-        continue;
-      double d = tk_graph_distance(graph, u, v);
+      double d = tk_graph_distance(graph, u, v, false);
       int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, u));
       int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, v));
-      double w = tk_graph_weight(graph, d == DBL_MAX ? 1.0 : d, false, iu, iv);
+      double w = tk_graph_weight(graph, d, false, iu, iv);
+
       khi = kh_put(pairs, graph->pairs, tm_pair(u, v, w), &kha);
       if (!kha)
         continue;
@@ -1071,11 +1174,27 @@ static inline int tm_create (lua_State *L)
   int i_labels = tk_lua_absindex(L, -1);
   tk_ivec_t *labels = tk_ivec_peekopt(L, -1);
 
+
+
+
+
+
+
+
+
+
+
   if (labels && !ids)
     tk_lua_verror(L, 1, "labels require ids (labels[i] corresponds to ids[i])");
 
   if (labels && ids && labels->n != ids->n)
     tk_lua_verror(L, 1, "labels length must equal ids length");
+
+
+
+
+
+
 
   lua_getfield(L, 1, "index");
   tk_inv_t *inv = tk_inv_peekopt(L, -1);
@@ -1089,13 +1208,14 @@ static inline int tm_create (lua_State *L)
   double knn_eps = tk_lua_foptposdouble(L, 1, "graph", "knn_eps", 1.0);
   if ((knn_pos + knn_neg) > knn_cache)
     knn_cache = knn_pos + knn_neg;
+  double pos_default = tk_lua_foptnumber(L, 1, "graph", "pos_default", 1.0);
+  double neg_default = tk_lua_foptnumber(L, 1, "graph", "neg_default", 1.0);
   double pos_scale = tk_lua_foptnumber(L, 1, "graph", "pos_scale", 1.0);
   double neg_scale = tk_lua_foptnumber(L, 1, "graph", "neg_scale", -1.0);
-  double repel_at = tk_lua_foptnumber(L, 1, "graph", "repel_at", -1.0);
-  double attract_at = tk_lua_foptnumber(L, 1, "graph", "attract_at", -1.0);
   double pos_sigma_scale = tk_lua_foptnumber(L, 1, "graph", "pos_sigma_scale", 1.0);
   double neg_sigma_scale = tk_lua_foptnumber(L, 1, "graph", "neg_sigma_scale", 1.0);
   int64_t sigma_k = tk_lua_foptinteger(L, 1, "graph", "sigma_k", -1);
+  bool no_label_is_match = tk_lua_foptboolean(L, 1, "graph", "no_label_is_match", true);
   double bridge_density = tk_lua_foptnumber(L, 1, "graph", "bridge_density", 0.02);
   double weight_eps = tk_lua_foptnumber(L, 1, "graph", "weight_eps", 1e-6);
   bool do_mst = tk_lua_foptboolean(L, 1, "graph", "mst", true);
@@ -1111,7 +1231,10 @@ static inline int tm_create (lua_State *L)
 
   tk_graph_t *graph = tm_graph_create(
     L, i_ids, ids, pos, neg, labels, inv, ann, hbi, knn_cache, knn_eps,
-    pos_scale, neg_scale, repel_at, attract_at, pos_sigma_scale, neg_sigma_scale, sigma_k, bridge_density, weight_eps, n_threads);
+    pos_scale, neg_scale, pos_default, neg_default, pos_sigma_scale,
+    neg_sigma_scale, sigma_k,
+
+    bridge_density, weight_eps, no_label_is_match, n_threads);
   int Gi = tk_lua_absindex(L, -1);
 
   tm_setup_hoods(L, Gi, graph);
@@ -1204,6 +1327,9 @@ static inline int tm_create (lua_State *L)
     lua_pushstring(L, "kruskal");
     lua_call(L, 4, 0);
   }
+
+
+
 
   if (do_bridge && graph->dsu.components > 1)
     tm_add_mst(L, graph, NULL);
@@ -1300,13 +1426,17 @@ static inline tk_graph_t *tm_graph_create (
   double knn_eps,
   double pos_scale,
   double neg_scale,
-  double repel_at,
-  double attract_at,
+  double pos_default,
+  double neg_default,
   double pos_sigma_scale,
   double neg_sigma_scale,
   int64_t sigma_k,
+
+
+
   double bridge_density,
   double weight_eps,
+  bool no_label_is_match,
   unsigned int n_threads
 ) {
   tk_graph_t *graph = tk_lua_newuserdata(L, tk_graph_t, TK_GRAPH_MT, tm_graph_mt_fns, tm_graph_gc);
@@ -1318,17 +1448,26 @@ static inline tk_graph_t *tm_graph_create (
   graph->knn_eps = knn_eps;
   graph->pos_scale = pos_scale;
   graph->neg_scale = neg_scale;
-  graph->repel_at = repel_at;
-  graph->attract_at = attract_at;
+  graph->pos_default = pos_default;
+  graph->neg_default = neg_default;
   graph->pos_sigma_scale = pos_sigma_scale;
   graph->neg_sigma_scale = neg_sigma_scale;
   graph->sigma_k = sigma_k;
+  graph->no_label_is_match = no_label_is_match;
   graph->bridge_density = bridge_density;
   graph->weight_eps = weight_eps;
   graph->pairs = kh_init(pairs);
   graph->inv = inv;
   graph->ann = ann;
   graph->hbi = hbi;
+
+
+
+
+
+
+
+
   if (ids != NULL) {
     graph->uids = ids;
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, i_ids);
