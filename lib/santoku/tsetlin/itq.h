@@ -148,7 +148,7 @@ static inline void tk_itq_encode (
 
   cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
               N, K, K, 1.0, X, K, R, K, 0.0, V1, K);
-  tk_itq_center(V0, N, K);
+  tk_itq_center(V1, N, K);
   tk_itq_sign(out, V1, N, K);
 
   // Cleanup
