@@ -1,5 +1,8 @@
 # Now
 
+- Graph
+    - Ensure new node type weighting is working
+
 - Clustering
     - Return n_clusters, n_core, n_border, n_noise
 
@@ -74,6 +77,11 @@
     - Optional lua gc management via tk_xvec_create(NULL, ...), allowing later opt-in via tk_xvec_register(L, xv)
 
 # Later
+
+- Graph
+    - Consider moving all weighting logic into the final adjacency construction
+      process for simplicity. No need to consider weights anywhere else. What
+      about the weights we get during knn?
 
 - Tests
     - QQP
