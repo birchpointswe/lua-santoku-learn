@@ -54,6 +54,7 @@ typedef struct tk_graph_s {
   double neg_sigma_scale;
   int64_t sigma_k;
   double weight_eps;
+  double bridge_density;
   tk_dvec_t *sigmas;
   tk_pvec_t *pos, *neg;
   tk_ivec_t *labels;

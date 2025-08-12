@@ -18,6 +18,7 @@ static inline tk_graph_t *tm_graph_create (
   double pos_sigma_scale,
   double neg_sigma_scale,
   int64_t sigma_k,
+  double bridge_density,
   double weight_eps,
   unsigned int n_threads
 );
@@ -632,90 +633,267 @@ static inline void tm_add_mst (
       }
       tk_iumap_destroy(last_in_class);
     }
+    // reps_comp: lowest-degree representative per component
     tk_pumap_t *reps_comp = tk_pumap_create();
     for (int64_t idx = 0; idx < (int64_t) graph->uids->n; idx ++) {
       int64_t u = graph->uids->a[idx];
       int64_t comp = tk_dsu_find(&graph->dsu, u);
       khint_t kc;
       int is_new;
-      int64_t deg_pos = tk_iuset_size(graph->adj_pos->a[idx]);
+      int64_t deg = tk_iuset_size(graph->adj_pos->a[idx]) + tk_iuset_size(graph->adj_neg->a[idx]);
       kc = tk_pumap_put(reps_comp, comp, &is_new);
-      if (is_new || deg_pos > tk_pumap_value(reps_comp, kc).p) {
-        tk_pumap_value(reps_comp, kc) = tk_pair(idx, deg_pos);
-      }
+      if (is_new || deg < tk_pumap_value(reps_comp, kc).p)
+        tk_pumap_value(reps_comp, kc) = tk_pair(idx, deg);
     }
     tk_pvec_t *centers = tk_pumap_values(L, reps_comp);
     tk_pvec_asc(centers, 0, centers->n);
     tk_pumap_destroy(reps_comp);
+    tk_pvec_shuffle(centers);
+    // in-class ring + chords
+    if (graph->labels && centers->n >= 2) {
+      /* Count reps per label */
+      tk_iumap_t *cnt = tk_iumap_create();     /* lbl -> count */
+      for (uint64_t i = 0; i < centers->n; i ++) {
+        int64_t idx_i = centers->a[i].i;
+        int64_t lbl = graph->labels->a[idx_i];
+        if (lbl < 0)
+          continue;
+        int is_new; khint_t kc = tk_iumap_put(cnt, lbl, &is_new);
+        if (is_new) {
+          tk_iumap_value(cnt, kc) = 1;
+        } else {
+          tk_iumap_value(cnt, kc) = tk_iumap_value(cnt, kc) + 1;
+        }
+      }
+      /* Build offsets for stable per-label slices */
+      tk_iumap_t *off = tk_iumap_create();     /* lbl -> start offset in buf */
+      uint64_t total = centers->n;
+      int64_t *buf = (int64_t *) malloc(total * sizeof(int64_t));   /* stores centers positions (0..centers->n-1) */
+      uint64_t cur = 0;
+      for (khint_t it = 0; it < kh_end(cnt); it ++) {
+        if (!kh_exist(cnt, it))
+          continue;
+        int64_t lbl = kh_key(cnt, it);
+        khint_t ko = tk_iumap_put(off, lbl, &(int){0});
+        tk_iumap_value(off, ko) = (int64_t) cur;
+        cur += (uint64_t) kh_val(cnt, it);
+      }
+      /* Scatter centers positions into contiguous per-label slices */
+      /* Use a temp cursor map so 'off' remains the base */
+      tk_iumap_t *curm = tk_iumap_create();    /* lbl -> next write */
+      for (khint_t it = 0; it < kh_end(off); it ++) {
+        if (!kh_exist(off, it))
+          continue;
+        int64_t lbl = kh_key(off, it);
+        khint_t kw = tk_iumap_put(curm, lbl, &(int){0});
+        tk_iumap_value(curm, kw) = tk_iumap_value(off, it);
+      }
+      for (uint64_t i = 0; i < centers->n; i ++) {
+        int64_t idx_i = centers->a[i].i;
+        int64_t lbl = graph->labels->a[idx_i];
+        if (lbl < 0)
+          continue;
+        khint_t kw = tk_iumap_get(curm, lbl);
+        int64_t wpos = tk_iumap_value(curm, kw);
+        buf[wpos] = (int64_t) i;               /* store position into this label's slice */
+        tk_iumap_value(curm, kw) = wpos + 1;
+      }
+      /* For each label slice: ring + chords */
+      for (khint_t it = 0; it < kh_end(cnt); it ++) {
+        if (!kh_exist(cnt, it))
+          continue;
+        int64_t lbl = kh_key(cnt, it);
+        int64_t n_l = kh_val(cnt, it);
+        if (n_l <= 0)
+          continue;
+        khint_t ko = tk_iumap_get(off, lbl);
+        int64_t base = tk_iumap_value(off, ko);
+        if (n_l >= 2) {
+          /* Ring within label slice, in the shuffled order implied by centers */
+          for (int64_t t = 0; t < n_l; t ++) {
+            int64_t pos_i = buf[base + t];
+            int64_t pos_j = buf[base + ((t + 1) % n_l)];
+            int64_t iu_uids = centers->a[pos_i].i;
+            int64_t iv_uids = centers->a[pos_j].i;
+            int64_t u = graph->uids->a[iu_uids];
+            int64_t v = graph->uids->a[iv_uids];
+            if (tk_dsu_find(&graph->dsu, u) != tk_dsu_find(&graph->dsu, v)) {
+              int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, u));
+              int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, v));
+              tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, tk_graph_distance(graph, u, v), true, iu, iv));
+              khint_t kp; int kha;
+              kp = kh_put(pairs, graph->pairs, e, &kha);
+              if (kha) {
+                kh_value(graph->pairs, kp) = true;
+                tk_graph_add_adj(graph, u, v, true);
+                tk_dsu_union(&graph->dsu, u, v);
+                graph->n_pos++;
+              }
+            }
+          }
+        }
+        if (n_l >= 3) {
+          uint64_t C = (uint64_t) llround(graph->bridge_density * (double) n_l);
+          if (C > 0) {
+            uint64_t step = (n_l / (int64_t) C) > 0 ? (uint64_t) (n_l / (int64_t) C) : 1;
+            uint64_t jump = (uint64_t) floor(sqrt((double) n_l));
+            if (jump < 2) {
+              jump = 2;
+            }
+            for (uint64_t t = 0; t < C; t ++) {
+              uint64_t s = (t * step) % (uint64_t) n_l;
+              uint64_t s2 = (s + jump) % (uint64_t) n_l;
+              int64_t pos_i = buf[base + (int64_t) s];
+              int64_t pos_j = buf[base + (int64_t) s2];
+              int64_t iu_uids = centers->a[pos_i].i;
+              int64_t iv_uids = centers->a[pos_j].i;
+              int64_t u = graph->uids->a[iu_uids];
+              int64_t v = graph->uids->a[iv_uids];
+              /* Keep chords even if already in same DSU; duplicates filtered by pairs-set */
+              int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, u));
+              int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, v));
+              tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, tk_graph_distance(graph, u, v), true, iu, iv));
+              khint_t kp; int kha;
+              kp = kh_put(pairs, graph->pairs, e, &kha);
+              if (kha) {
+                kh_value(graph->pairs, kp) = true;
+                tk_graph_add_adj(graph, u, v, true);
+                /* no DSU union needed for chords, but harmless if you keep it */
+                tk_dsu_union(&graph->dsu, u, v);
+                graph->n_pos++;
+              }
+            }
+          }
+        }
+      }
+      tk_iumap_destroy(curm);
+      tk_iumap_destroy(off);
+      tk_iumap_destroy(cnt);
+      free(buf);
+    }
+    // cross-class ring + chords
     if (graph->labels) {
       tk_pumap_t *reps_class = tk_pumap_create();
-      for (uint64_t i = 0; i < centers->n; i++) {
+      for (uint64_t i = 0; i < centers->n; i ++) {
         tk_pair_t pr = centers->a[i];
         int64_t idx = pr.i;
         int64_t lbl = graph->labels->a[idx];
         if (lbl < 0)
           continue;
-        khint_t kl;
-        int is_new;
+        khint_t kl; int is_new;
         kl = tk_pumap_put(reps_class, lbl, &is_new);
-        if (is_new || pr.p > tk_pumap_value(reps_class, kl).p) {
+        if (is_new || pr.p < tk_pumap_value(reps_class, kl).p)
           tk_pumap_value(reps_class, kl) = pr;
+      }
+      tk_pvec_t *anchors = tk_pumap_values(L, reps_class);
+      tk_pvec_asc(anchors, 0, anchors->n);
+      tk_pumap_destroy(reps_class);
+      tk_pvec_shuffle(anchors);
+      /* ring over anchors */
+      if (anchors->n >= 2) {
+        for (uint64_t i = 0; i < anchors->n; i ++) {
+          uint64_t j = (i + 1) % anchors->n;
+          int64_t iu_uids = anchors->a[i].i;
+          int64_t iv_uids = anchors->a[j].i;
+          int64_t u = graph->uids->a[iu_uids];
+          int64_t v = graph->uids->a[iv_uids];
+          if (tk_dsu_find(&graph->dsu, u) != tk_dsu_find(&graph->dsu, v)) {
+            int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, u));
+            int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, v));
+            tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, tk_graph_distance(graph, u, v), false, iu, iv));
+            int kha; khint_t kp = kh_put(pairs, graph->pairs, e, &kha);
+            if (kha) {
+              kh_value(graph->pairs, kp) = false;
+              tk_graph_add_adj(graph, u, v, false);
+              tk_dsu_union(&graph->dsu, u, v);
+              graph->n_neg++;
+            }
+          }
         }
       }
-      tk_pvec_t *by_class = tk_pumap_values(L, reps_class);
-      tk_pvec_asc(by_class, 0, by_class->n);
-      tk_pumap_destroy(reps_class);
-      lua_remove(L, -2);
-      centers = by_class;
-    }
-    for (uint64_t i = 1; i < centers->n; i ++) {
-      int64_t iu_uids = centers->a[i - 1].i;
-      int64_t iv_uids = centers->a[i].i;
-      int64_t u = graph->uids->a[iu_uids];
-      int64_t v = graph->uids->a[iv_uids];
-      if (tk_dsu_find(&graph->dsu, u) != tk_dsu_find(&graph->dsu, v)) {
-        int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, u));
-        int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, v));
-        tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, tk_graph_distance(graph, u, v), false, iu, iv));
-        khint_t kp; int kha;
-        kp = kh_put(pairs, graph->pairs, e, &kha);
-        assert(kha);
-        kh_value(graph->pairs, kp) = false;
-        tk_graph_add_adj(graph, u, v, false);
-        tk_dsu_union(&graph->dsu, u, v);
-        graph->n_neg++;
-      }
-    }
-    if (tk_dsu_components(&graph->dsu) > 1) {
-      tk_pumap_t *rem = tk_pumap_create();
-      for (int64_t idx = 0; idx < (int64_t) graph->uids->n; idx ++) {
-        int64_t u = graph->uids->a[idx];
-        int64_t comp = tk_dsu_find(&graph->dsu, u);
-        int is_new; khint_t kr = tk_pumap_put(rem, comp, &is_new);
-        if (is_new)
-          tk_pumap_value(rem, kr) = tk_pair(idx, 0);
-      }
-      tk_pvec_t *reps = tk_pumap_values(L, rem);
-      tk_pvec_asc(reps, 0, reps->n);
-      tk_pumap_destroy(rem);
-      for (uint64_t i = 1; i < reps->n; i++) {
-        int64_t iu_uids = reps->a[0].i;
-        int64_t iv_uids = reps->a[i].i;
-        int64_t u = graph->uids->a[iu_uids];
-        int64_t v = graph->uids->a[iv_uids];
-        if (tk_dsu_find(&graph->dsu, u) == tk_dsu_find(&graph->dsu, v))
-          continue;
-        int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, u));
-        int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, v));
-        tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, tk_graph_distance(graph, u, v), false, iu, iv));
-        int kha; khint_t kp = kh_put(pairs, graph->pairs, e, &kha);
-        assert(kha);
-        kh_value(graph->pairs, kp) = false;
-        tk_graph_add_adj(graph, u, v, false);
-        tk_dsu_union(&graph->dsu, u, v);
-        graph->n_neg++;
+      // chords over anchors
+      if (anchors->n >= 3) {
+        uint64_t n = anchors->n;
+        uint64_t C = (uint64_t) llround(graph->bridge_density * (double) n);
+        if (C > 0) {
+          uint64_t step = (n / C) > 0 ? (n / C) : 1;
+          uint64_t jump = (uint64_t) floor(sqrt((double) n));
+          if (jump < 2)
+            jump = 2;
+          for (uint64_t t = 0; t < C; t ++) {
+            uint64_t i = (t * step) % n;
+            uint64_t j = (i + jump) % n;
+            int64_t iu_uids = anchors->a[i].i;
+            int64_t iv_uids = anchors->a[j].i;
+            int64_t u = graph->uids->a[iu_uids];
+            int64_t v = graph->uids->a[iv_uids];
+            int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, u));
+            int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, v));
+            tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, tk_graph_distance(graph, u, v), false, iu, iv));
+            int kha; khint_t kp = kh_put(pairs, graph->pairs, e, &kha);
+            if (kha) {
+              kh_value(graph->pairs, kp) = false;
+              tk_graph_add_adj(graph, u, v, false);
+              tk_dsu_union(&graph->dsu, u, v);
+              graph->n_neg++;
+            }
+          }
+        }
       }
       lua_remove(L, -1);
+    } else {
+      /* No labels: fall back to a single ring + chords over centers */
+      if (centers->n >= 2) {
+        for (uint64_t i = 0; i < centers->n; i ++) {
+          uint64_t j = (i + 1) % centers->n;
+          int64_t iu_uids = centers->a[i].i;
+          int64_t iv_uids = centers->a[j].i;
+          int64_t u = graph->uids->a[iu_uids];
+          int64_t v = graph->uids->a[iv_uids];
+          if (tk_dsu_find(&graph->dsu, u) != tk_dsu_find(&graph->dsu, v)) {
+            int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, u));
+            int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, v));
+            tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, tk_graph_distance(graph, u, v), false, iu, iv));
+            khint_t kp; int kha;
+            kp = kh_put(pairs, graph->pairs, e, &kha);
+            if (kha) {
+              kh_value(graph->pairs, kp) = false;
+              tk_graph_add_adj(graph, u, v, false);
+              tk_dsu_union(&graph->dsu, u, v);
+              graph->n_neg++;
+            }
+          }
+        }
+      }
+      if (centers->n >= 3) {
+        uint64_t n = centers->n;
+        uint64_t C = (uint64_t) llround(graph->bridge_density * (double) n);
+        if (C > 0) {
+          uint64_t step = (n / C) > 0 ? (n / C) : 1;
+          uint64_t jump = (uint64_t) floor(sqrt((double) n));
+          if (jump < 2)
+            jump = 2;
+          for (uint64_t t = 0; t < C; t ++) {
+            uint64_t i = (t * step) % n;
+            uint64_t j = (i + jump) % n;
+            int64_t iu_uids = centers->a[i].i;
+            int64_t iv_uids = centers->a[j].i;
+            int64_t u = graph->uids->a[iu_uids];
+            int64_t v = graph->uids->a[iv_uids];
+            int64_t iu = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, u));
+            int64_t iv = tk_iumap_value(graph->uids_idx, tk_iumap_get(graph->uids_idx, v));
+            tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, tk_graph_distance(graph, u, v), false, iu, iv));
+            khint_t kp; int kha;
+            kp = kh_put(pairs, graph->pairs, e, &kha);
+            if (kha) {
+              kh_value(graph->pairs, kp) = false;
+              tk_graph_add_adj(graph, u, v, false);
+              tk_dsu_union(&graph->dsu, u, v);
+              graph->n_neg++;
+            }
+          }
+        }
+      }
     }
     lua_pop(L, 1);
   }
@@ -918,7 +1096,8 @@ static inline int tm_create (lua_State *L)
   double pos_sigma_scale = tk_lua_foptnumber(L, 1, "graph", "pos_sigma_scale", 1.0);
   double neg_sigma_scale = tk_lua_foptnumber(L, 1, "graph", "neg_sigma_scale", 1.0);
   int64_t sigma_k = tk_lua_foptinteger(L, 1, "graph", "sigma_k", -1);
-  double weight_eps = tk_lua_foptnumber(L, 1, "graph", "weight_eps", 1e-8);
+  double bridge_density = tk_lua_foptnumber(L, 1, "graph", "bridge_density", 0.02);
+  double weight_eps = tk_lua_foptnumber(L, 1, "graph", "weight_eps", 1e-6);
   bool do_mst = tk_lua_foptboolean(L, 1, "graph", "mst", true);
   bool do_bridge = tk_lua_foptboolean(L, 1, "graph", "bridge", true);
 
@@ -932,7 +1111,7 @@ static inline int tm_create (lua_State *L)
 
   tk_graph_t *graph = tm_graph_create(
     L, i_ids, ids, pos, neg, labels, inv, ann, hbi, knn_cache, knn_eps,
-    pos_scale, neg_scale, repel_at, attract_at, pos_sigma_scale, neg_sigma_scale, sigma_k, weight_eps, n_threads);
+    pos_scale, neg_scale, repel_at, attract_at, pos_sigma_scale, neg_sigma_scale, sigma_k, bridge_density, weight_eps, n_threads);
   int Gi = tk_lua_absindex(L, -1);
 
   tm_setup_hoods(L, Gi, graph);
@@ -1126,6 +1305,7 @@ static inline tk_graph_t *tm_graph_create (
   double pos_sigma_scale,
   double neg_sigma_scale,
   int64_t sigma_k,
+  double bridge_density,
   double weight_eps,
   unsigned int n_threads
 ) {
@@ -1143,6 +1323,7 @@ static inline tk_graph_t *tm_graph_create (
   graph->pos_sigma_scale = pos_sigma_scale;
   graph->neg_sigma_scale = neg_sigma_scale;
   graph->sigma_k = sigma_k;
+  graph->bridge_density = bridge_density;
   graph->weight_eps = weight_eps;
   graph->pairs = kh_init(pairs);
   graph->inv = inv;
