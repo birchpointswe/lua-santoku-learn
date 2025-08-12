@@ -88,7 +88,11 @@ static inline void tk_spectral_worker (void *dp, int sig)
         for (int64_t j = adj_offset[i]; j < adj_offset[i + 1]; j ++) {
           iv = adj_data[j];
           w = adj_weights[j];
-          sum += x[iv] * scale[i] * scale[iv] * w;
+          if (normalized) {
+            sum += x[iv] * scale[i] * scale[iv] * w;
+          } else {
+            sum += x[iv] * w;
+          }
         }
         y[i] = (normalized ? 1.0 : degree[i]) * x[i] - sum;
       }
