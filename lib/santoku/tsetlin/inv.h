@@ -319,8 +319,21 @@ static inline int64_t *tk_inv_sget (
   int64_t sid,
   size_t *np
 ) {
+  if (sid < 0 || sid + 1 > (int64_t) I->node_offsets->n) {
+    *np = 0;
+    return NULL;
+  }
   int64_t start = I->node_offsets->a[sid];
-  int64_t end = sid + 1 == (int64_t) I->node_offsets->n ? (int64_t) I->node_bits->n : I->node_offsets->a[sid + 1];
+  int64_t end;
+  if (sid + 1 == (int64_t) I->node_offsets->n) {
+    end = (int64_t) I->node_bits->n;
+  } else {
+    end = I->node_offsets->a[sid + 1];
+  }
+  if (start < 0 || end < start || end > (int64_t) I->node_bits->n) {
+    *np = 0;
+    return NULL;
+  }
   *np = (size_t) (end - start);
   return I->node_bits->a + start;
 }
@@ -365,36 +378,38 @@ static inline void tk_inv_add (
     tk_lua_verror(L, 2, "add", "can't add to a destroyed index");
     return;
   }
-  if (node_bits->n == 0)
-    return;
   tk_ivec_uasc(node_bits, 0, node_bits->n);
-  tk_iuset_t *seen = tk_iuset_create();
   size_t nb = node_bits->n;
   size_t nsamples = ids->n;
   size_t i = 0;
-  for (size_t s = 0; s < nsamples; s++) {
+  for (size_t s = 0; s < nsamples; s ++) {
     int64_t uid = ids->a[s];
     int64_t sid = tk_inv_uid_sid(I, uid, true);
     tk_ivec_push(I->node_offsets, (int64_t) I->node_bits->n);
     while (i < nb) {
       int64_t b = node_bits->a[i];
-      if (b < 0) { i++; continue; }
+      if (b < 0) {
+        i ++;
+        continue;
+      }
       size_t sample_idx = (size_t) b / (size_t) I->features;
       if (sample_idx != s)
         break;
       int64_t fid = b % (int64_t) I->features;
       tk_ivec_t *post = I->postings->a[fid];
       bool found = false;
-      for (size_t j = 0; j < post->n; j++)
-        if (post->a[j] == sid) { found = true; break; }
+      for (size_t j = 0; j < post->n; j ++)
+        if (post->a[j] == sid) {
+          found = true;
+          break;
+        }
       if (!found)
         tk_ivec_push(post, sid);
       tk_ivec_push(I->node_bits, fid);
-      i++;
+      i ++;
     }
   }
-  // After last sample, node_offsets->a[nsamples] marks end (optional)
-  tk_iuset_destroy(seen);
+  tk_ivec_push(I->node_offsets, (int64_t) I->node_bits->n);
 }
 
 static inline void tk_inv_remove (
@@ -417,7 +432,7 @@ static inline void tk_inv_mutualize (
 ) {
   if (I->destroyed)
     return;
-  tk_ivec_t *sids = tk_ivec_create(L, uids->n, 0, 0);
+  tk_ivec_t *sids = tk_ivec_create(L, uids->n, 0, 0); // sids
   for (uint64_t i = 0; i < uids->n; i ++)
     sids->a[i] = tk_inv_uid_sid(I, uids->a[i], false);
   tk_iumap_t *sid_idx = tk_iumap_from_ivec(sids);
@@ -439,7 +454,7 @@ static inline void tk_inv_mutualize (
   for (uint64_t i = 0; i < uids->n; i ++)
     tk_iuset_destroy(hoods_sets[i]);
   free(hoods_sets);
-  lua_remove(L, -3); // sids
+  lua_pop(L, 1); // sids
 }
 
 static inline void tk_inv_neighborhoods (
@@ -806,6 +821,11 @@ static inline int tk_inv_shrink_lua (lua_State *L)
   return 0;
 }
 
+static inline tk_ivec_t *tk_inv_ids (lua_State *L, tk_inv_t *I)
+{
+  return tk_iumap_keys(L, I->uid_sid);
+}
+
 static inline int tk_inv_ids_lua (lua_State *L)
 {
   tk_inv_t *I = tk_inv_peek(L, 1);
@@ -908,16 +928,12 @@ static inline void tk_inv_worker (void *dp, int sig)
       break;
 
     case TK_INV_MUTUAL_INIT: {
+      int kha;
       for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i++) {
         uhood = hoods->a[i];
-        uint64_t write = 0;
-        for (uint64_t j = 0; j < uhood->n; j ++) {
-          int64_t v = uhood->a[j].i;
-          vset = hoods_sets[v];
-          if (tk_iuset_contains(vset, i))
-            uhood->a[write ++] = uhood->a[j];
-        }
-        uhood->n = write;
+        uset = hoods_sets[i];
+        for (uint64_t i = 0; i < uhood->n; i ++)
+          tk_iuset_put(uset, uhood->a[i].i, &kha);
       }
       break;
     }
@@ -967,6 +983,8 @@ static inline tk_inv_t *tk_inv_create (
   uint64_t features,
   uint64_t n_threads
 ) {
+  if (!features)
+    tk_lua_verror(L, 2, "create", "features must be > 0");
   tk_inv_t *I = tk_lua_newuserdata(L, tk_inv_t, TK_INV_MT, tk_inv_lua_mt_fns, tk_inv_gc_lua);
   int Ii = tk_lua_absindex(L, -1);
   I->destroyed = false;

@@ -89,6 +89,11 @@ static inline void tk_ann_destroy (
   free(A->threads);
 }
 
+static inline tk_ivec_t *tk_ann_ids (lua_State *L, tk_ann_t *A)
+{
+  return tk_iumap_keys(L, A->uid_sid);
+}
+
 static inline int tk_ann_ids_lua (lua_State *L)
 {
   tk_ann_t *A = tk_ann_peek(L, 1);

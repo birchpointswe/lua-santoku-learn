@@ -1,6 +1,7 @@
 require("santoku.rvec")
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local tbl = require("santoku.table")
+local inv = require("santoku.tsetlin.inv")
 local pvec = require("santoku.pvec")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
@@ -174,6 +175,7 @@ M.read_binary_mnist = function (fp, n_features, max, class_max)
     offsets = offsets,
     problems = problems,
     solutions = solutions,
+    n_labels = 10,
     n_features = n_features,
     n = n,
   }
@@ -193,6 +195,7 @@ local function _split_binary_mnist (dataset, s, e)
   return {
     problems = ps,
     solutions = ss,
+    n_labels = dataset.n_labels,
     n_features = dataset.n_features,
     n = e - s + 1,
   }
@@ -216,6 +219,53 @@ local function canonicalize (a, b)
   else
     return b, a
   end
+end
+
+M.anchor_pairs = function (ids, n_anchors, limit)
+  limit = limit or 10000
+  if n_anchors == nil or n_anchors < 1 then
+    n_anchors = 1
+  end
+  local edges = pvec.create()
+  local anchors = {}
+  local sofar = 0
+  local steps = 0
+  while sofar < n_anchors and steps < limit do
+    steps = steps + 1
+    local a = ids:get(num.random(ids:size()) - 1)
+    if not anchors[a] then
+      anchors[a] = true
+      sofar = sofar + 1
+      for id in ids:each() do
+        if id ~= a then
+          edges:push(id, a)
+        end
+      end
+    end
+  end
+  return edges
+end
+
+-- Convert list of ids/classes into an index where "features" are class labels
+M.classes_index = function (ids, classes)
+  local fids = ivec.create(classes:size())
+  local nfid = 0
+  local fididx = {}
+  for idx, lbl in classes:ieach() do
+    local fid = fididx[lbl]
+    if not fid then
+      fid = nfid
+      nfid = nfid + 1
+      fididx[lbl] = fid
+    end
+    fids:set(idx, fid)
+  end
+  for idx, fid in fids:ieach() do
+    fids:set(idx, idx * nfid + fid)
+  end
+  local index = inv.create({ features = nfid })
+  index:add(fids, ids)
+  return index
 end
 
 M.multiclass_pairs = function (ids, labels, n_anchors_pos, n_anchors_neg, index, eps_pos, eps_neg)
