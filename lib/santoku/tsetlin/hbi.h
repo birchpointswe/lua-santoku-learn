@@ -105,6 +105,11 @@ static inline tk_hbi_code_t tk_hbi_pack (const char *V, uint64_t features)
   return h;
 }
 
+static inline tk_ivec_t *tk_hbi_ids (lua_State *L, tk_hbi_t *A)
+{
+  return tk_iumap_keys(L, A->uid_sid);
+}
+
 static inline int tk_hbi_ids_lua (lua_State *L)
 {
   tk_hbi_t *A = tk_hbi_peek(L, 1);

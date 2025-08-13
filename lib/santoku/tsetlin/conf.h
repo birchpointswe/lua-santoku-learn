@@ -73,7 +73,7 @@ typedef struct { int64_t u, v; double w; } tm_pair_t;
 #define tm_pair_lt(a, b) ((a).u < (b).u || ((a).u == (b).u && (a).v < (b).v))
 #define tm_pair_eq(a, b) ((a).u == (b).u && ((a).v == (b).v))
 #define tm_pair_hash(a) ((khint_t) hash128((uint64_t) kh_int64_hash_func((a).u), (uint64_t) kh_int64_hash_func((a).v)))
-KHASH_INIT(pairs, tm_pair_t, bool, 1, tm_pair_hash, tm_pair_eq)
+KHASH_INIT(pairs, tm_pair_t, char, 0, tm_pair_hash, tm_pair_eq)
 typedef khash_t(pairs) tm_pairs_t;
 KSORT_INIT(pair_asc, tm_pair_t, tm_pair_lt)
 typedef struct { int64_t sim; bool label; } tm_dl_t;
