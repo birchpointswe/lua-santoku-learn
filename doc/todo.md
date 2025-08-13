@@ -1,7 +1,12 @@
 # Now
 
 - Graph
-    - Ensure new node type weighting is working
+    - Demo using weighting in inverted index to combine label-features (e.g.
+      class IDs as features) alongside real features such
+
+- Graph
+    - Use indices for everything internal (e.g. iu/iv instead of u/v)
+    - Remove all of the uids_idx checks except when adding external edges
 
 - Clustering
     - Return n_clusters, n_core, n_border, n_noise
@@ -27,6 +32,10 @@
             - top_entropy, score_entropy, flip_interleave, filter, extend, ivec
 
 # Next
+
+- Graph
+    - Re-evaluate negative edge handling in graph (see 2025-08-10/simplify
+      branch and prior history)
 
 - tk_inv/ann/hbi_t
     - Support feature weights, particularly for inv
