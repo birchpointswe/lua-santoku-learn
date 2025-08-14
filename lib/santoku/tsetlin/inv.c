@@ -3,9 +3,19 @@
 
 static inline int tk_inv_create_lua (lua_State *L)
 {
-  uint64_t features = tk_lua_fcheckunsigned(L, 1, "create", "features");
+  int i_weights = -1;
+  tk_dvec_t *weights = NULL;
+  uint64_t features = 0;
+  lua_getfield(L, 1, "features");
+  if (lua_type(L, -1) == LUA_TNUMBER) {
+    features = tk_lua_checkunsigned(L, -1, "features");
+  } else {
+    weights = tk_dvec_peek(L, -1, "features");
+    i_weights = tk_lua_absindex(L, -1);
+    features = weights->n;
+  }
   uint64_t n_threads = tk_threads_getn(L, 1, "create", "threads");
-  tk_inv_create(L, features, n_threads);
+  tk_inv_create(L, features, weights, n_threads, i_weights);
   return 1;
 }
 

@@ -56,6 +56,7 @@ typedef struct tk_inv_s {
   bool destroyed;
   int64_t next_sid;
   uint64_t features;
+  tk_dvec_t *weights;
   tk_iumap_t *uid_sid;
   tk_iumap_t *sid_uid;
   tk_ivec_t *node_offsets;
@@ -114,87 +115,6 @@ static inline void tk_inv_destroy (
   }
   tk_threads_destroy(I->pool);
   free(I->threads);
-}
-
-static inline double tk_inv_overlap (
-  int64_t *a, size_t alen,
-  int64_t *b, size_t blen
-) {
-  if (alen == 0 || blen == 0)
-    return 0.0;
-  size_t i = 0, j = 0, inter = 0;
-  while (i < alen && j < blen) {
-    if (a[i] == b[j]) { inter++; i++; j++; }
-    else if (a[i] < b[j]) i++;
-    else j++;
-  }
-  size_t min_len = (alen < blen) ? alen : blen;
-  return (double) inter / (double) min_len;
-}
-
-static inline double tk_inv_jaccard (
-  int64_t *abits, size_t asize,
-  int64_t *bbits, size_t bsize
-) {
-  size_t i = 0, j = 0;
-  size_t intersection = 0;
-  size_t union_count = 0;
-  while (i < asize && j < bsize) {
-    if (abits[i] == bbits[j]) {
-      intersection ++;
-      union_count ++;
-      i ++;
-      j ++;
-    } else if (abits[i] < bbits[j]) {
-      union_count ++;
-      i ++;
-    } else {
-      union_count ++;
-      j ++;
-    }
-  }
-  // Remaining elements
-  union_count += (asize - i) + (bsize - j);
-  if (union_count == 0) // both empty → define Jaccard as 1.0
-    return 1.0;
-  return (double) intersection / (double) union_count;
-}
-
-static inline double tk_inv_similarity (
-  int64_t *abits, size_t asize,
-  int64_t *bbits, size_t bsize,
-  tk_inv_cmp_type_t cmp
-) {
-  switch (cmp) {
-    case TK_INV_JACCARD: {
-      return tk_inv_jaccard(abits, asize, bbits, bsize);
-    }
-    case TK_INV_OVERLAP: {
-      return tk_inv_overlap(abits, asize, bbits, bsize);
-    }
-    default:
-      return tk_inv_similarity(abits, asize, bbits, bsize, TK_INV_JACCARD);
-  }
-}
-
-static inline double tk_inv_similarity_partial (
-  size_t inter,
-  size_t qlen,
-  size_t elen,
-  tk_inv_cmp_type_t cmp
-) {
-  switch (cmp) {
-    case TK_INV_JACCARD: {
-      size_t uni = qlen + elen - inter;
-      return (uni == 0) ? 0.0 : (double) inter / (double) uni;
-    }
-    case TK_INV_OVERLAP: {
-      size_t min_len = (qlen < elen) ? qlen : elen;
-      return (min_len == 0) ? 0.0 : (double) inter / (double) min_len;
-    }
-    default:
-      return tk_inv_similarity_partial(inter, qlen, elen, TK_INV_JACCARD);
-  }
 }
 
 static inline void tk_inv_persist (
@@ -347,24 +267,6 @@ static inline int64_t *tk_inv_get (
   if (sid < 0)
     return NULL;
   return tk_inv_sget(I, sid, np);
-}
-
-static inline double tk_inv_distance (
-  tk_inv_t *I,
-  int64_t uid0,
-  int64_t uid1,
-  tk_inv_cmp_type_t cmp
-) {
-  size_t n0 = 0;
-  int64_t *v0 = tk_inv_get(I, uid0, &n0);
-  if (v0 == NULL)
-    return 1.0;
-  size_t n1 = 0;
-  int64_t *v1 = tk_inv_get(I, uid1, &n1);
-  if (v1 == NULL)
-    return 1.0;
-  double sim = tk_inv_similarity(v0, n0, v1, n1, cmp);
-  return 1.0 - sim;
 }
 
 static inline void tk_inv_add (
@@ -527,6 +429,180 @@ static inline void tk_inv_neighborhoods (
   lua_remove(L, -3); // sids
 }
 
+static inline double tk_inv_w (
+  tk_dvec_t *W,
+  int64_t fid
+) {
+  if (W == NULL)
+    return 1.0;
+  if (fid < 0 || fid >= (int64_t) W->n)
+    return 1.0;
+  return W->a[fid];
+}
+
+static inline double tk_sum_weights (
+  tk_dvec_t *W,
+  int64_t *bits,
+  size_t n
+) {
+  if (bits == NULL || n == 0)
+    return 0.0;
+  if (W == NULL)
+    return (double) n;
+  double s = 0.0;
+  for (size_t i = 0; i < n; i ++) {
+    s += tk_inv_w(W, bits[i]);
+  }
+  return s;
+}
+
+static inline double tk_inv_overlap_w (
+  tk_dvec_t *W,
+  int64_t *a, size_t alen,
+  int64_t *b, size_t blen
+) {
+  if (alen == 0 || blen == 0)
+    return 0.0;
+  double sum_a = tk_sum_weights(W, a, alen);
+  double sum_b = tk_sum_weights(W, b, blen);
+  double denom = (sum_a < sum_b) ? sum_a : sum_b;
+  if (denom == 0.0)
+    return 0.0;
+  size_t i = 0, j = 0;
+  double inter_w = 0.0;
+  while (i < alen && j < blen) {
+    if (a[i] == b[j]) {
+      inter_w += tk_inv_w(W, a[i]);
+      i ++;
+      j ++;
+    } else if (a[i] < b[j]) {
+      i ++;
+    } else {
+      j ++;
+    }
+  }
+  return inter_w / denom;
+}
+
+static inline double tk_inv_jaccard_w (
+  tk_dvec_t *W,
+  int64_t *abits, size_t asize,
+  int64_t *bbits, size_t bsize
+) {
+  size_t i = 0, j = 0;
+  double inter_w = 0.0;
+  double union_w = 0.0;
+  while (i < asize && j < bsize) {
+    int64_t ai = abits[i];
+    int64_t bj = bbits[j];
+    if (ai == bj) {
+      double w = tk_inv_w(W, ai);
+      inter_w += w;
+      union_w += w;
+      i ++;
+      j ++;
+    } else if (ai < bj) {
+      union_w += tk_inv_w(W, ai);
+      i ++;
+    } else {
+      union_w += tk_inv_w(W, bj);
+      j ++;
+    }
+  }
+  while (i < asize) {
+    union_w += tk_inv_w(W, abits[i]);
+    i ++;
+  }
+  while (j < bsize) {
+    union_w += tk_inv_w(W, bbits[j]);
+    j ++;
+  }
+  if (union_w == 0.0)
+    return 1.0;
+  return inter_w / union_w;
+}
+
+static inline double tk_inv_similarity (
+  tk_dvec_t *W,
+  int64_t *abits, size_t asize,
+  int64_t *bbits, size_t bsize,
+  tk_inv_cmp_type_t cmp
+) {
+  switch (cmp) {
+    case TK_INV_JACCARD: {
+      return tk_inv_jaccard_w(W, abits, asize, bbits, bsize);
+    }
+    case TK_INV_OVERLAP: {
+      return tk_inv_overlap_w(W, abits, asize, bbits, bsize);
+    }
+    default:
+      return tk_inv_similarity(W, abits, asize, bbits, bsize, TK_INV_JACCARD);
+  }
+}
+
+static inline double tk_inv_similarity_partial (
+  size_t inter,
+  size_t qlen,
+  size_t elen,
+  tk_inv_cmp_type_t cmp
+) {
+  switch (cmp) {
+    case TK_INV_JACCARD: {
+      size_t uni = qlen + elen - inter;
+      return (uni == 0) ? 0.0 : (double) inter / (double) uni;
+    }
+    case TK_INV_OVERLAP: {
+      size_t min_len = (qlen < elen) ? qlen : elen;
+      return (min_len == 0) ? 0.0 : (double) inter / (double) min_len;
+    }
+    default:
+      return tk_inv_similarity_partial(inter, qlen, elen, TK_INV_JACCARD);
+  }
+}
+
+static inline double tk_inv_similarity_partial_w (
+  double inter_w,
+  double q_w,
+  double e_w,
+  tk_inv_cmp_type_t cmp
+) {
+  switch (cmp) {
+    case TK_INV_JACCARD: {
+      double uni_w = q_w + e_w - inter_w;
+      if (uni_w == 0.0)
+        return 1.0;
+      return inter_w / uni_w;
+    }
+    case TK_INV_OVERLAP: {
+      double min_w = (q_w < e_w) ? q_w : e_w;
+      if (min_w == 0.0)
+        return 0.0;
+      return inter_w / min_w;
+    }
+    default:
+      return tk_inv_similarity_partial_w(inter_w, q_w, e_w, TK_INV_JACCARD);
+  }
+}
+
+static inline double tk_inv_distance (
+  tk_inv_t *I,
+  int64_t uid0,
+  int64_t uid1,
+  tk_inv_cmp_type_t cmp
+) {
+  size_t n0 = 0;
+  int64_t *v0 = tk_inv_get(I, uid0, &n0);
+  if (v0 == NULL)
+    return 1.0;
+  size_t n1 = 0;
+  int64_t *v1 = tk_inv_get(I, uid1, &n1);
+  if (v1 == NULL)
+    return 1.0;
+  tk_dvec_t *W = I->weights;
+  double sim = tk_inv_similarity(W, v0, n0, v1, n1, cmp);
+  return 1.0 - sim;
+}
+
 static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   tk_inv_t *I,
   int64_t *data,
@@ -543,29 +619,94 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
     out->m = knn;
   if (datalen == 0)
     return out;
+
   size_t n_sids = I->node_offsets->n;
-  tk_ivec_t *cnt = tk_ivec_create(NULL, n_sids, 0, 0);
-  tk_ivec_zero(cnt);
+  tk_dvec_t *W = I->weights;
+
+  // If no weights, fast int-path
+  if (W == NULL) {
+    tk_ivec_t *cnt = tk_ivec_create(NULL, n_sids, 0, 0);
+    tk_ivec_zero(cnt);
+    tk_ivec_t *touched = tk_ivec_create(NULL, 0, 0, 0);
+    for (size_t i = 0; i < datalen; i ++) {
+      int64_t fid = data[i];
+      if (fid < 0 || fid >= (int64_t) I->postings->n)
+        continue;
+      tk_ivec_t *vsids = I->postings->a[fid];
+      for (uint64_t j = 0; j < vsids->n; j ++) {
+        int64_t vsid = vsids->a[j];
+        if (vsid == sid0)
+          continue;
+        if (cnt->a[vsid] ++ == 0)
+          tk_ivec_push(touched, vsid);
+      }
+    }
+    for (uint64_t i = 0; i < touched->n; i ++) {
+      int64_t vsid = touched->a[i];
+      uint64_t inter = (uint64_t) cnt->a[vsid];
+      size_t elen;
+      tk_inv_sget(I, vsid, &elen);
+      double sim  = tk_inv_similarity_partial(inter, datalen, elen, cmp);
+      double dist = tk_inv_length_bump(1.0 - sim, elen);
+      if (dist <= eps) {
+        int64_t vuid = tk_inv_sid_uid(I, vsid);
+        if (vuid >= 0) {
+          if (knn)
+            tk_rvec_hmax(out, tk_rank(vuid, dist));
+          else
+            tk_rvec_push(out, tk_rank(vuid, dist));
+        }
+      }
+      cnt->a[vsid] = 0;
+    }
+
+    tk_rvec_asc(out, 0, out->n);
+    for (uint64_t i = 0; i < out->n; i ++) {
+      size_t len = 0;
+      tk_inv_sget(I, tk_inv_uid_sid(I, out->a[i].i, false), &len);
+      out->a[i].d = tk_inv_length_unbump(out->a[i].d, len);
+    }
+    if (knn > 0 && out->n > knn)
+      out->n = knn;
+    tk_ivec_destroy(cnt);
+    tk_ivec_destroy(touched);
+    return out;
+  }
+
+  // Weighted path
+  double q_w = 0.0;
+  for (size_t i = 0; i < datalen; i ++)
+    q_w += tk_inv_w(W, data[i]);
+
+  tk_dvec_t *wacc = tk_dvec_create(NULL, n_sids, 0, 0);
+  tk_dvec_zero(wacc);
   tk_ivec_t *touched = tk_ivec_create(NULL, 0, 0, 0);
-  for (size_t i = 0; i < datalen; i++) {
+
+  for (size_t i = 0; i < datalen; i ++) {
     int64_t fid = data[i];
-    if (fid < 0 || fid >= (int64_t)I->postings->n)
+    if (fid < 0 || fid >= (int64_t) I->postings->n)
       continue;
+    double wf = tk_inv_w(W, fid);
     tk_ivec_t *vsids = I->postings->a[fid];
-    for (uint64_t j = 0; j < vsids->n; j++) {
+    for (uint64_t j = 0; j < vsids->n; j ++) {
       int64_t vsid = vsids->a[j];
       if (vsid == sid0)
         continue;
-      if (cnt->a[vsid] ++ == 0)
+      if (wacc->a[vsid] == 0.0)
         tk_ivec_push(touched, vsid);
+      wacc->a[vsid] += wf;
     }
   }
+
   for (uint64_t i = 0; i < touched->n; i ++) {
     int64_t vsid = touched->a[i];
-    uint64_t inter = (uint64_t) cnt->a[vsid];
-    size_t elen;
-    tk_inv_sget(I, vsid, &elen);
-    double sim  = tk_inv_similarity_partial(inter, datalen, elen, cmp);
+    size_t elen = 0;
+    int64_t *ev = tk_inv_sget(I, vsid, &elen);
+    double e_w = 0.0;
+    for (size_t k = 0; k < elen; k ++)
+      e_w += tk_inv_w(W, ev[k]);
+    double inter_w = wacc->a[vsid];
+    double sim  = tk_inv_similarity_partial_w(inter_w, q_w, e_w, cmp);
     double dist = tk_inv_length_bump(1.0 - sim, elen);
     if (dist <= eps) {
       int64_t vuid = tk_inv_sid_uid(I, vsid);
@@ -576,17 +717,19 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
           tk_rvec_push(out, tk_rank(vuid, dist));
       }
     }
-    cnt->a[vsid] = 0;
+    wacc->a[vsid] = 0.0;
   }
+
   tk_rvec_asc(out, 0, out->n);
-  for (uint64_t i = 0; i < out->n; ++i) {
+  for (uint64_t i = 0; i < out->n; i ++) {
     size_t len = 0;
     tk_inv_sget(I, tk_inv_uid_sid(I, out->a[i].i, false), &len);
     out->a[i].d = tk_inv_length_unbump(out->a[i].d, len);
   }
   if (knn > 0 && out->n > knn)
     out->n = knn;
-  tk_ivec_destroy(cnt);
+
+  tk_dvec_destroy(wacc);
   tk_ivec_destroy(touched);
   return out;
 }
@@ -981,7 +1124,9 @@ static inline void tk_inv_suppress_unused_lua_mt_fns (void)
 static inline tk_inv_t *tk_inv_create (
   lua_State *L,
   uint64_t features,
-  uint64_t n_threads
+  tk_dvec_t *weights,
+  uint64_t n_threads,
+  int i_weights
 ) {
   if (!features)
     tk_lua_verror(L, 2, "create", "features must be > 0");
@@ -990,19 +1135,22 @@ static inline tk_inv_t *tk_inv_create (
   I->destroyed = false;
   I->next_sid = 0;
   I->features = features;
+  I->weights = weights;
+  if (weights)
+    tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, i_weights);
   I->uid_sid = tk_iumap_create();
   I->sid_uid = tk_iumap_create();
   I->node_offsets = tk_ivec_create(L, 0, 0, 0);
-  tk_lua_add_ephemeron(L, TK_INV_EPH, -2, -1);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
   I->node_bits = tk_ivec_create(L, 0, 0, 0);
-  tk_lua_add_ephemeron(L, TK_INV_EPH, -2, -1);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
   I->postings = tk_inv_postings_create(L, features, 0, 0);
-  tk_lua_add_ephemeron(L, TK_INV_EPH, -2, -1);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   for (uint64_t i = 0; i < features; i ++) {
     I->postings->a[i] = tk_ivec_create(L, 0, 0, 0);
-    tk_lua_add_ephemeron(L, TK_INV_EPH, -2, -1);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
     lua_pop(L, 1);
   }
   lua_pop(L, 1);
