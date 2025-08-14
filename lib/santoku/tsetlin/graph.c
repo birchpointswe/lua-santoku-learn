@@ -13,6 +13,7 @@ static inline tk_graph_t *tm_graph_create (
   uint64_t knn,
   uint64_t knn_cache,
   double knn_eps,
+  tk_inv_cmp_type_t inv_cmp,
   unsigned int n_threads
 );
 
@@ -229,7 +230,7 @@ static inline double tk_graph_distance (
     int64_t *wset = tk_inv_get(graph->inv, v, &wn);
     if (wset == NULL)
       return DBL_MAX;
-    return 1.0 - tk_inv_jaccard_w(graph->inv->weights, uset, un, wset, wn);
+    return 1.0 - tk_inv_similarity(graph->inv->weights, uset, un, wset, wn, graph->inv_cmp);
 
   } else if (graph->ann != NULL) {
 
@@ -552,7 +553,7 @@ static inline void tm_setup_hoods (lua_State *L, int Gi, tk_graph_t *graph)
     lua_pop(L, 1);
   } else {
     if (graph->inv != NULL)
-      tk_inv_neighborhoods(L, graph->inv, graph->knn_cache, graph->knn_eps, TK_INV_JACCARD, !find_sigma, &graph->inv_hoods, &graph->uids);
+      tk_inv_neighborhoods(L, graph->inv, graph->knn_cache, graph->knn_eps, graph->inv_cmp, !find_sigma, &graph->inv_hoods, &graph->uids);
     else if (graph->ann != NULL)
       tk_ann_neighborhoods(L, graph->ann, graph->knn_cache, graph->ann->features * graph->knn_eps, !find_sigma, &graph->ann_hoods, &graph->uids);
     else if (graph->hbi != NULL)
@@ -603,6 +604,17 @@ static inline int tm_create (lua_State *L)
   if (!have_index)
     tk_lua_verror(L, 2, "index", "a tk_inv_t, tk_ann_t, or tk_hbi_t index must be provided");
 
+  const char *inv_cmpstr = tk_lua_optstring(L, 4, "cmp", "jaccard");
+  tk_inv_cmp_type_t inv_cmp = TK_INV_PRECISION;
+  if (!strcmp(inv_cmpstr, "jaccard"))
+    inv_cmp = TK_INV_JACCARD;
+  else if (!strcmp(inv_cmpstr, "overlap"))
+    inv_cmp = TK_INV_OVERLAP;
+  else if (!strcmp(inv_cmpstr, "precision"))
+    inv_cmp = TK_INV_PRECISION;
+  else
+    tk_lua_verror(L, 3, "graph", "invalid comparator specified", inv_cmpstr);
+
   double weight_eps = tk_lua_foptnumber(L, 1, "graph", "weight_eps", 1e-8);
   double flip_at = tk_lua_foptnumber(L, 1, "graph", "flip_at", -1.0);
   double neg_scale = tk_lua_foptnumber(L, 1, "graph", "neg_scale", -1.0);
@@ -624,7 +636,7 @@ static inline int tm_create (lua_State *L)
 
   tk_graph_t *graph = tm_graph_create(
     L, edges, inv, ann, hbi, weight_eps, flip_at, neg_scale, sigma_k, knn,
-    knn_cache, knn_eps, n_threads);
+    knn_cache, knn_eps, inv_cmp, n_threads);
   int Gi = tk_lua_absindex(L, -1);
   tm_setup_hoods(L, Gi, graph);
 
@@ -772,6 +784,7 @@ static inline tk_graph_t *tm_graph_create (
   uint64_t knn,
   uint64_t knn_cache,
   double knn_eps,
+  tk_inv_cmp_type_t inv_cmp,
   unsigned int n_threads
 ) {
   tk_graph_t *graph = tk_lua_newuserdata(L, tk_graph_t, TK_GRAPH_MT, tm_graph_mt_fns, tm_graph_gc); // ud
@@ -780,6 +793,7 @@ static inline tk_graph_t *tm_graph_create (
   graph->pool = tk_threads_create(L, n_threads, tk_graph_worker);
   graph->edges = edges;
   graph->inv = inv;
+  graph->inv_cmp = inv_cmp;
   graph->ann = ann;
   graph->hbi = hbi;
   graph->weight_eps = weight_eps;
