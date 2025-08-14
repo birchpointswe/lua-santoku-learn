@@ -76,6 +76,7 @@ typedef struct tk_inv_thread_s {
   tk_iumap_t *sid_idx;
   tk_ivec_t *uids;
   tk_ivec_t *sids;
+  tk_dvec_t *wacc;
   uint64_t ifirst, ilast;
   double eps;
   uint64_t knn;
@@ -126,43 +127,39 @@ static inline void tk_inv_persist (
     tk_lua_verror(L, 2, "persist", "can't persist a destroyed index");
     return;
   }
-  // core scalars
   tk_lua_fwrite(L, (char *) &I->destroyed, sizeof(bool), 1, fh);
-  tk_lua_fwrite(L, (char *) &I->next_sid, sizeof(int64_t),1, fh);
+  tk_lua_fwrite(L, (char *) &I->next_sid, sizeof(int64_t), 1, fh);
   tk_lua_fwrite(L, (char *) &I->features, sizeof(uint64_t), 1, fh);
-  // uid → sid map
   khint_t m = I->uid_sid ? tk_iumap_size(I->uid_sid) : 0;
   tk_lua_fwrite(L, (char *) &m, sizeof(khint_t), 1, fh);
   if (m)
-    for (khint_t i = tk_iumap_begin(I->uid_sid); i < tk_iumap_end(I->uid_sid); i ++)
+    for (khint_t i = tk_iumap_begin(I->uid_sid); i < tk_iumap_end(I->uid_sid); i ++) {
       if (tk_iumap_exist(I->uid_sid, i)) {
         int64_t k = (int64_t) tk_iumap_key(I->uid_sid, i);
         int64_t v = (int64_t) tk_iumap_value(I->uid_sid, i);
         tk_lua_fwrite(L, (char *) &k, sizeof(int64_t), 1, fh);
         tk_lua_fwrite(L, (char *) &v, sizeof(int64_t), 1, fh);
       }
-  // sid → uid map
+    }
   m = I->sid_uid ? tk_iumap_size(I->sid_uid) : 0;
   tk_lua_fwrite(L, (char *) &m, sizeof(khint_t), 1, fh);
   if (m)
-    for (khint_t i = tk_iumap_begin(I->sid_uid); i < tk_iumap_end(I->sid_uid); i ++)
+    for (khint_t i = tk_iumap_begin(I->sid_uid); i < tk_iumap_end(I->sid_uid); i ++) {
       if (tk_iumap_exist(I->sid_uid, i)) {
         int64_t k = (int64_t) tk_iumap_key(I->sid_uid, i);
         int64_t v = (int64_t) tk_iumap_value(I->sid_uid, i);
-        tk_lua_fwrite(L, (char *) &k,sizeof(int64_t), 1, fh);
-        tk_lua_fwrite(L, (char *) &v,sizeof(int64_t), 1, fh);
+        tk_lua_fwrite(L, (char *) &k, sizeof(int64_t), 1, fh);
+        tk_lua_fwrite(L, (char *) &v, sizeof(int64_t), 1, fh);
       }
-  // node_offsets
+    }
   uint64_t n = I->node_offsets ? I->node_offsets->n : 0;
-  tk_lua_fwrite(L,(char *) &n, sizeof(uint64_t), 1, fh);
+  tk_lua_fwrite(L, (char *) &n, sizeof(uint64_t), 1, fh);
   if (n)
     tk_lua_fwrite(L, (char *) I->node_offsets->a, sizeof(int64_t), n, fh);
-  // node_bits
   n = I->node_bits ? I->node_bits->n : 0;
-  tk_lua_fwrite(L,(char *) &n, sizeof(uint64_t), 1, fh);
+  tk_lua_fwrite(L, (char *) &n, sizeof(uint64_t), 1, fh);
   if (n)
     tk_lua_fwrite(L, (char *) I->node_bits->a, sizeof(int64_t), n, fh);
-  // postings: vector of posting lists
   uint64_t pcount = I->postings ? I->postings->n : 0;
   tk_lua_fwrite(L, (char *) &pcount, sizeof(uint64_t), 1, fh);
   for (uint64_t i = 0; i < pcount; i ++) {
@@ -170,6 +167,10 @@ static inline void tk_inv_persist (
     tk_lua_fwrite(L, (char *) &P->n, sizeof(uint64_t), 1, fh);
     tk_lua_fwrite(L, (char *) P->a, sizeof(int64_t), P->n, fh);
   }
+  uint64_t wn = I->weights ? I->weights->n : 0;
+  tk_lua_fwrite(L, (char *) &wn, sizeof(uint64_t), 1, fh);
+  if (wn)
+    tk_lua_fwrite(L, (char *) I->weights->a, sizeof(double), wn, fh);
 }
 
 static inline uint64_t tk_inv_size (
@@ -1016,37 +1017,87 @@ static inline void tk_inv_worker (void *dp, int sig)
           uhood->m = knn;
         }
         start = I->node_offsets->a[usid];
-        end = (usid + 1 == (int64_t)I->node_offsets->n)
+        end = (usid + 1 == (int64_t) I->node_offsets->n)
           ? (int64_t) I->node_bits->n
           : I->node_offsets->a[usid + 1];
-        for (int64_t j = start; j < end; j ++) {
-          fid = I->node_bits->a[j];
-          vsids = I->postings->a[fid];
-          for (uint64_t k = 0; k < vsids->n; k ++) {
-            vsid = vsids->a[k];
-            if (vsid == usid)
-              continue;
-            khi = tk_iumap_get(sid_idx, vsid);
-            if (khi == tk_iumap_end(sid_idx))
-              continue;
-            iv = tk_iumap_value(sid_idx, khi);
-            if (cnt->a[iv] == 0)
-              tk_ivec_push(touched, iv);
-            cnt->a[iv] ++;
+        if (W == NULL) {
+          for (int64_t j = start; j < end; j ++) {
+            fid = I->node_bits->a[j];
+            vsids = I->postings->a[fid];
+            for (uint64_t k = 0; k < vsids->n; k ++) {
+              vsid = vsids->a[k];
+              if (vsid == usid)
+                continue;
+              khi = tk_iumap_get(sid_idx, vsid);
+              if (khi == tk_iumap_end(sid_idx))
+                continue;
+              iv = tk_iumap_value(sid_idx, khi);
+              if (cnt->a[iv] == 0)
+                tk_ivec_push(touched, iv);
+              cnt->a[iv] ++;
+            }
           }
-        }
-        for (uint64_t ti = 0; ti < touched->n; ti ++) {
-          iv = touched->a[ti];
-          vsid = sids->a[iv];
-          size_t inter = (size_t) cnt->a[iv];
-          vbits = tk_inv_sget(I, vsid, &nvbits);
-          double sim  = tk_inv_similarity_partial(inter, nubits, nvbits, cmp);
-          double dist = tk_inv_length_bump(1.0 - sim, nvbits);
-          if (dist <= eps) {
-            if (knn)
-              tk_rvec_hmax(uhood, tk_rank(iv, dist));
-            else
-              tk_rvec_push(uhood, tk_rank(iv, dist));
+          for (uint64_t ti = 0; ti < touched->n; ti ++) {
+            iv = touched->a[ti];
+            vsid = sids->a[iv];
+            size_t inter = (size_t) cnt->a[iv];
+            vbits = tk_inv_sget(I, vsid, &nvbits);
+            double sim = tk_inv_similarity_partial(inter, nubits, nvbits, cmp);
+            double dist = tk_inv_length_bump(1.0 - sim, nvbits);
+            if (dist <= eps) {
+              if (knn)
+                tk_rvec_hmax(uhood, tk_rank(iv, dist));
+              else
+                tk_rvec_push(uhood, tk_rank(iv, dist));
+            }
+          }
+          for (uint64_t ti = 0; ti < touched->n; ti ++) {
+            cnt->a[touched->a[ti]] = 0;
+          }
+        } else {
+          if (wacc->n < sids->n)
+            tk_dvec_ensure(wacc, sids->n);
+          double q_w = 0.0;
+          for (size_t k = 0; k < nubits; k ++) {
+            q_w += tk_inv_w(W, ubits[k]);
+          }
+          for (int64_t j = start; j < end; j ++) {
+            fid = I->node_bits->a[j];
+            double wf = tk_inv_w(W, fid);
+            vsids = I->postings->a[fid];
+            for (uint64_t k = 0; k < vsids->n; k ++) {
+              vsid = vsids->a[k];
+              if (vsid == usid)
+                continue;
+              khi = tk_iumap_get(sid_idx, vsid);
+              if (khi == tk_iumap_end(sid_idx))
+                continue;
+              iv = tk_iumap_value(sid_idx, khi);
+              if (wacc->a[iv] == 0.0)
+                tk_ivec_push(touched, iv);
+              wacc->a[iv] += wf;
+            }
+          }
+          for (uint64_t ti = 0; ti < touched->n; ti ++) {
+            iv = touched->a[ti];
+            vsid = sids->a[iv];
+            vbits = tk_inv_sget(I, vsid, &nvbits);
+            double e_w = 0.0;
+            for (size_t k = 0; k < nvbits; k ++) {
+              e_w += tk_inv_w(W, vbits[k]);
+            }
+            double inter_w = wacc->a[iv];
+            double sim = tk_inv_similarity_partial_w(inter_w, q_w, e_w, cmp);
+            double dist = tk_inv_length_bump(1.0 - sim, nvbits);
+            if (dist <= eps) {
+              if (knn)
+                tk_rvec_hmax(uhood, tk_rank(iv, dist));
+              else
+                tk_rvec_push(uhood, tk_rank(iv, dist));
+            }
+          }
+          for (uint64_t ti = 0; ti < touched->n; ti ++) {
+            wacc->a[touched->a[ti]] = 0.0;
           }
         }
         tk_rvec_asc(uhood, 0, uhood->n);
@@ -1058,15 +1109,7 @@ static inline void tk_inv_worker (void *dp, int sig)
         }
         uhood->m = uhood->n;
         uhood->a = realloc(uhood->a, uhood->n * sizeof(*uhood->a));
-        for (uint64_t ti = 0; ti < touched->n; ti ++)
-          cnt->a[touched->a[ti]] = 0;
         touched->n = 0;
-        if (mutual && knn) {
-          uset = hoods_sets[i];
-          int kha;
-          for (uint64_t i = 0; i < uhood->n; i ++)
-            tk_iuset_put(uset, uhood->a[i].i, &kha);
-        }
       }
       break;
 
@@ -1168,6 +1211,9 @@ static inline tk_inv_t *tk_inv_create (
     data->touched = tk_ivec_create(L, 0, 0, 0);
     tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
     lua_pop(L, 1);
+    data->wacc = tk_dvec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+    lua_pop(L, 1);
   }
   return I;
 }
@@ -1177,17 +1223,14 @@ static inline tk_inv_t *tk_inv_load (
   FILE *fh,
   uint64_t n_threads
 ) {
-  // userdata + metatable
   tk_inv_t *I = tk_lua_newuserdata(L, tk_inv_t, TK_INV_MT, tk_inv_lua_mt_fns, tk_inv_gc_lua);
   int Ii = tk_lua_absindex(L, -1);
   memset(I, 0, sizeof(tk_inv_t));
-  // core scalars
   tk_lua_fread(L, &I->destroyed, sizeof(bool), 1, fh);
   if (I->destroyed)
     tk_lua_verror(L, 2, "load", "index was destroyed when saved");
-  tk_lua_fread(L, &I->next_sid,  sizeof(int64_t), 1, fh);
-  tk_lua_fread(L, &I->features,  sizeof(uint64_t), 1, fh);
-  // uid → sid map
+  tk_lua_fread(L, &I->next_sid, sizeof(int64_t), 1, fh);
+  tk_lua_fread(L, &I->features, sizeof(uint64_t), 1, fh);
   I->uid_sid = tk_iumap_create();
   khint_t nkeys, k; int absent;
   tk_lua_fread(L, &nkeys, sizeof(khint_t), 1, fh);
@@ -1198,7 +1241,6 @@ static inline tk_inv_t *tk_inv_load (
     k = tk_iumap_put(I->uid_sid, key, &absent);
     tk_iumap_value(I->uid_sid, k) = val;
   }
-  // sid → uid map
   I->sid_uid = tk_iumap_create();
   tk_lua_fread(L, &nkeys, sizeof(khint_t), 1, fh);
   for (khint_t i = 0; i < nkeys; i ++) {
@@ -1208,20 +1250,19 @@ static inline tk_inv_t *tk_inv_load (
     k = tk_iumap_put(I->sid_uid, key, &absent);
     tk_iumap_value(I->sid_uid, k) = val;
   }
-  // node_offsets
   uint64_t n = 0;
   tk_lua_fread(L, &n, sizeof(uint64_t), 1, fh);
   I->node_offsets = tk_ivec_create(L, n, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
-  if (n) tk_lua_fread(L, I->node_offsets->a, sizeof(int64_t), n, fh);
+  if (n)
+    tk_lua_fread(L, I->node_offsets->a, sizeof(int64_t), n, fh);
   lua_pop(L, 1);
-  // node_bits
   tk_lua_fread(L, &n, sizeof(uint64_t), 1, fh);
   I->node_bits = tk_ivec_create(L, n, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
-  if (n) tk_lua_fread(L, I->node_bits->a, sizeof(int64_t), n, fh);
+  if (n)
+    tk_lua_fread(L, I->node_bits->a, sizeof(int64_t), n, fh);
   lua_pop(L, 1);
-  // postings vector
   uint64_t pcount = 0;
   tk_lua_fread(L, &pcount, sizeof(uint64_t), 1, fh);
   I->postings = tk_inv_postings_create(L, pcount, 0, 0);
@@ -1236,8 +1277,17 @@ static inline tk_inv_t *tk_inv_load (
     lua_pop(L, 1);
     I->postings->a[i] = P;
   }
-  lua_pop(L, 1); // pop postings vector
-  // thread pool
+  lua_pop(L, 1);
+  uint64_t wn = 0;
+  tk_lua_fread(L, &wn, sizeof(uint64_t), 1, fh);
+  if (wn) {
+    I->weights = tk_dvec_create(L, wn, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+    tk_lua_fread(L, I->weights->a, sizeof(double), wn, fh);
+    lua_pop(L, 1);
+  } else {
+    I->weights = NULL;
+  }
   I->threads = tk_malloc(L, n_threads * sizeof(tk_inv_thread_t));
   memset(I->threads, 0, n_threads * sizeof(tk_inv_thread_t));
   I->pool = tk_threads_create(L, n_threads, tk_inv_worker);
@@ -1250,6 +1300,9 @@ static inline tk_inv_t *tk_inv_load (
     tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
     lua_pop(L, 1);
     th->touched = tk_ivec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+    lua_pop(L, 1);
+    th->wacc = tk_dvec_create(L, 0, 0, 0);
     tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
     lua_pop(L, 1);
   }
