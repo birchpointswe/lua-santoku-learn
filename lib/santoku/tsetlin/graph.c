@@ -229,7 +229,7 @@ static inline double tk_graph_distance (
     int64_t *wset = tk_inv_get(graph->inv, v, &wn);
     if (wset == NULL)
       return DBL_MAX;
-    return 1.0 - tk_inv_jaccard(uset, un, wset, wn);
+    return 1.0 - tk_inv_jaccard_w(graph->inv->weights, uset, un, wset, wn);
 
   } else if (graph->ann != NULL) {
 
@@ -352,7 +352,6 @@ static inline tm_candidates_t tm_mst_knn_candidates (
         khi = kh_get(pairs, graph->pairs, e);
         if (khi != kh_end(graph->pairs))
           continue;
-
         kv_push(tm_candidate_t, all_candidates, tm_candidate(u, v, r.d));
       }
     }
@@ -372,7 +371,6 @@ static inline tm_candidates_t tm_mst_knn_candidates (
         khi = kh_get(pairs, graph->pairs, e);
         if (khi != kh_end(graph->pairs))
           continue;
-
         kv_push(tm_candidate_t, all_candidates, tm_candidate(u, v, (double) r.p / (double) graph->ann->features));
       }
     }
@@ -392,7 +390,6 @@ static inline tm_candidates_t tm_mst_knn_candidates (
         khi = kh_get(pairs, graph->pairs, e);
         if (khi != kh_end(graph->pairs))
           continue;
-
         kv_push(tm_candidate_t, all_candidates, tm_candidate(u, v, (double) r.p / (double) graph->hbi->features));
       }
     }
@@ -411,6 +408,7 @@ static inline void tm_add_mst (
   if (candidatesp != NULL) {
 
     tm_candidates_t candidates = *candidatesp;
+
 
     int kha;
     khint_t khi;
@@ -451,6 +449,7 @@ static inline void tm_add_mst (
     assert(centers->n > 1);
     tk_pvec_shuffle(centers);
     tk_pumap_destroy(reps_comp);
+
 
     int kha;
     for (int64_t i = 0; i < (int64_t) centers->n; i ++) {
