@@ -1,6 +1,7 @@
 # Now
 
 - Graph
+    - Segfault when knn_cache set to 1024
     - Demo using weighting in inverted index to combine label-features (e.g.
       class IDs as features) alongside real features such
 

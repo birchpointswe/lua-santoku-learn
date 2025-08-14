@@ -432,4 +432,137 @@ M.read_glove = function (fp, max)
   }
 end
 
+M.rank_weights = function (ranks, types, ratio, softness)
+  -- length helper compatible with tables/userdata
+  local function vlen(v)
+    if v == nil then
+      error("vector is nil")
+    end
+    if type(v.size) == "function" then
+      return v:size()
+    end
+    if type(v.length) == "function" then
+      return v:length()
+    end
+    if type(v.len) == "function" then
+      return v:len()
+    end
+    if type(v) == "table" then
+      return #v
+    end
+    error("unable to determine vector length")
+  end
+
+  -- params
+  if ranks == nil then
+    error("ranks is required")
+  end
+  if types == nil then
+    error("types is required")
+  end
+  ratio = ratio or 10
+  softness = softness or 1.0
+  if ratio <= 1 then
+    error("ratio must be > 1")
+  end
+  if softness < 0 or softness > 1 then
+    error("softness must be in [0, 1]")
+  end
+
+  local n_types = vlen(ranks)
+  local n_feat = vlen(types)
+  if n_types == 0 or n_feat == 0 then
+    return dvec.create(0), dvec.create(0)
+  end
+
+  -- build rank index and validate ranks (unique integer ids)
+  local rank_pos_of = {}
+  for pos = 0, n_types - 1 do
+    local tid = ranks:get(pos)
+    if type(tid) ~= "number" or tid ~= math.floor(tid) then
+      error("ranks must contain integer type ids")
+    end
+    if rank_pos_of[tid] ~= nil then
+      error("ranks must contain unique type ids")
+    end
+    rank_pos_of[tid] = pos
+  end
+
+  -- single pass over features: counts per type, validate membership in ranks
+  local counts = {}
+  for i = 0, n_feat - 1 do
+    local t = types:get(i)
+    if type(t) ~= "number" or t ~= math.floor(t) then
+      error("types must contain integer type ids")
+    end
+    if rank_pos_of[t] == nil then
+      error("types contains id not listed in ranks")
+    end
+    local c = counts[t]
+    if c == nil then
+      counts[t] = 1
+    else
+      counts[t] = c + 1
+    end
+  end
+
+  -- strict multipliers (iterate ranks from least to most important)
+  local strict_map = {}
+  local tail_sum = 0
+  for pos = n_types - 1, 0, -1 do
+    local tid = ranks:get(pos)
+    local alpha
+    if tail_sum == 0 then
+      alpha = 1
+    else
+      alpha = tail_sum + 1
+    end
+    strict_map[tid] = alpha
+    local c = counts[tid] or 0
+    tail_sum = tail_sum + alpha * c
+  end
+
+  -- geometric multipliers (highest importance gets largest power)
+  local geom_map = {}
+  for pos = 0, n_types - 1 do
+    local tid = ranks:get(pos)
+    local power = n_types - pos - 1
+    geom_map[tid] = ratio ^ power
+  end
+
+  -- blend per type and normalize (maps; then emit rank-ordered vector)
+  local blended_map = {}
+  local maxv = 0
+  for pos = 0, n_types - 1 do
+    local tid = ranks:get(pos)
+    local v = softness * strict_map[tid] + (1 - softness) * geom_map[tid]
+    blended_map[tid] = v
+    if v > maxv then
+      maxv = v
+    end
+  end
+  if maxv > 0 then
+    for pos = 0, n_types - 1 do
+      local tid = ranks:get(pos)
+      blended_map[tid] = blended_map[tid] / maxv
+    end
+  end
+
+  -- assign weights per feature
+  local weights = dvec.create(n_feat)
+  for i = 0, n_feat - 1 do
+    local tid = types:get(i)
+    weights:set(i, blended_map[tid])
+  end
+
+  -- class_alpha in rank order (index 0 corresponds to ranks:get(0))
+  local class_alpha = dvec.create(n_types)
+  for pos = 0, n_types - 1 do
+    local tid = ranks:get(pos)
+    class_alpha:set(pos, blended_map[tid])
+  end
+
+  return weights, class_alpha
+end
+
 return M
