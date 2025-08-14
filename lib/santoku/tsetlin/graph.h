@@ -36,7 +36,7 @@ typedef struct tk_graph_s {
 
   tm_pairs_t *pairs; // TODO: Standardize to tk_edges_t/tk_edge_t
   tk_graph_adj_t *adj;
-  tk_inv_t *inv; tk_inv_hoods_t *inv_hoods;
+  tk_inv_t *inv; tk_inv_hoods_t *inv_hoods; tk_inv_cmp_type_t inv_cmp;
   tk_ann_t *ann; tk_ann_hoods_t *ann_hoods;
   tk_hbi_t *hbi; tk_hbi_hoods_t *hbi_hoods;
   tk_ivec_t *uids;
