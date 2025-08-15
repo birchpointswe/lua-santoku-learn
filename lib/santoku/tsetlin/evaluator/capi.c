@@ -21,7 +21,6 @@ typedef struct {
   atomic_ulong *valid_pos, *valid_neg;
   tk_ivec_t *ids;
   tk_iumap_t *ididx;
-  tk_inv_t *inv;
   tk_ann_t *ann;
   tk_hbi_t *hbi;
   uint64_t min_pts;
@@ -99,7 +98,7 @@ static void tk_eval_worker (void *dp, int sig)
         uint64_t m = m0 + state->min_margin;
         data->next_m = m;
         tk_ivec_clear(data->next_assignments);
-        tk_cluster_dsu(state->hbi, state->ann, state->inv, data->rtmp, data->ptmp, m, state->min_pts, state->assign_noise, state->ids, data->next_assignments, state->ididx, &data->next_n);
+        tk_cluster_dsu(state->hbi, state->ann, data->rtmp, data->ptmp, m, state->min_pts, state->assign_noise, state->ids, data->next_assignments, state->ididx, &data->next_n);
         tk_accuracy_t result = _tm_clustering_accuracy(state->ids, data->next_assignments, state->pos, state->neg);
         data->next = result;
         tk_threads_notify_parent(data->self);
@@ -684,12 +683,11 @@ static inline int tm_optimize_clustering (lua_State *L)
 
   lua_getfield(L, 1, "index");
   int i_index = tk_lua_absindex(L, -1);
-  tk_inv_t *inv = tk_inv_peekopt(L, i_index);
   tk_ann_t *ann = tk_ann_peekopt(L, i_index);
   tk_hbi_t *hbi = tk_hbi_peekopt(L, i_index);
 
-  if (inv == NULL && ann == NULL && hbi == NULL)
-    tk_lua_verror(L, 3, "optimize_clustering", "index", "either tk_inv_t, tk_ann_t, or tk_inv_t must be provided");
+  if (ann == NULL && hbi == NULL)
+    tk_lua_verror(L, 3, "optimize_clustering", "index", "either tk_ann_t or tk_hbi_t must be provided");
 
   lua_getfield(L, 1, "ids");
   tk_ivec_t *ids = tk_ivec_peekopt(L, -1);
@@ -706,7 +704,7 @@ static inline int tm_optimize_clustering (lua_State *L)
 
   uint64_t min_margin = tk_lua_fcheckunsigned(L, 1, "optimize clustering", "min_margin");
   uint64_t max_margin = tk_lua_fcheckunsigned(L, 1, "optimize clustering", "max_margin");
-  uint64_t fs = inv != NULL ? inv->features : ann != NULL ? ann->features : hbi != NULL ? hbi->features : 0;
+  uint64_t fs = ann != NULL ? ann->features : hbi != NULL ? hbi->features : 0;
   if (max_margin > fs) max_margin = fs;
   if (min_margin > fs) min_margin = fs;
 
@@ -722,7 +720,6 @@ static inline int tm_optimize_clustering (lua_State *L)
   }
 
   tk_eval_t state;
-  state.inv = inv;
   state.ann = ann;
   state.hbi = hbi;
   state.pos = pos;
@@ -738,8 +735,7 @@ static inline int tm_optimize_clustering (lua_State *L)
   state.ids =
     ids != NULL ? ids :
     hbi ? tk_iumap_keys(L, hbi->uid_sid) :
-    ann ? tk_iumap_keys(L, ann->uid_sid) :
-    inv ? tk_iumap_keys(L, inv->uid_sid) : tk_ivec_create(L, 0, 0, 0); // t ids
+    ann ? tk_iumap_keys(L, ann->uid_sid) : tk_ivec_create(L, 0, 0, 0); // t ids
   state.ididx =
     tk_iumap_from_ivec(state.ids);
 
