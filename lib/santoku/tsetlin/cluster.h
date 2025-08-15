@@ -3,6 +3,7 @@
 
 #include <santoku/lua/utils.h>
 #include <santoku/tsetlin/dsu.h>
+#include <santoku/tsetlin/ann.h>
 #include <santoku/tsetlin/hbi.h>
 #include <santoku/ivec.h>
 #include <santoku/iumap.h>
@@ -32,20 +33,12 @@ static inline int64_t tk_idx_of (tk_iumap_t *ididx, int64_t id) {
         int64_t vid = ptmp->a[__j].i; \
         DO; \
       } \
-    } else if (inv != NULL) { \
-      tk_rvec_clear(rtmp); \
-      tk_inv_neighbors_by_id(inv, (uid), 0, margin, rtmp, TK_INV_JACCARD); \
-      for (uint64_t __j = 0; __j < rtmp->n; __j ++) { \
-        int64_t vid = rtmp->a[__j].i; \
-        DO; \
-      } \
     } \
   } while (0)
 
 static inline void tk_cluster_dsu (
   tk_hbi_t *hbi,
   tk_ann_t *ann,
-  tk_inv_t *inv,
   tk_rvec_t *rtmp,
   tk_pvec_t *ptmp,
   uint64_t margin,

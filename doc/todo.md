@@ -1,11 +1,6 @@
 # Now
 
 - Graph
-    - Segfault when knn_cache set to 1024
-    - Demo using weighting in inverted index to combine label-features (e.g.
-      class IDs as features) alongside real features such
-
-- Graph
     - Use indices for everything internal (e.g. iu/iv instead of u/v)
     - Remove all of the uids_idx checks except when adding external edges
 
