@@ -133,7 +133,7 @@ static inline void tk_itq_encode (
     }
     if (it == 0)
       first_obj = obj;
-    if (fabs(last_obj - obj) < tolerance * last_obj)
+    if (it > 0 && fabs(last_obj - obj) < tolerance * fabs(obj))
       break;
     last_obj = obj;
   }

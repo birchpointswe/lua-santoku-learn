@@ -221,17 +221,44 @@ local function canonicalize (a, b)
   end
 end
 
-M.anchor_pairs = function (ids, n_anchors, limit)
-  limit = limit or 10000
+M.random_pairs = function (ids, edges_per_node)
+  edges_per_node = edges_per_node or 3
+  local edges = pvec.create()
+  local n = ids:size()
+
+  if n <= 1 then
+    return edges
+  end
+
+  for i = 0, n - 1 do
+    local id1 = ids:get(i)
+    for j = 1, edges_per_node do
+
+      local idx2 = num.random(n) - 1
+
+      if idx2 == i then
+        idx2 = (idx2 + 1) % n
+      end
+      local id2 = ids:get(idx2)
+
+      if id1 < id2 then
+        edges:push(id1, id2)
+      else
+        edges:push(id2, id1)
+      end
+    end
+  end
+  return edges
+end
+
+M.anchor_pairs = function (ids, n_anchors)
   if n_anchors == nil or n_anchors < 1 then
     n_anchors = 1
   end
   local edges = pvec.create()
   local anchors = {}
   local sofar = 0
-  local steps = 0
-  while sofar < n_anchors and steps < limit do
-    steps = steps + 1
+  while sofar < n_anchors do
     local a = ids:get(num.random(ids:size()) - 1)
     if not anchors[a] then
       anchors[a] = true

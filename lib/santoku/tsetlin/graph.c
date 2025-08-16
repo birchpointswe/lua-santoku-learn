@@ -12,6 +12,7 @@ static inline tk_graph_t *tm_graph_create (
   int64_t sigma_k,
   double sigma_scale,
   uint64_t knn,
+  uint64_t knn_min,
   uint64_t knn_cache,
   double knn_eps,
   tk_inv_cmp_type_t cmp,
@@ -225,15 +226,17 @@ static inline double tk_graph_weight (
     return sim;
   }
   double fa = flip_at;
-  if (fa > 1.0) {
-    fa = 1.0;
-  }
-  const double denom = 1.0 - fa;
-  double t = (denom > 0.0) ? (b - fa) / denom : 1.0;
-  if (t < 0.0) {
-    t = 0.0;
-  } else if (t > 1.0) {
+  double t;
+  if (fa >= 1.0) {
     t = 1.0;
+  } else {
+    const double denom = 1.0 - fa;
+    t = (b - fa) / denom;
+    if (t < 0.0) {
+      t = 0.0;
+    } else if (t > 1.0) {
+      t = 1.0;
+    }
   }
   const double ramp = 0.5 * (1.0 - cos(M_PI * t));
   double mag = neg_scale * ramp;
@@ -580,11 +583,11 @@ static inline void tm_setup_hoods (lua_State *L, int Gi, tk_graph_t *graph)
     lua_pop(L, 1);
   } else {
     if (graph->inv != NULL)
-      tk_inv_neighborhoods(L, graph->inv, graph->knn_cache, graph->knn_eps, graph->cmp, graph->cmp_alpha, graph->cmp_beta, false, &graph->inv_hoods, &graph->uids);
+      tk_inv_neighborhoods(L, graph->inv, graph->knn_cache, graph->knn_eps, graph->knn_min, graph->cmp, graph->cmp_alpha, graph->cmp_beta, false, &graph->inv_hoods, &graph->uids);
     else if (graph->ann != NULL)
-      tk_ann_neighborhoods(L, graph->ann, graph->knn_cache, graph->ann->features * graph->knn_eps, false, &graph->ann_hoods, &graph->uids);
+      tk_ann_neighborhoods(L, graph->ann, graph->knn_cache, graph->ann->features * graph->knn_eps, graph->knn_min, false, &graph->ann_hoods, &graph->uids);
     else if (graph->hbi != NULL)
-      tk_hbi_neighborhoods(L, graph->hbi, graph->knn_cache, graph->hbi->features * graph->knn_eps, false, &graph->hbi_hoods, &graph->uids);
+      tk_hbi_neighborhoods(L, graph->hbi, graph->knn_cache, graph->hbi->features * graph->knn_eps, graph->knn_min, false, &graph->hbi_hoods, &graph->uids);
     else {
       assert(false);
       return;
@@ -594,7 +597,6 @@ static inline void tm_setup_hoods (lua_State *L, int Gi, tk_graph_t *graph)
     lua_pop(L, 2);
   }
   graph->uids_idx = tk_iumap_from_ivec(graph->uids);
-
   if (want_sigma) {
     graph->sigmas = tk_dvec_create(L, graph->uids->n, 0, 0);
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
@@ -656,6 +658,7 @@ static inline int tm_create (lua_State *L)
   double sigma_scale = tk_lua_foptnumber(L, 1, "graph", "sigma_scale", 1.0);
 
   uint64_t knn = tk_lua_foptunsigned(L, 1, "graph", "knn", 0);
+  uint64_t knn_min = tk_lua_foptunsigned(L, 1, "graph", "knn_min", 0);
   uint64_t knn_cache = tk_lua_foptunsigned(L, 1, "graph", "knn_cache", 0);
   double knn_eps = tk_lua_foptposdouble(L, 1, "graph", "knn_eps", 1.0);
   if (knn > knn_cache)
@@ -671,7 +674,7 @@ static inline int tm_create (lua_State *L)
 
   tk_graph_t *graph = tm_graph_create(
     L, edges, inv, ann, hbi, weight_eps, flip_at, neg_scale, sigma_k,
-    sigma_scale, knn, knn_cache, knn_eps, cmp, cmp_alpha, cmp_beta, n_threads);
+    sigma_scale, knn, knn_min, knn_cache, knn_eps, cmp, cmp_alpha, cmp_beta, n_threads);
   int Gi = tk_lua_absindex(L, -1);
   tm_setup_hoods(L, Gi, graph);
 
@@ -818,6 +821,7 @@ static inline tk_graph_t *tm_graph_create (
   int64_t sigma_k,
   double sigma_scale,
   uint64_t knn,
+  uint64_t knn_min,
   uint64_t knn_cache,
   double knn_eps,
   tk_inv_cmp_type_t cmp,
@@ -842,6 +846,7 @@ static inline tk_graph_t *tm_graph_create (
   graph->sigma_k = sigma_k;
   graph->sigma_scale = sigma_scale;
   graph->knn = knn;
+  graph->knn_min = knn_min;
   graph->knn_cache = knn_cache;
   graph->knn_eps = knn_eps;
   graph->pairs = kh_init(pairs);
