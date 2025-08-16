@@ -384,6 +384,7 @@ static inline void tk_hbi_neighborhoods (
   tk_hbi_t *A,
   uint64_t k,
   uint64_t eps,
+  uint64_t min,
   bool mutual,
   tk_hbi_hoods_t **hoodsp,
   tk_ivec_t **uidsp
@@ -577,12 +578,13 @@ static inline int tk_hbi_get_lua (lua_State *L)
 
 static inline int tk_hbi_neighborhoods_lua (lua_State *L)
 {
-  lua_settop(L, 4);
+  lua_settop(L, 5);
   tk_hbi_t *A = tk_hbi_peek(L, 1);
   uint64_t k = tk_lua_optunsigned(L, 2, "k", 0);
-  uint64_t eps = tk_lua_optunsigned(L, 3, "eps", 2);
-  bool mutual = tk_lua_optboolean(L, 4, "mutual", false);
-  tk_hbi_neighborhoods(L, A, k, eps, mutual, 0, 0);
+  uint64_t eps = tk_lua_optunsigned(L, 3, "eps", 3); // NOTE: intentionally not A->features
+  uint64_t min = tk_lua_optunsigned(L, 4, "min", 0);
+  bool mutual = tk_lua_optboolean(L, 5, "mutual", false);
+  tk_hbi_neighborhoods(L, A, k, eps, min, mutual, 0, 0);
   return 2;
 }
 
