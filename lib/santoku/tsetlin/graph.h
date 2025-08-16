@@ -50,6 +50,7 @@ typedef struct tk_graph_s {
   double sigma_scale;
 
   uint64_t knn;
+  uint64_t knn_min;
   uint64_t knn_cache;
   double knn_eps;
 

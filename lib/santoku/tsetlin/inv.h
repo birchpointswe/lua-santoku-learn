@@ -381,6 +381,7 @@ static inline void tk_inv_neighborhoods (
   tk_inv_t *I,
   uint64_t knn,
   double eps,
+  uint64_t min,
   tk_inv_cmp_type_t cmp,
   double tversky_alpha,
   double tversky_beta,
@@ -821,11 +822,12 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
 {
   tk_inv_t *I = tk_inv_peek(L, 1);
   uint64_t knn = tk_lua_checkunsigned(L, 2, "knn");
-  double eps = tk_lua_optposdouble(L, 3, "eps", 1.0);
-  const char *typ = tk_lua_optstring(L, 4, "comparator", "jaccard");
-  double tversky_alpha = tk_lua_optnumber(L, 5, "alpha", 1.0);
-  double tversky_beta = tk_lua_optnumber(L, 6, "beta", 0.1);
-  bool mutual = tk_lua_optboolean(L, 7, "mutual", false);
+  double eps = tk_lua_optposdouble(L, 3, "min", 1.0);
+  uint64_t min = tk_lua_optposdouble(L, 4, "eps", 1.0);
+  const char *typ = tk_lua_optstring(L, 5, "comparator", "jaccard");
+  double tversky_alpha = tk_lua_optnumber(L, 6, "alpha", 1.0);
+  double tversky_beta = tk_lua_optnumber(L, 7, "beta", 0.1);
+  bool mutual = tk_lua_optboolean(L, 8, "mutual", false);
   tk_inv_cmp_type_t cmp = TK_INV_JACCARD;
   if (!strcmp(typ, "jaccard"))
     cmp = TK_INV_JACCARD;
@@ -837,7 +839,7 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
     cmp = TK_INV_TVERSKY;
   else
     tk_lua_verror(L, 3, "neighbors", "invalid comparator specified", typ);
-  tk_inv_neighborhoods(L, I, knn, eps, cmp, tversky_alpha, tversky_beta, mutual, 0, 0);
+  tk_inv_neighborhoods(L, I, knn, eps, min, cmp, tversky_alpha, tversky_beta, mutual, 0, 0);
   return 2;
 }
 
@@ -1148,22 +1150,26 @@ static inline void tk_inv_worker (void *dp, int sig)
       }
       break;
 
+    // Build hood sets for mutualization
     case TK_INV_MUTUAL_INIT: {
       int kha;
       khint_t khi;
-      for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i++) {
+      for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i ++) {
         uhood = hoods->a[i];
         uset = hoods_sets[i];
-        for (uint64_t i = 0; i < uhood->n; i ++) {
-          khi = tk_dumap_put(uset, uhood->a[i].i, &kha);
-          tk_dumap_value(uset, khi) = uhood->a[i].d;
+        for (uint64_t j = 0; j < uhood->n; j ++) {
+          khi = tk_dumap_put(uset, uhood->a[j].i, &kha);
+          tk_dumap_value(uset, khi) = uhood->a[j].d;
         }
       }
       break;
     }
 
+    // NOTE: Move non-mutual neighbors to tail of list [hood->n, hood->m - 1]
     case TK_INV_MUTUAL_FILTER: {
+
       for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i ++) {
+
         uhood = hoods->a[i];
         uint64_t orig_n = uhood->n;
         assert(uhood->m >= orig_n);
@@ -1172,14 +1178,15 @@ static inline void tk_inv_worker (void *dp, int sig)
           uhood->m = 0;
           continue;
         }
+
         uint64_t left = 0;
         uint64_t right = orig_n - 1;
         khint_t khi;
         while (left <= right) {
-          int64_t v = uhood->a[left].i;
+          int64_t iv = uhood->a[left].i;
           double d = uhood->a[left].d;
-          assert(v >= 0 && (uint64_t) v < hoods->n);
-          vset = hoods_sets[v];
+          assert(iv >= 0 && (uint64_t) iv < hoods->n);
+          vset = hoods_sets[iv];
           khi = tk_dumap_get(vset, i);
           if (khi != tk_dumap_end(vset)) {
             double d0 = tk_dumap_value(vset, khi);
@@ -1197,9 +1204,42 @@ static inline void tk_inv_worker (void *dp, int sig)
             right --;
           }
         }
+
         uhood->n = left;
         uhood->m = orig_n;
         assert(uhood->n <= uhood->m);
+
+        // Make non-mutual distances symmetric
+        for (uint64_t qi = uhood->n; qi < uhood->m; qi++) {
+          int64_t iv = uhood->a[qi].i;
+          double d_forward = uhood->a[qi].d;
+          double d_reverse = d_forward;  // fallback
+
+          // Try to get reverse distance from neighbor's hood set, if not found,
+          // fall back to full distance computation
+          vset = hoods_sets[iv];
+          khi = tk_dumap_get(vset, i);
+          if (khi != tk_dumap_end(vset)) {
+            d_reverse = tk_dumap_value(vset, khi);
+          } else {
+            int64_t usid = sids->a[i];
+            int64_t vsid = sids->a[iv];
+            size_t ulen = 0, vlen = 0;
+            int64_t *ubits = tk_inv_sget(I, usid, &ulen);
+            int64_t *vbits = tk_inv_sget(I, vsid, &vlen);
+            if (ubits && vbits) {
+              double sim = tk_inv_similarity(I, vbits, vlen, ubits, ulen, cmp, tversky_alpha, tversky_beta);
+              d_reverse = 1.0 - sim;  // no bumping needed, already unbumped
+            }
+          }
+
+          // Store minimum distance
+          uhood->a[qi].d = (d_forward < d_reverse) ? d_forward : d_reverse;
+        }
+
+        // Re-sort both sections (mutual distances may have been updated)
+        tk_rvec_asc(uhood, 0, uhood->n);
+        tk_rvec_asc(uhood, uhood->n, uhood->m);
       }
       break;
     }
