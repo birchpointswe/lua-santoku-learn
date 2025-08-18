@@ -386,7 +386,9 @@ static inline void tk_ann_mutualize (
   lua_State *L,
   tk_ann_t *A,
   tk_ann_hoods_t *hoods,
-  tk_ivec_t *uids
+  tk_ivec_t *uids,
+  uint64_t min,
+  int64_t **old_to_newp
 ) {
   if (A->destroyed)
     return;
@@ -399,7 +401,7 @@ static inline void tk_ann_neighborhoods (
   tk_ann_t *A,
   uint64_t k,
   uint64_t eps,
-  uint64_t min,
+  uint64_t min, // TODO: unused
   bool mutual,
   tk_ann_hoods_t **hoodsp,
   tk_ivec_t **uidsp
@@ -666,7 +668,7 @@ static inline int tk_ann_neighborhoods_lua (lua_State *L)
   tk_ann_t *A = tk_ann_peek(L, 1);
   uint64_t k = tk_lua_optunsigned(L, 2, "k", 0);
   uint64_t eps = tk_lua_optunsigned(L, 3, "eps", A->features);
-  uint64_t min = tk_lua_optunsigned(L, 4, "min", 0);
+  uint64_t min = tk_lua_optunsigned(L, 4, "min", 0); // TODO: unused
   bool mutual = tk_lua_optboolean(L, 5, "mutual", false);
   tk_ann_neighborhoods(L, A, k, eps, min, mutual, 0, 0);
   return 2;
