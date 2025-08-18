@@ -386,7 +386,9 @@ static inline void tk_ann_mutualize (
   lua_State *L,
   tk_ann_t *A,
   tk_ann_hoods_t *hoods,
-  tk_ivec_t *uids
+  tk_ivec_t *uids,
+  uint64_t min,
+  int64_t **old_to_newp
 ) {
   if (A->destroyed)
     return;

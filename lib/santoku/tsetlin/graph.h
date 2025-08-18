@@ -53,6 +53,7 @@ typedef struct tk_graph_s {
   uint64_t knn_min;
   uint64_t knn_cache;
   double knn_eps;
+  bool bridge;
 
   tk_dvec_t *sigmas;
   uint64_t n_edges;

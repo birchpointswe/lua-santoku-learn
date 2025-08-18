@@ -371,7 +371,9 @@ static inline void tk_hbi_mutualize (
   lua_State *L,
   tk_hbi_t *A,
   tk_hbi_hoods_t *hoods,
-  tk_ivec_t *uids
+  tk_ivec_t *uids,
+  uint64_t min,
+  int64_t **old_to_newp
 ) {
   if (A->destroyed)
     return;
