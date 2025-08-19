@@ -28,6 +28,10 @@
 
 # Next
 
+- Rounding out functionality
+    - Support PCA for dimensionality reduction (likely followed by ITQ)
+    - Support ridge regression via SVD for codebook/classifier learning
+
 - Graph
     - Re-evaluate negative edge handling in graph (see 2025-08-10/simplify
       branch and prior history)
