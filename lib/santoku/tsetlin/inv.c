@@ -25,9 +25,11 @@ static inline int tk_inv_create_lua (lua_State *L)
   if (ranks != NULL) {
     n_ranks = tk_lua_fcheckunsigned(L, 1, "create", "n_ranks");
   }
-  double rank_decay = tk_lua_foptnumber(L, 1, "create", "rank_decay", 0.5);
+  int64_t rank_decay_window = tk_lua_foptinteger(L, 1, "create", "rank_decay_window", -1);
+  double rank_decay_sigma = tk_lua_foptnumber(L, 1, "create", "rank_decay_sigma", 1.0);
+  double rank_decay_floor = tk_lua_foptnumber(L, 1, "create", "rank_decay_floor", 0.0);
   uint64_t n_threads = tk_threads_getn(L, 1, "create", "threads");
-  tk_inv_create(L, features, weights, n_ranks, ranks, rank_decay, n_threads, i_weights, i_ranks);
+  tk_inv_create(L, features, weights, n_ranks, ranks, rank_decay_window, rank_decay_sigma, rank_decay_floor, n_threads, i_weights, i_ranks);
   return 1;
 }
 
