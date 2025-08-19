@@ -2,7 +2,6 @@
 
 - Graph
     - Use indices for everything internal (e.g. iu/iv instead of u/v)
-    - Remove all of the uids_idx checks except when adding external edges
 
 - Clustering
     - Return n_clusters, n_core, n_border, n_noise

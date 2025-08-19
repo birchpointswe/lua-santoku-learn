@@ -8,6 +8,7 @@ static inline int tk_inv_create_lua (lua_State *L)
   int i_ranks = -1;
   tk_ivec_t *ranks = NULL;
   uint64_t features = 0;
+  uint64_t n_ranks = 0;
   lua_getfield(L, 1, "features");
   if (lua_type(L, -1) == LUA_TNUMBER) {
     features = tk_lua_checkunsigned(L, -1, "features");
@@ -21,9 +22,12 @@ static inline int tk_inv_create_lua (lua_State *L)
     ranks = tk_ivec_peek(L, -1, "ranks");
     i_ranks = tk_lua_absindex(L, -1);
   }
+  if (ranks != NULL) {
+    n_ranks = tk_lua_fcheckunsigned(L, 1, "create", "n_ranks");
+  }
   double rank_decay = tk_lua_foptnumber(L, 1, "create", "rank_decay", 0.5);
   uint64_t n_threads = tk_threads_getn(L, 1, "create", "threads");
-  tk_inv_create(L, features, weights, ranks, rank_decay, n_threads, i_weights, i_ranks);
+  tk_inv_create(L, features, weights, n_ranks, ranks, rank_decay, n_threads, i_weights, i_ranks);
   return 1;
 }
 
