@@ -296,6 +296,32 @@ static inline void tk_hbi_remove (
   tk_hbi_uid_remove(A, uid);
 }
 
+static inline bool tk_hbi_probe_bucket (
+  tk_hbi_t *A,
+  tk_hbi_code_t h,
+  tk_pvec_t *out,
+  uint64_t knn,
+  int64_t sid0,
+  int r
+) {
+  khint_t khi = kh_get(tk_hbi_buckets, A->buckets, h);
+  if (khi != kh_end(A->buckets)) {
+    tk_ivec_t *bucket = kh_value(A->buckets, khi);
+    for (uint64_t bi = 0; bi < bucket->n; bi ++) {
+      int64_t sid1 = bucket->a[bi];
+      if (sid1 == sid0)
+        continue;
+      int64_t uid1 = tk_hbi_sid_uid(A, sid1);
+      if (uid1 < 0)
+        continue;
+      tk_pvec_push(out, tk_pair(uid1, (int64_t) r));
+      if (knn && out->n >= knn)
+        return true;
+    }
+  }
+  return false;
+}
+
 static inline void tk_hbi_extend_neighborhood (
   tk_hbi_t *A,
   uint64_t i,
@@ -455,29 +481,11 @@ static inline tk_pvec_t *tk_hbi_neighbors_by_vec (
   if (A->destroyed)
     return NULL;
   tk_pvec_clear(out);
-  if (knn) {
-    tk_pvec_ensure(out, knn);
-    out->m = knn;
-  }
-
   tk_hbi_code_t h0 = tk_hbi_pack(vec, A->features);
   int pos[TK_HBI_BITS];
   int nbits = (int) A->features;
-  khint_t khi = kh_get(tk_hbi_buckets, A->buckets, h0);
-  if (khi != kh_end(A->buckets)) {
-    tk_ivec_t *bucket = kh_value(A->buckets, khi);
-    for (uint64_t bi = 0; bi < bucket->n && (!knn || out->n < knn); bi ++) {
-      int64_t sid1 = bucket->a[bi];
-      if (sid1 == sid0) continue;
-      int64_t uid1 = tk_hbi_sid_uid(A, sid1);
-      if (uid1 < 0) continue;
-      tk_pvec_push(out, tk_pair(uid1, 0));
-    }
-  }
-  if (knn && out->n >= knn) {
-    tk_pvec_asc(out, 0, out->n);
+  if (tk_hbi_probe_bucket(A, h0, out, knn, sid0, 0))
     return out;
-  }
   for (int r = 1; r <= (int) eps && r <= nbits; r ++) {
     for (int i = 0; i < r; i ++)
       pos[i] = i;
@@ -485,23 +493,8 @@ static inline tk_pvec_t *tk_hbi_neighbors_by_vec (
       tk_hbi_code_t mask = 0;
       for (int i = 0; i < r; i ++)
         mask |= (1U << pos[i]);
-      khint_t khi = kh_get(tk_hbi_buckets, A->buckets, h0 ^ mask);
-      if (khi != kh_end(A->buckets)) {
-        tk_ivec_t *bucket = kh_value(A->buckets, khi);
-        for (uint64_t bi = 0; bi < bucket->n && (!knn || out->n < knn); bi ++) {
-          int64_t sid1 = bucket->a[bi];
-          if (sid1 == sid0)
-            continue;
-          int64_t uid1 = tk_hbi_sid_uid(A, sid1);
-          if (uid1 < 0)
-            continue;
-          tk_pvec_push(out, tk_pair(uid1, (int64_t) r));
-        }
-      }
-      if (knn && out->n >= knn) {
-        tk_pvec_asc(out, 0, out->n);
+      if (tk_hbi_probe_bucket(A, h0 ^ mask, out, knn, sid0, r))
         return out;
-      }
       int j;
       for (j = r - 1; j >= 0; j --) {
         if (pos[j] != j + nbits - r) {
@@ -515,6 +508,7 @@ static inline tk_pvec_t *tk_hbi_neighbors_by_vec (
         break;
     }
   }
+  tk_pvec_asc(out, 0, out->n);
   return out;
 }
 
