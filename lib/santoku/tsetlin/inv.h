@@ -65,7 +65,9 @@ typedef struct tk_inv_s {
   uint64_t n_ranks;
   tk_dvec_t *weights;
   tk_ivec_t *ranks;
-  double rank_decay;
+  int64_t rank_decay_window;
+  double rank_decay_sigma;
+  double rank_decay_floor;
   tk_iumap_t *uid_sid;
   tk_iumap_t *sid_uid;
   tk_ivec_t *node_offsets;
@@ -189,7 +191,9 @@ static inline void tk_inv_persist (
   uint64_t rn = I->ranks->n;
   tk_lua_fwrite(L, (char *) &rn, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, (char *) I->ranks->a, sizeof(int64_t), rn, fh);
-  tk_lua_fwrite(L, (char *) &I->rank_decay, sizeof(double), 1, fh);
+  tk_lua_fwrite(L, (char *) &I->rank_decay_window, sizeof(int64_t), 1, fh);
+  tk_lua_fwrite(L, (char *) &I->rank_decay_sigma, sizeof(double), 1, fh);
+  tk_lua_fwrite(L, (char *) &I->rank_decay_floor, sizeof(double), 1, fh);
 }
 
 static inline uint64_t tk_inv_size (
@@ -802,7 +806,22 @@ static inline double tk_inv_similarity_by_rank (
   double total_rank_weight = 0.0;
 
   for (uint64_t rank = 0; rank < I->n_ranks; rank++) {
-    double rank_weight = (I->rank_decay > 0.0) ? pow(I->rank_decay, (double)rank) : 1.0;
+    double rank_weight = 1.0;
+    if (I->rank_decay_window >= 0) {
+      if (rank == 0) {
+        rank_weight = 1.0;
+      } else if (rank >= (uint64_t)I->rank_decay_window) {
+        rank_weight = I->rank_decay_floor;
+      } else {
+        // Sigmoid ramp from 1.0 to rank_decay_floor over rank_decay_window ranks
+        double t = (double)rank / (double)I->rank_decay_window;  // 0 to 1
+        // Sigmoid curve: flat at start, steep in middle
+        // sigma controls the steepness: higher sigma = steeper transition
+        double sigmoid_arg = I->rank_decay_sigma * (t - 0.5);  // center around 0.5
+        double sigmoid_val = 1.0 / (1.0 + exp(sigmoid_arg));   // sigmoid from 1 to 0
+        rank_weight = I->rank_decay_floor + (1.0 - I->rank_decay_floor) * sigmoid_val;
+      }
+    }
 
     double inter_w = wacc->a[(int64_t) I->n_ranks * vsid + (int64_t) rank];
     double q_w = q_weights_by_rank[rank];
@@ -1496,7 +1515,9 @@ static inline tk_inv_t *tk_inv_create (
   tk_dvec_t *weights,
   uint64_t n_ranks,
   tk_ivec_t *ranks,
-  double rank_decay,
+  int64_t rank_decay_window,
+  double rank_decay_sigma,
+  double rank_decay_floor,
   uint64_t n_threads,
   int i_weights,
   int i_ranks
@@ -1512,7 +1533,9 @@ static inline tk_inv_t *tk_inv_create (
   I->weights = weights;
   if (weights)
     tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, i_weights);
-  I->rank_decay = rank_decay;
+  I->rank_decay_window = rank_decay_window;
+  I->rank_decay_sigma = rank_decay_sigma;
+  I->rank_decay_floor = rank_decay_floor;
   if (!ranks) {
     I->ranks = tk_ivec_create(L, I->features, 0, 0);
     tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
@@ -1638,7 +1661,9 @@ static inline tk_inv_t *tk_inv_load (
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   tk_lua_fread(L, I->ranks->a, sizeof(int64_t), rn, fh);
   lua_pop(L, 1);
-  tk_lua_fread(L, &I->rank_decay, sizeof(double), 1, fh);
+  tk_lua_fread(L, &I->rank_decay_window, sizeof(int64_t), 1, fh);
+  tk_lua_fread(L, &I->rank_decay_sigma, sizeof(double), 1, fh);
+  tk_lua_fread(L, &I->rank_decay_floor, sizeof(double), 1, fh);
   I->threads = tk_malloc(L, n_threads * sizeof(tk_inv_thread_t));
   memset(I->threads, 0, n_threads * sizeof(tk_inv_thread_t));
   I->pool = tk_threads_create(L, n_threads, tk_inv_worker);
