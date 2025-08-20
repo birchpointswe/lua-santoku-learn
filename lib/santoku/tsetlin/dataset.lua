@@ -232,7 +232,7 @@ M.random_pairs = function (ids, edges_per_node)
   -- Each node gets edges_per_node random connections
   for i = 0, n - 1 do
     local id1 = ids:get(i)
-    for j = 1, edges_per_node do
+    for _ = 1, edges_per_node do
       -- Pick a random target
       local idx2 = num.random(n) - 1  -- num.random returns 1-based
       -- Avoid self-loops

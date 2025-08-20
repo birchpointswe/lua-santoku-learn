@@ -821,33 +821,28 @@ static inline int tb_tokenizer_parse (lua_State *L)
 static inline int tb_tokenizer_tokenize (lua_State *L)
 {
   tb_tokenizer_t *tokenizer = peek_tokenizer(L, lua_upvalueindex(1));
-  lua_settop(L, 1);
-  uint64_t n;
-  if (lua_type(L, 1) != LUA_TTABLE) {
-    lua_newtable(L); // x t
-    lua_insert(L, 1); // t x
-    lua_rawseti(L, -2, 1); // t
-    n = 1;
+  lua_settop(L, 2); // t, out
+
+  tk_ivec_t *out = tk_ivec_peekopt(L, 2);
+  if (out == NULL) {
+    lua_pop(L, 1); // t
+    out = tk_ivec_create(L, 0, 0, 0); // t out
   } else {
-    n = (uint64_t) lua_objlen(L, 1);
+    tk_ivec_clear(out); // t out
   }
-  uint64_t n_features = (uint64_t) tb_tokenizer_features_aligned(tokenizer);
+
   int kha;
   uint64_t khi;
+  tk_iuset_t *seen = tk_iuset_create();
+  uint64_t n_features = (uint64_t) tb_tokenizer_features_aligned(tokenizer);
 
-  tk_iuset_t *seen = tk_iuset_create(); // seen
-  tk_ivec_t *out = tk_ivec_create(L, 0, 0, 0); // seen, out
-
-  // TODO: parallelize
-  for (size_t i = 1; i <= n; i ++) {
-    lua_rawgeti(L, 1, i); // t s
+  if (lua_type(L, 1) != LUA_TTABLE) {
 
     size_t doclen;
-    char *doc = tb_tokenizer_normalize((char *) luaL_checklstring(L, -1, &doclen), &doclen, tokenizer->max_run); // s
+    char *doc = tb_tokenizer_normalize((char *) luaL_checklstring(L, 1, &doclen), &doclen, tokenizer->max_run); // t out
     tb_tokenizer_populate_tokens(tokenizer, doc, doclen, false);
     free(doc);
 
-    tk_iuset_clear(seen);
     for (khint_t j = 0; j < tokenizer->tokens.n; j ++) {
       int id = tokenizer->tokens.a[j];
       if (id < 0)
@@ -855,9 +850,32 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
       khi = tk_iuset_put(seen, id, &kha);
       if (!kha)
         continue;
-      tk_ivec_push(out, (int64_t) id + ((int64_t) i - 1) * (int64_t) n_features);
+      tk_ivec_push(out, (int64_t) id);
     }
-    lua_pop(L, 1); // t
+
+  } else {
+
+    // TODO: parallelize
+    uint64_t n = (uint64_t) lua_objlen(L, 1);
+    for (size_t i = 1; i <= n; i ++) {
+      lua_rawgeti(L, 1, i); // t out s
+      size_t doclen;
+      char *doc = tb_tokenizer_normalize((char *) luaL_checklstring(L, -1, &doclen), &doclen, tokenizer->max_run); // s
+      tb_tokenizer_populate_tokens(tokenizer, doc, doclen, false);
+      free(doc);
+      tk_iuset_clear(seen);
+      for (khint_t j = 0; j < tokenizer->tokens.n; j ++) {
+        int id = tokenizer->tokens.a[j];
+        if (id < 0)
+          continue;
+        khi = tk_iuset_put(seen, id, &kha);
+        if (!kha)
+          continue;
+        tk_ivec_push(out, (int64_t) id + ((int64_t) i - 1) * (int64_t) n_features);
+      }
+      lua_pop(L, 1); // t out
+    }
+
   }
 
   tk_iuset_destroy(seen);
