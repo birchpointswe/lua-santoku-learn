@@ -232,7 +232,7 @@ M.random_pairs = function (ids, edges_per_node)
 
   for i = 0, n - 1 do
     local id1 = ids:get(i)
-    for j = 1, edges_per_node do
+    for _ = 1, edges_per_node do
 
       local idx2 = num.random(n) - 1
 
