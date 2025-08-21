@@ -16,6 +16,8 @@ local COREX_ITERS = 10
 
 local CLASSES = 10
 local CLAUSES = 1024
+local CLAUSE_TOLERANCE = 128  -- FPTM parameter LF
+local CLAUSE_MAXIMUM = 128    -- FPTM parameter L
 local TARGET = 32
 local SPECIFICITY = 10
 local NEGATIVE = 0.1
@@ -68,6 +70,8 @@ test("tsetlin", function ()
     features = HIDDEN,
     classes = CLASSES,
     clauses = CLAUSES,
+    clause_tolerance = CLAUSE_TOLERANCE,
+    clause_maximum = CLAUSE_MAXIMUM,
     target = TARGET,
     specificity = SPECIFICITY,
     negative = NEGATIVE,

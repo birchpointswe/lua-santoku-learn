@@ -14,12 +14,14 @@ local tokenizer = require("santoku.tsetlin.tokenizer")
 local TTR = 0.9
 local MAX = nil
 local EVALUATE_EVERY = 1
-local ITERATIONS = 10
+local ITERATIONS = 100
 
 local CLASSES = 2
-local CLAUSES = 8192
-local TARGET = 32
-local SPECIFICITY = 29
+local CLAUSES = 8
+local CLAUSE_TOLERANCE = 8
+local CLAUSE_MAXIMUM = 8
+local TARGET = 12
+local SPECIFICITY = 1000
 local NEGATIVE = 0.5
 
 local TOP_ALGO = "chi2"
@@ -99,6 +101,8 @@ test("tsetlin", function ()
     features = n_top_v,
     classes = CLASSES,
     clauses = CLAUSES,
+    clause_tolerance = CLAUSE_TOLERANCE,
+    clause_maximum = CLAUSE_MAXIMUM,
     target = TARGET,
     negative = NEGATIVE,
     specificity = SPECIFICITY

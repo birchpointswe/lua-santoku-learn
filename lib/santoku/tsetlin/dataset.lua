@@ -139,38 +139,49 @@ M.read_binary_mnist = function (fp, n_features, max, class_max)
   local problems = ivec.create()
   local solutions = ivec.create()
   local n = 0
-  local tmp = ivec.create()
+
   for l in fs.lines(fp) do
     if max and n >= max then
       break
     end
+
     local start = problems:size()
-    local feature = 0
-    tmp:clear()
-    local cls = nil
-    for s in str.gmatch(l, "%S+") do
-      if feature == n_features then
-        cls = s
+
+    -- Split line into tokens more efficiently
+    local tokens = {}
+    local token_count = 0
+    for token in str.gmatch(l, "%S+") do
+      token_count = token_count + 1
+      tokens[token_count] = token
+      if token_count > n_features then
         break
-      elseif s == "1" then
-        tmp:push(feature)
-      elseif s ~= "0" then
-        err.error("unexpected string", s)
       end
-      feature = feature + 1
     end
-    if not cls then -- luacheck: ignore
-      -- malformed row: no label; skip silently (or log)
+
+    if token_count <= n_features then
+      -- malformed row: no label; skip silently
     else
+      local cls = tokens[n_features + 1]
       class_cnt[cls] = (class_cnt[cls] or 0) + 1
+
       if not (class_max and class_cnt[cls] > class_max) then
         offsets:push(start)
-        problems:copy(tmp, 0, tmp:size(), problems:size())
+
+        -- Build features directly in problems vector
+        for feature = 1, n_features do
+          if tokens[feature] == "1" then
+            problems:push(feature - 1)
+          elseif tokens[feature] ~= "0" then
+            err.error("unexpected string", tokens[feature])
+          end
+        end
+
         solutions:push(tonumber(cls))
         n = n + 1
       end
     end
   end
+
   return {
     offsets = offsets,
     problems = problems,
@@ -187,9 +198,12 @@ local function _split_binary_mnist (dataset, s, e)
   for i = s, e do
     local pss = dataset.offsets:get(i - 1)
     local pse = i == dataset.n and dataset.problems:size() or dataset.offsets:get(i)
-    local m = ps:size()
-    ps:copy(dataset.problems, pss, pse, m)
-    ps:add((i - s) * dataset.n_features, m, ps:size())
+    local offset = (i - s) * dataset.n_features
+    
+    -- Copy features and adjust indices in one pass
+    for j = pss, pse - 1 do
+      ps:push(dataset.problems:get(j) + offset)
+    end
   end
   ss:copy(dataset.solutions, s - 1, e, 0)
   return {

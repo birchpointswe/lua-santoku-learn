@@ -27,6 +27,8 @@
 
 -- local HIDDEN = 16
 -- local CLAUSES = 512
+-- local CLAUSE_TOLERANCE = 64  -- FPTM parameter LF
+-- local CLAUSE_MAXIMUM = 64    -- FPTM parameter L
 -- local TARGET = 32
 -- local SPECIFICITY = 4
 
@@ -229,6 +231,8 @@
 --     visible = n_top_v,
 --     hidden = train.n_hidden,
 --     clauses = CLAUSES,
+--     clause_tolerance = CLAUSE_TOLERANCE,
+--     clause_maximum = CLAUSE_MAXIMUM,
 --     target = TARGET,
 --     specificity = SPECIFICITY
 --   })
