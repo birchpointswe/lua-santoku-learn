@@ -38,13 +38,11 @@ typedef enum {
 
 typedef enum {
   TM_SEED,
-  TM_CLASSIFIER_PRIME,
   TM_CLASSIFIER_SETUP,
   TM_CLASSIFIER_TRAIN,
   TM_CLASSIFIER_PREDICT,
   TM_CLASSIFIER_PREDICT_REDUCE,
   TM_ENCODER_SETUP,
-  TM_ENCODER_PRIME,
   TM_ENCODER_PREDICT,
   TM_ENCODER_PREDICT_REDUCE,
   TM_ENCODER_TRAIN,
@@ -77,8 +75,6 @@ typedef struct tk_tsetlin_thread_s {
     tk_bits_t *ps;
   } predict;
 
-  long int *sums_old; // classes x samples
-  long int *sums_local; // classes x samples
   unsigned int *shuffle; // samples
   long int *scores; // classes x samples
 
@@ -95,9 +91,10 @@ typedef struct tk_tsetlin_s {
   unsigned int classes;
   unsigned int features;
   unsigned int clauses;
-  unsigned int threshold;
+  unsigned int clause_tolerance;
+  unsigned int clause_maximum;
+  unsigned int target;
   unsigned int state_bits;
-  bool boost_true_positive;
   unsigned int input_bits;
   unsigned int input_chunks;
   unsigned int clause_chunks;
@@ -117,23 +114,10 @@ typedef struct tk_tsetlin_s {
   size_t encodings_len;
   tk_bits_t *encodings;
 
-  size_t sums_len;
-  atomic_long *sums; // samples x classes
-
   tk_threadpool_t *pool;
   bool initialized_threads;
 
 } tk_tsetlin_t;
-
-#define tm_state_old_sum(tm, thread, chunk, sample) \
-  (((tk_tsetlin_thread_t *) (tm)->pool->threads[thread].data)->sums_old[ \
-    (chunk) * ((tk_tsetlin_thread_t *) (tm)->pool->threads[(thread)].data)->train.n + \
-    (sample)])
-
-#define tm_state_sum_local(tm, thread, class, sample) \
-  (((tk_tsetlin_thread_t *) (tm)->pool->threads[thread].data)->sums_local[ \
-    (class) * ((tk_tsetlin_thread_t *) (tm)->pool->threads[(thread)].data)->predict.n + \
-    (sample)])
 
 #define tm_state_shuffle(tm, thread) \
   (((tk_tsetlin_thread_t *) (tm)->pool->threads[thread].data)->shuffle)
@@ -146,39 +130,12 @@ typedef struct tk_tsetlin_s {
 #define tm_state_clause_chunks(tm, thread) \
   (((tk_tsetlin_thread_t *) (tm)->pool->threads[thread].data)->clast - ((tk_tsetlin_thread_t *) (tm)->pool->threads[thread].data)->cfirst + 1)
 
-#define tm_state_sum(tm, class, sample) \
-  (&(tm)->sums[(sample) * (tm)->classes + \
-               (class)])
-
 #define tm_state_counts(tm, clause, input_chunk) \
   (&(tm)->state[(clause) * (tm)->input_chunks * ((tm)->state_bits - 1) + \
                 (input_chunk) * ((tm)->state_bits - 1)])
 
 #define tm_state_actions(tm, clause) \
   (&(tm)->actions[(clause) * (tm)->input_chunks])
-
-static inline void tk_tsetlin_init_streams (
-  tk_bits_t *mask,
-  unsigned int n,
-  double specificity
-) {
-  const unsigned int n_chunks = BITS_BYTES(n);
-  for (unsigned int i = 0; i < n_chunks; i ++)
-    mask[i] = (tk_bits_t)0;
-  const double p = 1.0 / specificity;
-  long int active = fast_norm(n * p, n * p * (1 - p));
-  if (active >= n)
-    active = n;
-  if (active < 0)
-    active = 0;
-  for (unsigned int i = 0; i < active; i ++) {
-    unsigned int r = fast_rand();
-    unsigned int f = ((uint64_t)r * n) >> 32;
-    unsigned int chunk = BITS_BYTE(f);
-    unsigned int bit = BITS_BIT(f);
-    mask[chunk] |= ((tk_bits_t)1 << bit);
-  }
-}
 
 static inline void tm_inc (
   tk_tsetlin_t *tm,
@@ -232,58 +189,140 @@ static inline void tm_dec (
   actions[chunk] &= ~carry_masked;
 }
 
-static inline void tk_tsetlin_calculate (
+static inline tk_bits_t tk_tsetlin_calculate (
   tk_tsetlin_t *tm,
   tk_bits_t *input,
   bool predict,
-  tk_bits_t *out,
-  unsigned int cfirst,
-  unsigned int clast
+  unsigned int *literalsp,
+  unsigned int *votesp,
+  unsigned int chunk
 ) {
+  tk_bits_t out = (tk_bits_t) 0;
   unsigned int input_chunks = tm->input_chunks;
-  for (unsigned int clause_chunk = cfirst; clause_chunk <= clast; clause_chunk ++) {
-    out[clause_chunk - cfirst] = (tk_bits_t)0;
-    for (unsigned int clause_chunk_pos = 0; clause_chunk_pos < BITS; clause_chunk_pos ++) {
-      tk_bits_t output = 0;
-      tk_bits_t all_exclude = 0;
-      unsigned int clause = clause_chunk * BITS + clause_chunk_pos;
-      tk_bits_t *actions = tm_state_actions(tm, clause);
-      for (unsigned int k = 0; k < input_chunks - 1; k ++) {
-        tk_bits_t inp = input[k];
-        tk_bits_t act = actions[k];
-        output |= ((act & inp) ^ act);
-        all_exclude |= act;
-      }
-      output |=
-        (actions[input_chunks - 1] & input[input_chunks - 1] & tm->tail_mask) ^
-        (actions[input_chunks - 1] & tm->tail_mask);
-      all_exclude |= ((actions[input_chunks - 1]) ^ tm->tail_mask);
-      output = !output && !(predict && !all_exclude);
-      if (output)
-        out[clause_chunk - cfirst] |= ((tk_bits_t)1 << clause_chunk_pos);
+  unsigned int tolerance = tm->clause_tolerance;
+
+  for (unsigned int j = 0; j < BITS; j ++) {
+
+    tk_bits_t all_exclude = 0;
+    unsigned int clause = chunk * BITS + j;
+    tk_bits_t *actions = tm_state_actions(tm, clause);
+    unsigned int failed = 0;
+    unsigned int literals = 0;
+
+    for (unsigned int k = 0; k < input_chunks - 1; k ++) {
+      tk_bits_t inp = input[k];
+      tk_bits_t act = actions[k];
+      literals += popcount(act);
+      failed += popcount(act & (~inp));
+      all_exclude |= act;
     }
+
+    tk_bits_t last_act = actions[input_chunks - 1] & tm->tail_mask;
+    literals += popcount(last_act);
+    failed += popcount(last_act & (~input[input_chunks - 1]) & tm->tail_mask);
+    all_exclude |= last_act;  // Fixed: was XORing with tail_mask
+
+    long int votes;
+    if (literals == 0) {
+      // Empty clause matches everything - vote with tolerance (FPTM behavior)
+      votes = (long int) tolerance;
+    } else {
+      votes = (literals < tolerance ? (long int) literals : (long int) tolerance) - (long int) failed;
+      if (votes < 0)
+        votes = 0;
+    }
+
+
+    if (votes > 0 && !(predict && !all_exclude))
+      out |= ((tk_bits_t) 1 << j);
+
+    literalsp[j] = literals;
+    votesp[j] = (unsigned int) votes;
   }
+
+  return out;
 }
 
 static inline long int tk_tsetlin_sums (
   tk_tsetlin_t *tm,
-  tk_bits_t *out,
-  unsigned int cfirst,
-  unsigned int clast,
-  unsigned int offset
+  tk_bits_t out,
+  unsigned int *votes
 ) {
   long int sum = 0;
-  for (unsigned int i = cfirst; i <= clast; i ++) {
-    sum += (long int) popcount(out[i - offset] & POS_MASK); // 0101
-    sum -= (long int) popcount(out[i - offset] & NEG_MASK); // 1010
+  // Positive clauses (even bits: 0, 2, 4, 6...) - use POS_MASK pattern
+  for (unsigned int j = 0; j < BITS; j += 2) {
+    if (out & ((tk_bits_t) 1 << j)) {
+      sum += (long int) votes[j];
+    }
+  }
+  // Negative clauses (odd bits: 1, 3, 5, 7...) - use NEG_MASK pattern
+  for (unsigned int j = 1; j < BITS; j += 2) {
+    if (out & ((tk_bits_t) 1 << j)) {
+      sum -= (long int) votes[j];
+    }
   }
   return sum;
+}
+
+static inline void apply_feedback (
+  tk_tsetlin_t *tm,
+  unsigned int clause_idx,
+  unsigned int chunk,
+  tk_bits_t *input,
+  unsigned int *literals,
+  unsigned int *votes,
+  bool positive_feedback,
+  unsigned int thread
+) {
+  unsigned int features = tm->features;
+  unsigned int max_literals = tm->clause_maximum;
+  unsigned int input_chunks = tm->input_chunks;
+  double specificity = tm->specificity;
+
+  bool output = votes[clause_idx] > 0;
+
+  if (positive_feedback) {
+    // Feedback 1: Positive feedback (Julia lines 252-291)
+    if (output) {
+      // Type Ia: Clause voted - deterministic increment/decrement with size constraint
+      if (literals[clause_idx] < max_literals) {
+        for (unsigned int k = 0; k < input_chunks; k ++)
+          tm_inc(tm, chunk * BITS + clause_idx, k, input[k]);
+      }
+      // Type Ib: Deterministic negative feedback
+      for (unsigned int k = 0; k < input_chunks; k ++)
+        tm_dec(tm, chunk * BITS + clause_idx, k, ~input[k]);
+    } else {
+      // Clause didn't vote - random penalty (Julia lines 277-286)
+      // Match Julia's calculation: tm.s = round(Int, length(first(X)) / tm.S)
+      // where X is booleanized input (2 * features)
+      unsigned int s = (2 * features) / specificity;
+      for (unsigned int r = 0; r < s; r ++) {
+        unsigned int random_chunk = fast_rand() % input_chunks;
+        unsigned int random_bit = fast_rand() % BITS;
+        tk_bits_t random_mask = (tk_bits_t)1 << random_bit;
+        tm_dec(tm, chunk * BITS + clause_idx, random_chunk, random_mask);
+      }
+    }
+  } else {
+    // Feedback 2: Negative feedback (Julia lines 292-308)
+    if (output) {
+      // Type II feedback: Include false input literals
+      // Match Julia: increment ALL false literals (remove action mask)
+      for (unsigned int k = 0; k < input_chunks; k ++) {
+        tm_inc(tm, chunk * BITS + clause_idx, k, ~input[k]);
+      }
+    }
+    // No action when clause doesn't vote in negative feedback
+  }
 }
 
 static inline void tm_update (
   tk_tsetlin_t *tm,
   tk_bits_t *input,
   tk_bits_t out,
+  unsigned int *literals,
+  unsigned int *votes,
   unsigned int s,
   unsigned int target_class,
   unsigned int target_vote,
@@ -294,65 +333,50 @@ static inline void tm_update (
   double negative_sampling = tm->negative;
   if (class != target_class && fast_chance(1 - negative_sampling))
     return;
-  unsigned int features = tm->features;
-  long int threshold = (long int) tm->threshold;
-  unsigned int input_chunks = tm->input_chunks;
-  unsigned int boost_true_positive = tm->boost_true_positive;
-  double specificity = tm->specificity;
-  // NOTE: This is much faster given the stack allocation of feedback arrays.
-  // Can we somehow achieve the same with heap?
-  tk_bits_t feedback_to_la[input_chunks];
-  unsigned int target = class == target_class ? target_vote : !target_vote;
-  long int tgt = (long int) target;
-  atomic_long *class_sump = tm_state_sum(tm, class, s);
-  long int old_sum = tm_state_old_sum(tm, thread, chunk, s);
-  long int new_sum = tk_tsetlin_sums(tm, &out, chunk, chunk, chunk);
-  long int diff = new_sum - old_sum;
-  long int class_sum;
-  if (diff != 0) {
-    tm_state_old_sum(tm, thread, chunk, s) = new_sum;
-    class_sum = tm_state_sum_local(tm, thread, class, s) = atomic_fetch_add(class_sump, diff) + diff;
+  long int vote_target = (long int) tm->target;
+
+  // Calculate immediate chunk vote (matching Julia's per-TATeam approach)
+  long int chunk_vote = tk_tsetlin_sums(tm, out, votes);
+  chunk_vote = (chunk_vote > vote_target) ? vote_target : chunk_vote;
+  chunk_vote = (chunk_vote < -vote_target) ? -vote_target : chunk_vote;
+
+  // Calculate update probability based on immediate chunk vote (matching Julia's formula)
+  double p;
+  if (class == target_class) {
+    p = (double)(vote_target - chunk_vote) / (2.0 * vote_target);
   } else {
-    class_sum = tm_state_sum_local(tm, thread, class, s);
+    p = (double)(vote_target + chunk_vote) / (2.0 * vote_target);
   }
-  class_sum = (class_sum > threshold) ? threshold : class_sum;
-  class_sum = (class_sum < -threshold) ? -threshold : class_sum;
-  long int err = (target == 1) ? (threshold - class_sum) : (threshold + class_sum);
-  double p = (double) err / (2.0 * threshold);
-  for (unsigned int j = 0; j < BITS; j ++) {
-    long int jl = (long int) j;
-    tk_bits_t *actions = tm_state_actions(tm, chunk * BITS + j);
-    bool output = (out & ((tk_bits_t)1 << j)) > 0;
+
+  // Dual positive/negative feedback structure matching Julia reference
+  // Process clause pairs: even indices = positive, odd indices = negative
+  for (unsigned int j = 0; j < BITS; j += 2) {
     if (fast_chance(p)) {
-      if ((2 * tgt - 1) * (1 - 2 * (jl & 1)) == -1) {
-        // Type II feedback
-        if (output)
-          for (unsigned int k = 0; k < input_chunks; k ++) {
-            tk_bits_t updated = (~input[k]) & (~actions[k]);
-            tm_inc(tm, chunk * BITS + j, k, updated);
-          }
-      } else if ((2 * tgt - 1) * (1 - 2 * (jl & 1)) == 1) {
-        // Type I Feedback
-        tk_tsetlin_init_streams(feedback_to_la, 2 * features, specificity);
-        if (output) {
-          if (boost_true_positive)
-            for (unsigned int k = 0; k < input_chunks; k ++) {
-              tk_bits_t ichunk = input[k];
-              tm_inc(tm, chunk * BITS + j, k, ichunk);
-            }
-          else
-            for (unsigned int k = 0; k < input_chunks; k ++) {
-              tk_bits_t fb = input[k] & (~feedback_to_la[k]);
-              tm_inc(tm, chunk * BITS + j, k, fb);
-            }
-          for (unsigned int k = 0; k < input_chunks; k ++) {
-            tk_bits_t fb = (~input[k]) & feedback_to_la[k];
-            tm_dec(tm, chunk * BITS + j, k, fb);
-          }
+      unsigned int pos_clause = j;     // Even index = positive clause
+      unsigned int neg_clause = j + 1; // Odd index = negative clause
+
+      // Ensure we don't exceed BITS boundary
+      if (neg_clause >= BITS)
+        break;
+
+      if (class == target_class) {
+        // For encoder: feedback depends on target bit value
+        // For classifier: target_vote is always 1
+
+
+        if (target_vote) {
+          // Target is 1: positive clauses get Type I, negative get Type II
+          apply_feedback(tm, pos_clause, chunk, input, literals, votes, true, thread); // Type I feedback
+          apply_feedback(tm, neg_clause, chunk, input, literals, votes, false, thread); // Type II feedback
         } else {
-          for (unsigned int k = 0; k < input_chunks; k ++)
-            tm_dec(tm, chunk * BITS + j, k, feedback_to_la[k]);
+          // Target is 0: negative clauses get Type I, positive get Type II (Julia binary approach)
+          apply_feedback(tm, neg_clause, chunk, input, literals, votes, true, thread); // Type I feedback
+          apply_feedback(tm, pos_clause, chunk, input, literals, votes, false, thread); // Type II feedback
         }
+      } else {
+        // Non-target class: swapped feedback
+        apply_feedback(tm, pos_clause, chunk, input, literals, votes, false, thread); // Negative feedback
+        apply_feedback(tm, neg_clause, chunk, input, literals, votes, true, thread); // Positive feedback
       }
     }
   }
@@ -443,11 +467,12 @@ static void tk_classifier_predict_thread (
   unsigned int thread
 ) {
   unsigned int input_chunks = tm->input_chunks;
-  tk_bits_t out;
+  unsigned int literals[BITS];
+  unsigned int votes[BITS];
   for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
     for (unsigned int s = 0; s < n; s ++) {
-      tk_tsetlin_calculate(tm, ps + s * input_chunks, true, &out, chunk, chunk);
-      long int score = tk_tsetlin_sums(tm, &out, chunk, chunk, chunk);
+      tk_bits_t out = tk_tsetlin_calculate(tm, ps + s * input_chunks, true, literals, votes, chunk);
+      long int score = tk_tsetlin_sums(tm, out, votes);
       tm_state_scores(tm, thread, chunk, s) = score;
     }
   }
@@ -461,7 +486,25 @@ static void tk_encoder_predict_thread (
   unsigned int clast,
   unsigned int thread
 ) {
-  return tk_classifier_predict_thread(tm, n, ps, cfirst, clast, thread);
+  unsigned int input_chunks = tm->input_chunks;
+  unsigned int literals[BITS];
+  unsigned int votes[BITS];
+  for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
+    for (unsigned int s = 0; s < n; s ++) {
+      tk_tsetlin_calculate(tm, ps + s * input_chunks, true, literals, votes, chunk);
+      // For encoder: store positive and negative votes separately
+      // Sum ALL clause votes, not just those with out bit set
+      long int pos_sum = 0, neg_sum = 0;
+      for (unsigned int j = 0; j < BITS; j += 2) {
+        pos_sum += (long int) votes[j];
+      }
+      for (unsigned int j = 1; j < BITS; j += 2) {
+        neg_sum += (long int) votes[j];
+      }
+      // Store the comparison result: positive for bit=1, negative for bit=0
+      tm_state_scores(tm, thread, chunk, s) = (pos_sum > neg_sum) ? 1 : -1;
+    }
+  }
 }
 
 static void tk_classifier_setup_thread (
@@ -472,31 +515,43 @@ static void tk_classifier_setup_thread (
   unsigned int clast,
   unsigned int thread
 ) {
+  // Initialize clauses with random literals included
+  // This matches typical Tsetlin machine initialization where states start at the midpoint
+  unsigned int m = tm->state_bits - 1;
+  unsigned int midpoint = (1 << (m - 1));  // Middle state value
+
   for (unsigned int clause_chunk = cfirst; clause_chunk <= clast; clause_chunk ++) {
     for (unsigned int clause_chunk_pos = 0; clause_chunk_pos < BITS; clause_chunk_pos ++) {
       unsigned int clause = clause_chunk * BITS + clause_chunk_pos;
       for (unsigned int input_chunk = 0; input_chunk < tm->input_chunks; input_chunk ++) {
-        unsigned int m = tm->state_bits - 1;
         tk_bits_t *actions = tm_state_actions(tm, clause);
         tk_bits_t *counts = tm_state_counts(tm, clause, input_chunk);
-        actions[input_chunk] = ZERO_MASK;
-        for (unsigned int b = 0; b < m; b ++)
-          counts[b] = ALL_MASK;
+
+        // Initialize each bit randomly around the midpoint
+        tk_bits_t random_actions = 0;
+        for (unsigned int bit = 0; bit < BITS; bit++) {
+          // 50% chance to include each literal initially
+          if (fast_chance(0.5)) {
+            random_actions |= ((tk_bits_t)1 << bit);
+          }
+        }
+
+        // Apply tail mask for the last chunk
+        if (input_chunk == tm->input_chunks - 1) {
+          random_actions &= tm->tail_mask;
+        }
+
+        actions[input_chunk] = random_actions;
+
+        // Initialize counts to midpoint (representing neutral state)
+        for (unsigned int b = 0; b < m; b++) {
+          if (b < (m - 1) && (midpoint & (1 << b))) {
+            counts[b] = ALL_MASK;  // Set bit if it's part of midpoint value
+          } else {
+            counts[b] = ZERO_MASK;
+          }
+        }
       }
-    }
-  }
-  unsigned int clause_chunks = tm->clause_chunks;
-  unsigned int input_chunks = tm->input_chunks;
-  for (unsigned int s = 0; s < n; s ++) {
-    tk_bits_t *input = ps + s * input_chunks;
-    tk_bits_t out;
-    for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
-      tk_tsetlin_calculate(tm, input, false, &out, chunk, chunk);
-      unsigned int class = chunk / clause_chunks;
-      atomic_long *class_sump = tm_state_sum(tm, class, s);
-      long int sum = tk_tsetlin_sums(tm, &out, chunk, chunk, chunk);
-      atomic_fetch_add(class_sump, sum);
-      tm_state_old_sum(tm, thread, chunk, s) = sum;
     }
   }
 }
@@ -512,34 +567,6 @@ static void tk_encoder_setup_thread (
   tk_classifier_setup_thread(tm, n, ps, cfirst, clast, thread);
 }
 
-static void tk_classifier_prime_thread (
-  tk_tsetlin_t *tm,
-  unsigned int n,
-  unsigned int cfirst,
-  unsigned int clast,
-  unsigned int thread
-) {
-  tk_tsetlin_thread_t *data = (tk_tsetlin_thread_t *) tm->pool->threads[thread].data;
-  unsigned int clause_chunks = tm->clause_chunks;
-  memset(data->sums_local, 0, tm->classes * n * sizeof(long int));
-  for (unsigned int s = 0; s < n; s ++) {
-    for (unsigned int class = cfirst / clause_chunks; class <= clast / clause_chunks; class ++) {
-      atomic_long *class_sump = tm_state_sum(tm, class, s);
-      tm_state_sum_local(tm, thread, class, s) = atomic_load(class_sump);
-    }
-  }
-}
-
-static void tk_encoder_prime_thread (
-  tk_tsetlin_t *tm,
-  unsigned int n,
-  unsigned int cfirst,
-  unsigned int clast,
-  unsigned int thread
-) {
-  tk_classifier_prime_thread(tm, n, cfirst, clast, thread);
-}
-
 static void tk_classifier_train_thread (
   tk_tsetlin_t *tm,
   unsigned int n,
@@ -550,23 +577,19 @@ static void tk_classifier_train_thread (
   unsigned int thread
 ) {
   tk_tsetlin_init_shuffle(tm_state_shuffle(tm, thread), n);
-
   unsigned int clause_chunks = tm->clause_chunks;
   unsigned int input_chunks = tm->input_chunks;
   unsigned int *shuffle = tm_state_shuffle(tm, thread);
-  tk_bits_t out;
-
+  unsigned int literals[BITS];
+  unsigned int votes[BITS];
   for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
-
-    // TODO: vectorized pre-calculation of class?
     unsigned int class = chunk / clause_chunks;
-
     for (unsigned int i = 0; i < n; i ++) {
       unsigned int s = shuffle[i];
       tk_bits_t *input = ps + s * input_chunks;
-      tk_tsetlin_calculate(tm, input, false, &out, chunk, chunk);
+      tk_bits_t out = tk_tsetlin_calculate(tm, input, false, literals, votes, chunk);
       unsigned int target_class = ss[s];
-      tm_update(tm, input, out, s, target_class, 1, class, chunk, thread);
+      tm_update(tm, input, out, literals, votes, s, target_class, 1, class, chunk, thread);
     }
   }
 }
@@ -581,25 +604,22 @@ static void tk_encoder_train_thread (
   unsigned int thread
 ) {
   tk_tsetlin_init_shuffle(tm_state_shuffle(tm, thread), n);
-
   unsigned int class_chunks = tm->class_chunks;
   unsigned int clause_chunks = tm->clause_chunks;
   unsigned int input_chunks = tm->input_chunks;
   unsigned int *shuffle = tm_state_shuffle(tm, thread);
-  tk_bits_t out;
-
+  unsigned int literals[BITS];
+  unsigned int votes[BITS];
   for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
-
     unsigned int class = chunk / clause_chunks;
     unsigned int enc_chunk = BITS_BYTE(class);
     unsigned int enc_bit = BITS_BIT(class);
-
     for (unsigned int i = 0; i < n; i ++) {
       unsigned int s = shuffle[i];
       tk_bits_t *input = ps + s * input_chunks;
-      tk_tsetlin_calculate(tm, input, false, &out, chunk, chunk);
+      tk_bits_t out = tk_tsetlin_calculate(tm, input, false, literals, votes, chunk);
       bool target = (ls[s * class_chunks + enc_chunk] & ((tk_bits_t) 1 << enc_bit)) > 0;
-      tm_update(tm, input, out, s, class, target, class, chunk, thread);
+      tm_update(tm, input, out, literals, votes, s, class, target, class, chunk, thread);
     }
   }
 }
@@ -613,22 +633,25 @@ static void tk_encoder_predict_reduce_thread (
   unsigned int clause_chunks = tm->clause_chunks;
   unsigned int classes = tm->classes;
   unsigned int class_chunks = tm->class_chunks;
-  long int sums[classes];
+  long int votes[classes];
   for (unsigned int s = sfirst; s <= slast; s ++) {
     for (unsigned int i = 0; i < classes; i ++)
-      sums[i] = 0;
+      votes[i] = 0;
     for (unsigned int t = 0; t < tm->pool->n_threads; t ++) {
       tk_tsetlin_thread_t *data = (tk_tsetlin_thread_t *) tm->pool->threads[t].data;
       for (unsigned int chunk = data->cfirst; chunk <= data->clast; chunk ++) {
         unsigned int class = chunk / clause_chunks;
-        sums[class] += tm_state_scores(tm, t, chunk, s);
+        // For encoder: scores are now 1 (pos > neg) or -1 (neg >= pos)
+        // Accumulate these binary decisions
+        votes[class] += tm_state_scores(tm, t, chunk, s);
       }
     }
     tk_bits_t *e = encodings + s * class_chunks;
     for (unsigned int class = 0; class < tm->classes; class ++) {
       unsigned int chunk = BITS_BYTE(class);
       unsigned int pos = BITS_BIT(class);
-      if (sums[class] > 0)
+      // If accumulated votes > 0, more chunks voted for 1 than 0
+      if (votes[class] > 0)
         e[chunk] |= ((tk_bits_t)1 << pos);
       else
         e[chunk] &= ~((tk_bits_t)1 << pos);
@@ -649,14 +672,6 @@ static void tk_tsetlin_worker (void *dp, int sig)
         data->tm,
         data->train.n,
         data->train.ps,
-        data->cfirst,
-        data->clast,
-        data->index);
-      break;
-    case TM_CLASSIFIER_PRIME:
-      tk_classifier_prime_thread(
-        data->tm,
-        data->train.n,
         data->cfirst,
         data->clast,
         data->index);
@@ -691,14 +706,6 @@ static void tk_tsetlin_worker (void *dp, int sig)
         data->tm,
         data->train.n,
         data->train.ps,
-        data->cfirst,
-        data->clast,
-        data->index);
-      break;
-    case TM_ENCODER_PRIME:
-      tk_encoder_prime_thread(
-        data->tm,
-        data->train.n,
         data->cfirst,
         data->clast,
         data->index);
@@ -740,9 +747,10 @@ static inline void tk_tsetlin_init_classifier (
   unsigned int classes,
   unsigned int features,
   unsigned int clauses,
+  unsigned int clause_tolerance,
+  unsigned int clause_maximum,
   unsigned int state_bits,
-  double thresholdf,
-  bool boost_true_positive,
+  double targetf,
   double negative,
   double specificity,
   unsigned int n_threads
@@ -751,18 +759,24 @@ static inline void tk_tsetlin_init_classifier (
     tk_lua_verror(L, 3, "create classifier", "classes", "must be greater than 1");
   if (!clauses)
     tk_lua_verror(L, 3, "create classifier", "clauses", "must be greater than 0");
+  if (!clause_tolerance)
+    tk_lua_verror(L, 3, "create classifier", "clause_tolerance", "must be greater than 0");
+  if (!clause_maximum)
+    tk_lua_verror(L, 3, "create classifier", "clause_maximum", "must be greater than 0");
   if (state_bits < 2)
     tk_lua_verror(L, 3, "create classifier", "bits", "must be greater than 1");
-  if (thresholdf <= 0)
-    tk_lua_verror(L, 3, "create classifier", "target", "must be greater than 0");
-  tm->negative = negative; // Note: unused in encoder
+  tm->negative = negative < 0 ? 1.0 / (double) classes : negative; // Note: unused in encoder
   tm->classes = classes;
   tm->class_chunks = BITS_BYTES(tm->classes);
   tm->clauses = BITS_BYTES(clauses) * BITS;
-  tm->threshold = ceil(thresholdf >= 1 ? thresholdf : fmaxf(1.0, (double) clauses * thresholdf));
+  tm->clause_tolerance = clause_tolerance;
+  tm->clause_maximum = clause_maximum;
+  tm->target =
+    targetf < 0
+      ? sqrt((double) tm->clauses / 2.0) * (double) clause_tolerance
+      : ceil(targetf >= 1 ? targetf : fmaxf(1.0, (double) tm->clauses * targetf));
   tm->features = features;
   tm->state_bits = state_bits;
-  tm->boost_true_positive = boost_true_positive;
   tm->input_bits = 2 * tm->features;
   uint64_t tail_bits = tm->input_bits & (BITS - 1);
   tm->tail_mask = tail_bits ? (tk_bits_t)((1u << tail_bits) - 1) : (tk_bits_t) ~0;
@@ -786,16 +800,18 @@ static inline int tk_tsetlin_init_encoder (
   unsigned int encoding_bits,
   unsigned int features,
   unsigned int clauses,
+  unsigned int clause_tolerance,
+  unsigned int clause_maximum,
   unsigned int state_bits,
-  double thresholdf,
-  bool boost_true_positive,
+  double targetf,
   double negative,
   double specificity,
   unsigned int n_threads
 ) {
-  tk_tsetlin_init_classifier(L, tm,
-      encoding_bits, features, clauses, state_bits, thresholdf,
-      boost_true_positive, negative, specificity, n_threads);
+  tk_tsetlin_init_classifier(
+    L, tm, encoding_bits, features, clauses, clause_tolerance, clause_maximum,
+    state_bits, targetf, negative, specificity,
+    n_threads);
   return 0;
 }
 
@@ -808,10 +824,11 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
       tk_lua_fcheckunsigned(L, 2, "create classifier", "classes"),
       tk_lua_fcheckunsigned(L, 2, "create classifier", "features"),
       tk_lua_fcheckunsigned(L, 2, "create classifier", "clauses"),
+      tk_lua_fcheckunsigned(L, 2, "create classifier", "clause_tolerance"),
+      tk_lua_fcheckunsigned(L, 2, "create classifier", "clause_maximum"),
       tk_lua_foptunsigned(L, 2, "create classifier", "state", 8),
-      tk_lua_fcheckposdouble(L, 2, "create classifier", "target"),
-      tk_lua_foptboolean(L, 2, "create classifier", "boost", true),
-      tk_lua_fcheckposdouble(L, 2, "create classifier", "negative"),
+      tk_lua_foptposdouble(L, 2, "create classifier", "target", -1.0),
+      tk_lua_foptposdouble(L, 2, "create classifier", "negative", -1.0),
       tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity"),
       tk_threads_getn(L, 2, "create classifier", "threads"));
 
@@ -827,10 +844,11 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
       tk_lua_fcheckunsigned(L, 2, "create encoder", "hidden"),
       tk_lua_fcheckunsigned(L, 2, "create encoder", "visible"),
       tk_lua_fcheckunsigned(L, 2, "create encoder", "clauses"),
+      tk_lua_fcheckunsigned(L, 2, "create encoder", "clause_tolerance"),
+      tk_lua_fcheckunsigned(L, 2, "create encoder", "clause_maximum"),
       tk_lua_foptunsigned(L, 2, "create encoder", "state", 8),
-      tk_lua_fcheckposdouble(L, 2, "create encoder", "target"),
-      tk_lua_foptboolean(L, 2, "create encoder", "boost", true),
-      tk_lua_foptposdouble(L, 2, "create encoder", "negative", 1.0), // note used in encoder
+      tk_lua_foptposdouble(L, 2, "create encoder", "target", -1.0),
+      tk_lua_foptposdouble(L, 2, "create encoder", "negative", -1.0), // note used in encoder
       tk_lua_fcheckposdouble(L, 2, "create encoder", "specificity"),
       tk_threads_getn(L, 2, "create encoder", "threads"));
 
@@ -868,17 +886,10 @@ static inline void tk_tsetlin_shrink (tk_tsetlin_t *tm)
 {
   if (tm == NULL) return;
   free(tm->state); tm->state = NULL;
-  if (numa_available() == -1) {
-    free(tm->sums); tm->sums = NULL;
-  } else {
-    numa_free(tm->sums, tm->sums_len); tm->sums = NULL; tm->sums_len = 0;
-  }
   if (tm->initialized_threads)
     for (unsigned int i = 0; i < tm->pool->n_threads; i ++) {
       tk_tsetlin_thread_t *data = (tk_tsetlin_thread_t *) tm->pool->threads[i].data;
       free(data->shuffle); data->shuffle = NULL;
-      free(data->sums_old); data->sums_old = NULL;
-      free(data->sums_local); data->sums_local = NULL;
       free(data->scores); data->scores = NULL;
     }
 }
@@ -1022,19 +1033,11 @@ static inline int tk_tsetlin_train_classifier (
     data->train.ps = ps;
     data->train.ss = ss;
     data->shuffle = tk_realloc(L, data->shuffle, n * sizeof(unsigned int));
-    data->sums_old = tk_realloc(L, data->sums_old, tm->classes * tm->clause_chunks * n * sizeof(long int));
-    data->sums_local = tk_realloc(L, data->sums_local, tm->classes * n * sizeof(long int));
   }
-
-  tm->sums = tk_ensure_interleaved(L, &tm->sums_len, tm->sums, n * tm->classes * sizeof(atomic_long), false);
-  for (unsigned int c = 0; c < tm->classes; c ++)
-    for (unsigned int s = 0; s < n; s ++)
-      atomic_init(tm_state_sum(tm, c, s), 0);
 
   tk_tsetlin_setup_thread_samples(tm, n);
 
   tk_threads_signal(tm->pool, TM_CLASSIFIER_SETUP, 0);
-  tk_threads_signal(tm->pool, TM_CLASSIFIER_PRIME, 0);
 
   for (unsigned int i = 0; i < max_iter; i ++) {
 
@@ -1086,19 +1089,11 @@ static inline int tk_tsetlin_train_encoder (
     data->train.ps = ps;
     data->train.ls = ls;
     data->shuffle = tk_realloc(L, data->shuffle, n * sizeof(unsigned int));
-    data->sums_old = tk_realloc(L, data->sums_old, tm->classes * tm->clause_chunks * n * sizeof(long int));
-    data->sums_local = tk_realloc(L, data->sums_local, tm->classes * n * sizeof(long int));
   }
-
-  tm->sums = tk_ensure_interleaved(L, &tm->sums_len, tm->sums, n * tm->classes * sizeof(atomic_long), false);
-  for (unsigned int c = 0; c < tm->classes; c ++)
-    for (unsigned int s = 0; s < n; s ++)
-      atomic_init(tm_state_sum(tm, c, s), 0);
 
   tk_tsetlin_setup_thread_samples(tm, n);
 
   tk_threads_signal(tm->pool, TM_ENCODER_SETUP, 0);
-  tk_threads_signal(tm->pool, TM_ENCODER_PRIME, 0);
 
   for (unsigned int i = 0; i < max_iter; i ++) {
 
@@ -1162,9 +1157,10 @@ static inline void _tk_tsetlin_persist_classifier (lua_State *L, tk_tsetlin_t *t
   tk_lua_fwrite(L, &tm->classes, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->features, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->clauses, sizeof(unsigned int), 1, fh);
-  tk_lua_fwrite(L, &tm->threshold, sizeof(unsigned int), 1, fh);
+  tk_lua_fwrite(L, &tm->clause_tolerance, sizeof(unsigned int), 1, fh);
+  tk_lua_fwrite(L, &tm->clause_maximum, sizeof(unsigned int), 1, fh);
+  tk_lua_fwrite(L, &tm->target, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->state_bits, sizeof(unsigned int), 1, fh);
-  tk_lua_fwrite(L, &tm->boost_true_positive, sizeof(bool), 1, fh);
   tk_lua_fwrite(L, &tm->input_bits, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->input_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->clause_chunks, sizeof(unsigned int), 1, fh);
@@ -1216,9 +1212,10 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, 
   tm->class_chunks = BITS_BYTES(tm->classes);
   tk_lua_fread(L, &tm->features, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->clauses, sizeof(unsigned int), 1, fh);
-  tk_lua_fread(L, &tm->threshold, sizeof(unsigned int), 1, fh);
+  tk_lua_fread(L, &tm->clause_tolerance, sizeof(unsigned int), 1, fh);
+  tk_lua_fread(L, &tm->clause_maximum, sizeof(unsigned int), 1, fh);
+  tk_lua_fread(L, &tm->target, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->state_bits, sizeof(unsigned int), 1, fh);
-  tk_lua_fread(L, &tm->boost_true_positive, sizeof(bool), 1, fh);
   tk_lua_fread(L, &tm->input_bits, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->input_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->clause_chunks, sizeof(unsigned int), 1, fh);

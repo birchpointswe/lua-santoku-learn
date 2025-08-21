@@ -105,7 +105,7 @@ M.optimize = function (args, typ)
   local metric_fn = err.assert(args.search_metric, "search_metric required")
   local each_cb = args.each
 
-  local param_names = { "clauses", "target", "specificity" }
+  local param_names = { "clauses", "clause_tolerance", "clause_maximum", "target", "specificity" }
 
   local samplers = {}
   for _, pname in ipairs(param_names) do
@@ -129,6 +129,11 @@ M.optimize = function (args, typ)
         p[name] = s.sample()
       end
     end
+    -- Ensure FPTM constraint: clause_tolerance (LF) <= clause_maximum (L)
+    if p.clause_tolerance and p.clause_maximum and p.clause_tolerance > p.clause_maximum then
+      -- Swap them to maintain the constraint
+      p.clause_tolerance, p.clause_maximum = p.clause_maximum, p.clause_tolerance
+    end
     return p
   end
 
@@ -147,8 +152,10 @@ M.optimize = function (args, typ)
 
       for t = 1, trials do
         local params = sample_params()
-        local key = str.format("%d|%d|%d",
+        local key = str.format("%d|%d|%d|%d|%d",
           params.clauses,
+          params.clause_tolerance,
+          params.clause_maximum,
           num.floor(params.target * 1e6 + 0.5),
           num.floor(params.specificity * 1e6 + 0.5))
         if not seen[key] then
@@ -181,6 +188,8 @@ M.optimize = function (args, typ)
               visible = args.visible,
               hidden = args.hidden,
               clauses = params.clauses,
+              clause_tolerance = params.clause_tolerance,
+              clause_maximum = params.clause_maximum,
               target = params.target,
               specificity = params.specificity,
             })
@@ -202,6 +211,8 @@ M.optimize = function (args, typ)
               classes = args.classes,
               negative = args.negative,
               clauses = params.clauses,
+              clause_tolerance = params.clause_tolerance,
+              clause_maximum = params.clause_maximum,
               target = params.target,
               specificity = params.specificity,
             })
@@ -253,6 +264,8 @@ M.optimize = function (args, typ)
       visible = args.visible,
       hidden = args.hidden,
       clauses = best_params.clauses,
+      clause_tolerance = best_params.clause_tolerance,
+      clause_maximum = best_params.clause_maximum,
       target = best_params.target,
       specificity = best_params.specificity,
     })
@@ -280,6 +293,8 @@ M.optimize = function (args, typ)
       classes = args.classes,
       negative = args.negative,
       clauses = best_params.clauses,
+      clause_tolerance = best_params.clause_tolerance,
+      clause_maximum = best_params.clause_maximum,
       target = best_params.target,
       specificity = best_params.specificity,
     })
