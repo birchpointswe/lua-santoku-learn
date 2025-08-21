@@ -2,6 +2,7 @@ local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
 local hbi = require("santoku.tsetlin.hbi")
 local tm = require("santoku.tsetlin")
+local pvec = require("santoku.pvec")
 local ivec = require("santoku.ivec")
 local graph = require("santoku.tsetlin.graph")
 local spectral = require("santoku.tsetlin.spectral")
@@ -13,36 +14,32 @@ local test = require("santoku.test")
 local utc = require("santoku.utc")
 
 local TTR = 0.9
-local MAX = 10000
+local MAX = nil
 local MAX_CLASS = nil
 local FEATURES = 784
 local THREADS = nil
 
 local BINARIZE = "itq"
 local TCH = true
-local HIDDEN = 10
+local HIDDEN = 8
 local EPS_SPECTRAL = 1e-5
 local NORMALIZED = true
-local POS_SCALE = 1.0
-local NEG_SCALE = -0.1
-local POS_SIGMA = -1
-local NEG_SIGMA = -1
-local MST = false
-local BRIDGE = true
-local KNN_POS = 0
-local KNN_NEG = 0
-local KNN_CACHE = 0
-local CLUSTER_MIN = 0
-local CLUSTER_MAX = 4
-local POS_ANCHORS = 6
-local NEG_ANCHORS = 2
+local FLIP_AT = 1.0
+local NEG_SCALE = 0.1
+local SIGMA_K = -1
+local ANCHORS = 4
+
+local CLAUSES = { def = 8, min = 8, max = 256, log = true, int = true }
+local CLAUSE_TOLERANCE = { def = 8, min = 8, max = 64, int = true }
+local CLAUSE_MAXIMUM = { def = 8, min = 8, max = 64, int = true }
+local TARGET = { def = 4, min = 8, max = 12 }
+local SPECIFICITY = { def = 1000, min = 200, max = 2000 }
 
 local SEARCH_PATIENCE = 3
 local SEARCH_ROUNDS = 4
-local SEARCH_TRIALS = 0
-local SEARCH_ITERATIONS = 0
-local ITERATIONS = 10
-local TOP_K = 1000
+local SEARCH_TRIALS = 4
+local SEARCH_ITERATIONS = 4
+local ITERATIONS = 100
 
 test("tsetlin", function ()
 
@@ -58,31 +55,27 @@ test("tsetlin", function ()
   dataset.n_features = FEATURES
 
   print("\nSampling pairs")
-  train.pos, train.neg = ds.multiclass_pairs(train.ids, train.solutions, POS_ANCHORS, NEG_ANCHORS)
-  test.pos, test.neg = ds.multiclass_pairs(test.ids, test.solutions, POS_ANCHORS, NEG_ANCHORS)
+  train.pos, train.neg = ds.multiclass_pairs(train.ids, train.solutions, ANCHORS, ANCHORS)
+  train.seed = pvec.create()
+  train.seed:copy(train.pos)
+  train.seed:copy(train.neg)
+  test.pos, test.neg = ds.multiclass_pairs(test.ids, test.solutions, ANCHORS, ANCHORS)
   str.printf("  Positives: %d  %d\n", train.pos:size(), test.pos:size())
   str.printf("  Negatives: %d  %d\n", train.neg:size(), test.neg:size())
+  local index = ds.classes_index(train.ids, train.solutions)
 
   print("\nCreating graph")
   local stopwatch = utc.stopwatch()
   train.graph = graph.create({
-    ids = train.ids,
-    labels = train.solutions,
-    pos = train.pos,
-    neg = train.neg,
-    mst = MST,
-    bridge = BRIDGE,
-    knn_pos = KNN_POS,
-    knn_neg = KNN_NEG,
-    knn_cache = KNN_CACHE,
-    pos_scale = POS_SCALE,
+    edges = train.seed,
+    index = index,
+    flip_at = FLIP_AT,
     neg_scale = NEG_SCALE,
-    pos_sigma = POS_SIGMA,
-    neg_sigma = NEG_SIGMA,
+    sigma_k = SIGMA_K,
     threads = THREADS,
-    each = function (s, b, n, dt)
+    each = function (s, b, dt)
       local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Components: %-6d  Positives: %-6d  Negatives: %-6d\n", d, dd, dt, s, b, n) -- luacheck: ignore
+      str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Components: %-6d  Edges: %-6d\n", d, dd, dt, s, b) -- luacheck: ignore
     end
   })
   train.adj_ids,
@@ -100,6 +93,7 @@ test("tsetlin", function ()
     n_hidden = HIDDEN,
     normalized = NORMALIZED,
     eps_primme = EPS_SPECTRAL,
+    threads = THREADS,
     each = function (t, s, v, k)
       local d, dd = stopwatch()
       if t == "done" then
@@ -153,13 +147,13 @@ test("tsetlin", function ()
 
   train.codes_spectral = train.codes_spectral:raw_bitmap(train.ids_spectral:size(), HIDDEN)
 
-  print("\nCodebook stats (general)")
-  train.pos, train.neg = train.graph:pairs()
+  print("\nCodebook stats")
+  train.pos_sampled, train.neg_sampled = ds.multiclass_pairs(train.ids, train.solutions, ANCHORS, ANCHORS)
   train.entropy = eval.entropy_stats(train.codes_spectral, train.n, HIDDEN, THREADS)
   str.printi("  Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)",
     train.entropy)
-  train.auc_binary = eval.auc(train.ids_spectral, train.codes_spectral, train.pos, train.neg, HIDDEN, nil, THREADS) -- luacheck: ignore
-  train.auc_continuous = eval.auc(train.ids_spectral, train.codes_spectral_cont, train.pos, train.neg, HIDDEN, nil, THREADS) -- luacheck: ignore
+  train.auc_binary = eval.auc(train.ids_spectral, train.codes_spectral, train.pos_sampled, train.neg_sampled, HIDDEN, nil, THREADS) -- luacheck: ignore
+  train.auc_continuous = eval.auc(train.ids_spectral, train.codes_spectral_cont, train.pos_sampled, train.neg_sampled, HIDDEN, nil, THREADS) -- luacheck: ignore
   str.printi("  AUC (continuous): %.4f#(auc_continuous) | AUC (binary): %.4f#(auc_binary)", train)
 
   print("\nRetrieval stats (graph)")
@@ -169,6 +163,7 @@ test("tsetlin", function ()
     ids = train.ids_spectral,
     pos = train.pos,
     neg = train.neg,
+    threads = THREADS,
     each = function (f, p, r, m)
       local d, dd = stopwatch()
       str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d\n", -- luacheck: ignore
@@ -182,42 +177,14 @@ test("tsetlin", function ()
   train.index_codes = hbi.create({ features = HIDDEN })
   train.index_codes:add(train.codes_spectral, train.ids_spectral)
 
-  print("\nClustering (graph)\n")
-  stopwatch()
-  train.cluster_score,
-  train.cluster_ids,
-  train.cluster_assignments,
-  train.n_clusters = eval.optimize_clustering({ -- luacheck: ignore
-    index = train.index_codes,
-    pos = train.pos,
-    neg = train.neg,
-    min_margin = CLUSTER_MIN,
-    max_margin = CLUSTER_MAX,
-    each = function (f, p, r, m, c)
-      local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d | Clusters: %d\n", -- luacheck: ignore
-        d, dd, f, p, r, m, c)
-    end
-  })
-  train.cluster_score.n_clusters = train.n_clusters
-  str.printi("\n  Best | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin) | Clusters: %d#(n_clusters)", -- luacheck: ignore
-    train.cluster_score)
-
-  print("\nSelecting features")
-  local top_v = train.problems:top_chi2(train.codes_spectral, train.n, dataset.n_features, HIDDEN, TOP_K)
-
   print("\nPrepping for encoder")
-  train.problems:filter(top_v, dataset.n_features)
-  train.problems:bits_rearrange(train.ids_spectral, top_v:size())
   train.n = train.ids_spectral:size()
-  train.problems:flip_interleave(train.n, top_v:size())
-  train.problems = train.problems:raw_bitmap(train.n, top_v:size() * 2)
+  train.problems:flip_interleave(train.n, FEATURES)
+  train.problems = train.problems:raw_bitmap(train.n, FEATURES * 2)
   test.ids = ivec.create(test.n)
   test.ids:fill_indices()
-  test.problems:filter(top_v, dataset.n_features)
-  test.problems:flip_interleave(test.n, top_v:size())
-  test.problems = test.problems:raw_bitmap(test.n, top_v:size() * 2)
-  dataset.n_features = top_v:size()
+  test.problems:flip_interleave(test.n, FEATURES)
+  test.problems = test.problems:raw_bitmap(test.n, FEATURES * 2)
 
   print()
   str.printf("Input Features    %d\n", dataset.n_features * 2)
@@ -235,9 +202,11 @@ test("tsetlin", function ()
     codes = train.codes_spectral,
     samples = train.n,
 
-    clauses = { def = 1024, min = 512, max = 4096, log = true, int = true },
-    target = { def = 0.1, min = 0.05, max = 0.25 },
-    specificity = { def = 10, min = 2, max = 20 },
+    clauses = CLAUSES,
+    clause_tolerance = CLAUSE_TOLERANCE,
+    clause_maximum = CLAUSE_MAXIMUM,
+    target = TARGET,
+    specificity = SPECIFICITY,
 
     search_patience = SEARCH_PATIENCE,
     search_rounds = SEARCH_ROUNDS,
@@ -254,12 +223,12 @@ test("tsetlin", function ()
     each = function (t, is_final, train_accuracy, params, epoch, round, trial)
       local d, dd = stopwatch()
       if is_final then
-        str.printf("  Time %3.2f %3.2f  Finalizing  C=%d T=%.2f S=%.2f  Epoch  %d\n",
-          d, dd, params.clauses, params.target, params.specificity, epoch)
+        str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%.2f S=%.2f  Epoch  %d\n",
+          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, epoch)
         print()
       else
-        str.printf("  Time %3.2f %3.2f  Exploring  C=%d T=%.2f S=%.2f  R=%d T=%d  Epoch  %d\n",
-          d, dd, params.clauses, params.target, params.specificity, round, trial, epoch)
+        str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%.2f S=%.2f  R=%d T=%d  Epoch  %d\n",
+          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, round, trial, epoch)
         print()
       end
       train.accuracy_predicted = train_accuracy
