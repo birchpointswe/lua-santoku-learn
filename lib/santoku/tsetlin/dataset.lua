@@ -139,15 +139,11 @@ M.read_binary_mnist = function (fp, n_features, max, class_max)
   local problems = ivec.create()
   local solutions = ivec.create()
   local n = 0
-
   for l in fs.lines(fp) do
     if max and n >= max then
       break
     end
-
     local start = problems:size()
-
-    -- Split line into tokens more efficiently
     local tokens = {}
     local token_count = 0
     for token in str.gmatch(l, "%S+") do
@@ -157,17 +153,14 @@ M.read_binary_mnist = function (fp, n_features, max, class_max)
         break
       end
     end
-
-    if token_count <= n_features then
-      -- malformed row: no label; skip silently
+    if token_count <= n_features then -- luacheck: ignore
+      -- skip
     else
       local cls = tokens[n_features + 1]
       class_cnt[cls] = (class_cnt[cls] or 0) + 1
 
       if not (class_max and class_cnt[cls] > class_max) then
         offsets:push(start)
-
-        -- Build features directly in problems vector
         for feature = 1, n_features do
           if tokens[feature] == "1" then
             problems:push(feature - 1)
@@ -175,13 +168,11 @@ M.read_binary_mnist = function (fp, n_features, max, class_max)
             err.error("unexpected string", tokens[feature])
           end
         end
-
         solutions:push(tonumber(cls))
         n = n + 1
       end
     end
   end
-
   return {
     offsets = offsets,
     problems = problems,
@@ -199,8 +190,6 @@ local function _split_binary_mnist (dataset, s, e)
     local pss = dataset.offsets:get(i - 1)
     local pse = i == dataset.n and dataset.problems:size() or dataset.offsets:get(i)
     local offset = (i - s) * dataset.n_features
-    
-    -- Copy features and adjust indices in one pass
     for j = pss, pse - 1 do
       ps:push(dataset.problems:get(j) + offset)
     end
@@ -236,25 +225,20 @@ local function canonicalize (a, b)
 end
 
 M.random_pairs = function (ids, edges_per_node)
-  edges_per_node = edges_per_node or 3  -- Default to 3 random edges per node
+  edges_per_node = edges_per_node or 3
   local edges = pvec.create()
   local n = ids:size()
-  -- Early return for small graphs
   if n <= 1 then
     return edges
   end
-  -- Each node gets edges_per_node random connections
   for i = 0, n - 1 do
     local id1 = ids:get(i)
     for _ = 1, edges_per_node do
-      -- Pick a random target
-      local idx2 = num.random(n) - 1  -- num.random returns 1-based
-      -- Avoid self-loops
+      local idx2 = num.random(n) - 1
       if idx2 == i then
         idx2 = (idx2 + 1) % n
       end
       local id2 = ids:get(idx2)
-      -- Add edge (undirected, so just one direction)
       if id1 < id2 then
         edges:push(id1, id2)
       else
@@ -287,7 +271,6 @@ M.anchor_pairs = function (ids, n_anchors)
   return edges
 end
 
--- Convert list of ids/classes into an index where "features" are class labels
 M.classes_index = function (ids, classes)
   local fids = ivec.create(classes:size())
   local nfid = 0
@@ -325,14 +308,14 @@ M.multiclass_pairs = function (ids, labels, n_anchors_pos, n_anchors_neg, index,
     local id = ids:get(i)
     if y ~= -1 then
       local prev = label_of_id[id]
-      if prev == nil then -- first time we see this id
+      if prev == nil then
         label_of_id[id] = y
         if not class_to_ids[y] then
           class_to_ids[y] = ivec.create()
           classes:push(y)
         end
         class_to_ids[y]:push(id)
-      elseif prev ~= y then -- conflicting label
+      elseif prev ~= y then
         err.abort(("id %d has labels %d and %d"):format(id, prev, y))
       end
     end

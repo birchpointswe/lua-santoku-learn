@@ -14,7 +14,7 @@ local CLASSES = 10
 local CLAUSES = 8
 local CLAUSE_TOLERANCE = 8
 local CLAUSE_MAXIMUM = 8
-local SPECIFICITY = 100
+local SPECIFICITY = 1000
 local NEGATIVE = nil
 local TARGET = 4
 
