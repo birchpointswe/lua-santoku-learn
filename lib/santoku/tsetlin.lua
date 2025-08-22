@@ -60,7 +60,7 @@ local function build_sampler (spec, global_dev)
       span = math.log(maxv) - math.log(minv)
       base_center = math.log(def)
     else
-      span = math.max(def - minv, maxv - def)
+      span = maxv - minv
       base_center = def
     end
     local jitter = (spec.dev or global_dev or 1.0) * span
@@ -192,6 +192,7 @@ M.optimize = function (args, typ)
               clause_maximum = params.clause_maximum,
               target = params.target,
               specificity = params.specificity,
+              threads = args.threads,
             })
 
             encoder.train({
@@ -215,6 +216,7 @@ M.optimize = function (args, typ)
               clause_maximum = params.clause_maximum,
               target = params.target,
               specificity = params.specificity,
+              threads = args.threads,
             })
 
             classifier.train({
@@ -268,6 +270,7 @@ M.optimize = function (args, typ)
       clause_maximum = best_params.clause_maximum,
       target = best_params.target,
       specificity = best_params.specificity,
+      threads = args.threads,
     })
 
     encoder.train({
@@ -297,6 +300,7 @@ M.optimize = function (args, typ)
       clause_maximum = best_params.clause_maximum,
       target = best_params.target,
       specificity = best_params.specificity,
+      threads = args.threads,
     })
 
     classifier.train({

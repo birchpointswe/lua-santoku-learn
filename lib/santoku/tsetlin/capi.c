@@ -52,42 +52,31 @@ typedef struct tk_tsetlin_s tk_tsetlin_t;
 typedef struct tk_tsetlin_thread_s tk_tsetlin_thread_t;
 
 typedef struct tk_tsetlin_thread_s {
-
   tk_tsetlin_t *tm;
-
   uint64_t sfirst;
   uint64_t slast;
-
   uint64_t cfirst;
   uint64_t clast;
-
   unsigned int index;
-
   struct {
     unsigned int n;
     tk_bits_t *ps;
     tk_bits_t *ls;
     unsigned int *ss;
   } train;
-
   struct {
     unsigned int n;
     tk_bits_t *ps;
   } predict;
-
-  unsigned int *shuffle; // samples
-  long int *scores; // classes x samples
-
+  unsigned int *shuffle;
+  long int *scores;
 } tk_tsetlin_thread_t;
 
 typedef struct tk_tsetlin_s {
-
   tk_tsetlin_type_t type;
   bool has_state;
-
   bool trained;
   bool destroyed;
-
   unsigned int classes;
   unsigned int features;
   unsigned int clauses;
@@ -102,21 +91,16 @@ typedef struct tk_tsetlin_s {
   unsigned int state_chunks;
   unsigned int action_chunks;
   tk_bits_t tail_mask;
-  tk_bits_t *state; // class clause bit chunk
-  tk_bits_t *actions; // class clause chunk
-
+  tk_bits_t *state;
+  tk_bits_t *actions;
   double negative;
   double specificity;
-
   size_t results_len;
   unsigned int *results;
-
   size_t encodings_len;
   tk_bits_t *encodings;
-
   tk_threadpool_t *pool;
   bool initialized_threads;
-
 } tk_tsetlin_t;
 
 #define tm_state_shuffle(tm, thread) \
@@ -192,7 +176,6 @@ static inline void tm_dec (
 static inline tk_bits_t tk_tsetlin_calculate (
   tk_tsetlin_t *tm,
   tk_bits_t *input,
-  bool predict,
   unsigned int *literalsp,
   unsigned int *votesp,
   unsigned int chunk
@@ -200,46 +183,33 @@ static inline tk_bits_t tk_tsetlin_calculate (
   tk_bits_t out = (tk_bits_t) 0;
   unsigned int input_chunks = tm->input_chunks;
   unsigned int tolerance = tm->clause_tolerance;
-
   for (unsigned int j = 0; j < BITS; j ++) {
-
-    tk_bits_t all_exclude = 0;
     unsigned int clause = chunk * BITS + j;
     tk_bits_t *actions = tm_state_actions(tm, clause);
     unsigned int failed = 0;
     unsigned int literals = 0;
-
     for (unsigned int k = 0; k < input_chunks - 1; k ++) {
       tk_bits_t inp = input[k];
       tk_bits_t act = actions[k];
       literals += popcount(act);
       failed += popcount(act & (~inp));
-      all_exclude |= act;
     }
-
     tk_bits_t last_act = actions[input_chunks - 1] & tm->tail_mask;
     literals += popcount(last_act);
     failed += popcount(last_act & (~input[input_chunks - 1]) & tm->tail_mask);
-    all_exclude |= last_act;  // Fixed: was XORing with tail_mask
-
     long int votes;
     if (literals == 0) {
-      // Empty clause matches everything - vote with tolerance (FPTM behavior)
       votes = (long int) tolerance;
     } else {
       votes = (literals < tolerance ? (long int) literals : (long int) tolerance) - (long int) failed;
       if (votes < 0)
         votes = 0;
     }
-
-
-    if (votes > 0 && !(predict && !all_exclude))
+    if (votes > 0)
       out |= ((tk_bits_t) 1 << j);
-
     literalsp[j] = literals;
     votesp[j] = (unsigned int) votes;
   }
-
   return out;
 }
 
@@ -249,18 +219,12 @@ static inline long int tk_tsetlin_sums (
   unsigned int *votes
 ) {
   long int sum = 0;
-  // Positive clauses (even bits: 0, 2, 4, 6...) - use POS_MASK pattern
-  for (unsigned int j = 0; j < BITS; j += 2) {
-    if (out & ((tk_bits_t) 1 << j)) {
+  for (unsigned int j = 0; j < BITS; j += 2)
+    if (out & ((tk_bits_t) 1 << j))
       sum += (long int) votes[j];
-    }
-  }
-  // Negative clauses (odd bits: 1, 3, 5, 7...) - use NEG_MASK pattern
-  for (unsigned int j = 1; j < BITS; j += 2) {
-    if (out & ((tk_bits_t) 1 << j)) {
+  for (unsigned int j = 1; j < BITS; j += 2)
+    if (out & ((tk_bits_t) 1 << j))
       sum -= (long int) votes[j];
-    }
-  }
   return sum;
 }
 
@@ -278,24 +242,19 @@ static inline void apply_feedback (
   unsigned int max_literals = tm->clause_maximum;
   unsigned int input_chunks = tm->input_chunks;
   double specificity = tm->specificity;
-
   bool output = votes[clause_idx] > 0;
-
   if (positive_feedback) {
-    // Feedback 1: Positive feedback (Julia lines 252-291)
+    // Positive feedback
     if (output) {
-      // Type Ia: Clause voted - deterministic increment/decrement with size constraint
-      if (literals[clause_idx] < max_literals) {
+      // Type Ia: clause voted
+      if (literals[clause_idx] < max_literals)
         for (unsigned int k = 0; k < input_chunks; k ++)
           tm_inc(tm, chunk * BITS + clause_idx, k, input[k]);
-      }
-      // Type Ib: Deterministic negative feedback
+      // Type Ib: deterministic negative feedback
       for (unsigned int k = 0; k < input_chunks; k ++)
         tm_dec(tm, chunk * BITS + clause_idx, k, ~input[k]);
     } else {
-      // Clause didn't vote - random penalty (Julia lines 277-286)
-      // Match Julia's calculation: tm.s = round(Int, length(first(X)) / tm.S)
-      // where X is booleanized input (2 * features)
+      // Clause didn't vote: random penalty
       unsigned int s = (2 * features) / specificity;
       for (unsigned int r = 0; r < s; r ++) {
         unsigned int random_chunk = fast_rand() % input_chunks;
@@ -305,15 +264,11 @@ static inline void apply_feedback (
       }
     }
   } else {
-    // Feedback 2: Negative feedback (Julia lines 292-308)
-    if (output) {
-      // Type II feedback: Include false input literals
-      // Match Julia: increment ALL false literals (remove action mask)
-      for (unsigned int k = 0; k < input_chunks; k ++) {
+    // Negative feedback
+    if (output)
+      // Type II feedback: include false input literals
+      for (unsigned int k = 0; k < input_chunks; k ++)
         tm_inc(tm, chunk * BITS + clause_idx, k, ~input[k]);
-      }
-    }
-    // No action when clause doesn't vote in negative feedback
   }
 }
 
@@ -323,61 +278,94 @@ static inline void tm_update (
   tk_bits_t out,
   unsigned int *literals,
   unsigned int *votes,
-  unsigned int s,
-  unsigned int target_class,
+  unsigned int sample, // sample number
+
+  // the class of this sample (e.g. the MNIST digit number or class id in
+  // classifier mode, or the index of the bit we're looking at in encoder mode)
+  unsigned int sample_class,
+
+  // the correct vote for this class (in classifier mode, this is always 1
+  // because we want to vote 1 for the sample's class, however in encoder mode,
+  // since the sample_class is actually the index of the bit in the sample's
+  // code we're trying to learn, this defines whether that bit is 0 or 1))
   unsigned int target_vote,
-  unsigned int class,
+
+  // the class to which this chunk is assigned (this chunk might be part of the
+  // quorum for class 3 (in classifier mode) or bit 3 (in encoder mode) (aka bit
+  // 6 in encoder mode); this is of course different than the class label for
+  // the sample.
+  unsigned int chunk_class,
+
+  // the chunk number (0 to (clauses * classes))
   unsigned int chunk,
+
   unsigned int thread
 ) {
-  double negative_sampling = tm->negative;
-  if (class != target_class && fast_chance(1 - negative_sampling))
-    return;
-  long int vote_target = (long int) tm->target;
+  // If you're not confused enough yet, some more detail:
+  //
+  // Each class has `tm->clauses` clauses, which are grouped into chunks.
+  // This routine is processing feedback for one of those chunks.
+  // In order to determine the feedback to give, we need to know what class this
+  // chunk maps to, and what the class or the bit value is for the sample we're
+  // looking at.
+  // Sample_class tells you the class of the sample (classifier mode) or the
+  // current bit position (encoder mode).
+  // Target_vote tells you what the right vote is for this class or bit
+  // position (always 1 in classifier mode, since the correct vote for the
+  // correct class is 1, but can be 0 or 1 in encoder mode depending on what the
+  // value of this bit position is.)
+  // Chunk_class tells you the class to which this chunk corresponds.
+  // When in classifier mode and chunk_class == sample_class, we're looking at a
+  // chunk that maps to the correct class so we want to encourage 1 votes.
+  // When in classifier mode and chunk_class != sample_class, we're looking at a
+  // chunk that maps to a different class than the class of the sample we're
+  // looking at, and therefore we want to encourge 0 votes.
+  // When in encoder mode, chunk_class will always equal sample class, since
+  // we're only concerned with the bit position to which this chunk corresponds,
+  // and the target_vote tells us if, for this sample, the chunk should output 0
+  // or 1.
 
-  // Calculate immediate chunk vote (matching Julia's per-TATeam approach)
+
+  // If we're looking at a chunk for a different class, we're going to encourage
+  // voting 0, but we do that gated by probability so that negatives don't
+  // overwhelm positives. Typically if we have 10 classes, we'd set the negative
+  // sampling to be 1/10th since this chunk is going to see every single sample
+  // and we assume that 9/10ths of them will be for other classes. In encoder
+  // mode, chunk_class always equals sample_class so the routine runs always.
+  double negative_sampling = tm->negative;
+  if (chunk_class != sample_class && fast_chance(1 - negative_sampling))
+    return;
+
+  long int vote_target = (long int) tm->target;
   long int chunk_vote = tk_tsetlin_sums(tm, out, votes);
   chunk_vote = (chunk_vote > vote_target) ? vote_target : chunk_vote;
   chunk_vote = (chunk_vote < -vote_target) ? -vote_target : chunk_vote;
-
-  // Calculate update probability based on immediate chunk vote (matching Julia's formula)
   double p;
-  if (class == target_class) {
-    p = (double)(vote_target - chunk_vote) / (2.0 * vote_target);
-  } else {
-    p = (double)(vote_target + chunk_vote) / (2.0 * vote_target);
-  }
 
-  // Dual positive/negative feedback structure matching Julia reference
-  // Process clause pairs: even indices = positive, odd indices = negative
+  if (chunk_class == sample_class && target_vote)
+    p = (double) (vote_target - chunk_vote) / (2.0 * vote_target);
+  else
+    p = (double) (vote_target + chunk_vote) / (2.0 * vote_target);
+
   for (unsigned int j = 0; j < BITS; j += 2) {
-    if (fast_chance(p)) {
-      unsigned int pos_clause = j;     // Even index = positive clause
-      unsigned int neg_clause = j + 1; // Odd index = negative clause
-
-      // Ensure we don't exceed BITS boundary
-      if (neg_clause >= BITS)
-        break;
-
-      if (class == target_class) {
-        // For encoder: feedback depends on target bit value
-        // For classifier: target_vote is always 1
-
-
-        if (target_vote) {
-          // Target is 1: positive clauses get Type I, negative get Type II
-          apply_feedback(tm, pos_clause, chunk, input, literals, votes, true, thread); // Type I feedback
-          apply_feedback(tm, neg_clause, chunk, input, literals, votes, false, thread); // Type II feedback
-        } else {
-          // Target is 0: negative clauses get Type I, positive get Type II (Julia binary approach)
-          apply_feedback(tm, neg_clause, chunk, input, literals, votes, true, thread); // Type I feedback
-          apply_feedback(tm, pos_clause, chunk, input, literals, votes, false, thread); // Type II feedback
-        }
-      } else {
-        // Non-target class: swapped feedback
-        apply_feedback(tm, pos_clause, chunk, input, literals, votes, false, thread); // Negative feedback
-        apply_feedback(tm, neg_clause, chunk, input, literals, votes, true, thread); // Positive feedback
-      }
+    unsigned int pos_clause = j;
+    unsigned int neg_clause = j + 1;
+    if (neg_clause >= BITS)
+      break;
+    if (chunk_class == sample_class && target_vote) {
+      // Strengthen positive clauses
+      if (fast_chance(p))
+        apply_feedback(tm, pos_clause, chunk, input, literals, votes, true, thread);
+      // Weaken negative clauses
+      if (fast_chance(p))
+        apply_feedback(tm, neg_clause, chunk, input, literals, votes, false, thread);
+    } else { // expected vote is 0
+      // Strengthen negative clauses
+      if (fast_chance(p))
+        apply_feedback(tm, neg_clause, chunk, input, literals, votes, true, thread);
+      // Weaken positive clauses
+      if (fast_chance(p))
+        apply_feedback(tm, pos_clause, chunk, input, literals, votes, false, thread);
     }
   }
 }
@@ -471,7 +459,8 @@ static void tk_classifier_predict_thread (
   unsigned int votes[BITS];
   for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
     for (unsigned int s = 0; s < n; s ++) {
-      tk_bits_t out = tk_tsetlin_calculate(tm, ps + s * input_chunks, true, literals, votes, chunk);
+      tk_bits_t *input = ps + s * input_chunks;
+      tk_bits_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
       long int score = tk_tsetlin_sums(tm, out, votes);
       tm_state_scores(tm, thread, chunk, s) = score;
     }
@@ -486,25 +475,7 @@ static void tk_encoder_predict_thread (
   unsigned int clast,
   unsigned int thread
 ) {
-  unsigned int input_chunks = tm->input_chunks;
-  unsigned int literals[BITS];
-  unsigned int votes[BITS];
-  for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
-    for (unsigned int s = 0; s < n; s ++) {
-      tk_tsetlin_calculate(tm, ps + s * input_chunks, true, literals, votes, chunk);
-      // For encoder: store positive and negative votes separately
-      // Sum ALL clause votes, not just those with out bit set
-      long int pos_sum = 0, neg_sum = 0;
-      for (unsigned int j = 0; j < BITS; j += 2) {
-        pos_sum += (long int) votes[j];
-      }
-      for (unsigned int j = 1; j < BITS; j += 2) {
-        neg_sum += (long int) votes[j];
-      }
-      // Store the comparison result: positive for bit=1, negative for bit=0
-      tm_state_scores(tm, thread, chunk, s) = (pos_sum > neg_sum) ? 1 : -1;
-    }
-  }
+  return tk_classifier_predict_thread(tm, n, ps, cfirst, clast, thread);
 }
 
 static void tk_classifier_setup_thread (
@@ -515,41 +486,21 @@ static void tk_classifier_setup_thread (
   unsigned int clast,
   unsigned int thread
 ) {
-  // Initialize clauses with random literals included
-  // This matches typical Tsetlin machine initialization where states start at the midpoint
   unsigned int m = tm->state_bits - 1;
-  unsigned int midpoint = (1 << (m - 1));  // Middle state value
-
+  unsigned int include_threshold = 1 << (m - 1);
+  unsigned int initial_state = include_threshold - 1;
   for (unsigned int clause_chunk = cfirst; clause_chunk <= clast; clause_chunk ++) {
     for (unsigned int clause_chunk_pos = 0; clause_chunk_pos < BITS; clause_chunk_pos ++) {
       unsigned int clause = clause_chunk * BITS + clause_chunk_pos;
       for (unsigned int input_chunk = 0; input_chunk < tm->input_chunks; input_chunk ++) {
         tk_bits_t *actions = tm_state_actions(tm, clause);
         tk_bits_t *counts = tm_state_counts(tm, clause, input_chunk);
-
-        // Initialize each bit randomly around the midpoint
-        tk_bits_t random_actions = 0;
-        for (unsigned int bit = 0; bit < BITS; bit++) {
-          // 50% chance to include each literal initially
-          if (fast_chance(0.5)) {
-            random_actions |= ((tk_bits_t)1 << bit);
-          }
-        }
-
-        // Apply tail mask for the last chunk
-        if (input_chunk == tm->input_chunks - 1) {
-          random_actions &= tm->tail_mask;
-        }
-
-        actions[input_chunk] = random_actions;
-
-        // Initialize counts to midpoint (representing neutral state)
-        for (unsigned int b = 0; b < m; b++) {
-          if (b < (m - 1) && (midpoint & (1 << b))) {
-            counts[b] = ALL_MASK;  // Set bit if it's part of midpoint value
-          } else {
+        actions[input_chunk] = 0;
+        for (unsigned int b = 0; b < m; b ++) {
+          if (initial_state & (1 << b))
+            counts[b] = ALL_MASK;
+          else
             counts[b] = ZERO_MASK;
-          }
         }
       }
     }
@@ -583,13 +534,13 @@ static void tk_classifier_train_thread (
   unsigned int literals[BITS];
   unsigned int votes[BITS];
   for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
-    unsigned int class = chunk / clause_chunks;
+    unsigned int chunk_class = chunk / clause_chunks;
     for (unsigned int i = 0; i < n; i ++) {
-      unsigned int s = shuffle[i];
-      tk_bits_t *input = ps + s * input_chunks;
-      tk_bits_t out = tk_tsetlin_calculate(tm, input, false, literals, votes, chunk);
-      unsigned int target_class = ss[s];
-      tm_update(tm, input, out, literals, votes, s, target_class, 1, class, chunk, thread);
+      unsigned int sample = shuffle[i];
+      tk_bits_t *input = ps + sample * input_chunks;
+      tk_bits_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
+      unsigned int sample_class = ss[sample];
+      tm_update(tm, input, out, literals, votes, sample, sample_class, 1, chunk_class, chunk, thread);
     }
   }
 }
@@ -611,15 +562,15 @@ static void tk_encoder_train_thread (
   unsigned int literals[BITS];
   unsigned int votes[BITS];
   for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
-    unsigned int class = chunk / clause_chunks;
-    unsigned int enc_chunk = BITS_BYTE(class);
-    unsigned int enc_bit = BITS_BIT(class);
+    unsigned int chunk_class = chunk / clause_chunks;
+    unsigned int enc_chunk = BITS_BYTE(chunk_class);
+    unsigned int enc_bit = BITS_BIT(chunk_class);
     for (unsigned int i = 0; i < n; i ++) {
-      unsigned int s = shuffle[i];
-      tk_bits_t *input = ps + s * input_chunks;
-      tk_bits_t out = tk_tsetlin_calculate(tm, input, false, literals, votes, chunk);
-      bool target = (ls[s * class_chunks + enc_chunk] & ((tk_bits_t) 1 << enc_bit)) > 0;
-      tm_update(tm, input, out, literals, votes, s, class, target, class, chunk, thread);
+      unsigned int sample = shuffle[i];
+      tk_bits_t *input = ps + sample * input_chunks;
+      tk_bits_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
+      bool target_vote = (ls[sample * class_chunks + enc_chunk] & ((tk_bits_t) 1 << enc_bit)) > 0;
+      tm_update(tm, input, out, literals, votes, sample, chunk_class, target_vote, chunk_class, chunk, thread);
     }
   }
 }
@@ -641,8 +592,6 @@ static void tk_encoder_predict_reduce_thread (
       tk_tsetlin_thread_t *data = (tk_tsetlin_thread_t *) tm->pool->threads[t].data;
       for (unsigned int chunk = data->cfirst; chunk <= data->clast; chunk ++) {
         unsigned int class = chunk / clause_chunks;
-        // For encoder: scores are now 1 (pos > neg) or -1 (neg >= pos)
-        // Accumulate these binary decisions
         votes[class] += tm_state_scores(tm, t, chunk, s);
       }
     }
@@ -650,7 +599,6 @@ static void tk_encoder_predict_reduce_thread (
     for (unsigned int class = 0; class < tm->classes; class ++) {
       unsigned int chunk = BITS_BYTE(class);
       unsigned int pos = BITS_BIT(class);
-      // If accumulated votes > 0, more chunks voted for 1 than 0
       if (votes[class] > 0)
         e[chunk] |= ((tk_bits_t)1 << pos);
       else
@@ -819,7 +767,6 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
 {
   tk_tsetlin_t *tm = tk_tsetlin_alloc_classifier(L, true);
   lua_insert(L, 1);
-
   tk_tsetlin_init_classifier(L, tm,
       tk_lua_fcheckunsigned(L, 2, "create classifier", "classes"),
       tk_lua_fcheckunsigned(L, 2, "create classifier", "features"),
@@ -831,7 +778,6 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
       tk_lua_foptposdouble(L, 2, "create classifier", "negative", -1.0),
       tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity"),
       tk_threads_getn(L, 2, "create classifier", "threads"));
-
   lua_settop(L, 1);
 }
 
@@ -839,7 +785,6 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
 {
   tk_tsetlin_t *tm = tk_tsetlin_alloc_encoder(L, true);
   lua_insert(L, 1);
-
   tk_tsetlin_init_encoder(L, tm,
       tk_lua_fcheckunsigned(L, 2, "create encoder", "hidden"),
       tk_lua_fcheckunsigned(L, 2, "create encoder", "visible"),
@@ -848,36 +793,26 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
       tk_lua_fcheckunsigned(L, 2, "create encoder", "clause_maximum"),
       tk_lua_foptunsigned(L, 2, "create encoder", "state", 8),
       tk_lua_foptposdouble(L, 2, "create encoder", "target", -1.0),
-      tk_lua_foptposdouble(L, 2, "create encoder", "negative", -1.0), // note used in encoder
+      tk_lua_foptposdouble(L, 2, "create encoder", "negative", -1.0), // Note: unused in encoder
       tk_lua_fcheckposdouble(L, 2, "create encoder", "specificity"),
       tk_threads_getn(L, 2, "create encoder", "threads"));
-
   lua_settop(L, 1);
 }
 
-// TODO: Instead of the user passing in a string name for the type, pass in the
-// enum value (TM_CLASSIFIER, TM_ENCODER, etc.). Expose these enum values via
-// the library table.
 static inline int tk_tsetlin_create (lua_State *L)
 {
   const char *type = luaL_checkstring(L, 1);
   if (!strcmp(type, "classifier")) {
-
     lua_remove(L, 1);
     tk_tsetlin_create_classifier(L);
     return 1;
-
   } else if (!strcmp(type, "encoder")) {
-
     lua_remove(L, 1);
     tk_tsetlin_create_encoder(L);
     return 1;
-
   } else {
-
     luaL_error(L, "unexpected tsetlin machine type in create");
     return 0;
-
   }
 }
 
@@ -957,13 +892,10 @@ static inline int tk_tsetlin_predict_encoder (
   lua_State *L,
   tk_tsetlin_t *tm
 ) {
-
   lua_settop(L, 3);
   tk_bits_t *ps = (tk_bits_t *) tk_lua_checkstring(L, 2, "argument 1 is not a raw bit-matrix of samples");
   unsigned int n = tk_lua_checkunsigned(L, 3, "argument 2 is not an integer n_samples");
-
   tm->encodings = tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * tm->class_chunks * sizeof(tk_bits_t), false);
-
   for (unsigned int i = 0; i < tm->pool->n_threads; i ++) {
     tk_tsetlin_thread_t *data = (tk_tsetlin_thread_t *) tm->pool->threads[i].data;
     unsigned int chunks = tm_state_clause_chunks(tm, i);
@@ -971,12 +903,9 @@ static inline int tk_tsetlin_predict_encoder (
     data->predict.ps = ps;
     data->scores = tk_realloc(L, data->scores, chunks * n * sizeof(long int));
   }
-
   tk_tsetlin_setup_thread_samples(tm, n);
-
   tk_threads_signal(tm->pool, TM_ENCODER_PREDICT, 0);
   tk_threads_signal(tm->pool, TM_ENCODER_PREDICT_REDUCE, 0);
-
   lua_pushlstring(L, (char *) tm->encodings, n * tm->class_chunks * sizeof(tk_bits_t));
   return 1;
 }
@@ -995,23 +924,6 @@ static inline int tk_tsetlin_predict (lua_State *L)
   return 0;
 }
 
-// static inline void en_tm_populate (
-//   tk_tsetlin_t *tm,
-//   unsigned int s,
-//   tk_bits_t *encoding,
-//   unsigned int t
-// ) {
-//   unsigned int classes = tm->classes;
-//   for (unsigned int i = 0; i < classes; i ++) {
-//     unsigned int chunk = BITS_BYTE(i);
-//     unsigned int pos = BITS_BIT(i);
-//     if (tm_state_sum_local(tm, t, i, s) > 0)
-//       encoding[chunk] |= ((tk_bits_t)1 << pos);
-//     else
-//       encoding[chunk] &= ~((tk_bits_t)1 << pos);
-//   }
-// }
-
 static inline int tk_tsetlin_train_classifier (
   lua_State *L,
   tk_tsetlin_t *tm
@@ -1020,13 +932,11 @@ static inline int tk_tsetlin_train_classifier (
   tk_bits_t *ps = (tk_bits_t *) tk_lua_fcheckstring(L, 2, "train", "problems");
   unsigned int *ss = (unsigned int *) tk_lua_fcheckstring(L, 2, "train", "solutions");
   unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
-
   int i_each = -1;
   if (tk_lua_ftype(L, 2, "each") != LUA_TNIL) {
     lua_getfield(L, 2, "each");
     i_each = tk_lua_absindex(L, -1);
   }
-
   for (unsigned int i = 0; i < tm->pool->n_threads; i ++) {
     tk_tsetlin_thread_t *data = (tk_tsetlin_thread_t *) tm->pool->threads[i].data;
     data->train.n = n;
@@ -1034,15 +944,10 @@ static inline int tk_tsetlin_train_classifier (
     data->train.ss = ss;
     data->shuffle = tk_realloc(L, data->shuffle, n * sizeof(unsigned int));
   }
-
   tk_tsetlin_setup_thread_samples(tm, n);
-
   tk_threads_signal(tm->pool, TM_CLASSIFIER_SETUP, 0);
-
   for (unsigned int i = 0; i < max_iter; i ++) {
-
     tk_threads_signal(tm->pool, TM_CLASSIFIER_TRAIN, 0);
-
     if (i_each > -1) {
       lua_pushvalue(L, i_each);
       lua_pushinteger(L, i + 1);
@@ -1053,11 +958,8 @@ static inline int tk_tsetlin_train_classifier (
       }
       lua_pop(L, 1);
     }
-
   }
-
   tk_tsetlin_shrink(tm);
-
   tm->trained = true;
   return 0;
 }
@@ -1066,19 +968,16 @@ static inline int tk_tsetlin_train_encoder (
   lua_State *L,
   tk_tsetlin_t *tm
 ) {
-
   unsigned int n = tk_lua_fcheckunsigned(L, 2, "train", "samples");
   tk_bits_t *ps = (tk_bits_t *) tk_lua_fcheckustring(L, 2, "train", "sentences");
   tk_bits_t *ls = (tk_bits_t *) tk_lua_fcheckustring(L, 2, "train", "codes");
   unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
   tm->encodings = tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * tm->class_chunks * sizeof(tk_bits_t), false);
-
   int i_each = -1;
   if (tk_lua_ftype(L, 2, "each") != LUA_TNIL) {
     lua_getfield(L, 2, "each");
     i_each = tk_lua_absindex(L, -1);
   }
-
   for (unsigned int i = 0; i < tm->pool->n_threads; i ++) {
     tk_tsetlin_thread_t *data = (tk_tsetlin_thread_t *) tm->pool->threads[i].data;
     unsigned int chunks = tm_state_clause_chunks(tm, i);
@@ -1090,15 +989,10 @@ static inline int tk_tsetlin_train_encoder (
     data->train.ls = ls;
     data->shuffle = tk_realloc(L, data->shuffle, n * sizeof(unsigned int));
   }
-
   tk_tsetlin_setup_thread_samples(tm, n);
-
   tk_threads_signal(tm->pool, TM_ENCODER_SETUP, 0);
-
   for (unsigned int i = 0; i < max_iter; i ++) {
-
     tk_threads_signal(tm->pool, TM_ENCODER_TRAIN, 0);
-
     if (i_each > -1) {
       lua_pushvalue(L, i_each);
       lua_pushinteger(L, i + 1);
@@ -1109,11 +1003,8 @@ static inline int tk_tsetlin_train_encoder (
       }
       lua_pop(L, 1);
     }
-
   }
-
   tk_tsetlin_shrink(tm);
-
   tm->trained = true;
   return 0;
 }
@@ -1245,7 +1136,7 @@ static inline void tk_tsetlin_load_encoder (lua_State *L, FILE *fh, bool read_st
 }
 
 // TODO: Merge malloc/assignment logic from load_* and create_* to reduce
-// changes for coding errors
+// chances for coding errors
 static inline int tk_tsetlin_load (lua_State *L)
 {
   lua_settop(L, 3);
@@ -1292,16 +1183,13 @@ static inline int tk_tsetlin_type (lua_State *L)
 
 static luaL_Reg tk_tsetlin_fns[] =
 {
-
   { "train", tk_tsetlin_train },
   { "predict", tk_tsetlin_predict },
   { "destroy", tk_tsetlin_destroy },
   { "persist", tk_tsetlin_persist },
   { "type", tk_tsetlin_type },
-
   { "create", tk_tsetlin_create },
   { "load", tk_tsetlin_load },
-
   { NULL, NULL }
 };
 

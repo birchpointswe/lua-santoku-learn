@@ -14,18 +14,18 @@ local tokenizer = require("santoku.tsetlin.tokenizer")
 local TTR = 0.9
 local MAX = nil
 local EVALUATE_EVERY = 1
-local ITERATIONS = 100
+local ITERATIONS = 1000
 
 local CLASSES = 2
-local CLAUSES = 8
+local CLAUSES = 32
 local CLAUSE_TOLERANCE = 8
 local CLAUSE_MAXIMUM = 8
-local TARGET = 12
+local TARGET = 4
 local SPECIFICITY = 1000
-local NEGATIVE = 0.5
+local NEGATIVE = nil
 
 local TOP_ALGO = "chi2"
-local TOP_K = 1024
+local TOP_K = 8192
 
 local TOKENIZER_CONFIG = {
   max_df = 0.95,

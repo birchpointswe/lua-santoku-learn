@@ -9,18 +9,18 @@ local tm = require("santoku.tsetlin")
 local utc = require("santoku.utc")
 
 local TTR = 0.9
-local MAX = 10000
+local MAX = nil
 local EVALUATE_EVERY = 1
-local TM_ITERS = 10
-local COREX_ITERS = 10
+local TM_ITERS = 100
+local COREX_ITERS = 100
 
 local CLASSES = 10
-local CLAUSES = 1024
-local CLAUSE_TOLERANCE = 128  -- FPTM parameter LF
-local CLAUSE_MAXIMUM = 128    -- FPTM parameter L
-local TARGET = 32
-local SPECIFICITY = 10
-local NEGATIVE = 0.1
+local CLAUSES = 8
+local CLAUSE_TOLERANCE = 8
+local CLAUSE_MAXIMUM = 8
+local SPECIFICITY = 1000
+local NEGATIVE = nil
+local TARGET = 4
 
 local VISIBLE = 784
 local HIDDEN = 128
