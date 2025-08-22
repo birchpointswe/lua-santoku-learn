@@ -1,11 +1,5 @@
 # Now
 
-- Graph
-    - Use indices for everything internal (e.g. iu/iv instead of u/v)
-
-- Clustering
-    - Return n_clusters, n_core, n_border, n_noise
-
 - ann/hbi
     - Implement mutual/mutualize for ann/hbi
     - Add mutualize lua api
@@ -26,7 +20,19 @@
         - Special cvec_bitx_xxx methods
             - top_entropy, score_entropy, flip_interleave, filter, extend, ivec
 
+- Lua GC for threadpool
+- Pcalls for callbacks, or make sure everything is connected to the lua GC
+- Vectorize everything
+
 # Next
+
+- Refactor inv to use ivec similarity routines
+
+- Graph
+    - Use indices for everything internal (e.g. iu/iv instead of u/v)
+
+- Clustering
+    - Return n_clusters, n_core, n_border, n_noise
 
 - Rounding out functionality
     - Support PCA for dimensionality reduction (likely followed by ITQ)
@@ -61,9 +67,6 @@
 - Chores
     - Speed up Spectral, ITQ
 
-- Tests
-    - SNLI
-
 - TBHSS
     - Get working with new TM code
     - Explore classify
@@ -72,9 +75,6 @@
     - Index & search
     - Move hyperparameter search/exploration code into TM library
     - Restrict TBHSS code to cover cli usage, pre-processing, etc.
-
-- Tsetlin
-    - Linear SVM comparison
 
 - tk_ann_t
     - Allow user to pass dataset in, which then uses top_entropy to select bits
@@ -86,13 +86,10 @@
 
 # Later
 
-- Graph
-    - Consider moving all weighting logic into the final adjacency construction
-      process for simplicity. No need to consider weights anywhere else. What
-      about the weights we get during knn?
+- Templated Trie
 
 - Tests
-    - QQP
+    - QQP, SNLI
 
 - tk_graph_t
     - Parallelize init & seed phase (slowest phase of entire pipeline)
