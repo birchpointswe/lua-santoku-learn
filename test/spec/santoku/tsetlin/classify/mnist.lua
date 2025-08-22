@@ -10,6 +10,7 @@ local utc = require("santoku.utc")
 local TTR = 0.9
 local MAX = nil
 local ITERATIONS = 100
+local THREADS = nil
 
 local CLASSES = 10
 local NEGATIVE = 0.1
@@ -66,6 +67,7 @@ test("tsetlin", function ()
     search_trials = SEARCH_TRIALS,
     search_iterations = SEARCH_ITERATIONS,
     final_iterations = ITERATIONS,
+    threads = THREADS,
 
     search_metric = function (t)
       local predicted = t.predict(train.problems, train.n)
@@ -77,15 +79,15 @@ test("tsetlin", function ()
       local test_predicted = t.predict(test.problems, test.n)
       local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, CLASSES)
       local d, dd = stopwatch()
+      -- luacheck: push ignore
       if is_final then
-        str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%.2f S=%.2f  F1=(%.2f,%.2f)  Epoch  %d\n",
+        str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%.2f S=%.2f  F1=(%.2f,%.2f)  Epoch  %d\n\n",
           d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, train_accuracy.f1, test_accuracy.f1, epoch)
-        print()
       else
-        str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%.2f S=%.2f  R=%d T=%d  F1=(%.2f,%.2f)  Epoch  %d\n",
-          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, round, trial, train_accuracy.f1, test_accuracy.f1, epoch) -- luacheck: ignore
-        print()
+        str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%.2f S=%.2f  R=%d T=%d  F1=(%.2f,%.2f)  Epoch  %d\n\n",
+          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, round, trial, train_accuracy.f1, test_accuracy.f1, epoch)
       end
+      -- luacheck: pop
     end
 
   })

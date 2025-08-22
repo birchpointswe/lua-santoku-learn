@@ -139,15 +139,11 @@ M.read_binary_mnist = function (fp, n_features, max, class_max)
   local problems = ivec.create()
   local solutions = ivec.create()
   local n = 0
-
   for l in fs.lines(fp) do
     if max and n >= max then
       break
     end
-
     local start = problems:size()
-
-
     local tokens = {}
     local token_count = 0
     for token in str.gmatch(l, "%S+") do
@@ -157,8 +153,7 @@ M.read_binary_mnist = function (fp, n_features, max, class_max)
         break
       end
     end
-
-    if token_count <= n_features then
+    if token_count <= n_features then -- luacheck: ignore
 
     else
       local cls = tokens[n_features + 1]
@@ -166,8 +161,6 @@ M.read_binary_mnist = function (fp, n_features, max, class_max)
 
       if not (class_max and class_cnt[cls] > class_max) then
         offsets:push(start)
-
-
         for feature = 1, n_features do
           if tokens[feature] == "1" then
             problems:push(feature - 1)
@@ -175,13 +168,11 @@ M.read_binary_mnist = function (fp, n_features, max, class_max)
             err.error("unexpected string", tokens[feature])
           end
         end
-
         solutions:push(tonumber(cls))
         n = n + 1
       end
     end
   end
-
   return {
     offsets = offsets,
     problems = problems,
@@ -199,8 +190,6 @@ local function _split_binary_mnist (dataset, s, e)
     local pss = dataset.offsets:get(i - 1)
     local pse = i == dataset.n and dataset.problems:size() or dataset.offsets:get(i)
     local offset = (i - s) * dataset.n_features
-    
-
     for j = pss, pse - 1 do
       ps:push(dataset.problems:get(j) + offset)
     end
@@ -239,22 +228,17 @@ M.random_pairs = function (ids, edges_per_node)
   edges_per_node = edges_per_node or 3
   local edges = pvec.create()
   local n = ids:size()
-
   if n <= 1 then
     return edges
   end
-
   for i = 0, n - 1 do
     local id1 = ids:get(i)
     for _ = 1, edges_per_node do
-
       local idx2 = num.random(n) - 1
-
       if idx2 == i then
         idx2 = (idx2 + 1) % n
       end
       local id2 = ids:get(idx2)
-
       if id1 < id2 then
         edges:push(id1, id2)
       else
@@ -286,7 +270,6 @@ M.anchor_pairs = function (ids, n_anchors)
   end
   return edges
 end
-
 
 M.classes_index = function (ids, classes)
   local fids = ivec.create(classes:size())
