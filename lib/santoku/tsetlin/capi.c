@@ -1,5 +1,6 @@
 /*
 
+Copyright (C) 2025 Birch Point SWE (FuzzyPattern TM added)
 Copyright (C) 2024 Birch Point SWE (Persist to and restore from disk)
 Copyright (C) 2024 Birch Point SWE (Lua integration, train/evaluate)
 Copyright (C) 2024 Birch Point SWE (Loss scaling, multi-threading, auto-vectorizer support)
