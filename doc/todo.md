@@ -1,5 +1,7 @@
 # Now
 
+- Rename to santoku-learn or similar
+
 - ann/hbi
     - Implement mutual/mutualize for ann/hbi
     - Add mutualize lua api
@@ -26,7 +28,22 @@
 
 # Next
 
+- Move conf.h items to other libraries
+    - Random number generation (santoku)
+    - Interleaved allocation (santoku-threads)
+    - Hash mixing/etc
+    - Bits/bytes, popcount
+
+- Versioning or other safety measures around persist/load
+
+- Feature selection via analysis of clause weights, with option to prune
+  unused literals, returning pruned for subsequent filtering of
+  tokenizer/booleanizer, giving faster inference.
+
+- Allow clauses per class to be a non-multiple of BITS
+
 - Refactor inv to use ivec similarity routines
+- Move hamming functions to cvec
 
 - Graph
     - Use indices for everything internal (e.g. iu/iv instead of u/v)
