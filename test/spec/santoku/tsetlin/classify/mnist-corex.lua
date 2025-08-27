@@ -52,14 +52,12 @@ test("tsetlin", function ()
 
   print("Transforming train")
   cor.compress(train.problems, train.n)
-  train.problems:flip_interleave(train.n, HIDDEN)
-  train.problems = train.problems:raw_bitmap(train.n, HIDDEN * 2)
+  train.problems = train.problems:raw_bitmap(train.n, HIDDEN * 2, true)
   train.solutions = train.solutions:raw("u32")
 
   print("Transforming test")
   cor.compress(test.problems, test.n)
-  test.problems:flip_interleave(test.n, HIDDEN)
-  test.problems = test.problems:raw_bitmap(test.n, HIDDEN * 2)
+  test.problems = test.problems:raw_bitmap(test.n, HIDDEN * 2, true)
   test.solutions = test.solutions:raw("u32")
 
   print("Train", train.n)
