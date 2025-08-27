@@ -1122,17 +1122,15 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, 
   tk_threads_signal(tm->pool, TM_SEED, 0);
 }
 
-static inline void tk_tsetlin_load_classifier (lua_State *L, FILE *fh, bool read_state, bool has_state)
+static inline void tk_tsetlin_load_classifier (lua_State *L, FILE *fh, bool read_state, bool has_state, unsigned int n_threads)
 {
   tk_tsetlin_t *tm = tk_tsetlin_alloc_classifier(L, read_state);
-  unsigned int n_threads = tk_threads_getn(L, 2, "threads", NULL);
   _tk_tsetlin_load_classifier(L, tm, fh, read_state, has_state, n_threads);
 }
 
-static inline void tk_tsetlin_load_encoder (lua_State *L, FILE *fh, bool read_state, bool has_state)
+static inline void tk_tsetlin_load_encoder (lua_State *L, FILE *fh, bool read_state, bool has_state, unsigned int n_threads)
 {
   tk_tsetlin_t *tm = tk_tsetlin_alloc_encoder(L, read_state);
-  unsigned int n_threads = tk_threads_getn(L, 2, "threads", NULL);
   _tk_tsetlin_load_classifier(L, tm, fh, read_state, has_state, n_threads);
 }
 
@@ -1140,12 +1138,13 @@ static inline void tk_tsetlin_load_encoder (lua_State *L, FILE *fh, bool read_st
 // chances for coding errors
 static inline int tk_tsetlin_load (lua_State *L)
 {
-  lua_settop(L, 3);
+  lua_settop(L, 4);
   size_t len;
   const char *data = luaL_checklstring(L, 1, &len);
   bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && lua_toboolean(L, 2);
   FILE *fh = isstr ? tk_lua_fmemopen(L, (char *) data, len, "r") : tk_lua_fopen(L, data, "r");
   bool read_state = lua_toboolean(L, 3);
+  unsigned int n_threads = tk_threads_getn(L, 4, "load", "threads");
   tk_tsetlin_type_t type;
   bool has_state;
   tk_lua_fread(L, &type, sizeof(type), 1, fh);
@@ -1154,11 +1153,11 @@ static inline int tk_tsetlin_load (lua_State *L)
     luaL_error(L, "read_state is true but state not persisted");
   switch (type) {
     case TM_CLASSIFIER:
-      tk_tsetlin_load_classifier(L, fh, read_state, has_state);
+      tk_tsetlin_load_classifier(L, fh, read_state, has_state, n_threads);
       tk_lua_fclose(L, fh);
       return 1;
     case TM_ENCODER:
-      tk_tsetlin_load_encoder(L, fh, read_state, has_state);
+      tk_tsetlin_load_encoder(L, fh, read_state, has_state, n_threads);
       tk_lua_fclose(L, fh);
       return 1;
     default:
