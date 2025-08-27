@@ -1012,15 +1012,27 @@ static inline int tk_inv_get_lua (lua_State *L)
     out->n = n;
   } else {
     uids = tk_ivec_peek(L, 2, "uids");
+    // First pass: calculate total size needed
+    size_t total_size = 0;
     for (uint64_t i = 0; i < uids->n; i ++) {
       uid = uids->a[i];
       size_t n = 0;
-      int64_t *data = tk_inv_get(I, uid, &n);
-      if (!n)
-        continue;
-      tk_ivec_ensure(out, out->n + n);
-      memcpy(out->a + out->n, data, n * sizeof(int64_t));
-      out->n += n;
+      tk_inv_get(I, uid, &n);
+      total_size += n;
+    }
+    // Pre-allocate the output vector with exact size needed
+    if (total_size > 0) {
+      tk_ivec_ensure(out, total_size);
+      // Second pass: copy data without reallocations
+      for (uint64_t i = 0; i < uids->n; i ++) {
+        uid = uids->a[i];
+        size_t n = 0;
+        int64_t *data = tk_inv_get(I, uid, &n);
+        if (!n)
+          continue;
+        memcpy(out->a + out->n, data, n * sizeof(int64_t));
+        out->n += n;
+      }
     }
   }
   return 1;
