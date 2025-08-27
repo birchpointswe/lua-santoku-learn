@@ -89,10 +89,8 @@ test("tsetlin", function ()
   test.problems = tokenizer.tokenize(test.problems);
 
   print("Prepping for classifier")
-  train.problems:flip_interleave(train.n, n_top_v)
-  test.problems:flip_interleave(test.n, n_top_v)
-  train.problems = train.problems:raw_bitmap(train.n, n_top_v * 2)
-  test.problems = test.problems:raw_bitmap(test.n, n_top_v * 2)
+  train.problems = train.problems:raw_bitmap(train.n, n_top_v * 2, true)
+  test.problems = test.problems:raw_bitmap(test.n, n_top_v * 2, true)
   train.solutions = train.solutions:raw("u32")
   test.solutions = test.solutions:raw("u32")
 
