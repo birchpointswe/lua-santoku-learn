@@ -33,98 +33,33 @@ High-level Tsetlin machine interface for classification and encoding.
 
 #### Classifier API
 
-##### Create Classifier
+##### Module Functions
 
 | Function | Arguments | Returns | Description |
 |----------|-----------|---------|-------------|
-| `tsetlin.classifier` | `table: {` | `classifier` | Create Tsetlin classifier for multi-class classification |
-|   | `features: number,` | | Number of binary features |
-|   | `classes: number,` | | Number of output classes |
-|   | `clauses: number,` | | Number of clauses per class |
-|   | `clause_tolerance: number,` | | Learning threshold (s parameter) |
-|   | `clause_maximum: number,` | | Maximum clause weight |
-|   | `specificity: number,` | | Literal inclusion probability |
-|   | `[negative]: number,` | | Negative voting weight (default: 1/classes) |
-|   | `[target]: number,` | | Target clause activation (default: sqrt(clauses/2)*tolerance) |
-|   | `[state]: number,` | | State bits (default: 8) |
-|   | `[threads]: number` | | Thread count for parallelization |
-| | `}` | | |
+| `tsetlin.classifier` | `table: {features, classes, clauses, clause_tolerance, clause_maximum, specificity, negative?, target?, state?, threads?}` | `classifier` | Create Tsetlin classifier |
+| `tsetlin.optimize_classifier` | `table: {features, classes, negative?, clauses?, clause_tolerance?, clause_maximum?, target?, specificity?, search_rounds?, search_trials?, search_iterations?, search_patience?, search_dev?, search_metric, each?, final_iterations?, samples?, problems?, solutions?, threads?}` | `classifier` | Optimize and train classifier |
 
-##### Train Classifier
+##### Instance Methods
 
 | Method | Arguments | Returns | Description |
 |--------|-----------|---------|-------------|
-| `classifier:train` | `table: {` | `-` | Train classifier on labeled data |
-|   | `samples: number,` | | Number of training samples |
-|   | `problems: string,` | | Binary feature patterns (bit-packed) |
-|   | `solutions: string,` | | Class labels (unsigned integers) |
-|   | `iterations: number,` | | Training epochs |
-|   | `[each]: function(epoch)` | | Callback per epoch, return false to stop |
-| | `}` | | |
-
-##### Optimize Classifier
-
-| Function | Arguments | Returns | Description |
-|----------|-----------|---------|-------------|
-| `tsetlin.optimize_classifier` | `table: {` | `classifier` | Find optimal hyperparameters and train |
-|   | `...classifier params,` | | All classifier creation parameters |
-|   | `...train params,` | | All training parameters |
-|   | `search_metric: function(tm),` | | Metric function returning score |
-|   | `[search_rounds]: number,` | | Optimization rounds (default: 3) |
-|   | `[search_trials]: number,` | | Trials per round (default: 10) |
-|   | `[search_iterations]: number,` | | Iterations per trial (default: 10) |
-|   | `[search_patience]: number,` | | Early stopping patience (default: 0) |
-|   | `[search_dev]: number,` | | Parameter deviation (default: 1.0) |
-|   | `[final_iterations]: number,` | | Final training iterations (default: 10x search) |
-|   | `[each]: function(tm, final, metrics, params, epoch, round?, trial?)` | | Progress callback |
-| | `}` | | |
+| `classifier:train` | `table: {samples, problems, solutions, iterations, each?}` | `-` | Train classifier on labeled data |
 
 #### Encoder API
 
-##### Create Encoder
+##### Module Functions
 
 | Function | Arguments | Returns | Description |
 |----------|-----------|---------|-------------|
-| `tsetlin.encoder` | `table: {` | `encoder` | Create Tsetlin encoder for binary encoding |
-|   | `visible: number,` | | Number of input features |
-|   | `hidden: number,` | | Number of encoded bits |
-|   | `clauses: number,` | | Number of clauses per bit |
-|   | `clause_tolerance: number,` | | Learning threshold |
-|   | `clause_maximum: number,` | | Maximum clause weight |
-|   | `specificity: number,` | | Literal inclusion probability |
-|   | `[target]: number,` | | Target clause activation |
-|   | `[state]: number,` | | State bits (default: 8) |
-|   | `[threads]: number` | | Thread count |
-| | `}` | | |
+| `tsetlin.encoder` | `table: {visible, hidden, clauses, clause_tolerance, clause_maximum, specificity, target?, state?, threads?}` | `encoder` | Create Tsetlin encoder |
+| `tsetlin.optimize_encoder` | `table: {visible, hidden, clauses?, clause_tolerance?, clause_maximum?, target?, specificity?, search_rounds?, search_trials?, search_iterations?, search_patience?, search_dev?, search_metric, each?, final_iterations?, sentences?, codes?, samples?, threads?}` | `encoder` | Optimize and train encoder |
 
-##### Train Encoder
+##### Instance Methods
 
 | Method | Arguments | Returns | Description |
 |--------|-----------|---------|-------------|
-| `encoder:train` | `table: {` | `-` | Train encoder on binary patterns |
-|   | `samples: number,` | | Number of training samples |
-|   | `sentences: string,` | | Input binary patterns (bit-packed) |
-|   | `codes: string,` | | Target binary codes (bit-packed) |
-|   | `iterations: number,` | | Training epochs |
-|   | `[each]: function(epoch)` | | Callback per epoch |
-| | `}` | | |
-
-##### Optimize Encoder
-
-| Function | Arguments | Returns | Description |
-|----------|-----------|---------|-------------|
-| `tsetlin.optimize_encoder` | `table: {` | `encoder` | Find optimal hyperparameters and train |
-|   | `...encoder params,` | | All encoder creation parameters |
-|   | `...train params,` | | All training parameters |
-|   | `search_metric: function(tm),` | | Metric function |
-|   | `[search_rounds]: number,` | | Optimization rounds |
-|   | `[search_trials]: number,` | | Trials per round |
-|   | `[search_iterations]: number,` | | Iterations per trial |
-|   | `[search_patience]: number,` | | Early stopping patience |
-|   | `[search_dev]: number,` | | Parameter deviation |
-|   | `[final_iterations]: number,` | | Final training iterations |
-|   | `[each]: function(tm, final, metrics, params, epoch, round?, trial?)` | | Progress callback |
-| | `}` | | |
+| `encoder:train` | `table: {samples, sentences, codes, iterations, each?}` | `-` | Train encoder on binary patterns |
 
 #### Common Instance Methods
 
