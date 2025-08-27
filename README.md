@@ -44,7 +44,7 @@ High-level Tsetlin machine interface for classification and encoding.
 
 | Method | Arguments | Returns | Description |
 |--------|-----------|---------|-------------|
-| `classifier:train` | `table: {samples, problems, solutions, iterations, each?}` | `-` | Train classifier on labeled data |
+| `classifier:train` | `table: {samples, problems, solutions, iterations, each?}` | `-` | Train classifier on labeled data. Note: `problems` can be passed as either a string or tk_cvec_t |
 
 #### Encoder API
 
@@ -59,7 +59,7 @@ High-level Tsetlin machine interface for classification and encoding.
 
 | Method | Arguments | Returns | Description |
 |--------|-----------|---------|-------------|
-| `encoder:train` | `table: {samples, sentences, codes, iterations, each?}` | `-` | Train encoder on binary patterns |
+| `encoder:train` | `table: {samples, sentences, codes, iterations, each?}` | `-` | Train encoder on binary patterns. Note: Both `sentences` and `codes` can be passed as either strings or tk_cvec_t objects |
 
 #### Common Instance Methods
 

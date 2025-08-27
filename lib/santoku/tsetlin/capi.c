@@ -29,6 +29,7 @@ SOFTWARE.
 #include <santoku/lua/utils.h>
 #include <santoku/tsetlin/conf.h>
 #include <santoku/threads.h>
+#include <santoku/cvec.h>
 
 #define TK_TSETLIN_MT "santoku_tsetlin"
 
@@ -930,7 +931,16 @@ static inline int tk_tsetlin_train_classifier (
   tk_tsetlin_t *tm
 ) {
   unsigned int n = tk_lua_fcheckunsigned(L, 2, "train", "samples");
-  tk_bits_t *ps = (tk_bits_t *) tk_lua_fcheckstring(L, 2, "train", "problems");
+  tk_bits_t *ps;
+  // Check if ps is passed as cvec or string
+  lua_getfield(L, 2, "problems");
+  tk_cvec_t *ps_cvec = tk_cvec_peekopt(L, -1);
+  if (ps_cvec) {
+    ps = (tk_bits_t *) ps_cvec->a;
+  } else {
+    ps = (tk_bits_t *) tk_lua_fcheckstring(L, 2, "train", "problems");
+  }
+  lua_pop(L, 1);
   unsigned int *ss = (unsigned int *) tk_lua_fcheckstring(L, 2, "train", "solutions");
   unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
   int i_each = -1;
@@ -970,8 +980,28 @@ static inline int tk_tsetlin_train_encoder (
   tk_tsetlin_t *tm
 ) {
   unsigned int n = tk_lua_fcheckunsigned(L, 2, "train", "samples");
-  tk_bits_t *ps = (tk_bits_t *) tk_lua_fcheckustring(L, 2, "train", "sentences");
-  tk_bits_t *ls = (tk_bits_t *) tk_lua_fcheckustring(L, 2, "train", "codes");
+  tk_bits_t *ps;
+  tk_bits_t *ls;
+  
+  // Check if ps is passed as cvec or string
+  lua_getfield(L, 2, "sentences");
+  tk_cvec_t *ps_cvec = tk_cvec_peekopt(L, -1);
+  if (ps_cvec) {
+    ps = (tk_bits_t *) ps_cvec->a;
+  } else {
+    ps = (tk_bits_t *) tk_lua_fcheckustring(L, 2, "train", "sentences");
+  }
+  lua_pop(L, 1);
+  
+  // Check if ls is passed as cvec or string
+  lua_getfield(L, 2, "codes");
+  tk_cvec_t *ls_cvec = tk_cvec_peekopt(L, -1);
+  if (ls_cvec) {
+    ls = (tk_bits_t *) ls_cvec->a;
+  } else {
+    ls = (tk_bits_t *) tk_lua_fcheckustring(L, 2, "train", "codes");
+  }
+  lua_pop(L, 1);
   unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
   tm->encodings = tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * tm->class_chunks * sizeof(tk_bits_t), false);
   int i_each = -1;
