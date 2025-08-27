@@ -873,7 +873,9 @@ static inline int tk_tsetlin_predict_classifier (
   tk_tsetlin_t *tm
 ) {
   lua_settop(L, 3);
-  tk_bits_t *ps = (tk_bits_t *) tk_lua_checkstring(L, 2, "argument 1 is not a raw bit-matrix of samples");
+  tk_bits_t *ps;
+  tk_cvec_t *ps_cvec = tk_cvec_peekopt(L, 2);
+  ps = ps_cvec ? (tk_bits_t *) ps_cvec->a : (tk_bits_t *) tk_lua_checkstring(L, 2, "argument 1 is not a raw bit-matrix of samples");
   unsigned int n = tk_lua_checkunsigned(L, 3, "argument 2 is not an integer n_samples");
   tm->results = tk_ensure_interleaved(L, &tm->results_len, tm->results, n * sizeof(unsigned int), false);
   for (unsigned int i = 0; i < tm->pool->n_threads; i ++) {
@@ -895,7 +897,9 @@ static inline int tk_tsetlin_predict_encoder (
   tk_tsetlin_t *tm
 ) {
   lua_settop(L, 3);
-  tk_bits_t *ps = (tk_bits_t *) tk_lua_checkstring(L, 2, "argument 1 is not a raw bit-matrix of samples");
+  tk_bits_t *ps;
+  tk_cvec_t *ps_cvec = tk_cvec_peekopt(L, 2);
+  ps = ps_cvec ? (tk_bits_t *) ps_cvec->a : (tk_bits_t *) tk_lua_checkstring(L, 2, "argument 1 is not a raw bit-matrix of samples");
   unsigned int n = tk_lua_checkunsigned(L, 3, "argument 2 is not an integer n_samples");
   tm->encodings = tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * tm->class_chunks * sizeof(tk_bits_t), false);
   for (unsigned int i = 0; i < tm->pool->n_threads; i ++) {
