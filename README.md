@@ -281,15 +281,6 @@ Text tokenization with n-grams, skip-grams, and character grams.
 | `tokenizer:persist` | `string?: filepath` | `string?` | Save tokenizer or return serialized data |
 | `tokenizer:destroy` | `-` | `-` | Free tokenizer memory |
 
-## Data Structures
-
-### Similarity Metrics (inv module)
-
-- `jaccard`: Jaccard similarity coefficient
-- `overlap`: Overlap coefficient
-- `tversky`: Tversky index with alpha/beta parameters
-- `dice`: Dice coefficient
-
 ### `santoku/tsetlin/dsu.h`
 
 | Function | Arguments | Returns | Description |
