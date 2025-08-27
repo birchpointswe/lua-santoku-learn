@@ -3,6 +3,7 @@
 #include <santoku/tsetlin/cluster.h>
 #include <santoku/threads.h>
 #include <santoku/ivec.h>
+#include <santoku/cvec.h>
 
 #define TK_EVAL_EPH "tk_eval_eph"
 
@@ -238,8 +239,11 @@ static void tk_eval_worker (void *dp, int sig)
 static inline int tm_class_accuracy (lua_State *L)
 {
   lua_settop(L, 5);
-  unsigned int *predicted = (unsigned int *) tk_lua_checkustring(L, 1, "predicted");
-  unsigned int *expected = (unsigned int *) tk_lua_checkustring(L, 2, "expected");
+  unsigned int *predicted, *expected;
+  tk_cvec_t *pvec = tk_cvec_peekopt(L, 1);
+  tk_cvec_t *evec = tk_cvec_peekopt(L, 2);
+  predicted = pvec != NULL ? (unsigned int *) pvec->a : (unsigned int *) tk_lua_checkustring(L, 1, "predicted");
+  expected = evec != NULL ? (unsigned int *) evec->a : (unsigned int *) tk_lua_checkustring(L, 2, "expected");
   unsigned int n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
   unsigned int n_dims = tk_lua_checkunsigned(L, 4, "n_classes");
   unsigned int n_threads = tk_threads_getn(L, 5, "n_threads", NULL);
@@ -628,9 +632,10 @@ static inline int tm_auc (lua_State *L)
 
   tk_ivec_t *ids = tk_ivec_peek(L, 1, "ids");
   tk_dvec_t *dcodes = tk_dvec_peekopt(L, 2);
-  tk_bits_t *codes = dcodes == NULL ? (tk_bits_t *) tk_lua_checkstring(L, 2, "codes") : NULL;
+  tk_cvec_t *ccodes = dcodes == NULL ? tk_cvec_peekopt(L, 2) : NULL;
+  tk_bits_t *codes = dcodes != NULL ? NULL : (ccodes != NULL ? (tk_bits_t *) ccodes->a : (tk_bits_t *) tk_lua_checkstring(L, 2, "codes"));
   if (!(dcodes != NULL || codes != NULL))
-    tk_lua_verror(L, 3, "auc", "codes", "must be either a string or tk_dvec_t");
+    tk_lua_verror(L, 3, "auc", "codes", "must be either a string, tk_cvec_t, or tk_dvec_t");
 
   tk_pvec_t *pos = tk_pvec_peek(L, 3, "pos");
   tk_pvec_t *neg = tk_pvec_peek(L, 4, "neg");
@@ -638,9 +643,11 @@ static inline int tm_auc (lua_State *L)
   uint64_t n_pos = pos->n;
   uint64_t n_neg = neg->n;
 
-  tk_bits_t *mask =
-    lua_type(L, 6) == LUA_TSTRING ? (tk_bits_t *) luaL_checkstring(L, 6) :
-    lua_type(L, 6) == LUA_TLIGHTUSERDATA ? (tk_bits_t *) lua_touserdata(L, 6) : NULL;
+  tk_bits_t *mask;
+  tk_cvec_t *mvec = tk_cvec_peekopt(L, 6);
+  mask = mvec != NULL ? (tk_bits_t *) mvec->a :
+    (lua_type(L, 6) == LUA_TSTRING ? (tk_bits_t *) luaL_checkstring(L, 6) :
+     lua_type(L, 6) == LUA_TLIGHTUSERDATA ? (tk_bits_t *) lua_touserdata(L, 6) : NULL);
 
   unsigned int n_threads = tk_threads_getn(L, 7, "n_threads", NULL);
 
