@@ -1,10 +1,12 @@
 # Now
 
+- Implement learning to triangulate pipeline
+
 - Rename to santoku-learn or similar
 
-- ann/hbi
-    - Implement mutual/mutualize for ann/hbi
-    - Add mutualize lua api
+- ann/hbi: implement mutualize/etc
+    - Note: Partially completed for ann
+    - Include mutualize lua api
     - Add tk_ann/hbi_distance/similarity as in inv (take this from the already-generalized
       tk_graph_distance(...) function)
 
@@ -24,9 +26,12 @@
 
 - Lua GC for threadpool
 - Pcalls for callbacks, or make sure everything is connected to the lua GC
-- Vectorize everything
+- Profile hot paths and vectorization opportunities
 
 # Next
+
+- ann/hbi
+    - Implement rank API
 
 - Move conf.h items to other libraries
     - Random number generation (santoku)
