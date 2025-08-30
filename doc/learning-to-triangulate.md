@@ -1,127 +1,99 @@
-## Learning-to-Triangulate Spectral Hash Codes for Cross-Domain Extension
+# Learning-to-Triangulate Spectral Hash Codes for Cross-Domain Extension
 
-### Related Work and Keywords
+Fundamentally an extension to self-taught hashing, this solves the out-of-sample
+extension problem of spectral hashing by learning to hash out-of-sample data
+points by per-bit classifiers that use the concatenation of nearest in-sample
+neighbor codes as features.
 
-This work intersects several research areas in the hashing and retrieval
-literature:
+## Motivation
 
-**Cross-Modal Hashing**: Methods that learn hash codes across different
-modalities (text, image, audio), particularly relevant for our cross-domain
-Space A/Space B setup.
+Spectral hashing pipelines can produce highly useful binary codes for in-sample
+data points with customizable spatial behavior. The underlying graph used in
+spectral hashing can be as simple as a KNN graph using some observable document
+features (e.g. text features or semantic embeddings), in which case the hamming
+distance between spectral embeddings approximates distance in the original
+feature space, or as complex as one specifically designed such that the spectral
+embeddings have specific spatial relationships (e.g. packing books of the same
+author as immediate nearest neighbors, with books of the same year one band out,
+followed by books of the same genre, etc.). Note that in this complex scenario
+the designed embedding space does not use the observable features of documents
+at all, instead relying on domain knowledge to form graph edges.
 
-**Anchor Graph Hashing**: Uses representative anchor points for scalable
-hashing, providing theoretical foundations for neighbor-based triangulation
-approaches.
+Challenges arise when a new data point is to be projected into this embedding
+space. Traditional spectral hashing relies on the uniform distribution
+assumption, which is impractical for real world datasets. Self-taught hashing
+addresses this by training per-bit classifiers to learn mappings from observable
+features to embeddings, but this typically requires the graph be constructed
+using the same feature space used to train the classifiers, and while projected
+codes can still be useful, the per-bit classifiers struggle to recover the
+in-sample codes accurately. Anchor graph hashing is another approach to this
+problem, which replaces direct per-bit classifiers with a derivation from
+distances between new data points and static in-sample anchor/landmark points to
+spectral coordinates, and shares the practical requirement that the feature
+space used to compute distances from new points to landmark points must be the
+same as the feature space used to construct the graph.
 
-**Out-of-Sample Extension**: Techniques for generating hash codes for new data
-without retraining, a core challenge we address through learned triangulation.
+Furthermore, in the case of a customized embedding space derived from a graph
+encoding domain knowledge of entity relationships instead of observable features,
+neither traditional spectral hashing's out-of-sample extension via analytical
+eigenfunctions nor self-taught hashing's per-bit classifiers can project new
+data points into the embedding space sufficiently well due primarily due to the
+mismatch between the domain knowledge used to construct the graph and the
+potentially unrelated observable features of the documents.
 
-**Domain Adaptation Hashing**: Methods that adapt hash functions across
-different domains or feature distributions, relevant for bridging Space A
-structure with Space B neighborhoods.
+## Proposed Solution: Cross Domain Hashing via Learned Triangulation
 
-**Neighbor-Augmented Learning**: Approaches that use k-nearest neighbor
-information as additional features for improved prediction, closely related to
-our triangulation learning paradigm.
+We construct a generalized spectral hashing system where Feature Space A (domain
+features, e.g. tags/metadata) defines graph topology optimized for
+domain-specific similarity, while Feature Space B (observed text/semantic
+features) provides triangulation landmarks for out-of-sample extension. This
+intentional separation enables semantic search that retrieves based on latent
+structural relationships from Space A while using Space B neighborhoods as
+landmarks for triangulation learning to locate new points within that structure.
 
-**Spectral Hashing**: Graph-based methods that use eigenvalue decomposition for
-hash code generation, forming our baseline pipeline.
-
-**Consensus Hashing**: Techniques that combine multiple hash codes or hash
-functions through learned aggregation, related to our learned triangulation of
-neighbor codes.
-
-### Problem Setup
-
-We construct a spectral hashing system where Feature Space A (tags/metadata)
-defines graph topology optimized for domain-specific similarity, while Feature
-Space B (text/semantic content) provides triangulation landmarks for
-out-of-sample extension. This intentional separation enables semantic search
-that retrieves based on latent structural relationships from Space A while using
-Space B neighborhoods as landmarks for triangulation learning to locate new
-points within that structure.
+In other words, we extend self-taught hashing by leveraging the in-sample codes
+of neighbors to the new data point in the readily available Feature Space B as
+the input features for the per-bit classifiers, optionally also including
+Feature Space B as additional features. This transforms the difficult problem of
+learning to project from Feature Space B into Feature Space A into a
+triangulation problem, where we source landmarks via Feature Space B and then
+learn to triangulate a new data point within Feature Space A from landmarks in
+the same feature space.
 
 ### Baseline Spectral Pipeline
 
-**In-Sample Code Generation:**
 1. **Graph Construction**: Build mutual k-NN graph from Feature Space A similarities
 2. **Spectral Decomposition**: Compute bottom eigenvectors of graph Laplacian
-3. **Binarization**: Apply iterative quantization or sign thresholding to obtain binary codes
+3. **Binarization**: Apply iterative quantization or sign/median thresholding to obtain binary codes
 4. **Optional Optimization**: Greedy bit flipping to maximize adjacency preservation
 
 This produces high-quality codes for in-sample data, but provides no mechanism
 for out-of-sample extension since new points cannot be added to the fixed
 spectral decomposition.
 
-### Core Challenge: Out-of-Sample Extension
+### Out of Sample Extension
 
-**The fundamental problem**: How to generate Space A-derived codes for new data
-points without recomputing the entire spectral decomposition?
-
-**Direct learning limitations**: Training classifiers to predict Space A codes
-directly from Space B features is often intractable and insufficiently accurate.
-
-### Proposed Solution: Learning-to-Triangulate
-
-**Core Insight**: Use Space B neighborhoods to triangulate Space A codes through
-learned optimal combination rather than naive aggregation.
-
-**Method Overview:**
-1. **Neighbor Retrieval**: For out-of-sample point, find k nearest neighbors in Space B
+1. **Neighbor Retrieval**: For out-of-sample points, find k nearest neighbors in Space B
 2. **Space A Code Retrieval**: Extract the pre-computed Space A codes for these k neighbors
 3. **Learned Triangulation**: Train mapping from neighborhood Space A codes → inferred Space A code for novel point
-4. **Optional Enhancement**: Include Space B features as additional signal when resources allow
 
-**Learning-to-Triangulate Architecture:**
+### Scaling Considerations
 
-**Input Features:**
-- **Primary**: Neighborhood Space A codes (concatenated: k × 128 features OR
-  aggregated: 128 features)
-- **Optional**: Space B features of query point (d additional features)
+The introduction of an additional landmark-lookup step at inference can add
+latency. This can be mitigated by both aggressively reducing the Feature Space B
+dimensionality via feature selection or by reducing the number of indexed
+landmarks.
 
-**Output**: Triangulated 128-bit Space A code for the novel point
-
-**Training**: Learn mapping using in-sample data where Space B neighborhoods and
-corresponding Space A codes are known
-
-### Research Contributions
-
-**1. Learned Triangulation Functions**
-Replace hand-crafted aggregation (majority vote, distance weighting) with
-learned optimal combination that adapts to local neighborhood patterns and
-cross-domain context.
-
-**2. Cross-Domain Out-of-Sample Extension**
-Enable spectral hash extension without spectral recomputation by learning the
-mapping between Space B neighborhoods and Space A spectral positions.
-
-### Evaluation Framework
-
-**Triangulation Learning Quality:**
-- Average Hamming distance between triangulated codes and ground-truth Space A codes
-- Per-bit error analysis: min/max/std bit error rates across code positions
-
-**Training Data Performance:**
-- AUC for retrieval tasks using triangulated codes
-- Clustering quality metrics on triangulated training codes
-- Best margin exhaustive scan: optimal Hamming radius for balanced
-  precision/recall
-
-**Out-of-Sample Extension Performance:**
-- AUC for retrieval tasks using triangulated codes on unseen data
-- Clustering quality on triangulated unseen codes
-- Best margin analysis for unseen code performance
-
-**Note**: All retrieval and clustering evaluation uses the original/sampled
-pairwise data that constructed the initial Space A graph, testing how well the
-triangulated codes capture the desired spatial characteristics in the projected
-code space.
-
-### Novelty and Impact
+## Novelty and Impact
 
 **Theoretical**: Treats cross-domain out-of-sample extension as a learned
-triangulation problem rather than fixed geometric operation, providing
-principled alternative to spectral recomputation.
+triangulation problem rather than fixed geometric operation or a direct per-bit
+learning problem, providing an alternative to STH and AGH that provides a
+generalized solution the out-of-sample extension problem, allowing different
+feature spaces to be used used for graph construction and extension.
 
-**Practical**: Enables scalable spectral hashing deployment where recomputing
-spectral decomposition for new data is computationally prohibitive.
+**Practical**: Enables scalable spectral hashing deployment in situations where
+it is necessary to project into a domain-specific embedding space from
+observable features different than those used in graph construction (e.g.
+designing an embedding based on labeled data and then projecting into it from
+observed features)
