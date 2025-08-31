@@ -1,6 +1,11 @@
 # Now
 
 - Implement learning to triangulate pipeline
+    - Baseline: lankmark codes only
+    - Landmark codes along with space b features
+
+- Implement generative model
+    - Predict visible features from spectral codes
 
 - Rename to santoku-learn or similar
 
