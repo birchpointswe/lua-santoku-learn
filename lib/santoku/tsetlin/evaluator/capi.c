@@ -147,8 +147,8 @@ static void tk_eval_worker (void *dp, int sig)
     case TK_EVAL_ENCODING_ACCURACY:
       for (uint64_t i = data->sfirst; i <= data->slast; i ++) {
         for (uint64_t j = 0; j < state->n_dims; j ++) {
-          uint64_t word = BITS_BYTE(j);
-          uint64_t bit = BITS_BIT(j);
+          uint64_t word = TK_CVEC_BITS_BYTE(j);
+          uint64_t bit = TK_CVEC_BITS_BIT(j);
           bool y =
             (state->codes_expected[i * state->chunks + word] & ((tk_bits_t)1 << bit)) ==
             (state->codes_predicted[i * state->chunks + word] & ((tk_bits_t)1 << bit));
@@ -215,11 +215,11 @@ static void tk_eval_worker (void *dp, int sig)
           state->pl[k].sim = (int64_t)(dot * 1e3);
         } else if (state->codes != NULL) {
           if (state->mask != NULL) {
-            state->pl[k].sim = (int64_t) (state->n_dims - tk_ann_hamming_mask(
+            state->pl[k].sim = (int64_t) (state->n_dims - tk_cvec_bits_hamming_mask(
               (const unsigned char *) state->codes + (uint64_t) iu * state->chunks,
               (const unsigned char *) state->codes + (uint64_t) iv * state->chunks, (const unsigned char *) state->mask, state->n_dims));
           } else {
-            state->pl[k].sim = (int64_t) (state->n_dims - tk_ann_hamming(
+            state->pl[k].sim = (int64_t) (state->n_dims - tk_cvec_bits_hamming(
               (const unsigned char *) state->codes + (uint64_t) iu * state->chunks,
               (const unsigned char *) state->codes + (uint64_t) iv * state->chunks, state->n_dims));
           }
@@ -341,7 +341,7 @@ static inline int tm_entropy_stats (lua_State *L)
   unsigned int n_dims = tk_lua_checkunsigned(L, 3, "n_hidden");
   unsigned int n_threads = tk_threads_getn(L, 4, "n_threads", NULL);
 
-  tk_dvec_t *entropies = tk_ivec_score_entropy(L, (char *) codes, n_samples, n_dims, n_threads);
+  tk_dvec_t *entropies = tk_ivec_bits_score_entropy(L, (char *) codes, n_samples, n_dims, n_threads);
 
   // Compute per-bit entropy
   double min_entropy = 1.0, max_entropy = 0.0, sum_entropy = 0.0;
@@ -529,7 +529,7 @@ static inline int tm_encoding_accuracy (lua_State *L)
   unsigned int n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
   unsigned int n_dims = tk_lua_checkunsigned(L, 4, "n_hidden");
   unsigned int n_threads = tk_threads_getn(L, 5, "n_threads", NULL);
-  uint64_t chunks = BITS_BYTES(n_dims);
+  uint64_t chunks = TK_CVEC_BITS_BYTES(n_dims);
 
   tk_eval_t state;
   state.n_dims = n_dims;
@@ -654,7 +654,7 @@ static inline int tm_auc (lua_State *L)
   tk_eval_t state;
   memset(&state, 0, sizeof(tk_eval_t));
   state.n_dims = n_dims;
-  state.chunks = BITS_BYTES(n_dims);
+  state.chunks = TK_CVEC_BITS_BYTES(n_dims);
   state.pl = malloc((n_pos + n_neg) * sizeof(tm_dl_t));
   state.mask = mask;
   state.id_code = tk_iumap_from_ivec(ids);
@@ -856,7 +856,7 @@ static inline int tm_optimize_retrieval (lua_State *L)
 
   tk_eval_t state;
   state.n_dims = n_dims;
-  state.chunks = BITS_BYTES(n_dims);
+  state.chunks = TK_CVEC_BITS_BYTES(n_dims);
   state.pl = malloc((n_pos + n_neg) * sizeof(tm_dl_t));
   state.mask = NULL;
   state.codes = codes;

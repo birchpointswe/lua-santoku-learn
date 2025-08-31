@@ -193,12 +193,12 @@ static inline tk_bits_t tk_tsetlin_calculate (
     for (unsigned int k = 0; k < input_chunks - 1; k ++) {
       tk_bits_t inp = input[k];
       tk_bits_t act = actions[k];
-      literals += popcount(act);
-      failed += popcount(act & (~inp));
+      literals += (unsigned int) tk_cvec_byte_popcount(act);
+      failed += (unsigned int) tk_cvec_byte_popcount(act & (~inp));
     }
     tk_bits_t last_act = actions[input_chunks - 1] & tm->tail_mask;
-    literals += popcount(last_act);
-    failed += popcount(last_act & (~input[input_chunks - 1]) & tm->tail_mask);
+    literals += (unsigned int) tk_cvec_byte_popcount(last_act);
+    failed += (unsigned int) tk_cvec_byte_popcount(last_act & (~input[input_chunks - 1]) & tm->tail_mask);
     long int votes;
     if (literals == 0) {
       votes = (long int) tolerance;
@@ -259,8 +259,8 @@ static inline void apply_feedback (
       // Clause didn't vote: random penalty
       unsigned int s = (2 * features) / specificity;
       for (unsigned int r = 0; r < s; r ++) {
-        unsigned int random_chunk = fast_rand() % input_chunks;
-        unsigned int random_bit = fast_rand() % BITS;
+        unsigned int random_chunk = tk_fast_random() % input_chunks;
+        unsigned int random_bit = tk_fast_random() % BITS;
         tk_bits_t random_mask = (tk_bits_t)1 << random_bit;
         tm_dec(tm, chunk * BITS + clause_idx, random_chunk, random_mask);
       }
@@ -335,7 +335,7 @@ static inline void tm_update (
   // and we assume that 9/10ths of them will be for other classes. In encoder
   // mode, chunk_class always equals sample_class so the routine runs always.
   double negative_sampling = tm->negative;
-  if (chunk_class != sample_class && fast_chance(1 - negative_sampling))
+  if (chunk_class != sample_class && tk_fast_chance(1 - negative_sampling))
     return;
 
   long int vote_target = (long int) tm->target;
@@ -356,17 +356,17 @@ static inline void tm_update (
       break;
     if (chunk_class == sample_class && target_vote) {
       // Strengthen positive clauses
-      if (fast_chance(p))
+      if (tk_fast_chance(p))
         apply_feedback(tm, pos_clause, chunk, input, literals, votes, true, thread);
       // Weaken negative clauses
-      if (fast_chance(p))
+      if (tk_fast_chance(p))
         apply_feedback(tm, neg_clause, chunk, input, literals, votes, false, thread);
     } else { // expected vote is 0
       // Strengthen negative clauses
-      if (fast_chance(p))
+      if (tk_fast_chance(p))
         apply_feedback(tm, neg_clause, chunk, input, literals, votes, true, thread);
       // Weaken positive clauses
-      if (fast_chance(p))
+      if (tk_fast_chance(p))
         apply_feedback(tm, pos_clause, chunk, input, literals, votes, false, thread);
     }
   }
@@ -378,7 +378,7 @@ static inline void tk_tsetlin_init_shuffle (
 ) {
   for (unsigned int i = 0; i < n; i ++) {
     shuffle[i] = i;
-    unsigned int j = i == 0 ? 0 : fast_rand() % (i + 1);
+    unsigned int j = i == 0 ? 0 : tk_fast_random() % (i + 1);
     unsigned int t = shuffle[i];
     shuffle[i] = shuffle[j];
     shuffle[j] = t;
@@ -500,9 +500,9 @@ static void tk_classifier_setup_thread (
         actions[input_chunk] = 0;
         for (unsigned int b = 0; b < m; b ++) {
           if (initial_state & (1 << b))
-            counts[b] = ALL_MASK;
+            counts[b] = TK_CVEC_ALL_MASK;
           else
-            counts[b] = ZERO_MASK;
+            counts[b] = TK_CVEC_ZERO_MASK;
         }
       }
     }
@@ -565,8 +565,8 @@ static void tk_encoder_train_thread (
   unsigned int votes[BITS];
   for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
     unsigned int chunk_class = chunk / clause_chunks;
-    unsigned int enc_chunk = BITS_BYTE(chunk_class);
-    unsigned int enc_bit = BITS_BIT(chunk_class);
+    unsigned int enc_chunk = TK_CVEC_BITS_BYTE(chunk_class);
+    unsigned int enc_bit = TK_CVEC_BITS_BIT(chunk_class);
     for (unsigned int i = 0; i < n; i ++) {
       unsigned int sample = shuffle[i];
       tk_bits_t *input = ps + sample * input_chunks;
@@ -599,8 +599,8 @@ static void tk_encoder_predict_reduce_thread (
     }
     tk_bits_t *e = encodings + s * class_chunks;
     for (unsigned int class = 0; class < tm->classes; class ++) {
-      unsigned int chunk = BITS_BYTE(class);
-      unsigned int pos = BITS_BIT(class);
+      unsigned int chunk = TK_CVEC_BITS_BYTE(class);
+      unsigned int pos = TK_CVEC_BITS_BIT(class);
       if (votes[class] > 0)
         e[chunk] |= ((tk_bits_t)1 << pos);
       else
@@ -615,7 +615,7 @@ static void tk_tsetlin_worker (void *dp, int sig)
   tk_tsetlin_thread_t *data = (tk_tsetlin_thread_t *) dp;
   switch (stage) {
     case TM_SEED:
-      seed_rand(data->index);
+      tk_fast_seed(data->index);
       break;
     case TM_CLASSIFIER_SETUP:
       tk_classifier_setup_thread(
@@ -717,8 +717,8 @@ static inline void tk_tsetlin_init_classifier (
     tk_lua_verror(L, 3, "create classifier", "bits", "must be greater than 1");
   tm->negative = negative < 0 ? 1.0 / (double) classes : negative; // Note: unused in encoder
   tm->classes = classes;
-  tm->class_chunks = BITS_BYTES(tm->classes);
-  tm->clauses = BITS_BYTES(clauses) * BITS;
+  tm->class_chunks = TK_CVEC_BITS_BYTES(tm->classes);
+  tm->clauses = TK_CVEC_BITS_BYTES(clauses) * BITS;
   tm->clause_tolerance = clause_tolerance;
   tm->clause_maximum = clause_maximum;
   tm->target =
@@ -730,8 +730,8 @@ static inline void tk_tsetlin_init_classifier (
   tm->input_bits = 2 * tm->features;
   uint64_t tail_bits = tm->input_bits & (BITS - 1);
   tm->tail_mask = tail_bits ? (tk_bits_t)((1u << tail_bits) - 1) : (tk_bits_t) ~0;
-  tm->input_chunks = BITS_BYTES(tm->input_bits);
-  tm->clause_chunks = BITS_BYTES(tm->clauses);
+  tm->input_chunks = TK_CVEC_BITS_BYTES(tm->input_bits);
+  tm->clause_chunks = TK_CVEC_BITS_BYTES(tm->clauses);
   tm->state_chunks = tm->classes * tm->clauses * (tm->state_bits - 1) * tm->input_chunks;
   tm->action_chunks = tm->classes * tm->clauses * tm->input_chunks;
   tm->state = tk_malloc_aligned(L, sizeof(tk_bits_t) * tm->state_chunks, BITS);
@@ -986,7 +986,6 @@ static inline int tk_tsetlin_train_encoder (
   unsigned int n = tk_lua_fcheckunsigned(L, 2, "train", "samples");
   tk_bits_t *ps;
   tk_bits_t *ls;
-  
   // Check if ps is passed as cvec or string
   lua_getfield(L, 2, "sentences");
   tk_cvec_t *ps_cvec = tk_cvec_peekopt(L, -1);
@@ -996,7 +995,6 @@ static inline int tk_tsetlin_train_encoder (
     ps = (tk_bits_t *) tk_lua_fcheckustring(L, 2, "train", "sentences");
   }
   lua_pop(L, 1);
-  
   // Check if ls is passed as cvec or string
   lua_getfield(L, 2, "codes");
   tk_cvec_t *ls_cvec = tk_cvec_peekopt(L, -1);
@@ -1135,7 +1133,7 @@ static inline int tk_tsetlin_persist (lua_State *L)
 static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, FILE *fh, bool read_state, bool has_state, unsigned int n_threads)
 {
   tk_lua_fread(L, &tm->classes, sizeof(unsigned int), 1, fh);
-  tm->class_chunks = BITS_BYTES(tm->classes);
+  tm->class_chunks = TK_CVEC_BITS_BYTES(tm->classes);
   tk_lua_fread(L, &tm->features, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->clauses, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->clause_tolerance, sizeof(unsigned int), 1, fh);
@@ -1178,7 +1176,7 @@ static inline int tk_tsetlin_load (lua_State *L)
   bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && lua_toboolean(L, 2);
   FILE *fh = isstr ? tk_lua_fmemopen(L, (char *) data, len, "r") : tk_lua_fopen(L, data, "r");
   bool read_state = lua_toboolean(L, 3);
-  unsigned int n_threads = tk_threads_getn(L, 4, "load", "threads");
+  unsigned int n_threads = tk_threads_getn(L, 4, "load", NULL);
   tk_tsetlin_type_t type;
   bool has_state;
   tk_lua_fread(L, &type, sizeof(type), 1, fh);

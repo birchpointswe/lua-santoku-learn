@@ -33,5 +33,9 @@ int luaopen_santoku_tsetlin_hbi (lua_State *L)
 {
   lua_newtable(L);
   tk_lua_register(L, tk_hbi_fns, 0);
+  tk_hbi_hoods_create(L, 0, 0, 0);
+  luaL_getmetafield(L, -1, "__index");
+  luaL_register(L, NULL, tk_hbi_hoods_lua_mt_fns); // t
+  lua_pop(L, 2);
   return 1;
 }

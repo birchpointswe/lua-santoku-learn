@@ -624,7 +624,7 @@ static inline void tk_corex_init_alpha_thread (
   unsigned int hlast
 ) {
   for (unsigned int i = hfirst * n_visible; i < (hlast + 1) * n_visible; i ++)
-    alpha[i] = 0.5 + 0.5 * fast_drand();
+    alpha[i] = 0.5 + 0.5 * tk_fast_drand();
 }
 
 // Doesn't really need to be threaded..'
@@ -652,8 +652,8 @@ static inline void tk_corex_init_log_pyx_unnorm_thread (
   double *restrict lpyx0 = log_pyx_unnorm + 0 * n_hidden * n_samples;
   double *restrict lpyx1 = log_pyx_unnorm + 1 * n_hidden * n_samples;
   for (unsigned int i = hfirst * n_samples; i < (hlast + 1) * n_samples; i ++) {
-    lpyx0[i] = log_dim_hidden * (0.5 + fast_drand());
-    lpyx1[i] = log_dim_hidden * (0.5 + fast_drand());
+    lpyx0[i] = log_dim_hidden * (0.5 + tk_fast_drand());
+    lpyx1[i] = log_dim_hidden * (0.5 + tk_fast_drand());
   }
 }
 
@@ -664,7 +664,7 @@ static void tk_corex_worker (void *dp, int sig)
   tk_corex_t *C = data->C;
   switch (stage) {
     case TK_CMP_INIT_SEED:
-      seed_rand(data->index);
+      tk_fast_seed(data->index);
       break;
     case TK_CMP_INIT_ALPHA:
       tk_corex_init_alpha_thread(

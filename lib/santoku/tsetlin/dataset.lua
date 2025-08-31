@@ -1,10 +1,8 @@
 require("santoku.rvec")
 local serialize = require("santoku.serialize") -- luacheck: ignore
-local tbl = require("santoku.table")
 local inv = require("santoku.tsetlin.inv")
 local pvec = require("santoku.pvec")
 local ivec = require("santoku.ivec")
-local dvec = require("santoku.dvec")
 local it = require("santoku.iter")
 local fs = require("santoku.fs")
 local str = require("santoku.string")

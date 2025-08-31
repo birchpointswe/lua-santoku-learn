@@ -56,5 +56,10 @@ int luaopen_santoku_tsetlin_inv (lua_State *L)
 {
   lua_newtable(L);
   tk_lua_register(L, tk_inv_fns, 0);
+  tk_inv_hoods_create(L, 0, 0, 0);
+  luaL_getmetafield(L, -1, "__index");
+  luaL_register(
+    L, NULL, tk_inv_hoods_lua_mt_fns); // t
+  lua_pop(L, 2);
   return 1;
 }

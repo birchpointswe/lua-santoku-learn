@@ -1,9 +1,6 @@
 build
+tmp
+.tmp*
 .old*
-test/res/santoku/tsetlin/BinarizedMNISTData/
-test/res/BinarizedMNISTData/
-tmp/
-test/res/imdb.dev/
-test/res/glove.10k.txt
-test/res/snli.10k.txt
-test/res/snli.50k.txt
+test/res/imdb.50k
+test/res/mnist.70k.txt

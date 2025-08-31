@@ -1,8 +1,6 @@
 #ifndef TK_CONF_H
 #define TK_CONF_H
 
-// #include <santoku/execinfo.h>
-
 #include <santoku/lua/utils.h>
 #include <santoku/threads.h>
 #include <santoku/klib.h>
@@ -35,16 +33,6 @@
 typedef uint8_t tk_bits_t;
 #define BITS 8
 #define BYTES (BITS / CHAR_BIT)
-#define BITS_BYTES(x) ((x + CHAR_BIT - 1) / CHAR_BIT)
-#define BITS_BYTE(x) (x / CHAR_BIT)
-#define BITS_BIT(x) ((x % CHAR_BIT))
-const tk_bits_t ZERO_MASK = 0x00;
-const tk_bits_t ALL_MASK = 0xFF;
-const tk_bits_t POS_MASK = 0x55;
-const tk_bits_t NEG_MASK = 0xAA;
-static inline uint8_t popcount (tk_bits_t x) {
-  return (uint8_t) __builtin_popcount(x);
-}
 
 static inline uint64_t mix64 (uint64_t x) {
   x ^= x >> 33;
@@ -87,45 +75,6 @@ typedef struct { int64_t u, v; double d; } tm_candidate_t;
 KSORT_INIT(candidates_asc, tm_candidate_t, tm_candidate_lt)
 KSORT_INIT(candidates_desc, tm_candidate_t, tm_candidate_gt)
 typedef kvec_t(tm_candidate_t) tm_candidates_t;
-
-static uint64_t const multiplier = 6364136223846793005u;
-__thread uint64_t mcg_state = 0xcafef00dd15ea5e5u;
-
-static inline uint32_t fast_rand ()
-{
-  uint64_t x = mcg_state;
-  unsigned int count = (unsigned int) (x >> 61);
-  mcg_state = x * multiplier;
-  return (uint32_t) ((x ^ x >> 22) >> (22 + count));
-}
-
-static inline void seed_rand (unsigned int r) {
-  uint64_t raw = (uint64_t)pthread_self() ^ (uint64_t)time(NULL) ^ ((uint64_t) r << 32);
-  mcg_state = mix64(raw);
-}
-
-static inline double fast_drand ()
-{
-  return ((double)fast_rand()) / ((double)UINT32_MAX);
-}
-
-static inline double fast_index (unsigned int n)
-{
-  return fast_rand() % n;
-}
-
-static inline bool fast_chance (double p)
-{
-  return fast_drand() <= p;
-}
-
-static inline int fast_norm (double mean, double variance)
-{
-  double u1 = (double) (fast_rand() + 1) / ((double) UINT32_MAX + 1);
-  double u2 = (double) fast_rand() / UINT32_MAX;
-  double n1 = sqrt(-2 * log(u1)) * sin(8 * atan(1) * u2);
-  return (int) round(mean + sqrt(variance) * n1);
-}
 
 static inline void *tk_malloc_interleaved (
   lua_State *L,

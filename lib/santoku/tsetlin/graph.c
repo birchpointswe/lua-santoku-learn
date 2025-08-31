@@ -1,4 +1,5 @@
 #include <santoku/tsetlin/graph.h>
+#include <santoku/cvec.h>
 
 static inline tk_graph_t *tm_graph_create (
   lua_State *L,
@@ -272,7 +273,7 @@ static inline double tk_graph_distance (
     char *wset = tk_ann_get(graph->ann, v);
     if (wset == NULL)
       return DBL_MAX;
-    return (double) tk_ann_hamming((const unsigned char *) uset, (const unsigned char *) wset, graph->ann->features) / (double) graph->ann->features;
+    return (double) tk_cvec_bits_hamming((const uint8_t *) uset, (const uint8_t *) wset, graph->ann->features) / (double) graph->ann->features;
 
   } else if (graph->hbi != NULL) {
 
@@ -282,7 +283,7 @@ static inline double tk_graph_distance (
     char *wset = tk_hbi_get(graph->hbi, v);
     if (wset == NULL)
       return DBL_MAX;
-    return (double) tk_ann_hamming((const unsigned char *) uset, (const unsigned char *) wset, graph->hbi->features) / (double) graph->hbi->features;
+    return (double) tk_cvec_bits_hamming((const uint8_t *) uset, (const uint8_t *) wset, graph->hbi->features) / (double) graph->hbi->features;
 
   } else {
     return DBL_MAX;
