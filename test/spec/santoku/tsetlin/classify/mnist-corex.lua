@@ -10,20 +10,24 @@ local utc = require("santoku.utc")
 
 local TTR = 0.9
 local MAX = nil
-local EVALUATE_EVERY = 1
-local TM_ITERS = 100
 local COREX_ITERS = 100
-
-local CLASSES = 10
-local CLAUSES = 8
-local CLAUSE_TOLERANCE = 8
-local CLAUSE_MAXIMUM = 8
-local SPECIFICITY = 1000
-local NEGATIVE = nil
-local TARGET = 4
 
 local VISIBLE = 784
 local HIDDEN = 128
+
+local CLASSES = 10
+local NEGATIVE = 0.1
+local CLAUSES = { def = 8, min = 8, max = 32, log = true, int = true }
+local CLAUSE_TOLERANCE = { def = 8, min = 8, max = 64, int = true }
+local CLAUSE_MAXIMUM = { def = 8, min = 8, max = 64, int = true }
+local TARGET = { def = 4, min = 8, max = 64 }
+local SPECIFICITY = { def = 1000, min = 100, max = 2000 }
+
+local SEARCH_PATIENCE = 3
+local SEARCH_ROUNDS = 10
+local SEARCH_TRIALS = 4
+local SEARCH_ITERATIONS = 10
+local FINAL_ITERATIONS = 100
 
 test("tsetlin", function ()
 
@@ -52,50 +56,61 @@ test("tsetlin", function ()
 
   print("Transforming train")
   cor.compress(train.problems, train.n)
-  train.problems = train.problems:raw_bitmap(train.n, HIDDEN, true)
+  train.problems = train.problems:bits_to_cvec(train.n, HIDDEN, true)
   train.solutions = train.solutions:raw("u32")
 
   print("Transforming test")
   cor.compress(test.problems, test.n)
-  test.problems = test.problems:raw_bitmap(test.n, HIDDEN, true)
+  test.problems = test.problems:bits_to_cvec(test.n, HIDDEN, true)
   test.solutions = test.solutions:raw("u32")
 
   print("Train", train.n)
   print("Test", test.n)
 
-  print("Creating")
-  local t = tm.classifier({
+  print("Optimizing classifier")
+  local t = tm.optimize_classifier({
+
     features = HIDDEN,
     classes = CLASSES,
+    negative = NEGATIVE,
+
+    samples = train.n,
+    problems = train.problems,
+    solutions = train.solutions,
+
     clauses = CLAUSES,
     clause_tolerance = CLAUSE_TOLERANCE,
     clause_maximum = CLAUSE_MAXIMUM,
     target = TARGET,
     specificity = SPECIFICITY,
-    negative = NEGATIVE,
-  })
 
-  print("Training")
-  local stopwatch = utc.stopwatch()
-  t.train({
-    samples = train.n,
-    problems = train.problems,
-    solutions = train.solutions,
-    iterations = TM_ITERS,
-    each = function (epoch)
-      local train_pred = t.predict(train.problems, train.n)
-      local test_pred = t.predict(test.problems, test.n)
-      local duration = stopwatch()
-      if epoch == TM_ITERS or epoch % EVALUATE_EVERY == 0 then
-        local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, CLASSES)
-        local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, CLASSES)
-        str.printf("Epoch %-4d  Time %4.2f  Test %4.2f  Train %4.2f\n",
-          epoch, duration, test_stats.f1, train_stats.f1)
+    search_patience = SEARCH_PATIENCE,
+    search_rounds = SEARCH_ROUNDS,
+    search_trials = SEARCH_TRIALS,
+    search_iterations = SEARCH_ITERATIONS,
+    final_iterations = FINAL_ITERATIONS,
+
+    search_metric = function (t)
+      local predicted = t.predict(train.problems, train.n)
+      local accuracy = eval.class_accuracy(predicted, train.solutions, train.n, CLASSES)
+      return accuracy.f1, accuracy
+    end,
+
+    each = function (t, is_final, train_accuracy, params, epoch, round, trial)
+      local test_predicted = t.predict(test.problems, test.n)
+      local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, CLASSES)
+      local d, dd = stopwatch()
+      -- luacheck: push ignore
+      if is_final then
+        str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%.2f S=%.2f  F1=(%.2f,%.2f)  Epoch  %d\n\n",
+          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, train_accuracy.f1, test_accuracy.f1, epoch)
       else
-        str.printf("Epoch %-4d  Time %4.2f\n",
-          epoch, duration)
+        str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%.2f S=%.2f  R=%d T=%d  F1=(%.2f,%.2f)  Epoch  %d\n\n",
+          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, round, trial, train_accuracy.f1, test_accuracy.f1, epoch)
       end
+      -- luacheck: pop
     end
+
   })
 
   print()
@@ -104,7 +119,7 @@ test("tsetlin", function ()
   t.persist("model.bin", true)
 
   print("Testing restore")
-  t = tm.load("model.bin", nil, true)
+  t = tm.load("model.bin")
   local train_pred = t.predict(train.problems, train.n)
   local test_pred = t.predict(test.problems, test.n)
   local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, CLASSES)

@@ -8,8 +8,10 @@
 #include <santoku/tsetlin/conf.h>
 #include <santoku/ivec.h>
 #include <santoku/iumap.h>
+#include <santoku/iuset.h>
 #include <santoku/dumap.h>
 #include <santoku/threads.h>
+#include <santoku/ivec/ext.h>
 
 #define TK_INV_MT "tk_inv_t"
 #define TK_INV_EPH "tk_inv_eph"
@@ -65,6 +67,9 @@ typedef struct tk_inv_s {
   tk_ivec_t *touched;
   tk_inv_thread_t *threads;
   tk_threadpool_t *pool;
+  // Temporary vectors for query processing (reused across calls)
+  tk_ivec_t *tmp_query_offsets;   // Temporary offsets for query vectors
+  tk_ivec_t *tmp_query_features;  // Temporary features for query vectors
 } tk_inv_t;
 
 typedef struct tk_inv_thread_s {
@@ -76,6 +81,8 @@ typedef struct tk_inv_thread_s {
   tk_iumap_t *sid_idx;
   tk_ivec_t *uids;
   tk_ivec_t *sids;
+  tk_ivec_t *query_offsets;   // Points to I->tmp_query_offsets when processing queries
+  tk_ivec_t *query_features;  // Points to I->tmp_query_features when processing queries
   tk_dvec_t *wacc;
   uint64_t ifirst, ilast;
   double eps;
@@ -340,6 +347,35 @@ static inline void tk_inv_remove (
   tk_inv_uid_remove(I, uid);
 }
 
+static inline void tk_inv_keep (
+  lua_State *L,
+  tk_inv_t *I,
+  tk_ivec_t *ids
+) {
+  if (I->destroyed) {
+    tk_lua_verror(L, 2, "keep", "can't keep in a destroyed index");
+    return;
+  }
+
+  // Create a set from the IDs to keep
+  tk_iuset_t *keep_set = tk_iuset_from_ivec(ids);
+
+  // Create a set of all current IDs, then remove the ones we want to keep
+  tk_iuset_t *to_remove_set = tk_iuset_create();
+  tk_iuset_union_iumap(to_remove_set, I->uid_sid);
+  tk_iuset_difference(to_remove_set, keep_set);
+
+  // Remove the IDs that are not in the keep set
+  int64_t uid;
+  tk_iuset_foreach(to_remove_set, uid, ({
+    tk_inv_uid_remove(I, uid);
+  }));
+
+  // Clean up
+  tk_iuset_destroy(keep_set);
+  tk_iuset_destroy(to_remove_set);
+}
+
 static inline void tk_inv_mutualize (
   lua_State *L,
   tk_inv_t *I,
@@ -460,20 +496,12 @@ static inline void tk_inv_neighborhoods (
   if (I->destroyed)
     return;
 
-  tk_ivec_t *sids, *uids;
-  if (uidsp && *uidsp) {
-    sids = tk_ivec_create(L, (*uidsp)->n, 0, 0);
-    uids = tk_ivec_create(L, (*uidsp)->n, 0, 0);
-    tk_ivec_copy(uids, *uidsp, 0, (int64_t) (*uidsp)->n, 0);
-    for (uint64_t i = 0; i < uids->n; i ++)
-      sids->a[i] = tk_inv_uid_sid(I, uids->a[i], false);
-  } else {
-    sids = tk_iumap_values(L, I->uid_sid);
-    tk_ivec_asc(sids, 0, sids->n); // sort for cache locality
-    uids = tk_ivec_create(L, sids->n, 0, 0);
-    for (uint64_t i = 0; i < sids->n; i ++)
-      uids->a[i] = tk_inv_sid_uid(I, sids->a[i]);
-  }
+  // Get all items in index
+  tk_ivec_t *sids = tk_iumap_values(L, I->uid_sid);
+  tk_ivec_asc(sids, 0, sids->n); // sort for cache locality
+  tk_ivec_t *uids = tk_ivec_create(L, sids->n, 0, 0);
+  for (uint64_t i = 0; i < sids->n; i ++)
+    uids->a[i] = tk_inv_sid_uid(I, sids->a[i]);
 
   tk_iumap_t *sid_idx = tk_iumap_from_ivec(sids);
   tk_inv_hoods_t *hoods = tk_inv_hoods_create(L, uids->n, 0, 0);
@@ -495,12 +523,14 @@ static inline void tk_inv_neighborhoods (
     tk_inv_thread_t *data = I->threads + i;
     data->uids = uids;
     data->sids = sids;
+    data->query_offsets = NULL;
+    data->query_features = NULL;
     tk_dvec_ensure(data->wacc, sids->n * I->n_ranks);
     tk_dvec_zero(data->wacc);
     data->hoods = hoods;
     data->hoods_sets = hoods_sets;
     data->sid_idx = sid_idx;
-    data->eps = eps; //+ TK_INV_LENGTH_EPS;
+    data->eps = eps;
     data->knn = knn;
     data->mutual = mutual;
     data->cmp = cmp;
@@ -597,7 +627,301 @@ cleanup:
       tk_dumap_destroy(hoods_sets[i]);
     free(hoods_sets);
   }
+  if (sids) lua_remove(L, -3); // sids
+}
+
+// Get neighborhoods for specific IDs
+static inline void tk_inv_neighborhoods_by_ids (
+  lua_State *L,
+  tk_inv_t *I,
+  tk_ivec_t *query_ids,
+  uint64_t knn,
+  double eps,
+  uint64_t min,
+  tk_inv_cmp_type_t cmp,
+  double tversky_alpha,
+  double tversky_beta,
+  bool mutual,
+  tk_inv_hoods_t **hoodsp,
+  tk_ivec_t **uidsp
+) {
+  if (I->destroyed)
+    return;
+
+  // Use provided UIDs
+  tk_ivec_t *sids = tk_ivec_create(L, query_ids->n, 0, 0);
+  tk_ivec_t *uids = tk_ivec_create(L, query_ids->n, 0, 0);
+  tk_ivec_copy(uids, query_ids, 0, (int64_t) query_ids->n, 0);
+  for (uint64_t i = 0; i < uids->n; i ++)
+    sids->a[i] = tk_inv_uid_sid(I, uids->a[i], false);
+
+  tk_iumap_t *sid_idx = tk_iumap_from_ivec(sids);
+  tk_inv_hoods_t *hoods = tk_inv_hoods_create(L, uids->n, 0, 0);
+  tk_dumap_t **hoods_sets = NULL;
+  if (mutual && knn) {
+    hoods_sets = tk_malloc(L, uids->n * sizeof(tk_dumap_t *));
+    for (uint64_t i = 0; i < uids->n; i ++)
+      hoods_sets[i] = tk_dumap_create();
+  }
+
+  for (uint64_t i = 0; i < hoods->n; i ++) {
+    hoods->a[i] = tk_rvec_create(L, knn, 0, 0);
+    hoods->a[i]->n = 0;
+    tk_lua_add_ephemeron(L, TK_INV_EPH, -2, -1);
+    lua_pop(L, 1);
+  }
+
+  for (uint64_t i = 0; i < I->pool->n_threads; i ++) {
+    tk_inv_thread_t *data = I->threads + i;
+    data->uids = uids;
+    data->sids = sids;
+    data->query_offsets = NULL;
+    data->query_features = NULL;
+    tk_dvec_ensure(data->wacc, sids->n * I->n_ranks);
+    tk_dvec_zero(data->wacc);
+    data->hoods = hoods;
+    data->hoods_sets = hoods_sets;
+    data->sid_idx = sid_idx;
+    data->eps = eps;
+    data->knn = knn;
+    data->mutual = mutual;
+    data->cmp = cmp;
+    data->tversky_alpha = tversky_alpha;
+    data->tversky_beta = tversky_beta;
+    tk_thread_range(i, I->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
+  }
+
+  tk_threads_signal(I->pool, TK_INV_NEIGHBORHOODS, 0);
+  if (mutual && knn) {
+    tk_threads_signal(I->pool, TK_INV_MUTUAL_INIT, 0);
+    tk_threads_signal(I->pool, TK_INV_MUTUAL_FILTER, 0);
+  }
+  tk_iumap_destroy(sid_idx);
+
+  // Apply min neighbor filtering if requested
+  if (min > 0) {
+    int64_t keeper_count = 0;
+    for (uint64_t i = 0; i < uids->n; i++)
+      if (hoods->a[i]->n >= min)
+        keeper_count ++;
+
+    if (keeper_count == (int64_t) uids->n)
+      goto cleanup;
+
+    int64_t *old_to_new = tk_malloc(L, uids->n * sizeof(int64_t));
+    int64_t new_idx = 0;
+    for (uint64_t i = 0; i < uids->n; i++) {
+      if (hoods->a[i]->n >= min) {
+        old_to_new[i] = new_idx++;
+      } else {
+        old_to_new[i] = -1;
+      }
+    }
+
+    for (uint64_t i = 0; i < I->pool->n_threads; i++) {
+      tk_inv_thread_t *data = I->threads + i;
+      data->old_to_new = old_to_new;
+      data->min = min;
+      tk_thread_range(i, I->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
+    }
+
+    tk_threads_signal(I->pool, TK_INV_MIN_REMAP, 0);
+
+    tk_ivec_t *new_uids = tk_ivec_create(L, (uint64_t) keeper_count, 0, 0);
+    tk_inv_hoods_t *new_hoods = tk_inv_hoods_create(L, (uint64_t) keeper_count, 0, 0);
+    new_hoods->n = (uint64_t) keeper_count;
+
+    uint64_t write_pos = 0;
+    for (uint64_t i = 0; i < uids->n; i++) {
+      if (hoods->a[i]->n >= min) {
+        new_uids->a[write_pos] = uids->a[i];
+        new_hoods->a[write_pos] = hoods->a[i];
+        write_pos++;
+      }
+    }
+
+    int64_t *old_uids_data = uids->a;
+    tk_inv_hood_t *old_hoods_data = hoods->a;
+    uids->a = new_uids->a;
+    uids->n = (uint64_t) keeper_count;
+    uids->m = (uint64_t) keeper_count;
+    hoods->a = new_hoods->a;
+    hoods->n = (uint64_t) keeper_count;
+    hoods->m = (uint64_t) keeper_count;
+    new_uids->a = old_uids_data;
+    new_hoods->a = old_hoods_data;
+    lua_remove(L, -2);
+    lua_remove(L, -1);
+    free(old_to_new);
+  }
+
+cleanup:
+  if (hoodsp) *hoodsp = hoods;
+  if (uidsp) *uidsp = uids;
+  if (hoods_sets) {
+    for (uint64_t i = 0; i < uids->n; i ++)
+      tk_dumap_destroy(hoods_sets[i]);
+    free(hoods_sets);
+  }
   lua_remove(L, -3); // sids
+}
+
+// Get neighborhoods for query vectors
+static inline void tk_inv_neighborhoods_by_vecs (
+  lua_State *L,
+  tk_inv_t *I,
+  tk_ivec_t *query_vecs,
+  uint64_t knn,
+  double eps,
+  uint64_t min,
+  tk_inv_cmp_type_t cmp,
+  double tversky_alpha,
+  double tversky_beta,
+  tk_inv_hoods_t **hoodsp,
+  tk_ivec_t **uidsp
+) {
+  if (I->destroyed)
+    return;
+
+  // Process query vectors (list-of-set-bits format)
+  // The format is: sample_idx * features + fid for each set bit
+  // We need to group by sample and extract feature IDs
+
+  // First, determine number of queries by finding max sample index
+  uint64_t n_queries = 0;
+  for (uint64_t i = 0; i < query_vecs->n; i++) {
+    int64_t encoded = query_vecs->a[i];
+    if (encoded >= 0) {
+      uint64_t sample_idx = (uint64_t) encoded / I->features;
+      if (sample_idx >= n_queries) n_queries = sample_idx + 1;
+    }
+  }
+
+  // Ensure tmp vectors have sufficient capacity
+  tk_ivec_ensure(I->tmp_query_offsets, n_queries + 1);
+  tk_ivec_ensure(I->tmp_query_features, query_vecs->n);
+
+  // Clear and reset vectors
+  I->tmp_query_offsets->n = n_queries + 1;
+  I->tmp_query_features->n = 0;
+
+  // Initialize offsets to 0
+  for (uint64_t i = 0; i <= n_queries; i++)
+    I->tmp_query_offsets->a[i] = 0;
+
+  // First pass: count features per query
+  for (uint64_t i = 0; i < query_vecs->n; i++) {
+    int64_t encoded = query_vecs->a[i];
+    if (encoded >= 0) {
+      uint64_t sample_idx = (uint64_t) encoded / I->features;
+      I->tmp_query_offsets->a[sample_idx + 1]++;
+    }
+  }
+
+  // Convert counts to offsets
+  for (uint64_t i = 1; i <= n_queries; i++)
+    I->tmp_query_offsets->a[i] += I->tmp_query_offsets->a[i - 1];
+
+  // Second pass: fill features array (we'll use a temp copy of offsets for writing)
+  tk_ivec_t *write_offsets = tk_ivec_create(L, n_queries, 0, 0);
+  tk_ivec_copy(write_offsets, I->tmp_query_offsets, 0, (int64_t) n_queries, 0);
+
+  for (uint64_t i = 0; i < query_vecs->n; i++) {
+    int64_t encoded = query_vecs->a[i];
+    if (encoded >= 0) {
+      uint64_t sample_idx = (uint64_t) encoded / I->features;
+      int64_t fid = encoded % (int64_t) I->features;
+      int64_t write_pos = write_offsets->a[sample_idx]++;
+      I->tmp_query_features->a[write_pos] = fid;
+    }
+  }
+  I->tmp_query_features->n = (size_t) I->tmp_query_offsets->a[n_queries];
+
+  lua_pop(L, 1); // Remove write_offsets
+
+  // Get all SIDs and create UID lookup table
+  tk_ivec_t *all_sids = tk_iumap_values(L, I->uid_sid);
+  tk_ivec_t *uids = tk_ivec_create(L, all_sids->n, 0, 0);
+  uids->n = all_sids->n;
+  for (uint64_t i = 0; i < all_sids->n; i++) {
+    uids->a[i] = tk_inv_sid_uid(I, all_sids->a[i]);
+  }
+  // Create sid_idx for mapping SIDs to indices
+  tk_iumap_t *sid_idx = tk_iumap_from_ivec(all_sids);
+
+  tk_inv_hoods_t *hoods = tk_inv_hoods_create(L, n_queries, 0, 0);
+  hoods->n = n_queries;
+
+  for (uint64_t i = 0; i < hoods->n; i ++) {
+    hoods->a[i] = tk_rvec_create(L, knn, 0, 0);
+    hoods->a[i]->n = 0;
+    tk_lua_add_ephemeron(L, TK_INV_EPH, -2, -1);
+    lua_pop(L, 1);
+  }
+
+  for (uint64_t i = 0; i < I->pool->n_threads; i ++) {
+    tk_inv_thread_t *data = I->threads + i;
+    data->uids = uids;
+    data->sids = all_sids;  // Need SIDs for lookup
+    data->query_offsets = I->tmp_query_offsets;
+    data->query_features = I->tmp_query_features;
+    tk_dvec_ensure(data->wacc, all_sids->n * I->n_ranks);
+    tk_dvec_zero(data->wacc);
+    data->hoods = hoods;
+    data->hoods_sets = NULL;  // No mutual filtering for query vectors
+    data->sid_idx = sid_idx;  // Need sid_idx for index mapping
+    data->eps = eps;
+    data->knn = knn;
+    data->mutual = false;  // No mutual filtering for query vectors
+    data->cmp = cmp;
+    data->tversky_alpha = tversky_alpha;
+    data->tversky_beta = tversky_beta;
+    tk_thread_range(i, I->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
+  }
+
+  tk_threads_signal(I->pool, TK_INV_NEIGHBORHOODS, 0);
+
+  // Clean up
+  tk_iumap_destroy(sid_idx);
+  lua_pop(L, 1); // pop all_sids
+
+  // Note: For neighborhoods_by_vecs, min filtering only removes query vectors
+  // that don't have enough neighbors. The UID lookup table remains unchanged.
+  if (min > 0) {
+    int64_t keeper_count = 0;
+    for (uint64_t i = 0; i < hoods->n; i++)
+      if (hoods->a[i]->n >= min)
+        keeper_count ++;
+
+    if (keeper_count == (int64_t) hoods->n)
+      goto cleanup;
+
+    // For neighborhoods_by_vecs, we don't remap indices since the UID lookup
+    // table remains complete. We just remove hoods that don't meet min threshold.
+    tk_inv_hoods_t *new_hoods = tk_inv_hoods_create(L, (uint64_t) keeper_count, 0, 0);
+    new_hoods->n = (uint64_t) keeper_count;
+
+    // Compact keeper hoods into new array
+    uint64_t write_pos = 0;
+    for (uint64_t i = 0; i < hoods->n; i++) {
+      if (hoods->a[i]->n >= min) {
+        new_hoods->a[write_pos] = hoods->a[i];
+        write_pos++;
+      }
+    }
+
+    // Update original hoods array in-place to point to new data
+    tk_inv_hood_t *old_hoods_data = hoods->a;
+    hoods->a = new_hoods->a;
+    hoods->n = (uint64_t) keeper_count;
+    hoods->m = (uint64_t) keeper_count;
+    new_hoods->a = old_hoods_data;
+    lua_remove(L, -1); // remove new_hoods (frees old hoods data)
+  }
+
+cleanup:
+  if (hoodsp) *hoodsp = hoods;
+  if (uidsp) *uidsp = uids;
 }
 
 static inline double tk_inv_w (
@@ -987,20 +1311,47 @@ static inline int tk_inv_add_lua (lua_State *L)
 static inline int tk_inv_remove_lua (lua_State *L)
 {
   tk_inv_t *I = tk_inv_peek(L, 1);
-  int64_t id = tk_lua_checkinteger(L, 2, "id");
-  tk_inv_remove(L, I, id);
+  if (lua_type(L, 2) == LUA_TNUMBER) {
+    int64_t id = tk_lua_checkinteger(L, 2, "id");
+    tk_inv_remove(L, I, id);
+  } else {
+    tk_ivec_t *ids = tk_ivec_peek(L, 2, "ids");
+    for (uint64_t i = 0; i < ids->n; i++) {
+      tk_inv_uid_remove(I, ids->a[i]);
+    }
+  }
+  return 0;
+}
+
+static inline int tk_inv_keep_lua (lua_State *L)
+{
+  tk_inv_t *I = tk_inv_peek(L, 1);
+  if (lua_type(L, 2) == LUA_TNUMBER) {
+    // Single ID case - keep only this ID
+    int64_t id = tk_lua_checkinteger(L, 2, "id");
+    tk_ivec_t *ids = tk_ivec_create(L, 1, 0, 0);
+    ids->a[0] = id;
+    ids->n = 1;
+    tk_inv_keep(L, I, ids);
+    lua_pop(L, 1);
+  } else {
+    tk_ivec_t *ids = tk_ivec_peek(L, 2, "ids");
+    tk_inv_keep(L, I, ids);
+  }
   return 0;
 }
 
 static inline int tk_inv_get_lua (lua_State *L)
 {
-  lua_settop(L, 3);
+  lua_settop(L, 4);
   tk_inv_t *I = tk_inv_peek(L, 1);
   int64_t uid = -1;
   tk_ivec_t *uids = NULL;
   tk_ivec_t *out = tk_ivec_peekopt(L, 3);
   out = out == NULL ? tk_ivec_create(L, 0, 0, 0) : out; // out
-  tk_ivec_clear(out);
+  bool append = tk_lua_optboolean(L, 4, "append", false);
+  if (!append)
+    tk_ivec_clear(out);
   if (lua_type(L, 2) == LUA_TNUMBER) {
     uid = tk_lua_checkinteger(L, 2, "id");
     size_t n = 0;
@@ -1022,7 +1373,7 @@ static inline int tk_inv_get_lua (lua_State *L)
     }
     // Pre-allocate the output vector with exact size needed
     if (total_size > 0) {
-      tk_ivec_ensure(out, total_size);
+      tk_ivec_ensure(out, out->n + total_size);
       // Second pass: copy data without reallocations
       for (uint64_t i = 0; i < uids->n; i ++) {
         uid = uids->a[i];
@@ -1030,8 +1381,8 @@ static inline int tk_inv_get_lua (lua_State *L)
         int64_t *data = tk_inv_get(I, uid, &n);
         if (!n)
           continue;
-        memcpy(out->a + out->n, data, n * sizeof(int64_t));
-        out->n += n;
+        for (size_t j = 0; j < n; j++)
+          out->a[out->n ++] = data[j] + (int64_t) (i * I->features);
       }
     }
   }
@@ -1042,12 +1393,13 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
 {
   tk_inv_t *I = tk_inv_peek(L, 1);
   uint64_t knn = tk_lua_checkunsigned(L, 2, "knn");
-  double eps = tk_lua_optposdouble(L, 3, "min", 1.0);
-  uint64_t min = tk_lua_optposdouble(L, 4, "eps", 1.0);
+  double eps = tk_lua_optposdouble(L, 3, "eps", 1.0);
+  uint64_t min = tk_lua_optunsigned(L, 4, "min", 0);
   const char *typ = tk_lua_optstring(L, 5, "comparator", "jaccard");
   double tversky_alpha = tk_lua_optnumber(L, 6, "alpha", 1.0);
   double tversky_beta = tk_lua_optnumber(L, 7, "beta", 0.1);
   bool mutual = tk_lua_optboolean(L, 8, "mutual", false);
+
   tk_inv_cmp_type_t cmp = TK_INV_JACCARD;
   if (!strcmp(typ, "jaccard"))
     cmp = TK_INV_JACCARD;
@@ -1058,8 +1410,76 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
   else if (!strcmp(typ, "tversky"))
     cmp = TK_INV_TVERSKY;
   else
-    tk_lua_verror(L, 3, "neighbors", "invalid comparator specified", typ);
-  tk_inv_neighborhoods(L, I, knn, eps, min, cmp, tversky_alpha, tversky_beta, mutual, 0, 0);
+    tk_lua_verror(L, 3, "neighborhoods", "invalid comparator specified", typ);
+
+  tk_inv_neighborhoods(L, I, knn, eps, min, cmp, tversky_alpha, tversky_beta, mutual, NULL, NULL);
+  return 2;
+}
+
+static inline int tk_inv_neighborhoods_by_ids_lua (lua_State *L)
+{
+  tk_inv_t *I = tk_inv_peek(L, 1);
+  tk_ivec_t *query_ids = tk_ivec_peek(L, 2, "ids");
+  uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
+  double eps = tk_lua_optposdouble(L, 4, "eps", 1.0);
+  uint64_t min = tk_lua_optunsigned(L, 5, "min", 0);
+  const char *typ = tk_lua_optstring(L, 6, "comparator", "jaccard");
+  double tversky_alpha = tk_lua_optnumber(L, 7, "alpha", 1.0);
+  double tversky_beta = tk_lua_optnumber(L, 8, "beta", 0.1);
+  bool mutual = tk_lua_optboolean(L, 9, "mutual", false);
+
+  tk_inv_cmp_type_t cmp = TK_INV_JACCARD;
+  if (!strcmp(typ, "jaccard"))
+    cmp = TK_INV_JACCARD;
+  else if (!strcmp(typ, "overlap"))
+    cmp = TK_INV_OVERLAP;
+  else if (!strcmp(typ, "dice"))
+    cmp = TK_INV_DICE;
+  else if (!strcmp(typ, "tversky"))
+    cmp = TK_INV_TVERSKY;
+  else
+    tk_lua_verror(L, 3, "neighborhoods_by_ids", "invalid comparator specified", typ);
+
+  // Filter invalid IDs in-place
+  int64_t write_pos = 0;
+  for (int64_t i = 0; i < (int64_t) query_ids->n; i++) {
+    int64_t uid = query_ids->a[i];
+    khint_t k = tk_iumap_get(I->uid_sid, uid);
+    if (k != tk_iumap_end(I->uid_sid)) {
+      query_ids->a[write_pos++] = uid;
+    }
+  }
+  query_ids->n = (uint64_t) write_pos;
+
+  tk_inv_hoods_t *hoods;
+  tk_inv_neighborhoods_by_ids(L, I, query_ids, knn, eps, min, cmp, tversky_alpha, tversky_beta, mutual, &hoods, &query_ids);
+  return 2;
+}
+
+static inline int tk_inv_neighborhoods_by_vecs_lua (lua_State *L)
+{
+  tk_inv_t *I = tk_inv_peek(L, 1);
+  tk_ivec_t *query_vecs = tk_ivec_peek(L, 2, "vectors");
+  uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
+  double eps = tk_lua_optposdouble(L, 4, "eps", 1.0);
+  uint64_t min = tk_lua_optunsigned(L, 5, "min", 0);
+  const char *typ = tk_lua_optstring(L, 6, "comparator", "jaccard");
+  double tversky_alpha = tk_lua_optnumber(L, 7, "alpha", 1.0);
+  double tversky_beta = tk_lua_optnumber(L, 8, "beta", 0.1);
+
+  tk_inv_cmp_type_t cmp = TK_INV_JACCARD;
+  if (!strcmp(typ, "jaccard"))
+    cmp = TK_INV_JACCARD;
+  else if (!strcmp(typ, "overlap"))
+    cmp = TK_INV_OVERLAP;
+  else if (!strcmp(typ, "dice"))
+    cmp = TK_INV_DICE;
+  else if (!strcmp(typ, "tversky"))
+    cmp = TK_INV_TVERSKY;
+  else
+    tk_lua_verror(L, 3, "neighborhoods_by_vecs", "invalid comparator specified", typ);
+
+  tk_inv_neighborhoods_by_vecs(L, I, query_vecs, knn, eps, min, cmp, tversky_alpha, tversky_beta, NULL, NULL);
   return 2;
 }
 
@@ -1257,25 +1677,45 @@ static inline void tk_inv_worker (void *dp, int sig)
 
     case TK_INV_NEIGHBORHOODS:
       touched->n = 0;
-      if (wacc->n < sids->n * I->n_ranks) {
-        tk_dvec_ensure(wacc, sids->n * I->n_ranks);
-        wacc->n = sids->n * I->n_ranks;
+      uint64_t n_items = data->query_offsets ? hoods->n : sids->n;
+      if (wacc->n < n_items * I->n_ranks) {
+        tk_dvec_ensure(wacc, n_items * I->n_ranks);
+        wacc->n = n_items * I->n_ranks;
       }
       tk_dvec_zero(wacc);
       for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i ++) {
-        usid = sids->a[i];
-        if (tk_iumap_get(I->sid_uid, usid) == tk_iumap_end(I->sid_uid))
-          continue;
-        ubits = tk_inv_sget(I, usid, &nubits);
         uhood = hoods->a[i];
         tk_rvec_clear(uhood);
-        start = I->node_offsets->a[usid];
-        end = (usid + 1 == (int64_t) I->node_offsets->n)
-          ? (int64_t) I->node_bits->n
-          : I->node_offsets->a[usid + 1];
-        if (wacc->n < sids->n * I->n_ranks) {
-          tk_dvec_ensure(wacc, sids->n * I->n_ranks);
-          wacc->n = sids->n * I->n_ranks;
+
+        // Get features either from query vectors or from stored data
+        if (data->query_offsets) {
+          // Using query vectors - get features from pre-processed arrays
+          int64_t start = data->query_offsets->a[i];
+          int64_t end = (i + 1 < (int64_t) data->query_offsets->n)
+                        ? data->query_offsets->a[i + 1]
+                        : (int64_t) data->query_features->n;
+          ubits = data->query_features->a + start;
+          nubits = (size_t)(end - start);
+          usid = -1;  // No SID for query vectors
+        } else {
+          // Using stored data
+          usid = sids->a[i];
+          if (tk_iumap_get(I->sid_uid, usid) == tk_iumap_end(I->sid_uid))
+            continue;
+          ubits = tk_inv_sget(I, usid, &nubits);
+        }
+
+        // These lines were only needed for stored data, not query vectors
+        if (!data->query_offsets) {
+          start = I->node_offsets->a[usid];
+          end = (usid + 1 == (int64_t) I->node_offsets->n)
+            ? (int64_t) I->node_bits->n
+            : I->node_offsets->a[usid + 1];
+        }
+
+        if (wacc->n < n_items * I->n_ranks) {
+          tk_dvec_ensure(wacc, n_items * I->n_ranks);
+          wacc->n = n_items * I->n_ranks;
         }
 
         // Compute query weights by rank
@@ -1480,8 +1920,11 @@ static luaL_Reg tk_inv_lua_mt_fns[] =
 {
   { "add", tk_inv_add_lua },
   { "remove", tk_inv_remove_lua },
+  { "keep", tk_inv_keep_lua },
   { "get", tk_inv_get_lua },
   { "neighborhoods", tk_inv_neighborhoods_lua },
+  { "neighborhoods_by_ids", tk_inv_neighborhoods_by_ids_lua },
+  { "neighborhoods_by_vecs", tk_inv_neighborhoods_by_vecs_lua },
   { "neighbors", tk_inv_neighbors_lua },
   { "distance", tk_inv_distance_lua },
   { "similarity", tk_inv_similarity_lua },
@@ -1550,6 +1993,13 @@ static inline tk_inv_t *tk_inv_create (
     tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
     lua_pop(L, 1);
   }
+  lua_pop(L, 1);
+  // Initialize temporary vectors for query processing
+  I->tmp_query_offsets = tk_ivec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
+  I->tmp_query_features = tk_ivec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
   I->threads = tk_malloc(L, n_threads * sizeof(tk_inv_thread_t));
   memset(I->threads, 0, n_threads * sizeof(tk_inv_thread_t));
@@ -1672,6 +2122,13 @@ static inline tk_inv_t *tk_inv_load (
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
   I->wacc = tk_dvec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
+  // Initialize temporary vectors for query processing
+  I->tmp_query_offsets = tk_ivec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
+  I->tmp_query_features = tk_ivec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
   return I;

@@ -1,13 +1,11 @@
 # Now
 
-- Implement learning to triangulate pipeline
-    - Baseline: lankmark codes only
-    - Landmark codes along with space b features
-
-- Implement generative model
-    - Predict visible features from spectral codes
-
-- Rename to santoku-learn or similar
+- L-STH
+    - Always store UIDs in neighborhoods. Set up indices if needed after.
+    - Support ranks in ANN
+    - Enhance MNIST encoder test to use classes in the index for
+      semi-supervision
+    - Ensure docs up to date (various changes across matrix/tsetlin)
 
 - ann/hbi: implement mutualize/etc
     - Note: Partially completed for ann
@@ -21,13 +19,7 @@
 
 - tk_cvec_t
     - Use for Corex output, TM input/output, ANN input/output, TCH input/output
-    - Standardize bits APIs between cvec and ivec
-        - Rename to tk_ivec/tk_cvec_bits_xxx
-        - Convert between ivec/cvec with tk_ivec_bits_cvec and tk_cvec_bits_ivec
-        - Special ivec_bits_xxx methods
-            - top_chi2/mi, score chi2/mi, filter, extend, cvec
-        - Special cvec_bitx_xxx methods
-            - top_entropy, score_entropy, flip_interleave, filter, extend, ivec
+    - Port various scoring functions from ivec to cvec
 
 - Lua GC for threadpool
 - Pcalls for callbacks, or make sure everything is connected to the lua GC
@@ -35,14 +27,13 @@
 
 # Next
 
-- ann/hbi
-    - Implement rank API
+- Rename to santoku-learn or similar
+
+- Implement generative model
+    - Predict visible features from spectral codes
 
 - Move conf.h items to other libraries
-    - Random number generation (santoku)
     - Interleaved allocation (santoku-threads)
-    - Hash mixing/etc
-    - Bits/bytes, popcount
 
 - Versioning or other safety measures around persist/load
 
@@ -50,13 +41,8 @@
   unused literals, returning pruned for subsequent filtering of
   tokenizer/booleanizer, giving faster inference.
 
-- Allow clauses per class to be a non-multiple of BITS
-
 - Refactor inv to use ivec similarity routines
 - Move hamming functions to cvec
-
-- Graph
-    - Use indices for everything internal (e.g. iu/iv instead of u/v)
 
 - Clustering
     - Return n_clusters, n_core, n_border, n_noise
@@ -115,8 +101,9 @@
 
 - Templated Trie
 
-- Tests
-    - QQP, SNLI
+- QQP
+
+- SNLI (will likely require some new graph features to handle the negatives)
 
 - tk_graph_t
     - Parallelize init & seed phase (slowest phase of entire pipeline)
@@ -205,6 +192,8 @@
 - Titanic dataset
 
 # Consider
+
+- Allow clauses per class to be a non-multiple of BITS?
 
 - ProNe
     - Potential alternative to spectral
