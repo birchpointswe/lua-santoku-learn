@@ -101,8 +101,3 @@ construction and extension.
 **Practical**: Enables scalable spectral hashing deployment in situations where it is necessary to project into a
 domain-specific embedding space from observable features different than those used in graph construction (e.g. designing
 an embedding based on labeled data and then projecting into it from observed features)
-
-## Future Exploration
-
-- Optimal landmark selection
-- Optimal feature selection for Feature Space B
