@@ -17,8 +17,8 @@ typedef khash_t(tk_cont_thresholds) tk_cont_thresholds_t;
 
 typedef struct { int64_t f; char *v; } tk_cat_bit_string_t;
 typedef struct { int64_t f; double v; } tk_cat_bit_double_t;
-#define tk_cat_bit_string_hash(k) (tk_lua_hash_128(tk_lua_hash_integer((k).f), tk_lua_hash_string((k).v)))
-#define tk_cat_bit_double_hash(k) (tk_lua_hash_128(tk_lua_hash_integer((k).f), tk_lua_hash_double((k).v)))
+#define tk_cat_bit_string_hash(k) (tk_hash_128(tk_hash_integer((k).f), tk_hash_string((k).v)))
+#define tk_cat_bit_double_hash(k) (tk_hash_128(tk_hash_integer((k).f), tk_hash_double((k).v)))
 #define tk_cat_bit_string_equal(a, b) ((a).f == (b).f && !strcmp((a).v, (b).v))
 #define tk_cat_bit_double_equal(a, b) ((a).f == (b).f && (a).v == (b).v)
 KHASH_INIT(tk_cat_bits_string, tk_cat_bit_string_t, int64_t, 1, tk_cat_bit_string_hash, tk_cat_bit_string_equal)

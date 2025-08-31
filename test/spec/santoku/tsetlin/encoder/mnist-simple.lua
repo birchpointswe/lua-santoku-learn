@@ -127,7 +127,7 @@ test("tsetlin", function ()
     })
   end
 
-  dataset.codes_spectral = dataset.codes_spectral:raw_bitmap(dataset.ids_spectral:size(), HIDDEN)
+  dataset.codes_spectral = dataset.codes_spectral:bits_to_cvec(dataset.ids_spectral:size(), HIDDEN)
 
   print("\nCodebook stats")
   dataset.pos_sampled, dataset.neg_sampled = ds.multiclass_pairs(dataset.ids, dataset.solutions, ANCHORS, ANCHORS)
