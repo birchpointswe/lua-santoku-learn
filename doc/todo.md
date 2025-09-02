@@ -2,10 +2,9 @@
 
 - L-STH
     - Always store UIDs in neighborhoods. Set up indices if needed after.
-    - Support ranks in ANN
-    - Enhance MNIST encoder test to use classes in the index for
-      semi-supervision
     - Ensure docs up to date (various changes across matrix/tsetlin)
+
+- Revise l-sth.md
 
 - ann/hbi: implement mutualize/etc
     - Note: Partially completed for ann
@@ -23,14 +22,18 @@
 
 - Lua GC for threadpool
 - Pcalls for callbacks, or make sure everything is connected to the lua GC
-- Profile hot paths and vectorization opportunities
+
+- QQP L-STH
 
 # Next
 
 - Rename to santoku-learn or similar
+- Profile hot paths and vectorization opportunities
 
-- Implement generative model
+- Generative model, next token predictor
     - Predict visible features from spectral codes
+    - Spectral embeddings from graph of ngrams as nodes, probabilities as
+      weights?
 
 - Move conf.h items to other libraries
     - Interleaved allocation (santoku-threads)
@@ -100,8 +103,6 @@
 # Later
 
 - Templated Trie
-
-- QQP
 
 - SNLI (will likely require some new graph features to handle the negatives)
 
@@ -192,6 +193,12 @@
 - Titanic dataset
 
 # Consider
+
+- Allow passing ann/hbi to inv such that we get multi-index lookup, with one of
+  them being primary. This would allow dense feature indexing in an ann, for
+  example, and then class/rank features in the inv, or vice versa.
+  Alternatively, build a separate multi-index abstraction, or add rank features
+  to ann/hbi such that this becomes less necessary.
 
 - Allow clauses per class to be a non-multiple of BITS?
 

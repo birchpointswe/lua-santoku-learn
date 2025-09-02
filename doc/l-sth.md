@@ -69,10 +69,12 @@ To train the classifiers:
 1. Determine which in-sample codes are considered landmarks, for example, either choosing to use all of them or a subset
    with maximal coverage
 
-2. Compute a k-nearest landmarks list for every landmark given their associated spectral codes
+2. Compute a k-nearest landmarks list for every landmark using Feature Space B. This must match how neighbors will be
+   found at inference time.
 
 3. Produce tuples of (landmark code, feature vector) for each of these neighbor lists, where feature vector is the
-   concatenated list of codes corresponding to the k-nearest landmarks, padded with zeros as needed
+   concatenated list of spectral codes (from Feature Space A) corresponding to the k-nearest landmarks found via Feature
+   Space B similarity, padded with zeros as needed
 
 4. Train a multi-output classifier that learns a mapping from these feature vectors to the landmark code itself
 
