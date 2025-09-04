@@ -231,7 +231,7 @@ static inline void tk_ann_persist (
   tk_lua_fwrite(L, (char *) &n_hash, sizeof(uint64_t), 1, fh);
   if (n_hash)
     tk_lua_fwrite(L, (char *) A->hash_bits->a, sizeof(int64_t),  n_hash, fh);
-  // buckets map  (hash → posting list)
+  // buckets map  (hash to posting list)
   khint_t nb = A->buckets ? kh_size(A->buckets) : 0;
   tk_lua_fwrite(L, (char *) &nb, sizeof(khint_t), 1, fh);
   for (khint_t i = kh_begin(A->buckets); i < kh_end(A->buckets); i ++)
@@ -247,7 +247,7 @@ static inline void tk_ann_persist (
         tk_lua_fwrite(L, (char *) plist->a, sizeof(int64_t),  plen, fh);
       }
     }
-  // uid → sid map
+  // uid to sid map
   khint_t nkeys = A->uid_sid ? tk_iumap_size(A->uid_sid) : 0;
   tk_lua_fwrite(L, (char *) &nkeys, sizeof(khint_t), 1, fh);
   for (khint_t i = tk_iumap_begin(A->uid_sid); i < tk_iumap_end(A->uid_sid); i ++)
@@ -257,7 +257,7 @@ static inline void tk_ann_persist (
       tk_lua_fwrite(L, (char *) &k, sizeof(int64_t), 1, fh);
       tk_lua_fwrite(L, (char *) &v, sizeof(int64_t), 1, fh);
     }
-  // sid → uid map
+  // sid to uid map
   nkeys = A->sid_uid ? tk_iumap_size(A->sid_uid) : 0;
   tk_lua_fwrite(L, (char *) &nkeys, sizeof(khint_t), 1, fh);
   for (khint_t i = tk_iumap_begin(A->sid_uid); i < tk_iumap_end(A->sid_uid); i ++)
@@ -320,6 +320,9 @@ static inline void tk_ann_add (
   }
   if (ids->n == 0)
     return;
+  // Pre-allocate vector storage for all samples being added
+  size_t bytes_per_vec = TK_CVEC_BITS_BYTES(A->features);
+  tk_cvec_ensure(A->vectors, A->vectors->n + ids->n * bytes_per_vec);
   int kha;
   khint_t khi;
   for (uint64_t i = 0; i < ids->n; i ++) {
@@ -1401,6 +1404,11 @@ static inline void tk_ann_setup_hash_bits_random (
   if (A->hash_bits->n > n_hash_bits)
     A->hash_bits->n = n_hash_bits;
   tk_ivec_shrink(A->hash_bits);
+  // Pre-size hash table based on expected size
+  size_t expected_buckets = expected / A->bucket_target * 2;
+  if (expected_buckets > 0) {
+    kh_resize(tk_ann_buckets, A->buckets, expected_buckets);
+  }
 }
 
 static inline tk_ann_t *tk_ann_create_base (
@@ -1497,7 +1505,7 @@ static inline tk_ann_t *tk_ann_load (
       kh_val(A->buckets, k) = NULL;
     }
   }
-  // uid → sid map
+  // uid to sid map
   A->uid_sid = tk_iumap_create();
   khint_t nkeys = 0; int64_t ikey, ival;
   tk_lua_fread(L, &nkeys, sizeof(khint_t), 1, fh);
@@ -1507,7 +1515,7 @@ static inline tk_ann_t *tk_ann_load (
     k = tk_iumap_put(A->uid_sid, ikey, &absent);
     tk_iumap_value(A->uid_sid, k) = ival;
   }
-  // sid → uid map
+  // sid to uid map
   A->sid_uid = tk_iumap_create();
   tk_lua_fread(L, &nkeys, sizeof(khint_t), 1, fh);
   for (khint_t i = 0; i < nkeys; i ++) {

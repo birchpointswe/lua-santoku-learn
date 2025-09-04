@@ -4,11 +4,12 @@
 #include <santoku/tsetlin/conf.h>
 #include <santoku/tsetlin/graph.h>
 #include <santoku/dvec.h>
+#include <santoku/cvec.h>
 
 static inline void tk_tch_refine (
 
   lua_State *L,
-  tk_ivec_t *codes,
+  tk_cvec_t *codes,
 
   tk_ivec_t *uids,
   tk_ivec_t *adj_offset,
@@ -27,19 +28,18 @@ static inline void tk_tch_refine (
 
   int *bitvecs = tk_malloc(L, n_dims * uids->n * sizeof(int));
 
-  for (uint64_t i = 0; i < n_dims * uids->n; i ++)
-    bitvecs[i] = -1;
-
-  for (uint64_t i = 0; i < codes->n; i ++) {
-    int64_t v = codes->a[i];
-    if (v < 0)
-      continue;
-    uint64_t s = (uint64_t) v / n_dims;
-    uint64_t f = (uint64_t) v % n_dims;
-    bitvecs[f * uids->n + s] = +1;
+  // Convert dense binary codes (cvec) to TCH format (-1/+1)
+  uint64_t bytes_per_sample = TK_CVEC_BITS_BYTES(n_dims);
+  for (uint64_t s = 0; s < uids->n; s++) {
+    for (uint64_t f = 0; f < n_dims; f++) {
+      uint64_t byte_idx = s * bytes_per_sample + (f / 8);
+      uint8_t bit_mask = 1 << (f % 8);
+      bool bit_set = (codes->a[byte_idx] & bit_mask) != 0;
+      bitvecs[f * uids->n + s] = bit_set ? +1 : -1;
+    }
   }
 
-  codes->n = 0;
+  tk_cvec_zero(codes);
 
   for (uint64_t f = 0; f < n_dims; f ++) {
     int *bitvec = bitvecs + f * uids->n;
@@ -69,9 +69,16 @@ static inline void tk_tch_refine (
       }
     } while (updated);
 
-    for (uint64_t i = 0; i < uids->n; i ++)
-      if (bitvec[i] > 0)
-        tk_ivec_push(codes, (int64_t) i * (int64_t) n_dims + (int64_t) f);
+    // Convert back to dense binary codes
+    for (uint64_t i = 0; i < uids->n; i ++) {
+      uint64_t byte_idx = i * bytes_per_sample + (f / 8);
+      uint8_t bit_mask = 1 << (f % 8);
+      if (bitvec[i] > 0) {
+        codes->a[byte_idx] |= bit_mask;  // Set bit
+      } else {
+        codes->a[byte_idx] &= ~bit_mask;  // Clear bit
+      }
+    }
   }
 
   if (i_each >= 0) {
@@ -81,10 +88,7 @@ static inline void tk_tch_refine (
   }
 
   free(bitvecs);
-  lua_pop(L, 2); // node_order
-
-  tk_ivec_shrink(codes);
-  tk_ivec_asc(codes, 0, codes->n);
+  lua_pop(L, 1); // node_order
 }
 
 #endif

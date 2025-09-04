@@ -40,6 +40,11 @@ end
 
 M.align = tm.align
 
+local function round_to_pow2 (x)
+  local log2x = num.log(x) / num.log(2)
+  return num.pow(2, num.floor(log2x + 0.5))
+end
+
 local function build_sampler (spec, global_dev)
   if type(spec) == "number" then
     return {
@@ -55,10 +60,11 @@ local function build_sampler (spec, global_dev)
     err.assert(def and minv and maxv, "range spec missing def|min|max")
     local is_log = not not spec.log
     local is_int = not not spec.int
+    local is_pow2 = not not spec.pow2
     local span, base_center
     if is_log then
-      span = math.log(maxv) - math.log(minv)
-      base_center = math.log(def)
+      span = num.log(maxv) - num.log(minv)
+      base_center = num.log(def)
     else
       span = maxv - minv
       base_center = def
@@ -69,16 +75,30 @@ local function build_sampler (spec, global_dev)
       type = "range",
       center = def,
       sample = function (center)
-        local c = center and (is_log and math.log(center) or center) or base_center
+        local c = center and (is_log and num.log(center) or center) or base_center
         local x = rand.fast_normal(c, jitter)
-        if is_log then x = math.exp(x) end
-        if x < minv then x = minv elseif x > maxv then x = maxv end
-        if is_int then x = num.floor(x + 0.5) end
+        if is_log then
+          x = num.exp(x)
+        end
+        if x < minv then
+          x = minv
+        elseif x > maxv then
+          x = maxv
+        end
+        if is_pow2 then
+          x = round_to_pow2(x)
+          if x < minv then
+            x = minv
+          elseif x > maxv then x = maxv
+          end
+        elseif is_int then
+          x = num.floor(x + 0.5)
+        end
         return x
       end,
       shrink = function ()
         round  = round + 1
-        jitter = jitter / math.sqrt(round)
+        jitter = jitter / num.sqrt(round)
       end,
     }
   end
@@ -91,7 +111,7 @@ local function build_sampler (spec, global_dev)
       end,
     }
   end
-  err.error("Bad hyper‑parameter specification: " .. tostring(spec))
+  err.error("Bad hyper‑parameter specification: " .. spec)
 end
 
 M.optimize = function (args, typ)
@@ -162,6 +182,7 @@ M.optimize = function (args, typ)
           seen[key] = true
 
           local best_epoch_score = -num.huge
+          local last_epoch_score = -num.huge
           local epochs_since_improve = 0
 
           local function each (epoch, tm)
@@ -170,6 +191,7 @@ M.optimize = function (args, typ)
             if each_cb then
               cb_result = each_cb(tm, false, metrics, params, epoch, r, t)
             end
+            last_epoch_score = score
             if score > best_epoch_score + 1e-8 then
               best_epoch_score = score
               epochs_since_improve = 0
@@ -233,13 +255,20 @@ M.optimize = function (args, typ)
             err.error("unexpected type to optimize", typ)
           end
 
-          local trial_score = best_epoch_score
+          -- Use the last score (where training ended) rather than best score
+          -- This prefers params that maintain good performance rather than spike and degrade
+          local trial_score = last_epoch_score
+
+          -- For round best, use final score
           if trial_score > round_best_score then
             round_best_score = trial_score
             round_best_params = params
           end
+
+          -- For global best, also use final score
           if trial_score > best_score then
-            best_score, best_params = trial_score, params
+            best_score = trial_score
+            best_params = params
           end
         end
       end

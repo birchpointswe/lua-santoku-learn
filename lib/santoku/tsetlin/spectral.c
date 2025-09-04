@@ -2,6 +2,7 @@
 #include <santoku/tsetlin/conf.h>
 #include <santoku/threads.h>
 #include <santoku/dvec.h>
+#include <santoku/dvec/ext.h>
 #include <openblas/cblas.h>
 #include <float.h>
 #include <math.h>
@@ -204,6 +205,9 @@ static inline void tm_run_spectral (
       z->a[i * n_hidden + k] = spec.evecs[i + f * uids->n];
     }
   }
+  
+  // Center each eigenvector dimension to have zero mean
+  tk_dvec_center(z->a, uids->n, n_hidden);
 
   for (uint64_t i = 0; i < spec.n_evals; i ++) {
     if (i_each != -1) {

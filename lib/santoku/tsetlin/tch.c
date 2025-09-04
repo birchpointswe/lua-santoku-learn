@@ -2,6 +2,7 @@
 #include <santoku/tsetlin/tch.h>
 #include <santoku/tsetlin/graph.h>
 #include <santoku/ivec.h>
+#include <santoku/cvec.h>
 
 #include <float.h>
 #include <lauxlib.h>
@@ -12,7 +13,7 @@ static inline int tk_tch_refine_lua (lua_State *L)
   lua_settop(L, 1);
 
   lua_getfield(L, 1, "codes");
-  tk_ivec_t *codes = tk_ivec_peek(L, -1, "codes");
+  tk_cvec_t *codes = tk_cvec_peek(L, -1, "codes");
   int i_out = tk_lua_absindex(L, -1);
 
   lua_getfield(L, 1, "ids");
