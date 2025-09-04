@@ -1,39 +1,34 @@
 # Now
 
-- L-STH
+- Finalize L-STH
+    - AUC-based bit selection (greedy selection of highest AUC-gain bits)
     - Always store UIDs in neighborhoods. Set up indices if needed after.
     - Ensure docs up to date (various changes across matrix/tsetlin)
-
-- Revise l-sth.md
+    - Revise l-sth.md
+    - QQP
 
 - ann/hbi: implement mutualize/etc
     - Note: Partially completed for ann
     - Include mutualize lua api
-    - Add tk_ann/hbi_distance/similarity as in inv (take this from the already-generalized
-      tk_graph_distance(...) function)
 
 - tk_xxmap/set_t:
     - Templatize over khash/kbtree
     - Proper Lua/C API like tk_xvec_t
 
 - tk_cvec_t
-    - Use for Corex output, TM input/output, ANN input/output, TCH input/output
-    - Port various scoring functions from ivec to cvec
+    - Ensure cvec used everywhere (no strings!)
+    - Implement cvec to/from string
 
 - Lua GC for threadpool
 - Pcalls for callbacks, or make sure everything is connected to the lua GC
 
-- QQP L-STH
-
 # Next
 
+- Avoid direct malloc, use newuserdata or cvec APIs
+
+- Rename tch
 - Rename to santoku-learn or similar
 - Profile hot paths and vectorization opportunities
-
-- Generative model, next token predictor
-    - Predict visible features from spectral codes
-    - Spectral embeddings from graph of ngrams as nodes, probabilities as
-      weights?
 
 - Move conf.h items to other libraries
     - Interleaved allocation (santoku-threads)
@@ -44,25 +39,20 @@
   unused literals, returning pruned for subsequent filtering of
   tokenizer/booleanizer, giving faster inference.
 
-- Refactor inv to use ivec similarity routines
-- Move hamming functions to cvec
+- Graph
+    - Re-evaluate negative edge handling in graph (see 2025-08-10/simplify
+      branch and prior history)
+    - Will need this for handling signed (e.g. SNLI) input pairs in a logically
+      sound way
+
+- Rounding out functionality
+    - Support PCA for dimensionality reduction (likely followed by ITQ)
+    - Support sparse/dense linear SVM for codebook/classifier learning
 
 - Clustering
     - Return n_clusters, n_core, n_border, n_noise
 
-- Rounding out functionality
-    - Support PCA for dimensionality reduction (likely followed by ITQ)
-    - Support ridge regression via SVD for codebook/classifier learning
-
 - Graph
-    - Re-evaluate negative edge handling in graph (see 2025-08-10/simplify
-      branch and prior history)
-
-- tk_inv/ann/hbi_t
-    - Support feature weights, particularly for inv
-
-- Graph
-    - Use dsu findx/unionx instead of uid-based api when we have indices
     - Return positive and negative weight totals when creating adjacency
 
 - Chore
@@ -72,35 +62,13 @@
 - TCH
     - Parallelize
 
-- Tsetlin
-    - Bayesian optimization
-
-- tk_inv/ann/hbi_t
-    - Parallelize add
-    - DRY (neighbirs and neighborhoods)
-    - Final TODOs
-
-- Chores
-    - Speed up Spectral, ITQ
-
-- TBHSS
-    - Get working with new TM code
-    - Explore classify
-    - Explore encode
-    - Confirm accuracy on mnist/imdb is as expected in both classify and encode mode
-    - Index & search
-    - Move hyperparameter search/exploration code into TM library
-    - Restrict TBHSS code to cover cli usage, pre-processing, etc.
-
-- tk_ann_t
-    - Allow user to pass dataset in, which then uses top_entropy to select bits
-      internally
-
-- tk_xvec_t
-    - Align Lua/C APIs (currently out of sync for pvec, rvec, etc)
-    - Optional lua gc management via tk_xvec_create(NULL, ...), allowing later opt-in via tk_xvec_register(L, xv)
+- Bitsel
+    - Parallelize
 
 # Later
+
+- TBHSS
+    - Reboot as a cli interface to this ML framework
 
 - Templated Trie
 
@@ -154,19 +122,10 @@
 - tk_cvec_t
     - Move dense bit operations here (hamming, xor, etc, etc)
 
-- General
-    - Replace most tk_malloc/realloc/numa with tk_xvec operations across libraries
-
 - Chore
     - Proper Lua/C APIs across the board
 
 # Eventually
-
-- TBHSS/etc
-    - Log stats to disk(?) render with ggplot(?)
-
-- Encoder
-    - Curriculum learning, bit pruning, etc.
 
 - tk_ann_t
     - Allow user-provided list of hash bits and enable easy mi, chi2 or corex-based feature bit-selection.
@@ -176,50 +135,33 @@
 
 - Multi-layer classifiers and encoders
 
-- Absorbing (speeds up training over time as clauses are dropped)
-
 - Convolutional
     - Tried this, see branch
 
-- Coalesced (reduces memory footprint for multi-output configurations)
-    - Tried this, didn't really help
-
-- Weighted (reduces memory footprint)
-- Integer-Weighted (see weighted)
-
-- Indexed (improves learning and classification speed)
-    - Triples memory usage
-
-- Titanic dataset
+- Titanic dataset?
 
 # Consider
-
-- Allow passing ann/hbi to inv such that we get multi-index lookup, with one of
-  them being primary. This would allow dense feature indexing in an ann, for
-  example, and then class/rank features in the inv, or vice versa.
-  Alternatively, build a separate multi-index abstraction, or add rank features
-  to ann/hbi such that this becomes less necessary.
-
-- Allow clauses per class to be a non-multiple of BITS?
 
 - ProNe
     - Potential alternative to spectral
     - Also explore various non-neural alternatives to GNNs
 
-- Misc
-    - Sparse/dense linear SVM for sanity checking all tasks
-
-- Spectral
-    - Weighted laplacian (ground truths, transitives, knn, kfn, etc.)
-
-- Clustering
-    - K-means, k-medoids, hierarchical, dbscan?
-
 - tk_dsu_t
     - Full Lua/C API?
 
-- vec/tpl.h Allow tk_vec_noundef to skip undefs?
+- tk_ann_t
+    - Guided hash bit selection (instead of random), using passed-in dataset to
+      select bits by entropy or some other metric (is this actually useful?)
 
 - Corex
     - Should anchor multiply feature MI instead of hard-boosting it?
-    - Allow explicit anchor feature list instead of last n_hidden, supporting multiple assigned to same latent, etc.
+    - Allow explicit anchor feature list instead of last n_hidden, supporting
+      multiple assigned to same latent, etc.
+
+- Generative model, next token predictor
+    - Predict visible features from spectral codes
+    - Spectral embeddings from graph of ngrams as nodes, probabilities as
+      weights?
+
+- Tsetlin
+    - Bayesian optimization

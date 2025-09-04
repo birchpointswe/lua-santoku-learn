@@ -17,7 +17,7 @@ static inline tk_graph_t *tm_graph_create (
   uint64_t knn_cache,
   double knn_eps,
   bool bridge,
-  tk_inv_cmp_type_t cmp,
+  tk_ivec_sim_type_t cmp,
   double cmp_alpha,
   double cmp_beta,
   unsigned int n_threads
@@ -531,13 +531,10 @@ static inline void tm_add_pairs (
     for (uint64_t i = 0; i < n_edges_old; i ++) {
       int64_t u = graph->edges->a[i].i;
       int64_t v = graph->edges->a[i].p;
-
-      // Check if both nodes exist after filtering
       khint_t khi_u = tk_iumap_get(graph->uids_idx, u);
       khint_t khi_v = tk_iumap_get(graph->uids_idx, v);
       if (khi_u == tk_iumap_end(graph->uids_idx) || khi_v == tk_iumap_end(graph->uids_idx))
-        continue;  // Skip edges to filtered nodes
-
+        continue;
       double d = tk_graph_distance(graph, u, v);
       if (d == DBL_MAX)
         continue;
@@ -671,15 +668,15 @@ static inline int tm_create (lua_State *L)
   const char *cmpstr = tk_lua_foptstring(L, 1, "graph", "cmp", "jaccard");
   double cmp_alpha = tk_lua_foptnumber(L, 1, "graph", "cmp_alpha", 1.0);
   double cmp_beta = tk_lua_foptnumber(L, 1, "graph", "cmp_beta", 0.1);
-  tk_inv_cmp_type_t cmp = TK_INV_JACCARD;
+  tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
   if (!strcmp(cmpstr, "jaccard"))
-    cmp = TK_INV_JACCARD;
+    cmp = TK_IVEC_JACCARD;
   else if (!strcmp(cmpstr, "overlap"))
-    cmp = TK_INV_OVERLAP;
+    cmp = TK_IVEC_OVERLAP;
   else if (!strcmp(cmpstr, "tversky"))
-    cmp = TK_INV_TVERSKY;
+    cmp = TK_IVEC_TVERSKY;
   else if (!strcmp(cmpstr, "dice"))
-    cmp = TK_INV_DICE;
+    cmp = TK_IVEC_DICE;
   else
     tk_lua_verror(L, 3, "graph", "invalid comparator specified", cmpstr);
 
@@ -858,7 +855,7 @@ static inline tk_graph_t *tm_graph_create (
   uint64_t knn_cache,
   double knn_eps,
   bool bridge,
-  tk_inv_cmp_type_t cmp,
+  tk_ivec_sim_type_t cmp,
   double cmp_alpha,
   double cmp_beta,
   unsigned int n_threads

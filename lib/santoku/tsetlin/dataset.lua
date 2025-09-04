@@ -3,6 +3,7 @@ local serialize = require("santoku.serialize") -- luacheck: ignore
 local inv = require("santoku.tsetlin.inv")
 local pvec = require("santoku.pvec")
 local ivec = require("santoku.ivec")
+local cvec = require("santoku.cvec")
 local it = require("santoku.iter")
 local fs = require("santoku.fs")
 local str = require("santoku.string")
@@ -12,50 +13,32 @@ local err = require("santoku.error")
 
 local M = {}
 
-M.read_binary_mnist = function (fp, n_features, max, class_max)
-  local class_cnt = {}
-  local offsets = ivec.create()
-  local problems = ivec.create()
-  local solutions = ivec.create()
+M.read_binary_mnist = function (fp, n_features, max)
+  local ps = ivec.create()
+  local ss = ivec.create()
   local n = 0
   for l in fs.lines(fp) do
     if max and n >= max then
       break
     end
-    local start = problems:size()
-    local tokens = {}
-    local token_count = 0
+    local f = 0
     for token in str.gmatch(l, "%S+") do
-      token_count = token_count + 1
-      tokens[token_count] = token
-      if token_count > n_features then
+      if f == n_features then
+        ss:push(tonumber(token))
         break
+      elseif token == "1" then
+        ps:push(n * n_features + f)
       end
+      f = f + 1
     end
-    if token_count <= n_features then -- luacheck: ignore
-      -- skip
-    else
-      local cls = tokens[n_features + 1]
-      class_cnt[cls] = (class_cnt[cls] or 0) + 1
-
-      if not (class_max and class_cnt[cls] > class_max) then
-        offsets:push(start)
-        for feature = 1, n_features do
-          if tokens[feature] == "1" then
-            problems:push(feature - 1)
-          elseif tokens[feature] ~= "0" then
-            err.error("unexpected string", tokens[feature])
-          end
-        end
-        solutions:push(tonumber(cls))
-        n = n + 1
-      end
-    end
+    n = n + 1
   end
+  local ids = ivec.create(n)
+  ids:fill_indices()
   return {
-    offsets = offsets,
-    problems = problems,
-    solutions = solutions,
+    ids = ids,
+    problems = ps,
+    solutions = ss,
     n_labels = 10,
     n_features = n_features,
     n = n,
@@ -63,18 +46,14 @@ M.read_binary_mnist = function (fp, n_features, max, class_max)
 end
 
 local function _split_binary_mnist (dataset, s, e)
+  local ids = ivec.create()
+  ids:copy(dataset.ids, s - 1, e, 0)
   local ps = ivec.create()
+  ps:bits_copy(dataset.problems, nil, ids, dataset.n_features)
   local ss = ivec.create()
-  for i = s, e do
-    local pss = dataset.offsets:get(i - 1)
-    local pse = i == dataset.n and dataset.problems:size() or dataset.offsets:get(i)
-    local offset = (i - s) * dataset.n_features
-    for j = pss, pse - 1 do
-      ps:push(dataset.problems:get(j) + offset)
-    end
-  end
   ss:copy(dataset.solutions, s - 1, e, 0)
   return {
+    ids = ids,
     problems = ps,
     solutions = ss,
     n_labels = dataset.n_labels,
@@ -103,9 +82,9 @@ local function canonicalize (a, b)
   end
 end
 
-M.random_pairs = function (ids, edges_per_node)
+M.random_pairs = function (ids, edges_per_node, out)
   edges_per_node = edges_per_node or 3
-  local edges = pvec.create()
+  local edges = out or pvec.create()
   local n = ids:size()
   if n <= 1 then
     return edges
@@ -128,11 +107,11 @@ M.random_pairs = function (ids, edges_per_node)
   return edges
 end
 
-M.anchor_pairs = function (ids, n_anchors)
+M.anchor_pairs = function (ids, n_anchors, out)
   if n_anchors == nil or n_anchors < 1 then
     n_anchors = 1
   end
-  local edges = pvec.create()
+  local edges = out or pvec.create()
   local anchors = {}
   local sofar = 0
   while sofar < n_anchors do
@@ -265,6 +244,18 @@ M.multiclass_pairs = function (ids, labels, n_anchors_pos, n_anchors_neg, index,
   pos:xasc()
   neg:xasc()
   return pos, neg
+end
+
+M.star_hoods = function (ids, hoods)
+  local out = pvec.create()
+  for idx, hood in hoods:ieach() do
+    local id = ids:get(idx)
+    for idxnbr in hood:each() do
+      local nbr = ids:get(idxnbr)
+      out:push(id, nbr)
+    end
+  end
+  return out
 end
 
 M.read_imdb = function (dir, max)

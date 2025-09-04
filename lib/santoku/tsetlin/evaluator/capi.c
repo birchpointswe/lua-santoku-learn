@@ -331,56 +331,6 @@ static inline int tm_class_accuracy (lua_State *L)
   return 1;
 }
 
-static inline int tm_entropy_stats (lua_State *L)
-{
-  lua_settop(L, 4);
-  tk_bits_t *codes;
-  tk_cvec_t *cvec = tk_cvec_peekopt(L, 1);
-  codes = cvec != NULL ? (tk_bits_t *) cvec->a : (tk_bits_t *) tk_lua_checkustring(L, 1, "codes");
-  unsigned int n_samples = tk_lua_checkunsigned(L, 2, "n_samples");
-  unsigned int n_dims = tk_lua_checkunsigned(L, 3, "n_hidden");
-  unsigned int n_threads = tk_threads_getn(L, 4, "n_threads", NULL);
-
-  tk_dvec_t *entropies = tk_ivec_bits_score_entropy(L, (char *) codes, n_samples, n_dims, n_threads);
-
-  // Compute per-bit entropy
-  double min_entropy = 1.0, max_entropy = 0.0, sum_entropy = 0.0;
-  lua_newtable(L); // result
-  lua_newtable(L); // per-bit entropy table
-  for (uint64_t j = 0; j < n_dims; j ++) {
-    double entropy = entropies->a[j];
-    lua_pushinteger(L, (int64_t) j + 1);
-    lua_pushnumber(L, entropy);
-    lua_settable(L, -3);
-    if (entropy < min_entropy)
-      min_entropy = entropy;
-    if (entropy > max_entropy)
-      max_entropy = entropy;
-    sum_entropy += entropy;
-  }
-  lua_setfield(L, -2, "bits");
-
-  // Aggregate stats
-  double mean = sum_entropy / n_dims;
-  double variance = 0.0;
-  for (uint64_t j = 0; j < n_dims; j ++) {
-    double entropy = entropies->a[j];
-    variance += (entropy - mean) * (entropy - mean);
-  }
-
-  variance /= n_dims;
-  lua_pushnumber(L, mean);
-  lua_setfield(L, -2, "mean");
-  lua_pushnumber(L, min_entropy);
-  lua_setfield(L, -2, "min");
-  lua_pushnumber(L, max_entropy);
-  lua_setfield(L, -2, "max");
-  lua_pushnumber(L, sqrt(variance));
-  lua_setfield(L, -2, "std");
-
-  return 1;
-}
-
 static inline tk_accuracy_t _tm_clustering_accuracy (
   tk_ivec_t *ids,
   tk_ivec_t *assignments,
@@ -950,6 +900,60 @@ static inline int tm_optimize_retrieval (lua_State *L)
   lua_setfield(L, -2, "tnr");
   lua_pushnumber(L, auc);
   lua_setfield(L, -2, "auc");
+  return 1;
+}
+
+static inline int tm_entropy_stats (lua_State *L)
+{
+  lua_settop(L, 4);
+  unsigned int n_samples = tk_lua_checkunsigned(L, 2, "n_samples");
+  unsigned int n_dims = tk_lua_checkunsigned(L, 3, "n_hidden");
+  unsigned int n_threads = tk_threads_getn(L, 4, "n_threads", NULL);
+  tk_cvec_t *cvec = tk_cvec_peekopt(L, 1);
+  tk_ivec_t *ivec = NULL;
+  tk_dvec_t *entropies = NULL;
+  if (cvec == NULL) {
+    ivec = tk_ivec_peekopt(L, 1);
+    entropies = tk_ivec_bits_score_entropy(L, ivec, n_samples, n_dims, n_threads);
+  } else {
+    entropies = tk_cvec_bits_score_entropy(L, cvec, n_samples, n_dims, n_threads);
+  }
+
+  // Compute per-bit entropy
+  double min_entropy = 1.0, max_entropy = 0.0, sum_entropy = 0.0;
+  lua_newtable(L); // result
+  lua_newtable(L); // per-bit entropy table
+  for (uint64_t j = 0; j < n_dims; j ++) {
+    double entropy = entropies->a[j];
+    lua_pushinteger(L, (int64_t) j + 1);
+    lua_pushnumber(L, entropy);
+    lua_settable(L, -3);
+    if (entropy < min_entropy)
+      min_entropy = entropy;
+    if (entropy > max_entropy)
+      max_entropy = entropy;
+    sum_entropy += entropy;
+  }
+  lua_setfield(L, -2, "bits");
+
+  // Aggregate stats
+  double mean = sum_entropy / n_dims;
+  double variance = 0.0;
+  for (uint64_t j = 0; j < n_dims; j ++) {
+    double entropy = entropies->a[j];
+    variance += (entropy - mean) * (entropy - mean);
+  }
+
+  variance /= n_dims;
+  lua_pushnumber(L, mean);
+  lua_setfield(L, -2, "mean");
+  lua_pushnumber(L, min_entropy);
+  lua_setfield(L, -2, "min");
+  lua_pushnumber(L, max_entropy);
+  lua_setfield(L, -2, "max");
+  lua_pushnumber(L, sqrt(variance));
+  lua_setfield(L, -2, "std");
+
   return 1;
 }
 
