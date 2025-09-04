@@ -320,6 +320,9 @@ static inline void tk_ann_add (
   }
   if (ids->n == 0)
     return;
+
+  size_t bytes_per_vec = TK_CVEC_BITS_BYTES(A->features);
+  tk_cvec_ensure(A->vectors, A->vectors->n + ids->n * bytes_per_vec);
   int kha;
   khint_t khi;
   for (uint64_t i = 0; i < ids->n; i ++) {
@@ -1401,6 +1404,11 @@ static inline void tk_ann_setup_hash_bits_random (
   if (A->hash_bits->n > n_hash_bits)
     A->hash_bits->n = n_hash_bits;
   tk_ivec_shrink(A->hash_bits);
+
+  size_t expected_buckets = expected / A->bucket_target * 2;
+  if (expected_buckets > 0) {
+    kh_resize(tk_ann_buckets, A->buckets, expected_buckets);
+  }
 }
 
 static inline tk_ann_t *tk_ann_create_base (

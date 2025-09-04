@@ -25,7 +25,7 @@ static inline int tk_inv_create_lua (lua_State *L)
   if (ranks != NULL) {
     n_ranks = tk_lua_fcheckunsigned(L, 1, "create", "n_ranks");
   }
-  int64_t rank_decay_window = tk_lua_foptinteger(L, 1, "create", "rank_decay_window", -1);
+  int64_t rank_decay_window = tk_lua_foptinteger(L, 1, "create", "rank_decay_window", 0);
   double rank_decay_sigma = tk_lua_foptnumber(L, 1, "create", "rank_decay_sigma", 1.0);
   double rank_decay_floor = tk_lua_foptnumber(L, 1, "create", "rank_decay_floor", 0.0);
   uint64_t n_threads = tk_threads_getn(L, 1, "create", "threads");

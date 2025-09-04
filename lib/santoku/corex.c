@@ -1,6 +1,7 @@
 #include <santoku/tsetlin/conf.h>
 #include <santoku/threads.h>
 #include <santoku/ivec.h>
+#include <santoku/iuset.h>
 
 #include <float.h>
 #include <math.h>
@@ -903,7 +904,6 @@ static inline void _tk_corex_train (
   int i_each
 ) {
   C->smoothing = 0.001;
-
   C->pyx = tk_malloc(L, C->n_hidden * n_samples * sizeof(double));
   C->log_pyx_unnorm = tk_malloc(L, 2 * C->n_hidden * n_samples * sizeof(double));
   C->sums = tk_malloc(L, 2 * C->n_hidden * n_samples * sizeof(double));
