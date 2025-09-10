@@ -153,11 +153,16 @@ Hamming ball index for binary similarity search.
 
 | Method | Arguments | Returns | Description |
 |--------|-----------|---------|-------------|
-| `hbi:add` | `string: data, number/tk_ivec_t: base_id/ids, number?: n_nodes` | `-` | Add binary data |
-| `hbi:remove` | `number: id` | `-` | Remove node by ID |
-| `hbi:get` | `number: id` | `string?` | Get binary data |
-| `hbi:neighborhoods` | `number?: k, number?: eps, number?: min, boolean?: mutual` | `tk_hbi_hoods_t, tk_ivec_t` | Find neighborhoods |
-| `hbi:neighbors` | `number/string: id/vector, number?: knn, number?: eps, tk_pvec_t?: out` | `tk_pvec_t` | Find neighbors |
+| `hbi:add` | `string/tk_cvec_t: data, number/tk_ivec_t: base_id/ids, number?: n_nodes` | `-` | Add binary data. Note: `data` can be passed as either a string or tk_cvec_t |
+| `hbi:remove` | `number/tk_ivec_t: id/ids` | `-` | Remove node(s) by ID |
+| `hbi:keep` | `number/tk_ivec_t: id/ids` | `-` | Keep only specified node(s), removing all others |
+| `hbi:get` | `number/tk_ivec_t: id/ids, tk_cvec_t?: out, number?: dest_sample, number?: dest_stride` | `tk_cvec_t` | Get binary data. Supports single ID or multiple IDs with optional packed output control |
+| `hbi:neighborhoods` | `number?: k, number?: eps, number?: min, boolean?: mutual` | `tk_hbi_hoods_t, tk_ivec_t` | Find neighborhoods for all nodes |
+| `hbi:neighborhoods_by_ids` | `tk_ivec_t: ids, number?: k, number?: eps, number?: min, boolean?: mutual` | `tk_hbi_hoods_t, tk_ivec_t` | Find neighborhoods for specific node IDs |
+| `hbi:neighborhoods_by_vecs` | `tk_cvec_t: vectors, number?: k, number?: eps, number?: min` | `tk_hbi_hoods_t, tk_ivec_t` | Find neighborhoods for query vectors |
+| `hbi:neighbors` | `number/string/tk_cvec_t: id/vector, number?: knn, number?: eps, tk_pvec_t?: out` | `tk_pvec_t` | Find neighbors. Note: vector can be string or tk_cvec_t |
+| `hbi:similarity` | `number: uid0, number: uid1` | `number` | Calculate similarity between two nodes (0 to 1) |
+| `hbi:distance` | `number: uid0, number: uid1` | `number` | Calculate normalized Hamming distance between two nodes (0 to 1) |
 | `hbi:size` | `-` | `number` | Get node count |
 | `hbi:threads` | `-` | `number` | Get thread count |
 | `hbi:features` | `-` | `number` | Get feature count |
@@ -172,7 +177,7 @@ Dataset utilities for machine learning tasks.
 
 | Function | Arguments | Returns | Description |
 |----------|------------|---------|-------------|
-| `dataset.read_binary_mnist` | `string: filepath, number: n_features, number?: max, number?: class_max` | `table: dataset` | Read binary MNIST data with feature and sample limits |
+| `dataset.read_binary_mnist` | `string: filepath, number: n_features, number?: max` | `table: dataset` | Read binary MNIST data with feature and sample limits |
 | `dataset.split_binary_mnist` | `table: dataset, number: ratio` | `table: train, table?: test` | Split binary MNIST into train/test sets |
 | `dataset.read_imdb` | `string: directory, number?: max` | `table: dataset` | Read IMDB movie reviews dataset |
 | `dataset.split_imdb` | `table: dataset, number: ratio` | `table: train, table: test` | Split IMDB dataset |
@@ -180,6 +185,7 @@ Dataset utilities for machine learning tasks.
 | `dataset.anchor_pairs` | `tk_ivec_t: ids, number?: n_anchors` | `tk_pvec_t` | Generate anchor-based node pairs |
 | `dataset.classes_index` | `tk_ivec_t: ids, tk_ivec_t: classes` | `tk_inv_t` | Create class-based inverted index |
 | `dataset.multiclass_pairs` | `tk_ivec_t: ids, tk_ivec_t: labels, number?: n_anchors_pos, number?: n_anchors_neg, tk_inv_t?: index, number?: eps_pos, number?: eps_neg` | `tk_pvec_t, tk_pvec_t` | Generate positive and negative pairs for classification |
+| `dataset.star_hoods` | `tk_ivec_t: ids, hoods` | `tk_pvec_t` | Convert neighborhoods to edge pairs (star topology) |
 
 ### `santoku.tsetlin.evaluator`
 
@@ -229,7 +235,7 @@ Greedy coordinate ascent for graph adjacency alignment via bit flipping.
 
 | Function | Arguments | Returns | Description |
 |----------|------------|---------|-------------|
-| `tch.refine` | `table: {codes, ids, offsets, neighbors, weights, n_dims, each?}` | `tk_ivec_t` | Refine binary codes by minimizing graph energy |
+| `tch.refine` | `table: {codes, ids, offsets, neighbors, weights, scale?, n_dims, threads?, each?}` | `tk_ivec_t` | Refine binary codes by minimizing graph energy. The optional `scale` parameter provides degree normalization factors for weighted adjacency |
 
 ### `santoku.tsetlin.booleanizer`
 
@@ -314,3 +320,25 @@ Text tokenization with n-grams, skip-grams, and character grams.
 |----------|------------|---------|-------------|
 | `tk_tch_refine` | `L: lua_State*, codes: tk_ivec_t*, uids: tk_ivec_t*, adj_offset: tk_ivec_t*, adj_data: tk_ivec_t*, adj_weights: tk_dvec_t*, n_dims: uint64_t, i_each: int` | `-` | Refine binary codes via coordinate ascent on graph adjacency |
 
+## License
+
+MIT License
+
+Copyright 2025 Birch Point SWE
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
