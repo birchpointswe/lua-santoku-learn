@@ -773,7 +773,6 @@ static inline int tm_create (lua_State *L)
     lua_call(L, 3, 0);
   }
 
-
   lua_pushvalue(L, Gi);
   return 1;
 }
@@ -786,7 +785,6 @@ static inline int tm_graph_adjacency (lua_State *L)
   uint64_t n_nodes = graph->uids->n;
   tk_lua_get_ephemeron(L, TK_GRAPH_EPH, graph->uids);
 
-
   tk_ivec_t *adj_offset = tk_ivec_create(L, n_nodes + 1, 0, 0);
   tk_ivec_t *adj_data = tk_ivec_create(L, 0, 0, 0);
   tk_dvec_t *adj_weights = tk_dvec_create(L, 0, 0, 0);
@@ -798,10 +796,7 @@ static inline int tm_graph_adjacency (lua_State *L)
     tk_thread_range(i, graph->pool->n_threads, n_nodes, &data->ifirst, &data->ilast);
   }
 
-
   tk_threads_signal(graph->pool, TK_GRAPH_CSR_OFFSET_LOCAL, 0);
-
-
   int64_t total = 0;
   for (unsigned int i = 0; i < graph->pool->n_threads; i ++) {
     tk_graph_thread_t *data = graph->threads + i;
@@ -811,11 +806,9 @@ static inline int tm_graph_adjacency (lua_State *L)
   }
   adj_offset->a[adj_offset->n - 1] = total;
 
-
   tk_threads_signal(graph->pool, TK_GRAPH_CSR_OFFSET_GLOBAL, 0);
   tk_ivec_resize(adj_data, (size_t) total, true);
   tk_dvec_resize(adj_weights, (size_t) total, true);
-
 
   tk_threads_signal(graph->pool, TK_GRAPH_CSR_DATA, 0);
 

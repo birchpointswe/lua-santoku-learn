@@ -1,6 +1,7 @@
 local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
 local fs = require("santoku.fs")
+local ivec = require("santoku.ivec")
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local str = require("santoku.string")
 local test = require("santoku.test")
@@ -33,6 +34,10 @@ test("tsetlin", function ()
   local dataset = ds.read_binary_mnist("test/res/mnist.70k.txt", FEATURES, MAX)
   print("Splitting")
   local train, test = ds.split_binary_mnist(dataset, TTR)
+  train.problems = ivec.create()
+  train.problems:bits_copy(dataset.problems, nil, train.ids, dataset.n_features)
+  test.problems = ivec.create()
+  test.problems:bits_copy(dataset.problems, nil, test.ids, dataset.n_features)
 
   str.printf("Transforming train\t%d\n", train.n)
   train.problems = train.problems:bits_to_cvec(train.n, dataset.n_features, true)

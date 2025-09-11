@@ -382,7 +382,6 @@ static inline char *tb_tokenizer_normalize (char *in, size_t *len, int max_run)
           last = ' ';
           break;
         default:
-
           last = ' ';
           break;
       }
@@ -947,7 +946,6 @@ static inline int tb_tokenizer_finalize (lua_State *L)
   double max_df = tokenizer->max_df < 0 ? (fabs(tokenizer->max_df) / (double) tokenizer->ndocs) : tokenizer->max_df;
   double min_df = tokenizer->min_df < 0 ? (fabs(tokenizer->min_df) / (double) tokenizer->ndocs) : tokenizer->min_df;
 
-
   for (i = kh_begin(tokenizer->ids); i < kh_end(tokenizer->ids); i ++)
     if (kh_exist(tokenizer->ids, i)) {
       tok = (char *) kh_key(tokenizer->ids, i);
@@ -970,7 +968,6 @@ static inline int tb_tokenizer_finalize (lua_State *L)
   tokenizer->dfs = NULL;
   kh_destroy(seen, tokenizer->tmp_seen);
   tokenizer->tmp_seen = NULL;
-
 
   ks_introsort(sort_pair, sort.n, sort.a);
   if (max_vocab && sort.n > max_vocab)

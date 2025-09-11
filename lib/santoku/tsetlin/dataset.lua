@@ -3,7 +3,6 @@ local serialize = require("santoku.serialize") -- luacheck: ignore
 local inv = require("santoku.tsetlin.inv")
 local pvec = require("santoku.pvec")
 local ivec = require("santoku.ivec")
-local cvec = require("santoku.cvec")
 local it = require("santoku.iter")
 local fs = require("santoku.fs")
 local str = require("santoku.string")
@@ -48,19 +47,17 @@ end
 local function _split_binary_mnist (dataset, s, e)
   local ids = ivec.create()
   ids:copy(dataset.ids, s - 1, e, 0)
-  local ps = ivec.create()
-  ps:bits_copy(dataset.problems, nil, ids, dataset.n_features)
   local ss = ivec.create()
   ss:copy(dataset.solutions, s - 1, e, 0)
   return {
     ids = ids,
-    problems = ps,
     solutions = ss,
     n_labels = dataset.n_labels,
     n_features = dataset.n_features,
     n = e - s + 1,
   }
 end
+
 
 M.split_binary_mnist = function (dataset, ratio)
   if ratio >= 1 then

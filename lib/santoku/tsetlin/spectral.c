@@ -199,13 +199,22 @@ static inline void tm_run_spectral (
   z->n = uids->n * n_hidden;
   double eps_drop = fmax(1e-8, 10.0 * eps_primme);
   uint64_t start = !has_negatives || fabs(spec.evals[0]) < eps_drop ? 1 : 0;
+
+
+  tk_dvec_t *eigenvalues = tk_dvec_create(L, n_hidden, 0, 0);
+  eigenvalues->n = n_hidden;
+
   for (uint64_t i = 0; i < uids->n; i ++) {
     for (uint64_t k = 0; k < n_hidden; k ++) {
       uint64_t f = start + k;
       z->a[i * n_hidden + k] = spec.evecs[i + f * uids->n];
+
+      if (i == 0) {
+        eigenvalues->a[k] = spec.evals[f];
+      }
     }
   }
-  
+
 
   tk_dvec_center(z->a, uids->n, n_hidden);
 
@@ -274,14 +283,17 @@ static inline int tm_encode (lua_State *L)
   tk_dvec_t *scale = tk_dvec_create(L, uids->n, 0, 0);
   tk_dvec_t *degree = tk_dvec_create(L, uids->n, 0, 0);
   tm_run_spectral(L, pool, z, scale, degree, uids, adj_offset, adj_data, adj_weights, n_hidden, eps_primme, normalized, i_each);
-  lua_pop(L, 2);
+
+  lua_remove(L, -2);
 
 
   tk_threads_destroy(pool);
-  assert(tk_ivec_peekopt(L, -2) == uids);
-  assert(tk_dvec_peekopt(L, -1) == z);
+  assert(tk_ivec_peekopt(L, -4) == uids);
+  assert(tk_dvec_peekopt(L, -3) == z);
 
-  return 2;
+
+
+  return 4;
 }
 
 static luaL_Reg tm_codebook_fns[] =
