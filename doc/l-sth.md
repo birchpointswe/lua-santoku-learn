@@ -140,11 +140,3 @@ rank-based supervision, class-weighted edges.
 - Encoder-aware bit selection.
 
 - End-to-end optimization pipeline.
-
-## TL;DR
-
-Train embeddings in 60 seconds on a laptop. Process 1M documents with 10M edges
-in minutes on consumer hardware. Run nightly retraining on edge devices. 95% of
-transformer accuracy at 0.1% of compute. No GPU requirements. Grid search 100
-configurations over lunch. Deploy to IoT, mobile, embedded systems without cloud
-dependencies.
