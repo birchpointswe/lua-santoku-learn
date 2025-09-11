@@ -14,6 +14,7 @@ typedef enum {
   TK_EVAL_ENCODING_ACCURACY,
   TK_EVAL_ENCODING_SIMILARITY,
   TK_EVAL_ENCODING_AUC,
+  TK_EVAL_GRAPH_RECONSTRUCTION,
 } tk_eval_stage_t;
 
 typedef struct {
@@ -32,11 +33,15 @@ typedef struct {
   double *f1, *precision, *recall;
   unsigned int *predicted, *expected;
   tk_bits_t *codes, *codes_predicted, *codes_expected, *mask;
+  uint64_t mask_popcount;
   double *dcodes;
   tk_iumap_t *id_code, *id_assignment;
   unsigned int n_visible, n_dims, chunks;
   tk_ivec_t *assignments;
   tk_graph_t *graph;
+  tk_ivec_t *offsets;
+  tk_ivec_t *neighbors;
+  tk_dvec_t *weights;
 } tk_eval_t;
 
 typedef struct {
@@ -63,6 +68,7 @@ typedef struct {
   tk_ivec_t *best_assignments;
   tk_rvec_t *rtmp;
   tk_pvec_t *ptmp;
+  double recon_error;
 } tk_eval_thread_t;
 
 static inline tk_accuracy_t _tm_clustering_accuracy (
@@ -215,7 +221,7 @@ static void tk_eval_worker (void *dp, int sig)
           state->pl[k].sim = (int64_t)(dot * 1e3);
         } else if (state->codes != NULL) {
           if (state->mask != NULL) {
-            state->pl[k].sim = (int64_t) (state->n_dims - tk_cvec_bits_hamming_mask(
+            state->pl[k].sim = (int64_t) (state->mask_popcount - tk_cvec_bits_hamming_mask(
               (const unsigned char *) state->codes + (uint64_t) iu * state->chunks,
               (const unsigned char *) state->codes + (uint64_t) iv * state->chunks, (const unsigned char *) state->mask, state->n_dims));
           } else {
@@ -227,6 +233,27 @@ static void tk_eval_worker (void *dp, int sig)
           state->pl[k].sim = -1;
         }
         state->pl[k].label = k < state->n_pos ? 1 : 0;
+      }
+      break;
+
+    case TK_EVAL_GRAPH_RECONSTRUCTION:
+      data->recon_error = 0.0;
+      for (uint64_t i = data->sfirst; i <= data->slast; i++) {
+        int64_t start = state->offsets->a[i];
+        int64_t end = state->offsets->a[i + 1];
+        for (int64_t j = start; j < end; j++) {
+          int64_t neighbor = state->neighbors->a[j];
+          double weight = state->weights->a[j];
+          uint64_t hamming_dist = tk_cvec_bits_hamming_mask(
+            (const unsigned char *) state->codes + i * state->chunks,
+            (const unsigned char *) state->codes + neighbor * state->chunks,
+            (const unsigned char *) state->mask,
+            state->n_dims);
+          double hamming_sim = 1.0 - ((double) hamming_dist / state->mask_popcount);
+          double target_sim = (weight > 0) ? weight : 0.0;
+          double error = fabs(weight) * (target_sim - hamming_sim) * (target_sim - hamming_sim);
+          data->recon_error += error;
+        }
       }
       break;
 
@@ -526,7 +553,7 @@ static inline int tm_encoding_accuracy (lua_State *L)
     lua_settable(L, -3);
   }
 
-  double mean_bdiff = (double) diff_total / (n_samples * n_dims);  /* mean Hamming */
+  double mean_bdiff = (double) diff_total / (n_samples * n_dims);
   double var = 0.0;
   for (uint64_t j = 0; j < n_dims; ++j) {
     double ber = (double) bdiff_total[j] / n_samples;
@@ -556,6 +583,10 @@ static inline double _tm_auc (
   tk_eval_t *state,
   tk_threadpool_t *pool
 ) {
+  // Return 0.0 for empty mask (no features selected)
+  if (state->mask != NULL && state->mask_popcount == 0)
+    return 0.0;
+
   tk_threads_signal(pool, TK_EVAL_ENCODING_AUC, 0);
   ks_introsort(dl, state->n_pos + state->n_neg, state->pl);
   double sum_ranks = 0.0;
@@ -574,6 +605,28 @@ static inline double _tm_auc (
     return 0.0;
   double auc = (sum_ranks - ((double) n_pos_valid * (n_pos_valid + 1) / 2)) / ((double) n_pos_valid * n_neg_valid);
   return auc;
+}
+
+static inline double _tm_graph_reconstruction (
+  lua_State *L,
+  tk_eval_t *state,
+  tk_threadpool_t *pool
+) {
+  if (state->mask != NULL && state->mask_popcount == 0)
+    return -1e9;
+  uint64_t n_nodes = state->offsets->n - 1;
+  tk_eval_thread_t *data = (tk_eval_thread_t *)pool->threads[0].data;
+  for (unsigned int i = 0; i < pool->n_threads; i++) {
+    data[i].recon_error = 0.0;
+    tk_thread_range(i, pool->n_threads, n_nodes, &data[i].sfirst, &data[i].slast);
+  }
+  tk_threads_signal(pool, TK_EVAL_GRAPH_RECONSTRUCTION, 0);
+  double total_error = 0.0;
+  for (unsigned int i = 0; i < pool->n_threads; i++)
+    total_error += data[i].recon_error;
+  double n_edges = state->weights->n;
+  double avg_error = (n_edges > 0) ? total_error / n_edges : 0.0;
+  return -avg_error;
 }
 
 static inline int tm_auc (lua_State *L)
@@ -646,6 +699,8 @@ static inline int tm_optimize_clustering (lua_State *L)
   if (ann == NULL && hbi == NULL)
     tk_lua_verror(L, 3, "optimize_clustering", "index", "either tk_ann_t or tk_hbi_t must be provided");
 
+  uint64_t n_features = ann != NULL ? ann->features : hbi->features;
+
   lua_getfield(L, 1, "ids");
   tk_ivec_t *ids = tk_ivec_peekopt(L, -1);
   int i_ids = ids == NULL ? -1 : tk_lua_absindex(L, -1);
@@ -659,8 +714,8 @@ static inline int tm_optimize_clustering (lua_State *L)
   uint64_t min_pts = tk_lua_foptunsigned(L, 1, "optimize clustering", "min_pts", 0);
   bool assign_noise = tk_lua_foptboolean(L, 1, "optimize clustering", "assign_noise", true);
 
-  uint64_t min_margin = tk_lua_fcheckunsigned(L, 1, "optimize clustering", "min_margin");
-  uint64_t max_margin = tk_lua_fcheckunsigned(L, 1, "optimize clustering", "max_margin");
+  uint64_t min_margin = tk_lua_foptunsigned(L, 1, "optimize clustering", "min_margin", 0);
+  uint64_t max_margin = tk_lua_foptunsigned(L, 1, "optimize clustering", "max_margin", n_features);
   uint64_t fs = ann != NULL ? ann->features : hbi != NULL ? hbi->features : 0;
   if (max_margin > fs) max_margin = fs;
   if (min_margin > fs) min_margin = fs;
@@ -903,6 +958,618 @@ static inline int tm_optimize_retrieval (lua_State *L)
   return 1;
 }
 
+typedef double (*tk_optimize_bits_score_fn)(lua_State *L, tk_eval_t *state, tk_threadpool_t *pool);
+
+static inline tk_ivec_t *tm_optimize_bits_generic (
+  lua_State *L,
+  tk_eval_t *state,
+  tk_threadpool_t *pool,
+  bool forward,
+  bool use_float,
+  int i_each,
+  tk_optimize_bits_score_fn score_function
+) {
+  uint64_t n_dims = state->n_dims;
+  tk_cvec_t *mask = tk_cvec_create(L, TK_CVEC_BITS_BYTES(n_dims), 0, 0); // mask
+  tk_ivec_t *active = tk_ivec_create(L, 0, 0, 0); // mask active
+  tk_ivec_t *removed = tk_ivec_create(L, 0, 0, 0); // mask active removed
+
+  if (forward) {
+    memset(mask->a, 0x00, TK_CVEC_BITS_BYTES(n_dims));
+    mask->a[0] |= 1;  // Set bit 0
+    state->mask_popcount = 1;
+    tk_ivec_push(active, 0);
+    tk_ivec_setn(removed, n_dims - 1);
+    // Fill removed with indices 1 through n_dims-1
+    for (uint64_t i = 0; i < n_dims - 1; i ++)
+      removed->a[i] = (int64_t) i + 1;
+  } else {
+    memset(mask->a, 0xFF, TK_CVEC_BITS_BYTES(n_dims));
+    state->mask_popcount = n_dims;
+    tk_ivec_setn(active, n_dims);
+    tk_ivec_fill_indices(active);
+  }
+
+  state->mask = (tk_bits_t *) mask->a;
+  double best_score = score_function(L, state, pool);
+  bool converged = false;
+  while (!converged) {
+
+    if (forward) {
+      // Forward selection: Add features from removed set
+      int64_t best_bit_to_add = -1;
+      uint64_t best_idx_to_add = 0;
+      double best_score_after_add = best_score;
+
+      for (uint64_t i = 0; i < removed->n; i ++) {
+        int64_t bit = removed->a[i];
+        state->mask_popcount++;
+        mask->a[TK_CVEC_BITS_BYTE(bit)] |= (1 << TK_CVEC_BITS_BIT(bit));
+        double score = score_function(L, state, pool);
+        state->mask_popcount--;
+        mask->a[TK_CVEC_BITS_BYTE(bit)] &= ~(1 << TK_CVEC_BITS_BIT(bit));
+        if (score >= best_score_after_add) {
+          best_score_after_add = score;
+          best_bit_to_add = bit;
+          best_idx_to_add = i;
+        }
+      }
+
+      if (best_bit_to_add >= 0 && best_score_after_add >= best_score) {
+        state->mask_popcount++;
+        mask->a[TK_CVEC_BITS_BYTE(best_bit_to_add)] |= (1 << TK_CVEC_BITS_BIT(best_bit_to_add));
+        tk_ivec_push(active, best_bit_to_add);
+        removed->a[best_idx_to_add] = removed->a[--removed->n];
+        double gain = best_score_after_add - best_score;
+        best_score = best_score_after_add;
+        if (i_each > -1) {
+          lua_pushvalue(L, i_each);
+          lua_pushinteger(L, best_bit_to_add);
+          lua_pushnumber(L, gain);
+          lua_pushnumber(L, best_score);
+          lua_pushstring(L, "add");
+          lua_call(L, 4, 0);
+        }
+
+        // Floating removal: Remove previously added features if it improves score
+        bool float_improved = use_float; // Only run if floating is enabled
+        while (float_improved && active->n > 1) {
+          float_improved = false;
+          int64_t best_float_bit_to_remove = -1;
+          uint64_t best_float_idx_to_remove = 0;
+          double best_float_score_after_remove = best_score;
+
+          for (uint64_t i = 0; i < active->n; i++) {
+            int64_t bit = active->a[i];
+            state->mask_popcount--;
+            mask->a[TK_CVEC_BITS_BYTE(bit)] &= ~(1 << TK_CVEC_BITS_BIT(bit));
+            double score = score_function(L, state, pool);
+            state->mask_popcount++;
+            mask->a[TK_CVEC_BITS_BYTE(bit)] |= (1 << TK_CVEC_BITS_BIT(bit));
+            if (score > best_float_score_after_remove) {
+              best_float_score_after_remove = score;
+              best_float_bit_to_remove = bit;
+              best_float_idx_to_remove = i;
+            }
+          }
+
+          if (best_float_bit_to_remove >= 0 && best_float_score_after_remove > best_score) {
+            state->mask_popcount--;
+            mask->a[TK_CVEC_BITS_BYTE(best_float_bit_to_remove)] &= ~(1 << TK_CVEC_BITS_BIT(best_float_bit_to_remove));
+            tk_ivec_push(removed, best_float_bit_to_remove);
+            active->a[best_float_idx_to_remove] = active->a[--active->n];
+            double float_gain = best_float_score_after_remove - best_score;
+            best_score = best_float_score_after_remove;
+            float_improved = true;
+            if (i_each > -1) {
+              lua_pushvalue(L, i_each);
+              lua_pushinteger(L, best_float_bit_to_remove);
+              lua_pushnumber(L, float_gain);
+              lua_pushnumber(L, best_score);
+              lua_pushstring(L, "float-remove");
+              lua_call(L, 4, 0);
+            }
+          }
+        }
+      } else {
+        converged = true;
+      }
+
+    } else {
+      // Backward elimination: Remove features from active set
+      int64_t best_bit_to_remove = -1;
+      uint64_t best_idx_to_remove = 0;
+      double best_score_after_remove = best_score;
+
+      for (uint64_t i = 0; i < active->n; i ++) {
+        int64_t bit = active->a[i];
+        state->mask_popcount--;
+        mask->a[TK_CVEC_BITS_BYTE(bit)] &= ~(1 << TK_CVEC_BITS_BIT(bit));
+        double score = score_function(L, state, pool);
+        state->mask_popcount++;
+        mask->a[TK_CVEC_BITS_BYTE(bit)] |= (1 << TK_CVEC_BITS_BIT(bit));
+        if (score >= best_score_after_remove) {
+          best_score_after_remove = score;
+          best_bit_to_remove = bit;
+          best_idx_to_remove = i;
+        }
+      }
+
+      if (best_bit_to_remove >= 0 && best_score_after_remove >= best_score) {
+        state->mask_popcount--;
+        mask->a[TK_CVEC_BITS_BYTE(best_bit_to_remove)] &= ~(1 << TK_CVEC_BITS_BIT(best_bit_to_remove));
+        tk_ivec_push(removed, best_bit_to_remove);
+        active->a[best_idx_to_remove] = active->a[--active->n];
+        double gain = best_score_after_remove - best_score;
+        best_score = best_score_after_remove;
+        if (i_each > -1) {
+          lua_pushvalue(L, i_each);
+          lua_pushinteger(L, best_bit_to_remove);
+          lua_pushnumber(L, gain);
+          lua_pushnumber(L, best_score);
+          lua_pushstring(L, "remove");
+          lua_call(L, 4, 0);
+        }
+
+        // Floating addition: Add previously removed features if it improves score
+        bool float_improved = use_float; // Only run if floating is enabled
+        while (float_improved && removed->n > 0) {
+          float_improved = false;
+          int64_t best_float_bit_to_add = -1;
+          uint64_t best_float_idx_to_add = 0;
+          double best_float_score_after_add = best_score;
+
+          for (uint64_t i = 0; i < removed->n; i++) {
+            int64_t bit = removed->a[i];
+            state->mask_popcount++;
+            mask->a[TK_CVEC_BITS_BYTE(bit)] |= (1 << TK_CVEC_BITS_BIT(bit));
+            double score = score_function(L, state, pool);
+            state->mask_popcount--;
+            mask->a[TK_CVEC_BITS_BYTE(bit)] &= ~(1 << TK_CVEC_BITS_BIT(bit));
+            if (score > best_float_score_after_add) {
+              best_float_score_after_add = score;
+              best_float_bit_to_add = bit;
+              best_float_idx_to_add = i;
+            }
+          }
+
+          if (best_float_bit_to_add >= 0 && best_float_score_after_add > best_score) {
+            state->mask_popcount++;
+            mask->a[TK_CVEC_BITS_BYTE(best_float_bit_to_add)] |= (1 << TK_CVEC_BITS_BIT(best_float_bit_to_add));
+            tk_ivec_push(active, best_float_bit_to_add);
+            removed->a[best_float_idx_to_add] = removed->a[--removed->n];
+            double float_gain = best_float_score_after_add - best_score;
+            best_score = best_float_score_after_add;
+            float_improved = true;
+            if (i_each > -1) {
+              lua_pushvalue(L, i_each);
+              lua_pushinteger(L, best_float_bit_to_add);
+              lua_pushnumber(L, float_gain);
+              lua_pushnumber(L, best_score);
+              lua_pushstring(L, "float-add");
+              lua_call(L, 4, 0);
+            }
+          }
+        }
+      } else {
+        converged = true;
+      }
+    }
+  }
+
+  tk_ivec_destroy(removed);
+  tk_cvec_destroy(mask);
+  lua_remove(L, -3); // active, removed
+  lua_pop(L, 1); // active
+  return active;
+}
+
+static inline tk_ivec_t *tm_optimize_bits_auc (
+  lua_State *L,
+  tk_eval_t *state,
+  tk_threadpool_t *pool,
+  bool forward,
+  bool use_float,
+  int i_each
+) {
+  return tm_optimize_bits_generic(L, state, pool, forward, use_float, i_each, _tm_auc);
+}
+
+static inline tk_ivec_t *tm_optimize_bits_graph (
+  lua_State *L,
+  tk_eval_t *state,
+  tk_threadpool_t *pool,
+  bool forward,
+  bool use_float,
+  int i_each
+) {
+  return tm_optimize_bits_generic(L, state, pool, forward, use_float, i_each, _tm_graph_reconstruction);
+}
+
+static inline tk_ivec_t *tm_optimize_bits_prefix_only (
+  lua_State *L,
+  tk_eval_t *state,
+  tk_threadpool_t *pool,
+  int i_each,
+  tk_optimize_bits_score_fn score_function
+) {
+  uint64_t n_dims = state->n_dims;
+  tk_cvec_t *mask = tk_cvec_create(L, TK_CVEC_BITS_BYTES(n_dims), 0, 0);
+  const double epsilon = 1e-6;
+
+  double best_score = -INFINITY;
+  uint64_t best_k = 0;
+
+  // Test each prefix: bits 0 through k-1
+  for (uint64_t k = 1; k <= n_dims; k++) {
+    // Set mask for bits 0 through k-1
+    memset(mask->a, 0x00, TK_CVEC_BITS_BYTES(n_dims));
+    for (uint64_t i = 0; i < k; i++) {
+      mask->a[TK_CVEC_BITS_BYTE(i)] |= (1 << TK_CVEC_BITS_BIT(i));
+    }
+
+    state->mask = (tk_bits_t *) mask->a;
+    state->mask_popcount = k;
+
+    // Evaluate this prefix
+    double score = score_function(L, state, pool);
+
+    // Callback for monitoring
+    if (i_each != -1) {
+      lua_pushvalue(L, i_each);
+      lua_pushinteger(L, (int64_t) k);
+      lua_pushnumber(L, 0.0);  // unused gain field
+      lua_pushnumber(L, score);
+      lua_pushstring(L, "add");
+      lua_call(L, 4, 0);
+    }
+
+    // Track best with tie-breaking for size
+    if (score > best_score + epsilon) {
+      // Clear new best
+      best_score = score;
+      best_k = k;
+    } else if (fabs(score - best_score) <= epsilon && k < best_k) {
+      // Equal score but smaller size - prefer it
+      best_k = k;
+    }
+  }
+
+  // Return the best prefix as selected bits
+  tk_ivec_t *kept_bits = tk_ivec_create(L, best_k, 0, 0);
+  kept_bits->n = best_k;
+  for (uint64_t i = 0; i < best_k; i++) {
+    kept_bits->a[i] = (int64_t) i;
+  }
+
+  // Final callback with best result
+  if (i_each != -1) {
+    lua_pushvalue(L, i_each);
+    lua_pushinteger(L, (int64_t) best_k);
+    lua_pushnumber(L, 0.0);
+    lua_pushnumber(L, best_score);
+    lua_pushstring(L, "final");
+    lua_call(L, 4, 0);
+  }
+
+  tk_cvec_destroy(mask);
+  return kept_bits;
+}
+
+static inline tk_ivec_t *tm_optimize_bits_prefix (
+  lua_State *L,
+  tk_eval_t *state,
+  tk_threadpool_t *pool,
+  int i_each,
+  tk_optimize_bits_score_fn score_function
+) {
+  uint64_t n_dims = state->n_dims;
+  tk_cvec_t *mask = tk_cvec_create(L, TK_CVEC_BITS_BYTES(n_dims), 0, 0);
+  const double epsilon = 1e-6;
+
+  double best_score = -INFINITY;
+  uint64_t best_k = 0;
+
+  // Phase 1: Test each prefix: bits 0 through k-1
+  for (uint64_t k = 1; k <= n_dims; k++) {
+    // Set mask for bits 0 through k-1
+    memset(mask->a, 0x00, TK_CVEC_BITS_BYTES(n_dims));
+    for (uint64_t i = 0; i < k; i++) {
+      mask->a[TK_CVEC_BITS_BYTE(i)] |= (1 << TK_CVEC_BITS_BIT(i));
+    }
+
+    state->mask = (tk_bits_t *) mask->a;
+    state->mask_popcount = k;
+
+    // Evaluate this prefix
+    double score = score_function(L, state, pool);
+
+    // Callback for monitoring
+    if (i_each != -1) {
+      lua_pushvalue(L, i_each);
+      lua_pushinteger(L, (int64_t) k);
+      lua_pushnumber(L, 0.0);  // unused gain field
+      lua_pushnumber(L, score);
+      lua_pushstring(L, "add");
+      lua_call(L, 4, 0);
+    }
+
+    // Track best with tie-breaking for size
+    if (score > best_score + epsilon) {
+      // Clear new best
+      best_score = score;
+      best_k = k;
+    } else if (fabs(score - best_score) <= epsilon && k < best_k) {
+      // Equal score but smaller size - prefer it
+      best_k = k;
+    }
+  }
+
+  // Initialize with the best prefix
+  tk_ivec_t *active = tk_ivec_create(L, best_k, 0, 0);
+  active->n = best_k;
+  for (uint64_t i = 0; i < best_k; i++) {
+    active->a[i] = (int64_t) i;
+  }
+
+  // Set mask to selected prefix
+  memset(mask->a, 0x00, TK_CVEC_BITS_BYTES(n_dims));
+  for (uint64_t i = 0; i < best_k; i++) {
+    mask->a[TK_CVEC_BITS_BYTE(i)] |= (1 << TK_CVEC_BITS_BIT(i));
+  }
+  state->mask = (tk_bits_t *) mask->a;
+  state->mask_popcount = best_k;
+
+  // Report initial state
+  if (i_each != -1) {
+    lua_pushvalue(L, i_each);
+    lua_pushinteger(L, (int64_t) best_k);
+    lua_pushnumber(L, 0.0);
+    lua_pushnumber(L, best_score);
+    lua_pushstring(L, "init");
+    lua_call(L, 4, 0);
+  }
+
+  // Phase 2: Standard SFBS - backward selection with floating
+  // Stack order after creates: mask, active, removed
+  tk_ivec_t *removed = tk_ivec_create(L, n_dims, 0, 0); // Track removed bits for floating
+  bool converged = false;
+
+  while (!converged && active->n > 0) {
+    double current_score = score_function(L, state, pool);
+
+    int64_t best_bit_to_remove = -1;
+    uint64_t best_idx_to_remove = 0;
+    double best_score_after_remove = current_score - epsilon;
+
+    // Try removing each active bit
+    for (uint64_t i = 0; i < active->n; i++) {
+      int64_t bit = active->a[i];
+
+      // Temporarily remove bit
+      state->mask_popcount--;
+      mask->a[TK_CVEC_BITS_BYTE(bit)] &= ~(1 << TK_CVEC_BITS_BIT(bit));
+
+      double score = score_function(L, state, pool);
+
+      // Restore bit
+      state->mask_popcount++;
+      mask->a[TK_CVEC_BITS_BYTE(bit)] |= (1 << TK_CVEC_BITS_BIT(bit));
+
+      // Check if this removal is beneficial or neutral
+      if (score >= best_score_after_remove) {
+        best_score_after_remove = score;
+        best_bit_to_remove = bit;
+        best_idx_to_remove = i;
+      }
+    }
+
+    // If we found a bit to remove
+    if (best_bit_to_remove >= 0 && best_score_after_remove >= current_score - epsilon) {
+      // Remove the bit permanently
+      state->mask_popcount--;
+      mask->a[TK_CVEC_BITS_BYTE(best_bit_to_remove)] &= ~(1 << TK_CVEC_BITS_BIT(best_bit_to_remove));
+      tk_ivec_push(removed, best_bit_to_remove);
+      active->a[best_idx_to_remove] = active->a[--active->n];
+
+      if (i_each != -1) {
+        lua_pushvalue(L, i_each);
+        lua_pushinteger(L, best_bit_to_remove);
+        lua_pushnumber(L, 0.0);
+        lua_pushnumber(L, best_score_after_remove);
+        lua_pushstring(L, "remove");
+        lua_call(L, 4, 0);
+      }
+
+      // Floating addition: Try adding back previously removed bits
+      bool float_improved = true;
+      while (float_improved && removed->n > 0) {
+        float_improved = false;
+        double float_current_score = score_function(L, state, pool);
+
+        int64_t best_float_bit_to_add = -1;
+        uint64_t best_float_idx_to_add = 0;
+        double best_float_score_after_add = float_current_score;
+
+        for (uint64_t i = 0; i < removed->n; i++) {
+          int64_t bit = removed->a[i];
+
+          // Temporarily add bit
+          state->mask_popcount++;
+          mask->a[TK_CVEC_BITS_BYTE(bit)] |= (1 << TK_CVEC_BITS_BIT(bit));
+
+          double score = score_function(L, state, pool);
+
+          // Remove bit again
+          state->mask_popcount--;
+          mask->a[TK_CVEC_BITS_BYTE(bit)] &= ~(1 << TK_CVEC_BITS_BIT(bit));
+
+          if (score > best_float_score_after_add + epsilon) {
+            best_float_score_after_add = score;
+            best_float_bit_to_add = bit;
+            best_float_idx_to_add = i;
+          }
+        }
+
+        if (best_float_bit_to_add >= 0 && best_float_score_after_add > float_current_score + epsilon) {
+          // Add the bit back permanently
+          state->mask_popcount++;
+          mask->a[TK_CVEC_BITS_BYTE(best_float_bit_to_add)] |= (1 << TK_CVEC_BITS_BIT(best_float_bit_to_add));
+          tk_ivec_push(active, best_float_bit_to_add);
+          removed->a[best_float_idx_to_add] = removed->a[--removed->n];
+          float_improved = true;
+
+          if (i_each != -1) {
+            lua_pushvalue(L, i_each);
+            lua_pushinteger(L, best_float_bit_to_add);
+            lua_pushnumber(L, 0.0);
+            lua_pushnumber(L, best_float_score_after_add);
+            lua_pushstring(L, "float-add");
+            lua_call(L, 4, 0);
+          }
+        }
+      }
+    } else {
+      converged = true;
+    }
+  }
+
+  // Clean up - stack has: mask, active, removed
+  tk_ivec_destroy(removed);
+  tk_cvec_destroy(mask);
+  lua_pop(L, 1); // pop removed from stack
+  // Now stack just has active, which we return
+
+  return active;
+}
+
+static inline int tm_optimize_bits (lua_State *L)
+{
+  lua_settop(L, 1);
+
+  // === Parse all inputs first ===
+  lua_getfield(L, 1, "codes");
+  tk_cvec_t *cvec = tk_cvec_peek(L, -1, "cvec");
+
+  const char *type = tk_lua_foptstring(L, 1, "optimize_bits", "type", NULL);
+  const char *method = tk_lua_foptstring(L, 1, "optimize_bits", "method", "sffs");
+  const char *dir = tk_lua_foptstring(L, 1, "optimize_bits", "direction", "backward");
+  bool use_float = tk_lua_foptboolean(L, 1, "optimize_bits", "float", true);
+  uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "optimize_bits", "n_dims");
+  unsigned int n_threads = tk_threads_getn(L, 1, "optimize_bits", "threads");
+
+  bool forward;
+  if (!strcmp(dir, "forward"))
+    forward = true;
+  else if (!strcmp(dir, "backward"))
+    forward = false;
+  else
+    return tk_lua_verror(L, 3, "optimize_bits", "direction",
+                        "must be either 'backward' or 'forward'");
+
+  int i_each = -1;
+  if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
+    lua_getfield(L, 1, "each");
+    i_each = tk_lua_absindex(L, -1);
+  }
+
+  tk_eval_t state;
+  memset(&state, 0, sizeof(tk_eval_t));
+  state.n_dims = n_dims;
+  state.chunks = TK_CVEC_BITS_BYTES(n_dims);
+  state.codes = (tk_bits_t *) cvec->a;
+  state.dcodes = NULL;
+
+  lua_getfield(L, 1, "offsets");
+  state.offsets = tk_ivec_peekopt(L, -1);
+  lua_getfield(L, 1, "neighbors");
+  state.neighbors = tk_ivec_peekopt(L, -1);
+  lua_getfield(L, 1, "weights");
+  state.weights = tk_dvec_peekopt(L, -1);
+
+  lua_getfield(L, 1, "ids");
+  tk_ivec_t *ids = tk_ivec_peekopt(L, -1);
+  lua_getfield(L, 1, "pos");
+  state.pos = tk_pvec_peekopt(L, -1);
+  lua_getfield(L, 1, "neg");
+  state.neg = tk_pvec_peekopt(L, -1);
+
+  bool is_graph = false;
+  if (type) {
+    if (!strcmp(type, "graph"))
+      is_graph = true;
+    else if (strcmp(type, "auc") != 0)
+      return tk_lua_verror(L, 3, "optimize_bits", "type", "must be either 'auc' or 'graph'");
+  } else {
+    if (state.offsets && state.neighbors && state.weights)
+      is_graph = true;
+    else if (!state.pos || !state.neg)
+      return tk_lua_verror(L, 3, "optimize_bits", "data", "must provide either graph data (offsets, neighbors, weights) or pair data (pos, neg)");
+  }
+
+  if (is_graph) {
+    if (!state.offsets || !state.neighbors || !state.weights)
+      return tk_lua_verror(L, 3, "optimize_bits", "graph data", "graph mode requires offsets, neighbors, and weights");
+    state.pl = NULL;
+    state.id_code = NULL;
+    state.pos = NULL;
+    state.neg = NULL;
+    state.n_pos = 0;
+    state.n_neg = 0;
+  } else {
+    if (!state.pos || !state.neg)
+      return tk_lua_verror(L, 3, "optimize_bits", "pair data", "auc mode requires pos and neg pairs");
+    state.n_pos = state.pos->n;
+    state.n_neg = state.neg->n;
+    state.id_code = ids ? tk_iumap_from_ivec(ids) : NULL;
+    state.pl = malloc((state.n_pos + state.n_neg) * sizeof(tm_dl_t));
+    state.offsets = NULL;
+    state.neighbors = NULL;
+    state.weights = NULL;
+  }
+
+  tk_eval_thread_t data[n_threads];
+  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
+  for (unsigned int i = 0; i < n_threads; i++) {
+    pool->threads[i].data = data + i;
+    data[i].state = &state;
+    if (!is_graph && (state.n_pos + state.n_neg) > 0)
+      tk_thread_range(i, n_threads, state.n_pos + state.n_neg, &data[i].pfirst, &data[i].plast);
+  }
+
+  tk_ivec_t *result;
+  if (!strcmp(method, "prefix")) {
+    // Use prefix selection method with SFBS
+    if (is_graph)
+      result = tm_optimize_bits_prefix(L, &state, pool, i_each, _tm_graph_reconstruction);
+    else
+      result = tm_optimize_bits_prefix(L, &state, pool, i_each, _tm_auc);
+  } else if (!strcmp(method, "prefix-only")) {
+    // Use prefix selection method without SFBS
+    if (is_graph)
+      result = tm_optimize_bits_prefix_only(L, &state, pool, i_each, _tm_graph_reconstruction);
+    else
+      result = tm_optimize_bits_prefix_only(L, &state, pool, i_each, _tm_auc);
+  } else if (!strcmp(method, "sffs")) {
+    // Use original SFFS method
+    if (is_graph)
+      result = tm_optimize_bits_graph(L, &state, pool, forward, use_float, i_each);
+    else
+      result = tm_optimize_bits_auc(L, &state, pool, forward, use_float, i_each);
+  } else {
+    return tk_lua_verror(L, 3, "optimize_bits", "method",
+                        "must be either 'sffs', 'prefix', or 'prefix-only'");
+  }
+
+  if (state.pl)
+    free(state.pl);
+  if (state.id_code)
+    tk_iumap_destroy(state.id_code);
+  tk_threads_destroy(pool);
+
+  return 1;
+}
+
 static inline int tm_entropy_stats (lua_State *L)
 {
   lua_settop(L, 4);
@@ -962,6 +1629,7 @@ static luaL_Reg tm_evaluator_fns[] =
   { "class_accuracy", tm_class_accuracy },
   { "encoding_accuracy", tm_encoding_accuracy },
   { "clustering_accuracy", tm_clustering_accuracy_lua },
+  { "optimize_bits", tm_optimize_bits },
   { "optimize_retrieval", tm_optimize_retrieval },
   { "optimize_clustering", tm_optimize_clustering },
   { "entropy_stats", tm_entropy_stats },

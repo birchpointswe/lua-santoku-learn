@@ -1,5 +1,6 @@
 local ds = require("santoku.tsetlin.dataset")
 local corex = require("santoku.corex")
+local ivec = require("santoku.ivec")
 local eval = require("santoku.tsetlin.evaluator")
 local fs = require("santoku.fs")
 local serialize = require("santoku.serialize") -- luacheck: ignore
@@ -34,6 +35,10 @@ test("tsetlin", function ()
   print("Reading data")
   local dataset = ds.read_binary_mnist("test/res/mnist.70k.txt", VISIBLE, MAX)
   local train, test = ds.split_binary_mnist(dataset, TTR)
+  train.problems = ivec.create()
+  train.problems:bits_copy(dataset.problems, nil, train.ids, dataset.n_features)
+  test.problems = ivec.create()
+  test.problems:bits_copy(dataset.problems, nil, test.ids, dataset.n_features)
 
   print("Creating Corex")
   local cor = corex.create({

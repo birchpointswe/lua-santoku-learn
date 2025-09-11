@@ -67,7 +67,7 @@ test("tsetlin", function ()
     dataset.graph:adjacency()
 
   print("\nSpectral eigendecomposition")
-  dataset.ids_spectral, dataset.codes_spectral = spectral.encode({
+  dataset.ids_spectral, dataset.codes_spectral, dataset.scale = spectral.encode({
     ids = dataset.graph_adj_ids,
     offsets = dataset.graph_adj_offsets,
     neighbors = dataset.graph_adj_neighbors,
@@ -119,6 +119,7 @@ test("tsetlin", function ()
       neighbors = dataset.graph_adj_neighbors,
       weights = dataset.graph_adj_weights,
       codes = dataset.codes_spectral,
+      scale = dataset.scale,
       n_dims = HIDDEN,
       each = function (s)
         local d, dd = stopwatch()
