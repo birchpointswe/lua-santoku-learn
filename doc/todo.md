@@ -1,16 +1,5 @@
 # Now
 
-- Finalize L-STH
-    - AUC-based bit selection (greedy selection of highest AUC-gain bits)
-    - Always store UIDs in neighborhoods. Set up indices if needed after.
-    - Ensure docs up to date (various changes across matrix/tsetlin)
-    - Revise l-sth.md
-    - QQP
-
-- ann/hbi: implement mutualize/etc
-    - Note: Partially completed for ann
-    - Include mutualize lua api
-
 - tk_xxmap/set_t:
     - Templatize over khash/kbtree
     - Proper Lua/C API like tk_xvec_t
@@ -20,112 +9,111 @@
     - Implement cvec to/from string
 
 - Lua GC for threadpool
-- Pcalls for callbacks, or make sure everything is connected to the lua GC
+- Connect all allocs to Lua
+- Double-check lua callback error handling
 
 # Next
 
-- Avoid direct malloc, use newuserdata or cvec APIs
+- Supplementary documentation similar to l-sth.md for the general classification
+  pipeline using tsetlin machines for binary, multiclass, and multi-output
+  scenarios
+    - Covering booleanizer, tokenizer, supporting external embeddings via
+      booleanizer, feature selection via learned clauses, feature selection via
+      chi2, mi, etc (look at test cases for all features)
 
-- Rename tch
-- Rename to santoku-learn or similar
-- Profile hot paths and vectorization opportunities
+- Rename tch to flipper
+- Rename library and project to santoku-learn
 
-- Move conf.h items to other libraries
-    - Interleaved allocation (santoku-threads)
+- l-sth
+    - IMDB & QQP
+    - Encoding landmark codes as bit-frequencies instead of (or in addition to)
+      concatenated codes for triangulation based on landmark bit statistics of
+      neighbors.
+    - Coreset sampling for landmark index (filter both features and samples for
+      optimal triangulation)
 
-- Versioning or other safety measures around persist/load
+- l-sth
+    - Explore chi2/etc on landmark features
+    - Select bits for encoder-learnability
 
-- Feature selection via analysis of clause weights, with option to prune
-  unused literals, returning pruned for subsequent filtering of
-  tokenizer/booleanizer, giving faster inference.
-
-- Graph
+- graph
     - Re-evaluate negative edge handling in graph (see 2025-08-10/simplify
       branch and prior history)
     - Will need this for handling signed (e.g. SNLI) input pairs in a logically
       sound way
 
-- Rounding out functionality
-    - Support PCA for dimensionality reduction (likely followed by ITQ)
-    - Support sparse/dense linear SVM for codebook/classifier learning
+- tsetlin
+    - Feature selection via analysis of clause weights, with option to prune
+      unused literals, returning pruned for subsequent filtering of
+      tokenizer/booleanizer, giving faster inference.
 
-- Clustering
-    - Return n_clusters, n_core, n_border, n_noise
+- Additional capabilities
+    - Sparse/dense PCA for dimensionality reduction (can be followed by ITQ)
+    - Sparse/dense linear SVM for codebook/classifier learning
 
-- Graph
-    - Return positive and negative weight totals when creating adjacency
-
-- Chore
-    - Error checks on dimensions to prevent segfaults
-    - Sanitize everything
-
-- TCH
-    - Parallelize
-
-- Bitsel
-    - Parallelize
+- Chores
+    - Move conf.h helpers into other santoku libraries (str, hash, interleaved alloc)
+    - Error checks on dimensions to prevent segfaults everywhere
+    - Sanitize all tests and downstream projects for memory leaks
+    - Persist/load versioning or other safety measures
+    - Profile hot paths and vectorization opportunities
 
 # Later
 
-- TBHSS
-    - Reboot as a cli interface to this ML framework
+- tbhss
+    - Reboot as a cli interface to this framework (toku learn {OPTIONS})
 
-- Templated Trie
+- tk_ctrie_t/tk_itrie_t/etc
+    - templated trie
 
-- SNLI (will likely require some new graph features to handle the negatives)
+- l-sth
+    - SNLI (will likely require some new graph features to handle the negatives)
 
 - tk_graph_t
-    - Parallelize init & seed phase (slowest phase of entire pipeline)
-    - Parallelize transitive expansion
-    - Restrict trans via trans_pos/neg_k/eps
+    - speed up init & seed phase (slowest phase of entire pipeline)
 
 - tk_booleanizer_t
-    - Mergable booleanizers, externally paralellized + merged
+    - mergable booleanizers, externally paralellized + merged
     - encode_sparse/dense for ivec/cvec
-    - When both double and string observations found, split into two different features, one for continuous and the
+    - when both double and string observations found, split into two different features, one for continuous and the
       other for categorical
 
 - tk_tokenizer_t
-    - Mergable tokenizers parallelized independently
-    - Proper Lua/C API and tk naming
-    - Use booleanizer under the hood
-    - Include text statistics as continuous/thresholded values
+    - mergable tokenizers parallelized independently
+    - proper Lua/C API and tk naming
+    - use booleanizer under the hood
+    - include text statistics as continuous/thresholded values
 
-- Misc
-    - Generalize the patterns found in tests into:
-        - santoku.tsetlin.encoder: wraps all supported encoder use-cases: graph or labeled data input, generating a
-          codebook, clustering, learning hash functions, ann search, persist/load, etc, integrates booleanizer,
-        tokenizer, etc, to reduce user-required pre-processing
-        - santoku.tsetlin.classifier: similar to encoder: labeled data input
-        - santoku.tsetlin.explore: TM hyperparameter exploration
-             - 1+ epoch restarts (few) doing a grid search or random hill climbing to find best starting point, followed
-               by longer training runs on the top contenders
+- High-level APIs
+    - santoku.learn.encoder
+        - l-sth pipeline, covering all supported variations and defaulting to
+          l-sth.md reference implementation: graph or labeled data input,
+          generating a codebook, clustering, learning hash functions, ann search,
+          persist/load, etc, integrates booleanizer, tokenizer, etc, to reduce
+          user-required pre-processing, feature selection at all phases, etc.
+    - santoku.learn.classifier
+        - similar to encoder, but for classification pipelines
+    - santoku.learn.explore
+        - generalized hyperparameter exploration
 
-- Eval/optimize
-    - Split optimize_retrieval into separate module
-        - optimize.retrieval: finds best margin for retrieval
-        - optimize.clustering: finds best margin for DSU clustering
-    - When scanning margins and multiple are tied for best, pick the median
-    - Parallelize AUC rank accumulation over pairs
-
-- Chores
-    - Auto-vectorize
-    - Document all public APIs
+- evaluator
+    - when scanning margins and multiple are tied for best, pick the median
 
 - tk_graph_t
-    - Proper Lua/C API and tk naming
     - Support querying for changes made to seed list over time (removed during dedupe, added by phase)
 
 - tk_hbi/ann_t
     - Precompute probes
 
-- tk_cvec_t
-    - Move dense bit operations here (hamming, xor, etc, etc)
-
-- Chore
-    - Proper Lua/C APIs across the board
-
 # Eventually
+
+- graph
+    - Consider removing neighborhoods calls from the graph module, instead of
+      requiring the user to pass in the seed edges, potentially even with weights.
+      The provided index, would then only be used for weight lookup in the fallback
+      phase.
+
+- hti: hamming tree index
 
 - tk_ann_t
     - Allow user-provided list of hash bits and enable easy mi, chi2 or corex-based feature bit-selection.
@@ -146,6 +134,12 @@
     - Potential alternative to spectral
     - Also explore various non-neural alternatives to GNNs
 
+- clustering
+    - Return n_clusters, n_core, n_border, n_noise
+
+- graph
+    - Return positive and negative weight totals when creating adjacency
+
 - tk_dsu_t
     - Full Lua/C API?
 
@@ -153,15 +147,18 @@
     - Guided hash bit selection (instead of random), using passed-in dataset to
       select bits by entropy or some other metric (is this actually useful?)
 
-- Corex
-    - Should anchor multiply feature MI instead of hard-boosting it?
-    - Allow explicit anchor feature list instead of last n_hidden, supporting
+- corex
+    - should anchor multiply feature MI instead of hard-boosting it?
+    - allow explicit anchor feature list instead of last n_hidden, supporting
       multiple assigned to same latent, etc.
 
-- Generative model, next token predictor
-    - Predict visible features from spectral codes
-    - Spectral embeddings from graph of ngrams as nodes, probabilities as
+- generative model, next token predictor
+    - predict visible features from spectral codes
+    - spectral embeddings from graph of ngrams as nodes, probabilities as
       weights?
 
-- Tsetlin
+- tsetlin
     - Bayesian optimization
+
+- tm optimizer
+    - Early stopping with no improvement

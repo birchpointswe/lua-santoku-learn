@@ -912,7 +912,8 @@ static inline int tk_tsetlin_predict_encoder (
   tk_tsetlin_setup_thread_samples(tm, n);
   tk_threads_signal(tm->pool, TM_ENCODER_PREDICT, 0);
   tk_threads_signal(tm->pool, TM_ENCODER_PREDICT_REDUCE, 0);
-  lua_pushlstring(L, (char *) tm->encodings, n * tm->class_chunks * sizeof(tk_bits_t));
+  tk_cvec_t *out = tk_cvec_create(L, n * tm->class_chunks * sizeof(tk_bits_t), 0, 0);
+  memcpy(out->a, tm->encodings, n * tm->class_chunks * sizeof(tk_bits_t));
   return 1;
 }
 
