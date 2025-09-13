@@ -33,37 +33,48 @@ supervision and landmark triangulation.
 
 ### Graph-Centric Supervision
 
-All supervision is injected during graph construction. The graph structure
-encodes domain knowledge and relationships. Subsequent steps preserve these
-relationships through reconstruction optimization. This aligns with
-semi-supervised spectral learning. Examples include feature-based supervision,
-class-weighted edges, and synthetic anchors.
+All supervision is injected during graph construction through a virtual node
+architecture. Virtual nodes represent latent concepts, classes, or bipartite
+connections without observable features, existing only as structural
+connections. Documents connect to virtual nodes based on ground-truth
+relationships, creating a heterogeneous graph with multiple node types.
+
+When multiple labelings exist (e.g., document categories and authors), each gets
+its own virtual node type. The system assigns ranks to edge types:
+document-virtual_A edges might be rank 0, document-virtual_B edges rank 1, and
+document-document edges rank 2. Edge weights decay exponentially with rank,
+normalized by the sum of per-rank weights. This exponential decay pairs
+naturally with the log-space mapping in reconstruction error, ensuring
+supervision shapes the manifold structure hierarchically.
+
+Document to document edge weights use symmetric similarity measures appropriate
+for the data, such as set-based similarity over text features with IDF
+weighting. Document to virtual node weights can use similar approaches,
+potentially downweighting high-degree virtual nodes. Higher-rank edges create
+progressively looser clustering (e.g., documents of the same category cluster
+tighter than documents of the same author, followed by documents sharing text
+features).
 
 ### Reconstruction-Optimized Bit Selection
 
 Various eigenvector selection approaches exist (smallest-k, eigengap-based,
 redundancy handling). This approach attempts to remain aligned with foundational
 spectral hashing literature while addressing practical considerations like the
-eigen-gap heuristic and redundant bit pruning. It attempts to preserve
-graph-injected supervision through the pipeline such that Hamming distances
-among binary codes approximate similarity relationships as defined by the graph.
+eigen-gap heuristic and redundant bit pruning. It preserves graph-injected
+supervision through the pipeline such that Hamming distances among binary codes
+approximate similarity relationships as defined by the graph.
 
-The steps are as follows:
-
-1. Oversample smallest-k eigenvectors (2-4x expected k)
-2. Threshold eigenvectors at their medians
-3. Refine via coordinate descent, flipping bits for graph reconstruction
-4. Exhaustively search for the optimal prefix by reconstruction error from
-  oversampled set of thresholded and refined eigenvectors
-5. Prune redundant bits via sequential floating backward selection (SFBS) by
-  reconstruction error
-
-Reconstruction error here measures the squared difference between the original
-graph weight and the Hamming similarity in binary space, weighted by the edge
-strength. If the graph indicates two nodes are similar (high weight) but their
-binary codes are distant (low Hamming similarity), this produces a large error.
-Strong edges contribute more to the total error, ensuring important
-relationships are preserved.
+The approach oversamples eigenvectors then applies median thresholding and
+coordinate descent refinement (maximizing weighted adjacency agreement per bit).
+Bit selection and pruning use stress-based error minimization where target
+distances are computed from edge weights via negative log transformation:
+`target_dist = -log(weight + ε)`. Both target and Hamming distances are
+normalized to `[0,1]`, and the weighted stress error becomes `weight *
+(target_norm - hamming_norm)²`. This weight-modulated stress ensures higher
+weight edges contribute more to error, with the log-space mapping naturally
+pairing with the exponential rank decay from supervision. The stress computation
+operates on the full heterogeneous graph, preserving virtual node relationships
+through the weight×rank combination.
 
 The approach handles signed, unsigned, weighted, normalized, and unnormalized
 graphs intermixed. Bit selection is particularly important for signed graphs
@@ -82,27 +93,31 @@ becomes fixed: n_hidden × n_landmarks.
 
 ## Reference Implementation Pipeline
 
-1. **Graph construction**: Mutual k-NN with supervised edges
+1. **Graph construction**: Create virtual nodes for each unique label/category.
+   Treat virtual node IDs as features - virtual nodes have their own ID as their
+   sole feature, while documents include virtual node IDs among their features.
+   Compute document-virtual weights using weighted Jaccard or similar set-based
+   similarity, ensuring documents connecting to many virtual nodes don't overwhelm
+   the graph. Build mutual k-NN edges between documents using observable features.
+
 2. **Spectral decomposition**: Eigendecomposition with oversampling
+
 3. **Binarization**: Median thresholding
-4. **Coordinate descent refinement**: Iterative bit flipping for graph
-  reconstruction
-5. **Bit selection**: Prefix testing with reconstruction error metric
-6. **SFBS pruning**: Redundant bit removal via floating selection
+
+4. **Coordinate descent refinement**: Iterative bit flipping to maximize
+   weighted adjacency agreement, operating on individual node codes one bit at a
+   time
+
+5. **Bit selection**: Prefix testing with stress-based reconstruction error
+   metric on the full heterogeneous graph
+
+6. **SFBS pruning**: Redundant bit removal via floating selection using
+   stress-based error
+
 7. **Landmark indexing**: Fast set-based methods
+
 8. **Hash function learning**: Multi-label binary classifier or ensemble
-  training
-
-## Technical Examples
-
-**Image labeling**: Triangulate location from similar images instead of learning
-image to location mappings directly.
-
-**Text labeling**: Intent classification using text-similarity k-NN shaped by
-intent labels.
-
-**Cross-domain transfer**: Image retrieval via text queries using
-text-supervised image graph.
+   training
 
 ## Out-of-Sample Extension
 

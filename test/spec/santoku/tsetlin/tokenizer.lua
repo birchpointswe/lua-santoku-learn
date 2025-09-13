@@ -19,13 +19,19 @@ test("tokenizer", function ()
     negations = 0,
   })
 
-  tok.train({ corpus = { "this is a test the lib\'s tokenizer" } })
+  tok.train({ corpus = {
+    "this is a test the lib\'s tokenizer",
+    "this is another test",
+    "And one more a thing",
+  } })
   tok.finalize()
   local words = tok.index()
-  -- print(serialize(words))
-  -- for id in tok.tokenize("this is a test"):each() do
-  --   print(id, words[id + 1])
-  -- end
+  local weights = tok.weights()
+  print(serialize(weights:table()))
+  print(serialize(words))
+  for id in tok.tokenize("this is a test"):each() do
+    print(id, words[id + 1], weights:get(id))
+  end
 
 end)
 

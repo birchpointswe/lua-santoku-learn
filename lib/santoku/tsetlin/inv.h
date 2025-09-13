@@ -52,9 +52,7 @@ typedef struct tk_inv_s {
   uint64_t n_ranks;
   tk_dvec_t *weights;
   tk_ivec_t *ranks;
-  int64_t rank_decay_window;
-  double rank_decay_sigma;
-  double rank_decay_floor;
+  double decay;
   tk_iumap_t *uid_sid;
   tk_iumap_t *sid_uid;
   tk_ivec_t *node_offsets;
@@ -96,6 +94,7 @@ typedef struct tk_inv_thread_s {
   int64_t *old_to_new;
   tk_iuset_t *local_uids;  // Thread-local UID collection
   tk_iumap_t *uid_to_idx;  // Shared UID->index mapping (read-only in REMAP)
+  int64_t rank_filter;  // Rank to filter on (-1 means no filtering)
 } tk_inv_thread_t;
 
 static inline tk_inv_t *tk_inv_peek (lua_State *L, int i)
@@ -310,9 +309,7 @@ static inline void tk_inv_persist (
   tk_lua_fwrite(L, (char *) &rn, sizeof(uint64_t), 1, fh);
   if (rn)
     tk_lua_fwrite(L, (char *) I->ranks->a, sizeof(int64_t), rn, fh);
-  tk_lua_fwrite(L, (char *) &I->rank_decay_window, sizeof(int64_t), 1, fh);
-  tk_lua_fwrite(L, (char *) &I->rank_decay_sigma, sizeof(double), 1, fh);
-  tk_lua_fwrite(L, (char *) &I->rank_decay_floor, sizeof(double), 1, fh);
+  tk_lua_fwrite(L, (char *) &I->decay, sizeof(double), 1, fh);
 }
 
 static inline uint64_t tk_inv_size (
@@ -613,6 +610,7 @@ static inline void tk_inv_neighborhoods (
   double tversky_alpha,
   double tversky_beta,
   bool mutual,
+  int64_t rank_filter,
   tk_inv_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
@@ -659,6 +657,7 @@ static inline void tk_inv_neighborhoods (
     data->cmp = cmp;
     data->tversky_alpha = tversky_alpha;
     data->tversky_beta = tversky_beta;
+    data->rank_filter = rank_filter;
     tk_thread_range(i, I->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
   }
 
@@ -765,6 +764,7 @@ static inline void tk_inv_neighborhoods_by_ids (
   double tversky_alpha,
   double tversky_beta,
   bool mutual,
+  int64_t rank_filter,
   tk_inv_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
@@ -811,6 +811,7 @@ static inline void tk_inv_neighborhoods_by_ids (
     data->cmp = cmp;
     data->tversky_alpha = tversky_alpha;
     data->tversky_beta = tversky_beta;
+    data->rank_filter = rank_filter;
     tk_thread_range(i, I->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
   }
 
@@ -900,6 +901,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
   tk_ivec_sim_type_t cmp,
   double tversky_alpha,
   double tversky_beta,
+  int64_t rank_filter,
   tk_inv_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
@@ -971,6 +973,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
     data->cmp = cmp;
     data->tversky_alpha = tversky_alpha;
     data->tversky_beta = tversky_beta;
+    data->rank_filter = rank_filter;
     tk_thread_range(i, I->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
   }
 
@@ -1171,7 +1174,7 @@ static inline double tk_inv_similarity (
   double tversky_beta
 ) {
   // If ranks configured, use rank-aware computation
-  // (disabled only when rank_decay_window is not set/initialized)
+  // (disabled only when decay is not set/initialized)
   if (I->ranks && I->n_ranks > 1) {
     // Ensure buffers are large enough
     tk_dvec_ensure(I->tmp_q_weights, I->n_ranks);
@@ -1236,37 +1239,7 @@ static inline double tk_inv_similarity (
     double total_rank_weight = 0.0;
 
     for (uint64_t rank = 0; rank < I->n_ranks; rank ++) {
-      double rank_weight = 1.0;
-      if (I->rank_decay_window == 0) {
-        // Special case: 0 means uniform weighting (all ranks equal)
-        rank_weight = 1.0;
-      } else if (I->rank_decay_window > 0) {
-        // Normal ranking: rank 0 has highest weight
-        if (rank == 0) {
-          rank_weight = 1.0;
-        } else if (rank >= (uint64_t)I->rank_decay_window) {
-          rank_weight = I->rank_decay_floor;
-        } else {
-          double t = (double)rank / (double)I->rank_decay_window;
-          double sigmoid_arg = I->rank_decay_sigma * (t - 0.5);
-          double sigmoid_val = 1.0 / (1.0 + exp(sigmoid_arg));
-          rank_weight = I->rank_decay_floor + (1.0 - I->rank_decay_floor) * sigmoid_val;
-        }
-      } else {
-        // Inverted ranking when window < 0: higher rank numbers get higher weight
-        uint64_t inverted_rank = I->n_ranks - 1 - rank;
-        uint64_t abs_window = (uint64_t)(-I->rank_decay_window);
-        if (inverted_rank == 0) {
-          rank_weight = 1.0;
-        } else if (inverted_rank >= abs_window) {
-          rank_weight = fabs(I->rank_decay_floor);
-        } else {
-          double t = (double)inverted_rank / (double)abs_window;
-          double sigmoid_arg = fabs(I->rank_decay_sigma) * (t - 0.5);
-          double sigmoid_val = 1.0 / (1.0 + exp(sigmoid_arg));
-          rank_weight = fabs(I->rank_decay_floor) + (1.0 - fabs(I->rank_decay_floor)) * sigmoid_val;
-        }
-      }
+      double rank_weight = exp(-(double)rank * I->decay);
 
       double rank_sim = tk_inv_similarity_partial(
         I->tmp_inter_weights->a[rank],
@@ -1377,40 +1350,7 @@ static inline double tk_inv_similarity_by_rank (
   double total_rank_weight = 0.0;
 
   for (uint64_t rank = 0; rank < I->n_ranks; rank ++) {
-    double rank_weight = 1.0;
-    if (I->rank_decay_window == 0) {
-      // Special case: 0 means uniform weighting (all ranks equal)
-      rank_weight = 1.0;
-    } else if (I->rank_decay_window > 0) {
-      // Normal ranking: rank 0 has highest weight
-      if (rank == 0) {
-        rank_weight = 1.0;
-      } else if (rank >= (uint64_t)I->rank_decay_window) {
-        rank_weight = I->rank_decay_floor;
-      } else {
-        // Sigmoid ramp from 1.0 to rank_decay_floor over rank_decay_window ranks
-        double t = (double)rank / (double)I->rank_decay_window;  // 0 to 1
-        // Sigmoid curve: flat at start, steep in middle
-        // sigma controls the steepness: higher sigma = steeper transition
-        double sigmoid_arg = I->rank_decay_sigma * (t - 0.5);  // center around 0.5
-        double sigmoid_val = 1.0 / (1.0 + exp(sigmoid_arg));   // sigmoid from 1 to 0
-        rank_weight = I->rank_decay_floor + (1.0 - I->rank_decay_floor) * sigmoid_val;
-      }
-    } else {
-      // Inverted ranking when window < 0: higher rank numbers get higher weight
-      uint64_t inverted_rank = I->n_ranks - 1 - rank;
-      uint64_t abs_window = (uint64_t)(-I->rank_decay_window);
-      if (inverted_rank == 0) {
-        rank_weight = 1.0;
-      } else if (inverted_rank >= abs_window) {
-        rank_weight = fabs(I->rank_decay_floor);
-      } else {
-        double t = (double)inverted_rank / (double)abs_window;
-        double sigmoid_arg = fabs(I->rank_decay_sigma) * (t - 0.5);
-        double sigmoid_val = 1.0 / (1.0 + exp(sigmoid_arg));
-        rank_weight = fabs(I->rank_decay_floor) + (1.0 - fabs(I->rank_decay_floor)) * sigmoid_val;
-      }
-    }
+    double rank_weight = exp(-(double)rank * I->decay);
 
     double inter_w = wacc->a[(int64_t) I->n_ranks * vsid + (int64_t) rank];
     double q_w = q_weights_by_rank[rank];
@@ -1430,6 +1370,110 @@ static inline double tk_inv_similarity_by_rank (
   }
 
   return (total_rank_weight > 0.0) ? total_weighted_sim / total_rank_weight : 0.0;
+}
+
+static inline double tk_inv_similarity_rank_filtered (
+  tk_inv_t *I,
+  int64_t *abits, size_t asize,
+  int64_t *bbits, size_t bsize,
+  tk_ivec_sim_type_t cmp,
+  double tversky_alpha,
+  double tversky_beta,
+  int64_t rank_filter
+) {
+  // If no rank filtering requested, use normal similarity
+  if (rank_filter < 0)
+    return tk_inv_similarity(I, abits, asize, bbits, bsize, cmp, tversky_alpha, tversky_beta);
+
+  // Only accumulate weights for features matching rank_filter
+  double filtered_inter_w = 0.0, filtered_sa = 0.0, filtered_sb = 0.0;
+
+  // Walk both sorted arrays simultaneously
+  size_t i = 0, j = 0;
+  while (i < asize && j < bsize) {
+    if (abits[i] == bbits[j]) {
+      int64_t fid = abits[i];
+      int64_t rank = (I->ranks && fid >= 0 && fid < (int64_t)I->features) ? I->ranks->a[fid] : 0;
+      if (rank == rank_filter) {
+        double w = tk_inv_w(I->weights, fid);
+        filtered_inter_w += w;
+        filtered_sa += w;
+        filtered_sb += w;
+      }
+      i++; j++;
+    } else if (abits[i] < bbits[j]) {
+      int64_t fid = abits[i];
+      int64_t rank = (I->ranks && fid >= 0 && fid < (int64_t)I->features) ? I->ranks->a[fid] : 0;
+      if (rank == rank_filter)
+        filtered_sa += tk_inv_w(I->weights, fid);
+      i++;
+    } else {
+      int64_t fid = bbits[j];
+      int64_t rank = (I->ranks && fid >= 0 && fid < (int64_t)I->features) ? I->ranks->a[fid] : 0;
+      if (rank == rank_filter)
+        filtered_sb += tk_inv_w(I->weights, fid);
+      j++;
+    }
+  }
+
+  // Process remaining elements in a
+  while (i < asize) {
+    int64_t fid = abits[i];
+    int64_t rank = (I->ranks && fid >= 0 && fid < (int64_t)I->features) ? I->ranks->a[fid] : 0;
+    if (rank == rank_filter)
+      filtered_sa += tk_inv_w(I->weights, fid);
+    i++;
+  }
+
+  // Process remaining elements in b
+  while (j < bsize) {
+    int64_t fid = bbits[j];
+    int64_t rank = (I->ranks && fid >= 0 && fid < (int64_t)I->features) ? I->ranks->a[fid] : 0;
+    if (rank == rank_filter)
+      filtered_sb += tk_inv_w(I->weights, fid);
+    j++;
+  }
+
+  // Compute similarity for the filtered rank
+  double rank_sim;
+  switch (cmp) {
+    case TK_IVEC_JACCARD: {
+      double u = filtered_sa + filtered_sb - filtered_inter_w;
+      rank_sim = (u == 0.0) ? 0.0 : filtered_inter_w / u;
+      break;
+    }
+    case TK_IVEC_OVERLAP: {
+      double m = (filtered_sa < filtered_sb) ? filtered_sa : filtered_sb;
+      rank_sim = (m == 0.0) ? 0.0 : filtered_inter_w / m;
+      break;
+    }
+    case TK_IVEC_TVERSKY: {
+      rank_sim = tk_inv_tversky_from_stats(filtered_inter_w, filtered_sa, filtered_sb, tversky_alpha, tversky_beta);
+      break;
+    }
+    case TK_IVEC_DICE: {
+      double denom = filtered_sa + filtered_sb;
+      rank_sim = (denom == 0.0) ? 0.0 : (2.0 * filtered_inter_w) / denom;
+      break;
+    }
+    default: { // fallback to Jaccard
+      double u = filtered_sa + filtered_sb - filtered_inter_w;
+      rank_sim = (u == 0.0) ? 0.0 : filtered_inter_w / u;
+      break;
+    }
+  }
+
+  // Apply rank weight for this specific rank
+  double rank_weight = exp(-(double) rank_filter * I->decay);
+
+  // Normalize by TOTAL rank weights (not just the filtered rank)
+  double total_rank_weight = 0.0;
+  for (uint64_t r = 0; r < I->n_ranks; r++) {
+    total_rank_weight += exp(-(double) r * I->decay);
+  }
+
+  // Return weighted and normalized similarity
+  return (total_rank_weight > 0.0) ? (rank_sim * rank_weight) / total_rank_weight : 0.0;
 }
 
 static inline double tk_inv_distance (
@@ -1461,7 +1505,8 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   tk_rvec_t *out,
   tk_ivec_sim_type_t cmp,
   double tversky_alpha,
-  double tversky_beta
+  double tversky_beta,
+  int64_t rank_filter
 ) {
   if (datalen == 0) {
     tk_rvec_clear(out);
@@ -1490,6 +1535,9 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
     int64_t rank = I->ranks ? I->ranks->a[fid] : 0;
     if (fid < 0 || fid >= (int64_t) I->postings->n)
       continue;
+    // Skip features not matching rank filter
+    if (rank_filter >= 0 && rank != rank_filter)
+      continue;
     double wf = tk_inv_w(I->weights, fid);
     tk_ivec_t *vsids = I->postings->a[fid];
     for (uint64_t j = 0; j < vsids->n; j ++) {
@@ -1513,8 +1561,13 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
     // Compute candidate weights by rank
     tk_inv_compute_candidate_weights_by_rank(I, ev, elen, e_weights_by_rank);
 
-    // Compute rank-weighted similarity
-    double sim = tk_inv_similarity_by_rank(I, I->wacc, vsid, q_weights_by_rank, e_weights_by_rank, cmp, tversky_alpha, tversky_beta);
+    // Compute similarity (with optional rank filtering)
+    double sim;
+    if (rank_filter >= 0) {
+      sim = tk_inv_similarity_rank_filtered(I, data, datalen, ev, elen, cmp, tversky_alpha, tversky_beta, rank_filter);
+    } else {
+      sim = tk_inv_similarity_by_rank(I, I->wacc, vsid, q_weights_by_rank, e_weights_by_rank, cmp, tversky_alpha, tversky_beta);
+    }
     double dist = 1.0 - sim;
     if (dist <= eps) {
       int64_t vuid = tk_inv_sid_uid(I, vsid);
@@ -1546,7 +1599,8 @@ static inline tk_rvec_t *tk_inv_neighbors_by_id (
   tk_rvec_t *out,
   tk_ivec_sim_type_t cmp,
   double tversky_alpha,
-  double tversky_beta
+  double tversky_beta,
+  int64_t rank_filter
 ) {
   int64_t sid0 = tk_inv_uid_sid(I, uid, false);
   if (sid0 < 0) {
@@ -1555,7 +1609,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_id (
   }
   size_t len = 0;
   int64_t *data = tk_inv_get(I, uid, &len);
-  return tk_inv_neighbors_by_vec(I, data, len, sid0, knn, eps, out, cmp, tversky_alpha, tversky_beta);
+  return tk_inv_neighbors_by_vec(I, data, len, sid0, knn, eps, out, cmp, tversky_alpha, tversky_beta, rank_filter);
 }
 
 static inline int tk_inv_gc_lua (lua_State *L)
@@ -1675,6 +1729,7 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
   double tversky_alpha = tk_lua_optnumber(L, 6, "alpha", 1.0);
   double tversky_beta = tk_lua_optnumber(L, 7, "beta", 0.1);
   bool mutual = tk_lua_optboolean(L, 8, "mutual", false);
+  int64_t rank_filter = lua_isnil(L, 9) ? -1 : (int64_t) tk_lua_checkunsigned(L, 9, "rank_filter");
 
   tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
   if (!strcmp(typ, "jaccard"))
@@ -1688,7 +1743,7 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
   else
     tk_lua_verror(L, 3, "neighborhoods", "invalid comparator specified", typ);
 
-  tk_inv_neighborhoods(L, I, knn, eps, min, cmp, tversky_alpha, tversky_beta, mutual, NULL, NULL);
+  tk_inv_neighborhoods(L, I, knn, eps, min, cmp, tversky_alpha, tversky_beta, mutual, rank_filter, NULL, NULL);
   return 2;
 }
 
@@ -1703,6 +1758,7 @@ static inline int tk_inv_neighborhoods_by_ids_lua (lua_State *L)
   double tversky_alpha = tk_lua_optnumber(L, 7, "alpha", 1.0);
   double tversky_beta = tk_lua_optnumber(L, 8, "beta", 0.1);
   bool mutual = tk_lua_optboolean(L, 9, "mutual", false);
+  int64_t rank_filter = lua_isnil(L, 10) ? -1 : (int64_t) tk_lua_checkunsigned(L, 10, "rank_filter");
 
   tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
   if (!strcmp(typ, "jaccard"))
@@ -1728,7 +1784,7 @@ static inline int tk_inv_neighborhoods_by_ids_lua (lua_State *L)
   query_ids->n = (uint64_t) write_pos;
 
   tk_inv_hoods_t *hoods;
-  tk_inv_neighborhoods_by_ids(L, I, query_ids, knn, eps, min, cmp, tversky_alpha, tversky_beta, mutual, &hoods, &query_ids);
+  tk_inv_neighborhoods_by_ids(L, I, query_ids, knn, eps, min, cmp, tversky_alpha, tversky_beta, mutual, rank_filter, &hoods, &query_ids);
   return 2;
 }
 
@@ -1742,6 +1798,7 @@ static inline int tk_inv_neighborhoods_by_vecs_lua (lua_State *L)
   const char *typ = tk_lua_optstring(L, 6, "comparator", "jaccard");
   double tversky_alpha = tk_lua_optnumber(L, 7, "alpha", 1.0);
   double tversky_beta = tk_lua_optnumber(L, 8, "beta", 0.1);
+  int64_t rank_filter = lua_isnil(L, 9) ? -1 : (int64_t) tk_lua_checkunsigned(L, 9, "rank_filter");
 
   tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
   if (!strcmp(typ, "jaccard"))
@@ -1755,7 +1812,7 @@ static inline int tk_inv_neighborhoods_by_vecs_lua (lua_State *L)
   else
     tk_lua_verror(L, 3, "neighborhoods_by_vecs", "invalid comparator specified", typ);
 
-  tk_inv_neighborhoods_by_vecs(L, I, query_vecs, knn, eps, min, cmp, tversky_alpha, tversky_beta, NULL, NULL);
+  tk_inv_neighborhoods_by_vecs(L, I, query_vecs, knn, eps, min, cmp, tversky_alpha, tversky_beta, rank_filter, NULL, NULL);
   return 2;
 }
 
@@ -1809,7 +1866,7 @@ static inline int tk_inv_distance_lua (lua_State *L)
 
 static inline int tk_inv_neighbors_lua (lua_State *L)
 {
-  lua_settop(L, 8);
+  lua_settop(L, 9);
   tk_inv_t *I = tk_inv_peek(L, 1);
   uint64_t knn = tk_lua_optunsigned(L, 3, "knn", 0);
   double eps = tk_lua_optposdouble(L, 4, "eps", 1.0);
@@ -1818,6 +1875,7 @@ static inline int tk_inv_neighbors_lua (lua_State *L)
   tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
   double tversky_alpha = tk_lua_optnumber(L, 7, "alpha", 1.0);
   double tversky_beta = tk_lua_optnumber(L, 8, "beta", 0.1);
+  int64_t rank_filter = lua_isnil(L, 9) ? -1 : (int64_t) tk_lua_checkunsigned(L, 9, "rank_filter");
   if (!strcmp(typ, "jaccard"))
     cmp = TK_IVEC_JACCARD;
   else if (!strcmp(typ, "overlap"))
@@ -1830,10 +1888,10 @@ static inline int tk_inv_neighbors_lua (lua_State *L)
     tk_lua_verror(L, 3, "neighbors", "invalid comparator specified", typ);
   if (lua_type(L, 2) == LUA_TNUMBER) {
     int64_t uid = tk_lua_checkinteger(L, 2, "id");
-    tk_inv_neighbors_by_id(I, uid, knn, eps, out, cmp, tversky_alpha, tversky_beta);
+    tk_inv_neighbors_by_id(I, uid, knn, eps, out, cmp, tversky_alpha, tversky_beta, rank_filter);
   } else {
     tk_ivec_t *vec = tk_ivec_peek(L, 2, "vector");
-    tk_inv_neighbors_by_vec(I, vec->a, vec->n, -1, knn, eps, out, cmp, tversky_alpha, tversky_beta);
+    tk_inv_neighbors_by_vec(I, vec->a, vec->n, -1, knn, eps, out, cmp, tversky_alpha, tversky_beta, rank_filter);
   }
   return 0;
 }
@@ -1856,6 +1914,13 @@ static inline int tk_inv_features_lua (lua_State *L)
 {
   tk_inv_t *I = tk_inv_peek(L, 1);
   lua_pushinteger(L, (int64_t) I->features);
+  return 1;
+}
+
+static inline int tk_inv_weights_lua (lua_State *L)
+{
+  tk_inv_t *I = tk_inv_peek(L, 1);
+  tk_lua_get_ephemeron(L, TK_INV_EPH, I->weights);
   return 1;
 }
 
@@ -1989,11 +2054,6 @@ static inline void tk_inv_worker (void *dp, int sig)
             : I->node_offsets->a[usid + 1];
         }
 
-        if (wacc->n < n_items * I->n_ranks) {
-          tk_dvec_ensure(wacc, n_items * I->n_ranks);
-          wacc->n = n_items * I->n_ranks;
-        }
-
         // Compute query weights by rank
         double *q_weights_by_rank = tk_malloc(NULL, I->n_ranks * sizeof(double));
         tk_inv_compute_query_weights_by_rank(I, ubits, nubits, q_weights_by_rank);
@@ -2005,6 +2065,9 @@ static inline void tk_inv_worker (void *dp, int sig)
         for (size_t k = 0; k < nubits; k ++) {
           fid = ubits[k];
           int64_t rank = I->ranks ? I->ranks->a[fid] : 0;
+          // Skip features not matching rank filter
+          if (data->rank_filter >= 0 && rank != data->rank_filter)
+            continue;
           double wf = tk_inv_w(I->weights, fid);
           assert(fid >= 0 && fid < (int64_t) I->postings->n);
           vsids = I->postings->a[fid];
@@ -2030,11 +2093,15 @@ static inline void tk_inv_worker (void *dp, int sig)
           vsid = sids->a[iv];
           vbits = tk_inv_sget(I, vsid, &nvbits);
 
-          // Compute candidate weights by rank
-          tk_inv_compute_candidate_weights_by_rank(I, vbits, nvbits, e_weights_by_rank);
-
-          // Compute rank-weighted similarity
-          double sim = tk_inv_similarity_by_rank(I, wacc, iv, q_weights_by_rank, e_weights_by_rank, cmp, tversky_alpha, tversky_beta);
+          // Compute similarity (with optional rank filtering)
+          double sim;
+          if (data->rank_filter >= 0) {
+            sim = tk_inv_similarity_rank_filtered(I, ubits, nubits, vbits, nvbits, cmp, tversky_alpha, tversky_beta, data->rank_filter);
+          } else {
+            // Compute candidate weights by rank
+            tk_inv_compute_candidate_weights_by_rank(I, vbits, nvbits, e_weights_by_rank);
+            sim = tk_inv_similarity_by_rank(I, wacc, iv, q_weights_by_rank, e_weights_by_rank, cmp, tversky_alpha, tversky_beta);
+          }
           double dist = 1.0 - sim;
           if (dist <= eps) {
             if (knn)
@@ -2233,6 +2300,7 @@ static luaL_Reg tk_inv_lua_mt_fns[] =
   { "size", tk_inv_size_lua },
   { "threads", tk_inv_threads_lua },
   { "features", tk_inv_features_lua },
+  { "weights", tk_inv_weights_lua },
   { "persist", tk_inv_persist_lua },
   { "destroy", tk_inv_destroy_lua },
   { "shrink", tk_inv_shrink_lua },
@@ -2250,9 +2318,7 @@ static inline tk_inv_t *tk_inv_create (
   tk_dvec_t *weights,
   uint64_t n_ranks,
   tk_ivec_t *ranks,
-  int64_t rank_decay_window,
-  double rank_decay_sigma,
-  double rank_decay_floor,
+  double decay,
   uint64_t n_threads,
   int i_weights,
   int i_ranks
@@ -2271,9 +2337,7 @@ static inline tk_inv_t *tk_inv_create (
   I->ranks = ranks;
   if (ranks)
     tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, i_ranks);
-  I->rank_decay_window = rank_decay_window;
-  I->rank_decay_sigma = rank_decay_sigma;
-  I->rank_decay_floor = rank_decay_floor;
+  I->decay = decay;
   I->uid_sid = tk_iumap_create();
   I->sid_uid = tk_iumap_create();
   I->node_offsets = tk_ivec_create(L, 0, 0, 0);
@@ -2412,9 +2476,7 @@ static inline tk_inv_t *tk_inv_load (
   } else {
     I->ranks = NULL;
   }
-  tk_lua_fread(L, &I->rank_decay_window, sizeof(int64_t), 1, fh);
-  tk_lua_fread(L, &I->rank_decay_sigma, sizeof(double), 1, fh);
-  tk_lua_fread(L, &I->rank_decay_floor, sizeof(double), 1, fh);
+  tk_lua_fread(L, &I->decay, sizeof(double), 1, fh);
   I->threads = tk_malloc(L, n_threads * sizeof(tk_inv_thread_t));
   memset(I->threads, 0, n_threads * sizeof(tk_inv_thread_t));
   I->pool = tk_threads_create(L, n_threads, tk_inv_worker);
