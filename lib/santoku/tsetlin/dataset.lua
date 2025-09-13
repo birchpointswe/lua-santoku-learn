@@ -79,46 +79,111 @@ local function canonicalize (a, b)
   end
 end
 
-M.random_pairs = function (ids, edges_per_node, out)
+M.random_pairs = function (ids, edges_per_node, out, labels)
   edges_per_node = edges_per_node or 3
   local edges = out or pvec.create()
   local n = ids:size()
   if n <= 1 then
     return edges
   end
+  local label_of_id, ids_by_label
+  if labels then
+    err.assert(ids:size() == labels:size(), "ids and labels must align")
+    label_of_id = {}
+    ids_by_label = {}
+    for i = 0, n - 1 do
+      local id = ids:get(i)
+      local label = labels:get(i)
+      if label ~= -1 then
+        label_of_id[id] = label
+        if not ids_by_label[label] then
+          ids_by_label[label] = ivec.create()
+        end
+        ids_by_label[label]:push(id)
+      end
+    end
+  end
   for i = 0, n - 1 do
     local id1 = ids:get(i)
-    for _ = 1, edges_per_node do
-      local idx2 = num.random(n) - 1
-      if idx2 == i then
-        idx2 = (idx2 + 1) % n
-      end
-      local id2 = ids:get(idx2)
-      if id1 < id2 then
-        edges:push(id1, id2)
-      else
-        edges:push(id2, id1)
+    local label1 = labels and labels:get(i)
+    if not labels or label1 ~= -1 then
+      for _ = 1, edges_per_node do
+        local id2
+        if labels then
+          local same_label_ids = ids_by_label[label1]
+          if same_label_ids and same_label_ids:size() > 1 then
+            local idx2 = num.random(same_label_ids:size()) - 1
+            id2 = same_label_ids:get(idx2)
+            while id2 == id1 do
+              idx2 = num.random(same_label_ids:size()) - 1
+              id2 = same_label_ids:get(idx2)
+            end
+          end
+        else
+          local idx2 = num.random(n) - 1
+          if idx2 == i then
+            idx2 = (idx2 + 1) % n
+          end
+          id2 = ids:get(idx2)
+        end
+        if id2 then
+          if id1 < id2 then
+            edges:push(id1, id2)
+          else
+            edges:push(id2, id1)
+          end
+        end
       end
     end
   end
   return edges
 end
 
-M.anchor_pairs = function (ids, n_anchors, out)
+M.anchor_pairs = function (ids, n_anchors, out, labels)
   if n_anchors == nil or n_anchors < 1 then
     n_anchors = 1
   end
   local edges = out or pvec.create()
-  local anchors = {}
-  local sofar = 0
-  while sofar < n_anchors do
-    local a = ids:get(num.random(ids:size()) - 1)
-    if not anchors[a] then
-      anchors[a] = true
-      sofar = sofar + 1
-      for id in ids:each() do
-        if id ~= a then
-          edges:push(id, a)
+  if labels then
+    err.assert(ids:size() == labels:size(), "ids and labels must align")
+    local ids_by_label = {}
+    for i = 0, ids:size() - 1 do
+      local id = ids:get(i)
+      local label = labels:get(i)
+      if label ~= -1 then
+        if not ids_by_label[label] then
+          ids_by_label[label] = {}
+        end
+        table.insert(ids_by_label[label], id)
+      end
+    end
+    for label, label_ids in pairs(ids_by_label) do
+      local n_label_anchors = num.min(n_anchors, #label_ids)
+      local anchors = {}
+      while #anchors < n_label_anchors do
+        local a = label_ids[num.random(#label_ids)]
+        if not anchors[a] then
+          anchors[a] = true
+          for _, id in ipairs(label_ids) do
+            if id ~= a then
+              edges:push(id, a)
+            end
+          end
+        end
+      end
+    end
+  else
+    local anchors = {}
+    local sofar = 0
+    while sofar < n_anchors do
+      local a = ids:get(num.random(ids:size()) - 1)
+      if not anchors[a] then
+        anchors[a] = true
+        sofar = sofar + 1
+        for id in ids:each() do
+          if id ~= a then
+            edges:push(id, a)
+          end
         end
       end
     end
@@ -159,11 +224,13 @@ M.multiclass_pairs = function (ids, labels, n_anchors_pos, n_anchors_neg, index,
   local class_to_ids, class_to_anchors = {}, {}
   local classes = ivec.create()
   local label_of_id   = {}
+  local n_unique_ids = 0
   for i, y in labels:ieach() do
     local id = ids:get(i)
     if y ~= -1 then
       local prev = label_of_id[id]
       if prev == nil then
+        n_unique_ids = n_unique_ids + 1
         label_of_id[id] = y
         if not class_to_ids[y] then
           class_to_ids[y] = ivec.create()
@@ -195,17 +262,24 @@ M.multiclass_pairs = function (ids, labels, n_anchors_pos, n_anchors_neg, index,
     end
   end
   if n_anchors_pos > 0 then
+    local n_edges_created = 0
+    local n_singleton_classes = 0
     for class in classes:each() do
       local idvec, anchors = class_to_ids[class], class_to_anchors[class]
+      if idvec:size() == 1 then
+        n_singleton_classes = n_singleton_classes + 1
+      end
       for id in idvec:each() do
         for a_id in anchors:each() do
           if id ~= a_id then
             if index and eps_pos then
               if index:distance(id, a_id) <= eps_pos then
                 pos:push(canonicalize(id, a_id))
+                n_edges_created = n_edges_created + 1
               end
             else
               pos:push(canonicalize(id, a_id))
+              n_edges_created = n_edges_created + 1
             end
           end
         end
