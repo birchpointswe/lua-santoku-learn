@@ -53,11 +53,14 @@ typedef struct tk_graph_s {
   uint64_t knn_min;
   uint64_t knn_cache;
   double knn_eps;
+  bool knn_mutual;
+  int64_t knn_rank;  // Rank filter for KNN searches (-1 means no filtering)
   bool bridge;
 
   tk_dvec_t *sigmas;
   uint64_t n_edges;
   tk_dsu_t dsu;
+  int64_t largest_component_root;  // -1 if bridge=true, else root of largest component
 
   tk_graph_thread_t *threads;
   tk_threadpool_t *pool;

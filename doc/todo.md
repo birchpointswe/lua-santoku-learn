@@ -14,6 +14,10 @@
 
 # Next
 
+- tk_graph_t
+    - Allow different indices for weight lookup and knn, both supporting
+      optional rank restriction, using the union of ids
+
 - Supplementary documentation similar to l-sth.md for the general classification
   pipeline using tsetlin machines for binary, multiclass, and multi-output
   scenarios

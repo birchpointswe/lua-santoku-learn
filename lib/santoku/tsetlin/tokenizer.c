@@ -1,11 +1,13 @@
 #include <santoku/lua/utils.h>
 #include <santoku/klib.h>
 #include <santoku/iuset.h>
+#include <santoku/dvec.h>
 #include <santoku/ivec.h>
 #include <assert.h>
 #include <ctype.h>
 
-#define MT_TOKENIZER "santoku_tokenizer"
+#define MT_TOKENIZER "tk_tokenizer_t"
+#define TK_TOKENIZER_EPH "tk_tokenizer_eph"
 
 typedef struct {
   int id;
@@ -45,6 +47,7 @@ typedef struct {
   tb_ids_t *ids;
   tb_strs_t *strs;
   tb_df_t *dfs;
+  tk_dvec_t *weights;
   tb_seen_t *tmp_seen;
   tb_tokens_t tokens;
   tb_tokens_t window;
@@ -135,6 +138,12 @@ static inline int tb_tokenizer_persist (lua_State *L)
         tk_lua_fwrite(L, (char *) &id, sizeof(int), 1, fh);
         tk_lua_fwrite(L, (char *) &df, sizeof(int), 1, fh);
       }
+  } else if (tokenizer->weights) {
+    tk_lua_fwrite(L, (char *) &tokenizer->weights->n, sizeof(size_t), 1, fh);
+    tk_lua_fwrite(L, (char *) tokenizer->weights->a, sizeof(double), tokenizer->weights->n, fh);
+  } else {
+    size_t n = 0;
+    tk_lua_fwrite(L, (char *) &n, sizeof(size_t), 1, fh);
   }
   if (!tostr) {
     tk_lua_fclose(L, fh);
@@ -925,7 +934,8 @@ static inline int tb_tokenizer_restrict (lua_State *L)
 
 static inline int tb_tokenizer_finalize (lua_State *L)
 {
-  tb_tokenizer_t *tokenizer = peek_tokenizer(L, lua_upvalueindex(1));
+  int i_tok = lua_upvalueindex(1);
+  tb_tokenizer_t *tokenizer = peek_tokenizer(L, i_tok);
 
   if (tokenizer->finalized)
     return luaL_error(L, "already finalized");;
@@ -934,6 +944,7 @@ static inline int tb_tokenizer_finalize (lua_State *L)
 
   char *tok;
   double df;
+  int dfi;
   int id, id0, absent;
   khint_t i, k;
   tb_ids_t *ids0 = kh_init(ids);
@@ -964,8 +975,6 @@ static inline int tb_tokenizer_finalize (lua_State *L)
         kv_push(tk_sort_pair_t, sort, p);
       }
     }
-  kh_destroy(dfs, tokenizer->dfs);
-  tokenizer->dfs = NULL;
   kh_destroy(seen, tokenizer->tmp_seen);
   tokenizer->tmp_seen = NULL;
 
@@ -973,11 +982,19 @@ static inline int tb_tokenizer_finalize (lua_State *L)
   if (max_vocab && sort.n > max_vocab)
     sort.n = max_vocab;
   tokenizer->next_id = 0;
+  tokenizer->weights = tk_dvec_create(L, 0, 0, 0); // dv
+  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, i_tok, -1); // dv
+  lua_pop(L, 1); //
   for (khint_t i = 0; i < sort.n; i ++) {
     id = sort.a[i].id;
     k = kh_get(strs, tokenizer->strs, (uint32_t) id);
     assert(k != kh_end(tokenizer->strs));
     tok = (char *) kh_value(tokenizer->strs, k);
+    k = kh_get(dfs, tokenizer->dfs, (uint32_t) id);
+    assert(k != kh_end(tokenizer->dfs));
+    dfi = kh_value(tokenizer->dfs, k);
+    double weight = tokenizer->ndocs > 1 ? log((double) tokenizer->ndocs / (double) (dfi + 1)) : 1.0;
+    tk_dvec_push(tokenizer->weights, weight);
     id0 = tokenizer->next_id ++;
     k = kh_put(ids, ids0, tok, &absent);
     assert(absent);
@@ -987,6 +1004,8 @@ static inline int tb_tokenizer_finalize (lua_State *L)
     kh_value(strs0, k) = tok;
   }
 
+  kh_destroy(dfs, tokenizer->dfs);
+  tokenizer->dfs = NULL;
   kv_destroy(sort);
   kh_destroy(ids, tokenizer->ids);
   kh_destroy(strs, tokenizer->strs);
@@ -1011,6 +1030,16 @@ static inline int tb_tokenizer_index (lua_State *L)
     lua_pushstring(L, tok); // t id str
     lua_settable(L, -3); // t
   }
+  return 1;
+}
+
+static inline int tb_tokenizer_weights (lua_State *L)
+{
+  lua_settop(L, 1);
+  tb_tokenizer_t *tokenizer = peek_tokenizer(L, lua_upvalueindex(1));
+  if (!tokenizer->finalized)
+    return 0;
+  tk_lua_get_ephemeron(L, TK_TOKENIZER_EPH, tokenizer->weights);
   return 1;
 }
 
@@ -1051,6 +1080,7 @@ static luaL_Reg tb_mt_fns[] =
   { "tokenize", tb_tokenizer_tokenize },
   { "parse", tb_tokenizer_parse },
   { "features", tb_tokenizer_features },
+  { "weights", tb_tokenizer_weights },
   { "finalize", tb_tokenizer_finalize },
   { "restrict", tb_tokenizer_restrict },
   { "index", tb_tokenizer_index },
@@ -1127,6 +1157,7 @@ static inline int tb_tokenizer_load (lua_State *L)
   bool isstr = lua_type(L, 3) == LUA_TBOOLEAN && lua_toboolean(L, 3);
   FILE *fh = isstr ? tk_lua_fmemopen(L, (char *) data, len, "r") : tk_lua_fopen(L, data, "r");
   tb_tokenizer_t *tokenizer = lua_newuserdata(L, sizeof(tb_tokenizer_t));
+  int i_tok = tk_lua_absindex(L, -1);
   memset(tokenizer, 0, sizeof(tb_tokenizer_t));
   luaL_getmetatable(L, MT_TOKENIZER);
   lua_setmetatable(L, -2);
@@ -1186,6 +1217,17 @@ static inline int tb_tokenizer_load (lua_State *L)
       k = kh_put(dfs, tokenizer->dfs, (uint32_t) id, &absent);
       assert(absent);
       kh_value(tokenizer->dfs, k) = df;
+    }
+  } else {
+    size_t n = 0;
+    tk_lua_fread(L, &n, sizeof(size_t), 1, fh);
+    if (n) {
+      tokenizer->weights = tk_dvec_create(L, n, 0, 0);
+      tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, i_tok, -1);
+      lua_pop(L, 1);
+      tk_lua_fread(L, tokenizer->weights->a, sizeof(double), n, fh);
+    } else {
+      tokenizer->weights = NULL;
     }
   }
   tk_lua_fclose(L, fh);
