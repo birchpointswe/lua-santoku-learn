@@ -1,5 +1,7 @@
 # Now
 
+- Update MNIST/etc examples using refined approach to supervision (virtual nodes)
+
 - tk_xxmap/set_t:
     - Templatize over khash/kbtree
     - Proper Lua/C API like tk_xvec_t
