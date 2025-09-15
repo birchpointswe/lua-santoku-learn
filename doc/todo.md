@@ -1,20 +1,16 @@
 # Now
 
 - Update MNIST/etc examples using refined approach to supervision (virtual nodes)
-
-- tk_xxmap/set_t:
-    - Templatize over khash/kbtree
-    - Proper Lua/C API like tk_xvec_t
-
 - tk_cvec_t
     - Ensure cvec used everywhere (no strings!)
-    - Implement cvec to/from string
-
 - Lua GC for threadpool
 - Connect all allocs to Lua
 - Double-check lua callback error handling
 
 # Next
+
+- Rename tch to flipper
+- Rename library and project to santoku-learn
 
 - tk_graph_t
     - Allow different indices for weight lookup and knn, both supporting
@@ -26,9 +22,6 @@
     - Covering booleanizer, tokenizer, supporting external embeddings via
       booleanizer, feature selection via learned clauses, feature selection via
       chi2, mi, etc (look at test cases for all features)
-
-- Rename tch to flipper
-- Rename library and project to santoku-learn
 
 - l-sth
     - IMDB & QQP
