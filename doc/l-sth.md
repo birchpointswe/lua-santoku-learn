@@ -51,8 +51,8 @@ system with text features and class labels: document-class edges are rank 0
 (highest importance), document-author edges might be rank 1, and
 document-document edges are rank 2 (lower importance). Edge weights are computed
 via a unified function: `w(i, j) = Σ[sim_r(i, j) * exp(-r * decay)] / Σ[exp(-r *
-decay)]`, where `sim_r(i, j)` computes similarity between nodes i and j
-considering only features at rank r. This exponential decay pairs naturally with
+decay)]`, where `sim_r(i, j)` computes similarity between nodes `i` and `j`
+considering only features at rank `r`. This exponential decay pairs naturally with
 the log-space mapping in reconstruction error, ensuring supervision shapes the
 manifold structure hierarchically.
 

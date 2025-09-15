@@ -47,7 +47,6 @@ typedef struct {
   tb_ids_t *ids;
   tb_strs_t *strs;
   tb_df_t *dfs;
-  tk_dvec_t *weights;
   tb_seen_t *tmp_seen;
   tb_tokens_t tokens;
   tb_tokens_t window;
@@ -129,7 +128,8 @@ static inline int tb_tokenizer_persist (lua_State *L)
       tk_lua_fwrite(L, tok, len, 1, fh);
       tk_lua_fwrite(L, (char *) &id, sizeof(int), 1, fh);
     }
-  if (!tokenizer->finalized) {
+  // Always persist dfs regardless of finalized state
+  if (tokenizer->dfs) {
     tk_lua_fwrite(L, (char *) &kh_size(tokenizer->dfs), sizeof(khint_t), 1, fh);
     for (khint_t i = kh_begin(tokenizer->dfs); i < kh_end(tokenizer->dfs); i ++)
       if (kh_exist(tokenizer->dfs, i)) {
@@ -138,12 +138,9 @@ static inline int tb_tokenizer_persist (lua_State *L)
         tk_lua_fwrite(L, (char *) &id, sizeof(int), 1, fh);
         tk_lua_fwrite(L, (char *) &df, sizeof(int), 1, fh);
       }
-  } else if (tokenizer->weights) {
-    tk_lua_fwrite(L, (char *) &tokenizer->weights->n, sizeof(size_t), 1, fh);
-    tk_lua_fwrite(L, (char *) tokenizer->weights->a, sizeof(double), tokenizer->weights->n, fh);
   } else {
-    size_t n = 0;
-    tk_lua_fwrite(L, (char *) &n, sizeof(size_t), 1, fh);
+    khint_t n = 0;
+    tk_lua_fwrite(L, (char *) &n, sizeof(khint_t), 1, fh);
   }
   if (!tostr) {
     tk_lua_fclose(L, fh);
@@ -692,17 +689,34 @@ static inline void tb_tokenizer_append_token (
   } else {
     kv_push_str(char, tokenizer->tmp_append, word);
   }
+  // In char-gram only mode (ngrams==0), skip unigram processing entirely
+  if (tokenizer->ngrams == 0) {
+    if (tb_tokenizer_is_negation_token(word)) {
+      *negation = tokenizer->negations;
+      return;
+    }
+    // Generate char-grams only
+    if (word[0] != '#' && strcmp(word, "'s") != 0)
+      tb_tokenizer_append_cgrams(tokenizer, word, train);
+    return;
+  }
+
+  // Normal mode: process unigrams and n-grams
   kv_push(char, tokenizer->tmp_append, '\0');
   char *bufp0 = tokenizer->tmp_append.a;
   int id0 = tb_tokenizer_new_token(tokenizer, &bufp0, train, tokenizer->tmp_append.n);
   if (id0 == -1) return;
   kv_push(int, tokenizer->tokens, id0);
+
   if (tb_tokenizer_is_negation_token(word)) {
     *negation = tokenizer->negations;
     return;
   }
+
+  // Generate char-grams
   if (word[0] != '#' && strcmp(word, "'s") != 0)
     tb_tokenizer_append_cgrams(tokenizer, word, train);
+
   if ((int) kv_size(tokenizer->window) == tokenizer->window_size) {
     size_t n = kv_size(tokenizer->window);
     if (n > 1)
@@ -711,9 +725,12 @@ static inline void tb_tokenizer_append_token (
   }
   kv_push(int, tokenizer->window, id0);
   int winlen = kv_size(tokenizer->window);
-  int skipgram[tokenizer->ngrams];
-  for (int r = 2; r <= tokenizer->ngrams; r ++)
-    tb_tokenizer_append_skipgram(tokenizer, skipgram, r, tokenizer->skips, r, 0, winlen, train);
+
+  if (tokenizer->ngrams > 0) {
+    int skipgram[tokenizer->ngrams];
+    for (int r = 2; r <= tokenizer->ngrams; r ++)
+      tb_tokenizer_append_skipgram(tokenizer, skipgram, r, tokenizer->skips, r, 0, winlen, train);
+  }
 }
 
 static inline void tb_tokenizer_populate_tokens (
@@ -902,10 +919,11 @@ static inline int tb_tokenizer_restrict (lua_State *L)
   tb_tokenizer_t *tokenizer = peek_tokenizer(L, lua_upvalueindex(1));
   char *tok;
   int64_t id, id0;
-  int absent;
+  int absent, dfi;
   khint_t k;
   tb_ids_t *ids0 = kh_init(ids);
   tb_strs_t *strs0 = kh_init(strs);
+  tb_df_t *dfs0 = tokenizer->dfs ? kh_init(dfs) : NULL;
   tokenizer->next_id = 0;
   for (lua_Integer i = 0; i < (int64_t) top_v->n; i ++) {
     id = top_v->a[i];
@@ -921,12 +939,27 @@ static inline int tb_tokenizer_restrict (lua_State *L)
     k = kh_put(strs, strs0, (uint32_t) id0, &absent);
     assert(absent);
     kh_value(strs0, k) = tok;
+
+    // Preserve document frequencies with new IDs
+    if (tokenizer->dfs) {
+      k = kh_get(dfs, tokenizer->dfs, (uint32_t) id);
+      if (k != kh_end(tokenizer->dfs)) {
+        dfi = kh_value(tokenizer->dfs, k);
+        k = kh_put(dfs, dfs0, (uint32_t) id0, &absent);
+        assert(absent);
+        kh_value(dfs0, k) = dfi;
+      }
+    }
   }
   for (khint_t k = kh_begin(tokenizer->strs); k < kh_end(tokenizer->strs); k ++)
     if (kh_exist(tokenizer->strs, k))
       free((char *) kh_value(tokenizer->strs, k));
   kh_destroy(ids, tokenizer->ids);
   kh_destroy(strs, tokenizer->strs);
+  if (tokenizer->dfs) {
+    kh_destroy(dfs, tokenizer->dfs);
+    tokenizer->dfs = dfs0;
+  }
   tokenizer->ids = ids0;
   tokenizer->strs = strs0;
   return 0;
@@ -982,9 +1015,10 @@ static inline int tb_tokenizer_finalize (lua_State *L)
   if (max_vocab && sort.n > max_vocab)
     sort.n = max_vocab;
   tokenizer->next_id = 0;
-  tokenizer->weights = tk_dvec_create(L, 0, 0, 0); // dv
-  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, i_tok, -1); // dv
-  lua_pop(L, 1); //
+
+  // Create new dfs hash for remapped IDs
+  tb_df_t *dfs0 = kh_init(dfs);
+
   for (khint_t i = 0; i < sort.n; i ++) {
     id = sort.a[i].id;
     k = kh_get(strs, tokenizer->strs, (uint32_t) id);
@@ -993,9 +1027,14 @@ static inline int tb_tokenizer_finalize (lua_State *L)
     k = kh_get(dfs, tokenizer->dfs, (uint32_t) id);
     assert(k != kh_end(tokenizer->dfs));
     dfi = kh_value(tokenizer->dfs, k);
-    double weight = tokenizer->ndocs > 1 ? log((double) tokenizer->ndocs / (double) (dfi + 1)) : 1.0;
-    tk_dvec_push(tokenizer->weights, weight);
+
     id0 = tokenizer->next_id ++;
+
+    // Store remapped document frequency
+    k = kh_put(dfs, dfs0, (uint32_t) id0, &absent);
+    assert(absent);
+    kh_value(dfs0, k) = dfi;
+
     k = kh_put(ids, ids0, tok, &absent);
     assert(absent);
     kh_value(ids0, k) = id0;
@@ -1004,8 +1043,9 @@ static inline int tb_tokenizer_finalize (lua_State *L)
     kh_value(strs0, k) = tok;
   }
 
+  // Replace old dfs with remapped version
   kh_destroy(dfs, tokenizer->dfs);
-  tokenizer->dfs = NULL;
+  tokenizer->dfs = dfs0;
   kv_destroy(sort);
   kh_destroy(ids, tokenizer->ids);
   kh_destroy(strs, tokenizer->strs);
@@ -1037,9 +1077,24 @@ static inline int tb_tokenizer_weights (lua_State *L)
 {
   lua_settop(L, 1);
   tb_tokenizer_t *tokenizer = peek_tokenizer(L, lua_upvalueindex(1));
-  if (!tokenizer->finalized)
+  if (!tokenizer->finalized || !tokenizer->dfs)
     return 0;
-  tk_lua_get_ephemeron(L, TK_TOKENIZER_EPH, tokenizer->weights);
+
+  // Compute IDF weights on-the-fly
+  tk_dvec_t *weights = tk_dvec_create(L, 0, 0, 0);
+  khint_t k;
+  int dfi;
+  for (int id = 0; id < tokenizer->next_id; id++) {
+    k = kh_get(dfs, tokenizer->dfs, (uint32_t) id);
+    if (k != kh_end(tokenizer->dfs)) {
+      dfi = kh_value(tokenizer->dfs, k);
+      double weight = tokenizer->ndocs > 1 ? log((double) (tokenizer->ndocs + 1) / (double) (dfi + 1)) : 1.0;
+      tk_dvec_push(weights, weight);
+    } else {
+      // Feature not found - shouldn't happen but handle gracefully
+      tk_dvec_push(weights, 1.0);
+    }
+  }
   return 1;
 }
 
@@ -1110,8 +1165,6 @@ static inline int tb_tokenizer_create (lua_State *L)
     luaL_error(L, "min_len must be greater than or equal to 1");
   if (max_len < min_len)
     luaL_error(L, "max_len must be greater than or equal to min_len");
-  if (ngrams == 0)
-    luaL_error(L, "ngrams must be greater than or equal to 1");
   if (!align)
     luaL_error(L, "alignment must be greater than 0 (use 128 for TM)");
   tb_tokenizer_t *tokenizer = lua_newuserdata(L, sizeof(tb_tokenizer_t));
@@ -1141,7 +1194,7 @@ static inline int tb_tokenizer_create (lua_State *L)
   tokenizer->skips = skips;
   tokenizer->negations = negations;
   tokenizer->align = align;
-  tokenizer->window_size = ngrams + (ngrams - 1) * skips;
+  tokenizer->window_size = ngrams > 0 ? ngrams + (ngrams - 1) * skips : 0;
   lua_newtable(L);
   lua_pushvalue(L, -2);
   tk_lua_register(L, tb_mt_fns, 1);
@@ -1157,7 +1210,6 @@ static inline int tb_tokenizer_load (lua_State *L)
   bool isstr = lua_type(L, 3) == LUA_TBOOLEAN && lua_toboolean(L, 3);
   FILE *fh = isstr ? tk_lua_fmemopen(L, (char *) data, len, "r") : tk_lua_fopen(L, data, "r");
   tb_tokenizer_t *tokenizer = lua_newuserdata(L, sizeof(tb_tokenizer_t));
-  int i_tok = tk_lua_absindex(L, -1);
   memset(tokenizer, 0, sizeof(tb_tokenizer_t));
   luaL_getmetatable(L, MT_TOKENIZER);
   lua_setmetatable(L, -2);
@@ -1168,10 +1220,9 @@ static inline int tb_tokenizer_load (lua_State *L)
   kv_init(tokenizer->window);
   tokenizer->ids = kh_init(ids);
   tokenizer->strs = kh_init(strs);
-  if (!tokenizer->finalized) {
-    tokenizer->dfs = kh_init(dfs);
+  tokenizer->dfs = kh_init(dfs);
+  if (!tokenizer->finalized)
     tokenizer->tmp_seen = kh_init(seen);
-  }
   tk_lua_fread(L, &tokenizer->finalized, sizeof(bool), 1, fh);
   tk_lua_fread(L, &tokenizer->max_vocab, sizeof(double), 1, fh);
   tk_lua_fread(L, &tokenizer->max_df, sizeof(double), 1, fh);
@@ -1207,28 +1258,16 @@ static inline int tb_tokenizer_load (lua_State *L)
     assert(absent);
     kh_value(tokenizer->strs, k) = tokn;
   }
-  if (!tokenizer->finalized) {
-    tk_lua_fread(L, (char *) &nkeys, sizeof(khint_t), 1, fh);
-    for (khint_t i = 0; i < nkeys; i ++) {
-      int id;
-      int df;
-      tk_lua_fread(L, &id, sizeof(int), 1, fh);
-      tk_lua_fread(L, &df, sizeof(int), 1, fh);
-      k = kh_put(dfs, tokenizer->dfs, (uint32_t) id, &absent);
-      assert(absent);
-      kh_value(tokenizer->dfs, k) = df;
-    }
-  } else {
-    size_t n = 0;
-    tk_lua_fread(L, &n, sizeof(size_t), 1, fh);
-    if (n) {
-      tokenizer->weights = tk_dvec_create(L, n, 0, 0);
-      tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, i_tok, -1);
-      lua_pop(L, 1);
-      tk_lua_fread(L, tokenizer->weights->a, sizeof(double), n, fh);
-    } else {
-      tokenizer->weights = NULL;
-    }
+  // Always load dfs regardless of finalized state
+  tk_lua_fread(L, (char *) &nkeys, sizeof(khint_t), 1, fh);
+  for (khint_t i = 0; i < nkeys; i ++) {
+    int id;
+    int df;
+    tk_lua_fread(L, &id, sizeof(int), 1, fh);
+    tk_lua_fread(L, &df, sizeof(int), 1, fh);
+    k = kh_put(dfs, tokenizer->dfs, (uint32_t) id, &absent);
+    assert(absent);
+    kh_value(tokenizer->dfs, k) = df;
   }
   tk_lua_fclose(L, fh);
   lua_newtable(L);
