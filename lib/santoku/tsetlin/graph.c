@@ -710,7 +710,7 @@ static inline int tm_create (lua_State *L)
 
   if (i_each != -1) {
     lua_pushvalue(L, i_each);
-    lua_pushinteger(L, 0);
+    lua_pushinteger(L, tk_dsu_components(&graph->dsu));
     lua_pushinteger(L, (int64_t) graph->n_edges);
     lua_pushstring(L, "init");
     lua_call(L, 3, 0);
@@ -738,18 +738,17 @@ static inline int tm_create (lua_State *L)
     }
   }
 
-  // Handle bridge=false: find largest component
   if (!graph->bridge && graph->dsu.components > 1) {
+
     // Count component sizes
     tk_iumap_t *comp_sizes = tk_iumap_create();
     for (uint64_t i = 0; i < graph->uids->n; i++) {
       int64_t root = tk_dsu_findx(&graph->dsu, (int64_t)i);
       int kha;
       khint_t khi = tk_iumap_put(comp_sizes, root, &kha);
-      if (kha) {
+      if (kha)
         tk_iumap_value(comp_sizes, khi) = 0;
-      }
-      tk_iumap_value(comp_sizes, khi)++;
+      tk_iumap_value(comp_sizes, khi) ++;
     }
 
     // Find largest component

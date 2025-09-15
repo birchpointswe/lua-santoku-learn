@@ -12,9 +12,9 @@ test("tokenizer", function ()
     max_len = 20,
     min_len = 1,
     max_run = 2,
-    ngrams = 2,
-    cgrams_min = 0,
-    cgrams_max = 0,
+    ngrams = 0,
+    cgrams_min = 3,
+    cgrams_max = 3,
     skips = 0,
     negations = 0,
   })

@@ -4,6 +4,7 @@
 #include <santoku/threads.h>
 #include <santoku/ivec.h>
 #include <santoku/cvec.h>
+#include <math.h>
 
 #define TK_EVAL_EPH "tk_eval_eph"
 
@@ -249,10 +250,13 @@ static void tk_eval_worker (void *dp, int sig)
       data->local_weight_max = -INFINITY;
       for (uint64_t i = data->wfirst; i <= data->wlast; i++) {
         double w = state->weights->a[i];
-        if (w < data->local_weight_min)
-          data->local_weight_min = w;
-        if (w > data->local_weight_max)
-          data->local_weight_max = w;
+        // Only track positive weights for log transformation bounds
+        if (w > 0) {
+          if (w < data->local_weight_min)
+            data->local_weight_min = w;
+          if (w > data->local_weight_max)
+            data->local_weight_max = w;
+        }
       }
       break;
 
@@ -264,10 +268,23 @@ static void tk_eval_worker (void *dp, int sig)
         for (int64_t j = start; j < end; j++) {
           int64_t neighbor = state->neighbors->a[j];
           double weight = state->weights->a[j];
-          double target_dist = -log(weight + 1e-8);
-          double log_min = -log(state->weight_linear_max + 1e-8);
-          double log_max = -log(state->weight_linear_min + 1e-8);
-          double target_norm = (target_dist - log_min) / (log_max - log_min + 1e-8);
+          double target_norm;
+
+          if (weight < 0) {
+            // Negative weight: repulsion - want large Hamming distance
+            // Map [-1, 0) to desired distance range
+            // -1.0 should map to maximum distance (1.0 after normalization)
+            // -0.0 should map to neutral distance (0.5 after normalization)
+            target_norm = 0.5 - 0.5 * weight; // Maps [-1,0) to [1.0,0.5)
+          } else {
+            // Positive weight: attraction - want small Hamming distance
+            // Use existing log transformation for positive weights
+            double target_dist = -log(weight + 1e-8);
+            double log_min = -log(state->weight_linear_max + 1e-8);
+            double log_max = -log(state->weight_linear_min + 1e-8);
+            target_norm = (target_dist - log_min) / (log_max - log_min + 1e-8);
+          }
+
           uint64_t hamming_dist;
           if (state->mask != NULL) {
             hamming_dist = tk_cvec_bits_hamming_mask(
@@ -283,7 +300,8 @@ static void tk_eval_worker (void *dp, int sig)
               state->n_dims);
           }
           double hamming_norm = state->mask_popcount > 0 ? (double)hamming_dist / state->mask_popcount : (double)hamming_dist / state->n_dims;
-          double error = weight * (target_norm - hamming_norm) * (target_norm - hamming_norm);
+          // Use absolute value of weight for error magnitude (both attraction and repulsion contribute)
+          double error = fabs(weight) * (target_norm - hamming_norm) * (target_norm - hamming_norm);
           data->recon_error += error;
         }
       }
