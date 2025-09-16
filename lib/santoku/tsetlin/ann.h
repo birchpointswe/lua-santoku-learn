@@ -61,15 +61,15 @@ typedef struct tk_ann_thread_s {
   tk_iumap_t *sid_idx;
   tk_ivec_t *uids;
   tk_ivec_t *sids;
-  tk_cvec_t *query_vecs;  // Query vectors (if provided instead of IDs)
+  tk_cvec_t *query_vecs;
   uint64_t ifirst, ilast;
   uint64_t eps;
   uint64_t k;
   uint64_t min;
   bool mutual;
   int64_t *old_to_new;
-  tk_iuset_t *local_uids;  // Thread-local UID collection
-  tk_iumap_t *uid_to_idx;  // Shared UID->index mapping (read-only in REMAP)
+  tk_iuset_t *local_uids;
+  tk_iumap_t *uid_to_idx;
 } tk_ann_thread_t;
 
 static inline tk_ann_t *tk_ann_peek (lua_State *L, int i)
@@ -89,7 +89,7 @@ static inline void tk_ann_shrink (
   if (A->destroyed)
     return;
 
-  // Step 1: Build mapping of old_sid to new_sid by finding all active sids
+  // Map old_sid to new_sid by finding all active sids
   int64_t *old_to_new = tk_malloc(L, A->next_sid * sizeof(int64_t));
   for (uint64_t i = 0; i < A->next_sid; i ++)
     old_to_new[i] = -1;
@@ -103,7 +103,7 @@ static inline void tk_ann_shrink (
     old_to_new[old_sid] = (int64_t) new_sid ++;
   }
 
-  // If no compaction needed, just shrink vectors and return
+  // If no compaction needed, just shrink
   if (new_sid == A->next_sid) {
     free(old_to_new);
     tk_cvec_shrink(A->vectors);
@@ -111,7 +111,7 @@ static inline void tk_ann_shrink (
     return;
   }
 
-  // Step 2: Compact the vectors array
+  // Compact the vectors array
   size_t bytes_per_vec = TK_CVEC_BITS_BYTES(A->features);
   char *old_vectors = A->vectors->a;
   char *new_vectors = A->vectors->a;  // Reuse same array, compact in-place
@@ -121,9 +121,7 @@ static inline void tk_ann_shrink (
       continue;
     int64_t old_sid = kh_key(A->sid_uid, k);
     int64_t new_sid_val = old_to_new[old_sid];
-
     if (new_sid_val != old_sid) {
-      // Need to move the vector data
       memmove(new_vectors + (uint64_t) new_sid_val * bytes_per_vec,
               old_vectors + (uint64_t) old_sid * bytes_per_vec,
               bytes_per_vec);
@@ -131,7 +129,7 @@ static inline void tk_ann_shrink (
   }
   A->vectors->n = new_sid * bytes_per_vec;
 
-  // Step 3: Update all bucket posting lists with new sids
+  // Update all bucket posting lists with new sids
   for (khint_t k = kh_begin(A->buckets); k != kh_end(A->buckets); k ++) {
     if (!kh_exist(A->buckets, k))
       continue;
@@ -140,7 +138,6 @@ static inline void tk_ann_shrink (
     if (!posting)
       continue;
 
-    // Update sids in the posting list
     for (uint64_t i = 0; i < posting->n; i ++) {
       int64_t old_sid = posting->a[i];
       int64_t new_sid_val = old_to_new[old_sid];
@@ -148,7 +145,6 @@ static inline void tk_ann_shrink (
         posting->a[i] = new_sid_val;
     }
 
-    // Remove any orphaned sids (shouldn't happen but be safe)
     uint64_t write_pos = 0;
     for (uint64_t i = 0; i < posting->n; i ++) {
       if (old_to_new[posting->a[i]] >= 0)
@@ -158,7 +154,7 @@ static inline void tk_ann_shrink (
     tk_ivec_shrink(posting);
   }
 
-  // Step 4: Update uid_sid and sid_uid mappings
+  // Update uid_sid and sid_uid mappings
   tk_iumap_t *new_uid_sid = tk_iumap_create();
   tk_iumap_t *new_sid_uid = tk_iumap_create();
 
@@ -182,10 +178,11 @@ static inline void tk_ann_shrink (
   A->uid_sid = new_uid_sid;
   A->sid_uid = new_sid_uid;
 
-  // Step 5: Update next_sid and shrink vectors
+  // Update next_sid and shrink vectors
   A->next_sid = new_sid;
   tk_cvec_shrink(A->vectors);
-  if (A->hash_bits) tk_ivec_shrink(A->hash_bits);
+  if (A->hash_bits)
+    tk_ivec_shrink(A->hash_bits);
 
   free(old_to_new);
 }
@@ -262,7 +259,6 @@ static inline char *tk_ann_get (
   return tk_ann_sget(A, sid);
 }
 
-// Hamming similarity (normalized) and distance functions
 static inline double tk_ann_similarity (
   tk_ann_t *A,
   int64_t uid0,
@@ -330,12 +326,10 @@ static inline void tk_ann_persist (
   tk_lua_fwrite(L, (char *) &A->bucket_target, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, (char *) &A->features, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, (char *) &A->probe_radius, sizeof(uint64_t), 1, fh);
-  // hash_bits vector
   uint64_t n_hash = A->hash_bits ? A->hash_bits->n : 0;
   tk_lua_fwrite(L, (char *) &n_hash, sizeof(uint64_t), 1, fh);
   if (n_hash)
     tk_lua_fwrite(L, (char *) A->hash_bits->a, sizeof(int64_t),  n_hash, fh);
-  // buckets map  (hash to posting list)
   khint_t nb = A->buckets ? kh_size(A->buckets) : 0;
   tk_lua_fwrite(L, (char *) &nb, sizeof(khint_t), 1, fh);
   for (khint_t i = kh_begin(A->buckets); i < kh_end(A->buckets); i ++)
@@ -351,7 +345,6 @@ static inline void tk_ann_persist (
         tk_lua_fwrite(L, (char *) plist->a, sizeof(int64_t),  plen, fh);
       }
     }
-  // uid to sid map
   khint_t nkeys = A->uid_sid ? tk_iumap_size(A->uid_sid) : 0;
   tk_lua_fwrite(L, (char *) &nkeys, sizeof(khint_t), 1, fh);
   for (khint_t i = tk_iumap_begin(A->uid_sid); i < tk_iumap_end(A->uid_sid); i ++)
@@ -361,7 +354,6 @@ static inline void tk_ann_persist (
       tk_lua_fwrite(L, (char *) &k, sizeof(int64_t), 1, fh);
       tk_lua_fwrite(L, (char *) &v, sizeof(int64_t), 1, fh);
     }
-  // sid to uid map
   nkeys = A->sid_uid ? tk_iumap_size(A->sid_uid) : 0;
   tk_lua_fwrite(L, (char *) &nkeys, sizeof(khint_t), 1, fh);
   for (khint_t i = tk_iumap_begin(A->sid_uid); i < tk_iumap_end(A->sid_uid); i ++)
@@ -371,7 +363,6 @@ static inline void tk_ann_persist (
       tk_lua_fwrite(L, (char *) &k, sizeof(int64_t), 1, fh);
       tk_lua_fwrite(L, (char *) &v, sizeof(int64_t), 1, fh);
     }
-  // vectors (contiguous float / double array)
   uint64_t vcount = A->vectors ? A->vectors->n : 0;
   tk_lua_fwrite(L, (char *) &vcount, sizeof(uint64_t), 1, fh);
   if (vcount)
@@ -424,7 +415,6 @@ static inline void tk_ann_add (
   }
   if (ids->n == 0)
     return;
-  // Pre-allocate vector storage for all samples being added
   size_t bytes_per_vec = TK_CVEC_BITS_BYTES(A->features);
   tk_cvec_ensure(A->vectors, A->vectors->n + ids->n * bytes_per_vec);
   int kha;
@@ -472,21 +462,17 @@ static inline void tk_ann_keep (
     return;
   }
 
-  // Create a set from the IDs to keep
   tk_iuset_t *keep_set = tk_iuset_from_ivec(ids);
 
-  // Create a set of all current IDs, then remove the ones we want to keep
   tk_iuset_t *to_remove_set = tk_iuset_create();
   tk_iuset_union_iumap(to_remove_set, A->uid_sid);
   tk_iuset_difference(to_remove_set, keep_set);
 
-  // Remove the IDs that are not in the keep set
   int64_t uid;
   tk_iuset_foreach(to_remove_set, uid, ({
     tk_ann_uid_remove(A, uid);
   }));
 
-  // Clean up
   tk_iuset_destroy(keep_set);
   tk_iuset_destroy(to_remove_set);
 }
@@ -520,9 +506,8 @@ static inline void tk_ann_mutualize (
   tk_threads_signal(A->pool, TK_ANN_MUTUAL_INIT, 0);
   tk_threads_signal(A->pool, TK_ANN_MUTUAL_FILTER, 0);
 
-  // Apply min neighbor filtering if requested
+  // Min filtering
   if (min > 0) {
-    // Build old_to_new index mapping
     int64_t *old_to_new = tk_malloc(L, uids->n * sizeof(int64_t));
     int64_t keeper_count = 0;
     for (uint64_t i = 0; i < uids->n; i ++) {
@@ -532,53 +517,35 @@ static inline void tk_ann_mutualize (
         old_to_new[i] = -1;
       }
     }
-
-    // Only proceed if filtering is needed
     if (keeper_count < (int64_t) uids->n) {
-      // Set up thread data for min filtering
       for (uint64_t i = 0; i < A->pool->n_threads; i ++) {
         tk_ann_thread_t *data = A->threads + i;
         data->old_to_new = old_to_new;
         data->min = min;
         tk_thread_range(i, A->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
       }
-
-      // Remap neighborhood indices in parallel
       tk_threads_signal(A->pool, TK_ANN_MIN_REMAP, 0);
-
-      // Create new compacted arrays
       tk_ivec_t *new_uids = tk_ivec_create(L, (uint64_t) keeper_count, 0, 0);
       tk_ann_hoods_t *new_hoods = tk_ann_hoods_create(L, (uint64_t) keeper_count, 0, 0);
       new_hoods->n = (uint64_t) keeper_count;
-
-      // Compact keeper data into new arrays using old_to_new mapping
       for (uint64_t i = 0; i < uids->n; i ++) {
         if (old_to_new[i] >= 0) {
           new_uids->a[old_to_new[i]] = uids->a[i];
           new_hoods->a[old_to_new[i]] = hoods->a[i];
         }
       }
-
-      // Update original arrays in-place to point to new data
-      // Save old data pointers for cleanup
       int64_t *old_uids_data = uids->a;
       tk_ann_hood_t *old_hoods_data = hoods->a;
-
-      // Swap in new data
       uids->a = new_uids->a;
       uids->n = (uint64_t) keeper_count;
       uids->m = (uint64_t) keeper_count;
       hoods->a = new_hoods->a;
       hoods->n = (uint64_t) keeper_count;
       hoods->m = (uint64_t) keeper_count;
-
-      // Prevent double-free by clearing new array pointers
       new_uids->a = old_uids_data;
       new_hoods->a = old_hoods_data;
-
-      // Clean up temporary arrays (will free old data)
-      lua_remove(L, -2); // remove new_uids (frees old uids data)
-      lua_remove(L, -1); // remove new_hoods (frees old hoods data)
+      lua_remove(L, -2); // remove new_uids
+      lua_remove(L, -1); // remove new_hoods
     }
 
     if (old_to_newp) {
@@ -595,7 +562,6 @@ static inline void tk_ann_mutualize (
   lua_pop(L, 1); // sids
 }
 
-// Get neighborhoods for all items in the index
 static inline void tk_ann_neighborhoods (
   lua_State *L,
   tk_ann_t *A,
@@ -611,7 +577,6 @@ static inline void tk_ann_neighborhoods (
     return;
   }
 
-  // Get all UIDs in index
   tk_ivec_t *sids = tk_iumap_values(L, A->uid_sid);
   tk_ivec_asc(sids, 0, sids->n); // sort for cache locality
   tk_ivec_t *uids = tk_ivec_create(L, sids->n, 0, 0);
@@ -624,7 +589,7 @@ static inline void tk_ann_neighborhoods (
   tk_ann_hoods_t *hoods = tk_ann_hoods_create(L, n_queries, 0, 0);
   hoods->n = n_queries;
   tk_iumap_t **hoods_sets = NULL;
-  if (mutual && k) {  // No mutual filtering for query vectors
+  if (mutual && k) {
     hoods_sets = tk_malloc(L, n_queries * sizeof(tk_iumap_t *));
     for (uint64_t i = 0; i < n_queries; i ++)
       hoods_sets[i] = tk_iumap_create();
@@ -647,7 +612,7 @@ static inline void tk_ann_neighborhoods (
     data->sid_idx = sid_idx;
     data->eps = eps;
     data->k = k;
-    data->mutual = mutual;  // No mutual for query vectors
+    data->mutual = mutual;
     tk_thread_range(i, A->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
   }
 
@@ -659,19 +624,14 @@ static inline void tk_ann_neighborhoods (
 
   tk_iumap_destroy(sid_idx);
 
-  // Apply min neighbor filtering if requested
+  // Min filtering
   if (min > 0) {
-    // Count how many UIDs will survive the min filter
     int64_t keeper_count = 0;
     for (uint64_t i = 0; i < uids->n; i ++)
       if (hoods->a[i]->n >= min)
         keeper_count ++;
-
-    // Early exit if no filtering needed
     if (keeper_count == (int64_t) uids->n)
       goto cleanup;
-
-    // Build old_to_new index mapping
     int64_t *old_to_new = tk_malloc(L, uids->n * sizeof(int64_t));
     int64_t new_idx = 0;
     for (uint64_t i = 0; i < uids->n; i ++) {
@@ -681,24 +641,16 @@ static inline void tk_ann_neighborhoods (
         old_to_new[i] = -1;
       }
     }
-
-    // Set up thread data for min filtering
     for (uint64_t i = 0; i < A->pool->n_threads; i ++) {
       tk_ann_thread_t *data = A->threads + i;
       data->old_to_new = old_to_new;
       data->min = min;
       tk_thread_range(i, A->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
     }
-
-    // Remap neighborhood indices in parallel
     tk_threads_signal(A->pool, TK_ANN_MIN_REMAP, 0);
-
-    // Create new compacted arrays
     tk_ivec_t *new_uids = tk_ivec_create(L, (uint64_t) keeper_count, 0, 0);
     tk_ann_hoods_t *new_hoods = tk_ann_hoods_create(L, (uint64_t) keeper_count, 0, 0);
     new_hoods->n = (uint64_t) keeper_count;
-
-    // Compact keeper data into new arrays
     uint64_t write_pos = 0;
     for (uint64_t i = 0; i < uids->n; i ++) {
       if (hoods->a[i]->n >= min) {
@@ -707,28 +659,18 @@ static inline void tk_ann_neighborhoods (
         write_pos ++;
       }
     }
-
-    // Update original arrays in-place to point to new data
-    // Save old data pointers for cleanup
     int64_t *old_uids_data = uids->a;
     tk_ann_hood_t *old_hoods_data = hoods->a;
-
-    // Swap in new data
     uids->a = new_uids->a;
     uids->n = (uint64_t) keeper_count;
     uids->m = (uint64_t) keeper_count;
     hoods->a = new_hoods->a;
     hoods->n = (uint64_t) keeper_count;
     hoods->m = (uint64_t) keeper_count;
-
-    // Prevent double-free by clearing new array pointers
     new_uids->a = old_uids_data;
     new_hoods->a = old_hoods_data;
-
-    // Clean up temporary arrays (will free old data)
-    lua_remove(L, -2); // remove new_uids (frees old uids data)
-    lua_remove(L, -1); // remove new_hoods (frees old hoods data)
-
+    lua_remove(L, -2); // remove new_uids
+    lua_remove(L, -1); // remove new_hoods
     free(old_to_new);
   }
 
@@ -881,32 +823,27 @@ static inline void tk_ann_neighborhoods_by_vecs (
     lua_pop(L, 1);
   }
 
-  // Pass NULL for sid_idx to make search store UIDs directly
   for (uint64_t i = 0; i < A->pool->n_threads; i ++) {
     tk_ann_thread_t *data = A->threads + i;
-    data->uids = NULL;  // No pre-built UIDs array
+    data->uids = NULL; // No pre-built UIDs array
     data->sids = NULL;
     data->query_vecs = query_vecs;
     data->hoods = hoods;
     data->hoods_sets = NULL;
-    data->sid_idx = NULL;  // NULL causes UIDs to be stored directly
+    data->sid_idx = NULL; // NULL causes UIDs to be stored directly
     data->eps = eps;
     data->k = k;
     data->mutual = false;
     tk_thread_range(i, A->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
   }
-
-  // Search phase: stores UIDs directly in hoods
   tk_threads_signal(A->pool, TK_ANN_NEIGHBORHOODS, 0);
-
-  // Collect unique UIDs in parallel
   for (uint64_t i = 0; i < A->pool->n_threads; i ++) {
     A->threads[i].local_uids = tk_iuset_create();
     tk_thread_range(i, A->pool->n_threads, hoods->n, &A->threads[i].ifirst, &A->threads[i].ilast);
   }
   tk_threads_signal(A->pool, TK_ANN_COLLECT_UIDS, 0);
 
-  // Merge thread-local UID sets and build mapping
+  // Merge thread-local UID sets
   tk_iumap_t *uid_to_idx = tk_iumap_create();
   int64_t next_idx = 0;
   int ret;
@@ -921,7 +858,7 @@ static inline void tk_ann_neighborhoods_by_vecs (
     tk_iuset_destroy(local);
   }
 
-  // Build compacted UIDs array
+  // Compact UIDs array
   tk_ivec_t *uids = tk_ivec_create(L, (uint64_t)next_idx, 0, 0); // hoods uids
   uids->n = (uint64_t)next_idx;
   for (khint_t k = tk_iumap_begin(uid_to_idx); k != tk_iumap_end(uid_to_idx); k++) {
@@ -940,16 +877,15 @@ static inline void tk_ann_neighborhoods_by_vecs (
   }
   tk_threads_signal(A->pool, TK_ANN_REMAP_UIDS, 0);
   tk_iumap_destroy(uid_to_idx);
+
+  // Min filtering
   if (min > 0) {
-    // Count keeper hoods
     int64_t keeper_count = 0;
     for (uint64_t i = 0; i < hoods->n; i ++)
       if (hoods->a[i]->n >= min)
         keeper_count ++;
     if (keeper_count == (int64_t) hoods->n)
       goto cleanup;
-
-    // Collect unique UIDs still referenced by keeper hoods
     int kha;
     tk_iuset_t *kept_uids = tk_iuset_create();
     for (uint64_t i = 0; i < hoods->n; i ++) {
@@ -962,15 +898,12 @@ static inline void tk_ann_neighborhoods_by_vecs (
         }
       }
     }
-
-    // Build new UIDs array and create old_idx->new_idx mapping
     tk_iumap_t *idx_remap = tk_iumap_create();
     tk_ivec_t *new_uids = tk_ivec_create(L, (uint64_t) tk_iuset_size(kept_uids), 0, 0); // uids hoods new_uids
     int64_t new_idx = 0;
     int64_t uid;
     tk_iuset_foreach(kept_uids, uid, ({
       new_uids->a[new_idx] = uid;
-      // Find old index of this UID
       for (uint64_t old_idx = 0; old_idx < uids->n; old_idx ++) {
         if (uids->a[old_idx] == uid) {
           int ret;
@@ -983,15 +916,12 @@ static inline void tk_ann_neighborhoods_by_vecs (
     }));
     new_uids->n = (uint64_t) new_idx;
     tk_iuset_destroy(kept_uids);
-
-    // Create new hoods array and remap indices
     tk_ann_hoods_t *new_hoods = tk_ann_hoods_create(L, (uint64_t) keeper_count, 0, 0); // uids hoods new_uids new_hoods
     new_hoods->n = (uint64_t) keeper_count;
     uint64_t write_pos = 0;
     for (uint64_t i = 0; i < hoods->n; i ++) {
       if (hoods->a[i]->n >= min) {
         tk_pvec_t *hood = hoods->a[i];
-        // Remap indices in this hood
         for (uint64_t j = 0; j < hood->n; j ++) {
           int64_t old_idx = hood->a[j].i;
           khint_t k = tk_iumap_get(idx_remap, old_idx);
@@ -1002,8 +932,6 @@ static inline void tk_ann_neighborhoods_by_vecs (
         new_hoods->a[write_pos ++] = hood;
       }
     }
-
-    // Swap arrays and cleanup
     int64_t *old_uids_data = uids->a;
     tk_ann_hood_t *old_hoods_data = hoods->a;
     uids->a = new_uids->a;
@@ -1017,6 +945,7 @@ static inline void tk_ann_neighborhoods_by_vecs (
     lua_pop(L, 2); // uids hoods
     tk_iumap_destroy(idx_remap);
   }
+
 cleanup:
   if (hoodsp)
     *hoodsp = hoods;
@@ -1211,7 +1140,6 @@ static inline int tk_ann_keep_lua (lua_State *L)
 {
   tk_ann_t *A = tk_ann_peek(L, 1);
   if (lua_type(L, 2) == LUA_TNUMBER) {
-    // Single ID case - keep only this ID
     int64_t id = tk_lua_checkinteger(L, 2, "id");
     tk_ivec_t *ids = tk_ivec_create(L, 1, 0, 0);
     ids->a[0] = id;
@@ -1237,7 +1165,7 @@ static inline int tk_ann_get_lua (lua_State *L)
   uint64_t dest_sample = tk_lua_optunsigned(L, 4, "dest_sample", 0);
   uint64_t dest_stride = tk_lua_optunsigned(L, 5, "dest_stride", 0);
 
-  // Determine if we're dealing with a single ID or multiple IDs
+  // Single vs multi
   uint64_t n_samples = 0;
   if (lua_type(L, 2) == LUA_TNUMBER) {
     n_samples = 1;
@@ -1246,46 +1174,32 @@ static inline int tk_ann_get_lua (lua_State *L)
     uids = tk_ivec_peek(L, 2, "uids");
     n_samples = uids->n;
   }
-
-  // Calculate destination layout
   uint64_t row_stride_bits;
   bool use_packed;
-
   if (dest_stride > 0) {
-    // Packed mode with fixed stride
     use_packed = true;
     row_stride_bits = dest_stride;
   } else {
-    // Byte-aligned mode
     use_packed = false;
     row_stride_bits = bytes_per_vec * CHAR_BIT;
   }
-
-  // Calculate total bytes needed
   uint64_t total_bytes;
   if (use_packed) {
-    // Packed mode: bit-level calculation
     uint64_t total_bits = dest_sample * row_stride_bits + n_samples * A->features;
-    // If using fixed stride, ensure space for full rows
-    if (dest_stride > 0 && n_samples > 0) {
+    if (dest_stride > 0 && n_samples > 0)
       total_bits = (dest_sample + n_samples) * row_stride_bits;
-    }
     total_bytes = TK_CVEC_BITS_BYTES(total_bits);
   } else {
-    // Byte-aligned mode
     total_bytes = (dest_sample + n_samples) * bytes_per_vec;
   }
 
   // Ensure destination capacity
   tk_cvec_ensure(out, total_bytes);
   uint8_t *dest_data = (uint8_t *)out->a;
-
   if (dest_sample == 0) {
-    // Overwrite mode: clear and set size
     out->n = total_bytes;
     memset(dest_data, 0, total_bytes);
   } else {
-    // Extend mode: grow and zero new portion
     uint64_t old_size = out->n;
     out->n = total_bytes;
     if (total_bytes > old_size) {
@@ -1295,20 +1209,15 @@ static inline int tk_ann_get_lua (lua_State *L)
 
   // Process samples
   if (lua_type(L, 2) == LUA_TNUMBER) {
-    // Single ID case
     char *data = tk_ann_get(A, uid);
     if (data != NULL) {
       if (use_packed) {
-        // Packed mode: write bits at calculated offset
         uint64_t bit_offset = dest_sample * row_stride_bits;
         uint64_t byte_offset = bit_offset / CHAR_BIT;
         uint8_t bit_shift = bit_offset % CHAR_BIT;
-
         if (bit_shift == 0) {
-          // Aligned case
           memcpy(dest_data + byte_offset, data, bytes_per_vec);
         } else {
-          // Unaligned case: need bit shifting
           uint8_t *src = (uint8_t *)data;
           for (uint64_t i = 0; i < bytes_per_vec; i++) {
             uint8_t byte = src[i];
@@ -1319,28 +1228,22 @@ static inline int tk_ann_get_lua (lua_State *L)
           }
         }
       } else {
-        // Byte-aligned mode
         memcpy(dest_data + dest_sample * bytes_per_vec, data, bytes_per_vec);
       }
     }
   } else {
-    // Multiple IDs case
     for (uint64_t i = 0; i < uids->n; i++) {
       uid = uids->a[i];
       char *data = tk_ann_get(A, uid);
 
       if (use_packed) {
-        // Packed mode: write at bit offset
         uint64_t bit_offset = (dest_sample + i) * row_stride_bits;
         uint64_t byte_offset = bit_offset / CHAR_BIT;
         uint8_t bit_shift = bit_offset % CHAR_BIT;
-
         if (data != NULL) {
           if (bit_shift == 0) {
-            // Aligned case
             memcpy(dest_data + byte_offset, data, bytes_per_vec);
           } else {
-            // Unaligned case: need bit shifting
             uint8_t *src = (uint8_t *)data;
             for (uint64_t j = 0; j < bytes_per_vec; j++) {
               uint8_t byte = src[j];
@@ -1351,14 +1254,10 @@ static inline int tk_ann_get_lua (lua_State *L)
             }
           }
         }
-        // If data is NULL, the area is already zeroed
       } else {
-        // Byte-aligned mode
         uint64_t offset = (dest_sample + i) * bytes_per_vec;
-        if (data != NULL) {
+        if (data != NULL)
           memcpy(dest_data + offset, data, bytes_per_vec);
-        }
-        // If data is NULL, the area is already zeroed
       }
     }
   }
@@ -1528,16 +1427,13 @@ static inline void tk_ann_worker (void *dp, int sig)
       for (uint64_t i = data->ifirst; i <= data->ilast; i ++) {
         tk_pvec_t *hood = data->hoods->a[i];
         tk_pvec_clear(hood);
-        // Get vector either from query_vecs or from stored vectors
         char *vec;
         int64_t sid;
         if (data->query_vecs) {
-          // Using query vectors - no SID
           uint64_t vec_bytes = TK_CVEC_BITS_BYTES(data->A->features);
           vec = data->query_vecs->a + i * vec_bytes;
-          sid = -1;  // No SID for query vectors
+          sid = -1;
         } else {
-          // Using stored vectors - lookup by SID
           sid = data->sids->a[i];
           vec = tk_ann_sget(data->A, sid);
         }
@@ -1546,7 +1442,6 @@ static inline void tk_ann_worker (void *dp, int sig)
       }
       break;
 
-    // Build hood sets for mutualization
     case TK_ANN_MUTUAL_INIT: {
       int kha;
       khint_t khi;
@@ -1561,7 +1456,7 @@ static inline void tk_ann_worker (void *dp, int sig)
       break;
     }
 
-    // NOTE: Move non-mutual neighbors to tail of list [hood->n, hood->m - 1]
+    // Note: Moves non-mutual neighbors to tail of list [hood->n, hood->m - 1]
     case TK_ANN_MUTUAL_FILTER: {
       for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i ++) {
         tk_pvec_t *uhood = data->hoods->a[i];
@@ -1605,13 +1500,11 @@ static inline void tk_ann_worker (void *dp, int sig)
           int64_t iv = uhood->a[qi].i;
           int64_t d_forward = uhood->a[qi].p;
           int64_t d_reverse = d_forward;  // fallback
-          // Try to get reverse distance from neighbor's hood set
           tk_iumap_t *vset = data->hoods_sets[iv];
           khi = tk_iumap_get(vset, i);
           if (khi != tk_iumap_end(vset)) {
             d_reverse = tk_iumap_value(vset, khi);
           } else {
-            // Fall back to full distance computation
             int64_t usid = data->sids->a[i];
             int64_t vsid = data->sids->a[iv];
             const unsigned char *ubits = (const unsigned char *) tk_ann_sget(data->A, usid);
@@ -1632,46 +1525,36 @@ static inline void tk_ann_worker (void *dp, int sig)
     }
 
     case TK_ANN_MIN_REMAP: {
-      // Remap neighborhood indices for keeper UIDs
       for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i ++) {
         if (data->hoods->a[i]->n >= data->min) {
           tk_pvec_t *hood = data->hoods->a[i];
           uint64_t mutual_write_pos = 0;
           uint64_t non_mutual_write_pos = 0;
-          // Process mutual neighbors (0 to n-1)
           for (uint64_t j = 0; j < hood->n; j ++) {
             int64_t old_neighbor_idx = hood->a[j].i;
             int64_t new_neighbor_idx = data->old_to_new[old_neighbor_idx];
-            if (new_neighbor_idx >= 0) {
-              // Keep this mutual neighbor, update index
+            if (new_neighbor_idx >= 0)
               hood->a[mutual_write_pos ++] = tk_pair(new_neighbor_idx, hood->a[j].p);
-            }
-            // Otherwise skip (neighbor was filtered out)
           }
-          // Process non-mutual neighbors (n to m-1)
           for (uint64_t j = hood->n; j < hood->m; j ++) {
             int64_t old_neighbor_idx = hood->a[j].i;
             int64_t new_neighbor_idx = data->old_to_new[old_neighbor_idx];
-            if (new_neighbor_idx >= 0) {
-              // Keep this non-mutual neighbor, update index
+            if (new_neighbor_idx >= 0)
               hood->a[mutual_write_pos + non_mutual_write_pos ++] = tk_pair(new_neighbor_idx, hood->a[j].p);
-            }
-            // Otherwise skip (neighbor was filtered out)
           }
-          hood->n = mutual_write_pos;  // Update mutual count after filtering
-          hood->m = mutual_write_pos + non_mutual_write_pos;  // Update total count after filtering
+          hood->n = mutual_write_pos;
+          hood->m = mutual_write_pos + non_mutual_write_pos;
         }
       }
       break;
     }
 
     case TK_ANN_COLLECT_UIDS: {
-      // Collect unique UIDs from assigned hoods
       int kha;
       for (uint64_t i = data->ifirst; i <= data->ilast; i ++) {
         tk_pvec_t *hood = data->hoods->a[i];
         for (uint64_t j = 0; j < hood->n; j ++) {
-          int64_t uid = hood->a[j].i;  // Currently stores UID directly
+          int64_t uid = hood->a[j].i;
           tk_iuset_put(data->local_uids, uid, &kha);
         }
       }
@@ -1679,15 +1562,13 @@ static inline void tk_ann_worker (void *dp, int sig)
     }
 
     case TK_ANN_REMAP_UIDS: {
-      // Remap hoods from UIDs to indices
       for (uint64_t i = data->ifirst; i <= data->ilast; i ++) {
         tk_pvec_t *hood = data->hoods->a[i];
         for (uint64_t j = 0; j < hood->n; j ++) {
-          int64_t uid = hood->a[j].i;  // Currently a UID
+          int64_t uid = hood->a[j].i;
           khint_t k = tk_iumap_get(data->uid_to_idx, uid);
-          if (k != tk_iumap_end(data->uid_to_idx)) {
-            hood->a[j].i = tk_iumap_value(data->uid_to_idx, k);  // Replace with index
-          }
+          if (k != tk_iumap_end(data->uid_to_idx))
+            hood->a[j].i = tk_iumap_value(data->uid_to_idx, k);
         }
       }
       break;
@@ -1737,11 +1618,9 @@ static inline void tk_ann_setup_hash_bits_random (
   if (A->hash_bits->n > n_hash_bits)
     A->hash_bits->n = n_hash_bits;
   tk_ivec_shrink(A->hash_bits);
-  // Pre-size hash table based on expected size
   size_t expected_buckets = expected / A->bucket_target * 2;
-  if (expected_buckets > 0) {
+  if (expected_buckets > 0)
     kh_resize(tk_ann_buckets, A->buckets, expected_buckets);
-  }
 }
 
 static inline tk_ann_t *tk_ann_create_base (
@@ -1793,11 +1672,9 @@ static inline tk_ann_t *tk_ann_load (
   FILE *fh,
   uint64_t n_threads
 ) {
-  // userdata + metatable
   tk_ann_t *A = tk_lua_newuserdata(L, tk_ann_t, TK_ANN_MT, tk_ann_lua_mt_fns, tk_ann_gc_lua);
   int Ai = tk_lua_absindex(L, -1);
   memset(A, 0, sizeof(tk_ann_t));
-  // core scalars
   tk_lua_fread(L, &A->destroyed, sizeof(bool), 1, fh);
   if (A->destroyed)
     tk_lua_verror(L, 2, "load", "index was destroyed when saved");
@@ -1805,7 +1682,6 @@ static inline tk_ann_t *tk_ann_load (
   tk_lua_fread(L, &A->bucket_target, sizeof(uint64_t), 1, fh);
   tk_lua_fread(L, &A->features, sizeof(uint64_t), 1, fh);
   tk_lua_fread(L, &A->probe_radius, sizeof(uint64_t), 1, fh);
-  // hash_bits vector
   uint64_t n_hash = 0;
   tk_lua_fread(L, &n_hash, sizeof(uint64_t), 1, fh);
   A->hash_bits = tk_ivec_create(L, n_hash, 0, 0);
@@ -1814,7 +1690,6 @@ static inline tk_ann_t *tk_ann_load (
   if (n_hash)
     tk_lua_fread(L, A->hash_bits->a, sizeof(int64_t), n_hash, fh);
   lua_pop(L, 1);
-  // buckets map
   A->buckets = kh_init(tk_ann_buckets);
   khint_t nb = 0, k; int absent;
   tk_lua_fread(L, &nb, sizeof(khint_t), 1, fh);
@@ -1838,7 +1713,6 @@ static inline tk_ann_t *tk_ann_load (
       kh_val(A->buckets, k) = NULL;
     }
   }
-  // uid to sid map
   A->uid_sid = tk_iumap_create();
   khint_t nkeys = 0; int64_t ikey, ival;
   tk_lua_fread(L, &nkeys, sizeof(khint_t), 1, fh);
@@ -1848,7 +1722,6 @@ static inline tk_ann_t *tk_ann_load (
     k = tk_iumap_put(A->uid_sid, ikey, &absent);
     tk_iumap_value(A->uid_sid, k) = ival;
   }
-  // sid to uid map
   A->sid_uid = tk_iumap_create();
   tk_lua_fread(L, &nkeys, sizeof(khint_t), 1, fh);
   for (khint_t i = 0; i < nkeys; i ++) {
@@ -1857,7 +1730,6 @@ static inline tk_ann_t *tk_ann_load (
     k = tk_iumap_put(A->sid_uid, ikey, &absent);
     tk_iumap_value(A->sid_uid, k) = ival;
   }
-  // vectors array
   uint64_t vcount = 0;
   tk_lua_fread(L, &vcount, sizeof(uint64_t), 1, fh);
   A->vectors = tk_cvec_create(L, vcount, 0, 0);
@@ -1866,7 +1738,6 @@ static inline tk_ann_t *tk_ann_load (
   if (vcount)
     tk_lua_fread(L, A->vectors->a, 1, vcount, fh);
   lua_pop(L, 1);
-  // thread pool
   A->threads = tk_malloc(L, n_threads * sizeof(tk_ann_thread_t));
   memset(A->threads, 0, n_threads * sizeof(tk_ann_thread_t));
   A->pool = tk_threads_create(L, n_threads, tk_ann_worker);

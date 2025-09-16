@@ -22,9 +22,8 @@ static inline int tk_inv_create_lua (lua_State *L)
     ranks = tk_ivec_peek(L, -1, "ranks");
     i_ranks = tk_lua_absindex(L, -1);
   }
-  if (ranks != NULL) {
+  if (ranks != NULL)
     n_ranks = tk_lua_fcheckunsigned(L, 1, "create", "n_ranks");
-  }
   double decay = tk_lua_foptnumber(L, 1, "create", "decay", 1.0);
   uint64_t n_threads = tk_threads_getn(L, 1, "create", "threads");
   tk_inv_create(L, features, weights, n_ranks, ranks, decay, n_threads, i_weights, i_ranks);

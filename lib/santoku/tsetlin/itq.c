@@ -23,7 +23,6 @@ static inline int tk_itq_encode_lua (lua_State *L)
     i_each = tk_lua_absindex(L, -1);
   }
 
-  // Run itq
   tk_itq_encode(L, codes, n_dims, max_iterations, tolerance, i_each, n_threads);
   return 1;
 }
