@@ -313,13 +313,13 @@ static void tk_eval_worker (void *dp, int sig)
 
 
 
-              importance *= 1.0 / scale_i;
 
 
 
 
 
 
+              importance *= fmax(1.0/scale_i, 1.0/scale_j);
 
 
 
