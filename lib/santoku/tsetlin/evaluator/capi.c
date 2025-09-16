@@ -299,7 +299,37 @@ static void tk_eval_worker (void *dp, int sig)
               state->n_dims);
           }
           double hamming_norm = state->mask_popcount > 0 ? (double)hamming_dist / state->mask_popcount : (double)hamming_dist / state->n_dims;
-          double error = fabs(weight) * (target_norm - hamming_norm) * (target_norm - hamming_norm);
+
+
+          double importance = fabs(weight);
+          if (state->scale != NULL && state->scale->n > 0) {
+
+            double scale_i = state->scale->a[i];
+            double scale_j = state->scale->a[neighbor];
+            if (scale_i > 0 && scale_j > 0) {
+
+
+
+
+
+
+              importance *= 1.0 / scale_i;
+
+
+
+
+
+
+
+
+
+
+
+
+            }
+          }
+
+          double error = importance * (target_norm - hamming_norm) * (target_norm - hamming_norm);
           data->recon_error += error;
         }
       }
