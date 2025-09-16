@@ -1,6 +1,6 @@
 # Now
 
-- Update MNIST/etc examples using refined approach to supervision (virtual nodes)
+- All tests functional
 - tk_cvec_t
     - Ensure cvec used everywhere (no strings!)
 - Lua GC for threadpool

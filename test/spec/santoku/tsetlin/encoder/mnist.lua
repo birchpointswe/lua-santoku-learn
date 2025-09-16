@@ -35,7 +35,7 @@ local ITQ_EPS = 1e-8
 local ITQ_ITERATIONS = 200
 
 local LAPLACIAN = "random"
-local DECAY = 4
+local DECAY = 4.0
 
 local KNN = 32
 local KNN_EPS = nil
@@ -278,7 +278,7 @@ test("tsetlin", function ()
       threads = THREADS,
       each = function (bit, gain, score, action)
         local d, dd = stopwatch()
-        str.printf("  Time: %6.2f %6.2f | Bit  %-3d  %-12s | Gain: %2.4f | Score: %.2f\n",
+        str.printf("  Time: %6.2f %6.2f | Bit  %-3d  %-12s | Gain: %2.12f | Score: %.12f\n",
           d, dd, bit, action, gain, score)
       end
     })
