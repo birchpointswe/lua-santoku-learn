@@ -1,6 +1,7 @@
 #include <santoku/tsetlin/conf.h>
 #include <santoku/threads.h>
 #include <santoku/ivec.h>
+#include <santoku/rvec.h>
 #include <santoku/iuset.h>
 
 #include <float.h>
@@ -628,8 +629,6 @@ static inline void tk_corex_init_alpha_thread (
     alpha[i] = 0.5 + 0.5 * tk_fast_drand();
 }
 
-
-
 static inline void tk_corex_init_tcs_thread (
   double *tcs,
   double *tcs_temp,
@@ -857,8 +856,29 @@ static inline int tk_corex_top_visible (lua_State *L)
   if (!C->trained)
     return tk_lua_verror(L, 1, "Can't extract features from untrained model!");
   unsigned int top_k = tk_lua_checkunsigned(L, 1, "top_k");
-  tk_dvec_t scores = tk_dvec(C->mis, C->n_hidden * C->n_visible);
-  tk_ivec_top_generic(L, &scores, C->n_visible, C->n_hidden, top_k, C->anchor > 0.0 ? C->n_hidden : 0);
+
+
+  tk_rvec_t *top_heap = tk_rvec_create(L, 0, 0, 0);
+
+
+  for (unsigned int v = 0; v < C->n_visible; v++) {
+    double max_mi = 0.0;
+    for (unsigned int h = 0; h < C->n_hidden; h++) {
+      double mi = C->mis[h * C->n_visible + v];
+      if (mi > max_mi) max_mi = mi;
+    }
+
+
+    tk_rank_t r = { (int64_t)v, max_mi };
+    tk_rvec_hmin(top_heap, top_k, r);
+  }
+
+
+  tk_rvec_desc(top_heap, 0, top_heap->n);
+  tk_ivec_from_rvec(L, top_heap);
+
+
+  lua_remove(L, -2);
   return 1;
 }
 

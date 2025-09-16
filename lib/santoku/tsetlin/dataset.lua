@@ -86,16 +86,14 @@ M.random_pairs = function (ids, edges_per_node, out, labels)
   if n <= 1 then
     return edges
   end
-  local label_of_id, ids_by_label
+  local ids_by_label
   if labels then
     err.assert(ids:size() == labels:size(), "ids and labels must align")
-    label_of_id = {}
     ids_by_label = {}
     for i = 0, n - 1 do
       local id = ids:get(i)
       local label = labels:get(i)
       if label ~= -1 then
-        label_of_id[id] = label
         if not ids_by_label[label] then
           ids_by_label[label] = ivec.create()
         end
@@ -157,7 +155,7 @@ M.anchor_pairs = function (ids, n_anchors, out, labels)
         table.insert(ids_by_label[label], id)
       end
     end
-    for label, label_ids in pairs(ids_by_label) do
+    for _, label_ids in pairs(ids_by_label) do
       local n_label_anchors = num.min(n_anchors, #label_ids)
       local anchors = {}
       while #anchors < n_label_anchors do
@@ -223,7 +221,7 @@ M.multiclass_pairs = function (ids, labels, n_anchors_pos, n_anchors_neg, index,
   local pos, neg = pvec.create(), pvec.create()
   local class_to_ids, class_to_anchors = {}, {}
   local classes = ivec.create()
-  local label_of_id   = {}
+  local label_of_id = {}
   local n_unique_ids = 0
   for i, y in labels:ieach() do
     local id = ids:get(i)

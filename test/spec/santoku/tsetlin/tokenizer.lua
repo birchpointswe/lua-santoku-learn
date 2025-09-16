@@ -1,5 +1,6 @@
 -- luacheck: push ignore
 
+require("santoku.ivec")
 local tokenizer = require("santoku.tsetlin.tokenizer")
 local test = require("santoku.test")
 local serialize = require("santoku.serialize")
@@ -19,14 +20,20 @@ test("tokenizer", function ()
     negations = 0,
   })
 
-  tok.train({ corpus = {
+  local corpus = {
     "this is a test the lib\'s tokenizer",
     "this is another test",
     "And one more a thing",
-  } })
+  }
+
+  tok.train({ corpus = corpus })
   tok.finalize()
+  local tokens = tok.tokenize(corpus)
+  local top, weights = tokens:bits_top_df(#corpus, tok.features())
+  tok.restrict(top)
+
   local words = tok.index()
-  local weights = tok.weights()
+
   print(serialize(weights:table()))
   print(serialize(words))
   for id in tok.tokenize("this is a test"):each() do

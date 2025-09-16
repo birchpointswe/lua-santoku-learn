@@ -69,7 +69,6 @@ static inline void tk_itq_encode (
   double *X = malloc(N * K * sizeof(double));
   memcpy(X, codes->a, N * K * sizeof(double));
 
-
   tk_dvec_center(X, N, K);
 
   tk_cvec_t *out = tk_cvec_create(L, N * TK_CVEC_BITS_BYTES(n_dims), 0, 0);
@@ -130,7 +129,6 @@ static inline void tk_itq_encode (
   cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, N, K, K, 1.0, X, K, R, K, 0.0, V1, K);
   tk_dvec_center(V1, N, K);
   tk_itq_sign(out->a, V1, N, K);
-
 
   free(superb);
   free(R);
