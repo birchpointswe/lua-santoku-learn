@@ -299,7 +299,37 @@ static void tk_eval_worker (void *dp, int sig)
               state->n_dims);
           }
           double hamming_norm = state->mask_popcount > 0 ? (double)hamming_dist / state->mask_popcount : (double)hamming_dist / state->n_dims;
-          double error = fabs(weight) * (target_norm - hamming_norm) * (target_norm - hamming_norm);
+
+          // Apply degree-based importance weighting if scale is provided
+          double importance = fabs(weight);
+          if (state->scale != NULL && state->scale->n > 0) {
+            // scale[i] = 1/sqrt(degree[i]), so smaller scale means higher degree
+            double scale_i = state->scale->a[i];
+            double scale_j = state->scale->a[neighbor];
+            if (scale_i > 0 && scale_j > 0) {
+              // Different weighting schemes (uncomment desired one):
+
+              // Geometric mean: sqrt(deg_i * deg_j)
+              // importance *= 1.0 / (scale_i * scale_j);
+
+              // Random walk: sqrt(deg_i)
+              importance *= 1.0 / scale_i;
+
+              // Arithmetic mean: (sqrt(deg_i) + sqrt(deg_j))/2
+              // importance *= 0.5 * (1.0/scale_i + 1.0/scale_j);
+
+              // Maximum: max(sqrt(deg_i), sqrt(deg_j))
+              // importance *= fmax(1.0/scale_i, 1.0/scale_j);
+
+              // Product: deg_i * deg_j
+              // importance *= 1.0 / (scale_i * scale_i * scale_j * scale_j);
+
+              // Minimum: min(sqrt(deg_i), sqrt(deg_j))
+              // importance *= fmin(1.0/scale_i, 1.0/scale_j);
+            }
+          }
+
+          double error = importance * (target_norm - hamming_norm) * (target_norm - hamming_norm);
           data->recon_error += error;
         }
       }

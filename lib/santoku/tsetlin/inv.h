@@ -2209,7 +2209,16 @@ static inline tk_inv_t *tk_inv_create (
   lua_pop(L, 1);
   I->total_rank_weight = 0.0;
   for (uint64_t r = 0; r < I->n_ranks; r++) {
-    double weight = exp(-(double)r * decay);
+    double weight;
+    if (decay < 0) {
+      // Negative decay: flip the importance ordering
+      // Highest rank (n_ranks-1) gets the most weight
+      uint64_t flipped_r = I->n_ranks - 1 - r;
+      weight = exp((double)flipped_r * decay);  // Note: decay is negative, so this is exp(-flipped_r * |decay|)
+    } else {
+      // Positive decay: normal exponential decay
+      weight = exp(-(double)r * decay);
+    }
     I->rank_weights->a[r] = weight;
     I->total_rank_weight += weight;
   }
@@ -2368,7 +2377,16 @@ static inline tk_inv_t *tk_inv_load (
   lua_pop(L, 1);
   I->total_rank_weight = 0.0;
   for (uint64_t r = 0; r < I->n_ranks; r++) {
-    double weight = exp(-(double)r * I->decay);
+    double weight;
+    if (I->decay < 0) {
+      // Negative decay: flip the importance ordering
+      // Highest rank (n_ranks-1) gets the most weight
+      uint64_t flipped_r = I->n_ranks - 1 - r;
+      weight = exp((double)flipped_r * I->decay);  // Note: decay is negative, so this is exp(-flipped_r * |decay|)
+    } else {
+      // Positive decay: normal exponential decay
+      weight = exp(-(double)r * I->decay);
+    }
     I->rank_weights->a[r] = weight;
     I->total_rank_weight += weight;
   }
