@@ -40,6 +40,7 @@ typedef struct tk_graph_s {
   tk_ann_t *ann; tk_ann_hoods_t *ann_hoods;
   tk_hbi_t *hbi; tk_hbi_hoods_t *hbi_hoods;
   tk_ivec_t *uids;
+  tk_ivec_t *uids_hoods;  // UIDs returned from neighborhood calls
   tk_iumap_t *uids_idx;
   tk_pvec_t *edges;
 
@@ -56,6 +57,7 @@ typedef struct tk_graph_s {
   bool knn_mutual;
   int64_t knn_rank;  // Rank filter for KNN searches (-1 means no filtering)
   bool bridge;
+  bool sigma_seed;  // Whether to re-weight seed edges after sigma calculation
 
   tk_dvec_t *sigmas;
   uint64_t n_edges;

@@ -44,6 +44,7 @@ typedef struct {
   tk_ivec_t *offsets;
   tk_ivec_t *neighbors;
   tk_dvec_t *weights;
+  tk_dvec_t *scale;  // Node degree scaling (1/sqrt(degree) for normalized Laplacian)
   double weight_linear_min;
   double weight_linear_max;
   uint64_t optimal_k;
@@ -269,22 +270,20 @@ static void tk_eval_worker (void *dp, int sig)
           int64_t neighbor = state->neighbors->a[j];
           double weight = state->weights->a[j];
           double target_norm;
-
           if (weight < 0) {
-            // Negative weight: repulsion - want large Hamming distance
-            // Map [-1, 0) to desired distance range
-            // -1.0 should map to maximum distance (1.0 after normalization)
-            // -0.0 should map to neutral distance (0.5 after normalization)
-            target_norm = 0.5 - 0.5 * weight; // Maps [-1,0) to [1.0,0.5)
+            target_norm = 1.0;
+          } else if (weight < 1e-8) {
+            target_norm = 1.0;
           } else {
-            // Positive weight: attraction - want small Hamming distance
-            // Use existing log transformation for positive weights
-            double target_dist = -log(weight + 1e-8);
-            double log_min = -log(state->weight_linear_max + 1e-8);
-            double log_max = -log(state->weight_linear_min + 1e-8);
-            target_norm = (target_dist - log_min) / (log_max - log_min + 1e-8);
+            if (state->weight_linear_max > 0 && state->weight_linear_min < INFINITY) {
+              double target_dist = -log(weight);
+              double log_min = -log(state->weight_linear_max + 1e-8);
+              double log_max = -log(state->weight_linear_min + 1e-8);
+              target_norm = (target_dist - log_min) / (log_max - log_min + 1e-8);
+            } else {
+              target_norm = 0.5;
+            }
           }
-
           uint64_t hamming_dist;
           if (state->mask != NULL) {
             hamming_dist = tk_cvec_bits_hamming_mask(
@@ -300,7 +299,6 @@ static void tk_eval_worker (void *dp, int sig)
               state->n_dims);
           }
           double hamming_norm = state->mask_popcount > 0 ? (double)hamming_dist / state->mask_popcount : (double)hamming_dist / state->n_dims;
-          // Use absolute value of weight for error magnitude (both attraction and repulsion contribute)
           double error = fabs(weight) * (target_norm - hamming_norm) * (target_norm - hamming_norm);
           data->recon_error += error;
         }
@@ -344,7 +342,6 @@ static inline int tm_class_accuracy (lua_State *L)
     atomic_init(state.FN + i, 0);
   }
 
-  // Setup pool
   tk_eval_thread_t data[n_threads];
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
   for (unsigned int i = 0; i < n_threads; i ++) {
@@ -353,7 +350,6 @@ static inline int tm_class_accuracy (lua_State *L)
     tk_thread_range(i, n_threads, n_samples, &data[i].sfirst, &data[i].slast);
   }
 
-  // Run eval via pool
   tk_threads_signal(pool, TK_EVAL_CLASS_ACCURACY, 0);
   tk_threads_destroy(pool);
 
@@ -443,7 +439,6 @@ static inline tk_accuracy_t _tm_clustering_accuracy (
   data.pfirst = 0;
   data.plast = n_pos + n_neg - 1;
 
-  // Run eval directly (no threading)
   tk_eval_worker(&data, TK_EVAL_CLUSTERING_ACCURACY);
 
   uint64_t vpos = atomic_load(state.valid_pos);
@@ -493,7 +488,6 @@ static inline tk_accuracy_t tm_clustering_accuracy (
   atomic_init(&valid_pos, 0);
   atomic_init(&valid_neg, 0);
 
-  // Setup pool
   tk_eval_thread_t data[n_threads];
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
   for (unsigned int i = 0; i < n_threads; i ++) {
@@ -502,7 +496,6 @@ static inline tk_accuracy_t tm_clustering_accuracy (
     tk_thread_range(i, n_threads, n_pos + n_neg, &data[i].pfirst, &data[i].plast);
   }
 
-  // Run eval via pool
   tk_threads_signal(pool, TK_EVAL_CLUSTERING_ACCURACY, 0);
   tk_threads_destroy(pool);
 
@@ -564,7 +557,6 @@ static inline int tm_encoding_accuracy (lua_State *L)
   state.codes_expected = codes_expected;
   state.codes_predicted = codes_predicted;
 
-  // Setup pool
   tk_eval_thread_t data[n_threads];
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
   for (unsigned int i = 0; i < n_threads; i ++) {
@@ -576,7 +568,6 @@ static inline int tm_encoding_accuracy (lua_State *L)
     tk_thread_range(i, n_threads, n_samples, &data[i].sfirst, &data[i].slast);
   }
 
-  // Run eval via pool
   tk_threads_signal(pool, TK_EVAL_ENCODING_ACCURACY, 0);
   tk_threads_destroy(pool);
 
@@ -696,7 +687,6 @@ static inline int tm_auc (lua_State *L)
   state.n_pos = n_pos;
   state.n_neg = n_neg;
 
-  // Setup pool
   tk_eval_thread_t data[n_threads];
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
   for (unsigned int i = 0; i < n_threads; i ++) {
@@ -779,7 +769,6 @@ static inline int tm_optimize_clustering (lua_State *L)
   state.ididx =
     tk_iumap_from_ivec(state.ids);
 
-  // Setup pool
   tk_eval_thread_t data[n_threads];
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
   for (unsigned int i = 0; i < n_threads; i ++) {
@@ -906,7 +895,6 @@ static inline int tm_optimize_retrieval (lua_State *L)
     atomic_init(state.hist_neg + i, 0);
   }
 
-  // Setup pool
   tk_eval_thread_t data[n_threads];
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
   for (unsigned int i = 0; i < n_threads; i ++) {
@@ -917,11 +905,9 @@ static inline int tm_optimize_retrieval (lua_State *L)
 
   double auc = _tm_auc(L, &state, pool);
 
-  // Calculate total for best margin calculation via pool
   tk_threads_signal(pool, TK_EVAL_ENCODING_SIMILARITY, 0);
   tk_threads_destroy(pool);
 
-  // Calculate histogram
   uint64_t pref_tp[n_dims + 1], pref_fp[n_dims + 1];
   uint64_t running_tp = 0, running_fp = 0;
   for (uint64_t d = 0; d <= n_dims; d ++) {
@@ -1062,16 +1048,17 @@ static void tm_optimize_bits_prefix_greedy (
       memcpy(candidate, mask, bytes_per_mask);
       candidate[TK_CVEC_BITS_BYTE(bit)] &= ~(1 << TK_CVEC_BITS_BIT(bit));
       double stress = tk_compute_stress(state, candidate, active->n - 1, pool);
-      if (stress < current_stress) {
+      if (stress + 1e-12 < current_stress) {
         mask[TK_CVEC_BITS_BYTE(bit)] &= ~(1 << TK_CVEC_BITS_BIT(bit));
         active->a[i] = active->a[active->n - 1];
         active->n --;
+        double gain = current_stress - stress;
         current_stress = stress;
         improved = true;
         if (i_each >= 0) {
           lua_pushvalue(L, i_each);
           lua_pushinteger(L, bit);
-          lua_pushinteger(L, (lua_Integer)active->n);
+          lua_pushnumber(L, gain);
           lua_pushnumber(L, current_stress);
           lua_pushliteral(L, "remove");
           lua_call(L, 4, 0);
@@ -1102,16 +1089,17 @@ static void tm_optimize_bits_prefix_greedy (
           candidate[TK_CVEC_BITS_BYTE(bit_out)] &= ~(1 << TK_CVEC_BITS_BIT(bit_out));
           candidate[TK_CVEC_BITS_BYTE(bit_in)] |= (1 << TK_CVEC_BITS_BIT(bit_in));
           double stress = tk_compute_stress(state, candidate, active->n, pool);
-          if (stress < current_stress) {
+          if (stress + 1e-12 < current_stress) {
             mask[TK_CVEC_BITS_BYTE(bit_out)] &= ~(1 << TK_CVEC_BITS_BIT(bit_out));
             mask[TK_CVEC_BITS_BYTE(bit_in)] |= (1 << TK_CVEC_BITS_BIT(bit_in));
             active->a[i] = bit_in;
+            double gain = current_stress - stress;
             current_stress = stress;
             improved = true;
             if (i_each >= 0) {
               lua_pushvalue(L, i_each);
               lua_pushinteger(L, bit_in);
-              lua_pushinteger(L, (lua_Integer)active->n);
+              lua_pushnumber(L, gain);
               lua_pushnumber(L, current_stress);
               lua_pushliteral(L, "swap");
               lua_call(L, 4, 0);
@@ -1141,16 +1129,17 @@ static void tm_optimize_bits_prefix_greedy (
         memcpy(candidate, mask, bytes_per_mask);
         candidate[TK_CVEC_BITS_BYTE(bit_add)] |= (1 << TK_CVEC_BITS_BIT(bit_add));
         double stress = tk_compute_stress(state, candidate, active->n + 1, pool);
-        if (stress < current_stress) {
+        if (stress + 1e-12 < current_stress) {
           mask[TK_CVEC_BITS_BYTE(bit_add)] |= (1 << TK_CVEC_BITS_BIT(bit_add));
           active->a[active->n] = bit_add;
           active->n ++;
+          double gain = current_stress - stress;
           current_stress = stress;
           improved = true;
           if (i_each >= 0) {
             lua_pushvalue(L, i_each);
             lua_pushinteger(L, bit_add);
-            lua_pushinteger(L, (lua_Integer)active->n);
+            lua_pushnumber(L, gain);
             lua_pushnumber(L, current_stress);
             lua_pushliteral(L, "add");
             lua_call(L, 4, 0);
@@ -1201,7 +1190,6 @@ static inline int tm_optimize_bits (lua_State *L)
     i_each = tk_lua_absindex(L, -1);
   }
 
-  // Initialize state for graph-based optimization
   tk_eval_t state;
   memset(&state, 0, sizeof(tk_eval_t));
   state.n_dims = n_dims;
@@ -1214,7 +1202,10 @@ static inline int tm_optimize_bits (lua_State *L)
   state.weight_linear_max = -INFINITY;
   state.L = L;
 
-  // Create thread pool
+  lua_getfield(L, 1, "scale");
+  state.scale = lua_isnil(L, -1) ? NULL : tk_dvec_peek(L, -1, "scale");
+  lua_pop(L, 1);
+
   tk_eval_thread_t data[n_threads];
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
   uint64_t n_nodes = offsets->n - 1; // Number of nodes
@@ -1242,18 +1233,22 @@ static inline int tm_optimize_bits (lua_State *L)
 
 static inline int tm_entropy_stats (lua_State *L)
 {
-  lua_settop(L, 4);
+  lua_settop(L, 3);
   unsigned int n_samples = tk_lua_checkunsigned(L, 2, "n_samples");
   unsigned int n_dims = tk_lua_checkunsigned(L, 3, "n_hidden");
-  unsigned int n_threads = tk_threads_getn(L, 4, "n_threads", NULL);
   tk_cvec_t *cvec = tk_cvec_peekopt(L, 1);
   tk_ivec_t *ivec = NULL;
+  tk_ivec_t *ids = NULL;
   tk_dvec_t *entropies = NULL;
   if (cvec == NULL) {
     ivec = tk_ivec_peekopt(L, 1);
-    entropies = tk_ivec_bits_score_entropy(L, ivec, n_samples, n_dims, n_threads);
+    tk_ivec_bits_top_entropy(L, ivec, n_samples, n_dims, n_dims);
+    ids = tk_ivec_peek(L, -2, "ids");
+    entropies = tk_dvec_peek(L, -1, "entropies");
   } else {
-    entropies = tk_cvec_bits_score_entropy(L, cvec, n_samples, n_dims, n_threads);
+    tk_cvec_bits_top_entropy(L, cvec, n_samples, n_dims, n_dims);
+    ids = tk_ivec_peek(L, -2, "ids");
+    entropies = tk_dvec_peek(L, -1, "entropies");
   }
 
   double min_entropy = 1.0, max_entropy = 0.0, sum_entropy = 0.0;
@@ -1261,7 +1256,7 @@ static inline int tm_entropy_stats (lua_State *L)
   lua_newtable(L); // per-bit entropy table
   for (uint64_t j = 0; j < n_dims; j ++) {
     double entropy = entropies->a[j];
-    lua_pushinteger(L, (int64_t) j + 1);
+    lua_pushinteger(L, (int64_t) ids->a[j] + 1);
     lua_pushnumber(L, entropy);
     lua_settable(L, -3);
     if (entropy < min_entropy)

@@ -11,7 +11,7 @@ local graph = require("santoku.tsetlin.graph")
 local spectral = require("santoku.tsetlin.spectral")
 local tch = require("santoku.tsetlin.tch")
 local itq = require("santoku.tsetlin.itq")
-local serialize = require("santoku.serialize") -- luacheck: ignore
+local serialize = require("santoku.serialize")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local utc = require("santoku.utc")
@@ -26,20 +26,22 @@ local HIDDEN = 32
 local LANDMARKS = 24
 local MODE = "landmarks" -- "landmarks" for L-STH, "raw" for STH
 
-local ENCODER = true
+local ENCODER = false
 local BINARIZE = "median" -- "itq", "median", or "sign"
 
 local TCH = true
-local SPECTRAL_EPS = 1e-6
+local SPECTRAL_EPS = 1e-5
 local ITQ_EPS = 1e-8
 local ITQ_ITERATIONS = 200
 
-local NORMALIZED = true
+local LAPLACIAN = "random"
+local DECAY = 4
 
 local KNN = 32
 local KNN_EPS = nil
 local KNN_MIN = nil
 local KNN_MUTUAL = true
+local BRIDGE = true
 
 local SEED_PAIRS = 0
 local SEED_ANCHORS = 0
@@ -49,14 +51,7 @@ local SAMPLED_ANCHORS = 16
 local SIGMA_K = nil
 
 local RANKS = true
-local RANK_WINDOW = -1
-local RANK_FLOOR = 1e-4
-
 local SFFS_FIXED = nil
-local SFFS_TYPE = "graph" -- default auc
-local SFFS_METHOD = "prefix" -- "sffs" or "prefix"
-local SFFS_DIRECTION = "forward" -- default backward (only for sffs method)
-local SFFS_FLOATING = true -- default on (only for sffs method)
 
 local CLAUSES = { def = 8, min = 8, max = 128, int = true, log = true, pow2 = true }
 local CLAUSE_TOLERANCE = { def = 8, min = 8, max = 256, int = true, log = true, pow2 = true }
@@ -86,8 +81,6 @@ test("tsetlin", function ()
     local idx = ann.create({ features = dataset.n_visible, expected_size = train.n })
     local data = ivec.create()
     data:bits_copy(dataset.problems, nil, train.ids, dataset.n_visible)
-    -- TODO: Eventually, support idx:add(dataset.problems, train.ids, true) for
-    -- adding by offsets
     idx:add(data:bits_to_cvec(train.n, dataset.n_visible), train.ids)
     local ids, hoods = idx:neighborhoods(KNN, KNN_EPS, KNN_MIN, KNN_MUTUAL)
     train.seed = ds.star_hoods(ids, hoods)
@@ -103,8 +96,6 @@ test("tsetlin", function ()
     ds.anchor_pairs(train.ids, SEED_ANCHORS, train.seed)
   end
   if SEED_CLASS_ANCHORS then
-    -- TODO: option for multiclass_pairs to write directly to out instead of
-    -- creating and returning the split pos/neg pvecs
     local pos, neg = ds.multiclass_pairs(train.ids, train.solutions, SEED_CLASS_ANCHORS, SEED_CLASS_ANCHORS)
     train.seed = train.seed or pvec.create()
     train.seed:copy(pos)
@@ -115,32 +106,64 @@ test("tsetlin", function ()
   print("Building the graph index")
   local graph_index
   if RANKS then
-    local graph_ranks = ivec.create(dataset.n_visible + 10) -- feature-rank labels
-    graph_ranks:fill(0, 0, dataset.n_visible) -- label all raw features rank 0
-    graph_ranks:fill(1, dataset.n_visible, dataset.n_visible + 10) -- label class features rank 1
-    local graph_supervision = ivec.create() -- feature matrix for class-features
-    graph_supervision:copy(train.ids) -- get ids
-    graph_supervision:lookup(dataset.solutions) -- map ids to class labels
-    graph_supervision:add_scaled(10) -- add sample offsets
-    local graph_problems = ivec.create()
-    graph_problems:bits_copy(dataset.problems, nil, train.ids, dataset.n_visible)
-    graph_problems:bits_extend(graph_supervision, dataset.n_visible, 10)
-    local graph_features = dataset.n_visible + 10
+
+    local virtual_ids = ivec.create(10)
+    virtual_ids:fill_indices()
+    virtual_ids:add(dataset.ids:size())
+
+    for id in train.ids:each() do
+      local class_label = dataset.solutions:get(id)
+      train.seed:push(id, dataset.ids:size() + class_label)
+    end
+
+    train.problems = ivec.create()
+    train.problems:bits_copy(dataset.problems, nil, train.ids, dataset.n_visible)
+
+    for idx, id in train.ids:ieach() do
+      local class_label = dataset.solutions:get(id)
+      local bit_idx = idx * (dataset.n_visible + 10) + dataset.n_visible + class_label
+      train.problems:push(bit_idx)
+    end
+
+    local graph_corpus = ivec.create()
+    local graph_ids = ivec.create()
+
+    graph_ids:copy(train.ids)
+    graph_corpus:copy(train.problems)
+
+    graph_ids:copy(virtual_ids)
+
+    local n_train_samples = train.ids:size()
+    local n_features = dataset.n_visible + 10
+
+    for i = 0, 9 do
+      local sample_idx = n_train_samples + i
+      local feature_idx = dataset.n_visible + i
+      local bit_idx = sample_idx * n_features + feature_idx
+      graph_corpus:push(bit_idx)
+    end
+
+    local graph_ranks = ivec.create(dataset.n_visible + 10)
+    graph_ranks:fill(1, 0, dataset.n_visible)
+    graph_ranks:fill(0, dataset.n_visible, dataset.n_visible + 10)
+
     graph_index = inv.create({
-      features = graph_features,
+      features = dataset.n_visible + 10,
       ranks = graph_ranks,
-      n_ranks = 2,
-      rank_decay_window = RANK_WINDOW,
-      rank_decay_floor = RANK_FLOOR,
+      decay = DECAY,
+      n_ranks = 2
     })
-    graph_index:add(graph_problems, train.ids)
-    collectgarbage("collect")
+    graph_index:add(graph_corpus, graph_ids)
+
   else
+
+    -- Fully unsupervised
     local graph_problems = ivec.create()
     graph_problems:bits_copy(dataset.problems, nil, train.ids, dataset.n_visible)
     graph_index = inv.create({ features = dataset.n_visible })
     graph_index:add(graph_problems, train.ids)
     collectgarbage("collect")
+
   end
 
   print("Creating graph")
@@ -148,11 +171,12 @@ test("tsetlin", function ()
   train.graph = graph.create({
     edges = train.seed,
     index = graph_index,
+    bridge = BRIDGE,
     sigma_k = SIGMA_K,
     threads = THREADS,
-    each = function (s, b, dt)
+    each = function (ids, s, b, dt)
       local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Components: %-6d  Edges: %-6d\n", d, dd, dt, s, b)
+      str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Nodes: %-6d  Components: %-6d  Edges: %-6d\n", d, dd, dt, ids, s, b)
     end
   })
   train.adj_ids,
@@ -164,12 +188,12 @@ test("tsetlin", function ()
 
   print("Spectral eigendecomposition")
   train.ids_spectral, train.codes_spectral, train.scale = spectral.encode({
+    type = LAPLACIAN,
     ids = train.adj_ids,
     offsets = train.adj_offsets,
     neighbors = train.adj_neighbors,
     weights = train.adj_weights,
     n_hidden = dataset.n_hidden,
-    normalized = NORMALIZED,
     eps_primme = SPECTRAL_EPS,
     threads = THREADS,
     each = function (t, s, v, k)
@@ -213,6 +237,7 @@ test("tsetlin", function ()
   end
   collectgarbage("collect")
 
+
   if TCH then
     print("Flipping bits")
     tch.refine({
@@ -246,16 +271,11 @@ test("tsetlin", function ()
       ids = train.ids_spectral,
       codes = train.codes_spectral,
       n_dims = dataset.n_hidden,
-      pos = SFFS_TYPE ~= "graph" and train.pos_sampled or nil,
-      neg = SFFS_TYPE ~= "graph" and train.neg_sampled or nil,
-      offsets = SFFS_TYPE == "graph" and train.adj_offsets or nil,
-      neighbors = SFFS_TYPE == "graph" and train.adj_neighbors or nil,
-      weights = SFFS_TYPE == "graph" and train.adj_weights or nil,
+      offsets = train.adj_offsets,
+      neighbors = train.adj_neighbors,
+      weights = train.adj_weights,
+      scale = train.scale,  -- Pass degree information (1/sqrt(degree))
       threads = THREADS,
-      type = SFFS_TYPE,
-      method = SFFS_METHOD,
-      direction = SFFS_DIRECTION,
-      float = SFFS_FLOATING,
       each = function (bit, gain, score, action)
         local d, dd = stopwatch()
         str.printf("  Time: %6.2f %6.2f | Bit  %-3d  %-12s | Gain: %2.4f | Score: %.2f\n",
@@ -324,12 +344,12 @@ test("tsetlin", function ()
     sth_solutions = train.codes_spectral
     sth_problems = ivec.create()
     sth_problems:bits_copy(dataset.problems, nil, sth_ids, dataset.n_visible)
-    sth_problems = sth_problems:bits_to_cvec(sth_n, dataset.n_visible, true) -- NOTE: true for flip interleave
+    sth_problems = sth_problems:bits_to_cvec(sth_n, dataset.n_visible, true)
 
     test_ids = test.ids
     test_problems = ivec.create()
     test_problems:bits_copy(dataset.problems, nil, test.ids, dataset.n_visible)
-    test_problems = test_problems:bits_to_cvec(test.n, dataset.n_visible, true) -- NOTE: true for flip interleave
+    test_problems = test_problems:bits_to_cvec(test.n, dataset.n_visible, true)
 
   elseif MODE == "landmarks" then
     print("Setting up landmark features for L-STH")

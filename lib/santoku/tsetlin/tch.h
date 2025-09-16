@@ -46,7 +46,6 @@ static inline void tk_tch_worker(void *dp, int sig)
   switch (stage) {
 
     case TK_TCH_OPTIMIZE_BITS: {
-      // Each thread processes complete bytes (8 bits) across all nodes
       uint64_t n_nodes = state->n_nodes;
       uint64_t n_dims = state->n_dims;
 
@@ -62,7 +61,6 @@ static inline void tk_tch_worker(void *dp, int sig)
           int *bitvec = state->bitvecs + f * n_nodes;
           tk_ivec_shuffle(node_order);
 
-          // Iterative flipping until convergence
           bool updated;
           do {
             updated = false;
@@ -77,7 +75,6 @@ static inline void tk_tch_worker(void *dp, int sig)
               for (int64_t jj = row_start; jj < row_end; jj++) {
                 int64_t j = state->adj_data->a[jj];
                 double weight = state->adj_weights->a[jj];
-                // Apply degree normalization if scale factors are provided
                 if (state->scale != NULL) {
                   weight *= state->scale->a[i] * state->scale->a[j];
                 }

@@ -8,7 +8,9 @@ optimization for bit selection preserving graph relationships, and (3)
 landmark-based out-of-sample extension enabling cross-domain inference. The
 method supports different feature spaces for graph construction and inference
 while maintaining fixed input dimensionality (n_hidden × n_landmarks) for
-scalable deployment.
+scalable deployment. The method employs random walk normalized Laplacian to
+preserve multi-scale rank hierarchies in heterogeneous graphs with extreme
+degree imbalance from virtual nodes.
 
 ## Introduction & Motivation
 
@@ -68,6 +70,16 @@ Higher-rank edges create progressively looser clustering (e.g., documents of the
 same category cluster tighter than documents of the same author, followed by
 documents sharing text features).
 
+The random walk normalized Laplacian `L_rw = I - D^(-1)W` is essential for
+preserving this rank hierarchy in heterogeneous graphs. Virtual nodes naturally
+have extreme degree imbalance (connecting to hundreds of documents), which would
+dominate unnormalized spectral decomposition or get over-penalized by symmetric
+normalization. Random walk normalization converts edge weights to transition
+probabilities, preserving the rank-based importance ratios regardless of node
+degrees. A document transitions to its category with probability proportional to
+exp(-0·decay) relative to its neighbors at exp(-2·decay), maintaining the
+designed hierarchy independent of how many other documents share that category.
+
 ### Reconstruction-Optimized Bit Selection
 
 Various eigenvector selection approaches exist (smallest-k, eigengap-based,
@@ -95,6 +107,16 @@ because eigenvectors can encode patterns that are not useful for reconstruction
 error or Hamming distance metrics. The reconstruction error ensures that
 dissimilar nodes marked by negative edges remain distant in Hamming space.
 
+### Spectral Properties Under Heterogeneous Structure
+
+The random walk Laplacian preserves multi-scale supervision through transition
+probabilities rather than absolute weights. This enables flexible k-NN
+strategies: aggressive k values (10-20) provide local manifold structure without
+overwhelming supervision, unlike symmetric normalization where k-NN edges would
+dominate virtual node connections after D^(-1/2) scaling. The eigenvalue gaps
+naturally separate rank levels, allowing eigenvector selection based on semantic
+hierarchy rather than arbitrary spectrum position.
+
 ### Landmark-Augmented Hash Learning
 
 Addresses cross-domain out-of-sample extension. The graph construction leverages
@@ -114,7 +136,11 @@ triangulation. Input dimensionality becomes fixed: n_hidden × n_landmarks.
    ensuring documents connecting to many virtual nodes don't overwhelm the
    graph. Build mutual k-NN edges between documents using observable features.
 
-2. **Spectral decomposition**: Eigendecomposition with oversampling
+2. **Spectral decomposition**: Eigendecomposition with oversampling using random
+   walk normalized Laplacian `L_rw = I - D^(-1)W`. The eigenvalue spectrum
+   exhibits gaps corresponding to rank levels, with near-zero eigenvalues for
+   category-level structure, intermediate values for author-level mixing, and
+   larger eigenvalues capturing k-NN document similarity.
 
 3. **Median thresholding**: Binarization via median split
 
@@ -150,6 +176,8 @@ code.
 - Mutual vs non-mutual k-NN
 - Edge seeding strategies
 - Decay parameter (1.5-2.0 for strong hierarchy)
+- Laplacian variants (random walk strongly preferred for virtual node
+  architectures)
 
 **Binarization**:
 - ITQ rotation
