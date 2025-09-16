@@ -313,13 +313,13 @@ static void tk_eval_worker (void *dp, int sig)
               // importance *= 1.0 / (scale_i * scale_j);
 
               // Random walk: sqrt(deg_i)
-              importance *= 1.0 / scale_i;
+              // importance *= 1.0 / scale_i;
 
               // Arithmetic mean: (sqrt(deg_i) + sqrt(deg_j))/2
               // importance *= 0.5 * (1.0/scale_i + 1.0/scale_j);
 
               // Maximum: max(sqrt(deg_i), sqrt(deg_j))
-              // importance *= fmax(1.0/scale_i, 1.0/scale_j);
+              importance *= fmax(1.0/scale_i, 1.0/scale_j);
 
               // Product: deg_i * deg_j
               // importance *= 1.0 / (scale_i * scale_i * scale_j * scale_j);
