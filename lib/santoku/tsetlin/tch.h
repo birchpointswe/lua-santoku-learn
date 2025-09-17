@@ -20,7 +20,6 @@ typedef struct {
   tk_ivec_t *adj_offset;
   tk_ivec_t *adj_data;
   tk_dvec_t *adj_weights;
-  tk_dvec_t *scale;
   uint64_t n_dims;
   uint64_t n_nodes;
   int *bitvecs;
@@ -75,9 +74,6 @@ static inline void tk_tch_worker(void *dp, int sig)
               for (int64_t jj = row_start; jj < row_end; jj++) {
                 int64_t j = state->adj_data->a[jj];
                 double weight = state->adj_weights->a[jj];
-                if (state->scale != NULL) {
-                  weight *= state->scale->a[i] * state->scale->a[j];
-                }
                 delta += bitvec[i] * bitvec[j] * weight;
               }
 
@@ -123,7 +119,6 @@ static inline void tk_tch_refine (
   tk_ivec_t *adj_offset,
   tk_ivec_t *adj_data,
   tk_dvec_t *adj_weights,
-  tk_dvec_t *scale,
   uint64_t n_dims,
   unsigned int n_threads,
   int i_each
@@ -149,7 +144,6 @@ static inline void tk_tch_refine (
     .adj_offset = adj_offset,
     .adj_data = adj_data,
     .adj_weights = adj_weights,
-    .scale = scale,
     .n_dims = n_dims,
     .n_nodes = n_nodes,
     .bitvecs = bitvecs,

@@ -11,7 +11,6 @@ local graph = require("santoku.tsetlin.graph")
 local spectral = require("santoku.tsetlin.spectral")
 local tch = require("santoku.tsetlin.tch")
 local itq = require("santoku.tsetlin.itq")
-local serialize = require("santoku.serialize")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local utc = require("santoku.utc")
@@ -26,7 +25,7 @@ local HIDDEN = 32
 local LANDMARKS = 24
 local MODE = "landmarks" -- "landmarks" for L-STH, "raw" for STH
 
-local ENCODER = false
+local ENCODER = true
 local BINARIZE = "median" -- "itq", "median", or "sign"
 
 local TCH = true
@@ -187,7 +186,7 @@ test("tsetlin", function ()
   collectgarbage("collect")
 
   print("Spectral eigendecomposition")
-  train.ids_spectral, train.codes_spectral, train.scale = spectral.encode({
+  train.ids_spectral, train.codes_spectral = spectral.encode({
     type = LAPLACIAN,
     ids = train.adj_ids,
     offsets = train.adj_offsets,
@@ -246,7 +245,6 @@ test("tsetlin", function ()
       neighbors = train.adj_neighbors,
       weights = train.adj_weights,
       codes = train.codes_spectral,
-      scale = train.scale,
       n_dims = dataset.n_hidden,
       each = function (s)
         local d, dd = stopwatch()
@@ -274,7 +272,6 @@ test("tsetlin", function ()
       offsets = train.adj_offsets,
       neighbors = train.adj_neighbors,
       weights = train.adj_weights,
-      scale = train.scale,  -- Pass degree information (1/sqrt(degree))
       threads = THREADS,
       each = function (bit, gain, score, action)
         local d, dd = stopwatch()
