@@ -1,8 +1,10 @@
 # Now
 
 - All tests functional
+
 - tk_cvec_t
     - Ensure cvec used everywhere (no strings!)
+
 - Lua GC for threadpool
 - Connect all allocs to Lua
 - Double-check lua callback error handling
