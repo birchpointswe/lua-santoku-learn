@@ -91,15 +91,13 @@ approximate similarity relationships as defined by the graph.
 
 The approach oversamples eigenvectors then applies median thresholding and
 coordinate descent refinement (maximizing weighted adjacency agreement per bit).
-Bit selection and pruning use reconstruction error minimization where target
-distances are computed from edge weights via negative log transformation:
-`target_dist = -log(weight + ε)`. Both target and Hamming distances are
-normalized to `[0,1]`, and the weighted reconstruction error becomes `weight *
-(target_norm - hamming_norm)²`. This weight-modulated error ensures higher
-weight edges contribute more to error, with the log-space mapping naturally
-pairing with the exponential rank decay from supervision. The reconstruction
-error computation operates on the full heterogeneous graph, preserving virtual
-node relationships through the weight×rank combination.
+Bit selection determines which thresholded eigenvectors to retain using reconstruction
+error minimization. Target distances from edge weights use negative log transformation
+`target_dist = -log(weight + ε)` normalized to `[0,1]`. The reconstruction error
+incorporates degree-based importance: `error = |weight| * max(deg_i, deg_j) *
+(target_norm - hamming_norm)²`. This prioritizes preserving hub edges (especially
+virtual nodes) when selecting bits, ensuring supervision signals are maintained
+despite degree imbalance.
 
 The approach handles signed, unsigned, weighted, normalized, and unnormalized
 graphs intermixed. Bit selection is particularly important for signed graphs
