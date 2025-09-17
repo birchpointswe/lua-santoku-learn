@@ -300,13 +300,8 @@ static void tk_eval_worker (void *dp, int sig)
           }
           double hamming_norm = state->mask_popcount > 0 ? (double)hamming_dist / state->mask_popcount : (double)hamming_dist / state->n_dims;
           double importance = fabs(weight);
-          if (state->scale != NULL && state->scale->n > 0) {
-            double scale_i = state->scale->a[i];
-            double scale_j = state->scale->a[neighbor];
-            if (scale_i > 0 && scale_j > 0)
-              importance *= fmax(1.0/scale_i, 1.0/scale_j);
-          }
-          double error = importance * (target_norm - hamming_norm) * (target_norm - hamming_norm);
+          double diff = target_norm - hamming_norm;
+          double error = importance * diff * diff;
           data->recon_error += error;
         }
       }
