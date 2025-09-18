@@ -637,7 +637,6 @@ static inline void tk_inv_neighborhoods (
       }
     }
 
-    // Set up thread data for min filtering
     for (uint64_t i = 0; i < I->pool->n_threads; i ++) {
       tk_inv_thread_t *data = I->threads + i;
       data->old_to_new = old_to_new;
@@ -645,10 +644,8 @@ static inline void tk_inv_neighborhoods (
       tk_thread_range(i, I->pool->n_threads, hoods->n, &data->ifirst, &data->ilast);
     }
 
-    // Remap neighborhood indices in parallel
     tk_threads_signal(I->pool, TK_INV_MIN_REMAP, 0);
 
-    // Create new compacted arrays
     tk_ivec_t *new_uids = tk_ivec_create(L, (uint64_t) keeper_count, 0, 0);
     tk_inv_hoods_t *new_hoods = tk_inv_hoods_create(L, (uint64_t) keeper_count, 0, 0);
     new_hoods->n = (uint64_t) keeper_count;
@@ -661,12 +658,9 @@ static inline void tk_inv_neighborhoods (
       }
     }
 
-    // Update original arrays in-place to point to new data
-    // Save old data pointers for cleanup
     int64_t *old_uids_data = uids->a;
     tk_inv_hood_t *old_hoods_data = hoods->a;
 
-    // Swap in new data
     uids->a = new_uids->a;
     uids->n = (uint64_t) keeper_count;
     uids->m = (uint64_t) keeper_count;
@@ -674,11 +668,9 @@ static inline void tk_inv_neighborhoods (
     hoods->n = (uint64_t) keeper_count;
     hoods->m = (uint64_t) keeper_count;
 
-    // Prevent double-free by clearing new array pointers
     new_uids->a = old_uids_data;
     new_hoods->a = old_hoods_data;
 
-    // Clean up temporary arrays (will free old data)
     lua_remove(L, -2); // remove new_uids (frees old uids data)
     lua_remove(L, -1); // remove new_hoods (frees old hoods data)
 
@@ -890,7 +882,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
   }
   for (uint64_t i = 0; i < I->pool->n_threads; i ++) {
     tk_inv_thread_t *data = I->threads + i;
-    data->uids = NULL;  // No pre-built UIDs array
+    data->uids = NULL;
     data->sids = NULL;
     data->query_offsets = I->tmp_query_offsets;
     data->query_features = I->tmp_query_features;
@@ -921,7 +913,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
     int64_t uid;
     tk_iuset_foreach(local, uid, ({
       khint_t k = tk_iumap_put(uid_to_idx, uid, &ret);
-      if (ret) // New UID
+      if (ret)
         tk_iumap_value(uid_to_idx, k) = next_idx++;
     }));
     tk_iuset_destroy(local);
@@ -1427,12 +1419,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
     size_t elen = 0;
     int64_t *ev = tk_inv_sget(I, vsid, &elen);
     tk_inv_compute_candidate_weights_by_rank(I, ev, elen, e_weights_by_rank);
-    double sim;
-    if (rank_filter >= 0) {
-      sim = tk_inv_similarity_rank_filtered(I, data, datalen, ev, elen, cmp, tversky_alpha, tversky_beta, rank_filter);
-    } else {
-      sim = tk_inv_similarity_by_rank(I, I->wacc, vsid, q_weights_by_rank, e_weights_by_rank, cmp, tversky_alpha, tversky_beta);
-    }
+    double sim = tk_inv_similarity_by_rank(I, I->wacc, vsid, q_weights_by_rank, e_weights_by_rank, cmp, tversky_alpha, tversky_beta);
     double dist = 1.0 - sim;
     double current_cutoff = (knn && out->n >= knn) ? out->a[0].d : eps;
     if (dist <= current_cutoff) {
@@ -1566,7 +1553,7 @@ static inline int tk_inv_get_lua (lua_State *L)
       size_t n = 0;
       int64_t *data = tk_inv_get(I, uid, &n);
       if (!n)
-        continue;  // No features for this sample - empty set represented by no indices
+        continue;
       for (size_t j = 0; j < n; j ++)
         out->a[out->n ++] = data[j] + (int64_t) (i * I->features);
     }
@@ -1870,43 +1857,29 @@ static inline void tk_inv_worker (void *dp, int sig)
 
     case TK_INV_NEIGHBORHOODS:
       touched->n = 0;
-      // wacc size already ensured during setup - no need to check again
       for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i ++) {
         uhood = hoods->a[i];
         tk_rvec_clear(uhood);
-
-        // Get features either from query vectors or from stored data
         if (data->query_offsets) {
-          // Using query vectors - get features from pre-processed arrays
           int64_t start = data->query_offsets->a[i];
-          int64_t end = (i + 1 < (int64_t) data->query_offsets->n)
-                        ? data->query_offsets->a[i + 1]
-                        : (int64_t) data->query_features->n;
+          int64_t end = (i + 1 < (int64_t) data->query_offsets->n) ? data->query_offsets->a[i + 1] : (int64_t) data->query_features->n;
           ubits = data->query_features->a + start;
           nubits = (size_t)(end - start);
-          usid = -1;  // No SID for query vectors
+          usid = -1;
         } else {
-          // Using stored data
           usid = sids->a[i];
           if (tk_iumap_get(I->sid_uid, usid) == tk_iumap_end(I->sid_uid))
             continue;
           ubits = tk_inv_sget(I, usid, &nubits);
         }
-
-        // Removed dead code - start/end were computed but never used
-
-        // Use thread-local buffer for query weights (already sized correctly)
         double *q_weights_by_rank = data->q_weights_buf->a;
         tk_inv_compute_query_weights_by_rank(I, ubits, nubits, q_weights_by_rank);
-
-        // Total query weight computation removed - was unused
         for (size_t k = 0; k < nubits; k ++) {
           fid = ubits[k];
           int64_t rank = I->ranks ? I->ranks->a[fid] : 0;
-                if (data->rank_filter >= 0 && rank != data->rank_filter)
+          if (data->rank_filter >= 0 && rank != data->rank_filter)
             continue;
           double wf = tk_inv_w(I->weights, fid);
-          // Bounds check removed - ensured at insertion time
           vsids = I->postings->a[fid];
           for (uint64_t l = 0; l < vsids->n; l ++) {
             vsid = vsids->a[l];
@@ -1916,56 +1889,35 @@ static inline void tk_inv_worker (void *dp, int sig)
             if (khi == tk_iumap_end(sid_idx))
               continue;
             iv = tk_iumap_value(sid_idx, khi);
-            // Bounds check removed - sid_idx guarantees valid indices
             if (wacc->a[(int64_t) I->n_ranks * iv + rank] == 0.0)
               tk_ivec_push(touched, iv);
             wacc->a[(int64_t) I->n_ranks * iv + rank] += wf;
           }
         }
-        // Use thread-local buffer for candidate weights (already sized correctly)
         double *e_weights_by_rank = data->e_weights_buf->a;
-
-        // Get cutoff distance for early termination if using KNN
         double cutoff = (knn && uhood->n >= knn) ? uhood->a[0].d : eps;
-
         for (uint64_t ti = 0; ti < touched->n; ti ++) {
           iv = touched->a[ti];
-
-          // Early termination: check if intersection alone can beat cutoff
           if (knn && uhood->n >= knn) {
-            // Compute upper bound on similarity from intersection weights
             double max_possible_sim = 0.0;
             for (uint64_t r = 0; r < I->n_ranks; r++) {
               double inter = wacc->a[(int64_t) I->n_ranks * iv + (int64_t) r];
               if (inter > 0.0) {
-                // Best case: all intersection, no difference
                 max_possible_sim += inter * I->rank_weights->a[r];
               }
             }
             max_possible_sim = (I->total_rank_weight > 0.0) ? max_possible_sim / I->total_rank_weight : 0.0;
-
-            // Skip if even perfect similarity can't beat cutoff
             if (1.0 - max_possible_sim > cutoff)
               continue;
           }
-
           vsid = sids->a[iv];
           vbits = tk_inv_sget(I, vsid, &nvbits);
-
-          // Compute similarity (with optional rank filtering)
-          double sim;
-          if (data->rank_filter >= 0) {
-            sim = tk_inv_similarity_rank_filtered(I, ubits, nubits, vbits, nvbits, cmp, tversky_alpha, tversky_beta, data->rank_filter);
-          } else {
-            // Compute candidate weights by rank
-            tk_inv_compute_candidate_weights_by_rank(I, vbits, nvbits, e_weights_by_rank);
-            sim = tk_inv_similarity_by_rank(I, wacc, iv, q_weights_by_rank, e_weights_by_rank, cmp, tversky_alpha, tversky_beta);
-          }
+          tk_inv_compute_candidate_weights_by_rank(I, vbits, nvbits, e_weights_by_rank);
+          double sim = tk_inv_similarity_by_rank(I, wacc, iv, q_weights_by_rank, e_weights_by_rank, cmp, tversky_alpha, tversky_beta);
           double dist = 1.0 - sim;
           if (dist <= cutoff) {
             if (knn) {
               tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
-              // Update cutoff if heap is full
               if (uhood->n >= knn)
                 cutoff = uhood->a[0].d;
             } else {
@@ -1973,19 +1925,14 @@ static inline void tk_inv_worker (void *dp, int sig)
             }
           }
         }
-        // Clear only the accumulator entries we touched
         for (uint64_t ti = 0; ti < touched->n; ti ++)
           for (uint64_t r = 0; r < I->n_ranks; r ++)
             wacc->a[(int64_t) I->n_ranks * touched->a[ti] + (int64_t) r] = 0.0;
         tk_rvec_asc(uhood, 0, uhood->n);
-        // Don't shrink - causes unnecessary reallocation
         touched->n = 0;
-
-        // No cleanup needed - we're using reusable buffers
       }
       break;
 
-    // Build hood sets for mutualization
     case TK_INV_MUTUAL_INIT: {
       int kha;
       khint_t khi;
@@ -2000,11 +1947,8 @@ static inline void tk_inv_worker (void *dp, int sig)
       break;
     }
 
-    // NOTE: Move non-mutual neighbors to tail of list [hood->n, hood->m - 1]
     case TK_INV_MUTUAL_FILTER: {
-
       for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i ++) {
-
         uhood = hoods->a[i];
         uint64_t orig_n = uhood->n;
         assert(uhood->m >= orig_n);
@@ -2013,7 +1957,6 @@ static inline void tk_inv_worker (void *dp, int sig)
           uhood->m = 0;
           continue;
         }
-
         uint64_t left = 0;
         uint64_t right = orig_n - 1;
         khint_t khi;
@@ -2039,19 +1982,13 @@ static inline void tk_inv_worker (void *dp, int sig)
             right --;
           }
         }
-
         uhood->n = left;
         uhood->m = orig_n;
         assert(uhood->n <= uhood->m);
-
-        // Make non-mutual distances symmetric
         for (uint64_t qi = uhood->n; qi < uhood->m; qi ++) {
           int64_t iv = uhood->a[qi].i;
           double d_forward = uhood->a[qi].d;
           double d_reverse = d_forward;  // fallback
-
-          // Try to get reverse distance from neighbor's hood set, if not found,
-          // fall back to full distance computation
           vset = hoods_sets[iv];
           khi = tk_dumap_get(vset, i);
           if (khi != tk_dumap_end(vset)) {
@@ -2063,19 +2000,15 @@ static inline void tk_inv_worker (void *dp, int sig)
             int64_t *ubits = tk_inv_sget(I, usid, &ulen);
             int64_t *vbits = tk_inv_sget(I, vsid, &vlen);
             if (ubits && vbits) {
-              // Use thread-local buffers for thread safety
-              double sim = tk_inv_similarity_with_buffers(I, vbits, vlen, ubits, ulen, cmp,
-                                                           tversky_alpha, tversky_beta,
-                                                           data->q_weights_buf, data->e_weights_buf, data->inter_weights_buf);
+              double sim = tk_inv_similarity_with_buffers(
+                I, vbits, vlen, ubits, ulen, cmp,
+                tversky_alpha, tversky_beta,
+                data->q_weights_buf, data->e_weights_buf, data->inter_weights_buf);
               d_reverse = 1.0 - sim;
             }
           }
-
-          // Store minimum distance
           uhood->a[qi].d = (d_forward < d_reverse) ? d_forward : d_reverse;
         }
-
-        // Re-sort both sections (mutual distances may have been updated)
         tk_rvec_asc(uhood, 0, uhood->n);
         tk_rvec_asc(uhood, uhood->n, uhood->m);
       }
@@ -2083,39 +2016,27 @@ static inline void tk_inv_worker (void *dp, int sig)
     }
 
     case TK_INV_MIN_REMAP: {
-      // Remap neighborhood indices for keeper UIDs
       for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i ++) {
         if (hoods->a[i]->n >= data->min) {
           tk_rvec_t *hood = hoods->a[i];
           uint64_t mutual_write_pos = 0;
           uint64_t non_mutual_write_pos = 0;
-
-          // Process mutual neighbors (0 to n-1)
           for (uint64_t j = 0; j < hood->n; j ++) {
             int64_t old_neighbor_idx = hood->a[j].i;
             int64_t new_neighbor_idx = data->old_to_new[old_neighbor_idx];
-
             if (new_neighbor_idx >= 0) {
-              // Keep this mutual neighbor, update index
               hood->a[mutual_write_pos ++] = tk_rank(new_neighbor_idx, hood->a[j].d);
             }
-            // Otherwise skip (neighbor was filtered out)
           }
-
-          // Process non-mutual neighbors (n to m-1)
           for (uint64_t j = hood->n; j < hood->m; j ++) {
             int64_t old_neighbor_idx = hood->a[j].i;
             int64_t new_neighbor_idx = data->old_to_new[old_neighbor_idx];
-
             if (new_neighbor_idx >= 0) {
-              // Keep this non-mutual neighbor, update index
               hood->a[mutual_write_pos + non_mutual_write_pos ++] = tk_rank(new_neighbor_idx, hood->a[j].d);
             }
-            // Otherwise skip (neighbor was filtered out)
           }
-
-          hood->n = mutual_write_pos;  // Update mutual count after filtering
-          hood->m = mutual_write_pos + non_mutual_write_pos;  // Update total count after filtering
+          hood->n = mutual_write_pos;
+          hood->m = mutual_write_pos + non_mutual_write_pos;
         }
       }
       break;
@@ -2371,7 +2292,6 @@ static inline tk_inv_t *tk_inv_load (
     I->ranks = NULL;
   }
   tk_lua_fread(L, &I->decay, sizeof(double), 1, fh);
-  // Precompute rank weights and total
   I->rank_weights = tk_dvec_create(L, I->n_ranks, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
@@ -2379,12 +2299,9 @@ static inline tk_inv_t *tk_inv_load (
   for (uint64_t r = 0; r < I->n_ranks; r++) {
     double weight;
     if (I->decay < 0) {
-      // Negative decay: flip the importance ordering
-      // Highest rank (n_ranks-1) gets the most weight
       uint64_t flipped_r = I->n_ranks - 1 - r;
-      weight = exp((double)flipped_r * I->decay);  // Note: decay is negative, so this is exp(-flipped_r * |decay|)
+      weight = exp((double)flipped_r * I->decay);
     } else {
-      // Positive decay: normal exponential decay
       weight = exp(-(double)r * I->decay);
     }
     I->rank_weights->a[r] = weight;
@@ -2404,7 +2321,6 @@ static inline tk_inv_t *tk_inv_load (
     th->wacc = tk_dvec_create(L, 0, 0, 0);
     tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
     lua_pop(L, 1);
-    // Create thread-local buffers for rank-aware similarity
     th->q_weights_buf = tk_dvec_create(L, I->n_ranks, 0, 0);
     tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
     lua_pop(L, 1);
@@ -2421,14 +2337,12 @@ static inline tk_inv_t *tk_inv_load (
   I->wacc = tk_dvec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
-  // Initialize temporary vectors for query processing
   I->tmp_query_offsets = tk_ivec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
   I->tmp_query_features = tk_ivec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
-  // Initialize temporary buffers for rank-aware similarity
   I->tmp_q_weights = tk_dvec_create(L, I->n_ranks, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);

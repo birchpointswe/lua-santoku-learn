@@ -44,7 +44,6 @@ typedef struct {
   tk_ivec_t *offsets;
   tk_ivec_t *neighbors;
   tk_dvec_t *weights;
-  tk_dvec_t *scale;  // Node degree scaling (1/sqrt(degree) for normalized Laplacian)
   double weight_linear_min;
   double weight_linear_max;
   uint64_t optimal_k;
@@ -251,13 +250,10 @@ static void tk_eval_worker (void *dp, int sig)
       data->local_weight_max = -INFINITY;
       for (uint64_t i = data->wfirst; i <= data->wlast; i++) {
         double w = state->weights->a[i];
-        // Only track positive weights for log transformation bounds
-        if (w > 0) {
-          if (w < data->local_weight_min)
-            data->local_weight_min = w;
-          if (w > data->local_weight_max)
-            data->local_weight_max = w;
-        }
+        if (w < data->local_weight_min)
+          data->local_weight_min = w;
+        if (w > data->local_weight_max)
+          data->local_weight_max = w;
       }
       break;
 
@@ -1203,10 +1199,6 @@ static inline int tm_optimize_bits (lua_State *L)
   state.weight_linear_min = INFINITY;
   state.weight_linear_max = -INFINITY;
   state.L = L;
-
-  lua_getfield(L, 1, "scale");
-  state.scale = lua_isnil(L, -1) ? NULL : tk_dvec_peek(L, -1, "scale");
-  lua_pop(L, 1);
 
   tk_eval_thread_t data[n_threads];
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
