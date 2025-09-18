@@ -27,7 +27,8 @@ typedef enum {
   TK_GRAPH_CSR_OFFSET_LOCAL,
   TK_GRAPH_CSR_OFFSET_GLOBAL,
   TK_GRAPH_CSR_DATA,
-  TK_GRAPH_SIGMA
+  TK_GRAPH_SIGMA,
+  TK_GRAPH_REWEIGHT
 } tk_graph_stage_t;
 
 typedef struct tk_graph_thread_s tk_graph_thread_t;
@@ -40,8 +41,9 @@ typedef struct tk_graph_s {
   tk_ann_t *ann; tk_ann_hoods_t *ann_hoods;
   tk_hbi_t *hbi; tk_hbi_hoods_t *hbi_hoods;
   tk_ivec_t *uids;
-  tk_ivec_t *uids_hoods;  // UIDs returned from neighborhood calls
+  tk_ivec_t *uids_hoods;
   tk_iumap_t *uids_idx;
+  tk_iumap_t *uids_idx_hoods;
   tk_pvec_t *edges;
 
   double weight_eps;
@@ -55,14 +57,13 @@ typedef struct tk_graph_s {
   uint64_t knn_cache;
   double knn_eps;
   bool knn_mutual;
-  int64_t knn_rank;  // Rank filter for KNN searches (-1 means no filtering)
+  int64_t knn_rank;
   bool bridge;
-  bool sigma_seed;  // Whether to re-weight seed edges after sigma calculation
 
   tk_dvec_t *sigmas;
   uint64_t n_edges;
   tk_dsu_t dsu;
-  int64_t largest_component_root;  // -1 if bridge=true, else root of largest component
+  int64_t largest_component_root;
 
   tk_graph_thread_t *threads;
   tk_threadpool_t *pool;

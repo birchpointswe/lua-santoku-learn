@@ -26,6 +26,7 @@ local LANDMARKS = 24
 local MODE = "landmarks" -- "landmarks" for L-STH, "raw" for STH
 
 local ENCODER = true
+local CLUSTER = true
 local BINARIZE = "median" -- "itq", "median", or "sign"
 
 local TCH = true
@@ -34,19 +35,19 @@ local ITQ_EPS = 1e-8
 local ITQ_ITERATIONS = 200
 
 local LAPLACIAN = "random"
-local DECAY = 4.0
+local DECAY = 1.0
 
-local KNN = 32
+local KNN = 24
 local KNN_EPS = nil
 local KNN_MIN = nil
 local KNN_MUTUAL = true
 local BRIDGE = true
+local MIN_PTS = 256
 
 local SEED_PAIRS = 0
 local SEED_ANCHORS = 0
 local SEED_CLASS_ANCHORS = 0
 local SAMPLED_ANCHORS = 16
-
 local SIGMA_K = nil
 
 local RANKS = true
@@ -319,199 +320,210 @@ test("tsetlin", function ()
     train.similarity)
   collectgarbage("collect")
 
-  if ENCODER == false then
-    return
+  if ENCODER or CLUSTER then
+    print("Indexing spectral codes")
+    train.idx_spectral = ann.create({ features = dataset.n_hidden, expected_size = train.ids_spectral:size() })
+    train.idx_spectral:add(train.codes_spectral, train.ids_spectral)
+    collectgarbage("collect")
   end
-
-  print("Indexing spectral codes")
-  local idx_spectral = ann.create({ features = dataset.n_hidden, expected_size = train.ids_spectral:size() })
-  idx_spectral:add(train.codes_spectral, train.ids_spectral)
-  collectgarbage("collect")
 
   local sth_n, sth_ids, sth_problems, sth_solutions, sth_visible
   local test_ids, test_problems
 
-  if MODE == "raw" then
-    print("Setting up raw features for STH")
+  if ENCODER then
 
-    sth_ids = train.ids_spectral
-    sth_n = sth_ids:size()
-    sth_visible = dataset.n_visible
+    if MODE == "raw" then
+      print("Setting up raw features for STH")
 
-    sth_solutions = train.codes_spectral
-    sth_problems = ivec.create()
-    sth_problems:bits_copy(dataset.problems, nil, sth_ids, dataset.n_visible)
-    sth_problems = sth_problems:bits_to_cvec(sth_n, dataset.n_visible, true)
+      sth_ids = train.ids_spectral
+      sth_n = sth_ids:size()
+      sth_visible = dataset.n_visible
 
-    test_ids = test.ids
-    test_problems = ivec.create()
-    test_problems:bits_copy(dataset.problems, nil, test.ids, dataset.n_visible)
-    test_problems = test_problems:bits_to_cvec(test.n, dataset.n_visible, true)
+      sth_solutions = train.codes_spectral
+      sth_problems = ivec.create()
+      sth_problems:bits_copy(dataset.problems, nil, sth_ids, dataset.n_visible)
+      sth_problems = sth_problems:bits_to_cvec(sth_n, dataset.n_visible, true)
 
-  elseif MODE == "landmarks" then
-    print("Setting up landmark features for L-STH")
+      test_ids = test.ids
+      test_problems = ivec.create()
+      test_problems:bits_copy(dataset.problems, nil, test.ids, dataset.n_visible)
+      test_problems = test_problems:bits_to_cvec(test.n, dataset.n_visible, true)
 
-    sth_ids = train.ids_spectral
-    sth_n = sth_ids:size()
-    sth_visible = dataset.n_latent
+    elseif MODE == "landmarks" then
+      print("Setting up landmark features for L-STH")
 
-    local sth_raw = ivec.create()
-    sth_raw:bits_copy(dataset.problems, nil, train.ids_spectral, dataset.n_visible)
-    sth_raw = sth_raw:bits_to_cvec(sth_n, dataset.n_visible)
+      sth_ids = train.ids_spectral
+      sth_n = sth_ids:size()
+      sth_visible = dataset.n_latent
 
-    local sth_idx = ann.create({ features = dataset.n_visible, expected_size = sth_ids:size() })
-    sth_idx:add(sth_raw, sth_ids)
+      local sth_raw = ivec.create()
+      sth_raw:bits_copy(dataset.problems, nil, train.ids_spectral, dataset.n_visible)
+      sth_raw = sth_raw:bits_to_cvec(sth_n, dataset.n_visible)
 
-    local sth_hoods
-    sth_ids, sth_hoods = sth_idx:neighborhoods(dataset.n_landmarks)
+      local sth_idx = ann.create({ features = dataset.n_visible, expected_size = sth_ids:size() })
+      sth_idx:add(sth_raw, sth_ids)
 
-    sth_solutions = idx_spectral:get(sth_ids)
-    sth_problems = cvec.create()
-    local tmp = ivec.create()
-    for i0, hood in sth_hoods:ieach() do
-      hood:keys(tmp)
-      tmp:lookup(sth_ids)
-      idx_spectral:get(tmp, sth_problems, i0, dataset.n_latent)
+      local sth_hoods
+      sth_ids, sth_hoods = sth_idx:neighborhoods(dataset.n_landmarks)
+
+      sth_solutions = train.idx_spectral:get(sth_ids)
+      sth_problems = cvec.create()
+      local tmp = ivec.create()
+      for i0, hood in sth_hoods:ieach() do
+        hood:keys(tmp)
+        tmp:lookup(sth_ids)
+        train.idx_spectral:get(tmp, sth_problems, i0, dataset.n_latent)
+      end
+      sth_problems:bits_flip_interleave(dataset.n_latent)
+
+      test_ids = test.ids
+      test_problems = cvec.create()
+      local test_vecs = ivec.create()
+      test_vecs:bits_copy(dataset.problems, nil, test.ids, dataset.n_visible)
+      test_vecs = test_vecs:bits_to_cvec(test.n, dataset.n_visible)
+      local nbr_ids, nbr_hoods = sth_idx:neighborhoods_by_vecs(test_vecs, dataset.n_landmarks)
+      for i0, hood in nbr_hoods:ieach() do
+        hood:keys(tmp)
+        tmp:lookup(nbr_ids)
+        train.idx_spectral:get(tmp, test_problems, i0, dataset.n_latent)
+      end
+      test_problems:bits_flip_interleave(dataset.n_latent)
+
+    else
+      err.error("Unexpected mode", MODE)
     end
-    sth_problems:bits_flip_interleave(dataset.n_latent)
+    collectgarbage("collect")
 
-    test_ids = test.ids
-    test_problems = cvec.create()
-    local test_vecs = ivec.create()
-    test_vecs:bits_copy(dataset.problems, nil, test.ids, dataset.n_visible)
-    test_vecs = test_vecs:bits_to_cvec(test.n, dataset.n_visible)
-    local nbr_ids, nbr_hoods = sth_idx:neighborhoods_by_vecs(test_vecs, dataset.n_landmarks)
-    for i0, hood in nbr_hoods:ieach() do
-      hood:keys(tmp)
-      tmp:lookup(nbr_ids)
-      idx_spectral:get(tmp, test_problems, i0, dataset.n_latent)
-    end
-    test_problems:bits_flip_interleave(dataset.n_latent)
+    print("Creating encoder")
+    stopwatch = utc.stopwatch()
+    train.encoder = tm.optimize_encoder({
+      visible = sth_visible,
+      hidden = dataset.n_hidden,
+      sentences = sth_problems,
+      codes = sth_solutions,
+      samples = sth_n,
+      clauses = CLAUSES,
+      clause_tolerance = CLAUSE_TOLERANCE,
+      clause_maximum = CLAUSE_MAXIMUM,
+      target = TARGET,
+      specificity = SPECIFICITY,
+      search_patience = SEARCH_PATIENCE,
+      search_rounds = SEARCH_ROUNDS,
+      search_trials = SEARCH_TRIALS,
+      search_iterations = SEARCH_ITERATIONS,
+      final_iterations = ITERATIONS,
+      threads = THREADS,
+      search_metric = function (t)
+        local predicted = t.predict(sth_problems, sth_n)
+        local accuracy = eval.encoding_accuracy(predicted, sth_solutions, sth_n, dataset.n_hidden)
+        return accuracy.mean_hamming, accuracy
+      end,
+      each = function (t, is_final, train_accuracy, params, epoch, round, trial)
+        local d, dd = stopwatch()
+        if is_final then
+          str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%d S=%.2f  Epoch  %d\n",
+            d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, epoch)
+        else
+          str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%d S=%.2f  R=%d T=%d  Epoch  %d\n",
+            d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, round, trial, epoch)
+        end
+        train.accuracy_predicted = train_accuracy
+        str.printi("    Train (acc) | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)", train.accuracy_predicted)
+        if is_final then
+          local sth_predicted = t.predict(sth_problems, sth_n)
+          train.auc_predicted = eval.auc(sth_ids, sth_predicted, train.pos_sampled, train.neg_sampled, dataset.n_hidden)
+          train.similarity_predicted = eval.optimize_retrieval({
+            codes = sth_predicted,
+            n_dims = dataset.n_hidden,
+            ids = sth_ids,
+            pos = train.pos_sampled,
+            neg = train.neg_sampled,
+          })
+          local test_predicted = t.predict(test_problems, test.n)
+          test.auc_predicted = eval.auc(test_ids, test_predicted, test.pos_sampled, test.neg_sampled, dataset.n_hidden)
+          test.similarity_predicted = eval.optimize_retrieval({
+            codes = test_predicted,
+            n_dims = dataset.n_hidden,
+            ids = test_ids,
+            pos = test.pos_sampled,
+            neg = test.neg_sampled,
+          })
+          train.similarity.auc = train.auc_binary
+          train.similarity_predicted.auc = train.auc_predicted
+          test.similarity_predicted.auc = test.auc_predicted
+          str.printi("    Codes (sim) | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", train.similarity)
+          str.printi("    Train (sim) | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", train.similarity_predicted)
+          str.printi("    Test (sim)  | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", test.similarity_predicted)
+          print()
+        end
+      end,
+    })
+    collectgarbage("collect")
 
-  else
-    err.error("Unexpected mode", MODE)
   end
-  collectgarbage("collect")
 
-  print("Creating encoder")
-  stopwatch = utc.stopwatch()
-  local t = tm.optimize_encoder({
-    visible = sth_visible,
-    hidden = dataset.n_hidden,
-    sentences = sth_problems,
-    codes = sth_solutions,
-    samples = sth_n,
-    clauses = CLAUSES,
-    clause_tolerance = CLAUSE_TOLERANCE,
-    clause_maximum = CLAUSE_MAXIMUM,
-    target = TARGET,
-    specificity = SPECIFICITY,
-    search_patience = SEARCH_PATIENCE,
-    search_rounds = SEARCH_ROUNDS,
-    search_trials = SEARCH_TRIALS,
-    search_iterations = SEARCH_ITERATIONS,
-    final_iterations = ITERATIONS,
-    threads = THREADS,
-    search_metric = function (t)
-      local predicted = t.predict(sth_problems, sth_n)
-      local accuracy = eval.encoding_accuracy(predicted, sth_solutions, sth_n, dataset.n_hidden)
-      return accuracy.mean_hamming, accuracy
-    end,
-    each = function (t, is_final, train_accuracy, params, epoch, round, trial)
-      local d, dd = stopwatch()
-      if is_final then
-        str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%d S=%.2f  Epoch  %d\n",
-          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, epoch)
-      else
-        str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%d S=%.2f  R=%d T=%d  Epoch  %d\n",
-          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, round, trial, epoch)
+  if CLUSTER then
+
+    print("Clustering (codes)")
+    local codes_stats, _, _, codes_nc = eval.optimize_clustering({
+      index = train.idx_spectral,
+      ids = train.ids_spectral,
+      pos = train.pos_sampled,
+      neg = train.neg_sampled,
+      min_pts = MIN_PTS,
+      assign_noise = true,
+      each = function (f, p, r, m, c)
+        local d, dd = stopwatch()
+        str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d | Clusters: %d\n",
+          d, dd, f, p, r, m, c)
       end
-      train.accuracy_predicted = train_accuracy
-      str.printi("    Train (acc) | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)", train.accuracy_predicted)
-      if is_final then
-        local sth_predicted = t.predict(sth_problems, sth_n)
-        train.auc_predicted = eval.auc(sth_ids, sth_predicted, train.pos_sampled, train.neg_sampled, dataset.n_hidden)
-        train.similarity_predicted = eval.optimize_retrieval({
-          codes = sth_predicted,
-          n_dims = dataset.n_hidden,
-          ids = sth_ids,
-          pos = train.pos_sampled,
-          neg = train.neg_sampled,
-        })
-        local test_predicted = t.predict(test_problems, test.n)
-        test.auc_predicted = eval.auc(test_ids, test_predicted, test.pos_sampled, test.neg_sampled, dataset.n_hidden)
-        test.similarity_predicted = eval.optimize_retrieval({
-          codes = test_predicted,
-          n_dims = dataset.n_hidden,
-          ids = test_ids,
-          pos = test.pos_sampled,
-          neg = test.neg_sampled,
-        })
-        train.similarity.auc = train.auc_binary
-        train.similarity_predicted.auc = train.auc_predicted
-        test.similarity_predicted.auc = test.auc_predicted
-        str.printi("    Codes (sim) | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", train.similarity)
-        str.printi("    Train (sim) | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", train.similarity_predicted)
-        str.printi("    Test (sim)  | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", test.similarity_predicted)
-        print()
-      end
-    end,
-  })
-  collectgarbage("collect")
+    })
+    codes_stats.n_clusters = codes_nc
+    str.printi("Best\n  BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin) | Clusters: %d#(n_clusters)",
+      codes_stats)
+    collectgarbage("collect")
 
-  print("Clustering (codes)")
-  local codes_stats, _, _, codes_nc = eval.optimize_clustering({
-    index = idx_spectral,
-    ids = train.ids_spectral,
-    pos = train.pos_sampled,
-    neg = train.neg_sampled,
-    each = function (f, p, r, m, c)
-      local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d | Clusters: %d\n",
-        d, dd, f, p, r, m, c)
-    end
-  })
-  codes_stats.n_clusters = codes_nc
-  str.printi("Best\n  BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin) | Clusters: %d#(n_clusters)",
-    codes_stats)
-  collectgarbage("collect")
+    if ENCODER then
 
-  print("Clustering (train)")
-  local idx_train = ann.create({ features = dataset.n_hidden, expected_size = train.n })
-  idx_train:add(t.predict(sth_problems, sth_n), sth_ids)
-  local train_stats, _, _, train_nc = eval.optimize_clustering({
-    index = idx_train,
-    ids = train.ids_spectral,
-    pos = train.pos_sampled,
-    neg = train.neg_sampled,
-    each = function (f, p, r, m, c)
-      local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d | Clusters: %d\n",
-        d, dd, f, p, r, m, c)
-    end
-  })
-  train_stats.n_clusters = train_nc
-  str.printi("Best\n  BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin) | Clusters: %d#(n_clusters)",
-    train_stats)
-  collectgarbage("collect")
+      print("Clustering (train)")
+      local idx_train = ann.create({ features = dataset.n_hidden, expected_size = train.n })
+      idx_train:add(train.encoder.predict(sth_problems, sth_n), sth_ids)
+      local train_stats, _, _, train_nc = eval.optimize_clustering({
+        index = idx_train,
+        ids = train.ids_spectral,
+        pos = train.pos_sampled,
+        neg = train.neg_sampled,
+        each = function (f, p, r, m, c)
+          local d, dd = stopwatch()
+          str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d | Clusters: %d\n",
+            d, dd, f, p, r, m, c)
+        end
+      })
+      train_stats.n_clusters = train_nc
+      str.printi("Best\n  BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin) | Clusters: %d#(n_clusters)",
+        train_stats)
+      collectgarbage("collect")
 
-  print("Clustering (test)")
-  local idx_test = ann.create({ features = dataset.n_hidden, expected_size = test.n })
-  idx_test:add(t.predict(test_problems, test.n), test_ids)
-  local test_stats, _, _, test_nc = eval.optimize_clustering({
-    index = idx_test,
-    ids = test_ids,
-    pos = test.pos_sampled,
-    neg = test.neg_sampled,
-    each = function (f, p, r, m, c)
-      local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d | Clusters: %d\n",
-        d, dd, f, p, r, m, c)
+      print("Clustering (test)")
+      local idx_test = ann.create({ features = dataset.n_hidden, expected_size = test.n })
+      idx_test:add(train.encoder.predict(test_problems, test.n), test_ids)
+      local test_stats, _, _, test_nc = eval.optimize_clustering({
+        index = idx_test,
+        ids = test_ids,
+        pos = test.pos_sampled,
+        neg = test.neg_sampled,
+        each = function (f, p, r, m, c)
+          local d, dd = stopwatch()
+          str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d | Clusters: %d\n",
+            d, dd, f, p, r, m, c)
+        end
+      })
+      test_stats.n_clusters = test_nc
+      str.printi("Best\n BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin) | Clusters: %d#(n_clusters)",
+        test_stats)
+      collectgarbage("collect")
+
     end
-  })
-  test_stats.n_clusters = test_nc
-  str.printi("Best\n BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin) | Clusters: %d#(n_clusters)",
-    test_stats)
-  collectgarbage("collect")
+  end
 
 end)
