@@ -96,9 +96,6 @@ static inline double tk_graph_weight (
       sj = eps;
     }
     double s = sqrt(si * sj);
-    if (g->sigma_scale > 0.0) {
-      s = s * g->sigma_scale;
-    }
     if (s > 0.0) {
       double s2 = s * s;
       sim = exp(-0.5 * (b * b) / s2);
@@ -212,13 +209,13 @@ static inline void tk_graph_worker (void *dp, int sig)
             tk_iuset_put(seen, neighbor_idx, &kha);
           }
         }))
-        if (graph->knn_mutual && graph->uids_idx_hoods) {
+        if (graph->uids_idx_hoods) {
           khint_t khi = tk_iumap_get(graph->uids_idx_hoods, uid);
           if (khi != tk_iumap_end(graph->uids_idx_hoods)) {
             int64_t hood_idx = tk_iumap_value(graph->uids_idx_hoods, khi);
             if (graph->inv_hoods && hood_idx < (int64_t)graph->inv_hoods->n) {
               tk_rvec_t *hood = graph->inv_hoods->a[hood_idx];
-              for (uint64_t j = hood->n; j < hood->m; j++) {
+              for (uint64_t j = 0; j < hood->m; j++) {
                 int64_t neighbor_hood_idx = hood->a[j].i;
                 if (neighbor_hood_idx >= 0 && neighbor_hood_idx < (int64_t)graph->uids_hoods->n) {
                   int64_t neighbor_uid = graph->uids_hoods->a[neighbor_hood_idx];
@@ -237,7 +234,7 @@ static inline void tk_graph_worker (void *dp, int sig)
             } else if (graph->ann_hoods && hood_idx < (int64_t)graph->ann_hoods->n) {
               tk_pvec_t *hood = graph->ann_hoods->a[hood_idx];
               double denom = graph->ann->features ? (double)graph->ann->features : 1.0;
-              for (uint64_t j = hood->n; j < hood->m; j++) {
+              for (uint64_t j = 0; j < hood->m; j++) {
                 int64_t neighbor_hood_idx = hood->a[j].i;
                 if (neighbor_hood_idx >= 0 && neighbor_hood_idx < (int64_t)graph->uids_hoods->n) {
                   int64_t neighbor_uid = graph->uids_hoods->a[neighbor_hood_idx];
@@ -256,7 +253,7 @@ static inline void tk_graph_worker (void *dp, int sig)
             } else if (graph->hbi_hoods && hood_idx < (int64_t)graph->hbi_hoods->n) {
               tk_pvec_t *hood = graph->hbi_hoods->a[hood_idx];
               double denom = graph->hbi->features ? (double)graph->hbi->features : 1.0;
-              for (uint64_t j = hood->n; j < hood->m; j++) {
+              for (uint64_t j = 0; j < hood->m; j++) {
                 int64_t neighbor_hood_idx = hood->a[j].i;
                 if (neighbor_hood_idx >= 0 && neighbor_hood_idx < (int64_t)graph->uids_hoods->n) {
                   int64_t neighbor_uid = graph->uids_hoods->a[neighbor_hood_idx];
@@ -600,13 +597,17 @@ static inline void tm_add_mst (
       int64_t u = graph->uids->a[iu];
       int64_t v = graph->uids->a[iv];
       double d = tk_graph_distance(graph, u, v);
-      assert(d != DBL_MAX);
+      if (d == DBL_MAX) {
+        // Skip this edge if distance cannot be computed
+        continue;
+      }
       tm_pair_t e = tm_pair(u, v, tk_graph_weight(graph, d, iu, iv));
       kh_put(pairs, graph->pairs, e, &kha);
-      assert(kha);
-      tk_graph_add_adj(graph, u, v);
-      tk_dsu_union(&graph->dsu, u, v);
-      graph->n_edges ++;
+      if (kha) {
+        tk_graph_add_adj(graph, u, v);
+        tk_dsu_union(&graph->dsu, u, v);
+        graph->n_edges ++;
+      }
     }
 
     lua_pop(L, 1); // centers
