@@ -27,7 +27,8 @@ typedef enum {
   TK_GRAPH_CSR_OFFSET_LOCAL,
   TK_GRAPH_CSR_OFFSET_GLOBAL,
   TK_GRAPH_CSR_DATA,
-  TK_GRAPH_SIGMA
+  TK_GRAPH_SIGMA,
+  TK_GRAPH_REWEIGHT
 } tk_graph_stage_t;
 
 typedef struct tk_graph_thread_s tk_graph_thread_t;
@@ -42,6 +43,7 @@ typedef struct tk_graph_s {
   tk_ivec_t *uids;
   tk_ivec_t *uids_hoods;
   tk_iumap_t *uids_idx;
+  tk_iumap_t *uids_idx_hoods;
   tk_pvec_t *edges;
 
   double weight_eps;
@@ -57,7 +59,6 @@ typedef struct tk_graph_s {
   bool knn_mutual;
   int64_t knn_rank;
   bool bridge;
-  bool sigma_seed;
 
   tk_dvec_t *sigmas;
   uint64_t n_edges;
