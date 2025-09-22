@@ -11,6 +11,9 @@
 
 # Next
 
+- tk_inv_t
+    - Consider making decay a query-time parameter
+
 - Rename tch to flipper
 - Rename library and project to santoku-learn
 
