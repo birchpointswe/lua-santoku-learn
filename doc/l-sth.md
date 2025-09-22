@@ -61,7 +61,8 @@ only features at rank `r`. Feature overlap in lower ranks (e.g. between
 documents and their associated author/category nodes or between documents
 sharing authors/categories themselves) results in exponentially higher
 similarity scores than feature overlap strictly in higher ranks (e.g. between
-documents sharing only visible (e.g. text ngram) features). This exponential decay pairs
+documents sharing only visible (e.g. text ngram) features). This exponential
+decay pairs
 naturally with the log-space mapping in reconstruction error (described below),
 ensuring supervision shapes the manifold structure hierarchically.
 
@@ -144,7 +145,7 @@ rather than feature dimensionality.
 ## Reference Implementation Pipeline
 
 1. **Graph construction**: Create virtual nodes for each unique label/category.
-   Virtual nodes contain features only at their rank (e.g., title nodes have
+   Virtual nodes contain features only at their rank (e.g., category nodes have
    rank-0 features), while documents contain features at all ranks. Compute all
    edge weights via the unified similarity function with exponential rank decay,
    ensuring documents connecting to many virtual nodes don't overwhelm the
@@ -207,7 +208,7 @@ rather than feature dimensionality.
 - Using bit-frequencies for landmark encoding instead of (or in addition to)
   concatenated codes for triangulation based on landmark bit statistics of
   neighbors.
-- Mixing landmarks with raw features.
+- Mixing landmarks with visible features.
 - Applying coreset sampling for landmark selection.
 - Developing encoder-aware bit selection.
 - Creating end-to-end optimization pipeline.
