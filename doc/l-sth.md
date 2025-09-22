@@ -24,14 +24,15 @@ this embedding space during the spectral decomposition process.
 
 ## Background
 
-[Spectral hashing](https://arxiv.org/abs/0809.3232) provides an efficient method
-to obtain binary embeddings for nodes in a graph where Hamming distances among
-embeddings approximate graph distance among nodes in the graph. The process of
-generating embeddings for unseen nodes is called out-of-sample extension. One
-method for enabling out-of-sample extension described in [Self-Taught Hashing
-(STH)](https://arxiv.org/abs/1211.4903) involves training k binary classifiers
-to predict individual bits from arbitrary node features, using the binary codes
-obtained for in-sample nodes as classifier targets.
+[Spectral hashing](https://people.csail.mit.edu/torralba/publications/spectralhashing.pdf)
+provides an efficient method to obtain binary embeddings for nodes in a graph
+where Hamming distances among embeddings approximate graph distance among nodes
+in the graph. The process of generating embeddings for unseen nodes is called
+out-of-sample extension. One method for enabling out-of-sample extension
+described in [Self-Taught Hashing (STH)](https://arxiv.org/pdf/1004.5370)
+involves training k binary classifiers to predict individual bits from arbitrary
+node features, using the binary codes obtained for in-sample nodes as classifier
+targets.
 
 ## Graph-Centric Supervision
 
