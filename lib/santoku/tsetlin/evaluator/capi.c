@@ -138,11 +138,11 @@ static void tk_eval_worker (void *dp, int sig)
         khi = tk_iumap_get(state->id_assignment, u);
         if (khi == tk_iumap_end(state->id_assignment))
           continue;
-        int64_t iu = tk_iumap_value(state->id_assignment, khi);
+        int64_t iu = tk_iumap_val(state->id_assignment, khi);
         khi = tk_iumap_get(state->id_assignment, v);
         if (khi == tk_iumap_end(state->id_assignment))
           continue;
-        int64_t iv = tk_iumap_value(state->id_assignment, khi);
+        int64_t iv = tk_iumap_val(state->id_assignment, khi);
         int64_t cu = state->assignments->a[iu];
         int64_t cv = state->assignments->a[iv];
         if (i < state->n_pos) {
@@ -205,7 +205,7 @@ static void tk_eval_worker (void *dp, int sig)
             state->pl[k].sim = -1;
             continue;
           }
-          iu = tk_iumap_value(state->id_code, khi);
+          iu = tk_iumap_val(state->id_code, khi);
           if (iu == -1)
             continue;
           khi = tk_iumap_get(state->id_code, v);
@@ -213,7 +213,7 @@ static void tk_eval_worker (void *dp, int sig)
             state->pl[k].sim = -1;
             continue;
           }
-          iv = tk_iumap_value(state->id_code, khi);
+          iv = tk_iumap_val(state->id_code, khi);
           if (iv == -1)
             continue;
         }
@@ -416,7 +416,7 @@ static inline tk_accuracy_t _tm_clustering_accuracy (
   tk_eval_t state;
   atomic_ulong TP, FP, FN, valid_pos, valid_neg;
   state.assignments = assignments;
-  state.id_assignment = tk_iumap_from_ivec(ids);
+  state.id_assignment = tk_iumap_from_ivec(0, ids);
   state.pos = pos;
   state.neg = neg;
   state.n_pos = n_pos;
@@ -470,7 +470,7 @@ static inline tk_accuracy_t tm_clustering_accuracy (
   tk_eval_t state;
   atomic_ulong TP, FP, FN, valid_pos, valid_neg;
   state.assignments = assignments;
-  state.id_assignment = tk_iumap_from_ivec(ids);
+  state.id_assignment = tk_iumap_from_ivec(0, ids);
   state.pos = pos;
   state.neg = neg;
   state.n_pos = n_pos;
@@ -677,7 +677,7 @@ static inline int tm_auc (lua_State *L)
   state.chunks = TK_CVEC_BITS_BYTES(n_dims);
   state.pl = malloc((n_pos + n_neg) * sizeof(tm_dl_t));
   state.mask = mask;
-  state.id_code = tk_iumap_from_ivec(ids);
+  state.id_code = tk_iumap_from_ivec(0, ids);
   state.codes = codes;
   state.dcodes = dcodes != NULL ? dcodes->a : NULL;
   state.pos = pos;
@@ -765,7 +765,7 @@ static inline int tm_optimize_clustering (lua_State *L)
     hbi ? tk_iumap_keys(L, hbi->uid_sid) :
     ann ? tk_iumap_keys(L, ann->uid_sid) : tk_ivec_create(L, 0, 0, 0); // t ids
   state.ididx =
-    tk_iumap_from_ivec(state.ids);
+    tk_iumap_from_ivec(0, state.ids);
 
   tk_eval_thread_t data[n_threads];
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
@@ -881,7 +881,7 @@ static inline int tm_optimize_retrieval (lua_State *L)
   state.mask = NULL;
   state.codes = codes;
   state.dcodes = NULL;
-  state.id_code = ids == NULL ? NULL : tk_iumap_from_ivec(ids); // TODO: Pass id_code (aka uid_hood) in instead of recomputing
+  state.id_code = ids == NULL ? NULL : tk_iumap_from_ivec(0, ids); // TODO: Pass id_code (aka uid_hood) in instead of recomputing
   state.pos = pos;
   state.neg = neg;
   state.n_pos = n_pos;

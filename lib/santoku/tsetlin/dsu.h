@@ -47,7 +47,7 @@ static inline int64_t tk_dsu_find (
 ) {
   khint_t khi = tk_iumap_get(dsu->ididx, uid);
   assert(khi != tk_iumap_end(dsu->ididx));
-  int64_t uidx = tk_iumap_value(dsu->ididx, khi);
+  int64_t uidx = tk_iumap_val(dsu->ididx, khi);
   return dsu->ids[tk_dsu_findx(dsu, uidx)];
 }
 
@@ -79,10 +79,10 @@ static inline void tk_dsu_union (
 ) {
   khint_t xkhi = tk_iumap_get(dsu->ididx, x);
   assert(xkhi != tk_iumap_end(dsu->ididx));
-  int64_t xidx = tk_iumap_value(dsu->ididx, xkhi);
+  int64_t xidx = tk_iumap_val(dsu->ididx, xkhi);
   khint_t ykhi = tk_iumap_get(dsu->ididx, y);
   assert(ykhi != tk_iumap_end(dsu->ididx));
-  int64_t yidx = tk_iumap_value(dsu->ididx, ykhi);
+  int64_t yidx = tk_iumap_val(dsu->ididx, ykhi);
   tk_dsu_unionx(dsu, xidx, yidx);
 }
 
@@ -91,7 +91,7 @@ static inline void tk_dsu_init (
   tk_ivec_t *ids
 ) {
   dsu->ids = ids->a; // TODO: add ids as ephemeron to DSU
-  dsu->ididx = tk_iumap_from_ivec(ids);
+  dsu->ididx = tk_iumap_from_ivec(0, ids);
   dsu->parent = malloc(ids->n * sizeof(int64_t)); // TODO: ivec, not malloc
   dsu->rank = malloc(ids->n * sizeof(int64_t)); // TODO: ivec, not malloc
   dsu->components = (int64_t) ids->n;

@@ -4,6 +4,7 @@
 #include <santoku/tsetlin/conf.h>
 #include <santoku/threads.h>
 #include <santoku/ivec.h>
+#include <santoku/euset.h>
 #include <santoku/iumap.h>
 #include <santoku/pumap.h>
 #include <santoku/tsetlin/inv.h>
@@ -35,7 +36,7 @@ typedef struct tk_graph_thread_s tk_graph_thread_t;
 
 typedef struct tk_graph_s {
 
-  tm_pairs_t *pairs; // TODO: Standardize to tk_edges_t/tk_edge_t
+  tk_euset_t *pairs;
   tk_graph_adj_t *adj;
   tk_inv_t *inv; tk_inv_hoods_t *inv_hoods; tk_ivec_sim_type_t cmp; double cmp_alpha, cmp_beta;
   tk_ann_t *ann; tk_ann_hoods_t *ann_hoods;
@@ -91,11 +92,11 @@ static inline double tk_graph_get_weight (
   int64_t v
 ) {
   khint_t khi;
-  tm_pair_t p = tm_pair(u, v, 0);
-  khi = kh_get(pairs, graph->pairs, p);
-  if (khi == kh_end(graph->pairs))
+  tk_edge_t p = tk_edge(u, v, 0);
+  khi = tk_euset_get(graph->pairs, p);
+  if (khi == tk_euset_end(graph->pairs))
     return 0.0;
-  return kh_key(graph->pairs, khi).w;
+  return tk_euset_key(graph->pairs, khi).w;
 }
 
 #endif

@@ -7,14 +7,29 @@
 #include <santoku/iumap.h>
 #include <santoku/zumap.h>
 
-KHASH_INIT(tk_observed_doubles, int64_t, tk_duset_t *, 1, kh_int64_hash_func, kh_int64_hash_equal)
-typedef khash_t(tk_observed_doubles) tk_observed_doubles_t;
+// tk_observed_doubles: int64_t -> tk_duset_t *
+#define tk_umap_name tk_observed_doubles
+#define tk_umap_key int64_t
+#define tk_umap_value tk_duset_t *
+#define tk_umap_eq(a, b) ((a) == (b))
+#define tk_umap_hash(a) (kh_int64_hash_func(a))
+#include <santoku/umap/tpl.h>
 
-KHASH_INIT(tk_observed_strings, int64_t, tk_cuset_t *, 1, kh_int64_hash_func, kh_int64_hash_equal)
-typedef khash_t(tk_observed_strings) tk_observed_strings_t;
+// tk_observed_strings: int64_t -> tk_cuset_t *
+#define tk_umap_name tk_observed_strings
+#define tk_umap_key int64_t
+#define tk_umap_value tk_cuset_t *
+#define tk_umap_eq(a, b) ((a) == (b))
+#define tk_umap_hash(a) (kh_int64_hash_func(a))
+#include <santoku/umap/tpl.h>
 
-KHASH_INIT(tk_cont_thresholds, int64_t, tk_dvec_t *, 1, kh_int64_hash_func, kh_int64_hash_equal)
-typedef khash_t(tk_cont_thresholds) tk_cont_thresholds_t;
+// tk_cont_thresholds: int64_t -> tk_dvec_t *
+#define tk_umap_name tk_cont_thresholds
+#define tk_umap_key int64_t
+#define tk_umap_value tk_dvec_t *
+#define tk_umap_eq(a, b) ((a) == (b))
+#define tk_umap_hash(a) (kh_int64_hash_func(a))
+#include <santoku/umap/tpl.h>
 
 typedef struct { int64_t f; char *v; } tk_cat_bit_string_t;
 typedef struct { int64_t f; double v; } tk_cat_bit_double_t;
@@ -22,10 +37,22 @@ typedef struct { int64_t f; double v; } tk_cat_bit_double_t;
 #define tk_cat_bit_double_hash(k) (tk_hash_128(tk_hash_integer((k).f), tk_hash_double((k).v)))
 #define tk_cat_bit_string_equal(a, b) ((a).f == (b).f && !strcmp((a).v, (b).v))
 #define tk_cat_bit_double_equal(a, b) ((a).f == (b).f && (a).v == (b).v)
-KHASH_INIT(tk_cat_bits_string, tk_cat_bit_string_t, int64_t, 1, tk_cat_bit_string_hash, tk_cat_bit_string_equal)
-KHASH_INIT(tk_cat_bits_double, tk_cat_bit_double_t, int64_t, 1, tk_cat_bit_double_hash, tk_cat_bit_double_equal)
-typedef khash_t(tk_cat_bits_string) tk_cat_bits_string_t;
-typedef khash_t(tk_cat_bits_double) tk_cat_bits_double_t;
+
+// tk_cat_bits_string: tk_cat_bit_string_t -> int64_t
+#define tk_umap_name tk_cat_bits_string
+#define tk_umap_key tk_cat_bit_string_t
+#define tk_umap_value int64_t
+#define tk_umap_eq(a, b) (tk_cat_bit_string_equal(a, b))
+#define tk_umap_hash(a) (tk_cat_bit_string_hash(a))
+#include <santoku/umap/tpl.h>
+
+// tk_cat_bits_double: tk_cat_bit_double_t -> int64_t
+#define tk_umap_name tk_cat_bits_double
+#define tk_umap_key tk_cat_bit_double_t
+#define tk_umap_value int64_t
+#define tk_umap_eq(a, b) (tk_cat_bit_double_equal(a, b))
+#define tk_umap_hash(a) (tk_cat_bit_double_hash(a))
+#include <santoku/umap/tpl.h>
 
 typedef struct {
 
@@ -67,7 +94,7 @@ static inline bool tk_booleanizer_is_categorical (
   if (tk_iuset_contains(B->continuous, id_feature))
     return false;
   if (!B->finalized && B->observed_strings != NULL)
-    return kh_get(tk_observed_strings, B->observed_strings, id_feature) != kh_end(B->observed_strings);
+    return tk_observed_strings_get(B->observed_strings, id_feature) != tk_observed_strings_end(B->observed_strings);
   return false;
 }
 
@@ -84,9 +111,9 @@ static inline void tk_booleanizer_encode_string (
     return;
   }
   tk_cat_bit_string_t key = { .f = id_feature, .v = (char *) value };
-  khint_t k = kh_get(tk_cat_bits_string, B->cat_bits_string, key);
-  if (k != kh_end(B->cat_bits_string)) {
-    int64_t bit_id = kh_value(B->cat_bits_string, k);
+  khint_t k = tk_cat_bits_string_get(B->cat_bits_string, key);
+  if (k != tk_cat_bits_string_end(B->cat_bits_string)) {
+    int64_t bit_id = tk_cat_bits_string_val(B->cat_bits_string, k);
     tk_ivec_push(out, (int64_t) id_sample * (int64_t) B->next_bit + bit_id);
   }
 }
@@ -105,18 +132,18 @@ static inline void tk_booleanizer_encode_double (
   }
   if (tk_booleanizer_is_categorical(B, id_feature)) {
     tk_cat_bit_double_t key = { .f = id_feature, .v = value };
-    khint_t k = kh_get(tk_cat_bits_double, B->cat_bits_double, key);
-    if (k != kh_end(B->cat_bits_double)) {
-      int64_t bit_id = kh_value(B->cat_bits_double, k);
+    khint_t k = tk_cat_bits_double_get(B->cat_bits_double, key);
+    if (k != tk_cat_bits_double_end(B->cat_bits_double)) {
+      int64_t bit_id = tk_cat_bits_double_val(B->cat_bits_double, k);
       tk_ivec_push(out, (int64_t) id_sample * (int64_t) B->next_bit + bit_id);
     }
   } else {
-    khint_t k_thresh = kh_get(tk_cont_thresholds, B->cont_thresholds, id_feature);
-    khint_t k_bits = kh_get(tk_iumap, B->cont_bits, id_feature);
-    if (k_thresh == kh_end(B->cont_thresholds) || k_bits == kh_end(B->cont_bits))
+    khint_t k_thresh = tk_cont_thresholds_get(B->cont_thresholds, id_feature);
+    khint_t k_bits = tk_iumap_get(B->cont_bits, id_feature);
+    if (k_thresh == tk_cont_thresholds_end(B->cont_thresholds) || k_bits == tk_iumap_end(B->cont_bits))
       return; // no thresholds/bit mapping for this feature
-    tk_dvec_t *thresholds = kh_value(B->cont_thresholds, k_thresh);
-    int64_t bit_base = kh_value(B->cont_bits, k_bits);
+    tk_dvec_t *thresholds = tk_cont_thresholds_val(B->cont_thresholds, k_thresh);
+    int64_t bit_base = tk_iumap_val(B->cont_bits, k_bits);
     for (uint64_t t = 0; t < thresholds->n; t ++)
       if (value > thresholds->a[t])
         tk_ivec_push(out, (int64_t) id_sample * (int64_t) B->next_bit + bit_base + (int64_t) t);
@@ -153,18 +180,18 @@ static inline void tk_booleanizer_encode_dvec (
       int64_t id_feature = (int64_t) id_dim0 + (int64_t) j;
       if (tk_booleanizer_is_categorical(B, id_feature)) {
         tk_cat_bit_double_t key = { .f = id_feature, .v = value };
-        khint_t k = kh_get(tk_cat_bits_double, B->cat_bits_double, key);
-        if (k != kh_end(B->cat_bits_double)) {
-          int64_t bit_id = kh_value(B->cat_bits_double, k);
+        khint_t k = tk_cat_bits_double_get(B->cat_bits_double, key);
+        if (k != tk_cat_bits_double_end(B->cat_bits_double)) {
+          int64_t bit_id = tk_cat_bits_double_val(B->cat_bits_double, k);
           tk_ivec_push(out, bit_id);
         }
       } else {
-        khint_t k_thresh = kh_get(tk_cont_thresholds, B->cont_thresholds, id_feature);
-        khint_t k_bits = kh_get(tk_iumap, B->cont_bits, id_feature);
-        if (k_thresh == kh_end(B->cont_thresholds) || k_bits == kh_end(B->cont_bits))
+        khint_t k_thresh = tk_cont_thresholds_get(B->cont_thresholds, id_feature);
+        khint_t k_bits = tk_iumap_get(B->cont_bits, id_feature);
+        if (k_thresh == tk_cont_thresholds_end(B->cont_thresholds) || k_bits == tk_iumap_end(B->cont_bits))
           continue; // should not happen
-        tk_dvec_t *thresholds = kh_value(B->cont_thresholds, k_thresh);
-        int64_t bit_base = kh_value(B->cont_bits, k_bits);
+        tk_dvec_t *thresholds = tk_cont_thresholds_val(B->cont_thresholds, k_thresh);
+        int64_t bit_base = tk_iumap_val(B->cont_bits, k_bits);
         for (uint64_t t = 0; t < thresholds->n; t ++)
           if (value >= thresholds->a[t])
             tk_ivec_push(out, (int64_t) i * (int64_t) B->next_bit + bit_base + (int64_t) t);
@@ -182,15 +209,15 @@ static inline int64_t tk_booleanizer_bit_integer (
   int kha;
   khint_t khi;
   khi = tk_iumap_get(B->integer_features, feature);
-  if (khi == kh_end(B->integer_features) && !train) {
+  if (khi == tk_iumap_end(B->integer_features) && !train) {
     return -1;
   } else if (train) {
     khi = tk_iumap_put(B->integer_features, feature, &kha);
     int64_t id_feature = (int64_t) B->next_feature ++;
-    tk_iumap_value(B->integer_features, khi) = id_feature;
+    tk_iumap_setval(B->integer_features, khi, id_feature);
     return id_feature;
   } else {
-    return tk_iumap_value(B->integer_features, khi);
+    return tk_iumap_val(B->integer_features, khi);
   }
 }
 
@@ -203,17 +230,17 @@ static inline int64_t tk_booleanizer_bit_string (
   int kha;
   khint_t khi;
   khi = tk_zumap_get(B->string_features, feature);
-  if (khi == kh_end(B->string_features) && !train) {
+  if (khi == tk_zumap_end(B->string_features) && !train) {
     return -1;
   } else if (train) {
     khi = tk_zumap_put(B->string_features, feature, &kha);
     if (kha)
-      tk_zumap_key(B->string_features, khi) = strdup(feature);
+      tk_zumap_setkey(B->string_features, khi, strdup(feature));
     int64_t id_feature = (int64_t) B->next_feature ++;
-    tk_zumap_value(B->string_features, khi) = id_feature;
+    tk_zumap_setval(B->string_features, khi, id_feature);
     return id_feature;
   } else {
-    return tk_zumap_value(B->string_features, khi);
+    return tk_zumap_val(B->string_features, khi);
   }
 }
 
@@ -232,11 +259,12 @@ static inline void tk_booleanizer_observe_double (
   int kha;
   khint_t khi;
   tk_duset_t *obs;
-  khi = kh_put(tk_observed_doubles, B->observed_doubles, id_feature, &kha);
-  if (kha)
-    obs = kh_value(B->observed_doubles, khi) = tk_duset_create();
-  else
-    obs = kh_value(B->observed_doubles, khi);
+  khi = tk_observed_doubles_put(B->observed_doubles, id_feature, &kha);
+  if (kha) {
+    obs = tk_duset_create(0, 0);
+    tk_observed_doubles_setval(B->observed_doubles, khi, obs);
+  } else
+    obs = tk_observed_doubles_val(B->observed_doubles, khi);
   tk_duset_put(obs, value, &kha);
 }
 
@@ -255,14 +283,15 @@ static inline void tk_booleanizer_observe_string (
   int kha;
   khint_t khi;
   tk_cuset_t *obs;
-  khi = kh_put(tk_observed_strings, B->observed_strings, id_feature, &kha);
-  if (kha)
-    obs = kh_value(B->observed_strings, khi) = tk_cuset_create();
-  else
-    obs = kh_value(B->observed_strings, khi);
+  khi = tk_observed_strings_put(B->observed_strings, id_feature, &kha);
+  if (kha) {
+    obs = tk_cuset_create(0, 0);
+    tk_observed_strings_setval(B->observed_strings, khi, obs);
+  } else
+    obs = tk_observed_strings_val(B->observed_strings, khi);
   khi = tk_cuset_put(obs, value, &kha);
   if (kha)
-    tk_cuset_key(obs, khi) = strdup(value);
+    tk_cuset_setkey(obs, khi, strdup(value));
 }
 
 static inline void tk_booleanizer_observe_integer (
@@ -338,10 +367,10 @@ static inline void tk_booleanizer_add_thresholds (
     }
   }
   tk_dvec_shrink(thresholds);
-  khi = kh_put(tk_cont_thresholds, B->cont_thresholds, id_feature, &kha);
-  kh_value(B->cont_thresholds, khi) = thresholds;
-  khi = kh_put(tk_iumap, B->cont_bits, id_feature, &kha);
-  kh_value(B->cont_bits, khi) = (int64_t) B->next_bit;
+  khi = tk_cont_thresholds_put(B->cont_thresholds, id_feature, &kha);
+  tk_cont_thresholds_setval(B->cont_thresholds, khi, thresholds);
+  khi = tk_iumap_put(B->cont_bits, id_feature, &kha);
+  tk_iumap_setval(B->cont_bits, khi, (int64_t) B->next_bit);
   B->next_bit += (uint64_t) thresholds->n;
 }
 
@@ -352,19 +381,18 @@ static inline void tk_booleanizer_shrink (
     return;
   tk_duset_t *du;
   tk_cuset_t *cu;
-  int64_t f;
   if (B->observed_doubles != NULL) {
-    kh_foreach(B->observed_doubles, f, du, ({
+    tk_umap_foreach_values(B->observed_doubles, du, ({
       tk_duset_destroy(du);
     }));
-    kh_destroy(tk_observed_doubles, B->observed_doubles);
+    tk_observed_doubles_destroy(B->observed_doubles);
     B->observed_doubles = NULL;
   }
   if (B->observed_strings != NULL) {
-    kh_foreach(B->observed_strings, f, cu, ({
+    tk_umap_foreach_values(B->observed_strings, cu, ({
       tk_cuset_destroy(cu);
     }))
-    kh_destroy(tk_observed_strings, B->observed_strings);
+    tk_observed_strings_destroy(B->observed_strings);
     B->observed_strings = NULL;
   }
 }
@@ -381,65 +409,52 @@ static inline void tk_booleanizer_finalize (
     return;
   }
   int kha;
-  khint_t khi, kho, vi;
-  tk_iuset_t *seen_features = tk_iuset_create();
+  khint_t kho;
+  tk_iuset_t *seen_features = tk_iuset_create(0, 0);
   tk_dvec_t *value_vec = tk_dvec_create(L, 0, 0, 0);
   int i_value_vec = tk_lua_absindex(L, -1);
   int64_t id_feature;
-  for (khi = kh_begin(B->observed_doubles); khi != kh_end(B->observed_doubles); khi ++) {
-    if (!kh_exist(B->observed_doubles, khi))
-      continue;
-    id_feature = kh_key(B->observed_doubles, khi);
+  tk_umap_foreach_keys(B->observed_doubles, id_feature, ({
     tk_iuset_put(seen_features, id_feature, &kha);
-  }
-  for (khi = kh_begin(B->observed_strings); khi != kh_end(B->observed_strings); khi ++) {
-    if (!kh_exist(B->observed_strings, khi))
-      continue;
-    id_feature = kh_key(B->observed_strings, khi);
+  }));
+  tk_umap_foreach_keys(B->observed_strings, id_feature, ({
     tk_iuset_put(seen_features, id_feature, &kha);
-  }
-  for (khi = tk_iuset_begin(seen_features); khi != tk_iuset_end(seen_features); khi ++) {
-    if (!kh_exist(seen_features, khi))
-      continue;
-    id_feature = tk_iuset_key(seen_features, khi);
+  }));
+  tk_umap_foreach_keys(seen_features, id_feature, ({
     if (tk_booleanizer_is_categorical(B, id_feature)) {
       tk_iuset_put(B->categorical, id_feature, &kha);
-      kho = kh_get(tk_observed_strings, B->observed_strings, id_feature);
-      if (kho != kh_end(B->observed_strings)) {
-        tk_cuset_t *values = kh_value(B->observed_strings, kho);
-        for (vi = kh_begin(values); vi != kh_end(values); vi ++) {
-          if (!kh_exist(values, vi))
-            continue;
-          const char *value = kh_key(values, vi);
+      kho = tk_observed_strings_get(B->observed_strings, id_feature);
+      if (kho != tk_observed_strings_end(B->observed_strings)) {
+        tk_cuset_t *values = tk_observed_strings_val(B->observed_strings, kho);
+        const char *value;
+        tk_umap_foreach_keys(values, value, ({
           tk_cat_bit_string_t key = { .f = id_feature, .v = (char *) value };
-          khint_t outk = kh_put(tk_cat_bits_string, B->cat_bits_string, key, &kha);
-          kh_value(B->cat_bits_string, outk) = (int64_t) B->next_bit ++;
-        }
+          khint_t outk = tk_cat_bits_string_put(B->cat_bits_string, key, &kha);
+          tk_cat_bits_string_setval(B->cat_bits_string, outk, (int64_t) B->next_bit ++);
+        }));
       }
-      kho = kh_get(tk_observed_doubles, B->observed_doubles, id_feature);
-      if (kho != kh_end(B->observed_doubles)) {
-        tk_duset_t *values = kh_value(B->observed_doubles, kho);
-        for (vi = kh_begin(values); vi != kh_end(values); vi ++) {
-          if (!kh_exist(values, vi))
-            continue;
-          double value = kh_key(values, vi);
+      kho = tk_observed_doubles_get(B->observed_doubles, id_feature);
+      if (kho != tk_observed_doubles_end(B->observed_doubles)) {
+        tk_duset_t *values = tk_observed_doubles_val(B->observed_doubles, kho);
+        double value;
+        tk_umap_foreach_keys(values, value, ({
           tk_cat_bit_double_t key = { .f = id_feature, .v = value };
-          khint_t outk = kh_put(tk_cat_bits_double, B->cat_bits_double, key, &kha);
-          kh_value(B->cat_bits_double, outk) = (int64_t) B->next_bit ++;
-        }
+          khint_t outk = tk_cat_bits_double_put(B->cat_bits_double, key, &kha);
+          tk_cat_bits_double_setval(B->cat_bits_double, outk, (int64_t) B->next_bit ++);
+        }));
       }
     } else {
       tk_iuset_put(B->continuous, id_feature, &kha);
-      kho = kh_get(tk_observed_doubles, B->observed_doubles, id_feature);
-      if (kho == kh_end(B->observed_doubles))
+      kho = tk_observed_doubles_get(B->observed_doubles, id_feature);
+      if (kho == tk_observed_doubles_end(B->observed_doubles))
         continue;
-      tk_duset_t *value_set = kh_value(B->observed_doubles, kho);
+      tk_duset_t *value_set = tk_observed_doubles_val(B->observed_doubles, kho);
       tk_dvec_clear(value_vec);
       tk_duset_dump(value_set, value_vec);
       tk_dvec_asc(value_vec, 0, value_vec->n);
       tk_booleanizer_add_thresholds(L, B, Bi, id_feature, value_vec);
     }
-  }
+  }));
   tk_booleanizer_shrink(B);
   B->finalized = true;
   lua_remove(L, i_value_vec);
@@ -489,23 +504,23 @@ static inline void tk_booleanizer_restrict (
     tk_lua_verror(L, 2, "restrict", "finalize must be called before restrict");
     return;
   }
-  tk_iumap_t *feature_id_map = tk_iumap_create();
+  tk_iumap_t *feature_id_map = tk_iumap_create(0, 0);
   khint_t khi;
   int kha;
   for (int64_t i = 0; i < (int64_t) ids->n; i ++) {
     int64_t old_id = ids->a[i];
     khi = tk_iumap_put(feature_id_map, old_id, &kha);
     if (kha)
-      tk_iumap_value(feature_id_map, khi) = i;
+      tk_iumap_setval(feature_id_map, khi, i);
   }
-  tk_iuset_t *new_continuous   = tk_iuset_create();
-  tk_iuset_t *new_categorical  = tk_iuset_create();
-  tk_iumap_t *new_integer_features = tk_iumap_create();
-  tk_zumap_t *new_string_features  = tk_zumap_create();
-  khash_t(tk_cat_bits_string) *new_cat_bits_string = kh_init(tk_cat_bits_string);
-  khash_t(tk_cat_bits_double) *new_cat_bits_double = kh_init(tk_cat_bits_double);
-  tk_iumap_t *new_cont_bits = tk_iumap_create();
-  khash_t(tk_cont_thresholds) *new_cont_thresholds = kh_init(tk_cont_thresholds);
+  tk_iuset_t *new_continuous   = tk_iuset_create(0, 0);
+  tk_iuset_t *new_categorical  = tk_iuset_create(0, 0);
+  tk_iumap_t *new_integer_features = tk_iumap_create(0, 0);
+  tk_zumap_t *new_string_features  = tk_zumap_create(0, 0);
+  tk_cat_bits_string_t *new_cat_bits_string = tk_cat_bits_string_create(0, 0);
+  tk_cat_bits_double_t *new_cat_bits_double = tk_cat_bits_double_create(0, 0);
+  tk_iumap_t *new_cont_bits = tk_iumap_create(0, 0);
+  tk_cont_thresholds_t *new_cont_thresholds = tk_cont_thresholds_create(0, 0);
   int64_t next_bit = 0;
   for (int64_t new_f = 0; new_f < (int64_t) ids->n; new_f ++) {
     int64_t old_f = ids->a[new_f];
@@ -514,56 +529,59 @@ static inline void tk_booleanizer_restrict (
     if (tk_iuset_contains(B->categorical, old_f))
       tk_iuset_put(new_categorical, new_f, NULL);
     khint_t k = tk_iumap_get(B->integer_features, old_f);
-    if (k != kh_end(B->integer_features)) {
+    if (k != tk_iumap_end(B->integer_features)) {
       khi = tk_iumap_put(new_integer_features, new_f, &kha);
       if (kha)
-        tk_iumap_value(new_integer_features, khi) = tk_iumap_value(B->integer_features, k);
+        tk_iumap_setval(new_integer_features, khi, tk_iumap_val(B->integer_features, k));
     }
-    k = kh_end(B->string_features);
+    k = tk_zumap_end(B->string_features);
     const char *z;
     int64_t v;
-    tk_zumap_foreach(B->string_features, z, v, ({
+    tk_umap_foreach(B->string_features, z, v, ({
       if (v == old_f)
         k = tk_zumap_get(B->string_features, z);
     }));
-    if (k != kh_end(B->string_features)) {
-      z = strdup(kh_key(B->string_features, k));
+    if (k != tk_zumap_end(B->string_features)) {
+      z = strdup(tk_zumap_key(B->string_features, k));
       khi = tk_zumap_put(new_string_features, z, &kha);
       if (kha)
-        tk_zumap_value(new_string_features, khi) = new_f;
+        tk_zumap_setval(new_string_features, khi, new_f);
     }
     tk_cat_bit_string_t cbs;
     int64_t new_bit;
-    kh_foreach(B->cat_bits_string, cbs, v, ({
+    tk_umap_foreach(B->cat_bits_string, cbs, v, ({
       if (cbs.f == old_f) {
         tk_cat_bit_string_t new_key = { .f = new_f, .v = strdup(cbs.v) };
-        khint_t nk = kh_put(tk_cat_bits_string, new_cat_bits_string, new_key, NULL);
+        int kha;
+        khint_t nk = tk_cat_bits_string_put(new_cat_bits_string, new_key, &kha);
         new_bit = next_bit ++;
-        kh_value(new_cat_bits_string, nk) = new_bit;
+        tk_cat_bits_string_setval(new_cat_bits_string, nk, new_bit);
       }
     }));
     tk_cat_bit_double_t cbd;
-    kh_foreach(B->cat_bits_double, cbd, v, ({
+    tk_umap_foreach(B->cat_bits_double, cbd, v, ({
       if (cbd.f == old_f) {
         tk_cat_bit_double_t new_key = { .f = new_f, .v = cbd.v };
-        khint_t nk = kh_put(tk_cat_bits_double, new_cat_bits_double, new_key, NULL);
+        int kha;
+        khint_t nk = tk_cat_bits_double_put(new_cat_bits_double, new_key, &kha);
         new_bit = next_bit ++;
-        kh_value(new_cat_bits_double, nk) = new_bit;
+        tk_cat_bits_double_setval(new_cat_bits_double, nk, new_bit);
       }
     }));
     k = tk_iumap_get(B->cont_bits, old_f);
-    if (k != kh_end(B->cont_bits)) {
+    if (k != tk_iumap_end(B->cont_bits)) {
       khi = tk_iumap_put(new_cont_bits, new_f, &kha);
       if (kha)
-        tk_iumap_value(new_cont_bits, khi) = next_bit;
-      khint_t kth = kh_get(tk_cont_thresholds, B->cont_thresholds, old_f);
-      if (kth != kh_end(B->cont_thresholds)) {
-        tk_dvec_t *old_vec = kh_value(B->cont_thresholds, kth);
+        tk_iumap_setval(new_cont_bits, khi, next_bit);
+      khint_t kth = tk_cont_thresholds_get(B->cont_thresholds, old_f);
+      if (kth != tk_cont_thresholds_end(B->cont_thresholds)) {
+        tk_dvec_t *old_vec = tk_cont_thresholds_val(B->cont_thresholds, kth);
         tk_dvec_t *new_vec = tk_dvec_create(L, old_vec->n, 0, 0);
         memcpy(new_vec->a, old_vec->a, sizeof(double) * old_vec->n);
         new_vec->n = old_vec->n;
-        khint_t nk = kh_put(tk_cont_thresholds, new_cont_thresholds, new_f, NULL);
-        kh_value(new_cont_thresholds, nk) = new_vec;
+        int kha;
+        khint_t nk = tk_cont_thresholds_put(new_cont_thresholds, new_f, &kha);
+        tk_cont_thresholds_setval(new_cont_thresholds, nk, new_vec);
       }
       next_bit += (int64_t) B->n_thresholds;
     }
@@ -572,15 +590,14 @@ static inline void tk_booleanizer_restrict (
   tk_iuset_destroy(B->categorical);
   tk_iumap_destroy(B->integer_features);
   const char *z;
-  int64_t v;
-  tk_zumap_foreach(B->string_features, z, v, ({
+  tk_umap_foreach_keys(B->string_features, z, ({
     free((char *) z);
-  }))
+  }));
   tk_zumap_destroy(B->string_features);
-  kh_destroy(tk_cat_bits_string, B->cat_bits_string);
-  kh_destroy(tk_cat_bits_double, B->cat_bits_double);
+  tk_cat_bits_string_destroy(B->cat_bits_string);
+  tk_cat_bits_double_destroy(B->cat_bits_double);
   tk_iumap_destroy(B->cont_bits);
-  kh_destroy(tk_cont_thresholds, B->cont_thresholds);
+  tk_cont_thresholds_destroy(B->cont_thresholds);
   tk_iumap_destroy(feature_id_map);
   B->continuous = new_continuous;
   B->categorical = new_categorical;
@@ -603,19 +620,19 @@ static inline void tk_booleanizer_destroy (
   tk_iuset_destroy(B->continuous);
   tk_iuset_destroy(B->categorical);
   tk_iumap_destroy(B->integer_features);
-  const char *z; int64_t f;
-  tk_zumap_foreach(B->string_features, z, f, ({
+  const char *z;
+  tk_umap_foreach_keys(B->string_features, z, ({
     free((char *) z);
   }));
   tk_zumap_destroy(B->string_features);
-  kh_destroy(tk_observed_strings, B->observed_strings);
-  kh_destroy(tk_cont_thresholds, B->cont_thresholds);
+  tk_observed_strings_destroy(B->observed_strings);
+  tk_cont_thresholds_destroy(B->cont_thresholds);
   tk_cat_bit_string_t cbs;
-  kh_foreach(B->cat_bits_string, cbs, f, ({
+  tk_umap_foreach_keys(B->cat_bits_string, cbs, ({
     free(cbs.v);
   }));
-  kh_destroy(tk_cat_bits_string, B->cat_bits_string);
-  kh_destroy(tk_cat_bits_double, B->cat_bits_double);
+  tk_cat_bits_string_destroy(B->cat_bits_string);
+  tk_cat_bits_double_destroy(B->cat_bits_double);
   tk_iumap_destroy(B->cont_bits);
   memset(B, 0, sizeof(*B));
   B->finalized = false;
@@ -640,60 +657,42 @@ static inline void tk_booleanizer_persist (
   tk_lua_fwrite(L, (char *) &B->next_feature, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, (char *) &B->next_bit, sizeof(uint64_t),1, fh);
   khint_t sz;
-  int64_t f, v;
-  sz = tk_iuset_size(B->continuous);
-  tk_lua_fwrite(L, (char *) &sz, sizeof(sz), 1, fh);
-  tk_iuset_foreach(B->continuous, f, ({
-    tk_lua_fwrite(L, (char *) &f, sizeof(int64_t), 1, fh);
-  }));
-  sz = tk_iuset_size(B->categorical);
-  tk_lua_fwrite(L, (char *) &sz, sizeof(sz), 1, fh);
-  tk_iuset_foreach(B->categorical, f, ({
-    tk_lua_fwrite(L, (char *) &f, sizeof(int64_t), 1, fh);
-  }));
-  sz = tk_iumap_size(B->integer_features);
-  tk_lua_fwrite(L, (char *) &sz, sizeof(sz), 1, fh);
-  tk_iumap_foreach(B->integer_features, f, v, ({
-    tk_lua_fwrite(L, (char *) &f, sizeof(int64_t), 1, fh);
-    tk_lua_fwrite(L, (char *) &v, sizeof(int64_t), 1, fh);
-  }));
+  int64_t f;
+  tk_iuset_persist(L, B->continuous, fh);
+  tk_iuset_persist(L, B->categorical, fh);
+  tk_iumap_persist(L, B->integer_features, fh);
   sz = tk_zumap_size(B->string_features);
   tk_lua_fwrite(L, (char *) &sz, sizeof(sz), 1, fh);
   const char *z;
-  tk_zumap_foreach(B->string_features, z, f, ({
+  tk_umap_foreach(B->string_features, z, f, ({
     size_t len = strlen(z);
     tk_lua_fwrite(L, (char *) &len, sizeof(size_t), 1, fh);
     tk_lua_fwrite(L, (char *) z, len, 1, fh);
     tk_lua_fwrite(L, (char *) &f, sizeof(int64_t), 1, fh);
   }));
-  sz = kh_size(B->cat_bits_string);
+  sz = tk_cat_bits_string_size(B->cat_bits_string);
   tk_lua_fwrite(L, (char *) &sz, sizeof(sz), 1, fh);
   tk_cat_bit_string_t cbs;
-  kh_foreach(B->cat_bits_string, cbs, f, ({
+  tk_umap_foreach(B->cat_bits_string, cbs, f, ({
     tk_lua_fwrite(L, (char *) &cbs.f, sizeof(int64_t), 1, fh);
     size_t len = strlen(cbs.v);
     tk_lua_fwrite(L, (char *) &len, sizeof(size_t), 1, fh);
     tk_lua_fwrite(L, cbs.v, len, 1, fh);
     tk_lua_fwrite(L, (char *) &f, sizeof(int64_t), 1, fh);
   }));
-  sz = kh_size(B->cat_bits_double);
+  sz = tk_cat_bits_double_size(B->cat_bits_double);
   tk_lua_fwrite(L, (char *) &sz, sizeof(sz), 1, fh);
   tk_cat_bit_double_t cbd;
-  kh_foreach(B->cat_bits_double, cbd, f, ({
+  tk_umap_foreach(B->cat_bits_double, cbd, f, ({
     tk_lua_fwrite(L, (char *) &cbd.f, sizeof(int64_t), 1, fh);
     tk_lua_fwrite(L, (char *) &cbd.v, sizeof(double),  1, fh);
     tk_lua_fwrite(L, (char *) &f, sizeof(int64_t), 1, fh);
   }));
-  sz = tk_iumap_size(B->cont_bits);
-  tk_lua_fwrite(L, (char *) &sz, sizeof(sz), 1, fh);
-  tk_iumap_foreach(B->cont_bits, f, v, ({
-    tk_lua_fwrite(L, (char *) &f, sizeof(int64_t), 1, fh);
-    tk_lua_fwrite(L, (char *) &v, sizeof(int64_t), 1, fh);
-  }));
-  sz = kh_size(B->cont_thresholds);
+  tk_iumap_persist(L, B->cont_bits, fh);
+  sz = tk_cont_thresholds_size(B->cont_thresholds);
   tk_lua_fwrite(L, (char *) &sz, sizeof(sz), 1, fh);
   tk_dvec_t *thresholds;
-  kh_foreach(B->cont_thresholds, f, thresholds, ({
+  tk_umap_foreach(B->cont_thresholds, f, thresholds, ({
     tk_lua_fwrite(L, (char *) &f, sizeof(int64_t), 1, fh);
     tk_lua_fwrite(L, (char *) &thresholds->n, sizeof(size_t), 1, fh);
     tk_lua_fwrite(L, (char *) thresholds->a, sizeof(double), thresholds->n, fh);
@@ -902,17 +901,17 @@ static inline tk_booleanizer_t *tk_booleanizer_create (
   tk_ivec_t *categorical
 ) {
   tk_booleanizer_t *B = tk_lua_newuserdata(L, tk_booleanizer_t, TK_BOOLEANIZER_MT, tk_booleanizer_mt_fns, tk_booleanizer_gc_lua);
-  B->continuous = (continuous != NULL) ? tk_iuset_from_ivec(continuous) : tk_iuset_create();
-  B->categorical = (categorical != NULL) ? tk_iuset_from_ivec(categorical) : tk_iuset_create();
+  B->continuous = (continuous != NULL) ? tk_iuset_from_ivec(0, continuous) : tk_iuset_create(0, 0);
+  B->categorical = (categorical != NULL) ? tk_iuset_from_ivec(0, categorical) : tk_iuset_create(0, 0);
   B->n_thresholds = n_thresholds;
-  B->integer_features = tk_iumap_create();
-  B->string_features = tk_zumap_create();
-  B->observed_doubles = kh_init(tk_observed_doubles);
-  B->observed_strings = kh_init(tk_observed_strings);
-  B->cat_bits_string = kh_init(tk_cat_bits_string);
-  B->cat_bits_double = kh_init(tk_cat_bits_double);
-  B->cont_bits = tk_iumap_create();
-  B->cont_thresholds = kh_init(tk_cont_thresholds);
+  B->integer_features = tk_iumap_create(0, 0);
+  B->string_features = tk_zumap_create(0, 0);
+  B->observed_doubles = tk_observed_doubles_create(0, 0);
+  B->observed_strings = tk_observed_strings_create(0, 0);
+  B->cat_bits_string = tk_cat_bits_string_create(0, 0);
+  B->cat_bits_double = tk_cat_bits_double_create(0, 0);
+  B->cont_bits = tk_iumap_create(0, 0);
+  B->cont_thresholds = tk_cont_thresholds_create(0, 0);
   B->next_feature = 0;
   B->next_bit = 0;
   B->finalized = false;
@@ -933,29 +932,10 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
   khint_t khi, sz;
   int kha;
   int64_t f;
-  B->continuous = tk_iuset_create();
-  tk_lua_fread(L, (char *) &sz, sizeof(sz), 1, fh);
-  for (khint_t i = 0; i < sz; i ++) {
-    tk_lua_fread(L, (char *) &f, sizeof(int64_t), 1, fh);
-    tk_iuset_put(B->continuous, f, &kha);
-  }
-  B->categorical = tk_iuset_create();
-  tk_lua_fread(L, (char *) &sz, sizeof(sz), 1, fh);
-  for (khint_t i = 0; i < sz; i ++) {
-    tk_lua_fread(L, (char *) &f, sizeof(int64_t), 1, fh);
-    tk_iuset_put(B->categorical, f, &kha);
-  }
-  int64_t key, val;
-  B->integer_features = tk_iumap_create();
-  tk_lua_fread(L, (char *) &sz, sizeof(sz), 1, fh);
-  for (khint_t i = 0; i < sz; i ++) {
-    tk_lua_fread(L, (char *) &key, sizeof(int64_t), 1, fh);
-    tk_lua_fread(L, (char *) &val, sizeof(int64_t), 1, fh);
-    khi = tk_iumap_put(B->integer_features, key, &kha);
-    if (kha)
-      tk_iumap_value(B->integer_features, khi) = val;
-  }
-  B->string_features = tk_zumap_create();
+  B->continuous = tk_iuset_load(0, fh);
+  B->categorical = tk_iuset_load(0, fh);
+  B->integer_features = tk_iumap_load(0, fh);
+  B->string_features = tk_zumap_create(0, 0);
   size_t len;
   tk_lua_fread(L, (char *) &sz, sizeof(sz), 1, fh);
   for (khint_t i = 0; i < sz; i ++) {
@@ -966,9 +946,9 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
     tk_lua_fread(L, (char *) &f, sizeof(int64_t), 1, fh);
     khi = tk_zumap_put(B->string_features, z, &kha);
     if (kha)
-      tk_zumap_value(B->string_features, khi) = f;
+      tk_zumap_setval(B->string_features, khi, f);
   }
-  B->cat_bits_string = kh_init(tk_cat_bits_string);
+  B->cat_bits_string = tk_cat_bits_string_create(0, 0);
   tk_lua_fread(L, (char *) &sz, sizeof(sz), 1, fh);
   for (khint_t i = 0; i < sz; i ++) {
     int64_t feature_id;
@@ -980,10 +960,10 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
     int64_t bit_id;
     tk_lua_fread(L, (char *) &bit_id, sizeof(int64_t), 1, fh);
     tk_cat_bit_string_t key = { .f = feature_id, .v = value };
-    khint_t k = kh_put(tk_cat_bits_string, B->cat_bits_string, key, &kha);
-    kh_value(B->cat_bits_string, k) = bit_id;
+    khint_t k = tk_cat_bits_string_put(B->cat_bits_string, key, &kha);
+    tk_cat_bits_string_setval(B->cat_bits_string, k, bit_id);
   }
-  B->cat_bits_double = kh_init(tk_cat_bits_double);
+  B->cat_bits_double = tk_cat_bits_double_create(0, 0);
   tk_lua_fread(L, (char *) &sz, sizeof(sz), 1, fh);
   for (khint_t i = 0; i < sz; i ++) {
     int64_t feature_id;
@@ -993,19 +973,11 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
     tk_lua_fread(L, (char *) &dval, sizeof(double), 1, fh);
     tk_lua_fread(L, (char *) &bit_id, sizeof(int64_t), 1, fh);
     tk_cat_bit_double_t key = { .f = feature_id, .v = dval };
-    khint_t k = kh_put(tk_cat_bits_double, B->cat_bits_double, key, &kha);
-    kh_value(B->cat_bits_double, k) = bit_id;
+    khint_t k = tk_cat_bits_double_put(B->cat_bits_double, key, &kha);
+    tk_cat_bits_double_setval(B->cat_bits_double, k, bit_id);
   }
-  B->cont_bits = tk_iumap_create();
-  tk_lua_fread(L, (char *) &sz, sizeof(sz), 1, fh);
-  for (khint_t i = 0; i < sz; i++) {
-    tk_lua_fread(L, (char *) &key, sizeof(int64_t), 1, fh);
-    tk_lua_fread(L, (char *) &val, sizeof(int64_t), 1, fh);
-    khi = tk_iumap_put(B->cont_bits, key, &kha);
-    if (kha)
-      tk_iumap_value(B->cont_bits, khi) = val;
-  }
-  B->cont_thresholds = kh_init(tk_cont_thresholds);
+  B->cont_bits = tk_iumap_load(0, fh);
+  B->cont_thresholds = tk_cont_thresholds_create(0, 0);
   tk_lua_fread(L, (char *) &sz, sizeof(sz), 1, fh);
   for (khint_t i = 0; i < sz; i ++) {
     int64_t feature_id;
@@ -1015,8 +987,8 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
     tk_dvec_t *thresh_vec = tk_dvec_create(L, n_thresh, 0, 0);
     tk_lua_fread(L, (char *) thresh_vec->a, sizeof(double), n_thresh, fh);
     thresh_vec->n = n_thresh;
-    khint_t k = kh_put(tk_cont_thresholds, B->cont_thresholds, feature_id, &kha);
-    kh_value(B->cont_thresholds, k) = thresh_vec;
+    khint_t k = tk_cont_thresholds_put(B->cont_thresholds, feature_id, &kha);
+    tk_cont_thresholds_setval(B->cont_thresholds, k, thresh_vec);
   }
   B->destroyed = false;
   return B;

@@ -1,18 +1,19 @@
 # Now
 
 - All tests functional
-
+- Sanitize
+- Ensure tk_cvec_t used in place of strings where possible
 - tk_cvec_t
     - Ensure cvec used everywhere (no strings!)
-
-- Lua GC for threadpool
+- Add lua_managed concept to threadpool
 - Connect all allocs to Lua
-- Double-check lua callback error handling
+    - Use ephemerons for long-lived maps (in indices, booleanizer, etc)
+    - Replace any lingering mallocs with vectors or newuserdata
+    - Double-check usage inside threads, using special signal for cleanup
+    - Double-check lua callback error handling, allowing errors to be thrown as
+      long as all allocs are tied to Lua
 
 # Next
-
-- tk_inv_t
-    - Consider making decay a query-time parameter
 
 - Rename tch to flipper
 - Rename library and project to santoku-learn
@@ -28,6 +29,8 @@
       booleanizer, feature selection via learned clauses, feature selection via
       chi2, mi, etc (look at test cases for all features)
 
+# Later
+
 - l-sth
     - IMDB & QQP
     - Encoding landmark codes as bit-frequencies instead of (or in addition to)
@@ -40,12 +43,6 @@
     - Explore chi2/etc on landmark features
     - Select bits for encoder-learnability
 
-- graph
-    - Re-evaluate negative edge handling in graph (see 2025-08-10/simplify
-      branch and prior history)
-    - Will need this for handling signed (e.g. SNLI) input pairs in a logically
-      sound way
-
 - tsetlin
     - Feature selection via analysis of clause weights, with option to prune
       unused literals, returning pruned for subsequent filtering of
@@ -56,13 +53,10 @@
     - Sparse/dense linear SVM for codebook/classifier learning
 
 - Chores
-    - Move conf.h helpers into other santoku libraries (str, hash, interleaved alloc)
+    - Move conf.h helpers into other santoku libraries (tm_dl_t, interleaved alloc)
     - Error checks on dimensions to prevent segfaults everywhere
-    - Sanitize all tests and downstream projects for memory leaks
     - Persist/load versioning or other safety measures
     - Profile hot paths and vectorization opportunities
-
-# Later
 
 - tbhss
     - Reboot as a cli interface to this framework (toku learn {OPTIONS})
@@ -71,7 +65,7 @@
     - templated trie
 
 - l-sth
-    - SNLI (will likely require some new graph features to handle the negatives)
+    - SNLI (use flip_at 0.5 with edges below 0.5 for repulsion)
 
 - tk_graph_t
     - speed up init & seed phase (slowest phase of entire pipeline)
@@ -101,7 +95,7 @@
         - generalized hyperparameter exploration
 
 - evaluator
-    - when scanning margins and multiple are tied for best, pick the median
+    - When scanning margins and multiple are tied for best, pick the median
 
 - tk_graph_t
     - Support querying for changes made to seed list over time (removed during dedupe, added by phase)
@@ -110,6 +104,9 @@
     - Precompute probes
 
 # Eventually
+
+- tk_inv_t
+    - Consider making decay a query-time parameter
 
 - graph
     - Consider removing neighborhoods calls from the graph module, instead of

@@ -3,19 +3,14 @@
 #include <santoku/iuset.h>
 #include <santoku/dvec.h>
 #include <santoku/ivec.h>
+#include <santoku/cvec.h>
+#include <santoku/cumap.h>
+#include <santoku/zumap.h>
 #include <assert.h>
 #include <ctype.h>
 
 #define MT_TOKENIZER "tk_tokenizer_t"
 #define TK_TOKENIZER_EPH "tk_tokenizer_eph"
-
-KHASH_MAP_INIT_STR(ids, int);
-KHASH_MAP_INIT_INT(strs, char *);
-
-typedef khash_t(ids) tb_ids_t;
-typedef khash_t(strs) tb_strs_t;
-typedef kvec_t(int) tb_tokens_t;
-typedef kvec_t(char) tb_token_t;
 
 typedef struct {
   int max_len;
@@ -28,13 +23,13 @@ typedef struct {
   int negations;
   int align;
   int next_id;
-  tb_ids_t *ids;
-  tb_strs_t *strs;
-  tb_tokens_t tokens;
-  tb_tokens_t window;
-  tb_token_t tmp_token;
-  tb_token_t tmp_skipgram;
-  tb_token_t tmp_append;
+  tk_zumap_t *ids;
+  tk_cumap_t *strs;
+  tk_ivec_t *tokens;
+  tk_ivec_t *window;
+  tk_cvec_t *tmp_token;
+  tk_cvec_t *tmp_skipgram;
+  tk_cvec_t *tmp_append;
   int window_size;
   bool collected;
   bool finalized;
@@ -51,16 +46,17 @@ static inline int tb_tokenizer_gc (lua_State *L)
   if (tokenizer->collected)
     return 0;
   tokenizer->collected = true;
-  for (khint_t k = kh_begin(tokenizer->strs); k < kh_end(tokenizer->strs); k ++)
-    if (kh_exist(tokenizer->strs, k))
-      free((char *) kh_value(tokenizer->strs, k));
-  kv_destroy(tokenizer->tokens);
-  kv_destroy(tokenizer->tmp_token);
-  kv_destroy(tokenizer->tmp_append);
-  kv_destroy(tokenizer->tmp_skipgram);
-  kv_destroy(tokenizer->window);
-  kh_destroy(ids, tokenizer->ids);
-  kh_destroy(strs, tokenizer->strs);
+  const char *stok;
+  tk_umap_foreach_values(tokenizer->strs, stok, ({
+    free((char *) stok);
+  }))
+  tk_cvec_destroy(tokenizer->tmp_token);
+  tk_cvec_destroy(tokenizer->tmp_append);
+  tk_cvec_destroy(tokenizer->tmp_skipgram);
+  tk_ivec_destroy(tokenizer->tokens);
+  tk_ivec_destroy(tokenizer->window);
+  tk_zumap_destroy(tokenizer->ids);
+  tk_cumap_destroy(tokenizer->strs);
   return 0;
 }
 
@@ -92,16 +88,16 @@ static inline int tb_tokenizer_persist (lua_State *L)
   tk_lua_fwrite(L, (char *) &tokenizer->negations, sizeof(int), 1, fh);
   tk_lua_fwrite(L, (char *) &tokenizer->align, sizeof(int), 1, fh);
   tk_lua_fwrite(L, (char *) &tokenizer->next_id, sizeof(int), 1, fh);
-  tk_lua_fwrite(L, (char *) &kh_size(tokenizer->ids), sizeof(khint_t), 1, fh);
-  for (khint_t i = kh_begin(tokenizer->ids); i < kh_end(tokenizer->ids); i ++)
-    if (kh_exist(tokenizer->ids, i)) {
-      char *tok = (char *) kh_key(tokenizer->ids, i);
-      size_t len = strlen(tok);
-      int id = kh_value(tokenizer->ids, i) ;
-      tk_lua_fwrite(L, (char *) &len, sizeof(size_t), 1, fh);
-      tk_lua_fwrite(L, tok, len, 1, fh);
-      tk_lua_fwrite(L, (char *) &id, sizeof(int), 1, fh);
-    }
+  size_t nids = tk_zumap_size(tokenizer->ids);
+  tk_lua_fwrite(L, (char *) &nids, sizeof(size_t), 1, fh);
+  const char *tok;
+  int64_t id;
+  tk_umap_foreach(tokenizer->ids, tok, id, ({
+    size_t len = strlen(tok);
+    tk_lua_fwrite(L, (char *) &len, sizeof(size_t), 1, fh);
+    tk_lua_fwrite(L, (char *) tok, len, 1, fh);
+    tk_lua_fwrite(L, (char *) &id, sizeof(int), 1, fh);
+  }))
   if (!tostr) {
     tk_lua_fclose(L, fh);
     return 0;
@@ -124,9 +120,9 @@ static inline char *tb_tokenizer_id_str (
   tb_tokenizer_t *tokenizer,
   int id
 ) {
-  khint_t k = kh_get(strs, tokenizer->strs, (uint32_t) id);
-  assert(k != kh_end(tokenizer->strs));
-  return (char *) kh_value(tokenizer->strs, k);
+  uint32_t k = tk_cumap_get(tokenizer->strs, id);
+  assert(k != tk_cumap_end(tokenizer->strs));
+  return (char *) tk_cumap_val(tokenizer->strs, k);
 }
 
 static inline int tb_tokenizer_new_token (
@@ -136,10 +132,10 @@ static inline int tb_tokenizer_new_token (
 ) {
   char *tok = *tokp;
   int id, absent;
-  khint_t k = kh_get(ids, tokenizer->ids, tok);
-  if (k != kh_end(tokenizer->ids)) {
-    id = kh_value(tokenizer->ids, k);
-    *tokp = (char *) kh_key(tokenizer->ids, k);
+  uint32_t k = tk_zumap_get(tokenizer->ids, tok);
+  if (k != tk_zumap_end(tokenizer->ids)) {
+    id = tk_zumap_val(tokenizer->ids, k);
+    *tokp = (char *) tk_zumap_key(tokenizer->ids, k);
   } else if (tokenizer->finalized) {
     // After finalization, don't add new tokens
     return -1;
@@ -147,12 +143,12 @@ static inline int tb_tokenizer_new_token (
     // During training, add new tokens
     char *tmp = strdup(tok);
     id = tokenizer->next_id ++;
-    k = kh_put(ids, tokenizer->ids, tmp, &absent);
+    k = tk_zumap_put(tokenizer->ids, tmp, &absent);
     assert(absent);
-    kh_value(tokenizer->ids, k) = id;
-    k = kh_put(strs, tokenizer->strs, (uint32_t) id, &absent);
+    tk_zumap_setval(tokenizer->ids, k, id);
+    k = tk_cumap_put(tokenizer->strs, id, &absent);
     assert(absent);
-    kh_value(tokenizer->strs, k) = tmp;
+    tk_cumap_setval(tokenizer->strs, k, tmp);
     *tokp = tmp;
   }
   return id;
@@ -175,16 +171,10 @@ static inline void tb_tokenizer_append_cgrams (
       char *bufp = buf;
       int id = tb_tokenizer_new_token(tokenizer, &bufp, (khint_t) k + 1);
       if (id != -1)
-        kv_push(int, tokenizer->tokens, id);
+        tk_ivec_push(tokenizer->tokens, id);
     }
   }
 }
-
-#define kv_push_str(type, vec, str) \
-  do { \
-    for (char *p__ = (str); *p__; p__ ++) \
-      kv_push(type, vec, *p__); \
-  } while (0)
 
 static inline bool tb_tokenizer_is_delim_char (char c)
 {
@@ -201,17 +191,17 @@ static inline int tb_have_bytes (const char *in, size_t i, size_t n)
   return 1;
 }
 
-static inline char *tb_tokenizer_normalize (char *in, size_t *len, int max_run)
+static inline tk_cvec_t *tb_tokenizer_normalize (char *in, size_t len, int max_run)
 {
-  kvec_t(char) out;
-  kv_init(out);
+  tk_cvec_t *out = tk_cvec_create(0, len, 0, 0);
+  out->n = 0;
   char last = 0;
   int run = 0;
 
-  for (size_t i = 0; in[i];) {
+  for (size_t i = 0; i < len;) {
     if (last && ((isalpha((unsigned char)last) && isdigit((unsigned char)in[i])) ||
       (isdigit((unsigned char)last) && isalpha((unsigned char)in[i])))) {
-      kv_push(char, out, ' ');
+      tk_cvec_push(out, ' ');
       last = ' ';
     }
 
@@ -224,75 +214,75 @@ static inline char *tb_tokenizer_normalize (char *in, size_t *len, int max_run)
     else { last = in[i]; }
 
     if (in[i] == '#') {
-      kv_push(char, out, ' ');
-      kv_push_str(char, out, "#hash");
-      kv_push(char, out, ' ');
+      tk_cvec_push(out, ' ');
+      tk_cvec_push_str(out, "#hash");
+      tk_cvec_push(out, ' ');
       i ++;
       last = ' ';
       run = 0;
       continue;
     } else if (tb_have_bytes(in, i, 2) && in[i] == ':' && in[i + 1] == ')') {
-      kv_push(char, out, ' ');
-      kv_push_str(char, out, "#smiley-positive");
-      kv_push(char, out, ' ');
+      tk_cvec_push(out, ' ');
+      tk_cvec_push_str(out, "#smiley-positive");
+      tk_cvec_push(out, ' ');
       i += 2;
       last = ' ';
       run = 0;
       continue;
     } else if (tb_have_bytes(in, i, 2) && in[i] == ':' && tolower((unsigned char)in[i + 1]) == 'd') {
-      kv_push(char, out, ' ');
-      kv_push_str(char, out, "#smiley-positive");
-      kv_push(char, out, ' ');
+      tk_cvec_push(out, ' ');
+      tk_cvec_push_str(out, "#smiley-positive");
+      tk_cvec_push(out, ' ');
       i += 2;
       last = ' ';
       run = 0;
       continue;
     } else if (tb_have_bytes(in, i, 2) && in[i] == ':' && in[i + 1] == '(') {
-      kv_push(char, out, ' ');
-      kv_push_str(char, out, "#smiley-negative");
-      kv_push(char, out, ' ');
+      tk_cvec_push(out, ' ');
+      tk_cvec_push_str(out, "#smiley-negative");
+      tk_cvec_push(out, ' ');
       i += 2;
       last = ' ';
       run = 0;
       continue;
     } else if (tb_have_bytes(in, i, 2) && in[i] == ';' && in[i + 1] == ')') {
-      kv_push(char, out, ' ');
-      kv_push_str(char, out, "#smiley-wink");
-      kv_push(char, out, ' ');
+      tk_cvec_push(out, ' ');
+      tk_cvec_push_str(out, "#smiley-wink");
+      tk_cvec_push(out, ' ');
       i += 2;
       last = ' ';
       run = 0;
       continue;
     } else if (in[i] == '!') {
-      kv_push(char, out, ' ');
-      kv_push_str(char, out, "#exclamation");
-      kv_push(char, out, ' ');
+      tk_cvec_push(out, ' ');
+      tk_cvec_push_str(out, "#exclamation");
+      tk_cvec_push(out, ' ');
       while (in[i] == '!') i ++;
       last = ' ';
       run = 0;
       continue;
     } else if (in[i] == '?') {
-      kv_push(char, out, ' ');
-      kv_push_str(char, out, "#question");
-      kv_push(char, out, ' ');
+      tk_cvec_push(out, ' ');
+      tk_cvec_push_str(out, "#question");
+      tk_cvec_push(out, ' ');
       while (in[i] == '?') i ++;
       last = ' ';
       run = 0;
       continue;
     } else if (tb_have_bytes(in, i, 3) && in[i] == '.' && in[i + 1] == '.' && in[i + 2] == '.') {
-      kv_push(char, out, ' ');
-      kv_push_str(char, out, "#ellipsis");
-      kv_push(char, out, ' ');
+      tk_cvec_push(out, ' ');
+      tk_cvec_push_str(out, "#ellipsis");
+      tk_cvec_push(out, ' ');
       i += 3;
       last = ' ';
       run = 0;
       continue;
     } else if (tb_have_bytes(in, i, 2) && in[i] == '\'' && in[i + 1] == 's' &&
       (!tb_have_bytes(in, i, 3) || in[i + 2] == '\0' || tb_tokenizer_is_delim_char(in[i + 2]))) {
-      kv_push(char, out, ' ');
-      kv_push(char, out, '\'');
-      kv_push(char, out, 's');
-      kv_push(char, out, ' ');
+      tk_cvec_push(out, ' ');
+      tk_cvec_push(out, '\'');
+      tk_cvec_push(out, 's');
+      tk_cvec_push(out, ' ');
       i += 2;
       last = ' ';
       run = 0;
@@ -302,13 +292,13 @@ static inline char *tb_tokenizer_normalize (char *in, size_t *len, int max_run)
     unsigned char c = (unsigned char) in[i];
 
     if (c < 0x80) {
-      kv_push(char, out, tolower(c));
+      tk_cvec_push(out, tolower(c));
       i ++;
       continue;
     }
 
     if (tb_have_bytes(in, i, 2) && c == 0xC2 && (unsigned char) in[i + 1] == 0xA0) {
-      kv_push(char, out, ' ');
+      tk_cvec_push(out, ' ');
       i += 2;
       last = ' ';
       run = 0;
@@ -321,23 +311,23 @@ static inline char *tb_tokenizer_normalize (char *in, size_t *len, int max_run)
         case 0x93: // en dash
         case 0x94: // em dash
         case 0x90: // hyphen
-          kv_push(char, out, '-');
+          tk_cvec_push(out, '-');
           last = '-';
           break;
         case 0x98: // left single quote
         case 0x99: // right single quote
-          kv_push(char, out, '\'');     // don't drop; avoid "dont" vs "don't"
+          tk_cvec_push(out, '\'');     // don't drop; avoid "dont" vs "don't"
           last = '\'';
           break;
         case 0x9C: // left double quote
         case 0x9D: // right double quote
-          kv_push(char, out, ' ');      // prevent token concatenation
+          tk_cvec_push(out, ' ');      // prevent token concatenation
           last = ' ';
           break;
         case 0xA6: // ellipsis
-          kv_push(char, out, ' ');
-          kv_push_str(char, out, "#ellipsis");
-          kv_push(char, out, ' ');
+          tk_cvec_push(out, ' ');
+          tk_cvec_push_str(out, "#ellipsis");
+          tk_cvec_push(out, ' ');
           last = ' ';
           break;
         default:
@@ -353,9 +343,9 @@ static inline char *tb_tokenizer_normalize (char *in, size_t *len, int max_run)
       (unsigned char) c == '.' &&
       (unsigned char) in[i + 1] == '.' &&
       (unsigned char) in[i + 2] == '.') {
-      kv_push(char, out, ' ');
-      kv_push_str(char, out, "#ellipsis");
-      kv_push(char, out, ' ');
+      tk_cvec_push(out, ' ');
+      tk_cvec_push_str(out, "#ellipsis");
+      tk_cvec_push(out, ' ');
       i += 3;
       last = ' ';
       run = 0;
@@ -363,9 +353,9 @@ static inline char *tb_tokenizer_normalize (char *in, size_t *len, int max_run)
     } else if (tb_have_bytes(in, i, 2) &&
       (unsigned char) c == '.' &&
       (unsigned char) in[i + 1] == '.') {
-      kv_push(char, out, ' ');
-      kv_push_str(char, out, "#ellipsis");
-      kv_push(char, out, ' ');
+      tk_cvec_push(out, ' ');
+      tk_cvec_push_str(out, "#ellipsis");
+      tk_cvec_push(out, ' ');
       i += 2;
       last = ' ';
       run = 0;
@@ -378,17 +368,17 @@ static inline char *tb_tokenizer_normalize (char *in, size_t *len, int max_run)
       (unsigned char) in[i + 2] == 0x98) {
       unsigned char b4 = (unsigned char) in[i + 3];
       if ((b4 >= 0x80 && b4 <= 0x8B) || (b4 >= 0x8F && b4 <= 0x90) || (b4 == 0x99)) {
-        kv_push(char, out, ' ');
-        kv_push_str(char, out, "#emoji-positive");
-        kv_push(char, out, ' ');
+        tk_cvec_push(out, ' ');
+        tk_cvec_push_str(out, "#emoji-positive");
+        tk_cvec_push(out, ' ');
       } else if ((b4 >= 0x9E && b4 <= 0xA2) || (b4 >= 0xA3 && b4 <= 0xA6)) {
-        kv_push(char, out, ' ');
-        kv_push_str(char, out, "#emoji-negative");
-        kv_push(char, out, ' ');
+        tk_cvec_push(out, ' ');
+        tk_cvec_push_str(out, "#emoji-negative");
+        tk_cvec_push(out, ' ');
       } else {
-        kv_push(char, out, ' ');
-        kv_push_str(char, out, "#emoji-other");
-        kv_push(char, out, ' ');
+        tk_cvec_push(out, ' ');
+        tk_cvec_push_str(out, "#emoji-other");
+        tk_cvec_push(out, ' ');
       }
       i += 4;
       last = ' ';
@@ -402,13 +392,13 @@ static inline char *tb_tokenizer_normalize (char *in, size_t *len, int max_run)
       (unsigned char) in[i + 2] == 0x91 &&
       ((unsigned char) in[i + 3] == 0x8D || (unsigned char) in[i + 3] == 0x8E)) {
       if ((unsigned char) in[i + 3] == 0x8D) {
-        kv_push(char, out, ' ');
-        kv_push_str(char, out, "#emoji-positive");
-        kv_push(char, out, ' ');
+        tk_cvec_push(out, ' ');
+        tk_cvec_push_str(out, "#emoji-positive");
+        tk_cvec_push(out, ' ');
       } else {
-        kv_push(char, out, ' ');
-        kv_push_str(char, out, "#emoji-negative");
-        kv_push(char, out, ' ');
+        tk_cvec_push(out, ' ');
+        tk_cvec_push_str(out, "#emoji-negative");
+        tk_cvec_push(out, ' ');
       }
       i += 4;
       last = ' ';
@@ -420,9 +410,9 @@ static inline char *tb_tokenizer_normalize (char *in, size_t *len, int max_run)
       (unsigned char)c == 0xE2 &&
       (unsigned char) in[i + 1] == 0x9D &&
       (unsigned char) in[i + 2] == 0xA4) {
-      kv_push(char, out, ' ');
-      kv_push_str(char, out, "#emoji-positive");
-      kv_push(char, out, ' ');
+      tk_cvec_push(out, ' ');
+      tk_cvec_push_str(out, "#emoji-positive");
+      tk_cvec_push(out, ' ');
       if (tb_have_bytes(in, i, 6) &&
         (unsigned char)in[i + 3] == 0xEF &&
         (unsigned char)in[i + 4] == 0xB8 &&
@@ -445,9 +435,8 @@ static inline char *tb_tokenizer_normalize (char *in, size_t *len, int max_run)
     run = 0;
   }
 
-  kv_push(char, out, '\0');
-  *len = out.n - 1;
-  return out.a;
+  tk_cvec_push(out, '\0');
+  return out;
 }
 
 static const struct { char *from, *to1, *to2, *to3; } contractions[] = {
@@ -588,19 +577,19 @@ static void tb_tokenizer_append_skipgram (
   int winlen
 ) {
   if (to_pick == 0) {
-    tok->tmp_skipgram.n = 0;
+    tok->tmp_skipgram->n = 0;
     for (int i = 0; i < rfirst; i ++) {
       int win_idx = skipgram[i];
-      char *s = tb_tokenizer_id_str(tok, tok->window.a[win_idx]);
-      kv_push_str(char, tok->tmp_skipgram, s);
+      char *s = tb_tokenizer_id_str(tok, tok->window->a[win_idx]);
+      tk_cvec_push_str(tok->tmp_skipgram, s);
       if (i + 1 < rfirst)
-        kv_push(char, tok->tmp_skipgram, ' ');
+        tk_cvec_push(tok->tmp_skipgram, ' ');
     }
-    kv_push(char, tok->tmp_skipgram, '\0');
-    char *bufp = tok->tmp_skipgram.a;
-    int nid = tb_tokenizer_new_token(tok, &bufp, tok->tmp_skipgram.n);
+    tk_cvec_push(tok->tmp_skipgram, '\0');
+    char *bufp = tok->tmp_skipgram->a;
+    int nid = tb_tokenizer_new_token(tok, &bufp, tok->tmp_skipgram->n);
     if (nid != -1)
-      kv_push(int, tok->tokens, nid);
+      tk_ivec_push(tok->tokens, nid);
     return;
   }
   int picked = (int) rfirst - (int) to_pick;
@@ -627,18 +616,18 @@ static inline void tb_tokenizer_append_token (
     (*negation) --;
   if (!word || word[0] == '\0')
     return;
-  tokenizer->tmp_append.n = 0;
+  tokenizer->tmp_append->n = 0;
   if (tb_tokenizer_is_number_token(word)) {
     if (is_negated) {
-      kv_push_str(char, tokenizer->tmp_append, "-#number");
+      tk_cvec_push_str(tokenizer->tmp_append, "-#number");
     } else {
-      kv_push_str(char, tokenizer->tmp_append, "#number");
+      tk_cvec_push_str(tokenizer->tmp_append, "#number");
     }
   } else if (is_negated && !tb_tokenizer_is_negation_token(word) && isalnum(word[0])) {
-    kv_push(char, tokenizer->tmp_append, '-');
-    kv_push_str(char, tokenizer->tmp_append, word);
+    tk_cvec_push(tokenizer->tmp_append, '-');
+    tk_cvec_push_str(tokenizer->tmp_append, word);
   } else {
-    kv_push_str(char, tokenizer->tmp_append, word);
+    tk_cvec_push_str(tokenizer->tmp_append, word);
   }
   // In char-gram only mode (ngrams==0), skip unigram processing entirely
   if (tokenizer->ngrams == 0) {
@@ -653,11 +642,11 @@ static inline void tb_tokenizer_append_token (
   }
 
   // Normal mode: process unigrams and n-grams
-  kv_push(char, tokenizer->tmp_append, '\0');
-  char *bufp0 = tokenizer->tmp_append.a;
-  int id0 = tb_tokenizer_new_token(tokenizer, &bufp0, tokenizer->tmp_append.n);
+  tk_cvec_push(tokenizer->tmp_append, '\0');
+  char *bufp0 = tokenizer->tmp_append->a;
+  int id0 = tb_tokenizer_new_token(tokenizer, &bufp0, tokenizer->tmp_append->n);
   if (id0 == -1) return;
-  kv_push(int, tokenizer->tokens, id0);
+  tk_ivec_push(tokenizer->tokens, id0);
 
   if (tb_tokenizer_is_negation_token(word)) {
     *negation = tokenizer->negations;
@@ -668,14 +657,14 @@ static inline void tb_tokenizer_append_token (
   if (word[0] != '#' && strcmp(word, "'s") != 0)
     tb_tokenizer_append_cgrams(tokenizer, word);
 
-  if ((int) kv_size(tokenizer->window) == tokenizer->window_size) {
-    size_t n = kv_size(tokenizer->window);
+  if ((int) tokenizer->window->n == tokenizer->window_size) {
+    size_t n = tokenizer->window->n;
     if (n > 1)
-      memmove(tokenizer->window.a, tokenizer->window.a + 1, sizeof *tokenizer->window.a * (n - 1));
-    kv_size(tokenizer->window) = (n > 0 ? n - 1 : 0);
+      memmove(tokenizer->window->a, tokenizer->window->a + 1, sizeof *tokenizer->window->a * (n - 1));
+    tokenizer->window->n = (n > 0 ? n - 1 : 0);
   }
-  kv_push(int, tokenizer->window, id0);
-  int winlen = kv_size(tokenizer->window);
+  tk_ivec_push(tokenizer->window, id0);
+  int winlen = tokenizer->window->n;
 
   if (tokenizer->ngrams > 0) {
     int skipgram[tokenizer->ngrams];
@@ -692,9 +681,9 @@ static inline void tb_tokenizer_populate_tokens (
   bool in_tag = false;
   bool skipping = false;
   int negation = 0;
-  kv_size(tokenizer->tmp_token) = 0;
-  kv_size(tokenizer->tokens) = 0;
-  kv_size(tokenizer->window) = 0;
+  tokenizer->tmp_token->n = 0;
+  tokenizer->tokens->n = 0;
+  tokenizer->window->n = 0;
   for (size_t e = 0; e <= len; e ++) {
     char c = (e < len ? doc[e] : ' ');
     if (!in_tag && c == '<' && e + 1 < len && (isalpha((unsigned char) doc[e + 1]) || doc[e + 1] == '/')) {
@@ -718,15 +707,15 @@ static inline void tb_tokenizer_populate_tokens (
     if (tb_tokenizer_is_negation_boundary_char(c))
       negation = 0;
     if (e < len && !tb_tokenizer_is_delim_char(c)) {
-      kv_push(char, tokenizer->tmp_token, c);
-      if ((int) tokenizer->tmp_token.n > tokenizer->max_len
-        && tokenizer->tmp_token.a[0] != '#') {
-        tokenizer->tmp_token.n = 0;
+      tk_cvec_push(tokenizer->tmp_token, c);
+      if ((int) tokenizer->tmp_token->n > tokenizer->max_len
+        && tokenizer->tmp_token->a[0] != '#') {
+        tokenizer->tmp_token->n = 0;
         skipping = true;
       }
-    } else if ((int) tokenizer->tmp_token.n >= tokenizer->min_len) {
-      kv_push(char, tokenizer->tmp_token, '\0');
-      char *tok = tokenizer->tmp_token.a;
+    } else if ((int) tokenizer->tmp_token->n >= tokenizer->min_len) {
+      tk_cvec_push(tokenizer->tmp_token, '\0');
+      char *tok = tokenizer->tmp_token->a;
       bool was_contraction = false;
       char canon_buf[tokenizer->max_len + 1];
       tb_copy_without_char(tok, canon_buf, '\'');
@@ -742,9 +731,9 @@ static inline void tb_tokenizer_populate_tokens (
       }
       if (!was_contraction)
         tb_tokenizer_append_token(tokenizer, tok, &negation);
-      tokenizer->tmp_token.n = 0;
+      tokenizer->tmp_token->n = 0;
     } else {
-      tokenizer->tmp_token.n = 0;
+      tokenizer->tmp_token->n = 0;
     }
   }
 }
@@ -753,14 +742,14 @@ static inline void _tb_tokenizer_parse (lua_State *L, tb_tokenizer_t *tokenizer)
 {
   size_t len;
   char *str = (char *) luaL_checklstring(L, 1, &len);
-  char *doc = tb_tokenizer_normalize(str, &len, tokenizer->max_run);
-  tb_tokenizer_populate_tokens(tokenizer, doc, len);
-  free(doc);
+  tk_cvec_t *doc = tb_tokenizer_normalize(str, len, tokenizer->max_run);
+  tb_tokenizer_populate_tokens(tokenizer, doc->a, doc->n);
+  tk_cvec_destroy(doc);
   lua_Integer n = 1;
   lua_newtable(L);
-  for (khint_t i = 0; i < kv_size(tokenizer->tokens); i ++) {
+  for (khint_t i = 0; i < tokenizer->tokens->n; i ++) {
     lua_pushinteger(L, n ++);
-    int t = kv_A(tokenizer->tokens, i);
+    int t = tokenizer->tokens->a[i];
     lua_pushstring(L, tb_tokenizer_id_str(tokenizer, t));
     lua_settable(L, -3);
   }
@@ -807,18 +796,19 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
 
   int kha;
   uint64_t khi;
-  tk_iuset_t *seen = tk_iuset_create();
+  tk_iuset_t *seen = tk_iuset_create(0, 0);
   uint64_t n_features = (uint64_t) tb_tokenizer_features_aligned(tokenizer);
 
   if (lua_type(L, 1) != LUA_TTABLE) {
 
     size_t doclen;
-    char *doc = tb_tokenizer_normalize((char *) luaL_checklstring(L, 1, &doclen), &doclen, tokenizer->max_run); // t out
-    tb_tokenizer_populate_tokens(tokenizer, doc, doclen);
-    free(doc);
+    char *odoc = (char *) luaL_checklstring(L, 1, &doclen);
+    tk_cvec_t *ndoc = tb_tokenizer_normalize(odoc, doclen, tokenizer->max_run); // t out
+    tb_tokenizer_populate_tokens(tokenizer, ndoc->a, ndoc->n);
+    tk_cvec_destroy(ndoc);
 
-    for (khint_t j = 0; j < tokenizer->tokens.n; j ++) {
-      int id = tokenizer->tokens.a[j];
+    for (khint_t j = 0; j < tokenizer->tokens->n; j ++) {
+      int id = tokenizer->tokens->a[j];
       if (id < 0)
         continue;
       khi = tk_iuset_put(seen, id, &kha);
@@ -834,12 +824,13 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
     for (size_t i = 1; i <= n; i ++) {
       lua_rawgeti(L, 1, i); // t out s
       size_t doclen;
-      char *doc = tb_tokenizer_normalize((char *) luaL_checklstring(L, -1, &doclen), &doclen, tokenizer->max_run); // s
-      tb_tokenizer_populate_tokens(tokenizer, doc, doclen);
-      free(doc);
+      char *odoc = (char *) luaL_checklstring(L, -1, &doclen);
+      tk_cvec_t *ndoc = tb_tokenizer_normalize(odoc, doclen, tokenizer->max_run); // t out
+      tb_tokenizer_populate_tokens(tokenizer, ndoc->a, ndoc->n);
+      tk_cvec_destroy(ndoc);
       tk_iuset_clear(seen);
-      for (khint_t j = 0; j < tokenizer->tokens.n; j ++) {
-        int id = tokenizer->tokens.a[j];
+      for (khint_t j = 0; j < tokenizer->tokens->n; j ++) {
+        int id = tokenizer->tokens->a[j];
         if (id < 0)
           continue;
         khi = tk_iuset_put(seen, id, &kha);
@@ -870,29 +861,30 @@ static inline int tb_tokenizer_restrict (lua_State *L)
   int64_t id, id0;
   int absent;
   khint_t k;
-  tb_ids_t *ids0 = kh_init(ids);
-  tb_strs_t *strs0 = kh_init(strs);
+  tk_zumap_t *ids0 = tk_zumap_create(0, 0);
+  tk_cumap_t *strs0 = tk_cumap_create(0, 0);
   tokenizer->next_id = 0;
   for (lua_Integer i = 0; i < (int64_t) top_v->n; i ++) {
     id = top_v->a[i];
     lua_pop(L, 1);
-    k = kh_get(strs, tokenizer->strs, (uint32_t) id);
-    if (k == kh_end(tokenizer->strs))
+    k = tk_cumap_get(tokenizer->strs, id);
+    if (k == tk_cumap_end(tokenizer->strs))
       continue;
-    tok = (char *) strdup(kh_value(tokenizer->strs, k));
+    tok = (char *) strdup(tk_cumap_val(tokenizer->strs, k));
     id0 = tokenizer->next_id ++;
-    k = kh_put(ids, ids0, tok, &absent);
+    k = tk_zumap_put(ids0, tok, &absent);
     assert(absent);
-    kh_value(ids0, k) = id0;
-    k = kh_put(strs, strs0, (uint32_t) id0, &absent);
+    tk_zumap_setval(ids0, k, id0);
+    k = tk_cumap_put(strs0, id0, &absent);
     assert(absent);
-    kh_value(strs0, k) = tok;
+    tk_cumap_setval(strs0, k, tok);
   }
-  for (khint_t k = kh_begin(tokenizer->strs); k < kh_end(tokenizer->strs); k ++)
-    if (kh_exist(tokenizer->strs, k))
-      free((char *) kh_value(tokenizer->strs, k));
-  kh_destroy(ids, tokenizer->ids);
-  kh_destroy(strs, tokenizer->strs);
+  const char *stok;
+  tk_umap_foreach_values(tokenizer->strs, stok, ({
+    free((char *) stok);
+  }))
+  tk_zumap_destroy(tokenizer->ids);
+  tk_cumap_destroy(tokenizer->strs);
   tokenizer->ids = ids0;
   tokenizer->strs = strs0;
   return 0;
@@ -923,8 +915,8 @@ static inline int tb_tokenizer_index (lua_State *L)
   int id;
   char *tok;
   for (id = 0; id < tokenizer->next_id; id ++) {
-    k = kh_get(strs, tokenizer->strs, (uint32_t) id);
-    tok = (char *) kh_value(tokenizer->strs, k);
+    k = tk_cumap_get(tokenizer->strs, (uint32_t) id);
+    tok = (char *) tk_cumap_val(tokenizer->strs, k);
     lua_pushinteger(L, id + 1); // t id
     lua_pushstring(L, tok); // t id str
     lua_settable(L, -3); // t
@@ -955,9 +947,9 @@ static inline int tb_tokenizer_train (lua_State *L)
     lua_pushinteger(L, (int64_t) i);
     lua_gettable(L, -2);
     size_t len;
-    char *doc = tb_tokenizer_normalize((char *) luaL_checklstring(L, -1, &len), &len, tokenizer->max_run);
-    tb_tokenizer_populate_tokens(tokenizer, doc, len);
-    free(doc);
+    tk_cvec_t *doc = tb_tokenizer_normalize((char *) luaL_checklstring(L, -1, &len), len, tokenizer->max_run);
+    tb_tokenizer_populate_tokens(tokenizer, doc->a, doc->n);
+    tk_cvec_destroy(doc);
     lua_pop(L, 1);
   }
   return 0;
@@ -1001,13 +993,13 @@ static inline int tb_tokenizer_create (lua_State *L)
   memset(tokenizer, 0, sizeof(tb_tokenizer_t));
   luaL_getmetatable(L, MT_TOKENIZER);
   lua_setmetatable(L, -2);
-  kv_init(tokenizer->tokens);
-  kv_init(tokenizer->tmp_token);
-  kv_init(tokenizer->tmp_append);
-  kv_init(tokenizer->tmp_skipgram);
-  kv_init(tokenizer->window);
-  tokenizer->ids = kh_init(ids);
-  tokenizer->strs = kh_init(strs);
+  tokenizer->tokens = tk_ivec_create(0, 0, 0, 0);
+  tokenizer->window = tk_ivec_create(0, 0, 0, 0);
+  tokenizer->tmp_token = tk_cvec_create(0, 0, 0, 0);
+  tokenizer->tmp_append = tk_cvec_create(0, 0, 0, 0);
+  tokenizer->tmp_skipgram = tk_cvec_create(0, 0, 0, 0);
+  tokenizer->ids = tk_zumap_create(0, 0);
+  tokenizer->strs = tk_cumap_create(0, 0);
   tokenizer->next_id = 0;
   tokenizer->max_len = max_len;
   tokenizer->min_len = min_len;
@@ -1037,13 +1029,13 @@ static inline int tb_tokenizer_load (lua_State *L)
   memset(tokenizer, 0, sizeof(tb_tokenizer_t));
   luaL_getmetatable(L, MT_TOKENIZER);
   lua_setmetatable(L, -2);
-  kv_init(tokenizer->tokens);
-  kv_init(tokenizer->tmp_token);
-  kv_init(tokenizer->tmp_append);
-  kv_init(tokenizer->tmp_skipgram);
-  kv_init(tokenizer->window);
-  tokenizer->ids = kh_init(ids);
-  tokenizer->strs = kh_init(strs);
+  tokenizer->tokens = tk_ivec_create(0, 0, 0, 0);
+  tokenizer->window = tk_ivec_create(0, 0, 0, 0);
+  tokenizer->tmp_token = tk_cvec_create(0, 0, 0, 0);
+  tokenizer->tmp_append = tk_cvec_create(0, 0, 0, 0);
+  tokenizer->tmp_skipgram = tk_cvec_create(0, 0, 0, 0);
+  tokenizer->ids = tk_zumap_create(0, 0);
+  tokenizer->strs = tk_cumap_create(0, 0);
   tk_lua_fread(L, &tokenizer->finalized, sizeof(bool), 1, fh);
   tk_lua_fread(L, &tokenizer->max_len, sizeof(int), 1, fh);
   tk_lua_fread(L, &tokenizer->min_len, sizeof(int), 1, fh);
@@ -1068,12 +1060,12 @@ static inline int tb_tokenizer_load (lua_State *L)
     int id;
     tk_lua_fread(L, &id, sizeof(int), 1, fh);
     char *tokn = strdup(tok);
-    k = kh_put(ids, tokenizer->ids, tokn, &absent);
+    k = tk_zumap_put(tokenizer->ids, tokn, &absent);
     assert(absent);
-    kh_value(tokenizer->ids, k) = id;
-    k = kh_put(strs, tokenizer->strs, (uint32_t) id, &absent);
+    tk_zumap_setval(tokenizer->ids, k, id);
+    k = tk_cumap_put(tokenizer->strs, id, &absent);
     assert(absent);
-    kh_value(tokenizer->strs, k) = tokn;
+    tk_cumap_setval(tokenizer->strs, k, tokn);
   }
   tk_lua_fclose(L, fh);
   lua_newtable(L);
