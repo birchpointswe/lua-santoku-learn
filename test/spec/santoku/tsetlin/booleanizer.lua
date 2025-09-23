@@ -1,5 +1,6 @@
 local booleanizer = require("santoku.tsetlin.booleanizer")
 local dvec = require("santoku.dvec")
+local ivec = require("santoku.ivec")
 local test = require("santoku.test")
 -- local serialize = require("santoku.serialize")
 
@@ -13,6 +14,9 @@ test("booleanizer", function ()
     bzr:finalize()
     local bits = bzr:encode(data, dims) -- luacheck: ignore
     -- print(serialize(bits:table()))
+    local top_v = ivec.create(2)
+    top_v:fill_indices()
+    bzr:restrict(top_v)
   end)
 
 end)

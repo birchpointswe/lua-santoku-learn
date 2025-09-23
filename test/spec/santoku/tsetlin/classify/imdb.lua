@@ -1,11 +1,11 @@
 local fs = require("santoku.fs")
 local it = require("santoku.iter")
+local err = require("santoku.error")
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local str = require("santoku.string")
 local test = require("santoku.test")
 local tm = require("santoku.tsetlin")
 local utc = require("santoku.utc")
-local ivec = require("santoku.ivec")
 
 local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
@@ -16,11 +16,11 @@ local MAX = nil
 local NEGATIVE = 0.5
 
 local CLASSES = 2
-local CLAUSES = 32 --{ def = 8, min = 8, max = 32, log = true, int = true, log = true }
-local CLAUSE_TOLERANCE = 24 --{ def = 8, min = 8, max = 64, int = true, log = true }
-local CLAUSE_MAXIMUM = 26 --{ def = 8, min = 8, max = 64, int = true, log = true }
-local TARGET = 18 --{ def = 4, min = 8, max = 64, int = true, log = true }
-local SPECIFICITY = 1000 --{ def = 1000, min = 100, max = 2000, int = true, log = true }
+local CLAUSES = { def = 8, min = 8, max = 32, int = true, log = true }
+local CLAUSE_TOLERANCE = { def = 8, min = 8, max = 64, int = true, log = true }
+local CLAUSE_MAXIMUM = { def = 8, min = 8, max = 64, int = true, log = true }
+local TARGET = { def = 4, min = 8, max = 64, int = true, log = true }
+local SPECIFICITY = { def = 1000, min = 100, max = 2000, int = true, log = true }
 
 local SEARCH_PATIENCE = 3
 local SEARCH_ROUNDS = 10
@@ -32,8 +32,6 @@ local TOP_ALGO = "chi2"
 local TOP_K = 8192
 
 local TOKENIZER_CONFIG = {
-  max_df = 0.95,
-  min_df = 0.01,
   max_len = 20,
   min_len = 1,
   max_run = 2,
@@ -42,7 +40,6 @@ local TOKENIZER_CONFIG = {
   cgrams_max = 4,
   skips = 2,
   negations = 4,
-  align = tm.align
 }
 
 test("tsetlin", function ()
@@ -56,47 +53,36 @@ test("tsetlin", function ()
 
   print("\nTraining tokenizer\n")
   local tokenizer = tokenizer.create(TOKENIZER_CONFIG)
-  tokenizer.train({ corpus = train.problems })
-  tokenizer.finalize()
-  dataset.n_features = tokenizer.features()
+  tokenizer:train({ corpus = train.problems })
+  tokenizer:finalize()
+  dataset.n_features = tokenizer:features()
   str.printf("Feat\t\t%d\t\t\n", dataset.n_features)
 
   print("Tokenizing train")
-  train.problems0 = tokenizer.tokenize(train.problems)
+  train.problems0 = tokenizer:tokenize(train.problems)
+  train.solutions:add_scaled(CLASSES)
   local top_v =
     TOP_ALGO == "chi2" and train.problems0:bits_top_chi2(train.solutions, train.n, dataset.n_features, CLASSES, TOP_K) or -- luacheck: ignore
     TOP_ALGO == "mi" and train.problems0:bits_top_mi(train.solutions, train.n, dataset.n_features, CLASSES, TOP_K) or
-    TOP_ALGO == "random" and (function ()
-      local v = ivec.create(dataset.n_features)
-      v:fill_indices()
-      v:shuffle()
-      v:setn(TOP_K)
-      return v
-    end)() or (function () -- luacheck: ignore
-      -- Fallback to all words
-      local t = ivec.create(dataset.n_features)
-      t:fill_indices()
-      return t
-    end)()
+    err.error("TOP_ALGO must bo chi2 or mi")
+  train.solutions:add_scaled(-CLASSES)
   local n_top_v = top_v:size()
   print("After top k filter", n_top_v)
 
   -- Show top words
-  local words = tokenizer.index()
+  local words = tokenizer:index()
   for id in it.take(32, top_v:each()) do
     print(id, words[id + 1])
   end
 
   print("Re-encoding train/test with top features")
-  tokenizer.restrict(top_v)
-  train.problems = tokenizer.tokenize(train.problems);
-  test.problems = tokenizer.tokenize(test.problems);
+  tokenizer:restrict(top_v)
+  train.problems = tokenizer:tokenize(train.problems);
+  test.problems = tokenizer:tokenize(test.problems);
 
   print("Prepping for classifier")
   train.problems = train.problems:bits_to_cvec(train.n, n_top_v, true)
   test.problems = test.problems:bits_to_cvec(test.n, n_top_v, true)
-  train.solutions = train.solutions:raw("u32")
-  test.solutions = test.solutions:raw("u32")
 
   print("Optimizing Classifier")
   local stopwatch = utc.stopwatch()

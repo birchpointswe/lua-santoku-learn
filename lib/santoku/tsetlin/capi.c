@@ -62,13 +62,13 @@ typedef struct tk_tsetlin_thread_s {
   unsigned int index;
   struct {
     unsigned int n;
-    tk_bits_t *ps;
-    tk_bits_t *ls;
-    unsigned int *ss;
+    tk_cvec_t *ps;
+    tk_cvec_t *ls;
+    tk_ivec_t *ss;
   } train;
   struct {
     unsigned int n;
-    tk_bits_t *ps;
+    tk_cvec_t *ps;
   } predict;
   unsigned int *shuffle;
   long int *scores;
@@ -451,7 +451,7 @@ static void tk_classifier_predict_reduce_thread (
 static void tk_classifier_predict_thread (
   tk_tsetlin_t *tm,
   unsigned int n,
-  tk_bits_t *ps,
+  tk_cvec_t *ps,
   unsigned int cfirst,
   unsigned int clast,
   unsigned int thread
@@ -461,7 +461,7 @@ static void tk_classifier_predict_thread (
   unsigned int votes[TK_CVEC_BITS];
   for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
     for (unsigned int s = 0; s < n; s ++) {
-      tk_bits_t *input = ps + s * input_chunks;
+      tk_bits_t *input = (tk_bits_t *) ps->a + s * input_chunks;
       tk_bits_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
       long int score = tk_tsetlin_sums(tm, out, votes);
       tm_state_scores(tm, thread, chunk, s) = score;
@@ -472,7 +472,7 @@ static void tk_classifier_predict_thread (
 static void tk_encoder_predict_thread (
   tk_tsetlin_t *tm,
   unsigned int n,
-  tk_bits_t *ps,
+  tk_cvec_t *ps,
   unsigned int cfirst,
   unsigned int clast,
   unsigned int thread
@@ -483,7 +483,7 @@ static void tk_encoder_predict_thread (
 static void tk_classifier_setup_thread (
   tk_tsetlin_t *tm,
   unsigned int n,
-  tk_bits_t *ps,
+  tk_cvec_t *ps,
   unsigned int cfirst,
   unsigned int clast,
   unsigned int thread
@@ -512,7 +512,7 @@ static void tk_classifier_setup_thread (
 static void tk_encoder_setup_thread (
   tk_tsetlin_t *tm,
   unsigned int n,
-  tk_bits_t *ps,
+  tk_cvec_t *ps,
   unsigned int cfirst,
   unsigned int clast,
   unsigned int thread
@@ -523,8 +523,8 @@ static void tk_encoder_setup_thread (
 static void tk_classifier_train_thread (
   tk_tsetlin_t *tm,
   unsigned int n,
-  tk_bits_t *ps,
-  unsigned int *ss,
+  tk_cvec_t *ps,
+  tk_ivec_t *ss,
   unsigned int cfirst,
   unsigned int clast,
   unsigned int thread
@@ -535,13 +535,14 @@ static void tk_classifier_train_thread (
   unsigned int *shuffle = tm_state_shuffle(tm, thread);
   unsigned int literals[TK_CVEC_BITS];
   unsigned int votes[TK_CVEC_BITS];
+  int64_t *lbls = ss->a;
   for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
     unsigned int chunk_class = chunk / clause_chunks;
     for (unsigned int i = 0; i < n; i ++) {
       unsigned int sample = shuffle[i];
-      tk_bits_t *input = ps + sample * input_chunks;
+      tk_bits_t *input = (tk_bits_t *) ps->a + sample * input_chunks;
       tk_bits_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
-      unsigned int sample_class = ss[sample];
+      unsigned int sample_class = lbls[sample];
       tm_update(tm, input, out, literals, votes, sample, sample_class, 1, chunk_class, chunk, thread);
     }
   }
@@ -549,8 +550,8 @@ static void tk_classifier_train_thread (
 
 static void tk_encoder_train_thread (
   tk_tsetlin_t *tm,
-  tk_bits_t *ps,
-  tk_bits_t *ls,
+  tk_cvec_t *ps,
+  tk_cvec_t *ls,
   unsigned int n,
   unsigned int cfirst,
   unsigned int clast,
@@ -563,15 +564,16 @@ static void tk_encoder_train_thread (
   unsigned int *shuffle = tm_state_shuffle(tm, thread);
   unsigned int literals[TK_CVEC_BITS];
   unsigned int votes[TK_CVEC_BITS];
+  tk_bits_t *lbls = (tk_bits_t *) ls->a;
   for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
     unsigned int chunk_class = chunk / clause_chunks;
     unsigned int enc_chunk = TK_CVEC_BITS_BYTE(chunk_class);
     unsigned int enc_bit = TK_CVEC_BITS_BIT(chunk_class);
     for (unsigned int i = 0; i < n; i ++) {
       unsigned int sample = shuffle[i];
-      tk_bits_t *input = ps + sample * input_chunks;
+      tk_bits_t *input = (tk_bits_t *) ps->a + sample * input_chunks;
       tk_bits_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
-      bool target_vote = (ls[sample * class_chunks + enc_chunk] & ((tk_bits_t) 1 << enc_bit)) > 0;
+      bool target_vote = (lbls[sample * class_chunks + enc_chunk] & ((tk_bits_t) 1 << enc_bit)) > 0;
       tm_update(tm, input, out, literals, votes, sample, chunk_class, target_vote, chunk_class, chunk, thread);
     }
   }
@@ -873,9 +875,7 @@ static inline int tk_tsetlin_predict_classifier (
   tk_tsetlin_t *tm
 ) {
   lua_settop(L, 3);
-  tk_bits_t *ps;
-  tk_cvec_t *ps_cvec = tk_cvec_peekopt(L, 2);
-  ps = ps_cvec ? (tk_bits_t *) ps_cvec->a : (tk_bits_t *) tk_lua_checkstring(L, 2, "argument 1 is not a raw bit-matrix of samples");
+  tk_cvec_t *ps = tk_cvec_peek(L, 2, "problems");
   unsigned int n = tk_lua_checkunsigned(L, 3, "argument 2 is not an integer n_samples");
   tm->results = tk_ensure_interleaved(L, &tm->results_len, tm->results, n * sizeof(unsigned int), false);
   for (unsigned int i = 0; i < tm->pool->n_threads; i ++) {
@@ -888,7 +888,9 @@ static inline int tk_tsetlin_predict_classifier (
   tk_tsetlin_setup_thread_samples(tm, n);
   tk_threads_signal(tm->pool, TM_CLASSIFIER_PREDICT, 0);
   tk_threads_signal(tm->pool, TM_CLASSIFIER_PREDICT_REDUCE, 0);
-  lua_pushlstring(L, (char *) tm->results, n * sizeof(unsigned int));
+  tk_ivec_t *out = tk_ivec_create(L, n, 0, 0);
+  for (uint64_t i = 0; i < n; i ++)
+    out->a[i] = tm->results[i];
   return 1;
 }
 
@@ -897,9 +899,7 @@ static inline int tk_tsetlin_predict_encoder (
   tk_tsetlin_t *tm
 ) {
   lua_settop(L, 3);
-  tk_bits_t *ps;
-  tk_cvec_t *ps_cvec = tk_cvec_peekopt(L, 2);
-  ps = ps_cvec ? (tk_bits_t *) ps_cvec->a : (tk_bits_t *) tk_lua_checkstring(L, 2, "argument 1 is not a raw bit-matrix of samples");
+  tk_cvec_t *ps = tk_cvec_peek(L, 2, "problems");
   unsigned int n = tk_lua_checkunsigned(L, 3, "argument 2 is not an integer n_samples");
   tm->encodings = tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * tm->class_chunks * sizeof(tk_bits_t), false);
   for (unsigned int i = 0; i < tm->pool->n_threads; i ++) {
@@ -936,17 +936,10 @@ static inline int tk_tsetlin_train_classifier (
   tk_tsetlin_t *tm
 ) {
   unsigned int n = tk_lua_fcheckunsigned(L, 2, "train", "samples");
-  tk_bits_t *ps;
-  // Check if ps is passed as cvec or string
   lua_getfield(L, 2, "problems");
-  tk_cvec_t *ps_cvec = tk_cvec_peekopt(L, -1);
-  if (ps_cvec) {
-    ps = (tk_bits_t *) ps_cvec->a;
-  } else {
-    ps = (tk_bits_t *) tk_lua_fcheckstring(L, 2, "train", "problems");
-  }
-  lua_pop(L, 1);
-  unsigned int *ss = (unsigned int *) tk_lua_fcheckstring(L, 2, "train", "solutions");
+  tk_cvec_t *ps = tk_cvec_peek(L, -1, "problems");
+  lua_getfield(L, 2, "solutions");
+  tk_ivec_t *ss = tk_ivec_peek(L, -1, "solutions");
   unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
   int i_each = -1;
   if (tk_lua_ftype(L, 2, "each") != LUA_TNIL) {
@@ -985,25 +978,11 @@ static inline int tk_tsetlin_train_encoder (
   tk_tsetlin_t *tm
 ) {
   unsigned int n = tk_lua_fcheckunsigned(L, 2, "train", "samples");
-  tk_bits_t *ps;
-  tk_bits_t *ls;
-  // Check if ps is passed as cvec or string
   lua_getfield(L, 2, "sentences");
-  tk_cvec_t *ps_cvec = tk_cvec_peekopt(L, -1);
-  if (ps_cvec) {
-    ps = (tk_bits_t *) ps_cvec->a;
-  } else {
-    ps = (tk_bits_t *) tk_lua_fcheckustring(L, 2, "train", "sentences");
-  }
+  tk_cvec_t *ps = tk_cvec_peek(L, -1, "sentences");
   lua_pop(L, 1);
-  // Check if ls is passed as cvec or string
   lua_getfield(L, 2, "codes");
-  tk_cvec_t *ls_cvec = tk_cvec_peekopt(L, -1);
-  if (ls_cvec) {
-    ls = (tk_bits_t *) ls_cvec->a;
-  } else {
-    ls = (tk_bits_t *) tk_lua_fcheckustring(L, 2, "train", "codes");
-  }
+  tk_cvec_t *ls = tk_cvec_peek(L, -1, "codes");
   lua_pop(L, 1);
   unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
   tm->encodings = tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * tm->class_chunks * sizeof(tk_bits_t), false);

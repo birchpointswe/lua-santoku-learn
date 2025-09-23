@@ -194,7 +194,6 @@ static inline void tk_ann_destroy (
   if (A->destroyed)
     return;
   A->destroyed = true;
-  tk_ann_buckets_destroy(A->buckets);
   tk_threads_destroy(A->pool);
   free(A->threads);
 }
@@ -1616,7 +1615,9 @@ static inline tk_ann_t *tk_ann_create_base (
     data->A = A;
   }
   A->features = features;
-  A->buckets = tk_ann_buckets_create(0, 0);
+  A->buckets = tk_ann_buckets_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_ANN_EPH, Ai, -1);
+  lua_pop(L, 1);
   A->uid_sid = tk_iumap_create(L, 0);
   tk_lua_add_ephemeron(L, TK_ANN_EPH, Ai, -1);
   lua_pop(L, 1);
@@ -1669,7 +1670,9 @@ static inline tk_ann_t *tk_ann_load (
   if (n_hash)
     tk_lua_fread(L, A->hash_bits->a, sizeof(int64_t), n_hash, fh);
   lua_pop(L, 1);
-  A->buckets = tk_ann_buckets_create(0, 0);
+  A->buckets = tk_ann_buckets_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_ANN_EPH, Ai, -1);
+  lua_pop(L, 1);
   khint_t nb = 0, k; int absent;
   tk_lua_fread(L, &nb, sizeof(khint_t), 1, fh);
   for (khint_t i = 0; i < nb; i ++) {

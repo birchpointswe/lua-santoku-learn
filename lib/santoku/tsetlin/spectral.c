@@ -320,9 +320,9 @@ static inline void tm_run_spectral (
       lua_pushinteger(L, (int64_t) i);
       lua_pushnumber(L, spec.evals[i]);
       lua_pushboolean(L, i >= start);
-      // NOTE: this hides errors in callback
-      if (lua_pcall(L, 4, 0, 0))
-        lua_pop(L, 1);
+      lua_call(L, 4, 0, 0)
+      // TODO: Set things up such that memory is correctly freed even if this
+      // throws
     }
   }
 

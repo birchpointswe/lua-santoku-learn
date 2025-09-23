@@ -78,7 +78,7 @@ typedef struct {
 } tk_booleanizer_t;
 
 #define TK_BOOLEANIZER_MT "tk_booleanizer_t"
-#define TK_BOOLEANIZER_EPHEMERON "tk_booleanizer_ephemeron"
+#define TK_BOOLEANIZER_EPH "tk_booleanizer_eph"
 
 static inline tk_booleanizer_t *tk_booleanizer_peek (lua_State *L, int i)
 {
@@ -331,7 +331,7 @@ static inline void tk_booleanizer_add_thresholds (
   khint_t khi;
   uint64_t n = value_vec->n;
   tk_dvec_t *thresholds = tk_dvec_create(L, 0, 0, 0);
-  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPHEMERON, Bi, tk_lua_absindex(L, -1));
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, tk_lua_absindex(L, -1));
   lua_pop(L, 1);
   if (n == 0) {
     // Nothing to do
@@ -494,7 +494,8 @@ static inline int64_t tk_booleanizer_bits (
 static inline void tk_booleanizer_restrict (
   lua_State *L,
   tk_booleanizer_t *B,
-  tk_ivec_t *ids
+  tk_ivec_t *ids,
+  int Bi
 ) {
   if (B->destroyed) {
     tk_lua_verror(L, 2, "restrict", "can't restrict a destroyed booleanizer");
@@ -513,21 +514,38 @@ static inline void tk_booleanizer_restrict (
     if (kha)
       tk_iumap_setval(feature_id_map, khi, i);
   }
-  tk_iuset_t *new_continuous   = tk_iuset_create(0, 0);
-  tk_iuset_t *new_categorical  = tk_iuset_create(0, 0);
-  tk_iumap_t *new_integer_features = tk_iumap_create(0, 0);
-  tk_zumap_t *new_string_features  = tk_zumap_create(0, 0);
-  tk_cat_bits_string_t *new_cat_bits_string = tk_cat_bits_string_create(0, 0);
-  tk_cat_bits_double_t *new_cat_bits_double = tk_cat_bits_double_create(0, 0);
-  tk_iumap_t *new_cont_bits = tk_iumap_create(0, 0);
-  tk_cont_thresholds_t *new_cont_thresholds = tk_cont_thresholds_create(0, 0);
+  tk_iuset_t *new_continuous   = tk_iuset_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  tk_iuset_t *new_categorical  = tk_iuset_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  tk_iumap_t *new_integer_features = tk_iumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  tk_zumap_t *new_string_features  = tk_zumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  tk_cat_bits_string_t *new_cat_bits_string = tk_cat_bits_string_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  tk_cat_bits_double_t *new_cat_bits_double = tk_cat_bits_double_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  tk_iumap_t *new_cont_bits = tk_iumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  tk_cont_thresholds_t *new_cont_thresholds = tk_cont_thresholds_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
   int64_t next_bit = 0;
   for (int64_t new_f = 0; new_f < (int64_t) ids->n; new_f ++) {
     int64_t old_f = ids->a[new_f];
+    int kha;
     if (tk_iuset_contains(B->continuous, old_f))
-      tk_iuset_put(new_continuous, new_f, NULL);
+      tk_iuset_put(new_continuous, new_f, &kha);
     if (tk_iuset_contains(B->categorical, old_f))
-      tk_iuset_put(new_categorical, new_f, NULL);
+      tk_iuset_put(new_categorical, new_f, &kha);
     khint_t k = tk_iumap_get(B->integer_features, old_f);
     if (k != tk_iumap_end(B->integer_features)) {
       khi = tk_iumap_put(new_integer_features, new_f, &kha);
@@ -577,6 +595,8 @@ static inline void tk_booleanizer_restrict (
       if (kth != tk_cont_thresholds_end(B->cont_thresholds)) {
         tk_dvec_t *old_vec = tk_cont_thresholds_val(B->cont_thresholds, kth);
         tk_dvec_t *new_vec = tk_dvec_create(L, old_vec->n, 0, 0);
+        tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+        lua_pop(L, 1);
         memcpy(new_vec->a, old_vec->a, sizeof(double) * old_vec->n);
         new_vec->n = old_vec->n;
         int kha;
@@ -586,17 +606,25 @@ static inline void tk_booleanizer_restrict (
       next_bit += (int64_t) B->n_thresholds;
     }
   }
+  tk_lua_del_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, B->continuous);
   tk_iuset_destroy(B->continuous);
+  tk_lua_del_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, B->categorical);
   tk_iuset_destroy(B->categorical);
+  tk_lua_del_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, B->integer_features);
   tk_iumap_destroy(B->integer_features);
   const char *z;
   tk_umap_foreach_keys(B->string_features, z, ({
     free((char *) z);
   }));
+  tk_lua_del_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, B->string_features);
   tk_zumap_destroy(B->string_features);
+  tk_lua_del_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, B->cat_bits_string);
   tk_cat_bits_string_destroy(B->cat_bits_string);
+  tk_lua_del_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, B->cat_bits_double);
   tk_cat_bits_double_destroy(B->cat_bits_double);
+  tk_lua_del_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, B->cont_bits);
   tk_iumap_destroy(B->cont_bits);
+  tk_lua_del_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, B->cont_thresholds);
   tk_cont_thresholds_destroy(B->cont_thresholds);
   tk_iumap_destroy(feature_id_map);
   B->continuous = new_continuous;
@@ -617,23 +645,14 @@ static inline void tk_booleanizer_destroy (
   if (B->destroyed)
     return;
   tk_booleanizer_shrink(B);
-  tk_iuset_destroy(B->continuous);
-  tk_iuset_destroy(B->categorical);
-  tk_iumap_destroy(B->integer_features);
   const char *z;
   tk_umap_foreach_keys(B->string_features, z, ({
     free((char *) z);
   }));
-  tk_zumap_destroy(B->string_features);
-  tk_observed_strings_destroy(B->observed_strings);
-  tk_cont_thresholds_destroy(B->cont_thresholds);
   tk_cat_bit_string_t cbs;
   tk_umap_foreach_keys(B->cat_bits_string, cbs, ({
     free(cbs.v);
   }));
-  tk_cat_bits_string_destroy(B->cat_bits_string);
-  tk_cat_bits_double_destroy(B->cat_bits_double);
-  tk_iumap_destroy(B->cont_bits);
   memset(B, 0, sizeof(*B));
   B->finalized = false;
   B->destroyed = true;
@@ -838,7 +857,7 @@ static inline int tk_booleanizer_restrict_lua (lua_State *L)
 {
   tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
   tk_ivec_t *ids = tk_ivec_peek(L, 2, "top_v");
-  tk_booleanizer_restrict(L, B, ids);
+  tk_booleanizer_restrict(L, B, ids, 1);
   return 0;
 }
 
@@ -901,17 +920,38 @@ static inline tk_booleanizer_t *tk_booleanizer_create (
   tk_ivec_t *categorical
 ) {
   tk_booleanizer_t *B = tk_lua_newuserdata(L, tk_booleanizer_t, TK_BOOLEANIZER_MT, tk_booleanizer_mt_fns, tk_booleanizer_gc_lua);
-  B->continuous = (continuous != NULL) ? tk_iuset_from_ivec(0, continuous) : tk_iuset_create(0, 0);
-  B->categorical = (categorical != NULL) ? tk_iuset_from_ivec(0, categorical) : tk_iuset_create(0, 0);
+  int Bi = lua_gettop(L);
+  B->continuous = (continuous != NULL) ? tk_iuset_from_ivec(L, continuous) : tk_iuset_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  B->categorical = (categorical != NULL) ? tk_iuset_from_ivec(L, categorical) : tk_iuset_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
   B->n_thresholds = n_thresholds;
-  B->integer_features = tk_iumap_create(0, 0);
-  B->string_features = tk_zumap_create(0, 0);
-  B->observed_doubles = tk_observed_doubles_create(0, 0);
-  B->observed_strings = tk_observed_strings_create(0, 0);
-  B->cat_bits_string = tk_cat_bits_string_create(0, 0);
-  B->cat_bits_double = tk_cat_bits_double_create(0, 0);
-  B->cont_bits = tk_iumap_create(0, 0);
-  B->cont_thresholds = tk_cont_thresholds_create(0, 0);
+  B->integer_features = tk_iumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  B->string_features = tk_zumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  B->observed_doubles = tk_observed_doubles_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  B->observed_strings = tk_observed_strings_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  B->cat_bits_string = tk_cat_bits_string_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  B->cat_bits_double = tk_cat_bits_double_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  B->cont_bits = tk_iumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  B->cont_thresholds = tk_cont_thresholds_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
   B->next_feature = 0;
   B->next_bit = 0;
   B->finalized = false;
@@ -924,6 +964,7 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
   FILE *fh
 ) {
   tk_booleanizer_t *B = tk_lua_newuserdata(L, tk_booleanizer_t, TK_BOOLEANIZER_MT, tk_booleanizer_mt_fns, tk_booleanizer_gc_lua);
+  int Bi = lua_gettop(L);
   memset(B, 0, sizeof(*B));
   tk_lua_fread(L, (char *) &B->finalized, sizeof(bool), 1, fh);
   tk_lua_fread(L, (char *) &B->n_thresholds, sizeof(uint64_t), 1, fh);
@@ -932,10 +973,18 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
   khint_t khi, sz;
   int kha;
   int64_t f;
-  B->continuous = tk_iuset_load(0, fh);
-  B->categorical = tk_iuset_load(0, fh);
-  B->integer_features = tk_iumap_load(0, fh);
-  B->string_features = tk_zumap_create(0, 0);
+  B->continuous = tk_iuset_load(L, fh);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  B->categorical = tk_iuset_load(L, fh);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  B->integer_features = tk_iumap_load(L, fh);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  B->string_features = tk_zumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
   size_t len;
   tk_lua_fread(L, (char *) &sz, sizeof(sz), 1, fh);
   for (khint_t i = 0; i < sz; i ++) {
@@ -948,7 +997,9 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
     if (kha)
       tk_zumap_setval(B->string_features, khi, f);
   }
-  B->cat_bits_string = tk_cat_bits_string_create(0, 0);
+  B->cat_bits_string = tk_cat_bits_string_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
   tk_lua_fread(L, (char *) &sz, sizeof(sz), 1, fh);
   for (khint_t i = 0; i < sz; i ++) {
     int64_t feature_id;
@@ -963,7 +1014,9 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
     khint_t k = tk_cat_bits_string_put(B->cat_bits_string, key, &kha);
     tk_cat_bits_string_setval(B->cat_bits_string, k, bit_id);
   }
-  B->cat_bits_double = tk_cat_bits_double_create(0, 0);
+  B->cat_bits_double = tk_cat_bits_double_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
   tk_lua_fread(L, (char *) &sz, sizeof(sz), 1, fh);
   for (khint_t i = 0; i < sz; i ++) {
     int64_t feature_id;
@@ -976,8 +1029,12 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
     khint_t k = tk_cat_bits_double_put(B->cat_bits_double, key, &kha);
     tk_cat_bits_double_setval(B->cat_bits_double, k, bit_id);
   }
-  B->cont_bits = tk_iumap_load(0, fh);
-  B->cont_thresholds = tk_cont_thresholds_create(0, 0);
+  B->cont_bits = tk_iumap_load(L, fh);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  B->cont_thresholds = tk_cont_thresholds_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
   tk_lua_fread(L, (char *) &sz, sizeof(sz), 1, fh);
   for (khint_t i = 0; i < sz; i ++) {
     int64_t feature_id;
@@ -985,6 +1042,8 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
     size_t n_thresh;
     tk_lua_fread(L, (char *) &n_thresh, sizeof(size_t), 1, fh);
     tk_dvec_t *thresh_vec = tk_dvec_create(L, n_thresh, 0, 0);
+    tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+    lua_pop(L, 1);
     tk_lua_fread(L, (char *) thresh_vec->a, sizeof(double), n_thresh, fh);
     thresh_vec->n = n_thresh;
     khint_t k = tk_cont_thresholds_put(B->cont_thresholds, feature_id, &kha);
