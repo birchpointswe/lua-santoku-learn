@@ -620,7 +620,9 @@ static inline void tm_init_uids (
   graph->uids = tk_ivec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
   lua_pop(L, 1);
-  graph->uids_idx = tk_iumap_create(0, 0);
+  graph->uids_idx = tk_iumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
+  lua_pop(L, 1);
 }
 
 static inline void tm_process_seed_edges (
@@ -699,8 +701,11 @@ static inline void tm_adj_init (
   graph->adj = tk_graph_adj_create(L, graph->uids->n, 0, 0);
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
   lua_pop(L, 1);
-  for (uint64_t i = 0; i < graph->uids->n; i ++)
-    graph->adj->a[i] = tk_iuset_create(0, 0);
+  for (uint64_t i = 0; i < graph->uids->n; i ++) {
+    graph->adj->a[i] = tk_iuset_create(L, 0);
+    tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
+    lua_pop(L, 1);
+  }
 }
 
 static inline void tm_adj_resize (
@@ -714,7 +719,9 @@ static inline void tm_adj_resize (
     return;
   tk_graph_adj_resize(graph->adj, new_size, true);
   for (uint64_t i = old_size; i < new_size; i++) {
-    graph->adj->a[i] = tk_iuset_create(0, 0);
+    graph->adj->a[i] = tk_iuset_create(L, 0);
+    tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
+    lua_pop(L, 1);
   }
 }
 
@@ -756,7 +763,9 @@ static inline void tm_run_knn_queries (
   }
 
   if (graph->uids_hoods) {
-    graph->uids_idx_hoods = tk_iumap_from_ivec(0, graph->uids_hoods);
+    graph->uids_idx_hoods = tk_iumap_from_ivec(L, graph->uids_hoods);
+    tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
+    lua_pop(L, 1);
     int kha;
     for (uint64_t i = 0; i < graph->uids_hoods->n; i++) {
       int64_t uid = graph->uids_hoods->a[i];
@@ -808,12 +817,6 @@ static void tm_graph_destroy (tk_graph_t *graph)
   tk_threads_destroy(graph->pool);
   if (graph->threads)
     free(graph->threads);
-  if (graph->pairs)
-    tk_euset_destroy(graph->pairs);
-  if (graph->uids_idx)
-    tk_iumap_destroy(graph->uids_idx);
-  if (graph->uids_idx_hoods)
-    tk_iumap_destroy(graph->uids_idx_hoods);
 }
 
 static inline int tm_graph_gc (lua_State *L)
@@ -1162,7 +1165,9 @@ static inline tk_graph_t *tm_graph_create (
   graph->knn_rank = knn_rank;
   graph->bridge = bridge;
   graph->largest_component_root = -1;
-  graph->pairs = tk_euset_create(0, 0);
+  graph->pairs = tk_euset_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, lua_gettop(L), -1);
+  lua_pop(L, 1);
   graph->n_edges = 0;
   graph->uids_hoods = NULL;
   graph->uids_idx_hoods = NULL;

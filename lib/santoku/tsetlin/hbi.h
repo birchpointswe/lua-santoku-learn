@@ -99,6 +99,7 @@ static inline void tk_hbi_shrink (
   if (A->destroyed)
     return;
 
+  int Ai = 1; // Object is at position 1 when called from Lua
   int64_t *old_to_new = tk_malloc(L, A->next_sid * sizeof(int64_t));
   for (uint64_t i = 0; i < A->next_sid; i ++)
     old_to_new[i] = -1;
@@ -141,8 +142,12 @@ static inline void tk_hbi_shrink (
     posting->n = write_pos;
     tk_ivec_shrink(posting);
   }
-  tk_iumap_t *new_uid_sid = tk_iumap_create(0, 0);
-  tk_iumap_t *new_sid_uid = tk_iumap_create(0, 0);
+  tk_iumap_t *new_uid_sid = tk_iumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
+  lua_pop(L, 1);
+  tk_iumap_t *new_sid_uid = tk_iumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
+  lua_pop(L, 1);
 
   int64_t uid;
   tk_umap_foreach(A->uid_sid, uid, old_sid, ({
@@ -156,6 +161,8 @@ static inline void tk_hbi_shrink (
     }
   }))
 
+  tk_lua_del_ephemeron(L, TK_HBI_EPH, Ai, A->uid_sid);
+  tk_lua_del_ephemeron(L, TK_HBI_EPH, Ai, A->sid_uid);
   tk_iumap_destroy(A->uid_sid);
   tk_iumap_destroy(A->sid_uid);
   A->uid_sid = new_uid_sid;
@@ -172,9 +179,6 @@ static inline void tk_hbi_destroy (
   if (A->destroyed)
     return;
   A->destroyed = true;
-  tk_iumap_destroy(A->uid_sid);
-  tk_iumap_destroy(A->sid_uid);
-  tk_hbi_buckets_destroy(A->buckets);
   tk_threads_destroy(A->pool);
   free(A->threads);
 }
@@ -1551,9 +1555,15 @@ static inline tk_hbi_t *tk_hbi_create (
     data->A = A;
   }
   A->features = features;
-  A->buckets = tk_hbi_buckets_create(0, 0);
-  A->uid_sid = tk_iumap_create(0, 0);
-  A->sid_uid = tk_iumap_create(0, 0);
+  A->buckets = tk_hbi_buckets_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
+  lua_pop(L, 1);
+  A->uid_sid = tk_iumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
+  lua_pop(L, 1);
+  A->sid_uid = tk_iumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
+  lua_pop(L, 1);
   A->codes = tk_hbi_codes_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
   lua_pop(L, 1);
@@ -1575,7 +1585,9 @@ static inline tk_hbi_t *tk_hbi_load (
     tk_lua_verror(L, 2, "load", "index was destroyed when saved");
   tk_lua_fread(L, &A->next_sid,  sizeof(uint64_t), 1, fh);
   tk_lua_fread(L, &A->features,  sizeof(uint64_t), 1, fh);
-  A->buckets = tk_hbi_buckets_create(0, 0);
+  A->buckets = tk_hbi_buckets_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
+  lua_pop(L, 1);
   khint_t nb = 0, k; int absent;
   tk_lua_fread(L, &nb, sizeof(khint_t), 1, fh);
   for (khint_t i = 0; i < nb; i ++) {
@@ -1598,8 +1610,12 @@ static inline tk_hbi_t *tk_hbi_load (
       tk_hbi_buckets_setval(A->buckets, k, NULL);
     }
   }
-  A->uid_sid = tk_iumap_load(0, 0);
-  A->sid_uid = tk_iumap_load(0, 0);
+  A->uid_sid = tk_iumap_load(L, 0);
+  tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
+  lua_pop(L, 1);
+  A->sid_uid = tk_iumap_load(L, 0);
+  tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
+  lua_pop(L, 1);
   uint64_t cnum = 0;
   tk_lua_fread(L, &cnum, sizeof(uint64_t), 1, fh);
   A->codes = tk_hbi_codes_create(L, cnum, 0, 0);

@@ -41,11 +41,9 @@ test("tsetlin", function ()
 
   str.printf("Transforming train\t%d\n", train.n)
   train.problems = train.problems:bits_to_cvec(train.n, dataset.n_features, true)
-  train.solutions = train.solutions:raw("u32")
 
   str.printf("Transforming test\t%d\n", test.n)
   test.problems = test.problems:bits_to_cvec(test.n, dataset.n_features, true)
-  test.solutions = test.solutions:raw("u32")
 
   print("Training\n")
   local stopwatch = utc.stopwatch()

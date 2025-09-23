@@ -9,7 +9,7 @@
 #include <assert.h>
 #include <ctype.h>
 
-#define MT_TOKENIZER "tk_tokenizer_t"
+#define TK_TOKENIZER_MT "tk_tokenizer_t"
 #define TK_TOKENIZER_EPH "tk_tokenizer_eph"
 
 typedef struct {
@@ -37,7 +37,7 @@ typedef struct {
 
 static tb_tokenizer_t *peek_tokenizer (lua_State *L, int i)
 {
-  return (tb_tokenizer_t *) luaL_checkudata(L, i, MT_TOKENIZER);
+  return (tb_tokenizer_t *) luaL_checkudata(L, i, TK_TOKENIZER_MT);
 }
 
 static inline int tb_tokenizer_gc (lua_State *L)
@@ -50,33 +50,24 @@ static inline int tb_tokenizer_gc (lua_State *L)
   tk_umap_foreach_values(tokenizer->strs, stok, ({
     free((char *) stok);
   }))
-  tk_cvec_destroy(tokenizer->tmp_token);
-  tk_cvec_destroy(tokenizer->tmp_append);
-  tk_cvec_destroy(tokenizer->tmp_skipgram);
-  tk_ivec_destroy(tokenizer->tokens);
-  tk_ivec_destroy(tokenizer->window);
-  tk_zumap_destroy(tokenizer->ids);
-  tk_cumap_destroy(tokenizer->strs);
   return 0;
 }
 
 static inline int tb_tokenizer_destroy (lua_State *L)
 {
-  lua_settop(L, 0);
-  lua_pushvalue(L, lua_upvalueindex(1));
   return tb_tokenizer_gc(L);
 }
 
 static inline int tb_tokenizer_persist (lua_State *L)
 {
-  tb_tokenizer_t *tokenizer = peek_tokenizer(L, lua_upvalueindex(1));
-  lua_settop(L, 1);
-  bool tostr = lua_type(L, 1) == LUA_TNIL;
+  lua_settop(L, 2);
+  tb_tokenizer_t *tokenizer = peek_tokenizer(L, 1);
+  bool tostr = lua_type(L, 2) == LUA_TNIL;
   FILE *fh;
   if (tostr)
     fh = tk_lua_tmpfile(L);
   else
-    fh = tk_lua_fopen(L, luaL_checkstring(L, 1), "w");
+    fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
   tk_lua_fwrite(L, (char *) &tokenizer->finalized, sizeof(bool), 1, fh);
   tk_lua_fwrite(L, (char *) &tokenizer->max_len, sizeof(int), 1, fh);
   tk_lua_fwrite(L, (char *) &tokenizer->min_len, sizeof(int), 1, fh);
@@ -764,9 +755,9 @@ static inline int tb_tokenizer_features_aligned (tb_tokenizer_t *tokenizer)
 
 static inline int tb_tokenizer_parse (lua_State *L)
 {
-  tb_tokenizer_t *tokenizer = peek_tokenizer(L, lua_upvalueindex(1));
-  lua_settop(L, 1);
-  if (lua_type(L, 1) != LUA_TTABLE) {
+  lua_settop(L, 2);
+  tb_tokenizer_t *tokenizer = peek_tokenizer(L, 1);
+  if (lua_type(L, 2) != LUA_TTABLE) {
     _tb_tokenizer_parse(L, tokenizer);
   } else {
     for (size_t i = 1; i <= (size_t) lua_objlen(L, 1); i ++) {
@@ -783,15 +774,15 @@ static inline int tb_tokenizer_parse (lua_State *L)
 
 static inline int tb_tokenizer_tokenize (lua_State *L)
 {
-  tb_tokenizer_t *tokenizer = peek_tokenizer(L, lua_upvalueindex(1));
-  lua_settop(L, 2); // t, out
+  lua_settop(L, 3); // tkz, t, out
+  tb_tokenizer_t *tokenizer = peek_tokenizer(L, 1);
 
-  tk_ivec_t *out = tk_ivec_peekopt(L, 2);
+  tk_ivec_t *out = tk_ivec_peekopt(L, 3);
   if (out == NULL) {
-    lua_pop(L, 1); // t
-    out = tk_ivec_create(L, 0, 0, 0); // t out
+    lua_pop(L, 1); // tks t
+    out = tk_ivec_create(L, 0, 0, 0); // tkz t out
   } else {
-    tk_ivec_clear(out); // t out
+    tk_ivec_clear(out); // tkz t out
   }
 
   int kha;
@@ -799,11 +790,11 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
   tk_iuset_t *seen = tk_iuset_create(0, 0);
   uint64_t n_features = (uint64_t) tb_tokenizer_features_aligned(tokenizer);
 
-  if (lua_type(L, 1) != LUA_TTABLE) {
+  if (lua_type(L, 2) != LUA_TTABLE) { // tkz t out
 
     size_t doclen;
-    char *odoc = (char *) luaL_checklstring(L, 1, &doclen);
-    tk_cvec_t *ndoc = tb_tokenizer_normalize(odoc, doclen, tokenizer->max_run); // t out
+    char *odoc = (char *) luaL_checklstring(L, 2, &doclen); // tkz t out
+    tk_cvec_t *ndoc = tb_tokenizer_normalize(odoc, doclen, tokenizer->max_run); // tkz t out
     tb_tokenizer_populate_tokens(tokenizer, ndoc->a, ndoc->n);
     tk_cvec_destroy(ndoc);
 
@@ -817,12 +808,13 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
       tk_ivec_push(out, (int64_t) id);
     }
 
+    // tkz t out
+
   } else {
 
-    // TODO: parallelize
-    uint64_t n = (uint64_t) lua_objlen(L, 1);
+    uint64_t n = (uint64_t) lua_objlen(L, 2); // tkz t out
     for (size_t i = 1; i <= n; i ++) {
-      lua_rawgeti(L, 1, i); // t out s
+      lua_rawgeti(L, 2, i); // tkz t out s
       size_t doclen;
       char *odoc = (char *) luaL_checklstring(L, -1, &doclen);
       tk_cvec_t *ndoc = tb_tokenizer_normalize(odoc, doclen, tokenizer->max_run); // t out
@@ -838,11 +830,14 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
           continue;
         tk_ivec_push(out, (int64_t) id + ((int64_t) i - 1) * (int64_t) n_features);
       }
-      lua_pop(L, 1); // t out
+      lua_pop(L, 1); // tkz t out
     }
+
+    // tkz t out
 
   }
 
+  // tkz t out
   tk_iuset_destroy(seen);
   tk_ivec_shrink(out);
   return 1;
@@ -850,19 +845,24 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
 
 static inline int tb_tokenizer_restrict (lua_State *L)
 {
-  lua_settop(L, 1);
+  lua_settop(L, 2);
 
-  tk_ivec_t *top_v = tk_ivec_peek(L, 1, "top_v");
+  int Ti = tk_lua_absindex(L, 1);
+  tb_tokenizer_t *tokenizer = peek_tokenizer(L, Ti);
+  tk_ivec_t *top_v = tk_ivec_peek(L, 2, "top_v");
 
   // TODO: Can we do this without strdup? Just don't free the ones we're
   // keeping?
-  tb_tokenizer_t *tokenizer = peek_tokenizer(L, lua_upvalueindex(1));
   char *tok;
   int64_t id, id0;
   int absent;
   khint_t k;
-  tk_zumap_t *ids0 = tk_zumap_create(0, 0);
-  tk_cumap_t *strs0 = tk_cumap_create(0, 0);
+  tk_zumap_t *ids0 = tk_zumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
+  lua_pop(L, 1);
+  tk_cumap_t *strs0 = tk_cumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
+  lua_pop(L, 1);
   tokenizer->next_id = 0;
   for (lua_Integer i = 0; i < (int64_t) top_v->n; i ++) {
     id = top_v->a[i];
@@ -883,33 +883,29 @@ static inline int tb_tokenizer_restrict (lua_State *L)
   tk_umap_foreach_values(tokenizer->strs, stok, ({
     free((char *) stok);
   }))
+  // tk_lua_del_ephemeron(L, TK_TOKENIZER_EPH, Ti, tokenizer->ids);
   tk_zumap_destroy(tokenizer->ids);
-  tk_cumap_destroy(tokenizer->strs);
   tokenizer->ids = ids0;
+  // tk_lua_del_ephemeron(L, TK_TOKENIZER_EPH, Ti, tokenizer->strs);
+  tk_cumap_destroy(tokenizer->strs);
   tokenizer->strs = strs0;
   return 0;
 }
 
 static inline int tb_tokenizer_finalize (lua_State *L)
 {
-  int i_tok = lua_upvalueindex(1);
-  tb_tokenizer_t *tokenizer = peek_tokenizer(L, i_tok);
-
+  lua_settop(L, 1);
+  tb_tokenizer_t *tokenizer = peek_tokenizer(L, -1);
   if (tokenizer->finalized)
     return luaL_error(L, "already finalized");
-
   tokenizer->finalized = true;
-
-  // Simply mark as finalized - no pruning or reordering
-  // All feature selection will be done externally via bits_top_df
-
   return 0;
 }
 
 static inline int tb_tokenizer_index (lua_State *L)
 {
   lua_settop(L, 1);
-  tb_tokenizer_t *tokenizer = peek_tokenizer(L, lua_upvalueindex(1));
+  tb_tokenizer_t *tokenizer = peek_tokenizer(L, 1);
   lua_newtable(L);
   khint_t k;
   int id;
@@ -928,29 +924,28 @@ static inline int tb_tokenizer_index (lua_State *L)
 static inline int tb_tokenizer_features (lua_State *L)
 {
   lua_settop(L, 1);
-  tb_tokenizer_t *tokenizer = peek_tokenizer(L, lua_upvalueindex(1));
+  tb_tokenizer_t *tokenizer = peek_tokenizer(L, 1);
   lua_pushinteger(L, (int64_t) tb_tokenizer_features_aligned(tokenizer));
   return 1;
 }
 
 static inline int tb_tokenizer_train (lua_State *L)
 {
-  lua_settop(L, 1);
-  tb_tokenizer_t *tokenizer = peek_tokenizer(L, lua_upvalueindex(1));
+  lua_settop(L, 2);
+  tb_tokenizer_t *tokenizer = peek_tokenizer(L, 1);
   if (tokenizer->finalized)
     return tk_lua_error(L, "already finalized");
-  tk_lua_fchecktype(L, 1, "train", "corpus", LUA_TTABLE);
-  lua_getfield(L, 1, "corpus");
-  lua_remove(L, 1);
-  int n = lua_objlen(L, 1);
+  tk_lua_fchecktype(L, 2, "train", "corpus", LUA_TTABLE);
+  lua_getfield(L, 2, "corpus"); // corpus
+  int n = lua_objlen(L, -1); //
   for (int i = 1; i <= n; i ++) {
-    lua_pushinteger(L, (int64_t) i);
-    lua_gettable(L, -2);
+    lua_pushinteger(L, (int64_t) i); // corpus i
+    lua_gettable(L, -2); // corpus v
     size_t len;
     tk_cvec_t *doc = tb_tokenizer_normalize((char *) luaL_checklstring(L, -1, &len), len, tokenizer->max_run);
     tb_tokenizer_populate_tokens(tokenizer, doc->a, doc->n);
     tk_cvec_destroy(doc);
-    lua_pop(L, 1);
+    lua_pop(L, 1); // corpus
   }
   return 0;
 }
@@ -989,17 +984,29 @@ static inline int tb_tokenizer_create (lua_State *L)
     luaL_error(L, "max_len must be greater than or equal to min_len");
   if (!align)
     luaL_error(L, "alignment must be greater than 0 (use 128 for TM)");
-  tb_tokenizer_t *tokenizer = lua_newuserdata(L, sizeof(tb_tokenizer_t));
-  memset(tokenizer, 0, sizeof(tb_tokenizer_t));
-  luaL_getmetatable(L, MT_TOKENIZER);
-  lua_setmetatable(L, -2);
-  tokenizer->tokens = tk_ivec_create(0, 0, 0, 0);
-  tokenizer->window = tk_ivec_create(0, 0, 0, 0);
-  tokenizer->tmp_token = tk_cvec_create(0, 0, 0, 0);
-  tokenizer->tmp_append = tk_cvec_create(0, 0, 0, 0);
-  tokenizer->tmp_skipgram = tk_cvec_create(0, 0, 0, 0);
-  tokenizer->ids = tk_zumap_create(0, 0);
-  tokenizer->strs = tk_cumap_create(0, 0);
+  tb_tokenizer_t *tokenizer = tk_lua_newuserdata(L, tb_tokenizer_t, TK_TOKENIZER_MT, tb_mt_fns, tb_tokenizer_gc);
+  int Ti = tk_lua_absindex(L, -1);
+  tokenizer->tokens = tk_ivec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
+  lua_pop(L, 1);
+  tokenizer->window = tk_ivec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
+  lua_pop(L, 1);
+  tokenizer->tmp_token = tk_cvec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
+  lua_pop(L, 1);
+  tokenizer->tmp_append = tk_cvec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
+  lua_pop(L, 1);
+  tokenizer->tmp_skipgram = tk_cvec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
+  lua_pop(L, 1);
+  tokenizer->ids = tk_zumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
+  lua_pop(L, 1);
+  tokenizer->strs = tk_cumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
+  lua_pop(L, 1);
   tokenizer->next_id = 0;
   tokenizer->max_len = max_len;
   tokenizer->min_len = min_len;
@@ -1011,9 +1018,6 @@ static inline int tb_tokenizer_create (lua_State *L)
   tokenizer->negations = negations;
   tokenizer->align = align;
   tokenizer->window_size = ngrams > 0 ? ngrams + (ngrams - 1) * skips : 0;
-  lua_newtable(L);
-  lua_pushvalue(L, -2);
-  tk_lua_register(L, tb_mt_fns, 1);
   return 1;
 }
 
@@ -1025,17 +1029,29 @@ static inline int tb_tokenizer_load (lua_State *L)
   const char *data = luaL_checklstring(L, 1, &len);
   bool isstr = lua_type(L, 3) == LUA_TBOOLEAN && lua_toboolean(L, 3);
   FILE *fh = isstr ? tk_lua_fmemopen(L, (char *) data, len, "r") : tk_lua_fopen(L, data, "r");
-  tb_tokenizer_t *tokenizer = lua_newuserdata(L, sizeof(tb_tokenizer_t));
-  memset(tokenizer, 0, sizeof(tb_tokenizer_t));
-  luaL_getmetatable(L, MT_TOKENIZER);
-  lua_setmetatable(L, -2);
-  tokenizer->tokens = tk_ivec_create(0, 0, 0, 0);
-  tokenizer->window = tk_ivec_create(0, 0, 0, 0);
-  tokenizer->tmp_token = tk_cvec_create(0, 0, 0, 0);
-  tokenizer->tmp_append = tk_cvec_create(0, 0, 0, 0);
-  tokenizer->tmp_skipgram = tk_cvec_create(0, 0, 0, 0);
-  tokenizer->ids = tk_zumap_create(0, 0);
-  tokenizer->strs = tk_cumap_create(0, 0);
+  tb_tokenizer_t *tokenizer = tk_lua_newuserdata(L, tb_tokenizer_t, TK_TOKENIZER_MT, tb_mt_fns, tb_tokenizer_gc);
+  int Ti = tk_lua_absindex(L, -1);
+  tokenizer->tokens = tk_ivec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
+  lua_pop(L, 1);
+  tokenizer->window = tk_ivec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
+  lua_pop(L, 1);
+  tokenizer->tmp_token = tk_cvec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
+  lua_pop(L, 1);
+  tokenizer->tmp_append = tk_cvec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
+  lua_pop(L, 1);
+  tokenizer->tmp_skipgram = tk_cvec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
+  lua_pop(L, 1);
+  tokenizer->ids = tk_zumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
+  lua_pop(L, 1);
+  tokenizer->strs = tk_cumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
+  lua_pop(L, 1);
   tk_lua_fread(L, &tokenizer->finalized, sizeof(bool), 1, fh);
   tk_lua_fread(L, &tokenizer->max_len, sizeof(int), 1, fh);
   tk_lua_fread(L, &tokenizer->min_len, sizeof(int), 1, fh);
@@ -1068,9 +1084,6 @@ static inline int tb_tokenizer_load (lua_State *L)
     tk_cumap_setval(tokenizer->strs, k, tokn);
   }
   tk_lua_fclose(L, fh);
-  lua_newtable(L);
-  lua_pushvalue(L, -2);
-  tk_lua_register(L, tb_mt_fns, 1);
   return 1;
 }
 
@@ -1085,9 +1098,5 @@ int luaopen_santoku_tsetlin_tokenizer (lua_State *L)
 {
   lua_newtable(L);
   tk_lua_register(L, tb_fns, 0);
-  luaL_newmetatable(L, MT_TOKENIZER);
-  lua_pushcfunction(L, tb_tokenizer_gc);
-  lua_setfield(L, -2, "__gc");
-  lua_pop(L, 1);
   return 1;
 }

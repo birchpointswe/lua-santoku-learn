@@ -44,15 +44,16 @@ example, category and author supervision can be injected into a graph of text
 documents by adding virtual nodes for each category and author and connecting
 them to all relevant data nodes.
 
-The feature space is formed from the union of multiple feature subspaces, each
-assigned to a specific rank. In the category, author, and document example,
-category IDs are assigned rank 0, author IDs rank 1, and visible (e.g. text
-ngram) features rank 2. Virtual nodes contain features only at their designated
-rank (category nodes have only category ID features, author nodes have only
-author ID features). Data nodes contain features at all ranks: the IDs of
-connected virtual nodes plus their *visible* features (e.g. text ngram features
-that must be available at inference time). This rank assignment enables
-similarity computation as:
+Virtual and data nodes both have features, and the feature space is formed from
+the union of multiple feature subspaces, each assigned to a specific rank. In
+the category, author, and document example, the category IDs subspace is
+assigned rank 0, the author IDs subspace is assigned rank 1, and the visible
+(e.g. text ngram) subspace is assigned rank 2. Virtual nodes contain features
+only at their designated rank (i.e. category nodes have only category ID
+features, author nodes have only author ID features). Data nodes contain
+features at all ranks: the IDs of connected virtual nodes plus their *visible*
+features (e.g. text ngram features that must be available at inference time).
+This rank assignment enables similarity computation as:
 
     w(i, j) = Σ[sim_r(i, j) * exp(-r * decay)] / Σ[exp(-r * decay)]
 
@@ -61,8 +62,7 @@ only features at rank `r`. Feature overlap in lower ranks (e.g. between
 documents and their associated author/category nodes or between documents
 sharing authors/categories themselves) results in exponentially higher
 similarity scores than feature overlap strictly in higher ranks (e.g. between
-documents sharing only visible (e.g. text ngram) features). This exponential
-decay pairs
+documents sharing only text ngram features). This exponential decay pairs
 naturally with the log-space mapping in reconstruction error (described below),
 ensuring supervision shapes the manifold structure hierarchically.
 
@@ -142,39 +142,39 @@ visible feature dimensionality, enabling more predictable training behavior.
 Inference speed depends on the efficiency of the landmark indexing structure
 rather than feature dimensionality.
 
-## Reference Implementation Pipeline
+## Reference Pipeline
 
-1. **Graph construction**: Create virtual nodes for each unique label/category.
-   Virtual nodes contain features only at their rank (e.g., category nodes have
-   rank-0 features), while documents contain features at all ranks. Compute all
-   edge weights via the unified similarity function with exponential rank decay,
-   ensuring documents connecting to many virtual nodes don't overwhelm the
-   graph. Build mutual k-NN edges between documents using visible features.
+1. **Construct the graph**: Create virtual nodes for each unique label/category.
+   Assign features to virtual nodes only at their designated rank (e.g., assign
+   rank-0 features to category nodes), while assigning features at all ranks to
+   data nodes. Compute all edge weights using the unified similarity function
+   with exponential rank decay to prevent documents connected to many virtual
+   nodes from overwhelming the graph. Build mutual k-NN edges between documents
+   using visible features.
 
-2. **Spectral decomposition**: Eigendecomposition with oversampling using random
-   walk normalized Laplacian `L_rw = I - D^(-1)W`. The eigenvalue spectrum
-   exhibits gaps corresponding to rank levels, with near-zero eigenvalues for
-   category-level structure, intermediate values for author-level mixing, and
-   larger eigenvalues capturing k-NN document similarity.
+2. **Perform spectral decomposition**: Apply eigendecomposition with oversampling
+   using the random walk normalized Laplacian `L_rw = I - D^(-1)W`. Observe that
+   the eigenvalue spectrum exhibits gaps corresponding to rank levels, with
+   near-zero eigenvalues for category-level structure, intermediate values for
+   author-level mixing, and larger eigenvalues capturing k-NN document similarity.
 
-3. **Median thresholding**: Binarization via median split
+3. **Apply median thresholding**: Binarize eigenvectors using median split.
 
-4. **Coordinate descent refinement**: Iterative bit flipping to maximize
-   weighted adjacency agreement, operating on each bit position across all nodes
+4. **Refine with coordinate descent**: Apply iterative bit flipping to maximize
+   weighted adjacency agreement, operating on each bit position across all nodes.
 
-5. **Bit selection**: Prefix testing with reconstruction error
-   metric on the full heterogeneous graph to select final binary codes from
-   binarized eigenvectors
+5. **Select bits**: Apply prefix testing with reconstruction error metric on the
+   full heterogeneous graph to select final binary codes from binarized
+   eigenvectors.
 
-6. **Redundant bit pruning**: Prefix selection followed by SFBS with swap
-   operations for bit removal using reconstruction error
+6. **Prune redundant bits**: Apply prefix selection followed by SFBS with swap
+   operations for bit removal using reconstruction error.
 
-7. **Landmark indexing**: Fast set-based methods (e.g., LSH, inverted indices
-   with Jaccard/overlap similarity)
+7. **Index landmarks**: Implement fast set-based methods (e.g., LSH, inverted
+   indices with Jaccard/overlap similarity).
 
-8. **Hash function learning**: Multi-label binary classifier or ensemble
-   training
-
+8. **Learn hash functions**: Train multi-label binary classifiers or classifier
+   ensembles.
 
 ## Experimental Variations
 

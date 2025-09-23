@@ -33,7 +33,7 @@ typedef struct {
   tk_pvec_t *pos, *neg;
   uint64_t n_pos, n_neg;
   double *f1, *precision, *recall;
-  unsigned int *predicted, *expected;
+  int64_t *predicted, *expected;
   tk_bits_t *codes, *codes_predicted, *codes_expected, *mask;
   uint64_t mask_popcount;
   double *dcodes;
@@ -312,11 +312,8 @@ static void tk_eval_worker (void *dp, int sig)
 static inline int tm_class_accuracy (lua_State *L)
 {
   lua_settop(L, 5);
-  unsigned int *predicted, *expected;
-  tk_cvec_t *pvec = tk_cvec_peekopt(L, 1);
-  tk_cvec_t *evec = tk_cvec_peekopt(L, 2);
-  predicted = pvec != NULL ? (unsigned int *) pvec->a : (unsigned int *) tk_lua_checkustring(L, 1, "predicted");
-  expected = evec != NULL ? (unsigned int *) evec->a : (unsigned int *) tk_lua_checkustring(L, 2, "expected");
+  tk_ivec_t *predicted = tk_ivec_peek(L, 1, "predicted");
+  tk_ivec_t *expected = tk_ivec_peek(L, 2, "expected");
   unsigned int n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
   unsigned int n_dims = tk_lua_checkunsigned(L, 4, "n_classes");
   unsigned int n_threads = tk_threads_getn(L, 5, "n_threads", NULL);
@@ -326,8 +323,8 @@ static inline int tm_class_accuracy (lua_State *L)
 
   tk_eval_t state;
   state.n_dims = n_dims;
-  state.expected = expected;
-  state.predicted = predicted;
+  state.expected = expected->a;
+  state.predicted = predicted->a;
   state.TP = tk_malloc(L, n_dims * sizeof(atomic_ulong));
   state.FP = tk_malloc(L, n_dims * sizeof(atomic_ulong));
   state.FN = tk_malloc(L, n_dims * sizeof(atomic_ulong));
@@ -800,14 +797,9 @@ static inline int tm_optimize_clustering (lua_State *L)
       lua_pushinteger(L, (lua_Integer) data[child].next_n);
       lua_pushvalue(L, i_ids);
       tk_lua_get_ephemeron(L, TK_EVAL_EPH, data[child].next_assignments);
-      if (lua_pcall(L, 7, 0, 0))
-      {
-        luaL_callmeta(L, -1, "__tostring");
-        const char *str = luaL_optstring(L, -1, NULL);
-        if (str)
-          fprintf(stderr, "%s\n", str);
-        lua_pop(L, 1);
-      }
+      lua_call(L, 7, 0, 0);
+      // TODO: Set things up such that memory is correctly freed even if this
+      // throws
     }
     tk_threads_acknowledge_child(pool, child);
   }

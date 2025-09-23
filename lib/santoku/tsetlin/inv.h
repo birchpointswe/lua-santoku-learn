@@ -115,6 +115,7 @@ static inline void tk_inv_shrink (
   if (I->destroyed)
     return;
 
+  int Ii = 1; // Object is at position 1 when called from Lua
   int64_t *old_to_new = tk_malloc(L, (size_t) I->next_sid * sizeof(int64_t));
   for (int64_t i = 0; i < I->next_sid; i ++)
     old_to_new[i] = -1;
@@ -144,7 +145,11 @@ static inline void tk_inv_shrink (
     return;
   }
   tk_ivec_t *new_node_offsets = tk_ivec_create(L, (size_t) new_sid + 1, 0, 0);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
   tk_ivec_t *new_node_bits = tk_ivec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
 
   new_node_offsets->n = 0;
   for (khint_t k = kh_begin(I->sid_uid); k != kh_end(I->sid_uid); k ++) {
@@ -158,6 +163,8 @@ static inline void tk_inv_shrink (
       tk_ivec_push(new_node_bits, I->node_bits->a[i]);
   }
   tk_ivec_push(new_node_offsets, (int64_t) new_node_bits->n);
+  tk_lua_del_ephemeron(L, TK_INV_EPH, Ii, I->node_offsets);
+  tk_lua_del_ephemeron(L, TK_INV_EPH, Ii, I->node_bits);
   tk_ivec_destroy(I->node_offsets);
   tk_ivec_destroy(I->node_bits);
   I->node_offsets = new_node_offsets;
@@ -177,8 +184,12 @@ static inline void tk_inv_shrink (
     post->n = write_pos;
     tk_ivec_shrink(post);
   }
-  tk_iumap_t *new_uid_sid = tk_iumap_create(0, 0);
-  tk_iumap_t *new_sid_uid = tk_iumap_create(0, 0);
+  tk_iumap_t *new_uid_sid = tk_iumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
+  tk_iumap_t *new_sid_uid = tk_iumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
 
   for (khint_t k = kh_begin(I->uid_sid); k != kh_end(I->uid_sid); k ++) {
     if (!kh_exist(I->uid_sid, k))
@@ -195,6 +206,8 @@ static inline void tk_inv_shrink (
     }
   }
 
+  tk_lua_del_ephemeron(L, TK_INV_EPH, Ii, I->uid_sid);
+  tk_lua_del_ephemeron(L, TK_INV_EPH, Ii, I->sid_uid);
   tk_iumap_destroy(I->uid_sid);
   tk_iumap_destroy(I->sid_uid);
   I->uid_sid = new_uid_sid;
@@ -223,12 +236,6 @@ static inline void tk_inv_destroy (
   if (I->destroyed)
     return;
   I->destroyed = true;
-  tk_iumap_destroy(I->uid_sid);
-  tk_iumap_destroy(I->sid_uid);
-  for (uint64_t i = 0; i < I->pool->n_threads; i ++) {
-    tk_inv_thread_t *data = I->threads + i;
-    tk_iuset_destroy(data->seen);
-  }
   tk_threads_destroy(I->pool);
   free(I->threads);
 }
@@ -2119,8 +2126,12 @@ static inline tk_inv_t *tk_inv_create (
     I->rank_weights->a[r] = weight;
     I->total_rank_weight += weight;
   }
-  I->uid_sid = tk_iumap_create(0, 0);
-  I->sid_uid = tk_iumap_create(0, 0);
+  I->uid_sid = tk_iumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
+  I->sid_uid = tk_iumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
   I->node_offsets = tk_ivec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
@@ -2165,7 +2176,9 @@ static inline tk_inv_t *tk_inv_create (
     tk_inv_thread_t *data = I->threads + i;
     I->pool->threads[i].data = data;
     data->I = I;
-    data->seen = tk_iuset_create(0, 0);
+    data->seen = tk_iuset_create(L, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+    lua_pop(L, 1);
     data->touched = tk_ivec_create(L, 0, 0, 0);
     tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
     lua_pop(L, 1);
@@ -2266,7 +2279,9 @@ static inline tk_inv_t *tk_inv_load (
     tk_inv_thread_t *th = I->threads + i;
     I->pool->threads[i].data = th;
     th->I = I;
-    th->seen = tk_iuset_create(0, 0);
+    th->seen = tk_iuset_create(L, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+    lua_pop(L, 1);
     th->touched = tk_ivec_create(L, 0, 0, 0);
     tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
     lua_pop(L, 1);
