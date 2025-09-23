@@ -62,12 +62,10 @@ test("tsetlin", function ()
   print("Transforming train")
   cor.compress(train.problems, train.n)
   train.problems = train.problems:bits_to_cvec(train.n, HIDDEN, true)
-  train.solutions = train.solutions:raw("u32")
 
   print("Transforming test")
   cor.compress(test.problems, test.n)
   test.problems = test.problems:bits_to_cvec(test.n, HIDDEN, true)
-  test.solutions = test.solutions:raw("u32")
 
   print("Train", train.n)
   print("Test", test.n)

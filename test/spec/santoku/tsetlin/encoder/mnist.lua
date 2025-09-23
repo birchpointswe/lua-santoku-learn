@@ -57,7 +57,7 @@ local CLAUSES = { def = 8, min = 8, max = 128, int = true, log = true, pow2 = tr
 local CLAUSE_TOLERANCE = { def = 8, min = 8, max = 256, int = true, log = true, pow2 = true }
 local CLAUSE_MAXIMUM = { def = 8, min = 8, max = 256, int = true, log = true, pow2 = true }
 local TARGET = { def = 4, min = 2, max = 256, int = true, log = true, pow2 = true }
-local SPECIFICITY = { def = 1000, min = 1, max = 4000, int = true, log = true }
+local SPECIFICITY = { def = 1000, min = 2, max = 4000, int = true, log = true }
 
 local SEARCH_PATIENCE = 10
 local SEARCH_ROUNDS = 20

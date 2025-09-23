@@ -320,9 +320,9 @@ static inline void tm_run_spectral (
       lua_pushinteger(L, (int64_t) i);
       lua_pushnumber(L, spec.evals[i]);
       lua_pushboolean(L, i >= start);
+      lua_call(L, 4, 0, 0)
 
-      if (lua_pcall(L, 4, 0, 0))
-        lua_pop(L, 1);
+
     }
   }
 

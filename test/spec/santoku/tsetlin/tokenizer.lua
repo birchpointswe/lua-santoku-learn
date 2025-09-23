@@ -26,17 +26,17 @@ test("tokenizer", function ()
     "And one more a thing",
   }
 
-  tok.train({ corpus = corpus })
-  tok.finalize()
-  local tokens = tok.tokenize(corpus)
-  local top, weights = tokens:bits_top_df(#corpus, tok.features())
-  tok.restrict(top)
+  tok:train({ corpus = corpus })
+  tok:finalize()
+  local tokens = tok:tokenize(corpus)
+  local top, weights = tokens:bits_top_df(#corpus, tok:features())
+  tok:restrict(top)
 
-  local words = tok.index()
+  local words = tok:index()
 
   print(serialize(weights:table()))
   print(serialize(words))
-  for id in tok.tokenize("this is a test"):each() do
+  for id in tok:tokenize("this is a test"):each() do
     print(id, words[id + 1], weights:get(id))
   end
 

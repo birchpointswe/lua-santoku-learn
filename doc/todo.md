@@ -1,22 +1,19 @@
 # Now
 
-- All tests functional
 - Sanitize
-- Ensure tk_cvec_t used in place of strings where possible
-- tk_cvec_t
-    - Ensure cvec used everywhere (no strings!)
-- Add lua_managed concept to threadpool
-- Connect all allocs to Lua
-    - Use ephemerons for long-lived maps (in indices, booleanizer, etc)
-    - Replace any lingering mallocs with vectors or newuserdata
-    - Double-check usage inside threads, using special signal for cleanup
-    - Double-check lua callback error handling, allowing errors to be thrown as
-      long as all allocs are tied to Lua
+
+- Fix double-free with del_ephemeron in tokenizer
+
+- Connect all allocs to Lua, ensuring all are freed given an error
+    - Thread pool
+    - Thread data
+    - Arbitrary mallocs (either use newuserdata/etc or ensure proper cleanup in
+      all cases)
+
+- Rename tch
+- Rename library and project to santoku-learn
 
 # Next
-
-- Rename tch to flipper
-- Rename library and project to santoku-learn
 
 - tk_graph_t
     - Allow different indices for weight lookup and knn, both supporting
