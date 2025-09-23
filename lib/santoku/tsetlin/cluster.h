@@ -14,7 +14,7 @@ static inline int tk_in_idset (tk_iumap_t *ididx, int64_t id) {
 
 static inline int64_t tk_idx_of (tk_iumap_t *ididx, int64_t id) {
   khint_t khi = tk_iumap_get(ididx, id);
-  return (khi == tk_iumap_end(ididx)) ? -1 : tk_iumap_value(ididx, khi);
+  return (khi == tk_iumap_end(ididx)) ? -1 : tk_iumap_val(ididx, khi);
 }
 
 #define TK_FOR_EPS_NEIGHBORS(uid, DO) \
@@ -65,7 +65,7 @@ static inline void tk_cluster_dsu (
       });
     }
 
-    tk_iumap_t *cmap = tk_iumap_create();
+    tk_iumap_t *cmap = tk_iumap_create(0, 0);
     int kha;
     khint_t khi;
     int64_t idx;
@@ -75,10 +75,10 @@ static inline void tk_cluster_dsu (
       int64_t r = tk_dsu_find(&dsu, u);
       khi = tk_iumap_get(ididx, u);
       assert(khi != tk_iumap_end(ididx));
-      idx = tk_iumap_value(ididx, khi);
+      idx = tk_iumap_val(ididx, khi);
       khi = tk_iumap_put(cmap, r, &kha);
-      if (kha) tk_iumap_value(cmap, khi) = next_cluster ++;
-      assignments->a[idx] = tk_iumap_value(cmap, khi);
+      if (kha) tk_iumap_setval(cmap, khi, next_cluster ++);
+      assignments->a[idx] = tk_iumap_val(cmap, khi);
     }
 
     tk_iumap_destroy(cmap);
@@ -127,11 +127,11 @@ static inline void tk_cluster_dsu (
   for (uint64_t i = 0; i < n; i ++) {
     int64_t u = ids->a[i];
     khint_t khi = tk_iumap_get(ididx, u);
-    int64_t idx = tk_iumap_value(ididx, khi);
+    int64_t idx = tk_iumap_val(ididx, khi);
     assignments->a[idx] = -1;
   }
 
-  tk_iumap_t *cmap = tk_iumap_create();
+  tk_iumap_t *cmap = tk_iumap_create(0, 0);
   int kha;
   khint_t khi;
   int64_t next_cluster = 0;
@@ -141,7 +141,7 @@ static inline void tk_cluster_dsu (
     int64_t u = ids->a[i];
     int64_t r = tk_dsu_find(&dsu, u);
     khi = tk_iumap_put(cmap, r, &kha);
-    if (kha) tk_iumap_value(cmap, khi) = next_cluster ++;
+    if (kha) tk_iumap_setval(cmap, khi, next_cluster ++);
   }
 
   for (uint64_t i = 0; i < n; i ++) {
@@ -149,9 +149,9 @@ static inline void tk_cluster_dsu (
     int64_t u = ids->a[i];
     int64_t r = tk_dsu_find(&dsu, u);
     khint_t kc = tk_iumap_get(cmap, r);
-    int64_t cid = (kc == tk_iumap_end(cmap)) ? -1 : tk_iumap_value(cmap, kc);
+    int64_t cid = (kc == tk_iumap_end(cmap)) ? -1 : tk_iumap_val(cmap, kc);
     khint_t ki = tk_iumap_get(ididx, u);
-    int64_t idx = tk_iumap_value(ididx, ki);
+    int64_t idx = tk_iumap_val(ididx, ki);
     assignments->a[idx] = cid;
   }
 
@@ -175,12 +175,12 @@ static inline void tk_cluster_dsu (
       });
 
       khint_t ki = tk_iumap_get(ididx, uid);
-      int64_t idx = tk_iumap_value(ididx, ki);
+      int64_t idx = tk_iumap_val(ididx, ki);
 
       if (attach_root >= 0) {
         khint_t kc = tk_iumap_get(cmap, attach_root);
         if (kc != tk_iumap_end(cmap))
-          assignments->a[idx] = tk_iumap_value(cmap, kc);
+          assignments->a[idx] = tk_iumap_val(cmap, kc);
         else
           assignments->a[idx] = -1;
       } else {

@@ -25,56 +25,12 @@
 
 #define TK_TSETLIN_MT "santoku_tsetlin"
 
-#define _STR(x) #x
-#define STR(x) _STR(x)
-#define MAX(a,b) ((a) > (b) ? (a) : (b))
-#define MIN(a,b) ((a) < (b) ? (a) : (b))
-
 typedef uint8_t tk_bits_t;
-#define BITS 8
-#define BYTES (BITS / CHAR_BIT)
 
-static inline uint64_t mix64 (uint64_t x) {
-  x ^= x >> 33;
-  x *= 0xff51afd7ed558ccdULL;
-  x ^= x >> 33;
-  x *= 0xc4ceb9fe1a85ec53ULL;
-  x ^= x >> 33;
-  return x;
-}
-
-static inline uint64_t hash128 (
-  uint64_t lo,
-  uint64_t hi
-) {
-  uint64_t x = lo ^ (hi + 0x9e3779b97f4a7c15ULL + (lo << 6) + (lo >> 2));
-  x ^= x >> 33;
-  x *= 0xff51afd7ed558ccdULL;
-  x ^= x >> 33;
-  x *= 0xc4ceb9fe1a85ec53ULL;
-  x ^= x >> 33;
-  return x;
-}
-
-typedef struct { int64_t u, v; double w; } tm_pair_t;
-#define tm_pair(u, v, w) (((u) < (v)) ? ((tm_pair_t) { (u), (v), (w) }) : ((tm_pair_t) { (v), (u), (w) }))
-#define tm_pair_lt(a, b) ((a).u < (b).u || ((a).u == (b).u && (a).v < (b).v))
-#define tm_pair_eq(a, b) ((a).u == (b).u && ((a).v == (b).v))
-#define tm_pair_hash(a) ((khint_t) hash128((uint64_t) kh_int64_hash_func((a).u), (uint64_t) kh_int64_hash_func((a).v)))
-KHASH_INIT(pairs, tm_pair_t, char, 0, tm_pair_hash, tm_pair_eq)
-typedef khash_t(pairs) tm_pairs_t;
-KSORT_INIT(pair_asc, tm_pair_t, tm_pair_lt)
 typedef struct { int64_t sim; bool label; } tm_dl_t;
 #define tm_dl_lt(a, b) ((a).sim < (b).sim)
 KSORT_INIT(dl, tm_dl_t, tm_dl_lt)
 typedef kvec_t(tm_dl_t) tm_dls_t;
-typedef struct { int64_t u, v; double d; } tm_candidate_t;
-#define tm_candidate_lt(a, b) ((a).d < (b).d)
-#define tm_candidate_gt(a, b) ((a).d > (b).d)
-#define tm_candidate(u, v, d) ((tm_candidate_t) { (u), (v), (d) })
-KSORT_INIT(candidates_asc, tm_candidate_t, tm_candidate_lt)
-KSORT_INIT(candidates_desc, tm_candidate_t, tm_candidate_gt)
-typedef kvec_t(tm_candidate_t) tm_candidates_t;
 
 static inline void *tk_malloc_interleaved (
   lua_State *L,
