@@ -26,80 +26,68 @@ typedef enum {
 typedef struct {
   double *x, *y, *z;
   double *evals, *evecs, *resNorms;
-  double *scale;
-  double *degree;
+  tk_dvec_t *scale;
+  tk_dvec_t *degree;
   tk_graph_t *graph;
   tk_ivec_t *adj_offset;
-  tk_ivec_t *adj_data;
+  tk_ivec_t *adj_neighbors;
   tk_dvec_t *adj_weights;
   tk_laplacian_type_t laplacian_type;
   uint64_t n_nodes;
   uint64_t n_hidden;
   uint64_t n_evals;
   tk_threadpool_t *pool;
+  int blockSize;
+  PRIMME_INT ldx;
+  PRIMME_INT ldy;
 } tk_spectral_t;
 
 typedef struct {
   tk_spectral_t *spec;
-  int64_t csr_pos_total;
-  int64_t csr_neg_total;
-  bool has_negatives;
   uint64_t ifirst, ilast;
   unsigned int index;
 } tk_spectral_thread_t;
 
-// Optimized matvec functions with hoisted branching
-static inline void tk_spectral_matvec_unnormalized(
+static inline void tk_spectral_matvec_unnormalized (
   uint64_t ifirst, uint64_t ilast,
   double *x, double *y,
-  int64_t *adj_data, int64_t *adj_offset, double *adj_weights,
-  double *degree
+  int64_t *adj_neighbors, int64_t *adj_offset, double *adj_weights,
+  double *degree,
+  int blockSize, PRIMME_INT ldx, PRIMME_INT ldy
 ) {
-  for (uint64_t i = ifirst; i <= ilast; i++) {
-    double sum = 0.0;
-    for (int64_t j = adj_offset[i]; j < adj_offset[i + 1]; j++) {
-      int64_t iv = adj_data[j];
-      sum += x[iv] * adj_weights[j];
+  for (int b = 0; b < blockSize; b++) {
+    double *xb = x + b * ldx;
+    double *yb = y + b * ldy;
+    for (uint64_t i = ifirst; i <= ilast; i++) {
+      double sum = 0.0;
+      for (int64_t j = adj_offset[i]; j < adj_offset[i + 1]; j++) {
+        int64_t iv = adj_neighbors[j];
+        sum += xb[iv] * adj_weights[j];
+      }
+      yb[i] = degree[i] * xb[i] - sum;
     }
-    y[i] = degree[i] * x[i] - sum;
   }
 }
 
-static inline void tk_spectral_matvec_normalized(
+static inline void tk_spectral_matvec_normalized (
   uint64_t ifirst, uint64_t ilast,
   double *x, double *y,
-  int64_t *adj_data, int64_t *adj_offset, double *adj_weights,
-  double *scale
+  int64_t *adj_neighbors, int64_t *adj_offset, double *adj_weights,
+  double *scale,
+  int blockSize, PRIMME_INT ldx, PRIMME_INT ldy
 ) {
-  for (uint64_t i = ifirst; i <= ilast; i++) {
-    double sum = 0.0;
-    double scale_i = scale[i];
-    for (int64_t j = adj_offset[i]; j < adj_offset[i + 1]; j++) {
-      int64_t iv = adj_data[j];
-      sum += x[iv] * scale_i * scale[iv] * adj_weights[j];
+  for (int b = 0; b < blockSize; b++) {
+    double *xb = x + b * ldx;
+    double *yb = y + b * ldy;
+    for (uint64_t i = ifirst; i <= ilast; i++) {
+      double sum = 0.0;
+      double scale_i = scale[i];
+      for (int64_t j = adj_offset[i]; j < adj_offset[i + 1]; j++) {
+        int64_t iv = adj_neighbors[j];
+        sum += xb[iv] * scale_i * scale[iv] * adj_weights[j];
+      }
+      yb[i] = xb[i] - sum;
     }
-    y[i] = x[i] - sum;
-  }
-}
-
-static inline void tk_spectral_matvec_random(
-  uint64_t ifirst, uint64_t ilast,
-  double *x, double *y,
-  int64_t *adj_data, int64_t *adj_offset, double *adj_weights,
-  double *scale
-) {
-  // IMPORTANT: The random walk Laplacian L = I - D^(-1)A is NOT symmetric
-  // PRIMME only supports symmetric/Hermitian or normal matrices
-  // Solution: We compute the normalized Laplacian (symmetric) eigenvectors
-  // and transform them to get random walk eigenvectors after PRIMME completes
-  for (uint64_t i = ifirst; i <= ilast; i++) {
-    double sum = 0.0;
-    double scale_i = scale[i];
-    for (int64_t j = adj_offset[i]; j < adj_offset[i + 1]; j++) {
-      int64_t iv = adj_data[j];
-      sum += x[iv] * scale_i * scale[iv] * adj_weights[j];
-    }
-    y[i] = x[i] - sum;
   }
 }
 
@@ -113,19 +101,16 @@ static inline void tk_spectral_worker (void *dp, int sig)
     case TK_SPECTRAL_SCALE: {
       uint64_t ifirst = data->ifirst;
       uint64_t ilast = data->ilast;
-      double *degree = data->spec->degree;
-      double *scale = data->spec->scale;
+      double *degree = data->spec->degree->a;
+      double *scale = data->spec->scale->a;
       int64_t *adj_offset = data->spec->adj_offset->a;
       double *adj_weights = data->spec->adj_weights->a;
       tk_laplacian_type_t laplacian_type = data->spec->laplacian_type;
-      data->has_negatives = false;
       for (uint64_t i = ifirst; i <= ilast; i++) {
         double sum = 0.0;
         for (int64_t j = adj_offset[i]; j < adj_offset[i + 1]; j++) {
           double w = adj_weights[j];
-          if (w < 0)
-            data->has_negatives = true;
-          sum += fabs(w);
+          sum += w;
         }
         degree[i] = sum;
         if (laplacian_type == TK_LAPLACIAN_NORMALIZED) {
@@ -144,33 +129,28 @@ static inline void tk_spectral_worker (void *dp, int sig)
       uint64_t ilast = data->ilast;
       double *x = data->spec->x;
       double *y = data->spec->y;
-      int64_t *adj_data = data->spec->adj_data->a;
+      int64_t *adj_neighbors = data->spec->adj_neighbors->a;
       int64_t *adj_offset = data->spec->adj_offset->a;
       double *adj_weights = data->spec->adj_weights->a;
-
-      // Dispatch to specialized function based on type
+      int blockSize = data->spec->blockSize;
+      PRIMME_INT ldx = data->spec->ldx;
+      PRIMME_INT ldy = data->spec->ldy;
       switch (data->spec->laplacian_type) {
         case TK_LAPLACIAN_UNNORMALIZED:
           tk_spectral_matvec_unnormalized(
             ifirst, ilast, x, y,
-            adj_data, adj_offset, adj_weights,
-            data->spec->degree
+            adj_neighbors, adj_offset, adj_weights,
+            data->spec->degree->a,
+            blockSize, ldx, ldy
           );
           break;
-
         case TK_LAPLACIAN_NORMALIZED:
+        case TK_LAPLACIAN_RANDOM:
           tk_spectral_matvec_normalized(
             ifirst, ilast, x, y,
-            adj_data, adj_offset, adj_weights,
-            data->spec->scale
-          );
-          break;
-
-        case TK_LAPLACIAN_RANDOM:
-          tk_spectral_matvec_random(
-            ifirst, ilast, x, y,
-            adj_data, adj_offset, adj_weights,
-            data->spec->scale
+            adj_neighbors, adj_offset, adj_weights,
+            data->spec->scale->a,
+            blockSize, ldx, ldy
           );
           break;
       }
@@ -192,11 +172,39 @@ static inline void tk_spectral_matvec (
   tk_spectral_t *spec = (tk_spectral_t *) primme->matrix;
   spec->x = (double *) vx;
   spec->y = (double *) vy;
+  spec->blockSize = *blockSize;
+  spec->ldx = *ldx;
+  spec->ldy = *ldy;
   tk_threads_signal(spec->pool, TK_SPECTRAL_MATVEC, 0);
   *ierr = 0;
 }
 
-// Consider primme params.method for perf/accuracy tradeoffs
+static inline void tk_spectral_preconditioner (
+  void *vx, PRIMME_INT *ldx,
+  void *vy, PRIMME_INT *ldy,
+  int *blockSize,
+  struct primme_params *primme,
+  int *ierr
+) {
+  tk_spectral_t *spec = (tk_spectral_t *) primme->preconditioner;
+  double *x = (double *) vx;
+  double *y = (double *) vy;
+  int64_t n = primme->n;
+  double *degree = spec->degree->a;
+  for (int b = 0; b < *blockSize; b++) {
+    double *xb = x + b * (*ldx);
+    double *yb = y + b * (*ldy);
+    for (int64_t i = 0; i < n; i++) {
+      if (degree[i] > 1e-10) {
+        yb[i] = xb[i] * (1.0 - 0.01 / (1.0 + degree[i]));
+      } else {
+        yb[i] = xb[i];
+      }
+    }
+  }
+  *ierr = 0;
+}
+
 static inline void tm_run_spectral (
   lua_State *L,
   tk_threadpool_t *pool,
@@ -205,20 +213,22 @@ static inline void tm_run_spectral (
   tk_dvec_t *degree,
   tk_ivec_t *uids,
   tk_ivec_t *adj_offset,
-  tk_ivec_t *adj_data,
+  tk_ivec_t *adj_neighbors,
   tk_dvec_t *adj_weights,
+  bool precondition,
   uint64_t n_hidden,
   double eps_primme,
   tk_laplacian_type_t laplacian_type,
   int i_each
 ) {
   tk_spectral_t spec;
+  memset(&spec, 0, sizeof(tk_spectral_t));
   tk_spectral_thread_t *threads = tk_malloc(L, pool->n_threads * sizeof(tk_spectral_thread_t));
   spec.laplacian_type = laplacian_type;
-  spec.scale = scale->a;
-  spec.degree = degree->a;
+  spec.scale = scale;
+  spec.degree = degree;
   spec.adj_offset = adj_offset;
-  spec.adj_data = adj_data;
+  spec.adj_neighbors = adj_neighbors;
   spec.adj_weights = adj_weights;
   spec.n_nodes = uids->n;
   spec.n_hidden = n_hidden;
@@ -230,35 +240,32 @@ static inline void tm_run_spectral (
     pool->threads[i].data = data;
     data->spec = &spec;
     data->index = i;
-    data->has_negatives = false;
     tk_thread_range(i, pool->n_threads, uids->n, &data->ifirst, &data->ilast);
   }
 
   tk_threads_signal(pool, TK_SPECTRAL_SCALE, 0);
-  bool has_negatives = false;
-  for (unsigned int i = 0; !has_negatives && i < pool->n_threads; i ++) {
-    tk_spectral_thread_t *data = threads + i;
-    has_negatives = data->has_negatives;
-  }
 
   openblas_set_num_threads((int) pool->n_threads);
   primme_params params;
   primme_initialize(&params);
-
-  params.maxBlockSize = (int) 1;
   params.n = (int64_t) uids->n;
   params.numEvals = spec.n_evals;
   params.matrixMatvec = tk_spectral_matvec;
   params.matrix = &spec;
   params.eps = eps_primme;
   params.printLevel = 0;
-  params.target = primme_closest_abs;
-  params.numTargetShifts = 1;
-  params.targetShifts = (double[]) { 0.0 };
+  params.target = primme_smallest;
 
-  // Performance optimizations
-  // Let PRIMME auto-configure for best performance
-  primme_set_method(PRIMME_DEFAULT_METHOD, &params);
+  params.maxBlockSize = 16;
+
+  if (precondition) {
+    params.applyPreconditioner = tk_spectral_preconditioner;
+    params.preconditioner = &spec;
+    primme_set_method(PRIMME_DEFAULT_MIN_TIME, &params);
+    params.correctionParams.precondition = 1;
+  } else {
+    primme_set_method(PRIMME_DEFAULT_MIN_TIME, &params);
+  }
 
   spec.evals = tk_malloc(L, (size_t) spec.n_evals * sizeof(double));
   spec.evecs = tk_malloc(L, (size_t) params.n * (size_t) spec.n_evals * sizeof(double));
@@ -277,7 +284,7 @@ static inline void tm_run_spectral (
   tk_dvec_ensure(z, uids->n * n_hidden);
   z->n = uids->n * n_hidden;
   double eps_drop = fmax(1e-8, 10.0 * eps_primme);
-  uint64_t start = !has_negatives || fabs(spec.evals[0]) < eps_drop ? 1 : 0;
+  uint64_t start = fabs(spec.evals[0]) < eps_drop ? 1 : 0;
 
   tk_dvec_t *eigenvalues = tk_dvec_create(L, n_hidden, 0, 0);
   eigenvalues->n = n_hidden;
@@ -286,31 +293,15 @@ static inline void tm_run_spectral (
     for (uint64_t k = 0; k < n_hidden; k ++) {
       uint64_t f = start + k;
       double eigval = spec.evecs[i + f * uids->n];
-
-      if (laplacian_type == TK_LAPLACIAN_RANDOM) {
-        // Random walk eigenvector = D^(1/2) * normalized eigenvector
-        // scale[i] currently contains 1/sqrt(degree[i])
-        // So we multiply by sqrt(degree[i]) = 1/scale[i]
+      if (laplacian_type == TK_LAPLACIAN_RANDOM)
         eigval = scale->a[i] > 0.0 ? eigval / scale->a[i] : eigval;
-      }
-
       z->a[i * n_hidden + k] = eigval;
-      // Store eigenvalue for each eigenvector (only need to do once)
-      if (i == 0) {
+      if (i == 0)
         eigenvalues->a[k] = spec.evals[f];
-      }
-    }
-  }
-
-  if (laplacian_type == TK_LAPLACIAN_RANDOM) {
-    for (uint64_t i = 0; i < uids->n; i++) {
-      double sqrt_scale = scale->a[i];
-      scale->a[i] = sqrt_scale * sqrt_scale;
     }
   }
 
   tk_dvec_center(z->a, uids->n, n_hidden);
-
   tk_dvec_rnorml2(z->a, uids->n, n_hidden);
 
   for (uint64_t i = 0; i < spec.n_evals; i ++) {
@@ -320,7 +311,7 @@ static inline void tm_run_spectral (
       lua_pushinteger(L, (int64_t) i);
       lua_pushnumber(L, spec.evals[i]);
       lua_pushboolean(L, i >= start);
-      lua_call(L, 4, 0, 0)
+      lua_call(L, 4, 0);
       // TODO: Set things up such that memory is correctly freed even if this
       // throws
     }
@@ -353,11 +344,12 @@ static inline int tm_encode (lua_State *L)
   tk_ivec_t *adj_offset = tk_ivec_peek(L, -1, "offsets");
 
   lua_getfield(L, 1, "neighbors");
-  tk_ivec_t *adj_data = tk_ivec_peek(L, -1, "neighbors");
+  tk_ivec_t *adj_neighbors = tk_ivec_peek(L, -1, "neighbors");
 
   lua_getfield(L, 1, "weights");
   tk_dvec_t *adj_weights = tk_dvec_peek(L, -1, "weights");
 
+  bool precondition = tk_lua_foptboolean(L, 1, "spectral", "precondition", true);
   uint64_t n_hidden = tk_lua_fcheckunsigned(L, 1, "spectral", "n_hidden");
   unsigned int n_threads = tk_threads_getn(L, 1, "spectral", "threads");
   const char *type_str = tk_lua_foptstring(L, 1, "spectral", "type", "random");
@@ -369,7 +361,7 @@ static inline int tm_encode (lua_State *L)
   } else if (strcmp(type_str, "random") == 0) {
     laplacian_type = TK_LAPLACIAN_RANDOM;
   }
-  double eps_primme = tk_lua_foptnumber(L, 1, "spectral", "eps_primme", 1e-4);
+  double eps_primme = tk_lua_foptnumber(L, 1, "spectral", "eps_primme", 1e-6);
 
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
@@ -384,7 +376,8 @@ static inline int tm_encode (lua_State *L)
   tk_dvec_t *z = tk_dvec_create(L, 0, 0, 0); // ids, z
   tk_dvec_t *scale = tk_dvec_create(L, uids->n, 0, 0); // ids, z, scale
   tk_dvec_t *degree = tk_dvec_create(L, uids->n, 0, 0); // ids, z, scale, degree
-  tm_run_spectral(L, pool, z, scale, degree, uids, adj_offset, adj_data, adj_weights, n_hidden, eps_primme, laplacian_type, i_each);
+  tm_run_spectral(L, pool, z, scale, degree, uids, adj_offset, adj_neighbors, adj_weights,
+                  precondition, n_hidden, eps_primme, laplacian_type, i_each);
   lua_remove(L, -2);
 
   tk_threads_destroy(pool);

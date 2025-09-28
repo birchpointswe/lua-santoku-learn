@@ -212,12 +212,6 @@ end
 
 M.multiclass_pairs = function (ids, labels, n_anchors_pos, n_anchors_neg, index, eps_pos, eps_neg)
   err.assert(ids:size() == labels:size(), "ids and labels must align")
-  if n_anchors_pos == nil then
-    n_anchors_pos = 1
-  end
-  if n_anchors_neg == nil then
-    n_anchors_neg = (n_anchors_pos > 0) and n_anchors_pos or 1
-  end
   local pos, neg = pvec.create(), pvec.create()
   local class_to_ids, class_to_anchors = {}, {}
   local classes = ivec.create()
@@ -244,7 +238,7 @@ M.multiclass_pairs = function (ids, labels, n_anchors_pos, n_anchors_neg, index,
   for class in classes:each() do
     class_to_anchors[class] = ivec.create()
   end
-  if n_anchors_pos > 0 then
+  if n_anchors_pos and n_anchors_pos > 0 then
     for class in classes:each() do
       local idvec = class_to_ids[class]
       local k = num.min(n_anchors_pos, idvec:size())
@@ -259,7 +253,7 @@ M.multiclass_pairs = function (ids, labels, n_anchors_pos, n_anchors_neg, index,
       end
     end
   end
-  if n_anchors_pos > 0 then
+  if n_anchors_pos and n_anchors_pos > 0 then
     local n_edges_created = 0
     local n_singleton_classes = 0
     for class in classes:each() do
@@ -284,7 +278,7 @@ M.multiclass_pairs = function (ids, labels, n_anchors_pos, n_anchors_neg, index,
       end
     end
   end
-  if n_anchors_neg > 0 then
+  if n_anchors_neg and n_anchors_neg > 0 then
     local global_pool = ivec.create()
     for _, vec in pairs(class_to_ids) do
       for id in vec:each() do

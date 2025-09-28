@@ -4,6 +4,8 @@
 #include <santoku/threads.h>
 #include <santoku/ivec.h>
 #include <santoku/cvec.h>
+#include <santoku/rvec.h>
+#include <santoku/pvec.h>
 #include <math.h>
 
 #define TK_EVAL_EPH "tk_eval_eph"
@@ -17,6 +19,7 @@ typedef enum {
   TK_EVAL_ENCODING_AUC,
   TK_EVAL_GRAPH_RECONSTRUCTION_INIT,
   TK_EVAL_GRAPH_RECONSTRUCTION,
+  TK_EVAL_GRAPH_RECONSTRUCTION_DESTROY,
 } tk_eval_stage_t;
 
 typedef struct {
@@ -44,8 +47,6 @@ typedef struct {
   tk_ivec_t *offsets;
   tk_ivec_t *neighbors;
   tk_dvec_t *weights;
-  double weight_linear_min;
-  double weight_linear_max;
   uint64_t optimal_k;
   lua_State *L;
 } tk_eval_t;
@@ -73,11 +74,14 @@ typedef struct {
   tk_ivec_t *next_assignments;
   tk_ivec_t *best_assignments;
   tk_rvec_t *rtmp;
-  double local_weight_min;
-  double local_weight_max;
   uint64_t wfirst, wlast;
   tk_pvec_t *ptmp;
-  double recon_error;
+  tk_rvec_t **adj_ranks;
+  tk_dumap_t **adj_ranks_idx;
+  tk_pvec_t *bin_ranks;
+  tk_dumap_t *bin_ranks_idx;
+  double recon_score;
+  uint64_t nodes_processed;
 } tk_eval_thread_t;
 
 static inline tk_accuracy_t _tm_clustering_accuracy (
@@ -218,7 +222,6 @@ static void tk_eval_worker (void *dp, int sig)
             continue;
         }
         if (state->dcodes != NULL) {
-          // continuous embedding: dot-product
           double *X = state->dcodes;
           uint64_t K = state->n_dims;
           double dot = 0.0;
@@ -226,7 +229,6 @@ static void tk_eval_worker (void *dp, int sig)
           double *xj = X + (uint64_t)iv * K;
           for (uint64_t d = 0; d < K; d ++)
             dot += xi[d] * xj[d];
-          // scale to retain precision in int64
           state->pl[k].sim = (int64_t)(dot * 1e3);
         } else if (state->codes != NULL) {
           if (state->mask != NULL) {
@@ -245,63 +247,86 @@ static void tk_eval_worker (void *dp, int sig)
       }
       break;
 
-    case TK_EVAL_GRAPH_RECONSTRUCTION_INIT:
-      data->local_weight_min = INFINITY;
-      data->local_weight_max = -INFINITY;
-      for (uint64_t i = data->wfirst; i <= data->wlast; i++) {
-        double w = state->weights->a[i];
-        if (w < data->local_weight_min)
-          data->local_weight_min = w;
-        if (w > data->local_weight_max)
-          data->local_weight_max = w;
+    case TK_EVAL_GRAPH_RECONSTRUCTION_INIT: {
+      uint64_t n_alloc = data->wlast - data->wfirst + 1;
+      data->adj_ranks = malloc(n_alloc * sizeof(tk_rvec_t *));
+      data->adj_ranks_idx = malloc(n_alloc * sizeof(tk_dumap_t *));
+      if (data->adj_ranks == NULL || data->adj_ranks_idx == NULL) {
+        if (data->adj_ranks) {
+          free(data->adj_ranks);
+          data->adj_ranks = NULL;
+        }
+        if (data->adj_ranks_idx) {
+          free(data->adj_ranks_idx);
+          data->adj_ranks_idx = NULL;
+        }
+        return;
       }
-      break;
+      for (uint64_t i = 0; i < n_alloc; i ++) {
+        data->adj_ranks[i] = NULL;
+        data->adj_ranks_idx[i] = NULL;
+      }
 
-    case TK_EVAL_GRAPH_RECONSTRUCTION:
-      data->recon_error = 0.0;
-      for (uint64_t i = data->sfirst; i <= data->slast; i++) {
-        int64_t start = state->offsets->a[i];
-        int64_t end = state->offsets->a[i + 1];
-        for (int64_t j = start; j < end; j++) {
+      data->bin_ranks = tk_pvec_create(0, 0, 0, 0);
+      data->bin_ranks_idx = tk_dumap_create(0, 0);
+      for (uint64_t i = 0; i < n_alloc; i ++) {
+        uint64_t node_idx = data->wfirst + i;
+        assert(node_idx + 1 < state->offsets->n);
+        data->adj_ranks[i] = tk_rvec_create(0, 0, 0, 0);
+        data->adj_ranks_idx[i] = tk_dumap_create(0, 0);
+        int64_t start = state->offsets->a[node_idx];
+        int64_t end = state->offsets->a[node_idx + 1];
+        for (int64_t j = start; j < end; j ++) {
           int64_t neighbor = state->neighbors->a[j];
           double weight = state->weights->a[j];
-          double target_norm;
-          if (weight < 0) {
-            target_norm = 1.0;
-          } else if (weight < 1e-8) {
-            target_norm = 1.0;
-          } else {
-            if (state->weight_linear_max > 0 && state->weight_linear_min < INFINITY) {
-              double target_dist = -log(weight);
-              double log_min = -log(state->weight_linear_max + 1e-8);
-              double log_max = -log(state->weight_linear_min + 1e-8);
-              target_norm = (target_dist - log_min) / (log_max - log_min + 1e-8);
-            } else {
-              target_norm = 0.5;
-            }
-          }
-          uint64_t hamming_dist;
-          if (state->mask != NULL) {
-            hamming_dist = tk_cvec_bits_hamming_mask(
-              (const unsigned char *) state->codes + i * state->chunks,
-              (const unsigned char *) state->codes + neighbor * state->chunks,
-              (const unsigned char *) state->mask,
-              state->n_dims);
-            hamming_dist = state->mask_popcount > 0 ? hamming_dist : 0;
-          } else {
-            hamming_dist = tk_cvec_bits_hamming(
-              (const unsigned char *) state->codes + i * state->chunks,
-              (const unsigned char *) state->codes + neighbor * state->chunks,
-              state->n_dims);
-          }
-          double hamming_norm = state->mask_popcount > 0 ? (double)hamming_dist / state->mask_popcount : (double)hamming_dist / state->n_dims;
-          double importance = fabs(weight);
-          double diff = target_norm - hamming_norm;
-          double error = importance * diff * diff;
-          data->recon_error += error;
+          tk_rvec_push(data->adj_ranks[i], tk_rank(neighbor, weight));
         }
+        tk_rvec_desc(data->adj_ranks[i], 0, data->adj_ranks[i]->n);
+        tk_rvec_ranks(data->adj_ranks[i], data->adj_ranks_idx[i]);
       }
       break;
+    }
+
+    case TK_EVAL_GRAPH_RECONSTRUCTION: {
+      data->recon_score = 0.0;
+      data->nodes_processed = 0;
+      for (uint64_t i = 0; i < data->wlast - data->wfirst + 1; i ++) {
+        tk_pvec_clear(data->bin_ranks);
+        uint64_t node_idx = data->wfirst + i;
+        assert(node_idx + 1 < state->offsets->n);
+        int64_t start = state->offsets->a[node_idx];
+        int64_t end = state->offsets->a[node_idx + 1];
+        for (int64_t j = start; j < end; j ++) {
+          int64_t neighbor = state->neighbors->a[j];
+          uint64_t hamming_dist = tk_cvec_bits_hamming_mask(
+            (const unsigned char *) state->codes + node_idx * state->chunks,
+            (const unsigned char *) state->codes + neighbor * state->chunks,
+            (const unsigned char *) state->mask,
+            state->n_dims);
+          tk_pvec_push(data->bin_ranks, tk_pair(neighbor, (int64_t) hamming_dist));
+        }
+        tk_pvec_asc(data->bin_ranks, 0, data->bin_ranks->n);
+        tk_pvec_ranks(data->bin_ranks, data->bin_ranks_idx);
+        data->recon_score += tk_dumap_correlation(data->adj_ranks_idx[i], data->bin_ranks_idx);
+        data->nodes_processed++;
+      }
+      break;
+    }
+
+    case TK_EVAL_GRAPH_RECONSTRUCTION_DESTROY: {
+      uint64_t n_alloc = data->wlast - data->wfirst + 1;
+      for (uint64_t i = 0; i < n_alloc; i ++) {
+        if (data->adj_ranks[i] != NULL)
+          tk_rvec_destroy(data->adj_ranks[i]);
+        if (data->adj_ranks_idx[i] != NULL)
+          tk_dumap_destroy(data->adj_ranks_idx[i]);
+      }
+      free(data->adj_ranks);
+      free(data->adj_ranks_idx);
+      tk_pvec_destroy(data->bin_ranks);
+      tk_dumap_destroy(data->bin_ranks_idx);
+      break;
+    }
 
     default:
       assert(false);
@@ -797,7 +822,7 @@ static inline int tm_optimize_clustering (lua_State *L)
       lua_pushinteger(L, (lua_Integer) data[child].next_n);
       lua_pushvalue(L, i_ids);
       tk_lua_get_ephemeron(L, TK_EVAL_EPH, data[child].next_assignments);
-      lua_call(L, 7, 0, 0);
+      lua_call(L, 7, 0);
       // TODO: Set things up such that memory is correctly freed even if this
       // throws
     }
@@ -962,7 +987,7 @@ static inline int tm_optimize_retrieval (lua_State *L)
   return 1;
 }
 
-static double tk_compute_stress (
+static double tk_compute_reconstruction (
   tk_eval_t *state,
   tk_bits_t *mask,
   uint64_t k,
@@ -974,14 +999,18 @@ static double tk_compute_stress (
   state->mask_popcount = k;
   tk_eval_thread_t *data = (tk_eval_thread_t *)pool->threads[0].data;
   unsigned int n_threads = pool->n_threads;
-  for (unsigned int i = 0; i < n_threads; i ++)
-    data[i].recon_error = 0.0;
-  tk_threads_signal(pool, TK_EVAL_GRAPH_RECONSTRUCTION, 0);
-  double total_error = 0.0;
   for (unsigned int i = 0; i < n_threads; i ++) {
-    total_error += data[i].recon_error;
+    data[i].recon_score = 0.0;
+    data[i].nodes_processed = 0;
   }
-  return total_error / (double)state->weights->n;
+  tk_threads_signal(pool, TK_EVAL_GRAPH_RECONSTRUCTION, 0);
+  double total = 0.0;
+  uint64_t total_nodes_processed = 0;
+  for (unsigned int i = 0; i < n_threads; i ++) {
+    total += data[i].recon_score;
+    total_nodes_processed += data[i].nodes_processed;
+  }
+  return total_nodes_processed > 0 ? total / (double) total_nodes_processed : 0.0;
 }
 
 static void tm_optimize_bits_prefix_greedy (
@@ -996,15 +1025,23 @@ static void tm_optimize_bits_prefix_greedy (
   tk_bits_t *candidate = tk_malloc(L, bytes_per_mask);
 
   uint64_t best_prefix = 1;
-  double best_prefix_stress = INFINITY;
-  uint64_t max_prefix = n_dims < 128 ? n_dims : 128;
-  for (uint64_t k = 1; k <= max_prefix; k ++) {
+  double best_prefix_score = -INFINITY;
+  for (uint64_t k = 1; k <= n_dims; k ++) {
     memset(mask, 0, bytes_per_mask);
     for (uint64_t b = 0; b < k; b ++)
       mask[TK_CVEC_BITS_BYTE(b)] |= (1 << TK_CVEC_BITS_BIT(b));
-    double stress = tk_compute_stress(state, mask, k, pool);
-    if (stress < best_prefix_stress) {
-      best_prefix_stress = stress;
+    double score = tk_compute_reconstruction(state, mask, k, pool);
+    double gain = best_prefix_score == -INFINITY ? 0 : (score - best_prefix_score);
+    if (i_each >= 0) {
+      lua_pushvalue(L, i_each);
+      lua_pushinteger(L, (lua_Integer) k);
+      lua_pushnumber(L, gain);
+      lua_pushnumber(L, score);
+      lua_pushliteral(L, "scan");
+      lua_call(L, 4, 0);
+    }
+    if (score > best_prefix_score + 1e-12) {
+      best_prefix_score = score;
       best_prefix = k;
     }
   }
@@ -1013,18 +1050,17 @@ static void tm_optimize_bits_prefix_greedy (
   for (uint64_t b = 0; b < best_prefix; b ++)
     mask[TK_CVEC_BITS_BYTE(b)] |= (1 << TK_CVEC_BITS_BIT(b));
   tk_ivec_t *active = tk_ivec_create(L, best_prefix, 0, 0); // active
-  active->n = best_prefix;
   for (uint64_t i = 0; i < best_prefix; i ++)
     active->a[i] = (int64_t) i;
 
-  double current_stress = best_prefix_stress;
+  double current_score = best_prefix_score;
 
   if (i_each >= 0) {
     lua_pushvalue(L, i_each);
-    lua_pushinteger(L, (lua_Integer)best_prefix);
-    lua_pushnumber(L, current_stress);
-    lua_pushnumber(L, current_stress);
-    lua_pushliteral(L, "prefix");
+    lua_pushinteger(L, (lua_Integer) best_prefix);
+    lua_pushnumber(L, 0.0);
+    lua_pushnumber(L, best_prefix_score);
+    lua_pushliteral(L, "init");
     lua_call(L, 4, 0);
   }
 
@@ -1032,32 +1068,71 @@ static void tm_optimize_bits_prefix_greedy (
   while (improved && active->n > 0) {
     improved = false;
 
-    // Try to remove
-    for (uint64_t i = 0; i < active->n; i ++) {
-      int64_t bit = active->a[i];
-      memcpy(candidate, mask, bytes_per_mask);
-      candidate[TK_CVEC_BITS_BYTE(bit)] &= ~(1 << TK_CVEC_BITS_BIT(bit));
-      double stress = tk_compute_stress(state, candidate, active->n - 1, pool);
-      if (stress + 1e-12 < current_stress) {
-        mask[TK_CVEC_BITS_BYTE(bit)] &= ~(1 << TK_CVEC_BITS_BIT(bit));
-        active->a[i] = active->a[active->n - 1];
-        active->n --;
-        double gain = current_stress - stress;
-        current_stress = stress;
-        improved = true;
-        if (i_each >= 0) {
-          lua_pushvalue(L, i_each);
-          lua_pushinteger(L, bit);
-          lua_pushnumber(L, gain);
-          lua_pushnumber(L, current_stress);
-          lua_pushliteral(L, "remove");
-          lua_call(L, 4, 0);
+    // Try removing
+    if (active->n > 1)
+      for (uint64_t i = 0; i < active->n; i ++) {
+        int64_t bit = active->a[i];
+        memcpy(candidate, mask, bytes_per_mask);
+        candidate[TK_CVEC_BITS_BYTE(bit)] &= ~(1 << TK_CVEC_BITS_BIT(bit));
+        double score = tk_compute_reconstruction(state, candidate, active->n - 1, pool);
+        if (score > current_score + 1e-12) {
+          mask[TK_CVEC_BITS_BYTE(bit)] &= ~(1 << TK_CVEC_BITS_BIT(bit));
+          active->a[i] = active->a[active->n - 1];
+          active->n --;
+          double gain = score - current_score;
+          current_score = score;
+          improved = true;
+          if (i_each >= 0) {
+            lua_pushvalue(L, i_each);
+            lua_pushinteger(L, bit);
+            lua_pushnumber(L, gain);
+            lua_pushnumber(L, current_score);
+            lua_pushliteral(L, "remove");
+            lua_call(L, 4, 0);
+          }
+          break;
         }
-        break;
+      }
+
+    // Try adding
+    if (!improved && active->n < n_dims) {
+      int64_t max_active = 0;
+      for (uint64_t j = 0; j < active->n; j ++)
+        if (active->a[j] > max_active)
+          max_active = active->a[j];
+      for (int64_t bit_add = max_active + 1; bit_add < (int64_t)n_dims; bit_add ++) {
+        bool is_active = false;
+        for (uint64_t j = 0; j < active->n; j ++) {
+          if (active->a[j] == bit_add) {
+            is_active = true;
+            break;
+          }
+        }
+        if (is_active)
+          continue;
+        memcpy(candidate, mask, bytes_per_mask);
+        candidate[TK_CVEC_BITS_BYTE(bit_add)] |= (1 << TK_CVEC_BITS_BIT(bit_add));
+        double score = tk_compute_reconstruction(state, candidate, active->n + 1, pool);
+        if (score > current_score + 1e-12) {
+          mask[TK_CVEC_BITS_BYTE(bit_add)] |= (1 << TK_CVEC_BITS_BIT(bit_add));
+          tk_ivec_push(active, bit_add);
+          double gain = current_score == -INFINITY ? 0 : (score - current_score);
+          current_score = score;
+          improved = true;
+          if (i_each >= 0) {
+            lua_pushvalue(L, i_each);
+            lua_pushinteger(L, bit_add);
+            lua_pushnumber(L, gain);
+            lua_pushnumber(L, current_score);
+            lua_pushliteral(L, "add");
+            lua_call(L, 4, 0);
+          }
+          break;
+        }
       }
     }
 
-    // If nothing removed, try swapping
+    // Try swapping
     if (!improved && active->n > 0) {
       for (uint64_t i = 0; i < active->n && !improved; i ++) {
         int64_t bit_out = active->a[i];
@@ -1078,19 +1153,19 @@ static void tm_optimize_bits_prefix_greedy (
           memcpy(candidate, mask, bytes_per_mask);
           candidate[TK_CVEC_BITS_BYTE(bit_out)] &= ~(1 << TK_CVEC_BITS_BIT(bit_out));
           candidate[TK_CVEC_BITS_BYTE(bit_in)] |= (1 << TK_CVEC_BITS_BIT(bit_in));
-          double stress = tk_compute_stress(state, candidate, active->n, pool);
-          if (stress + 1e-12 < current_stress) {
+          double score = tk_compute_reconstruction(state, candidate, active->n, pool);
+          if (score > current_score + 1e-12) {
             mask[TK_CVEC_BITS_BYTE(bit_out)] &= ~(1 << TK_CVEC_BITS_BIT(bit_out));
             mask[TK_CVEC_BITS_BYTE(bit_in)] |= (1 << TK_CVEC_BITS_BIT(bit_in));
             active->a[i] = bit_in;
-            double gain = current_stress - stress;
-            current_stress = stress;
+            double gain = score - current_score;
+            current_score = score;
             improved = true;
             if (i_each >= 0) {
               lua_pushvalue(L, i_each);
               lua_pushinteger(L, bit_in);
               lua_pushnumber(L, gain);
-              lua_pushnumber(L, current_stress);
+              lua_pushnumber(L, current_score);
               lua_pushliteral(L, "swap");
               lua_call(L, 4, 0);
             }
@@ -1100,44 +1175,6 @@ static void tm_optimize_bits_prefix_greedy (
       }
     }
 
-    // If nothing swapped, try adding
-    if (!improved && active->n < n_dims) {
-      int64_t max_active = 0;
-      for (uint64_t j = 0; j < active->n; j ++)
-        if (active->a[j] > max_active)
-          max_active = active->a[j];
-      for (int64_t bit_add = max_active + 1; bit_add < (int64_t)n_dims; bit_add ++) {
-        bool is_active = false;
-        for (uint64_t j = 0; j < active->n; j ++) {
-          if (active->a[j] == bit_add) {
-            is_active = true;
-            break;
-          }
-        }
-        if (is_active)
-          continue;
-        memcpy(candidate, mask, bytes_per_mask);
-        candidate[TK_CVEC_BITS_BYTE(bit_add)] |= (1 << TK_CVEC_BITS_BIT(bit_add));
-        double stress = tk_compute_stress(state, candidate, active->n + 1, pool);
-        if (stress + 1e-12 < current_stress) {
-          mask[TK_CVEC_BITS_BYTE(bit_add)] |= (1 << TK_CVEC_BITS_BIT(bit_add));
-          active->a[active->n] = bit_add;
-          active->n ++;
-          double gain = current_stress - stress;
-          current_stress = stress;
-          improved = true;
-          if (i_each >= 0) {
-            lua_pushvalue(L, i_each);
-            lua_pushinteger(L, bit_add);
-            lua_pushnumber(L, gain);
-            lua_pushnumber(L, current_stress);
-            lua_pushliteral(L, "add");
-            lua_call(L, 4, 0);
-          }
-          break;
-        }
-      }
-    }
   }
 
   for (uint64_t i = 0; i < active->n - 1; i ++) {
@@ -1158,7 +1195,6 @@ static inline int tm_optimize_bits (lua_State *L)
 {
   lua_settop(L, 1);
 
-  // Required fields for graph-based optimization
   lua_getfield(L, 1, "codes");
   tk_cvec_t *cvec = tk_cvec_peek(L, -1, "codes");
 
@@ -1188,8 +1224,6 @@ static inline int tm_optimize_bits (lua_State *L)
   state.offsets = offsets;
   state.neighbors = neighbors;
   state.weights = weights;
-  state.weight_linear_min = INFINITY;
-  state.weight_linear_max = -INFINITY;
   state.L = L;
 
   tk_eval_thread_t data[n_threads];
@@ -1198,21 +1232,13 @@ static inline int tm_optimize_bits (lua_State *L)
   for (unsigned int i = 0; i < n_threads; i++) {
     pool->threads[i].data = data + i;
     data[i].state = &state;
-    tk_thread_range(i, n_threads, state.weights->n, &data[i].wfirst, &data[i].wlast);
+    tk_thread_range(i, n_threads, n_nodes, &data[i].wfirst, &data[i].wlast);
     tk_thread_range(i, n_threads, n_nodes, &data[i].sfirst, &data[i].slast);
   }
 
-  // Step 1: Find min/max weights in parallel
   tk_threads_signal(pool, TK_EVAL_GRAPH_RECONSTRUCTION_INIT, 0);
-
-  for (unsigned int i = 0; i < n_threads; i++) {
-    if (data[i].local_weight_min < state.weight_linear_min)
-      state.weight_linear_min = data[i].local_weight_min;
-    if (data[i].local_weight_max > state.weight_linear_max)
-      state.weight_linear_max = data[i].local_weight_max;
-  }
-
   tm_optimize_bits_prefix_greedy(L, &state, pool, i_each); // result
+  tk_threads_signal(pool, TK_EVAL_GRAPH_RECONSTRUCTION_DESTROY, 0);
   tk_threads_destroy(pool);
   return 1;
 }

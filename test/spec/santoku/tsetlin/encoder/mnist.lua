@@ -25,28 +25,29 @@ local HIDDEN = 32
 local LANDMARKS = 24
 local MODE = "landmarks" -- "landmarks" for L-STH, "raw" for STH
 
-local ENCODER = true
-local CLUSTER = true
+local ENCODER = false
+local CLUSTER = false
 local BINARIZE = "median" -- "itq", "median", or "sign"
 
 local TCH = true
-local SPECTRAL_EPS = 1e-5
+local SPECTRAL_EPS = 1e-12
 local ITQ_EPS = 1e-8
 local ITQ_ITERATIONS = 200
 
 local LAPLACIAN = "random"
 local DECAY = 1.0
+local PRECONDITION = true
 
-local KNN = 24
+local KNN = 32
 local KNN_EPS = nil
 local KNN_MIN = nil
 local KNN_MUTUAL = true
 local BRIDGE = true
 local MIN_PTS = 256
 
-local SEED_PAIRS = 0
-local SEED_ANCHORS = 0
-local SEED_CLASS_ANCHORS = 0
+local SEED_PAIRS = nil
+local SEED_ANCHORS = nil
+local SEED_CLASS_ANCHORS = nil
 local SAMPLED_ANCHORS = 16
 local SIGMA_K = nil
 
@@ -107,40 +108,31 @@ test("tsetlin", function ()
   local graph_index
   if RANKS then
 
+    local problems_ext = ivec.create()
+    problems_ext:copy(train.solutions)
+    problems_ext:add_scaled(10)
+
+    local graph_problems = ivec.create()
+    graph_problems:bits_copy(dataset.problems, nil, train.ids, dataset.n_visible)
+    graph_problems:bits_extend(problems_ext, dataset.n_visible, 10)
+
     local virtual_ids = ivec.create(10)
     virtual_ids:fill_indices()
     virtual_ids:add(dataset.ids:size())
 
-    for id in train.ids:each() do
-      local class_label = dataset.solutions:get(id)
-      train.seed:push(id, dataset.ids:size() + class_label)
-    end
-
-    train.problems = ivec.create()
-    train.problems:bits_copy(dataset.problems, nil, train.ids, dataset.n_visible)
-
-    for idx, id in train.ids:ieach() do
-      local class_label = dataset.solutions:get(id)
-      local bit_idx = idx * (dataset.n_visible + 10) + dataset.n_visible + class_label
-      train.problems:push(bit_idx)
-    end
-
-    local graph_corpus = ivec.create()
     local graph_ids = ivec.create()
-
     graph_ids:copy(train.ids)
-    graph_corpus:copy(train.problems)
-
     graph_ids:copy(virtual_ids)
 
-    local n_train_samples = train.ids:size()
-    local n_features = dataset.n_visible + 10
+    for id in train.ids:each() do
+      local lbl = dataset.solutions:get(id)
+      train.seed:push(id, dataset.ids:size() + lbl)
+    end
 
     for i = 0, 9 do
-      local sample_idx = n_train_samples + i
-      local feature_idx = dataset.n_visible + i
-      local bit_idx = sample_idx * n_features + feature_idx
-      graph_corpus:push(bit_idx)
+      local sidx = train.n + i
+      local fidx = dataset.n_visible + i
+      graph_problems:push(sidx * (dataset.n_visible + 10) + fidx)
     end
 
     local graph_ranks = ivec.create(dataset.n_visible + 10)
@@ -153,7 +145,7 @@ test("tsetlin", function ()
       decay = DECAY,
       n_ranks = 2
     })
-    graph_index:add(graph_corpus, graph_ids)
+    graph_index:add(graph_problems, graph_ids)
 
   else
 
@@ -190,6 +182,7 @@ test("tsetlin", function ()
   train.ids_spectral, train.codes_spectral = spectral.encode({
     type = LAPLACIAN,
     ids = train.adj_ids,
+    precondition = PRECONDITION,
     offsets = train.adj_offsets,
     neighbors = train.adj_neighbors,
     weights = train.adj_weights,

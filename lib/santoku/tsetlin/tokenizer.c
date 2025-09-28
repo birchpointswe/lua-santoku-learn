@@ -82,7 +82,7 @@ static inline int tb_tokenizer_persist (lua_State *L)
   size_t nids = tk_zumap_size(tokenizer->ids);
   tk_lua_fwrite(L, (char *) &nids, sizeof(size_t), 1, fh);
   const char *tok;
-  int64_t id;
+  int id;
   tk_umap_foreach(tokenizer->ids, tok, id, ({
     size_t len = strlen(tok);
     tk_lua_fwrite(L, (char *) &len, sizeof(size_t), 1, fh);
@@ -854,7 +854,7 @@ static inline int tb_tokenizer_restrict (lua_State *L)
   // TODO: Can we do this without strdup? Just don't free the ones we're
   // keeping?
   char *tok;
-  int64_t id, id0;
+  int id, id0;
   int absent;
   khint_t k;
   tk_zumap_t *ids0 = tk_zumap_create(L, 0);
@@ -1063,19 +1063,18 @@ static inline int tb_tokenizer_load (lua_State *L)
   tk_lua_fread(L, &tokenizer->negations, sizeof(int), 1, fh);
   tk_lua_fread(L, &tokenizer->align, sizeof(int), 1, fh);
   tk_lua_fread(L, &tokenizer->next_id, sizeof(int), 1, fh);
-  khint_t nkeys;
-  khint_t k;
+  size_t nids;
+  uint32_t k;
   int absent;
-  tk_lua_fread(L, (char *) &nkeys, sizeof(khint_t), 1, fh);
-  for (khint_t i = 0; i < nkeys; i ++) {
+  tk_lua_fread(L, (char *) &nids, sizeof(size_t), 1, fh);
+  for (khint_t i = 0; i < nids; i ++) {
     size_t len;
     tk_lua_fread(L, &len, sizeof(size_t), 1, fh);
-    char tok[len + 1];
-    tk_lua_fread(L, tok, len, 1, fh);
-    tok[len] = 0;
+    char *tokn = malloc(len + 1);
+    tk_lua_fread(L, tokn, len, 1, fh);
+    tokn[len] = 0;
     int id;
     tk_lua_fread(L, &id, sizeof(int), 1, fh);
-    char *tokn = strdup(tok);
     k = tk_zumap_put(tokenizer->ids, tokn, &absent);
     assert(absent);
     tk_zumap_setval(tokenizer->ids, k, id);
