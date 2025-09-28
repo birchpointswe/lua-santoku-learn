@@ -30,13 +30,11 @@ local CLUSTER = false
 local BINARIZE = "median" -- "itq", "median", or "sign"
 
 local TCH = true
-local SPECTRAL_EPS = 1e-12
 local ITQ_EPS = 1e-8
 local ITQ_ITERATIONS = 200
 
 local LAPLACIAN = "random"
 local DECAY = 1.0
-local PRECONDITION = true
 
 local KNN = 32
 local KNN_EPS = nil
@@ -181,13 +179,15 @@ test("tsetlin", function ()
   print("Spectral eigendecomposition")
   train.ids_spectral, train.codes_spectral = spectral.encode({
     type = LAPLACIAN,
+
+    method = "DEFAULT",
+    eps_primme = 1e-12,
+
     ids = train.adj_ids,
-    precondition = PRECONDITION,
     offsets = train.adj_offsets,
     neighbors = train.adj_neighbors,
     weights = train.adj_weights,
     n_hidden = dataset.n_hidden,
-    eps_primme = SPECTRAL_EPS,
     threads = THREADS,
     each = function (t, s, v, k)
       local d, dd = stopwatch()

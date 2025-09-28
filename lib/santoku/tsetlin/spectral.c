@@ -86,7 +86,7 @@ static inline void tk_spectral_matvec_normalized (
         int64_t iv = adj_neighbors[j];
         sum += xb[iv] * scale_i * scale[iv] * adj_weights[j];
       }
-      yb[i] = xb[i] - sum;
+      yb[i] = 1.0 * xb[i] - sum;
     }
   }
 }
@@ -179,32 +179,6 @@ static inline void tk_spectral_matvec (
   *ierr = 0;
 }
 
-static inline void tk_spectral_preconditioner (
-  void *vx, PRIMME_INT *ldx,
-  void *vy, PRIMME_INT *ldy,
-  int *blockSize,
-  struct primme_params *primme,
-  int *ierr
-) {
-  tk_spectral_t *spec = (tk_spectral_t *) primme->preconditioner;
-  double *x = (double *) vx;
-  double *y = (double *) vy;
-  int64_t n = primme->n;
-  double *degree = spec->degree->a;
-  for (int b = 0; b < *blockSize; b++) {
-    double *xb = x + b * (*ldx);
-    double *yb = y + b * (*ldy);
-    for (int64_t i = 0; i < n; i++) {
-      if (degree[i] > 1e-10) {
-        yb[i] = xb[i] * (1.0 - 0.01 / (1.0 + degree[i]));
-      } else {
-        yb[i] = xb[i];
-      }
-    }
-  }
-  *ierr = 0;
-}
-
 static inline void tm_run_spectral (
   lua_State *L,
   tk_threadpool_t *pool,
@@ -215,7 +189,6 @@ static inline void tm_run_spectral (
   tk_ivec_t *adj_offset,
   tk_ivec_t *adj_neighbors,
   tk_dvec_t *adj_weights,
-  bool precondition,
   uint64_t n_hidden,
   double eps_primme,
   tk_laplacian_type_t laplacian_type,
@@ -255,17 +228,8 @@ static inline void tm_run_spectral (
   params.eps = eps_primme;
   params.printLevel = 0;
   params.target = primme_smallest;
-
   params.maxBlockSize = 16;
-
-  if (precondition) {
-    params.applyPreconditioner = tk_spectral_preconditioner;
-    params.preconditioner = &spec;
-    primme_set_method(PRIMME_DEFAULT_MIN_TIME, &params);
-    params.correctionParams.precondition = 1;
-  } else {
-    primme_set_method(PRIMME_DEFAULT_MIN_TIME, &params);
-  }
+  primme_set_method(PRIMME_DEFAULT_MIN_TIME, &params);
 
   spec.evals = tk_malloc(L, (size_t) spec.n_evals * sizeof(double));
   spec.evecs = tk_malloc(L, (size_t) params.n * (size_t) spec.n_evals * sizeof(double));
@@ -349,7 +313,6 @@ static inline int tm_encode (lua_State *L)
   lua_getfield(L, 1, "weights");
   tk_dvec_t *adj_weights = tk_dvec_peek(L, -1, "weights");
 
-  bool precondition = tk_lua_foptboolean(L, 1, "spectral", "precondition", true);
   uint64_t n_hidden = tk_lua_fcheckunsigned(L, 1, "spectral", "n_hidden");
   unsigned int n_threads = tk_threads_getn(L, 1, "spectral", "threads");
   const char *type_str = tk_lua_foptstring(L, 1, "spectral", "type", "random");
@@ -361,8 +324,7 @@ static inline int tm_encode (lua_State *L)
   } else if (strcmp(type_str, "random") == 0) {
     laplacian_type = TK_LAPLACIAN_RANDOM;
   }
-  double eps_primme = tk_lua_foptnumber(L, 1, "spectral", "eps_primme", 1e-6);
-
+  double eps_primme = tk_lua_foptnumber(L, 1, "spectral", "eps_primme", 1e-12);
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
     lua_getfield(L, 1, "each");
@@ -376,8 +338,8 @@ static inline int tm_encode (lua_State *L)
   tk_dvec_t *z = tk_dvec_create(L, 0, 0, 0); // ids, z
   tk_dvec_t *scale = tk_dvec_create(L, uids->n, 0, 0); // ids, z, scale
   tk_dvec_t *degree = tk_dvec_create(L, uids->n, 0, 0); // ids, z, scale, degree
-  tm_run_spectral(L, pool, z, scale, degree, uids, adj_offset, adj_neighbors, adj_weights,
-                  precondition, n_hidden, eps_primme, laplacian_type, i_each);
+  tm_run_spectral(L, pool, z, scale, degree, uids, adj_offset, adj_neighbors,
+                  adj_weights, n_hidden, eps_primme, laplacian_type, i_each);
   lua_remove(L, -2);
 
   tk_threads_destroy(pool);
