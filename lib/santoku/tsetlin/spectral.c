@@ -86,7 +86,7 @@ static inline void tk_spectral_matvec_normalized (
         int64_t iv = adj_neighbors[j];
         sum += xb[iv] * scale_i * scale[iv] * adj_weights[j];
       }
-      yb[i] = 1.0 * xb[i] - sum;
+      yb[i] = xb[i] - sum;
     }
   }
 }
@@ -208,6 +208,7 @@ static inline void tm_run_spectral (
   spec.n_evals = n_hidden + 1;
   assert(spec.n_evals >= 2);
   spec.pool = pool;
+
   for (unsigned int i = 0; i < pool->n_threads; i ++) {
     tk_spectral_thread_t *data = threads + i;
     pool->threads[i].data = data;
