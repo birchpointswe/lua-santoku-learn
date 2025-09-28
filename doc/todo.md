@@ -1,19 +1,17 @@
 # Now
 
 - Sanitize
-
 - Fix double-free with del_ephemeron in tokenizer
-
 - Connect all allocs to Lua, ensuring all are freed given an error
     - Thread pool
     - Thread data
     - Arbitrary mallocs (either use newuserdata/etc or ensure proper cleanup in
       all cases)
 
+# Next
+
 - Rename tch
 - Rename library and project to santoku-learn
-
-# Next
 
 - tk_graph_t
     - Allow different indices for weight lookup and knn, both supporting

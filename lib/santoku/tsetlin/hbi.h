@@ -435,7 +435,7 @@ static inline bool tk_hbi_probe_bucket (
       if (uid1 < 0)
         continue;
       tk_pvec_push(out, tk_pair(uid1, (int64_t) r));
-      if (knn && out->n >= knn)
+      if (out->n >= knn)
         return true;
     }
   }
@@ -1269,7 +1269,7 @@ static inline int tk_hbi_neighbors_lua (lua_State *L)
 {
   lua_settop(L, 5);
   tk_hbi_t *A = tk_hbi_peek(L, 1);
-  uint64_t knn = tk_lua_optunsigned(L, 3, "knn", 0);
+  uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
   uint64_t eps = tk_lua_optunsigned(L, 4, "eps", 0);
   tk_pvec_t *out = tk_pvec_peek(L, 5,  "out");
   if (lua_type(L, 2) == LUA_TNUMBER) {

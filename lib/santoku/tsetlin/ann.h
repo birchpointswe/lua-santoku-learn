@@ -961,10 +961,7 @@ static inline void tk_ann_probe_bucket (
     uint64_t dist = tk_cvec_bits_hamming((const uint8_t *)v, (const uint8_t *)p1, ftr);
     if (dist > eps)
       continue;
-    if (k > 0)
-      tk_pvec_hmax(out, k, tk_pair(id, (int64_t) dist));
-    else
-      tk_pvec_push(out, tk_pair(id, (int64_t) dist));
+    tk_pvec_hmax(out, k, tk_pair(id, (int64_t) dist));
   }
 }
 
@@ -1304,7 +1301,7 @@ static inline int tk_ann_neighbors_lua (lua_State *L)
 {
   lua_settop(L, 5);
   tk_ann_t *A = tk_ann_peek(L, 1);
-  uint64_t knn = tk_lua_optunsigned(L, 3, "knn", 0);
+  uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
   uint64_t eps = tk_lua_optunsigned(L, 4, "eps", A->features);
   tk_pvec_t *out = tk_pvec_peek(L, 5, "out");
   if (lua_type(L, 2) == LUA_TNUMBER) {
