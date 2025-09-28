@@ -8,8 +8,6 @@ static inline tk_graph_t *tm_graph_create (
   tk_ann_t *ann,
   tk_hbi_t *hbi,
   double weight_eps,
-  double flip_at,
-  double neg_scale,
   int64_t sigma_k,
   double sigma_scale,
   uint64_t knn,
@@ -74,17 +72,13 @@ static inline double tk_graph_weight (
   int64_t iv
 ) {
   const double eps = g->weight_eps;
-  const double flip_at = g->flip_at;
-  const double neg_scale = fabs(g->neg_scale);
   double b = base;
-  if (isnan(b) || b == DBL_MAX) {
+  if (isnan(b) || b == DBL_MAX)
     b = 1.0;
-  }
-  if (b < 0.0) {
+  if (b < 0.0)
     b = 0.0;
-  } else if (b > 1.0) {
+  else if (b > 1.0)
     b = 1.0;
-  }
   double sim;
   if (g->sigmas && g->sigmas->n) {
     double si = (iu >= 0 && (uint64_t) iu < g->sigmas->n) ? g->sigmas->a[iu] : eps;
@@ -105,34 +99,13 @@ static inline double tk_graph_weight (
   } else {
     sim = 1.0 - b;
   }
-  if (flip_at < 0.0 || b < flip_at) {
-    if (sim < eps) {
-      sim = eps;
-    }
-    if (sim > 1.0) {
-      sim = 1.0;
-    }
-    return sim;
+  if (sim < eps) {
+    sim = eps;
   }
-  double fa = flip_at;
-  double t;
-  if (fa >= 1.0) {
-    t = 1.0;
-  } else {
-    const double denom = 1.0 - fa;
-    t = (b - fa) / denom;
-    if (t < 0.0) {
-      t = 0.0;
-    } else if (t > 1.0) {
-      t = 1.0;
-    }
+  if (sim > 1.0) {
+    sim = 1.0;
   }
-  const double ramp = 0.5 * (1.0 - cos(M_PI * t));
-  double mag = neg_scale * ramp;
-  if (eps > 0.0 && mag < eps) {
-    mag = eps;
-  }
-  return -mag;
+  return sim;
 }
 
 static inline void tk_graph_worker (void *dp, int sig)
@@ -857,8 +830,6 @@ static inline int tm_create (lua_State *L)
     tk_lua_verror(L, 3, "graph", "invalid comparator specified", cmpstr);
 
   double weight_eps = tk_lua_foptnumber(L, 1, "graph", "weight_eps", 1e-8);
-  double flip_at = tk_lua_foptnumber(L, 1, "graph", "flip_at", -1.0);
-  double neg_scale = tk_lua_foptnumber(L, 1, "graph", "neg_scale", 1.0);
   int64_t sigma_k = tk_lua_foptinteger(L, 1, "graph", "sigma_k", 0);
   double sigma_scale = tk_lua_foptnumber(L, 1, "graph", "sigma_scale", 1.0);
 
@@ -881,9 +852,9 @@ static inline int tm_create (lua_State *L)
   }
 
   tk_graph_t *graph = tm_graph_create(
-    L, edges, inv, ann, hbi, weight_eps, flip_at, neg_scale, sigma_k,
-    sigma_scale, knn, knn_min, knn_cache, knn_eps, knn_mutual, knn_rank, bridge, cmp,
-    cmp_alpha, cmp_beta, n_threads);
+    L, edges, inv, ann, hbi, weight_eps, sigma_k, sigma_scale, knn, knn_min,
+    knn_cache, knn_eps, knn_mutual, knn_rank, bridge, cmp, cmp_alpha, cmp_beta,
+    n_threads);
   int Gi = tk_lua_absindex(L, -1);
 
   tm_init_uids(L, Gi, graph);
@@ -1125,8 +1096,6 @@ static inline tk_graph_t *tm_graph_create (
   tk_ann_t *ann,
   tk_hbi_t *hbi,
   double weight_eps,
-  double flip_at,
-  double neg_scale,
   int64_t sigma_k,
   double sigma_scale,
   uint64_t knn,
@@ -1153,8 +1122,6 @@ static inline tk_graph_t *tm_graph_create (
   graph->ann = ann;
   graph->hbi = hbi;
   graph->weight_eps = weight_eps;
-  graph->flip_at = flip_at;
-  graph->neg_scale = neg_scale;
   graph->sigma_k = sigma_k;
   graph->sigma_scale = sigma_scale;
   graph->knn = knn;

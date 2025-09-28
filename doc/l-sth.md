@@ -1,7 +1,7 @@
 # Graph-Supervised Self-Taught Hashing with Landmark Extension
 
 An approach to supervised spectral hashing involving the use of virtual nodes to
-encode supervision, reconstruction-error-based optimization to select the
+encode supervision, Spearman rank correlation-based optimization to select the
 optimal subset of bits, and landmark-based hash function learning to enable
 out-of-sample extension and cross-domain inference.
 
@@ -62,9 +62,9 @@ only features at rank `r`. Feature overlap in lower ranks (e.g. between
 documents and their associated author/category nodes or between documents
 sharing authors/categories themselves) results in exponentially higher
 similarity scores than feature overlap strictly in higher ranks (e.g. between
-documents sharing only text ngram features). This exponential decay pairs
-naturally with the log-space mapping in reconstruction error (described below),
-ensuring supervision shapes the manifold structure hierarchically.
+documents sharing only text ngram features). This exponential decay ensures
+supervision shapes the manifold structure hierarchically during the spectral
+decomposition and subsequent bit selection process.
 
 Jaccard, Dice, or any other weighted or unweighted set similarity can be used to
 compute per-rank similarity.
@@ -84,7 +84,7 @@ category with probability proportional to `exp(0)`, to its author with
 probability proportional to `exp(-1 · decay)`, and to its strictly visible-feature-similar
 neighbors with probability proportional to `exp(-2 · decay)`.
 
-## Reconstruction-Optimized Bit Selection
+## Spearman Correlation-Optimized Bit Selection
 
 Various eigenvector selection approaches exist (e.g. smallest-k, eigengap-based,
 redundancy handling). This approach attempts to remain aligned with foundational
@@ -99,16 +99,19 @@ individual nodes to maximize weighted adjacency agreement per-bit. The
 bit-flipping routine operates on each column of bits in isolation.
 
 Bit selection determines which of these binarized eigenvectors are retained
-using reconstruction error minimization. Target distances from edge weights use
-negative log transformation `target_dist = -log(weight + ε)` normalized to
-`[0,1]`. Reconstruction error uses `error = |weight| * (target_norm -
-hamming_norm)²`.
+using average Spearman rank correlation maximization. For each node, a sorted
+list of neighbors is computed from the adjacency list, then the same neighbors
+are re-sorted using Hamming distances between their binary codes. The Spearman
+rank correlation between these two orderings measures how well the Hamming
+distances preserve the graph-based neighbor relationships. The prefix + SFBS
+loop selects the optimal subset of bits that maximizes the average Spearman
+correlation across all nodes.
 
 Signed, unsigned, weighted, normalized, and unnormalized graphs are supported by
 this approach. Bit selection is particularly important for signed graphs because
-eigenvectors can encode patterns that are not useful for reconstruction error or
-Hamming distance metrics. This definition of reconstruction error ensures that
-dissimilar nodes marked by negative edges remain distant in Hamming space.
+eigenvectors can encode patterns that are not useful for preserving neighbor
+ordering relationships. This Spearman correlation approach ensures that nodes
+with similar graph neighborhoods also have similar Hamming distance orderings.
 
 ## Landmark-Augmented Hash Learning
 
@@ -163,12 +166,12 @@ rather than feature dimensionality.
 4. **Refine with coordinate descent**: Apply iterative bit flipping to maximize
    weighted adjacency agreement, operating on each bit position across all nodes.
 
-5. **Select bits**: Apply prefix testing with reconstruction error metric on the
+5. **Select bits**: Apply prefix testing with Spearman rank correlation metric on the
    full heterogeneous graph to select final binary codes from binarized
    eigenvectors.
 
 6. **Prune redundant bits**: Apply prefix selection followed by SFBS with swap
-   operations for bit removal using reconstruction error.
+   operations for bit removal using Spearman rank correlation.
 
 7. **Index landmarks**: Implement fast set-based methods (e.g., LSH, inverted
    indices with Jaccard/overlap similarity).
@@ -191,7 +194,7 @@ rather than feature dimensionality.
 - Skip coordinate descent refinement
 
 **Bit selection**:
-- Prefix + SFBS + swap (reference implementation)
+- Prefix + SFBS + swap using Spearman correlation (reference implementation)
 - Fixed selection alternatives
 - SFFS variants
 

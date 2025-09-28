@@ -1878,10 +1878,10 @@ static inline void tk_inv_worker (void *dp, int sig)
           }
         }
         double *e_weights_by_rank = data->e_weights_buf->a;
-        double cutoff = (knn && uhood->n >= knn) ? uhood->a[0].d : eps;
+        double cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps;
         for (uint64_t ti = 0; ti < touched->n; ti ++) {
           iv = touched->a[ti];
-          if (knn && uhood->n >= knn) {
+          if (uhood->n >= knn) {
             double max_possible_sim = 0.0;
             for (uint64_t r = 0; r < I->n_ranks; r++) {
               double inter = wacc->a[(int64_t) I->n_ranks * iv + (int64_t) r];
@@ -1899,13 +1899,9 @@ static inline void tk_inv_worker (void *dp, int sig)
           double sim = tk_inv_similarity_by_rank(I, wacc, iv, q_weights_by_rank, e_weights_by_rank, cmp, tversky_alpha, tversky_beta);
           double dist = 1.0 - sim;
           if (dist <= cutoff) {
-            if (knn) {
-              tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
-              if (uhood->n >= knn)
-                cutoff = uhood->a[0].d;
-            } else {
-              tk_rvec_push(uhood, tk_rank(iv, dist));
-            }
+            tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
+            if (uhood->n >= knn)
+              cutoff = uhood->a[0].d;
           }
         }
         for (uint64_t ti = 0; ti < touched->n; ti ++)
