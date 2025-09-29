@@ -151,15 +151,32 @@ static inline void tk_graph_worker (void *dp, int sig)
       for (uint64_t i = ifirst; i <= ilast; i ++) {
         int64_t u = uids[i];
         int64_t write = adj_offset[i];
-        int64_t iv, v;
-        double w;
-        tk_umap_foreach_keys(adj[i], iv, ({
-          v = uids[iv];
-          w = tk_graph_get_weight(graph, u, v);
+        tk_ivec_t *tmp_keys = tk_iuset_keys(0, adj[i]);
+        tk_ivec_asc(tmp_keys, 0, tmp_keys->n);
+        for (uint64_t j = 0; j < tmp_keys->n; j ++) {
+          int64_t iv = tmp_keys->a[j];
+          int64_t v = uids[iv];
+          double w = tk_graph_get_weight(graph, u, v);
           adj_data[write] = iv;
           adj_weights[write] = w;
           write ++;
-        }))
+        }
+        tk_ivec_destroy(tmp_keys);
+      }
+      break;
+    }
+
+    case TK_GRAPH_CSR_SOURCES: {
+      tk_ivec_t *adj_offset = data->adj_offset;
+      tk_ivec_t *adj_sources = data->adj_sources;
+      uint64_t ifirst = data->ifirst;
+      uint64_t ilast = data->ilast;
+      for (uint64_t i = ifirst; i <= ilast; i++) {
+        int64_t start = adj_offset->a[i];
+        int64_t end = adj_offset->a[i + 1];
+        for (int64_t j = start; j < end; j++) {
+          adj_sources->a[j] = (int64_t) i;
+        }
       }
       break;
     }
@@ -990,7 +1007,7 @@ static inline int tm_graph_adjacency (lua_State *L)
   if (graph->largest_component_root != -1) {
     uint64_t component_size = 0;
     tk_iumap_t *old_to_new = tk_iumap_create(0, 0);
-    tk_ivec_t *new_to_old = tk_ivec_create(L, 0, 0, 0);
+    tk_ivec_t *new_to_old = tk_ivec_create(0, 0, 0, 0);
 
     for (uint64_t old_idx = 0; old_idx < graph->uids->n; old_idx ++) {
       if (tk_dsu_findx(&graph->dsu, (int64_t)old_idx) == graph->largest_component_root) {
@@ -1002,16 +1019,16 @@ static inline int tm_graph_adjacency (lua_State *L)
       }
     }
 
-    tk_ivec_t *filtered_uids = tk_ivec_create(L, component_size, 0, 0);
+    tk_ivec_t *filtered_uids = tk_ivec_create(L, component_size, 0, 0); // uids
     for (uint64_t new_idx = 0; new_idx < component_size; new_idx ++) {
       int64_t old_idx = new_to_old->a[new_idx];
       filtered_uids->a[new_idx] = graph->uids->a[old_idx];
     }
     filtered_uids->n = component_size;
 
-    tk_ivec_t *adj_offset = tk_ivec_create(L, component_size + 1, 0, 0);
-    tk_ivec_t *adj_data = tk_ivec_create(L, 0, 0, 0);
-    tk_dvec_t *adj_weights = tk_dvec_create(L, 0, 0, 0);
+    tk_ivec_t *adj_offset = tk_ivec_create(L, component_size + 1, 0, 0); // uids offset
+    tk_ivec_t *adj_data = tk_ivec_create(L, 0, 0, 0); // uids offset data
+    tk_dvec_t *adj_weights = tk_dvec_create(L, 0, 0, 0); // uids offset data weights
 
     adj_offset->a[0] = 0;
     for (uint64_t new_idx = 0; new_idx < component_size; new_idx ++) {
@@ -1037,7 +1054,18 @@ static inline int tm_graph_adjacency (lua_State *L)
 
     tk_iumap_destroy(old_to_new);
     tk_ivec_destroy(new_to_old);
-    return 4;
+
+    tk_ivec_t *adj_sources = tk_ivec_create(L, adj_data->n, 0, 0); // uids offset data weights sources
+    for (uint64_t i = 0; i < adj_offset->n - 1; i++) {
+      int64_t start = adj_offset->a[i];
+      int64_t end = adj_offset->a[i + 1];
+      for (int64_t j = start; j < end; j++) {
+        adj_sources->a[j] = (int64_t) i;
+      }
+    }
+    lua_insert(L, -4);
+
+    return 5;
   }
 
   uint64_t n_nodes = graph->uids->n;
@@ -1046,11 +1074,13 @@ static inline int tm_graph_adjacency (lua_State *L)
   tk_ivec_t *adj_offset = tk_ivec_create(L, n_nodes + 1, 0, 0);
   tk_ivec_t *adj_data = tk_ivec_create(L, 0, 0, 0);
   tk_dvec_t *adj_weights = tk_dvec_create(L, 0, 0, 0);
+  tk_ivec_t *adj_sources = NULL;  // Will be created after we know total size
   for (unsigned int i = 0; i < graph->pool->n_threads; i ++) {
     tk_graph_thread_t *data = graph->threads + i;
     data->adj_offset = adj_offset;
     data->adj_data = adj_data;
     data->adj_weights = adj_weights;
+    data->adj_sources = NULL;  // Will be set later
     tk_thread_range(i, graph->pool->n_threads, n_nodes, &data->ifirst, &data->ilast);
   }
 
@@ -1069,7 +1099,21 @@ static inline int tm_graph_adjacency (lua_State *L)
   tk_dvec_resize(adj_weights, (size_t) total, true);
   tk_threads_signal(graph->pool, TK_GRAPH_CSR_DATA, 0);
 
-  return 4; // uids, offset, data, weight
+  // Create sources array that matches the edge ordering
+  adj_sources = tk_ivec_create(L, (size_t) total, 0, 0);
+  adj_sources->n = (size_t) total;
+  lua_insert(L, -4);
+
+  // Update thread data with sources array pointer
+  for (unsigned int i = 0; i < graph->pool->n_threads; i ++) {
+    tk_graph_thread_t *data = graph->threads + i;
+    data->adj_sources = adj_sources;
+  }
+
+  // Build sources array in parallel
+  tk_threads_signal(graph->pool, TK_GRAPH_CSR_SOURCES, 0);
+
+  return 5; // uids, sources, offset, data, weight
 }
 
 static inline int tm_graph_pairs (lua_State *L)

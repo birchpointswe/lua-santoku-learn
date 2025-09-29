@@ -28,6 +28,7 @@ typedef enum {
   TK_GRAPH_CSR_OFFSET_LOCAL,
   TK_GRAPH_CSR_OFFSET_GLOBAL,
   TK_GRAPH_CSR_DATA,
+  TK_GRAPH_CSR_SOURCES,
   TK_GRAPH_SIGMA,
   TK_GRAPH_REWEIGHT
 } tk_graph_stage_t;
@@ -74,6 +75,7 @@ typedef struct tk_graph_thread_s {
   tk_ivec_t *adj_offset;
   tk_ivec_t *adj_data;
   tk_dvec_t *adj_weights;
+  tk_ivec_t *adj_sources;
   int64_t csr_base;
   uint64_t ifirst, ilast;
   unsigned int index;
@@ -106,7 +108,8 @@ static inline void tk_graph_adj_mst (
   tk_dvec_t *weights,
   tk_ivec_t *mst_offset,
   tk_ivec_t *mst_neighbors,
-  tk_dvec_t *mst_weights
+  tk_dvec_t *mst_weights,
+  tk_ivec_t *mst_sources
 ) {
   if (!offset->n)
     return;
@@ -140,6 +143,7 @@ static inline void tk_graph_adj_mst (
   tk_ivec_clear(mst_offset);
   tk_ivec_clear(mst_neighbors);
   tk_dvec_clear(mst_weights);
+  tk_ivec_clear(mst_sources);
 
   if (mst_edges->n == 0) {
     for (uint64_t i = 0; i <= offset->n - 1; i++)
@@ -206,6 +210,7 @@ static inline void tk_graph_adj_mst (
       if (neighbor >= 0 && neighbor < (int64_t)(offset->n - 1)) {
         tk_ivec_push(mst_neighbors, neighbor);
         tk_dvec_push(mst_weights, weight);
+        tk_ivec_push(mst_sources, (int64_t) i);
       }
     }
     tk_ivec_destroy(adj_lists[i]);
