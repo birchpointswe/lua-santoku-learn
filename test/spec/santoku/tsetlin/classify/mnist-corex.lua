@@ -36,9 +36,9 @@ test("tsetlin", function ()
   local dataset = ds.read_binary_mnist("test/res/mnist.70k.txt", VISIBLE, MAX)
   local train, test = ds.split_binary_mnist(dataset, TTR)
   train.problems = ivec.create()
-  train.problems:bits_copy(dataset.problems, nil, train.ids, dataset.n_features)
+  dataset.problems:bits_select(nil, train.ids, dataset.n_features, train.problems)
   test.problems = ivec.create()
-  test.problems:bits_copy(dataset.problems, nil, test.ids, dataset.n_features)
+  dataset.problems:bits_select(nil, test.ids, dataset.n_features, test.problems)
 
   print("Creating Corex")
   local cor = corex.create({

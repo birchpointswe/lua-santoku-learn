@@ -20,26 +20,27 @@ local MAX = nil
 local MAX_CLASS = nil
 local THREADS = nil
 
+local PRIMME_EPS = 1e-12
 local VISIBLE = 784
 local HIDDEN = 32
 local LANDMARKS = 24
-local MODE = "landmarks" -- "landmarks" for L-STH, "raw" for STH
+local MODE = "landmarks"
 
 local ENCODER = false
 local CLUSTER = false
-local BINARIZE = "median" -- "itq", "median", or "sign"
+local BINARIZE = "median"
 
 local TCH = true
 local ITQ_EPS = 1e-8
 local ITQ_ITERATIONS = 200
 
-local LAPLACIAN = "random"
-local DECAY = 1.0
+local LAPLACIAN = "unnormalized"
+local DECAY = 2.0
 
 local KNN = 32
 local KNN_EPS = nil
 local KNN_MIN = nil
-local KNN_MUTUAL = true
+local KNN_MUTUAL = false
 local BRIDGE = true
 local MIN_PTS = 256
 
@@ -79,7 +80,7 @@ test("tsetlin", function ()
   if KNN then
     local idx = ann.create({ features = dataset.n_visible, expected_size = train.n })
     local data = ivec.create()
-    data:bits_copy(dataset.problems, nil, train.ids, dataset.n_visible)
+    dataset.problems:bits_select(nil, train.ids, dataset.n_visible, data)
     idx:add(data:bits_to_cvec(train.n, dataset.n_visible), train.ids)
     local ids, hoods = idx:neighborhoods(KNN, KNN_EPS, KNN_MIN, KNN_MUTUAL)
     train.seed = ds.star_hoods(ids, hoods)
@@ -110,28 +111,30 @@ test("tsetlin", function ()
     problems_ext:copy(train.solutions)
     problems_ext:add_scaled(10)
 
-    local graph_problems = ivec.create()
-    graph_problems:bits_copy(dataset.problems, nil, train.ids, dataset.n_visible)
-    graph_problems:bits_extend(problems_ext, dataset.n_visible, 10)
-
-    local virtual_ids = ivec.create(10)
-    virtual_ids:fill_indices()
-    virtual_ids:add(dataset.ids:size())
-
     local graph_ids = ivec.create()
     graph_ids:copy(train.ids)
-    graph_ids:copy(virtual_ids)
+    local graph_problems = ivec.create()
+    dataset.problems:bits_select(nil, graph_ids, dataset.n_visible, graph_problems)
+    graph_problems:bits_extend(problems_ext, dataset.n_visible, 10)
 
-    for id in train.ids:each() do
-      local lbl = dataset.solutions:get(id)
-      train.seed:push(id, dataset.ids:size() + lbl)
-    end
+    -- local virtual_ids = ivec.create(10)
+    -- virtual_ids:fill_indices()
+    -- virtual_ids:add(dataset.ids:size())
 
-    for i = 0, 9 do
-      local sidx = train.n + i
-      local fidx = dataset.n_visible + i
-      graph_problems:push(sidx * (dataset.n_visible + 10) + fidx)
-    end
+    -- local graph_ids = ivec.create()
+    -- graph_ids:copy(train.ids)
+    -- graph_ids:copy(virtual_ids)
+
+    -- for id in train.ids:each() do
+    --   local lbl = dataset.solutions:get(id)
+    --   train.seed:push(id, dataset.ids:size() + lbl)
+    -- end
+
+    -- for i = 0, 9 do
+    --   local sidx = train.n + i
+    --   local fidx = dataset.n_visible + i
+    --   graph_problems:push(sidx * (dataset.n_visible + 10) + fidx)
+    -- end
 
     local graph_ranks = ivec.create(dataset.n_visible + 10)
     graph_ranks:fill(1, 0, dataset.n_visible)
@@ -143,13 +146,14 @@ test("tsetlin", function ()
       decay = DECAY,
       n_ranks = 2
     })
+
     graph_index:add(graph_problems, graph_ids)
 
   else
 
     -- Fully unsupervised
     local graph_problems = ivec.create()
-    graph_problems:bits_copy(dataset.problems, nil, train.ids, dataset.n_visible)
+    dataset.problems:bits_select(nil, train.ids, dataset.n_visible, graph_problems)
     graph_index = inv.create({ features = dataset.n_visible })
     graph_index:add(graph_problems, train.ids)
     collectgarbage("collect")
@@ -170,6 +174,7 @@ test("tsetlin", function ()
     end
   })
   train.adj_ids,
+  train.adj_sources,
   train.adj_offsets,
   train.adj_neighbors,
   train.adj_weights =
@@ -179,20 +184,18 @@ test("tsetlin", function ()
   print("Spectral eigendecomposition")
   train.ids_spectral, train.codes_spectral = spectral.encode({
     type = LAPLACIAN,
-
-    method = "DEFAULT",
-    eps_primme = 1e-12,
-
+    eps = PRIMME_EPS,
     ids = train.adj_ids,
+    sources = train.adj_sources,
     offsets = train.adj_offsets,
     neighbors = train.adj_neighbors,
     weights = train.adj_weights,
     n_hidden = dataset.n_hidden,
     threads = THREADS,
-    each = function (t, s, v, k)
+    each = function (t, s, v, k, l)
       local d, dd = stopwatch()
       if t == "done" then
-        str.printf("  Time: %6.2f %6.2f  Spectral Steps: %3d\n", d, dd, s)
+        str.printf("  Time: %6.2f %6.2f  matvecs = %d  time_clear = %f  time_edges = %f  time_reduce = %f\n", d, dd, s, v, k, l)
       elseif t == "eig" then
         local gap = train.eig_last and v - train.eig_last or 0
         train.eig_last = v
@@ -279,7 +282,7 @@ test("tsetlin", function ()
   print("AUC stats")
   train.auc_continuous = eval.auc(train.ids_spectral, train.codes_spectral_cont, train.pos_sampled, train.neg_sampled, dataset.n_hidden, nil, THREADS)
   train.auc_binary_full = eval.auc(train.ids_spectral, train.codes_spectral, train.pos_sampled, train.neg_sampled, dataset.n_hidden, nil, THREADS)
-  train.codes_spectral:bits_filter(train.kept_bits, dataset.n_hidden)
+  train.codes_spectral:bits_select(train.kept_bits, nil, dataset.n_hidden)
   dataset.n_hidden_full = dataset.n_hidden
   dataset.n_hidden = train.kept_bits:size()
   dataset.n_latent = dataset.n_hidden * dataset.n_landmarks  -- Recalculate after bit selection
@@ -334,12 +337,12 @@ test("tsetlin", function ()
 
       sth_solutions = train.codes_spectral
       sth_problems = ivec.create()
-      sth_problems:bits_copy(dataset.problems, nil, sth_ids, dataset.n_visible)
+      dataset.problems:bits_select(nil, sth_ids, dataset.n_visible, sth_problems)
       sth_problems = sth_problems:bits_to_cvec(sth_n, dataset.n_visible, true)
 
       test_ids = test.ids
       test_problems = ivec.create()
-      test_problems:bits_copy(dataset.problems, nil, test.ids, dataset.n_visible)
+      dataset.problems:bits_select(nil, test.ids, dataset.n_visible, test_problems)
       test_problems = test_problems:bits_to_cvec(test.n, dataset.n_visible, true)
 
     elseif MODE == "landmarks" then
@@ -350,7 +353,7 @@ test("tsetlin", function ()
       sth_visible = dataset.n_latent
 
       local sth_raw = ivec.create()
-      sth_raw:bits_copy(dataset.problems, nil, train.ids_spectral, dataset.n_visible)
+      dataset.problems:bits_select(nil, train.ids_spectral, dataset.n_visible, sth_raw)
       sth_raw = sth_raw:bits_to_cvec(sth_n, dataset.n_visible)
 
       local sth_idx = ann.create({ features = dataset.n_visible, expected_size = sth_ids:size() })
@@ -372,7 +375,7 @@ test("tsetlin", function ()
       test_ids = test.ids
       test_problems = cvec.create()
       local test_vecs = ivec.create()
-      test_vecs:bits_copy(dataset.problems, nil, test.ids, dataset.n_visible)
+      dataset.problems:bits_select(nil, test.ids, dataset.n_visible, test_vecs)
       test_vecs = test_vecs:bits_to_cvec(test.n, dataset.n_visible)
       local nbr_ids, nbr_hoods = sth_idx:neighborhoods_by_vecs(test_vecs, dataset.n_landmarks)
       for i0, hood in nbr_hoods:ieach() do
