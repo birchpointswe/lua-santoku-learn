@@ -13,7 +13,7 @@
 #include <primme.h>
 #include <time.h>
 
-#define TK_SPECTRAL_BLOCKSIZE 16
+#define TK_SPECTRAL_BLOCKSIZE 32
 
 typedef enum {
   TK_SPECTRAL_SCALE,
@@ -188,16 +188,12 @@ static inline void tk_spectral_preconditioner (
   tk_spectral_t *spec = (tk_spectral_t *) primme->matrix;
   double *xvec = (double *) vx;
   double *yvec = (double *) vy;
-
   if (spec->laplacian_type == TK_LAPLACIAN_UNNORMALIZED) {
-    for (int b = 0; b < *blockSize; b++)
-      for (uint64_t i = 0; i < spec->n_nodes; i++) {
+    for (uint64_t i = 0; i < spec->n_nodes; i++)
+      for (int b = 0; b < *blockSize; b++) {
         double d = spec->degree->a[i];
-        yvec[(uint64_t) b * (size_t) (*ldy) + i] = d > 0 ? xvec[(uint64_t) b * (size_t) (*ldx) + i] / d : xvec[(uint64_t) b * (size_t) (*ldx) + i];
+        yvec[(uint64_t) b * (size_t) (*ldy) + i] = xvec[(uint64_t) b * (size_t) (*ldx) + i] / d;
       }
-  } else if (spec->laplacian_type == TK_LAPLACIAN_NORMALIZED) {
-    for (int b = 0; b < *blockSize; b++)
-      memcpy(yvec + (uint64_t) b * (size_t) (*ldy), xvec + (uint64_t) b * (size_t) (*ldx), spec->n_nodes * sizeof(double));
   } else {
     for (int b = 0; b < *blockSize; b++)
       memcpy(yvec + (uint64_t) b * (size_t) (*ldy), xvec + (uint64_t) b * (size_t) (*ldx), spec->n_nodes * sizeof(double));
@@ -294,7 +290,6 @@ static inline void tm_run_spectral (
   params.target = primme_smallest;
   params.maxBlockSize = TK_SPECTRAL_BLOCKSIZE;
   primme_set_method(PRIMME_DEFAULT_MIN_TIME, &params);
-
   params.applyPreconditioner = tk_spectral_preconditioner;
   params.correctionParams.precondition = 1;
 
@@ -357,6 +352,7 @@ static inline void tm_run_spectral (
     tk_spectral_thread_t *data = threads + i;
     free(data->y_local);
   }
+
   free(threads);
 
   if (i_each != -1) {
