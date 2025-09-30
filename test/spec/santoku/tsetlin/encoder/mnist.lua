@@ -174,7 +174,6 @@ test("tsetlin", function ()
     end
   })
   train.adj_ids,
-  train.adj_sources,
   train.adj_offsets,
   train.adj_neighbors,
   train.adj_weights =
@@ -186,16 +185,15 @@ test("tsetlin", function ()
     type = LAPLACIAN,
     eps = PRIMME_EPS,
     ids = train.adj_ids,
-    sources = train.adj_sources,
     offsets = train.adj_offsets,
     neighbors = train.adj_neighbors,
     weights = train.adj_weights,
     n_hidden = dataset.n_hidden,
     threads = THREADS,
-    each = function (t, s, v, k, l)
+    each = function (t, s, v, k)
       local d, dd = stopwatch()
       if t == "done" then
-        str.printf("  Time: %6.2f %6.2f  Stage: %s  matvecs = %d  time_clear = %f  time_edges = %f  time_reduce = %f\n", d, dd, t, s, v, k, l)
+        str.printf("  Time: %6.2f %6.2f  Stage: %s  matvecs = %d\n", d, dd, t, s)
       elseif t == "eig" then
         local gap = train.eig_last and v - train.eig_last or 0
         train.eig_last = v
@@ -310,11 +308,11 @@ test("tsetlin", function ()
     threads = THREADS,
     each = function (f, p, r, m)
       local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d\n",
+      str.printf("  Time: %6.2f %6.2f | BACC: %.6f | TPR: %.6f | TNR: %.6f | Margin: %d\n",
         d, dd, f, p, r, m)
     end
   })
-  str.printi("Best\n  BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin)",
+  str.printi("Best\n  BACC: %.6f#(bacc) | TPR: %.6f#(tpr) | TNR: %.6f#(tnr) | Margin: %d#(margin)",
     train.similarity)
   collectgarbage("collect")
 

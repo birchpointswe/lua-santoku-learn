@@ -115,72 +115,6 @@ static inline void tk_graph_worker (void *dp, int sig)
 
   switch (stage) {
 
-    case TK_GRAPH_CSR_OFFSET_LOCAL: {
-      tk_graph_adj_item_t *adj = data->graph->adj->a;
-      int64_t *adj_offset = data->adj_offset->a;
-      uint64_t ifirst = data->ifirst;
-      uint64_t ilast = data->ilast;
-      int64_t offset = 0;
-      for (uint64_t i = ifirst; i <= ilast; i ++) {
-        adj_offset[i] = offset;
-        offset += tk_iuset_size(adj[i]);
-      }
-      data->csr_base = offset;
-      break;
-    }
-
-    case TK_GRAPH_CSR_OFFSET_GLOBAL: {
-      uint64_t ifirst = data->ifirst;
-      uint64_t ilast = data->ilast;
-      int64_t *adj_offset = data->adj_offset->a;
-      int64_t csr_base = data->csr_base;
-      for (uint64_t i = ifirst; i <= ilast; i ++)
-        adj_offset[i] += csr_base;
-      break;
-    }
-
-    case TK_GRAPH_CSR_DATA: {
-      uint64_t ifirst = data->ifirst;
-      uint64_t ilast = data->ilast;
-      tk_graph_adj_item_t *adj = data->graph->adj->a;
-      int64_t *adj_data = data->adj_data->a;
-      int64_t *adj_offset = data->adj_offset->a;
-      double *adj_weights = data->adj_weights->a;
-      tk_graph_t *graph = data->graph;
-      int64_t *uids = graph->uids->a;
-      for (uint64_t i = ifirst; i <= ilast; i ++) {
-        int64_t u = uids[i];
-        int64_t write = adj_offset[i];
-        tk_ivec_t *tmp_keys = tk_iuset_keys(0, adj[i]);
-        tk_ivec_asc(tmp_keys, 0, tmp_keys->n);
-        for (uint64_t j = 0; j < tmp_keys->n; j ++) {
-          int64_t iv = tmp_keys->a[j];
-          int64_t v = uids[iv];
-          double w = tk_graph_get_weight(graph, u, v);
-          adj_data[write] = iv;
-          adj_weights[write] = w;
-          write ++;
-        }
-        tk_ivec_destroy(tmp_keys);
-      }
-      break;
-    }
-
-    case TK_GRAPH_CSR_SOURCES: {
-      tk_ivec_t *adj_offset = data->adj_offset;
-      tk_ivec_t *adj_sources = data->adj_sources;
-      uint64_t ifirst = data->ifirst;
-      uint64_t ilast = data->ilast;
-      for (uint64_t i = ifirst; i <= ilast; i++) {
-        int64_t start = adj_offset->a[i];
-        int64_t end = adj_offset->a[i + 1];
-        for (int64_t j = start; j < end; j++) {
-          adj_sources->a[j] = (int64_t) i;
-        }
-      }
-      break;
-    }
-
     case TK_GRAPH_SIGMA: {
       tk_graph_t *graph = data->graph;
       tk_dvec_t *distances = tk_dvec_create(0, 0, 0, 0);
@@ -200,7 +134,7 @@ static inline void tk_graph_worker (void *dp, int sig)
           }
         }))
         if (graph->uids_idx_hoods) {
-          khint_t khi = tk_iumap_get(graph->uids_idx_hoods, uid);
+          uint32_t khi = tk_iumap_get(graph->uids_idx_hoods, uid);
           if (khi != tk_iumap_end(graph->uids_idx_hoods)) {
             int64_t hood_idx = tk_iumap_val(graph->uids_idx_hoods, khi);
             if (graph->inv_hoods && hood_idx < (int64_t)graph->inv_hoods->n) {
@@ -209,11 +143,11 @@ static inline void tk_graph_worker (void *dp, int sig)
                 int64_t neighbor_hood_idx = hood->a[j].i;
                 if (neighbor_hood_idx >= 0 && neighbor_hood_idx < (int64_t)graph->uids_hoods->n) {
                   int64_t neighbor_uid = graph->uids_hoods->a[neighbor_hood_idx];
-                  khint_t n_khi = tk_iumap_get(graph->uids_idx, neighbor_uid);
+                  uint32_t n_khi = tk_iumap_get(graph->uids_idx, neighbor_uid);
                   if (n_khi != tk_iumap_end(graph->uids_idx)) {
                     int64_t neighbor_global_idx = tk_iumap_val(graph->uids_idx, n_khi);
                     int kha;
-                    khint_t s_khi = tk_iuset_put(seen, neighbor_global_idx, &kha);
+                    uint32_t s_khi = tk_iuset_put(seen, neighbor_global_idx, &kha);
                     (void)s_khi;
                     if (kha) {
                       tk_dvec_push(distances, hood->a[j].d);
@@ -228,11 +162,11 @@ static inline void tk_graph_worker (void *dp, int sig)
                 int64_t neighbor_hood_idx = hood->a[j].i;
                 if (neighbor_hood_idx >= 0 && neighbor_hood_idx < (int64_t)graph->uids_hoods->n) {
                   int64_t neighbor_uid = graph->uids_hoods->a[neighbor_hood_idx];
-                  khint_t n_khi = tk_iumap_get(graph->uids_idx, neighbor_uid);
+                  uint32_t n_khi = tk_iumap_get(graph->uids_idx, neighbor_uid);
                   if (n_khi != tk_iumap_end(graph->uids_idx)) {
                     int64_t neighbor_global_idx = tk_iumap_val(graph->uids_idx, n_khi);
                     int kha;
-                    khint_t s_khi = tk_iuset_put(seen, neighbor_global_idx, &kha);
+                    uint32_t s_khi = tk_iuset_put(seen, neighbor_global_idx, &kha);
                     (void)s_khi;
                     if (kha) {
                       tk_dvec_push(distances, (double)hood->a[j].p / denom);
@@ -247,11 +181,11 @@ static inline void tk_graph_worker (void *dp, int sig)
                 int64_t neighbor_hood_idx = hood->a[j].i;
                 if (neighbor_hood_idx >= 0 && neighbor_hood_idx < (int64_t)graph->uids_hoods->n) {
                   int64_t neighbor_uid = graph->uids_hoods->a[neighbor_hood_idx];
-                  khint_t n_khi = tk_iumap_get(graph->uids_idx, neighbor_uid);
+                  uint32_t n_khi = tk_iumap_get(graph->uids_idx, neighbor_uid);
                   if (n_khi != tk_iumap_end(graph->uids_idx)) {
                     int64_t neighbor_global_idx = tk_iumap_val(graph->uids_idx, n_khi);
                     int kha;
-                    khint_t s_khi = tk_iuset_put(seen, neighbor_global_idx, &kha);
+                    uint32_t s_khi = tk_iuset_put(seen, neighbor_global_idx, &kha);
                     (void)s_khi;
                     if (kha) {
                       tk_dvec_push(distances, (double)hood->a[j].p / denom);
@@ -323,7 +257,7 @@ static inline void tk_graph_add_adj (
   int64_t v
 ) {
   int kha;
-  khint_t khi;
+  uint32_t khi;
   khi = tk_iumap_get(graph->uids_idx, u);
   if (khi == tk_iumap_end(graph->uids_idx))
     return;
@@ -341,7 +275,7 @@ static inline void tm_add_knn (
   tk_graph_t *graph
 ) {
   int kha;
-  khint_t khi;
+  uint32_t khi;
   uint64_t knn = graph->knn;
 
   if (!graph->uids_hoods)
@@ -352,7 +286,7 @@ static inline void tm_add_knn (
     for (uint64_t hood_idx = 0; hood_idx < graph->uids_hoods->n && hood_idx < graph->inv_hoods->n; hood_idx++) {
       int64_t u = graph->uids_hoods->a[hood_idx];
 
-      khint_t u_khi = tk_iumap_get(graph->uids_idx, u);
+      uint32_t u_khi = tk_iumap_get(graph->uids_idx, u);
       if (u_khi == tk_iumap_end(graph->uids_idx))
         continue;
       int64_t u_global = tk_iumap_val(graph->uids_idx, u_khi);
@@ -360,12 +294,12 @@ static inline void tm_add_knn (
       tk_rvec_t *ns = graph->inv_hoods->a[hood_idx];
       uint64_t rem = knn;
 
-      for (khint_t j = 0; j < ns->n && rem; j++) {
+      for (uint32_t j = 0; j < ns->n && rem; j++) {
         tk_rank_t r = ns->a[j];
         if (r.i >= (int64_t) graph->uids_hoods->n)
           continue;
         int64_t v = graph->uids_hoods->a[r.i];
-        khint_t v_khi = tk_iumap_get(graph->uids_idx, v);
+        uint32_t v_khi = tk_iumap_get(graph->uids_idx, v);
         if (v_khi == tk_iumap_end(graph->uids_idx))
           continue;
         int64_t v_global = tk_iumap_val(graph->uids_idx, v_khi);
@@ -385,7 +319,7 @@ static inline void tm_add_knn (
     for (uint64_t hood_idx = 0; hood_idx < graph->uids_hoods->n && hood_idx < graph->ann_hoods->n; hood_idx++) {
       int64_t u = graph->uids_hoods->a[hood_idx];
 
-      khint_t u_khi = tk_iumap_get(graph->uids_idx, u);
+      uint32_t u_khi = tk_iumap_get(graph->uids_idx, u);
       if (u_khi == tk_iumap_end(graph->uids_idx))
         continue;
       int64_t u_global = tk_iumap_val(graph->uids_idx, u_khi);
@@ -393,12 +327,12 @@ static inline void tm_add_knn (
       tk_pvec_t *ns = graph->ann_hoods->a[hood_idx];
       uint64_t rem = knn;
 
-      for (khint_t j = 0; j < ns->n && rem; j++) {
+      for (uint32_t j = 0; j < ns->n && rem; j++) {
         tk_pair_t r = ns->a[j];
         if (r.i >= (int64_t) graph->uids_hoods->n)
           continue;
         int64_t v = graph->uids_hoods->a[r.i];
-        khint_t v_khi = tk_iumap_get(graph->uids_idx, v);
+        uint32_t v_khi = tk_iumap_get(graph->uids_idx, v);
         if (v_khi == tk_iumap_end(graph->uids_idx))
           continue;
         int64_t v_global = tk_iumap_val(graph->uids_idx, v_khi);
@@ -418,7 +352,7 @@ static inline void tm_add_knn (
     for (uint64_t hood_idx = 0; hood_idx < graph->uids_hoods->n && hood_idx < graph->hbi_hoods->n; hood_idx++) {
       int64_t u = graph->uids_hoods->a[hood_idx];
 
-      khint_t u_khi = tk_iumap_get(graph->uids_idx, u);
+      uint32_t u_khi = tk_iumap_get(graph->uids_idx, u);
       if (u_khi == tk_iumap_end(graph->uids_idx))
         continue;
       int64_t u_global = tk_iumap_val(graph->uids_idx, u_khi);
@@ -426,12 +360,12 @@ static inline void tm_add_knn (
       tk_pvec_t *ns = graph->hbi_hoods->a[hood_idx];
       uint64_t rem = knn;
 
-      for (khint_t j = 0; j < ns->n && rem; j++) {
+      for (uint32_t j = 0; j < ns->n && rem; j++) {
         tk_pair_t r = ns->a[j];
         if (r.i >= (int64_t) graph->uids_hoods->n)
           continue;
         int64_t v = graph->uids_hoods->a[r.i];
-        khint_t v_khi = tk_iumap_get(graph->uids_idx, v);
+        uint32_t v_khi = tk_iumap_get(graph->uids_idx, v);
         if (v_khi == tk_iumap_end(graph->uids_idx))
           continue;
         int64_t v_global = tk_iumap_val(graph->uids_idx, v_khi);
@@ -457,14 +391,14 @@ static inline tk_evec_t *tm_mst_knn_candidates (
     return all_candidates;
   if (graph->inv == NULL && graph->ann == NULL && graph->hbi == NULL)
     return all_candidates;
-  khint_t khi;
+  uint32_t khi;
   if (graph->inv != NULL && graph->inv_hoods != NULL) {
 
     for (uint64_t hood_idx = 0; hood_idx < graph->uids_hoods->n && hood_idx < graph->inv_hoods->n; hood_idx++) {
       int64_t u = graph->uids_hoods->a[hood_idx];
       tk_rvec_t *ns = graph->inv_hoods->a[hood_idx];
       int64_t cu = tk_dsu_find(&graph->dsu, u);
-      for (khint_t j = 0; j < ns->m; j ++) { // NOTE: ns->m here since our index stores non-mutuals in the back of the array
+      for (uint32_t j = 0; j < ns->m; j ++) { // NOTE: ns->m here since our index stores non-mutuals in the back of the array
         tk_rank_t r = ns->a[j];
         if (r.i >= (int64_t) graph->uids_hoods->n)
           continue;
@@ -485,7 +419,7 @@ static inline tk_evec_t *tm_mst_knn_candidates (
       int64_t u = graph->uids_hoods->a[hood_idx];
       tk_pvec_t *ns = graph->ann_hoods->a[hood_idx];
       int64_t cu = tk_dsu_find(&graph->dsu, u);
-      for (khint_t j = 0; j < ns->m; j ++) { // NOTE: ns->m here since our index stores non-mutuals in the back of the array
+      for (uint32_t j = 0; j < ns->m; j ++) { // NOTE: ns->m here since our index stores non-mutuals in the back of the array
         tk_pair_t r = ns->a[j];
         if (r.i >= (int64_t) graph->uids_hoods->n)
           continue;
@@ -506,7 +440,7 @@ static inline tk_evec_t *tm_mst_knn_candidates (
       int64_t u = graph->uids_hoods->a[hood_idx];
       tk_pvec_t *ns = graph->hbi_hoods->a[hood_idx];
       int64_t cu = tk_dsu_find(&graph->dsu, u);
-      for (khint_t j = 0; j < ns->m; j ++) { // NOTE: ns->m here since our index stores non-mutuals in the back of the array
+      for (uint32_t j = 0; j < ns->m; j ++) { // NOTE: ns->m here since our index stores non-mutuals in the back of the array
         tk_pair_t r = ns->a[j];
         if (r.i >= (int64_t) graph->uids_hoods->n)
           continue;
@@ -536,7 +470,7 @@ static inline void tm_add_mst (
 
     // Kruskal over candidates
     int kha;
-    khint_t khi;
+    uint32_t khi;
     for (uint64_t i = 0; i < candidates->n && tk_dsu_components(&graph->dsu) > 1; i ++) {
       tk_edge_t c = candidates->a[i];
       int64_t cu = tk_dsu_find(&graph->dsu, c.u);
@@ -561,7 +495,7 @@ static inline void tm_add_mst (
     for (int64_t idx = 0; idx < (int64_t) graph->uids->n; idx ++) {
       int64_t u = graph->uids->a[idx];
       int64_t comp = tk_dsu_find(&graph->dsu, u);
-      khint_t kc;
+      uint32_t kc;
       int is_new;
       int64_t deg = tk_iuset_size(graph->adj->a[idx]);
       kc = tk_pumap_put(reps_comp, comp, &is_new);
@@ -625,7 +559,7 @@ static inline void tm_process_seed_edges (
   for (uint64_t i = 0; i < graph->edges->n; i++) {
     int64_t u = graph->edges->a[i].i;
     int64_t v = graph->edges->a[i].p;
-    khint_t khi = tk_iumap_put(graph->uids_idx, u, &kha);
+    uint32_t khi = tk_iumap_put(graph->uids_idx, u, &kha);
     if (kha) {
       tk_iumap_setval(graph->uids_idx, khi, (int64_t) graph->uids->n);
       tk_ivec_push(graph->uids, u);
@@ -647,14 +581,14 @@ static inline void tm_add_seed_edges_immediate(
     return;
 
   int kha;
-  khint_t khi;
+  uint32_t khi;
 
   for (uint64_t i = 0; i < graph->edges->n; i++) {
     int64_t u = graph->edges->a[i].i;
     int64_t v = graph->edges->a[i].p;
 
-    khint_t khi_u = tk_iumap_get(graph->uids_idx, u);
-    khint_t khi_v = tk_iumap_get(graph->uids_idx, v);
+    uint32_t khi_u = tk_iumap_get(graph->uids_idx, u);
+    uint32_t khi_v = tk_iumap_get(graph->uids_idx, v);
     if (khi_u == tk_iumap_end(graph->uids_idx) ||
         khi_v == tk_iumap_end(graph->uids_idx)) {
       continue;
@@ -759,7 +693,7 @@ static inline void tm_run_knn_queries (
     int kha;
     for (uint64_t i = 0; i < graph->uids_hoods->n; i++) {
       int64_t uid = graph->uids_hoods->a[i];
-      khint_t khi = tk_iumap_put(graph->uids_idx, uid, &kha);
+      uint32_t khi = tk_iumap_put(graph->uids_idx, uid, &kha);
       if (kha) {
         tk_iumap_setval(graph->uids_idx, khi, (int64_t) graph->uids->n);
         tk_ivec_push(graph->uids, uid);
@@ -934,7 +868,7 @@ static inline int tm_create (lua_State *L)
     }
     int64_t max_size = 0;
     int64_t largest_root = -1;
-    for (khint_t k = tk_iumap_begin(comp_sizes); k != tk_iumap_end(comp_sizes); ++k) {
+    for (uint32_t k = tk_iumap_begin(comp_sizes); k != tk_iumap_end(comp_sizes); ++k) {
       if (!tk_iumap_exist(comp_sizes, k)) continue;
       int64_t size = tk_iumap_val(comp_sizes, k);
       if (size > max_size) {
@@ -947,8 +881,8 @@ static inline int tm_create (lua_State *L)
     tk_edge_t p;
     char c;
     kh_foreach(graph->pairs, p, c, ({
-      khint_t ukhi = tk_iumap_get(graph->uids_idx, p.u);
-      khint_t vkhi = tk_iumap_get(graph->uids_idx, p.v);
+      uint32_t ukhi = tk_iumap_get(graph->uids_idx, p.u);
+      uint32_t vkhi = tk_iumap_get(graph->uids_idx, p.v);
       if (ukhi != tk_iumap_end(graph->uids_idx) && vkhi != tk_iumap_end(graph->uids_idx)) {
         int64_t uidx = tk_iumap_val(graph->uids_idx, ukhi);
         int64_t vidx = tk_iumap_val(graph->uids_idx, vkhi);
@@ -1004,116 +938,152 @@ static inline int tm_graph_adjacency (lua_State *L)
 {
   lua_settop(L, 1);
   tk_graph_t *graph = tk_graph_peek(L, 1);
+  tk_ivec_t *selected_nodes = tk_ivec_create(0, 0, 0, 0);
+  tk_iumap_t *selected_set = tk_iumap_create(0, 0);
+  int kha;
+  uint32_t khi;
+
   if (graph->largest_component_root != -1) {
-    uint64_t component_size = 0;
-    tk_iumap_t *old_to_new = tk_iumap_create(0, 0);
-    tk_ivec_t *new_to_old = tk_ivec_create(0, 0, 0, 0);
-
-    for (uint64_t old_idx = 0; old_idx < graph->uids->n; old_idx ++) {
+    for (uint64_t old_idx = 0; old_idx < graph->uids->n; old_idx++) {
       if (tk_dsu_findx(&graph->dsu, (int64_t)old_idx) == graph->largest_component_root) {
-        int kha;
-        khint_t khi = tk_iumap_put(old_to_new, (int64_t)old_idx, &kha);
-        tk_iumap_setval(old_to_new, khi, (int64_t) component_size);
-        tk_ivec_push(new_to_old, (int64_t)old_idx);
-        component_size ++;
+        khi = tk_iumap_put(selected_set, (int64_t)old_idx, &kha);
+        tk_iumap_setval(selected_set, khi, (int64_t)selected_nodes->n);
+        tk_ivec_push(selected_nodes, (int64_t)old_idx);
       }
     }
-
-    tk_ivec_t *filtered_uids = tk_ivec_create(L, component_size, 0, 0); // uids
-    for (uint64_t new_idx = 0; new_idx < component_size; new_idx ++) {
-      int64_t old_idx = new_to_old->a[new_idx];
-      filtered_uids->a[new_idx] = graph->uids->a[old_idx];
+  } else {
+    for (uint64_t old_idx = 0; old_idx < graph->uids->n; old_idx++) {
+      khi = tk_iumap_put(selected_set, (int64_t)old_idx, &kha);
+      tk_iumap_setval(selected_set, khi, (int64_t)selected_nodes->n);
+      tk_ivec_push(selected_nodes, (int64_t)old_idx);
     }
-    filtered_uids->n = component_size;
+  }
 
-    tk_ivec_t *adj_offset = tk_ivec_create(L, component_size + 1, 0, 0); // uids offset
-    tk_ivec_t *adj_data = tk_ivec_create(L, 0, 0, 0); // uids offset data
-    tk_dvec_t *adj_weights = tk_dvec_create(L, 0, 0, 0); // uids offset data weights
-
-    adj_offset->a[0] = 0;
-    for (uint64_t new_idx = 0; new_idx < component_size; new_idx ++) {
-      int64_t old_idx = new_to_old->a[new_idx];
-      int64_t u_uid = graph->uids->a[old_idx];
-      int64_t neighbor_count = 0;
-      int64_t old_neighbor_idx;
-      tk_umap_foreach_keys(graph->adj->a[old_idx], old_neighbor_idx, ({
-        if (tk_dsu_findx(&graph->dsu, old_neighbor_idx) == graph->largest_component_root) {
-          khint_t khi = tk_iumap_get(old_to_new, old_neighbor_idx);
-          if (khi != tk_iumap_end(old_to_new)) {
-            int64_t new_neighbor_idx = tk_iumap_val(old_to_new, khi);
-            int64_t v_uid = graph->uids->a[old_neighbor_idx];
-            double w = tk_graph_get_weight(graph, u_uid, v_uid);
-            tk_ivec_push(adj_data, new_neighbor_idx);
-            tk_dvec_push(adj_weights, w);
-            neighbor_count ++;
-          }
-        }
-      }))
-      adj_offset->a[new_idx + 1] = adj_offset->a[new_idx] + neighbor_count;
-    }
-
-    tk_iumap_destroy(old_to_new);
-    tk_ivec_destroy(new_to_old);
-
-    tk_ivec_t *adj_sources = tk_ivec_create(L, adj_data->n, 0, 0); // uids offset data weights sources
-    for (uint64_t i = 0; i < adj_offset->n - 1; i++) {
-      int64_t start = adj_offset->a[i];
-      int64_t end = adj_offset->a[i + 1];
-      for (int64_t j = start; j < end; j++) {
-        adj_sources->a[j] = (int64_t) i;
+  uint64_t n_nodes = selected_nodes->n;
+  tk_ivec_t *tmp_offset = tk_ivec_create(0, n_nodes + 1, 0, 0);
+  tk_ivec_t *tmp_data = tk_ivec_create(0, 0, 0, 0);
+  tk_dvec_t *tmp_weights = tk_dvec_create(0, 0, 0, 0);
+  tmp_offset->a[0] = 0;
+  for (uint64_t i = 0; i < n_nodes; i++) {
+    int64_t old_idx = selected_nodes->a[i];
+    int64_t u_uid = graph->uids->a[old_idx];
+    tk_ivec_t *neighbors = tk_iuset_keys(0, graph->adj->a[old_idx]);
+    tk_ivec_asc(neighbors, 0, neighbors->n);
+    for (uint64_t j = 0; j < neighbors->n; j++) {
+      int64_t neighbor_old_idx = neighbors->a[j];
+      uint32_t khi = tk_iumap_get(selected_set, neighbor_old_idx);
+      if (khi != tk_iumap_end(selected_set)) {
+        int64_t neighbor_new_idx = tk_iumap_val(selected_set, khi);
+        int64_t v_uid = graph->uids->a[neighbor_old_idx];
+        double w = tk_graph_get_weight(graph, u_uid, v_uid);
+        tk_ivec_push(tmp_data, neighbor_new_idx);
+        tk_dvec_push(tmp_weights, w);
       }
     }
-    lua_insert(L, -4);
-
-    return 5;
+    tk_ivec_destroy(neighbors);
+    tmp_offset->a[i + 1] = (int64_t) tmp_data->n;
   }
 
-  uint64_t n_nodes = graph->uids->n;
-  tk_lua_get_ephemeron(L, TK_GRAPH_EPH, graph->uids);
+  tmp_offset->n = n_nodes + 1;
+  tk_ivec_t *old_to_new = tk_ivec_create(0, n_nodes, 0, 0);
+  tk_ivec_t *new_to_old = tk_ivec_create(0, n_nodes, 0, 0);
+  for (uint64_t i = 0; i < n_nodes; i++)
+    old_to_new->a[i] = -1;
+  int64_t min_deg = INT64_MAX;
+  int64_t start = 0;
+  for (uint64_t i = 0; i < n_nodes; i++) {
+    int64_t deg = tmp_offset->a[i + 1] - tmp_offset->a[i];
+    if (deg < min_deg && deg > 0) {
+      min_deg = deg;
+      start = (int64_t) i;
+    }
+  }
+  tk_ivec_t *queue = tk_ivec_create(0, 0, 0, 0);
+  uint64_t new_idx = 0;
 
-  tk_ivec_t *adj_offset = tk_ivec_create(L, n_nodes + 1, 0, 0);
-  tk_ivec_t *adj_data = tk_ivec_create(L, 0, 0, 0);
-  tk_dvec_t *adj_weights = tk_dvec_create(L, 0, 0, 0);
-  tk_ivec_t *adj_sources = NULL;  // Will be created after we know total size
-  for (unsigned int i = 0; i < graph->pool->n_threads; i ++) {
-    tk_graph_thread_t *data = graph->threads + i;
-    data->adj_offset = adj_offset;
-    data->adj_data = adj_data;
-    data->adj_weights = adj_weights;
-    data->adj_sources = NULL;  // Will be set later
-    tk_thread_range(i, graph->pool->n_threads, n_nodes, &data->ifirst, &data->ilast);
+  tk_ivec_push(queue, start);
+  old_to_new->a[start] = (int64_t) new_idx;
+  new_to_old->a[new_idx] = start;
+  new_idx++;
+
+  for (uint64_t q_idx = 0; q_idx < queue->n; q_idx++) {
+    int64_t u = queue->a[q_idx];
+    int64_t edge_start = tmp_offset->a[u];
+    int64_t edge_end = tmp_offset->a[u + 1];
+    tk_pvec_t *neighbors = tk_pvec_create(0, 0, 0, 0);
+    for (int64_t e = edge_start; e < edge_end; e++) {
+      int64_t v = tmp_data->a[e];
+      if (old_to_new->a[v] == -1) {
+        int64_t deg = tmp_offset->a[v + 1] - tmp_offset->a[v];
+        tk_pvec_push(neighbors, tk_pair(v, deg));
+      }
+    }
+    tk_pvec_asc(neighbors, 0, neighbors->n);
+    for (uint64_t i = 0; i < neighbors->n; i++) {
+      int64_t v = neighbors->a[i].i;
+      old_to_new->a[v] = (int64_t) new_idx;
+      new_to_old->a[new_idx] = v;
+      new_idx++;
+      tk_ivec_push(queue, v);
+    }
+    tk_pvec_destroy(neighbors);
   }
 
-  tk_threads_signal(graph->pool, TK_GRAPH_CSR_OFFSET_LOCAL, 0);
-  int64_t total = 0;
-  for (unsigned int i = 0; i < graph->pool->n_threads; i ++) {
-    tk_graph_thread_t *data = graph->threads + i;
-    int64_t tmp = data->csr_base;
-    data->csr_base = total;
-    total += tmp;
-  }
-  adj_offset->a[adj_offset->n - 1] = total;
-
-  tk_threads_signal(graph->pool, TK_GRAPH_CSR_OFFSET_GLOBAL, 0);
-  tk_ivec_resize(adj_data, (size_t) total, true);
-  tk_dvec_resize(adj_weights, (size_t) total, true);
-  tk_threads_signal(graph->pool, TK_GRAPH_CSR_DATA, 0);
-
-  // Create sources array that matches the edge ordering
-  adj_sources = tk_ivec_create(L, (size_t) total, 0, 0);
-  adj_sources->n = (size_t) total;
-  lua_insert(L, -4);
-
-  // Update thread data with sources array pointer
-  for (unsigned int i = 0; i < graph->pool->n_threads; i ++) {
-    tk_graph_thread_t *data = graph->threads + i;
-    data->adj_sources = adj_sources;
+  for (uint64_t i = 0; i < n_nodes; i++) {
+    if (old_to_new->a[i] == -1) {
+      old_to_new->a[i] = (int64_t) new_idx;
+      new_to_old->a[new_idx] = (int64_t) i;
+      new_idx++;
+    }
   }
 
-  // Build sources array in parallel
-  tk_threads_signal(graph->pool, TK_GRAPH_CSR_SOURCES, 0);
+  tk_ivec_destroy(queue);
+  for (uint64_t i = 0; i < n_nodes / 2; i++) {
+    int64_t tmp = new_to_old->a[i];
+    new_to_old->a[i] = new_to_old->a[n_nodes - 1 - i];
+    new_to_old->a[n_nodes - 1 - i] = tmp;
+  }
+  for (uint64_t new_i = 0; new_i < n_nodes; new_i++) {
+    int64_t old_i = new_to_old->a[new_i];
+    old_to_new->a[old_i] = (int64_t) new_i;
+  }
+  tk_ivec_t *final_uids = tk_ivec_create(L, n_nodes, 0, 0); // uids
+  tk_ivec_t *final_offset = tk_ivec_create(L, n_nodes + 1, 0, 0); // uids offset
+  tk_ivec_t *final_data = tk_ivec_create(L, tmp_data->n, 0, 0);   // uids offset data
+  tk_dvec_t *final_weights = tk_dvec_create(L, tmp_weights->n, 0, 0); // uids offset data weights
 
-  return 5; // uids, sources, offset, data, weight
+  final_offset->a[0] = 0;
+  int64_t write = 0;
+  for (uint64_t new_i = 0; new_i < n_nodes; new_i++) {
+    int64_t old_i = new_to_old->a[new_i];
+    int64_t original_idx = selected_nodes->a[old_i];
+    final_uids->a[new_i] = graph->uids->a[original_idx];
+    int64_t edge_start = tmp_offset->a[old_i];
+    int64_t edge_end = tmp_offset->a[old_i + 1];
+    for (int64_t e = edge_start; e < edge_end; e++) {
+      int64_t old_neighbor = tmp_data->a[e];
+      int64_t new_neighbor = old_to_new->a[old_neighbor];
+      final_data->a[write] = new_neighbor;
+      final_weights->a[write] = tmp_weights->a[e];
+      write++;
+    }
+    final_offset->a[new_i + 1] = write;
+  }
+
+  final_uids->n = n_nodes;
+  final_offset->n = n_nodes + 1;
+  final_data->n = tmp_data->n;
+  final_weights->n = tmp_weights->n;
+
+  tk_ivec_destroy(selected_nodes);
+  tk_iumap_destroy(selected_set);
+  tk_ivec_destroy(tmp_offset);
+  tk_ivec_destroy(tmp_data);
+  tk_dvec_destroy(tmp_weights);
+  tk_ivec_destroy(old_to_new);
+  tk_ivec_destroy(new_to_old);
+
+  return 4; // uids, offset, data, weights
 }
 
 static inline int tm_graph_pairs (lua_State *L)
