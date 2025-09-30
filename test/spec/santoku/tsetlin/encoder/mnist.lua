@@ -195,11 +195,13 @@ test("tsetlin", function ()
     each = function (t, s, v, k, l)
       local d, dd = stopwatch()
       if t == "done" then
-        str.printf("  Time: %6.2f %6.2f  matvecs = %d  time_clear = %f  time_edges = %f  time_reduce = %f\n", d, dd, s, v, k, l)
+        str.printf("  Time: %6.2f %6.2f  Stage: %s  matvecs = %d  time_clear = %f  time_edges = %f  time_reduce = %f\n", d, dd, t, s, v, k, l)
       elseif t == "eig" then
         local gap = train.eig_last and v - train.eig_last or 0
         train.eig_last = v
-        str.printf("  Time: %6.2f %6.2f  Eig: %3d = %.8f   Gap = %.8f   %s\n", d, dd, s, v, gap, k and "" or "drop")
+        str.printf("  Time: %6.2f %6.2f  Stage: %s  %3d = %.8f   Gap = %.8f   %s\n", d, dd, t, s, v, gap, k and "" or "drop")
+      else
+        str.printf("  Time: %6.2f %6.2f  Stage: %s\n", d, dd, t)
       end
     end
   })
