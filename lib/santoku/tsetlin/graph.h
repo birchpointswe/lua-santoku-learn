@@ -25,10 +25,6 @@ typedef tk_iuset_t * tk_graph_adj_item_t;
 #include <santoku/vec/tpl.h>
 
 typedef enum {
-  TK_GRAPH_CSR_OFFSET_LOCAL,
-  TK_GRAPH_CSR_OFFSET_GLOBAL,
-  TK_GRAPH_CSR_DATA,
-  TK_GRAPH_CSR_SOURCES,
   TK_GRAPH_SIGMA,
   TK_GRAPH_REWEIGHT
 } tk_graph_stage_t;
@@ -169,11 +165,9 @@ static inline void tk_graph_adj_mst (
   }
 
   tk_ivec_push(mst_offset, 0);
-  uint64_t zero_degree_count = 0;
   for (uint64_t i = 0; i < offset->n - 1; i++) {
     int64_t prev_offset = mst_offset->a[mst_offset->n - 1];
     int64_t deg = degree->a[i];
-    if (deg == 0) zero_degree_count++;
     if (deg < 0 || prev_offset < 0 || (deg > 0 && prev_offset > INT64_MAX - deg)) {
       tk_ivec_push(mst_offset, INT64_MAX);
     } else {
