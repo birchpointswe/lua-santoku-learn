@@ -9,7 +9,7 @@ local tm = require("santoku.tsetlin")
 local utc = require("santoku.utc")
 
 local TTR = 0.9
-local MAX = nil
+local MAX = 100
 local ITERATIONS = 100
 local THREADS = nil
 

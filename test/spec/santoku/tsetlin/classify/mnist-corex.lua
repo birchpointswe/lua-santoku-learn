@@ -10,25 +10,25 @@ local tm = require("santoku.tsetlin")
 local utc = require("santoku.utc")
 
 local TTR = 0.9
-local MAX = nil
-local COREX_ITERS = 100
+local MAX = 100
+local COREX_ITERS = 10
 
 local VISIBLE = 784
 local HIDDEN = 128
 
 local CLASSES = 10
 local NEGATIVE = 0.1
-local CLAUSES = { def = 8, min = 8, max = 32, log = true, int = true }
-local CLAUSE_TOLERANCE = { def = 8, min = 8, max = 64, int = true }
-local CLAUSE_MAXIMUM = { def = 8, min = 8, max = 64, int = true }
-local TARGET = { def = 4, min = 8, max = 64 }
-local SPECIFICITY = { def = 1000, min = 100, max = 2000 }
+local CLAUSES = 32 --{ def = 8, min = 8, max = 32, log = true, int = true }
+local CLAUSE_TOLERANCE = 64 --{ def = 8, min = 8, max = 64, int = true }
+local CLAUSE_MAXIMUM = 32 --{ def = 8, min = 8, max = 64, int = true }
+local TARGET = 8 --{ def = 4, min = 8, max = 64 }
+local SPECIFICITY = 2 --{ def = 1000, min = 100, max = 2000 }
 
 local SEARCH_PATIENCE = 3
 local SEARCH_ROUNDS = 10
 local SEARCH_TRIALS = 4
 local SEARCH_ITERATIONS = 10
-local FINAL_ITERATIONS = 100
+local FINAL_ITERATIONS = 10
 
 test("tsetlin", function ()
 

@@ -1,7 +1,9 @@
 results.mk: Makefile
 	truncate -s0 results.mk
-	pkg-config --exists openblas
-	test -d primme || git clone https://github.com/primme/primme --depth 1
-	cd primme && make lib \
-    CFLAGS="-O3 -march=native -fPIC $(shell pkg-config --cflags openblas)" \
-    LDFLAGS="-O3 -march=native $(shell pkg-config --libs openblas)"
+	if ! [ -d OpenBLAS ]; then git clone https://github.com/xianyi/OpenBLAS.git --depth 1; fi
+	if ! [ -f .openblas.ok ]; then cd OpenBLAS && make -j$(nproc) USE_THREAD=0 NO_SHARED=1 NO_LAPACKE= COMMON_OPT="-w" <% return blas_target and ("TARGET=" .. blas_target) or "" %>; fi
+	if ! [ -f .openblas.ok ]; then cd OpenBLAS && make install PREFIX=./install USE_THREAD=0 NO_SHARED=1 NO_LAPACKE= COMMON_OPT="-w" <% return blas_target and ("TARGET=" .. blas_target) or "" %>; fi
+	touch .openblas.ok
+	if ! [ -d primme ]; then git clone https://github.com/primme/primme --depth 1; fi
+	if ! [ -f .primme.ok ]; then cd primme && make -j$(nproc) lib CFLAGS="-w <% return primme_cflags or '-O3 -march=native -fPIC' %>" LDFLAGS="-w <% return primme_ldflags or '-O3 -march=native -fPIC' %>"; fi
+	touch .primme.ok
