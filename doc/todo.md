@@ -10,6 +10,12 @@
 
 # Next
 
+- Consistently follow the x/x_lua pattern for naming conventions
+- Can we build less of blas and primme? E.g. strictly the used functionality?
+- Build openblas as shared library installed as module, used by itq and primme
+- Threaded ITQ (now that blas is built single-threaded, we should explore doing
+  the threading at a higher level)
+
 - Rename tch
 - Rename library and project to santoku-learn
 

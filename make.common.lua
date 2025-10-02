@@ -22,12 +22,12 @@ local env = {
 
   rules = {
     ["spectral%.c"] = {
-      cflags = { "$(shell pkg-config --cflags openblas) -I$(PWD)/deps/primme/primme/include" },
-      ldflags = { "$(PWD)/deps/primme/primme/lib/libprimme.a -llapack -llapacke $(shell pkg-config --libs openblas)" },
+      cflags = { "-I$(PWD)/deps/primme/primme/include", "-I$(PWD)/deps/primme/OpenBLAS/install/include" },
+      ldflags = { "$(PWD)/deps/primme/primme/lib/libprimme.a", "$(PWD)/deps/primme/OpenBLAS/install/lib/libopenblas.a" },
     },
     ["itq%.c"] = {
-      cflags = { "$(shell pkg-config --cflags openblas)" },
-      ldflags = { "$(shell pkg-config --libs openblas) -llapacke" },
+      cflags = { "-I$(PWD)/deps/primme/OpenBLAS/install/include"  },
+      ldflags = { "$(PWD)/deps/primme/OpenBLAS/install/lib/libopenblas.a" },
     },
   },
 

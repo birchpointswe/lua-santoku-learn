@@ -735,18 +735,29 @@ static inline void tm_reweight_all_edges (
   tk_threads_signal(graph->pool, TK_GRAPH_REWEIGHT, 0);
 }
 
-static void tm_graph_destroy (tk_graph_t *graph)
+static void tm_graph_destroy_internal (tk_graph_t *graph)
 {
+  if (graph->destroyed)
+    return;
+  graph->destroyed = true;
   tk_dsu_free(&graph->dsu);
   tk_threads_destroy(graph->pool);
   if (graph->threads)
     free(graph->threads);
 }
 
+static inline int tm_graph_destroy (lua_State *L)
+{
+  lua_settop(L, 1);
+  tk_graph_t *graph = tk_graph_peek(L, 1);
+  tm_graph_destroy_internal(graph);
+  return 0;
+}
+
 static inline int tm_graph_gc (lua_State *L)
 {
   tk_graph_t *graph = tk_graph_peek(L, 1);
-  tm_graph_destroy(graph);
+  tm_graph_destroy_internal(graph);
   return 0;
 }
 
@@ -1100,6 +1111,7 @@ static luaL_Reg tm_graph_mt_fns[] =
 {
   { "pairs", tm_graph_pairs },
   { "adjacency", tm_graph_adjacency },
+  { "destroy", tm_graph_destroy },
   { NULL, NULL }
 };
 
@@ -1152,6 +1164,7 @@ static inline tk_graph_t *tm_graph_create (
   graph->n_edges = 0;
   graph->uids_hoods = NULL;
   graph->uids_idx_hoods = NULL;
+  graph->destroyed = false;
   for (unsigned int i = 0; i < n_threads; i ++) {
     tk_graph_thread_t *data = graph->threads + i;
     graph->pool->threads[i].data = data;

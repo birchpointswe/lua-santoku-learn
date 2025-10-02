@@ -10,12 +10,7 @@
 #include <string.h>
 #include <assert.h>
 #include <primme.h>
-
-#if __has_include(<openblas/cblas.h>)
-#include <openblas/cblas.h>
-#else
 #include <cblas.h>
-#endif
 
 #define TK_SPECTRAL_BLOCKSIZE 64
 
@@ -55,7 +50,6 @@ typedef struct {
   tk_spectral_t *spec;
   uint64_t ifirst, ilast;
 } tk_spectral_thread_t;
-
 
 static inline void tk_spectral_worker (void *dp, int sig)
 {
@@ -110,7 +104,6 @@ static inline void tk_spectral_worker (void *dp, int sig)
       const double * restrict adj_weights = data->spec->adj_weights->a;
       const double * restrict degree = data->spec->degree->a;
       const double * restrict scale = data->spec->scale->a;
-
       if (laplacian_type == TK_LAPLACIAN_UNNORMALIZED) {
         for (int b = 0; b < blockSize; b++) {
           double * restrict yb = y + (size_t) b * (size_t) ldy;
@@ -154,25 +147,14 @@ static inline void tk_spectral_worker (void *dp, int sig)
       const int blockSize = data->spec->blockSize;
       const PRIMME_INT ldx = data->spec->precond_ldx;
       const PRIMME_INT ldy = data->spec->precond_ldy;
-      const tk_laplacian_type_t laplacian_type = data->spec->laplacian_type;
       double * restrict xvec = data->spec->precond_x;
       double * restrict yvec = data->spec->precond_y;
       const double * restrict degree = data->spec->degree->a;
-
-      if (laplacian_type == TK_LAPLACIAN_UNNORMALIZED) {
-        for (int b = 0; b < blockSize; b++) {
-          const double * restrict xb = xvec + (size_t) b * (size_t) ldx;
-          double * restrict yb = yvec + (size_t) b * (size_t) ldy;
-          for (uint64_t i = node_first; i <= node_last; i++)
-            yb[i] = xb[i] / degree[i];
-        }
-      } else {
-        for (int b = 0; b < blockSize; b++) {
-          const double * restrict xb = xvec + (size_t) b * (size_t) ldx;
-          double * restrict yb = yvec + (size_t) b * (size_t) ldy;
-          for (uint64_t i = node_first; i <= node_last; i++)
-            yb[i] = xb[i];
-        }
+      for (int b = 0; b < blockSize; b++) {
+        const double * restrict xb = xvec + (size_t) b * (size_t) ldx;
+        double * restrict yb = yvec + (size_t) b * (size_t) ldy;
+        for (uint64_t i = node_first; i <= node_last; i++)
+          yb[i] = xb[i] / degree[i];
       }
       break;
     }
@@ -236,6 +218,7 @@ static inline void tm_run_spectral (
   int i_each
 ) {
   tk_spectral_t spec;
+
   tk_spectral_thread_t *threads = tk_malloc(L, pool->n_threads * sizeof(tk_spectral_thread_t));
   spec.laplacian_type = laplacian_type;
   spec.scale = scale;
@@ -257,7 +240,6 @@ static inline void tm_run_spectral (
 
   tk_threads_signal(pool, TK_SPECTRAL_SCALE, 0);
 
-  openblas_set_num_threads((int) pool->n_threads);
   primme_params params;
   primme_initialize(&params);
   params.n = (int64_t) uids->n;
@@ -356,7 +338,7 @@ static inline int tm_encode (lua_State *L)
   uint64_t n_hidden = tk_lua_fcheckunsigned(L, 1, "spectral", "n_hidden");
   unsigned int n_threads = tk_threads_getn(L, 1, "spectral", "threads");
   double eps = tk_lua_foptnumber(L, 1, "spectral", "eps", 1e-12);
-  const char *type_str = tk_lua_foptstring(L, 1, "spectral", "type", "random");
+  const char *type_str = tk_lua_foptstring(L, 1, "spectral", "type", "unnormalized");
   tk_laplacian_type_t laplacian_type = TK_LAPLACIAN_RANDOM;
 
   if (strcmp(type_str, "unnormalized") == 0) {

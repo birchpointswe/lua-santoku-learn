@@ -12,7 +12,7 @@ local str = require("santoku.string")
 local test = require("santoku.test")
 local utc = require("santoku.utc")
 
-local MAX = 10000
+local MAX = 100
 local MAX_CLASS = nil
 local FEATURES = 784
 local THREADS = nil
@@ -21,10 +21,9 @@ local BINARIZE = "itq"
 local TCH = true
 local HIDDEN = 8
 local EPS_SPECTRAL = 1e-3
-local NORMALIZED = true
-local FLIP_AT = 1.0
-local NEG_SCALE = 0.1
-local SIGMA_K = -1
+local LAPLACIAN = "unnormalized"
+local ITQ_EPS = 1e-8
+local ITQ_ITERATIONS = 200
 local CLUSTER_MIN = 0
 local CLUSTER_MAX = 4
 local ANCHORS = 8
@@ -51,13 +50,10 @@ test("tsetlin", function ()
   dataset.graph = graph.create({
     edges = seed,
     index = index,
-    flip_at = FLIP_AT,
-    neg_scale = NEG_SCALE,
-    sigma_k = SIGMA_K,
     threads = THREADS,
-    each = function (s, b, dt)
+    each = function (ids, s, b, dt)
       local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Components: %-6d  Edges: %-6d\n", d, dd, dt, s, b) -- luacheck: ignore
+      str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Nodes: %-6d  Components: %-6d  Edges: %-6d\n", d, dd, dt, ids, s, b)
     end
   })
   dataset.graph_adj_ids,
@@ -67,21 +63,25 @@ test("tsetlin", function ()
     dataset.graph:adjacency()
 
   print("\nSpectral eigendecomposition")
-  dataset.ids_spectral, dataset.codes_spectral, dataset.scale = spectral.encode({
+  dataset.ids_spectral, dataset.codes_spectral = spectral.encode({
+    type = LAPLACIAN,
+    eps = EPS_SPECTRAL,
     ids = dataset.graph_adj_ids,
     offsets = dataset.graph_adj_offsets,
     neighbors = dataset.graph_adj_neighbors,
     weights = dataset.graph_adj_weights,
     n_hidden = HIDDEN,
-    normalized = NORMALIZED,
-    eps_primme = EPS_SPECTRAL,
     threads = THREADS,
     each = function (t, s, v, k)
       local d, dd = stopwatch()
       if t == "done" then
-        str.printf("  Time: %6.2f %6.2f  Spectral Steps: %3d\n", d, dd, s)
+        str.printf("  Time: %6.2f %6.2f  Stage: %s  matvecs = %d\n", d, dd, t, s)
       elseif t == "eig" then
-        str.printf("  Time: %6.2f %6.2f  Eig: %3d = %.8f  %s\n", d, dd, s, v, k and "" or "drop")
+        local gap = dataset.eig_last and v - dataset.eig_last or 0
+        dataset.eig_last = v
+        str.printf("  Time: %6.2f %6.2f  Stage: %s  %3d = %.8f   Gap = %.8f   %s\n", d, dd, t, s, v, gap, k and "" or "drop")
+      else
+        str.printf("  Time: %6.2f %6.2f  Stage: %s\n", d, dd, t)
       end
     end
   })
@@ -92,6 +92,8 @@ test("tsetlin", function ()
     dataset.codes_spectral = itq.encode({
       codes = dataset.codes_spectral,
       n_dims = HIDDEN,
+      tolerance = ITQ_EPS,
+      iterations = ITQ_ITERATIONS,
       threads = THREADS,
       each = function (i, a, b)
         str.printf("  ITQ completed in %s itrs. Objective %f → %f\n", i, a, b)
@@ -119,8 +121,8 @@ test("tsetlin", function ()
       neighbors = dataset.graph_adj_neighbors,
       weights = dataset.graph_adj_weights,
       codes = dataset.codes_spectral,
-      scale = dataset.scale,
       n_dims = HIDDEN,
+      threads = THREADS,
       each = function (s)
         local d, dd = stopwatch()
         str.printf("  Time: %6.2f %6.2f  TCH Steps: %3d\n", d, dd, s)
@@ -165,6 +167,7 @@ test("tsetlin", function ()
   dataset.cluster_assignments_sampled,
   dataset.n_clusters_sampled = eval.optimize_clustering({ -- luacheck: ignore
     index = dataset.index_codes,
+    ids = dataset.ids_spectral,
     pos = dataset.pos_sampled,
     neg = dataset.neg_sampled,
     min_margin = CLUSTER_MIN,

@@ -5,23 +5,12 @@
 #include <santoku/cvec.h>
 #include <santoku/dvec.h>
 #include <santoku/dvec/ext.h>
-
 #include <stdlib.h>
 #include <stdint.h>
 #include <math.h>
 #include <float.h>
-
-#if __has_include(<openblas/cblas.h>)
-#include <openblas/cblas.h>
-#else
-#include <cblas.h>
-#endif
-
-#if __has_include(<openblas/lapacke.h>)
-#include <openblas/lapacke.h>
-#else
 #include <lapacke.h>
-#endif
+#include <cblas.h>
 
 static inline void tk_itq_sign (
   char *out,
@@ -88,8 +77,6 @@ static inline void tk_itq_encode (
   double last_obj = DBL_MAX, first_obj = 0.0;
   uint64_t it = 0;
 
-  openblas_set_num_threads((int) n_threads);
-
   for (it = 0; it < max_iterations; it ++) {
     cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                 N, K, K, 1.0, X, K, R, K, 0.0, V0, K);
@@ -140,6 +127,7 @@ static inline void tk_itq_encode (
   free(V0);
   free(V1);
   free(X);
+
 }
 
 #endif
