@@ -64,6 +64,8 @@ typedef struct tk_graph_s {
   tk_graph_thread_t *threads;
   tk_threadpool_t *pool;
 
+  bool destroyed;
+
 } tk_graph_t;
 
 typedef struct tk_graph_thread_s {

@@ -12,21 +12,21 @@ local eval = require("santoku.tsetlin.evaluator")
 local tokenizer = require("santoku.tsetlin.tokenizer")
 
 local TTR = 0.9
-local MAX = nil
+local MAX = 100
 local NEGATIVE = 0.5
 
 local CLASSES = 2
-local CLAUSES = { def = 8, min = 8, max = 32, int = true, log = true }
-local CLAUSE_TOLERANCE = { def = 8, min = 8, max = 64, int = true, log = true }
-local CLAUSE_MAXIMUM = { def = 8, min = 8, max = 64, int = true, log = true }
-local TARGET = { def = 4, min = 8, max = 64, int = true, log = true }
-local SPECIFICITY = { def = 1000, min = 100, max = 2000, int = true, log = true }
+local CLAUSES = 32 --{ def = 8, min = 8, max = 32, int = true, log = true }
+local CLAUSE_TOLERANCE = 32 --{ def = 8, min = 8, max = 64, int = true, log = true }
+local CLAUSE_MAXIMUM = 16 --{ def = 8, min = 8, max = 64, int = true, log = true }
+local TARGET = 8 --{ def = 4, min = 8, max = 64, int = true, log = true }
+local SPECIFICITY = 4 --{ def = 1000, min = 100, max = 2000, int = true, log = true }
 
 local SEARCH_PATIENCE = 3
 local SEARCH_ROUNDS = 10
 local SEARCH_TRIALS = 4
 local SEARCH_ITERATIONS = 10
-local FINAL_ITERATIONS = 20
+local FINAL_ITERATIONS = 10
 
 local TOP_ALGO = "chi2"
 local TOP_K = 8192

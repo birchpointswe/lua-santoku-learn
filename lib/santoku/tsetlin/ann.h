@@ -961,7 +961,10 @@ static inline void tk_ann_probe_bucket (
     uint64_t dist = tk_cvec_bits_hamming((const uint8_t *)v, (const uint8_t *)p1, ftr);
     if (dist > eps)
       continue;
-    tk_pvec_hmax(out, k, tk_pair(id, (int64_t) dist));
+    if (k)
+      tk_pvec_hmax(out, k, tk_pair(id, (int64_t) dist));
+    else
+      tk_pvec_push(out, tk_pair(id, (int64_t) dist));
   }
 }
 
@@ -1579,6 +1582,8 @@ static inline void tk_ann_setup_hash_bits_random (
   int Ai,
   uint64_t expected
 ) {
+  if (expected < A->bucket_target)
+    expected = A->bucket_target;
   uint64_t n_hash_bits = (uint64_t) ceil(log2((double) expected / (double) A->bucket_target));
   n_hash_bits = n_hash_bits > TK_ANN_BITS ? TK_ANN_BITS : n_hash_bits;
   A->hash_bits = tk_ivec_create(L, A->features, 0, 0);

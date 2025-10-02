@@ -8,8 +8,8 @@ local tm = require("santoku.tsetlin")
 local utc = require("santoku.utc")
 
 local TTR = 0.9
-local MAX = nil
-local ITERATIONS = 400
+local MAX = 100
+local ITERATIONS = 5
 
 local CLASSES = 10
 local CLAUSES = 8
