@@ -128,7 +128,10 @@ static inline void tk_graph_worker (void *dp, int sig)
           int64_t neighbor_uid = graph->uids->a[neighbor_idx];
           double d = tk_graph_distance(graph, uid, neighbor_uid);
           if (d != DBL_MAX) {
-            tk_dvec_push(distances, d);
+            if (tk_dvec_push(distances, d) != 0) {
+              atomic_store(&data->has_error, true);
+              return;
+            }
             int kha;
             tk_iuset_put(seen, neighbor_idx, &kha);
           }
@@ -150,7 +153,10 @@ static inline void tk_graph_worker (void *dp, int sig)
                     uint32_t s_khi = tk_iuset_put(seen, neighbor_global_idx, &kha);
                     (void)s_khi;
                     if (kha) {
-                      tk_dvec_push(distances, hood->a[j].d);
+                      if (tk_dvec_push(distances, hood->a[j].d) != 0) {
+                        atomic_store(&data->has_error, true);
+                        return;
+                      }
                     }
                   }
                 }
@@ -169,7 +175,10 @@ static inline void tk_graph_worker (void *dp, int sig)
                     uint32_t s_khi = tk_iuset_put(seen, neighbor_global_idx, &kha);
                     (void)s_khi;
                     if (kha) {
-                      tk_dvec_push(distances, (double)hood->a[j].p / denom);
+                      if (tk_dvec_push(distances, (double)hood->a[j].p / denom) != 0) {
+                        atomic_store(&data->has_error, true);
+                        return;
+                      }
                     }
                   }
                 }
@@ -188,7 +197,10 @@ static inline void tk_graph_worker (void *dp, int sig)
                     uint32_t s_khi = tk_iuset_put(seen, neighbor_global_idx, &kha);
                     (void)s_khi;
                     if (kha) {
-                      tk_dvec_push(distances, (double)hood->a[j].p / denom);
+                      if (tk_dvec_push(distances, (double)hood->a[j].p / denom) != 0) {
+                        atomic_store(&data->has_error, true);
+                        return;
+                      }
                     }
                   }
                 }
@@ -395,7 +407,10 @@ static inline tk_evec_t *tm_mst_knn_candidates (
         khi = tk_euset_get(graph->pairs, e);
         if (khi != tk_euset_end(graph->pairs))
           continue;
-        tk_evec_push(all_candidates, tk_edge(u, v, r.d));
+        if (tk_evec_push(all_candidates, tk_edge(u, v, r.d)) != 0) {
+          tk_evec_destroy(all_candidates);
+          return NULL;
+        }
       }
     }
 
@@ -416,7 +431,10 @@ static inline tk_evec_t *tm_mst_knn_candidates (
         khi = tk_euset_get(graph->pairs, e);
         if (khi != tk_euset_end(graph->pairs))
           continue;
-        tk_evec_push(all_candidates, tk_edge(u, v, (double) r.p / (double) graph->ann->features));
+        if (tk_evec_push(all_candidates, tk_edge(u, v, (double) r.p / (double) graph->ann->features)) != 0) {
+          tk_evec_destroy(all_candidates);
+          return NULL;
+        }
       }
     }
 
@@ -437,7 +455,10 @@ static inline tk_evec_t *tm_mst_knn_candidates (
         khi = tk_euset_get(graph->pairs, e);
         if (khi != tk_euset_end(graph->pairs))
           continue;
-        tk_evec_push(all_candidates, tk_edge(u, v, (double) r.p / (double) graph->hbi->features));
+        if (tk_evec_push(all_candidates, tk_edge(u, v, (double) r.p / (double) graph->hbi->features)) != 0) {
+          tk_evec_destroy(all_candidates);
+          return NULL;
+        }
       }
     }
   }
@@ -550,12 +571,18 @@ static inline void tm_process_seed_edges (
     uint32_t khi = tk_iumap_put(graph->uids_idx, u, &kha);
     if (kha) {
       tk_iumap_setval(graph->uids_idx, khi, (int64_t) graph->uids->n);
-      tk_ivec_push(graph->uids, u);
+      if (tk_ivec_push(graph->uids, u) != 0) {
+        tk_lua_verror(L, 2, "process_seed_edges", "allocation failed");
+        return;
+      }
     }
     khi = tk_iumap_put(graph->uids_idx, v, &kha);
     if (kha) {
       tk_iumap_setval(graph->uids_idx, khi, (int64_t) graph->uids->n);
-      tk_ivec_push(graph->uids, v);
+      if (tk_ivec_push(graph->uids, v) != 0) {
+        tk_lua_verror(L, 2, "process_seed_edges", "allocation failed");
+        return;
+      }
     }
   }
 
@@ -684,7 +711,10 @@ static inline void tm_run_knn_queries (
       uint32_t khi = tk_iumap_put(graph->uids_idx, uid, &kha);
       if (kha) {
         tk_iumap_setval(graph->uids_idx, khi, (int64_t) graph->uids->n);
-        tk_ivec_push(graph->uids, uid);
+        if (tk_ivec_push(graph->uids, uid) != 0) {
+          tk_lua_verror(L, 2, "graph_adj", "allocation failed");
+          return;
+        }
       }
     }
   }
@@ -706,8 +736,15 @@ static inline void tm_compute_sigma (
   for (unsigned int i = 0; i < graph->pool->n_threads; i++) {
     tk_graph_thread_t *data = graph->threads + i;
     tk_thread_range(i, graph->pool->n_threads, graph->uids->n, &data->ifirst, &data->ilast);
+    atomic_init(&data->has_error, false);
   }
   tk_threads_signal(graph->pool, TK_GRAPH_SIGMA, 0);
+  for (unsigned int i = 0; i < graph->pool->n_threads; i++) {
+    if (atomic_load(&graph->threads[i].has_error)) {
+      tk_lua_verror(L, 2, "compute_sigma", "worker allocation failed");
+      return;
+    }
+  }
 }
 
 static inline void tm_reweight_all_edges (
@@ -901,6 +938,8 @@ static inline int tm_adjacency (lua_State *L)
   } else if (graph->bridge && graph->knn_cache && graph->dsu->components > 1) {
 
     tk_evec_t *cs = tm_mst_knn_candidates(L, graph);
+    if (cs == NULL)
+      tk_lua_verror(L, 2, "graph_adj", "allocation failed during candidate collection");
     tm_add_mst(L, Gi, graph, cs);
     tk_evec_destroy(cs);
     if (i_each != -1) {
@@ -939,14 +978,20 @@ static inline int tm_adjacency (lua_State *L)
       if (tk_dsu_findx(graph->dsu, (int64_t)old_idx) == graph->largest_component_root) {
         khi = tk_iumap_put(selected_set, (int64_t)old_idx, &kha);
         tk_iumap_setval(selected_set, khi, (int64_t)selected_nodes->n);
-        tk_ivec_push(selected_nodes, (int64_t)old_idx);
+        if (tk_ivec_push(selected_nodes, (int64_t)old_idx) != 0) {
+          tk_lua_verror(L, 2, "graph_adj", "allocation failed");
+          return 0;
+        }
       }
     }
   } else {
     for (uint64_t old_idx = 0; old_idx < graph->uids->n; old_idx++) {
       khi = tk_iumap_put(selected_set, (int64_t)old_idx, &kha);
       tk_iumap_setval(selected_set, khi, (int64_t)selected_nodes->n);
-      tk_ivec_push(selected_nodes, (int64_t)old_idx);
+      if (tk_ivec_push(selected_nodes, (int64_t)old_idx) != 0) {
+        tk_lua_verror(L, 2, "graph_adj", "allocation failed");
+        return 0;
+      }
     }
   }
 
@@ -975,8 +1020,14 @@ static inline int tm_adjacency (lua_State *L)
         int64_t neighbor_new_idx = tk_iumap_val(selected_set, khi);
         int64_t v_uid = graph->uids->a[neighbor_old_idx];
         double w = tk_graph_get_weight(graph, u_uid, v_uid);
-        tk_ivec_push(tmp_data, neighbor_new_idx);
-        tk_dvec_push(tmp_weights, w);
+        if (tk_ivec_push(tmp_data, neighbor_new_idx) != 0) {
+          tk_lua_verror(L, 2, "graph_adj", "allocation failed");
+          return 0;
+        }
+        if (tk_dvec_push(tmp_weights, w) != 0) {
+          tk_lua_verror(L, 2, "graph_adj", "allocation failed");
+          return 0;
+        }
       }
     }
     tmp_offset->a[i + 1] = (int64_t) tmp_data->n;
@@ -1005,7 +1056,10 @@ static inline int tm_adjacency (lua_State *L)
   lua_pop(L, 1);
   uint64_t new_idx = 0;
 
-  tk_ivec_push(queue, start);
+  if (tk_ivec_push(queue, start) != 0) {
+    tk_lua_verror(L, 2, "graph_adj", "allocation failed");
+    return 0;
+  }
   old_to_new->a[start] = (int64_t) new_idx;
   new_to_old->a[new_idx] = start;
   new_idx++;
@@ -1021,7 +1075,10 @@ static inline int tm_adjacency (lua_State *L)
       int64_t v = tmp_data->a[e];
       if (old_to_new->a[v] == -1) {
         int64_t deg = tmp_offset->a[v + 1] - tmp_offset->a[v];
-        tk_pvec_push(neighbors, tk_pair(v, deg));
+        if (tk_pvec_push(neighbors, tk_pair(v, deg)) != 0) {
+          tk_lua_verror(L, 2, "graph_adj", "allocation failed");
+          return 0;
+        }
       }
     }
     tk_pvec_asc(neighbors, 0, neighbors->n);
@@ -1030,7 +1087,10 @@ static inline int tm_adjacency (lua_State *L)
       old_to_new->a[v] = (int64_t) new_idx;
       new_to_old->a[new_idx] = v;
       new_idx++;
-      tk_ivec_push(queue, v);
+      if (tk_ivec_push(queue, v) != 0) {
+        tk_lua_verror(L, 2, "graph_adj", "allocation failed");
+        return 0;
+      }
     }
   }
 

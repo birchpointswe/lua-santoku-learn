@@ -98,7 +98,7 @@ static inline bool tk_booleanizer_is_categorical (
   return false;
 }
 
-static inline void tk_booleanizer_encode_string (
+static inline int tk_booleanizer_encode_string (
   lua_State *L,
   tk_booleanizer_t *B,
   uint64_t id_sample,
@@ -108,17 +108,19 @@ static inline void tk_booleanizer_encode_string (
 ) {
   if (!B->finalized) {
     tk_lua_verror(L, 2, "encode", "finalize must be called before encode");
-    return;
+    return -1;
   }
   tk_cat_bit_string_t key = { .f = id_feature, .v = (char *) value };
   khint_t k = tk_cat_bits_string_get(B->cat_bits_string, key);
   if (k != tk_cat_bits_string_end(B->cat_bits_string)) {
     int64_t bit_id = tk_cat_bits_string_val(B->cat_bits_string, k);
-    tk_ivec_push(out, (int64_t) id_sample * (int64_t) B->next_bit + bit_id);
+    if (tk_ivec_push(out, (int64_t) id_sample * (int64_t) B->next_bit + bit_id) != 0)
+      return -1;
   }
+  return 0;
 }
 
-static inline void tk_booleanizer_encode_double (
+static inline int tk_booleanizer_encode_double (
   lua_State *L,
   tk_booleanizer_t *B,
   uint64_t id_sample,
@@ -128,29 +130,32 @@ static inline void tk_booleanizer_encode_double (
 ) {
   if (!B->finalized) {
     tk_lua_verror(L, 2, "encode", "finalize must be called before encode");
-    return;
+    return -1;
   }
   if (tk_booleanizer_is_categorical(B, id_feature)) {
     tk_cat_bit_double_t key = { .f = id_feature, .v = value };
     khint_t k = tk_cat_bits_double_get(B->cat_bits_double, key);
     if (k != tk_cat_bits_double_end(B->cat_bits_double)) {
       int64_t bit_id = tk_cat_bits_double_val(B->cat_bits_double, k);
-      tk_ivec_push(out, (int64_t) id_sample * (int64_t) B->next_bit + bit_id);
+      if (tk_ivec_push(out, (int64_t) id_sample * (int64_t) B->next_bit + bit_id) != 0)
+        return -1;
     }
   } else {
     khint_t k_thresh = tk_cont_thresholds_get(B->cont_thresholds, id_feature);
     khint_t k_bits = tk_iumap_get(B->cont_bits, id_feature);
     if (k_thresh == tk_cont_thresholds_end(B->cont_thresholds) || k_bits == tk_iumap_end(B->cont_bits))
-      return; // no thresholds/bit mapping for this feature
+      return 0; // no thresholds/bit mapping for this feature
     tk_dvec_t *thresholds = tk_cont_thresholds_val(B->cont_thresholds, k_thresh);
     int64_t bit_base = tk_iumap_val(B->cont_bits, k_bits);
     for (uint64_t t = 0; t < thresholds->n; t ++)
       if (value > thresholds->a[t])
-        tk_ivec_push(out, (int64_t) id_sample * (int64_t) B->next_bit + bit_base + (int64_t) t);
+        if (tk_ivec_push(out, (int64_t) id_sample * (int64_t) B->next_bit + bit_base + (int64_t) t) != 0)
+          return -1;
   }
+  return 0;
 }
 
-static inline void tk_booleanizer_encode_integer (
+static inline int tk_booleanizer_encode_integer (
   lua_State *L,
   tk_booleanizer_t *B,
   uint64_t id_sample,
@@ -158,10 +163,10 @@ static inline void tk_booleanizer_encode_integer (
   int64_t value,
   tk_ivec_t *out
 ) {
-  tk_booleanizer_encode_double(L, B, id_sample, id_feature, (double) value, out);
+  return tk_booleanizer_encode_double(L, B, id_sample, id_feature, (double) value, out);
 }
 
-static inline void tk_booleanizer_encode_dvec (
+static inline int tk_booleanizer_encode_dvec (
   lua_State *L,
   tk_booleanizer_t *B,
   tk_dvec_t *D,
@@ -171,7 +176,7 @@ static inline void tk_booleanizer_encode_dvec (
 ) {
   if (!B->finalized) {
     tk_lua_verror(L, 2, "encode", "finalize must be called before encode");
-    return;
+    return -1;
   }
   uint64_t n_samples = D->n / n_dims;
   for (uint64_t i = 0; i < n_samples; i ++) {
@@ -183,7 +188,8 @@ static inline void tk_booleanizer_encode_dvec (
         khint_t k = tk_cat_bits_double_get(B->cat_bits_double, key);
         if (k != tk_cat_bits_double_end(B->cat_bits_double)) {
           int64_t bit_id = tk_cat_bits_double_val(B->cat_bits_double, k);
-          tk_ivec_push(out, bit_id);
+          if (tk_ivec_push(out, bit_id) != 0)
+            return -1;
         }
       } else {
         khint_t k_thresh = tk_cont_thresholds_get(B->cont_thresholds, id_feature);
@@ -194,10 +200,12 @@ static inline void tk_booleanizer_encode_dvec (
         int64_t bit_base = tk_iumap_val(B->cont_bits, k_bits);
         for (uint64_t t = 0; t < thresholds->n; t ++)
           if (value >= thresholds->a[t])
-            tk_ivec_push(out, (int64_t) i * (int64_t) B->next_bit + bit_base + (int64_t) t);
+            if (tk_ivec_push(out, (int64_t) i * (int64_t) B->next_bit + bit_base + (int64_t) t) != 0)
+              return -1;
       }
     }
   }
+  return 0;
 }
 
 static inline int64_t tk_booleanizer_bit_integer (
@@ -363,9 +371,17 @@ static inline void tk_booleanizer_add_thresholds (
         sum += value_vec->a[i];
       thr = sum / (double) value_vec->n;
     }
-    tk_dvec_push(thresholds, thr);
+    if (tk_dvec_push(thresholds, thr) != 0) {
+      tk_dvec_destroy(thresholds);
+      tk_lua_verror(L, 2, "add_thresholds", "allocation failed");
+      return;
+    }
   } else if (n <= B->n_thresholds) {
-    tk_dvec_copy(thresholds, value_vec, 0, (int64_t) value_vec->n, 0);
+    if (tk_dvec_copy(thresholds, value_vec, 0, (int64_t) value_vec->n, 0) != 0) {
+      tk_dvec_destroy(thresholds);
+      tk_lua_verror(L, 2, "add_thresholds", "allocation failed");
+      return;
+    }
   } else {
     for (uint64_t i = 0; i < B->n_thresholds; i ++) {
       double q = (double) (i + 1) / (double) (B->n_thresholds + 1);
@@ -373,9 +389,13 @@ static inline void tk_booleanizer_add_thresholds (
       size_t left = (size_t) idx;
       size_t right = left + 1;
       double frac = idx - left;
-      tk_dvec_push(thresholds, (right < n)
+      if (tk_dvec_push(thresholds, (right < n)
         ? value_vec->a[left] * (1.0 - frac) + value_vec->a[right] * frac
-        : value_vec->a[left]);
+        : value_vec->a[left]) != 0) {
+        tk_dvec_destroy(thresholds);
+        tk_lua_verror(L, 2, "add_thresholds", "allocation failed");
+        return;
+      }
     }
   }
   tk_dvec_shrink(thresholds);
@@ -778,7 +798,8 @@ static inline int tk_booleanizer_encode_lua (lua_State *L)
       out = tk_ivec_create(L, 0, 0, 0);
     else
       lua_pushvalue(L, 5);
-    tk_booleanizer_encode_dvec(L, B, D, n_dims, id_dim0, out);
+    if (tk_booleanizer_encode_dvec(L, B, D, n_dims, id_dim0, out) != 0)
+      return 0;
     return 1;
   } else {
     uint64_t id_sample = tk_lua_checkunsigned(L, 2, "id_sample");
@@ -793,20 +814,23 @@ static inline int tk_booleanizer_encode_lua (lua_State *L)
     else
       lua_pushvalue(L, 4);
     int t = lua_type(L, 3);
+    int rc = 0;
     switch (t) {
       case LUA_TSTRING:
-        tk_booleanizer_encode_string(L, B, id_sample, id_feature, luaL_checkstring(L, 3), out);
+        rc = tk_booleanizer_encode_string(L, B, id_sample, id_feature, luaL_checkstring(L, 3), out);
         break;
       case LUA_TNUMBER:
-        tk_booleanizer_encode_double(L, B, id_sample, id_feature, luaL_checknumber(L, 3), out);
+        rc = tk_booleanizer_encode_double(L, B, id_sample, id_feature, luaL_checknumber(L, 3), out);
         break;
       case LUA_TBOOLEAN:
-        tk_booleanizer_encode_integer(L, B, id_sample, id_feature, lua_toboolean(L, 3), out);
+        rc = tk_booleanizer_encode_integer(L, B, id_sample, id_feature, lua_toboolean(L, 3), out);
         break;
       default:
         tk_lua_verror(L, 2, "encode", "unexpected type passed to encode", lua_typename(L, t));
         break;
     }
+    if (rc != 0)
+      return 0;
     return 1;
   }
 }

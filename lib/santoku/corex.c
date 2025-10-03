@@ -927,8 +927,12 @@ static inline int tk_corex_compress (lua_State *L)
     for (unsigned int s = 0; s < n_samples; s ++) {
       double py0 = C->pyx[h * n_samples + s];
       // TODO: should this be reversed?
-      if (py0 < 0.5)
-        tk_ivec_push(set_bits, s * C->n_hidden + h);
+      if (py0 < 0.5) {
+        if (tk_ivec_push(set_bits, s * C->n_hidden + h) != 0) {
+          tk_lua_verror(L, 2, "encode", "allocation failed");
+          return 0;
+        }
+      }
     }
   }
   tk_ivec_shrink(set_bits);

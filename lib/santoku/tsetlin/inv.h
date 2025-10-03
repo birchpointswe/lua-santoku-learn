@@ -158,11 +158,20 @@ static inline void tk_inv_shrink (
     int64_t old_sid = kh_key(I->sid_uid, k);
     int64_t start = I->node_offsets->a[old_sid];
     int64_t end = I->node_offsets->a[old_sid + 1];
-    tk_ivec_push(new_node_offsets, (int64_t) new_node_bits->n);
+    if (tk_ivec_push(new_node_offsets, (int64_t) new_node_bits->n) != 0) {
+      tk_lua_verror(L, 2, "compact", "allocation failed");
+      return;
+    }
     for (int64_t i = start; i < end; i ++)
-      tk_ivec_push(new_node_bits, I->node_bits->a[i]);
+      if (tk_ivec_push(new_node_bits, I->node_bits->a[i]) != 0) {
+        tk_lua_verror(L, 2, "compact", "allocation failed");
+        return;
+      }
   }
-  tk_ivec_push(new_node_offsets, (int64_t) new_node_bits->n);
+  if (tk_ivec_push(new_node_offsets, (int64_t) new_node_bits->n) != 0) {
+    tk_lua_verror(L, 2, "compact", "allocation failed");
+    return;
+  }
   tk_lua_del_ephemeron(L, TK_INV_EPH, Ii, I->node_offsets);
   tk_lua_del_ephemeron(L, TK_INV_EPH, Ii, I->node_bits);
   tk_ivec_destroy(I->node_offsets);
@@ -391,7 +400,10 @@ static inline void tk_inv_add (
   for (size_t s = 0; s < nsamples; s ++) {
     int64_t uid = ids->a[s];
     int64_t sid = tk_inv_uid_sid(I, uid, true);
-    tk_ivec_push(I->node_offsets, (int64_t) I->node_bits->n);
+    if (tk_ivec_push(I->node_offsets, (int64_t) I->node_bits->n) != 0) {
+      tk_lua_verror(L, 2, "add", "allocation failed during indexing");
+      return;
+    }
     while (i < nb) {
       int64_t b = node_bits->a[i];
       if (b < 0) {
@@ -411,12 +423,21 @@ static inline void tk_inv_add (
           break;
         }
       if (!found)
-        tk_ivec_push(post, sid);
-      tk_ivec_push(I->node_bits, fid);
+        if (tk_ivec_push(post, sid) != 0) {
+          tk_lua_verror(L, 2, "add", "allocation failed during indexing");
+          return;
+        }
+      if (tk_ivec_push(I->node_bits, fid) != 0) {
+        tk_lua_verror(L, 2, "add", "allocation failed during indexing");
+        return;
+      }
       i ++;
     }
   }
-  tk_ivec_push(I->node_offsets, (int64_t) I->node_bits->n);
+  if (tk_ivec_push(I->node_offsets, (int64_t) I->node_bits->n) != 0) {
+    tk_lua_verror(L, 2, "add", "allocation failed during indexing");
+    return;
+  }
 }
 
 static inline void tk_inv_remove (

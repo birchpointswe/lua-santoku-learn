@@ -145,7 +145,7 @@ static inline int tb_tokenizer_new_token (
   return id;
 }
 
-static inline void tb_tokenizer_append_cgrams (
+static inline int tb_tokenizer_append_cgrams (
   lua_State *L,
   int Ti,
   tb_tokenizer_t *tokenizer,
@@ -154,7 +154,7 @@ static inline void tb_tokenizer_append_cgrams (
   int toklen = (int) strlen(tok);
   int cmin = tokenizer->cgrams_min;
   int cmax = tokenizer->cgrams_max;
-  if (cmax == 0 || toklen < cmin) return;
+  if (cmax == 0 || toklen < cmin) return 0;
   if (cmax > toklen) cmax = toklen;
   for (int k = cmin; k <= cmax; k ++) {
     for (int s = 0; s + k <= toklen; s ++) {
@@ -164,9 +164,11 @@ static inline void tb_tokenizer_append_cgrams (
       char *bufp = buf;
       int id = tb_tokenizer_new_token(L, Ti, tokenizer, &bufp, (khint_t) k + 1);
       if (id != -1)
-        tk_ivec_push(tokenizer->tokens, id);
+        if (tk_ivec_push(tokenizer->tokens, id) != 0)
+          return -1;
     }
   }
+  return 0;
 }
 
 static inline bool tb_tokenizer_is_delim_char (char c)
@@ -188,13 +190,20 @@ static inline tk_cvec_t *tb_tokenizer_normalize (char *in, size_t len, int max_r
 {
   tk_cvec_t *out = tk_cvec_create(0, len, 0, 0);
   out->n = 0;
+
+  // Ensure capacity upfront - worst case: each char becomes "#emoji-positive " (17 chars)
+  if (tk_cvec_ensure(out, len * 20) != 0) {
+    tk_cvec_destroy(out);
+    return NULL;
+  }
+
   char last = 0;
   int run = 0;
 
   for (size_t i = 0; i < len;) {
     if (last && ((isalpha((unsigned char)last) && isdigit((unsigned char)in[i])) ||
       (isdigit((unsigned char)last) && isalpha((unsigned char)in[i])))) {
-      tk_cvec_push(out, ' ');
+      out->a[out->n++] = ' ';
       last = ' ';
     }
 
@@ -207,75 +216,75 @@ static inline tk_cvec_t *tb_tokenizer_normalize (char *in, size_t len, int max_r
     else { last = in[i]; }
 
     if (in[i] == '#') {
-      tk_cvec_push(out, ' ');
-      tk_cvec_push_str(out, "#hash");
-      tk_cvec_push(out, ' ');
+      out->a[out->n++] = ' ';
+      memcpy(out->a + out->n, "#hash", 5); out->n += 5;
+      out->a[out->n++] = ' ';
       i ++;
       last = ' ';
       run = 0;
       continue;
     } else if (tb_have_bytes(in, i, 2) && in[i] == ':' && in[i + 1] == ')') {
-      tk_cvec_push(out, ' ');
-      tk_cvec_push_str(out, "#smiley-positive");
-      tk_cvec_push(out, ' ');
+      out->a[out->n++] = ' ';
+      memcpy(out->a + out->n, "#smiley-positive", 16); out->n += 16;
+      out->a[out->n++] = ' ';
       i += 2;
       last = ' ';
       run = 0;
       continue;
     } else if (tb_have_bytes(in, i, 2) && in[i] == ':' && tolower((unsigned char)in[i + 1]) == 'd') {
-      tk_cvec_push(out, ' ');
-      tk_cvec_push_str(out, "#smiley-positive");
-      tk_cvec_push(out, ' ');
+      out->a[out->n++] = ' ';
+      memcpy(out->a + out->n, "#smiley-positive", 16); out->n += 16;
+      out->a[out->n++] = ' ';
       i += 2;
       last = ' ';
       run = 0;
       continue;
     } else if (tb_have_bytes(in, i, 2) && in[i] == ':' && in[i + 1] == '(') {
-      tk_cvec_push(out, ' ');
-      tk_cvec_push_str(out, "#smiley-negative");
-      tk_cvec_push(out, ' ');
+      out->a[out->n++] = ' ';
+      memcpy(out->a + out->n, "#smiley-negative", 16); out->n += 16;
+      out->a[out->n++] = ' ';
       i += 2;
       last = ' ';
       run = 0;
       continue;
     } else if (tb_have_bytes(in, i, 2) && in[i] == ';' && in[i + 1] == ')') {
-      tk_cvec_push(out, ' ');
-      tk_cvec_push_str(out, "#smiley-wink");
-      tk_cvec_push(out, ' ');
+      out->a[out->n++] = ' ';
+      memcpy(out->a + out->n, "#smiley-wink", 12); out->n += 12;
+      out->a[out->n++] = ' ';
       i += 2;
       last = ' ';
       run = 0;
       continue;
     } else if (in[i] == '!') {
-      tk_cvec_push(out, ' ');
-      tk_cvec_push_str(out, "#exclamation");
-      tk_cvec_push(out, ' ');
+      out->a[out->n++] = ' ';
+      memcpy(out->a + out->n, "#exclamation", 12); out->n += 12;
+      out->a[out->n++] = ' ';
       while (in[i] == '!') i ++;
       last = ' ';
       run = 0;
       continue;
     } else if (in[i] == '?') {
-      tk_cvec_push(out, ' ');
-      tk_cvec_push_str(out, "#question");
-      tk_cvec_push(out, ' ');
+      out->a[out->n++] = ' ';
+      memcpy(out->a + out->n, "#question", 9); out->n += 9;
+      out->a[out->n++] = ' ';
       while (in[i] == '?') i ++;
       last = ' ';
       run = 0;
       continue;
     } else if (tb_have_bytes(in, i, 3) && in[i] == '.' && in[i + 1] == '.' && in[i + 2] == '.') {
-      tk_cvec_push(out, ' ');
-      tk_cvec_push_str(out, "#ellipsis");
-      tk_cvec_push(out, ' ');
+      out->a[out->n++] = ' ';
+      memcpy(out->a + out->n, "#ellipsis", 9); out->n += 9;
+      out->a[out->n++] = ' ';
       i += 3;
       last = ' ';
       run = 0;
       continue;
     } else if (tb_have_bytes(in, i, 2) && in[i] == '\'' && in[i + 1] == 's' &&
       (!tb_have_bytes(in, i, 3) || in[i + 2] == '\0' || tb_tokenizer_is_delim_char(in[i + 2]))) {
-      tk_cvec_push(out, ' ');
-      tk_cvec_push(out, '\'');
-      tk_cvec_push(out, 's');
-      tk_cvec_push(out, ' ');
+      out->a[out->n++] = ' ';
+      out->a[out->n++] = '\'';
+      out->a[out->n++] = 's';
+      out->a[out->n++] = ' ';
       i += 2;
       last = ' ';
       run = 0;
@@ -285,13 +294,13 @@ static inline tk_cvec_t *tb_tokenizer_normalize (char *in, size_t len, int max_r
     unsigned char c = (unsigned char) in[i];
 
     if (c < 0x80) {
-      tk_cvec_push(out, tolower(c));
+      out->a[out->n++] = tolower(c);
       i ++;
       continue;
     }
 
     if (tb_have_bytes(in, i, 2) && c == 0xC2 && (unsigned char) in[i + 1] == 0xA0) {
-      tk_cvec_push(out, ' ');
+      out->a[out->n++] = ' ';
       i += 2;
       last = ' ';
       run = 0;
@@ -304,23 +313,23 @@ static inline tk_cvec_t *tb_tokenizer_normalize (char *in, size_t len, int max_r
         case 0x93: // en dash
         case 0x94: // em dash
         case 0x90: // hyphen
-          tk_cvec_push(out, '-');
+          out->a[out->n++] = '-';
           last = '-';
           break;
         case 0x98: // left single quote
         case 0x99: // right single quote
-          tk_cvec_push(out, '\'');     // don't drop; avoid "dont" vs "don't"
+          out->a[out->n++] = '\'';     // don't drop; avoid "dont" vs "don't"
           last = '\'';
           break;
         case 0x9C: // left double quote
         case 0x9D: // right double quote
-          tk_cvec_push(out, ' '); // prevent token concatenation
+          out->a[out->n++] = ' '; // prevent token concatenation
           last = ' ';
           break;
         case 0xA6: // ellipsis
-          tk_cvec_push(out, ' ');
-          tk_cvec_push_str(out, "#ellipsis");
-          tk_cvec_push(out, ' ');
+          out->a[out->n++] = ' ';
+          memcpy(out->a + out->n, "#ellipsis", 9); out->n += 9;
+          out->a[out->n++] = ' ';
           last = ' ';
           break;
         default:
@@ -336,9 +345,9 @@ static inline tk_cvec_t *tb_tokenizer_normalize (char *in, size_t len, int max_r
       (unsigned char) c == '.' &&
       (unsigned char) in[i + 1] == '.' &&
       (unsigned char) in[i + 2] == '.') {
-      tk_cvec_push(out, ' ');
-      tk_cvec_push_str(out, "#ellipsis");
-      tk_cvec_push(out, ' ');
+      out->a[out->n++] = ' ';
+      memcpy(out->a + out->n, "#ellipsis", 9); out->n += 9;
+      out->a[out->n++] = ' ';
       i += 3;
       last = ' ';
       run = 0;
@@ -346,9 +355,9 @@ static inline tk_cvec_t *tb_tokenizer_normalize (char *in, size_t len, int max_r
     } else if (tb_have_bytes(in, i, 2) &&
       (unsigned char) c == '.' &&
       (unsigned char) in[i + 1] == '.') {
-      tk_cvec_push(out, ' ');
-      tk_cvec_push_str(out, "#ellipsis");
-      tk_cvec_push(out, ' ');
+      out->a[out->n++] = ' ';
+      memcpy(out->a + out->n, "#ellipsis", 9); out->n += 9;
+      out->a[out->n++] = ' ';
       i += 2;
       last = ' ';
       run = 0;
@@ -361,17 +370,17 @@ static inline tk_cvec_t *tb_tokenizer_normalize (char *in, size_t len, int max_r
       (unsigned char) in[i + 2] == 0x98) {
       unsigned char b4 = (unsigned char) in[i + 3];
       if ((b4 >= 0x80 && b4 <= 0x8B) || (b4 >= 0x8F && b4 <= 0x90) || (b4 == 0x99)) {
-        tk_cvec_push(out, ' ');
-        tk_cvec_push_str(out, "#emoji-positive");
-        tk_cvec_push(out, ' ');
+        out->a[out->n++] = ' ';
+        memcpy(out->a + out->n, "#emoji-positive", 15); out->n += 15;
+        out->a[out->n++] = ' ';
       } else if ((b4 >= 0x9E && b4 <= 0xA2) || (b4 >= 0xA3 && b4 <= 0xA6)) {
-        tk_cvec_push(out, ' ');
-        tk_cvec_push_str(out, "#emoji-negative");
-        tk_cvec_push(out, ' ');
+        out->a[out->n++] = ' ';
+        memcpy(out->a + out->n, "#emoji-negative", 15); out->n += 15;
+        out->a[out->n++] = ' ';
       } else {
-        tk_cvec_push(out, ' ');
-        tk_cvec_push_str(out, "#emoji-other");
-        tk_cvec_push(out, ' ');
+        out->a[out->n++] = ' ';
+        memcpy(out->a + out->n, "#emoji-other", 12); out->n += 12;
+        out->a[out->n++] = ' ';
       }
       i += 4;
       last = ' ';
@@ -385,13 +394,13 @@ static inline tk_cvec_t *tb_tokenizer_normalize (char *in, size_t len, int max_r
       (unsigned char) in[i + 2] == 0x91 &&
       ((unsigned char) in[i + 3] == 0x8D || (unsigned char) in[i + 3] == 0x8E)) {
       if ((unsigned char) in[i + 3] == 0x8D) {
-        tk_cvec_push(out, ' ');
-        tk_cvec_push_str(out, "#emoji-positive");
-        tk_cvec_push(out, ' ');
+        out->a[out->n++] = ' ';
+        memcpy(out->a + out->n, "#emoji-positive", 15); out->n += 15;
+        out->a[out->n++] = ' ';
       } else {
-        tk_cvec_push(out, ' ');
-        tk_cvec_push_str(out, "#emoji-negative");
-        tk_cvec_push(out, ' ');
+        out->a[out->n++] = ' ';
+        memcpy(out->a + out->n, "#emoji-negative", 15); out->n += 15;
+        out->a[out->n++] = ' ';
       }
       i += 4;
       last = ' ';
@@ -403,9 +412,9 @@ static inline tk_cvec_t *tb_tokenizer_normalize (char *in, size_t len, int max_r
       (unsigned char)c == 0xE2 &&
       (unsigned char) in[i + 1] == 0x9D &&
       (unsigned char) in[i + 2] == 0xA4) {
-      tk_cvec_push(out, ' ');
-      tk_cvec_push_str(out, "#emoji-positive");
-      tk_cvec_push(out, ' ');
+      out->a[out->n++] = ' ';
+      memcpy(out->a + out->n, "#emoji-positive", 15); out->n += 15;
+      out->a[out->n++] = ' ';
       if (tb_have_bytes(in, i, 6) &&
         (unsigned char)in[i + 3] == 0xEF &&
         (unsigned char)in[i + 4] == 0xB8 &&
@@ -427,7 +436,7 @@ static inline tk_cvec_t *tb_tokenizer_normalize (char *in, size_t len, int max_r
     run = 0;
   }
 
-  tk_cvec_push(out, '\0');
+  out->a[out->n++] = '\0';
   return out;
 }
 
@@ -559,7 +568,7 @@ static inline bool tb_tokenizer_is_negation_boundary_token (char *tok)
     || tb_tokenizer_is_emoji_token(tok));
 }
 
-static void tb_tokenizer_append_skipgram (
+static int tb_tokenizer_append_skipgram (
   lua_State *L,
   int Ti,
   tb_tokenizer_t *tok,
@@ -575,16 +584,20 @@ static void tb_tokenizer_append_skipgram (
     for (int i = 0; i < rfirst; i ++) {
       int win_idx = skipgram[i];
       char *s = tb_tokenizer_id_str(tok, tok->window->a[win_idx]);
-      tk_cvec_push_str(tok->tmp_skipgram, s);
+      if (tk_cvec_push_str(tok->tmp_skipgram, s) != 0)
+        return -1;
       if (i + 1 < rfirst)
-        tk_cvec_push(tok->tmp_skipgram, ' ');
+        if (tk_cvec_push(tok->tmp_skipgram, ' ') != 0)
+          return -1;
     }
-    tk_cvec_push(tok->tmp_skipgram, '\0');
+    if (tk_cvec_push(tok->tmp_skipgram, '\0') != 0)
+      return -1;
     char *bufp = tok->tmp_skipgram->a;
     int nid = tb_tokenizer_new_token(L, Ti, tok, &bufp, tok->tmp_skipgram->n);
     if (nid != -1)
-      tk_ivec_push(tok->tokens, nid);
-    return;
+      if (tk_ivec_push(tok->tokens, nid) != 0)
+        return -1;
+    return 0;
   }
   int picked = (int) rfirst - (int) to_pick;
   int prev_idx = (picked == 0 ? -1 : skipgram[picked - 1]);
@@ -592,11 +605,13 @@ static void tb_tokenizer_append_skipgram (
     if (prev_idx >= 0 && (i - prev_idx - 1) > max_skips)
       continue;
     skipgram[picked] = i;
-    tb_tokenizer_append_skipgram(L, Ti, tok, skipgram, to_pick - 1, max_skips, rfirst, i + 1, winlen);
+    if (tb_tokenizer_append_skipgram(L, Ti, tok, skipgram, to_pick - 1, max_skips, rfirst, i + 1, winlen) != 0)
+      return -1;
   }
+  return 0;
 }
 
-static inline void tb_tokenizer_append_token (
+static inline int tb_tokenizer_append_token (
   lua_State *L,
   int Ti,
   tb_tokenizer_t *tokenizer,
@@ -604,52 +619,61 @@ static inline void tb_tokenizer_append_token (
   int *negation
 ) {
   if (word == NULL)
-    return;
+    return 0;
   if (tb_tokenizer_is_negation_boundary_token(word))
     *negation = 0;
   bool is_negated = *negation > 0;
   if (*negation)
     (*negation) --;
   if (!word || word[0] == '\0')
-    return;
+    return 0;
   tokenizer->tmp_append->n = 0;
   if (tb_tokenizer_is_number_token(word)) {
     if (is_negated) {
-      tk_cvec_push_str(tokenizer->tmp_append, "-#number");
+      if (tk_cvec_push_str(tokenizer->tmp_append, "-#number") != 0)
+        return -1;
     } else {
-      tk_cvec_push_str(tokenizer->tmp_append, "#number");
+      if (tk_cvec_push_str(tokenizer->tmp_append, "#number") != 0)
+        return -1;
     }
   } else if (is_negated && !tb_tokenizer_is_negation_token(word) && isalnum(word[0])) {
-    tk_cvec_push(tokenizer->tmp_append, '-');
-    tk_cvec_push_str(tokenizer->tmp_append, word);
+    if (tk_cvec_push(tokenizer->tmp_append, '-') != 0)
+      return -1;
+    if (tk_cvec_push_str(tokenizer->tmp_append, word) != 0)
+      return -1;
   } else {
-    tk_cvec_push_str(tokenizer->tmp_append, word);
+    if (tk_cvec_push_str(tokenizer->tmp_append, word) != 0)
+      return -1;
   }
   if (tokenizer->ngrams == 0) {
     if (tb_tokenizer_is_negation_token(word)) {
       *negation = tokenizer->negations;
-      return;
+      return 0;
     }
     if (word[0] != '#' && strcmp(word, "'s") != 0)
-      tb_tokenizer_append_cgrams(L, Ti, tokenizer, word);
-    return;
+      if (tb_tokenizer_append_cgrams(L, Ti, tokenizer, word) != 0)
+        return -1;
+    return 0;
   }
 
   // Normal mode: process unigrams and n-grams
-  tk_cvec_push(tokenizer->tmp_append, '\0');
+  if (tk_cvec_push(tokenizer->tmp_append, '\0') != 0)
+    return -1;
   char *bufp0 = tokenizer->tmp_append->a;
   int id0 = tb_tokenizer_new_token(L, Ti, tokenizer, &bufp0, tokenizer->tmp_append->n);
-  if (id0 == -1) return;
-  tk_ivec_push(tokenizer->tokens, id0);
+  if (id0 == -1) return 0;  // Token not in vocab (after restrict) - skip, not an error
+  if (tk_ivec_push(tokenizer->tokens, id0) != 0)
+    return -1;
 
   if (tb_tokenizer_is_negation_token(word)) {
     *negation = tokenizer->negations;
-    return;
+    return 0;
   }
 
   // Generate char-grams
   if (word[0] != '#' && strcmp(word, "'s") != 0)
-    tb_tokenizer_append_cgrams(L, Ti, tokenizer, word);
+    if (tb_tokenizer_append_cgrams(L, Ti, tokenizer, word) != 0)
+      return -1;
 
   if ((int) tokenizer->window->n == tokenizer->window_size) {
     size_t n = tokenizer->window->n;
@@ -657,17 +681,20 @@ static inline void tb_tokenizer_append_token (
       memmove(tokenizer->window->a, tokenizer->window->a + 1, sizeof *tokenizer->window->a * (n - 1));
     tokenizer->window->n = (n > 0 ? n - 1 : 0);
   }
-  tk_ivec_push(tokenizer->window, id0);
+  if (tk_ivec_push(tokenizer->window, id0) != 0)
+    return -1;
   int winlen = tokenizer->window->n;
 
   if (tokenizer->ngrams > 0) {
     int skipgram[tokenizer->ngrams];
     for (int r = 2; r <= tokenizer->ngrams; r ++)
-      tb_tokenizer_append_skipgram(L, Ti, tokenizer, skipgram, r, tokenizer->skips, r, 0, winlen);
+      if (tb_tokenizer_append_skipgram(L, Ti, tokenizer, skipgram, r, tokenizer->skips, r, 0, winlen) != 0)
+        return -1;
   }
+  return 0;
 }
 
-static inline void tb_tokenizer_populate_tokens (
+static inline int tb_tokenizer_populate_tokens (
   lua_State *L,
   int Ti,
   tb_tokenizer_t *tokenizer,
@@ -703,14 +730,16 @@ static inline void tb_tokenizer_populate_tokens (
     if (tb_tokenizer_is_negation_boundary_char(c))
       negation = 0;
     if (e < len && !tb_tokenizer_is_delim_char(c)) {
-      tk_cvec_push(tokenizer->tmp_token, c);
+      if (tk_cvec_push(tokenizer->tmp_token, c) != 0)
+        return -1;
       if ((int) tokenizer->tmp_token->n > tokenizer->max_len
         && tokenizer->tmp_token->a[0] != '#') {
         tokenizer->tmp_token->n = 0;
         skipping = true;
       }
     } else if ((int) tokenizer->tmp_token->n >= tokenizer->min_len) {
-      tk_cvec_push(tokenizer->tmp_token, '\0');
+      if (tk_cvec_push(tokenizer->tmp_token, '\0') != 0)
+        return -1;
       char *tok = tokenizer->tmp_token->a;
       bool was_contraction = false;
       char canon_buf[tokenizer->max_len + 1];
@@ -718,20 +747,25 @@ static inline void tb_tokenizer_populate_tokens (
       const char *key = canon_buf;
       for (size_t i = 0; i < n_contractions; i ++) {
         if (strcmp(key, contractions[i].from) == 0) {
-          tb_tokenizer_append_token(L, Ti, tokenizer, contractions[i].to1, &negation);
-          tb_tokenizer_append_token(L, Ti, tokenizer, contractions[i].to2, &negation);
-          tb_tokenizer_append_token(L, Ti, tokenizer, contractions[i].to3, &negation);
+          if (tb_tokenizer_append_token(L, Ti, tokenizer, contractions[i].to1, &negation) != 0)
+            return -1;
+          if (tb_tokenizer_append_token(L, Ti, tokenizer, contractions[i].to2, &negation) != 0)
+            return -1;
+          if (tb_tokenizer_append_token(L, Ti, tokenizer, contractions[i].to3, &negation) != 0)
+            return -1;
           was_contraction = true;
           break;
         }
       }
       if (!was_contraction)
-        tb_tokenizer_append_token(L, Ti, tokenizer, tok, &negation);
+        if (tb_tokenizer_append_token(L, Ti, tokenizer, tok, &negation) != 0)
+          return -1;
       tokenizer->tmp_token->n = 0;
     } else {
       tokenizer->tmp_token->n = 0;
     }
   }
+  return 0;
 }
 
 static inline void _tb_tokenizer_parse (lua_State *L, int Ti, tb_tokenizer_t *tokenizer)
@@ -739,8 +773,12 @@ static inline void _tb_tokenizer_parse (lua_State *L, int Ti, tb_tokenizer_t *to
   size_t len;
   char *str = (char *) luaL_checklstring(L, 1, &len);
   tk_cvec_t *doc = tb_tokenizer_normalize(str, len, tokenizer->max_run);
-  tb_tokenizer_populate_tokens(L, Ti, tokenizer, doc->a, doc->n);
+  if (doc == NULL)
+    tk_lua_verror(L, 2, "parse", "allocation failed during normalization");
+  int rc = tb_tokenizer_populate_tokens(L, Ti, tokenizer, doc->a, doc->n);
   tk_cvec_destroy(doc);
+  if (rc != 0)
+    tk_lua_verror(L, 2, "parse", "allocation failed during tokenization");
   lua_Integer n = 1;
   lua_newtable(L);
   for (khint_t i = 0; i < tokenizer->tokens->n; i ++) {
@@ -803,7 +841,17 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
     size_t doclen;
     char *odoc = (char *) luaL_checklstring(L, 2, &doclen); // tkz t out
     tk_cvec_t *ndoc = tb_tokenizer_normalize(odoc, doclen, tokenizer->max_run); // tkz t out
-    tb_tokenizer_populate_tokens(L, 1, tokenizer, ndoc->a, ndoc->n);
+    if (ndoc == NULL) {
+      tk_iuset_destroy(seen);
+      tk_lua_verror(L, 2, "tokenize", "allocation failed during normalization");
+      return 0;
+    }
+    if (tb_tokenizer_populate_tokens(L, 1, tokenizer, ndoc->a, ndoc->n) != 0) {
+      tk_cvec_destroy(ndoc);
+      tk_iuset_destroy(seen);
+      tk_lua_verror(L, 2, "tokenize", "allocation failed during tokenization");
+      return 0;
+    }
     tk_cvec_destroy(ndoc);
 
     for (khint_t j = 0; j < tokenizer->tokens->n; j ++) {
@@ -813,7 +861,11 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
       khi = tk_iuset_put(seen, id, &kha);
       if (!kha)
         continue;
-      tk_ivec_push(out, (int64_t) id);
+      if (tk_ivec_push(out, (int64_t) id) != 0) {
+        tk_iuset_destroy(seen);
+        tk_lua_verror(L, 2, "tokenize", "allocation failed");
+        return 0;
+      }
     }
 
     // tkz t out
@@ -826,7 +878,19 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
       size_t doclen;
       char *odoc = (char *) luaL_checklstring(L, -1, &doclen);
       tk_cvec_t *ndoc = tb_tokenizer_normalize(odoc, doclen, tokenizer->max_run); // t out
-      tb_tokenizer_populate_tokens(L, 1, tokenizer, ndoc->a, ndoc->n);
+      if (ndoc == NULL) {
+        lua_pop(L, 1);
+        tk_iuset_destroy(seen);
+        tk_lua_verror(L, 2, "tokenize", "allocation failed during normalization");
+        return 0;
+      }
+      if (tb_tokenizer_populate_tokens(L, 1, tokenizer, ndoc->a, ndoc->n) != 0) {
+        tk_cvec_destroy(ndoc);
+        lua_pop(L, 1);
+        tk_iuset_destroy(seen);
+        tk_lua_verror(L, 2, "tokenize", "allocation failed during tokenization");
+        return 0;
+      }
       tk_cvec_destroy(ndoc);
       tk_iuset_clear(seen);
       for (khint_t j = 0; j < tokenizer->tokens->n; j ++) {
@@ -836,7 +900,12 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
         khi = tk_iuset_put(seen, id, &kha);
         if (!kha)
           continue;
-        tk_ivec_push(out, (int64_t) id + ((int64_t) i - 1) * (int64_t) n_features);
+        if (tk_ivec_push(out, (int64_t) id + ((int64_t) i - 1) * (int64_t) n_features) != 0) {
+          lua_pop(L, 1);
+          tk_iuset_destroy(seen);
+          tk_lua_verror(L, 2, "tokenize", "allocation failed");
+          return 0;
+        }
       }
       lua_pop(L, 1); // tkz t out
     }
@@ -950,7 +1019,12 @@ static inline int tb_tokenizer_train (lua_State *L)
     lua_gettable(L, -2); // corpus v
     size_t len;
     tk_cvec_t *doc = tb_tokenizer_normalize((char *) luaL_checklstring(L, -1, &len), len, tokenizer->max_run);
-    tb_tokenizer_populate_tokens(L, 1, tokenizer, doc->a, doc->n);
+    if (doc == NULL)
+      return tk_lua_verror(L, 2, "train", "allocation failed during normalization");
+    if (tb_tokenizer_populate_tokens(L, 1, tokenizer, doc->a, doc->n) != 0) {
+      tk_cvec_destroy(doc);
+      return tk_lua_verror(L, 2, "train", "allocation failed during tokenization");
+    }
     tk_cvec_destroy(doc);
     lua_pop(L, 1); // corpus
   }
