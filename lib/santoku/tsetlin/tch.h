@@ -172,19 +172,27 @@ static inline void tk_tch_refine (
   }
   tk_threads_signal(pool, TK_TCH_CONVERT_TO_BINARY, 0);
 
+  // Calculate total_steps before cleanup
+  uint64_t total_steps = 0;
   if (i_each >= 0) {
-    uint64_t total_steps = 0;
     for (unsigned int i = 0; i < n_threads; i++) {
       total_steps += threads[i].steps;
     }
+  }
+
+  // Cleanup malloc'd buffers before any Lua API calls that can throw
+  free(bitvecs);
+  free(threads);
+
+  // Now safe to call Lua callback (pool is Lua-managed and will be GC'd on throw)
+  if (i_each >= 0) {
     lua_pushvalue(L, i_each);
     lua_pushinteger(L, (int64_t) total_steps);
     lua_call(L, 1, 0);
   }
 
-  free(bitvecs);
-  free(threads);
-  tk_threads_destroy(pool);
+  // Clean up the thread pool
+  lua_pop(L, 1);
 }
 
 #endif

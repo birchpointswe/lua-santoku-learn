@@ -101,6 +101,7 @@ typedef struct tk_tsetlin_s {
   unsigned int *results;
   size_t encodings_len;
   tk_bits_t *encodings;
+  tk_tsetlin_thread_t *threads;
   tk_threadpool_t *pool;
   bool initialized_threads;
 } tk_tsetlin_t;
@@ -390,19 +391,25 @@ tk_tsetlin_t *tk_tsetlin_peek (lua_State *L, int i)
   return (tk_tsetlin_t *) luaL_checkudata(L, i, TK_TSETLIN_MT);
 }
 
-static inline tk_tsetlin_t *tk_tsetlin_alloc (lua_State *L)
+static inline int tk_tsetlin_train (lua_State *);
+static inline int tk_tsetlin_predict (lua_State *);
+static inline int tk_tsetlin_destroy (lua_State *L);
+static inline int tk_tsetlin_persist (lua_State *);
+static inline int tk_tsetlin_type (lua_State *);
+
+static luaL_Reg tk_tsetlin_mt_fns[] =
 {
-  tk_tsetlin_t *tm = lua_newuserdata(L, sizeof(tk_tsetlin_t)); // ud
-  if (!tm) luaL_error(L, "error in malloc during creation");
-  memset(tm, 0, sizeof(tk_tsetlin_t));
-  luaL_getmetatable(L, TK_TSETLIN_MT); // ud mt
-  lua_setmetatable(L, -2); // ud
-  return tm;
-}
+  { "train", tk_tsetlin_train },
+  { "predict", tk_tsetlin_predict },
+  { "destroy", tk_tsetlin_destroy },
+  { "persist", tk_tsetlin_persist },
+  { "type", tk_tsetlin_type },
+  { NULL, NULL }
+};
 
 static inline tk_tsetlin_t *tk_tsetlin_alloc_classifier (lua_State *L, bool has_state)
 {
-  tk_tsetlin_t *tm = tk_tsetlin_alloc(L);
+  tk_tsetlin_t *tm = tk_lua_newuserdata(L, tk_tsetlin_t, TK_TSETLIN_MT, tk_tsetlin_mt_fns, tk_tsetlin_destroy);
   tm->type = TM_CLASSIFIER;
   tm->has_state = has_state;
   return tm;
@@ -410,7 +417,7 @@ static inline tk_tsetlin_t *tk_tsetlin_alloc_classifier (lua_State *L, bool has_
 
 static inline tk_tsetlin_t *tk_tsetlin_alloc_encoder (lua_State *L, bool has_state)
 {
-  tk_tsetlin_t *tm = tk_tsetlin_alloc(L);
+  tk_tsetlin_t *tm = tk_lua_newuserdata(L, tk_tsetlin_t, TK_TSETLIN_MT, tk_tsetlin_mt_fns, tk_tsetlin_destroy);
   tm->type = TM_ENCODER;
   tm->has_state = has_state;
   return tm;
@@ -430,7 +437,7 @@ static void tk_classifier_predict_reduce_thread (
     for (unsigned int i = 0; i < tm->classes; i ++)
       sums[i] = 0;
     for (unsigned int t = 0; t < tm->pool->n_threads; t ++) {
-      tk_tsetlin_thread_t *data = (tk_tsetlin_thread_t *) tm->pool->threads[t].data;
+      tk_tsetlin_thread_t *data = tm->threads + t;
       for (unsigned int chunk = data->cfirst; chunk <= data->clast; chunk ++) {
         unsigned int class = chunk / clause_chunks;
         sums[class] += tm_state_scores(tm, t, chunk, s);
@@ -593,7 +600,7 @@ static void tk_encoder_predict_reduce_thread (
     for (unsigned int i = 0; i < classes; i ++)
       votes[i] = 0;
     for (unsigned int t = 0; t < tm->pool->n_threads; t ++) {
-      tk_tsetlin_thread_t *data = (tk_tsetlin_thread_t *) tm->pool->threads[t].data;
+      tk_tsetlin_thread_t *data = tm->threads + t;
       for (unsigned int chunk = data->cfirst; chunk <= data->clast; chunk ++) {
         unsigned int class = chunk / clause_chunks;
         votes[class] += tm_state_scores(tm, t, chunk, s);
@@ -741,7 +748,7 @@ static inline void tk_tsetlin_init_classifier (
   tm->specificity = specificity;
   if (!(tm->state && tm->actions))
     luaL_error(L, "error in malloc during creation of classifier");
-  tm->pool = tk_threads_create(L, n_threads, tk_tsetlin_worker);
+  tm->pool = tk_threads_create(0, n_threads, tk_tsetlin_worker);
   tk_tsetlin_setup_threads(L, tm, n_threads);
   tk_threads_signal(tm->pool, TM_SEED, 0);
 }
@@ -827,7 +834,7 @@ static inline void tk_tsetlin_shrink (tk_tsetlin_t *tm)
   free(tm->state); tm->state = NULL;
   if (tm->initialized_threads)
     for (unsigned int i = 0; i < tm->pool->n_threads; i ++) {
-      tk_tsetlin_thread_t *data = (tk_tsetlin_thread_t *) tm->pool->threads[i].data;
+      tk_tsetlin_thread_t *data = tm->threads + i;
       free(data->shuffle); data->shuffle = NULL;
       free(data->scores); data->scores = NULL;
     }
@@ -847,9 +854,10 @@ static inline void _tk_tsetlin_destroy (tk_tsetlin_t *tm)
     numa_free(tm->results, tm->results_len); tm->results = NULL; tm->results_len = 0;
     numa_free(tm->encodings, tm->encodings_len); tm->encodings = NULL; tm->encodings_len = 0;
   }
-  for (unsigned int i = 0; i < tm->pool->n_threads; i ++)
-    free(tm->pool->threads[i].data);
-  tk_threads_destroy(tm->pool);
+  free(tm->threads);
+  if (tm->pool)
+    tk_threads_destroy(tm->pool);
+  tm->pool = NULL;
 }
 
 static inline int tk_tsetlin_destroy (lua_State *L)
@@ -865,7 +873,7 @@ static inline void tk_tsetlin_setup_thread_samples (
   unsigned int n
 ) {
   for (unsigned int i = 0; i < tm->pool->n_threads; i ++) {
-    tk_tsetlin_thread_t *data = (tk_tsetlin_thread_t *) tm->pool->threads[i].data;
+    tk_tsetlin_thread_t *data = tm->threads + i;
     tk_thread_range(i, tm->pool->n_threads, n, &data->sfirst, &data->slast);
   }
 }
@@ -880,7 +888,7 @@ static inline int tk_tsetlin_predict_classifier (
   tm->results = tk_ensure_interleaved(L, &tm->results_len, tm->results, n * sizeof(unsigned int), false);
   for (unsigned int i = 0; i < tm->pool->n_threads; i ++) {
     unsigned int chunks = tm_state_clause_chunks(tm, i);
-    tk_tsetlin_thread_t *data = (tk_tsetlin_thread_t *) tm->pool->threads[i].data;
+    tk_tsetlin_thread_t *data = tm->threads + i;
     data->predict.n = n;
     data->predict.ps = ps;
     data->scores = tk_realloc(L, data->scores, chunks * n * sizeof(long int));
@@ -903,7 +911,7 @@ static inline int tk_tsetlin_predict_encoder (
   unsigned int n = tk_lua_checkunsigned(L, 3, "argument 2 is not an integer n_samples");
   tm->encodings = tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * tm->class_chunks * sizeof(tk_bits_t), false);
   for (unsigned int i = 0; i < tm->pool->n_threads; i ++) {
-    tk_tsetlin_thread_t *data = (tk_tsetlin_thread_t *) tm->pool->threads[i].data;
+    tk_tsetlin_thread_t *data = tm->threads + i;
     unsigned int chunks = tm_state_clause_chunks(tm, i);
     data->predict.n = n;
     data->predict.ps = ps;
@@ -947,7 +955,7 @@ static inline int tk_tsetlin_train_classifier (
     i_each = tk_lua_absindex(L, -1);
   }
   for (unsigned int i = 0; i < tm->pool->n_threads; i ++) {
-    tk_tsetlin_thread_t *data = (tk_tsetlin_thread_t *) tm->pool->threads[i].data;
+    tk_tsetlin_thread_t *data = tm->threads + i;
     data->train.n = n;
     data->train.ps = ps;
     data->train.ss = ss;
@@ -992,7 +1000,7 @@ static inline int tk_tsetlin_train_encoder (
     i_each = tk_lua_absindex(L, -1);
   }
   for (unsigned int i = 0; i < tm->pool->n_threads; i ++) {
-    tk_tsetlin_thread_t *data = (tk_tsetlin_thread_t *) tm->pool->threads[i].data;
+    tk_tsetlin_thread_t *data = tm->threads + i;
     unsigned int chunks = tm_state_clause_chunks(tm, i);
     data->predict.n = n;
     data->predict.ps = ps;
@@ -1044,9 +1052,10 @@ static inline void tk_tsetlin_setup_threads (
 ) {
   tk_threadpool_t *pool = tm->pool;
   if (!tm->initialized_threads) {
+    tm->threads = tk_malloc(L, n_threads * sizeof(tk_tsetlin_thread_t));
+    memset(tm->threads, 0, n_threads * sizeof(tk_tsetlin_thread_t));
     for (unsigned int i = 0; i < tm->pool->n_threads; i ++) {
-      tk_tsetlin_thread_t *data = tk_malloc(L, sizeof(tk_tsetlin_thread_t));
-      memset(data, 0, sizeof(tk_tsetlin_thread_t));
+      tk_tsetlin_thread_t *data = tm->threads + i;
       pool->threads[i].data = data;
       data->tm = tm;
       data->index = i;
@@ -1129,7 +1138,7 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, 
   tk_lua_fread(L, &tm->tail_mask, sizeof(tk_bits_t), 1, fh);
   tm->actions = tk_malloc_aligned(L, sizeof(tk_bits_t) * tm->action_chunks, TK_CVEC_BITS);
   tk_lua_fread(L, tm->actions, sizeof(tk_bits_t), tm->action_chunks, fh);
-  tm->pool = tk_threads_create(L, n_threads, tk_tsetlin_worker);
+  tm->pool = tk_threads_create(0, n_threads, tk_tsetlin_worker);
   tk_tsetlin_setup_threads(L, tm, n_threads);
   tk_threads_signal(tm->pool, TM_SEED, 0);
 }
@@ -1193,13 +1202,9 @@ static inline int tk_tsetlin_type (lua_State *L)
   return 1;
 }
 
+// Module-level functions
 static luaL_Reg tk_tsetlin_fns[] =
 {
-  { "train", tk_tsetlin_train },
-  { "predict", tk_tsetlin_predict },
-  { "destroy", tk_tsetlin_destroy },
-  { "persist", tk_tsetlin_persist },
-  { "type", tk_tsetlin_type },
   { "create", tk_tsetlin_create },
   { "load", tk_tsetlin_load },
   { NULL, NULL }
@@ -1208,12 +1213,9 @@ static luaL_Reg tk_tsetlin_fns[] =
 int luaopen_santoku_tsetlin_capi (lua_State *L)
 {
   lua_newtable(L); // t
-  tk_lua_register(L, tk_tsetlin_fns, 0); // t
-  lua_pushinteger(L, TK_CVEC_BITS); // b
+  tk_lua_register(L, tk_tsetlin_fns, 0); // t - registers create, load
+  lua_pushinteger(L, TK_CVEC_BITS); // t b
   lua_setfield(L, -2, "align"); // t
-  luaL_newmetatable(L, TK_TSETLIN_MT); // t mt
-  lua_pushcfunction(L, tk_tsetlin_destroy); // t mt fn
-  lua_setfield(L, -2, "__gc"); // t mt
-  lua_pop(L, 1); // t
+  // Metatable methods and __gc are registered by tk_lua_newuserdata
   return 1;
 }

@@ -179,7 +179,6 @@ static inline void tk_hbi_destroy (
   if (A->destroyed)
     return;
   A->destroyed = true;
-  tk_threads_destroy(A->pool);
   free(A->threads);
 }
 
@@ -530,6 +529,8 @@ static inline void tk_hbi_mutualize (
   tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
   tk_iumap_t **hoods_sets = tk_malloc(L, uids->n * sizeof(tk_iumap_t *));
   for (uint64_t i = 0; i < uids->n; i ++)
+    hoods_sets[i] = NULL;
+  for (uint64_t i = 0; i < uids->n; i ++)
     hoods_sets[i] = tk_iumap_create(0, 0);
   for (uint64_t i = 0; i < A->pool->n_threads; i ++) {
     tk_hbi_thread_t *data = A->threads + i;
@@ -592,7 +593,8 @@ static inline void tk_hbi_mutualize (
   }
   tk_iumap_destroy(sid_idx);
   for (uint64_t i = 0; i < uids->n; i ++)
-    tk_iumap_destroy(hoods_sets[i]);
+    if (hoods_sets[i])
+      tk_iumap_destroy(hoods_sets[i]);
   free(hoods_sets);
   lua_remove(L, -1);
 }
@@ -1549,6 +1551,8 @@ static inline tk_hbi_t *tk_hbi_create (
   A->threads = tk_malloc(L, n_threads * sizeof(tk_hbi_thread_t));
   memset(A->threads, 0, n_threads * sizeof(tk_hbi_thread_t));
   A->pool = tk_threads_create(L, n_threads, tk_hbi_worker);
+  tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
+  lua_pop(L, 1);
   for (unsigned int i = 0; i < n_threads; i ++) {
     tk_hbi_thread_t *data = A->threads + i;
     A->pool->threads[i].data = data;
@@ -1610,10 +1614,10 @@ static inline tk_hbi_t *tk_hbi_load (
       tk_hbi_buckets_setval(A->buckets, k, NULL);
     }
   }
-  A->uid_sid = tk_iumap_load(L, 0);
+  A->uid_sid = tk_iumap_load(L, fh);
   tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
   lua_pop(L, 1);
-  A->sid_uid = tk_iumap_load(L, 0);
+  A->sid_uid = tk_iumap_load(L, fh);
   tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
   lua_pop(L, 1);
   uint64_t cnum = 0;
@@ -1627,6 +1631,8 @@ static inline tk_hbi_t *tk_hbi_load (
   A->threads = tk_malloc(L, n_threads * sizeof(tk_hbi_thread_t));
   memset(A->threads, 0, n_threads * sizeof(tk_hbi_thread_t));
   A->pool = tk_threads_create(L, n_threads, tk_hbi_worker);
+  tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
+  lua_pop(L, 1);
   for (unsigned int t = 0; t < n_threads; t ++) {
     tk_hbi_thread_t *th = A->threads + t;
     A->pool->threads[t].data = th;

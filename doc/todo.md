@@ -10,6 +10,8 @@
 
 # Next
 
+- Separate all lua api functions explicitly via _lua variant (_lua variants must
+  respect the expected stack semantics strictly)
 - Consistently follow the x/x_lua pattern for naming conventions
 - Can we build less of blas and primme? E.g. strictly the used functionality?
 - Build openblas as shared library installed as module, used by itq and primme

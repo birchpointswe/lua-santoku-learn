@@ -291,30 +291,36 @@ static inline void tm_run_spectral (
   tk_dvec_center(z->a, uids->n, n_hidden);
   tk_dvec_rnorml2(z->a, uids->n, n_hidden);
 
-  for (uint64_t i = 0; i < spec.n_evals; i ++) {
-    if (i_each != -1) {
-      lua_pushvalue(L, i_each);
-      lua_pushstring(L, "eig");
-      lua_pushinteger(L, (int64_t) i);
-      lua_pushnumber(L, spec.evals[i]);
-      lua_pushboolean(L, i >= start);
-      lua_call(L, 4, 0);
-      // TODO: Set things up such that memory is correctly freed even if this
-      // throws
-    }
+  // Copy data needed for callbacks before freeing malloc'd buffers
+  double *evals_copy = NULL;
+  int64_t numMatvecs = params.stats.numMatvecs;
+  if (i_each != -1) {
+    evals_copy = tk_malloc(L, spec.n_evals * sizeof(double));
+    memcpy(evals_copy, spec.evals, spec.n_evals * sizeof(double));
   }
 
+  // Free malloc'd buffers before any Lua API calls that can throw
   free(spec.evals);
   free(spec.evecs);
   free(spec.resNorms);
   primme_free(&params);
   free(threads);
 
+  // Now safe to call Lua callbacks (no malloc leaks if they throw)
   if (i_each != -1) {
+    for (uint64_t i = 0; i < spec.n_evals; i ++) {
+      lua_pushvalue(L, i_each);
+      lua_pushstring(L, "eig");
+      lua_pushinteger(L, (int64_t) i);
+      lua_pushnumber(L, evals_copy[i]);
+      lua_pushboolean(L, i >= start);
+      lua_call(L, 4, 0);
+    }
     lua_pushvalue(L, i_each);
     lua_pushstring(L, "done");
-    lua_pushinteger(L, params.stats.numMatvecs);
+    lua_pushinteger(L, numMatvecs);
     lua_call(L, 2, 0);
+    free(evals_copy);
   }
 }
 
@@ -366,7 +372,6 @@ static inline int tm_encode (lua_State *L)
                   laplacian_type, i_each);
   lua_remove(L, -2);
 
-  tk_threads_destroy(pool);
   assert(tk_ivec_peekopt(L, -4) == uids);
   assert(tk_dvec_peekopt(L, -3) == z);
   return 4;

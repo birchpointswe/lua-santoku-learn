@@ -236,7 +236,6 @@ static inline void tk_inv_destroy (
   if (I->destroyed)
     return;
   I->destroyed = true;
-  tk_threads_destroy(I->pool);
   free(I->threads);
 }
 
@@ -470,6 +469,8 @@ static inline void tk_inv_mutualize (
   tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
   tk_dumap_t **hoods_sets = tk_malloc(L, uids->n * sizeof(tk_dumap_t *));
   for (uint64_t i = 0; i < uids->n; i ++)
+    hoods_sets[i] = NULL;
+  for (uint64_t i = 0; i < uids->n; i ++)
     hoods_sets[i] = tk_dumap_create(0, 0);
   for (uint64_t i = 0; i < I->pool->n_threads; i ++) {
     tk_inv_thread_t *data = I->threads + i;
@@ -533,7 +534,8 @@ static inline void tk_inv_mutualize (
 
   tk_iumap_destroy(sid_idx);
   for (uint64_t i = 0; i < uids->n; i ++)
-    tk_dumap_destroy(hoods_sets[i]);
+    if (hoods_sets[i])
+      tk_dumap_destroy(hoods_sets[i]);
   free(hoods_sets);
   lua_pop(L, 1); // sids
 }
@@ -565,6 +567,8 @@ static inline void tk_inv_neighborhoods (
   tk_dumap_t **hoods_sets = NULL;
   if (mutual && knn) {
     hoods_sets = tk_malloc(L, uids->n * sizeof(tk_dumap_t *));
+    for (uint64_t i = 0; i < uids->n; i ++)
+      hoods_sets[i] = NULL;
     for (uint64_t i = 0; i < uids->n; i ++)
       hoods_sets[i] = tk_dumap_create(0, 0);
   }
@@ -665,7 +669,8 @@ cleanup:
   if (uidsp) *uidsp = uids;
   if (hoods_sets) {
     for (uint64_t i = 0; i < uids->n; i ++)
-      tk_dumap_destroy(hoods_sets[i]);
+      if (hoods_sets[i])
+        tk_dumap_destroy(hoods_sets[i]);
     free(hoods_sets);
   }
   if (sids) lua_remove(L, -3); // sids
@@ -699,6 +704,8 @@ static inline void tk_inv_neighborhoods_by_ids (
   tk_dumap_t **hoods_sets = NULL;
   if (mutual && knn) {
     hoods_sets = tk_malloc(L, uids->n * sizeof(tk_dumap_t *));
+    for (uint64_t i = 0; i < uids->n; i ++)
+      hoods_sets[i] = NULL;
     for (uint64_t i = 0; i < uids->n; i ++)
       hoods_sets[i] = tk_dumap_create(0, 0);
   }
@@ -797,7 +804,8 @@ cleanup:
   if (uidsp) *uidsp = uids;
   if (hoods_sets) {
     for (uint64_t i = 0; i < uids->n; i ++)
-      tk_dumap_destroy(hoods_sets[i]);
+      if (hoods_sets[i])
+        tk_dumap_destroy(hoods_sets[i]);
     free(hoods_sets);
   }
   lua_remove(L, -3); // sids
@@ -2168,6 +2176,8 @@ static inline tk_inv_t *tk_inv_create (
   I->threads = tk_malloc(L, n_threads * sizeof(tk_inv_thread_t));
   memset(I->threads, 0, n_threads * sizeof(tk_inv_thread_t));
   I->pool = tk_threads_create(L, n_threads, tk_inv_worker);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
   for (unsigned int i = 0; i < n_threads; i ++) {
     tk_inv_thread_t *data = I->threads + i;
     I->pool->threads[i].data = data;
@@ -2209,8 +2219,12 @@ static inline tk_inv_t *tk_inv_load (
   tk_lua_fread(L, &I->next_sid, sizeof(int64_t), 1, fh);
   tk_lua_fread(L, &I->features, sizeof(uint64_t), 1, fh);
   tk_lua_fread(L, &I->n_ranks, sizeof(uint64_t), 1, fh);
-  I->uid_sid = tk_iumap_load(0, fh);
-  I->sid_uid = tk_iumap_load(0, fh);
+  I->uid_sid = tk_iumap_load(L, fh);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
+  I->sid_uid = tk_iumap_load(L, fh);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
   I->node_offsets = tk_ivec_load(L, fh);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
@@ -2271,6 +2285,8 @@ static inline tk_inv_t *tk_inv_load (
   I->threads = tk_malloc(L, n_threads * sizeof(tk_inv_thread_t));
   memset(I->threads, 0, n_threads * sizeof(tk_inv_thread_t));
   I->pool = tk_threads_create(L, n_threads, tk_inv_worker);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
   for (unsigned int i = 0; i < n_threads; i ++) {
     tk_inv_thread_t *th = I->threads + i;
     I->pool->threads[i].data = th;

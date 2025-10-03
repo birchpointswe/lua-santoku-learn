@@ -47,20 +47,19 @@ test("tsetlin", function ()
 
   print("\nCreating graph")
   local stopwatch = utc.stopwatch()
-  dataset.graph = graph.create({
-    edges = seed,
-    index = index,
-    threads = THREADS,
-    each = function (ids, s, b, dt)
-      local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Nodes: %-6d  Components: %-6d  Edges: %-6d\n", d, dd, dt, ids, s, b)
-    end
-  })
   dataset.graph_adj_ids,
   dataset.graph_adj_offsets,
   dataset.graph_adj_neighbors,
   dataset.graph_adj_weights =
-    dataset.graph:adjacency()
+    graph.adjacency({
+      edges = seed,
+      index = index,
+      threads = THREADS,
+      each = function (ids, s, b, dt)
+        local d, dd = stopwatch()
+        str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Nodes: %-6d  Components: %-6d  Edges: %-6d\n", d, dd, dt, ids, s, b)
+      end
+    })
 
   print("\nSpectral eigendecomposition")
   dataset.ids_spectral, dataset.codes_spectral = spectral.encode({

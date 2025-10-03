@@ -46,10 +46,6 @@ static inline int tb_tokenizer_gc (lua_State *L)
   if (tokenizer->collected)
     return 0;
   tokenizer->collected = true;
-  const char *stok;
-  tk_umap_foreach_values(tokenizer->strs, stok, ({
-    free((char *) stok);
-  }))
   return 0;
 }
 
@@ -96,15 +92,17 @@ static inline int tb_tokenizer_persist (lua_State *L)
     size_t len;
     char *data = tk_lua_fslurp(L, fh, &len);
     if (data) {
+      tk_lua_fclose(L, fh);
       lua_pushlstring(L, data, len);
       free(data);
-      tk_lua_fclose(L, fh);
       return 1;
     } else {
       tk_lua_fclose(L, fh);
       return 0;
     }
   }
+  lua_settop(L, 0);
+  lua_gc(L, LUA_GCCOLLECT, 0);
 }
 
 static inline char *tb_tokenizer_id_str (
@@ -117,6 +115,8 @@ static inline char *tb_tokenizer_id_str (
 }
 
 static inline int tb_tokenizer_new_token (
+  lua_State *L,
+  int Ti,
   tb_tokenizer_t *tokenizer,
   char **tokp,
   size_t len
@@ -128,24 +128,26 @@ static inline int tb_tokenizer_new_token (
     id = tk_zumap_val(tokenizer->ids, k);
     *tokp = (char *) tk_zumap_key(tokenizer->ids, k);
   } else if (tokenizer->finalized) {
-    // After finalization, don't add new tokens
     return -1;
   } else {
-    // During training, add new tokens
-    char *tmp = strdup(tok);
+    size_t str_len = strlen(tok);
+    char *tmp = (char *) lua_newuserdata(L, str_len + 1);
+    memcpy(tmp, tok, str_len + 1);
     id = tokenizer->next_id ++;
     k = tk_zumap_put(tokenizer->ids, tmp, &absent);
-    assert(absent);
     tk_zumap_setval(tokenizer->ids, k, id);
     k = tk_cumap_put(tokenizer->strs, id, &absent);
-    assert(absent);
     tk_cumap_setval(tokenizer->strs, k, tmp);
+    tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
+    lua_pop(L, 1);
     *tokp = tmp;
   }
   return id;
 }
 
 static inline void tb_tokenizer_append_cgrams (
+  lua_State *L,
+  int Ti,
   tb_tokenizer_t *tokenizer,
   char *tok
 ) {
@@ -160,7 +162,7 @@ static inline void tb_tokenizer_append_cgrams (
       memcpy(buf, tok + s, (size_t) k);
       buf[k] = '\0';
       char *bufp = buf;
-      int id = tb_tokenizer_new_token(tokenizer, &bufp, (khint_t) k + 1);
+      int id = tb_tokenizer_new_token(L, Ti, tokenizer, &bufp, (khint_t) k + 1);
       if (id != -1)
         tk_ivec_push(tokenizer->tokens, id);
     }
@@ -312,7 +314,7 @@ static inline tk_cvec_t *tb_tokenizer_normalize (char *in, size_t len, int max_r
           break;
         case 0x9C: // left double quote
         case 0x9D: // right double quote
-          tk_cvec_push(out, ' ');      // prevent token concatenation
+          tk_cvec_push(out, ' '); // prevent token concatenation
           last = ' ';
           break;
         case 0xA6: // ellipsis
@@ -408,17 +410,16 @@ static inline tk_cvec_t *tb_tokenizer_normalize (char *in, size_t len, int max_r
         (unsigned char)in[i + 3] == 0xEF &&
         (unsigned char)in[i + 4] == 0xB8 &&
         (unsigned char)in[i + 5] == 0x8F) {
-        i += 6;            // ❤︎ (with VS16)
+        i += 6; // ❤︎ (with VS16)
       } else {
-        i += 3;            // ❤
+        i += 3; // ❤
       }
       last = ' ';
       run = 0;
       continue;
     }
 
-    // Fallback: skip well-formed multibyte sequences, but keep state sane
-    if      ((c & 0xE0) == 0xC0 && tb_have_bytes(in, i, 2)) i += 2;
+    if ((c & 0xE0) == 0xC0 && tb_have_bytes(in, i, 2)) i += 2;
     else if ((c & 0xF0) == 0xE0 && tb_have_bytes(in, i, 3)) i += 3;
     else if ((c & 0xF8) == 0xF0 && tb_have_bytes(in, i, 4)) i += 4;
     else i ++;
@@ -559,6 +560,8 @@ static inline bool tb_tokenizer_is_negation_boundary_token (char *tok)
 }
 
 static void tb_tokenizer_append_skipgram (
+  lua_State *L,
+  int Ti,
   tb_tokenizer_t *tok,
   int skipgram[],
   int to_pick,
@@ -578,7 +581,7 @@ static void tb_tokenizer_append_skipgram (
     }
     tk_cvec_push(tok->tmp_skipgram, '\0');
     char *bufp = tok->tmp_skipgram->a;
-    int nid = tb_tokenizer_new_token(tok, &bufp, tok->tmp_skipgram->n);
+    int nid = tb_tokenizer_new_token(L, Ti, tok, &bufp, tok->tmp_skipgram->n);
     if (nid != -1)
       tk_ivec_push(tok->tokens, nid);
     return;
@@ -589,11 +592,13 @@ static void tb_tokenizer_append_skipgram (
     if (prev_idx >= 0 && (i - prev_idx - 1) > max_skips)
       continue;
     skipgram[picked] = i;
-    tb_tokenizer_append_skipgram(tok, skipgram, to_pick - 1, max_skips, rfirst, i + 1, winlen);
+    tb_tokenizer_append_skipgram(L, Ti, tok, skipgram, to_pick - 1, max_skips, rfirst, i + 1, winlen);
   }
 }
 
 static inline void tb_tokenizer_append_token (
+  lua_State *L,
+  int Ti,
   tb_tokenizer_t *tokenizer,
   char *word,
   int *negation
@@ -620,22 +625,20 @@ static inline void tb_tokenizer_append_token (
   } else {
     tk_cvec_push_str(tokenizer->tmp_append, word);
   }
-  // In char-gram only mode (ngrams==0), skip unigram processing entirely
   if (tokenizer->ngrams == 0) {
     if (tb_tokenizer_is_negation_token(word)) {
       *negation = tokenizer->negations;
       return;
     }
-    // Generate char-grams only
     if (word[0] != '#' && strcmp(word, "'s") != 0)
-      tb_tokenizer_append_cgrams(tokenizer, word);
+      tb_tokenizer_append_cgrams(L, Ti, tokenizer, word);
     return;
   }
 
   // Normal mode: process unigrams and n-grams
   tk_cvec_push(tokenizer->tmp_append, '\0');
   char *bufp0 = tokenizer->tmp_append->a;
-  int id0 = tb_tokenizer_new_token(tokenizer, &bufp0, tokenizer->tmp_append->n);
+  int id0 = tb_tokenizer_new_token(L, Ti, tokenizer, &bufp0, tokenizer->tmp_append->n);
   if (id0 == -1) return;
   tk_ivec_push(tokenizer->tokens, id0);
 
@@ -646,7 +649,7 @@ static inline void tb_tokenizer_append_token (
 
   // Generate char-grams
   if (word[0] != '#' && strcmp(word, "'s") != 0)
-    tb_tokenizer_append_cgrams(tokenizer, word);
+    tb_tokenizer_append_cgrams(L, Ti, tokenizer, word);
 
   if ((int) tokenizer->window->n == tokenizer->window_size) {
     size_t n = tokenizer->window->n;
@@ -660,11 +663,13 @@ static inline void tb_tokenizer_append_token (
   if (tokenizer->ngrams > 0) {
     int skipgram[tokenizer->ngrams];
     for (int r = 2; r <= tokenizer->ngrams; r ++)
-      tb_tokenizer_append_skipgram(tokenizer, skipgram, r, tokenizer->skips, r, 0, winlen);
+      tb_tokenizer_append_skipgram(L, Ti, tokenizer, skipgram, r, tokenizer->skips, r, 0, winlen);
   }
 }
 
 static inline void tb_tokenizer_populate_tokens (
+  lua_State *L,
+  int Ti,
   tb_tokenizer_t *tokenizer,
   const char *doc,
   size_t len
@@ -713,15 +718,15 @@ static inline void tb_tokenizer_populate_tokens (
       const char *key = canon_buf;
       for (size_t i = 0; i < n_contractions; i ++) {
         if (strcmp(key, contractions[i].from) == 0) {
-          tb_tokenizer_append_token(tokenizer, contractions[i].to1, &negation);
-          tb_tokenizer_append_token(tokenizer, contractions[i].to2, &negation);
-          tb_tokenizer_append_token(tokenizer, contractions[i].to3, &negation);
+          tb_tokenizer_append_token(L, Ti, tokenizer, contractions[i].to1, &negation);
+          tb_tokenizer_append_token(L, Ti, tokenizer, contractions[i].to2, &negation);
+          tb_tokenizer_append_token(L, Ti, tokenizer, contractions[i].to3, &negation);
           was_contraction = true;
           break;
         }
       }
       if (!was_contraction)
-        tb_tokenizer_append_token(tokenizer, tok, &negation);
+        tb_tokenizer_append_token(L, Ti, tokenizer, tok, &negation);
       tokenizer->tmp_token->n = 0;
     } else {
       tokenizer->tmp_token->n = 0;
@@ -729,12 +734,12 @@ static inline void tb_tokenizer_populate_tokens (
   }
 }
 
-static inline void _tb_tokenizer_parse (lua_State *L, tb_tokenizer_t *tokenizer)
+static inline void _tb_tokenizer_parse (lua_State *L, int Ti, tb_tokenizer_t *tokenizer)
 {
   size_t len;
   char *str = (char *) luaL_checklstring(L, 1, &len);
   tk_cvec_t *doc = tb_tokenizer_normalize(str, len, tokenizer->max_run);
-  tb_tokenizer_populate_tokens(tokenizer, doc->a, doc->n);
+  tb_tokenizer_populate_tokens(L, Ti, tokenizer, doc->a, doc->n);
   tk_cvec_destroy(doc);
   lua_Integer n = 1;
   lua_newtable(L);
@@ -758,17 +763,20 @@ static inline int tb_tokenizer_parse (lua_State *L)
   lua_settop(L, 2);
   tb_tokenizer_t *tokenizer = peek_tokenizer(L, 1);
   if (lua_type(L, 2) != LUA_TTABLE) {
-    _tb_tokenizer_parse(L, tokenizer);
+    _tb_tokenizer_parse(L, 1, tokenizer);
   } else {
-    for (size_t i = 1; i <= (size_t) lua_objlen(L, 1); i ++) {
+    for (size_t i = 1; i <= (size_t) lua_objlen(L, 2); i ++) {
       lua_pushinteger(L, (int64_t) i); // t n
       lua_gettable(L, -2); // t s
-      _tb_tokenizer_parse(L, tokenizer); // t s tt
+      _tb_tokenizer_parse(L, 1, tokenizer); // t s tt
       lua_pushinteger(L, (int64_t) i); // t s tt n
       lua_replace(L, -3); // t n tt
       lua_settable(L, -3); // t
     }
   }
+  lua_replace(L, 1);
+  lua_settop(L, 1);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -795,7 +803,7 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
     size_t doclen;
     char *odoc = (char *) luaL_checklstring(L, 2, &doclen); // tkz t out
     tk_cvec_t *ndoc = tb_tokenizer_normalize(odoc, doclen, tokenizer->max_run); // tkz t out
-    tb_tokenizer_populate_tokens(tokenizer, ndoc->a, ndoc->n);
+    tb_tokenizer_populate_tokens(L, 1, tokenizer, ndoc->a, ndoc->n);
     tk_cvec_destroy(ndoc);
 
     for (khint_t j = 0; j < tokenizer->tokens->n; j ++) {
@@ -818,7 +826,7 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
       size_t doclen;
       char *odoc = (char *) luaL_checklstring(L, -1, &doclen);
       tk_cvec_t *ndoc = tb_tokenizer_normalize(odoc, doclen, tokenizer->max_run); // t out
-      tb_tokenizer_populate_tokens(tokenizer, ndoc->a, ndoc->n);
+      tb_tokenizer_populate_tokens(L, 1, tokenizer, ndoc->a, ndoc->n);
       tk_cvec_destroy(ndoc);
       tk_iuset_clear(seen);
       for (khint_t j = 0; j < tokenizer->tokens->n; j ++) {
@@ -840,6 +848,9 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
   // tkz t out
   tk_iuset_destroy(seen);
   tk_ivec_shrink(out);
+  lua_replace(L, 1);
+  lua_settop(L, 1);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -851,8 +862,7 @@ static inline int tb_tokenizer_restrict (lua_State *L)
   tb_tokenizer_t *tokenizer = peek_tokenizer(L, Ti);
   tk_ivec_t *top_v = tk_ivec_peek(L, 2, "top_v");
 
-  // TODO: Can we do this without strdup? Just don't free the ones we're
-  // keeping?
+  // Strings are userdata with ephemerons, so we can reuse them without strdup
   char *tok;
   int id, id0;
   int absent;
@@ -866,29 +876,25 @@ static inline int tb_tokenizer_restrict (lua_State *L)
   tokenizer->next_id = 0;
   for (lua_Integer i = 0; i < (int64_t) top_v->n; i ++) {
     id = top_v->a[i];
-    lua_pop(L, 1);
     k = tk_cumap_get(tokenizer->strs, id);
     if (k == tk_cumap_end(tokenizer->strs))
       continue;
-    tok = (char *) strdup(tk_cumap_val(tokenizer->strs, k));
+    tok = (char *) tk_cumap_val(tokenizer->strs, k);  // Reuse existing userdata
     id0 = tokenizer->next_id ++;
     k = tk_zumap_put(ids0, tok, &absent);
-    assert(absent);
     tk_zumap_setval(ids0, k, id0);
     k = tk_cumap_put(strs0, id0, &absent);
-    assert(absent);
     tk_cumap_setval(strs0, k, tok);
   }
-  const char *stok;
-  tk_umap_foreach_values(tokenizer->strs, stok, ({
-    free((char *) stok);
-  }))
-  // tk_lua_del_ephemeron(L, TK_TOKENIZER_EPH, Ti, tokenizer->ids);
+  // String keys are now userdata managed by ephemerons, no manual free needed
+  tk_lua_del_ephemeron(L, TK_TOKENIZER_EPH, Ti, tokenizer->ids);
   tk_zumap_destroy(tokenizer->ids);
   tokenizer->ids = ids0;
-  // tk_lua_del_ephemeron(L, TK_TOKENIZER_EPH, Ti, tokenizer->strs);
+  tk_lua_del_ephemeron(L, TK_TOKENIZER_EPH, Ti, tokenizer->strs);
   tk_cumap_destroy(tokenizer->strs);
   tokenizer->strs = strs0;
+  lua_settop(L, 0);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 0;
 }
 
@@ -899,6 +905,7 @@ static inline int tb_tokenizer_finalize (lua_State *L)
   if (tokenizer->finalized)
     return luaL_error(L, "already finalized");
   tokenizer->finalized = true;
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 0;
 }
 
@@ -943,10 +950,12 @@ static inline int tb_tokenizer_train (lua_State *L)
     lua_gettable(L, -2); // corpus v
     size_t len;
     tk_cvec_t *doc = tb_tokenizer_normalize((char *) luaL_checklstring(L, -1, &len), len, tokenizer->max_run);
-    tb_tokenizer_populate_tokens(tokenizer, doc->a, doc->n);
+    tb_tokenizer_populate_tokens(L, 1, tokenizer, doc->a, doc->n);
     tk_cvec_destroy(doc);
     lua_pop(L, 1); // corpus
   }
+  lua_settop(L, 0);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 0;
 }
 
@@ -966,6 +975,7 @@ static luaL_Reg tb_mt_fns[] =
 
 static inline int tb_tokenizer_create (lua_State *L)
 {
+  lua_settop(L, 1);
   int max_len = (int) tk_lua_fcheckunsigned(L, 1, "create", "max_len");
   int min_len = (int) tk_lua_fcheckunsigned(L, 1, "create", "min_len");
   int max_run = (int) tk_lua_fcheckunsigned(L, 1, "create", "max_run");
@@ -1018,6 +1028,7 @@ static inline int tb_tokenizer_create (lua_State *L)
   tokenizer->negations = negations;
   tokenizer->align = align;
   tokenizer->window_size = ngrams > 0 ? ngrams + (ngrams - 1) * skips : 0;
+  lua_replace(L, 1);
   return 1;
 }
 
@@ -1070,8 +1081,8 @@ static inline int tb_tokenizer_load (lua_State *L)
   for (khint_t i = 0; i < nids; i ++) {
     size_t len;
     tk_lua_fread(L, &len, sizeof(size_t), 1, fh);
-    char *tokn = malloc(len + 1);
-    tk_lua_fread(L, tokn, len, 1, fh);
+    char *tokn = (char *) lua_newuserdata(L, len + 1);  // GC-tracked on stack
+    tk_lua_fread(L, tokn, len, 1, fh);  // Safe: if throws, userdata GC'd
     tokn[len] = 0;
     int id;
     tk_lua_fread(L, &id, sizeof(int), 1, fh);
@@ -1081,6 +1092,8 @@ static inline int tb_tokenizer_load (lua_State *L)
     k = tk_cumap_put(tokenizer->strs, id, &absent);
     assert(absent);
     tk_cumap_setval(tokenizer->strs, k, tokn);
+    tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);  // Anchor to tokenizer
+    lua_pop(L, 1);  // Pop userdata (string remains via ephemeron)
   }
   tk_lua_fclose(L, fh);
   return 1;

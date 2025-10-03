@@ -60,6 +60,7 @@ typedef struct {
 typedef struct {
   tk_thread_t *self;
   tk_eval_t *state;
+  atomic_bool has_error;
   uint64_t diff;
   uint64_t *bdiff;
   uint64_t sfirst, slast;
@@ -252,6 +253,7 @@ static void tk_eval_worker (void *dp, int sig)
       data->adj_ranks = malloc(n_alloc * sizeof(tk_rvec_t *));
       data->adj_ranks_idx = malloc(n_alloc * sizeof(tk_dumap_t *));
       if (data->adj_ranks == NULL || data->adj_ranks_idx == NULL) {
+        atomic_store(&data->has_error, true);
         if (data->adj_ranks) {
           free(data->adj_ranks);
           data->adj_ranks = NULL;
@@ -367,11 +369,11 @@ static inline int tm_class_accuracy (lua_State *L)
   for (unsigned int i = 0; i < n_threads; i ++) {
     pool->threads[i].data = data + i;
     data[i].state = &state;
+    atomic_init(&data[i].has_error, false);
     tk_thread_range(i, n_threads, n_samples, &data[i].sfirst, &data[i].slast);
   }
 
   tk_threads_signal(pool, TK_EVAL_CLASS_ACCURACY, 0);
-  tk_threads_destroy(pool);
 
   // Reduce
   double precision_avg = 0.0, recall_avg = 0.0, f1_avg = 0.0;
@@ -420,7 +422,9 @@ static inline int tm_class_accuracy (lua_State *L)
   free(state.precision);
   free(state.recall);
   free(state.f1);
-
+  lua_replace(L, 1);
+  lua_settop(L, 1);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -513,11 +517,11 @@ static inline tk_accuracy_t tm_clustering_accuracy (
   for (unsigned int i = 0; i < n_threads; i ++) {
     pool->threads[i].data = data + i;
     data[i].state = &state;
+    atomic_init(&data[i].has_error, false);
     tk_thread_range(i, n_threads, n_pos + n_neg, &data[i].pfirst, &data[i].plast);
   }
 
   tk_threads_signal(pool, TK_EVAL_CLUSTERING_ACCURACY, 0);
-  tk_threads_destroy(pool);
 
   uint64_t vpos = atomic_load(state.valid_pos);
   uint64_t vneg = atomic_load(state.valid_neg);
@@ -555,6 +559,9 @@ static inline int tm_clustering_accuracy_lua (lua_State *L)
   lua_setfield(L, -2, "tpr");
   lua_pushnumber(L, acc.tnr);
   lua_setfield(L, -2, "tnr");
+  lua_replace(L, 1);
+  lua_settop(L, 1);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -582,6 +589,7 @@ static inline int tm_encoding_accuracy (lua_State *L)
   for (unsigned int i = 0; i < n_threads; i ++) {
     pool->threads[i].data = data + i;
     data[i].state = &state;
+    atomic_init(&data[i].has_error, false);
     data[i].diff = 0;
     data[i].bdiff = tk_malloc(L, n_dims * sizeof(uint64_t));
     memset(data[i].bdiff, 0, sizeof(uint64_t) * n_dims);
@@ -589,7 +597,6 @@ static inline int tm_encoding_accuracy (lua_State *L)
   }
 
   tk_threads_signal(pool, TK_EVAL_ENCODING_ACCURACY, 0);
-  tk_threads_destroy(pool);
 
   // Reduce
   uint64_t diff_total = 0;
@@ -636,6 +643,9 @@ static inline int tm_encoding_accuracy (lua_State *L)
   for (unsigned int i = 0; i < n_threads; i ++)
     free(data[i].bdiff);
 
+  lua_replace(L, 1);
+  lua_settop(L, 1);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -697,7 +707,7 @@ static inline int tm_auc (lua_State *L)
   memset(&state, 0, sizeof(tk_eval_t));
   state.n_dims = n_dims;
   state.chunks = TK_CVEC_BITS_BYTES(n_dims);
-  state.pl = malloc((n_pos + n_neg) * sizeof(tm_dl_t));
+  state.pl = tk_malloc(L, (n_pos + n_neg) * sizeof(tm_dl_t));
   state.mask = mask;
   state.id_code = tk_iumap_from_ivec(0, ids);
   state.codes = codes;
@@ -712,16 +722,19 @@ static inline int tm_auc (lua_State *L)
   for (unsigned int i = 0; i < n_threads; i ++) {
     pool->threads[i].data = data + i;
     data[i].state = &state;
+    atomic_init(&data[i].has_error, false);
     tk_thread_range(i, n_threads, n_pos + n_neg, &data[i].pfirst, &data[i].plast);
   }
 
   double auc = _tm_auc(L, &state, pool);
 
   free(state.pl);
-  tk_threads_destroy(pool);
   tk_iumap_destroy(state.id_code);
 
   lua_pushnumber(L, auc);
+  lua_replace(L, 1);
+  lua_settop(L, 1);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -787,7 +800,9 @@ static inline int tm_optimize_clustering (lua_State *L)
     hbi ? tk_iumap_keys(L, hbi->uid_sid) :
     ann ? tk_iumap_keys(L, ann->uid_sid) : tk_ivec_create(L, 0, 0, 0); // t ids
   state.ididx =
-    tk_iumap_from_ivec(0, state.ids);
+    tk_iumap_from_ivec(L, state.ids); // Use Lua-managed allocation for safety
+  tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+  lua_pop(L, 1);
 
   tk_eval_thread_t data[n_threads];
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
@@ -795,6 +810,7 @@ static inline int tm_optimize_clustering (lua_State *L)
     pool->threads[i].data = data + i;
     data[i].self = pool->threads + i;
     data[i].state = &state;
+    atomic_init(&data[i].has_error, false);
     data[i].best = (tk_accuracy_t) { .bacc = -1.0, .tpr = 0.0, .tnr = 0.0 };
     data[i].next_n = 0;
     data[i].best_n = 0;
@@ -840,8 +856,7 @@ static inline int tm_optimize_clustering (lua_State *L)
   tk_ivec_t *assignments = data[i_best].best_assignments;
   tk_lua_get_ephemeron(L, TK_EVAL_EPH, assignments); // t ids as
 
-  // Cleanup
-  tk_threads_destroy(pool);
+  tk_lua_del_ephemeron(L, TK_EVAL_EPH, i_eph, state.ididx);
   tk_iumap_destroy(state.ididx);
 
   lua_newtable(L); // t ids as score
@@ -857,6 +872,9 @@ static inline int tm_optimize_clustering (lua_State *L)
   lua_setfield(L, -2, "tnr");
   lua_insert(L, -3); // t score ids as
   lua_pushinteger(L, (int64_t) best_n); // t score ids as n
+  tk_lua_replace(L, 1, 4);
+  lua_settop(L, 4);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 4;
 }
 
@@ -894,7 +912,7 @@ static inline int tm_optimize_retrieval (lua_State *L)
   tk_eval_t state;
   state.n_dims = n_dims;
   state.chunks = TK_CVEC_BITS_BYTES(n_dims);
-  state.pl = malloc((n_pos + n_neg) * sizeof(tm_dl_t));
+  state.pl = tk_malloc(L, (n_pos + n_neg) * sizeof(tm_dl_t));
   state.mask = NULL;
   state.codes = codes;
   state.dcodes = NULL;
@@ -915,13 +933,16 @@ static inline int tm_optimize_retrieval (lua_State *L)
   for (unsigned int i = 0; i < n_threads; i ++) {
     pool->threads[i].data = data + i;
     data[i].state = &state;
+    atomic_init(&data[i].has_error, false);
     tk_thread_range(i, n_threads, n_pos + n_neg, &data[i].pfirst, &data[i].plast);
   }
 
   double auc = _tm_auc(L, &state, pool);
 
   tk_threads_signal(pool, TK_EVAL_ENCODING_SIMILARITY, 0);
-  tk_threads_destroy(pool);
+
+  free(state.pl);
+  state.pl = NULL;
 
   uint64_t pref_tp[n_dims + 1], pref_fp[n_dims + 1];
   uint64_t running_tp = 0, running_fp = 0;
@@ -931,6 +952,11 @@ static inline int tm_optimize_retrieval (lua_State *L)
     pref_tp[d] = running_tp;
     pref_fp[d] = running_fp;
   }
+
+  free(state.hist_pos);
+  free(state.hist_neg);
+  state.hist_pos = NULL;
+  state.hist_neg = NULL;
 
   double best_bacc = -1.0;
   double best_tpr = -1.0;
@@ -942,7 +968,7 @@ static inline int tm_optimize_retrieval (lua_State *L)
     uint64_t tn = n_neg - fp;
     double tpr = n_pos > 0 ? (double)tp / (double)n_pos : 0;
     double tnr = n_neg > 0 ? (double)tn / (double)n_neg : 0;
-    double bacc = 0.5 * (tpr + tnr); // true balanced accuracy
+    double bacc = 0.5 * (tpr + tnr);
     if (i_each > -1) {
       lua_pushvalue(L, i_each);
       lua_pushnumber(L, bacc);
@@ -965,14 +991,9 @@ static inline int tm_optimize_retrieval (lua_State *L)
     }
   }
 
-  // Cleanup
-  free(state.pl);
-  free(state.hist_pos);
-  free(state.hist_neg);
   if (state.id_code != NULL)
     tk_iumap_destroy(state.id_code);
 
-  // Output
   lua_newtable(L);
   lua_pushinteger(L, (int64_t) best_margin);
   lua_setfield(L, -2, "margin");
@@ -984,6 +1005,9 @@ static inline int tm_optimize_retrieval (lua_State *L)
   lua_setfield(L, -2, "tnr");
   lua_pushnumber(L, auc);
   lua_setfield(L, -2, "auc");
+  lua_replace(L, 1);
+  lua_settop(L, 1);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -1021,8 +1045,10 @@ static void tm_optimize_bits_prefix_greedy (
 ) {
   uint64_t n_dims = state->n_dims;
   uint64_t bytes_per_mask = TK_CVEC_BITS_BYTES(n_dims);
-  tk_bits_t *mask = tk_malloc(L, bytes_per_mask);
-  tk_bits_t *candidate = tk_malloc(L, bytes_per_mask);
+  tk_cvec_t *mask_cvec = tk_cvec_create(L, bytes_per_mask, 0, 0);
+  tk_cvec_t *candidate_cvec = tk_cvec_create(L, bytes_per_mask, 0, 0);
+  tk_bits_t *mask = (tk_bits_t *)mask_cvec->a;
+  tk_bits_t *candidate = (tk_bits_t *)candidate_cvec->a;
 
   uint64_t best_prefix = 1;
   double best_prefix_score = -INFINITY;
@@ -1186,9 +1212,6 @@ static void tm_optimize_bits_prefix_greedy (
       }
     }
   }
-
-  free(mask);
-  free(candidate);
 }
 
 static inline int tm_optimize_bits (lua_State *L)
@@ -1232,14 +1255,26 @@ static inline int tm_optimize_bits (lua_State *L)
   for (unsigned int i = 0; i < n_threads; i++) {
     pool->threads[i].data = data + i;
     data[i].state = &state;
+    atomic_init(&data[i].has_error, false);
     tk_thread_range(i, n_threads, n_nodes, &data[i].wfirst, &data[i].wlast);
     tk_thread_range(i, n_threads, n_nodes, &data[i].sfirst, &data[i].slast);
   }
 
   tk_threads_signal(pool, TK_EVAL_GRAPH_RECONSTRUCTION_INIT, 0);
+
+  // Check for allocation errors in worker threads
+  for (unsigned int i = 0; i < n_threads; i++) {
+    if (atomic_load(&data[i].has_error)) {
+      tk_threads_signal(pool, TK_EVAL_GRAPH_RECONSTRUCTION_DESTROY, 0);
+      tk_lua_verror(L, 2, "optimize_bits", "worker thread allocation failed");
+      return 0;
+    }
+  }
   tm_optimize_bits_prefix_greedy(L, &state, pool, i_each); // result
   tk_threads_signal(pool, TK_EVAL_GRAPH_RECONSTRUCTION_DESTROY, 0);
-  tk_threads_destroy(pool);
+  lua_replace(L, 1);
+  lua_settop(L, 1);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -1295,7 +1330,9 @@ static inline int tm_entropy_stats (lua_State *L)
   lua_setfield(L, -2, "max");
   lua_pushnumber(L, sqrt(variance));
   lua_setfield(L, -2, "std");
-
+  lua_replace(L, 1);
+  lua_settop(L, 1);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 

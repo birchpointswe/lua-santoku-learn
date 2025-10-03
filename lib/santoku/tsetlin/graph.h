@@ -58,7 +58,7 @@ typedef struct tk_graph_s {
 
   tk_dvec_t *sigmas;
   uint64_t n_edges;
-  tk_dsu_t dsu;
+  tk_dsu_t *dsu;
   int64_t largest_component_root;
 
   tk_graph_thread_t *threads;
@@ -125,15 +125,14 @@ static inline void tk_graph_adj_mst (
   tk_ivec_t *ids = tk_ivec_create(0, offset->n - 1, 0, 0);
   tk_ivec_fill_indices(ids);
 
-  tk_dsu_t dsu;
-  tk_dsu_init(&dsu, ids);
+  tk_dsu_t *dsu = tk_dsu_create(NULL, ids);
   tk_evec_t *mst_edges = tk_evec_create(0, 0, 0, 0);
 
   for (uint64_t i = 0; i < edges->n; i ++) {
     tk_edge_t e = edges->a[i];
-    if (tk_dsu_find(&dsu, e.u) == tk_dsu_find(&dsu, e.v))
+    if (tk_dsu_find(dsu, e.u) == tk_dsu_find(dsu, e.v))
       continue;
-    tk_dsu_union(&dsu, e.u, e.v);
+    tk_dsu_union(dsu, e.u, e.v);
     tk_evec_push(mst_edges, tk_edge(e.u, e.v, e.w));
   }
 
@@ -181,11 +180,23 @@ static inline void tk_graph_adj_mst (
   int64_t final_offset = mst_offset->a[mst_offset->n - 1];
   tk_ivec_push(mst_offset, final_offset);
 
-  tk_ivec_t **adj_lists = malloc((offset->n - 1) * sizeof(tk_ivec_t*));
-  tk_dvec_t **weight_lists = malloc((offset->n - 1) * sizeof(tk_dvec_t*));
+  tk_ivec_t **adj_lists = calloc(offset->n - 1, sizeof(tk_ivec_t*));
+  tk_dvec_t **weight_lists = calloc(offset->n - 1, sizeof(tk_dvec_t*));
+  if (!adj_lists || !weight_lists) {
+    free(adj_lists);
+    free(weight_lists);
+    tk_ivec_destroy(degree);
+    tk_evec_destroy(mst_edges);
+    tk_evec_destroy(edges);
+    tk_euset_destroy(edgeset);
+    tk_ivec_destroy(ids);
+    return;
+  }
   for (uint64_t i = 0; i < offset->n - 1; i++) {
     adj_lists[i] = tk_ivec_create(0, 0, 0, 0);
+    if (!adj_lists[i]) goto cleanup;
     weight_lists[i] = tk_dvec_create(0, 0, 0, 0);
+    if (!weight_lists[i]) goto cleanup;
   }
 
   for (uint64_t i = 0; i < mst_edges->n; i++) {
@@ -200,17 +211,23 @@ static inline void tk_graph_adj_mst (
   }
 
   for (uint64_t i = 0; i < offset->n - 1; i++) {
-    for (uint64_t j = 0; j < adj_lists[i]->n; j++) {
-      int64_t neighbor = adj_lists[i]->a[j];
-      double weight = weight_lists[i]->a[j];
-      if (neighbor >= 0 && neighbor < (int64_t)(offset->n - 1)) {
-        tk_ivec_push(mst_neighbors, neighbor);
-        tk_dvec_push(mst_weights, weight);
-        tk_ivec_push(mst_sources, (int64_t) i);
+    if (adj_lists[i]) {
+      for (uint64_t j = 0; j < adj_lists[i]->n; j++) {
+        int64_t neighbor = adj_lists[i]->a[j];
+        double weight = weight_lists[i]->a[j];
+        if (neighbor >= 0 && neighbor < (int64_t)(offset->n - 1)) {
+          tk_ivec_push(mst_neighbors, neighbor);
+          tk_dvec_push(mst_weights, weight);
+          tk_ivec_push(mst_sources, (int64_t) i);
+        }
       }
     }
-    tk_ivec_destroy(adj_lists[i]);
-    tk_dvec_destroy(weight_lists[i]);
+  }
+
+cleanup:
+  for (uint64_t i = 0; i < offset->n - 1; i++) {
+    if (adj_lists && adj_lists[i]) tk_ivec_destroy(adj_lists[i]);
+    if (weight_lists && weight_lists[i]) tk_dvec_destroy(weight_lists[i]);
   }
   free(adj_lists);
   free(weight_lists);
@@ -218,6 +235,7 @@ static inline void tk_graph_adj_mst (
   tk_evec_destroy(mst_edges);
   tk_evec_destroy(edges);
   tk_euset_destroy(edgeset);
+  tk_dsu_destroy(dsu);
   tk_ivec_destroy(ids);
 }
 
