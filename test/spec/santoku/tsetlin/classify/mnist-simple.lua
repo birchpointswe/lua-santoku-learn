@@ -52,14 +52,14 @@ test("tsetlin", function ()
   })
 
   print("Training\n")
-  t.train({
+  t:train({
     samples = train.n,
     problems = train.problems,
     solutions = train.solutions,
     iterations = ITERATIONS,
     each = function (epoch)
-      local train_predicted = t.predict(train.problems, train.n)
-      local test_predicted = t.predict(test.problems, test.n)
+      local train_predicted = t:predict(train.problems, train.n)
+      local test_predicted = t:predict(test.problems, test.n)
       local train_accuracy = eval.class_accuracy(train_predicted, train.solutions, train.n, CLASSES)
       local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, CLASSES)
       local d, dd = stopwatch()

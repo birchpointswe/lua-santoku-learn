@@ -194,7 +194,6 @@ static inline void tk_ann_destroy (
   if (A->destroyed)
     return;
   A->destroyed = true;
-  tk_threads_destroy(A->pool);
   free(A->threads);
 }
 
@@ -467,6 +466,8 @@ static inline void tk_ann_mutualize (
   tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
   tk_iumap_t **hoods_sets = tk_malloc(L, uids->n * sizeof(tk_iumap_t *));
   for (uint64_t i = 0; i < uids->n; i ++)
+    hoods_sets[i] = NULL;
+  for (uint64_t i = 0; i < uids->n; i ++)
     hoods_sets[i] = tk_iumap_create(0, 0);
   for (uint64_t i = 0; i < A->pool->n_threads; i ++) {
     tk_ann_thread_t *data = A->threads + i;
@@ -565,6 +566,8 @@ static inline void tk_ann_neighborhoods (
   tk_iumap_t **hoods_sets = NULL;
   if (mutual && k) {
     hoods_sets = tk_malloc(L, n_queries * sizeof(tk_iumap_t *));
+    for (uint64_t i = 0; i < n_queries; i ++)
+      hoods_sets[i] = NULL;
     for (uint64_t i = 0; i < n_queries; i ++)
       hoods_sets[i] = tk_iumap_create(0, 0);
   }
@@ -685,6 +688,8 @@ static inline void tk_ann_neighborhoods_by_ids (
   tk_iumap_t **hoods_sets = NULL;
   if (mutual && k) {
     hoods_sets = tk_malloc(L, n_queries * sizeof(tk_iumap_t *));
+    for (uint64_t i = 0; i < n_queries; i ++)
+      hoods_sets[i] = NULL;
     for (uint64_t i = 0; i < n_queries; i ++)
       hoods_sets[i] = tk_iumap_create(0, 0);
   }
@@ -1611,6 +1616,8 @@ static inline tk_ann_t *tk_ann_create_base (
   A->threads = tk_malloc(L, n_threads * sizeof(tk_ann_thread_t));
   memset(A->threads, 0, n_threads * sizeof(tk_ann_thread_t));
   A->pool = tk_threads_create(L, n_threads, tk_ann_worker);
+  tk_lua_add_ephemeron(L, TK_ANN_EPH, Ai, -1);
+  lua_pop(L, 1);
   for (unsigned int i = 0; i < n_threads; i ++) {
     tk_ann_thread_t *data = A->threads + i;
     A->pool->threads[i].data = data;
@@ -1714,6 +1721,8 @@ static inline tk_ann_t *tk_ann_load (
   A->threads = tk_malloc(L, n_threads * sizeof(tk_ann_thread_t));
   memset(A->threads, 0, n_threads * sizeof(tk_ann_thread_t));
   A->pool = tk_threads_create(L, n_threads, tk_ann_worker);
+  tk_lua_add_ephemeron(L, TK_ANN_EPH, Ai, -1);
+  lua_pop(L, 1);
   for (unsigned int t = 0; t < n_threads; t ++) {
     tk_ann_thread_t *th = A->threads + t;
     A->pool->threads[t].data = th;

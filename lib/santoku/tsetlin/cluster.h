@@ -52,8 +52,7 @@ static inline void tk_cluster_dsu (
   if (ptmp) tk_pvec_clear(ptmp);
   if (rtmp) tk_rvec_clear(rtmp);
 
-  tk_dsu_t dsu;
-  tk_dsu_init(&dsu, ids);
+  tk_dsu_t *dsu = tk_dsu_create(NULL, ids);
 
   if (min_pts <= 1) {
 
@@ -61,7 +60,7 @@ static inline void tk_cluster_dsu (
       int64_t uid = ids->a[i];
       TK_FOR_EPS_NEIGHBORS(uid, {
         if (tk_in_idset(ididx, vid))
-          tk_dsu_union(&dsu, uid, vid);
+          tk_dsu_union(dsu, uid, vid);
       });
     }
 
@@ -72,7 +71,7 @@ static inline void tk_cluster_dsu (
     int64_t next_cluster = 0;
     for (uint64_t i = 0; i < ids->n; i ++) {
       int64_t u = ids->a[i];
-      int64_t r = tk_dsu_find(&dsu, u);
+      int64_t r = tk_dsu_find(dsu, u);
       khi = tk_iumap_get(ididx, u);
       assert(khi != tk_iumap_end(ididx));
       idx = tk_iumap_val(ididx, khi);
@@ -82,7 +81,7 @@ static inline void tk_cluster_dsu (
     }
 
     tk_iumap_destroy(cmap);
-    tk_dsu_free(&dsu);
+    tk_dsu_destroy(dsu);
     *n_clustersp = (uint64_t) next_cluster;
     return;
   }
@@ -120,7 +119,7 @@ static inline void tk_cluster_dsu (
         continue;
       if (!is_core->a[(uint64_t) k])
         continue;
-      tk_dsu_union(&dsu, uid, vid);
+      tk_dsu_union(dsu, uid, vid);
     });
   }
 
@@ -139,7 +138,7 @@ static inline void tk_cluster_dsu (
   for (uint64_t i = 0; i < n; i ++) {
     if (!is_core->a[i]) continue;
     int64_t u = ids->a[i];
-    int64_t r = tk_dsu_find(&dsu, u);
+    int64_t r = tk_dsu_find(dsu, u);
     khi = tk_iumap_put(cmap, r, &kha);
     if (kha) tk_iumap_setval(cmap, khi, next_cluster ++);
   }
@@ -147,7 +146,7 @@ static inline void tk_cluster_dsu (
   for (uint64_t i = 0; i < n; i ++) {
     if (!is_core->a[i]) continue;
     int64_t u = ids->a[i];
-    int64_t r = tk_dsu_find(&dsu, u);
+    int64_t r = tk_dsu_find(dsu, u);
     khint_t kc = tk_iumap_get(cmap, r);
     int64_t cid = (kc == tk_iumap_end(cmap)) ? -1 : tk_iumap_val(cmap, kc);
     khint_t ki = tk_iumap_get(ididx, u);
@@ -170,7 +169,7 @@ static inline void tk_cluster_dsu (
           continue;
         if (!is_core->a[(uint64_t) k])
           continue;
-        attach_root = tk_dsu_find(&dsu, vid);
+        attach_root = tk_dsu_find(dsu, vid);
         break;
       });
 
@@ -190,7 +189,7 @@ static inline void tk_cluster_dsu (
   }
 
   tk_iumap_destroy(cmap);
-  tk_dsu_free(&dsu);
+  tk_dsu_destroy(dsu);
   tk_ivec_destroy(is_core);
   tk_ivec_destroy(deg);
 
