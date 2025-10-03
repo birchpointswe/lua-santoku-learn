@@ -281,7 +281,10 @@ static void tk_eval_worker (void *dp, int sig)
         for (int64_t j = start; j < end; j ++) {
           int64_t neighbor = state->neighbors->a[j];
           double weight = state->weights->a[j];
-          tk_rvec_push(data->adj_ranks[i], tk_rank(neighbor, weight));
+          if (tk_rvec_push(data->adj_ranks[i], tk_rank(neighbor, weight)) != 0) {
+            atomic_store(&data->has_error, true);
+            return;
+          }
         }
         tk_rvec_desc(data->adj_ranks[i], 0, data->adj_ranks[i]->n);
         tk_rvec_ranks(data->adj_ranks[i], data->adj_ranks_idx[i]);
@@ -305,7 +308,10 @@ static void tk_eval_worker (void *dp, int sig)
             (const unsigned char *) state->codes + neighbor * state->chunks,
             (const unsigned char *) state->mask,
             state->n_dims);
-          tk_pvec_push(data->bin_ranks, tk_pair(neighbor, (int64_t) hamming_dist));
+          if (tk_pvec_push(data->bin_ranks, tk_pair(neighbor, (int64_t) hamming_dist)) != 0) {
+            atomic_store(&data->has_error, true);
+            return;
+          }
         }
         tk_pvec_asc(data->bin_ranks, 0, data->bin_ranks->n);
         tk_pvec_ranks(data->bin_ranks, data->bin_ranks_idx);
@@ -1141,7 +1147,8 @@ static void tm_optimize_bits_prefix_greedy (
         double score = tk_compute_reconstruction(state, candidate, active->n + 1, pool);
         if (score > current_score + 1e-12) {
           mask[TK_CVEC_BITS_BYTE(bit_add)] |= (1 << TK_CVEC_BITS_BIT(bit_add));
-          tk_ivec_push(active, bit_add);
+          if (tk_ivec_push(active, bit_add) != 0)
+            tk_lua_verror(L, 2, "optimize_bits", "allocation failed");
           double gain = current_score == -INFINITY ? 0 : (score - current_score);
           current_score = score;
           improved = true;

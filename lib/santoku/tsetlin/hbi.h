@@ -374,7 +374,10 @@ static inline void tk_hbi_add (
     } else {
       bucket = tk_hbi_buckets_val(A->buckets, khi);
     }
-    tk_ivec_push(bucket, sid);
+    if (tk_ivec_push(bucket, sid) != 0) {
+      tk_lua_verror(L, 2, "add", "allocation failed during indexing");
+      return;
+    }
     tk_hbi_codes_push(A->codes, h);
   }
 }
