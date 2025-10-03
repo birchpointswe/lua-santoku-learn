@@ -47,7 +47,7 @@ static inline int tk_itq_median_lua (lua_State *L)
   uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "itq", "n_dims");
   tk_cvec_t *out = tk_cvec_create(L, codes->n / n_dims * TK_CVEC_BITS_BYTES(n_dims), 0, 0);
   tk_cvec_zero(out);
-  tk_itq_median(out->a, codes->a, codes->n / n_dims, n_dims);
+  tk_itq_median(L, out->a, codes->a, codes->n / n_dims, n_dims);
   return 1;
 }
 

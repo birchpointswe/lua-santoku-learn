@@ -234,8 +234,14 @@ static inline int64_t tk_booleanizer_bit_string (
     return -1;
   } else if (train) {
     khi = tk_zumap_put(B->string_features, feature, &kha);
-    if (kha)
-      tk_zumap_setkey(B->string_features, khi, strdup(feature));
+    if (kha) {
+      size_t len = strlen(feature);
+      char *z = (char *) lua_newuserdata(L, len + 1);  // GC-tracked
+      memcpy(z, feature, len + 1);
+      tk_zumap_setkey(B->string_features, khi, z);
+      tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, 1, -1);  // B at pos 1
+      lua_pop(L, 1);
+    }
     int64_t id_feature = (int64_t) B->next_feature ++;
     tk_zumap_setval(B->string_features, khi, id_feature);
     return id_feature;
@@ -290,8 +296,14 @@ static inline void tk_booleanizer_observe_string (
   } else
     obs = tk_observed_strings_val(B->observed_strings, khi);
   khi = tk_cuset_put(obs, value, &kha);
-  if (kha)
-    tk_cuset_setkey(obs, khi, strdup(value));
+  if (kha) {
+    size_t len = strlen(value);
+    char *v = (char *) lua_newuserdata(L, len + 1);  // GC-tracked
+    memcpy(v, value, len + 1);
+    tk_cuset_setkey(obs, khi, v);
+    tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, 1, -1);  // B at pos 1
+    lua_pop(L, 1);
+  }
 }
 
 static inline void tk_booleanizer_observe_integer (
@@ -560,20 +572,30 @@ static inline void tk_booleanizer_restrict (
         k = tk_zumap_get(B->string_features, z);
     }));
     if (k != tk_zumap_end(B->string_features)) {
-      z = strdup(tk_zumap_key(B->string_features, k));
+      const char *old_z = tk_zumap_key(B->string_features, k);
+      size_t len = strlen(old_z);
+      char *z = (char *) lua_newuserdata(L, len + 1);  // GC-tracked
+      memcpy(z, old_z, len + 1);
       khi = tk_zumap_put(new_string_features, z, &kha);
       if (kha)
         tk_zumap_setval(new_string_features, khi, new_f);
+      tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+      lua_pop(L, 1);
     }
     tk_cat_bit_string_t cbs;
     int64_t new_bit;
     tk_umap_foreach(B->cat_bits_string, cbs, v, ({
       if (cbs.f == old_f) {
-        tk_cat_bit_string_t new_key = { .f = new_f, .v = strdup(cbs.v) };
+        size_t len = strlen(cbs.v);
+        char *new_v = (char *) lua_newuserdata(L, len + 1);  // GC-tracked
+        memcpy(new_v, cbs.v, len + 1);
+        tk_cat_bit_string_t new_key = { .f = new_f, .v = new_v };
         int kha;
         khint_t nk = tk_cat_bits_string_put(new_cat_bits_string, new_key, &kha);
         new_bit = next_bit ++;
         tk_cat_bits_string_setval(new_cat_bits_string, nk, new_bit);
+        tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+        lua_pop(L, 1);
       }
     }));
     tk_cat_bit_double_t cbd;
@@ -645,14 +667,8 @@ static inline void tk_booleanizer_destroy (
   if (B->destroyed)
     return;
   tk_booleanizer_shrink(B);
-  const char *z;
-  tk_umap_foreach_keys(B->string_features, z, ({
-    free((char *) z);
-  }));
-  tk_cat_bit_string_t cbs;
-  tk_umap_foreach_keys(B->cat_bits_string, cbs, ({
-    free(cbs.v);
-  }));
+  // String keys in string_features and cat_bits_string.v are now userdata
+  // managed by ephemerons, so we don't free them manually
   memset(B, 0, sizeof(*B));
   B->finalized = false;
   B->destroyed = true;
@@ -989,13 +1005,15 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
   tk_lua_fread(L, (char *) &sz, sizeof(sz), 1, fh);
   for (khint_t i = 0; i < sz; i ++) {
     tk_lua_fread(L, (char *) &len, sizeof(size_t), 1, fh);
-    char *z = (char *) malloc(len + 1);
-    tk_lua_fread(L, z, len, 1, fh);
+    char *z = (char *) lua_newuserdata(L, len + 1);  // GC-tracked on stack
+    tk_lua_fread(L, z, len, 1, fh);  // Safe: if throws, userdata GC'd
     z[len] = '\0';
     tk_lua_fread(L, (char *) &f, sizeof(int64_t), 1, fh);
     khi = tk_zumap_put(B->string_features, z, &kha);
     if (kha)
       tk_zumap_setval(B->string_features, khi, f);
+    tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);  // Anchor to B
+    lua_pop(L, 1);  // Pop userdata (string remains via ephemeron)
   }
   B->cat_bits_string = tk_cat_bits_string_create(L, 0);
   tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
@@ -1005,14 +1023,16 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
     int64_t feature_id;
     tk_lua_fread(L, (char *) &feature_id, sizeof(int64_t), 1, fh);
     tk_lua_fread(L, (char *) &len, sizeof(size_t), 1, fh);
-    char *value = (char *) malloc(len + 1);
-    tk_lua_fread(L, value, len, 1, fh);
+    char *value = (char *) lua_newuserdata(L, len + 1);  // GC-tracked on stack
+    tk_lua_fread(L, value, len, 1, fh);  // Safe: if throws, userdata GC'd
     value[len] = '\0';
     int64_t bit_id;
     tk_lua_fread(L, (char *) &bit_id, sizeof(int64_t), 1, fh);
     tk_cat_bit_string_t key = { .f = feature_id, .v = value };
     khint_t k = tk_cat_bits_string_put(B->cat_bits_string, key, &kha);
     tk_cat_bits_string_setval(B->cat_bits_string, k, bit_id);
+    tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);  // Anchor to B
+    lua_pop(L, 1);  // Pop userdata (string remains via ephemeron)
   }
   B->cat_bits_double = tk_cat_bits_double_create(L, 0);
   tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);

@@ -1,24 +1,36 @@
 #ifndef TK_DSU_H
 #define TK_DSU_H
 
+#define TK_DSU_EPH "tk_dsu_eph"
+
 typedef struct {
-  int64_t *ids; // NOTE: currently owned by caller! TODO: Use ephemeron
-  tk_iumap_t *ididx; // NOTE: rebuilt here, but likely can be passed in from caller
-  int64_t *parent;
-  int64_t *rank;
+  tk_ivec_t *ids;
+  tk_iumap_t *ididx;
+  tk_ivec_t *parent;
+  tk_ivec_t *rank;
   int64_t components;
+  bool is_userdata;
 } tk_dsu_t;
 
-static inline void tk_dsu_free (tk_dsu_t *dsu)
+static inline void tk_dsu_destroy (tk_dsu_t *dsu)
 {
-  tk_iumap_destroy(dsu->ididx);
+  if (!dsu)
+    return;
+  bool was_userdata = dsu->is_userdata;
+  if (dsu->ididx) {
+    tk_iumap_destroy(dsu->ididx);
+    dsu->ididx = NULL;
+  }
   if (dsu->parent) {
-    free(dsu->parent);
+    tk_ivec_destroy(dsu->parent);
     dsu->parent = NULL;
   }
   if (dsu->rank) {
-    free(dsu->rank);
+    tk_ivec_destroy(dsu->rank);
     dsu->rank = NULL;
+  }
+  if (!was_userdata) {
+    free(dsu);
   }
 }
 
@@ -27,16 +39,14 @@ static inline int64_t tk_dsu_components (tk_dsu_t *dsu)
   return dsu->components;
 }
 
-// TODO: Replace recursion with manual stack
-// TODO: Expose separate strictly index-based version
 static inline int64_t tk_dsu_findx (
   tk_dsu_t *dsu,
   int64_t uidx
 ) {
-  int64_t pidx = dsu->parent[uidx];
+  int64_t pidx = dsu->parent->a[uidx];
   if (uidx != pidx) {
     pidx = tk_dsu_findx(dsu, pidx);
-    dsu->parent[uidx] = pidx;
+    dsu->parent->a[uidx] = pidx;
   }
   return pidx;
 }
@@ -48,7 +58,7 @@ static inline int64_t tk_dsu_find (
   khint_t khi = tk_iumap_get(dsu->ididx, uid);
   assert(khi != tk_iumap_end(dsu->ididx));
   int64_t uidx = tk_iumap_val(dsu->ididx, khi);
-  return dsu->ids[tk_dsu_findx(dsu, uidx)];
+  return dsu->ids->a[tk_dsu_findx(dsu, uidx)];
 }
 
 static inline void tk_dsu_unionx (
@@ -61,15 +71,15 @@ static inline void tk_dsu_unionx (
   if (xridx == yridx)
     return;
   dsu->components --;
-  int64_t xrank = dsu->rank[xridx];
-  int64_t yrank = dsu->rank[yridx];
+  int64_t xrank = dsu->rank->a[xridx];
+  int64_t yrank = dsu->rank->a[yridx];
   if (xrank < yrank) {
     int64_t tmp = xridx; xridx = yridx; yridx = tmp;
     int64_t tr = xrank; xrank = yrank; yrank = tr;
   }
-  dsu->parent[yridx] = xridx;
+  dsu->parent->a[yridx] = xridx;
   if (xrank == yrank)
-    dsu->rank[xridx] = xrank + 1;
+    dsu->rank->a[xridx] = xrank + 1;
 }
 
 static inline void tk_dsu_union (
@@ -86,19 +96,59 @@ static inline void tk_dsu_union (
   tk_dsu_unionx(dsu, xidx, yidx);
 }
 
-static inline void tk_dsu_init (
-  tk_dsu_t *dsu,
+static inline tk_dsu_t *tk_dsu_create (
+  lua_State *L,
   tk_ivec_t *ids
 ) {
-  dsu->ids = ids->a; // TODO: add ids as ephemeron to DSU
-  dsu->ididx = tk_iumap_from_ivec(0, ids);
-  dsu->parent = malloc(ids->n * sizeof(int64_t)); // TODO: ivec, not malloc
-  dsu->rank = malloc(ids->n * sizeof(int64_t)); // TODO: ivec, not malloc
+  tk_dsu_t *dsu;
+  int dsu_idx;
+  if (L) {
+    dsu = lua_newuserdata(L, sizeof(tk_dsu_t));
+    dsu_idx = lua_gettop(L);
+    dsu->is_userdata = true;
+  } else {
+    dsu = malloc(sizeof(tk_dsu_t));
+    if (!dsu) return NULL;
+    memset(dsu, 0, sizeof(tk_dsu_t));
+    dsu->is_userdata = false;
+  }
+  dsu->ids = ids;
+  if (L) {
+    dsu->ididx = tk_iumap_from_ivec(L, ids);
+    tk_lua_add_ephemeron(L, TK_DSU_EPH, dsu_idx, -1);
+    lua_pop(L, 1);
+    dsu->parent = tk_ivec_create(L, ids->n, 0, 0);
+    tk_lua_add_ephemeron(L, TK_DSU_EPH, dsu_idx, -1);
+    lua_pop(L, 1);
+    dsu->rank = tk_ivec_create(L, ids->n, 0, 0);
+    tk_lua_add_ephemeron(L, TK_DSU_EPH, dsu_idx, -1);
+    lua_pop(L, 1);
+  } else {
+    dsu->ididx = tk_iumap_from_ivec(0, ids);
+    if (!dsu->ididx) {
+      free(dsu);
+      return NULL;
+    }
+    dsu->parent = tk_ivec_create(0, ids->n, 0, 0);
+    if (!dsu->parent) {
+      tk_iumap_destroy(dsu->ididx);
+      free(dsu);
+      return NULL;
+    }
+    dsu->rank = tk_ivec_create(0, ids->n, 0, 0);
+    if (!dsu->rank) {
+      tk_ivec_destroy(dsu->parent);
+      tk_iumap_destroy(dsu->ididx);
+      free(dsu);
+      return NULL;
+    }
+  }
   dsu->components = (int64_t) ids->n;
   for (uint64_t i = 0; i < ids->n; i ++) {
-    dsu->parent[i] = (int64_t) i;
-    dsu->rank[i] = 0;
+    dsu->parent->a[i] = (int64_t) i;
+    dsu->rank->a[i] = 0;
   }
+  return dsu;
 }
 
 #endif

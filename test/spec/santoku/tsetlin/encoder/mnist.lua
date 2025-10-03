@@ -153,24 +153,21 @@ test("tsetlin", function ()
   print("Creating graph")
 
   local stopwatch = utc.stopwatch()
-  train.graph = graph.create({
-    edges = train.seed,
-    index = graph_index,
-    bridge = BRIDGE,
-    sigma_k = SIGMA_K,
-    threads = THREADS,
-    each = function (ids, s, b, dt)
-      local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Nodes: %-6d  Components: %-6d  Edges: %-6d\n", d, dd, dt, ids, s, b)
-    end
-  })
   train.adj_ids,
   train.adj_offsets,
   train.adj_neighbors,
   train.adj_weights =
-    train.graph:adjacency()
-  train.graph:destroy()
-  train.graph = nil
+    graph.adjacency({
+      edges = train.seed,
+      index = graph_index,
+      bridge = BRIDGE,
+      sigma_k = SIGMA_K,
+      threads = THREADS,
+      each = function (ids, s, b, dt)
+        local d, dd = stopwatch()
+        str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Nodes: %-6d  Components: %-6d  Edges: %-6d\n", d, dd, dt, ids, s, b)
+      end
+    })
   graph_index:destroy()
   collectgarbage("collect")
 
@@ -409,7 +406,7 @@ test("tsetlin", function ()
       final_iterations = ITERATIONS,
       threads = THREADS,
       search_metric = function (t)
-        local predicted = t.predict(sth_problems, sth_n)
+        local predicted = t:predict(sth_problems, sth_n)
         local accuracy = eval.encoding_accuracy(predicted, sth_solutions, sth_n, dataset.n_hidden, THREADS)
         return accuracy.mean_hamming, accuracy
       end,
@@ -425,7 +422,7 @@ test("tsetlin", function ()
         train.accuracy_predicted = train_accuracy
         str.printi("    Train (acc) | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)", train.accuracy_predicted)
         if is_final then
-          local sth_predicted = t.predict(sth_problems, sth_n)
+          local sth_predicted = t:predict(sth_problems, sth_n)
           train.auc_predicted = eval.auc(sth_ids, sth_predicted, train.pos_sampled, train.neg_sampled, dataset.n_hidden, nil, THREADS)
           train.similarity_predicted = eval.optimize_retrieval({
             codes = sth_predicted,
@@ -434,7 +431,7 @@ test("tsetlin", function ()
             pos = train.pos_sampled,
             neg = train.neg_sampled,
           })
-          local test_predicted = t.predict(test_problems, test.n)
+          local test_predicted = t:predict(test_problems, test.n)
           test.auc_predicted = eval.auc(test_ids, test_predicted, test.pos_sampled, test.neg_sampled, dataset.n_hidden, nil, THREADS)
           test.similarity_predicted = eval.optimize_retrieval({
             codes = test_predicted,
@@ -484,7 +481,7 @@ test("tsetlin", function ()
 
       print("Clustering (train)")
       local idx_train = ann.create({ features = dataset.n_hidden, expected_size = train.n, threads = THREADS })
-      idx_train:add(train.encoder.predict(sth_problems, sth_n), sth_ids)
+      idx_train:add(train.encoder:predict(sth_problems, sth_n), sth_ids)
       local train_stats, _, _, train_nc = eval.optimize_clustering({
         index = idx_train,
         ids = train.ids_spectral,
@@ -504,7 +501,7 @@ test("tsetlin", function ()
 
       print("Clustering (test)")
       local idx_test = ann.create({ features = dataset.n_hidden, expected_size = test.n, threads = THREADS })
-      idx_test:add(train.encoder.predict(test_problems, test.n), test_ids)
+      idx_test:add(train.encoder:predict(test_problems, test.n), test_ids)
       local test_stats, _, _, test_nc = eval.optimize_clustering({
         index = idx_test,
         ids = test_ids,

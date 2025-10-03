@@ -4,40 +4,16 @@ local str = require("santoku.string")
 local err = require("santoku.error")
 local rand = require("santoku.random")
 
-local function wrap (t)
-  return {
-    train = function (...)
-      return tm.train(t, ...)
-    end,
-    predict = function (...)
-      return tm.predict(t, ...)
-    end,
-    destroy = function (...)
-      return tm.destroy(t, ...)
-    end,
-    persist = function (...)
-      return tm.persist(t, ...)
-    end,
-    type = function (...)
-      return tm.type(t, ...)
-    end,
-  }
-end
-
 local M = {}
 
-M.load = function (...)
-  return wrap(tm.load(...))
-end
-
+-- Re-export capi functions (userdata now has methods directly via metatable)
+M.load = tm.load
 M.classifier = function (...)
-  return wrap(tm.create("classifier", ...))
+  return tm.create("classifier", ...)
 end
-
 M.encoder = function (...)
-  return wrap(tm.create("encoder", ...))
+  return tm.create("encoder", ...)
 end
-
 M.align = tm.align
 
 local function round_to_pow2 (x)
@@ -217,7 +193,7 @@ M.optimize = function (args, typ)
               threads = args.threads,
             })
 
-            encoder.train({
+            encoder:train({
               sentences  = args.sentences,
               codes = args.codes,
               samples = args.samples,
@@ -241,7 +217,7 @@ M.optimize = function (args, typ)
               threads = args.threads,
             })
 
-            classifier.train({
+            classifier:train({
               samples = args.samples,
               problems = args.problems,
               solutions = args.solutions,
@@ -302,7 +278,7 @@ M.optimize = function (args, typ)
       threads = args.threads,
     })
 
-    encoder.train({
+    encoder:train({
       sentences  = args.sentences,
       codes = args.codes,
       samples = args.samples,
@@ -332,7 +308,7 @@ M.optimize = function (args, typ)
       threads = args.threads,
     })
 
-    classifier.train({
+    classifier:train({
       samples = args.samples,
       problems = args.problems,
       solutions = args.solutions,

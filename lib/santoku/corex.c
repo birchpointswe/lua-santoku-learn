@@ -8,7 +8,8 @@
 #include <math.h>
 #include <time.h>
 
-#define MT_COREX "santoku_corex"
+#define TK_COREX_MT "tk_corex_t"
+#define TK_COREX_EPH "tk_corex_eph"
 
 typedef enum {
   TK_CMP_INIT_SEED,
@@ -84,12 +85,13 @@ typedef struct tk_corex_s {
   unsigned int n_visible;
   unsigned int n_hidden;
   bool initialized_threads;
+  tk_corex_thread_t *threads;
   tk_threadpool_t *pool;
 } tk_corex_t;
 
 static tk_corex_t *peek_corex (lua_State *L, int i)
 {
-  return (tk_corex_t *) luaL_checkudata(L, i, MT_COREX);
+  return (tk_corex_t *) luaL_checkudata(L, i, TK_COREX_MT);
 }
 
 static inline void tk_corex_shrink (tk_corex_t *C)
@@ -133,17 +135,34 @@ static int tk_corex_gc (lua_State *L)
     numa_free(C->samples, C->samples_len); C->samples = NULL;
     numa_free(C->visibles, C->visibles_len); C->visibles = NULL;
   }
-  for (unsigned int i = 0; i < C->pool->n_threads; i ++)
-    free(C->pool->threads[i].data);
-  tk_threads_destroy(C->pool);
+  free(C->threads);
   return 0;
 }
 
 static inline int tk_corex_destroy (lua_State *L)
 {
-  lua_settop(L, 0);
-  lua_pushvalue(L, lua_upvalueindex(1));
-  return tk_corex_gc(L);
+  tk_corex_t *C = peek_corex(L, 1);
+  if (!C->destroyed) {
+    C->destroyed = true;
+    tk_corex_shrink(C);
+    free(C->mis); C->mis = NULL;
+    free(C->alpha); C->alpha = NULL;
+    free(C->log_marg); C->log_marg = NULL;
+    free(C->log_py); C->log_py = NULL;
+    free(C->log_pyx_unnorm); C->log_pyx_unnorm = NULL;
+    free(C->pyx); C->pyx = NULL;
+    free(C->baseline); C->baseline = NULL;
+    free(C->sort); C->sort = NULL;
+    if (numa_available() == -1) {
+      free(C->samples); C->samples = NULL;
+      free(C->visibles); C->visibles = NULL;
+    } else {
+      numa_free(C->samples, C->samples_len); C->samples = NULL;
+      numa_free(C->visibles, C->visibles_len); C->visibles = NULL;
+    }
+    free(C->threads);
+  }
+  return 0;
 }
 
 static inline int tk_corex_compress (lua_State *);
@@ -837,9 +856,10 @@ static inline void tk_corex_setup_threads (
   unsigned int n_samples
 ) {
   tk_threadpool_t *pool = C->pool;
+  C->threads = tk_malloc(L, C->pool->n_threads * sizeof(tk_corex_thread_t));
   if (!C->initialized_threads) {
     for (unsigned int i = 0; i < C->pool->n_threads; i ++) {
-      tk_corex_thread_t *data = tk_malloc(L, sizeof(tk_corex_thread_t));
+      tk_corex_thread_t *data = C->threads + i;
       pool->threads[i].data = data;
       data->C = C;
       data->index = i;
@@ -852,10 +872,10 @@ static inline void tk_corex_setup_threads (
 
 static inline int tk_corex_top_visible (lua_State *L)
 {
-  tk_corex_t *C = peek_corex(L, lua_upvalueindex(1));
+  tk_corex_t *C = peek_corex(L, 1);
   if (!C->trained)
     return tk_lua_verror(L, 1, "Can't extract features from untrained model!");
-  unsigned int top_k = tk_lua_checkunsigned(L, 1, "top_k");
+  unsigned int top_k = tk_lua_checkunsigned(L, 2, "top_k");
 
   // Build a fixed-size heap to track top-k features across all hidden units
   tk_rvec_t *top_heap = tk_rvec_create(L, 0, 0, 0);
@@ -884,9 +904,9 @@ static inline int tk_corex_top_visible (lua_State *L)
 
 static inline int tk_corex_compress (lua_State *L)
 {
-  tk_corex_t *C = peek_corex(L, lua_upvalueindex(1));
-  tk_ivec_t *set_bits = tk_ivec_peek(L, 1, "set_bits");
-  unsigned int n_samples = tk_lua_optunsigned(L, 2, "n_samples", 1);
+  tk_corex_t *C = peek_corex(L, 1);
+  tk_ivec_t *set_bits = tk_ivec_peek(L, 2, "set_bits");
+  unsigned int n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
 
   // TODO: Expose shrink via the api, and only realloc if new size is larger than old
   C->sort = tk_realloc(L, C->sort, set_bits->n * sizeof(tk_corex_sort_t));
@@ -976,6 +996,7 @@ static inline void _tk_corex_train (
 
 static inline void tk_corex_init (
   lua_State *L,
+  int Ci,
   tk_corex_t *C,
   double lam,
   double spa,
@@ -1009,6 +1030,8 @@ static inline void tk_corex_init (
   C->entropy_x = tk_malloc_interleaved(L, &C->entropy_len, C->n_visible * sizeof(double));
   C->maxmis = tk_malloc_interleaved(L, &C->maxmis_len, C->n_visible * sizeof(double));
   C->pool = tk_threads_create(L, n_threads, tk_corex_worker);
+  tk_lua_add_ephemeron(L, TK_COREX_EPH, Ci, -1);
+  lua_pop(L, 1);
   tk_corex_setup_threads(L, C, 0, 0);
   tk_threads_signal(C->pool, TK_CMP_INIT_SEED, 0);
   tk_threads_signal(C->pool, TK_CMP_INIT_TCS, 0);
@@ -1016,42 +1039,42 @@ static inline void tk_corex_init (
 }
 
 static inline int tk_corex_visible (lua_State *L) {
-  tk_corex_t *C = peek_corex(L, lua_upvalueindex(1));
+  tk_corex_t *C = peek_corex(L, 1);
   lua_pushinteger(L, C->n_visible);
   return 1;
 }
 
 static inline int tk_corex_hidden (lua_State *L) {
-  tk_corex_t *C = peek_corex(L, lua_upvalueindex(1));
+  tk_corex_t *C = peek_corex(L, 1);
   lua_pushinteger(L, C->n_hidden);
   return 1;
 }
 
 static inline int tk_corex_train (lua_State *L) {
-  tk_corex_t *C = peek_corex(L, lua_upvalueindex(1));
+  tk_corex_t *C = peek_corex(L, 1);
   if (C->trained)
     return tk_lua_error(L, "Already trained!\n");
-  lua_getfield(L, 1, "corpus");
+  lua_getfield(L, 2, "corpus");
   tk_ivec_t *set_bits = tk_ivec_peek(L, -1, "set_bits");
-  unsigned int n_samples = tk_lua_fcheckunsigned(L, 1, "train", "samples");
-  unsigned int max_iter = tk_lua_fcheckunsigned(L, 1, "train", "iterations");
+  unsigned int n_samples = tk_lua_fcheckunsigned(L, 2, "train", "samples");
+  unsigned int max_iter = tk_lua_fcheckunsigned(L, 2, "train", "iterations");
   int i_each = -1;
-  if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
-    lua_getfield(L, 1, "each");
+  if (tk_lua_ftype(L, 2, "each") != LUA_TNIL) {
+    lua_getfield(L, 2, "each");
     i_each = tk_lua_absindex(L, -1);
   }
-  _tk_corex_train(L, C, set_bits, n_samples, max_iter, i_each); // c
+  _tk_corex_train(L, C, set_bits, n_samples, max_iter, i_each);
   return 0;
 }
 
 static inline int tk_corex_persist (lua_State *L)
 {
-  tk_corex_t *C = peek_corex(L, lua_upvalueindex(1));
+  tk_corex_t *C = peek_corex(L, 1);
   if (!C->trained)
     return tk_lua_error(L, "Can't persist an untrained model\n");
-  lua_settop(L, 1);
-  bool tostr = lua_type(L, 1) == LUA_TNIL;
-  FILE *fh = tostr ? tk_lua_tmpfile(L) : tk_lua_fopen(L, luaL_checkstring(L, 1), "w");
+  lua_settop(L, 2);
+  bool tostr = lua_type(L, 2) == LUA_TNIL;
+  FILE *fh = tostr ? tk_lua_tmpfile(L) : tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
   tk_lua_fwrite(L, &C->trained, sizeof(bool), 1, fh);
   tk_lua_fwrite(L, &C->n_visible, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &C->n_hidden, sizeof(unsigned int), 1, fh);
@@ -1096,17 +1119,10 @@ static luaL_Reg mt_fns[] =
 
 static inline int tk_corex_load (lua_State *L)
 {
-  lua_settop(L, 3); // fp ts
-  tk_corex_t *C = (tk_corex_t *)
-    lua_newuserdata(L, sizeof(tk_corex_t)); // tp ts c
-  memset(C, 0, sizeof(tk_corex_t));
-  luaL_getmetatable(L, MT_COREX); // fp ts c mt
-  lua_setmetatable(L, -2); // fp ts c
-  lua_newtable(L); // fp ts c t
-  lua_pushvalue(L, -2); // fp ts c t c
-  tk_lua_register(L, mt_fns, 1); // fp ts c t
-  lua_remove(L, -2); // fp ts t
+  lua_settop(L, 3);
   unsigned int n_threads = tk_threads_getn(L, 2, "threads", NULL);
+  tk_corex_t *C = tk_lua_newuserdata(L, tk_corex_t, TK_COREX_MT, mt_fns, tk_corex_gc);
+  int Ci = lua_gettop(L);
   size_t len;
   const char *data = luaL_checklstring(L, 1, &len);
   bool isstr = lua_type(L, 3) == LUA_TBOOLEAN && lua_toboolean(L, 3);
@@ -1129,6 +1145,8 @@ static inline int tk_corex_load (lua_State *L)
   tk_lua_fread(L, C->baseline, sizeof(double), 2 * C->n_hidden, fh);
   tk_lua_fclose(L, fh);
   C->pool = tk_threads_create(L, n_threads, tk_corex_worker);
+  tk_lua_add_ephemeron(L, TK_COREX_EPH, Ci, -1);
+  lua_pop(L, 1);
   tk_corex_setup_threads(L, C, 0, 0);
   return 1;
 }
@@ -1136,6 +1154,7 @@ static inline int tk_corex_load (lua_State *L)
 static inline int tk_corex_create (lua_State *L)
 {
   lua_settop(L, 1);
+  luaL_checktype(L, 1, LUA_TTABLE);
   unsigned int n_visible = tk_lua_fcheckunsigned(L, 1, "create", "visible");
   unsigned int n_hidden = tk_lua_fcheckunsigned(L, 1, "create", "hidden");
   double lam = tk_lua_foptnumber(L, 1, "create", "lam", 0.3);
@@ -1146,13 +1165,9 @@ static inline int tk_corex_create (lua_State *L)
   unsigned int tile_sblock = tk_lua_foptunsigned(L, 1, "create", "tile_s", 1024);
   unsigned int tile_vblock = tk_lua_foptunsigned(L, 1, "create", "tile_v", 2048);
   unsigned int n_threads = tk_threads_getn(L, 1, "create", "threads");
-  tk_corex_t *C = (tk_corex_t *) lua_newuserdata(L, sizeof(tk_corex_t)); // c
-  luaL_getmetatable(L, MT_COREX); // c mt
-  lua_setmetatable(L, -2); // c
-  tk_corex_init(L, C, lam, spa, tmin, ttc, anchor, tile_sblock, tile_vblock, n_visible, n_hidden, n_threads); // c
-  lua_newtable(L); // c t
-  lua_pushvalue(L, -2); // c t c
-  tk_lua_register(L, mt_fns, 1); // t
+  tk_corex_t *C = tk_lua_newuserdata(L, tk_corex_t, TK_COREX_MT, mt_fns, tk_corex_gc);
+  int Ci = lua_gettop(L);
+  tk_corex_init(L, Ci, C, lam, spa, tmin, ttc, anchor, tile_sblock, tile_vblock, n_visible, n_hidden, n_threads);
   return 1;
 }
 
@@ -1165,11 +1180,7 @@ static luaL_Reg fns[] =
 
 int luaopen_santoku_corex (lua_State *L)
 {
-  lua_newtable(L); // t
-  luaL_register(L, NULL, fns); // t
-  luaL_newmetatable(L, MT_COREX); // t mt
-  lua_pushcfunction(L, tk_corex_gc); // t mt fn
-  lua_setfield(L, -2, "__gc"); // t mt
-  lua_pop(L, 1); // t
+  lua_newtable(L);
+  luaL_register(L, NULL, fns);
   return 1;
 }
