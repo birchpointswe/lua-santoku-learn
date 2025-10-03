@@ -404,7 +404,10 @@ static inline void tk_ann_add (
     } else {
       bucket = kh_value(A->buckets, khi);
     }
-    tk_ivec_push(bucket, sid);
+    if (tk_ivec_push(bucket, sid) != 0) {
+      tk_lua_verror(L, 2, "add", "allocation failed during indexing");
+      return;
+    }
     tk_cvec_t datavec = {
       .n = TK_CVEC_BITS_BYTES(A->features),
       .m = TK_CVEC_BITS_BYTES(A->features),

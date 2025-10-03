@@ -268,7 +268,15 @@ static inline void tm_run_spectral (
     return;
   }
 
-  tk_dvec_ensure(z, uids->n * n_hidden);
+  if (tk_dvec_ensure(z, uids->n * n_hidden) != 0) {
+    primme_free(&params);
+    free(threads);
+    free(spec.evals);
+    free(spec.evecs);
+    free(spec.resNorms);
+    tk_lua_verror(L, 2, "spectral", "allocation failed");
+    return;
+  }
   z->n = uids->n * n_hidden;
   double eps_drop = fmax(1e-8, 10.0 * eps);
   uint64_t start = fabs(spec.evals[0]) < eps_drop ? 1 : 0;

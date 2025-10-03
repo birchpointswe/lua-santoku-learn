@@ -13,6 +13,7 @@
 #include <santoku/tsetlin/dsu.h>
 #include <float.h>
 #include <math.h>
+#include <stdatomic.h>
 
 #define TK_GRAPH_MT "tk_graph_t"
 #define TK_GRAPH_EPH "tk_graph_eph"
@@ -77,6 +78,7 @@ typedef struct tk_graph_thread_s {
   int64_t csr_base;
   uint64_t ifirst, ilast;
   unsigned int index;
+  atomic_bool has_error;
 } tk_graph_thread_t;
 
 static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
@@ -133,7 +135,8 @@ static inline void tk_graph_adj_mst (
     if (tk_dsu_find(dsu, e.u) == tk_dsu_find(dsu, e.v))
       continue;
     tk_dsu_union(dsu, e.u, e.v);
-    tk_evec_push(mst_edges, tk_edge(e.u, e.v, e.w));
+    if (tk_evec_push(mst_edges, tk_edge(e.u, e.v, e.w)) != 0)
+      goto cleanup;
   }
 
   ks_introsort(tk_evec_asc_u, mst_edges->n, mst_edges->a);
@@ -144,7 +147,8 @@ static inline void tk_graph_adj_mst (
 
   if (mst_edges->n == 0) {
     for (uint64_t i = 0; i <= offset->n - 1; i++)
-      tk_ivec_push(mst_offset, 0);
+      if (tk_ivec_push(mst_offset, 0) != 0)
+        goto cleanup;
     tk_evec_destroy(mst_edges);
     tk_evec_destroy(edges);
     tk_euset_destroy(edgeset);
@@ -153,6 +157,8 @@ static inline void tk_graph_adj_mst (
   }
 
   tk_ivec_t *degree = tk_ivec_create(0, offset->n - 1, 0, 0);
+  if (!degree)
+    goto cleanup;
   for (uint64_t i = 0; i < offset->n - 1; i++)
     degree->a[i] = 0;
 
@@ -165,20 +171,24 @@ static inline void tk_graph_adj_mst (
     }
   }
 
-  tk_ivec_push(mst_offset, 0);
+  if (tk_ivec_push(mst_offset, 0) != 0)
+    goto cleanup;
   for (uint64_t i = 0; i < offset->n - 1; i++) {
     int64_t prev_offset = mst_offset->a[mst_offset->n - 1];
     int64_t deg = degree->a[i];
     if (deg < 0 || prev_offset < 0 || (deg > 0 && prev_offset > INT64_MAX - deg)) {
-      tk_ivec_push(mst_offset, INT64_MAX);
+      if (tk_ivec_push(mst_offset, INT64_MAX) != 0)
+        goto cleanup;
     } else {
-      tk_ivec_push(mst_offset, prev_offset + deg);
+      if (tk_ivec_push(mst_offset, prev_offset + deg) != 0)
+        goto cleanup;
     }
   }
 
   // Add final offset entry for CSR format
   int64_t final_offset = mst_offset->a[mst_offset->n - 1];
-  tk_ivec_push(mst_offset, final_offset);
+  if (tk_ivec_push(mst_offset, final_offset) != 0)
+    goto cleanup;
 
   tk_ivec_t **adj_lists = calloc(offset->n - 1, sizeof(tk_ivec_t*));
   tk_dvec_t **weight_lists = calloc(offset->n - 1, sizeof(tk_dvec_t*));
@@ -203,10 +213,14 @@ static inline void tk_graph_adj_mst (
     tk_edge_t e = mst_edges->a[i];
     if (e.u >= 0 && e.u < (int64_t)(offset->n - 1) &&
         e.v >= 0 && e.v < (int64_t)(offset->n - 1)) {
-      tk_ivec_push(adj_lists[e.u], e.v);
-      tk_dvec_push(weight_lists[e.u], e.w);
-      tk_ivec_push(adj_lists[e.v], e.u);
-      tk_dvec_push(weight_lists[e.v], e.w);
+      if (tk_ivec_push(adj_lists[e.u], e.v) != 0)
+        goto cleanup;
+      if (tk_dvec_push(weight_lists[e.u], e.w) != 0)
+        goto cleanup;
+      if (tk_ivec_push(adj_lists[e.v], e.u) != 0)
+        goto cleanup;
+      if (tk_dvec_push(weight_lists[e.v], e.w) != 0)
+        goto cleanup;
     }
   }
 
@@ -216,9 +230,12 @@ static inline void tk_graph_adj_mst (
         int64_t neighbor = adj_lists[i]->a[j];
         double weight = weight_lists[i]->a[j];
         if (neighbor >= 0 && neighbor < (int64_t)(offset->n - 1)) {
-          tk_ivec_push(mst_neighbors, neighbor);
-          tk_dvec_push(mst_weights, weight);
-          tk_ivec_push(mst_sources, (int64_t) i);
+          if (tk_ivec_push(mst_neighbors, neighbor) != 0)
+            goto cleanup;
+          if (tk_dvec_push(mst_weights, weight) != 0)
+            goto cleanup;
+          if (tk_ivec_push(mst_sources, (int64_t) i) != 0)
+            goto cleanup;
         }
       }
     }
