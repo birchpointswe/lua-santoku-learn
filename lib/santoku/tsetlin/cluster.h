@@ -18,6 +18,7 @@ typedef struct {
   tk_iumap_t *ididx;
   uint64_t margin;
   double eps;
+  uint64_t depth;  // For prefix-based clustering
   uint64_t min_pts;
   bool assign_noise;
   uint64_t probe_radius;
@@ -36,6 +37,9 @@ typedef struct {
   tk_cvec_t *is_core_reuse;
   tk_rvec_t *rtmp;
   tk_pvec_t *ptmp;
+  uint64_t *prefix_cache_reuse;
+  tk_bits_t *prefix_bytes_reuse;
+  uint64_t prefix_cache_depth;
 } tk_cluster_opts_t;
 
 static inline int tk_in_idset (tk_iumap_t *ididx, int64_t id) {
@@ -284,6 +288,232 @@ static inline void tk_cluster_dsu (tk_cluster_opts_t *opts) {
   if (created_is_core)
     tk_cvec_destroy(is_core);
   *opts->n_clustersp = (uint64_t) next_cluster;
+}
+
+static inline bool tk_prefix_equal_bytes(
+  const tk_bits_t *a, const tk_bits_t *b, uint64_t depth
+) {
+  uint64_t full_bytes = depth / 8;
+  uint64_t remaining_bits = depth % 8;
+  if (full_bytes > 0 && memcmp(a, b, full_bytes) != 0)
+    return false;
+  if (remaining_bits > 0) {
+    uint8_t mask = (uint8_t)((1u << remaining_bits) - 1);
+    if ((a[full_bytes] & mask) != (b[full_bytes] & mask))
+      return false;
+  }
+  return true;
+}
+
+static inline uint64_t tk_extract_prefix_u64(
+  const tk_bits_t *code, uint64_t depth
+) {
+  uint64_t prefix = 0;
+  for (uint64_t bit = 0; bit < depth && bit < 64; bit++) {
+    uint64_t byte_idx = bit / 8;
+    uint64_t bit_idx = bit % 8;
+    if (code[byte_idx] & (1u << bit_idx))
+      prefix |= (1ULL << bit);
+  }
+  return prefix;
+}
+
+static inline void tk_cluster_prefix (tk_cluster_opts_t *opts) {
+  uint64_t n = opts->ids->n;
+  uint64_t depth = opts->depth;
+
+  uint64_t features = 0;
+  if (opts->hbi != NULL) {
+    features = opts->hbi->features;
+  } else if (opts->ann != NULL) {
+    features = opts->ann->features;
+  } else {
+    *opts->n_clustersp = 0;
+    return;
+  }
+
+  if (depth > features) depth = features;
+
+  if (depth == 0) {
+    for (uint64_t i = 0; i < n; i++) {
+      int64_t u = opts->ids->a[i];
+      khint_t khi = tk_iumap_get(opts->ididx, u);
+      int64_t idx = tk_iumap_val(opts->ididx, khi);
+      opts->assignments->a[idx] = 0;
+    }
+    *opts->n_clustersp = 1;
+    return;
+  }
+
+  bool use_incremental = (opts->prefix_cache_reuse != NULL &&
+                          opts->prefix_cache_depth == depth + 1);
+  bool use_u64 = (depth <= 64);
+
+  if (use_incremental) {
+    tk_iumap_t *prefix_to_cluster = tk_iumap_create(0, 0);
+    int64_t next_cluster_id = 0;
+
+    for (uint64_t i = 0; i < n; i++) {
+      int64_t uid = opts->ids->a[i];
+      uint64_t new_prefix = opts->prefix_cache_reuse[i] >> 1;
+      khint_t khi = tk_iumap_get(prefix_to_cluster, (int64_t)new_prefix);
+      int64_t cluster_id;
+      if (khi == tk_iumap_end(prefix_to_cluster)) {
+        int kha;
+        khi = tk_iumap_put(prefix_to_cluster, (int64_t)new_prefix, &kha);
+        tk_iumap_setval(prefix_to_cluster, khi, next_cluster_id);
+        cluster_id = next_cluster_id++;
+      } else {
+        cluster_id = tk_iumap_val(prefix_to_cluster, khi);
+      }
+      opts->prefix_cache_reuse[i] = new_prefix;
+      khint_t khi_idx = tk_iumap_get(opts->ididx, uid);
+      int64_t idx = tk_iumap_val(opts->ididx, khi_idx);
+      opts->assignments->a[idx] = cluster_id;
+    }
+
+    tk_iumap_destroy(prefix_to_cluster);
+    opts->prefix_cache_depth = depth;
+    *opts->n_clustersp = (uint64_t)next_cluster_id;
+
+  } else if (use_u64) {
+    tk_iumap_t *prefix_map = tk_iumap_create(0, 0);
+    int64_t next_cluster_id = 0;
+
+    for (uint64_t i = 0; i < n; i++) {
+      int64_t uid = opts->ids->a[i];
+      uint64_t prefix = 0;
+
+      if (opts->hbi != NULL) {
+        khint_t khi_uid = tk_iumap_get(opts->hbi->uid_sid, uid);
+        if (khi_uid == tk_iumap_end(opts->hbi->uid_sid))
+          continue;
+        int64_t sid = tk_iumap_val(opts->hbi->uid_sid, khi_uid);
+        uint32_t code = opts->hbi->codes->a[sid];
+        prefix = (depth < features) ? (code >> (features - depth)) : code;
+      } else if (opts->ann != NULL) {
+        khint_t khi_uid = tk_iumap_get(opts->ann->uid_sid, uid);
+        if (khi_uid == tk_iumap_end(opts->ann->uid_sid))
+          continue;
+        int64_t sid = tk_iumap_val(opts->ann->uid_sid, khi_uid);
+        uint64_t chunks = TK_CVEC_BITS_BYTES(features);
+        tk_bits_t *vec = (tk_bits_t *)opts->ann->vectors->a + ((uint64_t)sid * chunks);
+        prefix = tk_extract_prefix_u64(vec, depth);
+      }
+
+      if (opts->prefix_cache_reuse != NULL)
+        opts->prefix_cache_reuse[i] = prefix;
+
+      khint_t khi = tk_iumap_get(prefix_map, (int64_t)prefix);
+      int64_t cluster_id;
+      if (khi == tk_iumap_end(prefix_map)) {
+        int kha;
+        khi = tk_iumap_put(prefix_map, (int64_t)prefix, &kha);
+        tk_iumap_setval(prefix_map, khi, next_cluster_id);
+        cluster_id = next_cluster_id++;
+      } else {
+        cluster_id = tk_iumap_val(prefix_map, khi);
+      }
+
+      khint_t khi_idx = tk_iumap_get(opts->ididx, uid);
+      int64_t idx = tk_iumap_val(opts->ididx, khi_idx);
+      opts->assignments->a[idx] = cluster_id;
+    }
+
+    if (opts->prefix_cache_reuse != NULL)
+      opts->prefix_cache_depth = depth;
+
+    tk_iumap_destroy(prefix_map);
+    *opts->n_clustersp = (uint64_t)next_cluster_id;
+
+  } else {
+    uint64_t chunks = TK_CVEC_BITS_BYTES(features);
+    tk_bits_t *codes_buffer = NULL;
+    bool codes_cached = (opts->prefix_bytes_reuse != NULL &&
+                        opts->prefix_cache_depth == depth + 1);
+
+    if (!codes_cached) {
+      codes_buffer = (tk_bits_t *)malloc(n * chunks);
+      if (!codes_buffer) {
+        *opts->n_clustersp = 0;
+        return;
+      }
+      for (uint64_t i = 0; i < n; i++) {
+        int64_t uid = opts->ids->a[i];
+        tk_bits_t *dest = codes_buffer + i * chunks;
+        if (opts->ann != NULL) {
+          khint_t khi_uid = tk_iumap_get(opts->ann->uid_sid, uid);
+          if (khi_uid == tk_iumap_end(opts->ann->uid_sid)) {
+            memset(dest, 0, chunks);
+            continue;
+          }
+          int64_t sid = tk_iumap_val(opts->ann->uid_sid, khi_uid);
+          tk_bits_t *src = (tk_bits_t *) opts->ann->vectors->a + ((uint64_t)sid * chunks);
+          memcpy(dest, src, chunks);
+        }
+      }
+      if (opts->prefix_bytes_reuse != NULL)
+        memcpy(opts->prefix_bytes_reuse, codes_buffer, n * chunks);
+    } else {
+      codes_buffer = opts->prefix_bytes_reuse;
+    }
+
+    uint64_t *indices = (uint64_t *)malloc(n * sizeof(uint64_t));
+    if (!indices) {
+      if (!codes_cached) free(codes_buffer);
+      *opts->n_clustersp = 0;
+      return;
+    }
+    for (uint64_t i = 0; i < n; i++)
+      indices[i] = i;
+
+    for (uint64_t i = 1; i < n; i++) {
+      uint64_t key_idx = indices[i];
+      tk_bits_t *key_code = codes_buffer + key_idx * chunks;
+      int64_t j = (int64_t)i - 1;
+      while (j >= 0) {
+        uint64_t cmp_idx = indices[j];
+        tk_bits_t *cmp_code = codes_buffer + cmp_idx * chunks;
+        bool less = false;
+        uint64_t full_bytes = depth / 8;
+        uint64_t remaining_bits = depth % 8;
+        int cmp_result = memcmp(key_code, cmp_code, full_bytes);
+        if (cmp_result < 0) {
+          less = true;
+        } else if (cmp_result == 0 && remaining_bits > 0) {
+          uint8_t mask = (uint8_t)((1u << remaining_bits) - 1);
+          if ((key_code[full_bytes] & mask) < (cmp_code[full_bytes] & mask))
+            less = true;
+        }
+        if (!less) break;
+        indices[j + 1] = indices[j];
+        j--;
+      }
+      indices[j + 1] = key_idx;
+    }
+
+    int64_t next_cluster_id = 0;
+    tk_bits_t *prev_code = NULL;
+    for (uint64_t i = 0; i < n; i++) {
+      uint64_t idx_in_ids = indices[i];
+      int64_t uid = opts->ids->a[idx_in_ids];
+      tk_bits_t *curr_code = codes_buffer + idx_in_ids * chunks;
+      bool new_cluster = (prev_code == NULL ||
+                         !tk_prefix_equal_bytes(curr_code, prev_code, depth));
+      if (new_cluster)
+        next_cluster_id++;
+      khint_t khi_idx = tk_iumap_get(opts->ididx, uid);
+      int64_t assign_idx = tk_iumap_val(opts->ididx, khi_idx);
+      opts->assignments->a[assign_idx] = next_cluster_id - 1;
+      prev_code = curr_code;
+    }
+
+    free(indices);
+    if (!codes_cached) free(codes_buffer);
+    if (opts->prefix_bytes_reuse != NULL)
+      opts->prefix_cache_depth = depth;
+    *opts->n_clustersp = (uint64_t)next_cluster_id;
+  }
 }
 
 #endif

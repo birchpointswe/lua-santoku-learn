@@ -22,6 +22,11 @@ typedef enum {
   TK_EVAL_GRAPH_RECONSTRUCTION_DESTROY,
 } tk_eval_stage_t;
 
+typedef enum {
+  TK_CLUSTER_METHOD_GRAPH,
+  TK_CLUSTER_METHOD_PREFIX,
+} tk_cluster_method_t;
+
 typedef struct {
   tm_dl_t *pl;
   atomic_ulong *ERR, *TP, *FP, *FN, *hist_pos, *hist_neg;
@@ -33,6 +38,7 @@ typedef struct {
   tk_hbi_t *hbi;
   uint64_t min_pts;
   bool assign_noise;
+  tk_cluster_method_t cluster_method;
   uint64_t min_margin, max_margin;
   tk_dvec_t *inv_thresholds;  // Pre-computed distance thresholds for INV
   uint64_t probe_radius;
@@ -99,6 +105,9 @@ typedef struct {
   uint64_t nodes_processed;
   tk_dsu_t *dsu;
   tk_cvec_t *is_core;
+  uint64_t *prefix_cache;
+  tk_bits_t *prefix_bytes;
+  uint64_t prefix_cache_depth;
 } tk_eval_thread_t;
 
 static inline tk_accuracy_t _tm_clustering_accuracy (
@@ -131,24 +140,57 @@ static void tk_eval_worker (void *dp, int sig)
       break;
 
     case TK_EVAL_OPTIMIZE_CLUSTERING:
-      if (data->dsu == NULL) {
-        data->dsu = tk_dsu_create(NULL, state->ids);
+      if (state->cluster_method == TK_CLUSTER_METHOD_GRAPH) {
         if (data->dsu == NULL) {
-          atomic_store(&data->has_error, true);
-          return;
+          data->dsu = tk_dsu_create(NULL, state->ids);
+          if (data->dsu == NULL) {
+            atomic_store(&data->has_error, true);
+            return;
+          }
         }
-      }
-
-      if (data->is_core == NULL) {
-        data->is_core = tk_cvec_create(0, TK_CVEC_BITS_BYTES(state->ids->n), 0, 0);
-        tk_cvec_zero(data->is_core);
         if (data->is_core == NULL) {
-          atomic_store(&data->has_error, true);
-          return;
+          data->is_core = tk_cvec_create(0, TK_CVEC_BITS_BYTES(state->ids->n), 0, 0);
+          tk_cvec_zero(data->is_core);
+          if (data->is_core == NULL) {
+            atomic_store(&data->has_error, true);
+            return;
+          }
+        }
+      } else if (state->cluster_method == TK_CLUSTER_METHOD_PREFIX) {
+        uint64_t max_features = state->hbi ? state->hbi->features :
+                                state->ann ? state->ann->features : 0;
+        if (max_features <= 64) {
+          if (data->prefix_cache == NULL) {
+            data->prefix_cache = (uint64_t *)malloc(state->ids->n * sizeof(uint64_t));
+            if (data->prefix_cache == NULL) {
+              atomic_store(&data->has_error, true);
+              return;
+            }
+            memset(data->prefix_cache, 0, state->ids->n * sizeof(uint64_t));
+            data->prefix_cache_depth = 0;
+          }
+        } else {
+          if (data->prefix_bytes == NULL) {
+            uint64_t chunks = TK_CVEC_BITS_BYTES(max_features);
+            data->prefix_bytes = (tk_bits_t *)malloc(state->ids->n * chunks);
+            if (data->prefix_bytes == NULL) {
+              atomic_store(&data->has_error, true);
+              return;
+            }
+            memset(data->prefix_bytes, 0, state->ids->n * chunks);
+            data->prefix_cache_depth = 0;
+          }
         }
       }
 
-      for (uint64_t m0 = data->mfirst; m0 <= data->mlast; m0 ++) {
+      uint64_t m_start = state->cluster_method == TK_CLUSTER_METHOD_PREFIX ? data->mlast : data->mfirst;
+      uint64_t m_end = state->cluster_method == TK_CLUSTER_METHOD_PREFIX ? data->mfirst : data->mlast;
+      int64_t m_step = state->cluster_method == TK_CLUSTER_METHOD_PREFIX ? -1 : 1;
+
+      for (int64_t m0_signed = (int64_t)m_start;
+           m_step > 0 ? (m0_signed <= (int64_t)m_end) : (m0_signed >= (int64_t)m_end);
+           m0_signed += m_step) {
+        uint64_t m0 = (uint64_t)m0_signed;
         tk_ivec_clear(data->next_assignments);
 
         tk_cluster_opts_t cluster_opts = {
@@ -174,21 +216,31 @@ static void tk_eval_worker (void *dp, int sig)
           .dsu_reuse = data->dsu,
           .is_core_reuse = data->is_core,
           .rtmp = data->rtmp,
-          .ptmp = data->ptmp
+          .ptmp = data->ptmp,
+          .prefix_cache_reuse = data->prefix_cache,
+          .prefix_bytes_reuse = data->prefix_bytes,
+          .prefix_cache_depth = data->prefix_cache_depth
         };
 
-        if (state->inv != NULL) {
-          uint64_t bin_idx = m0 + state->min_margin;
-          double eps = state->inv_thresholds->a[bin_idx];
-          cluster_opts.eps = eps;
-          data->next_m = (uint64_t)(eps * 1000);
+        if (state->cluster_method == TK_CLUSTER_METHOD_PREFIX) {
+          uint64_t depth = m0 + state->min_margin;
+          cluster_opts.depth = depth;
+          data->next_m = depth;
+          tk_cluster_prefix(&cluster_opts);
+          data->prefix_cache_depth = cluster_opts.prefix_cache_depth;
         } else {
-          uint64_t m = m0 + state->min_margin;
-          cluster_opts.margin = m;
-          data->next_m = m;
+          if (state->inv != NULL) {
+            uint64_t bin_idx = m0 + state->min_margin;
+            double eps = state->inv_thresholds->a[bin_idx];
+            cluster_opts.eps = eps;
+            data->next_m = (uint64_t)(eps * 1000);
+          } else {
+            uint64_t m = m0 + state->min_margin;
+            cluster_opts.margin = m;
+            data->next_m = m;
+          }
+          tk_cluster_dsu(&cluster_opts);
         }
-
-        tk_cluster_dsu(&cluster_opts);
 
         tk_accuracy_t result = _tm_clustering_accuracy(state->ids, data->next_assignments, state->pos, state->neg);
         data->next = result;
@@ -214,6 +266,14 @@ static void tk_eval_worker (void *dp, int sig)
       if (data->is_core != NULL) {
         tk_cvec_destroy(data->is_core);
         data->is_core = NULL;
+      }
+      if (data->prefix_cache != NULL) {
+        free(data->prefix_cache);
+        data->prefix_cache = NULL;
+      }
+      if (data->prefix_bytes != NULL) {
+        free(data->prefix_bytes);
+        data->prefix_bytes = NULL;
       }
       break;
 
@@ -886,10 +946,26 @@ static inline int tm_optimize_clustering (lua_State *L)
   bool assign_noise = tk_lua_foptboolean(L, 1, "optimize clustering", "assign_noise", true);
   uint64_t probe_radius = tk_lua_foptunsigned(L, 1, "optimize clustering", "probe_radius", 3);
 
+  const char *methodstr = tk_lua_foptstring(L, 1, "optimize clustering", "method", "graph");
+  tk_cluster_method_t method = TK_CLUSTER_METHOD_GRAPH;
+  if (!strcmp(methodstr, "graph"))
+    method = TK_CLUSTER_METHOD_GRAPH;
+  else if (!strcmp(methodstr, "prefix"))
+    method = TK_CLUSTER_METHOD_PREFIX;
+
+  if (method == TK_CLUSTER_METHOD_PREFIX && (hbi == NULL && ann == NULL))
+    tk_lua_verror(L, 3, "optimize_clustering", "method", "prefix method requires hbi or ann index");
+
   uint64_t min_margin = tk_lua_foptunsigned(L, 1, "optimize clustering", "min_margin", 0);
   uint64_t max_margin = 0;
 
-  if (!use_inv) {
+  if (method == TK_CLUSTER_METHOD_PREFIX) {
+    max_margin = tk_lua_foptunsigned(L, 1, "optimize clustering", "max_margin", n_features);
+    if (max_margin > n_features) max_margin = n_features;
+    if (min_margin > n_features) min_margin = n_features;
+    if (max_margin < min_margin)
+      max_margin = min_margin;
+  } else if (!use_inv) {
     max_margin = tk_lua_foptunsigned(L, 1, "optimize clustering", "max_margin", n_features);
     uint64_t fs = ann != NULL ? ann->features : hbi != NULL ? hbi->features : 0;
     if (max_margin > fs) max_margin = fs;
@@ -955,6 +1031,7 @@ static inline int tm_optimize_clustering (lua_State *L)
   state.neg = neg;
   state.assign_noise = assign_noise;
   state.min_pts = min_pts;
+  state.cluster_method = method;
   state.min_margin = min_margin;
   state.max_margin = max_margin;
   state.inv_thresholds = inv_thresholds;
@@ -1037,6 +1114,9 @@ static inline int tm_optimize_clustering (lua_State *L)
     data[i].rtmp = tk_rvec_create(L, 0, 0, 0);
     data[i].dsu = NULL;
     data[i].is_core = NULL;
+    data[i].prefix_cache = NULL;
+    data[i].prefix_bytes = NULL;
+    data[i].prefix_cache_depth = 0;
     tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -4);
     tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -3);
     tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
@@ -1083,7 +1163,15 @@ static inline int tm_optimize_clustering (lua_State *L)
 
   lua_newtable(L); // t ids as score
   lua_pushinteger(L, (lua_Integer) best_m);
-  lua_setfield(L, -2, "margin");
+  if (method == TK_CLUSTER_METHOD_PREFIX) {
+    lua_setfield(L, -2, "depth");
+    lua_pushinteger(L, (lua_Integer) best_m);
+    lua_setfield(L, -2, "margin");
+  } else {
+    lua_setfield(L, -2, "margin");
+    lua_pushinteger(L, (lua_Integer) best_m);
+    lua_setfield(L, -2, "depth");
+  }
   lua_pushinteger(L, (lua_Integer) best_n);
   lua_setfield(L, -2, "n_clusters");
   lua_pushnumber(L, best.bacc);
@@ -1482,15 +1570,7 @@ static void tm_optimize_bits_prefix_greedy (
 
   }
 
-  for (uint64_t i = 0; i < active->n - 1; i ++) {
-    for (uint64_t j = i + 1; j < active->n; j ++) {
-      if (active->a[i] > active->a[j]) {
-        int64_t temp = active->a[i];
-        active->a[i] = active->a[j];
-        active->a[j] = temp;
-      }
-    }
-  }
+  tk_ivec_asc(active, 0, active->n);
 }
 
 static inline int tm_optimize_bits (lua_State *L)

@@ -28,6 +28,7 @@ SOFTWARE.
 
 #include <santoku/lua/utils.h>
 #include <santoku/tsetlin/conf.h>
+#include <santoku/tsetlin/simhash.h>
 #include <santoku/threads.h>
 #include <santoku/cvec.h>
 
@@ -96,6 +97,7 @@ typedef struct tk_tsetlin_s {
   tk_bits_t tail_mask;
   tk_bits_t *state;
   tk_bits_t *actions;
+  tk_simhash_t simhash;
   double negative;
   double specificity;
   size_t results_len;
@@ -118,65 +120,6 @@ typedef struct tk_tsetlin_s {
 #define tm_state_clause_chunks(pool, thread) \
   (tm_thread_data(pool, thread)->clast - tm_thread_data(pool, thread)->cfirst + 1)
 
-#define tm_state_counts(tm, clause, input_chunk) \
-  (&(tm)->state[(clause) * (tm)->input_chunks * ((tm)->state_bits - 1) + \
-                (input_chunk) * ((tm)->state_bits - 1)])
-
-#define tm_state_actions(tm, clause) \
-  (&(tm)->actions[(clause) * (tm)->input_chunks])
-
-static inline void tm_inc (
-  tk_tsetlin_t *tm,
-  unsigned int clause,
-  unsigned int chunk,
-  tk_bits_t active
-) {
-  if (!active) return;
-  unsigned int m = tm->state_bits - 1;
-  tk_bits_t *counts = tm_state_counts(tm, clause, chunk);
-  tk_bits_t carry, carry_next;
-  carry = active;
-  for (unsigned int b = 0; b < m; b ++) {
-    carry_next = counts[b] & carry;
-    counts[b] ^= carry;
-    carry = carry_next;
-  }
-  tk_bits_t *actions = tm_state_actions(tm, clause);
-  tk_bits_t carry_masked = carry & ((chunk == tm->input_chunks - 1) ? tm->tail_mask : (tk_bits_t)~0);
-  carry_next = actions[chunk] & carry_masked;
-  actions[chunk] ^= carry_masked;
-  carry = carry_next;
-  for (unsigned int b = 0; b < m; b ++)
-    counts[b] |= carry_masked;
-  actions[chunk] |= carry_masked;
-}
-
-static inline void tm_dec (
-  tk_tsetlin_t *tm,
-  unsigned int clause,
-  unsigned int chunk,
-  tk_bits_t active
-) {
-  if (!active) return;
-  unsigned int m = tm->state_bits - 1;
-  tk_bits_t *counts = tm_state_counts(tm, clause, chunk);
-  tk_bits_t carry, carry_next;
-  carry = active;
-  for (unsigned int b = 0; b < m; b ++) {
-    carry_next = (~counts[b]) & carry;
-    counts[b] ^= carry;
-    carry = carry_next;
-  }
-  tk_bits_t *actions = tm_state_actions(tm, clause);
-  tk_bits_t carry_masked = carry & ((chunk == tm->input_chunks - 1) ? tm->tail_mask : (tk_bits_t) ~0);
-  carry_next = (~actions[chunk]) & carry_masked;
-  actions[chunk] ^= carry_masked;
-  carry = carry_next;
-  for (unsigned int b = 0; b < m; b ++)
-    counts[b] &= ~carry_masked;
-  actions[chunk] &= ~carry_masked;
-}
-
 static inline tk_bits_t tk_tsetlin_calculate (
   tk_tsetlin_t *tm,
   tk_bits_t *input,
@@ -189,7 +132,7 @@ static inline tk_bits_t tk_tsetlin_calculate (
   unsigned int tolerance = tm->clause_tolerance;
   for (unsigned int j = 0; j < TK_CVEC_BITS; j ++) {
     unsigned int clause = chunk * TK_CVEC_BITS + j;
-    tk_bits_t *actions = tm_state_actions(tm, clause);
+    tk_bits_t *actions = tk_simhash_actions(&tm->simhash, clause);
     unsigned int failed = 0;
     unsigned int literals = 0;
     for (unsigned int k = 0; k < input_chunks - 1; k ++) {
@@ -253,10 +196,10 @@ static inline void apply_feedback (
       // Type Ia: clause voted
       if (literals[clause_idx] < max_literals)
         for (unsigned int k = 0; k < input_chunks; k ++)
-          tm_inc(tm, chunk * TK_CVEC_BITS + clause_idx, k, input[k]);
+          tk_simhash_inc(&tm->simhash, chunk * TK_CVEC_BITS + clause_idx, k, input[k]);
       // Type Ib: deterministic negative feedback
       for (unsigned int k = 0; k < input_chunks; k ++)
-        tm_dec(tm, chunk * TK_CVEC_BITS + clause_idx, k, ~input[k]);
+        tk_simhash_dec(&tm->simhash, chunk * TK_CVEC_BITS + clause_idx, k, ~input[k]);
     } else {
       // Clause didn't vote: random penalty
       unsigned int s = (2 * features) / specificity;
@@ -264,7 +207,7 @@ static inline void apply_feedback (
         unsigned int random_chunk = tk_fast_random() % input_chunks;
         unsigned int random_bit = tk_fast_random() % TK_CVEC_BITS;
         tk_bits_t random_mask = (tk_bits_t)1 << random_bit;
-        tm_dec(tm, chunk * TK_CVEC_BITS + clause_idx, random_chunk, random_mask);
+        tk_simhash_dec(&tm->simhash, chunk * TK_CVEC_BITS + clause_idx, random_chunk, random_mask);
       }
     }
   } else {
@@ -272,7 +215,7 @@ static inline void apply_feedback (
     if (output)
       // Type II feedback: include false input literals
       for (unsigned int k = 0; k < input_chunks; k ++)
-        tm_inc(tm, chunk * TK_CVEC_BITS + clause_idx, k, ~input[k]);
+        tk_simhash_inc(&tm->simhash, chunk * TK_CVEC_BITS + clause_idx, k, ~input[k]);
   }
 }
 
@@ -498,25 +441,9 @@ static void tk_classifier_setup_thread (
   unsigned int clast,
   unsigned int thread
 ) {
-  unsigned int m = tm->state_bits - 1;
-  unsigned int include_threshold = 1 << (m - 1);
-  unsigned int initial_state = include_threshold - 1;
-  for (unsigned int clause_chunk = cfirst; clause_chunk <= clast; clause_chunk ++) {
-    for (unsigned int clause_chunk_pos = 0; clause_chunk_pos < TK_CVEC_BITS; clause_chunk_pos ++) {
-      unsigned int clause = clause_chunk * TK_CVEC_BITS + clause_chunk_pos;
-      for (unsigned int input_chunk = 0; input_chunk < tm->input_chunks; input_chunk ++) {
-        tk_bits_t *actions = tm_state_actions(tm, clause);
-        tk_bits_t *counts = tm_state_counts(tm, clause, input_chunk);
-        actions[input_chunk] = 0;
-        for (unsigned int b = 0; b < m; b ++) {
-          if (initial_state & (1 << b))
-            counts[b] = TK_CVEC_ALL_MASK;
-          else
-            counts[b] = TK_CVEC_ZERO_MASK;
-        }
-      }
-    }
-  }
+  uint64_t first_clause = cfirst * TK_CVEC_BITS;
+  uint64_t last_clause = clast * TK_CVEC_BITS + TK_CVEC_BITS - 1;
+  tk_simhash_setup_initial_state(&tm->simhash, first_clause, last_clause);
 }
 
 static void tk_encoder_setup_thread (
@@ -759,6 +686,14 @@ static inline void tk_tsetlin_init_classifier (
   tm->specificity = specificity;
   if (!(tm->state && tm->actions))
     luaL_error(L, "error in malloc during creation of classifier");
+  tm->simhash.mode = TK_SIMHASH_PACKED;
+  tm->simhash.n_items = tm->classes * tm->clauses;
+  tm->simhash.n_chunks = tm->input_chunks;
+  tm->simhash.state_bits = tm->state_bits;
+  tm->simhash.tail_mask = tm->tail_mask;
+  tm->simhash.counts = tm->state;
+  tm->simhash.counts_int = NULL;
+  tm->simhash.actions = tm->actions;
 }
 
 static inline int tk_tsetlin_init_encoder (
@@ -1212,6 +1147,14 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, 
   tk_lua_fread(L, &tm->tail_mask, sizeof(tk_bits_t), 1, fh);
   tm->actions = tk_malloc_aligned(L, sizeof(tk_bits_t) * tm->action_chunks, TK_CVEC_BITS);
   tk_lua_fread(L, tm->actions, sizeof(tk_bits_t), tm->action_chunks, fh);
+  tm->simhash.mode = TK_SIMHASH_PACKED;
+  tm->simhash.n_items = tm->classes * tm->clauses;
+  tm->simhash.n_chunks = tm->input_chunks;
+  tm->simhash.state_bits = tm->state_bits;
+  tm->simhash.tail_mask = tm->tail_mask;
+  tm->simhash.counts = tm->state;
+  tm->simhash.counts_int = NULL;
+  tm->simhash.actions = tm->actions;
 }
 
 static inline void tk_tsetlin_load_classifier (lua_State *L, FILE *fh, bool read_state, bool has_state)
