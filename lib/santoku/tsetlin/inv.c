@@ -25,8 +25,7 @@ static inline int tk_inv_create_lua (lua_State *L)
   if (ranks != NULL)
     n_ranks = tk_lua_fcheckunsigned(L, 1, "create", "n_ranks");
   double decay = tk_lua_foptnumber(L, 1, "create", "decay", 1.0);
-  uint64_t n_threads = tk_threads_getn(L, 1, "create", "threads");
-  tk_inv_create(L, features, weights, n_ranks, ranks, decay, n_threads, i_weights, i_ranks);
+  tk_inv_create(L, features, weights, n_ranks, ranks, decay, i_weights, i_ranks);
   return 1;
 }
 
@@ -36,8 +35,7 @@ static inline int tk_inv_load_lua (lua_State *L)
   const char *data = tk_lua_checklstring(L, 1, &len, "data");
   bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && tk_lua_checkboolean(L, 2);
   FILE *fh = isstr ? tk_lua_fmemopen(L, (char *) data, len, "r") : tk_lua_fopen(L, data, "r");
-  uint64_t n_threads = tk_threads_getn(L, 3, "create", NULL);
-  tk_inv_load(L, fh, n_threads);
+  tk_inv_load(L, fh);
   tk_lua_fclose(L, fh);
   return 1;
 }

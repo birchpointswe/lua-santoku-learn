@@ -962,9 +962,13 @@ static inline tk_booleanizer_t *tk_booleanizer_create (
   tk_booleanizer_t *B = tk_lua_newuserdata(L, tk_booleanizer_t, TK_BOOLEANIZER_MT, tk_booleanizer_mt_fns, tk_booleanizer_gc_lua);
   int Bi = lua_gettop(L);
   B->continuous = (continuous != NULL) ? tk_iuset_from_ivec(L, continuous) : tk_iuset_create(L, 0);
+  if (!B->continuous)
+    tk_error(L, "booleanizer: iuset_from_ivec failed", ENOMEM);
   tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
   lua_pop(L, 1);
   B->categorical = (categorical != NULL) ? tk_iuset_from_ivec(L, categorical) : tk_iuset_create(L, 0);
+  if (!B->categorical)
+    tk_error(L, "booleanizer: iuset_from_ivec failed", ENOMEM);
   tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
   lua_pop(L, 1);
   B->n_thresholds = n_thresholds;

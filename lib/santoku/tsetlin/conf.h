@@ -62,12 +62,14 @@ static inline void *tk_ensure_interleaved (
     tk_error(L, "realloc failed", ENOMEM);
     return NULL;
   } else {
-    if (copy)
+    if (copy && p0 && s0 > 0)
       memcpy(p1, p0, s0);
-    if (numa_available() == -1)
-      free(p0);
-    else
-      numa_free(p0, s0);
+    if (p0) {
+      if (numa_available() == -1)
+        free(p0);
+      else
+        numa_free(p0, s0);
+    }
     return p1;
   }
 }
