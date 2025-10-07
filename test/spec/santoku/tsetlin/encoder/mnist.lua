@@ -27,7 +27,7 @@ local HIDDEN = 32
 local LANDMARKS = 24
 local MODE = "landmarks"
 
-local ENCODER = nil
+local ENCODER = true
 local CLUSTER = true
 local BINARIZE = "median"
 
@@ -43,6 +43,7 @@ local KNN = 32
 local KNN_EPS = nil
 local KNN_MIN = nil
 local KNN_MUTUAL = false
+local CLUSTER_METHOD = "prefix"
 local CLUSTER_KNN = nil
 local CLUSTER_KNN_MUTUAL = nil
 local MIN_PTS = 32
@@ -472,6 +473,9 @@ test("tsetlin", function ()
       ids = train.ids_spectral,
       pos = train.pos_sampled,
       neg = train.neg_sampled,
+      method = CLUSTER_METHOD,
+      knn = CLUSTER_KNN,
+      knn_mutual = CLUSTER_KNN_MUTUAL,
       min_pts = MIN_PTS,
       assign_noise = true,
       threads = THREADS,
@@ -498,6 +502,9 @@ test("tsetlin", function ()
         ids = train.ids_spectral,
         pos = train.pos_sampled,
         neg = train.neg_sampled,
+        method = CLUSTER_METHOD,
+        knn = CLUSTER_KNN,
+        knn_mutual = CLUSTER_KNN_MUTUAL,
         min_pts = MIN_PTS,
         assign_noise = true,
         threads = THREADS,
@@ -522,6 +529,7 @@ test("tsetlin", function ()
         ids = test_ids,
         pos = test.pos_sampled,
         neg = test.neg_sampled,
+        method = CLUSTER_METHOD,
         knn = CLUSTER_KNN,
         knn_mutual = CLUSTER_KNN_MUTUAL,
         min_pts = MIN_PTS,
