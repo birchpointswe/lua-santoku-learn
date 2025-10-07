@@ -190,7 +190,6 @@ M.optimize = function (args, typ)
               clause_maximum = params.clause_maximum,
               target = params.target,
               specificity = params.specificity,
-              threads = args.threads,
             })
 
             encoder:train({
@@ -198,6 +197,7 @@ M.optimize = function (args, typ)
               codes = args.codes,
               samples = args.samples,
               iterations = iters_search,
+              threads = args.threads,
               each = function (epoch)
                 return each(epoch, encoder)
               end,
@@ -214,7 +214,6 @@ M.optimize = function (args, typ)
               clause_maximum = params.clause_maximum,
               target = params.target,
               specificity = params.specificity,
-              threads = args.threads,
             })
 
             classifier:train({
@@ -222,6 +221,7 @@ M.optimize = function (args, typ)
               problems = args.problems,
               solutions = args.solutions,
               iterations = iters_search,
+              threads = args.threads,
               each = function (epoch)
                 return each(epoch, classifier)
               end,
@@ -275,7 +275,6 @@ M.optimize = function (args, typ)
       clause_maximum = best_params.clause_maximum,
       target = best_params.target,
       specificity = best_params.specificity,
-      threads = args.threads,
     })
 
     encoder:train({
@@ -283,6 +282,7 @@ M.optimize = function (args, typ)
       codes = args.codes,
       samples = args.samples,
       iterations = final_iters,
+      threads = args.threads,
       each = function (epoch)
         if each_cb then
           local _, metrics = metric_fn(encoder)
@@ -305,7 +305,6 @@ M.optimize = function (args, typ)
       clause_maximum = best_params.clause_maximum,
       target = best_params.target,
       specificity = best_params.specificity,
-      threads = args.threads,
     })
 
     classifier:train({
@@ -313,6 +312,7 @@ M.optimize = function (args, typ)
       problems = args.problems,
       solutions = args.solutions,
       iterations = final_iters,
+      threads = args.threads,
       each = function (epoch)
         if each_cb then
           local _, metrics = metric_fn(classifier)

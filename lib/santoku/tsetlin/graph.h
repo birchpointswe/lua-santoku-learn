@@ -56,14 +56,12 @@ typedef struct tk_graph_s {
   bool knn_mutual;
   int64_t knn_rank;
   bool bridge;
+  uint64_t probe_radius;
 
   tk_dvec_t *sigmas;
   uint64_t n_edges;
   tk_dsu_t *dsu;
   int64_t largest_component_root;
-
-  tk_graph_thread_t *threads;
-  tk_threadpool_t *pool;
 
   bool destroyed;
 

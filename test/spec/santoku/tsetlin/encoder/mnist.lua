@@ -4,6 +4,7 @@ local eval = require("santoku.tsetlin.evaluator")
 local tm = require("santoku.tsetlin")
 local inv = require("santoku.tsetlin.inv")
 local ann = require("santoku.tsetlin.ann")
+local hbi = require("santoku.tsetlin.hbi")
 local pvec = require("santoku.pvec")
 local ivec = require("santoku.ivec")
 local cvec = require("santoku.cvec")
@@ -16,7 +17,7 @@ local test = require("santoku.test")
 local utc = require("santoku.utc")
 
 local TTR = 0.9
-local MAX = 100
+local MAX = nil
 local MAX_CLASS = nil
 local THREADS = nil
 
@@ -26,7 +27,7 @@ local HIDDEN = 32
 local LANDMARKS = 24
 local MODE = "landmarks"
 
-local ENCODER = true
+local ENCODER = nil
 local CLUSTER = true
 local BINARIZE = "median"
 
@@ -34,6 +35,7 @@ local TCH = true
 local ITQ_EPS = 1e-8
 local ITQ_ITERATIONS = 200
 
+local CORRELATION = "spearman"
 local LAPLACIAN = "unnormalized"
 local DECAY = 2.0
 
@@ -41,29 +43,35 @@ local KNN = 32
 local KNN_EPS = nil
 local KNN_MIN = nil
 local KNN_MUTUAL = false
+local CLUSTER_KNN = nil
+local CLUSTER_KNN_MUTUAL = nil
+local MIN_PTS = 32
 local BRIDGE = true
-local MIN_PTS = 256
+local ANN = false -- true: ann, false: hbi
 
-local SEED_PAIRS = nil
-local SEED_ANCHORS = nil
-local SEED_CLASS_ANCHORS = nil
+-- local SEED_PAIRS = nil
+-- local SEED_ANCHORS = nil
+-- local SEED_CLASS_ANCHORS = nil
 local SAMPLED_ANCHORS = 16
-local SIGMA_K = nil
+-- local SIGMA_K = nil
 
 local RANKS = true
+local KEEP_PREFIX = nil
+local START_PREFIX = nil
+local SFFS_TOLERANCE = -1e-4
 local SFFS_FIXED = nil
 
-local CLAUSES = 32 --{ def = 8, min = 8, max = 128, int = true, log = true, pow2 = true }
-local CLAUSE_TOLERANCE = 128 --{ def = 8, min = 8, max = 256, int = true, log = true, pow2 = true }
-local CLAUSE_MAXIMUM = 128 --{ def = 8, min = 8, max = 256, int = true, log = true, pow2 = true }
-local TARGET = 64 --{ def = 4, min = 2, max = 256, int = true, log = true, pow2 = true }
-local SPECIFICITY = 2 --{ def = 1000, min = 2, max = 4000, int = true, log = true }
+local CLAUSES = { def = 8, min = 8, max = 128, int = true, log = true, pow2 = true }
+local CLAUSE_TOLERANCE = { def = 8, min = 8, max = 256, int = true, log = true, pow2 = true }
+local CLAUSE_MAXIMUM = { def = 8, min = 8, max = 256, int = true, log = true, pow2 = true }
+local TARGET = { def = 4, min = 2, max = 256, int = true, log = true, pow2 = true }
+local SPECIFICITY = { def = 1000, min = 2, max = 4000, int = true, log = true }
 
 local SEARCH_PATIENCE = 10
 local SEARCH_ROUNDS = 20
 local SEARCH_TRIALS = 4
 local SEARCH_ITERATIONS = 10
-local ITERATIONS = 5
+local ITERATIONS = 100
 
 test("tsetlin", function ()
 
@@ -81,32 +89,32 @@ test("tsetlin", function ()
   local train, test = ds.split_binary_mnist(dataset, TTR)
   if KNN then
     print("  Indexing original")
-    local idx = ann.create({ features = dataset.n_visible, expected_size = train.n, threads = THREADS })
+    local idx = ann.create({ features = dataset.n_visible, expected_size = train.n })
     local data = ivec.create()
     dataset.problems:bits_select(nil, train.ids, dataset.n_visible, data)
     idx:add(data:bits_to_cvec(train.n, dataset.n_visible), train.ids)
     print("  Neighborhoods")
-    local ids, hoods = idx:neighborhoods(KNN, KNN_EPS, KNN_MIN, KNN_MUTUAL)
+    local ids, hoods = idx:neighborhoods(KNN, nil, KNN_EPS, KNN_MIN, KNN_MUTUAL, THREADS)
     train.seed = ds.star_hoods(ids, hoods)
     idx:destroy()
     collectgarbage("collect")
   else
     train.seed = pvec.create()
   end
-  if SEED_PAIRS then
-    train.seed = train.seed or pvec.create()
-    ds.random_pairs(train.ids, SEED_PAIRS, train.seed)
-  end
-  if SEED_ANCHORS then
-    train.seed = train.seed or pvec.create()
-    ds.anchor_pairs(train.ids, SEED_ANCHORS, train.seed)
-  end
-  if SEED_CLASS_ANCHORS then
-    local pos, neg = ds.multiclass_pairs(train.ids, train.solutions, SEED_CLASS_ANCHORS, SEED_CLASS_ANCHORS)
-    train.seed = train.seed or pvec.create()
-    train.seed:copy(pos)
-    train.seed:copy(neg)
-  end
+  -- if SEED_PAIRS then
+  --   train.seed = train.seed or pvec.create()
+  --   ds.random_pairs(train.ids, SEED_PAIRS, train.seed)
+  -- end
+  -- if SEED_ANCHORS then
+  --   train.seed = train.seed or pvec.create()
+  --   ds.anchor_pairs(train.ids, SEED_ANCHORS, train.seed)
+  -- end
+  -- if SEED_CLASS_ANCHORS then
+  --   local pos, neg = ds.multiclass_pairs(train.ids, train.solutions, SEED_CLASS_ANCHORS, SEED_CLASS_ANCHORS)
+  --   train.seed = train.seed or pvec.create()
+  --   train.seed:copy(pos)
+  --   train.seed:copy(neg)
+  -- end
   collectgarbage("collect")
 
   print("Building the graph index")
@@ -129,13 +137,7 @@ test("tsetlin", function ()
     graph_ranks:fill(0, dataset.n_visible, dataset.n_visible + 10)
 
     print("  Indexing")
-    graph_index = inv.create({
-      features = dataset.n_visible + 10,
-      ranks = graph_ranks,
-      decay = DECAY,
-      threads = THREADS,
-      n_ranks = 2
-    })
+    graph_index = inv.create({ features = dataset.n_visible + 10, ranks = graph_ranks, decay = DECAY, n_ranks = 2 })
     graph_index:add(graph_problems, graph_ids)
 
   else
@@ -144,7 +146,7 @@ test("tsetlin", function ()
     print("  Indexing")
     local graph_problems = ivec.create()
     dataset.problems:bits_select(nil, train.ids, dataset.n_visible, graph_problems)
-    graph_index = inv.create({ features = dataset.n_visible, threads = THREADS })
+    graph_index = inv.create({ features = dataset.n_visible })
     graph_index:add(graph_problems, train.ids)
     collectgarbage("collect")
 
@@ -161,7 +163,7 @@ test("tsetlin", function ()
       edges = train.seed,
       index = graph_index,
       bridge = BRIDGE,
-      sigma_k = SIGMA_K,
+      -- sigma_k = SIGMA_K,
       threads = THREADS,
       each = function (ids, s, b, dt)
         local d, dd = stopwatch()
@@ -262,6 +264,10 @@ test("tsetlin", function ()
       offsets = train.adj_offsets,
       neighbors = train.adj_neighbors,
       weights = train.adj_weights,
+      keep_prefix = KEEP_PREFIX,
+      start_prefix = START_PREFIX,
+      tolerance = SFFS_TOLERANCE,
+      correlation = CORRELATION,
       threads = THREADS,
       each = function (bit, gain, score, action)
         local d, dd = stopwatch()
@@ -311,7 +317,9 @@ test("tsetlin", function ()
 
   if ENCODER or CLUSTER then
     print("Indexing spectral codes")
-    train.idx_spectral = ann.create({ features = dataset.n_hidden, expected_size = train.ids_spectral:size(), threads = THREADS })
+    train.idx_spectral = ANN
+      and ann.create({ features = dataset.n_hidden, expected_size = train.ids_spectral:size() })
+      or hbi.create({ features = dataset.n_hidden })
     train.idx_spectral:add(train.codes_spectral, train.ids_spectral)
     collectgarbage("collect")
   end
@@ -350,11 +358,11 @@ test("tsetlin", function ()
       dataset.problems:bits_select(nil, train.ids_spectral, dataset.n_visible, sth_raw)
       sth_raw = sth_raw:bits_to_cvec(sth_n, dataset.n_visible)
 
-      local sth_idx = ann.create({ features = dataset.n_visible, expected_size = sth_ids:size(), threads = THREADS })
+      local sth_idx = ann.create({ features = dataset.n_visible, expected_size = sth_ids:size() })
       sth_idx:add(sth_raw, sth_ids)
 
       local sth_hoods
-      sth_ids, sth_hoods = sth_idx:neighborhoods(dataset.n_landmarks)
+      sth_ids, sth_hoods = sth_idx:neighborhoods(dataset.n_landmarks, nil, nil, nil, nil, THREADS)
 
       sth_solutions = train.idx_spectral:get(sth_ids)
       sth_problems = cvec.create()
@@ -371,7 +379,7 @@ test("tsetlin", function ()
       local test_vecs = ivec.create()
       dataset.problems:bits_select(nil, test.ids, dataset.n_visible, test_vecs)
       test_vecs = test_vecs:bits_to_cvec(test.n, dataset.n_visible)
-      local nbr_ids, nbr_hoods = sth_idx:neighborhoods_by_vecs(test_vecs, dataset.n_landmarks)
+      local nbr_ids, nbr_hoods = sth_idx:neighborhoods_by_vecs(test_vecs, dataset.n_landmarks, nil, nil, nil, THREADS)
       for i0, hood in nbr_hoods:ieach() do
         hood:keys(tmp)
         tmp:lookup(nbr_ids)
@@ -406,7 +414,7 @@ test("tsetlin", function ()
       final_iterations = ITERATIONS,
       threads = THREADS,
       search_metric = function (t)
-        local predicted = t:predict(sth_problems, sth_n)
+        local predicted = t:predict(sth_problems, sth_n, THREADS)
         local accuracy = eval.encoding_accuracy(predicted, sth_solutions, sth_n, dataset.n_hidden, THREADS)
         return accuracy.mean_hamming, accuracy
       end,
@@ -422,7 +430,7 @@ test("tsetlin", function ()
         train.accuracy_predicted = train_accuracy
         str.printi("    Train (acc) | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)", train.accuracy_predicted)
         if is_final then
-          local sth_predicted = t:predict(sth_problems, sth_n)
+          local sth_predicted = t:predict(sth_problems, sth_n, THREADS)
           train.auc_predicted = eval.auc(sth_ids, sth_predicted, train.pos_sampled, train.neg_sampled, dataset.n_hidden, nil, THREADS)
           train.similarity_predicted = eval.optimize_retrieval({
             codes = sth_predicted,
@@ -430,8 +438,9 @@ test("tsetlin", function ()
             ids = sth_ids,
             pos = train.pos_sampled,
             neg = train.neg_sampled,
+            threads = THREADS,
           })
-          local test_predicted = t:predict(test_problems, test.n)
+          local test_predicted = t:predict(test_problems, test.n, THREADS)
           test.auc_predicted = eval.auc(test_ids, test_predicted, test.pos_sampled, test.neg_sampled, dataset.n_hidden, nil, THREADS)
           test.similarity_predicted = eval.optimize_retrieval({
             codes = test_predicted,
@@ -480,13 +489,17 @@ test("tsetlin", function ()
     if ENCODER then
 
       print("Clustering (train)")
-      local idx_train = ann.create({ features = dataset.n_hidden, expected_size = train.n, threads = THREADS })
-      idx_train:add(train.encoder:predict(sth_problems, sth_n), sth_ids)
+      local idx_train = ANN
+        and ann.create({ features = dataset.n_hidden, expected_size = train.n })
+        or hbi.create({ features = dataset.n_hidden })
+      idx_train:add(train.encoder:predict(sth_problems, sth_n, THREADS), sth_ids)
       local train_stats, _, _, train_nc = eval.optimize_clustering({
         index = idx_train,
         ids = train.ids_spectral,
         pos = train.pos_sampled,
         neg = train.neg_sampled,
+        min_pts = MIN_PTS,
+        assign_noise = true,
         threads = THREADS,
         each = function (f, p, r, m, c)
           local d, dd = stopwatch()
@@ -500,13 +513,19 @@ test("tsetlin", function ()
       collectgarbage("collect")
 
       print("Clustering (test)")
-      local idx_test = ann.create({ features = dataset.n_hidden, expected_size = test.n, threads = THREADS })
-      idx_test:add(train.encoder:predict(test_problems, test.n), test_ids)
+      local idx_test = ANN
+        and ann.create({ features = dataset.n_hidden, expected_size = test.n })
+        or hbi.create({ features = dataset.n_hidden })
+      idx_test:add(train.encoder:predict(test_problems, test.n, THREADS), test_ids)
       local test_stats, _, _, test_nc = eval.optimize_clustering({
         index = idx_test,
         ids = test_ids,
         pos = test.pos_sampled,
         neg = test.neg_sampled,
+        knn = CLUSTER_KNN,
+        knn_mutual = CLUSTER_KNN_MUTUAL,
+        min_pts = MIN_PTS,
+        assign_noise = true,
         threads = THREADS,
         each = function (f, p, r, m, c)
           local d, dd = stopwatch()

@@ -1,14 +1,13 @@
 # Now
 
-- Sanitize
-- Fix double-free with del_ephemeron in tokenizer
-- Connect all allocs to Lua, ensuring all are freed given an error
-    - Thread pool
-    - Thread data
-    - Arbitrary mallocs (either use newuserdata/etc or ensure proper cleanup in
-      all cases)
+- Need a true hierarchical test case for HLTH
 
 # Next
+
+- tokenizer
+    - store known tokens contiguously, no need for separate mallocs/etc for each
+      token. Use a single cvec as backend, storing pointers into that cvec
+      insted of separately alloc'd strings. Ensure tokens are null terminated.
 
 - Separate all lua api functions explicitly via _lua variant (_lua variants must
   respect the expected stack semantics strictly)

@@ -8,8 +8,9 @@ local tm = require("santoku.tsetlin")
 local utc = require("santoku.utc")
 
 local TTR = 0.9
-local MAX = 100
+local MAX = nil
 local ITERATIONS = 5
+local THREADS = nil
 
 local CLASSES = 10
 local CLAUSES = 8
@@ -58,10 +59,10 @@ test("tsetlin", function ()
     solutions = train.solutions,
     iterations = ITERATIONS,
     each = function (epoch)
-      local train_predicted = t:predict(train.problems, train.n)
-      local test_predicted = t:predict(test.problems, test.n)
-      local train_accuracy = eval.class_accuracy(train_predicted, train.solutions, train.n, CLASSES)
-      local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, CLASSES)
+      local train_predicted = t:predict(train.problems, train.n, THREADS)
+      local test_predicted = t:predict(test.problems, test.n, THREADS)
+      local train_accuracy = eval.class_accuracy(train_predicted, train.solutions, train.n, CLASSES, THREADS)
+      local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, CLASSES, THREADS)
       local d, dd = stopwatch()
       str.printf("  Time %3.2f %3.2f  F1=(%.2f,%.2f)  Epoch  %d\n",
         d, dd, train_accuracy.f1, test_accuracy.f1, epoch)
