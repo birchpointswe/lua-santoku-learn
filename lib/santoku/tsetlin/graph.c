@@ -17,10 +17,10 @@ static inline tk_graph_t *tm_graph_create (
   bool knn_mutual,
   int64_t knn_rank,
   bool bridge,
+  uint64_t probe_radius,
   tk_ivec_sim_type_t cmp,
   double cmp_alpha,
-  double cmp_beta,
-  unsigned int n_threads
+  double cmp_beta
 );
 
 static inline double tk_graph_distance (
@@ -668,7 +668,8 @@ static inline void tm_adj_resize (
 static inline void tm_run_knn_queries (
   lua_State *L,
   int Gi,
-  tk_graph_t *graph
+  tk_graph_t *graph,
+  uint64_t n_threads
 ) {
   bool have_index = graph->inv != NULL || graph->ann != NULL || graph->hbi != NULL;
   if (!graph->knn || !graph->knn_cache || !have_index)
@@ -676,16 +677,16 @@ static inline void tm_run_knn_queries (
   if (graph->inv != NULL) {
     tk_inv_neighborhoods(
       L, graph->inv, graph->knn_cache, graph->knn_eps, 0, graph->cmp,
-      graph->cmp_alpha, graph->cmp_beta, false, graph->knn_rank,
+      graph->cmp_alpha, graph->cmp_beta, false, graph->knn_rank, n_threads,
       &graph->inv_hoods, &graph->uids_hoods);
   } else if (graph->ann != NULL) {
     tk_ann_neighborhoods(
-      L, graph->ann, graph->knn_cache, graph->ann->features * graph->knn_eps, 0,
-      false, &graph->ann_hoods, &graph->uids_hoods);
+      L, graph->ann, graph->knn_cache, graph->probe_radius, graph->ann->features * graph->knn_eps, 0,
+      false, n_threads, &graph->ann_hoods, &graph->uids_hoods);
   } else if (graph->hbi != NULL) {
     tk_hbi_neighborhoods(
       L, graph->hbi, graph->knn_cache, graph->hbi->features * graph->knn_eps, 0,
-      false, &graph->hbi_hoods, &graph->uids_hoods);
+      false, n_threads, &graph->hbi_hoods, &graph->uids_hoods);
   }
 
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1); // hoods
@@ -694,15 +695,17 @@ static inline void tm_run_knn_queries (
 
   if (graph->knn_mutual) {
     if (graph->inv != NULL)
-      tk_inv_mutualize(L, graph->inv, graph->inv_hoods, graph->uids_hoods, graph->knn_min, NULL);
+      tk_inv_mutualize(L, graph->inv, graph->inv_hoods, graph->uids_hoods, graph->knn_min, n_threads, NULL);
     else if (graph->ann != NULL)
-      tk_ann_mutualize(L, graph->ann, graph->ann_hoods, graph->uids_hoods, graph->knn_min, NULL);
+      tk_ann_mutualize(L, graph->ann, graph->ann_hoods, graph->uids_hoods, graph->knn_min, n_threads, NULL);
     else if (graph->hbi != NULL)
-      tk_hbi_mutualize(L, graph->hbi, graph->hbi_hoods, graph->uids_hoods, graph->knn_min, NULL);
+      tk_hbi_mutualize(L, graph->hbi, graph->hbi_hoods, graph->uids_hoods, graph->knn_min, n_threads, NULL);
   }
 
   if (graph->uids_hoods) {
     graph->uids_idx_hoods = tk_iumap_from_ivec(L, graph->uids_hoods);
+    if (!graph->uids_idx_hoods)
+      tk_error(L, "graph_create: iumap_from_ivec failed", ENOMEM);
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
     lua_pop(L, 1);
     int kha;
@@ -724,40 +727,65 @@ static inline void tm_run_knn_queries (
 static inline void tm_compute_sigma (
   lua_State *L,
   int Gi,
-  tk_graph_t *graph
+  tk_graph_t *graph,
+  uint64_t n_threads
 ) {
   if (!graph->sigma_k || !graph->sigma_scale || graph->sigma_scale <= 0.0)
     return;
+
+  tk_graph_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_graph_thread_t));
+  memset(threads, 0, n_threads * sizeof(tk_graph_thread_t));
+  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_graph_worker);
+  for (unsigned int i = 0; i < n_threads; i++) {
+    tk_graph_thread_t *data = threads + i;
+    pool->threads[i].data = data;
+    data->graph = graph;
+  }
+
   graph->sigmas = tk_dvec_create(L, graph->uids->n, 0, 0);
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
   lua_pop(L, 1);
   for (uint64_t i = 0; i < graph->uids->n; i++)
     graph->sigmas->a[i] = 1.0;
-  for (unsigned int i = 0; i < graph->pool->n_threads; i++) {
-    tk_graph_thread_t *data = graph->threads + i;
-    tk_thread_range(i, graph->pool->n_threads, graph->uids->n, &data->ifirst, &data->ilast);
+  for (unsigned int i = 0; i < n_threads; i++) {
+    tk_graph_thread_t *data = threads + i;
+    tk_thread_range(i, n_threads, graph->uids->n, &data->ifirst, &data->ilast);
     atomic_init(&data->has_error, false);
   }
-  tk_threads_signal(graph->pool, TK_GRAPH_SIGMA, 0);
-  for (unsigned int i = 0; i < graph->pool->n_threads; i++) {
-    if (atomic_load(&graph->threads[i].has_error)) {
+  tk_threads_signal(pool, TK_GRAPH_SIGMA, 0);
+  for (unsigned int i = 0; i < n_threads; i++) {
+    if (atomic_load(&threads[i].has_error)) {
       tk_lua_verror(L, 2, "compute_sigma", "worker allocation failed");
       return;
     }
   }
+
+  tk_threads_destroy(pool);
+  free(threads);
 }
 
 static inline void tm_reweight_all_edges (
   lua_State *L,
-  tk_graph_t *graph
+  tk_graph_t *graph,
+  uint64_t n_threads
 ) {
   if (!graph->sigmas || graph->sigmas->n == 0)
     return;
-  for (unsigned int i = 0; i < graph->pool->n_threads; i++) {
-    tk_graph_thread_t *data = graph->threads + i;
-    tk_thread_range(i, graph->pool->n_threads, graph->uids->n, &data->ifirst, &data->ilast);
+
+  // Create local threadpool and threads
+  tk_graph_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_graph_thread_t));
+  memset(threads, 0, n_threads * sizeof(tk_graph_thread_t));
+  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_graph_worker);
+  for (unsigned int i = 0; i < n_threads; i++) {
+    tk_graph_thread_t *data = threads + i;
+    pool->threads[i].data = data;
+    data->graph = graph;
+    tk_thread_range(i, n_threads, graph->uids->n, &data->ifirst, &data->ilast);
   }
-  tk_threads_signal(graph->pool, TK_GRAPH_REWEIGHT, 0);
+  tk_threads_signal(pool, TK_GRAPH_REWEIGHT, 0);
+
+  tk_threads_destroy(pool);
+  free(threads);
 }
 
 static void tm_graph_destroy_internal (tk_graph_t *graph)
@@ -766,8 +794,6 @@ static void tm_graph_destroy_internal (tk_graph_t *graph)
     return;
   graph->destroyed = true;
   tk_dsu_destroy(graph->dsu);
-  if (graph->threads)
-    free(graph->threads);
 }
 
 static inline int tm_graph_gc (lua_State *L)
@@ -819,6 +845,7 @@ static inline int tm_adjacency (lua_State *L)
   bool knn_mutual = tk_lua_foptboolean(L, 1, "graph", "knn_mutual", false);
   int64_t knn_rank = tk_lua_foptinteger(L, 1, "graph", "knn_rank", -1);
   bool bridge = tk_lua_foptboolean(L, 1, "graph", "bridge", false);
+  uint64_t probe_radius = tk_lua_foptunsigned(L, 1, "graph", "probe_radius", 3);
   if (knn > knn_cache)
     knn_cache = knn;
 
@@ -832,8 +859,7 @@ static inline int tm_adjacency (lua_State *L)
 
   tk_graph_t *graph = tm_graph_create(
     L, edges, inv, ann, hbi, weight_eps, sigma_k, sigma_scale, knn, knn_min,
-    knn_cache, knn_eps, knn_mutual, knn_rank, bridge, cmp, cmp_alpha, cmp_beta,
-    n_threads);
+    knn_cache, knn_eps, knn_mutual, knn_rank, bridge, probe_radius, cmp, cmp_alpha, cmp_beta);
   int Gi = tk_lua_absindex(L, -1);
 
   tm_init_uids(L, Gi, graph);
@@ -865,7 +891,7 @@ static inline int tm_adjacency (lua_State *L)
 
   if (graph->knn) {
     uint64_t old_uid_count = graph->uids->n;
-    tm_run_knn_queries(L, Gi, graph);
+    tm_run_knn_queries(L, Gi, graph, n_threads);
     if (graph->uids->n > old_uid_count) {
       tk_dsu_destroy(graph->dsu);
       graph->dsu = tk_dsu_create(L, graph->uids);
@@ -879,8 +905,8 @@ static inline int tm_adjacency (lua_State *L)
       }))
     }
     tm_add_knn(L, graph);
-    tm_compute_sigma(L, Gi, graph);
-    tm_reweight_all_edges(L, graph);
+    tm_compute_sigma(L, Gi, graph, n_threads);
+    tm_reweight_all_edges(L, graph, n_threads);
     if (i_each != -1) {
       lua_pushvalue(L, i_each);
       lua_pushinteger(L, (int64_t)graph->uids->n);
@@ -1160,18 +1186,12 @@ static inline tk_graph_t *tm_graph_create (
   bool knn_mutual,
   int64_t knn_rank,
   bool bridge,
+  uint64_t probe_radius,
   tk_ivec_sim_type_t cmp,
   double cmp_alpha,
-  double cmp_beta,
-  unsigned int n_threads
+  double cmp_beta
 ) {
   tk_graph_t *graph = tk_lua_newuserdata(L, tk_graph_t, TK_GRAPH_MT, NULL, tm_graph_gc);
-  int graph_idx = lua_gettop(L);
-  graph->threads = tk_malloc(L, n_threads * sizeof(tk_graph_thread_t));
-  memset(graph->threads, 0, n_threads * sizeof(tk_graph_thread_t));
-  graph->pool = tk_threads_create(L, n_threads, tk_graph_worker);
-  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, graph_idx, -1);
-  lua_pop(L, 1);
   graph->edges = edges;
   graph->inv = inv;
   graph->cmp = cmp;
@@ -1189,6 +1209,7 @@ static inline tk_graph_t *tm_graph_create (
   graph->knn_mutual = knn_mutual;
   graph->knn_rank = knn_rank;
   graph->bridge = bridge;
+  graph->probe_radius = probe_radius;
   graph->largest_component_root = -1;
   graph->pairs = tk_euset_create(L, 0);
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, lua_gettop(L), -1);
@@ -1197,11 +1218,6 @@ static inline tk_graph_t *tm_graph_create (
   graph->uids_hoods = NULL;
   graph->uids_idx_hoods = NULL;
   graph->destroyed = false;
-  for (unsigned int i = 0; i < n_threads; i ++) {
-    tk_graph_thread_t *data = graph->threads + i;
-    graph->pool->threads[i].data = data;
-    data->graph = graph;
-  }
   return graph;
 }
 

@@ -12,21 +12,22 @@ local eval = require("santoku.tsetlin.evaluator")
 local tokenizer = require("santoku.tsetlin.tokenizer")
 
 local TTR = 0.9
-local MAX = 100
+local MAX = nil
 local NEGATIVE = 0.5
+local THREADS = nil
 
 local CLASSES = 2
-local CLAUSES = 32 --{ def = 8, min = 8, max = 32, int = true, log = true }
-local CLAUSE_TOLERANCE = 32 --{ def = 8, min = 8, max = 64, int = true, log = true }
-local CLAUSE_MAXIMUM = 16 --{ def = 8, min = 8, max = 64, int = true, log = true }
-local TARGET = 8 --{ def = 4, min = 8, max = 64, int = true, log = true }
-local SPECIFICITY = 4 --{ def = 1000, min = 2, max = 2000, int = true, log = true }
+local CLAUSES = { def = 8, min = 8, max = 32, int = true, log = true }
+local CLAUSE_TOLERANCE = { def = 8, min = 8, max = 64, int = true, log = true }
+local CLAUSE_MAXIMUM = { def = 8, min = 8, max = 64, int = true, log = true }
+local TARGET = { def = 4, min = 8, max = 64, int = true, log = true }
+local SPECIFICITY = { def = 1000, min = 2, max = 2000, int = true, log = true }
 
 local SEARCH_PATIENCE = 3
 local SEARCH_ROUNDS = 10
 local SEARCH_TRIALS = 4
 local SEARCH_ITERATIONS = 10
-local FINAL_ITERATIONS = 10
+local FINAL_ITERATIONS = 100
 
 local TOP_ALGO = "chi2"
 local TOP_K = 8192
@@ -109,14 +110,14 @@ test("tsetlin", function ()
     final_iterations = FINAL_ITERATIONS,
 
     search_metric = function (t)
-      local predicted = t:predict(train.problems, train.n)
-      local accuracy = eval.class_accuracy(predicted, train.solutions, train.n, CLASSES)
+      local predicted = t:predict(train.problems, train.n, THREADS)
+      local accuracy = eval.class_accuracy(predicted, train.solutions, train.n, CLASSES, THREADS)
       return accuracy.f1, accuracy
     end,
 
     each = function (t, is_final, train_accuracy, params, epoch, round, trial)
-      local test_predicted = t:predict(test.problems, test.n)
-      local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, CLASSES)
+      local test_predicted = t:predict(test.problems, test.n, THREADS)
+      local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, CLASSES, THREADS)
       local d, dd = stopwatch()
       -- luacheck: push ignore
       if is_final then
@@ -138,10 +139,10 @@ test("tsetlin", function ()
 
   print("Testing restore")
   t = tm.load("model.bin")
-  local train_pred = t:predict(train.problems, train.n)
-  local test_pred = t:predict(test.problems, test.n)
-  local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, CLASSES)
-  local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, CLASSES)
+  local train_pred = t:predict(train.problems, train.n, THREADS)
+  local test_pred = t:predict(test.problems, test.n, THREADS)
+  local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, CLASSES, THREADS)
+  local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, CLASSES, THREADS)
   str.printf("Evaluate\tTest\t%4.2f\tTrain\t%4.2f\n", test_stats.f1, train_stats.f1)
 
 end)

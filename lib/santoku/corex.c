@@ -84,9 +84,6 @@ typedef struct tk_corex_s {
   double smoothing;
   unsigned int n_visible;
   unsigned int n_hidden;
-  bool initialized_threads;
-  tk_corex_thread_t *threads;
-  tk_threadpool_t *pool;
 } tk_corex_t;
 
 static tk_corex_t *peek_corex (lua_State *L, int i)
@@ -106,9 +103,15 @@ static inline void tk_corex_shrink (tk_corex_t *C)
     free(C->px); C->px = NULL;
     free(C->entropy_x); C->entropy_x = NULL;
   } else {
-    numa_free(C->maxmis, C->maxmis_len); C->maxmis = NULL; C->maxmis_len = 0;
-    numa_free(C->entropy_x, C->entropy_len); C->entropy_x = NULL; C->entropy_len = 0;
-    numa_free(C->px, C->px_len); C->px = NULL; C->px_len = 0;
+    if (C->maxmis) {
+      numa_free(C->maxmis, C->maxmis_len); C->maxmis = NULL; C->maxmis_len = 0;
+    }
+    if (C->entropy_x) {
+      numa_free(C->entropy_x, C->entropy_len); C->entropy_x = NULL; C->entropy_len = 0;
+    }
+    if (C->px) {
+      numa_free(C->px, C->px_len); C->px = NULL; C->px_len = 0;
+    }
   }
 }
 
@@ -132,10 +135,13 @@ static int tk_corex_gc (lua_State *L)
     free(C->samples); C->samples = NULL;
     free(C->visibles); C->visibles = NULL;
   } else {
-    numa_free(C->samples, C->samples_len); C->samples = NULL;
-    numa_free(C->visibles, C->visibles_len); C->visibles = NULL;
+    if (C->samples) {
+      numa_free(C->samples, C->samples_len); C->samples = NULL;
+    }
+    if (C->visibles) {
+      numa_free(C->visibles, C->visibles_len); C->visibles = NULL;
+    }
   }
-  free(C->threads);
   return 0;
 }
 
@@ -157,10 +163,13 @@ static inline int tk_corex_destroy (lua_State *L)
       free(C->samples); C->samples = NULL;
       free(C->visibles); C->visibles = NULL;
     } else {
-      numa_free(C->samples, C->samples_len); C->samples = NULL;
-      numa_free(C->visibles, C->visibles_len); C->visibles = NULL;
+      if (C->samples) {
+        numa_free(C->samples, C->samples_len); C->samples = NULL;
+      }
+      if (C->visibles) {
+        numa_free(C->visibles, C->visibles_len); C->visibles = NULL;
+      }
     }
-    free(C->threads);
   }
   return 0;
 }
@@ -849,27 +858,6 @@ static void tk_corex_worker (void *dp, int sig)
   }
 }
 
-static inline void tk_corex_setup_threads (
-  lua_State *L,
-  tk_corex_t *C,
-  uint64_t n_set_bits,
-  unsigned int n_samples
-) {
-  tk_threadpool_t *pool = C->pool;
-  C->threads = tk_malloc(L, C->pool->n_threads * sizeof(tk_corex_thread_t));
-  if (!C->initialized_threads) {
-    for (unsigned int i = 0; i < C->pool->n_threads; i ++) {
-      tk_corex_thread_t *data = C->threads + i;
-      pool->threads[i].data = data;
-      data->C = C;
-      data->index = i;
-      tk_thread_range(i, C->pool->n_threads, C->n_hidden, &data->hfirst, &data->hlast);
-      tk_thread_range(i, C->pool->n_threads, C->n_visible, &data->vfirst, &data->vlast);
-    }
-    C->initialized_threads = true;
-  }
-}
-
 static inline int tk_corex_top_visible (lua_State *L)
 {
   tk_corex_t *C = peek_corex(L, 1);
@@ -907,6 +895,7 @@ static inline int tk_corex_compress (lua_State *L)
   tk_corex_t *C = peek_corex(L, 1);
   tk_ivec_t *set_bits = tk_ivec_peek(L, 2, "set_bits");
   unsigned int n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
+  unsigned int n_threads = tk_threads_getn(L, 4, "compress", NULL);
 
   // TODO: Expose shrink via the api, and only realloc if new size is larger than old
   C->sort = tk_realloc(L, C->sort, set_bits->n * sizeof(tk_corex_sort_t));
@@ -915,12 +904,28 @@ static inline int tk_corex_compress (lua_State *L)
   set_bits->n = tk_corex_setup_bits(L, set_bits, C->sort, C->samples, C->visibles, C->n_visible, false, 0, 0);
   C->n_samples = n_samples;
   C->n_set_bits = set_bits->n;
-  tk_corex_setup_threads(L, C, set_bits->n, n_samples);
   C->log_z = tk_realloc(L, C->log_z, C->n_hidden * n_samples * sizeof(double));
   C->pyx = tk_realloc(L, C->pyx, C->n_hidden * n_samples * sizeof(double));
   C->log_pyx_unnorm = tk_realloc(L, C->log_pyx_unnorm, 2 * C->n_hidden * n_samples * sizeof(double));
   C->sums = tk_realloc(L, C->sums, 2 * C->n_hidden * n_samples * sizeof(double));
-  tk_threads_signal(C->pool, TK_CMP_LATENT_ALL, 0);
+
+  tk_corex_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_corex_thread_t));
+  memset(threads, 0, n_threads * sizeof(tk_corex_thread_t));
+  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_corex_worker);
+  for (unsigned int i = 0; i < n_threads; i ++) {
+    tk_corex_thread_t *data = threads + i;
+    pool->threads[i].data = data;
+    data->C = C;
+    data->index = i;
+    tk_thread_range(i, n_threads, C->n_hidden, &data->hfirst, &data->hlast);
+    tk_thread_range(i, n_threads, C->n_visible, &data->vfirst, &data->vlast);
+  }
+
+  tk_threads_signal(pool, TK_CMP_LATENT_ALL, 0);
+
+  tk_threads_destroy(pool);
+  free(threads);
+
   // TODO: Parallelize output
   tk_ivec_clear(set_bits);
   for (unsigned int h = 0; h < C->n_hidden; h ++) {
@@ -945,8 +950,19 @@ static inline void _tk_corex_train (
   tk_ivec_t *set_bits,
   unsigned int n_samples,
   unsigned int max_iter,
-  int i_each
+  int i_each,
+  unsigned int n_threads
 ) {
+  // Check for potential overflow in allocations
+  if (C->n_hidden > 0 && n_samples > SIZE_MAX / C->n_hidden / sizeof(double) / 2) {
+    tk_lua_verror(L, 2, "corex_train", "dimensions too large (potential overflow)");
+    return;
+  }
+  if (C->n_hidden > 0 && C->n_visible > SIZE_MAX / C->n_hidden / sizeof(double)) {
+    tk_lua_verror(L, 2, "corex_train", "dimensions too large (potential overflow)");
+    return;
+  }
+
   C->smoothing = 0.001;
   C->pyx = tk_malloc(L, C->n_hidden * n_samples * sizeof(double));
   C->log_pyx_unnorm = tk_malloc(L, 2 * C->n_hidden * n_samples * sizeof(double));
@@ -966,15 +982,31 @@ static inline void _tk_corex_train (
     C->entropy_x,
     C->n_samples,
     C->n_visible);
-  tk_corex_setup_threads(L, C, C->n_set_bits, n_samples);
-  tk_threads_signal(C->pool, TK_CMP_INIT_PYX_UNNORM, 0);
-  tk_threads_signal(C->pool, TK_CMP_LATENT_NORM, 0);
+
+  tk_corex_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_corex_thread_t));
+  memset(threads, 0, n_threads * sizeof(tk_corex_thread_t));
+  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_corex_worker);
+  for (unsigned int i = 0; i < n_threads; i ++) {
+    tk_corex_thread_t *data = threads + i;
+    pool->threads[i].data = data;
+    data->C = C;
+    data->index = i;
+    tk_thread_range(i, n_threads, C->n_hidden, &data->hfirst, &data->hlast);
+    tk_thread_range(i, n_threads, C->n_visible, &data->vfirst, &data->vlast);
+  }
+
+  tk_threads_signal(pool, TK_CMP_INIT_SEED, 0);
+  tk_threads_signal(pool, TK_CMP_INIT_TCS, 0);
+  tk_threads_signal(pool, TK_CMP_INIT_ALPHA, 0);
+  tk_threads_signal(pool, TK_CMP_INIT_PYX_UNNORM, 0);
+  tk_threads_signal(pool, TK_CMP_LATENT_NORM, 0);
+
   for (unsigned int i = 0; i < max_iter; i ++) {
-    tk_threads_signal(C->pool, TK_CMP_MARGINALS, 0);
-    tk_threads_signal(C->pool, TK_CMP_MAXMIS, 0);
-    tk_threads_signal(C->pool, TK_CMP_ALPHA, 0);
-    tk_threads_signal(C->pool, TK_CMP_LATENT_ALL, 0);
-    tk_threads_signal(C->pool, TK_CMP_UPDATE_TC, 0);
+    tk_threads_signal(pool, TK_CMP_MARGINALS, 0);
+    tk_threads_signal(pool, TK_CMP_MAXMIS, 0);
+    tk_threads_signal(pool, TK_CMP_ALPHA, 0);
+    tk_threads_signal(pool, TK_CMP_LATENT_ALL, 0);
+    tk_threads_signal(pool, TK_CMP_UPDATE_TC, 0);
     tk_corex_update_last_tc(
       C->tcs,
       &C->last_tc,
@@ -985,7 +1017,13 @@ static inline void _tk_corex_train (
       lua_pushinteger(L, i + 1);
       lua_pushnumber(L, C->last_tc);
       lua_pushnumber(L, C->tc_dev);
-      lua_call(L, 3, 1);
+      int status = lua_pcall(L, 3, 1, 0);
+      if (status != LUA_OK) {
+        // Callback threw - clean up before re-throwing
+        tk_threads_destroy(pool);
+        free(threads);
+        lua_error(L);
+      }
       if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0) {
         lua_pop(L, 1);
         break;
@@ -994,6 +1032,10 @@ static inline void _tk_corex_train (
       }
     }
   }
+
+  tk_threads_destroy(pool);
+  free(threads);
+
   tk_corex_shrink(C);
   C->trained = true;
 }
@@ -1010,8 +1052,7 @@ static inline void tk_corex_init (
   unsigned int tile_sblock,
   unsigned int tile_vblock,
   unsigned int n_visible,
-  unsigned int n_hidden,
-  unsigned int n_threads
+  unsigned int n_hidden
 ) {
   memset(C, 0, sizeof(tk_corex_t));
   C->n_visible = n_visible;
@@ -1023,6 +1064,13 @@ static inline void tk_corex_init (
   C->anchor = anchor;
   C->tile_sblock = tile_sblock;
   C->tile_vblock = tile_vblock;
+
+  // Check for potential overflow in large allocations
+  if (n_hidden > 0 && n_visible > SIZE_MAX / n_hidden / sizeof(double) / 4) {
+    tk_lua_verror(L, 2, "corex_init", "dimensions too large (potential overflow)");
+    return;
+  }
+
   C->tcs = tk_malloc(L, C->n_hidden * sizeof(double));
   C->tcs_temp = tk_malloc(L, C->n_hidden * sizeof(double));
   C->alpha = tk_malloc(L, C->n_hidden * C->n_visible * sizeof(double));
@@ -1033,13 +1081,6 @@ static inline void tk_corex_init (
   C->px = tk_malloc_interleaved(L, &C->px_len, C->n_visible * sizeof(double));
   C->entropy_x = tk_malloc_interleaved(L, &C->entropy_len, C->n_visible * sizeof(double));
   C->maxmis = tk_malloc_interleaved(L, &C->maxmis_len, C->n_visible * sizeof(double));
-  C->pool = tk_threads_create(L, n_threads, tk_corex_worker);
-  tk_lua_add_ephemeron(L, TK_COREX_EPH, Ci, -1);
-  lua_pop(L, 1);
-  tk_corex_setup_threads(L, C, 0, 0);
-  tk_threads_signal(C->pool, TK_CMP_INIT_SEED, 0);
-  tk_threads_signal(C->pool, TK_CMP_INIT_TCS, 0);
-  tk_threads_signal(C->pool, TK_CMP_INIT_ALPHA, 0);
 }
 
 static inline int tk_corex_visible (lua_State *L) {
@@ -1062,12 +1103,13 @@ static inline int tk_corex_train (lua_State *L) {
   tk_ivec_t *set_bits = tk_ivec_peek(L, -1, "set_bits");
   unsigned int n_samples = tk_lua_fcheckunsigned(L, 2, "train", "samples");
   unsigned int max_iter = tk_lua_fcheckunsigned(L, 2, "train", "iterations");
+  unsigned int n_threads = tk_threads_getn(L, 2, "train", "threads");
   int i_each = -1;
   if (tk_lua_ftype(L, 2, "each") != LUA_TNIL) {
     lua_getfield(L, 2, "each");
     i_each = tk_lua_absindex(L, -1);
   }
-  _tk_corex_train(L, C, set_bits, n_samples, max_iter, i_each);
+  _tk_corex_train(L, C, set_bits, n_samples, max_iter, i_each, n_threads);
   return 0;
 }
 
@@ -1123,13 +1165,12 @@ static luaL_Reg mt_fns[] =
 
 static inline int tk_corex_load (lua_State *L)
 {
-  lua_settop(L, 3);
-  unsigned int n_threads = tk_threads_getn(L, 2, "threads", NULL);
+  lua_settop(L, 2);
   tk_corex_t *C = tk_lua_newuserdata(L, tk_corex_t, TK_COREX_MT, mt_fns, tk_corex_gc);
-  int Ci = lua_gettop(L);
+
   size_t len;
   const char *data = luaL_checklstring(L, 1, &len);
-  bool isstr = lua_type(L, 3) == LUA_TBOOLEAN && lua_toboolean(L, 3);
+  bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && lua_toboolean(L, 2);
   FILE *fh = isstr ? tk_lua_fmemopen(L, (char *) data, len, "r") : tk_lua_fopen(L, data, "r");
   tk_lua_fread(L, &C->trained, sizeof(bool), 1, fh);
   tk_lua_fread(L, &C->n_visible, sizeof(unsigned int), 1, fh);
@@ -1148,10 +1189,6 @@ static inline int tk_corex_load (lua_State *L)
   C->baseline = tk_malloc(L, 2 * C->n_hidden * sizeof(double));
   tk_lua_fread(L, C->baseline, sizeof(double), 2 * C->n_hidden, fh);
   tk_lua_fclose(L, fh);
-  C->pool = tk_threads_create(L, n_threads, tk_corex_worker);
-  tk_lua_add_ephemeron(L, TK_COREX_EPH, Ci, -1);
-  lua_pop(L, 1);
-  tk_corex_setup_threads(L, C, 0, 0);
   return 1;
 }
 
@@ -1168,10 +1205,9 @@ static inline int tk_corex_create (lua_State *L)
   double anchor = tk_lua_foptnumber(L, 1, "create", "anchor", 0.0);
   unsigned int tile_sblock = tk_lua_foptunsigned(L, 1, "create", "tile_s", 1024);
   unsigned int tile_vblock = tk_lua_foptunsigned(L, 1, "create", "tile_v", 2048);
-  unsigned int n_threads = tk_threads_getn(L, 1, "create", "threads");
   tk_corex_t *C = tk_lua_newuserdata(L, tk_corex_t, TK_COREX_MT, mt_fns, tk_corex_gc);
   int Ci = lua_gettop(L);
-  tk_corex_init(L, Ci, C, lam, spa, tmin, ttc, anchor, tile_sblock, tile_vblock, n_visible, n_hidden, n_threads);
+  tk_corex_init(L, Ci, C, lam, spa, tmin, ttc, anchor, tile_sblock, tile_vblock, n_visible, n_hidden);
   return 1;
 }
 

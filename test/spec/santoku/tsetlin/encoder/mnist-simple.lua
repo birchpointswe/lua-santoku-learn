@@ -12,7 +12,7 @@ local str = require("santoku.string")
 local test = require("santoku.test")
 local utc = require("santoku.utc")
 
-local MAX = 100
+local MAX = nil
 local MAX_CLASS = nil
 local FEATURES = 784
 local THREADS = nil
@@ -156,7 +156,7 @@ test("tsetlin", function ()
     dataset.similarity_sampled)
 
   print("\nCreating index")
-  dataset.index_codes = hbi.create({ features = HIDDEN, threads = THREADS })
+  dataset.index_codes = hbi.create({ features = HIDDEN })
   dataset.index_codes:add(dataset.codes_spectral, dataset.ids_spectral)
 
   print("\nClustering (sampled)\n")

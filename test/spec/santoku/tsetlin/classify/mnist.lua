@@ -9,7 +9,7 @@ local tm = require("santoku.tsetlin")
 local utc = require("santoku.utc")
 
 local TTR = 0.9
-local MAX = 100
+local MAX = nil
 local ITERATIONS = 100
 local THREADS = nil
 
@@ -71,14 +71,14 @@ test("tsetlin", function ()
     threads = THREADS,
 
     search_metric = function (t)
-      local predicted = t:predict(train.problems, train.n)
-      local accuracy = eval.class_accuracy(predicted, train.solutions, train.n, CLASSES)
+      local predicted = t:predict(train.problems, train.n, THREADS)
+      local accuracy = eval.class_accuracy(predicted, train.solutions, train.n, CLASSES, THREADS)
       return accuracy.f1, accuracy
     end,
 
     each = function (t, is_final, train_accuracy, params, epoch, round, trial)
-      local test_predicted = t:predict(test.problems, test.n)
-      local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, CLASSES)
+      local test_predicted = t:predict(test.problems, test.n, THREADS)
+      local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, CLASSES, THREADS)
       local d, dd = stopwatch()
       -- luacheck: push ignore
       if is_final then
@@ -100,10 +100,10 @@ test("tsetlin", function ()
 
   print("Testing restore")
   t = tm.load("model.bin", nil, true)
-  local train_pred = t:predict(train.problems, train.n)
-  local test_pred = t:predict(test.problems, test.n)
-  local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, CLASSES)
-  local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, CLASSES)
+  local train_pred = t:predict(train.problems, train.n, THREADS)
+  local test_pred = t:predict(test.problems, test.n, THREADS)
+  local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, CLASSES, THREADS)
+  local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, CLASSES, THREADS)
   str.printf("Evaluate\tTest\t%4.2f\tTrain\t%4.2f\n", test_stats.f1, train_stats.f1)
 
 end)

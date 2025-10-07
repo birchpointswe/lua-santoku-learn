@@ -115,6 +115,8 @@ static inline tk_dsu_t *tk_dsu_create (
   dsu->ids = ids;
   if (L) {
     dsu->ididx = tk_iumap_from_ivec(L, ids);
+    if (!dsu->ididx)
+      tk_error(L, "dsu_create: iumap_from_ivec failed", ENOMEM);
     tk_lua_add_ephemeron(L, TK_DSU_EPH, dsu_idx, -1);
     lua_pop(L, 1);
     dsu->parent = tk_ivec_create(L, ids->n, 0, 0);
