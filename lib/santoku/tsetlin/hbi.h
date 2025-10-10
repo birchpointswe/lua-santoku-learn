@@ -51,6 +51,11 @@ typedef enum {
   TK_HBI_REMAP_UIDS,
 } tk_hbi_stage_t;
 
+typedef enum {
+  TK_HBI_FIND,    // Lookup only, return -1 if not found
+  TK_HBI_REPLACE  // Create new sid, replace old mappings if uid exists
+} tk_hbi_uid_mode_t;
+
 typedef struct tk_hbi_thread_s tk_hbi_thread_t;
 
 typedef struct tk_hbi_s {
@@ -184,29 +189,33 @@ static inline void tk_hbi_destroy (
 static inline int64_t tk_hbi_uid_sid (
   tk_hbi_t *A,
   int64_t uid,
-  bool create
+  tk_hbi_uid_mode_t mode
 ) {
   int kha;
   khint_t khi;
-  if (create) {
-    int64_t sid = (int64_t) (A->next_sid ++);
-    khi = tk_iumap_put(A->uid_sid, uid, &kha);
-    if (!kha) {
-      int64_t sid0 = tk_iumap_val(A->uid_sid, khi);
-      khi = tk_iumap_get(A->sid_uid, sid0);
-      if (khi != tk_iumap_end(A->sid_uid))
-        tk_iumap_del(A->sid_uid, khi);
-    }
-    tk_iumap_setval(A->uid_sid, khi, sid);
-    khi = tk_iumap_put(A->sid_uid, sid, &kha);
-    tk_iumap_setval(A->sid_uid, khi, uid);
-    return sid;
-  } else {
+  if (mode == TK_HBI_FIND) {
     khi = tk_iumap_get(A->uid_sid, uid);
     if (khi == tk_iumap_end(A->uid_sid))
       return -1;
     else
       return tk_iumap_val(A->uid_sid, khi);
+  } else { // TK_HBI_REPLACE
+    // Remove old mappings if uid exists
+    khi = tk_iumap_get(A->uid_sid, uid);
+    if (khi != tk_iumap_end(A->uid_sid)) {
+      int64_t old_sid = tk_iumap_val(A->uid_sid, khi);
+      tk_iumap_del(A->uid_sid, khi);
+      khi = tk_iumap_get(A->sid_uid, old_sid);
+      if (khi != tk_iumap_end(A->sid_uid))
+        tk_iumap_del(A->sid_uid, khi);
+    }
+    // Create new mappings
+    int64_t sid = (int64_t) (A->next_sid ++);
+    khi = tk_iumap_put(A->uid_sid, uid, &kha);
+    tk_iumap_setval(A->uid_sid, khi, sid);
+    khi = tk_iumap_put(A->sid_uid, sid, &kha);
+    tk_iumap_setval(A->sid_uid, khi, uid);
+    return sid;
   }
 }
 
@@ -232,7 +241,7 @@ static inline char *tk_hbi_get (
   tk_hbi_t *A,
   int64_t uid
 ) {
-  int64_t sid = tk_hbi_uid_sid(A, uid, false);
+  int64_t sid = tk_hbi_uid_sid(A, uid, TK_HBI_FIND);
   if (sid < 0)
     return NULL;
   return tk_hbi_sget(A, sid);
@@ -361,7 +370,7 @@ static inline void tk_hbi_add (
   int kha;
   khint_t khi;
   for (uint64_t i = 0; i < ids->n; i ++) {
-    int64_t sid = tk_hbi_uid_sid(A, ids->a[i], true);
+    int64_t sid = tk_hbi_uid_sid(A, ids->a[i], TK_HBI_REPLACE);
     tk_ivec_t *bucket;
     tk_hbi_code_t h = tk_hbi_pack(data + i * TK_CVEC_BITS_BYTES(A->features), A->features);
     khi = tk_hbi_buckets_put(A->buckets, h, &kha);
@@ -520,7 +529,7 @@ static inline void tk_hbi_mutualize (
 
   tk_ivec_t *sids = tk_ivec_create(L, uids->n, 0, 0);
   for (uint64_t i = 0; i < uids->n; i ++)
-    sids->a[i] = tk_hbi_uid_sid(A, uids->a[i], false);
+    sids->a[i] = tk_hbi_uid_sid(A, uids->a[i], TK_HBI_FIND);
   tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
   if (!sid_idx)
     tk_error(L, "hbi_mutualize: iumap_from_ivec failed", ENOMEM);
@@ -749,7 +758,7 @@ static inline void tk_hbi_neighborhoods_by_ids (
   tk_ivec_t *uids = tk_ivec_create(L, query_ids->n, 0, 0);
   tk_ivec_copy(uids, query_ids, 0, (int64_t) query_ids->n, 0);
   for (uint64_t i = 0; i < uids->n; i ++)
-    sids->a[i] = tk_hbi_uid_sid(A, uids->a[i], false);
+    sids->a[i] = tk_hbi_uid_sid(A, uids->a[i], TK_HBI_FIND);
 
   int kha;
   khint_t khi;

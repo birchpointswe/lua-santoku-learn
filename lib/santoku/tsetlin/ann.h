@@ -45,6 +45,11 @@ typedef enum {
   TK_ANN_REMAP_UIDS,
 } tk_ann_stage_t;
 
+typedef enum {
+  TK_ANN_FIND,    // Lookup only, return -1 if not found
+  TK_ANN_REPLACE  // Create new sid, replace old mappings if uid exists
+} tk_ann_uid_mode_t;
+
 typedef struct tk_ann_thread_s tk_ann_thread_t;
 
 typedef struct tk_ann_s {
@@ -212,29 +217,33 @@ static inline int tk_ann_ids_lua (lua_State *L)
 static inline int64_t tk_ann_uid_sid (
   tk_ann_t *A,
   int64_t uid,
-  bool create
+  tk_ann_uid_mode_t mode
 ) {
   int kha;
   khint_t khi;
-  if (create) {
-    int64_t sid = (int64_t) (A->next_sid ++);
-    khi = tk_iumap_put(A->uid_sid, uid, &kha);
-    if (!kha) {
-      int64_t sid0 = tk_iumap_val(A->uid_sid, khi);
-      khi = tk_iumap_get(A->sid_uid, sid0);
-      if (khi != tk_iumap_end(A->sid_uid))
-        tk_iumap_del(A->sid_uid, khi);
-    }
-    tk_iumap_setval(A->uid_sid, khi, sid);
-    khi = tk_iumap_put(A->sid_uid, sid, &kha);
-    tk_iumap_setval(A->sid_uid, khi, uid);
-    return sid;
-  } else {
+  if (mode == TK_ANN_FIND) {
     khi = tk_iumap_get(A->uid_sid, uid);
     if (khi == tk_iumap_end(A->uid_sid))
       return -1;
     else
       return tk_iumap_val(A->uid_sid, khi);
+  } else { // TK_ANN_REPLACE
+    // Remove old mappings if uid exists
+    khi = tk_iumap_get(A->uid_sid, uid);
+    if (khi != tk_iumap_end(A->uid_sid)) {
+      int64_t old_sid = tk_iumap_val(A->uid_sid, khi);
+      tk_iumap_del(A->uid_sid, khi);
+      khi = tk_iumap_get(A->sid_uid, old_sid);
+      if (khi != tk_iumap_end(A->sid_uid))
+        tk_iumap_del(A->sid_uid, khi);
+    }
+    // Create new mappings
+    int64_t sid = (int64_t) (A->next_sid ++);
+    khi = tk_iumap_put(A->uid_sid, uid, &kha);
+    tk_iumap_setval(A->uid_sid, khi, sid);
+    khi = tk_iumap_put(A->sid_uid, sid, &kha);
+    tk_iumap_setval(A->sid_uid, khi, uid);
+    return sid;
   }
 }
 
@@ -249,7 +258,7 @@ static inline char *tk_ann_get (
   tk_ann_t *A,
   int64_t uid
 ) {
-  int64_t sid = tk_ann_uid_sid(A, uid, false);
+  int64_t sid = tk_ann_uid_sid(A, uid, TK_ANN_FIND);
   if (sid < 0)
     return NULL;
   return tk_ann_sget(A, sid);
@@ -391,7 +400,7 @@ static inline void tk_ann_add (
   int kha;
   khint_t khi;
   for (uint64_t i = 0; i < ids->n; i ++) {
-    int64_t sid = tk_ann_uid_sid(A, ids->a[i], true);
+    int64_t sid = tk_ann_uid_sid(A, ids->a[i], TK_ANN_REPLACE);
     tk_ivec_t *bucket;
     tk_ann_hash_t h = tk_ann_hash(A, data + i * TK_CVEC_BITS_BYTES(A->features));
     khi = kh_put(tk_ann_buckets, A->buckets, h, &kha);
@@ -478,7 +487,7 @@ static inline void tk_ann_mutualize (
 
   tk_ivec_t *sids = tk_ivec_create(L, uids->n, 0, 0); // sids
   for (uint64_t i = 0; i < uids->n; i ++)
-    sids->a[i] = tk_ann_uid_sid(A, uids->a[i], false);
+    sids->a[i] = tk_ann_uid_sid(A, uids->a[i], TK_ANN_FIND);
   tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
   if (!sid_idx)
     tk_error(L, "ann_mutualize: iumap_from_ivec failed", ENOMEM);
@@ -730,7 +739,7 @@ static inline void tk_ann_neighborhoods_by_ids (
   tk_ivec_t *uids = tk_ivec_create(L, query_ids->n, 0, 0); // sids uids
   tk_ivec_copy(uids, query_ids, 0, (int64_t) query_ids->n, 0);
   for (uint64_t i = 0; i < uids->n; i ++)
-    sids->a[i] = tk_ann_uid_sid(A, uids->a[i], false);
+    sids->a[i] = tk_ann_uid_sid(A, uids->a[i], TK_ANN_FIND);
   uint64_t n_queries = uids->n;
   tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
   if (!sid_idx)
@@ -1117,7 +1126,7 @@ static inline tk_pvec_t *tk_ann_neighbors_by_id (
   int64_t eps,
   tk_pvec_t *out
 ) {
-  int64_t sid0 = tk_ann_uid_sid(A, uid, false);
+  int64_t sid0 = tk_ann_uid_sid(A, uid, TK_ANN_FIND);
   if (sid0 < 0) {
     tk_pvec_clear(out);
     return out;
@@ -1399,7 +1408,7 @@ static inline int tk_ann_neighborhoods_by_ids_lua (lua_State *L)
   uint64_t n_threads = tk_threads_getn(L, 8, "neighborhoods_by_ids", NULL);
   int64_t write_pos = 0;
   for (int64_t i = 0; i < (int64_t) query_ids->n; i ++)
-    if (tk_ann_uid_sid(A, query_ids->a[i], false) >= 0)
+    if (tk_ann_uid_sid(A, query_ids->a[i], TK_ANN_FIND) >= 0)
       query_ids->a[write_pos ++] = query_ids->a[i];
   query_ids->n = (uint64_t) write_pos;
   tk_ann_hoods_t *hoods;

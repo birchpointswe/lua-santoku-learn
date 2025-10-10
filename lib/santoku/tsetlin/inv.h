@@ -41,6 +41,11 @@ typedef enum {
   TK_INV_REMAP_UIDS,
 } tk_inv_stage_t;
 
+typedef enum {
+  TK_INV_FIND,    // Lookup only, return -1 if not found
+  TK_INV_REPLACE  // Create new sid, replace old mappings if uid exists
+} tk_inv_uid_mode_t;
+
 typedef struct tk_inv_thread_s tk_inv_thread_t;
 
 typedef struct tk_inv_s {
@@ -309,29 +314,33 @@ static inline void tk_inv_uid_remove (
 static inline int64_t tk_inv_uid_sid (
   tk_inv_t *I,
   int64_t uid,
-  bool create
+  tk_inv_uid_mode_t mode
 ) {
   int kha;
   khint_t khi;
-  if (create) {
-    int64_t sid = (int64_t) (I->next_sid ++);
-    khi = tk_iumap_put(I->uid_sid, uid, &kha);
-    if (!kha) {
-      int64_t sid0 = tk_iumap_val(I->uid_sid, khi);
-      khi = tk_iumap_get(I->sid_uid, sid0);
-      if (khi != tk_iumap_end(I->sid_uid))
-        tk_iumap_del(I->sid_uid, khi);
-    }
-    tk_iumap_setval(I->uid_sid, khi, sid);
-    khi = tk_iumap_put(I->sid_uid, sid, &kha);
-    tk_iumap_setval(I->sid_uid, khi, uid);
-    return sid;
-  } else {
+  if (mode == TK_INV_FIND) {
     khi = tk_iumap_get(I->uid_sid, uid);
     if (khi == tk_iumap_end(I->uid_sid))
       return -1;
     else
       return tk_iumap_val(I->uid_sid, khi);
+  } else { // TK_INV_REPLACE
+    // Remove old mappings if uid exists
+    khi = tk_iumap_get(I->uid_sid, uid);
+    if (khi != tk_iumap_end(I->uid_sid)) {
+      int64_t old_sid = tk_iumap_val(I->uid_sid, khi);
+      tk_iumap_del(I->uid_sid, khi);
+      khi = tk_iumap_get(I->sid_uid, old_sid);
+      if (khi != tk_iumap_end(I->sid_uid))
+        tk_iumap_del(I->sid_uid, khi);
+    }
+    // Create new mappings
+    int64_t sid = (int64_t) (I->next_sid ++);
+    khi = tk_iumap_put(I->uid_sid, uid, &kha);
+    tk_iumap_setval(I->uid_sid, khi, sid);
+    khi = tk_iumap_put(I->sid_uid, sid, &kha);
+    tk_iumap_setval(I->sid_uid, khi, uid);
+    return sid;
   }
 }
 
@@ -375,7 +384,7 @@ static inline int64_t *tk_inv_get (
   int64_t uid,
   size_t *np
 ) {
-  int64_t sid = tk_inv_uid_sid(I, uid, false);
+  int64_t sid = tk_inv_uid_sid(I, uid, TK_INV_FIND);
   if (sid < 0)
     return NULL;
   return tk_inv_sget(I, sid, np);
@@ -398,7 +407,7 @@ static inline void tk_inv_add (
   size_t i = 0;
   for (size_t s = 0; s < nsamples; s ++) {
     int64_t uid = ids->a[s];
-    int64_t sid = tk_inv_uid_sid(I, uid, true);
+    int64_t sid = tk_inv_uid_sid(I, uid, TK_INV_REPLACE);
     if (tk_ivec_push(I->node_offsets, (int64_t) I->node_bits->n) != 0) {
       tk_lua_verror(L, 2, "add", "allocation failed during indexing");
       return;
@@ -415,17 +424,10 @@ static inline void tk_inv_add (
       int64_t fid = b % (int64_t) I->features;
       assert(fid >= 0 && fid < (int64_t)I->features && "fid out of range");
       tk_ivec_t *post = I->postings->a[fid];
-      bool found = false;
-      for (size_t j = 0; j < post->n; j ++)
-        if (post->a[j] == sid) {
-          found = true;
-          break;
-        }
-      if (!found)
-        if (tk_ivec_push(post, sid) != 0) {
-          tk_lua_verror(L, 2, "add", "allocation failed during indexing");
-          return;
-        }
+      if (tk_ivec_push(post, sid) != 0) {
+        tk_lua_verror(L, 2, "add", "allocation failed during indexing");
+        return;
+      }
       if (tk_ivec_push(I->node_bits, fid) != 0) {
         tk_lua_verror(L, 2, "add", "allocation failed during indexing");
         return;
@@ -500,7 +502,7 @@ static inline void tk_inv_mutualize (
 
   tk_ivec_t *sids = tk_ivec_create(L, uids->n, 0, 0); // sids
   for (uint64_t i = 0; i < uids->n; i ++)
-    sids->a[i] = tk_inv_uid_sid(I, uids->a[i], false);
+    sids->a[i] = tk_inv_uid_sid(I, uids->a[i], TK_INV_FIND);
   tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
   if (!sid_idx)
     tk_error(L, "inv_mutualize: iumap_from_ivec failed", ENOMEM);
@@ -783,7 +785,7 @@ static inline void tk_inv_neighborhoods_by_ids (
   tk_ivec_t *uids = tk_ivec_create(L, query_ids->n, 0, 0);
   tk_ivec_copy(uids, query_ids, 0, (int64_t) query_ids->n, 0);
   for (uint64_t i = 0; i < uids->n; i ++)
-    sids->a[i] = tk_inv_uid_sid(I, uids->a[i], false);
+    sids->a[i] = tk_inv_uid_sid(I, uids->a[i], TK_INV_FIND);
 
   tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
   if (!sid_idx)
@@ -2232,7 +2234,6 @@ static inline tk_inv_t *tk_inv_create (
   if (ranks)
     tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, i_ranks);
   I->decay = decay;
-  // Precompute rank weights and total to avoid repeated computation
   I->rank_weights = tk_dvec_create(L, I->n_ranks, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
@@ -2240,12 +2241,9 @@ static inline tk_inv_t *tk_inv_create (
   for (uint64_t r = 0; r < I->n_ranks; r++) {
     double weight;
     if (decay < 0) {
-      // Negative decay: flip the importance ordering
-      // Highest rank (n_ranks-1) gets the most weight
       uint64_t flipped_r = I->n_ranks - 1 - r;
-      weight = exp((double)flipped_r * decay);  // Note: decay is negative, so this is exp(-flipped_r * |decay|)
+      weight = exp((double)flipped_r * decay);
     } else {
-      // Positive decay: normal exponential decay
       weight = exp(-(double)r * decay);
     }
     I->rank_weights->a[r] = weight;
@@ -2277,14 +2275,12 @@ static inline tk_inv_t *tk_inv_create (
     lua_pop(L, 1);
   }
   lua_pop(L, 1);
-  // Initialize temporary vectors for query processing
   I->tmp_query_offsets = tk_ivec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
   I->tmp_query_features = tk_ivec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
-  // Initialize temporary buffers for rank-aware similarity
   I->tmp_q_weights = tk_dvec_create(L, I->n_ranks, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);

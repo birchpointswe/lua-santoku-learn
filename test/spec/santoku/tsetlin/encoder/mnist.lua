@@ -1,3 +1,4 @@
+require("santoku.dvec")
 local ds = require("santoku.tsetlin.dataset")
 local err = require("santoku.error")
 local eval = require("santoku.tsetlin.evaluator")
@@ -25,41 +26,38 @@ local PRIMME_EPS = 1e-12
 local VISIBLE = 784
 local HIDDEN = 32
 local LANDMARKS = 24
-local MODE = "landmarks"
+local MODE = "landmarks" -- or raw
 
-local ENCODER = true
+local ENCODER = false
 local CLUSTER = true
-local BINARIZE = "median"
+local BINARIZE = "median" -- or itq, sign
 
 local TCH = true
 local ITQ_EPS = 1e-8
 local ITQ_ITERATIONS = 200
 
-local CORRELATION = "spearman"
-local LAPLACIAN = "unnormalized"
+local CORRELATION = "spearman" -- spearman, kendall, spearman-weighted, kendall-weighted
+local QUALITY = "biserial" -- biserial, variance
+local LAPLACIAN = "unnormalized" -- unnormalized, normalized, random
 local DECAY = 2.0
 
 local KNN = 32
 local KNN_EPS = nil
 local KNN_MIN = nil
 local KNN_MUTUAL = false
-local CLUSTER_METHOD = "prefix"
-local CLUSTER_KNN = nil
-local CLUSTER_KNN_MUTUAL = nil
+local CLUSTER_METHOD = "agglo" -- or prefix, graph
+-- local CLUSTER_KNN = nil
+-- local CLUSTER_KNN_MUTUAL = nil
 local MIN_PTS = 32
 local BRIDGE = true
 local ANN = false -- true: ann, false: hbi
 
--- local SEED_PAIRS = nil
--- local SEED_ANCHORS = nil
--- local SEED_CLASS_ANCHORS = nil
 local SAMPLED_ANCHORS = 16
--- local SIGMA_K = nil
 
 local RANKS = true
 local KEEP_PREFIX = nil
 local START_PREFIX = nil
-local SFFS_TOLERANCE = -1e-4
+local SFFS_TOLERANCE = nil
 local SFFS_FIXED = nil
 
 local CLAUSES = { def = 8, min = 8, max = 128, int = true, log = true, pow2 = true }
@@ -68,10 +66,10 @@ local CLAUSE_MAXIMUM = { def = 8, min = 8, max = 256, int = true, log = true, po
 local TARGET = { def = 4, min = 2, max = 256, int = true, log = true, pow2 = true }
 local SPECIFICITY = { def = 1000, min = 2, max = 4000, int = true, log = true }
 
-local SEARCH_PATIENCE = 10
+local SEARCH_PATIENCE = 20
 local SEARCH_ROUNDS = 20
 local SEARCH_TRIALS = 4
-local SEARCH_ITERATIONS = 10
+local SEARCH_ITERATIONS = 20
 local ITERATIONS = 100
 
 test("tsetlin", function ()
@@ -96,26 +94,12 @@ test("tsetlin", function ()
     idx:add(data:bits_to_cvec(train.n, dataset.n_visible), train.ids)
     print("  Neighborhoods")
     local ids, hoods = idx:neighborhoods(KNN, nil, KNN_EPS, KNN_MIN, KNN_MUTUAL, THREADS)
-    train.seed = ds.star_hoods(ids, hoods)
+    train.seed = graph.star_hoods(ids, hoods, THREADS)
     idx:destroy()
     collectgarbage("collect")
   else
     train.seed = pvec.create()
   end
-  -- if SEED_PAIRS then
-  --   train.seed = train.seed or pvec.create()
-  --   ds.random_pairs(train.ids, SEED_PAIRS, train.seed)
-  -- end
-  -- if SEED_ANCHORS then
-  --   train.seed = train.seed or pvec.create()
-  --   ds.anchor_pairs(train.ids, SEED_ANCHORS, train.seed)
-  -- end
-  -- if SEED_CLASS_ANCHORS then
-  --   local pos, neg = ds.multiclass_pairs(train.ids, train.solutions, SEED_CLASS_ANCHORS, SEED_CLASS_ANCHORS)
-  --   train.seed = train.seed or pvec.create()
-  --   train.seed:copy(pos)
-  --   train.seed:copy(neg)
-  -- end
   collectgarbage("collect")
 
   print("Building the graph index")
@@ -164,7 +148,6 @@ test("tsetlin", function ()
       edges = train.seed,
       index = graph_index,
       bridge = BRIDGE,
-      -- sigma_k = SIGMA_K,
       threads = THREADS,
       each = function (ids, s, b, dt)
         local d, dd = stopwatch()
@@ -247,10 +230,30 @@ test("tsetlin", function ()
   end
   collectgarbage("collect")
 
+  print("Setting up eval data")
+  print("  Known labels")
   train.solutions_spectral = ivec.create()
   train.solutions_spectral:copy(train.solutions, train.ids_spectral)
-  train.pos_sampled, train.neg_sampled = ds.multiclass_pairs(train.ids_spectral, train.solutions_spectral, SAMPLED_ANCHORS, SAMPLED_ANCHORS)
-  test.pos_sampled, test.neg_sampled = ds.multiclass_pairs(test.ids, test.solutions, SAMPLED_ANCHORS, SAMPLED_ANCHORS)
+  print("  Sampling train")
+  train.ids_sampled,
+  train.pos_sampled,
+  train.neg_sampled
+    = graph.multiclass_pairs(train.ids_spectral, train.solutions_spectral, SAMPLED_ANCHORS, SAMPLED_ANCHORS, THREADS)
+  train.adj_sampled_ids, -- == train.ids_spectral
+  train.adj_sampled_offsets,
+  train.adj_sampled_neighbors,
+  train.adj_sampled_weights
+    = graph.adj_pairs(train.ids_sampled, train.pos_sampled, train.neg_sampled, THREADS)
+  print("  Sampling test")
+  test.ids_sampled,
+  test.pos_sampled,
+  test.neg_sampled
+    = graph.multiclass_pairs(test.ids, test.solutions, SAMPLED_ANCHORS, SAMPLED_ANCHORS, THREADS)
+  test.adj_sampled_ids, -- == test.ids
+  test.adj_sampled_offsets,
+  test.adj_sampled_neighbors,
+  test.adj_sampled_weights
+    = graph.adj_pairs(test.ids, test.pos_sampled, test.neg_sampled, THREADS)
   collectgarbage("collect")
 
   print("Optimizing bit selection")
@@ -279,18 +282,30 @@ test("tsetlin", function ()
     collectgarbage("collect")
   end
 
-  print("AUC stats")
-  train.auc_continuous = eval.auc(train.ids_spectral, train.codes_spectral_cont, train.pos_sampled, train.neg_sampled, dataset.n_hidden, nil, THREADS)
-  train.auc_binary_full = eval.auc(train.ids_spectral, train.codes_spectral, train.pos_sampled, train.neg_sampled, dataset.n_hidden, nil, THREADS)
+  -- print("AUC stats")
+  -- train.auc_continuous = eval.auc(
+  --   train.adj_sampled_ids, -- == train.ids_spectral
+  --   train.adj_sampled_offsets,
+  --   train.adj_sampled_neighbors,
+  --   train.adj_sampled_weights,
+  --   train.codes_spectral_cont,
+  --   dataset.n_hidden, nil, THREADS)
+  -- train.auc_binary_full = eval.auc(
+  --   train.adj_sampled_ids, -- == train.ids_spectral
+  --   train.adj_sampled_offsets,
+  --   train.adj_sampled_neighbors,
+  --   train.adj_sampled_weights,
+  --   train.codes_spectral,
+  --   dataset.n_hidden, nil, THREADS)
   train.codes_spectral:bits_select(train.kept_bits, nil, dataset.n_hidden)
-  dataset.n_hidden_full = dataset.n_hidden
+  -- dataset.n_hidden_full = dataset.n_hidden
   dataset.n_hidden = train.kept_bits:size()
   dataset.n_latent = dataset.n_hidden * dataset.n_landmarks  -- Recalculate after bit selection
-  train.auc_binary = eval.auc(train.ids_spectral, train.codes_spectral, train.pos_sampled, train.neg_sampled, dataset.n_hidden, nil, THREADS)
-  str.printf("  AUC (continuous):        %.4f\n", train.auc_continuous)
-  str.printf("  AUC (binary, all bits):  %.4f  %d bits\n", train.auc_binary_full, dataset.n_hidden_full)
-  str.printf("  AUC (binary, subset):    %.4f  %d bits\n", train.auc_binary, dataset.n_hidden)
-  collectgarbage("collect")
+  -- train.auc_binary = eval.auc(train.ids_spectral, train.codes_spectral, train.adj_sampled_offsets, train.adj_sampled_neighbors, train.adj_sampled_weights, dataset.n_hidden, nil, THREADS)
+  -- str.printf("  AUC (continuous):        %.4f\n", train.auc_continuous)
+  -- str.printf("  AUC (binary, all bits):  %.4f  %d bits\n", train.auc_binary_full, dataset.n_hidden_full)
+  -- str.printf("  AUC (binary, subset):    %.4f  %d bits\n", train.auc_binary, dataset.n_hidden)
+  -- collectgarbage("collect")
 
   print("Codebook stats")
   train.entropy = eval.entropy_stats(train.codes_spectral, train.ids_spectral:size(), dataset.n_hidden, THREADS)
@@ -298,26 +313,47 @@ test("tsetlin", function ()
     train.entropy)
   collectgarbage("collect")
 
-  print("Retrieval stats")
-  train.similarity = eval.optimize_retrieval({
+  print("Retrieval stats (graph edges)")
+  train.retrieval_scores = eval.optimize_retrieval({
     codes = train.codes_spectral,
     n_dims = dataset.n_hidden,
-    ids = train.ids_spectral,
-    pos = train.pos_sampled,
-    neg = train.neg_sampled,
+    ids = train.adj_sampled_ids,
+    offsets = train.adj_offsets,
+    neighbors = train.adj_neighbors,
+    weights = train.adj_weights,
+    quality = QUALITY,
     threads = THREADS,
-    each = function (f, p, r, m)
+    each = function (acc)
       local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | BACC: %.6f | TPR: %.6f | TNR: %.6f | Margin: %d\n",
-        d, dd, f, p, r, m)
+      str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.6f\n",
+        d, dd, acc.margin, acc.score)
     end
   })
-  str.printi("Best\n  BACC: %.6f#(bacc) | TPR: %.6f#(tpr) | TNR: %.6f#(tnr) | Margin: %d#(margin)",
-    train.similarity)
+  local best_score, best_idx = train.retrieval_scores:max()
+  str.printf("  Best | Margin: %d | Score: %+.6f\n", best_idx, best_score)
+  collectgarbage("collect")
+
+  print("Retrieval stats (sampled binary adjacency)")
+  train.retrieval_scores = eval.optimize_retrieval({
+    codes = train.codes_spectral,
+    n_dims = dataset.n_hidden,
+    ids = train.adj_sampled_ids,
+    offsets = train.adj_sampled_offsets,
+    neighbors = train.adj_sampled_neighbors,
+    weights = train.adj_sampled_weights,
+    quality = QUALITY,
+    threads = THREADS,
+    each = function (acc)
+      local d, dd = stopwatch()
+      str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.6f\n",
+        d, dd, acc.margin, acc.score)
+    end
+  })
+  local best_score, best_idx = train.retrieval_scores:max()
+  str.printf("  Best | Margin: %d | Score: %+.6f\n", best_idx, best_score)
   collectgarbage("collect")
 
   if ENCODER or CLUSTER then
-    print("Indexing spectral codes")
     train.idx_spectral = ANN
       and ann.create({ features = dataset.n_hidden, expected_size = train.ids_spectral:size() })
       or hbi.create({ features = dataset.n_hidden })
@@ -429,34 +465,51 @@ test("tsetlin", function ()
             d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, round, trial, epoch)
         end
         train.accuracy_predicted = train_accuracy
-        str.printi("    Train (acc) | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)", train.accuracy_predicted)
+        str.printi("    Train | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)", train.accuracy_predicted)
         if is_final then
           local sth_predicted = t:predict(sth_problems, sth_n, THREADS)
-          train.auc_predicted = eval.auc(sth_ids, sth_predicted, train.pos_sampled, train.neg_sampled, dataset.n_hidden, nil, THREADS)
-          train.similarity_predicted = eval.optimize_retrieval({
+          -- train.auc_predicted = eval.auc(sth_ids, sth_predicted, train.adj_sampled_offsets, train.adj_sampled_neighbors, train.adj_sampled_weights, dataset.n_hidden, nil, THREADS)
+          train.retrieval_scores = eval.optimize_retrieval({
             codes = sth_predicted,
             n_dims = dataset.n_hidden,
             ids = sth_ids,
-            pos = train.pos_sampled,
-            neg = train.neg_sampled,
+            offsets = train.adj_offsets,
+            weights = train.adj_weights,
+            neighbors = train.adj_neighbors,
+            quality = QUALITY,
             threads = THREADS,
           })
           local test_predicted = t:predict(test_problems, test.n, THREADS)
-          test.auc_predicted = eval.auc(test_ids, test_predicted, test.pos_sampled, test.neg_sampled, dataset.n_hidden, nil, THREADS)
-          test.similarity_predicted = eval.optimize_retrieval({
+          -- test.auc_predicted = eval.auc(test_ids, test_predicted, test.adj_sampled_offsets, test.adj_sampled_neighbors, test.adj_sampled_weights, dataset.n_hidden, nil, THREADS)
+          test.retrieval_scores_predicted = eval.optimize_retrieval({
             codes = test_predicted,
             n_dims = dataset.n_hidden,
             ids = test_ids,
-            pos = test.pos_sampled,
-            neg = test.neg_sampled,
+            offsets = train.adj_sampled_offsets,
+            weights = train.adj_sampled_weights,
+            neighbors = train.adj_sampled_neighbors,
+            quality = QUALITY,
             threads = THREADS,
           })
-          train.similarity.auc = train.auc_binary
-          train.similarity_predicted.auc = train.auc_predicted
-          test.similarity_predicted.auc = test.auc_predicted
-          str.printi("    Codes (sim) | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", train.similarity)
-          str.printi("    Train (sim) | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", train.similarity_predicted)
-          str.printi("    Test (sim)  | AUC: %.2f#(auc) | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %.2f#(margin)", test.similarity_predicted)
+          train.retrieval_scores = eval.optimize_retrieval({
+            codes = test_predicted,
+            n_dims = dataset.n_hidden,
+            ids = test_ids,
+            offsets = test.adj_sampled_offsets,
+            weights = test.adj_sampled_weights,
+            neighbors = test.adj_sampled_neighbors,
+            quality = QUALITY,
+            threads = THREADS,
+          })
+          -- train.similarity.auc = train.auc_binary
+          -- train.similarity_predicted.auc = train.auc_predicted
+          -- test.similarity_predicted.auc = test.auc_predicted
+          str.printi("    Codes  | Margin: %.2f#(2) | Score: %+.2f#(1)", { train.retrieval_scores:max() })
+          str.printi("    Train  | Margin: %.2f#(2) | Score: %+.2f#(1)", { train.retrieval_scores_predicted:max() })
+          str.printi("    Test   | Margin: %.2f#(2) | Score: %+.2f#(1)", { test.retrieval_scores:max() })
+          -- str.printi("    Codes | AUC: %.2f#(auc) | Margin: %.2f#(margin)", train.similarity)
+          -- str.printi("    Train | AUC: %.2f#(auc) | Margin: %.2f#(margin)", train.similarity_predicted)
+          -- str.printi("    Test  | AUC: %.2f#(auc) | Margin: %.2f#(margin)", test.similarity_predicted)
           print()
         end
       end,
@@ -467,27 +520,58 @@ test("tsetlin", function ()
 
   if CLUSTER then
 
-    print("Clustering (codes)")
-    local codes_stats, _, _, codes_nc = eval.optimize_clustering({
+    print("Clustering (codes) (graph edges)")
+    local codes_stats = eval.optimize_clustering({
       index = train.idx_spectral,
       ids = train.ids_spectral,
-      pos = train.pos_sampled,
-      neg = train.neg_sampled,
+      offsets = train.adj_offsets,
+      neighbors = train.adj_neighbors,
+      weights = train.adj_weights,
+      method = CLUSTER_METHOD,
+      -- knn = CLUSTER_KNN,
+      -- knn_mutual = CLUSTER_KNN_MUTUAL,
+      min_pts = MIN_PTS,
+      assign_noise = true,
+      quality = QUALITY,
+      threads = THREADS,
+      each = function (acc)
+        local d, dd = stopwatch()
+        str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.6f | Clusters: %d\n",
+          d, dd, acc.step, acc.score, acc.n_clusters)
+      end
+    })
+    if codes_stats.scores then
+      local best_score, best_step = codes_stats.scores:max()
+      local best_n_clusters = codes_stats.n_clusters:get(best_step)
+      str.printf("  Best | Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+    end
+    collectgarbage("collect")
+
+    print("Clustering (codes) (sampled binary adjacency)")
+    local codes_stats = eval.optimize_clustering({
+      index = train.idx_spectral,
+      ids = train.ids_spectral,
+      offsets = train.adj_sampled_offsets,
+      neighbors = train.adj_sampled_neighbors,
+      weights = train.adj_sampled_weights,
       method = CLUSTER_METHOD,
       knn = CLUSTER_KNN,
       knn_mutual = CLUSTER_KNN_MUTUAL,
       min_pts = MIN_PTS,
       assign_noise = true,
+      quality = QUALITY,
       threads = THREADS,
-      each = function (f, p, r, m, c)
+      each = function (acc)
         local d, dd = stopwatch()
-        str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d | Clusters: %d\n",
-          d, dd, f, p, r, m, c)
+        str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.6f | Clusters: %d\n",
+          d, dd, acc.step, acc.score, acc.n_clusters)
       end
     })
-    codes_stats.n_clusters = codes_nc
-    str.printi("Best\n  BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin) | Clusters: %d#(n_clusters)",
-      codes_stats)
+    if codes_stats.scores then
+      local best_score, best_step = codes_stats.scores:max()
+      local best_n_clusters = codes_stats.n_clusters:get(best_step)
+      str.printf("  Best | Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+    end
     collectgarbage("collect")
 
     if ENCODER then
@@ -497,53 +581,57 @@ test("tsetlin", function ()
         and ann.create({ features = dataset.n_hidden, expected_size = train.n })
         or hbi.create({ features = dataset.n_hidden })
       idx_train:add(train.encoder:predict(sth_problems, sth_n, THREADS), sth_ids)
-      local train_stats, _, _, train_nc = eval.optimize_clustering({
+      local train_stats = eval.optimize_clustering({
         index = idx_train,
         ids = train.ids_spectral,
-        pos = train.pos_sampled,
-        neg = train.neg_sampled,
         method = CLUSTER_METHOD,
         knn = CLUSTER_KNN,
         knn_mutual = CLUSTER_KNN_MUTUAL,
         min_pts = MIN_PTS,
         assign_noise = true,
+        quality = QUALITY,
         threads = THREADS,
-        each = function (f, p, r, m, c)
+        each = function (acc)
           local d, dd = stopwatch()
-          str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d | Clusters: %d\n",
-            d, dd, f, p, r, m, c)
+          str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.6f | Clusters: %d\n",
+            d, dd, acc.margin, acc.score, acc.n_clusters)
         end
       })
-      train_stats.n_clusters = train_nc
-      str.printi("Best\n  BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin) | Clusters: %d#(n_clusters)",
-        train_stats)
+      if train_stats.scores then
+        local best_score, best_step = train_stats.scores:max()
+        local best_n_clusters = train_stats.n_clusters:get(best_step)
+        str.printf("  Best | Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+      end
       collectgarbage("collect")
 
+      -- TODO: Support clustering_accuracy_graph for test by constructing a
+      -- parallel test graph
       print("Clustering (test)")
       local idx_test = ANN
         and ann.create({ features = dataset.n_hidden, expected_size = test.n })
         or hbi.create({ features = dataset.n_hidden })
       idx_test:add(train.encoder:predict(test_problems, test.n, THREADS), test_ids)
-      local test_stats, _, _, test_nc = eval.optimize_clustering({
+      local test_stats = eval.optimize_clustering({
         index = idx_test,
-        ids = test_ids,
-        pos = test.pos_sampled,
-        neg = test.neg_sampled,
+        ids = test.ids,
         method = CLUSTER_METHOD,
         knn = CLUSTER_KNN,
         knn_mutual = CLUSTER_KNN_MUTUAL,
         min_pts = MIN_PTS,
         assign_noise = true,
+        quality = QUALITY,
         threads = THREADS,
-        each = function (f, p, r, m, c)
+        each = function (acc)
           local d, dd = stopwatch()
-          str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d | Clusters: %d\n",
-            d, dd, f, p, r, m, c)
+          str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.6f | Clusters: %d\n",
+            d, dd, acc.margin, acc.score, acc.n_clusters)
         end
       })
-      test_stats.n_clusters = test_nc
-      str.printi("Best\n BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin) | Clusters: %d#(n_clusters)",
-        test_stats)
+      if test_stats.scores then
+        local best_step, best_score = test_stats.scores:argmax()
+        local best_n_clusters = test_stats.n_clusters:get(best_step)
+        str.printf("  Best | Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+      end
       collectgarbage("collect")
 
     end
