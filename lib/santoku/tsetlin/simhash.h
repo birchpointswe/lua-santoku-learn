@@ -55,10 +55,11 @@ static inline void tk_simhash_inc (
     uint8_t *counts = tk_simhash_counts_int(sh, item, chunk);
     tk_bits_t *actions = tk_simhash_actions(sh, item);
     uint64_t threshold = 1 << (sh->state_bits - 2);
+    uint64_t max_count = (1 << sh->state_bits) - 1;
     tk_bits_t mask = (chunk == sh->n_chunks - 1) ? sh->tail_mask : (tk_bits_t)~0;
     for (uint64_t b = 0; b < TK_CVEC_BITS; b++) {
       if (active & (1 << b)) {
-        if (counts[b] < 255) {
+        if (counts[b] < max_count) {
           counts[b]++;
           if (counts[b] == threshold)
             actions[chunk] = (actions[chunk] | (1 << b)) & mask;
@@ -193,6 +194,7 @@ static inline void tk_simhash_setup_initial_state (
   uint64_t m = sh->state_bits - 1;
   uint64_t include_threshold = 1 << (m - 1);
   uint64_t initial_state = include_threshold - 1;
+
   if (sh->mode == TK_SIMHASH_INTEGER) {
     for (uint64_t item = item_first; item <= item_last; item++) {
       for (uint64_t chunk = 0; chunk < sh->n_chunks; chunk++) {
@@ -220,12 +222,38 @@ static inline void tk_simhash_setup_initial_state (
   }
 }
 
+static inline uint64_t tk_simhash_read_count_packed (
+  tk_simhash_t *sh,
+  uint64_t item,
+  uint64_t chunk,
+  uint64_t bit
+) {
+  tk_bits_t *counts = tk_simhash_counts(sh, item, chunk);
+  tk_bits_t *actions = tk_simhash_actions(sh, item);
+  uint64_t m = sh->state_bits - 1;
+  uint64_t count = 0;
+  for (uint64_t b = 0; b < m; b++) {
+    if (counts[b] & (1 << bit))
+      count |= (1 << b);
+  }
+  if (actions[chunk] & (1 << bit))
+    count |= (1 << m);
+  return count;
+}
+
 static inline void tk_simhash_merge (
   tk_simhash_t *sh1,
   tk_simhash_t *sh2
 ) {
-  if (sh1->mode == TK_SIMHASH_INTEGER) {
-    uint64_t threshold = 1 << (sh1->state_bits - 2);
+  assert(sh1->state_bits == sh2->state_bits);
+  assert(sh1->n_items == sh2->n_items);
+  assert(sh1->n_chunks == sh2->n_chunks);
+
+  uint64_t threshold = 1 << (sh1->state_bits - 2);
+  uint64_t max_count = (1 << sh1->state_bits) - 1;
+
+  if (sh1->mode == TK_SIMHASH_INTEGER && sh2->mode == TK_SIMHASH_INTEGER) {
+    // INTEGER + INTEGER
     for (uint64_t item = 0; item < sh1->n_items; item++) {
       tk_bits_t *actions1 = tk_simhash_actions(sh1, item);
       for (uint64_t chunk = 0; chunk < sh1->n_chunks; chunk++) {
@@ -235,14 +263,47 @@ static inline void tk_simhash_merge (
         tk_bits_t new_actions = 0;
         for (uint64_t b = 0; b < TK_CVEC_BITS; b++) {
           uint16_t sum = (uint16_t)counts1[b] + (uint16_t)counts2[b];
-          counts1[b] = (sum > 255) ? 255 : sum;
+          counts1[b] = (sum > max_count) ? max_count : sum;
           if (counts1[b] >= threshold)
             new_actions |= (1 << b);
         }
         actions1[chunk] = new_actions & mask;
       }
     }
+  } else if (sh1->mode == TK_SIMHASH_INTEGER && sh2->mode == TK_SIMHASH_PACKED) {
+    // INTEGER + PACKED: extract sh2 counts and add to sh1
+    for (uint64_t item = 0; item < sh1->n_items; item++) {
+      tk_bits_t *actions1 = tk_simhash_actions(sh1, item);
+      for (uint64_t chunk = 0; chunk < sh1->n_chunks; chunk++) {
+        uint8_t *counts1 = tk_simhash_counts_int(sh1, item, chunk);
+        tk_bits_t mask = (chunk == sh1->n_chunks - 1) ? sh1->tail_mask : (tk_bits_t)~0;
+        tk_bits_t new_actions = 0;
+        for (uint64_t b = 0; b < TK_CVEC_BITS; b++) {
+          uint64_t count2 = tk_simhash_read_count_packed(sh2, item, chunk, b);
+          uint16_t sum = (uint16_t)counts1[b] + (uint16_t)count2;
+          counts1[b] = (sum > max_count) ? max_count : sum;
+          if (counts1[b] >= threshold)
+            new_actions |= (1 << b);
+        }
+        actions1[chunk] = new_actions & mask;
+      }
+    }
+  } else if (sh1->mode == TK_SIMHASH_PACKED && sh2->mode == TK_SIMHASH_INTEGER) {
+    // PACKED + INTEGER: extract sh2 counts and add to sh1 using inc
+    for (uint64_t item = 0; item < sh1->n_items; item++) {
+      for (uint64_t chunk = 0; chunk < sh1->n_chunks; chunk++) {
+        uint8_t *counts2 = tk_simhash_counts_int(sh2, item, chunk);
+        for (uint64_t b = 0; b < TK_CVEC_BITS; b++) {
+          uint64_t count2 = counts2[b];
+          // Increment sh1 'count2' times for this bit
+          for (uint64_t c = 0; c < count2; c++) {
+            tk_simhash_inc(sh1, item, chunk, 1 << b);
+          }
+        }
+      }
+    }
   } else {
+    // PACKED + PACKED
     uint64_t m = sh1->state_bits - 1;
     for (uint64_t item = 0; item < sh1->n_items; item++) {
       for (uint64_t chunk = 0; chunk < sh1->n_chunks; chunk++) {
