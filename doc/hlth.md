@@ -73,14 +73,22 @@ specifically selected to ensure that eigenvectors faithfully represent the
 weight hierarchy without introducing any normalization-related artifacts.
 
 The subset selection process finds the subset of binarized eigenvectors that
-best preserves the neighborhood structure defined by the graph. All prefixes are
-scored, and then beginning with the best scoring prefix, a greedy sequential
-floating backwards selection (SFBS) process iteratively removes, adds, and swaps
-bits to improve the score until convergence. The scoring function is Spearman
-rank correlation between two ranked nearest neighbors lists derived from the
-same adjacency lists used in the Laplacian. The first version is the ranked list
-of neighbors using the adjacency weights, and the second version is the same
-list of neighbors sorted by Hamming similarity using the current bit subset.
+best preserves the neighborhood structure defined by the graph. While
+eigenvectors are orthogonal by construction, as noted in the
+[spectral hashing paper](https://people.csail.mit.edu/torralba/publications/spectralhashing.pdf),
+certain combinations of bits become redundant when used together in binary codes.
+Specifically, when bits are derived from eigenfunctions that factor as outer
+products, their signs satisfy sign(Φᵢ(x₁)Φⱼ(x₂)) = sign(Φᵢ(x₁))·sign(Φⱼ(x₂)),
+creating deterministic dependencies that provide no additional information.
+
+A greedy sequential floating forwards selection (SFFS) process iteratively adds,
+removes, and swaps bits to improve the score until convergence, automatically
+identifying and removing such redundant bits. The scoring function maximizes
+Spearman rank correlation (or optionally Kendall's tau-b) between the adjacency
+ranking as-is and the adjacency ranking re-ranked by Hamming similarities. This
+preserves the hierarchical neighborhood structure encoded in the weighted graph
+by ensuring that pairs of nodes with strong edge weights remain close in Hamming
+space.
 
 ## Landmark-Augmented Hash Learning
 
@@ -124,6 +132,54 @@ codes encode the full hierarchical context.
 
 9. **Learn hash functions**: Train binary classifiers mapping from concatenated
    landmark codes to target bits.
+
+## Centroid-Linkage Agglomerative Clustering
+
+Once binary codes are obtained, centroid-linkage agglomerative clustering provides
+a hierarchical clustering structure over the embedded samples. The clustering
+operates directly on the binary codes using Hamming distance, progressively
+merging clusters based on centroid proximity.
+
+Cluster centroids are computed using majority vote across each bit position: for
+each bit in the centroid code, the value is set to 1 if the majority of cluster
+members have that bit set to 1, otherwise 0. Ties favor 0.
+
+The agglomerative process:
+
+1. Initialize each sample as its own singleton cluster with its binary code as
+   the centroid.
+
+2. At each iteration, find the pair of clusters with minimum Hamming distance
+   between their centroids.
+
+3. Merge the pair into a new cluster and compute the new centroid using majority
+   vote.
+
+4. Repeat until a single cluster remains.
+
+The resulting dendrogram captures the hierarchical clustering structure, with
+merge heights corresponding to the Hamming distance at which clusters were
+combined.
+
+## Clustering and Margin Evaluation
+
+Different cuts through the dendrogram produce different flat clusterings, while
+Hamming distance thresholds provide continuous similarity judgments. Both
+scenarios require evaluating how well binary partitions preserve the original
+weighted graph structure.
+
+For dendrogram cuts, rank-biserial correlation (or optionally variance) measures
+the association between cluster membership (binary) and edge weights (continuous
+ranks). Higher rank-biserial values indicate within-cluster edges have
+systematically higher weights than between-cluster edges, enabling selection of
+an optimal number of clusters.
+
+For Hamming margins, each candidate threshold m creates a binary classification
+where pairs within the margin are similar and pairs outside are dissimilar.
+Rank-biserial correlation evaluates how well this partition aligns with edge
+weights. The optimal margin maximizes rank-biserial correlation, providing a
+global threshold for similarity/dissimilarity decisions and enabling binary
+code-based retrieval.
 
 ## Future Directions
 
