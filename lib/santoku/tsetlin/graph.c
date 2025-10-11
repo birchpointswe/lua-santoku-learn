@@ -405,7 +405,6 @@ static inline void tm_add_seed_edges_immediate(
   }
 }
 
-
 static inline void tm_adj_init (
   lua_State *L,
   int Gi,
@@ -437,7 +436,6 @@ static inline void tm_adj_resize (
     lua_pop(L, 1);
   }
 }
-
 
 static inline void tm_run_knn_queries (
   lua_State *L,
