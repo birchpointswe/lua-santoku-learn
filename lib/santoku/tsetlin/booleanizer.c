@@ -1,7 +1,7 @@
 #include <assert.h>
 #include <santoku/lua/utils.h>
-#include <santoku/ivec.h>
 #include <santoku/iuset.h>
+#include <santoku/ivec.h>
 #include <santoku/duset.h>
 #include <santoku/cuset.h>
 #include <santoku/iumap.h>

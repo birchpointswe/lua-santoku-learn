@@ -1,3 +1,4 @@
+#include <santoku/iuset.h>
 #include <santoku/lua/utils.h>
 #include <santoku/tsetlin/hbi.h>
 #include <santoku/threads.h>

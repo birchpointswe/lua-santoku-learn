@@ -1,8 +1,8 @@
+#include <santoku/iuset.h>
 #include <santoku/tsetlin/conf.h>
 #include <santoku/threads.h>
 #include <santoku/ivec.h>
 #include <santoku/rvec.h>
-#include <santoku/iuset.h>
 
 #include <float.h>
 #include <math.h>

@@ -450,16 +450,16 @@ static inline void tm_run_knn_queries (
     return;
   if (graph->inv != NULL) {
     tk_inv_neighborhoods(
-      L, graph->inv, graph->knn_cache, graph->knn_eps, 0, graph->cmp,
+      L, graph->inv, graph->knn_cache, 0.0, graph->knn_eps, 0, graph->cmp,
       graph->cmp_alpha, graph->cmp_beta, false, graph->knn_rank, n_threads,
       &graph->inv_hoods, &graph->uids_hoods);
   } else if (graph->ann != NULL) {
     tk_ann_neighborhoods(
-      L, graph->ann, graph->knn_cache, graph->probe_radius, graph->ann->features * graph->knn_eps, 0,
+      L, graph->ann, graph->knn_cache, graph->probe_radius, 0, (int64_t)(graph->ann->features * graph->knn_eps), 0,
       false, n_threads, &graph->ann_hoods, &graph->uids_hoods);
   } else if (graph->hbi != NULL) {
     tk_hbi_neighborhoods(
-      L, graph->hbi, graph->knn_cache, graph->hbi->features * graph->knn_eps, 0,
+      L, graph->hbi, graph->knn_cache, 0, (uint64_t)(graph->hbi->features * graph->knn_eps), 0,
       false, n_threads, &graph->hbi_hoods, &graph->uids_hoods);
   }
 
