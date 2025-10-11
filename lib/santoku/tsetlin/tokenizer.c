@@ -996,7 +996,6 @@ static inline int tb_tokenizer_index (lua_State *L)
   return 1;
 }
 
-
 static inline int tb_tokenizer_features (lua_State *L)
 {
   lua_settop(L, 1);
