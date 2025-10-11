@@ -2,11 +2,11 @@
 #define TK_ANN_H
 
 #include <assert.h>
+#include <santoku/iuset.h>
 #include <santoku/lua/utils.h>
 #include <santoku/tsetlin/conf.h>
 #include <santoku/ivec.h>
 #include <santoku/iumap.h>
-#include <santoku/iuset.h>
 #include <santoku/threads.h>
 #include <santoku/ivec/ext.h>
 #include <santoku/cvec/ext.h>
@@ -74,7 +74,8 @@ typedef struct tk_ann_thread_s {
   tk_cvec_t *query_vecs;
   uint64_t ifirst, ilast;
   uint64_t probe_radius;
-  int64_t eps;
+  int64_t eps_min;
+  int64_t eps_max;
   uint64_t k;
   uint64_t min;
   bool mutual;
@@ -572,7 +573,8 @@ static inline void tk_ann_neighborhoods (
   tk_ann_t *A,
   uint64_t k,
   uint64_t probe_radius,
-  int64_t eps,
+  int64_t eps_min,
+  int64_t eps_max,
   uint64_t min,
   bool mutual,
   uint64_t n_threads,
@@ -631,7 +633,8 @@ static inline void tk_ann_neighborhoods (
     data->hoods_sets = hoods_sets;
     data->sid_idx = sid_idx;
     data->probe_radius = probe_radius;
-    data->eps = eps;
+    data->eps_min = eps_min;
+    data->eps_max = eps_max;
     data->k = k;
     data->mutual = mutual;
     tk_thread_range(i, n_threads, hoods->n, &data->ifirst, &data->ilast);
@@ -716,7 +719,8 @@ static inline void tk_ann_neighborhoods_by_ids (
   tk_ivec_t *query_ids,
   uint64_t k,
   uint64_t probe_radius,
-  int64_t eps,
+  int64_t eps_min,
+  int64_t eps_max,
   uint64_t min,
   bool mutual,
   uint64_t n_threads,
@@ -769,7 +773,8 @@ static inline void tk_ann_neighborhoods_by_ids (
     data->hoods_sets = hoods_sets;
     data->sid_idx = sid_idx;
     data->probe_radius = probe_radius;
-    data->eps = eps;
+    data->eps_min = eps_min;
+    data->eps_max = eps_max;
     data->k = k;
     data->mutual = mutual;
     tk_thread_range(i, n_threads, hoods->n, &data->ifirst, &data->ilast);
@@ -848,7 +853,8 @@ static inline void tk_ann_neighborhoods_by_vecs (
   tk_cvec_t *query_vecs,
   uint64_t k,
   uint64_t probe_radius,
-  int64_t eps,
+  int64_t eps_min,
+  int64_t eps_max,
   uint64_t min,
   uint64_t n_threads,
   tk_ann_hoods_t **hoodsp,
@@ -888,7 +894,8 @@ static inline void tk_ann_neighborhoods_by_vecs (
     data->hoods_sets = NULL;
     data->sid_idx = NULL; // NULL causes UIDs to be stored directly
     data->probe_radius = probe_radius;
-    data->eps = eps;
+    data->eps_min = eps_min;
+    data->eps_max = eps_max;
     data->k = k;
     data->mutual = false;
     tk_thread_range(i, n_threads, hoods->n, &data->ifirst, &data->ilast);
@@ -1022,7 +1029,8 @@ static inline void tk_ann_probe_bucket (
   int64_t skip_sid,
   tk_iumap_t *sid_idx,
   uint64_t k,
-  uint64_t filter_eps,
+  uint64_t filter_eps_min,
+  uint64_t filter_eps_max,
   int r,
   bool resort,
   tk_pvec_t *out
@@ -1051,7 +1059,7 @@ static inline void tk_ann_probe_bucket (
     if (resort) {
       const unsigned char *p1 = (const unsigned char *) tk_ann_sget(A, sid1);
       dist = tk_cvec_bits_hamming((const uint8_t *)v, (const uint8_t *)p1, ftr);
-      if (dist > filter_eps)
+      if (dist < filter_eps_min || dist > filter_eps_max)
         continue;
     } else {
       dist = (uint64_t) r;
@@ -1070,23 +1078,26 @@ static inline tk_pvec_t *tk_ann_neighbors_by_vec (
   int64_t sid0,
   uint64_t knn,
   uint64_t probe_radius,
-  int64_t eps,
+  int64_t eps_min,
+  int64_t eps_max,
   tk_pvec_t *out
 ) {
   if (A->destroyed)
     return NULL;
   tk_pvec_clear(out);
 
-  // Interpret eps: negative means use hash distances instead of full Hamming
+  // Interpret eps_max: negative means use hash distances instead of full Hamming
   bool resort;
-  uint64_t filter_eps;
+  uint64_t filter_eps_min, filter_eps_max;
 
-  if (eps < 0) {
+  if (eps_max < 0) {
     resort = false;
-    filter_eps = UINT64_MAX;  // No filtering
+    filter_eps_min = 0;
+    filter_eps_max = UINT64_MAX;  // No filtering
   } else {
     resort = true;
-    filter_eps = (uint64_t)eps;
+    filter_eps_min = (eps_min < 0) ? 0 : (uint64_t)eps_min;
+    filter_eps_max = (uint64_t)eps_max;
   }
 
   const tk_ann_hash_t h0 = tk_ann_hash(A, vec);
@@ -1100,7 +1111,7 @@ static inline tk_pvec_t *tk_ann_neighbors_by_vec (
       tk_ann_hash_t mask = 0;
       for (int i = 0; i < r; i ++)
         mask |= (1U << pos[i]);
-      tk_ann_probe_bucket(A, h0 ^ mask, v, ftr, sid0, NULL, knn, filter_eps, r, resort, out);
+      tk_ann_probe_bucket(A, h0 ^ mask, v, ftr, sid0, NULL, knn, filter_eps_min, filter_eps_max, r, resort, out);
       int j;
       for (j = r - 1; j >= 0; j--) {
         if (pos[j] != j + TK_ANN_BITS - r) {
@@ -1123,7 +1134,8 @@ static inline tk_pvec_t *tk_ann_neighbors_by_id (
   int64_t uid,
   uint64_t knn,
   uint64_t probe_radius,
-  int64_t eps,
+  int64_t eps_min,
+  int64_t eps_max,
   tk_pvec_t *out
 ) {
   int64_t sid0 = tk_ann_uid_sid(A, uid, TK_ANN_FIND);
@@ -1131,7 +1143,7 @@ static inline tk_pvec_t *tk_ann_neighbors_by_id (
     tk_pvec_clear(out);
     return out;
   }
-  return tk_ann_neighbors_by_vec(A, tk_ann_get(A, uid), sid0, knn, probe_radius, eps, out);
+  return tk_ann_neighbors_by_vec(A, tk_ann_get(A, uid), sid0, knn, probe_radius, eps_min, eps_max, out);
 }
 
 static inline void tk_ann_populate_neighborhood (
@@ -1143,23 +1155,26 @@ static inline void tk_ann_populate_neighborhood (
   tk_iumap_t *sid_idx,
   uint64_t knn,
   uint64_t probe_radius,
-  int64_t eps
+  int64_t eps_min,
+  int64_t eps_max
 ) {
-  // Interpret eps: negative means use hash distances instead of full Hamming
+  // Interpret eps_max: negative means use hash distances instead of full Hamming
   bool resort;
-  uint64_t filter_eps;
+  uint64_t filter_eps_min, filter_eps_max;
 
-  if (eps < 0) {
+  if (eps_max < 0) {
     resort = false;
-    filter_eps = UINT64_MAX;  // No filtering
+    filter_eps_min = 0;
+    filter_eps_max = UINT64_MAX;  // No filtering
   } else {
     resort = true;
-    filter_eps = (uint64_t)eps;
+    filter_eps_min = (eps_min < 0) ? 0 : (uint64_t)eps_min;
+    filter_eps_max = (uint64_t)eps_max;
   }
 
   const unsigned char *v_uc = (const unsigned char *) V;
   tk_ann_hash_t h = tk_ann_hash(A, V);
-  tk_ann_probe_bucket(A, h, v_uc, A->features, sid, sid_idx, knn, filter_eps, 0, resort, hood);
+  tk_ann_probe_bucket(A, h, v_uc, A->features, sid, sid_idx, knn, filter_eps_min, filter_eps_max, 0, resort, hood);
   int pos[TK_ANN_BITS];
   for (int r = 1; r <= (int) probe_radius && r <= TK_ANN_BITS; r ++) {
     for (int i = 0; i < r; i ++)
@@ -1168,7 +1183,7 @@ static inline void tk_ann_populate_neighborhood (
       tk_ann_hash_t mask = 0;
       for (int j = 0; j < r; j ++)
         mask |= (1U << pos[j]);
-      tk_ann_probe_bucket(A, h ^ mask, v_uc, A->features, sid, sid_idx, knn, filter_eps, r, resort, hood);
+      tk_ann_probe_bucket(A, h ^ mask, v_uc, A->features, sid, sid_idx, knn, filter_eps_min, filter_eps_max, r, resort, hood);
       int k;
       for (k = r - 1; k >= 0; k--) {
         if (pos[k] != k + TK_ANN_BITS - r) {
@@ -1383,50 +1398,53 @@ static inline int tk_ann_get_lua (lua_State *L)
 
 static inline int tk_ann_neighborhoods_lua (lua_State *L)
 {
-  lua_settop(L, 7);
+  lua_settop(L, 8);
   tk_ann_t *A = tk_ann_peek(L, 1);
   uint64_t k = tk_lua_optunsigned(L, 2, "k", 0);
   uint64_t probe_radius = tk_lua_optunsigned(L, 3, "probe_radius", 2);
-  int64_t eps = tk_lua_optinteger(L, 4, "eps", (int64_t)A->features);
-  uint64_t min = tk_lua_optunsigned(L, 5, "min", 0);
-  bool mutual = tk_lua_optboolean(L, 6, "mutual", false);
-  uint64_t n_threads = tk_threads_getn(L, 7, "neighborhoods", NULL);
-  tk_ann_neighborhoods(L, A, k, probe_radius, eps, min, mutual, n_threads, 0, 0);
+  int64_t eps_min = tk_lua_optinteger(L, 4, "eps_min", 0);
+  int64_t eps_max = tk_lua_optinteger(L, 5, "eps_max", (int64_t)A->features);
+  uint64_t min = tk_lua_optunsigned(L, 6, "min", 0);
+  bool mutual = tk_lua_optboolean(L, 7, "mutual", false);
+  uint64_t n_threads = tk_threads_getn(L, 8, "neighborhoods", NULL);
+  tk_ann_neighborhoods(L, A, k, probe_radius, eps_min, eps_max, min, mutual, n_threads, 0, 0);
   return 2;
 }
 
 static inline int tk_ann_neighborhoods_by_ids_lua (lua_State *L)
 {
-  lua_settop(L, 8);
+  lua_settop(L, 9);
   tk_ann_t *A = tk_ann_peek(L, 1);
   tk_ivec_t *query_ids = tk_ivec_peek(L, 2, "ids");
   uint64_t k = tk_lua_checkunsigned(L, 3, "k");
   uint64_t probe_radius = tk_lua_optunsigned(L, 4, "probe_radius", 2);
-  int64_t eps = tk_lua_optinteger(L, 5, "eps", (int64_t)A->features);
-  uint64_t min = tk_lua_optunsigned(L, 6, "min", 0);
-  bool mutual = tk_lua_optboolean(L, 7, "mutual", false);
-  uint64_t n_threads = tk_threads_getn(L, 8, "neighborhoods_by_ids", NULL);
+  int64_t eps_min = tk_lua_optinteger(L, 5, "eps_min", 0);
+  int64_t eps_max = tk_lua_optinteger(L, 6, "eps_max", (int64_t)A->features);
+  uint64_t min = tk_lua_optunsigned(L, 7, "min", 0);
+  bool mutual = tk_lua_optboolean(L, 8, "mutual", false);
+  uint64_t n_threads = tk_threads_getn(L, 9, "neighborhoods_by_ids", NULL);
   int64_t write_pos = 0;
   for (int64_t i = 0; i < (int64_t) query_ids->n; i ++)
     if (tk_ann_uid_sid(A, query_ids->a[i], TK_ANN_FIND) >= 0)
       query_ids->a[write_pos ++] = query_ids->a[i];
   query_ids->n = (uint64_t) write_pos;
   tk_ann_hoods_t *hoods;
-  tk_ann_neighborhoods_by_ids(L, A, query_ids, k, probe_radius, eps, min, mutual, n_threads, &hoods, &query_ids);
+  tk_ann_neighborhoods_by_ids(L, A, query_ids, k, probe_radius, eps_min, eps_max, min, mutual, n_threads, &hoods, &query_ids);
   return 2;
 }
 
 static inline int tk_ann_neighborhoods_by_vecs_lua (lua_State *L)
 {
-  lua_settop(L, 7);
+  lua_settop(L, 8);
   tk_ann_t *A = tk_ann_peek(L, 1);
   tk_cvec_t *query_vecs = tk_cvec_peek(L, 2, "vectors");
   uint64_t k = tk_lua_checkunsigned(L, 3, "k");
   uint64_t probe_radius = tk_lua_optunsigned(L, 4, "probe_radius", 3);
-  int64_t eps = tk_lua_optinteger(L, 5, "eps", (int64_t)A->features);
-  uint64_t min = tk_lua_optunsigned(L, 6, "min", 0);
-  uint64_t n_threads = tk_threads_getn(L, 7, "neighborhoods_by_vecs", NULL);
-  tk_ann_neighborhoods_by_vecs(L, A, query_vecs, k, probe_radius, eps, min, n_threads, NULL, NULL);
+  int64_t eps_min = tk_lua_optinteger(L, 5, "eps_min", 0);
+  int64_t eps_max = tk_lua_optinteger(L, 6, "eps_max", (int64_t)A->features);
+  uint64_t min = tk_lua_optunsigned(L, 7, "min", 0);
+  uint64_t n_threads = tk_threads_getn(L, 8, "neighborhoods_by_vecs", NULL);
+  tk_ann_neighborhoods_by_vecs(L, A, query_vecs, k, probe_radius, eps_min, eps_max, min, n_threads, NULL, NULL);
   return 2;
 }
 
@@ -1450,15 +1468,16 @@ static inline int tk_ann_distance_lua (lua_State *L)
 
 static inline int tk_ann_neighbors_lua (lua_State *L)
 {
-  lua_settop(L, 6);
+  lua_settop(L, 7);
   tk_ann_t *A = tk_ann_peek(L, 1);
   uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
   uint64_t probe_radius = tk_lua_optunsigned(L, 4, "probe_radius", 3);
-  int64_t eps = tk_lua_optinteger(L, 5, "eps", (int64_t)A->features);
-  tk_pvec_t *out = tk_pvec_peek(L, 6, "out");
+  int64_t eps_min = tk_lua_optinteger(L, 5, "eps_min", 0);
+  int64_t eps_max = tk_lua_optinteger(L, 6, "eps_max", (int64_t)A->features);
+  tk_pvec_t *out = tk_pvec_peek(L, 7, "out");
   if (lua_type(L, 2) == LUA_TNUMBER) {
     int64_t uid = tk_lua_checkinteger(L, 2, "id");
-    tk_ann_neighbors_by_id(A, uid, knn, probe_radius, eps, out);
+    tk_ann_neighbors_by_id(A, uid, knn, probe_radius, eps_min, eps_max, out);
   } else {
     // Check if vector is passed as cvec or string
     char *vec;
@@ -1468,7 +1487,7 @@ static inline int tk_ann_neighbors_lua (lua_State *L)
     } else {
       vec = (char *) tk_lua_checkustring(L, 2, "vector");
     }
-    tk_ann_neighbors_by_vec(A, vec, -1, knn, probe_radius, eps, out);
+    tk_ann_neighbors_by_vec(A, vec, -1, knn, probe_radius, eps_min, eps_max, out);
   }
   return 0;
 }
@@ -1553,7 +1572,7 @@ static inline void tk_ann_worker (void *dp, int sig)
           sid = data->sids->a[i];
           vec = tk_ann_sget(data->A, sid);
         }
-        tk_ann_populate_neighborhood(data->A, i, sid, vec, hood, data->sid_idx, data->k, data->probe_radius, data->eps);
+        tk_ann_populate_neighborhood(data->A, i, sid, vec, hood, data->sid_idx, data->k, data->probe_radius, data->eps_min, data->eps_max);
         tk_pvec_asc(hood, 0, hood->n);
       }
       break;

@@ -130,23 +130,6 @@ typedef struct {
   double diagnostic_std_sum;
 } tk_eval_thread_t;
 
-static inline tk_accuracy_t _tm_clustering_accuracy (
-  tk_ivec_t *ids,
-  tk_ivec_t *assignments,
-  tk_ivec_t *offsets,
-  tk_ivec_t *neighbors,
-  tk_dvec_t *weights,
-  tk_quality_metric_t quality
-);
-
-static inline void update_parent_from_diff(
-  const tk_ivec_t *prev_assignments,
-  const tk_ivec_t *curr_assignments,
-  uint64_t n_samples,
-  tk_ivec_t *parent,
-  uint64_t *next_cluster_id
-);
-
 static void tk_eval_worker (void *dp, int sig)
 {
   tk_eval_thread_t *data = (tk_eval_thread_t *) dp;
@@ -166,148 +149,6 @@ static void tk_eval_worker (void *dp, int sig)
           atomic_fetch_add(state->FP + y_pred, 1);
           atomic_fetch_add(state->FN + y_true, 1);
         }
-      }
-      break;
-
-    case TK_EVAL_OPTIMIZE_CLUSTERING:
-
-      if (state->cluster_method == TK_CLUSTER_METHOD_GRAPH) {
-
-        if (data->dsu == NULL) {
-          data->dsu = tk_dsu_create(NULL, state->ids);
-          if (data->dsu == NULL) {
-            atomic_store(&data->has_error, true);
-            return;
-          }
-        }
-
-        if (data->is_core == NULL) {
-          data->is_core = tk_cvec_create(0, TK_CVEC_BITS_BYTES(state->ids->n), 0, 0);
-          tk_cvec_zero(data->is_core);
-          if (data->is_core == NULL) {
-            atomic_store(&data->has_error, true);
-            return;
-          }
-        }
-
-      } else if (state->cluster_method == TK_CLUSTER_METHOD_PREFIX) {
-
-        uint64_t max_features = state->hbi ? state->hbi->features : state->ann ? state->ann->features : 0;
-        if (max_features <= 64) {
-          if (data->prefix_cache == NULL) {
-            data->prefix_cache = (uint64_t *)malloc(state->ids->n * sizeof(uint64_t));
-            if (data->prefix_cache == NULL) {
-              atomic_store(&data->has_error, true);
-              return;
-            }
-            memset(data->prefix_cache, 0, state->ids->n * sizeof(uint64_t));
-            data->prefix_cache_depth = 0;
-          }
-        } else {
-          if (data->prefix_bytes == NULL) {
-            uint64_t chunks = TK_CVEC_BITS_BYTES(max_features);
-            data->prefix_bytes = (tk_bits_t *)malloc(state->ids->n * chunks);
-            if (data->prefix_bytes == NULL) {
-              atomic_store(&data->has_error, true);
-              return;
-            }
-            memset(data->prefix_bytes, 0, state->ids->n * chunks);
-            data->prefix_cache_depth = 0;
-          }
-        }
-      }
-
-      uint64_t m_start = state->cluster_method == TK_CLUSTER_METHOD_PREFIX ? data->mlast : data->mfirst;
-      uint64_t m_end = state->cluster_method == TK_CLUSTER_METHOD_PREFIX ? data->mfirst : data->mlast;
-      int64_t m_step = state->cluster_method == TK_CLUSTER_METHOD_PREFIX ? -1 : 1;
-
-      for (int64_t m0_signed = (int64_t)m_start; m_step > 0 ? (m0_signed <= (int64_t)m_end) : (m0_signed >= (int64_t)m_end); m0_signed += m_step) {
-
-        uint64_t m0 = (uint64_t)m0_signed;
-        tk_ivec_clear(data->next_assignments);
-
-        tk_cluster_opts_t cluster_opts = {
-          .inv = state->inv,
-          .hbi = state->hbi,
-          .ann = state->ann,
-          .ids = state->ids,
-          .ididx = state->ididx,
-          .min_pts = state->min_pts,
-          .assign_noise = state->assign_noise,
-          .probe_radius = state->probe_radius,
-          .cmp = state->cmp,
-          .cmp_alpha = state->cmp_alpha,
-          .cmp_beta = state->cmp_beta,
-          .rank_filter = state->rank_filter,
-          .inv_hoods = state->inv_hoods,
-          .ann_hoods = state->ann_hoods,
-          .hbi_hoods = state->hbi_hoods,
-          .uids_hoods = state->uids_hoods,
-          .uids_idx_hoods = state->uids_idx_hoods,
-          .assignments = data->next_assignments,
-          .n_clustersp = &data->next_n,
-          .dsu_reuse = data->dsu,
-          .is_core_reuse = data->is_core,
-          .rtmp = data->rtmp,
-          .ptmp = data->ptmp,
-          .prefix_cache_reuse = data->prefix_cache,
-          .prefix_bytes_reuse = data->prefix_bytes,
-          .prefix_cache_depth = data->prefix_cache_depth
-        };
-
-        if (state->cluster_method == TK_CLUSTER_METHOD_PREFIX) {
-          uint64_t depth = m0 + state->min_margin;
-          cluster_opts.depth = depth;
-          data->next_m = depth;
-          tk_cluster_prefix(&cluster_opts);
-          data->prefix_cache_depth = cluster_opts.prefix_cache_depth;
-        } else {
-          if (state->inv != NULL) {
-            uint64_t bin_idx = m0 + state->min_margin;
-            double eps = state->inv_thresholds->a[bin_idx];
-            cluster_opts.eps = eps;
-            data->next_m = (uint64_t)(eps * 1000);
-          } else {
-            uint64_t m = m0 + state->min_margin;
-            cluster_opts.margin = m;
-            data->next_m = m;
-          }
-          tk_cluster_dsu(&cluster_opts);
-        }
-
-        tk_accuracy_t result = _tm_clustering_accuracy(
-          state->ids, data->next_assignments, state->offsets, state->neighbors,
-          state->weights, state->quality_metric);
-        data->next = result;
-        tk_threads_notify_parent(data->self);
-        if (result.score > data->best.score) {
-          data->best = result;
-          data->best_n = data->next_n;
-          data->best_m = data->next_m;
-          tk_ivec_t *tmp = data->best_assignments;
-          data->best_assignments = data->next_assignments;
-          data->next_assignments = tmp;
-        }
-
-        if (data->next_n <= 1)
-          break;
-      }
-
-      if (data->dsu != NULL) {
-        tk_dsu_destroy(data->dsu);
-        data->dsu = NULL;
-      }
-      if (data->is_core != NULL) {
-        tk_cvec_destroy(data->is_core);
-        data->is_core = NULL;
-      }
-      if (data->prefix_cache != NULL) {
-        free(data->prefix_cache);
-        data->prefix_cache = NULL;
-      }
-      if (data->prefix_bytes != NULL) {
-        free(data->prefix_bytes);
-        data->prefix_bytes = NULL;
       }
       break;
 
@@ -708,42 +549,6 @@ static inline int tm_class_accuracy (lua_State *L)
   lua_settop(L, 1);
   lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
-}
-
-static inline tk_accuracy_t _tm_clustering_accuracy (
-  tk_ivec_t *ids,
-  tk_ivec_t *assignments,
-  tk_ivec_t *offsets,
-  tk_ivec_t *neighbors,
-  tk_dvec_t *weights,
-  tk_quality_metric_t quality
-) {
-  if (offsets->n == 0)
-    return (tk_accuracy_t) { 0 };
-  uint64_t n_nodes = offsets->n - 1;
-  if (n_nodes == 0)
-    return (tk_accuracy_t) { 0 };
-
-  tk_eval_t state;
-  state.assignments = assignments;
-  state.offsets = offsets;
-  state.neighbors = neighbors;
-  state.weights = weights;
-  state.quality_metric = quality;
-
-  tk_eval_thread_t data;
-  data.state = &state;
-  data.wfirst = 0;
-  data.wlast = n_nodes - 1;
-  data.corr_score = 0.0;
-  data.corr_nodes_processed = 0;
-
-  tk_eval_worker(&data, TK_EVAL_CLUSTERING_QUALITY);
-
-  tk_accuracy_t acc;
-  acc.score = data.corr_nodes_processed > 0 ? data.corr_score / data.corr_nodes_processed : 0.0;
-
-  return acc;
 }
 
 static inline void tm_clustering_accuracy (
@@ -1166,66 +971,162 @@ typedef struct {
   unsigned int n_threads;
   tk_quality_metric_t quality_metric;
   double tolerance;
-  tk_ivec_t *prev_assignments;
-  tk_ivec_t *parent;
+  tk_ivec_t *dendro_offsets;
+  tk_pvec_t *dendro_merges;
   tk_dvec_t *scores;
   tk_ivec_t *n_clusters;
-  uint64_t next_cluster_id;
+  uint64_t n_samples;
 } agglo_callback_data_t;
 
-static inline void update_parent_from_diff(
+static inline tk_pvec_t *update_parent_from_diff(
+  lua_State *L,
   const tk_ivec_t *prev_assignments,
   const tk_ivec_t *curr_assignments,
-  uint64_t n_samples,
-  tk_ivec_t *parent,
-  uint64_t *next_cluster_id
+  uint64_t n_samples
 ) {
-  tk_iuset_t *new_ids = tk_iuset_create(NULL, 0);
-  if (!new_ids) return;
+  // Collect merge pairs: (absorbed_cluster, surviving_cluster)
+  tk_pvec_t *merges = tk_pvec_create(L, 0, 0, 0);
+  if (!merges) return NULL;
+
+  // Track which old clusters merged into which surviving clusters
+  tk_iuset_t *surviving_ids = tk_iuset_create(NULL, 0);
+  if (!surviving_ids) {
+    tk_pvec_destroy(merges);
+    return NULL;
+  }
+
   for (uint64_t i = 0; i < n_samples; i++) {
-    int64_t new_id = curr_assignments->a[i];
-    if (new_id >= 0) {
+    int64_t surviving_id = curr_assignments->a[i];
+    if (surviving_id >= 0) {
       int absent;
-      tk_iuset_put(new_ids, new_id, &absent);
+      tk_iuset_put(surviving_ids, surviving_id, &absent);
     }
   }
-  int64_t new_id;
-  tk_umap_foreach_keys(new_ids, new_id, ({
-    // Collect all old IDs that became this new ID
+
+  int64_t surviving_cluster;
+  tk_umap_foreach_keys(surviving_ids, surviving_cluster, ({
+    // Collect all old cluster IDs that merged into this surviving cluster
     tk_iuset_t *old_ids = tk_iuset_create(NULL, 0);
     if (!old_ids) continue;
+
     for (uint64_t i = 0; i < n_samples; i++) {
-      if (curr_assignments->a[i] == new_id && prev_assignments->a[i] >= 0) {
+      if (curr_assignments->a[i] == surviving_cluster && prev_assignments->a[i] >= 0) {
         int absent;
         tk_iuset_put(old_ids, prev_assignments->a[i], &absent);
       }
     }
+
+    // If multiple old clusters merged
     if (tk_iuset_size(old_ids) > 1) {
-      uint64_t parent_id = (*next_cluster_id)++;
-
-      // Ensure parent array is large enough
-      if (parent_id >= parent->n) {
-        uint64_t new_size = parent_id + 1024;
-        tk_ivec_ensure(parent, new_size);
-        // Initialize new entries to -1
-        for (uint64_t j = parent->n; j < new_size; j++)
-          parent->a[j] = -1;
-        parent->n = new_size;
-      }
-
-      if (parent_id < parent->n) {
-        parent->a[parent_id] = -1;
-        int64_t old_id;
-        tk_umap_foreach_keys(old_ids, old_id, ({
-          if (old_id >= 0 && (uint64_t)old_id < parent->n) {
-            parent->a[old_id] = (int64_t)parent_id;
-          }
-        }));
-      }
+      // Add merge pairs: all absorbed clusters point to surviving cluster
+      int64_t old_id;
+      tk_umap_foreach_keys(old_ids, old_id, ({
+        if (old_id != surviving_cluster && old_id >= 0) {
+          tk_pvec_push(merges, tk_pair(old_id, surviving_cluster));
+        }
+      }));
     }
+
     tk_iuset_destroy(old_ids);
   }));
-  tk_iuset_destroy(new_ids);
+  tk_iuset_destroy(surviving_ids);
+  return merges;
+}
+
+static inline tk_ivec_t *tk_pvec_dendro_cut(
+  lua_State *L,
+  tk_ivec_t *offsets,
+  tk_pvec_t *merges,
+  uint64_t step,
+  tk_ivec_t *assignments
+) {
+  // Find n_samples: scan offsets for first i where offsets[i]==0 after initial values
+  uint64_t n_samples = 0;
+  for (uint64_t i = 0; i < offsets->n; i++) {
+    if (offsets->a[i] == 0 && i > 0) {
+      n_samples = i;
+      break;
+    }
+  }
+
+  if (n_samples == 0 || n_samples > offsets->n) {
+    tk_error(L, "tk_pvec_dendro_cut: invalid dendro_offsets structure", EINVAL);
+  }
+
+  // Ensure assignments has correct size
+  if (assignments->m < n_samples) {
+    tk_ivec_ensure(assignments, n_samples);
+  }
+
+  // Copy initial assignments
+  for (uint64_t i = 0; i < n_samples; i++) {
+    assignments->a[i] = offsets->a[i];
+  }
+  assignments->n = n_samples;
+
+  // Build absorption map from merges in steps 0..step-1
+  tk_iumap_t *absorbed_to_surviving = tk_iumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_EVAL_EPH, -1, -1);
+  lua_pop(L, 1);
+
+  for (uint64_t s = 0; s < step && s + n_samples < offsets->n; s++) {
+    int64_t start = offsets->a[n_samples + s];
+    int64_t end = (s + n_samples + 1 < offsets->n) ? offsets->a[n_samples + s + 1] : (int64_t)merges->n;
+
+    for (int64_t idx = start; idx < end && idx < (int64_t)merges->n; idx++) {
+      tk_pair_t merge = merges->a[idx];
+      int64_t absorbed = merge.i;
+      int64_t surviving = merge.p;
+
+      int kha;
+      khint_t khi = tk_iumap_put(absorbed_to_surviving, absorbed, &kha);
+      tk_iumap_setval(absorbed_to_surviving, khi, surviving);
+    }
+  }
+
+  // Resolve chains: follow absorption map to find final surviving cluster
+  for (uint64_t i = 0; i < n_samples; i++) {
+    int64_t cluster = assignments->a[i];
+    uint64_t chain_limit = 10000;  // Prevent infinite loops
+    uint64_t chain_count = 0;
+
+    while (chain_count < chain_limit) {
+      khint_t khi = tk_iumap_get(absorbed_to_surviving, cluster);
+      if (khi == tk_iumap_end(absorbed_to_surviving)) {
+        break;  // Not absorbed, this is final cluster
+      }
+      cluster = tk_iumap_val(absorbed_to_surviving, khi);
+      chain_count++;
+    }
+
+    assignments->a[i] = cluster;
+  }
+
+  // Remap to consecutive cluster IDs
+  tk_iumap_t *cluster_remap = tk_iumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_EVAL_EPH, -1, -1);
+  lua_pop(L, 1);
+
+  int64_t next_id = 0;
+  for (uint64_t i = 0; i < n_samples; i++) {
+    int64_t cluster = assignments->a[i];
+    khint_t khi = tk_iumap_get(cluster_remap, cluster);
+
+    if (khi == tk_iumap_end(cluster_remap)) {
+      int kha;
+      khi = tk_iumap_put(cluster_remap, cluster, &kha);
+      tk_iumap_setval(cluster_remap, khi, next_id);
+      assignments->a[i] = next_id;
+      next_id++;
+    } else {
+      assignments->a[i] = tk_iumap_val(cluster_remap, khi);
+    }
+  }
+
+  tk_iumap_destroy(absorbed_to_surviving);
+  tk_iumap_destroy(cluster_remap);
+
+  return assignments;
 }
 
 static inline void agglo_snapshot_callback (
@@ -1238,23 +1139,44 @@ static inline void agglo_snapshot_callback (
   assert(ids->n == snapshot_assignments->n);
   agglo_callback_data_t *data = (agglo_callback_data_t *)user_data;
 
-  // Build dendrogram by comparing to previous assignments
   if (iteration == 0) {
-    // Initialize: copy current assignments to prev
-    tk_ivec_copy(data->prev_assignments, snapshot_assignments, 0, (int64_t)snapshot_assignments->n, 0);
-
-    // Set initial parent entries to -1 for all initial clusters
-    for (uint64_t i = 0; i < snapshot_assignments->n; i++) {
-      int64_t cluster_id = snapshot_assignments->a[i];
-      if (cluster_id >= 0 && (uint64_t)cluster_id < data->parent->n) {
-        data->parent->a[cluster_id] = -1;  // Active root
-      }
+    // Initialize dendrogram: store initial assignments in offsets[0..n-1], set offsets[n]=0
+    for (uint64_t i = 0; i < data->n_samples; i++) {
+      data->dendro_offsets->a[i] = snapshot_assignments->a[i];
     }
+    data->dendro_offsets->a[data->n_samples] = 0;  // First merge index starts at 0
+    data->dendro_offsets->n = data->n_samples + 1;
+
+    // Also need prev_assignments for next iteration
+    tk_ivec_t *prev_assignments = tk_ivec_create(data->L, data->n_samples, 0, 0);
+    tk_ivec_copy(prev_assignments, snapshot_assignments, 0, (int64_t)snapshot_assignments->n, 0);
+    tk_lua_add_ephemeron(data->L, TK_EVAL_EPH, data->i_eph, -1);
+    lua_pop(data->L, 1);
+    // Store prev_assignments in a temporary location (we'll use i_eph ephemeron table)
+    lua_pushlightuserdata(data->L, prev_assignments);
+    lua_setfield(data->L, data->i_eph, "__prev_assignments");
   } else {
-    update_parent_from_diff(
-      data->prev_assignments, snapshot_assignments, ids->n, data->parent,
-      &data->next_cluster_id);
-    tk_ivec_copy(data->prev_assignments, snapshot_assignments, 0, (int64_t)snapshot_assignments->n, 0);
+    // Retrieve prev_assignments
+    lua_getfield(data->L, data->i_eph, "__prev_assignments");
+    tk_ivec_t *prev_assignments = (tk_ivec_t *)lua_touserdata(data->L, -1);
+    lua_pop(data->L, 1);
+
+    // Get merge pairs from diff
+    tk_pvec_t *step_merges = update_parent_from_diff(data->L, prev_assignments, snapshot_assignments, data->n_samples);
+
+    // Append merges to dendro_merges
+    if (step_merges) {
+      for (uint64_t i = 0; i < step_merges->n; i++) {
+        tk_pvec_push(data->dendro_merges, step_merges->a[i]);
+      }
+      tk_pvec_destroy(step_merges);
+    }
+
+    // Push new offset = current dendro_merges->n
+    tk_ivec_push(data->dendro_offsets, (int64_t)data->dendro_merges->n);
+
+    // Update prev_assignments for next iteration
+    tk_ivec_copy(prev_assignments, snapshot_assignments, 0, (int64_t)snapshot_assignments->n, 0);
   }
 
   double score = 0.0;
@@ -1319,15 +1241,16 @@ static inline int tm_setup_clustering_ids (
 }
 
 typedef struct {
-  tk_ivec_t *parent;       // parent[cluster_id] = parent_id, -1 = active root
-  tk_dvec_t *scores;       // scores->a[step] = quality score
-  tk_ivec_t *n_clusters;   // n_clusters->a[step] = cluster count at step
+  tk_ivec_t *dendro_offsets;  // [0..n-1]=initial_assignments, [n+i]=merge offset for step i
+  tk_pvec_t *dendro_merges;   // merge pairs (absorbed, surviving)
+  tk_dvec_t *scores;          // scores->a[step] = quality score
+  tk_ivec_t *n_clusters;      // n_clusters->a[step] = cluster count at step
   uint64_t n_steps;
-  uint64_t max_cluster_id;
 } tm_optimize_result_t;
 
 static inline tm_optimize_result_t tm_optimize_clustering_agglo (
   lua_State *L,
+  tk_inv_t *inv,
   tk_ann_t *ann,
   tk_hbi_t *hbi,
   tk_ivec_t *ids,
@@ -1338,6 +1261,16 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
   tk_dvec_t *weights,
   unsigned int n_threads,
   uint64_t probe_radius,
+  tk_agglo_linkage_t linkage,
+  uint64_t knn,
+  uint64_t knn_min,
+  bool knn_mutual,
+  tk_ivec_sim_type_t cmp,
+  double cmp_alpha,
+  double cmp_beta,
+  int64_t rank_filter,
+  uint64_t min_pts,
+  bool assign_noise,
   tk_quality_metric_t quality,
   double tolerance,
   int i_each
@@ -1345,7 +1278,13 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
   tm_optimize_result_t result;
 
   // Initialize dendrogram structures
-  result.parent = tk_ivec_create(L, ids->n, 0, 0);
+  // Estimated size: n_samples for initial + estimated steps (assume n_samples/10)
+  uint64_t estimated_steps = ids->n / 10 + 10;
+  result.dendro_offsets = tk_ivec_create(L, ids->n + estimated_steps, 0, 0);
+  tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+  lua_pop(L, 1);
+
+  result.dendro_merges = tk_pvec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
   lua_pop(L, 1);
 
@@ -1366,9 +1305,32 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
   tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
   lua_pop(L, 1);
 
-  tk_ivec_t *prev_assignments = tk_ivec_create(L, ids->n, 0, 0);
-  tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
-  lua_pop(L, 1);
+  // Pre-compute neighborhoods for single-linkage mode
+  tk_inv_hoods_t *inv_hoods = NULL;
+  tk_ann_hoods_t *ann_hoods = NULL;
+  tk_hbi_hoods_t *hbi_hoods = NULL;
+  tk_ivec_t *hoods_uids = NULL;
+
+  if (linkage == TK_AGGLO_LINKAGE_SINGLE && knn > 0) {
+    // Need to pre-compute KNN neighborhoods
+    if (inv != NULL) {
+      tk_inv_neighborhoods(L, inv, knn, 0.0, 1.0, knn_min, cmp, cmp_alpha, cmp_beta,
+                           knn_mutual, rank_filter, n_threads, &inv_hoods, &hoods_uids);
+      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
+      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+      lua_pop(L, 2);
+    } else if (ann != NULL) {
+      tk_ann_neighborhoods(L, ann, knn, probe_radius, 0, -1, knn_min, knn_mutual, n_threads, &ann_hoods, &hoods_uids);
+      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
+      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+      lua_pop(L, 2);
+    } else if (hbi != NULL) {
+      tk_hbi_neighborhoods(L, hbi, knn, 0, UINT64_MAX, knn_min, knn_mutual, n_threads, &hbi_hoods, &hoods_uids);
+      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
+      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+      lua_pop(L, 2);
+    }
+  }
 
   // Initialize callback data
   agglo_callback_data_t cb_data = {
@@ -1382,251 +1344,25 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
     .n_threads = n_threads,
     .quality_metric = quality,
     .tolerance = tolerance,
-    .prev_assignments = prev_assignments,
-    .parent = result.parent,
+    .dendro_offsets = result.dendro_offsets,
+    .dendro_merges = result.dendro_merges,
     .scores = result.scores,
     .n_clusters = result.n_clusters,
-    .next_cluster_id = ids->n  // Start new IDs after initial clusters
+    .n_samples = ids->n
   };
 
-  uint64_t final_n_clusters = 0;
-  tk_cluster_opts_t cluster_opts = {
-    .ann = ann,
-    .hbi = hbi,
-    .ids = ids,
-    .n_threads = n_threads,
-    .use_agglo = true,
-    .L = L,
-    .probe_radius = probe_radius,
-    .assignments = working_assignments,
-    .n_clustersp = &final_n_clusters
-  };
+  uint64_t features = ann != NULL ? ann->features :
+                      hbi != NULL ? hbi->features :
+                      inv->features;
+  tk_agglo_index_type_t index_type = hbi != NULL ? TK_AGGLO_USE_HBI : TK_AGGLO_USE_ANN;
 
-  tk_cluster_agglo(&cluster_opts, agglo_snapshot_callback, &cb_data);
+  tk_agglo(L, ann, hbi, ids, features, index_type, linkage, probe_radius, knn, min_pts, assign_noise,
+           inv_hoods, ann_hoods, hbi_hoods, hoods_uids, n_threads, working_assignments,
+           agglo_snapshot_callback, &cb_data);
+
   tk_ivec_destroy(working_assignments);
-  tk_ivec_destroy(prev_assignments);
 
   result.n_steps = result.n_clusters->n;
-  result.max_cluster_id = cb_data.next_cluster_id > 0 ? cb_data.next_cluster_id - 1 : 0;
-
-  return result;
-}
-
-static inline tm_optimize_result_t tm_optimize_clustering_threaded (
-  lua_State *L,
-  tk_cluster_method_t method,
-  tk_inv_t *inv,
-  tk_ann_t *ann,
-  tk_hbi_t *hbi,
-  bool use_inv,
-  uint64_t n_features,
-  tk_ivec_t *ids,
-  tk_iumap_t *ididx,
-  int i_ids,
-  int i_eph,
-  tk_ivec_t *offsets,
-  tk_ivec_t *neighbors,
-  tk_dvec_t *weights,
-  unsigned int n_threads,
-  tk_quality_metric_t quality,
-  double tolerance,
-  int i_each
-) {
-  // Parse threaded method parameters
-  uint64_t min_pts = tk_lua_foptunsigned(L, 1, "optimize_clustering", "min_pts", 0);
-  bool assign_noise = tk_lua_foptboolean(L, 1, "optimize_clustering", "assign_noise", true);
-  uint64_t probe_radius = tk_lua_foptunsigned(L, 1, "optimize_clustering", "probe_radius", 3);
-
-  uint64_t min_margin = tk_lua_foptunsigned(L, 1, "optimize_clustering", "min_margin", 0);
-  uint64_t max_margin = 0;
-
-  if (method == TK_CLUSTER_METHOD_PREFIX) {
-    max_margin = tk_lua_foptunsigned(L, 1, "optimize_clustering", "max_margin", n_features);
-    if (max_margin > n_features) max_margin = n_features;
-    if (min_margin > n_features) min_margin = n_features;
-    if (max_margin < min_margin) max_margin = min_margin;
-  } else if (!use_inv) {
-    max_margin = tk_lua_foptunsigned(L, 1, "optimize_clustering", "max_margin", n_features);
-    uint64_t fs = ann != NULL ? ann->features : hbi != NULL ? hbi->features : 0;
-    if (max_margin > fs) max_margin = fs;
-    if (min_margin > fs) min_margin = fs;
-    if (max_margin < min_margin) max_margin = min_margin;
-  } else {
-    max_margin = tk_lua_foptunsigned(L, 1, "optimize_clustering", "max_margin", 100);
-    if (min_margin >= max_margin) min_margin = 0;
-  }
-
-  const char *cmpstr = tk_lua_foptstring(L, 1, "optimize_clustering", "cmp", "jaccard");
-  double cmp_alpha = tk_lua_foptnumber(L, 1, "optimize_clustering", "cmp_alpha", 1.0);
-  double cmp_beta = tk_lua_foptnumber(L, 1, "optimize_clustering", "cmp_beta", 0.1);
-  int64_t rank_filter = tk_lua_foptinteger(L, 1, "optimize_clustering", "rank_filter", -1);
-
-  tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
-  if (!strcmp(cmpstr, "jaccard"))
-    cmp = TK_IVEC_JACCARD;
-  else if (!strcmp(cmpstr, "overlap"))
-    cmp = TK_IVEC_OVERLAP;
-  else if (!strcmp(cmpstr, "tversky"))
-    cmp = TK_IVEC_TVERSKY;
-  else if (!strcmp(cmpstr, "dice"))
-    cmp = TK_IVEC_DICE;
-
-  uint64_t knn = tk_lua_foptunsigned(L, 1, "optimize_clustering", "knn", 0);
-  uint64_t knn_cache = tk_lua_foptunsigned(L, 1, "optimize_clustering", "knn_cache", 0);
-  if (knn > knn_cache)
-    knn_cache = knn;
-  uint64_t knn_min = tk_lua_foptunsigned(L, 1, "optimize_clustering", "knn_min", 0);
-  bool knn_mutual = tk_lua_foptboolean(L, 1, "optimize_clustering", "knn_mutual", false);
-  double knn_eps = tk_lua_foptposdouble(L, 1, "optimize_clustering", "knn_eps", 1.0);
-  int64_t knn_rank = tk_lua_foptinteger(L, 1, "optimize_clustering", "knn_rank", -1);
-
-  // Setup inv thresholds for inverted index
-  tk_dvec_t *inv_thresholds = NULL;
-  if (use_inv) {
-    inv_thresholds = tk_dvec_create(0, max_margin, 0, 0);
-    for (uint64_t i = 0; i < max_margin; i++) {
-      double t = (double)i / (max_margin - 1);
-      double log_min = log(1e-9);
-      double log_max = log(1.0 + 1e-9);
-      double log_eps = log_min + t * (log_max - log_min);
-      inv_thresholds->a[i] = exp(log_eps);
-    }
-    inv_thresholds->n = max_margin;
-  }
-
-  // Setup state
-  tk_eval_t state;
-  state.inv = inv;
-  state.ann = ann;
-  state.hbi = hbi;
-  state.ids = ids;
-  state.ididx = ididx;
-  state.offsets = offsets;
-  state.neighbors = neighbors;
-  state.weights = weights;
-  state.assign_noise = assign_noise;
-  state.min_pts = min_pts;
-  state.cluster_method = method;
-  state.min_margin = min_margin;
-  state.max_margin = max_margin;
-  state.inv_thresholds = inv_thresholds;
-  state.probe_radius = probe_radius;
-  state.cmp = cmp;
-  state.cmp_alpha = cmp_alpha;
-  state.cmp_beta = cmp_beta;
-  state.rank_filter = rank_filter;
-  state.quality_metric = quality;
-  state.L = L;
-
-  // Pre-compute neighborhoods if knn_cache is provided
-  state.inv_hoods = NULL;
-  state.ann_hoods = NULL;
-  state.hbi_hoods = NULL;
-  state.uids_hoods = NULL;
-  state.uids_idx_hoods = NULL;
-
-  if (knn_cache > 0) {
-    if (inv != NULL) {
-      tk_inv_neighborhoods(
-        L, inv, knn_cache, knn_eps, knn_min, cmp,
-        cmp_alpha, cmp_beta, knn_mutual, knn_rank, n_threads,
-        &state.inv_hoods, &state.uids_hoods);
-      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
-      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
-      lua_pop(L, 2);
-    } else if (ann != NULL) {
-      tk_ann_neighborhoods(
-        L, ann, knn_cache, probe_radius, ann->features * knn_eps, knn_min,
-        knn_mutual, n_threads, &state.ann_hoods, &state.uids_hoods);
-      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
-      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
-      lua_pop(L, 2);
-    } else if (hbi != NULL) {
-      tk_hbi_neighborhoods(
-        L, hbi, knn_cache, hbi->features * knn_eps, knn_min,
-        knn_mutual, n_threads, &state.hbi_hoods, &state.uids_hoods);
-      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
-      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
-      lua_pop(L, 2);
-    }
-
-    if (state.uids_hoods != NULL) {
-      state.uids_idx_hoods = tk_iumap_from_ivec(L, state.uids_hoods);
-      if (!state.uids_idx_hoods)
-        tk_error(L, "tm_optimize_clustering_threaded: iumap_from_ivec failed", ENOMEM);
-      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
-      lua_pop(L, 1);
-    }
-  }
-
-  // Initialize thread pool
-  tk_eval_thread_t data[n_threads];
-  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
-
-  for (unsigned int i = 0; i < n_threads; i++) {
-    pool->threads[i].data = data + i;
-    data[i].self = pool->threads + i;
-    data[i].state = &state;
-    atomic_init(&data[i].has_error, false);
-    data[i].best = (tk_accuracy_t) { .score = -1.0 };
-    data[i].next_n = 0;
-    data[i].best_n = 0;
-    data[i].best_m = 0;
-    data[i].next_assignments = tk_ivec_create(L, ids->n, 0, 0);
-    data[i].best_assignments = tk_ivec_create(L, ids->n, 0, 0);
-    data[i].ptmp = tk_pvec_create(L, 0, 0, 0);
-    data[i].rtmp = tk_rvec_create(L, 0, 0, 0);
-    data[i].dsu = NULL;
-    data[i].is_core = NULL;
-    data[i].prefix_cache = NULL;
-    data[i].prefix_bytes = NULL;
-    data[i].prefix_cache_depth = 0;
-    tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -4);
-    tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -3);
-    tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
-    tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
-    lua_pop(L, 4);
-    uint64_t n_steps = use_inv ? (max_margin - min_margin) : (max_margin - min_margin + 1);
-    tk_thread_range(i, n_threads, n_steps, &data[i].mfirst, &data[i].mlast);
-  }
-
-  // Run optimization loop
-  unsigned int child;
-  while (tk_threads_signal(pool, TK_EVAL_OPTIMIZE_CLUSTERING, &child)) {
-    if (i_each > -1) {
-      lua_pushvalue(L, i_each);
-      lua_newtable(L);
-      lua_pushnumber(L, data[child].next.score);
-      lua_setfield(L, -2, "score");
-      lua_pushinteger(L, (lua_Integer) data[child].next_m);
-      lua_setfield(L, -2, "step");
-      lua_pushinteger(L, (lua_Integer) data[child].next_n);
-      lua_setfield(L, -2, "n_clusters");
-      lua_pushvalue(L, i_ids);
-      lua_setfield(L, -2, "ids");
-      tk_lua_get_ephemeron(L, TK_EVAL_EPH, data[child].next_assignments);
-      lua_setfield(L, -2, "assignments");
-      lua_call(L, 1, 0);
-    }
-    tk_threads_acknowledge_child(pool, child);
-  }
-
-  // Select best result across threads
-  unsigned int i_best = 0;
-  for (unsigned int i = 1; i < n_threads; i++)
-    if (data[i].best.score > data[i_best].best.score)
-      i_best = i;
-
-  tm_optimize_result_t result;
-  // TODO: Implement dendrogram building for threaded methods
-  result.parent = NULL;
-  result.scores = NULL;
-  result.n_clusters = NULL;
-  result.n_steps = 0;
-  result.max_cluster_id = 0;
-
-  if (inv_thresholds != NULL)
-    tk_dvec_destroy(inv_thresholds);
 
   return result;
 }
@@ -1644,11 +1380,6 @@ static inline int tm_optimize_clustering (lua_State *L)
   if (inv == NULL && ann == NULL && hbi == NULL)
     tk_lua_verror(L, 3, "optimize_clustering", "index", "tk_inv_t, tk_ann_t, or tk_hbi_t must be provided");
 
-  bool use_inv = (inv != NULL);
-  uint64_t n_features = 0;
-  if (!use_inv)
-    n_features = ann != NULL ? ann->features : hbi->features;
-
   lua_getfield(L, 1, "ids");
   tk_ivec_t *ids = tk_ivec_peekopt(L, -1);
   int i_ids = ids == NULL ? -1 : tk_lua_absindex(L, -1);
@@ -1665,21 +1396,46 @@ static inline int tm_optimize_clustering (lua_State *L)
   tk_dvec_t *weights = tk_dvec_peek(L, -1, "weights");
   lua_pop(L, 1);
 
-  const char *methodstr = tk_lua_foptstring(L, 1, "optimize_clustering", "method", "agglo");
-  tk_cluster_method_t method = TK_CLUSTER_METHOD_AGGLO;
-  if (!strcmp(methodstr, "graph"))
-    method = TK_CLUSTER_METHOD_GRAPH;
-  else if (!strcmp(methodstr, "prefix"))
-    method = TK_CLUSTER_METHOD_PREFIX;
-  else if (!strcmp(methodstr, "agglo"))
-    method = TK_CLUSTER_METHOD_AGGLO;
-
-  if (method == TK_CLUSTER_METHOD_PREFIX && (hbi == NULL && ann == NULL))
-    tk_lua_verror(L, 3, "optimize_clustering", "method", "prefix method requires hbi or ann index");
-  if (method == TK_CLUSTER_METHOD_AGGLO && (hbi == NULL && ann == NULL))
-    tk_lua_verror(L, 3, "optimize_clustering", "method", "agglo method requires hbi or ann index");
+  // Only agglo method is supported
+  if (inv == NULL && hbi == NULL && ann == NULL)
+    tk_lua_verror(L, 3, "optimize_clustering", "index", "agglo method requires inv, hbi, or ann index");
 
   unsigned int n_threads = tk_threads_getn(L, 1, "optimize_clustering", "threads");
+
+  // Parse linkage mode
+  const char *linkage_str = tk_lua_foptstring(L, 1, "optimize_clustering", "linkage", "simhash");
+  tk_agglo_linkage_t linkage = TK_AGGLO_LINKAGE_SIMHASH;
+  if (!strcmp(linkage_str, "simhash"))
+    linkage = TK_AGGLO_LINKAGE_SIMHASH;
+  else if (!strcmp(linkage_str, "single"))
+    linkage = TK_AGGLO_LINKAGE_SINGLE;
+
+  // Parse single-linkage parameters
+  uint64_t knn = tk_lua_foptunsigned(L, 1, "optimize_clustering", "knn", 0);
+  uint64_t knn_min = tk_lua_foptunsigned(L, 1, "optimize_clustering", "knn_min", 0);
+  bool knn_mutual = tk_lua_foptboolean(L, 1, "optimize_clustering", "knn_mutual", true);
+  uint64_t min_pts = tk_lua_foptunsigned(L, 1, "optimize_clustering", "min_pts", 0);
+  bool assign_noise = tk_lua_foptboolean(L, 1, "optimize_clustering", "assign_noise", false);
+
+  // Parse inv-specific parameters
+  const char *cmpstr = tk_lua_foptstring(L, 1, "optimize_clustering", "cmp", "jaccard");
+  double cmp_alpha = tk_lua_foptnumber(L, 1, "optimize_clustering", "cmp_alpha", 1.0);
+  double cmp_beta = tk_lua_foptnumber(L, 1, "optimize_clustering", "cmp_beta", 0.1);
+  int64_t rank_filter = tk_lua_foptinteger(L, 1, "optimize_clustering", "rank_filter", -1);
+
+  tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
+  if (!strcmp(cmpstr, "jaccard"))
+    cmp = TK_IVEC_JACCARD;
+  else if (!strcmp(cmpstr, "overlap"))
+    cmp = TK_IVEC_OVERLAP;
+  else if (!strcmp(cmpstr, "tversky"))
+    cmp = TK_IVEC_TVERSKY;
+  else if (!strcmp(cmpstr, "dice"))
+    cmp = TK_IVEC_DICE;
+
+  // Validate single-linkage requirements
+  if (linkage == TK_AGGLO_LINKAGE_SINGLE && knn == 0)
+    tk_lua_verror(L, 3, "optimize_clustering", "knn", "knn parameter required for linkage=single");
 
   // Quality is optional - if omitted, defaults to NONE (no score tracking)
   tk_quality_metric_t quality = TK_QUALITY_NONE;
@@ -1706,18 +1462,14 @@ static inline int tm_optimize_clustering (lua_State *L)
   int i_eph;
   tm_setup_clustering_ids(L, inv, ann, hbi, ids, i_ids, &state_ids, &state_ididx, &i_eph);
 
-  // Run optimization
-  tm_optimize_result_t result;
-  if (method == TK_CLUSTER_METHOD_AGGLO) {
-    uint64_t probe_radius = tk_lua_foptunsigned(L, 1, "optimize_clustering", "probe_radius", 3);
-    result = tm_optimize_clustering_agglo(L, ann, hbi, state_ids, i_ids, i_eph,
-                                          offsets, neighbors, weights, n_threads,
-                                          probe_radius, quality, tolerance, i_each);
-  } else {
-    result = tm_optimize_clustering_threaded(L, method, inv, ann, hbi, use_inv, n_features,
-                                              state_ids, state_ididx, i_ids, i_eph,
-                                              offsets, neighbors, weights, n_threads, quality, tolerance, i_each);
-  }
+  // Run agglo optimization
+  uint64_t probe_radius = tk_lua_foptunsigned(L, 1, "optimize_clustering", "probe_radius", 3);
+  tm_optimize_result_t result = tm_optimize_clustering_agglo(L, inv, ann, hbi, state_ids, i_ids, i_eph,
+                                        offsets, neighbors, weights, n_threads,
+                                        probe_radius, linkage, knn, knn_min, knn_mutual,
+                                        cmp, cmp_alpha, cmp_beta, rank_filter,
+                                        min_pts, assign_noise,
+                                        quality, tolerance, i_each);
 
   // Cleanup
   tk_lua_del_ephemeron(L, TK_EVAL_EPH, i_eph, state_ididx);
@@ -1726,44 +1478,29 @@ static inline int tm_optimize_clustering (lua_State *L)
   // Build result table
   lua_newtable(L);
 
-  if (method == TK_CLUSTER_METHOD_AGGLO) {
-    // Return full trajectory for agglo method
-    tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.parent);
-    lua_setfield(L, -2, "parent");
+  tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.dendro_offsets);
+  lua_setfield(L, -2, "offsets");
 
-    // Only include scores if quality tracking was enabled
-    if (result.scores != NULL) {
-      tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.scores);
-      lua_setfield(L, -2, "scores");
-    }
+  tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.dendro_merges);
+  lua_setfield(L, -2, "merges");
 
-    tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.n_clusters);
-    lua_setfield(L, -2, "n_clusters");
-
-    lua_pushinteger(L, (lua_Integer)result.n_steps);
-    lua_setfield(L, -2, "n_steps");
-
-    lua_pushinteger(L, (lua_Integer)result.max_cluster_id);
-    lua_setfield(L, -2, "max_cluster_id");
-
-    if (ids != NULL)
-      lua_pushvalue(L, i_ids);
-    else
-      tk_lua_get_ephemeron(L, TK_EVAL_EPH, state_ids);
-    lua_setfield(L, -2, "ids");
-  } else {
-    // For threaded methods (PREFIX/GRAPH), dendrograms not yet supported
-    lua_pushnil(L);
-    lua_setfield(L, -2, "parent");
-    lua_pushnil(L);
+  // Only include scores if quality tracking was enabled
+  if (result.scores != NULL) {
+    tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.scores);
     lua_setfield(L, -2, "scores");
-    lua_pushnil(L);
-    lua_setfield(L, -2, "n_clusters");
-    lua_pushinteger(L, 0);
-    lua_setfield(L, -2, "n_steps");
-    lua_pushinteger(L, 0);
-    lua_setfield(L, -2, "max_cluster_id");
   }
+
+  tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.n_clusters);
+  lua_setfield(L, -2, "n_clusters");
+
+  lua_pushinteger(L, (lua_Integer)result.n_steps);
+  lua_setfield(L, -2, "n_steps");
+
+  if (ids != NULL)
+    lua_pushvalue(L, i_ids);
+  else
+    tk_lua_get_ephemeron(L, TK_EVAL_EPH, state_ids);
+  lua_setfield(L, -2, "ids");
 
   lua_replace(L, 1);
   lua_settop(L, 1);
@@ -2234,6 +1971,28 @@ static inline int tm_entropy_stats (lua_State *L)
   return 1;
 }
 
+static inline int tk_pvec_dendro_cut_lua (lua_State *L)
+{
+  lua_settop(L, 4);
+  tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
+  tk_pvec_t *merges = tk_pvec_peek(L, 2, "merges");
+  uint64_t step = tk_lua_checkunsigned(L, 3, "step");
+  tk_ivec_t *assignments = tk_ivec_peekopt(L, 4);
+  int i_assignments = -1;
+  if (assignments == NULL) {
+    assignments = tk_ivec_create(L, 0, 0, 0);
+    i_assignments = tk_lua_absindex(L, -1);
+  } else {
+    i_assignments = tk_lua_absindex(L, -1);
+  }
+  tk_pvec_dendro_cut(L, offsets, merges, step, assignments);
+  lua_pushvalue(L, i_assignments);
+  lua_replace(L, 1);
+  lua_settop(L, 1);
+  lua_gc(L, LUA_GCCOLLECT, 0);
+  return 1;
+}
+
 static luaL_Reg tm_evaluator_fns[] =
 {
   { "class_accuracy", tm_class_accuracy },
@@ -2245,6 +2004,7 @@ static luaL_Reg tm_evaluator_fns[] =
   { "optimize_clustering", tm_optimize_clustering },
   { "entropy_stats", tm_entropy_stats },
   { "auc", tm_auc },
+  { "dendro_cut", tk_pvec_dendro_cut_lua },
   { NULL, NULL }
 };
 

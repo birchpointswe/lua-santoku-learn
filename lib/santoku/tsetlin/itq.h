@@ -1,6 +1,7 @@
 #ifndef TK_ITQ_H
 #define TK_ITQ_H
 
+#include <santoku/iuset.h>
 #include <santoku/tsetlin/conf.h>
 #include <santoku/cvec.h>
 #include <santoku/dvec.h>

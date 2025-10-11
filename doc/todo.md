@@ -14,7 +14,8 @@
 - Experiment with the integer-backed simhash for tsetlin
 - Need a true hierarchical test case for HLTH
 - optimize_clustering should support csr adjacency as input in addition to inv,
-  ann, or hbi
+  ann, or hbi, supporting linkage=single mode
+- Should support linkage=complete and linkage=average for completeness
 
 # Next
 
