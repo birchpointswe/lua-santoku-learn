@@ -30,14 +30,14 @@ local MODE = "landmarks" -- or raw
 
 local ENCODER = false
 local CLUSTER = true
-local BINARIZE = "median" -- or itq, sign
+-- local BINARIZE = "median" -- or itq, sign
 
-local TCH = true
-local ITQ_EPS = 1e-8
-local ITQ_ITERATIONS = 200
+-- local TCH = true
+-- local ITQ_EPS = 1e-8
+-- local ITQ_ITERATIONS = 200
 
 local CORRELATION = "spearman" -- spearman, kendall, spearman-weighted, kendall-weighted
-local QUALITY = "biserial" -- biserial, variance
+local QUALITY = "variance" -- biserial, variance
 local LAPLACIAN = "unnormalized" -- unnormalized, normalized, random
 local DECAY = 2.0
 
@@ -45,20 +45,22 @@ local KNN = 32
 local KNN_EPS = nil
 local KNN_MIN = nil
 local KNN_MUTUAL = false
-local CLUSTER_METHOD = "agglo" -- or prefix, graph
--- local CLUSTER_KNN = nil
--- local CLUSTER_KNN_MUTUAL = nil
-local MIN_PTS = 32
 local BRIDGE = true
+local CLUSTER_LINKAGE = "simhash" -- simhash, single
+local CLUSTER_KNN = 32
+local CLUSTER_KNN_MIN = nil
+local CLUSTER_KNN_MUTUAL = false
+local CLUSTER_MIN_PTS = 32
+
 local ANN = false -- true: ann, false: hbi
 
 local SAMPLED_ANCHORS = 16
 
 local RANKS = true
-local KEEP_PREFIX = nil
-local START_PREFIX = nil
-local SFFS_TOLERANCE = nil
-local SFFS_FIXED = nil
+-- local KEEP_PREFIX = nil
+-- local START_PREFIX = nil
+-- local SFFS_TOLERANCE = nil
+-- local SFFS_FIXED = nil
 
 local CLAUSES = { def = 8, min = 8, max = 128, int = true, log = true, pow2 = true }
 local CLAUSE_TOLERANCE = { def = 8, min = 8, max = 256, int = true, log = true, pow2 = true }
@@ -93,7 +95,7 @@ test("tsetlin", function ()
     dataset.problems:bits_select(nil, train.ids, dataset.n_visible, data)
     idx:add(data:bits_to_cvec(train.n, dataset.n_visible), train.ids)
     print("  Neighborhoods")
-    local ids, hoods = idx:neighborhoods(KNN, nil, KNN_EPS, KNN_MIN, KNN_MUTUAL, THREADS)
+    local ids, hoods = idx:neighborhoods(KNN, nil, 0, KNN_EPS, KNN_MIN, KNN_MUTUAL, THREADS)
     train.seed = graph.star_hoods(ids, hoods, THREADS)
     idx:destroy()
     collectgarbage("collect")
@@ -184,36 +186,36 @@ test("tsetlin", function ()
   collectgarbage("collect")
 
   train.codes_spectral_cont = train.codes_spectral
-  if BINARIZE == "itq" then
-    print("Iterative Quantization")
-    train.codes_spectral = itq.encode({
-      codes = train.codes_spectral,
-      n_dims = dataset.n_hidden,
-      tolerance = ITQ_EPS,
-      iterations = ITQ_ITERATIONS,
-      threads = THREADS,
-      each = function (i, a, b)
-        str.printf("  ITQ completed in %s itrs. Objective %f → %f\n", i, a, b)
-      end
-    })
-  elseif BINARIZE == "median" then
+  -- if BINARIZE == "itq" then
+  --   print("Iterative Quantization")
+  --   train.codes_spectral = itq.encode({
+  --     codes = train.codes_spectral,
+  --     n_dims = dataset.n_hidden,
+  --     tolerance = ITQ_EPS,
+  --     iterations = ITQ_ITERATIONS,
+  --     threads = THREADS,
+  --     each = function (i, a, b)
+  --       str.printf("  ITQ completed in %s itrs. Objective %f → %f\n", i, a, b)
+  --     end
+  --   })
+  -- elseif BINARIZE == "median" then
     print("Median thresholding")
     train.codes_spectral = itq.median({
       codes = train.codes_spectral,
       n_dims = dataset.n_hidden,
     })
-  elseif BINARIZE == "sign" then
-    print("Sign thresholding")
-    train.codes_spectral = itq.sign({
-      codes = train.codes_spectral,
-      n_dims = dataset.n_hidden,
-    })
-  end
+  -- elseif BINARIZE == "sign" then
+  --   print("Sign thresholding")
+  --   train.codes_spectral = itq.sign({
+  --     codes = train.codes_spectral,
+  --     n_dims = dataset.n_hidden,
+  --   })
+  -- end
   collectgarbage("collect")
 
 
-  if TCH then
-    print("Flipping bits")
+  -- if TCH then
+  --   print("Flipping bits")
     tch.refine({
       ids = train.adj_ids,
       offsets = train.adj_offsets,
@@ -227,7 +229,7 @@ test("tsetlin", function ()
         str.printf("  Time: %6.2f %6.2f  TCH Steps: %3d\n", d, dd, s)
       end
     })
-  end
+  -- end
   collectgarbage("collect")
 
   print("Setting up eval data")
@@ -257,10 +259,10 @@ test("tsetlin", function ()
   collectgarbage("collect")
 
   print("Optimizing bit selection")
-  if SFFS_FIXED then
-    train.kept_bits = ivec.create(SFFS_FIXED)
-    train.kept_bits:fill_indices()
-  else
+  -- if SFFS_FIXED then
+  --   train.kept_bits = ivec.create(SFFS_FIXED)
+  --   train.kept_bits:fill_indices()
+  -- else
     train.kept_bits = eval.optimize_bits({
       ids = train.ids_spectral,
       codes = train.codes_spectral,
@@ -268,9 +270,9 @@ test("tsetlin", function ()
       offsets = train.adj_offsets,
       neighbors = train.adj_neighbors,
       weights = train.adj_weights,
-      keep_prefix = KEEP_PREFIX,
-      start_prefix = START_PREFIX,
-      tolerance = SFFS_TOLERANCE,
+      -- keep_prefix = KEEP_PREFIX,
+      -- start_prefix = START_PREFIX,
+      -- tolerance = SFFS_TOLERANCE,
       correlation = CORRELATION,
       threads = THREADS,
       each = function (bit, gain, score, action)
@@ -280,7 +282,7 @@ test("tsetlin", function ()
       end
     })
     collectgarbage("collect")
-  end
+  -- end
 
   -- print("AUC stats")
   -- train.auc_continuous = eval.auc(
@@ -330,7 +332,7 @@ test("tsetlin", function ()
     end
   })
   local best_score, best_idx = train.retrieval_scores:max()
-  str.printf("  Best | Margin: %d | Score: %+.6f\n", best_idx, best_score)
+  str.printf("Best\n  Margin: %d | Score: %+.6f\n", best_idx, best_score)
   collectgarbage("collect")
 
   print("Retrieval stats (sampled binary adjacency)")
@@ -350,7 +352,7 @@ test("tsetlin", function ()
     end
   })
   local best_score, best_idx = train.retrieval_scores:max()
-  str.printf("  Best | Margin: %d | Score: %+.6f\n", best_idx, best_score)
+  str.printf("Best\n  Margin: %d | Score: %+.6f\n", best_idx, best_score)
   collectgarbage("collect")
 
   if ENCODER or CLUSTER then
@@ -527,10 +529,11 @@ test("tsetlin", function ()
       offsets = train.adj_offsets,
       neighbors = train.adj_neighbors,
       weights = train.adj_weights,
-      method = CLUSTER_METHOD,
-      -- knn = CLUSTER_KNN,
-      -- knn_mutual = CLUSTER_KNN_MUTUAL,
-      min_pts = MIN_PTS,
+      linkage = CLUSTER_LINKAGE,
+      knn = CLUSTER_KNN,
+      knn_min = CLUSTER_KNN_MIN,
+      knn_mutual = CLUSTER_KNN_MUTUAL,
+      min_pts = CLUSTER_MIN_PTS,
       assign_noise = true,
       quality = QUALITY,
       threads = THREADS,
@@ -543,7 +546,24 @@ test("tsetlin", function ()
     if codes_stats.scores then
       local best_score, best_step = codes_stats.scores:max()
       local best_n_clusters = codes_stats.n_clusters:get(best_step)
-      str.printf("  Best | Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+      str.printf("Best\n  Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+      -- print("Validating dendrogram cuts.")
+      -- local cut_assignments = ivec.create()
+      -- for step = 0, codes_stats.n_steps - 1 do
+      --   eval.dendro_cut(codes_stats.offsets, codes_stats.merges, step, cut_assignments)
+      --   local cut_result = eval.clustering_accuracy({
+      --     assignments = cut_assignments,
+      --     offsets = train.adj_offsets,
+      --     neighbors = train.adj_neighbors,
+      --     weights = train.adj_weights,
+      --     quality = QUALITY,
+      --     threads = THREADS
+      --   })
+      --   local expected_score = codes_stats.scores:get(step)
+      --   local actual_score = cut_result.score
+      --   local diff = math.abs(expected_score - actual_score)
+      --   str.printf("  Step %d: expected %.6f, got %.6f (diff %.6e)\n", step, expected_score, actual_score, diff)
+      -- end
     end
     collectgarbage("collect")
 
@@ -554,10 +574,11 @@ test("tsetlin", function ()
       offsets = train.adj_sampled_offsets,
       neighbors = train.adj_sampled_neighbors,
       weights = train.adj_sampled_weights,
-      method = CLUSTER_METHOD,
+      linkage = CLUSTER_LINKAGE,
       knn = CLUSTER_KNN,
+      knn_min = CLUSTER_KNN_MIN,
       knn_mutual = CLUSTER_KNN_MUTUAL,
-      min_pts = MIN_PTS,
+      min_pts = CLUSTER_MIN_PTS,
       assign_noise = true,
       quality = QUALITY,
       threads = THREADS,
@@ -570,7 +591,7 @@ test("tsetlin", function ()
     if codes_stats.scores then
       local best_score, best_step = codes_stats.scores:max()
       local best_n_clusters = codes_stats.n_clusters:get(best_step)
-      str.printf("  Best | Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+      str.printf("Best\n  Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
     end
     collectgarbage("collect")
 
@@ -584,11 +605,12 @@ test("tsetlin", function ()
       local train_stats = eval.optimize_clustering({
         index = idx_train,
         ids = train.ids_spectral,
-        method = CLUSTER_METHOD,
-        knn = CLUSTER_KNN,
-        knn_mutual = CLUSTER_KNN_MUTUAL,
-        min_pts = MIN_PTS,
+        linkage = CLUSTER_LINKAGE,
         assign_noise = true,
+        knn = CLUSTER_KNN,
+        knn_min = CLUSTER_KNN_MIN,
+        knn_mutual = CLUSTER_KNN_MUTUAL,
+        min_pts = CLUSTER_MIN_PTS,
         quality = QUALITY,
         threads = THREADS,
         each = function (acc)
@@ -600,7 +622,7 @@ test("tsetlin", function ()
       if train_stats.scores then
         local best_score, best_step = train_stats.scores:max()
         local best_n_clusters = train_stats.n_clusters:get(best_step)
-        str.printf("  Best | Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+        str.printf("Best\n  Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
       end
       collectgarbage("collect")
 
@@ -614,11 +636,12 @@ test("tsetlin", function ()
       local test_stats = eval.optimize_clustering({
         index = idx_test,
         ids = test.ids,
-        method = CLUSTER_METHOD,
-        knn = CLUSTER_KNN,
-        knn_mutual = CLUSTER_KNN_MUTUAL,
-        min_pts = MIN_PTS,
+        linkage = CLUSTER_LINKAGE,
         assign_noise = true,
+        knn = CLUSTER_KNN,
+        knn_min = CLUSTER_KNN_MIN,
+        knn_mutual = CLUSTER_KNN_MUTUAL,
+        min_pts = CLUSTER_MIN_PTS,
         quality = QUALITY,
         threads = THREADS,
         each = function (acc)
@@ -630,7 +653,7 @@ test("tsetlin", function ()
       if test_stats.scores then
         local best_step, best_score = test_stats.scores:argmax()
         local best_n_clusters = test_stats.n_clusters:get(best_step)
-        str.printf("  Best | Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+        str.printf("Best\n  Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
       end
       collectgarbage("collect")
 

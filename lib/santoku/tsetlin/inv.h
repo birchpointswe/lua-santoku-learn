@@ -8,7 +8,6 @@
 #include <santoku/tsetlin/conf.h>
 #include <santoku/ivec.h>
 #include <santoku/iumap.h>
-#include <santoku/iuset.h>
 #include <santoku/dumap.h>
 #include <santoku/threads.h>
 #include <santoku/ivec/ext.h>
@@ -88,7 +87,8 @@ typedef struct tk_inv_thread_s {
   tk_dvec_t *e_weights_buf;
   tk_dvec_t *inter_weights_buf;
   uint64_t ifirst, ilast;
-  double eps;
+  double eps_min;
+  double eps_max;
   uint64_t knn;
   uint64_t min;
   bool mutual;
@@ -586,7 +586,8 @@ static inline void tk_inv_neighborhoods (
   lua_State *L,
   tk_inv_t *I,
   uint64_t knn,
-  double eps,
+  double eps_min,
+  double eps_max,
   uint64_t min,
   tk_ivec_sim_type_t cmp,
   double tversky_alpha,
@@ -651,7 +652,8 @@ static inline void tk_inv_neighborhoods (
     data->hoods = hoods;
     data->hoods_sets = hoods_sets;
     data->sid_idx = sid_idx;
-    data->eps = eps;
+    data->eps_min = eps_min;
+    data->eps_max = eps_max;
     data->knn = knn;
     data->mutual = mutual;
     data->cmp = cmp;
@@ -752,7 +754,8 @@ static inline void tk_inv_neighborhoods_by_ids (
   tk_inv_t *I,
   tk_ivec_t *query_ids,
   uint64_t knn,
-  double eps,
+  double eps_min,
+  double eps_max,
   uint64_t min,
   tk_ivec_sim_type_t cmp,
   double tversky_alpha,
@@ -817,7 +820,8 @@ static inline void tk_inv_neighborhoods_by_ids (
     data->hoods = hoods;
     data->hoods_sets = hoods_sets;
     data->sid_idx = sid_idx;
-    data->eps = eps;
+    data->eps_min = eps_min;
+    data->eps_max = eps_max;
     data->knn = knn;
     data->mutual = mutual;
     data->cmp = cmp;
@@ -916,7 +920,8 @@ static inline void tk_inv_neighborhoods_by_vecs (
   tk_inv_t *I,
   tk_ivec_t *query_vecs,
   uint64_t knn,
-  double eps,
+  double eps_min,
+  double eps_max,
   uint64_t min,
   tk_ivec_sim_type_t cmp,
   double tversky_alpha,
@@ -997,7 +1002,8 @@ static inline void tk_inv_neighborhoods_by_vecs (
     data->hoods = hoods;
     data->hoods_sets = NULL;
     data->sid_idx = NULL;
-    data->eps = eps;
+    data->eps_min = eps_min;
+    data->eps_max = eps_max;
     data->knn = knn;
     data->mutual = false;
     data->cmp = cmp;
@@ -1473,7 +1479,8 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   size_t datalen,
   int64_t sid0,
   uint64_t knn,
-  double eps,
+  double eps_min,
+  double eps_max,
   tk_rvec_t *out,
   tk_ivec_sim_type_t cmp,
   double tversky_alpha,
@@ -1538,8 +1545,8 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
     tk_inv_compute_candidate_weights_by_rank(I, ev, elen, e_weights_by_rank);
     double sim = tk_inv_similarity_by_rank(I, I->wacc, vsid, q_weights_by_rank, e_weights_by_rank, cmp, tversky_alpha, tversky_beta);
     double dist = 1.0 - sim;
-    double current_cutoff = (knn && out->n >= knn) ? out->a[0].d : eps;
-    if (dist <= current_cutoff) {
+    double current_cutoff = (knn && out->n >= knn) ? out->a[0].d : eps_max;
+    if (dist >= eps_min && dist <= current_cutoff) {
       int64_t vuid = tk_inv_sid_uid(I, vsid);
       if (vuid >= 0) {
         if (knn)
@@ -1560,7 +1567,8 @@ static inline tk_rvec_t *tk_inv_neighbors_by_id (
   tk_inv_t *I,
   int64_t uid,
   uint64_t knn,
-  double eps,
+  double eps_min,
+  double eps_max,
   tk_rvec_t *out,
   tk_ivec_sim_type_t cmp,
   double tversky_alpha,
@@ -1574,7 +1582,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_id (
   }
   size_t len = 0;
   int64_t *data = tk_inv_get(I, uid, &len);
-  return tk_inv_neighbors_by_vec(I, data, len, sid0, knn, eps, out, cmp, tversky_alpha, tversky_beta, rank_filter);
+  return tk_inv_neighbors_by_vec(I, data, len, sid0, knn, eps_min, eps_max, out, cmp, tversky_alpha, tversky_beta, rank_filter);
 }
 
 static inline int tk_inv_gc_lua (lua_State *L)
@@ -1682,15 +1690,16 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
 {
   tk_inv_t *I = tk_inv_peek(L, 1);
   uint64_t knn = tk_lua_checkunsigned(L, 2, "knn");
-  double eps = tk_lua_optposdouble(L, 3, "eps", 1.0);
-  uint64_t min = tk_lua_optunsigned(L, 4, "min", 0);
-  const char *typ = tk_lua_optstring(L, 5, "comparator", "jaccard");
-  double tversky_alpha = tk_lua_optnumber(L, 6, "alpha", 1.0);
-  double tversky_beta = tk_lua_optnumber(L, 7, "beta", 0.1);
-  bool mutual = tk_lua_optboolean(L, 8, "mutual", false);
-  int64_t rank_filter = lua_isnil(L, 9) ? -1 : (int64_t) tk_lua_checkunsigned(L, 9, "rank_filter");
+  double eps_min = tk_lua_optposdouble(L, 3, "eps_min", 0.0);
+  double eps_max = tk_lua_optposdouble(L, 4, "eps_max", 1.0);
+  uint64_t min = tk_lua_optunsigned(L, 5, "min", 0);
+  const char *typ = tk_lua_optstring(L, 6, "comparator", "jaccard");
+  double tversky_alpha = tk_lua_optnumber(L, 7, "alpha", 1.0);
+  double tversky_beta = tk_lua_optnumber(L, 8, "beta", 0.1);
+  bool mutual = tk_lua_optboolean(L, 9, "mutual", false);
+  int64_t rank_filter = lua_isnil(L, 10) ? -1 : (int64_t) tk_lua_checkunsigned(L, 10, "rank_filter");
 
-  uint64_t n_threads = tk_threads_getn(L, 10, "neighborhoods", NULL);
+  uint64_t n_threads = tk_threads_getn(L, 11, "neighborhoods", NULL);
 
   tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
   if (!strcmp(typ, "jaccard"))
@@ -1704,7 +1713,7 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
   else
     tk_lua_verror(L, 3, "neighborhoods", "invalid comparator specified", typ);
 
-  tk_inv_neighborhoods(L, I, knn, eps, min, cmp, tversky_alpha, tversky_beta, mutual, rank_filter, n_threads, NULL, NULL);
+  tk_inv_neighborhoods(L, I, knn, eps_min, eps_max, min, cmp, tversky_alpha, tversky_beta, mutual, rank_filter, n_threads, NULL, NULL);
   return 2;
 }
 
@@ -1713,13 +1722,14 @@ static inline int tk_inv_neighborhoods_by_ids_lua (lua_State *L)
   tk_inv_t *I = tk_inv_peek(L, 1);
   tk_ivec_t *query_ids = tk_ivec_peek(L, 2, "ids");
   uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
-  double eps = tk_lua_optposdouble(L, 4, "eps", 1.0);
-  uint64_t min = tk_lua_optunsigned(L, 5, "min", 0);
-  const char *typ = tk_lua_optstring(L, 6, "comparator", "jaccard");
-  double tversky_alpha = tk_lua_optnumber(L, 7, "alpha", 1.0);
-  double tversky_beta = tk_lua_optnumber(L, 8, "beta", 0.1);
-  bool mutual = tk_lua_optboolean(L, 9, "mutual", false);
-  int64_t rank_filter = lua_isnil(L, 10) ? -1 : (int64_t) tk_lua_checkunsigned(L, 10, "rank_filter");
+  double eps_min = tk_lua_optposdouble(L, 4, "eps_min", 0.0);
+  double eps_max = tk_lua_optposdouble(L, 5, "eps_max", 1.0);
+  uint64_t min = tk_lua_optunsigned(L, 6, "min", 0);
+  const char *typ = tk_lua_optstring(L, 7, "comparator", "jaccard");
+  double tversky_alpha = tk_lua_optnumber(L, 8, "alpha", 1.0);
+  double tversky_beta = tk_lua_optnumber(L, 9, "beta", 0.1);
+  bool mutual = tk_lua_optboolean(L, 10, "mutual", false);
+  int64_t rank_filter = lua_isnil(L, 11) ? -1 : (int64_t) tk_lua_checkunsigned(L, 11, "rank_filter");
 
   tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
   if (!strcmp(typ, "jaccard"))
@@ -1742,10 +1752,10 @@ static inline int tk_inv_neighborhoods_by_ids_lua (lua_State *L)
   }
   query_ids->n = (uint64_t) write_pos;
 
-  uint64_t n_threads = tk_threads_getn(L, 11, "neighborhoods_by_ids", NULL);
+  uint64_t n_threads = tk_threads_getn(L, 12, "neighborhoods_by_ids", NULL);
 
   tk_inv_hoods_t *hoods;
-  tk_inv_neighborhoods_by_ids(L, I, query_ids, knn, eps, min, cmp, tversky_alpha, tversky_beta, mutual, rank_filter, n_threads, &hoods, &query_ids);
+  tk_inv_neighborhoods_by_ids(L, I, query_ids, knn, eps_min, eps_max, min, cmp, tversky_alpha, tversky_beta, mutual, rank_filter, n_threads, &hoods, &query_ids);
   return 2;
 }
 
@@ -1754,12 +1764,13 @@ static inline int tk_inv_neighborhoods_by_vecs_lua (lua_State *L)
   tk_inv_t *I = tk_inv_peek(L, 1);
   tk_ivec_t *query_vecs = tk_ivec_peek(L, 2, "vectors");
   uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
-  double eps = tk_lua_optposdouble(L, 4, "eps", 1.0);
-  uint64_t min = tk_lua_optunsigned(L, 5, "min", 0);
-  const char *typ = tk_lua_optstring(L, 6, "comparator", "jaccard");
-  double tversky_alpha = tk_lua_optnumber(L, 7, "alpha", 1.0);
-  double tversky_beta = tk_lua_optnumber(L, 8, "beta", 0.1);
-  int64_t rank_filter = lua_isnil(L, 9) ? -1 : (int64_t) tk_lua_checkunsigned(L, 9, "rank_filter");
+  double eps_min = tk_lua_optposdouble(L, 4, "eps_min", 0.0);
+  double eps_max = tk_lua_optposdouble(L, 5, "eps_max", 1.0);
+  uint64_t min = tk_lua_optunsigned(L, 6, "min", 0);
+  const char *typ = tk_lua_optstring(L, 7, "comparator", "jaccard");
+  double tversky_alpha = tk_lua_optnumber(L, 8, "alpha", 1.0);
+  double tversky_beta = tk_lua_optnumber(L, 9, "beta", 0.1);
+  int64_t rank_filter = lua_isnil(L, 10) ? -1 : (int64_t) tk_lua_checkunsigned(L, 10, "rank_filter");
 
   tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
   if (!strcmp(typ, "jaccard"))
@@ -1773,9 +1784,9 @@ static inline int tk_inv_neighborhoods_by_vecs_lua (lua_State *L)
   else
     tk_lua_verror(L, 3, "neighborhoods_by_vecs", "invalid comparator specified", typ);
 
-  uint64_t n_threads = tk_threads_getn(L, 10, "neighborhoods_by_vecs", NULL);
+  uint64_t n_threads = tk_threads_getn(L, 11, "neighborhoods_by_vecs", NULL);
 
-  tk_inv_neighborhoods_by_vecs(L, I, query_vecs, knn, eps, min, cmp, tversky_alpha, tversky_beta, rank_filter, n_threads, NULL, NULL);
+  tk_inv_neighborhoods_by_vecs(L, I, query_vecs, knn, eps_min, eps_max, min, cmp, tversky_alpha, tversky_beta, rank_filter, n_threads, NULL, NULL);
   return 2;
 }
 
@@ -1829,16 +1840,17 @@ static inline int tk_inv_distance_lua (lua_State *L)
 
 static inline int tk_inv_neighbors_lua (lua_State *L)
 {
-  lua_settop(L, 9);
+  lua_settop(L, 10);
   tk_inv_t *I = tk_inv_peek(L, 1);
   uint64_t knn = tk_lua_optunsigned(L, 3, "knn", 0);
-  double eps = tk_lua_optposdouble(L, 4, "eps", 1.0);
-  tk_rvec_t *out = tk_rvec_peek(L, 5, "out");
-  const char *typ = tk_lua_optstring(L, 6, "comparator", "jaccard");
+  double eps_min = tk_lua_optposdouble(L, 4, "eps_min", 0.0);
+  double eps_max = tk_lua_optposdouble(L, 5, "eps_max", 1.0);
+  tk_rvec_t *out = tk_rvec_peek(L, 6, "out");
+  const char *typ = tk_lua_optstring(L, 7, "comparator", "jaccard");
   tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
-  double tversky_alpha = tk_lua_optnumber(L, 7, "alpha", 1.0);
-  double tversky_beta = tk_lua_optnumber(L, 8, "beta", 0.1);
-  int64_t rank_filter = lua_isnil(L, 9) ? -1 : (int64_t) tk_lua_checkunsigned(L, 9, "rank_filter");
+  double tversky_alpha = tk_lua_optnumber(L, 8, "alpha", 1.0);
+  double tversky_beta = tk_lua_optnumber(L, 9, "beta", 0.1);
+  int64_t rank_filter = lua_isnil(L, 10) ? -1 : (int64_t) tk_lua_checkunsigned(L, 10, "rank_filter");
   if (!strcmp(typ, "jaccard"))
     cmp = TK_IVEC_JACCARD;
   else if (!strcmp(typ, "overlap"))
@@ -1851,10 +1863,10 @@ static inline int tk_inv_neighbors_lua (lua_State *L)
     tk_lua_verror(L, 3, "neighbors", "invalid comparator specified", typ);
   if (lua_type(L, 2) == LUA_TNUMBER) {
     int64_t uid = tk_lua_checkinteger(L, 2, "id");
-    tk_inv_neighbors_by_id(I, uid, knn, eps, out, cmp, tversky_alpha, tversky_beta, rank_filter);
+    tk_inv_neighbors_by_id(I, uid, knn, eps_min, eps_max, out, cmp, tversky_alpha, tversky_beta, rank_filter);
   } else {
     tk_ivec_t *vec = tk_ivec_peek(L, 2, "vector");
-    tk_inv_neighbors_by_vec(I, vec->a, vec->n, -1, knn, eps, out, cmp, tversky_alpha, tversky_beta, rank_filter);
+    tk_inv_neighbors_by_vec(I, vec->a, vec->n, -1, knn, eps_min, eps_max, out, cmp, tversky_alpha, tversky_beta, rank_filter);
   }
   return 0;
 }
@@ -1958,7 +1970,8 @@ static inline void tk_inv_worker (void *dp, int sig)
   tk_ivec_t *sids = data->sids;
   tk_iumap_t *sid_idx = data->sid_idx;
   tk_dvec_t *wacc = data->wacc;
-  double eps = data->eps;
+  double eps_min = data->eps_min;
+  double eps_max = data->eps_max;
   uint64_t knn = data->knn;
   tk_ivec_sim_type_t cmp = data->cmp;
   khint_t khi;
@@ -2011,7 +2024,7 @@ static inline void tk_inv_worker (void *dp, int sig)
           }
         }
         double *e_weights_by_rank = data->e_weights_buf->a;
-        double cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps;
+        double cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
         for (uint64_t ti = 0; ti < touched->n; ti ++) {
           iv = touched->a[ti];
           if (uhood->n >= knn) {
@@ -2031,7 +2044,7 @@ static inline void tk_inv_worker (void *dp, int sig)
           tk_inv_compute_candidate_weights_by_rank(I, vbits, nvbits, e_weights_by_rank);
           double sim = tk_inv_similarity_by_rank(I, wacc, iv, q_weights_by_rank, e_weights_by_rank, cmp, tversky_alpha, tversky_beta);
           double dist = 1.0 - sim;
-          if (dist <= cutoff) {
+          if (dist >= eps_min && dist <= cutoff) {
             tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
             if (uhood->n >= knn)
               cutoff = uhood->a[0].d;

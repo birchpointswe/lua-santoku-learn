@@ -26,6 +26,7 @@ SOFTWARE.
 
 */
 
+#include <santoku/iuset.h>
 #include <santoku/lua/utils.h>
 #include <santoku/tsetlin/conf.h>
 #include <santoku/tsetlin/simhash.h>
