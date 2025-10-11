@@ -214,7 +214,6 @@ static inline int tk_ann_ids_lua (lua_State *L)
   return 1;
 }
 
-
 static inline int64_t tk_ann_uid_sid (
   tk_ann_t *A,
   int64_t uid,

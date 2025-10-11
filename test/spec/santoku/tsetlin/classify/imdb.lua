@@ -11,49 +11,57 @@ local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
 local tokenizer = require("santoku.tsetlin.tokenizer")
 
-local TTR = 0.9
-local MAX = nil
-local NEGATIVE = 0.5
-local THREADS = nil
-
-local CLASSES = 2
-local CLAUSES = { def = 8, min = 8, max = 32, int = true, log = true }
-local CLAUSE_TOLERANCE = { def = 8, min = 8, max = 64, int = true, log = true }
-local CLAUSE_MAXIMUM = { def = 8, min = 8, max = 64, int = true, log = true }
-local TARGET = { def = 4, min = 8, max = 64, int = true, log = true }
-local SPECIFICITY = { def = 1000, min = 2, max = 2000, int = true, log = true }
-
-local SEARCH_PATIENCE = 3
-local SEARCH_ROUNDS = 10
-local SEARCH_TRIALS = 4
-local SEARCH_ITERATIONS = 10
-local FINAL_ITERATIONS = 100
-
-local TOP_ALGO = "chi2"
-local TOP_K = 8192
-
-local TOKENIZER_CONFIG = {
-  max_len = 20,
-  min_len = 1,
-  max_run = 2,
-  ngrams = 2,
-  cgrams_min = 3,
-  cgrams_max = 4,
-  skips = 2,
-  negations = 4,
+local cfg = {
+  data = {
+    ttr = 0.9,
+    max = nil,
+  },
+  tokenizer = {
+    max_len = 20,
+    min_len = 1,
+    max_run = 2,
+    ngrams = 2,
+    cgrams_min = 3,
+    cgrams_max = 4,
+    skips = 2,
+    negations = 4,
+  },
+  feature_selection = {
+    algo = "chi2",
+    top_k = 8192,
+  },
+  tm = {
+    classes = 2,
+    negative = 0.5,
+    clauses = { def = 8, min = 8, max = 32, int = true, log = true },
+    clause_tolerance = { def = 8, min = 8, max = 64, int = true, log = true },
+    clause_maximum = { def = 8, min = 8, max = 64, int = true, log = true },
+    target = { def = 4, min = 8, max = 64, int = true, log = true },
+    specificity = { def = 1000, min = 2, max = 2000, int = true, log = true },
+  },
+  search = {
+    patience = 3,
+    rounds = 10,
+    trials = 4,
+    iterations = 10,
+  },
+  training = {
+    iterations = 100,
+  },
+  threads = nil,
 }
 
 test("tsetlin", function ()
 
   print("Reading data")
-  local dataset = ds.read_imdb("test/res/imdb.50k", MAX)
-  local train, test = ds.split_imdb(dataset, TTR)
+  local dataset = ds.read_imdb("test/res/imdb.50k", cfg.data.max)
+  local train, test = ds.split_imdb(dataset, cfg.data.ttr)
 
   print("Train", train.n)
   print("Test", test.n)
 
   print("\nTraining tokenizer\n")
-  local tokenizer = tokenizer.create(TOKENIZER_CONFIG)
+  local tokenizer = tokenizer.create(cfg.tokenizer)
   tokenizer:train({ corpus = train.problems })
   tokenizer:finalize()
   dataset.n_features = tokenizer:features()
@@ -61,12 +69,12 @@ test("tsetlin", function ()
 
   print("Tokenizing train")
   train.problems0 = tokenizer:tokenize(train.problems)
-  train.solutions:add_scaled(CLASSES)
+  train.solutions:add_scaled(cfg.tm.classes)
   local top_v =
-    TOP_ALGO == "chi2" and train.problems0:bits_top_chi2(train.solutions, train.n, dataset.n_features, CLASSES, TOP_K) or -- luacheck: ignore
-    TOP_ALGO == "mi" and train.problems0:bits_top_mi(train.solutions, train.n, dataset.n_features, CLASSES, TOP_K) or
-    err.error("TOP_ALGO must bo chi2 or mi")
-  train.solutions:add_scaled(-CLASSES)
+    cfg.feature_selection.algo == "chi2" and train.problems0:bits_top_chi2(train.solutions, train.n, dataset.n_features, cfg.tm.classes, cfg.feature_selection.top_k) or
+    cfg.feature_selection.algo == "mi" and train.problems0:bits_top_mi(train.solutions, train.n, dataset.n_features, cfg.tm.classes, cfg.feature_selection.top_k) or
+    err.error("feature_selection.algo must be chi2 or mi")
+  train.solutions:add_scaled(-cfg.tm.classes)
   local n_top_v = top_v:size()
   print("After top k filter", n_top_v)
 
@@ -91,33 +99,33 @@ test("tsetlin", function ()
 
     features = n_top_v,
 
-    classes = CLASSES,
-    clauses = CLAUSES,
-    clause_tolerance = CLAUSE_TOLERANCE,
-    clause_maximum = CLAUSE_MAXIMUM,
-    target = TARGET,
-    negative = NEGATIVE,
-    specificity = SPECIFICITY,
+    classes = cfg.tm.classes,
+    clauses = cfg.tm.clauses,
+    clause_tolerance = cfg.tm.clause_tolerance,
+    clause_maximum = cfg.tm.clause_maximum,
+    target = cfg.tm.target,
+    negative = cfg.tm.negative,
+    specificity = cfg.tm.specificity,
 
     samples = train.n,
     problems = train.problems,
     solutions = train.solutions,
 
-    search_patience = SEARCH_PATIENCE,
-    search_rounds = SEARCH_ROUNDS,
-    search_trials = SEARCH_TRIALS,
-    search_iterations = SEARCH_ITERATIONS,
-    final_iterations = FINAL_ITERATIONS,
+    search_patience = cfg.search.patience,
+    search_rounds = cfg.search.rounds,
+    search_trials = cfg.search.trials,
+    search_iterations = cfg.search.iterations,
+    final_iterations = cfg.training.iterations,
 
     search_metric = function (t)
-      local predicted = t:predict(train.problems, train.n, THREADS)
-      local accuracy = eval.class_accuracy(predicted, train.solutions, train.n, CLASSES, THREADS)
+      local predicted = t:predict(train.problems, train.n, cfg.threads)
+      local accuracy = eval.class_accuracy(predicted, train.solutions, train.n, cfg.tm.classes, cfg.threads)
       return accuracy.f1, accuracy
     end,
 
     each = function (t, is_final, train_accuracy, params, epoch, round, trial)
-      local test_predicted = t:predict(test.problems, test.n, THREADS)
-      local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, CLASSES, THREADS)
+      local test_predicted = t:predict(test.problems, test.n, cfg.threads)
+      local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, cfg.tm.classes, cfg.threads)
       local d, dd = stopwatch()
       -- luacheck: push ignore
       if is_final then
@@ -139,10 +147,10 @@ test("tsetlin", function ()
 
   print("Testing restore")
   t = tm.load("model.bin")
-  local train_pred = t:predict(train.problems, train.n, THREADS)
-  local test_pred = t:predict(test.problems, test.n, THREADS)
-  local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, CLASSES, THREADS)
-  local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, CLASSES, THREADS)
+  local train_pred = t:predict(train.problems, train.n, cfg.threads)
+  local test_pred = t:predict(test.problems, test.n, cfg.threads)
+  local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, cfg.tm.classes, cfg.threads)
+  local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, cfg.tm.classes, cfg.threads)
   str.printf("Evaluate\tTest\t%4.2f\tTrain\t%4.2f\n", test_stats.f1, train_stats.f1)
 
 end)

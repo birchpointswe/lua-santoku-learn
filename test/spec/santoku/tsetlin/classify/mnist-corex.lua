@@ -9,33 +9,42 @@ local test = require("santoku.test")
 local tm = require("santoku.tsetlin")
 local utc = require("santoku.utc")
 
-local TTR = 0.9
-local MAX = nil
-local COREX_ITERS = 10
-local THREADS = nil
-
-local VISIBLE = 784
-local HIDDEN = 128
-
-local CLASSES = 10
-local NEGATIVE = 0.1
-local CLAUSES = { def = 8, min = 8, max = 32, log = true, int = true }
-local CLAUSE_TOLERANCE = { def = 8, min = 8, max = 64, int = true }
-local CLAUSE_MAXIMUM = { def = 8, min = 8, max = 64, int = true }
-local TARGET = { def = 4, min = 8, max = 64 }
-local SPECIFICITY = { def = 1000, min = 1, max = 2000, int = true, log = true }
-
-local SEARCH_PATIENCE = 3
-local SEARCH_ROUNDS = 10
-local SEARCH_TRIALS = 4
-local SEARCH_ITERATIONS = 10
-local FINAL_ITERATIONS = 100
+local cfg = {
+  data = {
+    ttr = 0.9,
+    max = nil,
+    visible = 784,
+    hidden = 128,
+  },
+  corex = {
+    iterations = 10,
+  },
+  tm = {
+    classes = 10,
+    negative = 0.1,
+    clauses = { def = 8, min = 8, max = 32, log = true, int = true },
+    clause_tolerance = { def = 8, min = 8, max = 64, int = true },
+    clause_maximum = { def = 8, min = 8, max = 64, int = true },
+    target = { def = 4, min = 8, max = 64 },
+    specificity = { def = 1000, min = 1, max = 2000, int = true, log = true },
+  },
+  search = {
+    patience = 3,
+    rounds = 10,
+    trials = 4,
+    iterations = 10,
+  },
+  training = {
+    iterations = 100,
+  },
+  threads = nil,
+}
 
 test("tsetlin", function ()
 
   print("Reading data")
-  local dataset = ds.read_binary_mnist("test/res/mnist.70k.txt", VISIBLE, MAX)
-  local train, test = ds.split_binary_mnist(dataset, TTR)
+  local dataset = ds.read_binary_mnist("test/res/mnist.70k.txt", cfg.data.visible, cfg.data.max)
+  local train, test = ds.split_binary_mnist(dataset, cfg.data.ttr)
   train.problems = ivec.create()
   dataset.problems:bits_select(nil, train.ids, dataset.n_features, train.problems)
   test.problems = ivec.create()
@@ -44,7 +53,7 @@ test("tsetlin", function ()
   print("Creating Corex")
   local cor = corex.create({
     visible = dataset.n_features,
-    hidden = HIDDEN,
+    hidden = cfg.data.hidden,
   })
 
   print("Training")
@@ -52,7 +61,7 @@ test("tsetlin", function ()
   cor:train({
     corpus = train.problems,
     samples = train.n,
-    iterations = COREX_ITERS,
+    iterations = cfg.corex.iterations,
     each = function (epoch, tc, dev)
       local duration, total = stopwatch()
       str.printf("Epoch  %-4d   Time  %6.3f  %6.3f   Convergence  %4.6f  %4.6f\n",
@@ -62,11 +71,11 @@ test("tsetlin", function ()
 
   print("Transforming train")
   cor:compress(train.problems, train.n)
-  train.problems = train.problems:bits_to_cvec(train.n, HIDDEN, true)
+  train.problems = train.problems:bits_to_cvec(train.n, cfg.data.hidden, true)
 
   print("Transforming test")
   cor:compress(test.problems, test.n)
-  test.problems = test.problems:bits_to_cvec(test.n, HIDDEN, true)
+  test.problems = test.problems:bits_to_cvec(test.n, cfg.data.hidden, true)
 
   print("Train", train.n)
   print("Test", test.n)
@@ -74,35 +83,35 @@ test("tsetlin", function ()
   print("Optimizing classifier")
   local t = tm.optimize_classifier({
 
-    features = HIDDEN,
-    classes = CLASSES,
-    negative = NEGATIVE,
+    features = cfg.data.hidden,
+    classes = cfg.tm.classes,
+    negative = cfg.tm.negative,
 
     samples = train.n,
     problems = train.problems,
     solutions = train.solutions,
 
-    clauses = CLAUSES,
-    clause_tolerance = CLAUSE_TOLERANCE,
-    clause_maximum = CLAUSE_MAXIMUM,
-    target = TARGET,
-    specificity = SPECIFICITY,
+    clauses = cfg.tm.clauses,
+    clause_tolerance = cfg.tm.clause_tolerance,
+    clause_maximum = cfg.tm.clause_maximum,
+    target = cfg.tm.target,
+    specificity = cfg.tm.specificity,
 
-    search_patience = SEARCH_PATIENCE,
-    search_rounds = SEARCH_ROUNDS,
-    search_trials = SEARCH_TRIALS,
-    search_iterations = SEARCH_ITERATIONS,
-    final_iterations = FINAL_ITERATIONS,
+    search_patience = cfg.search.patience,
+    search_rounds = cfg.search.rounds,
+    search_trials = cfg.search.trials,
+    search_iterations = cfg.search.iterations,
+    final_iterations = cfg.training.iterations,
 
     search_metric = function (t)
-      local predicted = t:predict(train.problems, train.n, THREADS)
-      local accuracy = eval.class_accuracy(predicted, train.solutions, train.n, CLASSES, THREADS)
+      local predicted = t:predict(train.problems, train.n, cfg.threads)
+      local accuracy = eval.class_accuracy(predicted, train.solutions, train.n, cfg.tm.classes, cfg.threads)
       return accuracy.f1, accuracy
     end,
 
     each = function (t, is_final, train_accuracy, params, epoch, round, trial)
-      local test_predicted = t:predict(test.problems, test.n, THREADS)
-      local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, CLASSES, THREADS)
+      local test_predicted = t:predict(test.problems, test.n, cfg.threads)
+      local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, cfg.tm.classes, cfg.threads)
       local d, dd = stopwatch()
       -- luacheck: push ignore
       if is_final then

@@ -8,32 +8,39 @@ local test = require("santoku.test")
 local tm = require("santoku.tsetlin")
 local utc = require("santoku.utc")
 
-local TTR = 0.9
-local MAX = nil
-local ITERATIONS = 100
-local THREADS = nil
-
-local CLASSES = 10
-local NEGATIVE = 0.1
-local CLAUSES = { def = 8, min = 8, max = 32, log = true, int = true }
-local CLAUSE_TOLERANCE = { def = 8, min = 8, max = 64, int = true }
-local CLAUSE_MAXIMUM = { def = 8, min = 8, max = 64, int = true }
-local TARGET = { def = 4, min = 8, max = 64, int = true, log = true }
-local SPECIFICITY = { def = 1000, min = 2, max = 2000, int = true, log = true }
-
-local SEARCH_PATIENCE = 3
-local SEARCH_ROUNDS = 10
-local SEARCH_TRIALS = 4
-local SEARCH_ITERATIONS = 10
-
-local FEATURES = 784
+local cfg = {
+  data = {
+    ttr = 0.9,
+    max = nil,
+    features = 784,
+  },
+  tm = {
+    classes = 10,
+    negative = 0.1,
+    clauses = { def = 8, min = 8, max = 32, log = true, int = true },
+    clause_tolerance = { def = 8, min = 8, max = 64, int = true },
+    clause_maximum = { def = 8, min = 8, max = 64, int = true },
+    target = { def = 4, min = 8, max = 64, int = true, log = true },
+    specificity = { def = 1000, min = 2, max = 2000, int = true, log = true },
+  },
+  search = {
+    patience = 3,
+    rounds = 10,
+    trials = 4,
+    iterations = 10,
+  },
+  training = {
+    iterations = 100,
+  },
+  threads = nil,
+}
 
 test("tsetlin", function ()
 
   print("Reading data")
-  local dataset = ds.read_binary_mnist("test/res/mnist.70k.txt", FEATURES, MAX)
+  local dataset = ds.read_binary_mnist("test/res/mnist.70k.txt", cfg.data.features, cfg.data.max)
   print("Splitting")
-  local train, test = ds.split_binary_mnist(dataset, TTR)
+  local train, test = ds.split_binary_mnist(dataset, cfg.data.ttr)
   train.problems = ivec.create()
   dataset.problems:bits_select(nil, train.ids, dataset.n_features, train.problems)
   test.problems = ivec.create()
@@ -50,35 +57,35 @@ test("tsetlin", function ()
   local t = tm.optimize_classifier({
 
     features = dataset.n_features,
-    classes = CLASSES,
-    negative = NEGATIVE,
+    classes = cfg.tm.classes,
+    negative = cfg.tm.negative,
 
     samples = train.n,
     problems = train.problems,
     solutions = train.solutions,
 
-    clauses = CLAUSES,
-    clause_tolerance = CLAUSE_TOLERANCE,
-    clause_maximum = CLAUSE_MAXIMUM,
-    target = TARGET,
-    specificity = SPECIFICITY,
+    clauses = cfg.tm.clauses,
+    clause_tolerance = cfg.tm.clause_tolerance,
+    clause_maximum = cfg.tm.clause_maximum,
+    target = cfg.tm.target,
+    specificity = cfg.tm.specificity,
 
-    search_patience = SEARCH_PATIENCE,
-    search_rounds = SEARCH_ROUNDS,
-    search_trials = SEARCH_TRIALS,
-    search_iterations = SEARCH_ITERATIONS,
-    final_iterations = ITERATIONS,
-    threads = THREADS,
+    search_patience = cfg.search.patience,
+    search_rounds = cfg.search.rounds,
+    search_trials = cfg.search.trials,
+    search_iterations = cfg.search.iterations,
+    final_iterations = cfg.training.iterations,
+    threads = cfg.threads,
 
     search_metric = function (t)
-      local predicted = t:predict(train.problems, train.n, THREADS)
-      local accuracy = eval.class_accuracy(predicted, train.solutions, train.n, CLASSES, THREADS)
+      local predicted = t:predict(train.problems, train.n, cfg.threads)
+      local accuracy = eval.class_accuracy(predicted, train.solutions, train.n, cfg.tm.classes, cfg.threads)
       return accuracy.f1, accuracy
     end,
 
     each = function (t, is_final, train_accuracy, params, epoch, round, trial)
-      local test_predicted = t:predict(test.problems, test.n, THREADS)
-      local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, CLASSES, THREADS)
+      local test_predicted = t:predict(test.problems, test.n, cfg.threads)
+      local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, cfg.tm.classes, cfg.threads)
       local d, dd = stopwatch()
       -- luacheck: push ignore
       if is_final then
@@ -100,10 +107,10 @@ test("tsetlin", function ()
 
   print("Testing restore")
   t = tm.load("model.bin", nil, true)
-  local train_pred = t:predict(train.problems, train.n, THREADS)
-  local test_pred = t:predict(test.problems, test.n, THREADS)
-  local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, CLASSES, THREADS)
-  local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, CLASSES, THREADS)
+  local train_pred = t:predict(train.problems, train.n, cfg.threads)
+  local test_pred = t:predict(test.problems, test.n, cfg.threads)
+  local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, cfg.tm.classes, cfg.threads)
+  local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, cfg.tm.classes, cfg.threads)
   str.printf("Evaluate\tTest\t%4.2f\tTrain\t%4.2f\n", test_stats.f1, train_stats.f1)
 
 end)
