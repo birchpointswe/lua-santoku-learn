@@ -1,3 +1,4 @@
+require("santoku.dvec")
 local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
 local hbi = require("santoku.tsetlin.hbi")
@@ -17,26 +18,27 @@ local cfg = {
     max = nil,
     max_class = nil,
     features = 784,
-    hidden = 8,
+    hidden = 32,
   },
   mode = {
-    binarize = "itq",
+    binarize = "median",
     tch = true,
   },
   spectral = {
     laplacian = "unnormalized",
-    eps = 1e-3,
-  },
-  itq = {
-    eps = 1e-8,
-    iterations = 200,
+    eps = 1e-12,
   },
   clustering = {
-    min_margin = 0,
-    max_margin = 4,
+    linkage = "simhash",
+    knn = 32,
+    knn_min = nil,
+    knn_mutual = false,
+    min_pts = 32,
   },
   eval = {
     anchors = 8,
+    cluster_metric = "correlation",
+    tolerance = 1e-3,
   },
   threads = nil,
 }
@@ -51,7 +53,7 @@ test("tsetlin", function ()
   dataset.ids:fill_indices()
 
   print("\nSampling seed pairs")
-  local pos_seed, neg_seed = ds.multiclass_pairs(dataset.ids, dataset.solutions, cfg.eval.anchors, cfg.eval.anchors)
+  local _, pos_seed, neg_seed = graph.multiclass_pairs(dataset.ids, dataset.solutions, cfg.eval.anchors, cfg.eval.anchors, cfg.threads)
   local seed = pvec.create()
   seed:copy(pos_seed)
   seed:copy(neg_seed)
@@ -98,32 +100,12 @@ test("tsetlin", function ()
     end
   })
 
+  print("\nMedian thresholding")
   dataset.codes_spectral_cont = dataset.codes_spectral
-  if cfg.mode.binarize == "itq" then
-    print("\nIterative Quantization")
-    dataset.codes_spectral = itq.encode({
-      codes = dataset.codes_spectral,
-      n_dims = cfg.data.hidden,
-      tolerance = cfg.itq.eps,
-      iterations = cfg.itq.iterations,
-      threads = cfg.threads,
-      each = function (i, a, b)
-        str.printf("  ITQ completed in %s itrs. Objective %f → %f\n", i, a, b)
-      end
-    })
-  elseif cfg.mode.binarize == "median" then
-    print("\nMedian thresholding")
-    dataset.codes_spectral = itq.median({
-      codes = dataset.codes_spectral,
-      n_dims = cfg.data.hidden,
-    })
-  elseif cfg.mode.binarize == "sign" then
-    print("\nSign thresholding")
-    dataset.codes_spectral = itq.sign({
-      codes = dataset.codes_spectral,
-      n_dims = cfg.data.hidden,
-    })
-  end
+  dataset.codes_spectral = itq.median({
+    codes = dataset.codes_spectral,
+    n_dims = cfg.data.hidden,
+  })
 
   if cfg.mode.tch then
     print("\nFlipping bits")
@@ -143,7 +125,7 @@ test("tsetlin", function ()
   end
 
   print("\nCodebook stats")
-  dataset.pos_sampled, dataset.neg_sampled = ds.multiclass_pairs(dataset.ids, dataset.solutions, cfg.eval.anchors, cfg.eval.anchors)
+  dataset.ids_sampled, dataset.pos_sampled, dataset.neg_sampled = graph.multiclass_pairs(dataset.ids, dataset.solutions, cfg.eval.anchors, cfg.eval.anchors, cfg.threads)
   dataset.entropy = eval.entropy_stats(dataset.codes_spectral, dataset.n, cfg.data.hidden, cfg.threads)
   str.printi("  Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)",
     dataset.entropy)
@@ -151,48 +133,62 @@ test("tsetlin", function ()
   dataset.auc_continuous = eval.auc(dataset.ids_spectral, dataset.codes_spectral_cont, dataset.pos_sampled, dataset.neg_sampled, cfg.data.hidden, nil, cfg.threads)
   str.printi("  AUC (continuous): %.4f#(auc_continuous) | AUC (binary): %.4f#(auc_binary)", dataset)
 
+  print("\nSetting up adjacency for retrieval evaluation")
+  dataset.adj_sampled_ids,
+  dataset.adj_sampled_offsets,
+  dataset.adj_sampled_neighbors,
+  dataset.adj_sampled_weights =
+    graph.adj_pairs(dataset.ids_sampled, dataset.pos_sampled, dataset.neg_sampled, cfg.threads)
+
   print("\nRetrieval stats (sampled)")
-  dataset.similarity_sampled = eval.optimize_retrieval({
+  dataset.retrieval_scores = eval.optimize_retrieval({
     codes = dataset.codes_spectral,
     n_dims = cfg.data.hidden,
-    ids = dataset.ids_spectral,
-    pos = dataset.pos_sampled,
-    neg = dataset.neg_sampled,
+    ids = dataset.ids_sampled,
+    offsets = dataset.adj_sampled_offsets,
+    neighbors = dataset.adj_sampled_neighbors,
+    weights = dataset.adj_sampled_weights,
+    metric = "correlation",
     threads = cfg.threads,
-    each = function (f, p, r, m)
+    each = function (acc)
       local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d\n", -- luacheck: ignore
-        d, dd, f, p, r, m)
+      str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.6f\n",
+        d, dd, acc.margin, acc.score)
     end
   })
-  str.printi("\n  Best | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin)", -- luacheck: ignore
-    dataset.similarity_sampled)
+  local best_score, best_idx = dataset.retrieval_scores:max()
+  str.printf("Best\n  Margin: %d | Score: %+.6f\n", best_idx, best_score)
 
   print("\nCreating index")
   dataset.index_codes = hbi.create({ features = cfg.data.hidden })
   dataset.index_codes:add(dataset.codes_spectral, dataset.ids_spectral)
 
-  print("\nClustering (sampled)\n")
+  print("\nClustering (codes) (graph edges)\n")
   stopwatch()
-  dataset.cluster_score_sampled,
-  dataset.cluster_ids_sampled,
-  dataset.cluster_assignments_sampled,
-  dataset.n_clusters_sampled = eval.optimize_clustering({
+  local cluster_stats = eval.optimize_clustering({
     index = dataset.index_codes,
     ids = dataset.ids_spectral,
-    pos = dataset.pos_sampled,
-    neg = dataset.neg_sampled,
-    min_margin = cfg.clustering.min_margin,
-    max_margin = cfg.clustering.max_margin,
+    offsets = dataset.graph_adj_offsets,
+    neighbors = dataset.graph_adj_neighbors,
+    weights = dataset.graph_adj_weights,
+    linkage = cfg.clustering.linkage,
+    knn = cfg.clustering.knn,
+    knn_min = cfg.clustering.knn_min,
+    knn_mutual = cfg.clustering.knn_mutual,
+    min_pts = cfg.clustering.min_pts,
+    assign_noise = true,
+    metric = cfg.eval.cluster_metric,
     threads = cfg.threads,
-    each = function (f, p, r, m, c)
+    each = function (acc)
       local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | BACC: %.2f | TPR: %.2f | TNR: %.2f | Margin: %d | Clusters: %d\n", -- luacheck: ignore
-        d, dd, f, p, r, m, c)
+      str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.6f | Clusters: %d\n",
+        d, dd, acc.step, acc.score, acc.n_clusters)
     end
   })
-  dataset.cluster_score_sampled.n_clusters = dataset.n_clusters_sampled
-  str.printi("\n  Best | BACC: %.2f#(bacc) | TPR: %.2f#(tpr) | TNR: %.2f#(tnr) | Margin: %d#(margin) | Clusters: %d#(n_clusters)", -- luacheck: ignore
-    dataset.cluster_score_sampled)
+  if cluster_stats.scores then
+    local best_score, best_step = cluster_stats.scores:scores_plateau(cfg.eval.tolerance)
+    local best_n_clusters = cluster_stats.n_clusters:get(best_step)
+    str.printf("Best\n  Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+  end
 
 end)
