@@ -17,7 +17,7 @@ local str = require("santoku.string")
 local test = require("santoku.test")
 local utc = require("santoku.utc")
 
-local cfg = {
+local cfg; cfg = {
   data = {
     ttr = 0.9,
     max = nil,
@@ -62,10 +62,18 @@ local cfg = {
   },
   eval = {
     bits_metric = "correlation",
-    retrieval_metric = "correlation",
-    cluster_metric = "correlation",
+    retrieval_metric = "precision",
+    cluster_metric = "precision",
     sampled_anchors = 16,
     tolerance = 1e-3,
+    retrieval = function (d)
+      return d:max()
+      -- return d:scores_plateau(cfg.eval.tolerance)
+    end,
+    clustering = function (d)
+      return d:max()
+      -- return d:scores_plateau(cfg.eval.tolerance)
+    end,
   },
   bits = {
     keep_prefix = nil,
@@ -532,23 +540,23 @@ test("tsetlin", function ()
       end
     })
     if codes_stats.scores then
-      local best_score, best_step = codes_stats.scores:scores_plateau(cfg.eval.tolerance)
+      local best_score, best_step = cfg.eval.clustering(codes_stats.scores)
       local best_n_clusters = codes_stats.n_clusters:get(best_step)
       str.printf("Best\n  Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
-      print("Validating dendrogram cuts.")
-      for step, _, cut_assignments in eval.dendro_each(codes_stats.offsets, codes_stats.merges) do
-        local cut_result = eval.clustering_accuracy({
-          assignments = cut_assignments,
-          offsets = train.adj_offsets,
-          neighbors = train.adj_neighbors,
-          weights = train.adj_weights,
-          metric = cfg.eval.cluster_metric,
-          threads = cfg.threads
-        })
-        local expected_score = codes_stats.scores:get(step)
-        local actual_score = cut_result.score
-        str.printf("  Step %d:  expected %.6f  got %.6f\n", step, expected_score, actual_score)
-      end
+      -- print("Validating dendrogram cuts.")
+      -- for step, _, cut_assignments in eval.dendro_each(codes_stats.offsets, codes_stats.merges) do
+      --   local cut_result = eval.clustering_accuracy({
+      --     assignments = cut_assignments,
+      --     offsets = train.adj_offsets,
+      --     neighbors = train.adj_neighbors,
+      --     weights = train.adj_weights,
+      --     metric = cfg.eval.cluster_metric,
+      --     threads = cfg.threads
+      --   })
+      --   local expected_score = codes_stats.scores:get(step)
+      --   local actual_score = cut_result.score
+      --   str.printf("  Step %d:  expected %.6f  got %.6f\n", step, expected_score, actual_score)
+      -- end
     end
     collectgarbage("collect")
 
@@ -574,7 +582,7 @@ test("tsetlin", function ()
       end
     })
     if codes_stats.scores then
-      local best_score, best_step = codes_stats.scores:scores_plateau(cfg.eval.tolerance)
+      local best_score, best_step = cfg.eval.clustering(codes_stats.scores)
       local best_n_clusters = codes_stats.n_clusters:get(best_step)
       str.printf("Best\n  Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
     end
@@ -605,7 +613,7 @@ test("tsetlin", function ()
         end
       })
       if train_stats.scores then
-        local best_score, best_step = train_stats.scores:scores_plateau(cfg.eval.tolerance)
+        local best_score, best_step = cfg.eval.clustering(train_stats.scores)
         local best_n_clusters = train_stats.n_clusters:get(best_step)
         str.printf("Best\n  Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
       end
@@ -634,7 +642,7 @@ test("tsetlin", function ()
         end
       })
       if test_stats.scores then
-        local best_step, best_score = test_stats.scores:scores_plateau(cfg.eval.tolerance)
+        local best_step, best_score = cfg.eval.clustering(test_stats.scores)
         local best_n_clusters = test_stats.n_clusters:get(best_step)
         str.printf("Best\n  Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
       end

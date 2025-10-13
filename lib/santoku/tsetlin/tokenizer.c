@@ -102,7 +102,7 @@ static inline int tb_tokenizer_persist (lua_State *L)
     }
   }
   lua_settop(L, 0);
-  lua_gc(L, LUA_GCCOLLECT, 0);
+  // lua_gc(L, LUA_GCCOLLECT, 0);
 }
 
 static inline char *tb_tokenizer_id_str (
@@ -814,7 +814,7 @@ static inline int tb_tokenizer_parse (lua_State *L)
   }
   lua_replace(L, 1);
   lua_settop(L, 1);
-  lua_gc(L, LUA_GCCOLLECT, 0);
+  // lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -919,7 +919,7 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
   tk_ivec_shrink(out);
   lua_replace(L, 1);
   lua_settop(L, 1);
-  lua_gc(L, LUA_GCCOLLECT, 0);
+  // lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -963,7 +963,7 @@ static inline int tb_tokenizer_restrict (lua_State *L)
   tk_cumap_destroy(tokenizer->strs);
   tokenizer->strs = strs0;
   lua_settop(L, 0);
-  lua_gc(L, LUA_GCCOLLECT, 0);
+  // lua_gc(L, LUA_GCCOLLECT, 0);
   return 0;
 }
 
@@ -974,7 +974,7 @@ static inline int tb_tokenizer_finalize (lua_State *L)
   if (tokenizer->finalized)
     return luaL_error(L, "already finalized");
   tokenizer->finalized = true;
-  lua_gc(L, LUA_GCCOLLECT, 0);
+  // lua_gc(L, LUA_GCCOLLECT, 0);
   return 0;
 }
 
@@ -1028,7 +1028,7 @@ static inline int tb_tokenizer_train (lua_State *L)
     lua_pop(L, 1); // corpus
   }
   lua_settop(L, 0);
-  lua_gc(L, LUA_GCCOLLECT, 0);
+  // lua_gc(L, LUA_GCCOLLECT, 0);
   return 0;
 }
 

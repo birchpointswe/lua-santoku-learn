@@ -77,7 +77,6 @@ typedef struct {
   bool is_userdata;
   uint64_t n_clusters_created;
   uint64_t n_threads_arrays_allocated;
-  // Single-linkage specific fields:
   uint64_t knn;
   uint64_t min_pts;
   bool assign_noise;
@@ -287,9 +286,6 @@ static inline int64_t tk_agglo_find_nearest_core_cluster(
     int64_t nh_idx = hood_ptr->a[j].i; \
     if (nh_idx < 0 || nh_idx >= (int64_t)state->n_hoods) continue; \
     int64_t nh_uid = state->hoods_uids->a[nh_idx]; \
-    if (state->min_pts > 0 && state->is_core != NULL) { \
-      if (!tk_agglo_is_core(state->is_core, nh_idx, state->n_hoods)) continue; \
-    } \
     khint_t khi_n = tk_iumap_get(state->uid_to_cluster, nh_uid); \
     if (khi_n == tk_iumap_end(state->uid_to_cluster)) continue; \
     uint64_t neighbor_cluster_idx = (uint64_t)tk_iumap_val(state->uid_to_cluster, khi_n); \
@@ -553,9 +549,7 @@ static inline void tk_agglo_create_initial_clusters(
     uint64_t code_hash = tk_agglo_hash_code(code, code_chunks);
     khint_t khi = tk_iumap_get(code_hash_to_cluster, (int64_t)code_hash);
     uint64_t cluster_idx;
-    bool can_merge_same_code = true;
-    if (linkage == TK_AGGLO_LINKAGE_SINGLE && min_pts > 0)
-      can_merge_same_code = is_core_point;
+    bool can_merge_same_code = (linkage != TK_AGGLO_LINKAGE_SINGLE) || is_core_point;
     if (khi == tk_iumap_end(code_hash_to_cluster) || !can_merge_same_code) {
       if (state->n_clusters >= max_unique_codes)
         tk_error(L, "tk_agglo: too many unique clusters", ENOMEM);

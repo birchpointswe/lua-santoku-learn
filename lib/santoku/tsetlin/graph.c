@@ -938,7 +938,7 @@ static inline int tm_adjacency (lua_State *L)
   tm_graph_destroy_internal(graph);
   tk_lua_replace(L, 1, 4);
   lua_settop(L, 4);
-  lua_gc(L, LUA_GCCOLLECT, 0);
+  // lua_gc(L, LUA_GCCOLLECT, 0);
   return 4;
 }
 
@@ -1012,7 +1012,7 @@ static inline int tm_adj_pairs (lua_State *L)
   tk_ivec_register(L, offsets);
   tk_ivec_register(L, neighbors);
   tk_dvec_register(L, weights);
-  lua_gc(L, LUA_GCCOLLECT, 0);
+  // lua_gc(L, LUA_GCCOLLECT, 0);
   return 4;
 }
 
@@ -1035,7 +1035,7 @@ static inline int tm_star_hoods (lua_State *L)
     tk_lua_verror(L, 2, "star_hoods", "failed to convert hoods");
   lua_settop(L, 0);
   tk_pvec_register(L, pairs);
-  lua_gc(L, LUA_GCCOLLECT, 0);
+  // lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -1060,7 +1060,7 @@ static inline int tm_anchor_pairs (lua_State *L)
 
   lua_settop(L, 0);
   tk_pvec_register(L, pairs);
-  lua_gc(L, LUA_GCCOLLECT, 0);
+  // lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -1086,7 +1086,7 @@ static inline int tm_random_pairs (lua_State *L)
 
   lua_settop(L, 0);
   tk_pvec_register(L, pairs);
-  lua_gc(L, LUA_GCCOLLECT, 0);
+  // lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -1115,7 +1115,7 @@ static inline int tm_multiclass_pairs (lua_State *L)
   lua_settop(L, 1);
   tk_pvec_register(L, pos);
   tk_pvec_register(L, neg);
-  lua_gc(L, LUA_GCCOLLECT, 0);
+  // lua_gc(L, LUA_GCCOLLECT, 0);
   return 3;
 }
 
