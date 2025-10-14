@@ -18,19 +18,30 @@ typedef enum {
   TK_EVAL_GRAPH_RECONSTRUCTION_INIT,
   TK_EVAL_GRAPH_RECONSTRUCTION,
   TK_EVAL_GRAPH_RECONSTRUCTION_DESTROY,
+  TK_EVAL_CLUSTERING_QUALITY_INIT,
   TK_EVAL_CLUSTERING_QUALITY,
+  TK_EVAL_CLUSTERING_QUALITY_DESTROY,
+  TK_EVAL_RETRIEVAL_QUALITY_INIT,
   TK_EVAL_RETRIEVAL_QUALITY,
+  TK_EVAL_RETRIEVAL_QUALITY_DESTROY,
 } tk_eval_stage_t;
 
 typedef enum {
   TK_EVAL_METRIC_NONE,
-  TK_EVAL_METRIC_CORRELATION,
-  TK_EVAL_METRIC_PRECISION,
-  TK_EVAL_METRIC_DISPERSION,
-  TK_EVAL_METRIC_CORRELATION_WEIGHTED,
-  TK_EVAL_METRIC_PRECISION_WEIGHTED,
-  TK_EVAL_METRIC_DISPERSION_WEIGHTED,
+  TK_EVAL_METRIC_SPEARMAN,
+  TK_EVAL_METRIC_BISERIAL,
+  TK_EVAL_METRIC_VARIANCE,
 } tk_eval_metric_t;
+
+static inline tk_eval_metric_t tk_eval_parse_metric(const char *metric_str) {
+  if (!strcmp(metric_str, "spearman"))
+    return TK_EVAL_METRIC_SPEARMAN;
+  if (!strcmp(metric_str, "biserial"))
+    return TK_EVAL_METRIC_BISERIAL;
+  if (!strcmp(metric_str, "variance"))
+    return TK_EVAL_METRIC_VARIANCE;
+  return TK_EVAL_METRIC_NONE;
+}
 
 typedef struct {
   tm_dl_t *pl;
@@ -240,25 +251,10 @@ static void tk_eval_worker (void *dp, int sig)
         tk_pvec_asc(data->bin_ranks, 0, data->bin_ranks->n);
         double corr;
         switch (state->eval_metric) {
-          case TK_EVAL_METRIC_CORRELATION:
-            corr = tk_csr_pvec_spearman_streaming(
+          case TK_EVAL_METRIC_SPEARMAN:
+            corr = tk_csr_spearman(
               state->neighbors, state->weights, start, end,
               data->bin_ranks, data->rank_buffer_a, data->rank_buffer_b);
-            break;
-          case TK_EVAL_METRIC_PRECISION:
-            corr = tk_csr_pvec_ndcg_streaming(
-              state->neighbors, start, end,
-              data->bin_ranks, data->reverse_idx_buffer);
-            break;
-          case TK_EVAL_METRIC_PRECISION_WEIGHTED:
-            corr = tk_csr_weight_ndcg_streaming(
-              state->neighbors, state->weights, start, end,
-              data->bin_ranks, data->reverse_idx_buffer);
-            break;
-          case TK_EVAL_METRIC_DISPERSION:
-            corr = tk_csr_pvec_rank_diff_cv_streaming(
-              state->neighbors, start, end,
-              data->bin_ranks, data->reverse_idx_buffer);
             break;
           default:
             corr = 0.0;
@@ -284,6 +280,15 @@ static void tk_eval_worker (void *dp, int sig)
       break;
     }
 
+    case TK_EVAL_CLUSTERING_QUALITY_INIT: {
+      data->itmp = tk_iuset_create(NULL, 0);
+      if (!data->itmp) {
+        atomic_store(&data->has_error, true);
+        return;
+      }
+      break;
+    }
+
     case TK_EVAL_CLUSTERING_QUALITY: {
       data->corr_score = 0.0;
       data->corr_nodes_processed = 0;
@@ -294,16 +299,10 @@ static void tk_eval_worker (void *dp, int sig)
         if (n_neighbors == 0)
           continue;
         int64_t my_cluster = state->assignments->a[node_idx];
-        tk_rvec_clear(data->rtmp);
         tk_iuset_clear(data->itmp);
         for (int64_t idx = start; idx < end; idx++) {
           int64_t neighbor = state->neighbors->a[idx];
-          double weight = state->weights->a[idx];
           int64_t neighbor_cluster = state->assignments->a[neighbor];
-          if (tk_rvec_push(data->rtmp, tk_rank(neighbor, weight)) != 0) {
-            atomic_store(&data->has_error, true);
-            return;
-          }
           if (my_cluster == neighbor_cluster) {
             int kha;
             tk_iuset_put(data->itmp, neighbor, &kha);
@@ -311,23 +310,11 @@ static void tk_eval_worker (void *dp, int sig)
         }
         double node_score = 0.0;
         switch (state->eval_metric) {
-          case TK_EVAL_METRIC_CORRELATION:
-            node_score = tk_rvec_rank_biserial_binary(data->rtmp, data->itmp);
+          case TK_EVAL_METRIC_BISERIAL:
+            node_score = tk_csr_biserial(state->neighbors, start, end, data->itmp);
             break;
-          case TK_EVAL_METRIC_CORRELATION_WEIGHTED:
-            node_score = tk_rvec_weight_biserial_binary(data->rtmp, data->itmp);
-            break;
-          case TK_EVAL_METRIC_PRECISION:
-            node_score = tk_rvec_ndcg_binary(data->rtmp, data->itmp);
-            break;
-          case TK_EVAL_METRIC_PRECISION_WEIGHTED:
-            node_score = tk_rvec_weight_ndcg_binary(data->rtmp, data->itmp);
-            break;
-          case TK_EVAL_METRIC_DISPERSION:
-            node_score = tk_rvec_variance_ratio_binary(data->rtmp, data->itmp);
-            break;
-          case TK_EVAL_METRIC_DISPERSION_WEIGHTED:
-            node_score = tk_rvec_weight_variance_ratio_binary(data->rtmp, data->itmp);
+          case TK_EVAL_METRIC_VARIANCE:
+            node_score = tk_csr_variance_ratio(state->neighbors, start, end, data->itmp);
             break;
           default:
             node_score = 0.0;
@@ -335,6 +322,21 @@ static void tk_eval_worker (void *dp, int sig)
         }
         data->corr_score += node_score;
         data->corr_nodes_processed++;
+      }
+      break;
+    }
+
+    case TK_EVAL_CLUSTERING_QUALITY_DESTROY: {
+      if (data->itmp != NULL)
+        tk_iuset_destroy(data->itmp);
+      break;
+    }
+
+    case TK_EVAL_RETRIEVAL_QUALITY_INIT: {
+      data->itmp = tk_iuset_create(NULL, 0);
+      if (!data->itmp) {
+        atomic_store(&data->has_error, true);
+        return;
       }
       break;
     }
@@ -348,15 +350,9 @@ static void tk_eval_worker (void *dp, int sig)
         uint64_t n_neighbors = (uint64_t)(end - start);
         if (n_neighbors == 0)
           continue;
-        tk_rvec_clear(data->rtmp);
         tk_iuset_clear(data->itmp);
         for (int64_t idx = start; idx < end; idx++) {
           int64_t neighbor = state->neighbors->a[idx];
-          double weight = state->weights->a[idx];
-          if (tk_rvec_push(data->rtmp, tk_rank(neighbor, weight)) != 0) {
-            atomic_store(&data->has_error, true);
-            return;
-          }
           uint64_t hamming_dist = tk_cvec_bits_hamming(
             (const unsigned char *) state->codes + node_idx * state->chunks,
             (const unsigned char *) state->codes + neighbor * state->chunks,
@@ -368,23 +364,11 @@ static void tk_eval_worker (void *dp, int sig)
         }
         double node_score = 0.0;
         switch (state->eval_metric) {
-          case TK_EVAL_METRIC_CORRELATION:
-            node_score = tk_rvec_rank_biserial_binary(data->rtmp, data->itmp);
+          case TK_EVAL_METRIC_BISERIAL:
+            node_score = tk_csr_biserial(state->neighbors, start, end, data->itmp);
             break;
-          case TK_EVAL_METRIC_CORRELATION_WEIGHTED:
-            node_score = tk_rvec_weight_biserial_binary(data->rtmp, data->itmp);
-            break;
-          case TK_EVAL_METRIC_PRECISION:
-            node_score = tk_rvec_ndcg_binary(data->rtmp, data->itmp);
-            break;
-          case TK_EVAL_METRIC_PRECISION_WEIGHTED:
-            node_score = tk_rvec_weight_ndcg_binary(data->rtmp, data->itmp);
-            break;
-          case TK_EVAL_METRIC_DISPERSION:
-            node_score = tk_rvec_variance_ratio_binary(data->rtmp, data->itmp);
-            break;
-          case TK_EVAL_METRIC_DISPERSION_WEIGHTED:
-            node_score = tk_rvec_weight_variance_ratio_binary(data->rtmp, data->itmp);
+          case TK_EVAL_METRIC_VARIANCE:
+            node_score = tk_csr_variance_ratio(state->neighbors, start, end, data->itmp);
             break;
           default:
             node_score = 0.0;
@@ -393,6 +377,12 @@ static void tk_eval_worker (void *dp, int sig)
         data->corr_score += node_score;
         data->corr_nodes_processed++;
       }
+      break;
+    }
+
+    case TK_EVAL_RETRIEVAL_QUALITY_DESTROY: {
+      if (data->itmp != NULL)
+        tk_iuset_destroy(data->itmp);
       break;
     }
 
@@ -531,18 +521,21 @@ static inline void tm_clustering_accuracy (
     atomic_init(&data[i].has_error, false);
     data[i].corr_score = 0.0;
     data[i].corr_nodes_processed = 0;
-    data[i].rtmp = tk_rvec_create(NULL, 0, 0, 0);
-    data[i].itmp = tk_iuset_create(NULL, 0);
     tk_thread_range(i, n_threads, n_nodes, &data[i].wfirst, &data[i].wlast);
   }
 
-  tk_threads_signal(pool, TK_EVAL_CLUSTERING_QUALITY, 0);
+  tk_threads_signal(pool, TK_EVAL_CLUSTERING_QUALITY_INIT, 0);
 
-  // Cleanup reusable structures
   for (unsigned int i = 0; i < n_threads; i++) {
-    if (data[i].rtmp) tk_rvec_destroy(data[i].rtmp);
-    if (data[i].itmp) tk_iuset_destroy(data[i].itmp);
+    if (atomic_load(&data[i].has_error)) {
+      tk_threads_signal(pool, TK_EVAL_CLUSTERING_QUALITY_DESTROY, 0);
+      tk_lua_verror(L, 2, "clustering_accuracy", "worker thread allocation failed");
+      return;
+    }
   }
+
+  tk_threads_signal(pool, TK_EVAL_CLUSTERING_QUALITY, 0);
+  tk_threads_signal(pool, TK_EVAL_CLUSTERING_QUALITY_DESTROY, 0);
 
   // Aggregate across threads
   double total_corr_score = 0.0;
@@ -578,22 +571,10 @@ static inline int tm_clustering_accuracy_lua (lua_State *L)
 
   unsigned int n_threads = tk_threads_getn(L, 1, "clustering_accuracy", "threads");
 
-  char *metric_str = tk_lua_foptstring(L, 1, "clustering_accuracy", "metric", "correlation");
-  tk_eval_metric_t metric = TK_EVAL_METRIC_NONE;
-  if (!strcmp(metric_str, "correlation") || !strcmp(metric_str, "biserial"))
-    metric = TK_EVAL_METRIC_CORRELATION;
-  else if (!strcmp(metric_str, "correlation-weighted") || !strcmp(metric_str, "biserial-weighted"))
-    metric = TK_EVAL_METRIC_CORRELATION_WEIGHTED;
-  else if (!strcmp(metric_str, "precision") || !strcmp(metric_str, "ndcg"))
-    metric = TK_EVAL_METRIC_PRECISION;
-  else if (!strcmp(metric_str, "precision-weighted") || !strcmp(metric_str, "ndcg-weighted"))
-    metric = TK_EVAL_METRIC_PRECISION_WEIGHTED;
-  else if (!strcmp(metric_str, "dispersion") || !strcmp(metric_str, "variance"))
-    metric = TK_EVAL_METRIC_DISPERSION;
-  else if (!strcmp(metric_str, "dispersion-weighted") || !strcmp(metric_str, "variance-weighted"))
-    metric = TK_EVAL_METRIC_DISPERSION_WEIGHTED;
-  else
-    tk_lua_verror(L, 3, "clustering_accuracy", "metric", "must be 'correlation', 'precision', 'dispersion' or '-weighted' variants");
+  char *metric_str = tk_lua_foptstring(L, 1, "clustering_accuracy", "metric", "biserial");
+  tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
+  if (metric == TK_EVAL_METRIC_NONE)
+    tk_lua_verror(L, 3, "clustering_accuracy", "metric", "unknown metric");
 
   double score;
   tm_clustering_accuracy(L, assignments, offsets, neighbors, weights, n_threads, metric, &score);
@@ -650,18 +631,21 @@ static inline void tm_retrieval_accuracy (
     atomic_init(&data[i].has_error, false);
     data[i].corr_score = 0.0;
     data[i].corr_nodes_processed = 0;
-    data[i].rtmp = tk_rvec_create(NULL, 0, 0, 0);
-    data[i].itmp = tk_iuset_create(NULL, 0);
     tk_thread_range(i, n_threads, n_nodes, &data[i].wfirst, &data[i].wlast);
   }
 
-  tk_threads_signal(pool, TK_EVAL_RETRIEVAL_QUALITY, 0);
+  tk_threads_signal(pool, TK_EVAL_RETRIEVAL_QUALITY_INIT, 0);
 
-  // Cleanup reusable structures
   for (unsigned int i = 0; i < n_threads; i++) {
-    if (data[i].rtmp) tk_rvec_destroy(data[i].rtmp);
-    if (data[i].itmp) tk_iuset_destroy(data[i].itmp);
+    if (atomic_load(&data[i].has_error)) {
+      tk_threads_signal(pool, TK_EVAL_RETRIEVAL_QUALITY_DESTROY, 0);
+      tk_lua_verror(L, 2, "retrieval_accuracy", "worker thread allocation failed");
+      return;
+    }
   }
+
+  tk_threads_signal(pool, TK_EVAL_RETRIEVAL_QUALITY, 0);
+  tk_threads_signal(pool, TK_EVAL_RETRIEVAL_QUALITY_DESTROY, 0);
 
   // Aggregate quality scores across threads
   double total_quality_score = 0.0;
@@ -704,22 +688,10 @@ static inline int tm_retrieval_accuracy_lua (lua_State *L)
   uint64_t margin = tk_lua_fcheckunsigned(L, 1, "retrieval_accuracy", "margin");
   unsigned int n_threads = tk_threads_getn(L, 1, "retrieval_accuracy", "threads");
 
-  char *metric_str = tk_lua_foptstring(L, 1, "retrieval_accuracy", "metric", "correlation");
-  tk_eval_metric_t metric = TK_EVAL_METRIC_NONE;
-  if (!strcmp(metric_str, "correlation") || !strcmp(metric_str, "biserial"))
-    metric = TK_EVAL_METRIC_CORRELATION;
-  else if (!strcmp(metric_str, "correlation-weighted") || !strcmp(metric_str, "biserial-weighted"))
-    metric = TK_EVAL_METRIC_CORRELATION_WEIGHTED;
-  else if (!strcmp(metric_str, "precision") || !strcmp(metric_str, "ndcg"))
-    metric = TK_EVAL_METRIC_PRECISION;
-  else if (!strcmp(metric_str, "precision-weighted") || !strcmp(metric_str, "ndcg-weighted"))
-    metric = TK_EVAL_METRIC_PRECISION_WEIGHTED;
-  else if (!strcmp(metric_str, "dispersion") || !strcmp(metric_str, "variance"))
-    metric = TK_EVAL_METRIC_DISPERSION;
-  else if (!strcmp(metric_str, "dispersion-weighted") || !strcmp(metric_str, "variance-weighted"))
-    metric = TK_EVAL_METRIC_DISPERSION_WEIGHTED;
-  else
-    tk_lua_verror(L, 3, "retrieval_accuracy", "metric", "must be 'correlation', 'precision', 'dispersion' or '-weighted' variants");
+  char *metric_str = tk_lua_foptstring(L, 1, "retrieval_accuracy", "metric", "biserial");
+  tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
+  if (metric == TK_EVAL_METRIC_NONE)
+    tk_lua_verror(L, 3, "retrieval_accuracy", "metric", "unknown metric");
 
   uint64_t chunks = TK_CVEC_BITS_BYTES(n_dims);
 
@@ -1376,22 +1348,10 @@ static inline int tm_optimize_clustering (lua_State *L)
     tk_lua_verror(L, 3, "optimize_clustering", "knn", "knn parameter required for linkage=single");
 
   double tolerance = tk_lua_foptnumber(L, 1, "optimize_clustering", "tolerance", 1e-12);
-  char *metric_str = tk_lua_foptstring(L, 1, "optimize_clustering", "metric", "correlation");
-  tk_eval_metric_t metric = TK_EVAL_METRIC_NONE;
-  if (!strcmp(metric_str, "correlation") || !strcmp(metric_str, "biserial"))
-    metric = TK_EVAL_METRIC_CORRELATION;
-  else if (!strcmp(metric_str, "correlation-weighted") || !strcmp(metric_str, "biserial-weighted"))
-    metric = TK_EVAL_METRIC_CORRELATION_WEIGHTED;
-  else if (!strcmp(metric_str, "precision") || !strcmp(metric_str, "ndcg"))
-    metric = TK_EVAL_METRIC_PRECISION;
-  else if (!strcmp(metric_str, "precision-weighted") || !strcmp(metric_str, "ndcg-weighted"))
-    metric = TK_EVAL_METRIC_PRECISION_WEIGHTED;
-  else if (!strcmp(metric_str, "dispersion") || !strcmp(metric_str, "variance"))
-    metric = TK_EVAL_METRIC_DISPERSION;
-  else if (!strcmp(metric_str, "dispersion-weighted") || !strcmp(metric_str, "variance-weighted"))
-    metric = TK_EVAL_METRIC_DISPERSION_WEIGHTED;
-  else
-    tk_lua_verror(L, 3, "optimize_clustering", "metric", "must be 'correlation', 'precision', 'dispersion' or '-weighted' variants");
+  char *metric_str = tk_lua_foptstring(L, 1, "optimize_clustering", "metric", "biserial");
+  tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
+  if (metric == TK_EVAL_METRIC_NONE)
+    tk_lua_verror(L, 3, "optimize_clustering", "metric", "unknown metric");
 
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
@@ -1470,22 +1430,10 @@ static inline int tm_optimize_retrieval (lua_State *L)
   uint64_t min_margin = tk_lua_foptunsigned(L, 1, "optimize_retrieval", "min_margin", 0);
   uint64_t max_margin = tk_lua_foptunsigned(L, 1, "optimize_retrieval", "max_margin", n_dims);
 
-  char *metric_str = tk_lua_foptstring(L, 1, "optimize_retrieval", "metric", "correlation");
-  tk_eval_metric_t metric = TK_EVAL_METRIC_NONE;
-  if (!strcmp(metric_str, "correlation") || !strcmp(metric_str, "biserial"))
-    metric = TK_EVAL_METRIC_CORRELATION;
-  else if (!strcmp(metric_str, "correlation-weighted") || !strcmp(metric_str, "biserial-weighted"))
-    metric = TK_EVAL_METRIC_CORRELATION_WEIGHTED;
-  else if (!strcmp(metric_str, "precision") || !strcmp(metric_str, "ndcg"))
-    metric = TK_EVAL_METRIC_PRECISION;
-  else if (!strcmp(metric_str, "precision-weighted") || !strcmp(metric_str, "ndcg-weighted"))
-    metric = TK_EVAL_METRIC_PRECISION_WEIGHTED;
-  else if (!strcmp(metric_str, "dispersion") || !strcmp(metric_str, "variance"))
-    metric = TK_EVAL_METRIC_DISPERSION;
-  else if (!strcmp(metric_str, "dispersion-weighted") || !strcmp(metric_str, "variance-weighted"))
-    metric = TK_EVAL_METRIC_DISPERSION_WEIGHTED;
-  else
-    tk_lua_verror(L, 3, "optimize_retrieval", "metric", "must be 'correlation', 'precision', 'dispersion' or '-weighted' variants");
+  char *metric_str = tk_lua_foptstring(L, 1, "optimize_retrieval", "metric", "biserial");
+  tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
+  if (metric == TK_EVAL_METRIC_NONE)
+    tk_lua_verror(L, 3, "optimize_retrieval", "metric", "unknown metric");
 
   if (max_margin > n_dims)
     max_margin = n_dims;
@@ -1793,18 +1741,10 @@ static inline int tm_optimize_bits (lua_State *L)
   int64_t start_prefix = tk_lua_foptinteger(L, 1, "optimize_bits", "start_prefix", 0);
   double tolerance = tk_lua_foptnumber(L, 1, "optimize_bits", "tolerance", 1e-12);
 
-  char *metric_str = tk_lua_foptstring(L, 1, "optimize_bits", "metric", "correlation");
-  tk_eval_metric_t metric = TK_EVAL_METRIC_NONE;
-  if (!strcmp(metric_str, "correlation") || !strcmp(metric_str, "spearman"))
-    metric = TK_EVAL_METRIC_CORRELATION;
-  else if (!strcmp(metric_str, "precision") || !strcmp(metric_str, "ndcg"))
-    metric = TK_EVAL_METRIC_PRECISION;
-  else if (!strcmp(metric_str, "precision-weighted") || !strcmp(metric_str, "ndcg-weighted"))
-    metric = TK_EVAL_METRIC_PRECISION_WEIGHTED;
-  else if (!strcmp(metric_str, "dispersion") || !strcmp(metric_str, "cv"))
-    metric = TK_EVAL_METRIC_DISPERSION;
-  else
-    tk_lua_verror(L, 3, "optimize_bits", "metric", "must be 'correlation', 'precision', 'precision-weighted', or 'dispersion'");
+  char *metric_str = tk_lua_foptstring(L, 1, "optimize_bits", "metric", "spearman");
+  tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
+  if (metric == TK_EVAL_METRIC_NONE)
+    tk_lua_verror(L, 3, "optimize_bits", "metric", "unknown metric");
 
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {

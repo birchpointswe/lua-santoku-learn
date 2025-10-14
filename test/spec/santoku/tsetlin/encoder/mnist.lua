@@ -43,8 +43,8 @@ local cfg; cfg = {
     primme_eps = 1e-12,
   },
   itq = {
-    eps = 1e-8,
-    iterations = 200,
+    eps = 1e-12,
+    iterations = 1000,
   },
   graph = {
     knn = 32,
@@ -61,18 +61,18 @@ local cfg; cfg = {
     min_pts = 32,
   },
   eval = {
-    bits_metric = "correlation",
-    retrieval_metric = "precision",
-    cluster_metric = "precision",
+    bits_metric = "spearman",
+    retrieval_metric = "biserial",
+    cluster_metric = "biserial",
     sampled_anchors = 16,
     tolerance = 1e-3,
     retrieval = function (d)
-      return d:max()
-      -- return d:scores_plateau(cfg.eval.tolerance)
+      -- return d:max()
+      return d:scores_plateau(cfg.eval.tolerance)
     end,
     clustering = function (d)
-      return d:max()
-      -- return d:scores_plateau(cfg.eval.tolerance)
+      -- return d:max()
+      return d:scores_plateau(cfg.eval.tolerance)
     end,
   },
   bits = {
@@ -89,10 +89,10 @@ local cfg; cfg = {
     specificity = { def = 1000, min = 2, max = 4000, int = true, log = true },
   },
   search = {
-    patience = 20,
+    patience = 4,
     rounds = 20,
     trials = 4,
-    iterations = 20,
+    iterations = 10,
   },
   training = {
     patience = 20,
@@ -443,7 +443,7 @@ test("tsetlin", function ()
 
     print("Creating encoder")
     stopwatch = utc.stopwatch()
-    train.encoder = tm.optimize_encoder({
+    train.encoder, train.accuracy_predicted = tm.optimize_encoder({
       visible = sth_visible,
       hidden = dataset.n_hidden,
       sentences = sth_problems,
@@ -466,7 +466,7 @@ test("tsetlin", function ()
         local accuracy = eval.encoding_accuracy(predicted, sth_solutions, sth_n, dataset.n_hidden, cfg.threads)
         return accuracy.mean_hamming, accuracy
       end,
-      each = function (t, is_final, train_accuracy, params, epoch, round, trial)
+      each = function (_, is_final, train_accuracy, params, epoch, round, trial)
         local d, dd = stopwatch()
         if is_final then
           str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%d S=%.2f  Epoch  %d\n",
@@ -475,40 +475,44 @@ test("tsetlin", function ()
           str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%d S=%.2f  R=%d T=%d  Epoch  %d\n",
             d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, round, trial, epoch)
         end
-        train.accuracy_predicted = train_accuracy
-        str.printi("    Train | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)", train.accuracy_predicted)
-        if is_final then
-          local sth_predicted = t:predict(sth_problems, sth_n, cfg.threads)
-          train.retrieval_scores_predicted = eval.optimize_retrieval({
-            codes = sth_predicted,
-            n_dims = dataset.n_hidden,
-            ids = sth_ids,
-            offsets = train.adj_sampled_offsets,
-            weights = train.adj_sampled_weights,
-            neighbors = train.adj_sampled_neighbors,
-            weighted = cfg.eval.retrieval_weighted,
-            metric = cfg.eval.retrieval_metric,
-            threads = cfg.threads,
-          })
-          local test_predicted = t:predict(test_problems, test.n, cfg.threads)
-          test.retrieval_scores_predicted = eval.optimize_retrieval({
-            codes = test_predicted,
-            n_dims = dataset.n_hidden,
-            ids = test_ids,
-            offsets = test.adj_sampled_offsets,
-            weights = test.adj_sampled_weights,
-            neighbors = test.adj_sampled_neighbors,
-            weighted = cfg.eval.retrieval_weighted,
-            metric = cfg.eval.retrieval_metric,
-            threads = cfg.threads,
-          })
-          str.printi("    Codes  | Margin: %.2f#(2) | Score: %+.2f#(1)", { cfg.eval.retrieval(train.retrieval_scores) })
-          str.printi("    Train  | Margin: %.2f#(2) | Score: %+.2f#(1)", { cfg.eval.retrieval(train.retrieval_scores_predicted) })
-          str.printi("    Test   | Margin: %.2f#(2) | Score: %+.2f#(1)", { cfg.eval.retrieval(test.retrieval_scores_predicted) })
-          print()
-        end
+        str.printi("    Train | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)", train_accuracy)
       end,
     })
+    collectgarbage("collect")
+
+    print("Final encoder performance (best checkpoint)")
+    str.printi("  Train | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)", train.accuracy_predicted)
+
+    local sth_predicted = train.encoder:predict(sth_problems, sth_n, cfg.threads)
+    train.retrieval_scores_predicted = eval.optimize_retrieval({
+      codes = sth_predicted,
+      n_dims = dataset.n_hidden,
+      ids = sth_ids,
+      offsets = train.adj_sampled_offsets,
+      weights = train.adj_sampled_weights,
+      neighbors = train.adj_sampled_neighbors,
+      weighted = cfg.eval.retrieval_weighted,
+      metric = cfg.eval.retrieval_metric,
+      threads = cfg.threads,
+    })
+
+    local test_predicted = train.encoder:predict(test_problems, test.n, cfg.threads)
+    test.retrieval_scores_predicted = eval.optimize_retrieval({
+      codes = test_predicted,
+      n_dims = dataset.n_hidden,
+      ids = test_ids,
+      offsets = test.adj_sampled_offsets,
+      weights = test.adj_sampled_weights,
+      neighbors = test.adj_sampled_neighbors,
+      weighted = cfg.eval.retrieval_weighted,
+      metric = cfg.eval.retrieval_metric,
+      threads = cfg.threads,
+    })
+
+    str.printi("  Codes  | Margin: %.2f#(2) | Score: %+.2f#(1)", { cfg.eval.retrieval(train.retrieval_scores) })
+    str.printi("  Train  | Margin: %.2f#(2) | Score: %+.2f#(1)", { cfg.eval.retrieval(train.retrieval_scores_predicted) })
+    str.printi("  Test   | Margin: %.2f#(2) | Score: %+.2f#(1)", { cfg.eval.retrieval(test.retrieval_scores_predicted) })
+    print()
     collectgarbage("collect")
 
   end

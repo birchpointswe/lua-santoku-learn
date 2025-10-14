@@ -36,7 +36,7 @@ weaker signals (e.g., general feature overlap).
 
 Edge weights between nodes i and j are computed as:
 
-w(i, j) = Σ[sim_r(i, j) * exp(-r * decay)] / Σ[exp(-r * decay)]
+    w(i, j) = Σ[sim_r(i, j) * exp(-r * decay)] / Σ[exp(-r * decay)]
 
 where `sim_r(i, j)` computes similarity between nodes considering only features
 at rank `r`. Exponential decay biases the spectral decomposition toward
@@ -96,8 +96,7 @@ spectral decomposition process.
    via rank-biserial correlation
 
 Rank-biserial maxima identify high-quality partitions, but plateaus are common
-and often more informative for practical use. The L-method effectively
-identifies stable threshold ranges where performance remains consistent.
+and often more informative for practical use.
 
 ## Centroid-Linkage Agglomerative Clustering
 

@@ -65,6 +65,7 @@ static inline void tk_tch_worker(void *dp, int sig)
             updated = false;
             data->steps++;
 
+            // TODO: Can this be replaced with the standard metrics we use in evaluator/capi.c? This is a greedy loop that runs through every sample and, for the curent bit, checks to see if flipping that bit for that sample improves the weighted agreement of that sample's neighbors. I wonder if we can frame this as spearman, biserial, r-squared, and/or variance-ratio.
             for (uint64_t si = 0; si < n_nodes; si++) {
               int64_t i = node_order->a[si];
               int64_t row_start = state->adj_offset->a[i];
@@ -80,6 +81,7 @@ static inline void tk_tch_worker(void *dp, int sig)
                 updated = true;
               }
             }
+
           } while (updated);
         }
       }

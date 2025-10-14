@@ -82,6 +82,7 @@ typedef struct tk_tsetlin_s {
   bool has_state;
   bool trained;
   bool destroyed;
+  bool reusable;
   unsigned int classes;
   unsigned int features;
   unsigned int clauses;
@@ -342,6 +343,7 @@ static inline int tk_tsetlin_destroy (lua_State *L);
 static inline int tk_tsetlin_persist (lua_State *);
 static inline int tk_tsetlin_checkpoint (lua_State *);
 static inline int tk_tsetlin_restore (lua_State *);
+static inline int tk_tsetlin_reconfigure (lua_State *);
 static inline int tk_tsetlin_type (lua_State *);
 
 static luaL_Reg tk_tsetlin_mt_fns[] =
@@ -352,6 +354,7 @@ static luaL_Reg tk_tsetlin_mt_fns[] =
   { "persist", tk_tsetlin_persist },
   { "checkpoint", tk_tsetlin_checkpoint },
   { "restore", tk_tsetlin_restore },
+  { "reconfigure", tk_tsetlin_reconfigure },
   { "type", tk_tsetlin_type },
   { NULL, NULL }
 };
@@ -667,6 +670,7 @@ static inline void tk_tsetlin_init_classifier (
     tk_lua_verror(L, 3, "create classifier", "clause_maximum", "must be greater than 0");
   if (state_bits < 2)
     tk_lua_verror(L, 3, "create classifier", "bits", "must be greater than 1");
+  tm->reusable = false;
   tm->negative = negative < 0 ? 1.0 / (double) classes : negative; // Note: unused in encoder
   tm->classes = classes;
   tm->class_chunks = TK_CVEC_BITS_BYTES(tm->classes);
@@ -734,6 +738,7 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
       tk_lua_foptposdouble(L, 2, "create classifier", "target", -1.0),
       tk_lua_foptposdouble(L, 2, "create classifier", "negative", -1.0),
       tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity"));
+  tm->reusable = tk_lua_foptboolean(L, 2, "create classifier", "reusable", false);
   lua_settop(L, 1);
 }
 
@@ -751,6 +756,7 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
       tk_lua_foptposdouble(L, 2, "create encoder", "target", -1.0),
       tk_lua_foptposdouble(L, 2, "create encoder", "negative", -1.0), // Note: unused in encoder
       tk_lua_fcheckposdouble(L, 2, "create encoder", "specificity"));
+  tm->reusable = tk_lua_foptboolean(L, 2, "create encoder", "reusable", false);
   lua_settop(L, 1);
 }
 
@@ -775,6 +781,7 @@ static inline int tk_tsetlin_create (lua_State *L)
 static inline void tk_tsetlin_shrink (tk_tsetlin_t *tm)
 {
   if (tm == NULL) return;
+  tm->reusable = false;
   free(tm->state); tm->state = NULL;
 }
 
@@ -974,7 +981,8 @@ static inline int tk_tsetlin_train_classifier (
   tk_threads_destroy(pool);
   free(threads);
 
-  tk_tsetlin_shrink(tm);
+  if (!tm->reusable)
+    tk_tsetlin_shrink(tm);
   tm->trained = true;
   return 0;
 }
@@ -1059,7 +1067,8 @@ static inline int tk_tsetlin_train_encoder (
   tk_threads_destroy(pool);
   free(threads);
 
-  tk_tsetlin_shrink(tm);
+  if (!tm->reusable)
+    tk_tsetlin_shrink(tm);
   tm->trained = true;
   return 0;
 }
@@ -1079,7 +1088,7 @@ static inline int tk_tsetlin_train (lua_State *L)
   }
 }
 
-static inline void _tk_tsetlin_persist_classifier (lua_State *L, tk_tsetlin_t *tm, FILE *fh, bool persist_state)
+static inline void _tk_tsetlin_persist_classifier (lua_State *L, tk_tsetlin_t *tm, FILE *fh)
 {
   tk_lua_fwrite(L, &tm->classes, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->features, sizeof(unsigned int), 1, fh);
@@ -1098,23 +1107,19 @@ static inline void _tk_tsetlin_persist_classifier (lua_State *L, tk_tsetlin_t *t
   tk_lua_fwrite(L, tm->actions, sizeof(tk_bits_t), tm->action_chunks, fh);
 }
 
-static inline void tk_tsetlin_persist_classifier (lua_State *L, tk_tsetlin_t *tm, FILE *fh, bool persist_state)
+static inline void tk_tsetlin_persist_classifier (lua_State *L, tk_tsetlin_t *tm, FILE *fh)
 {
-  _tk_tsetlin_persist_classifier(L, tm, fh, persist_state);
+  _tk_tsetlin_persist_classifier(L, tm, fh);
 }
 
 static inline int tk_tsetlin_persist (lua_State *L)
 {
-  lua_settop(L, 3);
+  lua_settop(L, 2);
   tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
   bool tostr = lua_type(L, 2) == LUA_TNIL;
   FILE *fh = tostr ? tk_lua_tmpfile(L) : tk_lua_fopen(L, tk_lua_checkstring(L, 2, "persist path"), "w");
-  bool persist_state = lua_toboolean(L, 3);
-  if (persist_state && !tm->has_state)
-    luaL_error(L, "can't persist the state of a model loaded without state");
   tk_lua_fwrite(L, &tm->type, sizeof(tk_tsetlin_type_t), 1, fh);
-  tk_lua_fwrite(L, &persist_state, sizeof(bool), 1, fh);
-  tk_tsetlin_persist_classifier(L, tm, fh, persist_state);
+  tk_tsetlin_persist_classifier(L, tm, fh);
   if (!tostr) {
     tk_lua_fclose(L, fh);
     return 0;
@@ -1168,7 +1173,71 @@ static inline int tk_tsetlin_restore (lua_State *L)
   return 0;
 }
 
-static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, FILE *fh, bool read_state, bool has_state)
+static inline int tk_tsetlin_reconfigure (lua_State *L)
+{
+  lua_settop(L, 2);
+  tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
+
+  if (!tm->reusable)
+    luaL_error(L, "reconfigure requires reusable=true at creation time");
+
+  // Parse new params from table
+  unsigned int new_clauses = tk_lua_fcheckunsigned(L, 2, "reconfigure", "clauses");
+  unsigned int new_tolerance = tk_lua_fcheckunsigned(L, 2, "reconfigure", "clause_tolerance");
+  unsigned int new_maximum = tk_lua_fcheckunsigned(L, 2, "reconfigure", "clause_maximum");
+  double new_target = tk_lua_foptposdouble(L, 2, "reconfigure", "target", -1.0);
+  double new_specificity = tk_lua_fcheckposdouble(L, 2, "reconfigure", "specificity");
+
+  // Normalize clauses to chunk boundary
+  new_clauses = TK_CVEC_BITS_BYTES(new_clauses) * TK_CVEC_BITS;
+  unsigned int new_clause_chunks = TK_CVEC_BITS_BYTES(new_clauses);
+
+  // Calculate new sizes
+  unsigned int new_action_chunks = tm->classes * new_clauses * tm->input_chunks;
+  unsigned int new_state_chunks = tm->classes * new_clauses * (tm->state_bits - 1) * tm->input_chunks;
+
+  // Reallocate actions if needed
+  if (new_action_chunks > tm->action_chunks) {
+    free(tm->actions);
+    tm->actions = tk_malloc_aligned(L, sizeof(tk_bits_t) * new_action_chunks, TK_CVEC_BITS);
+    if (!tm->actions)
+      luaL_error(L, "failed to allocate actions in reconfigure");
+  }
+
+  // Zero actions (fresh start)
+  memset(tm->actions, 0, sizeof(tk_bits_t) * new_action_chunks);
+
+  // Reallocate state if needed
+  if (new_state_chunks > tm->state_chunks || !tm->state) {
+    if (tm->state) free(tm->state);
+    tm->state = tk_malloc_aligned(L, sizeof(tk_bits_t) * new_state_chunks, TK_CVEC_BITS);
+    if (!tm->state)
+      luaL_error(L, "failed to allocate state in reconfigure");
+  }
+
+  // Update metadata
+  tm->clauses = new_clauses;
+  tm->clause_chunks = new_clause_chunks;
+  tm->clause_tolerance = new_tolerance;
+  tm->clause_maximum = new_maximum;
+  tm->action_chunks = new_action_chunks;
+  tm->state_chunks = new_state_chunks;
+  tm->specificity = new_specificity;
+  tm->target = new_target < 0
+    ? sqrt((double) tm->clauses / 2.0) * (double) new_tolerance
+    : ceil(new_target >= 1 ? new_target : fmaxf(1.0, (double) tm->clauses * new_target));
+
+  // Update simhash pointers
+  tm->simhash.n_items = tm->classes * tm->clauses;
+  tm->simhash.counts = tm->state;
+  tm->simhash.actions = tm->actions;
+
+  tm->trained = false;
+
+  return 0;
+}
+
+static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, FILE *fh)
 {
   tk_lua_fread(L, &tm->classes, sizeof(unsigned int), 1, fh);
   tm->class_chunks = TK_CVEC_BITS_BYTES(tm->classes);
@@ -1187,6 +1256,7 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, 
   tk_lua_fread(L, &tm->tail_mask, sizeof(tk_bits_t), 1, fh);
   tm->actions = tk_malloc_aligned(L, sizeof(tk_bits_t) * tm->action_chunks, TK_CVEC_BITS);
   tk_lua_fread(L, tm->actions, sizeof(tk_bits_t), tm->action_chunks, fh);
+  tm->state = NULL;
   tm->simhash.mode = TK_SIMHASH_PACKED;
   tm->simhash.n_items = tm->classes * tm->clauses;
   tm->simhash.n_chunks = tm->input_chunks;
@@ -1197,41 +1267,36 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, 
   tm->simhash.actions = tm->actions;
 }
 
-static inline void tk_tsetlin_load_classifier (lua_State *L, FILE *fh, bool read_state, bool has_state)
+static inline void tk_tsetlin_load_classifier (lua_State *L, FILE *fh)
 {
-  tk_tsetlin_t *tm = tk_tsetlin_alloc_classifier(L, read_state);
-  _tk_tsetlin_load_classifier(L, tm, fh, read_state, has_state);
+  tk_tsetlin_t *tm = tk_tsetlin_alloc_classifier(L, true);
+  _tk_tsetlin_load_classifier(L, tm, fh);
 }
 
-static inline void tk_tsetlin_load_encoder (lua_State *L, FILE *fh, bool read_state, bool has_state)
+static inline void tk_tsetlin_load_encoder (lua_State *L, FILE *fh)
 {
-  tk_tsetlin_t *tm = tk_tsetlin_alloc_encoder(L, read_state);
-  _tk_tsetlin_load_classifier(L, tm, fh, read_state, has_state);
+  tk_tsetlin_t *tm = tk_tsetlin_alloc_encoder(L, true);
+  _tk_tsetlin_load_classifier(L, tm, fh);
 }
 
 // TODO: Merge malloc/assignment logic from load_* and create_* to reduce
 // chances for coding errors
 static inline int tk_tsetlin_load (lua_State *L)
 {
-  lua_settop(L, 3);
+  lua_settop(L, 2);
   size_t len;
   const char *data = luaL_checklstring(L, 1, &len);
   bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && lua_toboolean(L, 2);
   FILE *fh = isstr ? tk_lua_fmemopen(L, (char *) data, len, "r") : tk_lua_fopen(L, data, "r");
-  bool read_state = lua_toboolean(L, 3);
   tk_tsetlin_type_t type;
-  bool has_state;
   tk_lua_fread(L, &type, sizeof(type), 1, fh);
-  tk_lua_fread(L, &has_state, sizeof(bool), 1, fh);
-  if (read_state && !has_state)
-    luaL_error(L, "read_state is true but state not persisted");
   switch (type) {
     case TM_CLASSIFIER:
-      tk_tsetlin_load_classifier(L, fh, read_state, has_state);
+      tk_tsetlin_load_classifier(L, fh);
       tk_lua_fclose(L, fh);
       return 1;
     case TM_ENCODER:
-      tk_tsetlin_load_encoder(L, fh, read_state, has_state);
+      tk_tsetlin_load_encoder(L, fh);
       tk_lua_fclose(L, fh);
       return 1;
     default:

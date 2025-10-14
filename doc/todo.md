@@ -6,8 +6,6 @@
   optimizations: exhaustive, binary search, and the parameter sampling mechanism
   in tm.optimize
 
-- Abstract RCM tiling from graph.adjacency to separate graph.rcm or tile.rcm
-
 - All of the evaluator functions should accept an index in the same argument
   position as codes when those codes are used as-is for computation (e.g.
   entropy currently takes codes, but it very well could take idx if they're
