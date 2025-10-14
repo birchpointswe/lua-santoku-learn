@@ -65,6 +65,7 @@ static inline void tk_tch_worker(void *dp, int sig)
             updated = false;
             data->steps++;
 
+
             for (uint64_t si = 0; si < n_nodes; si++) {
               int64_t i = node_order->a[si];
               int64_t row_start = state->adj_offset->a[i];
@@ -80,6 +81,7 @@ static inline void tk_tch_worker(void *dp, int sig)
                 updated = true;
               }
             }
+
           } while (updated);
         }
       }
