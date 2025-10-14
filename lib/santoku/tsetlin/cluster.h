@@ -227,7 +227,7 @@ static inline void tk_agglo_cluster_merge (
 static inline bool tk_agglo_is_core(tk_cvec_t *is_core, int64_t hood_idx, uint64_t n_hoods) {
   if (!is_core || hood_idx < 0 || hood_idx >= (int64_t)n_hoods)
     return false;
-  return (is_core->a[TK_CVEC_BITS_BYTE(hood_idx)] & (1u << TK_CVEC_BITS_BIT(hood_idx))) != 0;
+  return ((uint8_t) is_core->a[TK_CVEC_BITS_BYTE(hood_idx)] & (1u << TK_CVEC_BITS_BIT(hood_idx))) != 0;
 }
 
 static inline int64_t tk_agglo_find_nearest_core_cluster(

@@ -83,7 +83,7 @@ local cfg; cfg = {
   },
   tm = {
     clauses = { def = 8, min = 8, max = 128, int = true, log = true, pow2 = true },
-    clause_tolerance = { def = 8, min = 8, max = 256, int = true, log = true, pow2 = true },
+    clause_tolerance =  { def = 8, min = 8, max = 256, int = true, log = true, pow2 = true },
     clause_maximum = { def = 8, min = 8, max = 256, int = true, log = true, pow2 = true },
     target = { def = 4, min = 2, max = 256, int = true, log = true, pow2 = true },
     specificity = { def = 1000, min = 2, max = 4000, int = true, log = true },
@@ -95,7 +95,8 @@ local cfg; cfg = {
     iterations = 20,
   },
   training = {
-    iterations = 100,
+    patience = 20,
+    iterations = 200,
   },
   threads = nil,
 }
@@ -297,6 +298,7 @@ test("tsetlin", function ()
       keep_prefix = cfg.bits.keep_prefix,
       start_prefix = cfg.bits.start_prefix,
       tolerance = cfg.bits.sffs_tolerance,
+      weighted = cfg.eval.bits_weighted,
       metric = cfg.eval.bits_metric,
       threads = cfg.threads,
       each = function (bit, gain, score, action)
@@ -327,6 +329,7 @@ test("tsetlin", function ()
     offsets = train.adj_offsets,
     neighbors = train.adj_neighbors,
     weights = train.adj_weights,
+    weighted = cfg.eval.retrieval_weighted,
     metric = cfg.eval.retrieval_metric,
     threads = cfg.threads,
     each = function (acc)
@@ -335,11 +338,11 @@ test("tsetlin", function ()
         d, dd, acc.margin, acc.score)
     end
   })
-  local best_score, best_idx = train.retrieval_scores:max()
+  local best_score, best_idx = cfg.eval.retrieval(train.retrieval_scores)
   str.printf("Best\n  Margin: %d | Score: %+.6f\n", best_idx, best_score)
   collectgarbage("collect")
 
-  print("Retrieval stats (sampled binary adjacency)")
+  print("Retrieval stats (class-label adjacency)")
   train.retrieval_scores = eval.optimize_retrieval({
     codes = train.codes_spectral,
     n_dims = dataset.n_hidden,
@@ -347,6 +350,7 @@ test("tsetlin", function ()
     offsets = train.adj_sampled_offsets,
     neighbors = train.adj_sampled_neighbors,
     weights = train.adj_sampled_weights,
+    weighted = cfg.eval.retrieval_weighted,
     metric = cfg.eval.retrieval_metric,
     threads = cfg.threads,
     each = function (acc)
@@ -355,7 +359,7 @@ test("tsetlin", function ()
         d, dd, acc.margin, acc.score)
     end
   })
-  local best_score, best_idx = train.retrieval_scores:max()
+  local best_score, best_idx = cfg.eval.retrieval(train.retrieval_scores)
   str.printf("Best\n  Margin: %d | Score: %+.6f\n", best_idx, best_score)
   collectgarbage("collect")
 
@@ -454,6 +458,7 @@ test("tsetlin", function ()
       search_rounds = cfg.search.rounds,
       search_trials = cfg.search.trials,
       search_iterations = cfg.search.iterations,
+      final_patience = cfg.training.patience,
       final_iterations = cfg.training.iterations,
       threads = cfg.threads,
       search_metric = function (t)
@@ -474,13 +479,14 @@ test("tsetlin", function ()
         str.printi("    Train | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)", train.accuracy_predicted)
         if is_final then
           local sth_predicted = t:predict(sth_problems, sth_n, cfg.threads)
-          train.retrieval_scores = eval.optimize_retrieval({
+          train.retrieval_scores_predicted = eval.optimize_retrieval({
             codes = sth_predicted,
             n_dims = dataset.n_hidden,
             ids = sth_ids,
-            offsets = train.adj_offsets,
-            weights = train.adj_weights,
-            neighbors = train.adj_neighbors,
+            offsets = train.adj_sampled_offsets,
+            weights = train.adj_sampled_weights,
+            neighbors = train.adj_sampled_neighbors,
+            weighted = cfg.eval.retrieval_weighted,
             metric = cfg.eval.retrieval_metric,
             threads = cfg.threads,
           })
@@ -489,25 +495,16 @@ test("tsetlin", function ()
             codes = test_predicted,
             n_dims = dataset.n_hidden,
             ids = test_ids,
-            offsets = train.adj_sampled_offsets,
-            weights = train.adj_sampled_weights,
-            neighbors = train.adj_sampled_neighbors,
-            metric = cfg.eval.retrieval_metric,
-            threads = cfg.threads,
-          })
-          train.retrieval_scores = eval.optimize_retrieval({
-            codes = test_predicted,
-            n_dims = dataset.n_hidden,
-            ids = test_ids,
             offsets = test.adj_sampled_offsets,
             weights = test.adj_sampled_weights,
             neighbors = test.adj_sampled_neighbors,
+            weighted = cfg.eval.retrieval_weighted,
             metric = cfg.eval.retrieval_metric,
             threads = cfg.threads,
           })
-          str.printi("    Codes  | Margin: %.2f#(2) | Score: %+.2f#(1)", { train.retrieval_scores:max() })
-          str.printi("    Train  | Margin: %.2f#(2) | Score: %+.2f#(1)", { train.retrieval_scores_predicted:max() })
-          str.printi("    Test   | Margin: %.2f#(2) | Score: %+.2f#(1)", { test.retrieval_scores:max() })
+          str.printi("    Codes  | Margin: %.2f#(2) | Score: %+.2f#(1)", { cfg.eval.retrieval(train.retrieval_scores) })
+          str.printi("    Train  | Margin: %.2f#(2) | Score: %+.2f#(1)", { cfg.eval.retrieval(train.retrieval_scores_predicted) })
+          str.printi("    Test   | Margin: %.2f#(2) | Score: %+.2f#(1)", { cfg.eval.retrieval(test.retrieval_scores_predicted) })
           print()
         end
       end,
@@ -531,6 +528,7 @@ test("tsetlin", function ()
       knn_mutual = cfg.clustering.knn_mutual,
       min_pts = cfg.clustering.min_pts,
       assign_noise = true,
+      weighted = cfg.eval.cluster_weighted,
       metric = cfg.eval.cluster_metric,
       threads = cfg.threads,
       each = function (acc)
@@ -550,6 +548,7 @@ test("tsetlin", function ()
       --     offsets = train.adj_offsets,
       --     neighbors = train.adj_neighbors,
       --     weights = train.adj_weights,
+      --     weighted = cfg.eval.cluster_weighted,
       --     metric = cfg.eval.cluster_metric,
       --     threads = cfg.threads
       --   })
@@ -560,10 +559,10 @@ test("tsetlin", function ()
     end
     collectgarbage("collect")
 
-    print("Clustering (codes) (sampled binary adjacency)")
+    print("Clustering (codes) (class-label adjacency)")
     local codes_stats = eval.optimize_clustering({
       index = train.idx_spectral,
-      ids = train.ids_spectral,
+      ids = train.adj_sampled_ids,
       offsets = train.adj_sampled_offsets,
       neighbors = train.adj_sampled_neighbors,
       weights = train.adj_sampled_weights,
@@ -573,6 +572,7 @@ test("tsetlin", function ()
       knn_mutual = cfg.clustering.knn_mutual,
       min_pts = cfg.clustering.min_pts,
       assign_noise = true,
+      weighted = cfg.eval.cluster_weighted,
       metric = cfg.eval.cluster_metric,
       threads = cfg.threads,
       each = function (acc)
@@ -597,19 +597,23 @@ test("tsetlin", function ()
       idx_train:add(train.encoder:predict(sth_problems, sth_n, cfg.threads), sth_ids)
       local train_stats = eval.optimize_clustering({
         index = idx_train,
-        ids = train.ids_spectral,
+        ids = train.adj_sampled_ids,
+        offsets = train.adj_sampled_offsets,
+        neighbors = train.adj_sampled_neighbors,
+        weights = train.adj_sampled_weights,
         linkage = cfg.clustering.linkage,
         assign_noise = true,
         knn = cfg.clustering.knn,
         knn_min = cfg.clustering.knn_min,
         knn_mutual = cfg.clustering.knn_mutual,
         min_pts = cfg.clustering.min_pts,
+        weighted = cfg.eval.cluster_weighted,
         metric = cfg.eval.cluster_metric,
         threads = cfg.threads,
         each = function (acc)
           local d, dd = stopwatch()
-          str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.6f | Clusters: %d\n",
-            d, dd, acc.margin, acc.score, acc.n_clusters)
+          str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.6f | Clusters: %d\n",
+            d, dd, acc.step, acc.score, acc.n_clusters)
         end
       })
       if train_stats.scores then
@@ -626,23 +630,27 @@ test("tsetlin", function ()
       idx_test:add(train.encoder:predict(test_problems, test.n, cfg.threads), test_ids)
       local test_stats = eval.optimize_clustering({
         index = idx_test,
-        ids = test.ids,
+        ids = test.adj_sampled_ids,
+        offsets = test.adj_sampled_offsets,
+        neighbors = test.adj_sampled_neighbors,
+        weights = test.adj_sampled_weights,
         linkage = cfg.clustering.linkage,
         assign_noise = true,
         knn = cfg.clustering.knn,
         knn_min = cfg.clustering.knn_min,
         knn_mutual = cfg.clustering.knn_mutual,
         min_pts = cfg.clustering.min_pts,
+        weighted = cfg.eval.cluster_weighted,
         metric = cfg.eval.cluster_metric,
         threads = cfg.threads,
         each = function (acc)
           local d, dd = stopwatch()
-          str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.6f | Clusters: %d\n",
-            d, dd, acc.margin, acc.score, acc.n_clusters)
+          str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.6f | Clusters: %d\n",
+            d, dd, acc.step, acc.score, acc.n_clusters)
         end
       })
       if test_stats.scores then
-        local best_step, best_score = cfg.eval.clustering(test_stats.scores)
+        local best_score, best_step = cfg.eval.clustering(test_stats.scores)
         local best_n_clusters = test_stats.n_clusters:get(best_step)
         str.printf("Best\n  Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
       end

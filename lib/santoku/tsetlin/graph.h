@@ -1421,6 +1421,26 @@ static inline void tk_graph_adj_mst (
     }
   }
 
+  // Sort each adjacency list by weight descending
+  for (uint64_t i = 0; i < offset->n - 1; i++) {
+    if (adj_lists[i] && adj_lists[i]->n > 0) {
+      tk_rvec_t *temp = tk_rvec_create(0, 0, 0, 0);
+      if (!temp) goto cleanup;
+      for (uint64_t j = 0; j < adj_lists[i]->n; j++) {
+        if (tk_rvec_push(temp, tk_rank(adj_lists[i]->a[j], weight_lists[i]->a[j])) != 0) {
+          tk_rvec_destroy(temp);
+          goto cleanup;
+        }
+      }
+      tk_rvec_desc(temp, 0, temp->n);
+      for (uint64_t j = 0; j < temp->n; j++) {
+        adj_lists[i]->a[j] = temp->a[j].i;
+        weight_lists[i]->a[j] = temp->a[j].d;
+      }
+      tk_rvec_destroy(temp);
+    }
+  }
+
   for (uint64_t i = 0; i < offset->n - 1; i++) {
     if (adj_lists[i]) {
       for (uint64_t j = 0; j < adj_lists[i]->n; j++) {

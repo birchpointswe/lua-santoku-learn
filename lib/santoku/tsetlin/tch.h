@@ -70,13 +70,11 @@ static inline void tk_tch_worker(void *dp, int sig)
               int64_t row_start = state->adj_offset->a[i];
               int64_t row_end = state->adj_offset->a[i + 1];
               double delta = 0.0;
-
               for (int64_t jj = row_start; jj < row_end; jj++) {
                 int64_t j = state->adj_data->a[jj];
                 double weight = state->adj_weights->a[jj];
                 delta += bitvec[i] * bitvec[j] * weight;
               }
-
               if (delta < 0.0) {
                 bitvec[i] = -bitvec[i];
                 updated = true;
@@ -125,7 +123,6 @@ static inline void tk_tch_refine (
 ) {
   uint64_t n_nodes = uids->n;
   uint64_t bytes_per_sample = TK_CVEC_BITS_BYTES(n_dims);
-
   int *bitvecs = tk_malloc(L, n_dims * n_nodes * sizeof(int));
   for (uint64_t s = 0; s < n_nodes; s++) {
     for (uint64_t f = 0; f < n_dims; f++) {
@@ -135,7 +132,6 @@ static inline void tk_tch_refine (
       bitvecs[f * n_nodes + s] = bit_set ? +1 : -1;
     }
   }
-
   tk_cvec_zero(codes);
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_tch_worker);
   tk_tch_state_t state = {
@@ -151,7 +147,6 @@ static inline void tk_tch_refine (
     .i_each = i_each,
     .L = L
   };
-
   tk_tch_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_tch_thread_t));
   for (unsigned int i = 0; i < n_threads; i++) {
     threads[i].state = &state;
@@ -159,39 +154,26 @@ static inline void tk_tch_refine (
     threads[i].steps = 0;
     pool->threads[i].data = &threads[i];
   }
-
-  // Each thread gets complete bytes to avoid race conditions
   uint64_t n_bytes = (n_dims + 7) / 8;
-  for (unsigned int i = 0; i < n_threads; i++) {
+  for (unsigned int i = 0; i < n_threads; i++)
     tk_thread_range(i, n_threads, n_bytes, &threads[i].byte_first, &threads[i].byte_last);
-  }
   tk_threads_signal(pool, TK_TCH_OPTIMIZE_BITS, 0);
-
-  for (unsigned int i = 0; i < n_threads; i++) {
+  for (unsigned int i = 0; i < n_threads; i++)
     tk_thread_range(i, n_threads, n_nodes, &threads[i].first, &threads[i].last);
-  }
   tk_threads_signal(pool, TK_TCH_CONVERT_TO_BINARY, 0);
-
-  // Calculate total_steps before cleanup
   uint64_t total_steps = 0;
   if (i_each >= 0) {
     for (unsigned int i = 0; i < n_threads; i++) {
       total_steps += threads[i].steps;
     }
   }
-
-  // Cleanup malloc'd buffers before any Lua API calls that can throw
   free(bitvecs);
   free(threads);
-
-  // Now safe to call Lua callback (pool is Lua-managed and will be GC'd on throw)
   if (i_each >= 0) {
     lua_pushvalue(L, i_each);
     lua_pushinteger(L, (int64_t) total_steps);
     lua_call(L, 1, 0);
   }
-
-  // Clean up the thread pool
   lua_pop(L, 1);
 }
 
