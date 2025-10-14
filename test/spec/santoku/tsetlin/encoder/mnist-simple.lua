@@ -37,6 +37,7 @@ local cfg = {
   },
   eval = {
     anchors = 8,
+    retrieval_metric = "correlation",
     cluster_metric = "correlation",
     tolerance = 1e-3,
   },
@@ -148,7 +149,7 @@ test("tsetlin", function ()
     offsets = dataset.adj_sampled_offsets,
     neighbors = dataset.adj_sampled_neighbors,
     weights = dataset.adj_sampled_weights,
-    metric = "correlation",
+    metric = cfg.eval.retrieval_metric,
     threads = cfg.threads,
     each = function (acc)
       local d, dd = stopwatch()

@@ -3,6 +3,7 @@ local num = require("santoku.num")
 local str = require("santoku.string")
 local err = require("santoku.error")
 local rand = require("santoku.random")
+local cvec = require("santoku.cvec")
 
 local M = {}
 
@@ -94,6 +95,8 @@ M.optimize = function (args, typ)
 
   local patience = args.search_patience or 0
   local use_early_stop = patience > 0
+  local final_patience = args.final_patience or 0
+  local use_final_early_stop = final_patience > 0
   local rounds = args.search_rounds or 3
   local trials = args.search_trials or 10
   local iters_search = args.search_iterations or 10
@@ -277,6 +280,11 @@ M.optimize = function (args, typ)
       specificity = best_params.specificity,
     })
 
+    local best_final_score = -num.huge
+    local checkpoint = use_final_early_stop and cvec.create(0) or nil
+    local has_checkpoint = false
+    local epochs_since_improve = 0
+
     encoder:train({
       sentences  = args.sentences,
       codes = args.codes,
@@ -284,12 +292,31 @@ M.optimize = function (args, typ)
       iterations = final_iters,
       threads = args.threads,
       each = function (epoch)
+        local cb_result = nil
         if each_cb then
-          local _, metrics = metric_fn(encoder)
-          return each_cb(encoder, true, metrics, best_params, epoch)
+          local score, metrics = metric_fn(encoder)
+          cb_result = each_cb(encoder, true, metrics, best_params, epoch)
+          if score > best_final_score + 1e-8 then
+            best_final_score = score
+            epochs_since_improve = 0
+            if use_final_early_stop then
+              encoder:checkpoint(checkpoint)
+              has_checkpoint = true
+            end
+          else
+            epochs_since_improve = epochs_since_improve + 1
+          end
+          if use_final_early_stop and epochs_since_improve >= final_patience then
+            return false
+          end
         end
+        return cb_result
       end,
     })
+
+    if use_final_early_stop and has_checkpoint then
+      encoder:restore(checkpoint)
+    end
 
     collectgarbage("collect")
     return encoder
@@ -307,6 +334,11 @@ M.optimize = function (args, typ)
       specificity = best_params.specificity,
     })
 
+    local best_final_score = -num.huge
+    local checkpoint = use_final_early_stop and cvec.create(0) or nil
+    local has_checkpoint = false
+    local epochs_since_improve = 0
+
     classifier:train({
       samples = args.samples,
       problems = args.problems,
@@ -314,12 +346,31 @@ M.optimize = function (args, typ)
       iterations = final_iters,
       threads = args.threads,
       each = function (epoch)
+        local cb_result = nil
         if each_cb then
-          local _, metrics = metric_fn(classifier)
-          return each_cb(classifier, true, metrics, best_params, epoch)
+          local score, metrics = metric_fn(classifier)
+          cb_result = each_cb(classifier, true, metrics, best_params, epoch)
+          if score > best_final_score + 1e-8 then
+            best_final_score = score
+            epochs_since_improve = 0
+            if use_final_early_stop then
+              classifier:checkpoint(checkpoint)
+              has_checkpoint = true
+            end
+          else
+            epochs_since_improve = epochs_since_improve + 1
+          end
+          if use_final_early_stop and epochs_since_improve >= final_patience then
+            return false
+          end
         end
+        return cb_result
       end,
     })
+
+    if use_final_early_stop and has_checkpoint then
+      classifier:restore(checkpoint)
+    end
 
     collectgarbage("collect")
     return classifier

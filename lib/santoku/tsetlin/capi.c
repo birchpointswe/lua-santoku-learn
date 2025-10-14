@@ -340,6 +340,8 @@ static inline int tk_tsetlin_train (lua_State *);
 static inline int tk_tsetlin_predict (lua_State *);
 static inline int tk_tsetlin_destroy (lua_State *L);
 static inline int tk_tsetlin_persist (lua_State *);
+static inline int tk_tsetlin_checkpoint (lua_State *);
+static inline int tk_tsetlin_restore (lua_State *);
 static inline int tk_tsetlin_type (lua_State *);
 
 static luaL_Reg tk_tsetlin_mt_fns[] =
@@ -348,6 +350,8 @@ static luaL_Reg tk_tsetlin_mt_fns[] =
   { "predict", tk_tsetlin_predict },
   { "destroy", tk_tsetlin_destroy },
   { "persist", tk_tsetlin_persist },
+  { "checkpoint", tk_tsetlin_checkpoint },
+  { "restore", tk_tsetlin_restore },
   { "type", tk_tsetlin_type },
   { NULL, NULL }
 };
@@ -1127,6 +1131,41 @@ static inline int tk_tsetlin_persist (lua_State *L)
       return 0;
     }
   }
+}
+
+static inline int tk_tsetlin_checkpoint (lua_State *L)
+{
+  lua_settop(L, 2);
+  tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
+  tk_cvec_t *checkpoint = tk_cvec_peek(L, 2, "checkpoint");
+
+  size_t size = tm->action_chunks * sizeof(tk_bits_t);
+  if (tk_cvec_ensure(checkpoint, size) != 0)
+    luaL_error(L, "failed to resize checkpoint buffer");
+  checkpoint->n = size;
+
+  // Copy actions into the cvec
+  memcpy(checkpoint->a, tm->actions, size);
+
+  return 0;
+}
+
+static inline int tk_tsetlin_restore (lua_State *L)
+{
+  lua_settop(L, 2);
+  tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
+  tk_cvec_t *checkpoint = tk_cvec_peek(L, 2, "checkpoint");
+
+  // Validate size matches
+  size_t expected_size = tm->action_chunks * sizeof(tk_bits_t);
+  if (checkpoint->n != expected_size)
+    luaL_error(L, "checkpoint size mismatch: expected %zu bytes, got %zu",
+               expected_size, checkpoint->n);
+
+  // Restore actions from checkpoint
+  memcpy(tm->actions, checkpoint->a, expected_size);
+
+  return 0;
 }
 
 static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, FILE *fh, bool read_state, bool has_state)

@@ -28,7 +28,7 @@ local cfg = {
   },
   feature_selection = {
     algo = "chi2",
-    top_k = 8192,
+    top_k = 2048,
   },
   tm = {
     classes = 2,

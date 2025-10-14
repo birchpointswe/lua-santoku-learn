@@ -810,7 +810,11 @@ static inline int tm_adjacency (lua_State *L)
     tk_ivec_t *neighbors = tk_iuset_keys(L, graph->adj->a[old_idx]);
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
     lua_pop(L, 1);
-    tk_ivec_asc(neighbors, 0, neighbors->n);
+
+    // Build (neighbor_idx, weight) pairs and sort by weight descending
+    tk_rvec_t *neighbor_weights = tk_rvec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
+    lua_pop(L, 1);
     for (uint64_t j = 0; j < neighbors->n; j++) {
       int64_t neighbor_old_idx = neighbors->a[j];
       uint32_t khi = tk_iumap_get(selected_set, neighbor_old_idx);
@@ -818,117 +822,47 @@ static inline int tm_adjacency (lua_State *L)
         int64_t neighbor_new_idx = tk_iumap_val(selected_set, khi);
         int64_t v_uid = graph->uids->a[neighbor_old_idx];
         double w = tk_graph_get_weight(graph, u_uid, v_uid);
-        if (tk_ivec_push(tmp_data, neighbor_new_idx) != 0) {
+        if (tk_rvec_push(neighbor_weights, tk_rank(neighbor_new_idx, w)) != 0) {
           tk_lua_verror(L, 2, "graph_adj", "allocation failed");
           return 0;
         }
-        if (tk_dvec_push(tmp_weights, w) != 0) {
-          tk_lua_verror(L, 2, "graph_adj", "allocation failed");
-          return 0;
-        }
+      }
+    }
+    tk_rvec_desc(neighbor_weights, 0, neighbor_weights->n);
+    for (uint64_t j = 0; j < neighbor_weights->n; j++) {
+      if (tk_ivec_push(tmp_data, neighbor_weights->a[j].i) != 0) {
+        tk_lua_verror(L, 2, "graph_adj", "allocation failed");
+        return 0;
+      }
+      if (tk_dvec_push(tmp_weights, neighbor_weights->a[j].d) != 0) {
+        tk_lua_verror(L, 2, "graph_adj", "allocation failed");
+        return 0;
       }
     }
     tmp_offset->a[i + 1] = (int64_t) tmp_data->n;
   }
 
   tmp_offset->n = n_nodes + 1;
-  tk_ivec_t *old_to_new = tk_ivec_create(L, n_nodes, 0, 0);
-  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
-  lua_pop(L, 1);
-  tk_ivec_t *new_to_old = tk_ivec_create(L, n_nodes, 0, 0);
-  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
-  lua_pop(L, 1);
-  for (uint64_t i = 0; i < n_nodes; i++)
-    old_to_new->a[i] = -1;
-  int64_t min_deg = INT64_MAX;
-  int64_t start = 0;
-  for (uint64_t i = 0; i < n_nodes; i++) {
-    int64_t deg = tmp_offset->a[i + 1] - tmp_offset->a[i];
-    if (deg < min_deg && deg > 0) {
-      min_deg = deg;
-      start = (int64_t) i;
-    }
-  }
-  tk_ivec_t *queue = tk_ivec_create(L, 0, 0, 0);
-  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
-  lua_pop(L, 1);
-  uint64_t new_idx = 0;
 
-  if (tk_ivec_push(queue, start) != 0) {
-    tk_lua_verror(L, 2, "graph_adj", "allocation failed");
-    return 0;
-  }
-  old_to_new->a[start] = (int64_t) new_idx;
-  new_to_old->a[new_idx] = start;
-  new_idx++;
-
-  for (uint64_t q_idx = 0; q_idx < queue->n; q_idx++) {
-    int64_t u = queue->a[q_idx];
-    int64_t edge_start = tmp_offset->a[u];
-    int64_t edge_end = tmp_offset->a[u + 1];
-    tk_pvec_t *neighbors = tk_pvec_create(L, 0, 0, 0);
-    tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
-    lua_pop(L, 1);
-    for (int64_t e = edge_start; e < edge_end; e++) {
-      int64_t v = tmp_data->a[e];
-      if (old_to_new->a[v] == -1) {
-        int64_t deg = tmp_offset->a[v + 1] - tmp_offset->a[v];
-        if (tk_pvec_push(neighbors, tk_pair(v, deg)) != 0) {
-          tk_lua_verror(L, 2, "graph_adj", "allocation failed");
-          return 0;
-        }
-      }
-    }
-    tk_pvec_asc(neighbors, 0, neighbors->n);
-    for (uint64_t i = 0; i < neighbors->n; i++) {
-      int64_t v = neighbors->a[i].i;
-      old_to_new->a[v] = (int64_t) new_idx;
-      new_to_old->a[new_idx] = v;
-      new_idx++;
-      if (tk_ivec_push(queue, v) != 0) {
-        tk_lua_verror(L, 2, "graph_adj", "allocation failed");
-        return 0;
-      }
-    }
-  }
-
-  for (uint64_t i = 0; i < n_nodes; i++) {
-    if (old_to_new->a[i] == -1) {
-      old_to_new->a[i] = (int64_t) new_idx;
-      new_to_old->a[new_idx] = (int64_t) i;
-      new_idx++;
-    }
-  }
-  for (uint64_t i = 0; i < n_nodes / 2; i++) {
-    int64_t tmp = new_to_old->a[i];
-    new_to_old->a[i] = new_to_old->a[n_nodes - 1 - i];
-    new_to_old->a[n_nodes - 1 - i] = tmp;
-  }
-  for (uint64_t new_i = 0; new_i < n_nodes; new_i++) {
-    int64_t old_i = new_to_old->a[new_i];
-    old_to_new->a[old_i] = (int64_t) new_i;
-  }
-  tk_ivec_t *final_uids = tk_ivec_create(L, n_nodes, 0, 0); // uids
-  tk_ivec_t *final_offset = tk_ivec_create(L, n_nodes + 1, 0, 0); // uids offset
-  tk_ivec_t *final_data = tk_ivec_create(L, tmp_data->n, 0, 0);   // uids offset data
-  tk_dvec_t *final_weights = tk_dvec_create(L, tmp_weights->n, 0, 0); // uids offset data weights
+  // Use natural ordering (no RCM)
+  tk_ivec_t *final_uids = tk_ivec_create(L, n_nodes, 0, 0);
+  tk_ivec_t *final_offset = tk_ivec_create(L, n_nodes + 1, 0, 0);
+  tk_ivec_t *final_data = tk_ivec_create(L, tmp_data->n, 0, 0);
+  tk_dvec_t *final_weights = tk_dvec_create(L, tmp_weights->n, 0, 0);
 
   final_offset->a[0] = 0;
   int64_t write = 0;
-  for (uint64_t new_i = 0; new_i < n_nodes; new_i++) {
-    int64_t old_i = new_to_old->a[new_i];
-    int64_t original_idx = selected_nodes->a[old_i];
-    final_uids->a[new_i] = graph->uids->a[original_idx];
-    int64_t edge_start = tmp_offset->a[old_i];
-    int64_t edge_end = tmp_offset->a[old_i + 1];
+  for (uint64_t i = 0; i < n_nodes; i++) {
+    int64_t original_idx = selected_nodes->a[i];
+    final_uids->a[i] = graph->uids->a[original_idx];
+    int64_t edge_start = tmp_offset->a[i];
+    int64_t edge_end = tmp_offset->a[i + 1];
     for (int64_t e = edge_start; e < edge_end; e++) {
-      int64_t old_neighbor = tmp_data->a[e];
-      int64_t new_neighbor = old_to_new->a[old_neighbor];
-      final_data->a[write] = new_neighbor;
+      final_data->a[write] = tmp_data->a[e];
       final_weights->a[write] = tmp_weights->a[e];
       write++;
     }
-    final_offset->a[new_i + 1] = write;
+    final_offset->a[i + 1] = write;
   }
 
   final_uids->n = n_nodes;
@@ -938,7 +872,7 @@ static inline int tm_adjacency (lua_State *L)
   tm_graph_destroy_internal(graph);
   tk_lua_replace(L, 1, 4);
   lua_settop(L, 4);
-  // lua_gc(L, LUA_GCCOLLECT, 0);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 4;
 }
 
@@ -1012,7 +946,7 @@ static inline int tm_adj_pairs (lua_State *L)
   tk_ivec_register(L, offsets);
   tk_ivec_register(L, neighbors);
   tk_dvec_register(L, weights);
-  // lua_gc(L, LUA_GCCOLLECT, 0);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 4;
 }
 
@@ -1035,7 +969,7 @@ static inline int tm_star_hoods (lua_State *L)
     tk_lua_verror(L, 2, "star_hoods", "failed to convert hoods");
   lua_settop(L, 0);
   tk_pvec_register(L, pairs);
-  // lua_gc(L, LUA_GCCOLLECT, 0);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -1060,7 +994,7 @@ static inline int tm_anchor_pairs (lua_State *L)
 
   lua_settop(L, 0);
   tk_pvec_register(L, pairs);
-  // lua_gc(L, LUA_GCCOLLECT, 0);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -1086,7 +1020,7 @@ static inline int tm_random_pairs (lua_State *L)
 
   lua_settop(L, 0);
   tk_pvec_register(L, pairs);
-  // lua_gc(L, LUA_GCCOLLECT, 0);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -1115,7 +1049,7 @@ static inline int tm_multiclass_pairs (lua_State *L)
   lua_settop(L, 1);
   tk_pvec_register(L, pos);
   tk_pvec_register(L, neg);
-  // lua_gc(L, LUA_GCCOLLECT, 0);
+  lua_gc(L, LUA_GCCOLLECT, 0);
   return 3;
 }
 

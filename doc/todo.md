@@ -1,5 +1,7 @@
 # Now
 
+- Consider eliminating (for now) single-linkage agglo. Too slow?
+
 - Generalize tm.optimize exploration to an explore module that covers various
   optimizations: exhaustive, binary search, and the parameter sampling mechanism
   in tm.optimize
