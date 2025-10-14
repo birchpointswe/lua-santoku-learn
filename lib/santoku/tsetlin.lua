@@ -143,6 +143,35 @@ M.optimize = function (args, typ)
     best_params = sample_params()
   else
 
+    -- Create reusable TM for search trials
+    local search_tm
+    if typ == "encoder" then
+      search_tm = M.encoder({
+        visible = args.visible,
+        hidden = args.hidden,
+        clauses = 8,
+        clause_tolerance = 8,
+        clause_maximum = 8,
+        target = 4,
+        specificity = 1000,
+        reusable = true,
+      })
+    elseif typ == "classifier" then
+      search_tm = M.classifier({
+        features = args.features,
+        classes = args.classes,
+        negative = args.negative,
+        clauses = 8,
+        clause_tolerance = 8,
+        clause_maximum = 8,
+        target = 4,
+        specificity = 1000,
+        reusable = true,
+      })
+    else
+      err.error("unexpected type to optimize", typ)
+    end
+
     for r = 1, rounds do
 
       local seen = {}
@@ -183,55 +212,30 @@ M.optimize = function (args, typ)
             return cb_result
           end
 
+          search_tm:reconfigure(params)
+
           if typ == "encoder" then
-
-            local encoder = M.encoder({
-              visible = args.visible,
-              hidden = args.hidden,
-              clauses = params.clauses,
-              clause_tolerance = params.clause_tolerance,
-              clause_maximum = params.clause_maximum,
-              target = params.target,
-              specificity = params.specificity,
-            })
-
-            encoder:train({
+            search_tm:train({
               sentences  = args.sentences,
               codes = args.codes,
               samples = args.samples,
               iterations = iters_search,
               threads = args.threads,
               each = function (epoch)
-                return each(epoch, encoder)
+                return each(epoch, search_tm)
               end,
             })
-
           elseif typ == "classifier" then
-
-            local classifier = M.classifier({
-              features = args.features,
-              classes = args.classes,
-              negative = args.negative,
-              clauses = params.clauses,
-              clause_tolerance = params.clause_tolerance,
-              clause_maximum = params.clause_maximum,
-              target = params.target,
-              specificity = params.specificity,
-            })
-
-            classifier:train({
+            search_tm:train({
               samples = args.samples,
               problems = args.problems,
               solutions = args.solutions,
               iterations = iters_search,
               threads = args.threads,
               each = function (epoch)
-                return each(epoch, classifier)
+                return each(epoch, search_tm)
               end,
             })
-
-          else
-            err.error("unexpected type to optimize", typ)
           end
 
           -- Use the last score (where training ended) rather than best score
@@ -264,6 +268,8 @@ M.optimize = function (args, typ)
 
       collectgarbage("collect")
     end
+
+    search_tm:destroy()
   end
 
   local final_iters = args.final_iterations or (iters_search * 10)
@@ -281,6 +287,7 @@ M.optimize = function (args, typ)
     })
 
     local best_final_score = -num.huge
+    local best_final_metrics = nil
     local checkpoint = use_final_early_stop and cvec.create(0) or nil
     local has_checkpoint = false
     local epochs_since_improve = 0
@@ -298,6 +305,7 @@ M.optimize = function (args, typ)
           cb_result = each_cb(encoder, true, metrics, best_params, epoch)
           if score > best_final_score + 1e-8 then
             best_final_score = score
+            best_final_metrics = metrics
             epochs_since_improve = 0
             if use_final_early_stop then
               encoder:checkpoint(checkpoint)
@@ -319,7 +327,7 @@ M.optimize = function (args, typ)
     end
 
     collectgarbage("collect")
-    return encoder
+    return encoder, best_final_metrics
 
   elseif typ == "classifier" then
 
@@ -335,6 +343,7 @@ M.optimize = function (args, typ)
     })
 
     local best_final_score = -num.huge
+    local best_final_metrics = nil
     local checkpoint = use_final_early_stop and cvec.create(0) or nil
     local has_checkpoint = false
     local epochs_since_improve = 0
@@ -352,6 +361,7 @@ M.optimize = function (args, typ)
           cb_result = each_cb(classifier, true, metrics, best_params, epoch)
           if score > best_final_score + 1e-8 then
             best_final_score = score
+            best_final_metrics = metrics
             epochs_since_improve = 0
             if use_final_early_stop then
               classifier:checkpoint(checkpoint)
@@ -373,7 +383,7 @@ M.optimize = function (args, typ)
     end
 
     collectgarbage("collect")
-    return classifier
+    return classifier, best_final_metrics
 
   else
     err.error("unexpected type to optimize", typ)
