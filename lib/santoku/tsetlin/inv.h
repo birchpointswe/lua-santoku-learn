@@ -3,6 +3,7 @@
 
 #include <assert.h>
 #include <math.h>
+#include <float.h>
 #include <string.h>
 #include <santoku/lua/utils.h>
 #include <santoku/tsetlin/conf.h>
@@ -57,6 +58,7 @@ typedef struct tk_inv_s {
   double decay;
   double total_rank_weight;
   tk_dvec_t *rank_weights;
+  tk_ivec_t *rank_sizes;
   tk_iumap_t *uid_sid;
   tk_iumap_t *sid_uid;
   tk_ivec_t *node_offsets;
@@ -1473,6 +1475,73 @@ static inline double tk_inv_distance (
   return 1.0 - sim;
 }
 
+static inline double tk_inv_distance_extend (
+  tk_inv_t *categories,
+  int64_t uid0,
+  int64_t uid1,
+  double observable_distance,
+  tk_ivec_sim_type_t cmp,
+  double tversky_alpha,
+  double tversky_beta
+) {
+  // If no categories or no rank information, just return observable distance
+  if (!categories || !categories->rank_weights || categories->n_ranks == 0)
+    return observable_distance;
+
+  // If observable distance is invalid, try to get hierarchical distance only
+  if (observable_distance == DBL_MAX || isnan(observable_distance)) {
+    return tk_inv_distance(categories, uid0, uid1, cmp, tversky_alpha, tversky_beta);
+  }
+
+  // Get hierarchical features for both UIDs
+  size_t n0 = 0, n1 = 0;
+  int64_t *v0 = tk_inv_get(categories, uid0, &n0);
+  int64_t *v1 = tk_inv_get(categories, uid1, &n1);
+
+  // If either UID has no hierarchical features, return observable distance
+  if (v0 == NULL || v1 == NULL)
+    return observable_distance;
+
+  // Compute hierarchical similarity
+  double hier_sim = tk_inv_similarity(categories, v0, n0, v1, n1, cmp, tversky_alpha, tversky_beta);
+
+  // Convert observable distance to similarity (assuming distance in [0,1])
+  double obs_sim = 1.0 - observable_distance;
+  if (obs_sim < 0.0) obs_sim = 0.0;
+  if (obs_sim > 1.0) obs_sim = 1.0;
+
+  // Blend hierarchical and observable similarities using rank weighting
+  // Treat observable as an additional rank after the last hierarchical rank
+  double obs_rank_weight = 0.0;
+  if (categories->n_ranks > 0 && categories->rank_weights) {
+    // Use exponential decay for observable rank weight
+    // Assuming decay parameter is encoded in rank_weights pattern
+    // For now, use a simple heuristic: weight = last_rank_weight * decay_ratio
+    double last_rank_weight = categories->rank_weights->a[categories->n_ranks - 1];
+    if (categories->n_ranks > 1) {
+      double second_last = categories->rank_weights->a[categories->n_ranks - 2];
+      if (second_last > 0.0) {
+        double decay_ratio = last_rank_weight / second_last;
+        obs_rank_weight = last_rank_weight * decay_ratio;
+      } else {
+        obs_rank_weight = last_rank_weight * 0.5; // Default decay
+      }
+    } else {
+      obs_rank_weight = last_rank_weight * 0.5; // Default decay for single rank
+    }
+  }
+
+  // Compute blended similarity
+  double total_weight = categories->total_rank_weight + obs_rank_weight;
+  if (total_weight <= 0.0)
+    return observable_distance;
+
+  double blended_sim = (hier_sim * categories->total_rank_weight + obs_sim * obs_rank_weight) / total_weight;
+
+  // Convert back to distance
+  return 1.0 - blended_sim;
+}
+
 static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   tk_inv_t *I,
   int64_t *data,
@@ -1986,6 +2055,9 @@ static inline void tk_inv_worker (void *dp, int sig)
 
     case TK_INV_NEIGHBORHOODS:
       touched->n = 0;
+      tk_dvec_ensure(data->q_weights_buf, I->n_ranks);
+      tk_dvec_ensure(data->e_weights_buf, I->n_ranks);
+      tk_dvec_ensure(data->inter_weights_buf, I->n_ranks);
       for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i ++) {
         uhood = hoods->a[i];
         tk_rvec_clear(uhood);
@@ -2261,6 +2333,26 @@ static inline tk_inv_t *tk_inv_create (
     }
     I->rank_weights->a[r] = weight;
     I->total_rank_weight += weight;
+  }
+  // Initialize rank_sizes to count features per rank
+  I->rank_sizes = tk_ivec_create(L, I->n_ranks, 0, 0);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
+  for (uint64_t r = 0; r < I->n_ranks; r++) {
+    I->rank_sizes->a[r] = 0;
+  }
+  if (ranks) {
+    for (uint64_t f = 0; f < features; f++) {
+      if (f < (uint64_t)ranks->n) {
+        int64_t rank = ranks->a[f];
+        if (rank >= 0 && rank < (int64_t)I->n_ranks) {
+          I->rank_sizes->a[rank]++;
+        }
+      }
+    }
+  } else {
+    // If no ranks provided, all features are in rank 0
+    I->rank_sizes->a[0] = (int64_t) features;
   }
   I->uid_sid = tk_iumap_create(L, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);

@@ -14,7 +14,6 @@
 typedef enum {
   TK_EVAL_CLASS_ACCURACY,
   TK_EVAL_ENCODING_ACCURACY,
-  TK_EVAL_ENCODING_AUC,
   TK_EVAL_GRAPH_RECONSTRUCTION_INIT,
   TK_EVAL_GRAPH_RECONSTRUCTION,
   TK_EVAL_GRAPH_RECONSTRUCTION_DESTROY,
@@ -63,7 +62,8 @@ typedef struct {
   tk_bits_t *codes, *codes_predicted, *codes_expected, *mask;
   uint64_t mask_popcount;
   double *dcodes;
-  tk_iumap_t *id_code, *id_assignment;
+  tk_iumap_t *id_assignment;
+  tk_ivec_t *adjacency_ids;
   unsigned int n_visible, n_dims, chunks;
   tk_ivec_t *assignments;
   tk_graph_t *graph;
@@ -119,7 +119,6 @@ static void tk_eval_worker (void *dp, int sig)
 {
   tk_eval_thread_t *data = (tk_eval_thread_t *) dp;
   tk_eval_t *state = data->state;
-  khint_t khi;
   switch ((tk_eval_stage_t) sig) {
 
     case TK_EVAL_CLASS_ACCURACY:
@@ -153,60 +152,6 @@ static void tk_eval_worker (void *dp, int sig)
       }
       break;
 
-    case TK_EVAL_ENCODING_AUC:
-      for (uint64_t k = data->pfirst; k <= data->plast; k ++) {
-        tk_pvec_t *pairs = k < state->n_pos ? state->pos : state->neg;
-        uint64_t offset = k < state->n_pos ? 0 : state->n_pos;
-        int64_t u = pairs->a[(k - offset)].i;
-        int64_t v = pairs->a[(k - offset)].p;
-        int64_t iu, iv;
-        if (state->id_code == NULL) {
-          iu = u;
-          iv = v;
-        } else {
-          khi = tk_iumap_get(state->id_code, u);
-          if (khi == tk_iumap_end(state->id_code)) {
-            state->pl[k].sim = -1;
-            continue;
-          }
-          iu = tk_iumap_val(state->id_code, khi);
-          if (iu == -1)
-            continue;
-          khi = tk_iumap_get(state->id_code, v);
-          if (khi == tk_iumap_end(state->id_code)) {
-            state->pl[k].sim = -1;
-            continue;
-          }
-          iv = tk_iumap_val(state->id_code, khi);
-          if (iv == -1)
-            continue;
-        }
-        if (state->dcodes != NULL) {
-          double *X = state->dcodes;
-          uint64_t K = state->n_dims;
-          double dot = 0.0;
-          double *xi = X + (uint64_t)iu * K;
-          double *xj = X + (uint64_t)iv * K;
-          for (uint64_t d = 0; d < K; d ++)
-            dot += xi[d] * xj[d];
-          state->pl[k].sim = (int64_t)(dot * 1e3);
-        } else if (state->codes != NULL) {
-          if (state->mask != NULL) {
-            state->pl[k].sim = (int64_t) (state->mask_popcount - tk_cvec_bits_hamming_mask(
-              (const unsigned char *) state->codes + (uint64_t) iu * state->chunks,
-              (const unsigned char *) state->codes + (uint64_t) iv * state->chunks, (const unsigned char *) state->mask, state->n_dims));
-          } else {
-            state->pl[k].sim = (int64_t) (state->n_dims - tk_cvec_bits_hamming(
-              (const unsigned char *) state->codes + (uint64_t) iu * state->chunks,
-              (const unsigned char *) state->codes + (uint64_t) iv * state->chunks, state->n_dims));
-          }
-        } else {
-          state->pl[k].sim = -1;
-        }
-        state->pl[k].label = k < state->n_pos ? 1 : 0;
-      }
-      break;
-
     case TK_EVAL_GRAPH_RECONSTRUCTION_INIT: {
       data->bin_ranks = tk_pvec_create(0, 0, 0, 0);
       data->reverse_idx_buffer = tk_iumap_create(NULL, 0);
@@ -236,14 +181,47 @@ static void tk_eval_worker (void *dp, int sig)
         assert(node_idx + 1 < state->offsets->n);
         int64_t start = state->offsets->a[node_idx];
         int64_t end = state->offsets->a[node_idx + 1];
+
+        // Get node code (either from codes array or index)
+        char *node_code = NULL;
+        if (state->codes) {
+          // Position-indexed codes (pre-arranged)
+          node_code = (char *)(state->codes + node_idx * state->chunks);
+        } else if (state->adjacency_ids) {
+          // Fetch from index by ID
+          int64_t node_id = state->adjacency_ids->a[node_idx];
+          node_code = state->ann ? tk_ann_get(state->ann, node_id)
+                                 : tk_hbi_get(state->hbi, node_id);
+        }
+        if (!node_code)
+          continue;
+
         for (int64_t j = start; j < end; j ++) {
-          int64_t neighbor = state->neighbors->a[j];
-          uint64_t hamming_dist = tk_cvec_bits_hamming_mask(
-            (const unsigned char *) state->codes + node_idx * state->chunks,
-            (const unsigned char *) state->codes + neighbor * state->chunks,
-            (const unsigned char *) state->mask,
-            state->n_dims);
-          if (tk_pvec_push(data->bin_ranks, tk_pair(neighbor, (int64_t) hamming_dist)) != 0) {
+          int64_t neighbor_pos = state->neighbors->a[j];
+
+          // Get neighbor code (either from codes array or index)
+          char *neighbor_code = NULL;
+          if (state->codes) {
+            neighbor_code = (char *)(state->codes + neighbor_pos * state->chunks);
+          } else if (state->adjacency_ids) {
+            int64_t neighbor_id = state->adjacency_ids->a[neighbor_pos];
+            neighbor_code = state->ann ? tk_ann_get(state->ann, neighbor_id)
+                                       : tk_hbi_get(state->hbi, neighbor_id);
+          }
+          if (!neighbor_code)
+            continue;
+
+          uint64_t hamming_dist = state->mask
+            ? tk_cvec_bits_hamming_mask(
+                (const unsigned char*)node_code,
+                (const unsigned char*)neighbor_code,
+                (const unsigned char*)state->mask,
+                state->n_dims)
+            : tk_cvec_bits_hamming(
+                (const unsigned char*)node_code,
+                (const unsigned char*)neighbor_code,
+                state->n_dims);
+          if (tk_pvec_push(data->bin_ranks, tk_pair(neighbor_pos, (int64_t) hamming_dist)) != 0) {
             atomic_store(&data->has_error, true);
             return;
           }
@@ -311,10 +289,10 @@ static void tk_eval_worker (void *dp, int sig)
         double node_score = 0.0;
         switch (state->eval_metric) {
           case TK_EVAL_METRIC_BISERIAL:
-            node_score = tk_csr_biserial(state->neighbors, start, end, data->itmp);
+            node_score = tk_csr_biserial(state->neighbors, state->weights, start, end, data->itmp);
             break;
           case TK_EVAL_METRIC_VARIANCE:
-            node_score = tk_csr_variance_ratio(state->neighbors, start, end, data->itmp);
+            node_score = tk_csr_variance_ratio(state->neighbors, state->weights, start, end, data->itmp);
             break;
           default:
             node_score = 0.0;
@@ -350,25 +328,53 @@ static void tk_eval_worker (void *dp, int sig)
         uint64_t n_neighbors = (uint64_t)(end - start);
         if (n_neighbors == 0)
           continue;
+
+        // Get node code (either from codes array or index)
+        char *node_code = NULL;
+        if (state->codes) {
+          // Position-indexed codes (pre-arranged)
+          node_code = (char *)(state->codes + node_idx * state->chunks);
+        } else if (state->adjacency_ids) {
+          // Fetch from index by ID
+          int64_t node_id = state->adjacency_ids->a[node_idx];
+          node_code = state->ann ? tk_ann_get(state->ann, node_id)
+                                 : tk_hbi_get(state->hbi, node_id);
+        }
+        if (!node_code)
+          continue;
+
         tk_iuset_clear(data->itmp);
         for (int64_t idx = start; idx < end; idx++) {
-          int64_t neighbor = state->neighbors->a[idx];
+          int64_t neighbor_pos = state->neighbors->a[idx];
+
+          // Get neighbor code (either from codes array or index)
+          char *neighbor_code = NULL;
+          if (state->codes) {
+            neighbor_code = (char *)(state->codes + neighbor_pos * state->chunks);
+          } else if (state->adjacency_ids) {
+            int64_t neighbor_id = state->adjacency_ids->a[neighbor_pos];
+            neighbor_code = state->ann ? tk_ann_get(state->ann, neighbor_id)
+                                       : tk_hbi_get(state->hbi, neighbor_id);
+          }
+          if (!neighbor_code)
+            continue;
+
           uint64_t hamming_dist = tk_cvec_bits_hamming(
-            (const unsigned char *) state->codes + node_idx * state->chunks,
-            (const unsigned char *) state->codes + neighbor * state->chunks,
+            (const unsigned char*)node_code,
+            (const unsigned char*)neighbor_code,
             state->n_dims);
           if (hamming_dist <= state->margin) {
             int kha;
-            tk_iuset_put(data->itmp, neighbor, &kha);
+            tk_iuset_put(data->itmp, neighbor_pos, &kha);
           }
         }
         double node_score = 0.0;
         switch (state->eval_metric) {
           case TK_EVAL_METRIC_BISERIAL:
-            node_score = tk_csr_biserial(state->neighbors, start, end, data->itmp);
+            node_score = tk_csr_biserial(state->neighbors, state->weights, start, end, data->itmp);
             break;
           case TK_EVAL_METRIC_VARIANCE:
-            node_score = tk_csr_variance_ratio(state->neighbors, start, end, data->itmp);
+            node_score = tk_csr_variance_ratio(state->neighbors, state->weights, start, end, data->itmp);
             break;
           default:
             node_score = 0.0;
@@ -591,8 +597,10 @@ static inline int tm_clustering_accuracy_lua (lua_State *L)
 static inline void tm_retrieval_accuracy (
   lua_State *L,
   tk_bits_t *codes,
+  tk_ann_t *ann,
+  tk_hbi_t *hbi,
+  tk_ivec_t *adjacency_ids,
   uint64_t n_dims,
-  uint64_t chunks,
   tk_ivec_t *offsets,
   tk_ivec_t *neighbors,
   tk_dvec_t *weights,
@@ -614,8 +622,11 @@ static inline void tm_retrieval_accuracy (
 
   tk_eval_t state;
   state.codes = codes;
+  state.ann = ann;
+  state.hbi = hbi;
+  state.adjacency_ids = adjacency_ids;
   state.n_dims = n_dims;
-  state.chunks = chunks;
+  state.chunks = TK_CVEC_BITS_BYTES(n_dims);
   state.offsets = offsets;
   state.neighbors = neighbors;
   state.weights = weights;
@@ -667,10 +678,29 @@ static inline int tm_retrieval_accuracy_lua (lua_State *L)
 {
   lua_settop(L, 1);
 
+  // Try codes first (optional)
   lua_getfield(L, 1, "codes");
-  tk_cvec_t *cvec = tk_cvec_peek(L, -1, "codes");
-  tk_bits_t *codes = (tk_bits_t *) cvec->a;
+  tk_cvec_t *cvec = tk_cvec_peekopt(L, -1);
+  tk_bits_t *codes = cvec ? (tk_bits_t *) cvec->a : NULL;
   lua_pop(L, 1);
+
+  // Try index (optional)
+  lua_getfield(L, 1, "index");
+  tk_ann_t *ann = tk_ann_peekopt(L, -1);
+  tk_hbi_t *hbi = tk_hbi_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  // Require at least one
+  if (!codes && !ann && !hbi)
+    tk_lua_verror(L, 3, "retrieval_accuracy", "codes or index", "must provide either codes or index (tk_ann_t/tk_hbi_t)");
+
+  // Get adjacency IDs (required if using index)
+  lua_getfield(L, 1, "ids");
+  tk_ivec_t *adjacency_ids = tk_ivec_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  if (!codes && !adjacency_ids)
+    tk_lua_verror(L, 3, "retrieval_accuracy", "ids", "required when using index");
 
   lua_getfield(L, 1, "offsets");
   tk_ivec_t *offsets = tk_ivec_peek(L, -1, "offsets");
@@ -684,7 +714,18 @@ static inline int tm_retrieval_accuracy_lua (lua_State *L)
   tk_dvec_t *weights = tk_dvec_peek(L, -1, "weights");
   lua_pop(L, 1);
 
-  uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "retrieval_accuracy", "n_dims");
+  // Get n_dims (optional if index provided)
+  uint64_t n_dims = tk_lua_foptunsigned(L, 1, "retrieval_accuracy", "n_dims", 0);
+  if (n_dims == 0) {
+    // Infer from index
+    if (ann)
+      n_dims = ann->features;
+    else if (hbi)
+      n_dims = hbi->features;
+    else if (codes)
+      tk_lua_verror(L, 3, "retrieval_accuracy", "n_dims", "required when using codes without index");
+  }
+
   uint64_t margin = tk_lua_fcheckunsigned(L, 1, "retrieval_accuracy", "margin");
   unsigned int n_threads = tk_threads_getn(L, 1, "retrieval_accuracy", "threads");
 
@@ -693,10 +734,8 @@ static inline int tm_retrieval_accuracy_lua (lua_State *L)
   if (metric == TK_EVAL_METRIC_NONE)
     tk_lua_verror(L, 3, "retrieval_accuracy", "metric", "unknown metric");
 
-  uint64_t chunks = TK_CVEC_BITS_BYTES(n_dims);
-
   double score;
-  tm_retrieval_accuracy(L, codes, n_dims, chunks, offsets, neighbors, weights,
+  tm_retrieval_accuracy(L, codes, ann, hbi, adjacency_ids, n_dims, offsets, neighbors, weights,
                         margin, n_threads, metric, &score);
 
   lua_newtable(L);
@@ -786,96 +825,6 @@ static inline int tm_encoding_accuracy (lua_State *L)
   for (unsigned int i = 0; i < n_threads; i ++)
     free(data[i].bdiff);
 
-  lua_replace(L, 1);
-  lua_settop(L, 1);
-  lua_gc(L, LUA_GCCOLLECT, 0);
-  return 1;
-}
-
-static inline double _tm_auc (
-  lua_State *L,
-  tk_eval_t *state,
-  tk_threadpool_t *pool
-) {
-  if (state->mask != NULL && state->mask_popcount == 0)
-    return 0.0;
-
-  tk_threads_signal(pool, TK_EVAL_ENCODING_AUC, 0);
-  ks_introsort(dl, state->n_pos + state->n_neg, state->pl);
-  double sum_ranks = 0.0;
-  unsigned int rank = 1;
-  uint64_t n_pos_valid = 0, n_neg_valid = 0;
-  for (uint64_t k = 0; k < state->n_pos + state->n_neg; k ++) {
-    if (state->pl[k].sim == -1)
-      continue;
-    if (state->pl[k].label)
-      sum_ranks += rank, n_pos_valid ++;
-    else
-      n_neg_valid ++;
-    rank ++;
-  }
-  if (n_pos_valid == 0 || n_neg_valid == 0)
-    return 0.0;
-  double auc = (sum_ranks - ((double) n_pos_valid * (n_pos_valid + 1) / 2)) / ((double) n_pos_valid * n_neg_valid);
-  return auc;
-}
-
-static inline int tm_auc (lua_State *L)
-{
-  lua_settop(L, 7);
-
-  tk_ivec_t *ids = tk_ivec_peek(L, 1, "ids");
-  tk_dvec_t *dcodes = tk_dvec_peekopt(L, 2);
-  tk_cvec_t *ccodes = dcodes == NULL ? tk_cvec_peekopt(L, 2) : NULL;
-  tk_bits_t *codes = dcodes != NULL ? NULL : (ccodes != NULL ? (tk_bits_t *) ccodes->a : (tk_bits_t *) tk_lua_checkstring(L, 2, "codes"));
-  if (!(dcodes != NULL || codes != NULL))
-    tk_lua_verror(L, 3, "auc", "codes", "must be either a string, tk_cvec_t, or tk_dvec_t");
-
-  tk_pvec_t *pos = tk_pvec_peek(L, 3, "pos");
-  tk_pvec_t *neg = tk_pvec_peek(L, 4, "neg");
-  uint64_t n_dims = tk_lua_checkunsigned(L, 5, "n_hidden");
-  uint64_t n_pos = pos->n;
-  uint64_t n_neg = neg->n;
-
-  tk_bits_t *mask;
-  tk_cvec_t *mvec = tk_cvec_peekopt(L, 6);
-  mask = mvec != NULL ? (tk_bits_t *) mvec->a :
-    (lua_type(L, 6) == LUA_TSTRING ? (tk_bits_t *) luaL_checkstring(L, 6) :
-     lua_type(L, 6) == LUA_TLIGHTUSERDATA ? (tk_bits_t *) lua_touserdata(L, 6) : NULL);
-
-  unsigned int n_threads = tk_threads_getn(L, 7, "n_threads", NULL);
-
-  tk_eval_t state;
-  memset(&state, 0, sizeof(tk_eval_t));
-  state.n_dims = n_dims;
-  state.chunks = TK_CVEC_BITS_BYTES(n_dims);
-  state.pl = tk_malloc(L, (n_pos + n_neg) * sizeof(tm_dl_t));
-  state.mask = mask;
-  state.id_code = tk_iumap_from_ivec(0, ids);
-  if (!state.id_code)
-    tk_error(L, "tm_auc: iumap_from_ivec failed", ENOMEM);
-  state.codes = codes;
-  state.dcodes = dcodes != NULL ? dcodes->a : NULL;
-  state.pos = pos;
-  state.neg = neg;
-  state.n_pos = n_pos;
-  state.n_neg = n_neg;
-
-  tk_eval_thread_t data[n_threads];
-  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
-  for (unsigned int i = 0; i < n_threads; i ++) {
-    pool->threads[i].data = data + i;
-    data[i].state = &state;
-    atomic_init(&data[i].has_error, false);
-    tk_thread_range(i, n_threads, n_pos + n_neg, &data[i].pfirst, &data[i].plast);
-  }
-
-  double auc = _tm_auc(L, &state, pool);
-
-  free(state.pl);
-  tk_iumap_destroy(state.id_code);
-
-  lua_pushnumber(L, auc);
   lua_replace(L, 1);
   lua_settop(L, 1);
   lua_gc(L, LUA_GCCOLLECT, 0);
@@ -1408,10 +1357,29 @@ static inline int tm_optimize_retrieval (lua_State *L)
 {
   lua_settop(L, 1);
 
+  // Try codes first (optional)
   lua_getfield(L, 1, "codes");
-  tk_cvec_t *cvec = tk_cvec_peek(L, -1, "codes");
-  tk_bits_t *codes = (tk_bits_t *) cvec->a;
+  tk_cvec_t *cvec = tk_cvec_peekopt(L, -1);
+  tk_bits_t *codes = cvec ? (tk_bits_t *) cvec->a : NULL;
   lua_pop(L, 1);
+
+  // Try index (optional)
+  lua_getfield(L, 1, "index");
+  tk_ann_t *ann = tk_ann_peekopt(L, -1);
+  tk_hbi_t *hbi = tk_hbi_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  // Require at least one
+  if (!codes && !ann && !hbi)
+    tk_lua_verror(L, 3, "optimize_retrieval", "codes or index", "must provide either codes or index (tk_ann_t/tk_hbi_t)");
+
+  // Get adjacency IDs (required if using index)
+  lua_getfield(L, 1, "ids");
+  tk_ivec_t *adjacency_ids = tk_ivec_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  if (!codes && !adjacency_ids)
+    tk_lua_verror(L, 3, "optimize_retrieval", "ids", "required when using index");
 
   lua_getfield(L, 1, "offsets");
   tk_ivec_t *offsets = tk_ivec_peek(L, -1, "offsets");
@@ -1425,7 +1393,18 @@ static inline int tm_optimize_retrieval (lua_State *L)
   tk_dvec_t *weights = tk_dvec_peek(L, -1, "weights");
   lua_pop(L, 1);
 
-  uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "optimize_retrieval", "n_dims");
+  // Get n_dims (optional if index provided)
+  uint64_t n_dims = tk_lua_foptunsigned(L, 1, "optimize_retrieval", "n_dims", 0);
+  if (n_dims == 0) {
+    // Infer from index
+    if (ann)
+      n_dims = ann->features;
+    else if (hbi)
+      n_dims = hbi->features;
+    else if (codes)
+      tk_lua_verror(L, 3, "optimize_retrieval", "n_dims", "required when using codes without index");
+  }
+
   unsigned int n_threads = tk_threads_getn(L, 1, "optimize_retrieval", "threads");
   uint64_t min_margin = tk_lua_foptunsigned(L, 1, "optimize_retrieval", "min_margin", 0);
   uint64_t max_margin = tk_lua_foptunsigned(L, 1, "optimize_retrieval", "max_margin", n_dims);
@@ -1446,14 +1425,12 @@ static inline int tm_optimize_retrieval (lua_State *L)
     i_each = tk_lua_absindex(L, -1);
   }
 
-  uint64_t chunks = TK_CVEC_BITS_BYTES(n_dims);
-
   tk_dvec_t *scores = tk_dvec_create(L, 0, 0, 0);
   int i_scores = tk_lua_absindex(L, -1);
 
   for (uint64_t m = min_margin; m <= max_margin; m++) {
     double score;
-    tm_retrieval_accuracy(L, codes, n_dims, chunks, offsets, neighbors, weights, m, n_threads, metric, &score);
+    tm_retrieval_accuracy(L, codes, ann, hbi, adjacency_ids, n_dims, offsets, neighbors, weights, m, n_threads, metric, &score);
     tk_dvec_push(scores, score);
     if (i_each > -1) {
       lua_pushvalue(L, i_each);
@@ -1674,45 +1651,45 @@ static void tm_optimize_bits_prefix_greedy (
       }
     }
 
-    if (!improved && active->n > 0) {
-      for (uint64_t i = 0; i < active->n && !improved; i ++) {
-        int64_t bit_out = active->a[i];
-        if (keep_prefix > 0 && bit_out < (int64_t)keep_prefix)
-          continue;
-        for (int64_t bit_in = 0; bit_in < (int64_t) n_dims; bit_in ++) {
-          bool is_active = false;
-          for (uint64_t j = 0; j < active->n; j ++) {
-            if (active->a[j] == bit_in) {
-              is_active = true;
-              break;
-            }
-          }
-          if (is_active)
-            continue;
-          memcpy(candidate, mask, bytes_per_mask);
-          candidate[TK_CVEC_BITS_BYTE(bit_out)] &= ~(1 << TK_CVEC_BITS_BIT(bit_out));
-          candidate[TK_CVEC_BITS_BYTE(bit_in)] |= (1 << TK_CVEC_BITS_BIT(bit_in));
-          double score = tk_compute_reconstruction(state, candidate, active->n, pool);
-          if (score > current_score + tolerance) {
-            mask[TK_CVEC_BITS_BYTE(bit_out)] &= ~(1 << TK_CVEC_BITS_BIT(bit_out));
-            mask[TK_CVEC_BITS_BYTE(bit_in)] |= (1 << TK_CVEC_BITS_BIT(bit_in));
-            active->a[i] = bit_in;
-            double gain = score - current_score;
-            current_score = score;
-            improved = true;
-            if (i_each >= 0) {
-              lua_pushvalue(L, i_each);
-              lua_pushinteger(L, bit_in);
-              lua_pushnumber(L, gain);
-              lua_pushnumber(L, current_score);
-              lua_pushliteral(L, "swap");
-              lua_call(L, 4, 0);
-            }
-            break;
-          }
-        }
-      }
-    }
+    // if (!improved && active->n > 0) {
+    //   for (uint64_t i = 0; i < active->n && !improved; i ++) {
+    //     int64_t bit_out = active->a[i];
+    //     if (keep_prefix > 0 && bit_out < (int64_t)keep_prefix)
+    //       continue;
+    //     for (int64_t bit_in = 0; bit_in < (int64_t) n_dims; bit_in ++) {
+    //       bool is_active = false;
+    //       for (uint64_t j = 0; j < active->n; j ++) {
+    //         if (active->a[j] == bit_in) {
+    //           is_active = true;
+    //           break;
+    //         }
+    //       }
+    //       if (is_active)
+    //         continue;
+    //       memcpy(candidate, mask, bytes_per_mask);
+    //       candidate[TK_CVEC_BITS_BYTE(bit_out)] &= ~(1 << TK_CVEC_BITS_BIT(bit_out));
+    //       candidate[TK_CVEC_BITS_BYTE(bit_in)] |= (1 << TK_CVEC_BITS_BIT(bit_in));
+    //       double score = tk_compute_reconstruction(state, candidate, active->n, pool);
+    //       if (score > current_score + tolerance) {
+    //         mask[TK_CVEC_BITS_BYTE(bit_out)] &= ~(1 << TK_CVEC_BITS_BIT(bit_out));
+    //         mask[TK_CVEC_BITS_BYTE(bit_in)] |= (1 << TK_CVEC_BITS_BIT(bit_in));
+    //         active->a[i] = bit_in;
+    //         double gain = score - current_score;
+    //         current_score = score;
+    //         improved = true;
+    //         if (i_each >= 0) {
+    //           lua_pushvalue(L, i_each);
+    //           lua_pushinteger(L, bit_in);
+    //           lua_pushnumber(L, gain);
+    //           lua_pushnumber(L, current_score);
+    //           lua_pushliteral(L, "swap");
+    //           lua_call(L, 4, 0);
+    //         }
+    //         break;
+    //       }
+    //     }
+    //   }
+    // }
 
   }
 
@@ -1723,19 +1700,54 @@ static inline int tm_optimize_bits (lua_State *L)
 {
   lua_settop(L, 1);
 
+  // Try codes first (optional)
   lua_getfield(L, 1, "codes");
-  tk_cvec_t *cvec = tk_cvec_peek(L, -1, "codes");
+  tk_cvec_t *cvec = tk_cvec_peekopt(L, -1);
+  tk_bits_t *codes = cvec ? (tk_bits_t *) cvec->a : NULL;
+  lua_pop(L, 1);
+
+  // Try index (optional)
+  lua_getfield(L, 1, "index");
+  tk_ann_t *ann = tk_ann_peekopt(L, -1);
+  tk_hbi_t *hbi = tk_hbi_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  // Require at least one
+  if (!codes && !ann && !hbi)
+    tk_lua_verror(L, 3, "optimize_bits", "codes or index", "must provide either codes or index (tk_ann_t/tk_hbi_t)");
+
+  // Get adjacency IDs (required if using index)
+  lua_getfield(L, 1, "ids");
+  tk_ivec_t *adjacency_ids = tk_ivec_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  if (!codes && !adjacency_ids)
+    tk_lua_verror(L, 3, "optimize_bits", "ids", "required when using index");
 
   lua_getfield(L, 1, "offsets");
   tk_ivec_t *offsets = tk_ivec_peek(L, -1, "offsets");
+  lua_pop(L, 1);
 
   lua_getfield(L, 1, "neighbors");
   tk_ivec_t *neighbors = tk_ivec_peek(L, -1, "neighbors");
+  lua_pop(L, 1);
 
   lua_getfield(L, 1, "weights");
   tk_dvec_t *weights = tk_dvec_peek(L, -1, "weights");
+  lua_pop(L, 1);
 
-  uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "optimize_bits", "n_dims");
+  // Get n_dims (optional if index provided)
+  uint64_t n_dims = tk_lua_foptunsigned(L, 1, "optimize_bits", "n_dims", 0);
+  if (n_dims == 0) {
+    // Infer from index
+    if (ann)
+      n_dims = ann->features;
+    else if (hbi)
+      n_dims = hbi->features;
+    else if (codes)
+      tk_lua_verror(L, 3, "optimize_bits", "n_dims", "required when using codes without index");
+  }
+
   unsigned int n_threads = tk_threads_getn(L, 1, "optimize_bits", "threads");
   uint64_t keep_prefix = tk_lua_foptunsigned(L, 1, "optimize_bits", "keep_prefix", 0);
   int64_t start_prefix = tk_lua_foptinteger(L, 1, "optimize_bits", "start_prefix", 0);
@@ -1754,9 +1766,12 @@ static inline int tm_optimize_bits (lua_State *L)
 
   tk_eval_t state;
   memset(&state, 0, sizeof(tk_eval_t));
+  state.codes = codes;
+  state.ann = ann;
+  state.hbi = hbi;
+  state.adjacency_ids = adjacency_ids;
   state.n_dims = n_dims;
   state.chunks = TK_CVEC_BITS_BYTES(n_dims);
-  state.codes = (tk_bits_t *) cvec->a;
   state.offsets = offsets;
   state.neighbors = neighbors;
   state.weights = weights;
@@ -2008,7 +2023,6 @@ static luaL_Reg tm_evaluator_fns[] =
   { "optimize_retrieval", tm_optimize_retrieval },
   { "optimize_clustering", tm_optimize_clustering },
   { "entropy_stats", tm_entropy_stats },
-  { "auc", tm_auc },
   { "dendro_cut", tk_pvec_dendro_cut_lua },
   { "dendro_each", tk_dendro_iter_lua },
   { NULL, NULL }

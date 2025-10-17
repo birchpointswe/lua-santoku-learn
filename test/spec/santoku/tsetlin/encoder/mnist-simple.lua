@@ -37,8 +37,8 @@ local cfg = {
   },
   eval = {
     anchors = 8,
-    retrieval_metric = "correlation",
-    cluster_metric = "correlation",
+    retrieval_metric = "biserial",
+    cluster_metric = "biserial",
     tolerance = 1e-3,
   },
   threads = nil,
@@ -53,29 +53,26 @@ test("tsetlin", function ()
   dataset.ids = ivec.create(dataset.n)
   dataset.ids:fill_indices()
 
-  print("\nSampling seed pairs")
-  local _, pos_seed, neg_seed = graph.multiclass_pairs(dataset.ids, dataset.solutions, cfg.eval.anchors, cfg.eval.anchors, cfg.threads)
-  local seed = pvec.create()
-  seed:copy(pos_seed)
-  seed:copy(neg_seed)
-  local index = ds.classes_index(dataset.ids, dataset.solutions)
-  str.printf("  Edges: %d\n", seed:size())
-
-  print("\nCreating graph")
+  print("\nCreating categorical graph")
   local stopwatch = utc.stopwatch()
-  dataset.graph_adj_ids,
-  dataset.graph_adj_offsets,
-  dataset.graph_adj_neighbors,
-  dataset.graph_adj_weights =
-    graph.adjacency({
-      edges = seed,
-      index = index,
-      threads = cfg.threads,
-      each = function (ids, s, b, dt)
-        local d, dd = stopwatch()
-        str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Nodes: %-6d  Components: %-6d  Edges: %-6d\n", d, dd, dt, ids, s, b)
-      end
-    })
+  do
+    local cat_index = ds.classes_index(dataset.ids, dataset.solutions)
+    dataset.graph_adj_ids,
+    dataset.graph_adj_offsets,
+    dataset.graph_adj_neighbors,
+    dataset.graph_adj_weights =
+      graph.adjacency({
+        category_index = cat_index,
+        category_anchors = cfg.eval.anchors,
+        category_negatives = cfg.eval.anchors,
+        threads = cfg.threads,
+        each = function (ids, s, b, dt)
+          local d, dd = stopwatch()
+          str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Nodes: %-6d  Components: %-6d  Edges: %-6d\n", d, dd, dt, ids, s, b)
+        end
+      })
+    cat_index:destroy()
+  end
 
   print("\nSpectral eigendecomposition")
   dataset.ids_spectral, dataset.codes_spectral = spectral.encode({
@@ -126,26 +123,36 @@ test("tsetlin", function ()
   end
 
   print("\nCodebook stats")
-  dataset.ids_sampled, dataset.pos_sampled, dataset.neg_sampled = graph.multiclass_pairs(dataset.ids, dataset.solutions, cfg.eval.anchors, cfg.eval.anchors, cfg.threads)
   dataset.entropy = eval.entropy_stats(dataset.codes_spectral, dataset.n, cfg.data.hidden, cfg.threads)
   str.printi("  Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)",
     dataset.entropy)
-  dataset.auc_binary = eval.auc(dataset.ids_spectral, dataset.codes_spectral, dataset.pos_sampled, dataset.neg_sampled, cfg.data.hidden, nil, cfg.threads)
-  dataset.auc_continuous = eval.auc(dataset.ids_spectral, dataset.codes_spectral_cont, dataset.pos_sampled, dataset.neg_sampled, cfg.data.hidden, nil, cfg.threads)
-  str.printi("  AUC (continuous): %.4f#(auc_continuous) | AUC (binary): %.4f#(auc_binary)", dataset)
 
-  print("\nSetting up adjacency for retrieval evaluation")
-  dataset.adj_sampled_ids,
-  dataset.adj_sampled_offsets,
-  dataset.adj_sampled_neighbors,
-  dataset.adj_sampled_weights =
-    graph.adj_pairs(dataset.ids_sampled, dataset.pos_sampled, dataset.neg_sampled, cfg.threads)
+  print("\nCreating spectral codes index")
+  dataset.index_codes = hbi.create({ features = cfg.data.hidden })
+  dataset.index_codes:add(dataset.codes_spectral, dataset.ids_spectral)
+  collectgarbage("collect")
 
-  print("\nRetrieval stats (sampled)")
+  print("\nCreating categorical adjacency for evaluation")
+  do
+    local cat_index = ds.classes_index(dataset.ids, dataset.solutions)
+    dataset.adj_sampled_ids,
+    dataset.adj_sampled_offsets,
+    dataset.adj_sampled_neighbors,
+    dataset.adj_sampled_weights =
+      graph.adjacency({
+        category_index = cat_index,
+        category_anchors = cfg.eval.anchors,
+        category_negatives = cfg.eval.anchors,
+        threads = cfg.threads
+      })
+    cat_index:destroy()
+  end
+  collectgarbage("collect")
+
+  print("\nRetrieval stats (categorical adjacency)")
   dataset.retrieval_scores = eval.optimize_retrieval({
-    codes = dataset.codes_spectral,
-    n_dims = cfg.data.hidden,
-    ids = dataset.ids_sampled,
+    index = dataset.index_codes,
+    ids = dataset.adj_sampled_ids,
     offsets = dataset.adj_sampled_offsets,
     neighbors = dataset.adj_sampled_neighbors,
     weights = dataset.adj_sampled_weights,
@@ -159,16 +166,13 @@ test("tsetlin", function ()
   })
   local best_score, best_idx = dataset.retrieval_scores:max()
   str.printf("Best\n  Margin: %d | Score: %+.6f\n", best_idx, best_score)
-
-  print("\nCreating index")
-  dataset.index_codes = hbi.create({ features = cfg.data.hidden })
-  dataset.index_codes:add(dataset.codes_spectral, dataset.ids_spectral)
+  collectgarbage("collect")
 
   print("\nClustering (codes) (graph edges)\n")
   stopwatch()
   local cluster_stats = eval.optimize_clustering({
     index = dataset.index_codes,
-    ids = dataset.ids_spectral,
+    ids = dataset.graph_adj_ids,
     offsets = dataset.graph_adj_offsets,
     neighbors = dataset.graph_adj_neighbors,
     weights = dataset.graph_adj_weights,

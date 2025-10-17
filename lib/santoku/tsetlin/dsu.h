@@ -96,6 +96,39 @@ static inline void tk_dsu_union (
   tk_dsu_unionx(dsu, xidx, yidx);
 }
 
+static inline void tk_dsu_add_ids (
+  lua_State *L,
+  tk_dsu_t *dsu
+) {
+  // Check if ids vector has grown
+  uint64_t old_n = dsu->parent->n;
+  uint64_t new_n = dsu->ids->n;
+
+  if (new_n <= old_n)
+    return;  // No new IDs
+
+  // Extend parent and rank arrays
+  tk_ivec_ensure(dsu->parent, new_n);
+  tk_ivec_ensure(dsu->rank, new_n);
+
+  // Add new IDs to the index and initialize their parent/rank
+  for (uint64_t i = old_n; i < new_n; i++) {
+    int64_t uid = dsu->ids->a[i];
+    int kha;
+    khint_t khi = tk_iumap_put(dsu->ididx, uid, &kha);
+    if (kha) {  // New ID
+      tk_iumap_setval(dsu->ididx, khi, (int64_t)i);
+      dsu->parent->a[i] = (int64_t)i;  // Parent to itself
+      dsu->rank->a[i] = 0;
+      dsu->components++;
+    }
+  }
+
+  // Update the sizes
+  dsu->parent->n = new_n;
+  dsu->rank->n = new_n;
+}
+
 static inline tk_dsu_t *tk_dsu_create (
   lua_State *L,
   tk_ivec_t *ids

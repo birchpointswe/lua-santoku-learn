@@ -1,4 +1,5 @@
 require("santoku.dvec")
+require("santoku.pvec")
 local ds = require("santoku.tsetlin.dataset")
 local err = require("santoku.error")
 local eval = require("santoku.tsetlin.evaluator")
@@ -6,7 +7,6 @@ local tm = require("santoku.tsetlin")
 local inv = require("santoku.tsetlin.inv")
 local ann = require("santoku.tsetlin.ann")
 local hbi = require("santoku.tsetlin.hbi")
-local pvec = require("santoku.pvec")
 local ivec = require("santoku.ivec")
 local cvec = require("santoku.cvec")
 local graph = require("santoku.tsetlin.graph")
@@ -27,44 +27,51 @@ local cfg; cfg = {
     landmarks = 24,
   },
   mode = {
-    encoder = true,
-    cluster = true,
+    encoder = false,
+    cluster = false,
     mode = "landmarks",
-    binarize = "median",
-    tch = true,
-    ranks = true,
+    binarize = "itq",
+    tch = false,
   },
   index = {
-    ann = false,
+    ann = true,
   },
   spectral = {
     laplacian = "unnormalized",
-    decay = 2.0,
     primme_eps = 1e-12,
+  },
+  sr = {
+    eps = 1e-12,
+    iterations = 1000,
   },
   itq = {
     eps = 1e-12,
     iterations = 1000,
   },
   graph = {
+    weight_cmp = nil,
+    weight_alpha = nil,
+    weight_beta = nil,
     knn = 32,
-    knn_eps = nil,
     knn_min = nil,
+    knn_cache = nil,
     knn_mutual = false,
+    category_anchors = nil,
+    category_knn = nil,
+    category_knn_decay = nil,
+    sigma_k = nil,
+    decay = 4.0,
     bridge = true,
   },
   clustering = {
     linkage = "simhash",
-    knn = 32,
-    knn_min = nil,
-    knn_mutual = false,
-    min_pts = 32,
   },
   eval = {
     bits_metric = "spearman",
     retrieval_metric = "biserial",
     cluster_metric = "biserial",
     sampled_anchors = 16,
+    sampled_pairs = 16,
     tolerance = 1e-3,
     retrieval = function (d)
       -- return d:max()
@@ -82,20 +89,20 @@ local cfg; cfg = {
     sffs_fixed = nil,
   },
   tm = {
-    clauses = { def = 8, min = 8, max = 128, int = true, log = true, pow2 = true },
+    clauses = { def = 8, min = 8, max = 32, int = true, log = true, pow2 = true },
     clause_tolerance =  { def = 8, min = 8, max = 256, int = true, log = true, pow2 = true },
     clause_maximum = { def = 8, min = 8, max = 256, int = true, log = true, pow2 = true },
     target = { def = 4, min = 2, max = 256, int = true, log = true, pow2 = true },
-    specificity = { def = 1000, min = 2, max = 4000, int = true, log = true },
+    specificity = { def = 10, min = 2, max = 400, int = true, log = true },
   },
   search = {
-    patience = 4,
-    rounds = 20,
+    patience = 10,
+    rounds = 10,
     trials = 4,
     iterations = 10,
   },
   training = {
-    patience = 20,
+    patience = 40,
     iterations = 200,
   },
   threads = nil,
@@ -115,66 +122,56 @@ test("tsetlin", function ()
   print("Splitting")
 
   local train, test = ds.split_binary_mnist(dataset, cfg.data.ttr)
-  if cfg.graph.knn then
-    print("  Indexing original")
-    local idx = ann.create({ features = dataset.n_visible, expected_size = train.n })
+
+  do
+    train.node_features = ann.create({ features = dataset.n_visible, expected_size = train.n })
     local data = ivec.create()
     dataset.problems:bits_select(nil, train.ids, dataset.n_visible, data)
-    idx:add(data:bits_to_cvec(train.n, dataset.n_visible), train.ids)
-    print("  Neighborhoods")
-    local ids, hoods = idx:neighborhoods(cfg.graph.knn, nil, 0, cfg.graph.knn_eps, cfg.graph.knn_min, cfg.graph.knn_mutual, cfg.threads)
-    train.seed = graph.star_hoods(ids, hoods, cfg.threads)
-    idx:destroy()
-    collectgarbage("collect")
-  else
-    train.seed = pvec.create()
+    data = data:bits_to_cvec(train.n, dataset.n_visible)
+    train.node_features:add(data, train.ids)
+    data:destroy()
   end
-  collectgarbage("collect")
 
-  print("Building the graph index")
-
-  local graph_index
-  if cfg.mode.ranks then
-
+  do
     local problems_ext = ivec.create()
     problems_ext:copy(train.solutions)
     problems_ext:add_scaled(10)
-
     local graph_ids = ivec.create()
     graph_ids:copy(train.ids)
     local graph_problems = ivec.create()
     dataset.problems:bits_select(nil, graph_ids, dataset.n_visible, graph_problems)
     graph_problems:bits_extend(problems_ext, dataset.n_visible, 10)
-
     local graph_ranks = ivec.create(dataset.n_visible + 10)
     graph_ranks:fill(1, 0, dataset.n_visible)
     graph_ranks:fill(0, dataset.n_visible, dataset.n_visible + 10)
-
-    print("  Indexing")
-    graph_index = inv.create({ features = dataset.n_visible + 10, ranks = graph_ranks, decay = cfg.spectral.decay, n_ranks = 2 })
-    graph_index:add(graph_problems, graph_ids)
-
-  else
-
-    print("  Indexing")
-    local graph_problems = ivec.create()
-    dataset.problems:bits_select(nil, train.ids, dataset.n_visible, graph_problems)
-    graph_index = inv.create({ features = dataset.n_visible })
-    graph_index:add(graph_problems, train.ids)
-    collectgarbage("collect")
-
+    train.node_combined = inv.create({ features = dataset.n_visible + 10, ranks = graph_ranks, decay = cfg.graph.decay, n_ranks = 2 })
+    train.node_combined:add(graph_problems, graph_ids)
   end
 
   print("Creating graph")
-
   local stopwatch = utc.stopwatch()
   train.adj_ids,
   train.adj_offsets,
   train.adj_neighbors,
   train.adj_weights =
     graph.adjacency({
-      edges = train.seed,
-      index = graph_index,
+      weight_index = train.node_combined,
+      weight_cmp = cfg.graph.weight_cmp,
+      weight_alpha = cfg.graph.weight_alpha,
+      weight_beta = cfg.graph.weight_beta,
+      category_index = train.node_combined,
+      category_anchors = cfg.graph.category_anchors,
+      category_knn = cfg.graph.category_knn,
+      category_knn_decay = cfg.graph.category_knn_decay,
+      category_ranks = 1,
+      random_pairs = cfg.graph.random_pairs,
+      knn_index = train.node_features,
+      knn = cfg.graph.knn,
+      knn_min = cfg.graph.knn_min,
+      knn_mutual = cfg.graph.knn_mutual,
+      knn_cache = cfg.graph.knn_cache,
+      knn_rank = 1,
+      sigma_k = cfg.graph.sigma_k,
       bridge = cfg.graph.bridge,
       threads = cfg.threads,
       each = function (ids, s, b, dt)
@@ -182,8 +179,15 @@ test("tsetlin", function ()
         str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Nodes: %-6d  Components: %-6d  Edges: %-6d\n", d, dd, dt, ids, s, b)
       end
     })
-  graph_index:destroy()
+  train.node_features:destroy()
+  train.node_combined:destroy()
   collectgarbage("collect")
+
+  print("Weight stats")
+  str.printf("  Max: %.6f  Min: %.6f:  Avg: %.6f\n",
+    (train.adj_weights:max()),
+    (train.adj_weights:min()),
+    (train.adj_weights:sum() / train.adj_weights:size()))
 
   print("Spectral eigendecomposition")
 
@@ -224,6 +228,34 @@ test("tsetlin", function ()
         str.printf("  ITQ completed in %s itrs. Objective %f → %f\n", i, a, b)
       end
     })
+  elseif cfg.mode.binarize == "sr-ranking" then
+    print("Spectral Rotation (Rank-Aware)")
+    train.codes_spectral = itq.sr_ranking({
+      codes = train.codes_spectral,
+      n_dims = dataset.n_hidden,
+      ids = train.adj_ids,
+      offsets = train.adj_offsets,
+      neighbors = train.adj_neighbors,
+      weights = train.adj_weights,
+      tolerance = cfg.sr.eps,
+      iterations = cfg.sr.iterations,
+      threads = cfg.threads,
+      each = function (i, a, b)
+        str.printf("  SR-Ranking completed in %s itrs. Objective %f → %f\n", i, a, b)
+      end
+    })
+  elseif cfg.mode.binarize == "sr" then
+    print("Spectral Rotation")
+    train.codes_spectral = itq.sr({
+      codes = train.codes_spectral,
+      n_dims = dataset.n_hidden,
+      tolerance = cfg.sr.eps,
+      iterations = cfg.sr.iterations,
+      threads = cfg.threads,
+      each = function (i, a, b)
+        str.printf("  SR completed in %s itrs. Objective %f → %f\n", i, a, b)
+      end
+    })
   elseif cfg.mode.binarize == "median" then
     print("Median thresholding")
     train.codes_spectral = itq.median({
@@ -235,6 +267,13 @@ test("tsetlin", function ()
     train.codes_spectral = itq.sign({
       codes = train.codes_spectral,
       n_dims = dataset.n_hidden,
+    })
+  elseif cfg.mode.binarize == "dbq" then
+    print("DBQ thresholding")
+    train.codes_spectral, dataset.n_hidden = itq.dbq({
+      codes = train.codes_spectral,
+      n_dims = dataset.n_hidden,
+      threads = cfg.threads,
     })
   end
   collectgarbage("collect")
@@ -257,30 +296,9 @@ test("tsetlin", function ()
   end
   collectgarbage("collect")
 
-  print("Setting up eval data")
-  print("  Known labels")
-  train.solutions_spectral = ivec.create()
-  train.solutions_spectral:copy(train.solutions, train.ids_spectral)
-  print("  Sampling train")
-  train.ids_sampled,
-  train.pos_sampled,
-  train.neg_sampled
-    = graph.multiclass_pairs(train.ids_spectral, train.solutions_spectral, cfg.eval.sampled_anchors, cfg.eval.sampled_anchors, cfg.threads)
-  train.adj_sampled_ids,
-  train.adj_sampled_offsets,
-  train.adj_sampled_neighbors,
-  train.adj_sampled_weights
-    = graph.adj_pairs(train.ids_sampled, train.pos_sampled, train.neg_sampled, cfg.threads)
-  print("  Sampling test")
-  test.ids_sampled,
-  test.pos_sampled,
-  test.neg_sampled
-    = graph.multiclass_pairs(test.ids, test.solutions, cfg.eval.sampled_anchors, cfg.eval.sampled_anchors, cfg.threads)
-  test.adj_sampled_ids,
-  test.adj_sampled_offsets,
-  test.adj_sampled_neighbors,
-  test.adj_sampled_weights
-    = graph.adj_pairs(test.ids, test.pos_sampled, test.neg_sampled, cfg.threads)
+  print("Rearranging codes to match graph adjacency")
+  local codes_adj_order = cvec.create()
+  train.codes_spectral:bits_select(nil, train.adj_ids, dataset.n_hidden, codes_adj_order)
   collectgarbage("collect")
 
   print("Optimizing bit selection")
@@ -289,16 +307,14 @@ test("tsetlin", function ()
     train.kept_bits:fill_indices()
   else
     train.kept_bits = eval.optimize_bits({
-      ids = train.ids_spectral,
-      codes = train.codes_spectral,
-      n_dims = dataset.n_hidden,
+      codes = codes_adj_order,
       offsets = train.adj_offsets,
       neighbors = train.adj_neighbors,
       weights = train.adj_weights,
+      n_dims = dataset.n_hidden,
       keep_prefix = cfg.bits.keep_prefix,
       start_prefix = cfg.bits.start_prefix,
       tolerance = cfg.bits.sffs_tolerance,
-      weighted = cfg.eval.bits_weighted,
       metric = cfg.eval.bits_metric,
       threads = cfg.threads,
       each = function (bit, gain, score, action)
@@ -309,10 +325,65 @@ test("tsetlin", function ()
     })
     collectgarbage("collect")
   end
+  codes_adj_order:destroy()
 
   train.codes_spectral:bits_select(train.kept_bits, nil, dataset.n_hidden)
   dataset.n_hidden = train.kept_bits:size()
   dataset.n_latent = dataset.n_hidden * dataset.n_landmarks
+  collectgarbage("collect")
+
+  print("Creating spectral codes index")
+  train.idx_spectral = cfg.index.ann
+    and ann.create({ features = dataset.n_hidden, expected_size = train.ids_spectral:size() })
+    or hbi.create({ features = dataset.n_hidden })
+  train.idx_spectral:add(train.codes_spectral, train.ids_spectral)
+  collectgarbage("collect")
+
+  print("Setting up eval data")
+  print("  Creating categorical adjacency for train")
+  do
+    local cat_index = inv.create({ features = 10, expected_size = train.ids_spectral:size(), decay = cfg.graph.decay })
+    local data = ivec.create()
+    data:copy(train.solutions, train.ids_spectral)
+    data:add_scaled(10)
+    cat_index:add(data, train.ids_spectral)
+    data:destroy()
+
+    train.adj_sampled_ids,
+    train.adj_sampled_offsets,
+    train.adj_sampled_neighbors,
+    train.adj_sampled_weights =
+      graph.adjacency({
+        category_index = cat_index,
+        category_anchors = cfg.eval.sampled_anchors,
+        random_pairs = cfg.eval.sampled_pairs,
+        threads = cfg.threads
+      })
+    cat_index:destroy()
+  end
+  collectgarbage("collect")
+
+  print("  Creating categorical adjacency for test")
+  do
+    local cat_index = inv.create({ features = 10, expected_size = test.n, decay = cfg.graph.decay })
+    local data = ivec.create()
+    data:copy(test.solutions)
+    data:add_scaled(10)
+    cat_index:add(data, test.ids)
+    data:destroy()
+
+    test.adj_sampled_ids,
+    test.adj_sampled_offsets,
+    test.adj_sampled_neighbors,
+    test.adj_sampled_weights =
+      graph.adjacency({
+        category_index = cat_index,
+        category_anchors = cfg.eval.sampled_anchors,
+        random_pairs = cfg.eval.sampled_pairs,
+        threads = cfg.threads
+      })
+    cat_index:destroy()
+  end
   collectgarbage("collect")
 
   print("Codebook stats")
@@ -323,56 +394,45 @@ test("tsetlin", function ()
 
   print("Retrieval stats (graph edges)")
   train.retrieval_scores = eval.optimize_retrieval({
-    codes = train.codes_spectral,
-    n_dims = dataset.n_hidden,
-    ids = train.adj_sampled_ids,
+    index = train.idx_spectral,
+    ids = train.adj_ids,
     offsets = train.adj_offsets,
     neighbors = train.adj_neighbors,
     weights = train.adj_weights,
-    weighted = cfg.eval.retrieval_weighted,
     metric = cfg.eval.retrieval_metric,
     threads = cfg.threads,
     each = function (acc)
       local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.6f\n",
+      str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.10f\n",
         d, dd, acc.margin, acc.score)
     end
   })
   local best_score, best_idx = cfg.eval.retrieval(train.retrieval_scores)
-  str.printf("Best\n  Margin: %d | Score: %+.6f\n", best_idx, best_score)
+  str.printf("Best\n  Margin: %d | Score: %+.10f\n", best_idx, best_score)
   collectgarbage("collect")
 
   print("Retrieval stats (class-label adjacency)")
   train.retrieval_scores = eval.optimize_retrieval({
-    codes = train.codes_spectral,
-    n_dims = dataset.n_hidden,
+    index = train.idx_spectral,
     ids = train.adj_sampled_ids,
     offsets = train.adj_sampled_offsets,
     neighbors = train.adj_sampled_neighbors,
     weights = train.adj_sampled_weights,
-    weighted = cfg.eval.retrieval_weighted,
     metric = cfg.eval.retrieval_metric,
     threads = cfg.threads,
     each = function (acc)
       local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.6f\n",
+      str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.10f\n",
         d, dd, acc.margin, acc.score)
     end
   })
   local best_score, best_idx = cfg.eval.retrieval(train.retrieval_scores)
-  str.printf("Best\n  Margin: %d | Score: %+.6f\n", best_idx, best_score)
+  str.printf("Best\n  Margin: %d | Score: %+.10f\n", best_idx, best_score)
   collectgarbage("collect")
-
-  if cfg.mode.encoder or cfg.mode.cluster then
-    train.idx_spectral = cfg.index.ann
-      and ann.create({ features = dataset.n_hidden, expected_size = train.ids_spectral:size() })
-      or hbi.create({ features = dataset.n_hidden })
-    train.idx_spectral:add(train.codes_spectral, train.ids_spectral)
-    collectgarbage("collect")
-  end
 
   local sth_n, sth_ids, sth_problems, sth_solutions, sth_visible
   local test_ids, test_problems
+  local idx_train, idx_test  -- Declare here for visibility across encoder/clustering blocks
 
   if cfg.mode.encoder then
 
@@ -483,28 +543,37 @@ test("tsetlin", function ()
     print("Final encoder performance (best checkpoint)")
     str.printi("  Train | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)", train.accuracy_predicted)
 
+    -- Create encoder prediction indices once for reuse
+    print("Creating encoder prediction indices")
+    idx_train = cfg.index.ann
+      and ann.create({ features = dataset.n_hidden, expected_size = sth_n })
+      or hbi.create({ features = dataset.n_hidden })
     local sth_predicted = train.encoder:predict(sth_problems, sth_n, cfg.threads)
+    idx_train:add(sth_predicted, sth_ids)
+
+    idx_test = cfg.index.ann
+      and ann.create({ features = dataset.n_hidden, expected_size = test.n })
+      or hbi.create({ features = dataset.n_hidden })
+    local test_predicted = train.encoder:predict(test_problems, test.n, cfg.threads)
+    idx_test:add(test_predicted, test_ids)
+    collectgarbage("collect")
+
     train.retrieval_scores_predicted = eval.optimize_retrieval({
-      codes = sth_predicted,
-      n_dims = dataset.n_hidden,
-      ids = sth_ids,
+      index = idx_train,
+      ids = train.adj_sampled_ids,
       offsets = train.adj_sampled_offsets,
       weights = train.adj_sampled_weights,
       neighbors = train.adj_sampled_neighbors,
-      weighted = cfg.eval.retrieval_weighted,
       metric = cfg.eval.retrieval_metric,
       threads = cfg.threads,
     })
 
-    local test_predicted = train.encoder:predict(test_problems, test.n, cfg.threads)
     test.retrieval_scores_predicted = eval.optimize_retrieval({
-      codes = test_predicted,
-      n_dims = dataset.n_hidden,
-      ids = test_ids,
+      index = idx_test,
+      ids = test.adj_sampled_ids,
       offsets = test.adj_sampled_offsets,
       weights = test.adj_sampled_weights,
       neighbors = test.adj_sampled_neighbors,
-      weighted = cfg.eval.retrieval_weighted,
       metric = cfg.eval.retrieval_metric,
       threads = cfg.threads,
     })
@@ -527,24 +596,18 @@ test("tsetlin", function ()
       neighbors = train.adj_neighbors,
       weights = train.adj_weights,
       linkage = cfg.clustering.linkage,
-      knn = cfg.clustering.knn,
-      knn_min = cfg.clustering.knn_min,
-      knn_mutual = cfg.clustering.knn_mutual,
-      min_pts = cfg.clustering.min_pts,
-      assign_noise = true,
-      weighted = cfg.eval.cluster_weighted,
       metric = cfg.eval.cluster_metric,
       threads = cfg.threads,
       each = function (acc)
         local d, dd = stopwatch()
-        str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.6f | Clusters: %d\n",
+        str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
           d, dd, acc.step, acc.score, acc.n_clusters)
       end
     })
     if codes_stats.scores then
       local best_score, best_step = cfg.eval.clustering(codes_stats.scores)
       local best_n_clusters = codes_stats.n_clusters:get(best_step)
-      str.printf("Best\n  Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+      str.printf("Best\n  Step: %2d | Score: %+.10f | Clusters: %d\n", best_step, best_score, best_n_clusters)
       -- print("Validating dendrogram cuts.")
       -- for step, _, cut_assignments in eval.dendro_each(codes_stats.offsets, codes_stats.merges) do
       --   local cut_result = eval.clustering_accuracy({
@@ -558,7 +621,7 @@ test("tsetlin", function ()
       --   })
       --   local expected_score = codes_stats.scores:get(step)
       --   local actual_score = cut_result.score
-      --   str.printf("  Step %d:  expected %.6f  got %.6f\n", step, expected_score, actual_score)
+      --   str.printf("  Step %d:  expected %.10f  got %.10f\n", step, expected_score, actual_score)
       -- end
     end
     collectgarbage("collect")
@@ -571,34 +634,24 @@ test("tsetlin", function ()
       neighbors = train.adj_sampled_neighbors,
       weights = train.adj_sampled_weights,
       linkage = cfg.clustering.linkage,
-      knn = cfg.clustering.knn,
-      knn_min = cfg.clustering.knn_min,
-      knn_mutual = cfg.clustering.knn_mutual,
-      min_pts = cfg.clustering.min_pts,
-      assign_noise = true,
-      weighted = cfg.eval.cluster_weighted,
       metric = cfg.eval.cluster_metric,
       threads = cfg.threads,
       each = function (acc)
         local d, dd = stopwatch()
-        str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.6f | Clusters: %d\n",
+        str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
           d, dd, acc.step, acc.score, acc.n_clusters)
       end
     })
     if codes_stats.scores then
       local best_score, best_step = cfg.eval.clustering(codes_stats.scores)
       local best_n_clusters = codes_stats.n_clusters:get(best_step)
-      str.printf("Best\n  Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+      str.printf("Best\n  Step: %2d | Score: %+.10f | Clusters: %d\n", best_step, best_score, best_n_clusters)
     end
     collectgarbage("collect")
 
     if cfg.mode.encoder then
 
       print("Clustering (train)")
-      local idx_train = cfg.index.ann
-        and ann.create({ features = dataset.n_hidden, expected_size = train.n })
-        or hbi.create({ features = dataset.n_hidden })
-      idx_train:add(train.encoder:predict(sth_problems, sth_n, cfg.threads), sth_ids)
       local train_stats = eval.optimize_clustering({
         index = idx_train,
         ids = train.adj_sampled_ids,
@@ -606,32 +659,22 @@ test("tsetlin", function ()
         neighbors = train.adj_sampled_neighbors,
         weights = train.adj_sampled_weights,
         linkage = cfg.clustering.linkage,
-        assign_noise = true,
-        knn = cfg.clustering.knn,
-        knn_min = cfg.clustering.knn_min,
-        knn_mutual = cfg.clustering.knn_mutual,
-        min_pts = cfg.clustering.min_pts,
-        weighted = cfg.eval.cluster_weighted,
         metric = cfg.eval.cluster_metric,
         threads = cfg.threads,
         each = function (acc)
           local d, dd = stopwatch()
-          str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.6f | Clusters: %d\n",
+          str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
             d, dd, acc.step, acc.score, acc.n_clusters)
         end
       })
       if train_stats.scores then
         local best_score, best_step = cfg.eval.clustering(train_stats.scores)
         local best_n_clusters = train_stats.n_clusters:get(best_step)
-        str.printf("Best\n  Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+        str.printf("Best\n  Step: %2d | Score: %+.10f | Clusters: %d\n", best_step, best_score, best_n_clusters)
       end
       collectgarbage("collect")
 
       print("Clustering (test)")
-      local idx_test = cfg.index.ann
-        and ann.create({ features = dataset.n_hidden, expected_size = test.n })
-        or hbi.create({ features = dataset.n_hidden })
-      idx_test:add(train.encoder:predict(test_problems, test.n, cfg.threads), test_ids)
       local test_stats = eval.optimize_clustering({
         index = idx_test,
         ids = test.adj_sampled_ids,
@@ -639,24 +682,18 @@ test("tsetlin", function ()
         neighbors = test.adj_sampled_neighbors,
         weights = test.adj_sampled_weights,
         linkage = cfg.clustering.linkage,
-        assign_noise = true,
-        knn = cfg.clustering.knn,
-        knn_min = cfg.clustering.knn_min,
-        knn_mutual = cfg.clustering.knn_mutual,
-        min_pts = cfg.clustering.min_pts,
-        weighted = cfg.eval.cluster_weighted,
         metric = cfg.eval.cluster_metric,
         threads = cfg.threads,
         each = function (acc)
           local d, dd = stopwatch()
-          str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.6f | Clusters: %d\n",
+          str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
             d, dd, acc.step, acc.score, acc.n_clusters)
         end
       })
       if test_stats.scores then
         local best_score, best_step = cfg.eval.clustering(test_stats.scores)
         local best_n_clusters = test_stats.n_clusters:get(best_step)
-        str.printf("Best\n  Step: %2d | Score: %+.6f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+        str.printf("Best\n  Step: %2d | Score: %+.10f | Clusters: %d\n", best_step, best_score, best_n_clusters)
       end
       collectgarbage("collect")
 
