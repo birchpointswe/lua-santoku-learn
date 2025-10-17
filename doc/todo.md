@@ -1,5 +1,7 @@
 # Now
 
+- Abstract the landmark/out-of-sample phase behind a simple tm + index wrapper
+
 - Consider eliminating (for now) single-linkage agglo. Too slow?
 
 - Generalize tm.optimize exploration to an explore module that covers various
@@ -16,6 +18,7 @@
 - optimize_clustering should support csr adjacency as input in addition to inv,
   ann, or hbi, supporting linkage=single mode
 - Should support linkage=complete and linkage=average for completeness
+- Support shared threadpools in some way (pooled threads, pooled mutexes, etc)
 
 # Next
 

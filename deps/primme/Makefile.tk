@@ -1,6 +1,6 @@
 results.mk: Makefile
 	truncate -s0 results.mk
-	if ! [ -d OpenBLAS ]; then git clone https://github.com/xianyi/OpenBLAS.git --depth 1; fi
+	if ! [ -d OpenBLAS ]; then git clone https://github.com/OpenMathLib/OpenBLAS.git --depth 1; fi
 	if ! [ -f .openblas.ok ]; then cd OpenBLAS && make -j$(nproc) USE_THREAD=0 NO_SHARED=1 NO_LAPACKE= COMMON_OPT="-w" <% return blas_target and ("TARGET=" .. blas_target) or "" %>; fi
 	if ! [ -f .openblas.ok ]; then cd OpenBLAS && make install PREFIX=./install USE_THREAD=0 NO_SHARED=1 NO_LAPACKE= COMMON_OPT="-w" <% return blas_target and ("TARGET=" .. blas_target) or "" %>; fi
 	touch .openblas.ok
