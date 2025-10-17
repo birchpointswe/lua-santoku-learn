@@ -296,9 +296,6 @@ static inline void tm_run_spectral (
     }
   }
 
-  tk_dvec_center(z->a, uids->n, n_hidden);
-  tk_dvec_rnorml2(z->a, uids->n, n_hidden);
-
   // Copy data needed for callbacks before freeing malloc'd buffers
   double *evals_copy = NULL;
   int64_t numMatvecs = params.stats.numMatvecs;
