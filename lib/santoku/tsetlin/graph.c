@@ -185,7 +185,7 @@ static inline tk_evec_t *tm_mst_knn_candidates (
         khi = tk_euset_get(graph->pairs, e);
         if (khi != tk_euset_end(graph->pairs))
           continue;
-        double d = tk_graph_distance(graph, u, v);
+        double d = tk_graph_distance(graph, u, v, graph->q_weights, graph->e_weights, graph->inter_weights);
         if (tk_evec_push(all_candidates, tk_edge(u, v, d)) != 0) {
           tk_evec_destroy(all_candidates);
           return NULL;
@@ -208,7 +208,7 @@ static inline tk_evec_t *tm_mst_knn_candidates (
         khi = tk_euset_get(graph->pairs, e);
         if (khi != tk_euset_end(graph->pairs))
           continue;
-        double d = tk_graph_distance(graph, u, v);
+        double d = tk_graph_distance(graph, u, v, graph->q_weights, graph->e_weights, graph->inter_weights);
         if (tk_evec_push(all_candidates, tk_edge(u, v, d)) != 0) {
           tk_evec_destroy(all_candidates);
           return NULL;
@@ -231,7 +231,7 @@ static inline tk_evec_t *tm_mst_knn_candidates (
         khi = tk_euset_get(graph->pairs, e);
         if (khi != tk_euset_end(graph->pairs))
           continue;
-        double d = tk_graph_distance(graph, u, v);
+        double d = tk_graph_distance(graph, u, v, graph->q_weights, graph->e_weights, graph->inter_weights);
         if (tk_evec_push(all_candidates, tk_edge(u, v, d)) != 0) {
           tk_evec_destroy(all_candidates);
           return NULL;
@@ -414,6 +414,23 @@ static inline tk_pvec_t *tm_add_anchor_edges_immediate(
     data->task.anchors.anchors = tk_ivec_create(L, 0, 0, 0);
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Pi, -1);
     lua_pop(L, 1);
+
+    // Per-thread buffers for inv distance computation
+    data->q_weights = NULL;
+    data->e_weights = NULL;
+    data->inter_weights = NULL;
+    if (graph->category_inv && graph->category_inv->ranks && graph->category_inv->n_ranks > 1) {
+      data->q_weights = tk_dvec_create(L, 0, 0, 0);
+      tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Pi, -1);
+      lua_pop(L, 1);
+      data->e_weights = tk_dvec_create(L, 0, 0, 0);
+      tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Pi, -1);
+      lua_pop(L, 1);
+      data->inter_weights = tk_dvec_create(L, 0, 0, 0);
+      tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Pi, -1);
+      lua_pop(L, 1);
+    }
+
     tk_thread_range(i, n_threads, rank_features != NULL ? rank_features->n : graph->category_inv->features, &data->task.anchors.feature_start, &data->task.anchors.feature_end);
     data->task.anchors.categories = graph->category_inv;
     data->task.anchors.category_anchors = graph->category_anchors;
@@ -550,23 +567,51 @@ static inline void tm_run_knn_queries (
 
 static inline void tk_compute_weights (
   lua_State *L,
+  int Gi,
   tk_graph_t *graph,
   uint64_t n_threads
 ) {
-  if (!graph->weight_inv && !graph->weight_ann && !graph->weight_hbi)
+  // Only skip if no weight index AND no fallback indices
+  if (!graph->weight_inv && !graph->weight_ann && !graph->weight_hbi &&
+      !graph->category_inv && !graph->knn_inv && !graph->knn_ann && !graph->knn_hbi)
     return;
-  tk_graph_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_graph_thread_t));
+
+  tk_graph_thread_t threads[n_threads];
   memset(threads, 0, n_threads * sizeof(tk_graph_thread_t));
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_graph_worker);
+  int Pi = tk_lua_absindex(L, -1);
+  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, Pi);
+
+  // Need buffers if ANY inv index has ranks
+  bool need_buffers = (graph->weight_inv && graph->weight_inv->ranks && graph->weight_inv->n_ranks > 1) ||
+                      (graph->category_inv && graph->category_inv->ranks && graph->category_inv->n_ranks > 1) ||
+                      (graph->knn_inv && graph->knn_inv->ranks && graph->knn_inv->n_ranks > 1);
+
   for (unsigned int i = 0; i < n_threads; i++) {
     tk_graph_thread_t *data = threads + i;
     pool->threads[i].data = data;
     data->graph = graph;
+
+    // Per-thread buffers for inv distance computation
+    data->q_weights = NULL;
+    data->e_weights = NULL;
+    data->inter_weights = NULL;
+    if (need_buffers) {
+      data->q_weights = tk_dvec_create(L, 0, 0, 0);
+      tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Pi, -1);
+      lua_pop(L, 1);
+      data->e_weights = tk_dvec_create(L, 0, 0, 0);
+      tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Pi, -1);
+      lua_pop(L, 1);
+      data->inter_weights = tk_dvec_create(L, 0, 0, 0);
+      tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Pi, -1);
+      lua_pop(L, 1);
+    }
+
     tk_thread_range(i, n_threads, graph->uids->n, &data->ifirst, &data->ilast);
   }
   tk_threads_signal(pool, TK_GRAPH_COMPUTE_WEIGHTS, 0);
-  tk_threads_destroy(pool);
-  free(threads);
+  lua_pop(L, 1); // pool
 }
 
 static inline void tm_compute_sigma (
@@ -590,8 +635,31 @@ static inline void tm_compute_sigma (
   lua_pop(L, 1);
   for (uint64_t i = 0; i < graph->uids->n; i++)
     graph->sigmas->a[i] = 1.0;
+
+  // Determine which index needs buffers for distance computation
+  bool need_buffers = (graph->weight_inv && graph->weight_inv->ranks && graph->weight_inv->n_ranks > 1) ||
+                      (graph->category_inv && graph->category_inv->ranks && graph->category_inv->n_ranks > 1) ||
+                      (graph->knn_inv && graph->knn_inv->ranks && graph->knn_inv->n_ranks > 1);
+
   for (unsigned int i = 0; i < n_threads; i++) {
     tk_graph_thread_t *data = threads + i;
+
+    // Per-thread buffers for inv distance computation
+    data->q_weights = NULL;
+    data->e_weights = NULL;
+    data->inter_weights = NULL;
+    if (need_buffers) {
+      data->q_weights = tk_dvec_create(L, 0, 0, 0);
+      tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
+      lua_pop(L, 1);
+      data->e_weights = tk_dvec_create(L, 0, 0, 0);
+      tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
+      lua_pop(L, 1);
+      data->inter_weights = tk_dvec_create(L, 0, 0, 0);
+      tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
+      lua_pop(L, 1);
+    }
+
     tk_thread_range(i, n_threads, graph->uids->n, &data->ifirst, &data->ilast);
     atomic_init(&data->has_error, false);
   }
@@ -985,7 +1053,7 @@ static inline int tm_adjacency (lua_State *L)
     }
   }
 
-  tk_compute_weights(L, graph, n_threads);
+  tk_compute_weights(L, Gi, graph, n_threads);
   tm_compute_sigma(L, Gi, graph, n_threads);
   tm_reweight_all_edges(L, graph, n_threads);
 
@@ -1160,6 +1228,23 @@ static inline tk_graph_t *tm_graph_create (
   graph->n_edges = 0;
   graph->uids_hoods = NULL;
   graph->uids_idx_hoods = NULL;
+
+  // Initialize graph-level buffers for non-threaded distance operations
+  graph->q_weights = NULL;
+  graph->e_weights = NULL;
+  graph->inter_weights = NULL;
+  if (weight_inv && weight_inv->ranks && weight_inv->n_ranks > 1) {
+    graph->q_weights = tk_dvec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_GRAPH_EPH, lua_gettop(L), -1);
+    lua_pop(L, 1);
+    graph->e_weights = tk_dvec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_GRAPH_EPH, lua_gettop(L), -1);
+    lua_pop(L, 1);
+    graph->inter_weights = tk_dvec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_GRAPH_EPH, lua_gettop(L), -1);
+    lua_pop(L, 1);
+  }
+
   graph->destroyed = false;
   return graph;
 }

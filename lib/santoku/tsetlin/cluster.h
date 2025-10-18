@@ -523,7 +523,6 @@ static inline void tk_agglo_create_initial_clusters(
   uint64_t code_chunks,
   uint64_t features,
   uint64_t state_bits,
-  uint64_t max_unique_codes,
   tk_iumap_t *code_hash_to_cluster
 ) {
   state->n_clusters = 0;
@@ -551,8 +550,6 @@ static inline void tk_agglo_create_initial_clusters(
     uint64_t cluster_idx;
     bool can_merge_same_code = (linkage != TK_AGGLO_LINKAGE_SINGLE) || is_core_point;
     if (khi == tk_iumap_end(code_hash_to_cluster) || !can_merge_same_code) {
-      if (state->n_clusters >= max_unique_codes)
-        tk_error(L, "tk_agglo: too many unique clusters", ENOMEM);
       cluster_idx = state->n_clusters;
       int64_t cluster_id = (int64_t)(2 * n_samples + 1 + cluster_idx);
       tk_agglo_cluster_t *cluster = tk_agglo_cluster_create(
@@ -835,21 +832,15 @@ static inline int tk_agglo (
   tk_lua_add_ephemeron(L, TK_AGGLO_EPH, state_idx, -1);
   lua_pop(L, 1);
 
-  uint64_t max_unique_codes = (features <= 20) ? (1ULL << features) : n_samples;
-  if (max_unique_codes > n_samples)
-    max_unique_codes = n_samples;
-  if (max_unique_codes > 1000000)
-    max_unique_codes = 1000000;
-
-  state->clusters = tk_malloc(L, max_unique_codes * sizeof(tk_agglo_cluster_t *));
-  for (uint64_t i = 0; i < max_unique_codes; i ++)
+  state->clusters = tk_malloc(L, n_samples * sizeof(tk_agglo_cluster_t *));
+  for (uint64_t i = 0; i < n_samples; i ++)
     state->clusters[i] = NULL;
 
   tk_iumap_t *code_hash_to_cluster = tk_iumap_create(L, 0);
   tk_lua_add_ephemeron(L, TK_AGGLO_EPH, state_idx, -1);
   lua_pop(L, 1);
   tk_agglo_create_initial_clusters(L, state, state_idx, ann, hbi, uids, assignments, linkage, min_pts,
-    n_samples, code_chunks, features, state_bits, max_unique_codes, code_hash_to_cluster);
+    n_samples, code_chunks, features, state_bits, code_hash_to_cluster);
   tk_agglo_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_agglo_thread_t));
   for (unsigned int i = 0; i < n_threads; i++) {
     threads[i].state = state;
@@ -857,26 +848,35 @@ static inline int tk_agglo (
     state->pool->threads[i].data = &threads[i];
   }
 
-  tk_ivec_t *cluster_ids = tk_ivec_create(L, 0, 0, 0);
-  tk_cvec_t *cluster_codes = tk_cvec_create(L, state->n_clusters * code_chunks, 0, 0);
-  for (uint64_t i = 0; i < state->n_clusters; i++) {
-    tk_ivec_push(cluster_ids, state->clusters[i]->cluster_id);
-    memcpy(cluster_codes->a + i * code_chunks, tk_simhash_actions(state->clusters[i]->simhash, 0), code_chunks);
-  }
-  if (state->index_type == TK_AGGLO_USE_ANN) {
-    state->index.ann = tk_ann_create_base(L, features, state->n_clusters);
-    int Ai = tk_lua_absindex(L, -1);
-    if (cluster_ids->n > 0)
+  if (state->n_clusters > 0) {
+    tk_ivec_t *cluster_ids = tk_ivec_create(L, 0, 0, 0);
+    tk_cvec_t *cluster_codes = tk_cvec_create(L, state->n_clusters * code_chunks, 0, 0);
+    for (uint64_t i = 0; i < state->n_clusters; i++) {
+      tk_ivec_push(cluster_ids, state->clusters[i]->cluster_id);
+      memcpy(cluster_codes->a + i * code_chunks, tk_simhash_actions(state->clusters[i]->simhash, 0), code_chunks);
+    }
+    if (state->index_type == TK_AGGLO_USE_ANN) {
+      uint64_t bucket_target = 30;  // Default from tk_ann_create_lua
+      state->index.ann = tk_ann_create_randomized(L, features, bucket_target, state->n_clusters);
+      int Ai = tk_lua_absindex(L, -1);
       tk_ann_add(L, state->index.ann, Ai, cluster_ids, (char *)cluster_codes->a);
-    lua_remove(L, -3);
-    lua_remove(L, -2);
-  } else {
-    state->index.hbi = tk_hbi_create(L, features);
-    int Ai = tk_lua_absindex(L, -1);
-    if (cluster_ids->n > 0)
+      lua_remove(L, -3);
+      lua_remove(L, -2);
+    } else {
+      state->index.hbi = tk_hbi_create(L, features);
+      int Ai = tk_lua_absindex(L, -1);
       tk_hbi_add(L, state->index.hbi, Ai, cluster_ids, (char *)cluster_codes->a);
-    lua_remove(L, -3);
-    lua_remove(L, -2);
+      lua_remove(L, -3);
+      lua_remove(L, -2);
+    }
+  } else {
+    // No clusters created - just create empty index
+    if (state->index_type == TK_AGGLO_USE_ANN) {
+      uint64_t bucket_target = 30;
+      state->index.ann = tk_ann_create_randomized(L, features, bucket_target, 0);
+    } else {
+      state->index.hbi = tk_hbi_create(L, features);
+    }
   }
   uint64_t iteration = 0;
   if (callback)

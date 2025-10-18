@@ -100,6 +100,9 @@ typedef struct tk_graph_s {
   uint64_t n_edges;
   tk_dsu_t *dsu;
   int64_t largest_component_root;
+  tk_dvec_t *q_weights;
+  tk_dvec_t *e_weights;
+  tk_dvec_t *inter_weights;
 
   bool destroyed;
 
@@ -110,7 +113,9 @@ typedef struct tk_graph_thread_s {
   uint64_t ifirst, ilast;
   unsigned int index;
   atomic_bool has_error;
-
+  tk_dvec_t *q_weights;
+  tk_dvec_t *e_weights;
+  tk_dvec_t *inter_weights;
   union {
     struct {
       tk_ivec_t *adj_offset;
@@ -167,96 +172,77 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
   return (tk_graph_t *) luaL_checkudata(L, i, TK_GRAPH_MT);
 }
 
+// Macro to compute distance from any index type (inv/ann/hbi)
+#define TK_GRAPH_INDEX_DISTANCE(idx_inv, idx_ann, idx_hbi, u, v, cmp, alpha, beta, q_w, e_w, i_w, dist_var) \
+  do { \
+    tk_inv_t *__idx_inv = (idx_inv); \
+    tk_ann_t *__idx_ann = (idx_ann); \
+    tk_hbi_t *__idx_hbi = (idx_hbi); \
+    (dist_var) = DBL_MAX; \
+    if (__idx_inv != NULL) { \
+      size_t un, vn; \
+      int64_t *uset = tk_inv_get(__idx_inv, (u), &un); \
+      int64_t *vset = tk_inv_get(__idx_inv, (v), &vn); \
+      if (uset && vset) { \
+        double sim = tk_inv_similarity(__idx_inv, uset, un, vset, vn, (cmp), (alpha), (beta), (q_w), (e_w), (i_w)); \
+        (dist_var) = 1.0 - sim; \
+      } else { \
+        (dist_var) = 1.0; \
+      } \
+    } else if (__idx_ann != NULL) { \
+      char *uset = tk_ann_get(__idx_ann, (u)); \
+      char *wset = tk_ann_get(__idx_ann, (v)); \
+      if (uset && wset) { \
+        (dist_var) = (double)tk_cvec_bits_hamming((const uint8_t *)uset, (const uint8_t *)wset, \
+                                                   __idx_ann->features) / (double)__idx_ann->features; \
+      } \
+    } else if (__idx_hbi != NULL) { \
+      char *uset = tk_hbi_get(__idx_hbi, (u)); \
+      char *wset = tk_hbi_get(__idx_hbi, (v)); \
+      if (uset && wset) { \
+        (dist_var) = (double)tk_cvec_bits_hamming((const uint8_t *)uset, (const uint8_t *)wset, \
+                                                   __idx_hbi->features) / (double)__idx_hbi->features; \
+      } \
+    } \
+  } while(0)
+
 static inline double tk_graph_distance (
   tk_graph_t *graph,
   int64_t u,
-  int64_t v
+  int64_t v,
+  tk_dvec_t *q_weights,
+  tk_dvec_t *e_weights,
+  tk_dvec_t *inter_weights
 ) {
-  if (graph->weight_inv != NULL) {
-    return tk_inv_distance(
-      graph->weight_inv, u, v, graph->weight_cmp, graph->weight_alpha,
-      graph->weight_beta);
-  } else if (graph->weight_ann != NULL) {
-    char *uset = tk_ann_get(graph->weight_ann, u);
-    char *wset = tk_ann_get(graph->weight_ann, v);
-    if (uset != NULL && wset != NULL)
-      return (double)tk_cvec_bits_hamming(
-        (const uint8_t *)uset,
-        (const uint8_t *)wset,
-        graph->weight_ann->features) / (double)graph->weight_ann->features;
-    return DBL_MAX;
-  } else if (graph->weight_hbi != NULL) {
-    char *uset = tk_hbi_get(graph->weight_hbi, u);
-    char *wset = tk_hbi_get(graph->weight_hbi, v);
-    if (uset != NULL && wset != NULL)
-      return (double)tk_cvec_bits_hamming(
-        (const uint8_t *)uset,
-        (const uint8_t *)wset,
-        graph->weight_hbi->features) / (double)graph->weight_hbi->features;
-    return DBL_MAX;
-  }
   double d = DBL_MAX;
+
+  // Try weight_index first
+  TK_GRAPH_INDEX_DISTANCE(graph->weight_inv, graph->weight_ann, graph->weight_hbi,
+                          u, v, graph->weight_cmp, graph->weight_alpha, graph->weight_beta,
+                          q_weights, e_weights, inter_weights, d);
+  if (d != DBL_MAX)
+    return d;
+
+  // Fallback to category + knn blending
   bool same_index = (graph->category_inv == graph->knn_inv);
   if (same_index && graph->category_inv != NULL) {
-    d = tk_inv_distance(
-      graph->category_inv, u, v, graph->category_cmp, graph->category_alpha,
-      graph->category_beta);
+    TK_GRAPH_INDEX_DISTANCE(graph->category_inv, NULL, NULL,
+                            u, v, graph->category_cmp, graph->category_alpha, graph->category_beta,
+                            q_weights, e_weights, inter_weights, d);
   } else if (graph->category_inv != NULL) {
     double obs_distance = DBL_MAX;
-    if (graph->knn_inv != NULL) {
-      size_t un, vn;
-      int64_t *uset = tk_inv_get(graph->knn_inv, u, &un);
-      int64_t *vset = tk_inv_get(graph->knn_inv, v, &vn);
-      if (uset != NULL && vset != NULL)
-        obs_distance = 1.0 - tk_inv_similarity(
-          graph->knn_inv, uset, un, vset, vn, graph->knn_cmp,
-          graph->knn_cmp_alpha, graph->knn_cmp_beta);
-    } else if (graph->knn_ann != NULL) {
-      char *uset = tk_ann_get(graph->knn_ann, u);
-      char *wset = tk_ann_get(graph->knn_ann, v);
-      if (uset != NULL && wset != NULL)
-        obs_distance = (double)tk_cvec_bits_hamming(
-          (const uint8_t *)uset,
-          (const uint8_t *)wset,
-          graph->knn_ann->features) / (double)graph->knn_ann->features;
-    } else if (graph->knn_hbi != NULL) {
-      char *uset = tk_hbi_get(graph->knn_hbi, u);
-      char *wset = tk_hbi_get(graph->knn_hbi, v);
-      if (uset != NULL && wset != NULL)
-        obs_distance = (double)tk_cvec_bits_hamming(
-          (const uint8_t *)uset,
-          (const uint8_t *)wset,
-          graph->knn_hbi->features) / (double)graph->knn_hbi->features;
-    }
+    TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann, graph->knn_hbi,
+                            u, v, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
+                            q_weights, e_weights, inter_weights, obs_distance);
     d = tk_inv_distance_extend(
       graph->category_inv, u, v, obs_distance, graph->category_cmp,
-      graph->category_alpha, graph->category_beta);
+      graph->category_alpha, graph->category_beta,
+      q_weights, e_weights, inter_weights);
   } else {
-    if (graph->knn_inv != NULL) {
-      size_t un, vn;
-      int64_t *uset = tk_inv_get(graph->knn_inv, u, &un);
-      int64_t *vset = tk_inv_get(graph->knn_inv, v, &vn);
-      if (uset != NULL && vset != NULL)
-        d = 1.0 - tk_inv_similarity(
-          graph->knn_inv, uset, un, vset, vn, graph->knn_cmp,
-          graph->knn_cmp_alpha, graph->knn_cmp_beta);
-    } else if (graph->knn_ann != NULL) {
-      char *uset = tk_ann_get(graph->knn_ann, u);
-      char *wset = tk_ann_get(graph->knn_ann, v);
-      if (uset != NULL && wset != NULL)
-        d = (double) tk_cvec_bits_hamming(
-          (const uint8_t *)uset,
-          (const uint8_t *)wset,
-          graph->knn_ann->features) / (double)graph->knn_ann->features;
-    } else if (graph->knn_hbi != NULL) {
-      char *uset = tk_hbi_get(graph->knn_hbi, u);
-      char *wset = tk_hbi_get(graph->knn_hbi, v);
-      if (uset != NULL && wset != NULL)
-        d = (double) tk_cvec_bits_hamming(
-          (const uint8_t *)uset,
-          (const uint8_t *)wset,
-          graph->knn_hbi->features) / (double)graph->knn_hbi->features;
-    }
+    // Just knn_index
+    TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann, graph->knn_hbi,
+                            u, v, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
+                            q_weights, e_weights, inter_weights, d);
   }
   return d;
 }
@@ -322,7 +308,7 @@ static inline void tk_graph_worker (void *dp, int sig)
         int64_t neighbor_idx;
         tk_umap_foreach_keys(graph->adj->a[i], neighbor_idx, ({
           int64_t neighbor_uid = graph->uids->a[neighbor_idx];
-          double d = tk_graph_distance(graph, uid, neighbor_uid);
+          double d = tk_graph_distance(graph, uid, neighbor_uid, data->q_weights, data->e_weights, data->inter_weights);
           if (d != DBL_MAX) {
             if (tk_dvec_push(distances, d) != 0) {
               atomic_store(&data->has_error, true);
@@ -349,7 +335,7 @@ static inline void tk_graph_worker (void *dp, int sig)
                     uint32_t s_khi = tk_iuset_put(seen, neighbor_global_idx, &kha);
                     (void)s_khi;
                     if (kha) {
-                      double d = tk_graph_distance(graph, uid, neighbor_uid);
+                      double d = tk_graph_distance(graph, uid, neighbor_uid, data->q_weights, data->e_weights, data->inter_weights);
                       if (d == DBL_MAX)
                         d = hood->a[j].d;
                       if (tk_dvec_push(distances, d) != 0) {
@@ -374,7 +360,7 @@ static inline void tk_graph_worker (void *dp, int sig)
                     uint32_t s_khi = tk_iuset_put(seen, neighbor_global_idx, &kha);
                     (void)s_khi;
                     if (kha) {
-                      double d = tk_graph_distance(graph, uid, neighbor_uid);
+                      double d = tk_graph_distance(graph, uid, neighbor_uid, data->q_weights, data->e_weights, data->inter_weights);
                       if (d == DBL_MAX)
                         d = (double)hood->a[j].p / denom;
                       if (tk_dvec_push(distances, d) != 0) {
@@ -399,7 +385,7 @@ static inline void tk_graph_worker (void *dp, int sig)
                     uint32_t s_khi = tk_iuset_put(seen, neighbor_global_idx, &kha);
                     (void)s_khi;
                     if (kha) {
-                      double d = tk_graph_distance(graph, uid, neighbor_uid);
+                      double d = tk_graph_distance(graph, uid, neighbor_uid, data->q_weights, data->e_weights, data->inter_weights);
                       if (d == DBL_MAX)
                         d = (double)hood->a[j].p / denom;
                       if (tk_dvec_push(distances, d) != 0) {
@@ -533,7 +519,10 @@ static inline void tk_graph_worker (void *dp, int sig)
                 data->task.multiclass.index, id, anchor,
                 data->task.multiclass.cmp,
                 data->task.multiclass.cmp_alpha,
-                data->task.multiclass.cmp_beta);
+                data->task.multiclass.cmp_beta,
+                data->q_weights,
+                data->e_weights,
+                data->inter_weights);
               if (dist > data->task.multiclass.eps_pos)
                 continue;
             }
@@ -578,7 +567,10 @@ static inline void tk_graph_worker (void *dp, int sig)
                   data->task.multiclass.index, id, other_id,
                   data->task.multiclass.cmp,
                   data->task.multiclass.cmp_alpha,
-                  data->task.multiclass.cmp_beta);
+                  data->task.multiclass.cmp_beta,
+                  data->q_weights,
+                  data->e_weights,
+                  data->inter_weights);
                 if (dist < data->task.multiclass.eps_neg) {
                   tries++;
                   continue;
@@ -648,7 +640,7 @@ static inline void tk_graph_worker (void *dp, int sig)
           for (uint64_t j = 0; j < anchors->n && j < n_anchors; j ++) {
             if (i == j) continue;
             int64_t v = anchors->a[j];
-            double dist = tk_inv_distance(inv, u, v, category_cmp, category_alpha, category_beta);
+            double dist = tk_inv_distance(inv, u, v, category_cmp, category_alpha, category_beta, data->q_weights, data->e_weights, data->inter_weights);
             tk_rvec_hmin(knn_heap, k_nearest, tk_rank(v, dist));
           }
           for (uint64_t k = 0; k < knn_heap->n; k++) {
@@ -665,8 +657,6 @@ static inline void tk_graph_worker (void *dp, int sig)
 
     case TK_GRAPH_COMPUTE_WEIGHTS: {
       tk_graph_t *graph = data->graph;
-      if (!graph->weight_inv && !graph->weight_ann && !graph->weight_hbi)
-        break;
       for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i++) {
         int64_t u = graph->uids->a[i];
         int64_t neighbor_idx;
@@ -676,7 +666,7 @@ static inline void tk_graph_worker (void *dp, int sig)
             tk_edge_t edge_key = tk_edge(u, v, 0);
             uint32_t k = tk_euset_get(graph->pairs, edge_key);
             if (k != tk_euset_end(graph->pairs)) {
-              double d = tk_graph_distance(graph, u, v);
+              double d = tk_graph_distance(graph, u, v, data->q_weights, data->e_weights, data->inter_weights);
               double w = tk_graph_weight(graph, d, i, neighbor_idx);
               kh_key(graph->pairs, k).w = w;
             }
@@ -1310,6 +1300,8 @@ static inline int tk_graph_multiclass_pairs (
       goto cleanup_multiclass;
     }
 
+    bool need_buffers = index && index->ranks && index->n_ranks > 1;
+
     for (unsigned int i = 0; i < n_threads; i++) {
       threads[i].task.multiclass.local_pos = tk_pvec_create(NULL, 0, 0, 0);
       if (!threads[i].task.multiclass.local_pos) {
@@ -1319,6 +1311,17 @@ static inline int tk_graph_multiclass_pairs (
         free(threads);
         goto cleanup_multiclass;
       }
+
+      // Per-thread buffers for inv distance computation
+      threads[i].q_weights = NULL;
+      threads[i].e_weights = NULL;
+      threads[i].inter_weights = NULL;
+      if (need_buffers) {
+        threads[i].q_weights = tk_dvec_create(NULL, 0, 0, 0);
+        threads[i].e_weights = tk_dvec_create(NULL, 0, 0, 0);
+        threads[i].inter_weights = tk_dvec_create(NULL, 0, 0, 0);
+      }
+
       threads[i].task.multiclass.class_ids = class_ids;
       threads[i].task.multiclass.anchors = anchors;
       threads[i].task.multiclass.n_classes = n_classes;
@@ -1355,6 +1358,9 @@ static inline int tk_graph_multiclass_pairs (
         }
       }
       tk_pvec_destroy(threads[i].task.multiclass.local_pos);
+      if (threads[i].q_weights) tk_dvec_destroy(threads[i].q_weights);
+      if (threads[i].e_weights) tk_dvec_destroy(threads[i].e_weights);
+      if (threads[i].inter_weights) tk_dvec_destroy(threads[i].inter_weights);
     }
 
     tk_threads_destroy(pool);
@@ -1376,6 +1382,8 @@ static inline int tk_graph_multiclass_pairs (
       goto cleanup_multiclass;
     }
 
+    bool need_buffers_neg = index && index->ranks && index->n_ranks > 1;
+
     for (unsigned int i = 0; i < n_threads; i++) {
       threads[i].task.multiclass.local_neg = tk_pvec_create(NULL, 0, 0, 0);
       if (!threads[i].task.multiclass.local_neg) {
@@ -1385,6 +1393,17 @@ static inline int tk_graph_multiclass_pairs (
         free(threads);
         goto cleanup_multiclass;
       }
+
+      // Per-thread buffers for inv distance computation
+      threads[i].q_weights = NULL;
+      threads[i].e_weights = NULL;
+      threads[i].inter_weights = NULL;
+      if (need_buffers_neg) {
+        threads[i].q_weights = tk_dvec_create(NULL, 0, 0, 0);
+        threads[i].e_weights = tk_dvec_create(NULL, 0, 0, 0);
+        threads[i].inter_weights = tk_dvec_create(NULL, 0, 0, 0);
+      }
+
       threads[i].task.multiclass.class_ids = class_ids;
       threads[i].task.multiclass.n_classes = n_classes;
       threads[i].task.multiclass.index = index;
@@ -1421,6 +1440,9 @@ static inline int tk_graph_multiclass_pairs (
         }
       }
       tk_pvec_destroy(threads[i].task.multiclass.local_neg);
+      if (threads[i].q_weights) tk_dvec_destroy(threads[i].q_weights);
+      if (threads[i].e_weights) tk_dvec_destroy(threads[i].e_weights);
+      if (threads[i].inter_weights) tk_dvec_destroy(threads[i].inter_weights);
     }
 
     tk_threads_destroy(pool);
