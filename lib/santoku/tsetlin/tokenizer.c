@@ -634,6 +634,9 @@ static int tb_tokenizer_append_skipgram (
   int winlen
 ) {
   if (to_pick == 0) {
+    // Only generate n-grams that include the last (newly added) token to avoid duplicates
+    if (skipgram[rfirst - 1] != winlen - 1)
+      return 0;
     tok->tmp_skipgram->n = 0;
     for (int i = 0; i < rfirst; i ++) {
       int win_idx = skipgram[i];
@@ -715,6 +718,12 @@ static inline int tb_tokenizer_append_token (
     return -1;
   char *bufp0 = tokenizer->tmp_append->a;
   int id0 = tb_tokenizer_new_token(L, Ti, tokenizer, &bufp0, tokenizer->tmp_append->n);
+
+  // Generate char-grams even if unigram not in vocab
+  if (word[0] != '#' && strcmp(word, "'s") != 0)
+    if (tb_tokenizer_append_cgrams(L, Ti, tokenizer, word) != 0)
+      return -1;
+
   if (id0 == -1) return 0;  // Token not in vocab (after restrict) - skip, not an error
   if (tk_ivec_push(tokenizer->tokens, id0) != 0)
     return -1;
@@ -723,11 +732,6 @@ static inline int tb_tokenizer_append_token (
     *negation = tokenizer->negations;
     return 0;
   }
-
-  // Generate char-grams
-  if (word[0] != '#' && strcmp(word, "'s") != 0)
-    if (tb_tokenizer_append_cgrams(L, Ti, tokenizer, word) != 0)
-      return -1;
 
   if ((int) tokenizer->window->n == tokenizer->window_size) {
     size_t n = tokenizer->window->n;
@@ -834,7 +838,7 @@ static inline int tb_tokenizer_populate_tokens (
 static inline void _tb_tokenizer_parse (lua_State *L, int Ti, tb_tokenizer_t *tokenizer, tk_cvec_t *buf)
 {
   size_t len;
-  char *str = (char *) luaL_checklstring(L, 1, &len);
+  char *str = (char *) luaL_checklstring(L, -1, &len);
   if (tb_tokenizer_normalize(buf, str, len, tokenizer->max_run) != 0)
     tk_lua_verror(L, 2, "parse", "allocation failed during normalization");
   int rc = tb_tokenizer_populate_tokens(L, Ti, tokenizer, buf->a, buf->n);
@@ -871,6 +875,7 @@ static inline int tb_tokenizer_parse (lua_State *L)
     tk_cvec_clear(buf);
   }
   if (lua_type(L, 2) != LUA_TTABLE) {
+    lua_pushvalue(L, 2);
     _tb_tokenizer_parse(L, 1, tokenizer, buf);
   } else {
     for (size_t i = 1; i <= (size_t) lua_objlen(L, 2); i ++) {

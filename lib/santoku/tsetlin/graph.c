@@ -728,8 +728,8 @@ static inline int tm_adjacency (lua_State *L)
 
   // Parse k-NN parameters (for knn_inv)
   const char *knn_cmp_str = tk_lua_foptstring(L, 1, "graph", "knn_cmp", "jaccard");
-  double knn_cmp_alpha = tk_lua_foptnumber(L, 1, "graph", "knn_cmp_alpha", 1.0);
-  double knn_cmp_beta = tk_lua_foptnumber(L, 1, "graph", "knn_cmp_beta", 0.1);
+  double knn_cmp_alpha = tk_lua_foptnumber(L, 1, "graph", "knn_cmp_alpha", 0.5);
+  double knn_cmp_beta = tk_lua_foptnumber(L, 1, "graph", "knn_cmp_beta", 0.5);
   tk_ivec_sim_type_t knn_cmp = TK_IVEC_JACCARD;
   if (!strcmp(knn_cmp_str, "jaccard"))
     knn_cmp = TK_IVEC_JACCARD;
@@ -756,8 +756,8 @@ static inline int tm_adjacency (lua_State *L)
 
   // Parse category parameters
   const char *category_cmp_str = tk_lua_foptstring(L, 1, "graph", "category_cmp", "jaccard");
-  double category_alpha = tk_lua_foptnumber(L, 1, "graph", "category_alpha", 1.0);
-  double category_beta = tk_lua_foptnumber(L, 1, "graph", "category_beta", 0.1);
+  double category_alpha = tk_lua_foptnumber(L, 1, "graph", "category_alpha", 0.5);
+  double category_beta = tk_lua_foptnumber(L, 1, "graph", "category_beta", 0.5);
   tk_ivec_sim_type_t category_cmp = TK_IVEC_JACCARD;
   if (!strcmp(category_cmp_str, "jaccard"))
     category_cmp = TK_IVEC_JACCARD;
@@ -776,8 +776,8 @@ static inline int tm_adjacency (lua_State *L)
 
   // Parse weight parameters
   const char *weight_cmp_str = tk_lua_foptstring(L, 1, "graph", "weight_cmp", "jaccard");
-  double weight_alpha = tk_lua_foptnumber(L, 1, "graph", "weight_alpha", 1.0);
-  double weight_beta = tk_lua_foptnumber(L, 1, "graph", "weight_beta", 0.1);
+  double weight_alpha = tk_lua_foptnumber(L, 1, "graph", "weight_alpha", 0.5);
+  double weight_beta = tk_lua_foptnumber(L, 1, "graph", "weight_beta", 0.5);
   tk_ivec_sim_type_t weight_cmp = TK_IVEC_JACCARD;
   if (!strcmp(weight_cmp_str, "jaccard"))
     weight_cmp = TK_IVEC_JACCARD;
@@ -1295,11 +1295,55 @@ static inline int tm_star_hoods (lua_State *L)
   return 1;
 }
 
+static inline int tm_adj_hoods(lua_State *L)
+{
+  lua_settop(L, 3);  // ids, hoods, {features=N, threads=N}
+
+  tk_ivec_t *ids = tk_ivec_peek(L, 1, "ids");
+
+  // Accept any hood type
+  tk_inv_hoods_t *inv_hoods = tk_inv_hoods_peekopt(L, 2);
+  tk_ann_hoods_t *ann_hoods = tk_ann_hoods_peekopt(L, 2);
+  tk_hbi_hoods_t *hbi_hoods = tk_hbi_hoods_peekopt(L, 2);
+
+  if (!inv_hoods && !ann_hoods && !hbi_hoods)
+    tk_lua_verror(L, 2, "adj_hoods", "hoods must be inv_hoods, ann_hoods, or hbi_hoods");
+
+  uint64_t n_hoods = inv_hoods ? inv_hoods->n :
+                     ann_hoods ? ann_hoods->n :
+                     hbi_hoods->n;
+
+  if (n_hoods != ids->n)
+    tk_lua_verror(L, 2, "adj_hoods", "hoods size must match ids size");
+
+  uint64_t features = tk_lua_foptunsigned(L, 3, "adj_hoods", "features", 0);
+  if (features == 0)
+    tk_lua_verror(L, 3, "adj_hoods", "features", "required");
+
+  unsigned int n_threads = tk_threads_getn(L, 3, "adj_hoods", "threads");
+
+  tk_ivec_t *offsets = NULL;
+  tk_ivec_t *neighbors = NULL;
+  tk_dvec_t *weights = NULL;
+
+  if (tk_graph_adj_hoods(L, ids, inv_hoods, ann_hoods, hbi_hoods, features,
+                         n_threads, &offsets, &neighbors, &weights) != 0)
+    tk_lua_verror(L, 2, "adj_hoods", "failed to convert hoods to adjacency");
+
+  lua_settop(L, 0);
+  tk_ivec_register(L, offsets);
+  tk_ivec_register(L, neighbors);
+  tk_dvec_register(L, weights);
+  lua_gc(L, LUA_GCCOLLECT, 0);
+  return 3;  // offsets, neighbors, weights
+}
+
 static luaL_Reg tm_graph_fns[] =
 {
   { "adjacency", tm_adjacency },
   { "adj_pairs", tm_adj_pairs },
   { "star_hoods", tm_star_hoods },
+  { "adj_hoods", tm_adj_hoods },
   { NULL, NULL }
 };
 

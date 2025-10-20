@@ -11,13 +11,13 @@ typedef struct {
   uint64_t n_clauses;     // Number of independent automata (clauses)
   uint64_t n_chunks;      // Input vector chunks
   uint64_t state_bits;    // Counter bit width (typically 8)
-  tk_bits_t *counts;      // Bit planes [n_clauses × n_chunks × (state_bits-1)]
-  tk_bits_t *actions;     // MSB plane (action bits) [n_clauses × n_chunks]
-  tk_bits_t tail_mask;    // Mask for last chunk
+  char *counts;           // Bit planes [n_clauses × n_chunks × (state_bits-1)]
+  char *actions;          // MSB plane (action bits) [n_clauses × n_chunks]
+  uint8_t tail_mask;      // Mask for last chunk
 } tk_automata_t;
 
 // Get count bit planes for a specific clause and chunk
-static inline tk_bits_t *tk_automata_counts (
+static inline char *tk_automata_counts (
   tk_automata_t *aut,
   uint64_t clause,
   uint64_t chunk
@@ -27,7 +27,7 @@ static inline tk_bits_t *tk_automata_counts (
 }
 
 // Get action bits for a specific clause
-static inline tk_bits_t *tk_automata_actions (
+static inline char *tk_automata_actions (
   tk_automata_t *aut,
   uint64_t clause
 ) {
@@ -41,7 +41,7 @@ static inline int tk_automata_init (
   uint64_t n_clauses,
   uint64_t n_chunks,
   uint64_t state_bits,
-  tk_bits_t tail_mask
+  uint8_t tail_mask
 ) {
   aut->n_clauses = n_clauses;
   aut->n_chunks = n_chunks;
@@ -49,12 +49,12 @@ static inline int tk_automata_init (
   aut->tail_mask = tail_mask;
 
   uint64_t action_chunks = n_clauses * n_chunks;
-  aut->actions = tk_malloc_aligned(L, sizeof(tk_bits_t) * action_chunks, TK_CVEC_BITS);
+  aut->actions = (char *)tk_malloc_aligned(L, action_chunks, TK_CVEC_BITS);
   if (!aut->actions)
     return -1;
 
   uint64_t state_chunks = n_clauses * n_chunks * (state_bits - 1);
-  aut->counts = tk_malloc_aligned(L, sizeof(tk_bits_t) * state_chunks, TK_CVEC_BITS);
+  aut->counts = (char *)tk_malloc_aligned(L, state_chunks, TK_CVEC_BITS);
   if (!aut->counts) {
     free(aut->actions);
     aut->actions = NULL;
@@ -87,12 +87,12 @@ static inline void tk_automata_setup (
 
   for (uint64_t clause = clause_first; clause <= clause_last; clause++) {
     for (uint64_t chunk = 0; chunk < aut->n_chunks; chunk++) {
-      tk_bits_t *actions = tk_automata_actions(aut, clause);
-      tk_bits_t *counts = tk_automata_counts(aut, clause, chunk);
+      uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
+      uint8_t *counts = (uint8_t *)tk_automata_counts(aut, clause, chunk);
 
       // Set all lower bits to 1 (representing -1)
       for (uint64_t b = 0; b < m; b++)
-        counts[b] = TK_CVEC_ALL_MASK;
+        counts[b] = 0xFF;
 
       // MSB = 0 for negative (inverted two's complement)
       actions[chunk] = 0;
@@ -106,26 +106,26 @@ static inline void tk_automata_inc (
   tk_automata_t *aut,
   uint64_t clause,
   uint64_t chunk,
-  tk_bits_t active
+  uint8_t active
 ) {
   if (!active) return;
 
   uint64_t m = aut->state_bits - 1;
-  tk_bits_t *counts = tk_automata_counts(aut, clause, chunk);
-  tk_bits_t *actions = tk_automata_actions(aut, clause);
-  tk_bits_t mask = (chunk == aut->n_chunks - 1) ? aut->tail_mask : (tk_bits_t)~0;
+  uint8_t *counts = (uint8_t *)tk_automata_counts(aut, clause, chunk);
+  uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
+  uint8_t mask = (chunk == aut->n_chunks - 1) ? aut->tail_mask : 0xFF;
 
   // Ripple carry addition
-  tk_bits_t carry = active;
+  uint8_t carry = active;
   for (uint64_t b = 0; b < m; b++) {
-    tk_bits_t carry_next = counts[b] & carry;
+    uint8_t carry_next = counts[b] & carry;
     counts[b] ^= carry;
     carry = carry_next;
   }
 
   // Final carry into MSB (inverted sign bit: flip means crossing 0)
-  tk_bits_t carry_masked = carry & mask;
-  tk_bits_t carry_next = actions[chunk] & carry_masked;
+  uint8_t carry_masked = carry & mask;
+  uint8_t carry_next = actions[chunk] & carry_masked;
   actions[chunk] ^= carry_masked;
   carry = carry_next;
 
@@ -141,26 +141,26 @@ static inline void tk_automata_dec (
   tk_automata_t *aut,
   uint64_t clause,
   uint64_t chunk,
-  tk_bits_t active
+  uint8_t active
 ) {
   if (!active) return;
 
   uint64_t m = aut->state_bits - 1;
-  tk_bits_t *counts = tk_automata_counts(aut, clause, chunk);
-  tk_bits_t *actions = tk_automata_actions(aut, clause);
-  tk_bits_t mask = (chunk == aut->n_chunks - 1) ? aut->tail_mask : (tk_bits_t)~0;
+  uint8_t *counts = (uint8_t *)tk_automata_counts(aut, clause, chunk);
+  uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
+  uint8_t mask = (chunk == aut->n_chunks - 1) ? aut->tail_mask : 0xFF;
 
   // Ripple borrow subtraction
-  tk_bits_t borrow = active;
+  uint8_t borrow = active;
   for (uint64_t b = 0; b < m; b++) {
-    tk_bits_t borrow_next = (~counts[b]) & borrow;
+    uint8_t borrow_next = (~counts[b]) & borrow;
     counts[b] ^= borrow;
     borrow = borrow_next;
   }
 
   // Final borrow from MSB
-  tk_bits_t borrow_masked = borrow & mask;
-  tk_bits_t borrow_next = (~actions[chunk]) & borrow_masked;
+  uint8_t borrow_masked = borrow & mask;
+  uint8_t borrow_next = (~actions[chunk]) & borrow_masked;
   actions[chunk] ^= borrow_masked;
   borrow = borrow_next;
 

@@ -96,16 +96,16 @@ typedef struct tk_tsetlin_s {
   unsigned int class_chunks;
   unsigned int state_chunks;
   unsigned int action_chunks;
-  tk_bits_t tail_mask;
-  tk_bits_t *state;
-  tk_bits_t *actions;
+  uint8_t tail_mask;
+  char *state;
+  char *actions;
   tk_automata_t automata;
   double negative;
   double specificity;
   size_t results_len;
   unsigned int *results;
   size_t encodings_len;
-  tk_bits_t *encodings;
+  char *encodings;
 } tk_tsetlin_t;
 
 #define tm_thread_data(pool, thread) \
@@ -122,30 +122,30 @@ typedef struct tk_tsetlin_s {
 #define tm_state_clause_chunks(pool, thread) \
   (tm_thread_data(pool, thread)->clast - tm_thread_data(pool, thread)->cfirst + 1)
 
-static inline tk_bits_t tk_tsetlin_calculate (
+static inline uint8_t tk_tsetlin_calculate (
   tk_tsetlin_t *tm,
-  tk_bits_t *input,
+  char *input,
   unsigned int *literalsp,
   unsigned int *votesp,
   unsigned int chunk
 ) {
-  tk_bits_t out = (tk_bits_t) 0;
+  uint8_t out = 0;
   unsigned int input_chunks = tm->input_chunks;
   unsigned int tolerance = tm->clause_tolerance;
   for (unsigned int j = 0; j < TK_CVEC_BITS; j ++) {
     unsigned int clause = chunk * TK_CVEC_BITS + j;
-    tk_bits_t *actions = tk_automata_actions(&tm->automata, clause);
+    char *actions = tk_automata_actions(&tm->automata, clause);
     unsigned int failed = 0;
     unsigned int literals = 0;
     for (unsigned int k = 0; k < input_chunks - 1; k ++) {
-      tk_bits_t inp = input[k];
-      tk_bits_t act = actions[k];
+      uint8_t inp = ((uint8_t *)input)[k];
+      uint8_t act = ((uint8_t *)actions)[k];
       literals += (unsigned int) tk_cvec_byte_popcount(act);
       failed += (unsigned int) tk_cvec_byte_popcount(act & (~inp));
     }
-    tk_bits_t last_act = actions[input_chunks - 1] & tm->tail_mask;
+    uint8_t last_act = ((uint8_t *)actions)[input_chunks - 1] & tm->tail_mask;
     literals += (unsigned int) tk_cvec_byte_popcount(last_act);
-    failed += (unsigned int) tk_cvec_byte_popcount(last_act & (~input[input_chunks - 1]) & tm->tail_mask);
+    failed += (unsigned int) tk_cvec_byte_popcount(last_act & (~((uint8_t *)input)[input_chunks - 1]) & tm->tail_mask);
     long int votes;
     if (literals == 0) {
       votes = (long int) tolerance;
@@ -155,7 +155,7 @@ static inline tk_bits_t tk_tsetlin_calculate (
         votes = 0;
     }
     if (votes > 0)
-      out |= ((tk_bits_t) 1 << j);
+      out |= (1 << j);
     literalsp[j] = literals;
     votesp[j] = (unsigned int) votes;
   }
@@ -164,15 +164,15 @@ static inline tk_bits_t tk_tsetlin_calculate (
 
 static inline long int tk_tsetlin_sums (
   tk_tsetlin_t *tm,
-  tk_bits_t out,
+  uint8_t out,
   unsigned int *votes
 ) {
   long int sum = 0;
   for (unsigned int j = 0; j < TK_CVEC_BITS; j += 2)
-    if (out & ((tk_bits_t) 1 << j))
+    if (out & (1 << j))
       sum += (long int) votes[j];
   for (unsigned int j = 1; j < TK_CVEC_BITS; j += 2)
-    if (out & ((tk_bits_t) 1 << j))
+    if (out & (1 << j))
       sum -= (long int) votes[j];
   return sum;
 }
@@ -181,7 +181,7 @@ static inline void apply_feedback (
   tk_tsetlin_t *tm,
   unsigned int clause_idx,
   unsigned int chunk,
-  tk_bits_t *input,
+  char *input,
   unsigned int *literals,
   unsigned int *votes,
   bool positive_feedback,
@@ -198,17 +198,17 @@ static inline void apply_feedback (
       // Type Ia: clause voted
       if (literals[clause_idx] < max_literals)
         for (unsigned int k = 0; k < input_chunks; k ++)
-          tk_automata_inc(&tm->automata, chunk * TK_CVEC_BITS + clause_idx, k, input[k]);
+          tk_automata_inc(&tm->automata, chunk * TK_CVEC_BITS + clause_idx, k, ((uint8_t *)input)[k]);
       // Type Ib: deterministic negative feedback
       for (unsigned int k = 0; k < input_chunks; k ++)
-        tk_automata_dec(&tm->automata, chunk * TK_CVEC_BITS + clause_idx, k, ~input[k]);
+        tk_automata_dec(&tm->automata, chunk * TK_CVEC_BITS + clause_idx, k, ~((uint8_t *)input)[k]);
     } else {
       // Clause didn't vote: random penalty
       unsigned int s = (2 * features) / specificity;
       for (unsigned int r = 0; r < s; r ++) {
         unsigned int random_chunk = tk_fast_random() % input_chunks;
         unsigned int random_bit = tk_fast_random() % TK_CVEC_BITS;
-        tk_bits_t random_mask = (tk_bits_t)1 << random_bit;
+        uint8_t random_mask = 1 << random_bit;
         tk_automata_dec(&tm->automata, chunk * TK_CVEC_BITS + clause_idx, random_chunk, random_mask);
       }
     }
@@ -217,14 +217,14 @@ static inline void apply_feedback (
     if (output)
       // Type II feedback: include false input literals
       for (unsigned int k = 0; k < input_chunks; k ++)
-        tk_automata_inc(&tm->automata, chunk * TK_CVEC_BITS + clause_idx, k, ~input[k]);
+        tk_automata_inc(&tm->automata, chunk * TK_CVEC_BITS + clause_idx, k, ~((uint8_t *)input)[k]);
   }
 }
 
 static inline void tm_update (
   tk_tsetlin_t *tm,
-  tk_bits_t *input,
-  tk_bits_t out,
+  char *input,
+  uint8_t out,
   unsigned int *literals,
   unsigned int *votes,
   unsigned int sample, // sample number
@@ -421,8 +421,8 @@ static void tk_classifier_predict_thread (
   unsigned int votes[TK_CVEC_BITS];
   for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
     for (unsigned int s = 0; s < n; s ++) {
-      tk_bits_t *input = (tk_bits_t *) ps->a + s * input_chunks;
-      tk_bits_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
+      char *input = ps->a + s * input_chunks;
+      uint8_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
       long int score = tk_tsetlin_sums(tm, out, votes);
       tm_state_scores(pool, thread, chunk, s) = score;
     }
@@ -486,8 +486,8 @@ static void tk_classifier_train_thread (
     unsigned int chunk_class = chunk / clause_chunks;
     for (unsigned int i = 0; i < n; i ++) {
       unsigned int sample = shuffle[i];
-      tk_bits_t *input = (tk_bits_t *) ps->a + sample * input_chunks;
-      tk_bits_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
+      char *input = ps->a + sample * input_chunks;
+      uint8_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
       unsigned int sample_class = lbls[sample];
       tm_update(tm, input, out, literals, votes, sample, sample_class, 1, chunk_class, chunk, thread);
     }
@@ -511,16 +511,16 @@ static void tk_encoder_train_thread (
   unsigned int *shuffle = tm_state_shuffle(pool, thread);
   unsigned int literals[TK_CVEC_BITS];
   unsigned int votes[TK_CVEC_BITS];
-  tk_bits_t *lbls = (tk_bits_t *) ls->a;
+  char *lbls = ls->a;
   for (unsigned int chunk = cfirst; chunk <= clast; chunk ++) {
     unsigned int chunk_class = chunk / clause_chunks;
     unsigned int enc_chunk = TK_CVEC_BITS_BYTE(chunk_class);
     unsigned int enc_bit = TK_CVEC_BITS_BIT(chunk_class);
     for (unsigned int i = 0; i < n; i ++) {
       unsigned int sample = shuffle[i];
-      tk_bits_t *input = (tk_bits_t *) ps->a + sample * input_chunks;
-      tk_bits_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
-      bool target_vote = (lbls[sample * class_chunks + enc_chunk] & ((tk_bits_t) 1 << enc_bit)) > 0;
+      char *input = ps->a + sample * input_chunks;
+      uint8_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
+      bool target_vote = (((uint8_t *)lbls)[sample * class_chunks + enc_chunk] & (1 << enc_bit)) > 0;
       tm_update(tm, input, out, literals, votes, sample, chunk_class, target_vote, chunk_class, chunk, thread);
     }
   }
@@ -532,7 +532,7 @@ static void tk_encoder_predict_reduce_thread (
   unsigned int sfirst,
   unsigned int slast
 ) {
-  tk_bits_t *encodings = tm->encodings;
+  char *encodings = tm->encodings;
   unsigned int clause_chunks = tm->clause_chunks;
   unsigned int classes = tm->classes;
   unsigned int class_chunks = tm->class_chunks;
@@ -547,14 +547,14 @@ static void tk_encoder_predict_reduce_thread (
         votes[class] += tm_state_scores(pool, t, chunk, s);
       }
     }
-    tk_bits_t *e = encodings + s * class_chunks;
+    uint8_t *e = (uint8_t *)(encodings + s * class_chunks);
     for (unsigned int class = 0; class < tm->classes; class ++) {
       unsigned int chunk = TK_CVEC_BITS_BYTE(class);
       unsigned int pos = TK_CVEC_BITS_BIT(class);
       if (votes[class] > 0)
-        e[chunk] |= ((tk_bits_t)1 << pos);
+        e[chunk] |= (1 << pos);
       else
-        e[chunk] &= ~((tk_bits_t)1 << pos);
+        e[chunk] &= ~(1 << pos);
     }
   }
 }
@@ -685,13 +685,13 @@ static inline void tk_tsetlin_init_classifier (
   tm->state_bits = state_bits;
   tm->input_bits = 2 * tm->features;
   uint64_t tail_bits = tm->input_bits & (TK_CVEC_BITS - 1);
-  tm->tail_mask = tail_bits ? (tk_bits_t)((1u << tail_bits) - 1) : (tk_bits_t) ~0;
+  tm->tail_mask = tail_bits ? (uint8_t)((1u << tail_bits) - 1) : 0xFF;
   tm->input_chunks = TK_CVEC_BITS_BYTES(tm->input_bits);
   tm->clause_chunks = TK_CVEC_BITS_BYTES(tm->clauses);
   tm->state_chunks = tm->classes * tm->clauses * (tm->state_bits - 1) * tm->input_chunks;
   tm->action_chunks = tm->classes * tm->clauses * tm->input_chunks;
-  tm->state = tk_malloc_aligned(L, sizeof(tk_bits_t) * tm->state_chunks, TK_CVEC_BITS);
-  tm->actions = tk_malloc_aligned(L, sizeof(tk_bits_t) * tm->action_chunks, TK_CVEC_BITS);
+  tm->state = (char *)tk_malloc_aligned(L, tm->state_chunks, TK_CVEC_BITS);
+  tm->actions = (char *)tk_malloc_aligned(L, tm->action_chunks, TK_CVEC_BITS);
   tm->specificity = specificity;
   if (!(tm->state && tm->actions))
     luaL_error(L, "error in malloc during creation of classifier");
@@ -862,7 +862,7 @@ static inline int tk_tsetlin_predict_encoder (
   tk_cvec_t *ps = tk_cvec_peek(L, 2, "problems");
   unsigned int n = tk_lua_checkunsigned(L, 3, "argument 2 is not an integer n_samples");
   unsigned int n_threads = tk_threads_getn(L, 4, "predict", NULL);
-  tm->encodings = tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * tm->class_chunks * sizeof(tk_bits_t), false);
+  tm->encodings = (char *)tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * tm->class_chunks, false);
 
   tk_tsetlin_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_tsetlin_thread_t));
   memset(threads, 0, n_threads * sizeof(tk_tsetlin_thread_t));
@@ -891,8 +891,8 @@ static inline int tk_tsetlin_predict_encoder (
   tk_threads_destroy(pool);
   free(threads);
 
-  tk_cvec_t *out = tk_cvec_create(L, n * tm->class_chunks * sizeof(tk_bits_t), 0, 0);
-  memcpy(out->a, tm->encodings, n * tm->class_chunks * sizeof(tk_bits_t));
+  tk_cvec_t *out = tk_cvec_create(L, n * tm->class_chunks, 0, 0);
+  memcpy(out->a, tm->encodings, n * tm->class_chunks);
   return 1;
 }
 
@@ -998,7 +998,7 @@ static inline int tk_tsetlin_train_encoder (
   lua_pop(L, 1);
   unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
   unsigned int n_threads = tk_threads_getn(L, 2, "train", "threads");
-  tm->encodings = tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * tm->class_chunks * sizeof(tk_bits_t), false);
+  tm->encodings = (char *)tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * tm->class_chunks, false);
   int i_each = -1;
   if (tk_lua_ftype(L, 2, "each") != LUA_TNIL) {
     lua_getfield(L, 2, "each");
@@ -1101,8 +1101,8 @@ static inline void _tk_tsetlin_persist_classifier (lua_State *L, tk_tsetlin_t *t
   tk_lua_fwrite(L, &tm->state_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->action_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->specificity, sizeof(double), 1, fh);
-  tk_lua_fwrite(L, &tm->tail_mask, sizeof(tk_bits_t), 1, fh);
-  tk_lua_fwrite(L, tm->actions, sizeof(tk_bits_t), tm->action_chunks, fh);
+  tk_lua_fwrite(L, &tm->tail_mask, sizeof(uint8_t), 1, fh);
+  tk_lua_fwrite(L, tm->actions, 1, tm->action_chunks, fh);
 }
 
 static inline void tk_tsetlin_persist_classifier (lua_State *L, tk_tsetlin_t *tm, FILE *fh)
@@ -1142,7 +1142,7 @@ static inline int tk_tsetlin_checkpoint (lua_State *L)
   tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
   tk_cvec_t *checkpoint = tk_cvec_peek(L, 2, "checkpoint");
 
-  size_t size = tm->action_chunks * sizeof(tk_bits_t);
+  size_t size = tm->action_chunks;
   if (tk_cvec_ensure(checkpoint, size) != 0)
     luaL_error(L, "failed to resize checkpoint buffer");
   checkpoint->n = size;
@@ -1160,7 +1160,7 @@ static inline int tk_tsetlin_restore (lua_State *L)
   tk_cvec_t *checkpoint = tk_cvec_peek(L, 2, "checkpoint");
 
   // Validate size matches
-  size_t expected_size = tm->action_chunks * sizeof(tk_bits_t);
+  size_t expected_size = tm->action_chunks;
   if (checkpoint->n != expected_size)
     luaL_error(L, "checkpoint size mismatch: expected %zu bytes, got %zu",
                expected_size, checkpoint->n);
@@ -1197,18 +1197,18 @@ static inline int tk_tsetlin_reconfigure (lua_State *L)
   // Reallocate actions if needed
   if (new_action_chunks > tm->action_chunks) {
     free(tm->actions);
-    tm->actions = tk_malloc_aligned(L, sizeof(tk_bits_t) * new_action_chunks, TK_CVEC_BITS);
+    tm->actions = (char *)tk_malloc_aligned(L, new_action_chunks, TK_CVEC_BITS);
     if (!tm->actions)
       luaL_error(L, "failed to allocate actions in reconfigure");
   }
 
   // Zero actions (fresh start)
-  memset(tm->actions, 0, sizeof(tk_bits_t) * new_action_chunks);
+  memset(tm->actions, 0, new_action_chunks);
 
   // Reallocate state if needed
   if (new_state_chunks > tm->state_chunks || !tm->state) {
     if (tm->state) free(tm->state);
-    tm->state = tk_malloc_aligned(L, sizeof(tk_bits_t) * new_state_chunks, TK_CVEC_BITS);
+    tm->state = (char *)tk_malloc_aligned(L, new_state_chunks, TK_CVEC_BITS);
     if (!tm->state)
       luaL_error(L, "failed to allocate state in reconfigure");
   }
@@ -1251,9 +1251,9 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, 
   tk_lua_fread(L, &tm->state_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->action_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->specificity, sizeof(double), 1, fh);
-  tk_lua_fread(L, &tm->tail_mask, sizeof(tk_bits_t), 1, fh);
-  tm->actions = tk_malloc_aligned(L, sizeof(tk_bits_t) * tm->action_chunks, TK_CVEC_BITS);
-  tk_lua_fread(L, tm->actions, sizeof(tk_bits_t), tm->action_chunks, fh);
+  tk_lua_fread(L, &tm->tail_mask, sizeof(uint8_t), 1, fh);
+  tm->actions = (char *)tk_malloc_aligned(L, tm->action_chunks, TK_CVEC_BITS);
+  tk_lua_fread(L, tm->actions, 1, tm->action_chunks, fh);
   tm->state = NULL;
   tm->automata.n_clauses = tm->classes * tm->clauses;
   tm->automata.n_chunks = tm->input_chunks;

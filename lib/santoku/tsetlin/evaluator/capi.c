@@ -59,7 +59,7 @@ typedef struct {
   uint64_t n_pos, n_neg;
   double *f1, *precision, *recall;
   int64_t *predicted, *expected;
-  tk_bits_t *codes, *codes_predicted, *codes_expected, *mask;
+  char *codes, *codes_predicted, *codes_expected, *mask;
   uint64_t mask_popcount;
   double *dcodes;
   tk_iumap_t *id_assignment;
@@ -106,7 +106,7 @@ typedef struct {
   tk_dsu_t *dsu;
   tk_cvec_t *is_core;
   uint64_t *prefix_cache;
-  tk_bits_t *prefix_bytes;
+  char *prefix_bytes;
   uint64_t prefix_cache_depth;
   double corr_score;
   uint64_t corr_nodes_processed;
@@ -142,8 +142,8 @@ static void tk_eval_worker (void *dp, int sig)
           uint64_t word = TK_CVEC_BITS_BYTE(j);
           uint64_t bit = TK_CVEC_BITS_BIT(j);
           bool y =
-            (state->codes_expected[i * state->chunks + word] & ((tk_bits_t)1 << bit)) ==
-            (state->codes_predicted[i * state->chunks + word] & ((tk_bits_t)1 << bit));
+            (((uint8_t *)state->codes_expected)[i * state->chunks + word] & (1 << bit)) ==
+            (((uint8_t *)state->codes_predicted)[i * state->chunks + word] & (1 << bit));
           if (y)
             continue;
           data->diff ++;
@@ -596,7 +596,7 @@ static inline int tm_clustering_accuracy_lua (lua_State *L)
 
 static inline void tm_retrieval_accuracy (
   lua_State *L,
-  tk_bits_t *codes,
+  char *codes,
   tk_ann_t *ann,
   tk_hbi_t *hbi,
   tk_ivec_t *adjacency_ids,
@@ -681,7 +681,7 @@ static inline int tm_retrieval_accuracy_lua (lua_State *L)
   // Try codes first (optional)
   lua_getfield(L, 1, "codes");
   tk_cvec_t *cvec = tk_cvec_peekopt(L, -1);
-  tk_bits_t *codes = cvec ? (tk_bits_t *) cvec->a : NULL;
+  char *codes = cvec ? cvec->a : NULL;
   lua_pop(L, 1);
 
   // Try index (optional)
@@ -750,11 +750,11 @@ static inline int tm_retrieval_accuracy_lua (lua_State *L)
 static inline int tm_encoding_accuracy (lua_State *L)
 {
   lua_settop(L, 5);
-  tk_bits_t *codes_predicted, *codes_expected;
+  char *codes_predicted, *codes_expected;
   tk_cvec_t *pvec = tk_cvec_peekopt(L, 1);
   tk_cvec_t *evec = tk_cvec_peekopt(L, 2);
-  codes_predicted = pvec != NULL ? (tk_bits_t *) pvec->a : (tk_bits_t *) tk_lua_checkustring(L, 1, "predicted");
-  codes_expected = evec != NULL ? (tk_bits_t *) evec->a : (tk_bits_t *) tk_lua_checkustring(L, 2, "expected");
+  codes_predicted = pvec != NULL ? pvec->a : (char *)tk_lua_checkustring(L, 1, "predicted");
+  codes_expected = evec != NULL ? evec->a : (char *)tk_lua_checkustring(L, 2, "expected");
   unsigned int n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
   unsigned int n_dims = tk_lua_checkunsigned(L, 4, "n_hidden");
   unsigned int n_threads = tk_threads_getn(L, 5, "n_threads", NULL);
@@ -1127,9 +1127,12 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
   tk_ivec_t *ids,
   int i_ids,
   int i_eph,
-  tk_ivec_t *offsets,
-  tk_ivec_t *neighbors,
-  tk_dvec_t *weights,
+  tk_ivec_t *cluster_offsets,
+  tk_ivec_t *cluster_neighbors,
+  tk_dvec_t *cluster_weights,
+  tk_ivec_t *eval_offsets,
+  tk_ivec_t *eval_neighbors,
+  tk_dvec_t *eval_weights,
   unsigned int n_threads,
   uint64_t probe_radius,
   tk_agglo_linkage_t linkage,
@@ -1139,7 +1142,7 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
   tk_ivec_sim_type_t cmp,
   double cmp_alpha,
   double cmp_beta,
-  int64_t rank_filter,
+  int64_t knn_rank,
   uint64_t min_pts,
   bool assign_noise,
   tk_eval_metric_t metric,
@@ -1173,27 +1176,61 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
   tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
   lua_pop(L, 1);
 
-  tk_inv_hoods_t *inv_hoods = NULL;
-  tk_ann_hoods_t *ann_hoods = NULL;
-  tk_hbi_hoods_t *hbi_hoods = NULL;
-  tk_ivec_t *hoods_uids = NULL;
+  tk_ivec_t *cluster_adj_ids = NULL;
+  tk_ivec_t *cluster_adj_offsets = NULL;
+  tk_ivec_t *cluster_adj_neighbors = NULL;
+  tk_dvec_t *cluster_adj_weights = NULL;
 
   if (linkage == TK_AGGLO_LINKAGE_SINGLE && knn > 0) {
-    if (inv != NULL) {
-      tk_inv_neighborhoods(L, inv, knn, 0.0, 1.0, knn_min, cmp, cmp_alpha, cmp_beta, knn_mutual, rank_filter, n_threads, &inv_hoods, &hoods_uids);
+    // Case 1: User provided cluster_xxx CSR - use directly
+    if (cluster_offsets && cluster_neighbors && cluster_weights) {
+      cluster_adj_ids = ids ? ids :
+                        inv ? tk_iumap_keys(L, inv->uid_sid) :
+                        ann ? tk_iumap_keys(L, ann->uid_sid) :
+                        hbi ? tk_iumap_keys(L, hbi->uid_sid) : NULL;
+      cluster_adj_offsets = cluster_offsets;
+      cluster_adj_neighbors = cluster_neighbors;
+      cluster_adj_weights = cluster_weights;
+    }
+    // Case 2: Generate hoods from index, then convert to CSR
+    else {
+      tk_inv_hoods_t *inv_hoods = NULL;
+      tk_ann_hoods_t *ann_hoods = NULL;
+      tk_hbi_hoods_t *hbi_hoods = NULL;
+      tk_ivec_t *hoods_uids = NULL;
+
+      if (inv != NULL) {
+        tk_inv_neighborhoods(L, inv, knn, 0.0, 1.0, knn_min, cmp, cmp_alpha, cmp_beta, knn_mutual, knn_rank, n_threads, &inv_hoods, &hoods_uids);
+        tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
+        tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+        lua_pop(L, 2);
+      } else if (ann != NULL) {
+        tk_ann_neighborhoods(L, ann, knn, probe_radius, 1, -1, knn_min, knn_mutual, n_threads, &ann_hoods, &hoods_uids);
+        tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
+        tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+        lua_pop(L, 2);
+      } else if (hbi != NULL) {
+        tk_hbi_neighborhoods(L, hbi, knn, 1, hbi->features, knn_min, knn_mutual, n_threads, &hbi_hoods, &hoods_uids);
+        tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
+        tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+        lua_pop(L, 2);
+      }
+
+      // Convert hoods to CSR
+      uint64_t features = inv ? inv->features :
+                         ann ? ann->features :
+                         hbi ? hbi->features : 0;
+
+      if (tk_graph_adj_hoods(L, hoods_uids, inv_hoods, ann_hoods, hbi_hoods, features,
+                            n_threads, &cluster_adj_offsets, &cluster_adj_neighbors,
+                            &cluster_adj_weights) != 0)
+        tk_lua_verror(L, 2, "optimize_clustering", "failed to convert hoods to adjacency");
+
+      cluster_adj_ids = hoods_uids;
+      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -3);
       tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
       tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
-      lua_pop(L, 2);
-    } else if (ann != NULL) {
-      tk_ann_neighborhoods(L, ann, knn, probe_radius, 1, -1, knn_min, knn_mutual, n_threads, &ann_hoods, &hoods_uids);
-      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
-      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
-      lua_pop(L, 2);
-    } else if (hbi != NULL) {
-      tk_hbi_neighborhoods(L, hbi, knn, 1, hbi->features, knn_min, knn_mutual, n_threads, &hbi_hoods, &hoods_uids);
-      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
-      tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
-      lua_pop(L, 2);
+      lua_pop(L, 3);
     }
   }
 
@@ -1202,9 +1239,9 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
     .i_each = i_each,
     .i_ids = i_ids,
     .i_eph = i_eph,
-    .offsets = offsets,
-    .neighbors = neighbors,
-    .weights = weights,
+    .offsets = eval_offsets,
+    .neighbors = eval_neighbors,
+    .weights = eval_weights,
     .n_threads = n_threads,
     .eval_metric = metric,
     .tolerance = tolerance,
@@ -1217,12 +1254,15 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
 
   uint64_t features = ann != NULL ? ann->features :
                       hbi != NULL ? hbi->features :
-                      inv->features;
+                      inv != NULL ? inv->features : 0;
   tk_agglo_index_type_t index_type = hbi != NULL ? TK_AGGLO_USE_HBI : TK_AGGLO_USE_ANN;
 
+  uint64_t centroid_bucket_target = ann ? ann->bucket_target : 30;
+
   tk_agglo(L, ann, hbi, ids, features, index_type, linkage, probe_radius, knn, min_pts, assign_noise,
-           inv_hoods, ann_hoods, hbi_hoods, hoods_uids, n_threads, working_assignments,
-           agglo_snapshot_callback, &cb_data);
+           cluster_adj_ids, cluster_adj_offsets, cluster_adj_neighbors, cluster_adj_weights,
+           n_threads, working_assignments, agglo_snapshot_callback, &cb_data,
+           centroid_bucket_target);
 
   tk_ivec_destroy(working_assignments);
 
@@ -1241,27 +1281,58 @@ static inline int tm_optimize_clustering (lua_State *L)
   tk_ann_t *ann = tk_ann_peekopt(L, i_index);
   tk_hbi_t *hbi = tk_hbi_peekopt(L, i_index);
 
-  if (inv == NULL && ann == NULL && hbi == NULL)
-    tk_lua_verror(L, 3, "optimize_clustering", "index", "tk_inv_t, tk_ann_t, or tk_hbi_t must be provided");
-
   lua_getfield(L, 1, "ids");
   tk_ivec_t *ids = tk_ivec_peekopt(L, -1);
   int i_ids = ids == NULL ? -1 : tk_lua_absindex(L, -1);
 
+  // Un-prefixed adjacency (for backward compat and defaults)
   lua_getfield(L, 1, "offsets");
-  tk_ivec_t *offsets = tk_ivec_peek(L, -1, "offsets");
+  tk_ivec_t *offsets = tk_ivec_peekopt(L, -1);
   lua_pop(L, 1);
 
   lua_getfield(L, 1, "neighbors");
-  tk_ivec_t *neighbors = tk_ivec_peek(L, -1, "neighbors");
+  tk_ivec_t *neighbors = tk_ivec_peekopt(L, -1);
   lua_pop(L, 1);
 
   lua_getfield(L, 1, "weights");
-  tk_dvec_t *weights = tk_dvec_peek(L, -1, "weights");
+  tk_dvec_t *weights = tk_dvec_peekopt(L, -1);
   lua_pop(L, 1);
 
-  if (inv == NULL && hbi == NULL && ann == NULL)
-    tk_lua_verror(L, 3, "optimize_clustering", "index", "agglo method requires inv, hbi, or ann index");
+  // Clustering adjacency (optional for single linkage)
+  lua_getfield(L, 1, "cluster_offsets");
+  tk_ivec_t *cluster_offsets = tk_ivec_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "cluster_neighbors");
+  tk_ivec_t *cluster_neighbors = tk_ivec_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "cluster_weights");
+  tk_dvec_t *cluster_weights = tk_dvec_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  // Eval adjacency (optional)
+  lua_getfield(L, 1, "eval_offsets");
+  tk_ivec_t *eval_offsets = tk_ivec_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "eval_neighbors");
+  tk_ivec_t *eval_neighbors = tk_ivec_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "eval_weights");
+  tk_dvec_t *eval_weights = tk_dvec_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  // Apply defaults: cluster_xxx defaults to offsets/neighbors/weights
+  if (!cluster_offsets) cluster_offsets = offsets;
+  if (!cluster_neighbors) cluster_neighbors = neighbors;
+  if (!cluster_weights) cluster_weights = weights;
+
+  // Apply defaults: eval_xxx defaults to cluster_xxx
+  if (!eval_offsets) eval_offsets = cluster_offsets;
+  if (!eval_neighbors) eval_neighbors = cluster_neighbors;
+  if (!eval_weights) eval_weights = cluster_weights;
 
   unsigned int n_threads = tk_threads_getn(L, 1, "optimize_clustering", "threads");
 
@@ -1272,16 +1343,23 @@ static inline int tm_optimize_clustering (lua_State *L)
   else if (!strcmp(linkage_str, "single"))
     linkage = TK_AGGLO_LINKAGE_SINGLE;
 
+  // No index: default to single linkage for adjacency-only clustering
+  if (inv == NULL && ann == NULL && hbi == NULL) {
+    linkage = TK_AGGLO_LINKAGE_SINGLE;
+    if (ids == NULL)
+      tk_lua_verror(L, 3, "optimize_clustering", "ids", "required");
+  }
+
   uint64_t knn = tk_lua_foptunsigned(L, 1, "optimize_clustering", "knn", 0);
   uint64_t knn_min = tk_lua_foptunsigned(L, 1, "optimize_clustering", "knn_min", 0);
   bool knn_mutual = tk_lua_foptboolean(L, 1, "optimize_clustering", "knn_mutual", true);
+  int64_t knn_rank = tk_lua_foptinteger(L, 1, "optimize_clustering", "knn_rank", -1);
   uint64_t min_pts = tk_lua_foptunsigned(L, 1, "optimize_clustering", "min_pts", 0);
   bool assign_noise = tk_lua_foptboolean(L, 1, "optimize_clustering", "assign_noise", false);
 
   const char *cmpstr = tk_lua_foptstring(L, 1, "optimize_clustering", "cmp", "jaccard");
-  double cmp_alpha = tk_lua_foptnumber(L, 1, "optimize_clustering", "cmp_alpha", 1.0);
-  double cmp_beta = tk_lua_foptnumber(L, 1, "optimize_clustering", "cmp_beta", 0.1);
-  int64_t rank_filter = tk_lua_foptinteger(L, 1, "optimize_clustering", "rank_filter", -1);
+  double cmp_alpha = tk_lua_foptnumber(L, 1, "optimize_clustering", "cmp_alpha", 0.5);
+  double cmp_beta = tk_lua_foptnumber(L, 1, "optimize_clustering", "cmp_beta", 0.5);
 
   tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
   if (!strcmp(cmpstr, "jaccard"))
@@ -1293,8 +1371,8 @@ static inline int tm_optimize_clustering (lua_State *L)
   else if (!strcmp(cmpstr, "dice"))
     cmp = TK_IVEC_DICE;
 
-  if (linkage == TK_AGGLO_LINKAGE_SINGLE && knn == 0)
-    tk_lua_verror(L, 3, "optimize_clustering", "knn", "knn parameter required for linkage=single");
+  if (linkage == TK_AGGLO_LINKAGE_SINGLE && knn == 0 && (inv != NULL || ann != NULL || hbi != NULL))
+    tk_lua_verror(L, 3, "optimize_clustering", "knn", "required");
   else if (linkage == TK_AGGLO_LINKAGE_CENTROID && knn == 0)
     knn = 1; // find single nearest other centroid
 
@@ -1317,9 +1395,11 @@ static inline int tm_optimize_clustering (lua_State *L)
 
   uint64_t probe_radius = tk_lua_foptunsigned(L, 1, "optimize_clustering", "probe_radius", 3);
   tm_optimize_result_t result = tm_optimize_clustering_agglo(
-    L, inv, ann, hbi, state_ids, i_ids, i_eph, offsets, neighbors, weights,
+    L, inv, ann, hbi, state_ids, i_ids, i_eph,
+    cluster_offsets, cluster_neighbors, cluster_weights,
+    eval_offsets, eval_neighbors, eval_weights,
     n_threads, probe_radius, linkage, knn, knn_min, knn_mutual, cmp, cmp_alpha,
-    cmp_beta, rank_filter, min_pts, assign_noise, metric, tolerance, i_each);
+    cmp_beta, knn_rank, min_pts, assign_noise, metric, tolerance, i_each);
 
   tk_lua_del_ephemeron(L, TK_EVAL_EPH, i_eph, state_ididx);
   tk_iumap_destroy(state_ididx);
@@ -1362,7 +1442,7 @@ static inline int tm_optimize_retrieval (lua_State *L)
   // Try codes first (optional)
   lua_getfield(L, 1, "codes");
   tk_cvec_t *cvec = tk_cvec_peekopt(L, -1);
-  tk_bits_t *codes = cvec ? (tk_bits_t *) cvec->a : NULL;
+  char *codes = cvec ? cvec->a : NULL;
   lua_pop(L, 1);
 
   // Try index (optional)
@@ -1454,7 +1534,7 @@ static inline int tm_optimize_retrieval (lua_State *L)
 
 static double tk_compute_reconstruction (
   tk_eval_t *state,
-  tk_bits_t *mask,
+  char *mask,
   uint64_t k,
   tk_threadpool_t *pool
 ) {
@@ -1491,8 +1571,8 @@ static void tm_optimize_bits_prefix_greedy (
   uint64_t bytes_per_mask = TK_CVEC_BITS_BYTES(n_dims);
   tk_cvec_t *mask_cvec = tk_cvec_create(L, bytes_per_mask, 0, 0);
   tk_cvec_t *candidate_cvec = tk_cvec_create(L, bytes_per_mask, 0, 0);
-  tk_bits_t *mask = (tk_bits_t *)mask_cvec->a;
-  tk_bits_t *candidate = (tk_bits_t *)candidate_cvec->a;
+  char *mask = mask_cvec->a;
+  char *candidate = candidate_cvec->a;
 
   uint64_t best_prefix;
   double best_prefix_score;
@@ -1665,7 +1745,7 @@ static inline int tm_optimize_bits (lua_State *L)
   // Try codes first (optional)
   lua_getfield(L, 1, "codes");
   tk_cvec_t *cvec = tk_cvec_peekopt(L, -1);
-  tk_bits_t *codes = cvec ? (tk_bits_t *) cvec->a : NULL;
+  char *codes = cvec ? cvec->a : NULL;
   lua_pop(L, 1);
 
   // Try index (optional)

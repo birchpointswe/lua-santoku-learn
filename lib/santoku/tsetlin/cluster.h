@@ -80,14 +80,14 @@ typedef struct {
   uint64_t knn;
   uint64_t min_pts;
   bool assign_noise;
-  tk_inv_hoods_t *inv_hoods;
-  tk_ann_hoods_t *ann_hoods;
-  tk_hbi_hoods_t *hbi_hoods;
-  tk_ivec_t *hoods_uids;
-  tk_iumap_t *uid_to_hood_idx;
-  tk_ivec_t *hood_offsets;
+  tk_ivec_t *adj_ids;
+  tk_ivec_t *adj_offsets;
+  tk_ivec_t *adj_neighbors;
+  tk_dvec_t *adj_weights;
+  tk_iumap_t *uid_to_adj_idx;
+  tk_ivec_t *adj_scan_offsets;
   tk_cvec_t *is_core;
-  uint64_t n_hoods;
+  uint64_t n_adj;
   double current_epsilon;  // Current distance threshold for single-linkage
 } tk_agglo_state_t;
 
@@ -107,10 +107,10 @@ typedef struct {
   } stage_data;
 } tk_agglo_thread_t;
 
-static inline uint64_t tk_agglo_hash_code (tk_bits_t *code, uint64_t code_chunks) {
+static inline uint64_t tk_agglo_hash_code (char *code, uint64_t code_chunks) {
   uint64_t hash = 0;
   for (uint64_t i = 0; i < code_chunks && i < 8; i++) {
-    hash ^= ((uint64_t)code[i]) << (i * 8);
+    hash ^= ((uint64_t)(uint8_t)code[i]) << (i * 8);
   }
   return hash;
 }
@@ -159,8 +159,8 @@ static inline tk_agglo_cluster_t *tk_agglo_cluster_create (
       return NULL;
     }
   }
-  tk_bits_t tail_mask = (features % TK_CVEC_BITS == 0) ?
-    (tk_bits_t)~0 : (tk_bits_t)((1 << (features % TK_CVEC_BITS)) - 1);
+  uint8_t tail_mask = (features % TK_CVEC_BITS == 0) ?
+    0xFF : (uint8_t)((1 << (features % TK_CVEC_BITS)) - 1);
   cluster->centroid = tk_centroid_create(L, code_chunks, tail_mask);
   if (!cluster->centroid) {
     tk_ivec_destroy(cluster->members);
@@ -193,7 +193,7 @@ static inline void tk_agglo_cluster_destroy (
 static inline void tk_agglo_cluster_add_member (
   tk_agglo_cluster_t *cluster,
   int64_t uid,
-  tk_bits_t *code,
+  char *code,
   uint64_t code_chunks
 ) {
   tk_ivec_push(cluster->members, uid);
@@ -223,44 +223,18 @@ static inline bool tk_agglo_is_core(tk_cvec_t *is_core, int64_t hood_idx, uint64
 
 static inline int64_t tk_agglo_find_nearest_core_cluster(
   tk_agglo_state_t *state,
-  int64_t hood_idx
+  int64_t adj_idx
 ) {
   int64_t nearest = -1;
-  if (state->inv_hoods != NULL && hood_idx < (int64_t)state->inv_hoods->n) {
-    tk_rvec_t *hood = state->inv_hoods->a[hood_idx];
-    for (uint64_t j = 0; j < hood->n; j++) {
-      int64_t nh_idx = hood->a[j].i;
-      if (nh_idx < 0 || nh_idx >= (int64_t)state->hoods_uids->n) continue;
-      if (!tk_agglo_is_core(state->is_core, nh_idx, state->n_hoods)) continue;
-      int64_t nh_uid = state->hoods_uids->a[nh_idx];
-      khint_t khi = tk_iumap_get(state->uid_to_cluster, nh_uid);
-      if (khi != tk_iumap_end(state->uid_to_cluster)) {
-        uint64_t cidx = (uint64_t)tk_iumap_val(state->uid_to_cluster, khi);
-        if (state->clusters[cidx] && state->clusters[cidx]->active)
-          return state->clusters[cidx]->cluster_id;
-      }
-    }
-  } else if (state->ann_hoods != NULL && hood_idx < (int64_t)state->ann_hoods->n) {
-    tk_pvec_t *hood = state->ann_hoods->a[hood_idx];
-    for (uint64_t j = 0; j < hood->n; j++) {
-      int64_t nh_idx = hood->a[j].i;
-      if (nh_idx < 0 || nh_idx >= (int64_t)state->hoods_uids->n) continue;
-      if (!tk_agglo_is_core(state->is_core, nh_idx, state->n_hoods)) continue;
-      int64_t nh_uid = state->hoods_uids->a[nh_idx];
-      khint_t khi = tk_iumap_get(state->uid_to_cluster, nh_uid);
-      if (khi != tk_iumap_end(state->uid_to_cluster)) {
-        uint64_t cidx = (uint64_t)tk_iumap_val(state->uid_to_cluster, khi);
-        if (state->clusters[cidx] && state->clusters[cidx]->active)
-          return state->clusters[cidx]->cluster_id;
-      }
-    }
-  } else if (state->hbi_hoods != NULL && hood_idx < (int64_t)state->hbi_hoods->n) {
-    tk_pvec_t *hood = state->hbi_hoods->a[hood_idx];
-    for (uint64_t j = 0; j < hood->n; j++) {
-      int64_t nh_idx = hood->a[j].i;
-      if (nh_idx < 0 || nh_idx >= (int64_t)state->hoods_uids->n) continue;
-      if (!tk_agglo_is_core(state->is_core, nh_idx, state->n_hoods)) continue;
-      int64_t nh_uid = state->hoods_uids->a[nh_idx];
+  if (state->adj_offsets != NULL && adj_idx >= 0 && adj_idx < (int64_t)state->adj_ids->n) {
+    int64_t start = state->adj_offsets->a[adj_idx];
+    int64_t end = state->adj_offsets->a[adj_idx + 1];
+    for (int64_t j = start; j < end; j++) {
+      int64_t nh_uid = state->adj_neighbors->a[j];
+      khint_t khi_nh = tk_iumap_get(state->uid_to_adj_idx, nh_uid);
+      if (khi_nh == tk_iumap_end(state->uid_to_adj_idx)) continue;
+      int64_t nh_idx = tk_iumap_val(state->uid_to_adj_idx, khi_nh);
+      if (!tk_agglo_is_core(state->is_core, nh_idx, state->n_adj)) continue;
       khint_t khi = tk_iumap_get(state->uid_to_cluster, nh_uid);
       if (khi != tk_iumap_end(state->uid_to_cluster)) {
         uint64_t cidx = (uint64_t)tk_iumap_val(state->uid_to_cluster, khi);
@@ -271,30 +245,6 @@ static inline int64_t tk_agglo_find_nearest_core_cluster(
   }
   return nearest;
 }
-
-#define TK_AGGLO_SCAN_HOOD_FOR_NEIGHBOR(hood_type, hood_ptr, distance_field) \
-  for (uint64_t j = offset; j < hood_ptr->n; j++) { \
-    int64_t nh_idx = hood_ptr->a[j].i; \
-    if (nh_idx < 0 || nh_idx >= (int64_t)state->n_hoods) continue; \
-    int64_t nh_uid = state->hoods_uids->a[nh_idx]; \
-    khint_t khi_n = tk_iumap_get(state->uid_to_cluster, nh_uid); \
-    if (khi_n == tk_iumap_end(state->uid_to_cluster)) continue; \
-    uint64_t neighbor_cluster_idx = (uint64_t)tk_iumap_val(state->uid_to_cluster, khi_n); \
-    if (neighbor_cluster_idx == i) continue; \
-    if (!state->clusters[neighbor_cluster_idx] || !state->clusters[neighbor_cluster_idx]->active) continue; \
-    double distance = (double)hood_ptr->a[j].distance_field; \
-    if (distance > state->current_epsilon) { \
-      if (state->hood_offsets && hood_idx >= 0 && hood_idx < (int64_t)state->hood_offsets->n) \
-        state->hood_offsets->a[hood_idx] = (int64_t) j; \
-      break; \
-    } \
-    if (distance == state->current_epsilon) { \
-      if (neighbor_cluster_idx != (uint64_t)best_neighbor_cluster_idx || distance < best_neighbor_distance) { \
-        best_neighbor_cluster_idx = (int64_t)neighbor_cluster_idx; \
-        best_neighbor_distance = distance; \
-      } \
-    } \
-  }
 
 static inline void tk_agglo_find_min_edges_thread(
   tk_agglo_state_t *state,
@@ -315,24 +265,41 @@ static inline void tk_agglo_find_min_edges_thread(
       double best_neighbor_distance = INFINITY;
       for (uint64_t m = 0; m < cluster->members->n; m++) {
         int64_t member_uid = cluster->members->a[m];
-        if (state->uid_to_hood_idx == NULL) continue;
-        khint_t khi = tk_iumap_get(state->uid_to_hood_idx, member_uid);
-        if (khi == tk_iumap_end(state->uid_to_hood_idx)) continue;
-        int64_t hood_idx = tk_iumap_val(state->uid_to_hood_idx, khi);
-        if (hood_idx < 0 || hood_idx >= (int64_t)state->hoods_uids->n) continue;
-        // Get saved offset to avoid rescanning processed neighbors
-        uint64_t offset = (state->hood_offsets != NULL && hood_idx < (int64_t)state->hood_offsets->n)
-                          ? (uint64_t)state->hood_offsets->a[hood_idx] : 0;
-        // Scan neighbors starting from offset, using current_epsilon as threshold
-        if (state->inv_hoods != NULL && hood_idx < (int64_t)state->inv_hoods->n) {
-          tk_rvec_t *hood = state->inv_hoods->a[hood_idx];
-          TK_AGGLO_SCAN_HOOD_FOR_NEIGHBOR(tk_rvec_t, hood, d)
-        } else if (state->ann_hoods != NULL && hood_idx < (int64_t)state->ann_hoods->n) {
-          tk_pvec_t *hood = state->ann_hoods->a[hood_idx];
-          TK_AGGLO_SCAN_HOOD_FOR_NEIGHBOR(tk_pvec_t, hood, p)
-        } else if (state->hbi_hoods != NULL && hood_idx < (int64_t)state->hbi_hoods->n) {
-          tk_pvec_t *hood = state->hbi_hoods->a[hood_idx];
-          TK_AGGLO_SCAN_HOOD_FOR_NEIGHBOR(tk_pvec_t, hood, p)
+        if (state->uid_to_adj_idx == NULL) continue;
+        khint_t khi = tk_iumap_get(state->uid_to_adj_idx, member_uid);
+        if (khi == tk_iumap_end(state->uid_to_adj_idx)) continue;
+        int64_t adj_idx = tk_iumap_val(state->uid_to_adj_idx, khi);
+        if (adj_idx < 0 || adj_idx >= (int64_t)state->adj_ids->n) continue;
+        // Get saved scan offset
+        uint64_t offset = (state->adj_scan_offsets != NULL &&
+                          adj_idx < (int64_t)state->adj_scan_offsets->n)
+                         ? (uint64_t)state->adj_scan_offsets->a[adj_idx] : 0;
+        // Scan CSR adjacency
+        int64_t start = state->adj_offsets->a[adj_idx];
+        int64_t end = state->adj_offsets->a[adj_idx + 1];
+        for (int64_t j = start + (int64_t)offset; j < end; j++) {
+          int64_t nh_uid = state->adj_neighbors->a[j];
+          double similarity = state->adj_weights->a[j];
+          double distance = 1.0 - similarity;
+          if (distance > state->current_epsilon) {
+            // Save scan position
+            if (state->adj_scan_offsets && adj_idx < (int64_t)state->adj_scan_offsets->n)
+              state->adj_scan_offsets->a[adj_idx] = j - start;
+            break;
+          }
+          khint_t khi_n = tk_iumap_get(state->uid_to_cluster, nh_uid);
+          if (khi_n == tk_iumap_end(state->uid_to_cluster)) continue;
+          uint64_t neighbor_cluster_idx = (uint64_t)tk_iumap_val(state->uid_to_cluster, khi_n);
+          if (neighbor_cluster_idx == i) continue;
+          if (!state->clusters[neighbor_cluster_idx] ||
+              !state->clusters[neighbor_cluster_idx]->active) continue;
+          if (distance == state->current_epsilon) {
+            if (neighbor_cluster_idx != (uint64_t)best_neighbor_cluster_idx ||
+                distance < best_neighbor_distance) {
+              best_neighbor_cluster_idx = (int64_t)neighbor_cluster_idx;
+              best_neighbor_distance = distance;
+            }
+          }
         }
       }
       if (best_neighbor_cluster_idx >= 0 && best_neighbor_distance == state->current_epsilon) {
@@ -341,7 +308,7 @@ static inline void tk_agglo_find_min_edges_thread(
             (state->clusters[c1]->size == state->clusters[c2]->size && c1 > c2)) {
           uint64_t tmp = c1; c1 = c2; c2 = tmp;
         }
-        double dist = (double)best_neighbor_distance;
+        double dist = best_neighbor_distance;
         if (dist < min_dist) {
           min_dist = dist;
           tk_pvec_clear(min_edges);
@@ -461,44 +428,35 @@ static inline void tk_agglo_init_single_linkage(
   lua_State *L,
   tk_agglo_state_t *state,
   int state_idx,
-  tk_inv_hoods_t *inv_hoods,
-  tk_ann_hoods_t *ann_hoods,
-  tk_hbi_hoods_t *hbi_hoods,
-  tk_ivec_t *hoods_uids,
+  tk_ivec_t *adj_ids,
+  tk_ivec_t *adj_offsets,
   uint64_t min_pts
 ) {
-  state->n_hoods = hoods_uids->n;
-  state->uid_to_hood_idx = tk_iumap_create(L, 0);
+  state->n_adj = adj_ids->n;
+  state->uid_to_adj_idx = tk_iumap_create(L, 0);
   tk_lua_add_ephemeron(L, TK_AGGLO_EPH, state_idx, -1);
   lua_pop(L, 1);
-  for (uint64_t i = 0; i < hoods_uids->n; i++) {
+  for (uint64_t i = 0; i < adj_ids->n; i++) {
     int kha;
-    khint_t khi = tk_iumap_put(state->uid_to_hood_idx, hoods_uids->a[i], &kha);
-    tk_iumap_setval(state->uid_to_hood_idx, khi, (int64_t)i);
+    khint_t khi = tk_iumap_put(state->uid_to_adj_idx, adj_ids->a[i], &kha);
+    tk_iumap_setval(state->uid_to_adj_idx, khi, (int64_t)i);
   }
-  state->hood_offsets = tk_ivec_create(L, hoods_uids->n, 0, 0);
+  state->adj_scan_offsets = tk_ivec_create(L, adj_ids->n, 0, 0);
   tk_lua_add_ephemeron(L, TK_AGGLO_EPH, state_idx, -1);
   lua_pop(L, 1);
-  for (uint64_t i = 0; i < hoods_uids->n; i++)
-    state->hood_offsets->a[i] = 0;
-  state->hood_offsets->n = hoods_uids->n;
+  for (uint64_t i = 0; i < adj_ids->n; i++)
+    state->adj_scan_offsets->a[i] = 0;
+  state->adj_scan_offsets->n = adj_ids->n;
   if (min_pts > 0) {
-    uint64_t n_bytes = TK_CVEC_BITS_BYTES(hoods_uids->n);
+    uint64_t n_bytes = TK_CVEC_BITS_BYTES(adj_ids->n);
     state->is_core = tk_cvec_create(L, n_bytes, 0, 0);
     tk_lua_add_ephemeron(L, TK_AGGLO_EPH, state_idx, -1);
     lua_pop(L, 1);
     for (uint64_t i = 0; i < n_bytes; i++)
       state->is_core->a[i] = 0;
     state->is_core->n = n_bytes;
-    for (uint64_t i = 0; i < hoods_uids->n; i++) {
-      uint64_t degree = 0;
-      if (inv_hoods != NULL && i < inv_hoods->n) {
-        degree = inv_hoods->a[i]->n;
-      } else if (ann_hoods != NULL && i < ann_hoods->n) {
-        degree = ann_hoods->a[i]->n;
-      } else if (hbi_hoods != NULL && i < hbi_hoods->n) {
-        degree = hbi_hoods->a[i]->n;
-      }
+    for (uint64_t i = 0; i < adj_ids->n; i++) {
+      uint64_t degree = (uint64_t)(adj_offsets->a[i + 1] - adj_offsets->a[i]);
       if (degree >= min_pts)
         state->is_core->a[TK_CVEC_BITS_BYTE(i)] |= (1u << TK_CVEC_BITS_BIT(i));
     }
@@ -527,12 +485,12 @@ static inline void tk_agglo_create_initial_clusters(
     char *vec_ptr = ann ? tk_ann_get(ann, uid) : tk_hbi_get(hbi, uid);
     if (!vec_ptr) continue;
     bool is_core_point = true;
-    if (linkage == TK_AGGLO_LINKAGE_SINGLE && min_pts > 0 && state->is_core != NULL && state->uid_to_hood_idx != NULL) {
-      khint_t khi_hood = tk_iumap_get(state->uid_to_hood_idx, uid);
-      if (khi_hood != tk_iumap_end(state->uid_to_hood_idx)) {
-        int64_t hood_idx = tk_iumap_val(state->uid_to_hood_idx, khi_hood);
-        if (hood_idx >= 0 && hood_idx < (int64_t)state->n_hoods) {
-          is_core_point = tk_agglo_is_core(state->is_core, hood_idx, state->n_hoods);
+    if (linkage == TK_AGGLO_LINKAGE_SINGLE && min_pts > 0 && state->is_core != NULL && state->uid_to_adj_idx != NULL) {
+      khint_t khi_adj = tk_iumap_get(state->uid_to_adj_idx, uid);
+      if (khi_adj != tk_iumap_end(state->uid_to_adj_idx)) {
+        int64_t adj_idx = tk_iumap_val(state->uid_to_adj_idx, khi_adj);
+        if (adj_idx >= 0 && adj_idx < (int64_t)state->n_adj) {
+          is_core_point = tk_agglo_is_core(state->is_core, adj_idx, state->n_adj);
         } else {
           is_core_point = false;
         }
@@ -540,7 +498,7 @@ static inline void tk_agglo_create_initial_clusters(
         is_core_point = false;
       }
     }
-    tk_bits_t *code = (tk_bits_t *)vec_ptr;
+    char *code = (char *)vec_ptr;
     uint64_t code_hash = tk_agglo_hash_code(code, code_chunks);
     khint_t khi = tk_iumap_get(code_hash_to_cluster, (int64_t)code_hash);
     uint64_t cluster_idx;
@@ -695,13 +653,13 @@ static inline bool tk_agglo_iteration(
     // Update index with new centroid
     tk_ivec_clear(temp_id);
     tk_ivec_push(temp_id, to->cluster_id);
-    tk_bits_t *to_code = tk_centroid_code(to->centroid);
+    char *to_code = tk_centroid_code(to->centroid);
     if (state->index_type == TK_AGGLO_USE_ANN) {
       tk_ann_remove(L, state->index.ann, to->cluster_id);
-      tk_ann_add(L, state->index.ann, index_stack_top, temp_id, (char *)to_code);
+      tk_ann_add(L, state->index.ann, index_stack_top, temp_id, to_code);
     } else {
       tk_hbi_remove(L, state->index.hbi, to->cluster_id);
-      tk_hbi_add(L, state->index.hbi, index_stack_top, temp_id, (char *)to_code);
+      tk_hbi_add(L, state->index.hbi, index_stack_top, temp_id, to_code);
     }
 
     state->n_active_clusters--;
@@ -718,34 +676,23 @@ static inline bool tk_agglo_iteration(
       if (!cluster || !cluster->active) continue;
       for (uint64_t m = 0; m < cluster->members->n; m++) {
         int64_t member_uid = cluster->members->a[m];
-        if (state->uid_to_hood_idx == NULL) continue;
-        khint_t khi = tk_iumap_get(state->uid_to_hood_idx, member_uid);
-        if (khi == tk_iumap_end(state->uid_to_hood_idx)) continue;
-        int64_t hood_idx = tk_iumap_val(state->uid_to_hood_idx, khi);
-        if (hood_idx < 0 || hood_idx >= (int64_t)state->hoods_uids->n) continue;
+        if (state->uid_to_adj_idx == NULL) continue;
+        khint_t khi = tk_iumap_get(state->uid_to_adj_idx, member_uid);
+        if (khi == tk_iumap_end(state->uid_to_adj_idx)) continue;
+        int64_t adj_idx = tk_iumap_val(state->uid_to_adj_idx, khi);
+        if (adj_idx < 0 || adj_idx >= (int64_t)state->adj_ids->n) continue;
 
         // Start from saved offset for efficiency
-        uint64_t offset = (state->hood_offsets != NULL && hood_idx < (int64_t)state->hood_offsets->n)
-                          ? (uint64_t)state->hood_offsets->a[hood_idx] : 0;
+        uint64_t offset = (state->adj_scan_offsets != NULL && adj_idx < (int64_t)state->adj_scan_offsets->n)
+                          ? (uint64_t)state->adj_scan_offsets->a[adj_idx] : 0;
 
-        if (state->ann_hoods != NULL && hood_idx < (int64_t)state->ann_hoods->n) {
-          tk_pvec_t *hood = state->ann_hoods->a[hood_idx];
-          if (offset < hood->n) {
-            double d = (double)hood->a[offset].p;
-            if (d < next_epsilon) next_epsilon = d;
-          }
-        } else if (state->inv_hoods != NULL && hood_idx < (int64_t)state->inv_hoods->n) {
-          tk_rvec_t *hood = state->inv_hoods->a[hood_idx];
-          if (offset < hood->n) {
-            double d = hood->a[offset].d;
-            if (d < next_epsilon) next_epsilon = d;
-          }
-        } else if (state->hbi_hoods != NULL && hood_idx < (int64_t)state->hbi_hoods->n) {
-          tk_pvec_t *hood = state->hbi_hoods->a[hood_idx];
-          if (offset < hood->n) {
-            double d = (double)hood->a[offset].p;
-            if (d < next_epsilon) next_epsilon = d;
-          }
+        int64_t start = state->adj_offsets->a[adj_idx];
+        int64_t end = state->adj_offsets->a[adj_idx + 1];
+        int64_t pos = start + (int64_t)offset;
+        if (pos < end) {
+          double similarity = state->adj_weights->a[pos];
+          double d = 1.0 - similarity;
+          if (d < next_epsilon) next_epsilon = d;
         }
       }
     }
@@ -772,14 +719,15 @@ static inline int tk_agglo (
   uint64_t knn,
   uint64_t min_pts,
   bool assign_noise,
-  tk_inv_hoods_t *inv_hoods,
-  tk_ann_hoods_t *ann_hoods,
-  tk_hbi_hoods_t *hbi_hoods,
-  tk_ivec_t *hoods_uids,
+  tk_ivec_t *adj_ids,
+  tk_ivec_t *adj_offsets,
+  tk_ivec_t *adj_neighbors,
+  tk_dvec_t *adj_weights,
   unsigned int n_threads,
   tk_ivec_t *assignments,
   tk_agglo_callback_t callback,
-  void *callback_data
+  void *callback_data,
+  uint64_t centroid_bucket_target
 ) {
   if (!L || !uids || !assignments)
     return -1;
@@ -817,16 +765,16 @@ static inline int tk_agglo (
   state->knn = knn;
   state->min_pts = min_pts;
   state->assign_noise = assign_noise;
-  state->inv_hoods = inv_hoods;
-  state->ann_hoods = ann_hoods;
-  state->hbi_hoods = hbi_hoods;
-  state->hoods_uids = hoods_uids;
-  state->uid_to_hood_idx = NULL;
-  state->hood_offsets = NULL;
+  state->adj_ids = adj_ids;
+  state->adj_offsets = adj_offsets;
+  state->adj_neighbors = adj_neighbors;
+  state->adj_weights = adj_weights;
+  state->uid_to_adj_idx = NULL;
+  state->adj_scan_offsets = NULL;
   state->is_core = NULL;
-  state->n_hoods = 0;
-  if (linkage == TK_AGGLO_LINKAGE_SINGLE && hoods_uids != NULL)
-    tk_agglo_init_single_linkage(L, state, state_idx, inv_hoods, ann_hoods, hbi_hoods, hoods_uids, min_pts);
+  state->n_adj = 0;
+  if (linkage == TK_AGGLO_LINKAGE_SINGLE && adj_ids != NULL)
+    tk_agglo_init_single_linkage(L, state, state_idx, adj_ids, adj_offsets, min_pts);
   state->uid_to_vec_idx = tk_iumap_create(L, 0);
   tk_lua_add_ephemeron(L, TK_AGGLO_EPH, state_idx, -1);
   lua_pop(L, 1);
@@ -899,7 +847,7 @@ static inline int tk_agglo (
       memcpy(cluster_codes->a + i * code_chunks, tk_centroid_code(state->clusters[i]->centroid), code_chunks);
     }
     if (state->index_type == TK_AGGLO_USE_ANN) {
-      uint64_t bucket_target = 30;  // Default from tk_ann_create_lua
+      uint64_t bucket_target = centroid_bucket_target > 0 ? centroid_bucket_target : 30;
       state->index.ann = tk_ann_create_randomized(L, features, bucket_target, state->n_clusters);
       int Ai = tk_lua_absindex(L, -1);
       tk_ann_add(L, state->index.ann, Ai, cluster_ids, (char *)cluster_codes->a);
@@ -914,7 +862,7 @@ static inline int tk_agglo (
     }
   } else {
     if (state->index_type == TK_AGGLO_USE_ANN) {
-      uint64_t bucket_target = 30;
+      uint64_t bucket_target = centroid_bucket_target > 0 ? centroid_bucket_target : 30;
       state->index.ann = tk_ann_create_randomized(L, features, bucket_target, 0);
     } else {
       state->index.hbi = tk_hbi_create(L, features);
@@ -932,13 +880,13 @@ static inline int tk_agglo (
   if (state->linkage == TK_AGGLO_LINKAGE_SINGLE && state->assign_noise && state->is_core != NULL) {
     for (uint64_t i = 0; i < n_samples; i++) {
       int64_t uid = uids->a[i];
-      if (state->uid_to_hood_idx == NULL) continue;
-      khint_t khi_hood = tk_iumap_get(state->uid_to_hood_idx, uid);
-      if (khi_hood == tk_iumap_end(state->uid_to_hood_idx)) continue;
-      int64_t hood_idx = tk_iumap_val(state->uid_to_hood_idx, khi_hood);
-      if (hood_idx < 0 || hood_idx >= (int64_t)state->hoods_uids->n) continue;
-      if (tk_agglo_is_core(state->is_core, hood_idx, state->n_hoods)) continue;
-      assignments->a[i] = tk_agglo_find_nearest_core_cluster(state, hood_idx);
+      if (state->uid_to_adj_idx == NULL) continue;
+      khint_t khi_adj = tk_iumap_get(state->uid_to_adj_idx, uid);
+      if (khi_adj == tk_iumap_end(state->uid_to_adj_idx)) continue;
+      int64_t adj_idx = tk_iumap_val(state->uid_to_adj_idx, khi_adj);
+      if (adj_idx < 0 || adj_idx >= (int64_t)state->adj_ids->n) continue;
+      if (tk_agglo_is_core(state->is_core, adj_idx, state->n_adj)) continue;
+      assignments->a[i] = tk_agglo_find_nearest_core_cluster(state, adj_idx);
     }
   }
   free(threads);

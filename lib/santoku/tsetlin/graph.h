@@ -35,6 +35,7 @@ typedef enum {
   TK_GRAPH_GEN_MULTICLASS_NEG,
   TK_GRAPH_STAR_HOODS,
   TK_GRAPH_ANCHORS,
+  TK_GRAPH_ADJ_HOODS,
 } tk_graph_stage_t;
 
 typedef enum {
@@ -164,6 +165,16 @@ typedef struct tk_graph_thread_s {
       uint64_t feature_end;
       tk_rvec_t *knn_heap;
     } anchors;
+    struct {
+      tk_ivec_t *ids;
+      tk_inv_hoods_t *inv_hoods;
+      tk_ann_hoods_t *ann_hoods;
+      tk_hbi_hoods_t *hbi_hoods;
+      uint64_t features;
+      tk_ivec_t *offsets;
+      tk_ivec_t *neighbors;
+      tk_dvec_t *weights;
+    } adj_hoods;
   } task;
 } tk_graph_thread_t;
 
@@ -672,6 +683,40 @@ static inline void tk_graph_worker (void *dp, int sig)
             }
           }
         }))
+      }
+      break;
+    }
+
+    case TK_GRAPH_ADJ_HOODS: {
+      for (uint64_t i = data->ifirst; i <= data->ilast && i < data->task.adj_hoods.ids->n; i++) {
+        int64_t start = data->task.adj_hoods.offsets->a[i];
+        int64_t end = data->task.adj_hoods.offsets->a[i + 1];
+        int64_t idx = start;
+
+        if (data->task.adj_hoods.ann_hoods && i < data->task.adj_hoods.ann_hoods->n) {
+          tk_pvec_t *hood = data->task.adj_hoods.ann_hoods->a[i];
+          for (uint64_t j = 0; j < hood->n && idx < end; j++) {
+            data->task.adj_hoods.neighbors->a[idx] = hood->a[j].i;
+            double distance = (double)hood->a[j].p / data->task.adj_hoods.features;
+            data->task.adj_hoods.weights->a[idx] = 1.0 - distance;
+            idx++;
+          }
+        } else if (data->task.adj_hoods.hbi_hoods && i < data->task.adj_hoods.hbi_hoods->n) {
+          tk_pvec_t *hood = data->task.adj_hoods.hbi_hoods->a[i];
+          for (uint64_t j = 0; j < hood->n && idx < end; j++) {
+            data->task.adj_hoods.neighbors->a[idx] = hood->a[j].i;
+            double distance = (double)hood->a[j].p / data->task.adj_hoods.features;
+            data->task.adj_hoods.weights->a[idx] = 1.0 - distance;
+            idx++;
+          }
+        } else if (data->task.adj_hoods.inv_hoods && i < data->task.adj_hoods.inv_hoods->n) {
+          tk_rvec_t *hood = data->task.adj_hoods.inv_hoods->a[i];
+          for (uint64_t j = 0; j < hood->n && idx < end; j++) {
+            data->task.adj_hoods.neighbors->a[idx] = hood->a[j].i;
+            data->task.adj_hoods.weights->a[idx] = 1.0 - hood->a[j].d;
+            idx++;
+          }
+        }
       }
       break;
     }
@@ -1328,8 +1373,8 @@ static inline int tk_graph_multiclass_pairs (
       threads[i].task.multiclass.index = index;
       threads[i].task.multiclass.eps_pos = eps_pos;
       threads[i].task.multiclass.cmp = TK_IVEC_JACCARD;
-      threads[i].task.multiclass.cmp_alpha = 1.0;
-      threads[i].task.multiclass.cmp_beta = 0.1;
+      threads[i].task.multiclass.cmp_alpha = 0.0;
+      threads[i].task.multiclass.cmp_beta = 0.0;
       pool->threads[i].data = &threads[i];
       tk_thread_range(i, n_threads, n_classes, &threads[i].ifirst, &threads[i].ilast);
       atomic_init(&threads[i].has_error, false);
@@ -1410,8 +1455,8 @@ static inline int tk_graph_multiclass_pairs (
       threads[i].task.multiclass.eps_neg = eps_neg;
       threads[i].task.multiclass.n_anchors_neg = n_anchors_neg;
       threads[i].task.multiclass.cmp = TK_IVEC_JACCARD;
-      threads[i].task.multiclass.cmp_alpha = 1.0;
-      threads[i].task.multiclass.cmp_beta = 0.1;
+      threads[i].task.multiclass.cmp_alpha = 0.0;
+      threads[i].task.multiclass.cmp_beta = 0.0;
       pool->threads[i].data = &threads[i];
       tk_thread_range(i, n_threads, n_classes, &threads[i].ifirst, &threads[i].ilast);
       atomic_init(&threads[i].has_error, false);
@@ -1658,6 +1703,123 @@ cleanup:
   tk_euset_destroy(edgeset);
   tk_dsu_destroy(dsu);
   tk_ivec_destroy(ids);
+}
+
+static inline int tk_graph_adj_hoods(
+  lua_State *L,
+  tk_ivec_t *ids,
+  tk_inv_hoods_t *inv_hoods,
+  tk_ann_hoods_t *ann_hoods,
+  tk_hbi_hoods_t *hbi_hoods,
+  uint64_t features,
+  unsigned int n_threads,
+  tk_ivec_t **offsets_out,
+  tk_ivec_t **neighbors_out,
+  tk_dvec_t **weights_out
+) {
+  if (!ids || ids->n == 0) {
+    *offsets_out = tk_ivec_create(NULL, 1, 0, 0);
+    *neighbors_out = tk_ivec_create(NULL, 0, 0, 0);
+    *weights_out = tk_dvec_create(NULL, 0, 0, 0);
+    if (!*offsets_out || !*neighbors_out || !*weights_out) {
+      if (*offsets_out) tk_ivec_destroy(*offsets_out);
+      if (*neighbors_out) tk_ivec_destroy(*neighbors_out);
+      if (*weights_out) tk_dvec_destroy(*weights_out);
+      return -1;
+    }
+    (*offsets_out)->a[0] = 0;
+    (*offsets_out)->n = 1;
+    return 0;
+  }
+
+  uint64_t n_queries = ids->n;
+
+  // Phase 1: Build offsets (sequential)
+  *offsets_out = tk_ivec_create(L, n_queries + 1, 0, 0);
+  if (!*offsets_out)
+    return -1;
+
+  (*offsets_out)->a[0] = 0;
+  for (uint64_t i = 0; i < n_queries; i++) {
+    uint64_t n_neighbors = 0;
+    if (ann_hoods && i < ann_hoods->n)
+      n_neighbors = ann_hoods->a[i]->n;
+    else if (hbi_hoods && i < hbi_hoods->n)
+      n_neighbors = hbi_hoods->a[i]->n;
+    else if (inv_hoods && i < inv_hoods->n)
+      n_neighbors = inv_hoods->a[i]->n;
+    (*offsets_out)->a[i + 1] = (*offsets_out)->a[i] + (int64_t)n_neighbors;
+  }
+  (*offsets_out)->n = n_queries + 1;
+
+  // Phase 2: Allocate neighbors and weights
+  uint64_t total = (uint64_t)(*offsets_out)->a[n_queries];
+  *neighbors_out = tk_ivec_create(L, total, 0, 0);
+  *weights_out = tk_dvec_create(L, total, 0, 0);
+  if (!*neighbors_out || !*weights_out) {
+    if (*neighbors_out) tk_ivec_destroy(*neighbors_out);
+    if (*weights_out) tk_dvec_destroy(*weights_out);
+    tk_ivec_destroy(*offsets_out);
+    return -1;
+  }
+  (*neighbors_out)->n = total;
+  (*weights_out)->n = total;
+
+  // Phase 3: Flatten in parallel using existing infrastructure
+  tk_graph_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_graph_thread_t));
+  if (!threads) {
+    tk_ivec_destroy(*neighbors_out);
+    tk_dvec_destroy(*weights_out);
+    tk_ivec_destroy(*offsets_out);
+    return -1;
+  }
+  memset(threads, 0, n_threads * sizeof(tk_graph_thread_t));
+
+  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_graph_worker);
+  if (!pool) {
+    free(threads);
+    tk_ivec_destroy(*neighbors_out);
+    tk_dvec_destroy(*weights_out);
+    tk_ivec_destroy(*offsets_out);
+    return -1;
+  }
+
+  for (unsigned int i = 0; i < n_threads; i++) {
+    threads[i].task.adj_hoods.ids = ids;
+    threads[i].task.adj_hoods.inv_hoods = inv_hoods;
+    threads[i].task.adj_hoods.ann_hoods = ann_hoods;
+    threads[i].task.adj_hoods.hbi_hoods = hbi_hoods;
+    threads[i].task.adj_hoods.features = features;
+    threads[i].task.adj_hoods.offsets = *offsets_out;
+    threads[i].task.adj_hoods.neighbors = *neighbors_out;
+    threads[i].task.adj_hoods.weights = *weights_out;
+    pool->threads[i].data = &threads[i];
+    tk_thread_range(i, n_threads, n_queries, &threads[i].ifirst, &threads[i].ilast);
+    atomic_init(&threads[i].has_error, false);
+  }
+
+  tk_threads_signal(pool, TK_GRAPH_ADJ_HOODS, 0);
+
+  // Check for errors
+  bool has_error = false;
+  for (unsigned int i = 0; i < n_threads; i++) {
+    if (atomic_load(&threads[i].has_error)) {
+      has_error = true;
+      break;
+    }
+  }
+
+  tk_threads_destroy(pool);
+  free(threads);
+
+  if (has_error) {
+    tk_ivec_destroy(*neighbors_out);
+    tk_dvec_destroy(*weights_out);
+    tk_ivec_destroy(*offsets_out);
+    return -1;
+  }
+
+  return 0;
 }
 
 #endif
