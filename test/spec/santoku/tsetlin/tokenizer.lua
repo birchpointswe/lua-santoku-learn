@@ -28,6 +28,7 @@ test("tokenizer", function ()
 
   tok:train({ corpus = corpus })
   tok:finalize()
+  print(serialize(tok:parse(corpus[1]), true))
   local tokens = tok:tokenize(corpus)
   local top, weights = tokens:bits_top_df(#corpus, tok:features())
   tok:restrict(top)

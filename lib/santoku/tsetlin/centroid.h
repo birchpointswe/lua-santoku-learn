@@ -10,8 +10,8 @@
 typedef struct {
   uint64_t n_chunks;      // Number of code chunks
   int32_t *votes;         // Signed vote counts [n_chunks × 32]
-  tk_bits_t *code;        // Majority centroid bitmap [n_chunks]
-  tk_bits_t tail_mask;    // Mask for last chunk
+  char *code;             // Majority centroid bitmap [n_chunks]
+  uint8_t tail_mask;      // Mask for last chunk
   uint64_t size;          // Number of members (for tracking first member)
 } tk_centroid_t;
 
@@ -19,7 +19,7 @@ typedef struct {
 static inline tk_centroid_t *tk_centroid_create (
   lua_State *L,
   uint64_t n_chunks,
-  tk_bits_t tail_mask
+  uint8_t tail_mask
 ) {
   tk_centroid_t *centroid = tk_malloc(L, sizeof(tk_centroid_t));
   if (!centroid) return NULL;
@@ -37,7 +37,7 @@ static inline tk_centroid_t *tk_centroid_create (
   }
 
   // Allocate centroid code
-  centroid->code = tk_malloc_aligned(L, sizeof(tk_bits_t) * n_chunks, TK_CVEC_BITS);
+  centroid->code = (char *)tk_malloc_aligned(L, n_chunks, TK_CVEC_BITS);
   if (!centroid->code) {
     free(centroid->votes);
     free(centroid);
@@ -72,15 +72,15 @@ static inline void tk_centroid_destroy (tk_centroid_t *centroid) {
 // Subsequent: vote for set bits (inc) and against unset bits (dec)
 static inline void tk_centroid_add_member (
   tk_centroid_t *centroid,
-  tk_bits_t *member_code,
+  char *member_code,
   uint64_t code_chunks
 ) {
   centroid->size++;
   bool is_first = (centroid->size == 1);
 
   for (uint64_t chunk = 0; chunk < code_chunks; chunk++) {
-    tk_bits_t mask = (chunk == code_chunks - 1) ? centroid->tail_mask : (tk_bits_t)~0;
-    tk_bits_t member_bits = member_code[chunk];
+    uint8_t mask = (chunk == code_chunks - 1) ? centroid->tail_mask : 0xFF;
+    uint8_t member_bits = ((uint8_t *)member_code)[chunk];
     int32_t *votes = &centroid->votes[chunk * TK_CVEC_BITS];
 
     for (uint64_t b = 0; b < TK_CVEC_BITS; b++) {
@@ -94,12 +94,12 @@ static inline void tk_centroid_add_member (
 
       // Update centroid code based on vote majority
       if (votes[b] >= 0)
-        centroid->code[chunk] |= (1 << b);
+        ((uint8_t *)centroid->code)[chunk] |= (1 << b);
       else
-        centroid->code[chunk] &= ~(1 << b);
+        ((uint8_t *)centroid->code)[chunk] &= ~(1 << b);
     }
 
-    centroid->code[chunk] &= mask;
+    ((uint8_t *)centroid->code)[chunk] &= mask;
   }
 }
 
@@ -112,8 +112,8 @@ static inline bool tk_centroid_merge (
   bool changed = false;
 
   for (uint64_t chunk = 0; chunk < dst->n_chunks; chunk++) {
-    tk_bits_t mask = (chunk == dst->n_chunks - 1) ? dst->tail_mask : (tk_bits_t)~0;
-    tk_bits_t old_code = dst->code[chunk];
+    uint8_t mask = (chunk == dst->n_chunks - 1) ? dst->tail_mask : 0xFF;
+    uint8_t old_code = ((uint8_t *)dst->code)[chunk];
     int32_t *votes_dst = &dst->votes[chunk * TK_CVEC_BITS];
     int32_t *votes_src = &src->votes[chunk * TK_CVEC_BITS];
 
@@ -123,13 +123,13 @@ static inline bool tk_centroid_merge (
 
       // Update centroid code based on combined vote majority
       if (votes_dst[b] >= 0)
-        dst->code[chunk] |= (1 << b);
+        ((uint8_t *)dst->code)[chunk] |= (1 << b);
       else
-        dst->code[chunk] &= ~(1 << b);
+        ((uint8_t *)dst->code)[chunk] &= ~(1 << b);
     }
 
-    dst->code[chunk] &= mask;
-    if (dst->code[chunk] != old_code)
+    ((uint8_t *)dst->code)[chunk] &= mask;
+    if (((uint8_t *)dst->code)[chunk] != old_code)
       changed = true;
   }
 
@@ -138,7 +138,7 @@ static inline bool tk_centroid_merge (
 }
 
 // Get the centroid code (parallel to tk_automata_actions)
-static inline tk_bits_t *tk_centroid_code (tk_centroid_t *centroid) {
+static inline char *tk_centroid_code (tk_centroid_t *centroid) {
   return centroid->code;
 }
 
