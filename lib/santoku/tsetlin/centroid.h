@@ -1,0 +1,145 @@
+#ifndef TK_CENTROID_H
+#define TK_CENTROID_H
+
+#include <santoku/tsetlin/conf.h>
+#include <santoku/cvec.h>
+
+
+
+
+typedef struct {
+  uint64_t n_chunks;
+  int32_t *votes;
+  tk_bits_t *code;
+  tk_bits_t tail_mask;
+  uint64_t size;
+} tk_centroid_t;
+
+
+static inline tk_centroid_t *tk_centroid_create (
+  lua_State *L,
+  uint64_t n_chunks,
+  tk_bits_t tail_mask
+) {
+  tk_centroid_t *centroid = tk_malloc(L, sizeof(tk_centroid_t));
+  if (!centroid) return NULL;
+
+  centroid->n_chunks = n_chunks;
+  centroid->tail_mask = tail_mask;
+  centroid->size = 0;
+
+
+  uint64_t n_votes = n_chunks * TK_CVEC_BITS;
+  centroid->votes = tk_malloc_aligned(L, sizeof(int32_t) * n_votes, TK_CVEC_BITS);
+  if (!centroid->votes) {
+    free(centroid);
+    return NULL;
+  }
+
+
+  centroid->code = tk_malloc_aligned(L, sizeof(tk_bits_t) * n_chunks, TK_CVEC_BITS);
+  if (!centroid->code) {
+    free(centroid->votes);
+    free(centroid);
+    return NULL;
+  }
+
+
+  for (uint64_t i = 0; i < n_votes; i++)
+    centroid->votes[i] = -1;
+  for (uint64_t i = 0; i < n_chunks; i++)
+    centroid->code[i] = 0;
+
+  return centroid;
+}
+
+
+static inline void tk_centroid_destroy (tk_centroid_t *centroid) {
+  if (!centroid) return;
+  if (centroid->votes) {
+    free(centroid->votes);
+    centroid->votes = NULL;
+  }
+  if (centroid->code) {
+    free(centroid->code);
+    centroid->code = NULL;
+  }
+  free(centroid);
+}
+
+
+
+
+static inline void tk_centroid_add_member (
+  tk_centroid_t *centroid,
+  tk_bits_t *member_code,
+  uint64_t code_chunks
+) {
+  centroid->size++;
+  bool is_first = (centroid->size == 1);
+
+  for (uint64_t chunk = 0; chunk < code_chunks; chunk++) {
+    tk_bits_t mask = (chunk == code_chunks - 1) ? centroid->tail_mask : (tk_bits_t)~0;
+    tk_bits_t member_bits = member_code[chunk];
+    int32_t *votes = &centroid->votes[chunk * TK_CVEC_BITS];
+
+    for (uint64_t b = 0; b < TK_CVEC_BITS; b++) {
+      if (member_bits & (1 << b)) {
+
+        votes[b]++;
+      } else if (!is_first) {
+
+        votes[b]--;
+      }
+
+
+      if (votes[b] >= 0)
+        centroid->code[chunk] |= (1 << b);
+      else
+        centroid->code[chunk] &= ~(1 << b);
+    }
+
+    centroid->code[chunk] &= mask;
+  }
+}
+
+
+
+static inline bool tk_centroid_merge (
+  tk_centroid_t *dst,
+  tk_centroid_t *src
+) {
+  bool changed = false;
+
+  for (uint64_t chunk = 0; chunk < dst->n_chunks; chunk++) {
+    tk_bits_t mask = (chunk == dst->n_chunks - 1) ? dst->tail_mask : (tk_bits_t)~0;
+    tk_bits_t old_code = dst->code[chunk];
+    int32_t *votes_dst = &dst->votes[chunk * TK_CVEC_BITS];
+    int32_t *votes_src = &src->votes[chunk * TK_CVEC_BITS];
+
+    for (uint64_t b = 0; b < TK_CVEC_BITS; b++) {
+
+      votes_dst[b] += votes_src[b];
+
+
+      if (votes_dst[b] >= 0)
+        dst->code[chunk] |= (1 << b);
+      else
+        dst->code[chunk] &= ~(1 << b);
+    }
+
+    dst->code[chunk] &= mask;
+    if (dst->code[chunk] != old_code)
+      changed = true;
+  }
+
+  dst->size += src->size;
+  return changed;
+}
+
+
+static inline tk_bits_t *tk_centroid_code (tk_centroid_t *centroid) {
+  return centroid->code;
+}
+
+#endif

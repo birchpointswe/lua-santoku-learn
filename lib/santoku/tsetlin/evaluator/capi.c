@@ -1265,10 +1265,10 @@ static inline int tm_optimize_clustering (lua_State *L)
 
   unsigned int n_threads = tk_threads_getn(L, 1, "optimize_clustering", "threads");
 
-  const char *linkage_str = tk_lua_foptstring(L, 1, "optimize_clustering", "linkage", "simhash");
-  tk_agglo_linkage_t linkage = TK_AGGLO_LINKAGE_SIMHASH;
-  if (!strcmp(linkage_str, "simhash"))
-    linkage = TK_AGGLO_LINKAGE_SIMHASH;
+  const char *linkage_str = tk_lua_foptstring(L, 1, "optimize_clustering", "linkage", "centroid");
+  tk_agglo_linkage_t linkage = TK_AGGLO_LINKAGE_CENTROID;
+  if (!strcmp(linkage_str, "centroid"))
+    linkage = TK_AGGLO_LINKAGE_CENTROID;
   else if (!strcmp(linkage_str, "single"))
     linkage = TK_AGGLO_LINKAGE_SINGLE;
 
@@ -1295,6 +1295,8 @@ static inline int tm_optimize_clustering (lua_State *L)
 
   if (linkage == TK_AGGLO_LINKAGE_SINGLE && knn == 0)
     tk_lua_verror(L, 3, "optimize_clustering", "knn", "knn parameter required for linkage=single");
+  else if (linkage == TK_AGGLO_LINKAGE_CENTROID && knn == 0)
+    knn = 1;
 
   double tolerance = tk_lua_foptnumber(L, 1, "optimize_clustering", "tolerance", 1e-12);
   char *metric_str = tk_lua_foptstring(L, 1, "optimize_clustering", "metric", "biserial");
@@ -1650,46 +1652,6 @@ static void tm_optimize_bits_prefix_greedy (
         }
       }
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
   }
 
