@@ -25,8 +25,6 @@
 
 #define TK_TSETLIN_MT "santoku_tsetlin"
 
-typedef uint8_t tk_bits_t;
-
 typedef struct { int64_t sim; bool label; } tm_dl_t;
 #define tm_dl_lt(a, b) ((a).sim < (b).sim)
 KSORT_INIT(dl, tm_dl_t, tm_dl_lt)

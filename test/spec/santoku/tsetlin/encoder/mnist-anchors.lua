@@ -60,7 +60,7 @@ local cfg; cfg = {
     category_knn = nil,
     category_knn_decay = nil,
     sigma_k = nil,
-    decay = 2.0,
+    decay = 4.0,
     bridge = true,
   },
   clustering = {

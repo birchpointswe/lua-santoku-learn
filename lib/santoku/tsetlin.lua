@@ -4,6 +4,7 @@ local str = require("santoku.string")
 local err = require("santoku.error")
 local rand = require("santoku.random")
 local cvec = require("santoku.cvec")
+local utc = require("santoku.utc")
 
 local M = {}
 
@@ -137,6 +138,7 @@ M.optimize = function (args, typ)
   end
 
   local best_score = -num.huge
+  local best_time = num.huge
   local best_params = nil
 
   if all_fixed or not (trials and trials > 0) or not (rounds and rounds > 0) then
@@ -213,6 +215,7 @@ M.optimize = function (args, typ)
           end
 
           search_tm:reconfigure(params)
+          local trial_start_time = utc.time(true)
 
           if typ == "encoder" then
             search_tm:train({
@@ -238,6 +241,8 @@ M.optimize = function (args, typ)
             })
           end
 
+          local trial_elapsed = utc.time(true) - trial_start_time
+
 
 
           local trial_score = last_epoch_score
@@ -249,8 +254,11 @@ M.optimize = function (args, typ)
           end
 
 
-          if trial_score > best_score then
+          local is_better = trial_score > best_score + 1e-8 or
+                           (num.abs(trial_score - best_score) < 1e-8 and trial_elapsed < best_time)
+          if is_better then
             best_score = trial_score
+            best_time = trial_elapsed
             best_params = params
           end
         end
