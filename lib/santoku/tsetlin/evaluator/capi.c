@@ -1265,10 +1265,10 @@ static inline int tm_optimize_clustering (lua_State *L)
 
   unsigned int n_threads = tk_threads_getn(L, 1, "optimize_clustering", "threads");
 
-  const char *linkage_str = tk_lua_foptstring(L, 1, "optimize_clustering", "linkage", "simhash");
-  tk_agglo_linkage_t linkage = TK_AGGLO_LINKAGE_SIMHASH;
-  if (!strcmp(linkage_str, "simhash"))
-    linkage = TK_AGGLO_LINKAGE_SIMHASH;
+  const char *linkage_str = tk_lua_foptstring(L, 1, "optimize_clustering", "linkage", "centroid");
+  tk_agglo_linkage_t linkage = TK_AGGLO_LINKAGE_CENTROID;
+  if (!strcmp(linkage_str, "centroid"))
+    linkage = TK_AGGLO_LINKAGE_CENTROID;
   else if (!strcmp(linkage_str, "single"))
     linkage = TK_AGGLO_LINKAGE_SINGLE;
 
@@ -1295,6 +1295,8 @@ static inline int tm_optimize_clustering (lua_State *L)
 
   if (linkage == TK_AGGLO_LINKAGE_SINGLE && knn == 0)
     tk_lua_verror(L, 3, "optimize_clustering", "knn", "knn parameter required for linkage=single");
+  else if (linkage == TK_AGGLO_LINKAGE_CENTROID && knn == 0)
+    knn = 1; // find single nearest other centroid
 
   double tolerance = tk_lua_foptnumber(L, 1, "optimize_clustering", "tolerance", 1e-12);
   char *metric_str = tk_lua_foptstring(L, 1, "optimize_clustering", "metric", "biserial");
@@ -1650,46 +1652,6 @@ static void tm_optimize_bits_prefix_greedy (
         }
       }
     }
-
-    // if (!improved && active->n > 0) {
-    //   for (uint64_t i = 0; i < active->n && !improved; i ++) {
-    //     int64_t bit_out = active->a[i];
-    //     if (keep_prefix > 0 && bit_out < (int64_t)keep_prefix)
-    //       continue;
-    //     for (int64_t bit_in = 0; bit_in < (int64_t) n_dims; bit_in ++) {
-    //       bool is_active = false;
-    //       for (uint64_t j = 0; j < active->n; j ++) {
-    //         if (active->a[j] == bit_in) {
-    //           is_active = true;
-    //           break;
-    //         }
-    //       }
-    //       if (is_active)
-    //         continue;
-    //       memcpy(candidate, mask, bytes_per_mask);
-    //       candidate[TK_CVEC_BITS_BYTE(bit_out)] &= ~(1 << TK_CVEC_BITS_BIT(bit_out));
-    //       candidate[TK_CVEC_BITS_BYTE(bit_in)] |= (1 << TK_CVEC_BITS_BIT(bit_in));
-    //       double score = tk_compute_reconstruction(state, candidate, active->n, pool);
-    //       if (score > current_score + tolerance) {
-    //         mask[TK_CVEC_BITS_BYTE(bit_out)] &= ~(1 << TK_CVEC_BITS_BIT(bit_out));
-    //         mask[TK_CVEC_BITS_BYTE(bit_in)] |= (1 << TK_CVEC_BITS_BIT(bit_in));
-    //         active->a[i] = bit_in;
-    //         double gain = score - current_score;
-    //         current_score = score;
-    //         improved = true;
-    //         if (i_each >= 0) {
-    //           lua_pushvalue(L, i_each);
-    //           lua_pushinteger(L, bit_in);
-    //           lua_pushnumber(L, gain);
-    //           lua_pushnumber(L, current_score);
-    //           lua_pushliteral(L, "swap");
-    //           lua_call(L, 4, 0);
-    //         }
-    //         break;
-    //       }
-    //     }
-    //   }
-    // }
 
   }
 

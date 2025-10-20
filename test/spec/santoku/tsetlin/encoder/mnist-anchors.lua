@@ -27,8 +27,8 @@ local cfg; cfg = {
     landmarks = 24,
   },
   mode = {
-    encoder = false,
-    cluster = false,
+    encoder = true,
+    cluster = true,
     mode = "landmarks",
     binarize = "itq",
     tch = false,
@@ -60,11 +60,12 @@ local cfg; cfg = {
     category_knn = nil,
     category_knn_decay = nil,
     sigma_k = nil,
-    decay = 4.0,
+    decay = 2.0,
     bridge = true,
   },
   clustering = {
-    linkage = "simhash",
+    knn = 256,
+    linkage = "centroid",
   },
   eval = {
     bits_metric = "spearman",
@@ -72,7 +73,7 @@ local cfg; cfg = {
     cluster_metric = "biserial",
     sampled_anchors = 16,
     sampled_pairs = 16,
-    tolerance = 1e-3,
+    tolerance = 1e-2,
     retrieval = function (d)
       -- return d:max()
       return d:scores_plateau(cfg.eval.tolerance)
@@ -97,7 +98,7 @@ local cfg; cfg = {
   },
   search = {
     patience = 10,
-    rounds = 10,
+    rounds = 20,
     trials = 4,
     iterations = 10,
   },
@@ -596,6 +597,7 @@ test("tsetlin", function ()
       neighbors = train.adj_neighbors,
       weights = train.adj_weights,
       linkage = cfg.clustering.linkage,
+      knn = cfg.clustering.knn,
       metric = cfg.eval.cluster_metric,
       threads = cfg.threads,
       each = function (acc)
@@ -634,6 +636,7 @@ test("tsetlin", function ()
       neighbors = train.adj_sampled_neighbors,
       weights = train.adj_sampled_weights,
       linkage = cfg.clustering.linkage,
+      knn = cfg.clustering.knn,
       metric = cfg.eval.cluster_metric,
       threads = cfg.threads,
       each = function (acc)
@@ -659,6 +662,7 @@ test("tsetlin", function ()
         neighbors = train.adj_sampled_neighbors,
         weights = train.adj_sampled_weights,
         linkage = cfg.clustering.linkage,
+        knn = cfg.clustering.knn,
         metric = cfg.eval.cluster_metric,
         threads = cfg.threads,
         each = function (acc)
@@ -682,6 +686,7 @@ test("tsetlin", function ()
         neighbors = test.adj_sampled_neighbors,
         weights = test.adj_sampled_weights,
         linkage = cfg.clustering.linkage,
+        knn = cfg.clustering.knn,
         metric = cfg.eval.cluster_metric,
         threads = cfg.threads,
         each = function (acc)

@@ -29,7 +29,7 @@ local cfg = {
     eps = 1e-12,
   },
   clustering = {
-    linkage = "simhash",
+    linkage = "centroid",
     knn = 32,
     knn_min = nil,
     knn_mutual = false,
