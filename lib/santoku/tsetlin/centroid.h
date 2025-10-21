@@ -1,7 +1,6 @@
 #ifndef TK_CENTROID_H
 #define TK_CENTROID_H
 
-#include <santoku/tsetlin/conf.h>
 #include <santoku/cvec.h>
 
 

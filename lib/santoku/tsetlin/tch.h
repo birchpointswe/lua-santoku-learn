@@ -1,7 +1,6 @@
 #ifndef TK_TCH_H
 #define TK_TCH_H
 
-#include <santoku/tsetlin/conf.h>
 #include <santoku/tsetlin/graph.h>
 #include <santoku/threads.h>
 #include <santoku/dvec.h>

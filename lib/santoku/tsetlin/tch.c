@@ -1,4 +1,3 @@
-#include <santoku/tsetlin/conf.h>
 #include <santoku/tsetlin/tch.h>
 #include <santoku/tsetlin/graph.h>
 #include <santoku/ivec.h>

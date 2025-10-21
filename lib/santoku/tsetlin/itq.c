@@ -1,4 +1,3 @@
-#include <santoku/tsetlin/conf.h>
 #include <santoku/tsetlin/itq.h>
 
 #include <float.h>
