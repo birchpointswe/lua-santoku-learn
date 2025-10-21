@@ -28,7 +28,6 @@ SOFTWARE.
 
 #include <santoku/iuset.h>
 #include <santoku/lua/utils.h>
-#include <santoku/tsetlin/conf.h>
 #include <santoku/tsetlin/automata.h>
 #include <santoku/threads.h>
 #include <santoku/cvec.h>
@@ -102,10 +101,10 @@ typedef struct tk_tsetlin_s {
   tk_automata_t automata;
   double negative;
   double specificity;
-  size_t results_len;
   unsigned int *results;
-  size_t encodings_len;
+  size_t results_len;
   char *encodings;
+  size_t encodings_len;
 } tk_tsetlin_t;
 
 #define tm_thread_data(pool, thread) \
@@ -790,17 +789,8 @@ static inline void _tk_tsetlin_destroy (tk_tsetlin_t *tm)
   tm->destroyed = true;
   tk_tsetlin_shrink(tm);
   free(tm->actions); tm->actions = NULL;
-  if (numa_available() == -1) {
-    free(tm->results); tm->results = NULL;
-    free(tm->encodings); tm->encodings = NULL;
-  } else {
-    if (tm->results) {
-      numa_free(tm->results, tm->results_len); tm->results = NULL; tm->results_len = 0;
-    }
-    if (tm->encodings) {
-      numa_free(tm->encodings, tm->encodings_len); tm->encodings = NULL; tm->encodings_len = 0;
-    }
-  }
+  free(tm->results); tm->results = NULL;
+  free(tm->encodings); tm->encodings = NULL;
 }
 
 static inline int tk_tsetlin_destroy (lua_State *L)
@@ -819,7 +809,13 @@ static inline int tk_tsetlin_predict_classifier (
   tk_cvec_t *ps = tk_cvec_peek(L, 2, "problems");
   unsigned int n = tk_lua_checkunsigned(L, 3, "argument 2 is not an integer n_samples");
   unsigned int n_threads = tk_threads_getn(L, 4, "predict", NULL);
-  tm->results = tk_ensure_interleaved(L, &tm->results_len, tm->results, n * sizeof(unsigned int), false);
+
+  // Only reallocate if needed
+  size_t needed = n * sizeof(unsigned int);
+  if (needed > tm->results_len) {
+    tm->results = tk_realloc(L, tm->results, needed);
+    tm->results_len = needed;
+  }
 
   tk_tsetlin_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_tsetlin_thread_t));
   memset(threads, 0, n_threads * sizeof(tk_tsetlin_thread_t));
@@ -862,7 +858,13 @@ static inline int tk_tsetlin_predict_encoder (
   tk_cvec_t *ps = tk_cvec_peek(L, 2, "problems");
   unsigned int n = tk_lua_checkunsigned(L, 3, "argument 2 is not an integer n_samples");
   unsigned int n_threads = tk_threads_getn(L, 4, "predict", NULL);
-  tm->encodings = (char *)tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * tm->class_chunks, false);
+
+  // Only reallocate if needed
+  size_t needed = n * tm->class_chunks;
+  if (needed > tm->encodings_len) {
+    tm->encodings = (char *)tk_realloc(L, tm->encodings, needed);
+    tm->encodings_len = needed;
+  }
 
   tk_tsetlin_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_tsetlin_thread_t));
   memset(threads, 0, n_threads * sizeof(tk_tsetlin_thread_t));
@@ -998,7 +1000,14 @@ static inline int tk_tsetlin_train_encoder (
   lua_pop(L, 1);
   unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
   unsigned int n_threads = tk_threads_getn(L, 2, "train", "threads");
-  tm->encodings = (char *)tk_ensure_interleaved(L, &tm->encodings_len, tm->encodings, n * tm->class_chunks, false);
+
+  // Only reallocate if needed
+  size_t needed = n * tm->class_chunks;
+  if (needed > tm->encodings_len) {
+    tm->encodings = (char *)tk_realloc(L, tm->encodings, needed);
+    tm->encodings_len = needed;
+  }
+
   int i_each = -1;
   if (tk_lua_ftype(L, 2, "each") != LUA_TNIL) {
     lua_getfield(L, 2, "each");

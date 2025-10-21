@@ -2,7 +2,6 @@
 #define TK_ITQ_H
 
 #include <santoku/iuset.h>
-#include <santoku/tsetlin/conf.h>
 #include <santoku/cvec.h>
 #include <santoku/dvec.h>
 #include <santoku/dvec/ext.h>
@@ -10,12 +9,136 @@
 #include <santoku/iumap.h>
 #include <santoku/dumap.h>
 #include <santoku/pvec.h>
+#include <santoku/threads.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <math.h>
 #include <float.h>
 #include <lapacke.h>
 #include <cblas.h>
+
+typedef enum {
+  TK_ITQ_MATVEC_XR,
+  TK_ITQ_CENTER_SUM,
+  TK_ITQ_CENTER_SUB,
+  TK_ITQ_SIGN,
+  TK_ITQ_PARTIAL_BTX,
+  TK_ITQ_MATVEC_XR_FINAL,
+  TK_ITQ_OBJECTIVE,
+} tk_itq_stage_t;
+
+typedef struct tk_itq_thread_s tk_itq_thread_t;
+typedef struct tk_itq_data_s tk_itq_data_t;
+
+typedef struct tk_itq_data_s {
+  double *X;
+  double *R;
+  double *V0;
+  double *V1;
+  double *B;
+  double *BtX_partials;
+  double *obj_partials;
+  double *center_sums;
+  uint64_t N;
+  uint64_t K;
+  tk_threadpool_t *pool;
+} tk_itq_data_t;
+
+typedef struct tk_itq_thread_s {
+  tk_itq_data_t *data;
+  uint64_t ifirst;
+  uint64_t ilast;
+  unsigned int thread_idx;
+} tk_itq_thread_t;
+
+static inline void tk_itq_worker(void *dp, int sig) {
+  tk_itq_stage_t stage = (tk_itq_stage_t) sig;
+  tk_itq_thread_t *thread = (tk_itq_thread_t *) dp;
+  tk_itq_data_t *data = thread->data;
+  uint64_t ifirst = thread->ifirst;
+  uint64_t ilast = thread->ilast;
+  uint64_t K = data->K;
+  unsigned int tid = thread->thread_idx;
+
+  switch (stage) {
+    case TK_ITQ_MATVEC_XR:
+    case TK_ITQ_MATVEC_XR_FINAL: {
+      double *X = data->X;
+      double *R = data->R;
+      double *V = (stage == TK_ITQ_MATVEC_XR) ? data->V0 : data->V1;
+      for (uint64_t i = ifirst; i <= ilast; i++) {
+        cblas_dgemv(CblasRowMajor, CblasNoTrans,
+                    K, K, 1.0,
+                    R, K,
+                    X + i * K, 1,
+                    0.0,
+                    V + i * K, 1);
+      }
+      break;
+    }
+
+    case TK_ITQ_CENTER_SUM: {
+      double *V = data->V0;
+      double *sums = data->center_sums + tid * K;
+      for (uint64_t j = 0; j < K; j++)
+        sums[j] = 0.0;
+      for (uint64_t i = ifirst; i <= ilast; i++) {
+        for (uint64_t j = 0; j < K; j++)
+          sums[j] += V[i * K + j];
+      }
+      break;
+    }
+
+    case TK_ITQ_CENTER_SUB: {
+      double *V = data->V0;
+      double *means = data->center_sums;
+      for (uint64_t i = ifirst; i <= ilast; i++) {
+        for (uint64_t j = 0; j < K; j++)
+          V[i * K + j] -= means[j];
+      }
+      break;
+    }
+
+    case TK_ITQ_SIGN: {
+      double *V = data->V0;
+      double *B = data->B;
+      for (uint64_t i = ifirst; i <= ilast; i++) {
+        for (uint64_t j = 0; j < K; j++)
+          B[i * K + j] = (V[i * K + j] >= 0.0) ? 1.0 : -1.0;
+      }
+      break;
+    }
+
+    case TK_ITQ_PARTIAL_BTX: {
+      double *B = data->B;
+      double *X = data->X;
+      double *partial = data->BtX_partials + tid * K * K;
+      uint64_t n_rows = ilast - ifirst + 1;
+      cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                  K, K, n_rows,
+                  1.0,
+                  B + ifirst * K, K,
+                  X + ifirst * K, K,
+                  0.0,
+                  partial, K);
+      break;
+    }
+
+    case TK_ITQ_OBJECTIVE: {
+      double *B = data->B;
+      double *V = data->V1;
+      double sum = 0.0;
+      for (uint64_t i = ifirst; i <= ilast; i++) {
+        for (uint64_t j = 0; j < K; j++) {
+          double d = B[i * K + j] - V[i * K + j];
+          sum += d * d;
+        }
+      }
+      data->obj_partials[tid] = sum;
+      break;
+    }
+  }
+}
 
 typedef struct {
   double a;
@@ -200,19 +323,68 @@ static inline void tk_itq_encode (
   for (uint64_t i = 0; i < K; i ++)
     for (uint64_t j = 0; j < K; j ++)
       R[i * K + j] = (i==j? 1.0 : 0.0);
+
+  // Setup threading
+  tk_itq_data_t thread_data;
+  thread_data.X = X;
+  thread_data.R = R;
+  thread_data.V0 = V0;
+  thread_data.V1 = V1;
+  thread_data.B = B;
+  thread_data.N = N;
+  thread_data.K = K;
+  thread_data.BtX_partials = tk_malloc(L, n_threads * K * K * sizeof(double));
+  thread_data.obj_partials = tk_malloc(L, n_threads * sizeof(double));
+  thread_data.center_sums = tk_malloc(L, n_threads * K * sizeof(double));
+
+  tk_itq_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_itq_thread_t));
+  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_itq_worker);
+  thread_data.pool = pool;
+
+  for (unsigned int i = 0; i < n_threads; i++) {
+    threads[i].data = &thread_data;
+    threads[i].thread_idx = i;
+    pool->threads[i].data = &threads[i];
+    tk_thread_range(i, n_threads, N, &threads[i].ifirst, &threads[i].ilast);
+  }
+
   double last_obj = DBL_MAX, first_obj = 0.0;
   uint64_t it = 0;
   for (it = 0; it < max_iterations; it ++) {
-    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                N, K, K, 1.0, X, K, R, K, 0.0, V0, K);
-    tk_dvec_center(V0, N, K);
-    for (size_t idx = 0; idx < N * K; idx ++)
-      B[idx] = (V0[idx] >= 0.0 ? 1.0 : -1.0);
-    cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-                K, K, N, 1.0, B, K, X, K, 0.0, BtV, K);
+    // V0 = X * R (threaded)
+    tk_threads_signal(pool, TK_ITQ_MATVEC_XR, 0);
+
+    // Center V0 (threaded two-pass)
+    tk_threads_signal(pool, TK_ITQ_CENTER_SUM, 0);
+    // Reduce sums from all threads
+    for (uint64_t j = 0; j < K; j++) {
+      double sum = 0.0;
+      for (unsigned int t = 0; t < n_threads; t++)
+        sum += thread_data.center_sums[t * K + j];
+      thread_data.center_sums[j] = sum / (double) N;
+    }
+    tk_threads_signal(pool, TK_ITQ_CENTER_SUB, 0);
+
+    // B = sign(V0) (threaded)
+    tk_threads_signal(pool, TK_ITQ_SIGN, 0);
+
+    // BtV = B^T * X (threaded with reduction)
+    tk_threads_signal(pool, TK_ITQ_PARTIAL_BTX, 0);
+    // Reduce partial results
+    memset(BtV, 0, K * K * sizeof(double));
+    for (unsigned int t = 0; t < n_threads; t++) {
+      double *partial = thread_data.BtX_partials + t * K * K;
+      for (uint64_t i = 0; i < K * K; i++)
+        BtV[i] += partial[i];
+    }
     int info = LAPACKE_dgesvd(LAPACK_ROW_MAJOR,'A','A',
                               K,K,BtV,K,S,U,K,VT,K,superb);
     if (info != 0) {
+      tk_threads_destroy(pool);
+      free(threads);
+      free(thread_data.BtX_partials);
+      free(thread_data.obj_partials);
+      free(thread_data.center_sums);
       free(superb);
       free(VT);
       free(S);
@@ -225,24 +397,39 @@ static inline void tk_itq_encode (
       free(X);
       luaL_error(L, "ITQ SVD failed to converge (info=%d)", info);
     }
+
+    // R = VT^T * U^T (K×K, sequential - too small to parallelize)
     cblas_dgemm(CblasRowMajor, CblasTrans, CblasTrans,
                 K, K, K, 1.0, VT, K, U, K, 0.0, R, K);
-    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                N, K, K, 1.0, X, K, R, K, 0.0, V1, K);
+
+    // V1 = X * R (threaded)
+    tk_threads_signal(pool, TK_ITQ_MATVEC_XR_FINAL, 0);
+
+    // Compute objective (threaded with reduction)
+    tk_threads_signal(pool, TK_ITQ_OBJECTIVE, 0);
     double obj = 0.0;
-    for (size_t idx = 0; idx < N * K; idx ++) {
-      double d = B[idx] - V1[idx];
-      obj += d * d;
-    }
+    for (unsigned int t = 0; t < n_threads; t++)
+      obj += thread_data.obj_partials[t];
     if (it == 0)
       first_obj = obj;
     if (it > 0 && fabs(last_obj - obj) < tolerance * fabs(obj))
       break;
     last_obj = obj;
   }
-  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, N, K, K, 1.0, X, K, R, K, 0.0, V1, K);
+
+  // Final rotation and binarization
+  tk_threads_signal(pool, TK_ITQ_MATVEC_XR_FINAL, 0);
   tk_dvec_center(V1, N, K);
   tk_itq_sign(out->a, V1, N, K);
+
+  // Cleanup threading
+  tk_threads_destroy(pool);
+  lua_pop(L, 1); // threads
+  free(threads);
+  free(thread_data.BtX_partials);
+  free(thread_data.obj_partials);
+  free(thread_data.center_sums);
+
   free(superb);
   free(VT);
   free(S);
@@ -439,13 +626,15 @@ static inline void tk_sr_ranking_encode (
     luaL_error(L, "SR ranking: allocation failed");
   }
 
-  tk_dumap_t *rank_buffer_a = tk_dumap_create(NULL, 0);
   tk_dumap_t *rank_buffer_b = tk_dumap_create(NULL, 0);
   tk_pvec_t *bin_ranks = tk_pvec_create(NULL, 0, 0, 0);
-  if (!rank_buffer_a || !rank_buffer_b || !bin_ranks) {
+  tk_ivec_t *count_buffer = tk_ivec_create(NULL, K + 1, 0, 0);
+  tk_dvec_t *avgrank_buffer = tk_dvec_create(NULL, K + 1, 0, 0);
+  if (!rank_buffer_b || !bin_ranks || !count_buffer || !avgrank_buffer) {
     if (bin_ranks) tk_pvec_destroy(bin_ranks);
     if (rank_buffer_b) tk_dumap_destroy(rank_buffer_b);
-    if (rank_buffer_a) tk_dumap_destroy(rank_buffer_a);
+    if (count_buffer) tk_ivec_destroy(count_buffer);
+    if (avgrank_buffer) tk_dvec_destroy(avgrank_buffer);
     free(B_binary);
     tk_iumap_destroy(id_map);
     tk_rvec_destroy(rank_vec);
@@ -523,11 +712,9 @@ static inline void tk_sr_ranking_encode (
         tk_pvec_push(bin_ranks, tk_pair(neighbor_pos, (int64_t)hamming_dist));
       }
 
-      // Sort by Hamming distance
-      tk_pvec_asc(bin_ranks, 0, bin_ranks->n);
-
-      // Compute Spearman correlation
-      double corr = tk_csr_spearman(adj_neighbors, adj_weights, start, end, bin_ranks, rank_buffer_a, rank_buffer_b);
+      // Compute Spearman correlation (counting sort inside, no pre-sort needed)
+      double corr = tk_csr_spearman(adj_neighbors, adj_weights, start, end, bin_ranks,
+                                    K, count_buffer, avgrank_buffer, rank_buffer_b);
 
       // Weight = 1 - corr (higher weight for worse ranking)
       // Clamp to [0.1, 2.0] to avoid extreme weights
@@ -554,7 +741,8 @@ static inline void tk_sr_ranking_encode (
     if (info != 0) {
       tk_pvec_destroy(bin_ranks);
       tk_dumap_destroy(rank_buffer_b);
-      tk_dumap_destroy(rank_buffer_a);
+      tk_ivec_destroy(count_buffer);
+      tk_dvec_destroy(avgrank_buffer);
       free(B_binary);
       tk_iumap_destroy(id_map);
       tk_rvec_destroy(rank_vec);
@@ -600,7 +788,8 @@ static inline void tk_sr_ranking_encode (
   // Cleanup
   tk_pvec_destroy(bin_ranks);
   tk_dumap_destroy(rank_buffer_b);
-  tk_dumap_destroy(rank_buffer_a);
+  tk_ivec_destroy(count_buffer);
+  tk_dvec_destroy(avgrank_buffer);
   free(B_binary);
   tk_iumap_destroy(id_map);
   tk_rvec_destroy(rank_vec);

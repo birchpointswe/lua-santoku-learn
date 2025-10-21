@@ -1,5 +1,4 @@
 #include <santoku/iuset.h>
-#include <santoku/tsetlin/conf.h>
 #include <santoku/threads.h>
 #include <santoku/ivec.h>
 #include <santoku/rvec.h>
@@ -51,24 +50,26 @@ typedef struct tk_corex_s {
   double *log_marg;
   double *log_py;
   double *log_pyx_unnorm;
-  size_t maxmis_len;
   double *maxmis;
   double *mis;
   double *log_z;
   double *sums;
   double *baseline;
   tk_corex_sort_t *sort;
+  size_t sort_len;
   uint64_t n_set_bits;
   unsigned int n_samples;
-  size_t samples_len;
   uint64_t *samples;
-  size_t visibles_len;
+  size_t samples_len;
   unsigned int *visibles;
-  size_t px_len;
+  size_t visibles_len;
   double *px;
-  size_t entropy_len;
   double *entropy_x;
   double *pyx;
+  size_t pyx_len;
+  size_t log_pyx_unnorm_len;
+  size_t sums_len;
+  size_t log_z_len;
   double *counts;
   double last_tc;
   double tc_dev;
@@ -98,21 +99,9 @@ static inline void tk_corex_shrink (tk_corex_t *C)
   free(C->counts); C->counts = NULL;
   free(C->tcs); C->tcs = NULL;
   free(C->tcs_temp); C->tcs_temp = NULL;
-  if (numa_available() == -1) {
-    free(C->maxmis); C->maxmis = NULL;
-    free(C->px); C->px = NULL;
-    free(C->entropy_x); C->entropy_x = NULL;
-  } else {
-    if (C->maxmis) {
-      numa_free(C->maxmis, C->maxmis_len); C->maxmis = NULL; C->maxmis_len = 0;
-    }
-    if (C->entropy_x) {
-      numa_free(C->entropy_x, C->entropy_len); C->entropy_x = NULL; C->entropy_len = 0;
-    }
-    if (C->px) {
-      numa_free(C->px, C->px_len); C->px = NULL; C->px_len = 0;
-    }
-  }
+  free(C->maxmis); C->maxmis = NULL;
+  free(C->px); C->px = NULL;
+  free(C->entropy_x); C->entropy_x = NULL;
 }
 
 static int tk_corex_gc (lua_State *L)
@@ -131,17 +120,8 @@ static int tk_corex_gc (lua_State *L)
   free(C->pyx); C->pyx = NULL;
   free(C->baseline); C->baseline = NULL;
   free(C->sort); C->sort = NULL;
-  if (numa_available() == -1) {
-    free(C->samples); C->samples = NULL;
-    free(C->visibles); C->visibles = NULL;
-  } else {
-    if (C->samples) {
-      numa_free(C->samples, C->samples_len); C->samples = NULL;
-    }
-    if (C->visibles) {
-      numa_free(C->visibles, C->visibles_len); C->visibles = NULL;
-    }
-  }
+  free(C->samples); C->samples = NULL;
+  free(C->visibles); C->visibles = NULL;
   return 0;
 }
 
@@ -159,17 +139,8 @@ static inline int tk_corex_destroy (lua_State *L)
     free(C->pyx); C->pyx = NULL;
     free(C->baseline); C->baseline = NULL;
     free(C->sort); C->sort = NULL;
-    if (numa_available() == -1) {
-      free(C->samples); C->samples = NULL;
-      free(C->visibles); C->visibles = NULL;
-    } else {
-      if (C->samples) {
-        numa_free(C->samples, C->samples_len); C->samples = NULL;
-      }
-      if (C->visibles) {
-        numa_free(C->visibles, C->visibles_len); C->visibles = NULL;
-      }
-    }
+    free(C->samples); C->samples = NULL;
+    free(C->visibles); C->visibles = NULL;
   }
   return 0;
 }
@@ -897,17 +868,52 @@ static inline int tk_corex_compress (lua_State *L)
   unsigned int n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
   unsigned int n_threads = tk_threads_getn(L, 4, "compress", NULL);
 
-  // TODO: Expose shrink via the api, and only realloc if new size is larger than old
-  C->sort = tk_realloc(L, C->sort, set_bits->n * sizeof(tk_corex_sort_t));
-  C->samples = tk_ensure_interleaved(L, &C->samples_len, C->samples, set_bits->n * sizeof(uint64_t), false);
-  C->visibles = tk_ensure_interleaved(L, &C->visibles_len, C->visibles, set_bits->n * sizeof(unsigned int), false);
+  // Only reallocate buffers if they need to grow
+  size_t needed_sort = set_bits->n * sizeof(tk_corex_sort_t);
+  if (needed_sort > C->sort_len) {
+    C->sort = tk_realloc(L, C->sort, needed_sort);
+    C->sort_len = needed_sort;
+  }
+
+  size_t needed_samples = set_bits->n * sizeof(uint64_t);
+  if (needed_samples > C->samples_len) {
+    C->samples = tk_realloc(L, C->samples, needed_samples);
+    C->samples_len = needed_samples;
+  }
+
+  size_t needed_visibles = set_bits->n * sizeof(unsigned int);
+  if (needed_visibles > C->visibles_len) {
+    C->visibles = tk_realloc(L, C->visibles, needed_visibles);
+    C->visibles_len = needed_visibles;
+  }
+
   set_bits->n = tk_corex_setup_bits(L, set_bits, C->sort, C->samples, C->visibles, C->n_visible, false, 0, 0);
   C->n_samples = n_samples;
   C->n_set_bits = set_bits->n;
-  C->log_z = tk_realloc(L, C->log_z, C->n_hidden * n_samples * sizeof(double));
-  C->pyx = tk_realloc(L, C->pyx, C->n_hidden * n_samples * sizeof(double));
-  C->log_pyx_unnorm = tk_realloc(L, C->log_pyx_unnorm, 2 * C->n_hidden * n_samples * sizeof(double));
-  C->sums = tk_realloc(L, C->sums, 2 * C->n_hidden * n_samples * sizeof(double));
+
+  size_t needed_log_z = C->n_hidden * n_samples * sizeof(double);
+  if (needed_log_z > C->log_z_len) {
+    C->log_z = tk_realloc(L, C->log_z, needed_log_z);
+    C->log_z_len = needed_log_z;
+  }
+
+  size_t needed_pyx = C->n_hidden * n_samples * sizeof(double);
+  if (needed_pyx > C->pyx_len) {
+    C->pyx = tk_realloc(L, C->pyx, needed_pyx);
+    C->pyx_len = needed_pyx;
+  }
+
+  size_t needed_log_pyx_unnorm = 2 * C->n_hidden * n_samples * sizeof(double);
+  if (needed_log_pyx_unnorm > C->log_pyx_unnorm_len) {
+    C->log_pyx_unnorm = tk_realloc(L, C->log_pyx_unnorm, needed_log_pyx_unnorm);
+    C->log_pyx_unnorm_len = needed_log_pyx_unnorm;
+  }
+
+  size_t needed_sums = 2 * C->n_hidden * n_samples * sizeof(double);
+  if (needed_sums > C->sums_len) {
+    C->sums = tk_realloc(L, C->sums, needed_sums);
+    C->sums_len = needed_sums;
+  }
 
   tk_corex_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_corex_thread_t));
   memset(threads, 0, n_threads * sizeof(tk_corex_thread_t));
@@ -964,14 +970,21 @@ static inline void _tk_corex_train (
   }
 
   C->smoothing = 0.001;
-  C->pyx = tk_malloc(L, C->n_hidden * n_samples * sizeof(double));
-  C->log_pyx_unnorm = tk_malloc(L, 2 * C->n_hidden * n_samples * sizeof(double));
-  C->sums = tk_malloc(L, 2 * C->n_hidden * n_samples * sizeof(double));
+  C->pyx_len = C->n_hidden * n_samples * sizeof(double);
+  C->pyx = tk_malloc(L, C->pyx_len);
+  C->log_pyx_unnorm_len = 2 * C->n_hidden * n_samples * sizeof(double);
+  C->log_pyx_unnorm = tk_malloc(L, C->log_pyx_unnorm_len);
+  C->sums_len = 2 * C->n_hidden * n_samples * sizeof(double);
+  C->sums = tk_malloc(L, C->sums_len);
   C->mis = tk_malloc(L, C->n_hidden * C->n_visible * sizeof(double));
-  C->log_z = tk_malloc(L, C->n_hidden * n_samples * sizeof(double));
-  C->sort = tk_malloc(L, set_bits->n * sizeof(tk_corex_sort_t));
-  C->samples = tk_malloc_interleaved(L, &C->samples_len, set_bits->n * sizeof(uint64_t));
-  C->visibles = tk_malloc_interleaved(L, &C->visibles_len, set_bits->n * sizeof(unsigned int));
+  C->log_z_len = C->n_hidden * n_samples * sizeof(double);
+  C->log_z = tk_malloc(L, C->log_z_len);
+  C->sort_len = set_bits->n * sizeof(tk_corex_sort_t);
+  C->sort = tk_malloc(L, C->sort_len);
+  C->samples_len = set_bits->n * sizeof(uint64_t);
+  C->samples = tk_malloc(L, C->samples_len);
+  C->visibles_len = set_bits->n * sizeof(unsigned int);
+  C->visibles = tk_malloc(L, C->visibles_len);
   set_bits->n = tk_corex_setup_bits(L, set_bits, C->sort, C->samples, C->visibles, C->n_visible, true, C->tile_sblock, C->tile_vblock);
   C->n_samples = n_samples;
   C->n_set_bits = set_bits->n;
@@ -1078,9 +1091,9 @@ static inline void tk_corex_init (
   C->log_marg = tk_malloc(L, 2 * 2 * C->n_hidden * C->n_visible * sizeof(double));
   C->counts = tk_malloc(L, 2 * 2 * C->n_hidden * C->n_visible * sizeof(double));
   C->baseline = tk_malloc(L, 2 * C->n_hidden * sizeof(double));
-  C->px = tk_malloc_interleaved(L, &C->px_len, C->n_visible * sizeof(double));
-  C->entropy_x = tk_malloc_interleaved(L, &C->entropy_len, C->n_visible * sizeof(double));
-  C->maxmis = tk_malloc_interleaved(L, &C->maxmis_len, C->n_visible * sizeof(double));
+  C->px = tk_malloc(L, C->n_visible * sizeof(double));
+  C->entropy_x = tk_malloc(L, C->n_visible * sizeof(double));
+  C->maxmis = tk_malloc(L, C->n_visible * sizeof(double));
 }
 
 static inline int tk_corex_visible (lua_State *L) {

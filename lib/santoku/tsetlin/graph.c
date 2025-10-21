@@ -386,7 +386,7 @@ static inline tk_pvec_t *tm_add_anchor_edges_immediate(
     tk_lua_verror(L, 2, "add_anchor_edges", "allocation failed");
     return NULL;
   }
-  tk_graph_thread_t threads[n_threads];
+  tk_graph_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_graph_thread_t));
   memset(threads, 0, n_threads * sizeof(tk_graph_thread_t));
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_graph_worker); // new_edges pool
   int Pi = tk_lua_absindex(L, -1);
@@ -437,9 +437,13 @@ static inline tk_pvec_t *tm_add_anchor_edges_immediate(
     atomic_init(&data->has_error, false);
   }
   tk_threads_signal(pool, TK_GRAPH_ANCHORS, 0);
-  for (unsigned int i = 0; i < n_threads; i++)
-    if (atomic_load(&threads[i].has_error))
+  for (unsigned int i = 0; i < n_threads; i++) {
+    if (atomic_load(&threads[i].has_error)) {
+      tk_threads_destroy(pool);
+      free(threads);
       tk_lua_verror(L, 2, "add_anchor_edges", "worker allocation failed");
+    }
+  }
   int kha;
   uint32_t khi;
   for (unsigned int i = 0; i < n_threads; i++) {
@@ -474,6 +478,8 @@ static inline tk_pvec_t *tm_add_anchor_edges_immediate(
       graph->n_edges++;
     }
   }
+  tk_threads_destroy(pool);
+  free(threads);
   lua_pop(L, 1); // new_edges
   return new_edges;
 }
@@ -576,7 +582,7 @@ static inline void tk_compute_weights (
       !graph->category_inv && !graph->knn_inv && !graph->knn_ann && !graph->knn_hbi)
     return;
 
-  tk_graph_thread_t threads[n_threads];
+  tk_graph_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_graph_thread_t));
   memset(threads, 0, n_threads * sizeof(tk_graph_thread_t));
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_graph_worker);
   int Pi = tk_lua_absindex(L, -1);
@@ -611,6 +617,8 @@ static inline void tk_compute_weights (
     tk_thread_range(i, n_threads, graph->uids->n, &data->ifirst, &data->ilast);
   }
   tk_threads_signal(pool, TK_GRAPH_COMPUTE_WEIGHTS, 0);
+  tk_threads_destroy(pool);
+  free(threads);
   lua_pop(L, 1); // pool
 }
 

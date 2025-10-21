@@ -44,6 +44,8 @@ typedef struct {
   bool is_userdata;
 } tk_agglo_cluster_t;
 
+typedef struct tk_agglo_thread_s tk_agglo_thread_t;
+
 typedef struct {
   tk_agglo_index_type_t index_type;
   tk_agglo_linkage_t linkage;
@@ -77,6 +79,7 @@ typedef struct {
   bool is_userdata;
   uint64_t n_clusters_created;
   uint64_t n_threads_arrays_allocated;
+  struct tk_agglo_thread_s *threads;
   uint64_t knn;
   uint64_t min_pts;
   bool assign_noise;
@@ -91,7 +94,7 @@ typedef struct {
   double current_epsilon;  // Current distance threshold for single-linkage
 } tk_agglo_state_t;
 
-typedef struct {
+struct tk_agglo_thread_s {
   tk_agglo_state_t *state;
   uint64_t first, last;
   unsigned int index;
@@ -105,7 +108,7 @@ typedef struct {
       uint64_t merge_first, merge_last;
     } merge;
   } stage_data;
-} tk_agglo_thread_t;
+};
 
 static inline uint64_t tk_agglo_hash_code (char *code, uint64_t code_chunks) {
   uint64_t hash = 0;
@@ -135,7 +138,6 @@ static inline tk_agglo_cluster_t *tk_agglo_cluster_create (
   if (L) {
     cluster = lua_newuserdata(L, sizeof(tk_agglo_cluster_t));
     cluster_idx = lua_gettop(L);
-    memset(cluster, 0, sizeof(tk_agglo_cluster_t));
     cluster->is_userdata = true;
   } else {
     cluster = malloc(sizeof(tk_agglo_cluster_t));
@@ -420,6 +422,10 @@ static inline int tk_agglo_state_gc(lua_State *L) {
     state->thread_neighbors = NULL;
     state->thread_min_dist = NULL;
     state->thread_min_edges = NULL;
+  }
+  if (state->threads) {
+    free(state->threads);
+    state->threads = NULL;
   }
   return 0;
 }
@@ -769,9 +775,6 @@ static inline int tk_agglo (
   state->adj_offsets = adj_offsets;
   state->adj_neighbors = adj_neighbors;
   state->adj_weights = adj_weights;
-  state->uid_to_adj_idx = NULL;
-  state->adj_scan_offsets = NULL;
-  state->is_core = NULL;
   state->n_adj = 0;
   if (linkage == TK_AGGLO_LINKAGE_SINGLE && adj_ids != NULL)
     tk_agglo_init_single_linkage(L, state, state_idx, adj_ids, adj_offsets, min_pts);
@@ -792,6 +795,12 @@ static inline int tk_agglo (
   state->thread_neighbors = tk_malloc(L, n_threads * sizeof(tk_pvec_t *));
   state->thread_min_dist = tk_malloc(L, n_threads * sizeof(double));
   state->thread_min_edges = tk_malloc(L, n_threads * sizeof(tk_pvec_t *));
+
+  // Initialize pointer arrays to NULL (tk_malloc doesn't zero)
+  for (unsigned int i = 0; i < n_threads; i++) {
+    state->thread_neighbors[i] = NULL;
+    state->thread_min_edges[i] = NULL;
+  }
 
   for (unsigned int i = 0; i < n_threads; i++) {
     state->thread_neighbors[i] = tk_pvec_create(L, 0, 0, 0);
@@ -832,11 +841,11 @@ static inline int tk_agglo (
   lua_pop(L, 1);
   tk_agglo_create_initial_clusters(L, state, state_idx, ann, hbi, uids, assignments, linkage, min_pts,
     n_samples, code_chunks, features, state_bits, code_hash_to_cluster);
-  tk_agglo_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_agglo_thread_t));
+  state->threads = tk_malloc(L, n_threads * sizeof(tk_agglo_thread_t));
   for (unsigned int i = 0; i < n_threads; i++) {
-    threads[i].state = state;
-    threads[i].index = i;
-    state->pool->threads[i].data = &threads[i];
+    state->threads[i].state = state;
+    state->threads[i].index = i;
+    state->pool->threads[i].data = &state->threads[i];
   }
 
   if (state->n_clusters > 0) {
@@ -874,7 +883,7 @@ static inline int tk_agglo (
   if (callback)
     callback(callback_data, iteration, state->n_active_clusters, uids, assignments);
   while (state->n_active_clusters > 1) {
-    if (!tk_agglo_iteration(L, state, threads, assignments, uids, n_threads, &iteration, callback, callback_data))
+    if (!tk_agglo_iteration(L, state, state->threads, assignments, uids, n_threads, &iteration, callback, callback_data))
       break;
   }
   if (state->linkage == TK_AGGLO_LINKAGE_SINGLE && state->assign_noise && state->is_core != NULL) {
@@ -889,7 +898,6 @@ static inline int tk_agglo (
       assignments->a[i] = tk_agglo_find_nearest_core_cluster(state, adj_idx);
     }
   }
-  free(threads);
   if (state->index_type == TK_AGGLO_USE_ANN && state->index.ann)
     lua_pop(L, 1);
   else if (state->index_type == TK_AGGLO_USE_HBI && state->index.hbi)

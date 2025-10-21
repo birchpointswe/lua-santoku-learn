@@ -1,9 +1,59 @@
 results.mk: Makefile
 	truncate -s0 results.mk
+
+	# Detect Fortran runtime library using compiler introspection (prefix-agnostic)
+	# For shared libraries (.so targets), we need shared runtime or PIC static library
+	@if command -v gfortran >/dev/null 2>&1; then \
+		FORTRAN_RT=$$(gfortran -print-file-name=libgfortran.so 2>/dev/null); \
+		if [ -z "$$FORTRAN_RT" ] || [ ! -f "$$FORTRAN_RT" ]; then \
+			FORTRAN_RT="-lgfortran"; \
+		fi; \
+		echo "TK_TSETLIN_FORTRAN_RUNTIME := $$FORTRAN_RT" >> results.mk; \
+	elif command -v flang >/dev/null 2>&1; then \
+		resdir=$$(flang -print-resource-dir 2>/dev/null); \
+		if [ -n "$$resdir" ]; then \
+			FORTRAN_RT=$$(find "$$resdir" -name 'libflang_rt.runtime.a' 2>/dev/null | head -1); \
+		fi; \
+		if [ -z "$$FORTRAN_RT" ] || [ ! -f "$$FORTRAN_RT" ]; then \
+			libdir=$$(dirname "$$(dirname "$$resdir")"); \
+			FORTRAN_RT=$$(find "$$libdir" -maxdepth 2 -name 'libflang_rt.runtime.a' 2>/dev/null | head -1); \
+		fi; \
+		if [ -z "$$FORTRAN_RT" ] || [ ! -f "$$FORTRAN_RT" ]; then \
+			FORTRAN_RT=$$(flang -print-file-name=libflang_rt.runtime.a 2>/dev/null); \
+		fi; \
+		if [ -n "$$FORTRAN_RT" ] && [ -f "$$FORTRAN_RT" ]; then \
+			echo "TK_TSETLIN_FORTRAN_RUNTIME := $$FORTRAN_RT" >> results.mk; \
+		else \
+			echo "TK_TSETLIN_FORTRAN_RUNTIME := -lflang_rt.runtime" >> results.mk; \
+		fi; \
+	else \
+		echo "TK_TSETLIN_FORTRAN_RUNTIME :=" >> results.mk; \
+	fi
+
+	# Build OpenBLAS with optimal single-threaded configuration
+	# Architecture detection for TARGET parameter
 	if ! [ -d OpenBLAS ]; then git clone https://github.com/OpenMathLib/OpenBLAS.git --depth 1; fi
-	if ! [ -f .openblas.ok ]; then cd OpenBLAS && make -j$(nproc) USE_THREAD=0 NO_SHARED=1 NO_LAPACKE= COMMON_OPT="-w" <% return blas_target and ("TARGET=" .. blas_target) or "" %>; fi
-	if ! [ -f .openblas.ok ]; then cd OpenBLAS && make install PREFIX=./install USE_THREAD=0 NO_SHARED=1 NO_LAPACKE= COMMON_OPT="-w" <% return blas_target and ("TARGET=" .. blas_target) or "" %>; fi
+	if ! [ -f .openblas.ok ]; then \
+		ARCH=$$(uname -m); \
+		if [ "$$ARCH" = "x86_64" ] || [ "$$ARCH" = "amd64" ]; then \
+			OPENBLAS_TARGET=""; \
+		elif [ "$$ARCH" = "aarch64" ] || [ "$$ARCH" = "arm64" ]; then \
+			OPENBLAS_TARGET="TARGET=ARMV8"; \
+		else \
+			OPENBLAS_TARGET=""; \
+		fi && \
+		cd OpenBLAS && make -j$$(nproc) \
+		USE_THREAD=0 \
+		NO_SHARED=1 \
+		COMMON_OPT="-w" \
+		$$OPENBLAS_TARGET; \
+	fi
+	if ! [ -f .openblas.ok ]; then cd OpenBLAS && make install PREFIX=./install USE_THREAD=0 NO_SHARED=1; fi
 	touch .openblas.ok
+
+	# Build PRIMME (against OpenBLAS)
 	if ! [ -d primme ]; then git clone https://github.com/primme/primme --depth 1; fi
-	if ! [ -f .primme.ok ]; then cd primme && make -j$(nproc) lib CFLAGS="-w <% return primme_cflags or '-O3 -march=native -fPIC' %>" LDFLAGS="-w <% return primme_ldflags or '-O3 -march=native -fPIC' %>"; fi
+	if ! [ -f .primme.ok ]; then cd primme && $(MAKE) -j$$(nproc) lib \
+		CFLAGS="-w <% return primme_cflags or '-O3 -march=native -mtune=native -fPIC -DNDEBUG -ffunction-sections -fdata-sections' %>" \
+		LDFLAGS="-w <% return primme_ldflags or '-O3 -march=native -fPIC' %>"; fi
 	touch .primme.ok
