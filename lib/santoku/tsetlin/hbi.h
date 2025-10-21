@@ -4,7 +4,6 @@
 #include <assert.h>
 #include <santoku/iuset.h>
 #include <santoku/lua/utils.h>
-#include <santoku/tsetlin/conf.h>
 #include <santoku/ivec.h>
 #include <santoku/iumap.h>
 #include <santoku/threads.h>

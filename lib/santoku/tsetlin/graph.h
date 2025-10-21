@@ -2,7 +2,6 @@
 #define TK_GRAPH_H
 
 #include <santoku/iuset.h>
-#include <santoku/tsetlin/conf.h>
 #include <santoku/threads.h>
 #include <santoku/ivec.h>
 #include <santoku/euset.h>

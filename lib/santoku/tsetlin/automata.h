@@ -1,7 +1,6 @@
 #ifndef TK_AUTOMATA_H
 #define TK_AUTOMATA_H
 
-#include <santoku/tsetlin/conf.h>
 #include <santoku/cvec.h>
 
 // Bit-parallel counter array for Tsetlin Machine automata

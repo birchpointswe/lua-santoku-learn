@@ -1,31 +1,21 @@
 # Now
 
+- Need a true hierarchical test case for HLTH
 - Abstract the landmark/out-of-sample phase behind a simple tm + index wrapper
-
-- Consider eliminating (for now) single-linkage agglo. Too slow?
-
 - Generalize tm.optimize exploration to an explore module that covers various
   optimizations: exhaustive, binary search, and the parameter sampling mechanism
-  in tm.optimize
-
-- All of the evaluator functions should accept an index in the same argument
-  position as codes when those codes are used as-is for computation (e.g.
-  entropy currently takes codes, but it very well could take idx if they're
-  already stored.)
-
-- Experiment with the integer-backed simhash for tsetlin
-- Need a true hierarchical test case for HLTH
-- optimize_clustering should support csr adjacency as input in addition to inv,
-  ann, or hbi, supporting linkage=single mode
-- Should support linkage=complete and linkage=average for completeness
-- Support shared threadpools in some way (pooled threads, pooled mutexes, etc)
-
-# Next
+  in tm.optimize, with integrated evaluation like the other optimize routines so
+  we don't create evaluator thread pools every epoch
 
 - tokenizer
     - store known tokens contiguously, no need for separate mallocs/etc for each
       token. Use a single cvec as backend, storing pointers into that cvec
       insted of separately alloc'd strings. Ensure tokens are null terminated.
+
+# Next
+
+- Should support linkage=complete and linkage=average for completeness
+- Support shared threadpools in some way (pooled threads, pooled mutexes, etc)
 
 - Separate all lua api functions explicitly via _lua variant (_lua variants must
   respect the expected stack semantics strictly)

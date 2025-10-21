@@ -6,7 +6,6 @@
 #include <float.h>
 #include <string.h>
 #include <santoku/lua/utils.h>
-#include <santoku/tsetlin/conf.h>
 #include <santoku/ivec.h>
 #include <santoku/iumap.h>
 #include <santoku/dumap.h>
