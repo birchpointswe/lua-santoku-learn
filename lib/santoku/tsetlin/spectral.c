@@ -11,7 +11,7 @@
 #include <primme.h>
 #include <cblas.h>
 
-#define TK_SPECTRAL_BLOCKSIZE 64
+#define TK_SPECTRAL_BLOCKSIZE 32
 
 typedef enum {
   TK_SPECTRAL_SCALE,
@@ -141,8 +141,6 @@ static inline void tk_spectral_worker (void *dp, int sig)
     }
 
     case TK_SPECTRAL_PRECONDITION: {
-      // NOTE: This only gets called for unnormalized Laplacian
-      // For normalized/random, preconditioning is disabled entirely
       const uint64_t node_first = data->ifirst;
       const uint64_t node_last = data->ilast;
       const int blockSize = data->spec->blockSize;
@@ -151,8 +149,6 @@ static inline void tk_spectral_worker (void *dp, int sig)
       double * restrict xvec = data->spec->precond_x;
       double * restrict yvec = data->spec->precond_y;
       const double * restrict degree = data->spec->degree->a;
-
-      // Unnormalized Laplacian: L = D - A, Jacobi preconditioner is D^(-1)
       for (int b = 0; b < blockSize; b++) {
         const double * restrict xb = xvec + (size_t) b * (size_t) ldx;
         double * restrict yb = yvec + (size_t) b * (size_t) ldy;
@@ -220,8 +216,6 @@ static inline void tm_run_spectral (
   tk_laplacian_type_t laplacian_type,
   const char *method_str,
   int use_precond,
-  int locking,
-  int dynamic,
   int i_each
 ) {
   tk_spectral_t spec;
@@ -247,6 +241,7 @@ static inline void tm_run_spectral (
 
   tk_threads_signal(pool, TK_SPECTRAL_SCALE, 0);
 
+  openblas_set_num_threads((int) pool->n_threads);
   primme_params params;
   primme_initialize(&params);
   params.n = (int64_t) uids->n;
@@ -258,7 +253,6 @@ static inline void tm_run_spectral (
   params.target = primme_smallest;
   params.maxBlockSize = TK_SPECTRAL_BLOCKSIZE;
 
-  // Select PRIMME method
   primme_preset_method method = PRIMME_DEFAULT_MIN_TIME;
   if (strcmp(method_str, "gd") == 0) {
     method = PRIMME_GD_plusK;
@@ -270,36 +264,12 @@ static inline void tm_run_spectral (
     method = PRIMME_JDQMR_ETol;
   }
   primme_set_method(method, &params);
-
-  // Preconditioning configuration
-  // Only use preconditioner for unnormalized Laplacian (diagonal = degree)
-  // For normalized/random, diagonal is 1, so Jacobi is identity (no-op)
   if (use_precond && laplacian_type == TK_LAPLACIAN_UNNORMALIZED) {
     params.applyPreconditioner = tk_spectral_preconditioner;
     params.correctionParams.precondition = 1;
   } else {
     params.correctionParams.precondition = 0;
   }
-
-  // Locking: lock converged eigenpairs (reduces active problem size)
-  params.locking = locking;
-
-  // Dynamic method switching: automatically switch if progress stalls
-  params.dynamicMethodSwitch = dynamic;
-
-  // Correction equation tuning for JDQMR/GD methods
-  // Start with loose inner tolerance, tighten as outer solve converges
-  params.correctionParams.convTest = primme_adaptive_ETolerance;
-  params.correctionParams.relTolBase = 1.5;
-
-  // Basis size management (balance memory vs convergence)
-  // For k eigenvalues, typical range: [k, 3k]
-  params.minRestartSize = spec.n_evals;
-  params.maxBasisSize = fmin(3 * spec.n_evals, 200);
-
-  // Safety limits
-  params.maxMatvecs = 1000000;
-  params.maxOuterIterations = 10000;
 
   spec.evals = tk_malloc(L, (size_t) spec.n_evals * sizeof(double));
   spec.evecs = tk_malloc(L, (size_t) params.n * (size_t) spec.n_evals * sizeof(double));
@@ -345,7 +315,6 @@ static inline void tm_run_spectral (
     }
   }
 
-  // Copy data needed for callbacks before freeing malloc'd buffers
   double *evals_copy = NULL;
   int64_t numMatvecs = params.stats.numMatvecs;
   if (i_each != -1) {
@@ -353,7 +322,6 @@ static inline void tm_run_spectral (
     memcpy(evals_copy, spec.evals, spec.n_evals * sizeof(double));
   }
 
-  // Free malloc'd buffers before any Lua API calls that can throw
   free(spec.evals);
   free(spec.evecs);
   free(spec.resNorms);
@@ -361,7 +329,6 @@ static inline void tm_run_spectral (
   tk_threads_destroy(pool);
   free(threads);
 
-  // Now safe to call Lua callbacks (no malloc leaks if they throw)
   if (i_each != -1) {
     for (uint64_t i = 0; i < spec.n_evals; i ++) {
       lua_pushvalue(L, i_each);
@@ -402,17 +369,8 @@ static inline int tm_encode (lua_State *L)
   const char *type_str = tk_lua_foptstring(L, 1, "spectral", "type", "unnormalized");
   const char *method_str = tk_lua_foptstring(L, 1, "spectral", "method", "jdqr");
 
-  // Optional advanced tuning
-  // Defaults based on empirical testing (MNIST 20k, k=32, unnormalized Laplacian)
   int use_precond = tk_lua_ftype(L, 1, "precondition") != LUA_TNIL
-    ? tk_lua_fcheckboolean(L, 1, "spectral", "precondition")
-    : 1;  // Default: use preconditioning (only applied to unnormalized)
-  int locking = tk_lua_ftype(L, 1, "locking") != LUA_TNIL
-    ? tk_lua_fcheckboolean(L, 1, "spectral", "locking")
-    : 0;  // Default: no locking (marginal benefit, adds overhead)
-  int dynamic = tk_lua_ftype(L, 1, "dynamic") != LUA_TNIL
-    ? tk_lua_fcheckboolean(L, 1, "spectral", "dynamic")
-    : 0;  // Default: no dynamic switching (expensive monitoring overhead)
+    ? tk_lua_fcheckboolean(L, 1, "spectral", "precondition") : 1;
 
   tk_laplacian_type_t laplacian_type = TK_LAPLACIAN_RANDOM;
 
@@ -432,13 +390,13 @@ static inline int tm_encode (lua_State *L)
 
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_spectral_worker);
 
-  lua_pushvalue(L, i_uids); // ids
-  tk_dvec_t *z = tk_dvec_create(L, 0, 0, 0); // ids, z
-  tk_dvec_t *scale = tk_dvec_create(L, uids->n, 0, 0); // ids, z, scale
-  tk_dvec_t *degree = tk_dvec_create(L, uids->n, 0, 0); // ids, z, scale, degree
+  lua_pushvalue(L, i_uids);
+  tk_dvec_t *z = tk_dvec_create(L, 0, 0, 0);
+  tk_dvec_t *scale = tk_dvec_create(L, uids->n, 0, 0);
+  tk_dvec_t *degree = tk_dvec_create(L, uids->n, 0, 0);
   tm_run_spectral(L, pool, z, scale, degree, uids, adj_offset, adj_neighbors,
                   adj_weights, n_hidden, eps,
-                  laplacian_type, method_str, use_precond, locking, dynamic, i_each);
+                  laplacian_type, method_str, use_precond, i_each);
   lua_remove(L, -2);
 
   assert(tk_ivec_peekopt(L, -4) == uids);
@@ -454,7 +412,7 @@ static luaL_Reg tm_codebook_fns[] =
 
 int luaopen_santoku_tsetlin_spectral (lua_State *L)
 {
-  lua_newtable(L); // t
-  tk_lua_register(L, tm_codebook_fns, 0); // t
+  lua_newtable(L);
+  tk_lua_register(L, tm_codebook_fns, 0);
   return 1;
 }
