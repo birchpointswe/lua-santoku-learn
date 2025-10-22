@@ -20,7 +20,7 @@ local utc = require("santoku.utc")
 local cfg; cfg = {
   data = {
     ttr = 0.9,
-    max = 20000,
+    max = nil,
     max_class = nil,
     visible = 784,
     hidden = 32,
@@ -42,7 +42,7 @@ local cfg; cfg = {
   },
   sr = {
     eps = 1e-12,
-    iterations = 1000,
+    iterations = 10000,
   },
   itq = {
     eps = 1e-12,
@@ -73,7 +73,7 @@ local cfg; cfg = {
     cluster_metric = "biserial",
     sampled_anchors = 16,
     sampled_pairs = 16,
-    tolerance = 1e-2,
+    tolerance = 1e-4,
     retrieval = function (d)
       -- return d:max()
       return d:scores_plateau(cfg.eval.tolerance)

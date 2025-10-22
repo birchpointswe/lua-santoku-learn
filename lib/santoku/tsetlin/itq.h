@@ -18,12 +18,9 @@
 #include <cblas.h>
 
 typedef enum {
-  TK_ITQ_MATVEC_XR,
   TK_ITQ_CENTER_SUM,
   TK_ITQ_CENTER_SUB,
   TK_ITQ_SIGN,
-  TK_ITQ_PARTIAL_BTX,
-  TK_ITQ_MATVEC_XR_FINAL,
   TK_ITQ_OBJECTIVE,
 } tk_itq_stage_t;
 
@@ -59,24 +56,7 @@ static inline void tk_itq_worker(void *dp, int sig) {
   uint64_t ilast = thread->ilast;
   uint64_t K = data->K;
   unsigned int tid = thread->thread_idx;
-
   switch (stage) {
-    case TK_ITQ_MATVEC_XR:
-    case TK_ITQ_MATVEC_XR_FINAL: {
-      double *X = data->X;
-      double *R = data->R;
-      double *V = (stage == TK_ITQ_MATVEC_XR) ? data->V0 : data->V1;
-      for (uint64_t i = ifirst; i <= ilast; i++) {
-        cblas_dgemv(CblasRowMajor, CblasNoTrans,
-                    K, K, 1.0,
-                    R, K,
-                    X + i * K, 1,
-                    0.0,
-                    V + i * K, 1);
-      }
-      break;
-    }
-
     case TK_ITQ_CENTER_SUM: {
       double *V = data->V0;
       double *sums = data->center_sums + tid * K;
@@ -88,7 +68,6 @@ static inline void tk_itq_worker(void *dp, int sig) {
       }
       break;
     }
-
     case TK_ITQ_CENTER_SUB: {
       double *V = data->V0;
       double *means = data->center_sums;
@@ -98,7 +77,6 @@ static inline void tk_itq_worker(void *dp, int sig) {
       }
       break;
     }
-
     case TK_ITQ_SIGN: {
       double *V = data->V0;
       double *B = data->B;
@@ -108,22 +86,6 @@ static inline void tk_itq_worker(void *dp, int sig) {
       }
       break;
     }
-
-    case TK_ITQ_PARTIAL_BTX: {
-      double *B = data->B;
-      double *X = data->X;
-      double *partial = data->BtX_partials + tid * K * K;
-      uint64_t n_rows = ilast - ifirst + 1;
-      cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-                  K, K, n_rows,
-                  1.0,
-                  B + ifirst * K, K,
-                  X + ifirst * K, K,
-                  0.0,
-                  partial, K);
-      break;
-    }
-
     case TK_ITQ_OBJECTIVE: {
       double *B = data->B;
       double *V = data->V1;
@@ -304,10 +266,11 @@ static inline void tk_itq_encode (
   int i_each,
   unsigned int n_threads
 ) {
+  openblas_set_num_threads((int) n_threads);
   const uint64_t K = n_dims;
   const size_t N = codes->n / K;
   tk_cvec_t *out = tk_cvec_create(L, N * TK_CVEC_BITS_BYTES(n_dims), 0, 0);
-  tk_cvec_zero(out);
+  tk_cvec_zero(out); // TODO: parallel
   double *X = tk_malloc(L, N * K * sizeof(double));
   double *R = tk_malloc(L, K*K*sizeof(double));
   double *V0 = tk_malloc(L, N * K*sizeof(double));
@@ -318,11 +281,11 @@ static inline void tk_itq_encode (
   double *S = tk_malloc(L, K  *sizeof(double));
   double *VT = tk_malloc(L, K*K*sizeof(double));
   double *superb= tk_malloc(L, (K-1)*sizeof(double));
-  memcpy(X, codes->a, N * K * sizeof(double));
-  tk_dvec_center(X, N, K);
-  for (uint64_t i = 0; i < K; i ++)
-    for (uint64_t j = 0; j < K; j ++)
-      R[i * K + j] = (i==j? 1.0 : 0.0);
+  memcpy(X, codes->a, N * K * sizeof(double)); // TODO: parallel
+  tk_dvec_center(X, N, K); // TODO: parallel
+  for (uint64_t i = 0; i < K; i ++) // TODO: parallel
+    for (uint64_t j = 0; j < K; j ++) // TODO: parallel
+      R[i * K + j] = (i==j? 1.0 : 0.0); // TODO: parallel
 
   // Setup threading
   tk_itq_data_t thread_data;
@@ -351,10 +314,7 @@ static inline void tk_itq_encode (
   double last_obj = DBL_MAX, first_obj = 0.0;
   uint64_t it = 0;
   for (it = 0; it < max_iterations; it ++) {
-    // V0 = X * R (threaded)
-    tk_threads_signal(pool, TK_ITQ_MATVEC_XR, 0);
-
-    // Center V0 (threaded two-pass)
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, N, K, K, 1.0, X, K, R, K, 0.0, V0, K);
     tk_threads_signal(pool, TK_ITQ_CENTER_SUM, 0);
     // Reduce sums from all threads
     for (uint64_t j = 0; j < K; j++) {
@@ -364,21 +324,9 @@ static inline void tk_itq_encode (
       thread_data.center_sums[j] = sum / (double) N;
     }
     tk_threads_signal(pool, TK_ITQ_CENTER_SUB, 0);
-
-    // B = sign(V0) (threaded)
     tk_threads_signal(pool, TK_ITQ_SIGN, 0);
-
-    // BtV = B^T * X (threaded with reduction)
-    tk_threads_signal(pool, TK_ITQ_PARTIAL_BTX, 0);
-    // Reduce partial results
-    memset(BtV, 0, K * K * sizeof(double));
-    for (unsigned int t = 0; t < n_threads; t++) {
-      double *partial = thread_data.BtX_partials + t * K * K;
-      for (uint64_t i = 0; i < K * K; i++)
-        BtV[i] += partial[i];
-    }
-    int info = LAPACKE_dgesvd(LAPACK_ROW_MAJOR,'A','A',
-                              K,K,BtV,K,S,U,K,VT,K,superb);
+    cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans, K, K, N, 1.0, B, K, X, K, 0.0, BtV, K);
+    int info = LAPACKE_dgesvd(LAPACK_ROW_MAJOR,'A','A', K,K,BtV,K,S,U,K,VT,K,superb);
     if (info != 0) {
       tk_threads_destroy(pool);
       free(threads);
@@ -397,15 +345,8 @@ static inline void tk_itq_encode (
       free(X);
       luaL_error(L, "ITQ SVD failed to converge (info=%d)", info);
     }
-
-    // R = VT^T * U^T (K×K, sequential - too small to parallelize)
-    cblas_dgemm(CblasRowMajor, CblasTrans, CblasTrans,
-                K, K, K, 1.0, VT, K, U, K, 0.0, R, K);
-
-    // V1 = X * R (threaded)
-    tk_threads_signal(pool, TK_ITQ_MATVEC_XR_FINAL, 0);
-
-    // Compute objective (threaded with reduction)
+    cblas_dgemm(CblasRowMajor, CblasTrans, CblasTrans, K, K, K, 1.0, VT, K, U, K, 0.0, R, K);
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, N, K, K, 1.0, X, K, R, K, 0.0, V1, K);
     tk_threads_signal(pool, TK_ITQ_OBJECTIVE, 0);
     double obj = 0.0;
     for (unsigned int t = 0; t < n_threads; t++)
@@ -416,11 +357,9 @@ static inline void tk_itq_encode (
       break;
     last_obj = obj;
   }
-
-  // Final rotation and binarization
-  tk_threads_signal(pool, TK_ITQ_MATVEC_XR_FINAL, 0);
-  tk_dvec_center(V1, N, K);
-  tk_itq_sign(out->a, V1, N, K);
+  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, N, K, K, 1.0, X, K, R, K, 0.0, V1, K);
+  tk_dvec_center(V1, N, K); // TODO: parallel
+  tk_itq_sign(out->a, V1, N, K); // TODO: parallel
 
   // Cleanup threading
   tk_threads_destroy(pool);
@@ -458,6 +397,7 @@ static inline void tk_sr_encode (
   int i_each,
   unsigned int n_threads
 ) {
+  openblas_set_num_threads((int) n_threads);
   const uint64_t K = n_dims;
   const size_t N = codes->n / K;
   tk_cvec_t *out = tk_cvec_create(L, N * TK_CVEC_BITS_BYTES(n_dims), 0, 0);
@@ -568,6 +508,7 @@ static inline void tk_sr_ranking_encode (
   int i_each,
   unsigned int n_threads
 ) {
+  openblas_set_num_threads((int) n_threads);
   const uint64_t K = n_dims;
   const size_t N = codes->n / K;
 

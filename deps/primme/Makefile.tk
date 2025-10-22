@@ -33,22 +33,8 @@ results.mk: Makefile
 	# Build OpenBLAS with optimal single-threaded configuration
 	# Architecture detection for TARGET parameter
 	if ! [ -d OpenBLAS ]; then git clone https://github.com/OpenMathLib/OpenBLAS.git --depth 1; fi
-	if ! [ -f .openblas.ok ]; then \
-		ARCH=$$(uname -m); \
-		if [ "$$ARCH" = "x86_64" ] || [ "$$ARCH" = "amd64" ]; then \
-			OPENBLAS_TARGET=""; \
-		elif [ "$$ARCH" = "aarch64" ] || [ "$$ARCH" = "arm64" ]; then \
-			OPENBLAS_TARGET="TARGET=ARMV8"; \
-		else \
-			OPENBLAS_TARGET=""; \
-		fi && \
-		cd OpenBLAS && make -j$$(nproc) \
-		USE_THREAD=0 \
-		NO_SHARED=1 \
-		COMMON_OPT="-w" \
-		$$OPENBLAS_TARGET; \
-	fi
-	if ! [ -f .openblas.ok ]; then cd OpenBLAS && make install PREFIX=./install USE_THREAD=0 NO_SHARED=1; fi
+	if ! [ -f .openblas.ok ]; then cd OpenBLAS && make -j$$(nproc) COMMON_OPT="-w" NO_SHARED=1; fi
+	if ! [ -f .openblas.ok ]; then cd OpenBLAS && make install PREFIX=./install COMMON_OPT="-w" NO_SHARED=1; fi
 	touch .openblas.ok
 
 	# Build PRIMME (against OpenBLAS)
