@@ -88,7 +88,7 @@ static inline void tm_add_knn (
       uint64_t rem = knn;
       for (uint32_t j = 0; j < ns->n && rem; j++) {
         tk_rank_t r = ns->a[j];
-        if (r.i >= (int64_t) graph->uids_hoods->n)
+        if (r.i < 0 || r.i >= (int64_t) graph->uids_hoods->n)
           continue;
         int64_t v = graph->uids_hoods->a[r.i];
         uint32_t v_khi = tk_iumap_get(graph->uids_idx, v);
@@ -114,7 +114,7 @@ static inline void tm_add_knn (
       uint64_t rem = knn;
       for (uint32_t j = 0; j < ns->n && rem; j++) {
         tk_pair_t r = ns->a[j];
-        if (r.i >= (int64_t) graph->uids_hoods->n)
+        if (r.i < 0 || r.i >= (int64_t) graph->uids_hoods->n)
           continue;
         int64_t v = graph->uids_hoods->a[r.i];
         uint32_t v_khi = tk_iumap_get(graph->uids_idx, v);
@@ -140,7 +140,7 @@ static inline void tm_add_knn (
       uint64_t rem = knn;
       for (uint32_t j = 0; j < ns->n && rem; j++) {
         tk_pair_t r = ns->a[j];
-        if (r.i >= (int64_t) graph->uids_hoods->n)
+        if (r.i < 0 || r.i >= (int64_t) graph->uids_hoods->n)
           continue;
         int64_t v = graph->uids_hoods->a[r.i];
         uint32_t v_khi = tk_iumap_get(graph->uids_idx, v);

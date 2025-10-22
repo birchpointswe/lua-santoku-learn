@@ -606,15 +606,26 @@ static inline void tk_inv_neighborhoods (
   tk_inv_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_inv_thread_t));
   memset(threads, 0, n_threads * sizeof(tk_inv_thread_t));
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_inv_worker);
+  int i_pool = tk_lua_absindex(L, -1);
   for (unsigned int i = 0; i < n_threads; i ++) {
     tk_inv_thread_t *data = threads + i;
     pool->threads[i].data = data;
     data->I = I;
     data->wacc = tk_dvec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, i_pool, -1);
+    lua_pop(L, 1);
     data->q_weights_buf = tk_dvec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, i_pool, -1);
+    lua_pop(L, 1);
     data->e_weights_buf = tk_dvec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, i_pool, -1);
+    lua_pop(L, 1);
     data->inter_weights_buf = tk_dvec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, i_pool, -1);
+    lua_pop(L, 1);
     data->touched = tk_ivec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, i_pool, -1);
+    lua_pop(L, 1);
   }
 
   tk_ivec_t *sids = tk_iumap_values(L, I->uid_sid);
@@ -626,6 +637,7 @@ static inline void tk_inv_neighborhoods (
   tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
   if (!sid_idx)
     tk_error(L, "inv_knn: iumap_from_ivec failed", ENOMEM);
+
   tk_inv_hoods_t *hoods = tk_inv_hoods_create(L, uids->n, 0, 0);
   tk_dumap_t **hoods_sets = NULL;
   if (mutual && knn) {
@@ -649,7 +661,8 @@ static inline void tk_inv_neighborhoods (
     data->sids = sids;
     data->query_offsets = NULL;
     data->query_features = NULL;
-    tk_dvec_ensure(data->wacc, sids->n * I->n_ranks);
+    if (tk_dvec_ensure(data->wacc, sids->n * I->n_ranks) != 0)
+      tk_error(L, "inv_neighborhoods: wacc allocation failed", ENOMEM);
     data->hoods = hoods;
     data->hoods_sets = hoods_sets;
     data->sid_idx = sid_idx;
@@ -665,6 +678,7 @@ static inline void tk_inv_neighborhoods (
   }
 
   tk_threads_signal(pool, TK_INV_NEIGHBORHOODS, 0);
+
   if (mutual && knn) {
     tk_threads_signal(pool, TK_INV_MUTUAL_INIT, 0);
     tk_threads_signal(pool, TK_INV_MUTUAL_FILTER, 0);
@@ -774,15 +788,26 @@ static inline void tk_inv_neighborhoods_by_ids (
   tk_inv_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_inv_thread_t));
   memset(threads, 0, n_threads * sizeof(tk_inv_thread_t));
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_inv_worker);
+  int i_pool = tk_lua_absindex(L, -1);
   for (unsigned int i = 0; i < n_threads; i ++) {
     tk_inv_thread_t *data = threads + i;
     pool->threads[i].data = data;
     data->I = I;
     data->wacc = tk_dvec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, i_pool, -1);
+    lua_pop(L, 1);
     data->q_weights_buf = tk_dvec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, i_pool, -1);
+    lua_pop(L, 1);
     data->e_weights_buf = tk_dvec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, i_pool, -1);
+    lua_pop(L, 1);
     data->inter_weights_buf = tk_dvec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, i_pool, -1);
+    lua_pop(L, 1);
     data->touched = tk_ivec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, i_pool, -1);
+    lua_pop(L, 1);
   }
 
   tk_ivec_t *sids = tk_ivec_create(L, query_ids->n, 0, 0);
@@ -817,7 +842,8 @@ static inline void tk_inv_neighborhoods_by_ids (
     data->sids = sids;
     data->query_offsets = NULL;
     data->query_features = NULL;
-    tk_dvec_ensure(data->wacc, sids->n * I->n_ranks);
+    if (tk_dvec_ensure(data->wacc, sids->n * I->n_ranks) != 0)
+      tk_error(L, "inv_neighborhoods: wacc allocation failed", ENOMEM);
     data->hoods = hoods;
     data->hoods_sets = hoods_sets;
     data->sid_idx = sid_idx;
@@ -939,15 +965,26 @@ static inline void tk_inv_neighborhoods_by_vecs (
   tk_inv_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_inv_thread_t));
   memset(threads, 0, n_threads * sizeof(tk_inv_thread_t));
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_inv_worker);
+  int i_pool = tk_lua_absindex(L, -1);
   for (unsigned int i = 0; i < n_threads; i ++) {
     tk_inv_thread_t *data = threads + i;
     pool->threads[i].data = data;
     data->I = I;
     data->wacc = tk_dvec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, i_pool, -1);
+    lua_pop(L, 1);
     data->q_weights_buf = tk_dvec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, i_pool, -1);
+    lua_pop(L, 1);
     data->e_weights_buf = tk_dvec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, i_pool, -1);
+    lua_pop(L, 1);
     data->inter_weights_buf = tk_dvec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, i_pool, -1);
+    lua_pop(L, 1);
     data->touched = tk_ivec_create(L, 0, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, i_pool, -1);
+    lua_pop(L, 1);
   }
   uint64_t n_queries = 0;
   for (uint64_t i = 0; i < query_vecs->n; i ++) {
@@ -2089,6 +2126,8 @@ static inline void tk_inv_worker (void *dp, int sig)
             if (khi == tk_iumap_end(sid_idx))
               continue;
             iv = tk_iumap_val(sid_idx, khi);
+            if (iv < 0 || iv >= (int64_t) sids->n)
+              continue;
             if (wacc->a[(int64_t) I->n_ranks * iv + rank] == 0.0)
               tk_ivec_push(touched, iv);
             wacc->a[(int64_t) I->n_ranks * iv + rank] += wf;

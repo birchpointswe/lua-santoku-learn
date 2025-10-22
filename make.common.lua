@@ -21,7 +21,7 @@ local env = {
       ldflags = {
         "$(PWD)/deps/primme/primme/lib/libprimme.a",
         "$(PWD)/deps/primme/OpenBLAS/install/lib/libopenblas.a",
-        "$(TK_TSETLIN_FORTRAN_RUNTIME)",
+        "$(TK_TSETLIN_FORTRAN_RUNTIME)"
       },
     },
     ["itq%.c"] = {
