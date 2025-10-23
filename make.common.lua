@@ -3,7 +3,7 @@ local env = {
   version = "0.0.158-1",
   variable_prefix = "TK_TSETLIN",
   license = "MIT",
-  public = true,
+  pub = true,
   cflags = {
     "-std=gnu11", "-D_GNU_SOURCE", "-Wall", "-Wextra", "-pthread",
     "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow",
@@ -12,24 +12,30 @@ local env = {
     "-I$(shell luarocks show santoku-threads --rock-dir)/include/",
     "-I$(shell luarocks show santoku-matrix --rock-dir)/include/",
   },
-  ldflags = {
-    "-lm", "-pthread"
-  },
+  ldflags = { "-lm", "-lpthread" },
   rules = {
     ["spectral%.c"] = {
-      cflags = { "-isystem$(PWD)/deps/primme/primme/include", "-isystem$(PWD)/deps/primme/OpenBLAS/install/include" },
+      cflags = {
+        "-isystem$(PWD)/deps/primme/primme/include",
+        "-fopenmp", "$(shell pkg-config --cflags blas lapack)"
+      },
       ldflags = {
         "$(PWD)/deps/primme/primme/lib/libprimme.a",
-        "$(PWD)/deps/primme/OpenBLAS/install/lib/libopenblas.a",
-        "$(TK_TSETLIN_FORTRAN_RUNTIME)"
+        "-fopenmp", "$(shell pkg-config --libs blas lapack)"
       },
     },
     ["itq%.c"] = {
-      cflags = { "-isystem$(PWD)/deps/primme/OpenBLAS/install/include" },
-      ldflags = {
-        "$(PWD)/deps/primme/OpenBLAS/install/lib/libopenblas.a",
-        "$(TK_TSETLIN_FORTRAN_RUNTIME)",
+      cflags = {
+        "-isystem$(PWD)/deps/primme/OpenBLAS/install/include",
+        "-fopenmp", "$(shell pkg-config --cflags blas lapack lapacke)"
       },
+      ldflags = {
+        "-fopenmp", "$(shell pkg-config --libs blas lapack lapacke)"
+      },
+    },
+    ["tch%.c"] = {
+      cflags = { "-fopenmp" },
+      ldflags = { "-fopenmp" },
     },
   },
   dependencies = {

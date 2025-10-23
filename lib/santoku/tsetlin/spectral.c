@@ -1,5 +1,4 @@
 #include <santoku/tsetlin/graph.h>
-#include <santoku/threads.h>
 #include <santoku/dvec.h>
 #include <santoku/dvec/ext.h>
 #include <float.h>
@@ -10,14 +9,10 @@
 #include <assert.h>
 #include <primme.h>
 #include <cblas.h>
+#include <omp.h>
 
-#define TK_SPECTRAL_BLOCKSIZE 32
-
-typedef enum {
-  TK_SPECTRAL_SCALE,
-  TK_SPECTRAL_MATVEC_EDGES,
-  TK_SPECTRAL_PRECONDITION,
-} tk_spectral_stage_t;
+#define TK_SPECTRAL_BLOCKSIZE 64
+#define TK_SPECTRAL_EPH "tk_spectral_eph"
 
 typedef enum {
   TK_LAPLACIAN_UNNORMALIZED,
@@ -37,129 +32,12 @@ typedef struct {
   tk_laplacian_type_t laplacian_type;
   uint64_t n_nodes;
   uint64_t n_evals;
-  tk_threadpool_t *pool;
   int blockSize;
   PRIMME_INT ldx;
   PRIMME_INT ldy;
   PRIMME_INT precond_ldx;
   PRIMME_INT precond_ldy;
 } tk_spectral_t;
-
-typedef struct {
-  tk_spectral_t *spec;
-  uint64_t ifirst, ilast;
-} tk_spectral_thread_t;
-
-static inline void tk_spectral_worker (void *dp, int sig)
-{
-  tk_spectral_stage_t stage = (tk_spectral_stage_t) sig;
-  tk_spectral_thread_t *data = (tk_spectral_thread_t *) dp;
-
-  switch (stage) {
-
-    case TK_SPECTRAL_SCALE: {
-      const uint64_t ifirst = data->ifirst;
-      const uint64_t ilast = data->ilast;
-      const tk_laplacian_type_t laplacian_type = data->spec->laplacian_type;
-      double * restrict degree = data->spec->degree->a;
-      double * restrict scale = data->spec->scale->a;
-      const int64_t * restrict adj_offset = data->spec->adj_offset->a;
-      const double * restrict adj_weights = data->spec->adj_weights->a;
-      if (laplacian_type == TK_LAPLACIAN_UNNORMALIZED) {
-        for (uint64_t i = ifirst; i <= ilast; i++) {
-          double sum = 0.0;
-          const int64_t j_start = adj_offset[i];
-          const int64_t j_end = adj_offset[i + 1];
-          for (int64_t j = j_start; j < j_end; j++)
-            sum += adj_weights[j];
-          degree[i] = sum;
-          scale[i] = 1.0;
-        }
-      } else {
-        for (uint64_t i = ifirst; i <= ilast; i++) {
-          double sum = 0.0;
-          const int64_t j_start = adj_offset[i];
-          const int64_t j_end = adj_offset[i + 1];
-          for (int64_t j = j_start; j < j_end; j++)
-            sum += adj_weights[j];
-          degree[i] = sum;
-          scale[i] = sum > 0.0 ? 1.0 / sqrt(sum) : 0.0;
-        }
-      }
-      break;
-    }
-
-    case TK_SPECTRAL_MATVEC_EDGES: {
-      const uint64_t node_first = data->ifirst;
-      const uint64_t node_last = data->ilast;
-      const int blockSize = data->spec->blockSize;
-      const PRIMME_INT ldx = data->spec->ldx;
-      const PRIMME_INT ldy = data->spec->ldy;
-      const tk_laplacian_type_t laplacian_type = data->spec->laplacian_type;
-      double * restrict x = data->spec->x;
-      double * restrict y = data->spec->y;
-      const int64_t * restrict adj_offset = data->spec->adj_offset->a;
-      const int64_t * restrict adj_neighbors = data->spec->adj_neighbors->a;
-      const double * restrict adj_weights = data->spec->adj_weights->a;
-      const double * restrict degree = data->spec->degree->a;
-      const double * restrict scale = data->spec->scale->a;
-      if (laplacian_type == TK_LAPLACIAN_UNNORMALIZED) {
-        for (int b = 0; b < blockSize; b++) {
-          double * restrict yb = y + (size_t) b * (size_t) ldy;
-          const double * restrict xb = x + (size_t) b * (size_t) ldx;
-          for (uint64_t i = node_first; i <= node_last; i++) {
-            double accum = degree[i] * xb[i];
-            const int64_t edge_start = adj_offset[i];
-            const int64_t edge_end = adj_offset[i + 1];
-            for (int64_t e = edge_start; e < edge_end; e++) {
-              const int64_t dst = adj_neighbors[e];
-              const double weight = adj_weights[e];
-              accum -= weight * xb[dst];
-            }
-            yb[i] = accum;
-          }
-        }
-      } else {
-        for (int b = 0; b < blockSize; b++) {
-          double * restrict yb = y + (size_t) b * (size_t) ldy;
-          const double * restrict xb = x + (size_t) b * (size_t) ldx;
-          for (uint64_t i = node_first; i <= node_last; i++) {
-            double accum = xb[i];
-            const double scale_i = scale[i];
-            const int64_t edge_start = adj_offset[i];
-            const int64_t edge_end = adj_offset[i + 1];
-            for (int64_t e = edge_start; e < edge_end; e++) {
-              const int64_t dst = adj_neighbors[e];
-              const double scaled_weight = scale_i * scale[dst] * adj_weights[e];
-              accum -= scaled_weight * xb[dst];
-            }
-            yb[i] = accum;
-          }
-        }
-      }
-      break;
-    }
-
-    case TK_SPECTRAL_PRECONDITION: {
-      const uint64_t node_first = data->ifirst;
-      const uint64_t node_last = data->ilast;
-      const int blockSize = data->spec->blockSize;
-      const PRIMME_INT ldx = data->spec->precond_ldx;
-      const PRIMME_INT ldy = data->spec->precond_ldy;
-      double * restrict xvec = data->spec->precond_x;
-      double * restrict yvec = data->spec->precond_y;
-      const double * restrict degree = data->spec->degree->a;
-      for (int b = 0; b < blockSize; b++) {
-        const double * restrict xb = xvec + (size_t) b * (size_t) ldx;
-        double * restrict yb = yvec + (size_t) b * (size_t) ldy;
-        for (uint64_t i = node_first; i <= node_last; i++)
-          yb[i] = xb[i] / degree[i];
-      }
-      break;
-    }
-
-  }
-}
 
 static inline void tk_spectral_preconditioner (
   void *vx,
@@ -171,12 +49,17 @@ static inline void tk_spectral_preconditioner (
   int *ierr
 ) {
   tk_spectral_t *spec = (tk_spectral_t *) primme->matrix;
-  spec->precond_x = (double *) vx;
-  spec->precond_y = (double *) vy;
-  spec->blockSize = *blockSize;
-  spec->precond_ldx = *ldx;
-  spec->precond_ldy = *ldy;
-  tk_threads_signal(spec->pool, TK_SPECTRAL_PRECONDITION, 0);
+  double *xvec = (double *) vx;
+  double *yvec = (double *) vy;
+  const double * restrict degree = spec->degree->a;
+  #pragma omp parallel for schedule(static)
+  for (int b = 0; b < *blockSize; b++) {
+    const double * restrict xb = xvec + (size_t) b * (size_t) *ldx;
+    double * restrict yb = yvec + (size_t) b * (size_t) *ldy;
+    for (uint64_t i = 0; i < spec->n_nodes; i++)
+      yb[i] = xb[i] / degree[i];
+  }
+
   *ierr = 0;
 }
 
@@ -192,18 +75,54 @@ static inline void tk_spectral_matvec (
   tk_spectral_t *spec = (tk_spectral_t *) primme->matrix;
   double *x = (double *) vx;
   double *y = (double *) vy;
-  spec->x = x;
-  spec->y = y;
-  spec->blockSize = *blockSize;
-  spec->ldx = *ldx;
-  spec->ldy = *ldy;
-  tk_threads_signal(spec->pool, TK_SPECTRAL_MATVEC_EDGES, 0);
+  const tk_laplacian_type_t laplacian_type = spec->laplacian_type;
+  const int64_t * restrict adj_offset = spec->adj_offset->a;
+  const int64_t * restrict adj_neighbors = spec->adj_neighbors->a;
+  const double * restrict adj_weights = spec->adj_weights->a;
+  const double * restrict degree = spec->degree->a;
+  const double * restrict scale = spec->scale->a;
+  if (laplacian_type == TK_LAPLACIAN_UNNORMALIZED) {
+    #pragma omp parallel for schedule(static)
+    for (int b = 0; b < *blockSize; b++) {
+      double * restrict yb = y + (size_t) b * (size_t) *ldy;
+      const double * restrict xb = x + (size_t) b * (size_t) *ldx;
+      for (uint64_t i = 0; i < spec->n_nodes; i++) {
+        double accum = degree[i] * xb[i];
+        const int64_t edge_start = adj_offset[i];
+        const int64_t edge_end = adj_offset[i + 1];
+        for (int64_t e = edge_start; e < edge_end; e++) {
+          const int64_t dst = adj_neighbors[e];
+          const double weight = adj_weights[e];
+          accum -= weight * xb[dst];
+        }
+        yb[i] = accum;
+      }
+    }
+  } else {
+    #pragma omp parallel for schedule(static)
+    for (int b = 0; b < *blockSize; b++) {
+      double * restrict yb = y + (size_t) b * (size_t) *ldy;
+      const double * restrict xb = x + (size_t) b * (size_t) *ldx;
+      for (uint64_t i = 0; i < spec->n_nodes; i++) {
+        double accum = xb[i];
+        const double scale_i = scale[i];
+        const int64_t edge_start = adj_offset[i];
+        const int64_t edge_end = adj_offset[i + 1];
+        for (int64_t e = edge_start; e < edge_end; e++) {
+          const int64_t dst = adj_neighbors[e];
+          const double scaled_weight = scale_i * scale[dst] * adj_weights[e];
+          accum -= scaled_weight * xb[dst];
+        }
+        yb[i] = accum;
+      }
+    }
+  }
   *ierr = 0;
 }
 
+
 static inline void tm_run_spectral (
   lua_State *L,
-  tk_threadpool_t *pool,
   tk_dvec_t *z,
   tk_dvec_t *scale,
   tk_dvec_t *degree,
@@ -219,8 +138,6 @@ static inline void tm_run_spectral (
   int i_each
 ) {
   tk_spectral_t spec;
-
-  tk_spectral_thread_t *threads = tk_malloc(L, pool->n_threads * sizeof(tk_spectral_thread_t));
   spec.laplacian_type = laplacian_type;
   spec.scale = scale;
   spec.degree = degree;
@@ -230,18 +147,39 @@ static inline void tm_run_spectral (
   spec.n_nodes = uids->n;
   spec.n_evals = n_hidden + 1;
   assert(spec.n_evals >= 2);
-  spec.pool = pool;
 
-  for (unsigned int i = 0; i < pool->n_threads; i ++) {
-    tk_spectral_thread_t *data = threads + i;
-    pool->threads[i].data = data;
-    data->spec = &spec;
-    tk_thread_range(i, pool->n_threads, uids->n, &data->ifirst, &data->ilast);
+  {
+    const tk_laplacian_type_t lap_type = spec.laplacian_type;
+    double * restrict deg = spec.degree->a;
+    double * restrict sc = spec.scale->a;
+    const int64_t * restrict offset = spec.adj_offset->a;
+    const double * restrict weights = spec.adj_weights->a;
+
+    if (lap_type == TK_LAPLACIAN_UNNORMALIZED) {
+      #pragma omp parallel for
+      for (uint64_t i = 0; i < spec.n_nodes; i++) {
+        double sum = 0.0;
+        const int64_t j_start = offset[i];
+        const int64_t j_end = offset[i + 1];
+        for (int64_t j = j_start; j < j_end; j++)
+          sum += weights[j];
+        deg[i] = sum;
+        sc[i] = 1.0;
+      }
+    } else {
+      #pragma omp parallel for
+      for (uint64_t i = 0; i < spec.n_nodes; i++) {
+        double sum = 0.0;
+        const int64_t j_start = offset[i];
+        const int64_t j_end = offset[i + 1];
+        for (int64_t j = j_start; j < j_end; j++)
+          sum += weights[j];
+        deg[i] = sum;
+        sc[i] = sum > 0.0 ? 1.0 / sqrt(sum) : 0.0;
+      }
+    }
   }
 
-  tk_threads_signal(pool, TK_SPECTRAL_SCALE, 0);
-
-  openblas_set_num_threads((int) pool->n_threads);
   primme_params params;
   primme_initialize(&params);
   params.n = (int64_t) uids->n;
@@ -254,14 +192,16 @@ static inline void tm_run_spectral (
   params.maxBlockSize = TK_SPECTRAL_BLOCKSIZE;
 
   primme_preset_method method = PRIMME_DEFAULT_MIN_TIME;
-  if (strcmp(method_str, "gd") == 0) {
-    method = PRIMME_GD_plusK;
-  } else if (strcmp(method_str, "jdqmr") == 0) {
-    method = PRIMME_JDQMR;
-  } else if (strcmp(method_str, "lobpcg") == 0) {
-    method = PRIMME_LOBPCG_OrthoBasis_Window;
-  } else if (strcmp(method_str, "jdqr") == 0) {
-    method = PRIMME_JDQMR_ETol;
+  if (method_str != NULL) {
+    if (strcmp(method_str, "gd") == 0) {
+      method = PRIMME_GD_plusK;
+    } else if (strcmp(method_str, "jdqmr") == 0) {
+      method = PRIMME_JDQMR;
+    } else if (strcmp(method_str, "lobpcg") == 0) {
+      method = PRIMME_LOBPCG_OrthoBasis_Window;
+    } else if (strcmp(method_str, "jdqr") == 0) {
+      method = PRIMME_JDQMR_ETol;
+    }
   }
   primme_set_method(method, &params);
   if (use_precond && laplacian_type == TK_LAPLACIAN_UNNORMALIZED) {
@@ -280,16 +220,12 @@ static inline void tm_run_spectral (
     free(spec.evecs);
     free(spec.resNorms);
     primme_free(&params);
-    tk_threads_destroy(pool);
-    free(threads);
     tk_lua_verror(L, 2, "spectral", "failure calling PRIMME");
     return;
   }
 
   if (tk_dvec_ensure(z, uids->n * n_hidden) != 0) {
     primme_free(&params);
-    tk_threads_destroy(pool);
-    free(threads);
     free(spec.evals);
     free(spec.evecs);
     free(spec.resNorms);
@@ -303,6 +239,7 @@ static inline void tm_run_spectral (
   tk_dvec_t *eigenvalues = tk_dvec_create(L, n_hidden, 0, 0);
   eigenvalues->n = n_hidden;
 
+  #pragma omp parallel for
   for (uint64_t i = 0; i < uids->n; i ++) {
     for (uint64_t k = 0; k < n_hidden; k ++) {
       uint64_t f = start + k;
@@ -326,8 +263,6 @@ static inline void tm_run_spectral (
   free(spec.evecs);
   free(spec.resNorms);
   primme_free(&params);
-  tk_threads_destroy(pool);
-  free(threads);
 
   if (i_each != -1) {
     for (uint64_t i = 0; i < spec.n_evals; i ++) {
@@ -364,10 +299,9 @@ static inline int tm_encode (lua_State *L)
   tk_dvec_t *adj_weights = tk_dvec_peek(L, -1, "weights");
 
   uint64_t n_hidden = tk_lua_fcheckunsigned(L, 1, "spectral", "n_hidden");
-  unsigned int n_threads = tk_threads_getn(L, 1, "spectral", "threads");
   double eps = tk_lua_foptnumber(L, 1, "spectral", "eps", 1e-6);
   const char *type_str = tk_lua_foptstring(L, 1, "spectral", "type", "unnormalized");
-  const char *method_str = tk_lua_foptstring(L, 1, "spectral", "method", "jdqr");
+  const char *method_str = tk_lua_foptstring(L, 1, "spectral", "method", NULL);
 
   int use_precond = tk_lua_ftype(L, 1, "precondition") != LUA_TNIL
     ? tk_lua_fcheckboolean(L, 1, "spectral", "precondition") : 1;
@@ -388,15 +322,12 @@ static inline int tm_encode (lua_State *L)
     i_each = tk_lua_absindex(L, -1);
   }
 
-  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_spectral_worker);
-
   lua_pushvalue(L, i_uids);
   tk_dvec_t *z = tk_dvec_create(L, 0, 0, 0);
   tk_dvec_t *scale = tk_dvec_create(L, uids->n, 0, 0);
   tk_dvec_t *degree = tk_dvec_create(L, uids->n, 0, 0);
-  tm_run_spectral(L, pool, z, scale, degree, uids, adj_offset, adj_neighbors,
-                  adj_weights, n_hidden, eps,
-                  laplacian_type, method_str, use_precond, i_each);
+
+  tm_run_spectral(L, z, scale, degree, uids, adj_offset, adj_neighbors, adj_weights, n_hidden, eps, laplacian_type, method_str, use_precond, i_each);
   lua_remove(L, -2);
 
   assert(tk_ivec_peekopt(L, -4) == uids);
