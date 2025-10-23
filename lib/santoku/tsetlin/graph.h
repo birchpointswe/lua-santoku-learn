@@ -49,14 +49,12 @@ typedef struct tk_graph_s {
   tk_euset_t *pairs;
   tk_graph_adj_t *adj;
 
-
   tk_inv_t *knn_inv; tk_inv_hoods_t *knn_inv_hoods;
   tk_ann_t *knn_ann; tk_ann_hoods_t *knn_ann_hoods;
   tk_hbi_t *knn_hbi; tk_hbi_hoods_t *knn_hbi_hoods;
   tk_ivec_sim_type_t knn_cmp;
   double knn_cmp_alpha, knn_cmp_beta;
   int64_t knn_rank;
-
 
   tk_inv_t *category_inv;
   tk_ivec_sim_type_t category_cmp;
@@ -66,14 +64,12 @@ typedef struct tk_graph_s {
   double category_knn_decay;
   uint64_t category_negatives;
 
-
   tk_inv_t *weight_inv;
   tk_ann_t *weight_ann;
   tk_hbi_t *weight_hbi;
   tk_ivec_sim_type_t weight_cmp;
   double weight_alpha, weight_beta;
   tk_graph_weight_pooling_t weight_pooling;
-
 
   uint64_t random_pairs;
 
@@ -182,7 +178,6 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
   return (tk_graph_t *) luaL_checkudata(L, i, TK_GRAPH_MT);
 }
 
-
 #define TK_GRAPH_INDEX_DISTANCE(idx_inv, idx_ann, idx_hbi, u, v, cmp, alpha, beta, q_w, e_w, i_w, dist_var) \
   do { \
     tk_inv_t *__idx_inv = (idx_inv); \
@@ -226,13 +221,11 @@ static inline double tk_graph_distance (
 ) {
   double d = DBL_MAX;
 
-
   TK_GRAPH_INDEX_DISTANCE(graph->weight_inv, graph->weight_ann, graph->weight_hbi,
                           u, v, graph->weight_cmp, graph->weight_alpha, graph->weight_beta,
                           q_weights, e_weights, inter_weights, d);
   if (d != DBL_MAX)
     return d;
-
 
   bool same_index = (graph->category_inv == graph->knn_inv);
   if (same_index && graph->category_inv != NULL) {
@@ -249,7 +242,6 @@ static inline double tk_graph_distance (
       graph->category_alpha, graph->category_beta,
       q_weights, e_weights, inter_weights);
   } else {
-
     TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann, graph->knn_hbi,
                             u, v, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
                             q_weights, e_weights, inter_weights, d);
@@ -779,7 +771,6 @@ static inline int tk_graph_pairs_to_csr (
   for (uint64_t i = 0; i < n_nodes; i++)
     hoods[i] = NULL;
 
-
   for (uint64_t i = 0; i < pos->n; i++) {
     int64_t a = pos->a[i].i;
     int64_t b = pos->a[i].p;
@@ -807,7 +798,6 @@ static inline int tk_graph_pairs_to_csr (
       goto cleanup;
   }
 
-
   for (uint64_t i = 0; i < neg->n; i++) {
     int64_t a = neg->a[i].i;
     int64_t b = neg->a[i].p;
@@ -834,7 +824,6 @@ static inline int tk_graph_pairs_to_csr (
     if (tk_rvec_push(hoods[bidx], tk_rank(aidx, 0.0)) != 0)
       goto cleanup;
   }
-
 
   *out_offsets = tk_ivec_create(NULL, n_nodes + 1, 0, 0);
   *out_neighbors = tk_ivec_create(NULL, 0, 0, 0);
@@ -923,7 +912,6 @@ static inline int tk_graph_star_hoods (
 
   tk_threads_signal(pool, TK_GRAPH_STAR_HOODS, 0);
 
-
   for (unsigned int i = 0; i < n_threads; i++) {
     if (atomic_load(&threads[i].has_error)) {
       for (unsigned int j = 0; j < n_threads; j++)
@@ -933,7 +921,6 @@ static inline int tk_graph_star_hoods (
       return -1;
     }
   }
-
 
   *out_pairs = tk_pvec_create(NULL, 0, 0, 0);
   if (!*out_pairs) {
@@ -979,10 +966,8 @@ static inline int tk_graph_anchor_pairs (
     return -1;
 
   if (labels && labels->n == ids->n) {
-
     tk_iumap_t **ids_by_label = NULL;
     int64_t max_label = -1;
-
 
     for (uint64_t i = 0; i < labels->n; i++) {
       int64_t lbl = labels->a[i];
@@ -999,7 +984,6 @@ static inline int tk_graph_anchor_pairs (
       return -1;
     }
 
-
     for (uint64_t i = 0; i < ids->n; i++) {
       int64_t lbl = labels->a[i];
       if (lbl == -1)
@@ -1012,7 +996,6 @@ static inline int tk_graph_anchor_pairs (
       tk_iumap_put(ids_by_label[lbl], ids->a[i], &kha);
     }
 
-
     for (int64_t lbl = 0; lbl <= max_label; lbl++) {
       if (!ids_by_label[lbl])
         continue;
@@ -1023,7 +1006,6 @@ static inline int tk_graph_anchor_pairs (
       uint64_t n_label_anchors = n_anchors < n_in_class ? n_anchors : n_in_class;
       tk_iuset_t *selected_anchors = tk_iuset_create(NULL, 0);
       if (!selected_anchors) goto cleanup_label;
-
 
       while (tk_iuset_size(selected_anchors) < n_label_anchors) {
         uint32_t rand_k = tk_iumap_begin(ids_by_label[lbl]);
@@ -1036,7 +1018,6 @@ static inline int tk_graph_anchor_pairs (
           tk_iuset_put(selected_anchors, anchor, &kha);
         }
       }
-
 
       for (uint32_t k = tk_iumap_begin(ids_by_label[lbl]); k != tk_iumap_end(ids_by_label[lbl]); k++) {
         if (!tk_iumap_exist(ids_by_label[lbl], k))
@@ -1064,7 +1045,6 @@ cleanup_label:
     free(ids_by_label);
 
   } else {
-
     tk_iuset_t *selected_anchors = tk_iuset_create(NULL, 0);
     if (!selected_anchors) {
       tk_pvec_destroy(*out_pairs);
@@ -1078,7 +1058,6 @@ cleanup_label:
       int kha;
       tk_iuset_put(selected_anchors, anchor, &kha);
     }
-
 
     for (uint64_t i = 0; i < ids->n; i++) {
       int64_t id = ids->a[i];
@@ -1115,7 +1094,6 @@ static inline int tk_graph_random_pairs (
     *out_pairs = tk_pvec_create(NULL, 0, 0, 0);
     return *out_pairs ? 0 : -1;
   }
-
 
   tk_ivec_t **ids_by_label = NULL;
   uint64_t n_labels = 0;
@@ -1177,7 +1155,6 @@ static inline int tk_graph_random_pairs (
 
   tk_threads_signal(pool, TK_GRAPH_GEN_RANDOM_PAIRS, 0);
 
-
   for (unsigned int i = 0; i < n_threads; i++) {
     if (atomic_load(&threads[i].has_error)) {
       for (unsigned int j = 0; j < n_threads; j++)
@@ -1187,7 +1164,6 @@ static inline int tk_graph_random_pairs (
       goto cleanup_random;
     }
   }
-
 
   *out_pairs = tk_pvec_create(NULL, 0, 0, 0);
   if (!*out_pairs) {
@@ -1215,9 +1191,7 @@ static inline int tk_graph_random_pairs (
   tk_threads_destroy(pool);
   free(threads);
 
-
   tk_pvec_xasc(*out_pairs, 0, (*out_pairs)->n);
-
 
   if (ids_by_label) {
     for (uint64_t i = 0; i < n_labels; i++)
@@ -1269,7 +1243,6 @@ static inline int tk_graph_multiclass_pairs (
     return 0;
   }
 
-
   int64_t max_label = -1;
   for (uint64_t i = 0; i < labels->n; i++)
     if (labels->a[i] > max_label)
@@ -1290,7 +1263,6 @@ static inline int tk_graph_multiclass_pairs (
     return -1;
   }
 
-
   for (uint64_t i = 0; i < ids->n; i++) {
     int64_t lbl = labels->a[i];
     if (lbl == -1)
@@ -1302,7 +1274,6 @@ static inline int tk_graph_multiclass_pairs (
     if (tk_ivec_push(class_ids[lbl], ids->a[i]) != 0)
       goto cleanup_multiclass;
   }
-
 
   if (n_anchors_pos > 0) {
     for (uint64_t c = 0; c < n_classes; c++) {
@@ -1329,7 +1300,6 @@ static inline int tk_graph_multiclass_pairs (
     }
   }
 
-
   *out_pos = tk_pvec_create(NULL, 0, 0, 0);
   if (!*out_pos) goto cleanup_multiclass;
 
@@ -1355,7 +1325,6 @@ static inline int tk_graph_multiclass_pairs (
         free(threads);
         goto cleanup_multiclass;
       }
-
 
       threads[i].q_weights = NULL;
       threads[i].e_weights = NULL;
@@ -1411,7 +1380,6 @@ static inline int tk_graph_multiclass_pairs (
     free(threads);
   }
 
-
   *out_neg = tk_pvec_create(NULL, 0, 0, 0);
   if (!*out_neg) goto cleanup_multiclass;
 
@@ -1437,7 +1405,6 @@ static inline int tk_graph_multiclass_pairs (
         free(threads);
         goto cleanup_multiclass;
       }
-
 
       threads[i].q_weights = NULL;
       threads[i].e_weights = NULL;
@@ -1493,10 +1460,8 @@ static inline int tk_graph_multiclass_pairs (
     free(threads);
   }
 
-
   tk_pvec_xasc(*out_pos, 0, (*out_pos)->n);
   tk_pvec_xasc(*out_neg, 0, (*out_neg)->n);
-
 
   for (uint64_t i = 0; i < n_classes; i++) {
     if (class_ids[i])
@@ -1613,7 +1578,6 @@ static inline void tk_graph_adj_mst (
     }
   }
 
-
   int64_t final_offset = mst_offset->a[mst_offset->n - 1];
   if (tk_ivec_push(mst_offset, final_offset) != 0)
     goto cleanup;
@@ -1651,7 +1615,6 @@ static inline void tk_graph_adj_mst (
         goto cleanup;
     }
   }
-
 
   for (uint64_t i = 0; i < offset->n - 1; i++) {
     if (adj_lists[i] && adj_lists[i]->n > 0) {
@@ -1733,7 +1696,6 @@ static inline int tk_graph_adj_hoods(
 
   uint64_t n_queries = ids->n;
 
-
   *offsets_out = tk_ivec_create(L, n_queries + 1, 0, 0);
   if (!*offsets_out)
     return -1;
@@ -1751,7 +1713,6 @@ static inline int tk_graph_adj_hoods(
   }
   (*offsets_out)->n = n_queries + 1;
 
-
   uint64_t total = (uint64_t)(*offsets_out)->a[n_queries];
   *neighbors_out = tk_ivec_create(L, total, 0, 0);
   *weights_out = tk_dvec_create(L, total, 0, 0);
@@ -1763,7 +1724,6 @@ static inline int tk_graph_adj_hoods(
   }
   (*neighbors_out)->n = total;
   (*weights_out)->n = total;
-
 
   tk_graph_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_graph_thread_t));
   if (!threads) {
@@ -1799,7 +1759,6 @@ static inline int tk_graph_adj_hoods(
 
   tk_threads_signal(pool, TK_GRAPH_ADJ_HOODS, 0);
 
-
   bool has_error = false;
   for (unsigned int i = 0; i < n_threads; i++) {
     if (atomic_load(&threads[i].has_error)) {
@@ -1820,5 +1779,12 @@ static inline int tk_graph_adj_hoods(
 
   return 0;
 }
+
+static inline void tk_graph_rcm_reorder(
+  tk_ivec_t *ids,
+  tk_ivec_t *offset,
+  tk_ivec_t *neighbors,
+  tk_dvec_t *weights
+);
 
 #endif

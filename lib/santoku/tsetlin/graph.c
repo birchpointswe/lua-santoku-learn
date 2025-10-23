@@ -11,7 +11,6 @@ static inline tk_pvec_t *tm_add_anchor_edges_immediate(
 static inline tk_graph_t *tm_graph_create (
   lua_State *L,
   tk_pvec_t *edges,
-
   tk_inv_t *knn_inv,
   tk_ann_t *knn_ann,
   tk_hbi_t *knn_hbi,
@@ -19,7 +18,6 @@ static inline tk_graph_t *tm_graph_create (
   double knn_cmp_alpha,
   double knn_cmp_beta,
   int64_t knn_rank,
-
   tk_inv_t *category_inv,
   tk_ivec_sim_type_t category_cmp,
   double category_alpha,
@@ -28,7 +26,6 @@ static inline tk_graph_t *tm_graph_create (
   uint64_t category_knn,
   double category_knn_decay,
   int64_t category_ranks,
-
   tk_inv_t *weight_inv,
   tk_ann_t *weight_ann,
   tk_hbi_t *weight_hbi,
@@ -36,7 +33,6 @@ static inline tk_graph_t *tm_graph_create (
   double weight_alpha,
   double weight_beta,
   tk_graph_weight_pooling_t weight_pooling,
-
   uint64_t random_pairs,
   double weight_eps,
   int64_t sigma_k,
@@ -415,7 +411,6 @@ static inline tk_pvec_t *tm_add_anchor_edges_immediate(
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Pi, -1);
     lua_pop(L, 1);
 
-
     data->q_weights = NULL;
     data->e_weights = NULL;
     data->inter_weights = NULL;
@@ -577,7 +572,6 @@ static inline void tk_compute_weights (
   tk_graph_t *graph,
   uint64_t n_threads
 ) {
-
   if (!graph->weight_inv && !graph->weight_ann && !graph->weight_hbi &&
       !graph->category_inv && !graph->knn_inv && !graph->knn_ann && !graph->knn_hbi)
     return;
@@ -588,7 +582,6 @@ static inline void tk_compute_weights (
   int Pi = tk_lua_absindex(L, -1);
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, Pi);
 
-
   bool need_buffers = (graph->weight_inv && graph->weight_inv->ranks && graph->weight_inv->n_ranks > 1) ||
                       (graph->category_inv && graph->category_inv->ranks && graph->category_inv->n_ranks > 1) ||
                       (graph->knn_inv && graph->knn_inv->ranks && graph->knn_inv->n_ranks > 1);
@@ -597,7 +590,6 @@ static inline void tk_compute_weights (
     tk_graph_thread_t *data = threads + i;
     pool->threads[i].data = data;
     data->graph = graph;
-
 
     data->q_weights = NULL;
     data->e_weights = NULL;
@@ -644,14 +636,12 @@ static inline void tm_compute_sigma (
   for (uint64_t i = 0; i < graph->uids->n; i++)
     graph->sigmas->a[i] = 1.0;
 
-
   bool need_buffers = (graph->weight_inv && graph->weight_inv->ranks && graph->weight_inv->n_ranks > 1) ||
                       (graph->category_inv && graph->category_inv->ranks && graph->category_inv->n_ranks > 1) ||
                       (graph->knn_inv && graph->knn_inv->ranks && graph->knn_inv->n_ranks > 1);
 
   for (unsigned int i = 0; i < n_threads; i++) {
     tk_graph_thread_t *data = threads + i;
-
 
     data->q_weights = NULL;
     data->e_weights = NULL;
@@ -718,6 +708,197 @@ static inline int tm_graph_gc (lua_State *L)
   return 0;
 }
 
+static inline void tk_graph_rcm_reorder(
+  tk_ivec_t *ids,
+  tk_ivec_t *offset,
+  tk_ivec_t *neighbors,
+  tk_dvec_t *weights
+) {
+  uint64_t n_nodes = ids->n;
+  if (n_nodes == 0 || offset->n == 0)
+    return;
+
+  tk_ivec_t *queue = tk_ivec_create(NULL, n_nodes, 0, 0);
+  tk_ivec_t *visited = tk_ivec_create(NULL, n_nodes, 0, 0);
+  tk_ivec_t *ordering = tk_ivec_create(NULL, n_nodes, 0, 0);
+  tk_ivec_t *degree = tk_ivec_create(NULL, n_nodes, 0, 0);
+
+  if (!queue || !visited || !ordering || !degree) {
+    if (queue) tk_ivec_destroy(queue);
+    if (visited) tk_ivec_destroy(visited);
+    if (ordering) tk_ivec_destroy(ordering);
+    if (degree) tk_ivec_destroy(degree);
+    return;
+  }
+
+  tk_ivec_clear(queue);
+  tk_ivec_clear(ordering);
+  tk_ivec_zero(visited);
+  for (uint64_t i = 0; i < n_nodes; i++) {
+    degree->a[i] = offset->a[i + 1] - offset->a[i];
+  }
+  degree->n = n_nodes;
+
+  int64_t start_node = 0;
+  int64_t min_degree = degree->a[0];
+  for (uint64_t i = 1; i < n_nodes; i++) {
+    if (degree->a[i] < min_degree) {
+      min_degree = degree->a[i];
+      start_node = (int64_t)i;
+    }
+  }
+
+  uint64_t queue_head = 0;
+  uint64_t queue_tail = 0;
+
+  for (uint64_t component_start = 0; component_start < n_nodes; ) {
+    while (component_start < n_nodes && visited->a[component_start])
+      component_start++;
+
+    if (component_start >= n_nodes)
+      break;
+
+    queue->a[queue_tail++] = (int64_t)component_start;
+    visited->a[component_start] = 1;
+
+    while (queue_head < queue_tail) {
+      int64_t u = queue->a[queue_head++];
+      ordering->a[ordering->n++] = u;
+
+      int64_t edge_start = offset->a[u];
+      int64_t edge_end = offset->a[u + 1];
+      tk_rvec_t *nbrs = tk_rvec_create(NULL, 0, 0, 0);
+      if (!nbrs) continue;
+
+      for (int64_t e = edge_start; e < edge_end; e++) {
+        int64_t v = neighbors->a[e];
+        if (!visited->a[v]) {
+          tk_rvec_push(nbrs, tk_rank(v, (double)degree->a[v]));
+        }
+      }
+
+      tk_rvec_asc(nbrs, 0, nbrs->n);
+
+      for (uint64_t i = 0; i < nbrs->n; i++) {
+        int64_t v = nbrs->a[i].i;
+        if (!visited->a[v]) {
+          queue->a[queue_tail++] = v;
+          visited->a[v] = 1;
+        }
+      }
+
+      tk_rvec_destroy(nbrs);
+    }
+  }
+
+  for (uint64_t i = 0; i < ordering->n / 2; i++) {
+    int64_t tmp = ordering->a[i];
+    ordering->a[i] = ordering->a[ordering->n - 1 - i];
+    ordering->a[ordering->n - 1 - i] = tmp;
+  }
+
+  tk_ivec_t *inv_perm = tk_ivec_create(NULL, n_nodes, 0, 0);
+  if (!inv_perm) {
+    tk_ivec_destroy(queue);
+    tk_ivec_destroy(visited);
+    tk_ivec_destroy(ordering);
+    tk_ivec_destroy(degree);
+    return;
+  }
+
+  if (ordering->n != n_nodes) {
+    tk_ivec_destroy(queue);
+    tk_ivec_destroy(visited);
+    tk_ivec_destroy(ordering);
+    tk_ivec_destroy(degree);
+    tk_ivec_destroy(inv_perm);
+    return;
+  }
+
+  for (uint64_t i = 0; i < ordering->n; i++) {
+    int64_t old_idx = ordering->a[i];
+    if (old_idx >= 0 && old_idx < (int64_t)n_nodes) {
+      inv_perm->a[old_idx] = (int64_t)i;
+    }
+  }
+  inv_perm->n = n_nodes;
+
+  tk_ivec_t *new_ids = tk_ivec_create(NULL, n_nodes, 0, 0);
+  tk_ivec_t *new_offset = tk_ivec_create(NULL, n_nodes + 1, 0, 0);
+  tk_ivec_t *new_neighbors = tk_ivec_create(NULL, neighbors->n, 0, 0);
+  tk_dvec_t *new_weights = tk_dvec_create(NULL, weights->n, 0, 0);
+
+  if (!new_ids || !new_offset || !new_neighbors || !new_weights) {
+    if (new_ids) tk_ivec_destroy(new_ids);
+    if (new_offset) tk_ivec_destroy(new_offset);
+    if (new_neighbors) tk_ivec_destroy(new_neighbors);
+    if (new_weights) tk_dvec_destroy(new_weights);
+    tk_ivec_destroy(queue);
+    tk_ivec_destroy(visited);
+    tk_ivec_destroy(ordering);
+    tk_ivec_destroy(degree);
+    tk_ivec_destroy(inv_perm);
+    return;
+  }
+
+  for (uint64_t i = 0; i < n_nodes; i++) {
+    new_ids->a[i] = ids->a[ordering->a[i]];
+  }
+  new_ids->n = n_nodes;
+
+  new_offset->a[0] = 0;
+  uint64_t write_pos = 0;
+
+  for (uint64_t new_i = 0; new_i < n_nodes; new_i++) {
+    int64_t old_i = ordering->a[new_i];
+    int64_t edge_start = offset->a[old_i];
+    int64_t edge_end = offset->a[old_i + 1];
+
+    for (int64_t e = edge_start; e < edge_end; e++) {
+      int64_t old_neighbor = neighbors->a[e];
+      int64_t new_neighbor = inv_perm->a[old_neighbor];
+      new_neighbors->a[write_pos] = new_neighbor;
+      new_weights->a[write_pos] = weights->a[e];
+      write_pos++;
+    }
+
+    new_offset->a[new_i + 1] = (int64_t)write_pos;
+  }
+
+  new_offset->n = n_nodes + 1;
+  new_neighbors->n = write_pos;
+  new_weights->n = write_pos;
+
+  int64_t *tmp_ids = ids->a;
+  ids->a = new_ids->a;
+  new_ids->a = tmp_ids;
+
+  int64_t *tmp_offset = offset->a;
+  offset->a = new_offset->a;
+  new_offset->a = tmp_offset;
+
+  int64_t *tmp_neighbors = neighbors->a;
+  neighbors->a = new_neighbors->a;
+  new_neighbors->a = tmp_neighbors;
+
+  double *tmp_weights = weights->a;
+  weights->a = new_weights->a;
+  new_weights->a = tmp_weights;
+
+  neighbors->n = write_pos;
+  weights->n = write_pos;
+
+  tk_ivec_destroy(new_ids);
+  tk_ivec_destroy(new_offset);
+  tk_ivec_destroy(new_neighbors);
+  tk_dvec_destroy(new_weights);
+  tk_ivec_destroy(queue);
+  tk_ivec_destroy(visited);
+  tk_ivec_destroy(ordering);
+  tk_ivec_destroy(degree);
+  tk_ivec_destroy(inv_perm);
+}
+
 static inline int tm_adjacency (lua_State *L)
 {
   lua_settop(L, 1);
@@ -727,13 +908,11 @@ static inline int tm_adjacency (lua_State *L)
   tk_pvec_t *edges = tk_pvec_peekopt(L, -1);
   lua_pop(L, 1);
 
-
   lua_getfield(L, 1, "knn_index");
   tk_inv_t *knn_inv = tk_inv_peekopt(L, -1);
   tk_ann_t *knn_ann = tk_ann_peekopt(L, -1);
   tk_hbi_t *knn_hbi = tk_hbi_peekopt(L, -1);
   lua_pop(L, 1);
-
 
   const char *knn_cmp_str = tk_lua_foptstring(L, 1, "graph", "knn_cmp", "jaccard");
   double knn_cmp_alpha = tk_lua_foptnumber(L, 1, "graph", "knn_cmp_alpha", 0.5);
@@ -750,18 +929,15 @@ static inline int tm_adjacency (lua_State *L)
   else
     tk_lua_verror(L, 3, "graph", "invalid knn comparator specified", knn_cmp_str);
 
-
   lua_getfield(L, 1, "category_index");
   tk_inv_t *category_inv = tk_inv_peekopt(L, -1);
   lua_pop(L, 1);
-
 
   lua_getfield(L, 1, "weight_index");
   tk_inv_t *weight_inv = tk_inv_peekopt(L, -1);
   tk_ann_t *weight_ann = tk_ann_peekopt(L, -1);
   tk_hbi_t *weight_hbi = tk_hbi_peekopt(L, -1);
   lua_pop(L, 1);
-
 
   const char *category_cmp_str = tk_lua_foptstring(L, 1, "graph", "category_cmp", "jaccard");
   double category_alpha = tk_lua_foptnumber(L, 1, "graph", "category_alpha", 0.5);
@@ -781,7 +957,6 @@ static inline int tm_adjacency (lua_State *L)
   uint64_t category_anchors = tk_lua_foptunsigned(L, 1, "graph", "category_anchors", 0);
   uint64_t category_knn = tk_lua_foptunsigned(L, 1, "graph", "category_knn", 0);
   double category_knn_decay = tk_lua_foptnumber(L, 1, "graph", "category_knn_decay", 0.0);
-
 
   const char *weight_cmp_str = tk_lua_foptstring(L, 1, "graph", "weight_cmp", "jaccard");
   double weight_alpha = tk_lua_foptnumber(L, 1, "graph", "weight_alpha", 0.5);
@@ -1136,6 +1311,9 @@ static inline int tm_adjacency (lua_State *L)
   final_offset->n = n_nodes + 1;
   final_data->n = tmp_data->n;
   final_weights->n = tmp_weights->n;
+
+  tk_graph_rcm_reorder(final_uids, final_offset, final_data, final_weights);
+
   tm_graph_destroy_internal(graph);
   tk_lua_replace(L, 1, 4);
   lua_settop(L, 4);
@@ -1146,7 +1324,6 @@ static inline int tm_adjacency (lua_State *L)
 static inline tk_graph_t *tm_graph_create (
   lua_State *L,
   tk_pvec_t *edges,
-
   tk_inv_t *knn_inv,
   tk_ann_t *knn_ann,
   tk_hbi_t *knn_hbi,
@@ -1154,7 +1331,6 @@ static inline tk_graph_t *tm_graph_create (
   double knn_cmp_alpha,
   double knn_cmp_beta,
   int64_t knn_rank,
-
   tk_inv_t *category_inv,
   tk_ivec_sim_type_t category_cmp,
   double category_alpha,
@@ -1163,7 +1339,6 @@ static inline tk_graph_t *tm_graph_create (
   uint64_t category_knn,
   double category_knn_decay,
   int64_t category_ranks,
-
   tk_inv_t *weight_inv,
   tk_ann_t *weight_ann,
   tk_hbi_t *weight_hbi,
@@ -1171,7 +1346,6 @@ static inline tk_graph_t *tm_graph_create (
   double weight_alpha,
   double weight_beta,
   tk_graph_weight_pooling_t weight_pooling,
-
   uint64_t random_pairs,
   double weight_eps,
   int64_t sigma_k,
@@ -1186,7 +1360,6 @@ static inline tk_graph_t *tm_graph_create (
 ) {
   tk_graph_t *graph = tk_lua_newuserdata(L, tk_graph_t, TK_GRAPH_MT, NULL, tm_graph_gc);
   graph->edges = edges;
-
   graph->knn_inv = knn_inv;
   graph->knn_ann = knn_ann;
   graph->knn_hbi = knn_hbi;
@@ -1198,7 +1371,6 @@ static inline tk_graph_t *tm_graph_create (
   graph->knn_ann_hoods = NULL;
   graph->knn_hbi_hoods = NULL;
 
-
   graph->category_inv = category_inv;
   graph->category_cmp = category_cmp;
   graph->category_alpha = category_alpha;
@@ -1208,7 +1380,6 @@ static inline tk_graph_t *tm_graph_create (
   graph->category_knn_decay = category_knn_decay;
   graph->category_ranks = category_ranks;
 
-
   graph->weight_inv = weight_inv;
   graph->weight_ann = weight_ann;
   graph->weight_hbi = weight_hbi;
@@ -1216,7 +1387,6 @@ static inline tk_graph_t *tm_graph_create (
   graph->weight_alpha = weight_alpha;
   graph->weight_beta = weight_beta;
   graph->weight_pooling = weight_pooling;
-
 
   graph->random_pairs = random_pairs;
   graph->weight_eps = weight_eps;
@@ -1236,7 +1406,6 @@ static inline tk_graph_t *tm_graph_create (
   graph->n_edges = 0;
   graph->uids_hoods = NULL;
   graph->uids_idx_hoods = NULL;
-
 
   graph->q_weights = NULL;
   graph->e_weights = NULL;
@@ -1308,7 +1477,6 @@ static inline int tm_adj_hoods(lua_State *L)
   lua_settop(L, 3);
 
   tk_ivec_t *ids = tk_ivec_peek(L, 1, "ids");
-
 
   tk_inv_hoods_t *inv_hoods = tk_inv_hoods_peekopt(L, 2);
   tk_ann_hoods_t *ann_hoods = tk_ann_hoods_peekopt(L, 2);
