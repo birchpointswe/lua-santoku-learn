@@ -27,8 +27,8 @@ local cfg; cfg = {
     landmarks = 24,
   },
   mode = {
-    encoder = false,
-    cluster = false,
+    encoder = true,
+    cluster = true,
     mode = "landmarks",
     binarize = "itq",
     tch = false,
@@ -38,6 +38,8 @@ local cfg; cfg = {
   },
   spectral = {
     laplacian = "unnormalized",
+    method = "jdqr",
+    precondition = "ic",
     primme_eps = 1e-12,
   },
   sr = {
@@ -193,6 +195,8 @@ test("tsetlin", function ()
   print("Spectral eigendecomposition")
 
   train.ids_spectral, train.codes_spectral = spectral.encode({
+    method = cfg.spectral.method,
+    precondition = cfg.spectral.precondition,
     type = cfg.spectral.laplacian,
     eps = cfg.spectral.primme_eps,
     ids = train.adj_ids,

@@ -7,12 +7,10 @@
 #include <santoku/cvec.h>
 #include <santoku/cumap.h>
 #include <santoku/zumap.h>
-#include <assert.h>
 #include <ctype.h>
 
 #define TK_TOKENIZER_MT "tk_tokenizer_t"
 #define TK_TOKENIZER_EPH "tk_tokenizer_eph"
-
 
 static uint8_t ascii_class[128];
 static char ascii_lower[128];
@@ -109,6 +107,7 @@ static inline int tb_tokenizer_persist (lua_State *L)
   }
   lua_settop(L, 0);
   lua_gc(L, LUA_GCCOLLECT, 0);
+  return 0;
 }
 
 static inline char *tb_tokenizer_id_str (
@@ -116,7 +115,6 @@ static inline char *tb_tokenizer_id_str (
   int id
 ) {
   uint32_t k = tk_cumap_get(tokenizer->strs, id);
-  assert(k != tk_cumap_end(tokenizer->strs));
   return (char *) tk_cumap_val(tokenizer->strs, k);
 }
 
@@ -195,8 +193,6 @@ static inline int tb_have_bytes (const char *in, size_t i, size_t n)
 static inline int tb_tokenizer_normalize (tk_cvec_t *out, char *in, size_t len, int max_run)
 {
   tk_cvec_clear(out);
-
-
   if (tk_cvec_ensure(out, len * 20) != 0)
     return -1;
 
@@ -206,21 +202,17 @@ static inline int tb_tokenizer_normalize (tk_cvec_t *out, char *in, size_t len, 
   for (size_t i = 0; i < len;) {
     unsigned char c = (unsigned char) in[i];
 
-
     if (c < 0x80 && c != '#' && c != '!' && c != '?' &&
         c != '\'' && c != '.' && c != ':' && c != ';') {
 
       uint8_t c_class = ascii_class[c];
       uint8_t last_class = last < 0x80 ? ascii_class[last] : 0;
-
-
       if (last && ((last_class == 1 && c_class == 2) ||
                    (last_class == 2 && c_class == 1))) {
         out->a[out->n++] = ' ';
         last = ' ';
         run = 0;
       }
-
 
       if (last && c_class == 1 && last == c) {
         run++;
@@ -234,7 +226,6 @@ static inline int tb_tokenizer_normalize (tk_cvec_t *out, char *in, size_t len, 
       i++;
       continue;
     }
-
 
     if (last && ((isalpha(last) && isdigit(c)) ||
       (isdigit(last) && isalpha(c)))) {
@@ -325,7 +316,6 @@ static inline int tb_tokenizer_normalize (tk_cvec_t *out, char *in, size_t len, 
       run = 0;
       continue;
     }
-
 
     if (c < 0x80) {
       out->a[out->n++] = tolower(c);
@@ -634,7 +624,6 @@ static int tb_tokenizer_append_skipgram (
   int winlen
 ) {
   if (to_pick == 0) {
-
     if (skipgram[rfirst - 1] != winlen - 1)
       return 0;
     tok->tmp_skipgram->n = 0;
@@ -713,12 +702,10 @@ static inline int tb_tokenizer_append_token (
     return 0;
   }
 
-
   if (tk_cvec_push(tokenizer->tmp_append, '\0') != 0)
     return -1;
   char *bufp0 = tokenizer->tmp_append->a;
   int id0 = tb_tokenizer_new_token(L, Ti, tokenizer, &bufp0, tokenizer->tmp_append->n);
-
 
   if (word[0] != '#' && strcmp(word, "'s") != 0)
     if (tb_tokenizer_append_cgrams(L, Ti, tokenizer, word) != 0)
@@ -803,8 +790,6 @@ static inline int tb_tokenizer_populate_tokens (
       char canon_buf[tokenizer->max_len + 1];
       tb_copy_without_char(tok, canon_buf, '\'');
       const char *key = canon_buf;
-
-
       int left = 0, right = (int)n_contractions - 1;
       while (left <= right && !was_contraction) {
         int mid = left + (right - left) / 2;
@@ -866,7 +851,6 @@ static inline int tb_tokenizer_parse (lua_State *L)
   lua_settop(L, 3);
   tb_tokenizer_t *tokenizer = peek_tokenizer(L, 1);
 
-
   tk_cvec_t *buf = tk_cvec_peekopt(L, 3);
   bool buf_is_lua = (buf != NULL);
   if (buf == NULL) {
@@ -888,7 +872,6 @@ static inline int tb_tokenizer_parse (lua_State *L)
     }
   }
 
-
   if (!buf_is_lua)
     tk_cvec_destroy(buf);
 
@@ -902,7 +885,6 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
   lua_settop(L, 5);
   tb_tokenizer_t *tokenizer = peek_tokenizer(L, 1);
 
-
   tk_ivec_t *out = tk_ivec_peekopt(L, 3);
   int i_out = -1;
   if (out == NULL) {
@@ -913,7 +895,6 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
     i_out = tk_lua_absindex(L, -1);
   }
 
-
   tk_iumap_t *seen = tk_iumap_peekopt(L, 4);
   bool seen_is_lua = (seen != NULL);
   if (seen == NULL) {
@@ -921,7 +902,6 @@ static inline int tb_tokenizer_tokenize (lua_State *L)
   } else {
     tk_iumap_clear(seen);
   }
-
 
   tk_cvec_t *buf = tk_cvec_peekopt(L, 5);
   bool buf_is_lua = (buf != NULL);
@@ -1041,7 +1021,6 @@ static inline int tb_tokenizer_restrict (lua_State *L)
   tb_tokenizer_t *tokenizer = peek_tokenizer(L, Ti);
   tk_ivec_t *top_v = tk_ivec_peek(L, 2, "top_v");
 
-
   char *tok;
   int id, id0;
   int absent;
@@ -1065,7 +1044,6 @@ static inline int tb_tokenizer_restrict (lua_State *L)
     k = tk_cumap_put(strs0, id0, &absent);
     tk_cumap_setval(strs0, k, tok);
   }
-
   tk_lua_del_ephemeron(L, TK_TOKENIZER_EPH, Ti, tokenizer->ids);
   tk_zumap_destroy(tokenizer->ids);
   tokenizer->ids = ids0;
@@ -1158,8 +1136,6 @@ static luaL_Reg tb_mt_fns[] =
 static inline int tb_tokenizer_create (lua_State *L)
 {
   lua_settop(L, 1);
-
-
   tb_init_ascii_tables();
 
   int max_len = (int) tk_lua_fcheckunsigned(L, 1, "create", "max_len");
@@ -1171,7 +1147,6 @@ static inline int tb_tokenizer_create (lua_State *L)
   int skips = (int) tk_lua_fcheckunsigned(L, 1, "create", "skips");
   int negations = (int) tk_lua_fcheckunsigned(L, 1, "create", "negations");
   int align = (int) tk_lua_foptunsigned(L, 1, "create", "align", 1);
-
   if (max_run < 1)
     luaL_error(L, "max_run must be greater than or equal to 1");
   if (min_len == 0)
@@ -1220,15 +1195,12 @@ static inline int tb_tokenizer_create (lua_State *L)
 
 static inline int tb_tokenizer_load (lua_State *L)
 {
-
-  lua_settop(L, 3);
-
-
+  lua_settop(L, 2);
   tb_init_ascii_tables();
 
   size_t len;
   const char *data = luaL_checklstring(L, 1, &len);
-  bool isstr = lua_type(L, 3) == LUA_TBOOLEAN && lua_toboolean(L, 3);
+  bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && lua_toboolean(L, 2);
   FILE *fh = isstr ? tk_lua_fmemopen(L, (char *) data, len, "r") : tk_lua_fopen(L, data, "r");
   tb_tokenizer_t *tokenizer = tk_lua_newuserdata(L, tb_tokenizer_t, TK_TOKENIZER_MT, tb_mt_fns, tb_tokenizer_gc);
   int Ti = tk_lua_absindex(L, -1);
@@ -1277,10 +1249,8 @@ static inline int tb_tokenizer_load (lua_State *L)
     int id;
     tk_lua_fread(L, &id, sizeof(int), 1, fh);
     k = tk_zumap_put(tokenizer->ids, tokn, &absent);
-    assert(absent);
     tk_zumap_setval(tokenizer->ids, k, id);
     k = tk_cumap_put(tokenizer->strs, id, &absent);
-    assert(absent);
     tk_cumap_setval(tokenizer->strs, k, tokn);
     tk_lua_add_ephemeron(L, TK_TOKENIZER_EPH, Ti, -1);
     lua_pop(L, 1);

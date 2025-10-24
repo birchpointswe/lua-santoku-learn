@@ -5,15 +5,27 @@ local env = {
   license = "MIT",
   pub = true,
   cflags = {
-    "-std=gnu11", "-D_GNU_SOURCE", "-Wall", "-Wextra", "-pthread",
+    "-std=gnu11", "-D_GNU_SOURCE", "-Wall", "-Wextra",
     "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow",
     "-Wpointer-sign", "-Wno-unused-parameter", "-Wno-unused-but-set-variable",
     "-I$(shell luarocks show santoku --rock-dir)/include/",
     "-I$(shell luarocks show santoku-threads --rock-dir)/include/",
     "-I$(shell luarocks show santoku-matrix --rock-dir)/include/",
+    "-fopenmp", "$(shell pkg-config --cflags blas lapack)"
   },
-  ldflags = { "-lm", "-lpthread" },
+  ldflags = {
+    "-lm", "-fopenmp", "$(shell pkg-config --cflags blas lapack)"
+  },
   rules = {
+    ["graph%.c"] = {
+      cflags = {
+        "-isystem$(PWD)/deps/primme/primme/include",
+      },
+      ldflags = {
+        "$(PWD)/deps/primme/primme/lib/libprimme.a",
+        "-fopenmp", "$(shell pkg-config --libs blas lapack)"
+      },
+    },
     ["spectral%.c"] = {
       cflags = {
         "-isystem$(PWD)/deps/primme/primme/include",
@@ -40,9 +52,9 @@ local env = {
   },
   dependencies = {
     "lua >= 5.1",
-    "santoku >= 0.0.292-1",
+    "santoku >= 0.0.294-1",
     "santoku-threads >= 0.0.22-1",
-    "santoku-matrix >= 0.0.143-1",
+    "santoku-matrix >= 0.0.155-1",
     "santoku-system >= 0.0.56-1",
   },
   test = {
