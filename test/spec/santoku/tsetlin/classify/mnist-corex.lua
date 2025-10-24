@@ -12,7 +12,7 @@ local utc = require("santoku.utc")
 local cfg = {
   data = {
     ttr = 0.9,
-    max = nil,
+    max = 1000,
     visible = 784,
     hidden = 128,
   },

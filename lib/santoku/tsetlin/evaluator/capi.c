@@ -1256,17 +1256,17 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
       tk_ivec_t *hoods_uids = NULL;
 
       if (inv != NULL) {
-        tk_inv_neighborhoods(L, inv, knn, 0.0, 1.0, knn_min, cmp, cmp_alpha, cmp_beta, knn_mutual, knn_rank, n_threads, &inv_hoods, &hoods_uids);
+        tk_inv_neighborhoods(L, inv, knn, 0.0, 1.0, knn_min, cmp, cmp_alpha, cmp_beta, knn_mutual, knn_rank, &inv_hoods, &hoods_uids);
         tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
         tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
         lua_pop(L, 2);
       } else if (ann != NULL) {
-        tk_ann_neighborhoods(L, ann, knn, probe_radius, 1, -1, knn_min, knn_mutual, n_threads, &ann_hoods, &hoods_uids);
+        tk_ann_neighborhoods(L, ann, knn, probe_radius, 1, -1, knn_min, knn_mutual, &ann_hoods, &hoods_uids);
         tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
         tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
         lua_pop(L, 2);
       } else if (hbi != NULL) {
-        tk_hbi_neighborhoods(L, hbi, knn, 1, hbi->features, knn_min, knn_mutual, n_threads, &hbi_hoods, &hoods_uids);
+        tk_hbi_neighborhoods(L, hbi, knn, 1, hbi->features, knn_min, knn_mutual, &hbi_hoods, &hoods_uids);
         tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
         tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
         lua_pop(L, 2);
@@ -1278,7 +1278,7 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
                          hbi ? hbi->features : 0;
 
       if (tk_graph_adj_hoods(L, hoods_uids, inv_hoods, ann_hoods, hbi_hoods, features,
-                            n_threads, &cluster_adj_offsets, &cluster_adj_neighbors,
+                            &cluster_adj_offsets, &cluster_adj_neighbors,
                             &cluster_adj_weights) != 0)
         tk_lua_verror(L, 2, "optimize_clustering", "failed to convert hoods to adjacency");
 

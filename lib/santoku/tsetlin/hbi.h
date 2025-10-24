@@ -1,14 +1,14 @@
 #ifndef TK_HBI_H
 #define TK_HBI_H
 
-#include <assert.h>
+// #include <assert.h>
 #include <santoku/iuset.h>
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
 #include <santoku/iumap.h>
-#include <santoku/threads.h>
 #include <santoku/ivec/ext.h>
 #include <santoku/cvec/ext.h>
+#include <omp.h>
 
 #define TK_HBI_BITS 32
 #define tk_hbi_code_t uint32_t
@@ -41,21 +41,9 @@ typedef tk_pvec_t * tk_hbi_hood_t;
 #include <santoku/vec/tpl.h>
 
 typedef enum {
-  TK_HBI_NEIGHBORHOODS,
-  TK_HBI_MUTUAL,
-  TK_HBI_MUTUAL_INIT,
-  TK_HBI_MUTUAL_FILTER,
-  TK_HBI_MIN_REMAP,
-  TK_HBI_COLLECT_UIDS,
-  TK_HBI_REMAP_UIDS,
-} tk_hbi_stage_t;
-
-typedef enum {
-  TK_HBI_FIND,    // Lookup only, return -1 if not found
-  TK_HBI_REPLACE  // Create new sid, replace old mappings if uid exists
+  TK_HBI_FIND,
+  TK_HBI_REPLACE
 } tk_hbi_uid_mode_t;
-
-typedef struct tk_hbi_thread_s tk_hbi_thread_t;
 
 typedef struct tk_hbi_s {
   bool destroyed;
@@ -66,26 +54,6 @@ typedef struct tk_hbi_s {
   tk_iumap_t *sid_uid;
   tk_hbi_codes_t *codes;
 } tk_hbi_t;
-
-typedef struct tk_hbi_thread_s {
-  tk_hbi_t *A;
-  tk_hbi_hoods_t *hoods;
-  tk_iumap_t *sid_idx;
-  tk_iumap_t **hoods_sets;
-  tk_ivec_t *uids;
-  tk_ivec_t *sids;
-  tk_cvec_t *query_vecs;
-  uint64_t ifirst, ilast;
-  uint64_t k;
-  uint64_t eps_min;
-  uint64_t eps_max;
-  uint64_t min;
-  int64_t *old_to_new;
-  tk_iuset_t *local_uids;
-  tk_iumap_t *uid_to_idx;
-} tk_hbi_thread_t;
-
-static inline void tk_hbi_worker (void *dp, int sig);
 
 static inline tk_hbi_t *tk_hbi_peek (lua_State *L, int i)
 {
@@ -105,6 +73,8 @@ static inline void tk_hbi_shrink (
     return;
 
   int Ai = 1; // Object is at position 1 when called from Lua
+  if (A->next_sid > SIZE_MAX / sizeof(int64_t))
+    tk_error(L, "hbi_shrink: allocation size overflow", ENOMEM);
   int64_t *old_to_new = tk_malloc(L, A->next_sid * sizeof(int64_t));
   for (uint64_t i = 0; i < A->next_sid; i ++)
     old_to_new[i] = -1;
@@ -199,8 +169,7 @@ static inline int64_t tk_hbi_uid_sid (
       return -1;
     else
       return tk_iumap_val(A->uid_sid, khi);
-  } else { // TK_HBI_REPLACE
-    // Remove old mappings if uid exists
+  } else {
     khi = tk_iumap_get(A->uid_sid, uid);
     if (khi != tk_iumap_end(A->uid_sid)) {
       int64_t old_sid = tk_iumap_val(A->uid_sid, khi);
@@ -209,7 +178,6 @@ static inline int64_t tk_hbi_uid_sid (
       if (khi != tk_iumap_end(A->sid_uid))
         tk_iumap_del(A->sid_uid, khi);
     }
-    // Create new mappings
     int64_t sid = (int64_t) (A->next_sid ++);
     khi = tk_iumap_put(A->uid_sid, uid, &kha);
     tk_iumap_setval(A->uid_sid, khi, sid);
@@ -514,20 +482,10 @@ static inline void tk_hbi_mutualize (
   tk_hbi_hoods_t *hoods,
   tk_ivec_t *uids,
   uint64_t min,
-  uint64_t n_threads,
   int64_t **old_to_newp
 ) {
   if (A->destroyed)
     return;
-
-  tk_hbi_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_hbi_thread_t));
-  memset(threads, 0, n_threads * sizeof(tk_hbi_thread_t));
-  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_hbi_worker);
-  for (unsigned int i = 0; i < n_threads; i ++) {
-    tk_hbi_thread_t *data = threads + i;
-    pool->threads[i].data = data;
-    data->A = A;
-  }
 
   tk_ivec_t *sids = tk_ivec_create(L, uids->n, 0, 0);
   for (uint64_t i = 0; i < uids->n; i ++)
@@ -535,23 +493,94 @@ static inline void tk_hbi_mutualize (
   tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
   if (!sid_idx)
     tk_error(L, "hbi_mutualize: iumap_from_ivec failed", ENOMEM);
+  if (uids->n > SIZE_MAX / sizeof(tk_iumap_t *))
+    tk_error(L, "hbi_mutualize: allocation size overflow", ENOMEM);
   tk_iumap_t **hoods_sets = tk_malloc(L, uids->n * sizeof(tk_iumap_t *));
   for (uint64_t i = 0; i < uids->n; i ++)
     hoods_sets[i] = NULL;
   for (uint64_t i = 0; i < uids->n; i ++)
     hoods_sets[i] = tk_iumap_create(0, 0);
-  for (uint64_t i = 0; i < n_threads; i ++) {
-    tk_hbi_thread_t *data = threads + i;
-    data->uids = uids;
-    data->sids = sids;
-    data->hoods = hoods;
-    data->hoods_sets = hoods_sets;
-    data->sid_idx = sid_idx;
-    tk_thread_range(i, n_threads, hoods->n, &data->ifirst, &data->ilast);
+
+  // TK_HBI_MUTUAL_INIT
+  #pragma omp parallel for schedule(static)
+  for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
+    int kha;
+    khint_t khi;
+    tk_pvec_t *uhood = hoods->a[i];
+    tk_iumap_t *uset = hoods_sets[i];
+    for (uint64_t j = 0; j < uhood->n; j ++) {
+      khi = tk_iumap_put(uset, uhood->a[j].i, &kha);
+      tk_iumap_setval(uset, khi, uhood->a[j].p);
+    }
   }
-  tk_threads_signal(pool, TK_HBI_MUTUAL_INIT, 0);
-  tk_threads_signal(pool, TK_HBI_MUTUAL_FILTER, 0);
+
+  // TK_HBI_MUTUAL_FILTER
+  #pragma omp parallel for schedule(static)
+  for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
+    khint_t khi;
+    tk_pvec_t *uhood = hoods->a[i];
+    uint64_t orig_n = uhood->n;
+    // assert(uhood->m >= orig_n);
+    if (orig_n == 0) {
+      uhood->n = 0;
+      uhood->m = 0;
+      continue;
+    }
+    uint64_t left = 0;
+    uint64_t right = orig_n - 1;
+    while (left <= right) {
+      int64_t iv = uhood->a[left].i;
+      int64_t d = uhood->a[left].p;
+      // assert(iv >= 0 && (uint64_t) iv < hoods->n);
+      tk_iumap_t *vset = hoods_sets[iv];
+      khi = tk_iumap_get(vset, i);
+      if (khi != tk_iumap_end(vset)) {
+        // Edge is mutual - keep it and update distance to minimum
+        int64_t d0 = tk_iumap_val(vset, khi);
+        if (d0 < d)
+          uhood->a[left].p = d0;
+        left ++;
+      } else {
+        // Edge is not mutual - move to end
+        if (left != right) {
+          tk_pair_t tmp = uhood->a[left];
+          uhood->a[left] = uhood->a[right];
+          uhood->a[right] = tmp;
+        }
+        if (right == 0)
+          break;
+        right--;
+      }
+    }
+    uhood->n = left;
+    uhood->m = orig_n;
+    // assert(uhood->n <= uhood->m);
+
+    for (uint64_t qi = uhood->n; qi < uhood->m; qi ++) {
+      int64_t iv = uhood->a[qi].i;
+      int64_t d_forward = uhood->a[qi].p;
+      int64_t d_reverse = d_forward;  // fallback
+      tk_iumap_t *vset = hoods_sets[iv];
+      khi = tk_iumap_get(vset, i);
+      if (khi != tk_iumap_end(vset)) {
+        d_reverse = tk_iumap_val(vset, khi);
+      } else {
+        int64_t usid = sids->a[i];
+        int64_t vsid = sids->a[iv];
+        tk_hbi_code_t ucode = A->codes->a[usid];
+        tk_hbi_code_t vcode = A->codes->a[vsid];
+        tk_hbi_code_t xor_result = ucode ^ vcode;
+        d_reverse = (int64_t) __builtin_popcount(xor_result);
+      }
+      uhood->a[qi].p = (d_forward < d_reverse) ? d_forward : d_reverse;
+    }
+    tk_pvec_asc(uhood, 0, uhood->n);
+    tk_pvec_asc(uhood, uhood->n, uhood->m);
+  }
+
   if (min > 0) {
+    if (uids->n > SIZE_MAX / sizeof(int64_t))
+      tk_error(L, "hbi_neighborhoods: allocation size overflow", ENOMEM);
     int64_t *old_to_new = tk_malloc(L, uids->n * sizeof(int64_t));
     int64_t keeper_count = 0;
     for (uint64_t i = 0; i < uids->n; i ++) {
@@ -562,13 +591,29 @@ static inline void tk_hbi_mutualize (
       }
     }
     if (keeper_count < (int64_t) uids->n) {
-      for (uint64_t i = 0; i < n_threads; i ++) {
-        tk_hbi_thread_t *data = threads + i;
-        data->old_to_new = old_to_new;
-        data->min = min;
-        tk_thread_range(i, n_threads, hoods->n, &data->ifirst, &data->ilast);
+      // TK_HBI_MIN_REMAP
+      #pragma omp parallel for schedule(static)
+      for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
+        if (hoods->a[i]->n >= min) {
+          tk_pvec_t *hood = hoods->a[i];
+          uint64_t mutual_write_pos = 0;
+          uint64_t non_mutual_write_pos = 0;
+          for (uint64_t j = 0; j < hood->n; j ++) {
+            int64_t old_neighbor_idx = hood->a[j].i;
+            int64_t new_neighbor_idx = old_to_new[old_neighbor_idx];
+            if (new_neighbor_idx >= 0)
+              hood->a[mutual_write_pos ++] = tk_pair(new_neighbor_idx, hood->a[j].p);
+          }
+          for (uint64_t j = hood->n; j < hood->m; j ++) {
+            int64_t old_neighbor_idx = hood->a[j].i;
+            int64_t new_neighbor_idx = old_to_new[old_neighbor_idx];
+            if (new_neighbor_idx >= 0)
+              hood->a[mutual_write_pos + non_mutual_write_pos ++] = tk_pair(new_neighbor_idx, hood->a[j].p);
+          }
+          hood->n = mutual_write_pos;
+          hood->m = mutual_write_pos + non_mutual_write_pos;
+        }
       }
-      tk_threads_signal(pool, TK_HBI_MIN_REMAP, 0);
       tk_ivec_t *new_uids = tk_ivec_create(L, (uint64_t) keeper_count, 0, 0);
       tk_hbi_hoods_t *new_hoods = tk_hbi_hoods_create(L, (uint64_t) keeper_count, 0, 0);
       new_hoods->n = (uint64_t) keeper_count;
@@ -605,9 +650,6 @@ static inline void tk_hbi_mutualize (
       tk_iumap_destroy(hoods_sets[i]);
   free(hoods_sets);
   lua_remove(L, -1);
-
-  tk_threads_destroy(pool);
-  free(threads);
 }
 
 static inline void tk_hbi_neighborhoods (
@@ -618,22 +660,12 @@ static inline void tk_hbi_neighborhoods (
   uint64_t eps_max,
   uint64_t min,
   bool mutual,
-  uint64_t n_threads,
   tk_hbi_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
   if (A->destroyed) {
     tk_lua_verror(L, 2, "neighborhoods", "can't query a destroyed index");
     return;
-  }
-
-  tk_hbi_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_hbi_thread_t));
-  memset(threads, 0, n_threads * sizeof(tk_hbi_thread_t));
-  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_hbi_worker);
-  for (unsigned int i = 0; i < n_threads; i ++) {
-    tk_hbi_thread_t *data = threads + i;
-    pool->threads[i].data = data;
-    data->A = A;
   }
 
   int kha;
@@ -656,21 +688,18 @@ static inline void tk_hbi_neighborhoods (
     tk_lua_add_ephemeron(L, TK_HBI_EPH, -2, -1);
     lua_pop(L, 1);
   }
-  for (uint64_t i = 0; i < n_threads; i ++) {
-    tk_hbi_thread_t *data = threads + i;
-    data->uids = uids;
-    data->sids = sids;
-    data->query_vecs = NULL;
-    data->hoods = hoods;
-    data->sid_idx = sid_idx;
-    data->k = k;
-    data->eps_min = eps_min;
-    data->eps_max = eps_max;
-    tk_thread_range(i, n_threads, hoods->n, &data->ifirst, &data->ilast);
+
+  // TK_HBI_NEIGHBORHOODS
+  #pragma omp parallel for schedule(static)
+  for (uint64_t i = 0; i < hoods->n; i ++) {
+    tk_pvec_t *hood = hoods->a[i];
+    int64_t sid = sids->a[i];
+    tk_hbi_populate_neighborhood(A, i, sid, tk_hbi_sget(A, sid), hood, sid_idx, k, eps_min, eps_max);
   }
-  tk_threads_signal(pool, TK_HBI_NEIGHBORHOODS, 0);
+
   if (mutual && k)
-    tk_threads_signal(pool, TK_HBI_MUTUAL, 0);
+    tk_hbi_mutualize(L, A, hoods, uids, 0, NULL);
+
   if (sid_idx) tk_iumap_destroy(sid_idx);
 
   // Min filtering
@@ -681,6 +710,8 @@ static inline void tk_hbi_neighborhoods (
         keeper_count ++;
     if (keeper_count == (int64_t) uids->n)
       goto cleanup;
+    if (uids->n > SIZE_MAX / sizeof(int64_t))
+      tk_error(L, "hbi_neighborhoods: allocation size overflow", ENOMEM);
     int64_t *old_to_new = tk_malloc(L, uids->n * sizeof(int64_t));
     int64_t new_idx = 0;
     for (uint64_t i = 0; i < uids->n; i ++) {
@@ -690,13 +721,29 @@ static inline void tk_hbi_neighborhoods (
         old_to_new[i] = -1;
       }
     }
-    for (uint64_t i = 0; i < n_threads; i ++) {
-      tk_hbi_thread_t *data = threads + i;
-      data->old_to_new = old_to_new;
-      data->min = min;
-      tk_thread_range(i, n_threads, hoods->n, &data->ifirst, &data->ilast);
+    // TK_HBI_MIN_REMAP
+    #pragma omp parallel for schedule(static)
+    for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
+      if (hoods->a[i]->n >= min) {
+        tk_pvec_t *hood = hoods->a[i];
+        uint64_t mutual_write_pos = 0;
+        uint64_t non_mutual_write_pos = 0;
+        for (uint64_t j = 0; j < hood->n; j ++) {
+          int64_t old_neighbor_idx = hood->a[j].i;
+          int64_t new_neighbor_idx = old_to_new[old_neighbor_idx];
+          if (new_neighbor_idx >= 0)
+            hood->a[mutual_write_pos ++] = tk_pair(new_neighbor_idx, hood->a[j].p);
+        }
+        for (uint64_t j = hood->n; j < hood->m; j ++) {
+          int64_t old_neighbor_idx = hood->a[j].i;
+          int64_t new_neighbor_idx = old_to_new[old_neighbor_idx];
+          if (new_neighbor_idx >= 0)
+            hood->a[mutual_write_pos + non_mutual_write_pos ++] = tk_pair(new_neighbor_idx, hood->a[j].p);
+        }
+        hood->n = mutual_write_pos;
+        hood->m = mutual_write_pos + non_mutual_write_pos;
+      }
     }
-    tk_threads_signal(pool, TK_HBI_MIN_REMAP, 0);
     tk_ivec_t *new_uids = tk_ivec_create(L, (uint64_t) keeper_count, 0, 0);
     tk_hbi_hoods_t *new_hoods = tk_hbi_hoods_create(L, (uint64_t) keeper_count, 0, 0);
     new_hoods->n = (uint64_t) keeper_count;
@@ -724,9 +771,6 @@ static inline void tk_hbi_neighborhoods (
   }
 
 cleanup:
-  tk_threads_destroy(pool);
-  free(threads);
-
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = uids;
   if (sids) lua_remove(L, -3); // sids
@@ -741,22 +785,12 @@ static inline void tk_hbi_neighborhoods_by_ids (
   uint64_t eps_max,
   uint64_t min,
   bool mutual,
-  uint64_t n_threads,
   tk_hbi_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
   if (A->destroyed) {
     tk_lua_verror(L, 2, "neighborhoods_by_ids", "can't query a destroyed index");
     return;
-  }
-
-  tk_hbi_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_hbi_thread_t));
-  memset(threads, 0, n_threads * sizeof(tk_hbi_thread_t));
-  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_hbi_worker);
-  for (unsigned int i = 0; i < n_threads; i ++) {
-    tk_hbi_thread_t *data = threads + i;
-    pool->threads[i].data = data;
-    data->A = A;
   }
 
   tk_ivec_t *sids = tk_ivec_create(L, query_ids->n, 0, 0);
@@ -781,22 +815,16 @@ static inline void tk_hbi_neighborhoods_by_ids (
     lua_pop(L, 1);
   }
 
-  for (uint64_t i = 0; i < n_threads; i ++) {
-    tk_hbi_thread_t *data = threads + i;
-    data->uids = uids;
-    data->sids = sids;
-    data->query_vecs = NULL;
-    data->hoods = hoods;
-    data->sid_idx = sid_idx;
-    data->k = k;
-    data->eps_min = eps_min;
-    data->eps_max = eps_max;
-    tk_thread_range(i, n_threads, hoods->n, &data->ifirst, &data->ilast);
+  // TK_HBI_NEIGHBORHOODS
+  #pragma omp parallel for schedule(static)
+  for (uint64_t i = 0; i < hoods->n; i ++) {
+    tk_pvec_t *hood = hoods->a[i];
+    int64_t sid = sids->a[i];
+    tk_hbi_populate_neighborhood(A, i, sid, tk_hbi_sget(A, sid), hood, sid_idx, k, eps_min, eps_max);
   }
 
-  tk_threads_signal(pool, TK_HBI_NEIGHBORHOODS, 0);
   if (mutual && k)
-    tk_threads_signal(pool, TK_HBI_MUTUAL, 0);
+    tk_hbi_mutualize(L, A, hoods, uids, 0, NULL);
 
   tk_iumap_destroy(sid_idx);
 
@@ -808,6 +836,8 @@ static inline void tk_hbi_neighborhoods_by_ids (
         keeper_count ++;
     if (keeper_count == (int64_t) uids->n)
       goto cleanup;
+    if (uids->n > SIZE_MAX / sizeof(int64_t))
+      tk_error(L, "hbi_neighborhoods: allocation size overflow", ENOMEM);
     int64_t *old_to_new = tk_malloc(L, uids->n * sizeof(int64_t));
     int64_t new_idx = 0;
     for (uint64_t i = 0; i < uids->n; i ++)
@@ -815,13 +845,29 @@ static inline void tk_hbi_neighborhoods_by_ids (
         old_to_new[i] = new_idx ++;
       else
         old_to_new[i] = -1;
-    for (uint64_t i = 0; i < n_threads; i ++) {
-      tk_hbi_thread_t *data = threads + i;
-      data->old_to_new = old_to_new;
-      data->min = min;
-      tk_thread_range(i, n_threads, hoods->n, &data->ifirst, &data->ilast);
+    // TK_HBI_MIN_REMAP
+    #pragma omp parallel for schedule(static)
+    for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
+      if (hoods->a[i]->n >= min) {
+        tk_pvec_t *hood = hoods->a[i];
+        uint64_t mutual_write_pos = 0;
+        uint64_t non_mutual_write_pos = 0;
+        for (uint64_t j = 0; j < hood->n; j ++) {
+          int64_t old_neighbor_idx = hood->a[j].i;
+          int64_t new_neighbor_idx = old_to_new[old_neighbor_idx];
+          if (new_neighbor_idx >= 0)
+            hood->a[mutual_write_pos ++] = tk_pair(new_neighbor_idx, hood->a[j].p);
+        }
+        for (uint64_t j = hood->n; j < hood->m; j ++) {
+          int64_t old_neighbor_idx = hood->a[j].i;
+          int64_t new_neighbor_idx = old_to_new[old_neighbor_idx];
+          if (new_neighbor_idx >= 0)
+            hood->a[mutual_write_pos + non_mutual_write_pos ++] = tk_pair(new_neighbor_idx, hood->a[j].p);
+        }
+        hood->n = mutual_write_pos;
+        hood->m = mutual_write_pos + non_mutual_write_pos;
+      }
     }
-    tk_threads_signal(pool, TK_HBI_MIN_REMAP, 0);
     tk_ivec_t *new_uids = tk_ivec_create(L, (uint64_t) keeper_count, 0, 0); // sids uids hoods nuids
     tk_hbi_hoods_t *new_hoods = tk_hbi_hoods_create(L, (uint64_t) keeper_count, 0, 0); // sids uids hoods nuids nhoods
     new_hoods->n = (uint64_t) keeper_count;
@@ -848,9 +894,6 @@ static inline void tk_hbi_neighborhoods_by_ids (
   }
 
 cleanup:
-  tk_threads_destroy(pool);
-  free(threads);
-
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = uids;
   lua_remove(L, -3); // sids
@@ -864,22 +907,12 @@ static inline void tk_hbi_neighborhoods_by_vecs (
   uint64_t eps_min,
   uint64_t eps_max,
   uint64_t min,
-  uint64_t n_threads,
   tk_hbi_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
   if (A->destroyed) {
     tk_lua_verror(L, 2, "neighborhoods_by_vecs", "can't query a destroyed index");
     return;
-  }
-
-  tk_hbi_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_hbi_thread_t));
-  memset(threads, 0, n_threads * sizeof(tk_hbi_thread_t));
-  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_hbi_worker);
-  for (unsigned int i = 0; i < n_threads; i ++) {
-    tk_hbi_thread_t *data = threads + i;
-    pool->threads[i].data = data;
-    data->A = A;
   }
 
   uint64_t vec_bytes = TK_CVEC_BITS_BYTES(A->features);
@@ -894,55 +927,102 @@ static inline void tk_hbi_neighborhoods_by_vecs (
     lua_pop(L, 1);
   }
 
-  // Pass NULL for sid_idx to make search store UIDs directly
-  for (uint64_t i = 0; i < n_threads; i ++) {
-    tk_hbi_thread_t *data = threads + i;
-    data->uids = NULL;
-    data->sids = NULL;
-    data->query_vecs = query_vecs;
-    data->hoods = hoods;
-    data->sid_idx = NULL;
-    data->k = k;
-    data->eps_min = eps_min;
-    data->eps_max = eps_max;
-    tk_thread_range(i, n_threads, hoods->n, &data->ifirst, &data->ilast);
-  }
+  // TK_HBI_NEIGHBORHOODS and UID collection in single parallel region
+  tk_iuset_t **local_uids = NULL;
+  tk_iumap_t *uid_to_idx = NULL;
+  tk_ivec_t *uids = NULL;
 
-  tk_threads_signal(pool, TK_HBI_NEIGHBORHOODS, 0);
-  for (uint64_t i = 0; i < n_threads; i ++) {
-    threads[i].local_uids = tk_iuset_create(0, 0);
-    tk_thread_range(i, n_threads, hoods->n, &threads[i].ifirst, &threads[i].ilast);
-  }
-  tk_threads_signal(pool, TK_HBI_COLLECT_UIDS, 0);
-  tk_iumap_t *uid_to_idx = tk_iumap_create(0, 0);
-  int64_t next_idx = 0;
-  int ret;
-  for (uint64_t t = 0; t < n_threads; t ++) {
-    tk_iuset_t *local = threads[t].local_uids;
-    int64_t uid;
-    tk_umap_foreach_keys(local, uid, ({
-      khint_t k = tk_iumap_put(uid_to_idx, uid, &ret);
-      if (ret)
-        tk_iumap_setval(uid_to_idx, k, next_idx++);
-    }));
-    tk_iuset_destroy(local);
-  }
-  tk_ivec_t *uids = tk_ivec_create(L, (uint64_t)next_idx, 0, 0); // hoods uids
-  uids->n = (uint64_t)next_idx;
-  for (khint_t k = tk_iumap_begin(uid_to_idx); k != tk_iumap_end(uid_to_idx); k++) {
-    if (tk_iumap_exist(uid_to_idx, k)) {
-      int64_t uid = tk_iumap_key(uid_to_idx, k);
-      int64_t idx = tk_iumap_val(uid_to_idx, k);
-      uids->a[idx] = uid;
+  #pragma omp parallel
+  {
+    int num_threads = omp_get_num_threads();
+    int tid = omp_get_thread_num();
+
+    // TK_HBI_NEIGHBORHOODS: Pass NULL for sid_idx to make search store UIDs directly
+    #pragma omp for schedule(static) nowait
+    for (uint64_t i = 0; i < hoods->n; i ++) {
+      tk_pvec_t *hood = hoods->a[i];
+      char *vec = (char *)(query_vecs->a + i * vec_bytes);
+      tk_hbi_populate_neighborhood(A, i, -1, vec, hood, NULL, k, eps_min, eps_max);
+    }
+
+    #pragma omp barrier
+
+    // TK_HBI_COLLECT_UIDS - Allocate thread-local UID sets
+    #pragma omp single
+    {
+      if (num_threads > INT_MAX / (int)sizeof(tk_iuset_t *))
+        tk_error(L, "hbi_neighborhoods: thread count overflow", ENOMEM);
+      local_uids = malloc((size_t)num_threads * sizeof(tk_iuset_t *));
+      if (!local_uids)
+        tk_error(L, "hbi_neighborhoods: local_uids allocation failed", ENOMEM);
+      for (int t = 0; t < num_threads; t++)
+        local_uids[t] = NULL;
+    }
+
+    #pragma omp barrier
+
+    tk_iuset_t *local = tk_iuset_create(0, 0);
+    local_uids[tid] = local;
+
+    #pragma omp for schedule(static)
+    for (uint64_t i = 0; i < hoods->n; i ++) {
+      tk_pvec_t *hood = hoods->a[i];
+      for (uint64_t j = 0; j < hood->n; j ++) {
+        int64_t uid = hood->a[j].i;
+        int kha;
+        tk_iuset_put(local, uid, &kha);
+      }
+    }
+
+    #pragma omp barrier
+
+    // Merge thread-local UID sets into global map
+    #pragma omp single
+    {
+      uid_to_idx = tk_iumap_create(0, 0);
+      int64_t next_idx = 0;
+      int ret;
+      for (int t = 0; t < num_threads; t ++) {
+        tk_iuset_t *local_set = local_uids[t];
+        int64_t uid;
+        tk_umap_foreach_keys(local_set, uid, ({
+          khint_t k = tk_iumap_put(uid_to_idx, uid, &ret);
+          if (ret)
+            tk_iumap_setval(uid_to_idx, k, next_idx++);
+        }));
+        tk_iuset_destroy(local_set);
+      }
+      free(local_uids);
+
+      // Compact UIDs array
+      uids = tk_ivec_create(L, (uint64_t)next_idx, 0, 0);
+      uids->n = (uint64_t)next_idx;
+      for (khint_t k = tk_iumap_begin(uid_to_idx); k != tk_iumap_end(uid_to_idx); k++) {
+        if (tk_iumap_exist(uid_to_idx, k)) {
+          int64_t uid = tk_iumap_key(uid_to_idx, k);
+          int64_t idx = tk_iumap_val(uid_to_idx, k);
+          uids->a[idx] = uid;
+        }
+      }
+    }
+
+    #pragma omp barrier
+
+    // TK_HBI_REMAP_UIDS: Remap UIDs to indices in uids array
+    #pragma omp for schedule(static)
+    for (uint64_t i = 0; i < hoods->n; i ++) {
+      tk_pvec_t *hood = hoods->a[i];
+      for (uint64_t j = 0; j < hood->n; j ++) {
+        int64_t uid = hood->a[j].i;
+        khint_t k = tk_iumap_get(uid_to_idx, uid);
+        if (k != tk_iumap_end(uid_to_idx)) {
+          hood->a[j].i = tk_iumap_val(uid_to_idx, k);
+        }
+      }
     }
   }
-  lua_insert(L, -2); // uids hoods
 
-  for (uint64_t i = 0; i < n_threads; i ++) {
-    threads[i].uid_to_idx = uid_to_idx;
-    tk_thread_range(i, n_threads, hoods->n, &threads[i].ifirst, &threads[i].ilast);
-  }
-  tk_threads_signal(pool, TK_HBI_REMAP_UIDS, 0);
+  lua_insert(L, -2); // uids hoods
   tk_iumap_destroy(uid_to_idx);
 
   // Min filtering
@@ -1014,10 +1094,6 @@ static inline void tk_hbi_neighborhoods_by_vecs (
   }
 
 cleanup:
-  // Destroy local threadpool and free threads
-  tk_threads_destroy(pool);
-  free(threads);
-
   if (hoodsp)
     *hoodsp = hoods;
   if (uidsp)
@@ -1283,21 +1359,20 @@ static inline int tk_hbi_get_lua (lua_State *L)
 
 static inline int tk_hbi_neighborhoods_lua (lua_State *L)
 {
-  lua_settop(L, 7);
+  lua_settop(L, 6);
   tk_hbi_t *A = tk_hbi_peek(L, 1);
   uint64_t k = tk_lua_optunsigned(L, 2, "k", 0);
   uint64_t eps_min = tk_lua_optunsigned(L, 3, "eps_min", 0);
   uint64_t eps_max = tk_lua_optunsigned(L, 4, "eps_max", 0);
   uint64_t min = tk_lua_optunsigned(L, 5, "min", 0);
   bool mutual = tk_lua_optboolean(L, 6, "mutual", false);
-  uint64_t n_threads = tk_threads_getn(L, 7, "neighborhoods", NULL);
-  tk_hbi_neighborhoods(L, A, k, eps_min, eps_max, min, mutual, n_threads, NULL, NULL);
+  tk_hbi_neighborhoods(L, A, k, eps_min, eps_max, min, mutual, NULL, NULL);
   return 2;
 }
 
 static inline int tk_hbi_neighborhoods_by_ids_lua (lua_State *L)
 {
-  lua_settop(L, 8);
+  lua_settop(L, 7);
   tk_hbi_t *A = tk_hbi_peek(L, 1);
   tk_ivec_t *query_ids = tk_ivec_peek(L, 2, "ids");
   uint64_t k = tk_lua_optunsigned(L, 3, "k", 0);
@@ -1305,7 +1380,6 @@ static inline int tk_hbi_neighborhoods_by_ids_lua (lua_State *L)
   uint64_t eps_max = tk_lua_optunsigned(L, 5, "eps_max", 0);
   uint64_t min = tk_lua_optunsigned(L, 6, "min", 0);
   bool mutual = tk_lua_optboolean(L, 7, "mutual", false);
-  uint64_t n_threads = tk_threads_getn(L, 8, "neighborhoods_by_ids", NULL);
   int64_t write_pos = 0;
   for (int64_t i = 0; i < (int64_t) query_ids->n; i ++) {
     int64_t uid = query_ids->a[i];
@@ -1316,22 +1390,21 @@ static inline int tk_hbi_neighborhoods_by_ids_lua (lua_State *L)
   }
   query_ids->n = (uint64_t) write_pos;
   tk_hbi_hoods_t *hoods;
-  tk_hbi_neighborhoods_by_ids(L, A, query_ids, k, eps_min, eps_max, min, mutual, n_threads, &hoods, &query_ids);
+  tk_hbi_neighborhoods_by_ids(L, A, query_ids, k, eps_min, eps_max, min, mutual, &hoods, &query_ids);
   return 2;
 }
 
 static inline int tk_hbi_neighborhoods_by_vecs_lua (lua_State *L)
 {
-  lua_settop(L, 7);
+  lua_settop(L, 6);
   tk_hbi_t *A = tk_hbi_peek(L, 1);
   tk_cvec_t *query_vecs = tk_cvec_peek(L, 2, "vectors");
   uint64_t k = tk_lua_optunsigned(L, 3, "k", 0);
   uint64_t eps_min = tk_lua_optunsigned(L, 4, "eps_min", 0);
   uint64_t eps_max = tk_lua_optunsigned(L, 5, "eps_max", 0);
   uint64_t min = tk_lua_optunsigned(L, 6, "min", 0);
-  uint64_t n_threads = tk_threads_getn(L, 7, "neighborhoods_by_vecs", NULL);
 
-  tk_hbi_neighborhoods_by_vecs(L, A, query_vecs, k, eps_min, eps_max, min, n_threads, NULL, NULL);
+  tk_hbi_neighborhoods_by_vecs(L, A, query_vecs, k, eps_min, eps_max, min, NULL, NULL);
   return 2;
 }
 
@@ -1434,164 +1507,6 @@ static inline int tk_hbi_shrink_lua (lua_State *L)
   tk_hbi_t *A = tk_hbi_peek(L, 1);
   tk_hbi_shrink(L, A);
   return 0;
-}
-
-static inline void tk_hbi_worker (void *dp, int sig)
-{
-  tk_hbi_stage_t stage = (tk_hbi_stage_t) sig;
-  tk_hbi_thread_t *data = (tk_hbi_thread_t *) dp;
-
-  switch (stage) {
-
-    case TK_HBI_NEIGHBORHOODS:
-      for (uint64_t i = data->ifirst; i <= data->ilast; i ++) {
-        tk_pvec_t *hood = data->hoods->a[i];
-        if (data->query_vecs) {
-          uint64_t vec_bytes = TK_CVEC_BITS_BYTES(data->A->features);
-          char *vec = (char *)(data->query_vecs->a + i * vec_bytes);
-          tk_hbi_populate_neighborhood(data->A, i, -1, vec, hood, data->sid_idx, data->k, data->eps_min, data->eps_max);
-        } else {
-          int64_t sid = data->sids->a[i];
-          tk_hbi_populate_neighborhood(data->A, i, sid, tk_hbi_sget(data->A, sid), hood, data->sid_idx, data->k, data->eps_min, data->eps_max);
-        }
-      }
-      break;
-
-    case TK_HBI_MUTUAL: {
-      assert(false);
-    }
-
-    case TK_HBI_MUTUAL_INIT: {
-      int kha;
-      khint_t khi;
-      for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i ++) {
-        tk_pvec_t *uhood = data->hoods->a[i];
-        tk_iumap_t *uset = data->hoods_sets[i];
-        for (uint64_t j = 0; j < uhood->n; j ++) {
-          khi = tk_iumap_put(uset, uhood->a[j].i, &kha);
-          tk_iumap_setval(uset, khi, uhood->a[j].p);
-        }
-      }
-      break;
-    }
-
-    case TK_HBI_MUTUAL_FILTER: {
-      for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i ++) {
-        tk_pvec_t *uhood = data->hoods->a[i];
-        uint64_t orig_n = uhood->n;
-        assert(uhood->m >= orig_n);
-        if (orig_n == 0) {
-          uhood->n = 0;
-          uhood->m = 0;
-          continue;
-        }
-        uint64_t left = 0;
-        uint64_t right = orig_n - 1;
-        khint_t khi;
-        while (left <= right) {
-          int64_t iv = uhood->a[left].i;
-          int64_t d = uhood->a[left].p;
-          assert(iv >= 0 && (uint64_t) iv < data->hoods->n);
-          tk_iumap_t *vset = data->hoods_sets[iv];
-          khi = tk_iumap_get(vset, i);
-          if (khi != tk_iumap_end(vset)) {
-            // Edge is mutual - keep it and update distance to minimum
-            int64_t d0 = tk_iumap_val(vset, khi);
-            if (d0 < d)
-              uhood->a[left].p = d0;
-            left ++;
-          } else {
-            // Edge is not mutual - move to end
-            if (left != right) {
-              tk_pair_t tmp = uhood->a[left];
-              uhood->a[left] = uhood->a[right];
-              uhood->a[right] = tmp;
-            }
-            if (right == 0)
-              break;
-            right--;
-          }
-        }
-        uhood->n = left;
-        uhood->m = orig_n;
-        assert(uhood->n <= uhood->m);
-
-        for (uint64_t qi = uhood->n; qi < uhood->m; qi ++) {
-          int64_t iv = uhood->a[qi].i;
-          int64_t d_forward = uhood->a[qi].p;
-          int64_t d_reverse = d_forward;  // fallback
-          tk_iumap_t *vset = data->hoods_sets[iv];
-          khi = tk_iumap_get(vset, i);
-          if (khi != tk_iumap_end(vset)) {
-            d_reverse = tk_iumap_val(vset, khi);
-          } else {
-            int64_t usid = data->sids->a[i];
-            int64_t vsid = data->sids->a[iv];
-            tk_hbi_code_t ucode = data->A->codes->a[usid];
-            tk_hbi_code_t vcode = data->A->codes->a[vsid];
-            tk_hbi_code_t xor_result = ucode ^ vcode;
-            d_reverse = (int64_t) __builtin_popcount(xor_result);
-          }
-          uhood->a[qi].p = (d_forward < d_reverse) ? d_forward : d_reverse;
-        }
-        tk_pvec_asc(uhood, 0, uhood->n);
-        tk_pvec_asc(uhood, uhood->n, uhood->m);
-      }
-      break;
-    }
-
-    case TK_HBI_MIN_REMAP: {
-      for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i ++) {
-        if (data->hoods->a[i]->n >= data->min) {
-          tk_pvec_t *hood = data->hoods->a[i];
-          uint64_t mutual_write_pos = 0;
-          uint64_t non_mutual_write_pos = 0;
-          for (uint64_t j = 0; j < hood->n; j ++) {
-            int64_t old_neighbor_idx = hood->a[j].i;
-            int64_t new_neighbor_idx = data->old_to_new[old_neighbor_idx];
-            if (new_neighbor_idx >= 0)
-              hood->a[mutual_write_pos ++] = tk_pair(new_neighbor_idx, hood->a[j].p);
-          }
-          for (uint64_t j = hood->n; j < hood->m; j ++) {
-            int64_t old_neighbor_idx = hood->a[j].i;
-            int64_t new_neighbor_idx = data->old_to_new[old_neighbor_idx];
-            if (new_neighbor_idx >= 0)
-              hood->a[mutual_write_pos + non_mutual_write_pos ++] = tk_pair(new_neighbor_idx, hood->a[j].p);
-          }
-          hood->n = mutual_write_pos;
-          hood->m = mutual_write_pos + non_mutual_write_pos;
-        }
-      }
-      break;
-    }
-
-    case TK_HBI_COLLECT_UIDS: {
-      int kha;
-      for (uint64_t i = data->ifirst; i <= data->ilast; i ++) {
-        tk_pvec_t *hood = data->hoods->a[i];
-        for (uint64_t j = 0; j < hood->n; j ++) {
-          int64_t uid = hood->a[j].i;
-          tk_iuset_put(data->local_uids, uid, &kha);
-        }
-      }
-      break;
-    }
-
-    case TK_HBI_REMAP_UIDS: {
-      for (uint64_t i = data->ifirst; i <= data->ilast; i ++) {
-        tk_pvec_t *hood = data->hoods->a[i];
-        for (uint64_t j = 0; j < hood->n; j ++) {
-          int64_t uid = hood->a[j].i;
-          khint_t k = tk_iumap_get(data->uid_to_idx, uid);
-          if (k != tk_iumap_end(data->uid_to_idx)) {
-            hood->a[j].i = tk_iumap_val(data->uid_to_idx, k);
-          }
-        }
-      }
-      break;
-    }
-
-  }
 }
 
 static luaL_Reg tk_hbi_lua_mt_fns[] =

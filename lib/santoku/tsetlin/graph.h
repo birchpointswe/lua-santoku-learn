@@ -25,24 +25,12 @@ typedef tk_iuset_t * tk_graph_adj_item_t;
 #define tk_vec_limited
 #include <santoku/vec/tpl.h>
 
-typedef enum {
-  TK_GRAPH_SIGMA,
-  TK_GRAPH_REWEIGHT,
-  TK_GRAPH_COMPUTE_WEIGHTS,
-  TK_GRAPH_GEN_RANDOM_PAIRS,
-  TK_GRAPH_GEN_MULTICLASS_POS,
-  TK_GRAPH_GEN_MULTICLASS_NEG,
-  TK_GRAPH_STAR_HOODS,
-  TK_GRAPH_ANCHORS,
-  TK_GRAPH_ADJ_HOODS,
-} tk_graph_stage_t;
 
 typedef enum {
   TK_GRAPH_WEIGHT_POOL_MIN,
   TK_GRAPH_WEIGHT_POOL_MAX
 } tk_graph_weight_pooling_t;
 
-typedef struct tk_graph_thread_s tk_graph_thread_t;
 
 typedef struct tk_graph_s {
 
@@ -104,74 +92,6 @@ typedef struct tk_graph_s {
 
 } tk_graph_t;
 
-typedef struct tk_graph_thread_s {
-  tk_graph_t *graph;
-  uint64_t ifirst, ilast;
-  unsigned int index;
-  atomic_bool has_error;
-  tk_dvec_t *q_weights;
-  tk_dvec_t *e_weights;
-  tk_dvec_t *inter_weights;
-  union {
-    struct {
-      tk_ivec_t *adj_offset;
-      tk_ivec_t *adj_data;
-      tk_dvec_t *adj_weights;
-      tk_ivec_t *adj_sources;
-      int64_t csr_base;
-    } recon;
-    struct {
-      tk_pvec_t *local_pairs;
-      tk_ivec_t *ids;
-      tk_ivec_t *labels;
-      uint64_t edges_per_node;
-      tk_ivec_t **ids_by_label;
-      uint64_t n_labels;
-    } random;
-    struct {
-      tk_pvec_t *local_pos;
-      tk_pvec_t *local_neg;
-      tk_ivec_t **class_ids;
-      tk_ivec_t **anchors;
-      tk_iumap_t *label_of_id;
-      uint64_t n_classes;
-      tk_inv_t *index;
-      double eps_pos;
-      double eps_neg;
-      uint64_t n_anchors_neg;
-      tk_ivec_sim_type_t cmp;
-      double cmp_alpha;
-      double cmp_beta;
-    } multiclass;
-    struct {
-      tk_pvec_t *local_pairs;
-      tk_ivec_t *ids;
-      tk_inv_hoods_t *inv_hoods;
-      tk_ann_hoods_t *ann_hoods;
-      tk_hbi_hoods_t *hbi_hoods;
-    } star;
-    struct {
-      tk_pvec_t *local_pairs;
-      tk_inv_t *categories;
-      tk_ivec_t *rank_features;
-      tk_ivec_t *anchors;
-      uint64_t category_anchors;
-      uint64_t feature_start;
-      uint64_t feature_end;
-      tk_rvec_t *knn_heap;
-    } anchors;
-    struct {
-      tk_ivec_t *ids;
-      tk_inv_hoods_t *inv_hoods;
-      tk_ann_hoods_t *ann_hoods;
-      tk_hbi_hoods_t *hbi_hoods;
-      uint64_t features;
-      tk_ivec_t *offsets;
-      tk_ivec_t *neighbors;
-      tk_dvec_t *weights;
-    } adj_hoods;
-  } task;
-} tk_graph_thread_t;
 
 static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
 {
@@ -185,7 +105,7 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
     tk_hbi_t *__idx_hbi = (idx_hbi); \
     (dist_var) = DBL_MAX; \
     if (__idx_inv != NULL) { \
-      size_t un, vn; \
+      size_t un = 0, vn = 0; \
       int64_t *uset = tk_inv_get(__idx_inv, (u), &un); \
       int64_t *vset = tk_inv_get(__idx_inv, (v), &vn); \
       if (uset && vset) { \
@@ -207,6 +127,182 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
       if (uset && wset) { \
         (dist_var) = (double)tk_cvec_bits_hamming((const uint8_t *)uset, (const uint8_t *)wset, \
                                                    __idx_hbi->features) / (double)__idx_hbi->features; \
+      } \
+    } \
+  } while(0)
+
+// Iterate over neighborhood hoods (inv: tk_rank_t, ann/hbi: tk_pair_t)
+#define TK_GRAPH_FOREACH_HOOD_NEIGHBOR(inv_hoods, ann_hoods, hbi_hoods, hood_idx, uids_hoods, neighbor_idx_var, neighbor_uid_var, body) \
+  do { \
+    if ((inv_hoods) != NULL && (hood_idx) < (inv_hoods)->n) { \
+      tk_rvec_t *__hood = (inv_hoods)->a[hood_idx]; \
+      for (uint64_t __j = 0; __j < __hood->n; __j++) { \
+        tk_rank_t __r = __hood->a[__j]; \
+        if (__r.i < 0 || __r.i >= (int64_t)(uids_hoods)->n) continue; \
+        (neighbor_idx_var) = __r.i; \
+        (neighbor_uid_var) = (uids_hoods)->a[__r.i]; \
+        body \
+      } \
+    } else if ((ann_hoods) != NULL && (hood_idx) < (ann_hoods)->n) { \
+      tk_pvec_t *__hood = (ann_hoods)->a[hood_idx]; \
+      for (uint64_t __j = 0; __j < __hood->n; __j++) { \
+        tk_pair_t __r = __hood->a[__j]; \
+        if (__r.i < 0 || __r.i >= (int64_t)(uids_hoods)->n) continue; \
+        (neighbor_idx_var) = __r.i; \
+        (neighbor_uid_var) = (uids_hoods)->a[__r.i]; \
+        body \
+      } \
+    } else if ((hbi_hoods) != NULL && (hood_idx) < (hbi_hoods)->n) { \
+      tk_pvec_t *__hood = (hbi_hoods)->a[hood_idx]; \
+      for (uint64_t __j = 0; __j < __hood->n; __j++) { \
+        tk_pair_t __r = __hood->a[__j]; \
+        if (__r.i < 0 || __r.i >= (int64_t)(uids_hoods)->n) continue; \
+        (neighbor_idx_var) = __r.i; \
+        (neighbor_uid_var) = (uids_hoods)->a[__r.i]; \
+        body \
+      } \
+    } \
+  } while(0)
+
+// Get distance from hood element (inv: .d, ann/hbi: .p / features)
+#define TK_GRAPH_HOOD_DISTANCE(inv_hoods, ann_hoods, hbi_hoods, hood_idx, elem_idx, features_ann, features_hbi, dist_var) \
+  do { \
+    if ((inv_hoods) != NULL && (hood_idx) < (inv_hoods)->n) { \
+      (dist_var) = (inv_hoods)->a[hood_idx]->a[elem_idx].d; \
+    } else if ((ann_hoods) != NULL && (hood_idx) < (ann_hoods)->n) { \
+      (dist_var) = (double)(ann_hoods)->a[hood_idx]->a[elem_idx].p / (double)(features_ann); \
+    } else if ((hbi_hoods) != NULL && (hood_idx) < (hbi_hoods)->n) { \
+      (dist_var) = (double)(hbi_hoods)->a[hood_idx]->a[elem_idx].p / (double)(features_hbi); \
+    } \
+  } while(0)
+
+// Get hood size for offset calculation
+#define TK_GRAPH_HOOD_SIZE(inv_hoods, ann_hoods, hbi_hoods, idx, size_var) \
+  do { \
+    (size_var) = 0; \
+    if ((inv_hoods) && (idx) < (inv_hoods)->n) { \
+      (size_var) = (inv_hoods)->a[idx]->n; \
+    } else if ((ann_hoods) && (idx) < (ann_hoods)->n) { \
+      (size_var) = (ann_hoods)->a[idx]->n; \
+    } else if ((hbi_hoods) && (idx) < (hbi_hoods)->n) { \
+      (size_var) = (hbi_hoods)->a[idx]->n; \
+    } \
+  } while(0)
+
+// Populate CSR from hood (inv: 1-d, ann/hbi: 1-p/features)
+#define TK_GRAPH_HOOD_TO_CSR(inv_hoods, ann_hoods, hbi_hoods, idx, features, neighbors_arr, weights_arr, write_pos, end_pos) \
+  do { \
+    if ((inv_hoods) && (idx) < (inv_hoods)->n) { \
+      tk_rvec_t *__hood = (inv_hoods)->a[idx]; \
+      for (uint64_t __j = 0; __j < __hood->n && (write_pos) < (end_pos); __j++) { \
+        (neighbors_arr)[(write_pos)] = __hood->a[__j].i; \
+        (weights_arr)[(write_pos)] = 1.0 - __hood->a[__j].d; \
+        (write_pos)++; \
+      } \
+    } else if ((ann_hoods) && (idx) < (ann_hoods)->n) { \
+      tk_pvec_t *__hood = (ann_hoods)->a[idx]; \
+      for (uint64_t __j = 0; __j < __hood->n && (write_pos) < (end_pos); __j++) { \
+        (neighbors_arr)[(write_pos)] = __hood->a[__j].i; \
+        double __dist = (double)__hood->a[__j].p / (double)(features); \
+        (weights_arr)[(write_pos)] = 1.0 - __dist; \
+        (write_pos)++; \
+      } \
+    } else if ((hbi_hoods) && (idx) < (hbi_hoods)->n) { \
+      tk_pvec_t *__hood = (hbi_hoods)->a[idx]; \
+      for (uint64_t __j = 0; __j < __hood->n && (write_pos) < (end_pos); __j++) { \
+        (neighbors_arr)[(write_pos)] = __hood->a[__j].i; \
+        double __dist = (double)__hood->a[__j].p / (double)(features); \
+        (weights_arr)[(write_pos)] = 1.0 - __dist; \
+        (write_pos)++; \
+      } \
+    } \
+  } while(0)
+
+// Call neighborhoods function based on index type
+#define TK_INDEX_NEIGHBORHOODS(inv, ann, hbi, L, k, probe_radius, eps_min, eps_max, min, mutual, cmp, alpha, beta, rank, inv_hoods_out, ann_hoods_out, hbi_hoods_out, uids_out) \
+  do { \
+    if ((inv) != NULL) { \
+      tk_inv_neighborhoods((L), (inv), (k), 0.0, 1.0, (min), (cmp), (alpha), (beta), (mutual), (rank), (inv_hoods_out), (uids_out)); \
+    } else if ((ann) != NULL) { \
+      tk_ann_neighborhoods((L), (ann), (k), (probe_radius), (eps_min), (eps_max), (min), (mutual), (ann_hoods_out), (uids_out)); \
+    } else if ((hbi) != NULL) { \
+      tk_hbi_neighborhoods((L), (hbi), (k), (uint64_t)(eps_min), (uint64_t)(eps_max), (min), (mutual), (hbi_hoods_out), (uids_out)); \
+    } \
+  } while(0)
+
+// Call mutualize function based on index type
+#define TK_INDEX_MUTUALIZE(inv, ann, hbi, L, inv_hoods, ann_hoods, hbi_hoods, uids, min, precomputed) \
+  do { \
+    if ((inv) != NULL) { \
+      tk_inv_mutualize((L), (inv), (inv_hoods), (uids), (min), (precomputed)); \
+    } else if ((ann) != NULL) { \
+      tk_ann_mutualize((L), (ann), (ann_hoods), (uids), (min), (precomputed)); \
+    } else if ((hbi) != NULL) { \
+      tk_hbi_mutualize((L), (hbi), (hbi_hoods), (uids), (min), (precomputed)); \
+    } \
+  } while(0)
+
+// Sigma computation: iterate hood->m with distance fallback
+#define TK_GRAPH_FOREACH_HOOD_FOR_SIGMA(inv_hoods, ann_hoods, hbi_hoods, features_ann, features_hbi, hood_idx, graph, uid, uids_hoods, uids_idx, seen, distances, q_w, e_w, i_w, error_var) \
+  do { \
+    if ((inv_hoods) && (hood_idx) < (int64_t)(inv_hoods)->n) { \
+      tk_rvec_t *__hood = (inv_hoods)->a[hood_idx]; \
+      for (uint64_t __j = 0; __j < __hood->m; __j++) { \
+        int64_t __nh_idx = __hood->a[__j].i; \
+        if (__nh_idx >= 0 && __nh_idx < (int64_t)(uids_hoods)->n) { \
+          int64_t __nh_uid = (uids_hoods)->a[__nh_idx]; \
+          uint32_t __n_khi = tk_iumap_get((uids_idx), __nh_uid); \
+          if (__n_khi != tk_iumap_end((uids_idx))) { \
+            int64_t __nh_global_idx = tk_iumap_val((uids_idx), __n_khi); \
+            int __kha; \
+            tk_iuset_put((seen), __nh_global_idx, &__kha); \
+            if (__kha) { \
+              double __d = tk_graph_distance((graph), (uid), __nh_uid, (q_w), (e_w), (i_w)); \
+              if (__d == DBL_MAX) __d = __hood->a[__j].d; \
+              if (tk_dvec_push((distances), __d) != 0) { (error_var) = true; break; } \
+            } \
+          } \
+        } \
+      } \
+    } else if ((ann_hoods) && (hood_idx) < (int64_t)(ann_hoods)->n) { \
+      tk_pvec_t *__hood = (ann_hoods)->a[hood_idx]; \
+      double __denom = (features_ann) ? (double)(features_ann) : 1.0; \
+      for (uint64_t __j = 0; __j < __hood->m; __j++) { \
+        int64_t __nh_idx = __hood->a[__j].i; \
+        if (__nh_idx >= 0 && __nh_idx < (int64_t)(uids_hoods)->n) { \
+          int64_t __nh_uid = (uids_hoods)->a[__nh_idx]; \
+          uint32_t __n_khi = tk_iumap_get((uids_idx), __nh_uid); \
+          if (__n_khi != tk_iumap_end((uids_idx))) { \
+            int64_t __nh_global_idx = tk_iumap_val((uids_idx), __n_khi); \
+            int __kha; \
+            tk_iuset_put((seen), __nh_global_idx, &__kha); \
+            if (__kha) { \
+              double __d = tk_graph_distance((graph), (uid), __nh_uid, (q_w), (e_w), (i_w)); \
+              if (__d == DBL_MAX) __d = (double)__hood->a[__j].p / __denom; \
+              if (tk_dvec_push((distances), __d) != 0) { (error_var) = true; break; } \
+            } \
+          } \
+        } \
+      } \
+    } else if ((hbi_hoods) && (hood_idx) < (int64_t)(hbi_hoods)->n) { \
+      tk_pvec_t *__hood = (hbi_hoods)->a[hood_idx]; \
+      double __denom = (features_hbi) ? (double)(features_hbi) : 1.0; \
+      for (uint64_t __j = 0; __j < __hood->m; __j++) { \
+        int64_t __nh_idx = __hood->a[__j].i; \
+        if (__nh_idx >= 0 && __nh_idx < (int64_t)(uids_hoods)->n) { \
+          int64_t __nh_uid = (uids_hoods)->a[__nh_idx]; \
+          uint32_t __n_khi = tk_iumap_get((uids_idx), __nh_uid); \
+          if (__n_khi != tk_iumap_end((uids_idx))) { \
+            int64_t __nh_global_idx = tk_iumap_val((uids_idx), __n_khi); \
+            int __kha; \
+            tk_iuset_put((seen), __nh_global_idx, &__kha); \
+            if (__kha) { \
+              double __d = tk_graph_distance((graph), (uid), __nh_uid, (q_w), (e_w), (i_w)); \
+              if (__d == DBL_MAX) __d = (double)__hood->a[__j].p / __denom; \
+              if (tk_dvec_push((distances), __d) != 0) { (error_var) = true; break; } \
+            } \
+          } \
+        } \
       } \
     } \
   } while(0)
@@ -292,428 +388,6 @@ static inline double tk_graph_weight (
   return sim;
 }
 
-static inline void tk_graph_worker (void *dp, int sig)
-{
-  tk_graph_stage_t stage = (tk_graph_stage_t) sig;
-  tk_graph_thread_t *data = (tk_graph_thread_t *) dp;
-
-  switch (stage) {
-
-    case TK_GRAPH_SIGMA: {
-      tk_graph_t *graph = data->graph;
-      tk_dvec_t *distances = tk_dvec_create(0, 0, 0, 0);
-      tk_iuset_t *seen = tk_iuset_create(0, 0);
-      for (uint64_t i = data->ifirst; i <= data->ilast; i++) {
-        tk_dvec_clear(distances);
-        tk_iuset_clear(seen);
-        int64_t uid = graph->uids->a[i];
-        int64_t neighbor_idx;
-        tk_umap_foreach_keys(graph->adj->a[i], neighbor_idx, ({
-          int64_t neighbor_uid = graph->uids->a[neighbor_idx];
-          double d = tk_graph_distance(graph, uid, neighbor_uid, data->q_weights, data->e_weights, data->inter_weights);
-          if (d != DBL_MAX) {
-            if (tk_dvec_push(distances, d) != 0) {
-              atomic_store(&data->has_error, true);
-              return;
-            }
-            int kha;
-            tk_iuset_put(seen, neighbor_idx, &kha);
-          }
-        }))
-        if (graph->uids_idx_hoods) {
-          uint32_t khi = tk_iumap_get(graph->uids_idx_hoods, uid);
-          if (khi != tk_iumap_end(graph->uids_idx_hoods)) {
-            int64_t hood_idx = tk_iumap_val(graph->uids_idx_hoods, khi);
-            if (graph->knn_inv_hoods && hood_idx < (int64_t)graph->knn_inv_hoods->n) {
-              tk_rvec_t *hood = graph->knn_inv_hoods->a[hood_idx];
-              for (uint64_t j = 0; j < hood->m; j++) {
-                int64_t neighbor_hood_idx = hood->a[j].i;
-                if (neighbor_hood_idx >= 0 && neighbor_hood_idx < (int64_t)graph->uids_hoods->n) {
-                  int64_t neighbor_uid = graph->uids_hoods->a[neighbor_hood_idx];
-                  uint32_t n_khi = tk_iumap_get(graph->uids_idx, neighbor_uid);
-                  if (n_khi != tk_iumap_end(graph->uids_idx)) {
-                    int64_t neighbor_global_idx = tk_iumap_val(graph->uids_idx, n_khi);
-                    int kha;
-                    uint32_t s_khi = tk_iuset_put(seen, neighbor_global_idx, &kha);
-                    (void)s_khi;
-                    if (kha) {
-                      double d = tk_graph_distance(graph, uid, neighbor_uid, data->q_weights, data->e_weights, data->inter_weights);
-                      if (d == DBL_MAX)
-                        d = hood->a[j].d;
-                      if (tk_dvec_push(distances, d) != 0) {
-                        atomic_store(&data->has_error, true);
-                        return;
-                      }
-                    }
-                  }
-                }
-              }
-            } else if (graph->knn_ann_hoods && hood_idx < (int64_t)graph->knn_ann_hoods->n) {
-              tk_pvec_t *hood = graph->knn_ann_hoods->a[hood_idx];
-              double denom = graph->knn_ann->features ? (double)graph->knn_ann->features : 1.0;
-              for (uint64_t j = 0; j < hood->m; j++) {
-                int64_t neighbor_hood_idx = hood->a[j].i;
-                if (neighbor_hood_idx >= 0 && neighbor_hood_idx < (int64_t)graph->uids_hoods->n) {
-                  int64_t neighbor_uid = graph->uids_hoods->a[neighbor_hood_idx];
-                  uint32_t n_khi = tk_iumap_get(graph->uids_idx, neighbor_uid);
-                  if (n_khi != tk_iumap_end(graph->uids_idx)) {
-                    int64_t neighbor_global_idx = tk_iumap_val(graph->uids_idx, n_khi);
-                    int kha;
-                    uint32_t s_khi = tk_iuset_put(seen, neighbor_global_idx, &kha);
-                    (void)s_khi;
-                    if (kha) {
-                      double d = tk_graph_distance(graph, uid, neighbor_uid, data->q_weights, data->e_weights, data->inter_weights);
-                      if (d == DBL_MAX)
-                        d = (double)hood->a[j].p / denom;
-                      if (tk_dvec_push(distances, d) != 0) {
-                        atomic_store(&data->has_error, true);
-                        return;
-                      }
-                    }
-                  }
-                }
-              }
-            } else if (graph->knn_hbi_hoods && hood_idx < (int64_t)graph->knn_hbi_hoods->n) {
-              tk_pvec_t *hood = graph->knn_hbi_hoods->a[hood_idx];
-              double denom = graph->knn_hbi->features ? (double)graph->knn_hbi->features : 1.0;
-              for (uint64_t j = 0; j < hood->m; j++) {
-                int64_t neighbor_hood_idx = hood->a[j].i;
-                if (neighbor_hood_idx >= 0 && neighbor_hood_idx < (int64_t)graph->uids_hoods->n) {
-                  int64_t neighbor_uid = graph->uids_hoods->a[neighbor_hood_idx];
-                  uint32_t n_khi = tk_iumap_get(graph->uids_idx, neighbor_uid);
-                  if (n_khi != tk_iumap_end(graph->uids_idx)) {
-                    int64_t neighbor_global_idx = tk_iumap_val(graph->uids_idx, n_khi);
-                    int kha;
-                    uint32_t s_khi = tk_iuset_put(seen, neighbor_global_idx, &kha);
-                    (void)s_khi;
-                    if (kha) {
-                      double d = tk_graph_distance(graph, uid, neighbor_uid, data->q_weights, data->e_weights, data->inter_weights);
-                      if (d == DBL_MAX)
-                        d = (double)hood->a[j].p / denom;
-                      if (tk_dvec_push(distances, d) != 0) {
-                        atomic_store(&data->has_error, true);
-                        return;
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-        double sigma = 1.0;
-        if (distances->n > 0) {
-          tk_dvec_asc(distances, 0, distances->n);
-          uint64_t k = (graph->sigma_k > 0) ? (uint64_t)graph->sigma_k : distances->n;
-          if (k > distances->n)
-            k = distances->n;
-          sigma = distances->a[k - 1];
-        }
-        graph->sigmas->a[i] = sigma * graph->sigma_scale;
-      }
-      tk_dvec_destroy(distances);
-      tk_iuset_destroy(seen);
-      break;
-    }
-
-    case TK_GRAPH_REWEIGHT: {
-      tk_graph_t *graph = data->graph;
-      const double eps = graph->weight_eps;
-      for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i++) {
-        int64_t u = graph->uids->a[i];
-        int64_t neighbor_idx;
-        tk_umap_foreach_keys(graph->adj->a[i], neighbor_idx, ({
-          int64_t v = graph->uids->a[neighbor_idx];
-          if (u < v) {
-            tk_edge_t edge_key = tk_edge(u, v, 0);
-            uint32_t k = tk_euset_get(graph->pairs, edge_key);
-            if (k != tk_euset_end(graph->pairs)) {
-              double stored_weight = kh_key(graph->pairs, k).w;
-              double d = 1.0 - stored_weight;
-              if (d < 0.0) d = 0.0;
-              if (d > 1.0) d = 1.0;
-              double si = (i >= 0 && (uint64_t) i < graph->sigmas->n) ? graph->sigmas->a[i] : eps;
-              double sj = (neighbor_idx >= 0 && (uint64_t) neighbor_idx < graph->sigmas->n) ? graph->sigmas->a[neighbor_idx] : eps;
-              if (si <= 0.0) si = eps;
-              if (sj <= 0.0) sj = eps;
-              double s = sqrt(si * sj);
-              double new_weight;
-              if (s > 0.0) {
-                double s2 = s * s;
-                new_weight = exp(-0.5 * (d * d) / s2);
-              } else {
-                new_weight = 1.0 - d;
-              }
-              if (new_weight < eps) new_weight = eps;
-              if (new_weight > 1.0) new_weight = 1.0;
-              kh_key(graph->pairs, k).w = new_weight;
-            }
-          }
-        }))
-      }
-      break;
-    }
-
-    case TK_GRAPH_STAR_HOODS: {
-      for (uint64_t idx = data->ifirst; idx <= data->ilast; idx++) {
-        int64_t id = data->task.star.ids->a[idx];
-        #define _tk_graph_process_hood(hood) \
-          do { \
-            for (uint64_t j = 0; j < (hood)->n; j++) { \
-              int64_t idxnbr = (hood)->a[j].i; \
-              if (idxnbr >= 0 && idxnbr < (int64_t) data->task.star.ids->n) { \
-                int64_t nbr = data->task.star.ids->a[idxnbr]; \
-                if (tk_pvec_push(data->task.star.local_pairs, tk_pair(id, nbr)) != 0) { \
-                  atomic_store(&data->has_error, true); \
-                  return; \
-                } \
-              } \
-            } \
-          } while(0)
-        if (data->task.star.inv_hoods != NULL)
-          _tk_graph_process_hood(data->task.star.inv_hoods->a[idx]);
-        else if (data->task.star.ann_hoods != NULL)
-          _tk_graph_process_hood(data->task.star.ann_hoods->a[idx]);
-        else if (data->task.star.hbi_hoods != NULL)
-          _tk_graph_process_hood(data->task.star.hbi_hoods->a[idx]);
-        #undef _tk_graph_process_hood
-      }
-      break;
-    }
-
-    case TK_GRAPH_GEN_RANDOM_PAIRS: {
-      tk_ivec_t *ids = data->task.random.ids;
-      uint64_t edges_per_node = data->task.random.edges_per_node;
-      uint64_t n = ids->n;
-      for (uint64_t i = data->ifirst; i <= data->ilast && i < n; i++) {
-        int64_t id1 = ids->a[i];
-        for (uint64_t e = 0; e < edges_per_node; e++) {
-          int64_t id2 = -1;
-          uint64_t idx2 = tk_fast_random() % n;
-          if (idx2 == i)
-            idx2 = (idx2 + 1) % n;
-          id2 = ids->a[idx2];
-          if (id2 >= 0 && id2 != id1) {
-            if (tk_pvec_push(data->task.random.local_pairs, tk_pair(id1, id2)) != 0) {
-              atomic_store(&data->has_error, true);
-              return;
-            }
-          }
-        }
-      }
-      break;
-    }
-
-    case TK_GRAPH_GEN_MULTICLASS_POS: {
-      for (uint64_t class_idx = data->ifirst; class_idx <= data->ilast && class_idx < data->task.multiclass.n_classes; class_idx++) {
-        tk_ivec_t *class_ids = data->task.multiclass.class_ids[class_idx];
-        tk_ivec_t *anchors = data->task.multiclass.anchors[class_idx];
-        if (!class_ids || !anchors)
-          continue;
-        for (uint64_t i = 0; i < class_ids->n; i++) {
-          int64_t id = class_ids->a[i];
-          for (uint64_t j = 0; j < anchors->n; j++) {
-            int64_t anchor = anchors->a[j];
-            if (id == anchor)
-              continue;
-            if (data->task.multiclass.index && data->task.multiclass.eps_pos > 0.0) {
-              double dist = tk_inv_distance(
-                data->task.multiclass.index, id, anchor,
-                data->task.multiclass.cmp,
-                data->task.multiclass.cmp_alpha,
-                data->task.multiclass.cmp_beta,
-                data->q_weights,
-                data->e_weights,
-                data->inter_weights);
-              if (dist > data->task.multiclass.eps_pos)
-                continue;
-            }
-            int64_t a = id < anchor ? id : anchor;
-            int64_t b = id < anchor ? anchor : id;
-            if (tk_pvec_push(data->task.multiclass.local_pos, tk_pair(a, b)) != 0) {
-              atomic_store(&data->has_error, true);
-              return;
-            }
-          }
-        }
-      }
-      break;
-    }
-
-    case TK_GRAPH_GEN_MULTICLASS_NEG: {
-      for (uint64_t class_idx = data->ifirst; class_idx <= data->ilast && class_idx < data->task.multiclass.n_classes; class_idx++) {
-        tk_ivec_t *class_ids = data->task.multiclass.class_ids[class_idx];
-        if (!class_ids)
-          continue;
-        for (uint64_t i = 0; i < class_ids->n; i++) {
-          int64_t id = class_ids->a[i];
-          for (uint64_t n = 0; n < data->task.multiclass.n_anchors_neg; n++) {
-            uint64_t tries = 0;
-            uint64_t max_tries = 100;
-            int64_t other_id = -1;
-            while (tries < max_tries) {
-              uint64_t other_class = tk_fast_random() % data->task.multiclass.n_classes;
-              if (other_class == class_idx) {
-                tries++;
-                continue;
-              }
-              tk_ivec_t *other_class_ids = data->task.multiclass.class_ids[other_class];
-              if (!other_class_ids || other_class_ids->n == 0) {
-                tries++;
-                continue;
-              }
-              uint64_t other_idx = tk_fast_random() % other_class_ids->n;
-              other_id = other_class_ids->a[other_idx];
-              if (data->task.multiclass.index && data->task.multiclass.eps_neg > 0.0) {
-                double dist = tk_inv_distance(
-                  data->task.multiclass.index, id, other_id,
-                  data->task.multiclass.cmp,
-                  data->task.multiclass.cmp_alpha,
-                  data->task.multiclass.cmp_beta,
-                  data->q_weights,
-                  data->e_weights,
-                  data->inter_weights);
-                if (dist < data->task.multiclass.eps_neg) {
-                  tries++;
-                  continue;
-                }
-              }
-              break;
-            }
-            if (other_id >= 0 && tries < max_tries) {
-              int64_t a = id < other_id ? id : other_id;
-              int64_t b = id < other_id ? other_id : id;
-              if (tk_pvec_push(data->task.multiclass.local_neg, tk_pair(a, b)) != 0) {
-                atomic_store(&data->has_error, true);
-                return;
-              }
-            }
-          }
-        }
-      }
-      break;
-    }
-
-    case TK_GRAPH_ANCHORS: {
-      tk_inv_t *inv = data->task.anchors.categories;
-      uint64_t category_anchors = data->task.anchors.category_anchors;
-      uint64_t feature_start = data->task.anchors.feature_start;
-      uint64_t feature_end = data->task.anchors.feature_end;
-      int64_t *rank_features = data->task.anchors.rank_features ? data->task.anchors.rank_features->a : NULL;
-      int64_t max_rank = (int64_t) inv->n_ranks - 1;
-      tk_rvec_t *knn_heap = data->task.anchors.knn_heap;
-      tk_ivec_t *anchors = data->task.anchors.anchors;
-      tk_graph_t *graph = data->graph;
-      double category_knn_decay = graph->category_knn_decay;
-      double category_knn = graph->category_knn;
-      double category_cmp = graph->category_cmp;
-      double category_alpha = graph->category_alpha;
-      double category_beta = graph->category_beta;
-      tk_pvec_t *local_pairs = data->task.anchors.local_pairs;
-      for (uint64_t fi = feature_start; fi <= feature_end; fi++) {
-        int64_t f = rank_features == NULL ? (int64_t) fi : rank_features[fi];
-        tk_ivec_t *postings = inv->postings->a[f];
-        if (!postings || postings->n == 0)
-          continue;
-        int64_t rank = inv->ranks ? inv->ranks->a[f] : 0;
-        int64_t effective_rank = (category_knn_decay < 0.0) ? (max_rank - rank) : rank;
-        double knn_weight = exp(-(double)effective_rank * fabs(category_knn_decay));
-        uint64_t n_anchors = (uint64_t) category_anchors;
-        uint64_t n_wanted = category_knn > 0 ? category_knn : n_anchors;
-        uint64_t k_nearest = (uint64_t) ceil((double) n_wanted * knn_weight);
-        tk_ivec_clear(anchors);
-        for (uint64_t i = 0; i < postings->n; i++) {
-          int64_t sid = postings->a[i];
-          uint32_t khi = tk_iumap_get(inv->sid_uid, sid);
-          if (khi != tk_iumap_end(inv->sid_uid)) {
-            int64_t uid = tk_iumap_val(inv->sid_uid, khi);
-            if (tk_ivec_push(anchors, uid) != 0) {
-              atomic_store(&data->has_error, true);
-              return;
-            }
-          }
-        }
-        if (anchors->n == 0)
-          continue;
-        tk_ivec_shuffle(anchors);
-        for (uint64_t i = 0; i < anchors->n; i++) {
-          int64_t u = anchors->a[i];
-          tk_rvec_clear(knn_heap);
-          for (uint64_t j = 0; j < anchors->n && j < n_anchors; j ++) {
-            if (i == j) continue;
-            int64_t v = anchors->a[j];
-            double dist = tk_inv_distance(inv, u, v, category_cmp, category_alpha, category_beta, data->q_weights, data->e_weights, data->inter_weights);
-            tk_rvec_hmin(knn_heap, k_nearest, tk_rank(v, dist));
-          }
-          for (uint64_t k = 0; k < knn_heap->n; k++) {
-            int64_t v = knn_heap->a[k].i;
-            if (tk_pvec_push(local_pairs, tk_pair(u, v)) != 0) {
-              atomic_store(&data->has_error, true);
-              return;
-            }
-          }
-        }
-      }
-      break;
-    }
-
-    case TK_GRAPH_COMPUTE_WEIGHTS: {
-      tk_graph_t *graph = data->graph;
-      for (int64_t i = (int64_t) data->ifirst; i <= (int64_t) data->ilast; i++) {
-        int64_t u = graph->uids->a[i];
-        int64_t neighbor_idx;
-        tk_umap_foreach_keys(graph->adj->a[i], neighbor_idx, ({
-          int64_t v = graph->uids->a[neighbor_idx];
-          if (u < v) {
-            tk_edge_t edge_key = tk_edge(u, v, 0);
-            uint32_t k = tk_euset_get(graph->pairs, edge_key);
-            if (k != tk_euset_end(graph->pairs)) {
-              double d = tk_graph_distance(graph, u, v, data->q_weights, data->e_weights, data->inter_weights);
-              double w = tk_graph_weight(graph, d, i, neighbor_idx);
-              kh_key(graph->pairs, k).w = w;
-            }
-          }
-        }))
-      }
-      break;
-    }
-
-    case TK_GRAPH_ADJ_HOODS: {
-      for (uint64_t i = data->ifirst; i <= data->ilast && i < data->task.adj_hoods.ids->n; i++) {
-        int64_t start = data->task.adj_hoods.offsets->a[i];
-        int64_t end = data->task.adj_hoods.offsets->a[i + 1];
-        int64_t idx = start;
-
-        if (data->task.adj_hoods.ann_hoods && i < data->task.adj_hoods.ann_hoods->n) {
-          tk_pvec_t *hood = data->task.adj_hoods.ann_hoods->a[i];
-          for (uint64_t j = 0; j < hood->n && idx < end; j++) {
-            data->task.adj_hoods.neighbors->a[idx] = hood->a[j].i;
-            double distance = (double)hood->a[j].p / data->task.adj_hoods.features;
-            data->task.adj_hoods.weights->a[idx] = 1.0 - distance;
-            idx++;
-          }
-        } else if (data->task.adj_hoods.hbi_hoods && i < data->task.adj_hoods.hbi_hoods->n) {
-          tk_pvec_t *hood = data->task.adj_hoods.hbi_hoods->a[i];
-          for (uint64_t j = 0; j < hood->n && idx < end; j++) {
-            data->task.adj_hoods.neighbors->a[idx] = hood->a[j].i;
-            double distance = (double)hood->a[j].p / data->task.adj_hoods.features;
-            data->task.adj_hoods.weights->a[idx] = 1.0 - distance;
-            idx++;
-          }
-        } else if (data->task.adj_hoods.inv_hoods && i < data->task.adj_hoods.inv_hoods->n) {
-          tk_rvec_t *hood = data->task.adj_hoods.inv_hoods->a[i];
-          for (uint64_t j = 0; j < hood->n && idx < end; j++) {
-            data->task.adj_hoods.neighbors->a[idx] = hood->a[j].i;
-            data->task.adj_hoods.weights->a[idx] = 1.0 - hood->a[j].d;
-            idx++;
-          }
-        }
-      }
-      break;
-    }
-
-  }
-}
 
 static inline double tk_graph_get_weight (
   tk_graph_t *graph,
@@ -873,7 +547,6 @@ static inline int tk_graph_star_hoods (
   tk_inv_hoods_t *inv_hoods,
   tk_ann_hoods_t *ann_hoods,
   tk_hbi_hoods_t *hbi_hoods,
-  unsigned int n_threads,
   tk_pvec_t **out_pairs
 ) {
   if (ids->n == 0) {
@@ -881,72 +554,68 @@ static inline int tk_graph_star_hoods (
     return *out_pairs ? 0 : -1;
   }
 
-  tk_graph_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_graph_thread_t));
-  if (!threads)
-    return -1;
-  memset(threads, 0, n_threads * sizeof(tk_graph_thread_t));
-
-  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_graph_worker);
-  if (!pool) {
-    free(threads);
-    return -1;
-  }
-
-  for (unsigned int i = 0; i < n_threads; i++) {
-    threads[i].task.star.local_pairs = tk_pvec_create(NULL, 0, 0, 0);
-    if (!threads[i].task.star.local_pairs) {
-      for (unsigned int j = 0; j < i; j++)
-        tk_pvec_destroy(threads[j].task.star.local_pairs);
-      tk_threads_destroy(pool);
-      free(threads);
-      return -1;
-    }
-    threads[i].task.star.ids = ids;
-    threads[i].task.star.inv_hoods = inv_hoods;
-    threads[i].task.star.ann_hoods = ann_hoods;
-    threads[i].task.star.hbi_hoods = hbi_hoods;
-    pool->threads[i].data = &threads[i];
-    tk_thread_range(i, n_threads, ids->n, &threads[i].ifirst, &threads[i].ilast);
-    atomic_init(&threads[i].has_error, false);
-  }
-
-  tk_threads_signal(pool, TK_GRAPH_STAR_HOODS, 0);
-
-  for (unsigned int i = 0; i < n_threads; i++) {
-    if (atomic_load(&threads[i].has_error)) {
-      for (unsigned int j = 0; j < n_threads; j++)
-        tk_pvec_destroy(threads[j].task.star.local_pairs);
-      tk_threads_destroy(pool);
-      free(threads);
-      return -1;
-    }
-  }
-
   *out_pairs = tk_pvec_create(NULL, 0, 0, 0);
-  if (!*out_pairs) {
-    for (unsigned int i = 0; i < n_threads; i++)
-      tk_pvec_destroy(threads[i].task.star.local_pairs);
-    tk_threads_destroy(pool);
-    free(threads);
+  if (!*out_pairs)
+    return -1;
+
+  bool has_error = false;
+
+  #pragma omp parallel reduction(||:has_error)
+  {
+    tk_pvec_t *local_pairs = tk_pvec_create(NULL, 0, 0, 0);
+    if (!local_pairs) {
+      has_error = true;
+    } else {
+      #pragma omp for schedule(static)
+      for (uint64_t idx = 0; idx < ids->n; idx++) {
+        if (has_error) continue;
+
+        int64_t id = ids->a[idx];
+        #define _tk_graph_process_hood(hood) \
+          do { \
+            for (uint64_t j = 0; j < (hood)->n; j++) { \
+              int64_t idxnbr = (hood)->a[j].i; \
+              if (idxnbr >= 0 && idxnbr < (int64_t)ids->n) { \
+                int64_t nbr = ids->a[idxnbr]; \
+                if (tk_pvec_push(local_pairs, tk_pair(id, nbr)) != 0) { \
+                  has_error = true; \
+                  break; \
+                } \
+              } \
+            } \
+          } while(0)
+
+        if (inv_hoods != NULL)
+          _tk_graph_process_hood(inv_hoods->a[idx]);
+        else if (ann_hoods != NULL)
+          _tk_graph_process_hood(ann_hoods->a[idx]);
+        else if (hbi_hoods != NULL)
+          _tk_graph_process_hood(hbi_hoods->a[idx]);
+
+        #undef _tk_graph_process_hood
+      }
+
+      // Merge local results into global
+      #pragma omp critical
+      {
+        for (uint64_t j = 0; j < local_pairs->n; j++) {
+          if (tk_pvec_push(*out_pairs, local_pairs->a[j]) != 0) {
+            has_error = true;
+            break;
+          }
+        }
+      }
+
+      tk_pvec_destroy(local_pairs);
+    }
+  }
+
+  if (has_error) {
+    tk_pvec_destroy(*out_pairs);
+    *out_pairs = NULL;
     return -1;
   }
 
-  for (unsigned int i = 0; i < n_threads; i++) {
-    for (uint64_t j = 0; j < threads[i].task.star.local_pairs->n; j++) {
-      if (tk_pvec_push(*out_pairs, threads[i].task.star.local_pairs->a[j]) != 0) {
-        tk_pvec_destroy(*out_pairs);
-        for (unsigned int k = 0; k < n_threads; k++)
-          tk_pvec_destroy(threads[k].task.star.local_pairs);
-        tk_threads_destroy(pool);
-        free(threads);
-        return -1;
-      }
-    }
-    tk_pvec_destroy(threads[i].task.star.local_pairs);
-  }
-
-  tk_threads_destroy(pool);
-  free(threads);
   return 0;
 }
 
@@ -1085,7 +754,6 @@ static inline int tk_graph_random_pairs (
   tk_ivec_t *ids,
   tk_ivec_t *labels,
   uint64_t edges_per_node,
-  unsigned int n_threads,
   tk_pvec_t **out_pairs
 ) {
   *out_pairs = NULL;
@@ -1124,72 +792,57 @@ static inline int tk_graph_random_pairs (
     }
   }
 
-  tk_graph_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_graph_thread_t));
-  if (!threads) goto cleanup_random;
-  memset(threads, 0, n_threads * sizeof(tk_graph_thread_t));
-
-  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_graph_worker);
-  if (!pool) {
-    free(threads);
-    goto cleanup_random;
-  }
-
-  for (unsigned int i = 0; i < n_threads; i++) {
-    threads[i].task.random.local_pairs = tk_pvec_create(NULL, 0, 0, 0);
-    if (!threads[i].task.random.local_pairs) {
-      for (unsigned int j = 0; j < i; j++)
-        tk_pvec_destroy(threads[j].task.random.local_pairs);
-      tk_threads_destroy(pool);
-      free(threads);
-      goto cleanup_random;
-    }
-    threads[i].task.random.ids = ids;
-    threads[i].task.random.labels = labels;
-    threads[i].task.random.edges_per_node = edges_per_node;
-    threads[i].task.random.ids_by_label = ids_by_label;
-    threads[i].task.random.n_labels = n_labels;
-    pool->threads[i].data = &threads[i];
-    tk_thread_range(i, n_threads, ids->n, &threads[i].ifirst, &threads[i].ilast);
-    atomic_init(&threads[i].has_error, false);
-  }
-
-  tk_threads_signal(pool, TK_GRAPH_GEN_RANDOM_PAIRS, 0);
-
-  for (unsigned int i = 0; i < n_threads; i++) {
-    if (atomic_load(&threads[i].has_error)) {
-      for (unsigned int j = 0; j < n_threads; j++)
-        tk_pvec_destroy(threads[j].task.random.local_pairs);
-      tk_threads_destroy(pool);
-      free(threads);
-      goto cleanup_random;
-    }
-  }
-
   *out_pairs = tk_pvec_create(NULL, 0, 0, 0);
-  if (!*out_pairs) {
-    for (unsigned int i = 0; i < n_threads; i++)
-      tk_pvec_destroy(threads[i].task.random.local_pairs);
-    tk_threads_destroy(pool);
-    free(threads);
+  if (!*out_pairs)
+    goto cleanup_random;
+
+  bool has_error = false;
+
+  #pragma omp parallel reduction(||:has_error)
+  {
+    tk_pvec_t *local_pairs = tk_pvec_create(NULL, 0, 0, 0);
+    if (!local_pairs) {
+      has_error = true;
+    } else {
+      #pragma omp for schedule(static)
+      for (uint64_t i = 0; i < ids->n; i++) {
+        if (has_error) continue;
+
+        int64_t id1 = ids->a[i];
+        for (uint64_t e = 0; e < edges_per_node; e++) {
+          int64_t id2 = -1;
+          uint64_t idx2 = tk_fast_random() % ids->n;
+          if (idx2 == i)
+            idx2 = (idx2 + 1) % ids->n;
+          id2 = ids->a[idx2];
+          if (id2 >= 0 && id2 != id1) {
+            if (tk_pvec_push(local_pairs, tk_pair(id1, id2)) != 0) {
+              has_error = true;
+              break;
+            }
+          }
+        }
+      }
+
+      #pragma omp critical
+      {
+        for (uint64_t j = 0; j < local_pairs->n; j++) {
+          if (tk_pvec_push(*out_pairs, local_pairs->a[j]) != 0) {
+            has_error = true;
+            break;
+          }
+        }
+      }
+
+      tk_pvec_destroy(local_pairs);
+    }
+  }
+
+  if (has_error) {
+    tk_pvec_destroy(*out_pairs);
+    *out_pairs = NULL;
     goto cleanup_random;
   }
-
-  for (unsigned int i = 0; i < n_threads; i++) {
-    for (uint64_t j = 0; j < threads[i].task.random.local_pairs->n; j++) {
-      if (tk_pvec_push(*out_pairs, threads[i].task.random.local_pairs->a[j]) != 0) {
-        tk_pvec_destroy(*out_pairs);
-        for (unsigned int k = 0; k < n_threads; k++)
-          tk_pvec_destroy(threads[k].task.random.local_pairs);
-        tk_threads_destroy(pool);
-        free(threads);
-        goto cleanup_random;
-      }
-    }
-    tk_pvec_destroy(threads[i].task.random.local_pairs);
-  }
-
-  tk_threads_destroy(pool);
-  free(threads);
 
   tk_pvec_xasc(*out_pairs, 0, (*out_pairs)->n);
 
@@ -1223,7 +876,6 @@ static inline int tk_graph_multiclass_pairs (
   tk_inv_t *index,
   double eps_pos,
   double eps_neg,
-  unsigned int n_threads,
   tk_pvec_t **out_pos,
   tk_pvec_t **out_neg
 ) {
@@ -1304,160 +956,184 @@ static inline int tk_graph_multiclass_pairs (
   if (!*out_pos) goto cleanup_multiclass;
 
   if (n_anchors_pos > 0) {
-    tk_graph_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_graph_thread_t));
-    if (!threads) goto cleanup_multiclass;
-    memset(threads, 0, n_threads * sizeof(tk_graph_thread_t));
-
-    tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_graph_worker);
-    if (!pool) {
-      free(threads);
-      goto cleanup_multiclass;
-    }
-
     bool need_buffers = index && index->ranks && index->n_ranks > 1;
+    bool has_error = false;
 
-    for (unsigned int i = 0; i < n_threads; i++) {
-      threads[i].task.multiclass.local_pos = tk_pvec_create(NULL, 0, 0, 0);
-      if (!threads[i].task.multiclass.local_pos) {
-        for (unsigned int j = 0; j < i; j++)
-          tk_pvec_destroy(threads[j].task.multiclass.local_pos);
-        tk_threads_destroy(pool);
-        free(threads);
-        goto cleanup_multiclass;
-      }
+    #pragma omp parallel reduction(||:has_error)
+    {
+      tk_pvec_t *local_pos = tk_pvec_create(NULL, 0, 0, 0);
+      tk_dvec_t *q_weights = NULL;
+      tk_dvec_t *e_weights = NULL;
+      tk_dvec_t *inter_weights = NULL;
 
-      threads[i].q_weights = NULL;
-      threads[i].e_weights = NULL;
-      threads[i].inter_weights = NULL;
-      if (need_buffers) {
-        threads[i].q_weights = tk_dvec_create(NULL, 0, 0, 0);
-        threads[i].e_weights = tk_dvec_create(NULL, 0, 0, 0);
-        threads[i].inter_weights = tk_dvec_create(NULL, 0, 0, 0);
-      }
-
-      threads[i].task.multiclass.class_ids = class_ids;
-      threads[i].task.multiclass.anchors = anchors;
-      threads[i].task.multiclass.n_classes = n_classes;
-      threads[i].task.multiclass.index = index;
-      threads[i].task.multiclass.eps_pos = eps_pos;
-      threads[i].task.multiclass.cmp = TK_IVEC_JACCARD;
-      threads[i].task.multiclass.cmp_alpha = 0.0;
-      threads[i].task.multiclass.cmp_beta = 0.0;
-      pool->threads[i].data = &threads[i];
-      tk_thread_range(i, n_threads, n_classes, &threads[i].ifirst, &threads[i].ilast);
-      atomic_init(&threads[i].has_error, false);
-    }
-
-    tk_threads_signal(pool, TK_GRAPH_GEN_MULTICLASS_POS, 0);
-
-    for (unsigned int i = 0; i < n_threads; i++) {
-      if (atomic_load(&threads[i].has_error)) {
-        for (unsigned int j = 0; j < n_threads; j++)
-          tk_pvec_destroy(threads[j].task.multiclass.local_pos);
-        tk_threads_destroy(pool);
-        free(threads);
-        goto cleanup_multiclass;
-      }
-    }
-
-    for (unsigned int i = 0; i < n_threads; i++) {
-      for (uint64_t j = 0; j < threads[i].task.multiclass.local_pos->n; j++) {
-        if (tk_pvec_push(*out_pos, threads[i].task.multiclass.local_pos->a[j]) != 0) {
-          for (unsigned int k = i; k < n_threads; k++)
-            tk_pvec_destroy(threads[k].task.multiclass.local_pos);
-          tk_threads_destroy(pool);
-          free(threads);
-          goto cleanup_multiclass;
+      if (!local_pos) {
+        has_error = true;
+      } else {
+        if (need_buffers) {
+          q_weights = tk_dvec_create(NULL, 0, 0, 0);
+          e_weights = tk_dvec_create(NULL, 0, 0, 0);
+          inter_weights = tk_dvec_create(NULL, 0, 0, 0);
+          if (!q_weights || !e_weights || !inter_weights) {
+            has_error = true;
+          }
         }
+
+        if (!has_error) {
+          #pragma omp for schedule(static)
+          for (uint64_t class_idx = 0; class_idx < n_classes; class_idx++) {
+            if (has_error) continue;
+
+            tk_ivec_t *class_ids_c = class_ids[class_idx];
+            tk_ivec_t *anchors_c = anchors[class_idx];
+            if (!class_ids_c || !anchors_c)
+              continue;
+
+            for (uint64_t i = 0; i < class_ids_c->n; i++) {
+              int64_t id = class_ids_c->a[i];
+              for (uint64_t j = 0; j < anchors_c->n; j++) {
+                int64_t anchor = anchors_c->a[j];
+                if (id == anchor)
+                  continue;
+                if (index && eps_pos > 0.0) {
+                  double dist = tk_inv_distance(
+                    index, id, anchor,
+                    TK_IVEC_JACCARD, 0.0, 0.0,
+                    q_weights, e_weights, inter_weights);
+                  if (dist > eps_pos)
+                    continue;
+                }
+                int64_t a = id < anchor ? id : anchor;
+                int64_t b = id < anchor ? anchor : id;
+                if (tk_pvec_push(local_pos, tk_pair(a, b)) != 0) {
+                  has_error = true;
+                  break;
+                }
+              }
+              if (has_error) break;
+            }
+          }
+
+          #pragma omp critical
+          {
+            for (uint64_t j = 0; j < local_pos->n; j++) {
+              if (tk_pvec_push(*out_pos, local_pos->a[j]) != 0) {
+                has_error = true;
+                break;
+              }
+            }
+          }
+        }
+
+        if (local_pos) tk_pvec_destroy(local_pos);
+        if (q_weights) tk_dvec_destroy(q_weights);
+        if (e_weights) tk_dvec_destroy(e_weights);
+        if (inter_weights) tk_dvec_destroy(inter_weights);
       }
-      tk_pvec_destroy(threads[i].task.multiclass.local_pos);
-      if (threads[i].q_weights) tk_dvec_destroy(threads[i].q_weights);
-      if (threads[i].e_weights) tk_dvec_destroy(threads[i].e_weights);
-      if (threads[i].inter_weights) tk_dvec_destroy(threads[i].inter_weights);
     }
 
-    tk_threads_destroy(pool);
-    free(threads);
+    if (has_error)
+      goto cleanup_multiclass;
   }
 
   *out_neg = tk_pvec_create(NULL, 0, 0, 0);
   if (!*out_neg) goto cleanup_multiclass;
 
   if (n_anchors_neg > 0) {
-    tk_graph_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_graph_thread_t));
-    if (!threads) goto cleanup_multiclass;
-    memset(threads, 0, n_threads * sizeof(tk_graph_thread_t));
-
-    tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_graph_worker);
-    if (!pool) {
-      free(threads);
-      goto cleanup_multiclass;
-    }
-
     bool need_buffers_neg = index && index->ranks && index->n_ranks > 1;
+    bool has_error = false;
 
-    for (unsigned int i = 0; i < n_threads; i++) {
-      threads[i].task.multiclass.local_neg = tk_pvec_create(NULL, 0, 0, 0);
-      if (!threads[i].task.multiclass.local_neg) {
-        for (unsigned int j = 0; j < i; j++)
-          tk_pvec_destroy(threads[j].task.multiclass.local_neg);
-        tk_threads_destroy(pool);
-        free(threads);
-        goto cleanup_multiclass;
-      }
+    #pragma omp parallel reduction(||:has_error)
+    {
+      tk_pvec_t *local_neg = tk_pvec_create(NULL, 0, 0, 0);
+      tk_dvec_t *q_weights = NULL;
+      tk_dvec_t *e_weights = NULL;
+      tk_dvec_t *inter_weights = NULL;
 
-      threads[i].q_weights = NULL;
-      threads[i].e_weights = NULL;
-      threads[i].inter_weights = NULL;
-      if (need_buffers_neg) {
-        threads[i].q_weights = tk_dvec_create(NULL, 0, 0, 0);
-        threads[i].e_weights = tk_dvec_create(NULL, 0, 0, 0);
-        threads[i].inter_weights = tk_dvec_create(NULL, 0, 0, 0);
-      }
-
-      threads[i].task.multiclass.class_ids = class_ids;
-      threads[i].task.multiclass.n_classes = n_classes;
-      threads[i].task.multiclass.index = index;
-      threads[i].task.multiclass.eps_neg = eps_neg;
-      threads[i].task.multiclass.n_anchors_neg = n_anchors_neg;
-      threads[i].task.multiclass.cmp = TK_IVEC_JACCARD;
-      threads[i].task.multiclass.cmp_alpha = 0.0;
-      threads[i].task.multiclass.cmp_beta = 0.0;
-      pool->threads[i].data = &threads[i];
-      tk_thread_range(i, n_threads, n_classes, &threads[i].ifirst, &threads[i].ilast);
-      atomic_init(&threads[i].has_error, false);
-    }
-
-    tk_threads_signal(pool, TK_GRAPH_GEN_MULTICLASS_NEG, 0);
-
-    for (unsigned int i = 0; i < n_threads; i++) {
-      if (atomic_load(&threads[i].has_error)) {
-        for (unsigned int j = 0; j < n_threads; j++)
-          tk_pvec_destroy(threads[j].task.multiclass.local_neg);
-        tk_threads_destroy(pool);
-        free(threads);
-        goto cleanup_multiclass;
-      }
-    }
-
-    for (unsigned int i = 0; i < n_threads; i++) {
-      for (uint64_t j = 0; j < threads[i].task.multiclass.local_neg->n; j++) {
-        if (tk_pvec_push(*out_neg, threads[i].task.multiclass.local_neg->a[j]) != 0) {
-          for (unsigned int k = i; k < n_threads; k++)
-            tk_pvec_destroy(threads[k].task.multiclass.local_neg);
-          tk_threads_destroy(pool);
-          free(threads);
-          goto cleanup_multiclass;
+      if (!local_neg) {
+        has_error = true;
+      } else {
+        if (need_buffers_neg) {
+          q_weights = tk_dvec_create(NULL, 0, 0, 0);
+          e_weights = tk_dvec_create(NULL, 0, 0, 0);
+          inter_weights = tk_dvec_create(NULL, 0, 0, 0);
+          if (!q_weights || !e_weights || !inter_weights) {
+            has_error = true;
+          }
         }
+
+        if (!has_error) {
+          #pragma omp for schedule(static)
+          for (uint64_t class_idx = 0; class_idx < n_classes; class_idx++) {
+            if (has_error) continue;
+
+            tk_ivec_t *class_ids_c = class_ids[class_idx];
+            if (!class_ids_c)
+              continue;
+
+            for (uint64_t i = 0; i < class_ids_c->n; i++) {
+              int64_t id = class_ids_c->a[i];
+              for (uint64_t n = 0; n < n_anchors_neg; n++) {
+                uint64_t tries = 0;
+                uint64_t max_tries = 100;
+                int64_t other_id = -1;
+                while (tries < max_tries) {
+                  uint64_t other_class = tk_fast_random() % n_classes;
+                  if (other_class == class_idx) {
+                    tries++;
+                    continue;
+                  }
+                  tk_ivec_t *other_class_ids = class_ids[other_class];
+                  if (!other_class_ids || other_class_ids->n == 0) {
+                    tries++;
+                    continue;
+                  }
+                  uint64_t other_idx = tk_fast_random() % other_class_ids->n;
+                  other_id = other_class_ids->a[other_idx];
+                  if (index && eps_neg > 0.0) {
+                    double dist = tk_inv_distance(
+                      index, id, other_id,
+                      TK_IVEC_JACCARD, 0.0, 0.0,
+                      q_weights, e_weights, inter_weights);
+                    if (dist < eps_neg) {
+                      tries++;
+                      continue;
+                    }
+                  }
+                  break;
+                }
+                if (other_id >= 0 && tries < max_tries) {
+                  int64_t a = id < other_id ? id : other_id;
+                  int64_t b = id < other_id ? other_id : id;
+                  if (tk_pvec_push(local_neg, tk_pair(a, b)) != 0) {
+                    has_error = true;
+                    break;
+                  }
+                }
+              }
+              if (has_error) break;
+            }
+          }
+
+          #pragma omp critical
+          {
+            for (uint64_t j = 0; j < local_neg->n; j++) {
+              if (tk_pvec_push(*out_neg, local_neg->a[j]) != 0) {
+                has_error = true;
+                break;
+              }
+            }
+          }
+        }
+
+        if (local_neg) tk_pvec_destroy(local_neg);
+        if (q_weights) tk_dvec_destroy(q_weights);
+        if (e_weights) tk_dvec_destroy(e_weights);
+        if (inter_weights) tk_dvec_destroy(inter_weights);
       }
-      tk_pvec_destroy(threads[i].task.multiclass.local_neg);
-      if (threads[i].q_weights) tk_dvec_destroy(threads[i].q_weights);
-      if (threads[i].e_weights) tk_dvec_destroy(threads[i].e_weights);
-      if (threads[i].inter_weights) tk_dvec_destroy(threads[i].inter_weights);
     }
 
-    tk_threads_destroy(pool);
-    free(threads);
+    if (has_error)
+      goto cleanup_multiclass;
   }
 
   tk_pvec_xasc(*out_pos, 0, (*out_pos)->n);
@@ -1674,7 +1350,6 @@ static inline int tk_graph_adj_hoods(
   tk_ann_hoods_t *ann_hoods,
   tk_hbi_hoods_t *hbi_hoods,
   uint64_t features,
-  unsigned int n_threads,
   tk_ivec_t **offsets_out,
   tk_ivec_t **neighbors_out,
   tk_dvec_t **weights_out
@@ -1703,12 +1378,7 @@ static inline int tk_graph_adj_hoods(
   (*offsets_out)->a[0] = 0;
   for (uint64_t i = 0; i < n_queries; i++) {
     uint64_t n_neighbors = 0;
-    if (ann_hoods && i < ann_hoods->n)
-      n_neighbors = ann_hoods->a[i]->n;
-    else if (hbi_hoods && i < hbi_hoods->n)
-      n_neighbors = hbi_hoods->a[i]->n;
-    else if (inv_hoods && i < inv_hoods->n)
-      n_neighbors = inv_hoods->a[i]->n;
+    TK_GRAPH_HOOD_SIZE(inv_hoods, ann_hoods, hbi_hoods, i, n_neighbors);
     (*offsets_out)->a[i + 1] = (*offsets_out)->a[i] + (int64_t)n_neighbors;
   }
   (*offsets_out)->n = n_queries + 1;
@@ -1724,67 +1394,16 @@ static inline int tk_graph_adj_hoods(
   }
   (*neighbors_out)->n = total;
   (*weights_out)->n = total;
-
-  tk_graph_thread_t *threads = tk_malloc(L, n_threads * sizeof(tk_graph_thread_t));
-  if (!threads) {
-    tk_ivec_destroy(*neighbors_out);
-    tk_dvec_destroy(*weights_out);
-    tk_ivec_destroy(*offsets_out);
-    return -1;
-  }
-  memset(threads, 0, n_threads * sizeof(tk_graph_thread_t));
-
-  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_graph_worker);
-  if (!pool) {
-    free(threads);
-    tk_ivec_destroy(*neighbors_out);
-    tk_dvec_destroy(*weights_out);
-    tk_ivec_destroy(*offsets_out);
-    return -1;
-  }
-
-  for (unsigned int i = 0; i < n_threads; i++) {
-    threads[i].task.adj_hoods.ids = ids;
-    threads[i].task.adj_hoods.inv_hoods = inv_hoods;
-    threads[i].task.adj_hoods.ann_hoods = ann_hoods;
-    threads[i].task.adj_hoods.hbi_hoods = hbi_hoods;
-    threads[i].task.adj_hoods.features = features;
-    threads[i].task.adj_hoods.offsets = *offsets_out;
-    threads[i].task.adj_hoods.neighbors = *neighbors_out;
-    threads[i].task.adj_hoods.weights = *weights_out;
-    pool->threads[i].data = &threads[i];
-    tk_thread_range(i, n_threads, n_queries, &threads[i].ifirst, &threads[i].ilast);
-    atomic_init(&threads[i].has_error, false);
-  }
-
-  tk_threads_signal(pool, TK_GRAPH_ADJ_HOODS, 0);
-
-  bool has_error = false;
-  for (unsigned int i = 0; i < n_threads; i++) {
-    if (atomic_load(&threads[i].has_error)) {
-      has_error = true;
-      break;
-    }
-  }
-
-  tk_threads_destroy(pool);
-  free(threads);
-
-  if (has_error) {
-    tk_ivec_destroy(*neighbors_out);
-    tk_dvec_destroy(*weights_out);
-    tk_ivec_destroy(*offsets_out);
-    return -1;
+  #pragma omp parallel for schedule(static)
+  for (uint64_t i = 0; i < n_queries; i++) {
+    int64_t start = (*offsets_out)->a[i];
+    int64_t end = (*offsets_out)->a[i + 1];
+    int64_t idx = start;
+    TK_GRAPH_HOOD_TO_CSR(inv_hoods, ann_hoods, hbi_hoods, i, features,
+                         (*neighbors_out)->a, (*weights_out)->a, idx, end);
   }
 
   return 0;
 }
-
-static inline void tk_graph_rcm_reorder(
-  tk_ivec_t *ids,
-  tk_ivec_t *offset,
-  tk_ivec_t *neighbors,
-  tk_dvec_t *weights
-);
 
 #endif

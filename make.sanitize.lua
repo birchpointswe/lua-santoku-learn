@@ -9,15 +9,18 @@ local ld_preload = env.var("LD_PRELOAD", nil)
 local asan = sys.sh({ "sh", "-c", str.format([[
   %s -fsanitize=address -xc /dev/null -### 2>&1 | grep -o '"[^"]*asan[^"]*\.so[^"]*"' | head -1 | tr -d '"'
 ]], env.var("CC", "clang")) })()
+local ok
 if not asan or asan == "" then
   local cc = env.var("CC", "clang")
   local arch = sys.sh({ "uname", "-m" })()
-  asan = sys.sh({ "sh", "-c", str.format([[
-    resdir=$(%s -print-resource-dir 2>/dev/null) && find "$resdir" -name 'libclang_rt.asan*%s*.so' 2>/dev/null | head -1 || \
-    libdir=$(%s -print-file-name=libasan.so 2>/dev/null) && [ -f "$libdir" ] && echo "$libdir"
-  ]], cc, arch, cc) })()
+  ok, asan = pcall(function ()
+    return sys.sh({ "sh", "-c", str.format([[
+      resdir=$(%s -print-resource-dir 2>/dev/null) && find "$resdir" -name 'libclang_rt.asan*%s*.so' -o -name 'libasan.*.so' 2>/dev/null | head -1 || \
+      libdir=$(%s -print-file-name=libasan.so 2>/dev/null) && [ -f "$libdir" ] && echo "$libdir"
+    ]], cc, arch, cc) })()
+  end)
 end
-err.assert(asan and asan ~= "", "Couldn't determine asan lib to preload")
+err.assert(ok and asan and asan ~= "", "Couldn't determine asan lib to preload")
 if ld_preload then
   ld_preload = ld_preload .. ":" .. asan
 else

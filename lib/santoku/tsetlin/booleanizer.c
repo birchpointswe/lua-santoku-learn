@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <omp.h>
 #include <santoku/lua/utils.h>
 #include <santoku/iuset.h>
 #include <santoku/ivec.h>
@@ -358,14 +359,30 @@ static inline void tk_booleanizer_add_thresholds (
   } else if (B->n_thresholds == 0) {
     // Otso
     double best_gap = -1.0, thr = 0.0;
-    for (uint64_t i = 1; i < value_vec->n; i ++) {
-      double gap = value_vec->a[i] - value_vec->a[i - 1];
-      if (gap > best_gap) {
-        best_gap = gap;
-        thr = 0.5 * (value_vec->a[i] + value_vec->a[i - 1]);
+    uint64_t best_idx = 0;
+    #pragma omp parallel
+    {
+      double local_best_gap = -1.0;
+      uint64_t local_best_idx = 0;
+      #pragma omp for
+      for (uint64_t i = 1; i < value_vec->n; i ++) {
+        double gap = value_vec->a[i] - value_vec->a[i - 1];
+        if (gap > local_best_gap) {
+          local_best_gap = gap;
+          local_best_idx = i;
+        }
+      }
+      #pragma omp critical
+      {
+        if (local_best_gap > best_gap) {
+          best_gap = local_best_gap;
+          best_idx = local_best_idx;
+        }
       }
     }
-    if (best_gap <= 0.0) {
+    if (best_gap > 0.0) {
+      thr = 0.5 * (value_vec->a[best_idx] + value_vec->a[best_idx - 1]);
+    } else {
       double sum = 0.0;
       for (uint64_t i = 0; i < value_vec->n; i ++)
         sum += value_vec->a[i];
@@ -687,8 +704,6 @@ static inline void tk_booleanizer_destroy (
   if (B->destroyed)
     return;
   tk_booleanizer_shrink(B);
-  // String keys in string_features and cat_bits_string.v are now userdata
-  // managed by ephemerons, so we don't free them manually
   memset(B, 0, sizeof(*B));
   B->finalized = false;
   B->destroyed = true;

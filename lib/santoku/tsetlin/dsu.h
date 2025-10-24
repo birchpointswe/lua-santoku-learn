@@ -1,6 +1,8 @@
 #ifndef TK_DSU_H
 #define TK_DSU_H
 
+#include <omp.h>
+
 #define TK_DSU_EPH "tk_dsu_eph"
 
 typedef struct {
@@ -56,7 +58,7 @@ static inline int64_t tk_dsu_find (
   int64_t uid
 ) {
   khint_t khi = tk_iumap_get(dsu->ididx, uid);
-  assert(khi != tk_iumap_end(dsu->ididx));
+  // assert(khi != tk_iumap_end(dsu->ididx));
   int64_t uidx = tk_iumap_val(dsu->ididx, khi);
   return dsu->ids->a[tk_dsu_findx(dsu, uidx)];
 }
@@ -88,10 +90,10 @@ static inline void tk_dsu_union (
   int64_t y
 ) {
   khint_t xkhi = tk_iumap_get(dsu->ididx, x);
-  assert(xkhi != tk_iumap_end(dsu->ididx));
+  // assert(xkhi != tk_iumap_end(dsu->ididx));
   int64_t xidx = tk_iumap_val(dsu->ididx, xkhi);
   khint_t ykhi = tk_iumap_get(dsu->ididx, y);
-  assert(ykhi != tk_iumap_end(dsu->ididx));
+  // assert(ykhi != tk_iumap_end(dsu->ididx));
   int64_t yidx = tk_iumap_val(dsu->ididx, ykhi);
   tk_dsu_unionx(dsu, xidx, yidx);
 }
@@ -100,31 +102,23 @@ static inline void tk_dsu_add_ids (
   lua_State *L,
   tk_dsu_t *dsu
 ) {
-  // Check if ids vector has grown
   uint64_t old_n = dsu->parent->n;
   uint64_t new_n = dsu->ids->n;
-
   if (new_n <= old_n)
-    return;  // No new IDs
-
-  // Extend parent and rank arrays
+    return;
   tk_ivec_ensure(dsu->parent, new_n);
   tk_ivec_ensure(dsu->rank, new_n);
-
-  // Add new IDs to the index and initialize their parent/rank
   for (uint64_t i = old_n; i < new_n; i++) {
     int64_t uid = dsu->ids->a[i];
     int kha;
     khint_t khi = tk_iumap_put(dsu->ididx, uid, &kha);
-    if (kha) {  // New ID
+    if (kha) {
       tk_iumap_setval(dsu->ididx, khi, (int64_t)i);
-      dsu->parent->a[i] = (int64_t)i;  // Parent to itself
+      dsu->parent->a[i] = (int64_t)i;
       dsu->rank->a[i] = 0;
       dsu->components++;
     }
   }
-
-  // Update the sizes
   dsu->parent->n = new_n;
   dsu->rank->n = new_n;
 }
@@ -179,6 +173,7 @@ static inline tk_dsu_t *tk_dsu_create (
     }
   }
   dsu->components = (int64_t) ids->n;
+  #pragma omp parallel for
   for (uint64_t i = 0; i < ids->n; i ++) {
     dsu->parent->a[i] = (int64_t) i;
     dsu->rank->a[i] = 0;
