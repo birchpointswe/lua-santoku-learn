@@ -1,7 +1,6 @@
 #ifndef TK_INV_H
 #define TK_INV_H
 
-// #include <assert.h>
 #include <math.h>
 #include <float.h>
 #include <string.h>
@@ -32,8 +31,8 @@ typedef tk_rvec_t * tk_inv_hood_t;
 #include <santoku/vec/tpl.h>
 
 typedef enum {
-  TK_INV_FIND,    // Lookup only, return -1 if not found
-  TK_INV_REPLACE  // Create new sid, replace old mappings if uid exists
+  TK_INV_FIND,
+  TK_INV_REPLACE
 } tk_inv_uid_mode_t;
 
 typedef struct tk_inv_s {
@@ -67,7 +66,6 @@ typedef struct tk_inv_s {
   int workspace_threads;
 } tk_inv_t;
 
-// Forward declarations for helper functions used in parallelized code
 static inline double tk_inv_w (tk_dvec_t *W, int64_t fid);
 static inline double tk_inv_similarity (
   tk_inv_t *inv,
@@ -123,7 +121,7 @@ static inline void tk_inv_shrink (
   if (inv->destroyed)
     return;
 
-  int Ii = 1; // Object is at position 1 when called from Lua
+  int Ii = 1;
   if (inv->next_sid > (int64_t) (SIZE_MAX / sizeof(int64_t)))
     tk_error(L, "inv_shrink: allocation size overflow", ENOMEM);
   int64_t *old_to_new = tk_malloc(L, (size_t) inv->next_sid * sizeof(int64_t));
@@ -329,8 +327,7 @@ static inline int64_t tk_inv_uid_sid (
       return -1;
     else
       return tk_iumap_val(inv->uid_sid, khi);
-  } else { // TK_INV_REPLACE
-    // Remove old mappings if uid exists
+  } else {
     khi = tk_iumap_get(inv->uid_sid, uid);
     if (khi != tk_iumap_end(inv->uid_sid)) {
       int64_t old_sid = tk_iumap_val(inv->uid_sid, khi);
@@ -339,7 +336,6 @@ static inline int64_t tk_inv_uid_sid (
       if (khi != tk_iumap_end(inv->sid_uid))
         tk_iumap_del(inv->sid_uid, khi);
     }
-    // Create new mappings
     int64_t sid = (int64_t) (inv->next_sid ++);
     khi = tk_iumap_put(inv->uid_sid, uid, &kha);
     tk_iumap_setval(inv->uid_sid, khi, sid);
@@ -494,7 +490,7 @@ static inline void tk_inv_mutualize (
   if (inv->destroyed)
     return;
 
-  tk_ivec_t *sids = tk_ivec_create(L, uids->n, 0, 0); // sids
+  tk_ivec_t *sids = tk_ivec_create(L, uids->n, 0, 0);
   for (uint64_t i = 0; i < uids->n; i ++)
     sids->a[i] = tk_inv_uid_sid(inv, uids->a[i], TK_INV_FIND);
   tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
@@ -535,7 +531,6 @@ static inline void tk_inv_mutualize (
     for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
       tk_rvec_t *uhood = hoods->a[i];
       uint64_t orig_n = uhood->n;
-      // assert(uhood->m >= orig_n);
       if (orig_n == 0) {
         uhood->n = 0;
         uhood->m = 0;
@@ -547,7 +542,6 @@ static inline void tk_inv_mutualize (
       while (left <= right) {
         int64_t iv = uhood->a[left].i;
         double d = uhood->a[left].d;
-        // assert(iv >= 0 && (uint64_t) iv < hoods->n);
         tk_dumap_t *vset = hoods_sets[iv];
         khi = tk_dumap_get(vset, i);
         if (khi != tk_dumap_end(vset)) {
@@ -568,11 +562,10 @@ static inline void tk_inv_mutualize (
       }
       uhood->n = left;
       uhood->m = orig_n;
-      // assert(uhood->n <= uhood->m);
       for (uint64_t qi = uhood->n; qi < uhood->m; qi ++) {
         int64_t iv = uhood->a[qi].i;
         double d_forward = uhood->a[qi].d;
-        double d_reverse = d_forward;  // fallback
+        double d_reverse = d_forward;
         tk_dumap_t *vset = hoods_sets[iv];
         khi = tk_dumap_get(vset, i);
         if (khi != tk_dumap_end(vset)) {
@@ -834,7 +827,7 @@ static inline void tk_inv_neighborhoods (
   tk_inv_ensure_workspace(L, inv, inv->uid_sid ? tk_iumap_size(inv->uid_sid) : 0);
 
   tk_ivec_t *sids = tk_iumap_values(L, inv->uid_sid);
-  tk_ivec_asc(sids, 0, sids->n); // sort for cache locality
+  tk_ivec_asc(sids, 0, sids->n);
   tk_ivec_t *uids = tk_ivec_create(L, sids->n, 0, 0);
   for (uint64_t i = 0; i < sids->n; i ++)
     uids->a[i] = tk_inv_sid_uid(inv, sids->a[i]);
@@ -962,7 +955,6 @@ static inline void tk_inv_neighborhoods (
       for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
         tk_rvec_t *uhood = hoods->a[i];
         uint64_t orig_n = uhood->n;
-        // assert(uhood->m >= orig_n);
         if (orig_n == 0) {
           uhood->n = 0;
           uhood->m = 0;
@@ -974,7 +966,6 @@ static inline void tk_inv_neighborhoods (
         while (left <= right) {
           int64_t iv = uhood->a[left].i;
           double d = uhood->a[left].d;
-          // assert(iv >= 0 && (uint64_t) iv < hoods->n);
           tk_dumap_t *vset = hoods_sets[iv];
           khi = tk_dumap_get(vset, i);
           if (khi != tk_dumap_end(vset)) {
@@ -995,7 +986,6 @@ static inline void tk_inv_neighborhoods (
         }
         uhood->n = left;
         uhood->m = orig_n;
-        // assert(uhood->n <= uhood->m);
         for (uint64_t qi = uhood->n; qi < uhood->m; qi ++) {
           int64_t iv = uhood->a[qi].i;
           double d_forward = uhood->a[qi].d;
@@ -1127,15 +1117,15 @@ static inline void tk_inv_neighborhoods (
     new_uids->a = old_uids_data;
     new_hoods->a = old_hoods_data;
 
-    lua_remove(L, -2); // remove new_uids (frees old uids data)
-    lua_remove(L, -1); // remove new_hoods (frees old hoods data)
+    lua_remove(L, -2);
+    lua_remove(L, -1);
 
     free(old_to_new);
   }
 
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = uids;
-  if (sids) lua_remove(L, -3); // sids
+  if (sids) lua_remove(L, -3);
 }
 
 static inline void tk_inv_neighborhoods_by_ids (
@@ -1287,7 +1277,6 @@ static inline void tk_inv_neighborhoods_by_ids (
       for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
         tk_rvec_t *uhood = hoods->a[i];
         uint64_t orig_n = uhood->n;
-        // assert(uhood->m >= orig_n);
         if (orig_n == 0) {
           uhood->n = 0;
           uhood->m = 0;
@@ -1299,7 +1288,6 @@ static inline void tk_inv_neighborhoods_by_ids (
         while (left <= right) {
           int64_t iv = uhood->a[left].i;
           double d = uhood->a[left].d;
-          // assert(iv >= 0 && (uint64_t) iv < hoods->n);
           tk_dumap_t *vset = hoods_sets[iv];
           khi = tk_dumap_get(vset, i);
           if (khi != tk_dumap_end(vset)) {
@@ -1320,7 +1308,6 @@ static inline void tk_inv_neighborhoods_by_ids (
         }
         uhood->n = left;
         uhood->m = orig_n;
-        // assert(uhood->n <= uhood->m);
         for (uint64_t qi = uhood->n; qi < uhood->m; qi ++) {
           int64_t iv = uhood->a[qi].i;
           double d_forward = uhood->a[qi].d;
@@ -1458,7 +1445,7 @@ static inline void tk_inv_neighborhoods_by_ids (
 
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = uids;
-  lua_remove(L, -3); // sids
+  lua_remove(L, -3);
 }
 
 static inline void tk_inv_neighborhoods_by_vecs (
@@ -1502,7 +1489,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
   }
   for (uint64_t i = 1; i <= n_queries; i ++)
     inv->tmp_query_offsets->a[i] += inv->tmp_query_offsets->a[i - 1];
-  tk_ivec_t *write_offsets = tk_ivec_create(L, n_queries, 0, 0); // offsets
+  tk_ivec_t *write_offsets = tk_ivec_create(L, n_queries, 0, 0);
   tk_ivec_copy(write_offsets, inv->tmp_query_offsets, 0, (int64_t) n_queries, 0);
   for (uint64_t i = 0; i < query_vecs->n; i ++) {
     int64_t encoded = query_vecs->a[i];
@@ -1514,8 +1501,8 @@ static inline void tk_inv_neighborhoods_by_vecs (
     }
   }
   inv->tmp_query_features->n = (size_t) inv->tmp_query_offsets->a[n_queries];
-  lua_pop(L, 1); //
-  tk_inv_hoods_t *hoods = tk_inv_hoods_create(L, n_queries, 0, 0); // hoods
+  lua_pop(L, 1);
+  tk_inv_hoods_t *hoods = tk_inv_hoods_create(L, n_queries, 0, 0);
   hoods->n = n_queries;
   for (uint64_t i = 0; i < hoods->n; i ++) {
     hoods->a[i] = tk_rvec_create(L, knn, 0, 0);
@@ -1673,7 +1660,6 @@ static inline void tk_inv_neighborhoods_by_vecs (
       for (uint64_t j = 0; j < hood->n; j++) {
         int64_t uid = hood->a[j].i;
         khint_t k = tk_iumap_get(uid_to_idx, uid);
-        // assert(k != tk_iumap_end(uid_to_idx));
         int64_t idx = tk_iumap_val(uid_to_idx, k);
         hood->a[j].i = idx;
       }
@@ -1705,7 +1691,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
       }
     }
     tk_iumap_t *idx_remap = tk_iumap_create(0, 0);
-    tk_ivec_t *new_uids = tk_ivec_create(L, (uint64_t) tk_iuset_size(kept_uids), 0, 0); // uids hoods new_uids
+    tk_ivec_t *new_uids = tk_ivec_create(L, (uint64_t) tk_iuset_size(kept_uids), 0, 0);
     int64_t new_idx = 0;
     int64_t uid;
     tk_umap_foreach_keys(kept_uids, uid, ({
@@ -1722,7 +1708,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
     }));
     new_uids->n = (uint64_t) new_idx;
     tk_iuset_destroy(kept_uids);
-    tk_inv_hoods_t *new_hoods = tk_inv_hoods_create(L, (uint64_t) keeper_count, 0, 0); // uids hoods new_uids new_hoods
+    tk_inv_hoods_t *new_hoods = tk_inv_hoods_create(L, (uint64_t) keeper_count, 0, 0);
     new_hoods->n = (uint64_t) keeper_count;
     uint64_t write_pos = 0;
     for (uint64_t i = 0; i < hoods->n; i ++) {
@@ -1748,7 +1734,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
     hoods->m = (uint64_t) keeper_count;
     new_uids->a = old_uids_data;
     new_hoods->a = old_hoods_data;
-    lua_pop(L, 2); // uids hoods
+    lua_pop(L, 2);
     tk_iumap_destroy(idx_remap);
   }
 
@@ -1765,7 +1751,6 @@ static inline double tk_inv_w (
 ) {
   if (W == NULL)
     return 1.0;
-  // assert(fid >= 0 && fid < (int64_t) W->n);
   return W->a[fid];
 }
 
@@ -1913,7 +1898,7 @@ static inline double tk_inv_similarity (
       double denom = sa + sb;
       return (denom == 0.0) ? 0.0 : (2.0 * inter_w) / denom;
     }
-    default: { // fallback to Jaccard
+    default: {
       double u = sa + sb - inter_w;
       return (u == 0.0) ? 0.0 : inter_w / u;
     }
@@ -2086,7 +2071,7 @@ static inline double tk_inv_similarity_rank_filtered (
       rank_sim = (denom == 0.0) ? 0.0 : (2.0 * filtered_inter_w) / denom;
       break;
     }
-    default: { // fallback to Jaccard
+    default: {
       double u = filtered_sa + filtered_sb - filtered_inter_w;
       rank_sim = (u == 0.0) ? 0.0 : filtered_inter_w / u;
       break;
@@ -2131,10 +2116,10 @@ static inline double tk_inv_distance_extend (
         double decay_ratio = last_rank_weight / second_last;
         obs_rank_weight = last_rank_weight * decay_ratio;
       } else {
-        obs_rank_weight = last_rank_weight * 0.5; // Default decay
+        obs_rank_weight = last_rank_weight * 0.5;
       }
     } else {
-      obs_rank_weight = last_rank_weight * 0.5; // Default decay for single rank
+      obs_rank_weight = last_rank_weight * 0.5;
     }
   }
   double total_weight = categories->total_rank_weight + obs_rank_weight;
@@ -2347,7 +2332,7 @@ static inline int tk_inv_get_lua (lua_State *L)
   int64_t uid = -1;
   tk_ivec_t *uids = NULL;
   tk_ivec_t *out = tk_ivec_peekopt(L, 3);
-  out = out == NULL ? tk_ivec_create(L, 0, 0, 0) : out; // out
+  out = out == NULL ? tk_ivec_create(L, 0, 0, 0) : out;
   bool append = tk_lua_optboolean(L, 4, "append", false);
   if (!append)
     tk_ivec_clear(out);
@@ -2733,7 +2718,6 @@ static inline tk_inv_t *tk_inv_create (
     inv->rank_weights->a[r] = weight;
     inv->total_rank_weight += weight;
   }
-  // Initialize rank_sizes to count features per rank
   inv->rank_sizes = tk_ivec_create(L, inv->n_ranks, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
@@ -2750,7 +2734,6 @@ static inline tk_inv_t *tk_inv_create (
       }
     }
   } else {
-    // If no ranks provided, all features are in rank 0
     inv->rank_sizes->a[0] = (int64_t) features;
   }
   inv->uid_sid = tk_iumap_create(L, 0);
