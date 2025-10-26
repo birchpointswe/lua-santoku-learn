@@ -1,7 +1,6 @@
 #ifndef TK_INV_H
 #define TK_INV_H
 
-
 #include <math.h>
 #include <float.h>
 #include <string.h>
@@ -66,7 +65,6 @@ typedef struct tk_inv_s {
   tk_ivec_t **thread_touched;
   int workspace_threads;
 } tk_inv_t;
-
 
 static inline double tk_inv_w (tk_dvec_t *W, int64_t fid);
 static inline double tk_inv_similarity (
@@ -330,7 +328,6 @@ static inline int64_t tk_inv_uid_sid (
     else
       return tk_iumap_val(inv->uid_sid, khi);
   } else {
-
     khi = tk_iumap_get(inv->uid_sid, uid);
     if (khi != tk_iumap_end(inv->uid_sid)) {
       int64_t old_sid = tk_iumap_val(inv->uid_sid, khi);
@@ -339,7 +336,6 @@ static inline int64_t tk_inv_uid_sid (
       if (khi != tk_iumap_end(inv->sid_uid))
         tk_iumap_del(inv->sid_uid, khi);
     }
-
     int64_t sid = (int64_t) (inv->next_sid ++);
     khi = tk_iumap_put(inv->uid_sid, uid, &kha);
     tk_iumap_setval(inv->uid_sid, khi, sid);
@@ -535,7 +531,6 @@ static inline void tk_inv_mutualize (
     for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
       tk_rvec_t *uhood = hoods->a[i];
       uint64_t orig_n = uhood->n;
-
       if (orig_n == 0) {
         uhood->n = 0;
         uhood->m = 0;
@@ -547,7 +542,6 @@ static inline void tk_inv_mutualize (
       while (left <= right) {
         int64_t iv = uhood->a[left].i;
         double d = uhood->a[left].d;
-
         tk_dumap_t *vset = hoods_sets[iv];
         khi = tk_dumap_get(vset, i);
         if (khi != tk_dumap_end(vset)) {
@@ -568,7 +562,6 @@ static inline void tk_inv_mutualize (
       }
       uhood->n = left;
       uhood->m = orig_n;
-
       for (uint64_t qi = uhood->n; qi < uhood->m; qi ++) {
         int64_t iv = uhood->a[qi].i;
         double d_forward = uhood->a[qi].d;
@@ -962,7 +955,6 @@ static inline void tk_inv_neighborhoods (
       for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
         tk_rvec_t *uhood = hoods->a[i];
         uint64_t orig_n = uhood->n;
-
         if (orig_n == 0) {
           uhood->n = 0;
           uhood->m = 0;
@@ -974,7 +966,6 @@ static inline void tk_inv_neighborhoods (
         while (left <= right) {
           int64_t iv = uhood->a[left].i;
           double d = uhood->a[left].d;
-
           tk_dumap_t *vset = hoods_sets[iv];
           khi = tk_dumap_get(vset, i);
           if (khi != tk_dumap_end(vset)) {
@@ -995,7 +986,6 @@ static inline void tk_inv_neighborhoods (
         }
         uhood->n = left;
         uhood->m = orig_n;
-
         for (uint64_t qi = uhood->n; qi < uhood->m; qi ++) {
           int64_t iv = uhood->a[qi].i;
           double d_forward = uhood->a[qi].d;
@@ -1287,7 +1277,6 @@ static inline void tk_inv_neighborhoods_by_ids (
       for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
         tk_rvec_t *uhood = hoods->a[i];
         uint64_t orig_n = uhood->n;
-
         if (orig_n == 0) {
           uhood->n = 0;
           uhood->m = 0;
@@ -1299,7 +1288,6 @@ static inline void tk_inv_neighborhoods_by_ids (
         while (left <= right) {
           int64_t iv = uhood->a[left].i;
           double d = uhood->a[left].d;
-
           tk_dumap_t *vset = hoods_sets[iv];
           khi = tk_dumap_get(vset, i);
           if (khi != tk_dumap_end(vset)) {
@@ -1320,7 +1308,6 @@ static inline void tk_inv_neighborhoods_by_ids (
         }
         uhood->n = left;
         uhood->m = orig_n;
-
         for (uint64_t qi = uhood->n; qi < uhood->m; qi ++) {
           int64_t iv = uhood->a[qi].i;
           double d_forward = uhood->a[qi].d;
@@ -1673,7 +1660,6 @@ static inline void tk_inv_neighborhoods_by_vecs (
       for (uint64_t j = 0; j < hood->n; j++) {
         int64_t uid = hood->a[j].i;
         khint_t k = tk_iumap_get(uid_to_idx, uid);
-
         int64_t idx = tk_iumap_val(uid_to_idx, k);
         hood->a[j].i = idx;
       }
@@ -1765,7 +1751,6 @@ static inline double tk_inv_w (
 ) {
   if (W == NULL)
     return 1.0;
-
   return W->a[fid];
 }
 
@@ -2733,7 +2718,6 @@ static inline tk_inv_t *tk_inv_create (
     inv->rank_weights->a[r] = weight;
     inv->total_rank_weight += weight;
   }
-
   inv->rank_sizes = tk_ivec_create(L, inv->n_ranks, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
@@ -2750,7 +2734,6 @@ static inline tk_inv_t *tk_inv_create (
       }
     }
   } else {
-
     inv->rank_sizes->a[0] = (int64_t) features;
   }
   inv->uid_sid = tk_iumap_create(L, 0);

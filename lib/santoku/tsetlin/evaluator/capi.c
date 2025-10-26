@@ -74,6 +74,7 @@ typedef struct {
   uint64_t optimal_k;
   int64_t start_prefix;
   double tolerance;
+  double metric_alpha;
   lua_State *L;
   tk_inv_hoods_t *inv_hoods;
   tk_ann_hoods_t *ann_hoods;
@@ -102,6 +103,7 @@ typedef struct {
   tk_dumap_t **adj_ranks_idx;
   tk_pvec_t *bin_ranks;
   double recon_score;
+  double recon_weight;
   uint64_t nodes_processed;
   tk_dsu_t *dsu;
   tk_cvec_t *is_core;
@@ -180,6 +182,7 @@ static void tk_eval_worker (void *dp, int sig)
 
     case TK_EVAL_GRAPH_RECONSTRUCTION: {
       data->recon_score = 0.0;
+      data->recon_weight = 0.0;
       data->nodes_processed = 0;
       for (uint64_t node_idx = data->wfirst; node_idx <= data->wlast; node_idx++) {
         tk_pvec_clear(data->bin_ranks);
@@ -252,7 +255,14 @@ static void tk_eval_worker (void *dp, int sig)
             corr = 0.0;
             break;
         }
-        data->recon_score += corr;
+        if (state->metric_alpha >= 0.0) {
+          uint64_t n_neighbors = (uint64_t)(end - start);
+          double weight = pow((double)n_neighbors, state->metric_alpha);
+          data->recon_score += corr * weight;
+          data->recon_weight += weight;
+        } else {
+          data->recon_score += corr;
+        }
         data->nodes_processed++;
       }
       break;
@@ -1602,16 +1612,23 @@ static double tk_compute_reconstruction (
   unsigned int n_threads = pool->n_threads;
   for (unsigned int i = 0; i < n_threads; i ++) {
     data[i].recon_score = 0.0;
+    data[i].recon_weight = 0.0;
     data[i].nodes_processed = 0;
   }
   tk_threads_signal(pool, TK_EVAL_GRAPH_RECONSTRUCTION, 0);
   double total = 0.0;
+  double total_weight = 0.0;
   uint64_t total_nodes_processed = 0;
   for (unsigned int i = 0; i < n_threads; i ++) {
     total += data[i].recon_score;
+    total_weight += data[i].recon_weight;
     total_nodes_processed += data[i].nodes_processed;
   }
-  return total_nodes_processed > 0 ? total / (double) total_nodes_processed : 0.0;
+  if (state->metric_alpha >= 0.0) {
+    return total_weight > 0.0 ? total / total_weight : 0.0;
+  } else {
+    return total_nodes_processed > 0 ? total / (double) total_nodes_processed : 0.0;
+  }
 }
 
 static void tm_optimize_bits_prefix_greedy (
@@ -1850,6 +1867,7 @@ static inline int tm_optimize_bits (lua_State *L)
   uint64_t keep_prefix = tk_lua_foptunsigned(L, 1, "optimize_bits", "keep_prefix", 0);
   int64_t start_prefix = tk_lua_foptinteger(L, 1, "optimize_bits", "start_prefix", 0);
   double tolerance = tk_lua_foptnumber(L, 1, "optimize_bits", "tolerance", 1e-12);
+  double metric_alpha = tk_lua_foptnumber(L, 1, "optimize_bits", "metric_alpha", -1.0);
 
   char *metric_str = tk_lua_foptstring(L, 1, "optimize_bits", "metric", "spearman");
   tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
@@ -1876,6 +1894,7 @@ static inline int tm_optimize_bits (lua_State *L)
   state.optimal_k = keep_prefix;
   state.start_prefix = start_prefix;
   state.tolerance = tolerance;
+  state.metric_alpha = metric_alpha;
   state.eval_metric = metric;
   state.L = L;
 

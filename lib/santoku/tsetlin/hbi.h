@@ -1,7 +1,6 @@
 #ifndef TK_HBI_H
 #define TK_HBI_H
 
-
 #include <santoku/iuset.h>
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
@@ -501,7 +500,6 @@ static inline void tk_hbi_mutualize (
   for (uint64_t i = 0; i < uids->n; i ++)
     hoods_sets[i] = tk_iumap_create(0, 0);
 
-
   #pragma omp parallel for schedule(static)
   for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
     int kha;
@@ -514,13 +512,11 @@ static inline void tk_hbi_mutualize (
     }
   }
 
-
   #pragma omp parallel for schedule(static)
   for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
     khint_t khi;
     tk_pvec_t *uhood = hoods->a[i];
     uint64_t orig_n = uhood->n;
-
     if (orig_n == 0) {
       uhood->n = 0;
       uhood->m = 0;
@@ -531,17 +527,14 @@ static inline void tk_hbi_mutualize (
     while (left <= right) {
       int64_t iv = uhood->a[left].i;
       int64_t d = uhood->a[left].p;
-
       tk_iumap_t *vset = hoods_sets[iv];
       khi = tk_iumap_get(vset, i);
       if (khi != tk_iumap_end(vset)) {
-
         int64_t d0 = tk_iumap_val(vset, khi);
         if (d0 < d)
           uhood->a[left].p = d0;
         left ++;
       } else {
-
         if (left != right) {
           tk_pair_t tmp = uhood->a[left];
           uhood->a[left] = uhood->a[right];
@@ -554,7 +547,6 @@ static inline void tk_hbi_mutualize (
     }
     uhood->n = left;
     uhood->m = orig_n;
-
 
     for (uint64_t qi = uhood->n; qi < uhood->m; qi ++) {
       int64_t iv = uhood->a[qi].i;
@@ -591,7 +583,6 @@ static inline void tk_hbi_mutualize (
       }
     }
     if (keeper_count < (int64_t) uids->n) {
-
       #pragma omp parallel for schedule(static)
       for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
         if (hoods->a[i]->n >= min) {
@@ -689,7 +680,6 @@ static inline void tk_hbi_neighborhoods (
     lua_pop(L, 1);
   }
 
-
   #pragma omp parallel for schedule(static)
   for (uint64_t i = 0; i < hoods->n; i ++) {
     tk_pvec_t *hood = hoods->a[i];
@@ -701,7 +691,6 @@ static inline void tk_hbi_neighborhoods (
     tk_hbi_mutualize(L, A, hoods, uids, 0, NULL);
 
   if (sid_idx) tk_iumap_destroy(sid_idx);
-
 
   if (min > 0) {
     int64_t keeper_count = 0;
@@ -721,7 +710,6 @@ static inline void tk_hbi_neighborhoods (
         old_to_new[i] = -1;
       }
     }
-
     #pragma omp parallel for schedule(static)
     for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
       if (hoods->a[i]->n >= min) {
@@ -815,7 +803,6 @@ static inline void tk_hbi_neighborhoods_by_ids (
     lua_pop(L, 1);
   }
 
-
   #pragma omp parallel for schedule(static)
   for (uint64_t i = 0; i < hoods->n; i ++) {
     tk_pvec_t *hood = hoods->a[i];
@@ -827,7 +814,6 @@ static inline void tk_hbi_neighborhoods_by_ids (
     tk_hbi_mutualize(L, A, hoods, uids, 0, NULL);
 
   tk_iumap_destroy(sid_idx);
-
 
   if (min > 0) {
     int64_t keeper_count = 0;
@@ -845,7 +831,6 @@ static inline void tk_hbi_neighborhoods_by_ids (
         old_to_new[i] = new_idx ++;
       else
         old_to_new[i] = -1;
-
     #pragma omp parallel for schedule(static)
     for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
       if (hoods->a[i]->n >= min) {
@@ -927,7 +912,6 @@ static inline void tk_hbi_neighborhoods_by_vecs (
     lua_pop(L, 1);
   }
 
-
   tk_iuset_t **local_uids = NULL;
   tk_iumap_t *uid_to_idx = NULL;
   tk_ivec_t *uids = NULL;
@@ -937,7 +921,6 @@ static inline void tk_hbi_neighborhoods_by_vecs (
     int num_threads = omp_get_num_threads();
     int tid = omp_get_thread_num();
 
-
     #pragma omp for schedule(static) nowait
     for (uint64_t i = 0; i < hoods->n; i ++) {
       tk_pvec_t *hood = hoods->a[i];
@@ -946,7 +929,6 @@ static inline void tk_hbi_neighborhoods_by_vecs (
     }
 
     #pragma omp barrier
-
 
     #pragma omp single
     {
@@ -976,7 +958,6 @@ static inline void tk_hbi_neighborhoods_by_vecs (
 
     #pragma omp barrier
 
-
     #pragma omp single
     {
       uid_to_idx = tk_iumap_create(0, 0);
@@ -994,7 +975,6 @@ static inline void tk_hbi_neighborhoods_by_vecs (
       }
       free(local_uids);
 
-
       uids = tk_ivec_create(L, (uint64_t)next_idx, 0, 0);
       uids->n = (uint64_t)next_idx;
       for (khint_t k = tk_iumap_begin(uid_to_idx); k != tk_iumap_end(uid_to_idx); k++) {
@@ -1007,7 +987,6 @@ static inline void tk_hbi_neighborhoods_by_vecs (
     }
 
     #pragma omp barrier
-
 
     #pragma omp for schedule(static)
     for (uint64_t i = 0; i < hoods->n; i ++) {
@@ -1024,7 +1003,6 @@ static inline void tk_hbi_neighborhoods_by_vecs (
 
   lua_insert(L, -2);
   tk_iumap_destroy(uid_to_idx);
-
 
   if (min > 0) {
     int64_t keeper_count = 0;
@@ -1299,7 +1277,6 @@ static inline int tk_hbi_get_lua (lua_State *L)
       memset(dest_data + old_size, 0, total_bytes - old_size);
     }
   }
-
 
   if (lua_type(L, 2) == LUA_TNUMBER) {
     char *data = tk_hbi_get(A, uid);
