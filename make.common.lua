@@ -1,9 +1,9 @@
 local env = {
   name = "santoku-tsetlin",
-  version = "0.0.159-1",
+  version = "0.0.160-1",
   variable_prefix = "TK_TSETLIN",
   license = "MIT",
-  pub = true,
+  public = true,
   cflags = {
     "-std=gnu11", "-D_GNU_SOURCE", "-Wall", "-Wextra",
     "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow",
