@@ -131,7 +131,6 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
     } \
   } while(0)
 
-// Iterate over neighborhood hoods (inv: tk_rank_t, ann/hbi: tk_pair_t)
 #define TK_GRAPH_FOREACH_HOOD_NEIGHBOR(inv_hoods, ann_hoods, hbi_hoods, hood_idx, uids_hoods, neighbor_idx_var, neighbor_uid_var, body) \
   do { \
     if ((inv_hoods) != NULL && (hood_idx) < (inv_hoods)->n) { \
@@ -164,7 +163,6 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
     } \
   } while(0)
 
-// Get distance from hood element (inv: .d, ann/hbi: .p / features)
 #define TK_GRAPH_HOOD_DISTANCE(inv_hoods, ann_hoods, hbi_hoods, hood_idx, elem_idx, features_ann, features_hbi, dist_var) \
   do { \
     if ((inv_hoods) != NULL && (hood_idx) < (inv_hoods)->n) { \
@@ -176,7 +174,6 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
     } \
   } while(0)
 
-// Get hood size for offset calculation
 #define TK_GRAPH_HOOD_SIZE(inv_hoods, ann_hoods, hbi_hoods, idx, size_var) \
   do { \
     (size_var) = 0; \
@@ -189,7 +186,6 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
     } \
   } while(0)
 
-// Populate CSR from hood (inv: 1-d, ann/hbi: 1-p/features)
 #define TK_GRAPH_HOOD_TO_CSR(inv_hoods, ann_hoods, hbi_hoods, idx, features, neighbors_arr, weights_arr, write_pos, end_pos) \
   do { \
     if ((inv_hoods) && (idx) < (inv_hoods)->n) { \
@@ -218,7 +214,6 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
     } \
   } while(0)
 
-// Call neighborhoods function based on index type
 #define TK_INDEX_NEIGHBORHOODS(inv, ann, hbi, L, k, probe_radius, eps_min, eps_max, min, mutual, cmp, alpha, beta, rank, inv_hoods_out, ann_hoods_out, hbi_hoods_out, uids_out) \
   do { \
     if ((inv) != NULL) { \
@@ -230,7 +225,6 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
     } \
   } while(0)
 
-// Call mutualize function based on index type
 #define TK_INDEX_MUTUALIZE(inv, ann, hbi, L, inv_hoods, ann_hoods, hbi_hoods, uids, min, precomputed) \
   do { \
     if ((inv) != NULL) { \
@@ -242,7 +236,6 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
     } \
   } while(0)
 
-// Sigma computation: iterate hood->m with distance fallback
 #define TK_GRAPH_FOREACH_HOOD_FOR_SIGMA(inv_hoods, ann_hoods, hbi_hoods, features_ann, features_hbi, hood_idx, graph, uid, uids_hoods, uids_idx, seen, distances, q_w, e_w, i_w, error_var) \
   do { \
     if ((inv_hoods) && (hood_idx) < (int64_t)(inv_hoods)->n) { \
@@ -595,7 +588,6 @@ static inline int tk_graph_star_hoods (
         #undef _tk_graph_process_hood
       }
 
-      // Merge local results into global
       #pragma omp critical
       {
         for (uint64_t j = 0; j < local_pairs->n; j++) {
