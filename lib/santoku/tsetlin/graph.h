@@ -118,14 +118,14 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
       char *uset = tk_ann_get(__idx_ann, (u)); \
       char *wset = tk_ann_get(__idx_ann, (v)); \
       if (uset && wset) { \
-        (dist_var) = (double)tk_cvec_bits_hamming((const uint8_t *)uset, (const uint8_t *)wset, \
+        (dist_var) = (double)tk_cvec_bits_hamming_serial((const uint8_t *)uset, (const uint8_t *)wset, \
                                                    __idx_ann->features) / (double)__idx_ann->features; \
       } \
     } else if (__idx_hbi != NULL) { \
       char *uset = tk_hbi_get(__idx_hbi, (u)); \
       char *wset = tk_hbi_get(__idx_hbi, (v)); \
       if (uset && wset) { \
-        (dist_var) = (double)tk_cvec_bits_hamming((const uint8_t *)uset, (const uint8_t *)wset, \
+        (dist_var) = (double)tk_cvec_bits_hamming_serial((const uint8_t *)uset, (const uint8_t *)wset, \
                                                    __idx_hbi->features) / (double)__idx_hbi->features; \
       } \
     } \
