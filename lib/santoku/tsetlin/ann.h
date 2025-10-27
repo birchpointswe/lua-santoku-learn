@@ -4,6 +4,7 @@
 #include <santoku/iuset.h>
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
+#include <santoku/pvec.h>
 #include <santoku/iumap.h>
 #include <santoku/ivec/ext.h>
 #include <santoku/cvec/ext.h>
@@ -243,7 +244,7 @@ static inline double tk_ann_similarity (
   char *v1 = tk_ann_get(A, uid1);
   if (!v0 || !v1)
     return 0.0;
-  uint64_t hamming_dist = tk_cvec_bits_hamming((const uint8_t *)v0, (const uint8_t *)v1, A->features);
+  uint64_t hamming_dist = tk_cvec_bits_hamming_serial((const uint8_t *)v0, (const uint8_t *)v1, A->features);
   return 1.0 - ((double)hamming_dist / (double)A->features);
 }
 
@@ -256,7 +257,7 @@ static inline double tk_ann_distance (
   char *v1 = tk_ann_get(A, uid1);
   if (!v0 || !v1)
     return 1.0;
-  uint64_t hamming_dist = tk_cvec_bits_hamming((const uint8_t *)v0, (const uint8_t *)v1, A->features);
+  uint64_t hamming_dist = tk_cvec_bits_hamming_serial((const uint8_t *)v0, (const uint8_t *)v1, A->features);
   return (double)hamming_dist / (double)A->features;
 }
 
@@ -513,7 +514,7 @@ static inline void tk_ann_mutualize (
         const unsigned char *ubits = (const unsigned char *) tk_ann_sget(A, usid);
         const unsigned char *vbits = (const unsigned char *) tk_ann_sget(A, vsid);
         if (ubits && vbits) {
-          uint64_t dist = tk_cvec_bits_hamming((const uint8_t *)vbits, (const uint8_t *)ubits, A->features);
+          uint64_t dist = tk_cvec_bits_hamming_serial((const uint8_t *)vbits, (const uint8_t *)ubits, A->features);
           d_reverse = (int64_t) dist;
         }
       }
@@ -713,7 +714,7 @@ static inline void tk_ann_neighborhoods (
           const unsigned char *ubits = (const unsigned char *) tk_ann_sget(A, usid);
           const unsigned char *vbits = (const unsigned char *) tk_ann_sget(A, vsid);
           if (ubits && vbits) {
-            uint64_t dist = tk_cvec_bits_hamming((const uint8_t *)vbits, (const uint8_t *)ubits, A->features);
+            uint64_t dist = tk_cvec_bits_hamming_serial((const uint8_t *)vbits, (const uint8_t *)ubits, A->features);
             d_reverse = (int64_t) dist;
           }
         }
@@ -919,7 +920,7 @@ static inline void tk_ann_neighborhoods_by_ids (
           const unsigned char *ubits = (const unsigned char *) tk_ann_sget(A, usid);
           const unsigned char *vbits = (const unsigned char *) tk_ann_sget(A, vsid);
           if (ubits && vbits) {
-            uint64_t dist = tk_cvec_bits_hamming((const uint8_t *)vbits, (const uint8_t *)ubits, A->features);
+            uint64_t dist = tk_cvec_bits_hamming_serial((const uint8_t *)vbits, (const uint8_t *)ubits, A->features);
             d_reverse = (int64_t) dist;
           }
         }
@@ -1237,7 +1238,7 @@ static inline void tk_ann_probe_bucket (
     uint64_t dist;
     if (resort) {
       const unsigned char *p1 = (const unsigned char *) tk_ann_sget(A, sid1);
-      dist = tk_cvec_bits_hamming((const uint8_t *)v, (const uint8_t *)p1, ftr);
+      dist = tk_cvec_bits_hamming_serial((const uint8_t *)v, (const uint8_t *)p1, ftr);
       if (dist < filter_eps_min || dist > filter_eps_max)
         continue;
     } else {

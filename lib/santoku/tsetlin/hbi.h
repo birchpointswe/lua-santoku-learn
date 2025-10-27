@@ -223,7 +223,7 @@ static inline double tk_hbi_similarity (
   char *v1 = tk_hbi_get(A, uid1);
   if (!v0 || !v1)
     return 0.0;
-  uint64_t hamming_dist = tk_cvec_bits_hamming((const uint8_t *)v0, (const uint8_t *)v1, A->features);
+  uint64_t hamming_dist = tk_cvec_bits_hamming_serial((const uint8_t *)v0, (const uint8_t *)v1, A->features);
   return 1.0 - ((double)hamming_dist / (double)A->features);
 }
 
@@ -236,7 +236,7 @@ static inline double tk_hbi_distance (
   char *v1 = tk_hbi_get(A, uid1);
   if (!v0 || !v1)
     return 1.0;
-  uint64_t hamming_dist = tk_cvec_bits_hamming((const uint8_t *)v0, (const uint8_t *)v1, A->features);
+  uint64_t hamming_dist = tk_cvec_bits_hamming_serial((const uint8_t *)v0, (const uint8_t *)v1, A->features);
   return (double)hamming_dist / (double)A->features;
 }
 

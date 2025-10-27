@@ -899,6 +899,8 @@ static inline void tk_inv_neighborhoods (
           wacc->a[(int64_t) inv->n_ranks * iv + rank] += wf;
         }
       }
+      // Deduplicate touched candidates to avoid scoring same candidate multiple times
+      tk_ivec_uasc(touched, 0, touched->n);
       double *e_weights_by_rank = e_weights_buf->a;
       double cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
@@ -1221,6 +1223,8 @@ static inline void tk_inv_neighborhoods_by_ids (
           wacc->a[(int64_t) inv->n_ranks * iv + rank] += wf;
         }
       }
+      // Deduplicate touched candidates to avoid scoring same candidate multiple times
+      tk_ivec_uasc(touched, 0, touched->n);
       double *e_weights_by_rank = e_weights_buf->a;
       double cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
@@ -1564,6 +1568,8 @@ static inline void tk_inv_neighborhoods_by_vecs (
           wacc->a[(int64_t) inv->n_ranks * iv + rank] += wf;
         }
       }
+      // Deduplicate touched candidates to avoid scoring same candidate multiple times
+      tk_ivec_uasc(touched, 0, touched->n);
       double *e_weights_by_rank = e_weights_buf->a;
       double cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
@@ -2586,6 +2592,27 @@ static inline int tk_inv_weights_lua (lua_State *L)
   return 1;
 }
 
+static inline int tk_inv_ranks_lua (lua_State *L)
+{
+  tk_inv_t *inv = tk_inv_peek(L, 1);
+  tk_lua_get_ephemeron(L, TK_INV_EPH, inv->ranks);
+  return 1;
+}
+
+static inline int tk_inv_rank_weights_lua (lua_State *L)
+{
+  tk_inv_t *inv = tk_inv_peek(L, 1);
+  tk_lua_get_ephemeron(L, TK_INV_EPH, inv->rank_weights);
+  return 1;
+}
+
+static inline int tk_inv_rank_sizes_lua (lua_State *L)
+{
+  tk_inv_t *inv = tk_inv_peek(L, 1);
+  tk_lua_get_ephemeron(L, TK_INV_EPH, inv->rank_sizes);
+  return 1;
+}
+
 static inline int tk_inv_persist_lua (lua_State *L)
 {
   tk_inv_t *inv = tk_inv_peek(L, 1);
@@ -2667,6 +2694,9 @@ static luaL_Reg tk_inv_lua_mt_fns[] =
   { "size", tk_inv_size_lua },
   { "features", tk_inv_features_lua },
   { "weights", tk_inv_weights_lua },
+  { "ranks", tk_inv_ranks_lua },
+  { "rank_weights", tk_inv_rank_weights_lua },
+  { "rank_sizes", tk_inv_rank_sizes_lua },
   { "persist", tk_inv_persist_lua },
   { "destroy", tk_inv_destroy_lua },
   { "shrink", tk_inv_shrink_lua },
@@ -2847,6 +2877,24 @@ static inline tk_inv_t *tk_inv_load (
     inv->ranks = NULL;
   }
   tk_lua_fread(L, &inv->decay, sizeof(double), 1, fh);
+
+  // Always recompute rank_sizes from ranks
+  inv->rank_sizes = tk_ivec_create(L, inv->n_ranks, 0, 0);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
+  for (uint64_t r = 0; r < inv->n_ranks; r++)
+    inv->rank_sizes->a[r] = 0;
+  if (inv->ranks) {
+    for (uint64_t f = 0; f < inv->features; f++) {
+      if (f < (uint64_t)inv->ranks->n) {
+        int64_t rank = inv->ranks->a[f];
+        if (rank >= 0 && rank < (int64_t)inv->n_ranks) {
+          inv->rank_sizes->a[rank]++;
+        }
+      }
+    }
+  }
+
   inv->rank_weights = tk_dvec_create(L, inv->n_ranks, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);

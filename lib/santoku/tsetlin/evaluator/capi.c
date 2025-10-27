@@ -220,12 +220,12 @@ static void tk_eval_worker (void *dp, int sig)
             continue;
 
           uint64_t hamming_dist = state->mask
-            ? tk_cvec_bits_hamming_mask(
+            ? tk_cvec_bits_hamming_mask_serial(
                 (const unsigned char*)node_code,
                 (const unsigned char*)neighbor_code,
                 (const unsigned char*)state->mask,
                 state->n_dims)
-            : tk_cvec_bits_hamming(
+            : tk_cvec_bits_hamming_serial(
                 (const unsigned char*)node_code,
                 (const unsigned char*)neighbor_code,
                 state->n_dims);
@@ -391,7 +391,7 @@ static void tk_eval_worker (void *dp, int sig)
           if (!neighbor_code)
             continue;
 
-          uint64_t hamming_dist = tk_cvec_bits_hamming(
+          uint64_t hamming_dist = tk_cvec_bits_hamming_serial(
             (const unsigned char*)node_code,
             (const unsigned char*)neighbor_code,
             state->n_dims);
