@@ -36,7 +36,7 @@ static inline void tk_tch_refine (
   #pragma omp parallel reduction(+:total_steps)
   {
     tk_ivec_t *node_order = tk_ivec_create(0, n_nodes, 0, 0);
-    tk_ivec_fill_indices(node_order);
+    tk_ivec_fill_indices_serial(node_order);
     tk_fast_seed((unsigned int)omp_get_thread_num() ^ (unsigned int)time(NULL));
     #pragma omp for
     for (uint64_t byte_idx = 0; byte_idx < n_bytes; byte_idx++) {
