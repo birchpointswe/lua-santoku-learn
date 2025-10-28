@@ -652,15 +652,11 @@ static inline void tk_ann_neighborhoods (
     lua_pop(L, 1);
   }
 
-  tk_ivec_t *active_sids = tk_ivec_create(L, n_active, 0, 0);
-  active_sids->n = n_active;
-
   tk_ivec_ensure(A->sid_to_pos, A->next_sid);
   A->sid_to_pos->n = A->next_sid;
   idx = 0;
   for (int64_t sid = 0; sid < (int64_t)A->next_sid; sid++) {
     if (A->sid_to_uid->a[sid] >= 0) {
-      active_sids->a[idx] = sid;
       A->sid_to_pos->a[sid] = (int64_t) idx;
       idx++;
     } else {
@@ -672,13 +668,12 @@ static inline void tk_ann_neighborhoods (
   for (uint64_t i = 0; i < hoods->n; i ++) {
     tk_pvec_t *hood = hoods->a[i];
     tk_pvec_clear(hood);
-    int64_t sid = active_sids->a[i];
+    int64_t uid = uids->a[i];
+    int64_t sid = tk_ann_uid_sid(A, uid, TK_ANN_FIND);
     char *vec = tk_ann_sget(A, sid);
     tk_ann_populate_neighborhood(A, i, sid, vec, hood, k, probe_radius, eps_min, eps_max);
     tk_pvec_asc(hood, 0, hood->n);
   }
-
-  tk_ivec_destroy(active_sids);
 
   if (mutual && k) {
     #pragma omp parallel for
@@ -828,6 +823,24 @@ cleanup:
   }
 }
 
+
+static inline void tk_ann_neighborhoods_by_ids (
+  lua_State *L,
+  tk_ann_t *A,
+  tk_ivec_t *query_ids,
+  uint64_t k,
+  uint64_t probe_radius,
+  uint64_t eps_min,
+  uint64_t eps_max,
+  uint64_t min,
+  bool mutual,
+  tk_ann_hoods_t **hoodsp,
+  tk_ivec_t **uidsp
+) {
+  if (A->destroyed) {
+    tk_lua_verror(L, 2, "neighborhoods_by_ids", "can't query a destroyed index");
+    return;
+  }
 
 static inline void tk_ann_neighborhoods_by_vecs (
   lua_State *L,
@@ -1400,6 +1413,45 @@ static inline int tk_ann_neighborhoods_lua (lua_State *L)
   return 2;
 }
 
+static inline int tk_ann_neighborhoods_by_ids_lua (lua_State *L)
+{
+  lua_settop(L, 7);
+  tk_ann_t *A = tk_ann_peek(L, 1);
+  tk_ivec_t *query_ids = tk_ivec_peek(L, 2, "ids");
+  uint64_t k = tk_lua_optunsigned(L, 3, "k", 0);
+  uint64_t probe_radius = tk_lua_optunsigned(L, 4, "probe_radius", 3);
+  uint64_t eps_min = tk_lua_optunsigned(L, 4, "eps_min", 0);
+  uint64_t eps_max = tk_lua_optunsigned(L, 5, "eps_max", 0);
+  uint64_t min = tk_lua_optunsigned(L, 6, "min", 0);
+  bool mutual = tk_lua_optboolean(L, 7, "mutual", false);
+  int64_t write_pos = 0;
+  for (int64_t i = 0; i < (int64_t) query_ids->n; i ++) {
+    int64_t uid = query_ids->a[i];
+    khint_t kh = tk_iumap_get(A->uid_sid, uid);
+    if (kh != tk_iumap_end(A->uid_sid)) {
+      query_ids->a[write_pos ++] = uid;
+    }
+  }
+  query_ids->n = (uint64_t) write_pos;
+  tk_ann_hoods_t *hoods;
+  tk_ann_neighborhoods_by_ids(L, A, query_ids, k, probe_radius, eps_min, eps_max, min, mutual, &hoods, &query_ids);
+  return 2;
+}
+
+static inline int tk_ann_neighborhoods_by_vecs_lua (lua_State *L)
+{
+  lua_settop(L, 7);
+  tk_ann_t *A = tk_ann_peek(L, 1);
+  tk_cvec_t *query_vecs = tk_cvec_peek(L, 2, "vectors");
+  uint64_t k = tk_lua_optunsigned(L, 3, "k", 0);
+  uint64_t probe_radius = tk_lua_optunsigned(L, 4, "probe_radius", 3);
+  int64_t eps_min = tk_lua_optinteger(L, 5, "eps_min", 0);
+  int64_t eps_max = tk_lua_optinteger(L, 6, "eps_max", 0);
+  uint64_t min = tk_lua_optunsigned(L, 7, "min", 0);
+  tk_ann_neighborhoods_by_vecs(L, A, query_vecs, k, probe_radius, eps_min, eps_max, min, NULL, NULL);
+  return 2;
+}
+
 static inline int tk_ann_similarity_lua (lua_State *L)
 {
   tk_ann_t *A = tk_ann_peek(L, 1);
@@ -1509,6 +1561,8 @@ static luaL_Reg tk_ann_lua_mt_fns[] =
   { "keep", tk_ann_keep_lua },
   { "get", tk_ann_get_lua },
   { "neighborhoods", tk_ann_neighborhoods_lua },
+  { "neighborhoods_by_ids", tk_ann_neighborhoods_by_ids_lua },
+  { "neighborhoods_by_vecs", tk_ann_neighborhoods_by_vecs_lua },
   { "neighbors", tk_ann_neighbors_lua },
   { "similarity", tk_ann_similarity_lua },
   { "distance", tk_ann_distance_lua },

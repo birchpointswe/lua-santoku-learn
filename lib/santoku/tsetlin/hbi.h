@@ -669,13 +669,10 @@ static inline void tk_hbi_neighborhoods (
 
   tk_ivec_t *uids = tk_ivec_create(L, n_active, 0, 0);
   uids->n = n_active;
-  tk_ivec_t *sids = tk_ivec_create(L, n_active, 0, 0);
-  sids->n = n_active;
   uint64_t idx = 0;
   for (uint64_t sid = 0; sid < A->next_sid; sid++) {
     int64_t uid = A->sid_to_uid->a[sid];
     if (uid >= 0) {
-      sids->a[idx] = (int64_t)sid;
       uids->a[idx] = uid;
       idx++;
     }
@@ -703,7 +700,8 @@ static inline void tk_hbi_neighborhoods (
   #pragma omp parallel for schedule(static)
   for (uint64_t i = 0; i < hoods->n; i ++) {
     tk_pvec_t *hood = hoods->a[i];
-    int64_t sid = sids->a[i];
+    int64_t uid = uids->a[i];
+    int64_t sid = tk_hbi_uid_sid(A, uid, TK_HBI_FIND);
     tk_hbi_populate_neighborhood(A, i, sid, tk_hbi_sget(A, sid), hood, k, eps_min, eps_max);
   }
 
@@ -779,7 +777,6 @@ static inline void tk_hbi_neighborhoods (
 cleanup:
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = uids;
-  if (sids) lua_remove(L, -3);
 }
 
 static inline void tk_hbi_neighborhoods_by_ids (
@@ -823,7 +820,8 @@ static inline void tk_hbi_neighborhoods_by_ids (
   #pragma omp parallel for schedule(static)
   for (uint64_t i = 0; i < hoods->n; i ++) {
     tk_pvec_t *hood = hoods->a[i];
-    int64_t sid = sids->a[i];
+    int64_t uid = uids->a[i];
+    int64_t sid = tk_hbi_uid_sid(A, uid, TK_HBI_FIND);
     tk_hbi_populate_neighborhood(A, i, sid, tk_hbi_sget(A, sid), hood, k, eps_min, eps_max);
   }
 
@@ -1395,7 +1393,6 @@ static inline int tk_hbi_neighborhoods_by_vecs_lua (lua_State *L)
   uint64_t eps_min = tk_lua_optunsigned(L, 4, "eps_min", 0);
   uint64_t eps_max = tk_lua_optunsigned(L, 5, "eps_max", 0);
   uint64_t min = tk_lua_optunsigned(L, 6, "min", 0);
-
   tk_hbi_neighborhoods_by_vecs(L, A, query_vecs, k, eps_min, eps_max, min, NULL, NULL);
   return 2;
 }
