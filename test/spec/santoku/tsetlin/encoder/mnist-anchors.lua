@@ -27,8 +27,8 @@ local cfg; cfg = {
     landmarks = 24,
   },
   mode = {
-    encoder = false,
-    cluster = false,
+    encoder = true,
+    cluster = true,
     mode = "landmarks",
     binarize = "itq",
     tch = false,
