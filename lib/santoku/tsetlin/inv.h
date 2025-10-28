@@ -496,9 +496,6 @@ static inline void tk_inv_mutualize (
   if (inv->destroyed)
     return;
 
-  tk_ivec_t *sids = tk_ivec_create(L, uids->n, 0, 0);
-  for (uint64_t i = 0; i < uids->n; i ++)
-    sids->a[i] = tk_inv_uid_sid(inv, uids->a[i], TK_INV_FIND);
   if (uids->n > SIZE_MAX / sizeof(tk_dumap_t *))
     tk_error(L, "inv_mutualize: allocation size overflow", ENOMEM);
   tk_dumap_t **hoods_sets = tk_malloc(L, uids->n * sizeof(tk_dumap_t *));
@@ -574,8 +571,8 @@ static inline void tk_inv_mutualize (
         if (khi != tk_dumap_end(vset)) {
           d_reverse = tk_dumap_val(vset, khi);
         } else {
-          int64_t usid = sids->a[i];
-          int64_t vsid = sids->a[iv];
+          int64_t usid = tk_inv_uid_sid(inv, uids->a[i], TK_INV_FIND);
+          int64_t vsid = tk_inv_uid_sid(inv, uids->a[iv], TK_INV_FIND);
           size_t ulen = 0, vlen = 0;
           int64_t *ubits = tk_inv_sget(inv, usid, &ulen);
           int64_t *vbits = tk_inv_sget(inv, vsid, &vlen);
@@ -835,13 +832,10 @@ static inline void tk_inv_neighborhoods (
 
   tk_ivec_t *uids = tk_ivec_create(L, n_active, 0, 0);
   uids->n = n_active;
-  tk_ivec_t *sids = tk_ivec_create(L, n_active, 0, 0);
-  sids->n = n_active;
   uint64_t idx = 0;
   for (int64_t sid = 0; sid < inv->next_sid; sid++) {
     int64_t uid = inv->sid_to_uid->a[sid];
     if (uid >= 0) {
-      sids->a[idx] = sid;
       uids->a[idx] = uid;
       idx++;
     }
@@ -892,7 +886,8 @@ static inline void tk_inv_neighborhoods (
     for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
       tk_rvec_t *uhood = hoods->a[i];
       tk_rvec_clear(uhood);
-      int64_t usid = sids->a[i];
+      int64_t uid = uids->a[i];
+      int64_t usid = tk_inv_uid_sid(inv, uid, TK_INV_FIND);
       if (usid < 0 || usid >= (int64_t)inv->sid_to_uid->n || inv->sid_to_uid->a[usid] < 0)
         continue;
       size_t nubits;
@@ -917,7 +912,7 @@ static inline void tk_inv_neighborhoods (
           if (iv < 0)
             continue;
           if (wacc->a[(int64_t) inv->n_ranks * iv + rank] == 0.0)
-            tk_ivec_push(touched, iv);
+            tk_ivec_push(touched, vsid);
           wacc->a[(int64_t) inv->n_ranks * iv + rank] += wf;
         }
       }
@@ -925,7 +920,8 @@ static inline void tk_inv_neighborhoods (
       double *e_weights_by_rank = e_weights_buf->a;
       double cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
-        int64_t iv = touched->a[ti];
+        int64_t vsid = touched->a[ti];
+        int64_t iv = inv->sid_to_pos->a[vsid];
         if (uhood->n >= knn) {
           double max_possible_sim = 0.0;
           for (uint64_t r = 0; r < inv->n_ranks; r++) {
@@ -938,7 +934,6 @@ static inline void tk_inv_neighborhoods (
           if (1.0 - max_possible_sim > cutoff)
             continue;
         }
-        int64_t vsid = sids->a[iv];
         size_t nvbits;
         int64_t *vbits = tk_inv_sget(inv, vsid, &nvbits);
         tk_inv_compute_candidate_weights_by_rank(inv, vbits, nvbits, e_weights_by_rank);
@@ -950,9 +945,12 @@ static inline void tk_inv_neighborhoods (
             cutoff = uhood->a[0].d;
         }
       }
-      for (uint64_t ti = 0; ti < touched->n; ti ++)
+      for (uint64_t ti = 0; ti < touched->n; ti ++) {
+        int64_t vsid = touched->a[ti];
+        int64_t iv = inv->sid_to_pos->a[vsid];
         for (uint64_t r = 0; r < inv->n_ranks; r ++)
-          wacc->a[(int64_t) inv->n_ranks * touched->a[ti] + (int64_t) r] = 0.0;
+          wacc->a[(int64_t) inv->n_ranks * iv + (int64_t) r] = 0.0;
+      }
       tk_rvec_asc(uhood, 0, uhood->n);
       touched->n = 0;
     }
@@ -1018,8 +1016,8 @@ static inline void tk_inv_neighborhoods (
           if (khi != tk_dumap_end(vset)) {
             d_reverse = tk_dumap_val(vset, khi);
           } else {
-            int64_t usid = sids->a[i];
-            int64_t vsid = sids->a[iv];
+            int64_t usid = tk_inv_uid_sid(inv, uids->a[i], TK_INV_FIND);
+            int64_t vsid = tk_inv_uid_sid(inv, uids->a[iv], TK_INV_FIND);
             size_t ulen = 0, vlen = 0;
             int64_t *ubits = tk_inv_sget(inv, usid, &ulen);
             int64_t *vbits = tk_inv_sget(inv, vsid, &vlen);
@@ -1146,7 +1144,6 @@ static inline void tk_inv_neighborhoods (
 
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = uids;
-  if (sids) lua_remove(L, -3);
 }
 
 static inline void tk_inv_neighborhoods_by_ids (
@@ -1170,18 +1167,17 @@ static inline void tk_inv_neighborhoods_by_ids (
 
   tk_inv_ensure_workspace(L, inv, inv->uid_sid ? tk_iumap_size(inv->uid_sid) : 0);
 
-  tk_ivec_t *sids = tk_ivec_create(L, query_ids->n, 0, 0);
   tk_ivec_t *uids = tk_ivec_create(L, query_ids->n, 0, 0);
   tk_ivec_copy(uids, query_ids, 0, (int64_t) query_ids->n, 0);
-  for (uint64_t i = 0; i < uids->n; i ++)
-    sids->a[i] = tk_inv_uid_sid(inv, uids->a[i], TK_INV_FIND);
 
   tk_ivec_ensure(inv->sid_to_pos, (uint64_t)inv->next_sid);
   inv->sid_to_pos->n = (uint64_t)inv->next_sid;
   for (int64_t sid = 0; sid < inv->next_sid; sid++)
     inv->sid_to_pos->a[sid] = -1;
-  for (uint64_t i = 0; i < sids->n; i++)
-    inv->sid_to_pos->a[sids->a[i]] = (int64_t)i;
+  for (uint64_t i = 0; i < uids->n; i++) {
+    int64_t sid = tk_inv_uid_sid(inv, uids->a[i], TK_INV_FIND);
+    inv->sid_to_pos->a[sid] = (int64_t)i;
+  }
   tk_inv_hoods_t *hoods = tk_inv_hoods_create(L, uids->n, 0, 0);
 
   for (uint64_t i = 0; i < hoods->n; i ++) {
@@ -1215,7 +1211,8 @@ static inline void tk_inv_neighborhoods_by_ids (
     for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
       tk_rvec_t *uhood = hoods->a[i];
       tk_rvec_clear(uhood);
-      int64_t usid = sids->a[i];
+      int64_t uid = uids->a[i];
+      int64_t usid = tk_inv_uid_sid(inv, uid, TK_INV_FIND);
       if (usid < 0 || usid >= (int64_t)inv->sid_to_uid->n || inv->sid_to_uid->a[usid] < 0)
         continue;
       size_t nubits;
@@ -1240,7 +1237,7 @@ static inline void tk_inv_neighborhoods_by_ids (
           if (iv < 0)
             continue;
           if (wacc->a[(int64_t) inv->n_ranks * iv + rank] == 0.0)
-            tk_ivec_push(touched, iv);
+            tk_ivec_push(touched, vsid);
           wacc->a[(int64_t) inv->n_ranks * iv + rank] += wf;
         }
       }
@@ -1248,7 +1245,8 @@ static inline void tk_inv_neighborhoods_by_ids (
       double *e_weights_by_rank = e_weights_buf->a;
       double cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
-        int64_t iv = touched->a[ti];
+        int64_t vsid = touched->a[ti];
+        int64_t iv = inv->sid_to_pos->a[vsid];
         if (uhood->n >= knn) {
           double max_possible_sim = 0.0;
           for (uint64_t r = 0; r < inv->n_ranks; r++) {
@@ -1261,7 +1259,6 @@ static inline void tk_inv_neighborhoods_by_ids (
           if (1.0 - max_possible_sim > cutoff)
             continue;
         }
-        int64_t vsid = sids->a[iv];
         size_t nvbits;
         int64_t *vbits = tk_inv_sget(inv, vsid, &nvbits);
         tk_inv_compute_candidate_weights_by_rank(inv, vbits, nvbits, e_weights_by_rank);
@@ -1273,9 +1270,12 @@ static inline void tk_inv_neighborhoods_by_ids (
             cutoff = uhood->a[0].d;
         }
       }
-      for (uint64_t ti = 0; ti < touched->n; ti ++)
+      for (uint64_t ti = 0; ti < touched->n; ti ++) {
+        int64_t vsid = touched->a[ti];
+        int64_t iv = inv->sid_to_pos->a[vsid];
         for (uint64_t r = 0; r < inv->n_ranks; r ++)
-          wacc->a[(int64_t) inv->n_ranks * touched->a[ti] + (int64_t) r] = 0.0;
+          wacc->a[(int64_t) inv->n_ranks * iv + (int64_t) r] = 0.0;
+      }
       tk_rvec_asc(uhood, 0, uhood->n);
       touched->n = 0;
     }
@@ -1341,8 +1341,8 @@ static inline void tk_inv_neighborhoods_by_ids (
           if (khi != tk_dumap_end(vset)) {
             d_reverse = tk_dumap_val(vset, khi);
           } else {
-            int64_t usid = sids->a[i];
-            int64_t vsid = sids->a[iv];
+            int64_t usid = tk_inv_uid_sid(inv, uids->a[i], TK_INV_FIND);
+            int64_t vsid = tk_inv_uid_sid(inv, uids->a[iv], TK_INV_FIND);
             size_t ulen = 0, vlen = 0;
             int64_t *ubits = tk_inv_sget(inv, usid, &ulen);
             int64_t *vbits = tk_inv_sget(inv, vsid, &vlen);
@@ -1465,7 +1465,6 @@ static inline void tk_inv_neighborhoods_by_ids (
 
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = uids;
-  lua_remove(L, -3);
 }
 
 static inline void tk_inv_neighborhoods_by_vecs (
@@ -1533,27 +1532,17 @@ static inline void tk_inv_neighborhoods_by_vecs (
 
   tk_inv_ensure_workspace(L, inv, inv->uid_sid ? tk_iumap_size(inv->uid_sid) : 0);
 
-  uint64_t n_active = 0;
-  for (int64_t sid = 0; sid < inv->next_sid; sid++)
-    if (inv->sid_to_uid->a[sid] >= 0)
-      n_active++;
-
-  tk_ivec_t *sids = tk_ivec_create(L, n_active, 0, 0);
-  sids->n = n_active;
-  uint64_t idx = 0;
-  for (int64_t sid = 0; sid < inv->next_sid; sid++) {
-    if (inv->sid_to_uid->a[sid] >= 0) {
-      sids->a[idx] = sid;
-      idx++;
-    }
-  }
-
   tk_ivec_ensure(inv->sid_to_pos, (uint64_t)inv->next_sid);
   inv->sid_to_pos->n = (uint64_t)inv->next_sid;
-  for (int64_t sid = 0; sid < inv->next_sid; sid++)
-    inv->sid_to_pos->a[sid] = -1;
-  for (uint64_t i = 0; i < sids->n; i++)
-    inv->sid_to_pos->a[sids->a[i]] = (int64_t)i;
+  uint64_t n_active = 0;
+  for (int64_t sid = 0; sid < inv->next_sid; sid++) {
+    if (inv->sid_to_uid->a[sid] >= 0) {
+      inv->sid_to_pos->a[sid] = (int64_t)n_active;
+      n_active++;
+    } else {
+      inv->sid_to_pos->a[sid] = -1;
+    }
+  }
 
   tk_iuset_t **local_uids_per_thread = NULL;
   tk_iumap_t *uid_to_idx = NULL;
@@ -1596,7 +1585,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
           if (iv < 0)
             continue;
           if (wacc->a[(int64_t) inv->n_ranks * iv + rank] == 0.0)
-            tk_ivec_push(touched, iv);
+            tk_ivec_push(touched, vsid);
           wacc->a[(int64_t) inv->n_ranks * iv + rank] += wf;
         }
       }
@@ -1604,7 +1593,8 @@ static inline void tk_inv_neighborhoods_by_vecs (
       double *e_weights_by_rank = e_weights_buf->a;
       double cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
-        int64_t iv = touched->a[ti];
+        int64_t vsid = touched->a[ti];
+        int64_t iv = inv->sid_to_pos->a[vsid];
         if (uhood->n >= knn) {
           double max_possible_sim = 0.0;
           for (uint64_t r = 0; r < inv->n_ranks; r++) {
@@ -1617,7 +1607,6 @@ static inline void tk_inv_neighborhoods_by_vecs (
           if (1.0 - max_possible_sim > cutoff)
             continue;
         }
-        int64_t vsid = sids->a[iv];
         size_t nvbits;
         int64_t *vbits = tk_inv_sget(inv, vsid, &nvbits);
         tk_inv_compute_candidate_weights_by_rank(inv, vbits, nvbits, e_weights_by_rank);
@@ -1629,9 +1618,12 @@ static inline void tk_inv_neighborhoods_by_vecs (
             cutoff = uhood->a[0].d;
         }
       }
-      for (uint64_t ti = 0; ti < touched->n; ti ++)
+      for (uint64_t ti = 0; ti < touched->n; ti ++) {
+        int64_t vsid = touched->a[ti];
+        int64_t iv = inv->sid_to_pos->a[vsid];
         for (uint64_t r = 0; r < inv->n_ranks; r ++)
-          wacc->a[(int64_t) inv->n_ranks * touched->a[ti] + (int64_t) r] = 0.0;
+          wacc->a[(int64_t) inv->n_ranks * iv + (int64_t) r] = 0.0;
+      }
       tk_rvec_asc(uhood, 0, uhood->n);
       touched->n = 0;
     }
