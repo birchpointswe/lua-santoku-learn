@@ -418,39 +418,45 @@ static inline void tk_spectral_matvec (
   const double * restrict degree = spec->degree->a;
   const double * restrict scale = spec->scale->a;
   if (laplacian_type == TK_LAPLACIAN_UNNORMALIZED) {
-    #pragma omp parallel for schedule(static)
-    for (uint64_t i = 0; i < spec->n_nodes; i++) {
-      const double deg = degree[i];
-      const int64_t edge_start = adj_offset[i];
-      const int64_t edge_end = adj_offset[i + 1];
+    #pragma omp parallel
+    {
       for (int b = 0; b < *blockSize; b++) {
         const double * restrict xb = x + (size_t) b * (size_t) *ldx;
         double * restrict yb = y + (size_t) b * (size_t) *ldy;
-        double accum = deg * xb[i];
-        for (int64_t e = edge_start; e < edge_end; e++) {
-          const int64_t dst = adj_neighbors[e];
-          const double weight = adj_weights[e];
-          accum -= weight * xb[dst];
+        #pragma omp for schedule(guided)
+        for (uint64_t i = 0; i < spec->n_nodes; i++) {
+          const double deg = degree[i];
+          const int64_t edge_start = adj_offset[i];
+          const int64_t edge_end = adj_offset[i + 1];
+          double accum = deg * xb[i];
+          for (int64_t e = edge_start; e < edge_end; e++) {
+            const int64_t dst = adj_neighbors[e];
+            const double weight = adj_weights[e];
+            accum -= weight * xb[dst];
+          }
+          yb[i] = accum;
         }
-        yb[i] = accum;
       }
     }
   } else {
-    #pragma omp parallel for schedule(static)
-    for (uint64_t i = 0; i < spec->n_nodes; i++) {
-      const double scale_i = scale[i];
-      const int64_t edge_start = adj_offset[i];
-      const int64_t edge_end = adj_offset[i + 1];
+    #pragma omp parallel
+    {
       for (int b = 0; b < *blockSize; b++) {
         const double * restrict xb = x + (size_t) b * (size_t) *ldx;
         double * restrict yb = y + (size_t) b * (size_t) *ldy;
-        double accum = xb[i];
-        for (int64_t e = edge_start; e < edge_end; e++) {
-          const int64_t dst = adj_neighbors[e];
-          const double scaled_weight = scale_i * scale[dst] * adj_weights[e];
-          accum -= scaled_weight * xb[dst];
+        #pragma omp for schedule(guided)
+        for (uint64_t i = 0; i < spec->n_nodes; i++) {
+          const double scale_i = scale[i];
+          const int64_t edge_start = adj_offset[i];
+          const int64_t edge_end = adj_offset[i + 1];
+          double accum = xb[i];
+          for (int64_t e = edge_start; e < edge_end; e++) {
+            const int64_t dst = adj_neighbors[e];
+            const double scaled_weight = scale_i * scale[dst] * adj_weights[e];
+            accum -= scaled_weight * xb[dst];
+          }
+          yb[i] = accum;
         }
-        yb[i] = accum;
       }
     }
   }

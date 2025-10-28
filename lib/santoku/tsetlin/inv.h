@@ -47,7 +47,8 @@ typedef struct tk_inv_s {
   tk_dvec_t *rank_weights;
   tk_ivec_t *rank_sizes;
   tk_iumap_t *uid_sid;
-  tk_iumap_t *sid_uid;
+  tk_ivec_t *sid_to_uid;
+  tk_ivec_t *sid_to_pos;
   tk_ivec_t *node_offsets;
   tk_ivec_t *node_bits;
   tk_inv_postings_t *postings;
@@ -128,11 +129,10 @@ static inline void tk_inv_shrink (
   for (int64_t i = 0; i < inv->next_sid; i ++)
     old_to_new[i] = -1;
   int64_t new_sid = 0;
-  for (khint_t k = kh_begin(inv->sid_uid); k != kh_end(inv->sid_uid); k ++) {
-    if (!kh_exist(inv->sid_uid, k))
-      continue;
-    int64_t old_sid = kh_key(inv->sid_uid, k);
-    old_to_new[old_sid] = new_sid ++;
+  for (int64_t s = 0; s < inv->next_sid; s++) {
+    if (inv->sid_to_uid->a[s] >= 0) {
+      old_to_new[s] = new_sid++;
+    }
   }
   if (new_sid == inv->next_sid) {
     free(old_to_new);
@@ -160,10 +160,9 @@ static inline void tk_inv_shrink (
   lua_pop(L, 1);
 
   new_node_offsets->n = 0;
-  for (khint_t k = kh_begin(inv->sid_uid); k != kh_end(inv->sid_uid); k ++) {
-    if (!kh_exist(inv->sid_uid, k))
+  for (int64_t old_sid = 0; old_sid < inv->next_sid; old_sid++) {
+    if (inv->sid_to_uid->a[old_sid] < 0)
       continue;
-    int64_t old_sid = kh_key(inv->sid_uid, k);
     int64_t start = inv->node_offsets->a[old_sid];
     int64_t end = inv->node_offsets->a[old_sid + 1];
     if (tk_ivec_push(new_node_offsets, (int64_t) new_node_bits->n) != 0) {
@@ -204,9 +203,6 @@ static inline void tk_inv_shrink (
   tk_iumap_t *new_uid_sid = tk_iumap_create(L, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
-  tk_iumap_t *new_sid_uid = tk_iumap_create(L, 0);
-  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
-  lua_pop(L, 1);
 
   for (khint_t k = kh_begin(inv->uid_sid); k != kh_end(inv->uid_sid); k ++) {
     if (!kh_exist(inv->uid_sid, k))
@@ -218,17 +214,25 @@ static inline void tk_inv_shrink (
       int is_new;
       khint_t khi = tk_iumap_put(new_uid_sid, uid, &is_new);
       tk_iumap_setval(new_uid_sid, khi, new_sid_val);
-      khi = tk_iumap_put(new_sid_uid, new_sid_val, &is_new);
-      tk_iumap_setval(new_sid_uid, khi, uid);
     }
   }
 
   tk_lua_del_ephemeron(L, TK_INV_EPH, Ii, inv->uid_sid);
-  tk_lua_del_ephemeron(L, TK_INV_EPH, Ii, inv->sid_uid);
   tk_iumap_destroy(inv->uid_sid);
-  tk_iumap_destroy(inv->sid_uid);
   inv->uid_sid = new_uid_sid;
-  inv->sid_uid = new_sid_uid;
+
+  tk_ivec_t *new_sid_to_uid = tk_ivec_create(L, (uint64_t)new_sid, 0, 0);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
+  new_sid_to_uid->n = (uint64_t)new_sid;
+  for (int64_t old_sid = 0; old_sid < inv->next_sid; old_sid++) {
+    int64_t new_sid_val = old_to_new[old_sid];
+    if (new_sid_val >= 0) {
+      new_sid_to_uid->a[new_sid_val] = inv->sid_to_uid->a[old_sid];
+    }
+  }
+  tk_lua_del_ephemeron(L, TK_INV_EPH, Ii, inv->sid_to_uid);
+  inv->sid_to_uid = new_sid_to_uid;
   inv->next_sid = new_sid;
 
   tk_inv_postings_shrink(inv->postings);
@@ -269,7 +273,7 @@ static inline void tk_inv_persist (
   tk_lua_fwrite(L, (char *) &inv->features, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, (char *) &inv->n_ranks, sizeof(uint64_t), 1, fh);
   tk_iumap_persist(L, inv->uid_sid, fh);
-  tk_iumap_persist(L, inv->sid_uid, fh);
+  tk_ivec_persist(L, inv->sid_to_uid, fh);
   tk_ivec_persist(L, inv->node_offsets, fh);
   tk_ivec_persist(L, inv->node_bits, fh);
   uint64_t pcount = inv->postings ? inv->postings->n : 0;
@@ -308,10 +312,9 @@ static inline void tk_inv_uid_remove (
     return;
   int64_t sid = tk_iumap_val(inv->uid_sid, khi);
   tk_iumap_del(inv->uid_sid, khi);
-  khi = tk_iumap_get(inv->sid_uid, sid);
-  if (khi == tk_iumap_end(inv->sid_uid))
-    return;
-  tk_iumap_del(inv->sid_uid, khi);
+
+  if (sid >= 0 && sid < (int64_t)inv->sid_to_uid->n)
+    inv->sid_to_uid->a[sid] = -1;
 }
 
 static inline int64_t tk_inv_uid_sid (
@@ -332,15 +335,20 @@ static inline int64_t tk_inv_uid_sid (
     if (khi != tk_iumap_end(inv->uid_sid)) {
       int64_t old_sid = tk_iumap_val(inv->uid_sid, khi);
       tk_iumap_del(inv->uid_sid, khi);
-      khi = tk_iumap_get(inv->sid_uid, old_sid);
-      if (khi != tk_iumap_end(inv->sid_uid))
-        tk_iumap_del(inv->sid_uid, khi);
+      if (old_sid >= 0 && old_sid < inv->next_sid)
+        inv->sid_to_uid->a[old_sid] = -1;
     }
     int64_t sid = (int64_t) (inv->next_sid ++);
     khi = tk_iumap_put(inv->uid_sid, uid, &kha);
     tk_iumap_setval(inv->uid_sid, khi, sid);
-    khi = tk_iumap_put(inv->sid_uid, sid, &kha);
-    tk_iumap_setval(inv->sid_uid, khi, uid);
+
+    tk_ivec_ensure(inv->sid_to_uid, (uint64_t)inv->next_sid);
+    if (inv->sid_to_uid->n < (uint64_t)inv->next_sid) {
+      for (uint64_t i = inv->sid_to_uid->n; i < (uint64_t)inv->next_sid; i++)
+        inv->sid_to_uid->a[i] = -1;
+      inv->sid_to_uid->n = (uint64_t)inv->next_sid;
+    }
+    inv->sid_to_uid->a[sid] = uid;
     return sid;
   }
 }
@@ -349,11 +357,9 @@ static inline int64_t tk_inv_sid_uid (
   tk_inv_t *inv,
   int64_t sid
 ) {
-  khint_t khi = tk_iumap_get(inv->sid_uid, sid);
-  if (khi == tk_iumap_end(inv->sid_uid))
+  if (sid < 0 || sid >= (int64_t)inv->sid_to_uid->n)
     return -1;
-  else
-    return tk_iumap_val(inv->sid_uid, khi);
+  return inv->sid_to_uid->a[sid];
 }
 
 static inline int64_t *tk_inv_sget (
@@ -493,9 +499,6 @@ static inline void tk_inv_mutualize (
   tk_ivec_t *sids = tk_ivec_create(L, uids->n, 0, 0);
   for (uint64_t i = 0; i < uids->n; i ++)
     sids->a[i] = tk_inv_uid_sid(inv, uids->a[i], TK_INV_FIND);
-  tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
-  if (!sid_idx)
-    tk_error(L, "inv_mutualize: iumap_from_ivec failed", ENOMEM);
   if (uids->n > SIZE_MAX / sizeof(tk_dumap_t *))
     tk_error(L, "inv_mutualize: allocation size overflow", ENOMEM);
   tk_dumap_t **hoods_sets = tk_malloc(L, uids->n * sizeof(tk_dumap_t *));
@@ -668,7 +671,6 @@ static inline void tk_inv_mutualize (
     free(old_to_new);
   }
 
-  tk_iumap_destroy(sid_idx);
   for (uint64_t i = 0; i < uids->n; i ++)
     if (hoods_sets[i])
       tk_dumap_destroy(hoods_sets[i]);
@@ -826,15 +828,36 @@ static inline void tk_inv_neighborhoods (
 
   tk_inv_ensure_workspace(L, inv, inv->uid_sid ? tk_iumap_size(inv->uid_sid) : 0);
 
-  tk_ivec_t *sids = tk_iumap_values(L, inv->uid_sid);
-  tk_ivec_asc(sids, 0, sids->n);
-  tk_ivec_t *uids = tk_ivec_create(L, sids->n, 0, 0);
-  for (uint64_t i = 0; i < sids->n; i ++)
-    uids->a[i] = tk_inv_sid_uid(inv, sids->a[i]);
+  uint64_t n_active = 0;
+  for (int64_t sid = 0; sid < inv->next_sid; sid++)
+    if (inv->sid_to_uid->a[sid] >= 0)
+      n_active++;
 
-  tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
-  if (!sid_idx)
-    tk_error(L, "inv_knn: iumap_from_ivec failed", ENOMEM);
+  tk_ivec_t *uids = tk_ivec_create(L, n_active, 0, 0);
+  uids->n = n_active;
+  tk_ivec_t *sids = tk_ivec_create(L, n_active, 0, 0);
+  sids->n = n_active;
+  uint64_t idx = 0;
+  for (int64_t sid = 0; sid < inv->next_sid; sid++) {
+    int64_t uid = inv->sid_to_uid->a[sid];
+    if (uid >= 0) {
+      sids->a[idx] = sid;
+      uids->a[idx] = uid;
+      idx++;
+    }
+  }
+
+  tk_ivec_ensure(inv->sid_to_pos, (uint64_t)inv->next_sid);
+  inv->sid_to_pos->n = (uint64_t)inv->next_sid;
+  idx = 0;
+  for (int64_t sid = 0; sid < inv->next_sid; sid++) {
+    if (inv->sid_to_uid->a[sid] >= 0) {
+      inv->sid_to_pos->a[sid] = (int64_t) idx;
+      idx++;
+    } else {
+      inv->sid_to_pos->a[sid] = -1;
+    }
+  }
 
   tk_inv_hoods_t *hoods = tk_inv_hoods_create(L, uids->n, 0, 0);
 
@@ -870,7 +893,7 @@ static inline void tk_inv_neighborhoods (
       tk_rvec_t *uhood = hoods->a[i];
       tk_rvec_clear(uhood);
       int64_t usid = sids->a[i];
-      if (tk_iumap_get(inv->sid_uid, usid) == tk_iumap_end(inv->sid_uid))
+      if (usid < 0 || usid >= (int64_t)inv->sid_to_uid->n || inv->sid_to_uid->a[usid] < 0)
         continue;
       size_t nubits;
       int64_t *ubits = tk_inv_sget(inv, usid, &nubits);
@@ -888,18 +911,16 @@ static inline void tk_inv_neighborhoods (
           int64_t vsid = vsids->a[l];
           if (vsid == usid)
             continue;
-          khint_t khi = tk_iumap_get(sid_idx, vsid);
-          if (khi == tk_iumap_end(sid_idx))
+          if (vsid < 0 || vsid >= inv->next_sid)
             continue;
-          int64_t iv = tk_iumap_val(sid_idx, khi);
-          if (iv < 0 || iv >= (int64_t) sids->n)
+          int64_t iv = inv->sid_to_pos->a[vsid];
+          if (iv < 0)
             continue;
           if (wacc->a[(int64_t) inv->n_ranks * iv + rank] == 0.0)
             tk_ivec_push(touched, iv);
           wacc->a[(int64_t) inv->n_ranks * iv + rank] += wf;
         }
       }
-      // Deduplicate touched candidates to avoid scoring same candidate multiple times
       tk_ivec_uasc(touched, 0, touched->n);
       double *e_weights_by_rank = e_weights_buf->a;
       double cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
@@ -1084,8 +1105,6 @@ static inline void tk_inv_neighborhoods (
     free(hoods_sets);
   }
 
-  tk_iumap_destroy(sid_idx);
-
   int64_t keeper_count = 0;
   if (min > 0) {
     for (uint64_t i = 0; i < uids->n; i ++)
@@ -1157,9 +1176,12 @@ static inline void tk_inv_neighborhoods_by_ids (
   for (uint64_t i = 0; i < uids->n; i ++)
     sids->a[i] = tk_inv_uid_sid(inv, uids->a[i], TK_INV_FIND);
 
-  tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
-  if (!sid_idx)
-    tk_error(L, "inv_search: iumap_from_ivec failed", ENOMEM);
+  tk_ivec_ensure(inv->sid_to_pos, (uint64_t)inv->next_sid);
+  inv->sid_to_pos->n = (uint64_t)inv->next_sid;
+  for (int64_t sid = 0; sid < inv->next_sid; sid++)
+    inv->sid_to_pos->a[sid] = -1;
+  for (uint64_t i = 0; i < sids->n; i++)
+    inv->sid_to_pos->a[sids->a[i]] = (int64_t)i;
   tk_inv_hoods_t *hoods = tk_inv_hoods_create(L, uids->n, 0, 0);
 
   for (uint64_t i = 0; i < hoods->n; i ++) {
@@ -1194,7 +1216,7 @@ static inline void tk_inv_neighborhoods_by_ids (
       tk_rvec_t *uhood = hoods->a[i];
       tk_rvec_clear(uhood);
       int64_t usid = sids->a[i];
-      if (tk_iumap_get(inv->sid_uid, usid) == tk_iumap_end(inv->sid_uid))
+      if (usid < 0 || usid >= (int64_t)inv->sid_to_uid->n || inv->sid_to_uid->a[usid] < 0)
         continue;
       size_t nubits;
       int64_t *ubits = tk_inv_sget(inv, usid, &nubits);
@@ -1212,18 +1234,16 @@ static inline void tk_inv_neighborhoods_by_ids (
           int64_t vsid = vsids->a[l];
           if (vsid == usid)
             continue;
-          khint_t khi = tk_iumap_get(sid_idx, vsid);
-          if (khi == tk_iumap_end(sid_idx))
+          if (vsid < 0 || vsid >= inv->next_sid)
             continue;
-          int64_t iv = tk_iumap_val(sid_idx, khi);
-          if (iv < 0 || iv >= (int64_t) sids->n)
+          int64_t iv = inv->sid_to_pos->a[vsid];
+          if (iv < 0)
             continue;
           if (wacc->a[(int64_t) inv->n_ranks * iv + rank] == 0.0)
             tk_ivec_push(touched, iv);
           wacc->a[(int64_t) inv->n_ranks * iv + rank] += wf;
         }
       }
-      // Deduplicate touched candidates to avoid scoring same candidate multiple times
       tk_ivec_uasc(touched, 0, touched->n);
       double *e_weights_by_rank = e_weights_buf->a;
       double cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
@@ -1352,8 +1372,6 @@ static inline void tk_inv_neighborhoods_by_ids (
     free(hoods_sets);
   }
 
-  tk_iumap_destroy(sid_idx);
-
   int64_t keeper_count = 0;
   if (min > 0) {
     for (uint64_t i = 0; i < uids->n; i ++)
@@ -1408,8 +1426,6 @@ static inline void tk_inv_neighborhoods_by_ids (
         tk_dumap_destroy(hoods_sets[i]);
     free(hoods_sets);
   }
-
-  tk_iumap_destroy(sid_idx);
 
   keeper_count = 0;
   if (min > 0) {
@@ -1515,12 +1531,29 @@ static inline void tk_inv_neighborhoods_by_vecs (
     lua_pop(L, 1);
   }
 
-  tk_ivec_t *sids = tk_iumap_values(L, inv->uid_sid);
-  tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
-  if (!sid_idx)
-    tk_error(L, "inv_neighborhoods_by_vecs: iumap_from_ivec failed", ENOMEM);
-
   tk_inv_ensure_workspace(L, inv, inv->uid_sid ? tk_iumap_size(inv->uid_sid) : 0);
+
+  uint64_t n_active = 0;
+  for (int64_t sid = 0; sid < inv->next_sid; sid++)
+    if (inv->sid_to_uid->a[sid] >= 0)
+      n_active++;
+
+  tk_ivec_t *sids = tk_ivec_create(L, n_active, 0, 0);
+  sids->n = n_active;
+  uint64_t idx = 0;
+  for (int64_t sid = 0; sid < inv->next_sid; sid++) {
+    if (inv->sid_to_uid->a[sid] >= 0) {
+      sids->a[idx] = sid;
+      idx++;
+    }
+  }
+
+  tk_ivec_ensure(inv->sid_to_pos, (uint64_t)inv->next_sid);
+  inv->sid_to_pos->n = (uint64_t)inv->next_sid;
+  for (int64_t sid = 0; sid < inv->next_sid; sid++)
+    inv->sid_to_pos->a[sid] = -1;
+  for (uint64_t i = 0; i < sids->n; i++)
+    inv->sid_to_pos->a[sids->a[i]] = (int64_t)i;
 
   tk_iuset_t **local_uids_per_thread = NULL;
   tk_iumap_t *uid_to_idx = NULL;
@@ -1557,18 +1590,16 @@ static inline void tk_inv_neighborhoods_by_vecs (
         tk_ivec_t *vsids = inv->postings->a[fid];
         for (uint64_t l = 0; l < vsids->n; l ++) {
           int64_t vsid = vsids->a[l];
-          khint_t khi = tk_iumap_get(sid_idx, vsid);
-          if (khi == tk_iumap_end(sid_idx))
+          if (vsid < 0 || vsid >= inv->next_sid)
             continue;
-          int64_t iv = tk_iumap_val(sid_idx, khi);
-          if (iv < 0 || iv >= (int64_t) sids->n)
+          int64_t iv = inv->sid_to_pos->a[vsid];
+          if (iv < 0)
             continue;
           if (wacc->a[(int64_t) inv->n_ranks * iv + rank] == 0.0)
             tk_ivec_push(touched, iv);
           wacc->a[(int64_t) inv->n_ranks * iv + rank] += wf;
         }
       }
-      // Deduplicate touched candidates to avoid scoring same candidate multiple times
       tk_ivec_uasc(touched, 0, touched->n);
       double *e_weights_by_rank = e_weights_buf->a;
       double cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
@@ -1673,7 +1704,6 @@ static inline void tk_inv_neighborhoods_by_vecs (
   }
 
   lua_remove(L, -2);
-  tk_iumap_destroy(sid_idx);
   lua_insert(L, -2);
   tk_iumap_destroy(uid_to_idx);
 
@@ -2769,7 +2799,10 @@ static inline tk_inv_t *tk_inv_create (
   inv->uid_sid = tk_iumap_create(L, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
-  inv->sid_uid = tk_iumap_create(L, 0);
+  inv->sid_to_uid = tk_ivec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
+  inv->sid_to_pos = tk_ivec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
   inv->node_offsets = tk_ivec_create(L, 0, 0, 0);
@@ -2832,7 +2865,10 @@ static inline tk_inv_t *tk_inv_load (
   inv->uid_sid = tk_iumap_load(L, fh);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
-  inv->sid_uid = tk_iumap_load(L, fh);
+  inv->sid_to_uid = tk_ivec_load(L, fh);
+  tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+  lua_pop(L, 1);
+  inv->sid_to_pos = tk_ivec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
   inv->node_offsets = tk_ivec_load(L, fh);
@@ -2878,7 +2914,6 @@ static inline tk_inv_t *tk_inv_load (
   }
   tk_lua_fread(L, &inv->decay, sizeof(double), 1, fh);
 
-  // Always recompute rank_sizes from ranks
   inv->rank_sizes = tk_ivec_create(L, inv->n_ranks, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);

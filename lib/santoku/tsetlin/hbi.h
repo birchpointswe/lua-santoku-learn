@@ -50,7 +50,8 @@ typedef struct tk_hbi_s {
   uint64_t features;
   tk_hbi_buckets_t *buckets;
   tk_iumap_t *uid_sid;
-  tk_iumap_t *sid_uid;
+  tk_ivec_t *sid_to_uid;
+  tk_ivec_t *sid_to_pos;
   tk_hbi_codes_t *codes;
 } tk_hbi_t;
 
@@ -78,10 +79,11 @@ static inline void tk_hbi_shrink (
   for (uint64_t i = 0; i < A->next_sid; i ++)
     old_to_new[i] = -1;
   uint64_t new_sid = 0;
-  int64_t old_sid;
-  tk_umap_foreach_keys(A->sid_uid, old_sid, ({
-    old_to_new[old_sid] = (int64_t) new_sid ++;
-  }))
+  for (uint64_t s = 0; s < A->next_sid; s++) {
+    if (A->sid_to_uid->a[s] >= 0) {
+      old_to_new[s] = (int64_t) new_sid++;
+    }
+  }
   if (new_sid == A->next_sid) {
     free(old_to_new);
     tk_hbi_codes_shrink(A->codes);
@@ -89,11 +91,12 @@ static inline void tk_hbi_shrink (
   }
   tk_hbi_code_t *old_codes = A->codes->a;
   tk_hbi_code_t *new_codes = A->codes->a;
-  tk_umap_foreach_keys(A->sid_uid, old_sid, ({
+  for (uint64_t old_sid = 0; old_sid < A->next_sid; old_sid++) {
+    if (A->sid_to_uid->a[old_sid] < 0) continue;
     int64_t new_sid_val = old_to_new[old_sid];
-    if (new_sid_val != old_sid)
+    if (new_sid_val != (int64_t)old_sid)
       new_codes[new_sid_val] = old_codes[old_sid];
-  }))
+  }
   A->codes->n = new_sid;
   for (khint_t k = kh_begin(A->buckets); k != kh_end(A->buckets); k ++) {
     if (!kh_exist(A->buckets, k))
@@ -119,28 +122,34 @@ static inline void tk_hbi_shrink (
   tk_iumap_t *new_uid_sid = tk_iumap_create(L, 0);
   tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
   lua_pop(L, 1);
-  tk_iumap_t *new_sid_uid = tk_iumap_create(L, 0);
-  tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
-  lua_pop(L, 1);
 
   int64_t uid;
+  int64_t old_sid;
   tk_umap_foreach(A->uid_sid, uid, old_sid, ({
     int64_t new_sid_val = old_to_new[old_sid];
     if (new_sid_val >= 0) {
       int is_new;
       khint_t khi = tk_iumap_put(new_uid_sid, uid, &is_new);
       tk_iumap_setval(new_uid_sid, khi, new_sid_val);
-      khi = tk_iumap_put(new_sid_uid, new_sid_val, &is_new);
-      tk_iumap_setval(new_sid_uid, khi, uid);
     }
   }))
 
   tk_lua_del_ephemeron(L, TK_HBI_EPH, Ai, A->uid_sid);
-  tk_lua_del_ephemeron(L, TK_HBI_EPH, Ai, A->sid_uid);
   tk_iumap_destroy(A->uid_sid);
-  tk_iumap_destroy(A->sid_uid);
   A->uid_sid = new_uid_sid;
-  A->sid_uid = new_sid_uid;
+
+  tk_ivec_t *new_sid_to_uid = tk_ivec_create(L, new_sid, 0, 0);
+  tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
+  lua_pop(L, 1);
+  new_sid_to_uid->n = new_sid;
+  for (uint64_t old_sid = 0; old_sid < A->next_sid; old_sid++) {
+    int64_t new_sid_val = old_to_new[old_sid];
+    if (new_sid_val >= 0) {
+      new_sid_to_uid->a[new_sid_val] = A->sid_to_uid->a[old_sid];
+    }
+  }
+  tk_lua_del_ephemeron(L, TK_HBI_EPH, Ai, A->sid_to_uid);
+  A->sid_to_uid = new_sid_to_uid;
   A->next_sid = new_sid;
   tk_hbi_codes_shrink(A->codes);
 
@@ -173,15 +182,20 @@ static inline int64_t tk_hbi_uid_sid (
     if (khi != tk_iumap_end(A->uid_sid)) {
       int64_t old_sid = tk_iumap_val(A->uid_sid, khi);
       tk_iumap_del(A->uid_sid, khi);
-      khi = tk_iumap_get(A->sid_uid, old_sid);
-      if (khi != tk_iumap_end(A->sid_uid))
-        tk_iumap_del(A->sid_uid, khi);
+      if (old_sid >= 0 && old_sid < (int64_t)A->sid_to_uid->n)
+        A->sid_to_uid->a[old_sid] = -1;
     }
     int64_t sid = (int64_t) (A->next_sid ++);
     khi = tk_iumap_put(A->uid_sid, uid, &kha);
     tk_iumap_setval(A->uid_sid, khi, sid);
-    khi = tk_iumap_put(A->sid_uid, sid, &kha);
-    tk_iumap_setval(A->sid_uid, khi, uid);
+
+    tk_ivec_ensure(A->sid_to_uid, A->next_sid);
+    if (A->sid_to_uid->n < A->next_sid) {
+      for (uint64_t i = A->sid_to_uid->n; i < A->next_sid; i++)
+        A->sid_to_uid->a[i] = -1;
+      A->sid_to_uid->n = A->next_sid;
+    }
+    A->sid_to_uid->a[sid] = uid;
     return sid;
   }
 }
@@ -190,11 +204,9 @@ static inline int64_t tk_hbi_sid_uid (
   tk_hbi_t *A,
   int64_t sid
 ) {
-  khint_t khi = tk_iumap_get(A->sid_uid, sid);
-  if (khi == tk_iumap_end(A->sid_uid))
+  if (sid < 0 || sid >= (int64_t)A->sid_to_uid->n)
     return -1;
-  else
-    return tk_iumap_val(A->sid_uid, khi);
+  return A->sid_to_uid->a[sid];
 }
 
 static inline char *tk_hbi_sget (
@@ -292,7 +304,7 @@ static inline void tk_hbi_persist (
     }
   }))
   tk_iumap_persist(L, A->uid_sid, fh);
-  tk_iumap_persist(L, A->sid_uid, fh);
+  tk_ivec_persist(L, A->sid_to_uid, fh);
   uint64_t cnum = A->codes ? A->codes->n : 0;
   tk_lua_fwrite(L, (char *) &cnum, sizeof(uint64_t), 1, fh);
   if (cnum)
@@ -315,10 +327,9 @@ static inline void tk_hbi_uid_remove (
     return;
   int64_t sid = tk_iumap_val(A->uid_sid, khi);
   tk_iumap_del(A->uid_sid, khi);
-  khi = tk_iumap_get(A->sid_uid, sid);
-  if (khi == tk_iumap_end(A->sid_uid))
-    return;
-  tk_iumap_del(A->sid_uid, khi);
+
+  if (sid >= 0 && sid < (int64_t)A->sid_to_uid->n)
+    A->sid_to_uid->a[sid] = -1;
 }
 
 static inline void tk_hbi_add (
@@ -403,8 +414,7 @@ static inline bool tk_hbi_probe_bucket (
   tk_pvec_t *out,
   uint64_t knn,
   int64_t sid0,
-  int r,
-  tk_iumap_t *sid_idx
+  int r
 ) {
   khint_t khi = tk_hbi_buckets_get(A->buckets, h);
   if (khi != tk_hbi_buckets_end(A->buckets)) {
@@ -414,17 +424,11 @@ static inline bool tk_hbi_probe_bucket (
       if (sid1 == sid0)
         continue;
 
-      int64_t id;
-      if (sid_idx) {
-        khi = tk_iumap_get(sid_idx, sid1);
-        if (khi == tk_iumap_end(sid_idx))
-          continue;
-        id = tk_iumap_val(sid_idx, khi);
-      } else {
-        id = tk_hbi_sid_uid(A, sid1);
-        if (id < 0)
-          continue;
-      }
+      if (sid1 < 0 || sid1 >= (int64_t)A->sid_to_pos->n)
+        continue;
+      int64_t id = A->sid_to_pos->a[sid1];
+      if (id < 0)
+        continue;
 
       tk_pvec_push(out, tk_pair(id, (int64_t) r));
       if (knn && out->n >= knn)
@@ -440,13 +444,12 @@ static inline void tk_hbi_populate_neighborhood (
   int64_t sid,
   char *V,
   tk_pvec_t *hood,
-  tk_iumap_t *sid_idx,
   uint64_t k,
   uint64_t eps_min,
   uint64_t eps_max
 ) {
   tk_hbi_code_t h = tk_hbi_pack(V, A->features);
-  if (eps_min == 0 && tk_hbi_probe_bucket(A, h, hood, k, sid, 0, sid_idx))
+  if (eps_min == 0 && tk_hbi_probe_bucket(A, h, hood, k, sid, 0))
     return;
   int pos[TK_HBI_BITS];
   int nbits = (int) A->features;
@@ -458,7 +461,7 @@ static inline void tk_hbi_populate_neighborhood (
       tk_hbi_code_t mask = 0;
       for (int i = 0; i < r; i ++)
         mask |= (1U << pos[i]);
-      if (tk_hbi_probe_bucket(A, h ^ mask, hood, k, sid, r, sid_idx))
+      if (tk_hbi_probe_bucket(A, h ^ mask, hood, k, sid, r))
         return;
       int i;
       for (i = r - 1; i >= 0; i--) {
@@ -659,18 +662,35 @@ static inline void tk_hbi_neighborhoods (
     return;
   }
 
-  int kha;
-  khint_t khi;
-  tk_ivec_t *sids = tk_iumap_values(L, A->uid_sid);
-  tk_ivec_asc(sids, 0, sids->n);
-  tk_ivec_t *uids = tk_ivec_create(L, sids->n, 0, 0);
-  for (uint64_t i = 0; i < sids->n; i ++)
-    uids->a[i] = tk_hbi_sid_uid(A, sids->a[i]);
+  uint64_t n_active = 0;
+  for (uint64_t sid = 0; sid < A->next_sid; sid++)
+    if (A->sid_to_uid->a[sid] >= 0)
+      n_active++;
 
-  tk_iumap_t *sid_idx = tk_iumap_create(0, 0);
-  for (uint64_t i = 0; i < sids->n; i ++) {
-    khi = tk_iumap_put(sid_idx, sids->a[i], &kha);
-    tk_iumap_setval(sid_idx, khi, (int64_t) i);
+  tk_ivec_t *uids = tk_ivec_create(L, n_active, 0, 0);
+  uids->n = n_active;
+  tk_ivec_t *sids = tk_ivec_create(L, n_active, 0, 0);
+  sids->n = n_active;
+  uint64_t idx = 0;
+  for (uint64_t sid = 0; sid < A->next_sid; sid++) {
+    int64_t uid = A->sid_to_uid->a[sid];
+    if (uid >= 0) {
+      sids->a[idx] = (int64_t)sid;
+      uids->a[idx] = uid;
+      idx++;
+    }
+  }
+
+  tk_ivec_ensure(A->sid_to_pos, A->next_sid);
+  A->sid_to_pos->n = A->next_sid;
+  idx = 0;
+  for (uint64_t sid = 0; sid < A->next_sid; sid++) {
+    if (A->sid_to_uid->a[sid] >= 0) {
+      A->sid_to_pos->a[sid] = (int64_t) idx;
+      idx++;
+    } else {
+      A->sid_to_pos->a[sid] = -1;
+    }
   }
   tk_hbi_hoods_t *hoods = tk_hbi_hoods_create(L, uids->n, 0, 0);
   for (uint64_t i = 0; i < hoods->n; i ++) {
@@ -684,13 +704,11 @@ static inline void tk_hbi_neighborhoods (
   for (uint64_t i = 0; i < hoods->n; i ++) {
     tk_pvec_t *hood = hoods->a[i];
     int64_t sid = sids->a[i];
-    tk_hbi_populate_neighborhood(A, i, sid, tk_hbi_sget(A, sid), hood, sid_idx, k, eps_min, eps_max);
+    tk_hbi_populate_neighborhood(A, i, sid, tk_hbi_sget(A, sid), hood, k, eps_min, eps_max);
   }
 
   if (mutual && k)
     tk_hbi_mutualize(L, A, hoods, uids, 0, NULL);
-
-  if (sid_idx) tk_iumap_destroy(sid_idx);
 
   if (min > 0) {
     int64_t keeper_count = 0;
@@ -787,13 +805,12 @@ static inline void tk_hbi_neighborhoods_by_ids (
   for (uint64_t i = 0; i < uids->n; i ++)
     sids->a[i] = tk_hbi_uid_sid(A, uids->a[i], TK_HBI_FIND);
 
-  int kha;
-  khint_t khi;
-  tk_iumap_t *sid_idx = tk_iumap_create(0, 0);
-  for (uint64_t i = 0; i < sids->n; i ++) {
-    khi = tk_iumap_put(sid_idx, sids->a[i], &kha);
-    tk_iumap_setval(sid_idx, khi, (int64_t) i);
-  }
+  tk_ivec_ensure(A->sid_to_pos, A->next_sid);
+  A->sid_to_pos->n = A->next_sid;
+  for (uint64_t sid = 0; sid < A->next_sid; sid++)
+    A->sid_to_pos->a[sid] = -1;
+  for (uint64_t i = 0; i < sids->n; i++)
+    A->sid_to_pos->a[sids->a[i]] = (int64_t)i;
 
   tk_hbi_hoods_t *hoods = tk_hbi_hoods_create(L, uids->n, 0, 0);
   for (uint64_t i = 0; i < hoods->n; i ++) {
@@ -807,13 +824,11 @@ static inline void tk_hbi_neighborhoods_by_ids (
   for (uint64_t i = 0; i < hoods->n; i ++) {
     tk_pvec_t *hood = hoods->a[i];
     int64_t sid = sids->a[i];
-    tk_hbi_populate_neighborhood(A, i, sid, tk_hbi_sget(A, sid), hood, sid_idx, k, eps_min, eps_max);
+    tk_hbi_populate_neighborhood(A, i, sid, tk_hbi_sget(A, sid), hood, k, eps_min, eps_max);
   }
 
   if (mutual && k)
     tk_hbi_mutualize(L, A, hoods, uids, 0, NULL);
-
-  tk_iumap_destroy(sid_idx);
 
   if (min > 0) {
     int64_t keeper_count = 0;
@@ -925,7 +940,7 @@ static inline void tk_hbi_neighborhoods_by_vecs (
     for (uint64_t i = 0; i < hoods->n; i ++) {
       tk_pvec_t *hood = hoods->a[i];
       char *vec = (char *)(query_vecs->a + i * vec_bytes);
-      tk_hbi_populate_neighborhood(A, i, -1, vec, hood, NULL, k, eps_min, eps_max);
+      tk_hbi_populate_neighborhood(A, i, -1, vec, hood, k, eps_min, eps_max);
     }
 
     #pragma omp barrier
@@ -1093,7 +1108,7 @@ static inline tk_pvec_t *tk_hbi_neighbors_by_vec (
   tk_hbi_code_t h0 = tk_hbi_pack(vec, A->features);
   int pos[TK_HBI_BITS];
   int nbits = (int) A->features;
-  if (eps_min == 0 && tk_hbi_probe_bucket(A, h0, out, knn, sid0, 0, NULL))
+  if (eps_min == 0 && tk_hbi_probe_bucket(A, h0, out, knn, sid0, 0))
     return out;
   int r_start = (eps_min == 0) ? 1 : (int) eps_min;
   for (int r = r_start; r <= (int) eps_max && r <= nbits; r ++) {
@@ -1103,7 +1118,7 @@ static inline tk_pvec_t *tk_hbi_neighbors_by_vec (
       tk_hbi_code_t mask = 0;
       for (int i = 0; i < r; i ++)
         mask |= (1U << pos[i]);
-      if (tk_hbi_probe_bucket(A, h0 ^ mask, out, knn, sid0, r, NULL))
+      if (tk_hbi_probe_bucket(A, h0 ^ mask, out, knn, sid0, r))
         return out;
       int j;
       for (j = r - 1; j >= 0; j --) {
@@ -1525,7 +1540,10 @@ static inline tk_hbi_t *tk_hbi_create (
   A->uid_sid = tk_iumap_create(L, 0);
   tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
   lua_pop(L, 1);
-  A->sid_uid = tk_iumap_create(L, 0);
+  A->sid_to_uid = tk_ivec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
+  lua_pop(L, 1);
+  A->sid_to_pos = tk_ivec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
   lua_pop(L, 1);
   A->codes = tk_hbi_codes_create(L, 0, 0, 0);
@@ -1576,7 +1594,10 @@ static inline tk_hbi_t *tk_hbi_load (
   A->uid_sid = tk_iumap_load(L, fh);
   tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
   lua_pop(L, 1);
-  A->sid_uid = tk_iumap_load(L, fh);
+  A->sid_to_uid = tk_ivec_load(L, fh);
+  tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
+  lua_pop(L, 1);
+  A->sid_to_pos = tk_ivec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
   lua_pop(L, 1);
   uint64_t cnum = 0;
