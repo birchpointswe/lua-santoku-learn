@@ -89,12 +89,24 @@ static inline uint8_t tk_tsetlin_calculate (
     char *actions = tk_automata_actions(&tm->automata, clause);
     unsigned int failed = 0;
     unsigned int literals = 0;
-    for (unsigned int k = 0; k < input_chunks - 1; k ++) {
-      uint8_t inp = ((uint8_t *)input)[k];
-      uint8_t act = ((uint8_t *)actions)[k];
-      literals += (unsigned int) tk_cvec_byte_popcount(act);
-      failed += (unsigned int) tk_cvec_byte_popcount((unsigned int)(act & (~inp)));
+
+    // Optimized: Use 64-bit SIMD-enabled popcount for bulk processing
+    if (input_chunks > 1) {
+      uint64_t bulk_bits = (input_chunks - 1) * 8;
+
+      // Count literals using vectorized popcount
+      literals = (unsigned int) tk_cvec_bits_popcount_serial((uint8_t*)actions, bulk_bits);
+
+      // Count failed: compute actions & ~input, then popcount
+      // Use stack allocation for temp buffer
+      uint8_t temp[input_chunks - 1];
+      for (unsigned int k = 0; k < input_chunks - 1; k++) {
+        temp[k] = ((uint8_t *)actions)[k] & ~((uint8_t *)input)[k];
+      }
+      failed = (unsigned int) tk_cvec_bits_popcount_serial(temp, bulk_bits);
     }
+
+    // Handle last chunk with tail_mask separately
     uint8_t last_act = ((uint8_t *)actions)[input_chunks - 1] & tm->tail_mask;
     literals += (unsigned int) tk_cvec_byte_popcount(last_act);
     failed += (unsigned int) tk_cvec_byte_popcount((unsigned int)(last_act & (~((uint8_t *)input)[input_chunks - 1]) & tm->tail_mask));

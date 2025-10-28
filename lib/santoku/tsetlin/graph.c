@@ -350,12 +350,13 @@ static inline tk_pvec_t *tm_add_anchor_edges_immediate(
           tk_ivec_clear(anchors);
           for (uint64_t i = 0; i < postings->n; i++) {
             int64_t sid = postings->a[i];
-            uint32_t khi = tk_iumap_get(inv->sid_uid, sid);
-            if (khi != tk_iumap_end(inv->sid_uid)) {
-              int64_t uid = tk_iumap_val(inv->sid_uid, khi);
-              if (tk_ivec_push(anchors, uid) != 0) {
-                has_error = true;
-                break;
+            if (sid >= 0 && sid < (int64_t)inv->sid_to_uid->n) {
+              int64_t uid = inv->sid_to_uid->a[sid];
+              if (uid >= 0) {
+                if (tk_ivec_push(anchors, uid) != 0) {
+                  has_error = true;
+                  break;
+                }
               }
             }
           }

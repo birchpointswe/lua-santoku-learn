@@ -464,7 +464,7 @@ static inline void tk_agglo_init_single_linkage(
     for (uint64_t i = 0; i < adj_ids->n; i++) {
       uint64_t degree = (uint64_t)(adj_offsets->a[i + 1] - adj_offsets->a[i]);
       if (degree >= min_pts)
-        state->is_core->a[TK_CVEC_BITS_BYTE(i)] |= (1u << TK_CVEC_BITS_BIT(i));
+        ((uint8_t *) state->is_core->a)[TK_CVEC_BITS_BYTE(i)] |= (1u << TK_CVEC_BITS_BIT(i));
     }
   }
 }
