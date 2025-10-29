@@ -325,7 +325,7 @@ static inline void tk_agglo_find_min_edges_thread(
       if (!cluster || !cluster->active) continue;
       tk_pvec_clear(neighbors);
       if (state->index_type == TK_AGGLO_USE_ANN) {
-        tk_ann_neighbors_by_id(state->index.ann, cluster->cluster_id, state->knn, state->probe_radius, 0, -1, neighbors);
+        tk_ann_neighbors_by_id(state->index.ann, cluster->cluster_id, state->knn, state->probe_radius, 0, state->index.ann->features, neighbors);
       } else {
         tk_hbi_neighbors_by_id(state->index.hbi, cluster->cluster_id, state->knn, 0, state->probe_radius, neighbors);
       }

@@ -34,7 +34,7 @@ local cfg; cfg = {
     tch = false,
   },
   index = {
-    ann = true,
+    ann = false,
   },
   spectral = {
     laplacian = "unnormalized",
