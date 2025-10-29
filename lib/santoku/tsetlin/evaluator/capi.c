@@ -1203,8 +1203,6 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
   uint64_t probe_radius,
   tk_agglo_linkage_t linkage,
   uint64_t knn,
-  uint64_t knn_min,
-  bool knn_mutual,
   tk_ivec_sim_type_t cmp,
   double cmp_alpha,
   double cmp_beta,
@@ -1266,17 +1264,17 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
       tk_ivec_t *hoods_uids = NULL;
 
       if (inv != NULL) {
-        tk_inv_neighborhoods(L, inv, knn, 0.0, 1.0, knn_min, cmp, cmp_alpha, cmp_beta, knn_mutual, knn_rank, &inv_hoods, &hoods_uids);
+        tk_inv_neighborhoods(L, inv, knn, 0.0, 1.0, cmp, cmp_alpha, cmp_beta, knn_rank, &inv_hoods, &hoods_uids);
         tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
         tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
         lua_pop(L, 2);
       } else if (ann != NULL) {
-        tk_ann_neighborhoods(L, ann, knn, probe_radius, 1, -1, knn_min, knn_mutual, &ann_hoods, &hoods_uids);
+        tk_ann_neighborhoods(L, ann, knn, probe_radius, 1, ann->features, &ann_hoods, &hoods_uids);
         tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
         tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
         lua_pop(L, 2);
       } else if (hbi != NULL) {
-        tk_hbi_neighborhoods(L, hbi, knn, 1, hbi->features, knn_min, knn_mutual, &hbi_hoods, &hoods_uids);
+        tk_hbi_neighborhoods(L, hbi, knn, 1, hbi->features, &hbi_hoods, &hoods_uids);
         tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -2);
         tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
         lua_pop(L, 2);
@@ -1417,8 +1415,6 @@ static inline int tm_optimize_clustering (lua_State *L)
   }
 
   uint64_t knn = tk_lua_foptunsigned(L, 1, "optimize_clustering", "knn", 0);
-  uint64_t knn_min = tk_lua_foptunsigned(L, 1, "optimize_clustering", "knn_min", 0);
-  bool knn_mutual = tk_lua_foptboolean(L, 1, "optimize_clustering", "knn_mutual", true);
   int64_t knn_rank = tk_lua_foptinteger(L, 1, "optimize_clustering", "knn_rank", -1);
   uint64_t min_pts = tk_lua_foptunsigned(L, 1, "optimize_clustering", "min_pts", 0);
   bool assign_noise = tk_lua_foptboolean(L, 1, "optimize_clustering", "assign_noise", false);
@@ -1464,7 +1460,7 @@ static inline int tm_optimize_clustering (lua_State *L)
     L, inv, ann, hbi, state_ids, i_ids, i_eph,
     cluster_offsets, cluster_neighbors, cluster_weights,
     eval_offsets, eval_neighbors, eval_weights,
-    n_threads, probe_radius, linkage, knn, knn_min, knn_mutual, cmp, cmp_alpha,
+    n_threads, probe_radius, linkage, knn, cmp, cmp_alpha,
     cmp_beta, knn_rank, min_pts, assign_noise, metric, tolerance, i_each);
 
   tk_lua_del_ephemeron(L, TK_EVAL_EPH, i_eph, state_ididx);
