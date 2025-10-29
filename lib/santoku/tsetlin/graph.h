@@ -25,12 +25,10 @@ typedef tk_iuset_t * tk_graph_adj_item_t;
 #define tk_vec_limited
 #include <santoku/vec/tpl.h>
 
-
 typedef enum {
   TK_GRAPH_WEIGHT_POOL_MIN,
   TK_GRAPH_WEIGHT_POOL_MAX
 } tk_graph_weight_pooling_t;
-
 
 typedef struct tk_graph_s {
 
@@ -72,10 +70,8 @@ typedef struct tk_graph_s {
   double sigma_scale;
 
   uint64_t knn;
-  uint64_t knn_min;
   uint64_t knn_cache;
   double knn_eps;
-  bool knn_mutual;
   bool bridge;
   uint64_t probe_radius;
   int64_t category_ranks;
@@ -214,25 +210,14 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
     } \
   } while(0)
 
-#define TK_INDEX_NEIGHBORHOODS(inv, ann, hbi, L, k, probe_radius, eps_min, eps_max, min, mutual, cmp, alpha, beta, rank, inv_hoods_out, ann_hoods_out, hbi_hoods_out, uids_out) \
+#define TK_INDEX_NEIGHBORHOODS(L, inv, ann, hbi, k, probe_radius, cmp, alpha, beta, rank, inv_hoods_out, ann_hoods_out, hbi_hoods_out, uids_out) \
   do { \
     if ((inv) != NULL) { \
-      tk_inv_neighborhoods((L), (inv), (k), 0.0, 1.0, (min), (cmp), (alpha), (beta), (mutual), (rank), (inv_hoods_out), (uids_out)); \
+      tk_inv_neighborhoods((L), (inv), (k), 0.0, 1.0, (cmp), (alpha), (beta), (rank), (inv_hoods_out), (uids_out)); \
     } else if ((ann) != NULL) { \
-      tk_ann_neighborhoods((L), (ann), (k), (probe_radius), (eps_min), (eps_max), (min), (mutual), (ann_hoods_out), (uids_out)); \
+      tk_ann_neighborhoods((L), (ann), (k), (probe_radius), 0, (ann)->features, (ann_hoods_out), (uids_out)); \
     } else if ((hbi) != NULL) { \
-      tk_hbi_neighborhoods((L), (hbi), (k), (uint64_t)(eps_min), (uint64_t)(eps_max), (min), (mutual), (hbi_hoods_out), (uids_out)); \
-    } \
-  } while(0)
-
-#define TK_INDEX_MUTUALIZE(inv, ann, hbi, L, inv_hoods, ann_hoods, hbi_hoods, uids, min, precomputed) \
-  do { \
-    if ((inv) != NULL) { \
-      tk_inv_mutualize((L), (inv), (inv_hoods), (uids), (min), (precomputed)); \
-    } else if ((ann) != NULL) { \
-      tk_ann_mutualize((L), (ann), (ann_hoods), (uids), (min), (precomputed)); \
-    } else if ((hbi) != NULL) { \
-      tk_hbi_mutualize((L), (hbi), (hbi_hoods), (uids), (min), (precomputed)); \
+      tk_hbi_neighborhoods((L), (hbi), (k), 0, (hbi)->features, (hbi_hoods_out), (uids_out)); \
     } \
   } while(0)
 
@@ -240,7 +225,7 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
   do { \
     if ((inv_hoods) && (hood_idx) < (int64_t)(inv_hoods)->n) { \
       tk_rvec_t *__hood = (inv_hoods)->a[hood_idx]; \
-      for (uint64_t __j = 0; __j < __hood->m; __j++) { \
+      for (uint64_t __j = 0; __j < __hood->n; __j++) { \
         int64_t __nh_idx = __hood->a[__j].i; \
         if (__nh_idx >= 0 && __nh_idx < (int64_t)(uids_hoods)->n) { \
           int64_t __nh_uid = (uids_hoods)->a[__nh_idx]; \
@@ -260,7 +245,7 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
     } else if ((ann_hoods) && (hood_idx) < (int64_t)(ann_hoods)->n) { \
       tk_pvec_t *__hood = (ann_hoods)->a[hood_idx]; \
       double __denom = (features_ann) ? (double)(features_ann) : 1.0; \
-      for (uint64_t __j = 0; __j < __hood->m; __j++) { \
+      for (uint64_t __j = 0; __j < __hood->n; __j++) { \
         int64_t __nh_idx = __hood->a[__j].i; \
         if (__nh_idx >= 0 && __nh_idx < (int64_t)(uids_hoods)->n) { \
           int64_t __nh_uid = (uids_hoods)->a[__nh_idx]; \
@@ -280,7 +265,7 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
     } else if ((hbi_hoods) && (hood_idx) < (int64_t)(hbi_hoods)->n) { \
       tk_pvec_t *__hood = (hbi_hoods)->a[hood_idx]; \
       double __denom = (features_hbi) ? (double)(features_hbi) : 1.0; \
-      for (uint64_t __j = 0; __j < __hood->m; __j++) { \
+      for (uint64_t __j = 0; __j < __hood->n; __j++) { \
         int64_t __nh_idx = __hood->a[__j].i; \
         if (__nh_idx >= 0 && __nh_idx < (int64_t)(uids_hoods)->n) { \
           int64_t __nh_uid = (uids_hoods)->a[__nh_idx]; \

@@ -37,10 +37,8 @@ static inline tk_graph_t *tm_graph_create (
   int64_t sigma_k,
   double sigma_scale,
   uint64_t knn,
-  uint64_t knn_min,
   uint64_t knn_cache,
   double knn_eps,
-  bool knn_mutual,
   bool bridge,
   uint64_t probe_radius
 );
@@ -120,10 +118,7 @@ static inline tk_evec_t *tm_mst_knn_candidates (
     int64_t cu = tk_dsu_find(graph->dsu, u);
     int64_t neighbor_idx;
     int64_t v;
-
-    // NOTE: Using hood->m (not hood->n) to include non-mutual neighbors
-    TK_GRAPH_FOREACH_HOOD_NEIGHBOR(graph->knn_inv_hoods, graph->knn_ann_hoods, graph->knn_hbi_hoods,
-                                     hood_idx, graph->uids_hoods, neighbor_idx, v, {
+    TK_GRAPH_FOREACH_HOOD_NEIGHBOR(graph->knn_inv_hoods, graph->knn_ann_hoods, graph->knn_hbi_hoods, hood_idx, graph->uids_hoods, neighbor_idx, v, {
       if (cu == tk_dsu_find(graph->dsu, v))
         continue;
       tk_edge_t e = tk_edge(u, v, 0);
@@ -485,21 +480,14 @@ static inline void tm_run_knn_queries (
   bool have_index = graph->knn_inv != NULL || graph->knn_ann != NULL || graph->knn_hbi != NULL;
   if (!graph->knn || !graph->knn_cache || !have_index)
     return;
-  int64_t eps_max = graph->knn_inv ? -1 :
-                     graph->knn_ann ? (int64_t)(graph->knn_ann->features * graph->knn_eps) :
-                     (int64_t)(graph->knn_hbi->features * graph->knn_eps);
-  TK_INDEX_NEIGHBORHOODS(graph->knn_inv, graph->knn_ann, graph->knn_hbi, L,
-                         graph->knn_cache, graph->probe_radius, 0, eps_max, 0, false,
-                         graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta, graph->knn_rank,
-                         &graph->knn_inv_hoods, &graph->knn_ann_hoods, &graph->knn_hbi_hoods, &graph->uids_hoods);
+  TK_INDEX_NEIGHBORHOODS(L,
+    graph->knn_inv, graph->knn_ann, graph->knn_hbi,
+    graph->knn_cache, graph->probe_radius,
+    graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta, graph->knn_rank,
+    &graph->knn_inv_hoods, &graph->knn_ann_hoods, &graph->knn_hbi_hoods, &graph->uids_hoods);
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2);
   lua_pop(L, 2);
-  if (graph->knn_mutual) {
-    TK_INDEX_MUTUALIZE(graph->knn_inv, graph->knn_ann, graph->knn_hbi, L,
-                       graph->knn_inv_hoods, graph->knn_ann_hoods, graph->knn_hbi_hoods,
-                       graph->uids_hoods, graph->knn_min, NULL);
-  }
   if (graph->uids_hoods) {
     graph->uids_idx_hoods = tk_iumap_from_ivec(L, graph->uids_hoods);
     if (!graph->uids_idx_hoods)
@@ -590,7 +578,6 @@ static inline void tm_compute_sigma (
 
   bool has_error = false;
 
-  // TODO: factor out ann/hbi/inv decision to macro
   #pragma omp parallel reduction(||:has_error)
   {
     tk_dvec_t *q_weights = NULL;
@@ -818,10 +805,8 @@ static inline int tm_adjacency (lua_State *L)
   double sigma_scale = tk_lua_foptnumber(L, 1, "graph", "sigma_scale", 1.0);
 
   uint64_t knn = tk_lua_foptunsigned(L, 1, "graph", "knn", 0);
-  uint64_t knn_min = tk_lua_foptunsigned(L, 1, "graph", "knn_min", 0);
   uint64_t knn_cache = tk_lua_foptunsigned(L, 1, "graph", "knn_cache", 0);
   double knn_eps = tk_lua_foptposdouble(L, 1, "graph", "knn_eps", 1.0);
-  bool knn_mutual = tk_lua_foptboolean(L, 1, "graph", "knn_mutual", false);
   int64_t category_ranks = tk_lua_foptinteger(L, 1, "graph", "category_ranks", -1);
 
   int64_t knn_rank_explicit = tk_lua_foptinteger(L, 1, "graph", "knn_rank", -2);
@@ -850,7 +835,7 @@ static inline int tm_adjacency (lua_State *L)
     category_anchors, category_knn, category_knn_decay, category_ranks,
     weight_inv, weight_ann, weight_hbi, weight_cmp, weight_alpha, weight_beta, weight_pooling,
     random_pairs, weight_eps, sigma_k, sigma_scale,
-    knn, knn_min, knn_cache, knn_eps, knn_mutual, bridge, probe_radius);
+    knn, knn_cache, knn_eps, bridge, probe_radius);
   int Gi = tk_lua_absindex(L, -1);
 
   tm_init_uids(L, Gi, graph);
@@ -1176,10 +1161,8 @@ static inline tk_graph_t *tm_graph_create (
   int64_t sigma_k,
   double sigma_scale,
   uint64_t knn,
-  uint64_t knn_min,
   uint64_t knn_cache,
   double knn_eps,
-  bool knn_mutual,
   bool bridge,
   uint64_t probe_radius
 ) {
@@ -1218,10 +1201,8 @@ static inline tk_graph_t *tm_graph_create (
   graph->sigma_k = sigma_k;
   graph->sigma_scale = sigma_scale;
   graph->knn = knn;
-  graph->knn_min = knn_min;
   graph->knn_cache = knn_cache;
   graph->knn_eps = knn_eps;
-  graph->knn_mutual = knn_mutual;
   graph->bridge = bridge;
   graph->probe_radius = probe_radius;
   graph->largest_component_root = -1;
