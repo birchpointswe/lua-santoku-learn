@@ -51,6 +51,7 @@ local cfg; cfg = {
     iterations = 1000,
   },
   graph = {
+    reweight = nil,
     weight_cmp = nil,
     weight_alpha = nil,
     weight_beta = nil,
@@ -158,6 +159,7 @@ test("tsetlin", function ()
   train.adj_neighbors,
   train.adj_weights =
     graph.adjacency({
+      reweight = cfg.graph.reweight,
       weight_index = train.node_combined,
       weight_cmp = cfg.graph.weight_cmp,
       weight_alpha = cfg.graph.weight_alpha,
