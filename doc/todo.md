@@ -1,36 +1,14 @@
 # Now
 
+- Parallelize booleanizer and tokenizer
+- Poor parallel core usage in cluster.h. Usage is bursty, most wall clock time spent single-threaded
+
 - Need a true hierarchical test case for HLTH
 - Abstract the landmark/out-of-sample phase behind a simple tm + index wrapper
-- Generalize tm.optimize exploration to an explore module that covers various
-  optimizations: exhaustive, binary search, and the parameter sampling mechanism
-  in tm.optimize, with integrated evaluation like the other optimize routines so
-  we don't create evaluator thread pools every epoch
-
-- tokenizer
-    - store known tokens contiguously, no need for separate mallocs/etc for each
-      token. Use a single cvec as backend, storing pointers into that cvec
-      insted of separately alloc'd strings. Ensure tokens are null terminated.
 
 # Next
 
-- Should support linkage=complete and linkage=average for completeness
-- Support shared threadpools in some way (pooled threads, pooled mutexes, etc)
-
-- Separate all lua api functions explicitly via _lua variant (_lua variants must
-  respect the expected stack semantics strictly)
-- Consistently follow the x/x_lua pattern for naming conventions
-- Can we build less of blas and primme? E.g. strictly the used functionality?
-- Build openblas as shared library installed as module, used by itq and primme
-- Threaded ITQ (now that blas is built single-threaded, we should explore doing
-  the threading at a higher level)
-
-- Rename tch
 - Rename library and project to santoku-learn
-
-- tk_graph_t
-    - Allow different indices for weight lookup and knn, both supporting
-      optional rank restriction, using the union of ids
 
 - Supplementary documentation similar to l-sth.md for the general classification
   pipeline using tsetlin machines for binary, multiclass, and multi-output
@@ -40,6 +18,11 @@
       chi2, mi, etc (look at test cases for all features)
 
 # Later
+
+- Generalize tm.optimize exploration to an explore module that covers various
+  optimizations: exhaustive, binary search, and the parameter sampling mechanism
+  in tm.optimize, with integrated evaluation like the other optimize routines so
+  we don't create evaluator thread pools every epoch
 
 - l-sth
     - IMDB & QQP
@@ -63,10 +46,8 @@
     - Sparse/dense linear SVM for codebook/classifier learning
 
 - Chores
-    - Move conf.h helpers into other santoku libraries (tm_dl_t, interleaved alloc)
     - Error checks on dimensions to prevent segfaults everywhere
     - Persist/load versioning or other safety measures
-    - Profile hot paths and vectorization opportunities
 
 - tbhss
     - Reboot as a cli interface to this framework (toku learn {OPTIONS})
@@ -79,18 +60,6 @@
 
 - tk_graph_t
     - speed up init & seed phase (slowest phase of entire pipeline)
-
-- tk_booleanizer_t
-    - mergable booleanizers, externally paralellized + merged
-    - encode_sparse/dense for ivec/cvec
-    - when both double and string observations found, split into two different features, one for continuous and the
-      other for categorical
-
-- tk_tokenizer_t
-    - mergable tokenizers parallelized independently
-    - proper Lua/C API and tk naming
-    - use booleanizer under the hood
-    - include text statistics as continuous/thresholded values
 
 - High-level APIs
     - santoku.learn.encoder
@@ -110,8 +79,21 @@
 - tk_graph_t
     - Support querying for changes made to seed list over time (removed during dedupe, added by phase)
 
-- tk_hbi/ann_t
-    - Precompute probes
+- ann/hbi
+    - Further parallelize adding and removing from indices where possible
+    - Precompute hash probes in ann/hbi
+    - Consider bloom filter to avoid empty buckets
+    - Explore/consider batch probe multiple buckets
+
+- tokenizer
+    - store known tokens contiguously, no need for separate mallocs/etc for each
+      token. Use a single cvec as backend, storing pointers into that cvec
+      insted of separately alloc'd strings. Ensure tokens are null terminated.
+
+- Separate all lua api functions explicitly via _lua variant (_lua variants must
+  respect the expected stack semantics strictly)
+
+- Consistently follow the x/x_lua pattern for naming conventions
 
 # Eventually
 
