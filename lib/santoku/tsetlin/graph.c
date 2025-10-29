@@ -34,6 +34,7 @@ static inline tk_graph_t *tm_graph_create (
   tk_graph_weight_pooling_t weight_pooling,
   uint64_t random_pairs,
   double weight_eps,
+  tk_graph_reweight_t reweight,
   int64_t sigma_k,
   double sigma_scale,
   uint64_t knn,
@@ -121,7 +122,7 @@ static inline tk_evec_t *tm_mst_knn_candidates (
     TK_GRAPH_FOREACH_HOOD_NEIGHBOR(graph->knn_inv_hoods, graph->knn_ann_hoods, graph->knn_hbi_hoods, hood_idx, graph->uids_hoods, neighbor_idx, v, {
       if (cu == tk_dsu_find(graph->dsu, v))
         continue;
-      tk_edge_t e = tk_edge(u, v, 0);
+      tk_edge_t e = tk_edge(u, v, 0.0);
       khi = tk_euset_get(graph->pairs, e);
       if (khi != tk_euset_end(graph->pairs))
         continue;
@@ -509,52 +510,144 @@ static inline void tm_run_knn_queries (
   }
 }
 
-static inline void tk_compute_weights (
+static inline void tm_compute_base_distances (
   lua_State *L,
   int Gi,
   tk_graph_t *graph
 ) {
   if (!graph->weight_inv && !graph->weight_ann && !graph->weight_hbi &&
-      !graph->category_inv && !graph->knn_inv && !graph->knn_ann && !graph->knn_hbi)
+    !graph->category_inv && !graph->knn_inv && !graph->knn_ann && !graph->knn_hbi)
     return;
-
   bool need_buffers = (graph->weight_inv && graph->weight_inv->ranks && graph->weight_inv->n_ranks > 1) ||
-                      (graph->category_inv && graph->category_inv->ranks && graph->category_inv->n_ranks > 1) ||
-                      (graph->knn_inv && graph->knn_inv->ranks && graph->knn_inv->n_ranks > 1);
-
-  #pragma omp parallel
+    (graph->category_inv && graph->category_inv->ranks && graph->category_inv->n_ranks > 1) ||
+    (graph->knn_inv && graph->knn_inv->ranks && graph->knn_inv->n_ranks > 1);
+  tk_iumap_t **all_rank_maps = NULL;
+  bool has_error = false;
+  if (graph->reweight == TK_GRAPH_REWEIGHT_RANK) {
+    all_rank_maps = tk_malloc(L, (graph->uids->n + 1) * sizeof(tk_iumap_t *));
+    tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
+    lua_pop(L, 1);
+    for (uint64_t i = 0; i < graph->uids->n; i++)
+      all_rank_maps[i] = NULL;
+    #pragma omp parallel reduction(||:has_error)
+    {
+      tk_dvec_t *q_weights = NULL;
+      tk_dvec_t *e_weights = NULL;
+      tk_dvec_t *inter_weights = NULL;
+      tk_rvec_t *neighbor_distances = tk_rvec_create(NULL, 0, 0, 0);
+      tk_iumap_t *rank_map = NULL;
+      if (need_buffers) {
+        q_weights = tk_dvec_create(NULL, 0, 0, 0);
+        e_weights = tk_dvec_create(NULL, 0, 0, 0);
+        inter_weights = tk_dvec_create(NULL, 0, 0, 0);
+        if (!q_weights || !e_weights || !inter_weights) has_error = true;
+      }
+      if (!neighbor_distances) has_error = true;
+      if (!has_error) {
+        #pragma omp for schedule(static)
+        for (int64_t i = 0; i < (int64_t)graph->uids->n; i++) {
+          if (has_error) continue;
+          tk_rvec_clear(neighbor_distances);
+          int64_t u = graph->uids->a[i];
+          int64_t neighbor_idx;
+          tk_umap_foreach_keys(graph->adj->a[i], neighbor_idx, ({
+            int64_t v = graph->uids->a[neighbor_idx];
+            double d = tk_graph_distance(graph, u, v, q_weights, e_weights, inter_weights);
+            if (tk_rvec_push(neighbor_distances, tk_rank(neighbor_idx, d)) != 0) {
+              has_error = true;
+            }
+          }))
+          if (has_error) continue;
+          tk_rvec_asc(neighbor_distances, 0, neighbor_distances->n);
+          rank_map = tk_iumap_create(NULL, neighbor_distances->n);
+          if (!rank_map) {
+            has_error = true;
+            continue;
+          }
+          int kha;
+          uint32_t khi;
+          for (uint64_t j = 0; j < neighbor_distances->n; j++) {
+            khi = tk_iumap_put(rank_map, neighbor_distances->a[j].i, &kha);
+            tk_iumap_setval(rank_map, khi, (int64_t)j);
+          }
+          all_rank_maps[i] = rank_map;
+        }
+      }
+      if (neighbor_distances) tk_rvec_destroy(neighbor_distances);
+      if (need_buffers) {
+        if (q_weights) tk_dvec_destroy(q_weights);
+        if (e_weights) tk_dvec_destroy(e_weights);
+        if (inter_weights) tk_dvec_destroy(inter_weights);
+      }
+    }
+    if (has_error) {
+      for(uint64_t i = 0; i < graph->uids->n; i++)
+        if (all_rank_maps[i]) tk_iumap_destroy(all_rank_maps[i]);
+      tk_lua_verror(L, 2, "compute_base_distances", "worker allocation failed in rank pass");
+      return;
+    }
+  }
+  #pragma omp parallel reduction(||:has_error)
   {
     tk_dvec_t *q_weights = NULL;
     tk_dvec_t *e_weights = NULL;
     tk_dvec_t *inter_weights = NULL;
-    if (need_buffers) {
+    if (need_buffers && graph->reweight != TK_GRAPH_REWEIGHT_RANK) {
       q_weights = tk_dvec_create(NULL, 0, 0, 0);
       e_weights = tk_dvec_create(NULL, 0, 0, 0);
       inter_weights = tk_dvec_create(NULL, 0, 0, 0);
+      if (!q_weights || !e_weights || !inter_weights) has_error = true;
     }
-    #pragma omp for schedule(static)
-    for (int64_t i = 0; i < (int64_t)graph->uids->n; i++) {
-      int64_t u = graph->uids->a[i];
-      int64_t neighbor_idx;
-      tk_umap_foreach_keys(graph->adj->a[i], neighbor_idx, ({
-        int64_t v = graph->uids->a[neighbor_idx];
-        if (u < v) {
-          tk_edge_t edge_key = tk_edge(u, v, 0);
-          uint32_t k = tk_euset_get(graph->pairs, edge_key);
-          if (k != tk_euset_end(graph->pairs)) {
-            double d = tk_graph_distance(graph, u, v, q_weights, e_weights, inter_weights);
-            double w = tk_graph_weight(graph, d, i, neighbor_idx);
-            kh_key(graph->pairs, k).w = w;
+    if (!has_error) {
+      #pragma omp for schedule(static)
+      for (int64_t i = 0; i < (int64_t)graph->uids->n; i++) {
+        if (has_error) continue;
+        int64_t u = graph->uids->a[i];
+        int64_t neighbor_idx;
+        tk_umap_foreach_keys(graph->adj->a[i], neighbor_idx, ({
+          int64_t v = graph->uids->a[neighbor_idx];
+          if (u < v) {
+            tk_edge_t edge_key = tk_edge(u, v, 0);
+            uint32_t k = tk_euset_get(graph->pairs, edge_key);
+            if (k != tk_euset_end(graph->pairs)) {
+              double base_uv, base_vu;
+              if (graph->reweight == TK_GRAPH_REWEIGHT_RANK) {
+                tk_iumap_t *rank_map_u = all_rank_maps[i];
+                uint32_t khi_u = tk_iumap_get(rank_map_u, neighbor_idx);
+                int64_t rank_uv = (khi_u == tk_iumap_end(rank_map_u)) ? -1 : tk_iumap_val(rank_map_u, khi_u);
+                base_uv = (rank_uv == -1) ? 1.0 : (1.0 - (1.0 / (1.0 + (double)rank_uv)));
+                tk_iumap_t *rank_map_v = all_rank_maps[neighbor_idx];
+                uint32_t khi_v = tk_iumap_get(rank_map_v, i);
+                int64_t rank_vu = (khi_v == tk_iumap_end(rank_map_v)) ? -1 : tk_iumap_val(rank_map_v, khi_v);
+                base_vu = (rank_vu == -1) ? 1.0 : (1.0 - (1.0 / (1.0 + (double)rank_vu)));
+              } else {
+                base_uv = tk_graph_distance(graph, u, v, q_weights, e_weights, inter_weights);
+                base_vu = base_uv;
+              }
+              double base_final;
+              if (graph->weight_pooling == TK_GRAPH_WEIGHT_POOL_MIN) {
+                base_final = fmax(base_uv, base_vu);
+              } else {
+                base_final = fmin(base_uv, base_vu);
+              }
+              kh_key(graph->pairs, k).w = base_final;
+            }
           }
-        }
-      }))
+        }))
+      }
     }
-
-    if (need_buffers) {
+    if (need_buffers && graph->reweight != TK_GRAPH_REWEIGHT_RANK) {
       if (q_weights) tk_dvec_destroy(q_weights);
       if (e_weights) tk_dvec_destroy(e_weights);
       if (inter_weights) tk_dvec_destroy(inter_weights);
     }
+  }
+  if (all_rank_maps) {
+    for(uint64_t i = 0; i < graph->uids->n; i++)
+      if (all_rank_maps[i]) tk_iumap_destroy(all_rank_maps[i]);
+  }
+  if (has_error) {
+    tk_lua_verror(L, 2, "compute_base_distances", "worker allocation failed in pooling pass");
   }
 }
 
@@ -565,27 +658,24 @@ static inline void tm_compute_sigma (
 ) {
   if (!graph->sigma_k || !graph->sigma_scale || graph->sigma_scale <= 0.0)
     return;
-
   graph->sigmas = tk_dvec_create(L, graph->uids->n, 0, 0);
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
   lua_pop(L, 1);
   for (uint64_t i = 0; i < graph->uids->n; i++)
     graph->sigmas->a[i] = 1.0;
-
   bool need_buffers = (graph->weight_inv && graph->weight_inv->ranks && graph->weight_inv->n_ranks > 1) ||
-                      (graph->category_inv && graph->category_inv->ranks && graph->category_inv->n_ranks > 1) ||
-                      (graph->knn_inv && graph->knn_inv->ranks && graph->knn_inv->n_ranks > 1);
-
+    (graph->category_inv && graph->category_inv->ranks && graph->category_inv->n_ranks > 1) ||
+    (graph->knn_inv && graph->knn_inv->ranks && graph->knn_inv->n_ranks > 1);
   bool has_error = false;
-
   #pragma omp parallel reduction(||:has_error)
   {
     tk_dvec_t *q_weights = NULL;
     tk_dvec_t *e_weights = NULL;
     tk_dvec_t *inter_weights = NULL;
-    tk_dvec_t *distances = tk_dvec_create(NULL, 0, 0, 0);
+    tk_rvec_t *neighbor_distances = tk_rvec_create(NULL, 0, 0, 0);
     tk_iuset_t *seen = tk_iuset_create(NULL, 0);
-    if (!distances || !seen) {
+    tk_dvec_t *final_distances = tk_dvec_create(NULL, 0, 0, 0);
+    if (!neighbor_distances || !seen || !final_distances) {
       has_error = true;
     } else {
       if (need_buffers) {
@@ -600,7 +690,8 @@ static inline void tm_compute_sigma (
         #pragma omp for schedule(static)
         for (uint64_t i = 0; i < graph->uids->n; i++) {
           if (has_error) continue;
-          tk_dvec_clear(distances);
+          tk_rvec_clear(neighbor_distances);
+          tk_dvec_clear(final_distances);
           tk_iuset_clear(seen);
           int64_t uid = graph->uids->a[i];
           int64_t neighbor_idx;
@@ -608,7 +699,7 @@ static inline void tm_compute_sigma (
             int64_t neighbor_uid = graph->uids->a[neighbor_idx];
             double d = tk_graph_distance(graph, uid, neighbor_uid, q_weights, e_weights, inter_weights);
             if (d != DBL_MAX) {
-              if (tk_dvec_push(distances, d) != 0) {
+              if (tk_rvec_push(neighbor_distances, tk_rank(neighbor_idx, d)) != 0) {
                 has_error = true;
               } else {
                 int kha;
@@ -623,35 +714,107 @@ static inline void tm_compute_sigma (
               int64_t hood_idx = tk_iumap_val(graph->uids_idx_hoods, khi);
               uint64_t features_ann = graph->knn_ann ? graph->knn_ann->features : 0;
               uint64_t features_hbi = graph->knn_hbi ? graph->knn_hbi->features : 0;
-              TK_GRAPH_FOREACH_HOOD_FOR_SIGMA(graph->knn_inv_hoods, graph->knn_ann_hoods, graph->knn_hbi_hoods,
-                                               features_ann, features_hbi, hood_idx, graph, uid,
-                                               graph->uids_hoods, graph->uids_idx, seen, distances,
-                                               q_weights, e_weights, inter_weights, has_error);
+              if (graph->knn_inv_hoods && (hood_idx) < (int64_t)(graph->knn_inv_hoods)->n) {
+                tk_rvec_t *__hood = (graph->knn_inv_hoods)->a[hood_idx];
+                for (uint64_t __j = 0; __j < __hood->n; __j++) {
+                  if (has_error) break;
+                  int64_t __nh_idx = __hood->a[__j].i;
+                  if (__nh_idx >= 0 && __nh_idx < (int64_t)(graph->uids_hoods)->n) {
+                    int64_t __nh_uid = (graph->uids_hoods)->a[__nh_idx];
+                    uint32_t __n_khi = tk_iumap_get((graph->uids_idx), __nh_uid);
+                    if (__n_khi != tk_iumap_end((graph->uids_idx))) {
+                      int64_t __nh_global_idx = tk_iumap_val((graph->uids_idx), __n_khi);
+                      int __kha;
+                      tk_iuset_put((seen), __nh_global_idx, &__kha);
+                      if (__kha) {
+                        double __d = tk_graph_distance((graph), (uid), __nh_uid, (q_weights), (e_weights), (inter_weights));
+                        if (__d == DBL_MAX) __d = __hood->a[__j].d;
+                        if (tk_rvec_push((neighbor_distances), tk_rank(__nh_global_idx, __d)) != 0) { has_error = true; }
+                      }
+                    }
+                  }
+                }
+              } else if (graph->knn_ann_hoods && (hood_idx) < (int64_t)(graph->knn_ann_hoods)->n) {
+                tk_pvec_t *__hood = (graph->knn_ann_hoods)->a[hood_idx];
+                double __denom = (features_ann) ? (double)(features_ann) : 1.0;
+                for (uint64_t __j = 0; __j < __hood->n; __j++) {
+                  if (has_error) break;
+                  int64_t __nh_idx = __hood->a[__j].i;
+                  if (__nh_idx >= 0 && __nh_idx < (int64_t)(graph->uids_hoods)->n) {
+                    int64_t __nh_uid = (graph->uids_hoods)->a[__nh_idx];
+                    uint32_t __n_khi = tk_iumap_get((graph->uids_idx), __nh_uid);
+                    if (__n_khi != tk_iumap_end((graph->uids_idx))) {
+                      int64_t __nh_global_idx = tk_iumap_val((graph->uids_idx), __n_khi);
+                      int __kha;
+                      tk_iuset_put((seen), __nh_global_idx, &__kha);
+                      if (__kha) {
+                        double __d = tk_graph_distance((graph), (uid), __nh_uid, (q_weights), (e_weights), (inter_weights));
+                        if (__d == DBL_MAX) __d = (double)__hood->a[__j].p / __denom;
+                        if (tk_rvec_push((neighbor_distances), tk_rank(__nh_global_idx, __d)) != 0) { has_error = true; }
+                      }
+                    }
+                  }
+                }
+              } else if (graph->knn_hbi_hoods && (hood_idx) < (int64_t)(graph->knn_hbi_hoods)->n) {
+                tk_pvec_t *__hood = (graph->knn_hbi_hoods)->a[hood_idx];
+                double __denom = (features_hbi) ? (double)(features_hbi) : 1.0;
+                for (uint64_t __j = 0; __j < __hood->n; __j++) {
+                  if (has_error) break;
+                  int64_t __nh_idx = __hood->a[__j].i;
+                  if (__nh_idx >= 0 && __nh_idx < (int64_t)(graph->uids_hoods)->n) {
+                    int64_t __nh_uid = (graph->uids_hoods)->a[__nh_idx];
+                    uint32_t __n_khi = tk_iumap_get((graph->uids_idx), __nh_uid);
+                    if (__n_khi != tk_iumap_end((graph->uids_idx))) {
+                      int64_t __nh_global_idx = tk_iumap_val((graph->uids_idx), __n_khi);
+                      int __kha;
+                      tk_iuset_put((seen), __nh_global_idx, &__kha);
+                      if (__kha) {
+                        double __d = tk_graph_distance((graph), (uid), __nh_uid, (q_weights), (e_weights), (inter_weights));
+                        if (__d == DBL_MAX) __d = (double)__hood->a[__j].p / __denom;
+                        if (tk_rvec_push((neighbor_distances), tk_rank(__nh_global_idx, __d)) != 0) { has_error = true; }
+                      }
+                    }
+                  }
+                }
+              }
             }
           }
-          if (!has_error) {
-            double sigma = 1.0;
-            if (distances->n > 0) {
-              tk_dvec_asc(distances, 0, distances->n);
-              uint64_t k = (graph->sigma_k > 0) ? (uint64_t)graph->sigma_k : distances->n;
-              if (k > distances->n)
-                k = distances->n;
-              sigma = distances->a[k - 1];
+          if (has_error) continue;
+          tk_rvec_asc(neighbor_distances, 0, neighbor_distances->n);
+          for(uint64_t j = 0; j < neighbor_distances->n; j++) {
+            double d;
+            if (graph->reweight == TK_GRAPH_REWEIGHT_RANK) {
+              d = 1.0 - (1.0 / (1.0 + (double)j));
+            } else {
+              d = neighbor_distances->a[j].d;
             }
-            graph->sigmas->a[i] = sigma * graph->sigma_scale;
+            if (tk_dvec_push(final_distances, d) != 0) {
+              has_error = true;
+              break;
+            }
           }
+          if (has_error) continue;
+          double sigma = 1.0;
+          if (final_distances->n > 0) {
+            tk_dvec_asc(final_distances, 0, final_distances->n);
+            uint64_t k = (graph->sigma_k > 0) ? (uint64_t)graph->sigma_k : final_distances->n;
+            if (k > final_distances->n)
+              k = final_distances->n;
+            sigma = final_distances->a[k - 1];
+          }
+          graph->sigmas->a[i] = sigma * graph->sigma_scale;
         }
       }
     }
-    if (distances) tk_dvec_destroy(distances);
+    if (neighbor_distances) tk_rvec_destroy(neighbor_distances);
     if (seen) tk_iuset_destroy(seen);
+    if (final_distances) tk_dvec_destroy(final_distances);
     if (need_buffers) {
       if (q_weights) tk_dvec_destroy(q_weights);
       if (e_weights) tk_dvec_destroy(e_weights);
       if (inter_weights) tk_dvec_destroy(inter_weights);
     }
   }
-
   if (has_error) {
     tk_lua_verror(L, 2, "compute_sigma", "worker allocation failed");
   }
@@ -661,9 +824,6 @@ static inline void tm_reweight_all_edges (
   lua_State *L,
   tk_graph_t *graph
 ) {
-  if (!graph->sigmas || graph->sigmas->n == 0)
-    return;
-
   const double eps = graph->weight_eps;
   #pragma omp parallel for schedule(static)
   for (int64_t i = 0; i < (int64_t)graph->uids->n; i++) {
@@ -675,25 +835,28 @@ static inline void tm_reweight_all_edges (
         tk_edge_t edge_key = tk_edge(u, v, 0);
         uint32_t k = tk_euset_get(graph->pairs, edge_key);
         if (k != tk_euset_end(graph->pairs)) {
-          double stored_weight = kh_key(graph->pairs, k).w;
-          double d = 1.0 - stored_weight;
+          double d = kh_key(graph->pairs, k).w;
           if (d < 0.0) d = 0.0;
           if (d > 1.0) d = 1.0;
-          double si = (i >= 0 && (uint64_t)i < graph->sigmas->n) ? graph->sigmas->a[i] : eps;
-          double sj = (neighbor_idx >= 0 && (uint64_t)neighbor_idx < graph->sigmas->n) ? graph->sigmas->a[neighbor_idx] : eps;
-          if (si <= 0.0) si = eps;
-          if (sj <= 0.0) sj = eps;
-          double s = sqrt(si * sj);
-          double new_weight;
-          if (s > 0.0) {
-            double s2 = s * s;
-            new_weight = exp(-0.5 * (d * d) / s2);
+          double sim;
+          if (graph->sigmas && graph->sigmas->n > 0) {
+            double si = (i >= 0 && (uint64_t)i < graph->sigmas->n) ? graph->sigmas->a[i] : eps;
+            double sj = (neighbor_idx >= 0 && (uint64_t)neighbor_idx < graph->sigmas->n) ? graph->sigmas->a[neighbor_idx] : eps;
+            if (si <= 0.0) si = eps;
+            if (sj <= 0.0) sj = eps;
+            double s = sqrt(si * sj);
+            if (s > 0.0) {
+              double s2 = s * s;
+              sim = exp(-0.5 * (d * d) / s2);
+            } else {
+              sim = 1.0 - d;
+            }
           } else {
-            new_weight = 1.0 - d;
+            sim = 1.0 - d;
           }
-          if (new_weight < eps) new_weight = eps;
-          if (new_weight > 1.0) new_weight = 1.0;
-          kh_key(graph->pairs, k).w = new_weight;
+          if (sim < eps) sim = eps;
+          if (sim > 1.0) sim = 1.0;
+          kh_key(graph->pairs, k).w = sim;
         }
       }
     }))
@@ -789,7 +952,7 @@ static inline int tm_adjacency (lua_State *L)
   else
     tk_lua_verror(L, 3, "graph", "invalid weight comparator specified", weight_cmp_str);
 
-  const char *weight_pooling_str = tk_lua_foptstring(L, 1, "graph", "weight_pooling", "max");
+  const char *weight_pooling_str = tk_lua_foptstring(L, 1, "graph", "weight_pooling", "min");
   tk_graph_weight_pooling_t weight_pooling = TK_GRAPH_WEIGHT_POOL_MIN;
   if (!strcmp(weight_pooling_str, "min"))
     weight_pooling = TK_GRAPH_WEIGHT_POOL_MIN;
@@ -797,6 +960,15 @@ static inline int tm_adjacency (lua_State *L)
     weight_pooling = TK_GRAPH_WEIGHT_POOL_MAX;
   else
     tk_lua_verror(L, 3, "graph", "invalid weight_pooling specified", weight_pooling_str);
+
+  const char *reweight_str = tk_lua_foptstring(L, 1, "graph", "reweight", NULL);
+  tk_graph_reweight_t reweight = TK_GRAPH_REWEIGHT_NONE;
+  if (reweight_str != NULL) {
+    if (!strcmp(reweight_str, "rank"))
+      reweight = TK_GRAPH_REWEIGHT_RANK;
+    else
+      tk_lua_verror(L, 3, "graph", "invalid reweight specified", reweight_str);
+  }
 
   uint64_t random_pairs = tk_lua_foptunsigned(L, 1, "graph", "random_pairs", 0);
 
@@ -834,7 +1006,7 @@ static inline int tm_adjacency (lua_State *L)
     category_inv, category_cmp, category_alpha, category_beta,
     category_anchors, category_knn, category_knn_decay, category_ranks,
     weight_inv, weight_ann, weight_hbi, weight_cmp, weight_alpha, weight_beta, weight_pooling,
-    random_pairs, weight_eps, sigma_k, sigma_scale,
+    random_pairs, weight_eps, reweight, sigma_k, sigma_scale,
     knn, knn_cache, knn_eps, bridge, probe_radius);
   int Gi = tk_lua_absindex(L, -1);
 
@@ -1048,7 +1220,7 @@ static inline int tm_adjacency (lua_State *L)
     }
   }
 
-  tk_compute_weights(L, Gi, graph);
+  tm_compute_base_distances(L, Gi, graph);
   tm_compute_sigma(L, Gi, graph);
   tm_reweight_all_edges(L, graph);
 
@@ -1158,6 +1330,7 @@ static inline tk_graph_t *tm_graph_create (
   tk_graph_weight_pooling_t weight_pooling,
   uint64_t random_pairs,
   double weight_eps,
+  tk_graph_reweight_t reweight,
   int64_t sigma_k,
   double sigma_scale,
   uint64_t knn,
@@ -1198,6 +1371,7 @@ static inline tk_graph_t *tm_graph_create (
 
   graph->random_pairs = random_pairs;
   graph->weight_eps = weight_eps;
+  graph->reweight = reweight;
   graph->sigma_k = sigma_k;
   graph->sigma_scale = sigma_scale;
   graph->knn = knn;

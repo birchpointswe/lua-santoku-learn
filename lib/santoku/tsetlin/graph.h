@@ -30,6 +30,11 @@ typedef enum {
   TK_GRAPH_WEIGHT_POOL_MAX
 } tk_graph_weight_pooling_t;
 
+typedef enum {
+  TK_GRAPH_REWEIGHT_NONE,
+  TK_GRAPH_REWEIGHT_RANK
+} tk_graph_reweight_t;;
+
 typedef struct tk_graph_s {
 
   tk_euset_t *pairs;
@@ -66,6 +71,7 @@ typedef struct tk_graph_s {
   tk_pvec_t *edges;
 
   double weight_eps;
+  tk_graph_reweight_t reweight;
   int64_t sigma_k;
   double sigma_scale;
 
@@ -322,50 +328,6 @@ static inline double tk_graph_distance (
   }
   return d;
 }
-
-static inline double tk_graph_weight (
-  const tk_graph_t *g,
-  double base,
-  int64_t iu,
-  int64_t iv
-) {
-  const double eps = g->weight_eps;
-  double b = base;
-  if (isnan(b) || b == DBL_MAX)
-    b = 1.0;
-  if (b < 0.0)
-    b = 0.0;
-  else if (b > 1.0)
-    b = 1.0;
-  double sim;
-  if (g->sigmas && g->sigmas->n) {
-    double si = (iu >= 0 && (uint64_t) iu < g->sigmas->n) ? g->sigmas->a[iu] : eps;
-    double sj = (iv >= 0 && (uint64_t) iv < g->sigmas->n) ? g->sigmas->a[iv] : eps;
-    if (si <= 0.0) {
-      si = eps;
-    }
-    if (sj <= 0.0) {
-      sj = eps;
-    }
-    double s = sqrt(si * sj);
-    if (s > 0.0) {
-      double s2 = s * s;
-      sim = exp(-0.5 * (b * b) / s2);
-    } else {
-      sim = 1.0 - b;
-    }
-  } else {
-    sim = 1.0 - b;
-  }
-  if (sim < eps) {
-    sim = eps;
-  }
-  if (sim > 1.0) {
-    sim = 1.0;
-  }
-  return sim;
-}
-
 
 static inline double tk_graph_get_weight (
   tk_graph_t *graph,
