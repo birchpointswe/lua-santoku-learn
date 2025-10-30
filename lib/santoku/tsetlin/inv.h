@@ -1441,6 +1441,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
       inv->wacc->a[(int64_t) inv->n_ranks * vsid + rank] += wf;
     }
   }
+  tk_ivec_uasc(inv->touched, 0, inv->touched->n);
   double *e_weights_by_rank = inv->tmp_e_weights->a;
 
   for (uint64_t i = 0; i < inv->touched->n; i ++) {
