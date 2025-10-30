@@ -133,31 +133,37 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
     } \
   } while(0)
 
-#define TK_GRAPH_FOREACH_HOOD_NEIGHBOR(inv_hoods, ann_hoods, hbi_hoods, hood_idx, uids_hoods, neighbor_idx_var, neighbor_uid_var, body) \
+#define TK_GRAPH_FOREACH_HOOD_NEIGHBOR(inv, ann, hbi, inv_hoods, ann_hoods, hbi_hoods, hood_idx, eps, uids_hoods, neighbor_idx_var, neighbor_uid_var, body) \
   do { \
     if ((inv_hoods) != NULL && (hood_idx) < (inv_hoods)->n) { \
+      double __eps = (eps); \
       tk_rvec_t *__hood = (inv_hoods)->a[hood_idx]; \
       for (uint64_t __j = 0; __j < __hood->n; __j++) { \
         tk_rank_t __r = __hood->a[__j]; \
         if (__r.i < 0 || __r.i >= (int64_t)(uids_hoods)->n) continue; \
+        if (__r.d > __eps) break; \
         (neighbor_idx_var) = __r.i; \
         (neighbor_uid_var) = (uids_hoods)->a[__r.i]; \
         body \
       } \
     } else if ((ann_hoods) != NULL && (hood_idx) < (ann_hoods)->n) { \
+      int64_t __eps = (int64_t)((eps)*(double)(ann)->features); \
       tk_pvec_t *__hood = (ann_hoods)->a[hood_idx]; \
       for (uint64_t __j = 0; __j < __hood->n; __j++) { \
         tk_pair_t __r = __hood->a[__j]; \
         if (__r.i < 0 || __r.i >= (int64_t)(uids_hoods)->n) continue; \
+        if (__r.p > __eps) break; \
         (neighbor_idx_var) = __r.i; \
         (neighbor_uid_var) = (uids_hoods)->a[__r.i]; \
         body \
       } \
     } else if ((hbi_hoods) != NULL && (hood_idx) < (hbi_hoods)->n) { \
+      int64_t __eps = (int64_t)((eps)*(double)(hbi)->features); \
       tk_pvec_t *__hood = (hbi_hoods)->a[hood_idx]; \
       for (uint64_t __j = 0; __j < __hood->n; __j++) { \
         tk_pair_t __r = __hood->a[__j]; \
         if (__r.i < 0 || __r.i >= (int64_t)(uids_hoods)->n) continue; \
+        if (__r.p > __eps) break; \
         (neighbor_idx_var) = __r.i; \
         (neighbor_uid_var) = (uids_hoods)->a[__r.i]; \
         body \
@@ -216,14 +222,14 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
     } \
   } while(0)
 
-#define TK_INDEX_NEIGHBORHOODS(L, inv, ann, hbi, k, probe_radius, cmp, alpha, beta, rank, inv_hoods_out, ann_hoods_out, hbi_hoods_out, uids_out) \
+#define TK_INDEX_NEIGHBORHOODS(L, inv, ann, hbi, k, probe_radius, eps, cmp, alpha, beta, rank, inv_hoods_out, ann_hoods_out, hbi_hoods_out, uids_out) \
   do { \
     if ((inv) != NULL) { \
-      tk_inv_neighborhoods((L), (inv), (k), 0.0, 1.0, (cmp), (alpha), (beta), (rank), (inv_hoods_out), (uids_out)); \
+      tk_inv_neighborhoods((L), (inv), (k), 0.0, (eps), (cmp), (alpha), (beta), (rank), (inv_hoods_out), (uids_out)); \
     } else if ((ann) != NULL) { \
-      tk_ann_neighborhoods((L), (ann), (k), (probe_radius), 0, (ann)->features, (ann_hoods_out), (uids_out)); \
+      tk_ann_neighborhoods((L), (ann), (k), (probe_radius), 0, ((eps)*(double)(ann)->features), (ann_hoods_out), (uids_out)); \
     } else if ((hbi) != NULL) { \
-      tk_hbi_neighborhoods((L), (hbi), (k), 0, (hbi)->features, (hbi_hoods_out), (uids_out)); \
+      tk_hbi_neighborhoods((L), (hbi), (k), 0, ((eps)*(double)(hbi)->features), (hbi_hoods_out), (uids_out)); \
     } \
   } while(0)
 
