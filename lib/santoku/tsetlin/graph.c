@@ -124,8 +124,7 @@ static inline tk_evec_t *tm_mst_knn_candidates (
     int64_t v;
     TK_GRAPH_FOREACH_HOOD_NEIGHBOR(graph->knn_inv, graph->knn_ann, graph->knn_hbi,
                                    graph->knn_inv_hoods, graph->knn_ann_hoods,
-                                   graph->knn_hbi_hoods, hood_idx,
-                                   graph->knn_eps, graph->uids_hoods,
+                                   graph->knn_hbi_hoods, hood_idx, 1.0, graph->uids_hoods,
                                    neighbor_idx, v, {
       if (cu == tk_dsu_find(graph->dsu, v))
         continue;
