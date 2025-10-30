@@ -118,7 +118,7 @@ static inline void tk_itq_encode (
     double obj = 0.0;
     #pragma omp parallel for reduction(+:obj)
     for (size_t idx = 0; idx < N * K; idx ++) {
-      double d = B[idx] - V1[idx];
+      double d = B[idx] - V0[idx];
       obj += d * d;
     }
     if (it == 0)
