@@ -76,7 +76,7 @@ local cfg; cfg = {
     cluster_metric = "biserial",
     sampled_anchors = 16,
     sampled_pairs = 16,
-    tolerance = 1e-4,
+    tolerance = 3e-2,
     retrieval = function (d)
       -- return d:max()
       return d:scores_plateau(cfg.eval.tolerance)
