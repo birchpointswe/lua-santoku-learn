@@ -272,11 +272,9 @@ static inline void tk_agglo_find_min_edges_thread(
         if (khi == tk_iumap_end(state->uid_to_adj_idx)) continue;
         int64_t adj_idx = tk_iumap_val(state->uid_to_adj_idx, khi);
         if (adj_idx < 0 || adj_idx >= (int64_t)state->adj_ids->n) continue;
-
         uint64_t offset = (state->adj_scan_offsets != NULL &&
                           adj_idx < (int64_t)state->adj_scan_offsets->n)
                          ? (uint64_t)state->adj_scan_offsets->a[adj_idx] : 0;
-
         int64_t start = state->adj_offsets->a[adj_idx];
         int64_t end = state->adj_offsets->a[adj_idx + 1];
         for (int64_t j = start + (int64_t)offset; j < end; j++) {
@@ -284,7 +282,6 @@ static inline void tk_agglo_find_min_edges_thread(
           double similarity = state->adj_weights->a[j];
           double distance = 1.0 - similarity;
           if (distance > state->current_epsilon) {
-
             if (state->adj_scan_offsets && adj_idx < (int64_t)state->adj_scan_offsets->n)
               state->adj_scan_offsets->a[adj_idx] = j - start;
             break;
@@ -609,7 +606,6 @@ static inline bool tk_agglo_iteration(
   if (state->selected_merges->n == 0)
     return false;
 
-
   int index_stack_top = tk_lua_absindex(L, -1);
   tk_ivec_t *temp_id = tk_ivec_create(L, 0, 0, 0);
   uint64_t merges_completed = 0;
@@ -624,12 +620,10 @@ static inline bool tk_agglo_iteration(
     if (!from || !to || !from->active || !to->active)
       continue;
 
-
     if (state->index_type == TK_AGGLO_USE_ANN)
       tk_ann_remove(L, state->index.ann, from->cluster_id);
     else
       tk_hbi_remove(L, state->index.hbi, from->cluster_id);
-
 
     for (uint64_t j = 0; j < from->members->n; j++) {
       int64_t uid = from->members->a[j];
@@ -638,14 +632,11 @@ static inline bool tk_agglo_iteration(
         tk_iumap_setval(state->uid_to_cluster, khi, (int64_t)to_idx);
     }
 
-
     centroid_changed = tk_agglo_cluster_merge(to, from);
-
 
     khint_t khi = tk_iumap_get(state->cluster_id_to_idx, from->cluster_id);
     if (khi != tk_iumap_end(state->cluster_id_to_idx))
       tk_iumap_del(state->cluster_id_to_idx, khi);
-
 
     for (uint64_t j = 0; j < to->members->n; j++) {
       int64_t uid = to->members->a[j];
@@ -655,7 +646,6 @@ static inline bool tk_agglo_iteration(
         assignments->a[vec_idx] = to->cluster_id;
       }
     }
-
 
     tk_ivec_clear(temp_id);
     tk_ivec_push(temp_id, to->cluster_id);
@@ -670,7 +660,6 @@ static inline bool tk_agglo_iteration(
 
     state->n_active_clusters--;
     merges_completed++;
-
 
     if (centroid_changed)
       break;
@@ -687,7 +676,6 @@ static inline bool tk_agglo_iteration(
         if (khi == tk_iumap_end(state->uid_to_adj_idx)) continue;
         int64_t adj_idx = tk_iumap_val(state->uid_to_adj_idx, khi);
         if (adj_idx < 0 || adj_idx >= (int64_t)state->adj_ids->n) continue;
-
 
         uint64_t offset = (state->adj_scan_offsets != NULL && adj_idx < (int64_t)state->adj_scan_offsets->n)
                           ? (uint64_t)state->adj_scan_offsets->a[adj_idx] : 0;
@@ -795,7 +783,6 @@ static inline int tk_agglo (
   state->thread_neighbors = tk_malloc(L, n_threads * sizeof(tk_pvec_t *));
   state->thread_min_dist = tk_malloc(L, n_threads * sizeof(double));
   state->thread_min_edges = tk_malloc(L, n_threads * sizeof(tk_pvec_t *));
-
 
   for (unsigned int i = 0; i < n_threads; i++) {
     state->thread_neighbors[i] = NULL;
