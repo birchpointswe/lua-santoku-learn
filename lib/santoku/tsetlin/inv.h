@@ -706,7 +706,7 @@ static inline void tk_inv_neighborhoods (
           wacc->a[(int64_t) inv->n_ranks * iv + rank] += wf;
         }
       }
-      tk_ivec_uasc(touched, 0, touched->n);
+      touched->n = tk_ivec_uasc(touched, 0, touched->n);
       double *e_weights_by_rank = e_weights_buf->a;
       double cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
@@ -818,7 +818,7 @@ static inline void tk_inv_neighborhoods_by_ids (
           wacc->a[(int64_t) inv->n_ranks * iv + rank] += wf;
         }
       }
-      tk_ivec_uasc(touched, 0, touched->n);
+      touched->n = tk_ivec_uasc(touched, 0, touched->n);
       double *e_weights_by_rank = e_weights_buf->a;
       double cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
@@ -964,7 +964,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
           wacc->a[(int64_t) inv->n_ranks * iv + rank] += wf;
         }
       }
-      tk_ivec_uasc(touched, 0, touched->n);
+      touched->n = tk_ivec_uasc(touched, 0, touched->n);
       double *e_weights_by_rank = e_weights_buf->a;
       double cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
@@ -1444,7 +1444,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
       inv->wacc->a[(int64_t) inv->n_ranks * vsid + rank] += wf;
     }
   }
-  tk_ivec_uasc(inv->touched, 0, inv->touched->n);
+  inv->touched->n = tk_ivec_uasc(inv->touched, 0, inv->touched->n);
   double *e_weights_by_rank = inv->tmp_e_weights->a;
 
   for (uint64_t i = 0; i < inv->touched->n; i ++) {
