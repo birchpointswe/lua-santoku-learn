@@ -96,7 +96,6 @@ static inline void tk_itq_encode (
   uint64_t it = 0;
   for (it = 0; it < max_iterations; it ++) {
     cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, N, K, K, 1.0, X, K, R, K, 0.0, V0, K);
-    tk_dvec_center(V0, N, K);
     #pragma omp parallel for
     for (size_t idx = 0; idx < N * K; idx ++)
       B[idx] = (V0[idx] >= 0.0 ? 1.0 : -1.0);
@@ -130,7 +129,6 @@ static inline void tk_itq_encode (
     last_obj = obj;
   }
   cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, N, K, K, 1.0, X, K, R, K, 0.0, V1, K);
-  tk_dvec_center(V1, N, K);
   tk_itq_sign(out->a, V1, N, K);
   free(superb);
   free(VT);
