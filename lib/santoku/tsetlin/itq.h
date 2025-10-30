@@ -115,7 +115,6 @@ static inline void tk_itq_encode (
       luaL_error(L, "ITQ SVD failed to converge (info=%d)", info);
     }
     cblas_dgemm(CblasRowMajor, CblasTrans, CblasTrans, K, K, K, 1.0, VT, K, U, K, 0.0, R, K);
-    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, N, K, K, 1.0, X, K, R, K, 0.0, V1, K);
     double obj = 0.0;
     #pragma omp parallel for reduction(+:obj)
     for (size_t idx = 0; idx < N * K; idx ++) {
@@ -130,7 +129,6 @@ static inline void tk_itq_encode (
   }
   cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, N, K, K, 1.0, X, K, R, K, 0.0, V1, K);
   tk_itq_sign(out->a, V1, N, K);
-  free(superb);
   free(VT);
   free(S);
   free(U);
