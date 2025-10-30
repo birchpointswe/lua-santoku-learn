@@ -945,7 +945,7 @@ static inline int tk_ann_neighborhoods_by_ids_lua (lua_State *L)
   uint64_t k = tk_lua_optunsigned(L, 3, "k", 0);
   uint64_t probe_radius = tk_lua_optunsigned(L, 4, "probe_radius", 3);
   uint64_t eps_min = tk_lua_optunsigned(L, 4, "eps_min", 0);
-  uint64_t eps_max = tk_lua_optunsigned(L, 5, "eps_max", 0);
+  uint64_t eps_max = tk_lua_optunsigned(L, 5, "eps_max", A->features);
   int64_t write_pos = 0;
   for (int64_t i = 0; i < (int64_t) query_ids->n; i ++) {
     int64_t uid = query_ids->a[i];
@@ -968,7 +968,7 @@ static inline int tk_ann_neighborhoods_by_vecs_lua (lua_State *L)
   uint64_t k = tk_lua_optunsigned(L, 3, "k", 0);
   uint64_t probe_radius = tk_lua_optunsigned(L, 4, "probe_radius", 3);
   uint64_t eps_min = tk_lua_optunsigned(L, 5, "eps_min", 0);
-  uint64_t eps_max = tk_lua_optunsigned(L, 6, "eps_max", 0);
+  uint64_t eps_max = tk_lua_optunsigned(L, 6, "eps_max", A->features);
   tk_ann_neighborhoods_by_vecs(L, A, query_vecs, k, probe_radius, eps_min, eps_max, NULL, NULL);
   return 2;
 }

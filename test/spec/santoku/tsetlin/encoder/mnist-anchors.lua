@@ -34,7 +34,7 @@ local cfg; cfg = {
     tch = false,
   },
   index = {
-    ann = false,
+    ann = true,
   },
   spectral = {
     laplacian = "unnormalized",
@@ -109,7 +109,6 @@ local cfg; cfg = {
     patience = 40,
     iterations = 200,
   },
-  threads = nil,
 }
 
 test("tsetlin", function ()
@@ -178,7 +177,6 @@ test("tsetlin", function ()
       knn_rank = 1,
       sigma_k = cfg.graph.sigma_k,
       bridge = cfg.graph.bridge,
-      threads = cfg.threads,
       each = function (ids, s, b, dt)
         local d, dd = stopwatch()
         str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Nodes: %-6d  Components: %-6d  Edges: %-6d\n", d, dd, dt, ids, s, b)
@@ -206,7 +204,6 @@ test("tsetlin", function ()
     neighbors = train.adj_neighbors,
     weights = train.adj_weights,
     n_hidden = dataset.n_hidden,
-    threads = cfg.threads,
     each = function (t, s, v, k)
       local d, dd = stopwatch()
       if t == "done" then
@@ -230,7 +227,6 @@ test("tsetlin", function ()
       n_dims = dataset.n_hidden,
       tolerance = cfg.itq.eps,
       iterations = cfg.itq.iterations,
-      threads = cfg.threads,
       each = function (i, a, b)
         str.printf("  ITQ completed in %s itrs. Objective %f → %f\n", i, a, b)
       end
@@ -246,7 +242,6 @@ test("tsetlin", function ()
       weights = train.adj_weights,
       tolerance = cfg.sr.eps,
       iterations = cfg.sr.iterations,
-      threads = cfg.threads,
       each = function (i, a, b)
         str.printf("  SR-Ranking completed in %s itrs. Objective %f → %f\n", i, a, b)
       end
@@ -258,7 +253,6 @@ test("tsetlin", function ()
       n_dims = dataset.n_hidden,
       tolerance = cfg.sr.eps,
       iterations = cfg.sr.iterations,
-      threads = cfg.threads,
       each = function (i, a, b)
         str.printf("  SR completed in %s itrs. Objective %f → %f\n", i, a, b)
       end
@@ -280,7 +274,6 @@ test("tsetlin", function ()
     train.codes_spectral, dataset.n_hidden = itq.dbq({
       codes = train.codes_spectral,
       n_dims = dataset.n_hidden,
-      threads = cfg.threads,
     })
   end
   collectgarbage("collect")
@@ -294,7 +287,6 @@ test("tsetlin", function ()
       weights = train.adj_weights,
       codes = train.codes_spectral,
       n_dims = dataset.n_hidden,
-      threads = cfg.threads,
       each = function (s)
         local d, dd = stopwatch()
         str.printf("  Time: %6.2f %6.2f  TCH Steps: %3d\n", d, dd, s)
@@ -323,7 +315,6 @@ test("tsetlin", function ()
       start_prefix = cfg.bits.start_prefix,
       tolerance = cfg.bits.sffs_tolerance,
       metric = cfg.eval.bits_metric,
-      threads = cfg.threads,
       each = function (bit, gain, score, action)
         local d, dd = stopwatch()
         str.printf("  Time: %6.2f %6.2f | Bit  %-3d  %-12s | Gain: %2.12f | Score: %.12f\n",
@@ -351,11 +342,10 @@ test("tsetlin", function ()
   do
     local cat_index = inv.create({ features = 10, expected_size = train.ids_spectral:size(), decay = cfg.graph.decay })
     local data = ivec.create()
-    data:copy(train.solutions, train.ids_spectral)
+    data:copy(train.solutions)
     data:add_scaled(10)
     cat_index:add(data, train.ids_spectral)
     data:destroy()
-
     train.adj_sampled_ids,
     train.adj_sampled_offsets,
     train.adj_sampled_neighbors,
@@ -364,7 +354,6 @@ test("tsetlin", function ()
         category_index = cat_index,
         category_anchors = cfg.eval.sampled_anchors,
         random_pairs = cfg.eval.sampled_pairs,
-        threads = cfg.threads
       })
     cat_index:destroy()
   end
@@ -378,7 +367,6 @@ test("tsetlin", function ()
     data:add_scaled(10)
     cat_index:add(data, test.ids)
     data:destroy()
-
     test.adj_sampled_ids,
     test.adj_sampled_offsets,
     test.adj_sampled_neighbors,
@@ -387,14 +375,13 @@ test("tsetlin", function ()
         category_index = cat_index,
         category_anchors = cfg.eval.sampled_anchors,
         random_pairs = cfg.eval.sampled_pairs,
-        threads = cfg.threads
       })
     cat_index:destroy()
   end
   collectgarbage("collect")
 
   print("Codebook stats")
-  train.entropy = eval.entropy_stats(train.codes_spectral, train.ids_spectral:size(), dataset.n_hidden, cfg.threads)
+  train.entropy = eval.entropy_stats(train.codes_spectral, train.ids_spectral:size(), dataset.n_hidden)
   str.printi("  Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)",
     train.entropy)
   collectgarbage("collect")
@@ -407,7 +394,6 @@ test("tsetlin", function ()
     neighbors = train.adj_neighbors,
     weights = train.adj_weights,
     metric = cfg.eval.retrieval_metric,
-    threads = cfg.threads,
     each = function (acc)
       local d, dd = stopwatch()
       str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.10f\n",
@@ -426,7 +412,6 @@ test("tsetlin", function ()
     neighbors = train.adj_sampled_neighbors,
     weights = train.adj_sampled_weights,
     metric = cfg.eval.retrieval_metric,
-    threads = cfg.threads,
     each = function (acc)
       local d, dd = stopwatch()
       str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.10f\n",
@@ -467,16 +452,14 @@ test("tsetlin", function ()
       sth_ids = train.ids_spectral
       sth_n = sth_ids:size()
       sth_visible = dataset.n_latent
-
       local sth_raw = ivec.create()
       dataset.problems:bits_select(nil, train.ids_spectral, dataset.n_visible, sth_raw)
       sth_raw = sth_raw:bits_to_cvec(sth_n, dataset.n_visible)
-
       local sth_idx = ann.create({ features = dataset.n_visible, expected_size = sth_ids:size() })
       sth_idx:add(sth_raw, sth_ids)
 
       local sth_hoods
-      sth_ids, sth_hoods = sth_idx:neighborhoods(dataset.n_landmarks, nil, nil, nil, nil, cfg.threads)
+      sth_ids, sth_hoods = sth_idx:neighborhoods(dataset.n_landmarks)
 
       sth_solutions = train.idx_spectral:get(sth_ids)
       sth_problems = cvec.create()
@@ -493,7 +476,7 @@ test("tsetlin", function ()
       local test_vecs = ivec.create()
       dataset.problems:bits_select(nil, test.ids, dataset.n_visible, test_vecs)
       test_vecs = test_vecs:bits_to_cvec(test.n, dataset.n_visible)
-      local nbr_ids, nbr_hoods = sth_idx:neighborhoods_by_vecs(test_vecs, dataset.n_landmarks, nil, nil, nil, cfg.threads)
+      local nbr_ids, nbr_hoods = sth_idx:neighborhoods_by_vecs(test_vecs, dataset.n_landmarks)
       for i0, hood in nbr_hoods:ieach() do
         hood:keys(tmp)
         tmp:lookup(nbr_ids)
@@ -527,10 +510,9 @@ test("tsetlin", function ()
       search_iterations = cfg.search.iterations,
       final_patience = cfg.training.patience,
       final_iterations = cfg.training.iterations,
-      threads = cfg.threads,
       search_metric = function (t)
-        local predicted = t:predict(sth_problems, sth_n, cfg.threads)
-        local accuracy = eval.encoding_accuracy(predicted, sth_solutions, sth_n, dataset.n_hidden, cfg.threads)
+        local predicted = t:predict(sth_problems, sth_n)
+        local accuracy = eval.encoding_accuracy(predicted, sth_solutions, sth_n, dataset.n_hidden)
         return accuracy.mean_hamming, accuracy
       end,
       each = function (_, is_final, train_accuracy, params, epoch, round, trial)
@@ -555,13 +537,13 @@ test("tsetlin", function ()
     idx_train = cfg.index.ann
       and ann.create({ features = dataset.n_hidden, expected_size = sth_n })
       or hbi.create({ features = dataset.n_hidden })
-    local sth_predicted = train.encoder:predict(sth_problems, sth_n, cfg.threads)
+    local sth_predicted = train.encoder:predict(sth_problems, sth_n)
     idx_train:add(sth_predicted, sth_ids)
 
     idx_test = cfg.index.ann
       and ann.create({ features = dataset.n_hidden, expected_size = test.n })
       or hbi.create({ features = dataset.n_hidden })
-    local test_predicted = train.encoder:predict(test_problems, test.n, cfg.threads)
+    local test_predicted = train.encoder:predict(test_problems, test.n)
     idx_test:add(test_predicted, test_ids)
     collectgarbage("collect")
 
@@ -572,7 +554,6 @@ test("tsetlin", function ()
       weights = train.adj_sampled_weights,
       neighbors = train.adj_sampled_neighbors,
       metric = cfg.eval.retrieval_metric,
-      threads = cfg.threads,
     })
 
     test.retrieval_scores_predicted = eval.optimize_retrieval({
@@ -582,7 +563,6 @@ test("tsetlin", function ()
       weights = test.adj_sampled_weights,
       neighbors = test.adj_sampled_neighbors,
       metric = cfg.eval.retrieval_metric,
-      threads = cfg.threads,
     })
 
     str.printi("  Codes  | Margin: %.2f#(2) | Score: %+.2f#(1)", { cfg.eval.retrieval(train.retrieval_scores) })
@@ -605,7 +585,6 @@ test("tsetlin", function ()
       linkage = cfg.clustering.linkage,
       knn = cfg.clustering.knn,
       metric = cfg.eval.cluster_metric,
-      threads = cfg.threads,
       each = function (acc)
         local d, dd = stopwatch()
         str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
@@ -625,7 +604,6 @@ test("tsetlin", function ()
       --     weights = train.adj_weights,
       --     weighted = cfg.eval.cluster_weighted,
       --     metric = cfg.eval.cluster_metric,
-      --     threads = cfg.threads
       --   })
       --   local expected_score = codes_stats.scores:get(step)
       --   local actual_score = cut_result.score
@@ -644,7 +622,6 @@ test("tsetlin", function ()
       linkage = cfg.clustering.linkage,
       knn = cfg.clustering.knn,
       metric = cfg.eval.cluster_metric,
-      threads = cfg.threads,
       each = function (acc)
         local d, dd = stopwatch()
         str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
@@ -670,7 +647,6 @@ test("tsetlin", function ()
         linkage = cfg.clustering.linkage,
         knn = cfg.clustering.knn,
         metric = cfg.eval.cluster_metric,
-        threads = cfg.threads,
         each = function (acc)
           local d, dd = stopwatch()
           str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
@@ -694,7 +670,6 @@ test("tsetlin", function ()
         linkage = cfg.clustering.linkage,
         knn = cfg.clustering.knn,
         metric = cfg.eval.cluster_metric,
-        threads = cfg.threads,
         each = function (acc)
           local d, dd = stopwatch()
           str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
