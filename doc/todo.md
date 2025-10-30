@@ -1,5 +1,6 @@
 # Now
 
+- Single-threaded bottleneck in a ITQ
 - Parallelize booleanizer and tokenizer
 - Poor parallel core usage in cluster.h. Usage is bursty, most wall clock time spent single-threaded
 
