@@ -1419,7 +1419,10 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   double *q_weights_by_rank = inv->tmp_q_weights->a;
   tk_inv_compute_query_weights_by_rank(inv, data, datalen, q_weights_by_rank);
 
-  tk_dvec_ensure(inv->wacc, n_sids * inv->n_ranks);  tk_ivec_clear(inv->touched);
+  tk_dvec_ensure(inv->wacc, n_sids * inv->n_ranks);
+  for (uint64_t i = 0; i < inv->wacc->n; i++)
+    inv->wacc->a[i] = 0.0;
+  tk_ivec_clear(inv->touched);
 
   for (size_t i = 0; i < datalen; i ++) {
     int64_t fid = data[i];

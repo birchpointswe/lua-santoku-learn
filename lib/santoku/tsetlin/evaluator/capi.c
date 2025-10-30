@@ -159,7 +159,6 @@ static void tk_eval_worker (void *dp, int sig)
       data->rank_buffer_b = tk_dumap_create(NULL, 0);
       data->itmp = tk_iuset_create(NULL, 0);
 
-      // Allocate counting sort buffers (sized for max possible hamming distance)
       uint64_t max_hamming = state->n_dims;
       data->count_buffer = tk_ivec_create(NULL, max_hamming + 1, 0, 0);
       data->avgrank_buffer = tk_dvec_create(NULL, max_hamming + 1, 0, 0);
@@ -190,13 +189,10 @@ static void tk_eval_worker (void *dp, int sig)
         int64_t start = state->offsets->a[node_idx];
         int64_t end = state->offsets->a[node_idx + 1];
 
-        // Get node code (either from codes array or index)
         char *node_code = NULL;
         if (state->codes) {
-          // Position-indexed codes (pre-arranged)
           node_code = (char *)(state->codes + node_idx * state->chunks);
         } else if (state->adjacency_ids) {
-          // Fetch from index by ID
           int64_t node_id = state->adjacency_ids->a[node_idx];
           node_code = state->ann ? tk_ann_get(state->ann, node_id)
                                  : tk_hbi_get(state->hbi, node_id);
@@ -207,7 +203,6 @@ static void tk_eval_worker (void *dp, int sig)
         for (int64_t j = start; j < end; j ++) {
           int64_t neighbor_pos = state->neighbors->a[j];
 
-          // Get neighbor code (either from codes array or index)
           char *neighbor_code = NULL;
           if (state->codes) {
             neighbor_code = (char *)(state->codes + neighbor_pos * state->chunks);
@@ -361,13 +356,10 @@ static void tk_eval_worker (void *dp, int sig)
         if (n_neighbors == 0)
           continue;
 
-        // Get node code (either from codes array or index)
         char *node_code = NULL;
         if (state->codes) {
-          // Position-indexed codes (pre-arranged)
           node_code = (char *)(state->codes + node_idx * state->chunks);
         } else if (state->adjacency_ids) {
-          // Fetch from index by ID
           int64_t node_id = state->adjacency_ids->a[node_idx];
           node_code = state->ann ? tk_ann_get(state->ann, node_id)
                                  : tk_hbi_get(state->hbi, node_id);
@@ -379,7 +371,6 @@ static void tk_eval_worker (void *dp, int sig)
         for (int64_t idx = start; idx < end; idx++) {
           int64_t neighbor_pos = state->neighbors->a[idx];
 
-          // Get neighbor code (either from codes array or index)
           char *neighbor_code = NULL;
           if (state->codes) {
             neighbor_code = (char *)(state->codes + neighbor_pos * state->chunks);
@@ -449,7 +440,6 @@ static inline int tm_class_accuracy (lua_State *L)
   state.expected = expected->a;
   state.predicted = predicted->a;
 
-  // Allocate with NULL tracking for safe cleanup on error
   state.TP = tk_malloc(L, n_dims * sizeof(atomic_ulong));
   state.FP = tk_malloc(L, n_dims * sizeof(atomic_ulong));
   state.FN = tk_malloc(L, n_dims * sizeof(atomic_ulong));
@@ -463,7 +453,6 @@ static inline int tm_class_accuracy (lua_State *L)
     atomic_init(state.FN + i, 0);
   }
 
-  // Use userdata for GC-safe allocation (auto-cleanup on error)
   tk_eval_thread_t *data = lua_newuserdata(L, n_threads * sizeof(tk_eval_thread_t));
   int data_idx = lua_gettop(L);
 
@@ -477,7 +466,6 @@ static inline int tm_class_accuracy (lua_State *L)
 
   tk_threads_signal(pool, TK_EVAL_CLASS_ACCURACY, 0);
 
-  // Reduce
   double precision_avg = 0.0, recall_avg = 0.0, f1_avg = 0.0;
   for (unsigned int c = 0; c < n_dims; c ++) {
     uint64_t tp = state.TP[c], fp = state.FP[c], fn = state.FN[c];
@@ -490,16 +478,13 @@ static inline int tm_class_accuracy (lua_State *L)
     f1_avg += state.f1[c];
   }
 
-  // Cleanup threads and pool
   tk_threads_destroy(pool);
   lua_remove(L, data_idx);
 
-  // Cleanup state arrays
   free(state.TP);
   free(state.FP);
   free(state.FN);
 
-  // Lua output
   precision_avg /= n_dims;
   recall_avg /= n_dims;
   f1_avg /= n_dims;
@@ -524,7 +509,6 @@ static inline int tm_class_accuracy (lua_State *L)
   lua_pushnumber(L, f1_avg);
   lua_setfield(L, -2, "f1");
 
-  // Final cleanup
   free(state.precision);
   free(state.recall);
   free(state.f1);
@@ -563,7 +547,6 @@ static inline void tm_clustering_accuracy (
   state.weights = weights;
   state.eval_metric = metric;
 
-  // Use userdata for GC-safe allocation
   tk_eval_thread_t *data = lua_newuserdata(L, n_threads * sizeof(tk_eval_thread_t));
   int data_idx = lua_gettop(L);
 
@@ -593,7 +576,6 @@ static inline void tm_clustering_accuracy (
   tk_threads_signal(pool, TK_EVAL_CLUSTERING_QUALITY, 0);
   tk_threads_signal(pool, TK_EVAL_CLUSTERING_QUALITY_DESTROY, 0);
 
-  // Aggregate across threads
   double total_corr_score = 0.0;
   uint64_t total_nodes_processed = 0;
   for (unsigned int i = 0; i < n_threads; i++) {
@@ -610,7 +592,6 @@ static inline int tm_clustering_accuracy_lua (lua_State *L)
 {
   lua_settop(L, 1);
 
-  // Parse parameters
   lua_getfield(L, 1, "assignments");
   tk_ivec_t *assignments = tk_ivec_peek(L, -1, "assignments");
   lua_pop(L, 1);
@@ -685,7 +666,6 @@ static inline void tm_retrieval_accuracy (
   state.margin = margin;
   state.eval_metric = metric;
 
-  // Use userdata for GC-safe allocation
   tk_eval_thread_t *data = lua_newuserdata(L, n_threads * sizeof(tk_eval_thread_t));
   int data_idx = lua_gettop(L);
 
@@ -715,7 +695,6 @@ static inline void tm_retrieval_accuracy (
   tk_threads_signal(pool, TK_EVAL_RETRIEVAL_QUALITY, 0);
   tk_threads_signal(pool, TK_EVAL_RETRIEVAL_QUALITY_DESTROY, 0);
 
-  // Aggregate quality scores across threads
   double total_quality_score = 0.0;
   uint64_t total_nodes_processed = 0;
   for (unsigned int i = 0; i < n_threads; i++) {
@@ -739,23 +718,19 @@ static inline int tm_retrieval_accuracy_lua (lua_State *L)
 {
   lua_settop(L, 1);
 
-  // Try codes first (optional)
   lua_getfield(L, 1, "codes");
   tk_cvec_t *cvec = tk_cvec_peekopt(L, -1);
   char *codes = cvec ? cvec->a : NULL;
   lua_pop(L, 1);
 
-  // Try index (optional)
   lua_getfield(L, 1, "index");
   tk_ann_t *ann = tk_ann_peekopt(L, -1);
   tk_hbi_t *hbi = tk_hbi_peekopt(L, -1);
   lua_pop(L, 1);
 
-  // Require at least one
   if (!codes && !ann && !hbi)
     tk_lua_verror(L, 3, "retrieval_accuracy", "codes or index", "must provide either codes or index (tk_ann_t/tk_hbi_t)");
 
-  // Get adjacency IDs (required if using index)
   lua_getfield(L, 1, "ids");
   tk_ivec_t *adjacency_ids = tk_ivec_peekopt(L, -1);
   lua_pop(L, 1);
@@ -775,10 +750,8 @@ static inline int tm_retrieval_accuracy_lua (lua_State *L)
   tk_dvec_t *weights = tk_dvec_peek(L, -1, "weights");
   lua_pop(L, 1);
 
-  // Get n_dims (optional if index provided)
   uint64_t n_dims = tk_lua_foptunsigned(L, 1, "retrieval_accuracy", "n_dims", 0);
   if (n_dims == 0) {
-    // Infer from index
     if (ann)
       n_dims = ann->features;
     else if (hbi)
@@ -827,10 +800,8 @@ static inline int tm_encoding_accuracy (lua_State *L)
   state.codes_expected = codes_expected;
   state.codes_predicted = codes_predicted;
 
-  // Use userdata for GC-safe allocation
   tk_eval_thread_t *data = lua_newuserdata(L, n_threads * sizeof(tk_eval_thread_t));
 
-  // Allocate bdiff arrays as userdata (GC-safe)
   uint64_t **bdiff_ptrs = lua_newuserdata(L, n_threads * sizeof(uint64_t *));
 
   tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
@@ -847,7 +818,6 @@ static inline int tm_encoding_accuracy (lua_State *L)
 
   tk_threads_signal(pool, TK_EVAL_ENCODING_ACCURACY, 0);
 
-  // Reduce
   uint64_t diff_total = 0;
   uint64_t *bdiff_total = lua_newuserdata(L, n_dims * sizeof(uint64_t));
   memset(bdiff_total, 0, n_dims * sizeof(uint64_t));
@@ -857,9 +827,8 @@ static inline int tm_encoding_accuracy (lua_State *L)
       bdiff_total[j] += data[i].bdiff[j];
   }
 
-  // Lua output
   lua_newtable(L);
-  lua_newtable(L); // dims
+  lua_newtable(L);
   double min_bdiff = 1.0, max_bdiff = 0.0;
   for (uint64_t j = 0; j < n_dims; j ++) {
     double t = (double) bdiff_total[j] / (double) n_samples;
@@ -889,7 +858,6 @@ static inline int tm_encoding_accuracy (lua_State *L)
   lua_setfield(L, -2, "ber_std");
 
   tk_threads_destroy(pool);
-  // Userdata cleanup handled by lua_settop
 
   lua_replace(L, 1);
   lua_settop(L, 1);
@@ -921,11 +889,9 @@ static inline tk_pvec_t *update_parent_from_diff(
   const tk_ivec_t *curr_assignments,
   uint64_t n_samples
 ) {
-  // Collect merge pairs: (absorbed_cluster, surviving_cluster)
   tk_pvec_t *merges = tk_pvec_create(L, 0, 0, 0);
   if (!merges) return NULL;
 
-  // Track which old clusters merged into which surviving clusters
   tk_iuset_t *surviving_ids = tk_iuset_create(NULL, 0);
   if (!surviving_ids) {
     tk_pvec_destroy(merges);
@@ -942,7 +908,6 @@ static inline tk_pvec_t *update_parent_from_diff(
 
   int64_t surviving_cluster;
   tk_umap_foreach_keys(surviving_ids, surviving_cluster, ({
-    // Collect all old cluster IDs that merged into this surviving cluster
     tk_iuset_t *old_ids = tk_iuset_create(NULL, 0);
     if (!old_ids) continue;
 
@@ -953,9 +918,7 @@ static inline tk_pvec_t *update_parent_from_diff(
       }
     }
 
-    // If multiple old clusters merged
     if (tk_iuset_size(old_ids) > 1) {
-      // Add merge pairs: all absorbed clusters point to surviving cluster
       int64_t old_id;
       tk_umap_foreach_keys(old_ids, old_id, ({
         if (old_id != surviving_cluster && old_id >= 0) {
@@ -977,7 +940,6 @@ static inline tk_ivec_t *tk_pvec_dendro_cut(
   uint64_t step,
   tk_ivec_t *assignments
 ) {
-  // Find n_samples: scan offsets for first i where offsets[i]==0 after initial values
   uint64_t n_samples = 0;
   for (uint64_t i = 0; i < offsets->n; i++) {
     if (offsets->a[i] == 0 && i > 0) {
@@ -990,18 +952,15 @@ static inline tk_ivec_t *tk_pvec_dendro_cut(
     tk_error(L, "tk_pvec_dendro_cut: invalid dendro_offsets structure", EINVAL);
   }
 
-  // Ensure assignments has correct size
   if (assignments->m < n_samples) {
     tk_ivec_ensure(assignments, n_samples);
   }
 
-  // Copy initial assignments
   for (uint64_t i = 0; i < n_samples; i++) {
     assignments->a[i] = offsets->a[i];
   }
   assignments->n = n_samples;
 
-  // Build absorption map from merges in steps 0..step-1
   tk_iumap_t *absorbed_to_surviving = tk_iumap_create(L, 0);
   tk_lua_add_ephemeron(L, TK_EVAL_EPH, -1, -1);
   lua_pop(L, 1);
@@ -1021,16 +980,15 @@ static inline tk_ivec_t *tk_pvec_dendro_cut(
     }
   }
 
-  // Resolve chains: follow absorption map to find final surviving cluster
   for (uint64_t i = 0; i < n_samples; i++) {
     int64_t cluster = assignments->a[i];
-    uint64_t chain_limit = 10000;  // Prevent infinite loops
+    uint64_t chain_limit = 10000;
     uint64_t chain_count = 0;
 
     while (chain_count < chain_limit) {
       khint_t khi = tk_iumap_get(absorbed_to_surviving, cluster);
       if (khi == tk_iumap_end(absorbed_to_surviving)) {
-        break;  // Not absorbed, this is final cluster
+        break;
       }
       cluster = tk_iumap_val(absorbed_to_surviving, khi);
       chain_count++;
@@ -1039,7 +997,6 @@ static inline tk_ivec_t *tk_pvec_dendro_cut(
     assignments->a[i] = cluster;
   }
 
-  // Remap to consecutive cluster IDs
   tk_iumap_t *cluster_remap = tk_iumap_create(L, 0);
   tk_lua_add_ephemeron(L, TK_EVAL_EPH, -1, -1);
   lua_pop(L, 1);
@@ -1077,31 +1034,25 @@ static inline void agglo_snapshot_callback (
   agglo_callback_data_t *data = (agglo_callback_data_t *)user_data;
 
   if (iteration == 0) {
-    // Initialize dendrogram: store initial assignments in offsets[0..n-1], set offsets[n]=0
     for (uint64_t i = 0; i < data->n_samples; i++) {
       data->dendro_offsets->a[i] = snapshot_assignments->a[i];
     }
-    data->dendro_offsets->a[data->n_samples] = 0;  // First merge index starts at 0
+    data->dendro_offsets->a[data->n_samples] = 0;
     data->dendro_offsets->n = data->n_samples + 1;
 
-    // Also need prev_assignments for next iteration
     tk_ivec_t *prev_assignments = tk_ivec_create(data->L, data->n_samples, 0, 0);
     tk_ivec_copy(prev_assignments, snapshot_assignments, 0, (int64_t)snapshot_assignments->n, 0);
     tk_lua_add_ephemeron(data->L, TK_EVAL_EPH, data->i_eph, -1);
     lua_pop(data->L, 1);
-    // Store prev_assignments in a temporary location (we'll use i_eph ephemeron table)
     lua_pushlightuserdata(data->L, prev_assignments);
     lua_setfield(data->L, data->i_eph, "__prev_assignments");
   } else {
-    // Retrieve prev_assignments
     lua_getfield(data->L, data->i_eph, "__prev_assignments");
     tk_ivec_t *prev_assignments = (tk_ivec_t *)lua_touserdata(data->L, -1);
     lua_pop(data->L, 1);
 
-    // Get merge pairs from diff
     tk_pvec_t *step_merges = update_parent_from_diff(data->L, prev_assignments, snapshot_assignments, data->n_samples);
 
-    // Append merges to dendro_merges
     if (step_merges) {
       for (uint64_t i = 0; i < step_merges->n; i++) {
         tk_pvec_push(data->dendro_merges, step_merges->a[i]);
@@ -1109,10 +1060,8 @@ static inline void agglo_snapshot_callback (
       tk_pvec_destroy(step_merges);
     }
 
-    // Push new offset = current dendro_merges->n
     tk_ivec_push(data->dendro_offsets, (int64_t)data->dendro_merges->n);
 
-    // Update prev_assignments for next iteration
     tk_ivec_copy(prev_assignments, snapshot_assignments, 0, (int64_t)snapshot_assignments->n, 0);
   }
 
@@ -1124,10 +1073,8 @@ static inline void agglo_snapshot_callback (
     tk_dvec_push(data->scores, score);
   }
 
-  // Always track cluster count
   tk_ivec_push(data->n_clusters, (int64_t)n_active_clusters);
 
-  // User callback if provided
   if (data->i_each > -1) {
     lua_pushvalue(data->L, data->i_each);
     lua_newtable(data->L);
@@ -1178,10 +1125,10 @@ static inline int tm_setup_clustering_ids (
 }
 
 typedef struct {
-  tk_ivec_t *dendro_offsets;  // [0..n-1]=initial_assignments, [n+i]=merge offset for step i
-  tk_pvec_t *dendro_merges;   // merge pairs (absorbed, surviving)
-  tk_dvec_t *scores;          // scores->a[step] = quality score
-  tk_ivec_t *n_clusters;      // n_clusters->a[step] = cluster count at step
+  tk_ivec_t *dendro_offsets;
+  tk_pvec_t *dendro_merges;
+  tk_dvec_t *scores;
+  tk_ivec_t *n_clusters;
   uint64_t n_steps;
 } tm_optimize_result_t;
 
@@ -1245,8 +1192,7 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
   tk_ivec_t *cluster_adj_neighbors = NULL;
   tk_dvec_t *cluster_adj_weights = NULL;
 
-  if (linkage == TK_AGGLO_LINKAGE_SINGLE && knn > 0) {
-    // Case 1: User provided cluster_xxx CSR - use directly
+  if (linkage == TK_AGGLO_LINKAGE_SINGLE) {
     if (cluster_offsets && cluster_neighbors && cluster_weights) {
       cluster_adj_ids = ids ? ids :
                         inv ? tk_iumap_keys(L, inv->uid_sid) :
@@ -1256,8 +1202,7 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
       cluster_adj_neighbors = cluster_neighbors;
       cluster_adj_weights = cluster_weights;
     }
-    // Case 2: Generate hoods from index, then convert to CSR
-    else {
+    else if (knn > 0) {
       tk_inv_hoods_t *inv_hoods = NULL;
       tk_ann_hoods_t *ann_hoods = NULL;
       tk_hbi_hoods_t *hbi_hoods = NULL;
@@ -1280,7 +1225,6 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
         lua_pop(L, 2);
       }
 
-      // Convert hoods to CSR
       uint64_t features = inv ? inv->features :
                          ann ? ann->features :
                          hbi ? hbi->features : 0;
@@ -1349,7 +1293,6 @@ static inline int tm_optimize_clustering (lua_State *L)
   tk_ivec_t *ids = tk_ivec_peekopt(L, -1);
   int i_ids = ids == NULL ? -1 : tk_lua_absindex(L, -1);
 
-  // Un-prefixed adjacency (for backward compat and defaults)
   lua_getfield(L, 1, "offsets");
   tk_ivec_t *offsets = tk_ivec_peekopt(L, -1);
   lua_pop(L, 1);
@@ -1362,7 +1305,6 @@ static inline int tm_optimize_clustering (lua_State *L)
   tk_dvec_t *weights = tk_dvec_peekopt(L, -1);
   lua_pop(L, 1);
 
-  // Clustering adjacency (optional for single linkage)
   lua_getfield(L, 1, "cluster_offsets");
   tk_ivec_t *cluster_offsets = tk_ivec_peekopt(L, -1);
   lua_pop(L, 1);
@@ -1375,7 +1317,6 @@ static inline int tm_optimize_clustering (lua_State *L)
   tk_dvec_t *cluster_weights = tk_dvec_peekopt(L, -1);
   lua_pop(L, 1);
 
-  // Eval adjacency (optional)
   lua_getfield(L, 1, "eval_offsets");
   tk_ivec_t *eval_offsets = tk_ivec_peekopt(L, -1);
   lua_pop(L, 1);
@@ -1388,12 +1329,10 @@ static inline int tm_optimize_clustering (lua_State *L)
   tk_dvec_t *eval_weights = tk_dvec_peekopt(L, -1);
   lua_pop(L, 1);
 
-  // Apply defaults: cluster_xxx defaults to offsets/neighbors/weights
   if (!cluster_offsets) cluster_offsets = offsets;
   if (!cluster_neighbors) cluster_neighbors = neighbors;
   if (!cluster_weights) cluster_weights = weights;
 
-  // Apply defaults: eval_xxx defaults to cluster_xxx
   if (!eval_offsets) eval_offsets = cluster_offsets;
   if (!eval_neighbors) eval_neighbors = cluster_neighbors;
   if (!eval_weights) eval_weights = cluster_weights;
@@ -1407,7 +1346,6 @@ static inline int tm_optimize_clustering (lua_State *L)
   else if (!strcmp(linkage_str, "single"))
     linkage = TK_AGGLO_LINKAGE_SINGLE;
 
-  // No index: default to single linkage for adjacency-only clustering
   if (inv == NULL && ann == NULL && hbi == NULL) {
     linkage = TK_AGGLO_LINKAGE_SINGLE;
     if (ids == NULL)
@@ -1436,7 +1374,7 @@ static inline int tm_optimize_clustering (lua_State *L)
   if (linkage == TK_AGGLO_LINKAGE_SINGLE && knn == 0 && (inv != NULL || ann != NULL || hbi != NULL))
     tk_lua_verror(L, 3, "optimize_clustering", "knn", "required");
   else if (linkage == TK_AGGLO_LINKAGE_CENTROID && knn == 0)
-    knn = 1; // find single nearest other centroid
+    knn = 1;
 
   double tolerance = tk_lua_foptnumber(L, 1, "optimize_clustering", "tolerance", 1e-12);
   char *metric_str = tk_lua_foptstring(L, 1, "optimize_clustering", "metric", "biserial");
@@ -1501,23 +1439,19 @@ static inline int tm_optimize_retrieval (lua_State *L)
 {
   lua_settop(L, 1);
 
-  // Try codes first (optional)
   lua_getfield(L, 1, "codes");
   tk_cvec_t *cvec = tk_cvec_peekopt(L, -1);
   char *codes = cvec ? cvec->a : NULL;
   lua_pop(L, 1);
 
-  // Try index (optional)
   lua_getfield(L, 1, "index");
   tk_ann_t *ann = tk_ann_peekopt(L, -1);
   tk_hbi_t *hbi = tk_hbi_peekopt(L, -1);
   lua_pop(L, 1);
 
-  // Require at least one
   if (!codes && !ann && !hbi)
     tk_lua_verror(L, 3, "optimize_retrieval", "codes or index", "must provide either codes or index (tk_ann_t/tk_hbi_t)");
 
-  // Get adjacency IDs (required if using index)
   lua_getfield(L, 1, "ids");
   tk_ivec_t *adjacency_ids = tk_ivec_peekopt(L, -1);
   lua_pop(L, 1);
@@ -1537,10 +1471,8 @@ static inline int tm_optimize_retrieval (lua_State *L)
   tk_dvec_t *weights = tk_dvec_peek(L, -1, "weights");
   lua_pop(L, 1);
 
-  // Get n_dims (optional if index provided)
   uint64_t n_dims = tk_lua_foptunsigned(L, 1, "optimize_retrieval", "n_dims", 0);
   if (n_dims == 0) {
-    // Infer from index
     if (ann)
       n_dims = ann->features;
     else if (hbi)
@@ -1811,23 +1743,19 @@ static inline int tm_optimize_bits (lua_State *L)
 {
   lua_settop(L, 1);
 
-  // Try codes first (optional)
   lua_getfield(L, 1, "codes");
   tk_cvec_t *cvec = tk_cvec_peekopt(L, -1);
   char *codes = cvec ? cvec->a : NULL;
   lua_pop(L, 1);
 
-  // Try index (optional)
   lua_getfield(L, 1, "index");
   tk_ann_t *ann = tk_ann_peekopt(L, -1);
   tk_hbi_t *hbi = tk_hbi_peekopt(L, -1);
   lua_pop(L, 1);
 
-  // Require at least one
   if (!codes && !ann && !hbi)
     tk_lua_verror(L, 3, "optimize_bits", "codes or index", "must provide either codes or index (tk_ann_t/tk_hbi_t)");
 
-  // Get adjacency IDs (required if using index)
   lua_getfield(L, 1, "ids");
   tk_ivec_t *adjacency_ids = tk_ivec_peekopt(L, -1);
   lua_pop(L, 1);
@@ -1847,10 +1775,8 @@ static inline int tm_optimize_bits (lua_State *L)
   tk_dvec_t *weights = tk_dvec_peek(L, -1, "weights");
   lua_pop(L, 1);
 
-  // Get n_dims (optional if index provided)
   uint64_t n_dims = tk_lua_foptunsigned(L, 1, "optimize_bits", "n_dims", 0);
   if (n_dims == 0) {
-    // Infer from index
     if (ann)
       n_dims = ann->features;
     else if (hbi)
@@ -1894,7 +1820,6 @@ static inline int tm_optimize_bits (lua_State *L)
   state.eval_metric = metric;
   state.L = L;
 
-  // Use userdata for GC-safe allocation
   tk_eval_thread_t *data = lua_newuserdata(L, n_threads * sizeof(tk_eval_thread_t));
   int data_idx = lua_gettop(L);
 
@@ -1918,10 +1843,9 @@ static inline int tm_optimize_bits (lua_State *L)
       return 0;
     }
   }
-  tm_optimize_bits_prefix_greedy(L, &state, pool, i_each); // result
+  tm_optimize_bits_prefix_greedy(L, &state, pool, i_each);
   tk_threads_signal(pool, TK_EVAL_GRAPH_RECONSTRUCTION_DESTROY, 0);
   tk_threads_destroy(pool);
-  // Userdata cleanup handled by lua_settop
   lua_replace(L, 1);
   lua_settop(L, 1);
   lua_gc(L, LUA_GCCOLLECT, 0);
@@ -1949,8 +1873,8 @@ static inline int tm_entropy_stats (lua_State *L)
   }
 
   double min_entropy = 1.0, max_entropy = 0.0, sum_entropy = 0.0;
-  lua_newtable(L); // result
-  lua_newtable(L); // per-bit entropy table
+  lua_newtable(L);
+  lua_newtable(L);
   for (uint64_t j = 0; j < n_dims; j ++) {
     double entropy = entropies->a[j];
     lua_pushinteger(L, (int64_t) ids->a[j] + 1);
@@ -2150,7 +2074,7 @@ static luaL_Reg tm_evaluator_fns[] =
 
 int luaopen_santoku_tsetlin_evaluator_capi (lua_State *L)
 {
-  lua_newtable(L); // t
-  tk_lua_register(L, tm_evaluator_fns, 0); // t
+  lua_newtable(L);
+  tk_lua_register(L, tm_evaluator_fns, 0);
   return 1;
 }
