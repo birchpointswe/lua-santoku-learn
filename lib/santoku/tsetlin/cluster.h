@@ -268,6 +268,7 @@ static inline void tk_agglo_init_single_linkage(
   state->adj_scan_offsets = tk_ivec_create(L, adj_ids->n, 0, 0);
   tk_lua_add_ephemeron(L, TK_AGGLO_EPH, state_idx, -1);
   lua_pop(L, 1);
+  #pragma omp parallel for schedule(static)
   for (uint64_t i = 0; i < adj_ids->n; i++)
     state->adj_scan_offsets->a[i] = 0;
   state->adj_scan_offsets->n = adj_ids->n;
@@ -276,13 +277,18 @@ static inline void tk_agglo_init_single_linkage(
     state->is_core = tk_cvec_create(L, n_bytes, 0, 0);
     tk_lua_add_ephemeron(L, TK_AGGLO_EPH, state_idx, -1);
     lua_pop(L, 1);
+    #pragma omp parallel for schedule(static)
     for (uint64_t i = 0; i < n_bytes; i++)
       state->is_core->a[i] = 0;
     state->is_core->n = n_bytes;
+    #pragma omp parallel for schedule(static)
     for (uint64_t i = 0; i < adj_ids->n; i++) {
       uint64_t degree = (uint64_t)(adj_offsets->a[i + 1] - adj_offsets->a[i]);
-      if (degree >= min_pts)
-        ((uint8_t *) state->is_core->a)[TK_CVEC_BITS_BYTE(i)] |= (1u << TK_CVEC_BITS_BIT(i));
+      if (degree >= min_pts) {
+        uint8_t bit = (1u << TK_CVEC_BITS_BIT(i));
+        #pragma omp atomic
+        ((uint8_t *) state->is_core->a)[TK_CVEC_BITS_BYTE(i)] |= bit;
+      }
     }
   }
 }
@@ -619,6 +625,7 @@ static inline bool tk_agglo_iteration(
   }
   if (state->linkage == TK_AGGLO_LINKAGE_SINGLE && merges_completed > 0) {
     double next_epsilon = INFINITY;
+    #pragma omp parallel for reduction(min:next_epsilon) schedule(dynamic, 8)
     for (uint64_t i = 0; i < state->n_clusters; i++) {
       tk_agglo_cluster_t *cluster = state->clusters[i];
       if (!cluster || !cluster->active) continue;
@@ -797,6 +804,7 @@ static inline int tk_agglo (
       break;
   }
   if (state->linkage == TK_AGGLO_LINKAGE_SINGLE && state->assign_noise && state->is_core != NULL) {
+    #pragma omp parallel for schedule(static, 64)
     for (uint64_t i = 0; i < n_samples; i++) {
       int64_t uid = uids->a[i];
       if (state->uid_to_adj_idx == NULL) continue;

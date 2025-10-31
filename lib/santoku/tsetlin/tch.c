@@ -2,7 +2,6 @@
 #include <santoku/tsetlin/graph.h>
 #include <santoku/ivec.h>
 #include <santoku/cvec.h>
-#include <santoku/threads.h>
 
 #include <float.h>
 #include <lauxlib.h>

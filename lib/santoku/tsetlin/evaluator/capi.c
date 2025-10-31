@@ -1,28 +1,14 @@
 #include <santoku/iuset.h>
 #include <santoku/tsetlin/graph.h>
 #include <santoku/tsetlin/cluster.h>
-#include <santoku/threads.h>
 #include <santoku/ivec.h>
 #include <santoku/cvec.h>
 #include <santoku/rvec.h>
 #include <santoku/pvec.h>
 #include <math.h>
+#include <assert.h>
 
 #define TK_EVAL_EPH "tk_eval_eph"
-
-typedef enum {
-  TK_EVAL_CLASS_ACCURACY,
-  TK_EVAL_ENCODING_ACCURACY,
-  TK_EVAL_GRAPH_RECONSTRUCTION_INIT,
-  TK_EVAL_GRAPH_RECONSTRUCTION,
-  TK_EVAL_GRAPH_RECONSTRUCTION_DESTROY,
-  TK_EVAL_CLUSTERING_QUALITY_INIT,
-  TK_EVAL_CLUSTERING_QUALITY,
-  TK_EVAL_CLUSTERING_QUALITY_DESTROY,
-  TK_EVAL_RETRIEVAL_QUALITY_INIT,
-  TK_EVAL_RETRIEVAL_QUALITY,
-  TK_EVAL_RETRIEVAL_QUALITY_DESTROY,
-} tk_eval_stage_t;
 
 typedef enum {
   TK_EVAL_METRIC_NONE,
@@ -81,346 +67,8 @@ typedef struct {
   tk_hbi_hoods_t *hbi_hoods;
   tk_ivec_t *uids_hoods;
   tk_eval_metric_t eval_metric;
-  unsigned int agglo_n_threads;
   uint64_t margin;
 } tk_eval_t;
-
-typedef struct {
-  tk_thread_t *self;
-  tk_eval_t *state;
-  atomic_bool has_error;
-  uint64_t diff;
-  uint64_t *bdiff;
-  uint64_t sfirst, slast;
-  uint64_t pfirst, plast;
-  uint64_t dfirst, dlast;
-  uint64_t mfirst, mlast;
-  tk_rvec_t *rtmp;
-  tk_iuset_t *itmp;
-  uint64_t wfirst, wlast;
-  tk_pvec_t *ptmp;
-  tk_rvec_t **adj_ranks;
-  tk_dumap_t **adj_ranks_idx;
-  tk_pvec_t *bin_ranks;
-  double recon_score;
-  double recon_weight;
-  uint64_t nodes_processed;
-  tk_dsu_t *dsu;
-  tk_cvec_t *is_core;
-  uint64_t *prefix_cache;
-  char *prefix_bytes;
-  uint64_t prefix_cache_depth;
-  double corr_score;
-  uint64_t corr_nodes_processed;
-  tk_ivec_t *count_buffer;
-  tk_dvec_t *avgrank_buffer;
-  tk_dumap_t *rank_buffer_b;
-} tk_eval_thread_t;
-
-static void tk_eval_worker (void *dp, int sig)
-{
-  tk_eval_thread_t *data = (tk_eval_thread_t *) dp;
-  tk_eval_t *state = data->state;
-  switch ((tk_eval_stage_t) sig) {
-
-    case TK_EVAL_CLASS_ACCURACY:
-      for (unsigned int i = data->sfirst; i <= data->slast; i ++) {
-        unsigned int y_pred = state->predicted[i];
-        unsigned int y_true = state->expected[i];
-        if (y_pred >= state->n_dims || y_true >= state->n_dims)
-          continue;
-        if (y_pred == y_true)
-          atomic_fetch_add(state->TP + y_true, 1);
-        else {
-          atomic_fetch_add(state->FP + y_pred, 1);
-          atomic_fetch_add(state->FN + y_true, 1);
-        }
-      }
-      break;
-
-    case TK_EVAL_ENCODING_ACCURACY:
-      for (uint64_t i = data->sfirst; i <= data->slast; i ++) {
-        for (uint64_t j = 0; j < state->n_dims; j ++) {
-          uint64_t word = TK_CVEC_BITS_BYTE(j);
-          uint64_t bit = TK_CVEC_BITS_BIT(j);
-          bool y =
-            (((uint8_t *)state->codes_expected)[i * state->chunks + word] & (1 << bit)) ==
-            (((uint8_t *)state->codes_predicted)[i * state->chunks + word] & (1 << bit));
-          if (y)
-            continue;
-          data->diff ++;
-          data->bdiff[j] ++;
-        }
-      }
-      break;
-
-    case TK_EVAL_GRAPH_RECONSTRUCTION_INIT: {
-      data->bin_ranks = tk_pvec_create(0, 0, 0, 0);
-      data->rank_buffer_b = tk_dumap_create(NULL, 0);
-      data->itmp = tk_iuset_create(NULL, 0);
-
-      uint64_t max_hamming = state->n_dims;
-      data->count_buffer = tk_ivec_create(NULL, max_hamming + 1, 0, 0);
-      data->avgrank_buffer = tk_dvec_create(NULL, max_hamming + 1, 0, 0);
-
-      if (!data->bin_ranks || !data->rank_buffer_b || !data->count_buffer ||
-          !data->avgrank_buffer || !data->itmp) {
-        atomic_store(&data->has_error, true);
-        if (data->bin_ranks) tk_pvec_destroy(data->bin_ranks);
-        if (data->rank_buffer_b) tk_dumap_destroy(data->rank_buffer_b);
-        if (data->count_buffer) tk_ivec_destroy(data->count_buffer);
-        if (data->avgrank_buffer) tk_dvec_destroy(data->avgrank_buffer);
-        if (data->itmp) tk_iuset_destroy(data->itmp);
-        return;
-      }
-
-      data->adj_ranks = NULL;
-      data->adj_ranks_idx = NULL;
-      break;
-    }
-
-    case TK_EVAL_GRAPH_RECONSTRUCTION: {
-      data->recon_score = 0.0;
-      data->recon_weight = 0.0;
-      data->nodes_processed = 0;
-      for (uint64_t node_idx = data->wfirst; node_idx <= data->wlast; node_idx++) {
-        tk_pvec_clear(data->bin_ranks);
-        assert(node_idx + 1 < state->offsets->n);
-        int64_t start = state->offsets->a[node_idx];
-        int64_t end = state->offsets->a[node_idx + 1];
-
-        char *node_code = NULL;
-        if (state->codes) {
-          node_code = (char *)(state->codes + node_idx * state->chunks);
-        } else if (state->adjacency_ids) {
-          int64_t node_id = state->adjacency_ids->a[node_idx];
-          node_code = state->ann ? tk_ann_get(state->ann, node_id)
-                                 : tk_hbi_get(state->hbi, node_id);
-        }
-        if (!node_code)
-          continue;
-
-        for (int64_t j = start; j < end; j ++) {
-          int64_t neighbor_pos = state->neighbors->a[j];
-
-          char *neighbor_code = NULL;
-          if (state->codes) {
-            neighbor_code = (char *)(state->codes + neighbor_pos * state->chunks);
-          } else if (state->adjacency_ids) {
-            int64_t neighbor_id = state->adjacency_ids->a[neighbor_pos];
-            neighbor_code = state->ann ? tk_ann_get(state->ann, neighbor_id)
-                                       : tk_hbi_get(state->hbi, neighbor_id);
-          }
-          if (!neighbor_code)
-            continue;
-
-          uint64_t hamming_dist = state->mask
-            ? tk_cvec_bits_hamming_mask_serial(
-                (const unsigned char*)node_code,
-                (const unsigned char*)neighbor_code,
-                (const unsigned char*)state->mask,
-                state->n_dims)
-            : tk_cvec_bits_hamming_serial(
-                (const unsigned char*)node_code,
-                (const unsigned char*)neighbor_code,
-                state->n_dims);
-          if (tk_pvec_push(data->bin_ranks, tk_pair(neighbor_pos, (int64_t) hamming_dist)) != 0) {
-            atomic_store(&data->has_error, true);
-            return;
-          }
-        }
-        double corr;
-        switch (state->eval_metric) {
-          case TK_EVAL_METRIC_SPEARMAN:
-            corr = tk_csr_spearman(
-              state->neighbors, state->weights, start, end,
-              data->bin_ranks,
-              state->mask_popcount,
-              data->count_buffer,
-              data->avgrank_buffer,
-              data->rank_buffer_b);
-            break;
-          case TK_EVAL_METRIC_POSITION:
-            corr = tk_csr_position(
-              state->neighbors, start, end,
-              data->bin_ranks,
-              data->rank_buffer_b);
-            break;
-          default:
-            corr = 0.0;
-            break;
-        }
-        if (state->metric_alpha >= 0.0) {
-          uint64_t n_neighbors = (uint64_t)(end - start);
-          double weight = pow((double)n_neighbors, state->metric_alpha);
-          data->recon_score += corr * weight;
-          data->recon_weight += weight;
-        } else {
-          data->recon_score += corr;
-        }
-        data->nodes_processed++;
-      }
-      break;
-    }
-
-    case TK_EVAL_GRAPH_RECONSTRUCTION_DESTROY: {
-      if (data->bin_ranks != NULL)
-        tk_pvec_destroy(data->bin_ranks);
-      if (data->rank_buffer_b != NULL)
-        tk_dumap_destroy(data->rank_buffer_b);
-      if (data->count_buffer != NULL)
-        tk_ivec_destroy(data->count_buffer);
-      if (data->avgrank_buffer != NULL)
-        tk_dvec_destroy(data->avgrank_buffer);
-      if (data->itmp != NULL)
-        tk_iuset_destroy(data->itmp);
-      break;
-    }
-
-    case TK_EVAL_CLUSTERING_QUALITY_INIT: {
-      data->itmp = tk_iuset_create(NULL, 0);
-      data->rank_buffer_b = tk_dumap_create(NULL, 0);
-      if (!data->itmp || !data->rank_buffer_b) {
-        atomic_store(&data->has_error, true);
-        if (data->itmp) tk_iuset_destroy(data->itmp);
-        if (data->rank_buffer_b) tk_dumap_destroy(data->rank_buffer_b);
-        return;
-      }
-      break;
-    }
-
-    case TK_EVAL_CLUSTERING_QUALITY: {
-      data->corr_score = 0.0;
-      data->corr_nodes_processed = 0;
-      for (uint64_t node_idx = data->wfirst; node_idx <= data->wlast; node_idx++) {
-        int64_t start = state->offsets->a[node_idx];
-        int64_t end = state->offsets->a[node_idx + 1];
-        uint64_t n_neighbors = (uint64_t)(end - start);
-        if (n_neighbors == 0)
-          continue;
-        int64_t my_cluster = state->assignments->a[node_idx];
-        tk_iuset_clear(data->itmp);
-        for (int64_t idx = start; idx < end; idx++) {
-          int64_t neighbor = state->neighbors->a[idx];
-          int64_t neighbor_cluster = state->assignments->a[neighbor];
-          if (my_cluster == neighbor_cluster) {
-            int kha;
-            tk_iuset_put(data->itmp, neighbor, &kha);
-          }
-        }
-        double node_score = 0.0;
-        switch (state->eval_metric) {
-          case TK_EVAL_METRIC_BISERIAL:
-            node_score = tk_csr_biserial(state->neighbors, state->weights, start, end, data->itmp);
-            break;
-          case TK_EVAL_METRIC_VARIANCE:
-            node_score = tk_csr_variance_ratio(state->neighbors, state->weights, start, end, data->itmp, data->rank_buffer_b);
-            break;
-          default:
-            node_score = 0.0;
-            break;
-        }
-        data->corr_score += node_score;
-        data->corr_nodes_processed++;
-      }
-      break;
-    }
-
-    case TK_EVAL_CLUSTERING_QUALITY_DESTROY: {
-      if (data->itmp != NULL)
-        tk_iuset_destroy(data->itmp);
-      if (data->rank_buffer_b != NULL)
-        tk_dumap_destroy(data->rank_buffer_b);
-      break;
-    }
-
-    case TK_EVAL_RETRIEVAL_QUALITY_INIT: {
-      data->itmp = tk_iuset_create(NULL, 0);
-      data->rank_buffer_b = tk_dumap_create(NULL, 0);
-      if (!data->itmp || !data->rank_buffer_b) {
-        atomic_store(&data->has_error, true);
-        if (data->itmp) tk_iuset_destroy(data->itmp);
-        if (data->rank_buffer_b) tk_dumap_destroy(data->rank_buffer_b);
-        return;
-      }
-      break;
-    }
-
-    case TK_EVAL_RETRIEVAL_QUALITY: {
-      data->corr_score = 0.0;
-      data->corr_nodes_processed = 0;
-      for (uint64_t node_idx = data->wfirst; node_idx <= data->wlast; node_idx++) {
-        int64_t start = state->offsets->a[node_idx];
-        int64_t end = state->offsets->a[node_idx + 1];
-        uint64_t n_neighbors = (uint64_t)(end - start);
-        if (n_neighbors == 0)
-          continue;
-
-        char *node_code = NULL;
-        if (state->codes) {
-          node_code = (char *)(state->codes + node_idx * state->chunks);
-        } else if (state->adjacency_ids) {
-          int64_t node_id = state->adjacency_ids->a[node_idx];
-          node_code = state->ann ? tk_ann_get(state->ann, node_id)
-                                 : tk_hbi_get(state->hbi, node_id);
-        }
-        if (!node_code)
-          continue;
-
-        tk_iuset_clear(data->itmp);
-        for (int64_t idx = start; idx < end; idx++) {
-          int64_t neighbor_pos = state->neighbors->a[idx];
-
-          char *neighbor_code = NULL;
-          if (state->codes) {
-            neighbor_code = (char *)(state->codes + neighbor_pos * state->chunks);
-          } else if (state->adjacency_ids) {
-            int64_t neighbor_id = state->adjacency_ids->a[neighbor_pos];
-            neighbor_code = state->ann ? tk_ann_get(state->ann, neighbor_id)
-                                       : tk_hbi_get(state->hbi, neighbor_id);
-          }
-          if (!neighbor_code)
-            continue;
-
-          uint64_t hamming_dist = tk_cvec_bits_hamming_serial(
-            (const unsigned char*)node_code,
-            (const unsigned char*)neighbor_code,
-            state->n_dims);
-          if (hamming_dist <= state->margin) {
-            int kha;
-            tk_iuset_put(data->itmp, neighbor_pos, &kha);
-          }
-        }
-        double node_score = 0.0;
-        switch (state->eval_metric) {
-          case TK_EVAL_METRIC_BISERIAL:
-            node_score = tk_csr_biserial(state->neighbors, state->weights, start, end, data->itmp);
-            break;
-          case TK_EVAL_METRIC_VARIANCE:
-            node_score = tk_csr_variance_ratio(state->neighbors, state->weights, start, end, data->itmp, data->rank_buffer_b);
-            break;
-          default:
-            node_score = 0.0;
-            break;
-        }
-        data->corr_score += node_score;
-        data->corr_nodes_processed++;
-      }
-      break;
-    }
-
-    case TK_EVAL_RETRIEVAL_QUALITY_DESTROY: {
-      if (data->itmp != NULL)
-        tk_iuset_destroy(data->itmp);
-      if (data->rank_buffer_b != NULL)
-        tk_dumap_destroy(data->rank_buffer_b);
-      break;
-    }
-
-    default:
-      assert(false);
-  }
-}
 
 static inline int tm_class_accuracy (lua_State *L)
 {
@@ -429,61 +77,51 @@ static inline int tm_class_accuracy (lua_State *L)
   tk_ivec_t *expected = tk_ivec_peek(L, 2, "expected");
   unsigned int n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
   unsigned int n_dims = tk_lua_checkunsigned(L, 4, "n_classes");
-  unsigned int n_threads = tk_threads_getn(L, 5, "n_threads", NULL);
-
   if (n_dims == 0)
     tk_lua_verror(L, 3, "class_accuracy", "n_classes", "must be > 0");
 
-  tk_eval_t state;
-  memset(&state, 0, sizeof(tk_eval_t));
-  state.n_dims = n_dims;
-  state.expected = expected->a;
-  state.predicted = predicted->a;
-
-  state.TP = tk_malloc(L, n_dims * sizeof(atomic_ulong));
-  state.FP = tk_malloc(L, n_dims * sizeof(atomic_ulong));
-  state.FN = tk_malloc(L, n_dims * sizeof(atomic_ulong));
-  state.precision = tk_malloc(L, n_dims * sizeof(double));
-  state.recall = tk_malloc(L, n_dims * sizeof(double));
-  state.f1 = tk_malloc(L, n_dims * sizeof(double));
+  atomic_ulong *TP = tk_malloc(L, n_dims * sizeof(atomic_ulong));
+  atomic_ulong *FP = tk_malloc(L, n_dims * sizeof(atomic_ulong));
+  atomic_ulong *FN = tk_malloc(L, n_dims * sizeof(atomic_ulong));
+  double *precision = tk_malloc(L, n_dims * sizeof(double));
+  double *recall = tk_malloc(L, n_dims * sizeof(double));
+  double *f1 = tk_malloc(L, n_dims * sizeof(double));
 
   for (uint64_t i = 0; i < n_dims; i ++) {
-    atomic_init(state.TP + i, 0);
-    atomic_init(state.FP + i, 0);
-    atomic_init(state.FN + i, 0);
+    atomic_init(TP + i, 0);
+    atomic_init(FP + i, 0);
+    atomic_init(FN + i, 0);
   }
 
-  tk_eval_thread_t *data = lua_newuserdata(L, n_threads * sizeof(tk_eval_thread_t));
-  int data_idx = lua_gettop(L);
-
-  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
-  for (unsigned int i = 0; i < n_threads; i ++) {
-    pool->threads[i].data = data + i;
-    data[i].state = &state;
-    atomic_init(&data[i].has_error, false);
-    tk_thread_range(i, n_threads, n_samples, &data[i].sfirst, &data[i].slast);
+  #pragma omp parallel for schedule(static)
+  for (unsigned int i = 0; i < n_samples; i ++) {
+    unsigned int y_pred = predicted->a[i];
+    unsigned int y_true = expected->a[i];
+    if (y_pred >= n_dims || y_true >= n_dims)
+      continue;
+    if (y_pred == y_true)
+      atomic_fetch_add(TP + y_true, 1);
+    else {
+      atomic_fetch_add(FP + y_pred, 1);
+      atomic_fetch_add(FN + y_true, 1);
+    }
   }
-
-  tk_threads_signal(pool, TK_EVAL_CLASS_ACCURACY, 0);
 
   double precision_avg = 0.0, recall_avg = 0.0, f1_avg = 0.0;
   for (unsigned int c = 0; c < n_dims; c ++) {
-    uint64_t tp = state.TP[c], fp = state.FP[c], fn = state.FN[c];
-    state.precision[c] = (tp + fp) > 0 ? (double) tp / (tp + fp) : 0.0;
-    state.recall[c] = (tp + fn) > 0 ? (double) tp / (tp + fn) : 0.0;
-    state.f1[c] = (state.precision[c] + state.recall[c]) > 0 ?
-      2.0 * state.precision[c] * state.recall[c] / (state.precision[c] + state.recall[c]) : 0.0;
-    precision_avg += state.precision[c];
-    recall_avg += state.recall[c];
-    f1_avg += state.f1[c];
+    uint64_t tp = TP[c], fp = FP[c], fn = FN[c];
+    precision[c] = (tp + fp) > 0 ? (double) tp / (tp + fp) : 0.0;
+    recall[c] = (tp + fn) > 0 ? (double) tp / (tp + fn) : 0.0;
+    f1[c] = (precision[c] + recall[c]) > 0 ?
+      2.0 * precision[c] * recall[c] / (precision[c] + recall[c]) : 0.0;
+    precision_avg += precision[c];
+    recall_avg += recall[c];
+    f1_avg += f1[c];
   }
 
-  tk_threads_destroy(pool);
-  lua_remove(L, data_idx);
-
-  free(state.TP);
-  free(state.FP);
-  free(state.FN);
+  free(TP);
+  free(FP);
+  free(FN);
 
   precision_avg /= n_dims;
   recall_avg /= n_dims;
@@ -493,11 +131,11 @@ static inline int tm_class_accuracy (lua_State *L)
   for (uint64_t c = 0; c < n_dims; c ++) {
     lua_pushinteger(L, (int64_t) c + 1);
     lua_newtable(L);
-    lua_pushnumber(L, state.precision[c]);
+    lua_pushnumber(L, precision[c]);
     lua_setfield(L, -2, "precision");
-    lua_pushnumber(L, state.recall[c]);
+    lua_pushnumber(L, recall[c]);
     lua_setfield(L, -2, "recall");
-    lua_pushnumber(L, state.f1[c]);
+    lua_pushnumber(L, f1[c]);
     lua_setfield(L, -2, "f1");
     lua_settable(L, -3);
   }
@@ -509,9 +147,9 @@ static inline int tm_class_accuracy (lua_State *L)
   lua_pushnumber(L, f1_avg);
   lua_setfield(L, -2, "f1");
 
-  free(state.precision);
-  free(state.recall);
-  free(state.f1);
+  free(precision);
+  free(recall);
+  free(f1);
   lua_replace(L, 1);
   lua_settop(L, 1);
   lua_gc(L, LUA_GCCOLLECT, 0);
@@ -524,7 +162,6 @@ static inline void tm_clustering_accuracy (
   tk_ivec_t *offsets,
   tk_ivec_t *neighbors,
   tk_dvec_t *weights,
-  unsigned int n_threads,
   tk_eval_metric_t metric,
   double *out_score
 ) {
@@ -540,52 +177,57 @@ static inline void tm_clustering_accuracy (
     return;
   }
 
-  tk_eval_t state;
-  state.assignments = assignments;
-  state.offsets = offsets;
-  state.neighbors = neighbors;
-  state.weights = weights;
-  state.eval_metric = metric;
+  double total_corr_score = 0.0;
+  uint64_t total_nodes_processed = 0;
 
-  tk_eval_thread_t *data = lua_newuserdata(L, n_threads * sizeof(tk_eval_thread_t));
-  int data_idx = lua_gettop(L);
+  #pragma omp parallel reduction(+:total_corr_score) reduction(+:total_nodes_processed)
+  {
+    tk_iuset_t *itmp = tk_iuset_create(NULL, 0);
+    tk_dumap_t *rank_buffer_b = tk_dumap_create(NULL, 0);
 
-  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
+    if (!itmp || !rank_buffer_b) {
+      if (itmp) tk_iuset_destroy(itmp);
+      if (rank_buffer_b) tk_dumap_destroy(rank_buffer_b);
+    } else {
+      #pragma omp for schedule(static)
+      for (uint64_t node_idx = 0; node_idx < n_nodes; node_idx++) {
+        int64_t start = offsets->a[node_idx];
+        int64_t end = offsets->a[node_idx + 1];
+        uint64_t n_neighbors = (uint64_t)(end - start);
+        if (n_neighbors == 0)
+          continue;
+        int64_t my_cluster = assignments->a[node_idx];
+        tk_iuset_clear(itmp);
+        for (int64_t idx = start; idx < end; idx++) {
+          int64_t neighbor = neighbors->a[idx];
+          int64_t neighbor_cluster = assignments->a[neighbor];
+          if (my_cluster == neighbor_cluster) {
+            int kha;
+            tk_iuset_put(itmp, neighbor, &kha);
+          }
+        }
+        double node_score = 0.0;
+        switch (metric) {
+          case TK_EVAL_METRIC_BISERIAL:
+            node_score = tk_csr_biserial(neighbors, weights, start, end, itmp);
+            break;
+          case TK_EVAL_METRIC_VARIANCE:
+            node_score = tk_csr_variance_ratio(neighbors, weights, start, end, itmp, rank_buffer_b);
+            break;
+          default:
+            node_score = 0.0;
+            break;
+        }
+        total_corr_score += node_score;
+        total_nodes_processed++;
+      }
 
-  for (unsigned int i = 0; i < n_threads; i ++) {
-    pool->threads[i].data = data + i;
-    data[i].state = &state;
-    atomic_init(&data[i].has_error, false);
-    data[i].corr_score = 0.0;
-    data[i].corr_nodes_processed = 0;
-    tk_thread_range(i, n_threads, n_nodes, &data[i].wfirst, &data[i].wlast);
-  }
-
-  tk_threads_signal(pool, TK_EVAL_CLUSTERING_QUALITY_INIT, 0);
-
-  for (unsigned int i = 0; i < n_threads; i++) {
-    if (atomic_load(&data[i].has_error)) {
-      tk_threads_signal(pool, TK_EVAL_CLUSTERING_QUALITY_DESTROY, 0);
-      tk_threads_destroy(pool);
-      lua_remove(L, data_idx);
-      tk_lua_verror(L, 2, "clustering_accuracy", "worker thread allocation failed");
-      return;
+      tk_iuset_destroy(itmp);
+      tk_dumap_destroy(rank_buffer_b);
     }
   }
 
-  tk_threads_signal(pool, TK_EVAL_CLUSTERING_QUALITY, 0);
-  tk_threads_signal(pool, TK_EVAL_CLUSTERING_QUALITY_DESTROY, 0);
-
-  double total_corr_score = 0.0;
-  uint64_t total_nodes_processed = 0;
-  for (unsigned int i = 0; i < n_threads; i++) {
-    total_corr_score += data[i].corr_score;
-    total_nodes_processed += data[i].corr_nodes_processed;
-  }
-
   *out_score = total_nodes_processed > 0 ? total_corr_score / total_nodes_processed : 0.0;
-  tk_threads_destroy(pool);
-  lua_remove(L, data_idx);
 }
 
 static inline int tm_clustering_accuracy_lua (lua_State *L)
@@ -608,15 +250,13 @@ static inline int tm_clustering_accuracy_lua (lua_State *L)
   tk_dvec_t *weights = tk_dvec_peek(L, -1, "weights");
   lua_pop(L, 1);
 
-  unsigned int n_threads = tk_threads_getn(L, 1, "clustering_accuracy", "threads");
-
   char *metric_str = tk_lua_foptstring(L, 1, "clustering_accuracy", "metric", "biserial");
   tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
   if (metric == TK_EVAL_METRIC_NONE)
     tk_lua_verror(L, 3, "clustering_accuracy", "metric", "unknown metric");
 
   double score;
-  tm_clustering_accuracy(L, assignments, offsets, neighbors, weights, n_threads, metric, &score);
+  tm_clustering_accuracy(L, assignments, offsets, neighbors, weights, metric, &score);
 
   lua_newtable(L);
   lua_pushnumber(L, score);
@@ -638,7 +278,6 @@ static inline void tm_retrieval_accuracy (
   tk_ivec_t *neighbors,
   tk_dvec_t *weights,
   uint64_t margin,
-  unsigned int n_threads,
   tk_eval_metric_t metric,
   double *out_score
 ) {
@@ -653,65 +292,89 @@ static inline void tm_retrieval_accuracy (
     return;
   }
 
-  tk_eval_t state;
-  state.codes = codes;
-  state.ann = ann;
-  state.hbi = hbi;
-  state.adjacency_ids = adjacency_ids;
-  state.n_dims = n_dims;
-  state.chunks = TK_CVEC_BITS_BYTES(n_dims);
-  state.offsets = offsets;
-  state.neighbors = neighbors;
-  state.weights = weights;
-  state.margin = margin;
-  state.eval_metric = metric;
-
-  tk_eval_thread_t *data = lua_newuserdata(L, n_threads * sizeof(tk_eval_thread_t));
-  int data_idx = lua_gettop(L);
-
-  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
-
-  for (unsigned int i = 0; i < n_threads; i++) {
-    pool->threads[i].data = data + i;
-    data[i].state = &state;
-    atomic_init(&data[i].has_error, false);
-    data[i].corr_score = 0.0;
-    data[i].corr_nodes_processed = 0;
-    tk_thread_range(i, n_threads, n_nodes, &data[i].wfirst, &data[i].wlast);
-  }
-
-  tk_threads_signal(pool, TK_EVAL_RETRIEVAL_QUALITY_INIT, 0);
-
-  for (unsigned int i = 0; i < n_threads; i++) {
-    if (atomic_load(&data[i].has_error)) {
-      tk_threads_signal(pool, TK_EVAL_RETRIEVAL_QUALITY_DESTROY, 0);
-      tk_threads_destroy(pool);
-      lua_remove(L, data_idx);
-      tk_lua_verror(L, 2, "retrieval_accuracy", "worker thread allocation failed");
-      return;
-    }
-  }
-
-  tk_threads_signal(pool, TK_EVAL_RETRIEVAL_QUALITY, 0);
-  tk_threads_signal(pool, TK_EVAL_RETRIEVAL_QUALITY_DESTROY, 0);
-
+  uint64_t chunks = TK_CVEC_BITS_BYTES(n_dims);
   double total_quality_score = 0.0;
   uint64_t total_nodes_processed = 0;
-  for (unsigned int i = 0; i < n_threads; i++) {
-    total_quality_score += data[i].corr_score;
-    total_nodes_processed += data[i].corr_nodes_processed;
+
+  #pragma omp parallel reduction(+:total_quality_score) reduction(+:total_nodes_processed)
+  {
+    tk_iuset_t *itmp = tk_iuset_create(NULL, 0);
+    tk_dumap_t *rank_buffer_b = tk_dumap_create(NULL, 0);
+
+    if (!itmp || !rank_buffer_b) {
+      if (itmp) tk_iuset_destroy(itmp);
+      if (rank_buffer_b) tk_dumap_destroy(rank_buffer_b);
+    } else {
+      #pragma omp for schedule(static)
+      for (uint64_t node_idx = 0; node_idx < n_nodes; node_idx++) {
+        int64_t start = offsets->a[node_idx];
+        int64_t end = offsets->a[node_idx + 1];
+        uint64_t n_neighbors = (uint64_t)(end - start);
+        if (n_neighbors == 0)
+          continue;
+
+        char *node_code = NULL;
+        if (codes) {
+          node_code = (char *)(codes + node_idx * chunks);
+        } else if (adjacency_ids) {
+          int64_t node_id = adjacency_ids->a[node_idx];
+          node_code = ann ? tk_ann_get(ann, node_id)
+                                 : tk_hbi_get(hbi, node_id);
+        }
+        if (!node_code)
+          continue;
+
+        tk_iuset_clear(itmp);
+        for (int64_t idx = start; idx < end; idx++) {
+          int64_t neighbor_pos = neighbors->a[idx];
+
+          char *neighbor_code = NULL;
+          if (codes) {
+            neighbor_code = (char *)(codes + (uint64_t) neighbor_pos * chunks);
+          } else if (adjacency_ids) {
+            int64_t neighbor_id = adjacency_ids->a[neighbor_pos];
+            neighbor_code = ann ? tk_ann_get(ann, neighbor_id)
+                                       : tk_hbi_get(hbi, neighbor_id);
+          }
+          if (!neighbor_code)
+            continue;
+
+          uint64_t hamming_dist = tk_cvec_bits_hamming_serial(
+            (const unsigned char*)node_code,
+            (const unsigned char*)neighbor_code,
+            n_dims);
+          if (hamming_dist <= margin) {
+            int kha;
+            tk_iuset_put(itmp, neighbor_pos, &kha);
+          }
+        }
+        double node_score = 0.0;
+        switch (metric) {
+          case TK_EVAL_METRIC_BISERIAL:
+            node_score = tk_csr_biserial(neighbors, weights, start, end, itmp);
+            break;
+          case TK_EVAL_METRIC_VARIANCE:
+            node_score = tk_csr_variance_ratio(neighbors, weights, start, end, itmp, rank_buffer_b);
+            break;
+          default:
+            node_score = 0.0;
+            break;
+        }
+        total_quality_score += node_score;
+        total_nodes_processed++;
+      }
+
+      tk_iuset_destroy(itmp);
+      tk_dumap_destroy(rank_buffer_b);
+    }
   }
 
   if (total_nodes_processed == 0) {
     *out_score = 0.0;
-    tk_threads_destroy(pool);
-    lua_remove(L, data_idx);
     return;
   }
 
   *out_score = total_quality_score / total_nodes_processed;
-  tk_threads_destroy(pool);
-  lua_remove(L, data_idx);
 }
 
 static inline int tm_retrieval_accuracy_lua (lua_State *L)
@@ -761,7 +424,6 @@ static inline int tm_retrieval_accuracy_lua (lua_State *L)
   }
 
   uint64_t margin = tk_lua_fcheckunsigned(L, 1, "retrieval_accuracy", "margin");
-  unsigned int n_threads = tk_threads_getn(L, 1, "retrieval_accuracy", "threads");
 
   char *metric_str = tk_lua_foptstring(L, 1, "retrieval_accuracy", "metric", "biserial");
   tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
@@ -770,7 +432,7 @@ static inline int tm_retrieval_accuracy_lua (lua_State *L)
 
   double score;
   tm_retrieval_accuracy(L, codes, ann, hbi, adjacency_ids, n_dims, offsets, neighbors, weights,
-                        margin, n_threads, metric, &score);
+                        margin, metric, &score);
 
   lua_newtable(L);
   lua_pushnumber(L, score);
@@ -791,40 +453,38 @@ static inline int tm_encoding_accuracy (lua_State *L)
   codes_expected = evec != NULL ? evec->a : (char *)tk_lua_checkustring(L, 2, "expected");
   unsigned int n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
   unsigned int n_dims = tk_lua_checkunsigned(L, 4, "n_hidden");
-  unsigned int n_threads = tk_threads_getn(L, 5, "n_threads", NULL);
   uint64_t chunks = TK_CVEC_BITS_BYTES(n_dims);
-
-  tk_eval_t state;
-  state.n_dims = n_dims;
-  state.chunks = chunks;
-  state.codes_expected = codes_expected;
-  state.codes_predicted = codes_predicted;
-
-  tk_eval_thread_t *data = lua_newuserdata(L, n_threads * sizeof(tk_eval_thread_t));
-
-  uint64_t **bdiff_ptrs = lua_newuserdata(L, n_threads * sizeof(uint64_t *));
-
-  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
-  for (unsigned int i = 0; i < n_threads; i ++) {
-    pool->threads[i].data = data + i;
-    data[i].state = &state;
-    atomic_init(&data[i].has_error, false);
-    data[i].diff = 0;
-    data[i].bdiff = lua_newuserdata(L, n_dims * sizeof(uint64_t));
-    bdiff_ptrs[i] = data[i].bdiff;
-    memset(data[i].bdiff, 0, sizeof(uint64_t) * n_dims);
-    tk_thread_range(i, n_threads, n_samples, &data[i].sfirst, &data[i].slast);
-  }
-
-  tk_threads_signal(pool, TK_EVAL_ENCODING_ACCURACY, 0);
 
   uint64_t diff_total = 0;
   uint64_t *bdiff_total = lua_newuserdata(L, n_dims * sizeof(uint64_t));
   memset(bdiff_total, 0, n_dims * sizeof(uint64_t));
-  for (unsigned int i = 0; i < n_threads; i ++) {
-    diff_total += data[i].diff;
-    for (uint64_t j = 0; j < n_dims; j ++)
-      bdiff_total[j] += data[i].bdiff[j];
+
+  #pragma omp parallel reduction(+:diff_total)
+  {
+    uint64_t *bdiff_local = calloc(n_dims, sizeof(uint64_t));
+
+    #pragma omp for schedule(static)
+    for (uint64_t i = 0; i < n_samples; i ++) {
+      for (uint64_t j = 0; j < n_dims; j ++) {
+        uint64_t word = TK_CVEC_BITS_BYTE(j);
+        uint64_t bit = TK_CVEC_BITS_BIT(j);
+        bool y =
+          (((uint8_t *)codes_expected)[i * chunks + word] & (1 << bit)) ==
+          (((uint8_t *)codes_predicted)[i * chunks + word] & (1 << bit));
+        if (y)
+          continue;
+        diff_total ++;
+        bdiff_local[j] ++;
+      }
+    }
+
+    #pragma omp critical
+    {
+      for (uint64_t j = 0; j < n_dims; j ++)
+        bdiff_total[j] += bdiff_local[j];
+    }
+
+    free(bdiff_local);
   }
 
   lua_newtable(L);
@@ -857,8 +517,6 @@ static inline int tm_encoding_accuracy (lua_State *L)
   lua_pushnumber(L, std_bdiff);
   lua_setfield(L, -2, "ber_std");
 
-  tk_threads_destroy(pool);
-
   lua_replace(L, 1);
   lua_settop(L, 1);
   lua_gc(L, LUA_GCCOLLECT, 0);
@@ -873,7 +531,6 @@ typedef struct {
   tk_ivec_t *offsets;
   tk_ivec_t *neighbors;
   tk_dvec_t *weights;
-  unsigned int n_threads;
   tk_eval_metric_t eval_metric;
   double tolerance;
   tk_ivec_t *dendro_offsets;
@@ -1069,7 +726,7 @@ static inline void agglo_snapshot_callback (
   if (data->eval_metric != TK_EVAL_METRIC_NONE && n_active_clusters > 1) {
     tm_clustering_accuracy(
       data->L, snapshot_assignments, data->offsets, data->neighbors,
-      data->weights, data->n_threads, data->eval_metric, &score);
+      data->weights, data->eval_metric, &score);
     tk_dvec_push(data->scores, score);
   }
 
@@ -1146,7 +803,6 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
   tk_ivec_t *eval_offsets,
   tk_ivec_t *eval_neighbors,
   tk_dvec_t *eval_weights,
-  unsigned int n_threads,
   uint64_t probe_radius,
   tk_agglo_linkage_t linkage,
   uint64_t knn,
@@ -1250,7 +906,6 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
     .offsets = eval_offsets,
     .neighbors = eval_neighbors,
     .weights = eval_weights,
-    .n_threads = n_threads,
     .eval_metric = metric,
     .tolerance = tolerance,
     .dendro_offsets = result.dendro_offsets,
@@ -1337,8 +992,6 @@ static inline int tm_optimize_clustering (lua_State *L)
   if (!eval_neighbors) eval_neighbors = cluster_neighbors;
   if (!eval_weights) eval_weights = cluster_weights;
 
-  unsigned int n_threads = tk_threads_getn(L, 1, "optimize_clustering", "threads");
-
   const char *linkage_str = tk_lua_foptstring(L, 1, "optimize_clustering", "linkage", "centroid");
   tk_agglo_linkage_t linkage = TK_AGGLO_LINKAGE_CENTROID;
   if (!strcmp(linkage_str, "centroid"))
@@ -1403,7 +1056,7 @@ static inline int tm_optimize_clustering (lua_State *L)
     L, inv, ann, hbi, state_ids, i_ids, i_eph,
     cluster_offsets, cluster_neighbors, cluster_weights,
     eval_offsets, eval_neighbors, eval_weights,
-    n_threads, probe_radius, linkage, knn, cmp, cmp_alpha,
+    probe_radius, linkage, knn, cmp, cmp_alpha,
     cmp_beta, knn_rank, min_pts, assign_noise, metric, tolerance, i_each);
 
   tk_lua_del_ephemeron(L, TK_EVAL_EPH, i_eph, state_ididx);
@@ -1486,7 +1139,6 @@ static inline int tm_optimize_retrieval (lua_State *L)
       tk_lua_verror(L, 3, "optimize_retrieval", "n_dims", "required when using codes without index");
   }
 
-  unsigned int n_threads = tk_threads_getn(L, 1, "optimize_retrieval", "threads");
   uint64_t min_margin = tk_lua_foptunsigned(L, 1, "optimize_retrieval", "min_margin", 0);
   uint64_t max_margin = tk_lua_foptunsigned(L, 1, "optimize_retrieval", "max_margin", n_dims);
 
@@ -1511,7 +1163,7 @@ static inline int tm_optimize_retrieval (lua_State *L)
 
   for (uint64_t m = min_margin; m <= max_margin; m++) {
     double score;
-    tm_retrieval_accuracy(L, codes, ann, hbi, adjacency_ids, n_dims, offsets, neighbors, weights, m, n_threads, metric, &score);
+    tm_retrieval_accuracy(L, codes, ann, hbi, adjacency_ids, n_dims, offsets, neighbors, weights, m, metric, &score);
     tk_dvec_push(scores, score);
     if (i_each > -1) {
       lua_pushvalue(L, i_each);
@@ -1532,32 +1184,128 @@ static inline int tm_optimize_retrieval (lua_State *L)
 }
 
 static double tk_compute_reconstruction (
-  tk_eval_t *state,
+  char *codes,
+  tk_ann_t *ann,
+  tk_hbi_t *hbi,
+  tk_ivec_t *adjacency_ids,
+  uint64_t n_dims,
+  tk_ivec_t *offsets,
+  tk_ivec_t *neighbors,
+  tk_dvec_t *weights,
+  tk_eval_metric_t eval_metric,
+  double metric_alpha,
   char *mask,
-  uint64_t k,
-  tk_threadpool_t *pool
+  uint64_t mask_popcount
 ) {
-  if (k == 0)
+  if (mask_popcount == 0)
     return -INFINITY;
-  state->mask = mask;
-  state->mask_popcount = k;
-  tk_eval_thread_t *data = (tk_eval_thread_t *)pool->threads[0].data;
-  unsigned int n_threads = pool->n_threads;
-  for (unsigned int i = 0; i < n_threads; i ++) {
-    data[i].recon_score = 0.0;
-    data[i].recon_weight = 0.0;
-    data[i].nodes_processed = 0;
-  }
-  tk_threads_signal(pool, TK_EVAL_GRAPH_RECONSTRUCTION, 0);
+
+  uint64_t chunks = TK_CVEC_BITS_BYTES(n_dims);
+  uint64_t n_nodes = offsets->n - 1;
   double total = 0.0;
   double total_weight = 0.0;
   uint64_t total_nodes_processed = 0;
-  for (unsigned int i = 0; i < n_threads; i ++) {
-    total += data[i].recon_score;
-    total_weight += data[i].recon_weight;
-    total_nodes_processed += data[i].nodes_processed;
+
+  #pragma omp parallel reduction(+:total) reduction(+:total_weight) reduction(+:total_nodes_processed)
+  {
+    tk_pvec_t *bin_ranks = tk_pvec_create(NULL, 0, 0, 0);
+    tk_dumap_t *rank_buffer_b = tk_dumap_create(NULL, 0);
+    uint64_t max_hamming = n_dims;
+    tk_ivec_t *count_buffer = tk_ivec_create(NULL, max_hamming + 1, 0, 0);
+    tk_dvec_t *avgrank_buffer = tk_dvec_create(NULL, max_hamming + 1, 0, 0);
+    tk_iuset_t *itmp = tk_iuset_create(NULL, 0);
+
+    if (!bin_ranks || !rank_buffer_b || !count_buffer || !avgrank_buffer || !itmp) {
+      if (bin_ranks) tk_pvec_destroy(bin_ranks);
+      if (rank_buffer_b) tk_dumap_destroy(rank_buffer_b);
+      if (count_buffer) tk_ivec_destroy(count_buffer);
+      if (avgrank_buffer) tk_dvec_destroy(avgrank_buffer);
+      if (itmp) tk_iuset_destroy(itmp);
+    } else {
+      #pragma omp for schedule(static)
+      for (uint64_t node_idx = 0; node_idx < n_nodes; node_idx++) {
+        tk_pvec_clear(bin_ranks);
+        int64_t start = offsets->a[node_idx];
+        int64_t end = offsets->a[node_idx + 1];
+
+        char *node_code = NULL;
+        if (codes) {
+          node_code = (char *)(codes + node_idx * chunks);
+        } else if (adjacency_ids) {
+          int64_t node_id = adjacency_ids->a[node_idx];
+          node_code = ann ? tk_ann_get(ann, node_id)
+                                 : tk_hbi_get(hbi, node_id);
+        }
+        if (!node_code)
+          continue;
+
+        for (int64_t j = start; j < end; j ++) {
+          int64_t neighbor_pos = neighbors->a[j];
+
+          char *neighbor_code = NULL;
+          if (codes) {
+            neighbor_code = (char *)(codes + (uint64_t) neighbor_pos * chunks);
+          } else if (adjacency_ids) {
+            int64_t neighbor_id = adjacency_ids->a[neighbor_pos];
+            neighbor_code = ann ? tk_ann_get(ann, neighbor_id)
+                                       : tk_hbi_get(hbi, neighbor_id);
+          }
+          if (!neighbor_code)
+            continue;
+
+          uint64_t hamming_dist = mask
+            ? tk_cvec_bits_hamming_mask_serial(
+                (const unsigned char*)node_code,
+                (const unsigned char*)neighbor_code,
+                (const unsigned char*)mask,
+                n_dims)
+            : tk_cvec_bits_hamming_serial(
+                (const unsigned char*)node_code,
+                (const unsigned char*)neighbor_code,
+                n_dims);
+          tk_pvec_push(bin_ranks, tk_pair(neighbor_pos, (int64_t) hamming_dist));
+        }
+        double corr;
+        switch (eval_metric) {
+          case TK_EVAL_METRIC_SPEARMAN:
+            corr = tk_csr_spearman(
+              neighbors, weights, start, end,
+              bin_ranks,
+              mask_popcount,
+              count_buffer,
+              avgrank_buffer,
+              rank_buffer_b);
+            break;
+          case TK_EVAL_METRIC_POSITION:
+            corr = tk_csr_position(
+              neighbors, start, end,
+              bin_ranks,
+              rank_buffer_b);
+            break;
+          default:
+            corr = 0.0;
+            break;
+        }
+        if (metric_alpha >= 0.0) {
+          uint64_t n_neighbors = (uint64_t)(end - start);
+          double weight = pow((double)n_neighbors, metric_alpha);
+          total += corr * weight;
+          total_weight += weight;
+        } else {
+          total += corr;
+        }
+        total_nodes_processed++;
+      }
+
+      tk_pvec_destroy(bin_ranks);
+      tk_dumap_destroy(rank_buffer_b);
+      tk_ivec_destroy(count_buffer);
+      tk_dvec_destroy(avgrank_buffer);
+      tk_iuset_destroy(itmp);
+    }
   }
-  if (state->metric_alpha >= 0.0) {
+
+  if (metric_alpha >= 0.0) {
     return total_weight > 0.0 ? total / total_weight : 0.0;
   } else {
     return total_nodes_processed > 0 ? total / (double) total_nodes_processed : 0.0;
@@ -1567,7 +1315,6 @@ static double tk_compute_reconstruction (
 static void tm_optimize_bits_prefix_greedy (
   lua_State *L,
   tk_eval_t *state,
-  tk_threadpool_t *pool,
   int i_each
 ) {
   uint64_t n_dims = state->n_dims;
@@ -1591,7 +1338,8 @@ static void tm_optimize_bits_prefix_greedy (
       memset(mask, 0, bytes_per_mask);
       for (uint64_t b = 0; b < k; b ++)
         mask[TK_CVEC_BITS_BYTE(b)] |= (1 << TK_CVEC_BITS_BIT(b));
-      double score = tk_compute_reconstruction(state, mask, k, pool);
+      double score = tk_compute_reconstruction(state->codes, state->ann, state->hbi, state->adjacency_ids,
+        state->n_dims, state->offsets, state->neighbors, state->weights, state->eval_metric, state->metric_alpha, mask, k);
       double gain = best_prefix_score == -INFINITY ? 0 : (score - best_prefix_score);
       if (i_each >= 0) {
         lua_pushvalue(L, i_each);
@@ -1621,7 +1369,8 @@ static void tm_optimize_bits_prefix_greedy (
     for (uint64_t b = 0; b < n_dims; b ++) {
       memset(mask, 0, bytes_per_mask);
       mask[TK_CVEC_BITS_BYTE(b)] |= (1 << TK_CVEC_BITS_BIT(b));
-      double score = tk_compute_reconstruction(state, mask, 1, pool);
+      double score = tk_compute_reconstruction(state->codes, state->ann, state->hbi, state->adjacency_ids,
+        state->n_dims, state->offsets, state->neighbors, state->weights, state->eval_metric, state->metric_alpha, mask, 1);
       if (score > best_prefix_score + 1e-12) {
         best_prefix_score = score;
         best_bit = b;
@@ -1645,7 +1394,8 @@ static void tm_optimize_bits_prefix_greedy (
     memset(mask, 0, bytes_per_mask);
     for (uint64_t b = 0; b < best_prefix; b ++)
       mask[TK_CVEC_BITS_BYTE(b)] |= (1 << TK_CVEC_BITS_BIT(b));
-    best_prefix_score = tk_compute_reconstruction(state, mask, best_prefix, pool);
+    best_prefix_score = tk_compute_reconstruction(state->codes, state->ann, state->hbi, state->adjacency_ids,
+      state->n_dims, state->offsets, state->neighbors, state->weights, state->eval_metric, state->metric_alpha, mask, best_prefix);
     if (i_each >= 0) {
       lua_pushvalue(L, i_each);
       lua_pushinteger(L, (lua_Integer) best_prefix);
@@ -1685,7 +1435,8 @@ static void tm_optimize_bits_prefix_greedy (
           continue;
         memcpy(candidate, mask, bytes_per_mask);
         candidate[TK_CVEC_BITS_BYTE(bit)] &= ~(1 << TK_CVEC_BITS_BIT(bit));
-        double score = tk_compute_reconstruction(state, candidate, active->n - 1, pool);
+        double score = tk_compute_reconstruction(state->codes, state->ann, state->hbi, state->adjacency_ids,
+          state->n_dims, state->offsets, state->neighbors, state->weights, state->eval_metric, state->metric_alpha, candidate, active->n - 1);
         if (score > current_score + tolerance) {
           mask[TK_CVEC_BITS_BYTE(bit)] &= ~(1 << TK_CVEC_BITS_BIT(bit));
           active->a[i] = active->a[active->n - 1];
@@ -1718,7 +1469,8 @@ static void tm_optimize_bits_prefix_greedy (
           continue;
         memcpy(candidate, mask, bytes_per_mask);
         candidate[TK_CVEC_BITS_BYTE(bit_add)] |= (1 << TK_CVEC_BITS_BIT(bit_add));
-        double score = tk_compute_reconstruction(state, candidate, active->n + 1, pool);
+        double score = tk_compute_reconstruction(state->codes, state->ann, state->hbi, state->adjacency_ids,
+          state->n_dims, state->offsets, state->neighbors, state->weights, state->eval_metric, state->metric_alpha, candidate, active->n + 1);
         if (score >= current_score + tolerance) {
           mask[TK_CVEC_BITS_BYTE(bit_add)] |= (1 << TK_CVEC_BITS_BIT(bit_add));
           if (tk_ivec_push(active, bit_add) != 0)
@@ -1790,7 +1542,6 @@ static inline int tm_optimize_bits (lua_State *L)
       tk_lua_verror(L, 3, "optimize_bits", "n_dims", "required when using codes without index");
   }
 
-  unsigned int n_threads = tk_threads_getn(L, 1, "optimize_bits", "threads");
   uint64_t keep_prefix = tk_lua_foptunsigned(L, 1, "optimize_bits", "keep_prefix", 0);
   int64_t start_prefix = tk_lua_foptinteger(L, 1, "optimize_bits", "start_prefix", 0);
   double tolerance = tk_lua_foptnumber(L, 1, "optimize_bits", "tolerance", 1e-12);
@@ -1825,32 +1576,7 @@ static inline int tm_optimize_bits (lua_State *L)
   state.eval_metric = metric;
   state.L = L;
 
-  tk_eval_thread_t *data = lua_newuserdata(L, n_threads * sizeof(tk_eval_thread_t));
-  int data_idx = lua_gettop(L);
-
-  tk_threadpool_t *pool = tk_threads_create(L, n_threads, tk_eval_worker);
-  uint64_t n_nodes = offsets->n - 1;
-  for (unsigned int i = 0; i < n_threads; i++) {
-    pool->threads[i].data = data + i;
-    data[i].state = &state;
-    atomic_init(&data[i].has_error, false);
-    tk_thread_range(i, n_threads, n_nodes, &data[i].wfirst, &data[i].wlast);
-    tk_thread_range(i, n_threads, n_nodes, &data[i].sfirst, &data[i].slast);
-  }
-
-  tk_threads_signal(pool, TK_EVAL_GRAPH_RECONSTRUCTION_INIT, 0);
-  for (unsigned int i = 0; i < n_threads; i++) {
-    if (atomic_load(&data[i].has_error)) {
-      tk_threads_signal(pool, TK_EVAL_GRAPH_RECONSTRUCTION_DESTROY, 0);
-      tk_threads_destroy(pool);
-      lua_remove(L, data_idx);
-      tk_lua_verror(L, 2, "optimize_bits", "worker thread allocation failed");
-      return 0;
-    }
-  }
-  tm_optimize_bits_prefix_greedy(L, &state, pool, i_each);
-  tk_threads_signal(pool, TK_EVAL_GRAPH_RECONSTRUCTION_DESTROY, 0);
-  tk_threads_destroy(pool);
+  tm_optimize_bits_prefix_greedy(L, &state, i_each);
   lua_replace(L, 1);
   lua_settop(L, 1);
   lua_gc(L, LUA_GCCOLLECT, 0);

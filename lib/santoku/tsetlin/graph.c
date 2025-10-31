@@ -1,5 +1,6 @@
 #include <santoku/tsetlin/graph.h>
 #include <santoku/cvec.h>
+#include <assert.h>
 
 static inline tk_pvec_t *tm_add_anchor_edges_immediate(
   lua_State *L,
