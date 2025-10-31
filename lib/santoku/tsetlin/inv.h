@@ -399,7 +399,7 @@ static inline void tk_inv_add (
     tk_lua_verror(L, 2, "add", "can't add to a destroyed index");
     return;
   }
-  tk_ivec_uasc(node_bits, 0, node_bits->n);
+  node_bits->n = tk_ivec_uasc(node_bits, 0, node_bits->n);
   size_t nb = node_bits->n;
   size_t nsamples = ids->n;
   size_t i = 0;
