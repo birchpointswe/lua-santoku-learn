@@ -448,12 +448,9 @@ static inline int tk_tsetlin_predict_classifier (
   lua_State *L,
   tk_tsetlin_t *tm
 ) {
-  lua_settop(L, 4);
+  lua_settop(L, 3);
   tk_cvec_t *ps = tk_cvec_peek(L, 2, "problems");
   unsigned int n = tk_lua_checkunsigned(L, 3, "argument 2 is not an integer n_samples");
-  unsigned int n_threads = lua_type(L, 4) == LUA_TNIL ? 0 : tk_lua_checkunsigned(L, 4, "threads");
-  if (n_threads > 0)
-    omp_set_num_threads((int)n_threads);
   size_t needed = n * sizeof(unsigned int);
   if (needed > tm->results_len) {
     tm->results = tk_realloc(L, tm->results, needed);
@@ -498,12 +495,9 @@ static inline int tk_tsetlin_predict_encoder (
   lua_State *L,
   tk_tsetlin_t *tm
 ) {
-  lua_settop(L, 4);
+  lua_settop(L, 3);
   tk_cvec_t *ps = tk_cvec_peek(L, 2, "problems");
   unsigned int n = tk_lua_checkunsigned(L, 3, "argument 2 is not an integer n_samples");
-  unsigned int n_threads = lua_type(L, 4) == LUA_TNIL ? 0 : tk_lua_checkunsigned(L, 4, "threads");
-  if (n_threads > 0)
-    omp_set_num_threads((int)n_threads);
   size_t needed = n * tm->class_chunks;
   if (needed > tm->encodings_len) {
     tm->encodings = (char *)tk_realloc(L, tm->encodings, needed);
@@ -568,15 +562,11 @@ static inline int tk_tsetlin_train_classifier (
   lua_getfield(L, 2, "solutions");
   tk_ivec_t *ss = tk_ivec_peek(L, -1, "solutions");
   unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
-  unsigned int n_threads = lua_type(L, -1) == LUA_TNIL ? 0 :
-    (tk_lua_ftype(L, 2, "threads") == LUA_TNIL ? 0 : tk_lua_fcheckunsigned(L, 2, "train", "threads"));
   int i_each = -1;
   if (tk_lua_ftype(L, 2, "each") != LUA_TNIL) {
     lua_getfield(L, 2, "each");
     i_each = tk_lua_absindex(L, -1);
   }
-  if (n_threads > 0)
-    omp_set_num_threads((int)n_threads);
   unsigned int total_chunks = tm->clause_chunks * tm->classes;
   unsigned int clause_chunks = tm->clause_chunks;
   unsigned int input_chunks = tm->input_chunks;
@@ -650,8 +640,6 @@ static inline int tk_tsetlin_train_encoder (
   tk_cvec_t *ls = tk_cvec_peek(L, -1, "codes");
   lua_pop(L, 1);
   unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
-  unsigned int n_threads = lua_type(L, -1) == LUA_TNIL ? 0 :
-    (tk_lua_ftype(L, 2, "threads") == LUA_TNIL ? 0 : tk_lua_fcheckunsigned(L, 2, "train", "threads"));
   size_t needed = n * tm->class_chunks;
   if (needed > tm->encodings_len) {
     tm->encodings = (char *)tk_realloc(L, tm->encodings, needed);
@@ -662,8 +650,6 @@ static inline int tk_tsetlin_train_encoder (
     lua_getfield(L, 2, "each");
     i_each = tk_lua_absindex(L, -1);
   }
-  if (n_threads > 0)
-    omp_set_num_threads((int)n_threads);
   unsigned int total_chunks = tm->clause_chunks * tm->classes;
   unsigned int class_chunks = tm->class_chunks;
   unsigned int clause_chunks = tm->clause_chunks;
