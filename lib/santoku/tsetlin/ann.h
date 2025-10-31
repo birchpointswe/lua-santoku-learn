@@ -50,7 +50,6 @@ typedef struct tk_ann_s {
   tk_iumap_t *uid_sid;
   tk_ivec_t *sid_to_uid;
   tk_cvec_t *vectors;
-  tk_ivec_t *sid_to_pos;
 } tk_ann_t;
 
 static inline tk_ann_t *tk_ann_peek (lua_State *L, int i)
@@ -449,6 +448,7 @@ static inline void tk_ann_probe_bucket_for_uid (
 
 static inline void tk_ann_probe_bucket (
   tk_ann_t *A,
+  tk_ivec_t *sid_to_pos,
   tk_ann_hash_t h,
   const unsigned char *v,
   uint64_t ftr,
@@ -468,9 +468,9 @@ static inline void tk_ann_probe_bucket (
     if (sid1 == skip_sid)
       continue;
 
-    if (sid1 < 0 || sid1 >= (int64_t)A->sid_to_pos->n)
+    if (sid1 < 0 || sid1 >= (int64_t)sid_to_pos->n)
       continue;
-    int64_t id = A->sid_to_pos->a[sid1];
+    int64_t id = sid_to_pos->a[sid1];
     if (id < 0)
       continue;
 
@@ -488,6 +488,7 @@ static inline void tk_ann_probe_bucket (
 
 static inline void tk_ann_populate_neighborhood (
   tk_ann_t *A,
+  tk_ivec_t *sid_to_pos,
   uint64_t i,
   int64_t sid,
   char *V,
@@ -499,7 +500,7 @@ static inline void tk_ann_populate_neighborhood (
 ) {
   const unsigned char *v_uc = (const unsigned char *) V;
   tk_ann_hash_t h = tk_ann_hash(A, V);
-  tk_ann_probe_bucket(A, h, v_uc, A->features, sid, knn, eps_min, eps_max, 0, hood);
+  tk_ann_probe_bucket(A, sid_to_pos, h, v_uc, A->features, sid, knn, eps_min, eps_max, 0, hood);
   int pos[TK_ANN_BITS];
   for (int r = 1; r <= (int) probe_radius && r <= TK_ANN_BITS; r ++) {
     for (int i = 0; i < r; i ++)
@@ -508,7 +509,7 @@ static inline void tk_ann_populate_neighborhood (
       tk_ann_hash_t mask = 0;
       for (int j = 0; j < r; j ++)
         mask |= (1U << pos[j]);
-      tk_ann_probe_bucket(A, h ^ mask, v_uc, A->features, sid, knn, eps_min, eps_max, r, hood);
+      tk_ann_probe_bucket(A, sid_to_pos, h ^ mask, v_uc, A->features, sid, knn, eps_min, eps_max, r, hood);
       int k;
       for (k = r - 1; k >= 0; k--) {
         if (pos[k] != k + TK_ANN_BITS - r) {
@@ -524,25 +525,28 @@ static inline void tk_ann_populate_neighborhood (
   }
 }
 
-static inline tk_ivec_t *tk_ann_prepare_universe_map (
+static inline void tk_ann_prepare_universe_map (
   lua_State *L,
-  tk_ann_t *A
+  tk_ann_t *A,
+  tk_ivec_t **uids_out,
+  tk_ivec_t **sid_to_pos_out
 ) {
   tk_ivec_t *uids = tk_ivec_create(L, 0, 0, 0);
-  tk_ivec_ensure(A->sid_to_pos, A->next_sid);
-  A->sid_to_pos->n = A->next_sid;
+  tk_ivec_t *sid_to_pos = tk_ivec_create(NULL, A->next_sid, 0, 0);
+  sid_to_pos->n = A->next_sid;
   uint64_t active_idx = 0;
   for (uint64_t sid = 0; sid < A->next_sid; sid++) {
     int64_t uid = A->sid_to_uid->a[sid];
     if (uid >= 0) {
-      A->sid_to_pos->a[sid] = (int64_t)active_idx;
+      sid_to_pos->a[sid] = (int64_t)active_idx;
       tk_ivec_push(uids, uid);
       active_idx++;
     } else {
-      A->sid_to_pos->a[sid] = -1;
+      sid_to_pos->a[sid] = -1;
     }
   }
-  return uids;
+  *uids_out = uids;
+  *sid_to_pos_out = sid_to_pos;
 }
 
 static inline void tk_ann_neighborhoods (
@@ -559,27 +563,21 @@ static inline void tk_ann_neighborhoods (
     tk_lua_verror(L, 2, "neighborhoods", "can't query a destroyed index");
     return;
   }
-  tk_ivec_t *uids = tk_ivec_create(L, 0, 0, 0);
-  tk_ann_hoods_t *hoods = tk_ann_hoods_create(L, 0, 0, 0);
+
+  tk_ivec_t *uids, *sid_to_pos;
+  tk_ann_prepare_universe_map(L, A, &uids, &sid_to_pos);
+
+  tk_ann_hoods_t *hoods = tk_ann_hoods_create(L, uids->n, 0, 0);
   int hoods_stack_idx = lua_gettop(L);
-  tk_ivec_ensure(A->sid_to_pos, A->next_sid);
-  A->sid_to_pos->n = A->next_sid;
-  uint64_t active_idx = 0;
-  for (uint64_t sid = 0; sid < A->next_sid; sid++) {
-    int64_t uid = A->sid_to_uid->a[sid];
-    if (uid >= 0) {
-      A->sid_to_pos->a[sid] = (int64_t)active_idx;
-      tk_ivec_push(uids, uid);
-      tk_pvec_t *hood = tk_pvec_create(L, k, 0, 0);
-      hood->n = 0;
-      tk_lua_add_ephemeron(L, TK_ANN_EPH, hoods_stack_idx, -1);
-      lua_pop(L, 1);
-      tk_ann_hoods_push(hoods, hood);
-      active_idx++;
-    } else {
-      A->sid_to_pos->a[sid] = -1;
-    }
+  hoods->n = uids->n;
+  for (uint64_t i = 0; i < hoods->n; i ++) {
+    tk_pvec_t *hood = tk_pvec_create(L, k, 0, 0);
+    hood->n = 0;
+    tk_lua_add_ephemeron(L, TK_ANN_EPH, hoods_stack_idx, -1);
+    lua_pop(L, 1);
+    hoods->a[i] = hood;
   }
+
   #pragma omp parallel for
   for (uint64_t i = 0; i < hoods->n; i ++) {
     tk_pvec_t *hood = hoods->a[i];
@@ -587,9 +585,12 @@ static inline void tk_ann_neighborhoods (
     int64_t uid = uids->a[i];
     int64_t sid = tk_ann_uid_sid(A, uid, TK_ANN_FIND);
     char *vec = tk_ann_sget(A, sid);
-    tk_ann_populate_neighborhood(A, i, sid, vec, hood, k, probe_radius, eps_min, eps_max);
+    tk_ann_populate_neighborhood(A, sid_to_pos, i, sid, vec, hood, k, probe_radius, eps_min, eps_max);
     tk_pvec_asc(hood, 0, hood->n);
   }
+
+  tk_ivec_destroy(sid_to_pos);
+
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = uids;
 }
@@ -609,8 +610,11 @@ static inline void tk_ann_neighborhoods_by_ids (
     tk_lua_verror(L, 2, "neighborhoods_by_ids", "can't query a destroyed index");
     return;
   }
-  tk_ivec_t *all_uids = tk_ann_prepare_universe_map(L, A); // uids at -1
-  tk_ann_hoods_t *hoods = tk_ann_hoods_create(L, query_ids->n, 0, 0); // hoods at -1
+
+  tk_ivec_t *all_uids, *sid_to_pos;
+  tk_ann_prepare_universe_map(L, A, &all_uids, &sid_to_pos);
+
+  tk_ann_hoods_t *hoods = tk_ann_hoods_create(L, query_ids->n, 0, 0);
   int hoods_stack_idx = lua_gettop(L);
   hoods->n = query_ids->n;
   for (uint64_t i = 0; i < hoods->n; i ++) {
@@ -619,6 +623,7 @@ static inline void tk_ann_neighborhoods_by_ids (
     tk_lua_add_ephemeron(L, TK_ANN_EPH, hoods_stack_idx, -1);
     lua_pop(L, 1);
   }
+
   #pragma omp parallel for schedule(static)
   for (uint64_t i = 0; i < hoods->n; i ++) {
     tk_pvec_t *hood = hoods->a[i];
@@ -626,9 +631,12 @@ static inline void tk_ann_neighborhoods_by_ids (
     int64_t sid = tk_ann_uid_sid(A, uid, TK_ANN_FIND);
     if (sid < 0)
       continue;
-    tk_ann_populate_neighborhood(A, i, sid, tk_ann_sget(A, sid), hood, k, probe_radius, eps_min, eps_max);
+    tk_ann_populate_neighborhood(A, sid_to_pos, i, sid, tk_ann_sget(A, sid), hood, k, probe_radius, eps_min, eps_max);
     tk_pvec_asc(hood, 0, hood->n);
   }
+
+  tk_ivec_destroy(sid_to_pos);
+
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = all_uids;
   lua_remove(L, -2);
@@ -647,7 +655,10 @@ static inline void tk_ann_neighborhoods_by_vecs (
 ) {
   if (A->destroyed)
     return;
-  tk_ivec_t *all_uids = tk_ann_prepare_universe_map(L, A);
+
+  tk_ivec_t *all_uids, *sid_to_pos;
+  tk_ann_prepare_universe_map(L, A, &all_uids, &sid_to_pos);
+
   uint64_t vec_bytes = TK_CVEC_BITS_BYTES(A->features);
   uint64_t n_queries = query_vecs->n / vec_bytes;
   tk_ann_hoods_t *hoods = tk_ann_hoods_create(L, n_queries, 0, 0);
@@ -659,14 +670,18 @@ static inline void tk_ann_neighborhoods_by_vecs (
     tk_lua_add_ephemeron(L, TK_ANN_EPH, hoods_stack_idx, -1);
     lua_pop(L, 1);
   }
+
   #pragma omp parallel for schedule(static)
   for (uint64_t i = 0; i < hoods->n; i ++) {
     tk_pvec_t *hood = hoods->a[i];
     char *vec = query_vecs->a + i * vec_bytes;
     int64_t sid = -1;
-    tk_ann_populate_neighborhood(A, i, sid, vec, hood, k, probe_radius, eps_min, eps_max);
+    tk_ann_populate_neighborhood(A, sid_to_pos, i, sid, vec, hood, k, probe_radius, eps_min, eps_max);
     tk_pvec_asc(hood, 0, hood->n);
   }
+
+  tk_ivec_destroy(sid_to_pos);
+
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = all_uids;
 }
@@ -1142,9 +1157,6 @@ static inline tk_ann_t *tk_ann_create_base (
   A->vectors = tk_cvec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_ANN_EPH, Ai, -1);
   lua_pop(L, 1);
-  A->sid_to_pos = tk_ivec_create(L, 0, 0, 0);
-  tk_lua_add_ephemeron(L, TK_ANN_EPH, Ai, -1);
-  lua_pop(L, 1);
   A->destroyed = false;
   A->next_sid = 0;
   A->bucket_target = bucket_target;
@@ -1221,9 +1233,6 @@ static inline tk_ann_t *tk_ann_load (
   tk_lua_add_ephemeron(L, TK_ANN_EPH, Ai, -1);
   if (vcount)
     tk_lua_fread(L, A->vectors->a, 1, vcount, fh);
-  lua_pop(L, 1);
-  A->sid_to_pos = tk_ivec_create(L, 0, 0, 0);
-  tk_lua_add_ephemeron(L, TK_ANN_EPH, Ai, -1);
   lua_pop(L, 1);
   return A;
 }

@@ -111,9 +111,10 @@ struct tk_agglo_thread_s {
 };
 
 static inline uint64_t tk_agglo_hash_code (char *code, uint64_t code_chunks) {
-  uint64_t hash = 0;
-  for (uint64_t i = 0; i < code_chunks && i < 8; i++) {
-    hash ^= ((uint64_t)(uint8_t)code[i]) << (i * 8);
+  uint64_t hash = 0xcbf29ce484222325ULL; // FNV-1a offset basis
+  for (uint64_t i = 0; i < code_chunks; i++) {
+    hash ^= (uint64_t)(uint8_t)code[i];
+    hash *= 0x100000001b3ULL; // FNV-1a prime
   }
   return hash;
 }
@@ -131,7 +132,8 @@ static inline tk_agglo_cluster_t *tk_agglo_cluster_create (
   int state_idx,
   int64_t cluster_id,
   uint64_t features,
-  uint64_t state_bits
+  uint64_t state_bits,
+  tk_agglo_linkage_t linkage
 ) {
   tk_agglo_cluster_t *cluster;
   int cluster_idx = -1;
@@ -161,14 +163,19 @@ static inline tk_agglo_cluster_t *tk_agglo_cluster_create (
       return NULL;
     }
   }
-  uint8_t tail_mask = (features % TK_CVEC_BITS == 0) ?
-    0xFF : (uint8_t)((1 << (features % TK_CVEC_BITS)) - 1);
-  cluster->centroid = tk_centroid_create(L, code_chunks, tail_mask);
-  if (!cluster->centroid) {
-    tk_ivec_destroy(cluster->members);
-    if (!cluster->is_userdata)
-      free(cluster);
-    return NULL;
+  // Only create centroid for centroid linkage
+  if (linkage == TK_AGGLO_LINKAGE_CENTROID) {
+    uint8_t tail_mask = (features % TK_CVEC_BITS == 0) ?
+      0xFF : (uint8_t)((1 << (features % TK_CVEC_BITS)) - 1);
+    cluster->centroid = tk_centroid_create(L, code_chunks, tail_mask);
+    if (!cluster->centroid) {
+      tk_ivec_destroy(cluster->members);
+      if (!cluster->is_userdata)
+        free(cluster);
+      return NULL;
+    }
+  } else {
+    cluster->centroid = NULL;
   }
   if (L && state_idx > 0)
     tk_lua_add_ephemeron(L, TK_AGGLO_EPH, state_idx, cluster_idx);
@@ -199,8 +206,12 @@ static inline void tk_agglo_cluster_add_member (
   uint64_t code_chunks
 ) {
   tk_ivec_push(cluster->members, uid);
-  tk_centroid_add_member(cluster->centroid, code, code_chunks);
-  cluster->size = cluster->centroid->size;
+  if (cluster->centroid) {
+    tk_centroid_add_member(cluster->centroid, code, code_chunks);
+    cluster->size = cluster->centroid->size;
+  } else {
+    cluster->size = cluster->members->n;
+  }
 }
 
 static inline bool tk_agglo_cluster_merge (
@@ -209,8 +220,13 @@ static inline bool tk_agglo_cluster_merge (
 ) {
   for (uint64_t i = 0; i < from->members->n; i++)
     tk_ivec_push(to->members, from->members->a[i]);
-  bool changed = tk_centroid_merge(to->centroid, from->centroid);
-  to->size = to->centroid->size;
+  bool changed = false;
+  if (to->centroid && from->centroid) {
+    changed = tk_centroid_merge(to->centroid, from->centroid);
+    to->size = to->centroid->size;
+  } else {
+    to->size = to->members->n;
+  }
   from->active = false;
   from->size = 0;
   tk_ivec_clear(from->members);
@@ -232,10 +248,9 @@ static inline int64_t tk_agglo_find_nearest_core_cluster(
     int64_t start = state->adj_offsets->a[adj_idx];
     int64_t end = state->adj_offsets->a[adj_idx + 1];
     for (int64_t j = start; j < end; j++) {
-      int64_t nh_uid = state->adj_neighbors->a[j];
-      khint_t khi_nh = tk_iumap_get(state->uid_to_adj_idx, nh_uid);
-      if (khi_nh == tk_iumap_end(state->uid_to_adj_idx)) continue;
-      int64_t nh_idx = tk_iumap_val(state->uid_to_adj_idx, khi_nh);
+      int64_t nh_idx = state->adj_neighbors->a[j];
+      if (nh_idx < 0 || nh_idx >= (int64_t)state->adj_ids->n) continue;
+      int64_t nh_uid = state->adj_ids->a[nh_idx];
       if (!tk_agglo_is_core(state->is_core, nh_idx, state->n_adj)) continue;
       khint_t khi = tk_iumap_get(state->uid_to_cluster, nh_uid);
       if (khi != tk_iumap_end(state->uid_to_cluster)) {
@@ -277,7 +292,9 @@ static inline void tk_agglo_find_min_edges_thread(
         int64_t start = state->adj_offsets->a[adj_idx];
         int64_t end = state->adj_offsets->a[adj_idx + 1];
         for (int64_t j = start + (int64_t)offset; j < end; j++) {
-          int64_t nh_uid = state->adj_neighbors->a[j];
+          int64_t nh_idx = state->adj_neighbors->a[j];
+          if (nh_idx < 0 || nh_idx >= (int64_t)state->adj_ids->n) continue;
+          int64_t nh_uid = state->adj_ids->a[nh_idx];
           double similarity = state->adj_weights->a[j];
           double distance = 1.0 - similarity;
           if (distance > state->current_epsilon) {
@@ -518,7 +535,7 @@ static inline void tk_agglo_create_initial_clusters(
     if (adjacency_only) {
       cluster_idx = state->n_clusters;
       int64_t cluster_id = (int64_t)(2 * n_samples + 1 + cluster_idx);
-      tk_agglo_cluster_t *cluster = tk_agglo_cluster_create(L, state_idx, cluster_id, features, state_bits);
+      tk_agglo_cluster_t *cluster = tk_agglo_cluster_create(L, state_idx, cluster_id, features, state_bits, linkage);
       lua_pop(L, 1);
       state->clusters[cluster_idx] = cluster;
       state->n_clusters_created++;
@@ -533,7 +550,7 @@ static inline void tk_agglo_create_initial_clusters(
       if (khi == tk_iumap_end(code_hash_to_cluster) || !can_merge_same_code) {
         cluster_idx = state->n_clusters;
         int64_t cluster_id = (int64_t)(2 * n_samples + 1 + cluster_idx);
-        tk_agglo_cluster_t *cluster = tk_agglo_cluster_create(L, state_idx, cluster_id, features, state_bits);
+        tk_agglo_cluster_t *cluster = tk_agglo_cluster_create(L, state_idx, cluster_id, features, state_bits, linkage);
         lua_pop(L, 1);
         state->clusters[cluster_idx] = cluster;
         state->n_clusters_created++;
@@ -641,7 +658,7 @@ static inline bool tk_agglo_iteration(
     uint64_t to_idx = (uint64_t)merge.p;
     tk_agglo_cluster_t *from = state->clusters[from_idx];
     tk_agglo_cluster_t *to = state->clusters[to_idx];
-    if (!from || !to || !from->active || !to->active)
+    if (!from || !to)
       continue;
 
     if (state->linkage == TK_AGGLO_LINKAGE_CENTROID) {
