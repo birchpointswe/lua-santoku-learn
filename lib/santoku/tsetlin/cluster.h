@@ -673,15 +673,17 @@ static inline bool tk_agglo_iteration(
       }
     }
 
-    tk_ivec_clear(temp_id);
-    tk_ivec_push(temp_id, to->cluster_id);
-    char *to_code = tk_centroid_code(to->centroid);
-    if (state->index_type == TK_AGGLO_USE_ANN) {
-      tk_ann_remove(L, state->index.ann, to->cluster_id);
-      tk_ann_add(L, state->index.ann, index_stack_top, temp_id, to_code);
-    } else {
-      tk_hbi_remove(L, state->index.hbi, to->cluster_id);
-      tk_hbi_add(L, state->index.hbi, index_stack_top, temp_id, to_code);
+    if (state->linkage == TK_AGGLO_LINKAGE_CENTROID) {
+      tk_ivec_clear(temp_id);
+      tk_ivec_push(temp_id, to->cluster_id);
+      char *to_code = tk_centroid_code(to->centroid);
+      if (state->index_type == TK_AGGLO_USE_ANN) {
+        tk_ann_remove(L, state->index.ann, to->cluster_id);
+        tk_ann_add(L, state->index.ann, index_stack_top, temp_id, to_code);
+      } else {
+        tk_hbi_remove(L, state->index.hbi, to->cluster_id);
+        tk_hbi_add(L, state->index.hbi, index_stack_top, temp_id, to_code);
+      }
     }
 
     state->n_active_clusters--;
