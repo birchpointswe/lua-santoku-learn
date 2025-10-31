@@ -267,7 +267,6 @@ static inline void tk_agglo_find_min_edges_thread(
       double best_neighbor_distance = INFINITY;
       for (uint64_t m = 0; m < cluster->members->n; m++) {
         int64_t member_uid = cluster->members->a[m];
-        if (state->uid_to_adj_idx == NULL) continue;
         khint_t khi = tk_iumap_get(state->uid_to_adj_idx, member_uid);
         if (khi == tk_iumap_end(state->uid_to_adj_idx)) continue;
         int64_t adj_idx = tk_iumap_val(state->uid_to_adj_idx, khi);
@@ -483,10 +482,21 @@ static inline void tk_agglo_create_initial_clusters(
   tk_iumap_t *code_hash_to_cluster
 ) {
   state->n_clusters = 0;
+  bool adjacency_only = (ann == NULL && hbi == NULL && linkage == TK_AGGLO_LINKAGE_SINGLE && state->uid_to_adj_idx != NULL);
+  static char dummy_code[64] = {0};
+
   for (uint64_t i = 0; i < n_samples; i++) {
     int64_t uid = uids->a[i];
-    char *vec_ptr = ann ? tk_ann_get(ann, uid) : tk_hbi_get(hbi, uid);
-    if (!vec_ptr) continue;
+    char *vec_ptr = ann ? tk_ann_get(ann, uid) : (hbi ? tk_hbi_get(hbi, uid) : NULL);
+
+    if (adjacency_only) {
+      khint_t khi_adj = tk_iumap_get(state->uid_to_adj_idx, uid);
+      if (khi_adj == tk_iumap_end(state->uid_to_adj_idx))
+        continue;
+    } else if (!vec_ptr) {
+      continue;
+    }
+
     bool is_core_point = true;
     if (linkage == TK_AGGLO_LINKAGE_SINGLE && min_pts > 0 && state->is_core != NULL && state->uid_to_adj_idx != NULL) {
       khint_t khi_adj = tk_iumap_get(state->uid_to_adj_idx, uid);
@@ -501,29 +511,43 @@ static inline void tk_agglo_create_initial_clusters(
         is_core_point = false;
       }
     }
-    char *code = (char *)vec_ptr;
-    uint64_t code_hash = tk_agglo_hash_code(code, code_chunks);
-    khint_t khi = tk_iumap_get(code_hash_to_cluster, (int64_t)code_hash);
+
+    char *code = vec_ptr ? (char *)vec_ptr : dummy_code;
     uint64_t cluster_idx;
-    bool can_merge_same_code = (linkage != TK_AGGLO_LINKAGE_SINGLE) || is_core_point;
-    if (khi == tk_iumap_end(code_hash_to_cluster) || !can_merge_same_code) {
+
+    if (adjacency_only) {
       cluster_idx = state->n_clusters;
       int64_t cluster_id = (int64_t)(2 * n_samples + 1 + cluster_idx);
-      tk_agglo_cluster_t *cluster = tk_agglo_cluster_create(
-        L, state_idx, cluster_id, features, state_bits);
+      tk_agglo_cluster_t *cluster = tk_agglo_cluster_create(L, state_idx, cluster_id, features, state_bits);
       lua_pop(L, 1);
       state->clusters[cluster_idx] = cluster;
       state->n_clusters_created++;
       int kha;
-      if (can_merge_same_code) {
-        khi = tk_iumap_put(code_hash_to_cluster, (int64_t)code_hash, &kha);
-        tk_iumap_setval(code_hash_to_cluster, khi, (int64_t)cluster_idx);
-      }
       khint_t khi2 = tk_iumap_put(state->cluster_id_to_idx, cluster->cluster_id, &kha);
       tk_iumap_setval(state->cluster_id_to_idx, khi2, (int64_t)cluster_idx);
       state->n_clusters++;
     } else {
-      cluster_idx = (uint64_t)tk_iumap_val(code_hash_to_cluster, khi);
+      uint64_t code_hash = tk_agglo_hash_code(code, code_chunks);
+      khint_t khi = tk_iumap_get(code_hash_to_cluster, (int64_t)code_hash);
+      bool can_merge_same_code = (linkage != TK_AGGLO_LINKAGE_SINGLE) || is_core_point;
+      if (khi == tk_iumap_end(code_hash_to_cluster) || !can_merge_same_code) {
+        cluster_idx = state->n_clusters;
+        int64_t cluster_id = (int64_t)(2 * n_samples + 1 + cluster_idx);
+        tk_agglo_cluster_t *cluster = tk_agglo_cluster_create(L, state_idx, cluster_id, features, state_bits);
+        lua_pop(L, 1);
+        state->clusters[cluster_idx] = cluster;
+        state->n_clusters_created++;
+        int kha;
+        if (can_merge_same_code) {
+          khi = tk_iumap_put(code_hash_to_cluster, (int64_t)code_hash, &kha);
+          tk_iumap_setval(code_hash_to_cluster, khi, (int64_t)cluster_idx);
+        }
+        khint_t khi2 = tk_iumap_put(state->cluster_id_to_idx, cluster->cluster_id, &kha);
+        tk_iumap_setval(state->cluster_id_to_idx, khi2, (int64_t)cluster_idx);
+        state->n_clusters++;
+      } else {
+        cluster_idx = (uint64_t)tk_iumap_val(code_hash_to_cluster, khi);
+      }
     }
     tk_agglo_cluster_add_member(state->clusters[cluster_idx], uid, code, code_chunks);
     int kha;
@@ -671,7 +695,6 @@ static inline bool tk_agglo_iteration(
       if (!cluster || !cluster->active) continue;
       for (uint64_t m = 0; m < cluster->members->n; m++) {
         int64_t member_uid = cluster->members->a[m];
-        if (state->uid_to_adj_idx == NULL) continue;
         khint_t khi = tk_iumap_get(state->uid_to_adj_idx, member_uid);
         if (khi == tk_iumap_end(state->uid_to_adj_idx)) continue;
         int64_t adj_idx = tk_iumap_val(state->uid_to_adj_idx, khi);
