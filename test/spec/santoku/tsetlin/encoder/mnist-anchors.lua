@@ -183,8 +183,6 @@ test("tsetlin", function ()
       end
     })
 
-  train.graph_rank_weights = train.node_combined:rank_weights()
-
   train.node_features:destroy()
   train.node_combined:destroy()
   collectgarbage("collect")
@@ -284,7 +282,6 @@ test("tsetlin", function ()
   if cfg.mode.tch then
     print("Flipping bits")
     tch.refine({
-      rank_weights = train.graph_rank_weights,
       ids = train.adj_ids,
       offsets = train.adj_offsets,
       neighbors = train.adj_neighbors,
