@@ -674,7 +674,6 @@ static inline tk_pvec_t *tk_hbi_neighbors_by_vec (
         break;
     }
   }
-  tk_pvec_asc(out, 0, out->n);
   return out;
 }
 
