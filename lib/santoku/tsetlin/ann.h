@@ -939,13 +939,13 @@ static inline int tk_ann_neighborhoods_lua (lua_State *L)
 
 static inline int tk_ann_neighborhoods_by_ids_lua (lua_State *L)
 {
-  lua_settop(L, 5);
+  lua_settop(L, 6);
   tk_ann_t *A = tk_ann_peek(L, 1);
   tk_ivec_t *query_ids = tk_ivec_peek(L, 2, "ids");
   uint64_t k = tk_lua_optunsigned(L, 3, "k", 0);
   uint64_t probe_radius = tk_lua_optunsigned(L, 4, "probe_radius", 3);
-  uint64_t eps_min = tk_lua_optunsigned(L, 4, "eps_min", 0);
-  uint64_t eps_max = tk_lua_optunsigned(L, 5, "eps_max", A->features);
+  uint64_t eps_min = tk_lua_optunsigned(L, 5, "eps_min", 0);
+  uint64_t eps_max = tk_lua_optunsigned(L, 6, "eps_max", A->features);
   int64_t write_pos = 0;
   for (int64_t i = 0; i < (int64_t) query_ids->n; i ++) {
     int64_t uid = query_ids->a[i];
