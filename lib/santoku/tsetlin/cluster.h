@@ -644,10 +644,12 @@ static inline bool tk_agglo_iteration(
     if (!from || !to || !from->active || !to->active)
       continue;
 
-    if (state->index_type == TK_AGGLO_USE_ANN)
-      tk_ann_remove(L, state->index.ann, from->cluster_id);
-    else
-      tk_hbi_remove(L, state->index.hbi, from->cluster_id);
+    if (state->linkage == TK_AGGLO_LINKAGE_CENTROID) {
+      if (state->index_type == TK_AGGLO_USE_ANN)
+        tk_ann_remove(L, state->index.ann, from->cluster_id);
+      else
+        tk_hbi_remove(L, state->index.hbi, from->cluster_id);
+    }
 
     for (uint64_t j = 0; j < from->members->n; j++) {
       int64_t uid = from->members->a[j];
