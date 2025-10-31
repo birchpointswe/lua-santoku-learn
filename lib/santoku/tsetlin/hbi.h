@@ -51,7 +51,6 @@ typedef struct tk_hbi_s {
   tk_hbi_buckets_t *buckets;
   tk_iumap_t *uid_sid;
   tk_ivec_t *sid_to_uid;
-  tk_ivec_t *sid_to_pos;
   tk_hbi_codes_t *codes;
 } tk_hbi_t;
 
@@ -427,6 +426,7 @@ static inline bool tk_hbi_probe_bucket_for_uid (
 
 static inline bool tk_hbi_probe_bucket (
   tk_hbi_t *A,
+  tk_ivec_t *sid_to_pos,
   tk_hbi_code_t h,
   tk_pvec_t *out,
   uint64_t knn,
@@ -440,9 +440,9 @@ static inline bool tk_hbi_probe_bucket (
       int64_t sid1 = bucket->a[bi];
       if (sid1 == sid0)
         continue;
-      if (sid1 < 0 || sid1 >= (int64_t)A->sid_to_pos->n)
+      if (sid1 < 0 || sid1 >= (int64_t)sid_to_pos->n)
         continue;
-      int64_t id = A->sid_to_pos->a[sid1];
+      int64_t id = sid_to_pos->a[sid1];
       if (id < 0)
         continue;
       tk_pvec_push(out, tk_pair(id, (int64_t) r));
@@ -455,6 +455,7 @@ static inline bool tk_hbi_probe_bucket (
 
 static inline void tk_hbi_populate_neighborhood (
   tk_hbi_t *A,
+  tk_ivec_t *sid_to_pos,
   uint64_t i,
   int64_t sid,
   char *V,
@@ -464,7 +465,7 @@ static inline void tk_hbi_populate_neighborhood (
   uint64_t eps_max
 ) {
   tk_hbi_code_t h = tk_hbi_pack(V, A->features);
-  if (eps_min == 0 && tk_hbi_probe_bucket(A, h, hood, k, sid, 0))
+  if (eps_min == 0 && tk_hbi_probe_bucket(A, sid_to_pos, h, hood, k, sid, 0))
     return;
   int pos[TK_HBI_BITS];
   int nbits = (int) A->features;
@@ -476,7 +477,7 @@ static inline void tk_hbi_populate_neighborhood (
       tk_hbi_code_t mask = 0;
       for (int i = 0; i < r; i ++)
         mask |= (1U << pos[i]);
-      if (tk_hbi_probe_bucket(A, h ^ mask, hood, k, sid, r))
+      if (tk_hbi_probe_bucket(A, sid_to_pos, h ^ mask, hood, k, sid, r))
         return;
       int i;
       for (i = r - 1; i >= 0; i--) {
@@ -493,26 +494,29 @@ static inline void tk_hbi_populate_neighborhood (
   }
 }
 
-static inline tk_ivec_t *tk_hbi_prepare_universe_map (
+static inline void tk_hbi_prepare_universe_map (
   lua_State *L,
-  tk_hbi_t *A
+  tk_hbi_t *A,
+  tk_ivec_t **uids_out,
+  tk_ivec_t **sid_to_pos_out
 ) {
   tk_ivec_t *uids = tk_ivec_create(L, A->next_sid, 0, 0);
   uids->n = 0;
-  tk_ivec_ensure(A->sid_to_pos, A->next_sid);
-  A->sid_to_pos->n = A->next_sid;
+  tk_ivec_t *sid_to_pos = tk_ivec_create(NULL, A->next_sid, 0, 0);
+  sid_to_pos->n = A->next_sid;
   uint64_t active_idx = 0;
   for (uint64_t sid = 0; sid < A->next_sid; sid++) {
     int64_t uid = A->sid_to_uid->a[sid];
     if (uid >= 0) {
-      A->sid_to_pos->a[sid] = (int64_t)active_idx;
+      sid_to_pos->a[sid] = (int64_t)active_idx;
       uids->a[uids->n ++] = uid;
       active_idx++;
     } else {
-      A->sid_to_pos->a[sid] = -1;
+      sid_to_pos->a[sid] = -1;
     }
   }
-  return uids;
+  *uids_out = uids;
+  *sid_to_pos_out = sid_to_pos;
 }
 
 static inline void tk_hbi_neighborhoods (
@@ -528,34 +532,31 @@ static inline void tk_hbi_neighborhoods (
     tk_lua_verror(L, 2, "neighborhoods", "can't query a destroyed index");
     return;
   }
-  tk_ivec_t *uids = tk_ivec_create(L, 0, 0, 0);
-  tk_hbi_hoods_t *hoods = tk_hbi_hoods_create(L, 0, 0, 0);
+
+  tk_ivec_t *uids, *sid_to_pos;
+  tk_hbi_prepare_universe_map(L, A, &uids, &sid_to_pos);
+
+  tk_hbi_hoods_t *hoods = tk_hbi_hoods_create(L, uids->n, 0, 0);
   int hoods_stack_idx = lua_gettop(L);
-  tk_ivec_ensure(A->sid_to_pos, A->next_sid);
-  A->sid_to_pos->n = A->next_sid;
-  uint64_t active_idx = 0;
-  for (uint64_t sid = 0; sid < A->next_sid; sid++) {
-    int64_t uid = A->sid_to_uid->a[sid];
-    if (uid >= 0) {
-      A->sid_to_pos->a[sid] = (int64_t)active_idx;
-      tk_ivec_push(uids, uid);
-      tk_pvec_t *hood = tk_pvec_create(L, k, 0, 0);
-      hood->n = 0;
-      tk_lua_add_ephemeron(L, TK_HBI_EPH, hoods_stack_idx, -1);
-      lua_pop(L, 1);
-      tk_hbi_hoods_push(hoods, hood);
-      active_idx++;
-    } else {
-      A->sid_to_pos->a[sid] = -1;
-    }
+  hoods->n = uids->n;
+  for (uint64_t i = 0; i < hoods->n; i ++) {
+    tk_pvec_t *hood = tk_pvec_create(L, k, 0, 0);
+    hood->n = 0;
+    tk_lua_add_ephemeron(L, TK_HBI_EPH, hoods_stack_idx, -1);
+    lua_pop(L, 1);
+    hoods->a[i] = hood;
   }
+
   #pragma omp parallel for schedule(static)
   for (uint64_t i = 0; i < hoods->n; i ++) {
     tk_pvec_t *hood = hoods->a[i];
     int64_t uid = uids->a[i];
     int64_t sid = tk_hbi_uid_sid(A, uid, TK_HBI_FIND);
-    tk_hbi_populate_neighborhood(A, i, sid, tk_hbi_sget(A, sid), hood, k, eps_min, eps_max);
+    tk_hbi_populate_neighborhood(A, sid_to_pos, i, sid, tk_hbi_sget(A, sid), hood, k, eps_min, eps_max);
   }
+
+  tk_ivec_destroy(sid_to_pos);
+
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = uids;
 }
@@ -574,7 +575,10 @@ static inline void tk_hbi_neighborhoods_by_ids (
     tk_lua_verror(L, 2, "neighborhoods_by_ids", "can't query a destroyed index");
     return;
   }
-  tk_ivec_t *all_uids = tk_hbi_prepare_universe_map(L, A);
+
+  tk_ivec_t *all_uids, *sid_to_pos;
+  tk_hbi_prepare_universe_map(L, A, &all_uids, &sid_to_pos);
+
   tk_ivec_t *sids = tk_ivec_create(L, query_ids->n, 0, 0);
   sids->n = query_ids->n;
   for (uint64_t i = 0; i < query_ids->n; i ++)
@@ -586,14 +590,18 @@ static inline void tk_hbi_neighborhoods_by_ids (
     tk_lua_add_ephemeron(L, TK_HBI_EPH, -2, -1);
     lua_pop(L, 1);
   }
+
   #pragma omp parallel for schedule(static)
   for (uint64_t i = 0; i < hoods->n; i ++) {
     int64_t sid = sids->a[i];
     if (sid < 0)
       continue;
     tk_pvec_t *hood = hoods->a[i];
-    tk_hbi_populate_neighborhood(A, i, sid, tk_hbi_sget(A, sid), hood, k, eps_min, eps_max);
+    tk_hbi_populate_neighborhood(A, sid_to_pos, i, sid, tk_hbi_sget(A, sid), hood, k, eps_min, eps_max);
   }
+
+  tk_ivec_destroy(sid_to_pos);
+
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = all_uids;
   lua_remove(L, -3);
@@ -613,7 +621,10 @@ static inline void tk_hbi_neighborhoods_by_vecs (
     tk_lua_verror(L, 2, "neighborhoods_by_vecs", "can't query a destroyed index");
     return;
   }
-  tk_ivec_t *all_uids = tk_hbi_prepare_universe_map(L, A);
+
+  tk_ivec_t *all_uids, *sid_to_pos;
+  tk_hbi_prepare_universe_map(L, A, &all_uids, &sid_to_pos);
+
   uint64_t vec_bytes = TK_CVEC_BITS_BYTES(A->features);
   uint64_t n_queries = query_vecs->n / vec_bytes;
   tk_hbi_hoods_t *hoods = tk_hbi_hoods_create(L, n_queries, 0, 0);
@@ -624,12 +635,16 @@ static inline void tk_hbi_neighborhoods_by_vecs (
     tk_lua_add_ephemeron(L, TK_HBI_EPH, -2, -1);
     lua_pop(L, 1);
   }
+
   #pragma omp parallel for schedule(static)
   for (uint64_t i = 0; i < hoods->n; i ++) {
     tk_pvec_t *hood = hoods->a[i];
     char *vec = (char *)(query_vecs->a + i * vec_bytes);
-    tk_hbi_populate_neighborhood(A, i, -1, vec, hood, k, eps_min, eps_max);
+    tk_hbi_populate_neighborhood(A, sid_to_pos, i, -1, vec, hood, k, eps_min, eps_max);
   }
+
+  tk_ivec_destroy(sid_to_pos);
+
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = all_uids;
 }
@@ -1076,9 +1091,6 @@ static inline tk_hbi_t *tk_hbi_create (
   A->sid_to_uid = tk_ivec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
   lua_pop(L, 1);
-  A->sid_to_pos = tk_ivec_create(L, 0, 0, 0);
-  tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
-  lua_pop(L, 1);
   A->codes = tk_hbi_codes_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
   lua_pop(L, 1);
@@ -1128,9 +1140,6 @@ static inline tk_hbi_t *tk_hbi_load (
   tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
   lua_pop(L, 1);
   A->sid_to_uid = tk_ivec_load(L, fh);
-  tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
-  lua_pop(L, 1);
-  A->sid_to_pos = tk_ivec_create(L, 0, 0, 0);
   tk_lua_add_ephemeron(L, TK_HBI_EPH, Ai, -1);
   lua_pop(L, 1);
   uint64_t cnum = 0;
