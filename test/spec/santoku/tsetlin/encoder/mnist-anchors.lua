@@ -27,11 +27,11 @@ local cfg; cfg = {
     landmarks = 24,
   },
   mode = {
-    encoder = true,
+    encoder = nil,
     cluster = true,
     mode = "landmarks",
     binarize = "itq",
-    tch = false,
+    tch = true,
   },
   index = {
     ann = true,
@@ -182,6 +182,9 @@ test("tsetlin", function ()
         str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Nodes: %-6d  Components: %-6d  Edges: %-6d\n", d, dd, dt, ids, s, b)
       end
     })
+
+  train.graph_rank_weights = train.node_combined:rank_weights()
+
   train.node_features:destroy()
   train.node_combined:destroy()
   collectgarbage("collect")
@@ -281,6 +284,7 @@ test("tsetlin", function ()
   if cfg.mode.tch then
     print("Flipping bits")
     tch.refine({
+      rank_weights = train.graph_rank_weights,
       ids = train.adj_ids,
       offsets = train.adj_offsets,
       neighbors = train.adj_neighbors,

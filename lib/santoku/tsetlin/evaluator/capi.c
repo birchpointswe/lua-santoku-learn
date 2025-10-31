@@ -529,7 +529,7 @@ static inline void tm_clustering_accuracy (
   double *out_score
 ) {
 
-  if (offsets->n == 0) {
+  if (!offsets || offsets->n == 0) {
     *out_score = 0.0;
     return;
   }
@@ -642,7 +642,7 @@ static inline void tm_retrieval_accuracy (
   tk_eval_metric_t metric,
   double *out_score
 ) {
-  if (offsets->n == 0) {
+  if (!offsets || offsets->n == 0) {
     *out_score = 0.0;
     return;
   }
@@ -1269,7 +1269,7 @@ static inline tm_optimize_result_t tm_optimize_clustering_agglo (
 
   tk_agglo(L, ann, hbi, ids, features, index_type, linkage, probe_radius, knn, min_pts, assign_noise,
            cluster_adj_ids, cluster_adj_offsets, cluster_adj_neighbors, cluster_adj_weights,
-           n_threads, working_assignments, agglo_snapshot_callback, &cb_data,
+           working_assignments, agglo_snapshot_callback, &cb_data,
            centroid_bucket_target);
 
   tk_ivec_destroy(working_assignments);
