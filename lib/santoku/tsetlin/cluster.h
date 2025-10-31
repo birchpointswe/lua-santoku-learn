@@ -727,7 +727,9 @@ static inline int tk_agglo (
     return -1;
   if (uids->n == 0)
     return -1;
-  if (!ann && !hbi)
+  if (linkage == TK_AGGLO_LINKAGE_CENTROID && !ann && !hbi)
+    return -1;
+  if (linkage == TK_AGGLO_LINKAGE_SINGLE && !adj_ids && !ann && !hbi)
     return -1;
   if (features == 0)
     return -1;
