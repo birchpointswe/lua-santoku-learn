@@ -9,7 +9,6 @@ local env = {
     "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow",
     "-Wpointer-sign", "-Wno-unused-parameter", "-Wno-unused-but-set-variable",
     "-I$(shell luarocks show santoku --rock-dir)/include/",
-    "-I$(shell luarocks show santoku-threads --rock-dir)/include/",
     "-I$(shell luarocks show santoku-matrix --rock-dir)/include/",
     "-fopenmp", "$(shell pkg-config --cflags blas lapack)"
   },
@@ -53,9 +52,7 @@ local env = {
   dependencies = {
     "lua >= 5.1",
     "santoku >= 0.0.294-1",
-    "santoku-threads >= 0.0.22-1",
     "santoku-matrix >= 0.0.162-1",
-    "santoku-system >= 0.0.56-1",
   },
   test = {
     dependencies = {
