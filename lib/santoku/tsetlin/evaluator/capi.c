@@ -1371,7 +1371,9 @@ static inline int tm_optimize_clustering (lua_State *L)
   else if (!strcmp(cmpstr, "dice"))
     cmp = TK_IVEC_DICE;
 
-  if (linkage == TK_AGGLO_LINKAGE_SINGLE && knn == 0 && (inv != NULL || ann != NULL || hbi != NULL))
+  if (linkage == TK_AGGLO_LINKAGE_SINGLE && knn == 0 &&
+      (inv != NULL || ann != NULL || hbi != NULL) &&
+      cluster_offsets == NULL)
     tk_lua_verror(L, 3, "optimize_clustering", "knn", "required");
   else if (linkage == TK_AGGLO_LINKAGE_CENTROID && knn == 0)
     knn = 1;
