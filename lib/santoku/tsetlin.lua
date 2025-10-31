@@ -223,7 +223,6 @@ M.optimize = function (args, typ)
               codes = args.codes,
               samples = args.samples,
               iterations = iters_search,
-              threads = args.threads,
               each = function (epoch)
                 return each(epoch, search_tm)
               end,
@@ -234,7 +233,6 @@ M.optimize = function (args, typ)
               problems = args.problems,
               solutions = args.solutions,
               iterations = iters_search,
-              threads = args.threads,
               each = function (epoch)
                 return each(epoch, search_tm)
               end,
@@ -305,7 +303,6 @@ M.optimize = function (args, typ)
       codes = args.codes,
       samples = args.samples,
       iterations = final_iters,
-      threads = args.threads,
       each = function (epoch)
         local cb_result = nil
         if each_cb then
@@ -361,7 +358,6 @@ M.optimize = function (args, typ)
       problems = args.problems,
       solutions = args.solutions,
       iterations = final_iters,
-      threads = args.threads,
       each = function (epoch)
         local cb_result = nil
         if each_cb then
