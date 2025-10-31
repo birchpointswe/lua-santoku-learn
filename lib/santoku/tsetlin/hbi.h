@@ -896,7 +896,7 @@ static inline int tk_hbi_neighborhoods_lua (lua_State *L)
   tk_hbi_t *A = tk_hbi_peek(L, 1);
   uint64_t k = tk_lua_optunsigned(L, 2, "k", 0);
   uint64_t eps_min = tk_lua_optunsigned(L, 3, "eps_min", 0);
-  uint64_t eps_max = tk_lua_optunsigned(L, 4, "eps_max", 0);
+  uint64_t eps_max = tk_lua_optunsigned(L, 4, "eps_max", A->features);
   tk_hbi_neighborhoods(L, A, k, eps_min, eps_max, NULL, NULL);
   return 2;
 }
@@ -958,7 +958,7 @@ static inline int tk_hbi_neighbors_lua (lua_State *L)
   tk_hbi_t *A = tk_hbi_peek(L, 1);
   uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
   uint64_t eps_min = tk_lua_optunsigned(L, 4, "eps_min", 0);
-  uint64_t eps_max = tk_lua_optunsigned(L, 5, "eps_max", 0);
+  uint64_t eps_max = tk_lua_optunsigned(L, 5, "eps_max", A->features);
   tk_pvec_t *out = tk_pvec_peek(L, 6,  "out");
   if (lua_type(L, 2) == LUA_TNUMBER) {
     int64_t uid = tk_lua_checkinteger(L, 2, "id");
