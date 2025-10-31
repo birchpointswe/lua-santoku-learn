@@ -17,6 +17,9 @@ static inline void tk_tch_refine (
   tk_ivec_t *adj_data,
   tk_dvec_t *adj_weights,
   uint64_t n_dims,
+  double eps,
+  tk_dvec_t *rank_weights,
+  uint64_t knn,
   int i_each
 ) {
   uint64_t n_nodes = uids->n;
@@ -33,6 +36,41 @@ static inline void tk_tch_refine (
   tk_cvec_zero(codes);
   uint64_t total_steps = 0;
   uint64_t n_bytes = (n_dims + 7) / 8;
+  double *eps_per_bit = NULL;
+  if (eps >= 0.0) {
+    eps_per_bit = tk_malloc(L, n_dims * sizeof(double));
+    for (uint64_t f = 0; f < n_dims; f++) {
+      eps_per_bit[f] = eps;
+    }
+  } else if (rank_weights != NULL && rank_weights->n > 0) {
+    eps_per_bit = tk_malloc(L, n_dims * sizeof(double));
+    double total_weight = 0.0;
+    for (uint64_t r = 0; r < rank_weights->n; r++) {
+      total_weight += rank_weights->a[r];
+    }
+    uint64_t bit_offset = 0;
+    for (uint64_t r = 0; r < rank_weights->n; r++) {
+      double rank_fraction = rank_weights->a[r] / total_weight;
+      uint64_t bits_for_rank = (uint64_t)(rank_fraction * (double)n_dims);
+      if (rank_weights->a[r] > 0.0 && bits_for_rank == 0) {
+        bits_for_rank = 1;
+      }
+      double threshold;
+      if (r < rank_weights->n - 1) {
+        threshold = sqrt(rank_weights->a[r] * rank_weights->a[r + 1]);
+      } else {
+        threshold = -1.0;
+      }
+      for (uint64_t b = 0; b < bits_for_rank && bit_offset < n_dims; b++) {
+        eps_per_bit[bit_offset] = threshold;
+        bit_offset++;
+      }
+    }
+    while (bit_offset < n_dims) {
+      eps_per_bit[bit_offset] = -1.0;
+      bit_offset++;
+    }
+  }
   #pragma omp parallel reduction(+:total_steps)
   {
     tk_ivec_t *node_order = tk_ivec_create(0, n_nodes, 0, 0);
@@ -44,6 +82,7 @@ static inline void tk_tch_refine (
       uint64_t last_bit = ((byte_idx + 1) * 8 - 1) < (n_dims - 1) ? ((byte_idx + 1) * 8 - 1) : (n_dims - 1);
       for (uint64_t f = first_bit; f <= last_bit; f++) {
         int *bitvec = bitvecs + f * n_nodes;
+        double eps_f = eps_per_bit ? eps_per_bit[f] : -1.0;
         tk_ivec_shuffle(node_order);
         bool updated;
         do {
@@ -54,10 +93,21 @@ static inline void tk_tch_refine (
             int64_t row_start = adj_offset->a[i];
             int64_t row_end = adj_offset->a[i + 1];
             double delta = 0.0;
-            for (int64_t jj = row_start; jj < row_end; jj++) {
+            int64_t neighbor_limit = row_end;
+            if (knn > 0) {
+              int64_t k_limit = row_start + (int64_t)knn;
+              if (k_limit < row_end) {
+                neighbor_limit = k_limit;
+              }
+            }
+            for (int64_t jj = row_start; jj < neighbor_limit; jj++) {
               int64_t j = adj_data->a[jj];
               double weight = adj_weights->a[jj];
-              delta += bitvec[i] * bitvec[j] * weight;
+              if (eps_f < 0.0) {
+                delta += bitvec[i] * bitvec[j] * weight;
+              } else if (weight >= eps_f) {
+                delta += bitvec[i] * bitvec[j] * weight;
+              }
             }
             if (delta < 0.0) {
               bitvec[i] = -bitvec[i];
@@ -75,13 +125,15 @@ static inline void tk_tch_refine (
       int *bitvec = bitvecs + f * n_nodes;
       uint64_t byte_idx = s * bytes_per_sample + (f / 8);
       uint8_t bit_mask = 1 << (f % 8);
-
       if (bitvec[s] > 0) {
         codes->a[byte_idx] |= bit_mask;
       } else {
         codes->a[byte_idx] &= ~bit_mask;
       }
     }
+  }
+  if (eps_per_bit) {
+    free(eps_per_bit);
   }
   free(bitvecs);
   if (i_each >= 0) {

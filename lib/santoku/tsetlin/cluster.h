@@ -7,7 +7,7 @@
 #include <santoku/tsetlin/ann.h>
 #include <santoku/tsetlin/hbi.h>
 #include <santoku/tsetlin/centroid.h>
-#include <santoku/threads.h>
+#include <omp.h>
 #include <santoku/ivec.h>
 #include <santoku/cvec.h>
 #include <santoku/iumap.h>
@@ -29,11 +29,6 @@ typedef enum {
   TK_AGGLO_LINKAGE_SINGLE
 } tk_agglo_linkage_t;
 
-typedef enum {
-  TK_AGGLO_STAGE_FIND_MIN_EDGES,
-  TK_AGGLO_STAGE_MERGE_CLUSTERS
-} tk_agglo_stage_t;
-
 typedef struct {
   int64_t cluster_id;
   tk_centroid_t *centroid;
@@ -43,8 +38,6 @@ typedef struct {
   uint64_t size;
   bool is_userdata;
 } tk_agglo_cluster_t;
-
-typedef struct tk_agglo_thread_s tk_agglo_thread_t;
 
 typedef struct {
   tk_agglo_index_type_t index_type;
@@ -66,11 +59,6 @@ typedef struct {
     tk_ann_t *ann;
     tk_hbi_t *hbi;
   } index;
-  tk_threadpool_t *pool;
-  unsigned int n_threads;
-  tk_pvec_t **thread_neighbors;
-  double *thread_min_dist;
-  tk_pvec_t **thread_min_edges;
   tk_evec_t *weighted_edges;
   tk_pvec_t *selected_merges;
   tk_iuset_t *merged_clusters;
@@ -78,8 +66,6 @@ typedef struct {
   lua_State *L;
   bool is_userdata;
   uint64_t n_clusters_created;
-  uint64_t n_threads_arrays_allocated;
-  struct tk_agglo_thread_s *threads;
   uint64_t knn;
   uint64_t min_pts;
   bool assign_noise;
@@ -94,27 +80,11 @@ typedef struct {
   double current_epsilon;
 } tk_agglo_state_t;
 
-struct tk_agglo_thread_s {
-  tk_agglo_state_t *state;
-  uint64_t first, last;
-  unsigned int index;
-  union {
-    struct {
-      tk_pvec_t *neighbors;
-      double min_dist;
-      tk_pvec_t *min_edges;
-    } find_edges;
-    struct {
-      uint64_t merge_first, merge_last;
-    } merge;
-  } stage_data;
-};
-
 static inline uint64_t tk_agglo_hash_code (char *code, uint64_t code_chunks) {
-  uint64_t hash = 0xcbf29ce484222325ULL; // FNV-1a offset basis
+  uint64_t hash = 0xcbf29ce484222325ULL;
   for (uint64_t i = 0; i < code_chunks; i++) {
     hash ^= (uint64_t)(uint8_t)code[i];
-    hash *= 0x100000001b3ULL; // FNV-1a prime
+    hash *= 0x100000001b3ULL;
   }
   return hash;
 }
@@ -163,7 +133,6 @@ static inline tk_agglo_cluster_t *tk_agglo_cluster_create (
       return NULL;
     }
   }
-  // Only create centroid for centroid linkage
   if (linkage == TK_AGGLO_LINKAGE_CENTROID) {
     uint8_t tail_mask = (features % TK_CVEC_BITS == 0) ?
       0xFF : (uint8_t)((1 << (features % TK_CVEC_BITS)) - 1);
@@ -263,158 +232,6 @@ static inline int64_t tk_agglo_find_nearest_core_cluster(
   return nearest;
 }
 
-static inline void tk_agglo_find_min_edges_thread(
-  tk_agglo_state_t *state,
-  uint64_t first,
-  uint64_t last,
-  tk_pvec_t *neighbors,
-  tk_pvec_t *min_edges,
-  double *min_dist_out
-) {
-  tk_pvec_clear(neighbors);
-  tk_pvec_clear(min_edges);
-  double min_dist = INFINITY;
-  if (state->linkage == TK_AGGLO_LINKAGE_SINGLE) {
-    for (uint64_t i = first; i <= last && i < state->n_clusters; i++) {
-      tk_agglo_cluster_t *cluster = state->clusters[i];
-      if (!cluster || !cluster->active) continue;
-      int64_t best_neighbor_cluster_idx = -1;
-      double best_neighbor_distance = INFINITY;
-      for (uint64_t m = 0; m < cluster->members->n; m++) {
-        int64_t member_uid = cluster->members->a[m];
-        khint_t khi = tk_iumap_get(state->uid_to_adj_idx, member_uid);
-        if (khi == tk_iumap_end(state->uid_to_adj_idx)) continue;
-        int64_t adj_idx = tk_iumap_val(state->uid_to_adj_idx, khi);
-        if (adj_idx < 0 || adj_idx >= (int64_t)state->adj_ids->n) continue;
-        uint64_t offset = (state->adj_scan_offsets != NULL &&
-                          adj_idx < (int64_t)state->adj_scan_offsets->n)
-                         ? (uint64_t)state->adj_scan_offsets->a[adj_idx] : 0;
-        int64_t start = state->adj_offsets->a[adj_idx];
-        int64_t end = state->adj_offsets->a[adj_idx + 1];
-        for (int64_t j = start + (int64_t)offset; j < end; j++) {
-          int64_t nh_idx = state->adj_neighbors->a[j];
-          if (nh_idx < 0 || nh_idx >= (int64_t)state->adj_ids->n) continue;
-          int64_t nh_uid = state->adj_ids->a[nh_idx];
-          double similarity = state->adj_weights->a[j];
-          double distance = 1.0 - similarity;
-          if (distance > state->current_epsilon) {
-            if (state->adj_scan_offsets && adj_idx < (int64_t)state->adj_scan_offsets->n)
-              state->adj_scan_offsets->a[adj_idx] = j - start;
-            break;
-          }
-          khint_t khi_n = tk_iumap_get(state->uid_to_cluster, nh_uid);
-          if (khi_n == tk_iumap_end(state->uid_to_cluster)) continue;
-          uint64_t neighbor_cluster_idx = (uint64_t)tk_iumap_val(state->uid_to_cluster, khi_n);
-          if (neighbor_cluster_idx == i) continue;
-          if (!state->clusters[neighbor_cluster_idx] ||
-              !state->clusters[neighbor_cluster_idx]->active) continue;
-          if (distance == state->current_epsilon) {
-            if (neighbor_cluster_idx != (uint64_t)best_neighbor_cluster_idx ||
-                distance < best_neighbor_distance) {
-              best_neighbor_cluster_idx = (int64_t)neighbor_cluster_idx;
-              best_neighbor_distance = distance;
-            }
-          }
-        }
-      }
-      if (best_neighbor_cluster_idx >= 0 && best_neighbor_distance == state->current_epsilon) {
-        uint64_t c1 = i, c2 = (uint64_t)best_neighbor_cluster_idx;
-        if (state->clusters[c1]->size > state->clusters[c2]->size ||
-            (state->clusters[c1]->size == state->clusters[c2]->size && c1 > c2)) {
-          uint64_t tmp = c1; c1 = c2; c2 = tmp;
-        }
-        double dist = best_neighbor_distance;
-        if (dist < min_dist) {
-          min_dist = dist;
-          tk_pvec_clear(min_edges);
-        }
-        if (dist == min_dist)
-          tk_pvec_push(min_edges, tk_pair((int64_t)c1, (int64_t)c2));
-      }
-    }
-  } else {
-    for (uint64_t i = first; i <= last && i < state->n_clusters; i++) {
-      tk_agglo_cluster_t *cluster = state->clusters[i];
-      if (!cluster || !cluster->active) continue;
-      tk_pvec_clear(neighbors);
-      if (state->index_type == TK_AGGLO_USE_ANN) {
-        tk_ann_neighbors_by_id(state->index.ann, cluster->cluster_id, state->knn, state->probe_radius, 0, state->index.ann->features, neighbors);
-      } else {
-        tk_hbi_neighbors_by_id(state->index.hbi, cluster->cluster_id, state->knn, 0, state->probe_radius, neighbors);
-      }
-      if (neighbors->n > 0) {
-        tk_pvec_asc(neighbors, 0, neighbors->n);
-        int64_t local_min = neighbors->a[0].p;
-        for (uint64_t j = 0; j < neighbors->n; j++) {
-          if (neighbors->a[j].p > local_min) break;
-          int64_t other_cluster_id = neighbors->a[j].i;
-          khint_t khi = tk_iumap_get(state->cluster_id_to_idx, other_cluster_id);
-          if (khi == tk_iumap_end(state->cluster_id_to_idx)) continue;
-          uint64_t other_idx = (uint64_t)tk_iumap_val(state->cluster_id_to_idx, khi);
-          if (!state->clusters[other_idx] || !state->clusters[other_idx]->active) continue;
-          if (i == other_idx) continue;
-          uint64_t c1 = i, c2 = other_idx;
-          if (state->clusters[c1]->size > state->clusters[c2]->size ||
-              (state->clusters[c1]->size == state->clusters[c2]->size && c1 > c2)) {
-            uint64_t tmp = c1; c1 = c2; c2 = tmp;
-          }
-          double dist = (double)local_min;
-          if (dist < min_dist) {
-            min_dist = dist;
-            tk_pvec_clear(min_edges);
-          }
-          if (dist == min_dist)
-            tk_pvec_push(min_edges, tk_pair((int64_t)c1, (int64_t)c2));
-        }
-      }
-    }
-  }
-  *min_dist_out = min_dist;
-}
-
-static inline void tk_agglo_merge_clusters_thread(
-  tk_agglo_state_t *state,
-  uint64_t merge_first,
-  uint64_t merge_last
-) {
-  for (uint64_t i = merge_first; i <= merge_last && i < state->selected_merges->n; i++) {
-    tk_pair_t merge = state->selected_merges->a[i];
-    uint64_t from_idx = (uint64_t)merge.i;
-    uint64_t to_idx = (uint64_t)merge.p;
-    tk_agglo_cluster_t *from = state->clusters[from_idx];
-    tk_agglo_cluster_t *to = state->clusters[to_idx];
-    if (!from || !to || !from->active || !to->active) continue;
-    for (uint64_t j = 0; j < from->members->n; j++) {
-      int64_t uid = from->members->a[j];
-      khint_t khi = tk_iumap_get(state->uid_to_cluster, uid);
-      if (khi != tk_iumap_end(state->uid_to_cluster))
-        tk_iumap_setval(state->uid_to_cluster, khi, (int64_t)to_idx);
-    }
-    tk_agglo_cluster_merge(to, from);
-    khint_t khi = tk_iumap_get(state->cluster_id_to_idx, from->cluster_id);
-    if (khi != tk_iumap_end(state->cluster_id_to_idx))
-      tk_iumap_del(state->cluster_id_to_idx, khi);
-  }
-}
-
-static inline void tk_agglo_worker(void *dp, int sig) {
-  tk_agglo_stage_t stage = (tk_agglo_stage_t)sig;
-  tk_agglo_thread_t *data = (tk_agglo_thread_t *)dp;
-  tk_agglo_state_t *state = data->state;
-  switch (stage) {
-    case TK_AGGLO_STAGE_FIND_MIN_EDGES:
-      tk_agglo_find_min_edges_thread(state, data->first, data->last,
-        data->stage_data.find_edges.neighbors, data->stage_data.find_edges.min_edges,
-        &data->stage_data.find_edges.min_dist);
-      break;
-    case TK_AGGLO_STAGE_MERGE_CLUSTERS:
-      tk_agglo_merge_clusters_thread(state, data->stage_data.merge.merge_first,
-        data->stage_data.merge.merge_last);
-      break;
-    default:
-      break;
-  }
-}
 
 static inline int tk_agglo_state_gc(lua_State *L) {
   tk_agglo_state_t *state = luaL_checkudata(L, 1, "tk_agglo_state_t");
@@ -427,18 +244,6 @@ static inline int tk_agglo_state_gc(lua_State *L) {
     }
     free(state->clusters);
     state->clusters = NULL;
-  }
-  if (state->thread_neighbors) {
-    free(state->thread_neighbors);
-    free(state->thread_min_dist);
-    free(state->thread_min_edges);
-    state->thread_neighbors = NULL;
-    state->thread_min_dist = NULL;
-    state->thread_min_edges = NULL;
-  }
-  if (state->threads) {
-    free(state->threads);
-    state->threads = NULL;
   }
   return 0;
 }
@@ -588,43 +393,146 @@ static inline void tk_agglo_create_initial_clusters(
 static inline bool tk_agglo_iteration(
   lua_State *L,
   tk_agglo_state_t *state,
-  tk_agglo_thread_t *threads,
   tk_ivec_t *assignments,
   tk_ivec_t *uids,
-  unsigned int n_threads,
   uint64_t *iteration,
   tk_agglo_callback_t callback,
   void *callback_data
 ) {
-  for (unsigned int i = 0; i < n_threads; i++) {
-    tk_thread_range(i, n_threads, state->n_clusters, &threads[i].first, &threads[i].last);
-    threads[i].stage_data.find_edges.neighbors = state->thread_neighbors[i];
-    threads[i].stage_data.find_edges.min_edges = state->thread_min_edges[i];
-    threads[i].stage_data.find_edges.min_dist = INFINITY;
-  }
-  tk_threads_signal(state->pool, TK_AGGLO_STAGE_FIND_MIN_EDGES, 0);
   double global_min = INFINITY;
-  for (unsigned int i = 0; i < n_threads; i++)
-    if (threads[i].stage_data.find_edges.min_dist < global_min)
-      global_min = threads[i].stage_data.find_edges.min_dist;
-  if (global_min == INFINITY)
-    return false;
   tk_evec_clear(state->weighted_edges);
-  for (unsigned int i = 0; i < n_threads; i++) {
-    if (threads[i].stage_data.find_edges.min_dist == global_min) {
-      tk_pvec_t *edges = threads[i].stage_data.find_edges.min_edges;
-      for (uint64_t j = 0; j < edges->n; j++) {
-        tk_pair_t edge = edges->a[j];
-        uint64_t c1 = (uint64_t)edge.i;
-        uint64_t c2 = (uint64_t)edge.p;
-        if (c1 >= state->n_clusters || c2 >= state->n_clusters) continue;
-        if (!state->clusters[c1] || !state->clusters[c2]) continue;
-        if (!state->clusters[c1]->active || !state->clusters[c2]->active) continue;
-        uint64_t merged_size = state->clusters[c1]->size + state->clusters[c2]->size;
-        tk_evec_push(state->weighted_edges, tk_edge((int64_t)c1, (int64_t)c2, (double)merged_size));
+
+  #pragma omp parallel
+  {
+    tk_pvec_t *neighbors = tk_pvec_create(0, 0, 0, 0);
+    tk_pvec_t *min_edges = tk_pvec_create(0, 0, 0, 0);
+    double min_dist = INFINITY;
+
+    #pragma omp for schedule(static) nowait
+    for (uint64_t i = 0; i < state->n_clusters; i++) {
+      tk_agglo_cluster_t *cluster = state->clusters[i];
+      if (!cluster || !cluster->active) continue;
+
+      if (state->linkage == TK_AGGLO_LINKAGE_SINGLE) {
+        int64_t best_neighbor_cluster_idx = -1;
+        double best_neighbor_distance = INFINITY;
+        for (uint64_t m = 0; m < cluster->members->n; m++) {
+          int64_t member_uid = cluster->members->a[m];
+          khint_t khi = tk_iumap_get(state->uid_to_adj_idx, member_uid);
+          if (khi == tk_iumap_end(state->uid_to_adj_idx)) continue;
+          int64_t adj_idx = tk_iumap_val(state->uid_to_adj_idx, khi);
+          if (adj_idx < 0 || adj_idx >= (int64_t)state->adj_ids->n) continue;
+          uint64_t offset = (state->adj_scan_offsets != NULL &&
+                            adj_idx < (int64_t)state->adj_scan_offsets->n)
+                           ? (uint64_t)state->adj_scan_offsets->a[adj_idx] : 0;
+          int64_t start = state->adj_offsets->a[adj_idx];
+          int64_t end = state->adj_offsets->a[adj_idx + 1];
+          for (int64_t j = start + (int64_t)offset; j < end; j++) {
+            int64_t nh_idx = state->adj_neighbors->a[j];
+            if (nh_idx < 0 || nh_idx >= (int64_t)state->adj_ids->n) continue;
+            int64_t nh_uid = state->adj_ids->a[nh_idx];
+            double similarity = state->adj_weights->a[j];
+            double distance = 1.0 - similarity;
+            if (distance > state->current_epsilon) {
+              if (state->adj_scan_offsets && adj_idx < (int64_t)state->adj_scan_offsets->n)
+                state->adj_scan_offsets->a[adj_idx] = j - start;
+              break;
+            }
+            khint_t khi_n = tk_iumap_get(state->uid_to_cluster, nh_uid);
+            if (khi_n == tk_iumap_end(state->uid_to_cluster)) continue;
+            uint64_t neighbor_cluster_idx = (uint64_t)tk_iumap_val(state->uid_to_cluster, khi_n);
+            if (neighbor_cluster_idx == i) continue;
+            if (!state->clusters[neighbor_cluster_idx] ||
+                !state->clusters[neighbor_cluster_idx]->active) continue;
+            if (distance == state->current_epsilon) {
+              if (neighbor_cluster_idx != (uint64_t)best_neighbor_cluster_idx ||
+                  distance < best_neighbor_distance) {
+                best_neighbor_cluster_idx = (int64_t)neighbor_cluster_idx;
+                best_neighbor_distance = distance;
+              }
+            }
+          }
+        }
+        if (best_neighbor_cluster_idx >= 0 && best_neighbor_distance == state->current_epsilon) {
+          uint64_t c1 = i, c2 = (uint64_t)best_neighbor_cluster_idx;
+          if (state->clusters[c1]->size > state->clusters[c2]->size ||
+              (state->clusters[c1]->size == state->clusters[c2]->size && c1 > c2)) {
+            uint64_t tmp = c1; c1 = c2; c2 = tmp;
+          }
+          double dist = best_neighbor_distance;
+          if (dist < min_dist) {
+            min_dist = dist;
+            tk_pvec_clear(min_edges);
+          }
+          if (dist == min_dist)
+            tk_pvec_push(min_edges, tk_pair((int64_t)c1, (int64_t)c2));
+        }
+      } else {
+        tk_pvec_clear(neighbors);
+        if (state->index_type == TK_AGGLO_USE_ANN) {
+          tk_ann_neighbors_by_id(state->index.ann, cluster->cluster_id, state->knn, state->probe_radius, 0, state->index.ann->features, neighbors);
+        } else {
+          tk_hbi_neighbors_by_id(state->index.hbi, cluster->cluster_id, state->knn, 0, state->probe_radius, neighbors);
+        }
+        if (neighbors->n > 0) {
+          tk_pvec_asc(neighbors, 0, neighbors->n);
+          int64_t local_min = neighbors->a[0].p;
+          for (uint64_t j = 0; j < neighbors->n; j++) {
+            if (neighbors->a[j].p > local_min) break;
+            int64_t other_cluster_id = neighbors->a[j].i;
+            khint_t khi = tk_iumap_get(state->cluster_id_to_idx, other_cluster_id);
+            if (khi == tk_iumap_end(state->cluster_id_to_idx)) continue;
+            uint64_t other_idx = (uint64_t)tk_iumap_val(state->cluster_id_to_idx, khi);
+            if (!state->clusters[other_idx] || !state->clusters[other_idx]->active) continue;
+            if (i == other_idx) continue;
+            uint64_t c1 = i, c2 = other_idx;
+            if (state->clusters[c1]->size > state->clusters[c2]->size ||
+                (state->clusters[c1]->size == state->clusters[c2]->size && c1 > c2)) {
+              uint64_t tmp = c1; c1 = c2; c2 = tmp;
+            }
+            double dist = (double)local_min;
+            if (dist < min_dist) {
+              min_dist = dist;
+              tk_pvec_clear(min_edges);
+            }
+            if (dist == min_dist)
+              tk_pvec_push(min_edges, tk_pair((int64_t)c1, (int64_t)c2));
+          }
+        }
       }
     }
+
+    #pragma omp critical
+    {
+      if (min_dist < global_min) {
+        global_min = min_dist;
+      }
+    }
+
+    #pragma omp barrier
+
+    if (min_dist == global_min) {
+      #pragma omp critical
+      {
+        for (uint64_t j = 0; j < min_edges->n; j++) {
+          tk_pair_t edge = min_edges->a[j];
+          uint64_t c1 = (uint64_t)edge.i;
+          uint64_t c2 = (uint64_t)edge.p;
+          if (c1 >= state->n_clusters || c2 >= state->n_clusters) continue;
+          if (!state->clusters[c1] || !state->clusters[c2]) continue;
+          if (!state->clusters[c1]->active || !state->clusters[c2]->active) continue;
+          uint64_t merged_size = state->clusters[c1]->size + state->clusters[c2]->size;
+          tk_evec_push(state->weighted_edges, tk_edge((int64_t)c1, (int64_t)c2, (double)merged_size));
+        }
+      }
+    }
+
+    tk_pvec_destroy(neighbors);
+    tk_pvec_destroy(min_edges);
   }
+
+  if (global_min == INFINITY)
+    return false;
   if (state->weighted_edges->n == 0)
     return false;
   tk_evec_asc(state->weighted_edges, 0, state->weighted_edges->n);
@@ -761,7 +669,6 @@ static inline int tk_agglo (
   tk_ivec_t *adj_offsets,
   tk_ivec_t *adj_neighbors,
   tk_dvec_t *adj_weights,
-  unsigned int n_threads,
   tk_ivec_t *assignments,
   tk_agglo_callback_t callback,
   void *callback_data,
@@ -798,10 +705,8 @@ static inline int tk_agglo (
   state->hbi = hbi;
   state->uids = uids;
   state->n_samples = n_samples;
-  state->n_threads = n_threads;
   state->assignments = assignments;
   state->n_clusters_created = 0;
-  state->n_threads_arrays_allocated = 0;
   state->knn = knn;
   state->min_pts = min_pts;
   state->assign_noise = assign_noise;
@@ -820,30 +725,6 @@ static inline int tk_agglo (
     int kha;
     khint_t khi = tk_iumap_put(state->uid_to_vec_idx, uids->a[i], &kha);
     tk_iumap_setval(state->uid_to_vec_idx, khi, (int64_t)i);
-  }
-
-  state->pool = tk_threads_create(L, n_threads, tk_agglo_worker);
-  tk_lua_add_ephemeron(L, TK_AGGLO_EPH, state_idx, -1);
-  lua_pop(L, 1);
-
-  state->thread_neighbors = tk_malloc(L, n_threads * sizeof(tk_pvec_t *));
-  state->thread_min_dist = tk_malloc(L, n_threads * sizeof(double));
-  state->thread_min_edges = tk_malloc(L, n_threads * sizeof(tk_pvec_t *));
-
-  for (unsigned int i = 0; i < n_threads; i++) {
-    state->thread_neighbors[i] = NULL;
-    state->thread_min_edges[i] = NULL;
-  }
-
-  for (unsigned int i = 0; i < n_threads; i++) {
-    state->thread_neighbors[i] = tk_pvec_create(L, 0, 0, 0);
-    tk_lua_add_ephemeron(L, TK_AGGLO_EPH, state_idx, -1);
-    lua_pop(L, 1);
-    state->thread_min_edges[i] = tk_pvec_create(L, 0, 0, 0);
-    tk_lua_add_ephemeron(L, TK_AGGLO_EPH, state_idx, -1);
-    lua_pop(L, 1);
-    state->thread_min_dist[i] = INFINITY;
-    state->n_threads_arrays_allocated++;
   }
 
   state->weighted_edges = tk_evec_create(L, 0, 0, 0);
@@ -874,12 +755,6 @@ static inline int tk_agglo (
   lua_pop(L, 1);
   tk_agglo_create_initial_clusters(L, state, state_idx, ann, hbi, uids, assignments, linkage, min_pts,
     n_samples, code_chunks, features, state_bits, code_hash_to_cluster);
-  state->threads = tk_malloc(L, n_threads * sizeof(tk_agglo_thread_t));
-  for (unsigned int i = 0; i < n_threads; i++) {
-    state->threads[i].state = state;
-    state->threads[i].index = i;
-    state->pool->threads[i].data = &state->threads[i];
-  }
 
   if (linkage == TK_AGGLO_LINKAGE_CENTROID) {
     if (state->n_clusters > 0) {
@@ -918,7 +793,7 @@ static inline int tk_agglo (
   if (callback)
     callback(callback_data, iteration, state->n_active_clusters, uids, assignments);
   while (state->n_active_clusters > 1) {
-    if (!tk_agglo_iteration(L, state, state->threads, assignments, uids, n_threads, &iteration, callback, callback_data))
+    if (!tk_agglo_iteration(L, state, assignments, uids, &iteration, callback, callback_data))
       break;
   }
   if (state->linkage == TK_AGGLO_LINKAGE_SINGLE && state->assign_noise && state->is_core != NULL) {
