@@ -1357,6 +1357,9 @@ static inline int tm_optimize_clustering (lua_State *L)
   uint64_t min_pts = tk_lua_foptunsigned(L, 1, "optimize_clustering", "min_pts", 0);
   bool assign_noise = tk_lua_foptboolean(L, 1, "optimize_clustering", "assign_noise", false);
 
+  if (assign_noise && min_pts == 0)
+    tk_lua_verror(L, 3, "optimize_clustering", "min_pts", "must be > 0 when assign_noise is true");
+
   const char *cmpstr = tk_lua_foptstring(L, 1, "optimize_clustering", "cmp", "jaccard");
   double cmp_alpha = tk_lua_foptnumber(L, 1, "optimize_clustering", "cmp_alpha", 0.5);
   double cmp_beta = tk_lua_foptnumber(L, 1, "optimize_clustering", "cmp_beta", 0.5);

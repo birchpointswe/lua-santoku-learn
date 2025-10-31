@@ -40,7 +40,7 @@ local cfg; cfg = {
     laplacian = "unnormalized",
     method = "jdqr",
     precondition = "ic",
-    primme_eps = 1e-12,
+    primme_eps = 1e-6,
   },
   sr = {
     eps = 1e-12,
