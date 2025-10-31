@@ -731,12 +731,12 @@ static inline int tk_agglo (
     return -1;
   if (linkage == TK_AGGLO_LINKAGE_SINGLE && !adj_ids && !ann && !hbi)
     return -1;
-  if (features == 0)
+  if ((ann || hbi) && features == 0)
     return -1;
 
   uint64_t n_samples = uids->n;
   uint64_t code_chunks = TK_CVEC_BITS_BYTES(features);
-  if (code_chunks == 0)
+  if ((ann || hbi) && code_chunks == 0)
     return -1;
 
   uint64_t state_bits = log2(n_samples * 2);
@@ -837,33 +837,35 @@ static inline int tk_agglo (
     state->pool->threads[i].data = &state->threads[i];
   }
 
-  if (state->n_clusters > 0) {
-    tk_ivec_t *cluster_ids = tk_ivec_create(L, 0, 0, 0);
-    tk_cvec_t *cluster_codes = tk_cvec_create(L, state->n_clusters * code_chunks, 0, 0);
-    for (uint64_t i = 0; i < state->n_clusters; i++) {
-      tk_ivec_push(cluster_ids, state->clusters[i]->cluster_id);
-      memcpy(cluster_codes->a + i * code_chunks, tk_centroid_code(state->clusters[i]->centroid), code_chunks);
-    }
-    if (state->index_type == TK_AGGLO_USE_ANN) {
-      uint64_t bucket_target = centroid_bucket_target > 0 ? centroid_bucket_target : 30;
-      state->index.ann = tk_ann_create_randomized(L, features, bucket_target, state->n_clusters);
-      int Ai = tk_lua_absindex(L, -1);
-      tk_ann_add(L, state->index.ann, Ai, cluster_ids, (char *)cluster_codes->a);
-      lua_remove(L, -3);
-      lua_remove(L, -2);
+  if (linkage == TK_AGGLO_LINKAGE_CENTROID) {
+    if (state->n_clusters > 0) {
+      tk_ivec_t *cluster_ids = tk_ivec_create(L, 0, 0, 0);
+      tk_cvec_t *cluster_codes = tk_cvec_create(L, state->n_clusters * code_chunks, 0, 0);
+      for (uint64_t i = 0; i < state->n_clusters; i++) {
+        tk_ivec_push(cluster_ids, state->clusters[i]->cluster_id);
+        memcpy(cluster_codes->a + i * code_chunks, tk_centroid_code(state->clusters[i]->centroid), code_chunks);
+      }
+      if (state->index_type == TK_AGGLO_USE_ANN) {
+        uint64_t bucket_target = centroid_bucket_target > 0 ? centroid_bucket_target : 30;
+        state->index.ann = tk_ann_create_randomized(L, features, bucket_target, state->n_clusters);
+        int Ai = tk_lua_absindex(L, -1);
+        tk_ann_add(L, state->index.ann, Ai, cluster_ids, (char *)cluster_codes->a);
+        lua_remove(L, -3);
+        lua_remove(L, -2);
+      } else {
+        state->index.hbi = tk_hbi_create(L, features);
+        int Ai = tk_lua_absindex(L, -1);
+        tk_hbi_add(L, state->index.hbi, Ai, cluster_ids, (char *)cluster_codes->a);
+        lua_remove(L, -3);
+        lua_remove(L, -2);
+      }
     } else {
-      state->index.hbi = tk_hbi_create(L, features);
-      int Ai = tk_lua_absindex(L, -1);
-      tk_hbi_add(L, state->index.hbi, Ai, cluster_ids, (char *)cluster_codes->a);
-      lua_remove(L, -3);
-      lua_remove(L, -2);
-    }
-  } else {
-    if (state->index_type == TK_AGGLO_USE_ANN) {
-      uint64_t bucket_target = centroid_bucket_target > 0 ? centroid_bucket_target : 30;
-      state->index.ann = tk_ann_create_randomized(L, features, bucket_target, 0);
-    } else {
-      state->index.hbi = tk_hbi_create(L, features);
+      if (state->index_type == TK_AGGLO_USE_ANN) {
+        uint64_t bucket_target = centroid_bucket_target > 0 ? centroid_bucket_target : 30;
+        state->index.ann = tk_ann_create_randomized(L, features, bucket_target, 0);
+      } else {
+        state->index.hbi = tk_hbi_create(L, features);
+      }
     }
   }
 
