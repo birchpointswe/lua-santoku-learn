@@ -18,6 +18,7 @@ static inline void tk_tch_refine (
   tk_dvec_t *adj_weights,
   uint64_t n_dims,
   uint64_t knn,
+  uint64_t max_iterations,
   int i_each
 ) {
   uint64_t n_nodes = uids->n;
@@ -50,13 +51,14 @@ static inline void tk_tch_refine (
         do {
           updated = false;
           total_steps++;
+          if (max_iterations > 0 && total_steps >= max_iterations) {
+            break;
+          }
           for (uint64_t si = 0; si < n_nodes; si++) {
             int64_t i = node_order->a[si];
             int64_t row_start = adj_offset->a[i];
             int64_t row_end = adj_offset->a[i + 1];
             double delta = 0.0;
-
-            // Compute neighbor limit (top-k if knn specified)
             int64_t neighbor_limit = row_end;
             if (knn > 0) {
               int64_t k_limit = row_start + (int64_t)knn;
@@ -64,7 +66,6 @@ static inline void tk_tch_refine (
                 neighbor_limit = k_limit;
               }
             }
-
             for (int64_t jj = row_start; jj < neighbor_limit; jj++) {
               int64_t j = adj_data->a[jj];
               double weight = adj_weights->a[jj];
