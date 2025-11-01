@@ -30,8 +30,11 @@ local cfg; cfg = {
     encoder = nil,
     cluster = true,
     mode = "landmarks",
-    binarize = "itq",
+    binarize = "median",
     tch = true,
+  },
+  tch = {
+    iterations = 10000,
   },
   index = {
     ann = true,
@@ -283,6 +286,7 @@ test("tsetlin", function ()
     print("Flipping bits")
     tch.refine({
       ids = train.adj_ids,
+      iterations = cfg.tch.iterations,
       offsets = train.adj_offsets,
       neighbors = train.adj_neighbors,
       weights = train.adj_weights,
