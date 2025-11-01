@@ -29,13 +29,15 @@ static inline int tk_tch_refine_lua (lua_State *L)
 
   uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "tch", "n_dims");
 
+  uint64_t knn = tk_lua_foptunsigned(L, 1, "tch", "knn", 0);
+
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
     lua_getfield(L, 1, "each");
     i_each = tk_lua_absindex(L, -1);
   }
 
-  tk_tch_refine(L, codes, uids, adj_offset, adj_data, adj_weights, n_dims, i_each);
+  tk_tch_refine(L, codes, uids, adj_offset, adj_data, adj_weights, n_dims, knn, i_each);
   lua_pushvalue(L, i_out);
   return 1;
 }
