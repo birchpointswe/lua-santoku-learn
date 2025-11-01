@@ -52,7 +52,6 @@ typedef struct tk_graph_s {
   uint64_t category_anchors;
   uint64_t category_knn;
   double category_knn_decay;
-  uint64_t category_negatives;
 
   tk_inv_t *weight_inv;
   tk_ann_t *weight_ann;
