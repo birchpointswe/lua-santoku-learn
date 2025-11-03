@@ -27,7 +27,7 @@ local cfg; cfg = {
     landmarks = 24,
   },
   mode = {
-    encoder = nil,
+    encoder = false,
     cluster = true,
     mode = "landmarks",
     binarize = "median",
@@ -71,7 +71,7 @@ local cfg; cfg = {
   },
   clustering = {
     knn = 256,
-    linkage = "centroid",
+    linkage = "single",
   },
   eval = {
     bits_metric = "spearman",
@@ -581,14 +581,21 @@ test("tsetlin", function ()
   if cfg.mode.cluster then
 
     print("Clustering (codes) (graph edges)")
-    local codes_stats = eval.optimize_clustering({
-      index = train.idx_spectral,
-      ids = train.ids_spectral,
+    local codes_clusters = eval.cluster({
+      codes = train.codes_spectral,
+      n_dims = dataset.n_hidden,
+      ids = train.adj_ids,
       offsets = train.adj_offsets,
       neighbors = train.adj_neighbors,
-      weights = train.adj_weights,
-      linkage = cfg.clustering.linkage,
-      knn = cfg.clustering.knn,
+    })
+    local codes_stats = eval.optimize_clustering({
+      ids = codes_clusters.ids,
+      offsets = codes_clusters.offsets,
+      merges = codes_clusters.merges,
+      eval_ids = train.adj_ids,
+      eval_offsets = train.adj_offsets,
+      eval_neighbors = train.adj_neighbors,
+      eval_weights = train.adj_weights,
       metric = cfg.eval.cluster_metric,
       each = function (acc)
         local d, dd = stopwatch()
@@ -600,33 +607,19 @@ test("tsetlin", function ()
       local best_score, best_step = cfg.eval.clustering(codes_stats.scores)
       local best_n_clusters = codes_stats.n_clusters:get(best_step)
       str.printf("Best\n  Step: %2d | Score: %+.10f | Clusters: %d\n", best_step, best_score, best_n_clusters)
-      -- print("Validating dendrogram cuts.")
-      -- for step, _, cut_assignments in eval.dendro_each(codes_stats.offsets, codes_stats.merges) do
-      --   local cut_result = eval.clustering_accuracy({
-      --     assignments = cut_assignments,
-      --     offsets = train.adj_offsets,
-      --     neighbors = train.adj_neighbors,
-      --     weights = train.adj_weights,
-      --     weighted = cfg.eval.cluster_weighted,
-      --     metric = cfg.eval.cluster_metric,
-      --   })
-      --   local expected_score = codes_stats.scores:get(step)
-      --   local actual_score = cut_result.score
-      --   str.printf("  Step %d:  expected %.10f  got %.10f\n", step, expected_score, actual_score)
-      -- end
     end
     collectgarbage("collect")
 
     print("Clustering (codes) (class-label adjacency)")
     local codes_stats = eval.optimize_clustering({
-      index = train.idx_spectral,
-      ids = train.adj_sampled_ids,
-      offsets = train.adj_sampled_offsets,
-      neighbors = train.adj_sampled_neighbors,
-      weights = train.adj_sampled_weights,
+      ids = codes_clusters.ids,
+      offsets = codes_clusters.offsets,
+      merges = codes_clusters.merges,
+      eval_ids = train.adj_sampled_ids,
+      eval_offsets = train.adj_sampled_offsets,
+      eval_neighbors = train.adj_sampled_neighbors,
+      eval_weights = train.adj_sampled_weights,
       linkage = cfg.clustering.linkage,
-      knn = cfg.clustering.knn,
-      metric = cfg.eval.cluster_metric,
       each = function (acc)
         local d, dd = stopwatch()
         str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",

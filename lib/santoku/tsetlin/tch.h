@@ -86,11 +86,11 @@ static inline void tk_tch_refine (
     for (uint64_t f = 0; f < n_dims; f++) {
       int *bitvec = bitvecs + f * n_nodes;
       uint64_t byte_idx = s * bytes_per_sample + (f / 8);
-      uint8_t bit_mask = 1 << (f % 8);
+      uint8_t bit_mask = (uint8_t)(1 << (f % 8));
       if (bitvec[s] > 0) {
-        codes->a[byte_idx] |= bit_mask;
+        codes->a[byte_idx] |= (char)bit_mask;
       } else {
-        codes->a[byte_idx] &= ~bit_mask;
+        codes->a[byte_idx] &= (char)~bit_mask;
       }
     }
   }

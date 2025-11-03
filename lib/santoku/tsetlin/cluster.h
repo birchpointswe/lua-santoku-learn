@@ -248,50 +248,6 @@ static inline int tk_agglo_state_gc(lua_State *L) {
   return 0;
 }
 
-static inline void tk_agglo_init_single_linkage(
-  lua_State *L,
-  tk_agglo_state_t *state,
-  int state_idx,
-  tk_ivec_t *adj_ids,
-  tk_ivec_t *adj_offsets,
-  uint64_t min_pts
-) {
-  state->n_adj = adj_ids->n;
-  state->uid_to_adj_idx = tk_iumap_create(L, 0);
-  tk_lua_add_ephemeron(L, TK_AGGLO_EPH, state_idx, -1);
-  lua_pop(L, 1);
-  for (uint64_t i = 0; i < adj_ids->n; i++) {
-    int kha;
-    khint_t khi = tk_iumap_put(state->uid_to_adj_idx, adj_ids->a[i], &kha);
-    tk_iumap_setval(state->uid_to_adj_idx, khi, (int64_t)i);
-  }
-  state->adj_scan_offsets = tk_ivec_create(L, adj_ids->n, 0, 0);
-  tk_lua_add_ephemeron(L, TK_AGGLO_EPH, state_idx, -1);
-  lua_pop(L, 1);
-  #pragma omp parallel for schedule(static)
-  for (uint64_t i = 0; i < adj_ids->n; i++)
-    state->adj_scan_offsets->a[i] = 0;
-  state->adj_scan_offsets->n = adj_ids->n;
-  if (min_pts > 0) {
-    uint64_t n_bytes = TK_CVEC_BITS_BYTES(adj_ids->n);
-    state->is_core = tk_cvec_create(L, n_bytes, 0, 0);
-    tk_lua_add_ephemeron(L, TK_AGGLO_EPH, state_idx, -1);
-    lua_pop(L, 1);
-    #pragma omp parallel for schedule(static)
-    for (uint64_t i = 0; i < n_bytes; i++)
-      state->is_core->a[i] = 0;
-    state->is_core->n = n_bytes;
-    #pragma omp parallel for schedule(static)
-    for (uint64_t i = 0; i < adj_ids->n; i++) {
-      uint64_t degree = (uint64_t)(adj_offsets->a[i + 1] - adj_offsets->a[i]);
-      if (degree >= min_pts) {
-        uint8_t bit = (1u << TK_CVEC_BITS_BIT(i));
-        #pragma omp atomic
-        ((uint8_t *) state->is_core->a)[TK_CVEC_BITS_BYTE(i)] |= bit;
-      }
-    }
-  }
-}
 
 static inline void tk_agglo_create_initial_clusters(
   lua_State *L,
@@ -402,8 +358,8 @@ static inline bool tk_agglo_iteration(
   tk_ivec_t *assignments,
   tk_ivec_t *uids,
   uint64_t *iteration,
-  tk_agglo_callback_t callback,
-  void *callback_data
+  tk_ivec_t *dendro_offsets,
+  tk_pvec_t *dendro_merges
 ) {
   double global_min = INFINITY;
   tk_evec_clear(state->weighted_edges);
@@ -440,8 +396,6 @@ static inline bool tk_agglo_iteration(
             double similarity = state->adj_weights->a[j];
             double distance = 1.0 - similarity;
             if (distance > state->current_epsilon) {
-              if (state->adj_scan_offsets && adj_idx < (int64_t)state->adj_scan_offsets->n)
-                state->adj_scan_offsets->a[adj_idx] = j - start;
               break;
             }
             khint_t khi_n = tk_iumap_get(state->uid_to_cluster, nh_uid);
@@ -591,6 +545,10 @@ static inline bool tk_agglo_iteration(
 
     centroid_changed = tk_agglo_cluster_merge(to, from);
 
+    if (dendro_merges) {
+      tk_pvec_push(dendro_merges, tk_pair(from->cluster_id, to->cluster_id));
+    }
+
     khint_t khi = tk_iumap_get(state->cluster_id_to_idx, from->cluster_id);
     if (khi != tk_iumap_end(state->cluster_id_to_idx))
       tk_iumap_del(state->cluster_id_to_idx, khi);
@@ -624,6 +582,27 @@ static inline bool tk_agglo_iteration(
       break;
   }
   if (state->linkage == TK_AGGLO_LINKAGE_SINGLE && merges_completed > 0) {
+    if (state->adj_scan_offsets) {
+      #pragma omp parallel for schedule(static)
+      for (uint64_t adj_idx = 0; adj_idx < state->adj_ids->n; adj_idx++) {
+        int64_t start = state->adj_offsets->a[adj_idx];
+        int64_t end = state->adj_offsets->a[adj_idx + 1];
+        int64_t offset = state->adj_scan_offsets->a[adj_idx];
+
+        for (int64_t j = start + offset; j < end; j++) {
+          double similarity = state->adj_weights->a[j];
+          double d = 1.0 - similarity;
+          if (d > state->current_epsilon) {
+            state->adj_scan_offsets->a[adj_idx] = j - start;
+            break;
+          }
+        }
+        if (start + state->adj_scan_offsets->a[adj_idx] >= end) {
+          state->adj_scan_offsets->a[adj_idx] = end - start;
+        }
+      }
+    }
+
     double next_epsilon = INFINITY;
     #pragma omp parallel for reduction(min:next_epsilon) schedule(dynamic, 8)
     for (uint64_t i = 0; i < state->n_clusters; i++) {
@@ -636,12 +615,11 @@ static inline bool tk_agglo_iteration(
         int64_t adj_idx = tk_iumap_val(state->uid_to_adj_idx, khi);
         if (adj_idx < 0 || adj_idx >= (int64_t)state->adj_ids->n) continue;
 
-        uint64_t offset = (state->adj_scan_offsets != NULL && adj_idx < (int64_t)state->adj_scan_offsets->n)
-                          ? (uint64_t)state->adj_scan_offsets->a[adj_idx] : 0;
-
+        int64_t offset = state->adj_scan_offsets->a[adj_idx];
         int64_t start = state->adj_offsets->a[adj_idx];
         int64_t end = state->adj_offsets->a[adj_idx + 1];
-        int64_t pos = start + (int64_t)offset;
+        int64_t pos = start + offset;
+
         if (pos < end) {
           double similarity = state->adj_weights->a[pos];
           double d = 1.0 - similarity;
@@ -653,11 +631,107 @@ static inline bool tk_agglo_iteration(
   }
   if (merges_completed > 0) {
     (*iteration)++;
-    if (callback)
-      callback(callback_data, *iteration, state->n_active_clusters, uids, assignments);
+
+    if (dendro_offsets) {
+      tk_ivec_push(dendro_offsets, (int64_t)dendro_merges->n);
+    }
   }
   lua_pop(L, 1);
   return true;
+}
+
+static inline int tk_agglo_single_linkage_dsu (
+  lua_State *L,
+  tk_ivec_t *adj_ids,
+  tk_ivec_t *adj_offsets,
+  tk_ivec_t *adj_neighbors,
+  tk_dvec_t *adj_weights,
+  tk_ivec_t *assignments,
+  tk_ivec_t *dendro_offsets,
+  tk_pvec_t *dendro_merges
+) {
+  uint64_t n_entities = adj_ids->n;
+
+  tk_evec_t *edges = tk_evec_create(NULL, 0, 0, 0);
+  for (uint64_t i = 0; i < n_entities; i++) {
+    int64_t start = adj_offsets->a[i];
+    int64_t end = adj_offsets->a[i + 1];
+    for (int64_t j = start; j < end; j++) {
+      int64_t nbr_idx = adj_neighbors->a[j];
+      if (nbr_idx <= (int64_t)i) continue;
+      double distance = 1.0 - adj_weights->a[j];
+      tk_evec_push(edges, tk_edge((int64_t)i, nbr_idx, distance));
+    }
+  }
+  tk_evec_asc(edges, 0, edges->n);
+
+  tk_dsu_t *dsu = tk_dsu_create(L, adj_ids);
+  tk_iumap_t *idx_to_cluster_id = tk_iumap_create(NULL, 0);
+
+  for (uint64_t i = 0; i < n_entities; i++) {
+    int64_t cluster_id = (int64_t)(2 * n_entities + 1 + i);
+    assignments->a[i] = cluster_id;
+    int kha;
+    uint32_t khi = tk_iumap_put(idx_to_cluster_id, (int64_t)i, &kha);
+    tk_iumap_setval(idx_to_cluster_id, khi, cluster_id);
+  }
+
+  if (dendro_offsets) {
+    tk_ivec_ensure(dendro_offsets, n_entities + 1);
+    for (uint64_t i = 0; i < n_entities; i++)
+      dendro_offsets->a[i] = assignments->a[i];
+    dendro_offsets->a[n_entities] = 0;
+    dendro_offsets->n = n_entities + 1;
+  }
+
+  uint64_t edge_idx = 0;
+  while (edge_idx < edges->n && tk_dsu_components(dsu) > 1) {
+    double cur_dist = edges->a[edge_idx].w;
+
+    while (edge_idx < edges->n && edges->a[edge_idx].w == cur_dist) {
+      int64_t i1 = edges->a[edge_idx].u;
+      int64_t i2 = edges->a[edge_idx].v;
+      edge_idx++;
+
+      int64_t r1 = tk_dsu_findx(dsu, i1);
+      int64_t r2 = tk_dsu_findx(dsu, i2);
+      if (r1 == r2) continue;
+
+      khint_t k1 = tk_iumap_get(idx_to_cluster_id, r1);
+      khint_t k2 = tk_iumap_get(idx_to_cluster_id, r2);
+      int64_t cid1 = tk_iumap_val(idx_to_cluster_id, k1);
+      int64_t cid2 = tk_iumap_val(idx_to_cluster_id, k2);
+
+      tk_dsu_unionx(dsu, i1, i2);
+      int64_t new_root = tk_dsu_findx(dsu, i1);
+
+      int64_t absorbed = cid1 < cid2 ? cid1 : cid2;
+      int64_t surviving = cid1 < cid2 ? cid2 : cid1;
+      if (dendro_merges) tk_pvec_push(dendro_merges, tk_pair(absorbed, surviving));
+
+      // Update cluster ID mapping - the new root must map to surviving
+      int kha;
+      khint_t knew = tk_iumap_put(idx_to_cluster_id, new_root, &kha);
+      tk_iumap_setval(idx_to_cluster_id, knew, surviving);
+    }
+
+    // Update ALL assignments after processing this distance level (O(n) once per distance)
+    for (uint64_t j = 0; j < n_entities; j++) {
+      int64_t root = tk_dsu_findx(dsu, (int64_t)j);
+      khint_t khi = tk_iumap_get(idx_to_cluster_id, root);
+      if (khi != tk_iumap_end(idx_to_cluster_id)) {
+        assignments->a[j] = tk_iumap_val(idx_to_cluster_id, khi);
+      }
+    }
+
+    // Record dendrogram offset
+    if (dendro_offsets) tk_ivec_push(dendro_offsets, (int64_t)dendro_merges->n);
+  }
+
+  tk_evec_destroy(edges);
+  tk_iumap_destroy(idx_to_cluster_id);
+  lua_pop(L, 1);
+  return 0;
 }
 
 static inline int tk_agglo (
@@ -677,14 +751,18 @@ static inline int tk_agglo (
   tk_ivec_t *adj_neighbors,
   tk_dvec_t *adj_weights,
   tk_ivec_t *assignments,
-  tk_agglo_callback_t callback,
-  void *callback_data,
-  uint64_t centroid_bucket_target
+  tk_ivec_t *dendro_offsets,
+  tk_pvec_t *dendro_merges
 ) {
   if (!L || !uids || !assignments)
     return -1;
   if (uids->n == 0)
     return -1;
+
+  if (linkage == TK_AGGLO_LINKAGE_SINGLE && adj_ids)
+    return tk_agglo_single_linkage_dsu(L, adj_ids, adj_offsets, adj_neighbors, adj_weights,
+                                       assignments, dendro_offsets, dendro_merges);
+
   if (linkage == TK_AGGLO_LINKAGE_CENTROID && !ann && !hbi)
     return -1;
   if (linkage == TK_AGGLO_LINKAGE_SINGLE && !adj_ids && !ann && !hbi)
@@ -722,8 +800,6 @@ static inline int tk_agglo (
   state->adj_neighbors = adj_neighbors;
   state->adj_weights = adj_weights;
   state->n_adj = 0;
-  if (linkage == TK_AGGLO_LINKAGE_SINGLE && adj_ids != NULL)
-    tk_agglo_init_single_linkage(L, state, state_idx, adj_ids, adj_offsets, min_pts);
   state->uid_to_vec_idx = tk_iumap_create(L, 0);
   tk_lua_add_ephemeron(L, TK_AGGLO_EPH, state_idx, -1);
   lua_pop(L, 1);
@@ -772,8 +848,7 @@ static inline int tk_agglo (
         memcpy(cluster_codes->a + i * code_chunks, tk_centroid_code(state->clusters[i]->centroid), code_chunks);
       }
       if (state->index_type == TK_AGGLO_USE_ANN) {
-        uint64_t bucket_target = centroid_bucket_target > 0 ? centroid_bucket_target : 30;
-        state->index.ann = tk_ann_create_randomized(L, features, bucket_target, state->n_clusters);
+        state->index.ann = tk_ann_create_randomized(L, features, 30, state->n_clusters);
         int Ai = tk_lua_absindex(L, -1);
         tk_ann_add(L, state->index.ann, Ai, cluster_ids, (char *)cluster_codes->a);
         lua_remove(L, -3);
@@ -787,8 +862,7 @@ static inline int tk_agglo (
       }
     } else {
       if (state->index_type == TK_AGGLO_USE_ANN) {
-        uint64_t bucket_target = centroid_bucket_target > 0 ? centroid_bucket_target : 30;
-        state->index.ann = tk_ann_create_randomized(L, features, bucket_target, 0);
+        state->index.ann = tk_ann_create_randomized(L, features, 30, 0);
       } else {
         state->index.hbi = tk_hbi_create(L, features);
       }
@@ -797,10 +871,18 @@ static inline int tk_agglo (
 
   state->current_epsilon = 0;
   uint64_t iteration = 0;
-  if (callback)
-    callback(callback_data, iteration, state->n_active_clusters, uids, assignments);
+
+  if (dendro_offsets) {
+    tk_ivec_ensure(dendro_offsets, n_samples + 1);
+    for (uint64_t i = 0; i < n_samples; i++) {
+      dendro_offsets->a[i] = assignments->a[i];
+    }
+    dendro_offsets->a[n_samples] = 0;
+    dendro_offsets->n = n_samples + 1;
+  }
+
   while (state->n_active_clusters > 1) {
-    if (!tk_agglo_iteration(L, state, assignments, uids, &iteration, callback, callback_data))
+    if (!tk_agglo_iteration(L, state, assignments, uids, &iteration, dendro_offsets, dendro_merges))
       break;
   }
   if (state->linkage == TK_AGGLO_LINKAGE_SINGLE && state->assign_noise && state->is_core != NULL) {

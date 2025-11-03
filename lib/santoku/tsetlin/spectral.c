@@ -6,7 +6,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-// #include <assert.h>
 #include <primme.h>
 #include <cblas.h>
 #include <omp.h>
@@ -449,7 +448,7 @@ static inline void tk_spectral_matvec (
           const double scale_i = scale[i];
           const int64_t edge_start = adj_offset[i];
           const int64_t edge_end = adj_offset[i + 1];
-          double accum = xb[i];
+          double accum = xb[i] - (scale_i * scale_i) * xb[i]; // self-loop regularization
           for (int64_t e = edge_start; e < edge_end; e++) {
             const int64_t dst = adj_neighbors[e];
             const double scaled_weight = scale_i * scale[dst] * adj_weights[e];
@@ -505,7 +504,6 @@ static inline void tm_run_spectral (
   spec->evecs = NULL;
   spec->resNorms = NULL;
   spec->evals_copy = NULL;
-  // assert(spec->n_evals >= 2);
 
   {
     const tk_laplacian_type_t lap_type = spec->laplacian_type;
@@ -527,7 +525,7 @@ static inline void tm_run_spectral (
     } else {
       #pragma omp parallel for schedule(static)
       for (uint64_t i = 0; i < spec->n_nodes; i++) {
-        double sum = 0.0;
+        double sum = 1.0; // self-loop regularization
         const int64_t j_start = offset[i];
         const int64_t j_end = offset[i + 1];
         for (int64_t j = j_start; j < j_end; j++)
@@ -716,9 +714,6 @@ static inline int tm_encode (lua_State *L)
 
   tm_run_spectral(L, z, scale, degree, uids, adj_offset, adj_neighbors, adj_weights, n_hidden, eps, laplacian_type, method, precond, block_size, i_each);
   lua_remove(L, -2);
-
-  // assert(tk_ivec_peekopt(L, -4) == uids);
-  // assert(tk_dvec_peekopt(L, -3) == z);
   return 4;
 }
 
