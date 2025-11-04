@@ -849,6 +849,7 @@ static inline int tk_ann_get_lua (lua_State *L)
     uid = tk_lua_checkinteger(L, 2, "id");
   } else {
     uids = lua_isnil(L, 2) ? tk_iumap_keys(L, A->uid_sid) : tk_ivec_peek(L, 2, "uids");
+    lua_replace(L, 2);
     n_samples = uids->n;
   }
   uint64_t row_stride_bits;
