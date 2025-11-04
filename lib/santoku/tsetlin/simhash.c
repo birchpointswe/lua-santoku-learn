@@ -8,6 +8,16 @@
 #include <string.h>
 #include <float.h>
 
+// MurmurHash3 64-bit finalizer - excellent avalanche properties
+static inline uint64_t murmur3_fmix64(uint64_t k) {
+  k ^= k >> 33;
+  k *= 0xff51afd7ed558ccdULL;
+  k ^= k >> 33;
+  k *= 0xc4ceb9fe1a85ec53ULL;
+  k ^= k >> 33;
+  return k;
+}
+
 static inline void hash_feature_to_weights(
   int64_t feature_id,
   uint64_t bit_start,
@@ -18,16 +28,20 @@ static inline void hash_feature_to_weights(
   uint64_t bits_remaining = n_bits_for_rank;
   uint64_t bit_offset = 0;
   uint64_t seed = (uint64_t)feature_id;
+
   while (bits_remaining > 0) {
-    uint32_t hash = kh_int64_hash_func(seed);
-    uint64_t bits_to_use = bits_remaining < 32 ? bits_remaining : 32;
+    // Use MurmurHash3 for excellent bit distribution
+    uint64_t hash64 = murmur3_fmix64(seed);
+    uint64_t bits_to_use = bits_remaining < 64 ? bits_remaining : 64;
+
     for (uint64_t b = 0; b < bits_to_use; b++) {
       uint64_t bit_idx = bit_start + bit_offset + b;
-      output_weights->a[bit_idx] = (hash & (1U << b)) ? weight : -weight;
+      output_weights->a[bit_idx] = (hash64 & (1ULL << b)) ? weight : -weight;
     }
+
     bits_remaining -= bits_to_use;
     bit_offset += bits_to_use;
-    seed = hash;
+    seed = hash64;  // Chain with full 64-bit output
   }
 }
 
