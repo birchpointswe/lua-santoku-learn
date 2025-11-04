@@ -809,7 +809,7 @@ static inline int tk_hbi_get_lua (lua_State *L)
     n_samples = 1;
     uid = tk_lua_checkinteger(L, 2, "id");
   } else {
-    uids = tk_ivec_peek(L, 2, "uids");
+    uids = lua_isnil(L, 2) ? tk_iumap_keys(L, A->uid_sid) : tk_ivec_peek(L, 2, "uids");
     n_samples = uids->n;
   }
 
