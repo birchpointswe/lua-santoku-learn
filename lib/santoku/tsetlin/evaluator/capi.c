@@ -320,23 +320,11 @@ static inline void tm_retrieval_accuracy (
           int64_t node_id = adjacency_ids->a[node_idx];
           node_code = ann ? tk_ann_get(ann, node_id)
                                  : tk_hbi_get(hbi, node_id);
-
-          // Debug first few retrievals
-          if (node_idx < 3 && margin == 0) {
-            uint64_t popcount = node_code ? tk_cvec_bits_popcount_serial((const uint8_t*)node_code, n_dims) : 0;
-            #pragma omp critical
-            fprintf(stderr, "RETRIEVAL: node_idx=%lu node_id=%ld code=%p popcount=%lu\n",
-                    (unsigned long)node_idx, node_id, (void*)node_code, (unsigned long)popcount);
-          }
         }
         if (!node_code)
           continue;
 
         tk_iuset_clear(itmp);
-
-        // Debug: collect distance stats for first node
-        uint64_t debug_dist_sum = 0;
-        uint64_t debug_dist_count = 0;
 
         for (int64_t idx = start; idx < end; idx++) {
           int64_t neighbor_pos = neighbors->a[idx];
@@ -357,23 +345,10 @@ static inline void tm_retrieval_accuracy (
             (const unsigned char*)neighbor_code,
             n_dims);
 
-          if (node_idx == 0 && margin == 0) {
-            debug_dist_sum += hamming_dist;
-            debug_dist_count++;
-          }
-
           if (hamming_dist <= margin) {
             int kha;
             tk_iuset_put(itmp, neighbor_pos, &kha);
           }
-        }
-
-        if (node_idx == 0 && margin == 0 && debug_dist_count > 0) {
-          #pragma omp critical
-          fprintf(stderr, "RETRIEVAL distances for node 0: count=%lu avg_dist=%.2f n_dims=%lu\n",
-                  (unsigned long)debug_dist_count,
-                  (double)debug_dist_sum / debug_dist_count,
-                  (unsigned long)n_dims);
         }
         double node_score = 0.0;
         switch (metric) {
@@ -1627,13 +1602,6 @@ static double tk_compute_reconstruction (
           int64_t node_id = adjacency_ids->a[node_idx];
           node_code = ann ? tk_ann_get(ann, node_id)
                                  : tk_hbi_get(hbi, node_id);
-
-          // Debug first few lookups
-          if (node_idx < 3) {
-            uint64_t popcount = node_code ? tk_cvec_bits_popcount_serial((const uint8_t*)node_code, n_dims) : 0;
-            fprintf(stderr, "DEBUG retrieval: node_idx=%lu node_id=%ld code=%p popcount=%lu\n",
-                    (unsigned long)node_idx, node_id, (void*)node_code, (unsigned long)popcount);
-          }
         }
         if (!node_code)
           continue;
@@ -1663,11 +1631,6 @@ static double tk_compute_reconstruction (
                 (const unsigned char*)neighbor_code,
                 n_dims);
 
-          // Debug first distance calculation
-          if (node_idx == 0 && j == start) {
-            fprintf(stderr, "DEBUG first distance: node_idx=0 neighbor_pos=%ld hamming=%lu n_dims=%lu\n",
-                    neighbor_pos, (unsigned long)hamming_dist, (unsigned long)n_dims);
-          }
           tk_pvec_push(bin_ranks, tk_pair(neighbor_pos, (int64_t) hamming_dist));
         }
         double corr;
