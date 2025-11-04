@@ -227,7 +227,7 @@ test("tsetlin", function ()
     collectgarbage("collect")
   elseif cfg.mode.codes == "simhash" then
     print("Simhash")
-    train.ids_spectral, train.codes_spectral = train.ids, simhash.encode(train.node_combined, dataset.n_hidden)
+    train.ids_spectral, train.codes_spectral = simhash.encode(train.node_combined, dataset.n_hidden)
     collectgarbage("collect")
   end
 
