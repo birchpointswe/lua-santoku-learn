@@ -19,7 +19,6 @@ typedef struct {
   uint8_t tail_mask;
 } tk_automata_t;
 
-
 static inline char *tk_automata_actions (
   tk_automata_t *aut,
   uint64_t clause
