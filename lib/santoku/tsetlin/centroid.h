@@ -195,7 +195,7 @@ static inline void tk_centroid_recompute (
     if (chunk == centroid->n_chunks - 1) {
       code_byte &= centroid->tail_mask;
     }
-    item_code[chunk] = code_byte;
+    item_code[chunk] = (char)code_byte;
   }
 }
 

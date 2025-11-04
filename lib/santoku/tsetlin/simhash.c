@@ -69,7 +69,7 @@ static inline int tm_encode(lua_State *L) {
 
   // Create mapping: sid -> output position (only for valid entities)
   int64_t *sid_to_outpos = malloc(max_sid * sizeof(int64_t));
-  uint64_t out_idx = 0;
+  int64_t out_idx = 0;
   for (uint64_t sid = 0; sid < max_sid; sid++) {
     if (inv->sid_to_uid->a[sid] >= 0) {
       sid_to_outpos[sid] = out_idx++;
