@@ -79,7 +79,7 @@ static inline void tk_itq_median (
         uint8_t bit_mask = (uint8_t) 1 << TK_CVEC_BITS_BIT(j);
         for (uint64_t i = 0; i < N; i ++) {
           if (X[i * K + j] >= med) {
-            local_out[i * TK_CVEC_BITS_BYTES(K) + byte_offset] |= bit_mask;
+            local_out[i * TK_CVEC_BITS_BYTES(K) + byte_offset] |= (char)bit_mask;
           }
         }
       }
