@@ -28,8 +28,8 @@ local cfg; cfg = {
     landmarks = 24,
   },
   mode = {
-    encoder = false,
-    cluster = false,
+    encoder = true,
+    cluster = true,
     codes = "simhash", --"spectral",
     mode = "landmarks",
     binarize = "itq",
