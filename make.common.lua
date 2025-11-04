@@ -1,6 +1,6 @@
 local env = {
   name = "santoku-tsetlin",
-  version = "0.0.200-1",
+  version = "0.0.201-1",
   variable_prefix = "TK_TSETLIN",
   license = "MIT",
   public = true,
@@ -37,7 +37,6 @@ local env = {
     },
     ["itq%.c"] = {
       cflags = {
-        "-isystem$(PWD)/deps/primme/OpenBLAS/install/include",
         "-fopenmp", "$(shell pkg-config --cflags blas lapack lapacke)"
       },
       ldflags = {
