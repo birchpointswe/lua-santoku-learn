@@ -1488,7 +1488,7 @@ static inline int tk_inv_get_lua (lua_State *L)
     memcpy(out->a, data, n * sizeof(int64_t));
     out->n = n;
   } else {
-    uids = tk_ivec_peek(L, 2, "uids");
+    uids = lua_isnil(L, 2) ? tk_iumap_keys(L, inv->uid_sid) : tk_ivec_peek(L, 2, "uids");
     size_t total_size = 0;
     for (uint64_t i = 0; i < uids->n; i ++) {
       uid = uids->a[i];
