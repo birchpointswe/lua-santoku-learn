@@ -24,12 +24,12 @@ local cfg; cfg = {
     max = nil,
     max_class = nil,
     visible = 784,
-    hidden = 32,
+    hidden = 9,
     landmarks = 24,
   },
   mode = {
-    encoder = true,
-    cluster = true,
+    encoder = false,
+    cluster = false,
     codes = "simhash", --"spectral",
     mode = "landmarks",
     binarize = "itq",
@@ -92,6 +92,7 @@ local cfg; cfg = {
     end,
   },
   bits = {
+    sel = false,
     keep_prefix = nil,
     start_prefix = nil,
     sffs_tolerance = nil,
@@ -316,8 +317,8 @@ test("tsetlin", function ()
   collectgarbage("collect")
 
   print("Optimizing bit selection")
-  if cfg.bits.sffs_fixed then
-    train.kept_bits = ivec.create(cfg.bits.sffs_fixed)
+  if cfg.bits.sffs_fixed or not cfg.bits.sel then
+    train.kept_bits = ivec.create(cfg.bits.sffs_fixed or dataset.n_hidden)
     train.kept_bits:fill_indices()
   else
     train.kept_bits = eval.optimize_bits({
@@ -400,6 +401,33 @@ test("tsetlin", function ()
   str.printi("  Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)",
     train.entropy)
   collectgarbage("collect")
+
+  print("DEBUG: Manual distance check")
+  do
+    local id1 = train.adj_ids:get(0)
+    local id2 = train.adj_ids:get(1)
+    local code1 = train.idx_spectral:get(id1)
+    local code2 = train.idx_spectral:get(id2)
+    print("  ID1:", id1, "ID2:", id2)
+    print("  Code1 size:", code1 and code1:size(), "Code2 size:", code2 and code2:size())
+    if code1 and code2 then
+      local dist = code1:bits_hamming(code2, dataset.n_hidden)
+      print("  Hamming distance:", dist, "out of", dataset.n_hidden, "bits")
+      print("  Normalized:", dist / dataset.n_hidden)
+      local edge_start = train.adj_offsets:get(0)
+      local edge_end = train.adj_offsets:get(1)
+      print("  Entity 0 has", edge_end - edge_start, "neighbors")
+      if edge_end > edge_start then
+        local first_neighbor = train.adj_neighbors:get(edge_start)
+        print("  First neighbor ID:", first_neighbor)
+        local neighbor_code = train.idx_spectral:get(first_neighbor)
+        if neighbor_code then
+          local neighbor_dist = code1:bits_hamming(neighbor_code, dataset.n_hidden)
+          print("  Distance to first neighbor:", neighbor_dist)
+        end
+      end
+    end
+  end
 
   print("Retrieval stats (graph edges)")
   train.retrieval_scores = eval.optimize_retrieval({

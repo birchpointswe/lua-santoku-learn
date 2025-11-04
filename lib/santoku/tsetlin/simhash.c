@@ -36,7 +36,8 @@ static inline void hash_feature_to_weights(
 
     for (uint64_t b = 0; b < bits_to_use; b++) {
       uint64_t bit_idx = bit_start + bit_offset + b;
-      output_weights->a[bit_idx] = (hash64 & (1ULL << b)) ? weight : -weight;
+      // ACCUMULATE instead of overwrite
+      output_weights->a[bit_idx] += (hash64 & (1ULL << b)) ? weight : -weight;
     }
 
     bits_remaining -= bits_to_use;
