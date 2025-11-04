@@ -8,7 +8,6 @@ local utc = require("santoku.utc")
 
 local M = {}
 
--- Re-export capi functions (userdata now has methods directly via metatable)
 M.load = tm.load
 M.classifier = function (...)
   return tm.create("classifier", ...)
@@ -129,23 +128,19 @@ M.optimize = function (args, typ)
         p[name] = s.sample()
       end
     end
-    -- Ensure FPTM constraint: clause_tolerance (LF) <= clause_maximum (L)
     if p.clause_tolerance and p.clause_maximum and p.clause_tolerance > p.clause_maximum then
-      -- Swap them to maintain the constraint
       p.clause_tolerance, p.clause_maximum = p.clause_maximum, p.clause_tolerance
     end
     return p
   end
 
   local best_score = -num.huge
-  local best_time = num.huge
   local best_params = nil
 
   if all_fixed or not (trials and trials > 0) or not (rounds and rounds > 0) then
     best_params = sample_params()
   else
 
-    -- Create reusable TM for search trials
     local search_tm
     if typ == "encoder" then
       search_tm = M.encoder({
@@ -241,22 +236,16 @@ M.optimize = function (args, typ)
 
           local trial_elapsed = utc.time(true) - trial_start_time
 
-          -- Use the last score (where training ended) rather than best score
-          -- This prefers params that maintain good performance rather than spike and degrade
           local trial_score = last_epoch_score
 
-          -- For round best, use final score
           if trial_score > round_best_score then
             round_best_score = trial_score
             round_best_params = params
           end
 
-          -- For global best, use final score and break ties with elapsed time
-          local is_better = trial_score > best_score + 1e-8 or (num.abs(trial_score - best_score) < 1e-8
-            --[[and trial_elapsed < best_time]])
+          local is_better = trial_score > best_score + 1e-8 or (num.abs(trial_score - best_score) < 1e-8)
           if is_better then
             best_score = trial_score
-            best_time = trial_elapsed
             best_params = params
           end
         end

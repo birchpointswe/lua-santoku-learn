@@ -24,11 +24,11 @@ local cfg; cfg = {
     max = nil,
     max_class = nil,
     visible = 784,
-    hidden = 9,
+    hidden = 32,
     landmarks = 24,
   },
   mode = {
-    encoder = true,
+    encoder = false,
     cluster = true,
     codes = "simhash", --"spectral",
     mode = "landmarks",
@@ -92,7 +92,7 @@ local cfg; cfg = {
     end,
   },
   bits = {
-    sel = false,
+    sel = true,
     keep_prefix = nil,
     start_prefix = nil,
     sffs_tolerance = nil,
@@ -190,7 +190,6 @@ test("tsetlin", function ()
     })
 
   train.node_features:destroy()
-  train.node_combined:destroy()
   collectgarbage("collect")
 
   print("Weight stats")
@@ -225,10 +224,16 @@ test("tsetlin", function ()
         end
       end
     })
+    train.node_combined:destroy()
     collectgarbage("collect")
   elseif cfg.mode.codes == "simhash" then
     print("Simhash")
-    train.ids_spectral, train.codes_spectral = simhash.encode(train.node_combined, dataset.n_hidden)
+    train.ids_simhash, train.codes_simhash = simhash.encode(train.node_combined, dataset.n_hidden)
+    train.ids_spectral = ivec.create()
+    train.ids_spectral:copy(train.adj_ids)
+    train.codes_spectral = cvec.create()
+    train.codes_spectral:bits_extend(train.codes_simhash, train.ids_spectral, train.ids_simhash, 0, dataset.n_hidden, true)
+    train.node_combined:destroy()
     collectgarbage("collect")
   end
 
@@ -401,33 +406,6 @@ test("tsetlin", function ()
   str.printi("  Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)",
     train.entropy)
   collectgarbage("collect")
-
-  print("DEBUG: Manual distance check")
-  do
-    local id1 = train.adj_ids:get(0)
-    local id2 = train.adj_ids:get(1)
-    local code1 = train.idx_spectral:get(id1)
-    local code2 = train.idx_spectral:get(id2)
-    print("  ID1:", id1, "ID2:", id2)
-    print("  Code1 size:", code1 and code1:size(), "Code2 size:", code2 and code2:size())
-    if code1 and code2 then
-      local dist = code1:bits_hamming(code2, dataset.n_hidden)
-      print("  Hamming distance:", dist, "out of", dataset.n_hidden, "bits")
-      print("  Normalized:", dist / dataset.n_hidden)
-      local edge_start = train.adj_offsets:get(0)
-      local edge_end = train.adj_offsets:get(1)
-      print("  Entity 0 has", edge_end - edge_start, "neighbors")
-      if edge_end > edge_start then
-        local first_neighbor = train.adj_neighbors:get(edge_start)
-        print("  First neighbor ID:", first_neighbor)
-        local neighbor_code = train.idx_spectral:get(first_neighbor)
-        if neighbor_code then
-          local neighbor_dist = code1:bits_hamming(neighbor_code, dataset.n_hidden)
-          print("  Distance to first neighbor:", neighbor_dist)
-        end
-      end
-    end
-  end
 
   print("Retrieval stats (graph edges)")
   train.retrieval_scores = eval.optimize_retrieval({
