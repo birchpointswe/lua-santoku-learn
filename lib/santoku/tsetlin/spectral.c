@@ -282,6 +282,7 @@ static inline int tk_spectral_compute_poly (
   cblas_dscal(n, 1.0 / norm, v, 1);
   double lambda_max = 0.0;
   for (int iter = 0; iter < 10; iter++) {
+    #pragma omp parallel for schedule(static)
     for (uint64_t i = 0; i < n; i++) {
       double accum = degree[i] * v[i];
       const int64_t edge_start = adj_offset[i];
@@ -302,7 +303,8 @@ static inline int tk_spectral_compute_poly (
   }
   free(v);
   free(Av);
-  double lambda_min = 0.0;
+  double lambda_min = DBL_MAX;
+  #pragma omp parallel for schedule(static) reduction(min:lambda_min)
   for (uint64_t i = 0; i < n; i++) {
     double row_sum = 0.0;
     const int64_t edge_start = adj_offset[i];
@@ -313,7 +315,7 @@ static inline int tk_spectral_compute_poly (
     double center = degree[i];
     double radius = row_sum;
     double lower_bound = fmax(0.0, center - radius);
-    if (i == 0 || lower_bound < lambda_min) {
+    if (lower_bound < lambda_min) {
       lambda_min = lower_bound;
     }
   }
@@ -416,14 +418,17 @@ static inline void tk_spectral_matvec (
   const double * restrict adj_weights = spec->adj_weights->a;
   const double * restrict degree = spec->degree->a;
   const double * restrict scale = spec->scale->a;
+  const uint64_t n_nodes = spec->n_nodes;
+  const int bs = *blockSize;
+
   if (laplacian_type == TK_LAPLACIAN_UNNORMALIZED) {
     #pragma omp parallel
     {
-      for (int b = 0; b < *blockSize; b++) {
+      for (int b = 0; b < bs; b++) {
         const double * restrict xb = x + (size_t) b * (size_t) *ldx;
         double * restrict yb = y + (size_t) b * (size_t) *ldy;
-        #pragma omp for schedule(guided)
-        for (uint64_t i = 0; i < spec->n_nodes; i++) {
+        #pragma omp for schedule(static) nowait
+        for (uint64_t i = 0; i < n_nodes; i++) {
           const double deg = degree[i];
           const int64_t edge_start = adj_offset[i];
           const int64_t edge_end = adj_offset[i + 1];
@@ -440,11 +445,11 @@ static inline void tk_spectral_matvec (
   } else {
     #pragma omp parallel
     {
-      for (int b = 0; b < *blockSize; b++) {
+      for (int b = 0; b < bs; b++) {
         const double * restrict xb = x + (size_t) b * (size_t) *ldx;
         double * restrict yb = y + (size_t) b * (size_t) *ldy;
-        #pragma omp for schedule(guided)
-        for (uint64_t i = 0; i < spec->n_nodes; i++) {
+        #pragma omp for schedule(static) nowait
+        for (uint64_t i = 0; i < n_nodes; i++) {
           const double scale_i = scale[i];
           const int64_t edge_start = adj_offset[i];
           const int64_t edge_end = adj_offset[i + 1];

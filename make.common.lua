@@ -28,7 +28,7 @@ local env = {
     ["spectral%.c"] = {
       cflags = {
         "-isystem$(PWD)/deps/primme/primme/include",
-        "-fopenmp", "-fno-tree-vectorize", "$(shell pkg-config --cflags blas lapack)"
+        "-fopenmp", "$(shell pkg-config --cflags blas lapack)"
       },
       ldflags = {
         "$(PWD)/deps/primme/primme/lib/libprimme.a",
