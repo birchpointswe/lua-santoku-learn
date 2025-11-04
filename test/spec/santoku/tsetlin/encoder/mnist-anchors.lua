@@ -28,10 +28,10 @@ local cfg; cfg = {
   },
   mode = {
     encoder = false,
-    cluster = true,
+    cluster = false,
     mode = "landmarks",
-    binarize = "median",
-    tch = true,
+    binarize = "itq",
+    tch = false,
   },
   tch = {
     iterations = 10000,
@@ -619,7 +619,7 @@ test("tsetlin", function ()
       eval_offsets = train.adj_sampled_offsets,
       eval_neighbors = train.adj_sampled_neighbors,
       eval_weights = train.adj_sampled_weights,
-      linkage = cfg.clustering.linkage,
+      metric = cfg.eval.cluster_metric,
       each = function (acc)
         local d, dd = stopwatch()
         str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
@@ -636,14 +636,21 @@ test("tsetlin", function ()
     if cfg.mode.encoder then
 
       print("Clustering (train)")
-      local train_stats = eval.optimize_clustering({
-        index = idx_train,
+      local train_clusters = eval.cluster({
+        codes = idx_train:get(),
+        n_bits = dataset.n_hidden,
         ids = train.adj_sampled_ids,
         offsets = train.adj_sampled_offsets,
         neighbors = train.adj_sampled_neighbors,
-        weights = train.adj_sampled_weights,
-        linkage = cfg.clustering.linkage,
-        knn = cfg.clustering.knn,
+      })
+      local train_stats = eval.optimize_clustering({
+        ids = train_clusters.ids,
+        offsets = train_clusters.offsets,
+        merges = train_clusters.merges,
+        eval_ids = train.adj_sampled_ids,
+        eval_offsets = train.adj_sampled_offsets,
+        eval_neighbors = train.adj_sampled_neighbors,
+        eval_weights = train.adj_sampled_weights,
         metric = cfg.eval.cluster_metric,
         each = function (acc)
           local d, dd = stopwatch()
@@ -659,14 +666,21 @@ test("tsetlin", function ()
       collectgarbage("collect")
 
       print("Clustering (test)")
-      local test_stats = eval.optimize_clustering({
-        index = idx_test,
+      local test_clusters = eval.cluster({
+        codes = idx_test:get(),
+        n_bits = dataset.n_hidden,
         ids = test.adj_sampled_ids,
         offsets = test.adj_sampled_offsets,
         neighbors = test.adj_sampled_neighbors,
-        weights = test.adj_sampled_weights,
-        linkage = cfg.clustering.linkage,
-        knn = cfg.clustering.knn,
+      })
+      local test_stats = eval.optimize_clustering({
+        ids = test_clusters.ids,
+        offsets = test_clusters.offsets,
+        merges = test_clusters.merges,
+        eval_ids = test.adj_sampled_ids,
+        eval_offsets = test.adj_sampled_offsets,
+        eval_neighbors = test.adj_sampled_neighbors,
+        eval_weights = test.adj_sampled_weights,
         metric = cfg.eval.cluster_metric,
         each = function (acc)
           local d, dd = stopwatch()
