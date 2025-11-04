@@ -252,8 +252,8 @@ M.optimize = function (args, typ)
           end
 
           -- For global best, use final score and break ties with elapsed time
-          local is_better = trial_score > best_score + 1e-8 or
-                           (num.abs(trial_score - best_score) < 1e-8 and trial_elapsed < best_time)
+          local is_better = trial_score > best_score + 1e-8 or (num.abs(trial_score - best_score) < 1e-8
+            --[[and trial_elapsed < best_time]])
           if is_better then
             best_score = trial_score
             best_time = trial_elapsed

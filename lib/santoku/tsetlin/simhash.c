@@ -10,19 +10,19 @@
 
 static inline void hash_feature_to_weights(
   int64_t feature_id,
-  uint64_t n_bits,
+  uint64_t bit_start,
+  uint64_t n_bits_for_rank,
   int32_t weight,
   tk_ivec_t *output_weights
 ) {
-  output_weights->n = n_bits;
-  uint64_t bits_remaining = n_bits;
+  uint64_t bits_remaining = n_bits_for_rank;
   uint64_t bit_offset = 0;
   uint64_t seed = (uint64_t)feature_id;
   while (bits_remaining > 0) {
     uint32_t hash = kh_int64_hash_func(seed);
     uint64_t bits_to_use = bits_remaining < 32 ? bits_remaining : 32;
     for (uint64_t b = 0; b < bits_to_use; b++) {
-      uint64_t bit_idx = bit_offset + b;
+      uint64_t bit_idx = bit_start + bit_offset + b;
       output_weights->a[bit_idx] = (hash & (1U << b)) ? weight : -weight;
     }
     bits_remaining -= bits_to_use;
@@ -54,6 +54,53 @@ static inline int tm_encode(lua_State *L) {
   }
   if (scale < 1.0) scale = 1.0;
   if (scale > 1e6) scale = 1e6;
+
+  // Determine number of ranks to hash
+  uint64_t n_ranks_to_hash = (hashed_ranks >= 0 && hashed_ranks < (int64_t)inv->n_ranks)
+    ? (uint64_t)hashed_ranks
+    : inv->n_ranks;
+
+  // Allocate bits per rank based on rank weights
+  uint64_t *rank_bit_start = malloc((n_ranks_to_hash + 1) * sizeof(uint64_t));
+  uint64_t *rank_n_bits = malloc(n_ranks_to_hash * sizeof(uint64_t));
+
+  if (inv->rank_weights && n_ranks_to_hash > 1) {
+    // Compute total weight for ranks we're hashing
+    double total_weight = 0.0;
+    for (uint64_t r = 0; r < n_ranks_to_hash; r++) {
+      total_weight += inv->rank_weights->a[r];
+    }
+
+    // Allocate bits proportional to rank weight
+    // Higher weight = more bits (more Hamming distance contribution)
+    uint64_t bits_allocated = 0;
+    for (uint64_t r = 0; r < n_ranks_to_hash; r++) {
+      double proportion = inv->rank_weights->a[r] / total_weight;
+      uint64_t bits = (uint64_t)(proportion * n_bits);
+      if (bits < 1) bits = 1;  // At least 1 bit per rank
+      rank_n_bits[r] = bits;
+      bits_allocated += bits;
+    }
+
+    // Adjust for rounding errors
+    if (bits_allocated != n_bits) {
+      int64_t diff = (int64_t)n_bits - (int64_t)bits_allocated;
+      // Add/subtract from rank 0 (highest weight, gets the adjustment)
+      rank_n_bits[0] = (uint64_t)((int64_t)rank_n_bits[0] + diff);
+    }
+
+    // Compute bit ranges
+    rank_bit_start[0] = 0;
+    for (uint64_t r = 0; r < n_ranks_to_hash; r++) {
+      rank_bit_start[r + 1] = rank_bit_start[r] + rank_n_bits[r];
+    }
+  } else {
+    // Single rank or no weights - all bits for rank 0
+    rank_bit_start[0] = 0;
+    rank_bit_start[1] = n_bits;
+    rank_n_bits[0] = n_bits;
+  }
+
   uint64_t n_chunks = (n_bits + TK_CVEC_BITS - 1) / TK_CVEC_BITS;
   uint64_t tail_bits = n_bits % TK_CVEC_BITS;
   uint8_t tail_mask = tail_bits ? ((1 << tail_bits) - 1) : 0xFF;
@@ -97,6 +144,11 @@ static inline int tm_encode(lua_State *L) {
       int64_t start = inv->node_offsets->a[sid];
       int64_t end = inv->node_offsets->a[sid + 1];
 
+      // Clear feature_weights buffer (set all to 0)
+      for (uint64_t i = 0; i < n_bits; i++) {
+        feature_weights->a[i] = 0;
+      }
+
       for (uint64_t r = 0; r < inv->n_ranks; r++) {
         rank_totals[r] = 0.0;
       }
@@ -138,17 +190,23 @@ static inline int tm_encode(lua_State *L) {
 
         int32_t weight = (int32_t)(normalized_weight * rank_weight * scale);
 
-        hash_feature_to_weights(feature_id, n_bits, weight, feature_weights);
-
-        tk_centroid_add_votes(centroid, outpos, feature_weights);
+        // Hash into rank-specific bit range
+        uint64_t bit_start = rank_bit_start[rank];
+        uint64_t n_bits_for_rank = rank_n_bits[rank];
+        hash_feature_to_weights(feature_id, bit_start, n_bits_for_rank, weight, feature_weights);
       }
 
+      // Accumulate all votes at once
+      tk_centroid_add_votes(centroid, outpos, feature_weights);
       tk_centroid_recompute(centroid, outpos);
     }
 
     free(rank_totals);
     tk_ivec_destroy(feature_weights);
   }
+
+  free(rank_bit_start);
+  free(rank_n_bits);
   // Return IDs in output order (only valid entities)
   tk_ivec_t *ids = tk_ivec_create(L, n_valid, 0, 0);
   ids->n = n_valid;
