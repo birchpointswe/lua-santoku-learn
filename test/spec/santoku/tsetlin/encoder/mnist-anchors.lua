@@ -10,6 +10,7 @@ local hbi = require("santoku.tsetlin.hbi")
 local ivec = require("santoku.ivec")
 local cvec = require("santoku.cvec")
 local graph = require("santoku.tsetlin.graph")
+local simhash = require("santoku.tsetlin.simhash")
 local spectral = require("santoku.tsetlin.spectral")
 local tch = require("santoku.tsetlin.tch")
 local itq = require("santoku.tsetlin.itq")
@@ -27,8 +28,9 @@ local cfg; cfg = {
     landmarks = 24,
   },
   mode = {
-    encoder = false,
-    cluster = false,
+    encoder = true,
+    cluster = true,
+    codes = "simhash", --"spectral",
     mode = "landmarks",
     binarize = "itq",
     tch = false,
@@ -196,91 +198,99 @@ test("tsetlin", function ()
     (train.adj_weights:min()),
     (train.adj_weights:sum() / train.adj_weights:size()))
 
-  print("Spectral eigendecomposition")
 
-  train.ids_spectral, train.codes_spectral = spectral.encode({
-    method = cfg.spectral.method,
-    precondition = cfg.spectral.precondition,
-    type = cfg.spectral.laplacian,
-    eps = cfg.spectral.primme_eps,
-    ids = train.adj_ids,
-    offsets = train.adj_offsets,
-    neighbors = train.adj_neighbors,
-    weights = train.adj_weights,
-    n_hidden = dataset.n_hidden,
-    each = function (t, s, v, k)
-      local d, dd = stopwatch()
-      if t == "done" then
-        str.printf("  Time: %6.2f %6.2f  Stage: %s  matvecs = %d\n", d, dd, t, s)
-      elseif t == "eig" then
-        local gap = train.eig_last and v - train.eig_last or 0
-        train.eig_last = v
-        str.printf("  Time: %6.2f %6.2f  Stage: %s  %3d = %.8f   Gap = %.8f   %s\n", d, dd, t, s, v, gap, k and "" or "drop")
-      else
-        str.printf("  Time: %6.2f %6.2f  Stage: %s\n", d, dd, t)
-      end
-    end
-  })
-  collectgarbage("collect")
-
-  train.codes_spectral_cont = train.codes_spectral
-  if cfg.mode.binarize == "itq" then
-    print("Iterative Quantization")
-    train.codes_spectral = itq.encode({
-      codes = train.codes_spectral,
-      n_dims = dataset.n_hidden,
-      tolerance = cfg.itq.eps,
-      iterations = cfg.itq.iterations,
-      each = function (i, a, b)
-        str.printf("  ITQ completed in %s itrs. Objective %f → %f\n", i, a, b)
-      end
-    })
-  elseif cfg.mode.binarize == "sr-ranking" then
-    print("Spectral Rotation (Rank-Aware)")
-    train.codes_spectral = itq.sr_ranking({
-      codes = train.codes_spectral,
-      n_dims = dataset.n_hidden,
+  if cfg.mode.codes == "spectral" then
+    print("Spectral eigendecomposition")
+    train.ids_spectral, train.codes_spectral = spectral.encode({
+      method = cfg.spectral.method,
+      precondition = cfg.spectral.precondition,
+      type = cfg.spectral.laplacian,
+      eps = cfg.spectral.primme_eps,
       ids = train.adj_ids,
       offsets = train.adj_offsets,
       neighbors = train.adj_neighbors,
       weights = train.adj_weights,
-      tolerance = cfg.sr.eps,
-      iterations = cfg.sr.iterations,
-      each = function (i, a, b)
-        str.printf("  SR-Ranking completed in %s itrs. Objective %f → %f\n", i, a, b)
+      n_hidden = dataset.n_hidden,
+      each = function (t, s, v, k)
+        local d, dd = stopwatch()
+        if t == "done" then
+          str.printf("  Time: %6.2f %6.2f  Stage: %s  matvecs = %d\n", d, dd, t, s)
+        elseif t == "eig" then
+          local gap = train.eig_last and v - train.eig_last or 0
+          train.eig_last = v
+          str.printf("  Time: %6.2f %6.2f  Stage: %s  %3d = %.8f   Gap = %.8f   %s\n", d, dd, t, s, v, gap, k and "" or "drop")
+        else
+          str.printf("  Time: %6.2f %6.2f  Stage: %s\n", d, dd, t)
+        end
       end
     })
-  elseif cfg.mode.binarize == "sr" then
-    print("Spectral Rotation")
-    train.codes_spectral = itq.sr({
-      codes = train.codes_spectral,
-      n_dims = dataset.n_hidden,
-      tolerance = cfg.sr.eps,
-      iterations = cfg.sr.iterations,
-      each = function (i, a, b)
-        str.printf("  SR completed in %s itrs. Objective %f → %f\n", i, a, b)
-      end
-    })
-  elseif cfg.mode.binarize == "median" then
-    print("Median thresholding")
-    train.codes_spectral = itq.median({
-      codes = train.codes_spectral,
-      n_dims = dataset.n_hidden,
-    })
-  elseif cfg.mode.binarize == "sign" then
-    print("Sign thresholding")
-    train.codes_spectral = itq.sign({
-      codes = train.codes_spectral,
-      n_dims = dataset.n_hidden,
-    })
-  elseif cfg.mode.binarize == "dbq" then
-    print("DBQ thresholding")
-    train.codes_spectral, dataset.n_hidden = itq.dbq({
-      codes = train.codes_spectral,
-      n_dims = dataset.n_hidden,
-    })
+    collectgarbage("collect")
+  elseif cfg.mode.codes == "simhash" then
+    print("Simhash")
+    train.ids_spectral, train.codes_spectral = train.ids, simhash.encode(train.node_combined, dataset.n_hidden)
+    collectgarbage("collect")
   end
-  collectgarbage("collect")
+
+  if cfg.mode.codes == "spectral" then
+    train.codes_spectral_cont = train.codes_spectral
+    if cfg.mode.binarize == "itq" then
+      print("Iterative Quantization")
+      train.codes_spectral = itq.encode({
+        codes = train.codes_spectral,
+        n_dims = dataset.n_hidden,
+        tolerance = cfg.itq.eps,
+        iterations = cfg.itq.iterations,
+        each = function (i, a, b)
+          str.printf("  ITQ completed in %s itrs. Objective %f → %f\n", i, a, b)
+        end
+      })
+    elseif cfg.mode.binarize == "sr-ranking" then
+      print("Spectral Rotation (Rank-Aware)")
+      train.codes_spectral = itq.sr_ranking({
+        codes = train.codes_spectral,
+        n_dims = dataset.n_hidden,
+        ids = train.adj_ids,
+        offsets = train.adj_offsets,
+        neighbors = train.adj_neighbors,
+        weights = train.adj_weights,
+        tolerance = cfg.sr.eps,
+        iterations = cfg.sr.iterations,
+        each = function (i, a, b)
+          str.printf("  SR-Ranking completed in %s itrs. Objective %f → %f\n", i, a, b)
+        end
+      })
+    elseif cfg.mode.binarize == "sr" then
+      print("Spectral Rotation")
+      train.codes_spectral = itq.sr({
+        codes = train.codes_spectral,
+        n_dims = dataset.n_hidden,
+        tolerance = cfg.sr.eps,
+        iterations = cfg.sr.iterations,
+        each = function (i, a, b)
+          str.printf("  SR completed in %s itrs. Objective %f → %f\n", i, a, b)
+        end
+      })
+    elseif cfg.mode.binarize == "median" then
+      print("Median thresholding")
+      train.codes_spectral = itq.median({
+        codes = train.codes_spectral,
+        n_dims = dataset.n_hidden,
+      })
+    elseif cfg.mode.binarize == "sign" then
+      print("Sign thresholding")
+      train.codes_spectral = itq.sign({
+        codes = train.codes_spectral,
+        n_dims = dataset.n_hidden,
+      })
+    elseif cfg.mode.binarize == "dbq" then
+      print("DBQ thresholding")
+      train.codes_spectral, dataset.n_hidden = itq.dbq({
+        codes = train.codes_spectral,
+        n_dims = dataset.n_hidden,
+      })
+    end
+    collectgarbage("collect")
+  end
 
   if cfg.mode.tch then
     print("Flipping bits")
@@ -429,7 +439,7 @@ test("tsetlin", function ()
 
   local sth_n, sth_ids, sth_problems, sth_solutions, sth_visible
   local test_ids, test_problems
-  local idx_train, idx_test  -- Declare here for visibility across encoder/clustering blocks
+  local idx_train, idx_test
 
   if cfg.mode.encoder then
 
