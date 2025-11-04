@@ -312,11 +312,8 @@ test("tsetlin", function ()
 
   print("Rearranging codes to match graph adjacency")
   local codes_adj_order = cvec.create()
-  print("DEBUG before bits_select: train.codes_spectral =", train.codes_spectral)
   train.codes_spectral:bits_select(nil, train.adj_ids, dataset.n_hidden, codes_adj_order)
-  print("DEBUG after bits_select: train.codes_spectral =", train.codes_spectral)
   collectgarbage("collect")
-  print("DEBUG after bits_select (collect): train.codes_spectral =", train.codes_spectral)
 
   print("Optimizing bit selection")
   if cfg.bits.sffs_fixed then
@@ -342,7 +339,6 @@ test("tsetlin", function ()
     collectgarbage("collect")
   end
   codes_adj_order:destroy()
-  print("DEBUG after bitsel: train.codes_spectral =", train.codes_spectral)
 
   train.codes_spectral:bits_select(train.kept_bits, nil, dataset.n_hidden)
   dataset.n_hidden = train.kept_bits:size()
@@ -652,7 +648,7 @@ test("tsetlin", function ()
       print("Clustering (train)")
       local train_clusters = eval.cluster({
         codes = idx_train:get(train.adj_sampled_ids),
-        n_bits = dataset.n_hidden,
+        n_dims = dataset.n_hidden,
         ids = train.adj_sampled_ids,
         offsets = train.adj_sampled_offsets,
         neighbors = train.adj_sampled_neighbors,
@@ -682,7 +678,7 @@ test("tsetlin", function ()
       print("Clustering (test)")
       local test_clusters = eval.cluster({
         codes = idx_test:get(test.adj_sampled_ids),
-        n_bits = dataset.n_hidden,
+        n_dims = dataset.n_hidden,
         ids = test.adj_sampled_ids,
         offsets = test.adj_sampled_offsets,
         neighbors = test.adj_sampled_neighbors,
