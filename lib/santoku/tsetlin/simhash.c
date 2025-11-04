@@ -57,8 +57,29 @@ static inline int tm_encode(lua_State *L) {
   uint64_t n_chunks = (n_bits + TK_CVEC_BITS - 1) / TK_CVEC_BITS;
   uint64_t tail_bits = n_bits % TK_CVEC_BITS;
   uint8_t tail_mask = tail_bits ? ((1 << tail_bits) - 1) : 0xFF;
-  uint64_t n_entities = inv->node_offsets->n - 1;
-  tk_centroid_t *centroid = tk_centroid_create_batch(L, n_entities, n_chunks, tail_mask);
+  uint64_t max_sid = inv->node_offsets->n - 1;
+
+  // Count valid entities
+  uint64_t n_valid = 0;
+  for (uint64_t sid = 0; sid < max_sid; sid++) {
+    if (inv->sid_to_uid->a[sid] >= 0) {
+      n_valid++;
+    }
+  }
+
+  // Create mapping: sid -> output position (only for valid entities)
+  int64_t *sid_to_outpos = malloc(max_sid * sizeof(int64_t));
+  uint64_t out_idx = 0;
+  for (uint64_t sid = 0; sid < max_sid; sid++) {
+    if (inv->sid_to_uid->a[sid] >= 0) {
+      sid_to_outpos[sid] = out_idx++;
+    } else {
+      sid_to_outpos[sid] = -1;
+    }
+  }
+
+  tk_centroid_t *centroid = tk_centroid_create_batch(L, n_valid, n_chunks, tail_mask);
+
   #pragma omp parallel
   {
     tk_ivec_t *feature_weights = tk_ivec_create(NULL, n_bits, 0, 0);
@@ -66,7 +87,13 @@ static inline int tm_encode(lua_State *L) {
     double *rank_totals = malloc(inv->n_ranks * sizeof(double));
 
     #pragma omp for schedule(static)
-    for (uint64_t sid = 0; sid < n_entities; sid++) {
+    for (uint64_t sid = 0; sid < max_sid; sid++) {
+      // Skip deleted entities
+      if (inv->sid_to_uid->a[sid] < 0) {
+        continue;
+      }
+
+      uint64_t outpos = (uint64_t)sid_to_outpos[sid];
       int64_t start = inv->node_offsets->a[sid];
       int64_t end = inv->node_offsets->a[sid + 1];
 
@@ -113,22 +140,34 @@ static inline int tm_encode(lua_State *L) {
 
         hash_feature_to_weights(feature_id, n_bits, weight, feature_weights);
 
-        tk_centroid_add_votes(centroid, sid, feature_weights);
+        tk_centroid_add_votes(centroid, outpos, feature_weights);
       }
 
-      tk_centroid_recompute(centroid, sid);
+      tk_centroid_recompute(centroid, outpos);
     }
 
     free(rank_totals);
     tk_ivec_destroy(feature_weights);
   }
-  size_t total_bytes = n_entities * n_chunks;
+  // Return IDs in output order (only valid entities)
+  tk_ivec_t *ids = tk_ivec_create(L, n_valid, 0, 0);
+  ids->n = n_valid;
+  uint64_t out_i = 0;
+  for (uint64_t sid = 0; sid < max_sid; sid++) {
+    if (inv->sid_to_uid->a[sid] >= 0) {
+      ids->a[out_i++] = inv->sid_to_uid->a[sid];
+    }
+  }
+
+  // Return codes (already packed in centroid)
+  size_t total_bytes = n_valid * n_chunks;
   tk_cvec_t *output = tk_cvec_create(L, total_bytes, 0, 0);
   output->n = total_bytes;
   memcpy(output->a, centroid->code, total_bytes);
-  lua_replace(L, 1);
-  lua_settop(L, 1);
-  return 1;
+
+  free(sid_to_outpos);
+
+  return 2;
 }
 
 static luaL_Reg tm_simhash_fns[] = {
