@@ -8,6 +8,8 @@
 #include <string.h>
 #include <float.h>
 
+#define TK_SIMHASH_SCALE 1e6
+
 static inline uint64_t murmur3_fmix64(uint64_t k) {
   k ^= k >> 33;
   k *= 0xff51afd7ed558ccdULL;
@@ -44,27 +46,10 @@ static inline int tm_encode(lua_State *L) {
   tk_inv_t *inv = tk_inv_peek(L, 1);
   uint64_t n_bits = tk_lua_checkunsigned(L, 2, "n_bits");
   int64_t hashed_ranks = -1;
-  if (lua_gettop(L) >= 3 && !lua_isnil(L, 3)) {
+  if (lua_gettop(L) >= 3 && !lua_isnil(L, 3))
     hashed_ranks = (int64_t)tk_lua_checkunsigned(L, 3, "hashed_ranks");
-  }
+  bool weighted = tk_lua_optboolean(L, 4, false, "weighted");
 
-  double scale = 1.0;
-  if (inv->rank_weights && inv->n_ranks > 0) {
-    double min_rank_weight = DBL_MAX;
-    #pragma omp parallel for reduction(min:min_rank_weight)
-    for (uint64_t r = 0; r < inv->n_ranks; r++) {
-      double w = inv->rank_weights->a[r];
-      if (w > 0 && w < min_rank_weight) {
-        min_rank_weight = w;
-      }
-    }
-    if (min_rank_weight < DBL_MAX && min_rank_weight > 0) {
-      scale = 1.0 / min_rank_weight;
-    }
-  }
-
-  if (scale < 1.0) scale = 1.0;
-  if (scale > 1e6) scale = 1e6;
   uint64_t n_ranks_to_hash = (hashed_ranks >= 0 && hashed_ranks < (int64_t)inv->n_ranks) ? (uint64_t)hashed_ranks : inv->n_ranks;
   uint64_t *rank_bit_start = malloc((n_ranks_to_hash + 1) * sizeof(uint64_t));
   uint64_t *rank_n_bits = malloc(n_ranks_to_hash * sizeof(uint64_t));
@@ -131,33 +116,28 @@ static inline int tm_encode(lua_State *L) {
       uint64_t outpos = (uint64_t)sid_to_outpos[sid];
       int64_t start = inv->node_offsets->a[sid];
       int64_t end = inv->node_offsets->a[sid + 1];
-      for (uint64_t i = 0; i < n_bits; i++) {
+      for (uint64_t i = 0; i < n_bits; i++)
         feature_weights->a[i] = 0;
-      }
-      for (uint64_t r = 0; r < inv->n_ranks; r++) {
+      for (uint64_t r = 0; r < inv->n_ranks; r++)
         rank_totals[r] = 0.0;
-      }
       for (int64_t i = start; i < end; i++) {
         int64_t feature_id = inv->node_bits->a[i];
         int64_t rank = inv->ranks ? inv->ranks->a[feature_id] : 0;
-        if (hashed_ranks >= 0 && rank >= hashed_ranks) {
+        if (hashed_ranks >= 0 && rank >= hashed_ranks)
           continue;
-        }
-        double feature_weight = inv->weights ? inv->weights->a[feature_id] : 1.0;
-        if (rank >= 0 && rank < (int64_t)inv->n_ranks) {
+        double feature_weight = (weighted && inv->weights) ? inv->weights->a[feature_id] : 1.0;
+        if (rank >= 0 && rank < (int64_t)inv->n_ranks)
           rank_totals[rank] += feature_weight;
-        }
       }
       for (int64_t i = start; i < end; i++) {
         int64_t feature_id = inv->node_bits->a[i];
         int64_t rank = inv->ranks ? inv->ranks->a[feature_id] : 0;
-        if (hashed_ranks >= 0 && rank >= hashed_ranks) {
+        if (hashed_ranks >= 0 && rank >= hashed_ranks)
           continue;
-        }
-        double feature_weight = inv->weights ? inv->weights->a[feature_id] : 1.0;
+        double feature_weight = (weighted && inv->weights) ? inv->weights->a[feature_id] : 1.0;
         double normalized_weight = (rank_totals[rank] > 0.0) ? feature_weight / rank_totals[rank] : 0.0;
         double rank_weight = (inv->rank_weights && rank >= 0 && rank < (int64_t)inv->n_ranks) ? inv->rank_weights->a[rank] : 1.0;
-        int32_t weight = (int32_t)(normalized_weight * rank_weight * scale);
+        int32_t weight = (int32_t)(normalized_weight * rank_weight * TK_SIMHASH_SCALE);
         uint64_t bit_start = rank_bit_start[rank];
         uint64_t n_bits_for_rank = rank_n_bits[rank];
         hash_feature_to_weights(feature_id, bit_start, n_bits_for_rank, weight, feature_weights);
