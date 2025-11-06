@@ -630,6 +630,104 @@ typedef struct {
   int64_t next_in_hash_chain;
 } tk_cluster_new_t;
 
+static inline uint64_t tk_cluster_complete_linkage_distance(
+  tk_cvec_t *codes,
+  uint64_t n_chunks,
+  uint64_t n_bits,
+  tk_cluster_new_t *cluster_i,
+  tk_cluster_new_t *cluster_j,
+  char *centroid_i,
+  char *centroid_j,
+  tk_pumap_t *distance_cache,
+  uint64_t early_exit_threshold
+) {
+  // Check cache first
+  int64_t cache_key;
+  if (cluster_i->cluster_id < cluster_j->cluster_id) {
+    cache_key = ((int64_t)cluster_i->cluster_id << 32) | cluster_j->cluster_id;
+  } else {
+    cache_key = ((int64_t)cluster_j->cluster_id << 32) | cluster_i->cluster_id;
+  }
+
+  if (distance_cache) {
+    khint_t khi = tk_pumap_get(distance_cache, cache_key);
+    if (khi != tk_pumap_end(distance_cache)) {
+      // Cache hit!
+      return (uint64_t)tk_pumap_val(distance_cache, khi).p;
+    }
+  }
+
+  // Quick lower bound check using centroids
+  uint64_t centroid_dist = tk_cvec_bits_hamming_serial(
+    (const uint8_t*)centroid_i,
+    (const uint8_t*)centroid_j,
+    n_bits
+  );
+
+  // Early termination if centroid already too far
+  if (early_exit_threshold > 0 && centroid_dist >= early_exit_threshold) {
+    return centroid_dist;  // Won't be minimum anyway
+  }
+
+  // Complete linkage: max distance between any pair of members
+  uint64_t max_dist = centroid_dist;  // Start with centroid as baseline
+  uint64_t total_pairs = cluster_i->members->n * cluster_j->members->n;
+
+  // Parallelize if clusters are large enough to benefit (avoid OpenMP overhead for small clusters)
+  if (total_pairs > 100) {
+    #pragma omp parallel for reduction(max:max_dist) schedule(static)
+    for (uint64_t mi = 0; mi < cluster_i->members->n; mi++) {
+      int64_t member_i = cluster_i->members->a[mi];
+      char *code_i = codes->a + (uint64_t)member_i * n_chunks;
+
+      for (uint64_t mj = 0; mj < cluster_j->members->n; mj++) {
+        int64_t member_j = cluster_j->members->a[mj];
+        char *code_j = codes->a + (uint64_t)member_j * n_chunks;
+
+        uint64_t dist = tk_cvec_bits_hamming_serial(
+          (const uint8_t*)code_i,
+          (const uint8_t*)code_j,
+          n_bits
+        );
+
+        if (dist > max_dist) {
+          max_dist = dist;
+        }
+      }
+    }
+  } else {
+    // Sequential for small clusters
+    for (uint64_t mi = 0; mi < cluster_i->members->n; mi++) {
+      int64_t member_i = cluster_i->members->a[mi];
+      char *code_i = codes->a + (uint64_t)member_i * n_chunks;
+
+      for (uint64_t mj = 0; mj < cluster_j->members->n; mj++) {
+        int64_t member_j = cluster_j->members->a[mj];
+        char *code_j = codes->a + (uint64_t)member_j * n_chunks;
+
+        uint64_t dist = tk_cvec_bits_hamming_serial(
+          (const uint8_t*)code_i,
+          (const uint8_t*)code_j,
+          n_bits
+        );
+
+        if (dist > max_dist) {
+          max_dist = dist;
+        }
+      }
+    }
+  }
+
+  // Store in cache
+  if (distance_cache) {
+    int kha;
+    khint_t khi = tk_pumap_put(distance_cache, cache_key, &kha);
+    tk_pumap_setval(distance_cache, khi, tk_pair(0, (double)max_dist));
+  }
+
+  return max_dist;
+}
+
 static inline int tk_cluster_centroid(
   lua_State *L,
   tk_cvec_t *codes,
@@ -833,8 +931,13 @@ static inline int tk_cluster_centroid(
   tk_iumap_destroy(code_to_cluster);
   n_active = n_clusters;
 
+  // Cache for complete linkage distances (cluster_id_pair → distance)
+  tk_pumap_t *distance_cache = tk_pumap_create(NULL, 0);
+
   tk_euset_t *seen_edges = tk_euset_create(NULL, 0);
-  if (!seen_edges) {
+  if (!seen_edges || !distance_cache) {
+    if (distance_cache) tk_pumap_destroy(distance_cache);
+    if (seen_edges) tk_euset_destroy(seen_edges);
     for (uint64_t c = 0; c < n_clusters; c++) {
       if (clusters[c]) {
         if (clusters[c]->members) tk_ivec_destroy(clusters[c]->members);
@@ -893,13 +996,15 @@ static inline int tk_cluster_centroid(
       char *code_u = tk_centroid_code(clusters[edge.u]->centroid);
       char *code_v = tk_centroid_code(clusters[edge.v]->centroid);
 
-      uint64_t hamming = tk_cvec_bits_hamming_serial(
-        (uint8_t*)code_u,
-        (uint8_t*)code_v,
-        n_bits
+      uint64_t complete_dist = tk_cluster_complete_linkage_distance(
+        codes, n_chunks, n_bits,
+        clusters[edge.u], clusters[edge.v],
+        code_u, code_v,
+        distance_cache,
+        0  // No early exit during initialization
       );
 
-      double dist = (double)hamming;
+      double dist = (double)complete_dist;
       tk_evec_push(edge_heap, tk_edge(edge.u, edge.v, dist));
     }
   }
@@ -1102,6 +1207,9 @@ static inline int tk_cluster_centroid(
 
     char *cj_code = tk_centroid_code(cj->centroid);
 
+    // Get current heap minimum for early exit optimization
+    uint64_t heap_min = (edge_heap->n > 0) ? (uint64_t)edge_heap->a[0].w : 0;
+
     for (khint_t k = tk_iuset_begin(cj->neighbor_ids);
          k != tk_iuset_end(cj->neighbor_ids); ++k) {
       if (!tk_iuset_exist(cj->neighbor_ids, k))
@@ -1115,13 +1223,15 @@ static inline int tk_cluster_centroid(
       tk_cluster_new_t *neighbor = clusters[neighbor_idx];
       char *neighbor_code = tk_centroid_code(neighbor->centroid);
 
-      uint64_t hamming = tk_cvec_bits_hamming_serial(
-        (uint8_t*)cj_code,
-        (uint8_t*)neighbor_code,
-        n_bits
+      uint64_t complete_dist = tk_cluster_complete_linkage_distance(
+        codes, n_chunks, n_bits,
+        cj, neighbor,
+        cj_code, neighbor_code,
+        distance_cache,
+        heap_min  // Early exit if distance >= current minimum
       );
 
-      double new_dist = (double)hamming;
+      double new_dist = (double)complete_dist;
 
       if (edge_heap->m < edge_heap->n + 1) {
         if (tk_evec_ensure(edge_heap, edge_heap->n + 100) != 0) {
@@ -1200,6 +1310,7 @@ static inline int tk_cluster_centroid(
   free(clusters);
   tk_ivec_destroy(entity_to_cluster);
   tk_evec_destroy(edge_heap);
+  if (distance_cache) tk_pumap_destroy(distance_cache);
 
   return 0;
 }
