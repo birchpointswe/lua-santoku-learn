@@ -641,7 +641,6 @@ static inline uint64_t tk_cluster_complete_linkage_distance(
   tk_pumap_t *distance_cache,
   uint64_t early_exit_threshold
 ) {
-
   int64_t cache_key;
   if (cluster_i->cluster_id < cluster_j->cluster_id) {
     cache_key = ((int64_t)cluster_i->cluster_id << 32) | cluster_j->cluster_id;
@@ -652,11 +651,9 @@ static inline uint64_t tk_cluster_complete_linkage_distance(
   if (distance_cache) {
     khint_t khi = tk_pumap_get(distance_cache, cache_key);
     if (khi != tk_pumap_end(distance_cache)) {
-
       return (uint64_t)tk_pumap_val(distance_cache, khi).p;
     }
   }
-
 
   uint64_t centroid_dist = tk_cvec_bits_hamming_serial(
     (const uint8_t*)centroid_i,
@@ -664,15 +661,12 @@ static inline uint64_t tk_cluster_complete_linkage_distance(
     n_bits
   );
 
-
   if (early_exit_threshold > 0 && centroid_dist >= early_exit_threshold) {
     return centroid_dist;
   }
 
-
   uint64_t max_dist = centroid_dist;
   uint64_t total_pairs = cluster_i->members->n * cluster_j->members->n;
-
 
   if (total_pairs > 100) {
     #pragma omp parallel for reduction(max:max_dist) schedule(static)
@@ -696,7 +690,6 @@ static inline uint64_t tk_cluster_complete_linkage_distance(
       }
     }
   } else {
-
     for (uint64_t mi = 0; mi < cluster_i->members->n; mi++) {
       int64_t member_i = cluster_i->members->a[mi];
       char *code_i = codes->a + (uint64_t)member_i * n_chunks;
@@ -717,7 +710,6 @@ static inline uint64_t tk_cluster_complete_linkage_distance(
       }
     }
   }
-
 
   if (distance_cache) {
     int kha;
@@ -931,7 +923,6 @@ static inline int tk_cluster_centroid(
   tk_iumap_destroy(code_to_cluster);
   n_active = n_clusters;
 
-
   tk_pumap_t *distance_cache = tk_pumap_create(NULL, 0);
 
   tk_euset_t *seen_edges = tk_euset_create(NULL, 0);
@@ -1037,29 +1028,22 @@ static inline int tk_cluster_centroid(
   }
 
   while (edge_heap->n > 0 && n_active > 1) {
-
     tk_edge_t min_edge = tk_evec_hmin_pop(edge_heap);
     double min_dist = min_edge.w;
 
-
     tk_evec_t *distance_level_edges = tk_evec_create(NULL, 0, 0, 0);
     tk_evec_push(distance_level_edges, min_edge);
-
 
     while (edge_heap->n > 0) {
       if (edge_heap->a[0].w > min_dist) break;
       tk_edge_t edge = tk_evec_hmin_pop(edge_heap);
       tk_evec_push(distance_level_edges, edge);
     }
-
-
     for (uint64_t i = 0; i < distance_level_edges->n; i++) {
       tk_edge_t *e = &distance_level_edges->a[i];
       uint64_t deg_u = clusters[e->u]->active ? tk_iuset_size(clusters[e->u]->neighbor_ids) : 0;
       uint64_t deg_v = clusters[e->v]->active ? tk_iuset_size(clusters[e->v]->neighbor_ids) : 0;
-
       uint64_t min_deg = deg_u < deg_v ? deg_u : deg_v;
-
       e->w = (double)min_deg;
     }
     tk_evec_asc(distance_level_edges, 0, distance_level_edges->n);
