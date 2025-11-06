@@ -234,8 +234,6 @@ M.optimize = function (args, typ)
             })
           end
 
-          local trial_elapsed = utc.time(true) - trial_start_time
-
           local trial_score = last_epoch_score
 
           if trial_score > round_best_score then
