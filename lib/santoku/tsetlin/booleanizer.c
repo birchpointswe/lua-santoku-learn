@@ -355,9 +355,7 @@ static inline void tk_booleanizer_add_thresholds (
   tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, tk_lua_absindex(L, -1));
   lua_pop(L, 1);
   if (n == 0) {
-    // Nothing to do
   } else if (B->n_thresholds == 0) {
-    // Otso
     double best_gap = -1.0, thr = 0.0;
     uint64_t best_idx = 0;
     #pragma omp parallel

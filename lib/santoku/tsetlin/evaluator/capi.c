@@ -641,7 +641,6 @@ static inline uint64_t tk_cluster_complete_linkage_distance(
   tk_pumap_t *distance_cache,
   uint64_t early_exit_threshold
 ) {
-  // Check cache first
   int64_t cache_key;
   if (cluster_i->cluster_id < cluster_j->cluster_id) {
     cache_key = ((int64_t)cluster_i->cluster_id << 32) | cluster_j->cluster_id;
@@ -652,28 +651,23 @@ static inline uint64_t tk_cluster_complete_linkage_distance(
   if (distance_cache) {
     khint_t khi = tk_pumap_get(distance_cache, cache_key);
     if (khi != tk_pumap_end(distance_cache)) {
-      // Cache hit!
       return (uint64_t)tk_pumap_val(distance_cache, khi).p;
     }
   }
 
-  // Quick lower bound check using centroids
   uint64_t centroid_dist = tk_cvec_bits_hamming_serial(
     (const uint8_t*)centroid_i,
     (const uint8_t*)centroid_j,
     n_bits
   );
 
-  // Early termination if centroid already too far
   if (early_exit_threshold > 0 && centroid_dist >= early_exit_threshold) {
-    return centroid_dist;  // Won't be minimum anyway
+    return centroid_dist;
   }
 
-  // Complete linkage: max distance between any pair of members
-  uint64_t max_dist = centroid_dist;  // Start with centroid as baseline
+  uint64_t max_dist = centroid_dist;
   uint64_t total_pairs = cluster_i->members->n * cluster_j->members->n;
 
-  // Parallelize if clusters are large enough to benefit (avoid OpenMP overhead for small clusters)
   if (total_pairs > 100) {
     #pragma omp parallel for reduction(max:max_dist) schedule(static)
     for (uint64_t mi = 0; mi < cluster_i->members->n; mi++) {
@@ -696,7 +690,6 @@ static inline uint64_t tk_cluster_complete_linkage_distance(
       }
     }
   } else {
-    // Sequential for small clusters
     for (uint64_t mi = 0; mi < cluster_i->members->n; mi++) {
       int64_t member_i = cluster_i->members->a[mi];
       char *code_i = codes->a + (uint64_t)member_i * n_chunks;
@@ -718,7 +711,6 @@ static inline uint64_t tk_cluster_complete_linkage_distance(
     }
   }
 
-  // Store in cache
   if (distance_cache) {
     int kha;
     khint_t khi = tk_pumap_put(distance_cache, cache_key, &kha);
@@ -931,7 +923,6 @@ static inline int tk_cluster_centroid(
   tk_iumap_destroy(code_to_cluster);
   n_active = n_clusters;
 
-  // Cache for complete linkage distances (cluster_id_pair → distance)
   tk_pumap_t *distance_cache = tk_pumap_create(NULL, 0);
 
   tk_euset_t *seen_edges = tk_euset_create(NULL, 0);
@@ -1001,7 +992,7 @@ static inline int tk_cluster_centroid(
         clusters[edge.u], clusters[edge.v],
         code_u, code_v,
         distance_cache,
-        0  // No early exit during initialization
+        0
       );
 
       double dist = (double)complete_dist;
@@ -1037,50 +1028,43 @@ static inline int tk_cluster_centroid(
   }
 
   while (edge_heap->n > 0 && n_active > 1) {
-    // Collect all edges at minimum distance
     tk_edge_t min_edge = tk_evec_hmin_pop(edge_heap);
     double min_dist = min_edge.w;
 
-    // Temporary vector for edges at this distance level
     tk_evec_t *distance_level_edges = tk_evec_create(NULL, 0, 0, 0);
     tk_evec_push(distance_level_edges, min_edge);
 
-    // Collect all other edges at the same distance
     while (edge_heap->n > 0) {
-      if (edge_heap->a[0].w > min_dist) break;  // Different distance
+      if (edge_heap->a[0].w > min_dist) break;
       tk_edge_t edge = tk_evec_hmin_pop(edge_heap);
       tk_evec_push(distance_level_edges, edge);
     }
-
-    // Sort edges by cluster degree (fewer neighbors first to avoid hubs)
     for (uint64_t i = 0; i < distance_level_edges->n; i++) {
       tk_edge_t *e = &distance_level_edges->a[i];
       uint64_t deg_u = clusters[e->u]->active ? tk_iuset_size(clusters[e->u]->neighbor_ids) : 0;
       uint64_t deg_v = clusters[e->v]->active ? tk_iuset_size(clusters[e->v]->neighbor_ids) : 0;
-      // Use MINIMUM degree (not sum) - prioritize lowest-degree clusters
       uint64_t min_deg = deg_u < deg_v ? deg_u : deg_v;
-      // Store min degree in weight temporarily for sorting
       e->w = (double)min_deg;
     }
     tk_evec_asc(distance_level_edges, 0, distance_level_edges->n);
 
-    // Process edges in batches by degree level
+
     uint64_t batch_start = 0;
     while (batch_start < distance_level_edges->n) {
       double current_min_degree = distance_level_edges->a[batch_start].w;
 
-      // Find end of this degree batch
+
       uint64_t batch_end = batch_start + 1;
       while (batch_end < distance_level_edges->n &&
              distance_level_edges->a[batch_end].w == current_min_degree) {
         batch_end++;
       }
 
-      // Track which clusters are involved in merges this batch
+
       tk_iuset_t *merged_this_batch = tk_iuset_create(NULL, 0);
       uint64_t merges_in_batch = 0;
 
-      // Process all edges at this (distance, degree) level
+
       for (uint64_t edge_idx = batch_start; edge_idx < batch_end; edge_idx++) {
         tk_edge_t edge = distance_level_edges->a[edge_idx];
         int64_t ci_idx = edge.u;
@@ -1092,7 +1076,7 @@ static inline int tk_cluster_centroid(
         if (!ci->active || !cj->active)
           continue;
 
-        // Check if either cluster already merged this batch
+
         khint_t khi_u = tk_iuset_get(merged_this_batch, ci_idx);
         khint_t khi_v = tk_iuset_get(merged_this_batch, cj_idx);
         if (khi_u != tk_iuset_end(merged_this_batch) ||
@@ -1100,7 +1084,7 @@ static inline int tk_cluster_centroid(
           continue;  // Skip - one or both already involved in a merge this batch
         }
 
-        // Mark both as merged this batch
+
         int kha;
         tk_iuset_put(merged_this_batch, ci_idx, &kha);
         tk_iuset_put(merged_this_batch, cj_idx, &kha);
@@ -1175,13 +1159,13 @@ static inline int tk_cluster_centroid(
       tk_iuset_put(cj->neighbor_ids, neighbor_idx, &neighbor_kha);
     }
 
-    // Remove ci from cj's neighbors (correct API: get iterator first)
+
     khint_t ci_in_cj = tk_iuset_get(cj->neighbor_ids, ci_idx);
     if (ci_in_cj != tk_iuset_end(cj->neighbor_ids)) {
       tk_iuset_del(cj->neighbor_ids, ci_in_cj);
     }
 
-    // Update all of ci's neighbors: remove ci, add cj
+
     for (khint_t k = tk_iuset_begin(ci->neighbor_ids);
          k != tk_iuset_end(ci->neighbor_ids); ++k) {
       if (!tk_iuset_exist(ci->neighbor_ids, k))
@@ -1194,20 +1178,20 @@ static inline int tk_cluster_centroid(
 
       tk_cluster_new_t *neighbor = clusters[neighbor_idx];
 
-      // Remove ci from neighbor (correct API)
+
       khint_t ci_in_neighbor = tk_iuset_get(neighbor->neighbor_ids, ci_idx);
       if (ci_in_neighbor != tk_iuset_end(neighbor->neighbor_ids)) {
         tk_iuset_del(neighbor->neighbor_ids, ci_in_neighbor);
       }
 
-      // Add cj to neighbor
+
       int neighbor_kha;
       tk_iuset_put(neighbor->neighbor_ids, cj_idx, &neighbor_kha);
     }
 
     char *cj_code = tk_centroid_code(cj->centroid);
 
-    // Get current heap minimum for early exit optimization
+
     uint64_t heap_min = (edge_heap->n > 0) ? (uint64_t)edge_heap->a[0].w : 0;
 
     for (khint_t k = tk_iuset_begin(cj->neighbor_ids);
@@ -1267,10 +1251,10 @@ static inline int tk_cluster_centroid(
         n_active--;
       }
 
-      // Cleanup batch tracking
+
       tk_iuset_destroy(merged_this_batch);
 
-      // Record dendrogram offset ONLY if merges happened in this batch
+
       if (merges_in_batch > 0 && dendro_offsets && dendro_merges) {
         if (dendro_offsets->m < dendro_offsets->n + 1) {
           if (tk_ivec_ensure(dendro_offsets, dendro_offsets->n + 100) != 0) {
@@ -1429,7 +1413,7 @@ static inline int tm_optimize_clustering (lua_State *L)
   tk_ivec_t *callback_assignments = tk_ivec_create(L, n_samples, 0, 0);
   int i_callback_assignments = tk_lua_absindex(L, -1);
 
-  // Reuse cluster_set across all steps to avoid churn
+
   tk_iumap_t *cluster_set = tk_iumap_create(NULL, 0);
 
   for (uint64_t step = 0; step <= n_steps; step++) {
@@ -1446,7 +1430,7 @@ static inline int tm_optimize_clustering (lua_State *L)
       }
     }
 
-    // Clear and reuse cluster_set instead of recreating
+
     tk_iumap_clear(cluster_set);
     for (uint64_t i = 0; i < n_samples; i++) {
       if (working_assignments->a[i] >= 0) {
@@ -1482,7 +1466,7 @@ static inline int tm_optimize_clustering (lua_State *L)
       lua_setfield(L, -2, "assignments");
       lua_call(L, 1, 1);  // Expect 1 return value
 
-      // Check if callback returned true (stop iteration)
+
       if (lua_toboolean(L, -1)) {
         lua_pop(L, 1);
         break;
