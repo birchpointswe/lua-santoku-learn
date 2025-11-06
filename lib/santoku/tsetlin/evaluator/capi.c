@@ -1364,6 +1364,8 @@ static inline int tm_optimize_clustering (lua_State *L)
   if (metric == TK_EVAL_METRIC_NONE)
     tk_lua_verror(L, 3, "optimize_clustering", "metric", "unknown metric");
 
+  bool all_merges = tk_lua_foptboolean(L, 1, "optimize_clustering", "all_merges", false);
+
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
     lua_getfield(L, 1, "each");
@@ -1380,8 +1382,8 @@ static inline int tm_optimize_clustering (lua_State *L)
   if (n_samples == 0 || n_samples > dendro_offsets->n)
     tk_lua_verror(L, 2, "optimize_clustering", "invalid dendro_offsets structure");
 
-  uint64_t n_steps = dendro_offsets->n > n_samples + 1 ?
-                     dendro_offsets->n - n_samples - 1 : 0;
+  uint64_t n_steps = all_merges ? dendro_merges->n : (dendro_offsets->n > n_samples + 1 ?
+                     dendro_offsets->n - n_samples - 1 : 0);
 
   tk_iumap_t *eval_id_to_idx = tk_iumap_from_ivec(NULL, eval_ids);
   if (!eval_id_to_idx)
@@ -1413,11 +1415,69 @@ static inline int tm_optimize_clustering (lua_State *L)
   tk_ivec_t *callback_assignments = tk_ivec_create(L, n_samples, 0, 0);
   int i_callback_assignments = tk_lua_absindex(L, -1);
 
+  tk_ivec_t *cluster_sizes = NULL;
+  tk_iumap_t *absorbed_to_surviving = NULL;
+  int64_t current_merge_idx = 0;
+
+  if (all_merges) {
+    cluster_sizes = tk_ivec_create(NULL, n_samples, 0, 0);
+    cluster_sizes->n = n_samples;
+    for (uint64_t i = 0; i < n_samples; i++)
+      cluster_sizes->a[i] = 1;
+    absorbed_to_surviving = tk_iumap_create(NULL, 0);
+  }
 
   tk_iumap_t *cluster_set = tk_iumap_create(NULL, 0);
 
   for (uint64_t step = 0; step <= n_steps; step++) {
-    tk_pvec_dendro_cut(L, dendro_offsets, dendro_merges, step, working_assignments);
+    if (all_merges) {
+      if (current_merge_idx >= dendro_merges->n)
+        break;
+      if (step == 0) {
+        for (uint64_t i = 0; i < n_samples; i++)
+          working_assignments->a[i] = dendro_offsets->a[i];
+        working_assignments->n = n_samples;
+      } else {
+        int64_t start = current_merge_idx;
+        tk_pair_t first_merge = dendro_merges->a[start];
+        int64_t target_size = cluster_sizes->a[first_merge.i] + cluster_sizes->a[first_merge.p];
+        int64_t end = start;
+        while (end < (int64_t)dendro_merges->n) {
+          tk_pair_t next_merge = dendro_merges->a[end];
+          int64_t next_size = cluster_sizes->a[next_merge.i] + cluster_sizes->a[next_merge.p];
+          if (next_size != target_size)
+            break;
+          end++;
+        }
+        for (int64_t idx = start; idx < end; idx++) {
+          tk_pair_t merge = dendro_merges->a[idx];
+          int64_t absorbed = merge.i;
+          int64_t surviving = merge.p;
+          int64_t new_size = cluster_sizes->a[absorbed] + cluster_sizes->a[surviving];
+          cluster_sizes->a[surviving] = new_size;
+          cluster_sizes->a[absorbed] = 0;
+          int kha;
+          khint_t khi = tk_iumap_put(absorbed_to_surviving, absorbed, &kha);
+          tk_iumap_setval(absorbed_to_surviving, khi, surviving);
+        }
+        current_merge_idx = end;
+      }
+      for (uint64_t i = 0; i < n_samples; i++) {
+        int64_t cluster = working_assignments->a[i];
+        uint64_t chain_limit = 10000;
+        uint64_t chain_count = 0;
+        while (chain_count < chain_limit) {
+          khint_t khi = tk_iumap_get(absorbed_to_surviving, cluster);
+          if (khi == tk_iumap_end(absorbed_to_surviving))
+            break;
+          cluster = tk_iumap_val(absorbed_to_surviving, khi);
+          chain_count++;
+        }
+        working_assignments->a[i] = cluster;
+      }
+    } else {
+      tk_pvec_dendro_cut(L, dendro_offsets, dendro_merges, step, working_assignments);
+    }
 
     for (uint64_t i = 0; i < eval_ids->n; i++) {
       eval_ordered_assignments->a[i] = -1;
@@ -1480,6 +1540,10 @@ static inline int tm_optimize_clustering (lua_State *L)
   free(dendro_to_eval);
   tk_iumap_destroy(eval_id_to_idx);
   tk_iumap_destroy(cluster_set);
+  if (cluster_sizes)
+    tk_ivec_destroy(cluster_sizes);
+  if (absorbed_to_surviving)
+    tk_iumap_destroy(absorbed_to_surviving);
 
   lua_newtable(L);
   lua_pushvalue(L, i_scores);
@@ -2133,9 +2197,12 @@ typedef struct {
   tk_ivec_t *assignments;
   tk_ivec_t *raw_assignments;
   tk_iumap_t *absorbed_to_surviving;
+  tk_ivec_t *cluster_sizes;
   uint64_t n_samples;
   uint64_t n_steps;
   uint64_t current_step;
+  int64_t current_merge_idx;
+  bool all_merges;
 } tk_dendro_iter_t;
 
 static inline int tk_dendro_iter_gc(lua_State *L) {
@@ -2162,13 +2229,42 @@ static inline int tk_dendro_iter_next(lua_State *L) {
       iter->ids->a[i] = (int64_t)i;
     iter->ids->n = iter->n_samples;
   } else {
-    int64_t start = iter->offsets->a[iter->n_samples + step - 1];
-    int64_t end = (step + iter->n_samples < iter->offsets->n) ?
-      iter->offsets->a[iter->n_samples + step] : (int64_t)iter->merges->n;
+    int64_t start, end;
+    if (iter->all_merges) {
+      if (iter->current_merge_idx >= (int64_t)iter->merges->n) {
+        lua_pushnil(L);
+        return 1;
+      }
+      start = iter->current_merge_idx;
+      tk_pair_t first_merge = iter->merges->a[start];
+      int64_t absorbed = first_merge.i;
+      int64_t surviving = first_merge.p;
+      int64_t size_absorbed = iter->cluster_sizes->a[absorbed];
+      int64_t size_surviving = iter->cluster_sizes->a[surviving];
+      int64_t target_size = size_absorbed + size_surviving;
+      end = start;
+      while (end < (int64_t)iter->merges->n) {
+        tk_pair_t next_merge = iter->merges->a[end];
+        int64_t next_size = iter->cluster_sizes->a[next_merge.i] + iter->cluster_sizes->a[next_merge.p];
+        if (next_size != target_size)
+          break;
+        end++;
+      }
+      iter->current_merge_idx = end;
+    } else {
+      start = iter->offsets->a[iter->n_samples + step - 1];
+      end = (step + iter->n_samples < iter->offsets->n) ?
+        iter->offsets->a[iter->n_samples + step] : (int64_t)iter->merges->n;
+    }
     for (int64_t idx = start; idx < end && idx < (int64_t)iter->merges->n; idx++) {
       tk_pair_t merge = iter->merges->a[idx];
       int64_t absorbed = merge.i;
       int64_t surviving = merge.p;
+      if (iter->all_merges) {
+        int64_t new_size = iter->cluster_sizes->a[absorbed] + iter->cluster_sizes->a[surviving];
+        iter->cluster_sizes->a[surviving] = new_size;
+        iter->cluster_sizes->a[absorbed] = 0;
+      }
       int kha;
       khint_t khi = tk_iumap_put(iter->absorbed_to_surviving, absorbed, &kha);
       tk_iumap_setval(iter->absorbed_to_surviving, khi, surviving);
@@ -2214,9 +2310,10 @@ static inline int tk_dendro_iter_next(lua_State *L) {
 }
 
 static inline int tk_dendro_iter_lua(lua_State *L) {
-  lua_settop(L, 2);
+  lua_settop(L, 3);
   tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
   tk_pvec_t *merges = tk_pvec_peek(L, 2, "merges");
+  bool all_merges = tk_lua_optboolean(L, 3, false, "all_merges");
   uint64_t n_samples = 0;
   for (uint64_t i = 0; i < offsets->n; i++) {
     if (offsets->a[i] == 0 && i > 0) {
@@ -2226,7 +2323,7 @@ static inline int tk_dendro_iter_lua(lua_State *L) {
   }
   if (n_samples == 0 || n_samples > offsets->n)
     tk_error(L, "tk_dendro_iter: invalid dendro_offsets structure", EINVAL);
-  uint64_t n_steps = offsets->n > n_samples ? offsets->n - n_samples : 0;
+  uint64_t n_steps = all_merges ? merges->n : (offsets->n > n_samples ? offsets->n - n_samples : 0);
   tk_dendro_iter_t *iter = tk_lua_newuserdata(L, tk_dendro_iter_t, TK_EVAL_EPH, NULL, tk_dendro_iter_gc);
   int iter_idx = lua_gettop(L);
   iter->offsets = offsets;
@@ -2234,6 +2331,8 @@ static inline int tk_dendro_iter_lua(lua_State *L) {
   iter->n_samples = n_samples;
   iter->n_steps = n_steps;
   iter->current_step = 0;
+  iter->current_merge_idx = 0;
+  iter->all_merges = all_merges;
   iter->ids = tk_ivec_create(L, n_samples, 0, 0);
   tk_lua_add_ephemeron(L, TK_EVAL_EPH, iter_idx, -1);
   lua_pop(L, 1);
@@ -2244,6 +2343,12 @@ static inline int tk_dendro_iter_lua(lua_State *L) {
   tk_lua_add_ephemeron(L, TK_EVAL_EPH, iter_idx, -1);
   lua_pop(L, 1);
   iter->absorbed_to_surviving = tk_iumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_EVAL_EPH, iter_idx, -1);
+  lua_pop(L, 1);
+  iter->cluster_sizes = tk_ivec_create(L, n_samples, 0, 0);
+  iter->cluster_sizes->n = n_samples;
+  for (uint64_t i = 0; i < n_samples; i++)
+    iter->cluster_sizes->a[i] = 1;
   tk_lua_add_ephemeron(L, TK_EVAL_EPH, iter_idx, -1);
   lua_pop(L, 1);
   lua_pushvalue(L, iter_idx);
