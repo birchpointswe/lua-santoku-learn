@@ -24,13 +24,13 @@ local cfg; cfg = {
     max = nil,
     max_class = nil,
     visible = 784,
-    hidden = 64,
+    hidden = 128,
     landmarks = 24,
   },
   mode = {
     encoder = false,
     cluster = true,
-    codes = "minhash", -- simhash, minhash, spectral
+    codes = "simhash", -- simhash, spectral
     mode = "landmarks",
     binarize = "itq",
     tch = false,
@@ -46,6 +46,10 @@ local cfg; cfg = {
     method = "jdqr",
     precondition = "ic",
     primme_eps = 1e-6,
+  },
+  simhash = {
+    ranks = 1,
+    weighted = nil,
   },
   sr = {
     eps = 1e-12,
@@ -69,7 +73,7 @@ local cfg; cfg = {
     category_knn_decay = nil,
     sigma_k = nil,
     decay = 4.0,
-    bridge = true,
+    bridge = "mst",
   },
   clustering = {
     knn = 256,
@@ -83,12 +87,12 @@ local cfg; cfg = {
     sampled_pairs = 16,
     tolerance = 2e-2,
     retrieval = function (d)
-      -- return d:max()
-      return d:scores_plateau(cfg.eval.tolerance)
+      return d:max()
+      -- return d:scores_plateau(cfg.eval.tolerance)
     end,
     clustering = function (d)
-      -- return d:max()
-      return d:scores_plateau(cfg.eval.tolerance)
+      return d:max()
+      -- return d:scores_plateau(cfg.eval.tolerance)
     end,
   },
   bits = {
@@ -228,16 +232,7 @@ test("tsetlin", function ()
     collectgarbage("collect")
   elseif cfg.mode.codes == "simhash" then
     print("Simhash")
-    train.ids_simhash, train.codes_simhash = simhash.simhash(train.node_combined, dataset.n_hidden)
-    train.ids_spectral = ivec.create()
-    train.ids_spectral:copy(train.adj_ids)
-    train.codes_spectral = cvec.create()
-    train.codes_spectral:bits_extend(train.codes_simhash, train.ids_spectral, train.ids_simhash, 0, dataset.n_hidden, true)
-    train.node_combined:destroy()
-    collectgarbage("collect")
-  elseif cfg.mode.codes == "minhash" then
-    print("Minhash")
-    train.ids_simhash, train.codes_simhash = simhash.minhash(train.node_combined, dataset.n_hidden)
+    train.ids_simhash, train.codes_simhash = simhash.encode(train.node_combined, dataset.n_hidden, cfg.simhash.ranks, cfg.simhash.weighted)
     train.ids_spectral = ivec.create()
     train.ids_spectral:copy(train.adj_ids)
     train.codes_spectral = cvec.create()
