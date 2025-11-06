@@ -34,6 +34,12 @@ typedef enum {
   TK_GRAPH_REWEIGHT_RANK
 } tk_graph_reweight_t;;
 
+typedef enum {
+  TK_GRAPH_BRIDGE_MST,
+  TK_GRAPH_BRIDGE_NONE,
+  TK_GRAPH_BRIDGE_LARGEST
+} tk_graph_bridge_t;
+
 typedef struct tk_graph_s {
 
   tk_euset_t *pairs;
@@ -76,7 +82,7 @@ typedef struct tk_graph_s {
   uint64_t knn;
   uint64_t knn_cache;
   double knn_eps;
-  bool bridge;
+  tk_graph_bridge_t bridge;
   uint64_t probe_radius;
   int64_t category_ranks;
 

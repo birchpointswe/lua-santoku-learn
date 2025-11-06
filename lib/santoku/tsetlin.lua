@@ -4,7 +4,6 @@ local str = require("santoku.string")
 local err = require("santoku.error")
 local rand = require("santoku.random")
 local cvec = require("santoku.cvec")
-local utc = require("santoku.utc")
 
 local M = {}
 
@@ -210,7 +209,6 @@ M.optimize = function (args, typ)
           end
 
           search_tm:reconfigure(params)
-          local trial_start_time = utc.time(true)
 
           if typ == "encoder" then
             search_tm:train({

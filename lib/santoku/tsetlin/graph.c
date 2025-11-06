@@ -169,7 +169,7 @@ static inline void tm_add_mst (
       tk_dsu_union(graph->dsu, c.u, c.v);
       graph->n_edges ++;
     }
-  } else if (graph->bridge) {
+  } else if (graph->bridge == TK_GRAPH_BRIDGE_MST) {
     tk_pumap_t *reps_comp = tk_pumap_create(L, 0);
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
     lua_pop(L, 1);
@@ -997,7 +997,15 @@ static inline int tm_adjacency (lua_State *L)
     knn_rank = knn_rank_explicit;
   }
 
-  bool bridge = tk_lua_foptboolean(L, 1, "graph", "bridge", false);
+  const char *bridge_str = tk_lua_foptstring(L, 1, "graph", "bridge", "mst");
+  tk_graph_bridge_t bridge = TK_GRAPH_BRIDGE_MST;
+  if (strcmp(bridge_str, "none") == 0) {
+    bridge = TK_GRAPH_BRIDGE_NONE;
+  } else if (strcmp(bridge_str, "largest") == 0) {
+    bridge = TK_GRAPH_BRIDGE_LARGEST;
+  } else if (strcmp(bridge_str, "mst") == 0) {
+    bridge = TK_GRAPH_BRIDGE_MST;
+  }
   uint64_t probe_radius = tk_lua_foptunsigned(L, 1, "graph", "probe_radius", 3);
   if (knn > knn_cache)
     knn_cache = knn;
@@ -1124,7 +1132,7 @@ static inline int tm_adjacency (lua_State *L)
     }
   }
 
-  if (!graph->bridge && graph->knn && graph->dsu->components > 1) {
+  if (graph->bridge == TK_GRAPH_BRIDGE_LARGEST && graph->knn && graph->dsu->components > 1) {
 
     tk_iumap_t *comp_sizes = tk_iumap_create(L, 0);
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
@@ -1167,7 +1175,7 @@ static inline int tm_adjacency (lua_State *L)
       lua_call(L, 4, 0);
     }
 
-  } else if (graph->bridge && graph->knn_cache && graph->dsu->components > 1) {
+  } else if (graph->bridge == TK_GRAPH_BRIDGE_MST && graph->knn_cache && graph->dsu->components > 1) {
 
     tk_evec_t *cs = tm_mst_knn_candidates(L, graph);
     if (cs == NULL)
@@ -1185,7 +1193,7 @@ static inline int tm_adjacency (lua_State *L)
 
   }
 
-  if (graph->bridge && graph->dsu->components > 1) {
+  if (graph->bridge == TK_GRAPH_BRIDGE_MST && graph->dsu->components > 1) {
     tm_add_mst(L, Gi, graph, NULL);
     if (i_each != -1) {
       lua_pushvalue(L, i_each);
