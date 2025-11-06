@@ -96,7 +96,6 @@ static inline int tm_minhash (lua_State *L)
       for (uint64_t r = 0; r < n_ranks_to_hash; r++) {
         double proportion = inv->rank_weights->a[r] / total_weight;
         uint64_t bits = (uint64_t)(proportion * n_bits);
-        if (bits < 1) bits = 1;
         rank_n_bits[r] = bits;
         bits_allocated += bits;
       }
@@ -253,7 +252,6 @@ static inline int tm_simhash (lua_State *L)
       for (uint64_t r = 0; r < n_ranks_to_hash; r++) {
         double proportion = inv->rank_weights->a[r] / total_weight;
         uint64_t bits = (uint64_t)(proportion * n_bits);
-        if (bits < 1) bits = 1;
         rank_n_bits[r] = bits;
         bits_allocated += bits;
       }
