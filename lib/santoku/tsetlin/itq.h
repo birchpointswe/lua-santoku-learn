@@ -39,7 +39,6 @@ static inline void tk_itq_sign (
       out_row[byte_idx] = byte_val;
     }
 
-    // Handle remaining bits in final byte
     uint64_t remaining_start = full_bytes * 8;
     if (remaining_start < K) {
       uint8_t byte_val = 0;
@@ -66,11 +65,9 @@ static inline void tk_itq_median (
     if (col && local_out) {
       #pragma omp for
       for (uint64_t j = 0; j < K; j ++) {
-        // Extract column
         for (uint64_t i = 0; i < N; i ++)
           col[i] = X[i * K + j];
 
-        // Find median
         ks_introsort(tk_dvec_asc, N, col);
         double med = (N & 1) ? col[N / 2] : 0.5 * (col[N / 2 - 1] + col[N / 2]);
 
@@ -84,7 +81,6 @@ static inline void tk_itq_median (
         }
       }
 
-      // Merge local buffers into output
       #pragma omp critical
       {
         for (uint64_t idx = 0; idx < N * TK_CVEC_BITS_BYTES(K); idx ++) {
