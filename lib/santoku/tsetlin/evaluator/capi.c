@@ -1431,7 +1431,7 @@ static inline int tm_optimize_clustering (lua_State *L)
 
   for (uint64_t step = 0; step <= n_steps; step++) {
     if (all_merges) {
-      if (current_merge_idx >= dendro_merges->n)
+      if (current_merge_idx >= (int64_t)dendro_merges->n)
         break;
       if (step == 0) {
         for (uint64_t i = 0; i < n_samples; i++)
