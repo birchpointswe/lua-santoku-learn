@@ -154,9 +154,7 @@ static inline int tm_simhash (lua_State *L)
           continue;
         if (rank >= 0 && rank < (int64_t)n_ranks_to_hash) {
           double feature_weight = (weighted && inv->weights) ? inv->weights->a[feature_id] : 1.0;
-          double normalized_weight = (rank_totals[rank] > 0.0) ? feature_weight / rank_totals[rank] : 0.0;
-          double rank_weight = (inv->rank_weights && rank >= 0 && rank < (int64_t)inv->n_ranks) ? inv->rank_weights->a[rank] : 1.0;
-          int32_t weight = (int32_t)(normalized_weight * rank_weight * TK_SIMHASH_SCALE);
+          int32_t weight = (int32_t)(feature_weight * TK_SIMHASH_SCALE);
           uint64_t bit_start = rank_bit_start[rank];
           uint64_t n_bits_for_rank = rank_n_bits[rank];
           hash_feature_to_weights(feature_id, bit_start, n_bits_for_rank, weight, feature_weights);
