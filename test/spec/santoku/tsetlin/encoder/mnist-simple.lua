@@ -149,20 +149,19 @@ test("tsetlin", function ()
   collectgarbage("collect")
 
   print("\nRetrieval stats (categorical adjacency)")
-  dataset.retrieval_scores = eval.optimize_retrieval({
+  dataset.retrieval_scores = eval.score_retrieval({
     index = dataset.index_codes,
     ids = dataset.adj_sampled_ids,
     offsets = dataset.adj_sampled_offsets,
     neighbors = dataset.adj_sampled_neighbors,
     weights = dataset.adj_sampled_weights,
     metric = cfg.eval.retrieval_metric,
-    threads = cfg.threads,
-    each = function (acc)
-      local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.6f\n",
-        d, dd, acc.margin, acc.score)
-    end
   })
+  for m = 0, dataset.retrieval_scores:size() - 1 do
+    local d, dd = stopwatch()
+    str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.6f\n",
+      d, dd, m, dataset.retrieval_scores:get(m))
+  end
   local best_score, best_idx = dataset.retrieval_scores:max()
   str.printf("Best\n  Margin: %d | Score: %+.6f\n", best_idx, best_score)
   collectgarbage("collect")
