@@ -1,11 +1,11 @@
 # Now
 
-- Single-threaded bottleneck in a ITQ
 - Parallelize booleanizer and tokenizer
-- Poor parallel core usage in cluster.h. Usage is bursty, most wall clock time spent single-threaded
-
 - Need a true hierarchical test case for HLTH
 - Abstract the landmark/out-of-sample phase behind a simple tm + index wrapper
+
+- Regression, autoencoder, convolutional
+- Explore shared libaries, optimistic dynmaic linking? Is that a thing?
 
 # Next
 

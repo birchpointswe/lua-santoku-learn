@@ -412,37 +412,37 @@ test("tsetlin", function ()
   collectgarbage("collect")
 
   print("Retrieval stats (graph edges)")
-  train.retrieval_scores = eval.optimize_retrieval({
+  train.retrieval_scores = eval.score_retrieval({
     index = train.idx_spectral,
     ids = train.adj_ids,
     offsets = train.adj_offsets,
     neighbors = train.adj_neighbors,
     weights = train.adj_weights,
     metric = cfg.eval.retrieval_metric,
-    each = function (acc)
-      local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.10f\n",
-        d, dd, acc.margin, acc.score)
-    end
   })
+  for m = 0, train.retrieval_scores:size() - 1 do
+    local d, dd = stopwatch()
+    str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.10f\n",
+      d, dd, m, train.retrieval_scores:get(m))
+  end
   local best_score, best_idx = cfg.eval.retrieval(train.retrieval_scores)
   str.printf("Best\n  Margin: %d | Score: %+.10f\n", best_idx, best_score)
   collectgarbage("collect")
 
   print("Retrieval stats (class-label adjacency)")
-  train.retrieval_scores = eval.optimize_retrieval({
+  train.retrieval_scores = eval.score_retrieval({
     index = train.idx_spectral,
     ids = train.adj_sampled_ids,
     offsets = train.adj_sampled_offsets,
     neighbors = train.adj_sampled_neighbors,
     weights = train.adj_sampled_weights,
     metric = cfg.eval.retrieval_metric,
-    each = function (acc)
-      local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.10f\n",
-        d, dd, acc.margin, acc.score)
-    end
   })
+  for m = 0, train.retrieval_scores:size() - 1 do
+    local d, dd = stopwatch()
+    str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.10f\n",
+      d, dd, m, train.retrieval_scores:get(m))
+  end
   local best_score, best_idx = cfg.eval.retrieval(train.retrieval_scores)
   str.printf("Best\n  Margin: %d | Score: %+.10f\n", best_idx, best_score)
   collectgarbage("collect")
@@ -572,7 +572,7 @@ test("tsetlin", function ()
     idx_test:add(test_predicted, test_ids)
     collectgarbage("collect")
 
-    train.retrieval_scores_predicted = eval.optimize_retrieval({
+    train.retrieval_scores_predicted = eval.score_retrieval({
       index = idx_train,
       ids = train.adj_sampled_ids,
       offsets = train.adj_sampled_offsets,
@@ -581,7 +581,7 @@ test("tsetlin", function ()
       metric = cfg.eval.retrieval_metric,
     })
 
-    test.retrieval_scores_predicted = eval.optimize_retrieval({
+    test.retrieval_scores_predicted = eval.score_retrieval({
       index = idx_test,
       ids = test.adj_sampled_ids,
       offsets = test.adj_sampled_offsets,
@@ -608,7 +608,7 @@ test("tsetlin", function ()
       offsets = train.adj_offsets,
       neighbors = train.adj_neighbors,
     })
-    local codes_stats = eval.optimize_clustering({
+    local codes_stats = eval.score_clustering({
       ids = codes_clusters.ids,
       offsets = codes_clusters.offsets,
       merges = codes_clusters.merges,
@@ -617,21 +617,19 @@ test("tsetlin", function ()
       eval_neighbors = train.adj_neighbors,
       eval_weights = train.adj_weights,
       metric = cfg.eval.cluster_metric,
-      each = function (acc)
-        local d, dd = stopwatch()
-        str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
-          d, dd, acc.step, acc.score, acc.n_clusters)
-      end
     })
-    if codes_stats.scores then
-      local best_score, best_step = cfg.eval.clustering(codes_stats.scores)
-      local best_n_clusters = codes_stats.n_clusters:get(best_step)
-      str.printf("Best\n  Step: %2d | Score: %+.10f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+    for step = 0, codes_stats.n_steps do
+      local d, dd = stopwatch()
+      str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
+        d, dd, step, codes_stats.scores:get(step), codes_stats.n_clusters:get(step))
     end
+    local best_score, best_step = cfg.eval.clustering(codes_stats.scores)
+    local best_n_clusters = codes_stats.n_clusters:get(best_step)
+    str.printf("Best\n  Step: %2d | Score: %+.10f | Clusters: %d\n", best_step, best_score, best_n_clusters)
     collectgarbage("collect")
 
     print("Clustering (codes) (class-label adjacency)")
-    local codes_stats = eval.optimize_clustering({
+    local codes_stats = eval.score_clustering({
       ids = codes_clusters.ids,
       offsets = codes_clusters.offsets,
       merges = codes_clusters.merges,
@@ -640,17 +638,15 @@ test("tsetlin", function ()
       eval_neighbors = train.adj_sampled_neighbors,
       eval_weights = train.adj_sampled_weights,
       metric = cfg.eval.cluster_metric,
-      each = function (acc)
-        local d, dd = stopwatch()
-        str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
-          d, dd, acc.step, acc.score, acc.n_clusters)
-      end
     })
-    if codes_stats.scores then
-      local best_score, best_step = cfg.eval.clustering(codes_stats.scores)
-      local best_n_clusters = codes_stats.n_clusters:get(best_step)
-      str.printf("Best\n  Step: %2d | Score: %+.10f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+    for step = 0, codes_stats.n_steps do
+      local d, dd = stopwatch()
+      str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
+        d, dd, step, codes_stats.scores:get(step), codes_stats.n_clusters:get(step))
     end
+    local best_score, best_step = cfg.eval.clustering(codes_stats.scores)
+    local best_n_clusters = codes_stats.n_clusters:get(best_step)
+    str.printf("Best\n  Step: %2d | Score: %+.10f | Clusters: %d\n", best_step, best_score, best_n_clusters)
     collectgarbage("collect")
 
     if cfg.mode.encoder then
@@ -663,7 +659,7 @@ test("tsetlin", function ()
         offsets = train.adj_sampled_offsets,
         neighbors = train.adj_sampled_neighbors,
       })
-      local train_stats = eval.optimize_clustering({
+      local train_stats = eval.score_clustering({
         ids = train_clusters.ids,
         offsets = train_clusters.offsets,
         merges = train_clusters.merges,
@@ -672,17 +668,15 @@ test("tsetlin", function ()
         eval_neighbors = train.adj_sampled_neighbors,
         eval_weights = train.adj_sampled_weights,
         metric = cfg.eval.cluster_metric,
-        each = function (acc)
-          local d, dd = stopwatch()
-          str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
-            d, dd, acc.step, acc.score, acc.n_clusters)
-        end
       })
-      if train_stats.scores then
-        local best_score, best_step = cfg.eval.clustering(train_stats.scores)
-        local best_n_clusters = train_stats.n_clusters:get(best_step)
-        str.printf("Best\n  Step: %2d | Score: %+.10f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+      for step = 0, train_stats.n_steps do
+        local d, dd = stopwatch()
+        str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
+          d, dd, step, train_stats.scores:get(step), train_stats.n_clusters:get(step))
       end
+      local best_score, best_step = cfg.eval.clustering(train_stats.scores)
+      local best_n_clusters = train_stats.n_clusters:get(best_step)
+      str.printf("Best\n  Step: %2d | Score: %+.10f | Clusters: %d\n", best_step, best_score, best_n_clusters)
       collectgarbage("collect")
 
       print("Clustering (test)")
@@ -693,7 +687,7 @@ test("tsetlin", function ()
         offsets = test.adj_sampled_offsets,
         neighbors = test.adj_sampled_neighbors,
       })
-      local test_stats = eval.optimize_clustering({
+      local test_stats = eval.score_clustering({
         ids = test_clusters.ids,
         offsets = test_clusters.offsets,
         merges = test_clusters.merges,
@@ -702,17 +696,15 @@ test("tsetlin", function ()
         eval_neighbors = test.adj_sampled_neighbors,
         eval_weights = test.adj_sampled_weights,
         metric = cfg.eval.cluster_metric,
-        each = function (acc)
-          local d, dd = stopwatch()
-          str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
-            d, dd, acc.step, acc.score, acc.n_clusters)
-        end
       })
-      if test_stats.scores then
-        local best_score, best_step = cfg.eval.clustering(test_stats.scores)
-        local best_n_clusters = test_stats.n_clusters:get(best_step)
-        str.printf("Best\n  Step: %2d | Score: %+.10f | Clusters: %d\n", best_step, best_score, best_n_clusters)
+      for step = 0, test_stats.n_steps do
+        local d, dd = stopwatch()
+        str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
+          d, dd, step, test_stats.scores:get(step), test_stats.n_clusters:get(step))
       end
+      local best_score, best_step = cfg.eval.clustering(test_stats.scores)
+      local best_n_clusters = test_stats.n_clusters:get(best_step)
+      str.printf("Best\n  Step: %2d | Score: %+.10f | Clusters: %d\n", best_step, best_score, best_n_clusters)
       collectgarbage("collect")
 
     end
