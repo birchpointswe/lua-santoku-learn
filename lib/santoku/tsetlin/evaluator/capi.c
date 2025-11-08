@@ -160,69 +160,6 @@ static inline int tm_class_accuracy (lua_State *L)
   return 1;
 }
 
-static inline void tm_clustering_accuracy_serial (
-  tk_ivec_t *assignments,
-  tk_ivec_t *offsets,
-  tk_ivec_t *neighbors,
-  tk_dvec_t *weights,
-  tk_eval_metric_t metric,
-  double *out_score
-) {
-  if (!offsets || offsets->n == 0) {
-    *out_score = 0.0;
-    return;
-  }
-  uint64_t n_nodes = offsets->n - 1;
-  if (n_nodes == 0) {
-    *out_score = 0.0;
-    return;
-  }
-  double total_corr_score = 0.0;
-  uint64_t total_nodes_processed = 0;
-  tk_iuset_t *itmp = tk_iuset_create(NULL, 0);
-  tk_dumap_t *rank_buffer_b = tk_dumap_create(NULL, 0);
-  if (!itmp || !rank_buffer_b) {
-    if (itmp) tk_iuset_destroy(itmp);
-    if (rank_buffer_b) tk_dumap_destroy(rank_buffer_b);
-    *out_score = 0.0;
-    return;
-  }
-  for (uint64_t node_idx = 0; node_idx < n_nodes; node_idx++) {
-    int64_t start = offsets->a[node_idx];
-    int64_t end = offsets->a[node_idx + 1];
-    uint64_t n_neighbors = (uint64_t)(end - start);
-    if (n_neighbors == 0)
-      continue;
-    int64_t my_cluster = assignments->a[node_idx];
-    tk_iuset_clear(itmp);
-    for (int64_t idx = start; idx < end; idx++) {
-      int64_t neighbor = neighbors->a[idx];
-      int64_t neighbor_cluster = assignments->a[neighbor];
-      if (my_cluster == neighbor_cluster) {
-        int kha;
-        tk_iuset_put(itmp, neighbor, &kha);
-      }
-    }
-    double node_score = 0.0;
-    switch (metric) {
-      case TK_EVAL_METRIC_BISERIAL:
-        node_score = tk_csr_biserial(neighbors, weights, start, end, itmp);
-        break;
-      case TK_EVAL_METRIC_VARIANCE:
-        node_score = tk_csr_variance_ratio(neighbors, weights, start, end, itmp, rank_buffer_b);
-        break;
-      default:
-        node_score = 0.0;
-        break;
-    }
-    total_corr_score += node_score;
-    total_nodes_processed++;
-  }
-  tk_iuset_destroy(itmp);
-  tk_dumap_destroy(rank_buffer_b);
-  *out_score = total_nodes_processed > 0 ? total_corr_score / total_nodes_processed : 0.0;
-}
-
 static inline void tm_clustering_accuracy (
   lua_State *L,
   tk_ivec_t *assignments,
@@ -691,14 +628,14 @@ typedef struct {
   bool active;
   tk_iuset_t *neighbor_ids;
   int64_t next_in_hash_chain;
-} tk_cluster_new_t;
+} tk_cluster_t;
 
 static inline uint64_t tk_cluster_complete_linkage_distance(
   tk_cvec_t *codes,
   uint64_t n_chunks,
   uint64_t n_bits,
-  tk_cluster_new_t *cluster_i,
-  tk_cluster_new_t *cluster_j,
+  tk_cluster_t *cluster_i,
+  tk_cluster_t *cluster_j,
   char *centroid_i,
   char *centroid_j,
   tk_pumap_t *distance_cache,
@@ -818,7 +755,7 @@ static inline int tk_cluster_centroid(
     return -1;
   }
 
-  tk_cluster_new_t **clusters = malloc(n_nodes * sizeof(tk_cluster_new_t*));
+  tk_cluster_t **clusters = malloc(n_nodes * sizeof(tk_cluster_t*));
   if (!clusters) return -1;
 
   uint64_t n_clusters = 0;
@@ -868,7 +805,7 @@ static inline int tk_cluster_centroid(
       int64_t matching_idx = -1;
 
       while (chain_idx != -1) {
-        tk_cluster_new_t *existing = clusters[chain_idx];
+        tk_cluster_t *existing = clusters[chain_idx];
 
         if (existing->members->n > 0) {
           char *existing_code = codes->a + (uint64_t)existing->members->a[0] * n_chunks;
@@ -900,7 +837,7 @@ static inline int tk_cluster_centroid(
     }
 
     if (need_new_cluster) {
-      tk_cluster_new_t *cluster = malloc(sizeof(tk_cluster_new_t));
+      tk_cluster_t *cluster = malloc(sizeof(tk_cluster_t));
       if (!cluster) {
         for (uint64_t c = 0; c < n_clusters; c++) {
           if (clusters[c]) {
@@ -958,7 +895,7 @@ static inline int tk_cluster_centroid(
       n_clusters++;
     }
 
-    tk_cluster_new_t *cluster = clusters[cluster_idx];
+    tk_cluster_t *cluster = clusters[cluster_idx];
 
     if (cluster->members->m < cluster->members->n + 1) {
       if (tk_ivec_ensure(cluster->members, cluster->members->n + 1) != 0) {
@@ -1133,8 +1070,8 @@ static inline int tk_cluster_centroid(
         int64_t ci_idx = edge.u;
         int64_t cj_idx = edge.v;
 
-        tk_cluster_new_t *ci = clusters[ci_idx];
-        tk_cluster_new_t *cj = clusters[cj_idx];
+        tk_cluster_t *ci = clusters[ci_idx];
+        tk_cluster_t *cj = clusters[cj_idx];
 
         if (!ci->active || !cj->active)
           continue;
@@ -1154,7 +1091,7 @@ static inline int tk_cluster_centroid(
         merges_in_batch++;
 
         if (ci->centroid->size > cj->centroid->size) {
-          tk_cluster_new_t *tmp = ci;
+          tk_cluster_t *tmp = ci;
           ci = cj;
           cj = tmp;
           int64_t tmp_idx = ci_idx;
@@ -1239,7 +1176,7 @@ static inline int tk_cluster_centroid(
       if (neighbor_idx == cj_idx || !clusters[neighbor_idx]->active)
         continue;
 
-      tk_cluster_new_t *neighbor = clusters[neighbor_idx];
+      tk_cluster_t *neighbor = clusters[neighbor_idx];
 
 
       khint_t ci_in_neighbor = tk_iuset_get(neighbor->neighbor_ids, ci_idx);
@@ -1267,7 +1204,7 @@ static inline int tk_cluster_centroid(
       if (!clusters[neighbor_idx]->active)
         continue;
 
-      tk_cluster_new_t *neighbor = clusters[neighbor_idx];
+      tk_cluster_t *neighbor = clusters[neighbor_idx];
       char *neighbor_code = tk_centroid_code(neighbor->centroid);
 
       uint64_t complete_dist = tk_cluster_complete_linkage_distance(
@@ -1346,7 +1283,7 @@ static inline int tk_cluster_centroid(
   }
 
   for (uint64_t i = 0; i < n_clusters; i++) {
-    tk_cluster_new_t *cluster = clusters[i];
+    tk_cluster_t *cluster = clusters[i];
     if (cluster) {
       if (cluster->members) tk_ivec_destroy(cluster->members);
       if (cluster->centroid) tk_centroid_destroy(cluster->centroid);
@@ -1396,7 +1333,7 @@ static inline int tm_score_clustering (lua_State *L)
 
   lua_getfield(L, 1, "ids");
   tk_ivec_t *dendro_ids = tk_ivec_peek(L, -1, "ids");
-  int i_ids = tk_lua_absindex(L, -1);
+  lua_pop(L, 1);
 
   lua_getfield(L, 1, "offsets");
   tk_ivec_t *dendro_offsets = tk_ivec_peek(L, -1, "offsets");
@@ -1495,14 +1432,28 @@ static inline int tm_score_clustering (lua_State *L)
         working_assignments->n = n_samples;
       } else {
         int64_t start = current_merge_idx;
+        if (start >= (int64_t)dendro_merges->n)
+          break;
+
+        int64_t distance_end = (int64_t)dendro_merges->n;
+        for (uint64_t d = 0; d < dendro_offsets->n - n_samples; d++) {
+          int64_t dist_start = dendro_offsets->a[n_samples + d];
+          int64_t dist_next = (n_samples + d + 1 < dendro_offsets->n) ?
+                              dendro_offsets->a[n_samples + d + 1] : (int64_t)dendro_merges->n;
+          if (start >= dist_start && start < dist_next) {
+            distance_end = dist_next;
+            break;
+          }
+        }
+
         tk_pair_t first_merge = dendro_merges->a[start];
         khint_t khi_i = tk_iumap_get(cluster_sizes, first_merge.i);
         khint_t khi_p = tk_iumap_get(cluster_sizes, first_merge.p);
         int64_t size_i = (khi_i != tk_iumap_end(cluster_sizes)) ? tk_iumap_val(cluster_sizes, khi_i) : 1;
         int64_t size_p = (khi_p != tk_iumap_end(cluster_sizes)) ? tk_iumap_val(cluster_sizes, khi_p) : 1;
         int64_t target_size = size_i + size_p;
-        int64_t end = start;
-        while (end < (int64_t)dendro_merges->n) {
+        int64_t end = start + 1;
+        while (end < distance_end && end < (int64_t)dendro_merges->n) {
           tk_pair_t next_merge = dendro_merges->a[end];
           khi_i = tk_iumap_get(cluster_sizes, next_merge.i);
           khi_p = tk_iumap_get(cluster_sizes, next_merge.p);
@@ -1578,6 +1529,8 @@ static inline int tm_score_clustering (lua_State *L)
     tk_ivec_push(n_clusters_per_step, (int64_t)n_active_clusters);
   }
 
+  uint64_t actual_steps = scores->n > 0 ? scores->n - 1 : 0;
+
   tk_ivec_destroy(working_assignments);
   tk_ivec_destroy(eval_ordered_assignments);
   free(dendro_to_eval);
@@ -1593,7 +1546,7 @@ static inline int tm_score_clustering (lua_State *L)
   lua_setfield(L, -2, "scores");
   lua_pushvalue(L, i_n_clusters_per_step);
   lua_setfield(L, -2, "n_clusters");
-  lua_pushinteger(L, (lua_Integer) n_steps);
+  lua_pushinteger(L, (lua_Integer) actual_steps);
   lua_setfield(L, -2, "n_steps");
 
   return 1;
@@ -2275,14 +2228,26 @@ static inline int tk_dendro_iter_next(lua_State *L) {
         return 1;
       }
       start = iter->current_merge_idx;
+
+      int64_t distance_end = (int64_t)iter->merges->n;
+      for (uint64_t d = 0; d < iter->offsets->n - iter->n_samples; d++) {
+        int64_t dist_start = iter->offsets->a[iter->n_samples + d];
+        int64_t dist_next = (iter->n_samples + d + 1 < iter->offsets->n) ?
+                            iter->offsets->a[iter->n_samples + d + 1] : (int64_t)iter->merges->n;
+        if (start >= dist_start && start < dist_next) {
+          distance_end = dist_next;
+          break;
+        }
+      }
+
       tk_pair_t first_merge = iter->merges->a[start];
       khint_t khi_i = tk_iumap_get(iter->cluster_sizes, first_merge.i);
       khint_t khi_p = tk_iumap_get(iter->cluster_sizes, first_merge.p);
       int64_t size_i = (khi_i != tk_iumap_end(iter->cluster_sizes)) ? tk_iumap_val(iter->cluster_sizes, khi_i) : 1;
       int64_t size_p = (khi_p != tk_iumap_end(iter->cluster_sizes)) ? tk_iumap_val(iter->cluster_sizes, khi_p) : 1;
       int64_t target_size = size_i + size_p;
-      end = start;
-      while (end < (int64_t)iter->merges->n) {
+      end = start + 1;
+      while (end < distance_end && end < (int64_t)iter->merges->n) {
         tk_pair_t next_merge = iter->merges->a[end];
         khi_i = tk_iumap_get(iter->cluster_sizes, next_merge.i);
         khi_p = tk_iumap_get(iter->cluster_sizes, next_merge.p);
