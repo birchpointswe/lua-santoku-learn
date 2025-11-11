@@ -777,17 +777,18 @@ static inline int tk_booleanizer_gc_lua (lua_State *L)
 static inline int tk_booleanizer_bit_lua (lua_State *L)
 {
   tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
+  bool train = lua_isboolean(L, 3) ? lua_toboolean(L, 3) : false;
   int64_t id;
   int t = lua_type(L, 2);
   switch (t) {
     case LUA_TNUMBER:
-      id = tk_booleanizer_bit_integer(L, B, lua_tointeger(L, 2), false);
+      id = tk_booleanizer_bit_integer(L, B, lua_tointeger(L, 2), train);
       if (id < 0)
         return 0;
       lua_pushinteger(L, id);
       return 1;
     case LUA_TSTRING:
-      id = tk_booleanizer_bit_string(L, B, lua_tostring(L, 2), false);
+      id = tk_booleanizer_bit_string(L, B, lua_tostring(L, 2), train);
       if (id < 0)
         return 0;
       lua_pushinteger(L, id);
