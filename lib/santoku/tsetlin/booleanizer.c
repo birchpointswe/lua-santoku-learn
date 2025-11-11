@@ -819,25 +819,25 @@ static inline int tk_booleanizer_encode_lua (lua_State *L)
     uint64_t id_sample = tk_lua_checkunsigned(L, 2, "id_sample");
     lua_pushcfunction(L, tk_booleanizer_bit_lua); // fn
     lua_pushvalue(L, 1); // fn B
-    lua_pushvalue(L, 2); // fn B l
+    lua_pushvalue(L, 3); // fn B feature
     lua_call(L, 2, 1); // id
     int64_t id_feature = (int64_t) tk_lua_checkunsigned(L, -1, "id_feature");
-    out = tk_ivec_peekopt(L, 4);
+    out = tk_ivec_peekopt(L, 5);
     if (out == NULL)
       out = tk_ivec_create(L, 0, 0, 0);
     else
-      lua_pushvalue(L, 4);
-    int t = lua_type(L, 3);
+      lua_pushvalue(L, 5);
+    int t = lua_type(L, 4);
     int rc = 0;
     switch (t) {
       case LUA_TSTRING:
-        rc = tk_booleanizer_encode_string(L, B, id_sample, id_feature, luaL_checkstring(L, 3), out);
+        rc = tk_booleanizer_encode_string(L, B, id_sample, id_feature, luaL_checkstring(L, 4), out);
         break;
       case LUA_TNUMBER:
-        rc = tk_booleanizer_encode_double(L, B, id_sample, id_feature, luaL_checknumber(L, 3), out);
+        rc = tk_booleanizer_encode_double(L, B, id_sample, id_feature, luaL_checknumber(L, 4), out);
         break;
       case LUA_TBOOLEAN:
-        rc = tk_booleanizer_encode_integer(L, B, id_sample, id_feature, lua_toboolean(L, 3), out);
+        rc = tk_booleanizer_encode_integer(L, B, id_sample, id_feature, lua_toboolean(L, 4), out);
         break;
       default:
         tk_lua_verror(L, 2, "encode", "unexpected type passed to encode", lua_typename(L, t));
@@ -861,22 +861,37 @@ static inline int tk_booleanizer_observe_lua (lua_State *L)
     lua_pushinteger(L, (int64_t) id_dim0 + (int64_t) n_dims - 1);
     return 2;
   } else {
+    // Check if we have 3 arguments: bzr:observe(feature, value)
+    int nargs = lua_gettop(L);
+    int feature_arg, value_arg;
+
+    if (nargs >= 3 && !lua_isnil(L, 3)) {
+      // New 3-argument mode: observe(feature, value)
+      feature_arg = 2;
+      value_arg = 3;
+    } else {
+      // Old 2-argument mode: observe(feature_as_value) - for backward compat
+      feature_arg = 2;
+      value_arg = 2;
+    }
+
     lua_pushcfunction(L, tk_booleanizer_bit_lua); // fn
     lua_pushvalue(L, 1); // fn B
-    lua_pushvalue(L, 2); // fn B l
-    lua_pushboolean(L, true); // fn B l train
+    lua_pushvalue(L, feature_arg); // fn B feature
+    lua_pushboolean(L, true); // fn B feature train
     lua_call(L, 3, 1); // id
     int64_t id_feature = (int64_t) tk_lua_checkunsigned(L, -1, "id_feature");
-    int t = lua_type(L, 2);
+
+    int t = lua_type(L, value_arg);
     switch (t) {
       case LUA_TSTRING:
-        tk_booleanizer_observe_string(L, B, id_feature, luaL_checkstring(L, 2));
+        tk_booleanizer_observe_string(L, B, id_feature, luaL_checkstring(L, value_arg));
         break;
       case LUA_TNUMBER:
-        tk_booleanizer_observe_double(L, B, id_feature, luaL_checknumber(L, 2));
+        tk_booleanizer_observe_double(L, B, id_feature, luaL_checknumber(L, value_arg));
         break;
       case LUA_TBOOLEAN:
-        tk_booleanizer_observe_integer(L, B, id_feature, lua_toboolean(L, 2));
+        tk_booleanizer_observe_integer(L, B, id_feature, lua_toboolean(L, value_arg));
         break;
       default:
         tk_lua_verror(L, 2, "observe", "unexpected type passed to observe", lua_typename(L, t));
