@@ -8,7 +8,6 @@
 #include <santoku/iumap.h>
 #include <santoku/zumap.h>
 
-
 #define tk_umap_name tk_observed_doubles
 #define tk_umap_key int64_t
 #define tk_umap_value tk_duset_t *
@@ -16,14 +15,12 @@
 #define tk_umap_hash(a) (kh_int64_hash_func(a))
 #include <santoku/umap/tpl.h>
 
-
 #define tk_umap_name tk_observed_strings
 #define tk_umap_key int64_t
 #define tk_umap_value tk_cuset_t *
 #define tk_umap_eq(a, b) ((a) == (b))
 #define tk_umap_hash(a) (kh_int64_hash_func(a))
 #include <santoku/umap/tpl.h>
-
 
 #define tk_umap_name tk_cont_thresholds
 #define tk_umap_key int64_t
@@ -39,14 +36,12 @@ typedef struct { int64_t f; double v; } tk_cat_bit_double_t;
 #define tk_cat_bit_string_equal(a, b) ((a).f == (b).f && !strcmp((a).v, (b).v))
 #define tk_cat_bit_double_equal(a, b) ((a).f == (b).f && (a).v == (b).v)
 
-
 #define tk_umap_name tk_cat_bits_string
 #define tk_umap_key tk_cat_bit_string_t
 #define tk_umap_value int64_t
 #define tk_umap_eq(a, b) (tk_cat_bit_string_equal(a, b))
 #define tk_umap_hash(a) (tk_cat_bit_string_hash(a))
 #include <santoku/umap/tpl.h>
-
 
 #define tk_umap_name tk_cat_bits_double
 #define tk_umap_key tk_cat_bit_double_t
@@ -669,10 +664,6 @@ static inline void tk_booleanizer_restrict (
   tk_iuset_destroy(B->categorical);
   tk_lua_del_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, B->integer_features);
   tk_iumap_destroy(B->integer_features);
-  const char *z;
-  tk_umap_foreach_keys(B->string_features, z, ({
-    free((char *) z);
-  }));
   tk_lua_del_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, B->string_features);
   tk_zumap_destroy(B->string_features);
   tk_lua_del_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, B->cat_bits_string);
@@ -839,6 +830,8 @@ static inline int tk_booleanizer_encode_lua (lua_State *L)
       case LUA_TBOOLEAN:
         rc = tk_booleanizer_encode_integer(L, B, id_sample, id_feature, lua_toboolean(L, 4), out);
         break;
+      case LUA_TNIL:
+        break;
       default:
         tk_lua_verror(L, 2, "encode", "unexpected type passed to encode", lua_typename(L, t));
         break;
@@ -861,27 +854,21 @@ static inline int tk_booleanizer_observe_lua (lua_State *L)
     lua_pushinteger(L, (int64_t) id_dim0 + (int64_t) n_dims - 1);
     return 2;
   } else {
-
     int nargs = lua_gettop(L);
     int feature_arg, value_arg;
-
     if (nargs >= 3 && !lua_isnil(L, 3)) {
-
       feature_arg = 2;
       value_arg = 3;
     } else {
-
       feature_arg = 2;
       value_arg = 2;
     }
-
     lua_pushcfunction(L, tk_booleanizer_bit_lua);
     lua_pushvalue(L, 1);
     lua_pushvalue(L, feature_arg);
     lua_pushboolean(L, true);
     lua_call(L, 3, 1);
     int64_t id_feature = (int64_t) tk_lua_checkunsigned(L, -1, "id_feature");
-
     int t = lua_type(L, value_arg);
     switch (t) {
       case LUA_TSTRING:
@@ -892,6 +879,8 @@ static inline int tk_booleanizer_observe_lua (lua_State *L)
         break;
       case LUA_TBOOLEAN:
         tk_booleanizer_observe_integer(L, B, id_feature, lua_toboolean(L, value_arg));
+        break;
+      case LUA_TNIL:
         break;
       default:
         tk_lua_verror(L, 2, "observe", "unexpected type passed to observe", lua_typename(L, t));
