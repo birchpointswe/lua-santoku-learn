@@ -1100,11 +1100,14 @@ static inline int tb_tokenizer_train (lua_State *L)
   lua_getfield(L, 2, "corpus");
   int n = lua_objlen(L, -1);
   tk_cvec_t *buf = tk_cvec_create(0, 0, 0, 0);
+  if (buf == NULL)
+    return tk_lua_verror(L, 2, "train", "failed to create buffer");
   for (int i = 1; i <= n; i ++) {
     lua_pushinteger(L, (int64_t) i);
     lua_gettable(L, -2);
     size_t len;
-    if (tb_tokenizer_normalize(buf, (char *) luaL_checklstring(L, -1, &len), len, tokenizer->max_run) != 0) {
+    char *str = (char *) luaL_checklstring(L, -1, &len);
+    if (tb_tokenizer_normalize(buf, str, len, tokenizer->max_run) != 0) {
       tk_cvec_destroy(buf);
       return tk_lua_verror(L, 2, "train", "allocation failed during normalization");
     }

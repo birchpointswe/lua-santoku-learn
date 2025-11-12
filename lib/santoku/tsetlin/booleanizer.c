@@ -217,9 +217,13 @@ static inline int64_t tk_booleanizer_bit_integer (
     return -1;
   } else if (train) {
     khi = tk_iumap_put(B->integer_features, feature, &kha);
-    int64_t id_feature = (int64_t) B->next_feature ++;
-    tk_iumap_setval(B->integer_features, khi, id_feature);
-    return id_feature;
+    if (kha) {
+      int64_t id_feature = (int64_t) B->next_feature ++;
+      tk_iumap_setval(B->integer_features, khi, id_feature);
+      return id_feature;
+    } else {
+      return tk_iumap_val(B->integer_features, khi);
+    }
   } else {
     return tk_iumap_val(B->integer_features, khi);
   }
@@ -245,10 +249,12 @@ static inline int64_t tk_booleanizer_bit_string (
       tk_zumap_setkey(B->string_features, khi, z);
       tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, 1, -1);
       lua_pop(L, 1);
+      int64_t id_feature = (int64_t) B->next_feature ++;
+      tk_zumap_setval(B->string_features, khi, id_feature);
+      return id_feature;
+    } else {
+      return tk_zumap_val(B->string_features, khi);
     }
-    int64_t id_feature = (int64_t) B->next_feature ++;
-    tk_zumap_setval(B->string_features, khi, id_feature);
-    return id_feature;
   } else {
     return tk_zumap_val(B->string_features, khi);
   }
@@ -812,6 +818,15 @@ static inline int tk_booleanizer_encode_lua (lua_State *L)
     lua_pushvalue(L, 1);
     lua_pushvalue(L, 3);
     lua_call(L, 2, 1);
+    if (lua_isnoneornil(L, -1)) {
+      lua_pop(L, 1);
+      out = tk_ivec_peekopt(L, 5);
+      if (out == NULL)
+        out = tk_ivec_create(L, 0, 0, 0);
+      else
+        lua_pushvalue(L, 5);
+      return 1;
+    }
     int64_t id_feature = (int64_t) tk_lua_checkunsigned(L, -1, "id_feature");
     out = tk_ivec_peekopt(L, 5);
     if (out == NULL)
