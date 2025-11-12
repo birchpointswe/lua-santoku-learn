@@ -192,14 +192,24 @@ static inline int tb_have_bytes (const char *in, size_t i, size_t n)
 
 static inline int tb_tokenizer_normalize (tk_cvec_t *out, char *in, size_t len, int max_run)
 {
+  #define ENSURE_SPACE(needed) do { \
+    size_t required = out->n + (needed); \
+    if (required > out->m) { \
+      size_t new_cap = out->m + (out->m >> 1) + (needed); \
+      if (tk_cvec_ensure(out, new_cap) != 0) return -1; \
+    } \
+  } while(0)
+
   tk_cvec_clear(out);
-  if (tk_cvec_ensure(out, len * 20) != 0)
+  if (tk_cvec_ensure(out, len * 2) != 0)
     return -1;
 
   unsigned char last = 0;
   int run = 0;
 
   for (size_t i = 0; i < len;) {
+    if ((i & 0x3F) == 0)
+      ENSURE_SPACE(128);
     unsigned char c = (unsigned char) in[i];
 
     if (c < 0x80 && c != '#' && c != '!' && c != '?' &&
@@ -250,6 +260,7 @@ static inline int tb_tokenizer_normalize (tk_cvec_t *out, char *in, size_t len, 
       run = 0;
       continue;
     } else if (tb_have_bytes(in, i, 2) && c == ':' && in[i + 1] == ')') {
+      ENSURE_SPACE(18);
       out->a[out->n++] = ' ';
       memcpy(out->a + out->n, "#smiley-positive", 16); out->n += 16;
       out->a[out->n++] = ' ';
@@ -258,6 +269,7 @@ static inline int tb_tokenizer_normalize (tk_cvec_t *out, char *in, size_t len, 
       run = 0;
       continue;
     } else if (tb_have_bytes(in, i, 2) && c == ':' && tolower((unsigned char)in[i + 1]) == 'd') {
+      ENSURE_SPACE(18);
       out->a[out->n++] = ' ';
       memcpy(out->a + out->n, "#smiley-positive", 16); out->n += 16;
       out->a[out->n++] = ' ';
@@ -266,6 +278,7 @@ static inline int tb_tokenizer_normalize (tk_cvec_t *out, char *in, size_t len, 
       run = 0;
       continue;
     } else if (tb_have_bytes(in, i, 2) && c == ':' && in[i + 1] == '(') {
+      ENSURE_SPACE(18);
       out->a[out->n++] = ' ';
       memcpy(out->a + out->n, "#smiley-negative", 16); out->n += 16;
       out->a[out->n++] = ' ';
@@ -274,6 +287,7 @@ static inline int tb_tokenizer_normalize (tk_cvec_t *out, char *in, size_t len, 
       run = 0;
       continue;
     } else if (tb_have_bytes(in, i, 2) && c == ';' && in[i + 1] == ')') {
+      ENSURE_SPACE(14);
       out->a[out->n++] = ' ';
       memcpy(out->a + out->n, "#smiley-wink", 12); out->n += 12;
       out->a[out->n++] = ' ';
@@ -282,6 +296,7 @@ static inline int tb_tokenizer_normalize (tk_cvec_t *out, char *in, size_t len, 
       run = 0;
       continue;
     } else if (c == '!') {
+      ENSURE_SPACE(14);
       out->a[out->n++] = ' ';
       memcpy(out->a + out->n, "#exclamation", 12); out->n += 12;
       out->a[out->n++] = ' ';
@@ -394,14 +409,17 @@ static inline int tb_tokenizer_normalize (tk_cvec_t *out, char *in, size_t len, 
       (unsigned char) in[i + 2] == 0x98) {
       unsigned char b4 = (unsigned char) in[i + 3];
       if ((b4 >= 0x80 && b4 <= 0x8B) || (b4 >= 0x8F && b4 <= 0x90) || (b4 == 0x99)) {
+        ENSURE_SPACE(17);
         out->a[out->n++] = ' ';
         memcpy(out->a + out->n, "#emoji-positive", 15); out->n += 15;
         out->a[out->n++] = ' ';
       } else if ((b4 >= 0x9E && b4 <= 0xA2) || (b4 >= 0xA3 && b4 <= 0xA6)) {
+        ENSURE_SPACE(17);
         out->a[out->n++] = ' ';
         memcpy(out->a + out->n, "#emoji-negative", 15); out->n += 15;
         out->a[out->n++] = ' ';
       } else {
+        ENSURE_SPACE(14);
         out->a[out->n++] = ' ';
         memcpy(out->a + out->n, "#emoji-other", 12); out->n += 12;
         out->a[out->n++] = ' ';
@@ -417,6 +435,7 @@ static inline int tb_tokenizer_normalize (tk_cvec_t *out, char *in, size_t len, 
       (unsigned char) in[i + 1] == 0x9F &&
       (unsigned char) in[i + 2] == 0x91 &&
       ((unsigned char) in[i + 3] == 0x8D || (unsigned char) in[i + 3] == 0x8E)) {
+      ENSURE_SPACE(17);
       if ((unsigned char) in[i + 3] == 0x8D) {
         out->a[out->n++] = ' ';
         memcpy(out->a + out->n, "#emoji-positive", 15); out->n += 15;
@@ -436,6 +455,7 @@ static inline int tb_tokenizer_normalize (tk_cvec_t *out, char *in, size_t len, 
       (unsigned char)c == 0xE2 &&
       (unsigned char) in[i + 1] == 0x9D &&
       (unsigned char) in[i + 2] == 0xA4) {
+      ENSURE_SPACE(17);
       out->a[out->n++] = ' ';
       memcpy(out->a + out->n, "#emoji-positive", 15); out->n += 15;
       out->a[out->n++] = ' ';
@@ -460,7 +480,9 @@ static inline int tb_tokenizer_normalize (tk_cvec_t *out, char *in, size_t len, 
     run = 0;
   }
 
+  ENSURE_SPACE(1);
   out->a[out->n++] = '\0';
+  #undef ENSURE_SPACE
   return 0;
 }
 
