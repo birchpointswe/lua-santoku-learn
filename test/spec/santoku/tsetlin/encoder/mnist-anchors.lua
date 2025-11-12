@@ -14,6 +14,7 @@ local simhash = require("santoku.tsetlin.simhash")
 local spectral = require("santoku.tsetlin.spectral")
 local tch = require("santoku.tsetlin.tch")
 local itq = require("santoku.tsetlin.itq")
+local hlth = require("santoku.tsetlin.hlth")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local utc = require("santoku.utc")
@@ -24,15 +25,15 @@ local cfg; cfg = {
     max = nil,
     max_class = nil,
     visible = 784,
-    hidden = 128,
-    landmarks = 24,
+    hidden = 32,
+    landmarks = 4,
   },
   mode = {
-    encoder = false,
+    encoder = true,
     cluster = true,
-    codes = "simhash", -- simhash, spectral
+    codes = "spectral", -- simhash, spectral
     mode = "landmarks",
-    binarize = "itq",
+    binarize = "median",
     tch = false,
   },
   tch = {
@@ -96,7 +97,7 @@ local cfg; cfg = {
     end,
   },
   bits = {
-    sel = false,
+    sel = true,
     keep_prefix = nil,
     start_prefix = nil,
     sffs_tolerance = nil,
@@ -129,7 +130,6 @@ test("tsetlin", function ()
   dataset.n_visible = cfg.data.visible
   dataset.n_hidden = cfg.data.hidden
   dataset.n_landmarks = cfg.data.landmarks
-  dataset.n_latent = cfg.data.hidden * cfg.data.landmarks
   collectgarbage("collect")
 
   print("Splitting")
@@ -483,31 +483,23 @@ test("tsetlin", function ()
       local sth_idx = ann.create({ features = dataset.n_visible, expected_size = sth_ids:size() })
       sth_idx:add(sth_raw, sth_ids)
 
-      local sth_hoods
-      sth_ids, sth_hoods = sth_idx:neighborhoods(dataset.n_landmarks)
+      local enc, n_latent = hlth.landmark_encoder({
+        landmarks_index = sth_idx,
+        codes_index = train.idx_spectral,
+        n_landmarks = dataset.n_landmarks
+      })
+      dataset.n_latent = n_latent
+      sth_visible = n_latent
 
       sth_solutions = train.idx_spectral:get(sth_ids)
-      sth_problems = cvec.create()
-      local tmp = ivec.create()
-      for i0, hood in sth_hoods:ieach() do
-        hood:keys(tmp)
-        tmp:lookup(sth_ids)
-        train.idx_spectral:get(tmp, sth_problems, i0, dataset.n_latent)
-      end
-      sth_problems:bits_flip_interleave(dataset.n_latent)
-
+      sth_problems = enc(sth_raw, sth_n)
+      sth_problems:bits_flip_interleave(n_latent)
       test_ids = test.ids
-      test_problems = cvec.create()
       local test_vecs = ivec.create()
       dataset.problems:bits_select(nil, test.ids, dataset.n_visible, test_vecs)
       test_vecs = test_vecs:bits_to_cvec(test.n, dataset.n_visible)
-      local nbr_ids, nbr_hoods = sth_idx:neighborhoods_by_vecs(test_vecs, dataset.n_landmarks)
-      for i0, hood in nbr_hoods:ieach() do
-        hood:keys(tmp)
-        tmp:lookup(nbr_ids)
-        train.idx_spectral:get(tmp, test_problems, i0, dataset.n_latent)
-      end
-      test_problems:bits_flip_interleave(dataset.n_latent)
+      test_problems = enc(test_vecs, test.n)
+      test_problems:bits_flip_interleave(n_latent)
       sth_idx:destroy()
       collectgarbage("collect")
 
