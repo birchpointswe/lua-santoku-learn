@@ -561,14 +561,17 @@ static inline void tk_inv_neighborhoods (
         int64_t vsid = touched->a[ti];
         int64_t iv = sid_to_pos->a[vsid];
         if (uhood->n >= knn) {
-          double max_possible_sim = 0.0;
+          double inter_weight = 0.0;
           for (uint64_t r = 0; r < inv->n_ranks; r++) {
             double inter = wacc->a[(int64_t) inv->n_ranks * iv + (int64_t) r];
             if (inter > 0.0) {
-              max_possible_sim += inter * inv->rank_weights->a[r];
+              inter_weight += inter * inv->rank_weights->a[r];
             }
           }
-          max_possible_sim = (inv->total_rank_weight > 0.0) ? max_possible_sim / inv->total_rank_weight : 0.0;
+          double query_weight = 0.0;
+          for (uint64_t r = 0; r < inv->n_ranks; r++)
+            query_weight += q_weights_by_rank[r] * inv->rank_weights->a[r];
+          double max_possible_sim = (query_weight > 0.0) ? (inter_weight / query_weight) : 0.0;
           if (1.0 - max_possible_sim > cutoff)
             continue;
         }
@@ -684,14 +687,17 @@ static inline void tk_inv_neighborhoods_by_ids (
         int64_t vsid = touched->a[ti];
         int64_t iv = sid_to_pos->a[vsid];
         if (uhood->n >= knn) {
-          double max_possible_sim = 0.0;
+          double inter_weight = 0.0;
           for (uint64_t r = 0; r < inv->n_ranks; r++) {
             double inter = wacc->a[(int64_t) inv->n_ranks * iv + (int64_t) r];
             if (inter > 0.0) {
-              max_possible_sim += inter * inv->rank_weights->a[r];
+              inter_weight += inter * inv->rank_weights->a[r];
             }
           }
-          max_possible_sim = (inv->total_rank_weight > 0.0) ? max_possible_sim / inv->total_rank_weight : 0.0;
+          double query_weight = 0.0;
+          for (uint64_t r = 0; r < inv->n_ranks; r++)
+            query_weight += q_weights_by_rank[r] * inv->rank_weights->a[r];
+          double max_possible_sim = (query_weight > 0.0) ? (inter_weight / query_weight) : 0.0;
           if (1.0 - max_possible_sim > cutoff)
             continue;
         }
@@ -845,14 +851,17 @@ static inline void tk_inv_neighborhoods_by_vecs (
         int64_t vsid = touched->a[ti];
         int64_t iv = sid_to_pos->a[vsid];
         if (uhood->n >= knn) {
-          double max_possible_sim = 0.0;
+          double inter_weight = 0.0;
           for (uint64_t r = 0; r < inv->n_ranks; r++) {
             double inter = wacc->a[(int64_t) inv->n_ranks * iv + (int64_t) r];
             if (inter > 0.0) {
-              max_possible_sim += inter * inv->rank_weights->a[r];
+              inter_weight += inter * inv->rank_weights->a[r];
             }
           }
-          max_possible_sim = (inv->total_rank_weight > 0.0) ? max_possible_sim / inv->total_rank_weight : 0.0;
+          double query_weight = 0.0;
+          for (uint64_t r = 0; r < inv->n_ranks; r++)
+            query_weight += q_weights_by_rank[r] * inv->rank_weights->a[r];
+          double max_possible_sim = (query_weight > 0.0) ? (inter_weight / query_weight) : 0.0;
           if (1.0 - max_possible_sim > cutoff)
             continue;
         }

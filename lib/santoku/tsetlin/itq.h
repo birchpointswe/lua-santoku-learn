@@ -169,6 +169,7 @@ static inline void tk_itq_encode (
     if (info != 0) {
       free(mem);
       luaL_error(L, "ITQ SVD failed to converge (info=%d)", info);
+      return;
     }
 
     // R = VT^T * U^T
