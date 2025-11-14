@@ -36,8 +36,8 @@ local cfg = {
   },
   eval = {
     anchors = 8,
-    retrieval_metric = "biserial",
-    cluster_metric = "biserial",
+    retrieval_metric = "mean",
+    cluster_metric = "mean",
     tolerance = 1e-3,
   },
   threads = nil,
