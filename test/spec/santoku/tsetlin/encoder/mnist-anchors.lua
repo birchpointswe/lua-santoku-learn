@@ -25,8 +25,8 @@ local cfg; cfg = {
     max = nil,
     max_class = nil,
     visible = 784,
-    hidden = 32,
-    landmarks = 4,
+    hidden = 24,
+    landmarks = 24,
   },
   mode = {
     encoder = true,
@@ -43,14 +43,14 @@ local cfg; cfg = {
     ann = true,
   },
   spectral = {
-    laplacian = "unnormalized",
+    laplacian = "random",
     method = "jdqr",
     precondition = "ic",
     primme_eps = 1e-6,
   },
   simhash = {
     ranks = 1,
-    weighted = nil,
+    quantiles = nil,
   },
   sr = {
     eps = 1e-12,
@@ -78,14 +78,14 @@ local cfg; cfg = {
   },
   clustering = {
     knn = 256,
-    linkage = "single",
   },
   eval = {
-    bits_metric = "spearman",
-    retrieval_metric = "biserial",
-    cluster_metric = "biserial",
-    sampled_anchors = 16,
-    sampled_pairs = 16,
+    knn = 16,
+    pairs = 16,
+    anchors = 16,
+    bits_metric = "pearson",
+    retrieval_metric = "min",
+    cluster_metric = "min",
     tolerance = 2e-2,
     retrieval = function (d)
       return d:max()
@@ -96,28 +96,32 @@ local cfg; cfg = {
       -- return d:scores_plateau(cfg.eval.tolerance)
     end,
   },
+  cluster = {
+    knn = 256
+  },
   bits = {
-    sel = true,
+    sel = false,
     keep_prefix = nil,
     start_prefix = nil,
     sffs_tolerance = nil,
     sffs_fixed = nil,
   },
   tm = {
-    clauses = { def = 8, min = 8, max = 32, int = true, log = true, pow2 = true },
-    clause_tolerance =  { def = 8, min = 8, max = 256, int = true, log = true, pow2 = true },
-    clause_maximum = { def = 8, min = 8, max = 256, int = true, log = true, pow2 = true },
-    target = { def = 4, min = 2, max = 256, int = true, log = true, pow2 = true },
-    specificity = { def = 10, min = 2, max = 400, int = true, log = true },
+    clauses = 8, --{ def = 8, min = 8, max = 32, int = true, log = true, pow2 = true },
+    clause_tolerance =  8, --{ def = 8, min = 8, max = 256, int = true, log = true, pow2 = true },
+    clause_maximum = 16, --{ def = 8, min = 8, max = 256, int = true, log = true, pow2 = true },
+    target = 8, --{ def = 4, min = 2, max = 256, int = true, log = true, pow2 = true },
+    specificity = 400, --{ def = 10, min = 2, max = 400, int = true, log = true },
   },
   search = {
-    patience = 10,
+    patience = 3,
     rounds = 20,
     trials = 4,
+    tolerance = 1e-6,
     iterations = 10,
   },
   training = {
-    patience = 40,
+    patience = 10,
     iterations = 200,
   },
 }
@@ -202,7 +206,6 @@ test("tsetlin", function ()
     (train.adj_weights:min()),
     (train.adj_weights:sum() / train.adj_weights:size()))
 
-
   if cfg.mode.codes == "spectral" then
     print("Spectral eigendecomposition")
     train.ids_spectral, train.codes_spectral = spectral.encode({
@@ -232,7 +235,7 @@ test("tsetlin", function ()
     collectgarbage("collect")
   elseif cfg.mode.codes == "simhash" then
     print("Simhash")
-    train.ids_simhash, train.codes_simhash = simhash.encode(train.node_combined, dataset.n_hidden, cfg.simhash.ranks, cfg.simhash.weighted)
+    train.ids_simhash, train.codes_simhash = simhash.encode(train.node_combined, dataset.n_hidden, cfg.simhash.ranks, cfg.simhash.quantiles)
     train.ids_spectral = ivec.create()
     train.ids_spectral:copy(train.adj_ids)
     train.codes_spectral = cvec.create()
@@ -371,35 +374,33 @@ test("tsetlin", function ()
     data:add_scaled(10)
     cat_index:add(data, train.ids_spectral)
     data:destroy()
-    train.adj_sampled_ids,
-    train.adj_sampled_offsets,
-    train.adj_sampled_neighbors,
-    train.adj_sampled_weights =
+    train.adj_eval_ids,
+    train.adj_eval_offsets,
+    train.adj_eval_neighbors,
+    train.adj_eval_weights =
       graph.adjacency({
         category_index = cat_index,
-        category_anchors = cfg.eval.sampled_anchors,
-        random_pairs = cfg.eval.sampled_pairs,
+        category_anchors = cfg.eval.anchors,
+        random_pairs = cfg.eval.pairs,
       })
     cat_index:destroy()
   end
-  collectgarbage("collect")
-
   print("  Creating categorical adjacency for test")
   do
-    local cat_index = inv.create({ features = 10, expected_size = test.n, decay = cfg.graph.decay })
+    local cat_index = inv.create({ features = 10, expected_size = test.ids:size(), decay = cfg.graph.decay })
     local data = ivec.create()
     data:copy(test.solutions)
     data:add_scaled(10)
     cat_index:add(data, test.ids)
     data:destroy()
-    test.adj_sampled_ids,
-    test.adj_sampled_offsets,
-    test.adj_sampled_neighbors,
-    test.adj_sampled_weights =
+    test.adj_eval_ids,
+    test.adj_eval_offsets,
+    test.adj_eval_neighbors,
+    test.adj_eval_weights =
       graph.adjacency({
         category_index = cat_index,
-        category_anchors = cfg.eval.sampled_anchors,
-        random_pairs = cfg.eval.sampled_pairs,
+        category_anchors = cfg.eval.anchors,
+        random_pairs = cfg.eval.pairs,
       })
     cat_index:destroy()
   end
@@ -411,32 +412,14 @@ test("tsetlin", function ()
     train.entropy)
   collectgarbage("collect")
 
-  print("Retrieval stats (graph edges)")
+  print("Retrieval stats (in-sample)")
   train.retrieval_scores = eval.score_retrieval({
     index = train.idx_spectral,
-    ids = train.adj_ids,
-    offsets = train.adj_offsets,
-    neighbors = train.adj_neighbors,
-    weights = train.adj_weights,
-    metric = cfg.eval.retrieval_metric,
-  })
-  for m = 0, train.retrieval_scores:size() - 1 do
-    local d, dd = stopwatch()
-    str.printf("  Time: %6.2f %6.2f | Margin: %d | Score: %+.10f\n",
-      d, dd, m, train.retrieval_scores:get(m))
-  end
-  local best_score, best_idx = cfg.eval.retrieval(train.retrieval_scores)
-  str.printf("Best\n  Margin: %d | Score: %+.10f\n", best_idx, best_score)
-  collectgarbage("collect")
-
-  print("Retrieval stats (class-label adjacency)")
-  train.retrieval_scores = eval.score_retrieval({
-    index = train.idx_spectral,
-    ids = train.adj_sampled_ids,
-    offsets = train.adj_sampled_offsets,
-    neighbors = train.adj_sampled_neighbors,
-    weights = train.adj_sampled_weights,
-    metric = cfg.eval.retrieval_metric,
+    ids = train.adj_eval_ids,
+    offsets = train.adj_eval_offsets,
+    neighbors = train.adj_eval_neighbors,
+    weights = train.adj_eval_weights,
+    metric = cfg.spectral.retrieval_metric,
   })
   for m = 0, train.retrieval_scores:size() - 1 do
     local d, dd = stopwatch()
@@ -476,7 +459,6 @@ test("tsetlin", function ()
 
       sth_ids = train.ids_spectral
       sth_n = sth_ids:size()
-      sth_visible = dataset.n_latent
       local sth_raw = ivec.create()
       dataset.problems:bits_select(nil, train.ids_spectral, dataset.n_visible, sth_raw)
       sth_raw = sth_raw:bits_to_cvec(sth_n, dataset.n_visible)
@@ -525,6 +507,7 @@ test("tsetlin", function ()
       search_rounds = cfg.search.rounds,
       search_trials = cfg.search.trials,
       search_iterations = cfg.search.iterations,
+      search_tolerance = cfg.search.tolerance,
       final_patience = cfg.training.patience,
       final_iterations = cfg.training.iterations,
       search_metric = function (t)
@@ -566,19 +549,19 @@ test("tsetlin", function ()
 
     train.retrieval_scores_predicted = eval.score_retrieval({
       index = idx_train,
-      ids = train.adj_sampled_ids,
-      offsets = train.adj_sampled_offsets,
-      weights = train.adj_sampled_weights,
-      neighbors = train.adj_sampled_neighbors,
+      ids = train.adj_eval_ids,
+      offsets = train.adj_eval_offsets,
+      weights = train.adj_eval_weights,
+      neighbors = train.adj_eval_neighbors,
       metric = cfg.eval.retrieval_metric,
     })
 
     test.retrieval_scores_predicted = eval.score_retrieval({
       index = idx_test,
-      ids = test.adj_sampled_ids,
-      offsets = test.adj_sampled_offsets,
-      weights = test.adj_sampled_weights,
-      neighbors = test.adj_sampled_neighbors,
+      ids = test.adj_eval_ids,
+      offsets = test.adj_eval_offsets,
+      weights = test.adj_eval_weights,
+      neighbors = test.adj_eval_neighbors,
       metric = cfg.eval.retrieval_metric,
     })
 
@@ -592,43 +575,27 @@ test("tsetlin", function ()
 
   if cfg.mode.cluster then
 
-    print("Clustering (codes) (graph edges)")
+    print("Clustering (in-sample)")
+    train.adj_cluster_ids, train.adj_cluster_offsets, train.adj_cluster_neighbors =
+      graph.adjacency({
+        knn_index = train.idx_spectral,
+        knn = cfg.cluster.knn
+      })
     local codes_clusters = eval.cluster({
-      codes = train.codes_spectral,
+      codes = train.idx_spectral:get(train.adj_cluster_ids),
       n_dims = dataset.n_hidden,
-      ids = train.adj_ids,
-      offsets = train.adj_offsets,
-      neighbors = train.adj_neighbors,
+      ids = train.adj_cluster_ids,
+      offsets = train.adj_cluster_offsets,
+      neighbors = train.adj_cluster_neighbors,
     })
     local codes_stats = eval.score_clustering({
       ids = codes_clusters.ids,
       offsets = codes_clusters.offsets,
       merges = codes_clusters.merges,
-      eval_ids = train.adj_ids,
-      eval_offsets = train.adj_offsets,
-      eval_neighbors = train.adj_neighbors,
-      eval_weights = train.adj_weights,
-      metric = cfg.eval.cluster_metric,
-    })
-    for step = 0, codes_stats.n_steps do
-      local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | Step: %2d | Score: %+.10f | Clusters: %d\n",
-        d, dd, step, codes_stats.scores:get(step), codes_stats.n_clusters:get(step))
-    end
-    local best_score, best_step = cfg.eval.clustering(codes_stats.scores)
-    local best_n_clusters = codes_stats.n_clusters:get(best_step)
-    str.printf("Best\n  Step: %2d | Score: %+.10f | Clusters: %d\n", best_step, best_score, best_n_clusters)
-    collectgarbage("collect")
-
-    print("Clustering (codes) (class-label adjacency)")
-    local codes_stats = eval.score_clustering({
-      ids = codes_clusters.ids,
-      offsets = codes_clusters.offsets,
-      merges = codes_clusters.merges,
-      eval_ids = train.adj_sampled_ids,
-      eval_offsets = train.adj_sampled_offsets,
-      eval_neighbors = train.adj_sampled_neighbors,
-      eval_weights = train.adj_sampled_weights,
+      eval_ids = train.adj_eval_ids,
+      eval_offsets = train.adj_eval_offsets,
+      eval_neighbors = train.adj_eval_neighbors,
+      eval_weights = train.adj_eval_weights,
       metric = cfg.eval.cluster_metric,
     })
     for step = 0, codes_stats.n_steps do
@@ -644,21 +611,26 @@ test("tsetlin", function ()
     if cfg.mode.encoder then
 
       print("Clustering (train)")
+      train.adj_pred_cluster_ids, train.adj_pred_cluster_offsets, train.adj_pred_cluster_neighbors =
+        graph.adjacency({
+          knn_index = idx_train,
+          knn = cfg.cluster.knn
+        })
       local train_clusters = eval.cluster({
-        codes = idx_train:get(train.adj_sampled_ids),
+        codes = idx_train:get(train.adj_pred_cluster_ids),
         n_dims = dataset.n_hidden,
-        ids = train.adj_sampled_ids,
-        offsets = train.adj_sampled_offsets,
-        neighbors = train.adj_sampled_neighbors,
+        ids = train.adj_pred_cluster_ids,
+        offsets = train.adj_pred_cluster_offsets,
+        neighbors = train.adj_pred_cluster_neighbors,
       })
       local train_stats = eval.score_clustering({
         ids = train_clusters.ids,
         offsets = train_clusters.offsets,
         merges = train_clusters.merges,
-        eval_ids = train.adj_sampled_ids,
-        eval_offsets = train.adj_sampled_offsets,
-        eval_neighbors = train.adj_sampled_neighbors,
-        eval_weights = train.adj_sampled_weights,
+        eval_ids = train.adj_eval_ids,
+        eval_offsets = train.adj_eval_offsets,
+        eval_neighbors = train.adj_eval_neighbors,
+        eval_weights = train.adj_eval_weights,
         metric = cfg.eval.cluster_metric,
       })
       for step = 0, train_stats.n_steps do
@@ -672,21 +644,26 @@ test("tsetlin", function ()
       collectgarbage("collect")
 
       print("Clustering (test)")
+      test.adj_pred_cluster_ids, test.adj_pred_cluster_offsets, test.adj_pred_cluster_neighbors =
+        graph.adjacency({
+          knn_index = idx_test,
+          knn = cfg.cluster.knn
+        })
       local test_clusters = eval.cluster({
-        codes = idx_test:get(test.adj_sampled_ids),
+        codes = idx_test:get(test.adj_pred_cluster_ids),
         n_dims = dataset.n_hidden,
-        ids = test.adj_sampled_ids,
-        offsets = test.adj_sampled_offsets,
-        neighbors = test.adj_sampled_neighbors,
+        ids = test.adj_pred_cluster_ids,
+        offsets = test.adj_pred_cluster_offsets,
+        neighbors = test.adj_pred_cluster_neighbors,
       })
       local test_stats = eval.score_clustering({
         ids = test_clusters.ids,
         offsets = test_clusters.offsets,
         merges = test_clusters.merges,
-        eval_ids = test.adj_sampled_ids,
-        eval_offsets = test.adj_sampled_offsets,
-        eval_neighbors = test.adj_sampled_neighbors,
-        eval_weights = test.adj_sampled_weights,
+        eval_ids = test.adj_eval_ids,
+        eval_offsets = test.adj_eval_offsets,
+        eval_neighbors = test.adj_eval_neighbors,
+        eval_weights = test.adj_eval_weights,
         metric = cfg.eval.cluster_metric,
       })
       for step = 0, test_stats.n_steps do

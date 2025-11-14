@@ -92,10 +92,11 @@ end
 
 M.optimize = function (args, typ)
 
-  local patience = args.search_patience or 0
+  local patience = args.search_patience or 10
   local use_early_stop = patience > 0
-  local final_patience = args.final_patience or 0
+  local final_patience = args.final_patience or 40
   local use_final_early_stop = final_patience > 0
+  local tolerance = args.search_tolerance or 1e-8
   local rounds = args.search_rounds or 3
   local trials = args.search_trials or 10
   local iters_search = args.search_iterations or 10
@@ -196,7 +197,7 @@ M.optimize = function (args, typ)
               cb_result = each_cb(tm, false, metrics, params, epoch, r, t)
             end
             last_epoch_score = score
-            if score > best_epoch_score + 1e-8 then
+            if score > best_epoch_score + tolerance then
               best_epoch_score = score
               epochs_since_improve = 0
             else
@@ -239,7 +240,7 @@ M.optimize = function (args, typ)
             round_best_params = params
           end
 
-          local is_better = trial_score > best_score + 1e-8 or (num.abs(trial_score - best_score) < 1e-8)
+          local is_better = trial_score > best_score + tolerance or (num.abs(trial_score - best_score) < tolerance)
           if is_better then
             best_score = trial_score
             best_params = params
@@ -293,7 +294,7 @@ M.optimize = function (args, typ)
         if each_cb then
           local score, metrics = metric_fn(encoder)
           cb_result = each_cb(encoder, true, metrics, best_params, epoch)
-          if score > best_final_score + 1e-8 then
+          if score > best_final_score + tolerance then
             best_final_score = score
             best_final_metrics = metrics
             epochs_since_improve = 0
@@ -348,7 +349,7 @@ M.optimize = function (args, typ)
         if each_cb then
           local score, metrics = metric_fn(classifier)
           cb_result = each_cb(classifier, true, metrics, best_params, epoch)
-          if score > best_final_score + 1e-8 then
+          if score > best_final_score + tolerance then
             best_final_score = score
             best_final_metrics = metrics
             epochs_since_improve = 0

@@ -21,20 +21,20 @@ static inline uint64_t murmur3_fmix64 (uint64_t k) {
 
 static inline void hash_feature_to_weights (
   int64_t feature_id,
+  uint64_t rep_index,
   uint64_t bit_start,
   uint64_t n_bits_for_rank,
-  int32_t weight,
   tk_ivec_t *output_weights
 ) {
   uint64_t bits_remaining = n_bits_for_rank;
   uint64_t bit_offset = 0;
-  uint64_t seed = (uint64_t)feature_id;
+  uint64_t seed = murmur3_fmix64((uint64_t)feature_id ^ (rep_index << 48));
   while (bits_remaining > 0) {
     uint64_t hash64 = murmur3_fmix64(seed);
     uint64_t bits_to_use = bits_remaining < 64 ? bits_remaining : 64;
     for (uint64_t b = 0; b < bits_to_use; b++) {
       uint64_t bit_idx = bit_start + bit_offset + b;
-      output_weights->a[bit_idx] += (hash64 & (1ULL << b)) ? weight : -weight;
+      output_weights->a[bit_idx] += (hash64 & (1ULL << b)) ? 1 : -1;
     }
     bits_remaining -= bits_to_use;
     bit_offset += bits_to_use;
@@ -49,7 +49,7 @@ static inline int tm_simhash (lua_State *L)
   int64_t hashed_ranks = -1;
   if (lua_gettop(L) >= 3 && !lua_isnil(L, 3))
     hashed_ranks = (int64_t)tk_lua_checkunsigned(L, 3, "hashed_ranks");
-  bool weighted = tk_lua_optboolean(L, 4, false, "weighted");
+  int64_t n_quantiles = tk_lua_optinteger(L, 4, "n_quantiles", 1);
   uint64_t n_ranks_to_hash = (hashed_ranks >= 0 && hashed_ranks < (int64_t)inv->n_ranks) ? (uint64_t)hashed_ranks : inv->n_ranks;
   if (n_ranks_to_hash == 0)
     return luaL_error(L, "n_ranks_to_hash must be > 0");
@@ -120,6 +120,16 @@ static inline int tm_simhash (lua_State *L)
     }
   }
   tk_centroid_t *centroid = tk_centroid_create_batch(L, n_valid, n_chunks, tail_mask);
+  double global_min_weight = DBL_MAX;
+  double global_max_weight = -DBL_MAX;
+  if (n_quantiles > 1 && inv->weights) {
+    #pragma omp parallel for reduction(min:global_min_weight) reduction(max:global_max_weight)
+    for (uint64_t i = 0; i < inv->weights->n; i++) {
+      double w = inv->weights->a[i];
+      if (w < global_min_weight) global_min_weight = w;
+      if (w > global_max_weight) global_max_weight = w;
+    }
+  }
   #pragma omp parallel
   {
     tk_ivec_t *feature_weights = tk_ivec_create(NULL, n_bits, 0, 0);
@@ -143,7 +153,7 @@ static inline int tm_simhash (lua_State *L)
         int64_t rank = inv->ranks ? inv->ranks->a[feature_id] : 0;
         if (hashed_ranks >= 0 && rank >= hashed_ranks)
           continue;
-        double feature_weight = (weighted && inv->weights) ? inv->weights->a[feature_id] : 1.0;
+        double feature_weight = (n_quantiles > 1 && inv->weights) ? inv->weights->a[feature_id] : 1.0;
         if (rank >= 0 && rank < (int64_t)inv->n_ranks)
           rank_totals[rank] += feature_weight;
       }
@@ -153,22 +163,26 @@ static inline int tm_simhash (lua_State *L)
         if (hashed_ranks >= 0 && rank >= hashed_ranks)
           continue;
         if (rank >= 0 && rank < (int64_t)n_ranks_to_hash) {
-          double feature_weight = (weighted && inv->weights) ? inv->weights->a[feature_id] : 1.0;
-          int32_t weight = (int32_t)(feature_weight * TK_SIMHASH_SCALE);
+          int repetitions = 1;
+          if (n_quantiles > 1 && inv->weights && global_max_weight > global_min_weight) {
+            double feature_weight = inv->weights->a[feature_id];
+            double normalized_weight = (feature_weight - global_min_weight) / (global_max_weight - global_min_weight);
+            repetitions = (int)fmax(1.0, round(normalized_weight * n_quantiles));
+          }
           uint64_t bit_start = rank_bit_start[rank];
           uint64_t n_bits_for_rank = rank_n_bits[rank];
-          hash_feature_to_weights(feature_id, bit_start, n_bits_for_rank, weight, feature_weights);
+          for (int rep = 0; rep < repetitions; rep++) {
+            hash_feature_to_weights(feature_id, (uint64_t)rep, bit_start, n_bits_for_rank, feature_weights);
+          }
         }
       }
       for (uint64_t r = 0; r < n_ranks_to_hash; r++) {
         if (rank_totals[r] == 0.0 && rank_n_bits[r] > 0) {
           int64_t uid = inv->sid_to_uid->a[sid];
           int64_t empty_feature_id = -((int64_t)murmur3_fmix64((uint64_t)uid ^ ((uint64_t)r << 32)));
-          double rank_weight = (inv->rank_weights && r < inv->n_ranks) ? inv->rank_weights->a[r] : 1.0;
-          int32_t weight = (int32_t)(rank_weight * TK_SIMHASH_SCALE);
           uint64_t bit_start = rank_bit_start[r];
           uint64_t n_bits_for_rank = rank_n_bits[r];
-          hash_feature_to_weights(empty_feature_id, bit_start, n_bits_for_rank, weight, feature_weights);
+          hash_feature_to_weights(empty_feature_id, 0, bit_start, n_bits_for_rank, feature_weights);
         }
       }
       tk_centroid_add_votes(centroid, outpos, feature_weights);
