@@ -16,21 +16,27 @@
 
 typedef enum {
   TK_EVAL_METRIC_NONE,
-  TK_EVAL_METRIC_SPEARMAN,
+  TK_EVAL_METRIC_PEARSON,
   TK_EVAL_METRIC_BISERIAL,
   TK_EVAL_METRIC_VARIANCE,
   TK_EVAL_METRIC_POSITION,
+  TK_EVAL_METRIC_MEAN,
+  TK_EVAL_METRIC_MIN,
 } tk_eval_metric_t;
 
-static inline tk_eval_metric_t tk_eval_parse_metric(const char *metric_str) {
-  if (!strcmp(metric_str, "spearman"))
-    return TK_EVAL_METRIC_SPEARMAN;
+static inline tk_eval_metric_t tk_eval_parse_metric (const char *metric_str) {
+  if (!strcmp(metric_str, "pearson"))
+    return TK_EVAL_METRIC_PEARSON;
   if (!strcmp(metric_str, "biserial"))
     return TK_EVAL_METRIC_BISERIAL;
   if (!strcmp(metric_str, "variance"))
     return TK_EVAL_METRIC_VARIANCE;
   if (!strcmp(metric_str, "position"))
     return TK_EVAL_METRIC_POSITION;
+  if (!strcmp(metric_str, "mean"))
+    return TK_EVAL_METRIC_MEAN;
+  if (!strcmp(metric_str, "min"))
+    return TK_EVAL_METRIC_MIN;
   return TK_EVAL_METRIC_NONE;
 }
 
@@ -210,10 +216,22 @@ static inline void tm_clustering_accuracy (
             tk_iuset_put(itmp, neighbor, &kha);
           }
         }
-        double node_score = 0.0;
-        switch (metric) {
+
+        // Only process if node has same-cluster neighbors
+        if (tk_iuset_size(itmp) > 0) {
+          double node_score = 0.0;
+          switch (metric) {
+            case TK_EVAL_METRIC_PEARSON:
+              node_score = tk_csr_pearson(neighbors, weights, start, end, itmp);
+              break;
           case TK_EVAL_METRIC_BISERIAL:
-            node_score = tk_csr_biserial(neighbors, weights, start, end, itmp);
+            node_score = tk_csr_point_biserial(neighbors, weights, start, end, itmp);
+            break;
+          case TK_EVAL_METRIC_MEAN:
+            node_score = tk_csr_mean(neighbors, weights, start, end, itmp);
+            break;
+          case TK_EVAL_METRIC_MIN:
+            node_score = tk_csr_min(neighbors, weights, start, end, itmp);
             break;
           case TK_EVAL_METRIC_VARIANCE:
             node_score = tk_csr_variance_ratio(neighbors, weights, start, end, itmp, rank_buffer_b);
@@ -221,9 +239,10 @@ static inline void tm_clustering_accuracy (
           default:
             node_score = 0.0;
             break;
+          }
+          total_corr_score += node_score;
+          total_nodes_processed++;
         }
-        total_corr_score += node_score;
-        total_nodes_processed++;
       }
 
       tk_iuset_destroy(itmp);
@@ -254,7 +273,7 @@ static inline int tm_clustering_accuracy_lua (lua_State *L)
   tk_dvec_t *weights = tk_dvec_peek(L, -1, "weights");
   lua_pop(L, 1);
 
-  char *metric_str = tk_lua_foptstring(L, 1, "clustering_accuracy", "metric", "biserial");
+  char *metric_str = tk_lua_foptstring(L, 1, "clustering_accuracy", "metric", "mean");
   tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
   if (metric == TK_EVAL_METRIC_NONE)
     tk_lua_verror(L, 3, "clustering_accuracy", "metric", "unknown metric");
@@ -350,10 +369,24 @@ static inline void tm_retrieval_accuracy (
             tk_iuset_put(itmp, neighbor_pos, &kha);
           }
         }
-        double node_score = 0.0;
-        switch (metric) {
+
+        uint64_t neighbors_within = tk_iuset_size(itmp);
+
+        // Only process nodes that retrieved neighbors
+        if (neighbors_within > 0) {
+          double node_score = 0.0;
+          switch (metric) {
+            case TK_EVAL_METRIC_PEARSON:
+            node_score = tk_csr_pearson(neighbors, weights, start, end, itmp);
+            break;
           case TK_EVAL_METRIC_BISERIAL:
-            node_score = tk_csr_biserial(neighbors, weights, start, end, itmp);
+            node_score = tk_csr_point_biserial(neighbors, weights, start, end, itmp);
+            break;
+          case TK_EVAL_METRIC_MEAN:
+            node_score = tk_csr_mean(neighbors, weights, start, end, itmp);
+            break;
+          case TK_EVAL_METRIC_MIN:
+            node_score = tk_csr_min(neighbors, weights, start, end, itmp);
             break;
           case TK_EVAL_METRIC_VARIANCE:
             node_score = tk_csr_variance_ratio(neighbors, weights, start, end, itmp, rank_buffer_b);
@@ -361,9 +394,10 @@ static inline void tm_retrieval_accuracy (
           default:
             node_score = 0.0;
             break;
+          }
+          total_quality_score += node_score;
+          total_nodes_processed++;
         }
-        total_quality_score += node_score;
-        total_nodes_processed++;
       }
 
       tk_iuset_destroy(itmp);
@@ -427,7 +461,7 @@ static inline int tm_retrieval_accuracy_lua (lua_State *L)
 
   uint64_t margin = tk_lua_fcheckunsigned(L, 1, "retrieval_accuracy", "margin");
 
-  char *metric_str = tk_lua_foptstring(L, 1, "retrieval_accuracy", "metric", "biserial");
+  char *metric_str = tk_lua_foptstring(L, 1, "retrieval_accuracy", "metric", "mean");
   tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
   if (metric == TK_EVAL_METRIC_NONE)
     tk_lua_verror(L, 3, "retrieval_accuracy", "metric", "unknown metric");
@@ -1359,7 +1393,7 @@ static inline int tm_score_clustering (lua_State *L)
   tk_dvec_t *eval_weights = tk_dvec_peek(L, -1, "eval_weights");
   lua_pop(L, 1);
 
-  char *metric_str = tk_lua_foptstring(L, 1, "score_clustering", "metric", "biserial");
+  char *metric_str = tk_lua_foptstring(L, 1, "score_clustering", "metric", "mean");
   tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
   if (metric == TK_EVAL_METRIC_NONE)
     tk_lua_verror(L, 3, "score_clustering", "metric", "unknown metric");
@@ -1664,7 +1698,7 @@ static inline int tm_score_retrieval (lua_State *L)
   uint64_t min_margin = tk_lua_foptunsigned(L, 1, "score_retrieval", "min_margin", 0);
   uint64_t max_margin = tk_lua_foptunsigned(L, 1, "score_retrieval", "max_margin", n_dims);
 
-  char *metric_str = tk_lua_foptstring(L, 1, "score_retrieval", "metric", "biserial");
+  char *metric_str = tk_lua_foptstring(L, 1, "score_retrieval", "metric", "mean");
   tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
   if (metric == TK_EVAL_METRIC_NONE)
     tk_lua_verror(L, 3, "score_retrieval", "metric", "unknown metric");
@@ -1775,14 +1809,8 @@ static double tk_compute_reconstruction (
         }
         double corr;
         switch (eval_metric) {
-          case TK_EVAL_METRIC_SPEARMAN:
-            corr = tk_csr_spearman(
-              neighbors, weights, start, end,
-              bin_ranks,
-              mask_popcount,
-              count_buffer,
-              avgrank_buffer,
-              rank_buffer_b);
+          case TK_EVAL_METRIC_PEARSON:
+            corr = tk_csr_pearson_distance(neighbors, weights, start, end, bin_ranks, rank_buffer_b);
             break;
           case TK_EVAL_METRIC_POSITION:
             corr = tk_csr_position(
@@ -2055,7 +2083,7 @@ static inline int tm_optimize_bits (lua_State *L)
   double tolerance = tk_lua_foptnumber(L, 1, "optimize_bits", "tolerance", 1e-12);
   double metric_alpha = tk_lua_foptnumber(L, 1, "optimize_bits", "metric_alpha", -1.0);
 
-  char *metric_str = tk_lua_foptstring(L, 1, "optimize_bits", "metric", "spearman");
+  char *metric_str = tk_lua_foptstring(L, 1, "optimize_bits", "metric", "pearson");
   tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
   if (metric == TK_EVAL_METRIC_NONE)
     tk_lua_verror(L, 3, "optimize_bits", "metric", "unknown metric");

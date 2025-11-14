@@ -10,7 +10,9 @@ static inline tk_pvec_t *tm_add_anchor_edges_immediate(
 
 static inline tk_graph_t *tm_graph_create (
   lua_State *L,
-  tk_pvec_t *edges,
+  tk_ivec_t *seed_ids,
+  tk_ivec_t *seed_offsets,
+  tk_ivec_t *seed_neighbors,
   tk_inv_t *knn_inv,
   tk_ann_t *knn_ann,
   tk_hbi_t *knn_hbi,
@@ -38,6 +40,9 @@ static inline tk_graph_t *tm_graph_create (
   tk_graph_reweight_t reweight,
   int64_t sigma_k,
   double sigma_scale,
+  tk_ivec_t *knn_query_ids,
+  tk_ivec_t *knn_query_ivec,
+  tk_cvec_t *knn_query_cvec,
   uint64_t knn,
   uint64_t knn_cache,
   double knn_eps,
@@ -73,9 +78,9 @@ static inline void tm_add_knn (
   uint64_t knn = graph->knn;
   if (!graph->uids_hoods)
     return;
-  uint64_t max_hoods = graph->uids_hoods ? graph->uids_hoods->n : 0;
+  uint64_t max_hoods = graph->knn_query_ids ? graph->knn_query_ids->n : (graph->uids_hoods ? graph->uids_hoods->n : 0);
   for (uint64_t hood_idx = 0; hood_idx < max_hoods; hood_idx++) {
-    int64_t u = graph->uids_hoods->a[hood_idx];
+    int64_t u = graph->knn_query_ids ? graph->knn_query_ids->a[hood_idx] : graph->uids_hoods->a[hood_idx];
     uint32_t u_khi = tk_iumap_get(graph->uids_idx, u);
     if (u_khi == tk_iumap_end(graph->uids_idx))
       continue;
@@ -223,56 +228,66 @@ static inline void tm_process_seed_edges (
   lua_State *L,
   tk_graph_t *graph
 ) {
-  if (graph->edges == NULL || graph->edges->n == 0)
+  if (!graph->seed_ids || !graph->seed_offsets || !graph->seed_neighbors)
     return;
   int kha;
-  for (uint64_t i = 0; i < graph->edges->n; i++) {
-    int64_t u = graph->edges->a[i].i;
-    int64_t v = graph->edges->a[i].p;
-    uint32_t khi = tk_iumap_put(graph->uids_idx, u, &kha);
-    if (kha) {
-      tk_iumap_setval(graph->uids_idx, khi, (int64_t) graph->uids->n);
-      if (tk_ivec_push(graph->uids, u) != 0) {
-        tk_lua_verror(L, 2, "process_seed_edges", "allocation failed");
-        return;
+  for (uint64_t i = 0; i < graph->seed_ids->n; i++) {
+    int64_t u = graph->seed_ids->a[i];
+    int64_t start = graph->seed_offsets->a[i];
+    int64_t end = i < graph->seed_offsets->n - 1 ? graph->seed_offsets->a[i+1] : (int64_t) graph->seed_neighbors->n;
+    for (int64_t j = start; j < end; j++) {
+      int64_t v_idx = graph->seed_neighbors->a[j];
+      int64_t v = graph->seed_ids->a[v_idx];
+      uint32_t khi = tk_iumap_put(graph->uids_idx, u, &kha);
+      if (kha) {
+        tk_iumap_setval(graph->uids_idx, khi, (int64_t) graph->uids->n);
+        if (tk_ivec_push(graph->uids, u) != 0) {
+          tk_lua_verror(L, 2, "process_seed_edges", "allocation failed");
+          return;
+        }
       }
-    }
-    khi = tk_iumap_put(graph->uids_idx, v, &kha);
-    if (kha) {
-      tk_iumap_setval(graph->uids_idx, khi, (int64_t) graph->uids->n);
-      if (tk_ivec_push(graph->uids, v) != 0) {
-        tk_lua_verror(L, 2, "process_seed_edges", "allocation failed");
-        return;
+      khi = tk_iumap_put(graph->uids_idx, v, &kha);
+      if (kha) {
+        tk_iumap_setval(graph->uids_idx, khi, (int64_t) graph->uids->n);
+        if (tk_ivec_push(graph->uids, v) != 0) {
+          tk_lua_verror(L, 2, "process_seed_edges", "allocation failed");
+          return;
+        }
       }
     }
   }
-
 }
 
 static inline void tm_add_seed_edges_immediate(
   lua_State *L,
   tk_graph_t *graph
 ) {
-  if (graph->edges == NULL || graph->edges->n == 0)
+  if (!graph->seed_ids || !graph->seed_offsets || !graph->seed_neighbors)
     return;
   int kha;
   uint32_t khi;
-  for (uint64_t i = 0; i < graph->edges->n; i++) {
-    int64_t u = graph->edges->a[i].i;
-    int64_t v = graph->edges->a[i].p;
+  for (uint64_t i = 0; i < graph->seed_ids->n; i++) {
+    int64_t u = graph->seed_ids->a[i];
+    int64_t start = graph->seed_offsets->a[i];
+    int64_t end = i < graph->seed_offsets->n - 1 ? graph->seed_offsets->a[i+1] : (int64_t) graph->seed_neighbors->n;
+
+    for (int64_t j = start; j < end; j++) {
+      int64_t v_idx = graph->seed_neighbors->a[j];
+      int64_t v = graph->seed_ids->a[v_idx];
     uint32_t khi_u = tk_iumap_get(graph->uids_idx, u);
     uint32_t khi_v = tk_iumap_get(graph->uids_idx, v);
     if (khi_u == tk_iumap_end(graph->uids_idx) ||
         khi_v == tk_iumap_end(graph->uids_idx)) {
       continue;
     }
-    tk_edge_t e = tk_edge(u, v, 0.0);
-    khi = tk_euset_put(graph->pairs, e, &kha);
-    if (!kha)
-      continue;
-    tk_graph_add_adj(graph, u, v);
-    tk_dsu_union(graph->dsu, u, v);
-    graph->n_edges++;
+      tk_edge_t e = tk_edge(u, v, 0.0);
+      khi = tk_euset_put(graph->pairs, e, &kha);
+      if (!kha)
+        continue;
+      tk_graph_add_adj(graph, u, v);
+      tk_dsu_union(graph->dsu, u, v);
+      graph->n_edges++;
+    }
   }
 }
 
@@ -489,14 +504,32 @@ static inline void tm_run_knn_queries (
   bool have_index = graph->knn_inv != NULL || graph->knn_ann != NULL || graph->knn_hbi != NULL;
   if (!graph->knn || !graph->knn_cache || !have_index)
     return;
-  TK_INDEX_NEIGHBORHOODS(L,
-    graph->knn_inv, graph->knn_ann, graph->knn_hbi,
-    graph->knn_cache, graph->probe_radius, 1.0,
-    graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta, graph->knn_rank,
-    &graph->knn_inv_hoods, &graph->knn_ann_hoods, &graph->knn_hbi_hoods, &graph->uids_hoods);
-  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
-  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2);
-  lua_pop(L, 2);
+
+  if (graph->knn_query_ids) {
+    if (graph->knn_inv) {
+      tk_inv_neighborhoods_by_vecs(L, graph->knn_inv, graph->knn_query_ivec, graph->knn_cache,
+                                   0.0, 1.0, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
+                                   graph->knn_rank, &graph->knn_inv_hoods, &graph->uids_hoods);
+    } else if (graph->knn_ann) {
+      tk_ann_neighborhoods_by_vecs(L, graph->knn_ann, graph->knn_query_cvec, graph->knn_cache,
+                                   graph->probe_radius, 0, ~0ULL, &graph->knn_ann_hoods, &graph->uids_hoods);
+    } else if (graph->knn_hbi) {
+      tk_hbi_neighborhoods_by_vecs(L, graph->knn_hbi, graph->knn_query_cvec, graph->knn_cache,
+                                   0, ~0ULL, &graph->knn_hbi_hoods, &graph->uids_hoods);
+    }
+    tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
+    tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2);
+    lua_pop(L, 2);
+  } else {
+    TK_INDEX_NEIGHBORHOODS(L,
+      graph->knn_inv, graph->knn_ann, graph->knn_hbi,
+      graph->knn_cache, graph->probe_radius, 1.0,
+      graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta, graph->knn_rank,
+      &graph->knn_inv_hoods, &graph->knn_ann_hoods, &graph->knn_hbi_hoods, &graph->uids_hoods);
+    tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
+    tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2);
+    lua_pop(L, 2);
+  }
   if (graph->uids_hoods) {
     graph->uids_idx_hoods = tk_iumap_from_ivec(L, graph->uids_hoods);
     if (!graph->uids_idx_hoods)
@@ -504,6 +537,21 @@ static inline void tm_run_knn_queries (
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
     lua_pop(L, 1);
     int kha;
+
+    if (graph->knn_query_ids) {
+      for (uint64_t i = 0; i < graph->knn_query_ids->n; i++) {
+        int64_t uid = graph->knn_query_ids->a[i];
+        uint32_t khi = tk_iumap_put(graph->uids_idx, uid, &kha);
+        if (kha) {
+          tk_iumap_setval(graph->uids_idx, khi, (int64_t) graph->uids->n);
+          if (tk_ivec_push(graph->uids, uid) != 0) {
+            tk_lua_verror(L, 2, "graph_adj", "allocation failed");
+            return;
+          }
+        }
+      }
+    }
+
     for (uint64_t i = 0; i < graph->uids_hoods->n; i++) {
       int64_t uid = graph->uids_hoods->a[i];
       uint32_t khi = tk_iumap_put(graph->uids_idx, uid, &kha);
@@ -891,14 +939,31 @@ static inline int tm_adjacency (lua_State *L)
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
 
-  lua_getfield(L, 1, "edges");
-  tk_pvec_t *edges = tk_pvec_peekopt(L, -1);
+  lua_getfield(L, 1, "seed_ids");
+  tk_ivec_t *seed_ids = tk_ivec_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "seed_offsets");
+  tk_ivec_t *seed_offsets = tk_ivec_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "seed_neighbors");
+  tk_ivec_t *seed_neighbors = tk_ivec_peekopt(L, -1);
   lua_pop(L, 1);
 
   lua_getfield(L, 1, "knn_index");
   tk_inv_t *knn_inv = tk_inv_peekopt(L, -1);
   tk_ann_t *knn_ann = tk_ann_peekopt(L, -1);
   tk_hbi_t *knn_hbi = tk_hbi_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "knn_query_ids");
+  tk_ivec_t *knn_query_ids = tk_ivec_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "knn_query_codes");
+  tk_ivec_t *knn_query_ivec = tk_ivec_peekopt(L, -1);
+  tk_cvec_t *knn_query_cvec = knn_query_ivec ? NULL : tk_cvec_peekopt(L, -1);
   lua_pop(L, 1);
 
   const char *knn_cmp_str = tk_lua_foptstring(L, 1, "graph", "knn_cmp", "jaccard");
@@ -1010,6 +1075,15 @@ static inline int tm_adjacency (lua_State *L)
   if (knn > knn_cache)
     knn_cache = knn;
 
+  bool use_query_mode = (knn_query_ids != NULL && (knn_query_ivec != NULL || knn_query_cvec != NULL));
+
+  if (use_query_mode) {
+    if (knn_inv && !knn_query_ivec)
+      return luaL_error(L, "graph.adjacency: knn_query_codes must be ivec when knn_index is inv");
+    if ((knn_ann || knn_hbi) && !knn_query_cvec)
+      return luaL_error(L, "graph.adjacency: knn_query_codes must be cvec when knn_index is ann/hbi");
+  }
+
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
     lua_getfield(L, 1, "each");
@@ -1017,12 +1091,13 @@ static inline int tm_adjacency (lua_State *L)
   }
 
   tk_graph_t *graph = tm_graph_create(
-    L, edges,
+    L, seed_ids, seed_offsets, seed_neighbors,
     knn_inv, knn_ann, knn_hbi, knn_cmp, knn_cmp_alpha, knn_cmp_beta, knn_rank,
     category_inv, category_cmp, category_alpha, category_beta,
     category_anchors, category_knn, category_knn_decay, category_ranks,
     weight_inv, weight_ann, weight_hbi, weight_cmp, weight_alpha, weight_beta, weight_pooling,
     random_pairs, weight_eps, reweight, sigma_k, sigma_scale,
+    knn_query_ids, knn_query_ivec, knn_query_cvec,
     knn, knn_cache, knn_eps, bridge, probe_radius);
   int Gi = tk_lua_absindex(L, -1);
 
@@ -1321,7 +1396,9 @@ static inline int tm_adjacency (lua_State *L)
 
 static inline tk_graph_t *tm_graph_create (
   lua_State *L,
-  tk_pvec_t *edges,
+  tk_ivec_t *seed_ids,
+  tk_ivec_t *seed_offsets,
+  tk_ivec_t *seed_neighbors,
   tk_inv_t *knn_inv,
   tk_ann_t *knn_ann,
   tk_hbi_t *knn_hbi,
@@ -1349,6 +1426,9 @@ static inline tk_graph_t *tm_graph_create (
   tk_graph_reweight_t reweight,
   int64_t sigma_k,
   double sigma_scale,
+  tk_ivec_t *knn_query_ids,
+  tk_ivec_t *knn_query_ivec,
+  tk_cvec_t *knn_query_cvec,
   uint64_t knn,
   uint64_t knn_cache,
   double knn_eps,
@@ -1356,7 +1436,9 @@ static inline tk_graph_t *tm_graph_create (
   uint64_t probe_radius
 ) {
   tk_graph_t *graph = tk_lua_newuserdata(L, tk_graph_t, TK_GRAPH_MT, NULL, tm_graph_gc);
-  graph->edges = edges;
+  graph->seed_ids = seed_ids;
+  graph->seed_offsets = seed_offsets;
+  graph->seed_neighbors = seed_neighbors;
   graph->knn_inv = knn_inv;
   graph->knn_ann = knn_ann;
   graph->knn_hbi = knn_hbi;
@@ -1395,6 +1477,9 @@ static inline tk_graph_t *tm_graph_create (
   graph->knn_eps = knn_eps;
   graph->bridge = bridge;
   graph->probe_radius = probe_radius;
+  graph->knn_query_ids = knn_query_ids;
+  graph->knn_query_ivec = knn_query_ivec;
+  graph->knn_query_cvec = knn_query_cvec;
   graph->largest_component_root = -1;
   graph->pairs = tk_euset_create(L, 0);
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, lua_gettop(L), -1);
@@ -1445,28 +1530,6 @@ static inline int tm_adj_pairs (lua_State *L)
   return 4;
 }
 
-static inline int tm_star_hoods (lua_State *L)
-{
-  lua_settop(L, 3);
-
-  tk_ivec_t *ids = tk_ivec_peek(L, 1, "ids");
-  tk_inv_hoods_t *inv_hoods = tk_inv_hoods_peekopt(L, 2);
-  tk_ann_hoods_t *ann_hoods = tk_ann_hoods_peekopt(L, 2);
-  tk_hbi_hoods_t *hbi_hoods = tk_hbi_hoods_peekopt(L, 2);
-  if (!inv_hoods && !ann_hoods && !hbi_hoods)
-    tk_lua_verror(L, 2, "star_hoods", "hoods must be tk_inv_hoods_t, tk_ann_hoods_t, or tk_hbi_hoods_t");
-  uint64_t n_hoods = inv_hoods ? inv_hoods->n : ann_hoods ? ann_hoods->n : hbi_hoods->n;
-  if (n_hoods != ids->n)
-    tk_lua_verror(L, 2, "star_hoods", "hoods size must match ids size");
-  tk_pvec_t *pairs = NULL;
-  if (tk_graph_star_hoods(L, ids, inv_hoods, ann_hoods, hbi_hoods, &pairs) != 0)
-    tk_lua_verror(L, 2, "star_hoods", "failed to convert hoods");
-  lua_settop(L, 0);
-  tk_pvec_register(L, pairs);
-  lua_gc(L, LUA_GCCOLLECT, 0);
-  return 1;
-}
-
 static inline int tm_adj_hoods(lua_State *L)
 {
   lua_settop(L, 3);
@@ -1511,7 +1574,6 @@ static luaL_Reg tm_graph_fns[] =
 {
   { "adjacency", tm_adjacency },
   { "adj_pairs", tm_adj_pairs },
-  { "star_hoods", tm_star_hoods },
   { "adj_hoods", tm_adj_hoods },
   { NULL, NULL }
 };

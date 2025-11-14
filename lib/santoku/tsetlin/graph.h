@@ -44,10 +44,16 @@ typedef struct tk_graph_s {
 
   tk_euset_t *pairs;
   tk_graph_adj_t *adj;
+  tk_ivec_t *seed_ids;
+  tk_ivec_t *seed_offsets;
+  tk_ivec_t *seed_neighbors;
 
   tk_inv_t *knn_inv; tk_inv_hoods_t *knn_inv_hoods;
   tk_ann_t *knn_ann; tk_ann_hoods_t *knn_ann_hoods;
   tk_hbi_t *knn_hbi; tk_hbi_hoods_t *knn_hbi_hoods;
+  tk_ivec_t *knn_query_ids;
+  tk_ivec_t *knn_query_ivec;
+  tk_cvec_t *knn_query_cvec;
   tk_ivec_sim_type_t knn_cmp;
   double knn_cmp_alpha, knn_cmp_beta;
   int64_t knn_rank;
@@ -72,7 +78,6 @@ typedef struct tk_graph_s {
   tk_ivec_t *uids_hoods;
   tk_iumap_t *uids_idx;
   tk_iumap_t *uids_idx_hoods;
-  tk_pvec_t *edges;
 
   double weight_eps;
   tk_graph_reweight_t reweight;
@@ -489,213 +494,6 @@ cleanup:
   *out_neighbors = NULL;
   *out_weights = NULL;
   return -1;
-}
-
-static inline int tk_graph_star_hoods (
-  lua_State *L,
-  tk_ivec_t *ids,
-  tk_inv_hoods_t *inv_hoods,
-  tk_ann_hoods_t *ann_hoods,
-  tk_hbi_hoods_t *hbi_hoods,
-  tk_pvec_t **out_pairs
-) {
-  if (ids->n == 0) {
-    *out_pairs = tk_pvec_create(NULL, 0, 0, 0);
-    return *out_pairs ? 0 : -1;
-  }
-
-  *out_pairs = tk_pvec_create(NULL, 0, 0, 0);
-  if (!*out_pairs)
-    return -1;
-
-  bool has_error = false;
-
-  #pragma omp parallel reduction(||:has_error)
-  {
-    tk_pvec_t *local_pairs = tk_pvec_create(NULL, 0, 0, 0);
-    if (!local_pairs) {
-      has_error = true;
-    } else {
-      #pragma omp for schedule(static)
-      for (uint64_t idx = 0; idx < ids->n; idx++) {
-        if (has_error) continue;
-
-        int64_t id = ids->a[idx];
-        #define _tk_graph_process_hood(hood) \
-          do { \
-            for (uint64_t j = 0; j < (hood)->n; j++) { \
-              int64_t idxnbr = (hood)->a[j].i; \
-              if (idxnbr >= 0 && idxnbr < (int64_t)ids->n) { \
-                int64_t nbr = ids->a[idxnbr]; \
-                if (tk_pvec_push(local_pairs, tk_pair(id, nbr)) != 0) { \
-                  has_error = true; \
-                  break; \
-                } \
-              } \
-            } \
-          } while(0)
-
-        if (inv_hoods != NULL)
-          _tk_graph_process_hood(inv_hoods->a[idx]);
-        else if (ann_hoods != NULL)
-          _tk_graph_process_hood(ann_hoods->a[idx]);
-        else if (hbi_hoods != NULL)
-          _tk_graph_process_hood(hbi_hoods->a[idx]);
-
-        #undef _tk_graph_process_hood
-      }
-
-      #pragma omp critical
-      {
-        for (uint64_t j = 0; j < local_pairs->n; j++) {
-          if (tk_pvec_push(*out_pairs, local_pairs->a[j]) != 0) {
-            has_error = true;
-            break;
-          }
-        }
-      }
-
-      tk_pvec_destroy(local_pairs);
-    }
-  }
-
-  if (has_error) {
-    tk_pvec_destroy(*out_pairs);
-    *out_pairs = NULL;
-    return -1;
-  }
-
-  return 0;
-}
-
-static inline int tk_graph_anchor_pairs (
-  tk_ivec_t *ids,
-  tk_ivec_t *labels,
-  uint64_t n_anchors,
-  tk_pvec_t **out_pairs
-) {
-  if (ids->n == 0 || n_anchors == 0) {
-    *out_pairs = tk_pvec_create(NULL, 0, 0, 0);
-    return *out_pairs ? 0 : -1;
-  }
-
-  *out_pairs = tk_pvec_create(NULL, 0, 0, 0);
-  if (!*out_pairs)
-    return -1;
-
-  if (labels && labels->n == ids->n) {
-    tk_iumap_t **ids_by_label = NULL;
-    int64_t max_label = -1;
-
-    for (uint64_t i = 0; i < labels->n; i++) {
-      int64_t lbl = labels->a[i];
-      if (lbl > max_label)
-        max_label = lbl;
-    }
-
-    if (max_label < 0)
-      return 0;
-
-    ids_by_label = calloc((uint64_t) max_label + 1, sizeof(tk_iumap_t *));
-    if (!ids_by_label) {
-      tk_pvec_destroy(*out_pairs);
-      return -1;
-    }
-
-    for (uint64_t i = 0; i < ids->n; i++) {
-      int64_t lbl = labels->a[i];
-      if (lbl == -1)
-        continue;
-      if (!ids_by_label[lbl]) {
-        ids_by_label[lbl] = tk_iumap_create(NULL, 0);
-        if (!ids_by_label[lbl]) goto cleanup_label;
-      }
-      int kha;
-      tk_iumap_put(ids_by_label[lbl], ids->a[i], &kha);
-    }
-
-    for (int64_t lbl = 0; lbl <= max_label; lbl++) {
-      if (!ids_by_label[lbl])
-        continue;
-      uint64_t n_in_class = tk_iumap_size(ids_by_label[lbl]);
-      if (n_in_class == 0)
-        continue;
-
-      uint64_t n_label_anchors = n_anchors < n_in_class ? n_anchors : n_in_class;
-      tk_iuset_t *selected_anchors = tk_iuset_create(NULL, 0);
-      if (!selected_anchors) goto cleanup_label;
-
-      while (tk_iuset_size(selected_anchors) < n_label_anchors) {
-        uint32_t rand_k = tk_iumap_begin(ids_by_label[lbl]);
-        uint64_t skip = tk_fast_random() % tk_iumap_size(ids_by_label[lbl]);
-        for (uint64_t s = 0; s < skip && rand_k != tk_iumap_end(ids_by_label[lbl]); s++)
-          rand_k++;
-        if (rand_k != tk_iumap_end(ids_by_label[lbl])) {
-          int64_t anchor = tk_iumap_key(ids_by_label[lbl], rand_k);
-          int kha;
-          tk_iuset_put(selected_anchors, anchor, &kha);
-        }
-      }
-
-      for (uint32_t k = tk_iumap_begin(ids_by_label[lbl]); k != tk_iumap_end(ids_by_label[lbl]); k++) {
-        if (!tk_iumap_exist(ids_by_label[lbl], k))
-          continue;
-        int64_t id = tk_iumap_key(ids_by_label[lbl], k);
-        for (uint32_t ak = tk_iuset_begin(selected_anchors); ak != tk_iuset_end(selected_anchors); ak++) {
-          if (!tk_iuset_exist(selected_anchors, ak))
-            continue;
-          int64_t anchor = tk_iuset_key(selected_anchors, ak);
-          if (id != anchor) {
-            if (tk_pvec_push(*out_pairs, tk_pair(id, anchor)) != 0) {
-              tk_iuset_destroy(selected_anchors);
-              goto cleanup_label;
-            }
-          }
-        }
-      }
-      tk_iuset_destroy(selected_anchors);
-    }
-
-cleanup_label:
-    for (int64_t lbl = 0; lbl <= max_label; lbl++)
-      if (ids_by_label[lbl])
-        tk_iumap_destroy(ids_by_label[lbl]);
-    free(ids_by_label);
-
-  } else {
-    tk_iuset_t *selected_anchors = tk_iuset_create(NULL, 0);
-    if (!selected_anchors) {
-      tk_pvec_destroy(*out_pairs);
-      return -1;
-    }
-
-    uint64_t n_actual = n_anchors < ids->n ? n_anchors : ids->n;
-    while (tk_iuset_size(selected_anchors) < n_actual) {
-      uint64_t rand_idx = tk_fast_random() % ids->n;
-      int64_t anchor = ids->a[rand_idx];
-      int kha;
-      tk_iuset_put(selected_anchors, anchor, &kha);
-    }
-
-    for (uint64_t i = 0; i < ids->n; i++) {
-      int64_t id = ids->a[i];
-      for (uint32_t k = tk_iuset_begin(selected_anchors); k != tk_iuset_end(selected_anchors); k++) {
-        if (!tk_iuset_exist(selected_anchors, k))
-          continue;
-        int64_t anchor = tk_iuset_key(selected_anchors, k);
-        if (id != anchor) {
-          if (tk_pvec_push(*out_pairs, tk_pair(id, anchor)) != 0) {
-            tk_iuset_destroy(selected_anchors);
-            tk_pvec_destroy(*out_pairs);
-            return -1;
-          }
-        }
-      }
-    }
-    tk_iuset_destroy(selected_anchors);
-  }
-
-  return 0;
 }
 
 static inline int tk_graph_random_pairs (
