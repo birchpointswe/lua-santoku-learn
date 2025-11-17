@@ -95,20 +95,24 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
   out->n = n_samples * n_latent_bytes;
   memset(out->a, 0, out->n);
 
-  size_t code_bytes = TK_CVEC_BITS_BYTES(enc->n_hidden);
-
   if (n_samples == 1) {
     tk_ivec_t *tmp = tk_ivec_create(NULL, 0, 0, 0);
     int64_t nbr_idx, nbr_uid;
     TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, feat_hbi, inv_hoods, ann_hoods, hbi_hoods, 0, 1.0, nbr_ids, nbr_idx, nbr_uid, {
       tk_ivec_push(tmp, nbr_uid);
     });
-    for (uint64_t j = 0; j < tmp->n; j++) {
+    uint64_t bit_offset = 0;
+    for (uint64_t j = 0; j < tmp->n && j < enc->n_landmarks; j++) {
       char *code_data = code_ann ? tk_ann_get(code_ann, tmp->a[j]) : tk_hbi_get(code_hbi, tmp->a[j]);
       if (code_data != NULL) {
-        uint64_t byte_offset = j * code_bytes;
-        memcpy((uint8_t *)out->a + byte_offset, code_data, code_bytes);
+        for (uint64_t b = 0; b < enc->n_hidden; b++) {
+          if (code_data[TK_CVEC_BITS_BYTE(b)] & (1 << TK_CVEC_BITS_BIT(b))) {
+            uint64_t dst_bit = bit_offset + b;
+            ((uint8_t *)out->a)[TK_CVEC_BITS_BYTE(dst_bit)] |= (1 << TK_CVEC_BITS_BIT(dst_bit));
+          }
+        }
       }
+      bit_offset += enc->n_hidden;
     }
     tk_ivec_destroy(tmp);
   } else {
@@ -123,18 +127,18 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
           tk_ivec_push(tmp, nbr_uid);
         });
         uint8_t *sample_dest = (uint8_t *)out->a + i * n_latent_bytes;
-        for (uint64_t j = 0; j < tmp->n; j++) {
+        uint64_t bit_offset = 0;
+        for (uint64_t j = 0; j < tmp->n && j < enc->n_landmarks; j++) {
           char *code_data = code_ann ? tk_ann_get(code_ann, tmp->a[j]) : tk_hbi_get(code_hbi, tmp->a[j]);
           if (code_data != NULL) {
-            uint64_t byte_offset = j * code_bytes;
-            memcpy(sample_dest + byte_offset, code_data, code_bytes);
+            for (uint64_t b = 0; b < enc->n_hidden; b++) {
+              if (code_data[TK_CVEC_BITS_BYTE(b)] & (1 << TK_CVEC_BITS_BIT(b))) {
+                uint64_t dst_bit = bit_offset + b;
+                sample_dest[TK_CVEC_BITS_BYTE(dst_bit)] |= (1 << TK_CVEC_BITS_BIT(dst_bit));
+              }
+            }
           }
-        }
-        if (n_latent_bits % CHAR_BIT != 0) {
-          uint64_t last_byte = n_latent_bits / CHAR_BIT;
-          uint8_t valid_bits = n_latent_bits % CHAR_BIT;
-          uint8_t mask = (1 << valid_bits) - 1;
-          sample_dest[last_byte] &= mask;
+          bit_offset += enc->n_hidden;
         }
       }
       tk_ivec_destroy(tmp);

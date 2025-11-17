@@ -184,7 +184,7 @@ static inline int tk_booleanizer_encode_dvec (
         khint_t k = tk_cat_bits_double_get(B->cat_bits_double, key);
         if (k != tk_cat_bits_double_end(B->cat_bits_double)) {
           int64_t bit_id = tk_cat_bits_double_val(B->cat_bits_double, k);
-          if (tk_ivec_push(out, bit_id) != 0)
+          if (tk_ivec_push(out, (int64_t) i * (int64_t) B->next_feature + bit_id) != 0)
             return -1;
         }
       } else {
@@ -476,9 +476,14 @@ static inline void tk_booleanizer_finalize (
         tk_cuset_t *values = tk_observed_strings_val(B->observed_strings, kho);
         const char *value;
         tk_umap_foreach_keys(values, value, ({
-          tk_cat_bit_string_t key = { .f = id_feature, .v = (char *) value };
+          size_t len = strlen(value);
+          char *value_copy = (char *) lua_newuserdata(L, len + 1);
+          memcpy(value_copy, value, len + 1);
+          tk_cat_bit_string_t key = { .f = id_feature, .v = value_copy };
           khint_t outk = tk_cat_bits_string_put(B->cat_bits_string, key, &kha);
           tk_cat_bits_string_setval(B->cat_bits_string, outk, (int64_t) B->next_feature ++);
+          tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+          lua_pop(L, 1);
         }));
       }
       kho = tk_observed_doubles_get(B->observed_doubles, id_feature);
@@ -507,21 +512,6 @@ static inline void tk_booleanizer_finalize (
   B->finalized = true;
   lua_remove(L, i_value_vec);
   tk_iuset_destroy(seen_features);
-}
-
-static inline int64_t tk_booleanizer_attributes (
-  lua_State *L,
-  tk_booleanizer_t *B
-) {
-  if (B->destroyed) {
-    tk_lua_verror(L, 2, "attributes", "can't query a destroyed booleanizer");
-    return -1;
-  }
-  if (!B->finalized) {
-    tk_lua_verror(L, 2, "attributes", "finalize must be called before attributes");
-    return -1;
-  }
-  return (int64_t) B->next_attr;
 }
 
 static inline int64_t tk_booleanizer_features (
@@ -912,13 +902,6 @@ static inline int tk_booleanizer_finalize_lua (lua_State *L)
   return 0;
 }
 
-static inline int tk_booleanizer_attributes_lua (lua_State *L)
-{
-  tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
-  lua_pushinteger(L, tk_booleanizer_attributes(L, B));
-  return 1;
-}
-
 static inline int tk_booleanizer_features_lua (lua_State *L)
 {
   tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
@@ -972,13 +955,117 @@ static inline int tk_booleanizer_destroy_lua (lua_State *L)
   return 0;
 }
 
+static inline int tk_booleanizer_feature_lua (lua_State *L)
+{
+  lua_settop(L, 3);
+  tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
+  if (!B->finalized) {
+    tk_lua_verror(L, 2, "feature", "finalize must be called before feature");
+    return 0;
+  }
+
+  int t_attr = lua_type(L, 2);
+  int t_val = lua_type(L, 3);
+
+  if (t_attr == LUA_TNUMBER && t_val == LUA_TNUMBER) {
+    int64_t attr = lua_tointeger(L, 2);
+    double val = lua_tonumber(L, 3);
+    if (tk_booleanizer_is_categorical(B, attr)) {
+      tk_cat_bit_double_t key = { .f = attr, .v = val };
+      khint_t k = tk_cat_bits_double_get(B->cat_bits_double, key);
+      if (k != tk_cat_bits_double_end(B->cat_bits_double)) {
+        lua_pushinteger(L, tk_cat_bits_double_val(B->cat_bits_double, k));
+        return 1;
+      }
+    } else {
+      tk_lua_verror(L, 3, "feature", "continuous features not supported");
+      return 0;
+    }
+  } else if (t_attr == LUA_TSTRING && t_val == LUA_TSTRING) {
+    const char *attr = lua_tostring(L, 2);
+    const char *val = lua_tostring(L, 3);
+    khint_t k_attr = tk_zumap_get(B->string_features, attr);
+    if (k_attr == tk_zumap_end(B->string_features))
+      return 0;
+    int64_t attr_id = tk_zumap_val(B->string_features, k_attr);
+    tk_cat_bit_string_t key = { .f = attr_id, .v = (char *) val };
+    khint_t k = tk_cat_bits_string_get(B->cat_bits_string, key);
+    if (k != tk_cat_bits_string_end(B->cat_bits_string)) {
+      lua_pushinteger(L, tk_cat_bits_string_val(B->cat_bits_string, k));
+      return 1;
+    }
+  } else {
+    tk_lua_verror(L, 3, "feature", "both arguments must be numbers or both strings");
+    return 0;
+  }
+
+  return 0;
+}
+
+static inline int tk_booleanizer_index_lua (lua_State *L)
+{
+  lua_settop(L, 1);
+  tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
+  if (!B->finalized) {
+    tk_lua_verror(L, 2, "index", "finalize must be called before index");
+    return 0;
+  }
+
+  lua_newtable(L);
+
+  tk_cat_bit_string_t key_s;
+  int64_t bit_id;
+  tk_umap_foreach(B->cat_bits_string, key_s, bit_id, ({
+    lua_pushinteger(L, bit_id + 1);
+    lua_newtable(L);
+
+    const char *attr_name = NULL;
+    const char *z;
+    int64_t attr_id;
+    tk_umap_foreach(B->string_features, z, attr_id, ({
+      if (attr_id == key_s.f) {
+        attr_name = z;
+        break;
+      }
+    }));
+
+    lua_pushstring(L, "attribute");
+    lua_pushstring(L, attr_name ? attr_name : "");
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "value");
+    lua_pushstring(L, key_s.v);
+    lua_settable(L, -3);
+
+    lua_settable(L, -3);
+  }));
+
+  tk_cat_bit_double_t key_d;
+  tk_umap_foreach(B->cat_bits_double, key_d, bit_id, ({
+    lua_pushinteger(L, bit_id + 1);
+    lua_newtable(L);
+
+    lua_pushstring(L, "attribute");
+    lua_pushinteger(L, key_d.f);
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "value");
+    lua_pushnumber(L, key_d.v);
+    lua_settable(L, -3);
+
+    lua_settable(L, -3);
+  }));
+
+  return 1;
+}
+
 static luaL_Reg tk_booleanizer_mt_fns[] =
 {
   { "observe", tk_booleanizer_observe_lua },
   { "encode", tk_booleanizer_encode_lua },
-  { "attributes", tk_booleanizer_attributes_lua },
   { "features", tk_booleanizer_features_lua },
-  { "bit", tk_booleanizer_bit_lua },
+  { "feature", tk_booleanizer_feature_lua },
+  { "index", tk_booleanizer_index_lua },
   { "finalize", tk_booleanizer_finalize_lua },
   { "restrict", tk_booleanizer_restrict_lua },
   { "persist", tk_booleanizer_persist_lua },
