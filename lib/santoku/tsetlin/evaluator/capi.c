@@ -17,9 +17,9 @@
 typedef enum {
   TK_EVAL_METRIC_NONE,
   TK_EVAL_METRIC_PEARSON,
+  TK_EVAL_METRIC_KENDALL,
   TK_EVAL_METRIC_BISERIAL,
   TK_EVAL_METRIC_VARIANCE,
-  TK_EVAL_METRIC_POSITION,
   TK_EVAL_METRIC_MEAN,
   TK_EVAL_METRIC_MIN,
 } tk_eval_metric_t;
@@ -27,12 +27,12 @@ typedef enum {
 static inline tk_eval_metric_t tk_eval_parse_metric (const char *metric_str) {
   if (!strcmp(metric_str, "pearson"))
     return TK_EVAL_METRIC_PEARSON;
+  if (!strcmp(metric_str, "kendall"))
+    return TK_EVAL_METRIC_KENDALL;
   if (!strcmp(metric_str, "biserial"))
     return TK_EVAL_METRIC_BISERIAL;
   if (!strcmp(metric_str, "variance"))
     return TK_EVAL_METRIC_VARIANCE;
-  if (!strcmp(metric_str, "position"))
-    return TK_EVAL_METRIC_POSITION;
   if (!strcmp(metric_str, "mean"))
     return TK_EVAL_METRIC_MEAN;
   if (!strcmp(metric_str, "min"))
@@ -225,7 +225,7 @@ static inline void tm_clustering_accuracy (
               node_score = tk_csr_pearson(neighbors, weights, start, end, itmp);
               break;
           case TK_EVAL_METRIC_BISERIAL:
-            node_score = tk_csr_point_biserial(neighbors, weights, start, end, itmp);
+            node_score = tk_csr_pearson(neighbors, weights, start, end, itmp);
             break;
           case TK_EVAL_METRIC_MEAN:
             node_score = tk_csr_mean(neighbors, weights, start, end, itmp);
@@ -380,7 +380,7 @@ static inline void tm_retrieval_accuracy (
             node_score = tk_csr_pearson(neighbors, weights, start, end, itmp);
             break;
           case TK_EVAL_METRIC_BISERIAL:
-            node_score = tk_csr_point_biserial(neighbors, weights, start, end, itmp);
+            node_score = tk_csr_pearson(neighbors, weights, start, end, itmp);
             break;
           case TK_EVAL_METRIC_MEAN:
             node_score = tk_csr_mean(neighbors, weights, start, end, itmp);
@@ -1812,11 +1812,8 @@ static double tk_compute_reconstruction (
           case TK_EVAL_METRIC_PEARSON:
             corr = tk_csr_pearson_distance(neighbors, weights, start, end, bin_ranks, rank_buffer_b);
             break;
-          case TK_EVAL_METRIC_POSITION:
-            corr = tk_csr_position(
-              neighbors, start, end,
-              bin_ranks,
-              rank_buffer_b);
+          case TK_EVAL_METRIC_KENDALL:
+            corr = tk_csr_kendall_tau_distance(neighbors, weights, start, end, bin_ranks, rank_buffer_b);
             break;
           default:
             corr = 0.0;

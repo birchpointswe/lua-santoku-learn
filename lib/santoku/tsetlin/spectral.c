@@ -658,7 +658,7 @@ static inline int tm_encode (lua_State *L)
   uint64_t block_size = tk_lua_foptunsigned(L, 1, "spectral", "block_size", 64);
   block_size = block_size ? block_size : 1;
   uint64_t n_hidden = tk_lua_fcheckunsigned(L, 1, "spectral", "n_hidden");
-  double eps = tk_lua_foptnumber(L, 1, "spectral", "eps", 1e-12);
+  double eps = tk_lua_foptnumber(L, 1, "spectral", "eps", 1e-8);
 
   const char *type_str = tk_lua_foptstring(L, 1, "spectral", "type", "unnormalized");
   tk_laplacian_type_t laplacian_type = TK_LAPLACIAN_UNNORMALIZED;

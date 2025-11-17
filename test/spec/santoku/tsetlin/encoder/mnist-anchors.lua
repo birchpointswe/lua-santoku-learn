@@ -25,7 +25,8 @@ local cfg; cfg = {
     max = nil,
     max_class = nil,
     visible = 784,
-    hidden = 24,
+    n_dims_spectral = 32,
+    n_dims_simhash = 64,
     landmarks = 24,
   },
   mode = {
@@ -43,36 +44,22 @@ local cfg; cfg = {
     ann = true,
   },
   spectral = {
-    laplacian = "random",
+    laplacian = "unnormalized",
     method = "jdqr",
     precondition = "ic",
-    primme_eps = 1e-6,
+    primme_eps = 1e-8,
   },
   simhash = {
     ranks = 1,
     quantiles = nil,
-  },
-  sr = {
-    eps = 1e-12,
-    iterations = 10000,
   },
   itq = {
     eps = 1e-12,
     iterations = 1000,
   },
   graph = {
-    reweight = nil,
-    weight_cmp = nil,
-    weight_alpha = nil,
-    weight_beta = nil,
-    knn = 32,
-    knn_min = nil,
-    knn_cache = nil,
-    knn_mutual = false,
-    category_anchors = nil,
-    category_knn = nil,
-    category_knn_decay = nil,
-    sigma_k = nil,
+    knn = 8,
+    knn_cache = 12,
     decay = 4.0,
     bridge = "mst",
   },
@@ -100,11 +87,11 @@ local cfg; cfg = {
     knn = 256
   },
   bits = {
-    sel = false,
+    sel = true,
     keep_prefix = nil,
     start_prefix = nil,
     sffs_tolerance = nil,
-    sffs_fixed = nil,
+    sffs_fixed = 9,
   },
   tm = {
     clauses = 8, --{ def = 8, min = 8, max = 32, int = true, log = true, pow2 = true },
@@ -132,7 +119,9 @@ test("tsetlin", function ()
 
   local dataset = ds.read_binary_mnist("test/res/mnist.70k.txt", cfg.data.visible, cfg.data.max, cfg.data.max_class)
   dataset.n_visible = cfg.data.visible
-  dataset.n_hidden = cfg.data.hidden
+  dataset.n_hidden =
+    (cfg.mode.codes == "spectral" and cfg.data.n_dims_spectral) or
+    (cfg.mode.codes == "simhash" and cfg.data.n_dims_simhash) or error("invalid dims")
   dataset.n_landmarks = cfg.data.landmarks
   collectgarbage("collect")
 
@@ -165,49 +154,49 @@ test("tsetlin", function ()
     train.node_combined:add(graph_problems, graph_ids)
   end
 
-  print("Creating graph")
   local stopwatch = utc.stopwatch()
-  train.adj_ids,
-  train.adj_offsets,
-  train.adj_neighbors,
-  train.adj_weights =
-    graph.adjacency({
-      reweight = cfg.graph.reweight,
-      weight_index = train.node_combined,
-      weight_cmp = cfg.graph.weight_cmp,
-      weight_alpha = cfg.graph.weight_alpha,
-      weight_beta = cfg.graph.weight_beta,
-      category_index = train.node_combined,
-      category_anchors = cfg.graph.category_anchors,
-      category_knn = cfg.graph.category_knn,
-      category_knn_decay = cfg.graph.category_knn_decay,
-      category_ranks = 1,
-      random_pairs = cfg.graph.random_pairs,
-      knn_index = train.node_features,
-      knn = cfg.graph.knn,
-      knn_min = cfg.graph.knn_min,
-      knn_mutual = cfg.graph.knn_mutual,
-      knn_cache = cfg.graph.knn_cache,
-      knn_rank = 1,
-      sigma_k = cfg.graph.sigma_k,
-      bridge = cfg.graph.bridge,
-      each = function (ids, s, b, dt)
-        local d, dd = stopwatch()
-        str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Nodes: %-6d  Components: %-6d  Edges: %-6d\n", d, dd, dt, ids, s, b)
-      end
-    })
-
-  train.node_features:destroy()
-  collectgarbage("collect")
-
-  print("Weight stats")
-  str.printf("  Max: %.6f  Min: %.6f:  Avg: %.6f\n",
-    (train.adj_weights:max()),
-    (train.adj_weights:min()),
-    (train.adj_weights:sum() / train.adj_weights:size()))
 
   if cfg.mode.codes == "spectral" then
-    print("Spectral eigendecomposition")
+
+    print("Creating graph")
+    train.adj_ids,
+    train.adj_offsets,
+    train.adj_neighbors,
+    train.adj_weights =
+      graph.adjacency({
+        reweight = cfg.graph.reweight,
+        weight_index = train.node_combined,
+        weight_cmp = cfg.graph.weight_cmp,
+        weight_alpha = cfg.graph.weight_alpha,
+        weight_beta = cfg.graph.weight_beta,
+        category_index = train.node_combined,
+        category_anchors = cfg.graph.category_anchors,
+        category_knn = cfg.graph.category_knn,
+        category_knn_decay = cfg.graph.category_knn_decay,
+        category_ranks = 1,
+        random_pairs = cfg.graph.random_pairs,
+        knn_index = train.node_features,
+        knn = cfg.graph.knn,
+        knn_min = cfg.graph.knn_min,
+        knn_mutual = cfg.graph.knn_mutual,
+        knn_cache = cfg.graph.knn_cache,
+        knn_rank = 1,
+        sigma_k = cfg.graph.sigma_k,
+        bridge = cfg.graph.bridge,
+        each = function (ids, s, b, dt)
+          local d, dd = stopwatch()
+          str.printf("  Time: %6.2f %6.2f  Stage: %-12s  Nodes: %-6d  Components: %-6d  Edges: %-6d\n", d, dd, dt, ids, s, b)
+        end
+      })
+    collectgarbage("collect")
+
+    print("Weight stats")
+    str.printf("  Max: %.6f  Min: %.6f:  Avg: %.6f\n",
+      (train.adj_weights:max()),
+      (train.adj_weights:min()),
+      (train.adj_weights:sum() / train.adj_weights:size()))
+
+    print("Spectral hashing")
     train.ids_spectral, train.codes_spectral = spectral.encode({
       method = cfg.spectral.method,
       precondition = cfg.spectral.precondition,
@@ -233,7 +222,9 @@ test("tsetlin", function ()
     })
     train.node_combined:destroy()
     collectgarbage("collect")
+
   elseif cfg.mode.codes == "simhash" then
+
     print("Simhash")
     train.ids_simhash, train.codes_simhash = simhash.encode(train.node_combined, dataset.n_hidden, cfg.simhash.ranks, cfg.simhash.quantiles)
     train.ids_spectral = ivec.create()
@@ -242,6 +233,7 @@ test("tsetlin", function ()
     train.codes_spectral:bits_extend(train.codes_simhash, train.ids_spectral, train.ids_simhash, 0, dataset.n_hidden, true)
     train.node_combined:destroy()
     collectgarbage("collect")
+
   end
 
   if cfg.mode.codes == "spectral" then
@@ -257,32 +249,6 @@ test("tsetlin", function ()
           str.printf("  ITQ completed in %s itrs. Objective %f → %f\n", i, a, b)
         end
       })
-    elseif cfg.mode.binarize == "sr-ranking" then
-      print("Spectral Rotation (Rank-Aware)")
-      train.codes_spectral = itq.sr_ranking({
-        codes = train.codes_spectral,
-        n_dims = dataset.n_hidden,
-        ids = train.adj_ids,
-        offsets = train.adj_offsets,
-        neighbors = train.adj_neighbors,
-        weights = train.adj_weights,
-        tolerance = cfg.sr.eps,
-        iterations = cfg.sr.iterations,
-        each = function (i, a, b)
-          str.printf("  SR-Ranking completed in %s itrs. Objective %f → %f\n", i, a, b)
-        end
-      })
-    elseif cfg.mode.binarize == "sr" then
-      print("Spectral Rotation")
-      train.codes_spectral = itq.sr({
-        codes = train.codes_spectral,
-        n_dims = dataset.n_hidden,
-        tolerance = cfg.sr.eps,
-        iterations = cfg.sr.iterations,
-        each = function (i, a, b)
-          str.printf("  SR completed in %s itrs. Objective %f → %f\n", i, a, b)
-        end
-      })
     elseif cfg.mode.binarize == "median" then
       print("Median thresholding")
       train.codes_spectral = itq.median({
@@ -292,12 +258,6 @@ test("tsetlin", function ()
     elseif cfg.mode.binarize == "sign" then
       print("Sign thresholding")
       train.codes_spectral = itq.sign({
-        codes = train.codes_spectral,
-        n_dims = dataset.n_hidden,
-      })
-    elseif cfg.mode.binarize == "dbq" then
-      print("DBQ thresholding")
-      train.codes_spectral, dataset.n_hidden = itq.dbq({
         codes = train.codes_spectral,
         n_dims = dataset.n_hidden,
       })
