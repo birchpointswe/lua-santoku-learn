@@ -13,6 +13,10 @@ static inline tk_graph_t *tm_graph_create (
   tk_ivec_t *seed_ids,
   tk_ivec_t *seed_offsets,
   tk_ivec_t *seed_neighbors,
+  tk_ivec_t *bipartite_ids,
+  tk_ivec_t *bipartite_features,
+  tk_ivec_t *bipartite_nodes,
+  uint64_t bipartite_dims,
   tk_inv_t *knn_inv,
   tk_ann_t *knn_ann,
   tk_hbi_t *knn_hbi,
@@ -289,6 +293,86 @@ static inline void tm_add_seed_edges_immediate(
       tk_dsu_union(graph->dsu, u, v);
       graph->n_edges++;
     }
+  }
+}
+
+static inline void tm_process_bipartite_edges (
+  lua_State *L,
+  tk_graph_t *graph
+) {
+  if (!graph->bipartite_features || graph->bipartite_dims == 0)
+    return;
+  int kha;
+
+  // Collect all source nodes from bipartite_ids
+  if (graph->bipartite_ids) {
+    for (uint64_t i = 0; i < graph->bipartite_ids->n; i++) {
+      int64_t uid = graph->bipartite_ids->a[i];
+      uint32_t khi = tk_iumap_put(graph->uids_idx, uid, &kha);
+      if (kha) {
+        tk_iumap_setval(graph->uids_idx, khi, (int64_t) graph->uids->n);
+        if (tk_ivec_push(graph->uids, uid) != 0) {
+          tk_lua_verror(L, 2, "process_bipartite_edges", "allocation failed");
+          return;
+        }
+      }
+    }
+  }
+
+  // Collect all target nodes from bipartite_nodes
+  if (graph->bipartite_nodes) {
+    for (uint64_t i = 0; i < graph->bipartite_nodes->n; i++) {
+      int64_t uid = graph->bipartite_nodes->a[i];
+      uint32_t khi = tk_iumap_put(graph->uids_idx, uid, &kha);
+      if (kha) {
+        tk_iumap_setval(graph->uids_idx, khi, (int64_t) graph->uids->n);
+        if (tk_ivec_push(graph->uids, uid) != 0) {
+          tk_lua_verror(L, 2, "process_bipartite_edges", "allocation failed");
+          return;
+        }
+      }
+    }
+  }
+}
+
+static inline void tm_add_bipartite_edges_immediate(
+  lua_State *L,
+  tk_graph_t *graph
+) {
+  if (!graph->bipartite_features || graph->bipartite_dims == 0)
+    return;
+
+  int kha;
+  uint32_t khi;
+
+  for (uint64_t bit_idx = 0; bit_idx < graph->bipartite_features->n; bit_idx++) {
+    int64_t bit_pos = graph->bipartite_features->a[bit_idx];
+    int64_t sample_idx = bit_pos / (int64_t)graph->bipartite_dims;
+    int64_t feature_idx = bit_pos % (int64_t)graph->bipartite_dims;
+
+    // Bounds checking
+    if (sample_idx < 0 || sample_idx >= (int64_t)graph->bipartite_ids->n)
+      continue;
+    if (feature_idx < 0 || feature_idx >= (int64_t)graph->bipartite_nodes->n)
+      continue;
+
+    int64_t u = graph->bipartite_ids->a[sample_idx];
+    int64_t v = graph->bipartite_nodes->a[feature_idx];
+
+    uint32_t khi_u = tk_iumap_get(graph->uids_idx, u);
+    uint32_t khi_v = tk_iumap_get(graph->uids_idx, v);
+    if (khi_u == tk_iumap_end(graph->uids_idx) ||
+        khi_v == tk_iumap_end(graph->uids_idx))
+      continue;
+
+    tk_edge_t e = tk_edge(u, v, 0.0);
+    khi = tk_euset_put(graph->pairs, e, &kha);
+    if (!kha)
+      continue;
+
+    tk_graph_add_adj(graph, u, v);
+    tk_dsu_union(graph->dsu, u, v);
+    graph->n_edges++;
   }
 }
 
@@ -901,6 +985,20 @@ static inline int tm_adjacency (lua_State *L)
   tk_ivec_t *seed_neighbors = tk_ivec_peekopt(L, -1);
   lua_pop(L, 1);
 
+  lua_getfield(L, 1, "bipartite_ids");
+  tk_ivec_t *bipartite_ids = tk_ivec_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "bipartite_features");
+  tk_ivec_t *bipartite_features = tk_ivec_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "bipartite_nodes");
+  tk_ivec_t *bipartite_nodes = tk_ivec_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  uint64_t bipartite_dims = tk_lua_foptunsigned(L, 1, "graph", "bipartite_dims", 0);
+
   lua_getfield(L, 1, "knn_index");
   tk_inv_t *knn_inv = tk_inv_peekopt(L, -1);
   tk_ann_t *knn_ann = tk_ann_peekopt(L, -1);
@@ -1035,6 +1133,7 @@ static inline int tm_adjacency (lua_State *L)
 
   tk_graph_t *graph = tm_graph_create(
     L, seed_ids, seed_offsets, seed_neighbors,
+    bipartite_ids, bipartite_features, bipartite_nodes, bipartite_dims,
     knn_inv, knn_ann, knn_hbi, knn_cmp, knn_cmp_alpha, knn_cmp_beta, knn_rank,
     category_inv, category_cmp, category_alpha, category_beta,
     category_anchors, category_knn, category_knn_decay, category_ranks,
@@ -1045,6 +1144,7 @@ static inline int tm_adjacency (lua_State *L)
   int Gi = tk_lua_absindex(L, -1);
 
   tm_init_uids(L, Gi, graph);
+  tm_process_bipartite_edges(L, graph);
   tm_process_seed_edges(L, graph);
   graph->dsu = tk_dsu_create(L, graph->uids);
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
@@ -1060,6 +1160,17 @@ static inline int tm_adjacency (lua_State *L)
   }
 
   tm_adj_init(L, Gi, graph);
+  tm_add_bipartite_edges_immediate(L, graph);
+
+  if (i_each != -1) {
+    lua_pushvalue(L, i_each);
+    lua_pushinteger(L, (int64_t)graph->uids->n);
+    lua_pushinteger(L, tk_dsu_components(graph->dsu));
+    lua_pushinteger(L, (int64_t) graph->n_edges);
+    lua_pushstring(L, "bipartite");
+    lua_call(L, 4, 0);
+  }
+
   tm_add_seed_edges_immediate(L, graph);
 
   if (i_each != -1) {
@@ -1400,6 +1511,10 @@ static inline tk_graph_t *tm_graph_create (
   tk_ivec_t *seed_ids,
   tk_ivec_t *seed_offsets,
   tk_ivec_t *seed_neighbors,
+  tk_ivec_t *bipartite_ids,
+  tk_ivec_t *bipartite_features,
+  tk_ivec_t *bipartite_nodes,
+  uint64_t bipartite_dims,
   tk_inv_t *knn_inv,
   tk_ann_t *knn_ann,
   tk_hbi_t *knn_hbi,
@@ -1441,6 +1556,10 @@ static inline tk_graph_t *tm_graph_create (
   graph->seed_ids = seed_ids;
   graph->seed_offsets = seed_offsets;
   graph->seed_neighbors = seed_neighbors;
+  graph->bipartite_ids = bipartite_ids;
+  graph->bipartite_features = bipartite_features;
+  graph->bipartite_nodes = bipartite_nodes;
+  graph->bipartite_dims = bipartite_dims;
   graph->knn_inv = knn_inv;
   graph->knn_ann = knn_ann;
   graph->knn_hbi = knn_hbi;
