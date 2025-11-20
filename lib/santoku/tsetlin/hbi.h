@@ -398,6 +398,182 @@ static inline void tk_hbi_keep (
   tk_iuset_destroy(to_remove_set);
 }
 
+static inline void tk_hbi_mutualize (
+  lua_State *L,
+  tk_hbi_t *A,
+  tk_hbi_hoods_t *hoods,
+  tk_ivec_t *uids,
+  uint64_t min,
+  int64_t **old_to_newp
+) {
+  if (A->destroyed)
+    return;
+
+  tk_ivec_t *sids = tk_ivec_create(L, uids->n, 0, 0);
+  for (uint64_t i = 0; i < uids->n; i ++)
+    sids->a[i] = tk_hbi_uid_sid(A, uids->a[i], TK_HBI_FIND);
+  tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
+  if (!sid_idx)
+    tk_error(L, "hbi_mutualize: iumap_from_ivec failed", ENOMEM);
+  if (uids->n > SIZE_MAX / sizeof(tk_iumap_t *))
+    tk_error(L, "hbi_mutualize: allocation size overflow", ENOMEM);
+  tk_iumap_t **hoods_sets = tk_malloc(L, uids->n * sizeof(tk_iumap_t *));
+  for (uint64_t i = 0; i < uids->n; i ++)
+    hoods_sets[i] = NULL;
+  for (uint64_t i = 0; i < uids->n; i ++)
+    hoods_sets[i] = tk_iumap_create(0, 0);
+
+  // TK_HBI_MUTUAL_INIT
+  #pragma omp parallel for schedule(static)
+  for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
+    int kha;
+    khint_t khi;
+    tk_pvec_t *uhood = hoods->a[i];
+    tk_iumap_t *uset = hoods_sets[i];
+    for (uint64_t j = 0; j < uhood->n; j ++) {
+      khi = tk_iumap_put(uset, uhood->a[j].i, &kha);
+      tk_iumap_setval(uset, khi, uhood->a[j].p);
+    }
+  }
+
+  // TK_HBI_MUTUAL_FILTER
+  #pragma omp parallel for schedule(static)
+  for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
+    khint_t khi;
+    tk_pvec_t *uhood = hoods->a[i];
+    uint64_t orig_n = uhood->n;
+    // assert(uhood->m >= orig_n);
+    if (orig_n == 0) {
+      uhood->n = 0;
+      uhood->m = 0;
+      continue;
+    }
+    uint64_t left = 0;
+    uint64_t right = orig_n - 1;
+    while (left <= right) {
+      int64_t iv = uhood->a[left].i;
+      int64_t d = uhood->a[left].p;
+      // assert(iv >= 0 && (uint64_t) iv < hoods->n);
+      tk_iumap_t *vset = hoods_sets[iv];
+      khi = tk_iumap_get(vset, i);
+      if (khi != tk_iumap_end(vset)) {
+        // Edge is mutual - keep it and update distance to minimum
+        int64_t d0 = tk_iumap_val(vset, khi);
+        if (d0 < d)
+          uhood->a[left].p = d0;
+        left ++;
+      } else {
+        // Edge is not mutual - move to end
+        if (left != right) {
+          tk_pair_t tmp = uhood->a[left];
+          uhood->a[left] = uhood->a[right];
+          uhood->a[right] = tmp;
+        }
+        if (right == 0)
+          break;
+        right--;
+      }
+    }
+    uhood->n = left;
+    uhood->m = orig_n;
+    // assert(uhood->n <= uhood->m);
+
+    for (uint64_t qi = uhood->n; qi < uhood->m; qi ++) {
+      int64_t iv = uhood->a[qi].i;
+      int64_t d_forward = uhood->a[qi].p;
+      int64_t d_reverse = d_forward;  // fallback
+      tk_iumap_t *vset = hoods_sets[iv];
+      khi = tk_iumap_get(vset, i);
+      if (khi != tk_iumap_end(vset)) {
+        d_reverse = tk_iumap_val(vset, khi);
+      } else {
+        int64_t usid = sids->a[i];
+        int64_t vsid = sids->a[iv];
+        tk_hbi_code_t ucode = A->codes->a[usid];
+        tk_hbi_code_t vcode = A->codes->a[vsid];
+        tk_hbi_code_t xor_result = ucode ^ vcode;
+        d_reverse = (int64_t) __builtin_popcount(xor_result);
+      }
+      uhood->a[qi].p = (d_forward < d_reverse) ? d_forward : d_reverse;
+    }
+    tk_pvec_asc(uhood, 0, uhood->n);
+    tk_pvec_asc(uhood, uhood->n, uhood->m);
+  }
+
+  if (min > 0) {
+    if (uids->n > SIZE_MAX / sizeof(int64_t))
+      tk_error(L, "hbi_neighborhoods: allocation size overflow", ENOMEM);
+    int64_t *old_to_new = tk_malloc(L, uids->n * sizeof(int64_t));
+    int64_t keeper_count = 0;
+    for (uint64_t i = 0; i < uids->n; i ++) {
+      if (hoods->a[i]->n >= min) {
+        old_to_new[i] = keeper_count ++;
+      } else {
+        old_to_new[i] = -1;
+      }
+    }
+    if (keeper_count < (int64_t) uids->n) {
+      // TK_HBI_MIN_REMAP
+      #pragma omp parallel for schedule(static)
+      for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
+        if (hoods->a[i]->n >= min) {
+          tk_pvec_t *hood = hoods->a[i];
+          uint64_t mutual_write_pos = 0;
+          uint64_t non_mutual_write_pos = 0;
+          for (uint64_t j = 0; j < hood->n; j ++) {
+            int64_t old_neighbor_idx = hood->a[j].i;
+            int64_t new_neighbor_idx = old_to_new[old_neighbor_idx];
+            if (new_neighbor_idx >= 0)
+              hood->a[mutual_write_pos ++] = tk_pair(new_neighbor_idx, hood->a[j].p);
+          }
+          for (uint64_t j = hood->n; j < hood->m; j ++) {
+            int64_t old_neighbor_idx = hood->a[j].i;
+            int64_t new_neighbor_idx = old_to_new[old_neighbor_idx];
+            if (new_neighbor_idx >= 0)
+              hood->a[mutual_write_pos + non_mutual_write_pos ++] = tk_pair(new_neighbor_idx, hood->a[j].p);
+          }
+          hood->n = mutual_write_pos;
+          hood->m = mutual_write_pos + non_mutual_write_pos;
+        }
+      }
+      tk_ivec_t *new_uids = tk_ivec_create(L, (uint64_t) keeper_count, 0, 0);
+      tk_hbi_hoods_t *new_hoods = tk_hbi_hoods_create(L, (uint64_t) keeper_count, 0, 0);
+      new_hoods->n = (uint64_t) keeper_count;
+      for (uint64_t i = 0; i < uids->n; i ++) {
+        if (old_to_new[i] >= 0) {
+          new_uids->a[old_to_new[i]] = uids->a[i];
+          new_hoods->a[old_to_new[i]] = hoods->a[i];
+        }
+      }
+      int64_t *old_uids_data = uids->a;
+      tk_hbi_hood_t *old_hoods_data = hoods->a;
+      uids->a = new_uids->a;
+      uids->n = (uint64_t) keeper_count;
+      uids->m = (uint64_t) keeper_count;
+      hoods->a = new_hoods->a;
+      hoods->n = (uint64_t) keeper_count;
+      hoods->m = (uint64_t) keeper_count;
+      new_uids->a = old_uids_data;
+      new_hoods->a = old_hoods_data;
+
+      lua_remove(L, -2);
+      lua_remove(L, -1);
+    }
+
+    if (old_to_newp) {
+      *old_to_newp = old_to_new;
+    } else {
+      free(old_to_new);
+    }
+  }
+  tk_iumap_destroy(sid_idx);
+  for (uint64_t i = 0; i < uids->n; i ++)
+    if (hoods_sets[i])
+      tk_iumap_destroy(hoods_sets[i]);
+  free(hoods_sets);
+  lua_remove(L, -1);
+}
+
 static inline bool tk_hbi_probe_bucket_for_uid (
   tk_hbi_t *A,
   tk_hbi_code_t h,

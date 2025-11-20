@@ -41,10 +41,21 @@ static inline int tk_inv_load_lua (lua_State *L)
   return 1;
 }
 
+static inline int tk_inv_mutualize_lua (lua_State *L)
+{
+  tk_inv_t *inv = tk_inv_peek(L, 1);
+  tk_inv_hoods_t *hoods = tk_inv_hoods_peek(L, 2, "hoods");
+  tk_ivec_t *uids = tk_ivec_peek(L, 3, "ids");
+  uint64_t min = tk_lua_optunsigned(L, 4, "min", 0);
+  tk_inv_mutualize(L, inv, hoods, uids, min, NULL);
+  return 0;
+}
+
 static luaL_Reg tk_inv_fns[] =
 {
   { "create", tk_inv_create_lua },
   { "load", tk_inv_load_lua },
+  { "mutualize", tk_inv_mutualize_lua },
   { NULL, NULL }
 };
 
