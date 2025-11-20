@@ -1907,10 +1907,9 @@ static double tk_compute_reconstruction (
   uint64_t chunks = TK_CVEC_BITS_BYTES(n_dims);
   uint64_t n_nodes = offsets->n - 1;
   double total = 0.0;
-  double total_weight = 0.0;
   uint64_t total_nodes_processed = 0;
 
-  #pragma omp parallel reduction(+:total) reduction(+:total_weight) reduction(+:total_nodes_processed)
+  #pragma omp parallel reduction(+:total) reduction(+:total_nodes_processed)
   {
     tk_pvec_t *bin_ranks = tk_pvec_create(NULL, 0, 0, 0);
     tk_pvec_t *weight_ranks_buffer = tk_pvec_create(NULL, 0, 0, 0);

@@ -1,6 +1,6 @@
 local env = {
   name = "santoku-tsetlin",
-  version = "0.0.229-1",
+  version = "0.0.230-1",
   variable_prefix = "TK_TSETLIN",
   license = "MIT",
   public = true,
@@ -13,7 +13,8 @@ local env = {
     "-fopenmp", "$(shell pkg-config --cflags blas lapack)"
   },
   ldflags = {
-    "-lm", "-fopenmp", "$(shell pkg-config --cflags blas lapack)"
+    "-lm", "-fopenmp", "$(shell pkg-config --cflags blas lapack)",
+    "-Wl,-z,nodelete"
   },
   rules = {
     ["graph%.c"] = {
@@ -51,7 +52,7 @@ local env = {
   dependencies = {
     "lua >= 5.1",
     "santoku >= 0.0.294-1",
-    "santoku-matrix >= 0.0.178-1",
+    "santoku-matrix >= 0.0.179-1",
   },
   test = {
     dependencies = {
