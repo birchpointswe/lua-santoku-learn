@@ -583,9 +583,7 @@ static inline void tk_inv_mutualize (
   }
 
   if (min > 0 && keeper_count < (int64_t) uids->n) {
-    #pragma omp barrier
-
-    #pragma omp for schedule(static) nowait
+    #pragma omp parallel for schedule(static)
     for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
       if (hoods->a[i]->n >= min) {
         tk_rvec_t *hood = hoods->a[i];
