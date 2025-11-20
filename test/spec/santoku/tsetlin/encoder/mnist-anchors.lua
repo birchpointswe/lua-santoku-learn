@@ -34,14 +34,14 @@ local cfg; cfg = {
     end
   },
   simhash = {
-    n_dims = 128,
+    n_dims =  64,
     ranks = nil,
     quantiles = nil,
   },
   select = {
     enabled = true,
     reverse = true,
-    metric = "spearman",
+    metric = "pearson",
     anchors = 16,
     pairs = 16,
   },
@@ -158,7 +158,7 @@ test("mnist-anchors", function()
         bridge = cfg.graph.bridge,
         each = function (ns, cs, es, stg)
           local d, dd = stopwatch()
-          str.printf("  Time: %6.2f %6.2f | Stage: %-10s  Nodes: %5d  Components: %5d  Edges: %5d\n",
+          str.printf("  Time: %6.2f %6.2f | Stage: %-10s  Nodes: %7d  Components: %5d  Edges: %8d\n",
             d, dd, stg, ns, cs, es)
         end
       })
