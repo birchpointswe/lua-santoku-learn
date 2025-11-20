@@ -1,0 +1,6 @@
+Let's parallelize that min/max search if possible
+
+- Figure out expected evaluation results for tag search
+- train encoder to predict spectral codes from landmark features
+- evaluate encoder and projected codes
+- build end-user apis for suggestions
