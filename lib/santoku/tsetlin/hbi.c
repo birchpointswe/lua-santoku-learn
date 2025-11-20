@@ -20,10 +20,21 @@ static inline int tk_hbi_load_lua (lua_State *L)
   return 1;
 }
 
+static inline int tk_hbi_mutualize_lua (lua_State *L)
+{
+  tk_hbi_t *hbi = tk_hbi_peek(L, 1);
+  tk_hbi_hoods_t *hoods = tk_hbi_hoods_peek(L, 2, "hoods");
+  tk_ivec_t *uids = tk_ivec_peek(L, 3, "ids");
+  uint64_t min = tk_lua_optunsigned(L, 4, "min", 0);
+  tk_hbi_mutualize(L, hbi, hoods, uids, min, NULL);
+  return 0;
+}
+
 static luaL_Reg tk_hbi_fns[] =
 {
   { "create", tk_hbi_create_lua },
   { "load", tk_hbi_load_lua },
+  { "mutualize", tk_hbi_mutualize_lua },
   { NULL, NULL }
 };
 
