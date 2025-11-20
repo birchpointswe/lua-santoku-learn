@@ -4,12 +4,6 @@
 #include <omp.h>
 #include <santoku/cvec.h>
 
-#if defined(__AVX2__)
-#include <immintrin.h>
-#elif defined(__ARM_NEON)
-#include <arm_neon.h>
-#endif
-
 typedef struct {
   uint64_t n_clauses;
   uint64_t n_chunks;
@@ -161,48 +155,75 @@ static inline void tk_automata_inc (
   for (uint64_t b = 0; b < m; b++) {
     counts_planes[b] = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
   }
+
   uint64_t k = 0;
-#if defined(__AVX2__)
-  for (; k + 31 < n_chunks; k += 32) {
-    __m256i v_carry = _mm256_loadu_si256((__m256i*)&input[k]);
-    for (uint64_t b = 0; b < m; b++) {
-      __m256i v_counts_b = _mm256_loadu_si256((__m256i*)&counts_planes[b][k]);
-      __m256i v_carry_next = _mm256_and_si256(v_counts_b, v_carry);
-      _mm256_storeu_si256((__m256i*)&counts_planes[b][k], _mm256_xor_si256(v_counts_b, v_carry));
-      v_carry = v_carry_next;
-    }
-    __m256i v_actions = _mm256_loadu_si256((__m256i*)&actions[k]);
-    __m256i v_carry_next = _mm256_and_si256(v_actions, v_carry);
-    _mm256_storeu_si256((__m256i*)&actions[k], _mm256_xor_si256(v_actions, v_carry));
-    v_carry = v_carry_next;
-    for (uint64_t b = 0; b < m; b++) {
-      __m256i v_counts_b = _mm256_loadu_si256((__m256i*)&counts_planes[b][k]);
-      _mm256_storeu_si256((__m256i*)&counts_planes[b][k], _mm256_or_si256(v_counts_b, v_carry));
-    }
-    v_actions = _mm256_loadu_si256((__m256i*)&actions[k]);
-    _mm256_storeu_si256((__m256i*)&actions[k], _mm256_or_si256(v_actions, v_carry));
-  }
-#elif defined(__ARM_NEON)
+
+#ifdef __SIZEOF_INT128__
   for (; k + 15 < n_chunks; k += 16) {
-    uint8x16_t v_carry = vld1q_u8(&input[k]);
+    __uint128_t inp_val;
+    memcpy(&inp_val, &input[k], sizeof(__uint128_t));
+    __uint128_t carry = inp_val;
+
     for (uint64_t b = 0; b < m; b++) {
-      uint8x16_t v_counts_b = vld1q_u8(&counts_planes[b][k]);
-      uint8x16_t v_carry_next = vandq_u8(v_counts_b, v_carry);
-      vst1q_u8(&counts_planes[b][k], veorq_u8(v_counts_b, v_carry));
-      v_carry = v_carry_next;
+      __uint128_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(__uint128_t));
+      __uint128_t carry_next = counts & carry;
+      __uint128_t new_counts = counts ^ carry;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(__uint128_t));
+      carry = carry_next;
     }
-    uint8x16_t v_actions = vld1q_u8(&actions[k]);
-    uint8x16_t v_carry_next = vandq_u8(v_actions, v_carry);
-    vst1q_u8(&actions[k], veorq_u8(v_actions, v_carry));
-    v_carry = v_carry_next;
+
+    __uint128_t acts;
+    memcpy(&acts, &actions[k], sizeof(__uint128_t));
+    __uint128_t carry_next = acts & carry;
+    __uint128_t new_acts = acts ^ carry;
+    memcpy(&actions[k], &new_acts, sizeof(__uint128_t));
+    carry = carry_next;
+
     for (uint64_t b = 0; b < m; b++) {
-      uint8x16_t v_counts_b = vld1q_u8(&counts_planes[b][k]);
-      vst1q_u8(&counts_planes[b][k], vorrq_u8(v_counts_b, v_carry));
+      __uint128_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(__uint128_t));
+      __uint128_t new_counts = counts | carry;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(__uint128_t));
     }
-    v_actions = vld1q_u8(&actions[k]);
-    vst1q_u8(&actions[k], vorrq_u8(v_actions, v_carry));
+    memcpy(&acts, &actions[k], sizeof(__uint128_t));
+    acts = acts | carry;
+    memcpy(&actions[k], &acts, sizeof(__uint128_t));
+  }
+#else
+  for (; k + 7 < n_chunks; k += 8) {
+    uint64_t inp_val;
+    memcpy(&inp_val, &input[k], sizeof(uint64_t));
+    uint64_t carry = inp_val;
+
+    for (uint64_t b = 0; b < m; b++) {
+      uint64_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(uint64_t));
+      uint64_t carry_next = counts & carry;
+      uint64_t new_counts = counts ^ carry;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(uint64_t));
+      carry = carry_next;
+    }
+
+    uint64_t acts;
+    memcpy(&acts, &actions[k], sizeof(uint64_t));
+    uint64_t carry_next = acts & carry;
+    uint64_t new_acts = acts ^ carry;
+    memcpy(&actions[k], &new_acts, sizeof(uint64_t));
+    carry = carry_next;
+
+    for (uint64_t b = 0; b < m; b++) {
+      uint64_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(uint64_t));
+      uint64_t new_counts = counts | carry;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(uint64_t));
+    }
+    memcpy(&acts, &actions[k], sizeof(uint64_t));
+    acts = acts | carry;
+    memcpy(&actions[k], &acts, sizeof(uint64_t));
   }
 #endif
+
   for (; k < n_chunks; k++) {
     tk_automata_inc_byte(aut, clause, k, input[k]);
   }
@@ -216,55 +237,82 @@ static inline void tk_automata_dec (
 ) {
   uint64_t m = aut->state_bits - 1;
   uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
+
   uint8_t *counts_planes[m];
   for (uint64_t b = 0; b < m; b++) {
     counts_planes[b] = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
   }
+
   uint64_t k = 0;
-#if defined(__AVX2__)
-  const __m256i v_all_ones = _mm256_set1_epi8(0xFF);
-  for (; k + 31 < n_chunks; k += 32) {
-    __m256i v_borrow = _mm256_loadu_si256((__m256i*)&input[k]);
-    for (uint64_t b = 0; b < m; b++) {
-      __m256i v_counts_b = _mm256_loadu_si256((__m256i*)&counts_planes[b][k]);
-      __m256i v_borrow_next = _mm256_andnot_si256(v_counts_b, v_borrow);
-      _mm256_storeu_si256((__m256i*)&counts_planes[b][k], _mm256_xor_si256(v_counts_b, v_borrow));
-      v_borrow = v_borrow_next;
-    }
-    __m256i v_actions = _mm256_loadu_si256((__m256i*)&actions[k]);
-    __m256i v_borrow_next = _mm256_andnot_si256(v_actions, v_borrow);
-    _mm256_storeu_si256((__m256i*)&actions[k], _mm256_xor_si256(v_actions, v_borrow));
-    v_borrow = v_borrow_next;
-    __m256i v_not_borrow = _mm256_xor_si256(v_borrow, v_all_ones);
-    for (uint64_t b = 0; b < m; b++) {
-      __m256i v_counts_b = _mm256_loadu_si256((__m256i*)&counts_planes[b][k]);
-      _mm256_storeu_si256((__m256i*)&counts_planes[b][k], _mm256_and_si256(v_counts_b, v_not_borrow));
-    }
-    v_actions = _mm256_loadu_si256((__m256i*)&actions[k]);
-    _mm256_storeu_si256((__m256i*)&actions[k], _mm256_and_si256(v_actions, v_not_borrow));
-  }
-#elif defined(__ARM_NEON)
+
+#ifdef __SIZEOF_INT128__
   for (; k + 15 < n_chunks; k += 16) {
-    uint8x16_t v_borrow = vld1q_u8(&input[k]);
+    __uint128_t inp_val;
+    memcpy(&inp_val, &input[k], sizeof(__uint128_t));
+    __uint128_t borrow = inp_val;
+
     for (uint64_t b = 0; b < m; b++) {
-      uint8x16_t v_counts_b = vld1q_u8(&counts_planes[b][k]);
-      uint8x16_t v_borrow_next = vbicq_u8(v_borrow, v_counts_b);
-      vst1q_u8(&counts_planes[b][k], veorq_u8(v_counts_b, v_borrow));
-      v_borrow = v_borrow_next;
+      __uint128_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(__uint128_t));
+      __uint128_t borrow_next = ~counts & borrow;
+      __uint128_t new_counts = counts ^ borrow;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(__uint128_t));
+      borrow = borrow_next;
     }
-    uint8x16_t v_actions = vld1q_u8(&actions[k]);
-    uint8x16_t v_borrow_next = vbicq_u8(v_borrow, v_actions);
-    vst1q_u8(&actions[k], veorq_u8(v_actions, v_borrow));
-    v_borrow = v_borrow_next;
-    uint8x16_t v_not_borrow = vmvnq_u8(v_borrow);
+
+    __uint128_t acts;
+    memcpy(&acts, &actions[k], sizeof(__uint128_t));
+    __uint128_t borrow_next = ~acts & borrow;
+    __uint128_t new_acts = acts ^ borrow;
+    memcpy(&actions[k], &new_acts, sizeof(__uint128_t));
+    borrow = borrow_next;
+
+    __uint128_t not_borrow = ~borrow;
     for (uint64_t b = 0; b < m; b++) {
-      uint8x16_t v_counts_b = vld1q_u8(&counts_planes[b][k]);
-      vst1q_u8(&counts_planes[b][k], vandq_u8(v_counts_b, v_not_borrow));
+      __uint128_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(__uint128_t));
+      __uint128_t new_counts = counts & not_borrow;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(__uint128_t));
     }
-    v_actions = vld1q_u8(&actions[k]);
-    vst1q_u8(&actions[k], vandq_u8(v_actions, v_not_borrow));
+    memcpy(&acts, &actions[k], sizeof(__uint128_t));
+    acts = acts & not_borrow;
+    memcpy(&actions[k], &acts, sizeof(__uint128_t));
+  }
+#else
+  for (; k + 7 < n_chunks; k += 8) {
+    uint64_t inp_val;
+    memcpy(&inp_val, &input[k], sizeof(uint64_t));
+    uint64_t borrow = inp_val;
+
+    for (uint64_t b = 0; b < m; b++) {
+      uint64_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(uint64_t));
+      uint64_t borrow_next = ~counts & borrow;
+      uint64_t new_counts = counts ^ borrow;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(uint64_t));
+      borrow = borrow_next;
+    }
+
+    uint64_t acts;
+    memcpy(&acts, &actions[k], sizeof(uint64_t));
+    uint64_t borrow_next = ~acts & borrow;
+    uint64_t new_acts = acts ^ borrow;
+    memcpy(&actions[k], &new_acts, sizeof(uint64_t));
+    borrow = borrow_next;
+
+    uint64_t not_borrow = ~borrow;
+    for (uint64_t b = 0; b < m; b++) {
+      uint64_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(uint64_t));
+      uint64_t new_counts = counts & not_borrow;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(uint64_t));
+    }
+    memcpy(&acts, &actions[k], sizeof(uint64_t));
+    acts = acts & not_borrow;
+    memcpy(&actions[k], &acts, sizeof(uint64_t));
   }
 #endif
+
   for (; k < n_chunks; k++) {
     tk_automata_dec_byte(aut, clause, k, input[k]);
   }
@@ -278,55 +326,80 @@ static inline void tk_automata_inc_not (
 ) {
   uint64_t m = aut->state_bits - 1;
   uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
+
   uint8_t *counts_planes[m];
   for (uint64_t b = 0; b < m; b++) {
     counts_planes[b] = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
   }
+
   uint64_t k = 0;
-#if defined(__AVX2__)
-  const __m256i v_all_ones = _mm256_set1_epi8(0xFF);
-  for (; k + 31 < n_chunks; k += 32) {
-    __m256i v_input = _mm256_loadu_si256((__m256i*)&input[k]);
-    __m256i v_carry = _mm256_xor_si256(v_input, v_all_ones);
-    for (uint64_t b = 0; b < m; b++) {
-      __m256i v_counts_b = _mm256_loadu_si256((__m256i*)&counts_planes[b][k]);
-      __m256i v_carry_next = _mm256_and_si256(v_counts_b, v_carry);
-      _mm256_storeu_si256((__m256i*)&counts_planes[b][k], _mm256_xor_si256(v_counts_b, v_carry));
-      v_carry = v_carry_next;
-    }
-    __m256i v_actions = _mm256_loadu_si256((__m256i*)&actions[k]);
-    __m256i v_carry_next = _mm256_and_si256(v_actions, v_carry);
-    _mm256_storeu_si256((__m256i*)&actions[k], _mm256_xor_si256(v_actions, v_carry));
-    v_carry = v_carry_next;
-    for (uint64_t b = 0; b < m; b++) {
-      __m256i v_counts_b = _mm256_loadu_si256((__m256i*)&counts_planes[b][k]);
-      _mm256_storeu_si256((__m256i*)&counts_planes[b][k], _mm256_or_si256(v_counts_b, v_carry));
-    }
-    v_actions = _mm256_loadu_si256((__m256i*)&actions[k]);
-    _mm256_storeu_si256((__m256i*)&actions[k], _mm256_or_si256(v_actions, v_carry));
-  }
-#elif defined(__ARM_NEON)
+
+#ifdef __SIZEOF_INT128__
   for (; k + 15 < n_chunks; k += 16) {
-    uint8x16_t v_input = vld1q_u8(&input[k]);
-    uint8x16_t v_carry = vmvnq_u8(v_input);
+    __uint128_t inp_val;
+    memcpy(&inp_val, &input[k], sizeof(__uint128_t));
+    __uint128_t carry = ~inp_val;
+
     for (uint64_t b = 0; b < m; b++) {
-      uint8x16_t v_counts_b = vld1q_u8(&counts_planes[b][k]);
-      uint8x16_t v_carry_next = vandq_u8(v_counts_b, v_carry);
-      vst1q_u8(&counts_planes[b][k], veorq_u8(v_counts_b, v_carry));
-      v_carry = v_carry_next;
+      __uint128_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(__uint128_t));
+      __uint128_t carry_next = counts & carry;
+      __uint128_t new_counts = counts ^ carry;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(__uint128_t));
+      carry = carry_next;
     }
-    uint8x16_t v_actions = vld1q_u8(&actions[k]);
-    uint8x16_t v_carry_next = vandq_u8(v_actions, v_carry);
-    vst1q_u8(&actions[k], veorq_u8(v_actions, v_carry));
-    v_carry = v_carry_next;
+
+    __uint128_t acts;
+    memcpy(&acts, &actions[k], sizeof(__uint128_t));
+    __uint128_t carry_next = acts & carry;
+    __uint128_t new_acts = acts ^ carry;
+    memcpy(&actions[k], &new_acts, sizeof(__uint128_t));
+    carry = carry_next;
+
     for (uint64_t b = 0; b < m; b++) {
-      uint8x16_t v_counts_b = vld1q_u8(&counts_planes[b][k]);
-      vst1q_u8(&counts_planes[b][k], vorrq_u8(v_counts_b, v_carry));
+      __uint128_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(__uint128_t));
+      __uint128_t new_counts = counts | carry;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(__uint128_t));
     }
-    v_actions = vld1q_u8(&actions[k]);
-    vst1q_u8(&actions[k], vorrq_u8(v_actions, v_carry));
+    memcpy(&acts, &actions[k], sizeof(__uint128_t));
+    acts = acts | carry;
+    memcpy(&actions[k], &acts, sizeof(__uint128_t));
+  }
+#else
+  for (; k + 7 < n_chunks; k += 8) {
+    uint64_t inp_val;
+    memcpy(&inp_val, &input[k], sizeof(uint64_t));
+    uint64_t carry = ~inp_val;
+
+    for (uint64_t b = 0; b < m; b++) {
+      uint64_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(uint64_t));
+      uint64_t carry_next = counts & carry;
+      uint64_t new_counts = counts ^ carry;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(uint64_t));
+      carry = carry_next;
+    }
+
+    uint64_t acts;
+    memcpy(&acts, &actions[k], sizeof(uint64_t));
+    uint64_t carry_next = acts & carry;
+    uint64_t new_acts = acts ^ carry;
+    memcpy(&actions[k], &new_acts, sizeof(uint64_t));
+    carry = carry_next;
+
+    for (uint64_t b = 0; b < m; b++) {
+      uint64_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(uint64_t));
+      uint64_t new_counts = counts | carry;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(uint64_t));
+    }
+    memcpy(&acts, &actions[k], sizeof(uint64_t));
+    acts = acts | carry;
+    memcpy(&actions[k], &acts, sizeof(uint64_t));
   }
 #endif
+
   for (; k < n_chunks; k++) {
     tk_automata_inc_byte(aut, clause, k, ~input[k]);
   }
@@ -340,57 +413,82 @@ static inline void tk_automata_dec_not (
 ) {
   uint64_t m = aut->state_bits - 1;
   uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
+
   uint8_t *counts_planes[m];
   for (uint64_t b = 0; b < m; b++) {
     counts_planes[b] = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
   }
+
   uint64_t k = 0;
-#if defined(__AVX2__)
-  const __m256i v_all_ones = _mm256_set1_epi8(0xFF);
-  for (; k + 31 < n_chunks; k += 32) {
-    __m256i v_input = _mm256_loadu_si256((__m256i*)&input[k]);
-    __m256i v_borrow = _mm256_xor_si256(v_input, v_all_ones);
-    for (uint64_t b = 0; b < m; b++) {
-      __m256i v_counts_b = _mm256_loadu_si256((__m256i*)&counts_planes[b][k]);
-      __m256i v_borrow_next = _mm256_andnot_si256(v_counts_b, v_borrow);
-      _mm256_storeu_si256((__m256i*)&counts_planes[b][k], _mm256_xor_si256(v_counts_b, v_borrow));
-      v_borrow = v_borrow_next;
-    }
-    __m256i v_actions = _mm256_loadu_si256((__m256i*)&actions[k]);
-    __m256i v_borrow_next = _mm256_andnot_si256(v_actions, v_borrow);
-    _mm256_storeu_si256((__m256i*)&actions[k], _mm256_xor_si256(v_actions, v_borrow));
-    v_borrow = v_borrow_next;
-    __m256i v_not_borrow = _mm256_xor_si256(v_borrow, v_all_ones);
-    for (uint64_t b = 0; b < m; b++) {
-      __m256i v_counts_b = _mm256_loadu_si256((__m256i*)&counts_planes[b][k]);
-      _mm256_storeu_si256((__m256i*)&counts_planes[b][k], _mm256_and_si256(v_counts_b, v_not_borrow));
-    }
-    v_actions = _mm256_loadu_si256((__m256i*)&actions[k]);
-    _mm256_storeu_si256((__m256i*)&actions[k], _mm256_and_si256(v_actions, v_not_borrow));
-  }
-#elif defined(__ARM_NEON)
+
+#ifdef __SIZEOF_INT128__
   for (; k + 15 < n_chunks; k += 16) {
-    uint8x16_t v_input = vld1q_u8(&input[k]);
-    uint8x16_t v_borrow = vmvnq_u8(v_input);
+    __uint128_t inp_val;
+    memcpy(&inp_val, &input[k], sizeof(__uint128_t));
+    __uint128_t borrow = ~inp_val;
+
     for (uint64_t b = 0; b < m; b++) {
-      uint8x16_t v_counts_b = vld1q_u8(&counts_planes[b][k]);
-      uint8x16_t v_borrow_next = vbicq_u8(v_borrow, v_counts_b);
-      vst1q_u8(&counts_planes[b][k], veorq_u8(v_counts_b, v_borrow));
-      v_borrow = v_borrow_next;
+      __uint128_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(__uint128_t));
+      __uint128_t borrow_next = ~counts & borrow;
+      __uint128_t new_counts = counts ^ borrow;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(__uint128_t));
+      borrow = borrow_next;
     }
-    uint8x16_t v_actions = vld1q_u8(&actions[k]);
-    uint8x16_t v_borrow_next = vbicq_u8(v_borrow, v_actions);
-    vst1q_u8(&actions[k], veorq_u8(v_actions, v_borrow));
-    v_borrow = v_borrow_next;
-    uint8x16_t v_not_borrow = vmvnq_u8(v_borrow);
+
+    __uint128_t acts;
+    memcpy(&acts, &actions[k], sizeof(__uint128_t));
+    __uint128_t borrow_next = ~acts & borrow;
+    __uint128_t new_acts = acts ^ borrow;
+    memcpy(&actions[k], &new_acts, sizeof(__uint128_t));
+    borrow = borrow_next;
+
+    __uint128_t not_borrow = ~borrow;
     for (uint64_t b = 0; b < m; b++) {
-      uint8x16_t v_counts_b = vld1q_u8(&counts_planes[b][k]);
-      vst1q_u8(&counts_planes[b][k], vandq_u8(v_counts_b, v_not_borrow));
+      __uint128_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(__uint128_t));
+      __uint128_t new_counts = counts & not_borrow;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(__uint128_t));
     }
-    v_actions = vld1q_u8(&actions[k]);
-    vst1q_u8(&actions[k], vandq_u8(v_actions, v_not_borrow));
+    memcpy(&acts, &actions[k], sizeof(__uint128_t));
+    acts = acts & not_borrow;
+    memcpy(&actions[k], &acts, sizeof(__uint128_t));
+  }
+#else
+  for (; k + 7 < n_chunks; k += 8) {
+    uint64_t inp_val;
+    memcpy(&inp_val, &input[k], sizeof(uint64_t));
+    uint64_t borrow = ~inp_val;
+
+    for (uint64_t b = 0; b < m; b++) {
+      uint64_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(uint64_t));
+      uint64_t borrow_next = ~counts & borrow;
+      uint64_t new_counts = counts ^ borrow;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(uint64_t));
+      borrow = borrow_next;
+    }
+
+    uint64_t acts;
+    memcpy(&acts, &actions[k], sizeof(uint64_t));
+    uint64_t borrow_next = ~acts & borrow;
+    uint64_t new_acts = acts ^ borrow;
+    memcpy(&actions[k], &new_acts, sizeof(uint64_t));
+    borrow = borrow_next;
+
+    uint64_t not_borrow = ~borrow;
+    for (uint64_t b = 0; b < m; b++) {
+      uint64_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(uint64_t));
+      uint64_t new_counts = counts & not_borrow;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(uint64_t));
+    }
+    memcpy(&acts, &actions[k], sizeof(uint64_t));
+    acts = acts & not_borrow;
+    memcpy(&actions[k], &acts, sizeof(uint64_t));
   }
 #endif
+
   for (; k < n_chunks; k++) {
     tk_automata_dec_byte(aut, clause, k, ~input[k]);
   }
