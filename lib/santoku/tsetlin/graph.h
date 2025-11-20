@@ -48,6 +48,11 @@ typedef struct tk_graph_s {
   tk_ivec_t *seed_offsets;
   tk_ivec_t *seed_neighbors;
 
+  tk_ivec_t *bipartite_ids;
+  tk_ivec_t *bipartite_features;
+  tk_ivec_t *bipartite_nodes;
+  uint64_t bipartite_dims;
+
   tk_inv_t *knn_inv; tk_inv_hoods_t *knn_inv_hoods;
   tk_ann_t *knn_ann; tk_ann_hoods_t *knn_ann_hoods;
   tk_hbi_t *knn_hbi; tk_hbi_hoods_t *knn_hbi_hoods;

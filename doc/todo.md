@@ -1,9 +1,8 @@
 # Now
 
 - Parallelize booleanizer and tokenizer
-- Need a true hierarchical test case for HLTH
+- Need a true hierarchical test case for HLTH (newsgroups?)
 - Abstract the landmark/out-of-sample phase behind a simple tm + index wrapper
-
 - Regression, autoencoder, convolutional
 - Explore shared libaries, optimistic dynmaic linking? Is that a thing?
 
