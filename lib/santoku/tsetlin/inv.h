@@ -448,6 +448,207 @@ static inline void tk_inv_keep (
   tk_iuset_destroy(to_remove_set);
 }
 
+static inline void tk_inv_mutualize (
+  lua_State *L,
+  tk_inv_t *inv,
+  tk_inv_hoods_t *hoods,
+  tk_ivec_t *uids,
+  uint64_t min,
+  int64_t **old_to_newp
+) {
+  if (inv->destroyed)
+    return;
+
+  tk_ivec_t *sids = tk_ivec_create(L, uids->n, 0, 0); // sids
+  for (uint64_t i = 0; i < uids->n; i ++)
+    sids->a[i] = tk_inv_uid_sid(inv, uids->a[i], TK_INV_FIND);
+  tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
+  if (!sid_idx)
+    tk_error(L, "inv_mutualize: iumap_from_ivec failed", ENOMEM);
+  if (uids->n > SIZE_MAX / sizeof(tk_dumap_t *))
+    tk_error(L, "inv_mutualize: allocation size overflow", ENOMEM);
+  tk_dumap_t **hoods_sets = tk_malloc(L, uids->n * sizeof(tk_dumap_t *));
+  for (uint64_t i = 0; i < uids->n; i ++)
+    hoods_sets[i] = tk_dumap_create(0, 0);
+
+  tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
+  double tversky_alpha = 1.0;
+  double tversky_beta = 0.1;
+
+  #pragma omp parallel
+  {
+    tk_dvec_t *q_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
+    tk_dvec_t *e_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
+    tk_dvec_t *inter_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
+
+    #pragma omp for schedule(static) nowait
+    for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
+      tk_rvec_t *uhood = hoods->a[i];
+      tk_dumap_t *uset = hoods_sets[i];
+      int kha;
+      khint_t khi;
+      for (uint64_t j = 0; j < uhood->n; j ++) {
+        khi = tk_dumap_put(uset, uhood->a[j].i, &kha);
+        tk_dumap_setval(uset, khi, uhood->a[j].d);
+      }
+    }
+
+    #pragma omp barrier
+
+    #pragma omp for schedule(static) nowait
+    for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
+      tk_rvec_t *uhood = hoods->a[i];
+      uint64_t orig_n = uhood->n;
+      // assert(uhood->m >= orig_n);
+      if (orig_n == 0) {
+        uhood->n = 0;
+        uhood->m = 0;
+        continue;
+      }
+      uint64_t left = 0;
+      uint64_t right = orig_n - 1;
+      khint_t khi;
+      while (left <= right) {
+        int64_t iv = uhood->a[left].i;
+        double d = uhood->a[left].d;
+        // assert(iv >= 0 && (uint64_t) iv < hoods->n);
+        tk_dumap_t *vset = hoods_sets[iv];
+        khi = tk_dumap_get(vset, i);
+        if (khi != tk_dumap_end(vset)) {
+          double d0 = tk_dumap_val(vset, khi);
+          if (d0 < d)
+            uhood->a[left].d = d0;
+          left ++;
+        } else {
+          if (left != right) {
+            tk_rank_t tmp = uhood->a[left];
+            uhood->a[left] = uhood->a[right];
+            uhood->a[right] = tmp;
+          }
+          if (right == 0)
+            break;
+          right --;
+        }
+      }
+      uhood->n = left;
+      uhood->m = orig_n;
+      // assert(uhood->n <= uhood->m);
+      for (uint64_t qi = uhood->n; qi < uhood->m; qi ++) {
+        int64_t iv = uhood->a[qi].i;
+        double d_forward = uhood->a[qi].d;
+        double d_reverse = d_forward;  // fallback
+        tk_dumap_t *vset = hoods_sets[iv];
+        khi = tk_dumap_get(vset, i);
+        if (khi != tk_dumap_end(vset)) {
+          d_reverse = tk_dumap_val(vset, khi);
+        } else {
+          int64_t usid = sids->a[i];
+          int64_t vsid = sids->a[iv];
+          size_t ulen = 0, vlen = 0;
+          int64_t *ubits = tk_inv_sget(inv, usid, &ulen);
+          int64_t *vbits = tk_inv_sget(inv, vsid, &vlen);
+          if (ubits && vbits) {
+            double sim = tk_inv_similarity(
+              inv, vbits, vlen, ubits, ulen, cmp,
+              tversky_alpha, tversky_beta,
+              q_weights_buf, e_weights_buf, inter_weights_buf);
+            d_reverse = 1.0 - sim;
+          }
+        }
+        uhood->a[qi].d = (d_forward < d_reverse) ? d_forward : d_reverse;
+      }
+      tk_rvec_asc(uhood, 0, uhood->n);
+      tk_rvec_asc(uhood, uhood->n, uhood->m);
+    }
+
+    tk_dvec_destroy(q_weights_buf);
+    tk_dvec_destroy(e_weights_buf);
+    tk_dvec_destroy(inter_weights_buf);
+  }
+
+  int64_t *old_to_new = NULL;
+  int64_t keeper_count = 0;
+
+  if (min > 0) {
+    if (uids->n > SIZE_MAX / sizeof(int64_t))
+      tk_error(L, "inv_neighborhoods: allocation size overflow", ENOMEM);
+    old_to_new = tk_malloc(L, uids->n * sizeof(int64_t));
+    for (uint64_t i = 0; i < uids->n; i ++) {
+      if (hoods->a[i]->n >= min) {
+        old_to_new[i] = keeper_count ++;
+      } else {
+        old_to_new[i] = -1;
+      }
+    }
+  }
+
+  if (min > 0 && keeper_count < (int64_t) uids->n) {
+    #pragma omp barrier
+
+    #pragma omp for schedule(static) nowait
+    for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
+      if (hoods->a[i]->n >= min) {
+        tk_rvec_t *hood = hoods->a[i];
+        uint64_t mutual_write_pos = 0;
+        uint64_t non_mutual_write_pos = 0;
+        for (uint64_t j = 0; j < hood->n; j ++) {
+          int64_t old_neighbor_idx = hood->a[j].i;
+          int64_t new_neighbor_idx = old_to_new[old_neighbor_idx];
+          if (new_neighbor_idx >= 0) {
+            hood->a[mutual_write_pos ++] = tk_rank(new_neighbor_idx, hood->a[j].d);
+          }
+        }
+        for (uint64_t j = hood->n; j < hood->m; j ++) {
+          int64_t old_neighbor_idx = hood->a[j].i;
+          int64_t new_neighbor_idx = old_to_new[old_neighbor_idx];
+          if (new_neighbor_idx >= 0) {
+            hood->a[mutual_write_pos + non_mutual_write_pos ++] = tk_rank(new_neighbor_idx, hood->a[j].d);
+          }
+        }
+        hood->n = mutual_write_pos;
+        hood->m = mutual_write_pos + non_mutual_write_pos;
+      }
+    }
+  }
+
+  if (old_to_new) {
+    tk_ivec_t *new_uids = tk_ivec_create(L, (uint64_t) keeper_count, 0, 0);
+    tk_inv_hoods_t *new_hoods = tk_inv_hoods_create(L, (uint64_t) keeper_count, 0, 0);
+    new_hoods->n = (uint64_t) keeper_count;
+    for (uint64_t i = 0; i < uids->n; i ++) {
+      if (old_to_new[i] >= 0) {
+        new_uids->a[old_to_new[i]] = uids->a[i];
+        new_hoods->a[old_to_new[i]] = hoods->a[i];
+      }
+    }
+    int64_t *old_uids_data = uids->a;
+    tk_inv_hood_t *old_hoods_data = hoods->a;
+    uids->a = new_uids->a;
+    uids->n = (uint64_t) keeper_count;
+    uids->m = (uint64_t) keeper_count;
+    hoods->a = new_hoods->a;
+    hoods->n = (uint64_t) keeper_count;
+    hoods->m = (uint64_t) keeper_count;
+    new_uids->a = old_uids_data;
+    new_hoods->a = old_hoods_data;
+
+    lua_remove(L, -2);
+    lua_remove(L, -1);
+  }
+
+  if (old_to_newp) {
+    *old_to_newp = old_to_new;
+  } else if (old_to_new) {
+    free(old_to_new);
+  }
+
+  tk_iumap_destroy(sid_idx);
+  for (uint64_t i = 0; i < uids->n; i ++)
+    if (hoods_sets[i])
+      tk_dumap_destroy(hoods_sets[i]);
+  free(hoods_sets);
+  lua_pop(L, 1);
+}
 
 static inline void tk_inv_prepare_universe_map (
   lua_State *L,

@@ -48,6 +48,8 @@ local cfg; cfg = {
   graph = {
     decay = 8.0,
     knn = 64,
+    knn_mutual = nil,
+    knn_min = nil,
     bridge = "mst",
   },
   ann = {
@@ -72,7 +74,7 @@ local cfg; cfg = {
     knn = 64,
   },
   encoder = {
-    enabled = false,
+    enabled = true,
   },
   tm = {
     clauses = { def = 8, min = 8, max = 32, int = true, log = true, pow2 = true },
@@ -146,7 +148,7 @@ test("mnist-anchors", function()
   -- Encode using spectral or simhash
   if cfg.data.mode == "spectral" then
     -- Create adjacency for spectral encoding
-    print("\nCreating adjacency for spectral")
+    print("\nCreating adjacency for spectral\n")
     do
       train.adj_ids_spectral,
       train.adj_offsets_spectral,
@@ -155,6 +157,8 @@ test("mnist-anchors", function()
         weight_index = train.index_graph,
         knn_index = train.node_features,
         knn = cfg.graph.knn,
+        knn_mutual = cfg.graph.knn_mutual,
+        knn_min = cfg.graph.knn_min,
         bridge = cfg.graph.bridge,
         each = function (ns, cs, es, stg)
           local d, dd = stopwatch()
@@ -163,7 +167,7 @@ test("mnist-anchors", function()
         end
       })
     end
-    str.printf("  Min: %f  Max: %f  Mean: %f\n",
+    str.printf("\n  Min: %f  Max: %f  Mean: %f\n",
       train.adj_weights_spectral:min(),
       train.adj_weights_spectral:max(),
       train.adj_weights_spectral:sum() / train.adj_weights_spectral:size())

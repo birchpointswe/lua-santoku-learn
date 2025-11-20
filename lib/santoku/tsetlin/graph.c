@@ -45,6 +45,8 @@ static inline tk_graph_t *tm_graph_create (
   uint64_t knn,
   uint64_t knn_cache,
   double knn_eps,
+  bool knn_mutual,
+  uint64_t knn_min,
   bool bridge,
   uint64_t probe_radius
 );
@@ -127,7 +129,7 @@ static inline tk_evec_t *tm_mst_knn_candidates (
     int64_t cu = tk_dsu_find(graph->dsu, u);
     int64_t neighbor_idx;
     int64_t v;
-    TK_GRAPH_FOREACH_HOOD_NEIGHBOR(graph->knn_inv, graph->knn_ann, graph->knn_hbi,
+    TK_GRAPH_FOREACH_HOOD_NEIGHBOR_ALL(graph->knn_inv, graph->knn_ann, graph->knn_hbi,
                                    graph->knn_inv_hoods, graph->knn_ann_hoods,
                                    graph->knn_hbi_hoods, hood_idx,
                                    1.0, graph->uids_hoods,
@@ -510,18 +512,30 @@ static inline void tm_run_knn_queries (
                                    0.0, 1.0, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
                                    graph->knn_rank, &graph->knn_inv_hoods, &graph->uids_hoods);
       // inv neighborhoods_by_vecs doesn't push to stack, values set via pointers
+      if (graph->knn_mutual && graph->knn_inv_hoods) {
+        tk_inv_mutualize(L, graph->knn_inv, graph->knn_inv_hoods, graph->uids_hoods,
+                        graph->knn_min, NULL);
+      }
     } else if (graph->knn_ann) {
       tk_ann_neighborhoods_by_vecs(L, graph->knn_ann, graph->knn_query_cvec, graph->knn_cache,
                                    graph->probe_radius, 0, ~0ULL, &graph->knn_ann_hoods, &graph->uids_hoods);
       tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
       tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2);
       lua_pop(L, 2);
+      if (graph->knn_mutual && graph->knn_ann_hoods) {
+        tk_ann_mutualize(L, graph->knn_ann, graph->knn_ann_hoods, graph->uids_hoods,
+                        graph->knn_min, NULL);
+      }
     } else if (graph->knn_hbi) {
       tk_hbi_neighborhoods_by_vecs(L, graph->knn_hbi, graph->knn_query_cvec, graph->knn_cache,
                                    0, ~0ULL, &graph->knn_hbi_hoods, &graph->uids_hoods);
       tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
       tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2);
       lua_pop(L, 2);
+      if (graph->knn_mutual && graph->knn_hbi_hoods) {
+        tk_hbi_mutualize(L, graph->knn_hbi, graph->knn_hbi_hoods, graph->uids_hoods,
+                        graph->knn_min, NULL);
+      }
     }
   } else {
     TK_INDEX_NEIGHBORHOODS(L,
@@ -532,6 +546,18 @@ static inline void tm_run_knn_queries (
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2);
     lua_pop(L, 2);
+    if (graph->knn_mutual) {
+      if (graph->knn_inv_hoods) {
+        tk_inv_mutualize(L, graph->knn_inv, graph->knn_inv_hoods, graph->uids_hoods,
+                        graph->knn_min, NULL);
+      } else if (graph->knn_ann_hoods) {
+        tk_ann_mutualize(L, graph->knn_ann, graph->knn_ann_hoods, graph->uids_hoods,
+                        graph->knn_min, NULL);
+      } else if (graph->knn_hbi_hoods) {
+        tk_hbi_mutualize(L, graph->knn_hbi, graph->knn_hbi_hoods, graph->uids_hoods,
+                        graph->knn_min, NULL);
+      }
+    }
   }
   if (graph->uids_hoods) {
     graph->uids_idx_hoods = tk_iumap_from_ivec(L, graph->uids_hoods);
@@ -967,6 +993,8 @@ static inline int tm_adjacency (lua_State *L)
   uint64_t knn = tk_lua_foptunsigned(L, 1, "graph", "knn", 0);
   uint64_t knn_cache = tk_lua_foptunsigned(L, 1, "graph", "knn_cache", 0);
   double knn_eps = tk_lua_foptposdouble(L, 1, "graph", "knn_eps", 1.0);
+  bool knn_mutual = tk_lua_foptboolean(L, 1, "graph", "knn_mutual", false);
+  uint64_t knn_min = tk_lua_foptunsigned(L, 1, "graph", "knn_min", 0);
   int64_t category_ranks = tk_lua_foptinteger(L, 1, "graph", "category_ranks", -1);
 
   int64_t knn_rank_explicit = tk_lua_foptinteger(L, 1, "graph", "knn_rank", -2);
@@ -1013,7 +1041,7 @@ static inline int tm_adjacency (lua_State *L)
     weight_inv, weight_ann, weight_hbi, weight_cmp, weight_alpha, weight_beta, weight_pooling,
     random_pairs, weight_eps, sigma_k, sigma_scale,
     knn_query_ids, knn_query_ivec, knn_query_cvec,
-    knn, knn_cache, knn_eps, bridge, probe_radius);
+    knn, knn_cache, knn_eps, knn_mutual, knn_min, bridge, probe_radius);
   int Gi = tk_lua_absindex(L, -1);
 
   tm_init_uids(L, Gi, graph);
@@ -1404,6 +1432,8 @@ static inline tk_graph_t *tm_graph_create (
   uint64_t knn,
   uint64_t knn_cache,
   double knn_eps,
+  bool knn_mutual,
+  uint64_t knn_min,
   bool bridge,
   uint64_t probe_radius
 ) {
@@ -1446,6 +1476,8 @@ static inline tk_graph_t *tm_graph_create (
   graph->knn = knn;
   graph->knn_cache = knn_cache;
   graph->knn_eps = knn_eps;
+  graph->knn_mutual = knn_mutual;
+  graph->knn_min = knn_min;
   graph->bridge = bridge;
   graph->probe_radius = probe_radius;
   graph->knn_query_ids = knn_query_ids;
