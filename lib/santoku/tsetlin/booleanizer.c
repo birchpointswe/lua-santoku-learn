@@ -61,6 +61,11 @@ typedef struct {
   tk_iuset_t *continuous;
   tk_iuset_t *categorical;
 
+  tk_iuset_t *categorical_user_keys_int;
+  tk_cuset_t *categorical_user_keys_string;
+  tk_iuset_t *continuous_user_keys_int;
+  tk_cuset_t *continuous_user_keys_string;
+
   tk_iumap_t *integer_features;
   tk_zumap_t *string_features;
   tk_observed_doubles_t *observed_doubles;
@@ -220,6 +225,11 @@ static inline int64_t tk_booleanizer_bit_integer (
     if (kha) {
       int64_t id_attr = (int64_t) B->next_attr ++;
       tk_iumap_setval(B->integer_features, khi, id_attr);
+      // Check if this user key should be categorical or continuous
+      if (tk_iuset_contains(B->categorical_user_keys_int, feature))
+        tk_iuset_put(B->categorical, id_attr, &kha);
+      if (tk_iuset_contains(B->continuous_user_keys_int, feature))
+        tk_iuset_put(B->continuous, id_attr, &kha);
       return id_attr;
     } else {
       return tk_iumap_val(B->integer_features, khi);
@@ -251,6 +261,11 @@ static inline int64_t tk_booleanizer_bit_string (
       lua_pop(L, 1);
       int64_t id_attr = (int64_t) B->next_attr ++;
       tk_zumap_setval(B->string_features, khi, id_attr);
+      // Check if this user key should be categorical or continuous
+      if (tk_cuset_contains(B->categorical_user_keys_string, feature))
+        tk_iuset_put(B->categorical, id_attr, &kha);
+      if (tk_cuset_contains(B->continuous_user_keys_string, feature))
+        tk_iuset_put(B->continuous, id_attr, &kha);
       return id_attr;
     } else {
       return tk_zumap_val(B->string_features, khi);
@@ -689,6 +704,19 @@ static inline void tk_booleanizer_destroy (
   if (B->destroyed)
     return;
   tk_booleanizer_shrink(B);
+  // Free malloc'd strings in user key sets
+  if (B->categorical_user_keys_string) {
+    const char *key;
+    tk_umap_foreach_keys(B->categorical_user_keys_string, key, ({
+      free((void *)key);
+    }));
+  }
+  if (B->continuous_user_keys_string) {
+    const char *key;
+    tk_umap_foreach_keys(B->continuous_user_keys_string, key, ({
+      free((void *)key);
+    }));
+  }
   memset(B, 0, sizeof(*B));
   B->finalized = false;
   B->destroyed = true;
@@ -969,16 +997,51 @@ static inline int tk_booleanizer_feature_lua (lua_State *L)
 
   if (t_attr == LUA_TNUMBER && t_val == LUA_TNUMBER) {
     int64_t attr = lua_tointeger(L, 2);
+    khint_t k_attr = tk_iumap_get(B->integer_features, attr);
+    if (k_attr == tk_iumap_end(B->integer_features))
+      return 0;
+    int64_t attr_id = tk_iumap_val(B->integer_features, k_attr);
     double val = lua_tonumber(L, 3);
-    if (tk_booleanizer_is_categorical(B, attr)) {
-      tk_cat_bit_double_t key = { .f = attr, .v = val };
+    if (tk_booleanizer_is_categorical(B, attr_id)) {
+      tk_cat_bit_double_t key = { .f = attr_id, .v = val };
       khint_t k = tk_cat_bits_double_get(B->cat_bits_double, key);
       if (k != tk_cat_bits_double_end(B->cat_bits_double)) {
         lua_pushinteger(L, tk_cat_bits_double_val(B->cat_bits_double, k));
         return 1;
       }
     } else {
-      tk_lua_verror(L, 3, "feature", "continuous features not supported");
+      tk_lua_verror(L, 2, "feature", "continuous features not supported");
+      return 0;
+    }
+  } else if (t_attr == LUA_TNUMBER && t_val == LUA_TSTRING) {
+    int64_t attr = lua_tointeger(L, 2);
+    khint_t k_attr = tk_iumap_get(B->integer_features, attr);
+    if (k_attr == tk_iumap_end(B->integer_features))
+      return 0;
+    int64_t attr_id = tk_iumap_val(B->integer_features, k_attr);
+    const char *val = lua_tostring(L, 3);
+    tk_cat_bit_string_t key = { .f = attr_id, .v = (char *) val };
+    khint_t k = tk_cat_bits_string_get(B->cat_bits_string, key);
+    if (k != tk_cat_bits_string_end(B->cat_bits_string)) {
+      lua_pushinteger(L, tk_cat_bits_string_val(B->cat_bits_string, k));
+      return 1;
+    }
+  } else if (t_attr == LUA_TSTRING && t_val == LUA_TNUMBER) {
+    const char *attr = lua_tostring(L, 2);
+    khint_t k_attr = tk_zumap_get(B->string_features, attr);
+    if (k_attr == tk_zumap_end(B->string_features))
+      return 0;
+    int64_t attr_id = tk_zumap_val(B->string_features, k_attr);
+    double val = lua_tonumber(L, 3);
+    if (tk_booleanizer_is_categorical(B, attr_id)) {
+      tk_cat_bit_double_t key = { .f = attr_id, .v = val };
+      khint_t k = tk_cat_bits_double_get(B->cat_bits_double, key);
+      if (k != tk_cat_bits_double_end(B->cat_bits_double)) {
+        lua_pushinteger(L, tk_cat_bits_double_val(B->cat_bits_double, k));
+        return 1;
+      }
+    } else {
+      tk_lua_verror(L, 2, "feature", "continuous features not supported");
       return 0;
     }
   } else if (t_attr == LUA_TSTRING && t_val == LUA_TSTRING) {
@@ -995,7 +1058,7 @@ static inline int tk_booleanizer_feature_lua (lua_State *L)
       return 1;
     }
   } else {
-    tk_lua_verror(L, 3, "feature", "both arguments must be numbers or both strings");
+    tk_lua_verror(L, 2, "feature", "unsupported argument types");
     return 0;
   }
 
@@ -1076,21 +1139,27 @@ static luaL_Reg tk_booleanizer_mt_fns[] =
 static inline tk_booleanizer_t *tk_booleanizer_create (
   lua_State *L,
   uint64_t n_thresholds,
-  tk_ivec_t *continuous,
-  tk_ivec_t *categorical
+  tk_iuset_t *categorical_user_keys_int,
+  tk_cuset_t *categorical_user_keys_string,
+  tk_iuset_t *continuous_user_keys_int,
+  tk_cuset_t *continuous_user_keys_string
 ) {
   tk_booleanizer_t *B = tk_lua_newuserdata(L, tk_booleanizer_t, TK_BOOLEANIZER_MT, tk_booleanizer_mt_fns, tk_booleanizer_gc_lua);
   int Bi = lua_gettop(L);
-  B->continuous = (continuous != NULL) ? tk_iuset_from_ivec(L, continuous) : tk_iuset_create(L, 0);
+  B->continuous = tk_iuset_create(L, 0);
   if (!B->continuous)
-    tk_error(L, "booleanizer: iuset_from_ivec failed", ENOMEM);
+    tk_error(L, "booleanizer: iuset_create failed", ENOMEM);
   tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
   lua_pop(L, 1);
-  B->categorical = (categorical != NULL) ? tk_iuset_from_ivec(L, categorical) : tk_iuset_create(L, 0);
+  B->categorical = tk_iuset_create(L, 0);
   if (!B->categorical)
-    tk_error(L, "booleanizer: iuset_from_ivec failed", ENOMEM);
+    tk_error(L, "booleanizer: iuset_create failed", ENOMEM);
   tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
   lua_pop(L, 1);
+  B->categorical_user_keys_int = categorical_user_keys_int;
+  B->categorical_user_keys_string = categorical_user_keys_string;
+  B->continuous_user_keys_int = continuous_user_keys_int;
+  B->continuous_user_keys_string = continuous_user_keys_string;
   B->n_thresholds = n_thresholds;
   B->integer_features = tk_iumap_create(L, 0);
   tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
@@ -1227,11 +1296,80 @@ static inline int tk_booleanizer_create_lua (lua_State *L)
   if (lua_isnil(L, 1))
     lua_newtable(L);
   uint64_t n_thresholds = tk_lua_foptunsigned(L, 1, "create", "n_thresholds", 0);
-  lua_getfield(L, 1, "continuous");
-  tk_ivec_t *continuous = lua_isnil(L, -1) ? NULL : tk_ivec_peekopt(L, -1);
-  lua_getfield(L, 1, "categorical");
-  tk_ivec_t *categorical = lua_isnil(L, -1) ? NULL : tk_ivec_peekopt(L, -1);
-  tk_booleanizer_create(L, n_thresholds, continuous, categorical);
+
+  // Parse categorical keys from Lua table
+  // Keep these on the stack so we can add them as ephemerons later
+  tk_iuset_t *categorical_user_keys_int = tk_iuset_create(L, 0);  // stack: [config, cat_int]
+  tk_cuset_t *categorical_user_keys_string = tk_cuset_create(L, 0);  // stack: [config, cat_int, cat_str]
+  tk_iuset_t *continuous_user_keys_int = tk_iuset_create(L, 0);  // stack: [config, cat_int, cat_str, cont_int]
+  tk_cuset_t *continuous_user_keys_string = tk_cuset_create(L, 0);  // stack: [config, cat_int, cat_str, cont_int, cont_str]
+
+  lua_getfield(L, 1, "categorical");  // stack: [..., cont_str, categorical_table]
+  if (lua_istable(L, -1)) {
+    lua_pushnil(L);
+    while (lua_next(L, -2)) {
+      int t = lua_type(L, -1);
+      int kha;
+      if (t == LUA_TNUMBER) {
+        int64_t key = lua_tointeger(L, -1);
+        tk_iuset_put(categorical_user_keys_int, key, &kha);
+      } else if (t == LUA_TSTRING) {
+        const char *key = lua_tostring(L, -1);
+        size_t len = strlen(key);
+        char *z = (char *) malloc(len + 1);
+        if (!z)
+          tk_error(L, "booleanizer: malloc failed", ENOMEM);
+        memcpy(z, key, len + 1);
+        tk_cuset_put(categorical_user_keys_string, z, &kha);
+      }
+      lua_pop(L, 1);
+    }
+  }
+  lua_pop(L, 1);  // pop categorical_table, back to: [config, cat_int, cat_str, cont_int, cont_str]
+
+  lua_getfield(L, 1, "continuous");  // stack: [..., cont_str, continuous_table]
+  if (lua_istable(L, -1)) {
+    lua_pushnil(L);
+    while (lua_next(L, -2)) {
+      int t = lua_type(L, -1);
+      int kha;
+      if (t == LUA_TNUMBER) {
+        int64_t key = lua_tointeger(L, -1);
+        tk_iuset_put(continuous_user_keys_int, key, &kha);
+      } else if (t == LUA_TSTRING) {
+        const char *key = lua_tostring(L, -1);
+        size_t len = strlen(key);
+        char *z = (char *) malloc(len + 1);
+        if (!z)
+          tk_error(L, "booleanizer: malloc failed", ENOMEM);
+        memcpy(z, key, len + 1);
+        tk_cuset_put(continuous_user_keys_string, z, &kha);
+      }
+      lua_pop(L, 1);
+    }
+  }
+  lua_pop(L, 1);  // pop continuous_table, back to: [config, cat_int, cat_str, cont_int, cont_str]
+
+  tk_booleanizer_create(L, n_thresholds, categorical_user_keys_int, categorical_user_keys_string,
+                        continuous_user_keys_int, continuous_user_keys_string);
+  // stack: [config, cat_int, cat_str, cont_int, cont_str, booleanizer]
+  int Bi = lua_gettop(L);
+  // Add the user key sets as ephemerons
+  lua_pushvalue(L, 2);  // cat_int
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  lua_pushvalue(L, 3);  // cat_str
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  lua_pushvalue(L, 4);  // cont_int
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  lua_pushvalue(L, 5);  // cont_str
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
+  // Clean up stack, leaving only booleanizer
+  lua_replace(L, 1);  // move booleanizer to position 1
+  lua_settop(L, 1);   // pop everything else
   return 1;
 }
 
