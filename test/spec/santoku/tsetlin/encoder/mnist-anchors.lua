@@ -1,6 +1,8 @@
-require("santoku.dvec")
+local dvec = require("santoku.dvec")
 local cvec = require("santoku.cvec")
 local test = require("santoku.test")
+local err = require("santoku.error")
+local fs = require("santoku.fs")
 local ds = require("santoku.tsetlin.dataset")
 local utc = require("santoku.utc")
 local ivec = require("santoku.ivec")
@@ -28,10 +30,31 @@ local cfg; cfg = {
     n_dims = 24,
     eps = 1e-8,
     binarize = itq.encode, --itq.median,
-    gap = function (eigs)
-      local _, idx = eigs:scores_max_gap()
-      return idx
-    end
+    -- gap = function (eigs)
+    --   local _, idx = eigs:scores_max_gap()
+    --   return idx
+    -- end,
+    top = function (codes, n, dims)
+      local iids, iscores = codes:mtx_top_skewness(n, dims)
+      print("\nTop Skew")
+      local _, iidx = iscores:scores_lmethod()
+      iidx = iidx
+      for i = 0, dims - 1 do
+        str.printf("  Eig = %3d  Skew: %.8f  %s\n", iids:get(i), iscores:get(i), i == iidx and "<- elbow" or "")
+      end
+      iids:setn(iidx)
+      return iids
+    end,
+    -- top = function (codes, n, dims)
+    --   local eids, escores = codes:mtx_top_kurtosis(n, dims)
+    --   print("\ntop kurtosis")
+    --   local _, eidx = escores:scores_lmethod()
+    --   for i = 0, dims - 1 do
+    --     str.printf("  eig = %3d  kurtosis: %.8f  %s\n", eids:get(i), escores:get(i), i == eidx and "<- elbow" or "")
+    --   end
+    --   eids:setn(eidx)
+    --   return eids
+    -- end,
   },
   simhash = {
     n_dims =  64,
@@ -39,7 +62,7 @@ local cfg; cfg = {
     quantiles = nil,
   },
   select = {
-    enabled = true,
+    enabled = false,
     reverse = true,
     metric = "pearson",
     anchors = 16,
@@ -74,7 +97,7 @@ local cfg; cfg = {
     knn = 64,
   },
   encoder = {
-    enabled = true,
+    enabled = false,
   },
   tm = {
     clauses = { def = 8, min = 8, max = 32, int = true, log = true, pow2 = true },
@@ -194,18 +217,23 @@ test("mnist-anchors", function()
         end
       end
     })
+    train.dims_spectral = cfg.spectral.n_dims
     if cfg.spectral.gap then
       local idx = cfg.spectral.gap(train.eigs_spectral)
       if idx then
-        str.printf("Found gap at value %d\n", idx)
+        str.printf("\nFound gap at value %d\n", idx)
         local bs = ivec.create(idx)
         bs:fill_indices()
-        train.codes_spectral:mtx_select(bs, nil, cfg.spectral.n_dims)
+        train.codes_spectral:mtx_select(bs, nil, train.dims_spectral)
         train.dims_spectral = idx
       end
     end
-    if not train.dims_spectral then
-      train.dims_spectral = cfg.spectral.n_dims
+    if cfg.spectral.top then
+      local kept = cfg.spectral.top(train.codes_spectral, train.adj_ids_spectral:size(), train.dims_spectral)
+      if kept then
+        train.codes_spectral:mtx_select(kept, nil, cfg.spectral.n_dims)
+        train.dims_spectral = kept:size()
+      end
     end
     print("\nMedian thresholding")
     train.codes_spectral = cfg.spectral.binarize({
