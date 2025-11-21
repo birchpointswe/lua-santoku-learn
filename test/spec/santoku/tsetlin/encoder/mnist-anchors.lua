@@ -1,8 +1,6 @@
-local dvec = require("santoku.dvec")
+require("santoku.dvec")
 local cvec = require("santoku.cvec")
 local test = require("santoku.test")
-local err = require("santoku.error")
-local fs = require("santoku.fs")
 local ds = require("santoku.tsetlin.dataset")
 local utc = require("santoku.utc")
 local ivec = require("santoku.ivec")
@@ -34,17 +32,17 @@ local cfg; cfg = {
     --   local _, idx = eigs:scores_max_gap()
     --   return idx
     -- end,
-    top = function (codes, n, dims)
-      local iids, iscores = codes:mtx_top_skewness(n, dims)
-      print("\nTop Skew")
-      local _, iidx = iscores:scores_lmethod()
-      iidx = iidx
-      for i = 0, dims - 1 do
-        str.printf("  Eig = %3d  Skew: %.8f  %s\n", iids:get(i), iscores:get(i), i == iidx and "<- elbow" or "")
-      end
-      iids:setn(iidx)
-      return iids
-    end,
+    -- top = function (codes, n, dims)
+    --   local iids, iscores = codes:mtx_top_skewness(n, dims)
+    --   print("\nTop Skew")
+    --   local _, iidx = iscores:scores_lmethod()
+    --   iidx = iidx
+    --   for i = 0, dims - 1 do
+    --     str.printf("  Eig = %3d  Skew: %.8f  %s\n", iids:get(i), iscores:get(i), i == iidx and "<- elbow" or "")
+    --   end
+    --   iids:setn(iidx)
+    --   return iids
+    -- end,
     -- top = function (codes, n, dims)
     --   local eids, escores = codes:mtx_top_kurtosis(n, dims)
     --   print("\ntop kurtosis")
@@ -55,6 +53,27 @@ local cfg; cfg = {
     --   eids:setn(eidx)
     --   return eids
     -- end,
+    top = function (codes, n, dims)
+      local iids, iscores = codes:mtx_top_skewness(n, dims)
+      local eids, escores = codes:mtx_top_kurtosis(n, dims)
+      print("\nTop Skew")
+      local _, iidx = iscores:scores_lmethod()
+      iidx = iidx
+      for i = 0, dims - 1 do
+        str.printf("  Eig = %3d  Skew: %.8f  %s\n", iids:get(i), iscores:get(i), i == iidx and "<- elbow" or "")
+      end
+      iids:setn(iidx)
+      print("\nTop Kurtosis")
+      local _, eidx = escores:scores_lmethod()
+      for i = 0, dims - 1 do
+        str.printf("  Eig = %3d  Kurtosis: %.8f  %s\n", eids:get(i), escores:get(i), i == eidx and "<- elbow" or "")
+      end
+      eids:setn(eidx)
+      iids:asc()
+      eids:asc()
+      iids:set_intersect(eids)
+      return iids
+    end,
   },
   simhash = {
     n_dims =  64,
