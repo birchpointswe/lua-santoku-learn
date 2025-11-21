@@ -1160,9 +1160,11 @@ static inline int tm_adjacency (lua_State *L)
   }
 
   tm_adj_init(L, Gi, graph);
+
+  uint64_t edges_before_bipartite = graph->n_edges;
   tm_add_bipartite_edges_immediate(L, graph);
 
-  if (i_each != -1) {
+  if (i_each != -1 && graph->n_edges > edges_before_bipartite) {
     lua_pushvalue(L, i_each);
     lua_pushinteger(L, (int64_t)graph->uids->n);
     lua_pushinteger(L, tk_dsu_components(graph->dsu));
@@ -1171,9 +1173,10 @@ static inline int tm_adjacency (lua_State *L)
     lua_call(L, 4, 0);
   }
 
+  uint64_t edges_before_seed = graph->n_edges;
   tm_add_seed_edges_immediate(L, graph);
 
-  if (i_each != -1) {
+  if (i_each != -1 && graph->n_edges > edges_before_seed) {
     lua_pushvalue(L, i_each);
     lua_pushinteger(L, (int64_t)graph->uids->n);
     lua_pushinteger(L, tk_dsu_components(graph->dsu));
