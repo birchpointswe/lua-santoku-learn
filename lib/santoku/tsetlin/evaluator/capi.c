@@ -21,6 +21,7 @@ typedef enum {
   TK_EVAL_METRIC_VARIANCE,
   TK_EVAL_METRIC_MEAN,
   TK_EVAL_METRIC_MIN,
+  TK_EVAL_METRIC_NDCG,
 } tk_eval_metric_t;
 
 static inline tk_eval_metric_t tk_eval_parse_metric (const char *metric_str) {
@@ -34,6 +35,8 @@ static inline tk_eval_metric_t tk_eval_parse_metric (const char *metric_str) {
     return TK_EVAL_METRIC_MEAN;
   if (!strcmp(metric_str, "min"))
     return TK_EVAL_METRIC_MIN;
+  if (!strcmp(metric_str, "ndcg"))
+    return TK_EVAL_METRIC_NDCG;
   return TK_EVAL_METRIC_NONE;
 }
 
@@ -1983,6 +1986,11 @@ static double tk_compute_reconstruction (
             // Sort bin_ranks by hamming distance (descending) for rank-based correlation
             tk_pvec_desc(bin_ranks, 0, bin_ranks->n);
             corr = tk_csr_spearman_distance(neighbors, weights, start, end, bin_ranks, weight_ranks_buffer, weight_rank_map);
+            break;
+          case TK_EVAL_METRIC_NDCG:
+            // Sort bin_ranks by hamming distance (ascending) for nDCG computation
+            tk_pvec_asc(bin_ranks, 0, bin_ranks->n);
+            corr = tk_csr_ndcg_distance(neighbors, weights, start, end, bin_ranks, rank_buffer_b);
             break;
           default:
             corr = 0.0;
