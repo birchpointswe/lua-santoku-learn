@@ -27,9 +27,9 @@ local cfg; cfg = {
     laplacian = "unnormalized",
     n_dims = 24,
     eps = 1e-8,
-    binarize = itq.encode,
+    binarize = itq.otsu,
     top = function (codes, n, dims)
-      local eids, escores = codes:mtx_top_dip(n, dims)
+      local eids, escores = codes:mtx_top_esber(n, dims)
       print("\nRanked Eigenvectors")
       local _, eidx = escores:scores_lmethod()
       for i = 0, dims - 1 do
