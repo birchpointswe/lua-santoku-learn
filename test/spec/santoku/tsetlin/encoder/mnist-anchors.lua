@@ -27,14 +27,13 @@ local cfg; cfg = {
     laplacian = "unnormalized",
     n_dims = 24,
     eps = 1e-8,
-    binarize = itq.otsu,
+    binarize = itq.encode,
     top = function (codes, n, dims)
-      local eids, escores = codes:mtx_top_esber(n, dims)
-      print("\nTop Entropy")
+      local eids, escores = codes:mtx_top_dip(n, dims)
+      print("\nRanked Eigenvectors")
       local _, eidx = escores:scores_lmethod()
-      eidx = eidx
       for i = 0, dims - 1 do
-        str.printf("  Eig = %3d  Entropy: %.8f  %s\n", eids:get(i), escores:get(i), i == eidx and "<- elbow" or "")
+        str.printf("  Rank = %3d  Eig = %3d  Score: %.8f  %s\n", i, eids:get(i), escores:get(i), i == eidx and "<- elbow" or "")
       end
       eids:setn(eidx)
       return eids
@@ -44,13 +43,6 @@ local cfg; cfg = {
     n_dims =  64,
     ranks = nil,
     quantiles = nil,
-  },
-  select = {
-    enabled = false,
-    reverse = true,
-    metric = "pearson",
-    anchors = 16,
-    pairs = 16,
   },
   graph = {
     decay = 8.0,
@@ -202,22 +194,10 @@ test("mnist-anchors", function()
       end
     })
     train.dims_spectral = cfg.spectral.n_dims
-    if cfg.spectral.gap then
-      local idx = cfg.spectral.gap(train.eigs_spectral)
-      if idx then
-        str.printf("\nFound gap at value %d\n", idx)
-        local bs = ivec.create(idx)
-        bs:fill_indices()
-        train.codes_spectral:mtx_select(bs, nil, train.dims_spectral)
-        train.dims_spectral = idx
-      end
-    end
     if cfg.spectral.top then
       local kept = cfg.spectral.top(train.codes_spectral, train.adj_ids_spectral:size(), train.dims_spectral)
-      if kept then
-        train.codes_spectral:mtx_select(kept, nil, cfg.spectral.n_dims)
-        train.dims_spectral = kept:size()
-      end
+      train.codes_spectral:mtx_select(kept, nil, train.dims_spectral)
+      train.dims_spectral = kept:size()
     end
     print("\nMedian thresholding")
     train.codes_spectral = cfg.spectral.binarize({
@@ -247,38 +227,6 @@ test("mnist-anchors", function()
     data:add_scaled(10)
     train.cat_index:add(data, train.ids_spectral)
     data:destroy()
-  end
-
-  if cfg.select.enabled then
-    print("\nCreating adjacency for bit selection")
-    local ids, offs, nbrs, wts = graph.adjacency({
-      category_index = train.cat_index,
-      category_anchors = cfg.select.anchors,
-      random_pairs = cfg.select.pairs,
-      each = function (ns, cs, es, stg)
-        local d, dd = stopwatch()
-        str.printf("  Time: %6.2f %6.2f | Stage: %-10s  Nodes: %5d  Components: %5s  Edges: %5s\n",
-          d, dd, stg, ns, cs, es)
-      end
-    })
-    print("\nOptimizing bits")
-    local codes = cvec.create()
-    codes:bits_extend(train.codes_spectral, ids, train.ids_spectral, 0, train.dims_spectral, true)
-    train.kept_bits = eval.optimize_bits({
-      codes = codes,
-      n_dims = train.dims_spectral,
-      start_prefix = cfg.select.reverse and train.dims_spectral or nil,
-      expected_offsets = offs,
-      expected_neighbors = nbrs,
-      expected_weights = wts,
-      metric = cfg.select.metric,
-      each = function (bit, gain, score, stage)
-        local d, dd = stopwatch()
-        str.printf("  Time: %6.2f %6.2f | Stage: %-8s | Bit: %3d | Score: %.6f | Gain: %.6f\n", d, dd, stage, bit, score, gain)
-      end
-    })
-    train.codes_spectral:bits_select(train.kept_bits, nil, train.dims_spectral)
-    train.dims_spectral = train.kept_bits:size()
   end
 
   -- Build category-based ground truth adjacency
