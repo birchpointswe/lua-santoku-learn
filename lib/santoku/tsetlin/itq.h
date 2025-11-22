@@ -27,7 +27,6 @@ static inline void tk_itq_sign (
   for (uint64_t i = 0; i < N; i ++) {
     double *row = X + i * K;
     uint8_t *out_row = (uint8_t *)(out + i * TK_CVEC_BITS_BYTES(K));
-
     uint64_t full_bytes = K / 8;
     for (uint64_t byte_idx = 0; byte_idx < full_bytes; byte_idx ++) {
       uint8_t byte_val = 0;
@@ -37,7 +36,6 @@ static inline void tk_itq_sign (
       }
       out_row[byte_idx] = byte_val;
     }
-
     uint64_t remaining_start = full_bytes * 8;
     if (remaining_start < K) {
       uint8_t byte_val = 0;
@@ -171,10 +169,8 @@ static inline void tk_itq_encode (
   const size_t N = codes->n / K;
   tk_cvec_t *out = tk_cvec_create(L, N * TK_CVEC_BITS_BYTES(n_dims), 0, 0);
   tk_cvec_zero(out);
-
   size_t total_size = (N * K * 3 +  K * K * 4 + K + K - 1) * sizeof(double);
   double *mem = tk_malloc(L, total_size);
-
   double *X = mem;
   double *V0 = X + N * K;
   double *B = V0 + N * K;
@@ -184,21 +180,16 @@ static inline void tk_itq_encode (
   double *VT = U + K * K;
   double *S = VT + K * K;
   double *superb = S + K;
-
   memcpy(X, codes->a, N * K * sizeof(double));
   tk_dvec_center(X, N, K);
-
   #pragma omp parallel for collapse(2)
   for (uint64_t i = 0; i < K; i ++)
     for (uint64_t j = 0; j < K; j ++)
       R[i * K + j] = (i == j ? 1.0 : 0.0);
-
   double last_obj = DBL_MAX, first_obj = 0.0;
   uint64_t it = 0;
-
   for (it = 0; it < max_iterations; it ++) {
     cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, N, K, K, 1.0, X, K, R, K, 0.0, V0, K);
-
     double obj = 0.0;
     #pragma omp parallel for reduction(+:obj)
     for (size_t idx = 0; idx < N * K; idx ++) {
@@ -208,32 +199,23 @@ static inline void tk_itq_encode (
       double d = b - v;
       obj += d * d;
     }
-
     if (it == 0)
       first_obj = obj;
-
     if (it > 0 && fabs(last_obj - obj) < tolerance * fabs(obj))
       break;
-
     last_obj = obj;
-
     cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans, K, K, N, 1.0, B, K, X, K, 0.0, BtV, K);
-
     int info = LAPACKE_dgesvd(LAPACK_ROW_MAJOR, 'A', 'A', K, K, BtV, K, S, U, K, VT, K, superb);
     if (info != 0) {
       free(mem);
       luaL_error(L, "ITQ SVD failed to converge (info=%d)", info);
       return;
     }
-
     cblas_dgemm(CblasRowMajor, CblasTrans, CblasTrans, K, K, K, 1.0, VT, K, U, K, 0.0, R, K);
   }
-
   cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, N, K, K, 1.0, X, K, R, K, 0.0, V0, K);
   tk_itq_sign(out->a, V0, N, K);
-
   free(mem);
-
   if (i_each >= 0) {
     lua_pushvalue(L, i_each);
     lua_pushinteger(L, (int64_t) it);
