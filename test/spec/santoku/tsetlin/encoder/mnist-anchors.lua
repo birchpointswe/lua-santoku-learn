@@ -27,52 +27,17 @@ local cfg; cfg = {
     laplacian = "unnormalized",
     n_dims = 24,
     eps = 1e-8,
-    binarize = itq.encode,
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    binarize = itq.otsu,
     top = function (codes, n, dims)
-      local iids, iscores = codes:mtx_top_skewness(n, dims)
-      local eids, escores = codes:mtx_top_kurtosis(n, dims)
-      print("\nTop Skew")
-      local _, iidx = iscores:scores_lmethod()
-      iidx = iidx
-      for i = 0, dims - 1 do
-        str.printf("  Eig = %3d  Skew: %.8f  %s\n", iids:get(i), iscores:get(i), i == iidx and "<- elbow" or "")
-      end
-      iids:setn(iidx)
-      print("\nTop Kurtosis")
+      local eids, escores = codes:mtx_top_esber(n, dims)
+      print("\nTop Entropy")
       local _, eidx = escores:scores_lmethod()
+      eidx = eidx
       for i = 0, dims - 1 do
-        str.printf("  Eig = %3d  Kurtosis: %.8f  %s\n", eids:get(i), escores:get(i), i == eidx and "<- elbow" or "")
+        str.printf("  Eig = %3d  Entropy: %.8f  %s\n", eids:get(i), escores:get(i), i == eidx and "<- elbow" or "")
       end
       eids:setn(eidx)
-      iids:asc()
-      eids:asc()
-      iids:set_intersect(eids)
-      return iids
+      return eids
     end,
   },
   simhash = {
