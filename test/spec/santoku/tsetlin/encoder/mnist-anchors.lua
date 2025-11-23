@@ -27,8 +27,14 @@ local cfg; cfg = {
     laplacian = "unnormalized",
     n_dims = 24,
     eps = 1e-8,
-    binarize = itq.otsu,
-    top = function (codes, n, dims)
+    threshold = function (codes, dims)
+      return itq.otsu({
+        codes = codes,
+        n_dims = dims,
+        metric = "variance",
+      })
+    end,
+    select = function (codes, n, dims)
       local eids, escores = codes:mtx_top_entropy(n, dims)
       print("\nRanked Eigenvectors")
       local _, eidx = escores:scores_lmethod()
@@ -194,16 +200,11 @@ test("mnist-anchors", function()
       end
     })
     train.dims_spectral = cfg.spectral.n_dims
-    if cfg.spectral.top then
-      local kept = cfg.spectral.top(train.codes_spectral, train.adj_ids_spectral:size(), train.dims_spectral)
-      train.codes_spectral:mtx_select(kept, nil, train.dims_spectral)
-      train.dims_spectral = kept:size()
-    end
-    print("\nMedian thresholding")
-    train.codes_spectral = cfg.spectral.binarize({
-      codes = train.codes_spectral,
-      n_dims = train.dims_spectral,
-    })
+    local kept = cfg.spectral.select(train.codes_spectral, train.adj_ids_spectral:size(), train.dims_spectral)
+    train.codes_spectral:mtx_select(kept, nil, train.dims_spectral)
+    train.dims_spectral = kept:size()
+    print("\nThresholding")
+    train.codes_spectral = cfg.spectral.threshold(train.codes_spectral, train.dims_spectral)
   elseif cfg.data.mode == "simhash" then
     print("\nSimhashing")
     local idx = inv.create({ features = 10, expected_size = train.n })

@@ -51,9 +51,11 @@ static inline int tk_itq_otsu_lua (lua_State *L)
   lua_getfield(L, 1, "codes");
   tk_dvec_t *codes = tk_dvec_peek(L, -1, "codes");
   uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "itq", "n_dims");
+  const char *metric = tk_lua_foptstring(L, 1, "itq", "metric", "variance");
+  uint64_t n_bins = tk_lua_foptunsigned(L, 1, "itq", "n_bins", 0);
   tk_cvec_t *out = tk_cvec_create(L, codes->n / n_dims * TK_CVEC_BITS_BYTES(n_dims), 0, 0);
   tk_cvec_zero(out);
-  tk_itq_otsu(L, out->a, codes->a, codes->n / n_dims, n_dims);
+  tk_itq_otsu(L, out->a, codes->a, codes->n / n_dims, n_dims, metric, n_bins);
   return 1;
 }
 
