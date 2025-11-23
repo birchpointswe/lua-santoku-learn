@@ -29,7 +29,7 @@ local cfg; cfg = {
     eps = 1e-8,
     binarize = itq.otsu,
     top = function (codes, n, dims)
-      local eids, escores = codes:mtx_top_esber(n, dims)
+      local eids, escores = codes:mtx_top_entropy(n, dims)
       print("\nRanked Eigenvectors")
       local _, eidx = escores:scores_lmethod()
       for i = 0, dims - 1 do
