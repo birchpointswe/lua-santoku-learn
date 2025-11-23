@@ -97,23 +97,34 @@ static inline void tk_itq_otsu (
   uint64_t N,
   uint64_t K,
   const char *metric,
-  uint64_t n_bins
+  uint64_t n_bins,
+  bool minimize,
+  tk_ivec_t *out_indices,
+  tk_dvec_t *out_scores
 ) {
   if (n_bins == 0)
     n_bins = 32;
+  bool use_entropy = (strcmp(metric, "entropy") == 0);
+  tk_rvec_t *ranked = tk_rvec_create(0, 0, 0, 0);
+  tk_rvec_ensure(ranked, K);
+  double *scores = (double *)calloc(K, sizeof(double));
+  double *thresholds = (double *)calloc(K, sizeof(double));
+  char *temp_out = (char *)calloc(N * TK_CVEC_BITS_BYTES(K), 1);
+  if (!scores || !thresholds || !temp_out) {
+    if (scores) free(scores);
+    if (thresholds) free(thresholds);
+    if (temp_out) free(temp_out);
+    tk_rvec_destroy(ranked);
+    luaL_error(L, "Otsu: failed to allocate buffers");
+    return;
+  }
   #pragma omp parallel
   {
     uint64_t *bins = (uint64_t *)calloc(n_bins, sizeof(uint64_t));
-    char *local_out = calloc(N * TK_CVEC_BITS_BYTES(K), 1);
-    if (!bins || !local_out) {
+    if (!bins) {
       #pragma omp critical
-      {
-        if (bins) free(bins);
-        if (local_out) free(local_out);
-        luaL_error(L, "Adaptive Otsu: failed to allocate buffers");
-      }
+      luaL_error(L, "Otsu: failed to allocate bin buffer");
     }
-    bool use_entropy = (strcmp(metric, "entropy") == 0);
     #pragma omp for
     for (uint64_t j = 0; j < K; j ++) {
       double min_val = X[0 * K + j];
@@ -125,6 +136,8 @@ static inline void tk_itq_otsu (
       }
       double range = max_val - min_val;
       if (range < 1e-10) {
+        scores[j] = 0.0;
+        thresholds[j] = min_val;
         continue;
       }
       memset(bins, 0, n_bins * sizeof(uint64_t));
@@ -135,7 +148,7 @@ static inline void tk_itq_otsu (
         if (bin_idx >= n_bins) bin_idx = n_bins - 1;
         bins[bin_idx]++;
       }
-      double max_score = -DBL_MAX;
+      double best_score = minimize ? DBL_MAX : -DBL_MAX;
       double best_threshold = min_val;
       for (uint64_t b = 0; b < n_bins - 1; b ++) {
         uint64_t count_below = 0;
@@ -180,28 +193,50 @@ static inline void tk_itq_otsu (
           double mean1 = sum_above / (double)count_above;
           score = w0 * w1 * (mean0 - mean1) * (mean0 - mean1);
         }
-        if (score > max_score) {
-          max_score = score;
+        bool is_better = minimize ? (score < best_score) : (score > best_score);
+        if (is_better) {
+          best_score = score;
           best_threshold = min_val + range * ((double)(b + 1)) / (double)n_bins;
         }
       }
-      uint64_t byte_offset = TK_CVEC_BITS_BYTE(j);
-      uint8_t bit_mask = (uint8_t) 1 << TK_CVEC_BITS_BIT(j);
-      for (uint64_t i = 0; i < N; i ++) {
-        if (X[i * K + j] >= best_threshold) {
-          local_out[i * TK_CVEC_BITS_BYTES(K) + byte_offset] |= (char)bit_mask;
-        }
-      }
+      scores[j] = best_score;
+      thresholds[j] = best_threshold;
     }
-    #pragma omp critical
-    {
-      for (uint64_t idx = 0; idx < N * TK_CVEC_BITS_BYTES(K); idx ++) {
-        out[idx] |= local_out[idx];
-      }
-    }
-    free(local_out);
     free(bins);
   }
+  for (uint64_t j = 0; j < K; j ++) {
+    double rank_score = minimize ? -scores[j] : scores[j];
+    tk_rank_t r = { (int64_t)j, rank_score };
+    tk_rvec_push(ranked, r);
+  }
+  tk_rvec_desc(ranked, 0, ranked->n);
+  for (uint64_t j = 0; j < K; j ++) {
+    uint64_t orig_j = (uint64_t)ranked->a[j].i;
+    double threshold = thresholds[orig_j];
+    uint64_t byte_offset = TK_CVEC_BITS_BYTE(j);
+    uint8_t bit_mask = (uint8_t) 1 << TK_CVEC_BITS_BIT(j);
+    for (uint64_t i = 0; i < N; i ++) {
+      if (X[i * K + orig_j] >= threshold) {
+        temp_out[i * TK_CVEC_BITS_BYTES(K) + byte_offset] |= (char)bit_mask;
+      }
+    }
+  }
+  memcpy(out, temp_out, N * TK_CVEC_BITS_BYTES(K));
+  if (out_indices) {
+    tk_rvec_keys(L, ranked, out_indices);
+  }
+  if (out_scores) {
+    tk_dvec_ensure(out_scores, K);
+    for (uint64_t j = 0; j < K; j ++) {
+      uint64_t orig_j = (uint64_t)ranked->a[j].i;
+      out_scores->a[j] = minimize ? -scores[orig_j] : scores[orig_j];
+    }
+    out_scores->n = K;
+  }
+  free(scores);
+  free(thresholds);
+  free(temp_out);
+  tk_rvec_destroy(ranked);
 }
 
 static inline void tk_itq_encode (
