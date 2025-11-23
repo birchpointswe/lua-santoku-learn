@@ -28,11 +28,21 @@ local cfg; cfg = {
     n_dims = 24,
     eps = 1e-8,
     threshold = function (codes, dims)
-      return itq.otsu({
+      local codes, ids, vals = itq.otsu({
         codes = codes,
         n_dims = dims,
         metric = "variance",
+        minimize = false,
       })
+      print("\nThreshold scores")
+      local _, idx = vals:scores_lmethod()
+      for i = 0, vals:size() - 1 do
+        str.printf("  Rank = %3d  Eig = %3d  Score: %.8f  %s\n", i, ids:get(i), vals:get(i), i == idx and "<- elbow" or "")
+      end
+      return codes, dims
+      -- ids:setn(idx)
+      -- codes:bits_select(ids, nil, dims)
+      -- return codes, idx
     end,
     select = function (codes, n, dims)
       local eids, escores = codes:mtx_top_entropy(n, dims)
@@ -200,11 +210,17 @@ test("mnist-anchors", function()
       end
     })
     train.dims_spectral = cfg.spectral.n_dims
-    local kept = cfg.spectral.select(train.codes_spectral, train.adj_ids_spectral:size(), train.dims_spectral)
-    train.codes_spectral:mtx_select(kept, nil, train.dims_spectral)
-    train.dims_spectral = kept:size()
+    if cfg.spectral.select then
+      local kept = cfg.spectral.select(train.codes_spectral, train.adj_ids_spectral:size(), train.dims_spectral)
+      train.codes_spectral:mtx_select(kept, nil, train.dims_spectral)
+      train.dims_spectral = kept:size()
+    end
     print("\nThresholding")
-    train.codes_spectral = cfg.spectral.threshold(train.codes_spectral, train.dims_spectral)
+    if cfg.spectral.threshold then
+      train.codes_spectral = cfg.spectral.threshold(train.codes_spectral, train.dims_spectral)
+    else
+      train.codes_spectral = itq.median({ codes = train.codes_spectral, n_dims = train.dims_spectral })
+    end
   elseif cfg.data.mode == "simhash" then
     print("\nSimhashing")
     local idx = inv.create({ features = 10, expected_size = train.n })
