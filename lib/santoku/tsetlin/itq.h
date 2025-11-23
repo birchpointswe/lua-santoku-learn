@@ -95,65 +95,112 @@ static inline void tk_itq_otsu (
   char *out,
   double *X,
   uint64_t N,
-  uint64_t K
+  uint64_t K,
+  const char *metric,
+  uint64_t n_bins
 ) {
+  if (n_bins == 0)
+    n_bins = 32;
   #pragma omp parallel
   {
-    double *col = malloc(N * sizeof(double));
+    uint64_t *bins = (uint64_t *)calloc(n_bins, sizeof(uint64_t));
     char *local_out = calloc(N * TK_CVEC_BITS_BYTES(K), 1);
-
-    if (col && local_out) {
-      #pragma omp for
-      for (uint64_t j = 0; j < K; j ++) {
-        for (uint64_t i = 0; i < N; i ++)
-          col[i] = X[i * K + j];
-
-        ks_introsort(tk_dvec_asc, N, col);
-
-        double total_sum = 0.0;
-        for (uint64_t i = 0; i < N; i ++)
-          total_sum += col[i];
-
-        double max_variance = -1.0;
-        double threshold = col[0];
-        double sum_left = 0.0;
-
-        for (uint64_t i = 0; i < N - 1; i ++) {
-          sum_left += col[i];
-          double w0 = (double)(i + 1) / N;
-          double w1 = 1.0 - w0;
-
-          if (w0 > 0.0 && w1 > 0.0) {
-            double mean0 = sum_left / (i + 1);
-            double mean1 = (total_sum - sum_left) / (N - i - 1);
-            double variance = w0 * w1 * (mean0 - mean1) * (mean0 - mean1);
-
-            if (variance > max_variance) {
-              max_variance = variance;
-              threshold = (col[i] + col[i + 1]) / 2.0;
-            }
-          }
-        }
-
-        uint64_t byte_offset = TK_CVEC_BITS_BYTE(j);
-        uint8_t bit_mask = (uint8_t) 1 << TK_CVEC_BITS_BIT(j);
-        for (uint64_t i = 0; i < N; i ++) {
-          if (X[i * K + j] >= threshold) {
-            local_out[i * TK_CVEC_BITS_BYTES(K) + byte_offset] |= (char)bit_mask;
-          }
-        }
-      }
-
+    if (!bins || !local_out) {
       #pragma omp critical
       {
-        for (uint64_t idx = 0; idx < N * TK_CVEC_BITS_BYTES(K); idx ++) {
-          out[idx] |= local_out[idx];
+        if (bins) free(bins);
+        if (local_out) free(local_out);
+        luaL_error(L, "Adaptive Otsu: failed to allocate buffers");
+      }
+    }
+    bool use_entropy = (strcmp(metric, "entropy") == 0);
+    #pragma omp for
+    for (uint64_t j = 0; j < K; j ++) {
+      double min_val = X[0 * K + j];
+      double max_val = min_val;
+      for (uint64_t i = 1; i < N; i ++) {
+        double val = X[i * K + j];
+        if (val < min_val) min_val = val;
+        if (val > max_val) max_val = val;
+      }
+      double range = max_val - min_val;
+      if (range < 1e-10) {
+        continue;
+      }
+      memset(bins, 0, n_bins * sizeof(uint64_t));
+      for (uint64_t i = 0; i < N; i ++) {
+        double val = X[i * K + j];
+        double normalized = (val - min_val) / range;
+        uint64_t bin_idx = (uint64_t)(normalized * (double)(n_bins - 1));
+        if (bin_idx >= n_bins) bin_idx = n_bins - 1;
+        bins[bin_idx]++;
+      }
+      double max_score = -DBL_MAX;
+      double best_threshold = min_val;
+      for (uint64_t b = 0; b < n_bins - 1; b ++) {
+        uint64_t count_below = 0;
+        uint64_t count_above = 0;
+        for (uint64_t i = 0; i <= b; i ++)
+          count_below += bins[i];
+        for (uint64_t i = b + 1; i < n_bins; i ++)
+          count_above += bins[i];
+        if (count_below == 0 || count_above == 0)
+          continue;
+        double score = 0.0;
+        if (use_entropy) {
+          double H0 = 0.0;
+          for (uint64_t i = 0; i <= b; i ++) {
+            if (bins[i] > 0) {
+              double p = (double)bins[i] / (double)count_below;
+              H0 -= p * log2(p);
+            }
+          }
+          double H1 = 0.0;
+          for (uint64_t i = b + 1; i < n_bins; i ++) {
+            if (bins[i] > 0) {
+              double p = (double)bins[i] / (double)count_above;
+              H1 -= p * log2(p);
+            }
+          }
+          score = H0 + H1;
+        } else {
+          double w0 = (double)count_below / (double)N;
+          double w1 = (double)count_above / (double)N;
+          double sum_below = 0.0;
+          double sum_above = 0.0;
+          for (uint64_t i = 0; i <= b; i ++) {
+            double bin_center = min_val + range * ((double)i + 0.5) / (double)n_bins;
+            sum_below += (double)bins[i] * bin_center;
+          }
+          for (uint64_t i = b + 1; i < n_bins; i ++) {
+            double bin_center = min_val + range * ((double)i + 0.5) / (double)n_bins;
+            sum_above += (double)bins[i] * bin_center;
+          }
+          double mean0 = sum_below / (double)count_below;
+          double mean1 = sum_above / (double)count_above;
+          score = w0 * w1 * (mean0 - mean1) * (mean0 - mean1);
+        }
+        if (score > max_score) {
+          max_score = score;
+          best_threshold = min_val + range * ((double)(b + 1)) / (double)n_bins;
         }
       }
-
-      free(local_out);
-      free(col);
+      uint64_t byte_offset = TK_CVEC_BITS_BYTE(j);
+      uint8_t bit_mask = (uint8_t) 1 << TK_CVEC_BITS_BIT(j);
+      for (uint64_t i = 0; i < N; i ++) {
+        if (X[i * K + j] >= best_threshold) {
+          local_out[i * TK_CVEC_BITS_BYTES(K) + byte_offset] |= (char)bit_mask;
+        }
+      }
     }
+    #pragma omp critical
+    {
+      for (uint64_t idx = 0; idx < N * TK_CVEC_BITS_BYTES(K); idx ++) {
+        out[idx] |= local_out[idx];
+      }
+    }
+    free(local_out);
+    free(bins);
   }
 }
 
