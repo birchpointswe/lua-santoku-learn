@@ -60,6 +60,7 @@ static inline int tk_itq_otsu_lua (lua_State *L)
 static luaL_Reg tk_itq_fns[] =
 {
   { "encode", tk_itq_encode_lua },
+  { "itq", tk_itq_encode_lua },
   { "sign", tk_itq_sign_lua },
   { "median", tk_itq_median_lua },
   { "otsu", tk_itq_otsu_lua },
