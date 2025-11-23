@@ -53,10 +53,15 @@ static inline int tk_itq_otsu_lua (lua_State *L)
   uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "itq", "n_dims");
   const char *metric = tk_lua_foptstring(L, 1, "itq", "metric", "variance");
   uint64_t n_bins = tk_lua_foptunsigned(L, 1, "itq", "n_bins", 0);
+  bool minimize = tk_lua_foptboolean(L, 1, "itq", "minimize", false);
   tk_cvec_t *out = tk_cvec_create(L, codes->n / n_dims * TK_CVEC_BITS_BYTES(n_dims), 0, 0);
   tk_cvec_zero(out);
-  tk_itq_otsu(L, out->a, codes->a, codes->n / n_dims, n_dims, metric, n_bins);
-  return 1;
+  tk_ivec_t *indices = tk_ivec_create(L, 0, 0, 0);
+  tk_dvec_t *scores = tk_dvec_create(L, 0, 0, 0);
+  tk_itq_otsu(L, out->a, codes->a, codes->n / n_dims, n_dims, metric, n_bins, minimize, indices, scores);
+  lua_insert(L, -2);
+  lua_insert(L, -2);
+  return 3;
 }
 
 static luaL_Reg tk_itq_fns[] =
