@@ -154,7 +154,6 @@ static inline int tk_spectral_compute_ic (
   uint64_t current_nnz = 0;
 
   if (unweighted) {
-    // Optimized path for unweighted graphs
     for (uint64_t i = 0; i < n; i++) {
       spec->ic_offset[i] = (int64_t) current_nnz;
       const int64_t edge_start = adj_offset[i];
@@ -163,7 +162,7 @@ static inline int tk_spectral_compute_ic (
         int64_t j = adj_neighbors[e];
         if (j < (int64_t)i) {
           spec->ic_neighbors[current_nnz] = j;
-          spec->ic_L[current_nnz] = -1.0;  // No weight load!
+          spec->ic_L[current_nnz] = -1.0;
           current_nnz++;
         }
       }
@@ -172,7 +171,6 @@ static inline int tk_spectral_compute_ic (
       current_nnz++;
     }
   } else {
-    // Weighted path
     const double * restrict adj_weights = spec->adj_weights->a;
     for (uint64_t i = 0; i < n; i++) {
       spec->ic_offset[i] = (int64_t) current_nnz;
@@ -308,7 +306,6 @@ static inline int tk_spectral_compute_poly (
   double lambda_max = 0.0;
 
   if (unweighted) {
-    // Optimized path for unweighted graphs
     for (int iter = 0; iter < 10; iter++) {
       #pragma omp parallel for schedule(static)
       for (uint64_t i = 0; i < n; i++) {
@@ -317,7 +314,7 @@ static inline int tk_spectral_compute_poly (
         const int64_t edge_end = adj_offset[i + 1];
         for (int64_t e = edge_start; e < edge_end; e++) {
           const int64_t dst = adj_neighbors[e];
-          accum -= v[dst];  // No weight load or multiply!
+          accum -= v[dst];
         }
         Av[i] = accum;
       }
@@ -329,7 +326,6 @@ static inline int tk_spectral_compute_poly (
       }
     }
   } else {
-    // Weighted path
     const double * restrict adj_weights = spec->adj_weights->a;
     for (int iter = 0; iter < 10; iter++) {
       #pragma omp parallel for schedule(static)
@@ -357,7 +353,6 @@ static inline int tk_spectral_compute_poly (
 
   double lambda_min = DBL_MAX;
   if (unweighted) {
-    // Optimized path: just count edges
     #pragma omp parallel for schedule(static) reduction(min:lambda_min)
     for (uint64_t i = 0; i < n; i++) {
       const int64_t edge_start = adj_offset[i];
@@ -371,7 +366,6 @@ static inline int tk_spectral_compute_poly (
       }
     }
   } else {
-    // Weighted path
     const double * restrict adj_weights = spec->adj_weights->a;
     #pragma omp parallel for schedule(static) reduction(min:lambda_min)
     for (uint64_t i = 0; i < n; i++) {
@@ -422,7 +416,6 @@ static inline void tk_spectral_poly (
   double alpha = 1.0 / radius;
 
   if (unweighted) {
-    // Optimized path for unweighted graphs
     for (int b = 0; b < *blockSize; b++) {
       const double * restrict xb = xvec + (size_t) b * (size_t) *ldx;
       double * restrict yb = yvec + (size_t) b * (size_t) *ldy;
@@ -440,7 +433,7 @@ static inline void tk_spectral_poly (
           const int64_t edge_end = adj_offset[i + 1];
           for (int64_t e = edge_start; e < edge_end; e++) {
             const int64_t dst = adj_neighbors[e];
-            accum -= w0[dst];  // No weight load or multiply!
+            accum -= w0[dst];
           }
           w1[i] = (accum - center * w0[i]) * alpha;
         }
@@ -456,7 +449,7 @@ static inline void tk_spectral_poly (
             const int64_t edge_end = adj_offset[i + 1];
             for (int64_t e = edge_start; e < edge_end; e++) {
               const int64_t dst = adj_neighbors[e];
-              accum -= w_curr[dst];  // No weight load or multiply!
+              accum -= w_curr[dst];
             }
             w_prev[i] = 2.0 * alpha * (accum - center * w_curr[i]) - w_prev[i];
           }
@@ -469,7 +462,6 @@ static inline void tk_spectral_poly (
       }
     }
   } else {
-    // Weighted path
     const double * restrict adj_weights = spec->adj_weights->a;
     for (int b = 0; b < *blockSize; b++) {
       const double * restrict xb = xvec + (size_t) b * (size_t) *ldx;
@@ -544,7 +536,6 @@ static inline void tk_spectral_matvec (
   const bool unweighted = spec->unweighted;
 
   if (unweighted) {
-    // Optimized path for unweighted graphs: no weight loads or multiplies
     if (laplacian_type == TK_LAPLACIAN_UNNORMALIZED) {
       #pragma omp parallel
       {
@@ -559,7 +550,7 @@ static inline void tk_spectral_matvec (
             double accum = deg * xb[i];
             for (int64_t e = edge_start; e < edge_end; e++) {
               const int64_t dst = adj_neighbors[e];
-              accum -= xb[dst];  // No weight load or multiply!
+              accum -= xb[dst];
             }
             yb[i] = accum;
           }
@@ -578,7 +569,7 @@ static inline void tk_spectral_matvec (
             const double slf_i = self_loop[i];
             const int64_t edge_start = adj_offset[i];
             const int64_t edge_end = adj_offset[i + 1];
-            double accum = slf_i * xb[i]; // Use precomputed self-loop factor
+            double accum = slf_i * xb[i];
             for (int64_t e = edge_start; e < edge_end; e++) {
               const int64_t dst = adj_neighbors[e];
               accum -= scale_i * scale[dst] * xb[dst];
@@ -589,7 +580,6 @@ static inline void tk_spectral_matvec (
       }
     }
   } else {
-    // Weighted path
     const double * restrict adj_weights = spec->adj_weights->a;
     if (laplacian_type == TK_LAPLACIAN_UNNORMALIZED) {
       #pragma omp parallel
@@ -625,7 +615,7 @@ static inline void tk_spectral_matvec (
             const double slf_i = self_loop[i];
             const int64_t edge_start = adj_offset[i];
             const int64_t edge_end = adj_offset[i + 1];
-            double accum = slf_i * xb[i]; // Use precomputed self-loop factor
+            double accum = slf_i * xb[i];
             for (int64_t e = edge_start; e < edge_end; e++) {
               const int64_t dst = adj_neighbors[e];
               const double scaled_weight = scale_i * scale[dst] * adj_weights[e];
@@ -691,7 +681,6 @@ static inline void tm_run_spectral (
     double * restrict sc = spec->scale->a;
     const int64_t * restrict offset = spec->adj_offset->a;
 
-    // Allocate self_loop_factor for normalized Laplacian (precompute 1 - scale_i^2)
     if (lap_type != TK_LAPLACIAN_UNNORMALIZED) {
       spec->self_loop_factor = tk_dvec_create(L, spec->n_nodes, 0, 0);
       spec->self_loop_factor->n = spec->n_nodes;
@@ -700,7 +689,6 @@ static inline void tm_run_spectral (
     }
 
     if (unweighted) {
-      // Optimized path for unweighted graphs: just count edges
       if (lap_type == TK_LAPLACIAN_UNNORMALIZED) {
         #pragma omp parallel for schedule(static)
         for (uint64_t i = 0; i < spec->n_nodes; i++) {
@@ -715,15 +703,14 @@ static inline void tm_run_spectral (
         for (uint64_t i = 0; i < spec->n_nodes; i++) {
           const int64_t j_start = offset[i];
           const int64_t j_end = offset[i + 1];
-          double sum = 1.0 + (double)(j_end - j_start); // self-loop + edge count
+          double sum = 1.0 + (double)(j_end - j_start);
           deg[i] = sum;
           double scale_i = 1.0 / sqrt(sum);
           sc[i] = scale_i;
-          slf[i] = 1.0 - scale_i * scale_i;  // Precompute self-loop factor
+          slf[i] = 1.0 - scale_i * scale_i;
         }
       }
     } else {
-      // Weighted path: sum edge weights
       const double * restrict weights = spec->adj_weights->a;
       if (lap_type == TK_LAPLACIAN_UNNORMALIZED) {
         #pragma omp parallel for schedule(static)
@@ -740,7 +727,7 @@ static inline void tm_run_spectral (
         double * restrict slf = spec->self_loop_factor->a;
         #pragma omp parallel for schedule(static)
         for (uint64_t i = 0; i < spec->n_nodes; i++) {
-          double sum = 1.0; // self-loop regularization
+          double sum = 1.0;
           const int64_t j_start = offset[i];
           const int64_t j_end = offset[i + 1];
           for (int64_t j = j_start; j < j_end; j++)
@@ -748,7 +735,7 @@ static inline void tm_run_spectral (
           deg[i] = sum;
           double scale_i = sum > 0.0 ? 1.0 / sqrt(sum) : 0.0;
           sc[i] = scale_i;
-          slf[i] = 1.0 - scale_i * scale_i;  // Precompute self-loop factor
+          slf[i] = 1.0 - scale_i * scale_i;
         }
       }
     }
@@ -929,13 +916,29 @@ static inline int tm_encode (lua_State *L)
     i_each = tk_lua_absindex(L, -1);
   }
 
-  lua_pushvalue(L, i_uids);
   tk_dvec_t *z = tk_dvec_create(L, 0, 0, 0);
+  int i_z = lua_gettop(L);
   tk_dvec_t *scale = tk_dvec_create(L, uids->n, 0, 0);
+  int i_scale = lua_gettop(L);
   tk_dvec_t *degree = tk_dvec_create(L, uids->n, 0, 0);
 
   tm_run_spectral(L, z, scale, degree, uids, adj_offset, adj_neighbors, adj_weights, n_hidden, eps, laplacian_type, method, precond, block_size, i_each, unweighted);
-  lua_remove(L, -2);
+
+  int i_eigenvalues = lua_gettop(L);
+
+  lua_pushvalue(L, i_uids);
+  lua_replace(L, 1);
+
+  lua_pushvalue(L, i_z);
+  lua_replace(L, 2);
+
+  lua_pushvalue(L, i_scale);
+  lua_replace(L, 3);
+
+  lua_pushvalue(L, i_eigenvalues);
+  lua_replace(L, 4);
+
+  lua_settop(L, 4);
   return 4;
 }
 
