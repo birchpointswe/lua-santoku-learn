@@ -154,7 +154,6 @@ static inline int tk_spectral_compute_ic (
   uint64_t current_nnz = 0;
 
   if (unweighted) {
-
     for (uint64_t i = 0; i < n; i++) {
       spec->ic_offset[i] = (int64_t) current_nnz;
       const int64_t edge_start = adj_offset[i];
@@ -172,7 +171,6 @@ static inline int tk_spectral_compute_ic (
       current_nnz++;
     }
   } else {
-
     const double * restrict adj_weights = spec->adj_weights->a;
     for (uint64_t i = 0; i < n; i++) {
       spec->ic_offset[i] = (int64_t) current_nnz;
@@ -308,7 +306,6 @@ static inline int tk_spectral_compute_poly (
   double lambda_max = 0.0;
 
   if (unweighted) {
-
     for (int iter = 0; iter < 10; iter++) {
       #pragma omp parallel for schedule(static)
       for (uint64_t i = 0; i < n; i++) {
@@ -329,7 +326,6 @@ static inline int tk_spectral_compute_poly (
       }
     }
   } else {
-
     const double * restrict adj_weights = spec->adj_weights->a;
     for (int iter = 0; iter < 10; iter++) {
       #pragma omp parallel for schedule(static)
@@ -357,7 +353,6 @@ static inline int tk_spectral_compute_poly (
 
   double lambda_min = DBL_MAX;
   if (unweighted) {
-
     #pragma omp parallel for schedule(static) reduction(min:lambda_min)
     for (uint64_t i = 0; i < n; i++) {
       const int64_t edge_start = adj_offset[i];
@@ -371,7 +366,6 @@ static inline int tk_spectral_compute_poly (
       }
     }
   } else {
-
     const double * restrict adj_weights = spec->adj_weights->a;
     #pragma omp parallel for schedule(static) reduction(min:lambda_min)
     for (uint64_t i = 0; i < n; i++) {
@@ -422,7 +416,6 @@ static inline void tk_spectral_poly (
   double alpha = 1.0 / radius;
 
   if (unweighted) {
-
     for (int b = 0; b < *blockSize; b++) {
       const double * restrict xb = xvec + (size_t) b * (size_t) *ldx;
       double * restrict yb = yvec + (size_t) b * (size_t) *ldy;
@@ -469,7 +462,6 @@ static inline void tk_spectral_poly (
       }
     }
   } else {
-
     const double * restrict adj_weights = spec->adj_weights->a;
     for (int b = 0; b < *blockSize; b++) {
       const double * restrict xb = xvec + (size_t) b * (size_t) *ldx;
@@ -544,7 +536,6 @@ static inline void tk_spectral_matvec (
   const bool unweighted = spec->unweighted;
 
   if (unweighted) {
-
     if (laplacian_type == TK_LAPLACIAN_UNNORMALIZED) {
       #pragma omp parallel
       {
@@ -589,7 +580,6 @@ static inline void tk_spectral_matvec (
       }
     }
   } else {
-
     const double * restrict adj_weights = spec->adj_weights->a;
     if (laplacian_type == TK_LAPLACIAN_UNNORMALIZED) {
       #pragma omp parallel
@@ -691,7 +681,6 @@ static inline void tm_run_spectral (
     double * restrict sc = spec->scale->a;
     const int64_t * restrict offset = spec->adj_offset->a;
 
-
     if (lap_type != TK_LAPLACIAN_UNNORMALIZED) {
       spec->self_loop_factor = tk_dvec_create(L, spec->n_nodes, 0, 0);
       spec->self_loop_factor->n = spec->n_nodes;
@@ -700,7 +689,6 @@ static inline void tm_run_spectral (
     }
 
     if (unweighted) {
-
       if (lap_type == TK_LAPLACIAN_UNNORMALIZED) {
         #pragma omp parallel for schedule(static)
         for (uint64_t i = 0; i < spec->n_nodes; i++) {
@@ -723,7 +711,6 @@ static inline void tm_run_spectral (
         }
       }
     } else {
-
       const double * restrict weights = spec->adj_weights->a;
       if (lap_type == TK_LAPLACIAN_UNNORMALIZED) {
         #pragma omp parallel for schedule(static)
@@ -929,13 +916,29 @@ static inline int tm_encode (lua_State *L)
     i_each = tk_lua_absindex(L, -1);
   }
 
-  lua_pushvalue(L, i_uids);
   tk_dvec_t *z = tk_dvec_create(L, 0, 0, 0);
+  int i_z = lua_gettop(L);
   tk_dvec_t *scale = tk_dvec_create(L, uids->n, 0, 0);
+  int i_scale = lua_gettop(L);
   tk_dvec_t *degree = tk_dvec_create(L, uids->n, 0, 0);
 
   tm_run_spectral(L, z, scale, degree, uids, adj_offset, adj_neighbors, adj_weights, n_hidden, eps, laplacian_type, method, precond, block_size, i_each, unweighted);
-  lua_remove(L, -2);
+
+  int i_eigenvalues = lua_gettop(L);
+
+  lua_pushvalue(L, i_uids);
+  lua_replace(L, 1);
+
+  lua_pushvalue(L, i_z);
+  lua_replace(L, 2);
+
+  lua_pushvalue(L, i_scale);
+  lua_replace(L, 3);
+
+  lua_pushvalue(L, i_eigenvalues);
+  lua_replace(L, 4);
+
+  lua_settop(L, 4);
   return 4;
 }
 
