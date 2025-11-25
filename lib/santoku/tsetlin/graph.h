@@ -40,6 +40,12 @@ typedef enum {
   TK_GRAPH_BRIDGE_LARGEST
 } tk_graph_bridge_t;
 
+typedef enum {
+  TK_GRAPH_KNN_MODE_NONE,   // Basic weighted graph
+  TK_GRAPH_KNN_MODE_SIGMA,  // Local sigma reweighting
+  TK_GRAPH_KNN_MODE_CKNN    // Continuous k-NN filtering (unweighted)
+} tk_graph_knn_mode_t;
+
 typedef struct tk_graph_s {
 
   tk_euset_t *pairs;
@@ -86,8 +92,9 @@ typedef struct tk_graph_s {
 
   double weight_eps;
   tk_graph_reweight_t reweight;
-  int64_t sigma_k;
-  double sigma_scale;
+
+  tk_graph_knn_mode_t knn_mode;
+  double knn_alpha;
 
   uint64_t knn;
   uint64_t knn_cache;
