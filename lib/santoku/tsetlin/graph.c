@@ -41,8 +41,8 @@ static inline tk_graph_t *tm_graph_create (
   tk_graph_weight_pooling_t weight_pooling,
   uint64_t random_pairs,
   double weight_eps,
-  int64_t sigma_k,
-  double sigma_scale,
+  tk_graph_knn_mode_t knn_mode,
+  double knn_alpha,
   tk_ivec_t *knn_query_ids,
   tk_ivec_t *knn_query_ivec,
   tk_cvec_t *knn_query_cvec,
@@ -51,7 +51,7 @@ static inline tk_graph_t *tm_graph_create (
   double knn_eps,
   bool knn_mutual,
   uint64_t knn_min,
-  bool bridge,
+  tk_graph_bridge_t bridge,
   uint64_t probe_radius
 );
 
@@ -74,44 +74,215 @@ static inline void tk_graph_add_adj (
   tk_iuset_put(graph->adj->a[iv], iu, &kha);
 }
 
+static inline void tm_compute_cknn_rhos (
+  lua_State *L,
+  int Gi,
+  tk_graph_t *graph
+) {
+  if (graph->knn_mode != TK_GRAPH_KNN_MODE_CKNN || graph->knn <= 0)
+    return;
+  if (!graph->uids_hoods)
+    return;
+
+  // Allocate sigmas array to store rho values
+  // NOTE: This reuses graph->sigmas storage temporarily for CkNN filtering.
+  // In CkNN mode, we skip the later tm_compute_sigma call, so no conflict.
+  graph->sigmas = tk_dvec_create(L, graph->uids->n, 0, 0);
+  tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
+  lua_pop(L, 1);
+
+  // Initialize all to 1.0 (fallback for nodes without hoods)
+  for (uint64_t i = 0; i < graph->uids->n; i++)
+    graph->sigmas->a[i] = 1.0;
+
+  uint64_t features_ann = graph->knn_ann ? graph->knn_ann->features : 1;
+  uint64_t features_hbi = graph->knn_hbi ? graph->knn_hbi->features : 1;
+  uint64_t k = graph->knn;
+
+  // For each hood, extract k-th neighbor distance (ρ)
+  for (uint64_t hood_idx = 0; hood_idx < graph->uids_hoods->n; hood_idx++) {
+    int64_t uid = graph->uids_hoods->a[hood_idx];
+    uint32_t khi = tk_iumap_get(graph->uids_idx, uid);
+    if (khi == tk_iumap_end(graph->uids_idx))
+      continue;
+    int64_t i = tk_iumap_val(graph->uids_idx, khi);
+    if (i < 0 || (uint64_t)i >= graph->sigmas->n)
+      continue;
+
+    double kth_dist = 1.0;
+    uint64_t hood_size = 0;
+
+    if (graph->knn_inv_hoods && hood_idx < graph->knn_inv_hoods->n) {
+      tk_rvec_t *hood = graph->knn_inv_hoods->a[hood_idx];
+      hood_size = hood->n;
+      uint64_t k_clamped = (k > hood_size) ? hood_size : k;
+      if (k_clamped > 0)
+        kth_dist = hood->a[k_clamped - 1].d;
+    } else if (graph->knn_ann_hoods && hood_idx < graph->knn_ann_hoods->n) {
+      tk_pvec_t *hood = graph->knn_ann_hoods->a[hood_idx];
+      hood_size = hood->n;
+      uint64_t k_clamped = (k > hood_size) ? hood_size : k;
+      if (k_clamped > 0)
+        kth_dist = (double)hood->a[k_clamped - 1].p / (double)features_ann;
+    } else if (graph->knn_hbi_hoods && hood_idx < graph->knn_hbi_hoods->n) {
+      tk_pvec_t *hood = graph->knn_hbi_hoods->a[hood_idx];
+      hood_size = hood->n;
+      uint64_t k_clamped = (k > hood_size) ? hood_size : k;
+      if (k_clamped > 0)
+        kth_dist = (double)hood->a[k_clamped - 1].p / (double)features_hbi;
+    }
+
+    graph->sigmas->a[i] = kth_dist;
+  }
+}
+
 static inline void tm_add_knn (
   lua_State *L,
   tk_graph_t *graph
 ) {
+  if (!graph->uids_hoods)
+    return;
+
   int kha;
   uint32_t khi;
   uint64_t knn = graph->knn;
-  if (!graph->uids_hoods)
-    return;
-  uint64_t max_hoods = graph->knn_query_ids ? graph->knn_query_ids->n : (graph->uids_hoods ? graph->uids_hoods->n : 0);
+  double delta = graph->knn_alpha > 0 ? graph->knn_alpha : 1.0;
+  bool use_cknn = (graph->knn_mode == TK_GRAPH_KNN_MODE_CKNN) && graph->sigmas && graph->sigmas->n > 0;
+
+  uint64_t features_ann = graph->knn_ann ? graph->knn_ann->features : 1;
+  uint64_t features_hbi = graph->knn_hbi ? graph->knn_hbi->features : 1;
+  uint64_t max_hoods = graph->knn_query_ids ? graph->knn_query_ids->n : graph->uids_hoods->n;
+
   for (uint64_t hood_idx = 0; hood_idx < max_hoods; hood_idx++) {
     int64_t u = graph->knn_query_ids ? graph->knn_query_ids->a[hood_idx] : graph->uids_hoods->a[hood_idx];
     uint32_t u_khi = tk_iumap_get(graph->uids_idx, u);
     if (u_khi == tk_iumap_end(graph->uids_idx))
       continue;
+    int64_t iu = tk_iumap_val(graph->uids_idx, u_khi);
+
+    double rho_u = 1.0;
+    if (use_cknn && iu >= 0 && (uint64_t)iu < graph->sigmas->n)
+      rho_u = graph->sigmas->a[iu];
 
     uint64_t rem = knn;
-    int64_t neighbor_idx;
-    int64_t v;
 
-    TK_GRAPH_FOREACH_HOOD_NEIGHBOR(graph->knn_inv, graph->knn_ann, graph->knn_hbi,
-                                   graph->knn_inv_hoods, graph->knn_ann_hoods,
-                                   graph->knn_hbi_hoods, hood_idx,
-                                   graph->knn_eps, graph->uids_hoods,
-                                   neighbor_idx, v, {
-      if (!rem) break;
-      uint32_t v_khi = tk_iumap_get(graph->uids_idx, v);
-      if (v_khi == tk_iumap_end(graph->uids_idx))
-        continue;
-      tk_edge_t e = tk_edge(u, v, 0.0);
-      khi = tk_euset_put(graph->pairs, e, &kha);
-      if (!kha)
-        continue;
-      tk_graph_add_adj(graph, u, v);
-      tk_dsu_union(graph->dsu, u, v);
-      graph->n_edges++;
-      rem--;
-    });
+    // For INV hoods
+    if (graph->knn_inv_hoods && hood_idx < graph->knn_inv_hoods->n) {
+      tk_rvec_t *hood = graph->knn_inv_hoods->a[hood_idx];
+      for (uint64_t j = 0; j < hood->n && rem > 0; j++) {
+        if (hood->a[j].i < 0 || hood->a[j].i >= (int64_t)graph->uids_hoods->n)
+          continue;
+        double d_uv = hood->a[j].d;
+        if (d_uv > graph->knn_eps)
+          break;
+
+        int64_t neighbor_idx = hood->a[j].i;
+        int64_t v = graph->uids_hoods->a[neighbor_idx];
+
+        uint32_t v_khi = tk_iumap_get(graph->uids_idx, v);
+        if (v_khi == tk_iumap_end(graph->uids_idx))
+          continue;
+        int64_t iv = tk_iumap_val(graph->uids_idx, v_khi);
+
+        // CkNN filtering - use weight_index distance if available
+        if (use_cknn) {
+          double rho_v = (iv >= 0 && (uint64_t)iv < graph->sigmas->n) ? graph->sigmas->a[iv] : 1.0;
+          double threshold = delta * sqrt(rho_u * rho_v);
+          // Use semantic distance from weight_index instead of knn_index
+          if (graph->weight_inv || graph->weight_ann || graph->weight_hbi)
+            d_uv = tk_graph_distance(graph, u, v, graph->q_weights, graph->e_weights, graph->inter_weights);
+          if (d_uv > threshold)
+            continue;
+        }
+
+        tk_edge_t e = tk_edge(u, v, 0.0);
+        khi = tk_euset_put(graph->pairs, e, &kha);
+        if (!kha)
+          continue;
+        tk_graph_add_adj(graph, u, v);
+        tk_dsu_union(graph->dsu, u, v);
+        graph->n_edges++;
+        rem--;
+      }
+    }
+    // For ANN hoods
+    else if (graph->knn_ann_hoods && hood_idx < graph->knn_ann_hoods->n) {
+      tk_pvec_t *hood = graph->knn_ann_hoods->a[hood_idx];
+      for (uint64_t j = 0; j < hood->n && rem > 0; j++) {
+        if (hood->a[j].i < 0 || hood->a[j].i >= (int64_t)graph->uids_hoods->n)
+          continue;
+        double d_uv = (double)hood->a[j].p / (double)features_ann;
+        if (d_uv > graph->knn_eps)
+          break;
+
+        int64_t neighbor_idx = hood->a[j].i;
+        int64_t v = graph->uids_hoods->a[neighbor_idx];
+
+        uint32_t v_khi = tk_iumap_get(graph->uids_idx, v);
+        if (v_khi == tk_iumap_end(graph->uids_idx))
+          continue;
+        int64_t iv = tk_iumap_val(graph->uids_idx, v_khi);
+
+        // CkNN filtering - use weight_index distance if available
+        if (use_cknn) {
+          double rho_v = (iv >= 0 && (uint64_t)iv < graph->sigmas->n) ? graph->sigmas->a[iv] : 1.0;
+          double threshold = delta * sqrt(rho_u * rho_v);
+          // Use semantic distance from weight_index instead of knn_index
+          if (graph->weight_inv || graph->weight_ann || graph->weight_hbi)
+            d_uv = tk_graph_distance(graph, u, v, graph->q_weights, graph->e_weights, graph->inter_weights);
+          if (d_uv > threshold)
+            continue;
+        }
+
+        tk_edge_t e = tk_edge(u, v, 0.0);
+        khi = tk_euset_put(graph->pairs, e, &kha);
+        if (!kha)
+          continue;
+        tk_graph_add_adj(graph, u, v);
+        tk_dsu_union(graph->dsu, u, v);
+        graph->n_edges++;
+        rem--;
+      }
+    }
+    // For HBI hoods
+    else if (graph->knn_hbi_hoods && hood_idx < graph->knn_hbi_hoods->n) {
+      tk_pvec_t *hood = graph->knn_hbi_hoods->a[hood_idx];
+      for (uint64_t j = 0; j < hood->n && rem > 0; j++) {
+        if (hood->a[j].i < 0 || hood->a[j].i >= (int64_t)graph->uids_hoods->n)
+          continue;
+        double d_uv = (double)hood->a[j].p / (double)features_hbi;
+        if (d_uv > graph->knn_eps)
+          break;
+
+        int64_t neighbor_idx = hood->a[j].i;
+        int64_t v = graph->uids_hoods->a[neighbor_idx];
+
+        uint32_t v_khi = tk_iumap_get(graph->uids_idx, v);
+        if (v_khi == tk_iumap_end(graph->uids_idx))
+          continue;
+        int64_t iv = tk_iumap_val(graph->uids_idx, v_khi);
+
+        // CkNN filtering - use weight_index distance if available
+        if (use_cknn) {
+          double rho_v = (iv >= 0 && (uint64_t)iv < graph->sigmas->n) ? graph->sigmas->a[iv] : 1.0;
+          double threshold = delta * sqrt(rho_u * rho_v);
+          // Use semantic distance from weight_index instead of knn_index
+          if (graph->weight_inv || graph->weight_ann || graph->weight_hbi)
+            d_uv = tk_graph_distance(graph, u, v, graph->q_weights, graph->e_weights, graph->inter_weights);
+          if (d_uv > threshold)
+            continue;
+        }
+
+        tk_edge_t e = tk_edge(u, v, 0.0);
+        khi = tk_euset_put(graph->pairs, e, &kha);
+        if (!kha)
+          continue;
+        tk_graph_add_adj(graph, u, v);
+        tk_dsu_union(graph->dsu, u, v);
+        graph->n_edges++;
+        rem--;
+      }
+    }
   }
 }
 
@@ -750,7 +921,7 @@ static inline void tm_compute_sigma (
   int Gi,
   tk_graph_t *graph
 ) {
-  if (!graph->sigma_k || !graph->sigma_scale || graph->sigma_scale <= 0.0)
+  if (graph->knn_mode != TK_GRAPH_KNN_MODE_SIGMA || graph->knn <= 0 || graph->knn_alpha <= 0.0)
     return;
   graph->sigmas = tk_dvec_create(L, graph->uids->n, 0, 0);
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
@@ -887,12 +1058,12 @@ static inline void tm_compute_sigma (
           double sigma = 1.0;
           if (final_distances->n > 0) {
             tk_dvec_asc(final_distances, 0, final_distances->n);
-            uint64_t k = (graph->sigma_k > 0) ? (uint64_t)graph->sigma_k : final_distances->n;
+            uint64_t k = (graph->knn > 0) ? graph->knn : final_distances->n;
             if (k > final_distances->n)
               k = final_distances->n;
             sigma = final_distances->a[k - 1];
           }
-          graph->sigmas->a[i] = sigma * graph->sigma_scale;
+          graph->sigmas->a[i] = sigma * graph->knn_alpha;
         }
       }
     }
@@ -1085,8 +1256,18 @@ static inline int tm_adjacency (lua_State *L)
   uint64_t random_pairs = tk_lua_foptunsigned(L, 1, "graph", "random_pairs", 0);
 
   double weight_eps = tk_lua_foptnumber(L, 1, "graph", "weight_eps", 1e-8);
-  int64_t sigma_k = tk_lua_foptinteger(L, 1, "graph", "sigma_k", 0);
-  double sigma_scale = tk_lua_foptnumber(L, 1, "graph", "sigma_scale", 1.0);
+
+  // Parse knn_mode parameter
+  const char *knn_mode_str = tk_lua_foptstring(L, 1, "graph", "knn_mode", NULL);
+  tk_graph_knn_mode_t knn_mode = TK_GRAPH_KNN_MODE_NONE;
+  if (knn_mode_str != NULL) {
+    if (strcmp(knn_mode_str, "sigma") == 0) {
+      knn_mode = TK_GRAPH_KNN_MODE_SIGMA;
+    } else if (strcmp(knn_mode_str, "cknn") == 0) {
+      knn_mode = TK_GRAPH_KNN_MODE_CKNN;
+    }
+  }
+  double knn_alpha = tk_lua_foptnumber(L, 1, "graph", "knn_alpha", 1.0);
 
   uint64_t knn = tk_lua_foptunsigned(L, 1, "graph", "knn", 0);
   uint64_t knn_cache = tk_lua_foptunsigned(L, 1, "graph", "knn_cache", 0);
@@ -1138,7 +1319,7 @@ static inline int tm_adjacency (lua_State *L)
     category_inv, category_cmp, category_alpha, category_beta,
     category_anchors, category_knn, category_knn_decay, category_ranks,
     weight_inv, weight_ann, weight_hbi, weight_cmp, weight_alpha, weight_beta, weight_pooling,
-    random_pairs, weight_eps, sigma_k, sigma_scale,
+    random_pairs, weight_eps, knn_mode, knn_alpha,
     knn_query_ids, knn_query_ivec, knn_query_cvec,
     knn, knn_cache, knn_eps, knn_mutual, knn_min, bridge, probe_radius);
   int Gi = tk_lua_absindex(L, -1);
@@ -1311,6 +1492,10 @@ static inline int tm_adjacency (lua_State *L)
       tk_dsu_add_ids(L, graph->dsu);
       tm_adj_resize(L, Gi, graph);
     }
+    // Compute ρ values BEFORE adding edges (if CkNN mode enabled)
+    if (graph->knn_mode == TK_GRAPH_KNN_MODE_CKNN && graph->knn > 0) {
+      tm_compute_cknn_rhos(L, Gi, graph);
+    }
     tm_add_knn(L, graph);
     if (i_each != -1) {
       lua_pushvalue(L, i_each);
@@ -1426,9 +1611,13 @@ static inline int tm_adjacency (lua_State *L)
     }
   }
 
-  tm_compute_base_distances(L, Gi, graph);
-  tm_compute_sigma(L, Gi, graph);
-  tm_reweight_all_edges(L, graph);
+  // Only compute distances and reweight edges if NOT using CkNN
+  // (CkNN graphs are unweighted)
+  if (graph->knn_mode != TK_GRAPH_KNN_MODE_CKNN) {
+    tm_compute_base_distances(L, Gi, graph);
+    tm_compute_sigma(L, Gi, graph);
+    tm_reweight_all_edges(L, graph);
+  }
 
   uint64_t n_nodes = selected_nodes->n;
   tk_ivec_t *tmp_offset = tk_ivec_create(L, n_nodes + 1, 0, 0);
@@ -1502,11 +1691,23 @@ static inline int tm_adjacency (lua_State *L)
   final_data->n = tmp_data->n;
   final_weights->n = tmp_weights->n;
 
+  if (i_each != -1 && graph->largest_component_root != -1) {
+    lua_pushvalue(L, i_each);
+    lua_pushinteger(L, (int64_t)final_uids->n);
+    lua_pushinteger(L, 1);
+    lua_pushinteger(L, (int64_t)final_data->n);
+    lua_pushstring(L, "after-largest");
+    lua_call(L, 4, 0);
+  }
+
+  // Save knn_mode before destroying graph
+  bool is_cknn = (graph->knn_mode == TK_GRAPH_KNN_MODE_CKNN);
+
   tm_graph_destroy_internal(graph);
   tk_lua_replace(L, 1, 4);
-  lua_settop(L, 4);
+  lua_settop(L, is_cknn ? 3 : 4);
   lua_gc(L, LUA_GCCOLLECT, 0);
-  return 4;
+  return is_cknn ? 3 : 4;
 }
 
 static inline tk_graph_t *tm_graph_create (
@@ -1542,8 +1743,8 @@ static inline tk_graph_t *tm_graph_create (
   tk_graph_weight_pooling_t weight_pooling,
   uint64_t random_pairs,
   double weight_eps,
-  int64_t sigma_k,
-  double sigma_scale,
+  tk_graph_knn_mode_t knn_mode,
+  double knn_alpha,
   tk_ivec_t *knn_query_ids,
   tk_ivec_t *knn_query_ivec,
   tk_cvec_t *knn_query_cvec,
@@ -1552,7 +1753,7 @@ static inline tk_graph_t *tm_graph_create (
   double knn_eps,
   bool knn_mutual,
   uint64_t knn_min,
-  bool bridge,
+  tk_graph_bridge_t bridge,
   uint64_t probe_radius
 ) {
   tk_graph_t *graph = tk_lua_newuserdata(L, tk_graph_t, TK_GRAPH_MT, NULL, tm_graph_gc);
@@ -1593,8 +1794,8 @@ static inline tk_graph_t *tm_graph_create (
 
   graph->random_pairs = random_pairs;
   graph->weight_eps = weight_eps;
-  graph->sigma_k = sigma_k;
-  graph->sigma_scale = sigma_scale;
+  graph->knn_mode = knn_mode;
+  graph->knn_alpha = knn_alpha;
   graph->knn = knn;
   graph->knn_cache = knn_cache;
   graph->knn_eps = knn_eps;

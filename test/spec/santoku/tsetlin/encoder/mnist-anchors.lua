@@ -40,9 +40,6 @@ local cfg; cfg = {
         str.printf("  Rank = %3d  Eig = %3d  Score: %.8f  %s\n", i, ids:get(i), vals:get(i), i == idx and "<- elbow" or "")
       end
       return codes, dims
-      -- ids:setn(idx)
-      -- codes:bits_select(ids, nil, dims)
-      -- return codes, idx
     end,
     select = function (codes, n, dims)
       local eids, escores = codes:mtx_top_entropy(n, dims)
@@ -62,9 +59,12 @@ local cfg; cfg = {
   },
   graph = {
     decay = 8.0,
-    knn = 64,
+    knn = 24,
+    knn_mode = "cknn",
+    knn_alpha = 2.8,
     knn_mutual = nil,
     knn_min = nil,
+    knn_cache = nil,
     bridge = "mst",
   },
   ann = {
@@ -78,10 +78,12 @@ local cfg; cfg = {
     clustering_metric = "min",
     verbose = true,
     retrieval = function (d)
-      return d:scores_plateau(1e-8)
+      local idx = d:scores_plateau(1e-4)
+      return idx - 1
     end,
     clustering = function (d)
-      return d:scores_plateau(1e-8)
+      local idx = d:scores_plateau(1e-4)
+      return idx - 1
     end,
   },
   cluster = {
@@ -172,6 +174,9 @@ test("mnist-anchors", function()
         weight_index = train.index_graph,
         knn_index = train.node_features,
         knn = cfg.graph.knn,
+        knn_mode = cfg.graph.knn_mode,
+        knn_alpha = cfg.graph.knn_alpha,
+        knn_cache = cfg.graph.knn_cache,
         knn_mutual = cfg.graph.knn_mutual,
         knn_min = cfg.graph.knn_min,
         bridge = cfg.graph.bridge,
@@ -182,10 +187,12 @@ test("mnist-anchors", function()
         end
       })
     end
-    str.printf("\n  Min: %f  Max: %f  Mean: %f\n",
-      train.adj_weights_spectral:min(),
-      train.adj_weights_spectral:max(),
-      train.adj_weights_spectral:sum() / train.adj_weights_spectral:size())
+    if train.adj_weights_spectral then
+      str.printf("\n  Min: %f  Max: %f  Mean: %f\n",
+        train.adj_weights_spectral:min(),
+        train.adj_weights_spectral:max(),
+        train.adj_weights_spectral:sum() / train.adj_weights_spectral:size())
+    end
     print("\nSpectral eigendecomposition")
     train.ids_spectral, train.codes_spectral, train.scale_spectral, train.eigs_spectral = spectral.encode({
       type = cfg.spectral.laplacian,
@@ -319,9 +326,9 @@ test("mnist-anchors", function()
     end
   end
 
-  local best_f1, best_idx = cfg.eval.retrieval(train.retrieval_stats.f1)
+  local best_margin = cfg.eval.retrieval(train.retrieval_stats.quality)
   str.printf("Best\n  Margin: %2d | Quality: %.2f | Recall: %.2f | F1: %.2f\n",
-    best_idx, train.retrieval_stats.quality:get(best_idx), train.retrieval_stats.recall:get(best_idx), best_f1)
+    best_margin, train.retrieval_stats.quality:get(best_margin), train.retrieval_stats.recall:get(best_margin), train.retrieval_stats.f1:get(best_margin))
 
   -- Optional clustering
   if cfg.cluster.enabled then
@@ -364,11 +371,11 @@ test("mnist-anchors", function()
         train.cluster_stats.f1:get(step), train.cluster_stats.n_clusters:get(step))
     end
 
-    local best_f1, best_step = cfg.eval.clustering(train.cluster_stats.f1)
+    local best_step = cfg.eval.clustering(train.cluster_stats.quality)
     local best_n_clusters = train.cluster_stats.n_clusters:get(best_step)
     str.printf("Best\n  Step: %2d | Quality: %.2f | Recall: %.2f | F1: %.2f | Clusters: %d\n",
       best_step, train.cluster_stats.quality:get(best_step), train.cluster_stats.recall:get(best_step),
-      best_f1, best_n_clusters)
+      train.cluster_stats.f1:get(best_step), best_n_clusters)
   end
 
   collectgarbage("collect")
@@ -523,16 +530,16 @@ test("mnist-anchors", function()
     })
 
     -- Compare results
-    local orig_best_f1, orig_best_idx = cfg.eval.retrieval(train.retrieval_stats.f1)
-    local train_pred_best_f1, train_pred_best_idx = cfg.eval.retrieval(train_pred_stats.f1)
-    local test_pred_best_f1, test_pred_best_idx = cfg.eval.retrieval(test_pred_stats.f1)
+    local orig_best_margin = cfg.eval.retrieval(train.retrieval_stats.quality)
+    local train_pred_best_margin = cfg.eval.retrieval(train_pred_stats.quality)
+    local test_pred_best_margin = cfg.eval.retrieval(test_pred_stats.quality)
 
     str.printi("  Original | Margin: %.0f#(1) | Quality: %.2f#(2) | Recall: %.2f#(3) | F1: %.2f#(4)",
-      { orig_best_idx, train.retrieval_stats.quality:get(orig_best_idx), train.retrieval_stats.recall:get(orig_best_idx), orig_best_f1 })
+      { orig_best_margin, train.retrieval_stats.quality:get(orig_best_margin), train.retrieval_stats.recall:get(orig_best_margin),  train.retrieval_stats.f1:get(orig_best_margin) })
     str.printi("  Train    | Margin: %.0f#(1) | Quality: %.2f#(2) | Recall: %.2f#(3) | F1: %.2f#(4)",
-      { train_pred_best_idx, train_pred_stats.quality:get(train_pred_best_idx), train_pred_stats.recall:get(train_pred_best_idx), train_pred_best_f1 })
+      { train_pred_best_margin, train_pred_stats.quality:get(train_pred_best_margin), train_pred_stats.recall:get(train_pred_best_margin), train_pred_stats.f1:get(train_pred_best_margin) })
     str.printi("  Test     | Margin: %.0f#(1) | Quality: %.2f#(2) | Recall: %.2f#(3) | F1: %.2f#(4)",
-      { test_pred_best_idx, test_pred_stats.quality:get(test_pred_best_idx), test_pred_stats.recall:get(test_pred_best_idx), test_pred_best_f1 })
+      { test_pred_best_margin, test_pred_stats.quality:get(test_pred_best_margin), test_pred_stats.recall:get(test_pred_best_margin), test_pred_stats.f1:get(test_pred_best_margin) })
 
     idx_train_pred:destroy()
     idx_test_pred:destroy()
