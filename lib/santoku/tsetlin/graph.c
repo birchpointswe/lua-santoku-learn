@@ -1667,10 +1667,15 @@ static inline int tm_adjacency (lua_State *L)
   }
   tmp_offset->n = n_nodes + 1;
 
+  bool is_cknn = (graph->knn_mode == TK_GRAPH_KNN_MODE_CKNN);
+
   tk_ivec_t *final_uids = tk_ivec_create(L, n_nodes, 0, 0);
   tk_ivec_t *final_offset = tk_ivec_create(L, n_nodes + 1, 0, 0);
   tk_ivec_t *final_data = tk_ivec_create(L, tmp_data->n, 0, 0);
-  tk_dvec_t *final_weights = tk_dvec_create(L, tmp_weights->n, 0, 0);
+  tk_dvec_t *final_weights = NULL;
+  if (!is_cknn) {
+    final_weights = tk_dvec_create(L, tmp_weights->n, 0, 0);
+  }
   final_offset->a[0] = 0;
   int64_t write = 0;
   for (uint64_t i = 0; i < n_nodes; i++) {
@@ -1680,7 +1685,9 @@ static inline int tm_adjacency (lua_State *L)
     int64_t edge_end = tmp_offset->a[i + 1];
     for (int64_t e = edge_start; e < edge_end; e++) {
       final_data->a[write] = tmp_data->a[e];
-      final_weights->a[write] = tmp_weights->a[e];
+      if (!is_cknn) {
+        final_weights->a[write] = tmp_weights->a[e];
+      }
       write++;
     }
     final_offset->a[i + 1] = write;
@@ -1689,7 +1696,9 @@ static inline int tm_adjacency (lua_State *L)
   final_uids->n = n_nodes;
   final_offset->n = n_nodes + 1;
   final_data->n = tmp_data->n;
-  final_weights->n = tmp_weights->n;
+  if (!is_cknn) {
+    final_weights->n = tmp_weights->n;
+  }
 
   if (i_each != -1 && graph->largest_component_root != -1) {
     lua_pushvalue(L, i_each);
@@ -1700,14 +1709,19 @@ static inline int tm_adjacency (lua_State *L)
     lua_call(L, 4, 0);
   }
 
-  // Save knn_mode before destroying graph
-  bool is_cknn = (graph->knn_mode == TK_GRAPH_KNN_MODE_CKNN);
-
   tm_graph_destroy_internal(graph);
-  tk_lua_replace(L, 1, 4);
-  lua_settop(L, is_cknn ? 3 : 4);
-  lua_gc(L, LUA_GCCOLLECT, 0);
-  return is_cknn ? 3 : 4;
+
+  if (is_cknn) {
+    tk_lua_replace(L, 1, 3);
+    lua_settop(L, 3);
+    lua_gc(L, LUA_GCCOLLECT, 0);
+    return 3;
+  } else {
+    tk_lua_replace(L, 1, 4);
+    lua_settop(L, 4);
+    lua_gc(L, LUA_GCCOLLECT, 0);
+    return 4;
+  }
 }
 
 static inline tk_graph_t *tm_graph_create (
