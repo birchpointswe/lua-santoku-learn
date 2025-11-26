@@ -58,8 +58,8 @@ local cfg; cfg = {
     quantiles = nil,
   },
   graph = {
-    decay = 8.0,
-    knn = 12,
+    decay = 8,
+    knn = 24,
     knn_mode = "cknn",
     knn_alpha = 4,
     knn_mutual = nil,
