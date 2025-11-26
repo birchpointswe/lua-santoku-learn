@@ -106,6 +106,7 @@ typedef struct tk_graph_s {
   int64_t category_ranks;
 
   tk_dvec_t *sigmas;
+  double manifold_dim;  // Estimated manifold dimensionality (Levina-Bickel)
   uint64_t n_edges;
   tk_dsu_t *dsu;
   int64_t largest_component_root;

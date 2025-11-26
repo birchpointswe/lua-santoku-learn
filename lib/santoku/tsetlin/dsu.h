@@ -58,7 +58,6 @@ static inline int64_t tk_dsu_find (
   int64_t uid
 ) {
   khint_t khi = tk_iumap_get(dsu->ididx, uid);
-  // assert(khi != tk_iumap_end(dsu->ididx));
   int64_t uidx = tk_iumap_val(dsu->ididx, khi);
   return dsu->ids->a[tk_dsu_findx(dsu, uidx)];
 }
@@ -90,10 +89,8 @@ static inline void tk_dsu_union (
   int64_t y
 ) {
   khint_t xkhi = tk_iumap_get(dsu->ididx, x);
-  // assert(xkhi != tk_iumap_end(dsu->ididx));
   int64_t xidx = tk_iumap_val(dsu->ididx, xkhi);
   khint_t ykhi = tk_iumap_get(dsu->ididx, y);
-  // assert(ykhi != tk_iumap_end(dsu->ididx));
   int64_t yidx = tk_iumap_val(dsu->ididx, ykhi);
   tk_dsu_unionx(dsu, xidx, yidx);
 }
