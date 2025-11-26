@@ -62,6 +62,7 @@ typedef struct tk_graph_s {
   tk_inv_t *knn_inv; tk_inv_hoods_t *knn_inv_hoods;
   tk_ann_t *knn_ann; tk_ann_hoods_t *knn_ann_hoods;
   tk_hbi_t *knn_hbi; tk_hbi_hoods_t *knn_hbi_hoods;
+  tk_inv_hoods_t *weighted_hoods;  // Pre-computed weight_index distances, sorted
   tk_ivec_t *knn_query_ids;
   tk_ivec_t *knn_query_ivec;
   tk_cvec_t *knn_query_cvec;
@@ -398,6 +399,19 @@ static inline double tk_graph_distance (
                             q_weights, e_weights, inter_weights, d);
   }
   return d;
+}
+
+// Returns true if weight_index is not set or is the same as knn_index.
+// When true, distances from knn_index hoods are in the same order as
+// tk_graph_distance would compute, allowing early-break optimizations.
+static inline bool tk_graph_weight_is_knn (tk_graph_t *graph) {
+  // No weight_index means we use knn_index for distances
+  if (!graph->weight_inv && !graph->weight_ann && !graph->weight_hbi)
+    return true;
+  // Check if weight_index pointers match knn_index pointers
+  return (graph->weight_inv == graph->knn_inv &&
+          graph->weight_ann == graph->knn_ann &&
+          graph->weight_hbi == graph->knn_hbi);
 }
 
 static inline double tk_graph_get_weight (
