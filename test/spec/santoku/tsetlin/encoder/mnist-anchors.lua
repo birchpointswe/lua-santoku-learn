@@ -59,12 +59,12 @@ local cfg; cfg = {
   },
   graph = {
     decay = 8,
-    knn = 24,
+    knn = 12,
     knn_mode = "cknn",
-    knn_alpha = 4,
+    knn_alpha = 20,
     knn_mutual = nil,
     knn_min = nil,
-    knn_cache = 32,
+    knn_cache = 128,
     bridge = "mst",
   },
   ann = {
