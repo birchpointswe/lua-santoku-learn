@@ -75,14 +75,11 @@ static inline void tk_graph_add_adj (
   tk_iuset_put(graph->adj->a[iv], iu, &kha);
 }
 
-// Pre-compute weight_index distances and re-sort hoods when weight_index differs from knn_index.
-// Creates graph->weighted_hoods which can be used by cknn and sigma computations.
 static inline void tm_reweight_hoods (
   lua_State *L,
   int Gi,
   tk_graph_t *graph
 ) {
-  // Only reweight if weight_index differs from knn_index
   if (tk_graph_weight_is_knn(graph))
     return;
   if (!graph->uids_hoods || graph->uids_hoods->n == 0)
@@ -91,8 +88,6 @@ static inline void tm_reweight_hoods (
     return;
 
   uint64_t n_hoods = graph->uids_hoods->n;
-  uint64_t features_ann = graph->knn_ann ? graph->knn_ann->features : 1;
-  uint64_t features_hbi = graph->knn_hbi ? graph->knn_hbi->features : 1;
 
   graph->weighted_hoods = tk_inv_hoods_create(L, n_hoods, 0, 0);
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
@@ -141,7 +136,7 @@ static inline void tm_reweight_hoods (
               if (ni < 0 || ni >= (int64_t)graph->uids_hoods->n) continue;
               int64_t nuid = graph->uids_hoods->a[ni];
               double d = tk_graph_distance(graph, uid, nuid, q_weights, e_weights, inter_weights);
-              if (d == DBL_MAX) d = src->a[j].d;
+              if (d == DBL_MAX) continue;
               if (tk_rvec_push(local_hood, tk_rank(ni, d)) != 0) { has_error = true; break; }
             }
           } else if (graph->knn_ann_hoods && hood_idx < graph->knn_ann_hoods->n) {
@@ -151,7 +146,7 @@ static inline void tm_reweight_hoods (
               if (ni < 0 || ni >= (int64_t)graph->uids_hoods->n) continue;
               int64_t nuid = graph->uids_hoods->a[ni];
               double d = tk_graph_distance(graph, uid, nuid, q_weights, e_weights, inter_weights);
-              if (d == DBL_MAX) d = (double)src->a[j].p / (double)features_ann;
+              if (d == DBL_MAX) continue;
               if (tk_rvec_push(local_hood, tk_rank(ni, d)) != 0) { has_error = true; break; }
             }
           } else if (graph->knn_hbi_hoods && hood_idx < graph->knn_hbi_hoods->n) {
@@ -161,7 +156,7 @@ static inline void tm_reweight_hoods (
               if (ni < 0 || ni >= (int64_t)graph->uids_hoods->n) continue;
               int64_t nuid = graph->uids_hoods->a[ni];
               double d = tk_graph_distance(graph, uid, nuid, q_weights, e_weights, inter_weights);
-              if (d == DBL_MAX) d = (double)src->a[j].p / (double)features_hbi;
+              if (d == DBL_MAX) continue;
               if (tk_rvec_push(local_hood, tk_rank(ni, d)) != 0) { has_error = true; break; }
             }
           }
@@ -189,9 +184,6 @@ static inline void tm_reweight_hoods (
     tk_lua_verror(L, 2, "reweight_hoods", "worker allocation failed");
 }
 
-// Compute CkNN rhos (local density estimates) for all nodes.
-// Iterates over all graph->uids, collecting distances from both adj neighbors
-// and knn hoods, similar to how sigma mode works.
 static inline void tm_compute_cknn_rhos (
   lua_State *L,
   int Gi,
@@ -249,7 +241,6 @@ static inline void tm_compute_cknn_rhos (
           tk_iuset_clear(seen);
           int64_t uid = graph->uids->a[i];
 
-          // Collect distances from adj neighbors (seed/bipartite/anchor/random/knn edges)
           if (graph->adj && i < graph->adj->n) {
             int64_t neighbor_idx;
             tk_umap_foreach_keys(graph->adj->a[i], neighbor_idx, ({
@@ -266,14 +257,12 @@ static inline void tm_compute_cknn_rhos (
           }
           if (has_error) continue;
 
-          // Collect distances from knn hoods (using weighted_hoods if available)
           if (graph->uids_idx_hoods) {
             uint32_t khi = tk_iumap_get(graph->uids_idx_hoods, uid);
             if (khi != tk_iumap_end(graph->uids_idx_hoods)) {
               int64_t hood_idx = tk_iumap_val(graph->uids_idx_hoods, khi);
 
               if (graph->weighted_hoods && hood_idx < (int64_t)graph->weighted_hoods->n) {
-                // Use pre-computed weighted hoods
                 tk_rvec_t *hood = graph->weighted_hoods->a[hood_idx];
                 for (uint64_t j = 0; j < hood->n; j++) {
                   int64_t ni = hood->a[j].i;
@@ -344,13 +333,11 @@ static inline void tm_compute_cknn_rhos (
           }
           if (has_error) continue;
 
-          // Sort distances and pick k-th for rho
           if (distances->n > 0) {
             tk_dvec_asc(distances, 0, distances->n);
             uint64_t k_use = (k > distances->n) ? distances->n : k;
             graph->sigmas->a[i] = distances->a[k_use - 1];
 
-            // Levina-Bickel manifold dimension estimate
             uint64_t k_lb = (k_est > distances->n) ? distances->n : k_est;
             if (k_lb >= 2) {
               double R_k = distances->a[k_lb - 1];
@@ -435,9 +422,6 @@ static inline void tm_add_knn (
       rho_u = graph->sigmas->a[iu];
     uint64_t rem = knn;
 
-    // When CkNN mode is active and weighted_hoods is available (weight_index differs from knn_index),
-    // use the pre-computed and sorted weighted_hoods. This allows correct early-break since hoods
-    // are sorted by weight_index distances.
     if (use_cknn && graph->weighted_hoods && hood_idx < graph->weighted_hoods->n) {
 
       tk_rvec_t *hood = graph->weighted_hoods->a[hood_idx];
@@ -454,7 +438,7 @@ static inline void tm_add_knn (
         double rho_v = (iv >= 0 && (uint64_t)iv < graph->sigmas->n) ? graph->sigmas->a[iv] : 1.0;
         double threshold = delta * sqrt(rho_u * rho_v);
         if (d_uv > threshold)
-          break;  // Safe to break: hoods sorted by weight_index distance
+          break;
         tk_edge_t e = tk_edge(u, v, 0.0);
         khi = tk_euset_put(graph->pairs, e, &kha);
         if (!kha)
@@ -482,7 +466,6 @@ static inline void tm_add_knn (
         if (use_cknn) {
           double rho_v = (iv >= 0 && (uint64_t)iv < graph->sigmas->n) ? graph->sigmas->a[iv] : 1.0;
           double threshold = delta * sqrt(rho_u * rho_v);
-          // Note: when weight_index == knn_index (no weighted_hoods), d_uv is already correct
           if (d_uv > threshold)
             break;
         }
@@ -515,7 +498,6 @@ static inline void tm_add_knn (
         if (use_cknn) {
           double rho_v = (iv >= 0 && (uint64_t)iv < graph->sigmas->n) ? graph->sigmas->a[iv] : 1.0;
           double threshold = delta * sqrt(rho_u * rho_v);
-          // Note: when weight_index == knn_index (no weighted_hoods), d_uv is already correct
           if (d_uv > threshold)
             break;
         }
@@ -548,7 +530,6 @@ static inline void tm_add_knn (
         if (use_cknn) {
           double rho_v = (iv >= 0 && (uint64_t)iv < graph->sigmas->n) ? graph->sigmas->a[iv] : 1.0;
           double threshold = delta * sqrt(rho_u * rho_v);
-          // Note: when weight_index == knn_index (no weighted_hoods), d_uv is already correct
           if (d_uv > threshold)
             break;
         }
@@ -1752,8 +1733,6 @@ static inline int tm_adjacency (lua_State *L)
       tk_dsu_add_ids(L, graph->dsu);
       tm_adj_resize(L, Gi, graph);
     }
-    // Pre-compute weighted hoods if weight_index differs from knn_index and CkNN mode is active.
-    // This must happen before tm_compute_cknn_rhos so rhos are computed with correct distances.
     if (graph->knn_mode == TK_GRAPH_KNN_MODE_CKNN && graph->knn > 0 && !tk_graph_weight_is_knn(graph)) {
       tm_reweight_hoods(L, Gi, graph);
     }
