@@ -59,12 +59,12 @@ local cfg; cfg = {
   },
   graph = {
     decay = 8.0,
-    knn = 24,
+    knn = 12,
     knn_mode = "cknn",
-    knn_alpha = 2.8,
+    knn_alpha = 4,
     knn_mutual = nil,
     knn_min = nil,
-    knn_cache = nil,
+    knn_cache = 32,
     bridge = "mst",
   },
   ann = {
@@ -216,8 +216,6 @@ test("mnist-anchors", function()
         end
       end
     })
-    print(train.ids_spectral, train.codes_spectral, train.scale_spectral, train.eigs_spectral)
-    print(getmetatable(train.ids_spectral).__name, getmetatable(train.codes_spectral).__name, getmetatable(train.scale_spectral).__name, getmetatable(train.eigs_spectral).__name)
     train.dims_spectral = cfg.spectral.n_dims
     if cfg.spectral.select then
       local kept = cfg.spectral.select(train.codes_spectral, train.adj_ids_spectral:size(), train.dims_spectral)
