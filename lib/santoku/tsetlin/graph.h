@@ -401,14 +401,9 @@ static inline double tk_graph_distance (
   return d;
 }
 
-
-
-
 static inline bool tk_graph_weight_is_knn (tk_graph_t *graph) {
-
   if (!graph->weight_inv && !graph->weight_ann && !graph->weight_hbi)
     return true;
-
   return (graph->weight_inv == graph->knn_inv &&
           graph->weight_ann == graph->knn_ann &&
           graph->weight_hbi == graph->knn_hbi);
