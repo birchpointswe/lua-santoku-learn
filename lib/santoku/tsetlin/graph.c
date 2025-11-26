@@ -197,6 +197,7 @@ static inline void tm_compute_cknn_rhos (
   graph->sigmas = tk_dvec_create(L, graph->uids->n, 0, 0);
   tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
   lua_pop(L, 1);
+  graph->sigmas->n = graph->uids->n;
 
   for (uint64_t i = 0; i < graph->uids->n; i++)
     graph->sigmas->a[i] = 1.0;
