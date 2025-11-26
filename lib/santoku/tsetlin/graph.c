@@ -230,7 +230,7 @@ static inline void tm_add_knn (
     if (graph->knn_inv_hoods && hood_idx < graph->knn_inv_hoods->n) {
 
       tk_rvec_t *hood = graph->knn_inv_hoods->a[hood_idx];
-      for (uint64_t j = 0; j < hood->n && rem > 0; j++) {
+      for (uint64_t j = 0; j < hood->n && (use_cknn || rem > 0); j++) {
         if (hood->a[j].i < 0 || hood->a[j].i >= (int64_t)graph->uids_hoods->n)
           continue;
         double d_uv = hood->a[j].d;
@@ -248,7 +248,7 @@ static inline void tm_add_knn (
           if (graph->weight_inv || graph->weight_ann || graph->weight_hbi)
             d_uv = tk_graph_distance(graph, u, v, graph->q_weights, graph->e_weights, graph->inter_weights);
           if (d_uv > threshold)
-            continue;
+            break;
         }
         tk_edge_t e = tk_edge(u, v, 0.0);
         khi = tk_euset_put(graph->pairs, e, &kha);
@@ -257,13 +257,14 @@ static inline void tm_add_knn (
         tk_graph_add_adj(graph, u, v);
         tk_dsu_union(graph->dsu, u, v);
         graph->n_edges++;
-        rem--;
+        if (!use_cknn)
+          rem--;
       }
 
     } else if (graph->knn_ann_hoods && hood_idx < graph->knn_ann_hoods->n) {
 
       tk_pvec_t *hood = graph->knn_ann_hoods->a[hood_idx];
-      for (uint64_t j = 0; j < hood->n && rem > 0; j++) {
+      for (uint64_t j = 0; j < hood->n && (use_cknn || rem > 0); j++) {
         if (hood->a[j].i < 0 || hood->a[j].i >= (int64_t)graph->uids_hoods->n)
           continue;
         double d_uv = (double)hood->a[j].p / (double)features_ann;
@@ -281,7 +282,7 @@ static inline void tm_add_knn (
           if (graph->weight_inv || graph->weight_ann || graph->weight_hbi)
             d_uv = tk_graph_distance(graph, u, v, graph->q_weights, graph->e_weights, graph->inter_weights);
           if (d_uv > threshold)
-            continue;
+            break;
         }
         tk_edge_t e = tk_edge(u, v, 0.0);
         khi = tk_euset_put(graph->pairs, e, &kha);
@@ -290,13 +291,14 @@ static inline void tm_add_knn (
         tk_graph_add_adj(graph, u, v);
         tk_dsu_union(graph->dsu, u, v);
         graph->n_edges++;
-        rem--;
+        if (!use_cknn)
+          rem--;
       }
 
     } else if (graph->knn_hbi_hoods && hood_idx < graph->knn_hbi_hoods->n) {
 
       tk_pvec_t *hood = graph->knn_hbi_hoods->a[hood_idx];
-      for (uint64_t j = 0; j < hood->n && rem > 0; j++) {
+      for (uint64_t j = 0; j < hood->n && (use_cknn || rem > 0); j++) {
         if (hood->a[j].i < 0 || hood->a[j].i >= (int64_t)graph->uids_hoods->n)
           continue;
         double d_uv = (double)hood->a[j].p / (double)features_hbi;
@@ -314,7 +316,7 @@ static inline void tm_add_knn (
           if (graph->weight_inv || graph->weight_ann || graph->weight_hbi)
             d_uv = tk_graph_distance(graph, u, v, graph->q_weights, graph->e_weights, graph->inter_weights);
           if (d_uv > threshold)
-            continue;
+            break;
         }
         tk_edge_t e = tk_edge(u, v, 0.0);
         khi = tk_euset_put(graph->pairs, e, &kha);
@@ -323,7 +325,8 @@ static inline void tm_add_knn (
         tk_graph_add_adj(graph, u, v);
         tk_dsu_union(graph->dsu, u, v);
         graph->n_edges++;
-        rem--;
+        if (!use_cknn)
+          rem--;
       }
     }
   }
