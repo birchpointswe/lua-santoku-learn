@@ -41,9 +41,9 @@ typedef enum {
 } tk_graph_bridge_t;
 
 typedef enum {
-  TK_GRAPH_KNN_MODE_NONE,   // Basic weighted graph
-  TK_GRAPH_KNN_MODE_SIGMA,  // Local sigma reweighting
-  TK_GRAPH_KNN_MODE_CKNN    // Continuous k-NN filtering (unweighted)
+  TK_GRAPH_KNN_MODE_NONE,
+  TK_GRAPH_KNN_MODE_SIGMA,
+  TK_GRAPH_KNN_MODE_CKNN
 } tk_graph_knn_mode_t;
 
 typedef struct tk_graph_s {
@@ -62,7 +62,7 @@ typedef struct tk_graph_s {
   tk_inv_t *knn_inv; tk_inv_hoods_t *knn_inv_hoods;
   tk_ann_t *knn_ann; tk_ann_hoods_t *knn_ann_hoods;
   tk_hbi_t *knn_hbi; tk_hbi_hoods_t *knn_hbi_hoods;
-  tk_inv_hoods_t *weighted_hoods;  // Pre-computed weight_index distances, sorted
+  tk_inv_hoods_t *weighted_hoods;
   tk_ivec_t *knn_query_ids;
   tk_ivec_t *knn_query_ivec;
   tk_cvec_t *knn_query_cvec;
@@ -107,7 +107,7 @@ typedef struct tk_graph_s {
   int64_t category_ranks;
 
   tk_dvec_t *sigmas;
-  double manifold_dim;  // Estimated manifold dimensionality (Levina-Bickel)
+  double manifold_dim;
   uint64_t n_edges;
   tk_dsu_t *dsu;
   int64_t largest_component_root;
@@ -401,14 +401,9 @@ static inline double tk_graph_distance (
   return d;
 }
 
-// Returns true if weight_index is not set or is the same as knn_index.
-// When true, distances from knn_index hoods are in the same order as
-// tk_graph_distance would compute, allowing early-break optimizations.
 static inline bool tk_graph_weight_is_knn (tk_graph_t *graph) {
-  // No weight_index means we use knn_index for distances
   if (!graph->weight_inv && !graph->weight_ann && !graph->weight_hbi)
     return true;
-  // Check if weight_index pointers match knn_index pointers
   return (graph->weight_inv == graph->knn_inv &&
           graph->weight_ann == graph->knn_ann &&
           graph->weight_hbi == graph->knn_hbi);
