@@ -25,6 +25,7 @@ static inline tk_graph_t *tm_graph_create (
   double knn_cmp_alpha,
   double knn_cmp_beta,
   int64_t knn_rank,
+  double knn_decay,
   tk_inv_t *category_inv,
   tk_ivec_sim_type_t category_cmp,
   double category_alpha,
@@ -39,6 +40,7 @@ static inline tk_graph_t *tm_graph_create (
   tk_ivec_sim_type_t weight_cmp,
   double weight_alpha,
   double weight_beta,
+  double weight_decay,
   tk_graph_weight_pooling_t weight_pooling,
   uint64_t random_pairs,
   double weight_eps,
@@ -947,7 +949,7 @@ static inline tk_pvec_t *tm_add_anchor_edges_immediate(
             for (uint64_t j = 0; j < anchors->n && j < n_anchors; j++) {
               if (i == j) continue;
               int64_t v = anchors->a[j];
-              double dist = tk_inv_distance(inv, u, v, category_cmp, category_alpha, category_beta, q_weights, e_weights, inter_weights);
+              double dist = tk_inv_distance(inv, u, v, category_cmp, category_alpha, category_beta, category_knn_decay, q_weights, e_weights, inter_weights);
               tk_rvec_hmin(knn_heap, k_nearest, tk_rank(v, dist));
             }
             for (uint64_t k = 0; k < knn_heap->n; k++) {
@@ -1066,7 +1068,7 @@ static inline void tm_run_knn_queries (
     if (graph->knn_inv) {
       tk_inv_neighborhoods_by_vecs(L, graph->knn_inv, graph->knn_query_ivec, graph->knn_cache,
                                    0.0, 1.0, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
-                                   graph->knn_rank, &graph->knn_inv_hoods, &graph->uids_hoods);
+                                   graph->knn_decay, graph->knn_rank, &graph->knn_inv_hoods, &graph->uids_hoods);
       if (graph->knn_mutual && graph->knn_inv_hoods) {
         tk_inv_mutualize(L, graph->knn_inv, graph->knn_inv_hoods, graph->uids_hoods,
                         graph->knn_min, NULL);
@@ -1096,7 +1098,7 @@ static inline void tm_run_knn_queries (
     TK_INDEX_NEIGHBORHOODS(L,
       graph->knn_inv, graph->knn_ann, graph->knn_hbi,
       graph->knn_cache, graph->probe_radius, 1.0,
-      graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta, graph->knn_rank,
+      graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta, graph->knn_rank, graph->knn_decay,
       &graph->knn_inv_hoods, &graph->knn_ann_hoods, &graph->knn_hbi_hoods, &graph->uids_hoods);
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2);
@@ -1583,6 +1585,8 @@ static inline int tm_adjacency (lua_State *L)
   } else {
     knn_rank = knn_rank_explicit;
   }
+  double knn_decay = tk_lua_foptnumber(L, 1, "graph", "knn_decay", 0.0);
+  double weight_decay = tk_lua_foptnumber(L, 1, "graph", "weight_decay", 0.0);
 
   const char *bridge_str = tk_lua_foptstring(L, 1, "graph", "bridge", "mst");
   tk_graph_bridge_t bridge = TK_GRAPH_BRIDGE_MST;
@@ -1615,10 +1619,10 @@ static inline int tm_adjacency (lua_State *L)
   tk_graph_t *graph = tm_graph_create(
     L, seed_ids, seed_offsets, seed_neighbors,
     bipartite_ids, bipartite_features, bipartite_nodes, bipartite_dims,
-    knn_inv, knn_ann, knn_hbi, knn_cmp, knn_cmp_alpha, knn_cmp_beta, knn_rank,
+    knn_inv, knn_ann, knn_hbi, knn_cmp, knn_cmp_alpha, knn_cmp_beta, knn_rank, knn_decay,
     category_inv, category_cmp, category_alpha, category_beta,
     category_anchors, category_knn, category_knn_decay, category_ranks,
-    weight_inv, weight_ann, weight_hbi, weight_cmp, weight_alpha, weight_beta, weight_pooling,
+    weight_inv, weight_ann, weight_hbi, weight_cmp, weight_alpha, weight_beta, weight_decay, weight_pooling,
     random_pairs, weight_eps, knn_mode, knn_alpha,
     knn_query_ids, knn_query_ivec, knn_query_cvec,
     knn, knn_cache, knn_eps, knn_mutual, knn_min, bridge, probe_radius);
@@ -2038,6 +2042,7 @@ static inline tk_graph_t *tm_graph_create (
   double knn_cmp_alpha,
   double knn_cmp_beta,
   int64_t knn_rank,
+  double knn_decay,
   tk_inv_t *category_inv,
   tk_ivec_sim_type_t category_cmp,
   double category_alpha,
@@ -2052,6 +2057,7 @@ static inline tk_graph_t *tm_graph_create (
   tk_ivec_sim_type_t weight_cmp,
   double weight_alpha,
   double weight_beta,
+  double weight_decay,
   tk_graph_weight_pooling_t weight_pooling,
   uint64_t random_pairs,
   double weight_eps,
@@ -2083,6 +2089,7 @@ static inline tk_graph_t *tm_graph_create (
   graph->knn_cmp_alpha = knn_cmp_alpha;
   graph->knn_cmp_beta = knn_cmp_beta;
   graph->knn_rank = knn_rank;
+  graph->knn_decay = knn_decay;
   graph->knn_inv_hoods = NULL;
   graph->knn_ann_hoods = NULL;
   graph->knn_hbi_hoods = NULL;
@@ -2103,6 +2110,7 @@ static inline tk_graph_t *tm_graph_create (
   graph->weight_cmp = weight_cmp;
   graph->weight_alpha = weight_alpha;
   graph->weight_beta = weight_beta;
+  graph->weight_decay = weight_decay;
   graph->weight_pooling = weight_pooling;
 
   graph->random_pairs = random_pairs;

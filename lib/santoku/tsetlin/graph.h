@@ -69,6 +69,7 @@ typedef struct tk_graph_s {
   tk_ivec_sim_type_t knn_cmp;
   double knn_cmp_alpha, knn_cmp_beta;
   int64_t knn_rank;
+  double knn_decay;
 
   tk_inv_t *category_inv;
   tk_ivec_sim_type_t category_cmp;
@@ -82,6 +83,7 @@ typedef struct tk_graph_s {
   tk_hbi_t *weight_hbi;
   tk_ivec_sim_type_t weight_cmp;
   double weight_alpha, weight_beta;
+  double weight_decay;
   tk_graph_weight_pooling_t weight_pooling;
 
   uint64_t random_pairs;
@@ -125,7 +127,7 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
   return (tk_graph_t *) luaL_checkudata(L, i, TK_GRAPH_MT);
 }
 
-#define TK_GRAPH_INDEX_DISTANCE(idx_inv, idx_ann, idx_hbi, u, v, cmp, alpha, beta, q_w, e_w, i_w, dist_var) \
+#define TK_GRAPH_INDEX_DISTANCE(idx_inv, idx_ann, idx_hbi, u, v, cmp, alpha, beta, decay, q_w, e_w, i_w, dist_var) \
   do { \
     tk_inv_t *__idx_inv = (idx_inv); \
     tk_ann_t *__idx_ann = (idx_ann); \
@@ -136,7 +138,7 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
       int64_t *uset = tk_inv_get(__idx_inv, (u), &un); \
       int64_t *vset = tk_inv_get(__idx_inv, (v), &vn); \
       if (uset && vset) { \
-        double sim = tk_inv_similarity(__idx_inv, uset, un, vset, vn, (cmp), (alpha), (beta), (q_w), (e_w), (i_w)); \
+        double sim = tk_inv_similarity(__idx_inv, uset, un, vset, vn, (cmp), (alpha), (beta), (decay), (q_w), (e_w), (i_w)); \
         (dist_var) = 1.0 - sim; \
       } else { \
         (dist_var) = 1.0; \
@@ -288,10 +290,10 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
     } \
   } while(0)
 
-#define TK_INDEX_NEIGHBORHOODS(L, inv, ann, hbi, k, probe_radius, eps, cmp, alpha, beta, rank, inv_hoods_out, ann_hoods_out, hbi_hoods_out, uids_out) \
+#define TK_INDEX_NEIGHBORHOODS(L, inv, ann, hbi, k, probe_radius, eps, cmp, alpha, beta, rank, decay, inv_hoods_out, ann_hoods_out, hbi_hoods_out, uids_out) \
   do { \
     if ((inv) != NULL) { \
-      tk_inv_neighborhoods((L), (inv), (k), 0.0, (eps), (cmp), (alpha), (beta), (rank), (inv_hoods_out), (uids_out)); \
+      tk_inv_neighborhoods((L), (inv), (k), 0.0, (eps), (cmp), (alpha), (beta), (decay), (rank), (inv_hoods_out), (uids_out)); \
     } else if ((ann) != NULL) { \
       tk_ann_neighborhoods((L), (ann), (k), (probe_radius), 0, ((eps)*(double)(ann)->features), (ann_hoods_out), (uids_out)); \
     } else if ((hbi) != NULL) { \
@@ -375,7 +377,7 @@ static inline double tk_graph_distance (
 
   TK_GRAPH_INDEX_DISTANCE(graph->weight_inv, graph->weight_ann, graph->weight_hbi,
                           u, v, graph->weight_cmp, graph->weight_alpha, graph->weight_beta,
-                          q_weights, e_weights, inter_weights, d);
+                          graph->weight_decay, q_weights, e_weights, inter_weights, d);
   if (d != DBL_MAX)
     return d;
 
@@ -383,20 +385,20 @@ static inline double tk_graph_distance (
   if (same_index && graph->category_inv != NULL) {
     TK_GRAPH_INDEX_DISTANCE(graph->category_inv, NULL, NULL,
                             u, v, graph->category_cmp, graph->category_alpha, graph->category_beta,
-                            q_weights, e_weights, inter_weights, d);
+                            graph->category_knn_decay, q_weights, e_weights, inter_weights, d);
   } else if (graph->category_inv != NULL) {
     double obs_distance = DBL_MAX;
     TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann, graph->knn_hbi,
                             u, v, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
-                            q_weights, e_weights, inter_weights, obs_distance);
+                            graph->knn_decay, q_weights, e_weights, inter_weights, obs_distance);
     d = tk_inv_distance_extend(
       graph->category_inv, u, v, obs_distance, graph->category_cmp,
-      graph->category_alpha, graph->category_beta,
+      graph->category_alpha, graph->category_beta, graph->category_knn_decay,
       q_weights, e_weights, inter_weights);
   } else {
     TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann, graph->knn_hbi,
                             u, v, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
-                            q_weights, e_weights, inter_weights, d);
+                            graph->knn_decay, q_weights, e_weights, inter_weights, d);
   }
   return d;
 }
@@ -809,7 +811,7 @@ static inline int tk_graph_multiclass_pairs (
                 if (index && eps_pos > 0.0) {
                   double dist = tk_inv_distance(
                     index, id, anchor,
-                    TK_IVEC_JACCARD, 0.0, 0.0,
+                    TK_IVEC_JACCARD, 0.0, 0.0, 0.0,
                     q_weights, e_weights, inter_weights);
                   if (dist > eps_pos)
                     continue;
@@ -904,7 +906,7 @@ static inline int tk_graph_multiclass_pairs (
                   if (index && eps_neg > 0.0) {
                     double dist = tk_inv_distance(
                       index, id, other_id,
-                      TK_IVEC_JACCARD, 0.0, 0.0,
+                      TK_IVEC_JACCARD, 0.0, 0.0, 0.0,
                       q_weights, e_weights, inter_weights);
                     if (dist < eps_neg) {
                       tries++;
