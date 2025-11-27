@@ -50,6 +50,7 @@ static inline int tm_simhash (lua_State *L)
   if (lua_gettop(L) >= 3 && !lua_isnil(L, 3))
     hashed_ranks = (int64_t)tk_lua_checkunsigned(L, 3, "hashed_ranks");
   int64_t n_quantiles = tk_lua_optinteger(L, 4, "n_quantiles", 1);
+  double decay = tk_lua_optnumber(L, 5, "decay", 0.0);
   uint64_t n_ranks_to_hash = (hashed_ranks >= 0 && hashed_ranks < (int64_t)inv->n_ranks) ? (uint64_t)hashed_ranks : inv->n_ranks;
   if (n_ranks_to_hash == 0)
     return luaL_error(L, "n_ranks_to_hash must be > 0");
@@ -60,14 +61,14 @@ static inline int tm_simhash (lua_State *L)
     free(rank_n_bits);
     return luaL_error(L, "out of memory");
   }
-  if (inv->rank_weights && n_ranks_to_hash > 1) {
+  if (n_ranks_to_hash > 1 && decay != 0.0) {
+    double rank_weights[n_ranks_to_hash];
     double total_weight = 0.0;
-    for (uint64_t r = 0; r < n_ranks_to_hash; r++)
-      total_weight += inv->rank_weights->a[r];
+    tk_inv_compute_rank_weights(n_ranks_to_hash, decay, rank_weights, &total_weight);
     if (total_weight > DBL_MIN) {
       uint64_t bits_allocated = 0;
       for (uint64_t r = 0; r < n_ranks_to_hash; r++) {
-        double proportion = inv->rank_weights->a[r] / total_weight;
+        double proportion = rank_weights[r] / total_weight;
         uint64_t bits = (uint64_t)(proportion * n_bits);
         rank_n_bits[r] = bits;
         bits_allocated += bits;

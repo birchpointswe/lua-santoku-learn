@@ -25,8 +25,7 @@ static inline int tk_inv_create_lua (lua_State *L)
   }
   if (ranks != NULL)
     n_ranks = tk_lua_fcheckunsigned(L, 1, "create", "n_ranks");
-  double decay = tk_lua_foptnumber(L, 1, "create", "decay", 1.0);
-  tk_inv_create(L, features, weights, n_ranks, ranks, decay, i_weights, i_ranks);
+  tk_inv_create(L, features, weights, n_ranks, ranks, i_weights, i_ranks);
   return 1;
 }
 
