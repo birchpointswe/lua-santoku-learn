@@ -78,7 +78,7 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
   if (feat_inv && query_ivec) {
     tk_inv_neighborhoods_by_vecs(L, feat_inv, query_ivec, enc->n_landmarks, 0.0, 1.0,
                                  enc->cmp, enc->tversky_alpha, enc->tversky_beta,
-                                 enc->rank_filter, &inv_hoods, &nbr_ids);
+                                 0.0, enc->rank_filter, &inv_hoods, &nbr_ids);
   } else if (feat_ann && query_cvec) {
     tk_ann_neighborhoods_by_vecs(L, feat_ann, query_cvec, enc->n_landmarks, enc->probe_radius,
                                  0, ~0ULL, &ann_hoods, &nbr_ids);
