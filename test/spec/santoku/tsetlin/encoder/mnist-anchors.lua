@@ -12,7 +12,6 @@ local itq = require("santoku.tsetlin.itq")
 local graph = require("santoku.tsetlin.graph")
 local simhash = require("santoku.tsetlin.simhash")
 local hlth = require("santoku.tsetlin.hlth")
-local tm = require("santoku.tsetlin")
 local optimize = require("santoku.tsetlin.optimize")
 
 local cfg; cfg = {
@@ -177,7 +176,7 @@ test("mnist-anchors", function()
 
   if cfg.data.mode == "spectral" then
     print("\nOptimizing spectral pipeline")
-    local model, best_params, _ = optimize.spectral({
+    local model = optimize.spectral({
       index = train.index_graph,
       knn_index = train.node_features,
       n_dims = cfg.spectral.n_dims,

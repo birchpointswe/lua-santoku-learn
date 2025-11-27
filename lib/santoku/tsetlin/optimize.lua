@@ -161,7 +161,7 @@ M.search = function (args)
     if skip_final then
       return nil, best_params, nil
     else
-      local score, metrics, result = trial_fn(best_params, { is_final = true })
+      local _, metrics, result = trial_fn(best_params, { is_final = true })
       return result, best_params, metrics
     end
   end
@@ -238,7 +238,6 @@ M.search = function (args)
     end
     if best_result and cleanup_fn then
       cleanup_fn(best_result)
-      best_result = nil
     end
     local final_score, final_metrics, final_result = trial_fn(best_params, { is_final = true })
     best_result = final_result
@@ -799,7 +798,7 @@ M.spectral = function (args)
     end or nil,
   })
 
-  local final_model, final_score, final_metrics = build_and_eval(best_params, { is_final = true })
+  local final_model, _, final_metrics = build_and_eval(best_params, { is_final = true })
 
   collectgarbage("collect")
   return final_model, best_params, final_metrics
