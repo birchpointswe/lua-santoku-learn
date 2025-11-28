@@ -568,73 +568,111 @@ M.build_spectral = function (args)
   }
 end
 
-M.evaluate_spectral_retrieval = function (args)
+---------------------------------------------------------------------------------
+-- Scorer helpers: functions that return a search_metric function
+---------------------------------------------------------------------------------
 
-  local model = args.model
-  local query_ids = args.query_ids
-  local target_ids = args.target_ids
-  local ground_truth = args.ground_truth
-  local cfg = args.cfg or {}
+-- Creates a search_metric function for retrieval-based evaluation.
+--
+-- args:
+--   build_ground_truth(ids): function that returns { ids, offsets, neighbors, weights }
+--   score_by: metric to optimize ("quality", "f1", "recall") - default "quality"
+--   retrieval_metric: "min" or "mean" - default "min"
+--   select_margin(quality_dvec): function to select best margin - default plateau
+--   cleanup: if true, destroy ground_truth after use - default true
+--
+-- Returns: function(model, cfg) -> (score, metrics)
+M.retrieval_scorer = function (args)
+  local build_ground_truth = err.assert(args.build_ground_truth, "build_ground_truth required")
+  local score_by = args.score_by or "quality"
+  local retrieval_metric = args.retrieval_metric or "min"
+  local select_margin = args.select_margin
+  local cleanup = args.cleanup ~= false
 
-  local index_targets = ann.create({
-    features = model.dims,
-    expected_size = target_ids:size(),
-    bucket_size = cfg.bucket_size,
-  })
-  index_targets:add(model.index:get(target_ids), target_ids)
+  return function (model, cfg)
+    local ground_truth = build_ground_truth(model.ids)
 
-  local adj_retrieved_ids,
-        adj_retrieved_offsets,
-        adj_retrieved_neighbors,
-        adj_retrieved_weights = graph.adjacency({
-    weight_index = model.index,
-    knn_index = index_targets,
-    knn_query_ids = query_ids,
-    knn_query_codes = model.index:get(query_ids),
-    knn = cfg.eval_knn or 32,
-    bridge = "none",
-  })
+    local adj_retrieved_ids, adj_retrieved_offsets, adj_retrieved_neighbors, adj_retrieved_weights =
+      graph.adjacency({
+        weight_index = model.index,
+        seed_ids = ground_truth.ids,
+        seed_offsets = ground_truth.offsets,
+        seed_neighbors = ground_truth.neighbors,
+      })
 
-  local stats = evaluator.score_retrieval({
-    retrieved_ids = adj_retrieved_ids,
-    retrieved_offsets = adj_retrieved_offsets,
-    retrieved_neighbors = adj_retrieved_neighbors,
-    retrieved_weights = adj_retrieved_weights,
-    expected_ids = ground_truth.ids,
-    expected_offsets = ground_truth.offsets,
-    expected_neighbors = ground_truth.neighbors,
-    expected_weights = ground_truth.weights,
-    metric = cfg.retrieval_metric or "min",
-    n_dims = model.dims,
-  })
+    local stats = evaluator.score_retrieval({
+      retrieved_ids = adj_retrieved_ids,
+      retrieved_offsets = adj_retrieved_offsets,
+      retrieved_neighbors = adj_retrieved_neighbors,
+      retrieved_weights = adj_retrieved_weights,
+      expected_ids = ground_truth.ids,
+      expected_offsets = ground_truth.offsets,
+      expected_neighbors = ground_truth.neighbors,
+      expected_weights = ground_truth.weights,
+      metric = retrieval_metric,
+      n_dims = model.dims,
+    })
 
-  local margin_fn = cfg.retrieval_margin or function (quality)
-    local _, idx = quality:scores_plateau(cfg.tolerance or 1e-4)
-    return idx - 1
+    local margin_fn = select_margin or function (quality)
+      local _, idx = quality:scores_plateau(1e-4)
+      return idx - 1
+    end
+    local best_margin = margin_fn(stats.quality)
+    local quality = stats.quality:get(best_margin)
+    local recall = stats.recall:get(best_margin)
+    local f1 = stats.f1:get(best_margin)
+
+    -- Cleanup
+    if cleanup and ground_truth.destroy then
+      ground_truth:destroy()
+    elseif cleanup then
+      if ground_truth.ids then ground_truth.ids:destroy() end
+      if ground_truth.offsets then ground_truth.offsets:destroy() end
+      if ground_truth.neighbors then ground_truth.neighbors:destroy() end
+      if ground_truth.weights then ground_truth.weights:destroy() end
+    end
+    adj_retrieved_ids:destroy()
+    adj_retrieved_offsets:destroy()
+    adj_retrieved_neighbors:destroy()
+    adj_retrieved_weights:destroy()
+    stats.quality:destroy()
+    stats.recall:destroy()
+    stats.f1:destroy()
+
+    local metrics = {
+      quality = quality,
+      recall = recall,
+      f1 = f1,
+      best_margin = best_margin,
+    }
+
+    local score = metrics[score_by]
+    if not score then
+      err.error("Unknown score_by metric: " .. tostring(score_by))
+    end
+
+    return score, metrics
   end
-  local best_margin = margin_fn(stats.quality)
-  local quality = stats.quality:get(best_margin)
-  local recall = stats.recall:get(best_margin)
-
-  index_targets:destroy()
-  adj_retrieved_ids:destroy()
-  adj_retrieved_offsets:destroy()
-  adj_retrieved_neighbors:destroy()
-  adj_retrieved_weights:destroy()
-  stats.quality:destroy()
-  stats.recall:destroy()
-  stats.f1:destroy()
-
-  return {
-    best_margin = best_margin,
-    quality = quality,
-    recall = recall,
-  }
 end
 
-M.evaluate_spectral_entropy = function (args)
-  local model = args.model
-  return evaluator.entropy_stats(model.codes, model.ids:size(), model.dims)
+-- Creates a search_metric function for entropy-based evaluation.
+--
+-- args:
+--   score_by: "mean", "min", "max", "std" - default "mean"
+--
+-- Returns: function(model, cfg) -> (score, metrics)
+M.entropy_scorer = function (args)
+  args = args or {}
+  local score_by = args.score_by or "mean"
+
+  return function (model)
+    local ent = evaluator.entropy_stats(model.codes, model.ids:size(), model.dims)
+    local score = ent[score_by]
+    if not score then
+      err.error("Unknown score_by metric: " .. tostring(score_by))
+    end
+    return score, { entropy = ent }
+  end
 end
 
 M.destroy_spectral = function (model)
@@ -653,12 +691,10 @@ M.spectral = function (args)
   local index = args.index
   local knn_index = args.knn_index
   local category_index = args.category_index
-  local query_ids = args.query_ids
-  local target_ids = args.target_ids
-  local ground_truth = args.ground_truth
   local param_names = args.param_names or M.spectral_param_names
   local samplers = M.build_samplers(args, param_names, args.search_dev or 0.2)
   local each_cb = args.each
+  local metric_fn = err.assert(args.search_metric, "search_metric required")
 
   local base_cfg = {
     n_dims = args.n_dims or 64,
@@ -670,10 +706,6 @@ M.spectral = function (args)
     bridge = args.bridge,
     select = args.select,
     threshold = args.threshold,
-    tolerance = args.tolerance,
-    retrieval_metric = args.retrieval_metric,
-    retrieval_margin = args.retrieval_margin,
-    eval_knn = args.eval_knn,
     knn_min = args.knn_min,
     knn_rank = args.knn_rank,
     knn_eps = args.knn_eps,
@@ -691,31 +723,6 @@ M.spectral = function (args)
     adjacency_each = args.adjacency_each,
     spectral_each = args.spectral_each,
   }
-
-  local metric_fn = args.search_metric
-  if not metric_fn then
-    if ground_truth and query_ids and target_ids then
-      metric_fn = function (model, cfg)
-        local ret = M.evaluate_spectral_retrieval({
-          model = model,
-          query_ids = query_ids,
-          target_ids = target_ids,
-          ground_truth = ground_truth,
-          cfg = cfg,
-        })
-        return ret.quality, {
-          quality = ret.quality,
-          recall = ret.recall,
-          best_margin = ret.best_margin,
-        }
-      end
-    else
-      metric_fn = function (model)
-        local ent = M.evaluate_spectral_entropy({ model = model })
-        return ent.mean, { entropy = ent }
-      end
-    end
-  end
 
   local function make_cfg (params)
     local cfg = {}
