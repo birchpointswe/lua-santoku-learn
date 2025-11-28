@@ -61,20 +61,15 @@ local cfg; cfg = {
     bucket_size = nil,
   },
   eval = {
-    knn = 32  ,
+    knn = 32,
     anchors = 16,
     pairs = 16,
-    retrieval_metric = "min",
-    clustering_metric = "min",
+    ranking = "ndcg",
+    metric = "min",
+    elbow = "plateau",
+    elbow_alpha = 1e-4,
+    elbow_target = "f1",
     verbose = true,
-    retrieval = function (d)
-      local idx = d:scores_plateau(1e-4)
-      return idx - 1
-    end,
-    clustering = function (d)
-      local idx = d:scores_plateau(1e-4)
-      return idx - 1
-    end,
   },
   cluster = {
     enabled = true,
@@ -222,13 +217,12 @@ test("mnist-anchors", function()
           expected_offsets = ground_truth.offsets,
           expected_neighbors = ground_truth.neighbors,
           expected_weights = ground_truth.weights,
-          metric = cfg.eval.retrieval_metric,
+          ranking = cfg.eval.ranking,
+          metric = cfg.eval.metric,
+          elbow = cfg.eval.elbow,
+          elbow_alpha = cfg.eval.elbow_alpha,
           n_dims = m.dims,
         })
-        local best_margin = cfg.eval.retrieval(stats.quality)
-        local quality = stats.quality:get(best_margin)
-        local recall = stats.recall:get(best_margin)
-        local f1 = stats.f1:get(best_margin)
         cat_index:destroy()
         ground_truth.ids:destroy()
         ground_truth.offsets:destroy()
@@ -238,14 +232,11 @@ test("mnist-anchors", function()
         adj_retrieved_offsets:destroy()
         adj_retrieved_neighbors:destroy()
         adj_retrieved_weights:destroy()
-        stats.quality:destroy()
-        stats.recall:destroy()
-        stats.f1:destroy()
-        return quality, {
-          quality = quality,
-          recall = recall,
-          f1 = f1,
-          best_margin = best_margin,
+        return stats.f1, {
+          score = stats.score,
+          quality = stats.quality,
+          recall = stats.recall,
+          f1 = stats.f1,
         }
       end,
       each = cfg.eval.verbose and function (info)
@@ -260,8 +251,8 @@ test("mnist-anchors", function()
           end
         elseif info.event == "eval" then
           local m = info.metrics
-          str.printf("    => Q=%.4f R=%.4f F1=%.4f M=%d\n",
-            m.quality, m.recall, m.f1, m.best_margin)
+          str.printf("    => S=%.4f Q=%.4f R=%.4f F1=%.4f\n",
+            m.score, m.quality, m.recall, m.f1)
         elseif info.event == "round" then
           str.printf("\n  ---- Round %d complete | Best: %.4f | Global: %.4f ----\n",
             info.round, info.round_best_score, info.global_best_score)
@@ -344,21 +335,16 @@ test("mnist-anchors", function()
     expected_offsets = train.adj_expected_offsets,
     expected_neighbors = train.adj_expected_neighbors,
     expected_weights = train.adj_expected_weights,
-    metric = cfg.eval.retrieval_metric,
+    ranking = cfg.eval.ranking,
+    metric = cfg.eval.metric,
+    elbow = cfg.eval.elbow,
+    elbow_alpha = cfg.eval.elbow_alpha,
     n_dims = train.dims_spectral,
   })
 
-  if cfg.eval.verbose then
-    for m = 0, train.retrieval_stats.quality:size() - 1 do
-      local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | Margin: %2d | Quality: %.2f | Recall: %.2f | F1: %.2f\n",
-        d, dd, m, train.retrieval_stats.quality:get(m), train.retrieval_stats.recall:get(m), train.retrieval_stats.f1:get(m))
-    end
-  end
-
-  local best_margin = cfg.eval.retrieval(train.retrieval_stats.quality)
-  str.printf("Best\n  Margin: %2d | Quality: %.2f | Recall: %.2f | F1: %.2f\n",
-    best_margin, train.retrieval_stats.quality:get(best_margin), train.retrieval_stats.recall:get(best_margin), train.retrieval_stats.f1:get(best_margin))
+  str.printf("Retrieval\n  Score: %.4f | Quality: %.4f | Recall: %.4f | F1: %.4f\n",
+    train.retrieval_stats.score, train.retrieval_stats.quality,
+    train.retrieval_stats.recall, train.retrieval_stats.f1)
 
   if cfg.cluster.enabled then
     print("\nSetting up clustering adjacency")
@@ -390,21 +376,24 @@ test("mnist-anchors", function()
       expected_offsets = train.adj_expected_offsets,
       expected_neighbors = train.adj_expected_neighbors,
       expected_weights = train.adj_expected_weights,
-      metric = cfg.eval.clustering_metric,
+      metric = cfg.eval.metric,
+      elbow = cfg.eval.elbow,
+      elbow_target = cfg.eval.elbow_target,
+      elbow_alpha = cfg.eval.elbow_alpha,
     })
 
-    for step = 0, train.cluster_stats.n_steps do
-      local d, dd = stopwatch()
-      str.printf("  Time: %6.2f %6.2f | Step: %2d | Quality: %.2f | Recall: %.2f | F1: %.2f | Clusters: %d\n",
-        d, dd, step, train.cluster_stats.quality:get(step), train.cluster_stats.recall:get(step),
-        train.cluster_stats.f1:get(step), train.cluster_stats.n_clusters:get(step))
+    if cfg.eval.verbose then
+      for step = 0, train.cluster_stats.n_steps do
+        local d, dd = stopwatch()
+        str.printf("  Time: %6.2f %6.2f | Step: %2d | Quality: %.2f | Recall: %.2f | F1: %.2f | Clusters: %d\n",
+          d, dd, step, train.cluster_stats.quality_curve:get(step), train.cluster_stats.recall_curve:get(step),
+          train.cluster_stats.f1_curve:get(step), train.cluster_stats.n_clusters_curve:get(step))
+      end
     end
 
-    local best_step = cfg.eval.clustering(train.cluster_stats.quality)
-    local best_n_clusters = train.cluster_stats.n_clusters:get(best_step)
-    str.printf("Best\n  Step: %2d | Quality: %.2f | Recall: %.2f | F1: %.2f | Clusters: %d\n",
-      best_step, train.cluster_stats.quality:get(best_step), train.cluster_stats.recall:get(best_step),
-      train.cluster_stats.f1:get(best_step), best_n_clusters)
+    str.printf("Clustering\n  Best Step: %d | Quality: %.4f | Recall: %.4f | F1: %.4f | Clusters: %d\n",
+      train.cluster_stats.best_step, train.cluster_stats.quality, train.cluster_stats.recall,
+      train.cluster_stats.f1, train.cluster_stats.n_clusters)
   end
 
   collectgarbage("collect")
@@ -527,7 +516,10 @@ test("mnist-anchors", function()
       expected_offsets = train.adj_expected_offsets,
       expected_neighbors = train.adj_expected_neighbors,
       expected_weights = train.adj_expected_weights,
-      metric = cfg.eval.retrieval_metric,
+      ranking = cfg.eval.ranking,
+      metric = cfg.eval.metric,
+      elbow = cfg.eval.elbow,
+      elbow_alpha = cfg.eval.elbow_alpha,
       n_dims = train.dims_spectral,
     })
 
@@ -541,20 +533,22 @@ test("mnist-anchors", function()
       expected_offsets = test_adj_expected_offsets,
       expected_neighbors = test_adj_expected_neighbors,
       expected_weights = test_adj_expected_weights,
-      metric = cfg.eval.retrieval_metric,
+      ranking = cfg.eval.ranking,
+      metric = cfg.eval.metric,
+      elbow = cfg.eval.elbow,
+      elbow_alpha = cfg.eval.elbow_alpha,
       n_dims = train.dims_spectral,
     })
 
-    local orig_best_margin = cfg.eval.retrieval(train.retrieval_stats.quality)
-    local train_pred_best_margin = cfg.eval.retrieval(train_pred_stats.quality)
-    local test_pred_best_margin = cfg.eval.retrieval(test_pred_stats.quality)
-
-    str.printi("  Original | Margin: %.0f#(1) | Quality: %.2f#(2) | Recall: %.2f#(3) | F1: %.2f#(4)",
-      { orig_best_margin, train.retrieval_stats.quality:get(orig_best_margin), train.retrieval_stats.recall:get(orig_best_margin),  train.retrieval_stats.f1:get(orig_best_margin) })
-    str.printi("  Train    | Margin: %.0f#(1) | Quality: %.2f#(2) | Recall: %.2f#(3) | F1: %.2f#(4)",
-      { train_pred_best_margin, train_pred_stats.quality:get(train_pred_best_margin), train_pred_stats.recall:get(train_pred_best_margin), train_pred_stats.f1:get(train_pred_best_margin) })
-    str.printi("  Test     | Margin: %.0f#(1) | Quality: %.2f#(2) | Recall: %.2f#(3) | F1: %.2f#(4)",
-      { test_pred_best_margin, test_pred_stats.quality:get(test_pred_best_margin), test_pred_stats.recall:get(test_pred_best_margin), test_pred_stats.f1:get(test_pred_best_margin) })
+    str.printf("  Original | Score: %.4f | Quality: %.4f | Recall: %.4f | F1: %.4f\n",
+      train.retrieval_stats.score, train.retrieval_stats.quality,
+      train.retrieval_stats.recall, train.retrieval_stats.f1)
+    str.printf("  Train    | Score: %.4f | Quality: %.4f | Recall: %.4f | F1: %.4f\n",
+      train_pred_stats.score, train_pred_stats.quality,
+      train_pred_stats.recall, train_pred_stats.f1)
+    str.printf("  Test     | Score: %.4f | Quality: %.4f | Recall: %.4f | F1: %.4f\n",
+      test_pred_stats.score, test_pred_stats.quality,
+      test_pred_stats.recall, test_pred_stats.f1)
 
     idx_train_pred:destroy()
     idx_test_pred:destroy()
