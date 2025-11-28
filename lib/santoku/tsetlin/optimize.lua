@@ -574,10 +574,10 @@ M.retrieval_scorer = function (args)
   local ranking = args.ranking or "ndcg"
   local metric = args.metric or "min"
   local elbow = args.elbow or "plateau"
-  local elbow_alpha = args.elbow_alpha or 1e-4
+  local elbow_alpha = args.elbow_alpha or 2
   local cleanup = args.cleanup ~= false
 
-  return function (model, cfg)
+  return function (model)
     local ground_truth = build_ground_truth(model.ids)
 
     local adj_retrieved_ids, adj_retrieved_offsets, adj_retrieved_neighbors, adj_retrieved_weights =
