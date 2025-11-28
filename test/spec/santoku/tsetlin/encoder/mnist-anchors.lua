@@ -26,6 +26,8 @@ local cfg; cfg = {
     laplacian = "unnormalized",
     n_dims = 24,
     eps = 1e-8,
+    elbow_select = "lmethod",
+    elbow_alpha_select = nil,
     threshold = function (codes, dims)
       local codes, _, _ = itq.otsu({
         codes = codes,
@@ -37,7 +39,7 @@ local cfg; cfg = {
     end,
     select = function (codes, _, n, dims)
       local eids, escores = codes:mtx_top_entropy(n, dims)
-      local _, eidx = escores:scores_lmethod()
+      local _, eidx = escores:scores_elbow(cfg.spectral.elbow_select, cfg.spectral.elbow_alpha_select)
       eids:setn(eidx)
       return eids
     end,
@@ -66,9 +68,11 @@ local cfg; cfg = {
     pairs = 16,
     ranking = "ndcg",
     metric = "min",
-    elbow = "plateau",
-    elbow_alpha = 1e-4,
-    elbow_target = "f1",
+    elbow_retrieval = "lmethod",
+    elbow_clustering = "plateau",
+    elbow_alpha_retrieval = nil,
+    elbow_alpha_clustering = 0.01,
+    elbow_target_clustering = "quality",
     verbose = true,
   },
   cluster = {
@@ -219,8 +223,8 @@ test("mnist-anchors", function()
           expected_weights = ground_truth.weights,
           ranking = cfg.eval.ranking,
           metric = cfg.eval.metric,
-          elbow = cfg.eval.elbow,
-          elbow_alpha = cfg.eval.elbow_alpha,
+          elbow = cfg.eval.elbow_retrieval,
+          elbow_alpha = cfg.eval.elbow_alpha_retrieval,
           n_dims = m.dims,
         })
         cat_index:destroy()
@@ -325,7 +329,6 @@ test("mnist-anchors", function()
     train.adj_retrieved_weights:sum() / train.adj_retrieved_weights:size(),
     train.adj_retrieved_weights:size() / train.adj_retrieved_ids:size())
 
-  print("\nRetrieval stats")
   train.retrieval_stats = eval.score_retrieval({
     retrieved_ids = train.adj_retrieved_ids,
     retrieved_offsets = train.adj_retrieved_offsets,
@@ -337,12 +340,12 @@ test("mnist-anchors", function()
     expected_weights = train.adj_expected_weights,
     ranking = cfg.eval.ranking,
     metric = cfg.eval.metric,
-    elbow = cfg.eval.elbow,
-    elbow_alpha = cfg.eval.elbow_alpha,
+    elbow = cfg.eval.elbow_retrieval,
+    elbow_alpha = cfg.eval.elbow_alpha_retrieval,
     n_dims = train.dims_spectral,
   })
 
-  str.printf("Retrieval\n  Score: %.4f | Quality: %.4f | Recall: %.4f | F1: %.4f\n",
+  str.printf("\nRetrieval\n  Score: %.4f | Quality: %.4f | Recall: %.4f | F1: %.4f\n",
     train.retrieval_stats.score, train.retrieval_stats.quality,
     train.retrieval_stats.recall, train.retrieval_stats.f1)
 
@@ -377,9 +380,9 @@ test("mnist-anchors", function()
       expected_neighbors = train.adj_expected_neighbors,
       expected_weights = train.adj_expected_weights,
       metric = cfg.eval.metric,
-      elbow = cfg.eval.elbow,
-      elbow_target = cfg.eval.elbow_target,
-      elbow_alpha = cfg.eval.elbow_alpha,
+      elbow = cfg.eval.elbow_clustering,
+      elbow_target = cfg.eval.elbow_target_clustering,
+      elbow_alpha = cfg.eval.elbow_alpha_clustering,
     })
 
     if cfg.eval.verbose then
@@ -518,8 +521,8 @@ test("mnist-anchors", function()
       expected_weights = train.adj_expected_weights,
       ranking = cfg.eval.ranking,
       metric = cfg.eval.metric,
-      elbow = cfg.eval.elbow,
-      elbow_alpha = cfg.eval.elbow_alpha,
+      elbow = cfg.eval.elbow_retrieval,
+      elbow_alpha = cfg.eval.elbow_alpha_retrieval,
       n_dims = train.dims_spectral,
     })
 
@@ -535,8 +538,8 @@ test("mnist-anchors", function()
       expected_weights = test_adj_expected_weights,
       ranking = cfg.eval.ranking,
       metric = cfg.eval.metric,
-      elbow = cfg.eval.elbow,
-      elbow_alpha = cfg.eval.elbow_alpha,
+      elbow = cfg.eval.elbow_retrieval,
+      elbow_alpha = cfg.eval.elbow_alpha_retrieval,
       n_dims = train.dims_spectral,
     })
 
