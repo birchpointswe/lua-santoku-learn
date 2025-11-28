@@ -568,25 +568,13 @@ M.build_spectral = function (args)
   }
 end
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 M.retrieval_scorer = function (args)
   local build_ground_truth = err.assert(args.build_ground_truth, "build_ground_truth required")
   local score_by = args.score_by or "quality"
-  local retrieval_metric = args.retrieval_metric or "min"
-  local select_margin = args.select_margin
+  local ranking = args.ranking or "ndcg"
+  local metric = args.metric or "min"
+  local elbow = args.elbow or "plateau"
+  local elbow_alpha = args.elbow_alpha or 1e-4
   local cleanup = args.cleanup ~= false
 
   return function (model, cfg)
@@ -609,19 +597,12 @@ M.retrieval_scorer = function (args)
       expected_offsets = ground_truth.offsets,
       expected_neighbors = ground_truth.neighbors,
       expected_weights = ground_truth.weights,
-      metric = retrieval_metric,
+      ranking = ranking,
+      metric = metric,
+      elbow = elbow,
+      elbow_alpha = elbow_alpha,
       n_dims = model.dims,
     })
-
-    local margin_fn = select_margin or function (quality)
-      local _, idx = quality:scores_plateau(1e-4)
-      return idx - 1
-    end
-    local best_margin = margin_fn(stats.quality)
-    local quality = stats.quality:get(best_margin)
-    local recall = stats.recall:get(best_margin)
-    local f1 = stats.f1:get(best_margin)
-
 
     if cleanup and ground_truth.destroy then
       ground_truth:destroy()
@@ -635,15 +616,12 @@ M.retrieval_scorer = function (args)
     adj_retrieved_offsets:destroy()
     adj_retrieved_neighbors:destroy()
     adj_retrieved_weights:destroy()
-    stats.quality:destroy()
-    stats.recall:destroy()
-    stats.f1:destroy()
 
     local metrics = {
-      quality = quality,
-      recall = recall,
-      f1 = f1,
-      best_margin = best_margin,
+      score = stats.score,
+      quality = stats.quality,
+      recall = stats.recall,
+      f1 = stats.f1,
     }
 
     local score = metrics[score_by]
@@ -655,16 +633,9 @@ M.retrieval_scorer = function (args)
   end
 end
 
-
-
-
-
-
-
 M.entropy_scorer = function (args)
   args = args or {}
   local score_by = args.score_by or "mean"
-
   return function (model)
     local ent = evaluator.entropy_stats(model.codes, model.ids:size(), model.dims)
     local score = ent[score_by]
