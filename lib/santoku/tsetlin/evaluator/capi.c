@@ -40,6 +40,35 @@ static inline tk_eval_metric_t tk_eval_parse_metric (const char *metric_str) {
   return TK_EVAL_METRIC_NONE;
 }
 
+typedef enum {
+  TK_EVAL_ELBOW_NONE,
+  TK_EVAL_ELBOW_LMETHOD,
+  TK_EVAL_ELBOW_MAX_GAP,
+  TK_EVAL_ELBOW_MAX_DROP,
+  TK_EVAL_ELBOW_PLATEAU,
+  TK_EVAL_ELBOW_KNEEDLE,
+  TK_EVAL_ELBOW_MAX_CURVATURE,
+  TK_EVAL_ELBOW_MAX_ACCELERATION,
+} tk_eval_elbow_t;
+
+static inline tk_eval_elbow_t tk_eval_parse_elbow (const char *elbow_str) {
+  if (!strcmp(elbow_str, "lmethod"))
+    return TK_EVAL_ELBOW_LMETHOD;
+  if (!strcmp(elbow_str, "max_gap"))
+    return TK_EVAL_ELBOW_MAX_GAP;
+  if (!strcmp(elbow_str, "max_drop"))
+    return TK_EVAL_ELBOW_MAX_DROP;
+  if (!strcmp(elbow_str, "plateau"))
+    return TK_EVAL_ELBOW_PLATEAU;
+  if (!strcmp(elbow_str, "kneedle"))
+    return TK_EVAL_ELBOW_KNEEDLE;
+  if (!strcmp(elbow_str, "max_curvature"))
+    return TK_EVAL_ELBOW_MAX_CURVATURE;
+  if (!strcmp(elbow_str, "max_acceleration"))
+    return TK_EVAL_ELBOW_MAX_ACCELERATION;
+  return TK_EVAL_ELBOW_NONE;
+}
+
 typedef struct {
   atomic_ulong *TP, *FP, *FN;
   tk_ivec_t *ids;
@@ -1349,6 +1378,13 @@ static inline tm_cluster_result_t tm_cluster_agglo (
   return result;
 }
 
+static inline size_t tk_eval_apply_elbow_dvec (
+  tk_dvec_t *v,
+  tk_eval_elbow_t elbow,
+  double alpha,
+  double *out_val
+);
+
 static inline int tm_score_clustering (lua_State *L)
 {
   lua_settop(L, 1);
@@ -1397,10 +1433,22 @@ static inline int tm_score_clustering (lua_State *L)
   tk_dvec_t *eval_weights = tk_dvec_peek(L, -1, "expected_weights or eval_weights");
   lua_pop(L, 1);
 
-  char *metric_str = tk_lua_foptstring(L, 1, "score_clustering", "metric", "mean");
+  const char *metric_str = tk_lua_foptstring(L, 1, "score_clustering", "metric", "min");
   tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
-  if (metric == TK_EVAL_METRIC_NONE)
-    tk_lua_verror(L, 3, "score_clustering", "metric", "unknown metric");
+  if (metric != TK_EVAL_METRIC_MIN &&
+      metric != TK_EVAL_METRIC_MEAN &&
+      metric != TK_EVAL_METRIC_VARIANCE)
+    tk_lua_verror(L, 1, "score_clustering", "metric", "must be min, mean, or variance");
+
+  const char *elbow_str = tk_lua_fcheckstring(L, 1, "score_clustering", "elbow");
+  tk_eval_elbow_t elbow = tk_eval_parse_elbow(elbow_str);
+  if (elbow == TK_EVAL_ELBOW_NONE)
+    tk_lua_verror(L, 1, "score_clustering", "elbow", "unknown elbow method");
+
+  const char *elbow_target_str = tk_lua_foptstring(L, 1, "score_clustering", "elbow_target", "f1");
+  bool elbow_on_f1 = strcmp(elbow_target_str, "quality") != 0;
+
+  double elbow_alpha = tk_lua_foptnumber(L, 1, "score_clustering", "elbow_alpha", 1e-4);
 
   bool all_merges = tk_lua_foptboolean(L, 1, "score_clustering", "all_merges", false);
 
@@ -1610,16 +1658,37 @@ static inline int tm_score_clustering (lua_State *L)
   if (absorbed_to_surviving)
     tk_iumap_destroy(absorbed_to_surviving);
 
+  tk_dvec_t *target_curve = elbow_on_f1 ? f1_scores : scores;
+  double elbow_val;
+  size_t best_step = tk_eval_apply_elbow_dvec(target_curve, elbow, elbow_alpha, &elbow_val);
+
+  double best_quality = (best_step < scores->n) ? scores->a[best_step] : 0.0;
+  double best_recall = (best_step < recall_scores->n) ? recall_scores->a[best_step] : 0.0;
+  double best_f1 = (best_step < f1_scores->n) ? f1_scores->a[best_step] : 0.0;
+  int64_t best_n_clusters = (best_step < n_clusters_per_step->n) ? n_clusters_per_step->a[best_step] : 0;
+
   lua_newtable(L);
-  lua_pushvalue(L, i_scores);
+
+  lua_pushnumber(L, best_quality);
   lua_setfield(L, -2, "quality");
-  lua_pushvalue(L, i_recall_scores);
+  lua_pushnumber(L, best_recall);
   lua_setfield(L, -2, "recall");
-  lua_pushvalue(L, i_f1_scores);
+  lua_pushnumber(L, best_f1);
   lua_setfield(L, -2, "f1");
-  lua_pushvalue(L, i_n_clusters_per_step);
+  lua_pushinteger(L, (lua_Integer)best_n_clusters);
   lua_setfield(L, -2, "n_clusters");
-  lua_pushinteger(L, (lua_Integer) actual_steps);
+  lua_pushinteger(L, (lua_Integer)best_step);
+  lua_setfield(L, -2, "best_step");
+
+  lua_pushvalue(L, i_scores);
+  lua_setfield(L, -2, "quality_curve");
+  lua_pushvalue(L, i_recall_scores);
+  lua_setfield(L, -2, "recall_curve");
+  lua_pushvalue(L, i_f1_scores);
+  lua_setfield(L, -2, "f1_curve");
+  lua_pushvalue(L, i_n_clusters_per_step);
+  lua_setfield(L, -2, "n_clusters_curve");
+  lua_pushinteger(L, (lua_Integer)actual_steps);
   lua_setfield(L, -2, "n_steps");
 
   return 1;
@@ -1688,6 +1757,61 @@ static inline int tm_cluster (lua_State *L)
   return 1;
 }
 
+static inline size_t tk_eval_apply_elbow_pvec (
+  tk_pvec_t *v,
+  tk_eval_elbow_t elbow,
+  double alpha,
+  int64_t *out_val
+) {
+  int64_t int_tolerance = (int64_t)alpha;
+  switch (elbow) {
+    case TK_EVAL_ELBOW_LMETHOD:
+      return tk_pvec_scores_lmethod(v, out_val);
+    case TK_EVAL_ELBOW_MAX_GAP:
+      return tk_pvec_scores_max_gap(v, out_val);
+    case TK_EVAL_ELBOW_MAX_DROP:
+      return tk_pvec_scores_max_drop(v, out_val);
+    case TK_EVAL_ELBOW_PLATEAU:
+      return tk_pvec_scores_plateau(v, int_tolerance, out_val);
+    case TK_EVAL_ELBOW_KNEEDLE:
+      return tk_pvec_scores_kneedle(v, alpha, out_val);
+    case TK_EVAL_ELBOW_MAX_CURVATURE:
+      return tk_pvec_scores_max_curvature(v, out_val);
+    case TK_EVAL_ELBOW_MAX_ACCELERATION:
+      return tk_pvec_scores_max_acceleration(v, out_val);
+    default:
+      if (out_val) *out_val = (v->n > 0) ? v->a[v->n - 1].p : 0;
+      return v->n > 0 ? v->n - 1 : 0;
+  }
+}
+
+static inline size_t tk_eval_apply_elbow_dvec (
+  tk_dvec_t *v,
+  tk_eval_elbow_t elbow,
+  double alpha,
+  double *out_val
+) {
+  switch (elbow) {
+    case TK_EVAL_ELBOW_LMETHOD:
+      return tk_dvec_scores_lmethod(v->a, v->n, out_val);
+    case TK_EVAL_ELBOW_MAX_GAP:
+      return tk_dvec_scores_max_gap(v->a, v->n, out_val);
+    case TK_EVAL_ELBOW_MAX_DROP:
+      return tk_dvec_scores_max_drop(v->a, v->n, out_val);
+    case TK_EVAL_ELBOW_PLATEAU:
+      return tk_dvec_scores_plateau(v->a, v->n, alpha, out_val);
+    case TK_EVAL_ELBOW_KNEEDLE:
+      return tk_dvec_scores_kneedle(v->a, v->n, alpha, out_val);
+    case TK_EVAL_ELBOW_MAX_CURVATURE:
+      return tk_dvec_scores_max_curvature(v->a, v->n, out_val);
+    case TK_EVAL_ELBOW_MAX_ACCELERATION:
+      return tk_dvec_scores_max_acceleration(v->a, v->n, out_val);
+    default:
+      if (out_val) *out_val = (v->n > 0) ? v->a[v->n - 1] : 0.0;
+      return v->n > 0 ? v->n - 1 : 0;
+  }
+}
+
 static inline int tm_score_retrieval (lua_State *L)
 {
   lua_settop(L, 1);
@@ -1726,163 +1850,186 @@ static inline int tm_score_retrieval (lua_State *L)
 
   uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "score_retrieval", "n_dims");
 
-  char *metric_str = tk_lua_foptstring(L, 1, "score_retrieval", "metric", "variance");
-  tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
-  if (metric == TK_EVAL_METRIC_NONE)
-    tk_lua_verror(L, 3, "score_retrieval", "metric", "unknown metric");
+  const char *ranking_str = tk_lua_fcheckstring(L, 1, "score_retrieval", "ranking");
+  tk_eval_metric_t ranking = tk_eval_parse_metric(ranking_str);
+  if (ranking != TK_EVAL_METRIC_NDCG &&
+      ranking != TK_EVAL_METRIC_SPEARMAN &&
+      ranking != TK_EVAL_METRIC_PEARSON)
+    tk_lua_verror(L, 1, "score_retrieval", "ranking", "must be ndcg, spearman, or pearson");
 
-  tk_dvec_t *quality_scores = tk_dvec_create(L, 0, 0, 0);
-  int i_quality_scores = tk_lua_absindex(L, -1);
-  tk_dvec_t *recall_scores = tk_dvec_create(L, 0, 0, 0);
-  int i_recall_scores = tk_lua_absindex(L, -1);
-  tk_dvec_t *f1_scores = tk_dvec_create(L, 0, 0, 0);
-  int i_f1_scores = tk_lua_absindex(L, -1);
+  const char *metric_str = tk_lua_foptstring(L, 1, "score_retrieval", "metric", "min");
+  tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
+  if (metric != TK_EVAL_METRIC_MIN &&
+      metric != TK_EVAL_METRIC_MEAN &&
+      metric != TK_EVAL_METRIC_VARIANCE)
+    tk_lua_verror(L, 1, "score_retrieval", "metric", "must be min, mean, or variance");
+
+  const char *elbow_str = tk_lua_fcheckstring(L, 1, "score_retrieval", "elbow");
+  tk_eval_elbow_t elbow = tk_eval_parse_elbow(elbow_str);
+  if (elbow == TK_EVAL_ELBOW_NONE)
+    tk_lua_verror(L, 1, "score_retrieval", "elbow", "unknown elbow method");
+
+  double elbow_alpha = tk_lua_foptnumber(L, 1, "score_retrieval", "elbow_alpha", 1e-4);
 
   tk_iumap_t *expected_id_to_idx = tk_iumap_from_ivec(NULL, expected_ids);
   if (!expected_id_to_idx)
     tk_error(L, "score_retrieval: failed to create expected ID mapping", ENOMEM);
 
-  // Pre-compute recall denominator: total expected weight for all queries in retrieved
-  double global_recall_denominator = 0.0;
-  #pragma omp parallel reduction(+:global_recall_denominator)
+  double total_score = 0.0;
+  double total_quality = 0.0;
+  double total_recall = 0.0;
+  uint64_t n_queries = 0;
+
+  #pragma omp parallel reduction(+:total_score) reduction(+:total_quality) reduction(+:total_recall) reduction(+:n_queries)
   {
-    #pragma omp for schedule(static)
-    for (uint64_t query_idx = 0; query_idx < retrieved_offsets->n - 1; query_idx++) {
-      int64_t query_id = retrieved_ids->a[query_idx];
-      khint_t exp_khi = tk_iumap_get(expected_id_to_idx, query_id);
-      if (exp_khi == tk_iumap_end(expected_id_to_idx))
-        continue;
-      int64_t expected_query_idx = tk_iumap_val(expected_id_to_idx, exp_khi);
+    tk_pvec_t *query_neighbors = tk_pvec_create(NULL, 0, 0, 0);
+    tk_iuset_t *cutoff_ids = tk_iuset_create(NULL, 0);
+    tk_iuset_t *expected_neighbor_set = tk_iuset_create(NULL, 0);
+    tk_dumap_t *weight_map = tk_dumap_create(NULL, 0);
+    tk_pvec_t *weight_ranks_buffer = tk_pvec_create(NULL, 0, 0, 0);
+    tk_dumap_t *weight_rank_map = tk_dumap_create(NULL, 0);
 
-      // Sum all expected weights for this query
-      int64_t exp_start = expected_offsets->a[expected_query_idx];
-      int64_t exp_end = expected_offsets->a[expected_query_idx + 1];
-      for (int64_t i = exp_start; i < exp_end; i++) {
-        global_recall_denominator += expected_weights->a[i];
-      }
-    }
-  }
+    if (!query_neighbors || !cutoff_ids || !expected_neighbor_set ||
+        !weight_map || !weight_ranks_buffer || !weight_rank_map) {
+      if (query_neighbors) tk_pvec_destroy(query_neighbors);
+      if (cutoff_ids) tk_iuset_destroy(cutoff_ids);
+      if (expected_neighbor_set) tk_iuset_destroy(expected_neighbor_set);
+      if (weight_map) tk_dumap_destroy(weight_map);
+      if (weight_ranks_buffer) tk_pvec_destroy(weight_ranks_buffer);
+      if (weight_rank_map) tk_dumap_destroy(weight_rank_map);
+    } else {
+      #pragma omp for schedule(static)
+      for (uint64_t query_idx = 0; query_idx < retrieved_offsets->n - 1; query_idx++) {
+        int64_t query_id = retrieved_ids->a[query_idx];
 
-  for (uint64_t m = 0; m <= n_dims; m++) {
-    double total_quality_weight = 0.0;
-    uint64_t total_quality_count = 0;
-    double total_recall_numerator = 0.0;
+        khint_t exp_khi = tk_iumap_get(expected_id_to_idx, query_id);
+        if (exp_khi == tk_iumap_end(expected_id_to_idx))
+          continue;
+        int64_t expected_query_idx = tk_iumap_val(expected_id_to_idx, exp_khi);
 
-    #pragma omp parallel reduction(+:total_quality_weight) reduction(+:total_quality_count) reduction(+:total_recall_numerator)
-    {
-      tk_iuset_t *within_margin_ids = tk_iuset_create(NULL, 0);
-      tk_iuset_t *expected_neighbor_set = tk_iuset_create(NULL, 0);
+        int64_t exp_start = expected_offsets->a[expected_query_idx];
+        int64_t exp_end = expected_offsets->a[expected_query_idx + 1];
+        if (exp_end == exp_start)
+          continue;
 
-      if (!within_margin_ids || !expected_neighbor_set) {
-        if (within_margin_ids) tk_iuset_destroy(within_margin_ids);
-        if (expected_neighbor_set) tk_iuset_destroy(expected_neighbor_set);
-      } else {
-        #pragma omp for schedule(static)
-        for (uint64_t query_idx = 0; query_idx < retrieved_offsets->n - 1; query_idx++) {
-          int64_t query_id = retrieved_ids->a[query_idx];
+        tk_pvec_clear(query_neighbors);
+        int64_t ret_start = retrieved_offsets->a[query_idx];
+        int64_t ret_end = retrieved_offsets->a[query_idx + 1];
 
-          khint_t exp_khi = tk_iumap_get(expected_id_to_idx, query_id);
-          if (exp_khi == tk_iumap_end(expected_id_to_idx))
-            continue;
-          int64_t expected_query_idx = tk_iumap_val(expected_id_to_idx, exp_khi);
+        for (int64_t i = ret_start; i < ret_end; i++) {
+          double hamming_sim = retrieved_weights->a[i];
+          int64_t hamming_dist = (int64_t)round((1.0 - hamming_sim) * (double)n_dims);
+          int64_t neighbor_idx = retrieved_neighbors->a[i];
+          tk_pvec_push(query_neighbors, tk_pair(neighbor_idx, hamming_dist));
+        }
 
-          tk_iuset_clear(within_margin_ids);
-          int64_t ret_start = retrieved_offsets->a[query_idx];
-          int64_t ret_end = retrieved_offsets->a[query_idx + 1];
+        if (query_neighbors->n == 0)
+          continue;
 
-          for (int64_t i = ret_start; i < ret_end; i++) {
-            double hamming_sim = retrieved_weights->a[i];
-            double hamming_dist = (1.0 - hamming_sim) * (double)n_dims;
-            if (hamming_dist <= (double)m) {
-              int64_t neighbor_idx = retrieved_neighbors->a[i];
-              int64_t neighbor_id = retrieved_ids->a[neighbor_idx];
-              int kha;
-              tk_iuset_put(within_margin_ids, neighbor_id, &kha);
-            }
-          }
+        tk_pvec_asc(query_neighbors, 0, query_neighbors->n);
 
-          int64_t exp_start = expected_offsets->a[expected_query_idx];
-          int64_t exp_end = expected_offsets->a[expected_query_idx + 1];
+        int64_t cutoff_dist;
+        size_t cutoff_idx = tk_eval_apply_elbow_pvec(query_neighbors, elbow, elbow_alpha, &cutoff_dist);
 
-          if (exp_end == exp_start)
-            continue;
+        tk_iuset_clear(cutoff_ids);
+        for (size_t i = 0; i <= cutoff_idx && i < query_neighbors->n; i++) {
+          int64_t neighbor_idx = query_neighbors->a[i].i;
+          int64_t neighbor_id = retrieved_ids->a[neighbor_idx];
+          int kha;
+          tk_iuset_put(cutoff_ids, neighbor_id, &kha);
+        }
 
-          tk_iuset_clear(expected_neighbor_set);
-          for (int64_t i = exp_start; i < exp_end; i++) {
-            int64_t neighbor_idx = expected_neighbors->a[i];
-            int64_t neighbor_id = expected_ids->a[neighbor_idx];
-            if (tk_iuset_get(within_margin_ids, neighbor_id) != tk_iuset_end(within_margin_ids)) {
-              int kha;
-              tk_iuset_put(expected_neighbor_set, neighbor_idx, &kha);
-            }
-          }
+        double ranking_score = 0.0;
+        switch (ranking) {
+          case TK_EVAL_METRIC_NDCG:
+            ranking_score = tk_csr_ndcg_distance(expected_neighbors, expected_weights,
+              exp_start, exp_end, query_neighbors, weight_map);
+            break;
+          case TK_EVAL_METRIC_SPEARMAN:
+            ranking_score = tk_csr_spearman_distance(expected_neighbors, expected_weights,
+              exp_start, exp_end, query_neighbors, weight_ranks_buffer, weight_rank_map);
+            break;
+          case TK_EVAL_METRIC_PEARSON:
+            ranking_score = tk_csr_pearson_distance(expected_neighbors, expected_weights,
+              exp_start, exp_end, query_neighbors, weight_map);
+            break;
+          default:
+            break;
+        }
 
-          // Accumulate at edge level for global pooling
-          if (metric == TK_EVAL_METRIC_MEAN) {
-            // For mean metric: accumulate sum of weights and counts globally
-            for (int64_t i = exp_start; i < exp_end; i++) {
-              int64_t neighbor_idx = expected_neighbors->a[i];
-              double weight = expected_weights->a[i];
-              if (tk_iuset_get(expected_neighbor_set, neighbor_idx) != tk_iuset_end(expected_neighbor_set)) {
-                total_quality_weight += weight;
-                total_quality_count++;
-              }
-            }
-          } else if (tk_iuset_size(expected_neighbor_set) > 0) {
-            // For other metrics: use per-query computation (existing behavior)
-            double query_quality = 0.0;
-            switch (metric) {
-              case TK_EVAL_METRIC_VARIANCE:
-                query_quality = tk_csr_variance_ratio(expected_neighbors, expected_weights,
-                  exp_start, exp_end, expected_neighbor_set, NULL);
-                break;
-              case TK_EVAL_METRIC_MIN:
-                query_quality = tk_csr_min(expected_neighbors, expected_weights,
-                  exp_start, exp_end, expected_neighbor_set);
-                break;
-              default:
-                query_quality = 0.0;
-                break;
-            }
-            total_quality_weight += query_quality;
-            total_quality_count++;
-          }
-
-          // Accumulate recall numerator (found within margin)
-          for (int64_t i = exp_start; i < exp_end; i++) {
-            int64_t neighbor_idx = expected_neighbors->a[i];
-            if (tk_iuset_get(expected_neighbor_set, neighbor_idx) != tk_iuset_end(expected_neighbor_set)) {
-              double weight = expected_weights->a[i];
-              total_recall_numerator += weight;
-            }
+        tk_iuset_clear(expected_neighbor_set);
+        for (int64_t i = exp_start; i < exp_end; i++) {
+          int64_t neighbor_idx = expected_neighbors->a[i];
+          int64_t neighbor_id = expected_ids->a[neighbor_idx];
+          if (tk_iuset_get(cutoff_ids, neighbor_id) != tk_iuset_end(cutoff_ids)) {
+            int kha;
+            tk_iuset_put(expected_neighbor_set, neighbor_idx, &kha);
           }
         }
 
-        tk_iuset_destroy(within_margin_ids);
-        tk_iuset_destroy(expected_neighbor_set);
-      }
-    }
+        double query_quality = 0.0;
+        if (tk_iuset_size(expected_neighbor_set) > 0) {
+          switch (metric) {
+            case TK_EVAL_METRIC_MIN:
+              query_quality = tk_csr_min(expected_neighbors, expected_weights,
+                exp_start, exp_end, expected_neighbor_set);
+              break;
+            case TK_EVAL_METRIC_MEAN:
+              query_quality = tk_csr_mean(expected_neighbors, expected_weights,
+                exp_start, exp_end, expected_neighbor_set);
+              break;
+            case TK_EVAL_METRIC_VARIANCE:
+              query_quality = tk_csr_variance_ratio(expected_neighbors, expected_weights,
+                exp_start, exp_end, expected_neighbor_set, weight_map);
+              break;
+            default:
+              break;
+          }
+        }
 
-    double avg_quality = (metric == TK_EVAL_METRIC_MEAN) ?
-      (total_quality_count > 0 ? total_quality_weight / (double)total_quality_count : 0.0) :
-      (total_quality_count > 0 ? total_quality_weight / (double)total_quality_count : 0.0);
-    double avg_recall = global_recall_denominator > 0.0 ?
-      total_recall_numerator / global_recall_denominator : 0.0;
-    double f1 = (avg_quality > 0.0 && avg_recall > 0.0) ?
-      (2.0 * avg_quality * avg_recall) / (avg_quality + avg_recall) : 0.0;
-    tk_dvec_push(quality_scores, avg_quality);
-    tk_dvec_push(recall_scores, avg_recall);
-    tk_dvec_push(f1_scores, f1);
+        double query_recall_num = 0.0;
+        double query_recall_denom = 0.0;
+        for (int64_t i = exp_start; i < exp_end; i++) {
+          double weight = expected_weights->a[i];
+          query_recall_denom += weight;
+          int64_t neighbor_idx = expected_neighbors->a[i];
+          if (tk_iuset_get(expected_neighbor_set, neighbor_idx) != tk_iuset_end(expected_neighbor_set)) {
+            query_recall_num += weight;
+          }
+        }
+        double query_recall = query_recall_denom > 0.0 ? query_recall_num / query_recall_denom : 0.0;
+
+        total_score += ranking_score;
+        total_quality += query_quality;
+        total_recall += query_recall;
+        n_queries++;
+      }
+
+      tk_pvec_destroy(query_neighbors);
+      tk_iuset_destroy(cutoff_ids);
+      tk_iuset_destroy(expected_neighbor_set);
+      tk_dumap_destroy(weight_map);
+      tk_pvec_destroy(weight_ranks_buffer);
+      tk_dumap_destroy(weight_rank_map);
+    }
   }
 
   tk_iumap_destroy(expected_id_to_idx);
 
+  double avg_score = n_queries > 0 ? total_score / (double)n_queries : 0.0;
+  double avg_quality = n_queries > 0 ? total_quality / (double)n_queries : 0.0;
+  double avg_recall = n_queries > 0 ? total_recall / (double)n_queries : 0.0;
+  double f1 = (avg_quality > 0.0 && avg_recall > 0.0) ?
+    (2.0 * avg_quality * avg_recall) / (avg_quality + avg_recall) : 0.0;
+
   lua_newtable(L);
-  lua_pushvalue(L, i_quality_scores);
+  lua_pushnumber(L, avg_score);
+  lua_setfield(L, -2, "score");
+  lua_pushnumber(L, avg_quality);
   lua_setfield(L, -2, "quality");
-  lua_pushvalue(L, i_recall_scores);
+  lua_pushnumber(L, avg_recall);
   lua_setfield(L, -2, "recall");
-  lua_pushvalue(L, i_f1_scores);
+  lua_pushnumber(L, f1);
   lua_setfield(L, -2, "f1");
 
   lua_replace(L, 1);
@@ -1983,12 +2130,10 @@ static double tk_compute_reconstruction (
             corr = tk_csr_pearson_distance(neighbors, weights, start, end, bin_ranks, rank_buffer_b);
             break;
           case TK_EVAL_METRIC_SPEARMAN:
-            // Sort bin_ranks by hamming distance (descending) for rank-based correlation
             tk_pvec_desc(bin_ranks, 0, bin_ranks->n);
             corr = tk_csr_spearman_distance(neighbors, weights, start, end, bin_ranks, weight_ranks_buffer, weight_rank_map);
             break;
           case TK_EVAL_METRIC_NDCG:
-            // Sort bin_ranks by hamming distance (ascending) for nDCG computation
             tk_pvec_asc(bin_ranks, 0, bin_ranks->n);
             corr = tk_csr_ndcg_distance(neighbors, weights, start, end, bin_ranks, rank_buffer_b);
             break;
