@@ -747,6 +747,8 @@ M.spectral = function (args)
             each = spectral_each,
           })
 
+          local model_is_best = false
+
           for _ = 1, (eval_fixed and 1 or eval_samples) do
             local eval_params = M.sample_tier(eval_cfg)
             local elbow, elbow_alpha = M.sample_elbow(eval_cfg.elbow, eval_cfg.elbow_alpha)
@@ -783,12 +785,12 @@ M.spectral = function (args)
                 best_params = { adjacency = adj_params, spectral = spec_params, eval = eval_params }
                 best_model = model
                 best_metrics = metrics
-                model = nil
+                model_is_best = true
               end
             end
           end
 
-          if model then
+          if not model_is_best then
             M.destroy_spectral(model)
           end
         end
