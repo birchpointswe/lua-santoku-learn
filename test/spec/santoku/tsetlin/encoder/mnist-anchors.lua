@@ -255,7 +255,7 @@ test("mnist-anchors", function()
           end
         elseif info.event == "eval" then
           local m = info.metrics
-          str.printf("    => S=%.4f Q=%.4f R=%.4f F1=%.4f\n",
+          str.printf("      S=%.4f Q=%.4f R=%.4f F1=%.4f\n",
             m.score, m.quality, m.recall, m.f1)
         elseif info.event == "round" then
           str.printf("\n  ---- Round %d complete | Best: %.4f | Global: %.4f ----\n",
