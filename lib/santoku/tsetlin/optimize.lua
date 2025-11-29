@@ -12,6 +12,48 @@ local cvec = require("santoku.cvec")
 
 local M = {}
 
+M.elbow_methods = {
+  max_gap = {},
+  max_drop = {},
+  otsu = {},
+  lmethod = {},
+  max_curvature = {},
+  max_acceleration = {},
+  first_gap = { alpha = { def = 5, min = 1, max = 50 } },
+  plateau = { alpha = { def = 1, min = 0, max = 10 } },
+  first_gap_ratio = { alpha = { def = 3, min = 1, max = 10 } },
+  kneedle = { alpha = { def = 1, min = 0.1, max = 10, log = true } },
+}
+
+M.sample_elbow = function (elbow_list, elbow_alpha_override)
+  if type(elbow_list) ~= "table" or #elbow_list == 0 then
+    local method = elbow_list
+    local method_info = M.elbow_methods[method]
+    local alpha = nil
+    if method_info and method_info.alpha then
+      local spec = (elbow_alpha_override and elbow_alpha_override[method]) or method_info.alpha
+      alpha = spec.def
+    end
+    return method, alpha
+  end
+  local method = elbow_list[num.random(#elbow_list)]
+  local method_info = M.elbow_methods[method]
+  if not method_info then
+    err.error("Unknown elbow method: " .. tostring(method))
+  end
+  local alpha = nil
+  if method_info.alpha then
+    local spec = (elbow_alpha_override and elbow_alpha_override[method]) or method_info.alpha
+    if spec.log then
+      local log_val = num.random() * (num.log(spec.max) - num.log(spec.min)) + num.log(spec.min)
+      alpha = num.exp(log_val)
+    else
+      alpha = num.random() * (spec.max - spec.min) + spec.min
+    end
+  end
+  return method, alpha
+end
+
 local function round_to_pow2 (x)
   local log2x = num.log(x) / num.log(2)
   return num.pow(2, num.floor(log2x + 0.5))
@@ -116,6 +158,49 @@ M.sample_params = function (samplers, param_names)
     end
   end
   return p
+end
+
+M.sample_tier = function (tier_cfg)
+  local result = {}
+  for k, v in pairs(tier_cfg) do
+    if type(v) == "table" and v.def ~= nil then
+      local minv, maxv = v.min, v.max
+      local is_log = v.log
+      local is_int = v.int
+      local is_pow2 = v.pow2
+      local x
+      if is_log then
+        local log_val = num.random() * (num.log(maxv) - num.log(minv)) + num.log(minv)
+        x = num.exp(log_val)
+      else
+        x = num.random() * (maxv - minv) + minv
+      end
+      if is_pow2 then
+        x = round_to_pow2(x)
+        if x < minv then x = minv elseif x > maxv then x = maxv end
+      elseif is_int then
+        x = num.floor(x + 0.5)
+      end
+      result[k] = x
+    elseif type(v) == "table" and #v > 0 then
+      result[k] = v[num.random(#v)]
+    else
+      result[k] = v
+    end
+  end
+  return result
+end
+
+M.tier_all_fixed = function (tier_cfg)
+  for _, v in pairs(tier_cfg) do
+    if type(v) == "table" and v.def ~= nil then
+      return false
+    end
+    if type(v) == "table" and #v > 1 then
+      return false
+    end
+  end
+  return true
 end
 
 M.all_fixed = function (samplers)
@@ -441,211 +526,6 @@ M.encoder = function (args)
   return optimize_tm(args, "encoder")
 end
 
-M.spectral_param_names = {
-  "knn",
-  "knn_alpha",
-  "knn_mutual",
-  "category_knn",
-  "category_knn_decay",
-  "weight_cmp",
-  "weight_alpha",
-  "weight_beta",
-  "weight_decay",
-  "knn_cmp",
-  "knn_beta",
-  "knn_decay",
-  "category_cmp",
-  "category_alpha",
-  "category_beta",
-  "category_decay",
-}
-
-M.build_spectral = function (args)
-
-  local index = args.index
-  local knn_index = args.knn_index or index
-  local category_index = args.category_index
-  local cfg = args.cfg
-  local each = args.each
-  if each then
-    each("adjacency")
-  end
-
-  local adj_ids, adj_offsets, adj_neighbors, adj_weights = graph.adjacency({
-    weight_index = index,
-    weight_cmp = cfg.weight_cmp,
-    weight_alpha = cfg.weight_alpha,
-    weight_beta = cfg.weight_beta,
-    weight_decay = cfg.weight_decay,
-    knn_index = knn_index,
-    knn = cfg.knn,
-    knn_mode = cfg.knn_mode,
-    knn_alpha = cfg.knn_alpha,
-    knn_mutual = cfg.knn_mutual,
-    knn_cmp = cfg.knn_cmp,
-    knn_beta = cfg.knn_beta,
-    knn_decay = cfg.knn_decay,
-    knn_cache = cfg.knn_cache or 32,
-    knn_min = cfg.knn_min,
-    knn_rank = cfg.knn_rank,
-    knn_eps = cfg.knn_eps,
-    knn_query_ids = cfg.knn_query_ids,
-    knn_query_codes = cfg.knn_query_codes,
-    category_index = category_index,
-    category_knn = cfg.category_knn,
-    category_knn_decay = cfg.category_knn_decay,
-    category_cmp = cfg.category_cmp,
-    category_alpha = cfg.category_alpha,
-    category_beta = cfg.category_beta,
-    category_decay = cfg.category_decay,
-    category_anchors = cfg.category_anchors,
-    bipartite_ids = cfg.bipartite_ids,
-    bipartite_features = cfg.bipartite_features,
-    bipartite_nodes = cfg.bipartite_nodes,
-    bipartite_dims = cfg.bipartite_dims,
-    seed_ids = cfg.seed_ids,
-    seed_offsets = cfg.seed_offsets,
-    seed_neighbors = cfg.seed_neighbors,
-    random_pairs = cfg.random_pairs,
-    bridge = cfg.bridge,
-    each = cfg.adjacency_each,
-  })
-
-  if each then
-    each("spectral")
-  end
-
-  local ids, codes, _, eigs = spectral.encode({
-    type = cfg.laplacian or "unnormalized",
-    n_hidden = cfg.n_dims,
-    eps = cfg.eps or 1e-10,
-    ids = adj_ids,
-    offsets = adj_offsets,
-    neighbors = adj_neighbors,
-    weights = adj_weights,
-    each = cfg.spectral_each,
-  })
-
-  local dims = cfg.n_dims
-
-  if cfg.select then
-    if each then each("select") end
-    local kept = cfg.select(codes, eigs, ids:size(), dims)
-    codes:mtx_select(kept, nil, dims)
-    dims = kept:size()
-  end
-
-  if each then
-    each("threshold")
-  end
-
-  local threshold_fn = cfg.threshold or function (c, d)
-    return itq.median({ codes = c, n_dims = d })
-  end
-  codes = threshold_fn(codes, dims)
-
-  if each then
-    each("index")
-  end
-
-  local ann_index = ann.create({
-    expected_size = ids:size(),
-    bucket_size = cfg.bucket_size,
-    features = dims,
-  })
-  ann_index:add(codes, ids)
-
-  return {
-    ids = ids,
-    codes = codes,
-    eigs = eigs,
-    dims = dims,
-    index = ann_index,
-    adj_ids = adj_ids,
-    adj_offsets = adj_offsets,
-    adj_neighbors = adj_neighbors,
-    adj_weights = adj_weights,
-  }
-end
-
-M.retrieval_scorer = function (args)
-  local build_ground_truth = err.assert(args.build_ground_truth, "build_ground_truth required")
-  local score_by = args.score_by or "quality"
-  local ranking = args.ranking or "ndcg"
-  local metric = args.metric or "min"
-  local elbow = args.elbow or "plateau"
-  local elbow_alpha = args.elbow_alpha or 2
-  local cleanup = args.cleanup ~= false
-
-  return function (model)
-    local ground_truth = build_ground_truth(model.ids)
-
-    local adj_retrieved_ids, adj_retrieved_offsets, adj_retrieved_neighbors, adj_retrieved_weights =
-      graph.adjacency({
-        weight_index = model.index,
-        seed_ids = ground_truth.ids,
-        seed_offsets = ground_truth.offsets,
-        seed_neighbors = ground_truth.neighbors,
-      })
-
-    local stats = evaluator.score_retrieval({
-      retrieved_ids = adj_retrieved_ids,
-      retrieved_offsets = adj_retrieved_offsets,
-      retrieved_neighbors = adj_retrieved_neighbors,
-      retrieved_weights = adj_retrieved_weights,
-      expected_ids = ground_truth.ids,
-      expected_offsets = ground_truth.offsets,
-      expected_neighbors = ground_truth.neighbors,
-      expected_weights = ground_truth.weights,
-      ranking = ranking,
-      metric = metric,
-      elbow = elbow,
-      elbow_alpha = elbow_alpha,
-      n_dims = model.dims,
-    })
-
-    if cleanup and ground_truth.destroy then
-      ground_truth:destroy()
-    elseif cleanup then
-      if ground_truth.ids then ground_truth.ids:destroy() end
-      if ground_truth.offsets then ground_truth.offsets:destroy() end
-      if ground_truth.neighbors then ground_truth.neighbors:destroy() end
-      if ground_truth.weights then ground_truth.weights:destroy() end
-    end
-    adj_retrieved_ids:destroy()
-    adj_retrieved_offsets:destroy()
-    adj_retrieved_neighbors:destroy()
-    adj_retrieved_weights:destroy()
-
-    local metrics = {
-      score = stats.score,
-      quality = stats.quality,
-      recall = stats.recall,
-      f1 = stats.f1,
-    }
-
-    local score = metrics[score_by]
-    if not score then
-      err.error("Unknown score_by metric: " .. tostring(score_by))
-    end
-
-    return score, metrics
-  end
-end
-
-M.entropy_scorer = function (args)
-  args = args or {}
-  local score_by = args.score_by or "mean"
-  return function (model)
-    local ent = evaluator.entropy_stats(model.codes, model.ids:size(), model.dims)
-    local score = ent[score_by]
-    if not score then
-      err.error("Unknown score_by metric: " .. tostring(score_by))
-    end
-    return score, { entropy = ent }
-  end
-end
-
 M.destroy_spectral = function (model)
   if not model then return end
   if model.index then model.index:destroy() end
@@ -658,128 +538,316 @@ M.destroy_spectral = function (model)
   if model.adj_weights then model.adj_weights:destroy() end
 end
 
+M.build_adjacency = function (args)
+  local index = args.index
+  local knn_index = args.knn_index or index
+  local p = args.params
+  local each = args.each
+
+  return graph.adjacency({
+    weight_index = index,
+    weight_cmp = p.cmp,
+    weight_decay = p.weight_decay,
+    knn_index = knn_index,
+    knn = p.knn,
+    knn_mode = p.knn_mode,
+    knn_alpha = p.knn_alpha,
+    knn_mutual = p.knn_mutual,
+    knn_cache = p.knn_cache or 32,
+    bridge = p.bridge,
+    each = each,
+  })
+end
+
+M.build_spectral_from_adjacency = function (args)
+  local adj_ids, adj_offsets, adj_neighbors, adj_weights = args.adj_ids, args.adj_offsets, args.adj_neighbors, args.adj_weights
+  local p = args.params
+  local bucket_size = args.bucket_size
+  local each = args.each
+
+  local ids, codes, _, eigs = spectral.encode({
+    type = p.laplacian or "unnormalized",
+    n_hidden = p.n_dims,
+    eps = p.eps or 1e-10,
+    ids = adj_ids,
+    offsets = adj_offsets,
+    neighbors = adj_neighbors,
+    weights = adj_weights,
+    each = each,
+  })
+
+  local dims = p.n_dims
+
+  if p.select then
+    local kept = p.select(codes, eigs, ids:size(), dims)
+    codes:mtx_select(kept, nil, dims)
+    dims = kept:size()
+  end
+
+  local threshold_fn = p.threshold or function (c, d)
+    return itq.median({ codes = c, n_dims = d })
+  end
+  codes = threshold_fn(codes, dims)
+
+  local ann_index = ann.create({
+    expected_size = ids:size(),
+    bucket_size = bucket_size,
+    features = dims,
+  })
+  ann_index:add(codes, ids)
+
+  return {
+    ids = ids,
+    codes = codes,
+    eigs = eigs,
+    dims = dims,
+    index = ann_index,
+  }
+end
+
+M.score_spectral_eval = function (args)
+  local model = args.model
+  local eval_params = args.eval_params
+  local expected = args.expected
+
+  local adj_retrieved_ids, adj_retrieved_offsets, adj_retrieved_neighbors, adj_retrieved_weights =
+    graph.adjacency({
+      weight_index = model.index,
+      seed_ids = expected.ids,
+      seed_offsets = expected.offsets,
+      seed_neighbors = expected.neighbors,
+    })
+
+  local stats = evaluator.score_retrieval({
+    retrieved_ids = adj_retrieved_ids,
+    retrieved_offsets = adj_retrieved_offsets,
+    retrieved_neighbors = adj_retrieved_neighbors,
+    retrieved_weights = adj_retrieved_weights,
+    expected_ids = expected.ids,
+    expected_offsets = expected.offsets,
+    expected_neighbors = expected.neighbors,
+    expected_weights = expected.weights,
+    ranking = eval_params.ranking,
+    metric = eval_params.metric,
+    elbow = eval_params.elbow,
+    elbow_alpha = eval_params.elbow_alpha,
+    n_dims = model.dims,
+  })
+
+  if adj_retrieved_ids then adj_retrieved_ids:destroy() end
+  if adj_retrieved_offsets then adj_retrieved_offsets:destroy() end
+  if adj_retrieved_neighbors then adj_retrieved_neighbors:destroy() end
+  if adj_retrieved_weights then adj_retrieved_weights:destroy() end
+
+  return stats.f1, {
+    score = stats.score,
+    quality = stats.quality,
+    recall = stats.recall,
+    f1 = stats.f1,
+  }
+end
+
 M.spectral = function (args)
   local index = args.index
   local knn_index = args.knn_index
-  local category_index = args.category_index
-  local param_names = args.param_names or M.spectral_param_names
-  local samplers = M.build_samplers(args, param_names, args.search_dev or 0.2)
+  local bucket_size = args.bucket_size
   local each_cb = args.each
-  local metric_fn = err.assert(args.search_metric, "search_metric required")
+  local adjacency_each = args.adjacency_each
+  local spectral_each = args.spectral_each
 
-  local base_cfg = {
-    n_dims = args.n_dims or 64,
-    laplacian = args.laplacian or "unnormalized",
-    eps = args.eps or 1e-10,
-    bucket_size = args.bucket_size,
-    knn_cache = args.knn_cache or 32,
-    knn_mode = args.knn_mode,
-    bridge = args.bridge,
-    select = args.select,
-    threshold = args.threshold,
-    knn_min = args.knn_min,
-    knn_rank = args.knn_rank,
-    knn_eps = args.knn_eps,
-    knn_query_ids = args.knn_query_ids,
-    knn_query_codes = args.knn_query_codes,
-    category_anchors = args.category_anchors,
-    bipartite_ids = args.bipartite_ids,
-    bipartite_features = args.bipartite_features,
-    bipartite_nodes = args.bipartite_nodes,
-    bipartite_dims = args.bipartite_dims,
-    seed_ids = args.seed_ids,
-    seed_offsets = args.seed_offsets,
-    seed_neighbors = args.seed_neighbors,
-    random_pairs = args.random_pairs,
-    adjacency_each = args.adjacency_each,
-    spectral_each = args.spectral_each,
+  local adjacency_cfg = err.assert(args.adjacency, "adjacency config required")
+  local spectral_cfg = err.assert(args.spectral, "spectral config required")
+  local eval_cfg = err.assert(args.eval, "eval config required")
+
+  local adjacency_samples = args.adjacency_samples or 1
+  local spectral_samples = args.spectral_samples or 1
+  local eval_samples = args.eval_samples or 1
+
+  local expected = {
+    ids = args.expected_ids,
+    offsets = args.expected_offsets,
+    neighbors = args.expected_neighbors,
+    weights = args.expected_weights,
   }
 
-  local function make_cfg (params)
-    local cfg = {}
-    for k, v in pairs(base_cfg) do
-      cfg[k] = v
-    end
-    for k, v in pairs(params) do
-      cfg[k] = v
-    end
-    return cfg
+  local seen = {}
+  local best_score = -num.huge
+  local best_params = nil
+  local best_model = nil
+  local best_metrics = nil
+  local sample_count = 0
+
+  local adj_fixed = M.tier_all_fixed(adjacency_cfg)
+  local spec_fixed = M.tier_all_fixed(spectral_cfg)
+  local eval_fixed = M.tier_all_fixed(eval_cfg) and (type(eval_cfg.elbow) ~= "table" or #eval_cfg.elbow <= 1)
+
+  local function make_adj_key (p)
+    return str.format("%s|%s|%s|%s",
+      tostring(p.knn), tostring(p.knn_alpha), tostring(p.weight_decay), tostring(p.knn_mutual))
   end
 
-  local function build_and_eval (params, info)
-    local cfg = make_cfg(params)
+  local function make_spec_key (adj_key, p)
+    return str.format("%s|%s|%s", adj_key, tostring(p.n_dims), tostring(p.laplacian))
+  end
 
-    local model = M.build_spectral({
-      index = index,
-      knn_index = knn_index,
-      category_index = category_index,
-      cfg = cfg,
-      each = each_cb and function (stage)
+  local function make_eval_key (spec_key, p)
+    local alpha_str = p.elbow_alpha and str.format("%.2f", p.elbow_alpha) or "nil"
+    return str.format("%s|%s|%s|%s", spec_key, p.elbow, alpha_str, p.ranking)
+  end
+
+  for _ = 1, (adj_fixed and 1 or adjacency_samples) do
+    local adj_params = M.sample_tier(adjacency_cfg)
+    local adj_key = make_adj_key(adj_params)
+
+    if not seen[adj_key] then
+      seen[adj_key] = true
+      sample_count = sample_count + 1
+
+      if each_cb then
         each_cb({
           event = "stage",
-          stage = stage,
-          round = info.round,
-          trial = info.trial,
-          is_final = info.is_final,
-          params = params,
+          stage = "adjacency",
+          sample = sample_count,
+          is_final = false,
+          params = { adjacency = adj_params },
         })
-      end or nil,
-    })
+      end
 
-    local score, metrics = metric_fn(model, cfg)
+      local adj_ids, adj_offsets, adj_neighbors, adj_weights = M.build_adjacency({
+        index = index,
+        knn_index = knn_index,
+        params = adj_params,
+        each = adjacency_each,
+      })
 
+      for _ = 1, (spec_fixed and 1 or spectral_samples) do
+        local spec_params = M.sample_tier(spectral_cfg)
+        local spec_key = make_spec_key(adj_key, spec_params)
+
+        if not seen[spec_key] then
+          seen[spec_key] = true
+
+          if each_cb then
+            each_cb({
+              event = "stage",
+              stage = "spectral",
+              sample = sample_count,
+              is_final = false,
+              params = { adjacency = adj_params, spectral = spec_params },
+            })
+          end
+
+          local model = M.build_spectral_from_adjacency({
+            adj_ids = adj_ids,
+            adj_offsets = adj_offsets,
+            adj_neighbors = adj_neighbors,
+            adj_weights = adj_weights,
+            params = spec_params,
+            bucket_size = bucket_size,
+            each = spectral_each,
+          })
+
+          for _ = 1, (eval_fixed and 1 or eval_samples) do
+            local eval_params = M.sample_tier(eval_cfg)
+            local elbow, elbow_alpha = M.sample_elbow(eval_cfg.elbow, eval_cfg.elbow_alpha)
+            eval_params.elbow = elbow
+            eval_params.elbow_alpha = elbow_alpha
+
+            local eval_key = make_eval_key(spec_key, eval_params)
+
+            if not seen[eval_key] then
+              seen[eval_key] = true
+
+              local score, metrics = M.score_spectral_eval({
+                model = model,
+                eval_params = eval_params,
+                expected = expected,
+              })
+
+              if each_cb then
+                each_cb({
+                  event = "eval",
+                  sample = sample_count,
+                  is_final = false,
+                  params = { adjacency = adj_params, spectral = spec_params, eval = eval_params },
+                  score = score,
+                  metrics = metrics,
+                })
+              end
+
+              if score > best_score then
+                if best_model then
+                  M.destroy_spectral(best_model)
+                end
+                best_score = score
+                best_params = { adjacency = adj_params, spectral = spec_params, eval = eval_params }
+                best_model = model
+                best_metrics = metrics
+                model = nil
+              end
+            end
+          end
+
+          if model then
+            M.destroy_spectral(model)
+          end
+        end
+      end
+
+      if adj_ids then adj_ids:destroy() end
+      if adj_offsets then adj_offsets:destroy() end
+      if adj_neighbors then adj_neighbors:destroy() end
+      if adj_weights then adj_weights:destroy() end
+      collectgarbage("collect")
+    end
+  end
+
+  if best_model then
     if each_cb then
       each_cb({
-        event = "eval",
-        round = info.round,
-        trial = info.trial,
-        is_final = info.is_final,
-        params = params,
-        score = score,
-        metrics = metrics,
+        event = "stage",
+        stage = "adjacency",
+        is_final = true,
+        params = best_params,
       })
     end
 
-    return model, score, metrics
+    local adj_ids, adj_offsets, adj_neighbors, adj_weights = M.build_adjacency({
+      index = index,
+      knn_index = knn_index,
+      params = best_params.adjacency,
+      each = adjacency_each,
+    })
+
+    M.destroy_spectral(best_model)
+
+    if each_cb then
+      each_cb({
+        event = "stage",
+        stage = "spectral",
+        is_final = true,
+        params = best_params,
+      })
+    end
+
+    best_model = M.build_spectral_from_adjacency({
+      adj_ids = adj_ids,
+      adj_offsets = adj_offsets,
+      adj_neighbors = adj_neighbors,
+      adj_weights = adj_weights,
+      params = best_params.spectral,
+      bucket_size = bucket_size,
+      each = spectral_each,
+    })
+
+    best_model.adj_ids = adj_ids
+    best_model.adj_offsets = adj_offsets
+    best_model.adj_neighbors = adj_neighbors
+    best_model.adj_weights = adj_weights
   end
 
-  local _, best_params, _ = M.search({
-    param_names = param_names,
-    samplers = samplers,
-    rounds = args.search_rounds or 3,
-    trials = args.search_trials or 10,
-    tolerance = args.search_tolerance or 1e-6,
-    skip_final = true,
-
-    trial_fn = function (params, info)
-      local model, score, metrics = build_and_eval(params, info)
-      M.destroy_spectral(model)
-      collectgarbage("collect")
-      return score, metrics, nil
-    end,
-
-    make_key = function (p)
-      return str.format("%d|%s|%s|%s|%s|%s|%s",
-        p.knn or 0,
-        tostring(p.knn_alpha),
-        tostring(p.knn_mutual),
-        tostring(p.weight_cmp),
-        tostring(p.knn_cmp),
-        tostring(p.category_knn),
-        tostring(p.category_cmp))
-    end,
-
-    each = each_cb and function (info)
-      if info.event == "round" or info.event == "final_start" or info.event == "final_end" then
-        each_cb(info)
-      end
-    end or nil,
-  })
-
-  local final_model, _, final_metrics = build_and_eval(best_params, { is_final = true })
-
   collectgarbage("collect")
-  return final_model, best_params, final_metrics
+  return best_model, best_params, best_metrics
 end
 
 return M
