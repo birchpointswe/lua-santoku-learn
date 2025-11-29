@@ -22,58 +22,13 @@ local cfg; cfg = {
     visible = 784,
     mode = "spectral", -- "spectral" or "simhash"
   },
-  spectral = {
-    laplacian = "unnormalized",
-    n_dims = 24,
-    eps = 1e-8,
-    elbow_select = "lmethod",
-    elbow_alpha_select = nil,
-    threshold = function (codes, dims)
-      local codes, _, _ = itq.otsu({
-        codes = codes,
-        n_dims = dims,
-        metric = "variance",
-        minimize = false
-      })
-      return codes, dims
-    end,
-    select = function (codes, _, n, dims)
-      local eids, escores = codes:mtx_top_entropy(n, dims)
-      local _, eidx = escores:scores_elbow(cfg.spectral.elbow_select, cfg.spectral.elbow_alpha_select)
-      eids:setn(eidx)
-      return eids
-    end,
-  },
   simhash = {
-    n_dims =  64,
+    n_dims = 64,
     ranks = nil,
     quantiles = nil,
   },
-  graph = {
-    decay = 4, --{ def = 12, min = 0, max = 8 },
-    knn = 24, --{ def = 12, min = 4, max = 24, int = true, log = true },
-    knn_alpha = 20, --{ def = 30, min = 1, max = 40, int = true, log = true },
-    knn_mode = "cknn",
-    knn_mutual = true,
-    knn_min = nil,
-    knn_cache = 32,
-    bridge = "mst",
-  },
   ann = {
     bucket_size = nil,
-  },
-  eval = {
-    knn = 32,
-    anchors = 16,
-    pairs = 16,
-    ranking = "ndcg",
-    metric = "min",
-    elbow_retrieval = "lmethod",
-    elbow_clustering = "plateau",
-    elbow_alpha_retrieval = nil,
-    elbow_alpha_clustering = 0.01,
-    elbow_target_clustering = "quality",
-    verbose = true,
   },
   cluster = {
     enabled = true,
@@ -89,20 +44,67 @@ local cfg; cfg = {
     target = { def = 4, min = 2, max = 256, int = true, log = true, pow2 = true },
     specificity = { def = 10, min = 2, max = 400, int = true, log = true },
   },
-  search = {
+  tm_search = {
     patience = 3,
     rounds = 20,
     trials = 4,
     tolerance = 1e-6,
     iterations = 10,
   },
-  spectral_search = {
-    rounds = 3,
-    trials = 5,
-  },
   training = {
     patience = 10,
     iterations = 200,
+  },
+  search = {
+    adjacency_samples = 15,
+    spectral_samples = 1,
+    eval_samples = 1,
+    adjacency = {
+      knn = 24,
+      knn_alpha = 20,
+      weight_decay = 4,
+      knn_mutual = true,
+      knn_mode = "cknn",
+      knn_cache = 32,
+      bridge = "mst",
+    },
+    spectral = {
+      laplacian = "unnormalized",
+      n_dims = 24,
+      eps = 1e-8,
+      elbow_select = "lmethod",
+      elbow_alpha_select = nil,
+      threshold = function (codes, dims)
+        local codes, _, _ = itq.otsu({
+          codes = codes,
+          n_dims = dims,
+          metric = "variance",
+          minimize = false
+        })
+        return codes, dims
+      end,
+      select = function (codes, _, n, dims)
+        local eids, escores = codes:mtx_top_entropy(n, dims)
+        local _, eidx = escores:scores_elbow(cfg.search.spectral.elbow_select, cfg.search.spectral.elbow_alpha_select)
+        eids:setn(eidx)
+        return eids
+      end,
+    },
+    eval = {
+      knn = 32,
+      anchors = 16,
+      pairs = 16,
+      ranking = "ndcg",
+      metric = "min",
+      elbow = "lmethod",
+      elbow_alpha = nil,
+    },
+    cluster_eval = {
+      elbow = "plateau",
+      elbow_alpha = 0.01,
+      elbow_target = "quality",
+    },
+    verbose = true,
   },
 }
 
@@ -113,7 +115,7 @@ test("mnist-anchors", function()
   print("Reading data")
   local dataset = ds.read_binary_mnist("test/res/mnist.70k.txt", cfg.data.visible, cfg.data.max, cfg.data.max_class)
   dataset.n_visible = cfg.data.visible
-  dataset.n_hidden = cfg.data.mode == "spectral" and cfg.spectral.n_dims or cfg.simhash.n_dims
+  dataset.n_hidden = cfg.data.mode == "spectral" and cfg.search.spectral.n_dims or cfg.simhash.n_dims
 
   print("\nSplitting")
   local train, test = ds.split_binary_mnist(dataset, cfg.data.ttr)
@@ -150,19 +152,19 @@ test("mnist-anchors", function()
     train.node_features:add(train.train_raw, train.ids)
   end
 
-  local function build_category_ground_truth (ids_spectral)
+  local function build_category_ground_truth (ids)
     local cat_index = inv.create({ features = 10 })
     local data = ivec.create()
     data:copy(train.solutions)
     data:add_scaled(10)
-    cat_index:add(data, ids_spectral)
+    cat_index:add(data, ids)
     data:destroy()
 
     local adj_expected_ids, adj_expected_offsets, adj_expected_neighbors, adj_expected_weights =
       graph.adjacency({
         category_index = cat_index,
-        category_anchors = cfg.eval.anchors,
-        random_pairs = cfg.eval.pairs,
+        category_anchors = cfg.search.eval.anchors,
+        random_pairs = cfg.search.eval.pairs,
       })
 
     return cat_index, {
@@ -173,93 +175,53 @@ test("mnist-anchors", function()
     }
   end
 
+  print("\nBuilding category ground truth")
+  train.cat_index, train.ground_truth = build_category_ground_truth(train.ids)
+
   if cfg.data.mode == "spectral" then
     print("\nOptimizing spectral pipeline")
     local model = optimize.spectral({
       index = train.index_graph,
       knn_index = train.node_features,
-      n_dims = cfg.spectral.n_dims,
-      laplacian = cfg.spectral.laplacian,
-      eps = cfg.spectral.eps,
-      select = cfg.spectral.select,
-      threshold = cfg.spectral.threshold,
-      knn_cache = cfg.graph.knn_cache,
-      knn_mode = cfg.graph.knn_mode,
-      bridge = cfg.graph.bridge,
       bucket_size = cfg.ann.bucket_size,
-      knn = cfg.graph.knn,
-      knn_alpha = cfg.graph.knn_alpha,
-      knn_mutual = cfg.graph.knn_mutual,
-      weight_decay = cfg.graph.decay,
-      search_rounds = cfg.spectral_search.rounds,
-      search_trials = cfg.spectral_search.trials,
-      adjacency_each = cfg.eval.verbose and function (ns, cs, es, stg)
+
+      adjacency_samples = cfg.search.adjacency_samples,
+      spectral_samples = cfg.search.spectral_samples,
+      eval_samples = cfg.search.eval_samples,
+
+      adjacency = cfg.search.adjacency,
+      spectral = cfg.search.spectral,
+      eval = cfg.search.eval,
+
+      expected_ids = train.ground_truth.ids,
+      expected_offsets = train.ground_truth.offsets,
+      expected_neighbors = train.ground_truth.neighbors,
+      expected_weights = train.ground_truth.weights,
+
+      adjacency_each = cfg.search.verbose and function (ns, cs, es, stg)
         if stg == "kruskal" or stg == "done" then
           str.printf("    graph: %d nodes, %d edges, %d components\n", ns, es, cs)
         end
       end or nil,
-      spectral_each = cfg.eval.verbose and function (t, s)
+      spectral_each = cfg.search.verbose and function (t, s)
         if t == "done" then
           str.printf("    spectral: %d matvecs\n", s)
         end
       end or nil,
-      search_metric = function (m)
-        local cat_index, ground_truth = build_category_ground_truth(m.ids)
-        local adj_retrieved_ids, adj_retrieved_offsets, adj_retrieved_neighbors, adj_retrieved_weights =
-          graph.adjacency({
-            weight_index = m.index,
-            seed_ids = ground_truth.ids,
-            seed_offsets = ground_truth.offsets,
-            seed_neighbors = ground_truth.neighbors,
-          })
-        local stats = eval.score_retrieval({
-          retrieved_ids = adj_retrieved_ids,
-          retrieved_offsets = adj_retrieved_offsets,
-          retrieved_neighbors = adj_retrieved_neighbors,
-          retrieved_weights = adj_retrieved_weights,
-          expected_ids = ground_truth.ids,
-          expected_offsets = ground_truth.offsets,
-          expected_neighbors = ground_truth.neighbors,
-          expected_weights = ground_truth.weights,
-          ranking = cfg.eval.ranking,
-          metric = cfg.eval.metric,
-          elbow = cfg.eval.elbow_retrieval,
-          elbow_alpha = cfg.eval.elbow_alpha_retrieval,
-          n_dims = m.dims,
-        })
-        cat_index:destroy()
-        ground_truth.ids:destroy()
-        ground_truth.offsets:destroy()
-        ground_truth.neighbors:destroy()
-        ground_truth.weights:destroy()
-        adj_retrieved_ids:destroy()
-        adj_retrieved_offsets:destroy()
-        adj_retrieved_neighbors:destroy()
-        adj_retrieved_weights:destroy()
-        return stats.f1, {
-          score = stats.score,
-          quality = stats.quality,
-          recall = stats.recall,
-          f1 = stats.f1,
-        }
-      end,
-      each = cfg.eval.verbose and function (info)
+      each = cfg.search.verbose and function (info)
         if info.event == "stage" and info.stage == "adjacency" then
-          local p = info.params
+          local p = info.params.adjacency
           if info.is_final then
             str.printf("\n  [Final] knn=%d knn_alpha=%d knn_mutual=%s\n",
               p.knn, p.knn_alpha, tostring(p.knn_mutual))
           else
-            str.printf("\n  [R%d T%d] knn=%d knn_alpha=%d knn_mutual=%s\n",
-              info.round, info.trial, p.knn, p.knn_alpha, tostring(p.knn_mutual))
+            str.printf("\n  [%d] knn=%d knn_alpha=%d knn_mutual=%s\n",
+              info.sample, p.knn, p.knn_alpha, tostring(p.knn_mutual))
           end
         elseif info.event == "eval" then
           local m = info.metrics
           str.printf("      S=%.4f Q=%.4f R=%.4f F1=%.4f\n",
             m.score, m.quality, m.recall, m.f1)
-        elseif info.event == "round" then
-          str.printf("\n  ---- Round %d complete | Best: %.4f | Global: %.4f ----\n",
-            info.round, info.round_best_score, info.global_best_score)
         end
       end or nil,
     })
@@ -291,8 +253,6 @@ test("mnist-anchors", function()
     error("Unknown mode: " .. cfg.data.mode)
   end
 
-  print("\nCreating class index")
-  train.cat_index, train.ground_truth = build_category_ground_truth(train.ids_spectral)
   train.adj_expected_ids = train.ground_truth.ids
   train.adj_expected_offsets = train.ground_truth.offsets
   train.adj_expected_neighbors = train.ground_truth.neighbors
@@ -338,10 +298,10 @@ test("mnist-anchors", function()
     expected_offsets = train.adj_expected_offsets,
     expected_neighbors = train.adj_expected_neighbors,
     expected_weights = train.adj_expected_weights,
-    ranking = cfg.eval.ranking,
-    metric = cfg.eval.metric,
-    elbow = cfg.eval.elbow_retrieval,
-    elbow_alpha = cfg.eval.elbow_alpha_retrieval,
+    ranking = cfg.search.eval.ranking,
+    metric = cfg.search.eval.metric,
+    elbow = cfg.search.eval.elbow,
+    elbow_alpha = cfg.search.eval.elbow_alpha,
     n_dims = train.dims_spectral,
   })
 
@@ -379,13 +339,13 @@ test("mnist-anchors", function()
       expected_offsets = train.adj_expected_offsets,
       expected_neighbors = train.adj_expected_neighbors,
       expected_weights = train.adj_expected_weights,
-      metric = cfg.eval.metric,
-      elbow = cfg.eval.elbow_clustering,
-      elbow_target = cfg.eval.elbow_target_clustering,
-      elbow_alpha = cfg.eval.elbow_alpha_clustering,
+      metric = cfg.search.eval.metric,
+      elbow = cfg.search.cluster_eval.elbow,
+      elbow_target = cfg.search.cluster_eval.elbow_target,
+      elbow_alpha = cfg.search.cluster_eval.elbow_alpha,
     })
 
-    if cfg.eval.verbose then
+    if cfg.search.verbose then
       for step = 0, train.cluster_stats.n_steps do
         local d, dd = stopwatch()
         str.printf("  Time: %6.2f %6.2f | Step: %2d | Quality: %.2f | Recall: %.2f | F1: %.2f | Clusters: %d\n",
@@ -434,11 +394,11 @@ test("mnist-anchors", function()
       clause_maximum = cfg.tm.clause_maximum,
       target = cfg.tm.target,
       specificity = cfg.tm.specificity,
-      search_patience = cfg.search.patience,
-      search_rounds = cfg.search.rounds,
-      search_trials = cfg.search.trials,
-      search_iterations = cfg.search.iterations,
-      search_tolerance = cfg.search.tolerance,
+      search_patience = cfg.tm_search.patience,
+      search_rounds = cfg.tm_search.rounds,
+      search_trials = cfg.tm_search.trials,
+      search_iterations = cfg.tm_search.iterations,
+      search_tolerance = cfg.tm_search.tolerance,
       final_patience = cfg.training.patience,
       final_iterations = cfg.training.iterations,
       search_metric = function (t)
@@ -496,8 +456,8 @@ test("mnist-anchors", function()
     local test_adj_expected_ids, test_adj_expected_offsets, test_adj_expected_neighbors, test_adj_expected_weights =
       graph.adjacency({
         category_index = test.cat_index,
-        category_anchors = cfg.eval.anchors,
-        random_pairs = cfg.eval.pairs,
+        category_anchors = cfg.search.eval.anchors,
+        random_pairs = cfg.search.eval.pairs,
       })
 
     print("Building retrieved adjacency for predicted codes (test)")
@@ -519,10 +479,10 @@ test("mnist-anchors", function()
       expected_offsets = train.adj_expected_offsets,
       expected_neighbors = train.adj_expected_neighbors,
       expected_weights = train.adj_expected_weights,
-      ranking = cfg.eval.ranking,
-      metric = cfg.eval.metric,
-      elbow = cfg.eval.elbow_retrieval,
-      elbow_alpha = cfg.eval.elbow_alpha_retrieval,
+      ranking = cfg.search.eval.ranking,
+      metric = cfg.search.eval.metric,
+      elbow = cfg.search.eval.elbow,
+      elbow_alpha = cfg.search.eval.elbow_alpha,
       n_dims = train.dims_spectral,
     })
 
@@ -536,10 +496,10 @@ test("mnist-anchors", function()
       expected_offsets = test_adj_expected_offsets,
       expected_neighbors = test_adj_expected_neighbors,
       expected_weights = test_adj_expected_weights,
-      ranking = cfg.eval.ranking,
-      metric = cfg.eval.metric,
-      elbow = cfg.eval.elbow_retrieval,
-      elbow_alpha = cfg.eval.elbow_alpha_retrieval,
+      ranking = cfg.search.eval.ranking,
+      metric = cfg.search.eval.metric,
+      elbow = cfg.search.eval.elbow,
+      elbow_alpha = cfg.search.eval.elbow_alpha,
       n_dims = train.dims_spectral,
     })
 
