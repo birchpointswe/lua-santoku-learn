@@ -9,11 +9,12 @@ local str = require("santoku.string")
 local err = require("santoku.error")
 local rand = require("santoku.random")
 local cvec = require("santoku.cvec")
+local dvec = require("santoku.dvec")
 
 local M = {}
 
 M.elbow_methods = {
-  max_gap = {},  -- uses absolute gap values
+  max_gap = {},
   otsu = {},
   lmethod = {},
   max_curvature = {},
@@ -32,39 +33,64 @@ M.select_metrics = {
   dip = {},
 }
 
-M.sample_elbow = function (elbow_list, elbow_alpha_override)
-  if type(elbow_list) ~= "table" or #elbow_list == 0 then
-    local method = elbow_list
-    if method == "none" then
-      return "none", nil
-    end
-    local method_info = M.elbow_methods[method]
-    local alpha = nil
-    if method_info and method_info.alpha then
-      local spec = (elbow_alpha_override and elbow_alpha_override[method]) or method_info.alpha
-      alpha = spec.def
-    end
-    return method, alpha
+local function sample_alpha_spec (spec)
+  if spec == nil then
+    return nil
   end
-  local method = elbow_list[num.random(#elbow_list)]
+  if type(spec) == "number" then
+    return spec
+  end
+  if type(spec) ~= "table" then
+    return nil
+  end
+  if spec.min == nil or spec.max == nil then
+    return spec.def
+  end
+  local val
+  if spec.log then
+    local log_val = num.random() * (num.log(spec.max) - num.log(spec.min)) + num.log(spec.min)
+    val = num.exp(log_val)
+  else
+    val = num.random() * (spec.max - spec.min) + spec.min
+  end
+  if spec.int then
+    val = num.floor(val + 0.5)
+  end
+  return val
+end
+
+M.sample_elbow = function (elbow_list, elbow_alpha_override)
+  local method
+  if type(elbow_list) ~= "table" or #elbow_list == 0 then
+    method = elbow_list
+  else
+    method = elbow_list[num.random(#elbow_list)]
+  end
+
   if method == "none" then
     return "none", nil
   end
+
   local method_info = M.elbow_methods[method]
-  if not method_info then
-    err.error("Unknown elbow method: " .. tostring(method))
+  if not method_info or not method_info.alpha then
+    return method, nil
   end
-  local alpha = nil
-  if method_info.alpha then
-    local spec = (elbow_alpha_override and elbow_alpha_override[method]) or method_info.alpha
-    if spec.log then
-      local log_val = num.random() * (num.log(spec.max) - num.log(spec.min)) + num.log(spec.min)
-      alpha = num.exp(log_val)
-    else
-      alpha = num.random() * (spec.max - spec.min) + spec.min
+
+  local spec
+  if elbow_alpha_override ~= nil then
+    if type(elbow_alpha_override) == "number" then
+      return method, elbow_alpha_override
+    elseif type(elbow_alpha_override) == "table" then
+      if elbow_alpha_override[method] then
+        spec = elbow_alpha_override[method]
+      elseif elbow_alpha_override.min ~= nil or elbow_alpha_override.def ~= nil then
+        spec = elbow_alpha_override
+      end
     end
   end
-  return method, alpha
+  spec = spec or method_info.alpha
+
+  return method, sample_alpha_spec(spec)
 end
 
 M.sample_metric = function (metric_list, metric_alpha_override)
@@ -74,24 +100,24 @@ M.sample_metric = function (metric_list, metric_alpha_override)
   else
     metric = metric_list[num.random(#metric_list)]
   end
+
   local metric_info = M.select_metrics[metric]
   if not metric_info then
     return metric, nil
   end
+
   local alpha = {}
   for param_name, param_spec in pairs(metric_info) do
-    local spec = (metric_alpha_override and metric_alpha_override[metric] and metric_alpha_override[metric][param_name]) or param_spec
-    local val
-    if spec.log then
-      local log_val = num.random() * (num.log(spec.max) - num.log(spec.min)) + num.log(spec.min)
-      val = num.exp(log_val)
-    else
-      val = num.random() * (spec.max - spec.min) + spec.min
+    local spec
+    if metric_alpha_override then
+      if metric_alpha_override[metric] and metric_alpha_override[metric][param_name] then
+        spec = metric_alpha_override[metric][param_name]
+      elseif metric_alpha_override[param_name] then
+        spec = metric_alpha_override[param_name]
+      end
     end
-    if spec.int then
-      val = num.floor(val + 0.5)
-    end
-    alpha[param_name] = val
+    spec = spec or param_spec
+    alpha[param_name] = sample_alpha_spec(spec)
   end
   return metric, alpha
 end
@@ -252,6 +278,23 @@ M.all_fixed = function (samplers)
     end
   end
   return true
+end
+
+-- Check if an alpha config contains any ranges (min/max specs)
+-- Alpha configs can be: nil, number, { min, max, ... }, or { method = { min, max, ... }, ... }
+local function has_alpha_range (alpha_cfg)
+  if alpha_cfg == nil then return false end
+  if type(alpha_cfg) == "number" then return false end
+  if type(alpha_cfg) ~= "table" then return false end
+  -- Check if it's directly a range spec
+  if alpha_cfg.min ~= nil and alpha_cfg.max ~= nil then return true end
+  -- Check if it's a method -> spec mapping
+  for _, spec in pairs(alpha_cfg) do
+    if type(spec) == "table" and spec.min ~= nil and spec.max ~= nil then
+      return true
+    end
+  end
+  return false
 end
 
 M.recenter_and_shrink = function (samplers, param_names, best_params)
@@ -571,11 +614,8 @@ end
 M.destroy_spectral = function (model)
   if not model then return end
   if model.index then model.index:destroy() end
-  -- Note: model.ids is NOT destroyed here because spectral.encode may return
-  -- the same vector that was passed as input (adj_ids). Destroying it would
-  -- corrupt the adjacency vectors used by subsequent spectral builds.
-  -- The adj_ids is destroyed separately when model.adj_ids is set.
   if model.codes then model.codes:destroy() end
+  if model.raw_codes then model.raw_codes:destroy() end
   if model.eigs then model.eigs:destroy() end
   if model.adj_ids then model.adj_ids:destroy() end
   if model.adj_offsets then model.adj_offsets:destroy() end
@@ -610,7 +650,7 @@ M.build_spectral_from_adjacency = function (args)
   local bucket_size = args.bucket_size
   local each = args.each
 
-  local ids, codes, _, eigs = spectral.encode({
+  local ids, raw_codes, _, eigs = spectral.encode({
     type = p.laplacian or "unnormalized",
     n_hidden = p.n_dims,
     eps = p.eps or 1e-10,
@@ -623,33 +663,10 @@ M.build_spectral_from_adjacency = function (args)
 
   local dims = p.n_dims
 
-  if p.select_elbow and p.select_elbow ~= "none" then
-    local metric = p.select_metric or "entropy"
-    local malpha = p.select_metric_alpha or {}
-    local escores
-    if metric == "entropy" then
-      escores = codes:mtx_top_entropy(dims, malpha.n_bins)
-    elseif metric == "variance" then
-      escores = codes:mtx_top_variance(dims)
-    elseif metric == "skewness" then
-      escores = codes:mtx_top_skewness(dims)
-    elseif metric == "bimodality" then
-      escores = codes:mtx_top_bimodality(dims)
-    elseif metric == "dip" then
-      escores = codes:mtx_top_dip(dims)
-    else
-      err.error("Unknown select_metric: " .. tostring(metric))
-    end
-    local kept = escores:scores_elbow(p.select_elbow, p.select_elbow_alpha)
-    codes:mtx_select(kept, nil, dims)
-    dims = kept:size()
-    escores:destroy()
-  end
-
   local threshold_fn = p.threshold or function (c, d)
     return itq.median({ codes = c, n_dims = d })
   end
-  codes = threshold_fn(codes, dims)
+  local codes = threshold_fn(raw_codes, dims)
 
   local ann_index = ann.create({
     expected_size = ids:size(),
@@ -661,6 +678,8 @@ M.build_spectral_from_adjacency = function (args)
   return {
     ids = ids,
     codes = codes,
+    raw_codes = raw_codes,
+    threshold_fn = threshold_fn,
     eigs = eigs,
     dims = dims,
     index = ann_index,
@@ -674,22 +693,78 @@ M.score_spectral_eval = function (args)
   local knn_target_ids = args.knn_target_ids
   local bucket_size = args.bucket_size
 
-  local knn_index = model.index
+  local eval_codes = model.codes
+  local eval_dims = model.dims
+  local eval_index = model.index
+  local temp_raw = nil
+  local temp_codes = nil
+  local temp_index = nil
+  local temp_kept = nil
+  local selected_elbow = nil  -- tracks original elbow selection before min clamping
+
+  local select_metric = eval_params.select_metric or "entropy"
+  if eval_params.select_elbow and eval_params.select_elbow ~= "none" and select_metric ~= "none" then
+    local metric = select_metric
+    local malpha = eval_params.select_metric_alpha or {}
+    local n_samples = model.ids:size()
+    local indices, scores
+    if metric == "entropy" then
+      indices, scores = model.raw_codes:mtx_top_entropy(n_samples, eval_dims, eval_dims, malpha.n_bins)
+    elseif metric == "variance" then
+      indices, scores = model.raw_codes:mtx_top_variance(n_samples, eval_dims, eval_dims)
+    elseif metric == "skewness" then
+      indices, scores = model.raw_codes:mtx_top_skewness(n_samples, eval_dims, eval_dims)
+    elseif metric == "bimodality" then
+      indices, scores = model.raw_codes:mtx_top_bimodality(n_samples, eval_dims, eval_dims)
+    elseif metric == "dip" then
+      indices, scores = model.raw_codes:mtx_top_dip(n_samples, eval_dims, eval_dims)
+    else
+      err.error("Unknown select_metric: " .. tostring(metric))
+    end
+    local _, elbow_idx = scores:scores_elbow(eval_params.select_elbow, eval_params.select_elbow_alpha)
+    scores:destroy()
+    local selected_dims = elbow_idx
+    selected_elbow = elbow_idx
+
+    if selected_dims > 0 and selected_dims < eval_dims then
+      indices:setn(selected_dims)
+      temp_kept = indices
+      temp_raw = dvec.create()
+      model.raw_codes:mtx_select(temp_kept, nil, eval_dims, temp_raw)
+      temp_codes = model.threshold_fn(temp_raw, selected_dims)
+      eval_codes = temp_codes
+      eval_dims = selected_dims
+
+      temp_index = ann.create({
+        expected_size = model.ids:size(),
+        bucket_size = bucket_size,
+        features = eval_dims,
+      })
+      temp_index:add(eval_codes, model.ids)
+      eval_index = temp_index
+    else
+      indices:destroy()
+    end
+  end
+
+  local knn_index = eval_index
+  local temp_knn_index = nil
   if knn_target_ids then
-    knn_index = ann.create({
+    temp_knn_index = ann.create({
       expected_size = knn_target_ids:size(),
       bucket_size = bucket_size,
-      features = model.dims,
+      features = eval_dims,
     })
-    knn_index:add(model.index:get(knn_target_ids), knn_target_ids)
+    temp_knn_index:add(eval_index:get(knn_target_ids), knn_target_ids)
+    knn_index = temp_knn_index
   end
 
   local adj_retrieved_ids, adj_retrieved_offsets, adj_retrieved_neighbors, adj_retrieved_weights =
     graph.adjacency({
-      weight_index = model.index,
+      weight_index = eval_index,
       knn_index = knn_index,
       knn_query_ids = expected.ids,
-      knn_query_codes = model.index:get(expected.ids),
+      knn_query_codes = eval_index:get(expected.ids),
       knn = eval_params.knn,
       bridge = "none",
     })
@@ -707,14 +782,18 @@ M.score_spectral_eval = function (args)
     metric = eval_params.metric,
     elbow = eval_params.elbow,
     elbow_alpha = eval_params.elbow_alpha,
-    n_dims = model.dims,
+    n_dims = eval_dims,
   })
 
   if adj_retrieved_ids then adj_retrieved_ids:destroy() end
   if adj_retrieved_offsets then adj_retrieved_offsets:destroy() end
   if adj_retrieved_neighbors then adj_retrieved_neighbors:destroy() end
   if adj_retrieved_weights then adj_retrieved_weights:destroy() end
-  if knn_target_ids and knn_index then knn_index:destroy() end
+  if temp_knn_index then temp_knn_index:destroy() end
+  if temp_index then temp_index:destroy() end
+  if temp_codes then temp_codes:destroy() end
+  if temp_raw then temp_raw:destroy() end
+  if temp_kept then temp_kept:destroy() end
 
   local target = eval_params.target or "f1"
   local target_score = stats[target]
@@ -724,6 +803,8 @@ M.score_spectral_eval = function (args)
     quality = stats.quality,
     recall = stats.recall,
     f1 = stats.f1,
+    n_dims = eval_dims,
+    selected_elbow = selected_elbow,  -- original elbow selection (before min clamping)
   }
 end
 
@@ -760,9 +841,13 @@ M.spectral = function (args)
 
   local adj_fixed = M.tier_all_fixed(adjacency_cfg)
   local spec_fixed = M.tier_all_fixed(spectral_cfg)
-    and (type(spectral_cfg.select_elbow) ~= "table" or #spectral_cfg.select_elbow <= 1)
-    and (type(spectral_cfg.select_metric) ~= "table" or #spectral_cfg.select_metric <= 1)
-  local eval_fixed = M.tier_all_fixed(eval_cfg) and (type(eval_cfg.elbow) ~= "table" or #eval_cfg.elbow <= 1)
+  local eval_fixed = M.tier_all_fixed(eval_cfg)
+    and (type(eval_cfg.elbow) ~= "table" or #eval_cfg.elbow <= 1)
+    and not has_alpha_range(eval_cfg.elbow_alpha)
+    and (type(eval_cfg.select_elbow) ~= "table" or #eval_cfg.select_elbow <= 1)
+    and not has_alpha_range(eval_cfg.select_elbow_alpha)
+    and (type(eval_cfg.select_metric) ~= "table" or #eval_cfg.select_metric <= 1)
+    and not has_alpha_range(eval_cfg.select_metric_alpha)
 
   local function make_adj_key (p)
     return str.format("%s|%s|%s|%s",
@@ -770,6 +855,11 @@ M.spectral = function (args)
   end
 
   local function make_spec_key (adj_key, p)
+    return str.format("%s|%s|%s", adj_key, tostring(p.n_dims), tostring(p.laplacian))
+  end
+
+  local function make_eval_key (spec_key, p)
+    local alpha_str = p.elbow_alpha and str.format("%.2f", p.elbow_alpha) or "nil"
     local select_str
     if p.select_elbow then
       local metric_alpha_str = ""
@@ -782,12 +872,7 @@ M.spectral = function (args)
     else
       select_str = "none"
     end
-    return str.format("%s|%s|%s|%s", adj_key, tostring(p.n_dims), tostring(p.laplacian), select_str)
-  end
-
-  local function make_eval_key (spec_key, p)
-    local alpha_str = p.elbow_alpha and str.format("%.2f", p.elbow_alpha) or "nil"
-    return str.format("%s|%s|%s|%s", spec_key, p.elbow, alpha_str, p.ranking)
+    return str.format("%s|%s|%s|%s|%s", spec_key, p.elbow, alpha_str, p.ranking, select_str)
   end
 
   for _ = 1, (adj_fixed and 1 or adjacency_samples) do
@@ -817,14 +902,6 @@ M.spectral = function (args)
 
       for _ = 1, (spec_fixed and 1 or spectral_samples) do
         local spec_params = M.sample_tier(spectral_cfg)
-        if spectral_cfg.select_elbow then
-          local select_elbow, select_elbow_alpha = M.sample_elbow(spectral_cfg.select_elbow, spectral_cfg.select_elbow_alpha)
-          spec_params.select_elbow = select_elbow
-          spec_params.select_elbow_alpha = select_elbow_alpha
-          local select_metric, select_metric_alpha = M.sample_metric(spectral_cfg.select_metric, spectral_cfg.select_metric_alpha)
-          spec_params.select_metric = select_metric or "entropy"
-          spec_params.select_metric_alpha = select_metric_alpha
-        end
         local spec_key = make_spec_key(adj_key, spec_params)
 
         if not seen[spec_key] then
@@ -857,6 +934,14 @@ M.spectral = function (args)
             local elbow, elbow_alpha = M.sample_elbow(eval_cfg.elbow, eval_cfg.elbow_alpha)
             eval_params.elbow = elbow
             eval_params.elbow_alpha = elbow_alpha
+            if eval_cfg.select_elbow then
+              local select_elbow, select_elbow_alpha = M.sample_elbow(eval_cfg.select_elbow, eval_cfg.select_elbow_alpha)
+              eval_params.select_elbow = select_elbow
+              eval_params.select_elbow_alpha = select_elbow_alpha
+              local select_metric, select_metric_alpha = M.sample_metric(eval_cfg.select_metric, eval_cfg.select_metric_alpha)
+              eval_params.select_metric = select_metric or "entropy"
+              eval_params.select_metric_alpha = select_metric_alpha
+            end
 
             local eval_key = make_eval_key(spec_key, eval_params)
 
@@ -883,7 +968,7 @@ M.spectral = function (args)
               end
 
               if score > best_score then
-                if best_model then
+                if best_model and best_model ~= model then
                   M.destroy_spectral(best_model)
                 end
                 best_score = score

@@ -44,7 +44,6 @@ typedef enum {
   TK_EVAL_ELBOW_NONE,
   TK_EVAL_ELBOW_LMETHOD,
   TK_EVAL_ELBOW_MAX_GAP,
-  TK_EVAL_ELBOW_MAX_DROP,
   TK_EVAL_ELBOW_PLATEAU,
   TK_EVAL_ELBOW_KNEEDLE,
   TK_EVAL_ELBOW_MAX_CURVATURE,
@@ -59,8 +58,6 @@ static inline tk_eval_elbow_t tk_eval_parse_elbow (const char *elbow_str) {
     return TK_EVAL_ELBOW_LMETHOD;
   if (!strcmp(elbow_str, "max_gap"))
     return TK_EVAL_ELBOW_MAX_GAP;
-  if (!strcmp(elbow_str, "max_drop"))
-    return TK_EVAL_ELBOW_MAX_DROP;
   if (!strcmp(elbow_str, "plateau"))
     return TK_EVAL_ELBOW_PLATEAU;
   if (!strcmp(elbow_str, "kneedle"))
@@ -1778,8 +1775,6 @@ static inline size_t tk_eval_apply_elbow_pvec (
       return tk_pvec_scores_lmethod(v, out_val);
     case TK_EVAL_ELBOW_MAX_GAP:
       return tk_pvec_scores_max_gap(v, out_val);
-    case TK_EVAL_ELBOW_MAX_DROP:
-      return tk_pvec_scores_max_drop(v, out_val);
     case TK_EVAL_ELBOW_PLATEAU:
       return tk_pvec_scores_plateau(v, int_tolerance, out_val);
     case TK_EVAL_ELBOW_KNEEDLE:
@@ -1811,8 +1806,6 @@ static inline size_t tk_eval_apply_elbow_dvec (
       return tk_dvec_scores_lmethod(v->a, v->n, out_val);
     case TK_EVAL_ELBOW_MAX_GAP:
       return tk_dvec_scores_max_gap(v->a, v->n, out_val);
-    case TK_EVAL_ELBOW_MAX_DROP:
-      return tk_dvec_scores_max_drop(v->a, v->n, out_val);
     case TK_EVAL_ELBOW_PLATEAU:
       return tk_dvec_scores_plateau(v->a, v->n, alpha, out_val);
     case TK_EVAL_ELBOW_KNEEDLE:
