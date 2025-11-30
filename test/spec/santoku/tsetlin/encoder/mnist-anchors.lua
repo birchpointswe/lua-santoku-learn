@@ -98,6 +98,7 @@ local cfg; cfg = {
       metric = "min",
       elbow = "lmethod",
       elbow_alpha = nil,
+      target = "f1",
     },
     cluster_eval = {
       elbow = "plateau",

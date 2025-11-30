@@ -13,8 +13,7 @@ local cvec = require("santoku.cvec")
 local M = {}
 
 M.elbow_methods = {
-  max_gap = {},
-  max_drop = {},
+  max_gap = {},  -- uses absolute gap values
   otsu = {},
   lmethod = {},
   max_curvature = {},
@@ -25,9 +24,20 @@ M.elbow_methods = {
   kneedle = { alpha = { def = 1, min = 0.1, max = 10, log = true } },
 }
 
+M.select_metrics = {
+  variance = {},
+  skewness = {},
+  entropy = { n_bins = { def = 0, min = 0, max = 100, int = true } },  -- 0 = auto
+  bimodality = {},
+  dip = {},
+}
+
 M.sample_elbow = function (elbow_list, elbow_alpha_override)
   if type(elbow_list) ~= "table" or #elbow_list == 0 then
     local method = elbow_list
+    if method == "none" then
+      return "none", nil
+    end
     local method_info = M.elbow_methods[method]
     local alpha = nil
     if method_info and method_info.alpha then
@@ -37,6 +47,9 @@ M.sample_elbow = function (elbow_list, elbow_alpha_override)
     return method, alpha
   end
   local method = elbow_list[num.random(#elbow_list)]
+  if method == "none" then
+    return "none", nil
+  end
   local method_info = M.elbow_methods[method]
   if not method_info then
     err.error("Unknown elbow method: " .. tostring(method))
@@ -52,6 +65,35 @@ M.sample_elbow = function (elbow_list, elbow_alpha_override)
     end
   end
   return method, alpha
+end
+
+M.sample_metric = function (metric_list, metric_alpha_override)
+  local metric
+  if type(metric_list) ~= "table" or #metric_list == 0 then
+    metric = metric_list
+  else
+    metric = metric_list[num.random(#metric_list)]
+  end
+  local metric_info = M.select_metrics[metric]
+  if not metric_info then
+    return metric, nil
+  end
+  local alpha = {}
+  for param_name, param_spec in pairs(metric_info) do
+    local spec = (metric_alpha_override and metric_alpha_override[metric] and metric_alpha_override[metric][param_name]) or param_spec
+    local val
+    if spec.log then
+      local log_val = num.random() * (num.log(spec.max) - num.log(spec.min)) + num.log(spec.min)
+      val = num.exp(log_val)
+    else
+      val = num.random() * (spec.max - spec.min) + spec.min
+    end
+    if spec.int then
+      val = num.floor(val + 0.5)
+    end
+    alpha[param_name] = val
+  end
+  return metric, alpha
 end
 
 local function round_to_pow2 (x)
@@ -529,7 +571,10 @@ end
 M.destroy_spectral = function (model)
   if not model then return end
   if model.index then model.index:destroy() end
-  if model.ids then model.ids:destroy() end
+  -- Note: model.ids is NOT destroyed here because spectral.encode may return
+  -- the same vector that was passed as input (adj_ids). Destroying it would
+  -- corrupt the adjacency vectors used by subsequent spectral builds.
+  -- The adj_ids is destroyed separately when model.adj_ids is set.
   if model.codes then model.codes:destroy() end
   if model.eigs then model.eigs:destroy() end
   if model.adj_ids then model.adj_ids:destroy() end
@@ -578,10 +623,27 @@ M.build_spectral_from_adjacency = function (args)
 
   local dims = p.n_dims
 
-  if p.select then
-    local kept = p.select(codes, eigs, ids:size(), dims)
+  if p.select_elbow and p.select_elbow ~= "none" then
+    local metric = p.select_metric or "entropy"
+    local malpha = p.select_metric_alpha or {}
+    local escores
+    if metric == "entropy" then
+      escores = codes:mtx_top_entropy(dims, malpha.n_bins)
+    elseif metric == "variance" then
+      escores = codes:mtx_top_variance(dims)
+    elseif metric == "skewness" then
+      escores = codes:mtx_top_skewness(dims)
+    elseif metric == "bimodality" then
+      escores = codes:mtx_top_bimodality(dims)
+    elseif metric == "dip" then
+      escores = codes:mtx_top_dip(dims)
+    else
+      err.error("Unknown select_metric: " .. tostring(metric))
+    end
+    local kept = escores:scores_elbow(p.select_elbow, p.select_elbow_alpha)
     codes:mtx_select(kept, nil, dims)
     dims = kept:size()
+    escores:destroy()
   end
 
   local threshold_fn = p.threshold or function (c, d)
@@ -609,13 +671,27 @@ M.score_spectral_eval = function (args)
   local model = args.model
   local eval_params = args.eval_params
   local expected = args.expected
+  local knn_target_ids = args.knn_target_ids
+  local bucket_size = args.bucket_size
+
+  local knn_index = model.index
+  if knn_target_ids then
+    knn_index = ann.create({
+      expected_size = knn_target_ids:size(),
+      bucket_size = bucket_size,
+      features = model.dims,
+    })
+    knn_index:add(model.index:get(knn_target_ids), knn_target_ids)
+  end
 
   local adj_retrieved_ids, adj_retrieved_offsets, adj_retrieved_neighbors, adj_retrieved_weights =
     graph.adjacency({
       weight_index = model.index,
-      seed_ids = expected.ids,
-      seed_offsets = expected.offsets,
-      seed_neighbors = expected.neighbors,
+      knn_index = knn_index,
+      knn_query_ids = expected.ids,
+      knn_query_codes = model.index:get(expected.ids),
+      knn = eval_params.knn,
+      bridge = "none",
     })
 
   local stats = evaluator.score_retrieval({
@@ -638,8 +714,12 @@ M.score_spectral_eval = function (args)
   if adj_retrieved_offsets then adj_retrieved_offsets:destroy() end
   if adj_retrieved_neighbors then adj_retrieved_neighbors:destroy() end
   if adj_retrieved_weights then adj_retrieved_weights:destroy() end
+  if knn_target_ids and knn_index then knn_index:destroy() end
 
-  return stats.f1, {
+  local target = eval_params.target or "f1"
+  local target_score = stats[target]
+
+  return target_score, {
     score = stats.score,
     quality = stats.quality,
     recall = stats.recall,
@@ -654,6 +734,7 @@ M.spectral = function (args)
   local each_cb = args.each
   local adjacency_each = args.adjacency_each
   local spectral_each = args.spectral_each
+  local knn_target_ids = args.knn_target_ids
 
   local adjacency_cfg = err.assert(args.adjacency, "adjacency config required")
   local spectral_cfg = err.assert(args.spectral, "spectral config required")
@@ -679,6 +760,8 @@ M.spectral = function (args)
 
   local adj_fixed = M.tier_all_fixed(adjacency_cfg)
   local spec_fixed = M.tier_all_fixed(spectral_cfg)
+    and (type(spectral_cfg.select_elbow) ~= "table" or #spectral_cfg.select_elbow <= 1)
+    and (type(spectral_cfg.select_metric) ~= "table" or #spectral_cfg.select_metric <= 1)
   local eval_fixed = M.tier_all_fixed(eval_cfg) and (type(eval_cfg.elbow) ~= "table" or #eval_cfg.elbow <= 1)
 
   local function make_adj_key (p)
@@ -687,7 +770,19 @@ M.spectral = function (args)
   end
 
   local function make_spec_key (adj_key, p)
-    return str.format("%s|%s|%s", adj_key, tostring(p.n_dims), tostring(p.laplacian))
+    local select_str
+    if p.select_elbow then
+      local metric_alpha_str = ""
+      if p.select_metric_alpha then
+        for k, v in pairs(p.select_metric_alpha) do
+          metric_alpha_str = metric_alpha_str .. str.format("|%s=%.2f", k, v)
+        end
+      end
+      select_str = str.format("%s%s|%s|%.2f", p.select_metric or "entropy", metric_alpha_str, p.select_elbow, p.select_elbow_alpha or 0)
+    else
+      select_str = "none"
+    end
+    return str.format("%s|%s|%s|%s", adj_key, tostring(p.n_dims), tostring(p.laplacian), select_str)
   end
 
   local function make_eval_key (spec_key, p)
@@ -722,6 +817,14 @@ M.spectral = function (args)
 
       for _ = 1, (spec_fixed and 1 or spectral_samples) do
         local spec_params = M.sample_tier(spectral_cfg)
+        if spectral_cfg.select_elbow then
+          local select_elbow, select_elbow_alpha = M.sample_elbow(spectral_cfg.select_elbow, spectral_cfg.select_elbow_alpha)
+          spec_params.select_elbow = select_elbow
+          spec_params.select_elbow_alpha = select_elbow_alpha
+          local select_metric, select_metric_alpha = M.sample_metric(spectral_cfg.select_metric, spectral_cfg.select_metric_alpha)
+          spec_params.select_metric = select_metric or "entropy"
+          spec_params.select_metric_alpha = select_metric_alpha
+        end
         local spec_key = make_spec_key(adj_key, spec_params)
 
         if not seen[spec_key] then
@@ -764,6 +867,8 @@ M.spectral = function (args)
                 model = model,
                 eval_params = eval_params,
                 expected = expected,
+                knn_target_ids = knn_target_ids,
+                bucket_size = bucket_size,
               })
 
               if each_cb then
