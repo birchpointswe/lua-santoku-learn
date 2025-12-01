@@ -204,24 +204,31 @@ static inline void tm_clustering_accuracy (
   tk_ivec_t *neighbors,
   tk_dvec_t *weights,
   tk_eval_metric_t metric,
-  double *out_score
+  double *out_score,
+  uint64_t *out_n_participating,
+  uint64_t *out_total_queries
 ) {
 
   if (!offsets || offsets->n == 0) {
     *out_score = 0.0;
+    if (out_n_participating) *out_n_participating = 0;
+    if (out_total_queries) *out_total_queries = 0;
     return;
   }
 
   uint64_t n_nodes = offsets->n - 1;
   if (n_nodes == 0) {
     *out_score = 0.0;
+    if (out_n_participating) *out_n_participating = 0;
+    if (out_total_queries) *out_total_queries = 0;
     return;
   }
 
   double total_corr_score = 0.0;
   uint64_t total_nodes_processed = 0;
+  uint64_t total_valid_queries = 0;
 
-  #pragma omp parallel reduction(+:total_corr_score) reduction(+:total_nodes_processed)
+  #pragma omp parallel reduction(+:total_corr_score) reduction(+:total_nodes_processed) reduction(+:total_valid_queries)
   {
     tk_iuset_t *itmp = tk_iuset_create(NULL, 0);
     tk_dumap_t *rank_buffer_b = tk_dumap_create(NULL, 0);
@@ -238,6 +245,12 @@ static inline void tm_clustering_accuracy (
         if (n_neighbors == 0)
           continue;
         int64_t my_cluster = assignments->a[node_idx];
+        if (my_cluster < 0)
+          continue;
+
+        // This is a valid query (has neighbors and valid cluster)
+        total_valid_queries++;
+
         tk_iuset_clear(itmp);
         for (int64_t idx = start; idx < end; idx++) {
           int64_t neighbor = neighbors->a[idx];
@@ -249,6 +262,7 @@ static inline void tm_clustering_accuracy (
         }
 
         if (tk_iuset_size(itmp) > 0) {
+          // Participating: has at least one same-cluster expected neighbor
           double node_score = 0.0;
           switch (metric) {
           case TK_EVAL_METRIC_MEAN:
@@ -275,6 +289,8 @@ static inline void tm_clustering_accuracy (
   }
 
   *out_score = total_nodes_processed > 0 ? total_corr_score / total_nodes_processed : 0.0;
+  if (out_n_participating) *out_n_participating = total_nodes_processed;
+  if (out_total_queries) *out_total_queries = total_valid_queries;
 }
 
 static inline int tm_clustering_accuracy_lua (lua_State *L)
@@ -303,7 +319,7 @@ static inline int tm_clustering_accuracy_lua (lua_State *L)
     tk_lua_verror(L, 3, "clustering_accuracy", "metric", "unknown metric");
 
   double score;
-  tm_clustering_accuracy(L, assignments, offsets, neighbors, weights, metric, &score);
+  tm_clustering_accuracy(L, assignments, offsets, neighbors, weights, metric, &score, NULL, NULL);
   lua_pushnumber(L, score);
   lua_replace(L, 1);
   lua_settop(L, 1);
@@ -1485,8 +1501,8 @@ static inline int tm_score_clustering (lua_State *L)
 
   tk_dvec_t *scores = tk_dvec_create(L, 0, 0, 0);
   int i_scores = tk_lua_absindex(L, -1);
-  tk_dvec_t *recall_scores = tk_dvec_create(L, 0, 0, 0);
-  int i_recall_scores = tk_lua_absindex(L, -1);
+  tk_dvec_t *participation_scores = tk_dvec_create(L, 0, 0, 0);
+  int i_participation_scores = tk_lua_absindex(L, -1);
   tk_dvec_t *f1_scores = tk_dvec_create(L, 0, 0, 0);
   int i_f1_scores = tk_lua_absindex(L, -1);
   tk_ivec_t *n_clusters_per_step = tk_ivec_create(L, 0, 0, 0);
@@ -1613,38 +1629,21 @@ static inline int tm_score_clustering (lua_State *L)
     uint64_t n_active_clusters = tk_iumap_size(cluster_set);
 
     double score = 0.0;
-    double recall = 0.0;
+    double participation = 0.0;
+    uint64_t n_participating = 0;
+    uint64_t total_queries = 0;
     if (metric != TK_EVAL_METRIC_NONE && n_active_clusters >= 1) {
       tm_clustering_accuracy(L, eval_ordered_assignments, eval_offsets, eval_neighbors,
-                            eval_weights, metric, &score);
+                            eval_weights, metric, &score, &n_participating, &total_queries);
 
-      double recall_numerator = 0.0;
-      double recall_denominator = 0.0;
-      for (uint64_t i = 0; i < eval_offsets->n - 1; i++) {
-        int64_t start = eval_offsets->a[i];
-        int64_t end = eval_offsets->a[i + 1];
-        int64_t cluster_i = eval_ordered_assignments->a[i];
-        if (cluster_i < 0)
-          continue;
-        for (int64_t j = start; j < end; j++) {
-          int64_t neighbor_idx = eval_neighbors->a[j];
-          double weight = eval_weights->a[j];
-          recall_denominator += weight;
-          if (neighbor_idx >= 0 && neighbor_idx < (int64_t)eval_ordered_assignments->n) {
-            int64_t cluster_j = eval_ordered_assignments->a[neighbor_idx];
-            if (cluster_i == cluster_j && cluster_j >= 0) {
-              recall_numerator += weight;
-            }
-          }
-        }
-      }
-      recall = recall_denominator > 0.0 ? recall_numerator / recall_denominator : 0.0;
+      // Participation: fraction of valid queries that got at least one same-cluster neighbor
+      participation = total_queries > 0 ? (double)n_participating / (double)total_queries : 0.0;
     }
 
-    double f1 = (score > 0.0 && recall > 0.0) ?
-      (2.0 * score * recall) / (score + recall) : 0.0;
+    double f1 = (score > 0.0 && participation > 0.0) ?
+      (2.0 * score * participation) / (score + participation) : 0.0;
     tk_dvec_push(scores, score);
-    tk_dvec_push(recall_scores, recall);
+    tk_dvec_push(participation_scores, participation);
     tk_dvec_push(f1_scores, f1);
     tk_ivec_push(n_clusters_per_step, (int64_t)n_active_clusters);
   }
@@ -1666,7 +1665,7 @@ static inline int tm_score_clustering (lua_State *L)
   size_t best_step = tk_eval_apply_elbow_dvec(target_curve, elbow, elbow_alpha, &elbow_val);
 
   double best_quality = (best_step < scores->n) ? scores->a[best_step] : 0.0;
-  double best_recall = (best_step < recall_scores->n) ? recall_scores->a[best_step] : 0.0;
+  double best_participation = (best_step < participation_scores->n) ? participation_scores->a[best_step] : 0.0;
   double best_f1 = (best_step < f1_scores->n) ? f1_scores->a[best_step] : 0.0;
   int64_t best_n_clusters = (best_step < n_clusters_per_step->n) ? n_clusters_per_step->a[best_step] : 0;
 
@@ -1674,8 +1673,8 @@ static inline int tm_score_clustering (lua_State *L)
 
   lua_pushnumber(L, best_quality);
   lua_setfield(L, -2, "quality");
-  lua_pushnumber(L, best_recall);
-  lua_setfield(L, -2, "recall");
+  lua_pushnumber(L, best_participation);
+  lua_setfield(L, -2, "participation");
   lua_pushnumber(L, best_f1);
   lua_setfield(L, -2, "f1");
   lua_pushinteger(L, (lua_Integer)best_n_clusters);
@@ -1685,8 +1684,8 @@ static inline int tm_score_clustering (lua_State *L)
 
   lua_pushvalue(L, i_scores);
   lua_setfield(L, -2, "quality_curve");
-  lua_pushvalue(L, i_recall_scores);
-  lua_setfield(L, -2, "recall_curve");
+  lua_pushvalue(L, i_participation_scores);
+  lua_setfield(L, -2, "participation_curve");
   lua_pushvalue(L, i_f1_scores);
   lua_setfield(L, -2, "f1_curve");
   lua_pushvalue(L, i_n_clusters_per_step);
@@ -1884,10 +1883,10 @@ static inline int tm_score_retrieval (lua_State *L)
 
   double total_score = 0.0;
   double total_quality = 0.0;
-  double total_recall = 0.0;
-  uint64_t n_queries = 0;
+  uint64_t total_queries = 0;
+  uint64_t n_participating = 0;
 
-  #pragma omp parallel reduction(+:total_score) reduction(+:total_quality) reduction(+:total_recall) reduction(+:n_queries)
+  #pragma omp parallel reduction(+:total_score) reduction(+:total_quality) reduction(+:total_queries) reduction(+:n_participating)
   {
     tk_pvec_t *query_neighbors = tk_pvec_create(NULL, 0, 0, 0);
     tk_iuset_t *cutoff_ids = tk_iuset_create(NULL, 0);
@@ -1994,22 +1993,15 @@ static inline int tm_score_retrieval (lua_State *L)
           }
         }
 
-        double query_recall_num = 0.0;
-        double query_recall_denom = 0.0;
-        for (int64_t i = exp_start; i < exp_end; i++) {
-          double weight = expected_weights->a[i];
-          query_recall_denom += weight;
-          int64_t neighbor_idx = expected_neighbors->a[i];
-          if (tk_iuset_get(expected_neighbor_set, neighbor_idx) != tk_iuset_end(expected_neighbor_set)) {
-            query_recall_num += weight;
-          }
-        }
-        double query_recall = query_recall_denom > 0.0 ? query_recall_num / query_recall_denom : 0.0;
+        // Participation: did this query get at least one correct retrieval?
+        bool participating = tk_iuset_size(expected_neighbor_set) > 0;
 
+        total_queries++;
         total_score += ranking_score;
-        total_quality += query_quality;
-        total_recall += query_recall;
-        n_queries++;
+        if (participating) {
+          n_participating++;
+          total_quality += query_quality;
+        }
       }
 
       tk_pvec_destroy(query_neighbors);
@@ -2023,21 +2015,25 @@ static inline int tm_score_retrieval (lua_State *L)
 
   tk_iumap_destroy(expected_id_to_idx);
 
-  double avg_score = n_queries > 0 ? total_score / (double)n_queries : 0.0;
-  double avg_quality = n_queries > 0 ? total_quality / (double)n_queries : 0.0;
-  double avg_recall = n_queries > 0 ? total_recall / (double)n_queries : 0.0;
-  double f1 = (avg_quality > 0.0 && avg_recall > 0.0) ?
-    (2.0 * avg_quality * avg_recall) / (avg_quality + avg_recall) : 0.0;
+  double avg_score = total_queries > 0 ? total_score / (double)total_queries : 0.0;
+  double avg_quality = n_participating > 0 ? total_quality / (double)n_participating : 0.0;
+  double participation = total_queries > 0 ? (double)n_participating / (double)total_queries : 0.0;
+  double f1 = (avg_quality > 0.0 && participation > 0.0) ?
+    (2.0 * avg_quality * participation) / (avg_quality + participation) : 0.0;
 
   lua_newtable(L);
   lua_pushnumber(L, avg_score);
   lua_setfield(L, -2, "score");
   lua_pushnumber(L, avg_quality);
   lua_setfield(L, -2, "quality");
-  lua_pushnumber(L, avg_recall);
-  lua_setfield(L, -2, "recall");
+  lua_pushnumber(L, participation);
+  lua_setfield(L, -2, "participation");
   lua_pushnumber(L, f1);
   lua_setfield(L, -2, "f1");
+  lua_pushinteger(L, (lua_Integer)total_queries);
+  lua_setfield(L, -2, "total_queries");
+  lua_pushinteger(L, (lua_Integer)n_participating);
+  lua_setfield(L, -2, "n_participating");
 
   lua_replace(L, 1);
   lua_settop(L, 1);
