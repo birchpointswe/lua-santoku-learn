@@ -1190,7 +1190,7 @@ static inline void tm_compute_base_distances (
             if (k != tk_euset_end(graph->pairs)) {
               double base_uv, base_vu;
               base_uv = tk_graph_distance(graph, u, v, q_weights, e_weights, inter_weights);
-              base_vu = base_uv;
+              base_vu = tk_graph_distance(graph, v, u, q_weights, e_weights, inter_weights);
               double base_final;
               if (graph->weight_pooling == TK_GRAPH_WEIGHT_POOL_MIN) {
                 base_final = fmax(base_uv, base_vu);
