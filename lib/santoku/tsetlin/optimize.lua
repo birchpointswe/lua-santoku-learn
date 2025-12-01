@@ -18,7 +18,6 @@ M.elbow_methods = {
   otsu = {},
   lmethod = {},
   max_curvature = {},
-  max_acceleration = {},
   first_gap = { alpha = { def = 5, min = 1, max = 50 } },
   plateau = { alpha = { def = 1, min = 0, max = 10 } },
   first_gap_ratio = { alpha = { def = 3, min = 1, max = 10 } },
