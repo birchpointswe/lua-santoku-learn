@@ -795,15 +795,19 @@ M.score_spectral_eval = function (args)
   if temp_kept then temp_kept:destroy() end
 
   local target = eval_params.target or "f1"
+  -- Support "recall" as alias for "participation" for backward compatibility
+  if target == "recall" then target = "participation" end
   local target_score = stats[target]
 
   return target_score, {
     score = stats.score,
     quality = stats.quality,
-    recall = stats.recall,
+    participation = stats.participation,
     f1 = stats.f1,
     n_dims = eval_dims,
     selected_elbow = selected_elbow,  -- original elbow selection (before min clamping)
+    total_queries = stats.total_queries,
+    n_participating = stats.n_participating,
   }
 end
 

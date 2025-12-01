@@ -221,8 +221,8 @@ test("mnist-anchors", function()
           end
         elseif info.event == "eval" then
           local m = info.metrics
-          str.printf("      S=%.4f Q=%.4f R=%.4f F1=%.4f\n",
-            m.score, m.quality, m.recall, m.f1)
+          str.printf("      S=%.4f Q=%.4f P=%.4f F1=%.4f\n",
+            m.score, m.quality, m.participation, m.f1)
         end
       end or nil,
     })
@@ -306,9 +306,9 @@ test("mnist-anchors", function()
     n_dims = train.dims_spectral,
   })
 
-  str.printf("\nRetrieval\n  Score: %.4f | Quality: %.4f | Recall: %.4f | F1: %.4f\n",
+  str.printf("\nRetrieval\n  Score: %.4f | Quality: %.4f | Participation: %.4f | F1: %.4f\n",
     train.retrieval_stats.score, train.retrieval_stats.quality,
-    train.retrieval_stats.recall, train.retrieval_stats.f1)
+    train.retrieval_stats.participation, train.retrieval_stats.f1)
 
   if cfg.cluster.enabled then
     print("\nSetting up clustering adjacency")
@@ -349,14 +349,14 @@ test("mnist-anchors", function()
     if cfg.search.verbose then
       for step = 0, train.cluster_stats.n_steps do
         local d, dd = stopwatch()
-        str.printf("  Time: %6.2f %6.2f | Step: %2d | Quality: %.2f | Recall: %.2f | F1: %.2f | Clusters: %d\n",
-          d, dd, step, train.cluster_stats.quality_curve:get(step), train.cluster_stats.recall_curve:get(step),
+        str.printf("  Time: %6.2f %6.2f | Step: %2d | Quality: %.2f | Participation: %.2f | F1: %.2f | Clusters: %d\n",
+          d, dd, step, train.cluster_stats.quality_curve:get(step), train.cluster_stats.participation_curve:get(step),
           train.cluster_stats.f1_curve:get(step), train.cluster_stats.n_clusters_curve:get(step))
       end
     end
 
-    str.printf("Clustering\n  Best Step: %d | Quality: %.4f | Recall: %.4f | F1: %.4f | Clusters: %d\n",
-      train.cluster_stats.best_step, train.cluster_stats.quality, train.cluster_stats.recall,
+    str.printf("Clustering\n  Best Step: %d | Quality: %.4f | Participation: %.4f | F1: %.4f | Clusters: %d\n",
+      train.cluster_stats.best_step, train.cluster_stats.quality, train.cluster_stats.participation,
       train.cluster_stats.f1, train.cluster_stats.n_clusters)
   end
 
@@ -504,15 +504,15 @@ test("mnist-anchors", function()
       n_dims = train.dims_spectral,
     })
 
-    str.printf("  Original | Score: %.4f | Quality: %.4f | Recall: %.4f | F1: %.4f\n",
+    str.printf("  Original | Score: %.4f | Quality: %.4f | Participation: %.4f | F1: %.4f\n",
       train.retrieval_stats.score, train.retrieval_stats.quality,
-      train.retrieval_stats.recall, train.retrieval_stats.f1)
-    str.printf("  Train    | Score: %.4f | Quality: %.4f | Recall: %.4f | F1: %.4f\n",
+      train.retrieval_stats.participation, train.retrieval_stats.f1)
+    str.printf("  Train    | Score: %.4f | Quality: %.4f | Participation: %.4f | F1: %.4f\n",
       train_pred_stats.score, train_pred_stats.quality,
-      train_pred_stats.recall, train_pred_stats.f1)
-    str.printf("  Test     | Score: %.4f | Quality: %.4f | Recall: %.4f | F1: %.4f\n",
+      train_pred_stats.participation, train_pred_stats.f1)
+    str.printf("  Test     | Score: %.4f | Quality: %.4f | Participation: %.4f | F1: %.4f\n",
       test_pred_stats.score, test_pred_stats.quality,
-      test_pred_stats.recall, test_pred_stats.f1)
+      test_pred_stats.participation, test_pred_stats.f1)
 
     idx_train_pred:destroy()
     idx_test_pred:destroy()
