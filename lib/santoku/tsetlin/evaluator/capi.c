@@ -47,7 +47,6 @@ typedef enum {
   TK_EVAL_ELBOW_PLATEAU,
   TK_EVAL_ELBOW_KNEEDLE,
   TK_EVAL_ELBOW_MAX_CURVATURE,
-  TK_EVAL_ELBOW_MAX_ACCELERATION,
   TK_EVAL_ELBOW_OTSU,
   TK_EVAL_ELBOW_FIRST_GAP,
   TK_EVAL_ELBOW_FIRST_GAP_RATIO,
@@ -64,8 +63,6 @@ static inline tk_eval_elbow_t tk_eval_parse_elbow (const char *elbow_str) {
     return TK_EVAL_ELBOW_KNEEDLE;
   if (!strcmp(elbow_str, "max_curvature"))
     return TK_EVAL_ELBOW_MAX_CURVATURE;
-  if (!strcmp(elbow_str, "max_acceleration"))
-    return TK_EVAL_ELBOW_MAX_ACCELERATION;
   if (!strcmp(elbow_str, "otsu"))
     return TK_EVAL_ELBOW_OTSU;
   if (!strcmp(elbow_str, "first_gap"))
@@ -1781,8 +1778,6 @@ static inline size_t tk_eval_apply_elbow_pvec (
       return tk_pvec_scores_kneedle(v, alpha, out_val);
     case TK_EVAL_ELBOW_MAX_CURVATURE:
       return tk_pvec_scores_max_curvature(v, out_val);
-    case TK_EVAL_ELBOW_MAX_ACCELERATION:
-      return tk_pvec_scores_max_acceleration(v, out_val);
     case TK_EVAL_ELBOW_OTSU:
       return tk_pvec_scores_otsu(v, out_val);
     case TK_EVAL_ELBOW_FIRST_GAP:
@@ -1812,8 +1807,6 @@ static inline size_t tk_eval_apply_elbow_dvec (
       return tk_dvec_scores_kneedle(v->a, v->n, alpha, out_val);
     case TK_EVAL_ELBOW_MAX_CURVATURE:
       return tk_dvec_scores_max_curvature(v->a, v->n, out_val);
-    case TK_EVAL_ELBOW_MAX_ACCELERATION:
-      return tk_dvec_scores_max_acceleration(v->a, v->n, out_val);
     case TK_EVAL_ELBOW_OTSU:
       return tk_dvec_scores_otsu(v->a, v->n, out_val);
     case TK_EVAL_ELBOW_FIRST_GAP:
