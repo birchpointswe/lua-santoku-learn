@@ -10,6 +10,7 @@ local err = require("santoku.error")
 local rand = require("santoku.random")
 local cvec = require("santoku.cvec")
 local dvec = require("santoku.dvec")
+local ivec = require("santoku.ivec")
 
 local M = {}
 
@@ -30,6 +31,7 @@ M.select_metrics = {
   entropy = { n_bins = { def = 0, min = 0, max = 100, int = true } },  -- 0 = auto
   bimodality = {},
   dip = {},
+  eigs = {},  -- use eigenvalues directly (ascending order from spectral decomposition)
 }
 
 local function sample_alpha_spec (spec)
@@ -717,6 +719,18 @@ M.score_spectral_eval = function (args)
       indices, scores = model.raw_codes:mtx_top_bimodality(n_samples, eval_dims, eval_dims)
     elseif metric == "dip" then
       indices, scores = model.raw_codes:mtx_top_dip(n_samples, eval_dims, eval_dims)
+    elseif metric == "eigs" then
+      -- Use eigenvalues directly (already in ascending order from spectral decomposition)
+      -- Create sequential indices [0, 1, 2, ..., eval_dims-1]
+      indices = ivec.create()
+      for i = 0, eval_dims - 1 do
+        indices:push(i)
+      end
+      -- Copy eigenvalues (so we can destroy scores later without affecting model.eigs)
+      scores = dvec.create()
+      for i = 0, eval_dims - 1 do
+        scores:push(model.eigs:get(i))
+      end
     else
       err.error("Unknown select_metric: " .. tostring(metric))
     end
@@ -778,7 +792,6 @@ M.score_spectral_eval = function (args)
     expected_neighbors = expected.neighbors,
     expected_weights = expected.weights,
     ranking = eval_params.ranking,
-    metric = eval_params.metric,
     elbow = eval_params.elbow,
     elbow_alpha = eval_params.elbow_alpha,
     n_dims = eval_dims,
@@ -795,19 +808,16 @@ M.score_spectral_eval = function (args)
   if temp_kept then temp_kept:destroy() end
 
   local target = eval_params.target or "f1"
-  -- Support "recall" as alias for "participation" for backward compatibility
-  if target == "recall" then target = "participation" end
   local target_score = stats[target]
 
   return target_score, {
     score = stats.score,
-    quality = stats.quality,
-    participation = stats.participation,
+    precision = stats.precision,
+    recall = stats.recall,
     f1 = stats.f1,
     n_dims = eval_dims,
     selected_elbow = selected_elbow,  -- original elbow selection (before min clamping)
     total_queries = stats.total_queries,
-    n_participating = stats.n_participating,
   }
 end
 
