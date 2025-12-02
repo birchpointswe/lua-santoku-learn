@@ -9,6 +9,7 @@
 #include <santoku/euset.h>
 #include <santoku/iumap.h>
 #include <math.h>
+#include <float.h>
 #include <assert.h>
 #include <string.h>
 
@@ -203,6 +204,7 @@ static inline void tm_clustering_accuracy (
   tk_ivec_t *offsets,
   tk_ivec_t *neighbors,
   tk_dvec_t *weights,
+  bool use_min,
   double *out_quality,
   uint64_t *out_total_queries
 ) {
@@ -236,25 +238,31 @@ static inline void tm_clustering_accuracy (
       if (my_cluster < 0)
         continue;
 
-      // This is a valid query (has neighbors and valid cluster)
-      total_valid_queries++;
-
-      // Sum expected weights for neighbors in same cluster
+      // Quality: min or avg expected weight of cluster members that are in expected neighbors
+      double min_weight = DBL_MAX;
       double weight_sum = 0.0;
-      double total_weight = 0.0;
+      uint64_t n_matches = 0;
+
       for (int64_t idx = start; idx < end; idx++) {
-        double weight = weights->a[idx];
-        total_weight += weight;
         int64_t neighbor = neighbors->a[idx];
         int64_t neighbor_cluster = assignments->a[neighbor];
+        if (neighbor_cluster < 0)
+          continue;  // Skip unassigned neighbors
         if (my_cluster == neighbor_cluster) {
+          double weight = weights->a[idx];
+          if (weight < min_weight)
+            min_weight = weight;
           weight_sum += weight;
+          n_matches++;
         }
       }
 
-      // Quality: fraction of expected weight captured in same cluster
-      double node_quality = (total_weight > 0.0) ? weight_sum / total_weight : 0.0;
-      total_quality += node_quality;
+      // Only count nodes with evaluable cluster members
+      if (n_matches > 0) {
+        double node_quality = use_min ? min_weight : (weight_sum / (double)n_matches);
+        total_quality += node_quality;
+        total_valid_queries++;
+      }
     }
   }
 
@@ -282,8 +290,13 @@ static inline int tm_clustering_accuracy_lua (lua_State *L)
   tk_dvec_t *weights = tk_dvec_peek(L, -1, "weights");
   lua_pop(L, 1);
 
+  lua_getfield(L, 1, "metric");
+  const char *metric_str = lua_isnil(L, -1) ? "min" : lua_tostring(L, -1);
+  lua_pop(L, 1);
+  bool use_min = (strcmp(metric_str, "avg") != 0);
+
   double quality;
-  tm_clustering_accuracy(L, assignments, offsets, neighbors, weights, &quality, NULL);
+  tm_clustering_accuracy(L, assignments, offsets, neighbors, weights, use_min, &quality, NULL);
   lua_pushnumber(L, quality);
   lua_replace(L, 1);
   lua_settop(L, 1);
@@ -1425,6 +1438,9 @@ static inline int tm_score_clustering (lua_State *L)
 
   bool all_merges = tk_lua_foptboolean(L, 1, "score_clustering", "all_merges", false);
 
+  const char *metric_str = tk_lua_foptstring(L, 1, "score_clustering", "metric", "min");
+  bool use_min = (strcmp(metric_str, "avg") != 0);
+
   uint64_t n_samples = 0;
   for (uint64_t i = 0; i < dendro_offsets->n; i++) {
     if (dendro_offsets->a[i] == 0 && i > 0) {
@@ -1582,7 +1598,7 @@ static inline int tm_score_clustering (lua_State *L)
     uint64_t total_queries = 0;
     if (n_active_clusters >= 1) {
       tm_clustering_accuracy(L, eval_ordered_assignments, eval_offsets, eval_neighbors,
-                            eval_weights, &quality, &total_queries);
+                            eval_weights, use_min, &quality, &total_queries);
     }
 
     tk_dvec_push(quality_scores, quality);
@@ -1807,8 +1823,9 @@ static inline int tm_score_retrieval (lua_State *L)
   double total_score = 0.0;
   double total_quality = 0.0;
   uint64_t total_queries = 0;
+  uint64_t total_quality_queries = 0;
 
-  #pragma omp parallel reduction(+:total_score) reduction(+:total_quality) reduction(+:total_queries)
+  #pragma omp parallel reduction(+:total_score) reduction(+:total_quality) reduction(+:total_queries) reduction(+:total_quality_queries)
   {
     tk_pvec_t *query_neighbors = tk_pvec_create(NULL, 0, 0, 0);
     tk_iuset_t *cutoff_ids = tk_iuset_create(NULL, 0);
@@ -1849,8 +1866,14 @@ static inline int tm_score_retrieval (lua_State *L)
           tk_pvec_push(query_neighbors, tk_pair(neighbor_idx, hamming_dist));
         }
 
-        if (query_neighbors->n == 0)
+        // If no neighbors retrieved, count as score=0, quality=0
+        // This penalizes retrieving nothing (every query should have at least one match)
+        if (query_neighbors->n == 0) {
+          total_queries++;
+          total_quality_queries++;
+          // score += 0, quality += 0 implicitly
           continue;
+        }
 
         tk_pvec_asc(query_neighbors, 0, query_neighbors->n);
 
@@ -1905,11 +1928,14 @@ static inline int tm_score_retrieval (lua_State *L)
             n_matches++;
           }
         }));
-        double query_quality = (n_matches > 0) ? quality_sum / (double)n_matches : 0.0;
 
         total_queries++;
-        total_quality += query_quality;
         total_score += ranking_score;
+        // Count queries with no matches as quality=0 (penalizes missing all expected items)
+        if (n_matches > 0) {
+          total_quality += quality_sum / (double)n_matches;
+        }
+        total_quality_queries++;
       }
 
       tk_pvec_destroy(query_neighbors);
@@ -1923,7 +1949,7 @@ static inline int tm_score_retrieval (lua_State *L)
   tk_iumap_destroy(expected_id_to_idx);
 
   double avg_score = total_queries > 0 ? total_score / (double)total_queries : 0.0;
-  double avg_quality = total_queries > 0 ? total_quality / (double)total_queries : 0.0;
+  double avg_quality = total_quality_queries > 0 ? total_quality / (double)total_quality_queries : 0.0;
   double combined = (avg_score > 0.0 && avg_quality > 0.0) ?
     (2.0 * avg_score * avg_quality) / (avg_score + avg_quality) : 0.0;
 
