@@ -807,14 +807,13 @@ M.score_spectral_eval = function (args)
   if temp_raw then temp_raw:destroy() end
   if temp_kept then temp_kept:destroy() end
 
-  local target = eval_params.target or "f1"
+  local target = eval_params.target or "combined"
   local target_score = stats[target]
 
   return target_score, {
     score = stats.score,
-    precision = stats.precision,
-    recall = stats.recall,
-    f1 = stats.f1,
+    quality = stats.quality,
+    combined = stats.combined,
     n_dims = eval_dims,
     selected_elbow = selected_elbow,  -- original elbow selection (before min clamping)
     total_queries = stats.total_queries,

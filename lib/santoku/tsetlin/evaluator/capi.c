@@ -202,35 +202,35 @@ static inline void tm_clustering_accuracy (
   tk_ivec_t *assignments,
   tk_ivec_t *offsets,
   tk_ivec_t *neighbors,
-  double *out_recall,
+  tk_dvec_t *weights,
+  double *out_quality,
   uint64_t *out_total_queries
 ) {
   (void)L;
 
   if (!offsets || offsets->n == 0) {
-    *out_recall = 0.0;
+    *out_quality = 0.0;
     if (out_total_queries) *out_total_queries = 0;
     return;
   }
 
   uint64_t n_nodes = offsets->n - 1;
   if (n_nodes == 0) {
-    *out_recall = 0.0;
+    *out_quality = 0.0;
     if (out_total_queries) *out_total_queries = 0;
     return;
   }
 
-  double total_recall = 0.0;
+  double total_quality = 0.0;
   uint64_t total_valid_queries = 0;
 
-  #pragma omp parallel reduction(+:total_recall) reduction(+:total_valid_queries)
+  #pragma omp parallel reduction(+:total_quality) reduction(+:total_valid_queries)
   {
     #pragma omp for schedule(static)
     for (uint64_t node_idx = 0; node_idx < n_nodes; node_idx++) {
       int64_t start = offsets->a[node_idx];
       int64_t end = offsets->a[node_idx + 1];
-      uint64_t n_expected = (uint64_t)(end - start);
-      if (n_expected == 0)
+      if (end == start)
         continue;
       int64_t my_cluster = assignments->a[node_idx];
       if (my_cluster < 0)
@@ -239,23 +239,26 @@ static inline void tm_clustering_accuracy (
       // This is a valid query (has neighbors and valid cluster)
       total_valid_queries++;
 
-      // Count expected neighbors in same cluster
-      uint64_t n_same_cluster = 0;
+      // Sum expected weights for neighbors in same cluster
+      double weight_sum = 0.0;
+      double total_weight = 0.0;
       for (int64_t idx = start; idx < end; idx++) {
+        double weight = weights->a[idx];
+        total_weight += weight;
         int64_t neighbor = neighbors->a[idx];
         int64_t neighbor_cluster = assignments->a[neighbor];
         if (my_cluster == neighbor_cluster) {
-          n_same_cluster++;
+          weight_sum += weight;
         }
       }
 
-      // Recall: fraction of expected neighbors in same cluster
-      double node_recall = (double)n_same_cluster / (double)n_expected;
-      total_recall += node_recall;
+      // Quality: fraction of expected weight captured in same cluster
+      double node_quality = (total_weight > 0.0) ? weight_sum / total_weight : 0.0;
+      total_quality += node_quality;
     }
   }
 
-  *out_recall = total_valid_queries > 0 ? total_recall / (double)total_valid_queries : 0.0;
+  *out_quality = total_valid_queries > 0 ? total_quality / (double)total_valid_queries : 0.0;
   if (out_total_queries) *out_total_queries = total_valid_queries;
 }
 
@@ -275,9 +278,13 @@ static inline int tm_clustering_accuracy_lua (lua_State *L)
   tk_ivec_t *neighbors = tk_ivec_peek(L, -1, "neighbors");
   lua_pop(L, 1);
 
-  double recall;
-  tm_clustering_accuracy(L, assignments, offsets, neighbors, &recall, NULL);
-  lua_pushnumber(L, recall);
+  lua_getfield(L, 1, "weights");
+  tk_dvec_t *weights = tk_dvec_peek(L, -1, "weights");
+  lua_pop(L, 1);
+
+  double quality;
+  tm_clustering_accuracy(L, assignments, offsets, neighbors, weights, &quality, NULL);
+  lua_pushnumber(L, quality);
   lua_replace(L, 1);
   lua_settop(L, 1);
   return 1;
@@ -1401,6 +1408,14 @@ static inline int tm_score_clustering (lua_State *L)
   tk_ivec_t *eval_neighbors = tk_ivec_peek(L, -1, "expected_neighbors or eval_neighbors");
   lua_pop(L, 1);
 
+  lua_getfield(L, 1, "expected_weights");
+  if (lua_isnil(L, -1)) {
+    lua_pop(L, 1);
+    lua_getfield(L, 1, "eval_weights");
+  }
+  tk_dvec_t *eval_weights = tk_dvec_peek(L, -1, "expected_weights or eval_weights");
+  lua_pop(L, 1);
+
   const char *elbow_str = tk_lua_fcheckstring(L, 1, "score_clustering", "elbow");
   tk_eval_elbow_t elbow = tk_eval_parse_elbow(elbow_str);
   if (elbow == TK_EVAL_ELBOW_NONE)
@@ -1438,8 +1453,8 @@ static inline int tm_score_clustering (lua_State *L)
     }
   }
 
-  tk_dvec_t *recall_scores = tk_dvec_create(L, 0, 0, 0);
-  int i_recall_scores = tk_lua_absindex(L, -1);
+  tk_dvec_t *quality_scores = tk_dvec_create(L, 0, 0, 0);
+  int i_quality_scores = tk_lua_absindex(L, -1);
   tk_ivec_t *n_clusters_per_step = tk_ivec_create(L, 0, 0, 0);
   int i_n_clusters_per_step = tk_lua_absindex(L, -1);
 
@@ -1563,18 +1578,18 @@ static inline int tm_score_clustering (lua_State *L)
     }
     uint64_t n_active_clusters = tk_iumap_size(cluster_set);
 
-    double recall = 0.0;
+    double quality = 0.0;
     uint64_t total_queries = 0;
     if (n_active_clusters >= 1) {
       tm_clustering_accuracy(L, eval_ordered_assignments, eval_offsets, eval_neighbors,
-                            &recall, &total_queries);
+                            eval_weights, &quality, &total_queries);
     }
 
-    tk_dvec_push(recall_scores, recall);
+    tk_dvec_push(quality_scores, quality);
     tk_ivec_push(n_clusters_per_step, (int64_t)n_active_clusters);
   }
 
-  uint64_t actual_steps = recall_scores->n > 0 ? recall_scores->n - 1 : 0;
+  uint64_t actual_steps = quality_scores->n > 0 ? quality_scores->n - 1 : 0;
 
   tk_ivec_destroy(working_assignments);
   tk_ivec_destroy(eval_ordered_assignments);
@@ -1587,22 +1602,22 @@ static inline int tm_score_clustering (lua_State *L)
     tk_iumap_destroy(absorbed_to_surviving);
 
   double elbow_val;
-  size_t best_step = tk_eval_apply_elbow_dvec(recall_scores, elbow, elbow_alpha, &elbow_val);
+  size_t best_step = tk_eval_apply_elbow_dvec(quality_scores, elbow, elbow_alpha, &elbow_val);
 
-  double best_recall = (best_step < recall_scores->n) ? recall_scores->a[best_step] : 0.0;
+  double best_quality = (best_step < quality_scores->n) ? quality_scores->a[best_step] : 0.0;
   int64_t best_n_clusters = (best_step < n_clusters_per_step->n) ? n_clusters_per_step->a[best_step] : 0;
 
   lua_newtable(L);
 
-  lua_pushnumber(L, best_recall);
-  lua_setfield(L, -2, "recall");
+  lua_pushnumber(L, best_quality);
+  lua_setfield(L, -2, "quality");
   lua_pushinteger(L, (lua_Integer)best_n_clusters);
   lua_setfield(L, -2, "n_clusters");
   lua_pushinteger(L, (lua_Integer)best_step);
   lua_setfield(L, -2, "best_step");
 
-  lua_pushvalue(L, i_recall_scores);
-  lua_setfield(L, -2, "recall_curve");
+  lua_pushvalue(L, i_quality_scores);
+  lua_setfield(L, -2, "quality_curve");
   lua_pushvalue(L, i_n_clusters_per_step);
   lua_setfield(L, -2, "n_clusters_curve");
   lua_pushinteger(L, (lua_Integer)actual_steps);
@@ -1790,24 +1805,21 @@ static inline int tm_score_retrieval (lua_State *L)
     tk_error(L, "score_retrieval: failed to create expected ID mapping", ENOMEM);
 
   double total_score = 0.0;
-  double total_precision = 0.0;
-  double total_recall = 0.0;
+  double total_quality = 0.0;
   uint64_t total_queries = 0;
 
-  #pragma omp parallel reduction(+:total_score) reduction(+:total_precision) reduction(+:total_recall) reduction(+:total_queries)
+  #pragma omp parallel reduction(+:total_score) reduction(+:total_quality) reduction(+:total_queries)
   {
     tk_pvec_t *query_neighbors = tk_pvec_create(NULL, 0, 0, 0);
     tk_iuset_t *cutoff_ids = tk_iuset_create(NULL, 0);
-    tk_iuset_t *expected_neighbor_set = tk_iuset_create(NULL, 0);
     tk_dumap_t *weight_map = tk_dumap_create(NULL, 0);
     tk_pvec_t *weight_ranks_buffer = tk_pvec_create(NULL, 0, 0, 0);
     tk_dumap_t *weight_rank_map = tk_dumap_create(NULL, 0);
 
-    if (!query_neighbors || !cutoff_ids || !expected_neighbor_set ||
+    if (!query_neighbors || !cutoff_ids ||
         !weight_map || !weight_ranks_buffer || !weight_rank_map) {
       if (query_neighbors) tk_pvec_destroy(query_neighbors);
       if (cutoff_ids) tk_iuset_destroy(cutoff_ids);
-      if (expected_neighbor_set) tk_iuset_destroy(expected_neighbor_set);
       if (weight_map) tk_dumap_destroy(weight_map);
       if (weight_ranks_buffer) tk_pvec_destroy(weight_ranks_buffer);
       if (weight_rank_map) tk_dumap_destroy(weight_rank_map);
@@ -1871,34 +1883,37 @@ static inline int tm_score_retrieval (lua_State *L)
             break;
         }
 
-        tk_iuset_clear(expected_neighbor_set);
+        // Build map from expected neighbor ID to weight for this query
+        tk_dumap_clear(weight_map);
         for (int64_t i = exp_start; i < exp_end; i++) {
           int64_t neighbor_idx = expected_neighbors->a[i];
           int64_t neighbor_id = expected_ids->a[neighbor_idx];
-          if (tk_iuset_get(cutoff_ids, neighbor_id) != tk_iuset_end(cutoff_ids)) {
-            int kha;
-            tk_iuset_put(expected_neighbor_set, neighbor_idx, &kha);
-          }
+          double weight = expected_weights->a[i];
+          int kha;
+          khint_t khi = tk_dumap_put(weight_map, neighbor_id, &kha);
+          tk_dumap_setval(weight_map, khi, weight);
         }
 
-        // Precision: |intersection| / |retrieved_after_elbow|
-        // Recall: |intersection| / |expected|
-        uint64_t n_intersection = tk_iuset_size(expected_neighbor_set);
-        uint64_t n_retrieved = tk_iuset_size(cutoff_ids);
-        uint64_t n_expected = (uint64_t)(exp_end - exp_start);
-
-        double query_precision = (n_retrieved > 0) ? (double)n_intersection / (double)n_retrieved : 0.0;
-        double query_recall = (n_expected > 0) ? (double)n_intersection / (double)n_expected : 0.0;
+        // Quality: mean(expected_weight for selected ∩ expected) - only items we can evaluate
+        double quality_sum = 0.0;
+        uint64_t n_matches = 0;
+        int64_t retrieved_id;
+        tk_umap_foreach_keys(cutoff_ids, retrieved_id, ({
+          khint_t khi = tk_dumap_get(weight_map, retrieved_id);
+          if (khi != tk_dumap_end(weight_map)) {
+            quality_sum += tk_dumap_val(weight_map, khi);
+            n_matches++;
+          }
+        }));
+        double query_quality = (n_matches > 0) ? quality_sum / (double)n_matches : 0.0;
 
         total_queries++;
-        total_precision += query_precision;
-        total_recall += query_recall;
+        total_quality += query_quality;
         total_score += ranking_score;
       }
 
       tk_pvec_destroy(query_neighbors);
       tk_iuset_destroy(cutoff_ids);
-      tk_iuset_destroy(expected_neighbor_set);
       tk_dumap_destroy(weight_map);
       tk_pvec_destroy(weight_ranks_buffer);
       tk_dumap_destroy(weight_rank_map);
@@ -1908,20 +1923,17 @@ static inline int tm_score_retrieval (lua_State *L)
   tk_iumap_destroy(expected_id_to_idx);
 
   double avg_score = total_queries > 0 ? total_score / (double)total_queries : 0.0;
-  double avg_precision = total_queries > 0 ? total_precision / (double)total_queries : 0.0;
-  double avg_recall = total_queries > 0 ? total_recall / (double)total_queries : 0.0;
-  double f1 = (avg_precision > 0.0 && avg_recall > 0.0) ?
-    (2.0 * avg_precision * avg_recall) / (avg_precision + avg_recall) : 0.0;
+  double avg_quality = total_queries > 0 ? total_quality / (double)total_queries : 0.0;
+  double combined = (avg_score > 0.0 && avg_quality > 0.0) ?
+    (2.0 * avg_score * avg_quality) / (avg_score + avg_quality) : 0.0;
 
   lua_newtable(L);
   lua_pushnumber(L, avg_score);
   lua_setfield(L, -2, "score");
-  lua_pushnumber(L, avg_precision);
-  lua_setfield(L, -2, "precision");
-  lua_pushnumber(L, avg_recall);
-  lua_setfield(L, -2, "recall");
-  lua_pushnumber(L, f1);
-  lua_setfield(L, -2, "f1");
+  lua_pushnumber(L, avg_quality);
+  lua_setfield(L, -2, "quality");
+  lua_pushnumber(L, combined);
+  lua_setfield(L, -2, "combined");
   lua_pushinteger(L, (lua_Integer)total_queries);
   lua_setfield(L, -2, "total_queries");
 
