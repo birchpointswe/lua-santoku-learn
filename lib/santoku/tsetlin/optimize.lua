@@ -281,15 +281,11 @@ M.all_fixed = function (samplers)
   return true
 end
 
-
-
 local function has_alpha_range (alpha_cfg)
   if alpha_cfg == nil then return false end
   if type(alpha_cfg) == "number" then return false end
   if type(alpha_cfg) ~= "table" then return false end
-
   if alpha_cfg.min ~= nil and alpha_cfg.max ~= nil then return true end
-
   for _, spec in pairs(alpha_cfg) do
     if type(spec) == "table" and spec.min ~= nil and spec.max ~= nil then
       return true
@@ -720,13 +716,10 @@ M.score_spectral_eval = function (args)
     elseif metric == "dip" then
       indices, scores = model.raw_codes:mtx_top_dip(n_samples, eval_dims, eval_dims)
     elseif metric == "eigs" then
-
-
       indices = ivec.create()
       for i = 0, eval_dims - 1 do
         indices:push(i)
       end
-
       scores = dvec.create()
       for i = 0, eval_dims - 1 do
         scores:push(model.eigs:get(i))
@@ -791,6 +784,7 @@ M.score_spectral_eval = function (args)
     expected_offsets = expected.offsets,
     expected_neighbors = expected.neighbors,
     expected_weights = expected.weights,
+    query_ids = eval_params.query_ids,
     ranking = eval_params.ranking,
     elbow = eval_params.elbow,
     elbow_alpha = eval_params.elbow_alpha,
@@ -828,6 +822,7 @@ M.spectral = function (args)
   local adjacency_each = args.adjacency_each
   local spectral_each = args.spectral_each
   local knn_target_ids = args.knn_target_ids
+  local query_ids = args.query_ids
 
   local adjacency_cfg = err.assert(args.adjacency, "adjacency config required")
   local spectral_cfg = err.assert(args.spectral, "spectral config required")
@@ -954,6 +949,7 @@ M.spectral = function (args)
               eval_params.select_metric = select_metric or "entropy"
               eval_params.select_metric_alpha = select_metric_alpha
             end
+            eval_params.query_ids = query_ids
 
             local eval_key = make_eval_key(spec_key, eval_params)
 
@@ -1006,7 +1002,9 @@ M.spectral = function (args)
     end
   end
 
-  if best_model then
+
+  local all_fixed = adj_fixed and spec_fixed and eval_fixed
+  if best_model and not all_fixed then
     if each_cb then
       each_cb({
         event = "stage",
