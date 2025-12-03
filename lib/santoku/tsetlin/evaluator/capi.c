@@ -1816,9 +1816,26 @@ static inline int tm_score_retrieval (lua_State *L)
 
   double elbow_alpha = tk_lua_foptnumber(L, 1, "score_retrieval", "elbow_alpha", 1e-4);
 
+  // Optional query_ids filter - if provided, only evaluate queries in this set
+  tk_iuset_t *query_filter = NULL;
+  lua_getfield(L, 1, "query_ids");
+  if (!lua_isnil(L, -1)) {
+    tk_ivec_t *query_ids = tk_ivec_peek(L, -1, "query_ids");
+    query_filter = tk_iuset_create(NULL, query_ids->n);
+    if (!query_filter)
+      tk_error(L, "score_retrieval: failed to create query filter", ENOMEM);
+    for (uint64_t i = 0; i < query_ids->n; i++) {
+      int kha;
+      tk_iuset_put(query_filter, query_ids->a[i], &kha);
+    }
+  }
+  lua_pop(L, 1);
+
   tk_iumap_t *expected_id_to_idx = tk_iumap_from_ivec(NULL, expected_ids);
-  if (!expected_id_to_idx)
+  if (!expected_id_to_idx) {
+    if (query_filter) tk_iuset_destroy(query_filter);
     tk_error(L, "score_retrieval: failed to create expected ID mapping", ENOMEM);
+  }
 
   double total_score = 0.0;
   double total_quality = 0.0;
@@ -1844,6 +1861,10 @@ static inline int tm_score_retrieval (lua_State *L)
       #pragma omp for schedule(static)
       for (uint64_t query_idx = 0; query_idx < retrieved_offsets->n - 1; query_idx++) {
         int64_t query_id = retrieved_ids->a[query_idx];
+
+        // Skip if query not in filter (when filter is provided)
+        if (query_filter && tk_iuset_get(query_filter, query_id) == tk_iuset_end(query_filter))
+          continue;
 
         khint_t exp_khi = tk_iumap_get(expected_id_to_idx, query_id);
         if (exp_khi == tk_iumap_end(expected_id_to_idx))
@@ -1891,16 +1912,16 @@ static inline int tm_score_retrieval (lua_State *L)
         double ranking_score = 0.0;
         switch (ranking) {
           case TK_EVAL_METRIC_NDCG:
-            ranking_score = tk_csr_ndcg_distance(expected_neighbors, expected_weights,
-              exp_start, exp_end, query_neighbors, weight_map);
+            ranking_score = tk_csr_ndcg_distance(expected_ids, expected_neighbors, expected_weights,
+              exp_start, exp_end, retrieved_ids, query_neighbors, weight_map);
             break;
           case TK_EVAL_METRIC_SPEARMAN:
-            ranking_score = tk_csr_spearman_distance(expected_neighbors, expected_weights,
-              exp_start, exp_end, query_neighbors, weight_ranks_buffer, weight_rank_map);
+            ranking_score = tk_csr_spearman_distance(expected_ids, expected_neighbors, expected_weights,
+              exp_start, exp_end, retrieved_ids, query_neighbors, weight_ranks_buffer, weight_rank_map);
             break;
           case TK_EVAL_METRIC_PEARSON:
-            ranking_score = tk_csr_pearson_distance(expected_neighbors, expected_weights,
-              exp_start, exp_end, query_neighbors, weight_map);
+            ranking_score = tk_csr_pearson_distance(expected_ids, expected_neighbors, expected_weights,
+              exp_start, exp_end, retrieved_ids, query_neighbors, weight_map);
             break;
           default:
             break;
@@ -1947,6 +1968,7 @@ static inline int tm_score_retrieval (lua_State *L)
   }
 
   tk_iumap_destroy(expected_id_to_idx);
+  if (query_filter) tk_iuset_destroy(query_filter);
 
   double avg_score = total_queries > 0 ? total_score / (double)total_queries : 0.0;
   double avg_quality = total_quality_queries > 0 ? total_quality / (double)total_quality_queries : 0.0;
@@ -2058,15 +2080,19 @@ static double tk_compute_reconstruction (
         double corr;
         switch (eval_metric) {
           case TK_EVAL_METRIC_PEARSON:
-            corr = tk_csr_pearson_distance(neighbors, weights, start, end, bin_ranks, rank_buffer_b);
+            // Same adjacency for both expected and retrieved (single adjacency comparison)
+            corr = tk_csr_pearson_distance(adjacency_ids, neighbors, weights, start, end,
+              adjacency_ids, bin_ranks, rank_buffer_b);
             break;
           case TK_EVAL_METRIC_SPEARMAN:
             tk_pvec_desc(bin_ranks, 0, bin_ranks->n);
-            corr = tk_csr_spearman_distance(neighbors, weights, start, end, bin_ranks, weight_ranks_buffer, weight_rank_map);
+            corr = tk_csr_spearman_distance(adjacency_ids, neighbors, weights, start, end,
+              adjacency_ids, bin_ranks, weight_ranks_buffer, weight_rank_map);
             break;
           case TK_EVAL_METRIC_NDCG:
             tk_pvec_asc(bin_ranks, 0, bin_ranks->n);
-            corr = tk_csr_ndcg_distance(neighbors, weights, start, end, bin_ranks, rank_buffer_b);
+            corr = tk_csr_ndcg_distance(adjacency_ids, neighbors, weights, start, end,
+              adjacency_ids, bin_ranks, rank_buffer_b);
             break;
           default:
             corr = 0.0;

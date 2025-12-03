@@ -274,15 +274,17 @@ test("mnist-anchors", function()
   train.entropy = eval.entropy_stats(train.codes_spectral, train.ids_spectral:size(), train.dims_spectral)
   str.printi("  Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)", train.entropy)
 
-  print("\nBuilding retrieved adjacency")
+  print("\nBuilding retrieved adjacency (spectral KNN)")
   train.adj_retrieved_ids,
   train.adj_retrieved_offsets,
   train.adj_retrieved_neighbors,
   train.adj_retrieved_weights = graph.adjacency({
     weight_index = train.index_spectral,
-    seed_ids = train.adj_expected_ids,
-    seed_offsets = train.adj_expected_offsets,
-    seed_neighbors = train.adj_expected_neighbors
+    knn_index = train.index_spectral,
+    knn_query_ids = train.adj_expected_ids,
+    knn_query_codes = train.codes_expected,
+    knn = cfg.search.eval.knn,
+    bridge = "none",
   })
   str.printf("  Min: %f  Max: %f  Mean: %f  Mean Size: %d\n",
     train.adj_retrieved_weights:min(),
@@ -435,12 +437,16 @@ test("mnist-anchors", function()
     idx_test_pred:add(test_predicted, test.ids)
 
     print("\nBuilding retrieved adjacency for predicted codes (train)")
+    local train_pred_query_codes = cvec.create()
+    train_pred_query_codes:bits_extend(train_predicted, train.adj_expected_ids, train.ids_spectral, 0, train.dims_spectral, true)
     local train_pred_retrieved_ids, train_pred_retrieved_offsets, train_pred_retrieved_neighbors, train_pred_retrieved_weights =
       graph.adjacency({
         weight_index = idx_train_pred,
-        seed_ids = train.adj_expected_ids,
-        seed_offsets = train.adj_expected_offsets,
-        seed_neighbors = train.adj_expected_neighbors,
+        knn_index = idx_train_pred,
+        knn_query_ids = train.adj_expected_ids,
+        knn_query_codes = train_pred_query_codes,
+        knn = cfg.search.eval.knn,
+        bridge = "none",
       })
 
     print("Building expected adjacency for test")
@@ -462,12 +468,16 @@ test("mnist-anchors", function()
       })
 
     print("Building retrieved adjacency for predicted codes (test)")
+    local test_pred_query_codes = cvec.create()
+    test_pred_query_codes:bits_extend(test_predicted, test_adj_expected_ids, test.ids, 0, train.dims_spectral, true)
     local test_pred_retrieved_ids, test_pred_retrieved_offsets, test_pred_retrieved_neighbors, test_pred_retrieved_weights =
       graph.adjacency({
         weight_index = idx_test_pred,
-        seed_ids = test_adj_expected_ids,
-        seed_offsets = test_adj_expected_offsets,
-        seed_neighbors = test_adj_expected_neighbors,
+        knn_index = idx_test_pred,
+        knn_query_ids = test_adj_expected_ids,
+        knn_query_codes = test_pred_query_codes,
+        knn = cfg.search.eval.knn,
+        bridge = "none",
       })
 
     print("\nEvaluating train predicted codes")
