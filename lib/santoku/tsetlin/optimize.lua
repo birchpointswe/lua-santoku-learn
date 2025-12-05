@@ -49,8 +49,12 @@ local function sample_alpha_spec (spec)
   end
   local val
   if spec.log then
-    local log_val = num.random() * (num.log(spec.max) - num.log(spec.min)) + num.log(spec.min)
-    val = num.exp(log_val)
+    -- For log scale with non-positive min, shift range so shifted_min = 1
+    local shift = spec.min <= 0 and (1 - spec.min) or 0
+    local smin = spec.min + shift
+    local smax = spec.max + shift
+    local log_val = num.random() * (num.log(smax) - num.log(smin)) + num.log(smin)
+    val = num.exp(log_val) - shift
   else
     val = num.random() * (spec.max - spec.min) + spec.min
   end
@@ -141,56 +145,46 @@ M.build_sampler = function (spec, global_dev)
       end
     }
   end
-  if type(spec) == "table" and spec.def ~= nil then
+  if type(spec) == "table" and (spec.def ~= nil or (spec.min ~= nil and spec.max ~= nil)) then
     local def, minv, maxv = spec.def, spec.min, spec.max
-    err.assert(def and minv and maxv, "range spec missing def|min|max")
+    err.assert(minv and maxv, "range spec missing min|max")
     local is_log = not not spec.log
     local is_int = not not spec.int
     local is_pow2 = not not spec.pow2
-    local span, base_center
-    if is_log then
-      span = num.log(maxv) - num.log(minv)
-      base_center = num.log(def)
-    else
-      span = maxv - minv
-      base_center = def
-    end
+    -- For log scale with non-positive min, shift range so shifted_min = 1
+    local shift = (is_log and minv <= 0) and (1 - minv) or 0
+    local smin = minv + shift
+    local smax = maxv + shift
+    local span = is_log and (num.log(smax) - num.log(smin)) or (maxv - minv)
     local init_jitter = (spec.dev or global_dev or 1.0) * span
     local jitter = init_jitter
-    local round = 0
     return {
       type = "range",
       center = def,
       sample = function (center)
-        local c = center and (is_log and num.log(center) or center) or base_center
-        local x = rand.fast_normal(c, jitter)
-        if is_log then
-          x = num.exp(x)
+        local x
+        if center then
+          local c = is_log and num.log(center + shift) or center
+          x = rand.fast_normal(c, jitter)
+          if is_log then x = num.exp(x) - shift end
+        else
+          if is_log then
+            x = num.exp(num.random() * span + num.log(smin)) - shift
+          else
+            x = num.random() * span + minv
+          end
         end
-        if x < minv then
-          x = minv
-        elseif x > maxv then
-          x = maxv
-        end
+        if x < minv then x = minv elseif x > maxv then x = maxv end
         if is_pow2 then
           x = round_to_pow2(x)
-          if x < minv then
-            x = minv
-          elseif x > maxv then
-            x = maxv
-          end
+          if x < minv then x = minv elseif x > maxv then x = maxv end
         elseif is_int then
           x = num.floor(x + 0.5)
         end
         return x
       end,
-      shrink = function ()
-        round = round + 1
-        jitter = init_jitter / num.sqrt(round + 1)
-      end,
-      reset = function ()
-        round = 0
-        jitter = init_jitter
+      adapt = function (factor)
+        jitter = jitter * factor
       end,
     }
   end
@@ -214,8 +208,15 @@ M.build_samplers = function (args, param_names, global_dev)
   return samplers
 end
 
-M.sample_params = function (samplers, param_names)
+M.sample_params = function (samplers, param_names, base_cfg)
   local p = {}
+  -- Start with a shallow copy of base config if provided
+  if base_cfg then
+    for k, v in pairs(base_cfg) do
+      p[k] = v
+    end
+  end
+  -- Override with sampled values
   for _, name in ipairs(param_names) do
     local s = samplers[name]
     if s then
@@ -232,18 +233,23 @@ end
 M.sample_tier = function (tier_cfg)
   local result = {}
   for k, v in pairs(tier_cfg) do
-    if type(v) == "table" and v.def ~= nil then
+    if type(v) == "table" and (v.def ~= nil or (v.min ~= nil and v.max ~= nil)) then
       local minv, maxv = v.min, v.max
       local is_log = v.log
       local is_int = v.int
       local is_pow2 = v.pow2
       local x
       if is_log then
-        local log_val = num.random() * (num.log(maxv) - num.log(minv)) + num.log(minv)
-        x = num.exp(log_val)
+        -- For log scale with non-positive min, shift range so shifted_min = 1
+        local shift = minv <= 0 and (1 - minv) or 0
+        local smin = minv + shift
+        local smax = maxv + shift
+        local log_val = num.random() * (num.log(smax) - num.log(smin)) + num.log(smin)
+        x = num.exp(log_val) - shift
       else
         x = num.random() * (maxv - minv) + minv
       end
+      if x < minv then x = minv elseif x > maxv then x = maxv end
       if is_pow2 then
         x = round_to_pow2(x)
         if x < minv then x = minv elseif x > maxv then x = maxv end
@@ -263,6 +269,9 @@ end
 M.tier_all_fixed = function (tier_cfg)
   for _, v in pairs(tier_cfg) do
     if type(v) == "table" and v.def ~= nil then
+      return false
+    end
+    if type(v) == "table" and v.min ~= nil and v.max ~= nil then
       return false
     end
     if type(v) == "table" and #v > 1 then
@@ -294,15 +303,36 @@ local function has_alpha_range (alpha_cfg)
   return false
 end
 
-M.recenter_and_shrink = function (samplers, param_names, best_params)
+-- Recenter samplers on best-known parameters
+M.recenter = function (samplers, param_names, best_params)
   for _, pname in ipairs(param_names) do
     local s = samplers[pname]
     if s and s.type == "range" and best_params[pname] then
       s.center = best_params[pname]
-      if s.shrink then
-        s.shrink()
-      end
     end
+  end
+end
+
+-- Adapt jitter for all samplers by a factor
+M.adapt_jitter = function (samplers, factor)
+  for _, s in pairs(samplers) do
+    if s and s.adapt then
+      s.adapt(factor)
+    end
+  end
+end
+
+-- 1/5th success rule: compute adaptive factor based on improvement rate
+-- >20% improving -> don't shrink (exploration working)
+-- 5-20% improving -> moderate shrink
+-- <5% improving -> aggressive shrink (need to focus)
+M.success_factor = function (success_rate)
+  if success_rate > 0.2 then
+    return 1.0
+  elseif success_rate > 0.05 then
+    return 0.85
+  else
+    return 0.5
   end
 end
 
@@ -337,6 +367,8 @@ M.search = function (args)
     local seen = {}
     local round_best_score = -num.huge
     local round_best_params = nil
+    local round_improvements = 0
+    local round_samples = 0
     for t = 1, trials do
       local params = M.sample_params(samplers, param_names)
       local dominated = false
@@ -354,6 +386,7 @@ M.search = function (args)
           trial = t,
           is_final = false,
         })
+        round_samples = round_samples + 1
         if each_cb then
           each_cb({
             event = "trial",
@@ -369,6 +402,7 @@ M.search = function (args)
           round_best_params = params
         end
         if score > best_score + tolerance then
+          round_improvements = round_improvements + 1
           if best_result and cleanup_fn then
             cleanup_fn(best_result)
           end
@@ -383,9 +417,13 @@ M.search = function (args)
         end
       end
     end
-    if round_best_params then
-      M.recenter_and_shrink(samplers, param_names, round_best_params)
+    -- Recenter on global best and adapt jitter using 1/5th success rule
+    if best_params then
+      M.recenter(samplers, param_names, best_params)
     end
+    local success_rate = round_samples > 0 and (round_improvements / round_samples) or 0
+    local adapt_factor = M.success_factor(success_rate)
+    M.adapt_jitter(samplers, adapt_factor)
     if each_cb then
       each_cb({
         event = "round",
@@ -394,6 +432,8 @@ M.search = function (args)
         round_best_params = round_best_params,
         global_best_score = best_score,
         global_best_params = best_params,
+        success_rate = success_rate,
+        adapt_factor = adapt_factor,
       })
     end
     collectgarbage("collect")
@@ -690,7 +730,7 @@ M.score_spectral_eval = function (args)
   local knn_target_ids = args.knn_target_ids
   local bucket_size = args.bucket_size
 
-  local eval_codes = model.codes
+  local eval_codes
   local eval_dims = model.dims
   local eval_index = model.index
   local temp_raw = nil
@@ -786,6 +826,7 @@ M.score_spectral_eval = function (args)
     expected_weights = expected.weights,
     query_ids = eval_params.query_ids,
     ranking = eval_params.ranking,
+    metric = eval_params.metric,
     elbow = eval_params.elbow,
     elbow_alpha = eval_params.elbow_alpha,
     n_dims = eval_dims,
@@ -831,6 +872,8 @@ M.spectral = function (args)
   local adjacency_samples = args.adjacency_samples or 1
   local spectral_samples = args.spectral_samples or 1
   local eval_samples = args.eval_samples or 1
+  local rounds = args.rounds or 1
+  local global_dev = args.dev
 
   local expected = {
     ids = args.expected_ids,
@@ -839,11 +882,14 @@ M.spectral = function (args)
     weights = args.expected_weights,
   }
 
-  local seen = {}
   local best_score = -num.huge
   local best_params = nil
   local best_model = nil
   local best_metrics = nil
+  local best_adj_ids = nil
+  local best_adj_offsets = nil
+  local best_adj_neighbors = nil
+  local best_adj_weights = nil
   local sample_count = 0
 
   local adj_fixed = M.tier_all_fixed(adjacency_cfg)
@@ -855,6 +901,12 @@ M.spectral = function (args)
     and not has_alpha_range(eval_cfg.select_elbow_alpha)
     and (type(eval_cfg.select_metric) ~= "table" or #eval_cfg.select_metric <= 1)
     and not has_alpha_range(eval_cfg.select_metric_alpha)
+
+  -- Build samplers for hill climbing (adjacency and spectral tiers)
+  local adj_param_names = { "knn", "knn_alpha", "weight_decay", "knn_mutual", "knn_mode", "cmp", "bridge" }
+  local spec_param_names = { "n_dims", "laplacian", "eps" }
+  local adj_samplers = M.build_samplers(adjacency_cfg, adj_param_names, global_dev)
+  local spec_samplers = M.build_samplers(spectral_cfg, spec_param_names, global_dev)
 
   local function make_adj_key (p)
     return str.format("%s|%s|%s|%s",
@@ -882,8 +934,23 @@ M.spectral = function (args)
     return str.format("%s|%s|%s|%s|%s", spec_key, p.elbow, alpha_str, p.ranking, select_str)
   end
 
+  for round = 1, rounds do
+    local seen = {}
+    local round_best_score = -num.huge
+    local round_best_params = nil
+    local round_improvements = 0
+    local round_samples = 0
+
+    if each_cb then
+      each_cb({
+        event = "round_start",
+        round = round,
+        rounds = rounds,
+      })
+    end
+
   for _ = 1, (adj_fixed and 1 or adjacency_samples) do
-    local adj_params = M.sample_tier(adjacency_cfg)
+    local adj_params = M.sample_params(adj_samplers, adj_param_names, adjacency_cfg)
     local adj_key = make_adj_key(adj_params)
 
     if not seen[adj_key] then
@@ -908,7 +975,7 @@ M.spectral = function (args)
       })
 
       for _ = 1, (spec_fixed and 1 or spectral_samples) do
-        local spec_params = M.sample_tier(spectral_cfg)
+        local spec_params = M.sample_params(spec_samplers, spec_param_names, spectral_cfg)
         local spec_key = make_spec_key(adj_key, spec_params)
 
         if not seen[spec_key] then
@@ -975,14 +1042,33 @@ M.spectral = function (args)
                 })
               end
 
+              round_samples = round_samples + 1
+
+              if score > round_best_score then
+                round_best_score = score
+                round_best_params = { adjacency = adj_params, spectral = spec_params, eval = eval_params }
+              end
+
               if score > best_score then
+                round_improvements = round_improvements + 1
                 if best_model and best_model ~= model then
                   M.destroy_spectral(best_model)
+                end
+                -- Destroy old best adjacency arrays if they're different from current
+                if best_adj_ids and best_adj_ids ~= adj_ids then
+                  best_adj_ids:destroy()
+                  best_adj_offsets:destroy()
+                  best_adj_neighbors:destroy()
+                  if best_adj_weights then best_adj_weights:destroy() end
                 end
                 best_score = score
                 best_params = { adjacency = adj_params, spectral = spec_params, eval = eval_params }
                 best_model = model
                 best_metrics = metrics
+                best_adj_ids = adj_ids
+                best_adj_offsets = adj_offsets
+                best_adj_neighbors = adj_neighbors
+                best_adj_weights = adj_weights
                 model_is_best = true
               end
             end
@@ -994,12 +1080,41 @@ M.spectral = function (args)
         end
       end
 
-      if adj_ids then adj_ids:destroy() end
-      if adj_offsets then adj_offsets:destroy() end
-      if adj_neighbors then adj_neighbors:destroy() end
-      if adj_weights then adj_weights:destroy() end
+      -- Only destroy adjacency arrays if they're not the best ones
+      if adj_ids and adj_ids ~= best_adj_ids then
+        adj_ids:destroy()
+        adj_offsets:destroy()
+        adj_neighbors:destroy()
+        if adj_weights then adj_weights:destroy() end
+      end
       collectgarbage("collect")
     end
+  end
+
+    -- Recenter on global best and adapt jitter using 1/5th success rule
+    if best_params then
+      M.recenter(adj_samplers, adj_param_names, best_params.adjacency)
+      M.recenter(spec_samplers, spec_param_names, best_params.spectral)
+    end
+    local success_rate = round_samples > 0 and (round_improvements / round_samples) or 0
+    local adapt_factor = M.success_factor(success_rate)
+    M.adapt_jitter(adj_samplers, adapt_factor)
+    M.adapt_jitter(spec_samplers, adapt_factor)
+
+    if each_cb then
+      each_cb({
+        event = "round_end",
+        round = round,
+        rounds = rounds,
+        round_best_score = round_best_score,
+        round_best_params = round_best_params,
+        global_best_score = best_score,
+        global_best_params = best_params,
+        success_rate = success_rate,
+        adapt_factor = adapt_factor,
+      })
+    end
+
   end
 
   -- Skip final rebuild if all configs are fixed (model from exploration is already final)
@@ -1012,6 +1127,14 @@ M.spectral = function (args)
         is_final = true,
         params = best_params,
       })
+    end
+
+    -- Destroy the saved best adjacency arrays since we're rebuilding
+    if best_adj_ids then
+      best_adj_ids:destroy()
+      best_adj_offsets:destroy()
+      best_adj_neighbors:destroy()
+      if best_adj_weights then best_adj_weights:destroy() end
     end
 
     local adj_ids, adj_offsets, adj_neighbors, adj_weights = M.build_adjacency({
@@ -1046,6 +1169,12 @@ M.spectral = function (args)
     best_model.adj_offsets = adj_offsets
     best_model.adj_neighbors = adj_neighbors
     best_model.adj_weights = adj_weights
+  elseif best_model and all_fixed then
+    -- Use the saved adjacency arrays from exploration
+    best_model.adj_ids = best_adj_ids
+    best_model.adj_offsets = best_adj_offsets
+    best_model.adj_neighbors = best_adj_neighbors
+    best_model.adj_weights = best_adj_weights
   end
 
   collectgarbage("collect")
