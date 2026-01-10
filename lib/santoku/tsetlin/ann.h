@@ -1305,7 +1305,7 @@ static inline void tk_ann_setup_hash_bits_random (
   tk_lua_add_ephemeron(L, TK_ANN_EPH, Ai, -1);
   lua_pop(L, 1);
   tk_ivec_fill_indices(A->hash_bits);
-  tk_ivec_shuffle(A->hash_bits);
+  tk_ivec_shuffle(A->hash_bits, 0, A->hash_bits->n);
   if (A->hash_bits->n > n_hash_bits)
     A->hash_bits->n = n_hash_bits;
   tk_ivec_shrink(A->hash_bits);

@@ -753,7 +753,7 @@ static inline int tk_graph_multiclass_pairs (
       if (!shuffle) goto cleanup_multiclass;
 
       tk_ivec_fill_indices(shuffle);
-      tk_ivec_shuffle(shuffle);
+      tk_ivec_shuffle(shuffle, 0, shuffle->n);
 
       for (uint64_t i = 0; i < k; i++) {
         int64_t anchor = class_ids[c]->a[shuffle->a[i]];
