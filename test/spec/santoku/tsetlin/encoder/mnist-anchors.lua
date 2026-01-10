@@ -56,13 +56,14 @@ local cfg; cfg = {
     iterations = 200,
   },
   search = {
-    adjacency_samples = 15,
+    rounds = 1,
+    adjacency_samples = 1,
     spectral_samples = 1,
     eval_samples = 1,
     adjacency = {
       knn = 24,
       knn_alpha = 20,
-      weight_decay = 4,
+      weight_decay = 8,
       knn_mutual = true,
       knn_mode = "cknn",
       knn_cache = 32,
@@ -71,23 +72,15 @@ local cfg; cfg = {
     spectral = {
       laplacian = "unnormalized",
       n_dims = 24,
-      eps = 1e-8,
-      elbow_select = "lmethod",
-      elbow_alpha_select = nil,
+      eps = 1e-12,
       threshold = function (codes, dims)
-        local codes, _, _ = itq.otsu({
+        local codes = itq.otsu({
           codes = codes,
           n_dims = dims,
           metric = "variance",
           minimize = false
         })
         return codes, dims
-      end,
-      select = function (codes, _, n, dims)
-        local eids, escores = codes:mtx_top_entropy(n, dims)
-        local _, eidx = escores:scores_elbow(cfg.search.spectral.elbow_select, cfg.search.spectral.elbow_alpha_select)
-        eids:setn(eidx)
-        return eids
       end,
     },
     eval = {
@@ -98,7 +91,9 @@ local cfg; cfg = {
       metric = "min",
       elbow = "lmethod",
       elbow_alpha = nil,
-      target = "f1",
+      select_elbow = "lmethod",
+      select_metric = "entropy",
+      target = "combined",
     },
     cluster_eval = {
       elbow = "plateau",
@@ -185,20 +180,16 @@ test("mnist-anchors", function()
       index = train.index_graph,
       knn_index = train.node_features,
       bucket_size = cfg.ann.bucket_size,
-
       adjacency_samples = cfg.search.adjacency_samples,
       spectral_samples = cfg.search.spectral_samples,
       eval_samples = cfg.search.eval_samples,
-
       adjacency = cfg.search.adjacency,
       spectral = cfg.search.spectral,
       eval = cfg.search.eval,
-
       expected_ids = train.ground_truth.ids,
       expected_offsets = train.ground_truth.offsets,
       expected_neighbors = train.ground_truth.neighbors,
       expected_weights = train.ground_truth.weights,
-
       adjacency_each = cfg.search.verbose and function (ns, cs, es, stg)
         if stg == "kruskal" or stg == "done" then
           str.printf("    graph: %d nodes, %d edges, %d components\n", ns, es, cs)
@@ -210,19 +201,42 @@ test("mnist-anchors", function()
         end
       end or nil,
       each = cfg.search.verbose and function (info)
-        if info.event == "stage" and info.stage == "adjacency" then
+        if info.event == "round_start" then
+          str.printf("\n=== Round %d/%d ===\n", info.round, info.rounds)
+        elseif info.event == "round_end" then
+          str.printf("\n--- Round %d complete: best=%.4f (global=%.4f) success=%.0f%% adapt=%.2f ---\n",
+            info.round, info.round_best_score, info.global_best_score,
+            (info.success_rate or 0) * 100, info.adapt_factor or 1)
+        elseif info.event == "stage" and info.stage == "adjacency" then
           local p = info.params.adjacency
           if info.is_final then
-            str.printf("\n  [Final] knn=%d knn_alpha=%d knn_mutual=%s\n",
-              p.knn, p.knn_alpha, tostring(p.knn_mutual))
+            str.printf("\n  [Final] decay=%.2f knn=%d knn_alpha=%d knn_mutual=%s\n",
+              p.weight_decay, p.knn, p.knn_alpha, tostring(p.knn_mutual))
           else
-            str.printf("\n  [%d] knn=%d knn_alpha=%d knn_mutual=%s\n",
-              info.sample, p.knn, p.knn_alpha, tostring(p.knn_mutual))
+            str.printf("\n  [%d] decay=%.2f knn=%d knn_alpha=%d knn_mutual=%s\n",
+              info.sample, p.weight_decay, p.knn, p.knn_alpha, tostring(p.knn_mutual))
           end
+        elseif info.event == "stage" and info.stage == "spectral" then
+          local p = info.params.spectral
+          str.printf("    lap=%s dims=%d\n", p.laplacian, p.n_dims)
         elseif info.event == "eval" then
+          local e = info.params.eval
           local m = info.metrics
-          str.printf("      S=%.4f Q=%.4f P=%.4f F1=%.4f\n",
-            m.score, m.quality, m.participation, m.f1)
+          local alpha_str = e.elbow_alpha and str.format("%5.2f", e.elbow_alpha) or "    -"
+          local select_str = ""
+          if e.select_metric and e.select_metric ~= "none" then
+            local sel_alpha = e.select_elbow_alpha and str.format("%.2f", e.select_elbow_alpha) or "-"
+            local dims_str
+            if m.selected_elbow and m.selected_elbow <= 0 then
+              dims_str = str.format("FAIL->%d", m.n_dims)
+            elseif m.selected_elbow and m.selected_elbow ~= m.n_dims then
+              dims_str = str.format("%d->%d", m.selected_elbow, m.n_dims)
+            else
+              dims_str = str.format("%d", m.n_dims)
+            end
+            select_str = str.format("  [%s/%s/%s %s]", e.select_metric, e.select_elbow, sel_alpha, dims_str)
+          end
+          str.printf("      S=%.4f Q=%.4f C=%.4f  %-15s %s%s\n", m.score, m.quality, m.combined, e.elbow, alpha_str, select_str)
         end
       end or nil,
     })
@@ -241,8 +255,6 @@ test("mnist-anchors", function()
     train.ids_spectral, train.codes_spectral = simhash.encode(idx, cfg.simhash.n_dims, cfg.simhash.ranks, cfg.simhash.quantiles)
     train.dims_spectral = cfg.simhash.n_dims
     idx:destroy()
-
-    -- Index the codes
     print("\nIndexing codes")
     train.index_spectral = ann.create({
       expected_size = train.n,
@@ -280,11 +292,9 @@ test("mnist-anchors", function()
   train.adj_retrieved_neighbors,
   train.adj_retrieved_weights = graph.adjacency({
     weight_index = train.index_spectral,
-    knn_index = train.index_spectral,
-    knn_query_ids = train.adj_expected_ids,
-    knn_query_codes = train.codes_expected,
-    knn = cfg.search.eval.knn,
-    bridge = "none",
+    seed_ids = train.adj_expected_ids,
+    seed_offsets = train.adj_expected_offsets,
+    seed_neighbors = train.adj_expected_neighbors,
   })
   str.printf("  Min: %f  Max: %f  Mean: %f  Mean Size: %d\n",
     train.adj_retrieved_weights:min(),
@@ -308,9 +318,9 @@ test("mnist-anchors", function()
     n_dims = train.dims_spectral,
   })
 
-  str.printf("\nRetrieval\n  Score: %.4f | Quality: %.4f | Participation: %.4f | F1: %.4f\n",
+  str.printf("\nRetrieval\n  Score: %.4f | Quality: %.4f | Combined: %.4f\n",
     train.retrieval_stats.score, train.retrieval_stats.quality,
-    train.retrieval_stats.participation, train.retrieval_stats.f1)
+    train.retrieval_stats.combined)
 
   if cfg.cluster.enabled then
     print("\nSetting up clustering adjacency")
@@ -351,15 +361,15 @@ test("mnist-anchors", function()
     if cfg.search.verbose then
       for step = 0, train.cluster_stats.n_steps do
         local d, dd = stopwatch()
-        str.printf("  Time: %6.2f %6.2f | Step: %2d | Quality: %.2f | Participation: %.2f | F1: %.2f | Clusters: %d\n",
-          d, dd, step, train.cluster_stats.quality_curve:get(step), train.cluster_stats.participation_curve:get(step),
-          train.cluster_stats.f1_curve:get(step), train.cluster_stats.n_clusters_curve:get(step))
+        str.printf("  Time: %6.2f %6.2f | Step: %2d | Quality: %.2f | Clusters: %d\n",
+          d, dd, step, train.cluster_stats.quality_curve:get(step),
+          train.cluster_stats.n_clusters_curve:get(step))
       end
     end
 
-    str.printf("Clustering\n  Best Step: %d | Quality: %.4f | Participation: %.4f | F1: %.4f | Clusters: %d\n",
-      train.cluster_stats.best_step, train.cluster_stats.quality, train.cluster_stats.participation,
-      train.cluster_stats.f1, train.cluster_stats.n_clusters)
+    str.printf("Clustering\n  Best Step: %d | Quality: %.4f | Clusters: %d\n",
+      train.cluster_stats.best_step, train.cluster_stats.quality,
+      train.cluster_stats.n_clusters)
   end
 
   collectgarbage("collect")
@@ -514,15 +524,15 @@ test("mnist-anchors", function()
       n_dims = train.dims_spectral,
     })
 
-    str.printf("  Original | Score: %.4f | Quality: %.4f | Participation: %.4f | F1: %.4f\n",
+    str.printf("  Original | Score: %.4f | Quality: %.4f | Combined: %.4f\n",
       train.retrieval_stats.score, train.retrieval_stats.quality,
-      train.retrieval_stats.participation, train.retrieval_stats.f1)
-    str.printf("  Train    | Score: %.4f | Quality: %.4f | Participation: %.4f | F1: %.4f\n",
+      train.retrieval_stats.combined)
+    str.printf("  Train    | Score: %.4f | Quality: %.4f | Combined: %.4f\n",
       train_pred_stats.score, train_pred_stats.quality,
-      train_pred_stats.participation, train_pred_stats.f1)
-    str.printf("  Test     | Score: %.4f | Quality: %.4f | Participation: %.4f | F1: %.4f\n",
+      train_pred_stats.combined)
+    str.printf("  Test     | Score: %.4f | Quality: %.4f | Combined: %.4f\n",
       test_pred_stats.score, test_pred_stats.quality,
-      test_pred_stats.participation, test_pred_stats.f1)
+      test_pred_stats.combined)
 
     idx_train_pred:destroy()
     idx_test_pred:destroy()

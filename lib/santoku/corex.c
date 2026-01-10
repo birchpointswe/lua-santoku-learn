@@ -21,6 +21,13 @@ typedef struct tk_corex_sort_s {
   unsigned int v;
 } tk_corex_sort_t;
 
+#define tk_vec_name tk_corex_arr
+#define tk_vec_base tk_corex_sort_t
+#define tk_vec_lt(a, b) ((a).v < (b).v || ((a).v == (b).v && (a).s < (b).s))
+#define tk_vec_gt(a, b) ((a).v > (b).v || ((a).v == (b).v && (a).s > (b).s))
+#define tk_vec_limited
+#include <santoku/vec/tpl.h>
+
 typedef struct tk_corex_s {
   bool trained;
   bool destroyed;
@@ -472,21 +479,6 @@ static inline void tk_corex_update_last_tc (
   *tc_dev = stdev;
 }
 
-static inline int tk_corex_sort_lt (tk_corex_sort_t a, tk_corex_sort_t b)
-{
-  if (a.v < b.v) return 1;
-  if (a.v > b.v) return 0;
-  if (a.s < b.s) return 1;
-  if (a.s > b.s) return 0;
-  return 0;
-}
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wsign-compare"
-#pragma GCC diagnostic ignored "-Wsign-conversion"
-KSORT_INIT(pairs, tk_corex_sort_t, tk_corex_sort_lt);
-#pragma GCC diagnostic pop
-
 typedef struct {
   tk_corex_sort_t *pairs;
   size_t capacity;
@@ -531,7 +523,7 @@ static void tk_corex_tile_pairs (
   size_t out_idx = 0;
   for (size_t t = 0; t < total_tiles; t ++) {
     tk_corex_tile_t *tile = &tiles[t];
-    ks_introsort(pairs, tile->size, tile->pairs);
+    ks_introsort(tk_corex_arr_asc, tile->size, tile->pairs);
     for (size_t j = 0; j < tile->size; j ++) {
       pairs[out_idx ++] = tile->pairs[j];
     }
@@ -563,7 +555,7 @@ static inline uint64_t tk_corex_setup_bits (
     n ++;
   }
   if (!tile)
-    ks_introsort(pairs, n, pairs);
+    ks_introsort(tk_corex_arr_asc, n, pairs);
   else
     tk_corex_tile_pairs(L, pairs, n, n_visible, tile_sblock, tile_vblock);
   for (size_t i = 0; i < n; i ++) {

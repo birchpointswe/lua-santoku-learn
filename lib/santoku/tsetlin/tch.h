@@ -46,7 +46,7 @@ static inline void tk_tch_refine (
       uint64_t last_bit = ((byte_idx + 1) * 8 - 1) < (n_dims - 1) ? ((byte_idx + 1) * 8 - 1) : (n_dims - 1);
       for (uint64_t f = first_bit; f <= last_bit; f++) {
         int *bitvec = bitvecs + f * n_nodes;
-        tk_ivec_shuffle(node_order);
+        tk_ivec_shuffle(node_order, 0, node_order->n);
         bool updated;
         do {
           updated = false;

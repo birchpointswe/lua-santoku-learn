@@ -2,6 +2,7 @@ local ds = require("santoku.tsetlin.dataset")
 local corex = require("santoku.corex")
 local ivec = require("santoku.ivec")
 local eval = require("santoku.tsetlin.evaluator")
+local optimize = require("santoku.tsetlin.optimize")
 local fs = require("santoku.fs")
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local str = require("santoku.string")
@@ -12,12 +13,12 @@ local utc = require("santoku.utc")
 local cfg = {
   data = {
     ttr = 0.9,
-    max = 1000,
+    max = nil,
     visible = 784,
     hidden = 128,
   },
   corex = {
-    iterations = 10,
+    iterations = 100,
   },
   tm = {
     classes = 10,
@@ -81,7 +82,7 @@ test("tsetlin", function ()
   print("Test", test.n)
 
   print("Optimizing classifier")
-  local t = tm.optimize_classifier({
+  local t = optimize.classifier({
 
     features = cfg.data.hidden,
     classes = cfg.tm.classes,

@@ -1,7 +1,6 @@
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local inv = require("santoku.tsetlin.inv")
 local ivec = require("santoku.ivec")
-local it = require("santoku.iter")
 local fs = require("santoku.fs")
 local str = require("santoku.string")
 local arr = require("santoku.array")
@@ -92,26 +91,31 @@ end
 M.read_imdb = function (dir, max)
   local problems = {}
   local solutions = {}
-  local pos = it.paste(1, it.take(max or num.huge, fs.files(dir .. "/pos")))
-  local neg = it.paste(0, it.take(max or num.huge, fs.files(dir .. "/neg")))
-  local samples = it.map(function (label, text)
-    return label, fs.readfile(text)
-  end, it.chain(pos, neg))
-  for label, review in samples do
-    solutions[#solutions + 1] = label
-    problems[#problems + 1] = review
+  local n = 0
+  for fp in fs.files(dir .. "/pos") do
+    if max and n >= max then break end
+    solutions[#solutions + 1] = 1
+    problems[#problems + 1] = fs.readfile(fp)
+    n = n + 1
   end
-  arr.shuffle(problems, solutions)
+  n = 0
+  for fp in fs.files(dir .. "/neg") do
+    if max and n >= max then break end
+    solutions[#solutions + 1] = 0
+    problems[#problems + 1] = fs.readfile(fp)
+    n = n + 1
+  end
+  local idxs = arr.shuffle(arr.range(1, #problems))
   return {
     n = #problems,
-    problems = problems,
-    solutions = solutions
+    problems = arr.lookup(idxs, problems, {}),
+    solutions = arr.lookup(idxs, solutions, {})
   }
 end
 
 local function _split_imdb (dataset, s, e)
-  local ps = arr.copy({}, dataset.problems, 1, s, e)
-  local ss = arr.copy({}, dataset.solutions, 1, s, e)
+  local ps = arr.copy({}, dataset.problems, s, e)
+  local ss = arr.copy({}, dataset.solutions, s, e)
   ss = ivec.create(ss)
   return {
     n = #ps,

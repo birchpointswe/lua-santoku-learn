@@ -1,5 +1,4 @@
 local fs = require("santoku.fs")
-local it = require("santoku.iter")
 local err = require("santoku.error")
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local str = require("santoku.string")
@@ -9,7 +8,8 @@ local utc = require("santoku.utc")
 
 local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
-local tokenizer = require("santoku.tsetlin.tokenizer")
+local optimize = require("santoku.tsetlin.optimize")
+local tokenizer = require("santoku.tokenizer")
 
 local cfg = {
   data = {
@@ -28,7 +28,7 @@ local cfg = {
   },
   feature_selection = {
     algo = "chi2",
-    top_k = 8192,
+    top_k = 2048,
   },
   tm = {
     classes = 2,
@@ -80,8 +80,11 @@ test("tsetlin", function ()
 
   -- Show top words
   local words = tokenizer:index()
-  for id in it.take(32, top_v:each()) do
+  local nw = 0
+  for id in top_v:each() do
     print(id, words[id + 1])
+    nw = nw + 1
+    if nw >= 32 then break end
   end
 
   print("Re-encoding train/test with top features")
@@ -95,7 +98,7 @@ test("tsetlin", function ()
 
   print("Optimizing Classifier")
   local stopwatch = utc.stopwatch()
-  local t = tm.optimize_classifier({
+  local t = optimize.classifier({
 
     features = n_top_v,
 

@@ -262,31 +262,6 @@ Feature booleanization for continuous and categorical data.
 | `booleanizer:persist` | `string/boolean: filepath/to_string` | `string?` | Save booleanizer |
 | `booleanizer:destroy` | `-` | `-` | Free memory |
 
-### `santoku.tsetlin.tokenizer`
-
-Text tokenization with n-grams, skip-grams, and character grams.
-
-#### Module Functions
-
-| Function | Arguments | Returns | Description |
-|----------|------------|---------|-------------|
-| `tokenizer.create` | `table: {max_vocab?, max_df?, min_df?, max_len, min_len, max_run, ngrams, cgrams_min, cgrams_max, skips, negations, align?}` | `tk_tokenizer_t` | Create tokenizer with vocabulary and n-gram parameters |
-| `tokenizer.load` | `string: data, number?: threads, boolean?: from_string` | `tk_tokenizer_t` | Load tokenizer from file or string |
-
-#### Instance Methods
-
-| Method | Arguments | Returns | Description |
-|--------|------------|---------|-------------|
-| `tokenizer:train` | `table: {corpus}` | `-` | Train tokenizer on document corpus |
-| `tokenizer:tokenize` | `string/table: text, tk_ivec_t?: out` | `tk_ivec_t` | Tokenize text to feature indices |
-| `tokenizer:parse` | `string/table: text` | `table: tokens` | Parse text to human-readable tokens |
-| `tokenizer:features` | `-` | `number` | Return total feature count (aligned) |
-| `tokenizer:finalize` | `-` | `-` | Finalize vocabulary after training |
-| `tokenizer:restrict` | `tk_ivec_t: top_vocab` | `-` | Restrict to top vocabulary items |
-| `tokenizer:index` | `-` | `table: vocab` | Return vocabulary index mapping |
-| `tokenizer:persist` | `string?: filepath` | `string?` | Save tokenizer or return serialized data |
-| `tokenizer:destroy` | `-` | `-` | Free tokenizer memory |
-
 ### `santoku/tsetlin/dsu.h`
 
 | Function | Arguments | Returns | Description |

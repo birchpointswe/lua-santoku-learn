@@ -1,5 +1,6 @@
 local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
+local optimize = require("santoku.tsetlin.optimize")
 local fs = require("santoku.fs")
 local ivec = require("santoku.ivec")
 local serialize = require("santoku.serialize") -- luacheck: ignore
@@ -54,7 +55,7 @@ test("tsetlin", function ()
 
   print("Training\n")
   local stopwatch = utc.stopwatch()
-  local t = tm.optimize_classifier({
+  local t = optimize.classifier({
 
     features = dataset.n_features,
     classes = cfg.tm.classes,
