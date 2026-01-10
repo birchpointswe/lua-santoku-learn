@@ -685,7 +685,7 @@ static inline void tm_add_mst (
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
     lua_pop(L, 1);
     assert(centers->n > 1);
-    tk_pvec_shuffle(centers);
+    tk_pvec_shuffle(centers, 0, centers->n);
     int kha;
     for (int64_t i = centers->n > 2 ? 0 : 1; i < (int64_t) centers->n; i ++) {
       int64_t j = i == ((int64_t) centers->n - 1) ? 0 : i + 1;
@@ -942,7 +942,7 @@ static inline tk_pvec_t *tm_add_anchor_edges_immediate(
           if (anchors->n == 0)
             continue;
 
-          tk_ivec_shuffle(anchors);
+          tk_ivec_shuffle(anchors, 0, anchors->n);
           for (uint64_t i = 0; i < anchors->n; i++) {
             int64_t u = anchors->a[i];
             tk_rvec_clear(knn_heap);

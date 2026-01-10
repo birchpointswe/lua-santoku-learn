@@ -38,12 +38,12 @@ base.env.test.env_vars = {
   UBSAN_OPTIONS = ubsan_options,
   -- LD_PRELOAD = ld_preload
 }
-base.env.cflags = arr.extend({
+base.env.cflags = arr.flatten({ {
   "-fsanitize=address,undefined", "-fno-sanitize-recover=undefined",
   "-g3", "-O0", "-fno-inline", "-fno-omit-frame-pointer",
-}, base.env.cflags)
-base.env.ldflags = arr.extend({
+}, base.env.cflags })
+base.env.ldflags = arr.flatten({ {
   "-fsanitize=address,undefined",
   "-g3", "-O0"
-}, base.env.ldflags)
+}, base.env.ldflags })
 return base
