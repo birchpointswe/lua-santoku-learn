@@ -4,3 +4,5 @@ tmp
 .old*
 test/res/imdb.50k
 test/res/mnist.70k.txt
+test/res/20news-bydate-test
+test/res/20news-bydate-train/

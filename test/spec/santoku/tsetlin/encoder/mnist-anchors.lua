@@ -73,20 +73,17 @@ local cfg; cfg = {
       laplacian = "unnormalized",
       n_dims = 24,
       eps = 1e-12,
-      threshold = function (codes, dims)
-        local codes = itq.otsu({
-          codes = codes,
-          n_dims = dims,
-          metric = "variance",
-          minimize = false
-        })
-        return codes, dims
-      end,
+      threshold = {
+        method = "otsu",
+        otsu_metric = "variance",
+        otsu_minimize = false,
+        otsu_n_bins = 32,
+      },
     },
     eval = {
       knn = 32,
       anchors = 16,
-      pairs = 16,
+      pairs = 64,
       ranking = "ndcg",
       metric = "min",
       elbow = "lmethod",
@@ -163,11 +160,25 @@ test("mnist-anchors", function()
         random_pairs = cfg.search.eval.pairs,
       })
 
+    local adj_cluster_ids, adj_cluster_offsets, adj_cluster_neighbors, adj_cluster_weights =
+      graph.adjacency({
+        category_index = cat_index,
+        category_anchors = cfg.search.eval.anchors,
+      })
+
     return cat_index, {
-      ids = adj_expected_ids,
-      offsets = adj_expected_offsets,
-      neighbors = adj_expected_neighbors,
-      weights = adj_expected_weights,
+      retrieval = {
+        ids = adj_expected_ids,
+        offsets = adj_expected_offsets,
+        neighbors = adj_expected_neighbors,
+        weights = adj_expected_weights,
+      },
+      clustering = {
+        ids = adj_cluster_ids,
+        offsets = adj_cluster_offsets,
+        neighbors = adj_cluster_neighbors,
+        weights = adj_cluster_weights,
+      },
     }
   end
 
@@ -186,10 +197,10 @@ test("mnist-anchors", function()
       adjacency = cfg.search.adjacency,
       spectral = cfg.search.spectral,
       eval = cfg.search.eval,
-      expected_ids = train.ground_truth.ids,
-      expected_offsets = train.ground_truth.offsets,
-      expected_neighbors = train.ground_truth.neighbors,
-      expected_weights = train.ground_truth.weights,
+      expected_ids = train.ground_truth.retrieval.ids,
+      expected_offsets = train.ground_truth.retrieval.offsets,
+      expected_neighbors = train.ground_truth.retrieval.neighbors,
+      expected_weights = train.ground_truth.retrieval.weights,
       adjacency_each = cfg.search.verbose and function (ns, cs, es, stg)
         if stg == "kruskal" or stg == "done" then
           str.printf("    graph: %d nodes, %d edges, %d components\n", ns, es, cs)
@@ -218,14 +229,31 @@ test("mnist-anchors", function()
           end
         elseif info.event == "stage" and info.stage == "spectral" then
           local p = info.params.spectral
-          str.printf("    lap=%s dims=%d\n", p.laplacian, p.n_dims)
+          local thresh_str = "unknown"
+          if p.threshold_params and p.threshold_params.method then
+            local m = p.threshold_params.method
+            if m == "itq" then
+              local iters = p.threshold_params.iterations or 100
+              local tol = p.threshold_params.tolerance or 1e-8
+              thresh_str = str.format("itq(i=%d,t=%.0e)", iters, tol)
+            elseif m == "otsu" then
+              local metric = p.threshold_params.metric or "variance"
+              local minimize = p.threshold_params.minimize and "min" or "max"
+              thresh_str = str.format("otsu(%s,%s)", metric, minimize)
+            else
+              thresh_str = m
+            end
+          elseif type(p.threshold) == "string" then
+            thresh_str = p.threshold
+          end
+          str.printf("    lap=%s dims=%d thresh=%s\n", p.laplacian, p.n_dims, thresh_str)
         elseif info.event == "eval" then
           local e = info.params.eval
           local m = info.metrics
-          local alpha_str = e.elbow_alpha and str.format("%5.2f", e.elbow_alpha) or "    -"
+          local alpha_str = e.elbow_alpha and str.format("%.1f", e.elbow_alpha) or "-"
           local select_str = ""
           if e.select_metric and e.select_metric ~= "none" then
-            local sel_alpha = e.select_elbow_alpha and str.format("%.2f", e.select_elbow_alpha) or "-"
+            local sel_alpha = e.select_elbow_alpha and str.format("%.1f", e.select_elbow_alpha) or "-"
             local dims_str
             if m.selected_elbow and m.selected_elbow <= 0 then
               dims_str = str.format("FAIL->%d", m.n_dims)
@@ -234,9 +262,10 @@ test("mnist-anchors", function()
             else
               dims_str = str.format("%d", m.n_dims)
             end
-            select_str = str.format("  [%s/%s/%s %s]", e.select_metric, e.select_elbow, sel_alpha, dims_str)
+            select_str = str.format(" [%s/%s(%s) %s]", e.select_metric, e.select_elbow, sel_alpha, dims_str)
           end
-          str.printf("      S=%.4f Q=%.4f C=%.4f  %-15s %s%s\n", m.score, m.quality, m.combined, e.elbow, alpha_str, select_str)
+          str.printf("    elbow=%s(%s) knn=%d score=%.4f quality=%.4f combined=%.4f%s\n",
+            e.elbow, alpha_str, e.knn, m.score, m.quality, m.combined, select_str)
         end
       end or nil,
     })
@@ -266,10 +295,10 @@ test("mnist-anchors", function()
     error("Unknown mode: " .. cfg.data.mode)
   end
 
-  train.adj_expected_ids = train.ground_truth.ids
-  train.adj_expected_offsets = train.ground_truth.offsets
-  train.adj_expected_neighbors = train.ground_truth.neighbors
-  train.adj_expected_weights = train.ground_truth.weights
+  train.adj_expected_ids = train.ground_truth.retrieval.ids
+  train.adj_expected_offsets = train.ground_truth.retrieval.offsets
+  train.adj_expected_neighbors = train.ground_truth.retrieval.neighbors
+  train.adj_expected_weights = train.ground_truth.retrieval.weights
 
   print("\nBuilding expected adjacency (category-based)")
   do
@@ -348,10 +377,10 @@ test("mnist-anchors", function()
       ids = train.codes_clusters.ids,
       offsets = train.codes_clusters.offsets,
       merges = train.codes_clusters.merges,
-      expected_ids = train.adj_expected_ids,
-      expected_offsets = train.adj_expected_offsets,
-      expected_neighbors = train.adj_expected_neighbors,
-      expected_weights = train.adj_expected_weights,
+      expected_ids = train.ground_truth.retrieval.ids,
+      expected_offsets = train.ground_truth.retrieval.offsets,
+      expected_neighbors = train.ground_truth.retrieval.neighbors,
+      expected_weights = train.ground_truth.retrieval.weights,
       metric = cfg.search.eval.metric,
       elbow = cfg.search.cluster_eval.elbow,
       elbow_target = cfg.search.cluster_eval.elbow_target,
@@ -447,16 +476,12 @@ test("mnist-anchors", function()
     idx_test_pred:add(test_predicted, test.ids)
 
     print("\nBuilding retrieved adjacency for predicted codes (train)")
-    local train_pred_query_codes = cvec.create()
-    train_pred_query_codes:bits_extend(train_predicted, train.adj_expected_ids, train.ids_spectral, 0, train.dims_spectral, true)
     local train_pred_retrieved_ids, train_pred_retrieved_offsets, train_pred_retrieved_neighbors, train_pred_retrieved_weights =
       graph.adjacency({
         weight_index = idx_train_pred,
-        knn_index = idx_train_pred,
-        knn_query_ids = train.adj_expected_ids,
-        knn_query_codes = train_pred_query_codes,
-        knn = cfg.search.eval.knn,
-        bridge = "none",
+        seed_ids = train.adj_expected_ids,
+        seed_offsets = train.adj_expected_offsets,
+        seed_neighbors = train.adj_expected_neighbors,
       })
 
     print("Building expected adjacency for test")
@@ -478,16 +503,12 @@ test("mnist-anchors", function()
       })
 
     print("Building retrieved adjacency for predicted codes (test)")
-    local test_pred_query_codes = cvec.create()
-    test_pred_query_codes:bits_extend(test_predicted, test_adj_expected_ids, test.ids, 0, train.dims_spectral, true)
     local test_pred_retrieved_ids, test_pred_retrieved_offsets, test_pred_retrieved_neighbors, test_pred_retrieved_weights =
       graph.adjacency({
         weight_index = idx_test_pred,
-        knn_index = idx_test_pred,
-        knn_query_ids = test_adj_expected_ids,
-        knn_query_codes = test_pred_query_codes,
-        knn = cfg.search.eval.knn,
-        bridge = "none",
+        seed_ids = test_adj_expected_ids,
+        seed_offsets = test_adj_expected_offsets,
+        seed_neighbors = test_adj_expected_neighbors,
       })
 
     print("\nEvaluating train predicted codes")

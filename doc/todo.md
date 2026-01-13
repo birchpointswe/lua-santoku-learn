@@ -2,6 +2,8 @@
 
 - Parallelize booleanizer and tokenizer
 - Need a true hierarchical test case for HLTH (newsgroups?)
+- Add IDF weighting to newsgroups test (chi2 for selection, then bits_top_df for
+  IDF weights, double-restrict tokenizer to reorder by IDF)
 - Abstract the landmark/out-of-sample phase behind a simple tm + index wrapper
 - Regression, autoencoder, convolutional
 - Explore shared libaries, optimistic dynmaic linking? Is that a thing?
