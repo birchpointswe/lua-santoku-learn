@@ -131,4 +131,44 @@ M.split_imdb = function (dataset, ratio)
     _split_imdb(dataset, n_train + 1, #dataset.problems)
 end
 
+M.read_20newsgroups = function (dir, max_per_class)
+  local problems = {}
+  local solutions = {}
+  local categories = {}
+  local cat_idx = 0
+  for cat_dir in fs.dirs(dir) do
+    local cat_name = fs.basename(cat_dir)
+    categories[#categories + 1] = cat_name
+    local n = 0
+    for fp in fs.files(cat_dir) do
+      if max_per_class and n >= max_per_class then break end
+      solutions[#solutions + 1] = cat_idx
+      problems[#problems + 1] = fs.readfile(fp)
+      n = n + 1
+    end
+    cat_idx = cat_idx + 1
+  end
+  local idxs = arr.shuffle(arr.range(1, #problems))
+  return {
+    n = #problems,
+    n_labels = cat_idx,
+    categories = categories,
+    problems = arr.lookup(idxs, problems, {}),
+    solutions = ivec.create(arr.lookup(idxs, solutions, {}))
+  }
+end
+
+M.read_20newsgroups_split = function (train_dir, test_dir, max_per_class)
+  local train = M.read_20newsgroups(train_dir, max_per_class)
+  local test_raw = M.read_20newsgroups(test_dir, max_per_class)
+  local test = {
+    n = test_raw.n,
+    n_labels = test_raw.n_labels,
+    categories = test_raw.categories,
+    problems = test_raw.problems,
+    solutions = test_raw.solutions
+  }
+  return train, test
+end
+
 return M

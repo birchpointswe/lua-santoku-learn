@@ -22,6 +22,11 @@ typedef enum {
   TK_HLTH_IDX_HBI
 } tk_hlth_index_type_t;
 
+typedef enum {
+  TK_HLTH_MODE_CONCAT,
+  TK_HLTH_MODE_FREQUENCY
+} tk_hlth_mode_t;
+
 typedef struct {
   tk_hlth_index_type_t feat_idx_type;
   tk_hlth_index_type_t code_idx_type;
@@ -34,6 +39,8 @@ typedef struct {
   double tversky_alpha;
   double tversky_beta;
   int64_t rank_filter;
+  tk_hlth_mode_t mode;
+  uint64_t n_thresholds;
   bool destroyed;
 } tk_hlth_encoder_t;
 
@@ -89,32 +96,57 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
   }
 
   int stack_before_out = lua_gettop(L);
-  uint64_t n_latent_bits = enc->n_hidden * enc->n_landmarks;
+
+  uint64_t n_latent_bits;
+  if (enc->mode == TK_HLTH_MODE_FREQUENCY)
+    n_latent_bits = enc->n_hidden * enc->n_thresholds;
+  else
+    n_latent_bits = enc->n_hidden * enc->n_landmarks;
+
   uint64_t n_latent_bytes = TK_CVEC_BITS_BYTES(n_latent_bits);
   tk_cvec_t *out = tk_cvec_create(L, n_samples * n_latent_bytes, NULL, NULL);
   out->n = n_samples * n_latent_bytes;
   memset(out->a, 0, out->n);
 
-  if (n_samples == 1) {
-    tk_ivec_t *tmp = tk_ivec_create(NULL, 0, 0, 0);
-    int64_t nbr_idx, nbr_uid;
-    TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, feat_hbi, inv_hoods, ann_hoods, hbi_hoods, 0, 1.0, nbr_ids, nbr_idx, nbr_uid, {
-      tk_ivec_push(tmp, nbr_uid);
-    });
-    uint64_t bit_offset = 0;
-    for (uint64_t j = 0; j < tmp->n && j < enc->n_landmarks; j++) {
-      char *code_data = code_ann ? tk_ann_get(code_ann, tmp->a[j]) : tk_hbi_get(code_hbi, tmp->a[j]);
-      if (code_data != NULL) {
+  if (enc->mode == TK_HLTH_MODE_FREQUENCY) {
+    #pragma omp parallel
+    {
+      uint64_t *bit_counts = calloc(enc->n_hidden, sizeof(uint64_t));
+      tk_ivec_t *tmp = tk_ivec_create(NULL, 0, 0, 0);
+      #pragma omp for schedule(static)
+      for (uint64_t i = 0; i < n_samples; i++) {
+        memset(bit_counts, 0, enc->n_hidden * sizeof(uint64_t));
+        tk_ivec_clear(tmp);
+        int64_t nbr_idx, nbr_uid;
+        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, feat_hbi, inv_hoods, ann_hoods, hbi_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
+          tk_ivec_push(tmp, nbr_uid);
+        });
+        uint64_t n_found = 0;
+        for (uint64_t j = 0; j < tmp->n && j < enc->n_landmarks; j++) {
+          char *code_data = code_ann ? tk_ann_get(code_ann, tmp->a[j]) : tk_hbi_get(code_hbi, tmp->a[j]);
+          if (code_data != NULL) {
+            for (uint64_t b = 0; b < enc->n_hidden; b++) {
+              if (code_data[TK_CVEC_BITS_BYTE(b)] & (1 << TK_CVEC_BITS_BIT(b)))
+                bit_counts[b]++;
+            }
+            n_found++;
+          }
+        }
+        uint8_t *sample_dest = (uint8_t *)out->a + i * n_latent_bytes;
         for (uint64_t b = 0; b < enc->n_hidden; b++) {
-          if (code_data[TK_CVEC_BITS_BYTE(b)] & (1 << TK_CVEC_BITS_BIT(b))) {
-            uint64_t dst_bit = bit_offset + b;
-            ((uint8_t *)out->a)[TK_CVEC_BITS_BYTE(dst_bit)] |= (1 << TK_CVEC_BITS_BIT(dst_bit));
+          double freq = (n_found > 0) ? (double)bit_counts[b] / (double)n_found : 0.0;
+          for (uint64_t t = 0; t < enc->n_thresholds; t++) {
+            double threshold = (double)(t + 1) / (double)(enc->n_thresholds + 1);
+            if (freq > threshold) {
+              uint64_t out_bit = b * enc->n_thresholds + t;
+              sample_dest[TK_CVEC_BITS_BYTE(out_bit)] |= (1 << TK_CVEC_BITS_BIT(out_bit));
+            }
           }
         }
       }
-      bit_offset += enc->n_hidden;
+      tk_ivec_destroy(tmp);
+      free(bit_counts);
     }
-    tk_ivec_destroy(tmp);
   } else {
     #pragma omp parallel
     {
@@ -195,6 +227,13 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
 
   uint64_t probe_radius = tk_lua_foptunsigned(L, 1, "landmark_encoder", "probe_radius", 2);
 
+  const char *mode_str = tk_lua_foptstring(L, 1, "landmark_encoder", "mode", "concat");
+  tk_hlth_mode_t mode = TK_HLTH_MODE_CONCAT;
+  if (!strcmp(mode_str, "frequency"))
+    mode = TK_HLTH_MODE_FREQUENCY;
+
+  uint64_t n_thresholds = tk_lua_foptunsigned(L, 1, "landmark_encoder", "n_thresholds", 1);
+
   uint64_t n_hidden = code_ann ? code_ann->features : code_hbi->features;
 
   tk_hlth_encoder_t *enc = tk_lua_newuserdata(L, tk_hlth_encoder_t, TK_HLTH_ENCODER_MT, tk_hlth_encoder_mt_fns, tk_hlth_encoder_gc);
@@ -225,6 +264,8 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
   enc->tversky_alpha = tversky_alpha;
   enc->tversky_beta = tversky_beta;
   enc->rank_filter = rank_filter;
+  enc->mode = mode;
+  enc->n_thresholds = n_thresholds;
 
   lua_getfield(L, 1, "landmarks_index");
   tk_lua_add_ephemeron(L, TK_HLTH_ENCODER_EPH, Ei, -1);
@@ -235,7 +276,13 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
   lua_pop(L, 1);
 
   lua_pushcclosure(L, tk_hlth_encode_lua, 1);
-  lua_pushinteger(L, (int64_t) n_landmarks * (int64_t) n_hidden);
+
+  int64_t n_latent;
+  if (mode == TK_HLTH_MODE_FREQUENCY)
+    n_latent = (int64_t) n_hidden * (int64_t) n_thresholds;
+  else
+    n_latent = (int64_t) n_landmarks * (int64_t) n_hidden;
+  lua_pushinteger(L, n_latent);
 
   return 2;
 }
