@@ -1504,29 +1504,6 @@ static inline int tm_cluster (lua_State *L)
 
     tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.n_clusters_curve);
     lua_setfield(L, -2, "n_clusters_curve");
-
-    tk_dvec_t *log_quality = tk_dvec_create(NULL, result.quality_curve->n, 0, 0);
-    for (uint64_t i = 0; i < result.quality_curve->n; i++) {
-      double q = result.quality_curve->a[i];
-      double log_q = (q > 1e-10) ? log(q) : log(1e-10);
-      tk_dvec_push(log_quality, log_q);
-    }
-
-    double elbow_val;
-    size_t best_step = tk_dvec_scores_lmethod(log_quality->a, log_quality->n, &elbow_val);
-    tk_dvec_destroy(log_quality);
-
-    double best_quality = (best_step < result.quality_curve->n) ? result.quality_curve->a[best_step] : 0.0;
-    int64_t best_n_clusters = (best_step < result.n_clusters_curve->n) ? result.n_clusters_curve->a[best_step] : 0;
-
-    lua_pushinteger(L, (lua_Integer)best_step);
-    lua_setfield(L, -2, "best_step");
-
-    lua_pushnumber(L, best_quality);
-    lua_setfield(L, -2, "quality");
-
-    lua_pushinteger(L, (lua_Integer)best_n_clusters);
-    lua_setfield(L, -2, "n_clusters");
   }
 
   lua_replace(L, 1);

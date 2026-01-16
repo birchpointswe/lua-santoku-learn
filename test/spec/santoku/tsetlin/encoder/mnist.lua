@@ -372,6 +372,15 @@ test("mnist-anchors", function()
       quality = true,
     })
 
+    local cost_curve = dvec.create()
+    cost_curve:copy(train.codes_clusters.quality_curve)
+    cost_curve:log()
+    cost_curve:scale(-1)
+    local _, best_step = cost_curve:scores_elbow("lmethod")
+    train.codes_clusters.best_step = best_step
+    train.codes_clusters.quality = train.codes_clusters.quality_curve:get(best_step)
+    train.codes_clusters.n_clusters = train.codes_clusters.n_clusters_curve:get(best_step)
+
     if cfg.search.verbose then
       for step = 0, train.codes_clusters.n_steps do
         local d, dd = stopwatch()
