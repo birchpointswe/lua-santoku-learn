@@ -16,6 +16,7 @@ local optimize = require("santoku.tsetlin.optimize")
 local cfg; cfg = {
   data = {
     ttr = 0.9,
+    tvr = 0.1,
     max = nil,
     max_class = nil,
     visible = 784,
@@ -115,9 +116,20 @@ test("mnist-anchors", function()
   dataset.n_hidden = cfg.data.mode == "spectral" and cfg.search.spectral.n_dims or cfg.simhash.n_dims
 
   print("\nSplitting")
-  local train, test = ds.split_binary_mnist(dataset, cfg.data.ttr)
-  str.printf("  Train: %6d\n", train.n)
-  str.printf("  Test:  %6d\n", test.n)
+  local train, test, validate = ds.split_binary_mnist(dataset, cfg.data.ttr, cfg.data.tvr)
+  str.printf("  Train:    %6d\n", train.n)
+  str.printf("  Validate: %6d\n", validate.n)
+  str.printf("  Test:     %6d\n", test.n)
+
+  print("\nCreating IDs")
+  train.ids = ivec.create(train.n)
+  train.ids:fill_indices()
+  validate.ids = ivec.create(validate.n)
+  validate.ids:fill_indices()
+  validate.ids:add(train.n)
+  test.ids = ivec.create(test.n)
+  test.ids:fill_indices()
+  test.ids:add(train.n + validate.n)
 
   print("\nBuilding pixel similarity graph")
   do
@@ -195,6 +207,7 @@ test("mnist-anchors", function()
       index = train.index_graph,
       knn_index = train.node_features,
       bucket_size = cfg.ann.bucket_size,
+      rounds = cfg.search.rounds,
       adjacency_samples = cfg.search.adjacency_samples,
       spectral_samples = cfg.search.spectral_samples,
       eval_samples = cfg.search.eval_samples,
@@ -411,12 +424,36 @@ test("mnist-anchors", function()
     train_landmark_feats:bits_flip_interleave(n_latent)
     local train_solutions = train.index_sup:get(train.ids)
 
+    print("Transforming validate data to landmark features")
+    local validate_raw = ivec.create()
+    dataset.problems:bits_select(nil, validate.ids, dataset.n_visible, validate_raw)
+    validate_raw = validate_raw:bits_to_cvec(validate.n, dataset.n_visible)
+    local validate_landmark_feats = encode_landmarks(validate_raw, validate.n)
+    validate_landmark_feats:bits_flip_interleave(n_latent)
+
     print("Transforming test data to landmark features")
     local test_raw = ivec.create()
     dataset.problems:bits_select(nil, test.ids, dataset.n_visible, test_raw)
     test_raw = test_raw:bits_to_cvec(test.n, dataset.n_visible)
     local test_landmark_feats = encode_landmarks(test_raw, test.n)
     test_landmark_feats:bits_flip_interleave(n_latent)
+
+    print("Building expected adjacency for validate")
+    validate.cat_index = inv.create({
+      features = 10,
+      expected_size = validate.n,
+    })
+    local val_data = ivec.create()
+    val_data:copy(validate.solutions)
+    val_data:add_scaled(10)
+    validate.cat_index:add(val_data, validate.ids)
+    val_data:destroy()
+    local val_adj_expected_ids, val_adj_expected_offsets, val_adj_expected_neighbors, val_adj_expected_weights =
+      graph.adjacency({
+        category_index = validate.cat_index,
+        category_anchors = cfg.search.eval.anchors,
+        random_pairs = cfg.search.eval.pairs,
+      })
 
     print("\nTraining encoder")
     train.encoder, train.encoder_accuracy = optimize.encoder({
@@ -439,24 +476,51 @@ test("mnist-anchors", function()
       final_patience = cfg.training.patience,
       final_iterations = cfg.training.iterations,
       search_metric = function (t)
-        local predicted = t:predict(train_landmark_feats, train.n)
-        local accuracy = eval.encoding_accuracy(predicted, train_solutions, train.n, train.dims_sup)
-        return accuracy.mean_hamming, accuracy
+        local val_pred = t:predict(validate_landmark_feats, validate.n)
+        local idx_val = ann.create({ features = train.dims_sup, expected_size = validate.n })
+        idx_val:add(val_pred, validate.ids)
+        local val_retrieved_ids, val_retrieved_offsets, val_retrieved_neighbors, val_retrieved_weights =
+          graph.adjacency({
+            weight_index = idx_val,
+            seed_ids = val_adj_expected_ids,
+            seed_offsets = val_adj_expected_offsets,
+            seed_neighbors = val_adj_expected_neighbors,
+          })
+        local val_stats = eval.score_retrieval({
+          retrieved_ids = val_retrieved_ids,
+          retrieved_offsets = val_retrieved_offsets,
+          retrieved_neighbors = val_retrieved_neighbors,
+          retrieved_weights = val_retrieved_weights,
+          expected_ids = val_adj_expected_ids,
+          expected_offsets = val_adj_expected_offsets,
+          expected_neighbors = val_adj_expected_neighbors,
+          expected_weights = val_adj_expected_weights,
+          ranking = cfg.search.eval.ranking,
+          metric = cfg.search.eval.metric,
+          n_dims = train.dims_sup,
+        })
+        idx_val:destroy()
+        val_retrieved_ids:destroy()
+        val_retrieved_offsets:destroy()
+        val_retrieved_neighbors:destroy()
+        val_retrieved_weights:destroy()
+        return val_stats.score, val_stats
       end,
-      each = function (_, is_final, train_accuracy, params, epoch, round, trial)
+      each = function (_, is_final, val_accuracy, params, epoch, round, trial)
         local d, dd = stopwatch()
         local phase = is_final and "[F]" or str.format("[R%d T%d]", round, trial)
-        str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d ham=%.2f\n",
+        str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d score=%.4f\n",
           epoch, phase, d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
-          params.target, params.specificity, params.include_bits, train_accuracy.mean_hamming)
+          params.target, params.specificity, params.include_bits, val_accuracy.score)
       end,
     })
 
     print("\nFinal encoder performance")
-    str.printi("  Train | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)", train.encoder_accuracy)
+    str.printf("  Val | Score: %.4f\n", train.encoder_accuracy.score)
 
     print("\nPredicting codes with encoder")
     local train_predicted = train.encoder:predict(train_landmark_feats, train.n)
+    local validate_predicted = train.encoder:predict(validate_landmark_feats, validate.n)
     local test_predicted = train.encoder:predict(test_landmark_feats, test.n)
 
     print("Indexing predicted codes")
