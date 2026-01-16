@@ -299,7 +299,7 @@ static inline int tk_spectral_compute_poly (
     return -1;
   }
   for (uint64_t i = 0; i < n; i++) {
-    v[i] = ((double)rand() / RAND_MAX) - 0.5;
+    v[i] = tk_fast_drand() - 0.5;
   }
   double norm = cblas_dnrm2(n, v, 1);
   cblas_dscal(n, 1.0 / norm, v, 1);

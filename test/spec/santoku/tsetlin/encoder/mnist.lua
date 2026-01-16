@@ -8,7 +8,6 @@ local str = require("santoku.string")
 local eval = require("santoku.tsetlin.evaluator")
 local inv = require("santoku.tsetlin.inv")
 local ann = require("santoku.tsetlin.ann")
-local itq = require("santoku.tsetlin.itq")
 local graph = require("santoku.tsetlin.graph")
 local simhash = require("santoku.tsetlin.simhash")
 local hlth = require("santoku.tsetlin.hlth")
@@ -27,43 +26,51 @@ local cfg; cfg = {
     ranks = nil,
     quantiles = nil,
   },
+  landmarks = {
+    n_landmarks = { def = 8, min = 4, max = 16, int = true },
+    n_thresholds = { def = 7, min = 3, max = 12, int = true },
+    landmark_mode = { "frequency", "weighted" },
+    quantile = false,
+  },
   ann = {
     bucket_size = nil,
   },
   cluster = {
     enabled = true,
+    verbose = true,
     knn = 64,
   },
   encoder = {
     enabled = false,
+    verbose = true,
   },
   tm = {
-    clauses = { def = 8, min = 8, max = 32, int = true, log = true, pow2 = true },
-    clause_tolerance = { def = 8, min = 8, max = 256, int = true, log = true, pow2 = true },
-    clause_maximum = { def = 8, min = 8, max = 256, int = true, log = true, pow2 = true },
-    target = { def = 4, min = 2, max = 256, int = true, log = true, pow2 = true },
-    specificity = { def = 10, min = 2, max = 400, int = true, log = true },
+    clauses = { def = 16, min = 8, max = 32, round = 8 },
+    clause_tolerance = { def = 64, min = 16, max = 128, int = true },
+    clause_maximum = { def = 64, min = 16, max = 128, int = true },
+    target = { def = 32, min = 16, max = 128, int = true },
+    specificity = { def = 1000, min = 400, max = 4000 },
+    include_bits = { def = 1, min = 1, max = 4, int = true },
   },
   tm_search = {
-    patience = 3,
-    rounds = 20,
-    trials = 4,
-    tolerance = 1e-6,
-    iterations = 10,
+    patience = 2,
+    rounds = 4,
+    trials = 10,
+    iterations = 20,
   },
   training = {
-    patience = 10,
+    patience = 2,
     iterations = 200,
   },
   search = {
-    rounds = 1,
-    adjacency_samples = 1,
-    spectral_samples = 1,
-    eval_samples = 1,
+    rounds = 4,  -- 0 = use baselines (def values), >0 = explore
+    adjacency_samples = 4,
+    spectral_samples = 2,
+    eval_samples = 2,
     adjacency = {
-      knn = 24,
-      knn_alpha = 20,
-      weight_decay = 8,
+      knn = { def = 24, min = 16, max = 32, int = true },
+      knn_alpha = { def = 20, min = 12, max = 28, int = true },
+      weight_decay = { def = 8, min = 2, max = 16 },
       knn_mutual = true,
       knn_mode = "cknn",
       knn_cache = 32,
@@ -85,7 +92,7 @@ local cfg; cfg = {
       anchors = 16,
       pairs = 64,
       ranking = "ndcg",
-      metric = "min",
+      metric = "avg",
       elbow = "lmethod",
       elbow_alpha = nil,
       select_elbow = "lmethod",
@@ -269,10 +276,10 @@ test("mnist-anchors", function()
         end
       end or nil,
     })
-    train.ids_spectral = model.ids
-    train.codes_spectral = model.codes
-    train.dims_spectral = model.dims
-    train.index_spectral = model.index
+    train.ids_sup = model.ids
+    train.codes_sup = model.codes
+    train.dims_sup = model.dims
+    train.index_sup = model.index
   elseif cfg.data.mode == "simhash" then
     print("\nSimhashing")
     local idx = inv.create({ features = 10, expected_size = train.n })
@@ -281,16 +288,16 @@ test("mnist-anchors", function()
     data:add_scaled(10)
     idx:add(data, train.ids)
     data:destroy()
-    train.ids_spectral, train.codes_spectral = simhash.encode(idx, cfg.simhash.n_dims, cfg.simhash.ranks, cfg.simhash.quantiles)
-    train.dims_spectral = cfg.simhash.n_dims
+    train.ids_sup, train.codes_sup = simhash.encode(idx, cfg.simhash.n_dims, cfg.simhash.ranks, cfg.simhash.quantiles)
+    train.dims_sup = cfg.simhash.n_dims
     idx:destroy()
     print("\nIndexing codes")
-    train.index_spectral = ann.create({
+    train.index_sup = ann.create({
       expected_size = train.n,
       bucket_size = cfg.ann.bucket_size,
-      features = train.dims_spectral
+      features = train.dims_sup
     })
-    train.index_spectral:add(train.codes_spectral, train.ids_spectral)
+    train.index_sup:add(train.codes_sup, train.ids_sup)
   else
     error("Unknown mode: " .. cfg.data.mode)
   end
@@ -303,7 +310,7 @@ test("mnist-anchors", function()
   print("\nBuilding expected adjacency (category-based)")
   do
     train.codes_expected = cvec.create()
-    train.codes_expected:bits_extend(train.codes_spectral, train.adj_expected_ids, train.ids_spectral, 0, train.dims_spectral, true)
+    train.codes_expected:bits_extend(train.codes_sup, train.adj_expected_ids, train.ids_sup, 0, train.dims_sup, true)
     train.category_index = train.cat_index
     str.printf("  Min: %f  Max: %f  Mean: %f\n",
       train.adj_expected_weights:min(),
@@ -312,7 +319,7 @@ test("mnist-anchors", function()
   end
 
   print("\nCodebook stats")
-  train.entropy = eval.entropy_stats(train.codes_spectral, train.ids_spectral:size(), train.dims_spectral)
+  train.entropy = eval.entropy_stats(train.codes_sup, train.ids_sup:size(), train.dims_sup)
   str.printi("  Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)", train.entropy)
 
   print("\nBuilding retrieved adjacency (spectral KNN)")
@@ -320,7 +327,7 @@ test("mnist-anchors", function()
   train.adj_retrieved_offsets,
   train.adj_retrieved_neighbors,
   train.adj_retrieved_weights = graph.adjacency({
-    weight_index = train.index_spectral,
+    weight_index = train.index_sup,
     seed_ids = train.adj_expected_ids,
     seed_offsets = train.adj_expected_offsets,
     seed_neighbors = train.adj_expected_neighbors,
@@ -344,7 +351,7 @@ test("mnist-anchors", function()
     metric = cfg.search.eval.metric,
     elbow = cfg.search.eval.elbow,
     elbow_alpha = cfg.search.eval.elbow_alpha,
-    n_dims = train.dims_spectral,
+    n_dims = train.dims_sup,
   })
 
   str.printf("\nRetrieval\n  Score: %.4f | Quality: %.4f | Combined: %.4f\n",
@@ -355,7 +362,7 @@ test("mnist-anchors", function()
     print("\nSetting up clustering adjacency")
     local adj_cluster_ids, adj_cluster_offsets, adj_cluster_neighbors =
       graph.adjacency({
-        knn_index = train.index_spectral,
+        knn_index = train.index_sup,
         knn = cfg.cluster.knn,
         each = function (ns, cs, es, stg)
           local d, dd = stopwatch()
@@ -366,8 +373,8 @@ test("mnist-anchors", function()
 
     print("\nClustering")
     train.codes_clusters = eval.cluster({
-      codes = train.index_spectral:get(adj_cluster_ids),
-      n_dims = train.dims_spectral,
+      codes = train.index_sup:get(adj_cluster_ids),
+      n_dims = train.dims_sup,
       ids = adj_cluster_ids,
       offsets = adj_cluster_offsets,
       neighbors = adj_cluster_neighbors,
@@ -408,14 +415,14 @@ test("mnist-anchors", function()
     print("\nCreating landmark encoder")
     local encode_landmarks, n_latent = hlth.landmark_encoder({
       landmarks_index = train.node_features,
-      codes_index = train.index_spectral,
+      codes_index = train.index_sup,
       n_landmarks = cfg.data.landmarks
     })
 
     print("\nTransforming training data to landmark features")
     local train_landmark_feats = encode_landmarks(train.train_raw, train.n)
     train_landmark_feats:bits_flip_interleave(n_latent)
-    local train_solutions = train.index_spectral:get(train.ids)
+    local train_solutions = train.index_sup:get(train.ids)
 
     print("Transforming test data to landmark features")
     local test_raw = ivec.create()
@@ -427,7 +434,7 @@ test("mnist-anchors", function()
     print("\nTraining encoder")
     train.encoder, train.encoder_accuracy = optimize.encoder({
       visible = n_latent,
-      hidden = train.dims_spectral,
+      hidden = train.dims_sup,
       sentences = train_landmark_feats,
       codes = train_solutions,
       samples = train.n,
@@ -436,6 +443,7 @@ test("mnist-anchors", function()
       clause_maximum = cfg.tm.clause_maximum,
       target = cfg.tm.target,
       specificity = cfg.tm.specificity,
+      include_bits = cfg.tm.include_bits,
       search_patience = cfg.tm_search.patience,
       search_rounds = cfg.tm_search.rounds,
       search_trials = cfg.tm_search.trials,
@@ -445,17 +453,17 @@ test("mnist-anchors", function()
       final_iterations = cfg.training.iterations,
       search_metric = function (t)
         local predicted = t:predict(train_landmark_feats, train.n)
-        local accuracy = eval.encoding_accuracy(predicted, train_solutions, train.n, train.dims_spectral)
+        local accuracy = eval.encoding_accuracy(predicted, train_solutions, train.n, train.dims_sup)
         return accuracy.mean_hamming, accuracy
       end,
       each = function (_, is_final, train_accuracy, params, epoch, round, trial)
         local d, dd = stopwatch()
         if is_final then
-          str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%d S=%.2f  Epoch  %d\n",
-            d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, epoch)
+          str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%d S=%.2f IB=%d  Epoch  %d\n",
+            d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, epoch)
         else
-          str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%d S=%.2f  R=%d T=%d  Epoch  %d\n",
-            d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, round, trial, epoch)
+          str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%d S=%.2f IB=%d  R=%d T=%d  Epoch  %d\n",
+            d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, round, trial, epoch)
         end
         str.printi("    Train | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)", train_accuracy)
       end,
@@ -469,10 +477,10 @@ test("mnist-anchors", function()
     local test_predicted = train.encoder:predict(test_landmark_feats, test.n)
 
     print("Indexing predicted codes")
-    local idx_train_pred = ann.create({ features = train.dims_spectral, expected_size = train.n })
-    idx_train_pred:add(train_predicted, train.ids_spectral)
+    local idx_train_pred = ann.create({ features = train.dims_sup, expected_size = train.n })
+    idx_train_pred:add(train_predicted, train.ids_sup)
 
-    local idx_test_pred = ann.create({ features = train.dims_spectral, expected_size = test.n })
+    local idx_test_pred = ann.create({ features = train.dims_sup, expected_size = test.n })
     idx_test_pred:add(test_predicted, test.ids)
 
     print("\nBuilding retrieved adjacency for predicted codes (train)")
@@ -525,7 +533,7 @@ test("mnist-anchors", function()
       metric = cfg.search.eval.metric,
       elbow = cfg.search.eval.elbow,
       elbow_alpha = cfg.search.eval.elbow_alpha,
-      n_dims = train.dims_spectral,
+      n_dims = train.dims_sup,
     })
 
     print("Evaluating test predicted codes")
@@ -542,7 +550,7 @@ test("mnist-anchors", function()
       metric = cfg.search.eval.metric,
       elbow = cfg.search.eval.elbow,
       elbow_alpha = cfg.search.eval.elbow_alpha,
-      n_dims = train.dims_spectral,
+      n_dims = train.dims_sup,
     })
 
     str.printf("  Original | Score: %.4f | Quality: %.4f | Combined: %.4f\n",

@@ -1,52 +1,48 @@
-local fs = require("santoku.fs")
-local err = require("santoku.error")
-local serialize = require("santoku.serialize") -- luacheck: ignore
 local str = require("santoku.string")
 local test = require("santoku.test")
-local tm = require("santoku.tsetlin")
-local utc = require("santoku.utc")
-
 local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
 local optimize = require("santoku.tsetlin.optimize")
 local tokenizer = require("santoku.tokenizer")
+local utc = require("santoku.utc")
 
 local cfg = {
   data = {
-    ttr = 0.9,
+    ttr = 0.5,
     max = nil,
   },
   tokenizer = {
     max_len = 20,
     min_len = 1,
     max_run = 2,
-    ngrams = 2,
-    cgrams_min = 3,
-    cgrams_max = 4,
-    skips = 2,
-    negations = 4,
+    ngrams = 4,
+    cgrams_min = 0,
+    cgrams_max = 0,
+    skips = 0,
+    negations = 0,
   },
   feature_selection = {
     algo = "chi2",
-    top_k = 2048,
+    top_k = 12800,
   },
   tm = {
     classes = 2,
     negative = 0.5,
-    clauses = { def = 8, min = 8, max = 32, int = true, log = true },
-    clause_tolerance = { def = 8, min = 8, max = 64, int = true, log = true },
-    clause_maximum = { def = 8, min = 8, max = 64, int = true, log = true },
-    target = { def = 4, min = 8, max = 64, int = true, log = true },
-    specificity = { def = 1000, min = 2, max = 2000, int = true, log = true },
+    clauses = { def = 16, min = 8, max = 32, round = 8 },
+    clause_tolerance = { def = 64, min = 16, max = 128, int = true },
+    clause_maximum = { def = 64, min = 16, max = 128, int = true },
+    target = { def = 32, min = 16, max = 128, int = true },
+    specificity = { def = 1000, min = 400, max = 4000 },
+    include_bits = { def = 1, min = 1, max = 4, int = true },
   },
   search = {
-    patience = 3,
-    rounds = 10,
-    trials = 4,
-    iterations = 10,
+    patience = 2,
+    rounds = 4,
+    trials = 10,
+    iterations = 20,
   },
   training = {
-    iterations = 100,
+    iterations = 200,
   },
   threads = nil,
 }
@@ -61,36 +57,47 @@ test("tsetlin", function ()
   print("Test", test.n)
 
   print("\nTraining tokenizer\n")
-  local tokenizer = tokenizer.create(cfg.tokenizer)
-  tokenizer:train({ corpus = train.problems })
-  tokenizer:finalize()
-  dataset.n_features = tokenizer:features()
-  str.printf("Feat\t\t%d\t\t\n", dataset.n_features)
+  local tok = tokenizer.create(cfg.tokenizer)
+  tok:train({ corpus = train.problems })
+  tok:finalize()
+  local n_features = tok:features()
+  str.printf("Feat\t\t%d\t\t\n", n_features)
 
   print("Tokenizing train")
-  train.problems0 = tokenizer:tokenize(train.problems)
+  train.problems0 = tok:tokenize(train.problems)
   train.solutions:add_scaled(cfg.tm.classes)
-  local top_v =
-    cfg.feature_selection.algo == "chi2" and train.problems0:bits_top_chi2(train.solutions, train.n, dataset.n_features, cfg.tm.classes, cfg.feature_selection.top_k) or
-    cfg.feature_selection.algo == "mi" and train.problems0:bits_top_mi(train.solutions, train.n, dataset.n_features, cfg.tm.classes, cfg.feature_selection.top_k) or
-    err.error("feature_selection.algo must be chi2 or mi")
+  local top_v, chi2_weights
+  if cfg.feature_selection.algo == "chi2" then
+    top_v, chi2_weights = train.problems0:bits_top_chi2(train.solutions, train.n, n_features, cfg.tm.classes, cfg.feature_selection.top_k)
+  else
+    top_v, chi2_weights = train.problems0:bits_top_mi(train.solutions, train.n, n_features, cfg.tm.classes, cfg.feature_selection.top_k)
+  end
   train.solutions:add_scaled(-cfg.tm.classes)
   local n_top_v = top_v:size()
   print("After top k filter", n_top_v)
+  train.problems0 = nil
 
-  -- Show top words
-  local words = tokenizer:index()
-  local nw = 0
-  for id in top_v:each() do
-    print(id, words[id + 1])
-    nw = nw + 1
-    if nw >= 32 then break end
+  local words = tok:index()
+  print("\nTop 30 by Chi2 score:")
+  for i = 0, 29 do
+    local id = top_v:get(i)
+    local score = chi2_weights:get(i)
+    str.printf("  %6d  %-24s  %.4f\n", id, words[id + 1] or "?", score)
   end
 
-  print("Re-encoding train/test with top features")
-  tokenizer:restrict(top_v)
-  train.problems = tokenizer:tokenize(train.problems);
-  test.problems = tokenizer:tokenize(test.problems);
+  print("\nBottom 30 (of selected subset) by Chi2 score:")
+  for i = 0, 29 do
+    local id = top_v:get(n_top_v - i - 1)
+    local score = chi2_weights:get(n_top_v - i - 1)
+    str.printf("  %6d  %-24s  %.4f\n", id, words[id + 1] or "?", score)
+  end
+
+  tok:restrict(top_v)
+
+  print("\nRe-encoding train/test with top features")
+  train.problems = tok:tokenize(train.problems)
+  test.problems = tok:tokenize(test.problems)
+  tok:destroy()
 
   print("Prepping for classifier")
   train.problems = train.problems:bits_to_cvec(train.n, n_top_v, true)
@@ -109,6 +116,7 @@ test("tsetlin", function ()
     target = cfg.tm.target,
     negative = cfg.tm.negative,
     specificity = cfg.tm.specificity,
+    include_bits = cfg.tm.include_bits,
 
     samples = train.n,
     problems = train.problems,
@@ -130,26 +138,19 @@ test("tsetlin", function ()
       local test_predicted = t:predict(test.problems, test.n, cfg.threads)
       local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, cfg.tm.classes, cfg.threads)
       local d, dd = stopwatch()
-      -- luacheck: push ignore
       if is_final then
-        str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%.2f S=%.2f  F1=(%.2f,%.2f)  Epoch  %d\n\n",
-          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, train_accuracy.f1, test_accuracy.f1, epoch)
+        str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%.2f S=%.2f IB=%d  F1=(%.2f,%.2f)  Epoch  %d\n",
+          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, train_accuracy.f1, test_accuracy.f1, epoch)
       else
-        str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%.2f S=%.2f  R=%d T=%d  F1=(%.2f,%.2f)  Epoch  %d\n\n",
-          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, round, trial, train_accuracy.f1, test_accuracy.f1, epoch)
+        str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%.2f S=%.2f IB=%d  R=%d T=%d  F1=(%.2f,%.2f)  Epoch  %d\n",
+          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, round, trial, train_accuracy.f1, test_accuracy.f1, epoch)
       end
-      -- luacheck: pop
     end
 
   })
 
   print()
-  print("Persisting")
-  fs.rm("model.bin", true)
-  t:persist("model.bin", true)
-
-  print("Testing restore")
-  t = tm.load("model.bin")
+  print("Final Evaluation")
   local train_pred = t:predict(train.problems, train.n, cfg.threads)
   local test_pred = t:predict(test.problems, test.n, cfg.threads)
   local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, cfg.tm.classes, cfg.threads)

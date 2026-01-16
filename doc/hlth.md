@@ -290,9 +290,8 @@ metrics and elbow detection.
 | max_gap | - | Largest gap between consecutive values |
 | max_curvature | - | Maximum curvature point |
 | otsu | - | Otsu's threshold on score distribution |
-| plateau | 0-10 | Plateau detection with sensitivity |
-| first_gap | 1-50 | First gap exceeding threshold |
-| first_gap_ratio | 1-10 | First gap ratio exceeding threshold |
+| plateau | 0.001-0.1 | Plateau detection with relative tolerance |
+| first_gap | 1-10 | First gap exceeding alpha × median gap |
 | kneedle | 0.1-10 (log) | Kneedle algorithm |
 
 ## Ground Truth Construction
@@ -429,6 +428,7 @@ Directly concatenates k landmark codes into a single feature vector:
 - Output dimension: n_landmarks × n_hidden bits
 - Position-sensitive: landmark order matters
 - Direct representation of neighborhood
+- Risk of overfitting: encodes exact landmark identities rather than aggregate patterns
 
 Example: 4 landmarks × 32-bit codes = 128-bit feature vector
 
@@ -443,7 +443,8 @@ Computes bit frequency statistics across landmarks with multi-threshold encoding
 - Output dimension: n_hidden × n_thresholds bits
 - Position-invariant: landmark order doesn't matter
 - Robust to noise via consensus encoding
-- Better generalization through aggregation
+- Better generalization: aggregates patterns rather than memorizing landmarks
+- Preferred for out-of-sample extension where train/test gap is a concern
 
 Example: 32 bits × 7 thresholds = 224-bit feature vector
 

@@ -56,6 +56,7 @@ typedef struct tk_tsetlin_s {
   unsigned int clause_maximum;
   unsigned int target;
   unsigned int state_bits;
+  unsigned int include_bits;
   unsigned int input_bits;
   unsigned int input_chunks;
   unsigned int clause_chunks;
@@ -170,9 +171,9 @@ static inline void apply_feedback (
   unsigned int clause_id = chunk * TK_CVEC_BITS + clause_idx;
   if (positive_feedback) {
     if (output) {
-      if (literals[clause_idx] < max_literals)
+      if (literals[clause_idx] <= max_literals)
         tk_automata_inc(&tm->automata, clause_id, (uint8_t*)input, input_chunks);
-      tk_automata_dec_not(&tm->automata, clause_id, (uint8_t*)input, input_chunks);
+      tk_automata_dec_not_excluded(&tm->automata, clause_id, (uint8_t*)input, input_chunks);
     } else {
       unsigned int s = (2 * features) / specificity;
       unsigned int input_bits = tm->input_bits;
@@ -185,7 +186,7 @@ static inline void apply_feedback (
     }
   } else {
     if (output) {
-      tk_automata_inc_not(&tm->automata, clause_id, (uint8_t*)input, input_chunks);
+      tk_automata_inc_not_excluded(&tm->automata, clause_id, (uint8_t*)input, input_chunks);
     }
   }
 }
@@ -299,6 +300,7 @@ static inline void tk_tsetlin_init_classifier (
   unsigned int clause_tolerance,
   unsigned int clause_maximum,
   unsigned int state_bits,
+  unsigned int include_bits,
   double targetf,
   double negative,
   double specificity
@@ -326,6 +328,7 @@ static inline void tk_tsetlin_init_classifier (
       : ceil(targetf >= 1 ? targetf : fmaxf(1.0, (double) tm->clauses * targetf));
   tm->features = features;
   tm->state_bits = state_bits;
+  tm->include_bits = include_bits ? include_bits : 1;
   tm->input_bits = 2 * tm->features;
   uint64_t tail_bits = tm->input_bits & (TK_CVEC_BITS - 1);
   tm->tail_mask = tail_bits ? (uint8_t)((1u << tail_bits) - 1) : 0xFF;
@@ -341,6 +344,7 @@ static inline void tk_tsetlin_init_classifier (
   tm->automata.n_clauses = tm->classes * tm->clauses;
   tm->automata.n_chunks = tm->input_chunks;
   tm->automata.state_bits = tm->state_bits;
+  tm->automata.include_bits = tm->include_bits;
   tm->automata.tail_mask = tm->tail_mask;
   tm->automata.counts = tm->state;
   tm->automata.actions = tm->actions;
@@ -355,13 +359,14 @@ static inline int tk_tsetlin_init_encoder (
   unsigned int clause_tolerance,
   unsigned int clause_maximum,
   unsigned int state_bits,
+  unsigned int include_bits,
   double targetf,
   double negative,
   double specificity
 ) {
   tk_tsetlin_init_classifier(
     L, tm, encoding_bits, features, clauses, clause_tolerance, clause_maximum,
-    state_bits, targetf, negative, specificity);
+    state_bits, include_bits, targetf, negative, specificity);
   return 0;
 }
 
@@ -376,6 +381,7 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
       tk_lua_fcheckunsigned(L, 2, "create classifier", "clause_tolerance"),
       tk_lua_fcheckunsigned(L, 2, "create classifier", "clause_maximum"),
       tk_lua_foptunsigned(L, 2, "create classifier", "state", 8),
+      tk_lua_foptunsigned(L, 2, "create classifier", "include_bits", 1),
       tk_lua_foptposdouble(L, 2, "create classifier", "target", -1.0),
       tk_lua_foptposdouble(L, 2, "create classifier", "negative", -1.0),
       tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity"));
@@ -394,6 +400,7 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
       tk_lua_fcheckunsigned(L, 2, "create encoder", "clause_tolerance"),
       tk_lua_fcheckunsigned(L, 2, "create encoder", "clause_maximum"),
       tk_lua_foptunsigned(L, 2, "create encoder", "state", 8),
+      tk_lua_foptunsigned(L, 2, "create encoder", "include_bits", 1),
       tk_lua_foptposdouble(L, 2, "create encoder", "target", -1.0),
       tk_lua_foptposdouble(L, 2, "create encoder", "negative", -1.0),
       tk_lua_fcheckposdouble(L, 2, "create encoder", "specificity"));
@@ -561,7 +568,7 @@ static inline int tk_tsetlin_train_classifier (
   tk_cvec_t *ps = tk_cvec_peek(L, -1, "problems");
   lua_getfield(L, 2, "solutions");
   tk_ivec_t *ss = tk_ivec_peek(L, -1, "solutions");
-  unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
+  unsigned int max_iter = tk_lua_fcheckunsigned(L, 2, "train", "iterations");
   int i_each = -1;
   if (tk_lua_ftype(L, 2, "each") != LUA_TNIL) {
     lua_getfield(L, 2, "each");
@@ -571,22 +578,30 @@ static inline int tk_tsetlin_train_classifier (
   unsigned int clause_chunks = tm->clause_chunks;
   unsigned int input_chunks = tm->input_chunks;
   int64_t *lbls = ss->a;
-  volatile bool break_flag = false;
+  bool break_flag = false;
+  int max_threads = omp_get_max_threads();
+  unsigned int **shuffles = (unsigned int **)tk_malloc(L, (size_t)max_threads * sizeof(unsigned int *));
+  for (int t = 0; t < max_threads; t++)
+    shuffles[t] = (unsigned int *)tk_malloc(L, n * sizeof(unsigned int));
   #pragma omp parallel
   {
     int tid = omp_get_thread_num();
     tk_fast_seed((uint64_t)tid);
-    unsigned int *shuffle = (unsigned int *)tk_malloc(L, n * sizeof(unsigned int));
-    unsigned int literals[TK_CVEC_BITS];
-    unsigned int votes[TK_CVEC_BITS];
     #pragma omp for schedule(static)
     for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
       uint64_t first_clause = chunk * TK_CVEC_BITS;
       uint64_t last_clause = chunk * TK_CVEC_BITS + TK_CVEC_BITS - 1;
       tk_automata_setup(&tm->automata, first_clause, last_clause);
     }
-    for (unsigned int iter = 0; iter < max_iter; iter ++) {
-      if (break_flag) break;
+  }
+  for (unsigned int iter = 0; iter < max_iter; iter++) {
+    if (break_flag) break;
+    #pragma omp parallel
+    {
+      int tid = omp_get_thread_num();
+      unsigned int *shuffle = shuffles[tid];
+      unsigned int literals[TK_CVEC_BITS];
+      unsigned int votes[TK_CVEC_BITS];
       tk_tsetlin_init_shuffle(shuffle, n);
       #pragma omp for schedule(static)
       for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
@@ -599,29 +614,26 @@ static inline int tk_tsetlin_train_classifier (
           tm_update(tm, input, out, literals, votes, sample, sample_class, 1, chunk_class, chunk, (unsigned int)tid);
         }
       }
-      #pragma omp barrier
-      #pragma omp single
-      {
-        if (i_each > -1) {
-          lua_pushvalue(L, i_each);
-          lua_pushinteger(L, iter + 1);
-          int status = lua_pcall(L, 1, 1, 0);
-          if (status != LUA_OK) {
-            fprintf(stderr, "Error in Lua callback: %s\n", lua_tostring(L, -1));
-            lua_pop(L, 1);
-            break_flag = true;
-          }
-          if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0) {
-            lua_pop(L, 1);
-            break_flag = true;
-          } else {
-            lua_pop(L, 1);
-          }
-        }
+    }
+    if (i_each > -1) {
+      lua_pushvalue(L, i_each);
+      lua_pushinteger(L, iter + 1);
+      int status = lua_pcall(L, 1, 1, 0);
+      if (status != LUA_OK) {
+        fprintf(stderr, "Error in Lua callback: %s\n", lua_tostring(L, -1));
+        lua_pop(L, 1);
+        break_flag = true;
+      } else if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0) {
+        lua_pop(L, 1);
+        break_flag = true;
+      } else {
+        lua_pop(L, 1);
       }
     }
-    free(shuffle);
   }
+  for (int t = 0; t < max_threads; t++)
+    free(shuffles[t]);
+  free(shuffles);
   if (!tm->reusable)
     tk_tsetlin_shrink(tm);
   tm->trained = true;
@@ -639,7 +651,7 @@ static inline int tk_tsetlin_train_encoder (
   lua_getfield(L, 2, "codes");
   tk_cvec_t *ls = tk_cvec_peek(L, -1, "codes");
   lua_pop(L, 1);
-  unsigned int max_iter =  tk_lua_fcheckunsigned(L, 2, "train", "iterations");
+  unsigned int max_iter = tk_lua_fcheckunsigned(L, 2, "train", "iterations");
   size_t needed = n * tm->class_chunks;
   if (needed > tm->encodings_len) {
     tm->encodings = (char *)tk_realloc(L, tm->encodings, needed);
@@ -655,22 +667,30 @@ static inline int tk_tsetlin_train_encoder (
   unsigned int clause_chunks = tm->clause_chunks;
   unsigned int input_chunks = tm->input_chunks;
   char *lbls = ls->a;
-  volatile bool break_flag = false;
+  bool break_flag = false;
+  int max_threads = omp_get_max_threads();
+  unsigned int **shuffles = (unsigned int **)tk_malloc(L, (size_t)max_threads * sizeof(unsigned int *));
+  for (int t = 0; t < max_threads; t++)
+    shuffles[t] = (unsigned int *)tk_malloc(L, n * sizeof(unsigned int));
   #pragma omp parallel
   {
     int tid = omp_get_thread_num();
     tk_fast_seed((uint64_t)tid);
-    unsigned int *shuffle = (unsigned int *)tk_malloc(L, n * sizeof(unsigned int));
-    unsigned int literals[TK_CVEC_BITS];
-    unsigned int votes[TK_CVEC_BITS];
     #pragma omp for schedule(static)
     for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
       uint64_t first_clause = chunk * TK_CVEC_BITS;
       uint64_t last_clause = chunk * TK_CVEC_BITS + TK_CVEC_BITS - 1;
       tk_automata_setup(&tm->automata, first_clause, last_clause);
     }
-    for (unsigned int iter = 0; iter < max_iter; iter ++) {
-      if (break_flag) break;
+  }
+  for (unsigned int iter = 0; iter < max_iter; iter++) {
+    if (break_flag) break;
+    #pragma omp parallel
+    {
+      int tid = omp_get_thread_num();
+      unsigned int *shuffle = shuffles[tid];
+      unsigned int literals[TK_CVEC_BITS];
+      unsigned int votes[TK_CVEC_BITS];
       tk_tsetlin_init_shuffle(shuffle, n);
       #pragma omp for schedule(static)
       for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
@@ -685,29 +705,26 @@ static inline int tk_tsetlin_train_encoder (
           tm_update(tm, input, out, literals, votes, sample, chunk_class, target_vote, chunk_class, chunk, (unsigned int)tid);
         }
       }
-      #pragma omp barrier
-      #pragma omp single
-      {
-        if (i_each > -1) {
-          lua_pushvalue(L, i_each);
-          lua_pushinteger(L, iter + 1);
-          int status = lua_pcall(L, 1, 1, 0);
-          if (status != LUA_OK) {
-            fprintf(stderr, "Error in Lua callback: %s\n", lua_tostring(L, -1));
-            lua_pop(L, 1);
-            break_flag = true;
-          }
-          if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0) {
-            lua_pop(L, 1);
-            break_flag = true;
-          } else {
-            lua_pop(L, 1);
-          }
-        }
+    }
+    if (i_each > -1) {
+      lua_pushvalue(L, i_each);
+      lua_pushinteger(L, iter + 1);
+      int status = lua_pcall(L, 1, 1, 0);
+      if (status != LUA_OK) {
+        fprintf(stderr, "Error in Lua callback: %s\n", lua_tostring(L, -1));
+        lua_pop(L, 1);
+        break_flag = true;
+      } else if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0) {
+        lua_pop(L, 1);
+        break_flag = true;
+      } else {
+        lua_pop(L, 1);
       }
     }
-    free(shuffle);
   }
+  for (int t = 0; t < max_threads; t++)
+    free(shuffles[t]);
+  free(shuffles);
   if (!tm->reusable)
     tk_tsetlin_shrink(tm);
   tm->trained = true;
@@ -738,6 +755,7 @@ static inline void _tk_tsetlin_persist_classifier (lua_State *L, tk_tsetlin_t *t
   tk_lua_fwrite(L, &tm->clause_maximum, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->target, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->state_bits, sizeof(unsigned int), 1, fh);
+  tk_lua_fwrite(L, &tm->include_bits, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->input_bits, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->input_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->clause_chunks, sizeof(unsigned int), 1, fh);
@@ -816,6 +834,7 @@ static inline int tk_tsetlin_reconfigure (lua_State *L)
   unsigned int new_clauses = tk_lua_fcheckunsigned(L, 2, "reconfigure", "clauses");
   unsigned int new_tolerance = tk_lua_fcheckunsigned(L, 2, "reconfigure", "clause_tolerance");
   unsigned int new_maximum = tk_lua_fcheckunsigned(L, 2, "reconfigure", "clause_maximum");
+  unsigned int new_include_bits = tk_lua_foptunsigned(L, 2, "reconfigure", "include_bits", tm->include_bits);
   double new_target = tk_lua_foptposdouble(L, 2, "reconfigure", "target", -1.0);
   double new_specificity = tk_lua_fcheckposdouble(L, 2, "reconfigure", "specificity");
 
@@ -845,6 +864,7 @@ static inline int tk_tsetlin_reconfigure (lua_State *L)
   tm->clause_chunks = new_clause_chunks;
   tm->clause_tolerance = new_tolerance;
   tm->clause_maximum = new_maximum;
+  tm->include_bits = new_include_bits ? new_include_bits : 1;
   tm->action_chunks = new_action_chunks;
   tm->state_chunks = new_state_chunks;
   tm->specificity = new_specificity;
@@ -853,6 +873,7 @@ static inline int tk_tsetlin_reconfigure (lua_State *L)
     : ceil(new_target >= 1 ? new_target : fmaxf(1.0, (double) tm->clauses * new_target));
 
   tm->automata.n_clauses = tm->classes * tm->clauses;
+  tm->automata.include_bits = tm->include_bits;
   tm->automata.counts = tm->state;
   tm->automata.actions = tm->actions;
 
@@ -871,6 +892,8 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, 
   tk_lua_fread(L, &tm->clause_maximum, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->target, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->state_bits, sizeof(unsigned int), 1, fh);
+  tk_lua_fread(L, &tm->include_bits, sizeof(unsigned int), 1, fh);
+  if (!tm->include_bits) tm->include_bits = 1;
   tk_lua_fread(L, &tm->input_bits, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->input_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->clause_chunks, sizeof(unsigned int), 1, fh);
@@ -884,6 +907,7 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, 
   tm->automata.n_clauses = tm->classes * tm->clauses;
   tm->automata.n_chunks = tm->input_chunks;
   tm->automata.state_bits = tm->state_bits;
+  tm->automata.include_bits = tm->include_bits;
   tm->automata.tail_mask = tm->tail_mask;
   tm->automata.counts = tm->state;
   tm->automata.actions = tm->actions;
