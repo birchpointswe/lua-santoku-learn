@@ -7,6 +7,12 @@
 - Abstract the landmark/out-of-sample phase behind a simple tm + index wrapper
 - Regression, autoencoder, convolutional
 - Explore shared libaries, optimistic dynmaic linking? Is that a thing?
+- Agreement-weighted landmark encoding: weight each landmark's contribution by its
+  code consistency score (mean hamming distance to token-space neighbors). Based on
+  cross-space neighborhood agreement literature (trustworthiness/continuity).
+  Diagnostic shows strong correlation between code consistency and test accuracy.
+- Batch distance API for ann/inv indices (distance_many or similar) to avoid O(n*k)
+  individual :distance() calls in diagnostics and weighted encoding
 
 # Next
 
@@ -157,3 +163,26 @@
 
 - tm optimizer
     - Early stopping with no improvement
+
+# Experiment Results (newsgroups encoder)
+
+| Experiment | Test Combined | Notes |
+|------------|---------------|-------|
+| Baseline (frequency, fixed thresholds) | 0.7796 | 8 landmarks, 7 thresholds |
+| Quantile thresholds | 0.7756 | Per-bit adaptive thresholds |
+| Landmark filter k=1/cluster | 0.4387 | Too few landmarks (106) |
+| Landmark filter k=50/cluster (consistent) | 0.7353 | 2682 landmarks |
+| Landmark filter k=100/cluster | 0.7560 | 4826 landmarks |
+| Landmark filter k=50 inverted | 0.5268 | Select inconsistent landmarks |
+| Perfect cluster + k=50 authority | 0.7274 | Class labels as clusters |
+| Perfect cluster + k=400 authority | 0.7723 | ~16k landmarks |
+| Concat mode baseline | 0.7564 | |
+| Concat + filtering | 0.7423 | |
+| Nyström (unsup→warp→sup) | 0.4709 | Pure Nyström approach |
+| IDF-only features (no chi2) | ~0.27 | Rare features uninformative |
+
+Conclusions:
+- Landmark filtering hurts - encoder needs coverage, not quality
+- Quantile thresholds don't help - fixed thresholds are fine
+- Pure Nyström approach underperforms standard landmark
+- Chi2 feature selection helps despite being "impure" - IDF-only picks rare uninformative features

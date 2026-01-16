@@ -1,5 +1,9 @@
 # Two-Stage Spectral Embedding via Nyström Extension
 
+> **Experimental**: This approach is under active research and not yet
+> production-ready. The standard landmark-based encoding in hlth.md is the
+> recommended approach for out-of-sample extension.
+
 ## Overview
 
 Spectral graph hashing with supervised edge weighting creates a warped manifold where label information distorts natural token-space geometry. Standard landmark-based out-of-sample extension conflates two distinct problems:

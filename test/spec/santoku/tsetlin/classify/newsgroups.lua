@@ -1,3 +1,4 @@
+local arr = require("santoku.array")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local ds = require("santoku.tsetlin.dataset")
@@ -9,6 +10,7 @@ local utc = require("santoku.utc")
 local cfg = {
   data = {
     max_per_class = nil,
+    tvr = 0.1,
   },
   tokenizer = {
     max_len = 20,
@@ -17,30 +19,32 @@ local cfg = {
     ngrams = 2,
     cgrams_min = 3,
     cgrams_max = 4,
-    skips = 2,
+    skips = 1,
     negations = 0,
   },
   feature_selection = {
     algo = "chi2",
-    top_k = 4096,
+    top_k = 32768,
   },
   tm = {
     classes = 20,
-    negative = 0.5,
-    clauses = { def = 16, min = 8, max = 64, int = true, log = true },
-    clause_tolerance = { def = 16, min = 8, max = 64, int = true, log = true },
-    clause_maximum = { def = 16, min = 8, max = 64, int = true, log = true },
-    target = { def = 8, min = 4, max = 64, int = true, log = true },
-    specificity = { def = 1000, min = 2, max = 2000, int = true, log = true },
+    negative = 0.05,
+    clauses = { def = 16, min = 8, max = 32, round = 8 },
+    clause_tolerance = { def = 64, min = 16, max = 128, int = true },
+    clause_maximum = { def = 64, min = 16, max = 128, int = true },
+    target = { def = 32, min = 16, max = 128, int = true },
+    specificity = { def = 1000, min = 400, max = 4000 },
+    include_bits = { def = 1, min = 1, max = 4, int = true },
   },
   search = {
-    patience = 3,
-    rounds = 10,
-    trials = 4,
-    iterations = 10,
+    patience = 6,
+    rounds = 4,
+    trials = 10,
+    iterations = 20,
   },
   training = {
-    iterations = 100,
+    patience = 40,
+    iterations = 400,
   },
   threads = nil,
 }
@@ -48,12 +52,15 @@ local cfg = {
 test("tsetlin", function ()
 
   print("Reading data")
-  local train, test = ds.read_20newsgroups_split(
+  local train, test, validate = ds.read_20newsgroups_split(
     "test/res/20news-bydate-train",
     "test/res/20news-bydate-test",
-    cfg.data.max_per_class)
+    cfg.data.max_per_class,
+    nil,
+    cfg.data.tvr)
 
   print("Train", train.n)
+  print("Validate", validate.n)
   print("Test", test.n)
 
   print("\nTraining tokenizer\n")
@@ -66,28 +73,43 @@ test("tsetlin", function ()
   print("Tokenizing train")
   train.problems0 = tok:tokenize(train.problems)
   train.solutions:add_scaled(cfg.tm.classes)
-  local top_v =
-    cfg.feature_selection.algo == "chi2" and train.problems0:bits_top_chi2(train.solutions, train.n, n_features, cfg.tm.classes, cfg.feature_selection.top_k) or
-    train.problems0:bits_top_mi(train.solutions, train.n, n_features, cfg.tm.classes, cfg.feature_selection.top_k)
+  local top_v, chi2_weights
+  if cfg.feature_selection.algo == "chi2" then
+    top_v, chi2_weights = train.problems0:bits_top_chi2(train.solutions, train.n, n_features, cfg.tm.classes, cfg.feature_selection.top_k)
+  else
+    top_v, chi2_weights = train.problems0:bits_top_mi(train.solutions, train.n, n_features, cfg.tm.classes, cfg.feature_selection.top_k)
+  end
   train.solutions:add_scaled(-cfg.tm.classes)
   local n_top_v = top_v:size()
   print("After top k filter", n_top_v)
+  train.problems0 = nil
 
   local words = tok:index()
-  local nw = 0
-  for id in top_v:each() do
-    print(id, words[id + 1])
-    nw = nw + 1
-    if nw >= 32 then break end
+  print("\nTop 30 by Chi2 score:")
+  for i = 0, 29 do
+    local id = top_v:get(i)
+    local score = chi2_weights:get(i)
+    str.printf("  %6d  %-24s  %.4f\n", id, words[id + 1] or "?", score)
   end
 
-  print("Re-encoding train/test with top features")
+  print("\nBottom 30 (of selected subset) by Chi2 score:")
+  for i = 0, 29 do
+    local id = top_v:get(n_top_v - i - 1)
+    local score = chi2_weights:get(n_top_v - i - 1)
+    str.printf("  %6d  %-24s  %.4f\n", id, words[id + 1] or "?", score)
+  end
+
   tok:restrict(top_v)
-  train.problems = tok:tokenize(train.problems);
-  test.problems = tok:tokenize(test.problems);
+
+  print("\nRe-encoding train/validate/test with top features")
+  train.problems = tok:tokenize(train.problems)
+  validate.problems = tok:tokenize(validate.problems)
+  test.problems = tok:tokenize(test.problems)
+  tok:destroy()
 
   print("Prepping for classifier")
   train.problems = train.problems:bits_to_cvec(train.n, n_top_v, true)
+  validate.problems = validate.problems:bits_to_cvec(validate.n, n_top_v, true)
   test.problems = test.problems:bits_to_cvec(test.n, n_top_v, true)
 
   print("Optimizing Classifier")
@@ -103,6 +125,7 @@ test("tsetlin", function ()
     target = cfg.tm.target,
     negative = cfg.tm.negative,
     specificity = cfg.tm.specificity,
+    include_bits = cfg.tm.include_bits,
 
     samples = train.n,
     problems = train.problems,
@@ -115,21 +138,21 @@ test("tsetlin", function ()
     final_iterations = cfg.training.iterations,
 
     search_metric = function (t)
-      local predicted = t:predict(train.problems, train.n, cfg.threads)
-      local accuracy = eval.class_accuracy(predicted, train.solutions, train.n, cfg.tm.classes, cfg.threads)
+      local predicted = t:predict(validate.problems, validate.n, cfg.threads)
+      local accuracy = eval.class_accuracy(predicted, validate.solutions, validate.n, cfg.tm.classes, cfg.threads)
       return accuracy.f1, accuracy
     end,
 
-    each = function (t, is_final, train_accuracy, params, epoch, round, trial)
+    each = function (t, is_final, val_accuracy, params, epoch, round, trial)
       local test_predicted = t:predict(test.problems, test.n, cfg.threads)
       local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, cfg.tm.classes, cfg.threads)
       local d, dd = stopwatch()
       if is_final then
-        str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%.2f S=%.2f  F1=(%.2f,%.2f)  Epoch  %d\n\n",
-          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, train_accuracy.f1, test_accuracy.f1, epoch)
+        str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%.2f S=%.2f IB=%d  F1=(val=%.2f,test=%.2f)  Epoch  %d\n",
+          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, val_accuracy.f1, test_accuracy.f1, epoch)
       else
-        str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%.2f S=%.2f  R=%d T=%d  F1=(%.2f,%.2f)  Epoch  %d\n\n",
-          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, round, trial, train_accuracy.f1, test_accuracy.f1, epoch)
+        str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%.2f S=%.2f IB=%d  R=%d T=%d  F1=(val=%.2f,test=%.2f)  Epoch  %d\n",
+          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, round, trial, val_accuracy.f1, test_accuracy.f1, epoch)
       end
     end
 
@@ -138,9 +161,22 @@ test("tsetlin", function ()
   print()
   print("Final Evaluation")
   local train_pred = t:predict(train.problems, train.n, cfg.threads)
+  local val_pred = t:predict(validate.problems, validate.n, cfg.threads)
   local test_pred = t:predict(test.problems, test.n, cfg.threads)
   local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, cfg.tm.classes, cfg.threads)
+  local val_stats = eval.class_accuracy(val_pred, validate.solutions, validate.n, cfg.tm.classes, cfg.threads)
   local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, cfg.tm.classes, cfg.threads)
-  str.printf("Evaluate\tTest\t%4.2f\tTrain\t%4.2f\n", test_stats.f1, train_stats.f1)
+  str.printf("Evaluate\tTrain\t%4.2f\tVal\t%4.2f\tTest\t%4.2f\n", train_stats.f1, val_stats.f1, test_stats.f1)
+
+  print("\nPer-class Test Accuracy (sorted by difficulty):\n")
+  local class_order = arr.range(1, cfg.tm.classes)
+  arr.sort(class_order, function (a, b)
+    return test_stats.classes[a].f1 < test_stats.classes[b].f1
+  end)
+  for _, c in ipairs(class_order) do
+    local ts = test_stats.classes[c]
+    local cat = train.categories[c] or ("class_" .. (c - 1))
+    str.printf("  %-28s  F1=%.2f  P=%.2f  R=%.2f\n", cat, ts.f1, ts.precision, ts.recall)
+  end
 
 end)

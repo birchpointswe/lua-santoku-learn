@@ -706,7 +706,8 @@ static inline void tk_inv_neighborhoods (
   if (inv->destroyed)
     return;
 
-  double rank_weights[inv->n_ranks];
+  tk_dvec_t *rank_weights_vec = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
+  double *rank_weights = rank_weights_vec->a;
   double total_rank_weight;
   tk_inv_compute_rank_weights(inv->n_ranks, decay, rank_weights, &total_rank_weight);
 
@@ -737,6 +738,7 @@ static inline void tk_inv_neighborhoods (
   #pragma omp parallel
   {
     tk_dvec_t *wacc = tk_dvec_create(NULL, uids->n * inv->n_ranks, 0, 0);
+    memset(wacc->a, 0, sizeof(double) * uids->n * inv->n_ranks);
     tk_ivec_t *touched = tk_ivec_create(NULL, 0, 0, 0);
     tk_dvec_t *q_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
     tk_dvec_t *e_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
@@ -824,6 +826,7 @@ static inline void tk_inv_neighborhoods (
     tk_dvec_destroy(inter_weights_buf);
   }
 
+  tk_dvec_destroy(rank_weights_vec);
   tk_ivec_destroy(sid_to_pos);
 
   if (hoodsp) *hoodsp = hoods;
@@ -848,7 +851,8 @@ static inline void tk_inv_neighborhoods_by_ids (
   if (inv->destroyed)
     return;
 
-  double rank_weights[inv->n_ranks];
+  tk_dvec_t *rank_weights_vec = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
+  double *rank_weights = rank_weights_vec->a;
   double total_rank_weight;
   tk_inv_compute_rank_weights(inv->n_ranks, decay, rank_weights, &total_rank_weight);
 
@@ -868,6 +872,7 @@ static inline void tk_inv_neighborhoods_by_ids (
   #pragma omp parallel
   {
     tk_dvec_t *wacc = tk_dvec_create(NULL, all_uids->n * inv->n_ranks, 0, 0);
+    memset(wacc->a, 0, sizeof(double) * all_uids->n * inv->n_ranks);
     tk_ivec_t *touched = tk_ivec_create(NULL, 0, 0, 0);
     tk_dvec_t *q_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
     tk_dvec_t *e_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
@@ -955,6 +960,7 @@ static inline void tk_inv_neighborhoods_by_ids (
     tk_dvec_destroy(inter_weights_buf);
   }
 
+  tk_dvec_destroy(rank_weights_vec);
   tk_ivec_destroy(sid_to_pos);
 
   if (hoodsp) *hoodsp = hoods;
@@ -1035,11 +1041,13 @@ static inline void tk_inv_neighborhoods_by_vecs (
 
   #pragma omp parallel
   {
-    double rank_weights[inv->n_ranks];
+    tk_dvec_t *rank_weights_vec = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
+    double *rank_weights = rank_weights_vec->a;
     double total_rank_weight;
     tk_inv_compute_rank_weights(inv->n_ranks, decay, rank_weights, &total_rank_weight);
 
     tk_dvec_t *wacc = tk_dvec_create(NULL, all_uids->n * inv->n_ranks, 0, 0);
+    memset(wacc->a, 0, sizeof(double) * all_uids->n * inv->n_ranks);
     tk_ivec_t *touched = tk_ivec_create(NULL, 0, 0, 0);
     tk_dvec_t *q_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
     tk_dvec_t *e_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
@@ -1117,6 +1125,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
       touched->n = 0;
     }
 
+    tk_dvec_destroy(rank_weights_vec);
     tk_dvec_destroy(wacc);
     tk_ivec_destroy(touched);
     tk_dvec_destroy(q_weights_buf);
@@ -1206,7 +1215,8 @@ static inline double tk_inv_similarity (
     tk_dvec_ensure(e_weights, inv->n_ranks);
     tk_dvec_ensure(inter_weights, inv->n_ranks);
 
-    double rank_weights[inv->n_ranks];
+    tk_dvec_t *rank_weights_vec = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
+    double *rank_weights = rank_weights_vec->a;
     double total_rank_weight;
     tk_inv_compute_rank_weights(inv->n_ranks, decay, rank_weights, &total_rank_weight);
 
@@ -1270,6 +1280,7 @@ static inline double tk_inv_similarity (
       total_weighted_sim += rank_sim * rank_weight;
     }
 
+    tk_dvec_destroy(rank_weights_vec);
     return (total_rank_weight > 0.0) ? total_weighted_sim / total_rank_weight : 0.0;
   }
   double inter_w = 0.0, sa = 0.0, sb = 0.0;
@@ -1474,11 +1485,13 @@ static inline double tk_inv_similarity_rank_filtered (
     }
   }
 
-  double rank_weights[inv->n_ranks];
+  tk_dvec_t *rank_weights_vec = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
+  double *rank_weights = rank_weights_vec->a;
   double total_rank_weight;
   tk_inv_compute_rank_weights(inv->n_ranks, decay, rank_weights, &total_rank_weight);
 
   double rank_weight = rank_weights[rank_filter];
+  tk_dvec_destroy(rank_weights_vec);
   return (total_rank_weight > 0.0) ? (rank_sim * rank_weight) / total_rank_weight : 0.0;
 }
 
@@ -1505,7 +1518,8 @@ static inline double tk_inv_distance_extend (
   if (v0 == NULL || v1 == NULL)
     return observable_distance;
 
-  double rank_weights[categories->n_ranks];
+  tk_dvec_t *rank_weights_vec = tk_dvec_create(NULL, categories->n_ranks, 0, 0);
+  double *rank_weights = rank_weights_vec->a;
   double total_rank_weight;
   tk_inv_compute_rank_weights(categories->n_ranks, decay, rank_weights, &total_rank_weight);
 
@@ -1529,9 +1543,12 @@ static inline double tk_inv_distance_extend (
     }
   }
   double total_weight = total_rank_weight + obs_rank_weight;
-  if (total_weight <= 0.0)
+  if (total_weight <= 0.0) {
+    tk_dvec_destroy(rank_weights_vec);
     return observable_distance;
+  }
   double blended_sim = (hier_sim * total_rank_weight + obs_sim * obs_rank_weight) / total_weight;
+  tk_dvec_destroy(rank_weights_vec);
   return 1.0 - blended_sim;
 }
 
@@ -1561,7 +1578,8 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   tk_rvec_clear(out);
   size_t n_sids = inv->node_offsets->n;
 
-  double rank_weights[inv->n_ranks];
+  tk_dvec_t *rank_weights_vec = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
+  double *rank_weights = rank_weights_vec->a;
   double total_rank_weight;
   tk_inv_compute_rank_weights(inv->n_ranks, decay, rank_weights, &total_rank_weight);
 
@@ -1640,6 +1658,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
 
   tk_rvec_asc(out, 0, out->n);
 
+  tk_dvec_destroy(rank_weights_vec);
   tk_dvec_destroy(tmp_q_weights);
   tk_dvec_destroy(tmp_e_weights);
   tk_dvec_destroy(wacc);

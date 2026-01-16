@@ -23,17 +23,18 @@ local cfg = {
   tm = {
     classes = 10,
     negative = 0.1,
-    clauses = { def = 8, min = 8, max = 32, log = true, int = true },
-    clause_tolerance = { def = 8, min = 8, max = 64, int = true },
-    clause_maximum = { def = 8, min = 8, max = 64, int = true },
-    target = { def = 4, min = 8, max = 64 },
-    specificity = { def = 1000, min = 1, max = 2000, int = true, log = true },
+    clauses = { def = 16, min = 8, max = 32, round = 8 },
+    clause_tolerance = { def = 64, min = 16, max = 128, int = true },
+    clause_maximum = { def = 64, min = 16, max = 128, int = true },
+    target = { def = 32, min = 16, max = 128, int = true },
+    specificity = { def = 1000, min = 400, max = 4000 },
+    include_bits = { def = 1, min = 1, max = 4, int = true },
   },
   search = {
-    patience = 3,
-    rounds = 10,
-    trials = 4,
-    iterations = 10,
+    patience = 2,
+    rounds = 4,
+    trials = 10,
+    iterations = 20,
   },
   training = {
     iterations = 100,
@@ -97,6 +98,7 @@ test("tsetlin", function ()
     clause_maximum = cfg.tm.clause_maximum,
     target = cfg.tm.target,
     specificity = cfg.tm.specificity,
+    include_bits = cfg.tm.include_bits,
 
     search_patience = cfg.search.patience,
     search_rounds = cfg.search.rounds,
@@ -116,11 +118,11 @@ test("tsetlin", function ()
       local d, dd = stopwatch()
       -- luacheck: push ignore
       if is_final then
-        str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%.2f S=%.2f  F1=(%.2f,%.2f)  Epoch  %d\n\n",
-          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, train_accuracy.f1, test_accuracy.f1, epoch)
+        str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%.2f S=%.2f IB=%d  F1=(%.2f,%.2f)  Epoch  %d\n\n",
+          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, train_accuracy.f1, test_accuracy.f1, epoch)
       else
-        str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%.2f S=%.2f  R=%d T=%d  F1=(%.2f,%.2f)  Epoch  %d\n\n",
-          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, round, trial, train_accuracy.f1, test_accuracy.f1, epoch)
+        str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%.2f S=%.2f IB=%d  R=%d T=%d  F1=(%.2f,%.2f)  Epoch  %d\n\n",
+          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, round, trial, train_accuracy.f1, test_accuracy.f1, epoch)
       end
       -- luacheck: pop
     end
@@ -139,5 +141,16 @@ test("tsetlin", function ()
   local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, cfg.tm.classes, cfg.threads)
   local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, cfg.tm.classes, cfg.threads)
   str.printf("Evaluate\tTest\t%4.2f\tTrain\t%4.2f\n", test_stats.f1, train_stats.f1)
+
+  print("\nPer-class Test Accuracy (sorted by difficulty):\n")
+  local class_order = {}
+  for c = 1, cfg.tm.classes do class_order[c] = c end
+  table.sort(class_order, function (a, b)
+    return test_stats.classes[a].f1 < test_stats.classes[b].f1
+  end)
+  for _, c in ipairs(class_order) do
+    local ts = test_stats.classes[c]
+    str.printf("  digit_%d  F1=%.2f  P=%.2f  R=%.2f\n", c - 1, ts.f1, ts.precision, ts.recall)
+  end
 
 end)
