@@ -14,7 +14,7 @@ local itq = require("santoku.tsetlin.itq")
 local tokenizer = require("santoku.tokenizer")
 
 local cfg; cfg = {
-  early_exit_after = nil,  -- nil, "spectral", "encoder", "retrieval"
+  early_exit_after = "retrieval",  -- nil, "spectral", "encoder", "retrieval"
   lookup_mode = "token",        -- "token" (k-NN in token space) | "unsupervised" (k-NN in unsup spectral space)
   aggregate_mode = "supervised", -- "supervised" (aggregate sup codes) | "unsupervised" (aggregate unsup codes)
   data = {
@@ -42,10 +42,9 @@ local cfg; cfg = {
     min_df = -2,
     max_df = 0.98,
     max_vocab = nil,
-    chi2_filter = nil,  -- nil to disable, or max tokens by chi2
   },
   landmark_selection = {
-    method = nil,  -- "chi2", "coherence", or nil (use IDF)
+    method = nil,  -- "chi2" (spectral codes), "coherence", or nil (use IDF)
     max_vocab = 8192,
     lambda = 0.5,     -- for coherence regularization
   },
@@ -82,16 +81,16 @@ local cfg; cfg = {
     unsup_n_dims = nil,  -- nil = use search.spectral.n_dims, or set explicit value
   },
   tm = {
-    clauses = { def = 16, min = 8, max = 64, round = 8 },
-    clause_tolerance = { def = 64, min = 16, max = 128, int = true },
-    clause_maximum = { def = 64, min = 16, max = 128, int = true },
-    target = { def = 32, min = 16, max = 128, int = true },
-    specificity = { def = 1000, min = 400, max = 4000 },
-    include_bits = { def = 1, min = 1, max = 4, int = true },
+    clauses = { def = 32, min = 8, max = 64, round = 8 },
+    clause_tolerance = { def = 76, min = 16, max = 128, int = true },
+    clause_maximum = { def = 21, min = 16, max = 128, int = true },
+    target = { def = 33, min = 16, max = 128, int = true },
+    specificity = { def = 520, min = 400, max = 4000 },
+    include_bits = { def = 2, min = 1, max = 4, int = true },
   },
   tm_search = {
     patience = 2,
-    rounds = 4,
+    rounds = 0,
     trials = 10,
     iterations = 20,
   },
@@ -108,10 +107,10 @@ local cfg; cfg = {
     specificity = { def = 1000, min = 400, max = 4000 },
     include_bits = { def = 1, min = 1, max = 4, int = true },
     negative = 0.5,
-    search_patience = 3,
-    search_rounds = 2,
-    search_trials = 2,
-    search_iterations = 8,
+    search_patience = 2,
+    search_rounds = 4,
+    search_trials = 10,
+    search_iterations = 20,
     final_iterations = 100,
   },
   search = {
@@ -146,15 +145,10 @@ local cfg; cfg = {
       pairs = 64,
       ranking = "ndcg",
       metric = "avg",
-      elbow = { def = "first_gap", "first_gap", "plateau", "lmethod" },
-      elbow_alpha = {
-        first_gap = { def = 0.1, min = 0.01, max = 4 },
-        plateau = { def = 0.1, min = 0.01, max = 4 }
-      },
-      target = "combined",
       max_consecutive_zeros = 3,
     },
     cluster_eval = {
+      ranking = "ndcg",
       elbow = "plateau",
       elbow_alpha = 0.01,
       elbow_target = "quality",
@@ -189,58 +183,19 @@ test("newsgroups", function()
   print("\nTokenizing train")
   train.tokens = tok:tokenize(train.problems)
 
-  local n_top_v, idf_weights
-
-  if cfg.feature_selection.chi2_filter then
-    print("\nFeature selection (chi2 against class labels)")
-    train.solutions:add_scaled(cfg.data.n_classes)
-    local chi2_sorted, chi2_weights = train.tokens:bits_top_chi2(
-      train.solutions,
-      train.n,
-      n_tokens,
-      cfg.data.n_classes,
-      cfg.feature_selection.chi2_filter)
-    train.solutions:add_scaled(-cfg.data.n_classes)
-    n_top_v = chi2_sorted:size()
-    str.printf("  Chi2 filtered: %d features\n", n_top_v)
-    str.printf("  Chi2 range: %.3f - %.3f\n", chi2_weights:get(chi2_weights:size() - 1), chi2_weights:get(0))
-    local words = tok:index()
-    print("\n  Top 30 by chi2 score:")
-    for i = 0, math.min(29, n_top_v - 1) do
-      local id = chi2_sorted:get(i)
-      local score = chi2_weights:get(i)
-      str.printf("    %6d  %-24s  %.4f\n", id, words[id + 1] or "?", score)
-    end
-    tok:restrict(chi2_sorted)
-    print("\nRe-tokenizing with chi2-filtered vocabulary")
-    train.tokens = tok:tokenize(train.problems)
-    validate.tokens = tok:tokenize(validate.problems)
-    test.tokens = tok:tokenize(test.problems)
-    print("\nComputing IDF weights for chi2-filtered vocabulary")
-    local idf_sorted, idf_sorted_weights = train.tokens:bits_top_df(
-      train.n, n_top_v, nil,
-      cfg.feature_selection.min_df, cfg.feature_selection.max_df)
-    idf_weights = dvec.create(n_top_v)
-    for i = 0, idf_sorted:size() - 1 do
-      local feat_id = idf_sorted:get(i)
-      idf_weights:set(feat_id, idf_sorted_weights:get(i))
-    end
-    str.printf("  IDF range: %.3f - %.3f\n", idf_weights:min(), idf_weights:max())
-  else
-    print("\nFeature selection (IDF filtering)")
-    local idf_sorted
-    idf_sorted, idf_weights = train.tokens:bits_top_df(
-      train.n, n_tokens, cfg.feature_selection.max_vocab,
-      cfg.feature_selection.min_df, cfg.feature_selection.max_df)
-    n_top_v = idf_sorted:size()
-    str.printf("  DF filtered: %d features\n", n_top_v)
-    str.printf("  IDF range: %.3f - %.3f\n", idf_weights:min(), idf_weights:max())
-    tok:restrict(idf_sorted)
-    print("\nRe-tokenizing with IDF-filtered vocabulary")
-    train.tokens = tok:tokenize(train.problems)
-    validate.tokens = tok:tokenize(validate.problems)
-    test.tokens = tok:tokenize(test.problems)
-  end
+  print("\nFeature selection (IDF filtering)")
+  local idf_sorted, idf_weights
+  idf_sorted, idf_weights = train.tokens:bits_top_df(
+    train.n, n_tokens, cfg.feature_selection.max_vocab,
+    cfg.feature_selection.min_df, cfg.feature_selection.max_df)
+  local n_top_v = idf_sorted:size()
+  str.printf("  DF filtered: %d features\n", n_top_v)
+  str.printf("  IDF range: %.3f - %.3f\n", idf_weights:min(), idf_weights:max())
+  tok:restrict(idf_sorted)
+  print("\nRe-tokenizing with IDF-filtered vocabulary")
+  train.tokens = tok:tokenize(train.problems)
+  validate.tokens = tok:tokenize(validate.problems)
+  test.tokens = tok:tokenize(test.problems)
 
   print("\nCreating IDs")
   train.ids = ivec.create(train.n)
@@ -442,9 +397,7 @@ test("newsgroups", function()
       elseif info.event == "eval" then
         local e = info.params.eval
         local m = info.metrics
-        local alpha_str = e.elbow_alpha and str.format("%.1f", e.elbow_alpha) or "-"
-        str.printf("    elbow=%s(%s) knn=%d score=%.4f quality=%.4f combined=%.4f\n",
-          e.elbow, alpha_str, e.knn, m.score, m.quality, m.combined)
+        str.printf("    knn=%d score=%.4f\n", e.knn, m.score)
       end
     end or nil,
   })
@@ -603,15 +556,13 @@ test("newsgroups", function()
       test.tokens_landmark = tok:tokenize(test.problems)
       landmark_weights = coherence_scores
     elseif cfg.landmark_selection.method == "chi2" then
-      print("\nSelecting tokens by chi2 (class association)")
-      train.solutions:add_scaled(cfg.data.n_classes)
+      print("\nSelecting tokens by chi2 (spectral code association)")
       local landmark_vocab, chi2_scores = train.tokens:bits_top_chi2(
-        train.solutions,
+        train.codes_sup,
         train.n,
         n_top_v,
-        cfg.data.n_classes,
+        train.dims_sup,
         cfg.landmark_selection.max_vocab)
-      train.solutions:add_scaled(-cfg.data.n_classes)
       n_landmark_v = landmark_vocab:size()
       str.printf("  Selected %d tokens by chi2 (score range: %.4f - %.4f)\n",
         n_landmark_v, chi2_scores:get(chi2_scores:size() - 1), chi2_scores:get(0))
@@ -651,10 +602,11 @@ test("newsgroups", function()
   end
 
 
-  train.adj_expected_ids = train.ground_truth_sup.retrieval.ids
-  train.adj_expected_offsets = train.ground_truth_sup.retrieval.offsets
-  train.adj_expected_neighbors = train.ground_truth_sup.retrieval.neighbors
-  train.adj_expected_weights = train.ground_truth_sup.retrieval.weights
+  local spectral_ground_truth = build_token_ground_truth(train.index_sup, cfg.search.eval.knn)
+  train.adj_expected_ids = spectral_ground_truth.retrieval.ids
+  train.adj_expected_offsets = spectral_ground_truth.retrieval.offsets
+  train.adj_expected_neighbors = spectral_ground_truth.retrieval.neighbors
+  train.adj_expected_weights = spectral_ground_truth.retrieval.weights
 
   print("\nSpot-check: k-NN Classification & Precision (spectral codes)")
   do
@@ -848,45 +800,31 @@ test("newsgroups", function()
       })
 
     print("\nClustering")
+    local cluster_codes = train.index_sup:get(adj_cluster_ids)
     train.codes_clusters = eval.cluster({
-      codes = train.index_sup:get(adj_cluster_ids),
+      codes = cluster_codes,
       n_dims = train.dims_sup,
       ids = adj_cluster_ids,
       offsets = adj_cluster_offsets,
       neighbors = adj_cluster_neighbors,
-    })
-
-    train.cluster_stats = eval.score_clustering({
-      ids = train.codes_clusters.ids,
-      offsets = train.codes_clusters.offsets,
-      merges = train.codes_clusters.merges,
-      expected_ids = train.ground_truth_sup.retrieval.ids,
-      expected_offsets = train.ground_truth_sup.retrieval.offsets,
-      expected_neighbors = train.ground_truth_sup.retrieval.neighbors,
-      expected_weights = train.ground_truth_sup.retrieval.weights,
-      metric = cfg.search.eval.metric,
-      elbow = cfg.search.cluster_eval.elbow,
-      elbow_target = cfg.search.cluster_eval.elbow_target,
-      elbow_alpha = cfg.search.cluster_eval.elbow_alpha,
+      quality = true,
     })
 
     if cfg.cluster.verbose then
-      for step = 0, train.cluster_stats.n_steps do
+      for step = 0, train.codes_clusters.n_steps do
         local d, dd = stopwatch()
         str.printf("  Time: %6.2f %6.2f | Step: %2d | Quality: %.2f | Clusters: %d\n",
-          d, dd, step, train.cluster_stats.quality_curve:get(step),
-          train.cluster_stats.n_clusters_curve:get(step))
+          d, dd, step, train.codes_clusters.quality_curve:get(step),
+          train.codes_clusters.n_clusters_curve:get(step))
       end
     end
 
     str.printf("\nClustering Metrics\n")
-    str.printf("  Best Step: %d (dendrogram cut point)\n", train.cluster_stats.best_step)
-    str.printf("  Quality: %.4f (rank-biserial correlation: cluster membership vs expected similarity)\n",
-      train.cluster_stats.quality)
+    str.printf("  Best Step: %d (lmethod elbow on log-scaled intracluster similarity)\n", train.codes_clusters.best_step)
+    str.printf("  Quality: %.4f (average similarity to cluster centroid)\n",
+      train.codes_clusters.quality)
     str.printf("  Clusters: %d (number of clusters at best step, target is %d categories)\n",
-      train.cluster_stats.n_clusters, cfg.data.n_classes)
-    str.printf("  Interpretation: Quality near 1.0 means cluster membership strongly correlates with\n")
-    str.printf("                  category-based expected neighbors; cluster count near %d is ideal.\n", cfg.data.n_classes)
+      train.codes_clusters.n_clusters, cfg.data.n_classes)
 
     if cfg.landmark_filter.enabled then
       print("\nLandmark Filtering (cluster-based authority selection)")
@@ -902,8 +840,8 @@ test("newsgroups", function()
         cluster_assignments = eval.dendro_cut(
           train.codes_clusters.offsets,
           train.codes_clusters.merges,
-          train.cluster_stats.best_step)
-        n_clusters_used = train.cluster_stats.n_clusters
+          train.codes_clusters.best_step)
+        n_clusters_used = train.codes_clusters.n_clusters
       end
       str.printf("  Cluster assignments: %d samples, %d clusters\n",
         cluster_assignments:size(), n_clusters_used)
@@ -1077,7 +1015,7 @@ test("newsgroups", function()
           category_anchors = cfg.search.eval.anchors,
           random_pairs = cfg.search.eval.pairs,
         })
-      encoder_args.search_metric = function (t, enc_info)
+      encoder_args.search_metric = function (t)
         local val_pred = t:predict(validate.raw_encoder_sentences, validate.n)
         local idx_val = ann.create({ features = train.dims_sup, expected_size = validate.n })
         idx_val:add(val_pred, validate.ids)
@@ -1099,8 +1037,6 @@ test("newsgroups", function()
           expected_weights = val_adj_expected_weights,
           ranking = cfg.search.eval.ranking,
           metric = cfg.search.eval.metric,
-          elbow = train.spectral_params_sup.eval.elbow,
-          elbow_alpha = train.spectral_params_sup.eval.elbow_alpha,
           n_dims = train.dims_sup,
         })
         idx_val:destroy()
@@ -1108,18 +1044,14 @@ test("newsgroups", function()
         val_retrieved_offsets:destroy()
         val_retrieved_neighbors:destroy()
         val_retrieved_weights:destroy()
-        return val_stats.combined, val_stats
+        return val_stats.score, val_stats
       end
       encoder_args.each = function (_, is_final, metrics, params, epoch, round, trial)
         local d, dd = stopwatch()
-        if is_final then
-          str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%d S=%.2f IB=%d  raw V=%d  Epoch  %d\n",
-            d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, n_raw_v, epoch)
-        else
-          str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%d S=%.2f IB=%d  raw V=%d  R=%d T=%d  Epoch  %d\n",
-            d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, n_raw_v, round, trial, epoch)
-        end
-        str.printf("    Val | Score: %.4f | Quality: %.4f | Combined: %.4f\n", metrics.score, metrics.quality, metrics.combined)
+        local phase = is_final and "[F]" or str.format("[R%d T%d]", round, trial)
+        str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d V=%d score=%.4f\n",
+          epoch, phase, d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
+          params.target, params.specificity, params.include_bits, n_raw_v, metrics.score)
       end
     elseif cfg.encoder.mode == "unsup_to_sup" then
       str.printf("\nTraining encoder (mode=unsup_to_sup, %d unsup dims -> %d sup dims)\n",
@@ -1153,7 +1085,7 @@ test("newsgroups", function()
           category_anchors = cfg.search.eval.anchors,
           random_pairs = cfg.search.eval.pairs,
         })
-      encoder_args.search_metric = function (t, enc_info)
+      encoder_args.search_metric = function (t)
         local val_pred = t:predict(validate.unsup_encoder_sentences, validate.n)
         local idx_val = ann.create({ features = train.dims_sup, expected_size = validate.n })
         idx_val:add(val_pred, validate.ids)
@@ -1175,8 +1107,6 @@ test("newsgroups", function()
           expected_weights = val_adj_expected_weights,
           ranking = cfg.search.eval.ranking,
           metric = cfg.search.eval.metric,
-          elbow = train.spectral_params_sup.eval.elbow,
-          elbow_alpha = train.spectral_params_sup.eval.elbow_alpha,
           n_dims = train.dims_sup,
         })
         idx_val:destroy()
@@ -1184,18 +1114,14 @@ test("newsgroups", function()
         val_retrieved_offsets:destroy()
         val_retrieved_neighbors:destroy()
         val_retrieved_weights:destroy()
-        return val_stats.combined, val_stats
+        return val_stats.score, val_stats
       end
       encoder_args.each = function (_, is_final, metrics, params, epoch, round, trial)
         local d, dd = stopwatch()
-        if is_final then
-          str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%d S=%.2f IB=%d  unsup_to_sup  Epoch  %d\n",
-            d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, epoch)
-        else
-          str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%d S=%.2f IB=%d  unsup_to_sup  R=%d T=%d  Epoch  %d\n",
-            d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, round, trial, epoch)
-        end
-        str.printf("    Val | Score: %.4f | Quality: %.4f | Combined: %.4f\n", metrics.score, metrics.quality, metrics.combined)
+        local phase = is_final and "[F]" or str.format("[R%d T%d]", round, trial)
+        str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d unsup_to_sup score=%.4f\n",
+          epoch, phase, d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
+          params.target, params.specificity, params.include_bits, metrics.score)
       end
     else
       local base_landmarks_index = train.filtered_node_features or train.node_features
@@ -1227,15 +1153,11 @@ test("newsgroups", function()
         local mode = params.landmark_mode or "?"
         local uses_thresh = mode == "frequency" or mode == "weighted"
         local th = uses_thresh and (params.n_thresholds or "-") or "-"
-        local mode_short = mode == "frequency" and "freq" or (mode == "weighted" and "weighted" or "concat")
-        if is_final then
-          str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%d S=%.2f IB=%d  %s LM=%s TH=%s  Epoch  %d\n",
-            d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, mode_short, lm, th, epoch)
-        else
-          str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%d S=%.2f IB=%d  %s LM=%s TH=%s  R=%d T=%d  Epoch  %d\n",
-            d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, mode_short, lm, th, round, trial, epoch)
-        end
-        str.printi("    Train | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)", train_accuracy)
+        local mode_short = mode == "frequency" and "freq" or (mode == "weighted" and "wt" or "cat")
+        local phase = is_final and "[F]" or str.format("[R%d T%d]", round, trial)
+        str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d %s LM=%s TH=%s ham=%.2f\n",
+          epoch, phase, d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
+          params.target, params.specificity, params.include_bits, mode_short, lm, th, train_accuracy.mean_hamming)
       end
     end
 
@@ -1244,8 +1166,7 @@ test("newsgroups", function()
 
     print("\nFinal encoder performance")
     if cfg.encoder.mode == "raw" or cfg.encoder.mode == "unsup_to_sup" then
-      str.printf("  Val | Score: %.4f | Quality: %.4f | Combined: %.4f\n",
-        train.encoder_accuracy.score, train.encoder_accuracy.quality, train.encoder_accuracy.combined)
+      str.printf("  Val | Score: %.4f\n", train.encoder_accuracy.score)
     else
       str.printi("  Train | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)", train.encoder_accuracy)
     end
@@ -1399,8 +1320,6 @@ test("newsgroups", function()
       expected_weights = train.adj_expected_weights,
       ranking = cfg.search.eval.ranking,
       metric = cfg.search.eval.metric,
-      elbow = train.spectral_params_sup.eval.elbow,
-      elbow_alpha = train.spectral_params_sup.eval.elbow_alpha,
       n_dims = train.dims_sup,
     })
 
@@ -1416,21 +1335,13 @@ test("newsgroups", function()
       expected_weights = test_adj_expected_weights,
       ranking = cfg.search.eval.ranking,
       metric = cfg.search.eval.metric,
-      elbow = train.spectral_params_sup.eval.elbow,
-      elbow_alpha = train.spectral_params_sup.eval.elbow_alpha,
       n_dims = train.dims_sup,
     })
 
     str.printf("\nEncoder Retrieval Results\n")
-    str.printf("  Original | Score: %.4f | Quality: %.4f | Combined: %.4f\n",
-      train.retrieval_stats.score, train.retrieval_stats.quality,
-      train.retrieval_stats.combined)
-    str.printf("  Train    | Score: %.4f | Quality: %.4f | Combined: %.4f\n",
-      train_pred_stats.score, train_pred_stats.quality,
-      train_pred_stats.combined)
-    str.printf("  Test     | Score: %.4f | Quality: %.4f | Combined: %.4f\n",
-      test_pred_stats.score, test_pred_stats.quality,
-      test_pred_stats.combined)
+    str.printf("  Original | Score: %.4f\n", train.retrieval_stats.score)
+    str.printf("  Train    | Score: %.4f\n", train_pred_stats.score)
+    str.printf("  Test     | Score: %.4f\n", test_pred_stats.score)
 
     print("\nSpot-check: Test k-NN Classification (test-to-test)")
     do
@@ -1668,15 +1579,10 @@ test("newsgroups", function()
           local test_pred = t:predict(test_predicted, test.n)
           local test_accuracy = eval.class_accuracy(test_pred, test.solutions, test.n, cfg.data.n_classes)
           local d, dd = stopwatch()
-          if is_final then
-            str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%.2f S=%.2f IB=%d  F1=(%.2f,%.2f)  Epoch %d\n",
-              d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
-              params.target, params.specificity, params.include_bits, val_accuracy.f1, test_accuracy.f1, epoch)
-          else
-            str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%.2f S=%.2f IB=%d  R=%d T=%d  F1=(%.2f,%.2f)  Epoch %d\n",
-              d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
-              params.target, params.specificity, params.include_bits, round, trial, val_accuracy.f1, test_accuracy.f1, epoch)
-          end
+          local phase = is_final and "[F]" or str.format("[R%d T%d]", round, trial)
+          str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d f1=(%.2f,%.2f)\n",
+            epoch, phase, d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
+            params.target, params.specificity, params.include_bits, val_accuracy.f1, test_accuracy.f1)
         end,
       })
 

@@ -1201,8 +1201,6 @@ M.score_spectral_eval = function (args)
     query_ids = eval_params.query_ids,
     ranking = eval_params.ranking,
     metric = eval_params.metric,
-    elbow = eval_params.elbow,
-    elbow_alpha = eval_params.elbow_alpha,
     n_dims = eval_dims,
   })
 
@@ -1215,13 +1213,8 @@ M.score_spectral_eval = function (args)
   if temp_raw then temp_raw:destroy() end
   if temp_kept then temp_kept:destroy() end
 
-  local target = eval_params.target or "combined"
-  local target_score = stats[target]
-
-  return target_score, {
+  return stats.score, {
     score = stats.score,
-    quality = stats.quality,
-    combined = stats.combined,
     n_dims = eval_dims,
     selected_elbow = selected_elbow,
     total_queries = stats.total_queries,
@@ -1271,8 +1264,6 @@ M.spectral = function (args)
   local adj_fixed = M.tier_all_fixed(adjacency_cfg)
   local spec_fixed = M.tier_all_fixed(spectral_cfg)
   local eval_fixed = M.tier_all_fixed(eval_cfg)
-    and (type(eval_cfg.elbow) ~= "table" or #eval_cfg.elbow <= 1)
-    and not has_alpha_range(eval_cfg.elbow_alpha)
     and (type(eval_cfg.select_elbow) ~= "table" or #eval_cfg.select_elbow <= 1)
     and not has_alpha_range(eval_cfg.select_elbow_alpha)
     and (type(eval_cfg.select_metric) ~= "table" or #eval_cfg.select_metric <= 1)
@@ -1303,9 +1294,6 @@ M.spectral = function (args)
       select_params.select_metric_alpha = select_metric_alpha
     end
 
-    local elbow, elbow_alpha = M.sample_elbow(eval_cfg.elbow, eval_cfg.elbow_alpha, true)
-    eval_params.elbow = elbow
-    eval_params.elbow_alpha = elbow_alpha
     if eval_cfg.select_elbow then
       local select_elbow, select_elbow_alpha = M.sample_elbow(eval_cfg.select_elbow, eval_cfg.select_elbow_alpha, true)
       eval_params.select_elbow = select_elbow
@@ -1399,8 +1387,7 @@ M.spectral = function (args)
   end
 
   local function make_eval_key (select_key, p)
-    local alpha_str = p.elbow_alpha and str.format("%.2f", p.elbow_alpha) or "nil"
-    return str.format("%s|%s|%s|%s", select_key, p.elbow, alpha_str, p.ranking)
+    return str.format("%s|%s", select_key, p.ranking)
   end
 
   local function mem_kb ()
@@ -1562,9 +1549,6 @@ M.spectral = function (args)
                 end
 
                 local eval_params = M.sample_tier(eval_cfg)
-                local elbow, elbow_alpha = M.sample_elbow(eval_cfg.elbow, eval_cfg.elbow_alpha)
-                eval_params.elbow = elbow
-                eval_params.elbow_alpha = elbow_alpha
                 if eval_cfg.select_elbow then
                   local select_elbow, select_elbow_alpha = M.sample_elbow(eval_cfg.select_elbow, eval_cfg.select_elbow_alpha)
                   eval_params.select_elbow = select_elbow

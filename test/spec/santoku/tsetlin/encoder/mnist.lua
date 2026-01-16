@@ -93,11 +93,8 @@ local cfg; cfg = {
       pairs = 64,
       ranking = "ndcg",
       metric = "avg",
-      elbow = "lmethod",
-      elbow_alpha = nil,
       select_elbow = "lmethod",
       select_metric = "entropy",
-      target = "combined",
     },
     cluster_eval = {
       elbow = "plateau",
@@ -257,7 +254,6 @@ test("mnist-anchors", function()
         elseif info.event == "eval" then
           local e = info.params.eval
           local m = info.metrics
-          local alpha_str = e.elbow_alpha and str.format("%.1f", e.elbow_alpha) or "-"
           local select_str = ""
           if e.select_metric and e.select_metric ~= "none" then
             local sel_alpha = e.select_elbow_alpha and str.format("%.1f", e.select_elbow_alpha) or "-"
@@ -271,8 +267,7 @@ test("mnist-anchors", function()
             end
             select_str = str.format(" [%s/%s(%s) %s]", e.select_metric, e.select_elbow, sel_alpha, dims_str)
           end
-          str.printf("    elbow=%s(%s) knn=%d score=%.4f quality=%.4f combined=%.4f%s\n",
-            e.elbow, alpha_str, e.knn, m.score, m.quality, m.combined, select_str)
+          str.printf("    knn=%d score=%.4f%s\n", e.knn, m.score, select_str)
         end
       end or nil,
     })
@@ -349,14 +344,10 @@ test("mnist-anchors", function()
     expected_weights = train.adj_expected_weights,
     ranking = cfg.search.eval.ranking,
     metric = cfg.search.eval.metric,
-    elbow = cfg.search.eval.elbow,
-    elbow_alpha = cfg.search.eval.elbow_alpha,
     n_dims = train.dims_sup,
   })
 
-  str.printf("\nRetrieval\n  Score: %.4f | Quality: %.4f | Combined: %.4f\n",
-    train.retrieval_stats.score, train.retrieval_stats.quality,
-    train.retrieval_stats.combined)
+  str.printf("\nRetrieval\n  Score: %.4f\n", train.retrieval_stats.score)
 
   if cfg.cluster.enabled then
     print("\nSetting up clustering adjacency")
@@ -378,34 +369,21 @@ test("mnist-anchors", function()
       ids = adj_cluster_ids,
       offsets = adj_cluster_offsets,
       neighbors = adj_cluster_neighbors,
-    })
-
-    train.cluster_stats = eval.score_clustering({
-      ids = train.codes_clusters.ids,
-      offsets = train.codes_clusters.offsets,
-      merges = train.codes_clusters.merges,
-      expected_ids = train.ground_truth.retrieval.ids,
-      expected_offsets = train.ground_truth.retrieval.offsets,
-      expected_neighbors = train.ground_truth.retrieval.neighbors,
-      expected_weights = train.ground_truth.retrieval.weights,
-      metric = cfg.search.eval.metric,
-      elbow = cfg.search.cluster_eval.elbow,
-      elbow_target = cfg.search.cluster_eval.elbow_target,
-      elbow_alpha = cfg.search.cluster_eval.elbow_alpha,
+      quality = true,
     })
 
     if cfg.search.verbose then
-      for step = 0, train.cluster_stats.n_steps do
+      for step = 0, train.codes_clusters.n_steps do
         local d, dd = stopwatch()
         str.printf("  Time: %6.2f %6.2f | Step: %2d | Quality: %.2f | Clusters: %d\n",
-          d, dd, step, train.cluster_stats.quality_curve:get(step),
-          train.cluster_stats.n_clusters_curve:get(step))
+          d, dd, step, train.codes_clusters.quality_curve:get(step),
+          train.codes_clusters.n_clusters_curve:get(step))
       end
     end
 
     str.printf("Clustering\n  Best Step: %d | Quality: %.4f | Clusters: %d\n",
-      train.cluster_stats.best_step, train.cluster_stats.quality,
-      train.cluster_stats.n_clusters)
+      train.codes_clusters.best_step, train.codes_clusters.quality,
+      train.codes_clusters.n_clusters)
   end
 
   collectgarbage("collect")
@@ -458,14 +436,10 @@ test("mnist-anchors", function()
       end,
       each = function (_, is_final, train_accuracy, params, epoch, round, trial)
         local d, dd = stopwatch()
-        if is_final then
-          str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%d S=%.2f IB=%d  Epoch  %d\n",
-            d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, epoch)
-        else
-          str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%d S=%.2f IB=%d  R=%d T=%d  Epoch  %d\n",
-            d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, round, trial, epoch)
-        end
-        str.printi("    Train | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)", train_accuracy)
+        local phase = is_final and "[F]" or str.format("[R%d T%d]", round, trial)
+        str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d ham=%.2f\n",
+          epoch, phase, d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
+          params.target, params.specificity, params.include_bits, train_accuracy.mean_hamming)
       end,
     })
 
@@ -531,8 +505,6 @@ test("mnist-anchors", function()
       expected_weights = train.adj_expected_weights,
       ranking = cfg.search.eval.ranking,
       metric = cfg.search.eval.metric,
-      elbow = cfg.search.eval.elbow,
-      elbow_alpha = cfg.search.eval.elbow_alpha,
       n_dims = train.dims_sup,
     })
 
@@ -548,20 +520,12 @@ test("mnist-anchors", function()
       expected_weights = test_adj_expected_weights,
       ranking = cfg.search.eval.ranking,
       metric = cfg.search.eval.metric,
-      elbow = cfg.search.eval.elbow,
-      elbow_alpha = cfg.search.eval.elbow_alpha,
       n_dims = train.dims_sup,
     })
 
-    str.printf("  Original | Score: %.4f | Quality: %.4f | Combined: %.4f\n",
-      train.retrieval_stats.score, train.retrieval_stats.quality,
-      train.retrieval_stats.combined)
-    str.printf("  Train    | Score: %.4f | Quality: %.4f | Combined: %.4f\n",
-      train_pred_stats.score, train_pred_stats.quality,
-      train_pred_stats.combined)
-    str.printf("  Test     | Score: %.4f | Quality: %.4f | Combined: %.4f\n",
-      test_pred_stats.score, test_pred_stats.quality,
-      test_pred_stats.combined)
+    str.printf("  Original | Score: %.4f\n", train.retrieval_stats.score)
+    str.printf("  Train    | Score: %.4f\n", train_pred_stats.score)
+    str.printf("  Test     | Score: %.4f\n", test_pred_stats.score)
 
     idx_train_pred:destroy()
     idx_test_pred:destroy()
