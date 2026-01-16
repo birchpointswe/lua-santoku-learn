@@ -50,7 +50,6 @@ typedef enum {
   TK_EVAL_ELBOW_MAX_CURVATURE,
   TK_EVAL_ELBOW_OTSU,
   TK_EVAL_ELBOW_FIRST_GAP,
-  TK_EVAL_ELBOW_FIRST_GAP_RATIO,
 } tk_eval_elbow_t;
 
 static inline tk_eval_elbow_t tk_eval_parse_elbow (const char *elbow_str) {
@@ -68,8 +67,6 @@ static inline tk_eval_elbow_t tk_eval_parse_elbow (const char *elbow_str) {
     return TK_EVAL_ELBOW_OTSU;
   if (!strcmp(elbow_str, "first_gap"))
     return TK_EVAL_ELBOW_FIRST_GAP;
-  if (!strcmp(elbow_str, "first_gap_ratio"))
-    return TK_EVAL_ELBOW_FIRST_GAP_RATIO;
   return TK_EVAL_ELBOW_NONE;
 }
 
@@ -194,7 +191,6 @@ static inline int tm_class_accuracy (lua_State *L)
   free(f1);
   lua_replace(L, 1);
   lua_settop(L, 1);
-  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -488,7 +484,6 @@ static inline int tm_retrieval_accuracy_lua (lua_State *L)
   lua_setfield(L, -2, "score");
   lua_replace(L, 1);
   lua_settop(L, 1);
-  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -568,7 +563,6 @@ static inline int tm_encoding_accuracy (lua_State *L)
 
   lua_replace(L, 1);
   lua_settop(L, 1);
-  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -775,7 +769,8 @@ static inline int tk_cluster_centroid(
   tk_ivec_t *adj_neighbors,
   uint64_t n_bits,
   tk_ivec_t *dendro_offsets,
-  tk_pvec_t *dendro_merges
+  tk_pvec_t *dendro_merges,
+  bool early_exit
 ) {
   if ((dendro_offsets && !dendro_merges) || (!dendro_offsets && dendro_merges)) {
     return -1;
@@ -1239,7 +1234,7 @@ static inline int tk_cluster_centroid(
     char *cj_code = tk_centroid_code(cj->centroid);
 
 
-    uint64_t heap_min = (edge_heap->n > 0) ? (uint64_t)edge_heap->a[0].w : 0;
+    uint64_t heap_min = early_exit && edge_heap->n > 0 ? (uint64_t)edge_heap->a[0].w : 0;
 
     for (khint_t k = tk_iuset_begin(cj->neighbor_ids);
          k != tk_iuset_end(cj->neighbor_ids); ++k) {
@@ -1353,7 +1348,8 @@ static inline tm_cluster_result_t tm_cluster_agglo (
   tk_ivec_t *adj_offsets,
   tk_ivec_t *adj_neighbors,
   uint64_t n_bits,
-  int i_eph
+  int i_eph,
+  bool early_exit
 ) {
   tm_cluster_result_t result;
 
@@ -1366,7 +1362,7 @@ static inline tm_cluster_result_t tm_cluster_agglo (
   lua_pop(L, 1);
 
   tk_cluster_centroid(L, codes, adj_ids, adj_offsets, adj_neighbors,
-                     n_bits, result.dendro_offsets, result.dendro_merges);
+                     n_bits, result.dendro_offsets, result.dendro_merges, early_exit);
 
   result.n_steps = result.dendro_offsets->n > adj_ids->n + 1 ?
                    result.dendro_offsets->n - adj_ids->n - 1 : 0;
@@ -1681,9 +1677,10 @@ static inline int tm_cluster (lua_State *L)
     tk_lua_verror(L, 3, "cluster", "neighbors", "required");
 
   uint64_t n_bits = tk_lua_fcheckunsigned(L, 1, "cluster", "n_dims");
+  bool early_exit = tk_lua_foptboolean(L, 1, "cluster", "early_exit", false);
 
   tm_cluster_result_t result = tm_cluster_agglo(
-    L, codes, ids, offsets, neighbors, n_bits, i_eph);
+    L, codes, ids, offsets, neighbors, n_bits, i_eph, early_exit);
 
   lua_newtable(L);
 
@@ -1701,7 +1698,6 @@ static inline int tm_cluster (lua_State *L)
 
   lua_replace(L, 1);
   lua_settop(L, 1);
-  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -1726,9 +1722,7 @@ static inline size_t tk_eval_apply_elbow_pvec (
     case TK_EVAL_ELBOW_OTSU:
       return tk_pvec_scores_otsu(v, out_val);
     case TK_EVAL_ELBOW_FIRST_GAP:
-      return tk_pvec_scores_first_gap(v, (int64_t)alpha, out_val);
-    case TK_EVAL_ELBOW_FIRST_GAP_RATIO:
-      return tk_pvec_scores_first_gap_ratio(v, alpha, out_val);
+      return tk_pvec_scores_first_gap(v, alpha, out_val);
     default:
       if (out_val) *out_val = (v->n > 0) ? v->a[v->n - 1].p : 0;
       return v->n > 0 ? v->n - 1 : 0;
@@ -1756,8 +1750,6 @@ static inline size_t tk_eval_apply_elbow_dvec (
       return tk_dvec_scores_otsu(v->a, v->n, out_val);
     case TK_EVAL_ELBOW_FIRST_GAP:
       return tk_dvec_scores_first_gap(v->a, v->n, alpha, out_val);
-    case TK_EVAL_ELBOW_FIRST_GAP_RATIO:
-      return tk_dvec_scores_first_gap_ratio(v->a, v->n, alpha, out_val);
     default:
       if (out_val) *out_val = (v->n > 0) ? v->a[v->n - 1] : 0.0;
       return v->n > 0 ? v->n - 1 : 0;
@@ -1987,7 +1979,6 @@ static inline int tm_score_retrieval (lua_State *L)
 
   lua_replace(L, 1);
   lua_settop(L, 1);
-  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -2357,7 +2348,6 @@ static inline int tm_optimize_bits (lua_State *L)
   tm_optimize_bits_prefix_greedy(L, &state, i_each);
   lua_replace(L, 1);
   lua_settop(L, 1);
-  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -2415,7 +2405,6 @@ static inline int tm_entropy_stats (lua_State *L)
   lua_setfield(L, -2, "std");
   lua_replace(L, 1);
   lua_settop(L, 1);
-  lua_gc(L, LUA_GCCOLLECT, 0);
   return 1;
 }
 
@@ -2491,7 +2480,6 @@ static inline int tk_pvec_dendro_cut_lua (lua_State *L)
   lua_replace(L, 2);
   lua_replace(L, 3);
   lua_settop(L, 3);
-  lua_gc(L, LUA_GCCOLLECT, 0);
   return 3;
 }
 

@@ -187,6 +187,7 @@ static inline void tm_reweight_hoods (
 
   if (has_error)
     tk_lua_verror(L, 2, "reweight_hoods", "worker allocation failed");
+
 }
 
 static inline void tm_compute_cknn_rhos (
@@ -942,6 +943,7 @@ static inline tk_pvec_t *tm_add_anchor_edges_immediate(
           if (anchors->n == 0)
             continue;
 
+          tk_fast_mcg_state = tk_hash_mix((uint64_t)f + 1);
           tk_ivec_shuffle(anchors, 0, anchors->n);
           for (uint64_t i = 0; i < anchors->n; i++) {
             int64_t u = anchors->a[i];
@@ -2016,12 +2018,10 @@ static inline int tm_adjacency (lua_State *L)
   if (is_cknn) {
     tk_lua_replace(L, 1, 3);
     lua_settop(L, 3);
-    lua_gc(L, LUA_GCCOLLECT, 0);
     return 3;
   } else {
     tk_lua_replace(L, 1, 4);
     lua_settop(L, 4);
-    lua_gc(L, LUA_GCCOLLECT, 0);
     return 4;
   }
 }
@@ -2174,7 +2174,6 @@ static inline int tm_adj_pairs (lua_State *L)
   tk_ivec_register(L, offsets);
   tk_ivec_register(L, neighbors);
   tk_dvec_register(L, weights);
-  lua_gc(L, LUA_GCCOLLECT, 0);
   return 4;
 }
 
@@ -2214,7 +2213,6 @@ static inline int tm_adj_hoods(lua_State *L)
   tk_ivec_register(L, offsets);
   tk_ivec_register(L, neighbors);
   tk_dvec_register(L, weights);
-  lua_gc(L, LUA_GCCOLLECT, 0);
   return 3;
 }
 

@@ -8,6 +8,7 @@ typedef struct {
   uint64_t n_clauses;
   uint64_t n_chunks;
   uint64_t state_bits;
+  uint64_t include_bits;
   char *counts;
   char *actions;
   uint8_t tail_mask;
@@ -35,11 +36,13 @@ static inline int tk_automata_init (
   uint64_t n_clauses,
   uint64_t n_chunks,
   uint64_t state_bits,
-  uint8_t tail_mask
+  uint8_t tail_mask,
+  uint64_t include_bits
 ) {
   aut->n_clauses = n_clauses;
   aut->n_chunks = n_chunks;
   aut->state_bits = state_bits;
+  aut->include_bits = include_bits ? include_bits : 1;
   aut->tail_mask = tail_mask;
   uint64_t action_chunks = n_clauses * n_chunks;
   aut->actions = (char *)tk_malloc_aligned(L, action_chunks, TK_CVEC_BITS);
@@ -72,7 +75,6 @@ static inline void tk_automata_setup (
   uint64_t clause_last
 ) {
   uint64_t m = aut->state_bits - 1;
-  #pragma omp parallel for
   for (uint64_t clause = clause_first; clause <= clause_last; clause++) {
     for (uint64_t b = 0; b < m; b++) {
       uint8_t *counts_plane = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
@@ -491,6 +493,251 @@ static inline void tk_automata_dec_not (
 
   for (; k < n_chunks; k++) {
     tk_automata_dec_byte(aut, clause, k, ~input[k]);
+  }
+}
+
+static inline uint8_t tk_automata_included_byte (
+  tk_automata_t *aut,
+  uint64_t clause,
+  uint64_t chunk
+) {
+  uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
+  uint8_t included = actions[chunk];
+  uint64_t m = aut->state_bits - 1;
+  for (uint64_t i = 1; i < aut->include_bits && i <= m; i++) {
+    uint8_t *plane = (uint8_t *)tk_automata_counts_plane(aut, clause, m - i);
+    included &= plane[chunk];
+  }
+  return included;
+}
+
+static inline void tk_automata_dec_byte_excluded (
+  tk_automata_t *aut,
+  uint64_t clause,
+  uint64_t chunk,
+  uint8_t active
+) {
+  uint8_t included = tk_automata_included_byte(aut, clause, chunk);
+  active &= ~included;
+  if (!active) return;
+  tk_automata_dec_byte(aut, clause, chunk, active);
+}
+
+static inline void tk_automata_inc_byte_excluded (
+  tk_automata_t *aut,
+  uint64_t clause,
+  uint64_t chunk,
+  uint8_t active
+) {
+  uint8_t included = tk_automata_included_byte(aut, clause, chunk);
+  active &= ~included;
+  if (!active) return;
+  tk_automata_inc_byte(aut, clause, chunk, active);
+}
+
+static inline void tk_automata_dec_not_excluded (
+  tk_automata_t *aut,
+  uint64_t clause,
+  const uint8_t *input,
+  uint64_t n_chunks
+) {
+  uint64_t m = aut->state_bits - 1;
+  uint64_t ib = aut->include_bits;
+  uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
+
+  uint8_t *counts_planes[m];
+  for (uint64_t b = 0; b < m; b++) {
+    counts_planes[b] = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
+  }
+
+  uint64_t k = 0;
+
+#ifdef __SIZEOF_INT128__
+  for (; k + 15 < n_chunks; k += 16) {
+    __uint128_t inp_val;
+    memcpy(&inp_val, &input[k], sizeof(__uint128_t));
+    __uint128_t included;
+    memcpy(&included, &actions[k], sizeof(__uint128_t));
+    for (uint64_t i = 1; i < ib && i <= m; i++) {
+      __uint128_t plane;
+      memcpy(&plane, &counts_planes[m - i][k], sizeof(__uint128_t));
+      included &= plane;
+    }
+    __uint128_t borrow = ~inp_val & ~included;
+
+    for (uint64_t b = 0; b < m; b++) {
+      __uint128_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(__uint128_t));
+      __uint128_t borrow_next = ~counts & borrow;
+      __uint128_t new_counts = counts ^ borrow;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(__uint128_t));
+      borrow = borrow_next;
+    }
+
+    __uint128_t acts;
+    memcpy(&acts, &actions[k], sizeof(__uint128_t));
+    __uint128_t borrow_next = ~acts & borrow;
+    __uint128_t new_acts = acts ^ borrow;
+    memcpy(&actions[k], &new_acts, sizeof(__uint128_t));
+    borrow = borrow_next;
+
+    __uint128_t not_borrow = ~borrow;
+    for (uint64_t b = 0; b < m; b++) {
+      __uint128_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(__uint128_t));
+      __uint128_t new_counts = counts & not_borrow;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(__uint128_t));
+    }
+    memcpy(&acts, &actions[k], sizeof(__uint128_t));
+    acts = acts & not_borrow;
+    memcpy(&actions[k], &acts, sizeof(__uint128_t));
+  }
+#else
+  for (; k + 7 < n_chunks; k += 8) {
+    uint64_t inp_val;
+    memcpy(&inp_val, &input[k], sizeof(uint64_t));
+    uint64_t included;
+    memcpy(&included, &actions[k], sizeof(uint64_t));
+    for (uint64_t i = 1; i < ib && i <= m; i++) {
+      uint64_t plane;
+      memcpy(&plane, &counts_planes[m - i][k], sizeof(uint64_t));
+      included &= plane;
+    }
+    uint64_t borrow = ~inp_val & ~included;
+
+    for (uint64_t b = 0; b < m; b++) {
+      uint64_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(uint64_t));
+      uint64_t borrow_next = ~counts & borrow;
+      uint64_t new_counts = counts ^ borrow;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(uint64_t));
+      borrow = borrow_next;
+    }
+
+    uint64_t acts;
+    memcpy(&acts, &actions[k], sizeof(uint64_t));
+    uint64_t borrow_next = ~acts & borrow;
+    uint64_t new_acts = acts ^ borrow;
+    memcpy(&actions[k], &new_acts, sizeof(uint64_t));
+    borrow = borrow_next;
+
+    uint64_t not_borrow = ~borrow;
+    for (uint64_t b = 0; b < m; b++) {
+      uint64_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(uint64_t));
+      uint64_t new_counts = counts & not_borrow;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(uint64_t));
+    }
+    memcpy(&acts, &actions[k], sizeof(uint64_t));
+    acts = acts & not_borrow;
+    memcpy(&actions[k], &acts, sizeof(uint64_t));
+  }
+#endif
+
+  for (; k < n_chunks; k++) {
+    tk_automata_dec_byte_excluded(aut, clause, k, ~input[k]);
+  }
+}
+
+static inline void tk_automata_inc_not_excluded (
+  tk_automata_t *aut,
+  uint64_t clause,
+  const uint8_t *input,
+  uint64_t n_chunks
+) {
+  uint64_t m = aut->state_bits - 1;
+  uint64_t ib = aut->include_bits;
+  uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
+
+  uint8_t *counts_planes[m];
+  for (uint64_t b = 0; b < m; b++) {
+    counts_planes[b] = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
+  }
+
+  uint64_t k = 0;
+
+#ifdef __SIZEOF_INT128__
+  for (; k + 15 < n_chunks; k += 16) {
+    __uint128_t inp_val;
+    memcpy(&inp_val, &input[k], sizeof(__uint128_t));
+    __uint128_t included;
+    memcpy(&included, &actions[k], sizeof(__uint128_t));
+    for (uint64_t i = 1; i < ib && i <= m; i++) {
+      __uint128_t plane;
+      memcpy(&plane, &counts_planes[m - i][k], sizeof(__uint128_t));
+      included &= plane;
+    }
+    __uint128_t carry = ~inp_val & ~included;
+
+    for (uint64_t b = 0; b < m; b++) {
+      __uint128_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(__uint128_t));
+      __uint128_t carry_next = counts & carry;
+      __uint128_t new_counts = counts ^ carry;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(__uint128_t));
+      carry = carry_next;
+    }
+
+    __uint128_t acts;
+    memcpy(&acts, &actions[k], sizeof(__uint128_t));
+    __uint128_t carry_next = acts & carry;
+    __uint128_t new_acts = acts ^ carry;
+    memcpy(&actions[k], &new_acts, sizeof(__uint128_t));
+    carry = carry_next;
+
+    for (uint64_t b = 0; b < m; b++) {
+      __uint128_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(__uint128_t));
+      __uint128_t new_counts = counts | carry;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(__uint128_t));
+    }
+    memcpy(&acts, &actions[k], sizeof(__uint128_t));
+    acts = acts | carry;
+    memcpy(&actions[k], &acts, sizeof(__uint128_t));
+  }
+#else
+  for (; k + 7 < n_chunks; k += 8) {
+    uint64_t inp_val;
+    memcpy(&inp_val, &input[k], sizeof(uint64_t));
+    uint64_t included;
+    memcpy(&included, &actions[k], sizeof(uint64_t));
+    for (uint64_t i = 1; i < ib && i <= m; i++) {
+      uint64_t plane;
+      memcpy(&plane, &counts_planes[m - i][k], sizeof(uint64_t));
+      included &= plane;
+    }
+    uint64_t carry = ~inp_val & ~included;
+
+    for (uint64_t b = 0; b < m; b++) {
+      uint64_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(uint64_t));
+      uint64_t carry_next = counts & carry;
+      uint64_t new_counts = counts ^ carry;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(uint64_t));
+      carry = carry_next;
+    }
+
+    uint64_t acts;
+    memcpy(&acts, &actions[k], sizeof(uint64_t));
+    uint64_t carry_next = acts & carry;
+    uint64_t new_acts = acts ^ carry;
+    memcpy(&actions[k], &new_acts, sizeof(uint64_t));
+    carry = carry_next;
+
+    for (uint64_t b = 0; b < m; b++) {
+      uint64_t counts;
+      memcpy(&counts, &counts_planes[b][k], sizeof(uint64_t));
+      uint64_t new_counts = counts | carry;
+      memcpy(&counts_planes[b][k], &new_counts, sizeof(uint64_t));
+    }
+    memcpy(&acts, &actions[k], sizeof(uint64_t));
+    acts = acts | carry;
+    memcpy(&actions[k], &acts, sizeof(uint64_t));
+  }
+#endif
+
+  for (; k < n_chunks; k++) {
+    tk_automata_inc_byte_excluded(aut, clause, k, ~input[k]);
   }
 }
 
