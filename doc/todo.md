@@ -1,7 +1,8 @@
 # Now
 
-- Support lambda for centroid optimization instead of on/off. When 0, off, when
-  1.0, default, used as an alpha to loosen/tighten the lower bound optimization
+- Support lambda for centroid clustering optimization instead of on/off. When 0,
+  off, when 1.0, default, used as an alpha to loosen/tighten the lower bound
+  optimization
 
 - Support passing in an index instead of codes to clustering, which allows
   clustering based on tk_inv_t, tk_ann_t, or tk_hbi_t using a new
@@ -11,30 +12,23 @@
 - Batch distance API for ann/inv indices (distance_many or similar) to avoid
   O(n*k) individual :distance() calls in diagnostics and weighted encoding
 
-- Parallelize booleanizer and tokenizer
-
-# Next
-
-- Rename library and project to santoku-learn
-
 - Extend tests
     - imdb encoder
     - qqp encoder/classifier
     - snli encoder/classifier
 
-- Additional capabilities
-    - Sparse/dense PCA for dimensionality reduction (can be followed by ITQ)
-    - Sparse/dense linear SVM for codebook/classifier learning
-
 - Supplementary documentation similar to sth/hlth/nystrom for classification
   pipelines
 
-- Supplementary documentation similar to l-sth.md for the general classification
-  pipeline using tsetlin machines for binary, multiclass, and multi-output
-  scenarios
-    - Covering booleanizer, tokenizer, supporting external embeddings via
-      booleanizer, feature selection via learned clauses, feature selection via
-      chi2, mi, etc (look at test cases for all features)
+# Next
+
+- Parallelize booleanizer and tokenizer
+
+- Rename library and project to santoku-learn
+
+- Additional capabilities
+    - Sparse/dense PCA for dimensionality reduction (can be followed by ITQ)
+    - Sparse/dense linear SVM for codebook/classifier learning
 
 - Regression, autoencoder
 
