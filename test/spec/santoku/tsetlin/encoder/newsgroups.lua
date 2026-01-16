@@ -14,7 +14,7 @@ local itq = require("santoku.tsetlin.itq")
 local tokenizer = require("santoku.tokenizer")
 
 local cfg; cfg = {
-  early_exit_after = "retrieval",  -- nil, "spectral", "encoder", "retrieval"
+  early_exit_after = nil,  -- nil, "spectral", "encoder", "retrieval"
   lookup_mode = "token",        -- "token" (k-NN in token space) | "unsupervised" (k-NN in unsup spectral space)
   aggregate_mode = "supervised", -- "supervised" (aggregate sup codes) | "unsupervised" (aggregate unsup codes)
   data = {
@@ -76,21 +76,22 @@ local cfg; cfg = {
     enabled = true,
     verbose = true,
     mode = "raw",  -- "landmarks", "raw", or "unsup_to_sup"
-    raw_max_vocab = 32768,
+    individualized = true,  -- per-dimension feature selection
+    raw_max_vocab = 12288,
     raw_selection = "chi2",  -- "chi2" or "mi"
     unsup_n_dims = nil,  -- nil = use search.spectral.n_dims, or set explicit value
   },
   tm = {
-    clauses = { def = 32, min = 8, max = 64, round = 8 },
-    clause_tolerance = { def = 76, min = 16, max = 128, int = true },
-    clause_maximum = { def = 21, min = 16, max = 128, int = true },
-    target = { def = 33, min = 16, max = 128, int = true },
-    specificity = { def = 520, min = 400, max = 4000 },
-    include_bits = { def = 2, min = 1, max = 4, int = true },
+    clauses = { def = 24, min = 8, max = 256, round = 8 },
+    clause_tolerance = { def = 17, min = 16, max = 128, int = true },
+    clause_maximum = { def = 85, min = 16, max = 128, int = true },
+    target = { def = 17, min = 16, max = 128, int = true },
+    specificity = { def = 735, min = 400, max = 4000 },
+    include_bits = { def = 3, min = 1, max = 4, int = true },
   },
   tm_search = {
     patience = 2,
-    rounds = 0,
+    rounds = 6,
     trials = 10,
     iterations = 20,
   },
@@ -100,12 +101,12 @@ local cfg; cfg = {
   },
   classifier = {
     enabled = true,
-    clauses = { def = 16, min = 8, max = 32, round = 8 },
-    clause_tolerance = { def = 64, min = 16, max = 128, int = true },
-    clause_maximum = { def = 64, min = 16, max = 128, int = true },
-    target = { def = 32, min = 16, max = 128, int = true },
-    specificity = { def = 1000, min = 400, max = 4000 },
-    include_bits = { def = 1, min = 1, max = 4, int = true },
+    clauses = { def = 8, min = 8, max = 32, round = 8 },
+    clause_tolerance = { def = 35, min = 16, max = 128, int = true },
+    clause_maximum = { def = 44, min = 16, max = 128, int = true },
+    target = { def = 58, min = 16, max = 128, int = true },
+    specificity = { def = 858, min = 400, max = 4000 },
+    include_bits = { def = 2, min = 1, max = 4, int = true },
     negative = 0.5,
     search_patience = 2,
     search_rounds = 4,
@@ -121,9 +122,9 @@ local cfg; cfg = {
     select_samples = 8,
     eval_samples = 4,
     adjacency = {
-      knn = { def = 24, min = 20, max = 35, int = true },
-      knn_alpha = { def = 15, min = 10, max = 16, int = true },
-      weight_decay = { def = 3.47, min = 2, max = 6 },
+      knn = { def = 23, min = 20, max = 35, int = true },
+      knn_alpha = { def = 14, min = 10, max = 16, int = true },
+      weight_decay = { def = 2.71, min = 2, max = 6 },
       knn_mutual = false,
       knn_mode = "cknn",
       knn_cache = 128,
@@ -608,184 +609,6 @@ test("newsgroups", function()
   train.adj_expected_neighbors = spectral_ground_truth.retrieval.neighbors
   train.adj_expected_weights = spectral_ground_truth.retrieval.weights
 
-  print("\nSpot-check: k-NN Classification & Precision (spectral codes)")
-  do
-    local max_k = 10
-    local knn_ids, knn_offsets, knn_neighbors = graph.adjacency({
-      knn_index = train.index_sup,
-      knn = max_k + 1,
-      bridge = "none",
-    })
-
-    local id_to_idx = {}
-    for i = 0, knn_ids:size() - 1 do
-      id_to_idx[knn_ids:get(i)] = i
-    end
-
-    local k_values = { 1, 3, 5, 10 }
-    for _, k in ipairs(k_values) do
-      local correct = 0
-      local total_precision = 0
-      local counted = 0
-      for i = 0, train.n - 1 do
-        local query_id = train.ids:get(i)
-        local idx = id_to_idx[query_id]
-        if idx then
-          local query_label = train.solutions:get(i)
-          local offset_start = knn_offsets:get(idx)
-          local offset_end = knn_offsets:get(idx + 1)
-          local votes = {}
-          local same_class = 0
-          local neighbor_count = 0
-          for j = offset_start, offset_end - 1 do
-            local neighbor_idx = knn_neighbors:get(j)
-            local neighbor_id = knn_ids:get(neighbor_idx)
-            if neighbor_id ~= query_id and neighbor_id < train.n then
-              neighbor_count = neighbor_count + 1
-              if neighbor_count <= k then
-                local neighbor_label = train.solutions:get(neighbor_id)
-                votes[neighbor_label] = (votes[neighbor_label] or 0) + 1
-                if neighbor_label == query_label then
-                  same_class = same_class + 1
-                end
-              end
-            end
-          end
-          if neighbor_count > 0 then
-            local best_label, best_count = -1, 0
-            for lbl, cnt in pairs(votes) do
-              if cnt > best_count then
-                best_label, best_count = lbl, cnt
-              end
-            end
-            if best_label == query_label then
-              correct = correct + 1
-            end
-            total_precision = total_precision + same_class / k
-            counted = counted + 1
-          end
-        end
-      end
-      if counted > 0 then
-        str.printf("  k=%2d: Accuracy = %.2f%% | Precision = %.2f%%\n",
-          k, 100 * correct / counted, 100 * total_precision / counted)
-      end
-    end
-    knn_ids:destroy()
-    knn_offsets:destroy()
-    knn_neighbors:destroy()
-  end
-
-  print("\nSpot-check: Example Retrievals (5 random samples)")
-  do
-    local k = 5
-    local knn_ids, knn_offsets, knn_neighbors = graph.adjacency({
-      knn_index = train.index_sup,
-      knn = k + 1,
-      bridge = "none",
-    })
-    local id_to_idx = {}
-    for i = 0, knn_ids:size() - 1 do
-      id_to_idx[knn_ids:get(i)] = i
-    end
-    local samples = { 0, 100, 500, 1000, 5000 }
-    for _, i in ipairs(samples) do
-      if i < train.n then
-        local query_id = train.ids:get(i)
-        local idx = id_to_idx[query_id]
-        if idx then
-          local query_label = train.solutions:get(i)
-          local query_cat = train.categories[query_label + 1]
-          local offset_start = knn_offsets:get(idx)
-          local offset_end = knn_offsets:get(idx + 1)
-          str.printf("  Sample %d [%s]:\n", i, query_cat)
-          local shown = 0
-          for j = offset_start, offset_end - 1 do
-            local neighbor_idx = knn_neighbors:get(j)
-            local neighbor_id = knn_ids:get(neighbor_idx)
-            if neighbor_id ~= query_id and neighbor_id < train.n and shown < k then
-              local neighbor_label = train.solutions:get(neighbor_id)
-              local neighbor_cat = train.categories[neighbor_label + 1]
-              local match = neighbor_cat == query_cat and "+" or "-"
-              str.printf("    %d. [%s] %s\n", shown + 1, match, neighbor_cat)
-              shown = shown + 1
-            end
-          end
-        end
-      end
-    end
-    knn_ids:destroy()
-    knn_offsets:destroy()
-    knn_neighbors:destroy()
-  end
-
-  print("\nPer-class train k=5 accuracy (spectral codes, train-to-train)")
-  do
-    local k = 5
-    local knn_ids, knn_offsets, knn_neighbors = graph.adjacency({
-      knn_index = train.index_sup,
-      knn = k + 1,
-      bridge = "none",
-    })
-    local id_to_idx = {}
-    for i = 0, knn_ids:size() - 1 do
-      id_to_idx[knn_ids:get(i)] = i
-    end
-    local class_correct = {}
-    local class_total = {}
-    for c = 0, cfg.data.n_classes - 1 do
-      class_correct[c] = 0
-      class_total[c] = 0
-    end
-    for i = 0, train.n - 1 do
-      local query_id = train.ids:get(i)
-      local idx = id_to_idx[query_id]
-      if idx then
-        local query_label = train.solutions:get(i)
-        local offset_start = knn_offsets:get(idx)
-        local offset_end = knn_offsets:get(idx + 1)
-        local votes = {}
-        local neighbor_count = 0
-        for j = offset_start, offset_end - 1 do
-          local neighbor_idx = knn_neighbors:get(j)
-          local neighbor_id = knn_ids:get(neighbor_idx)
-          if neighbor_id ~= query_id and neighbor_id < train.n then
-            neighbor_count = neighbor_count + 1
-            if neighbor_count <= k then
-              local neighbor_label = train.solutions:get(neighbor_id)
-              votes[neighbor_label] = (votes[neighbor_label] or 0) + 1
-            end
-          end
-        end
-        if neighbor_count > 0 then
-          class_total[query_label] = class_total[query_label] + 1
-          local best_label, best_count = -1, 0
-          for lbl, cnt in pairs(votes) do
-            if cnt > best_count then
-              best_label, best_count = lbl, cnt
-            end
-          end
-          if best_label == query_label then
-            class_correct[query_label] = class_correct[query_label] + 1
-          end
-        end
-      end
-    end
-    local sorted_classes = {}
-    for c = 0, cfg.data.n_classes - 1 do
-      local acc = class_total[c] > 0 and (class_correct[c] / class_total[c]) or 0
-      table.insert(sorted_classes, { c = c, acc = acc, n = class_total[c] })
-    end
-    table.sort(sorted_classes, function(a, b) return a.acc < b.acc end)
-    for _, item in ipairs(sorted_classes) do
-      local cat = train.categories[item.c + 1]
-      str.printf("  %5.1f%% (%4d) %s\n", 100 * item.acc, item.n, cat)
-    end
-    knn_ids:destroy()
-    knn_offsets:destroy()
-    knn_neighbors:destroy()
-  end
-
   if cfg.cluster.enabled then
     print("\nSetting up clustering adjacency")
     local adj_cluster_ids, adj_cluster_offsets, adj_cluster_neighbors =
@@ -810,6 +633,15 @@ test("newsgroups", function()
       quality = true,
     })
 
+    local cost_curve = dvec.create()
+    cost_curve:copy(train.codes_clusters.quality_curve)
+    cost_curve:log()
+    cost_curve:scale(-1)
+    local _, best_step = cost_curve:scores_elbow("lmethod")
+    train.codes_clusters.best_step = best_step
+    train.codes_clusters.quality = train.codes_clusters.quality_curve:get(best_step)
+    train.codes_clusters.n_clusters = train.codes_clusters.n_clusters_curve:get(best_step)
+
     if cfg.cluster.verbose then
       for step = 0, train.codes_clusters.n_steps do
         local d, dd = stopwatch()
@@ -819,12 +651,8 @@ test("newsgroups", function()
       end
     end
 
-    str.printf("\nClustering Metrics\n")
-    str.printf("  Best Step: %d (lmethod elbow on log-scaled intracluster similarity)\n", train.codes_clusters.best_step)
-    str.printf("  Quality: %.4f (average similarity to cluster centroid)\n",
-      train.codes_clusters.quality)
-    str.printf("  Clusters: %d (number of clusters at best step, target is %d categories)\n",
-      train.codes_clusters.n_clusters, cfg.data.n_classes)
+    str.printf("\nClustering: step=%d quality=%.4f clusters=%d\n",
+      train.codes_clusters.best_step, train.codes_clusters.quality, train.codes_clusters.n_clusters)
 
     if cfg.landmark_filter.enabled then
       print("\nLandmark Filtering (cluster-based authority selection)")
@@ -966,39 +794,76 @@ test("newsgroups", function()
 
     if cfg.encoder.mode == "raw" then
       local selection_method = cfg.encoder.raw_selection or "chi2"
-      str.printf("\nTraining encoder (mode=raw, selecting %d features by %s)\n", cfg.encoder.raw_max_vocab, selection_method)
-      local raw_vocab, raw_scores
-      if selection_method == "mi" then
-        raw_vocab, raw_scores = train.tokens:bits_top_mi(
-          train.codes_sup,
-          train.n,
-          n_top_v,
-          train.dims_sup,
+      local use_ind = cfg.encoder.individualized
+      str.printf("\nTraining encoder (mode=raw, selecting %d features by %s, individualized=%s)\n",
+        cfg.encoder.raw_max_vocab, selection_method, tostring(use_ind))
+
+      if use_ind then
+        local ids_union, feat_offsets, feat_ids = train.tokens:bits_top_chi2_ind(
+          train.codes_sup, train.n, n_top_v, train.dims_sup,
           cfg.encoder.raw_max_vocab)
+        local union_size = ids_union:size()
+        local total_features = feat_offsets:get(train.dims_sup)
+        str.printf("  Per-dimension chi2: union=%d total=%d (%.1fx expansion)\n",
+          union_size, total_features, total_features / union_size)
+        tok:restrict(ids_union)
+        local function to_ind_bitmap (split)
+          local toks = tok:tokenize(split.problems)
+          local ind, ind_off = toks:bits_individualize(feat_offsets, feat_ids, union_size)
+          local bitmap, dim_off = ind:bits_to_cvec_ind(ind_off, feat_offsets, split.n, true)
+          toks:destroy()
+          ind:destroy()
+          ind_off:destroy()
+          return bitmap, dim_off
+        end
+        local train_bitmap, train_dim_off = to_ind_bitmap(train)
+        local val_bitmap, val_dim_off = to_ind_bitmap(validate)
+        local test_bitmap, test_dim_off = to_ind_bitmap(test)
+        encoder_args.sentences = train_bitmap
+        encoder_args.visible = union_size
+        encoder_args.individualized = true
+        encoder_args.feat_offsets = feat_offsets
+        encoder_args.dim_offsets = train_dim_off
+        validate.raw_encoder_sentences = val_bitmap
+        validate.raw_encoder_dim_offsets = val_dim_off
+        test.raw_encoder_sentences = test_bitmap
+        test.raw_encoder_dim_offsets = test_dim_off
+        train.raw_encoder_feat_offsets = feat_offsets
+        train.raw_encoder_n_features = union_size
       else
-        raw_vocab, raw_scores = train.tokens:bits_top_chi2(
-          train.codes_sup,
-          train.n,
-          n_top_v,
-          train.dims_sup,
-          cfg.encoder.raw_max_vocab)
+        local raw_vocab, raw_scores
+        if selection_method == "mi" then
+          raw_vocab, raw_scores = train.tokens:bits_top_mi(
+            train.codes_sup,
+            train.n,
+            n_top_v,
+            train.dims_sup,
+            cfg.encoder.raw_max_vocab)
+        else
+          raw_vocab, raw_scores = train.tokens:bits_top_chi2(
+            train.codes_sup,
+            train.n,
+            n_top_v,
+            train.dims_sup,
+            cfg.encoder.raw_max_vocab)
+        end
+        local n_raw_v = raw_vocab:size()
+        str.printf("  Selected %d tokens by %s\n", n_raw_v, selection_method)
+        str.printf("  Score range: %.4f - %.4f\n", raw_scores:get(n_raw_v - 1), raw_scores:get(0))
+        train.raw_encoder_vocab = raw_vocab
+        train.raw_encoder_n_features = n_raw_v
+        local train_raw_selected = ivec.create()
+        train.tokens:bits_select(raw_vocab, nil, n_top_v, train_raw_selected)
+        local validate_raw_selected = ivec.create()
+        validate.tokens:bits_select(raw_vocab, nil, n_top_v, validate_raw_selected)
+        local test_raw_selected = ivec.create()
+        test.tokens:bits_select(raw_vocab, nil, n_top_v, test_raw_selected)
+        local train_raw_sentences = train_raw_selected:bits_to_cvec(train.n, n_raw_v, true)
+        validate.raw_encoder_sentences = validate_raw_selected:bits_to_cvec(validate.n, n_raw_v, true)
+        test.raw_encoder_sentences = test_raw_selected:bits_to_cvec(test.n, n_raw_v, true)
+        encoder_args.sentences = train_raw_sentences
+        encoder_args.visible = n_raw_v
       end
-      local n_raw_v = raw_vocab:size()
-      str.printf("  Selected %d tokens by %s\n", n_raw_v, selection_method)
-      str.printf("  Score range: %.4f - %.4f\n", raw_scores:get(n_raw_v - 1), raw_scores:get(0))
-      train.raw_encoder_vocab = raw_vocab
-      train.raw_encoder_n_features = n_raw_v
-      local train_raw_selected = ivec.create()
-      train.tokens:bits_select(raw_vocab, nil, n_top_v, train_raw_selected)
-      local validate_raw_selected = ivec.create()
-      validate.tokens:bits_select(raw_vocab, nil, n_top_v, validate_raw_selected)
-      local test_raw_selected = ivec.create()
-      test.tokens:bits_select(raw_vocab, nil, n_top_v, test_raw_selected)
-      local train_raw_sentences = train_raw_selected:bits_to_cvec(train.n, n_raw_v, true)
-      validate.raw_encoder_sentences = validate_raw_selected:bits_to_cvec(validate.n, n_raw_v, true)
-      test.raw_encoder_sentences = test_raw_selected:bits_to_cvec(test.n, n_raw_v, true)
-      encoder_args.sentences = train_raw_sentences
-      encoder_args.visible = n_raw_v
       print("Building expected adjacency for validate")
       validate.cat_index = inv.create({
         features = cfg.data.n_classes,
@@ -1015,8 +880,13 @@ test("newsgroups", function()
           category_anchors = cfg.search.eval.anchors,
           random_pairs = cfg.search.eval.pairs,
         })
-      encoder_args.search_metric = function (t)
-        local val_pred = t:predict(validate.raw_encoder_sentences, validate.n)
+      encoder_args.search_metric = function (t, _)
+        local val_pred
+        if validate.raw_encoder_dim_offsets then
+          val_pred = t:predict(validate.raw_encoder_sentences, validate.raw_encoder_dim_offsets, validate.n)
+        else
+          val_pred = t:predict(validate.raw_encoder_sentences, validate.n)
+        end
         local idx_val = ann.create({ features = train.dims_sup, expected_size = validate.n })
         idx_val:add(val_pred, validate.ids)
         local val_retrieved_ids, val_retrieved_offsets, val_retrieved_neighbors, val_retrieved_weights =
@@ -1051,7 +921,7 @@ test("newsgroups", function()
         local phase = is_final and "[F]" or str.format("[R%d T%d]", round, trial)
         str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d V=%d score=%.4f\n",
           epoch, phase, d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
-          params.target, params.specificity, params.include_bits, n_raw_v, metrics.score)
+          params.target, params.specificity, params.include_bits, train.raw_encoder_n_features, metrics.score)
       end
     elseif cfg.encoder.mode == "unsup_to_sup" then
       str.printf("\nTraining encoder (mode=unsup_to_sup, %d unsup dims -> %d sup dims)\n",
@@ -1252,9 +1122,16 @@ test("newsgroups", function()
     end
 
     print("\nPredicting codes with encoder")
-    local train_predicted = train.encoder:predict(train_encoder_input, train.n)
-    local test_predicted = train.encoder:predict(test_encoder_input, test.n)
-    local validate_predicted = train.encoder:predict(validate_encoder_input, validate.n)
+    local train_predicted, test_predicted, validate_predicted
+    if cfg.encoder.individualized then
+      train_predicted = train.encoder:predict(train_encoder_input, encoder_args.dim_offsets, train.n)
+      test_predicted = train.encoder:predict(test_encoder_input, test.raw_encoder_dim_offsets, test.n)
+      validate_predicted = train.encoder:predict(validate_encoder_input, validate.raw_encoder_dim_offsets, validate.n)
+    else
+      train_predicted = train.encoder:predict(train_encoder_input, train.n)
+      test_predicted = train.encoder:predict(test_encoder_input, test.n)
+      validate_predicted = train.encoder:predict(validate_encoder_input, validate.n)
+    end
     str.printf("  train_predicted: size=%d bytes, expected=%d bytes\n",
       train_predicted:size(), train.n * math.ceil(train.dims_sup / 8))
     str.printf("  test_predicted: size=%d bytes, expected=%d bytes\n",
@@ -1338,200 +1215,8 @@ test("newsgroups", function()
       n_dims = train.dims_sup,
     })
 
-    str.printf("\nEncoder Retrieval Results\n")
-    str.printf("  Original | Score: %.4f\n", train.retrieval_stats.score)
-    str.printf("  Train    | Score: %.4f\n", train_pred_stats.score)
-    str.printf("  Test     | Score: %.4f\n", test_pred_stats.score)
-
-    print("\nSpot-check: Test k-NN Classification (test-to-test)")
-    do
-      local max_k = 10
-      local knn_ids, knn_offsets, knn_neighbors = graph.adjacency({
-        knn_index = idx_test_pred,
-        knn = max_k + 1,
-        bridge = "none",
-      })
-
-      local id_to_idx = {}
-      for i = 0, knn_ids:size() - 1 do
-        id_to_idx[knn_ids:get(i)] = i
-      end
-
-      local k_values = { 1, 3, 5, 10 }
-      for _, k in ipairs(k_values) do
-        local correct = 0
-        local total_precision = 0
-        local counted = 0
-        for i = 0, test.n - 1 do
-          local query_id = test.ids:get(i)
-          local idx = id_to_idx[query_id]
-          if idx then
-            local query_label = test.solutions:get(i)
-            local offset_start = knn_offsets:get(idx)
-            local offset_end = knn_offsets:get(idx + 1)
-            local votes = {}
-            local same_class = 0
-            local neighbor_count = 0
-            for j = offset_start, offset_end - 1 do
-              local neighbor_idx = knn_neighbors:get(j)
-              local neighbor_id = knn_ids:get(neighbor_idx)
-              local test_id_start = train.n + validate.n
-              if neighbor_id ~= query_id and neighbor_id >= test_id_start then
-                local neighbor_test_idx = neighbor_id - test_id_start
-                if neighbor_test_idx < test.n then
-                  neighbor_count = neighbor_count + 1
-                  if neighbor_count <= k then
-                    local neighbor_label = test.solutions:get(neighbor_test_idx)
-                    votes[neighbor_label] = (votes[neighbor_label] or 0) + 1
-                    if neighbor_label == query_label then
-                      same_class = same_class + 1
-                    end
-                  end
-                end
-              end
-            end
-            if neighbor_count > 0 then
-              local best_label, best_count = -1, 0
-              for lbl, cnt in pairs(votes) do
-                if cnt > best_count then
-                  best_label, best_count = lbl, cnt
-                end
-              end
-              if best_label == query_label then
-                correct = correct + 1
-              end
-              total_precision = total_precision + same_class / k
-              counted = counted + 1
-            end
-          end
-        end
-        if counted > 0 then
-          str.printf("  k=%2d: Accuracy = %.2f%% | Precision = %.2f%%\n",
-            k, 100 * correct / counted, 100 * total_precision / counted)
-        end
-      end
-      knn_ids:destroy()
-      knn_offsets:destroy()
-      knn_neighbors:destroy()
-    end
-
-    print("\nPer-class test k=5 accuracy (test-to-test)")
-    do
-      local k = 5
-      local knn_ids, knn_offsets, knn_neighbors = graph.adjacency({
-        knn_index = idx_test_pred,
-        knn = k + 1,
-        bridge = "none",
-      })
-      local id_to_idx = {}
-      for i = 0, knn_ids:size() - 1 do
-        id_to_idx[knn_ids:get(i)] = i
-      end
-      local class_correct = {}
-      local class_total = {}
-      for c = 0, cfg.data.n_classes - 1 do
-        class_correct[c] = 0
-        class_total[c] = 0
-      end
-      for i = 0, test.n - 1 do
-        local query_id = test.ids:get(i)
-        local idx = id_to_idx[query_id]
-        if idx then
-          local query_label = test.solutions:get(i)
-          local offset_start = knn_offsets:get(idx)
-          local offset_end = knn_offsets:get(idx + 1)
-          local votes = {}
-          local neighbor_count = 0
-          local test_id_start = train.n + validate.n
-          for j = offset_start, offset_end - 1 do
-            local neighbor_idx = knn_neighbors:get(j)
-            local neighbor_id = knn_ids:get(neighbor_idx)
-            if neighbor_id ~= query_id and neighbor_id >= test_id_start then
-              local neighbor_test_idx = neighbor_id - test_id_start
-              if neighbor_test_idx < test.n then
-                neighbor_count = neighbor_count + 1
-                if neighbor_count <= k then
-                  local neighbor_label = test.solutions:get(neighbor_test_idx)
-                  votes[neighbor_label] = (votes[neighbor_label] or 0) + 1
-                end
-              end
-            end
-          end
-          if neighbor_count > 0 then
-            class_total[query_label] = class_total[query_label] + 1
-            local best_label, best_count = -1, 0
-            for lbl, cnt in pairs(votes) do
-              if cnt > best_count then
-                best_label, best_count = lbl, cnt
-              end
-            end
-            if best_label == query_label then
-              class_correct[query_label] = class_correct[query_label] + 1
-            end
-          end
-        end
-      end
-      local sorted_classes = {}
-      for c = 0, cfg.data.n_classes - 1 do
-        local acc = class_total[c] > 0 and (class_correct[c] / class_total[c]) or 0
-        table.insert(sorted_classes, { c = c, acc = acc, n = class_total[c] })
-      end
-      table.sort(sorted_classes, function(a, b) return a.acc < b.acc end)
-      for _, item in ipairs(sorted_classes) do
-        local cat = test.categories[item.c + 1]
-        str.printf("  %5.1f%% (%4d) %s\n", 100 * item.acc, item.n, cat)
-      end
-      knn_ids:destroy()
-      knn_offsets:destroy()
-      knn_neighbors:destroy()
-    end
-
-    print("\nSpot-check: Test Example Retrievals (5 random samples, test-to-test)")
-    do
-      local k = 5
-      local knn_ids, knn_offsets, knn_neighbors = graph.adjacency({
-        knn_index = idx_test_pred,
-        knn = k + 1,
-        bridge = "none",
-      })
-      local id_to_idx = {}
-      for i = 0, knn_ids:size() - 1 do
-        id_to_idx[knn_ids:get(i)] = i
-      end
-      local samples = { 0, 100, 500, 1000, 3000 }
-      for _, test_idx in ipairs(samples) do
-        if test_idx < test.n then
-          local query_id = test.ids:get(test_idx)
-          local idx = id_to_idx[query_id]
-          if idx then
-            local query_label = test.solutions:get(test_idx)
-            local query_cat = test.categories[query_label + 1]
-            local offset_start = knn_offsets:get(idx)
-            local offset_end = knn_offsets:get(idx + 1)
-            str.printf("  Test Sample %d [%s]:\n", test_idx, query_cat)
-            local shown = 0
-            local test_id_start = train.n + validate.n
-            for j = offset_start, offset_end - 1 do
-              local neighbor_idx = knn_neighbors:get(j)
-              local neighbor_id = knn_ids:get(neighbor_idx)
-              if neighbor_id ~= query_id and neighbor_id >= test_id_start then
-                local neighbor_test_idx = neighbor_id - test_id_start
-                if neighbor_test_idx < test.n and shown < k then
-                  local neighbor_label = test.solutions:get(neighbor_test_idx)
-                  local neighbor_cat = test.categories[neighbor_label + 1]
-                  local match = neighbor_cat == query_cat and "+" or "-"
-                  str.printf("    %d. [%s] %s\n", shown + 1, match, neighbor_cat)
-                  shown = shown + 1
-                end
-              end
-            end
-          end
-        end
-      end
-      knn_ids:destroy()
-      knn_offsets:destroy()
-      knn_neighbors:destroy()
-    end
+    str.printf("\nEncoder Retrieval: original=%.4f train=%.4f test=%.4f\n",
+      train.retrieval_stats.score, train_pred_stats.score, test_pred_stats.score)
 
     idx_train_pred:destroy()
     idx_test_pred:destroy()
@@ -1542,16 +1227,11 @@ test("newsgroups", function()
     end
 
     if cfg.classifier.enabled then
-      print("\n=== Classification on Predicted Codes ===")
-      str.printf("  Train: %d samples, Test: %d samples\n", train.n, test.n)
-      str.printf("  Features: %d bits, Classes: %d\n", train.dims_sup, cfg.data.n_classes)
-
-      print("Flip-interleaving predicted codes for classifier")
+      print("\nClassifier")
       train_predicted:bits_flip_interleave(train.dims_sup)
       validate_predicted:bits_flip_interleave(train.dims_sup)
       test_predicted:bits_flip_interleave(train.dims_sup)
 
-      print("\nOptimizing classifier on train predicted codes")
       local classifier = optimize.classifier({
         features = train.dims_sup,
         classes = cfg.data.n_classes,
@@ -1586,7 +1266,6 @@ test("newsgroups", function()
         end,
       })
 
-      print("\nFinal Classification Results")
       local train_class_pred = classifier:predict(train_predicted, train.n)
       local val_class_pred = classifier:predict(validate_predicted, validate.n)
       local test_class_pred = classifier:predict(test_predicted, test.n)
@@ -1594,28 +1273,8 @@ test("newsgroups", function()
       local val_class_stats = eval.class_accuracy(val_class_pred, validate.solutions, validate.n, cfg.data.n_classes)
       local test_class_stats = eval.class_accuracy(test_class_pred, test.solutions, test.n, cfg.data.n_classes)
 
-      str.printf("  Train F1: %.2f (P=%.2f R=%.2f)\n",
-        train_class_stats.f1, train_class_stats.precision, train_class_stats.recall)
-      str.printf("  Val   F1: %.2f (P=%.2f R=%.2f)\n",
-        val_class_stats.f1, val_class_stats.precision, val_class_stats.recall)
-      str.printf("  Test  F1: %.2f (P=%.2f R=%.2f)\n",
-        test_class_stats.f1, test_class_stats.precision, test_class_stats.recall)
-
-      print("\nPer-class Test Accuracy (sorted by difficulty):")
-      local class_order = {}
-      for c = 0, cfg.data.n_classes - 1 do
-        table.insert(class_order, c)
-      end
-      table.sort(class_order, function (a, b)
-        return test_class_stats.classes[a + 1].f1 < test_class_stats.classes[b + 1].f1
-      end)
-      for _, c in ipairs(class_order) do
-        local ts = test_class_stats.classes[c + 1]
-        local cat = test.categories[c + 1] or ("class_" .. c)
-        str.printf("  %-28s  F1=%.2f  P=%.2f  R=%.2f\n", cat, ts.f1, ts.precision, ts.recall)
-      end
-
-      print("=== END Classification ===\n")
+      str.printf("\nClassifier F1: train=%.2f val=%.2f test=%.2f\n",
+        train_class_stats.f1, val_class_stats.f1, test_class_stats.f1)
     end
   end
 
