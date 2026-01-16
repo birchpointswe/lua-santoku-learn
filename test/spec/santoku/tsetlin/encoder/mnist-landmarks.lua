@@ -63,6 +63,21 @@ local cfg; cfg = {
     patience = 2,
     iterations = 200,
   },
+  classifier = {
+    enabled = true,
+    clauses = { def = 8, min = 8, max = 32, round = 8 },
+    clause_tolerance = { def = 64, min = 16, max = 128, int = true },
+    clause_maximum = { def = 64, min = 16, max = 128, int = true },
+    target = { def = 32, min = 16, max = 128, int = true },
+    specificity = { def = 1000, min = 400, max = 4000 },
+    include_bits = { def = 1, min = 1, max = 4, int = true },
+    negative = 0.5,
+    search_patience = 2,
+    search_rounds = 4,
+    search_trials = 10,
+    search_iterations = 20,
+    final_iterations = 100,
+  },
   search = {
     rounds = 4,  -- 0 = use baselines (def values), >0 = explore
     adjacency_samples = 4,
@@ -602,6 +617,57 @@ test("mnist-anchors", function()
 
     idx_train_pred:destroy()
     idx_test_pred:destroy()
+
+    if cfg.classifier.enabled then
+      print("\nClassifier")
+      train_predicted:bits_flip_interleave(train.dims_sup)
+      validate_predicted:bits_flip_interleave(train.dims_sup)
+      test_predicted:bits_flip_interleave(train.dims_sup)
+
+      local classifier = optimize.classifier({
+        features = train.dims_sup,
+        classes = 10,
+        clauses = cfg.classifier.clauses,
+        clause_tolerance = cfg.classifier.clause_tolerance,
+        clause_maximum = cfg.classifier.clause_maximum,
+        target = cfg.classifier.target,
+        negative = cfg.classifier.negative,
+        specificity = cfg.classifier.specificity,
+        include_bits = cfg.classifier.include_bits,
+        samples = train.n,
+        problems = train_predicted,
+        solutions = train.solutions,
+        search_patience = cfg.classifier.search_patience,
+        search_rounds = cfg.classifier.search_rounds,
+        search_trials = cfg.classifier.search_trials,
+        search_iterations = cfg.classifier.search_iterations,
+        final_iterations = cfg.classifier.final_iterations,
+        search_metric = function (t)
+          local predicted = t:predict(validate_predicted, validate.n)
+          local accuracy = eval.class_accuracy(predicted, validate.solutions, validate.n, 10)
+          return accuracy.f1, accuracy
+        end,
+        each = function (t, is_final, val_accuracy, params, epoch, round, trial)
+          local test_pred = t:predict(test_predicted, test.n)
+          local test_accuracy = eval.class_accuracy(test_pred, test.solutions, test.n, 10)
+          local d, dd = stopwatch()
+          local phase = is_final and "[F]" or str.format("[R%d T%d]", round, trial)
+          str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d f1=(%.2f,%.2f)\n",
+            epoch, phase, d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
+            params.target, params.specificity, params.include_bits, val_accuracy.f1, test_accuracy.f1)
+        end,
+      })
+
+      local train_class_pred = classifier:predict(train_predicted, train.n)
+      local val_class_pred = classifier:predict(validate_predicted, validate.n)
+      local test_class_pred = classifier:predict(test_predicted, test.n)
+      local train_class_stats = eval.class_accuracy(train_class_pred, train.solutions, train.n, 10)
+      local val_class_stats = eval.class_accuracy(val_class_pred, validate.solutions, validate.n, 10)
+      local test_class_stats = eval.class_accuracy(test_class_pred, test.solutions, test.n, 10)
+
+      str.printf("\nClassifier F1: train=%.2f val=%.2f test=%.2f\n",
+        train_class_stats.f1, val_class_stats.f1, test_class_stats.f1)
+    end
   end
 
   collectgarbage("collect")
