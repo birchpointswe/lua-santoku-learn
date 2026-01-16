@@ -1,4 +1,4 @@
-require("santoku.dvec")
+local dvec = require("santoku.dvec")
 local cvec = require("santoku.cvec")
 local test = require("santoku.test")
 local ds = require("santoku.tsetlin.dataset")
