@@ -106,7 +106,7 @@ local cfg; cfg = {
     final_iterations = 100,
   },
   search = {
-    rounds = 0,
+    rounds = 4,
     patience = 3,
     adjacency_samples = 8,
     spectral_samples = 4,

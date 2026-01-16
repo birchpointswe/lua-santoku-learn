@@ -12,6 +12,7 @@ local utc = require("santoku.utc")
 local cfg = {
   data = {
     ttr = 0.9,
+    tvr = 0.1,
     max = nil,
     features = 784,
   },
@@ -42,14 +43,23 @@ test("tsetlin", function ()
   print("Reading data")
   local dataset = ds.read_binary_mnist("test/res/mnist.70k.txt", cfg.data.features, cfg.data.max)
   print("Splitting")
-  local train, test = ds.split_binary_mnist(dataset, cfg.data.ttr)
+  local train, test, validate = ds.split_binary_mnist(dataset, cfg.data.ttr, cfg.data.tvr)
+  str.printf("  Train:    %6d\n", train.n)
+  str.printf("  Validate: %6d\n", validate.n)
+  str.printf("  Test:     %6d\n", test.n)
+
   train.problems = ivec.create()
   dataset.problems:bits_select(nil, train.ids, dataset.n_features, train.problems)
+  validate.problems = ivec.create()
+  dataset.problems:bits_select(nil, validate.ids, dataset.n_features, validate.problems)
   test.problems = ivec.create()
   dataset.problems:bits_select(nil, test.ids, dataset.n_features, test.problems)
 
   str.printf("Transforming train\t%d\n", train.n)
   train.problems = train.problems:bits_to_cvec(train.n, dataset.n_features, true)
+
+  str.printf("Transforming validate\t%d\n", validate.n)
+  validate.problems = validate.problems:bits_to_cvec(validate.n, dataset.n_features, true)
 
   str.printf("Transforming test\t%d\n", test.n)
   test.problems = test.problems:bits_to_cvec(test.n, dataset.n_features, true)
@@ -81,22 +91,22 @@ test("tsetlin", function ()
     threads = cfg.threads,
 
     search_metric = function (t)
-      local predicted = t:predict(train.problems, train.n, cfg.threads)
-      local accuracy = eval.class_accuracy(predicted, train.solutions, train.n, cfg.tm.classes, cfg.threads)
+      local predicted = t:predict(validate.problems, validate.n, cfg.threads)
+      local accuracy = eval.class_accuracy(predicted, validate.solutions, validate.n, cfg.tm.classes, cfg.threads)
       return accuracy.f1, accuracy
     end,
 
-    each = function (t, is_final, train_accuracy, params, epoch, round, trial)
+    each = function (t, is_final, val_accuracy, params, epoch, round, trial)
       local test_predicted = t:predict(test.problems, test.n, cfg.threads)
       local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, cfg.tm.classes, cfg.threads)
       local d, dd = stopwatch()
       -- luacheck: push ignore
       if is_final then
-        str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%.2f S=%.2f IB=%d  F1=(%.2f,%.2f)  Epoch  %d\n\n",
-          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, train_accuracy.f1, test_accuracy.f1, epoch)
+        str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%.2f S=%.2f IB=%d  F1=(val=%.2f,test=%.2f)  Epoch  %d\n\n",
+          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, val_accuracy.f1, test_accuracy.f1, epoch)
       else
-        str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%.2f S=%.2f IB=%d  R=%d T=%d  F1=(%.2f,%.2f)  Epoch  %d\n\n",
-          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, round, trial, train_accuracy.f1, test_accuracy.f1, epoch)
+        str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%.2f S=%.2f IB=%d  R=%d T=%d  F1=(val=%.2f,test=%.2f)  Epoch  %d\n\n",
+          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, round, trial, val_accuracy.f1, test_accuracy.f1, epoch)
       end
       -- luacheck: pop
     end
@@ -111,10 +121,12 @@ test("tsetlin", function ()
   print("Testing restore")
   t = tm.load("model.bin", nil, true)
   local train_pred = t:predict(train.problems, train.n, cfg.threads)
+  local val_pred = t:predict(validate.problems, validate.n, cfg.threads)
   local test_pred = t:predict(test.problems, test.n, cfg.threads)
   local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, cfg.tm.classes, cfg.threads)
+  local val_stats = eval.class_accuracy(val_pred, validate.solutions, validate.n, cfg.tm.classes, cfg.threads)
   local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, cfg.tm.classes, cfg.threads)
-  str.printf("Evaluate\tTest\t%4.2f\tTrain\t%4.2f\n", test_stats.f1, train_stats.f1)
+  str.printf("Evaluate\tTrain\t%4.2f\tVal\t%4.2f\tTest\t%4.2f\n", train_stats.f1, val_stats.f1, test_stats.f1)
 
   print("\nPer-class Test Accuracy (sorted by difficulty):\n")
   local class_order = {}
