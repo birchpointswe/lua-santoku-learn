@@ -4,29 +4,6 @@ Machine learning library with Tsetlin machines, clustering, indexing, and embedd
 
 ## API Reference
 
-### `santoku.corex`
-
-Correlation Explanation (CorEx) for unsupervised learning and feature compression.
-
-#### Module Functions
-
-| Function | Arguments | Returns | Description |
-|----------|-----------|---------|-------------|
-| `corex.create` | `table: {visible, hidden, lam?, spa?, tmin?, ttc?, anchor?, tile_s?, tile_v?, threads?}` | `tk_corex_t` | Create CorEx model |
-| `corex.load` | `string/tk_corex_t: data, boolean?: from_string, number?: threads` | `tk_corex_t` | Load CorEx model from file |
-
-#### Instance Methods
-
-| Method | Arguments | Returns | Description |
-|--------|-----------|---------|-------------|
-| `corex:train` | `table: {corpus, samples, iterations, each?}` | `-` | Train CorEx model |
-| `corex:compress` | `tk_ivec_t: set_bits, number?: n_samples` | `tk_ivec_t` | Compress data |
-| `corex:top_visible` | `number: top_k` | `tk_ivec_t` | Get top-k visible features |
-| `corex:visible` | `-` | `number` | Get visible dimension count |
-| `corex:hidden` | `-` | `number` | Get hidden dimension count |
-| `corex:persist` | `string?: filepath` | `string?` | Save model |
-| `corex:destroy` | `-` | `-` | Free memory |
-
 ### `santoku.tsetlin`
 
 High-level Tsetlin machine interface for classification and encoding.
