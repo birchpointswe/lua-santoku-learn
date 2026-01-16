@@ -620,6 +620,8 @@ local function create_tm (typ, args)
     return tm.create("encoder", {
       visible = args.visible,
       hidden = args.hidden,
+      individualized = args.individualized,
+      feat_offsets = args.feat_offsets,
       clauses = 8,
       clause_tolerance = 8,
       clause_maximum = 8,
@@ -633,6 +635,8 @@ local function create_tm (typ, args)
       features = args.features,
       classes = args.classes,
       negative = args.negative,
+      individualized = args.individualized,
+      feat_offsets = args.feat_offsets,
       clauses = 8,
       clause_tolerance = 8,
       clause_maximum = 8,
@@ -651,6 +655,8 @@ local function create_final_tm (typ, args, params)
     return tm.create("encoder", {
       visible = args.visible,
       hidden = args.hidden,
+      individualized = args.individualized,
+      feat_offsets = args.feat_offsets,
       clauses = params.clauses,
       clause_tolerance = params.clause_tolerance,
       clause_maximum = params.clause_maximum,
@@ -663,6 +669,8 @@ local function create_final_tm (typ, args, params)
       features = args.features,
       classes = args.classes,
       negative = args.negative,
+      individualized = args.individualized,
+      feat_offsets = args.feat_offsets,
       clauses = params.clauses,
       clause_tolerance = params.clause_tolerance,
       clause_maximum = params.clause_maximum,
@@ -686,6 +694,7 @@ local function train_tm (typ, tmobj, args, params, iterations, early_patience, t
   local enc_info = encoding_info or {
     sentences = args.sentences,
     samples = args.samples,
+    dim_offsets = args.dim_offsets,
   }
 
   local function on_epoch (epoch)
@@ -720,6 +729,7 @@ local function train_tm (typ, tmobj, args, params, iterations, early_patience, t
       sentences = args.sentences,
       codes = args.codes,
       samples = args.samples,
+      dim_offsets = args.dim_offsets,
       iterations = iterations,
       each = on_epoch,
     })
@@ -728,6 +738,7 @@ local function train_tm (typ, tmobj, args, params, iterations, early_patience, t
       samples = args.samples,
       problems = args.problems,
       solutions = args.solutions,
+      dim_offsets = args.dim_offsets,
       iterations = iterations,
       each = on_epoch,
     })
@@ -810,6 +821,8 @@ local function optimize_tm (args, typ)
       features = args.features,
       classes = args.classes,
       negative = args.negative,
+      individualized = args.individualized,
+      feat_offsets = args.feat_offsets,
     })
     search_tm_visible = init_visible
   end
@@ -830,6 +843,8 @@ local function optimize_tm (args, typ)
         features = args.features,
         classes = args.classes,
         negative = args.negative,
+        individualized = args.individualized,
+        feat_offsets = args.feat_offsets,
       })
       search_tm_visible = visible
     end
@@ -840,6 +855,7 @@ local function optimize_tm (args, typ)
       samples = args.samples,
       problems = args.problems,
       solutions = args.solutions,
+      dim_offsets = args.dim_offsets,
     }
     local encoding_info = {
       sentences = sentences,
@@ -847,6 +863,7 @@ local function optimize_tm (args, typ)
       samples = args.samples,
       n_landmarks = params.n_landmarks,
       n_thresholds = params.n_thresholds,
+      dim_offsets = args.dim_offsets,
     }
     local score, metrics = train_tm(typ, search_tm, train_args, params, iters_search,
       use_early_stop and patience or nil, tolerance, metric_fn, each_cb, info, encoding_info)
@@ -887,6 +904,8 @@ local function optimize_tm (args, typ)
     features = args.features,
     classes = args.classes,
     negative = args.negative,
+    individualized = args.individualized,
+    feat_offsets = args.feat_offsets,
   }, best_params)
   local final_train_args = {
     sentences = final_sentences,
@@ -894,6 +913,7 @@ local function optimize_tm (args, typ)
     samples = args.samples,
     problems = args.problems,
     solutions = args.solutions,
+    dim_offsets = args.dim_offsets,
   }
   local final_encoding_info = {
     sentences = final_sentences,
@@ -902,6 +922,7 @@ local function optimize_tm (args, typ)
     n_landmarks = best_params.n_landmarks,
     n_thresholds = best_params.n_thresholds,
     landmark_mode = best_params.landmark_mode,
+    dim_offsets = args.dim_offsets,
   }
   local _, final_metrics = train_tm(typ, final_tm, final_train_args, best_params, final_iters,
     use_final_early_stop and final_patience or nil, tolerance, metric_fn, each_cb, { is_final = true }, final_encoding_info)
