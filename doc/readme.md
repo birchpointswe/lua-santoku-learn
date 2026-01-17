@@ -56,22 +56,6 @@ then train a Tsetlin machine encoder on the selected features.
 
 See [sth.md](sth.md) for details.
 
-### Landmark-based Tsetlin Hashing (HLTH)
-
-Neighborhood aggregation via landmark retrieval and code consensus.
-
-**Approach**: Retrieve k-nearest landmarks by feature similarity, aggregate
-their codes using frequency thresholds, then train a Tsetlin machine encoder
-on the aggregated representation.
-
-**Characteristics**:
-- Position-invariant neighborhood encoding
-- Robust to noise via consensus
-- Supports multiple lookup modes (token-space, unsupervised codes)
-- Supports Nyström extension for unsupervised spectral codes
-
-See [hlth.md](hlth.md) for details.
-
 ## Pipeline Components
 
 ### Feature Extraction and Ranking
@@ -149,6 +133,6 @@ Extracts eigenvectors from graph Laplacian using PRIMME solver.
 | graph | Build k-NN/CkNN adjacency graphs with bridging |
 | spectral | Laplacian eigenvector computation via PRIMME |
 | itq | Binarization: ITQ rotation, Otsu, median, sign |
-| hlth | Landmark-based hash encoding |
+| hlth | Landmark and nystrom-based hash encoding |
 | eval | Retrieval and clustering evaluation |
 | optimize | Hyperparameter search with adaptive sampling |
