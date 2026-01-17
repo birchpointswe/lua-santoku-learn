@@ -29,7 +29,7 @@ local cfg = {
   tm = {
     classes = 2,
     negative = 0.5,
-    clauses = { def = 16, min = 8, max = 32, round = 8 },
+    clauses = { def = 16, min = 8, max = 256, round = 8 },
     clause_tolerance = { def = 64, min = 16, max = 128, int = true },
     clause_maximum = { def = 64, min = 16, max = 128, int = true },
     target = { def = 32, min = 16, max = 128, int = true },
@@ -37,12 +37,13 @@ local cfg = {
     include_bits = { def = 1, min = 1, max = 4, int = true },
   },
   search = {
-    patience = 2,
+    patience = 6,
     rounds = 6,
     trials = 10,
     iterations = 20,
   },
   training = {
+    patience = 20,
     iterations = 200,
   },
   threads = nil,

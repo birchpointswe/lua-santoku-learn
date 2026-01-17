@@ -45,7 +45,7 @@ local cfg = {
     iterations = 20,
   },
   training = {
-    patience = 40,
+    patience = 20,
     iterations = 400,
   },
   threads = nil,

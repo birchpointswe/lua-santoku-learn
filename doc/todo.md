@@ -1,5 +1,7 @@
 # Now
 
+- Convolutional input, separate or alongside individualized input
+
 - Add options to add unsupervised spectral as additional feature engineering for
   classification and encoder targets. For encoder, raw features and nystrom, and
   for classifier, encoder and nystrom. Also include an option to allow raw
