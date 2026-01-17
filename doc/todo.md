@@ -1,7 +1,5 @@
 # Now
 
-- Deprecate/remove hlth stuff, saved in diff branch, commit to sth
-
 - Add options to add unsupervised spectral as additional feature engineering for
   classification and encoder targets. For encoder, raw features and nystrom, and
   for classifier, encoder and nystrom. Also include an option to allow raw
