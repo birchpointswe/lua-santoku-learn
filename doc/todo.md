@@ -1,9 +1,5 @@
 # Now
 
-- Support lambda for centroid clustering optimization instead of on/off. When 0,
-  off, when 1.0, default, used as an alpha to loosen/tighten the lower bound
-  optimization
-
 - Support passing in an index instead of codes to clustering, which allows
   clustering based on tk_inv_t, tk_ann_t, or tk_hbi_t using a new
   tk_inv/ann/hbi_distances (batch distance) API

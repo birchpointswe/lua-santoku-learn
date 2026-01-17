@@ -82,13 +82,19 @@ local cfg; cfg = {
   },
   tm_search = {
     patience = 2,
-    rounds = 4,
+    rounds = 6,
     trials = 10,
     iterations = 20,
   },
   training = {
     patience = 20,
     iterations = 400,
+  },
+  bit_pruning = {
+    enabled = true,
+    metric = "retrieval",
+    ranking = "ndcg",
+    tolerance = 1e-6,
   },
   classifier = {
     enabled = true,
@@ -100,13 +106,13 @@ local cfg; cfg = {
     include_bits = { def = 2, min = 1, max = 4, int = true },
     negative = 0.5,
     search_patience = 2,
-    search_rounds = 4,
+    search_rounds = 6,
     search_trials = 10,
     search_iterations = 20,
     final_iterations = 100,
   },
   search = {
-    rounds = 4,
+    rounds = 6,
     patience = 3,
     adjacency_samples = 8,
     spectral_samples = 4,
@@ -123,7 +129,7 @@ local cfg; cfg = {
     },
     spectral = {
       laplacian = "unnormalized",
-      n_dims = 32,
+      n_dims = 64,
       eps = 1e-8,
       threshold = {
         method = "itq",
@@ -376,11 +382,7 @@ test("newsgroups-landmarks", function()
             thresh_str = m
           end
         end
-        local select_str = p.select_metric or "none"
-        local select_elbow_str = p.select_elbow or "none"
-        local select_alpha_str = p.select_elbow_alpha and str.format("%.1f", p.select_elbow_alpha) or "-"
-        str.printf("    thresh=%s select=%s(%s,a=%s)\n",
-          thresh_str, select_str, select_elbow_str, select_alpha_str)
+        str.printf("    thresh=%s\n", thresh_str)
       elseif info.event == "select_result" then
         str.printf("    selected_dims=%d\n", info.selected_dims)
       elseif info.event == "eval" then
@@ -598,11 +600,6 @@ test("newsgroups-landmarks", function()
       graph.adjacency({
         knn_index = train.index_sup,
         knn = cfg.cluster.knn,
-        each = function (ns, cs, es, stg)
-          local d, dd = stopwatch()
-          str.printf("  Time: %6.2f %6.2f | Stage: %-10s  Nodes: %5d  Components: %5s  Edges: %5s\n",
-            d, dd, stg, ns, cs, es)
-        end
       })
 
     print("\nClustering")
@@ -627,14 +624,13 @@ test("newsgroups-landmarks", function()
 
     if cfg.cluster.verbose then
       for step = 0, train.codes_clusters.n_steps do
-        local d, dd = stopwatch()
-        str.printf("  Time: %6.2f %6.2f | Step: %2d | Quality: %.2f | Clusters: %d\n",
-          d, dd, step, train.codes_clusters.quality_curve:get(step),
+        str.printf("  Step: %2d | Quality: %.2f | Clusters: %d\n",
+          step, train.codes_clusters.quality_curve:get(step),
           train.codes_clusters.n_clusters_curve:get(step))
       end
     end
 
-    str.printf("\nClustering: step=%d quality=%.4f clusters=%d\n",
+    str.printf("\nClustering spectral codes\n  in-sample: step=%d quality=%.4f clusters=%d\n",
       train.codes_clusters.best_step, train.codes_clusters.quality, train.codes_clusters.n_clusters)
 
     if cfg.landmark_filter.enabled then
@@ -812,7 +808,7 @@ test("newsgroups-landmarks", function()
   train.encoder, train.encoder_accuracy, train.encoder_params = optimize.encoder(encoder_args)
 
   print("\nFinal encoder performance")
-  str.printi("  Train | Ham: %.2f#(mean_hamming) | BER: %.2f#(ber_min) %.2f#(ber_max) %.2f#(ber_std)", train.encoder_accuracy)
+  str.printf("  Train | Hamming: %.4f\n", train.encoder_accuracy.mean_hamming)
   print("\n  Best landmark params:")
   str.printf("    mode=%s n_landmarks=%d n_thresholds=%s\n",
     train.encoder_params.landmark_mode,
@@ -945,6 +941,43 @@ test("newsgroups-landmarks", function()
 
   str.printf("\nEncoder Retrieval: original=%.4f train=%.4f test=%.4f\n",
     train.retrieval_stats.score, train_pred_stats.score, test_pred_stats.score)
+
+  if cfg.cluster.enabled then
+    local function cluster_codes(codes, ids, n, dims, label)
+      local idx = ann.create({ features = dims, expected_size = n })
+      idx:add(codes, ids)
+      local adj_ids, adj_offsets, adj_neighbors = graph.adjacency({
+        knn_index = idx,
+        knn = cfg.cluster.knn,
+      })
+      local codes_for_cluster = idx:get(adj_ids)
+      local result = eval.cluster({
+        codes = codes_for_cluster,
+        n_dims = dims,
+        ids = adj_ids,
+        offsets = adj_offsets,
+        neighbors = adj_neighbors,
+        quality = true,
+      })
+      local cost_curve = dvec.create()
+      cost_curve:copy(result.quality_curve)
+      cost_curve:log()
+      cost_curve:scale(-1)
+      local _, best_step = cost_curve:scores_elbow("lmethod")
+      result.best_step = best_step
+      result.quality = result.quality_curve:get(best_step)
+      result.n_clusters = result.n_clusters_curve:get(best_step)
+      str.printf("  %s: step=%d quality=%.4f clusters=%d\n",
+        label, result.best_step, result.quality, result.n_clusters)
+      idx:destroy()
+      return result
+    end
+
+    print("\nClustering predicted codes")
+    local train_pred_clusters = cluster_codes(train_predicted, train.ids, train.n, train.dims_sup, "train")
+    local val_pred_clusters = cluster_codes(validate_predicted, validate.ids, validate.n, train.dims_sup, "val")
+    local test_pred_clusters = cluster_codes(test_predicted, test.ids, test.n, train.dims_sup, "test")
+  end
 
   idx_train_pred:destroy()
   idx_test_pred:destroy()
