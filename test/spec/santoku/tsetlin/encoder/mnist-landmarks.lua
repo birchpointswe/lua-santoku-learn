@@ -42,7 +42,7 @@ local cfg; cfg = {
     knn = 64,
   },
   encoder = {
-    enabled = false,
+    enabled = true,
     verbose = true,
   },
   tm = {
@@ -444,7 +444,7 @@ test("mnist-anchors", function()
       })
 
     print("\nTraining encoder")
-    train.encoder, train.encoder_accuracy = optimize.encoder({
+    train.encoder, train.encoder_accuracy, train.encoder_params = optimize.encoder({
       visible = n_latent,
       hidden = train.dims_sup,
       sentences = train_landmark_feats,
@@ -509,17 +509,154 @@ test("mnist-anchors", function()
     print("\nFinal encoder performance")
     str.printf("  Train | Hamming: %.4f\n", train.encoder_accuracy.hamming)
     str.printf("  Val   | Retrieval: %.4f\n", train.encoder_accuracy.score)
+    print("\n  Best TM params:")
+    str.printf("    clauses=%d clause_tolerance=%d clause_maximum=%d target=%d specificity=%.2f\n",
+      train.encoder_params.clauses,
+      train.encoder_params.clause_tolerance,
+      train.encoder_params.clause_maximum,
+      train.encoder_params.target,
+      train.encoder_params.specificity)
 
     print("\nPredicting codes with encoder")
     local train_predicted = train.encoder:predict(train_landmark_feats, train.n)
     local validate_predicted = train.encoder:predict(validate_landmark_feats, validate.n)
     local test_predicted = train.encoder:predict(test_landmark_feats, test.n)
 
+    local dims_predicted = train.dims_sup
+
+    print("Building expected adjacency for validate")
+    validate.cat_index = inv.create({
+      features = 10,
+      expected_size = validate.n,
+    })
+    local val_data = ivec.create()
+    val_data:copy(validate.solutions)
+    val_data:add_scaled(10)
+    validate.cat_index:add(val_data, validate.ids)
+    val_data:destroy()
+    local val_adj_expected_ids, val_adj_expected_offsets, val_adj_expected_neighbors, val_adj_expected_weights =
+      graph.adjacency({
+        category_index = validate.cat_index,
+        category_anchors = cfg.search.eval.anchors,
+        random_pairs = cfg.search.eval.pairs,
+      })
+
+    local function score_predictions(codes, ids, n, exp_ids, exp_offsets, exp_neighbors, exp_weights, dims)
+      local idx = ann.create({ features = dims, expected_size = n })
+      idx:add(codes, ids)
+      local ret_ids, ret_offsets, ret_neighbors, ret_weights = graph.adjacency({
+        weight_index = idx,
+        seed_ids = exp_ids,
+        seed_offsets = exp_offsets,
+        seed_neighbors = exp_neighbors,
+      })
+      local stats = eval.score_retrieval({
+        retrieved_ids = ret_ids,
+        retrieved_offsets = ret_offsets,
+        retrieved_neighbors = ret_neighbors,
+        retrieved_weights = ret_weights,
+        expected_ids = exp_ids,
+        expected_offsets = exp_offsets,
+        expected_neighbors = exp_neighbors,
+        expected_weights = exp_weights,
+        ranking = cfg.search.eval.ranking,
+        metric = cfg.search.eval.metric,
+        n_dims = dims,
+      })
+      idx:destroy()
+      ret_ids:destroy()
+      ret_offsets:destroy()
+      ret_neighbors:destroy()
+      ret_weights:destroy()
+      return stats.score
+    end
+
+    local train_score_before = score_predictions(train_predicted, train.ids, train.n,
+      train.adj_expected_ids, train.adj_expected_offsets, train.adj_expected_neighbors, train.adj_expected_weights, dims_predicted)
+    local val_score_before = score_predictions(validate_predicted, validate.ids, validate.n,
+      val_adj_expected_ids, val_adj_expected_offsets, val_adj_expected_neighbors, val_adj_expected_weights, dims_predicted)
+    local train_ham_before = eval.encoding_accuracy(train_predicted, train_solutions, train.n, dims_predicted).mean_hamming
+
+    str.printf("\nPre-pruning: train=%.4f ham=%.4f val=%.4f\n",
+      train_score_before, train_ham_before, val_score_before)
+
+    if cfg.bit_pruning and cfg.bit_pruning.enabled then
+      print("\nOptimizing bit selection")
+
+      local idx_val_pred = ann.create({ features = dims_predicted, expected_size = validate.n })
+      idx_val_pred:add(validate_predicted, validate.ids)
+
+      local val_retrieved_ids, val_retrieved_offsets, val_retrieved_neighbors, val_retrieved_weights =
+        graph.adjacency({
+          weight_index = idx_val_pred,
+          seed_ids = val_adj_expected_ids,
+          seed_offsets = val_adj_expected_offsets,
+          seed_neighbors = val_adj_expected_neighbors,
+        })
+
+      local active_bits = eval.optimize_bits({
+        index = idx_val_pred,
+        retrieved_ids = val_retrieved_ids,
+        retrieved_offsets = val_retrieved_offsets,
+        retrieved_neighbors = val_retrieved_neighbors,
+        expected_ids = val_adj_expected_ids,
+        expected_offsets = val_adj_expected_offsets,
+        expected_neighbors = val_adj_expected_neighbors,
+        expected_weights = val_adj_expected_weights,
+        n_dims = dims_predicted,
+        metric = cfg.bit_pruning.metric,
+        ranking = cfg.bit_pruning.ranking,
+        tolerance = cfg.bit_pruning.tolerance or 1e-6,
+        start_prefix = train.dims_sup,
+        each = cfg.search.verbose and function (bit, gain, score, event)
+          str.printf("  %s bit=%d gain=%.6f score=%.6f\n", event, bit, gain, score)
+        end or nil,
+      })
+
+      idx_val_pred:destroy()
+      val_retrieved_ids:destroy()
+      val_retrieved_offsets:destroy()
+      val_retrieved_neighbors:destroy()
+      val_retrieved_weights:destroy()
+      local n_active = active_bits:size()
+      str.printf("  kept %d / %d bits (%.1f%%)\n", n_active, train.dims_sup, 100 * n_active / train.dims_sup)
+      if n_active < train.dims_sup then
+        local train_pruned = cvec.create()
+        local test_pruned = cvec.create()
+        local validate_pruned = cvec.create()
+        train_predicted:bits_select(active_bits, nil, train.dims_sup, train_pruned)
+        test_predicted:bits_select(active_bits, nil, train.dims_sup, test_pruned)
+        validate_predicted:bits_select(active_bits, nil, train.dims_sup, validate_pruned)
+        train_predicted:destroy()
+        test_predicted:destroy()
+        validate_predicted:destroy()
+        train_predicted = train_pruned
+        test_predicted = test_pruned
+        validate_predicted = validate_pruned
+        dims_predicted = n_active
+
+        train.encoder:restrict(active_bits)
+
+        local train_score_after = score_predictions(train_predicted, train.ids, train.n,
+          train.adj_expected_ids, train.adj_expected_offsets, train.adj_expected_neighbors, train.adj_expected_weights, dims_predicted)
+        local val_score_after = score_predictions(validate_predicted, validate.ids, validate.n,
+          val_adj_expected_ids, val_adj_expected_offsets, val_adj_expected_neighbors, val_adj_expected_weights, dims_predicted)
+        local train_solutions_pruned = cvec.create()
+        train_solutions:bits_select(active_bits, nil, train.dims_sup, train_solutions_pruned)
+        local train_ham_after = eval.encoding_accuracy(train_predicted, train_solutions_pruned, train.n, dims_predicted).mean_hamming
+        train_solutions_pruned:destroy()
+        str.printf("  Post-pruning: train=%.4f (%+.4f) ham=%.4f (%+.4f) val=%.4f (%+.4f)\n",
+          train_score_after, train_score_after - train_score_before,
+          train_ham_after, train_ham_after - train_ham_before,
+          val_score_after, val_score_after - val_score_before)
+      end
+    end
+
     print("Indexing predicted codes")
-    local idx_train_pred = ann.create({ features = train.dims_sup, expected_size = train.n })
+    local idx_train_pred = ann.create({ features = dims_predicted, expected_size = train.n })
     idx_train_pred:add(train_predicted, train.ids)
 
-    local idx_test_pred = ann.create({ features = train.dims_sup, expected_size = test.n })
+    local idx_test_pred = ann.create({ features = dims_predicted, expected_size = test.n })
     idx_test_pred:add(test_predicted, test.ids)
 
     print("\nBuilding retrieved adjacency for predicted codes (train)")
@@ -570,7 +707,7 @@ test("mnist-anchors", function()
       expected_weights = train.adj_expected_weights,
       ranking = cfg.search.eval.ranking,
       metric = cfg.search.eval.metric,
-      n_dims = train.dims_sup,
+      n_dims = dims_predicted,
     })
 
     print("Evaluating test predicted codes")
@@ -585,7 +722,7 @@ test("mnist-anchors", function()
       expected_weights = test_adj_expected_weights,
       ranking = cfg.search.eval.ranking,
       metric = cfg.search.eval.metric,
-      n_dims = train.dims_sup,
+      n_dims = dims_predicted,
     })
 
     str.printf("\nEncoder Retrieval: original=%.4f train=%.4f test=%.4f\n",
@@ -623,9 +760,9 @@ test("mnist-anchors", function()
       end
 
       print("\nClustering predicted codes")
-      local train_pred_clusters = cluster_codes(train_predicted, train.ids, train.n, train.dims_sup, "train")
-      local val_pred_clusters = cluster_codes(validate_predicted, validate.ids, validate.n, train.dims_sup, "val")
-      local test_pred_clusters = cluster_codes(test_predicted, test.ids, test.n, train.dims_sup, "test")
+      local train_pred_clusters = cluster_codes(train_predicted, train.ids, train.n, dims_predicted, "train")
+      local val_pred_clusters = cluster_codes(validate_predicted, validate.ids, validate.n, dims_predicted, "val")
+      local test_pred_clusters = cluster_codes(test_predicted, test.ids, test.n, dims_predicted, "test")
     end
 
     idx_train_pred:destroy()
@@ -633,12 +770,12 @@ test("mnist-anchors", function()
 
     if cfg.classifier.enabled then
       print("\nClassifier")
-      train_predicted:bits_flip_interleave(train.dims_sup)
-      validate_predicted:bits_flip_interleave(train.dims_sup)
-      test_predicted:bits_flip_interleave(train.dims_sup)
+      train_predicted:bits_flip_interleave(dims_predicted)
+      validate_predicted:bits_flip_interleave(dims_predicted)
+      test_predicted:bits_flip_interleave(dims_predicted)
 
       local classifier = optimize.classifier({
-        features = train.dims_sup,
+        features = dims_predicted,
         classes = 10,
         clauses = cfg.classifier.clauses,
         clause_tolerance = cfg.classifier.clause_tolerance,

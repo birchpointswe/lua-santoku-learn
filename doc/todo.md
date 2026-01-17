@@ -1,5 +1,12 @@
 # Now
 
+- Deprecate/remove hlth stuff, saved in diff branch, commit to sth
+
+- Add options to add unsupervised spectral as additional feature engineering for
+  classification and encoder targets. For encoder, raw features and nystrom, and
+  for classifier, encoder and nystrom. Also include an option to allow raw
+  features along with encoder and or nystrom features for final classifiers.
+
 - Support passing in an index instead of codes to clustering, which allows
   clustering based on tk_inv_t, tk_ann_t, or tk_hbi_t using a new
   tk_inv/ann/hbi_distances (batch distance) API
