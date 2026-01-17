@@ -11,7 +11,7 @@ local utc = require("santoku.utc")
 
 local cfg = {
   data = {
-    ttr = 0.9,
+    ttr = 0.5,
     tvr = 0.1,
     max = nil,
     features = 784,
@@ -28,7 +28,7 @@ local cfg = {
   },
   search = {
     patience = 2,
-    rounds = 4,
+    rounds = 6,
     trials = 10,
     iterations = 20,
   },

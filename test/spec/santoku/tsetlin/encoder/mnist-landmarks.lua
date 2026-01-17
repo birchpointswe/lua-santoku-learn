@@ -15,7 +15,7 @@ local optimize = require("santoku.tsetlin.optimize")
 
 local cfg; cfg = {
   data = {
-    ttr = 0.9,
+    ttr = 0.5,
     tvr = 0.1,
     max = nil,
     max_class = nil,
@@ -55,13 +55,19 @@ local cfg; cfg = {
   },
   tm_search = {
     patience = 2,
-    rounds = 4,
+    rounds = 6,
     trials = 10,
     iterations = 20,
   },
   training = {
-    patience = 2,
-    iterations = 200,
+    patience = 20,
+    iterations = 400,
+  },
+  bit_pruning = {
+    enabled = true,
+    metric = "retrieval",
+    ranking = "ndcg",
+    tolerance = 1e-6,
   },
   classifier = {
     enabled = true,
@@ -73,16 +79,18 @@ local cfg; cfg = {
     include_bits = { def = 1, min = 1, max = 4, int = true },
     negative = 0.5,
     search_patience = 2,
-    search_rounds = 4,
+    search_rounds = 6,
     search_trials = 10,
     search_iterations = 20,
     final_iterations = 100,
   },
   search = {
-    rounds = 4,  -- 0 = use baselines (def values), >0 = explore
-    adjacency_samples = 4,
-    spectral_samples = 2,
-    eval_samples = 2,
+    rounds = 6,
+    patience = 3,
+    adjacency_samples = 8,
+    spectral_samples = 4,
+    select_samples = 8,
+    eval_samples = 4,
     adjacency = {
       knn = { def = 24, min = 16, max = 32, int = true },
       knn_alpha = { def = 20, min = 12, max = 28, int = true },
@@ -94,7 +102,7 @@ local cfg; cfg = {
     },
     spectral = {
       laplacian = "unnormalized",
-      n_dims = 24,
+      n_dims = 64,
       eps = 1e-12,
       threshold = {
         method = "otsu",
@@ -109,8 +117,6 @@ local cfg; cfg = {
       pairs = 64,
       ranking = "ndcg",
       metric = "avg",
-      select_elbow = "lmethod",
-      select_metric = "entropy",
     },
     cluster_eval = {
       elbow = "plateau",
@@ -218,13 +224,15 @@ test("mnist-anchors", function()
 
   if cfg.data.mode == "spectral" then
     print("\nOptimizing spectral pipeline")
-    local model = optimize.spectral({
+    local model, spectral_best_params, spectral_best_metrics = optimize.spectral({
       index = train.index_graph,
       knn_index = train.node_features,
       bucket_size = cfg.ann.bucket_size,
       rounds = cfg.search.rounds,
+      patience = cfg.search.patience,
       adjacency_samples = cfg.search.adjacency_samples,
       spectral_samples = cfg.search.spectral_samples,
+      select_samples = cfg.search.select_samples,
       eval_samples = cfg.search.eval_samples,
       adjacency = cfg.search.adjacency,
       spectral = cfg.search.spectral,
@@ -234,9 +242,7 @@ test("mnist-anchors", function()
       expected_neighbors = train.ground_truth.retrieval.neighbors,
       expected_weights = train.ground_truth.retrieval.weights,
       adjacency_each = cfg.search.verbose and function (ns, cs, es, stg)
-        if stg == "kruskal" or stg == "done" then
-          str.printf("    graph: %d nodes, %d edges, %d components\n", ns, es, cs)
-        end
+        str.printf("    graph[%s]: %d nodes, %d edges, %d components\n", stg, ns, es, cs)
       end or nil,
       spectral_each = cfg.search.verbose and function (t, s)
         if t == "done" then
@@ -247,55 +253,26 @@ test("mnist-anchors", function()
         if info.event == "round_start" then
           str.printf("\n=== Round %d/%d ===\n", info.round, info.rounds)
         elseif info.event == "round_end" then
-          str.printf("\n--- Round %d complete: best=%.4f (global=%.4f) success=%.0f%% adapt=%.2f ---\n",
-            info.round, info.round_best_score, info.global_best_score,
-            (info.success_rate or 0) * 100, info.adapt_factor or 1)
+          str.printf("\n--- Round %d complete: best=%.4f (global=%.4f) ---\n",
+            info.round, info.round_best_score, info.global_best_score)
+        elseif info.event == "adjacency_cached" then
+          str.printf("\n  [%d] CACHED key=%s\n", info.adj_sample, info.adj_key)
         elseif info.event == "stage" and info.stage == "adjacency" then
           local p = info.params.adjacency
           if info.is_final then
-            str.printf("\n  [Final] decay=%.2f knn=%d knn_alpha=%d knn_mutual=%s\n",
-              p.weight_decay, p.knn, p.knn_alpha, tostring(p.knn_mutual))
+            str.printf("\n  [Final] decay=%.2f knn=%d alpha=%d mutual=%s mode=%s\n",
+              p.weight_decay, p.knn, p.knn_alpha, tostring(p.knn_mutual), p.knn_mode)
           else
-            str.printf("\n  [%d] decay=%.2f knn=%d knn_alpha=%d knn_mutual=%s\n",
-              info.sample, p.weight_decay, p.knn, p.knn_alpha, tostring(p.knn_mutual))
+            str.printf("\n  [%d] decay=%.2f knn=%d alpha=%d mutual=%s mode=%s\n",
+              info.sample, p.weight_decay, p.knn, p.knn_alpha, tostring(p.knn_mutual), p.knn_mode)
           end
         elseif info.event == "stage" and info.stage == "spectral" then
           local p = info.params.spectral
-          local thresh_str = "unknown"
-          if p.threshold_params and p.threshold_params.method then
-            local m = p.threshold_params.method
-            if m == "itq" then
-              local iters = p.threshold_params.iterations or 100
-              local tol = p.threshold_params.tolerance or 1e-8
-              thresh_str = str.format("itq(i=%d,t=%.0e)", iters, tol)
-            elseif m == "otsu" then
-              local metric = p.threshold_params.metric or "variance"
-              local minimize = p.threshold_params.minimize and "min" or "max"
-              thresh_str = str.format("otsu(%s,%s)", metric, minimize)
-            else
-              thresh_str = m
-            end
-          elseif type(p.threshold) == "string" then
-            thresh_str = p.threshold
-          end
-          str.printf("    lap=%s dims=%d thresh=%s\n", p.laplacian, p.n_dims, thresh_str)
+          str.printf("    lap=%s dims=%d\n", p.laplacian, p.n_dims)
         elseif info.event == "eval" then
           local e = info.params.eval
           local m = info.metrics
-          local select_str = ""
-          if e.select_metric and e.select_metric ~= "none" then
-            local sel_alpha = e.select_elbow_alpha and str.format("%.1f", e.select_elbow_alpha) or "-"
-            local dims_str
-            if m.selected_elbow and m.selected_elbow <= 0 then
-              dims_str = str.format("FAIL->%d", m.n_dims)
-            elseif m.selected_elbow and m.selected_elbow ~= m.n_dims then
-              dims_str = str.format("%d->%d", m.selected_elbow, m.n_dims)
-            else
-              dims_str = str.format("%d", m.n_dims)
-            end
-            select_str = str.format(" [%s/%s(%s) %s]", e.select_metric, e.select_elbow, sel_alpha, dims_str)
-          end
-          str.printf("    knn=%d score=%.4f%s\n", e.knn, m.score, select_str)
+          str.printf("    knn=%d score=%.4f\n", e.knn, m.score)
         end
       end or nil,
     })
@@ -303,6 +280,8 @@ test("mnist-anchors", function()
     train.codes_sup = model.codes
     train.dims_sup = model.dims
     train.index_sup = model.index
+    train.spectral_params = spectral_best_params
+    train.retrieval_stats_spectral = spectral_best_metrics
   elseif cfg.data.mode == "simhash" then
     print("\nSimhashing")
     local idx = inv.create({ features = 10, expected_size = train.n })
@@ -383,16 +362,12 @@ test("mnist-anchors", function()
       graph.adjacency({
         knn_index = train.index_sup,
         knn = cfg.cluster.knn,
-        each = function (ns, cs, es, stg)
-          local d, dd = stopwatch()
-          str.printf("  Time: %6.2f %6.2f | Stage: %-10s  Nodes: %5d  Components: %5s  Edges: %5s\n",
-            d, dd, stg, ns, cs, es)
-        end
       })
 
     print("\nClustering")
+    local cluster_codes = train.index_sup:get(adj_cluster_ids)
     train.codes_clusters = eval.cluster({
-      codes = train.index_sup:get(adj_cluster_ids),
+      codes = cluster_codes,
       n_dims = train.dims_sup,
       ids = adj_cluster_ids,
       offsets = adj_cluster_offsets,
@@ -409,18 +384,16 @@ test("mnist-anchors", function()
     train.codes_clusters.quality = train.codes_clusters.quality_curve:get(best_step)
     train.codes_clusters.n_clusters = train.codes_clusters.n_clusters_curve:get(best_step)
 
-    if cfg.search.verbose then
+    if cfg.cluster.verbose then
       for step = 0, train.codes_clusters.n_steps do
-        local d, dd = stopwatch()
-        str.printf("  Time: %6.2f %6.2f | Step: %2d | Quality: %.2f | Clusters: %d\n",
-          d, dd, step, train.codes_clusters.quality_curve:get(step),
+        str.printf("  Step: %2d | Quality: %.2f | Clusters: %d\n",
+          step, train.codes_clusters.quality_curve:get(step),
           train.codes_clusters.n_clusters_curve:get(step))
       end
     end
 
-    str.printf("Clustering\n  Best Step: %d | Quality: %.4f | Clusters: %d\n",
-      train.codes_clusters.best_step, train.codes_clusters.quality,
-      train.codes_clusters.n_clusters)
+    str.printf("\nClustering spectral codes\n  in-sample: step=%d quality=%.4f clusters=%d\n",
+      train.codes_clusters.best_step, train.codes_clusters.quality, train.codes_clusters.n_clusters)
   end
 
   collectgarbage("collect")
@@ -490,8 +463,10 @@ test("mnist-anchors", function()
       search_tolerance = cfg.tm_search.tolerance,
       final_patience = cfg.training.patience,
       final_iterations = cfg.training.iterations,
-      search_metric = function (t)
+      search_metric = function (t, enc_info)
         local val_pred = t:predict(validate_landmark_feats, validate.n)
+        local train_pred = t:predict(enc_info.sentences, enc_info.samples)
+        local acc = eval.encoding_accuracy(train_pred, train_solutions, enc_info.samples, train.dims_sup)
         local idx_val = ann.create({ features = train.dims_sup, expected_size = validate.n })
         idx_val:add(val_pred, validate.ids)
         local val_retrieved_ids, val_retrieved_offsets, val_retrieved_neighbors, val_retrieved_weights =
@@ -519,19 +494,21 @@ test("mnist-anchors", function()
         val_retrieved_offsets:destroy()
         val_retrieved_neighbors:destroy()
         val_retrieved_weights:destroy()
+        val_stats.hamming = acc.mean_hamming
         return val_stats.score, val_stats
       end,
-      each = function (_, is_final, val_accuracy, params, epoch, round, trial)
+      each = function (_, is_final, metrics, params, epoch, round, trial)
         local d, dd = stopwatch()
         local phase = is_final and "[F]" or str.format("[R%d T%d]", round, trial)
-        str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d score=%.4f\n",
+        str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d ham=%.4f val=%.4f\n",
           epoch, phase, d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
-          params.target, params.specificity, params.include_bits, val_accuracy.score)
+          params.target, params.specificity, params.include_bits, metrics.hamming, metrics.score)
       end,
     })
 
     print("\nFinal encoder performance")
-    str.printf("  Val | Score: %.4f\n", train.encoder_accuracy.score)
+    str.printf("  Train | Hamming: %.4f\n", train.encoder_accuracy.hamming)
+    str.printf("  Val   | Retrieval: %.4f\n", train.encoder_accuracy.score)
 
     print("\nPredicting codes with encoder")
     local train_predicted = train.encoder:predict(train_landmark_feats, train.n)
@@ -540,7 +517,7 @@ test("mnist-anchors", function()
 
     print("Indexing predicted codes")
     local idx_train_pred = ann.create({ features = train.dims_sup, expected_size = train.n })
-    idx_train_pred:add(train_predicted, train.ids_sup)
+    idx_train_pred:add(train_predicted, train.ids)
 
     local idx_test_pred = ann.create({ features = train.dims_sup, expected_size = test.n })
     idx_test_pred:add(test_predicted, test.ids)
@@ -611,9 +588,45 @@ test("mnist-anchors", function()
       n_dims = train.dims_sup,
     })
 
-    str.printf("  Original | Score: %.4f\n", train.retrieval_stats.score)
-    str.printf("  Train    | Score: %.4f\n", train_pred_stats.score)
-    str.printf("  Test     | Score: %.4f\n", test_pred_stats.score)
+    str.printf("\nEncoder Retrieval: original=%.4f train=%.4f test=%.4f\n",
+      train.retrieval_stats.score, train_pred_stats.score, test_pred_stats.score)
+
+    if cfg.cluster.enabled then
+      local function cluster_codes(codes, ids, n, dims, label)
+        local idx = ann.create({ features = dims, expected_size = n })
+        idx:add(codes, ids)
+        local adj_ids, adj_offsets, adj_neighbors = graph.adjacency({
+          knn_index = idx,
+          knn = cfg.cluster.knn,
+        })
+        local codes_for_cluster = idx:get(adj_ids)
+        local result = eval.cluster({
+          codes = codes_for_cluster,
+          n_dims = dims,
+          ids = adj_ids,
+          offsets = adj_offsets,
+          neighbors = adj_neighbors,
+          quality = true,
+        })
+        local cost_curve = dvec.create()
+        cost_curve:copy(result.quality_curve)
+        cost_curve:log()
+        cost_curve:scale(-1)
+        local _, best_step = cost_curve:scores_elbow("lmethod")
+        result.best_step = best_step
+        result.quality = result.quality_curve:get(best_step)
+        result.n_clusters = result.n_clusters_curve:get(best_step)
+        str.printf("  %s: step=%d quality=%.4f clusters=%d\n",
+          label, result.best_step, result.quality, result.n_clusters)
+        idx:destroy()
+        return result
+      end
+
+      print("\nClustering predicted codes")
+      local train_pred_clusters = cluster_codes(train_predicted, train.ids, train.n, train.dims_sup, "train")
+      local val_pred_clusters = cluster_codes(validate_predicted, validate.ids, validate.n, train.dims_sup, "val")
+      local test_pred_clusters = cluster_codes(test_predicted, test.ids, test.n, train.dims_sup, "test")
+    end
 
     idx_train_pred:destroy()
     idx_test_pred:destroy()

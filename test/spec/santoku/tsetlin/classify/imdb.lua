@@ -16,10 +16,10 @@ local cfg = {
     max_len = 20,
     min_len = 1,
     max_run = 2,
-    ngrams = 4,
-    cgrams_min = 0,
-    cgrams_max = 0,
-    skips = 0,
+    ngrams = 2,
+    cgrams_min = 3,
+    cgrams_max = 4,
+    skips = 1,
     negations = 0,
   },
   feature_selection = {
@@ -38,7 +38,7 @@ local cfg = {
   },
   search = {
     patience = 2,
-    rounds = 4,
+    rounds = 6,
     trials = 10,
     iterations = 20,
   },

@@ -108,7 +108,6 @@ static inline void tk_centroid_add_member (
   uint64_t code_chunks
 ) {
   centroid->size++;
-  bool is_first = (centroid->size == 1);
   for (uint64_t chunk = 0; chunk < code_chunks; chunk++) {
     uint8_t mask = (chunk == code_chunks - 1) ? centroid->tail_mask : 0xFF;
     uint8_t member_bits = ((uint8_t *)member_code)[chunk];
@@ -117,7 +116,7 @@ static inline void tk_centroid_add_member (
     for (uint64_t b = 0; b < TK_CVEC_BITS; b++) {
       if (member_bits & (1 << b)) {
         votes[b]++;
-      } else if (!is_first) {
+      } else {
         votes[b]--;
       }
       if (votes[b] >= 0) {

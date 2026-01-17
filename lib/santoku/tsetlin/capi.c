@@ -409,6 +409,7 @@ tk_tsetlin_t *tk_tsetlin_peek (lua_State *L, int i)
 static inline int tk_tsetlin_train (lua_State *);
 static inline int tk_tsetlin_predict (lua_State *);
 static inline int tk_tsetlin_destroy (lua_State *L);
+static inline int tk_tsetlin_restrict (lua_State *L);
 static inline int tk_tsetlin_persist (lua_State *);
 static inline int tk_tsetlin_checkpoint (lua_State *);
 static inline int tk_tsetlin_restore (lua_State *);
@@ -420,6 +421,7 @@ static luaL_Reg tk_tsetlin_mt_fns[] =
   { "train", tk_tsetlin_train },
   { "predict", tk_tsetlin_predict },
   { "destroy", tk_tsetlin_destroy },
+  { "restrict", tk_tsetlin_restrict },
   { "persist", tk_tsetlin_persist },
   { "checkpoint", tk_tsetlin_checkpoint },
   { "restore", tk_tsetlin_restore },
@@ -744,6 +746,157 @@ static inline int tk_tsetlin_destroy (lua_State *L)
   lua_settop(L, 1);
   tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
   _tk_tsetlin_destroy(tm);
+  return 0;
+}
+
+static inline int tk_tsetlin_restrict (lua_State *L)
+{
+  lua_settop(L, 2);
+  tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
+  tk_ivec_t *selected_dims = tk_ivec_peek(L, 2, "selected_dims");
+
+  if (!tm->individualized)
+    return luaL_error(L, "restrict only supported for individualized TMs");
+
+  uint64_t n_orig = tm->classes;
+  uint64_t n_selected = selected_dims->n;
+
+  if (n_selected == 0)
+    return luaL_error(L, "selected_dims cannot be empty");
+
+  for (uint64_t i = 0; i < n_selected; i++) {
+    int64_t dim = selected_dims->a[i];
+    if (dim < 0 || (uint64_t)dim >= n_orig)
+      return luaL_error(L, "selected_dims[%d] = %d out of range [0, %d)", (int)i, (int)dim, (int)n_orig);
+    for (uint64_t j = i + 1; j < n_selected; j++)
+      if (selected_dims->a[i] == selected_dims->a[j])
+        return luaL_error(L, "duplicate dimension %d in selected_dims", (int)dim);
+  }
+
+  uint64_t *orig_state_offsets = (uint64_t *)malloc(n_orig * sizeof(uint64_t));
+  uint64_t *orig_actions_offsets = (uint64_t *)malloc(n_orig * sizeof(uint64_t));
+  uint64_t *orig_feat_sizes = (uint64_t *)malloc(n_orig * sizeof(uint64_t));
+  uint64_t *orig_input_chunks_ind = (uint64_t *)malloc(n_orig * sizeof(uint64_t));
+  uint8_t *orig_tail_masks_ind = (uint8_t *)malloc(n_orig * sizeof(uint8_t));
+
+  if (!orig_state_offsets || !orig_actions_offsets || !orig_feat_sizes ||
+      !orig_input_chunks_ind || !orig_tail_masks_ind) {
+    free(orig_state_offsets);
+    free(orig_actions_offsets);
+    free(orig_feat_sizes);
+    free(orig_input_chunks_ind);
+    free(orig_tail_masks_ind);
+    return luaL_error(L, "malloc failed in restrict");
+  }
+
+  memcpy(orig_state_offsets, tm->state_offsets, n_orig * sizeof(uint64_t));
+  memcpy(orig_actions_offsets, tm->actions_offsets, n_orig * sizeof(uint64_t));
+  memcpy(orig_feat_sizes, tm->feat_sizes, n_orig * sizeof(uint64_t));
+  memcpy(orig_input_chunks_ind, tm->input_chunks_ind, n_orig * sizeof(uint64_t));
+  memcpy(orig_tail_masks_ind, tm->tail_masks_ind, n_orig * sizeof(uint8_t));
+
+  uint64_t new_state_bytes = 0;
+  uint64_t new_action_bytes = 0;
+  for (uint64_t i = 0; i < n_selected; i++) {
+    uint64_t dim = (uint64_t)selected_dims->a[i];
+    uint64_t chunks = orig_input_chunks_ind[dim];
+    new_state_bytes += tm->clauses * chunks * (tm->state_bits - 1);
+    new_action_bytes += tm->clauses * chunks;
+  }
+
+  char *new_state = NULL;
+  char *new_actions = NULL;
+
+  if (tm->has_state && tm->state) {
+    new_state = (char *)tk_malloc_aligned(L, new_state_bytes, TK_CVEC_BITS);
+    uint64_t write_pos = 0;
+    for (uint64_t i = 0; i < n_selected; i++) {
+      uint64_t dim = (uint64_t)selected_dims->a[i];
+      uint64_t chunks = orig_input_chunks_ind[dim];
+      uint64_t size = tm->clauses * chunks * (tm->state_bits - 1);
+      memcpy(new_state + write_pos, tm->state + orig_state_offsets[dim], size);
+      write_pos += size;
+    }
+    free(tm->state);
+    tm->state = new_state;
+  }
+
+  new_actions = (char *)tk_malloc_aligned(L, new_action_bytes, TK_CVEC_BITS);
+  uint64_t write_pos = 0;
+  for (uint64_t i = 0; i < n_selected; i++) {
+    uint64_t dim = (uint64_t)selected_dims->a[i];
+    uint64_t chunks = orig_input_chunks_ind[dim];
+    uint64_t size = tm->clauses * chunks;
+    memcpy(new_actions + write_pos, tm->actions + orig_actions_offsets[dim], size);
+    write_pos += size;
+  }
+  free(tm->actions);
+  tm->actions = new_actions;
+
+  for (uint64_t i = 0; i < n_selected; i++) {
+    uint64_t dim = (uint64_t)selected_dims->a[i];
+    tm->feat_sizes[i] = orig_feat_sizes[dim];
+    tm->input_chunks_ind[i] = orig_input_chunks_ind[dim];
+    tm->tail_masks_ind[i] = orig_tail_masks_ind[dim];
+  }
+
+#define SHRINK_REALLOC(ptr, type, count) do { \
+    type *_tmp = (type *)realloc(ptr, (count) * sizeof(type)); \
+    if (!_tmp) { \
+      free(orig_state_offsets); free(orig_actions_offsets); \
+      free(orig_feat_sizes); free(orig_input_chunks_ind); free(orig_tail_masks_ind); \
+      return luaL_error(L, "realloc failed in restrict"); \
+    } \
+    ptr = _tmp; \
+  } while (0)
+
+  SHRINK_REALLOC(tm->feat_sizes, uint64_t, n_selected);
+  SHRINK_REALLOC(tm->input_chunks_ind, uint64_t, n_selected);
+  SHRINK_REALLOC(tm->tail_masks_ind, uint8_t, n_selected);
+  SHRINK_REALLOC(tm->state_offsets, uint64_t, n_selected);
+  SHRINK_REALLOC(tm->actions_offsets, uint64_t, n_selected);
+  SHRINK_REALLOC(tm->automata_arr, tk_automata_t, n_selected);
+
+#undef SHRINK_REALLOC
+
+  uint64_t state_off = 0;
+  uint64_t actions_off = 0;
+  for (uint64_t i = 0; i < n_selected; i++) {
+    tm->state_offsets[i] = state_off;
+    tm->actions_offsets[i] = actions_off;
+
+    tk_automata_t *a = &tm->automata_arr[i];
+    a->n_clauses = tm->clauses;
+    a->n_chunks = tm->input_chunks_ind[i];
+    a->state_bits = tm->state_bits;
+    a->include_bits = tm->include_bits;
+    a->tail_mask = tm->tail_masks_ind[i];
+    a->counts = tm->has_state && tm->state ? tm->state + state_off : NULL;
+    a->actions = tm->actions + actions_off;
+
+    state_off += tm->clauses * tm->input_chunks_ind[i] * (tm->state_bits - 1);
+    actions_off += tm->clauses * tm->input_chunks_ind[i];
+  }
+
+  tm->classes = (unsigned int)n_selected;
+  tm->class_chunks = TK_CVEC_BITS_BYTES(tm->classes);
+  tm->state_chunks = (unsigned int)new_state_bytes;
+  tm->action_chunks = (unsigned int)new_action_bytes;
+
+  free(tm->results);
+  tm->results = NULL;
+  tm->results_len = 0;
+
+  free(tm->encodings);
+  tm->encodings = NULL;
+  tm->encodings_len = 0;
+
+  free(orig_state_offsets);
+  free(orig_actions_offsets);
+  free(orig_feat_sizes);
+  free(orig_input_chunks_ind);
+  free(orig_tail_masks_ind);
+
   return 0;
 }
 
