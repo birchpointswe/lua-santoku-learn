@@ -10,22 +10,37 @@ local inv = require("santoku.tsetlin.inv")
 local ann = require("santoku.tsetlin.ann")
 local graph = require("santoku.tsetlin.graph")
 local optimize = require("santoku.tsetlin.optimize")
+local tokenizer = require("santoku.tokenizer")
 
 local cfg; cfg = {
   data = {
     ttr = 0.5,
     tvr = 0.1,
     max = nil,
-    max_class = nil,
-    visible = 784,
+    n_classes = 2,
+  },
+  tokenizer = {
+    max_len = 20,
+    min_len = 1,
+    max_run = 2,
+    ngrams = 2,
+    cgrams_min = 3,
+    cgrams_max = 4,
+    skips = 1,
+    negations = 0,
+  },
+  feature_selection = {
+    min_df = -2,
+    max_df = 0.98,
+    max_vocab = nil,
   },
   encoder = {
     individualized = true,
-    max_vocab = 784,
+    max_vocab = 12288,
     selection = "chi2",
   },
   tm = {
-    clauses = { def = 24, min = 8, max = 256, round = 8 },
+    clauses = { def = 128, min = 8, max = 256, round = 8 },
     clause_tolerance = { def = 64, min = 16, max = 128, int = true },
     clause_maximum = { def = 64, min = 16, max = 128, int = true },
     target = { def = 32, min = 16, max = 128, int = true },
@@ -105,20 +120,41 @@ local cfg; cfg = {
   },
 }
 
-test("mnist-raw", function()
+test("imdb-raw", function()
 
   local stopwatch = utc.stopwatch()
 
   print("Reading data")
-  local dataset = ds.read_binary_mnist("test/res/mnist.70k.txt", cfg.data.visible, cfg.data.max, cfg.data.max_class)
-  dataset.n_visible = cfg.data.visible
-  dataset.n_hidden = cfg.search.spectral.n_dims
+  local dataset = ds.read_imdb("test/res/imdb.50k", cfg.data.max)
+  local train, test, validate = ds.split_imdb(dataset, cfg.data.ttr, cfg.data.tvr)
 
-  print("\nSplitting")
-  local train, test, validate = ds.split_binary_mnist(dataset, cfg.data.ttr, cfg.data.tvr)
   str.printf("  Train:    %6d\n", train.n)
   str.printf("  Validate: %6d\n", validate.n)
   str.printf("  Test:     %6d\n", test.n)
+
+  print("\nTraining tokenizer")
+  local tok = tokenizer.create(cfg.tokenizer)
+  tok:train({ corpus = train.problems })
+  tok:finalize()
+  local n_tokens = tok:features()
+  str.printf("  Vocabulary: %d tokens\n", n_tokens)
+
+  print("\nTokenizing train")
+  train.tokens = tok:tokenize(train.problems)
+
+  print("\nFeature selection (IDF filtering)")
+  local idf_sorted, idf_weights
+  idf_sorted, idf_weights = train.tokens:bits_top_df(
+    train.n, n_tokens, cfg.feature_selection.max_vocab,
+    cfg.feature_selection.min_df, cfg.feature_selection.max_df)
+  local n_top_v = idf_sorted:size()
+  str.printf("  DF filtered: %d features\n", n_top_v)
+  str.printf("  IDF range: %.3f - %.3f\n", idf_weights:min(), idf_weights:max())
+  tok:restrict(idf_sorted)
+  print("\nRe-tokenizing with IDF-filtered vocabulary")
+  train.tokens = tok:tokenize(train.problems)
+  validate.tokens = tok:tokenize(validate.problems)
+  test.tokens = tok:tokenize(test.problems)
 
   print("\nCreating IDs")
   train.ids = ivec.create(train.n)
@@ -130,41 +166,44 @@ test("mnist-raw", function()
   test.ids:fill_indices()
   test.ids:add(train.n + validate.n)
 
-  print("\nExtracting train pixels")
-  train.pixels = ivec.create()
-  dataset.problems:bits_select(nil, train.ids, cfg.data.visible, train.pixels)
-
-  print("\nBuilding pixel similarity graph")
+  print("\nBuilding supervised graph (categories + tokens)")
   do
-    local graph_ids = ivec.create()
-    graph_ids:copy(train.ids)
     local graph_problems = ivec.create()
-    graph_problems:copy(train.pixels)
-    local problems_ext = ivec.create()
-    problems_ext:copy(train.solutions)
-    problems_ext:add_scaled(10)
-    graph_problems:bits_extend(problems_ext, cfg.data.visible, 10)
-    local graph_ranks = ivec.create(cfg.data.visible + 10)
-    graph_ranks:fill(1, 0, cfg.data.visible)
-    graph_ranks:fill(0, cfg.data.visible, cfg.data.visible + 10)
-    train.index_graph = inv.create({
-      features = cfg.data.visible + 10,
+    train.tokens:bits_select(nil, train.ids, n_top_v, graph_problems)
+    local cat_ext = ivec.create()
+    cat_ext:copy(train.solutions)
+    cat_ext:add_scaled(cfg.data.n_classes)
+    graph_problems:bits_extend(cat_ext, n_top_v, cfg.data.n_classes)
+    local graph_weights = dvec.create(n_top_v + cfg.data.n_classes)
+    for i = 0, n_top_v - 1 do
+      graph_weights:set(i, idf_weights:get(i))
+    end
+    graph_weights:fill(1.0, n_top_v, n_top_v + cfg.data.n_classes)
+    local graph_ranks = ivec.create(n_top_v + cfg.data.n_classes)
+    graph_ranks:fill(1, 0, n_top_v)
+    graph_ranks:fill(0, n_top_v, n_top_v + cfg.data.n_classes)
+    train.index_graph_sup = inv.create({
+      features = graph_weights,
       ranks = graph_ranks,
       n_ranks = 2,
     })
-    train.index_graph:add(graph_problems, graph_ids)
+    train.index_graph_sup:add(graph_problems, train.ids)
+    str.printf("  Sup graph: %d features (%d tokens + %d categories)\n",
+      n_top_v + cfg.data.n_classes, n_top_v, cfg.data.n_classes)
   end
 
-  print("\nBuilding node features index (raw pixels)")
-  train.node_features = ann.create({ features = dataset.n_visible, expected_size = train.n })
-  train.train_raw = train.pixels:bits_to_cvec(train.n, dataset.n_visible)
-  train.node_features:add(train.train_raw, train.ids)
+  print("\nBuilding knn index (IDF-weighted tokens only)")
+  train.node_features_graph = inv.create({
+    features = idf_weights,
+  })
+  train.node_features_graph:add(train.tokens, train.ids)
+  str.printf("  KNN index: %d tokens with IDF weights\n", n_top_v)
 
-  local function build_category_ground_truth (ids)
-    local cat_index = inv.create({ features = 10 })
+  local function build_category_ground_truth (ids, solutions)
+    local cat_index = inv.create({ features = cfg.data.n_classes })
     local data = ivec.create()
-    data:copy(train.solutions)
-    data:add_scaled(10)
+    data:copy(solutions)
+    data:add_scaled(cfg.data.n_classes)
     cat_index:add(data, ids)
     data:destroy()
 
@@ -185,13 +224,13 @@ test("mnist-raw", function()
     }
   end
 
-  print("\nBuilding category ground truth")
-  train.cat_index, train.ground_truth = build_category_ground_truth(train.ids)
+  print("\nBuilding category ground truth (for supervised spectral)")
+  train.cat_index, train.ground_truth_sup = build_category_ground_truth(train.ids, train.solutions)
 
-  print("\nOptimizing spectral pipeline")
-  local model, spectral_best_params, spectral_best_metrics = optimize.spectral({
-    index = train.index_graph,
-    knn_index = train.node_features,
+  print("\nOptimizing supervised spectral pipeline")
+  local model_sup, spectral_best_params_sup, spectral_best_metrics_sup = optimize.spectral({
+    index = train.index_graph_sup,
+    knn_index = train.node_features_graph,
     rounds = cfg.search.rounds,
     patience = cfg.search.patience,
     adjacency_samples = cfg.search.adjacency_samples,
@@ -201,10 +240,10 @@ test("mnist-raw", function()
     adjacency = cfg.search.adjacency,
     spectral = cfg.search.spectral,
     eval = cfg.search.eval,
-    expected_ids = train.ground_truth.retrieval.ids,
-    expected_offsets = train.ground_truth.retrieval.offsets,
-    expected_neighbors = train.ground_truth.retrieval.neighbors,
-    expected_weights = train.ground_truth.retrieval.weights,
+    expected_ids = train.ground_truth_sup.retrieval.ids,
+    expected_offsets = train.ground_truth_sup.retrieval.offsets,
+    expected_neighbors = train.ground_truth_sup.retrieval.neighbors,
+    expected_weights = train.ground_truth_sup.retrieval.weights,
     adjacency_each = cfg.search.verbose and function (ns, cs, es, stg)
       str.printf("    graph[%s]: %d nodes, %d edges, %d components\n", stg, ns, es, cs)
     end or nil,
@@ -240,12 +279,13 @@ test("mnist-raw", function()
       end
     end or nil,
   })
-  train.ids_sup = model.ids
-  train.codes_sup = model.codes
-  train.dims_sup = model.dims
-  train.index_sup = model.index
-  train.spectral_params = spectral_best_params
-  train.retrieval_stats = spectral_best_metrics
+
+  train.codes_sup = model_sup.codes
+  train.ids_sup = model_sup.ids
+  train.dims_sup = model_sup.dims
+  train.index_sup = model_sup.index
+  train.spectral_params_sup = spectral_best_params_sup
+  train.retrieval_stats = spectral_best_metrics_sup
 
   local function build_token_ground_truth (knn_index, knn)
     local adj_expected_ids, adj_expected_offsets, adj_expected_neighbors, adj_expected_weights =
@@ -310,41 +350,6 @@ test("mnist-raw", function()
       train.codes_clusters.best_step, train.codes_clusters.quality, train.codes_clusters.n_clusters)
   end
 
-  print("\nCodebook stats")
-  train.entropy = eval.entropy_stats(train.codes_sup, train.ids_sup:size(), train.dims_sup)
-  str.printi("  Entropy: %.4f#(mean) | Min: %.4f#(min) | Max: %.4f#(max) | Std: %.4f#(std)", train.entropy)
-
-  print("\nBuilding retrieved adjacency (spectral KNN)")
-  train.adj_retrieved_ids,
-  train.adj_retrieved_offsets,
-  train.adj_retrieved_neighbors,
-  train.adj_retrieved_weights = graph.adjacency({
-    weight_index = train.index_sup,
-    seed_ids = train.adj_expected_ids,
-    seed_offsets = train.adj_expected_offsets,
-    seed_neighbors = train.adj_expected_neighbors,
-  })
-
-  print("Building expected codes")
-  train.codes_expected = cvec.create()
-  train.codes_expected:bits_extend(train.codes_sup, train.adj_expected_ids, train.ids_sup, 0, train.dims_sup, true)
-
-  local base_retrieval = eval.score_retrieval({
-    retrieved_ids = train.adj_retrieved_ids,
-    retrieved_offsets = train.adj_retrieved_offsets,
-    retrieved_neighbors = train.adj_retrieved_neighbors,
-    retrieved_weights = train.adj_retrieved_weights,
-    expected_ids = train.adj_expected_ids,
-    expected_offsets = train.adj_expected_offsets,
-    expected_neighbors = train.adj_expected_neighbors,
-    expected_weights = train.adj_expected_weights,
-    ranking = cfg.search.eval.ranking,
-    metric = cfg.search.eval.metric,
-    n_dims = train.dims_sup,
-  })
-
-  str.printf("\nRetrieval: score=%.4f\n", base_retrieval.score)
-
   collectgarbage("collect")
 
   local train_solutions = train.index_sup:get(train.ids)
@@ -366,43 +371,45 @@ test("mnist-raw", function()
     final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,
     search_metric = function (t, enc_info)
-      local predicted = t:predict(enc_info.sentences, enc_info.samples)
+      local predicted
+      if enc_info.dim_offsets then
+        predicted = t:predict(enc_info.sentences, enc_info.dim_offsets, enc_info.samples)
+      else
+        predicted = t:predict(enc_info.sentences, enc_info.samples)
+      end
       local accuracy = eval.encoding_accuracy(predicted, train_solutions, enc_info.samples, train.dims_sup)
       return accuracy.mean_hamming, accuracy
     end,
   }
 
-  local selection_method = cfg.encoder.selection
+  local selection_method = cfg.encoder.selection or "idf"
   local use_ind = cfg.encoder.individualized
-  str.printf("\nTraining encoder (selecting %d features by %s, individualized=%s)\n",
-    cfg.encoder.max_vocab, selection_method, tostring(use_ind))
-
-  local validate_pixels = ivec.create()
-  dataset.problems:bits_select(nil, validate.ids, cfg.data.visible, validate_pixels)
-  local test_pixels = ivec.create()
-  dataset.problems:bits_select(nil, test.ids, cfg.data.visible, test_pixels)
+  print("\nTraining encoder")
+  str.printf("  Mode: individualized=%s, selection=%s\n", tostring(use_ind), selection_method)
 
   if use_ind then
-    local ids_union, feat_offsets, feat_ids = train.pixels:bits_top_chi2_ind(
-      train.codes_sup, train.n, cfg.data.visible, train.dims_sup,
+    local ids_union, feat_offsets, feat_ids = train.tokens:bits_top_chi2_ind(
+      train.codes_sup, train.n, n_top_v, train.dims_sup,
       cfg.encoder.max_vocab)
     local union_size = ids_union:size()
     local total_features = feat_offsets:get(train.dims_sup)
-    str.printf("  Per-dimension chi2: union=%d total=%d (%.1fx expansion)\n",
+    str.printf("  Budget: %d features/dim × %d dims = %d total slots\n",
+      cfg.encoder.max_vocab, train.dims_sup, cfg.encoder.max_vocab * train.dims_sup)
+    str.printf("  Actual: %d unique features, %d total (%.1fx expansion)\n",
       union_size, total_features, total_features / union_size)
-    local function to_ind_bitmap (pixels, n)
-      local selected = ivec.create()
-      pixels:bits_select(ids_union, nil, cfg.data.visible, selected)
-      local ind, ind_off = selected:bits_individualize(feat_offsets, feat_ids, union_size)
-      local bitmap, dim_off = ind:bits_to_cvec_ind(ind_off, feat_offsets, n, true)
-      selected:destroy()
+    tok:restrict(ids_union)
+    local function to_ind_bitmap (split)
+      local toks = tok:tokenize(split.problems)
+      local ind, ind_off = toks:bits_individualize(feat_offsets, feat_ids, union_size)
+      local bitmap, dim_off = ind:bits_to_cvec_ind(ind_off, feat_offsets, split.n, true)
+      toks:destroy()
       ind:destroy()
       ind_off:destroy()
       return bitmap, dim_off
     end
-    local train_bitmap, train_dim_off = to_ind_bitmap(train.pixels, train.n)
-    local val_bitmap, val_dim_off = to_ind_bitmap(validate_pixels, validate.n)
-    local test_bitmap, test_dim_off = to_ind_bitmap(test_pixels, test.n)
+    local train_bitmap, train_dim_off = to_ind_bitmap(train)
+    local val_bitmap, val_dim_off = to_ind_bitmap(validate)
+    local test_bitmap, test_dim_off = to_ind_bitmap(test)
     encoder_args.sentences = train_bitmap
     encoder_args.visible = union_size
     encoder_args.individualized = true
@@ -419,72 +426,53 @@ test("mnist-raw", function()
   else
     local raw_vocab, raw_scores
     if selection_method == "mi" then
-      raw_vocab, raw_scores = train.pixels:bits_top_mi(
+      raw_vocab, raw_scores = train.tokens:bits_top_mi(
         train.codes_sup,
         train.n,
-        cfg.data.visible,
+        n_top_v,
         train.dims_sup,
         cfg.encoder.max_vocab)
     else
-      raw_vocab, raw_scores = train.pixels:bits_top_chi2(
+      raw_vocab, raw_scores = train.tokens:bits_top_chi2(
         train.codes_sup,
         train.n,
-        cfg.data.visible,
+        n_top_v,
         train.dims_sup,
         cfg.encoder.max_vocab)
     end
     local n_raw_v = raw_vocab:size()
-    str.printf("  Selected %d pixels by %s\n", n_raw_v, selection_method)
+    str.printf("  Selected %d tokens by %s\n", n_raw_v, selection_method)
     str.printf("  Score range: %.4f - %.4f\n", raw_scores:get(n_raw_v - 1), raw_scores:get(0))
     train.raw_encoder_vocab = raw_vocab
     train.raw_encoder_n_features = n_raw_v
     local train_raw_selected = ivec.create()
-    train.pixels:bits_select(raw_vocab, nil, cfg.data.visible, train_raw_selected)
+    train.tokens:bits_select(raw_vocab, nil, n_top_v, train_raw_selected)
     local validate_raw_selected = ivec.create()
-    validate_pixels:bits_select(raw_vocab, nil, cfg.data.visible, validate_raw_selected)
+    validate.tokens:bits_select(raw_vocab, nil, n_top_v, validate_raw_selected)
     local test_raw_selected = ivec.create()
-    test_pixels:bits_select(raw_vocab, nil, cfg.data.visible, test_raw_selected)
+    test.tokens:bits_select(raw_vocab, nil, n_top_v, test_raw_selected)
     local train_raw_sentences = train_raw_selected:bits_to_cvec(train.n, n_raw_v, true)
     validate.raw_encoder_sentences = validate_raw_selected:bits_to_cvec(validate.n, n_raw_v, true)
     test.raw_encoder_sentences = test_raw_selected:bits_to_cvec(test.n, n_raw_v, true)
     encoder_args.sentences = train_raw_sentences
     encoder_args.visible = n_raw_v
   end
-
   print("Building expected adjacency for validate")
   validate.cat_index = inv.create({
-    features = 10,
+    features = cfg.data.n_classes,
     expected_size = validate.n,
   })
-  local val_data = ivec.create()
-  val_data:copy(validate.solutions)
-  val_data:add_scaled(10)
-  validate.cat_index:add(val_data, validate.ids)
-  val_data:destroy()
+  local val_cat_data = ivec.create()
+  val_cat_data:copy(validate.solutions)
+  val_cat_data:add_scaled(cfg.data.n_classes)
+  validate.cat_index:add(val_cat_data, validate.ids)
+  val_cat_data:destroy()
   local val_adj_expected_ids, val_adj_expected_offsets, val_adj_expected_neighbors, val_adj_expected_weights =
     graph.adjacency({
       category_index = validate.cat_index,
       category_anchors = cfg.search.eval.anchors,
       random_pairs = cfg.search.eval.pairs,
     })
-
-  print("Building expected adjacency for test")
-  test.cat_index = inv.create({
-    features = 10,
-    expected_size = test.n,
-  })
-  local test_data = ivec.create()
-  test_data:copy(test.solutions)
-  test_data:add_scaled(10)
-  test.cat_index:add(test_data, test.ids)
-  test_data:destroy()
-  local test_adj_expected_ids, test_adj_expected_offsets, test_adj_expected_neighbors, test_adj_expected_weights =
-    graph.adjacency({
-      category_index = test.cat_index,
-      category_anchors = cfg.search.eval.anchors,
-      random_pairs = cfg.search.eval.pairs,
-    })
-
   encoder_args.search_metric = function (t, enc_info)
     local val_pred
     if validate.raw_encoder_dim_offsets then
@@ -552,19 +540,19 @@ test("mnist-raw", function()
     train.encoder_params.specificity)
 
   local train_encoder_input = encoder_args.sentences
-  local validate_encoder_input = validate.raw_encoder_sentences
   local test_encoder_input = test.raw_encoder_sentences
+  local validate_encoder_input = validate.raw_encoder_sentences
 
   print("\nPredicting codes with encoder")
-  local train_predicted, validate_predicted, test_predicted
+  local train_predicted, test_predicted, validate_predicted
   if cfg.encoder.individualized then
     train_predicted = train.encoder:predict(train_encoder_input, encoder_args.dim_offsets, train.n)
-    validate_predicted = train.encoder:predict(validate_encoder_input, validate.raw_encoder_dim_offsets, validate.n)
     test_predicted = train.encoder:predict(test_encoder_input, test.raw_encoder_dim_offsets, test.n)
+    validate_predicted = train.encoder:predict(validate_encoder_input, validate.raw_encoder_dim_offsets, validate.n)
   else
     train_predicted = train.encoder:predict(train_encoder_input, train.n)
-    validate_predicted = train.encoder:predict(validate_encoder_input, validate.n)
     test_predicted = train.encoder:predict(test_encoder_input, test.n)
+    validate_predicted = train.encoder:predict(validate_encoder_input, validate.n)
   end
 
   local dims_predicted = train.dims_sup
@@ -701,7 +689,34 @@ test("mnist-raw", function()
       seed_neighbors = train.adj_expected_neighbors,
     })
 
-  print("Evaluating train predicted codes")
+  print("Building expected adjacency for test")
+  test.cat_index = inv.create({
+    features = cfg.data.n_classes,
+    expected_size = test.n,
+  })
+  local test_data = ivec.create()
+  test_data:copy(test.solutions)
+  test_data:add_scaled(cfg.data.n_classes)
+  test.cat_index:add(test_data, test.ids)
+  test_data:destroy()
+
+  local test_adj_expected_ids, test_adj_expected_offsets, test_adj_expected_neighbors, test_adj_expected_weights =
+    graph.adjacency({
+      category_index = test.cat_index,
+      category_anchors = cfg.search.eval.anchors,
+      random_pairs = cfg.search.eval.pairs,
+    })
+
+  print("Building retrieved adjacency for predicted codes (test)")
+  local test_pred_retrieved_ids, test_pred_retrieved_offsets, test_pred_retrieved_neighbors, test_pred_retrieved_weights =
+    graph.adjacency({
+      weight_index = idx_test_pred,
+      seed_ids = test_adj_expected_ids,
+      seed_offsets = test_adj_expected_offsets,
+      seed_neighbors = test_adj_expected_neighbors,
+    })
+
+  print("\nEvaluating train predicted codes")
   local train_pred_stats = eval.score_retrieval({
     retrieved_ids = train_pred_retrieved_ids,
     retrieved_offsets = train_pred_retrieved_offsets,
@@ -782,7 +797,7 @@ test("mnist-raw", function()
 
     local classifier = optimize.classifier({
       features = dims_predicted,
-      classes = 10,
+      classes = cfg.data.n_classes,
       clauses = cfg.classifier.clauses,
       clause_tolerance = cfg.classifier.clause_tolerance,
       clause_maximum = cfg.classifier.clause_maximum,
@@ -800,12 +815,12 @@ test("mnist-raw", function()
       final_iterations = cfg.classifier.final_iterations,
       search_metric = function (t)
         local predicted = t:predict(validate_predicted, validate.n)
-        local accuracy = eval.class_accuracy(predicted, validate.solutions, validate.n, 10)
+        local accuracy = eval.class_accuracy(predicted, validate.solutions, validate.n, cfg.data.n_classes)
         return accuracy.f1, accuracy
       end,
       each = function (t, is_final, val_accuracy, params, epoch, round, trial)
         local test_pred = t:predict(test_predicted, test.n)
-        local test_accuracy = eval.class_accuracy(test_pred, test.solutions, test.n, 10)
+        local test_accuracy = eval.class_accuracy(test_pred, test.solutions, test.n, cfg.data.n_classes)
         local d, dd = stopwatch()
         local phase = is_final and "[F]" or str.format("[R%d T%d]", round, trial)
         str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d f1=(%.2f,%.2f)\n",
@@ -817,9 +832,9 @@ test("mnist-raw", function()
     local train_class_pred = classifier:predict(train_predicted, train.n)
     local val_class_pred = classifier:predict(validate_predicted, validate.n)
     local test_class_pred = classifier:predict(test_predicted, test.n)
-    local train_class_stats = eval.class_accuracy(train_class_pred, train.solutions, train.n, 10)
-    local val_class_stats = eval.class_accuracy(val_class_pred, validate.solutions, validate.n, 10)
-    local test_class_stats = eval.class_accuracy(test_class_pred, test.solutions, test.n, 10)
+    local train_class_stats = eval.class_accuracy(train_class_pred, train.solutions, train.n, cfg.data.n_classes)
+    local val_class_stats = eval.class_accuracy(val_class_pred, validate.solutions, validate.n, cfg.data.n_classes)
+    local test_class_stats = eval.class_accuracy(test_class_pred, test.solutions, test.n, cfg.data.n_classes)
 
     str.printf("\nClassifier F1: train=%.2f val=%.2f test=%.2f\n",
       train_class_stats.f1, val_class_stats.f1, test_class_stats.f1)
