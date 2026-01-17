@@ -93,7 +93,7 @@ local cfg; cfg = {
       knn = { def = 25, min = 20, max = 35, int = true },
       knn_alpha = { def = 12, min = 10, max = 16, int = true },
       weight_decay = { def = 2.19, min = 2, max = 6 },
-      knn_mutual = false,
+      knn_mutual = { def = false },
       knn_mode = "cknn",
       knn_cache = 128,
       bridge = "mst",
@@ -371,7 +371,6 @@ test("newsgroups-raw", function()
     search_rounds = cfg.tm_search.rounds,
     search_trials = cfg.tm_search.trials,
     search_iterations = cfg.tm_search.iterations,
-    search_tolerance = cfg.tm_search.tolerance,
     final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,
     search_metric = function (t, enc_info)
