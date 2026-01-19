@@ -1,11 +1,7 @@
 # Now
 
-- Convolutional input, separate or alongside individualized input
-
-- Add options to add unsupervised spectral as additional feature engineering for
-  classification and encoder targets. For encoder, raw features and nystrom, and
-  for classifier, encoder and nystrom. Also include an option to allow raw
-  features along with encoder and or nystrom features for final classifiers.
+- Revise/rewrite documentation for sth
+- Supplementary documentation similar to sth for classification pipelines
 
 - Support passing in an index instead of codes to clustering, which allows
   clustering based on tk_inv_t, tk_ann_t, or tk_hbi_t using a new
@@ -16,14 +12,8 @@
   O(n*k) individual :distance() calls in diagnostics and weighted encoding
 
 - Extend tests
-    - imdb encoder
     - qqp encoder/classifier
     - snli encoder/classifier
-
-- Supplementary documentation similar to sth/hlth/nystrom for classification
-  pipelines
-
-# Next
 
 - Parallelize booleanizer and tokenizer
 
@@ -33,7 +23,7 @@
     - Sparse/dense PCA for dimensionality reduction (can be followed by ITQ)
     - Sparse/dense linear SVM for codebook/classifier learning
 
-- Regression, autoencoder
+- Regression TM, supporting single and multi-output
 
 - tsetlin
     - Interpretation of learned clauses, e.g. emitting clauses weighted by
@@ -52,6 +42,15 @@
 - _ind variants for:
     - All bits_top functions
     - Corex top features
+
+# Next
+
+- Add options to add unsupervised spectral as additional feature engineering for
+  classification and encoder targets. For encoder, raw features and nystrom, and
+  for classifier, encoder and nystrom. Also include an option to allow raw
+  features along with encoder and or nystrom features for final classifiers.
+
+- Autoencoder
 
 - Chores
     - Error checks on dimensions to prevent segfaults everywhere

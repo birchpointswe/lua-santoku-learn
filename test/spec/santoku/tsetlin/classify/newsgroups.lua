@@ -19,33 +19,33 @@ local cfg = {
     max_run = 2,
     ngrams = 2,
     cgrams_min = 3,
-    cgrams_max = 4,
+    cgrams_max = 3,
     skips = 1,
     negations = 0,
   },
   feature_selection = {
     algo = "chi2",
-    top_k = 12288,
+    top_k = 8192*2,
     individualized = true,
   },
   tm = {
     classes = 20,
     negative = 0.05,
     clauses = { def = 16, min = 8, max = 256, round = 8 },
-    clause_tolerance = { def = 64, min = 16, max = 128, int = true },
-    clause_maximum = { def = 64, min = 16, max = 128, int = true },
-    target = { def = 32, min = 16, max = 128, int = true },
+    clause_tolerance = { def = 64, min = 16, max = 256, int = true },
+    clause_maximum = { def = 64, min = 16, max = 256, int = true },
+    target = { def = 32, min = 16, max = 256, int = true },
     specificity = { def = 1000, min = 400, max = 4000 },
     include_bits = { def = 1, min = 1, max = 4, int = true },
   },
   search = {
-    patience = 6,
+    patience = 10,
     rounds = 6,
     trials = 10,
-    iterations = 20,
+    iterations = 40,
   },
   training = {
-    patience = 20,
+    patience = 200,
     iterations = 400,
   },
   threads = nil,
@@ -80,14 +80,21 @@ test("tsetlin", function ()
   local use_ind = cfg.feature_selection.individualized
 
   if use_ind then
-    str.printf("\nPer-class chi2 feature selection (individualized=%s)\n", tostring(use_ind))
-    local ids_union, feat_offs, feat_ids = train.problems0:bits_top_chi2_ind(
-      train.solutions, train.n, n_features, cfg.tm.classes, cfg.feature_selection.top_k)
+    local algo = cfg.feature_selection.algo or "chi2"
+    str.printf("\nPer-class %s feature selection (individualized=%s)\n", algo, tostring(use_ind))
+    local ids_union, feat_offs, feat_ids
+    if algo == "mi" then
+      ids_union, feat_offs, feat_ids = train.problems0:bits_top_mi_ind(
+        train.solutions, train.n, n_features, cfg.tm.classes, cfg.feature_selection.top_k)
+    else
+      ids_union, feat_offs, feat_ids = train.problems0:bits_top_chi2_ind(
+        train.solutions, train.n, n_features, cfg.tm.classes, cfg.feature_selection.top_k)
+    end
     feat_offsets = feat_offs
     local union_size = ids_union:size()
     local total_features = feat_offsets:get(cfg.tm.classes)
-    str.printf("  Per-class chi2: union=%d total=%d (%.1fx expansion)\n",
-      union_size, total_features, total_features / union_size)
+    str.printf("  Per-class %s: union=%d total=%d (%.1fx expansion)\n",
+      algo, union_size, total_features, total_features / union_size)
     train.solutions:add_scaled(-cfg.tm.classes)
     train.problems0 = nil
     tok:restrict(ids_union)
@@ -171,6 +178,7 @@ test("tsetlin", function ()
     search_rounds = cfg.search.rounds,
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
+    final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,
 
     search_metric = function (t0, _)
@@ -193,13 +201,10 @@ test("tsetlin", function ()
       end
       local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, cfg.tm.classes, cfg.threads)
       local d, dd = stopwatch()
-      if is_final then
-        str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%.2f S=%.2f IB=%d  F1=(val=%.2f,test=%.2f)  Epoch  %d\n",
-          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, val_accuracy.f1, test_accuracy.f1, epoch)
-      else
-        str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%.2f S=%.2f IB=%d  R=%d T=%d  F1=(val=%.2f,test=%.2f)  Epoch  %d\n",
-          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, round, trial, val_accuracy.f1, test_accuracy.f1, epoch)
-      end
+      local phase = is_final and "[F]" or str.format("[R%d T%d]", round, trial)
+      str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d F1=(%.2f,%.2f)\n",
+        epoch, phase, d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
+        params.target, params.specificity, params.include_bits, val_accuracy.f1, test_accuracy.f1)
     end
 
   })
