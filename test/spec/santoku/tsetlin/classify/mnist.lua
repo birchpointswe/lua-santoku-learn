@@ -27,14 +27,14 @@ local cfg = {
     include_bits = { def = 1, min = 1, max = 4, int = true },
   },
   search = {
-    patience = 6,
+    patience = 10,
     rounds = 6,
     trials = 10,
-    iterations = 20,
+    iterations = 40,
   },
   training = {
-    patience = 20,
-    iterations = 200,
+    patience = 40,
+    iterations = 400,
   },
   threads = nil,
 }
@@ -88,6 +88,7 @@ test("tsetlin", function ()
     search_rounds = cfg.search.rounds,
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
+    final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,
 
     search_metric = function (t)
@@ -100,15 +101,10 @@ test("tsetlin", function ()
       local test_predicted = t:predict(test.problems, test.n, cfg.threads)
       local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, cfg.tm.classes, cfg.threads)
       local d, dd = stopwatch()
-      -- luacheck: push ignore
-      if is_final then
-        str.printf("  Time %3.2f %3.2f  Finalizing  C=%d LF=%d L=%d T=%.2f S=%.2f IB=%d  F1=(val=%.2f,test=%.2f)  Epoch  %d\n",
-          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, val_accuracy.f1, test_accuracy.f1, epoch)
-      else
-        str.printf("  Time %3.2f %3.2f  Exploring  C=%d LF=%d L=%d T=%.2f S=%.2f IB=%d  R=%d T=%d  F1=(val=%.2f,test=%.2f)  Epoch  %d\n",
-          d, dd, params.clauses, params.clause_tolerance, params.clause_maximum, params.target, params.specificity, params.include_bits, round, trial, val_accuracy.f1, test_accuracy.f1, epoch)
-      end
-      -- luacheck: pop
+      local phase = is_final and "[F]" or str.format("[R%d T%d]", round, trial)
+      str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d F1=(%.2f,%.2f)\n",
+        epoch, phase, d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
+        params.target, params.specificity, params.include_bits, val_accuracy.f1, test_accuracy.f1)
     end
 
   })
