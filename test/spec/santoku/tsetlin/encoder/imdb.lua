@@ -23,7 +23,7 @@ local cfg; cfg = {
     max_len = 20,
     min_len = 1,
     max_run = 2,
-    ngrams = 2,
+    ngrams = 4,
     cgrams_min = 3,
     cgrams_max = 4,
     skips = 1,
@@ -48,13 +48,13 @@ local cfg; cfg = {
     include_bits = { def = 1, min = 1, max = 4, int = true },
   },
   tm_search = {
-    patience = 2,
+    patience = 10,
     rounds = 6,
     trials = 10,
-    iterations = 20,
+    iterations = 40,
   },
   training = {
-    patience = 20,
+    patience = 40,
     iterations = 400,
   },
   bit_pruning = {
@@ -77,24 +77,24 @@ local cfg; cfg = {
     specificity = { def = 1000, min = 400, max = 4000 },
     include_bits = { def = 1, min = 1, max = 4, int = true },
     negative = 0.5,
-    search_patience = 2,
+    search_patience = 10,
     search_rounds = 6,
     search_trials = 10,
-    search_iterations = 20,
-    final_iterations = 100,
+    search_iterations = 40,
+    final_patience = 40,
+    final_iterations = 400,
   },
   search = {
     rounds = 6,
-    patience = 3,
     adjacency_samples = 8,
     spectral_samples = 4,
     select_samples = 8,
     eval_samples = 4,
     adjacency = {
-      knn = { def = 24, min = 16, max = 32, int = true },
-      knn_alpha = { def = 20, min = 12, max = 28, int = true },
-      weight_decay = { def = 8, min = 2, max = 16 },
-      knn_mutual = { def = false },
+      knn = { def = 25, min = 20, max = 35, int = true },
+      knn_alpha = { def = 12, min = 10, max = 16, int = true },
+      weight_decay = { def = 2.19, min = 2, max = 6 },
+      knn_mutual = { def = false, false, true },
       knn_mode = "cknn",
       knn_cache = 128,
       bridge = "mst",
@@ -232,7 +232,6 @@ test("imdb-raw", function()
     index = train.index_graph_sup,
     knn_index = train.node_features_graph,
     rounds = cfg.search.rounds,
-    patience = cfg.search.patience,
     adjacency_samples = cfg.search.adjacency_samples,
     spectral_samples = cfg.search.spectral_samples,
     select_samples = cfg.search.select_samples,
@@ -388,9 +387,16 @@ test("imdb-raw", function()
   str.printf("  Mode: individualized=%s, selection=%s\n", tostring(use_ind), selection_method)
 
   if use_ind then
-    local ids_union, feat_offsets, feat_ids = train.tokens:bits_top_chi2_ind(
-      train.codes_sup, train.n, n_top_v, train.dims_sup,
-      cfg.encoder.max_vocab)
+    local ids_union, feat_offsets, feat_ids
+    if selection_method == "mi" then
+      ids_union, feat_offsets, feat_ids = train.tokens:bits_top_mi_ind(
+        train.codes_sup, train.n, n_top_v, train.dims_sup,
+        cfg.encoder.max_vocab)
+    else
+      ids_union, feat_offsets, feat_ids = train.tokens:bits_top_chi2_ind(
+        train.codes_sup, train.n, n_top_v, train.dims_sup,
+        cfg.encoder.max_vocab)
+    end
     local union_size = ids_union:size()
     local total_features = feat_offsets:get(train.dims_sup)
     str.printf("  Budget: %d features/dim × %d dims = %d total slots\n",
@@ -781,9 +787,9 @@ test("imdb-raw", function()
     end
 
     print("\nClustering predicted codes")
-    local train_pred_clusters = cluster_codes(train_predicted, train.ids, train.n, dims_predicted, "train")
-    local val_pred_clusters = cluster_codes(validate_predicted, validate.ids, validate.n, dims_predicted, "val")
-    local test_pred_clusters = cluster_codes(test_predicted, test.ids, test.n, dims_predicted, "test")
+    cluster_codes(train_predicted, train.ids, train.n, dims_predicted, "train")
+    cluster_codes(validate_predicted, validate.ids, validate.n, dims_predicted, "val")
+    cluster_codes(test_predicted, test.ids, test.n, dims_predicted, "test")
   end
 
   idx_train_pred:destroy()
@@ -812,6 +818,7 @@ test("imdb-raw", function()
       search_rounds = cfg.classifier.search_rounds,
       search_trials = cfg.classifier.search_trials,
       search_iterations = cfg.classifier.search_iterations,
+      final_patience = cfg.classifier.final_patience,
       final_iterations = cfg.classifier.final_iterations,
       search_metric = function (t)
         local predicted = t:predict(validate_predicted, validate.n)
@@ -823,7 +830,7 @@ test("imdb-raw", function()
         local test_accuracy = eval.class_accuracy(test_pred, test.solutions, test.n, cfg.data.n_classes)
         local d, dd = stopwatch()
         local phase = is_final and "[F]" or str.format("[R%d T%d]", round, trial)
-        str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d f1=(%.2f,%.2f)\n",
+        str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d F1=(%.2f,%.2f)\n",
           epoch, phase, d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
           params.target, params.specificity, params.include_bits, val_accuracy.f1, test_accuracy.f1)
       end,

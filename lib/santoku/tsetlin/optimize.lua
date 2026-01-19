@@ -197,7 +197,7 @@ M.build_sampler = function (spec, global_dev)
       end
     }
   end
-  if type(spec) == "table" and (spec.def ~= nil or (spec.min ~= nil and spec.max ~= nil)) then
+  if type(spec) == "table" and spec.min ~= nil and spec.max ~= nil then
     local minv, maxv = spec.min, spec.max
     err.assert(minv and maxv, "range spec missing min|max")
     local is_log = not not spec.log
@@ -395,7 +395,6 @@ M.search = function (args)
   local trial_fn = err.assert(args.trial_fn, "trial_fn required")
   local rounds = args.rounds or 3
   local trials = args.trials or 10
-  local tolerance = args.tolerance or 1e-8
   local make_key = args.make_key
   local each_cb = args.each
   local cleanup_fn = args.cleanup
@@ -453,7 +452,7 @@ M.search = function (args)
           round_best_score = score
           round_best_params = params
         end
-        if score > best_score + tolerance then
+        if score > best_score then
           round_improvements = round_improvements + 1
           if best_result and cleanup_fn then
             cleanup_fn(best_result)
@@ -583,7 +582,7 @@ local function create_final_tm (typ, args, params)
   end
 end
 
-local function train_tm (typ, tmobj, args, params, iterations, early_patience, tolerance, metric_fn, each_cb, info, encoding_info)
+local function train_tm (typ, tmobj, args, params, iterations, early_patience, metric_fn, each_cb, info, encoding_info)
   local best_epoch_score = -num.huge
   local last_epoch_score = -num.huge
   local last_metrics = nil
@@ -609,7 +608,7 @@ local function train_tm (typ, tmobj, args, params, iterations, early_patience, t
         return false
       end
     end
-    if score > best_epoch_score + tolerance then
+    if score > best_epoch_score then
       best_epoch_score = score
       epochs_since_improve = 0
       if checkpoint then
@@ -660,7 +659,6 @@ local function optimize_tm (args, typ)
   local use_early_stop = patience > 0
   local final_patience = args.final_patience or 40
   local use_final_early_stop = final_patience > 0
-  local tolerance = args.search_tolerance or 1e-8
   local iters_search = args.search_iterations or 10
   local final_iters = args.final_iterations or (iters_search * 10)
   local global_dev = args.search_dev or 0.2
@@ -766,7 +764,7 @@ local function optimize_tm (args, typ)
       dim_offsets = args.dim_offsets,
     }
     local score, metrics = train_tm(typ, search_tm, train_args, params, iters_search,
-      use_early_stop and patience or nil, tolerance, metric_fn, each_cb, info, encoding_info)
+      use_early_stop and patience or nil, metric_fn, each_cb, info, encoding_info)
     return score, metrics, nil
   end
 
@@ -775,7 +773,6 @@ local function optimize_tm (args, typ)
     samplers = samplers,
     rounds = args.search_rounds or 3,
     trials = args.search_trials or 10,
-    tolerance = tolerance,
     trial_fn = search_trial_fn,
     skip_final = true,
     make_key = function (p)
@@ -825,7 +822,7 @@ local function optimize_tm (args, typ)
     dim_offsets = args.dim_offsets,
   }
   local _, final_metrics = train_tm(typ, final_tm, final_train_args, best_params, final_iters,
-    use_final_early_stop and final_patience or nil, tolerance, metric_fn, each_cb, { is_final = true }, final_encoding_info)
+    use_final_early_stop and final_patience or nil, metric_fn, each_cb, { is_final = true }, final_encoding_info)
 
   for _, cached in pairs(landmark_cache) do
     cached.sentences:destroy()
@@ -1039,7 +1036,6 @@ M.spectral = function (args)
   local select_samples = args.select_samples or 1
   local eval_samples = args.eval_samples or 1
   local rounds = args.rounds or 1
-  local patience = args.patience or 0
   local global_dev = args.dev or 0.2
 
   local expected = {
@@ -1058,7 +1054,6 @@ M.spectral = function (args)
   local best_adj_neighbors = nil
   local best_adj_weights = nil
   local sample_count = 0
-  local rounds_without_improvement = 0
 
   local adj_fixed = M.tier_all_fixed(adjacency_cfg)
   local spec_fixed = M.tier_all_fixed(spectral_cfg)
@@ -1408,12 +1403,6 @@ M.spectral = function (args)
     M.adapt_jitter(adj_samplers, adapt_factor)
     M.adapt_jitter(spec_samplers, adapt_factor)
 
-    if round_improvements > 0 then
-      rounds_without_improvement = 0
-    else
-      rounds_without_improvement = rounds_without_improvement + 1
-    end
-
     collectgarbage("collect")
     local round_end_mem = mem_kb()
 
@@ -1428,14 +1417,9 @@ M.spectral = function (args)
         global_best_params = best_params,
         success_rate = success_rate,
         adapt_factor = adapt_factor,
-        rounds_without_improvement = rounds_without_improvement,
         mem_kb = round_end_mem,
         mem_delta_kb = round_end_mem - round_start_mem,
       })
-    end
-
-    if patience > 0 and rounds_without_improvement >= patience then
-      break
     end
 
   end
