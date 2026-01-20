@@ -18,17 +18,16 @@ local cfg = {
   },
   tm = {
     classes = 10,
-    negative = 0.1,
-    clauses = { def = 16, min = 8, max = 256, round = 8 },
-    clause_tolerance = { def = 64, min = 16, max = 128, int = true },
-    clause_maximum = { def = 64, min = 16, max = 128, int = true },
-    target = { def = 32, min = 16, max = 128, int = true },
-    specificity = { def = 1000, min = 400, max = 4000 },
-    include_bits = { def = 1, min = 1, max = 4, int = true },
+    clauses = { def = 80, min = 8, max = 256, round = 8 },
+    clause_tolerance = { def = 33, min = 16, max = 128, int = true },
+    clause_maximum = { def = 109, min = 16, max = 128, int = true },
+    target = { def = 16, min = 16, max = 128, int = true },
+    specificity = { def = 483, min = 400, max = 4000 },
+    include_bits = { def = 3, min = 1, max = 4, int = true },
   },
   search = {
     patience = 10,
-    rounds = 6,
+    rounds = 0,
     trials = 10,
     iterations = 40,
   },
@@ -71,7 +70,6 @@ test("tsetlin", function ()
 
     features = dataset.n_features,
     classes = cfg.tm.classes,
-    negative = cfg.tm.negative,
 
     samples = train.n,
     problems = train.problems,
@@ -97,14 +95,12 @@ test("tsetlin", function ()
       return accuracy.f1, accuracy
     end,
 
-    each = function (t, is_final, val_accuracy, params, epoch, round, trial)
-      local test_predicted = t:predict(test.problems, test.n, cfg.threads)
-      local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, cfg.tm.classes, cfg.threads)
+    each = function (_, is_final, val_accuracy, params, epoch, round, trial)
       local d, dd = stopwatch()
-      local phase = is_final and "[F]" or str.format("[R%d T%d]", round, trial)
-      str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d F1=(%.2f,%.2f)\n",
-        epoch, phase, d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
-        params.target, params.specificity, params.include_bits, val_accuracy.f1, test_accuracy.f1)
+      local phase = is_final and "F" or str.format("R%d T%d", round, trial)
+      str.printf("[CLASSIFY %s E%d] C=%d L=%d/%d T=%d S=%.0f IB=%d F1=%.2f (%.2fs +%.2fs)\n",
+        phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
+        params.target, params.specificity, params.include_bits, val_accuracy.f1, d, dd)
     end
 
   })

@@ -133,6 +133,5 @@ Extracts eigenvectors from graph Laplacian using PRIMME solver.
 | graph | Build k-NN/CkNN adjacency graphs with bridging |
 | spectral | Laplacian eigenvector computation via PRIMME |
 | itq | Binarization: ITQ rotation, Otsu, median, sign |
-| hlth | Landmark and nystrom-based hash encoding |
 | eval | Retrieval and clustering evaluation |
 | optimize | Hyperparameter search with adaptive sampling |

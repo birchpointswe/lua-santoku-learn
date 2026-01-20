@@ -2,6 +2,7 @@
 #include <lauxlib.h>
 #include <string.h>
 #include <limits.h>
+#include <math.h>
 #include <santoku/lua/utils.h>
 #include <santoku/iuset.h>
 #include <santoku/ivec.h>
@@ -30,7 +31,9 @@ typedef enum {
 typedef enum {
   TK_HLTH_MODE_CONCAT,
   TK_HLTH_MODE_FREQUENCY,
-  TK_HLTH_MODE_WEIGHTED
+  TK_HLTH_MODE_FREQUENCY_WEIGHTED,
+  TK_HLTH_MODE_CENTROID,
+  TK_HLTH_MODE_CENTROID_WEIGHTED
 } tk_hlth_mode_t;
 
 typedef struct {
@@ -146,8 +149,10 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
   int stack_before_out = lua_gettop(L);
 
   uint64_t n_latent_bits;
-  if (enc->mode == TK_HLTH_MODE_FREQUENCY || enc->mode == TK_HLTH_MODE_WEIGHTED)
+  if (enc->mode == TK_HLTH_MODE_FREQUENCY || enc->mode == TK_HLTH_MODE_FREQUENCY_WEIGHTED)
     n_latent_bits = enc->n_hidden * enc->n_thresholds;
+  else if (enc->mode == TK_HLTH_MODE_CENTROID || enc->mode == TK_HLTH_MODE_CENTROID_WEIGHTED)
+    n_latent_bits = enc->n_hidden;
   else
     n_latent_bits = enc->n_hidden * enc->n_landmarks;
 
@@ -253,7 +258,7 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
       free(all_freqs);
       free(quantile_thresholds);
     }
-  } else if (enc->mode == TK_HLTH_MODE_WEIGHTED) {
+  } else if (enc->mode == TK_HLTH_MODE_FREQUENCY_WEIGHTED) {
     uint64_t feat_ann_features = feat_ann ? feat_ann->features : 0;
     uint64_t feat_hbi_features = feat_hbi ? feat_hbi->features : 0;
     #pragma omp parallel
@@ -318,6 +323,107 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
               uint64_t out_bit = b * enc->n_thresholds + t;
               sample_dest[TK_CVEC_BITS_BYTE(out_bit)] |= (1 << TK_CVEC_BITS_BIT(out_bit));
             }
+          }
+        }
+      }
+      tk_ivec_destroy(tmp);
+      tk_dvec_destroy(sims);
+      free(bit_weights);
+    }
+  } else if (enc->mode == TK_HLTH_MODE_CENTROID) {
+    #pragma omp parallel
+    {
+      int64_t *bit_votes = calloc(enc->n_hidden, sizeof(int64_t));
+      tk_ivec_t *tmp = tk_ivec_create(NULL, 0, 0, 0);
+      #pragma omp for schedule(static)
+      for (uint64_t i = 0; i < n_samples; i++) {
+        memset(bit_votes, 0, enc->n_hidden * sizeof(int64_t));
+        tk_ivec_clear(tmp);
+        int64_t nbr_idx, nbr_uid;
+        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, feat_hbi, inv_hoods, ann_hoods, hbi_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
+          tk_ivec_push(tmp, nbr_uid);
+        });
+        for (uint64_t j = 0; j < tmp->n && j < enc->n_landmarks; j++) {
+          char *code_data = code_ann ? tk_ann_get(code_ann, tmp->a[j]) : tk_hbi_get(code_hbi, tmp->a[j]);
+          if (code_data != NULL) {
+            for (uint64_t b = 0; b < enc->n_hidden; b++) {
+              if (code_data[TK_CVEC_BITS_BYTE(b)] & (1 << TK_CVEC_BITS_BIT(b)))
+                bit_votes[b]++;
+              else
+                bit_votes[b]--;
+            }
+          }
+        }
+        uint8_t *sample_dest = (uint8_t *)out->a + i * n_latent_bytes;
+        for (uint64_t b = 0; b < enc->n_hidden; b++) {
+          if (bit_votes[b] >= 0) {
+            sample_dest[TK_CVEC_BITS_BYTE(b)] |= (1 << TK_CVEC_BITS_BIT(b));
+          }
+        }
+      }
+      tk_ivec_destroy(tmp);
+      free(bit_votes);
+    }
+  } else if (enc->mode == TK_HLTH_MODE_CENTROID_WEIGHTED) {
+    uint64_t feat_ann_features = feat_ann ? feat_ann->features : 0;
+    uint64_t feat_hbi_features = feat_hbi ? feat_hbi->features : 0;
+    #pragma omp parallel
+    {
+      double *bit_weights = calloc(enc->n_hidden, sizeof(double));
+      tk_ivec_t *tmp = tk_ivec_create(NULL, 0, 0, 0);
+      tk_dvec_t *sims = tk_dvec_create(NULL, 0, 0, 0);
+      #pragma omp for schedule(static)
+      for (uint64_t i = 0; i < n_samples; i++) {
+        memset(bit_weights, 0, enc->n_hidden * sizeof(double));
+        tk_ivec_clear(tmp);
+        tk_dvec_clear(sims);
+        int64_t nbr_idx, nbr_uid;
+        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, feat_hbi, inv_hoods, ann_hoods, hbi_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
+          double sim = 1.0;
+          if (inv_hoods) {
+            tk_rvec_t *hood = inv_hoods->a[i];
+            for (uint64_t j = 0; j < hood->n; j++) {
+              if (hood->a[j].i == nbr_idx) {
+                sim = 1.0 - hood->a[j].d;
+                break;
+              }
+            }
+          } else if (ann_hoods && feat_ann_features > 0) {
+            tk_pvec_t *hood = ann_hoods->a[i];
+            for (uint64_t j = 0; j < hood->n; j++) {
+              if (hood->a[j].i == nbr_idx) {
+                sim = 1.0 - (double)hood->a[j].p / (double)feat_ann_features;
+                break;
+              }
+            }
+          } else if (hbi_hoods && feat_hbi_features > 0) {
+            tk_pvec_t *hood = hbi_hoods->a[i];
+            for (uint64_t j = 0; j < hood->n; j++) {
+              if (hood->a[j].i == nbr_idx) {
+                sim = 1.0 - (double)hood->a[j].p / (double)feat_hbi_features;
+                break;
+              }
+            }
+          }
+          tk_ivec_push(tmp, nbr_uid);
+          tk_dvec_push(sims, sim);
+        });
+        for (uint64_t j = 0; j < tmp->n && j < enc->n_landmarks; j++) {
+          char *code_data = code_ann ? tk_ann_get(code_ann, tmp->a[j]) : tk_hbi_get(code_hbi, tmp->a[j]);
+          if (code_data != NULL) {
+            double w = sims->a[j];
+            for (uint64_t b = 0; b < enc->n_hidden; b++) {
+              if (code_data[TK_CVEC_BITS_BYTE(b)] & (1 << TK_CVEC_BITS_BIT(b)))
+                bit_weights[b] += w;
+              else
+                bit_weights[b] -= w;
+            }
+          }
+        }
+        uint8_t *sample_dest = (uint8_t *)out->a + i * n_latent_bytes;
+        for (uint64_t b = 0; b < enc->n_hidden; b++) {
+          if (bit_weights[b] >= 0.0) {
+            sample_dest[TK_CVEC_BITS_BYTE(b)] |= (1 << TK_CVEC_BITS_BIT(b));
           }
         }
       }
@@ -409,8 +515,12 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
   tk_hlth_mode_t mode = TK_HLTH_MODE_CONCAT;
   if (!strcmp(mode_str, "frequency"))
     mode = TK_HLTH_MODE_FREQUENCY;
-  else if (!strcmp(mode_str, "weighted"))
-    mode = TK_HLTH_MODE_WEIGHTED;
+  else if (!strcmp(mode_str, "frequency_weighted"))
+    mode = TK_HLTH_MODE_FREQUENCY_WEIGHTED;
+  else if (!strcmp(mode_str, "centroid"))
+    mode = TK_HLTH_MODE_CENTROID;
+  else if (!strcmp(mode_str, "centroid_weighted"))
+    mode = TK_HLTH_MODE_CENTROID_WEIGHTED;
 
   uint64_t n_thresholds = tk_lua_foptunsigned(L, 1, "landmark_encoder", "n_thresholds", 1);
   bool quantile = tk_lua_foptboolean(L, 1, "landmark_encoder", "quantile", false);
@@ -460,8 +570,10 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
   lua_pushcclosure(L, tk_hlth_encode_lua, 1);
 
   int64_t n_latent;
-  if (mode == TK_HLTH_MODE_FREQUENCY || mode == TK_HLTH_MODE_WEIGHTED)
+  if (mode == TK_HLTH_MODE_FREQUENCY || mode == TK_HLTH_MODE_FREQUENCY_WEIGHTED)
     n_latent = (int64_t) n_hidden * (int64_t) n_thresholds;
+  else if (mode == TK_HLTH_MODE_CENTROID || mode == TK_HLTH_MODE_CENTROID_WEIGHTED)
+    n_latent = (int64_t) n_hidden;
   else
     n_latent = (int64_t) n_landmarks * (int64_t) n_hidden;
   lua_pushinteger(L, n_latent);
@@ -564,6 +676,10 @@ static inline int tk_nystrom_encode_lua(lua_State *L) {
 
       double *sample_out = raw_codes->a + i * enc->n_dims;
 
+      double total_w = 0.0;
+      for (uint64_t j = 0; j < sims->n; j++)
+        total_w += sims->a[j];
+
       for (uint64_t j = 0; j < tmp->n; j++) {
         int64_t uid = tmp->a[j];
         double w = sims->a[j];
@@ -578,8 +694,9 @@ static inline int tk_nystrom_encode_lua(lua_State *L) {
         double *train_evec = enc->eigenvectors->a + (uint64_t)train_idx * enc->n_dims;
         for (uint64_t d = 0; d < enc->n_dims; d++) {
           double lambda = enc->eigenvalues->a[d];
-          if (lambda > 1e-10) {
-            sample_out[d] += w * train_evec[d] / lambda;
+          double denom = total_w - lambda;
+          if (fabs(denom) > 1e-10) {
+            sample_out[d] += w * train_evec[d] / denom;
           }
         }
       }
@@ -730,223 +847,9 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
   return 2;
 }
 
-static inline int tk_hlth_authority_scores_lua(lua_State *L) {
-  lua_settop(L, 1);
-  luaL_checktype(L, 1, LUA_TTABLE);
-
-  lua_getfield(L, 1, "token_index");
-  tk_inv_t *token_inv = tk_inv_peekopt(L, -1);
-  tk_ann_t *token_ann = tk_ann_peekopt(L, -1);
-  tk_hbi_t *token_hbi = tk_hbi_peekopt(L, -1);
-  lua_pop(L, 1);
-
-  if (!token_inv && !token_ann && !token_hbi)
-    return luaL_error(L, "authority_scores: token_index must be inv, ann, or hbi");
-
-  lua_getfield(L, 1, "code_index");
-  tk_ann_t *code_ann = tk_ann_peekopt(L, -1);
-  tk_hbi_t *code_hbi = tk_hbi_peekopt(L, -1);
-  lua_pop(L, 1);
-
-  if (!code_ann && !code_hbi)
-    return luaL_error(L, "authority_scores: code_index must be ann or hbi");
-
-  lua_getfield(L, 1, "ids");
-  tk_ivec_t *ids = tk_ivec_peek(L, -1, "ids");
-  lua_pop(L, 1);
-
-  lua_getfield(L, 1, "tokens");
-  tk_ivec_t *tokens_ivec = tk_ivec_peekopt(L, -1);
-  tk_cvec_t *tokens_cvec = tokens_ivec ? NULL : tk_cvec_peekopt(L, -1);
-  lua_pop(L, 1);
-
-  if (!tokens_ivec && !tokens_cvec)
-    return luaL_error(L, "authority_scores: tokens must be ivec or cvec");
-
-  uint64_t n_samples = tk_lua_fcheckunsigned(L, 1, "authority_scores", "n_samples");
-  uint64_t k_neighbors = tk_lua_fcheckunsigned(L, 1, "authority_scores", "k_neighbors");
-  uint64_t probe_radius = tk_lua_foptunsigned(L, 1, "authority_scores", "probe_radius", 2);
-
-  const char *cmp_str = tk_lua_foptstring(L, 1, "authority_scores", "cmp", "jaccard");
-  tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
-  if (!strcmp(cmp_str, "overlap")) cmp = TK_IVEC_OVERLAP;
-  else if (!strcmp(cmp_str, "dice")) cmp = TK_IVEC_DICE;
-  else if (!strcmp(cmp_str, "tversky")) cmp = TK_IVEC_TVERSKY;
-  double cmp_alpha = tk_lua_foptnumber(L, 1, "authority_scores", "cmp_alpha", 0.5);
-  double cmp_beta = tk_lua_foptnumber(L, 1, "authority_scores", "cmp_beta", 0.5);
-
-  uint64_t n_bits = code_ann ? code_ann->features : code_hbi->features;
-
-  tk_inv_hoods_t *inv_hoods = NULL;
-  tk_ann_hoods_t *ann_hoods = NULL;
-  tk_hbi_hoods_t *hbi_hoods = NULL;
-  tk_ivec_t *nbr_ids = NULL;
-
-  if (token_inv && tokens_ivec) {
-    tk_inv_neighborhoods_by_vecs(L, token_inv, tokens_ivec, k_neighbors + 1, 0.0, 1.0,
-                                 cmp, cmp_alpha, cmp_beta, 0.0, -1, &inv_hoods, &nbr_ids);
-  } else if (token_ann && tokens_cvec) {
-    tk_ann_neighborhoods_by_vecs(L, token_ann, tokens_cvec, k_neighbors + 1, probe_radius,
-                                 0, ~0ULL, &ann_hoods, &nbr_ids);
-  } else if (token_hbi && tokens_cvec) {
-    tk_hbi_neighborhoods_by_vecs(L, token_hbi, tokens_cvec, k_neighbors + 1, 0, ~0ULL, &hbi_hoods, &nbr_ids);
-  } else {
-    return luaL_error(L, "authority_scores: index/query type mismatch");
-  }
-
-  int stack_before_out = lua_gettop(L);
-  tk_dvec_t *scores = tk_dvec_create(L, n_samples, 0, 0);
-  scores->n = n_samples;
-
-  #pragma omp parallel
-  {
-    #pragma omp for schedule(static)
-    for (uint64_t i = 0; i < n_samples; i++) {
-      int64_t my_uid = ids->a[i];
-      double total_dist = 0.0;
-      uint64_t n_found = 0;
-
-      if (inv_hoods) {
-        tk_rvec_t *hood = inv_hoods->a[i];
-        for (uint64_t j = 0; j < hood->n && j < k_neighbors + 1; j++) {
-          int64_t nbr_uid = nbr_ids->a[hood->a[j].i];
-          if (nbr_uid == my_uid) continue;
-          double dist = code_ann ? tk_ann_distance(code_ann, my_uid, nbr_uid)
-                                 : tk_hbi_distance(code_hbi, my_uid, nbr_uid);
-          if (dist >= 0) {
-            total_dist += dist;
-            n_found++;
-          }
-        }
-      } else if (ann_hoods) {
-        tk_pvec_t *hood = ann_hoods->a[i];
-        for (uint64_t j = 0; j < hood->n && j < k_neighbors + 1; j++) {
-          int64_t nbr_uid = nbr_ids->a[hood->a[j].i];
-          if (nbr_uid == my_uid) continue;
-          double dist = code_ann ? tk_ann_distance(code_ann, my_uid, nbr_uid)
-                                 : tk_hbi_distance(code_hbi, my_uid, nbr_uid);
-          if (dist >= 0) {
-            total_dist += dist;
-            n_found++;
-          }
-        }
-      } else if (hbi_hoods) {
-        tk_pvec_t *hood = hbi_hoods->a[i];
-        for (uint64_t j = 0; j < hood->n && j < k_neighbors + 1; j++) {
-          int64_t nbr_uid = nbr_ids->a[hood->a[j].i];
-          if (nbr_uid == my_uid) continue;
-          double dist = code_ann ? tk_ann_distance(code_ann, my_uid, nbr_uid)
-                                 : tk_hbi_distance(code_hbi, my_uid, nbr_uid);
-          if (dist >= 0) {
-            total_dist += dist;
-            n_found++;
-          }
-        }
-      }
-
-      scores->a[i] = n_found > 0 ? total_dist / (double)n_found : (double)n_bits;
-    }
-  }
-
-  lua_replace(L, stack_before_out);
-  lua_settop(L, stack_before_out);
-  return 1;
-}
-
-static inline int tk_hlth_select_landmarks_lua(lua_State *L) {
-  lua_settop(L, 1);
-  luaL_checktype(L, 1, LUA_TTABLE);
-
-  lua_getfield(L, 1, "scores");
-  tk_dvec_t *scores = tk_dvec_peek(L, -1, "scores");
-  lua_pop(L, 1);
-
-  lua_getfield(L, 1, "assignments");
-  tk_ivec_t *assignments = tk_ivec_peek(L, -1, "assignments");
-  lua_pop(L, 1);
-
-  uint64_t k_per_cluster = tk_lua_fcheckunsigned(L, 1, "select_landmarks", "k_per_cluster");
-  uint64_t n_samples = scores->n;
-
-  if (assignments->n != n_samples)
-    return luaL_error(L, "select_landmarks: scores and assignments size mismatch");
-
-  int64_t max_cluster = -1;
-  for (uint64_t i = 0; i < n_samples; i++) {
-    if (assignments->a[i] > max_cluster)
-      max_cluster = assignments->a[i];
-  }
-  uint64_t n_clusters = (uint64_t)(max_cluster + 1);
-
-  typedef struct { uint64_t idx; double score; } scored_t;
-  scored_t **cluster_items = malloc(n_clusters * sizeof(scored_t *));
-  uint64_t *cluster_sizes = calloc(n_clusters, sizeof(uint64_t));
-  uint64_t *cluster_caps = calloc(n_clusters, sizeof(uint64_t));
-
-  for (uint64_t c = 0; c < n_clusters; c++) {
-    cluster_items[c] = NULL;
-    cluster_caps[c] = 0;
-    cluster_sizes[c] = 0;
-  }
-
-  for (uint64_t i = 0; i < n_samples; i++) {
-    int64_t c = assignments->a[i];
-    if (c < 0) continue;
-    uint64_t uc = (uint64_t)c;
-    if (cluster_sizes[uc] >= cluster_caps[uc]) {
-      uint64_t new_cap = cluster_caps[uc] == 0 ? 16 : cluster_caps[uc] * 2;
-      cluster_items[uc] = realloc(cluster_items[uc], new_cap * sizeof(scored_t));
-      cluster_caps[uc] = new_cap;
-    }
-    cluster_items[uc][cluster_sizes[uc]].idx = i;
-    cluster_items[uc][cluster_sizes[uc]].score = scores->a[i];
-    cluster_sizes[uc]++;
-  }
-
-  uint64_t total_selected = 0;
-  for (uint64_t c = 0; c < n_clusters; c++) {
-    total_selected += cluster_sizes[c] < k_per_cluster ? cluster_sizes[c] : k_per_cluster;
-  }
-
-  tk_ivec_t *selected = tk_ivec_create(L, total_selected, 0, 0);
-
-  for (uint64_t c = 0; c < n_clusters; c++) {
-    uint64_t n = cluster_sizes[c];
-    if (n == 0) continue;
-    scored_t *items = cluster_items[c];
-    for (uint64_t i = 0; i < n - 1; i++) {
-      uint64_t min_idx = i;
-      for (uint64_t j = i + 1; j < n; j++) {
-        if (items[j].score < items[min_idx].score)
-          min_idx = j;
-      }
-      if (min_idx != i) {
-        scored_t tmp = items[i];
-        items[i] = items[min_idx];
-        items[min_idx] = tmp;
-      }
-      if (i + 1 >= k_per_cluster) break;
-    }
-    uint64_t to_take = n < k_per_cluster ? n : k_per_cluster;
-    for (uint64_t i = 0; i < to_take; i++) {
-      tk_ivec_push(selected, (int64_t)items[i].idx);
-    }
-    free(cluster_items[c]);
-  }
-
-  free(cluster_items);
-  free(cluster_sizes);
-  free(cluster_caps);
-
-  lua_settop(L, 2);
-  return 1;
-}
-
 static luaL_Reg tk_hlth_fns[] = {
   { "landmark_encoder", tk_hlth_landmark_encoder_lua },
   { "nystrom_encoder", tk_hlth_nystrom_encoder_lua },
-  { "authority_scores", tk_hlth_authority_scores_lua },
-  { "select_landmarks", tk_hlth_select_landmarks_lua },
   { NULL, NULL }
 };
 

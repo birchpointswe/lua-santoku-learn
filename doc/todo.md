@@ -1,5 +1,7 @@
 # Now
 
+- Experiment with ProNe vs Spectral
+
 - Revise/rewrite documentation for sth
 - Supplementary documentation similar to sth for classification pipelines
 
