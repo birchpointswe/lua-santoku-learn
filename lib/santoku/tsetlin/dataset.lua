@@ -147,7 +147,7 @@ M.split_imdb = function (dataset, ratio, tvr)
 end
 
 local function clean_newsgroup_text (text, remove)
-  remove = remove or { headers = true, quotes = true, footers = true, emails = true }
+  remove = remove or { headers = true, quotes = true, footers = true, emails = false }
   local lines = {}
   local in_body = not remove.headers
   local sig_start = nil

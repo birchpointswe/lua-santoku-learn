@@ -22,11 +22,11 @@ local cfg; cfg = {
     max_len = 20,
     min_len = 1,
     max_run = 2,
-    ngrams = 4,
+    ngrams = 2,
     cgrams_min = 3,
-    cgrams_max = 4,
+    cgrams_max = 5,
+    cgrams_cross = true,
     skips = 1,
-    negations = 0,
   },
   feature_selection = {
     min_df = -2,
@@ -35,16 +35,16 @@ local cfg; cfg = {
   },
   encoder = {
     individualized = true,
-    max_vocab = 12288,
+    max_vocab = 16384,
     selection = "chi2",
   },
   tm = {
-    clauses = { def = 128, min = 8, max = 256, round = 8 },
-    clause_tolerance = { def = 19, min = 16, max = 128, int = true },
-    clause_maximum = { def = 123, min = 16, max = 128, int = true },
-    target = { def = 22, min = 16, max = 128, int = true },
-    specificity = { def = 669, min = 400, max = 4000 },
-    include_bits = { def = 4, min = 1, max = 4, int = true },
+    clauses = { def = 104, min = 8, max = 256, round = 8 },
+    clause_tolerance = { def = 16, min = 16, max = 128, int = true },
+    clause_maximum = { def = 108, min = 16, max = 128, int = true },
+    target = { def = 17, min = 16, max = 128, int = true },
+    specificity = { def = 493, min = 400, max = 4000 },
+    include_bits = { def = 3, min = 1, max = 4, int = true },
   },
   tm_search = {
     patience = 10,
@@ -75,7 +75,6 @@ local cfg; cfg = {
     target = { def = 58, min = 16, max = 128, int = true },
     specificity = { def = 858, min = 400, max = 4000 },
     include_bits = { def = 2, min = 1, max = 4, int = true },
-    negative = 0.5,
     search_patience = 10,
     search_rounds = 6,
     search_trials = 10,
@@ -92,7 +91,7 @@ local cfg; cfg = {
     adjacency = {
       knn = { def = 25, min = 20, max = 35, int = true },
       knn_alpha = { def = 12, min = 10, max = 16, int = true },
-      weight_decay = { def = 2.19, min = 2, max = 6 },
+      weight_decay = { def = 2.36, min = 2, max = 6 },
       knn_mutual = { def = false, false, true },
       knn_mode = "cknn",
       knn_cache = 128,
@@ -234,7 +233,7 @@ test("newsgroups-raw", function()
   local model_sup, spectral_best_params_sup, spectral_best_metrics_sup = optimize.spectral({
     index = train.index_graph_sup,
     knn_index = train.node_features_graph,
-    rounds = cfg.search.rounds,
+    search_rounds = cfg.search.rounds,
     adjacency_samples = cfg.search.adjacency_samples,
     spectral_samples = cfg.search.spectral_samples,
     select_samples = cfg.search.select_samples,
@@ -246,38 +245,31 @@ test("newsgroups-raw", function()
     expected_offsets = train.ground_truth_sup.retrieval.offsets,
     expected_neighbors = train.ground_truth_sup.retrieval.neighbors,
     expected_weights = train.ground_truth_sup.retrieval.weights,
-    adjacency_each = cfg.search.verbose and function (ns, cs, es, stg)
-      str.printf("    graph[%s]: %d nodes, %d edges, %d components\n", stg, ns, es, cs)
-    end or nil,
-    spectral_each = cfg.search.verbose and function (t, s)
-      if t == "done" then
-        str.printf("    spectral: %d matvecs\n", s)
-      end
-    end or nil,
     each = cfg.search.verbose and function (info)
       if info.event == "round_start" then
-        str.printf("\n=== Round %d/%d ===\n", info.round, info.rounds)
+        str.printf("\n[SPECTRAL R%d] Starting round %d/%d\n", info.round, info.round, info.rounds)
       elseif info.event == "round_end" then
-        str.printf("\n--- Round %d complete: best=%.4f (global=%.4f) ---\n",
-          info.round, info.round_best_score, info.global_best_score)
-      elseif info.event == "adjacency_cached" then
-        str.printf("\n  [%d] CACHED key=%s\n", info.adj_sample, info.adj_key)
+        str.printf("[SPECTRAL R%d] best=%.4f global=%.4f success=%.0f%% adapt=%.2f\n",
+          info.round, info.round_best_score, info.global_best_score,
+          (info.success_rate or 0) * 100, info.adapt_factor or 1)
       elseif info.event == "stage" and info.stage == "adjacency" then
         local p = info.params.adjacency
-        if info.is_final then
-          str.printf("\n  [Final] decay=%.2f knn=%d alpha=%d mutual=%s mode=%s\n",
-            p.weight_decay, p.knn, p.knn_alpha, tostring(p.knn_mutual), p.knn_mode)
-        else
-          str.printf("\n  [%d] decay=%.2f knn=%d alpha=%d mutual=%s mode=%s\n",
-            info.sample, p.weight_decay, p.knn, p.knn_alpha, tostring(p.knn_mutual), p.knn_mode)
-        end
+        local phase = info.is_final and "F" or str.format("R%d S%d", info.round, info.sample)
+        str.printf("[SPECTRAL %s ADJ] knn=%d alpha=%d decay=%.2f mutual=%s mode=%s bridge=%s\n",
+          phase, p.knn, p.knn_alpha, p.weight_decay, tostring(p.knn_mutual), p.knn_mode, p.bridge or "none")
+      elseif info.event == "adjacency_result" then
+        str.printf("[SPECTRAL] nodes=%d edges=%d\n", info.n_nodes, info.n_edges)
       elseif info.event == "stage" and info.stage == "spectral" then
         local p = info.params.spectral
-        str.printf("    lap=%s dims=%d\n", p.laplacian, p.n_dims)
+        str.printf("[SPECTRAL] EIG dims=%d lap=%s\n", p.n_dims, p.laplacian or "unnorm")
+      elseif info.event == "spectral_result" then
+        str.printf("[SPECTRAL] eig=[%.2e, %.2e] matvecs=%d\n", info.eig_min or 0, info.eig_max or 0, info.n_matvecs or 0)
+      elseif info.event == "stage" and info.stage == "select" then
+        local p = info.params.select or {}
+        local tp = p.threshold_params or {}
+        str.printf("[SPECTRAL] SEL threshold=%s\n", tp.method or "none")
       elseif info.event == "eval" then
-        local e = info.params.eval
-        local m = info.metrics
-        str.printf("    knn=%d score=%.4f\n", e.knn, m.score)
+        str.printf("[SPECTRAL] score=%.4f\n", info.score)
       end
     end or nil,
   })
@@ -288,6 +280,13 @@ test("newsgroups-raw", function()
   train.index_sup = model_sup.index
   train.spectral_params_sup = spectral_best_params_sup
   train.retrieval_stats = spectral_best_metrics_sup
+
+  str.printf("\nSpectral: dims=%d retrieval=%.4f\n", train.dims_sup, spectral_best_metrics_sup.score)
+  local adj_p = spectral_best_params_sup.adjacency
+  local spec_p = spectral_best_params_sup.spectral
+  str.printf("  Adjacency: knn=%d alpha=%d decay=%.2f mutual=%s mode=%s bridge=%s\n",
+    adj_p.knn, adj_p.knn_alpha, adj_p.weight_decay, tostring(adj_p.knn_mutual), adj_p.knn_mode, adj_p.bridge or "none")
+  str.printf("  Spectral: dims=%d lap=%s\n", spec_p.n_dims, spec_p.laplacian or "unnorm")
 
   local function build_token_ground_truth (knn_index, knn)
     local adj_expected_ids, adj_expected_offsets, adj_expected_neighbors, adj_expected_weights =
@@ -482,13 +481,8 @@ test("newsgroups-raw", function()
       category_anchors = cfg.search.eval.anchors,
       random_pairs = cfg.search.eval.pairs,
     })
+  local train_solutions = train.index_sup:get(train.ids)
   encoder_args.search_metric = function (t, enc_info)
-    local val_pred
-    if validate.raw_encoder_dim_offsets then
-      val_pred = t:predict(validate.raw_encoder_sentences, validate.raw_encoder_dim_offsets, validate.n)
-    else
-      val_pred = t:predict(validate.raw_encoder_sentences, validate.n)
-    end
     local train_pred
     if enc_info.dim_offsets then
       train_pred = t:predict(enc_info.sentences, enc_info.dim_offsets, enc_info.samples)
@@ -496,50 +490,20 @@ test("newsgroups-raw", function()
       train_pred = t:predict(enc_info.sentences, enc_info.samples)
     end
     local acc = eval.encoding_accuracy(train_pred, train_solutions, enc_info.samples, train.dims_sup)
-    local idx_val = ann.create({ features = train.dims_sup, expected_size = validate.n })
-    idx_val:add(val_pred, validate.ids)
-    local val_retrieved_ids, val_retrieved_offsets, val_retrieved_neighbors, val_retrieved_weights =
-      graph.adjacency({
-        weight_index = idx_val,
-        seed_ids = val_adj_expected_ids,
-        seed_offsets = val_adj_expected_offsets,
-        seed_neighbors = val_adj_expected_neighbors,
-      })
-    local val_stats = eval.score_retrieval({
-      retrieved_ids = val_retrieved_ids,
-      retrieved_offsets = val_retrieved_offsets,
-      retrieved_neighbors = val_retrieved_neighbors,
-      retrieved_weights = val_retrieved_weights,
-      expected_ids = val_adj_expected_ids,
-      expected_offsets = val_adj_expected_offsets,
-      expected_neighbors = val_adj_expected_neighbors,
-      expected_weights = val_adj_expected_weights,
-      ranking = cfg.search.eval.ranking,
-      metric = cfg.search.eval.metric,
-      n_dims = train.dims_sup,
-    })
-    idx_val:destroy()
-    val_retrieved_ids:destroy()
-    val_retrieved_offsets:destroy()
-    val_retrieved_neighbors:destroy()
-    val_retrieved_weights:destroy()
-    val_stats.hamming = acc.mean_hamming
-    return val_stats.score, val_stats
+    return acc.mean_hamming, acc
   end
   encoder_args.each = function (_, is_final, metrics, params, epoch, round, trial)
     local d, dd = stopwatch()
-    local phase = is_final and "[F]" or str.format("[R%d T%d]", round, trial)
-    str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d V=%d ham=%.4f val=%.4f\n",
-      epoch, phase, d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
-      params.target, params.specificity, params.include_bits, train.raw_encoder_n_features,
-      metrics.hamming, metrics.score)
+    local phase = is_final and "F" or str.format("R%d T%d", round, trial)
+    str.printf("[ENCODER %s E%d] C=%d L=%d/%d T=%d S=%.0f IB=%d ham=%.4f (%.2fs +%.2fs)\n",
+      phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
+      params.target, params.specificity, params.include_bits, metrics.mean_hamming, d, dd)
   end
 
   train.encoder, train.encoder_accuracy, train.encoder_params = optimize.encoder(encoder_args)
 
   print("\nFinal encoder performance")
-  str.printf("  Train | Hamming: %.4f\n", train.encoder_accuracy.hamming)
-  str.printf("  Val   | Retrieval: %.4f\n", train.encoder_accuracy.score)
+  str.printf("  Train | Hamming: %.4f\n", train.encoder_accuracy.mean_hamming)
   print("\n  Best TM params:")
   str.printf("    clauses=%d clause_tolerance=%d clause_maximum=%d target=%d specificity=%.2f\n",
     train.encoder_params.clauses,
@@ -811,7 +775,6 @@ test("newsgroups-raw", function()
       clause_tolerance = cfg.classifier.clause_tolerance,
       clause_maximum = cfg.classifier.clause_maximum,
       target = cfg.classifier.target,
-      negative = cfg.classifier.negative,
       specificity = cfg.classifier.specificity,
       include_bits = cfg.classifier.include_bits,
       samples = train.n,
@@ -828,14 +791,12 @@ test("newsgroups-raw", function()
         local accuracy = eval.class_accuracy(predicted, validate.solutions, validate.n, cfg.data.n_classes)
         return accuracy.f1, accuracy
       end,
-      each = function (t, is_final, val_accuracy, params, epoch, round, trial)
-        local test_pred = t:predict(test_predicted, test.n)
-        local test_accuracy = eval.class_accuracy(test_pred, test.solutions, test.n, cfg.data.n_classes)
+      each = function (_, is_final, val_accuracy, params, epoch, round, trial)
         local d, dd = stopwatch()
-        local phase = is_final and "[F]" or str.format("[R%d T%d]", round, trial)
-        str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d F1=(%.2f,%.2f)\n",
-          epoch, phase, d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
-          params.target, params.specificity, params.include_bits, val_accuracy.f1, test_accuracy.f1)
+        local phase = is_final and "F" or str.format("R%d T%d", round, trial)
+        str.printf("[CLASSIFY %s E%d] C=%d L=%d/%d T=%d S=%.0f IB=%d F1=%.2f (%.2fs +%.2fs)\n",
+          phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
+          params.target, params.specificity, params.include_bits, val_accuracy.f1, d, dd)
       end,
     })
 
