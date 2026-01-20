@@ -44,6 +44,14 @@ local env = {
         "-fopenmp", "$(shell pkg-config --libs blas lapack lapacke)"
       },
     },
+    ["prone%.c"] = {
+      cflags = {
+        "-fopenmp", "$(shell pkg-config --cflags blas lapack lapacke)"
+      },
+      ldflags = {
+        "-fopenmp", "$(shell pkg-config --libs blas lapack lapacke)"
+      },
+    },
     ["tch%.c"] = {
       cflags = { "-fopenmp" },
       ldflags = { "-fopenmp" },
@@ -53,7 +61,7 @@ local env = {
     "lua >= 5.1",
     "santoku >= 0.0.320-1",
     "santoku-matrix >= 0.0.216-1",
-    "santoku-tokenizer >= 0.0.6-1",
+    "santoku-tokenizer >= 0.0.15-1",
   },
   test = {
     dependencies = {

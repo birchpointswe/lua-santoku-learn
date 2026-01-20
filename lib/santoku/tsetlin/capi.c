@@ -68,8 +68,11 @@ typedef struct tk_tsetlin_s {
   char *state;
   char *actions;
   tk_automata_t automata;
-  double negative;
   double specificity;
+  uint32_t negative_threshold;
+  unsigned int specificity_threshold;
+  unsigned int specificity_uint;
+  unsigned int double_vote_target;
   unsigned int *results;
   size_t results_len;
   char *encodings;
@@ -170,10 +173,8 @@ static inline void apply_feedback (
   bool positive_feedback,
   unsigned int thread
 ) {
-  unsigned int features = tm->features;
   unsigned int max_literals = tm->clause_maximum;
   unsigned int input_chunks = tm->input_chunks;
-  double specificity = tm->specificity;
   bool output = votes[clause_idx] > 0;
   unsigned int clause_id = chunk * TK_CVEC_BITS + clause_idx;
   if (positive_feedback) {
@@ -182,7 +183,7 @@ static inline void apply_feedback (
         tk_automata_inc(&tm->automata, clause_id, (uint8_t*)input, input_chunks);
       tk_automata_dec_not_excluded(&tm->automata, clause_id, (uint8_t*)input, input_chunks);
     } else {
-      unsigned int s = (2 * features) / specificity;
+      unsigned int s = tm->specificity_threshold;
       unsigned int input_bits = tm->input_bits;
       for (unsigned int r = 0; r < s; r ++) {
         unsigned int random_input_bit = tk_fast_random() % input_bits;
@@ -211,32 +212,32 @@ static inline void tm_update (
   unsigned int chunk,
   unsigned int thread
 ) {
-  double negative_sampling = tm->negative;
-  if (chunk_class != sample_class && tk_fast_chance(1 - negative_sampling))
+  if (chunk_class != sample_class && tk_fast_random() <= tm->negative_threshold)
     return;
   long int vote_target = (long int) tm->target;
   long int chunk_vote = tk_tsetlin_sums(tm, out, votes);
   chunk_vote = (chunk_vote > vote_target) ? vote_target : chunk_vote;
   chunk_vote = (chunk_vote < -vote_target) ? -vote_target : chunk_vote;
-  double p;
+  unsigned int threshold;
+  unsigned int double_vote_target = tm->double_vote_target;
   if (chunk_class == sample_class && target_vote)
-    p = (double) (vote_target - chunk_vote) / (2.0 * vote_target);
+    threshold = (unsigned int)(vote_target - chunk_vote);
   else
-    p = (double) (vote_target + chunk_vote) / (2.0 * vote_target);
+    threshold = (unsigned int)(vote_target + chunk_vote);
   for (unsigned int j = 0; j < TK_CVEC_BITS; j += 2) {
     unsigned int pos_clause = j;
     unsigned int neg_clause = j + 1;
     if (neg_clause >= TK_CVEC_BITS)
       break;
     if (chunk_class == sample_class && target_vote) {
-      if (tk_fast_chance(p))
+      if (tk_fast_random() % double_vote_target < threshold)
         apply_feedback(tm, pos_clause, chunk, input, literals, votes, true, thread);
-      if (tk_fast_chance(p))
+      if (tk_fast_random() % double_vote_target < threshold)
         apply_feedback(tm, neg_clause, chunk, input, literals, votes, false, thread);
     } else {
-      if (tk_fast_chance(p))
+      if (tk_fast_random() % double_vote_target < threshold)
         apply_feedback(tm, neg_clause, chunk, input, literals, votes, true, thread);
-      if (tk_fast_chance(p))
+      if (tk_fast_random() % double_vote_target < threshold)
         apply_feedback(tm, pos_clause, chunk, input, literals, votes, false, thread);
     }
   }
@@ -333,7 +334,7 @@ static inline void apply_feedback_ind (
   bool positive_feedback,
   uint64_t features,
   uint64_t input_chunks,
-  double specificity,
+  unsigned int specificity_uint,
   unsigned int max_literals
 ) {
   bool output = votes[clause_idx] > 0;
@@ -345,7 +346,7 @@ static inline void apply_feedback_ind (
       tk_automata_dec_not_excluded(aut, clause_id, (uint8_t*)input, input_chunks);
     } else {
       uint64_t input_bits = 2 * features;
-      unsigned int s = (unsigned int)((double)(2 * features) / specificity);
+      unsigned int s = (unsigned int)((2 * features) / specificity_uint);
       for (unsigned int r = 0; r < s; r++) {
         unsigned int random_input_bit = tk_fast_random() % input_bits;
         unsigned int random_chunk = random_input_bit / 8;
@@ -369,34 +370,34 @@ static inline void tm_update_ind (
   bool target_vote,
   unsigned int chunk,
   long int vote_target,
-  double negative_sampling,
+  unsigned int double_vote_target,
   uint64_t features,
   uint64_t input_chunks,
-  double specificity,
+  unsigned int specificity_threshold,
   unsigned int max_literals
 ) {
   long int chunk_vote = tk_tsetlin_sums_ind(out, votes);
   chunk_vote = (chunk_vote > vote_target) ? vote_target : chunk_vote;
   chunk_vote = (chunk_vote < -vote_target) ? -vote_target : chunk_vote;
-  double p;
+  unsigned int threshold;
   if (target_vote)
-    p = (double)(vote_target - chunk_vote) / (2.0 * vote_target);
+    threshold = (unsigned int)(vote_target - chunk_vote);
   else
-    p = (double)(vote_target + chunk_vote) / (2.0 * vote_target);
+    threshold = (unsigned int)(vote_target + chunk_vote);
   for (unsigned int j = 0; j < TK_CVEC_BITS; j += 2) {
     unsigned int pos_clause = j;
     unsigned int neg_clause = j + 1;
     if (neg_clause >= TK_CVEC_BITS) break;
     if (target_vote) {
-      if (tk_fast_chance(p))
-        apply_feedback_ind(aut, pos_clause, chunk, input, literals, votes, true, features, input_chunks, specificity, max_literals);
-      if (tk_fast_chance(p))
-        apply_feedback_ind(aut, neg_clause, chunk, input, literals, votes, false, features, input_chunks, specificity, max_literals);
+      if (tk_fast_random() % double_vote_target < threshold)
+        apply_feedback_ind(aut, pos_clause, chunk, input, literals, votes, true, features, input_chunks, specificity_threshold, max_literals);
+      if (tk_fast_random() % double_vote_target < threshold)
+        apply_feedback_ind(aut, neg_clause, chunk, input, literals, votes, false, features, input_chunks, specificity_threshold, max_literals);
     } else {
-      if (tk_fast_chance(p))
-        apply_feedback_ind(aut, neg_clause, chunk, input, literals, votes, true, features, input_chunks, specificity, max_literals);
-      if (tk_fast_chance(p))
-        apply_feedback_ind(aut, pos_clause, chunk, input, literals, votes, false, features, input_chunks, specificity, max_literals);
+      if (tk_fast_random() % double_vote_target < threshold)
+        apply_feedback_ind(aut, neg_clause, chunk, input, literals, votes, true, features, input_chunks, specificity_threshold, max_literals);
+      if (tk_fast_random() % double_vote_target < threshold)
+        apply_feedback_ind(aut, pos_clause, chunk, input, literals, votes, false, features, input_chunks, specificity_threshold, max_literals);
     }
   }
 }
@@ -457,7 +458,6 @@ static inline void tk_tsetlin_init_classifier (
   unsigned int state_bits,
   unsigned int include_bits,
   double targetf,
-  double negative,
   double specificity
 ) {
   if (!classes)
@@ -471,7 +471,6 @@ static inline void tk_tsetlin_init_classifier (
   if (state_bits < 2)
     tk_lua_verror(L, 3, "create classifier", "bits", "must be greater than 1");
   tm->reusable = false;
-  tm->negative = negative < 0 ? 1.0 / (double) classes : negative;
   tm->classes = classes;
   tm->class_chunks = TK_CVEC_BITS_BYTES(tm->classes);
   tm->clauses = TK_CVEC_BITS_BYTES(clauses) * TK_CVEC_BITS;
@@ -494,6 +493,10 @@ static inline void tk_tsetlin_init_classifier (
   tm->state = (char *)tk_malloc_aligned(L, tm->state_chunks, TK_CVEC_BITS);
   tm->actions = (char *)tk_malloc_aligned(L, tm->action_chunks, TK_CVEC_BITS);
   tm->specificity = specificity;
+  tm->specificity_uint = (unsigned int)specificity;
+  tm->negative_threshold = UINT32_MAX - UINT32_MAX / tm->classes;
+  tm->specificity_threshold = (2 * tm->features) / tm->specificity_uint;
+  tm->double_vote_target = 2 * tm->target;
   if (!(tm->state && tm->actions))
     luaL_error(L, "error in malloc during creation of classifier");
   tm->automata.n_clauses = tm->classes * tm->clauses;
@@ -516,12 +519,11 @@ static inline int tk_tsetlin_init_encoder (
   unsigned int state_bits,
   unsigned int include_bits,
   double targetf,
-  double negative,
   double specificity
 ) {
   tk_tsetlin_init_classifier(
     L, tm, encoding_bits, features, clauses, clause_tolerance, clause_maximum,
-    state_bits, include_bits, targetf, negative, specificity);
+    state_bits, include_bits, targetf, specificity);
   return 0;
 }
 
@@ -536,7 +538,6 @@ static inline void tk_tsetlin_init_classifier_ind (
   unsigned int state_bits,
   unsigned int include_bits,
   double targetf,
-  double negative,
   double specificity
 ) {
   if (!classes)
@@ -553,7 +554,6 @@ static inline void tk_tsetlin_init_classifier_ind (
     tk_lua_verror(L, 3, "create classifier ind", "feat_offsets", "must have classes + 1 elements");
   tm->individualized = true;
   tm->reusable = false;
-  tm->negative = negative < 0 ? 1.0 / (double) classes : negative;
   tm->classes = classes;
   tm->class_chunks = TK_CVEC_BITS_BYTES(tm->classes);
   tm->clauses = TK_CVEC_BITS_BYTES(clauses) * TK_CVEC_BITS;
@@ -567,6 +567,9 @@ static inline void tk_tsetlin_init_classifier_ind (
   tm->state_bits = state_bits;
   tm->include_bits = include_bits ? include_bits : 1;
   tm->specificity = specificity;
+  tm->specificity_uint = (unsigned int)specificity;
+  tm->negative_threshold = UINT32_MAX - UINT32_MAX / tm->classes;
+  tm->double_vote_target = 2 * tm->target;
   tm->feat_sizes = (uint64_t *)tk_malloc(L, classes * sizeof(uint64_t));
   tm->input_chunks_ind = (uint64_t *)tk_malloc(L, classes * sizeof(uint64_t));
   tm->tail_masks_ind = (uint8_t *)tk_malloc(L, classes * sizeof(uint8_t));
@@ -616,12 +619,11 @@ static inline void tk_tsetlin_init_encoder_ind (
   unsigned int state_bits,
   unsigned int include_bits,
   double targetf,
-  double negative,
   double specificity
 ) {
   tk_tsetlin_init_classifier_ind(
     L, tm, encoding_bits, feat_offsets, clauses, clause_tolerance, clause_maximum,
-    state_bits, include_bits, targetf, negative, specificity);
+    state_bits, include_bits, targetf, specificity);
 }
 
 static inline void tk_tsetlin_create_classifier (lua_State *L)
@@ -642,7 +644,6 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
         tk_lua_foptunsigned(L, 2, "create classifier", "state", 8),
         tk_lua_foptunsigned(L, 2, "create classifier", "include_bits", 1),
         tk_lua_foptposdouble(L, 2, "create classifier", "target", -1.0),
-        tk_lua_foptposdouble(L, 2, "create classifier", "negative", -1.0),
         tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity"));
   } else {
     tk_tsetlin_init_classifier(L, tm,
@@ -654,7 +655,6 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
         tk_lua_foptunsigned(L, 2, "create classifier", "state", 8),
         tk_lua_foptunsigned(L, 2, "create classifier", "include_bits", 1),
         tk_lua_foptposdouble(L, 2, "create classifier", "target", -1.0),
-        tk_lua_foptposdouble(L, 2, "create classifier", "negative", -1.0),
         tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity"));
   }
   tm->reusable = tk_lua_foptboolean(L, 2, "create classifier", "reusable", false);
@@ -679,7 +679,6 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
         tk_lua_foptunsigned(L, 2, "create encoder", "state", 8),
         tk_lua_foptunsigned(L, 2, "create encoder", "include_bits", 1),
         tk_lua_foptposdouble(L, 2, "create encoder", "target", -1.0),
-        tk_lua_foptposdouble(L, 2, "create encoder", "negative", -1.0),
         tk_lua_fcheckposdouble(L, 2, "create encoder", "specificity"));
   } else {
     tk_tsetlin_init_encoder(L, tm,
@@ -691,7 +690,6 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
         tk_lua_foptunsigned(L, 2, "create encoder", "state", 8),
         tk_lua_foptunsigned(L, 2, "create encoder", "include_bits", 1),
         tk_lua_foptposdouble(L, 2, "create encoder", "target", -1.0),
-        tk_lua_foptposdouble(L, 2, "create encoder", "negative", -1.0),
         tk_lua_fcheckposdouble(L, 2, "create encoder", "specificity"));
   }
   tm->reusable = tk_lua_foptboolean(L, 2, "create encoder", "reusable", false);
@@ -1308,7 +1306,8 @@ static inline int tk_tsetlin_train_encoder_ind (lua_State *L, tk_tsetlin_t *tm) 
   unsigned int clause_chunks = tm->clause_chunks;
   char *lbls = ls->a;
   long int vote_target = (long int)tm->target;
-  double specificity = tm->specificity;
+  unsigned int double_vote_target = tm->double_vote_target;
+  unsigned int specificity_uint = tm->specificity_uint;
   unsigned int max_literals = tm->clause_maximum;
   unsigned int tolerance = tm->clause_tolerance;
   bool break_flag = false;
@@ -1354,7 +1353,7 @@ static inline int tk_tsetlin_train_encoder_ind (lua_State *L, tk_tsetlin_t *tm) 
             char *input = ps->a + byte_offset_h + sample * input_chunks_h;
             uint8_t out = tk_tsetlin_calculate_ind(aut, input, literals, votes, chunk, input_chunks_h, tail_mask_h, tolerance);
             bool target_vote = (((uint8_t *)lbls)[sample * class_chunks + enc_chunk] & (1 << enc_bit)) > 0;
-            tm_update_ind(aut, input, out, literals, votes, target_vote, chunk, vote_target, 0.0, feat_size_h, input_chunks_h, specificity, max_literals);
+            tm_update_ind(aut, input, out, literals, votes, target_vote, chunk, vote_target, double_vote_target, feat_size_h, input_chunks_h, specificity_uint, max_literals);
           }
         }
       }
@@ -1403,8 +1402,9 @@ static inline int tk_tsetlin_train_classifier_ind (lua_State *L, tk_tsetlin_t *t
   unsigned int clause_chunks = tm->clause_chunks;
   int64_t *lbls = ss->a;
   long int vote_target = (long int)tm->target;
-  double specificity = tm->specificity;
-  double negative_sampling = tm->negative;
+  unsigned int double_vote_target = tm->double_vote_target;
+  unsigned int specificity_uint = tm->specificity_uint;
+  uint32_t negative_threshold = tm->negative_threshold;
   unsigned int max_literals = tm->clause_maximum;
   unsigned int tolerance = tm->clause_tolerance;
   bool break_flag = false;
@@ -1446,12 +1446,12 @@ static inline int tk_tsetlin_train_classifier_ind (lua_State *L, tk_tsetlin_t *t
           for (unsigned int i = 0; i < n; i++) {
             unsigned int sample = shuffle[i];
             unsigned int sample_class = (unsigned int)lbls[sample];
-            if (h != sample_class && tk_fast_chance(1 - negative_sampling))
+            if (h != sample_class && tk_fast_random() <= negative_threshold)
               continue;
             char *input = ps->a + byte_offset_h + sample * input_chunks_h;
             uint8_t out = tk_tsetlin_calculate_ind(aut, input, literals, votes, chunk, input_chunks_h, tail_mask_h, tolerance);
             bool target_vote = (h == sample_class);
-            tm_update_ind(aut, input, out, literals, votes, target_vote, chunk, vote_target, negative_sampling, feat_size_h, input_chunks_h, specificity, max_literals);
+            tm_update_ind(aut, input, out, literals, votes, target_vote, chunk, vote_target, double_vote_target, feat_size_h, input_chunks_h, specificity_uint, max_literals);
           }
         }
       }
@@ -1643,9 +1643,13 @@ static inline int tk_tsetlin_reconfigure (lua_State *L)
   tm->action_chunks = new_action_chunks;
   tm->state_chunks = new_state_chunks;
   tm->specificity = new_specificity;
+  tm->specificity_uint = (unsigned int)new_specificity;
   tm->target = new_target < 0
     ? sqrt((double) tm->clauses / 2.0) * (double) new_tolerance
     : ceil(new_target >= 1 ? new_target : fmaxf(1.0, (double) tm->clauses * new_target));
+  tm->double_vote_target = 2 * tm->target;
+  if (!tm->individualized)
+    tm->specificity_threshold = (2 * tm->features) / tm->specificity_uint;
 
   if (tm->individualized) {
     uint64_t action_offset = 0, state_offset = 0;

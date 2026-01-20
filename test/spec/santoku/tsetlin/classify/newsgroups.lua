@@ -3,7 +3,7 @@ local str = require("santoku.string")
 local test = require("santoku.test")
 local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
-require("santoku.ivec")
+local ivec = require("santoku.ivec")
 local optimize = require("santoku.tsetlin.optimize")
 local tokenizer = require("santoku.tokenizer")
 local utc = require("santoku.utc")
@@ -19,33 +19,32 @@ local cfg = {
     max_run = 2,
     ngrams = 2,
     cgrams_min = 3,
-    cgrams_max = 3,
+    cgrams_max = 5,
+    cgrams_cross = true,
     skips = 1,
-    negations = 0,
   },
   feature_selection = {
     algo = "chi2",
-    top_k = 8192*2,
+    top_k = 16384,
     individualized = true,
   },
   tm = {
     classes = 20,
-    negative = 0.05,
-    clauses = { def = 16, min = 8, max = 256, round = 8 },
-    clause_tolerance = { def = 64, min = 16, max = 256, int = true },
-    clause_maximum = { def = 64, min = 16, max = 256, int = true },
-    target = { def = 32, min = 16, max = 256, int = true },
-    specificity = { def = 1000, min = 400, max = 4000 },
-    include_bits = { def = 1, min = 1, max = 4, int = true },
+    clauses = { def = 72, min = 8, max = 256, round = 8 },
+    clause_tolerance = { def = 61, min = 16, max = 128, int = true },
+    clause_maximum = { def = 97, min = 16, max = 128, int = true },
+    target = { def = 51, min = 16, max = 128, int = true },
+    specificity = { def = 439, min = 400, max = 4000 },
+    include_bits = { def = 2, min = 1, max = 4, int = true },
   },
   search = {
-    patience = 10,
-    rounds = 6,
+    patience = 6,
+    rounds = 0,
     trials = 10,
-    iterations = 40,
+    iterations = 20,
   },
   training = {
-    patience = 200,
+    patience = 20,
     iterations = 400,
   },
   threads = nil,
@@ -80,21 +79,14 @@ test("tsetlin", function ()
   local use_ind = cfg.feature_selection.individualized
 
   if use_ind then
-    local algo = cfg.feature_selection.algo or "chi2"
-    str.printf("\nPer-class %s feature selection (individualized=%s)\n", algo, tostring(use_ind))
-    local ids_union, feat_offs, feat_ids
-    if algo == "mi" then
-      ids_union, feat_offs, feat_ids = train.problems0:bits_top_mi_ind(
-        train.solutions, train.n, n_features, cfg.tm.classes, cfg.feature_selection.top_k)
-    else
-      ids_union, feat_offs, feat_ids = train.problems0:bits_top_chi2_ind(
-        train.solutions, train.n, n_features, cfg.tm.classes, cfg.feature_selection.top_k)
-    end
+    str.printf("\nPer-class chi2 feature selection (individualized=%s)\n", tostring(use_ind))
+    local ids_union, feat_offs, feat_ids = train.problems0:bits_top_chi2_ind(
+      train.solutions, train.n, n_features, cfg.tm.classes, cfg.feature_selection.top_k)
     feat_offsets = feat_offs
     local union_size = ids_union:size()
     local total_features = feat_offsets:get(cfg.tm.classes)
-    str.printf("  Per-class %s: union=%d total=%d (%.1fx expansion)\n",
-      algo, union_size, total_features, total_features / union_size)
+    str.printf("  Per-class chi2: union=%d total=%d (%.1fx expansion)\n",
+      union_size, total_features, total_features / union_size)
     train.solutions:add_scaled(-cfg.tm.classes)
     train.problems0 = nil
     tok:restrict(ids_union)
@@ -121,7 +113,6 @@ test("tsetlin", function ()
     train.solutions:add_scaled(-cfg.tm.classes)
     n_top_v = top_v:size()
     print("After top k filter", n_top_v)
-    train.problems0 = nil
 
     local words = tok:index()
     print("\nTop 30 by Chi2 score:")
@@ -138,17 +129,26 @@ test("tsetlin", function ()
       str.printf("  %6d  %-24s  %.4f\n", id, words[id + 1] or "?", score)
     end
 
-    tok:restrict(top_v)
+    print("\nSelecting top features and converting to cvec")
+    local train_selected = ivec.create()
+    train.problems0:bits_select(top_v, nil, n_features, train_selected)
+    train.problems = train_selected:bits_to_cvec(train.n, n_top_v, true)
+    train_selected:destroy()
+    train.problems0:destroy()
 
-    print("\nRe-encoding train/validate/test with top features")
-    train.problems = tok:tokenize(train.problems)
-    validate.problems = tok:tokenize(validate.problems)
-    test.problems = tok:tokenize(test.problems)
+    local validate_tokens = tok:tokenize(validate.problems)
+    local validate_selected = ivec.create()
+    validate_tokens:bits_select(top_v, nil, n_features, validate_selected)
+    validate.problems = validate_selected:bits_to_cvec(validate.n, n_top_v, true)
+    validate_tokens:destroy()
+    validate_selected:destroy()
 
-    print("Prepping for classifier")
-    train.problems = train.problems:bits_to_cvec(train.n, n_top_v, true)
-    validate.problems = validate.problems:bits_to_cvec(validate.n, n_top_v, true)
-    test.problems = test.problems:bits_to_cvec(test.n, n_top_v, true)
+    local test_tokens = tok:tokenize(test.problems)
+    local test_selected = ivec.create()
+    test_tokens:bits_select(top_v, nil, n_features, test_selected)
+    test.problems = test_selected:bits_to_cvec(test.n, n_top_v, true)
+    test_tokens:destroy()
+    test_selected:destroy()
   end
   tok:destroy()
 
@@ -166,7 +166,6 @@ test("tsetlin", function ()
     clause_tolerance = cfg.tm.clause_tolerance,
     clause_maximum = cfg.tm.clause_maximum,
     target = cfg.tm.target,
-    negative = cfg.tm.negative,
     specificity = cfg.tm.specificity,
     include_bits = cfg.tm.include_bits,
 
@@ -178,7 +177,6 @@ test("tsetlin", function ()
     search_rounds = cfg.search.rounds,
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
-    final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,
 
     search_metric = function (t0, _)
@@ -192,19 +190,12 @@ test("tsetlin", function ()
       return accuracy.f1, accuracy
     end,
 
-    each = function (t0, is_final, val_accuracy, params, epoch, round, trial)
-      local test_predicted
-      if test_dim_offsets then
-        test_predicted = t0:predict(test.problems, test_dim_offsets, test.n, cfg.threads)
-      else
-        test_predicted = t0:predict(test.problems, test.n, cfg.threads)
-      end
-      local test_accuracy = eval.class_accuracy(test_predicted, test.solutions, test.n, cfg.tm.classes, cfg.threads)
+    each = function (_, is_final, val_accuracy, params, epoch, round, trial)
       local d, dd = stopwatch()
-      local phase = is_final and "[F]" or str.format("[R%d T%d]", round, trial)
-      str.printf("  [E%d]%s %.2f %.2f C=%d L=%d/%d T=%d S=%.0f IB=%d F1=(%.2f,%.2f)\n",
-        epoch, phase, d, dd, params.clauses, params.clause_tolerance, params.clause_maximum,
-        params.target, params.specificity, params.include_bits, val_accuracy.f1, test_accuracy.f1)
+      local phase = is_final and "F" or str.format("R%d T%d", round, trial)
+      str.printf("[CLASSIFY %s E%d] C=%d L=%d/%d T=%d S=%.0f IB=%d F1=%.2f (%.2fs +%.2fs)\n",
+        phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
+        params.target, params.specificity, params.include_bits, val_accuracy.f1, d, dd)
     end
 
   })

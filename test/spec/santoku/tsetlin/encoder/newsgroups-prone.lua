@@ -14,10 +14,9 @@ local tokenizer = require("santoku.tokenizer")
 
 local cfg; cfg = {
   data = {
-    ttr = 0.5,
+    max_per_class = nil,
+    n_classes = 20,
     tvr = 0.1,
-    max = nil,
-    n_classes = 2,
   },
   tokenizer = {
     max_len = 20,
@@ -30,22 +29,24 @@ local cfg; cfg = {
     skips = 1,
   },
   feature_selection = {
-    min_df = -2,
-    max_df = 0.98,
+    min_df = -10,
+    max_df = -2000,
+    -- max_df = 0.98,
     max_vocab = nil,
   },
   encoder = {
     individualized = true,
-    max_vocab = 16384,
+    max_vocab = 8192,
+    -- max_vocab = 16384,
     selection = "chi2",
   },
   tm = {
-    clauses = { def = 128, min = 8, max = 256, round = 8 },
-    clause_tolerance = { def = 64, min = 16, max = 128, int = true },
-    clause_maximum = { def = 64, min = 16, max = 128, int = true },
-    target = { def = 32, min = 16, max = 128, int = true },
-    specificity = { def = 1000, min = 400, max = 4000 },
-    include_bits = { def = 1, min = 1, max = 4, int = true },
+    clauses = { def = 104, min = 8, max = 256, round = 8 },
+    clause_tolerance = { def = 16, min = 16, max = 128, int = true },
+    clause_maximum = { def = 108, min = 16, max = 128, int = true },
+    target = { def = 17, min = 16, max = 128, int = true },
+    specificity = { def = 493, min = 400, max = 4000 },
+    include_bits = { def = 3, min = 1, max = 4, int = true },
   },
   tm_search = {
     patience = 10,
@@ -71,11 +72,11 @@ local cfg; cfg = {
   classifier = {
     enabled = true,
     clauses = { def = 8, min = 8, max = 32, round = 8 },
-    clause_tolerance = { def = 64, min = 16, max = 128, int = true },
-    clause_maximum = { def = 64, min = 16, max = 128, int = true },
-    target = { def = 32, min = 16, max = 128, int = true },
-    specificity = { def = 1000, min = 400, max = 4000 },
-    include_bits = { def = 1, min = 1, max = 4, int = true },
+    clause_tolerance = { def = 35, min = 16, max = 128, int = true },
+    clause_maximum = { def = 44, min = 16, max = 128, int = true },
+    target = { def = 58, min = 16, max = 128, int = true },
+    specificity = { def = 858, min = 400, max = 4000 },
+    include_bits = { def = 2, min = 1, max = 4, int = true },
     search_patience = 10,
     search_rounds = 6,
     search_trials = 10,
@@ -86,22 +87,26 @@ local cfg; cfg = {
   search = {
     rounds = 6,
     adjacency_samples = 8,
-    spectral_samples = 4,
+    prone_samples = 4,
     select_samples = 8,
     eval_samples = 4,
     adjacency = {
       knn = { def = 25, min = 20, max = 35, int = true },
       knn_alpha = { def = 12, min = 10, max = 16, int = true },
-      weight_decay = { def = 2.19, min = 2, max = 6 },
+      weight_decay = { def = 2.36, min = 2, max = 6 },
       knn_mutual = { def = false, false, true },
       knn_mode = "cknn",
       knn_cache = 128,
       bridge = "mst",
     },
-    spectral = {
-      laplacian = "unnormalized",
+    prone = {
       n_dims = 64,
-      eps = 1e-8,
+      n_iter = { def = 5, min = 3, max = 10, int = true },
+      step = { def = 10, min = 5, max = 20, int = true },
+      mu = { def = 0.2, min = 0.0, max = 0.5 },
+      theta = { def = 0.5, min = 0.1, max = 1.0 },
+      neg_samples = { def = 5, min = 1, max = 10, int = true },
+      propagate = true,
       threshold = {
         method = "itq",
         itq_iterations = 500,
@@ -119,17 +124,21 @@ local cfg; cfg = {
   },
 }
 
-test("imdb-raw", function()
+test("prone", function()
 
   local stopwatch = utc.stopwatch()
 
   print("Reading data")
-  local dataset = ds.read_imdb("test/res/imdb.50k", cfg.data.max)
-  local train, test, validate = ds.split_imdb(dataset, cfg.data.ttr, cfg.data.tvr)
+  local train, test, validate = ds.read_20newsgroups_split(
+    "test/res/20news-bydate-train",
+    "test/res/20news-bydate-test",
+    cfg.data.max_per_class,
+    nil,
+    cfg.data.tvr)
 
-  str.printf("  Train:    %6d\n", train.n)
-  str.printf("  Validate: %6d\n", validate.n)
-  str.printf("  Test:     %6d\n", test.n)
+  str.printf("  Train:    %6d (%d categories)\n", train.n, train.n_labels)
+  str.printf("  Validate: %6d (%d categories)\n", validate.n, validate.n_labels)
+  str.printf("  Test:     %6d (%d categories)\n", test.n, test.n_labels)
 
   print("\nTraining tokenizer")
   local tok = tokenizer.create(cfg.tokenizer)
@@ -223,20 +232,20 @@ test("imdb-raw", function()
     }
   end
 
-  print("\nBuilding category ground truth (for supervised spectral)")
+  print("\nBuilding category ground truth (for supervised ProNE)")
   train.cat_index, train.ground_truth_sup = build_category_ground_truth(train.ids, train.solutions)
 
-  print("\nOptimizing supervised spectral pipeline")
-  local model_sup, spectral_best_params_sup, spectral_best_metrics_sup = optimize.spectral({
+  print("\nOptimizing supervised ProNE pipeline")
+  local model_sup, prone_best_params_sup, prone_best_metrics_sup = optimize.prone({
     index = train.index_graph_sup,
     knn_index = train.node_features_graph,
     search_rounds = cfg.search.rounds,
     adjacency_samples = cfg.search.adjacency_samples,
-    spectral_samples = cfg.search.spectral_samples,
+    prone_samples = cfg.search.prone_samples,
     select_samples = cfg.search.select_samples,
     eval_samples = cfg.search.eval_samples,
     adjacency = cfg.search.adjacency,
-    spectral = cfg.search.spectral,
+    prone = cfg.search.prone,
     eval = cfg.search.eval,
     expected_ids = train.ground_truth_sup.retrieval.ids,
     expected_offsets = train.ground_truth_sup.retrieval.offsets,
@@ -244,29 +253,31 @@ test("imdb-raw", function()
     expected_weights = train.ground_truth_sup.retrieval.weights,
     each = cfg.search.verbose and function (info)
       if info.event == "round_start" then
-        str.printf("\n[SPECTRAL R%d] Starting round %d/%d\n", info.round, info.round, info.rounds)
+        str.printf("\n[PRONE R%d] Starting round %d/%d\n", info.round, info.round, info.rounds)
       elseif info.event == "round_end" then
-        str.printf("[SPECTRAL R%d] best=%.4f global=%.4f success=%.0f%% adapt=%.2f\n",
+        str.printf("[PRONE R%d] best=%.4f global=%.4f success=%.0f%% adapt=%.2f\n",
           info.round, info.round_best_score, info.global_best_score,
           (info.success_rate or 0) * 100, info.adapt_factor or 1)
       elseif info.event == "stage" and info.stage == "adjacency" then
         local p = info.params.adjacency
-        local phase = info.is_final and "F" or str.format("R%d A%d", info.round or 0, info.sample or 0)
-        str.printf("[SPECTRAL %s ADJ] knn=%d alpha=%d decay=%.2f mutual=%s mode=%s bridge=%s\n",
+        local phase = info.is_final and "F" or str.format("R%d S%d", info.round, info.sample)
+        str.printf("[PRONE %s ADJ] knn=%d alpha=%d decay=%.2f mutual=%s mode=%s bridge=%s\n",
           phase, p.knn, p.knn_alpha, p.weight_decay, tostring(p.knn_mutual), p.knn_mode, p.bridge or "none")
       elseif info.event == "adjacency_result" then
-        str.printf("[SPECTRAL] nodes=%d edges=%d\n", info.n_nodes, info.n_edges)
-      elseif info.event == "stage" and info.stage == "spectral" then
-        local p = info.params.spectral
-        str.printf("[SPECTRAL] EIG dims=%d lap=%s\n", p.n_dims, p.laplacian or "unnorm")
-      elseif info.event == "spectral_result" then
-        str.printf("[SPECTRAL] eig=[%.2e, %.2e] matvecs=%d\n", info.eig_min or 0, info.eig_max or 0, info.n_matvecs or 0)
+        str.printf("[PRONE] nodes=%d edges=%d\n", info.n_nodes, info.n_edges)
+      elseif info.event == "stage" and info.stage == "prone" then
+        local p = info.params.prone
+        str.printf("[PRONE] EMB dims=%d n_iter=%d step=%d mu=%.2f theta=%.2f neg=%d prop=%s\n",
+          p.n_dims, p.n_iter or 5, p.step or 10, p.mu or 0.2, p.theta or 0.5,
+          p.neg_samples or 5, tostring(p.propagate ~= false))
+      elseif info.event == "prone_result" then
+        str.printf("[PRONE] n_nodes=%d n_dims=%d\n", info.n_nodes or 0, info.n_dims or 0)
       elseif info.event == "stage" and info.stage == "select" then
         local p = info.params.select or {}
         local tp = p.threshold_params or {}
-        str.printf("[SPECTRAL] SEL threshold=%s\n", tp.method or "none")
+        str.printf("[PRONE] SEL threshold=%s\n", tp.method or "none")
       elseif info.event == "eval" then
-        str.printf("[SPECTRAL] score=%.4f\n", info.score)
+        str.printf("[PRONE] score=%.4f\n", info.score)
       end
     end or nil,
   })
@@ -275,15 +286,17 @@ test("imdb-raw", function()
   train.ids_sup = model_sup.ids
   train.dims_sup = model_sup.dims
   train.index_sup = model_sup.index
-  train.spectral_params_sup = spectral_best_params_sup
-  train.retrieval_stats = spectral_best_metrics_sup
+  train.prone_params_sup = prone_best_params_sup
+  train.retrieval_stats = prone_best_metrics_sup
 
-  str.printf("\nSpectral: dims=%d retrieval=%.4f\n", train.dims_sup, spectral_best_metrics_sup.score)
-  local adj_p = spectral_best_params_sup.adjacency
-  local spec_p = spectral_best_params_sup.spectral
+  str.printf("\nProNE: dims=%d retrieval=%.4f\n", train.dims_sup, prone_best_metrics_sup.score)
+  local adj_p = prone_best_params_sup.adjacency
+  local prone_p = prone_best_params_sup.prone
   str.printf("  Adjacency: knn=%d alpha=%d decay=%.2f mutual=%s mode=%s bridge=%s\n",
     adj_p.knn, adj_p.knn_alpha, adj_p.weight_decay, tostring(adj_p.knn_mutual), adj_p.knn_mode, adj_p.bridge or "none")
-  str.printf("  Spectral: dims=%d lap=%s\n", spec_p.n_dims, spec_p.laplacian or "unnorm")
+  str.printf("  ProNE: dims=%d n_iter=%d step=%d mu=%.2f theta=%.2f neg=%d prop=%s\n",
+    prone_p.n_dims, prone_p.n_iter or 5, prone_p.step or 10, prone_p.mu or 0.2,
+    prone_p.theta or 0.5, prone_p.neg_samples or 5, tostring(prone_p.propagate ~= false))
 
   local function build_token_ground_truth (knn_index, knn)
     local adj_expected_ids, adj_expected_offsets, adj_expected_neighbors, adj_expected_weights =
@@ -302,11 +315,11 @@ test("imdb-raw", function()
     }
   end
 
-  local spectral_ground_truth = build_token_ground_truth(train.index_sup, cfg.search.eval.knn)
-  train.adj_expected_ids = spectral_ground_truth.retrieval.ids
-  train.adj_expected_offsets = spectral_ground_truth.retrieval.offsets
-  train.adj_expected_neighbors = spectral_ground_truth.retrieval.neighbors
-  train.adj_expected_weights = spectral_ground_truth.retrieval.weights
+  local prone_ground_truth = build_token_ground_truth(train.index_sup, cfg.search.eval.knn)
+  train.adj_expected_ids = prone_ground_truth.retrieval.ids
+  train.adj_expected_offsets = prone_ground_truth.retrieval.offsets
+  train.adj_expected_neighbors = prone_ground_truth.retrieval.neighbors
+  train.adj_expected_weights = prone_ground_truth.retrieval.weights
 
   if cfg.cluster.enabled then
     print("\nSetting up clustering adjacency")
@@ -344,7 +357,7 @@ test("imdb-raw", function()
       end
     end
 
-    str.printf("\nClustering spectral codes\n  in-sample: step=%d quality=%.4f clusters=%d\n",
+    str.printf("\nClustering ProNE codes\n  in-sample: step=%d quality=%.4f clusters=%d\n",
       train.codes_clusters.best_step, train.codes_clusters.quality, train.codes_clusters.n_clusters)
   end
 

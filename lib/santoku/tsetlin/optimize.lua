@@ -1,9 +1,9 @@
 local tm = require("santoku.tsetlin.capi")
 local graph = require("santoku.tsetlin.graph")
 local spectral = require("santoku.tsetlin.spectral")
+local prone = require("santoku.tsetlin.prone")
 local itq = require("santoku.tsetlin.itq")
 local ann = require("santoku.tsetlin.ann")
-local hlth = require("santoku.tsetlin.hlth")
 local evaluator = require("santoku.tsetlin.evaluator")
 local num = require("santoku.num")
 local str = require("santoku.string")
@@ -13,6 +13,21 @@ local cvec = require("santoku.cvec")
 
 local M = {}
 
+local function key_int (v)
+  return v and tostring(num.floor(v + 0.5)) or "nil"
+end
+
+local function key_int8 (v)
+  return v and tostring(num.floor((v + 4) / 8) * 8) or "nil"
+end
+
+local function key_float2 (v)
+  return v and str.format("%.2f", v) or "nil"
+end
+
+local function key_str (v)
+  return v ~= nil and tostring(v) or "nil"
+end
 
 local function sample_alpha_spec (spec, use_defaults)
   if spec == nil then
@@ -328,6 +343,9 @@ M.sample_tier = function (tier_cfg, use_defaults)
       result[k] = v
     end
   end
+  if result.cgrams_min and result.cgrams_max and result.cgrams_min > result.cgrams_max then
+    result.cgrams_min, result.cgrams_max = result.cgrams_max, result.cgrams_min
+  end
   return result
 end
 
@@ -533,7 +551,6 @@ local function create_tm (typ, args)
     return tm.create("classifier", {
       features = args.features,
       classes = args.classes,
-      negative = args.negative,
       individualized = args.individualized,
       feat_offsets = args.feat_offsets,
       clauses = 8,
@@ -567,7 +584,6 @@ local function create_final_tm (typ, args, params)
     return tm.create("classifier", {
       features = args.features,
       classes = args.classes,
-      negative = args.negative,
       individualized = args.individualized,
       feat_offsets = args.feat_offsets,
       clauses = params.clauses,
@@ -651,8 +667,6 @@ local function train_tm (typ, tmobj, args, params, iterations, early_patience, m
   return last_epoch_score, last_metrics
 end
 
-local make_landmark_key
-
 local function optimize_tm (args, typ)
 
   local patience = args.search_patience or 10
@@ -665,90 +679,28 @@ local function optimize_tm (args, typ)
   local metric_fn = err.assert(args.search_metric, "search_metric required")
   local each_cb = args.each
 
-  local use_landmarks = typ == "encoder" and args.landmarks_index and args.codes_index and args.features
-  local landmark_cache = {}
-  local current_sentences = args.sentences
-  local current_visible = args.visible
-
   local param_names = { "clauses", "clause_tolerance", "clause_maximum", "target", "specificity", "include_bits" }
-  if use_landmarks then
-    param_names[#param_names + 1] = "n_landmarks"
-    param_names[#param_names + 1] = "n_thresholds"
-    param_names[#param_names + 1] = "landmark_mode"
-  end
-
   local samplers = M.build_samplers(args, param_names, global_dev)
 
-  make_landmark_key = function (p)
-    return str.format("%d|%d|%s|%s", p.n_landmarks or 0, p.n_thresholds or 0, p.landmark_mode or "frequency", args.quantile and "q" or "f")
-  end
-
-  local function get_encoded_data (params)
-    if not use_landmarks then
-      return current_sentences, current_visible
-    end
-    local key = make_landmark_key(params)
-    if landmark_cache[key] then
-      return landmark_cache[key].sentences, landmark_cache[key].visible
-    end
-    local mode = params.landmark_mode or "frequency"
-    local encode_fn, n_visible = hlth.landmark_encoder({
-      landmarks_index = args.landmarks_index,
-      codes_index = args.codes_index,
-      n_landmarks = params.n_landmarks,
-      mode = mode,
-      n_thresholds = mode == "frequency" and params.n_thresholds or nil,
-      quantile = args.quantile,
-    })
-    local sentences = encode_fn(args.features, args.samples)
-    sentences:bits_flip_interleave(n_visible)
-    landmark_cache[key] = { sentences = sentences, visible = n_visible }
-    return sentences, n_visible
-  end
-
   local search_tm
-  local search_tm_visible
   if not M.all_fixed(samplers) then
-    local _, init_visible = get_encoded_data({
-      n_landmarks = samplers.n_landmarks and samplers.n_landmarks.center or args.n_landmarks,
-      n_thresholds = samplers.n_thresholds and samplers.n_thresholds.center or args.n_thresholds,
-    })
     search_tm = create_tm(typ, {
-      visible = init_visible,
+      visible = args.visible,
       hidden = args.hidden,
       features = args.features,
       classes = args.classes,
-      negative = args.negative,
       individualized = args.individualized,
       feat_offsets = args.feat_offsets,
     })
-    search_tm_visible = init_visible
   end
 
   local function search_trial_fn (params, info)
     if params.clause_tolerance and params.clause_maximum and params.clause_tolerance > params.clause_maximum then
       params.clause_tolerance, params.clause_maximum = params.clause_maximum, params.clause_tolerance
     end
-    if (params.landmark_mode == "frequency" or params.landmark_mode == "weighted") and params.n_landmarks and params.n_thresholds and params.n_landmarks < params.n_thresholds then
-      params.n_landmarks, params.n_thresholds = params.n_thresholds, params.n_landmarks
-    end
-    local sentences, visible = get_encoded_data(params)
-    if use_landmarks and visible ~= search_tm_visible then
-      search_tm:destroy()
-      search_tm = create_tm(typ, {
-        visible = visible,
-        hidden = args.hidden,
-        features = args.features,
-        classes = args.classes,
-        negative = args.negative,
-        individualized = args.individualized,
-        feat_offsets = args.feat_offsets,
-      })
-      search_tm_visible = visible
-    end
     search_tm:reconfigure(params)
     local train_args = {
-      sentences = sentences,
+      sentences = args.sentences,
       codes = args.codes,
       samples = args.samples,
       problems = args.problems,
@@ -756,11 +708,9 @@ local function optimize_tm (args, typ)
       dim_offsets = args.dim_offsets,
     }
     local encoding_info = {
-      sentences = sentences,
-      visible = visible,
+      sentences = args.sentences,
+      visible = args.visible,
       samples = args.samples,
-      n_landmarks = params.n_landmarks,
-      n_thresholds = params.n_thresholds,
       dim_offsets = args.dim_offsets,
     }
     local score, metrics = train_tm(typ, search_tm, train_args, params, iters_search,
@@ -776,17 +726,13 @@ local function optimize_tm (args, typ)
     trial_fn = search_trial_fn,
     skip_final = true,
     make_key = function (p)
-      local base = str.format("%d|%d|%d|%d|%d|%d",
-        p.clauses,
-        p.clause_tolerance,
-        p.clause_maximum,
-        num.floor(p.target * 1e6 + 0.5),
-        num.floor(p.specificity * 1e6 + 0.5),
-        p.include_bits or 1)
-      if use_landmarks then
-        return base .. "|" .. make_landmark_key(p)
-      end
-      return base
+      return str.format("%s|%s|%s|%s|%s|%s",
+        key_int8(p.clauses),
+        key_int(p.clause_tolerance),
+        key_int(p.clause_maximum),
+        key_int(p.target),
+        key_int(p.specificity),
+        key_int(p.include_bits or 1))
     end,
   })
 
@@ -794,18 +740,16 @@ local function optimize_tm (args, typ)
     search_tm:destroy()
   end
 
-  local final_sentences, final_visible = get_encoded_data(best_params)
   local final_tm = create_final_tm(typ, {
-    visible = final_visible,
+    visible = args.visible,
     hidden = args.hidden,
     features = args.features,
     classes = args.classes,
-    negative = args.negative,
     individualized = args.individualized,
     feat_offsets = args.feat_offsets,
   }, best_params)
   local final_train_args = {
-    sentences = final_sentences,
+    sentences = args.sentences,
     codes = args.codes,
     samples = args.samples,
     problems = args.problems,
@@ -813,20 +757,13 @@ local function optimize_tm (args, typ)
     dim_offsets = args.dim_offsets,
   }
   local final_encoding_info = {
-    sentences = final_sentences,
-    visible = final_visible,
+    sentences = args.sentences,
+    visible = args.visible,
     samples = args.samples,
-    n_landmarks = best_params.n_landmarks,
-    n_thresholds = best_params.n_thresholds,
-    landmark_mode = best_params.landmark_mode,
     dim_offsets = args.dim_offsets,
   }
   local _, final_metrics = train_tm(typ, final_tm, final_train_args, best_params, final_iters,
     use_final_early_stop and final_patience or nil, metric_fn, each_cb, { is_final = true }, final_encoding_info)
-
-  for _, cached in pairs(landmark_cache) do
-    cached.sentences:destroy()
-  end
 
   collectgarbage("collect")
   return final_tm, final_metrics, best_params
@@ -868,14 +805,24 @@ M.build_adjacency = function (args)
 
   return graph.adjacency({
     weight_index = index,
-    weight_cmp = p.cmp,
+    weight_cmp = p.weight_cmp,
     weight_decay = p.weight_decay,
+    weight_pooling = p.weight_pooling,
     knn_index = knn_index,
     knn = p.knn,
     knn_mode = p.knn_mode,
     knn_alpha = p.knn_alpha,
     knn_mutual = p.knn_mutual,
     knn_cache = p.knn_cache or 32,
+    knn_cmp = p.knn_cmp,
+    knn_cmp_alpha = p.knn_cmp_alpha,
+    knn_cmp_beta = p.knn_cmp_beta,
+    knn_eps = p.knn_eps,
+    knn_min = p.knn_min,
+    probe_radius = p.probe_radius,
+    category_cmp = p.category_cmp,
+    category_alpha = p.category_alpha,
+    category_beta = p.category_beta,
     bridge = p.bridge,
     each = each,
   })
@@ -886,6 +833,18 @@ M.build_spectral_raw = function (args)
   local p = args.params
   local each = args.each
 
+  local n_matvecs = 0
+  local wrapped_each = each and function (event, matvecs)
+    if event == "done" then
+      n_matvecs = matvecs
+    end
+    each(event, matvecs)
+  end or function (event, matvecs)
+    if event == "done" then
+      n_matvecs = matvecs
+    end
+  end
+
   local ids, raw_codes, _, eigs = spectral.encode({
     type = p.laplacian or "unnormalized",
     n_hidden = p.n_dims,
@@ -894,7 +853,7 @@ M.build_spectral_raw = function (args)
     offsets = adj_offsets,
     neighbors = adj_neighbors,
     weights = adj_weights,
-    each = each,
+    each = wrapped_each,
   })
 
   return {
@@ -902,6 +861,7 @@ M.build_spectral_raw = function (args)
     raw_codes = raw_codes,
     eigs = eigs,
     dims = p.n_dims,
+    n_matvecs = n_matvecs,
   }
 end
 
@@ -1035,8 +995,8 @@ M.spectral = function (args)
   local spectral_samples = args.spectral_samples or 1
   local select_samples = args.select_samples or 1
   local eval_samples = args.eval_samples or 1
-  local rounds = args.rounds or 1
-  local global_dev = args.dev or 0.2
+  local rounds = args.search_rounds or 1
+  local global_dev = args.search_dev or 0.2
 
   local expected = {
     ids = args.expected_ids,
@@ -1093,6 +1053,18 @@ M.spectral = function (args)
       each = spectral_each,
     })
 
+    if each_cb then
+      each_cb({
+        event = "spectral_result",
+        n_nodes = raw_model.ids:size(),
+        n_dims = raw_model.dims,
+        n_matvecs = raw_model.n_matvecs,
+        eig_min = raw_model.eigs and raw_model.eigs:min() or nil,
+        eig_max = raw_model.eigs and raw_model.eigs:max() or nil,
+        params = { adjacency = adj_params, spectral = spec_params },
+      })
+    end
+
     local model = M.apply_threshold({
       raw_model = raw_model,
       threshold_params = threshold_params,
@@ -1119,18 +1091,29 @@ M.spectral = function (args)
   end
 
   -- Build samplers for hill climbing (adjacency and spectral tiers)
-  local adj_param_names = { "knn", "knn_alpha", "weight_decay", "knn_mutual", "knn_mode", "cmp", "bridge" }
+  local adj_param_names = {
+    "knn", "knn_alpha", "knn_mutual", "knn_mode", "knn_cache",
+    "knn_cmp", "knn_cmp_alpha", "knn_cmp_beta", "knn_eps", "knn_min",
+    "weight_cmp", "weight_decay", "weight_pooling",
+    "category_cmp", "category_alpha", "category_beta",
+    "probe_radius", "bridge",
+  }
   local spec_param_names = { "n_dims", "laplacian", "eps" }
   local adj_samplers = M.build_samplers(adjacency_cfg, adj_param_names, global_dev)
   local spec_samplers = M.build_samplers(spectral_cfg, spec_param_names, global_dev)
 
   local function make_adj_key (p)
-    return str.format("%s|%s|%s|%s",
-      tostring(p.knn), tostring(p.knn_alpha), tostring(p.weight_decay), tostring(p.knn_mutual))
+    return str.format("%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
+      key_int(p.knn), key_int(p.knn_alpha), key_str(p.knn_mutual), key_str(p.knn_mode),
+      key_int(p.knn_cache), key_str(p.knn_cmp), key_float2(p.knn_cmp_alpha),
+      key_float2(p.knn_cmp_beta), key_float2(p.knn_eps), key_int(p.knn_min),
+      key_str(p.weight_cmp), key_float2(p.weight_decay), key_str(p.weight_pooling),
+      key_str(p.category_cmp), key_float2(p.category_alpha), key_float2(p.category_beta),
+      key_int(p.probe_radius), key_str(p.bridge))
   end
 
   local function make_spec_key (adj_key, p)
-    return str.format("%s|%s|%s", adj_key, tostring(p.n_dims), tostring(p.laplacian))
+    return str.format("%s|%s|%s", adj_key, key_int(p.n_dims), key_str(p.laplacian))
   end
 
   local function make_select_key (spec_key, p)
@@ -1146,8 +1129,9 @@ M.spectral = function (args)
     return collectgarbage("count")
   end
 
+  local seen = {}
+
   for round = 1, rounds do
-    local seen = {}
     local round_best_score = -num.huge
     local round_best_params = nil
     local round_improvements = 0
@@ -1171,6 +1155,7 @@ M.spectral = function (args)
       if each_cb then
         each_cb({
           event = "adjacency_cached",
+          round = round,
           adj_sample = adj_i,
           adj_key = adj_key,
           params = { adjacency = adj_params },
@@ -1185,6 +1170,7 @@ M.spectral = function (args)
         each_cb({
           event = "stage",
           stage = "adjacency",
+          round = round,
           sample = sample_count,
           adj_sample = adj_i,
           adj_key = adj_key,
@@ -1201,6 +1187,17 @@ M.spectral = function (args)
         each = adjacency_each,
       })
 
+      if each_cb then
+        each_cb({
+          event = "adjacency_result",
+          round = round,
+          adj_sample = adj_i,
+          n_nodes = adj_ids:size(),
+          n_edges = adj_neighbors:size(),
+          params = { adjacency = adj_params },
+        })
+      end
+
       for _ = 1, (spec_fixed and 1 or spectral_samples) do
         local spec_params = M.sample_params(spec_samplers, spec_param_names, spectral_cfg)
         local spec_key = make_spec_key(adj_key, spec_params)
@@ -1213,6 +1210,7 @@ M.spectral = function (args)
             each_cb({
               event = "stage",
               stage = "spectral",
+              round = round,
               sample = sample_count,
               is_final = false,
               params = { adjacency = adj_params, spectral = spec_params },
@@ -1228,6 +1226,18 @@ M.spectral = function (args)
             params = spec_params,
             each = spectral_each,
           })
+
+          if each_cb then
+            each_cb({
+              event = "spectral_result",
+              n_nodes = raw_model.ids:size(),
+              n_dims = raw_model.dims,
+              n_matvecs = raw_model.n_matvecs,
+              eig_min = raw_model.eigs and raw_model.eigs:min() or nil,
+              eig_max = raw_model.eigs and raw_model.eigs:max() or nil,
+              params = { adjacency = adj_params, spectral = spec_params },
+            })
+          end
 
           local raw_model_has_best = false
 
@@ -1250,6 +1260,7 @@ M.spectral = function (args)
                 each_cb({
                   event = "stage",
                   stage = "select",
+                  round = round,
                   sample = sample_count,
                   is_final = false,
                   params = { adjacency = adj_params, spectral = spec_params, select = select_params },
@@ -1267,6 +1278,7 @@ M.spectral = function (args)
               if each_cb then
                 each_cb({
                   event = "select_result",
+                  round = round,
                   params = { adjacency = adj_params, spectral = spec_params, select = select_params },
                   selected_dims = model.dims,
                 })
@@ -1306,6 +1318,7 @@ M.spectral = function (args)
                   if each_cb then
                     each_cb({
                       event = "eval",
+                      round = round,
                       sample = sample_count,
                       is_final = false,
                       params = { adjacency = adj_params, spectral = spec_params, select = select_params, eval = eval_params },
@@ -1425,64 +1438,595 @@ M.spectral = function (args)
   end
 
   if best_model then
-    if each_cb then
-      each_cb({
-        event = "stage",
-        stage = "adjacency",
-        is_final = true,
-        params = best_params,
-      })
-    end
+    best_model.owns_base = true
+    best_model.owns_raw_codes = true
+    best_model.adj_ids = best_adj_ids
+    best_model.adj_offsets = best_adj_offsets
+    best_model.adj_neighbors = best_adj_neighbors
+    best_model.adj_weights = best_adj_weights
+  end
 
-    if best_adj_ids then
-      best_adj_ids:destroy()
-      best_adj_offsets:destroy()
-      best_adj_neighbors:destroy()
-      if best_adj_weights then best_adj_weights:destroy() end
+  collectgarbage("collect")
+  return best_model, best_params, best_metrics
+end
+
+M.destroy_prone = function (model)
+  if not model then return end
+  if model.raw_model then
+    M.destroy_prone_raw(model.raw_model)
+    model.raw_model = nil
+  end
+  if model.owns_base ~= false then
+    if model.ids then model.ids:destroy() end
+  end
+  if model.index then model.index:destroy() end
+  if model.codes then model.codes:destroy() end
+  if model.raw_codes and model.owns_raw_codes ~= false then model.raw_codes:destroy() end
+  if model.adj_ids then model.adj_ids:destroy() end
+  if model.adj_offsets then model.adj_offsets:destroy() end
+  if model.adj_neighbors then model.adj_neighbors:destroy() end
+  if model.adj_weights then model.adj_weights:destroy() end
+end
+
+M.build_prone_raw = function (args)
+  local adj_ids, adj_offsets, adj_neighbors, adj_weights = args.adj_ids, args.adj_offsets, args.adj_neighbors, args.adj_weights
+  local p = args.params
+  local each = args.each
+
+  local ids, raw_codes = prone.encode({
+    ids = adj_ids,
+    offsets = adj_offsets,
+    neighbors = adj_neighbors,
+    weights = adj_weights,
+    n_hidden = p.n_dims,
+    n_iter = p.n_iter or 5,
+    step = p.step or 10,
+    mu = p.mu or 0.2,
+    theta = p.theta or 0.5,
+    neg_samples = p.neg_samples or 5,
+    propagate = p.propagate ~= false,
+    each = each,
+  })
+
+  return {
+    ids = ids,
+    raw_codes = raw_codes,
+    dims = p.n_dims,
+  }
+end
+
+M.destroy_prone_raw = function (raw_model)
+  if not raw_model then return end
+  if raw_model.ids then raw_model.ids:destroy() end
+  if raw_model.raw_codes then raw_model.raw_codes:destroy() end
+end
+
+M.build_prone_from_adjacency = function (args)
+  local p = args.params
+  local bucket_size = args.bucket_size
+
+  local raw_model = M.build_prone_raw({
+    adj_ids = args.adj_ids,
+    adj_offsets = args.adj_offsets,
+    adj_neighbors = args.adj_neighbors,
+    adj_weights = args.adj_weights,
+    params = p,
+    each = args.each,
+  })
+
+  local threshold_params
+  if type(p.threshold) == "function" then
+    threshold_params = p.threshold_params or { method = "custom" }
+  else
+    threshold_params = M.sample_threshold(p.threshold)
+  end
+
+  return M.apply_threshold({
+    raw_model = raw_model,
+    threshold_params = threshold_params,
+    bucket_size = bucket_size,
+  })
+end
+
+M.score_prone_eval = function (args)
+  local model = args.model
+  local eval_params = args.eval_params
+  local expected = args.expected
+
+  local adj_retrieved_ids, adj_retrieved_offsets, adj_retrieved_neighbors, adj_retrieved_weights =
+    graph.adjacency({
+      weight_index = model.index,
+      seed_ids = expected.ids,
+      seed_offsets = expected.offsets,
+      seed_neighbors = expected.neighbors,
+    })
+
+  local stats = evaluator.score_retrieval({
+    retrieved_ids = adj_retrieved_ids,
+    retrieved_offsets = adj_retrieved_offsets,
+    retrieved_neighbors = adj_retrieved_neighbors,
+    retrieved_weights = adj_retrieved_weights,
+    expected_ids = expected.ids,
+    expected_offsets = expected.offsets,
+    expected_neighbors = expected.neighbors,
+    expected_weights = expected.weights,
+    query_ids = eval_params.query_ids,
+    ranking = eval_params.ranking,
+    metric = eval_params.metric,
+    n_dims = model.dims,
+  })
+
+  if adj_retrieved_ids then adj_retrieved_ids:destroy() end
+  if adj_retrieved_offsets then adj_retrieved_offsets:destroy() end
+  if adj_retrieved_neighbors then adj_retrieved_neighbors:destroy() end
+  if adj_retrieved_weights then adj_retrieved_weights:destroy() end
+
+  return stats.score, {
+    score = stats.score,
+    n_dims = model.dims,
+    total_queries = stats.total_queries,
+  }
+end
+
+M.prone = function (args)
+  local index = args.index
+  local knn_index = args.knn_index
+  local bucket_size = args.bucket_size
+  local each_cb = args.each
+  local adjacency_each = args.adjacency_each
+  local prone_each = args.prone_each
+  local query_ids = args.query_ids
+
+  local adjacency_cfg = err.assert(args.adjacency, "adjacency config required")
+  local prone_cfg = err.assert(args.prone, "prone config required")
+  local eval_cfg = err.assert(args.eval, "eval config required")
+
+  local adjacency_samples = args.adjacency_samples or 1
+  local prone_samples = args.prone_samples or 1
+  local select_samples = args.select_samples or 1
+  local eval_samples = args.eval_samples or 1
+  local rounds = args.search_rounds or 1
+  local global_dev = args.search_dev or 0.2
+
+  local expected = {
+    ids = args.expected_ids,
+    offsets = args.expected_offsets,
+    neighbors = args.expected_neighbors,
+    weights = args.expected_weights,
+  }
+
+  local best_score = -num.huge
+  local best_params = nil
+  local best_model = nil
+  local best_metrics = nil
+  local best_adj_ids = nil
+  local best_adj_offsets = nil
+  local best_adj_neighbors = nil
+  local best_adj_weights = nil
+  local sample_count = 0
+
+  local adj_fixed = M.tier_all_fixed(adjacency_cfg)
+  local prone_fixed = M.tier_all_fixed(prone_cfg)
+  local eval_fixed = M.tier_all_fixed(eval_cfg)
+
+  local all_fixed = adj_fixed and prone_fixed and eval_fixed
+
+  if rounds <= 0 or all_fixed then
+    local adj_params = M.sample_tier(adjacency_cfg, true)
+    local prone_params = M.sample_tier(prone_cfg, true)
+    local eval_params = M.sample_tier(eval_cfg, true)
+
+    local threshold_params, threshold_fn = M.sample_threshold(prone_cfg.threshold)
+
+    if each_cb then
+      each_cb({ event = "stage", stage = "adjacency", is_final = true, params = { adjacency = adj_params } })
     end
 
     local adj_ids, adj_offsets, adj_neighbors, adj_weights = M.build_adjacency({
       index = index,
       knn_index = knn_index,
-      params = best_params.adjacency,
+      params = adj_params,
       each = adjacency_each,
     })
 
-    M.destroy_spectral(best_model)
-
     if each_cb then
-      each_cb({
-        event = "stage",
-        stage = "spectral",
-        is_final = true,
-        params = best_params,
-      })
+      each_cb({ event = "stage", stage = "prone", is_final = true, params = { adjacency = adj_params, prone = prone_params } })
     end
 
-    local raw_model = M.build_spectral_raw({
+    local raw_model = M.build_prone_raw({
       adj_ids = adj_ids,
       adj_offsets = adj_offsets,
       adj_neighbors = adj_neighbors,
       adj_weights = adj_weights,
-      params = best_params.spectral,
-      each = spectral_each,
+      params = prone_params,
+      each = prone_each,
     })
 
-    local select_params = best_params.select or {}
-    best_model = M.apply_threshold({
+    if each_cb then
+      each_cb({
+        event = "prone_result",
+        n_nodes = raw_model.ids:size(),
+        n_dims = raw_model.dims,
+        params = { adjacency = adj_params, prone = prone_params },
+      })
+    end
+
+    local model = M.apply_threshold({
       raw_model = raw_model,
-      threshold_params = select_params.threshold_params,
-      threshold_fn = select_params.threshold_fn,
+      threshold_params = threshold_params,
+      threshold_fn = threshold_fn,
       bucket_size = bucket_size,
-      select_params = select_params,
     })
+    model.owns_base = true
+    model.owns_raw_codes = true
+
+    model.adj_ids = adj_ids
+    model.adj_offsets = adj_offsets
+    model.adj_neighbors = adj_neighbors
+    model.adj_weights = adj_weights
+
+    local best_params = { adjacency = adj_params, prone = prone_params, eval = eval_params }
+
+    local _, metrics = M.score_prone_eval({
+      model = model,
+      eval_params = eval_params,
+      expected = expected,
+    })
+
+    return model, best_params, metrics
+  end
+
+  local adj_param_names = {
+    "knn", "knn_alpha", "knn_mutual", "knn_mode", "knn_cache",
+    "knn_cmp", "knn_cmp_alpha", "knn_cmp_beta", "knn_eps", "knn_min",
+    "weight_cmp", "weight_decay", "weight_pooling",
+    "category_cmp", "category_alpha", "category_beta",
+    "probe_radius", "bridge",
+  }
+  local prone_param_names = { "n_dims", "n_iter", "step", "mu", "theta", "neg_samples", "propagate" }
+  local adj_samplers = M.build_samplers(adjacency_cfg, adj_param_names, global_dev)
+  local prone_samplers = M.build_samplers(prone_cfg, prone_param_names, global_dev)
+
+  local function make_adj_key (p)
+    return str.format("%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
+      key_int(p.knn), key_int(p.knn_alpha), key_str(p.knn_mutual), key_str(p.knn_mode),
+      key_int(p.knn_cache), key_str(p.knn_cmp), key_float2(p.knn_cmp_alpha),
+      key_float2(p.knn_cmp_beta), key_float2(p.knn_eps), key_int(p.knn_min),
+      key_str(p.weight_cmp), key_float2(p.weight_decay), key_str(p.weight_pooling),
+      key_str(p.category_cmp), key_float2(p.category_alpha), key_float2(p.category_beta),
+      key_int(p.probe_radius), key_str(p.bridge))
+  end
+
+  local function make_prone_key (adj_key, p)
+    return str.format("%s|%s|%s|%s|%s|%s|%s|%s",
+      adj_key, key_int(p.n_dims), key_int(p.n_iter), key_int(p.step),
+      key_float2(p.mu), key_float2(p.theta), key_int(p.neg_samples), key_str(p.propagate))
+  end
+
+  local function make_select_key (prone_key, p)
+    local thresh_str = p.threshold_params and p.threshold_params.method or "none"
+    return str.format("%s|%s", prone_key, thresh_str)
+  end
+
+  local function make_eval_key (select_key, p)
+    return str.format("%s|%s", select_key, p.ranking)
+  end
+
+  local function mem_kb ()
+    return collectgarbage("count")
+  end
+
+  local seen = {}
+
+  for round = 1, rounds do
+    local round_best_score = -num.huge
+    local round_best_params = nil
+    local round_improvements = 0
+    local round_samples = 0
+    local round_start_mem = mem_kb()
+
+    if each_cb then
+      each_cb({
+        event = "round_start",
+        round = round,
+        rounds = rounds,
+        mem_kb = round_start_mem,
+      })
+    end
+
+  for adj_i = 1, (adj_fixed and 1 or adjacency_samples) do
+    local adj_params = M.sample_params(adj_samplers, adj_param_names, adjacency_cfg)
+    local adj_key = make_adj_key(adj_params)
+
+    if seen[adj_key] then
+      if each_cb then
+        each_cb({
+          event = "adjacency_cached",
+          round = round,
+          adj_sample = adj_i,
+          adj_key = adj_key,
+          params = { adjacency = adj_params },
+        })
+      end
+    else
+      seen[adj_key] = true
+      sample_count = sample_count + 1
+
+      local adj_mem_before = mem_kb()
+      if each_cb then
+        each_cb({
+          event = "stage",
+          stage = "adjacency",
+          round = round,
+          sample = sample_count,
+          adj_sample = adj_i,
+          adj_key = adj_key,
+          is_final = false,
+          params = { adjacency = adj_params },
+          mem_kb = adj_mem_before,
+        })
+      end
+
+      local adj_ids, adj_offsets, adj_neighbors, adj_weights = M.build_adjacency({
+        index = index,
+        knn_index = knn_index,
+        params = adj_params,
+        each = adjacency_each,
+      })
+
+      if each_cb then
+        each_cb({
+          event = "adjacency_result",
+          round = round,
+          adj_sample = adj_i,
+          n_nodes = adj_ids:size(),
+          n_edges = adj_neighbors:size(),
+          params = { adjacency = adj_params },
+        })
+      end
+
+      for _ = 1, (prone_fixed and 1 or prone_samples) do
+        local prone_params = M.sample_params(prone_samplers, prone_param_names, prone_cfg)
+        local prone_key = make_prone_key(adj_key, prone_params)
+
+        if not seen[prone_key] then
+          seen[prone_key] = true
+
+          local prone_mem_before = mem_kb()
+          if each_cb then
+            each_cb({
+              event = "stage",
+              stage = "prone",
+              round = round,
+              sample = sample_count,
+              is_final = false,
+              params = { adjacency = adj_params, prone = prone_params },
+              mem_kb = prone_mem_before,
+            })
+          end
+
+          local raw_model = M.build_prone_raw({
+            adj_ids = adj_ids,
+            adj_offsets = adj_offsets,
+            adj_neighbors = adj_neighbors,
+            adj_weights = adj_weights,
+            params = prone_params,
+            each = prone_each,
+          })
+
+          if each_cb then
+            each_cb({
+              event = "prone_result",
+              n_nodes = raw_model.ids:size(),
+              n_dims = raw_model.dims,
+              params = { adjacency = adj_params, prone = prone_params },
+            })
+          end
+
+          local raw_model_has_best = false
+
+          for _ = 1, select_samples do
+            local select_params = {}
+
+            local threshold_params, threshold_fn = M.sample_threshold(prone_cfg.threshold)
+            if threshold_params then
+              select_params.threshold_params = threshold_params
+            elseif threshold_fn then
+              select_params.threshold_fn = threshold_fn
+            end
+
+            local select_key = make_select_key(prone_key, select_params)
+
+            if not seen[select_key] then
+              seen[select_key] = true
+
+              if each_cb then
+                each_cb({
+                  event = "stage",
+                  stage = "select",
+                  round = round,
+                  sample = sample_count,
+                  is_final = false,
+                  params = { adjacency = adj_params, prone = prone_params, select = select_params },
+                  mem_kb = mem_kb(),
+                })
+              end
+
+              local model = M.apply_threshold({
+                raw_model = raw_model,
+                threshold_params = select_params.threshold_params,
+                threshold_fn = select_params.threshold_fn,
+                bucket_size = bucket_size,
+              })
+
+              if each_cb then
+                each_cb({
+                  event = "select_result",
+                  round = round,
+                  params = { adjacency = adj_params, prone = prone_params, select = select_params },
+                  selected_dims = model.dims,
+                })
+              end
+
+              local model_is_best = false
+              local consecutive_zeros = 0
+              local max_consecutive_zeros = eval_cfg.max_consecutive_zeros or 3
+
+              for eval_i = 1, (eval_fixed and 1 or eval_samples) do
+                if consecutive_zeros >= max_consecutive_zeros then
+                  if each_cb then
+                    each_cb({
+                      event = "eval_early_stop",
+                      consecutive_zeros = consecutive_zeros,
+                      eval_sample = eval_i,
+                      eval_samples = eval_samples,
+                    })
+                  end
+                  break
+                end
+
+                local eval_params = M.sample_tier(eval_cfg)
+                eval_params.query_ids = query_ids
+
+                local eval_key = make_eval_key(select_key, eval_params)
+
+                if not seen[eval_key] then
+                  seen[eval_key] = true
+
+                  local score, metrics = M.score_prone_eval({
+                    model = model,
+                    eval_params = eval_params,
+                    expected = expected,
+                  })
+
+                  if each_cb then
+                    each_cb({
+                      event = "eval",
+                      round = round,
+                      sample = sample_count,
+                      is_final = false,
+                      params = { adjacency = adj_params, prone = prone_params, select = select_params, eval = eval_params },
+                      score = score,
+                      metrics = metrics,
+                      mem_kb = mem_kb(),
+                    })
+                  end
+
+                  if score <= 0 then
+                    consecutive_zeros = consecutive_zeros + 1
+                  else
+                    consecutive_zeros = 0
+                  end
+
+                  round_samples = round_samples + 1
+
+                  if score > round_best_score then
+                    round_best_score = score
+                    round_best_params = { adjacency = adj_params, prone = prone_params, select = select_params, eval = eval_params }
+                  end
+
+                  if score > best_score then
+                    round_improvements = round_improvements + 1
+                    if best_model and best_model ~= model then
+                      M.destroy_prone(best_model)
+                    end
+                    if best_adj_ids and best_adj_ids ~= adj_ids then
+                      best_adj_ids:destroy()
+                      best_adj_offsets:destroy()
+                      best_adj_neighbors:destroy()
+                      if best_adj_weights then best_adj_weights:destroy() end
+                    end
+                    best_score = score
+                    best_params = { adjacency = adj_params, prone = prone_params, select = select_params, eval = eval_params }
+                    best_model = model
+                    best_model.raw_model = raw_model
+                    best_metrics = metrics
+                    best_adj_ids = adj_ids
+                    best_adj_offsets = adj_offsets
+                    best_adj_neighbors = adj_neighbors
+                    best_adj_weights = adj_weights
+                    model_is_best = true
+                    raw_model_has_best = true
+                  end
+                end
+              end
+
+              if not model_is_best then
+                M.destroy_prone(model)
+              end
+            end
+          end
+
+          if not raw_model_has_best then
+            M.destroy_prone_raw(raw_model)
+          end
+          collectgarbage("collect")
+
+          if each_cb then
+            each_cb({
+              event = "prone_done",
+              mem_kb = mem_kb(),
+              mem_before = prone_mem_before,
+            })
+          end
+        end
+      end
+
+      if adj_ids and adj_ids ~= best_adj_ids then
+        adj_ids:destroy()
+        adj_offsets:destroy()
+        adj_neighbors:destroy()
+        if adj_weights then adj_weights:destroy() end
+      end
+      collectgarbage("collect")
+
+      if each_cb then
+        each_cb({
+          event = "adjacency_done",
+          mem_kb = mem_kb(),
+          mem_before = adj_mem_before,
+        })
+      end
+    end
+  end
+
+    if best_params then
+      M.recenter(adj_samplers, adj_param_names, best_params.adjacency)
+      M.recenter(prone_samplers, prone_param_names, best_params.prone)
+    end
+    local success_rate = round_samples > 0 and (round_improvements / round_samples) or 0
+    local adapt_factor = M.success_factor(success_rate)
+    M.adapt_jitter(adj_samplers, adapt_factor)
+    M.adapt_jitter(prone_samplers, adapt_factor)
+
+    collectgarbage("collect")
+    local round_end_mem = mem_kb()
+
+    if each_cb then
+      each_cb({
+        event = "round_end",
+        round = round,
+        rounds = rounds,
+        round_best_score = round_best_score,
+        round_best_params = round_best_params,
+        global_best_score = best_score,
+        global_best_params = best_params,
+        success_rate = success_rate,
+        adapt_factor = adapt_factor,
+        mem_kb = round_end_mem,
+        mem_delta_kb = round_end_mem - round_start_mem,
+      })
+    end
+
+  end
+
+  if best_model then
     best_model.owns_base = true
     best_model.owns_raw_codes = true
-
-    best_model.adj_ids = adj_ids
-    best_model.adj_offsets = adj_offsets
-    best_model.adj_neighbors = adj_neighbors
-    best_model.adj_weights = adj_weights
+    best_model.adj_ids = best_adj_ids
+    best_model.adj_offsets = best_adj_offsets
+    best_model.adj_neighbors = best_adj_neighbors
+    best_model.adj_weights = best_adj_weights
   end
 
   collectgarbage("collect")
