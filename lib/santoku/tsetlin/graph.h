@@ -108,6 +108,10 @@ typedef struct tk_graph_s {
   uint64_t probe_radius;
   int64_t category_ranks;
 
+  bool knn_anchor;
+  bool knn_seed;
+  bool knn_bipartite;
+
   tk_dvec_t *sigmas;
   double manifold_dim;
   uint64_t n_edges;
@@ -121,6 +125,8 @@ typedef struct tk_graph_s {
 
 } tk_graph_t;
 
+#define TK_GRAPH_HAS_HOODS(g) \
+  ((g)->uids_hoods && (g)->uids_hoods->n > 0)
 
 static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
 {
@@ -400,6 +406,21 @@ static inline double tk_graph_distance (
                             u, v, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
                             graph->knn_decay, q_weights, e_weights, inter_weights, d);
   }
+  return d;
+}
+
+static inline double tk_graph_knn_distance (
+  tk_graph_t *graph,
+  int64_t u,
+  int64_t v,
+  tk_dvec_t *q_weights,
+  tk_dvec_t *e_weights,
+  tk_dvec_t *inter_weights
+) {
+  double d = DBL_MAX;
+  TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann, graph->knn_hbi,
+                          u, v, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
+                          graph->knn_decay, q_weights, e_weights, inter_weights, d);
   return d;
 }
 
