@@ -1,6 +1,35 @@
 # Now
 
-- Experiment with ProNe vs Spectral
+- Is joint optimization for spectral/prone encoder possible? Pre-computing
+  in-sample embeddings and trying them during encoder trials? Something like
+  that?
+
+- Add EUR-Lex-4k test
+- Can score_elbow/etc should use a bipartite multi-label/etc structure? Or just
+  known binary connections? Can we do that for clustering?
+
+- Need to write up the philosophy: using prone/spectral based on observable knn
+  by reweighted with label info as a dimensionality reduction bridge, thus
+  allowing classifiers/learners to recover the representation from the
+  observable space.
+
+- Check: do we need include_bits? IB=3 functionaly equivalent to state_bits=5?
+
+- Document/define how we do thousand-label multi-label classification via
+  encoder/knn search (likely need to bring back elbow method search likely)
+
+- Add simple hamming distance cutoff to elbow optimization
+
+- Adapt all existing encoder tests to support prone vs spectral, as well as
+  explored adjacencies vs expected-as-training adjacencies
+
+- Explore expected+cknn filtering for spectral instead of separate training
+  adjacency
+
+- Simplify spectral adjacency sampling by simply pre-creating a single big
+  bridge=none knn adjacency, and then pass it to graph.adjacency as
+  seed/bipartite, relying on existing cknn/etc logic. Double-check on whether
+  this is actually equivalent to re-creating it every time.
 
 - Revise/rewrite documentation for sth
 - Supplementary documentation similar to sth for classification pipelines
@@ -12,10 +41,6 @@
 
 - Batch distance API for ann/inv indices (distance_many or similar) to avoid
   O(n*k) individual :distance() calls in diagnostics and weighted encoding
-
-- Extend tests
-    - qqp encoder/classifier
-    - snli encoder/classifier
 
 - Parallelize booleanizer and tokenizer
 
@@ -46,6 +71,11 @@
     - Corex top features
 
 # Next
+
+- Extend tests
+    - AmaonCat-13K encoder
+    - snli encoder/classifier
+    - qqp encoder/classifier
 
 - Add options to add unsupervised spectral as additional feature engineering for
   classification and encoder targets. For encoder, raw features and nystrom, and

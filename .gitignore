@@ -6,3 +6,7 @@ test/res/imdb.50k
 test/res/mnist.70k.txt
 test/res/20news-bydate-test
 test/res/20news-bydate-train/
+test/res/Eurlex-4K/
+test/res/Eurlex-4K.jsonld
+test/res/Eurlex-4K.tar.gz
+test/res/eurlex57k/
