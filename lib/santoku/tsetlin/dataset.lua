@@ -5,6 +5,7 @@ local fs = require("santoku.fs")
 local str = require("santoku.string")
 local arr = require("santoku.array")
 local num = require("santoku.num")
+local json = require("cjson")
 
 local M = {}
 
@@ -252,6 +253,84 @@ M.read_20newsgroups_split = function (train_dir, test_dir, max_per_class, remove
     solutions = val_solutions
   }
   return train, test, validate
+end
+
+local function read_eurlex57k_jsonl (fp, max, label_map)
+  local problems = {}
+  local solutions = ivec.create()
+  local n = 0
+  for line in fs.lines(fp) do
+    if max and n >= max then
+      break
+    end
+    local doc = json.decode(line)
+    local parts = {}
+    if doc.title then parts[#parts + 1] = doc.title end
+    if doc.header then parts[#parts + 1] = doc.header end
+    if doc.recitals then parts[#parts + 1] = doc.recitals end
+    if doc.main_body then
+      if type(doc.main_body) == "table" then
+        for _, p in ipairs(doc.main_body) do
+          parts[#parts + 1] = p
+        end
+      else
+        parts[#parts + 1] = doc.main_body
+      end
+    end
+    problems[#problems + 1] = table.concat(parts, "\n")
+    local labels = doc.eurovoc_concepts or {}
+    for _, lbl in ipairs(labels) do
+      local idx = label_map[lbl]
+      if idx then
+        solutions:push(n * label_map.n_labels + idx)
+      end
+    end
+    n = n + 1
+  end
+  return problems, solutions, n
+end
+
+M.read_eurlex57k = function (dir, max)
+  local label_map = { n_labels = 0 }
+  for _, fname in ipairs({ "train.jsonl", "dev.jsonl", "test.jsonl" }) do
+    local fp = dir .. "/" .. fname
+    if fs.exists(fp) then
+      for line in fs.lines(fp) do
+        local doc = json.decode(line)
+        for _, lbl in ipairs(doc.eurovoc_concepts or {}) do
+          if not label_map[lbl] then
+            label_map[lbl] = label_map.n_labels
+            label_map.n_labels = label_map.n_labels + 1
+          end
+        end
+      end
+    end
+  end
+  local train_problems, train_solutions, train_n =
+    read_eurlex57k_jsonl(dir .. "/train.jsonl", max, label_map)
+  local dev_problems, dev_solutions, dev_n =
+    read_eurlex57k_jsonl(dir .. "/dev.jsonl", max, label_map)
+  local test_problems, test_solutions, test_n =
+    read_eurlex57k_jsonl(dir .. "/test.jsonl", max, label_map)
+  local train = {
+    n = train_n,
+    n_labels = label_map.n_labels,
+    problems = train_problems,
+    solutions = train_solutions,
+  }
+  local dev = {
+    n = dev_n,
+    n_labels = label_map.n_labels,
+    problems = dev_problems,
+    solutions = dev_solutions,
+  }
+  local test = {
+    n = test_n,
+    n_labels = label_map.n_labels,
+    problems = test_problems,
+    solutions = test_solutions,
+  }
+  return train, dev, test, label_map
 end
 
 return M

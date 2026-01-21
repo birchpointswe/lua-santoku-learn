@@ -21,46 +21,6 @@ static inline double tk_bessel_iv(int n, double x) {
   return sum;
 }
 
-static inline void tk_prone_spmm(
-  const int64_t *offsets,
-  const int64_t *neighbors,
-  const double *weights,
-  const double *inv_degree,
-  uint64_t n_nodes,
-  uint64_t n_cols,
-  const double *X,
-  double *Y,
-  double scale,
-  bool use_weights
-) {
-  #pragma omp parallel for schedule(static)
-  for (uint64_t i = 0; i < n_nodes; i++) {
-    const int64_t start = offsets[i];
-    const int64_t end = offsets[i + 1];
-    const double inv_di = inv_degree[i];
-    double *Yi = Y + i * n_cols;
-    for (uint64_t k = 0; k < n_cols; k++)
-      Yi[k] = 0.0;
-    if (use_weights) {
-      for (int64_t e = start; e < end; e++) {
-        const int64_t j = neighbors[e];
-        const double w = weights[e] * inv_di * scale;
-        const double *Xj = X + j * n_cols;
-        for (uint64_t k = 0; k < n_cols; k++)
-          Yi[k] += w * Xj[k];
-      }
-    } else {
-      const double w = inv_di * scale;
-      for (int64_t e = start; e < end; e++) {
-        const int64_t j = neighbors[e];
-        const double *Xj = X + j * n_cols;
-        for (uint64_t k = 0; k < n_cols; k++)
-          Yi[k] += w * Xj[k];
-      }
-    }
-  }
-}
-
 static inline void tk_prone_laplacian_mult(
   const int64_t *offsets,
   const int64_t *neighbors,
@@ -85,7 +45,7 @@ static inline void tk_prone_laplacian_mult(
       Yi[k] = diag_factor * Xi[k];
     if (use_weights) {
       for (int64_t e = start; e < end; e++) {
-        const int64_t j = neighbors[e];
+        const uint64_t j = (uint64_t)neighbors[e];
         const double w = weights[e] * inv_sqrt_di * inv_sqrt_degree[j];
         const double *Xj = X + j * n_cols;
         for (uint64_t k = 0; k < n_cols; k++)
@@ -93,7 +53,7 @@ static inline void tk_prone_laplacian_mult(
       }
     } else {
       for (int64_t e = start; e < end; e++) {
-        const int64_t j = neighbors[e];
+        const uint64_t j = (uint64_t)neighbors[e];
         const double w = inv_sqrt_di * inv_sqrt_degree[j];
         const double *Xj = X + j * n_cols;
         for (uint64_t k = 0; k < n_cols; k++)
@@ -122,7 +82,7 @@ static inline void tk_prone_adjacency_mult(
       Yi[k] = 0.0;
     if (use_weights) {
       for (int64_t e = start; e < end; e++) {
-        const int64_t j = neighbors[e];
+        const uint64_t j = (uint64_t)neighbors[e];
         const double w = weights[e];
         const double *Xj = X + j * n_cols;
         for (uint64_t k = 0; k < n_cols; k++)
@@ -130,7 +90,7 @@ static inline void tk_prone_adjacency_mult(
       }
     } else {
       for (int64_t e = start; e < end; e++) {
-        const int64_t j = neighbors[e];
+        const uint64_t j = (uint64_t)neighbors[e];
         const double *Xj = X + j * n_cols;
         for (uint64_t k = 0; k < n_cols; k++)
           Yi[k] += Xj[k];
@@ -192,7 +152,7 @@ static inline void tk_prone_smf(
       Yi[k] = 0.0;
     if (use_weights) {
       for (int64_t e = start; e < end; e++) {
-        const int64_t j = neighbors[e];
+        const uint64_t j = (uint64_t)neighbors[e];
         double f_ij = log_vol + log(weights[e]) + log_inv_di - log_degree[j] - log_neg;
         if (f_ij > 0.0) {
           const double *Oj = Omega + j * n_hidden;
@@ -202,7 +162,7 @@ static inline void tk_prone_smf(
       }
     } else {
       for (int64_t e = start; e < end; e++) {
-        const int64_t j = neighbors[e];
+        const uint64_t j = (uint64_t)neighbors[e];
         double f_ij = log_vol + log_inv_di - log_degree[j] - log_neg;
         if (f_ij > 0.0) {
           const double *Oj = Omega + j * n_hidden;
@@ -225,7 +185,7 @@ static inline void tk_prone_smf(
         Tj[k] = 0.0;
       if (use_weights) {
         for (int64_t e = start; e < end; e++) {
-          const int64_t ii = neighbors[e];
+          const uint64_t ii = (uint64_t)neighbors[e];
           double f_ji = log_vol + log(weights[e]) + log_inv_dj - log_degree[ii] - log_neg;
           if (f_ji > 0.0) {
             const double *Yii = Y + ii * n_hidden;
@@ -235,7 +195,7 @@ static inline void tk_prone_smf(
         }
       } else {
         for (int64_t e = start; e < end; e++) {
-          const int64_t ii = neighbors[e];
+          const uint64_t ii = (uint64_t)neighbors[e];
           double f_ji = log_vol + log_inv_dj - log_degree[ii] - log_neg;
           if (f_ji > 0.0) {
             const double *Yii = Y + ii * n_hidden;
@@ -256,7 +216,7 @@ static inline void tk_prone_smf(
         Yi[k] = 0.0;
       if (use_weights) {
         for (int64_t e = start; e < end; e++) {
-          const int64_t j = neighbors[e];
+          const uint64_t j = (uint64_t)neighbors[e];
           double f_ij = log_vol + log(weights[e]) + log_inv_di - log_degree[j] - log_neg;
           if (f_ij > 0.0) {
             const double *Tj = temp + j * n_hidden;
@@ -266,7 +226,7 @@ static inline void tk_prone_smf(
         }
       } else {
         for (int64_t e = start; e < end; e++) {
-          const int64_t j = neighbors[e];
+          const uint64_t j = (uint64_t)neighbors[e];
           double f_ij = log_vol + log_inv_di - log_degree[j] - log_neg;
           if (f_ij > 0.0) {
             const double *Tj = temp + j * n_hidden;
@@ -311,7 +271,7 @@ static inline void tk_prone_smf(
       Yi[k] = 0.0;
     if (use_weights) {
       for (int64_t e = start; e < end; e++) {
-        const int64_t j = neighbors[e];
+        const uint64_t j = (uint64_t)neighbors[e];
         double f_ij = log_vol + log(weights[e]) + log_inv_di - log_degree[j] - log_neg;
         if (f_ij > 0.0) {
           const double *Qj = Q + j * n_hidden;
@@ -321,7 +281,7 @@ static inline void tk_prone_smf(
       }
     } else {
       for (int64_t e = start; e < end; e++) {
-        const int64_t j = neighbors[e];
+        const uint64_t j = (uint64_t)neighbors[e];
         double f_ij = log_vol + log_inv_di - log_degree[j] - log_neg;
         if (f_ij > 0.0) {
           const double *Qj = Q + j * n_hidden;

@@ -29,6 +29,33 @@ local function key_str (v)
   return v ~= nil and tostring(v) or "nil"
 end
 
+local function cmp_cost(a, b)
+  if b == nil then return -1 end
+  if type(a) == "number" then
+    if a < b then return -1 end
+    if a > b then return 1 end
+    return 0
+  end
+  for i = 1, #a do
+    if a[i] < b[i] then return -1 end
+    if a[i] > b[i] then return 1 end
+  end
+  return 0
+end
+
+local function is_preferred(new_score, new_cost, best_score, best_cost, tolerance)
+  if best_cost == nil then
+    return true
+  end
+  if new_score > best_score + tolerance then
+    return true
+  end
+  if new_score >= best_score - tolerance and cmp_cost(new_cost, best_cost) < 0 then
+    return true
+  end
+  return false
+end
+
 local function sample_alpha_spec (spec, use_defaults)
   if spec == nil then
     return nil
@@ -257,6 +284,10 @@ M.build_sampler = function (spec, global_dev)
       end,
       adapt = function (factor)
         jitter = jitter * factor
+        local min_jitter = init_jitter * 0.1
+        local max_jitter = init_jitter * 2.0
+        if jitter < min_jitter then jitter = min_jitter end
+        if jitter > max_jitter then jitter = max_jitter end
       end,
     }
   end
@@ -392,17 +423,20 @@ M.adapt_jitter = function (samplers, factor)
   end
 end
 
--- 1/5th success rule: compute adaptive factor based on improvement rate
--- >20% improving -> don't shrink (exploration working)
--- 5-20% improving -> moderate shrink
--- <5% improving -> aggressive shrink (need to focus)
+-- 1/5th success rule (bidirectional): adapt step size based on improvement rate
+-- >25% improving -> expand (being too conservative)
+-- 15-25% improving -> sweet spot, no change
+-- 5-15% improving -> moderate shrink
+-- <5% improving -> aggressive shrink
 M.success_factor = function (success_rate)
-  if success_rate > 0.2 then
+  if success_rate > 0.25 then
+    return 1.2
+  elseif success_rate > 0.15 then
     return 1.0
   elseif success_rate > 0.05 then
-    return 0.8
+    return 0.85
   else
-    return 0.5
+    return 0.7
   end
 end
 
@@ -417,7 +451,10 @@ M.search = function (args)
   local each_cb = args.each
   local cleanup_fn = args.cleanup
   local skip_final = args.skip_final
+  local preference_tolerance = args.preference_tolerance or 1e-6
+  local size_fn = args.size_fn or function() return 0 end
   local best_score = -num.huge
+  local best_size = nil
   local best_params = nil
   local best_result = nil
   local best_metrics = nil
@@ -432,8 +469,9 @@ M.search = function (args)
     end
   end
 
+  local seen = {}
+
   for r = 1, rounds do
-    local seen = {}
     local round_best_score = -num.huge
     local round_best_params = nil
     local round_improvements = 0
@@ -470,12 +508,14 @@ M.search = function (args)
           round_best_score = score
           round_best_params = params
         end
-        if score > best_score then
+        local current_size = size_fn(params)
+        if is_preferred(score, current_size, best_score, best_size, preference_tolerance) then
           round_improvements = round_improvements + 1
           if best_result and cleanup_fn then
             cleanup_fn(best_result)
           end
           best_score = score
+          best_size = current_size
           best_params = params
           best_result = result
           best_metrics = metrics
@@ -486,12 +526,20 @@ M.search = function (args)
         end
       end
     end
-    -- Recenter on global best and adapt jitter using 1/5th success rule
+    -- Recenter on global best and adapt jitter
     if best_params then
       M.recenter(samplers, param_names, best_params)
     end
+    local skip_rate = (trials - round_samples) / trials
     local success_rate = round_samples > 0 and (round_improvements / round_samples) or 0
-    local adapt_factor = M.success_factor(success_rate)
+    local adapt_factor
+    if skip_rate > 0.8 then
+      adapt_factor = 1.3
+    elseif round_samples < 3 then
+      adapt_factor = 1.0
+    else
+      adapt_factor = M.success_factor(success_rate)
+    end
     M.adapt_jitter(samplers, adapt_factor)
     if each_cb then
       each_cb({
@@ -502,6 +550,7 @@ M.search = function (args)
         global_best_score = best_score,
         global_best_params = best_params,
         success_rate = success_rate,
+        skip_rate = skip_rate,
         adapt_factor = adapt_factor,
       })
     end
@@ -725,6 +774,8 @@ local function optimize_tm (args, typ)
     trials = args.search_trials or 10,
     trial_fn = search_trial_fn,
     skip_final = true,
+    preference_tolerance = args.preference_tolerance or 1e-6,
+    size_fn = function(p) return { p.clauses or 0, -(p.specificity or 0) } end,
     make_key = function (p)
       return str.format("%s|%s|%s|%s|%s|%s",
         key_int8(p.clauses),
@@ -802,6 +853,9 @@ M.build_adjacency = function (args)
   local knn_index = args.knn_index or index
   local p = args.params
   local each = args.each
+  local seed_ids = args.seed_ids
+  local seed_offsets = args.seed_offsets
+  local seed_neighbors = args.seed_neighbors
 
   return graph.adjacency({
     weight_index = index,
@@ -813,12 +867,18 @@ M.build_adjacency = function (args)
     knn_mode = p.knn_mode,
     knn_alpha = p.knn_alpha,
     knn_mutual = p.knn_mutual,
-    knn_cache = p.knn_cache or 32,
+    knn_cache = seed_ids and 0 or (p.knn_cache or 32),
     knn_cmp = p.knn_cmp,
     knn_cmp_alpha = p.knn_cmp_alpha,
     knn_cmp_beta = p.knn_cmp_beta,
     knn_eps = p.knn_eps,
     knn_min = p.knn_min,
+    knn_anchor = p.knn_anchor,
+    knn_seed = seed_ids and true or p.knn_seed,
+    knn_bipartite = p.knn_bipartite,
+    seed_ids = seed_ids,
+    seed_offsets = seed_offsets,
+    seed_neighbors = seed_neighbors,
     probe_radius = p.probe_radius,
     category_cmp = p.category_cmp,
     category_alpha = p.category_alpha,
@@ -906,7 +966,6 @@ end
 
 M.destroy_spectral_raw = function (raw_model)
   if not raw_model then return end
-  if raw_model.ids then raw_model.ids:destroy() end
   if raw_model.raw_codes then raw_model.raw_codes:destroy() end
   if raw_model.eigs then raw_model.eigs:destroy() end
 end
@@ -987,16 +1046,23 @@ M.spectral = function (args)
   local spectral_each = args.spectral_each
   local query_ids = args.query_ids
 
-  local adjacency_cfg = err.assert(args.adjacency, "adjacency config required")
+  local prebuilt_adj_ids = args.adj_ids
+  local prebuilt_adj_offsets = args.adj_offsets
+  local prebuilt_adj_neighbors = args.adj_neighbors
+  local prebuilt_adj_weights = args.adj_weights
+  local has_prebuilt_adj = prebuilt_adj_ids ~= nil
+
+  local adjacency_cfg = has_prebuilt_adj and {} or err.assert(args.adjacency, "adjacency config required")
   local spectral_cfg = err.assert(args.spectral, "spectral config required")
   local eval_cfg = err.assert(args.eval, "eval config required")
 
-  local adjacency_samples = args.adjacency_samples or 1
+  local adjacency_samples = has_prebuilt_adj and 1 or (args.adjacency_samples or 1)
   local spectral_samples = args.spectral_samples or 1
   local select_samples = args.select_samples or 1
   local eval_samples = args.eval_samples or 1
   local rounds = args.search_rounds or 1
   local global_dev = args.search_dev or 0.2
+  local preference_tolerance = args.preference_tolerance or 1e-6
 
   local expected = {
     ids = args.expected_ids,
@@ -1006,6 +1072,7 @@ M.spectral = function (args)
   }
 
   local best_score = -num.huge
+  local best_cost = nil
   local best_params = nil
   local best_model = nil
   local best_metrics = nil
@@ -1015,7 +1082,7 @@ M.spectral = function (args)
   local best_adj_weights = nil
   local sample_count = 0
 
-  local adj_fixed = M.tier_all_fixed(adjacency_cfg)
+  local adj_fixed = has_prebuilt_adj or M.tier_all_fixed(adjacency_cfg)
   local spec_fixed = M.tier_all_fixed(spectral_cfg)
   local eval_fixed = M.tier_all_fixed(eval_cfg)
 
@@ -1023,7 +1090,7 @@ M.spectral = function (args)
 
   -- When rounds <= 0 or all tiers are fixed, skip search and build single model with defaults
   if rounds <= 0 or all_fixed then
-    local adj_params = M.sample_tier(adjacency_cfg, true)
+    local adj_params = has_prebuilt_adj and { prebuilt = true } or M.sample_tier(adjacency_cfg, true)
     local spec_params = M.sample_tier(spectral_cfg, true)
     local eval_params = M.sample_tier(eval_cfg, true)
 
@@ -1033,12 +1100,20 @@ M.spectral = function (args)
       each_cb({ event = "stage", stage = "adjacency", is_final = true, params = { adjacency = adj_params } })
     end
 
-    local adj_ids, adj_offsets, adj_neighbors, adj_weights = M.build_adjacency({
-      index = index,
-      knn_index = knn_index,
-      params = adj_params,
-      each = adjacency_each,
-    })
+    local adj_ids, adj_offsets, adj_neighbors, adj_weights
+    if has_prebuilt_adj then
+      adj_ids = prebuilt_adj_ids
+      adj_offsets = prebuilt_adj_offsets
+      adj_neighbors = prebuilt_adj_neighbors
+      adj_weights = prebuilt_adj_weights
+    else
+      adj_ids, adj_offsets, adj_neighbors, adj_weights = M.build_adjacency({
+        index = index,
+        knn_index = knn_index,
+        params = adj_params,
+        each = adjacency_each,
+      })
+    end
 
     if each_cb then
       each_cb({ event = "stage", stage = "spectral", is_final = true, params = { adjacency = adj_params, spectral = spec_params } })
@@ -1094,6 +1169,7 @@ M.spectral = function (args)
   local adj_param_names = {
     "knn", "knn_alpha", "knn_mutual", "knn_mode", "knn_cache",
     "knn_cmp", "knn_cmp_alpha", "knn_cmp_beta", "knn_eps", "knn_min",
+    "knn_anchor", "knn_seed", "knn_bipartite",
     "weight_cmp", "weight_decay", "weight_pooling",
     "category_cmp", "category_alpha", "category_beta",
     "probe_radius", "bridge",
@@ -1103,10 +1179,11 @@ M.spectral = function (args)
   local spec_samplers = M.build_samplers(spectral_cfg, spec_param_names, global_dev)
 
   local function make_adj_key (p)
-    return str.format("%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
+    return str.format("%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
       key_int(p.knn), key_int(p.knn_alpha), key_str(p.knn_mutual), key_str(p.knn_mode),
       key_int(p.knn_cache), key_str(p.knn_cmp), key_float2(p.knn_cmp_alpha),
       key_float2(p.knn_cmp_beta), key_float2(p.knn_eps), key_int(p.knn_min),
+      key_str(p.knn_anchor), key_str(p.knn_seed), key_str(p.knn_bipartite),
       key_str(p.weight_cmp), key_float2(p.weight_decay), key_str(p.weight_pooling),
       key_str(p.category_cmp), key_float2(p.category_alpha), key_float2(p.category_beta),
       key_int(p.probe_radius), key_str(p.bridge))
@@ -1148,8 +1225,8 @@ M.spectral = function (args)
     end
 
   for adj_i = 1, (adj_fixed and 1 or adjacency_samples) do
-    local adj_params = M.sample_params(adj_samplers, adj_param_names, adjacency_cfg)
-    local adj_key = make_adj_key(adj_params)
+    local adj_params = has_prebuilt_adj and { prebuilt = true } or M.sample_params(adj_samplers, adj_param_names, adjacency_cfg)
+    local adj_key = has_prebuilt_adj and "prebuilt" or make_adj_key(adj_params)
 
     if seen[adj_key] then
       if each_cb then
@@ -1180,12 +1257,20 @@ M.spectral = function (args)
         })
       end
 
-      local adj_ids, adj_offsets, adj_neighbors, adj_weights = M.build_adjacency({
-        index = index,
-        knn_index = knn_index,
-        params = adj_params,
-        each = adjacency_each,
-      })
+      local adj_ids, adj_offsets, adj_neighbors, adj_weights
+      if has_prebuilt_adj then
+        adj_ids = prebuilt_adj_ids
+        adj_offsets = prebuilt_adj_offsets
+        adj_neighbors = prebuilt_adj_neighbors
+        adj_weights = prebuilt_adj_weights
+      else
+        adj_ids, adj_offsets, adj_neighbors, adj_weights = M.build_adjacency({
+          index = index,
+          knn_index = knn_index,
+          params = adj_params,
+          each = adjacency_each,
+        })
+      end
 
       if each_cb then
         each_cb({
@@ -1341,7 +1426,8 @@ M.spectral = function (args)
                     round_best_params = { adjacency = adj_params, spectral = spec_params, select = select_params, eval = eval_params }
                   end
 
-                  if score > best_score then
+                  local current_cost = { adj_params.weight_decay or 0, spec_params.n_dims or 0, adj_neighbors:size() }
+                  if is_preferred(score, current_cost, best_score, best_cost, preference_tolerance) then
                     round_improvements = round_improvements + 1
                     if best_model and best_model ~= model then
                       M.destroy_spectral(best_model)
@@ -1353,6 +1439,7 @@ M.spectral = function (args)
                       if best_adj_weights then best_adj_weights:destroy() end
                     end
                     best_score = score
+                    best_cost = current_cost
                     best_params = { adjacency = adj_params, spectral = spec_params, select = select_params, eval = eval_params }
                     best_model = model
                     best_model.raw_model = raw_model
@@ -1406,13 +1493,22 @@ M.spectral = function (args)
     end
   end
 
-    -- Recenter on global best and adapt jitter using 1/5th success rule
+    -- Recenter on global best and adapt jitter
     if best_params then
       M.recenter(adj_samplers, adj_param_names, best_params.adjacency)
       M.recenter(spec_samplers, spec_param_names, best_params.spectral)
     end
+    local expected_samples = adjacency_samples * spectral_samples * select_samples * eval_samples
+    local skip_rate = 1 - (round_samples / expected_samples)
     local success_rate = round_samples > 0 and (round_improvements / round_samples) or 0
-    local adapt_factor = M.success_factor(success_rate)
+    local adapt_factor
+    if skip_rate > 0.8 then
+      adapt_factor = 1.3
+    elseif round_samples < 3 then
+      adapt_factor = 1.0
+    else
+      adapt_factor = M.success_factor(success_rate)
+    end
     M.adapt_jitter(adj_samplers, adapt_factor)
     M.adapt_jitter(spec_samplers, adapt_factor)
 
@@ -1429,6 +1525,7 @@ M.spectral = function (args)
         global_best_score = best_score,
         global_best_params = best_params,
         success_rate = success_rate,
+        skip_rate = skip_rate,
         adapt_factor = adapt_factor,
         mem_kb = round_end_mem,
         mem_delta_kb = round_end_mem - round_start_mem,
@@ -1497,7 +1594,6 @@ end
 
 M.destroy_prone_raw = function (raw_model)
   if not raw_model then return end
-  if raw_model.ids then raw_model.ids:destroy() end
   if raw_model.raw_codes then raw_model.raw_codes:destroy() end
 end
 
@@ -1577,16 +1673,27 @@ M.prone = function (args)
   local prone_each = args.prone_each
   local query_ids = args.query_ids
 
-  local adjacency_cfg = err.assert(args.adjacency, "adjacency config required")
+  local prebuilt_adj_ids = args.adj_ids
+  local prebuilt_adj_offsets = args.adj_offsets
+  local prebuilt_adj_neighbors = args.adj_neighbors
+  local prebuilt_adj_weights = args.adj_weights
+  local has_prebuilt_adj = prebuilt_adj_ids ~= nil
+
+  local seed_ids = args.seed_ids
+  local seed_offsets = args.seed_offsets
+  local seed_neighbors = args.seed_neighbors
+
+  local adjacency_cfg = has_prebuilt_adj and {} or err.assert(args.adjacency, "adjacency config required")
   local prone_cfg = err.assert(args.prone, "prone config required")
   local eval_cfg = err.assert(args.eval, "eval config required")
 
-  local adjacency_samples = args.adjacency_samples or 1
+  local adjacency_samples = has_prebuilt_adj and 1 or (args.adjacency_samples or 1)
   local prone_samples = args.prone_samples or 1
   local select_samples = args.select_samples or 1
   local eval_samples = args.eval_samples or 1
   local rounds = args.search_rounds or 1
   local global_dev = args.search_dev or 0.2
+  local preference_tolerance = args.preference_tolerance or 1e-6
 
   local expected = {
     ids = args.expected_ids,
@@ -1596,6 +1703,7 @@ M.prone = function (args)
   }
 
   local best_score = -num.huge
+  local best_cost = nil
   local best_params = nil
   local best_model = nil
   local best_metrics = nil
@@ -1605,14 +1713,14 @@ M.prone = function (args)
   local best_adj_weights = nil
   local sample_count = 0
 
-  local adj_fixed = M.tier_all_fixed(adjacency_cfg)
+  local adj_fixed = has_prebuilt_adj or M.tier_all_fixed(adjacency_cfg)
   local prone_fixed = M.tier_all_fixed(prone_cfg)
   local eval_fixed = M.tier_all_fixed(eval_cfg)
 
   local all_fixed = adj_fixed and prone_fixed and eval_fixed
 
   if rounds <= 0 or all_fixed then
-    local adj_params = M.sample_tier(adjacency_cfg, true)
+    local adj_params = has_prebuilt_adj and { prebuilt = true } or M.sample_tier(adjacency_cfg, true)
     local prone_params = M.sample_tier(prone_cfg, true)
     local eval_params = M.sample_tier(eval_cfg, true)
 
@@ -1622,12 +1730,23 @@ M.prone = function (args)
       each_cb({ event = "stage", stage = "adjacency", is_final = true, params = { adjacency = adj_params } })
     end
 
-    local adj_ids, adj_offsets, adj_neighbors, adj_weights = M.build_adjacency({
-      index = index,
-      knn_index = knn_index,
-      params = adj_params,
-      each = adjacency_each,
-    })
+    local adj_ids, adj_offsets, adj_neighbors, adj_weights
+    if has_prebuilt_adj then
+      adj_ids = prebuilt_adj_ids
+      adj_offsets = prebuilt_adj_offsets
+      adj_neighbors = prebuilt_adj_neighbors
+      adj_weights = prebuilt_adj_weights
+    else
+      adj_ids, adj_offsets, adj_neighbors, adj_weights = M.build_adjacency({
+        index = index,
+        knn_index = knn_index,
+        params = adj_params,
+        seed_ids = seed_ids,
+        seed_offsets = seed_offsets,
+        seed_neighbors = seed_neighbors,
+        each = adjacency_each,
+      })
+    end
 
     if each_cb then
       each_cb({ event = "stage", stage = "prone", is_final = true, params = { adjacency = adj_params, prone = prone_params } })
@@ -1679,6 +1798,7 @@ M.prone = function (args)
   local adj_param_names = {
     "knn", "knn_alpha", "knn_mutual", "knn_mode", "knn_cache",
     "knn_cmp", "knn_cmp_alpha", "knn_cmp_beta", "knn_eps", "knn_min",
+    "knn_anchor", "knn_seed", "knn_bipartite",
     "weight_cmp", "weight_decay", "weight_pooling",
     "category_cmp", "category_alpha", "category_beta",
     "probe_radius", "bridge",
@@ -1688,10 +1808,11 @@ M.prone = function (args)
   local prone_samplers = M.build_samplers(prone_cfg, prone_param_names, global_dev)
 
   local function make_adj_key (p)
-    return str.format("%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
+    return str.format("%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
       key_int(p.knn), key_int(p.knn_alpha), key_str(p.knn_mutual), key_str(p.knn_mode),
       key_int(p.knn_cache), key_str(p.knn_cmp), key_float2(p.knn_cmp_alpha),
       key_float2(p.knn_cmp_beta), key_float2(p.knn_eps), key_int(p.knn_min),
+      key_str(p.knn_anchor), key_str(p.knn_seed), key_str(p.knn_bipartite),
       key_str(p.weight_cmp), key_float2(p.weight_decay), key_str(p.weight_pooling),
       key_str(p.category_cmp), key_float2(p.category_alpha), key_float2(p.category_beta),
       key_int(p.probe_radius), key_str(p.bridge))
@@ -1735,8 +1856,8 @@ M.prone = function (args)
     end
 
   for adj_i = 1, (adj_fixed and 1 or adjacency_samples) do
-    local adj_params = M.sample_params(adj_samplers, adj_param_names, adjacency_cfg)
-    local adj_key = make_adj_key(adj_params)
+    local adj_params = has_prebuilt_adj and { prebuilt = true } or M.sample_params(adj_samplers, adj_param_names, adjacency_cfg)
+    local adj_key = has_prebuilt_adj and "prebuilt" or make_adj_key(adj_params)
 
     if seen[adj_key] then
       if each_cb then
@@ -1767,12 +1888,23 @@ M.prone = function (args)
         })
       end
 
-      local adj_ids, adj_offsets, adj_neighbors, adj_weights = M.build_adjacency({
-        index = index,
-        knn_index = knn_index,
-        params = adj_params,
-        each = adjacency_each,
-      })
+      local adj_ids, adj_offsets, adj_neighbors, adj_weights
+      if has_prebuilt_adj then
+        adj_ids = prebuilt_adj_ids
+        adj_offsets = prebuilt_adj_offsets
+        adj_neighbors = prebuilt_adj_neighbors
+        adj_weights = prebuilt_adj_weights
+      else
+        adj_ids, adj_offsets, adj_neighbors, adj_weights = M.build_adjacency({
+          index = index,
+          knn_index = knn_index,
+          params = adj_params,
+          seed_ids = seed_ids,
+          seed_offsets = seed_offsets,
+          seed_neighbors = seed_neighbors,
+          each = adjacency_each,
+        })
+      end
 
       if each_cb then
         each_cb({
@@ -1782,6 +1914,7 @@ M.prone = function (args)
           n_nodes = adj_ids:size(),
           n_edges = adj_neighbors:size(),
           params = { adjacency = adj_params },
+          has_seeds = seed_ids ~= nil,
         })
       end
 
@@ -1925,7 +2058,8 @@ M.prone = function (args)
                     round_best_params = { adjacency = adj_params, prone = prone_params, select = select_params, eval = eval_params }
                   end
 
-                  if score > best_score then
+                  local current_cost = { adj_params.weight_decay or 0, prone_params.n_dims or 0, adj_neighbors:size() }
+                  if is_preferred(score, current_cost, best_score, best_cost, preference_tolerance) then
                     round_improvements = round_improvements + 1
                     if best_model and best_model ~= model then
                       M.destroy_prone(best_model)
@@ -1937,6 +2071,7 @@ M.prone = function (args)
                       if best_adj_weights then best_adj_weights:destroy() end
                     end
                     best_score = score
+                    best_cost = current_cost
                     best_params = { adjacency = adj_params, prone = prone_params, select = select_params, eval = eval_params }
                     best_model = model
                     best_model.raw_model = raw_model
@@ -1994,8 +2129,17 @@ M.prone = function (args)
       M.recenter(adj_samplers, adj_param_names, best_params.adjacency)
       M.recenter(prone_samplers, prone_param_names, best_params.prone)
     end
+    local expected_samples = adjacency_samples * prone_samples * select_samples * eval_samples
+    local skip_rate = 1 - (round_samples / expected_samples)
     local success_rate = round_samples > 0 and (round_improvements / round_samples) or 0
-    local adapt_factor = M.success_factor(success_rate)
+    local adapt_factor
+    if skip_rate > 0.8 then
+      adapt_factor = 1.3
+    elseif round_samples < 3 then
+      adapt_factor = 1.0
+    else
+      adapt_factor = M.success_factor(success_rate)
+    end
     M.adapt_jitter(adj_samplers, adapt_factor)
     M.adapt_jitter(prone_samplers, adapt_factor)
 
@@ -2012,6 +2156,7 @@ M.prone = function (args)
         global_best_score = best_score,
         global_best_params = best_params,
         success_rate = success_rate,
+        skip_rate = skip_rate,
         adapt_factor = adapt_factor,
         mem_kb = round_end_mem,
         mem_delta_kb = round_end_mem - round_start_mem,
