@@ -381,22 +381,22 @@ test("mnist-raw", function()
       ids = adj_cluster_ids,
       offsets = adj_cluster_offsets,
       neighbors = adj_cluster_neighbors,
-      quality = true,
+      metric = "radius",
     })
 
     local cost_curve = dvec.create()
-    cost_curve:copy(train.codes_clusters.quality_curve)
+    cost_curve:copy(train.codes_clusters.metric_curve)
     cost_curve:log()
     cost_curve:scale(-1)
     local _, best_step = cost_curve:scores_elbow("lmethod")
     train.codes_clusters.best_step = best_step
-    train.codes_clusters.quality = train.codes_clusters.quality_curve:get(best_step)
+    train.codes_clusters.quality = train.codes_clusters.metric_curve:get(best_step)
     train.codes_clusters.n_clusters = train.codes_clusters.n_clusters_curve:get(best_step)
 
     if cfg.cluster.verbose then
       for step = 0, train.codes_clusters.n_steps do
         str.printf("  Step: %2d | Quality: %.2f | Clusters: %d\n",
-          step, train.codes_clusters.quality_curve:get(step),
+          step, train.codes_clusters.metric_curve:get(step),
           train.codes_clusters.n_clusters_curve:get(step))
       end
     end
@@ -424,7 +424,7 @@ test("mnist-raw", function()
   train.codes_expected = cvec.create()
   train.codes_expected:bits_extend(train.codes_sup, train.adj_expected_ids, train.ids_sup, 0, train.dims_sup, true)
 
-  local base_retrieval = eval.score_retrieval({
+  local base_retrieval = eval.ranking_accuracy({
     retrieved_ids = train.adj_retrieved_ids,
     retrieved_offsets = train.adj_retrieved_offsets,
     retrieved_neighbors = train.adj_retrieved_neighbors,
@@ -638,7 +638,7 @@ test("mnist-raw", function()
       seed_offsets = exp_offsets,
       seed_neighbors = exp_neighbors,
     })
-    local stats = eval.score_retrieval({
+    local stats = eval.ranking_accuracy({
       retrieved_ids = ret_ids,
       retrieved_offsets = ret_offsets,
       retrieved_neighbors = ret_neighbors,
@@ -771,7 +771,7 @@ test("mnist-raw", function()
     })
 
   print("Evaluating train predicted codes")
-  local train_pred_stats = eval.score_retrieval({
+  local train_pred_stats = eval.ranking_accuracy({
     retrieved_ids = train_pred_retrieved_ids,
     retrieved_offsets = train_pred_retrieved_offsets,
     retrieved_neighbors = train_pred_retrieved_neighbors,
@@ -786,7 +786,7 @@ test("mnist-raw", function()
   })
 
   print("Evaluating test predicted codes")
-  local test_pred_stats = eval.score_retrieval({
+  local test_pred_stats = eval.ranking_accuracy({
     retrieved_ids = test_pred_retrieved_ids,
     retrieved_offsets = test_pred_retrieved_offsets,
     retrieved_neighbors = test_pred_retrieved_neighbors,
@@ -818,15 +818,15 @@ test("mnist-raw", function()
         ids = adj_ids,
         offsets = adj_offsets,
         neighbors = adj_neighbors,
-        quality = true,
+        metric = "radius",
       })
       local cost_curve = dvec.create()
-      cost_curve:copy(result.quality_curve)
+      cost_curve:copy(result.metric_curve)
       cost_curve:log()
       cost_curve:scale(-1)
       local _, best_step = cost_curve:scores_elbow("lmethod")
       result.best_step = best_step
-      result.quality = result.quality_curve:get(best_step)
+      result.quality = result.metric_curve:get(best_step)
       result.n_clusters = result.n_clusters_curve:get(best_step)
       str.printf("  %s: step=%d quality=%.4f clusters=%d\n",
         label, result.best_step, result.quality, result.n_clusters)
