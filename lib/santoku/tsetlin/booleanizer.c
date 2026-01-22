@@ -200,7 +200,7 @@ static inline int tk_booleanizer_encode_dvec (
         tk_dvec_t *thresholds = tk_cont_thresholds_val(B->cont_thresholds, k_thresh);
         int64_t bit_base = tk_iumap_val(B->cont_bits, k_bits);
         for (uint64_t t = 0; t < thresholds->n; t ++)
-          if (value >= thresholds->a[t])
+          if (value > thresholds->a[t])
             if (tk_ivec_push(out, (int64_t) i * (int64_t) B->next_feature + bit_base + (int64_t) t) != 0)
               return -1;
       }
