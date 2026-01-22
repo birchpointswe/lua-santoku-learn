@@ -371,43 +371,7 @@ static inline void tk_booleanizer_add_thresholds (
   tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, tk_lua_absindex(L, -1));
   lua_pop(L, 1);
   if (n == 0) {
-  } else if (B->n_thresholds == 0) {
-    double best_gap = -1.0, thr = 0.0;
-    uint64_t best_idx = 0;
-    #pragma omp parallel
-    {
-      double local_best_gap = -1.0;
-      uint64_t local_best_idx = 0;
-      #pragma omp for
-      for (uint64_t i = 1; i < value_vec->n; i ++) {
-        double gap = value_vec->a[i] - value_vec->a[i - 1];
-        if (gap > local_best_gap) {
-          local_best_gap = gap;
-          local_best_idx = i;
-        }
-      }
-      #pragma omp critical
-      {
-        if (local_best_gap > best_gap) {
-          best_gap = local_best_gap;
-          best_idx = local_best_idx;
-        }
-      }
-    }
-    if (best_gap > 0.0) {
-      thr = 0.5 * (value_vec->a[best_idx] + value_vec->a[best_idx - 1]);
-    } else {
-      double sum = 0.0;
-      for (uint64_t i = 0; i < value_vec->n; i ++)
-        sum += value_vec->a[i];
-      thr = sum / (double) value_vec->n;
-    }
-    if (tk_dvec_push(thresholds, thr) != 0) {
-      tk_dvec_destroy(thresholds);
-      tk_lua_verror(L, 2, "add_thresholds", "allocation failed");
-      return;
-    }
-  } else if (n <= B->n_thresholds) {
+  } else if (B->n_thresholds == 0 || n <= B->n_thresholds) {
     if (tk_dvec_copy(thresholds, value_vec, 0, (int64_t) value_vec->n, 0) != 0) {
       tk_dvec_destroy(thresholds);
       tk_lua_verror(L, 2, "add_thresholds", "allocation failed");
@@ -544,6 +508,56 @@ static inline int64_t tk_booleanizer_features (
   return (int64_t) B->next_feature;
 }
 
+static inline tk_ivec_t *tk_booleanizer_bit_offsets (
+  lua_State *L,
+  tk_booleanizer_t *B
+) {
+  if (B->destroyed) {
+    tk_lua_verror(L, 2, "bit_offsets", "can't query a destroyed booleanizer");
+    return NULL;
+  }
+  if (!B->finalized) {
+    tk_lua_verror(L, 2, "bit_offsets", "finalize must be called before bit_offsets");
+    return NULL;
+  }
+  tk_ivec_t *offsets = tk_ivec_create(L, 0, 0, 0);
+  int64_t attr_id, bit_start;
+  tk_umap_foreach(B->cont_bits, attr_id, bit_start, ({
+    tk_ivec_push(offsets, bit_start);
+  }));
+  tk_iumap_t *cat_attr_starts = tk_iumap_create(0, 0);
+  tk_cat_bit_string_t cbs;
+  int64_t bit_id;
+  tk_umap_foreach(B->cat_bits_string, cbs, bit_id, ({
+    khint_t k = tk_iumap_get(cat_attr_starts, cbs.f);
+    if (k == tk_iumap_end(cat_attr_starts)) {
+      int kha;
+      k = tk_iumap_put(cat_attr_starts, cbs.f, &kha);
+      tk_iumap_setval(cat_attr_starts, k, bit_id);
+    } else if (bit_id < tk_iumap_val(cat_attr_starts, k)) {
+      tk_iumap_setval(cat_attr_starts, k, bit_id);
+    }
+  }));
+  tk_cat_bit_double_t cbd;
+  tk_umap_foreach(B->cat_bits_double, cbd, bit_id, ({
+    khint_t k = tk_iumap_get(cat_attr_starts, cbd.f);
+    if (k == tk_iumap_end(cat_attr_starts)) {
+      int kha;
+      k = tk_iumap_put(cat_attr_starts, cbd.f, &kha);
+      tk_iumap_setval(cat_attr_starts, k, bit_id);
+    } else if (bit_id < tk_iumap_val(cat_attr_starts, k)) {
+      tk_iumap_setval(cat_attr_starts, k, bit_id);
+    }
+  }));
+  tk_umap_foreach(cat_attr_starts, attr_id, bit_start, ({
+    tk_ivec_push(offsets, bit_start);
+  }));
+  tk_iumap_destroy(cat_attr_starts);
+  tk_ivec_asc(offsets, 0, offsets->n);
+  tk_ivec_push(offsets, (int64_t) B->next_feature);
+  return offsets;
+}
+
 static inline void tk_booleanizer_restrict (
   lua_State *L,
   tk_booleanizer_t *B,
@@ -665,8 +679,8 @@ static inline void tk_booleanizer_restrict (
         int kha;
         khint_t nk = tk_cont_thresholds_put(new_cont_thresholds, new_f, &kha);
         tk_cont_thresholds_setval(new_cont_thresholds, nk, new_vec);
+        next_bit += (int64_t) new_vec->n;
       }
-      next_bit += (int64_t) B->n_thresholds;
     }
   }
   tk_lua_del_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, B->continuous);
@@ -937,6 +951,13 @@ static inline int tk_booleanizer_features_lua (lua_State *L)
   return 1;
 }
 
+static inline int tk_booleanizer_bit_offsets_lua (lua_State *L)
+{
+  tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
+  tk_booleanizer_bit_offsets(L, B);
+  return 1;
+}
+
 static inline int tk_booleanizer_restrict_lua (lua_State *L)
 {
   tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
@@ -1127,6 +1148,7 @@ static luaL_Reg tk_booleanizer_mt_fns[] =
   { "observe", tk_booleanizer_observe_lua },
   { "encode", tk_booleanizer_encode_lua },
   { "features", tk_booleanizer_features_lua },
+  { "bit_offsets", tk_booleanizer_bit_offsets_lua },
   { "feature", tk_booleanizer_feature_lua },
   { "index", tk_booleanizer_index_lua },
   { "finalize", tk_booleanizer_finalize_lua },

@@ -474,11 +474,13 @@ static inline int tm_retrieval_ks (lua_State *L)
   tk_hbi_hoods_t *hbi_hoods = (inv_hoods || ann_hoods) ? NULL : tk_hbi_hoods_peekopt(L, -1);
   if (!inv_hoods && !ann_hoods && !hbi_hoods)
     return luaL_error(L, "hoods must be inv_hoods, ann_hoods, or hbi_hoods");
+  lua_getfield(L, 1, "hood_ids");
+  tk_ivec_t *hood_ids = tk_ivec_peek(L, -1, "hood_ids");
   lua_getfield(L, 1, "expected_offsets");
   tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
   lua_getfield(L, 1, "expected_neighbors");
   tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
-  lua_pop(L, 3);
+  lua_pop(L, 4);
   uint64_t n_samples = inv_hoods ? inv_hoods->n : (ann_hoods ? ann_hoods->n : hbi_hoods->n);
   if (exp_off->n != n_samples + 1)
     return luaL_error(L, "expected_offsets length must match hoods count + 1");
@@ -503,10 +505,11 @@ static inline int tm_retrieval_ks (lua_State *L)
     uint64_t best_k = 1;
     uint64_t tp = 0;
     for (uint64_t k = 1; k <= hood_size; k++) {
-      int64_t nbr_id;
-      if (inv_hoods) nbr_id = inv_hoods->a[s]->a[k-1].i;
-      else if (ann_hoods) nbr_id = ann_hoods->a[s]->a[k-1].i;
-      else nbr_id = hbi_hoods->a[s]->a[k-1].i;
+      int64_t nbr_pos;
+      if (inv_hoods) nbr_pos = inv_hoods->a[s]->a[k-1].i;
+      else if (ann_hoods) nbr_pos = ann_hoods->a[s]->a[k-1].i;
+      else nbr_pos = hbi_hoods->a[s]->a[k-1].i;
+      int64_t nbr_id = hood_ids->a[nbr_pos];
       if (tk_iuset_contains(exp_set, nbr_id)) tp++;
       double prec = (double)tp / k;
       double rec = (double)tp / n_expected;
