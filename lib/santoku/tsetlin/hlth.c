@@ -33,7 +33,8 @@ typedef enum {
   TK_HLTH_MODE_FREQUENCY,
   TK_HLTH_MODE_FREQUENCY_WEIGHTED,
   TK_HLTH_MODE_CENTROID,
-  TK_HLTH_MODE_CENTROID_WEIGHTED
+  TK_HLTH_MODE_CENTROID_WEIGHTED,
+  TK_HLTH_MODE_SIMILARITIES
 } tk_hlth_mode_t;
 
 typedef struct {
@@ -50,6 +51,7 @@ typedef struct {
   int64_t rank_filter;
   tk_hlth_mode_t mode;
   uint64_t n_thresholds;
+  uint64_t n_bins;
   bool quantile;
   bool destroyed;
 } tk_hlth_encoder_t;
@@ -112,6 +114,64 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
 
   if (enc->destroyed)
     return luaL_error(L, "encode: encoder has been destroyed");
+
+  if (enc->mode == TK_HLTH_MODE_SIMILARITIES) {
+    tk_inv_hoods_t *inv_hoods = tk_inv_hoods_peekopt(L, 1);
+    tk_ann_hoods_t *ann_hoods = inv_hoods ? NULL : tk_ann_hoods_peekopt(L, 1);
+    tk_hbi_hoods_t *hbi_hoods = (inv_hoods || ann_hoods) ? NULL : tk_hbi_hoods_peekopt(L, 1);
+    if (!inv_hoods && !ann_hoods && !hbi_hoods)
+      return luaL_error(L, "encode: similarities mode requires hoods (inv, ann, or hbi)");
+    uint64_t n_samples = inv_hoods ? inv_hoods->n : (ann_hoods ? ann_hoods->n : hbi_hoods->n);
+    uint64_t hood_size = enc->n_landmarks;
+    uint64_t n_bins = enc->n_bins;
+    uint64_t n_latent_bits = hood_size * n_bins;
+    uint64_t n_latent_bytes = TK_CVEC_BITS_BYTES(n_latent_bits);
+    tk_cvec_t *out = tk_cvec_create(L, n_samples * n_latent_bytes, NULL, NULL);
+    out->n = n_samples * n_latent_bytes;
+    memset(out->a, 0, out->n);
+    double *all_sims = malloc(n_samples * hood_size * sizeof(double));
+    double *thresholds = malloc(hood_size * (n_bins - 1) * sizeof(double));
+    for (uint64_t k = 0; k < hood_size; k++) {
+      for (uint64_t i = 0; i < n_samples; i++) {
+        double sim = 0.0;
+        uint64_t cur_size = inv_hoods ? inv_hoods->a[i]->n : (ann_hoods ? ann_hoods->a[i]->n : hbi_hoods->a[i]->n);
+        if (k < cur_size) {
+          if (inv_hoods) sim = inv_hoods->a[i]->a[k].d;
+          else if (ann_hoods) sim = (double)ann_hoods->a[i]->a[k].p;
+          else sim = (double)hbi_hoods->a[i]->a[k].p;
+        }
+        all_sims[i] = sim;
+      }
+      double *sorted = malloc(n_samples * sizeof(double));
+      memcpy(sorted, all_sims, n_samples * sizeof(double));
+      for (uint64_t i = 0; i < n_samples; i++) {
+        for (uint64_t j = i + 1; j < n_samples; j++) {
+          if (sorted[i] > sorted[j]) {
+            double tmp = sorted[i]; sorted[i] = sorted[j]; sorted[j] = tmp;
+          }
+        }
+      }
+      for (uint64_t b = 0; b < n_bins - 1; b++) {
+        uint64_t idx = (b + 1) * n_samples / n_bins;
+        if (idx >= n_samples) idx = n_samples - 1;
+        thresholds[k * (n_bins - 1) + b] = sorted[idx];
+      }
+      free(sorted);
+      for (uint64_t i = 0; i < n_samples; i++) {
+        double sim = all_sims[i];
+        uint64_t bin = 0;
+        for (uint64_t b = 0; b < n_bins - 1; b++) {
+          if (sim > thresholds[k * (n_bins - 1) + b]) bin = b + 1;
+        }
+        uint64_t bit_idx = k * n_bins + bin;
+        uint8_t *sample_dest = (uint8_t *)out->a + i * n_latent_bytes;
+        sample_dest[TK_CVEC_BITS_BYTE(bit_idx)] |= (1 << TK_CVEC_BITS_BIT(bit_idx));
+      }
+    }
+    free(all_sims);
+    free(thresholds);
+    return 1;
+  }
 
   tk_ivec_t *query_ivec = tk_ivec_peekopt(L, 1);
   tk_cvec_t *query_cvec = query_ivec ? NULL : tk_cvec_peekopt(L, 1);
@@ -475,22 +535,33 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
 
-  lua_getfield(L, 1, "landmarks_index");
-  tk_inv_t *feat_inv = tk_inv_peekopt(L, -1);
-  tk_ann_t *feat_ann = tk_ann_peekopt(L, -1);
-  tk_hbi_t *feat_hbi = tk_hbi_peekopt(L, -1);
-  lua_pop(L, 1);
+  const char *mode_str = tk_lua_foptstring(L, 1, "landmark_encoder", "mode", "concat");
+  bool is_similarities = !strcmp(mode_str, "similarities");
 
-  if (!feat_inv && !feat_ann && !feat_hbi)
-    return luaL_error(L, "landmark_encoder: landmark_index must be inv, ann, or hbi");
+  tk_inv_t *feat_inv = NULL;
+  tk_ann_t *feat_ann = NULL;
+  tk_hbi_t *feat_hbi = NULL;
+  tk_ann_t *code_ann = NULL;
+  tk_hbi_t *code_hbi = NULL;
 
-  lua_getfield(L, 1, "codes_index");
-  tk_ann_t *code_ann = tk_ann_peekopt(L, -1);
-  tk_hbi_t *code_hbi = tk_hbi_peekopt(L, -1);
-  lua_pop(L, 1);
+  if (!is_similarities) {
+    lua_getfield(L, 1, "landmarks_index");
+    feat_inv = tk_inv_peekopt(L, -1);
+    feat_ann = tk_ann_peekopt(L, -1);
+    feat_hbi = tk_hbi_peekopt(L, -1);
+    lua_pop(L, 1);
 
-  if (!code_ann && !code_hbi)
-    return luaL_error(L, "landmark_encoder: code_index must be ann or hbi");
+    if (!feat_inv && !feat_ann && !feat_hbi)
+      return luaL_error(L, "landmark_encoder: landmark_index must be inv, ann, or hbi");
+
+    lua_getfield(L, 1, "codes_index");
+    code_ann = tk_ann_peekopt(L, -1);
+    code_hbi = tk_hbi_peekopt(L, -1);
+    lua_pop(L, 1);
+
+    if (!code_ann && !code_hbi)
+      return luaL_error(L, "landmark_encoder: code_index must be ann or hbi");
+  }
 
   uint64_t n_landmarks = tk_lua_foptunsigned(L, 1, "landmark_encoder", "n_landmarks", 24);
 
@@ -511,7 +582,6 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
 
   uint64_t probe_radius = tk_lua_foptunsigned(L, 1, "landmark_encoder", "probe_radius", 2);
 
-  const char *mode_str = tk_lua_foptstring(L, 1, "landmark_encoder", "mode", "concat");
   tk_hlth_mode_t mode = TK_HLTH_MODE_CONCAT;
   if (!strcmp(mode_str, "frequency"))
     mode = TK_HLTH_MODE_FREQUENCY;
@@ -521,11 +591,16 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
     mode = TK_HLTH_MODE_CENTROID;
   else if (!strcmp(mode_str, "centroid_weighted"))
     mode = TK_HLTH_MODE_CENTROID_WEIGHTED;
+  else if (!strcmp(mode_str, "similarities"))
+    mode = TK_HLTH_MODE_SIMILARITIES;
 
   uint64_t n_thresholds = tk_lua_foptunsigned(L, 1, "landmark_encoder", "n_thresholds", 1);
+  uint64_t n_bins = tk_lua_foptunsigned(L, 1, "landmark_encoder", "n_bins", 8);
   bool quantile = tk_lua_foptboolean(L, 1, "landmark_encoder", "quantile", false);
 
-  uint64_t n_hidden = code_ann ? code_ann->features : code_hbi->features;
+  uint64_t n_hidden = 0;
+  if (!is_similarities)
+    n_hidden = code_ann ? code_ann->features : code_hbi->features;
 
   tk_hlth_encoder_t *enc = tk_lua_newuserdata(L, tk_hlth_encoder_t, TK_HLTH_ENCODER_MT, tk_hlth_encoder_mt_fns, tk_hlth_encoder_gc);
   int Ei = lua_gettop(L);
@@ -535,17 +610,23 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
   } else if (feat_ann) {
     enc->feat_idx = feat_ann;
     enc->feat_idx_type = TK_HLTH_IDX_ANN;
-  } else {
+  } else if (feat_hbi) {
     enc->feat_idx = feat_hbi;
     enc->feat_idx_type = TK_HLTH_IDX_HBI;
+  } else {
+    enc->feat_idx = NULL;
+    enc->feat_idx_type = TK_HLTH_IDX_INV;
   }
 
   if (code_ann) {
     enc->code_idx = code_ann;
     enc->code_idx_type = TK_HLTH_IDX_ANN;
-  } else {
+  } else if (code_hbi) {
     enc->code_idx = code_hbi;
     enc->code_idx_type = TK_HLTH_IDX_HBI;
+  } else {
+    enc->code_idx = NULL;
+    enc->code_idx_type = TK_HLTH_IDX_ANN;
   }
 
   enc->n_landmarks = n_landmarks;
@@ -557,15 +638,18 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
   enc->rank_filter = rank_filter;
   enc->mode = mode;
   enc->n_thresholds = n_thresholds;
+  enc->n_bins = n_bins;
   enc->quantile = quantile;
 
-  lua_getfield(L, 1, "landmarks_index");
-  tk_lua_add_ephemeron(L, TK_HLTH_ENCODER_EPH, Ei, -1);
-  lua_pop(L, 1);
+  if (!is_similarities) {
+    lua_getfield(L, 1, "landmarks_index");
+    tk_lua_add_ephemeron(L, TK_HLTH_ENCODER_EPH, Ei, -1);
+    lua_pop(L, 1);
 
-  lua_getfield(L, 1, "codes_index");
-  tk_lua_add_ephemeron(L, TK_HLTH_ENCODER_EPH, Ei, -1);
-  lua_pop(L, 1);
+    lua_getfield(L, 1, "codes_index");
+    tk_lua_add_ephemeron(L, TK_HLTH_ENCODER_EPH, Ei, -1);
+    lua_pop(L, 1);
+  }
 
   lua_pushcclosure(L, tk_hlth_encode_lua, 1);
 
@@ -574,6 +658,8 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
     n_latent = (int64_t) n_hidden * (int64_t) n_thresholds;
   else if (mode == TK_HLTH_MODE_CENTROID || mode == TK_HLTH_MODE_CENTROID_WEIGHTED)
     n_latent = (int64_t) n_hidden;
+  else if (mode == TK_HLTH_MODE_SIMILARITIES)
+    n_latent = (int64_t) n_landmarks * (int64_t) n_bins;
   else
     n_latent = (int64_t) n_landmarks * (int64_t) n_hidden;
   lua_pushinteger(L, n_latent);

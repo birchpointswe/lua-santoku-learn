@@ -1,3 +1,8 @@
+# Current
+
+- .tmp.eurlex.md refactor
+- regressor
+
 # Now
 
 - Is joint optimization for spectral/prone encoder possible? Pre-computing

@@ -610,6 +610,20 @@ local function create_tm (typ, args)
       include_bits = 1,
       reusable = true,
     })
+  elseif typ == "regressor" then
+    return tm.create("regressor", {
+      features = args.features,
+      outputs = args.outputs,
+      individualized = args.individualized,
+      feat_offsets = args.feat_offsets,
+      clauses = 8,
+      clause_tolerance = 8,
+      clause_maximum = 8,
+      target = 4,
+      specificity = 1000,
+      include_bits = 1,
+      reusable = true,
+    })
   else
     err.error("unexpected type", typ)
   end
@@ -633,6 +647,19 @@ local function create_final_tm (typ, args, params)
     return tm.create("classifier", {
       features = args.features,
       classes = args.classes,
+      individualized = args.individualized,
+      feat_offsets = args.feat_offsets,
+      clauses = params.clauses,
+      clause_tolerance = params.clause_tolerance,
+      clause_maximum = params.clause_maximum,
+      target = params.target,
+      specificity = params.specificity,
+      include_bits = params.include_bits,
+    })
+  elseif typ == "regressor" then
+    return tm.create("regressor", {
+      features = args.features,
+      outputs = args.outputs,
       individualized = args.individualized,
       feat_offsets = args.feat_offsets,
       clauses = params.clauses,
@@ -706,6 +733,15 @@ local function train_tm (typ, tmobj, args, params, iterations, early_patience, m
       iterations = iterations,
       each = on_epoch,
     })
+  elseif typ == "regressor" then
+    tmobj:train({
+      samples = args.samples,
+      problems = args.problems,
+      targets = args.targets,
+      dim_offsets = args.dim_offsets,
+      iterations = iterations,
+      each = on_epoch,
+    })
   end
 
   if checkpoint and has_checkpoint then
@@ -738,6 +774,7 @@ local function optimize_tm (args, typ)
       hidden = args.hidden,
       features = args.features,
       classes = args.classes,
+      outputs = args.outputs,
       individualized = args.individualized,
       feat_offsets = args.feat_offsets,
     })
@@ -754,6 +791,7 @@ local function optimize_tm (args, typ)
       samples = args.samples,
       problems = args.problems,
       solutions = args.solutions,
+      targets = args.targets,
       dim_offsets = args.dim_offsets,
     }
     local encoding_info = {
@@ -796,6 +834,7 @@ local function optimize_tm (args, typ)
     hidden = args.hidden,
     features = args.features,
     classes = args.classes,
+    outputs = args.outputs,
     individualized = args.individualized,
     feat_offsets = args.feat_offsets,
   }, best_params)
@@ -805,6 +844,7 @@ local function optimize_tm (args, typ)
     samples = args.samples,
     problems = args.problems,
     solutions = args.solutions,
+    targets = args.targets,
     dim_offsets = args.dim_offsets,
   }
   local final_encoding_info = {
@@ -826,6 +866,10 @@ end
 
 M.encoder = function (args)
   return optimize_tm(args, "encoder")
+end
+
+M.regressor = function (args)
+  return optimize_tm(args, "regressor")
 end
 
 M.destroy_spectral = function (model)
@@ -1010,7 +1054,7 @@ M.score_spectral_eval = function (args)
       seed_neighbors = expected.neighbors,
     })
 
-  local stats = evaluator.score_retrieval({
+  local stats = evaluator.ranking_accuracy({
     retrieved_ids = adj_retrieved_ids,
     retrieved_offsets = adj_retrieved_offsets,
     retrieved_neighbors = adj_retrieved_neighbors,
@@ -1637,7 +1681,7 @@ M.score_prone_eval = function (args)
       seed_neighbors = expected.neighbors,
     })
 
-  local stats = evaluator.score_retrieval({
+  local stats = evaluator.ranking_accuracy({
     retrieved_ids = adj_retrieved_ids,
     retrieved_offsets = adj_retrieved_offsets,
     retrieved_neighbors = adj_retrieved_neighbors,
