@@ -337,7 +337,7 @@ end
 
 M.read_california_housing = function (fp, opts)
   opts = opts or {}
-  local n_thresholds = opts.n_thresholds or 8
+  local n_thresholds = opts.n_thresholds or 0
   local max = opts.max
   local feature_cols = opts.feature_cols or {
     "longitude", "latitude", "housing_median_age",
@@ -418,11 +418,10 @@ local function _encode_housing_split (dataset, rows)
     end
     targets:push(tonumber(row[target_col]))
   end
-  local problems = bits:bits_to_cvec(#rows, n_features, true)
   return {
     n = #rows,
     n_features = n_features,
-    problems = problems,
+    bits = bits,
     targets = targets,
   }
 end
