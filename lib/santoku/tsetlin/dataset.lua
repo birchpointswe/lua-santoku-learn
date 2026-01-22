@@ -1,6 +1,8 @@
 local serialize = require("santoku.serialize") -- luacheck: ignore
+local booleanizer = require("santoku.tsetlin.booleanizer")
 local inv = require("santoku.tsetlin.inv")
 local ivec = require("santoku.ivec")
+local dvec = require("santoku.dvec")
 local fs = require("santoku.fs")
 local str = require("santoku.string")
 local arr = require("santoku.array")
@@ -331,6 +333,123 @@ M.read_eurlex57k = function (dir, max)
     solutions = test_solutions,
   }
   return train, dev, test, label_map
+end
+
+M.read_california_housing = function (fp, opts)
+  opts = opts or {}
+  local n_thresholds = opts.n_thresholds or 8
+  local max = opts.max
+  local feature_cols = opts.feature_cols or {
+    "longitude", "latitude", "housing_median_age",
+    "total_rooms", "total_bedrooms", "population",
+    "households", "median_income"
+  }
+  local categorical_cols = opts.categorical_cols or { "ocean_proximity" }
+  local target_col = opts.target_col or "median_house_value"
+  local lines = {}
+  for line in fs.lines(fp) do
+    lines[#lines + 1] = line
+  end
+  local header = {}
+  for col in str.gmatch(lines[1], "[^,]+") do
+    header[#header + 1] = col
+  end
+  local data = {}
+  local n = max and num.min(#lines - 1, max) or (#lines - 1)
+  for i = 2, n + 1 do
+    local row = {}
+    local j = 1
+    local line = lines[i] .. ","
+    for val in str.gmatch(line, "([^,]*),") do
+      if val ~= "" then
+        row[header[j]] = val
+      end
+      j = j + 1
+    end
+    if row[target_col] then
+      data[#data + 1] = row
+    end
+  end
+  local bzr = booleanizer.create({ n_thresholds = n_thresholds })
+  for _, row in ipairs(data) do
+    for _, col in ipairs(feature_cols) do
+      local val = tonumber(row[col])
+      if val then bzr:observe(col, val) end
+    end
+    for _, col in ipairs(categorical_cols) do
+      local val = row[col]
+      if val then bzr:observe(col, val) end
+    end
+  end
+  bzr:finalize()
+  local idxs = arr.shuffle(arr.range(1, #data))
+  local shuffled = {}
+  for i, idx in ipairs(idxs) do
+    shuffled[i] = data[idx]
+  end
+  return {
+    data = shuffled,
+    booleanizer = bzr,
+    n = #shuffled,
+    n_features = bzr:features(),
+    feature_cols = feature_cols,
+    categorical_cols = categorical_cols,
+    target_col = target_col,
+  }
+end
+
+local function _encode_housing_split (dataset, rows)
+  local bzr = dataset.booleanizer
+  local feature_cols = dataset.feature_cols
+  local categorical_cols = dataset.categorical_cols
+  local target_col = dataset.target_col
+  local n_features = dataset.n_features
+  local bits = ivec.create()
+  local targets = dvec.create()
+  for i, row in ipairs(rows) do
+    local sample_id = i - 1
+    for _, col in ipairs(feature_cols) do
+      local val = tonumber(row[col])
+      if val then bzr:encode(sample_id, col, val, bits) end
+    end
+    for _, col in ipairs(categorical_cols) do
+      local val = row[col]
+      if val then bzr:encode(sample_id, col, val, bits) end
+    end
+    targets:push(tonumber(row[target_col]))
+  end
+  local problems = bits:bits_to_cvec(#rows, n_features, true)
+  return {
+    n = #rows,
+    n_features = n_features,
+    problems = problems,
+    targets = targets,
+  }
+end
+
+M.split_california_housing = function (dataset, ttr, tvr)
+  local n = dataset.n
+  local data = dataset.data
+  local n_train_total = num.floor(n * ttr)
+  local n_val = tvr and num.floor(n * tvr) or 0
+  local n_train = n_train_total
+  local train_rows, val_rows, test_rows = {}, {}, {}
+  for i = 1, n_train do
+    train_rows[#train_rows + 1] = data[i]
+  end
+  for i = n_train + 1, n_train + n_val do
+    val_rows[#val_rows + 1] = data[i]
+  end
+  for i = n_train + n_val + 1, n do
+    test_rows[#test_rows + 1] = data[i]
+  end
+  local train = _encode_housing_split(dataset, train_rows)
+  local test = _encode_housing_split(dataset, test_rows)
+  if n_val > 0 then
+    local validate = _encode_housing_split(dataset, val_rows)
+    return train, test, validate
+  end
+  return train, test
 end
 
 return M

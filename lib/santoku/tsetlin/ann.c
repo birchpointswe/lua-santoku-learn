@@ -32,11 +32,32 @@ static inline int tk_ann_mutualize_lua (lua_State *L)
   return 0;
 }
 
+static inline int tk_ann_hoods_select_topk_lua (lua_State *L)
+{
+  lua_settop(L, 2);
+  tk_ann_hoods_t *hoods = tk_ann_hoods_peek(L, 1, "hoods");
+  tk_ivec_t *ks = tk_ivec_peek(L, 2, "ks");
+  if (ks->n != hoods->n)
+    return luaL_error(L, "ks length must match hoods count");
+  for (uint64_t i = 0; i < hoods->n; i++) {
+    uint64_t k = ks->a[i] > 0 ? (uint64_t)ks->a[i] : 0;
+    uint64_t cur = hoods->a[i]->n;
+    tk_pvec_setn(hoods->a[i], k < cur ? k : cur);
+  }
+  return 0;
+}
+
 static luaL_Reg tk_ann_fns[] =
 {
   { "create", tk_ann_create_lua },
   { "load", tk_ann_load_lua },
   { "mutualize", tk_ann_mutualize_lua },
+  { NULL, NULL }
+};
+
+static luaL_Reg tk_ann_hoods_ext_fns[] =
+{
+  { "select_topk", tk_ann_hoods_select_topk_lua },
   { NULL, NULL }
 };
 
@@ -47,6 +68,7 @@ int luaopen_santoku_tsetlin_ann (lua_State *L)
   tk_ann_hoods_create(L, 0, 0, 0);
   luaL_getmetafield(L, -1, "__index");
   luaL_register(L, NULL, tk_ann_hoods_lua_mt_fns);
+  luaL_register(L, NULL, tk_ann_hoods_ext_fns);
   lua_pop(L, 2);
   return 1;
 }

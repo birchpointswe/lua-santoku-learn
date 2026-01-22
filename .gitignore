@@ -10,3 +10,4 @@ test/res/Eurlex-4K/
 test/res/Eurlex-4K.jsonld
 test/res/Eurlex-4K.tar.gz
 test/res/eurlex57k/
+test/res/california-housing.csv

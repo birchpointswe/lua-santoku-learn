@@ -41,6 +41,7 @@ SOFTWARE.
 typedef enum {
   TM_CLASSIFIER,
   TM_ENCODER,
+  TM_REGRESSOR,
 } tk_tsetlin_type_t;
 
 typedef struct tk_tsetlin_s {
@@ -77,6 +78,10 @@ typedef struct tk_tsetlin_s {
   size_t results_len;
   char *encodings;
   size_t encodings_len;
+  double *regression_out;
+  size_t regression_out_len;
+  double y_min;
+  double y_max;
   uint64_t *feat_sizes;
   uint64_t *input_chunks_ind;
   uint8_t *tail_masks_ind;
@@ -447,6 +452,14 @@ static inline tk_tsetlin_t *tk_tsetlin_alloc_encoder (lua_State *L, bool has_sta
   return tm;
 }
 
+static inline tk_tsetlin_t *tk_tsetlin_alloc_regressor (lua_State *L, bool has_state)
+{
+  tk_tsetlin_t *tm = tk_lua_newuserdata(L, tk_tsetlin_t, TK_TSETLIN_MT, tk_tsetlin_mt_fns, tk_tsetlin_destroy);
+  tm->type = TM_REGRESSOR;
+  tm->has_state = has_state;
+  return tm;
+}
+
 static inline void tk_tsetlin_init_classifier (
   lua_State *L,
   tk_tsetlin_t *tm,
@@ -524,6 +537,27 @@ static inline int tk_tsetlin_init_encoder (
   tk_tsetlin_init_classifier(
     L, tm, encoding_bits, features, clauses, clause_tolerance, clause_maximum,
     state_bits, include_bits, targetf, specificity);
+  return 0;
+}
+
+static inline int tk_tsetlin_init_regressor (
+  lua_State *L,
+  tk_tsetlin_t *tm,
+  unsigned int outputs,
+  unsigned int features,
+  unsigned int clauses,
+  unsigned int clause_tolerance,
+  unsigned int clause_maximum,
+  unsigned int state_bits,
+  unsigned int include_bits,
+  double targetf,
+  double specificity
+) {
+  tk_tsetlin_init_classifier(
+    L, tm, outputs, features, clauses, clause_tolerance, clause_maximum,
+    state_bits, include_bits, targetf, specificity);
+  tm->y_min = 0.0;
+  tm->y_max = 1.0;
   return 0;
 }
 
@@ -626,6 +660,26 @@ static inline void tk_tsetlin_init_encoder_ind (
     state_bits, include_bits, targetf, specificity);
 }
 
+static inline void tk_tsetlin_init_regressor_ind (
+  lua_State *L,
+  tk_tsetlin_t *tm,
+  unsigned int outputs,
+  tk_ivec_t *feat_offsets,
+  unsigned int clauses,
+  unsigned int clause_tolerance,
+  unsigned int clause_maximum,
+  unsigned int state_bits,
+  unsigned int include_bits,
+  double targetf,
+  double specificity
+) {
+  tk_tsetlin_init_classifier_ind(
+    L, tm, outputs, feat_offsets, clauses, clause_tolerance, clause_maximum,
+    state_bits, include_bits, targetf, specificity);
+  tm->y_min = 0.0;
+  tm->y_max = 1.0;
+}
+
 static inline void tk_tsetlin_create_classifier (lua_State *L)
 {
   tk_tsetlin_t *tm = tk_tsetlin_alloc_classifier(L, true);
@@ -696,6 +750,41 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
   lua_settop(L, 1);
 }
 
+static inline void tk_tsetlin_create_regressor (lua_State *L)
+{
+  tk_tsetlin_t *tm = tk_tsetlin_alloc_regressor(L, true);
+  lua_insert(L, 1);
+  bool individualized = tk_lua_foptboolean(L, 2, "create regressor", "individualized", false);
+  if (individualized) {
+    lua_getfield(L, 2, "feat_offsets");
+    tk_ivec_t *feat_offsets = tk_ivec_peek(L, -1, "feat_offsets");
+    lua_pop(L, 1);
+    tk_tsetlin_init_regressor_ind(L, tm,
+        tk_lua_fcheckunsigned(L, 2, "create regressor", "outputs"),
+        feat_offsets,
+        tk_lua_fcheckunsigned(L, 2, "create regressor", "clauses"),
+        tk_lua_fcheckunsigned(L, 2, "create regressor", "clause_tolerance"),
+        tk_lua_fcheckunsigned(L, 2, "create regressor", "clause_maximum"),
+        tk_lua_foptunsigned(L, 2, "create regressor", "state", 8),
+        tk_lua_foptunsigned(L, 2, "create regressor", "include_bits", 1),
+        tk_lua_foptposdouble(L, 2, "create regressor", "target", -1.0),
+        tk_lua_fcheckposdouble(L, 2, "create regressor", "specificity"));
+  } else {
+    tk_tsetlin_init_regressor(L, tm,
+        tk_lua_foptunsigned(L, 2, "create regressor", "outputs", 1),
+        tk_lua_fcheckunsigned(L, 2, "create regressor", "features"),
+        tk_lua_fcheckunsigned(L, 2, "create regressor", "clauses"),
+        tk_lua_fcheckunsigned(L, 2, "create regressor", "clause_tolerance"),
+        tk_lua_fcheckunsigned(L, 2, "create regressor", "clause_maximum"),
+        tk_lua_foptunsigned(L, 2, "create regressor", "state", 8),
+        tk_lua_foptunsigned(L, 2, "create regressor", "include_bits", 1),
+        tk_lua_foptposdouble(L, 2, "create regressor", "target", -1.0),
+        tk_lua_fcheckposdouble(L, 2, "create regressor", "specificity"));
+  }
+  tm->reusable = tk_lua_foptboolean(L, 2, "create regressor", "reusable", false);
+  lua_settop(L, 1);
+}
+
 static inline int tk_tsetlin_create (lua_State *L)
 {
   const char *type = luaL_checkstring(L, 1);
@@ -706,6 +795,10 @@ static inline int tk_tsetlin_create (lua_State *L)
   } else if (!strcmp(type, "encoder")) {
     lua_remove(L, 1);
     tk_tsetlin_create_encoder(L);
+    return 1;
+  } else if (!strcmp(type, "regressor")) {
+    lua_remove(L, 1);
+    tk_tsetlin_create_regressor(L);
     return 1;
   } else {
     luaL_error(L, "unexpected tsetlin machine type in create");
@@ -729,6 +822,7 @@ static inline void _tk_tsetlin_destroy (tk_tsetlin_t *tm)
   free(tm->actions); tm->actions = NULL;
   free(tm->results); tm->results = NULL;
   free(tm->encodings); tm->encodings = NULL;
+  free(tm->regression_out); tm->regression_out = NULL;
   if (tm->individualized) {
     free(tm->feat_sizes); tm->feat_sizes = NULL;
     free(tm->input_chunks_ind); tm->input_chunks_ind = NULL;
@@ -1083,6 +1177,90 @@ static inline int tk_tsetlin_predict_encoder_ind (lua_State *L, tk_tsetlin_t *tm
   return 1;
 }
 
+static inline int tk_tsetlin_predict_regressor (lua_State *L, tk_tsetlin_t *tm) {
+  lua_settop(L, 3);
+  tk_cvec_t *ps = tk_cvec_peek(L, 2, "problems");
+  unsigned int n = tk_lua_checkunsigned(L, 3, "n_samples");
+  const unsigned int classes = tm->classes;
+  size_t needed = n * classes * sizeof(double);
+  if (needed > tm->regression_out_len) {
+    tm->regression_out = (double *)tk_realloc(L, tm->regression_out, needed);
+    tm->regression_out_len = needed;
+  }
+  const unsigned int total_chunks = tm->clause_chunks * classes;
+  const unsigned int clause_chunks = tm->clause_chunks;
+  const unsigned int input_chunks = tm->input_chunks;
+  const unsigned int target = tm->target;
+  const double y_min = tm->y_min;
+  const double y_range = tm->y_max - tm->y_min;
+  double *regression_out = tm->regression_out;
+  const double max_possible = (double)(clause_chunks * target);
+  #pragma omp parallel for schedule(static)
+  for (unsigned int s = 0; s < n; s++) {
+    long int votes_per_class[classes];
+    for (unsigned int c = 0; c < classes; c++)
+      votes_per_class[c] = 0;
+    unsigned int literals[TK_CVEC_BITS];
+    unsigned int votes_buf[TK_CVEC_BITS];
+    char *input = ps->a + s * input_chunks;
+    for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
+      uint8_t out = tk_tsetlin_calculate(tm, input, literals, votes_buf, chunk);
+      unsigned int c = chunk / clause_chunks;
+      for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+        if (out & (1 << j))
+          votes_per_class[c] += votes_buf[j];
+    }
+    for (unsigned int c = 0; c < classes; c++)
+      regression_out[s * classes + c] = ((double)votes_per_class[c] / max_possible) * y_range + y_min;
+  }
+  tk_dvec_t *out = tk_dvec_create(L, n * classes, 0, 0);
+  memcpy(out->a, tm->regression_out, n * classes * sizeof(double));
+  return 1;
+}
+
+static inline int tk_tsetlin_predict_regressor_ind (lua_State *L, tk_tsetlin_t *tm) {
+  lua_settop(L, 4);
+  tk_cvec_t *ps = tk_cvec_peek(L, 2, "problems");
+  tk_ivec_t *dim_offsets = tk_ivec_peek(L, 3, "dim_offsets");
+  unsigned int n = tk_lua_checkunsigned(L, 4, "n_samples");
+  const unsigned int classes = tm->classes;
+  size_t needed = n * classes * sizeof(double);
+  if (needed > tm->regression_out_len) {
+    tm->regression_out = (double *)tk_realloc(L, tm->regression_out, needed);
+    tm->regression_out_len = needed;
+  }
+  const unsigned int clause_chunks = tm->clause_chunks;
+  const unsigned int tolerance = tm->clause_tolerance;
+  const unsigned int target = tm->target;
+  const double y_min = tm->y_min;
+  const double y_range = tm->y_max - tm->y_min;
+  double *regression_out = tm->regression_out;
+  const double max_possible = (double)(clause_chunks * target);
+  #pragma omp parallel for schedule(static)
+  for (unsigned int s = 0; s < n; s++) {
+    unsigned int literals[TK_CVEC_BITS];
+    unsigned int votes_buf[TK_CVEC_BITS];
+    for (unsigned int h = 0; h < classes; h++) {
+      tk_automata_t *aut = &tm->automata_arr[h];
+      uint64_t input_chunks_h = tm->input_chunks_ind[h];
+      uint8_t tail_mask_h = tm->tail_masks_ind[h];
+      uint64_t byte_offset_h = (uint64_t)dim_offsets->a[h];
+      char *input = ps->a + byte_offset_h + s * input_chunks_h;
+      long int vote_sum = 0;
+      for (unsigned int chunk = 0; chunk < clause_chunks; chunk++) {
+        uint8_t out = tk_tsetlin_calculate_ind(aut, input, literals, votes_buf, chunk, input_chunks_h, tail_mask_h, tolerance);
+        for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+          if (out & (1 << j))
+            vote_sum += votes_buf[j];
+      }
+      regression_out[s * classes + h] = ((double)vote_sum / max_possible) * y_range + y_min;
+    }
+  }
+  tk_dvec_t *out = tk_dvec_create(L, n * classes, 0, 0);
+  memcpy(out->a, tm->regression_out, n * classes * sizeof(double));
+  return 1;
+}
+
 static inline int tk_tsetlin_predict (lua_State *L)
 {
   tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
@@ -1092,6 +1270,8 @@ static inline int tk_tsetlin_predict (lua_State *L)
         return tk_tsetlin_predict_classifier_ind(L, tm);
       case TM_ENCODER:
         return tk_tsetlin_predict_encoder_ind(L, tm);
+      case TM_REGRESSOR:
+        return tk_tsetlin_predict_regressor_ind(L, tm);
       default:
         return luaL_error(L, "unexpected tsetlin machine type in predict");
     }
@@ -1101,6 +1281,8 @@ static inline int tk_tsetlin_predict (lua_State *L)
       return tk_tsetlin_predict_classifier(L, tm);
     case TM_ENCODER:
       return tk_tsetlin_predict_encoder(L, tm);
+    case TM_REGRESSOR:
+      return tk_tsetlin_predict_regressor(L, tm);
     default:
       return luaL_error(L, "unexpected tsetlin machine type in predict");
   }
@@ -1481,6 +1663,237 @@ static inline int tk_tsetlin_train_classifier_ind (lua_State *L, tk_tsetlin_t *t
   return 0;
 }
 
+static inline int tk_tsetlin_train_regressor (lua_State *L, tk_tsetlin_t *tm) {
+  unsigned int n = tk_lua_fcheckunsigned(L, 2, "train", "samples");
+  lua_getfield(L, 2, "problems");
+  tk_cvec_t *ps = tk_cvec_peek(L, -1, "problems");
+  lua_pop(L, 1);
+  lua_getfield(L, 2, "targets");
+  tk_dvec_t *ts = tk_dvec_peek(L, -1, "targets");
+  lua_pop(L, 1);
+  unsigned int max_iter = tk_lua_fcheckunsigned(L, 2, "train", "iterations");
+  int i_each = -1;
+  if (tk_lua_ftype(L, 2, "each") != LUA_TNIL) {
+    lua_getfield(L, 2, "each");
+    i_each = tk_lua_absindex(L, -1);
+  }
+  double y_min = DBL_MAX, y_max = 0.0;
+  for (uint64_t i = 0; i < ts->n; i++) {
+    if (ts->a[i] > y_max) y_max = ts->a[i];
+    if (ts->a[i] < y_min) y_min = ts->a[i];
+  }
+  if (y_max <= y_min) { y_min = 0.0; y_max = 1.0; }
+  tm->y_min = y_min;
+  tm->y_max = y_max;
+  double y_range = y_max - y_min;
+  unsigned int classes = tm->classes;
+  unsigned int clause_chunks = tm->clause_chunks;
+  unsigned int total_chunks = clause_chunks * classes;
+  unsigned int input_chunks = tm->input_chunks;
+  long int vote_target = (long int)tm->target;
+  unsigned int double_vote_target = tm->double_vote_target;
+  double *targets = ts->a;
+  bool break_flag = false;
+  int max_threads = omp_get_max_threads();
+  unsigned int **shuffles = (unsigned int **)tk_malloc(L, (size_t)max_threads * sizeof(unsigned int *));
+  for (int t = 0; t < max_threads; t++)
+    shuffles[t] = (unsigned int *)tk_malloc(L, n * sizeof(unsigned int));
+  #pragma omp parallel
+  {
+    int tid = omp_get_thread_num();
+    tk_fast_seed((uint64_t)tid);
+    #pragma omp for schedule(static)
+    for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
+      uint64_t first_clause = chunk * TK_CVEC_BITS;
+      uint64_t last_clause = chunk * TK_CVEC_BITS + TK_CVEC_BITS - 1;
+      tk_automata_setup(&tm->automata, first_clause, last_clause);
+    }
+  }
+  for (unsigned int iter = 0; iter < max_iter; iter++) {
+    if (break_flag) break;
+    #pragma omp parallel
+    {
+      int tid = omp_get_thread_num();
+      unsigned int *shuffle = shuffles[tid];
+      unsigned int literals[TK_CVEC_BITS];
+      unsigned int votes[TK_CVEC_BITS];
+      tk_tsetlin_init_shuffle(shuffle, n);
+      #pragma omp for schedule(static)
+      for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
+        unsigned int chunk_class = chunk / clause_chunks;
+        for (unsigned int i = 0; i < n; i++) {
+          unsigned int sample = shuffle[i];
+          char *input = ps->a + sample * input_chunks;
+          double y_target = targets[sample * classes + chunk_class];
+          uint8_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
+          long int chunk_vote = 0;
+          for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+            if (out & (1 << j))
+              chunk_vote += votes[j];
+          double target_ratio = (y_target - y_min) / y_range;
+          long int ideal_chunk_vote = (long int)(target_ratio * vote_target);
+          if (chunk_vote > vote_target) chunk_vote = vote_target;
+          if (chunk_vote < 0) chunk_vote = 0;
+          unsigned int threshold;
+          bool want_more = (chunk_vote < ideal_chunk_vote);
+          if (want_more)
+            threshold = (unsigned int)(ideal_chunk_vote - chunk_vote);
+          else
+            threshold = (unsigned int)(chunk_vote - ideal_chunk_vote);
+          for (unsigned int j = 0; j < TK_CVEC_BITS; j++) {
+            if (tk_fast_random() % double_vote_target < threshold)
+              apply_feedback(tm, j, chunk, input, literals, votes, want_more, (unsigned int)tid);
+          }
+        }
+      }
+    }
+    if (i_each > -1) {
+      lua_pushvalue(L, i_each);
+      lua_pushinteger(L, iter + 1);
+      int status = lua_pcall(L, 1, 1, 0);
+      if (status != LUA_OK) {
+        fprintf(stderr, "Error in Lua callback: %s\n", lua_tostring(L, -1));
+        lua_pop(L, 1);
+        break_flag = true;
+      } else if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0) {
+        lua_pop(L, 1);
+        break_flag = true;
+      } else {
+        lua_pop(L, 1);
+      }
+    }
+  }
+  for (int t = 0; t < max_threads; t++)
+    free(shuffles[t]);
+  free(shuffles);
+  if (!tm->reusable)
+    tk_tsetlin_shrink(tm);
+  tm->trained = true;
+  return 0;
+}
+
+static inline int tk_tsetlin_train_regressor_ind (lua_State *L, tk_tsetlin_t *tm) {
+  unsigned int n = tk_lua_fcheckunsigned(L, 2, "train", "samples");
+  lua_getfield(L, 2, "problems");
+  tk_cvec_t *ps = tk_cvec_peek(L, -1, "problems");
+  lua_pop(L, 1);
+  lua_getfield(L, 2, "targets");
+  tk_dvec_t *ts = tk_dvec_peek(L, -1, "targets");
+  lua_pop(L, 1);
+  lua_getfield(L, 2, "dim_offsets");
+  tk_ivec_t *dim_offsets = tk_ivec_peek(L, -1, "dim_offsets");
+  lua_pop(L, 1);
+  unsigned int max_iter = tk_lua_fcheckunsigned(L, 2, "train", "iterations");
+  int i_each = -1;
+  if (tk_lua_ftype(L, 2, "each") != LUA_TNIL) {
+    lua_getfield(L, 2, "each");
+    i_each = tk_lua_absindex(L, -1);
+  }
+  double y_min = DBL_MAX, y_max = 0.0;
+  for (uint64_t i = 0; i < ts->n; i++) {
+    if (ts->a[i] > y_max) y_max = ts->a[i];
+    if (ts->a[i] < y_min) y_min = ts->a[i];
+  }
+  if (y_max <= y_min) { y_min = 0.0; y_max = 1.0; }
+  tm->y_min = y_min;
+  tm->y_max = y_max;
+  double y_range = y_max - y_min;
+  unsigned int classes = tm->classes;
+  unsigned int clause_chunks = tm->clause_chunks;
+  long int vote_target = (long int)tm->target;
+  unsigned int double_vote_target = tm->double_vote_target;
+  unsigned int specificity_uint = tm->specificity_uint;
+  unsigned int max_literals = tm->clause_maximum;
+  unsigned int tolerance = tm->clause_tolerance;
+  double *targets = ts->a;
+  bool break_flag = false;
+  int max_threads = omp_get_max_threads();
+  unsigned int **shuffles = (unsigned int **)tk_malloc(L, (size_t)max_threads * sizeof(unsigned int *));
+  for (int t = 0; t < max_threads; t++)
+    shuffles[t] = (unsigned int *)tk_malloc(L, n * sizeof(unsigned int));
+  #pragma omp parallel
+  {
+    int tid = omp_get_thread_num();
+    tk_fast_seed((uint64_t)tid);
+    #pragma omp for schedule(static)
+    for (unsigned int h = 0; h < classes; h++) {
+      tk_automata_t *aut = &tm->automata_arr[h];
+      for (unsigned int chunk = 0; chunk < clause_chunks; chunk++) {
+        uint64_t first_clause = chunk * TK_CVEC_BITS;
+        uint64_t last_clause = chunk * TK_CVEC_BITS + TK_CVEC_BITS - 1;
+        tk_automata_setup(aut, first_clause, last_clause);
+      }
+    }
+  }
+  for (unsigned int iter = 0; iter < max_iter; iter++) {
+    if (break_flag) break;
+    #pragma omp parallel
+    {
+      int tid = omp_get_thread_num();
+      unsigned int *shuffle = shuffles[tid];
+      unsigned int literals[TK_CVEC_BITS];
+      unsigned int votes[TK_CVEC_BITS];
+      tk_tsetlin_init_shuffle(shuffle, n);
+      #pragma omp for schedule(static)
+      for (unsigned int h = 0; h < classes; h++) {
+        tk_automata_t *aut = &tm->automata_arr[h];
+        uint64_t input_chunks_h = tm->input_chunks_ind[h];
+        uint8_t tail_mask_h = tm->tail_masks_ind[h];
+        uint64_t feat_size_h = tm->feat_sizes[h];
+        uint64_t byte_offset_h = (uint64_t)dim_offsets->a[h];
+        for (unsigned int chunk = 0; chunk < clause_chunks; chunk++) {
+          for (unsigned int i = 0; i < n; i++) {
+            unsigned int sample = shuffle[i];
+            char *input = ps->a + byte_offset_h + sample * input_chunks_h;
+            double y_target = targets[sample * classes + h];
+            uint8_t out = tk_tsetlin_calculate_ind(aut, input, literals, votes, chunk, input_chunks_h, tail_mask_h, tolerance);
+            long int chunk_vote = 0;
+            for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+              if (out & (1 << j))
+                chunk_vote += votes[j];
+            double target_ratio = (y_target - y_min) / y_range;
+            long int ideal_chunk_vote = (long int)(target_ratio * vote_target);
+            if (chunk_vote > vote_target) chunk_vote = vote_target;
+            if (chunk_vote < 0) chunk_vote = 0;
+            unsigned int threshold;
+            bool want_more = (chunk_vote < ideal_chunk_vote);
+            if (want_more)
+              threshold = (unsigned int)(ideal_chunk_vote - chunk_vote);
+            else
+              threshold = (unsigned int)(chunk_vote - ideal_chunk_vote);
+            for (unsigned int j = 0; j < TK_CVEC_BITS; j++) {
+              if (tk_fast_random() % double_vote_target < threshold)
+                apply_feedback_ind(aut, j, chunk, input, literals, votes, want_more, feat_size_h, input_chunks_h, specificity_uint, max_literals);
+            }
+          }
+        }
+      }
+    }
+    if (i_each > -1) {
+      lua_pushvalue(L, i_each);
+      lua_pushinteger(L, iter + 1);
+      int status = lua_pcall(L, 1, 1, 0);
+      if (status != LUA_OK) {
+        fprintf(stderr, "Error in Lua callback: %s\n", lua_tostring(L, -1));
+        lua_pop(L, 1);
+        break_flag = true;
+      } else if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0) {
+        lua_pop(L, 1);
+        break_flag = true;
+      } else {
+        lua_pop(L, 1);
+      }
+    }
+  }
+  for (int t = 0; t < max_threads; t++)
+    free(shuffles[t]);
+  free(shuffles);
+  if (!tm->reusable)
+    tk_tsetlin_shrink(tm);
+  tm->trained = true;
+  return 0;
+}
+
 static inline int tk_tsetlin_train (lua_State *L)
 {
   tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
@@ -1492,6 +1905,8 @@ static inline int tk_tsetlin_train (lua_State *L)
         return tk_tsetlin_train_classifier_ind(L, tm);
       case TM_ENCODER:
         return tk_tsetlin_train_encoder_ind(L, tm);
+      case TM_REGRESSOR:
+        return tk_tsetlin_train_regressor_ind(L, tm);
       default:
         return luaL_error(L, "unexpected tsetlin machine type in train");
     }
@@ -1501,6 +1916,8 @@ static inline int tk_tsetlin_train (lua_State *L)
       return tk_tsetlin_train_classifier(L, tm);
     case TM_ENCODER:
       return tk_tsetlin_train_encoder(L, tm);
+    case TM_REGRESSOR:
+      return tk_tsetlin_train_regressor(L, tm);
     default:
       return luaL_error(L, "unexpected tsetlin machine type in train");
   }
@@ -1543,6 +1960,10 @@ static inline int tk_tsetlin_persist (lua_State *L)
   FILE *fh = tostr ? tk_lua_tmpfile(L) : tk_lua_fopen(L, tk_lua_checkstring(L, 2, "persist path"), "w");
   tk_lua_fwrite(L, &tm->type, sizeof(tk_tsetlin_type_t), 1, fh);
   tk_tsetlin_persist_classifier(L, tm, fh);
+  if (tm->type == TM_REGRESSOR) {
+    tk_lua_fwrite(L, &tm->y_min, sizeof(double), 1, fh);
+    tk_lua_fwrite(L, &tm->y_max, sizeof(double), 1, fh);
+  }
   if (!tostr) {
     tk_lua_fclose(L, fh);
     return 0;
@@ -1752,6 +2173,14 @@ static inline void tk_tsetlin_load_encoder (lua_State *L, FILE *fh)
   _tk_tsetlin_load_classifier(L, tm, fh);
 }
 
+static inline void tk_tsetlin_load_regressor (lua_State *L, FILE *fh)
+{
+  tk_tsetlin_t *tm = tk_tsetlin_alloc_regressor(L, true);
+  _tk_tsetlin_load_classifier(L, tm, fh);
+  tk_lua_fread(L, &tm->y_min, sizeof(double), 1, fh);
+  tk_lua_fread(L, &tm->y_max, sizeof(double), 1, fh);
+}
+
 static inline int tk_tsetlin_load (lua_State *L)
 {
   lua_settop(L, 2);
@@ -1770,6 +2199,10 @@ static inline int tk_tsetlin_load (lua_State *L)
       tk_tsetlin_load_encoder(L, fh);
       tk_lua_fclose(L, fh);
       return 1;
+    case TM_REGRESSOR:
+      tk_tsetlin_load_regressor(L, fh);
+      tk_lua_fclose(L, fh);
+      return 1;
     default:
       return luaL_error(L, "unexpected tsetlin machine type in load");
   }
@@ -1784,6 +2217,9 @@ static inline int tk_tsetlin_type (lua_State *L)
       break;
     case TM_ENCODER:
       lua_pushstring(L, "encoder");
+      break;
+    case TM_REGRESSOR:
+      lua_pushstring(L, "regressor");
       break;
     default:
       return luaL_error(L, "unexpected tsetlin machine type in type");
