@@ -9,10 +9,10 @@ local utc = require("santoku.utc")
 
 local cfg = {
   data = {
-    ttr = 0.7,
-    tvr = 0.15,
+    ttr = 0.8,
+    tvr = 0.10,
     max = nil,
-    n_thresholds = 99999,
+    n_thresholds = 32,
   },
   tm = {
     outputs = 1,
@@ -25,9 +25,10 @@ local cfg = {
   },
   search = {
     patience = 5,
-    rounds = 0,
+    rounds = 6,
     trials = 8,
     iterations = 30,
+    metric = "mean",
   },
   training = {
     patience = 30,
@@ -55,7 +56,12 @@ test("tsetlin regressor", function ()
   local target_min = train.targets:min()
   str.printf("  Target range: %.0f - %.0f\n", target_min, target_max)
 
-  print("Training\n")
+  local n_features = dataset.n_features
+  train.problems = train.bits:bits_to_cvec(train.n, n_features, true)
+  validate.problems = validate.bits:bits_to_cvec(validate.n, n_features, true)
+  test_set.problems = test_set.bits:bits_to_cvec(test_set.n, n_features, true)
+
+  print("\nTraining")
   local stopwatch = utc.stopwatch()
   local t = optimize.regressor({
 
@@ -83,8 +89,7 @@ test("tsetlin regressor", function ()
     search_metric = function (regressor)
       local predicted = regressor:predict(validate.problems, validate.n, cfg.threads)
       local stats = eval.regression_accuracy(predicted, validate.targets)
-      local score = -stats.mean
-      return score, stats
+      return -stats[cfg.search.metric], stats
     end,
 
     each = function (_, is_final, val_stats, params, epoch, round, trial)
