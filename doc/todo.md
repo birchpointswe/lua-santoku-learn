@@ -1,13 +1,24 @@
 # Current
 
-- .tmp.eurlex.md refactor
-- regressor
+~ Run real full end to end as-is to get good defaults for all
+
+- Make heterogeneous (keep spot checks the same; print label/doc nodes together)
+- Create label only index
+- Evaluate and spot check train/dev/test asymmetric label rankings
+- Train regressor
+- Evaluate and spot check train/dev/test asymmetric label selected sets
+
+- Rewrite docs in favor of nystrom approach
+
+- Save branch
+- Purge everything not in current/active code usage, incl:
+    - corex, tch, cknn, sigma, elbows, prone, knn_xxx=true helpers simhash,
+      top_coherence, top_lift, optimize elbows, prone
+    - essentially all unused code, saving behind a save branch
+
+- Clean up todo.md
 
 # Now
-
-- Is joint optimization for spectral/prone encoder possible? Pre-computing
-  in-sample embeddings and trying them during encoder trials? Something like
-  that?
 
 - Add EUR-Lex-4k test
 - Can score_elbow/etc should use a bipartite multi-label/etc structure? Or just
@@ -92,9 +103,6 @@
 - Chores
     - Error checks on dimensions to prevent segfaults everywhere
     - Persist/load versioning or other safety measures
-
-- tk_ctrie_t/tk_itrie_t/etc
-    - templated trie
 
 - tk_graph_t
     - speed up init & seed phase (slowest phase of entire pipeline)

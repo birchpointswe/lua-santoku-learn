@@ -26,11 +26,6 @@ local cfg; cfg = {
       max_vocab = 784,
       selection = "chi2",
     },
-    prone = {
-      individualized = true,
-      max_vocab = 784,
-      selection = "chi2",
-    },
   },
   tm = {
     clauses = { def = 48, min = 8, max = 256, round = 8 },
@@ -80,7 +75,6 @@ local cfg; cfg = {
     rounds = 0,
     adjacency_samples = 8,
     spectral_samples = 4,
-    prone_samples = 20,
     select_samples = 8,
     eval_samples = 4,
     adjacency = {
@@ -93,34 +87,11 @@ local cfg; cfg = {
         knn_cache = 128,
         bridge = "mst",
       },
-      prone = {
-        knn = { def = 24, min = 16, max = 32, int = true },
-        knn_alpha = { def = 20, min = 12, max = 28, int = true },
-        weight_decay = { def = 8, min = 2, max = 16 },
-        knn_mutual = { def = false, false, true },
-        knn_mode = "cknn",
-        knn_cache = 128,
-        bridge = "mst",
-      },
     },
     spectral = {
       laplacian = "unnormalized",
       n_dims = 64,
       eps = 1e-8,
-      threshold = {
-        method = "itq",
-        itq_iterations = 500,
-        itq_tolerance = 1e-8,
-      },
-    },
-    prone = {
-      n_dims = { def = 8, min = 8, max = 64, int = true, round = 8 },
-      n_iter = { def = 5, min = 3, max = 10, int = true },
-      step = { def = 10, min = 5, max = 20, int = true },
-      mu = { def = 0.2, min = 0.0, max = 0.5 },
-      theta = { def = 0.5, min = 0.1, max = 1.0 },
-      neg_samples = { def = 5, min = 1, max = 10, int = true },
-      propagate = true,
       threshold = {
         method = "itq",
         itq_iterations = 500,
@@ -226,113 +197,56 @@ test("mnist-raw", function()
 
   local model, best_params, best_metrics
 
-  if cfg.embeddings == "spectral" then
-    print("\nOptimizing spectral pipeline")
-    model, best_params, best_metrics = optimize.spectral({
-      index = train.index_graph,
-      knn_index = train.node_features,
-      search_rounds = cfg.search.rounds,
-      adjacency_samples = cfg.search.adjacency_samples,
-      spectral_samples = cfg.search.spectral_samples,
-      select_samples = cfg.search.select_samples,
-      eval_samples = cfg.search.eval_samples,
-      adjacency = adj_cfg,
-      spectral = cfg.search.spectral,
-      eval = cfg.search.eval,
-      expected_ids = train.ground_truth.retrieval.ids,
-      expected_offsets = train.ground_truth.retrieval.offsets,
-      expected_neighbors = train.ground_truth.retrieval.neighbors,
-      expected_weights = train.ground_truth.retrieval.weights,
-      each = cfg.search.verbose and function (info)
-        if info.event == "round_start" then
-          str.printf("\n[SPECTRAL R%d] Starting round %d/%d\n", info.round, info.round, info.rounds)
-        elseif info.event == "round_end" then
-          str.printf("[SPECTRAL R%d] best=%.4f global=%.4f success=%.0f%% adapt=%.2f\n",
-            info.round, info.round_best_score, info.global_best_score,
-            (info.success_rate or 0) * 100, info.adapt_factor or 1)
-        elseif info.event == "stage" and info.stage == "adjacency" then
-          local p = info.params.adjacency
-          local phase = info.is_final and "F" or str.format("R%d A%d", info.round or 0, info.sample or 0)
-          str.printf("[SPECTRAL %s ADJ] knn=%d alpha=%d decay=%.2f mutual=%s mode=%s bridge=%s\n",
-            phase, p.knn, p.knn_alpha, p.weight_decay, tostring(p.knn_mutual), p.knn_mode, p.bridge or "none")
-        elseif info.event == "adjacency_result" then
-          str.printf("[SPECTRAL] nodes=%d edges=%d\n", info.n_nodes, info.n_edges)
-        elseif info.event == "stage" and info.stage == "spectral" then
-          local p = info.params.spectral
-          str.printf("[SPECTRAL] EIG dims=%d lap=%s\n", p.n_dims, p.laplacian or "unnorm")
-        elseif info.event == "spectral_result" then
-          str.printf("[SPECTRAL] eig=[%.2e, %.2e] matvecs=%d\n", info.eig_min or 0, info.eig_max or 0, info.n_matvecs or 0)
-        elseif info.event == "stage" and info.stage == "select" then
-          local p = info.params.select or {}
-          local tp = p.threshold_params or {}
-          str.printf("[SPECTRAL] SEL threshold=%s\n", tp.method or "none")
-        elseif info.event == "eval" then
-          str.printf("[SPECTRAL] score=%.4f\n", info.score)
-        end
-      end or nil,
-    })
-    str.printf("\nSpectral: dims=%d retrieval=%.4f\n", model.dims, best_metrics.score)
-    local adj_p = best_params.adjacency
-    local spec_p = best_params.spectral
-    str.printf("  Adjacency: knn=%d alpha=%d decay=%.2f mutual=%s mode=%s bridge=%s\n",
-      adj_p.knn, adj_p.knn_alpha, adj_p.weight_decay, tostring(adj_p.knn_mutual), adj_p.knn_mode, adj_p.bridge or "none")
-    str.printf("  Spectral: dims=%d lap=%s\n", spec_p.n_dims, spec_p.laplacian or "unnorm")
-  else
-    print("\nOptimizing ProNE pipeline")
-    model, best_params, best_metrics = optimize.prone({
-      index = train.index_graph,
-      knn_index = train.node_features,
-      search_rounds = cfg.search.rounds,
-      adjacency_samples = cfg.search.adjacency_samples,
-      prone_samples = cfg.search.prone_samples,
-      select_samples = cfg.search.select_samples,
-      eval_samples = cfg.search.eval_samples,
-      adjacency = adj_cfg,
-      prone = cfg.search.prone,
-      eval = cfg.search.eval,
-      expected_ids = train.ground_truth.retrieval.ids,
-      expected_offsets = train.ground_truth.retrieval.offsets,
-      expected_neighbors = train.ground_truth.retrieval.neighbors,
-      expected_weights = train.ground_truth.retrieval.weights,
-      each = cfg.search.verbose and function (info)
-        if info.event == "round_start" then
-          str.printf("\n[PRONE R%d] Starting round %d/%d\n", info.round, info.round, info.rounds)
-        elseif info.event == "round_end" then
-          str.printf("[PRONE R%d] best=%.4f global=%.4f success=%.0f%% adapt=%.2f\n",
-            info.round, info.round_best_score, info.global_best_score,
-            (info.success_rate or 0) * 100, info.adapt_factor or 1)
-        elseif info.event == "stage" and info.stage == "adjacency" then
-          local p = info.params.adjacency
-          local phase = info.is_final and "F" or str.format("R%d A%d", info.round or 0, info.sample or 0)
-          str.printf("[PRONE %s ADJ] knn=%d alpha=%d decay=%.2f mutual=%s mode=%s bridge=%s\n",
-            phase, p.knn, p.knn_alpha, p.weight_decay, tostring(p.knn_mutual), p.knn_mode, p.bridge or "none")
-        elseif info.event == "adjacency_result" then
-          str.printf("[PRONE] nodes=%d edges=%d\n", info.n_nodes, info.n_edges)
-        elseif info.event == "stage" and info.stage == "prone" then
-          local p = info.params.prone
-          str.printf("[PRONE] EMB dims=%d n_iter=%d step=%d mu=%.2f theta=%.2f neg=%d prop=%s\n",
-            p.n_dims, p.n_iter or 5, p.step or 10, p.mu or 0.2, p.theta or 0.5,
-            p.neg_samples or 5, tostring(p.propagate ~= false))
-        elseif info.event == "prone_result" then
-          str.printf("[PRONE] n_nodes=%d n_dims=%d\n", info.n_nodes or 0, info.n_dims or 0)
-        elseif info.event == "stage" and info.stage == "select" then
-          local p = info.params.select or {}
-          local tp = p.threshold_params or {}
-          str.printf("[PRONE] SEL threshold=%s\n", tp.method or "none")
-        elseif info.event == "eval" then
-          str.printf("[PRONE] score=%.4f\n", info.score)
-        end
-      end or nil,
-    })
-    str.printf("\nProNE: dims=%d retrieval=%.4f\n", model.dims, best_metrics.score)
-    local adj_p = best_params.adjacency
-    local prone_p = best_params.prone
-    str.printf("  Adjacency: knn=%d alpha=%d decay=%.2f mutual=%s mode=%s bridge=%s\n",
-      adj_p.knn, adj_p.knn_alpha, adj_p.weight_decay, tostring(adj_p.knn_mutual), adj_p.knn_mode, adj_p.bridge or "none")
-    str.printf("  ProNE: dims=%d n_iter=%d step=%d mu=%.2f theta=%.2f neg=%d prop=%s\n",
-      prone_p.n_dims, prone_p.n_iter or 5, prone_p.step or 10, prone_p.mu or 0.2,
-      prone_p.theta or 0.5, prone_p.neg_samples or 5, tostring(prone_p.propagate ~= false))
-  end
+  print("\nOptimizing spectral pipeline")
+  model, best_params, best_metrics = optimize.spectral({
+    index = train.index_graph,
+    knn_index = train.node_features,
+    search_rounds = cfg.search.rounds,
+    adjacency_samples = cfg.search.adjacency_samples,
+    spectral_samples = cfg.search.spectral_samples,
+    select_samples = cfg.search.select_samples,
+    eval_samples = cfg.search.eval_samples,
+    adjacency = adj_cfg,
+    spectral = cfg.search.spectral,
+    eval = cfg.search.eval,
+    expected_ids = train.ground_truth.retrieval.ids,
+    expected_offsets = train.ground_truth.retrieval.offsets,
+    expected_neighbors = train.ground_truth.retrieval.neighbors,
+    expected_weights = train.ground_truth.retrieval.weights,
+    each = cfg.search.verbose and function (info)
+      if info.event == "round_start" then
+        str.printf("\n[SPECTRAL R%d] Starting round %d/%d\n", info.round, info.round, info.rounds)
+      elseif info.event == "round_end" then
+        str.printf("[SPECTRAL R%d] best=%.4f global=%.4f success=%.0f%% adapt=%.2f\n",
+          info.round, info.round_best_score, info.global_best_score,
+          (info.success_rate or 0) * 100, info.adapt_factor or 1)
+      elseif info.event == "stage" and info.stage == "adjacency" then
+        local p = info.params.adjacency
+        local phase = info.is_final and "F" or str.format("R%d A%d", info.round or 0, info.sample or 0)
+        str.printf("[SPECTRAL %s ADJ] knn=%d alpha=%d decay=%.2f mutual=%s mode=%s bridge=%s\n",
+          phase, p.knn, p.knn_alpha, p.weight_decay, tostring(p.knn_mutual), p.knn_mode, p.bridge or "none")
+      elseif info.event == "adjacency_result" then
+        str.printf("[SPECTRAL] nodes=%d edges=%d\n", info.n_nodes, info.n_edges)
+      elseif info.event == "stage" and info.stage == "spectral" then
+        local p = info.params.spectral
+        str.printf("[SPECTRAL] EIG dims=%d lap=%s\n", p.n_dims, p.laplacian or "unnorm")
+      elseif info.event == "spectral_result" then
+        str.printf("[SPECTRAL] eig=[%.2e, %.2e] matvecs=%d\n", info.eig_min or 0, info.eig_max or 0, info.n_matvecs or 0)
+      elseif info.event == "stage" and info.stage == "select" then
+        local p = info.params.select or {}
+        local tp = p.threshold_params or {}
+        str.printf("[SPECTRAL] SEL threshold=%s\n", tp.method or "none")
+      elseif info.event == "eval" then
+        str.printf("[SPECTRAL] score=%.4f\n", info.score)
+      end
+    end or nil,
+  })
+  str.printf("\nSpectral: dims=%d retrieval=%.4f\n", model.dims, best_metrics.score)
+  local adj_p = best_params.adjacency
+  local spec_p = best_params.spectral
+  str.printf("  Adjacency: knn=%d alpha=%d decay=%.2f mutual=%s mode=%s bridge=%s\n",
+    adj_p.knn, adj_p.knn_alpha, adj_p.weight_decay, tostring(adj_p.knn_mutual), adj_p.knn_mode, adj_p.bridge or "none")
+  str.printf("  Spectral: dims=%d lap=%s\n", spec_p.n_dims, spec_p.laplacian or "unnorm")
 
   train.ids_sup = model.ids
   train.codes_sup = model.codes

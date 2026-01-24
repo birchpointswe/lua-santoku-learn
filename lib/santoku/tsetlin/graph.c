@@ -746,14 +746,18 @@ static inline void tm_process_seed_edges (
 ) {
   if (!graph->seed_ids || !graph->seed_offsets || !graph->seed_neighbors)
     return;
+  if (graph->seed_offsets->n < 1)
+    return;
   int kha;
-  for (uint64_t i = 0; i < graph->seed_ids->n; i++) {
+  tk_ivec_t *nbr_ids = graph->seed_ids;
+  uint64_t n_queries = graph->seed_offsets->n - 1;
+  for (uint64_t i = 0; i < n_queries; i++) {
     int64_t u = graph->seed_ids->a[i];
     int64_t start = graph->seed_offsets->a[i];
-    int64_t end = i < graph->seed_offsets->n - 1 ? graph->seed_offsets->a[i+1] : (int64_t) graph->seed_neighbors->n;
+    int64_t end = graph->seed_offsets->a[i + 1];
     for (int64_t j = start; j < end; j++) {
       int64_t v_idx = graph->seed_neighbors->a[j];
-      int64_t v = graph->seed_ids->a[v_idx];
+      int64_t v = nbr_ids->a[v_idx];
       uint32_t khi = tk_iumap_put(graph->uids_idx, u, &kha);
       if (kha) {
         tk_iumap_setval(graph->uids_idx, khi, (int64_t) graph->uids->n);
@@ -859,17 +863,21 @@ static inline void tm_add_seed_edges_immediate(
 ) {
   if (!graph->seed_ids || !graph->seed_offsets || !graph->seed_neighbors)
     return;
+  if (graph->seed_offsets->n < 1)
+    return;
   int kha;
   uint32_t khi;
   bool use_cknn = (graph->knn_mode == TK_GRAPH_KNN_MODE_CKNN);
-  for (uint64_t i = 0; i < graph->seed_ids->n; i++) {
+  tk_ivec_t *nbr_ids = graph->seed_ids;
+  uint64_t n_queries = graph->seed_offsets->n - 1;
+  for (uint64_t i = 0; i < n_queries; i++) {
     int64_t u = graph->seed_ids->a[i];
     int64_t start = graph->seed_offsets->a[i];
-    int64_t end = i < graph->seed_offsets->n - 1 ? graph->seed_offsets->a[i+1] : (int64_t) graph->seed_neighbors->n;
+    int64_t end = graph->seed_offsets->a[i + 1];
 
     for (int64_t j = start; j < end; j++) {
       int64_t v_idx = graph->seed_neighbors->a[j];
-      int64_t v = graph->seed_ids->a[v_idx];
+      int64_t v = nbr_ids->a[v_idx];
       uint32_t khi_u = tk_iumap_get(graph->uids_idx, u);
       uint32_t khi_v = tk_iumap_get(graph->uids_idx, v);
       if (khi_u == tk_iumap_end(graph->uids_idx) ||
@@ -1048,10 +1056,13 @@ static inline void tm_build_hoods_from_seeds (
     return;
   if (!graph->knn_seed)
     return;
+  if (graph->seed_offsets->n < 1)
+    return;
 
   tm_ensure_hood_structures(L, Gi, graph);
 
-  uint64_t n_nodes = graph->seed_ids->n;
+  tk_ivec_t *nbr_ids = graph->seed_ids;
+  uint64_t n_queries = graph->seed_offsets->n - 1;
   tk_evec_t *all_edges = tk_evec_create(0, 0, 0, 0);
   bool has_error = false;
 
@@ -1062,19 +1073,17 @@ static inline void tm_build_hoods_from_seeds (
       has_error = true;
     } else {
       #pragma omp for schedule(static)
-      for (uint64_t i = 0; i < n_nodes; i++) {
+      for (uint64_t i = 0; i < n_queries; i++) {
         if (has_error) continue;
 
         int64_t u = graph->seed_ids->a[i];
         int64_t start = graph->seed_offsets->a[i];
-        int64_t end = i < graph->seed_offsets->n - 1
-          ? graph->seed_offsets->a[i + 1]
-          : (int64_t)graph->seed_neighbors->n;
+        int64_t end = graph->seed_offsets->a[i + 1];
 
         for (int64_t j = start; j < end; j++) {
           if (has_error) break;
           int64_t v_idx = graph->seed_neighbors->a[j];
-          int64_t v = graph->seed_ids->a[v_idx];
+          int64_t v = nbr_ids->a[v_idx];
 
           double dist = tk_graph_distance(graph, u, v, NULL, NULL, NULL);
           if (dist == DBL_MAX) dist = 1.0;
@@ -2589,9 +2598,7 @@ static inline int tm_adj_hoods(lua_State *L)
   if (n_hoods != ids->n)
     tk_lua_verror(L, 2, "adj_hoods", "hoods size must match ids size");
 
-  uint64_t features = tk_lua_foptunsigned(L, 3, "adj_hoods", "features", 0);
-  if (features == 0)
-    tk_lua_verror(L, 3, "adj_hoods", "features", "required");
+  uint64_t features = tk_lua_checkunsigned(L, 3, "features");
 
   tk_ivec_t *offsets = NULL;
   tk_ivec_t *neighbors = NULL;
@@ -2601,10 +2608,9 @@ static inline int tm_adj_hoods(lua_State *L)
                          &offsets, &neighbors, &weights) != 0)
     tk_lua_verror(L, 2, "adj_hoods", "failed to convert hoods to adjacency");
 
-  lua_settop(L, 0);
-  tk_ivec_register(L, offsets);
-  tk_ivec_register(L, neighbors);
-  tk_dvec_register(L, weights);
+  lua_remove(L, 1);
+  lua_remove(L, 1);
+  lua_remove(L, 1);
   return 3;
 }
 
