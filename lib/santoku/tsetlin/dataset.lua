@@ -257,7 +257,7 @@ M.read_20newsgroups_split = function (train_dir, test_dir, max_per_class, remove
   return train, test, validate
 end
 
-local function read_eurlex57k_jsonl (fp, max, label_map)
+local function read_eurlex57k_jsonl (fp, max, label_map, label_counts)
   local problems = {}
   local solutions = ivec.create()
   local n = 0
@@ -281,12 +281,15 @@ local function read_eurlex57k_jsonl (fp, max, label_map)
     end
     problems[#problems + 1] = table.concat(parts, "\n")
     local labels = doc.eurovoc_concepts or {}
+    local doc_label_count = 0
     for _, lbl in ipairs(labels) do
       local idx = label_map[lbl]
       if idx then
         solutions:push(n * label_map.n_labels + idx)
+        doc_label_count = doc_label_count + 1
       end
     end
+    label_counts:push(doc_label_count)
     n = n + 1
   end
   return problems, solutions, n
@@ -308,29 +311,35 @@ M.read_eurlex57k = function (dir, max)
       end
     end
   end
+  local train_label_counts = ivec.create()
+  local dev_label_counts = ivec.create()
+  local test_label_counts = ivec.create()
   local train_problems, train_solutions, train_n =
-    read_eurlex57k_jsonl(dir .. "/train.jsonl", max, label_map)
+    read_eurlex57k_jsonl(dir .. "/train.jsonl", max, label_map, train_label_counts)
   local dev_problems, dev_solutions, dev_n =
-    read_eurlex57k_jsonl(dir .. "/dev.jsonl", max, label_map)
+    read_eurlex57k_jsonl(dir .. "/dev.jsonl", max, label_map, dev_label_counts)
   local test_problems, test_solutions, test_n =
-    read_eurlex57k_jsonl(dir .. "/test.jsonl", max, label_map)
+    read_eurlex57k_jsonl(dir .. "/test.jsonl", max, label_map, test_label_counts)
   local train = {
     n = train_n,
     n_labels = label_map.n_labels,
     problems = train_problems,
     solutions = train_solutions,
+    label_counts = train_label_counts,
   }
   local dev = {
     n = dev_n,
     n_labels = label_map.n_labels,
     problems = dev_problems,
     solutions = dev_solutions,
+    label_counts = dev_label_counts,
   }
   local test = {
     n = test_n,
     n_labels = label_map.n_labels,
     problems = test_problems,
     solutions = test_solutions,
+    label_counts = test_label_counts,
   }
   return train, dev, test, label_map
 end

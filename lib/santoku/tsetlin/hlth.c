@@ -53,6 +53,7 @@ typedef struct {
   uint64_t n_thresholds;
   uint64_t n_bins;
   bool quantile;
+  bool concat_query;
   bool destroyed;
 } tk_hlth_encoder_t;
 
@@ -61,17 +62,14 @@ typedef struct {
   void *feat_idx;
   tk_dvec_t *eigenvectors;
   tk_dvec_t *eigenvalues;
-  tk_ivec_t *ids;
-  tk_iumap_t *id_to_idx;
+  tk_ivec_t *landmark_ids;
   uint64_t n_dims;
-  uint64_t n_training_samples;
-  uint64_t k_neighbors;
+  uint64_t n_landmarks;
   tk_ivec_sim_type_t cmp;
   double cmp_alpha;
   double cmp_beta;
-  uint64_t probe_radius;
+  double decay;
   int64_t rank_filter;
-  int threshold_fn_ref;
   bool destroyed;
 } tk_nystrom_encoder_t;
 
@@ -93,18 +91,10 @@ static inline tk_nystrom_encoder_t *tk_nystrom_encoder_peek(lua_State *L, int i)
 
 static inline int tk_nystrom_encoder_gc(lua_State *L) {
   tk_nystrom_encoder_t *enc = tk_nystrom_encoder_peek(L, 1);
-  if (enc->id_to_idx) {
-    tk_iumap_destroy(enc->id_to_idx);
-    enc->id_to_idx = NULL;
-  }
-  if (enc->threshold_fn_ref != LUA_NOREF) {
-    luaL_unref(L, LUA_REGISTRYINDEX, enc->threshold_fn_ref);
-    enc->threshold_fn_ref = LUA_NOREF;
-  }
   enc->feat_idx = NULL;
   enc->eigenvectors = NULL;
   enc->eigenvalues = NULL;
-  enc->ids = NULL;
+  enc->landmark_ids = NULL;
   enc->destroyed = true;
   return 0;
 }
@@ -116,28 +106,57 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
     return luaL_error(L, "encode: encoder has been destroyed");
 
   if (enc->mode == TK_HLTH_MODE_SIMILARITIES) {
-    tk_inv_hoods_t *inv_hoods = tk_inv_hoods_peekopt(L, 1);
-    tk_ann_hoods_t *ann_hoods = inv_hoods ? NULL : tk_ann_hoods_peekopt(L, 1);
-    tk_hbi_hoods_t *hbi_hoods = (inv_hoods || ann_hoods) ? NULL : tk_hbi_hoods_peekopt(L, 1);
-    if (!inv_hoods && !ann_hoods && !hbi_hoods)
-      return luaL_error(L, "encode: similarities mode requires hoods (inv, ann, or hbi)");
-    uint64_t n_samples = inv_hoods ? inv_hoods->n : (ann_hoods ? ann_hoods->n : hbi_hoods->n);
+    tk_cvec_t *query_cvec = tk_cvec_peekopt(L, 1);
+    if (!query_cvec)
+      return luaL_error(L, "encode: similarities mode requires cvec query");
+    uint64_t n_samples = tk_lua_checkunsigned(L, 2, "n_samples");
+
+    tk_ann_t *feat_ann = enc->feat_idx_type == TK_HLTH_IDX_ANN ? (tk_ann_t *)enc->feat_idx : NULL;
+    tk_hbi_t *feat_hbi = enc->feat_idx_type == TK_HLTH_IDX_HBI ? (tk_hbi_t *)enc->feat_idx : NULL;
+
+    tk_ann_hoods_t *ann_hoods = NULL;
+    tk_hbi_hoods_t *hbi_hoods = NULL;
+    tk_ivec_t *nbr_ids = NULL;
+
+    if (feat_ann) {
+      tk_ann_neighborhoods_by_vecs(L, feat_ann, query_cvec, enc->n_landmarks, enc->probe_radius,
+                                   0, ~0ULL, &ann_hoods, &nbr_ids);
+    } else if (feat_hbi) {
+      tk_hbi_neighborhoods_by_vecs(L, feat_hbi, query_cvec, enc->n_landmarks, 0, ~0ULL, &hbi_hoods, &nbr_ids);
+    } else {
+      return luaL_error(L, "encode: similarities mode requires ann or hbi landmarks_index");
+    }
+
     uint64_t hood_size = enc->n_landmarks;
     uint64_t n_bins = enc->n_bins;
-    uint64_t n_latent_bits = hood_size * n_bins;
+    uint64_t query_bits = enc->concat_query ? enc->n_hidden : 0;
+    uint64_t n_latent_bits = query_bits + hood_size * n_bins;
     uint64_t n_latent_bytes = TK_CVEC_BITS_BYTES(n_latent_bits);
+    uint64_t query_bytes = TK_CVEC_BITS_BYTES(query_bits);
+
+    int stack_before_out = lua_gettop(L);
     tk_cvec_t *out = tk_cvec_create(L, n_samples * n_latent_bytes, NULL, NULL);
     out->n = n_samples * n_latent_bytes;
     memset(out->a, 0, out->n);
+
+    if (enc->concat_query) {
+      uint64_t src_bytes_per_sample = TK_CVEC_BITS_BYTES(enc->n_hidden);
+      #pragma omp parallel for schedule(static)
+      for (uint64_t i = 0; i < n_samples; i++) {
+        uint8_t *src = (uint8_t *)query_cvec->a + i * src_bytes_per_sample;
+        uint8_t *dst = (uint8_t *)out->a + i * n_latent_bytes;
+        memcpy(dst, src, query_bytes);
+      }
+    }
+
     double *all_sims = malloc(n_samples * hood_size * sizeof(double));
     double *thresholds = malloc(hood_size * (n_bins - 1) * sizeof(double));
     for (uint64_t k = 0; k < hood_size; k++) {
       for (uint64_t i = 0; i < n_samples; i++) {
         double sim = 0.0;
-        uint64_t cur_size = inv_hoods ? inv_hoods->a[i]->n : (ann_hoods ? ann_hoods->a[i]->n : hbi_hoods->a[i]->n);
+        uint64_t cur_size = ann_hoods ? ann_hoods->a[i]->n : hbi_hoods->a[i]->n;
         if (k < cur_size) {
-          if (inv_hoods) sim = inv_hoods->a[i]->a[k].d;
-          else if (ann_hoods) sim = (double)ann_hoods->a[i]->a[k].p;
+          if (ann_hoods) sim = (double)ann_hoods->a[i]->a[k].p;
           else sim = (double)hbi_hoods->a[i]->a[k].p;
         }
         all_sims[i] = sim;
@@ -163,13 +182,16 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
         for (uint64_t b = 0; b < n_bins - 1; b++) {
           if (sim > thresholds[k * (n_bins - 1) + b]) bin = b + 1;
         }
-        uint64_t bit_idx = k * n_bins + bin;
+        uint64_t bit_idx = query_bits + k * n_bins + bin;
         uint8_t *sample_dest = (uint8_t *)out->a + i * n_latent_bytes;
         sample_dest[TK_CVEC_BITS_BYTE(bit_idx)] |= (1 << TK_CVEC_BITS_BIT(bit_idx));
       }
     }
     free(all_sims);
     free(thresholds);
+
+    lua_replace(L, stack_before_out);
+    lua_settop(L, stack_before_out);
     return 1;
   }
 
@@ -544,24 +566,26 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
   tk_ann_t *code_ann = NULL;
   tk_hbi_t *code_hbi = NULL;
 
+  lua_getfield(L, 1, "landmarks_index");
+  feat_inv = is_similarities ? NULL : tk_inv_peekopt(L, -1);
+  feat_ann = tk_ann_peekopt(L, -1);
+  feat_hbi = tk_hbi_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  if (!feat_inv && !feat_ann && !feat_hbi)
+    return luaL_error(L, "landmark_encoder: landmarks_index must be %s", is_similarities ? "ann or hbi" : "inv, ann, or hbi");
+
   if (!is_similarities) {
-    lua_getfield(L, 1, "landmarks_index");
-    feat_inv = tk_inv_peekopt(L, -1);
-    feat_ann = tk_ann_peekopt(L, -1);
-    feat_hbi = tk_hbi_peekopt(L, -1);
-    lua_pop(L, 1);
-
-    if (!feat_inv && !feat_ann && !feat_hbi)
-      return luaL_error(L, "landmark_encoder: landmark_index must be inv, ann, or hbi");
-
     lua_getfield(L, 1, "codes_index");
     code_ann = tk_ann_peekopt(L, -1);
     code_hbi = tk_hbi_peekopt(L, -1);
     lua_pop(L, 1);
 
     if (!code_ann && !code_hbi)
-      return luaL_error(L, "landmark_encoder: code_index must be ann or hbi");
+      return luaL_error(L, "landmark_encoder: codes_index must be ann or hbi");
   }
+
+  bool concat_query = tk_lua_foptboolean(L, 1, "landmark_encoder", "concat_query", true);
 
   uint64_t n_landmarks = tk_lua_foptunsigned(L, 1, "landmark_encoder", "n_landmarks", 24);
 
@@ -601,6 +625,8 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
   uint64_t n_hidden = 0;
   if (!is_similarities)
     n_hidden = code_ann ? code_ann->features : code_hbi->features;
+  else if (concat_query)
+    n_hidden = feat_ann ? feat_ann->features : feat_hbi->features;
 
   tk_hlth_encoder_t *enc = tk_lua_newuserdata(L, tk_hlth_encoder_t, TK_HLTH_ENCODER_MT, tk_hlth_encoder_mt_fns, tk_hlth_encoder_gc);
   int Ei = lua_gettop(L);
@@ -640,12 +666,13 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
   enc->n_thresholds = n_thresholds;
   enc->n_bins = n_bins;
   enc->quantile = quantile;
+  enc->concat_query = concat_query;
+
+  lua_getfield(L, 1, "landmarks_index");
+  tk_lua_add_ephemeron(L, TK_HLTH_ENCODER_EPH, Ei, -1);
+  lua_pop(L, 1);
 
   if (!is_similarities) {
-    lua_getfield(L, 1, "landmarks_index");
-    tk_lua_add_ephemeron(L, TK_HLTH_ENCODER_EPH, Ei, -1);
-    lua_pop(L, 1);
-
     lua_getfield(L, 1, "codes_index");
     tk_lua_add_ephemeron(L, TK_HLTH_ENCODER_EPH, Ei, -1);
     lua_pop(L, 1);
@@ -659,7 +686,7 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
   else if (mode == TK_HLTH_MODE_CENTROID || mode == TK_HLTH_MODE_CENTROID_WEIGHTED)
     n_latent = (int64_t) n_hidden;
   else if (mode == TK_HLTH_MODE_SIMILARITIES)
-    n_latent = (int64_t) n_landmarks * (int64_t) n_bins;
+    n_latent = (int64_t) n_landmarks * (int64_t) n_bins + (concat_query ? (int64_t) n_hidden : 0);
   else
     n_latent = (int64_t) n_landmarks * (int64_t) n_hidden;
   lua_pushinteger(L, n_latent);
@@ -677,130 +704,121 @@ static inline int tk_nystrom_encode_lua(lua_State *L) {
   if (enc->destroyed)
     return luaL_error(L, "nystrom_encode: encoder has been destroyed");
 
-  tk_ivec_t *query_ivec = tk_ivec_peekopt(L, 1);
-  tk_cvec_t *query_cvec = query_ivec ? NULL : tk_cvec_peekopt(L, 1);
+  tk_ivec_t *query_vecs = tk_ivec_peekopt(L, 1);
 
-  if (!query_ivec && !query_cvec)
-    return luaL_error(L, "nystrom_encode: expected ivec or cvec query");
-
-  uint64_t n_samples = tk_lua_checkunsigned(L, 2, "n_samples");
+  if (!query_vecs)
+    return luaL_error(L, "nystrom_encode: expected ivec query");
 
   tk_inv_t *feat_inv = enc->feat_idx_type == TK_HLTH_IDX_INV ? (tk_inv_t *)enc->feat_idx : NULL;
-  tk_ann_t *feat_ann = enc->feat_idx_type == TK_HLTH_IDX_ANN ? (tk_ann_t *)enc->feat_idx : NULL;
-  tk_hbi_t *feat_hbi = enc->feat_idx_type == TK_HLTH_IDX_HBI ? (tk_hbi_t *)enc->feat_idx : NULL;
 
-  tk_ann_hoods_t *ann_hoods = NULL;
-  tk_hbi_hoods_t *hbi_hoods = NULL;
-  tk_inv_hoods_t *inv_hoods = NULL;
-  tk_ivec_t *nbr_ids = NULL;
+  if (!feat_inv)
+    return luaL_error(L, "nystrom_encode: features_index must be inv");
 
-  uint64_t k = enc->k_neighbors > 0 ? enc->k_neighbors : enc->n_training_samples;
+  uint64_t n_features = feat_inv->features;
+  uint64_t n_landmarks = enc->n_landmarks;
+  uint64_t n_dims = enc->n_dims;
 
-  if (feat_inv && query_ivec) {
-    tk_inv_neighborhoods_by_vecs(L, feat_inv, query_ivec, k, 0.0, 1.0,
-                                 enc->cmp, enc->cmp_alpha, enc->cmp_beta,
-                                 0.0, enc->rank_filter, &inv_hoods, &nbr_ids);
-  } else if (feat_ann && query_cvec) {
-    tk_ann_neighborhoods_by_vecs(L, feat_ann, query_cvec, k, enc->probe_radius,
-                                 0, ~0ULL, &ann_hoods, &nbr_ids);
-  } else if (feat_hbi && query_cvec) {
-    tk_hbi_neighborhoods_by_vecs(L, feat_hbi, query_cvec, k, 0, ~0ULL, &hbi_hoods, &nbr_ids);
-  } else {
-    return luaL_error(L, "nystrom_encode: index/query type mismatch");
+  uint64_t n_samples = 0;
+  for (uint64_t i = 0; i < query_vecs->n; i++) {
+    int64_t encoded = query_vecs->a[i];
+    if (encoded >= 0) {
+      uint64_t sample_idx = (uint64_t)encoded / n_features;
+      if (sample_idx >= n_samples) n_samples = sample_idx + 1;
+    }
   }
+
+  tk_ivec_t *query_offsets = tk_ivec_create(L, n_samples + 1, 0, 0);
+  tk_ivec_t *query_features = tk_ivec_create(L, query_vecs->n, 0, 0);
+  query_offsets->n = n_samples + 1;
+  query_features->n = 0;
+
+  for (uint64_t i = 0; i <= n_samples; i++)
+    query_offsets->a[i] = 0;
+  for (uint64_t i = 0; i < query_vecs->n; i++) {
+    int64_t encoded = query_vecs->a[i];
+    if (encoded >= 0) {
+      uint64_t sample_idx = (uint64_t)encoded / n_features;
+      query_offsets->a[sample_idx + 1]++;
+    }
+  }
+  for (uint64_t i = 1; i <= n_samples; i++)
+    query_offsets->a[i] += query_offsets->a[i - 1];
+
+  tk_ivec_t *write_offsets = tk_ivec_create(L, n_samples, 0, 0);
+  tk_ivec_copy(write_offsets, query_offsets, 0, (int64_t)n_samples, 0);
+
+  for (uint64_t i = 0; i < query_vecs->n; i++) {
+    int64_t encoded = query_vecs->a[i];
+    if (encoded >= 0) {
+      uint64_t sample_idx = (uint64_t)encoded / n_features;
+      int64_t fid = encoded % (int64_t)n_features;
+      int64_t write_pos = write_offsets->a[sample_idx]++;
+      query_features->a[write_pos] = fid;
+    }
+  }
+  query_features->n = (size_t)query_offsets->a[n_samples];
 
   int stack_before_out = lua_gettop(L);
 
-  tk_dvec_t *raw_codes = tk_dvec_create(L, n_samples * enc->n_dims, 0, 0);
-  raw_codes->n = n_samples * enc->n_dims;
+  tk_dvec_t *raw_codes = tk_dvec_create(L, n_samples * n_dims, 0, 0);
+  raw_codes->n = n_samples * n_dims;
   memset(raw_codes->a, 0, raw_codes->n * sizeof(double));
-
-  uint64_t feat_ann_features = feat_ann ? feat_ann->features : 0;
-  uint64_t feat_hbi_features = feat_hbi ? feat_hbi->features : 0;
 
   #pragma omp parallel
   {
-    tk_ivec_t *tmp = tk_ivec_create(NULL, 0, 0, 0);
-    tk_dvec_t *sims = tk_dvec_create(NULL, 0, 0, 0);
+    tk_dvec_t *q_weights = tk_dvec_create(NULL, feat_inv->n_ranks, 0, 0);
+    tk_dvec_t *e_weights = tk_dvec_create(NULL, feat_inv->n_ranks, 0, 0);
+    tk_dvec_t *inter_weights = tk_dvec_create(NULL, feat_inv->n_ranks, 0, 0);
+    tk_dvec_t *sims = tk_dvec_create(NULL, n_landmarks, 0, 0);
+    sims->n = n_landmarks;
 
     #pragma omp for schedule(static)
     for (uint64_t i = 0; i < n_samples; i++) {
-      tk_ivec_clear(tmp);
-      tk_dvec_clear(sims);
+      int64_t q_start = query_offsets->a[i];
+      int64_t q_end = query_offsets->a[i + 1];
+      int64_t *q_bits = query_features->a + q_start;
+      size_t q_len = (size_t)(q_end - q_start);
 
-      int64_t nbr_idx, nbr_uid;
-      TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, feat_hbi, inv_hoods, ann_hoods, hbi_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
-        double sim = 1.0;
-        if (inv_hoods) {
-          tk_rvec_t *hood = inv_hoods->a[i];
-          for (uint64_t j = 0; j < hood->n; j++) {
-            if (hood->a[j].i == nbr_idx) {
-              sim = 1.0 - hood->a[j].d;
-              break;
-            }
-          }
-        } else if (ann_hoods && feat_ann_features > 0) {
-          tk_pvec_t *hood = ann_hoods->a[i];
-          for (uint64_t j = 0; j < hood->n; j++) {
-            if (hood->a[j].i == nbr_idx) {
-              sim = 1.0 - (double)hood->a[j].p / (double)feat_ann_features;
-              break;
-            }
-          }
-        } else if (hbi_hoods && feat_hbi_features > 0) {
-          tk_pvec_t *hood = hbi_hoods->a[i];
-          for (uint64_t j = 0; j < hood->n; j++) {
-            if (hood->a[j].i == nbr_idx) {
-              sim = 1.0 - (double)hood->a[j].p / (double)feat_hbi_features;
-              break;
-            }
+      for (uint64_t j = 0; j < n_landmarks; j++) {
+        int64_t landmark_uid = enc->landmark_ids->a[j];
+        int64_t landmark_sid = tk_inv_uid_sid(feat_inv, landmark_uid, TK_INV_FIND);
+
+        double sim = 0.0;
+        if (landmark_sid >= 0 && q_len > 0) {
+          size_t l_nbits;
+          int64_t *l_bits = tk_inv_sget(feat_inv, landmark_sid, &l_nbits);
+          if (l_bits && l_nbits > 0) {
+            sim = tk_inv_similarity(feat_inv, q_bits, q_len, l_bits, l_nbits,
+              enc->cmp, enc->cmp_alpha, enc->cmp_beta, enc->decay,
+              q_weights, e_weights, inter_weights);
           }
         }
-        tk_ivec_push(tmp, nbr_uid);
-        tk_dvec_push(sims, sim);
-      });
+        sims->a[j] = sim;
+      }
 
-      double *sample_out = raw_codes->a + i * enc->n_dims;
-
-      double total_w = 0.0;
-      for (uint64_t j = 0; j < sims->n; j++)
-        total_w += sims->a[j];
-
-      for (uint64_t j = 0; j < tmp->n; j++) {
-        int64_t uid = tmp->a[j];
-        double w = sims->a[j];
-
-        uint32_t khi = tk_iumap_get(enc->id_to_idx, uid);
-        if (khi == tk_iumap_end(enc->id_to_idx))
-          continue;
-        int64_t train_idx = tk_iumap_val(enc->id_to_idx, khi);
-        if (train_idx < 0 || (uint64_t)train_idx >= enc->n_training_samples)
-          continue;
-
-        double *train_evec = enc->eigenvectors->a + (uint64_t)train_idx * enc->n_dims;
-        for (uint64_t d = 0; d < enc->n_dims; d++) {
-          double lambda = enc->eigenvalues->a[d];
-          double denom = total_w - lambda;
-          if (fabs(denom) > 1e-10) {
-            sample_out[d] += w * train_evec[d] / denom;
-          }
+      double *sample_out = raw_codes->a + i * n_dims;
+      for (uint64_t d = 0; d < n_dims; d++) {
+        double lambda = enc->eigenvalues->a[d];
+        double inv_lambda = (fabs(lambda) > 1e-10) ? 1.0 / lambda : 0.0;
+        double sum = 0.0;
+        for (uint64_t j = 0; j < n_landmarks; j++) {
+          double evec_jd = enc->eigenvectors->a[j * n_dims + d];
+          sum += sims->a[j] * evec_jd;
         }
+        sample_out[d] = sum * inv_lambda;
       }
     }
 
-    tk_ivec_destroy(tmp);
+    tk_dvec_destroy(q_weights);
+    tk_dvec_destroy(e_weights);
+    tk_dvec_destroy(inter_weights);
     tk_dvec_destroy(sims);
   }
 
-  lua_rawgeti(L, LUA_REGISTRYINDEX, enc->threshold_fn_ref);
   lua_pushvalue(L, stack_before_out + 1);
-  lua_pushinteger(L, (lua_Integer)enc->n_dims);
-  lua_call(L, 2, 1);
+  lua_pushinteger(L, (lua_Integer)n_samples);
 
-  lua_replace(L, stack_before_out);
-  lua_settop(L, stack_before_out);
-
-  return 1;
+  return 2;
 }
 
 static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
@@ -809,12 +827,10 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
 
   lua_getfield(L, 1, "features_index");
   tk_inv_t *feat_inv = tk_inv_peekopt(L, -1);
-  tk_ann_t *feat_ann = tk_ann_peekopt(L, -1);
-  tk_hbi_t *feat_hbi = tk_hbi_peekopt(L, -1);
   lua_pop(L, 1);
 
-  if (!feat_inv && !feat_ann && !feat_hbi)
-    return luaL_error(L, "nystrom_encoder: features_index must be inv, ann, or hbi");
+  if (!feat_inv)
+    return luaL_error(L, "nystrom_encoder: features_index must be inv");
 
   lua_getfield(L, 1, "eigenvectors");
   tk_dvec_t *eigenvectors = tk_dvec_peekopt(L, -1);
@@ -828,11 +844,11 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
   if (!eigenvalues)
     return luaL_error(L, "nystrom_encoder: eigenvalues required");
 
-  lua_getfield(L, 1, "ids");
-  tk_ivec_t *ids = tk_ivec_peekopt(L, -1);
+  lua_getfield(L, 1, "landmark_ids");
+  tk_ivec_t *landmark_ids = tk_ivec_peekopt(L, -1);
   lua_pop(L, 1);
-  if (!ids)
-    return luaL_error(L, "nystrom_encoder: ids required");
+  if (!landmark_ids)
+    return luaL_error(L, "nystrom_encoder: landmark_ids required");
 
   uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "nystrom_encoder", "n_dims");
 
@@ -845,17 +861,11 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
     return luaL_error(L, "nystrom_encoder: eigenvectors size (%llu) not divisible by n_dims (%llu)",
                       (unsigned long long)eigenvectors->n, (unsigned long long)n_dims);
 
-  uint64_t n_training_samples = eigenvectors->n / n_dims;
-  if (ids->n != n_training_samples)
-    return luaL_error(L, "nystrom_encoder: ids size (%llu) != eigenvector rows (%llu)",
-                      (unsigned long long)ids->n, (unsigned long long)n_training_samples);
+  uint64_t n_landmarks = eigenvectors->n / n_dims;
+  if (landmark_ids->n != n_landmarks)
+    return luaL_error(L, "nystrom_encoder: landmark_ids size (%llu) != eigenvector rows (%llu)",
+                      (unsigned long long)landmark_ids->n, (unsigned long long)n_landmarks);
 
-  lua_getfield(L, 1, "threshold");
-  if (!lua_isfunction(L, -1))
-    return luaL_error(L, "nystrom_encoder: threshold must be a function");
-  int threshold_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-
-  uint64_t k_neighbors = tk_lua_foptunsigned(L, 1, "nystrom_encoder", "k_neighbors", 0);
   const char *cmp_str = tk_lua_foptstring(L, 1, "nystrom_encoder", "cmp", "jaccard");
   tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
   if (!strcmp(cmp_str, "jaccard"))
@@ -869,42 +879,24 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
 
   double cmp_alpha = tk_lua_foptnumber(L, 1, "nystrom_encoder", "cmp_alpha", 0.5);
   double cmp_beta = tk_lua_foptnumber(L, 1, "nystrom_encoder", "cmp_beta", 0.5);
-  uint64_t probe_radius = tk_lua_foptunsigned(L, 1, "nystrom_encoder", "probe_radius", 2);
+  double decay = tk_lua_foptnumber(L, 1, "nystrom_encoder", "decay", 0.0);
   int64_t rank_filter = tk_lua_foptinteger(L, 1, "nystrom_encoder", "rank_filter", -1);
-
-  tk_iumap_t *id_to_idx = tk_iumap_from_ivec(NULL, ids);
-  if (!id_to_idx) {
-    luaL_unref(L, LUA_REGISTRYINDEX, threshold_ref);
-    return luaL_error(L, "nystrom_encoder: failed to create id_to_idx map");
-  }
 
   tk_nystrom_encoder_t *enc = tk_lua_newuserdata(L, tk_nystrom_encoder_t, TK_NYSTROM_ENCODER_MT, tk_nystrom_encoder_mt_fns, tk_nystrom_encoder_gc);
   int Ei = lua_gettop(L);
 
-  if (feat_inv) {
-    enc->feat_idx = feat_inv;
-    enc->feat_idx_type = TK_HLTH_IDX_INV;
-  } else if (feat_ann) {
-    enc->feat_idx = feat_ann;
-    enc->feat_idx_type = TK_HLTH_IDX_ANN;
-  } else {
-    enc->feat_idx = feat_hbi;
-    enc->feat_idx_type = TK_HLTH_IDX_HBI;
-  }
-
+  enc->feat_idx = feat_inv;
+  enc->feat_idx_type = TK_HLTH_IDX_INV;
   enc->eigenvectors = eigenvectors;
   enc->eigenvalues = eigenvalues;
-  enc->ids = ids;
-  enc->id_to_idx = id_to_idx;
+  enc->landmark_ids = landmark_ids;
   enc->n_dims = n_dims;
-  enc->n_training_samples = n_training_samples;
-  enc->k_neighbors = k_neighbors;
+  enc->n_landmarks = n_landmarks;
   enc->cmp = cmp;
   enc->cmp_alpha = cmp_alpha;
   enc->cmp_beta = cmp_beta;
-  enc->probe_radius = probe_radius;
+  enc->decay = decay;
   enc->rank_filter = rank_filter;
-  enc->threshold_fn_ref = threshold_ref;
   enc->destroyed = false;
 
   lua_getfield(L, 1, "features_index");
@@ -919,11 +911,7 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
   tk_lua_add_ephemeron(L, TK_NYSTROM_ENCODER_EPH, Ei, -1);
   lua_pop(L, 1);
 
-  lua_getfield(L, 1, "ids");
-  tk_lua_add_ephemeron(L, TK_NYSTROM_ENCODER_EPH, Ei, -1);
-  lua_pop(L, 1);
-
-  lua_getfield(L, 1, "threshold");
+  lua_getfield(L, 1, "landmark_ids");
   tk_lua_add_ephemeron(L, TK_NYSTROM_ENCODER_EPH, Ei, -1);
   lua_pop(L, 1);
 
@@ -933,9 +921,87 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
   return 2;
 }
 
+static inline int tk_hlth_nystrom_lift_lua(lua_State *L) {
+  lua_settop(L, 1);
+  luaL_checktype(L, 1, LUA_TTABLE);
+
+  lua_getfield(L, 1, "chol");
+  tk_dvec_t *chol = tk_dvec_peekopt(L, -1);
+  lua_pop(L, 1);
+  if (!chol)
+    return luaL_error(L, "nystrom_lift: chol (Cholesky factor L) required");
+
+  lua_getfield(L, 1, "eigenvectors");
+  tk_dvec_t *eigenvectors = tk_dvec_peekopt(L, -1);
+  lua_pop(L, 1);
+  if (!eigenvectors)
+    return luaL_error(L, "nystrom_lift: eigenvectors required");
+
+  lua_getfield(L, 1, "eigenvalues");
+  tk_dvec_t *eigenvalues = tk_dvec_peekopt(L, -1);
+  lua_pop(L, 1);
+  if (!eigenvalues)
+    return luaL_error(L, "nystrom_lift: eigenvalues required");
+
+  uint64_t n_samples = tk_lua_fcheckunsigned(L, 1, "nystrom_lift", "n_samples");
+  uint64_t n_landmarks = tk_lua_fcheckunsigned(L, 1, "nystrom_lift", "n_landmarks");
+  uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "nystrom_lift", "n_dims");
+
+  if (chol->n != n_samples * n_landmarks)
+    return luaL_error(L, "nystrom_lift: chol size (%llu) != n_samples * n_landmarks (%llu)",
+      (unsigned long long)chol->n, (unsigned long long)(n_samples * n_landmarks));
+
+  if (eigenvectors->n != n_landmarks * n_dims)
+    return luaL_error(L, "nystrom_lift: eigenvectors size (%llu) != n_landmarks * n_dims (%llu)",
+      (unsigned long long)eigenvectors->n, (unsigned long long)(n_landmarks * n_dims));
+
+  if (eigenvalues->n != n_dims)
+    return luaL_error(L, "nystrom_lift: eigenvalues size (%llu) != n_dims (%llu)",
+      (unsigned long long)eigenvalues->n, (unsigned long long)n_dims);
+
+  tk_dvec_t *inv_sqrt_lambda = tk_dvec_create(NULL, n_dims, 0, 0);
+  inv_sqrt_lambda->n = n_dims;
+  for (uint64_t d = 0; d < n_dims; d++) {
+    double lam = eigenvalues->a[d];
+    inv_sqrt_lambda->a[d] = (fabs(lam) > 1e-10) ? 1.0 / sqrt(fabs(lam)) : 0.0;
+  }
+
+  tk_dvec_t *col_means = tk_dvec_create(NULL, n_landmarks, 0, 0);
+  col_means->n = n_landmarks;
+  #pragma omp parallel for schedule(static)
+  for (uint64_t j = 0; j < n_landmarks; j++) {
+    double sum = 0.0;
+    for (uint64_t i = 0; i < n_samples; i++)
+      sum += chol->a[i * n_landmarks + j];
+    col_means->a[j] = sum / (double)n_samples;
+  }
+
+  tk_dvec_t *out = tk_dvec_create(L, n_samples * n_dims, 0, 0);
+  out->n = n_samples * n_dims;
+
+  #pragma omp parallel for schedule(static)
+  for (uint64_t i = 0; i < n_samples; i++) {
+    double *L_row = chol->a + i * n_landmarks;
+    double *U_row = out->a + i * n_dims;
+    for (uint64_t d = 0; d < n_dims; d++) {
+      double sum = 0.0;
+      for (uint64_t j = 0; j < n_landmarks; j++) {
+        sum += (L_row[j] - col_means->a[j]) * eigenvectors->a[j * n_dims + d];
+      }
+      U_row[d] = sum * inv_sqrt_lambda->a[d];
+    }
+  }
+
+  tk_dvec_destroy(col_means);
+  tk_dvec_destroy(inv_sqrt_lambda);
+
+  return 1;
+}
+
 static luaL_Reg tk_hlth_fns[] = {
   { "landmark_encoder", tk_hlth_landmark_encoder_lua },
   { "nystrom_encoder", tk_hlth_nystrom_encoder_lua },
+  { "nystrom_lift", tk_hlth_nystrom_lift_lua },
   { NULL, NULL }
 };
 

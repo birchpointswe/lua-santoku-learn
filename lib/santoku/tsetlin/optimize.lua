@@ -4,6 +4,7 @@ local spectral = require("santoku.tsetlin.spectral")
 local prone = require("santoku.tsetlin.prone")
 local itq = require("santoku.tsetlin.itq")
 local ann = require("santoku.tsetlin.ann")
+local hlth = require("santoku.tsetlin.hlth")
 local evaluator = require("santoku.tsetlin.evaluator")
 local num = require("santoku.num")
 local str = require("santoku.string")
@@ -88,137 +89,13 @@ local function sample_alpha_spec (spec, use_defaults)
   return val
 end
 
-M.threshold_methods = {
-  itq = {
-    iterations = { def = 100, min = 50, max = 500, int = true },
+M.apply_itq = function (raw_codes, n_dims)
+  return itq.itq({
+    codes = raw_codes,
+    n_dims = n_dims,
+    iterations = 100,
     tolerance = 1e-8,
-  },
-  otsu = {
-    metric = { "variance", "entropy" },
-    minimize = { true, false },
-    n_bins = 32,
-  },
-  median = {},
-  sign = {},
-}
-
-M.sample_threshold = function (threshold_cfg)
-  if type(threshold_cfg) == "function" then
-    return nil, threshold_cfg
-  end
-  local method
-  if type(threshold_cfg) == "string" then
-    method = threshold_cfg
-  elseif type(threshold_cfg) == "table" and threshold_cfg.method then
-    if type(threshold_cfg.method) == "table" and #threshold_cfg.method > 0 then
-      method = threshold_cfg.method[num.random(#threshold_cfg.method)]
-    else
-      method = threshold_cfg.method
-    end
-  else
-    method = "median"
-  end
-  local method_info = M.threshold_methods[method]
-  if not method_info then
-    err.error("Unknown threshold method: " .. tostring(method))
-  end
-  local params = { method = method }
-  for param_name, param_spec in pairs(method_info) do
-    local override = threshold_cfg and type(threshold_cfg) == "table" and threshold_cfg[method .. "_" .. param_name]
-    local spec = override ~= nil and override or param_spec
-    if type(spec) == "table" and #spec > 0 then
-      params[param_name] = spec[num.random(#spec)]
-    elseif type(spec) == "table" and (spec.min ~= nil or spec.def ~= nil) then
-      params[param_name] = sample_alpha_spec(spec)
-    else
-      params[param_name] = spec
-    end
-  end
-  return params, nil
-end
-
-M.build_threshold_fn = function (threshold_params, captured_state)
-  if not threshold_params then
-    threshold_params = { method = "median" }
-  end
-  local method = threshold_params.method
-  local state = captured_state or {}
-
-  if method == "itq" then
-    return function (codes, dims)
-      if state.rotation and state.mean then
-        return itq.itq({
-          codes = codes,
-          n_dims = dims,
-          rotation = state.rotation,
-          mean = state.mean,
-        }), dims, state
-      else
-        local binary, rotation, mean = itq.itq({
-          codes = codes,
-          n_dims = dims,
-          iterations = threshold_params.iterations or 100,
-          tolerance = threshold_params.tolerance or 1e-8,
-          return_rotation = true,
-        })
-        state.rotation = rotation
-        state.mean = mean
-        state.method = "itq"
-        return binary, dims, state
-      end
-    end
-  elseif method == "otsu" then
-    return function (codes, dims)
-      if state.indices and state.thresholds then
-        return itq.otsu({
-          codes = codes,
-          n_dims = dims,
-          indices = state.indices,
-          thresholds = state.thresholds,
-        }), dims, state
-      else
-        local binary, indices, scores, thresholds = itq.otsu({
-          codes = codes,
-          n_dims = dims,
-          metric = threshold_params.metric or "variance",
-          minimize = threshold_params.minimize or false,
-          n_bins = threshold_params.n_bins or 32,
-          return_thresholds = true,
-        })
-        state.indices = indices
-        state.scores = scores
-        state.thresholds = thresholds
-        state.method = "otsu"
-        return binary, dims, state
-      end
-    end
-  elseif method == "median" then
-    return function (codes, dims)
-      if state.thresholds then
-        return itq.median({
-          codes = codes,
-          n_dims = dims,
-          thresholds = state.thresholds,
-        }), dims, state
-      else
-        local binary, thresholds = itq.median({
-          codes = codes,
-          n_dims = dims,
-          return_thresholds = true,
-        })
-        state.thresholds = thresholds
-        state.method = "median"
-        return binary, dims, state
-      end
-    end
-  elseif method == "sign" then
-    return function (codes, dims)
-      state.method = "sign"
-      return itq.sign({ codes = codes, n_dims = dims }), dims, state
-    end
-  else
-    err.error("Unknown threshold method: " .. tostring(method))
-  end
+  })
 end
 
 local function round_to_pow2 (x)
@@ -874,22 +751,14 @@ end
 
 M.destroy_spectral = function (model)
   if not model then return end
-  if model.raw_model then
-    M.destroy_spectral_raw(model.raw_model)
-    model.raw_model = nil
-  end
-  if model.owns_base ~= false then
-    if model.ids then model.ids:destroy() end
-    if model.eigs then model.eigs:destroy() end
-  end
   if model.index then model.index:destroy() end
   if model.codes then model.codes:destroy() end
-  if model.raw_codes and model.owns_raw_codes ~= false then model.raw_codes:destroy() end
-  if model.selected_indices then model.selected_indices:destroy() end
-  if model.adj_ids then model.adj_ids:destroy() end
-  if model.adj_offsets then model.adj_offsets:destroy() end
-  if model.adj_neighbors then model.adj_neighbors:destroy() end
-  if model.adj_weights then model.adj_weights:destroy() end
+  if model.raw_codes then model.raw_codes:destroy() end
+  if model.ids then model.ids:destroy() end
+  if model.landmark_ids then model.landmark_ids:destroy() end
+  if model.eigenvectors then model.eigenvectors:destroy() end
+  if model.eigenvalues then model.eigenvalues:destroy() end
+  if model.chol then model.chol:destroy() end
 end
 
 M.build_adjacency = function (args)
@@ -971,15 +840,12 @@ end
 
 M.apply_threshold = function (args)
   local raw_model = args.raw_model
-  local threshold_params = args.threshold_params
-  local threshold_fn = args.threshold_fn
   local bucket_size = args.bucket_size
 
   local raw_codes = raw_model.raw_codes
   local dims = raw_model.dims
 
-  threshold_fn = threshold_fn or M.build_threshold_fn(threshold_params)
-  local codes, _, threshold_state = threshold_fn(raw_codes, dims)
+  local codes = M.apply_itq(raw_codes, dims)
 
   local ann_index = ann.create({
     expected_size = raw_model.ids:size(),
@@ -992,9 +858,6 @@ M.apply_threshold = function (args)
     ids = raw_model.ids,
     codes = codes,
     raw_codes = raw_codes,
-    threshold_fn = threshold_fn,
-    threshold_params = threshold_params,
-    threshold_state = threshold_state,
     eigs = raw_model.eigs,
     dims = dims,
     index = ann_index,
@@ -1027,16 +890,8 @@ M.build_spectral_from_adjacency = function (args)
     each = args.each,
   })
 
-  local threshold_params
-  if type(p.threshold) == "function" then
-    threshold_params = p.threshold_params or { method = "custom" }
-  else
-    threshold_params = M.sample_threshold(p.threshold)
-  end
-
   return M.apply_threshold({
     raw_model = raw_model,
-    threshold_params = threshold_params,
     bucket_size = bucket_size,
   })
 end
@@ -1044,35 +899,19 @@ end
 M.score_spectral_eval = function (args)
   local model = args.model
   local eval_params = args.eval_params
-  local expected = args.expected
-
-  local adj_retrieved_ids, adj_retrieved_offsets, adj_retrieved_neighbors, adj_retrieved_weights =
-    graph.adjacency({
-      weight_index = model.index,
-      seed_ids = expected.ids,
-      seed_offsets = expected.offsets,
-      seed_neighbors = expected.neighbors,
-    })
+  local eval = args.eval
 
   local stats = evaluator.ranking_accuracy({
-    retrieved_ids = adj_retrieved_ids,
-    retrieved_offsets = adj_retrieved_offsets,
-    retrieved_neighbors = adj_retrieved_neighbors,
-    retrieved_weights = adj_retrieved_weights,
-    expected_ids = expected.ids,
-    expected_offsets = expected.offsets,
-    expected_neighbors = expected.neighbors,
-    expected_weights = expected.weights,
-    query_ids = eval_params.query_ids,
+    codes = model.codes,
+    index = model.index,
+    ids = model.ids,
+    eval_ids = eval.ids,
+    eval_offsets = eval.offsets,
+    eval_neighbors = eval.neighbors,
+    eval_weights = eval.weights,
     ranking = eval_params.ranking,
-    metric = eval_params.metric,
     n_dims = model.dims,
   })
-
-  if adj_retrieved_ids then adj_retrieved_ids:destroy() end
-  if adj_retrieved_offsets then adj_retrieved_offsets:destroy() end
-  if adj_retrieved_neighbors then adj_retrieved_neighbors:destroy() end
-  if adj_retrieved_weights then adj_retrieved_weights:destroy() end
 
   return stats.score, {
     score = stats.score,
@@ -1081,469 +920,281 @@ M.score_spectral_eval = function (args)
   }
 end
 
-M.spectral = function (args)
+M.build_spectral_nystrom = function (args)
   local index = args.index
-  local knn_index = args.knn_index
+  local n_landmarks = args.n_landmarks
+  local n_dims = args.n_dims
+  local cmp = args.cmp
+  local cmp_alpha = args.cmp_alpha
+  local cmp_beta = args.cmp_beta
+  local decay = args.decay
   local bucket_size = args.bucket_size
   local each_cb = args.each
-  local adjacency_each = args.adjacency_each
-  local spectral_each = args.spectral_each
-  local query_ids = args.query_ids
 
-  local prebuilt_adj_ids = args.adj_ids
-  local prebuilt_adj_offsets = args.adj_offsets
-  local prebuilt_adj_neighbors = args.adj_neighbors
-  local prebuilt_adj_weights = args.adj_weights
-  local has_prebuilt_adj = prebuilt_adj_ids ~= nil
+  if each_cb then
+    each_cb({ event = "stage", stage = "landmarks", decay = decay })
+  end
 
-  local adjacency_cfg = has_prebuilt_adj and {} or err.assert(args.adjacency, "adjacency config required")
-  local spectral_cfg = err.assert(args.spectral, "spectral config required")
-  local eval_cfg = err.assert(args.eval, "eval config required")
+  local landmark_ids, doc_ids, chol, actual_landmarks =
+    index:sample_landmarks(n_landmarks, cmp, cmp_alpha, cmp_beta, decay)
 
-  local adjacency_samples = has_prebuilt_adj and 1 or (args.adjacency_samples or 1)
-  local spectral_samples = args.spectral_samples or 1
-  local select_samples = args.select_samples or 1
-  local eval_samples = args.eval_samples or 1
-  local rounds = args.search_rounds or 1
-  local global_dev = args.search_dev or 0.2
-  local preference_tolerance = args.preference_tolerance or 1e-6
+  local n_samples = doc_ids:size()
 
-  local expected = {
-    ids = args.expected_ids,
-    offsets = args.expected_offsets,
-    neighbors = args.expected_neighbors,
-    weights = args.expected_weights,
+  if each_cb then
+    each_cb({
+      event = "landmarks_result",
+      n_samples = n_samples,
+      n_landmarks = actual_landmarks,
+      requested_landmarks = n_landmarks,
+    })
+  end
+
+  if each_cb then
+    each_cb({ event = "stage", stage = "spectral" })
+  end
+
+  local eigenvectors, eigenvalues = spectral.encode({
+    chol = chol,
+    n_samples = n_samples,
+    n_landmarks = actual_landmarks,
+    n_dims = n_dims,
+    each = args.spectral_each,
+  })
+
+  if each_cb then
+    each_cb({
+      event = "spectral_result",
+      n_dims = n_dims,
+      eig_min = eigenvalues:min(),
+      eig_max = eigenvalues:max(),
+    })
+  end
+
+  if each_cb then
+    each_cb({ event = "stage", stage = "lift" })
+  end
+
+  local raw_codes = hlth.nystrom_lift({
+    chol = chol,
+    eigenvectors = eigenvectors,
+    eigenvalues = eigenvalues,
+    n_samples = n_samples,
+    n_landmarks = actual_landmarks,
+    n_dims = n_dims,
+  })
+
+  if each_cb then
+    each_cb({ event = "stage", stage = "itq" })
+  end
+
+  local codes = M.apply_itq(raw_codes, n_dims)
+
+  if each_cb then
+    each_cb({ event = "stage", stage = "index" })
+  end
+
+  local ann_index = ann.create({
+    expected_size = n_samples,
+    bucket_size = bucket_size,
+    features = n_dims,
+  })
+  ann_index:add(codes, doc_ids)
+
+  return {
+    ids = doc_ids,
+    codes = codes,
+    raw_codes = raw_codes,
+    dims = n_dims,
+    index = ann_index,
+    landmark_ids = landmark_ids,
+    eigenvectors = eigenvectors,
+    eigenvalues = eigenvalues,
+    chol = chol,
+    n_landmarks = actual_landmarks,
   }
+end
+
+M.spectral = function (args)
+  local index = err.assert(args.index, "index required")
+  local n_landmarks_cfg = err.assert(args.n_landmarks, "n_landmarks required")
+  local n_dims_cfg = err.assert(args.n_dims, "n_dims required")
+  local cmp = args.cmp or "jaccard"
+  local cmp_alpha = args.cmp_alpha or 0.5
+  local cmp_beta = args.cmp_beta or 0.5
+  local decay_cfg = args.decay or 0.0
+  local bucket_size = args.bucket_size
+  local each_cb = args.each
+  local tolerance = args.tolerance or 1e-6
+
+  local expected = args.expected and {
+    ids = args.expected.ids,
+    offsets = args.expected.offsets,
+    neighbors = args.expected.neighbors,
+    weights = args.expected.weights,
+  } or nil
+
+  local eval_cfg = args.eval
+  local rounds = args.rounds or 1
+  local samples_per_round = args.samples or 4
+  local global_dev = args.search_dev or 0.2
+
+  local function is_range(cfg)
+    return type(cfg) == "table" and cfg.min ~= nil
+  end
+
+  local function get_fixed_val(cfg)
+    if type(cfg) == "number" then return cfg end
+    if type(cfg) == "table" then return cfg.def or cfg.min end
+    return nil
+  end
+
+  local landmarks_is_range = is_range(n_landmarks_cfg)
+  local dims_is_range = is_range(n_dims_cfg)
+  local decay_is_range = is_range(decay_cfg)
+  local has_search = (landmarks_is_range or dims_is_range or decay_is_range) and expected and eval_cfg and rounds > 0
+
+  if not has_search then
+    local n_landmarks_val = get_fixed_val(n_landmarks_cfg)
+    local n_dims_val = get_fixed_val(n_dims_cfg)
+    local decay_val = get_fixed_val(decay_cfg) or 0.0
+    local params = { n_landmarks = n_landmarks_val, n_dims = n_dims_val, decay = decay_val }
+    if each_cb then
+      each_cb({ event = "sample", n_landmarks = n_landmarks_val, n_dims = n_dims_val, decay = decay_val })
+    end
+    local model = M.build_spectral_nystrom({
+      index = index,
+      n_landmarks = n_landmarks_val,
+      n_dims = n_dims_val,
+      cmp = cmp,
+      cmp_alpha = cmp_alpha,
+      cmp_beta = cmp_beta,
+      decay = decay_val,
+      bucket_size = bucket_size,
+      each = each_cb,
+    })
+    local score = nil
+    if expected and eval_cfg then
+      local metrics
+      score, metrics = M.score_spectral_eval({
+        model = model,
+        eval_params = eval_cfg,
+        eval = expected,
+      })
+      if each_cb then
+        each_cb({ event = "eval", n_landmarks = n_landmarks_val, n_dims = n_dims_val, decay = decay_val, score = score, metrics = metrics })
+      end
+    end
+    if each_cb then
+      each_cb({ event = "done", best_params = params, best_score = score })
+    end
+    return model, params
+  end
+
+  local landmarks_sampler = M.build_sampler(n_landmarks_cfg, global_dev)
+  local dims_sampler = M.build_sampler(n_dims_cfg, global_dev)
+  local decay_sampler = M.build_sampler(decay_cfg, global_dev)
 
   local best_score = -num.huge
   local best_cost = nil
-  local best_params = nil
   local best_model = nil
-  local best_metrics = nil
-  local best_adj_ids = nil
-  local best_adj_offsets = nil
-  local best_adj_neighbors = nil
-  local best_adj_weights = nil
-  local sample_count = 0
-
-  local adj_fixed = has_prebuilt_adj or M.tier_all_fixed(adjacency_cfg)
-  local spec_fixed = M.tier_all_fixed(spectral_cfg)
-  local eval_fixed = M.tier_all_fixed(eval_cfg)
-
-  local all_fixed = adj_fixed and spec_fixed and eval_fixed
-
-  -- When rounds <= 0 or all tiers are fixed, skip search and build single model with defaults
-  if rounds <= 0 or all_fixed then
-    local adj_params = has_prebuilt_adj and { prebuilt = true } or M.sample_tier(adjacency_cfg, true)
-    local spec_params = M.sample_tier(spectral_cfg, true)
-    local eval_params = M.sample_tier(eval_cfg, true)
-
-    local threshold_params, threshold_fn = M.sample_threshold(spectral_cfg.threshold)
-
-    if each_cb then
-      each_cb({ event = "stage", stage = "adjacency", is_final = true, params = { adjacency = adj_params } })
-    end
-
-    local adj_ids, adj_offsets, adj_neighbors, adj_weights
-    if has_prebuilt_adj then
-      adj_ids = prebuilt_adj_ids
-      adj_offsets = prebuilt_adj_offsets
-      adj_neighbors = prebuilt_adj_neighbors
-      adj_weights = prebuilt_adj_weights
-    else
-      adj_ids, adj_offsets, adj_neighbors, adj_weights = M.build_adjacency({
-        index = index,
-        knn_index = knn_index,
-        params = adj_params,
-        each = adjacency_each,
-      })
-    end
-
-    if each_cb then
-      each_cb({ event = "stage", stage = "spectral", is_final = true, params = { adjacency = adj_params, spectral = spec_params } })
-    end
-
-    local raw_model = M.build_spectral_raw({
-      adj_ids = adj_ids,
-      adj_offsets = adj_offsets,
-      adj_neighbors = adj_neighbors,
-      adj_weights = adj_weights,
-      params = spec_params,
-      each = spectral_each,
-    })
-
-    if each_cb then
-      each_cb({
-        event = "spectral_result",
-        n_nodes = raw_model.ids:size(),
-        n_dims = raw_model.dims,
-        n_matvecs = raw_model.n_matvecs,
-        eig_min = raw_model.eigs and raw_model.eigs:min() or nil,
-        eig_max = raw_model.eigs and raw_model.eigs:max() or nil,
-        params = { adjacency = adj_params, spectral = spec_params },
-      })
-    end
-
-    local model = M.apply_threshold({
-      raw_model = raw_model,
-      threshold_params = threshold_params,
-      threshold_fn = threshold_fn,
-      bucket_size = bucket_size,
-    })
-    model.owns_base = true
-    model.owns_raw_codes = true
-
-    model.adj_ids = adj_ids
-    model.adj_offsets = adj_offsets
-    model.adj_neighbors = adj_neighbors
-    model.adj_weights = adj_weights
-
-    local best_params = { adjacency = adj_params, spectral = spec_params, eval = eval_params }
-
-    local _, metrics = M.score_spectral_eval({
-      model = model,
-      eval_params = eval_params,
-      expected = expected,
-    })
-
-    return model, best_params, metrics
-  end
-
-  -- Build samplers for hill climbing (adjacency and spectral tiers)
-  local adj_param_names = {
-    "knn", "knn_alpha", "knn_mutual", "knn_mode", "knn_cache",
-    "knn_cmp", "knn_cmp_alpha", "knn_cmp_beta", "knn_eps", "knn_min",
-    "knn_anchor", "knn_seed", "knn_bipartite",
-    "weight_cmp", "weight_decay", "weight_pooling",
-    "category_cmp", "category_alpha", "category_beta",
-    "probe_radius", "bridge",
-  }
-  local spec_param_names = { "n_dims", "laplacian", "eps" }
-  local adj_samplers = M.build_samplers(adjacency_cfg, adj_param_names, global_dev)
-  local spec_samplers = M.build_samplers(spectral_cfg, spec_param_names, global_dev)
-
-  local function make_adj_key (p)
-    return str.format("%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
-      key_int(p.knn), key_int(p.knn_alpha), key_str(p.knn_mutual), key_str(p.knn_mode),
-      key_int(p.knn_cache), key_str(p.knn_cmp), key_float2(p.knn_cmp_alpha),
-      key_float2(p.knn_cmp_beta), key_float2(p.knn_eps), key_int(p.knn_min),
-      key_str(p.knn_anchor), key_str(p.knn_seed), key_str(p.knn_bipartite),
-      key_str(p.weight_cmp), key_float2(p.weight_decay), key_str(p.weight_pooling),
-      key_str(p.category_cmp), key_float2(p.category_alpha), key_float2(p.category_beta),
-      key_int(p.probe_radius), key_str(p.bridge))
-  end
-
-  local function make_spec_key (adj_key, p)
-    return str.format("%s|%s|%s", adj_key, key_int(p.n_dims), key_str(p.laplacian))
-  end
-
-  local function make_select_key (spec_key, p)
-    local thresh_str = p.threshold_params and p.threshold_params.method or "none"
-    return str.format("%s|%s", spec_key, thresh_str)
-  end
-
-  local function make_eval_key (select_key, p)
-    return str.format("%s|%s", select_key, p.ranking)
-  end
-
-  local function mem_kb ()
-    return collectgarbage("count")
-  end
-
+  local best_params = nil
   local seen = {}
 
   for round = 1, rounds do
+    if each_cb then
+      each_cb({ event = "round_start", round = round, rounds = rounds })
+    end
+
     local round_best_score = -num.huge
-    local round_best_params = nil
     local round_improvements = 0
     local round_samples = 0
-    local round_start_mem = mem_kb()
 
-    if each_cb then
-      each_cb({
-        event = "round_start",
-        round = round,
-        rounds = rounds,
-        mem_kb = round_start_mem,
-      })
-    end
+    for _ = 1, samples_per_round do
+      local n_landmarks_val = landmarks_sampler.sample(landmarks_sampler.center)
+      local n_dims_val = dims_sampler.sample(dims_sampler.center)
+      local decay_val = decay_sampler.sample(decay_sampler.center)
 
-  for adj_i = 1, (adj_fixed and 1 or adjacency_samples) do
-    local adj_params = has_prebuilt_adj and { prebuilt = true } or M.sample_params(adj_samplers, adj_param_names, adjacency_cfg)
-    local adj_key = has_prebuilt_adj and "prebuilt" or make_adj_key(adj_params)
-
-    if seen[adj_key] then
-      if each_cb then
-        each_cb({
-          event = "adjacency_cached",
-          round = round,
-          adj_sample = adj_i,
-          adj_key = adj_key,
-          params = { adjacency = adj_params },
-        })
-      end
-    else
-      seen[adj_key] = true
-      sample_count = sample_count + 1
-
-      local adj_mem_before = mem_kb()
-      if each_cb then
-        each_cb({
-          event = "stage",
-          stage = "adjacency",
-          round = round,
-          sample = sample_count,
-          adj_sample = adj_i,
-          adj_key = adj_key,
-          is_final = false,
-          params = { adjacency = adj_params },
-          mem_kb = adj_mem_before,
-        })
+      if n_dims_val > n_landmarks_val then
+        n_dims_val = n_landmarks_val
       end
 
-      local adj_ids, adj_offsets, adj_neighbors, adj_weights
-      if has_prebuilt_adj then
-        adj_ids = prebuilt_adj_ids
-        adj_offsets = prebuilt_adj_offsets
-        adj_neighbors = prebuilt_adj_neighbors
-        adj_weights = prebuilt_adj_weights
-      else
-        adj_ids, adj_offsets, adj_neighbors, adj_weights = M.build_adjacency({
-          index = index,
-          knn_index = knn_index,
-          params = adj_params,
-          each = adjacency_each,
-        })
-      end
+      local cfg_key = str.format("%d_%d_%.2f", n_landmarks_val, n_dims_val, decay_val)
 
-      if each_cb then
-        each_cb({
-          event = "adjacency_result",
-          round = round,
-          adj_sample = adj_i,
-          n_nodes = adj_ids:size(),
-          n_edges = adj_neighbors:size(),
-          params = { adjacency = adj_params },
-        })
-      end
+      if not seen[cfg_key] then
+        seen[cfg_key] = true
+        round_samples = round_samples + 1
 
-      for _ = 1, (spec_fixed and 1 or spectral_samples) do
-        local spec_params = M.sample_params(spec_samplers, spec_param_names, spectral_cfg)
-        local spec_key = make_spec_key(adj_key, spec_params)
-
-        if not seen[spec_key] then
-          seen[spec_key] = true
-
-          local spec_mem_before = mem_kb()
-          if each_cb then
-            each_cb({
-              event = "stage",
-              stage = "spectral",
-              round = round,
-              sample = sample_count,
-              is_final = false,
-              params = { adjacency = adj_params, spectral = spec_params },
-              mem_kb = spec_mem_before,
-            })
-          end
-
-          local raw_model = M.build_spectral_raw({
-            adj_ids = adj_ids,
-            adj_offsets = adj_offsets,
-            adj_neighbors = adj_neighbors,
-            adj_weights = adj_weights,
-            params = spec_params,
-            each = spectral_each,
+        if each_cb then
+          each_cb({
+            event = "sample",
+            round = round,
+            n_landmarks = n_landmarks_val,
+            n_dims = n_dims_val,
+            decay = decay_val,
           })
+        end
 
-          if each_cb then
-            each_cb({
-              event = "spectral_result",
-              n_nodes = raw_model.ids:size(),
-              n_dims = raw_model.dims,
-              n_matvecs = raw_model.n_matvecs,
-              eig_min = raw_model.eigs and raw_model.eigs:min() or nil,
-              eig_max = raw_model.eigs and raw_model.eigs:max() or nil,
-              params = { adjacency = adj_params, spectral = spec_params },
-            })
+        local model = M.build_spectral_nystrom({
+          index = index,
+          n_landmarks = n_landmarks_val,
+          n_dims = n_dims_val,
+          cmp = cmp,
+          cmp_alpha = cmp_alpha,
+          cmp_beta = cmp_beta,
+          decay = decay_val,
+          bucket_size = bucket_size,
+          each = each_cb,
+        })
+
+        local score, metrics = M.score_spectral_eval({
+          model = model,
+          eval_params = eval_cfg,
+          eval = expected,
+        })
+
+        if each_cb then
+          each_cb({
+            event = "eval",
+            round = round,
+            n_landmarks = n_landmarks_val,
+            n_dims = n_dims_val,
+            decay = decay_val,
+            score = score,
+            metrics = metrics,
+          })
+        end
+
+        if score > round_best_score then
+          round_best_score = score
+        end
+
+        local cost = { n_dims_val, n_landmarks_val }
+        if is_preferred(score, cost, best_score, best_cost, tolerance) then
+          round_improvements = round_improvements + 1
+          if best_model then
+            M.destroy_spectral(best_model)
           end
-
-          local raw_model_has_best = false
-
-          for _ = 1, select_samples do
-            local select_params = {}
-
-            local threshold_params, threshold_fn = M.sample_threshold(spectral_cfg.threshold)
-            if threshold_params then
-              select_params.threshold_params = threshold_params
-            elseif threshold_fn then
-              select_params.threshold_fn = threshold_fn
-            end
-
-            local select_key = make_select_key(spec_key, select_params)
-
-            if not seen[select_key] then
-              seen[select_key] = true
-
-              if each_cb then
-                each_cb({
-                  event = "stage",
-                  stage = "select",
-                  round = round,
-                  sample = sample_count,
-                  is_final = false,
-                  params = { adjacency = adj_params, spectral = spec_params, select = select_params },
-                  mem_kb = mem_kb(),
-                })
-              end
-
-              local model = M.apply_threshold({
-                raw_model = raw_model,
-                threshold_params = select_params.threshold_params,
-                threshold_fn = select_params.threshold_fn,
-                bucket_size = bucket_size,
-              })
-
-              if each_cb then
-                each_cb({
-                  event = "select_result",
-                  round = round,
-                  params = { adjacency = adj_params, spectral = spec_params, select = select_params },
-                  selected_dims = model.dims,
-                })
-              end
-
-              local model_is_best = false
-              local consecutive_zeros = 0
-              local max_consecutive_zeros = eval_cfg.max_consecutive_zeros or 3
-
-              for eval_i = 1, (eval_fixed and 1 or eval_samples) do
-                if consecutive_zeros >= max_consecutive_zeros then
-                  if each_cb then
-                    each_cb({
-                      event = "eval_early_stop",
-                      consecutive_zeros = consecutive_zeros,
-                      eval_sample = eval_i,
-                      eval_samples = eval_samples,
-                    })
-                  end
-                  break
-                end
-
-                local eval_params = M.sample_tier(eval_cfg)
-                eval_params.query_ids = query_ids
-
-                local eval_key = make_eval_key(select_key, eval_params)
-
-                if not seen[eval_key] then
-                  seen[eval_key] = true
-
-                  local score, metrics = M.score_spectral_eval({
-                    model = model,
-                    eval_params = eval_params,
-                    expected = expected,
-                  })
-
-                  if each_cb then
-                    each_cb({
-                      event = "eval",
-                      round = round,
-                      sample = sample_count,
-                      is_final = false,
-                      params = { adjacency = adj_params, spectral = spec_params, select = select_params, eval = eval_params },
-                      score = score,
-                      metrics = metrics,
-                      mem_kb = mem_kb(),
-                    })
-                  end
-
-                  if score <= 0 then
-                    consecutive_zeros = consecutive_zeros + 1
-                  else
-                    consecutive_zeros = 0
-                  end
-
-                  round_samples = round_samples + 1
-
-                  if score > round_best_score then
-                    round_best_score = score
-                    round_best_params = { adjacency = adj_params, spectral = spec_params, select = select_params, eval = eval_params }
-                  end
-
-                  local current_cost = { adj_params.weight_decay or 0, spec_params.n_dims or 0, adj_neighbors:size() }
-                  if is_preferred(score, current_cost, best_score, best_cost, preference_tolerance) then
-                    round_improvements = round_improvements + 1
-                    if best_model and best_model ~= model then
-                      M.destroy_spectral(best_model)
-                    end
-                    if best_adj_ids and best_adj_ids ~= adj_ids then
-                      best_adj_ids:destroy()
-                      best_adj_offsets:destroy()
-                      best_adj_neighbors:destroy()
-                      if best_adj_weights then best_adj_weights:destroy() end
-                    end
-                    best_score = score
-                    best_cost = current_cost
-                    best_params = { adjacency = adj_params, spectral = spec_params, select = select_params, eval = eval_params }
-                    best_model = model
-                    best_model.raw_model = raw_model
-                    best_metrics = metrics
-                    best_adj_ids = adj_ids
-                    best_adj_offsets = adj_offsets
-                    best_adj_neighbors = adj_neighbors
-                    best_adj_weights = adj_weights
-                    model_is_best = true
-                    raw_model_has_best = true
-                  end
-                end
-              end
-
-              if not model_is_best then
-                M.destroy_spectral(model)
-              end
-            end
-          end
-
-          if not raw_model_has_best then
-            M.destroy_spectral_raw(raw_model)
-          end
-          collectgarbage("collect")
-
-          if each_cb then
-            each_cb({
-              event = "spectral_done",
-              mem_kb = mem_kb(),
-              mem_before = spec_mem_before,
-            })
-          end
+          best_score = score
+          best_cost = cost
+          best_model = model
+          best_params = {
+            n_landmarks = n_landmarks_val,
+            n_dims = n_dims_val,
+            decay = decay_val,
+          }
+        else
+          M.destroy_spectral(model)
         end
       end
-
-      if adj_ids and adj_ids ~= best_adj_ids then
-        adj_ids:destroy()
-        adj_offsets:destroy()
-        adj_neighbors:destroy()
-        if adj_weights then adj_weights:destroy() end
-      end
-      collectgarbage("collect")
-
-      if each_cb then
-        each_cb({
-          event = "adjacency_done",
-          mem_kb = mem_kb(),
-          mem_before = adj_mem_before,
-        })
-      end
     end
-  end
 
-    -- Recenter on global best and adapt jitter
     if best_params then
-      M.recenter(adj_samplers, adj_param_names, best_params.adjacency)
-      M.recenter(spec_samplers, spec_param_names, best_params.spectral)
+      landmarks_sampler.center = best_params.n_landmarks
+      dims_sampler.center = best_params.n_dims
+      decay_sampler.center = best_params.decay
     end
-    local expected_samples = adjacency_samples * spectral_samples * select_samples * eval_samples
-    local skip_rate = 1 - (round_samples / expected_samples)
+
+    local skip_rate = (samples_per_round - round_samples) / samples_per_round
     local success_rate = round_samples > 0 and (round_improvements / round_samples) or 0
     local adapt_factor
     if skip_rate > 0.8 then
@@ -1553,11 +1204,9 @@ M.spectral = function (args)
     else
       adapt_factor = M.success_factor(success_rate)
     end
-    M.adapt_jitter(adj_samplers, adapt_factor)
-    M.adapt_jitter(spec_samplers, adapt_factor)
-
-    collectgarbage("collect")
-    local round_end_mem = mem_kb()
+    if landmarks_sampler.adapt then landmarks_sampler.adapt(adapt_factor) end
+    if dims_sampler.adapt then dims_sampler.adapt(adapt_factor) end
+    if decay_sampler.adapt then decay_sampler.adapt(adapt_factor) end
 
     if each_cb then
       each_cb({
@@ -1565,30 +1214,22 @@ M.spectral = function (args)
         round = round,
         rounds = rounds,
         round_best_score = round_best_score,
-        round_best_params = round_best_params,
         global_best_score = best_score,
-        global_best_params = best_params,
+        best_params = best_params,
         success_rate = success_rate,
         skip_rate = skip_rate,
         adapt_factor = adapt_factor,
-        mem_kb = round_end_mem,
-        mem_delta_kb = round_end_mem - round_start_mem,
       })
     end
 
+    collectgarbage("collect")
   end
 
-  if best_model then
-    best_model.owns_base = true
-    best_model.owns_raw_codes = true
-    best_model.adj_ids = best_adj_ids
-    best_model.adj_offsets = best_adj_offsets
-    best_model.adj_neighbors = best_adj_neighbors
-    best_model.adj_weights = best_adj_weights
+  if each_cb then
+    each_cb({ event = "done", best_params = best_params, best_score = best_score })
   end
 
-  collectgarbage("collect")
-  return best_model, best_params, best_metrics
+  return best_model, best_params
 end
 
 M.destroy_prone = function (model)
@@ -1654,16 +1295,8 @@ M.build_prone_from_adjacency = function (args)
     each = args.each,
   })
 
-  local threshold_params
-  if type(p.threshold) == "function" then
-    threshold_params = p.threshold_params or { method = "custom" }
-  else
-    threshold_params = M.sample_threshold(p.threshold)
-  end
-
   return M.apply_threshold({
     raw_model = raw_model,
-    threshold_params = threshold_params,
     bucket_size = bucket_size,
   })
 end
@@ -1671,35 +1304,19 @@ end
 M.score_prone_eval = function (args)
   local model = args.model
   local eval_params = args.eval_params
-  local expected = args.expected
-
-  local adj_retrieved_ids, adj_retrieved_offsets, adj_retrieved_neighbors, adj_retrieved_weights =
-    graph.adjacency({
-      weight_index = model.index,
-      seed_ids = expected.ids,
-      seed_offsets = expected.offsets,
-      seed_neighbors = expected.neighbors,
-    })
+  local eval = args.eval
 
   local stats = evaluator.ranking_accuracy({
-    retrieved_ids = adj_retrieved_ids,
-    retrieved_offsets = adj_retrieved_offsets,
-    retrieved_neighbors = adj_retrieved_neighbors,
-    retrieved_weights = adj_retrieved_weights,
-    expected_ids = expected.ids,
-    expected_offsets = expected.offsets,
-    expected_neighbors = expected.neighbors,
-    expected_weights = expected.weights,
-    query_ids = eval_params.query_ids,
+    codes = model.codes,
+    index = model.index,
+    ids = model.ids,
+    eval_ids = eval.ids,
+    eval_offsets = eval.offsets,
+    eval_neighbors = eval.neighbors,
+    eval_weights = eval.weights,
     ranking = eval_params.ranking,
-    metric = eval_params.metric,
     n_dims = model.dims,
   })
-
-  if adj_retrieved_ids then adj_retrieved_ids:destroy() end
-  if adj_retrieved_offsets then adj_retrieved_offsets:destroy() end
-  if adj_retrieved_neighbors then adj_retrieved_neighbors:destroy() end
-  if adj_retrieved_weights then adj_retrieved_weights:destroy() end
 
   return stats.score, {
     score = stats.score,
@@ -1715,7 +1332,6 @@ M.prone = function (args)
   local each_cb = args.each
   local adjacency_each = args.adjacency_each
   local prone_each = args.prone_each
-  local query_ids = args.query_ids
 
   local prebuilt_adj_ids = args.adj_ids
   local prebuilt_adj_offsets = args.adj_offsets
@@ -1768,8 +1384,6 @@ M.prone = function (args)
     local prone_params = M.sample_tier(prone_cfg, true)
     local eval_params = M.sample_tier(eval_cfg, true)
 
-    local threshold_params, threshold_fn = M.sample_threshold(prone_cfg.threshold)
-
     if each_cb then
       each_cb({ event = "stage", stage = "adjacency", is_final = true, params = { adjacency = adj_params } })
     end
@@ -1816,8 +1430,6 @@ M.prone = function (args)
 
     local model = M.apply_threshold({
       raw_model = raw_model,
-      threshold_params = threshold_params,
-      threshold_fn = threshold_fn,
       bucket_size = bucket_size,
     })
     model.owns_base = true
@@ -1833,7 +1445,7 @@ M.prone = function (args)
     local _, metrics = M.score_prone_eval({
       model = model,
       eval_params = eval_params,
-      expected = expected,
+      eval = expected,
     })
 
     return model, best_params, metrics
@@ -1869,8 +1481,7 @@ M.prone = function (args)
   end
 
   local function make_select_key (prone_key, p)
-    local thresh_str = p.threshold_params and p.threshold_params.method or "none"
-    return str.format("%s|%s", prone_key, thresh_str)
+    return str.format("%s|itq", prone_key)
   end
 
   local function make_eval_key (select_key, p)
@@ -2004,14 +1615,6 @@ M.prone = function (args)
 
           for _ = 1, select_samples do
             local select_params = {}
-
-            local threshold_params, threshold_fn = M.sample_threshold(prone_cfg.threshold)
-            if threshold_params then
-              select_params.threshold_params = threshold_params
-            elseif threshold_fn then
-              select_params.threshold_fn = threshold_fn
-            end
-
             local select_key = make_select_key(prone_key, select_params)
 
             if not seen[select_key] then
@@ -2031,8 +1634,6 @@ M.prone = function (args)
 
               local model = M.apply_threshold({
                 raw_model = raw_model,
-                threshold_params = select_params.threshold_params,
-                threshold_fn = select_params.threshold_fn,
                 bucket_size = bucket_size,
               })
 
@@ -2063,7 +1664,6 @@ M.prone = function (args)
                 end
 
                 local eval_params = M.sample_tier(eval_cfg)
-                eval_params.query_ids = query_ids
 
                 local eval_key = make_eval_key(select_key, eval_params)
 
@@ -2073,7 +1673,7 @@ M.prone = function (args)
                   local score, metrics = M.score_prone_eval({
                     model = model,
                     eval_params = eval_params,
-                    expected = expected,
+                    eval = expected,
                   })
 
                   if each_cb then

@@ -74,9 +74,6 @@ typedef struct {
   tk_ivec_t *offsets;
   tk_ivec_t *neighbors;
   tk_dvec_t *weights;
-  tk_ivec_t *retrieved_ids;
-  tk_ivec_t *retrieved_offsets;
-  tk_ivec_t *retrieved_neighbors;
   tk_eval_metric_t retrieval_ranking;
   uint64_t optimal_k;
   int64_t start_prefix;
@@ -1478,39 +1475,48 @@ static inline int tm_score_retrieval (lua_State *L)
 {
   lua_settop(L, 1);
 
-  lua_getfield(L, 1, "retrieved_ids");
-  tk_ivec_t *retrieved_ids = tk_ivec_peek(L, -1, "retrieved_ids");
+  lua_getfield(L, 1, "codes");
+  tk_cvec_t *codes_cvec = tk_cvec_peekopt(L, -1);
   lua_pop(L, 1);
 
-  lua_getfield(L, 1, "retrieved_offsets");
-  tk_ivec_t *retrieved_offsets = tk_ivec_peek(L, -1, "retrieved_offsets");
+  tk_ann_t *ann = NULL;
+  tk_hbi_t *hbi = NULL;
+  char *codes = NULL;
+
+  if (codes_cvec) {
+    codes = codes_cvec->a;
+  } else {
+    lua_getfield(L, 1, "index");
+    ann = tk_ann_peekopt(L, -1);
+    if (!ann)
+      hbi = tk_hbi_peekopt(L, -1);
+    lua_pop(L, 1);
+    if (!ann && !hbi)
+      tk_lua_verror(L, 1, "score_retrieval", "codes/index", "codes or index required");
+  }
+
+  lua_getfield(L, 1, "ids");
+  tk_ivec_t *code_ids = tk_ivec_peek(L, -1, "ids");
   lua_pop(L, 1);
 
-  lua_getfield(L, 1, "retrieved_neighbors");
-  tk_ivec_t *retrieved_neighbors = tk_ivec_peek(L, -1, "retrieved_neighbors");
+  lua_getfield(L, 1, "eval_ids");
+  tk_ivec_t *eval_ids = tk_ivec_peek(L, -1, "eval_ids");
   lua_pop(L, 1);
 
-  lua_getfield(L, 1, "retrieved_weights");
-  tk_dvec_t *retrieved_weights = tk_dvec_peek(L, -1, "retrieved_weights");
+  lua_getfield(L, 1, "eval_offsets");
+  tk_ivec_t *eval_offsets = tk_ivec_peek(L, -1, "eval_offsets");
   lua_pop(L, 1);
 
-  lua_getfield(L, 1, "expected_ids");
-  tk_ivec_t *expected_ids = tk_ivec_peek(L, -1, "expected_ids");
+  lua_getfield(L, 1, "eval_neighbors");
+  tk_ivec_t *eval_neighbors = tk_ivec_peek(L, -1, "eval_neighbors");
   lua_pop(L, 1);
 
-  lua_getfield(L, 1, "expected_offsets");
-  tk_ivec_t *expected_offsets = tk_ivec_peek(L, -1, "expected_offsets");
-  lua_pop(L, 1);
-
-  lua_getfield(L, 1, "expected_neighbors");
-  tk_ivec_t *expected_neighbors = tk_ivec_peek(L, -1, "expected_neighbors");
-  lua_pop(L, 1);
-
-  lua_getfield(L, 1, "expected_weights");
-  tk_dvec_t *expected_weights = tk_dvec_peek(L, -1, "expected_weights");
+  lua_getfield(L, 1, "eval_weights");
+  tk_dvec_t *eval_weights = tk_dvec_peek(L, -1, "eval_weights");
   lua_pop(L, 1);
 
   uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "score_retrieval", "n_dims");
+  uint64_t chunks = TK_CVEC_BITS_BYTES(n_dims);
 
   const char *ranking_str = tk_lua_fcheckstring(L, 1, "score_retrieval", "ranking");
   tk_eval_metric_t ranking = tk_eval_parse_metric(ranking_str);
@@ -1519,26 +1525,9 @@ static inline int tm_score_retrieval (lua_State *L)
       ranking != TK_EVAL_METRIC_PEARSON)
     tk_lua_verror(L, 1, "score_retrieval", "ranking", "must be ndcg, spearman, or pearson");
 
-  // Optional query_ids filter - if provided, only evaluate queries in this set
-  tk_iuset_t *query_filter = NULL;
-  lua_getfield(L, 1, "query_ids");
-  if (!lua_isnil(L, -1)) {
-    tk_ivec_t *query_ids = tk_ivec_peek(L, -1, "query_ids");
-    query_filter = tk_iuset_create(NULL, query_ids->n);
-    if (!query_filter)
-      tk_error(L, "score_retrieval: failed to create query filter", ENOMEM);
-    for (uint64_t i = 0; i < query_ids->n; i++) {
-      int kha;
-      tk_iuset_put(query_filter, query_ids->a[i], &kha);
-    }
-  }
-  lua_pop(L, 1);
-
-  tk_iumap_t *expected_id_to_idx = tk_iumap_from_ivec(NULL, expected_ids);
-  if (!expected_id_to_idx) {
-    if (query_filter) tk_iuset_destroy(query_filter);
-    tk_error(L, "score_retrieval: failed to create expected ID mapping", ENOMEM);
-  }
+  tk_iumap_t *code_id_to_idx = tk_iumap_from_ivec(NULL, code_ids);
+  if (!code_id_to_idx)
+    tk_error(L, "score_retrieval: failed to create code ID mapping", ENOMEM);
 
   double total_score = 0.0;
   uint64_t total_queries = 0;
@@ -1557,32 +1546,51 @@ static inline int tm_score_retrieval (lua_State *L)
       if (weight_rank_map) tk_dumap_destroy(weight_rank_map);
     } else {
       #pragma omp for schedule(static)
-      for (uint64_t query_idx = 0; query_idx < retrieved_offsets->n - 1; query_idx++) {
-        int64_t query_id = retrieved_ids->a[query_idx];
+      for (uint64_t query_idx = 0; query_idx < eval_offsets->n - 1; query_idx++) {
+        int64_t query_id = eval_ids->a[query_idx];
 
-        // Skip if query not in filter (when filter is provided)
-        if (query_filter && tk_iuset_get(query_filter, query_id) == tk_iuset_end(query_filter))
+        khint_t code_khi = tk_iumap_get(code_id_to_idx, query_id);
+        if (code_khi == tk_iumap_end(code_id_to_idx))
+          continue;
+        int64_t query_code_idx = tk_iumap_val(code_id_to_idx, code_khi);
+
+        int64_t eval_start = eval_offsets->a[query_idx];
+        int64_t eval_end = eval_offsets->a[query_idx + 1];
+        if (eval_end == eval_start)
           continue;
 
-        khint_t exp_khi = tk_iumap_get(expected_id_to_idx, query_id);
-        if (exp_khi == tk_iumap_end(expected_id_to_idx))
-          continue;
-        int64_t expected_query_idx = tk_iumap_val(expected_id_to_idx, exp_khi);
-
-        int64_t exp_start = expected_offsets->a[expected_query_idx];
-        int64_t exp_end = expected_offsets->a[expected_query_idx + 1];
-        if (exp_end == exp_start)
+        char *query_code = codes
+          ? codes + query_code_idx * chunks
+          : (ann ? tk_ann_get(ann, query_id) : tk_hbi_get(hbi, query_id));
+        if (!query_code)
           continue;
 
         tk_pvec_clear(query_neighbors);
-        int64_t ret_start = retrieved_offsets->a[query_idx];
-        int64_t ret_end = retrieved_offsets->a[query_idx + 1];
 
-        for (int64_t i = ret_start; i < ret_end; i++) {
-          double hamming_sim = retrieved_weights->a[i];
-          int64_t hamming_dist = (int64_t)round((1.0 - hamming_sim) * (double)n_dims);
-          int64_t neighbor_idx = retrieved_neighbors->a[i];
-          tk_pvec_push(query_neighbors, tk_pair(neighbor_idx, hamming_dist));
+        for (int64_t i = eval_start; i < eval_end; i++) {
+          int64_t neighbor_eval_idx = eval_neighbors->a[i];
+          int64_t neighbor_id = eval_ids->a[neighbor_eval_idx];
+
+          char *neighbor_code = codes
+            ? NULL
+            : (ann ? tk_ann_get(ann, neighbor_id) : tk_hbi_get(hbi, neighbor_id));
+
+          if (codes) {
+            khint_t nbr_khi = tk_iumap_get(code_id_to_idx, neighbor_id);
+            if (nbr_khi == tk_iumap_end(code_id_to_idx))
+              continue;
+            int64_t neighbor_code_idx = tk_iumap_val(code_id_to_idx, nbr_khi);
+            neighbor_code = codes + neighbor_code_idx * chunks;
+          } else if (!neighbor_code) {
+            continue;
+          }
+
+          uint64_t hamming_dist = tk_cvec_bits_hamming_serial(
+            (const unsigned char*)query_code,
+            (const unsigned char*)neighbor_code,
+            n_dims);
+
+          tk_pvec_push(query_neighbors, tk_pair(neighbor_eval_idx, (int64_t)hamming_dist));
         }
 
         if (query_neighbors->n == 0) {
@@ -1595,16 +1603,16 @@ static inline int tm_score_retrieval (lua_State *L)
         double ranking_score = 0.0;
         switch (ranking) {
           case TK_EVAL_METRIC_NDCG:
-            ranking_score = tk_csr_ndcg_distance(expected_ids, expected_neighbors, expected_weights,
-              exp_start, exp_end, retrieved_ids, query_neighbors, weight_map);
+            ranking_score = tk_csr_ndcg_distance(eval_ids, eval_neighbors, eval_weights,
+              eval_start, eval_end, eval_ids, query_neighbors, weight_map);
             break;
           case TK_EVAL_METRIC_SPEARMAN:
-            ranking_score = tk_csr_spearman_distance(expected_ids, expected_neighbors, expected_weights,
-              exp_start, exp_end, retrieved_ids, query_neighbors, weight_ranks_buffer, weight_rank_map);
+            ranking_score = tk_csr_spearman_distance(eval_ids, eval_neighbors, eval_weights,
+              eval_start, eval_end, eval_ids, query_neighbors, weight_ranks_buffer, weight_rank_map);
             break;
           case TK_EVAL_METRIC_PEARSON:
-            ranking_score = tk_csr_pearson_distance(expected_ids, expected_neighbors, expected_weights,
-              exp_start, exp_end, retrieved_ids, query_neighbors, weight_map);
+            ranking_score = tk_csr_pearson_distance(eval_ids, eval_neighbors, eval_weights,
+              eval_start, eval_end, eval_ids, query_neighbors, weight_map);
             break;
           default:
             break;
@@ -1621,8 +1629,7 @@ static inline int tm_score_retrieval (lua_State *L)
     }
   }
 
-  tk_iumap_destroy(expected_id_to_idx);
-  if (query_filter) tk_iuset_destroy(query_filter);
+  tk_iumap_destroy(code_id_to_idx);
 
   double avg_score = total_queries > 0 ? total_score / (double)total_queries : 0.0;
 
@@ -1764,9 +1771,6 @@ static double tk_compute_reconstruction (
 static double tk_compute_retrieval (
   tk_ann_t *ann,
   tk_hbi_t *hbi,
-  tk_ivec_t *retrieved_ids,
-  tk_ivec_t *retrieved_offsets,
-  tk_ivec_t *retrieved_neighbors,
   tk_ivec_t *expected_ids,
   tk_ivec_t *expected_offsets,
   tk_ivec_t *expected_neighbors,
@@ -1779,11 +1783,7 @@ static double tk_compute_retrieval (
   if (mask_popcount == 0)
     return -INFINITY;
 
-  tk_iumap_t *expected_id_to_idx = tk_iumap_from_ivec(NULL, expected_ids);
-  if (!expected_id_to_idx)
-    return -INFINITY;
-
-  uint64_t n_queries = retrieved_offsets->n - 1;
+  uint64_t n_queries = expected_offsets->n - 1;
   double total = 0.0;
   uint64_t total_queries = 0;
 
@@ -1802,15 +1802,10 @@ static double tk_compute_retrieval (
     } else {
       #pragma omp for schedule(static)
       for (uint64_t query_idx = 0; query_idx < n_queries; query_idx++) {
-        int64_t query_id = retrieved_ids->a[query_idx];
+        int64_t query_id = expected_ids->a[query_idx];
 
-        khint_t exp_khi = tk_iumap_get(expected_id_to_idx, query_id);
-        if (exp_khi == tk_iumap_end(expected_id_to_idx))
-          continue;
-        int64_t expected_query_idx = tk_iumap_val(expected_id_to_idx, exp_khi);
-
-        int64_t exp_start = expected_offsets->a[expected_query_idx];
-        int64_t exp_end = expected_offsets->a[expected_query_idx + 1];
+        int64_t exp_start = expected_offsets->a[query_idx];
+        int64_t exp_end = expected_offsets->a[query_idx + 1];
         if (exp_end == exp_start)
           continue;
 
@@ -1819,12 +1814,10 @@ static double tk_compute_retrieval (
           continue;
 
         tk_pvec_clear(query_neighbors);
-        int64_t ret_start = retrieved_offsets->a[query_idx];
-        int64_t ret_end = retrieved_offsets->a[query_idx + 1];
 
-        for (int64_t i = ret_start; i < ret_end; i++) {
-          int64_t neighbor_idx = retrieved_neighbors->a[i];
-          int64_t neighbor_id = retrieved_ids->a[neighbor_idx];
+        for (int64_t i = exp_start; i < exp_end; i++) {
+          int64_t neighbor_idx = expected_neighbors->a[i];
+          int64_t neighbor_id = expected_ids->a[neighbor_idx];
           char *neighbor_code = ann ? tk_ann_get(ann, neighbor_id) : tk_hbi_get(hbi, neighbor_id);
           if (!neighbor_code)
             continue;
@@ -1854,15 +1847,15 @@ static double tk_compute_retrieval (
         switch (ranking) {
           case TK_EVAL_METRIC_NDCG:
             ranking_score = tk_csr_ndcg_distance(expected_ids, expected_neighbors, expected_weights,
-              exp_start, exp_end, retrieved_ids, query_neighbors, weight_map);
+              exp_start, exp_end, expected_ids, query_neighbors, weight_map);
             break;
           case TK_EVAL_METRIC_SPEARMAN:
             ranking_score = tk_csr_spearman_distance(expected_ids, expected_neighbors, expected_weights,
-              exp_start, exp_end, retrieved_ids, query_neighbors, weight_ranks_buffer, weight_rank_map);
+              exp_start, exp_end, expected_ids, query_neighbors, weight_ranks_buffer, weight_rank_map);
             break;
           case TK_EVAL_METRIC_PEARSON:
             ranking_score = tk_csr_pearson_distance(expected_ids, expected_neighbors, expected_weights,
-              exp_start, exp_end, retrieved_ids, query_neighbors, weight_map);
+              exp_start, exp_end, expected_ids, query_neighbors, weight_map);
             break;
           default:
             break;
@@ -1879,7 +1872,6 @@ static double tk_compute_retrieval (
     }
   }
 
-  tk_iumap_destroy(expected_id_to_idx);
   return total_queries > 0 ? total / (double)total_queries : 0.0;
 }
 
@@ -1891,7 +1883,6 @@ static double tk_compute_score (
   if (state->eval_metric == TK_EVAL_METRIC_RETRIEVAL) {
     return tk_compute_retrieval(
       state->ann, state->hbi,
-      state->retrieved_ids, state->retrieved_offsets, state->retrieved_neighbors,
       state->adjacency_ids, state->offsets, state->neighbors, state->weights,
       state->n_dims, state->retrieval_ranking, mask, mask_popcount);
   } else {
@@ -2114,9 +2105,6 @@ static inline int tm_optimize_bits (lua_State *L)
   char *codes = NULL;
   tk_ann_t *ann = NULL;
   tk_hbi_t *hbi = NULL;
-  tk_ivec_t *retrieved_ids = NULL;
-  tk_ivec_t *retrieved_offsets = NULL;
-  tk_ivec_t *retrieved_neighbors = NULL;
   tk_eval_metric_t retrieval_ranking = TK_EVAL_METRIC_NDCG;
 
   if (metric == TK_EVAL_METRIC_RETRIEVAL) {
@@ -2127,18 +2115,6 @@ static inline int tm_optimize_bits (lua_State *L)
     lua_pop(L, 1);
     if (!ann && !hbi)
       tk_lua_verror(L, 1, "optimize_bits", "index", "retrieval metric requires ann or hbi index");
-
-    lua_getfield(L, 1, "retrieved_ids");
-    retrieved_ids = tk_ivec_peek(L, -1, "retrieved_ids");
-    lua_pop(L, 1);
-
-    lua_getfield(L, 1, "retrieved_offsets");
-    retrieved_offsets = tk_ivec_peek(L, -1, "retrieved_offsets");
-    lua_pop(L, 1);
-
-    lua_getfield(L, 1, "retrieved_neighbors");
-    retrieved_neighbors = tk_ivec_peek(L, -1, "retrieved_neighbors");
-    lua_pop(L, 1);
 
     char *ranking_str = tk_lua_foptstring(L, 1, "optimize_bits", "ranking", "ndcg");
     retrieval_ranking = tk_eval_parse_metric(ranking_str);
@@ -2181,9 +2157,6 @@ static inline int tm_optimize_bits (lua_State *L)
   state.offsets = offsets;
   state.neighbors = neighbors;
   state.weights = weights;
-  state.retrieved_ids = retrieved_ids;
-  state.retrieved_offsets = retrieved_offsets;
-  state.retrieved_neighbors = retrieved_neighbors;
   state.retrieval_ranking = retrieval_ranking;
   state.optimal_k = keep_prefix;
   state.start_prefix = start_prefix;

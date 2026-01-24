@@ -28,12 +28,18 @@ local env = {
     },
     ["spectral%.c"] = {
       cflags = {
-        "-isystem$(PWD)/deps/primme/primme/include",
-        "-fopenmp", "$(shell pkg-config --cflags blas lapack)"
+        "-fopenmp", "$(shell pkg-config --cflags blas lapack lapacke)"
       },
       ldflags = {
-        "$(PWD)/deps/primme/primme/lib/libprimme.a",
-        "-fopenmp", "$(shell pkg-config --libs blas lapack)"
+        "-fopenmp", "$(shell pkg-config --libs blas lapack lapacke)"
+      },
+    },
+    ["hlth%.c"] = {
+      cflags = {
+        "-fopenmp"
+      },
+      ldflags = {
+        "-fopenmp"
       },
     },
     ["itq%.c"] = {
@@ -60,8 +66,8 @@ local env = {
   dependencies = {
     "lua >= 5.1",
     "santoku >= 0.0.320-1",
-    "santoku-matrix >= 0.0.219-1",
-    "santoku-tokenizer >= 0.0.15-1",
+    "santoku-matrix >= 0.0.228-1",
+    "santoku-tokenizer >= 0.0.17-1",
   },
   test = {
     dependencies = {

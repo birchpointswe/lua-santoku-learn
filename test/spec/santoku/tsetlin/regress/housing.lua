@@ -34,7 +34,6 @@ local cfg = {
     patience = 30,
     iterations = 300,
   },
-  threads = nil,
 }
 
 test("tsetlin regressor", function ()
@@ -87,7 +86,7 @@ test("tsetlin regressor", function ()
     final_iterations = cfg.training.iterations,
 
     search_metric = function (regressor)
-      local predicted = regressor:predict(validate.problems, validate.n, cfg.threads)
+      local predicted = regressor:predict(validate.problems, validate.n)
       local stats = eval.regression_accuracy(predicted, validate.targets)
       return -stats[cfg.search.metric], stats
     end,
@@ -110,9 +109,9 @@ test("tsetlin regressor", function ()
   print("Testing restore")
   t = tm.load("regressor.bin", nil, true)
 
-  local train_pred = t:predict(train.problems, train.n, cfg.threads)
-  local val_pred = t:predict(validate.problems, validate.n, cfg.threads)
-  local test_pred = t:predict(test_set.problems, test_set.n, cfg.threads)
+  local train_pred = t:predict(train.problems, train.n)
+  local val_pred = t:predict(validate.problems, validate.n)
+  local test_pred = t:predict(test_set.problems, test_set.n)
 
   local train_stats = eval.regression_accuracy(train_pred, train.targets)
   local val_stats = eval.regression_accuracy(val_pred, validate.targets)
