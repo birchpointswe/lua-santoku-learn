@@ -1190,9 +1190,9 @@ static inline int tk_graph_adj_hoods(
   tk_dvec_t **weights_out
 ) {
   if (!ids || ids->n == 0) {
-    *offsets_out = tk_ivec_create(NULL, 1, 0, 0);
-    *neighbors_out = tk_ivec_create(NULL, 0, 0, 0);
-    *weights_out = tk_dvec_create(NULL, 0, 0, 0);
+    *offsets_out = tk_ivec_create(L, 1, 0, 0);
+    *neighbors_out = tk_ivec_create(L, 0, 0, 0);
+    *weights_out = tk_dvec_create(L, 0, 0, 0);
     if (!*offsets_out || !*neighbors_out || !*weights_out) {
       if (*offsets_out) tk_ivec_destroy(*offsets_out);
       if (*neighbors_out) tk_ivec_destroy(*neighbors_out);

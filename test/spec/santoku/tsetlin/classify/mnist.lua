@@ -1,8 +1,9 @@
+local arr = require("santoku.array")
 local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
-local optimize = require("santoku.tsetlin.optimize")
 local fs = require("santoku.fs")
 local ivec = require("santoku.ivec")
+local optimize = require("santoku.tsetlin.optimize")
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local str = require("santoku.string")
 local test = require("santoku.test")
@@ -26,19 +27,18 @@ local cfg = {
     include_bits = { def = 3, min = 1, max = 4, int = true },
   },
   search = {
-    patience = 10,
-    rounds = 0,
+    patience = 4,
+    rounds = 4,
     trials = 10,
-    iterations = 40,
+    iterations = 10,
   },
   training = {
     patience = 40,
     iterations = 400,
   },
-  threads = nil,
 }
 
-test("tsetlin", function ()
+test("mnist", function ()
 
   print("Reading data")
   local dataset = ds.read_binary_mnist("test/res/mnist.70k.txt", cfg.data.features, cfg.data.max)
@@ -90,8 +90,8 @@ test("tsetlin", function ()
     final_iterations = cfg.training.iterations,
 
     search_metric = function (t)
-      local predicted = t:predict(validate.problems, validate.n, cfg.threads)
-      local accuracy = eval.class_accuracy(predicted, validate.solutions, validate.n, cfg.tm.classes, cfg.threads)
+      local predicted = t:predict(validate.problems, validate.n)
+      local accuracy = eval.class_accuracy(predicted, validate.solutions, validate.n, cfg.tm.classes)
       return accuracy.f1, accuracy
     end,
 
@@ -112,23 +112,22 @@ test("tsetlin", function ()
 
   print("Testing restore")
   t = tm.load("model.bin", nil, true)
-  local train_pred = t:predict(train.problems, train.n, cfg.threads)
-  local val_pred = t:predict(validate.problems, validate.n, cfg.threads)
-  local test_pred = t:predict(test.problems, test.n, cfg.threads)
-  local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, cfg.tm.classes, cfg.threads)
-  local val_stats = eval.class_accuracy(val_pred, validate.solutions, validate.n, cfg.tm.classes, cfg.threads)
-  local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, cfg.tm.classes, cfg.threads)
+  local train_pred = t:predict(train.problems, train.n)
+  local val_pred = t:predict(validate.problems, validate.n)
+  local test_pred = t:predict(test.problems, test.n)
+  local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, cfg.tm.classes)
+  local val_stats = eval.class_accuracy(val_pred, validate.solutions, validate.n, cfg.tm.classes)
+  local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, cfg.tm.classes)
   str.printf("Evaluate\tTrain\t%4.2f\tVal\t%4.2f\tTest\t%4.2f\n", train_stats.f1, val_stats.f1, test_stats.f1)
 
   print("\nPer-class Test Accuracy (sorted by difficulty):\n")
-  local class_order = {}
-  for c = 1, cfg.tm.classes do class_order[c] = c end
-  table.sort(class_order, function (a, b)
+  local class_order = arr.range(1, cfg.tm.classes)
+  arr.sort(class_order, function (a, b)
     return test_stats.classes[a].f1 < test_stats.classes[b].f1
   end)
   for _, c in ipairs(class_order) do
     local ts = test_stats.classes[c]
-    str.printf("  digit_%d  F1=%.2f  P=%.2f  R=%.2f\n", c - 1, ts.f1, ts.precision, ts.recall)
+    str.printf("  digit_%-2d  F1=%.2f  P=%.2f  R=%.2f\n", c - 1, ts.f1, ts.precision, ts.recall)
   end
 
 end)
