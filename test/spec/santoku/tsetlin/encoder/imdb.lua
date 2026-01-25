@@ -35,7 +35,7 @@ local cfg = {
     max_vocab = 8192,
   },
   encoder = {
-    clauses = { def = 176, min = 8, max = 256, round = 8 },
+    clauses = 8, --{ def = 176, min = 8, max = 256, round = 8 },
     clause_tolerance = { def = 43, min = 16, max = 128, int = true },
     clause_maximum = { def = 104, min = 16, max = 128, int = true },
     target = { def = 32, min = 16, max = 128, int = true },
@@ -50,13 +50,12 @@ local cfg = {
   },
   bit_pruning = {
     enabled = true,
-    metric = "retrieval",
-    ranking = "ndcg",
+    metric = "ndcg",
     tolerance = 1e-6,
   },
   nystrom = {
     n_landmarks = 4096,
-    n_dims = 24,
+    n_dims = 256,
     cmp = "jaccard",
     decay = { def = 0.67, min = 0.0, max = 2.0 },
     rounds = 4,
@@ -143,19 +142,20 @@ test("imdb", function()
   local test_label_offsets, test_label_neighbors = test_solutions_bitmap:bits_to_csr(test_set.n, n_classes)
   test_set.label_csr = { offsets = test_label_offsets, neighbors = test_label_neighbors }
 
-  local n_graph_features = n_classes + n_top_v
-
   print("\nComputing BNS weights for tokens")
   local bns_top_ids, bns_top_scores = train.tokens:bits_top_bns(
     train_solutions_bitmap, train.n, n_top_v, n_classes, n_top_v)
+  str.printf("  Vocab: %d -> %d (BNS filtered)\n", n_top_v, bns_top_ids:size())
+  str.printf("  BNS weights: min=%.4f max=%.4f\n", bns_top_scores:min(), bns_top_scores:max())
+  tok:restrict(bns_top_ids)
+  train.tokens = tok:tokenize(train.problems)
+  validate.tokens = tok:tokenize(validate.problems)
+  test_set.tokens = tok:tokenize(test_set.problems)
+  n_top_v = bns_top_ids:size()
+  local n_graph_features = n_classes + n_top_v
   local graph_weights = dvec.create(n_graph_features)
   graph_weights:fill(1.0, 0, n_classes)
-  for i = 0, bns_top_ids:size() - 1 do
-    local tok_id = bns_top_ids:get(i)
-    graph_weights:set(n_classes + tok_id, bns_top_scores:get(i))
-  end
-  str.printf("  BNS weights: min=%.4f max=%.4f (for %d tokens)\n",
-    bns_top_scores:min(), bns_top_scores:max(), bns_top_ids:size())
+  graph_weights:copy(bns_top_scores, n_classes)
 
   print("\nBuilding graph_index (docs only, two-rank: labels + tokens)")
   local graph_features = ivec.create()
@@ -324,7 +324,6 @@ test("imdb", function()
       n_dims = train.dims,
       start_prefix = train.dims,
       metric = cfg.bit_pruning.metric,
-      ranking = cfg.bit_pruning.ranking,
       tolerance = cfg.bit_pruning.tolerance,
       each = cfg.verbose and function (bit, gain, score, event)
         str.printf("  %s bit=%d gain=%.6f score=%.6f\n", event, bit, gain, score)

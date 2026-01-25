@@ -48,7 +48,9 @@ static inline void tk_itq_encode (
   uint64_t n_dims,
   uint64_t max_iterations,
   double tolerance,
-  int i_each
+  int i_each,
+  tk_dvec_t **means_out,
+  tk_dvec_t **rotation_out
 ) {
   const uint64_t K = n_dims;
   const size_t N = codes->n / K;
@@ -118,6 +120,20 @@ static inline void tk_itq_encode (
 
   cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, N, K, K, 1.0, X, K, R, K, 0.0, V0, K);
   tk_itq_sign(out->a, V0, N, K);
+
+  if (means_out) {
+    tk_dvec_t *means = tk_dvec_create(L, K, 0, 0);
+    means->n = K;
+    memcpy(means->a, mean_buf, K * sizeof(double));
+    *means_out = means;
+  }
+
+  if (rotation_out) {
+    tk_dvec_t *rotation = tk_dvec_create(L, K * K, 0, 0);
+    rotation->n = K * K;
+    memcpy(rotation->a, R, K * K * sizeof(double));
+    *rotation_out = rotation;
+  }
 
   if (i_each >= 0) {
     lua_pushvalue(L, i_each);

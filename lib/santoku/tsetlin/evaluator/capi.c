@@ -26,7 +26,6 @@ typedef enum {
   TK_EVAL_METRIC_MEAN,
   TK_EVAL_METRIC_MIN,
   TK_EVAL_METRIC_NDCG,
-  TK_EVAL_METRIC_RETRIEVAL,
 } tk_eval_metric_t;
 
 static inline tk_eval_metric_t tk_eval_parse_metric (const char *metric_str) {
@@ -42,8 +41,6 @@ static inline tk_eval_metric_t tk_eval_parse_metric (const char *metric_str) {
     return TK_EVAL_METRIC_MIN;
   if (!strcmp(metric_str, "ndcg"))
     return TK_EVAL_METRIC_NDCG;
-  if (!strcmp(metric_str, "retrieval"))
-    return TK_EVAL_METRIC_RETRIEVAL;
   return TK_EVAL_METRIC_NONE;
 }
 
@@ -74,7 +71,6 @@ typedef struct {
   tk_ivec_t *offsets;
   tk_ivec_t *neighbors;
   tk_dvec_t *weights;
-  tk_eval_metric_t retrieval_ranking;
   uint64_t optimal_k;
   int64_t start_prefix;
   double tolerance;
@@ -1560,7 +1556,7 @@ static inline int tm_score_retrieval (lua_State *L)
           continue;
 
         char *query_code = codes
-          ? codes + query_code_idx * chunks
+          ? codes + (uint64_t)query_code_idx * chunks
           : (ann ? tk_ann_get(ann, query_id) : tk_hbi_get(hbi, query_id));
         if (!query_code)
           continue;
@@ -1580,7 +1576,7 @@ static inline int tm_score_retrieval (lua_State *L)
             if (nbr_khi == tk_iumap_end(code_id_to_idx))
               continue;
             int64_t neighbor_code_idx = tk_iumap_val(code_id_to_idx, nbr_khi);
-            neighbor_code = codes + neighbor_code_idx * chunks;
+            neighbor_code = codes + (uint64_t)neighbor_code_idx * chunks;
           } else if (!neighbor_code) {
             continue;
           }
@@ -1768,129 +1764,15 @@ static double tk_compute_reconstruction (
   return total_nodes_processed > 0 ? total / (double) total_nodes_processed : 0.0;
 }
 
-static double tk_compute_retrieval (
-  tk_ann_t *ann,
-  tk_hbi_t *hbi,
-  tk_ivec_t *expected_ids,
-  tk_ivec_t *expected_offsets,
-  tk_ivec_t *expected_neighbors,
-  tk_dvec_t *expected_weights,
-  uint64_t n_dims,
-  tk_eval_metric_t ranking,
-  char *mask,
-  uint64_t mask_popcount
-) {
-  if (mask_popcount == 0)
-    return -INFINITY;
-
-  uint64_t n_queries = expected_offsets->n - 1;
-  double total = 0.0;
-  uint64_t total_queries = 0;
-
-  #pragma omp parallel reduction(+:total) reduction(+:total_queries)
-  {
-    tk_pvec_t *query_neighbors = tk_pvec_create(NULL, 0, 0, 0);
-    tk_dumap_t *weight_map = tk_dumap_create(NULL, 0);
-    tk_pvec_t *weight_ranks_buffer = tk_pvec_create(NULL, 0, 0, 0);
-    tk_dumap_t *weight_rank_map = tk_dumap_create(NULL, 0);
-
-    if (!query_neighbors || !weight_map || !weight_ranks_buffer || !weight_rank_map) {
-      if (query_neighbors) tk_pvec_destroy(query_neighbors);
-      if (weight_map) tk_dumap_destroy(weight_map);
-      if (weight_ranks_buffer) tk_pvec_destroy(weight_ranks_buffer);
-      if (weight_rank_map) tk_dumap_destroy(weight_rank_map);
-    } else {
-      #pragma omp for schedule(static)
-      for (uint64_t query_idx = 0; query_idx < n_queries; query_idx++) {
-        int64_t query_id = expected_ids->a[query_idx];
-
-        int64_t exp_start = expected_offsets->a[query_idx];
-        int64_t exp_end = expected_offsets->a[query_idx + 1];
-        if (exp_end == exp_start)
-          continue;
-
-        char *query_code = ann ? tk_ann_get(ann, query_id) : tk_hbi_get(hbi, query_id);
-        if (!query_code)
-          continue;
-
-        tk_pvec_clear(query_neighbors);
-
-        for (int64_t i = exp_start; i < exp_end; i++) {
-          int64_t neighbor_idx = expected_neighbors->a[i];
-          int64_t neighbor_id = expected_ids->a[neighbor_idx];
-          char *neighbor_code = ann ? tk_ann_get(ann, neighbor_id) : tk_hbi_get(hbi, neighbor_id);
-          if (!neighbor_code)
-            continue;
-
-          uint64_t hamming_dist = mask
-            ? tk_cvec_bits_hamming_mask_serial(
-                (const unsigned char*)query_code,
-                (const unsigned char*)neighbor_code,
-                (const unsigned char*)mask,
-                n_dims)
-            : tk_cvec_bits_hamming_serial(
-                (const unsigned char*)query_code,
-                (const unsigned char*)neighbor_code,
-                n_dims);
-
-          tk_pvec_push(query_neighbors, tk_pair(neighbor_idx, (int64_t)hamming_dist));
-        }
-
-        if (query_neighbors->n == 0) {
-          total_queries++;
-          continue;
-        }
-
-        tk_pvec_asc(query_neighbors, 0, query_neighbors->n);
-
-        double ranking_score = 0.0;
-        switch (ranking) {
-          case TK_EVAL_METRIC_NDCG:
-            ranking_score = tk_csr_ndcg_distance(expected_ids, expected_neighbors, expected_weights,
-              exp_start, exp_end, expected_ids, query_neighbors, weight_map);
-            break;
-          case TK_EVAL_METRIC_SPEARMAN:
-            ranking_score = tk_csr_spearman_distance(expected_ids, expected_neighbors, expected_weights,
-              exp_start, exp_end, expected_ids, query_neighbors, weight_ranks_buffer, weight_rank_map);
-            break;
-          case TK_EVAL_METRIC_PEARSON:
-            ranking_score = tk_csr_pearson_distance(expected_ids, expected_neighbors, expected_weights,
-              exp_start, exp_end, expected_ids, query_neighbors, weight_map);
-            break;
-          default:
-            break;
-        }
-
-        total_queries++;
-        total += ranking_score;
-      }
-
-      tk_pvec_destroy(query_neighbors);
-      tk_dumap_destroy(weight_map);
-      tk_pvec_destroy(weight_ranks_buffer);
-      tk_dumap_destroy(weight_rank_map);
-    }
-  }
-
-  return total_queries > 0 ? total / (double)total_queries : 0.0;
-}
-
 static double tk_compute_score (
   tk_eval_t *state,
   char *mask,
   uint64_t mask_popcount
 ) {
-  if (state->eval_metric == TK_EVAL_METRIC_RETRIEVAL) {
-    return tk_compute_retrieval(
-      state->ann, state->hbi,
-      state->adjacency_ids, state->offsets, state->neighbors, state->weights,
-      state->n_dims, state->retrieval_ranking, mask, mask_popcount);
-  } else {
-    return tk_compute_reconstruction(
-      state->codes, state->ann, state->hbi, state->adjacency_ids,
-      state->n_dims, state->offsets, state->neighbors, state->weights,
-      state->eval_metric, mask, mask_popcount);
-  }
+  return tk_compute_reconstruction(
+    state->codes, state->ann, state->hbi, state->adjacency_ids,
+    state->n_dims, state->offsets, state->neighbors, state->weights,
+    state->eval_metric, mask, mask_popcount);
 }
 
 static void tm_optimize_bits_prefix_greedy (
@@ -2076,10 +1958,12 @@ static inline int tm_optimize_bits (lua_State *L)
 {
   lua_settop(L, 1);
 
-  char *metric_str = tk_lua_foptstring(L, 1, "optimize_bits", "metric", "spearman");
+  char *metric_str = tk_lua_foptstring(L, 1, "optimize_bits", "metric", "ndcg");
   tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
-  if (metric == TK_EVAL_METRIC_NONE)
-    tk_lua_verror(L, 1, "optimize_bits", "metric", "unknown metric");
+  if (metric != TK_EVAL_METRIC_NDCG &&
+      metric != TK_EVAL_METRIC_SPEARMAN &&
+      metric != TK_EVAL_METRIC_PEARSON)
+    tk_lua_verror(L, 1, "optimize_bits", "metric", "must be ndcg, spearman, or pearson");
 
   uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "optimize_bits", "n_dims");
   uint64_t keep_prefix = tk_lua_foptunsigned(L, 1, "optimize_bits", "keep_prefix", 0);
@@ -2105,39 +1989,20 @@ static inline int tm_optimize_bits (lua_State *L)
   char *codes = NULL;
   tk_ann_t *ann = NULL;
   tk_hbi_t *hbi = NULL;
-  tk_eval_metric_t retrieval_ranking = TK_EVAL_METRIC_NDCG;
 
-  if (metric == TK_EVAL_METRIC_RETRIEVAL) {
+  lua_getfield(L, 1, "codes");
+  tk_cvec_t *cvec = tk_cvec_peekopt(L, -1);
+  lua_pop(L, 1);
+  if (cvec) {
+    codes = cvec->a;
+  } else {
     lua_getfield(L, 1, "index");
     ann = tk_ann_peekopt(L, -1);
     if (!ann)
       hbi = tk_hbi_peekopt(L, -1);
     lua_pop(L, 1);
     if (!ann && !hbi)
-      tk_lua_verror(L, 1, "optimize_bits", "index", "retrieval metric requires ann or hbi index");
-
-    char *ranking_str = tk_lua_foptstring(L, 1, "optimize_bits", "ranking", "ndcg");
-    retrieval_ranking = tk_eval_parse_metric(ranking_str);
-    if (retrieval_ranking != TK_EVAL_METRIC_NDCG &&
-        retrieval_ranking != TK_EVAL_METRIC_SPEARMAN &&
-        retrieval_ranking != TK_EVAL_METRIC_PEARSON)
-      tk_lua_verror(L, 1, "optimize_bits", "ranking", "must be ndcg, spearman, or pearson");
-  } else {
-    lua_getfield(L, 1, "codes");
-    tk_cvec_t *cvec = tk_cvec_peekopt(L, -1);
-    lua_pop(L, 1);
-
-    if (cvec) {
-      codes = cvec->a;
-    } else {
-      lua_getfield(L, 1, "index");
-      ann = tk_ann_peekopt(L, -1);
-      if (!ann)
-        hbi = tk_hbi_peekopt(L, -1);
-      lua_pop(L, 1);
-      if (!ann && !hbi)
-        tk_lua_verror(L, 1, "optimize_bits", "codes/index", "codes or index required");
-    }
+      tk_lua_verror(L, 1, "optimize_bits", "codes/index", "codes or index required");
   }
 
   int i_each = -1;
@@ -2157,7 +2022,6 @@ static inline int tm_optimize_bits (lua_State *L)
   state.offsets = offsets;
   state.neighbors = neighbors;
   state.weights = weights;
-  state.retrieval_ranking = retrieval_ranking;
   state.optimal_k = keep_prefix;
   state.start_prefix = start_prefix;
   state.tolerance = tolerance;

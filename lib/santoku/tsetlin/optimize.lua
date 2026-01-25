@@ -89,12 +89,13 @@ local function sample_alpha_spec (spec, use_defaults)
   return val
 end
 
-M.apply_itq = function (raw_codes, n_dims)
+M.apply_itq = function (raw_codes, n_dims, return_params)
   return itq.itq({
     codes = raw_codes,
     n_dims = n_dims,
     iterations = 100,
     tolerance = 1e-8,
+    return_params = return_params,
   })
 end
 
@@ -974,7 +975,7 @@ M.build_spectral_nystrom = function (args)
     each_cb({ event = "stage", stage = "lift" })
   end
 
-  local raw_codes = hlth.nystrom_lift({
+  local col_means, raw_codes = hlth.nystrom_lift({
     chol = chol,
     eigenvectors = eigenvectors,
     eigenvalues = eigenvalues,
@@ -987,7 +988,7 @@ M.build_spectral_nystrom = function (args)
     each_cb({ event = "stage", stage = "itq" })
   end
 
-  local codes = M.apply_itq(raw_codes, n_dims)
+  local codes, itq_means, itq_rotation = M.apply_itq(raw_codes, n_dims, true)
 
   if each_cb then
     each_cb({ event = "stage", stage = "index" })
@@ -1009,6 +1010,9 @@ M.build_spectral_nystrom = function (args)
     landmark_ids = landmark_ids,
     eigenvectors = eigenvectors,
     eigenvalues = eigenvalues,
+    col_means = col_means,
+    itq_means = itq_means,
+    itq_rotation = itq_rotation,
     chol = chol,
     n_landmarks = actual_landmarks,
   }

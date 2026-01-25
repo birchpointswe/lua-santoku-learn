@@ -63,8 +63,8 @@ typedef struct tk_tsetlin_s {
   unsigned int input_chunks;
   unsigned int clause_chunks;
   unsigned int class_chunks;
-  unsigned int state_chunks;
-  unsigned int action_chunks;
+  size_t state_chunks;
+  size_t action_chunks;
   uint8_t tail_mask;
   char *state;
   char *actions;
@@ -501,8 +501,8 @@ static inline void tk_tsetlin_init_classifier (
   tm->tail_mask = tail_bits ? (uint8_t)((1u << tail_bits) - 1) : 0xFF;
   tm->input_chunks = TK_CVEC_BITS_BYTES(tm->input_bits);
   tm->clause_chunks = TK_CVEC_BITS_BYTES(tm->clauses);
-  tm->state_chunks = tm->classes * tm->clauses * (tm->state_bits - 1) * tm->input_chunks;
-  tm->action_chunks = tm->classes * tm->clauses * tm->input_chunks;
+  tm->state_chunks = (size_t)tm->classes * tm->clauses * (tm->state_bits - 1) * tm->input_chunks;
+  tm->action_chunks = (size_t)tm->classes * tm->clauses * tm->input_chunks;
   tm->state = (char *)tk_malloc_aligned(L, tm->state_chunks, TK_CVEC_BITS);
   tm->actions = (char *)tk_malloc_aligned(L, tm->action_chunks, TK_CVEC_BITS);
   tm->specificity = specificity;
@@ -624,8 +624,8 @@ static inline void tk_tsetlin_init_classifier_ind (
     total_state_bytes += tm->clauses * tm->input_chunks_ind[h] * (state_bits - 1);
     total_action_bytes += tm->clauses * tm->input_chunks_ind[h];
   }
-  tm->state_chunks = (unsigned int)total_state_bytes;
-  tm->action_chunks = (unsigned int)total_action_bytes;
+  tm->state_chunks = total_state_bytes;
+  tm->action_chunks = total_action_bytes;
   tm->state = (char *)tk_malloc_aligned(L, total_state_bytes, TK_CVEC_BITS);
   tm->actions = (char *)tk_malloc_aligned(L, total_action_bytes, TK_CVEC_BITS);
   if (!(tm->state && tm->actions))
@@ -972,8 +972,8 @@ static inline int tk_tsetlin_restrict (lua_State *L)
 
   tm->classes = (unsigned int)n_selected;
   tm->class_chunks = TK_CVEC_BITS_BYTES(tm->classes);
-  tm->state_chunks = (unsigned int)new_state_bytes;
-  tm->action_chunks = (unsigned int)new_action_bytes;
+  tm->state_chunks = new_state_bytes;
+  tm->action_chunks = new_action_bytes;
 
   free(tm->results);
   tm->results = NULL;
@@ -1321,7 +1321,10 @@ static inline int tk_tsetlin_train_classifier (
     for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
       uint64_t first_clause = chunk * TK_CVEC_BITS;
       uint64_t last_clause = chunk * TK_CVEC_BITS + TK_CVEC_BITS - 1;
-      tk_automata_setup(&tm->automata, first_clause, last_clause);
+      if (last_clause >= tm->automata.n_clauses)
+        last_clause = tm->automata.n_clauses - 1;
+      if (first_clause < tm->automata.n_clauses)
+        tk_automata_setup(&tm->automata, first_clause, last_clause);
     }
   }
   for (unsigned int iter = 0; iter < max_iter; iter++) {
@@ -1410,7 +1413,10 @@ static inline int tk_tsetlin_train_encoder (
     for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
       uint64_t first_clause = chunk * TK_CVEC_BITS;
       uint64_t last_clause = chunk * TK_CVEC_BITS + TK_CVEC_BITS - 1;
-      tk_automata_setup(&tm->automata, first_clause, last_clause);
+      if (last_clause >= tm->automata.n_clauses)
+        last_clause = tm->automata.n_clauses - 1;
+      if (first_clause < tm->automata.n_clauses)
+        tk_automata_setup(&tm->automata, first_clause, last_clause);
     }
   }
   for (unsigned int iter = 0; iter < max_iter; iter++) {
@@ -1507,7 +1513,10 @@ static inline int tk_tsetlin_train_encoder_ind (lua_State *L, tk_tsetlin_t *tm) 
       for (unsigned int chunk = 0; chunk < clause_chunks; chunk++) {
         uint64_t first_clause = chunk * TK_CVEC_BITS;
         uint64_t last_clause = chunk * TK_CVEC_BITS + TK_CVEC_BITS - 1;
-        tk_automata_setup(aut, first_clause, last_clause);
+        if (last_clause >= aut->n_clauses)
+          last_clause = aut->n_clauses - 1;
+        if (first_clause < aut->n_clauses)
+          tk_automata_setup(aut, first_clause, last_clause);
       }
     }
   }
@@ -1604,7 +1613,10 @@ static inline int tk_tsetlin_train_classifier_ind (lua_State *L, tk_tsetlin_t *t
       for (unsigned int chunk = 0; chunk < clause_chunks; chunk++) {
         uint64_t first_clause = chunk * TK_CVEC_BITS;
         uint64_t last_clause = chunk * TK_CVEC_BITS + TK_CVEC_BITS - 1;
-        tk_automata_setup(aut, first_clause, last_clause);
+        if (last_clause >= aut->n_clauses)
+          last_clause = aut->n_clauses - 1;
+        if (first_clause < aut->n_clauses)
+          tk_automata_setup(aut, first_clause, last_clause);
       }
     }
   }
@@ -1706,7 +1718,10 @@ static inline int tk_tsetlin_train_regressor (lua_State *L, tk_tsetlin_t *tm) {
     for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
       uint64_t first_clause = chunk * TK_CVEC_BITS;
       uint64_t last_clause = chunk * TK_CVEC_BITS + TK_CVEC_BITS - 1;
-      tk_automata_setup(&tm->automata, first_clause, last_clause);
+      if (last_clause >= tm->automata.n_clauses)
+        last_clause = tm->automata.n_clauses - 1;
+      if (first_clause < tm->automata.n_clauses)
+        tk_automata_setup(&tm->automata, first_clause, last_clause);
     }
   }
   for (unsigned int iter = 0; iter < max_iter; iter++) {
@@ -1821,7 +1836,10 @@ static inline int tk_tsetlin_train_regressor_ind (lua_State *L, tk_tsetlin_t *tm
       for (unsigned int chunk = 0; chunk < clause_chunks; chunk++) {
         uint64_t first_clause = chunk * TK_CVEC_BITS;
         uint64_t last_clause = chunk * TK_CVEC_BITS + TK_CVEC_BITS - 1;
-        tk_automata_setup(aut, first_clause, last_clause);
+        if (last_clause >= aut->n_clauses)
+          last_clause = aut->n_clauses - 1;
+        if (first_clause < aut->n_clauses)
+          tk_automata_setup(aut, first_clause, last_clause);
       }
     }
   }
@@ -1936,8 +1954,8 @@ static inline void _tk_tsetlin_persist_classifier (lua_State *L, tk_tsetlin_t *t
   tk_lua_fwrite(L, &tm->input_bits, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->input_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fwrite(L, &tm->clause_chunks, sizeof(unsigned int), 1, fh);
-  tk_lua_fwrite(L, &tm->state_chunks, sizeof(unsigned int), 1, fh);
-  tk_lua_fwrite(L, &tm->action_chunks, sizeof(unsigned int), 1, fh);
+  tk_lua_fwrite(L, &tm->state_chunks, sizeof(size_t), 1, fh);
+  tk_lua_fwrite(L, &tm->action_chunks, sizeof(size_t), 1, fh);
   tk_lua_fwrite(L, &tm->specificity, sizeof(double), 1, fh);
   tk_lua_fwrite(L, &tm->tail_mask, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, tm->actions, 1, tm->action_chunks, fh);
@@ -2026,18 +2044,18 @@ static inline int tk_tsetlin_reconfigure (lua_State *L)
   new_clauses = TK_CVEC_BITS_BYTES(new_clauses) * TK_CVEC_BITS;
   unsigned int new_clause_chunks = TK_CVEC_BITS_BYTES(new_clauses);
 
-  unsigned int new_action_chunks, new_state_chunks;
+  size_t new_action_chunks, new_state_chunks;
   if (tm->individualized) {
-    uint64_t total_action = 0, total_state = 0;
+    size_t total_action = 0, total_state = 0;
     for (unsigned int h = 0; h < tm->classes; h++) {
-      total_action += new_clauses * tm->input_chunks_ind[h];
-      total_state += new_clauses * tm->input_chunks_ind[h] * (tm->state_bits - 1);
+      total_action += (size_t)new_clauses * tm->input_chunks_ind[h];
+      total_state += (size_t)new_clauses * tm->input_chunks_ind[h] * (tm->state_bits - 1);
     }
-    new_action_chunks = (unsigned int)total_action;
-    new_state_chunks = (unsigned int)total_state;
+    new_action_chunks = total_action;
+    new_state_chunks = total_state;
   } else {
-    new_action_chunks = tm->classes * new_clauses * tm->input_chunks;
-    new_state_chunks = tm->classes * new_clauses * (tm->state_bits - 1) * tm->input_chunks;
+    new_action_chunks = (size_t)tm->classes * new_clauses * tm->input_chunks;
+    new_state_chunks = (size_t)tm->classes * new_clauses * (tm->state_bits - 1) * tm->input_chunks;
   }
 
   if (new_action_chunks > tm->action_chunks) {
@@ -2112,8 +2130,8 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, 
   tk_lua_fread(L, &tm->input_bits, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->input_chunks, sizeof(unsigned int), 1, fh);
   tk_lua_fread(L, &tm->clause_chunks, sizeof(unsigned int), 1, fh);
-  tk_lua_fread(L, &tm->state_chunks, sizeof(unsigned int), 1, fh);
-  tk_lua_fread(L, &tm->action_chunks, sizeof(unsigned int), 1, fh);
+  tk_lua_fread(L, &tm->state_chunks, sizeof(size_t), 1, fh);
+  tk_lua_fread(L, &tm->action_chunks, sizeof(size_t), 1, fh);
   tk_lua_fread(L, &tm->specificity, sizeof(double), 1, fh);
   tk_lua_fread(L, &tm->tail_mask, sizeof(uint8_t), 1, fh);
   tm->actions = (char *)tk_malloc_aligned(L, tm->action_chunks, TK_CVEC_BITS);
