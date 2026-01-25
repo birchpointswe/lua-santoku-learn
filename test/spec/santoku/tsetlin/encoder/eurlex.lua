@@ -31,10 +31,10 @@ local cfg = {
   feature_selection = {
     min_df = -2,
     max_df = 0.98,
-    max_vocab = 8192,
+    max_vocab = 4096,
   },
   encoder = {
-    clauses = { def = 248, min = 16, max = 256, round = 8 },
+    clauses = 8, --{ def = 248, min = 16, max = 256, round = 8 },
     clause_tolerance = { def = 20, min = 8, max = 128, int = true },
     clause_maximum = { def = 119, min = 16, max = 128, int = true },
     target = { def = 17, min = 4, max = 64, int = true },
@@ -49,13 +49,12 @@ local cfg = {
   },
   bit_pruning = {
     enabled = true,
-    metric = "retrieval",
-    ranking = "ndcg",
+    metric = "ndcg",
     tolerance = 1e-6,
   },
   nystrom = {
     n_landmarks = 4096,
-    n_dims = 24,
+    n_dims = 256,
     cmp = "jaccard",
     decay = { def = 0.67, min = 0.0, max = 2.0 },
     rounds = 4,
@@ -119,17 +118,19 @@ test("eurlex-docs", function()
   local test_label_offsets, test_label_neighbors = test_set.solutions:bits_to_csr(test_set.n, n_labels)
   test_set.label_csr = { offsets = test_label_offsets, neighbors = test_label_neighbors }
 
-  local n_graph_features = n_labels + n_top_v
-
   print("\nComputing BNS weights for tokens")
   local bns_top_ids, bns_top_scores = train.tokens:bits_top_bns(
     train.solutions, train.n, n_top_v, n_labels, n_top_v)
+  str.printf("  Vocab: %d -> %d (BNS filtered)\n", n_top_v, bns_top_ids:size())
+  tok:restrict(bns_top_ids)
+  train.tokens = tok:tokenize(train.problems)
+  dev.tokens = tok:tokenize(dev.problems)
+  test_set.tokens = tok:tokenize(test_set.problems)
+  n_top_v = bns_top_ids:size()
+  local n_graph_features = n_labels + n_top_v
   local graph_weights = dvec.create(n_graph_features)
   graph_weights:fill(1.0, 0, n_labels)
-  for i = 0, bns_top_ids:size() - 1 do
-    local tok_id = bns_top_ids:get(i)
-    graph_weights:set(n_labels + tok_id, bns_top_scores:get(i))
-  end
+  graph_weights:copy(bns_top_scores, n_labels)
   str.printf("  BNS weights: min=%.4f max=%.4f (for %d tokens)\n",
     bns_top_scores:min(), bns_top_scores:max(), bns_top_ids:size())
 
@@ -300,7 +301,6 @@ test("eurlex-docs", function()
       n_dims = train.dims,
       start_prefix = train.dims,
       metric = cfg.bit_pruning.metric,
-      ranking = cfg.bit_pruning.ranking,
       tolerance = cfg.bit_pruning.tolerance,
       each = cfg.verbose and function (bit, gain, score, event)
         str.printf("  %s bit=%d gain=%.6f score=%.6f\n", event, bit, gain, score)
