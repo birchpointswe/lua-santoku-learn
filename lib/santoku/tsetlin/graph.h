@@ -144,7 +144,7 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
       int64_t *uset = tk_inv_get(__idx_inv, (u), &un); \
       int64_t *vset = tk_inv_get(__idx_inv, (v), &vn); \
       if (uset && vset) { \
-        double sim = tk_inv_similarity(__idx_inv, uset, un, vset, vn, (cmp), (alpha), (beta), (decay), (q_w), (e_w), (i_w)); \
+        double sim = tk_inv_similarity(__idx_inv, uset, un, vset, vn, (cmp), (alpha), (beta), (decay), (q_w), (e_w), (i_w), NULL, 0.0); \
         (dist_var) = 1.0 - sim; \
       } else { \
         (dist_var) = 1.0; \

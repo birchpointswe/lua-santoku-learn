@@ -12,6 +12,7 @@ static inline int tk_itq_encode_lua (lua_State *L)
   uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "itq", "n_dims");
   uint64_t max_iterations = tk_lua_foptunsigned(L, 1, "itq", "iterations", 1000);
   double tolerance = tk_lua_foptposdouble(L, 1, "itq", "tolerance", 1e-8);
+  bool return_params = tk_lua_foptboolean(L, 1, "itq", "return_params", false);
 
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
@@ -19,8 +20,15 @@ static inline int tk_itq_encode_lua (lua_State *L)
     i_each = tk_lua_absindex(L, -1);
   }
 
-  tk_itq_encode(L, codes, n_dims, max_iterations, tolerance, i_each);
+  tk_dvec_t *means = NULL;
+  tk_dvec_t *rotation = NULL;
+  tk_itq_encode(L, codes, n_dims, max_iterations, tolerance, i_each,
+    return_params ? &means : NULL,
+    return_params ? &rotation : NULL);
 
+  if (return_params) {
+    return 3;
+  }
   return 1;
 }
 

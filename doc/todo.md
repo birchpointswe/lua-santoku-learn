@@ -1,19 +1,18 @@
 # Current
 
-~ Run real full end to end as-is to get good defaults for all
-
+- Run end to end and update defaults
 - Make heterogeneous (keep spot checks the same; print label/doc nodes together)
 - Create label only index
+- Refactor to avoid graph.xxx entirely, extending the index apis to directly
+  produce what is needed for eval/etc.
 - Evaluate and spot check train/dev/test asymmetric label rankings
 - Train regressor
 - Evaluate and spot check train/dev/test asymmetric label selected sets
-
 - Rewrite docs in favor of nystrom approach
-
 - Save branch
 - Purge everything not in current/active code usage, incl:
     - corex, tch, cknn, sigma, elbows, prone, knn_xxx=true helpers simhash,
-      top_coherence, top_lift, optimize elbows, prone
+      top_coherence, top_lift, optimize elbows, prone, graph module
     - essentially all unused code, saving behind a save branch
 
 - Clean up todo.md
