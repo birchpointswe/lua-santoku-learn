@@ -1,13 +1,10 @@
-#include <santoku/iuset.h>
 #include <santoku/lua/utils.h>
 #include <santoku/tsetlin/ann.h>
 
 static inline int tk_ann_create_lua (lua_State *L)
 {
-  uint64_t expected = tk_lua_fcheckunsigned(L, 1, "create", "expected_size");
   uint64_t features = tk_lua_fcheckunsigned(L, 1, "create", "features");
-  uint64_t bucket_target = tk_lua_foptunsigned(L, 1, "create", "bucket_target", 30);
-  tk_ann_create_randomized(L, features, bucket_target, expected);
+  tk_ann_create(L, features);
   return 1;
 }
 
@@ -22,16 +19,6 @@ static inline int tk_ann_load_lua (lua_State *L)
   return 1;
 }
 
-static inline int tk_ann_mutualize_lua (lua_State *L)
-{
-  tk_ann_t *ann = tk_ann_peek(L, 1);
-  tk_ann_hoods_t *hoods = tk_ann_hoods_peek(L, 2, "hoods");
-  tk_ivec_t *uids = tk_ivec_peek(L, 3, "ids");
-  uint64_t min = tk_lua_optunsigned(L, 4, "min", 0);
-  tk_ann_mutualize(L, ann, hoods, uids, min, NULL);
-  return 0;
-}
-
 static inline int tk_ann_hoods_select_topk_lua (lua_State *L)
 {
   lua_settop(L, 2);
@@ -42,7 +29,7 @@ static inline int tk_ann_hoods_select_topk_lua (lua_State *L)
   for (uint64_t i = 0; i < hoods->n; i++) {
     uint64_t k = ks->a[i] > 0 ? (uint64_t)ks->a[i] : 0;
     uint64_t cur = hoods->a[i]->n;
-    tk_pvec_setn(hoods->a[i], k < cur ? k : cur);
+    hoods->a[i]->n = k < cur ? k : cur;
   }
   return 0;
 }
@@ -51,7 +38,6 @@ static luaL_Reg tk_ann_fns[] =
 {
   { "create", tk_ann_create_lua },
   { "load", tk_ann_load_lua },
-  { "mutualize", tk_ann_mutualize_lua },
   { NULL, NULL }
 };
 

@@ -49,7 +49,6 @@ Direct feature-to-code prediction via per-dimension chi2 feature selection.
 then train a Tsetlin machine encoder on the selected features.
 
 **Characteristics**:
-- Per-dimension feature spaces (individualized)
 - Direct token/pixel features as input
 - Simpler pipeline with fewer hyperparameters
 - Well-suited for high-dimensional sparse features

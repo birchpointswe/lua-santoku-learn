@@ -67,7 +67,7 @@ Approximate nearest neighbor index with binary encodings.
 
 | Function | Arguments | Returns | Description |
 |----------|-----------|---------|-------------|
-| `ann.create` | `table: {expected_size, features, bucket_target?: 30, probe_radius?: 2, threads?}` | `tk_ann_t` | Create ANN index with LSH parameters |
+| `ann.create` | `table: {features}` | `tk_ann_t` | Create ANN index |
 | `ann.load` | `string/tk_ann_t: data, boolean?: from_string, number?: threads` | `tk_ann_t` | Load ANN index from file |
 
 #### Instance Methods
@@ -95,7 +95,7 @@ Inverted index for sparse binary features.
 
 | Function | Arguments | Returns | Description |
 |----------|-----------|---------|-------------|
-| `inv.create` | `table: {features, weights?: tk_dvec_t, ranks?: tk_ivec_t, n_ranks?, rank_decay_window?, rank_decay_sigma?, rank_decay_floor?, threads?}` | `tk_inv_t` | Create inverted index with ranking |
+| `inv.create` | `table: {features: number/tk_dvec_t, ranks?: tk_ivec_t, n_ranks?}` | `tk_inv_t` | Create inverted index with ranking |
 | `inv.load` | `string/tk_inv_t: data, boolean?: from_string, number?: threads` | `tk_inv_t` | Load from file |
 
 #### Instance Methods

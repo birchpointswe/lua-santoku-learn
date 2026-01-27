@@ -23,21 +23,21 @@ local cfg = {
     skips = 1,
   },
   feature_selection = {
-    max_vocab = 16384,
+    max_vocab = 2^15,
   },
   tm = {
     classes = 20,
-    clauses = 32,
-    clause_tolerance = { def = 109, min = 16, max = 128, int = true },
-    clause_maximum = { def = 118, min = 16, max = 128, int = true },
-    target = { def = 48, min = 16, max = 128, int = true },
-    specificity = { def = 497, min = 400, max = 4000 },
-    include_bits = { def = 2, min = 1, max = 4, int = true },
+    clauses = 64,
+    clause_tolerance = { def = 41, min = 16, max = 128, int = true },
+    clause_maximum = { def = 108, min = 16, max = 128, int = true },
+    target = { def = 98, min = 16, max = 128, int = true },
+    specificity = { def = 534, min = 400, max = 4000 },
+    include_bits = { def = 3, min = 1, max = 4, int = true },
   },
   search = {
     patience = 4,
-    rounds = 4,
-    trials = 10,
+    rounds = 6,
+    trials = 20,
     iterations = 10,
   },
   training = {
@@ -78,21 +78,21 @@ test("newsgroups", function ()
   local n_top_v = chi2_ids:size()
   str.printf("  Chi2: %d features\n", n_top_v)
   train.solutions:add_scaled(-cfg.tm.classes)
-  train.problems0 = nil
+  train.problems0 = nil -- luacheck: ignore
   tok:restrict(chi2_ids)
-  chi2_ids = nil
+  chi2_ids = nil -- luacheck: ignore
 
   local function to_bitmap (split)
     local toks = tok:tokenize(split.problems)
     local bitmap = toks:bits_to_cvec(split.n, n_top_v, true)
-    toks:destroy()
+    toks = nil -- luacheck: ignore
     return bitmap
   end
 
   train.problems = to_bitmap(train)
   validate.problems = to_bitmap(validate)
   test.problems = to_bitmap(test)
-  tok:destroy()
+  tok = nil -- luacheck: ignore
 
   print("Optimizing Classifier")
   local stopwatch = utc.stopwatch()
