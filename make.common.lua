@@ -13,7 +13,7 @@ local env = {
     "-fopenmp", "$(shell pkg-config --cflags blas lapack lapacke)"
   },
   ldflags = {
-    "-lm", "-fopenmp", "$(shell pkg-config --cflags blas lapack lapacke)",
+    "-lm", "-fopenmp", "$(shell pkg-config --libs blas lapack lapacke)",
     "-Wl,-z,nodelete"
   },
   dependencies = {

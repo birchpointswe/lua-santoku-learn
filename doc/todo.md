@@ -11,6 +11,8 @@
 - Rewrite docs in favor of new approach
 - Clean up todo.md
 
+- TM curriculum leaning/re-allocation of capacity during training
+
 # Now
 
 - Allow clustering on tk_inv_t (centroid lower-bound possible?)
