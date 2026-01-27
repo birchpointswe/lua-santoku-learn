@@ -10,42 +10,11 @@ local env = {
     "-Wpointer-sign", "-Wno-unused-parameter", "-Wno-unused-but-set-variable",
     "-I$(shell luarocks show santoku --rock-dir)/include/",
     "-I$(shell luarocks show santoku-matrix --rock-dir)/include/",
-    "-fopenmp", "$(shell pkg-config --cflags blas lapack)"
+    "-fopenmp", "$(shell pkg-config --cflags blas lapack lapacke)"
   },
   ldflags = {
-    "-lm", "-fopenmp", "$(shell pkg-config --cflags blas lapack)",
+    "-lm", "-fopenmp", "$(shell pkg-config --cflags blas lapack lapacke)",
     "-Wl,-z,nodelete"
-  },
-  rules = {
-    ["graph%.c"] = {
-      cflags = {
-        "-isystem$(PWD)/deps/primme/primme/include",
-      },
-      ldflags = {
-        "$(PWD)/deps/primme/primme/lib/libprimme.a",
-        "-fopenmp", "$(shell pkg-config --libs blas lapack)"
-      },
-    },
-    ["spectral%.c"] = {
-      cflags = { "-fopenmp", "$(shell pkg-config --cflags blas lapack lapacke)" },
-      ldflags = { "-fopenmp", "$(shell pkg-config --libs blas lapack lapacke)" },
-    },
-    ["hlth%.c"] = {
-      cflags = { "-fopenmp", "$(shell pkg-config --cflags blas lapack lapacke)" },
-      ldflags = { "-fopenmp", "$(shell pkg-config --libs blas lapack lapacke)" },
-    },
-    ["itq%.c"] = {
-      cflags = { "-fopenmp", "$(shell pkg-config --cflags blas lapack lapacke)" },
-      ldflags = { "-fopenmp", "$(shell pkg-config --libs blas lapack lapacke)" },
-    },
-    ["inv%.c"] = {
-      cflags = { "-fopenmp", "$(shell pkg-config --cflags blas lapack lapacke)" },
-      ldflags = { "-fopenmp", "$(shell pkg-config --libs blas lapack lapacke)" },
-    },
-    ["tch%.c"] = {
-      cflags = { "-fopenmp" },
-      ldflags = { "-fopenmp" },
-    },
   },
   dependencies = {
     "lua >= 5.1",
