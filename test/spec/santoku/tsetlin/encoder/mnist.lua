@@ -17,25 +17,21 @@ local cfg = {
     ttr = 0.5,
     tvr = 0.1,
     max = nil,
-    max_class = nil,
     visible = 784,
   },
-  feature_selection = {
-    max_vocab = 784,
-  },
   encoder = {
-    clauses = 8, --{ def = 48, min = 8, max = 256, round = 8 },
-    clause_tolerance = { def = 64, min = 16, max = 128, int = true },
+    clauses = 32,
+    clause_tolerance = { def = 64, min = 8, max = 128, int = true },
     clause_maximum = { def = 95, min = 16, max = 128, int = true },
-    target = { def = 16, min = 16, max = 128, int = true },
-    specificity = { def = 493, min = 400, max = 4000 },
-    include_bits = { def = 2, min = 1, max = 4, int = true },
+    target = { def = 16, min = 4, max = 64, int = true },
+    specificity = { def = 493, min = 50, max = 2000 },
+    include_bits = { def = 2, min = 1, max = 6, int = true },
     search_patience = 4,
-    search_rounds = 4,
+    search_rounds = 6,
     search_trials = 10,
     search_iterations = 10,
-    final_patience = 40,
-    final_iterations = 400,
+    final_patience = 20,
+    final_iterations = 200,
   },
   bit_pruning = {
     enabled = true,
@@ -44,19 +40,22 @@ local cfg = {
   },
   nystrom = {
     n_landmarks = 4096,
-    n_dims = 64,
-    cmp = "jaccard",
-    decay = { def = 0.67, min = 0.0, max = 2.0 },
-    rounds = 4,
+    n_dims = 96,
+    cmp = "cosine",
+    combine = "exponential",
+    decay = { def = 2.4, min = 0.0, max = 3.0 },
+    binarize = "itq",
+    rounds = 6,
     samples = 10,
   },
   eval = {
     anchors = 16,
     pairs = 64,
     ranking = "ndcg",
+    cmp = "cosine",
   },
   classifier = {
-    clauses = { def = 8, min = 8, max = 32, round = 8 },
+    clauses = 32,
     clause_tolerance = { def = 64, min = 16, max = 128, int = true },
     clause_maximum = { def = 64, min = 16, max = 128, int = true },
     target = { def = 32, min = 16, max = 128, int = true },
@@ -66,8 +65,8 @@ local cfg = {
     search_rounds = 4,
     search_trials = 10,
     search_iterations = 10,
-    final_patience = 40,
-    final_iterations = 400,
+    final_patience = 20,
+    final_iterations = 200,
   },
   verbose = true,
 }
@@ -80,18 +79,19 @@ test("mnist", function ()
   local stopwatch = utc.stopwatch()
 
   print("Loading data")
-  local dataset = ds.read_mnist(
-    "test/res/mnist/train-images-idx3-ubyte",
-    "test/res/mnist/train-labels-idx1-ubyte",
-    cfg.data.max_class, cfg.data.max)
-  local train, test_set, validate = ds.split(dataset, cfg.data.ttr, cfg.data.tvr)
+  local dataset = ds.read_binary_mnist("test/res/mnist.70k.txt", n_visible, cfg.data.max)
+  local train, test_set, validate = ds.split_binary_mnist(dataset, cfg.data.ttr, cfg.data.tvr)
   str.printf("  Train: %d  Validate: %d  Test: %d  Classes: %d  Pixels: %d\n",
     train.n, validate.n, test_set.n, n_classes, n_visible)
 
-  print("\nBinarizing pixels")
-  train.pixels = train.problems:bits_to_ivec(train.n, n_visible)
-  validate.pixels = validate.problems:bits_to_ivec(validate.n, n_visible)
-  test_set.pixels = test_set.problems:bits_to_ivec(test_set.n, n_visible)
+  print("\nExtracting pixels")
+  train.pixels = ivec.create()
+  dataset.problems:bits_select(nil, train.ids, n_visible, train.pixels)
+  validate.pixels = ivec.create()
+  dataset.problems:bits_select(nil, validate.ids, n_visible, validate.pixels)
+  test_set.pixels = ivec.create()
+  dataset.problems:bits_select(nil, test_set.ids, n_visible, test_set.pixels)
+  dataset = nil
 
   print("\nCreating IDs")
   train.ids = ivec.create(train.n)
@@ -120,38 +120,24 @@ test("mnist", function ()
   local test_label_offsets, test_label_neighbors = test_solutions_bitmap:bits_to_csr(test_set.n, n_classes)
   test_set.label_csr = { offsets = test_label_offsets, neighbors = test_label_neighbors }
 
-  print("\nComputing BNS weights for pixels")
-  local bns_top_ids, bns_top_scores = train.pixels:bits_top_bns(
-    train_solutions_bitmap, train.n, n_visible, n_classes, n_visible)
-  str.printf("  Vocab: %d -> %d (BNS filtered)\n", n_visible, bns_top_ids:size())
-  local n_top_v = bns_top_ids:size()
-  local n_graph_features = n_classes + n_top_v
-  local graph_weights = dvec.create(n_graph_features)
-  graph_weights:fill(1.0, 0, n_classes)
-  graph_weights:copy(bns_top_scores, n_classes)
-  str.printf("  BNS weights: min=%.4f max=%.4f (for %d pixels)\n",
-    bns_top_scores:min(), bns_top_scores:max(), bns_top_ids:size())
-
-  print("\nRestricting pixels to BNS-selected features")
-  train.pixels:bits_select(bns_top_ids, nil, n_visible, train.pixels)
-  validate.pixels:bits_select(bns_top_ids, nil, n_visible, validate.pixels)
-  test_set.pixels:bits_select(bns_top_ids, nil, n_visible, test_set.pixels)
-
   print("\nBuilding graph_index (docs only, two-rank: labels + pixels)")
+  local n_graph_features = n_classes + n_visible
   local graph_features = ivec.create()
   graph_features:copy(train_solutions_bitmap)
-  graph_features:bits_extend(train.pixels, n_classes, n_top_v)
+  graph_features:bits_extend(train.pixels, n_classes, n_visible)
   local graph_ranks = ivec.create(n_graph_features)
   graph_ranks:fill(0, 0, n_classes)
   graph_ranks:fill(1, n_classes, n_graph_features)
   train.graph_index = inv.create({
-    features = graph_weights,
+    features = n_graph_features,
     ranks = graph_ranks,
     n_ranks = 2,
   })
   train.graph_index:add(graph_features, train.ids)
+  graph_features = nil
+  graph_ranks = nil
   str.printf("  Docs: %d  Features: %d (labels=%d, pixels=%d)\n",
-    train.n, n_graph_features, n_classes, n_top_v)
+    train.n, n_graph_features, n_classes, n_visible)
 
   print("\nBuilding eval_index (labels only) and evaluation adjacency")
   train.eval_index = inv.create({ features = n_classes, expected_size = train.n })
@@ -159,6 +145,7 @@ test("mnist", function ()
   local train_eval_ids, train_eval_offsets, train_eval_neighbors, train_eval_weights =
     graph.adjacency({
       category_index = train.eval_index,
+      category_cmp = cfg.eval.cmp,
       category_anchors = cfg.eval.anchors,
       random_pairs = cfg.eval.pairs,
     })
@@ -179,7 +166,9 @@ test("mnist", function ()
     n_landmarks = cfg.nystrom.n_landmarks,
     n_dims = cfg.nystrom.n_dims,
     cmp = cfg.nystrom.cmp,
+    combine = cfg.nystrom.combine,
     decay = cfg.nystrom.decay,
+    binarize = cfg.nystrom.binarize,
     rounds = cfg.nystrom.rounds,
     samples = cfg.nystrom.samples,
     expected = {
@@ -198,6 +187,24 @@ test("mnist", function ()
   local train_target_codes = train.index:get(train.ids)
   util.spot_check_codes(train_target_codes, train.n, train.dims, "spectral codes")
 
+  print("\nBit entropy stats for spectral codes:")
+  local entropy_ids, entropy_scores = train_target_codes:bits_top_entropy(train.n, train.dims, train.dims)
+  local zero_entropy_count = 0
+  for i = 0, entropy_ids:size() - 1 do
+    local dim = entropy_ids:get(i)
+    local ent = entropy_scores:get(i)
+    if ent < 0.01 then
+      zero_entropy_count = zero_entropy_count + 1
+      if zero_entropy_count <= 10 then
+        str.printf("  dim %d: entropy=%.6f (near-constant)\n", dim, ent)
+      end
+    end
+  end
+  str.printf("  Total near-constant dims (entropy < 0.01): %d / %d\n", zero_entropy_count, train.dims)
+  str.printf("  Entropy range: min=%.6f max=%.6f\n", entropy_scores:min(), entropy_scores:max())
+  entropy_ids = nil
+  entropy_scores = nil
+
   if cfg.verbose then
     print("\nSpot-checking spectral code KNN (compare to eval adj above)")
     local spectral_knn_ids, spectral_knn_offsets, spectral_knn_neighbors, spectral_knn_weights =
@@ -213,6 +220,16 @@ test("mnist", function ()
   end
 
   print("\nEvaluating spectral codes against eval adjacency")
+  local spectral_raw_stats = eval.ranking_accuracy({
+    raw_codes = model.raw_codes,
+    ids = model.ids,
+    eval_ids = train_eval_ids,
+    eval_offsets = train_eval_offsets,
+    eval_neighbors = train_eval_neighbors,
+    eval_weights = train_eval_weights,
+    ranking = cfg.eval.ranking,
+    n_dims = train.dims,
+  })
   local spectral_eval_stats = eval.ranking_accuracy({
     index = train.index,
     ids = model.ids,
@@ -223,16 +240,11 @@ test("mnist", function ()
     ranking = cfg.eval.ranking,
     n_dims = train.dims,
   })
-  str.printf("  Spectral codes ranking score: %.4f\n", spectral_eval_stats.score)
+  str.printf("  Spectral codes ranking: raw=%.4f binary=%.4f\n", spectral_raw_stats.score, spectral_eval_stats.score)
+  model.raw_codes = nil
 
-  print("\nPer-dim Chi2 feature selection for encoder")
-  local chi2_vocab = train.pixels:bits_top_chi2_ind(
-    train_target_codes, train.n, n_top_v, train.dims, cfg.feature_selection.max_vocab)
-  local train_encoder_visible = chi2_vocab:size()
-  str.printf("  Chi2: %d features (union across %d dims)\n", train_encoder_visible, train.dims)
-  local train_encoder_pixels = ivec.create()
-  train.pixels:bits_select(chi2_vocab, nil, n_top_v, train_encoder_pixels)
-  local train_encoder_sentences = train_encoder_pixels:bits_to_cvec(train.n, train_encoder_visible, true)
+  print("\nConverting pixels to sentences for encoder")
+  local train_encoder_sentences = train.pixels:bits_to_cvec(train.n, n_visible, true)
 
   print("\nTraining encoder")
   local encoder_args = {
@@ -240,7 +252,7 @@ test("mnist", function ()
     codes = train_target_codes,
     samples = train.n,
     sentences = train_encoder_sentences,
-    visible = train_encoder_visible,
+    visible = n_visible,
     clauses = cfg.encoder.clauses,
     clause_tolerance = cfg.encoder.clause_tolerance,
     clause_maximum = cfg.encoder.clause_maximum,
@@ -273,6 +285,8 @@ test("mnist", function ()
 
   local train_ham = eval.encoding_accuracy(train_predicted, train_target_codes, train.n, train.dims).mean_hamming
   str.printf("  Train hamming: %.4f\n", train_ham)
+  train_target_codes = nil
+  train_encoder_sentences = nil
 
   print("\nEvaluating predicted codes against eval adjacency")
   local train_pred_ann = ann.create({ features = train.dims, expected_size = train.n })
@@ -320,11 +334,14 @@ test("mnist", function ()
       util.spot_check_codes(train_predicted, train.n, dims_final, "train pruned")
     end
   end
+  train_eval_ids = nil
+  train_eval_offsets = nil
+  train_eval_neighbors = nil
+  train_eval_weights = nil
+  train_pred_ann = nil
 
   print("\nPredicting validate codes")
-  local validate_encoder_pixels = ivec.create()
-  validate.pixels:bits_select(chi2_vocab, nil, n_top_v, validate_encoder_pixels)
-  local validate_encoder_sentences = validate_encoder_pixels:bits_to_cvec(validate.n, train_encoder_visible, true)
+  local validate_encoder_sentences = validate.pixels:bits_to_cvec(validate.n, n_visible, true)
   local validate_predicted = train.encoder:predict(validate_encoder_sentences, validate.n)
   if active_bits then
     local validate_pruned = cvec.create()
@@ -339,6 +356,7 @@ test("mnist", function ()
   local validate_eval_ids, validate_eval_offsets, validate_eval_neighbors, validate_eval_weights =
     graph.adjacency({
       category_index = validate.eval_index,
+      category_cmp = cfg.eval.cmp,
       category_anchors = cfg.eval.anchors,
       random_pairs = cfg.eval.pairs,
     })
@@ -367,11 +385,15 @@ test("mnist", function ()
     n_dims = dims_final,
   })
   str.printf("  Validate ranking score: %.4f\n", validate_pred_stats.score)
+  validate_encoder_sentences = nil
+  validate_pred_ann = nil
+  validate_eval_ids = nil
+  validate_eval_offsets = nil
+  validate_eval_neighbors = nil
+  validate_eval_weights = nil
 
   print("\nPredicting test codes")
-  local test_encoder_pixels = ivec.create()
-  test_set.pixels:bits_select(chi2_vocab, nil, n_top_v, test_encoder_pixels)
-  local test_encoder_sentences = test_encoder_pixels:bits_to_cvec(test_set.n, train_encoder_visible, true)
+  local test_encoder_sentences = test_set.pixels:bits_to_cvec(test_set.n, n_visible, true)
   local test_predicted = train.encoder:predict(test_encoder_sentences, test_set.n)
   if active_bits then
     local test_pruned = cvec.create()
@@ -386,6 +408,7 @@ test("mnist", function ()
   local test_eval_ids, test_eval_offsets, test_eval_neighbors, test_eval_weights =
     graph.adjacency({
       category_index = test_set.eval_index,
+      category_cmp = cfg.eval.cmp,
       category_anchors = cfg.eval.anchors,
       random_pairs = cfg.eval.pairs,
     })
@@ -414,48 +437,63 @@ test("mnist", function ()
     n_dims = dims_final,
   })
   str.printf("  Test ranking score: %.4f\n", test_pred_stats.score)
+  test_encoder_sentences = nil
+  test_pred_ann = nil
 
-  if cfg.classifier then
-    print("\nTraining classifier on predicted codes")
-    local classifier_args = {
-      hidden = n_classes,
-      codes = train_solutions_bitmap:bits_to_cvec(train.n, n_classes),
-      samples = train.n,
-      sentences = train_predicted:to_cvec(train.n, dims_final),
-      visible = dims_final,
-      clauses = cfg.classifier.clauses,
-      clause_tolerance = cfg.classifier.clause_tolerance,
-      clause_maximum = cfg.classifier.clause_maximum,
-      target = cfg.classifier.target,
-      specificity = cfg.classifier.specificity,
-      include_bits = cfg.classifier.include_bits,
-      search_patience = cfg.classifier.search_patience,
-      search_rounds = cfg.classifier.search_rounds,
-      search_trials = cfg.classifier.search_trials,
-      search_iterations = cfg.classifier.search_iterations,
-      final_patience = cfg.classifier.final_patience,
-      final_iterations = cfg.classifier.final_iterations,
-      search_metric = function (t, enc_info)
-        local predicted = t:predict(enc_info.sentences, enc_info.samples)
-        local accuracy = eval.encoding_accuracy(predicted, enc_info.codes, enc_info.samples, n_classes)
-        return accuracy.mean_hamming, accuracy
-      end,
-      each = cfg.verbose and function (_, is_final, metrics, params, epoch, round, trial)
-        local phase = is_final and "F" or str.format("R%d T%d", round, trial)
-        str.printf("[CLASSIFIER %s E%d] C=%d L=%d/%d T=%d S=%.0f IB=%d ham=%.4f\n",
-          phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
-          params.target, params.specificity, params.include_bits, metrics.mean_hamming)
-      end or nil,
-    }
-    local classifier = optimize.encoder(classifier_args)
+  print("\nClassifier evaluation")
+  train_predicted:bits_flip_interleave(dims_final)
+  validate_predicted:bits_flip_interleave(dims_final)
+  test_predicted:bits_flip_interleave(dims_final)
 
-    print("\nClassifying test set")
-    local test_class_predicted = classifier:predict(test_predicted:to_cvec(test_set.n, dims_final), test_set.n)
-    local test_class_accuracy = eval.classification_accuracy(
-      test_class_predicted, test_solutions_bitmap:bits_to_cvec(test_set.n, n_classes), test_set.n, n_classes)
-    str.printf("  Test classification accuracy: %.4f\n", test_class_accuracy.accuracy)
-  end
+  local classifier = optimize.classifier({
+    features = dims_final,
+    classes = n_classes,
+    clauses = cfg.classifier.clauses,
+    clause_tolerance = cfg.classifier.clause_tolerance,
+    clause_maximum = cfg.classifier.clause_maximum,
+    target = cfg.classifier.target,
+    specificity = cfg.classifier.specificity,
+    include_bits = cfg.classifier.include_bits,
+    samples = train.n,
+    problems = train_predicted,
+    solutions = train.solutions,
+    search_patience = cfg.classifier.search_patience,
+    search_rounds = cfg.classifier.search_rounds,
+    search_trials = cfg.classifier.search_trials,
+    search_iterations = cfg.classifier.search_iterations,
+    final_patience = cfg.classifier.final_patience,
+    final_iterations = cfg.classifier.final_iterations,
+    search_metric = function (t)
+      local predicted = t:predict(validate_predicted, validate.n)
+      local accuracy = eval.class_accuracy(predicted, validate.solutions, validate.n, n_classes)
+      return accuracy.f1, accuracy
+    end,
+    each = cfg.verbose and function (_, is_final, val_accuracy, params, epoch, round, trial)
+      local d, dd = stopwatch()
+      local phase = is_final and "F" or str.format("R%d T%d", round, trial)
+      str.printf("[CLASSIFY %s E%d] C=%d L=%d/%d T=%d S=%.0f IB=%d F1=%.2f (%.2fs +%.2fs)\n",
+        phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
+        params.target, params.specificity, params.include_bits, val_accuracy.f1, d, dd)
+    end or nil,
+  })
 
-  str.printf("\nTotal time: %.2fs\n", stopwatch())
+  local train_class_pred = classifier:predict(train_predicted, train.n)
+  local validate_class_pred = classifier:predict(validate_predicted, validate.n)
+  local test_class_pred = classifier:predict(test_predicted, test_set.n)
+  local train_class_stats = eval.class_accuracy(train_class_pred, train.solutions, train.n, n_classes)
+  local validate_class_stats = eval.class_accuracy(validate_class_pred, validate.solutions, validate.n, n_classes)
+  local test_class_stats = eval.class_accuracy(test_class_pred, test_set.solutions, test_set.n, n_classes)
+
+  print("\n" .. string.rep("=", 60))
+  print("SUMMARY")
+  print(string.rep("=", 60))
+  str.printf("  Spectral dims: %d -> %d (after pruning)\n", train.dims, dims_final)
+  str.printf("  Train spectral score: %.4f\n", spectral_eval_stats.score)
+  str.printf("  Train predicted score: %.4f  hamming: %.4f\n", pred_eval_stats.score, train_ham)
+  str.printf("  Validate predicted score: %.4f\n", validate_pred_stats.score)
+  str.printf("  Test predicted score: %.4f\n", test_pred_stats.score)
+  str.printf("  Classifier F1: train=%.2f validate=%.2f test=%.2f\n",
+    train_class_stats.f1, validate_class_stats.f1, test_class_stats.f1)
+  str.printf("  Time: %.1fs\n", stopwatch())
 
 end)

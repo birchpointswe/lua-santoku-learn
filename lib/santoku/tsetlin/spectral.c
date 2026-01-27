@@ -52,30 +52,37 @@ static inline int tm_encode (lua_State *L)
     1.0, chol_centered->a, (int)n_landmarks, chol_centered->a, (int)n_landmarks,
     0.0, gram->a, (int)n_landmarks);
 
-  tk_dvec_t *eigenvalues_full = tk_dvec_create(L, n_landmarks, 0, 0);
-  eigenvalues_full->n = n_landmarks;
+  tk_dvec_t *eigenvalues_raw = tk_dvec_create(L, n_dims, 0, 0);
+  double *evecs_raw = malloc(n_landmarks * n_landmarks * sizeof(double));
+  int *isuppz = malloc(2 * n_dims * sizeof(int));
+  int m = 0;
 
-  int info = LAPACKE_dsyevd(LAPACK_ROW_MAJOR, 'V', 'U',
-    (int)n_landmarks, gram->a, (int)n_landmarks, eigenvalues_full->a);
+  int info = LAPACKE_dsyevr(LAPACK_ROW_MAJOR, 'V', 'I', 'U',
+    (int)n_landmarks, gram->a, (int)n_landmarks,
+    0.0, 0.0, (int)(n_landmarks - n_dims + 1), (int)n_landmarks,
+    0.0, &m, eigenvalues_raw->a, evecs_raw, (int)n_landmarks, isuppz);
 
-  if (info != 0)
-    return luaL_error(L, "LAPACKE_dsyevd failed with info=%d", info);
+  free(isuppz);
+
+  if (info != 0) {
+    free(evecs_raw);
+    return luaL_error(L, "LAPACKE_dsyevr failed with info=%d", info);
+  }
 
   tk_dvec_t *eigenvectors = tk_dvec_create(L, n_landmarks * n_dims, 0, 0);
-  eigenvectors->n = n_landmarks * n_dims;
+  tk_dvec_t *eigenvalues = tk_dvec_create(L, n_dims, 0, 0);
 
   #pragma omp parallel for schedule(static)
   for (uint64_t i = 0; i < n_landmarks; i++) {
     for (uint64_t k = 0; k < n_dims; k++) {
-      uint64_t col = n_landmarks - 1 - k;
-      eigenvectors->a[i * n_dims + k] = gram->a[i * n_landmarks + col];
+      uint64_t col = n_dims - 1 - k;
+      eigenvectors->a[i * n_dims + k] = evecs_raw[i * n_landmarks + col];
     }
   }
-
-  tk_dvec_t *eigenvalues = tk_dvec_create(L, n_dims, 0, 0);
-  eigenvalues->n = n_dims;
   for (uint64_t k = 0; k < n_dims; k++)
-    eigenvalues->a[k] = eigenvalues_full->a[n_landmarks - 1 - k];
+    eigenvalues->a[k] = eigenvalues_raw->a[n_dims - 1 - k];
+
+  free(evecs_raw);
 
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
@@ -84,12 +91,12 @@ static inline int tm_encode (lua_State *L)
   }
 
   if (i_each != -1) {
-    for (uint64_t i = 0; i < n_landmarks; i++) {
+    for (uint64_t i = 0; i < n_dims; i++) {
       lua_pushvalue(L, i_each);
       lua_pushstring(L, "eig");
       lua_pushinteger(L, (int64_t)i);
-      lua_pushnumber(L, eigenvalues_full->a[n_landmarks - 1 - i]);
-      lua_pushboolean(L, i < n_dims);
+      lua_pushnumber(L, eigenvalues->a[i]);
+      lua_pushboolean(L, 1);
       lua_call(L, 4, 0);
     }
     lua_pushvalue(L, i_each);

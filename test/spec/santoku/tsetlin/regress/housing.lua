@@ -16,11 +16,11 @@ local cfg = {
   },
   tm = {
     outputs = 1,
-    clauses = { def = 160, min = 32, max = 512, round = 8 },
-    clause_tolerance = { def = 40, min = 8, max = 128, int = true },
-    clause_maximum = { def = 127, min = 16, max = 128, int = true },
-    target = { def = 47, min = 4, max = 64, int = true },
-    specificity = { def = 64, min = 50, max = 2000 },
+    clauses = 32,
+    clause_tolerance = { def = 58, min = 8, max = 128, int = true },
+    clause_maximum = { def = 89, min = 16, max = 128, int = true },
+    target = { def = 53, min = 4, max = 64, int = true },
+    specificity = { def = 293, min = 50, max = 2000 },
     include_bits = { def = 1, min = 1, max = 6, int = true },
   },
   search = {
