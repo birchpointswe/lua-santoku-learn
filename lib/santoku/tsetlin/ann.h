@@ -2,6 +2,7 @@
 #define TK_ANN_H
 
 #include <santoku/lua/utils.h>
+#include <santoku/iuset.h>
 #include <santoku/ivec.h>
 #include <santoku/pvec.h>
 #include <santoku/iumap.h>
