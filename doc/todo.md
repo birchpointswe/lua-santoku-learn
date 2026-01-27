@@ -8,67 +8,16 @@
 - Spot check found label neighbors
 - Fit regression predicting k from neighbors lists
 - Evaluate regression-selected tags against train/dev/test
-- Rewrite docs in favor of nystrom approach
-- Save branch
-- Purge everything not in current/active code usage, incl:
-    - _ind variants and support for bits_individualize in TM/etc.
-    - corex, tch, cknn, sigma, elbows, prone, knn_xxx=true helpers simhash,
-      optimize elbows
-    - essentially all unused code, saving behind a save branch
-
+- Rewrite docs in favor of new approach
 - Clean up todo.md
-- Consider
-    - Leverage bits_to_csr more broadly, using csr format for most operations
 
 # Now
 
-- Add EUR-Lex-4k test
-- Can score_elbow/etc should use a bipartite multi-label/etc structure? Or just
-  known binary connections? Can we do that for clustering?
-
-- Need to write up the philosophy: using prone/spectral based on observable knn
-  by reweighted with label info as a dimensionality reduction bridge, thus
-  allowing classifiers/learners to recover the representation from the
-  observable space.
-
-- Check: do we need include_bits? IB=3 functionaly equivalent to state_bits=5?
-
-- Document/define how we do thousand-label multi-label classification via
-  encoder/knn search (likely need to bring back elbow method search likely)
-
-- Add simple hamming distance cutoff to elbow optimization
-
-- Adapt all existing encoder tests to support prone vs spectral, as well as
-  explored adjacencies vs expected-as-training adjacencies
-
-- Explore expected+cknn filtering for spectral instead of separate training
-  adjacency
-
-- Simplify spectral adjacency sampling by simply pre-creating a single big
-  bridge=none knn adjacency, and then pass it to graph.adjacency as
-  seed/bipartite, relying on existing cknn/etc logic. Double-check on whether
-  this is actually equivalent to re-creating it every time.
-
-- Revise/rewrite documentation for sth
-- Supplementary documentation similar to sth for classification pipelines
-
-- Support passing in an index instead of codes to clustering, which allows
-  clustering based on tk_inv_t, tk_ann_t, or tk_hbi_t using a new
-  tk_inv/ann/hbi_distances (batch distance) API
-    - Centroid optimization disabled in this case
-
+- Allow clustering on tk_inv_t (centroid lower-bound possible?)
 - Batch distance API for ann/inv indices (distance_many or similar) to avoid
   O(n*k) individual :distance() calls in diagnostics and weighted encoding
-
 - Parallelize booleanizer and tokenizer
-
 - Rename library and project to santoku-learn
-
-- Additional capabilities
-    - Sparse/dense PCA for dimensionality reduction (can be followed by ITQ)
-    - Sparse/dense linear SVM for codebook/classifier learning
-
-- Regression TM, supporting single and multi-output
 
 - tsetlin
     - Interpretation of learned clauses, e.g. emitting clauses weighted by
@@ -82,25 +31,22 @@
           names/etc (pixel coordinates for mnist, tokens for text, etc)
     - Prune unused literals, returning pruned for subsequent filtering of
       tokenizer/booleanizer, giving faster inference
-        - Demonstrate this
-
-- _ind variants for:
-    - All bits_top functions
-    - Corex top features
 
 # Next
+
+- Consider explicitly NOT exposing any :destroy() functionality to lua, instead
+  accomplishing lua-side explicit cleanup via =nil and collectgarbage. Then, see
+  what additional cleanup c-side this enables.
 
 - Extend tests
     - AmaonCat-13K encoder
     - snli encoder/classifier
     - qqp encoder/classifier
 
-- Add options to add unsupervised spectral as additional feature engineering for
-  classification and encoder targets. For encoder, raw features and nystrom, and
-  for classifier, encoder and nystrom. Also include an option to allow raw
-  features along with encoder and or nystrom features for final classifiers.
-
-- Autoencoder
+- Explore higher-level architectures:
+    - Autoencoder
+    - Triplet-loss trained encoder/regressor
+    - Stacked encoders
 
 - Chores
     - Error checks on dimensions to prevent segfaults everywhere
@@ -122,63 +68,28 @@
         - Generalization over the existing random search with center-based
           tightening
 
-- tk_graph_t
-    - Support querying for changes made to seed list over time (removed during dedupe, added by phase)
-
-- ann/hbi
-    - Further parallelize adding and removing from indices where possible
-    - Precompute hash probes in ann/hbi
-    - Consider bloom filter to avoid empty buckets
-    - Explore/consider batch probe multiple buckets
-
 - tokenizer
     - store known tokens contiguously, no need for separate mallocs/etc for each
       token. Use a single cvec as backend, storing pointers into that cvec
       insted of separately alloc'd strings. Ensure tokens are null terminated.
 
-- Separate all lua api functions explicitly via _lua variant (_lua variants must
-  respect the expected stack semantics strictly)
-
-- Consistently follow the x/x_lua pattern for naming conventions
-
-# Eventually
-
-- tk_inv_t
-    - Consider making decay a query-time parameter
-
-- tk_ann_t
-    - Allow user-provided list of hash bits and enable easy mi, chi2 or
-      corex-based feature bit-selection.
-        - mi, chi2, and corex could be run over all pairs using 1/pos 0/neg as
-          the binary label and the XOR of the nodes' features as the set of
-          features
-
-# Consider
-
-- Convolutional
-    - Tried this, see branch
-
-- Multi-layer classifiers and encoders
-- Titanic dataset
+- Separate all lua api functions explicitly via x/x_lua variant (_lua variants
+  must respect the expected stack semantics strictly); use it consistently
 
 - tk_dsu_t
     - Full Lua/C API?
 
-- tk_ann_t
-    - Guided hash bit selection (instead of random), using passed-in dataset to
-      select bits by entropy or some other metric (is this actually useful?)
+# Consider
 
-- corex
-    - should anchor multiply feature MI instead of hard-boosting it?
-    - allow explicit anchor feature list instead of last n_hidden, supporting
-      multiple assigned to same latent, etc.
+- Titanic dataset
 
-- generative model, next token predictor
+- Convolutional
+    - Tried this, see branch
+
+- Generative model, next token predictor
     - predict visible features from spectral codes
     - spectral embeddings from graph of ngrams as nodes, probabilities as
       weights?
 
-- tsetlin
+- Optimize
     - Bayesian optimization
-
-- Explore shared libaries, optimistic dynmaic linking? Is that a thing?

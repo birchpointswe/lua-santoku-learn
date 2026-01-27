@@ -8,7 +8,6 @@
 #include <santoku/pumap.h>
 #include <santoku/tsetlin/inv.h>
 #include <santoku/tsetlin/ann.h>
-#include <santoku/tsetlin/hbi.h>
 #include <santoku/tsetlin/dsu.h>
 #include <float.h>
 #include <math.h>
@@ -40,12 +39,6 @@ typedef enum {
   TK_GRAPH_BRIDGE_LARGEST
 } tk_graph_bridge_t;
 
-typedef enum {
-  TK_GRAPH_KNN_MODE_NONE,
-  TK_GRAPH_KNN_MODE_SIGMA,
-  TK_GRAPH_KNN_MODE_CKNN
-} tk_graph_knn_mode_t;
-
 typedef struct tk_graph_s {
 
   tk_euset_t *pairs;
@@ -61,7 +54,6 @@ typedef struct tk_graph_s {
 
   tk_inv_t *knn_inv; tk_inv_hoods_t *knn_inv_hoods;
   tk_ann_t *knn_ann; tk_ann_hoods_t *knn_ann_hoods;
-  tk_hbi_t *knn_hbi; tk_hbi_hoods_t *knn_hbi_hoods;
   tk_inv_hoods_t *weighted_hoods;
   tk_ivec_t *knn_query_ids;
   tk_ivec_t *knn_query_ivec;
@@ -80,7 +72,6 @@ typedef struct tk_graph_s {
 
   tk_inv_t *weight_inv;
   tk_ann_t *weight_ann;
-  tk_hbi_t *weight_hbi;
   tk_ivec_sim_type_t weight_cmp;
   double weight_alpha, weight_beta;
   double weight_decay;
@@ -96,14 +87,8 @@ typedef struct tk_graph_s {
   double weight_eps;
   tk_graph_reweight_t reweight;
 
-  tk_graph_knn_mode_t knn_mode;
-  double knn_alpha;
-
   uint64_t knn;
   uint64_t knn_cache;
-  double knn_eps;
-  bool knn_mutual;
-  uint64_t knn_min;
   tk_graph_bridge_t bridge;
   uint64_t probe_radius;
   int64_t category_ranks;
@@ -112,8 +97,6 @@ typedef struct tk_graph_s {
   bool knn_seed;
   bool knn_bipartite;
 
-  tk_dvec_t *sigmas;
-  double manifold_dim;
   uint64_t n_edges;
   tk_dsu_t *dsu;
   int64_t largest_component_root;
@@ -133,18 +116,17 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
   return (tk_graph_t *) luaL_checkudata(L, i, TK_GRAPH_MT);
 }
 
-#define TK_GRAPH_INDEX_DISTANCE(idx_inv, idx_ann, idx_hbi, u, v, cmp, alpha, beta, decay, dist_var) \
+#define TK_GRAPH_INDEX_DISTANCE(idx_inv, idx_ann, u, v, cmp, alpha, beta, decay, dist_var) \
   do { \
     tk_inv_t *__idx_inv = (idx_inv); \
     tk_ann_t *__idx_ann = (idx_ann); \
-    tk_hbi_t *__idx_hbi = (idx_hbi); \
     (dist_var) = DBL_MAX; \
     if (__idx_inv != NULL) { \
       size_t un = 0, vn = 0; \
       int64_t *uset = tk_inv_get(__idx_inv, (u), &un); \
       int64_t *vset = tk_inv_get(__idx_inv, (v), &vn); \
       if (uset && vset) { \
-        double sim = tk_inv_similarity(__idx_inv, uset, un, vset, vn, (cmp), (alpha), (beta), (decay), TK_COMBINE_WEIGHTED_AVG); \
+        double sim = tk_inv_similarity(__idx_inv, uset, un, vset, vn, (cmp), (alpha), (beta), TK_COMBINE_WEIGHTED_AVG, (decay)); \
         (dist_var) = 1.0 - sim; \
       } else { \
         (dist_var) = 1.0; \
@@ -156,17 +138,10 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
         (dist_var) = (double)tk_cvec_bits_hamming_serial((const uint8_t *)uset, (const uint8_t *)wset, \
                                                    __idx_ann->features) / (double)__idx_ann->features; \
       } \
-    } else if (__idx_hbi != NULL) { \
-      char *uset = tk_hbi_get(__idx_hbi, (u)); \
-      char *wset = tk_hbi_get(__idx_hbi, (v)); \
-      if (uset && wset) { \
-        (dist_var) = (double)tk_cvec_bits_hamming_serial((const uint8_t *)uset, (const uint8_t *)wset, \
-                                                   __idx_hbi->features) / (double)__idx_hbi->features; \
-      } \
     } \
   } while(0)
 
-#define TK_GRAPH_FOREACH_HOOD_NEIGHBOR(inv, ann, hbi, inv_hoods, ann_hoods, hbi_hoods, hood_idx, eps, uids_hoods, neighbor_idx_var, neighbor_uid_var, body) \
+#define TK_GRAPH_FOREACH_HOOD_NEIGHBOR(inv, ann, inv_hoods, ann_hoods, hood_idx, eps, uids_hoods, neighbor_idx_var, neighbor_uid_var, body) \
   do { \
     if ((inv_hoods) != NULL && (hood_idx) < (inv_hoods)->n) { \
       double __eps = (eps); \
@@ -190,9 +165,25 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
         (neighbor_uid_var) = (uids_hoods)->a[__r.i]; \
         body \
       } \
-    } else if ((hbi_hoods) != NULL && (hood_idx) < (hbi_hoods)->n) { \
-      int64_t __eps = (int64_t)((eps)*(double)(hbi)->features); \
-      tk_pvec_t *__hood = (hbi_hoods)->a[hood_idx]; \
+    } \
+  } while(0)
+
+#define TK_GRAPH_FOREACH_HOOD_NEIGHBOR_ALL(inv, ann, inv_hoods, ann_hoods, hood_idx, eps, uids_hoods, neighbor_idx_var, neighbor_uid_var, body) \
+  do { \
+    if ((inv_hoods) != NULL && (hood_idx) < (inv_hoods)->n) { \
+      double __eps = (eps); \
+      tk_rvec_t *__hood = (inv_hoods)->a[hood_idx]; \
+      for (uint64_t __j = 0; __j < __hood->n; __j++) { \
+        tk_rank_t __r = __hood->a[__j]; \
+        if (__r.i < 0 || __r.i >= (int64_t)(uids_hoods)->n) continue; \
+        if (__r.d > __eps) break; \
+        (neighbor_idx_var) = __r.i; \
+        (neighbor_uid_var) = (uids_hoods)->a[__r.i]; \
+        body \
+      } \
+    } else if ((ann_hoods) != NULL && (hood_idx) < (ann_hoods)->n) { \
+      int64_t __eps = (int64_t)((eps)*(double)(ann)->features); \
+      tk_pvec_t *__hood = (ann_hoods)->a[hood_idx]; \
       for (uint64_t __j = 0; __j < __hood->n; __j++) { \
         tk_pair_t __r = __hood->a[__j]; \
         if (__r.i < 0 || __r.i >= (int64_t)(uids_hoods)->n) continue; \
@@ -204,71 +195,26 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
     } \
   } while(0)
 
-#define TK_GRAPH_FOREACH_HOOD_NEIGHBOR_ALL(inv, ann, hbi, inv_hoods, ann_hoods, hbi_hoods, hood_idx, eps, uids_hoods, neighbor_idx_var, neighbor_uid_var, body) \
-  do { \
-    if ((inv_hoods) != NULL && (hood_idx) < (inv_hoods)->n) { \
-      double __eps = (eps); \
-      tk_rvec_t *__hood = (inv_hoods)->a[hood_idx]; \
-      uint64_t __limit = __hood->m > __hood->n ? __hood->m : __hood->n; \
-      for (uint64_t __j = 0; __j < __limit; __j++) { \
-        tk_rank_t __r = __hood->a[__j]; \
-        if (__r.i < 0 || __r.i >= (int64_t)(uids_hoods)->n) continue; \
-        if (__j < __hood->n && __r.d > __eps) break; \
-        (neighbor_idx_var) = __r.i; \
-        (neighbor_uid_var) = (uids_hoods)->a[__r.i]; \
-        body \
-      } \
-    } else if ((ann_hoods) != NULL && (hood_idx) < (ann_hoods)->n) { \
-      int64_t __eps = (int64_t)((eps)*(double)(ann)->features); \
-      tk_pvec_t *__hood = (ann_hoods)->a[hood_idx]; \
-      uint64_t __limit = __hood->m > __hood->n ? __hood->m : __hood->n; \
-      for (uint64_t __j = 0; __j < __limit; __j++) { \
-        tk_pair_t __r = __hood->a[__j]; \
-        if (__r.i < 0 || __r.i >= (int64_t)(uids_hoods)->n) continue; \
-        if (__j < __hood->n && __r.p > __eps) break; \
-        (neighbor_idx_var) = __r.i; \
-        (neighbor_uid_var) = (uids_hoods)->a[__r.i]; \
-        body \
-      } \
-    } else if ((hbi_hoods) != NULL && (hood_idx) < (hbi_hoods)->n) { \
-      int64_t __eps = (int64_t)((eps)*(double)(hbi)->features); \
-      tk_pvec_t *__hood = (hbi_hoods)->a[hood_idx]; \
-      uint64_t __limit = __hood->m > __hood->n ? __hood->m : __hood->n; \
-      for (uint64_t __j = 0; __j < __limit; __j++) { \
-        tk_pair_t __r = __hood->a[__j]; \
-        if (__r.i < 0 || __r.i >= (int64_t)(uids_hoods)->n) continue; \
-        if (__j < __hood->n && __r.p > __eps) break; \
-        (neighbor_idx_var) = __r.i; \
-        (neighbor_uid_var) = (uids_hoods)->a[__r.i]; \
-        body \
-      } \
-    } \
-  } while(0)
-
-#define TK_GRAPH_HOOD_DISTANCE(inv_hoods, ann_hoods, hbi_hoods, hood_idx, elem_idx, features_ann, features_hbi, dist_var) \
+#define TK_GRAPH_HOOD_DISTANCE(inv_hoods, ann_hoods, hood_idx, elem_idx, features_ann, dist_var) \
   do { \
     if ((inv_hoods) != NULL && (hood_idx) < (inv_hoods)->n) { \
       (dist_var) = (inv_hoods)->a[hood_idx]->a[elem_idx].d; \
     } else if ((ann_hoods) != NULL && (hood_idx) < (ann_hoods)->n) { \
       (dist_var) = (double)(ann_hoods)->a[hood_idx]->a[elem_idx].p / (double)(features_ann); \
-    } else if ((hbi_hoods) != NULL && (hood_idx) < (hbi_hoods)->n) { \
-      (dist_var) = (double)(hbi_hoods)->a[hood_idx]->a[elem_idx].p / (double)(features_hbi); \
     } \
   } while(0)
 
-#define TK_GRAPH_HOOD_SIZE(inv_hoods, ann_hoods, hbi_hoods, idx, size_var) \
+#define TK_GRAPH_HOOD_SIZE(inv_hoods, ann_hoods, idx, size_var) \
   do { \
     (size_var) = 0; \
     if ((inv_hoods) && (idx) < (inv_hoods)->n) { \
       (size_var) = (inv_hoods)->a[idx]->n; \
     } else if ((ann_hoods) && (idx) < (ann_hoods)->n) { \
       (size_var) = (ann_hoods)->a[idx]->n; \
-    } else if ((hbi_hoods) && (idx) < (hbi_hoods)->n) { \
-      (size_var) = (hbi_hoods)->a[idx]->n; \
     } \
   } while(0)
 
-#define TK_GRAPH_HOOD_TO_CSR(inv_hoods, ann_hoods, hbi_hoods, idx, features, neighbors_arr, weights_arr, write_pos, end_pos) \
+#define TK_GRAPH_HOOD_TO_CSR(inv_hoods, ann_hoods, idx, features, neighbors_arr, weights_arr, write_pos, end_pos) \
   do { \
     if ((inv_hoods) && (idx) < (inv_hoods)->n) { \
       tk_rvec_t *__hood = (inv_hoods)->a[idx]; \
@@ -285,89 +231,15 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
         (weights_arr)[(write_pos)] = 1.0 - __dist; \
         (write_pos)++; \
       } \
-    } else if ((hbi_hoods) && (idx) < (hbi_hoods)->n) { \
-      tk_pvec_t *__hood = (hbi_hoods)->a[idx]; \
-      for (uint64_t __j = 0; __j < __hood->n && (write_pos) < (end_pos); __j++) { \
-        (neighbors_arr)[(write_pos)] = __hood->a[__j].i; \
-        double __dist = (double)__hood->a[__j].p / (double)(features); \
-        (weights_arr)[(write_pos)] = 1.0 - __dist; \
-        (write_pos)++; \
-      } \
     } \
   } while(0)
 
-#define TK_INDEX_NEIGHBORHOODS(L, inv, ann, hbi, k, probe_radius, eps, cmp, alpha, beta, decay, inv_hoods_out, ann_hoods_out, hbi_hoods_out, uids_out) \
+#define TK_INDEX_NEIGHBORHOODS(L, inv, ann, k, probe_radius, cmp, alpha, beta, decay, inv_hoods_out, ann_hoods_out, uids_out) \
   do { \
     if ((inv) != NULL) { \
-      tk_inv_neighborhoods((L), (inv), (k), 0.0, (eps), (cmp), (alpha), (beta), (decay), (inv_hoods_out), (uids_out)); \
+      tk_inv_neighborhoods((L), (inv), (k), (cmp), (alpha), (beta), (decay), (inv_hoods_out), (uids_out)); \
     } else if ((ann) != NULL) { \
-      tk_ann_neighborhoods((L), (ann), (k), (probe_radius), 0, ((eps)*(double)(ann)->features), (ann_hoods_out), (uids_out)); \
-    } else if ((hbi) != NULL) { \
-      tk_hbi_neighborhoods((L), (hbi), (k), 0, ((eps)*(double)(hbi)->features), (hbi_hoods_out), (uids_out)); \
-    } \
-  } while(0)
-
-#define TK_GRAPH_FOREACH_HOOD_FOR_SIGMA(inv_hoods, ann_hoods, hbi_hoods, features_ann, features_hbi, hood_idx, graph, uid, uids_hoods, uids_idx, seen, distances, error_var) \
-  do { \
-    if ((inv_hoods) && (hood_idx) < (int64_t)(inv_hoods)->n) { \
-      tk_rvec_t *__hood = (inv_hoods)->a[hood_idx]; \
-      for (uint64_t __j = 0; __j < __hood->n; __j++) { \
-        int64_t __nh_idx = __hood->a[__j].i; \
-        if (__nh_idx >= 0 && __nh_idx < (int64_t)(uids_hoods)->n) { \
-          int64_t __nh_uid = (uids_hoods)->a[__nh_idx]; \
-          uint32_t __n_khi = tk_iumap_get((uids_idx), __nh_uid); \
-          if (__n_khi != tk_iumap_end((uids_idx))) { \
-            int64_t __nh_global_idx = tk_iumap_val((uids_idx), __n_khi); \
-            int __kha; \
-            tk_iuset_put((seen), __nh_global_idx, &__kha); \
-            if (__kha) { \
-              double __d = tk_graph_distance((graph), (uid), __nh_uid); \
-              if (__d == DBL_MAX) __d = __hood->a[__j].d; \
-              if (tk_dvec_push((distances), __d) != 0) { (error_var) = true; break; } \
-            } \
-          } \
-        } \
-      } \
-    } else if ((ann_hoods) && (hood_idx) < (int64_t)(ann_hoods)->n) { \
-      tk_pvec_t *__hood = (ann_hoods)->a[hood_idx]; \
-      double __denom = (features_ann) ? (double)(features_ann) : 1.0; \
-      for (uint64_t __j = 0; __j < __hood->n; __j++) { \
-        int64_t __nh_idx = __hood->a[__j].i; \
-        if (__nh_idx >= 0 && __nh_idx < (int64_t)(uids_hoods)->n) { \
-          int64_t __nh_uid = (uids_hoods)->a[__nh_idx]; \
-          uint32_t __n_khi = tk_iumap_get((uids_idx), __nh_uid); \
-          if (__n_khi != tk_iumap_end((uids_idx))) { \
-            int64_t __nh_global_idx = tk_iumap_val((uids_idx), __n_khi); \
-            int __kha; \
-            tk_iuset_put((seen), __nh_global_idx, &__kha); \
-            if (__kha) { \
-              double __d = tk_graph_distance((graph), (uid), __nh_uid); \
-              if (__d == DBL_MAX) __d = (double)__hood->a[__j].p / __denom; \
-              if (tk_dvec_push((distances), __d) != 0) { (error_var) = true; break; } \
-            } \
-          } \
-        } \
-      } \
-    } else if ((hbi_hoods) && (hood_idx) < (int64_t)(hbi_hoods)->n) { \
-      tk_pvec_t *__hood = (hbi_hoods)->a[hood_idx]; \
-      double __denom = (features_hbi) ? (double)(features_hbi) : 1.0; \
-      for (uint64_t __j = 0; __j < __hood->n; __j++) { \
-        int64_t __nh_idx = __hood->a[__j].i; \
-        if (__nh_idx >= 0 && __nh_idx < (int64_t)(uids_hoods)->n) { \
-          int64_t __nh_uid = (uids_hoods)->a[__nh_idx]; \
-          uint32_t __n_khi = tk_iumap_get((uids_idx), __nh_uid); \
-          if (__n_khi != tk_iumap_end((uids_idx))) { \
-            int64_t __nh_global_idx = tk_iumap_val((uids_idx), __n_khi); \
-            int __kha; \
-            tk_iuset_put((seen), __nh_global_idx, &__kha); \
-            if (__kha) { \
-              double __d = tk_graph_distance((graph), (uid), __nh_uid); \
-              if (__d == DBL_MAX) __d = (double)__hood->a[__j].p / __denom; \
-              if (tk_dvec_push((distances), __d) != 0) { (error_var) = true; break; } \
-            } \
-          } \
-        } \
-      } \
+      tk_ann_neighborhoods((L), (ann), (k), (probe_radius), (ann_hoods_out), (uids_out)); \
     } \
   } while(0)
 
@@ -378,7 +250,7 @@ static inline double tk_graph_distance (
 ) {
   double d = DBL_MAX;
 
-  TK_GRAPH_INDEX_DISTANCE(graph->weight_inv, graph->weight_ann, graph->weight_hbi,
+  TK_GRAPH_INDEX_DISTANCE(graph->weight_inv, graph->weight_ann,
                           u, v, graph->weight_cmp, graph->weight_alpha, graph->weight_beta,
                           graph->weight_decay, d);
   if (d != DBL_MAX)
@@ -386,19 +258,19 @@ static inline double tk_graph_distance (
 
   bool same_index = (graph->category_inv == graph->knn_inv);
   if (same_index && graph->category_inv != NULL) {
-    TK_GRAPH_INDEX_DISTANCE(graph->category_inv, NULL, NULL,
+    TK_GRAPH_INDEX_DISTANCE(graph->category_inv, NULL,
                             u, v, graph->category_cmp, graph->category_alpha, graph->category_beta,
                             graph->category_knn_decay, d);
   } else if (graph->category_inv != NULL) {
     double obs_distance = DBL_MAX;
-    TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann, graph->knn_hbi,
+    TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann,
                             u, v, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
                             graph->knn_decay, obs_distance);
     d = tk_inv_distance_extend(
       graph->category_inv, u, v, obs_distance, graph->category_cmp,
-      graph->category_alpha, graph->category_beta, graph->category_knn_decay, TK_COMBINE_WEIGHTED_AVG);
+      graph->category_alpha, graph->category_beta, TK_COMBINE_WEIGHTED_AVG, graph->category_knn_decay);
   } else {
-    TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann, graph->knn_hbi,
+    TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann,
                             u, v, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
                             graph->knn_decay, d);
   }
@@ -411,18 +283,17 @@ static inline double tk_graph_knn_distance (
   int64_t v
 ) {
   double d = DBL_MAX;
-  TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann, graph->knn_hbi,
+  TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann,
                           u, v, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
                           graph->knn_decay, d);
   return d;
 }
 
 static inline bool tk_graph_weight_is_knn (tk_graph_t *graph) {
-  if (!graph->weight_inv && !graph->weight_ann && !graph->weight_hbi)
+  if (!graph->weight_inv && !graph->weight_ann)
     return true;
   return (graph->weight_inv == graph->knn_inv &&
-          graph->weight_ann == graph->knn_ann &&
-          graph->weight_hbi == graph->knn_hbi);
+          graph->weight_ann == graph->knn_ann);
 }
 
 static inline double tk_graph_get_weight (
@@ -825,7 +696,7 @@ static inline int tk_graph_multiclass_pairs (
                 if (index && eps_pos > 0.0) {
                   double dist = tk_inv_distance(
                     index, id, anchor,
-                    TK_IVEC_JACCARD, 0.0, 0.0, 0.0, TK_COMBINE_WEIGHTED_AVG);
+                    TK_IVEC_JACCARD, 0.0, 0.0, TK_COMBINE_WEIGHTED_AVG, 0.0);
                   if (dist > eps_pos)
                     continue;
                 }
@@ -919,7 +790,7 @@ static inline int tk_graph_multiclass_pairs (
                   if (index && eps_neg > 0.0) {
                     double dist = tk_inv_distance(
                       index, id, other_id,
-                      TK_IVEC_JACCARD, 0.0, 0.0, 0.0, TK_COMBINE_WEIGHTED_AVG);
+                      TK_IVEC_JACCARD, 0.0, 0.0, TK_COMBINE_WEIGHTED_AVG, 0.0);
                     if (dist < eps_neg) {
                       tries++;
                       continue;
@@ -1174,7 +1045,6 @@ static inline int tk_graph_adj_hoods(
   tk_ivec_t *ids,
   tk_inv_hoods_t *inv_hoods,
   tk_ann_hoods_t *ann_hoods,
-  tk_hbi_hoods_t *hbi_hoods,
   uint64_t features,
   tk_ivec_t **offsets_out,
   tk_ivec_t **neighbors_out,
@@ -1204,7 +1074,7 @@ static inline int tk_graph_adj_hoods(
   (*offsets_out)->a[0] = 0;
   for (uint64_t i = 0; i < n_queries; i++) {
     uint64_t n_neighbors = 0;
-    TK_GRAPH_HOOD_SIZE(inv_hoods, ann_hoods, hbi_hoods, i, n_neighbors);
+    TK_GRAPH_HOOD_SIZE(inv_hoods, ann_hoods, i, n_neighbors);
     (*offsets_out)->a[i + 1] = (*offsets_out)->a[i] + (int64_t)n_neighbors;
   }
   (*offsets_out)->n = n_queries + 1;
@@ -1225,7 +1095,7 @@ static inline int tk_graph_adj_hoods(
     int64_t start = (*offsets_out)->a[i];
     int64_t end = (*offsets_out)->a[i + 1];
     int64_t idx = start;
-    TK_GRAPH_HOOD_TO_CSR(inv_hoods, ann_hoods, hbi_hoods, i, features,
+    TK_GRAPH_HOOD_TO_CSR(inv_hoods, ann_hoods, i, features,
                          (*neighbors_out)->a, (*weights_out)->a, idx, end);
   }
 

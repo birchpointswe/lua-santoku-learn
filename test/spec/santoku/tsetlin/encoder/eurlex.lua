@@ -28,24 +28,22 @@ local cfg = {
     skips = 1,
   },
   feature_selection = {
-    min_df = 0.01,
-    max_df = 0.8,
     max_vocab_spectral = 2^16,
     max_vocab_encoder = 2^14,
   },
   encoder = {
-    clauses = 32,
-    clause_tolerance = { def = 45, min = 8, max = 128, int = true },
-    clause_maximum = { def = 125, min = 16, max = 128, int = true },
-    target = { def = 20, min = 4, max = 64, int = true },
-    specificity = { def = 1962, min = 50, max = 2000 },
+    clauses = 64,
+    clause_tolerance = { def = 70, min = 8, max = 128, int = true },
+    clause_maximum = { def = 78, min = 16, max = 128, int = true },
+    target = { def = 39, min = 4, max = 64, int = true },
+    specificity = { def = 562, min = 50, max = 2000 },
     include_bits = { def = 1, min = 1, max = 6, int = true },
     search_patience = 4,
     search_rounds = 6,
-    search_trials = 10,
+    search_trials = 20,
     search_iterations = 10,
-    final_patience = 20,
-    final_iterations = 200,
+    final_patience = 40,
+    final_iterations = 400,
   },
   bit_pruning = {
     enabled = true,
@@ -54,13 +52,13 @@ local cfg = {
   },
   nystrom = {
     n_landmarks = 4096,
-    n_dims = 96,
+    n_dims = 64,
     cmp = "cosine",
     combine = "exponential",
-    decay = { def = 2.4, min = 0.0, max = 3.0 },
+    decay = { def = 1.35, min = 0.0, max = 3.0 },
     binarize = "itq",
     rounds = 6,
-    samples = 10,
+    samples = 20,
   },
   eval = {
     anchors = 16,
@@ -91,10 +89,10 @@ test("eurlex-docs", function()
   train.tokens = tok:tokenize(train.problems)
   dev.tokens = tok:tokenize(dev.problems)
   test_set.tokens = tok:tokenize(test_set.problems)
-  tok = nil
-  train.problems = nil
-  dev.problems = nil
-  test_set.problems = nil
+  tok = nil -- luacheck: ignore
+  train.problems = nil -- luacheck: ignore
+  dev.problems = nil -- luacheck: ignore
+  test_set.problems = nil -- luacheck: ignore
 
   print("\nCreating IDs")
   train.ids = ivec.create(train.n)
@@ -115,10 +113,7 @@ test("eurlex-docs", function()
   test_set.label_csr = { offsets = test_label_offsets, neighbors = test_label_neighbors }
 
   print("\nFeature selection")
-  local df_ids, df_scores = train.tokens:bits_top_df(
-    train.n, n_tokens, nil,
-    cfg.feature_selection.min_df or 0,
-    cfg.feature_selection.max_df or 1)
+  local df_ids, df_scores = train.tokens:bits_top_df(train.n, n_tokens)
   str.printf("  IDF: %d -> %d\n", n_tokens, df_ids:size())
   train.tokens:bits_select(df_ids, nil, n_tokens)
   dev.tokens:bits_select(df_ids, nil, n_tokens)
@@ -131,18 +126,22 @@ test("eurlex-docs", function()
   local idf_gathered = dvec.create()
   idf_gathered:copy(df_scores, bns_ids)
   bns_scores:scalev(idf_gathered)
-  df_ids = nil
-  df_scores = nil
+  df_ids = nil -- luacheck: ignore
+  df_scores = nil -- luacheck: ignore
   train.tokens:bits_select(bns_ids, nil, n_tokens)
   dev.tokens:bits_select(bns_ids, nil, n_tokens)
   test_set.tokens:bits_select(bns_ids, nil, n_tokens)
   local n_top_v = bns_ids:size()
-  bns_ids = nil
+  bns_ids = nil -- luacheck: ignore
+  local label_df_ids, label_idf_scores = train.solutions:bits_top_df(train.n, n_labels)
   local n_graph_features = n_labels + n_top_v
   local graph_weights = dvec.create(n_graph_features)
-  graph_weights:fill(1.0, 0, n_labels)
+  graph_weights:fill(0.0, 0, n_labels)
+  graph_weights:copy(label_idf_scores, label_df_ids, true)
+  label_df_ids = nil -- luacheck: ignore
+  label_idf_scores = nil -- luacheck: ignore
   graph_weights:copy(bns_scores, n_labels)
-  bns_scores = nil
+  bns_scores = nil -- luacheck: ignore
 
   print("\nBuilding graph_index (docs only, two-rank: labels + tokens)")
   local graph_features = ivec.create()
@@ -157,13 +156,13 @@ test("eurlex-docs", function()
     n_ranks = 2,
   })
   train.graph_index:add(graph_features, train.ids)
-  graph_features = nil
-  graph_ranks = nil
+  graph_features = nil -- luacheck: ignore
+  graph_ranks = nil -- luacheck: ignore
   str.printf("  Docs: %d  Features: %d (labels=%d, tokens=%d)\n",
     train.n, n_graph_features, n_labels, n_top_v)
 
   print("\nBuilding eval_index (labels only) and evaluation adjacency")
-  train.eval_index = inv.create({ features = n_labels, expected_size = train.n })
+  train.eval_index = inv.create({ features = n_labels })
   train.eval_index:add(train.solutions, train.ids)
   local train_eval_ids, train_eval_offsets, train_eval_neighbors, train_eval_weights =
     graph.adjacency({
@@ -225,8 +224,8 @@ test("eurlex-docs", function()
   end
   str.printf("  Total near-constant dims (entropy < 0.01): %d / %d\n", zero_entropy_count, train.dims)
   str.printf("  Entropy range: min=%.6f max=%.6f\n", entropy_scores:min(), entropy_scores:max())
-  entropy_ids = nil
-  entropy_scores = nil
+  entropy_ids = nil -- luacheck: ignore
+  entropy_scores = nil -- luacheck: ignore
 
   if cfg.verbose then
     print("\nSpot-checking spectral code KNN (compare to eval adj above)")
@@ -264,7 +263,7 @@ test("eurlex-docs", function()
     n_dims = train.dims,
   })
   str.printf("  Spectral codes ranking: raw=%.4f binary=%.4f\n", spectral_raw_stats.score, spectral_eval_stats.score)
-  model.raw_codes = nil
+  model.raw_codes = nil -- luacheck: ignore
 
   local encoder_feat_ids = train.tokens:bits_top_chi2(
     train_target_codes, train.n, n_top_v, train.dims,
@@ -275,7 +274,7 @@ test("eurlex-docs", function()
   train_toks:copy(train.tokens)
   train_toks:bits_select(encoder_feat_ids, nil, n_top_v)
   local train_encoder_sentences = train_toks:bits_to_cvec(train.n, train_encoder_visible, true)
-  train_toks = nil
+  train_toks = nil -- luacheck: ignore
 
   print("\nTraining encoder")
   local encoder_args = {
@@ -316,11 +315,11 @@ test("eurlex-docs", function()
 
   local train_ham = eval.encoding_accuracy(train_predicted, train_target_codes, train.n, train.dims).mean_hamming
   str.printf("  Train hamming: %.4f\n", train_ham)
-  train_target_codes = nil
-  train_encoder_sentences = nil
+  train_target_codes = nil -- luacheck: ignore
+  train_encoder_sentences = nil -- luacheck: ignore
 
   print("\nEvaluating predicted codes against eval adjacency")
-  local train_pred_ann = ann.create({ features = train.dims, expected_size = train.n })
+  local train_pred_ann = ann.create({ features = train.dims })
   train_pred_ann:add(train_predicted, train.ids)
 
   local pred_eval_stats = eval.ranking_accuracy({
@@ -365,18 +364,18 @@ test("eurlex-docs", function()
       util.spot_check_codes(train_predicted, train.n, dims_final, "train pruned")
     end
   end
-  train_eval_ids = nil
-  train_eval_offsets = nil
-  train_eval_neighbors = nil
-  train_eval_weights = nil
-  train_pred_ann = nil
+  train_eval_ids = nil -- luacheck: ignore
+  train_eval_offsets = nil -- luacheck: ignore
+  train_eval_neighbors = nil -- luacheck: ignore
+  train_eval_weights = nil -- luacheck: ignore
+  train_pred_ann = nil -- luacheck: ignore
 
   print("\nPredicting dev codes")
   local dev_toks = ivec.create()
   dev_toks:copy(dev.tokens)
   dev_toks:bits_select(encoder_feat_ids, nil, n_top_v)
   local dev_encoder_sentences = dev_toks:bits_to_cvec(dev.n, train_encoder_visible, true)
-  dev_toks = nil
+  dev_toks = nil -- luacheck: ignore
   local dev_predicted = train.encoder:predict(dev_encoder_sentences, dev.n)
   if active_bits then
     local dev_pruned = cvec.create()
@@ -386,7 +385,7 @@ test("eurlex-docs", function()
   util.spot_check_codes(dev_predicted, dev.n, dims_final, "dev predicted")
 
   print("\nBuilding dev eval_index (labels only) and evaluation adjacency")
-  dev.eval_index = inv.create({ features = n_labels, expected_size = dev.n })
+  dev.eval_index = inv.create({ features = n_labels })
   dev.eval_index:add(dev.solutions, dev.ids)
   local dev_eval_ids, dev_eval_offsets, dev_eval_neighbors, dev_eval_weights =
     graph.adjacency({
@@ -407,7 +406,7 @@ test("eurlex-docs", function()
   end
 
   print("\nEvaluating dev predicted codes")
-  local dev_pred_ann = ann.create({ features = dims_final, expected_size = dev.n })
+  local dev_pred_ann = ann.create({ features = dims_final })
   dev_pred_ann:add(dev_predicted, dev.ids)
   local dev_pred_stats = eval.ranking_accuracy({
     index = dev_pred_ann,
@@ -420,20 +419,20 @@ test("eurlex-docs", function()
     n_dims = dims_final,
   })
   str.printf("  Dev ranking score: %.4f\n", dev_pred_stats.score)
-  dev_encoder_sentences = nil
-  dev_predicted = nil
-  dev_pred_ann = nil
-  dev_eval_ids = nil
-  dev_eval_offsets = nil
-  dev_eval_neighbors = nil
-  dev_eval_weights = nil
+  dev_encoder_sentences = nil -- luacheck: ignore
+  dev_predicted = nil -- luacheck: ignore
+  dev_pred_ann = nil -- luacheck: ignore
+  dev_eval_ids = nil -- luacheck: ignore
+  dev_eval_offsets = nil -- luacheck: ignore
+  dev_eval_neighbors = nil -- luacheck: ignore
+  dev_eval_weights = nil -- luacheck: ignore
 
   print("\nPredicting test codes")
   local test_toks = ivec.create()
   test_toks:copy(test_set.tokens)
   test_toks:bits_select(encoder_feat_ids, nil, n_top_v)
   local test_encoder_sentences = test_toks:bits_to_cvec(test_set.n, train_encoder_visible, true)
-  test_toks = nil
+  test_toks = nil -- luacheck: ignore
   local test_predicted = train.encoder:predict(test_encoder_sentences, test_set.n)
   if active_bits then
     local test_pruned = cvec.create()
@@ -443,7 +442,7 @@ test("eurlex-docs", function()
   util.spot_check_codes(test_predicted, test_set.n, dims_final, "test predicted")
 
   print("\nBuilding test eval_index (labels only) and evaluation adjacency")
-  test_set.eval_index = inv.create({ features = n_labels, expected_size = test_set.n })
+  test_set.eval_index = inv.create({ features = n_labels })
   test_set.eval_index:add(test_set.solutions, test_set.ids)
   local test_eval_ids, test_eval_offsets, test_eval_neighbors, test_eval_weights =
     graph.adjacency({
@@ -464,7 +463,7 @@ test("eurlex-docs", function()
   end
 
   print("\nEvaluating test predicted codes")
-  local test_pred_ann = ann.create({ features = dims_final, expected_size = test_set.n })
+  local test_pred_ann = ann.create({ features = dims_final })
   test_pred_ann:add(test_predicted, test_set.ids)
   local test_pred_stats = eval.ranking_accuracy({
     index = test_pred_ann,
@@ -477,9 +476,9 @@ test("eurlex-docs", function()
     n_dims = dims_final,
   })
   str.printf("  Test ranking score: %.4f\n", test_pred_stats.score)
-  test_encoder_sentences = nil
-  test_predicted = nil
-  test_pred_ann = nil
+  test_encoder_sentences = nil -- luacheck: ignore
+  test_predicted = nil -- luacheck: ignore
+  test_pred_ann = nil -- luacheck: ignore
 
   print("\n" .. string.rep("=", 60))
   print("SUMMARY")
