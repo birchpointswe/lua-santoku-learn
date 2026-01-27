@@ -151,7 +151,7 @@ static inline void tm_reweight_hoods (
               int64_t ni = src->a[j].i;
               if (ni < 0 || ni >= (int64_t)graph->uids_hoods->n) continue;
               int64_t nuid = graph->uids_hoods->a[ni];
-              double d = tk_graph_distance(graph, uid, nuid, q_weights, e_weights, inter_weights);
+              double d = tk_graph_distance(graph, uid, nuid);
               if (d == DBL_MAX) continue;
               if (tk_rvec_push(local_hood, tk_rank(ni, d)) != 0) { has_error = true; break; }
             }
@@ -162,7 +162,7 @@ static inline void tm_reweight_hoods (
               int64_t ni = src->a[j].i;
               if (ni < 0 || ni >= (int64_t)graph->uids_hoods->n) continue;
               int64_t nuid = graph->uids_hoods->a[ni];
-              double d = tk_graph_distance(graph, uid, nuid, q_weights, e_weights, inter_weights);
+              double d = tk_graph_distance(graph, uid, nuid);
               if (d == DBL_MAX) continue;
               if (tk_rvec_push(local_hood, tk_rank(ni, d)) != 0) { has_error = true; break; }
             }
@@ -173,7 +173,7 @@ static inline void tm_reweight_hoods (
               int64_t ni = src->a[j].i;
               if (ni < 0 || ni >= (int64_t)graph->uids_hoods->n) continue;
               int64_t nuid = graph->uids_hoods->a[ni];
-              double d = tk_graph_distance(graph, uid, nuid, q_weights, e_weights, inter_weights);
+              double d = tk_graph_distance(graph, uid, nuid);
               if (d == DBL_MAX) continue;
               if (tk_rvec_push(local_hood, tk_rank(ni, d)) != 0) { has_error = true; break; }
             }
@@ -265,7 +265,7 @@ static inline void tm_compute_cknn_rhos (
             int64_t neighbor_idx;
             tk_umap_foreach_keys(graph->adj->a[i], neighbor_idx, ({
               int64_t neighbor_uid = graph->uids->a[neighbor_idx];
-              double d = tk_graph_distance(graph, uid, neighbor_uid, q_weights, e_weights, inter_weights);
+              double d = tk_graph_distance(graph, uid, neighbor_uid);
               if (d != DBL_MAX) {
                 if (tk_dvec_push(distances, d) != 0) { has_error = true; }
                 else {
@@ -310,7 +310,7 @@ static inline void tm_compute_cknn_rhos (
                   int kha;
                   tk_iuset_put(seen, n_global_idx, &kha);
                   if (kha) {
-                    double d = tk_graph_distance(graph, uid, nuid, q_weights, e_weights, inter_weights);
+                    double d = tk_graph_distance(graph, uid, nuid);
                     if (d == DBL_MAX) d = hood->a[j].d;
                     if (tk_dvec_push(distances, d) != 0) { has_error = true; break; }
                   }
@@ -328,7 +328,7 @@ static inline void tm_compute_cknn_rhos (
                   int kha;
                   tk_iuset_put(seen, n_global_idx, &kha);
                   if (kha) {
-                    double d = tk_graph_distance(graph, uid, nuid, q_weights, e_weights, inter_weights);
+                    double d = tk_graph_distance(graph, uid, nuid);
                     if (d == DBL_MAX) d = (double)hood->a[j].p / (double)features_ann;
                     if (tk_dvec_push(distances, d) != 0) { has_error = true; break; }
                   }
@@ -346,7 +346,7 @@ static inline void tm_compute_cknn_rhos (
                   int kha;
                   tk_iuset_put(seen, n_global_idx, &kha);
                   if (kha) {
-                    double d = tk_graph_distance(graph, uid, nuid, q_weights, e_weights, inter_weights);
+                    double d = tk_graph_distance(graph, uid, nuid);
                     if (d == DBL_MAX) d = (double)hood->a[j].p / (double)features_hbi;
                     if (tk_dvec_push(distances, d) != 0) { has_error = true; break; }
                   }
@@ -608,7 +608,7 @@ static inline tk_evec_t *tm_mst_knn_candidates (
         tk_edge_t e = tk_edge(u, v, 0.0);
         khi = tk_euset_get(graph->pairs, e);
         if (khi != tk_euset_end(graph->pairs)) continue;
-        double d = tk_graph_distance(graph, u, v, graph->q_weights, graph->e_weights, graph->inter_weights);
+        double d = tk_graph_distance(graph, u, v);
         bool is_mutual = (j < hood->n);
         double sort_d = (graph->knn_mutual && !is_mutual) ? (1.0 + d) : d;
         if (tk_evec_push(all_candidates, tk_edge(u, v, sort_d)) != 0) {
@@ -628,7 +628,7 @@ static inline tk_evec_t *tm_mst_knn_candidates (
         tk_edge_t e = tk_edge(u, v, 0.0);
         khi = tk_euset_get(graph->pairs, e);
         if (khi != tk_euset_end(graph->pairs)) continue;
-        double d = tk_graph_distance(graph, u, v, graph->q_weights, graph->e_weights, graph->inter_weights);
+        double d = tk_graph_distance(graph, u, v);
         bool is_mutual = (j < hood->n);
         double sort_d = (graph->knn_mutual && !is_mutual) ? (1.0 + d) : d;
         if (tk_evec_push(all_candidates, tk_edge(u, v, sort_d)) != 0) {
@@ -648,7 +648,7 @@ static inline tk_evec_t *tm_mst_knn_candidates (
         tk_edge_t e = tk_edge(u, v, 0.0);
         khi = tk_euset_get(graph->pairs, e);
         if (khi != tk_euset_end(graph->pairs)) continue;
-        double d = tk_graph_distance(graph, u, v, graph->q_weights, graph->e_weights, graph->inter_weights);
+        double d = tk_graph_distance(graph, u, v);
         bool is_mutual = (j < hood->n);
         double sort_d = (graph->knn_mutual && !is_mutual) ? (1.0 + d) : d;
         if (tk_evec_push(all_candidates, tk_edge(u, v, sort_d)) != 0) {
@@ -714,7 +714,7 @@ static inline void tm_add_mst (
       int64_t iv = centers->a[j].i;
       int64_t u = graph->uids->a[iu];
       int64_t v = graph->uids->a[iv];
-      double d = use_cknn ? 0.0 : tk_graph_distance(graph, u, v, graph->q_weights, graph->e_weights, graph->inter_weights);
+      double d = use_cknn ? 0.0 : tk_graph_distance(graph, u, v);
       if (d == DBL_MAX) d = 1.0;
       tk_edge_t e = tk_edge(u, v, use_cknn ? 0.0 : d);
       tk_euset_put(graph->pairs, e, &kha);
@@ -884,7 +884,7 @@ static inline void tm_add_seed_edges_immediate(
           khi_v == tk_iumap_end(graph->uids_idx)) {
         continue;
       }
-      double d = use_cknn ? 0.0 : tk_graph_distance(graph, u, v, NULL, NULL, NULL);
+      double d = use_cknn ? 0.0 : tk_graph_distance(graph, u, v);
       if (d == DBL_MAX) d = 1.0;
       tk_edge_t e = tk_edge(u, v, use_cknn ? 0.0 : d);
       khi = tk_euset_put(graph->pairs, e, &kha);
@@ -958,7 +958,7 @@ static inline void tm_add_bipartite_edges_immediate(
     if (khi_u == tk_iumap_end(graph->uids_idx) ||
         khi_v == tk_iumap_end(graph->uids_idx))
       continue;
-    double d = use_cknn ? 0.0 : tk_graph_distance(graph, u, v, NULL, NULL, NULL);
+    double d = use_cknn ? 0.0 : tk_graph_distance(graph, u, v);
     if (d == DBL_MAX) d = 1.0;
     tk_edge_t e = tk_edge(u, v, use_cknn ? 0.0 : d);
     khi = tk_euset_put(graph->pairs, e, &kha);
@@ -1006,7 +1006,7 @@ static inline void tm_build_hoods_from_bipartite (
         int64_t u = graph->bipartite_ids->a[sample_idx];
         int64_t v = graph->bipartite_nodes->a[feature_idx];
 
-        double dist = tk_graph_distance(graph, u, v, NULL, NULL, NULL);
+        double dist = tk_graph_distance(graph, u, v);
         if (dist == DBL_MAX) dist = 1.0;
 
         if (tk_evec_push(local_edges, tk_edge(u, v, dist)) != 0) {
@@ -1085,7 +1085,7 @@ static inline void tm_build_hoods_from_seeds (
           int64_t v_idx = graph->seed_neighbors->a[j];
           int64_t v = nbr_ids->a[v_idx];
 
-          double dist = tk_graph_distance(graph, u, v, NULL, NULL, NULL);
+          double dist = tk_graph_distance(graph, u, v);
           if (dist == DBL_MAX) dist = 1.0;
 
           if (tk_evec_push(local_edges, tk_edge(u, v, dist)) != 0) {
@@ -1178,7 +1178,7 @@ static inline void tm_build_hoods_from_anchors (
         if (!postings || postings->n == 0)
           continue;
 
-        int64_t rank = inv->ranks ? inv->ranks->a[f] : 0;
+        int64_t rank = inv->ranks->a[f];
         int64_t effective_rank = (category_knn_decay < 0.0) ? (max_rank - rank) : rank;
         double knn_weight = exp(-(double)effective_rank * fabs(category_knn_decay));
         uint64_t n_wanted = category_knn > 0 ? (uint64_t)category_knn : category_anchors;
@@ -1212,7 +1212,7 @@ static inline void tm_build_hoods_from_anchors (
             if (i == j) continue;
             int64_t v = anchors->a[j];
 
-            double dist = tk_graph_distance(graph, u, v, NULL, NULL, NULL);
+            double dist = tk_graph_distance(graph, u, v);
             if (dist == DBL_MAX) continue;
 
             tk_rvec_hmin(knn_heap, k_nearest, tk_rank(v, dist));
@@ -1329,7 +1329,7 @@ static inline tk_pvec_t *tm_add_anchor_edges_immediate(
           if (!postings || postings->n == 0)
             continue;
 
-          int64_t rank = inv->ranks ? inv->ranks->a[f] : 0;
+          int64_t rank = inv->ranks->a[f];
           int64_t effective_rank = (category_knn_decay < 0.0) ? (max_rank - rank) : rank;
           double knn_weight = exp(-(double)effective_rank * fabs(category_knn_decay));
           uint64_t n_anchors = (uint64_t)category_anchors;
@@ -1361,7 +1361,7 @@ static inline tk_pvec_t *tm_add_anchor_edges_immediate(
             for (uint64_t j = 0; j < anchors->n && j < n_anchors; j++) {
               if (i == j) continue;
               int64_t v = anchors->a[j];
-              double dist = tk_inv_distance(inv, u, v, category_cmp, category_alpha, category_beta, category_knn_decay, q_weights, e_weights, inter_weights);
+              double dist = tk_inv_distance(inv, u, v, category_cmp, category_alpha, category_beta, category_knn_decay, TK_COMBINE_WEIGHTED_AVG);
               tk_rvec_hmin(knn_heap, k_nearest, tk_rank(v, dist));
             }
             for (uint64_t k = 0; k < knn_heap->n; k++) {
@@ -1405,7 +1405,7 @@ static inline tk_pvec_t *tm_add_anchor_edges_immediate(
             }
             if (!has_error) {
               bool use_cknn = (graph->knn_mode == TK_GRAPH_KNN_MODE_CKNN);
-              double d = use_cknn ? 0.0 : tk_graph_distance(graph, u, v, q_weights, e_weights, inter_weights);
+              double d = use_cknn ? 0.0 : tk_graph_distance(graph, u, v);
               if (d == DBL_MAX) d = 1.0;
               tk_edge_t e = tk_edge(u, v, use_cknn ? 0.0 : d);
               khi = tk_euset_put(graph->pairs, e, &kha);
@@ -1485,7 +1485,7 @@ static inline void tm_run_knn_queries (
     if (graph->knn_inv) {
       tk_inv_neighborhoods_by_vecs(L, graph->knn_inv, graph->knn_query_ivec, graph->knn_cache,
                                    0.0, 1.0, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
-                                   graph->knn_decay, graph->knn_rank, &graph->knn_inv_hoods, &graph->uids_hoods);
+                                   graph->knn_decay, &graph->knn_inv_hoods, &graph->uids_hoods);
       if (graph->knn_mutual && graph->knn_inv_hoods) {
         tk_inv_mutualize(L, graph->knn_inv, graph->knn_inv_hoods, graph->uids_hoods,
                         graph->knn_min, NULL);
@@ -1515,7 +1515,7 @@ static inline void tm_run_knn_queries (
     TK_INDEX_NEIGHBORHOODS(L,
       graph->knn_inv, graph->knn_ann, graph->knn_hbi,
       graph->knn_cache, graph->probe_radius, 1.0,
-      graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta, graph->knn_rank, graph->knn_decay,
+      graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta, graph->knn_decay,
       &graph->knn_inv_hoods, &graph->knn_ann_hoods, &graph->knn_hbi_hoods, &graph->uids_hoods);
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2);
@@ -1615,7 +1615,7 @@ static inline void tm_compute_sigma (
           int64_t neighbor_idx;
           tk_umap_foreach_keys(graph->adj->a[i], neighbor_idx, ({
             int64_t neighbor_uid = graph->uids->a[neighbor_idx];
-            double d = tk_graph_distance(graph, uid, neighbor_uid, q_weights, e_weights, inter_weights);
+            double d = tk_graph_distance(graph, uid, neighbor_uid);
             if (d != DBL_MAX) {
               if (tk_rvec_push(neighbor_distances, tk_rank(neighbor_idx, d)) != 0) {
                 has_error = true;
@@ -1646,7 +1646,7 @@ static inline void tm_compute_sigma (
                       int __kha;
                       tk_iuset_put((seen), __nh_global_idx, &__kha);
                       if (__kha) {
-                        double __d = tk_graph_distance((graph), (uid), __nh_uid, (q_weights), (e_weights), (inter_weights));
+                        double __d = tk_graph_distance((graph), (uid), __nh_uid);
                         if (__d == DBL_MAX) __d = __hood->a[__j].d;
                         if (tk_rvec_push((neighbor_distances), tk_rank(__nh_global_idx, __d)) != 0) { has_error = true; }
                       }
@@ -1668,7 +1668,7 @@ static inline void tm_compute_sigma (
                       int __kha;
                       tk_iuset_put((seen), __nh_global_idx, &__kha);
                       if (__kha) {
-                        double __d = tk_graph_distance((graph), (uid), __nh_uid, (q_weights), (e_weights), (inter_weights));
+                        double __d = tk_graph_distance((graph), (uid), __nh_uid);
                         if (__d == DBL_MAX) __d = (double)__hood->a[__j].p / __denom;
                         if (tk_rvec_push((neighbor_distances), tk_rank(__nh_global_idx, __d)) != 0) { has_error = true; }
                       }
@@ -1690,7 +1690,7 @@ static inline void tm_compute_sigma (
                       int __kha;
                       tk_iuset_put((seen), __nh_global_idx, &__kha);
                       if (__kha) {
-                        double __d = tk_graph_distance((graph), (uid), __nh_uid, (q_weights), (e_weights), (inter_weights));
+                        double __d = tk_graph_distance((graph), (uid), __nh_uid);
                         if (__d == DBL_MAX) __d = (double)__hood->a[__j].p / __denom;
                         if (tk_rvec_push((neighbor_distances), tk_rank(__nh_global_idx, __d)) != 0) { has_error = true; }
                       }
@@ -1844,17 +1844,7 @@ static inline int tm_adjacency (lua_State *L)
   const char *knn_cmp_str = tk_lua_foptstring(L, 1, "graph", "knn_cmp", "jaccard");
   double knn_cmp_alpha = tk_lua_foptnumber(L, 1, "graph", "knn_cmp_alpha", 0.5);
   double knn_cmp_beta = tk_lua_foptnumber(L, 1, "graph", "knn_cmp_beta", 0.5);
-  tk_ivec_sim_type_t knn_cmp = TK_IVEC_JACCARD;
-  if (!strcmp(knn_cmp_str, "jaccard"))
-    knn_cmp = TK_IVEC_JACCARD;
-  else if (!strcmp(knn_cmp_str, "overlap"))
-    knn_cmp = TK_IVEC_OVERLAP;
-  else if (!strcmp(knn_cmp_str, "tversky"))
-    knn_cmp = TK_IVEC_TVERSKY;
-  else if (!strcmp(knn_cmp_str, "dice"))
-    knn_cmp = TK_IVEC_DICE;
-  else
-    tk_lua_verror(L, 3, "graph", "invalid knn comparator specified", knn_cmp_str);
+  tk_ivec_sim_type_t knn_cmp = tk_inv_parse_cmp(knn_cmp_str);
 
   lua_getfield(L, 1, "category_index");
   tk_inv_t *category_inv = tk_inv_peekopt(L, -1);
@@ -1869,17 +1859,7 @@ static inline int tm_adjacency (lua_State *L)
   const char *category_cmp_str = tk_lua_foptstring(L, 1, "graph", "category_cmp", "jaccard");
   double category_alpha = tk_lua_foptnumber(L, 1, "graph", "category_alpha", 0.5);
   double category_beta = tk_lua_foptnumber(L, 1, "graph", "category_beta", 0.5);
-  tk_ivec_sim_type_t category_cmp = TK_IVEC_JACCARD;
-  if (!strcmp(category_cmp_str, "jaccard"))
-    category_cmp = TK_IVEC_JACCARD;
-  else if (!strcmp(category_cmp_str, "overlap"))
-    category_cmp = TK_IVEC_OVERLAP;
-  else if (!strcmp(category_cmp_str, "tversky"))
-    category_cmp = TK_IVEC_TVERSKY;
-  else if (!strcmp(category_cmp_str, "dice"))
-    category_cmp = TK_IVEC_DICE;
-  else
-    tk_lua_verror(L, 3, "graph", "invalid category comparator specified", category_cmp_str);
+  tk_ivec_sim_type_t category_cmp = tk_inv_parse_cmp(category_cmp_str);
 
   uint64_t category_anchors = tk_lua_foptunsigned(L, 1, "graph", "category_anchors", 0);
   uint64_t category_knn = tk_lua_foptunsigned(L, 1, "graph", "category_knn", 0);
@@ -1888,17 +1868,7 @@ static inline int tm_adjacency (lua_State *L)
   const char *weight_cmp_str = tk_lua_foptstring(L, 1, "graph", "weight_cmp", "jaccard");
   double weight_alpha = tk_lua_foptnumber(L, 1, "graph", "weight_alpha", 0.5);
   double weight_beta = tk_lua_foptnumber(L, 1, "graph", "weight_beta", 0.5);
-  tk_ivec_sim_type_t weight_cmp = TK_IVEC_JACCARD;
-  if (!strcmp(weight_cmp_str, "jaccard"))
-    weight_cmp = TK_IVEC_JACCARD;
-  else if (!strcmp(weight_cmp_str, "overlap"))
-    weight_cmp = TK_IVEC_OVERLAP;
-  else if (!strcmp(weight_cmp_str, "tversky"))
-    weight_cmp = TK_IVEC_TVERSKY;
-  else if (!strcmp(weight_cmp_str, "dice"))
-    weight_cmp = TK_IVEC_DICE;
-  else
-    tk_lua_verror(L, 3, "graph", "invalid weight comparator specified", weight_cmp_str);
+  tk_ivec_sim_type_t weight_cmp = tk_inv_parse_cmp(weight_cmp_str);
 
   const char *weight_pooling_str = tk_lua_foptstring(L, 1, "graph", "weight_pooling", "min");
   tk_graph_weight_pooling_t weight_pooling = TK_GRAPH_WEIGHT_POOL_MIN;
@@ -2142,7 +2112,7 @@ static inline int tm_adjacency (lua_State *L)
       uint32_t khi_v = tk_iumap_get(graph->uids_idx, v);
       if (khi_u == tk_iumap_end(graph->uids_idx) || khi_v == tk_iumap_end(graph->uids_idx))
         continue;
-      double d = use_cknn ? 0.0 : tk_graph_distance(graph, u, v, NULL, NULL, NULL);
+      double d = use_cknn ? 0.0 : tk_graph_distance(graph, u, v);
       if (d == DBL_MAX) d = 1.0;
       tk_edge_t e = tk_edge(u, v, use_cknn ? 0.0 : d);
       khi = tk_euset_put(graph->pairs, e, &kha);

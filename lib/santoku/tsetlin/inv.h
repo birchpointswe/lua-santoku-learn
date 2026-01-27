@@ -5,6 +5,7 @@
 #include <float.h>
 #include <string.h>
 #include <omp.h>
+#include <cblas.h>
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
 #include <santoku/iumap.h>
@@ -50,41 +51,68 @@ typedef struct tk_inv_s {
   tk_inv_postings_t *postings;
 } tk_inv_t;
 
-static inline void tk_inv_compute_rank_weights (
-  uint64_t n_ranks,
-  double decay,
-  double *rank_weights_out,
-  double *total_weight_out
-) {
-  double total = 0.0;
-  for (uint64_t r = 0; r < n_ranks; r++) {
-    double weight;
-    if (decay < 0) {
-      uint64_t flipped_r = n_ranks - 1 - r;
-      weight = exp((double)flipped_r * decay);
-    } else {
-      weight = exp(-(double)r * decay);
-    }
-    rank_weights_out[r] = weight;
-    total += weight;
-  }
-  *total_weight_out = total;
-}
 
 static inline double tk_inv_w (tk_dvec_t *W, int64_t fid);
+
+#define TK_INV_MAX_RANKS 5
+
+typedef struct {
+  double weights[TK_INV_MAX_RANKS];
+  double total;
+  uint64_t n_ranks;
+} tk_inv_rank_weights_t;
+
+typedef enum {
+  TK_COMBINE_WEIGHTED_AVG,
+  TK_COMBINE_ADDITIVE,
+  TK_COMBINE_EXPONENTIAL
+} tk_combine_type_t;
+
+typedef struct {
+  int64_t *sid_map;
+  double *residual;
+  double *L_mat;
+  int64_t *landmark_sids;
+} tk_inv_landmarks_ctx_t;
+
+static inline int tk_inv_landmarks_ctx_gc (lua_State *L) {
+  tk_inv_landmarks_ctx_t *ctx = (tk_inv_landmarks_ctx_t *)lua_touserdata(L, 1);
+  if (ctx->sid_map) { free(ctx->sid_map); ctx->sid_map = NULL; }
+  if (ctx->residual) { free(ctx->residual); ctx->residual = NULL; }
+  if (ctx->L_mat) { free(ctx->L_mat); ctx->L_mat = NULL; }
+  if (ctx->landmark_sids) { free(ctx->landmark_sids); ctx->landmark_sids = NULL; }
+  return 0;
+}
+
+static inline void tk_inv_precompute_rank_weights (
+  tk_inv_rank_weights_t *rw,
+  uint64_t n_ranks,
+  double decay
+);
 static inline double tk_inv_similarity (
   tk_inv_t *inv,
   int64_t *a, size_t na,
   int64_t *b, size_t nb,
   tk_ivec_sim_type_t cmp,
-  double tversky_alpha,
-  double tversky_beta,
-  double decay,
-  tk_dvec_t *q_weights,
-  tk_dvec_t *e_weights,
-  tk_dvec_t *inter_weights,
-  double *ext_rank_weights,
-  double ext_total_rank_weight
+  double cmp_alpha,
+  double cmp_beta,
+  tk_combine_type_t combine,
+  double decay
+);
+static inline double tk_inv_similarity_fast (
+  int64_t *ranks_arr,
+  double *weights_arr,
+  uint64_t n_ranks,
+  int64_t *abits, size_t asize,
+  int64_t *bbits, size_t bsize,
+  tk_ivec_sim_type_t cmp,
+  double cmp_alpha,
+  double cmp_beta,
+  tk_combine_type_t combine,
+  tk_inv_rank_weights_t *rw,
+  double *q_arr,
+  double *e_arr,
+  double *i_arr
 );
 static inline void tk_inv_compute_query_weights_by_rank (
   tk_inv_t *inv,
@@ -98,19 +126,18 @@ static inline void tk_inv_compute_candidate_weights_by_rank (
   size_t nbits,
   double *e_weights_by_rank
 );
-static inline double tk_inv_similarity_by_rank (
-  tk_inv_t *inv,
-  tk_dvec_t *wacc,
-  int64_t v,
+static inline double tk_inv_similarity_by_rank_fast (
+  uint64_t n_ranks,
+  double *wacc_arr,
+  int64_t vsid,
   double *q_weights_by_rank,
   double *e_weights_by_rank,
   tk_ivec_sim_type_t cmp,
-  double tversky_alpha,
-  double tversky_beta,
-  double *rank_weights,
-  double total_rank_weight,
+  double cmp_alpha,
+  double cmp_beta,
+  tk_combine_type_t combine,
   double cutoff,
-  double decay
+  tk_inv_rank_weights_t *rw
 );
 
 static inline tk_inv_t *tk_inv_peek (lua_State *L, int i)
@@ -121,6 +148,23 @@ static inline tk_inv_t *tk_inv_peek (lua_State *L, int i)
 static inline tk_inv_t *tk_inv_peekopt (lua_State *L, int i)
 {
   return (tk_inv_t *) tk_lua_testuserdata(L, i, TK_INV_MT);
+}
+
+static inline tk_ivec_sim_type_t tk_inv_parse_cmp (const char *s) {
+  if (!s || !strcmp(s, "jaccard")) return TK_IVEC_JACCARD;
+  if (!strcmp(s, "overlap")) return TK_IVEC_OVERLAP;
+  if (!strcmp(s, "dice")) return TK_IVEC_DICE;
+  if (!strcmp(s, "tversky")) return TK_IVEC_TVERSKY;
+  if (!strcmp(s, "cosine")) return TK_IVEC_COSINE;
+  if (!strcmp(s, "min_kernel")) return TK_IVEC_MIN_KERNEL;
+  return TK_IVEC_JACCARD;
+}
+
+static inline tk_combine_type_t tk_inv_parse_combine (const char *s) {
+  if (!s || !strcmp(s, "weighted_avg")) return TK_COMBINE_WEIGHTED_AVG;
+  if (!strcmp(s, "additive")) return TK_COMBINE_ADDITIVE;
+  if (!strcmp(s, "exponential")) return TK_COMBINE_EXPONENTIAL;
+  return TK_COMBINE_WEIGHTED_AVG;
 }
 
 static inline void tk_inv_shrink (
@@ -148,8 +192,8 @@ static inline void tk_inv_shrink (
       tk_ivec_shrink(inv->postings->a[i]);
     tk_ivec_shrink(inv->node_offsets);
     tk_ivec_shrink(inv->node_bits);
-    if (inv->weights) tk_dvec_shrink(inv->weights);
-    if (inv->ranks) tk_ivec_shrink(inv->ranks);
+    tk_dvec_shrink(inv->weights);
+    tk_ivec_shrink(inv->ranks);
     return;
   }
   tk_ivec_t *new_node_offsets = tk_ivec_create(L, (size_t) new_sid + 1, 0, 0);
@@ -231,8 +275,8 @@ static inline void tk_inv_shrink (
   tk_inv_postings_shrink(inv->postings);
   tk_ivec_shrink(inv->node_offsets);
   tk_ivec_shrink(inv->node_bits);
-  if (inv->weights) tk_dvec_shrink(inv->weights);
-  if (inv->ranks) tk_ivec_shrink(inv->ranks);
+  tk_dvec_shrink(inv->weights);
+  tk_ivec_shrink(inv->ranks);
   free(old_to_new);
 }
 
@@ -268,16 +312,8 @@ static inline void tk_inv_persist (
     tk_lua_fwrite(L, (char *) &P->n, sizeof(uint64_t), 1, fh);
     tk_lua_fwrite(L, (char *) P->a, sizeof(int64_t), P->n, fh);
   }
-  size_t wn = inv->weights ? inv->weights->n : 0;
-  if (wn)
-    tk_dvec_persist(L, inv->weights, fh);
-  else
-    tk_lua_fwrite(L, (char *) &wn, sizeof(size_t), 1, fh);
-  size_t rn = inv->ranks ? inv->ranks->n : 0;
-  if (rn)
-    tk_ivec_persist(L, inv->ranks, fh);
-  else
-    tk_lua_fwrite(L, (char *) &rn, sizeof(size_t), 1, fh);
+  tk_dvec_persist(L, inv->weights, fh);
+  tk_ivec_persist(L, inv->ranks, fh);
 }
 
 static inline uint64_t tk_inv_size (
@@ -493,14 +529,19 @@ static inline void tk_inv_mutualize (
     hoods_sets[i] = tk_dumap_create(0, 0);
 
   tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
-  double tversky_alpha = 1.0;
-  double tversky_beta = 0.1;
+  double cmp_alpha = 1.0;
+  double cmp_beta = 0.1;
+
+  tk_inv_rank_weights_t rw;
+  tk_inv_precompute_rank_weights(&rw, inv->n_ranks, 0.0);
+  int64_t *ranks_arr = inv->ranks->a;
+  double *weights_arr = inv->weights->a;
 
   #pragma omp parallel
   {
-    tk_dvec_t *q_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-    tk_dvec_t *e_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-    tk_dvec_t *inter_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
+    double q_weights_buf[TK_INV_MAX_RANKS];
+    double e_weights_buf[TK_INV_MAX_RANKS];
+    double inter_weights_buf[TK_INV_MAX_RANKS];
 
     #pragma omp for schedule(static) nowait
     for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
@@ -566,10 +607,10 @@ static inline void tk_inv_mutualize (
           int64_t *ubits = tk_inv_sget(inv, usid, &ulen);
           int64_t *vbits = tk_inv_sget(inv, vsid, &vlen);
           if (ubits && vbits) {
-            double sim = tk_inv_similarity(
-              inv, vbits, vlen, ubits, ulen, cmp,
-              tversky_alpha, tversky_beta, 0.0,
-              q_weights_buf, e_weights_buf, inter_weights_buf, NULL, 0.0);
+            double sim = tk_inv_similarity_fast(
+              ranks_arr, weights_arr, inv->n_ranks,
+              vbits, vlen, ubits, ulen, cmp, cmp_alpha, cmp_beta,
+              TK_COMBINE_WEIGHTED_AVG, &rw, q_weights_buf, e_weights_buf, inter_weights_buf);
             d_reverse = 1.0 - sim;
           }
         }
@@ -578,10 +619,6 @@ static inline void tk_inv_mutualize (
       tk_rvec_asc(uhood, 0, uhood->n);
       tk_rvec_asc(uhood, uhood->n, uhood->m);
     }
-
-    tk_dvec_destroy(q_weights_buf);
-    tk_dvec_destroy(e_weights_buf);
-    tk_dvec_destroy(inter_weights_buf);
   }
 
   int64_t *old_to_new = NULL;
@@ -697,20 +734,14 @@ static inline void tk_inv_neighborhoods (
   double eps_min,
   double eps_max,
   tk_ivec_sim_type_t cmp,
-  double tversky_alpha,
-  double tversky_beta,
+  double cmp_alpha,
+  double cmp_beta,
   double decay,
-  int64_t rank_filter,
   tk_inv_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
   if (inv->destroyed)
     return;
-
-  tk_dvec_t *rank_weights_vec = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-  double *rank_weights = rank_weights_vec->a;
-  double total_rank_weight;
-  tk_inv_compute_rank_weights(inv->n_ranks, decay, rank_weights, &total_rank_weight);
 
   tk_ivec_t *uids = tk_ivec_create(L, 0, 0, 0);
   tk_ivec_t *sid_to_pos = tk_ivec_create(L, (uint64_t)inv->next_sid, 0, 0);
@@ -736,13 +767,17 @@ static inline void tk_inv_neighborhoods (
     }
   }
 
+  tk_inv_rank_weights_t rw;
+  tk_inv_precompute_rank_weights(&rw, inv->n_ranks, decay);
+  uint64_t n_ranks = inv->n_ranks;
+
   #pragma omp parallel
   {
-    tk_dvec_t *wacc = tk_dvec_create(NULL, uids->n * inv->n_ranks, 0, 0);
-    memset(wacc->a, 0, sizeof(double) * uids->n * inv->n_ranks);
+    tk_dvec_t *wacc = tk_dvec_create(NULL, uids->n * n_ranks, 0, 0);
+    memset(wacc->a, 0, sizeof(double) * uids->n * n_ranks);
     tk_ivec_t *touched = tk_ivec_create(NULL, 0, 0, 0);
-    tk_dvec_t *q_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-    tk_dvec_t *e_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
+    double q_weights_buf[TK_INV_MAX_RANKS];
+    double e_weights_buf[TK_INV_MAX_RANKS];
     #pragma omp for schedule(static) nowait
     for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
       tk_rvec_t *uhood = hoods->a[i];
@@ -753,23 +788,17 @@ static inline void tk_inv_neighborhoods (
         continue;
       size_t nubits;
       int64_t *ubits = tk_inv_sget(inv, usid, &nubits);
-      double *q_weights_by_rank = q_weights_buf->a;
+      double *q_weights_by_rank = q_weights_buf;
       tk_inv_compute_query_weights_by_rank(inv, ubits, nubits, q_weights_by_rank);
       touched->n = 0;
       double cutoff = eps_max;
       double min_required_sim = 1.0 - cutoff;
-      bool reverse = decay < 0;
-      double remaining_weight = total_rank_weight;
-      for (uint64_t ri = 0; ri < inv->n_ranks; ri ++) {
-        uint64_t current_rank = reverse ? (inv->n_ranks - 1 - ri) : ri;
-        if (rank_filter >= 0 && (int64_t)current_rank != rank_filter) {
-          remaining_weight -= rank_weights[current_rank];
-          continue;
-        }
-        bool can_prune_new = remaining_weight / total_rank_weight < min_required_sim;
+      double gate = 1.0;
+      for (uint64_t current_rank = 0; current_rank < n_ranks; current_rank ++) {
+        bool can_prune_new = gate < min_required_sim;
         for (size_t k = 0; k < nubits; k ++) {
           int64_t fid = ubits[k];
-          int64_t fid_rank = inv->ranks ? inv->ranks->a[fid] : 0;
+          int64_t fid_rank = inv->ranks->a[fid];
           if ((uint64_t)fid_rank != current_rank)
             continue;
           double wf = tk_inv_w(inv->weights, fid);
@@ -783,11 +812,11 @@ static inline void tk_inv_neighborhoods (
             int64_t iv = sid_to_pos->a[vsid];
             if (iv < 0)
               continue;
-            double *wacc_base = &wacc->a[(int64_t) inv->n_ranks * iv];
+            double *wacc_base = &wacc->a[(int64_t) n_ranks * iv];
             if (wacc_base[0] < 0)
               continue;
             bool first_touch = true;
-            for (uint64_t r = 0; r < inv->n_ranks; r ++) {
+            for (uint64_t r = 0; r < n_ranks; r ++) {
               if (wacc_base[r] != 0.0) {
                 first_touch = false;
                 break;
@@ -804,61 +833,21 @@ static inline void tk_inv_neighborhoods (
             wacc_base[current_rank] += wf;
           }
         }
-        remaining_weight -= rank_weights[current_rank];
-        if (ri + 1 < inv->n_ranks && remaining_weight > 0 && cutoff < 1.0) {
-          min_required_sim = 1.0 - cutoff;
-          for (uint64_t ti = 0; ti < touched->n; ti ++) {
-            int64_t vsid = touched->a[ti];
-            int64_t iv = sid_to_pos->a[vsid];
-            double *wacc_base = &wacc->a[(int64_t) inv->n_ranks * iv];
-            if (wacc_base[0] < 0)
-              continue;
-            double partial_inter_weight = 0.0;
-            for (uint64_t rj = 0; rj <= ri; rj ++) {
-              uint64_t r = reverse ? (inv->n_ranks - 1 - rj) : rj;
-              double inter = wacc_base[r];
-              if (inter > 0.0)
-                partial_inter_weight += inter * rank_weights[r];
-            }
-            double partial_query_weight = 0.0;
-            for (uint64_t rj = 0; rj <= ri; rj ++) {
-              uint64_t r = reverse ? (inv->n_ranks - 1 - rj) : rj;
-              partial_query_weight += q_weights_by_rank[r] * rank_weights[r];
-            }
-            double max_partial_sim = (partial_query_weight > 0.0) ? partial_inter_weight / partial_query_weight : 0.0;
-            double max_total_sim = (max_partial_sim * (total_rank_weight - remaining_weight) + remaining_weight) / total_rank_weight;
-            if (max_total_sim < min_required_sim)
-              wacc_base[0] = -1.0;
-          }
-        }
+        gate *= decay;
       }
       touched->n = tk_ivec_uasc(touched, 0, touched->n);
-      double *e_weights_by_rank = e_weights_buf->a;
+      double *e_weights_by_rank = e_weights_buf;
       cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
         int64_t vsid = touched->a[ti];
         int64_t iv = sid_to_pos->a[vsid];
-        double *wacc_base = &wacc->a[(int64_t) inv->n_ranks * iv];
+        double *wacc_base = &wacc->a[(int64_t) n_ranks * iv];
         if (wacc_base[0] < 0)
           continue;
-        if (uhood->n >= knn) {
-          double inter_weight = 0.0;
-          for (uint64_t r = 0; r < inv->n_ranks; r++) {
-            double inter = wacc_base[r];
-            if (inter > 0.0)
-              inter_weight += inter * rank_weights[r];
-          }
-          double query_weight = 0.0;
-          for (uint64_t r = 0; r < inv->n_ranks; r++)
-            query_weight += q_weights_by_rank[r] * rank_weights[r];
-          double max_possible_sim = (query_weight > 0.0) ? (inter_weight / query_weight) : 0.0;
-          if (1.0 - max_possible_sim > cutoff)
-            continue;
-        }
         size_t nvbits;
         int64_t *vbits = tk_inv_sget(inv, vsid, &nvbits);
         tk_inv_compute_candidate_weights_by_rank(inv, vbits, nvbits, e_weights_by_rank);
-        double sim = tk_inv_similarity_by_rank(inv, wacc, iv, q_weights_by_rank, e_weights_by_rank, cmp, tversky_alpha, tversky_beta, rank_weights, total_rank_weight, cutoff, decay);
+        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_by_rank, cmp, cmp_alpha, cmp_beta, TK_COMBINE_WEIGHTED_AVG, cutoff, &rw);
         double dist = 1.0 - sim;
         if (dist >= eps_min && dist <= cutoff) {
           tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
@@ -869,8 +858,8 @@ static inline void tk_inv_neighborhoods (
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
         int64_t vsid = touched->a[ti];
         int64_t iv = sid_to_pos->a[vsid];
-        for (uint64_t r = 0; r < inv->n_ranks; r ++)
-          wacc->a[(int64_t) inv->n_ranks * iv + (int64_t) r] = 0.0;
+        for (uint64_t r = 0; r < n_ranks; r ++)
+          wacc->a[(int64_t) n_ranks * iv + (int64_t) r] = 0.0;
       }
       tk_rvec_asc(uhood, 0, uhood->n);
       touched->n = 0;
@@ -878,11 +867,8 @@ static inline void tk_inv_neighborhoods (
 
     tk_dvec_destroy(wacc);
     tk_ivec_destroy(touched);
-    tk_dvec_destroy(q_weights_buf);
-    tk_dvec_destroy(e_weights_buf);
   }
 
-  tk_dvec_destroy(rank_weights_vec);
   tk_ivec_destroy(sid_to_pos);
 
   if (hoodsp) *hoodsp = hoods;
@@ -897,20 +883,14 @@ static inline void tk_inv_neighborhoods_by_ids (
   double eps_min,
   double eps_max,
   tk_ivec_sim_type_t cmp,
-  double tversky_alpha,
-  double tversky_beta,
+  double cmp_alpha,
+  double cmp_beta,
   double decay,
-  int64_t rank_filter,
   tk_inv_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
   if (inv->destroyed)
     return;
-
-  tk_dvec_t *rank_weights_vec = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-  double *rank_weights = rank_weights_vec->a;
-  double total_rank_weight;
-  tk_inv_compute_rank_weights(inv->n_ranks, decay, rank_weights, &total_rank_weight);
 
   tk_ivec_t *all_uids, *sid_to_pos;
   tk_inv_prepare_universe_map(L, inv, &all_uids, &sid_to_pos);
@@ -925,13 +905,17 @@ static inline void tk_inv_neighborhoods_by_ids (
     lua_pop(L, 1);
   }
 
+  tk_inv_rank_weights_t rw;
+  tk_inv_precompute_rank_weights(&rw, inv->n_ranks, decay);
+  uint64_t n_ranks = inv->n_ranks;
+
   #pragma omp parallel
   {
-    tk_dvec_t *wacc = tk_dvec_create(NULL, all_uids->n * inv->n_ranks, 0, 0);
-    memset(wacc->a, 0, sizeof(double) * all_uids->n * inv->n_ranks);
+    tk_dvec_t *wacc = tk_dvec_create(NULL, all_uids->n * n_ranks, 0, 0);
+    memset(wacc->a, 0, sizeof(double) * all_uids->n * n_ranks);
     tk_ivec_t *touched = tk_ivec_create(NULL, 0, 0, 0);
-    tk_dvec_t *q_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-    tk_dvec_t *e_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
+    double q_weights_buf[TK_INV_MAX_RANKS];
+    double e_weights_buf[TK_INV_MAX_RANKS];
     #pragma omp for schedule(static) nowait
     for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
       tk_rvec_t *uhood = hoods->a[i];
@@ -942,23 +926,17 @@ static inline void tk_inv_neighborhoods_by_ids (
         continue;
       size_t nubits;
       int64_t *ubits = tk_inv_sget(inv, usid, &nubits);
-      double *q_weights_by_rank = q_weights_buf->a;
+      double *q_weights_by_rank = q_weights_buf;
       tk_inv_compute_query_weights_by_rank(inv, ubits, nubits, q_weights_by_rank);
       touched->n = 0;
       double cutoff = eps_max;
       double min_required_sim = 1.0 - cutoff;
-      bool reverse = decay < 0;
-      double remaining_weight = total_rank_weight;
-      for (uint64_t ri = 0; ri < inv->n_ranks; ri ++) {
-        uint64_t current_rank = reverse ? (inv->n_ranks - 1 - ri) : ri;
-        if (rank_filter >= 0 && (int64_t)current_rank != rank_filter) {
-          remaining_weight -= rank_weights[current_rank];
-          continue;
-        }
-        bool can_prune_new = remaining_weight / total_rank_weight < min_required_sim;
+      double gate = 1.0;
+      for (uint64_t current_rank = 0; current_rank < n_ranks; current_rank ++) {
+        bool can_prune_new = gate < min_required_sim;
         for (size_t k = 0; k < nubits; k ++) {
           int64_t fid = ubits[k];
-          int64_t fid_rank = inv->ranks ? inv->ranks->a[fid] : 0;
+          int64_t fid_rank = inv->ranks->a[fid];
           if ((uint64_t)fid_rank != current_rank)
             continue;
           double wf = tk_inv_w(inv->weights, fid);
@@ -972,11 +950,11 @@ static inline void tk_inv_neighborhoods_by_ids (
             int64_t iv = sid_to_pos->a[vsid];
             if (iv < 0)
               continue;
-            double *wacc_base = &wacc->a[(int64_t) inv->n_ranks * iv];
+            double *wacc_base = &wacc->a[(int64_t) n_ranks * iv];
             if (wacc_base[0] < 0)
               continue;
             bool first_touch = true;
-            for (uint64_t r = 0; r < inv->n_ranks; r ++) {
+            for (uint64_t r = 0; r < n_ranks; r ++) {
               if (wacc_base[r] != 0.0) {
                 first_touch = false;
                 break;
@@ -993,61 +971,21 @@ static inline void tk_inv_neighborhoods_by_ids (
             wacc_base[current_rank] += wf;
           }
         }
-        remaining_weight -= rank_weights[current_rank];
-        if (ri + 1 < inv->n_ranks && remaining_weight > 0 && cutoff < 1.0) {
-          min_required_sim = 1.0 - cutoff;
-          for (uint64_t ti = 0; ti < touched->n; ti ++) {
-            int64_t vsid = touched->a[ti];
-            int64_t iv = sid_to_pos->a[vsid];
-            double *wacc_base = &wacc->a[(int64_t) inv->n_ranks * iv];
-            if (wacc_base[0] < 0)
-              continue;
-            double partial_inter_weight = 0.0;
-            for (uint64_t rj = 0; rj <= ri; rj ++) {
-              uint64_t r = reverse ? (inv->n_ranks - 1 - rj) : rj;
-              double inter = wacc_base[r];
-              if (inter > 0.0)
-                partial_inter_weight += inter * rank_weights[r];
-            }
-            double partial_query_weight = 0.0;
-            for (uint64_t rj = 0; rj <= ri; rj ++) {
-              uint64_t r = reverse ? (inv->n_ranks - 1 - rj) : rj;
-              partial_query_weight += q_weights_by_rank[r] * rank_weights[r];
-            }
-            double max_partial_sim = (partial_query_weight > 0.0) ? partial_inter_weight / partial_query_weight : 0.0;
-            double max_total_sim = (max_partial_sim * (total_rank_weight - remaining_weight) + remaining_weight) / total_rank_weight;
-            if (max_total_sim < min_required_sim)
-              wacc_base[0] = -1.0;
-          }
-        }
+        gate *= decay;
       }
       touched->n = tk_ivec_uasc(touched, 0, touched->n);
-      double *e_weights_by_rank = e_weights_buf->a;
+      double *e_weights_by_rank = e_weights_buf;
       cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
         int64_t vsid = touched->a[ti];
         int64_t iv = sid_to_pos->a[vsid];
-        double *wacc_base = &wacc->a[(int64_t) inv->n_ranks * iv];
+        double *wacc_base = &wacc->a[(int64_t) n_ranks * iv];
         if (wacc_base[0] < 0)
           continue;
-        if (uhood->n >= knn) {
-          double inter_weight = 0.0;
-          for (uint64_t r = 0; r < inv->n_ranks; r++) {
-            double inter = wacc_base[r];
-            if (inter > 0.0)
-              inter_weight += inter * rank_weights[r];
-          }
-          double query_weight = 0.0;
-          for (uint64_t r = 0; r < inv->n_ranks; r++)
-            query_weight += q_weights_by_rank[r] * rank_weights[r];
-          double max_possible_sim = (query_weight > 0.0) ? (inter_weight / query_weight) : 0.0;
-          if (1.0 - max_possible_sim > cutoff)
-            continue;
-        }
         size_t nvbits;
         int64_t *vbits = tk_inv_sget(inv, vsid, &nvbits);
         tk_inv_compute_candidate_weights_by_rank(inv, vbits, nvbits, e_weights_by_rank);
-        double sim = tk_inv_similarity_by_rank(inv, wacc, iv, q_weights_by_rank, e_weights_by_rank, cmp, tversky_alpha, tversky_beta, rank_weights, total_rank_weight, cutoff, decay);
+        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_by_rank, cmp, cmp_alpha, cmp_beta, TK_COMBINE_WEIGHTED_AVG, cutoff, &rw);
         double dist = 1.0 - sim;
         if (dist >= eps_min && dist <= cutoff) {
           tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
@@ -1058,8 +996,8 @@ static inline void tk_inv_neighborhoods_by_ids (
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
         int64_t vsid = touched->a[ti];
         int64_t iv = sid_to_pos->a[vsid];
-        for (uint64_t r = 0; r < inv->n_ranks; r ++)
-          wacc->a[(int64_t) inv->n_ranks * iv + (int64_t) r] = 0.0;
+        for (uint64_t r = 0; r < n_ranks; r ++)
+          wacc->a[(int64_t) n_ranks * iv + (int64_t) r] = 0.0;
       }
       tk_rvec_asc(uhood, 0, uhood->n);
       touched->n = 0;
@@ -1067,11 +1005,8 @@ static inline void tk_inv_neighborhoods_by_ids (
 
     tk_dvec_destroy(wacc);
     tk_ivec_destroy(touched);
-    tk_dvec_destroy(q_weights_buf);
-    tk_dvec_destroy(e_weights_buf);
   }
 
-  tk_dvec_destroy(rank_weights_vec);
   tk_ivec_destroy(sid_to_pos);
 
   if (hoodsp) *hoodsp = hoods;
@@ -1087,10 +1022,9 @@ static inline void tk_inv_neighborhoods_by_vecs (
   double eps_min,
   double eps_max,
   tk_ivec_sim_type_t cmp,
-  double tversky_alpha,
-  double tversky_beta,
+  double cmp_alpha,
+  double cmp_beta,
   double decay,
-  int64_t rank_filter,
   tk_inv_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
@@ -1150,18 +1084,17 @@ static inline void tk_inv_neighborhoods_by_vecs (
   tk_ivec_t *all_uids, *sid_to_pos;
   tk_inv_prepare_universe_map(L, inv, &all_uids, &sid_to_pos);
 
+  tk_inv_rank_weights_t rw;
+  tk_inv_precompute_rank_weights(&rw, inv->n_ranks, decay);
+  uint64_t n_ranks = inv->n_ranks;
+
   #pragma omp parallel
   {
-    tk_dvec_t *rank_weights_vec = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-    double *rank_weights = rank_weights_vec->a;
-    double total_rank_weight;
-    tk_inv_compute_rank_weights(inv->n_ranks, decay, rank_weights, &total_rank_weight);
-
-    tk_dvec_t *wacc = tk_dvec_create(NULL, all_uids->n * inv->n_ranks, 0, 0);
-    memset(wacc->a, 0, sizeof(double) * all_uids->n * inv->n_ranks);
+    tk_dvec_t *wacc = tk_dvec_create(NULL, all_uids->n * n_ranks, 0, 0);
+    memset(wacc->a, 0, sizeof(double) * all_uids->n * n_ranks);
     tk_ivec_t *touched = tk_ivec_create(NULL, 0, 0, 0);
-    tk_dvec_t *q_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-    tk_dvec_t *e_weights_buf = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
+    double q_weights_buf[TK_INV_MAX_RANKS];
+    double e_weights_buf[TK_INV_MAX_RANKS];
 
     #pragma omp for schedule(static) nowait
     for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
@@ -1171,23 +1104,17 @@ static inline void tk_inv_neighborhoods_by_vecs (
       int64_t end = (i + 1 < (int64_t) query_offsets->n) ? query_offsets->a[i + 1] : (int64_t) query_features->n;
       int64_t *ubits = query_features->a + start;
       size_t nubits = (size_t)(end - start);
-      double *q_weights_by_rank = q_weights_buf->a;
+      double *q_weights_by_rank = q_weights_buf;
       tk_inv_compute_query_weights_by_rank(inv, ubits, nubits, q_weights_by_rank);
       touched->n = 0;
       double cutoff = eps_max;
       double min_required_sim = 1.0 - cutoff;
-      bool reverse = decay < 0;
-      double remaining_weight = total_rank_weight;
-      for (uint64_t ri = 0; ri < inv->n_ranks; ri ++) {
-        uint64_t current_rank = reverse ? (inv->n_ranks - 1 - ri) : ri;
-        if (rank_filter >= 0 && (int64_t)current_rank != rank_filter) {
-          remaining_weight -= rank_weights[current_rank];
-          continue;
-        }
-        bool can_prune_new = remaining_weight / total_rank_weight < min_required_sim;
+      double gate = 1.0;
+      for (uint64_t current_rank = 0; current_rank < n_ranks; current_rank ++) {
+        bool can_prune_new = gate < min_required_sim;
         for (size_t k = 0; k < nubits; k ++) {
           int64_t fid = ubits[k];
-          int64_t fid_rank = inv->ranks ? inv->ranks->a[fid] : 0;
+          int64_t fid_rank = inv->ranks->a[fid];
           if ((uint64_t)fid_rank != current_rank)
             continue;
           double wf = tk_inv_w(inv->weights, fid);
@@ -1199,11 +1126,11 @@ static inline void tk_inv_neighborhoods_by_vecs (
             int64_t iv = sid_to_pos->a[vsid];
             if (iv < 0)
               continue;
-            double *wacc_base = &wacc->a[(int64_t) inv->n_ranks * iv];
+            double *wacc_base = &wacc->a[(int64_t) n_ranks * iv];
             if (wacc_base[0] < 0)
               continue;
             bool first_touch = true;
-            for (uint64_t r = 0; r < inv->n_ranks; r ++) {
+            for (uint64_t r = 0; r < n_ranks; r ++) {
               if (wacc_base[r] != 0.0) {
                 first_touch = false;
                 break;
@@ -1220,61 +1147,21 @@ static inline void tk_inv_neighborhoods_by_vecs (
             wacc_base[current_rank] += wf;
           }
         }
-        remaining_weight -= rank_weights[current_rank];
-        if (ri + 1 < inv->n_ranks && remaining_weight > 0 && cutoff < 1.0) {
-          min_required_sim = 1.0 - cutoff;
-          for (uint64_t ti = 0; ti < touched->n; ti ++) {
-            int64_t vsid = touched->a[ti];
-            int64_t iv = sid_to_pos->a[vsid];
-            double *wacc_base = &wacc->a[(int64_t) inv->n_ranks * iv];
-            if (wacc_base[0] < 0)
-              continue;
-            double partial_inter_weight = 0.0;
-            for (uint64_t rj = 0; rj <= ri; rj ++) {
-              uint64_t r = reverse ? (inv->n_ranks - 1 - rj) : rj;
-              double inter = wacc_base[r];
-              if (inter > 0.0)
-                partial_inter_weight += inter * rank_weights[r];
-            }
-            double partial_query_weight = 0.0;
-            for (uint64_t rj = 0; rj <= ri; rj ++) {
-              uint64_t r = reverse ? (inv->n_ranks - 1 - rj) : rj;
-              partial_query_weight += q_weights_by_rank[r] * rank_weights[r];
-            }
-            double max_partial_sim = (partial_query_weight > 0.0) ? partial_inter_weight / partial_query_weight : 0.0;
-            double max_total_sim = (max_partial_sim * (total_rank_weight - remaining_weight) + remaining_weight) / total_rank_weight;
-            if (max_total_sim < min_required_sim)
-              wacc_base[0] = -1.0;
-          }
-        }
+        gate *= decay;
       }
       touched->n = tk_ivec_uasc(touched, 0, touched->n);
-      double *e_weights_by_rank = e_weights_buf->a;
+      double *e_weights_by_rank = e_weights_buf;
       cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
         int64_t vsid = touched->a[ti];
         int64_t iv = sid_to_pos->a[vsid];
-        double *wacc_base = &wacc->a[(int64_t) inv->n_ranks * iv];
+        double *wacc_base = &wacc->a[(int64_t) n_ranks * iv];
         if (wacc_base[0] < 0)
           continue;
-        if (uhood->n >= knn) {
-          double inter_weight = 0.0;
-          for (uint64_t r = 0; r < inv->n_ranks; r++) {
-            double inter = wacc_base[r];
-            if (inter > 0.0)
-              inter_weight += inter * rank_weights[r];
-          }
-          double query_weight = 0.0;
-          for (uint64_t r = 0; r < inv->n_ranks; r++)
-            query_weight += q_weights_by_rank[r] * rank_weights[r];
-          double max_possible_sim = (query_weight > 0.0) ? (inter_weight / query_weight) : 0.0;
-          if (1.0 - max_possible_sim > cutoff)
-            continue;
-        }
         size_t nvbits;
         int64_t *vbits = tk_inv_sget(inv, vsid, &nvbits);
         tk_inv_compute_candidate_weights_by_rank(inv, vbits, nvbits, e_weights_by_rank);
-        double sim = tk_inv_similarity_by_rank(inv, wacc, iv, q_weights_by_rank, e_weights_by_rank, cmp, tversky_alpha, tversky_beta, rank_weights, total_rank_weight, cutoff, decay);
+        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_by_rank, cmp, cmp_alpha, cmp_beta, TK_COMBINE_WEIGHTED_AVG, cutoff, &rw);
         double dist = 1.0 - sim;
         if (dist >= eps_min && dist <= cutoff) {
           tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
@@ -1285,18 +1172,15 @@ static inline void tk_inv_neighborhoods_by_vecs (
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
         int64_t vsid = touched->a[ti];
         int64_t iv = sid_to_pos->a[vsid];
-        for (uint64_t r = 0; r < inv->n_ranks; r ++)
-          wacc->a[(int64_t) inv->n_ranks * iv + (int64_t) r] = 0.0;
+        for (uint64_t r = 0; r < n_ranks; r ++)
+          wacc->a[(int64_t) n_ranks * iv + (int64_t) r] = 0.0;
       }
       tk_rvec_asc(uhood, 0, uhood->n);
       touched->n = 0;
     }
 
-    tk_dvec_destroy(rank_weights_vec);
     tk_dvec_destroy(wacc);
     tk_ivec_destroy(touched);
-    tk_dvec_destroy(q_weights_buf);
-    tk_dvec_destroy(e_weights_buf);
   }
 
   tk_ivec_destroy(sid_to_pos);
@@ -1311,181 +1195,126 @@ static inline double tk_inv_w (
   tk_dvec_t *W,
   int64_t fid
 ) {
-  if (W == NULL)
-    return 1.0;
   return W->a[fid];
 }
 
-static inline void tk_inv_stats (
-  tk_inv_t *inv,
-  int64_t *a, size_t alen,
-  int64_t *b, size_t blen,
-  double *inter_w,
-  double *sum_a,
-  double *sum_b
+#define tk_inv_similarity_partial tk_ivec_set_similarity_from_partial
+
+static inline void tk_inv_precompute_rank_weights (
+  tk_inv_rank_weights_t *rw,
+  uint64_t n_ranks,
+  double decay
 ) {
+  double abs_decay = fabs(decay);
+  rw->n_ranks = n_ranks;
+  rw->total = 0.0;
+  for (uint64_t r = 0; r < n_ranks && r < TK_INV_MAX_RANKS; r++) {
+    double eff_r = (decay >= 0.0) ? (double)r : (double)(n_ranks - 1 - r);
+    rw->weights[r] = exp(-eff_r * abs_decay);
+    rw->total += rw->weights[r];
+  }
+}
+
+static inline double tk_inv_combine_ranks (
+  double *i_arr, double *q_arr, double *e_arr,
+  uint64_t n_ranks,
+  tk_ivec_sim_type_t sim_type,
+  double alpha, double beta,
+  tk_combine_type_t combine_type,
+  tk_inv_rank_weights_t *rw
+) {
+  double accum = 0.0;
+  for (uint64_t r = 0; r < n_ranks; r++) {
+    double s = tk_inv_similarity_partial(i_arr[r], q_arr[r], e_arr[r], sim_type, alpha, beta);
+    accum += rw->weights[r] * s;
+  }
+  switch (combine_type) {
+    case TK_COMBINE_WEIGHTED_AVG:
+      return (rw->total > 0.0) ? accum / rw->total : 0.0;
+    case TK_COMBINE_ADDITIVE:
+      return accum;
+    case TK_COMBINE_EXPONENTIAL:
+      return exp(accum) - 1.0;
+    default:
+      return (rw->total > 0.0) ? accum / rw->total : 0.0;
+  }
+}
+
+static inline double tk_inv_similarity_fast (
+  int64_t *ranks_arr,
+  double *weights_arr,
+  uint64_t n_ranks,
+  int64_t *abits, size_t asize,
+  int64_t *bbits, size_t bsize,
+  tk_ivec_sim_type_t cmp,
+  double cmp_alpha,
+  double cmp_beta,
+  tk_combine_type_t combine,
+  tk_inv_rank_weights_t *rw,
+  double *q_arr,
+  double *e_arr,
+  double *i_arr
+) {
+  for (uint64_t r = 0; r < n_ranks; r++) {
+    q_arr[r] = 0.0;
+    e_arr[r] = 0.0;
+    i_arr[r] = 0.0;
+  }
   size_t i = 0, j = 0;
-  double inter = 0.0, sa = 0.0, sb = 0.0;
-  while (i < alen && j < blen) {
-    int64_t ai = a[i], bj = b[j];
-    if (ai == bj) {
-      double w = tk_inv_w(inv->weights, ai);
-      inter += w;
-      sa += w;
-      sb += w;
-      i ++;
-      j ++;
-    } else if (ai < bj) {
-      sa += tk_inv_w(inv->weights, ai);
-      i ++;
+  while (i < asize && j < bsize) {
+    if (abits[i] == bbits[j]) {
+      int64_t fid = abits[i];
+      int64_t rank = ranks_arr[fid];
+      double w = weights_arr[fid];
+      i_arr[rank] += w;
+      q_arr[rank] += w;
+      e_arr[rank] += w;
+      i++; j++;
+    } else if (abits[i] < bbits[j]) {
+      int64_t fid = abits[i];
+      int64_t rank = ranks_arr[fid];
+      q_arr[rank] += weights_arr[fid];
+      i++;
     } else {
-      sb += tk_inv_w(inv->weights, bj);
-      j ++;
+      int64_t fid = bbits[j];
+      int64_t rank = ranks_arr[fid];
+      e_arr[rank] += weights_arr[fid];
+      j++;
     }
   }
-  while (i < alen)
-    sa += tk_inv_w(inv->weights, a[i ++]);
-  while (j < blen)
-    sb += tk_inv_w(inv->weights, b[j ++]);
-  *inter_w = inter;
-  *sum_a = sa;
-  *sum_b = sb;
+  while (i < asize) {
+    int64_t fid = abits[i];
+    int64_t rank = ranks_arr[fid];
+    q_arr[rank] += weights_arr[fid];
+    i++;
+  }
+  while (j < bsize) {
+    int64_t fid = bbits[j];
+    int64_t rank = ranks_arr[fid];
+    e_arr[rank] += weights_arr[fid];
+    j++;
+  }
+  return tk_inv_combine_ranks(i_arr, q_arr, e_arr, n_ranks, cmp, cmp_alpha, cmp_beta, combine, rw);
 }
-
-static inline double tk_inv_tversky_from_stats (double inter_w, double sa, double sb, double alpha, double beta)
-{
-  double a_only = sa - inter_w;
-  double b_only = sb - inter_w;
-  if (a_only < 0.0) a_only = 0.0;
-  if (b_only < 0.0) b_only = 0.0;
-  double denom = inter_w + alpha * a_only + beta * b_only;
-  return (denom == 0.0) ? 0.0 : inter_w / denom;
-}
-
-#define tk_inv_similarity_partial tk_ivec_set_similarity_from_partial
 
 static inline double tk_inv_similarity (
   tk_inv_t *inv,
   int64_t *abits, size_t asize,
   int64_t *bbits, size_t bsize,
   tk_ivec_sim_type_t cmp,
-  double tversky_alpha,
-  double tversky_beta,
-  double decay,
-  tk_dvec_t *q_weights,
-  tk_dvec_t *e_weights,
-  tk_dvec_t *inter_weights,
-  double *ext_rank_weights,
-  double ext_total_rank_weight
+  double cmp_alpha,
+  double cmp_beta,
+  tk_combine_type_t combine,
+  double decay
 ) {
-  if (inv->ranks && inv->n_ranks > 1 && q_weights && e_weights && inter_weights) {
-    tk_dvec_ensure(q_weights, inv->n_ranks);
-    tk_dvec_ensure(e_weights, inv->n_ranks);
-    tk_dvec_ensure(inter_weights, inv->n_ranks);
-
-    double rank_weights_buf[64];
-    double *rank_weights;
-    double total_rank_weight;
-    bool free_rank_weights = false;
-    if (ext_rank_weights) {
-      rank_weights = ext_rank_weights;
-      total_rank_weight = ext_total_rank_weight;
-    } else {
-      rank_weights = (inv->n_ranks <= 64) ? rank_weights_buf : (double *)malloc(inv->n_ranks * sizeof(double));
-      if (!rank_weights)
-        return 0.0;
-      free_rank_weights = (inv->n_ranks > 64);
-      tk_inv_compute_rank_weights(inv->n_ranks, decay, rank_weights, &total_rank_weight);
-    }
-
-    for (uint64_t r = 0; r < inv->n_ranks; r ++) {
-      q_weights->a[r] = 0.0;
-      e_weights->a[r] = 0.0;
-      inter_weights->a[r] = 0.0;
-    }
-    size_t i = 0, j = 0;
-    while (i < asize && j < bsize) {
-      if (abits[i] == bbits[j]) {
-        int64_t fid = abits[i];
-        int64_t rank = (fid >= 0 && fid < (int64_t)inv->features && inv->ranks) ? inv->ranks->a[fid] : 0;
-        if (rank >= 0 && rank < (int64_t)inv->n_ranks) {
-          double w = tk_inv_w(inv->weights, fid);
-          inter_weights->a[rank] += w;
-          q_weights->a[rank] += w;
-          e_weights->a[rank] += w;
-        }
-        i ++; j ++;
-      } else if (abits[i] < bbits[j]) {
-        int64_t fid = abits[i];
-        int64_t rank = (fid >= 0 && fid < (int64_t)inv->features && inv->ranks) ? inv->ranks->a[fid] : 0;
-        if (rank >= 0 && rank < (int64_t)inv->n_ranks) {
-          q_weights->a[rank] += tk_inv_w(inv->weights, fid);
-        }
-        i ++;
-      } else {
-        int64_t fid = bbits[j];
-        int64_t rank = (fid >= 0 && fid < (int64_t)inv->features && inv->ranks) ? inv->ranks->a[fid] : 0;
-        if (rank >= 0 && rank < (int64_t)inv->n_ranks) {
-          e_weights->a[rank] += tk_inv_w(inv->weights, fid);
-        }
-        j ++;
-      }
-    }
-    while (i < asize) {
-      int64_t fid = abits[i];
-      int64_t rank = (fid >= 0 && fid < (int64_t)inv->features && inv->ranks) ? inv->ranks->a[fid] : 0;
-      if (rank >= 0 && rank < (int64_t)inv->n_ranks) {
-        q_weights->a[rank] += tk_inv_w(inv->weights, fid);
-      }
-      i ++;
-    }
-    while (j < bsize) {
-      int64_t fid = bbits[j];
-      int64_t rank = (fid >= 0 && fid < (int64_t)inv->features && inv->ranks) ? inv->ranks->a[fid] : 0;
-      if (rank >= 0 && rank < (int64_t)inv->n_ranks) {
-        e_weights->a[rank] += tk_inv_w(inv->weights, fid);
-      }
-      j ++;
-    }
-    double total_weighted_sim = 0.0;
-    for (uint64_t rank = 0; rank < inv->n_ranks; rank ++) {
-      double rank_weight = rank_weights[rank];
-      double rank_sim = tk_inv_similarity_partial(
-        inter_weights->a[rank],
-        q_weights->a[rank],
-        e_weights->a[rank],
-        cmp, tversky_alpha, tversky_beta);
-      total_weighted_sim += rank_sim * rank_weight;
-    }
-
-    double result = (total_rank_weight > 0.0) ? total_weighted_sim / total_rank_weight : 0.0;
-    if (free_rank_weights)
-      free(rank_weights);
-    return result;
-  }
-  double inter_w = 0.0, sa = 0.0, sb = 0.0;
-  tk_inv_stats(inv, abits, asize, bbits, bsize, &inter_w, &sa, &sb);
-  switch (cmp) {
-    case TK_IVEC_JACCARD: {
-      double u = sa + sb - inter_w;
-      return (u == 0.0) ? 0.0 : inter_w / u;
-    }
-    case TK_IVEC_OVERLAP: {
-      double m = (sa < sb) ? sa : sb;
-      return (m == 0.0) ? 0.0 : inter_w / m;
-    }
-    case TK_IVEC_TVERSKY: {
-      return tk_inv_tversky_from_stats(inter_w, sa, sb, tversky_alpha, tversky_beta);
-    }
-    case TK_IVEC_DICE: {
-      double denom = sa + sb;
-      return (denom == 0.0) ? 0.0 : (2.0 * inter_w) / denom;
-    }
-    default: {
-      double u = sa + sb - inter_w;
-      return (u == 0.0) ? 0.0 : inter_w / u;
-    }
-  }
+  tk_inv_rank_weights_t rw;
+  tk_inv_precompute_rank_weights(&rw, inv->n_ranks, decay);
+  double q_arr[TK_INV_MAX_RANKS] = {0};
+  double e_arr[TK_INV_MAX_RANKS] = {0};
+  double i_arr[TK_INV_MAX_RANKS] = {0};
+  return tk_inv_similarity_fast(inv->ranks->a, inv->weights->a, inv->n_ranks,
+    abits, asize, bbits, bsize, cmp, cmp_alpha, cmp_beta, combine, &rw,
+    q_arr, e_arr, i_arr);
 }
 
 static inline double tk_inv_distance (
@@ -1493,12 +1322,10 @@ static inline double tk_inv_distance (
   int64_t uid0,
   int64_t uid1,
   tk_ivec_sim_type_t cmp,
-  double tversky_alpha,
-  double tversky_beta,
-  double decay,
-  tk_dvec_t *q_weights,
-  tk_dvec_t *e_weights,
-  tk_dvec_t *inter_weights
+  double cmp_alpha,
+  double cmp_beta,
+  tk_combine_type_t combine,
+  double decay
 ) {
   size_t n0 = 0, n1 = 0;
   int64_t *v0 = tk_inv_get(inv, uid0, &n0);
@@ -1507,8 +1334,7 @@ static inline double tk_inv_distance (
   int64_t *v1 = tk_inv_get(inv, uid1, &n1);
   if (v1 == NULL)
     return 1.0;
-  double sim = tk_inv_similarity(inv, v0, n0, v1, n1, cmp, tversky_alpha, tversky_beta, decay, q_weights, e_weights, inter_weights, NULL, 0.0);
-  return 1.0 - sim;
+  return 1.0 - tk_inv_similarity(inv, v0, n0, v1, n1, cmp, cmp_alpha, cmp_beta, combine, decay);
 }
 
 static inline void tk_inv_compute_query_weights_by_rank (
@@ -1522,7 +1348,7 @@ static inline void tk_inv_compute_query_weights_by_rank (
   for (size_t i = 0; i < datalen; i ++) {
     int64_t fid = data[i];
     if (fid >= 0 && fid < (int64_t) inv->features) {
-      int64_t rank = inv->ranks ? inv->ranks->a[fid] : 0;
+      int64_t rank = inv->ranks->a[fid];
       if (rank >= 0 && rank < (int64_t) inv->n_ranks) {
         q_weights_by_rank[rank] += tk_inv_w(inv->weights, fid);
       }
@@ -1541,11 +1367,56 @@ static inline void tk_inv_compute_candidate_weights_by_rank (
   for (size_t i = 0; i < nfeatures; i ++) {
     int64_t fid = features[i];
     if (fid >= 0 && fid < (int64_t) inv->features) {
-      int64_t rank = inv->ranks ? inv->ranks->a[fid] : 0;
+      int64_t rank = inv->ranks->a[fid];
       if (rank >= 0 && rank < (int64_t) inv->n_ranks) {
         e_weights_by_rank[rank] += tk_inv_w(inv->weights, fid);
       }
     }
+  }
+}
+
+static inline double tk_inv_similarity_by_rank_fast (
+  uint64_t n_ranks,
+  double *wacc_arr,
+  int64_t vsid,
+  double *q_weights_by_rank,
+  double *e_weights_by_rank,
+  tk_ivec_sim_type_t cmp,
+  double cmp_alpha,
+  double cmp_beta,
+  tk_combine_type_t combine,
+  double cutoff,
+  tk_inv_rank_weights_t *rw
+) {
+  double accum = 0.0;
+  double total_weight = 0.0;
+  double min_required_sim = 1.0 - cutoff;
+  for (uint64_t rank = 0; rank < n_ranks; rank++) {
+    double weight = rw->weights[rank];
+    double inter_w = wacc_arr[(int64_t)n_ranks * vsid + (int64_t)rank];
+    double q_w = q_weights_by_rank[rank];
+    double e_w = e_weights_by_rank[rank];
+    double rank_sim = (q_w > 0.0 || e_w > 0.0)
+      ? tk_inv_similarity_partial(inter_w, q_w, e_w, cmp, cmp_alpha, cmp_beta)
+      : 0.0;
+    accum += weight * rank_sim;
+    total_weight += weight;
+    if (combine == TK_COMBINE_WEIGHTED_AVG && cutoff < 1.0 && rw->total > 0.0) {
+      double remaining_weight = rw->total - total_weight;
+      double max_possible_sim = (accum + remaining_weight) / rw->total;
+      if (max_possible_sim < min_required_sim)
+        return 0.0;
+    }
+  }
+  switch (combine) {
+    case TK_COMBINE_WEIGHTED_AVG:
+      return (rw->total > 0.0) ? accum / rw->total : 0.0;
+    case TK_COMBINE_ADDITIVE:
+      return accum;
+    case TK_COMBINE_EXPONENTIAL:
+      return exp(accum) - 1.0;
+    default:
+      return (rw->total > 0.0) ? accum / rw->total : 0.0;
   }
 }
 
@@ -1556,132 +1427,17 @@ static inline double tk_inv_similarity_by_rank (
   double *q_weights_by_rank,
   double *e_weights_by_rank,
   tk_ivec_sim_type_t cmp,
-  double tversky_alpha,
-  double tversky_beta,
-  double *rank_weights,
-  double total_rank_weight,
+  double cmp_alpha,
+  double cmp_beta,
+  tk_combine_type_t combine,
   double cutoff,
   double decay
 ) {
-  double total_weighted_sim = 0.0;
-  double remaining_weight = total_rank_weight;
-  double min_required_sim = 1.0 - cutoff;
-  bool reverse = decay < 0;
-  for (uint64_t i = 0; i < inv->n_ranks; i ++) {
-    uint64_t rank = reverse ? (inv->n_ranks - 1 - i) : i;
-    double rank_weight = rank_weights[rank];
-    remaining_weight -= rank_weight;
-    double inter_w = wacc->a[(int64_t) inv->n_ranks * vsid + (int64_t) rank];
-    double q_w = q_weights_by_rank[rank];
-    double e_w = e_weights_by_rank[rank];
-    double rank_sim;
-    if (q_w > 0.0 || e_w > 0.0) {
-      rank_sim = tk_inv_similarity_partial(inter_w, q_w, e_w, cmp, tversky_alpha, tversky_beta);
-    } else {
-      rank_sim = 0.0;
-    }
-    total_weighted_sim += rank_sim * rank_weight;
-    if (remaining_weight > 0.0 && cutoff < 1.0) {
-      double max_possible_sim = (total_weighted_sim + remaining_weight) / total_rank_weight;
-      if (max_possible_sim < min_required_sim)
-        return 0.0;
-    }
-  }
-  return (total_rank_weight > 0.0) ? total_weighted_sim / total_rank_weight : 0.0;
-}
-
-static inline double tk_inv_similarity_rank_filtered (
-  tk_inv_t *inv,
-  int64_t *abits, size_t asize,
-  int64_t *bbits, size_t bsize,
-  tk_ivec_sim_type_t cmp,
-  double tversky_alpha,
-  double tversky_beta,
-  double decay,
-  int64_t rank_filter,
-  tk_dvec_t *q_weights,
-  tk_dvec_t *e_weights,
-  tk_dvec_t *inter_weights
-) {
-  if (rank_filter < 0)
-    return tk_inv_similarity(inv, abits, asize, bbits, bsize, cmp, tversky_alpha, tversky_beta, decay, q_weights, e_weights, inter_weights, NULL, 0.0);
-  double filtered_inter_w = 0.0, filtered_sa = 0.0, filtered_sb = 0.0;
-  size_t i = 0, j = 0;
-  while (i < asize && j < bsize) {
-    if (abits[i] == bbits[j]) {
-      int64_t fid = abits[i];
-      int64_t rank = (inv->ranks && fid >= 0 && fid < (int64_t)inv->features) ? inv->ranks->a[fid] : 0;
-      if (rank == rank_filter) {
-        double w = tk_inv_w(inv->weights, fid);
-        filtered_inter_w += w;
-        filtered_sa += w;
-        filtered_sb += w;
-      }
-      i++; j++;
-    } else if (abits[i] < bbits[j]) {
-      int64_t fid = abits[i];
-      int64_t rank = (inv->ranks && fid >= 0 && fid < (int64_t)inv->features) ? inv->ranks->a[fid] : 0;
-      if (rank == rank_filter)
-        filtered_sa += tk_inv_w(inv->weights, fid);
-      i++;
-    } else {
-      int64_t fid = bbits[j];
-      int64_t rank = (inv->ranks && fid >= 0 && fid < (int64_t)inv->features) ? inv->ranks->a[fid] : 0;
-      if (rank == rank_filter)
-        filtered_sb += tk_inv_w(inv->weights, fid);
-      j++;
-    }
-  }
-  while (i < asize) {
-    int64_t fid = abits[i];
-    int64_t rank = (inv->ranks && fid >= 0 && fid < (int64_t)inv->features) ? inv->ranks->a[fid] : 0;
-    if (rank == rank_filter)
-      filtered_sa += tk_inv_w(inv->weights, fid);
-    i++;
-  }
-  while (j < bsize) {
-    int64_t fid = bbits[j];
-    int64_t rank = (inv->ranks && fid >= 0 && fid < (int64_t)inv->features) ? inv->ranks->a[fid] : 0;
-    if (rank == rank_filter)
-      filtered_sb += tk_inv_w(inv->weights, fid);
-    j++;
-  }
-  double rank_sim;
-  switch (cmp) {
-    case TK_IVEC_JACCARD: {
-      double u = filtered_sa + filtered_sb - filtered_inter_w;
-      rank_sim = (u == 0.0) ? 0.0 : filtered_inter_w / u;
-      break;
-    }
-    case TK_IVEC_OVERLAP: {
-      double m = (filtered_sa < filtered_sb) ? filtered_sa : filtered_sb;
-      rank_sim = (m == 0.0) ? 0.0 : filtered_inter_w / m;
-      break;
-    }
-    case TK_IVEC_TVERSKY: {
-      rank_sim = tk_inv_tversky_from_stats(filtered_inter_w, filtered_sa, filtered_sb, tversky_alpha, tversky_beta);
-      break;
-    }
-    case TK_IVEC_DICE: {
-      double denom = filtered_sa + filtered_sb;
-      rank_sim = (denom == 0.0) ? 0.0 : (2.0 * filtered_inter_w) / denom;
-      break;
-    }
-    default: {
-      double u = filtered_sa + filtered_sb - filtered_inter_w;
-      rank_sim = (u == 0.0) ? 0.0 : filtered_inter_w / u;
-      break;
-    }
-  }
-
-  tk_dvec_t *rank_weights_vec = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-  double *rank_weights = rank_weights_vec->a;
-  double total_rank_weight;
-  tk_inv_compute_rank_weights(inv->n_ranks, decay, rank_weights, &total_rank_weight);
-
-  double rank_weight = rank_weights[rank_filter];
-  tk_dvec_destroy(rank_weights_vec);
-  return (total_rank_weight > 0.0) ? (rank_sim * rank_weight) / total_rank_weight : 0.0;
+  tk_inv_rank_weights_t rw;
+  tk_inv_precompute_rank_weights(&rw, inv->n_ranks, decay);
+  return tk_inv_similarity_by_rank_fast(
+    inv->n_ranks, wacc->a, vsid, q_weights_by_rank, e_weights_by_rank,
+    cmp, cmp_alpha, cmp_beta, combine, cutoff, &rw);
 }
 
 static inline double tk_inv_distance_extend (
@@ -1690,54 +1446,27 @@ static inline double tk_inv_distance_extend (
   int64_t uid1,
   double observable_distance,
   tk_ivec_sim_type_t cmp,
-  double tversky_alpha,
-  double tversky_beta,
-  double decay,
-  tk_dvec_t *q_weights,
-  tk_dvec_t *e_weights,
-  tk_dvec_t *inter_weights
+  double cmp_alpha,
+  double cmp_beta,
+  tk_combine_type_t combine,
+  double decay
 ) {
   if (!categories || categories->n_ranks == 0)
     return observable_distance;
   if (observable_distance == DBL_MAX || isnan(observable_distance))
-    return tk_inv_distance(categories, uid0, uid1, cmp, tversky_alpha, tversky_beta, decay, q_weights, e_weights, inter_weights);
+    return tk_inv_distance(categories, uid0, uid1, cmp, cmp_alpha, cmp_beta, combine, decay);
   size_t n0 = 0, n1 = 0;
   int64_t *v0 = tk_inv_get(categories, uid0, &n0);
   int64_t *v1 = tk_inv_get(categories, uid1, &n1);
   if (v0 == NULL || v1 == NULL)
     return observable_distance;
-
-  tk_dvec_t *rank_weights_vec = tk_dvec_create(NULL, categories->n_ranks, 0, 0);
-  double *rank_weights = rank_weights_vec->a;
-  double total_rank_weight;
-  tk_inv_compute_rank_weights(categories->n_ranks, decay, rank_weights, &total_rank_weight);
-
-  double hier_sim = tk_inv_similarity(categories, v0, n0, v1, n1, cmp, tversky_alpha, tversky_beta, decay, q_weights, e_weights, inter_weights, NULL, 0.0);
+  double hier_sim = tk_inv_similarity(categories, v0, n0, v1, n1, cmp, cmp_alpha, cmp_beta, combine, decay);
   double obs_sim = 1.0 - observable_distance;
   if (obs_sim < 0.0) obs_sim = 0.0;
   if (obs_sim > 1.0) obs_sim = 1.0;
-  double obs_rank_weight = 0.0;
-  if (categories->n_ranks > 0) {
-    double last_rank_weight = rank_weights[categories->n_ranks - 1];
-    if (categories->n_ranks > 1) {
-      double second_last = rank_weights[categories->n_ranks - 2];
-      if (second_last > 0.0) {
-        double decay_ratio = last_rank_weight / second_last;
-        obs_rank_weight = last_rank_weight * decay_ratio;
-      } else {
-        obs_rank_weight = last_rank_weight * 0.5;
-      }
-    } else {
-      obs_rank_weight = last_rank_weight * 0.5;
-    }
-  }
-  double total_weight = total_rank_weight + obs_rank_weight;
-  if (total_weight <= 0.0) {
-    tk_dvec_destroy(rank_weights_vec);
-    return observable_distance;
-  }
-  double blended_sim = (hier_sim * total_rank_weight + obs_sim * obs_rank_weight) / total_weight;
-  tk_dvec_destroy(rank_weights_vec);
+  double abs_decay = fabs(decay);
+  double total_weight = 1.0 + abs_decay;
+  double blended_sim = (hier_sim + abs_decay * obs_sim) / total_weight;
   return 1.0 - blended_sim;
 }
 
@@ -1751,13 +1480,9 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   double eps_max,
   tk_rvec_t *out,
   tk_ivec_sim_type_t cmp,
-  double tversky_alpha,
-  double tversky_beta,
-  double decay,
-  int64_t rank_filter,
-  tk_dvec_t *q_weights,
-  tk_dvec_t *e_weights,
-  tk_dvec_t *inter_weights
+  double cmp_alpha,
+  double cmp_beta,
+  double decay
 ) {
   if (datalen == 0) {
     tk_rvec_clear(out);
@@ -1766,41 +1491,34 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
 
   tk_rvec_clear(out);
   size_t n_sids = inv->node_offsets->n;
+  uint64_t n_ranks = inv->n_ranks;
 
-  tk_dvec_t *rank_weights_vec = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-  double *rank_weights = rank_weights_vec->a;
-  double total_rank_weight;
-  tk_inv_compute_rank_weights(inv->n_ranks, decay, rank_weights, &total_rank_weight);
+  tk_inv_rank_weights_t rw;
+  tk_inv_precompute_rank_weights(&rw, n_ranks, decay);
 
-  tk_dvec_t *tmp_q_weights = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-  tk_dvec_t *tmp_e_weights = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-  tk_dvec_t *wacc = tk_dvec_create(NULL, n_sids * inv->n_ranks, 0, 0);
+  double tmp_q_weights[TK_INV_MAX_RANKS];
+  double tmp_e_weights[TK_INV_MAX_RANKS];
+  tk_dvec_t *wacc = tk_dvec_create(NULL, n_sids * n_ranks, 0, 0);
   tk_ivec_t *touched = tk_ivec_create(NULL, 0, 0, 0);
 
-  double *q_weights_by_rank = tmp_q_weights->a;
+  double *q_weights_by_rank = tmp_q_weights;
   tk_inv_compute_query_weights_by_rank(inv, data, datalen, q_weights_by_rank);
 
-  wacc->n = n_sids * inv->n_ranks;
+  wacc->n = n_sids * n_ranks;
   for (uint64_t i = 0; i < wacc->n; i++)
     wacc->a[i] = 0.0;
 
   double cutoff = eps_max;
   double min_required_sim = 1.0 - cutoff;
-  bool reverse = decay < 0;
-  double remaining_weight = total_rank_weight;
+  double gate = 1.0;
 
-  for (uint64_t ri = 0; ri < inv->n_ranks; ri ++) {
-    uint64_t current_rank = reverse ? (inv->n_ranks - 1 - ri) : ri;
-    if (rank_filter >= 0 && (int64_t)current_rank != rank_filter) {
-      remaining_weight -= rank_weights[current_rank];
-      continue;
-    }
-    bool can_prune_new = remaining_weight / total_rank_weight < min_required_sim;
+  for (uint64_t current_rank = 0; current_rank < n_ranks; current_rank ++) {
+    bool can_prune_new = gate < min_required_sim;
     for (size_t i = 0; i < datalen; i ++) {
       int64_t fid = data[i];
       if (fid < 0 || fid >= (int64_t) inv->postings->n)
         continue;
-      int64_t fid_rank = inv->ranks ? inv->ranks->a[fid] : 0;
+      int64_t fid_rank = inv->ranks->a[fid];
       if ((uint64_t)fid_rank != current_rank)
         continue;
       double wf = tk_inv_w(inv->weights, fid);
@@ -1809,11 +1527,11 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
         int64_t vsid = vsids->a[j];
         if (vsid == sid0)
           continue;
-        double *wacc_base = &wacc->a[(int64_t) inv->n_ranks * vsid];
+        double *wacc_base = &wacc->a[(int64_t) n_ranks * vsid];
         if (wacc_base[0] < 0)
           continue;
         bool first_touch = true;
-        for (uint64_t r = 0; r < inv->n_ranks; r ++) {
+        for (uint64_t r = 0; r < n_ranks; r ++) {
           if (wacc_base[r] != 0.0) {
             first_touch = false;
             break;
@@ -1830,67 +1548,26 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
         wacc_base[current_rank] += wf;
       }
     }
-    remaining_weight -= rank_weights[current_rank];
-    if (ri + 1 < inv->n_ranks && remaining_weight > 0 && cutoff < 1.0) {
-      min_required_sim = 1.0 - cutoff;
-      for (uint64_t ti = 0; ti < touched->n; ti ++) {
-        int64_t vsid = touched->a[ti];
-        double *wacc_base = &wacc->a[(int64_t) inv->n_ranks * vsid];
-        if (wacc_base[0] < 0)
-          continue;
-        double partial_inter_weight = 0.0;
-        for (uint64_t rj = 0; rj <= ri; rj ++) {
-          uint64_t r = reverse ? (inv->n_ranks - 1 - rj) : rj;
-          double inter = wacc_base[r];
-          if (inter > 0.0)
-            partial_inter_weight += inter * rank_weights[r];
-        }
-        double partial_query_weight = 0.0;
-        for (uint64_t rj = 0; rj <= ri; rj ++) {
-          uint64_t r = reverse ? (inv->n_ranks - 1 - rj) : rj;
-          partial_query_weight += q_weights_by_rank[r] * rank_weights[r];
-        }
-        double max_partial_sim = (partial_query_weight > 0.0) ? partial_inter_weight / partial_query_weight : 0.0;
-        double max_total_sim = (max_partial_sim * (total_rank_weight - remaining_weight) + remaining_weight) / total_rank_weight;
-        if (max_total_sim < min_required_sim)
-          wacc_base[0] = -1.0;
-      }
-    }
+    gate *= decay;
   }
 
   touched->n = tk_ivec_uasc(touched, 0, touched->n);
-  double *e_weights_by_rank = tmp_e_weights->a;
+  double *e_weights_by_rank = tmp_e_weights;
 
   for (uint64_t i = 0; i < touched->n; i ++) {
     int64_t vsid = touched->a[i];
-    double *wacc_base = &wacc->a[(int64_t) inv->n_ranks * vsid];
+    double *wacc_base = &wacc->a[(int64_t) n_ranks * vsid];
     if (wacc_base[0] < 0) {
-      for (uint64_t r = 0; r < inv->n_ranks; r ++)
+      for (uint64_t r = 0; r < n_ranks; r ++)
         wacc_base[r] = 0.0;
       continue;
-    }
-
-    if (knn && out->n >= knn) {
-      double max_sim = 0.0;
-      for (uint64_t r = 0; r < inv->n_ranks; r++) {
-        double inter = wacc_base[r];
-        if (inter > 0.0)
-          max_sim += inter * rank_weights[r];
-      }
-      max_sim = (total_rank_weight > 0.0) ? max_sim / total_rank_weight : 0.0;
-
-      if (1.0 - max_sim > out->a[0].d) {
-        for (uint64_t r = 0; r < inv->n_ranks; r ++)
-          wacc_base[r] = 0.0;
-        continue;
-      }
     }
 
     size_t elen = 0;
     int64_t *ev = tk_inv_sget(inv, vsid, &elen);
     tk_inv_compute_candidate_weights_by_rank(inv, ev, elen, e_weights_by_rank);
     double current_cutoff = (knn && out->n >= knn) ? out->a[0].d : eps_max;
-    double sim = tk_inv_similarity_by_rank(inv, wacc, vsid, q_weights_by_rank, e_weights_by_rank, cmp, tversky_alpha, tversky_beta, rank_weights, total_rank_weight, current_cutoff, decay);
+    double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, vsid, q_weights_by_rank, e_weights_by_rank, cmp, cmp_alpha, cmp_beta, TK_COMBINE_WEIGHTED_AVG, current_cutoff, &rw);
     double dist = 1.0 - sim;
     if (dist >= eps_min && dist <= current_cutoff) {
       int64_t vuid = tk_inv_sid_uid(inv, vsid);
@@ -1901,15 +1578,12 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
           tk_rvec_push(out, tk_rank(vuid, dist));
       }
     }
-    for (uint64_t r = 0; r < inv->n_ranks; r ++)
+    for (uint64_t r = 0; r < n_ranks; r ++)
       wacc_base[r] = 0.0;
   }
 
   tk_rvec_asc(out, 0, out->n);
 
-  tk_dvec_destroy(rank_weights_vec);
-  tk_dvec_destroy(tmp_q_weights);
-  tk_dvec_destroy(tmp_e_weights);
   tk_dvec_destroy(wacc);
   tk_ivec_destroy(touched);
 
@@ -1924,13 +1598,9 @@ static inline tk_rvec_t *tk_inv_neighbors_by_id (
   double eps_max,
   tk_rvec_t *out,
   tk_ivec_sim_type_t cmp,
-  double tversky_alpha,
-  double tversky_beta,
-  double decay,
-  int64_t rank_filter,
-  tk_dvec_t *q_weights,
-  tk_dvec_t *e_weights,
-  tk_dvec_t *inter_weights
+  double cmp_alpha,
+  double cmp_beta,
+  double decay
 ) {
   int64_t sid0 = tk_inv_uid_sid(inv, uid, false);
   if (sid0 < 0) {
@@ -1939,7 +1609,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_id (
   }
   size_t len = 0;
   int64_t *data = tk_inv_get(inv, uid, &len);
-  return tk_inv_neighbors_by_vec(inv, data, len, sid0, knn, eps_min, eps_max, out, cmp, tversky_alpha, tversky_beta, decay, rank_filter, q_weights, e_weights, inter_weights);
+  return tk_inv_neighbors_by_vec(inv, data, len, sid0, knn, eps_min, eps_max, out, cmp, cmp_alpha, cmp_beta, decay);
 }
 
 static inline int tk_inv_gc_lua (lua_State *L)
@@ -2049,25 +1719,11 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
   uint64_t knn = tk_lua_checkunsigned(L, 2, "knn");
   double eps_min = tk_lua_optposdouble(L, 3, "eps_min", 0.0);
   double eps_max = tk_lua_optposdouble(L, 4, "eps_max", 1.0);
-  const char *typ = tk_lua_optstring(L, 5, "comparator", "jaccard");
-  double tversky_alpha = tk_lua_optnumber(L, 6, "alpha", 1.0);
-  double tversky_beta = tk_lua_optnumber(L, 7, "beta", 0.1);
-  int64_t rank_filter = lua_isnil(L, 8) ? -1 : (int64_t) tk_lua_checkunsigned(L, 8, "rank_filter");
-  double decay = tk_lua_optnumber(L, 9, "decay", 0.0);
-
-  tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
-  if (!strcmp(typ, "jaccard"))
-    cmp = TK_IVEC_JACCARD;
-  else if (!strcmp(typ, "overlap"))
-    cmp = TK_IVEC_OVERLAP;
-  else if (!strcmp(typ, "dice"))
-    cmp = TK_IVEC_DICE;
-  else if (!strcmp(typ, "tversky"))
-    cmp = TK_IVEC_TVERSKY;
-  else
-    tk_lua_verror(L, 3, "neighborhoods", "invalid comparator specified", typ);
-
-  tk_inv_neighborhoods(L, inv, knn, eps_min, eps_max, cmp, tversky_alpha, tversky_beta, decay, rank_filter, NULL, NULL);
+  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 5, "comparator", "jaccard"));
+  double cmp_alpha = tk_lua_optnumber(L, 6, "alpha", 1.0);
+  double cmp_beta = tk_lua_optnumber(L, 7, "beta", 0.1);
+  double decay = tk_lua_optnumber(L, 8, "decay", 0.0);
+  tk_inv_neighborhoods(L, inv, knn, eps_min, eps_max, cmp, cmp_alpha, cmp_beta, decay, NULL, NULL);
   return 2;
 }
 
@@ -2078,23 +1734,10 @@ static inline int tk_inv_neighborhoods_by_ids_lua (lua_State *L)
   uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
   double eps_min = tk_lua_optposdouble(L, 4, "eps_min", 0.0);
   double eps_max = tk_lua_optposdouble(L, 5, "eps_max", 1.0);
-  const char *typ = tk_lua_optstring(L, 6, "comparator", "jaccard");
-  double tversky_alpha = tk_lua_optnumber(L, 7, "alpha", 1.0);
-  double tversky_beta = tk_lua_optnumber(L, 8, "beta", 0.1);
-  int64_t rank_filter = lua_isnil(L, 9) ? -1 : (int64_t) tk_lua_checkunsigned(L, 9, "rank_filter");
-  double decay = tk_lua_optnumber(L, 10, "decay", 0.0);
-
-  tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
-  if (!strcmp(typ, "jaccard"))
-    cmp = TK_IVEC_JACCARD;
-  else if (!strcmp(typ, "overlap"))
-    cmp = TK_IVEC_OVERLAP;
-  else if (!strcmp(typ, "dice"))
-    cmp = TK_IVEC_DICE;
-  else if (!strcmp(typ, "tversky"))
-    cmp = TK_IVEC_TVERSKY;
-  else
-    tk_lua_verror(L, 3, "neighborhoods_by_ids", "invalid comparator specified", typ);
+  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 6, "comparator", "jaccard"));
+  double cmp_alpha = tk_lua_optnumber(L, 7, "alpha", 1.0);
+  double cmp_beta = tk_lua_optnumber(L, 8, "beta", 0.1);
+  double decay = tk_lua_optnumber(L, 9, "decay", 0.0);
   int64_t write_pos = 0;
   for (int64_t i = 0; i < (int64_t) query_ids->n; i ++) {
     int64_t uid = query_ids->a[i];
@@ -2106,7 +1749,7 @@ static inline int tk_inv_neighborhoods_by_ids_lua (lua_State *L)
   query_ids->n = (uint64_t) write_pos;
 
   tk_inv_hoods_t *hoods;
-  tk_inv_neighborhoods_by_ids(L, inv, query_ids, knn, eps_min, eps_max, cmp, tversky_alpha, tversky_beta, rank_filter, decay, &hoods, &query_ids);
+  tk_inv_neighborhoods_by_ids(L, inv, query_ids, knn, eps_min, eps_max, cmp, cmp_alpha, cmp_beta, decay, &hoods, &query_ids);
   return 2;
 }
 
@@ -2117,126 +1760,59 @@ static inline int tk_inv_neighborhoods_by_vecs_lua (lua_State *L)
   uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
   double eps_min = tk_lua_optposdouble(L, 4, "eps_min", 0.0);
   double eps_max = tk_lua_optposdouble(L, 5, "eps_max", 1.0);
-  const char *typ = tk_lua_optstring(L, 6, "comparator", "jaccard");
-  double tversky_alpha = tk_lua_optnumber(L, 7, "alpha", 1.0);
-  double tversky_beta = tk_lua_optnumber(L, 8, "beta", 0.1);
-  int64_t rank_filter = lua_isnil(L, 9) ? -1 : (int64_t) tk_lua_checkunsigned(L, 9, "rank_filter");
-  double decay = tk_lua_optnumber(L, 10, "decay", 0.0);
-
-  tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
-  if (!strcmp(typ, "jaccard"))
-    cmp = TK_IVEC_JACCARD;
-  else if (!strcmp(typ, "overlap"))
-    cmp = TK_IVEC_OVERLAP;
-  else if (!strcmp(typ, "dice"))
-    cmp = TK_IVEC_DICE;
-  else if (!strcmp(typ, "tversky"))
-    cmp = TK_IVEC_TVERSKY;
-  else
-    tk_lua_verror(L, 3, "neighborhoods_by_vecs", "invalid comparator specified", typ);
-
-  tk_inv_neighborhoods_by_vecs(L, inv, query_vecs, knn, eps_min, eps_max, cmp, tversky_alpha, tversky_beta, decay, rank_filter, NULL, NULL);
+  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 6, "comparator", "jaccard"));
+  double cmp_alpha = tk_lua_optnumber(L, 7, "alpha", 1.0);
+  double cmp_beta = tk_lua_optnumber(L, 8, "beta", 0.1);
+  double decay = tk_lua_optnumber(L, 9, "decay", 0.0);
+  tk_inv_neighborhoods_by_vecs(L, inv, query_vecs, knn, eps_min, eps_max, cmp, cmp_alpha, cmp_beta, decay, NULL, NULL);
   return 2;
 }
 
 static inline int tk_inv_similarity_lua (lua_State *L)
 {
-  lua_settop(L, 10);
   tk_inv_t *inv = tk_inv_peek(L, 1);
-  const char *typ = tk_lua_optstring(L, 4, "comparator", "jaccard");
-  double tversky_alpha = tk_lua_optnumber(L, 5, "alpha", 1.0);
-  double tversky_beta = tk_lua_optnumber(L, 6, "beta", 0.1);
-  tk_dvec_t *q_weights = tk_dvec_peekopt(L, 7);
-  tk_dvec_t *e_weights = tk_dvec_peekopt(L, 8);
-  tk_dvec_t *inter_weights = tk_dvec_peekopt(L, 9);
-  double decay = tk_lua_optnumber(L, 10, "decay", 0.0);
-  tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
-  if (!strcmp(typ, "jaccard"))
-    cmp = TK_IVEC_JACCARD;
-  else if (!strcmp(typ, "overlap"))
-    cmp = TK_IVEC_OVERLAP;
-  else if (!strcmp(typ, "dice"))
-    cmp = TK_IVEC_DICE;
-  else if (!strcmp(typ, "tversky"))
-    cmp = TK_IVEC_TVERSKY;
-  else
-    tk_lua_verror(L, 3, "similarity", "invalid comparator specified", typ);
   int64_t uid0 = tk_lua_checkinteger(L, 2, "uid0");
   int64_t uid1 = tk_lua_checkinteger(L, 3, "uid1");
-  if (!q_weights) q_weights = tk_dvec_create(L, 0, 0, 0);
-  if (!e_weights) e_weights = tk_dvec_create(L, 0, 0, 0);
-  if (!inter_weights) inter_weights = tk_dvec_create(L, 0, 0, 0);
-  lua_pushnumber(L, 1.0 - tk_inv_distance(inv, uid0, uid1, cmp, tversky_alpha, tversky_beta, decay, q_weights, e_weights, inter_weights));
+  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 4, "comparator", "jaccard"));
+  double cmp_alpha = tk_lua_optnumber(L, 5, "alpha", 1.0);
+  double cmp_beta = tk_lua_optnumber(L, 6, "beta", 0.1);
+  double decay = tk_lua_optnumber(L, 7, "decay", 0.0);
+  tk_combine_type_t combine = tk_inv_parse_combine(tk_lua_optstring(L, 8, "combine", "weighted_avg"));
+  lua_pushnumber(L, 1.0 - tk_inv_distance(inv, uid0, uid1, cmp, cmp_alpha, cmp_beta, combine, decay));
   return 1;
 }
 
 static inline int tk_inv_distance_lua (lua_State *L)
 {
-  lua_settop(L, 10);
   tk_inv_t *inv = tk_inv_peek(L, 1);
-  const char *typ = tk_lua_optstring(L, 4, "comparator", "jaccard");
-  double tversky_alpha = tk_lua_optnumber(L, 5, "alpha", 1.0);
-  double tversky_beta = tk_lua_optnumber(L, 6, "beta", 0.1);
-  tk_dvec_t *q_weights = tk_dvec_peekopt(L, 7);
-  tk_dvec_t *e_weights = tk_dvec_peekopt(L, 8);
-  tk_dvec_t *inter_weights = tk_dvec_peekopt(L, 9);
-  double decay = tk_lua_optnumber(L, 10, "decay", 0.0);
-  tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
-  if (!strcmp(typ, "jaccard"))
-    cmp = TK_IVEC_JACCARD;
-  else if (!strcmp(typ, "overlap"))
-    cmp = TK_IVEC_OVERLAP;
-  else if (!strcmp(typ, "dice"))
-    cmp = TK_IVEC_DICE;
-  else if (!strcmp(typ, "tversky"))
-    cmp = TK_IVEC_TVERSKY;
-  else
-    tk_lua_verror(L, 3, "distance", "invalid comparator specified", typ);
   int64_t uid0 = tk_lua_checkinteger(L, 2, "uid0");
   int64_t uid1 = tk_lua_checkinteger(L, 3, "uid1");
-  if (!q_weights) q_weights = tk_dvec_create(L, 0, 0, 0);
-  if (!e_weights) e_weights = tk_dvec_create(L, 0, 0, 0);
-  if (!inter_weights) inter_weights = tk_dvec_create(L, 0, 0, 0);
-  lua_pushnumber(L, tk_inv_distance(inv, uid0, uid1, cmp, tversky_alpha, tversky_beta, decay, q_weights, e_weights, inter_weights));
+  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 4, "comparator", "jaccard"));
+  double cmp_alpha = tk_lua_optnumber(L, 5, "alpha", 1.0);
+  double cmp_beta = tk_lua_optnumber(L, 6, "beta", 0.1);
+  double decay = tk_lua_optnumber(L, 7, "decay", 0.0);
+  tk_combine_type_t combine = tk_inv_parse_combine(tk_lua_optstring(L, 8, "combine", "weighted_avg"));
+  lua_pushnumber(L, tk_inv_distance(inv, uid0, uid1, cmp, cmp_alpha, cmp_beta, combine, decay));
   return 1;
 }
 
 static inline int tk_inv_neighbors_lua (lua_State *L)
 {
-  lua_settop(L, 14);
   tk_inv_t *inv = tk_inv_peek(L, 1);
   uint64_t knn = tk_lua_optunsigned(L, 3, "knn", 0);
   double eps_min = tk_lua_optposdouble(L, 4, "eps_min", 0.0);
   double eps_max = tk_lua_optposdouble(L, 5, "eps_max", 1.0);
   tk_rvec_t *out = tk_rvec_peek(L, 6, "out");
-  const char *typ = tk_lua_optstring(L, 7, "comparator", "jaccard");
-  tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
-  double tversky_alpha = tk_lua_optnumber(L, 8, "alpha", 1.0);
-  double tversky_beta = tk_lua_optnumber(L, 9, "beta", 0.1);
-  int64_t rank_filter = lua_isnil(L, 10) ? -1 : (int64_t) tk_lua_checkunsigned(L, 10, "rank_filter");
-  tk_dvec_t *q_weights = tk_dvec_peekopt(L, 11);
-  tk_dvec_t *e_weights = tk_dvec_peekopt(L, 12);
-  tk_dvec_t *inter_weights = tk_dvec_peekopt(L, 13);
-  double decay = tk_lua_optnumber(L, 14, "decay", 0.0);
-  if (!strcmp(typ, "jaccard"))
-    cmp = TK_IVEC_JACCARD;
-  else if (!strcmp(typ, "overlap"))
-    cmp = TK_IVEC_OVERLAP;
-  else if (!strcmp(typ, "dice"))
-    cmp = TK_IVEC_DICE;
-  else if (!strcmp(typ, "tversky"))
-    cmp = TK_IVEC_TVERSKY;
-  else
-    tk_lua_verror(L, 3, "neighbors", "invalid comparator specified", typ);
-  if (!q_weights) q_weights = tk_dvec_create(L, 0, 0, 0);
-  if (!e_weights) e_weights = tk_dvec_create(L, 0, 0, 0);
-  if (!inter_weights) inter_weights = tk_dvec_create(L, 0, 0, 0);
+  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 7, "comparator", "jaccard"));
+  double cmp_alpha = tk_lua_optnumber(L, 8, "alpha", 1.0);
+  double cmp_beta = tk_lua_optnumber(L, 9, "beta", 0.1);
+  double decay = tk_lua_optnumber(L, 10, "decay", 0.0);
   if (lua_type(L, 2) == LUA_TNUMBER) {
     int64_t uid = tk_lua_checkinteger(L, 2, "id");
-    tk_inv_neighbors_by_id(inv, uid, knn, eps_min, eps_max, out, cmp, tversky_alpha, tversky_beta, rank_filter, decay, q_weights, e_weights, inter_weights);
+    tk_inv_neighbors_by_id(inv, uid, knn, eps_min, eps_max, out, cmp, cmp_alpha, cmp_beta, decay);
   } else {
     tk_ivec_t *vec = tk_ivec_peek(L, 2, "vector");
-    tk_inv_neighbors_by_vec(inv, vec->a, vec->n, -1, knn, eps_min, eps_max, out, cmp, tversky_alpha, tversky_beta, rank_filter, decay, q_weights, e_weights, inter_weights);
+    tk_inv_neighbors_by_vec(inv, vec->a, vec->n, -1, knn, eps_min, eps_max, out, cmp, cmp_alpha, cmp_beta, decay);
   }
   return 0;
 }
@@ -2266,17 +1842,6 @@ static inline int tk_inv_ranks_lua (lua_State *L)
 {
   tk_inv_t *inv = tk_inv_peek(L, 1);
   tk_lua_get_ephemeron(L, TK_INV_EPH, inv->ranks);
-  return 1;
-}
-
-static inline int tk_inv_rank_weights_lua (lua_State *L)
-{
-  tk_inv_t *inv = tk_inv_peek(L, 1);
-  double decay = tk_lua_optnumber(L, 2, "decay", 0.0);
-  tk_dvec_t *result = tk_dvec_create(L, inv->n_ranks, 0, 0);
-  result->n = inv->n_ranks;
-  double total;
-  tk_inv_compute_rank_weights(inv->n_ranks, decay, result->a, &total);
   return 1;
 }
 
@@ -2323,9 +1888,10 @@ static inline void tk_inv_sample_landmarks (
   tk_inv_t *inv,
   uint64_t n_landmarks,
   tk_ivec_sim_type_t cmp,
-  double tversky_alpha,
-  double tversky_beta,
+  double cmp_alpha,
+  double cmp_beta,
   double decay,
+  tk_combine_type_t combine,
   tk_ivec_t **ids_out,
   tk_ivec_t **doc_ids_out,
   tk_dvec_t **chol_out,
@@ -2347,131 +1913,137 @@ static inline void tk_inv_sample_landmarks (
     return;
   }
 
-  int64_t *sid_map = tk_malloc(L, n_docs * sizeof(int64_t));
+  tk_inv_landmarks_ctx_t *ctx = (tk_inv_landmarks_ctx_t *)
+    lua_newuserdata(L, sizeof(tk_inv_landmarks_ctx_t));
+  memset(ctx, 0, sizeof(tk_inv_landmarks_ctx_t));
+  lua_newtable(L);
+  lua_pushcfunction(L, tk_inv_landmarks_ctx_gc);
+  lua_setfield(L, -2, "__gc");
+  lua_setmetatable(L, -2);
+  int ctx_idx = lua_gettop(L);
+
+  ctx->sid_map = (int64_t *)malloc(n_docs * sizeof(int64_t));
+  ctx->residual = (double *)malloc(n_docs * sizeof(double));
+  ctx->L_mat = (double *)malloc(n_docs * n_landmarks * sizeof(double));
+  ctx->landmark_sids = (int64_t *)malloc(n_landmarks * sizeof(int64_t));
+  if (!ctx->sid_map || !ctx->residual || !ctx->L_mat || !ctx->landmark_sids) {
+    luaL_error(L, "sample_landmarks: out of memory");
+    return;
+  }
+
+  int64_t *sid_map = ctx->sid_map;
+  double *residual = ctx->residual;
+  double *L_mat = ctx->L_mat;
+  int64_t *landmark_sids = ctx->landmark_sids;
+
   uint64_t idx = 0;
   for (int64_t sid = 0; sid < inv->next_sid; sid++) {
     if (inv->sid_to_uid->a[sid] >= 0)
       sid_map[idx++] = sid;
   }
 
-  double *residual = tk_malloc(L, n_docs * sizeof(double));
+  tk_inv_rank_weights_t rw;
+  tk_inv_precompute_rank_weights(&rw, inv->n_ranks, decay);
+
+  int64_t *ranks_arr = inv->ranks->a;
+  double *weights_arr = inv->weights->a;
+
   memset(residual, 0, n_docs * sizeof(double));
+  memset(L_mat, 0, n_docs * n_landmarks * sizeof(double));
+
+  uint64_t actual_landmarks = 0;
+  double initial_trace = 0.0;
+  double trace = 0.0;
+  uint64_t pivot_idx = 0;
+  double scale = 0.0;
+  double *pivot_row = NULL;
+  size_t p_nbits = 0;
+  int64_t *p_bits = NULL;
+  bool done = false;
 
   #pragma omp parallel
   {
-    tk_dvec_t *thr_q = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-    tk_dvec_t *thr_e = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-    tk_dvec_t *thr_i = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-    tk_dvec_t *thr_rw = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-    double thr_total_rw = 0.0;
-    if (thr_rw)
-      tk_inv_compute_rank_weights(inv->n_ranks, decay, thr_rw->a, &thr_total_rw);
-    #pragma omp for
+    double thr_q[TK_INV_MAX_RANKS];
+    double thr_e[TK_INV_MAX_RANKS];
+    double thr_i[TK_INV_MAX_RANKS];
+
+    #pragma omp for reduction(+:initial_trace)
     for (uint64_t i = 0; i < n_docs; i++) {
-      if (thr_q && thr_e && thr_i && thr_rw) {
-        size_t i_nbits;
-        int64_t *i_bits = tk_inv_sget(inv, sid_map[i], &i_nbits);
-        residual[i] = tk_inv_similarity(inv, i_bits, i_nbits, i_bits, i_nbits,
-                                        cmp, tversky_alpha, tversky_beta, decay,
-                                        thr_q, thr_e, thr_i, thr_rw->a, thr_total_rw);
-      } else {
-        residual[i] = 0.0;
-      }
-    }
-    if (thr_q) tk_dvec_destroy(thr_q);
-    if (thr_e) tk_dvec_destroy(thr_e);
-    if (thr_i) tk_dvec_destroy(thr_i);
-    if (thr_rw) tk_dvec_destroy(thr_rw);
-  }
-
-  double *L_mat = tk_malloc(L, n_docs * n_landmarks * sizeof(double));
-  memset(L_mat, 0, n_docs * n_landmarks * sizeof(double));
-
-  int64_t *landmark_sids = tk_malloc(L, n_landmarks * sizeof(int64_t));
-  uint64_t actual_landmarks = 0;
-
-  double initial_trace = 0.0;
-  for (uint64_t i = 0; i < n_docs; i++) {
-    initial_trace += residual[i];
-  }
-
-  for (uint64_t j = 0; j < n_landmarks; j++) {
-    double trace = 0.0;
-    for (uint64_t i = 0; i < n_docs; i++) {
-      if (residual[i] > 0.0)
-        trace += residual[i];
+      size_t i_nbits;
+      int64_t *i_bits = tk_inv_sget(inv, sid_map[i], &i_nbits);
+      residual[i] = tk_inv_similarity_fast(ranks_arr, weights_arr, inv->n_ranks,
+                                           i_bits, i_nbits, i_bits, i_nbits,
+                                           cmp, cmp_alpha, cmp_beta,
+                                           combine, &rw, thr_q, thr_e, thr_i);
+      initial_trace += residual[i];
     }
 
-    if (trace < 1e-12 * initial_trace || trace < 1e-15)
-      break;
+    for (uint64_t j = 0; j < n_landmarks && !done; j++) {
 
-    double r = tk_fast_drand() * trace;
-    uint64_t pivot_idx = n_docs - 1;
-    double cumsum = 0.0;
-    for (uint64_t i = 0; i < n_docs; i++) {
-      if (residual[i] > 0.0) {
-        cumsum += residual[i];
-        if (cumsum >= r) {
-          pivot_idx = i;
-          break;
+      #pragma omp single
+      {
+        trace = 0.0;
+        for (uint64_t i = 0; i < n_docs; i++) {
+          if (residual[i] > 0.0)
+            trace += residual[i];
+        }
+
+        if (trace < 1e-12 * initial_trace || trace < 1e-15) {
+          done = true;
+        } else {
+          double r = tk_fast_drand() * trace;
+          pivot_idx = n_docs - 1;
+          double cumsum = 0.0;
+          for (uint64_t i = 0; i < n_docs; i++) {
+            if (residual[i] > 0.0) {
+              cumsum += residual[i];
+              if (cumsum >= r) {
+                pivot_idx = i;
+                break;
+              }
+            }
+          }
+
+          double pivot_residual = residual[pivot_idx];
+          if (pivot_residual < 1e-15) {
+            done = true;
+          } else {
+            landmark_sids[actual_landmarks] = sid_map[pivot_idx];
+            actual_landmarks++;
+            scale = sqrt(pivot_residual);
+            p_bits = tk_inv_sget(inv, sid_map[pivot_idx], &p_nbits);
+            pivot_row = &L_mat[pivot_idx * n_landmarks];
+          }
         }
       }
-    }
 
-    double pivot_residual = residual[pivot_idx];
-    if (pivot_residual < 1e-15)
-      break;
+      if (done) continue;
 
-    landmark_sids[actual_landmarks] = sid_map[pivot_idx];
-    actual_landmarks++;
-
-    double scale = sqrt(pivot_residual);
-
-    size_t p_nbits;
-    int64_t *p_bits = tk_inv_sget(inv, sid_map[pivot_idx], &p_nbits);
-
-    #pragma omp parallel
-    {
-      tk_dvec_t *thr_q = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-      tk_dvec_t *thr_e = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-      tk_dvec_t *thr_i = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-      tk_dvec_t *thr_rw = tk_dvec_create(NULL, inv->n_ranks, 0, 0);
-      double thr_total_rw = 0.0;
-      if (thr_rw)
-        tk_inv_compute_rank_weights(inv->n_ranks, decay, thr_rw->a, &thr_total_rw);
       #pragma omp for
       for (uint64_t i = 0; i < n_docs; i++) {
-        if (thr_q && thr_e && thr_i && thr_rw) {
-          size_t i_nbits;
-          int64_t *i_bits = tk_inv_sget(inv, sid_map[i], &i_nbits);
-
-          double kip = tk_inv_similarity(inv, i_bits, i_nbits, p_bits, p_nbits,
-                                         cmp, tversky_alpha, tversky_beta, decay,
-                                         thr_q, thr_e, thr_i, thr_rw->a, thr_total_rw);
-
-          double dot = 0.0;
-          for (uint64_t k = 0; k < j; k++)
-            dot += L_mat[i * n_landmarks + k] * L_mat[pivot_idx * n_landmarks + k];
-
-          L_mat[i * n_landmarks + j] = (kip - dot) / scale;
-        } else {
-          L_mat[i * n_landmarks + j] = 0.0;
-        }
+        size_t i_nbits;
+        int64_t *i_bits = tk_inv_sget(inv, sid_map[i], &i_nbits);
+        double kip = tk_inv_similarity_fast(ranks_arr, weights_arr, inv->n_ranks,
+                                            i_bits, i_nbits, p_bits, p_nbits,
+                                            cmp, cmp_alpha, cmp_beta,
+                                            combine, &rw, thr_q, thr_e, thr_i);
+        double dot = (j > 0) ? cblas_ddot((int)j, &L_mat[i * n_landmarks], 1, pivot_row, 1) : 0.0;
+        L_mat[i * n_landmarks + j] = (kip - dot) / scale;
       }
-      if (thr_q) tk_dvec_destroy(thr_q);
-      if (thr_e) tk_dvec_destroy(thr_e);
-      if (thr_i) tk_dvec_destroy(thr_i);
-      if (thr_rw) tk_dvec_destroy(thr_rw);
-    }
 
-    for (uint64_t i = 0; i < n_docs; i++) {
-      double lij = L_mat[i * n_landmarks + j];
-      residual[i] -= lij * lij;
-      if (residual[i] < 0.0)
-        residual[i] = 0.0;
-    }
+      #pragma omp for
+      for (uint64_t i = 0; i < n_docs; i++) {
+        double lij = L_mat[i * n_landmarks + j];
+        residual[i] -= lij * lij;
+        if (residual[i] < 0.0)
+          residual[i] = 0.0;
+      }
 
-    residual[pivot_idx] = 0.0;
+      #pragma omp single
+      {
+        residual[pivot_idx] = 0.0;
+      }
+    }
   }
 
   tk_ivec_t *landmark_ids = tk_ivec_create(L, actual_landmarks, 0, 0);
@@ -2486,15 +2058,12 @@ static inline void tk_inv_sample_landmarks (
 
   tk_dvec_t *chol = tk_dvec_create(L, n_docs * actual_landmarks, 0, 0);
   for (uint64_t i = 0; i < n_docs; i++) {
-    for (uint64_t j = 0; j < actual_landmarks; j++)
-      chol->a[i * actual_landmarks + j] = L_mat[i * n_landmarks + j];
+    for (uint64_t jj = 0; jj < actual_landmarks; jj++)
+      chol->a[i * actual_landmarks + jj] = L_mat[i * n_landmarks + jj];
   }
   chol->n = n_docs * actual_landmarks;
 
-  free(sid_map);
-  free(residual);
-  free(L_mat);
-  free(landmark_sids);
+  lua_remove(L, ctx_idx);
 
   *ids_out = landmark_ids;
   *doc_ids_out = all_doc_ids;
@@ -2504,33 +2073,20 @@ static inline void tk_inv_sample_landmarks (
 
 static inline int tk_inv_sample_landmarks_lua (lua_State *L)
 {
-  lua_settop(L, 6);
+  lua_settop(L, 7);
   tk_inv_t *inv = tk_inv_peek(L, 1);
   uint64_t n_landmarks = tk_lua_checkunsigned(L, 2, "n_landmarks");
-  const char *typ = tk_lua_optstring(L, 3, "cmp", "jaccard");
-  double tversky_alpha = tk_lua_optnumber(L, 4, "alpha", 0.5);
-  double tversky_beta = tk_lua_optnumber(L, 5, "beta", 0.5);
+  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 3, "cmp", "jaccard"));
+  double cmp_alpha = tk_lua_optnumber(L, 4, "alpha", 0.5);
+  double cmp_beta = tk_lua_optnumber(L, 5, "beta", 0.5);
   double decay = tk_lua_optnumber(L, 6, "decay", 0.0);
-
-  tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
-  if (!strcmp(typ, "jaccard"))
-    cmp = TK_IVEC_JACCARD;
-  else if (!strcmp(typ, "overlap"))
-    cmp = TK_IVEC_OVERLAP;
-  else if (!strcmp(typ, "dice"))
-    cmp = TK_IVEC_DICE;
-  else if (!strcmp(typ, "tversky"))
-    cmp = TK_IVEC_TVERSKY;
-  else
-    tk_lua_verror(L, 3, "sample_landmarks", "invalid comparator specified", typ);
-
+  tk_combine_type_t combine = tk_inv_parse_combine(tk_lua_optstring(L, 7, "combine", "weighted_avg"));
   tk_ivec_t *landmark_ids;
   tk_ivec_t *doc_ids;
   tk_dvec_t *chol;
   uint64_t actual_landmarks;
-  tk_inv_sample_landmarks(L, inv, n_landmarks, cmp, tversky_alpha, tversky_beta, decay,
+  tk_inv_sample_landmarks(L, inv, n_landmarks, cmp, cmp_alpha, cmp_beta, decay, combine,
                           &landmark_ids, &doc_ids, &chol, &actual_landmarks);
-
   lua_pushinteger(L, (int64_t) actual_landmarks);
   return 4;
 }
@@ -2586,7 +2142,6 @@ static luaL_Reg tk_inv_lua_mt_fns[] =
   { "features", tk_inv_features_lua },
   { "weights", tk_inv_weights_lua },
   { "ranks", tk_inv_ranks_lua },
-  { "rank_weights", tk_inv_rank_weights_lua },
   { "rank_sizes", tk_inv_rank_sizes_lua },
   { "persist", tk_inv_persist_lua },
   { "destroy", tk_inv_destroy_lua },
@@ -2611,35 +2166,46 @@ static inline tk_inv_t *tk_inv_create (
 ) {
   if (!features)
     tk_lua_verror(L, 2, "create", "features must be > 0");
+  if (n_ranks > TK_INV_MAX_RANKS)
+    return luaL_error(L, "n_ranks (%llu) exceeds TK_INV_MAX_RANKS (%d)",
+      (unsigned long long)n_ranks, TK_INV_MAX_RANKS), NULL;
   tk_inv_t *inv = tk_lua_newuserdata(L, tk_inv_t, TK_INV_MT, tk_inv_lua_mt_fns, tk_inv_gc_lua);
   int Ii = tk_lua_absindex(L, -1);
   inv->destroyed = false;
   inv->next_sid = 0;
   inv->features = features;
   inv->n_ranks = n_ranks >= 1 ? n_ranks : 1;
-  inv->weights = weights;
-  if (weights)
+  if (weights) {
+    inv->weights = weights;
     tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, i_weights);
-  inv->ranks = ranks;
-  if (ranks)
+  } else {
+    inv->weights = tk_dvec_create(L, features, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+    lua_pop(L, 1);
+    inv->weights->n = features;
+    for (uint64_t f = 0; f < features; f++)
+      inv->weights->a[f] = 1.0;
+  }
+  if (ranks) {
+    inv->ranks = ranks;
     tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, i_ranks);
+  } else {
+    inv->ranks = tk_ivec_create(L, features, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+    lua_pop(L, 1);
+    inv->ranks->n = features;
+    for (uint64_t f = 0; f < features; f++)
+      inv->ranks->a[f] = 0;
+  }
   inv->rank_sizes = tk_ivec_create(L, inv->n_ranks, 0, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
-  for (uint64_t r = 0; r < inv->n_ranks; r++) {
+  for (uint64_t r = 0; r < inv->n_ranks; r++)
     inv->rank_sizes->a[r] = 0;
-  }
-  if (ranks) {
-    for (uint64_t f = 0; f < features; f++) {
-      if (f < (uint64_t)ranks->n) {
-        int64_t rank = ranks->a[f];
-        if (rank >= 0 && rank < (int64_t)inv->n_ranks) {
-          inv->rank_sizes->a[rank]++;
-        }
-      }
-    }
-  } else {
-    inv->rank_sizes->a[0] = (int64_t) features;
+  for (uint64_t f = 0; f < features; f++) {
+    int64_t rank = inv->ranks->a[f];
+    if (rank >= 0 && rank < (int64_t)inv->n_ranks)
+      inv->rank_sizes->a[rank]++;
   }
   inv->uid_sid = tk_iumap_create(L, 0);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
@@ -2677,6 +2243,8 @@ static inline tk_inv_t *tk_inv_load (
   tk_lua_fread(L, &inv->next_sid, sizeof(int64_t), 1, fh);
   tk_lua_fread(L, &inv->features, sizeof(uint64_t), 1, fh);
   tk_lua_fread(L, &inv->n_ranks, sizeof(uint64_t), 1, fh);
+  if (inv->n_ranks > TK_INV_MAX_RANKS)
+    tk_lua_verror(L, 2, "load", "n_ranks in file exceeds TK_INV_MAX_RANKS");
   inv->uid_sid = tk_iumap_load(L, fh);
   tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
   lua_pop(L, 1);
@@ -2712,7 +2280,12 @@ static inline tk_inv_t *tk_inv_load (
     tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
     lua_pop(L, 1);
   } else {
-    inv->weights = NULL;
+    inv->weights = tk_dvec_create(L, inv->features, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+    lua_pop(L, 1);
+    inv->weights->n = inv->features;
+    for (uint64_t f = 0; f < inv->features; f++)
+      inv->weights->a[f] = 1.0;
   }
   size_t rn = 0;
   tk_lua_fread(L, &rn, sizeof(size_t), 1, fh);
@@ -2722,7 +2295,12 @@ static inline tk_inv_t *tk_inv_load (
     tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
     lua_pop(L, 1);
   } else {
-    inv->ranks = NULL;
+    inv->ranks = tk_ivec_create(L, inv->features, 0, 0);
+    tk_lua_add_ephemeron(L, TK_INV_EPH, Ii, -1);
+    lua_pop(L, 1);
+    inv->ranks->n = inv->features;
+    for (uint64_t f = 0; f < inv->features; f++)
+      inv->ranks->a[f] = 0;
   }
 
   inv->rank_sizes = tk_ivec_create(L, inv->n_ranks, 0, 0);
@@ -2730,15 +2308,10 @@ static inline tk_inv_t *tk_inv_load (
   lua_pop(L, 1);
   for (uint64_t r = 0; r < inv->n_ranks; r++)
     inv->rank_sizes->a[r] = 0;
-  if (inv->ranks) {
-    for (uint64_t f = 0; f < inv->features; f++) {
-      if (f < (uint64_t)inv->ranks->n) {
-        int64_t rank = inv->ranks->a[f];
-        if (rank >= 0 && rank < (int64_t)inv->n_ranks) {
-          inv->rank_sizes->a[rank]++;
-        }
-      }
-    }
+  for (uint64_t f = 0; f < inv->features; f++) {
+    int64_t rank = inv->ranks->a[f];
+    if (rank >= 0 && rank < (int64_t)inv->n_ranks)
+      inv->rank_sizes->a[rank]++;
   }
 
   return inv;

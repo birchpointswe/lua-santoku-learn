@@ -9,7 +9,7 @@ local utc = require("santoku.utc")
 
 local cfg = {
   data = {
-    max_per_class = nil,
+    max = nil,
     tvr = 0.1,
   },
   tokenizer = {
@@ -27,11 +27,11 @@ local cfg = {
   },
   tm = {
     classes = 20,
-    clauses = { def = 72, min = 8, max = 256, round = 8 },
-    clause_tolerance = { def = 61, min = 16, max = 128, int = true },
-    clause_maximum = { def = 97, min = 16, max = 128, int = true },
-    target = { def = 51, min = 16, max = 128, int = true },
-    specificity = { def = 439, min = 400, max = 4000 },
+    clauses = 32,
+    clause_tolerance = { def = 109, min = 16, max = 128, int = true },
+    clause_maximum = { def = 118, min = 16, max = 128, int = true },
+    target = { def = 48, min = 16, max = 128, int = true },
+    specificity = { def = 497, min = 400, max = 4000 },
     include_bits = { def = 2, min = 1, max = 4, int = true },
   },
   search = {
@@ -52,7 +52,7 @@ test("newsgroups", function ()
   local train, test, validate = ds.read_20newsgroups_split(
     "test/res/20news-bydate-train",
     "test/res/20news-bydate-test",
-    cfg.data.max_per_class,
+    cfg.data.max,
     nil,
     cfg.data.tvr)
 
@@ -71,31 +71,27 @@ test("newsgroups", function ()
   train.problems0 = tok:tokenize(train.problems)
   train.solutions:add_scaled(cfg.tm.classes)
 
-  print("\nPer-class Chi2 feature selection")
-  local ids_union, feat_offsets, feat_ids = train.problems0:bits_top_chi2_ind(
-    train.solutions, train.n, n_features, cfg.tm.classes, cfg.feature_selection.max_vocab)
-  local n_top_v = ids_union:size()
-  local total_features = feat_offsets:get(cfg.tm.classes)
-  str.printf("  Per-class Chi2: union=%d total=%d (%.1fx expansion)\n",
-    n_top_v, total_features, total_features / n_top_v)
+  print("\nFeature selection")
+  local chi2_ids = train.problems0:bits_top_chi2(
+    train.solutions, train.n, n_features, cfg.tm.classes,
+    cfg.feature_selection.max_vocab, "max")
+  local n_top_v = chi2_ids:size()
+  str.printf("  Chi2: %d features\n", n_top_v)
   train.solutions:add_scaled(-cfg.tm.classes)
   train.problems0 = nil
-  tok:restrict(ids_union)
+  tok:restrict(chi2_ids)
+  chi2_ids = nil
 
-  local function to_ind_bitmap (split)
+  local function to_bitmap (split)
     local toks = tok:tokenize(split.problems)
-    local ind, ind_off = toks:bits_individualize(feat_offsets, feat_ids, n_top_v)
-    local bitmap, dim_off = ind:bits_to_cvec_ind(ind_off, feat_offsets, split.n, true)
+    local bitmap = toks:bits_to_cvec(split.n, n_top_v, true)
     toks:destroy()
-    ind:destroy()
-    ind_off:destroy()
-    return bitmap, dim_off
+    return bitmap
   end
 
-  local train_dim_offsets, validate_dim_offsets, test_dim_offsets
-  train.problems, train_dim_offsets = to_ind_bitmap(train)
-  validate.problems, validate_dim_offsets = to_ind_bitmap(validate)
-  test.problems, test_dim_offsets = to_ind_bitmap(test)
+  train.problems = to_bitmap(train)
+  validate.problems = to_bitmap(validate)
+  test.problems = to_bitmap(test)
   tok:destroy()
 
   print("Optimizing Classifier")
@@ -103,10 +99,6 @@ test("newsgroups", function ()
   local t = optimize.classifier({
 
     features = n_top_v,
-    individualized = true,
-    feat_offsets = feat_offsets,
-    dim_offsets = train_dim_offsets,
-
     classes = cfg.tm.classes,
     clauses = cfg.tm.clauses,
     clause_tolerance = cfg.tm.clause_tolerance,
@@ -127,7 +119,7 @@ test("newsgroups", function ()
     final_iterations = cfg.training.iterations,
 
     search_metric = function (t0, _)
-      local predicted = t0:predict(validate.problems, validate_dim_offsets, validate.n)
+      local predicted = t0:predict(validate.problems, validate.n)
       local accuracy = eval.class_accuracy(predicted, validate.solutions, validate.n, cfg.tm.classes)
       return accuracy.f1, accuracy
     end,
@@ -144,9 +136,9 @@ test("newsgroups", function ()
 
   print()
   print("Final Evaluation")
-  local train_pred = t:predict(train.problems, train_dim_offsets, train.n)
-  local val_pred = t:predict(validate.problems, validate_dim_offsets, validate.n)
-  local test_pred = t:predict(test.problems, test_dim_offsets, test.n)
+  local train_pred = t:predict(train.problems, train.n)
+  local val_pred = t:predict(validate.problems, validate.n)
+  local test_pred = t:predict(test.problems, test.n)
   local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, cfg.tm.classes)
   local val_stats = eval.class_accuracy(val_pred, validate.solutions, validate.n, cfg.tm.classes)
   local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, cfg.tm.classes)
