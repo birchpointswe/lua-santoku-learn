@@ -19,12 +19,12 @@ local cfg = {
   },
   tm = {
     classes = 10,
-    clauses = { def = 80, min = 8, max = 256, round = 8 },
-    clause_tolerance = { def = 33, min = 16, max = 128, int = true },
-    clause_maximum = { def = 109, min = 16, max = 128, int = true },
-    target = { def = 16, min = 16, max = 128, int = true },
-    specificity = { def = 483, min = 400, max = 4000 },
-    include_bits = { def = 3, min = 1, max = 4, int = true },
+    clauses = 32,
+    clause_tolerance = { def = 43, min = 16, max = 128, int = true },
+    clause_maximum = { def = 110, min = 16, max = 128, int = true },
+    target = { def = 19, min = 16, max = 128, int = true },
+    specificity = { def = 456, min = 400, max = 4000 },
+    include_bits = { def = 2, min = 1, max = 4, int = true },
   },
   search = {
     patience = 4,

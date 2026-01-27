@@ -26,26 +26,26 @@ local cfg = {
     cgrams_max = 5,
     cgrams_cross = true,
     skips = 1,
-    expected_vocab = 1300000,
   },
   feature_selection = {
-    min_df = -2,
-    max_df = 0.98,
-    max_vocab = 4096,
+    min_df = 0.01,
+    max_df = 0.8,
+    max_vocab_spectral = 2^16,
+    max_vocab_encoder = 2^14,
   },
   encoder = {
-    clauses = 8, --{ def = 248, min = 16, max = 256, round = 8 },
-    clause_tolerance = { def = 20, min = 8, max = 128, int = true },
-    clause_maximum = { def = 119, min = 16, max = 128, int = true },
-    target = { def = 17, min = 4, max = 64, int = true },
-    specificity = { def = 816, min = 50, max = 2000 },
-    include_bits = { def = 2, min = 1, max = 6, int = true },
+    clauses = 32,
+    clause_tolerance = { def = 45, min = 8, max = 128, int = true },
+    clause_maximum = { def = 125, min = 16, max = 128, int = true },
+    target = { def = 20, min = 4, max = 64, int = true },
+    specificity = { def = 1962, min = 50, max = 2000 },
+    include_bits = { def = 1, min = 1, max = 6, int = true },
     search_patience = 4,
-    search_rounds = 4,
+    search_rounds = 6,
     search_trials = 10,
     search_iterations = 10,
-    final_patience = 40,
-    final_iterations = 400,
+    final_patience = 20,
+    final_iterations = 200,
   },
   bit_pruning = {
     enabled = true,
@@ -54,16 +54,19 @@ local cfg = {
   },
   nystrom = {
     n_landmarks = 4096,
-    n_dims = 256,
-    cmp = "jaccard",
-    decay = { def = 0.67, min = 0.0, max = 2.0 },
-    rounds = 4,
+    n_dims = 96,
+    cmp = "cosine",
+    combine = "exponential",
+    decay = { def = 2.4, min = 0.0, max = 3.0 },
+    binarize = "itq",
+    rounds = 6,
     samples = 10,
   },
   eval = {
     anchors = 16,
     pairs = 64,
     ranking = "ndcg",
+    cmp = "cosine",
   },
   verbose = true,
 }
@@ -88,17 +91,10 @@ test("eurlex-docs", function()
   train.tokens = tok:tokenize(train.problems)
   dev.tokens = tok:tokenize(dev.problems)
   test_set.tokens = tok:tokenize(test_set.problems)
-
-  print("\nFeature selection (DF filter)")
-  local df_sorted = train.tokens:bits_top_df(
-    train.n, n_tokens, nil,
-    cfg.feature_selection.min_df, cfg.feature_selection.max_df)
-  local n_top_v = df_sorted:size()
-  str.printf("  Vocab: %d -> %d (DF filtered)\n", n_tokens, n_top_v)
-  tok:restrict(df_sorted)
-  train.tokens = tok:tokenize(train.problems)
-  dev.tokens = tok:tokenize(dev.problems)
-  test_set.tokens = tok:tokenize(test_set.problems)
+  tok = nil
+  train.problems = nil
+  dev.problems = nil
+  test_set.problems = nil
 
   print("\nCreating IDs")
   train.ids = ivec.create(train.n)
@@ -118,21 +114,35 @@ test("eurlex-docs", function()
   local test_label_offsets, test_label_neighbors = test_set.solutions:bits_to_csr(test_set.n, n_labels)
   test_set.label_csr = { offsets = test_label_offsets, neighbors = test_label_neighbors }
 
-  print("\nComputing BNS weights for tokens")
-  local bns_top_ids, bns_top_scores = train.tokens:bits_top_bns(
-    train.solutions, train.n, n_top_v, n_labels, n_top_v)
-  str.printf("  Vocab: %d -> %d (BNS filtered)\n", n_top_v, bns_top_ids:size())
-  tok:restrict(bns_top_ids)
-  train.tokens = tok:tokenize(train.problems)
-  dev.tokens = tok:tokenize(dev.problems)
-  test_set.tokens = tok:tokenize(test_set.problems)
-  n_top_v = bns_top_ids:size()
+  print("\nFeature selection")
+  local df_ids, df_scores = train.tokens:bits_top_df(
+    train.n, n_tokens, nil,
+    cfg.feature_selection.min_df or 0,
+    cfg.feature_selection.max_df or 1)
+  str.printf("  IDF: %d -> %d\n", n_tokens, df_ids:size())
+  train.tokens:bits_select(df_ids, nil, n_tokens)
+  dev.tokens:bits_select(df_ids, nil, n_tokens)
+  test_set.tokens:bits_select(df_ids, nil, n_tokens)
+  n_tokens = df_ids:size()
+  local bns_ids, bns_scores = train.tokens:bits_top_bns(
+    train.solutions, train.n, n_tokens, n_labels,
+    cfg.feature_selection.max_vocab_spectral, "max")
+  str.printf("  BNS: %d -> %d\n", n_tokens, bns_ids:size())
+  local idf_gathered = dvec.create()
+  idf_gathered:copy(df_scores, bns_ids)
+  bns_scores:scalev(idf_gathered)
+  df_ids = nil
+  df_scores = nil
+  train.tokens:bits_select(bns_ids, nil, n_tokens)
+  dev.tokens:bits_select(bns_ids, nil, n_tokens)
+  test_set.tokens:bits_select(bns_ids, nil, n_tokens)
+  local n_top_v = bns_ids:size()
+  bns_ids = nil
   local n_graph_features = n_labels + n_top_v
   local graph_weights = dvec.create(n_graph_features)
   graph_weights:fill(1.0, 0, n_labels)
-  graph_weights:copy(bns_top_scores, n_labels)
-  str.printf("  BNS weights: min=%.4f max=%.4f (for %d tokens)\n",
-    bns_top_scores:min(), bns_top_scores:max(), bns_top_ids:size())
+  graph_weights:copy(bns_scores, n_labels)
+  bns_scores = nil
 
   print("\nBuilding graph_index (docs only, two-rank: labels + tokens)")
   local graph_features = ivec.create()
@@ -147,6 +157,8 @@ test("eurlex-docs", function()
     n_ranks = 2,
   })
   train.graph_index:add(graph_features, train.ids)
+  graph_features = nil
+  graph_ranks = nil
   str.printf("  Docs: %d  Features: %d (labels=%d, tokens=%d)\n",
     train.n, n_graph_features, n_labels, n_top_v)
 
@@ -156,6 +168,7 @@ test("eurlex-docs", function()
   local train_eval_ids, train_eval_offsets, train_eval_neighbors, train_eval_weights =
     graph.adjacency({
       category_index = train.eval_index,
+      category_cmp = cfg.eval.cmp,
       category_anchors = cfg.eval.anchors,
       random_pairs = cfg.eval.pairs,
     })
@@ -176,7 +189,9 @@ test("eurlex-docs", function()
     n_landmarks = cfg.nystrom.n_landmarks,
     n_dims = cfg.nystrom.n_dims,
     cmp = cfg.nystrom.cmp,
+    combine = cfg.nystrom.combine,
     decay = cfg.nystrom.decay,
+    binarize = cfg.nystrom.binarize,
     rounds = cfg.nystrom.rounds,
     samples = cfg.nystrom.samples,
     expected = {
@@ -195,6 +210,24 @@ test("eurlex-docs", function()
   local train_target_codes = train.index:get(train.ids)
   util.spot_check_codes(train_target_codes, train.n, train.dims, "spectral codes")
 
+  print("\nBit entropy stats for spectral codes:")
+  local entropy_ids, entropy_scores = train_target_codes:bits_top_entropy(train.n, train.dims, train.dims)
+  local zero_entropy_count = 0
+  for i = 0, entropy_ids:size() - 1 do
+    local dim = entropy_ids:get(i)
+    local ent = entropy_scores:get(i)
+    if ent < 0.01 then
+      zero_entropy_count = zero_entropy_count + 1
+      if zero_entropy_count <= 10 then
+        str.printf("  dim %d: entropy=%.6f (near-constant)\n", dim, ent)
+      end
+    end
+  end
+  str.printf("  Total near-constant dims (entropy < 0.01): %d / %d\n", zero_entropy_count, train.dims)
+  str.printf("  Entropy range: min=%.6f max=%.6f\n", entropy_scores:min(), entropy_scores:max())
+  entropy_ids = nil
+  entropy_scores = nil
+
   if cfg.verbose then
     print("\nSpot-checking spectral code KNN (compare to eval adj above)")
     local spectral_knn_ids, spectral_knn_offsets, spectral_knn_neighbors, spectral_knn_weights =
@@ -210,6 +243,16 @@ test("eurlex-docs", function()
   end
 
   print("\nEvaluating spectral codes against eval adjacency")
+  local spectral_raw_stats = eval.ranking_accuracy({
+    raw_codes = model.raw_codes,
+    ids = model.ids,
+    eval_ids = train_eval_ids,
+    eval_offsets = train_eval_offsets,
+    eval_neighbors = train_eval_neighbors,
+    eval_weights = train_eval_weights,
+    ranking = cfg.eval.ranking,
+    n_dims = train.dims,
+  })
   local spectral_eval_stats = eval.ranking_accuracy({
     index = train.index,
     ids = model.ids,
@@ -220,16 +263,19 @@ test("eurlex-docs", function()
     ranking = cfg.eval.ranking,
     n_dims = train.dims,
   })
-  str.printf("  Spectral codes ranking score: %.4f\n", spectral_eval_stats.score)
+  str.printf("  Spectral codes ranking: raw=%.4f binary=%.4f\n", spectral_raw_stats.score, spectral_eval_stats.score)
+  model.raw_codes = nil
 
-  print("\nPer-dim Chi2 feature selection for encoder")
-  local chi2_vocab = train.tokens:bits_top_chi2_ind(
-    train_target_codes, train.n, n_top_v, train.dims, cfg.feature_selection.max_vocab)
-  local train_encoder_visible = chi2_vocab:size()
-  str.printf("  Chi2: %d features (union across %d dims)\n", train_encoder_visible, train.dims)
-  tok:restrict(chi2_vocab)
-  local train_toks = tok:tokenize(train.problems)
+  local encoder_feat_ids = train.tokens:bits_top_chi2(
+    train_target_codes, train.n, n_top_v, train.dims,
+    cfg.feature_selection.max_vocab_encoder, "max")
+  local train_encoder_visible = encoder_feat_ids:size()
+  str.printf("  Chi2: %d features\n", train_encoder_visible)
+  local train_toks = ivec.create()
+  train_toks:copy(train.tokens)
+  train_toks:bits_select(encoder_feat_ids, nil, n_top_v)
   local train_encoder_sentences = train_toks:bits_to_cvec(train.n, train_encoder_visible, true)
+  train_toks = nil
 
   print("\nTraining encoder")
   local encoder_args = {
@@ -270,6 +316,8 @@ test("eurlex-docs", function()
 
   local train_ham = eval.encoding_accuracy(train_predicted, train_target_codes, train.n, train.dims).mean_hamming
   str.printf("  Train hamming: %.4f\n", train_ham)
+  train_target_codes = nil
+  train_encoder_sentences = nil
 
   print("\nEvaluating predicted codes against eval adjacency")
   local train_pred_ann = ann.create({ features = train.dims, expected_size = train.n })
@@ -317,10 +365,18 @@ test("eurlex-docs", function()
       util.spot_check_codes(train_predicted, train.n, dims_final, "train pruned")
     end
   end
+  train_eval_ids = nil
+  train_eval_offsets = nil
+  train_eval_neighbors = nil
+  train_eval_weights = nil
+  train_pred_ann = nil
 
   print("\nPredicting dev codes")
-  local dev_toks = tok:tokenize(dev.problems)
+  local dev_toks = ivec.create()
+  dev_toks:copy(dev.tokens)
+  dev_toks:bits_select(encoder_feat_ids, nil, n_top_v)
   local dev_encoder_sentences = dev_toks:bits_to_cvec(dev.n, train_encoder_visible, true)
+  dev_toks = nil
   local dev_predicted = train.encoder:predict(dev_encoder_sentences, dev.n)
   if active_bits then
     local dev_pruned = cvec.create()
@@ -335,6 +391,7 @@ test("eurlex-docs", function()
   local dev_eval_ids, dev_eval_offsets, dev_eval_neighbors, dev_eval_weights =
     graph.adjacency({
       category_index = dev.eval_index,
+      category_cmp = cfg.eval.cmp,
       category_anchors = cfg.eval.anchors,
       random_pairs = cfg.eval.pairs,
     })
@@ -363,10 +420,20 @@ test("eurlex-docs", function()
     n_dims = dims_final,
   })
   str.printf("  Dev ranking score: %.4f\n", dev_pred_stats.score)
+  dev_encoder_sentences = nil
+  dev_predicted = nil
+  dev_pred_ann = nil
+  dev_eval_ids = nil
+  dev_eval_offsets = nil
+  dev_eval_neighbors = nil
+  dev_eval_weights = nil
 
   print("\nPredicting test codes")
-  local test_toks = tok:tokenize(test_set.problems)
+  local test_toks = ivec.create()
+  test_toks:copy(test_set.tokens)
+  test_toks:bits_select(encoder_feat_ids, nil, n_top_v)
   local test_encoder_sentences = test_toks:bits_to_cvec(test_set.n, train_encoder_visible, true)
+  test_toks = nil
   local test_predicted = train.encoder:predict(test_encoder_sentences, test_set.n)
   if active_bits then
     local test_pruned = cvec.create()
@@ -381,6 +448,7 @@ test("eurlex-docs", function()
   local test_eval_ids, test_eval_offsets, test_eval_neighbors, test_eval_weights =
     graph.adjacency({
       category_index = test_set.eval_index,
+      category_cmp = cfg.eval.cmp,
       category_anchors = cfg.eval.anchors,
       random_pairs = cfg.eval.pairs,
     })
@@ -409,6 +477,9 @@ test("eurlex-docs", function()
     n_dims = dims_final,
   })
   str.printf("  Test ranking score: %.4f\n", test_pred_stats.score)
+  test_encoder_sentences = nil
+  test_predicted = nil
+  test_pred_ann = nil
 
   print("\n" .. string.rep("=", 60))
   print("SUMMARY")

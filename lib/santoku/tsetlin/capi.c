@@ -684,9 +684,8 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
 {
   tk_tsetlin_t *tm = tk_tsetlin_alloc_classifier(L, true);
   lua_insert(L, 1);
-  bool individualized = tk_lua_foptboolean(L, 2, "create classifier", "individualized", false);
-  if (individualized) {
-    lua_getfield(L, 2, "feat_offsets");
+  lua_getfield(L, 2, "feat_offsets");
+  if (!lua_isnil(L, -1)) {
     tk_ivec_t *feat_offsets = tk_ivec_peek(L, -1, "feat_offsets");
     lua_pop(L, 1);
     tk_tsetlin_init_classifier_ind(L, tm,
@@ -700,6 +699,7 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
         tk_lua_foptposdouble(L, 2, "create classifier", "target", -1.0),
         tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity"));
   } else {
+    lua_pop(L, 1);
     tk_tsetlin_init_classifier(L, tm,
         tk_lua_fcheckunsigned(L, 2, "create classifier", "classes"),
         tk_lua_fcheckunsigned(L, 2, "create classifier", "features"),
@@ -719,9 +719,8 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
 {
   tk_tsetlin_t *tm = tk_tsetlin_alloc_encoder(L, true);
   lua_insert(L, 1);
-  bool individualized = tk_lua_foptboolean(L, 2, "create encoder", "individualized", false);
-  if (individualized) {
-    lua_getfield(L, 2, "feat_offsets");
+  lua_getfield(L, 2, "feat_offsets");
+  if (!lua_isnil(L, -1)) {
     tk_ivec_t *feat_offsets = tk_ivec_peek(L, -1, "feat_offsets");
     lua_pop(L, 1);
     tk_tsetlin_init_encoder_ind(L, tm,
@@ -735,6 +734,7 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
         tk_lua_foptposdouble(L, 2, "create encoder", "target", -1.0),
         tk_lua_fcheckposdouble(L, 2, "create encoder", "specificity"));
   } else {
+    lua_pop(L, 1);
     tk_tsetlin_init_encoder(L, tm,
         tk_lua_fcheckunsigned(L, 2, "create encoder", "hidden"),
         tk_lua_fcheckunsigned(L, 2, "create encoder", "visible"),
@@ -754,9 +754,8 @@ static inline void tk_tsetlin_create_regressor (lua_State *L)
 {
   tk_tsetlin_t *tm = tk_tsetlin_alloc_regressor(L, true);
   lua_insert(L, 1);
-  bool individualized = tk_lua_foptboolean(L, 2, "create regressor", "individualized", false);
-  if (individualized) {
-    lua_getfield(L, 2, "feat_offsets");
+  lua_getfield(L, 2, "feat_offsets");
+  if (!lua_isnil(L, -1)) {
     tk_ivec_t *feat_offsets = tk_ivec_peek(L, -1, "feat_offsets");
     lua_pop(L, 1);
     tk_tsetlin_init_regressor_ind(L, tm,
@@ -770,6 +769,7 @@ static inline void tk_tsetlin_create_regressor (lua_State *L)
         tk_lua_foptposdouble(L, 2, "create regressor", "target", -1.0),
         tk_lua_fcheckposdouble(L, 2, "create regressor", "specificity"));
   } else {
+    lua_pop(L, 1);
     tk_tsetlin_init_regressor(L, tm,
         tk_lua_foptunsigned(L, 2, "create regressor", "outputs", 1),
         tk_lua_fcheckunsigned(L, 2, "create regressor", "features"),

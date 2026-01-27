@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <float.h>
+#include <math.h>
 
 #define TK_SIMHASH_SCALE 1e6
 
@@ -62,22 +63,28 @@ static inline int tm_simhash (lua_State *L)
     return luaL_error(L, "out of memory");
   }
   if (n_ranks_to_hash > 1 && decay != 0.0) {
-    double rank_weights[n_ranks_to_hash];
+    double abs_decay = fabs(decay);
     double total_weight = 0.0;
-    tk_inv_compute_rank_weights(n_ranks_to_hash, decay, rank_weights, &total_weight);
+    for (uint64_t r = 0; r < n_ranks_to_hash; r++) {
+      double eff_r = (decay >= 0.0) ? (double)r : (double)(n_ranks_to_hash - 1 - r);
+      total_weight += exp(-eff_r * abs_decay);
+    }
     if (total_weight > DBL_MIN) {
       uint64_t bits_allocated = 0;
       for (uint64_t r = 0; r < n_ranks_to_hash; r++) {
-        double proportion = rank_weights[r] / total_weight;
+        double eff_r = (decay >= 0.0) ? (double)r : (double)(n_ranks_to_hash - 1 - r);
+        double weight = exp(-eff_r * abs_decay);
+        double proportion = weight / total_weight;
         uint64_t bits = (uint64_t)(proportion * n_bits);
         rank_n_bits[r] = bits;
         bits_allocated += bits;
       }
       if (bits_allocated != n_bits) {
         int64_t diff = (int64_t)n_bits - (int64_t)bits_allocated;
-        int64_t new_bits = (int64_t)rank_n_bits[0] + diff;
+        uint64_t adjust_rank = (decay >= 0.0) ? 0 : n_ranks_to_hash - 1;
+        int64_t new_bits = (int64_t)rank_n_bits[adjust_rank] + diff;
         if (new_bits < 0) new_bits = 0;
-        rank_n_bits[0] = (uint64_t)new_bits;
+        rank_n_bits[adjust_rank] = (uint64_t)new_bits;
       }
       rank_bit_start[0] = 0;
       for (uint64_t r = 0; r < n_ranks_to_hash; r++)
@@ -151,7 +158,7 @@ static inline int tm_simhash (lua_State *L)
         rank_totals[r] = 0.0;
       for (int64_t i = start; i < end; i++) {
         int64_t feature_id = inv->node_bits->a[i];
-        int64_t rank = inv->ranks ? inv->ranks->a[feature_id] : 0;
+        int64_t rank = inv->ranks->a[feature_id];
         if (hashed_ranks >= 0 && rank >= hashed_ranks)
           continue;
         double feature_weight = (n_quantiles > 1 && inv->weights) ? inv->weights->a[feature_id] : 1.0;
@@ -160,7 +167,7 @@ static inline int tm_simhash (lua_State *L)
       }
       for (int64_t i = start; i < end; i++) {
         int64_t feature_id = inv->node_bits->a[i];
-        int64_t rank = inv->ranks ? inv->ranks->a[feature_id] : 0;
+        int64_t rank = inv->ranks->a[feature_id];
         if (hashed_ranks >= 0 && rank >= hashed_ranks)
           continue;
         if (rank >= 0 && rank < (int64_t)n_ranks_to_hash) {

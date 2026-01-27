@@ -187,7 +187,7 @@ local function clean_newsgroup_text (text, remove)
   return table.concat(lines, "\n")
 end
 
-M.read_20newsgroups = function (dir, max_per_class, remove)
+M.read_20newsgroups = function (dir, max_per_class, remove, max)
   local problems = {}
   local solutions = {}
   local categories = {}
@@ -206,18 +206,30 @@ M.read_20newsgroups = function (dir, max_per_class, remove)
     cat_idx = cat_idx + 1
   end
   local idxs = arr.shuffle(arr.range(1, #problems))
+  local shuffled_problems = arr.lookup(idxs, problems, {})
+  local shuffled_solutions = arr.lookup(idxs, solutions, {})
+  local total = max and num.min(#shuffled_problems, max) or #shuffled_problems
+  if total < #shuffled_problems then
+    local ps, ss = {}, {}
+    for i = 1, total do
+      ps[i] = shuffled_problems[i]
+      ss[i] = shuffled_solutions[i]
+    end
+    shuffled_problems = ps
+    shuffled_solutions = ss
+  end
   return {
-    n = #problems,
+    n = total,
     n_labels = cat_idx,
     categories = categories,
-    problems = arr.lookup(idxs, problems, {}),
-    solutions = ivec.create(arr.lookup(idxs, solutions, {}))
+    problems = shuffled_problems,
+    solutions = ivec.create(shuffled_solutions)
   }
 end
 
-M.read_20newsgroups_split = function (train_dir, test_dir, max_per_class, remove, tvr)
-  local all_train = M.read_20newsgroups(train_dir, max_per_class, remove)
-  local test_raw = M.read_20newsgroups(test_dir, max_per_class, remove)
+M.read_20newsgroups_split = function (train_dir, test_dir, max, remove, tvr)
+  local all_train = M.read_20newsgroups(train_dir, nil, remove, max)
+  local test_raw = M.read_20newsgroups(test_dir, nil, remove, max)
   local test = {
     n = test_raw.n,
     n_labels = test_raw.n_labels,
@@ -292,6 +304,7 @@ local function read_eurlex57k_jsonl (fp, max, label_map, label_counts)
     label_counts:push(doc_label_count)
     n = n + 1
   end
+  solutions:asc()
   return problems, solutions, n
 end
 

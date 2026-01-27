@@ -3,19 +3,22 @@
 - Run end to end and update defaults
 - Make heterogeneous (keep spot checks the same; print label/doc nodes together)
 - Create label only index
-- Refactor to avoid graph.xxx entirely, extending the index apis to directly
-  produce what is needed for eval/etc.
-- Evaluate and spot check train/dev/test asymmetric label rankings
-- Train regressor
-- Evaluate and spot check train/dev/test asymmetric label selected sets
+- Asym neighborhoods lookup for train-spectral/train-predicted/dev/test against
+  spectral label codes
+- Spot check found label neighbors
+- Fit regression predicting k from neighbors lists
+- Evaluate regression-selected tags against train/dev/test
 - Rewrite docs in favor of nystrom approach
 - Save branch
 - Purge everything not in current/active code usage, incl:
+    - _ind variants and support for bits_individualize in TM/etc.
     - corex, tch, cknn, sigma, elbows, prone, knn_xxx=true helpers simhash,
-      top_coherence, top_lift, optimize elbows, prone, graph module
+      optimize elbows
     - essentially all unused code, saving behind a save branch
 
 - Clean up todo.md
+- Consider
+    - Leverage bits_to_csr more broadly, using csr format for most operations
 
 # Now
 

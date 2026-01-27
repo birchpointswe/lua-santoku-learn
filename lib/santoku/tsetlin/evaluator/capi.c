@@ -1475,11 +1475,40 @@ static inline int tm_score_retrieval (lua_State *L)
   tk_cvec_t *codes_cvec = tk_cvec_peekopt(L, -1);
   lua_pop(L, 1);
 
+  lua_getfield(L, 1, "raw_codes");
+  tk_dvec_t *raw_codes_dvec = tk_dvec_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "kernel_index");
+  tk_inv_t *kernel_index = tk_inv_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  tk_ivec_sim_type_t kernel_cmp = TK_IVEC_COSINE;
+  double kernel_alpha = 0.5;
+  double kernel_beta = 0.5;
+  double kernel_decay = 0.0;
+  tk_combine_type_t kernel_combine = TK_COMBINE_EXPONENTIAL;
+
+  if (kernel_index) {
+    const char *cmp_str = tk_lua_foptstring(L, 1, "score_retrieval", "kernel_cmp", "cosine");
+    kernel_cmp = tk_inv_parse_cmp(cmp_str);
+    kernel_alpha = tk_lua_foptnumber(L, 1, "score_retrieval", "kernel_alpha", 0.5);
+    kernel_beta = tk_lua_foptnumber(L, 1, "score_retrieval", "kernel_beta", 0.5);
+    kernel_decay = tk_lua_foptnumber(L, 1, "score_retrieval", "kernel_decay", 0.0);
+    const char *combine_str = tk_lua_foptstring(L, 1, "score_retrieval", "kernel_combine", "exponential");
+    kernel_combine = tk_inv_parse_combine(combine_str);
+  }
+
   tk_ann_t *ann = NULL;
   tk_hbi_t *hbi = NULL;
   char *codes = NULL;
+  double *raw_codes = NULL;
 
-  if (codes_cvec) {
+  if (kernel_index) {
+    // kernel mode - no codes needed
+  } else if (raw_codes_dvec) {
+    raw_codes = raw_codes_dvec->a;
+  } else if (codes_cvec) {
     codes = codes_cvec->a;
   } else {
     lua_getfield(L, 1, "index");
@@ -1488,12 +1517,15 @@ static inline int tm_score_retrieval (lua_State *L)
       hbi = tk_hbi_peekopt(L, -1);
     lua_pop(L, 1);
     if (!ann && !hbi)
-      tk_lua_verror(L, 1, "score_retrieval", "codes/index", "codes or index required");
+      tk_lua_verror(L, 1, "score_retrieval", "codes/index/raw_codes/kernel_index", "codes, raw_codes, index, or kernel_index required");
   }
 
-  lua_getfield(L, 1, "ids");
-  tk_ivec_t *code_ids = tk_ivec_peek(L, -1, "ids");
-  lua_pop(L, 1);
+  tk_ivec_t *code_ids = NULL;
+  if (!kernel_index) {
+    lua_getfield(L, 1, "ids");
+    code_ids = tk_ivec_peek(L, -1, "ids");
+    lua_pop(L, 1);
+  }
 
   lua_getfield(L, 1, "eval_ids");
   tk_ivec_t *eval_ids = tk_ivec_peek(L, -1, "eval_ids");
@@ -1511,8 +1543,12 @@ static inline int tm_score_retrieval (lua_State *L)
   tk_dvec_t *eval_weights = tk_dvec_peek(L, -1, "eval_weights");
   lua_pop(L, 1);
 
-  uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "score_retrieval", "n_dims");
-  uint64_t chunks = TK_CVEC_BITS_BYTES(n_dims);
+  uint64_t n_dims = 0;
+  uint64_t chunks = 0;
+  if (!kernel_index) {
+    n_dims = tk_lua_fcheckunsigned(L, 1, "score_retrieval", "n_dims");
+    chunks = TK_CVEC_BITS_BYTES(n_dims);
+  }
 
   const char *ranking_str = tk_lua_fcheckstring(L, 1, "score_retrieval", "ranking");
   tk_eval_metric_t ranking = tk_eval_parse_metric(ranking_str);
@@ -1521,9 +1557,12 @@ static inline int tm_score_retrieval (lua_State *L)
       ranking != TK_EVAL_METRIC_PEARSON)
     tk_lua_verror(L, 1, "score_retrieval", "ranking", "must be ndcg, spearman, or pearson");
 
-  tk_iumap_t *code_id_to_idx = tk_iumap_from_ivec(NULL, code_ids);
-  if (!code_id_to_idx)
-    tk_error(L, "score_retrieval: failed to create code ID mapping", ENOMEM);
+  tk_iumap_t *code_id_to_idx = NULL;
+  if (!kernel_index) {
+    code_id_to_idx = tk_iumap_from_ivec(NULL, code_ids);
+    if (!code_id_to_idx)
+      tk_error(L, "score_retrieval: failed to create code ID mapping", ENOMEM);
+  }
 
   double total_score = 0.0;
   uint64_t total_queries = 0;
@@ -1531,12 +1570,14 @@ static inline int tm_score_retrieval (lua_State *L)
   #pragma omp parallel reduction(+:total_score) reduction(+:total_queries)
   {
     tk_pvec_t *query_neighbors = tk_pvec_create(NULL, 0, 0, 0);
+    tk_rvec_t *query_neighbors_raw = tk_rvec_create(NULL, 0, 0, 0);
     tk_dumap_t *weight_map = tk_dumap_create(NULL, 0);
     tk_pvec_t *weight_ranks_buffer = tk_pvec_create(NULL, 0, 0, 0);
     tk_dumap_t *weight_rank_map = tk_dumap_create(NULL, 0);
 
-    if (!query_neighbors || !weight_map || !weight_ranks_buffer || !weight_rank_map) {
+    if (!query_neighbors || !query_neighbors_raw || !weight_map || !weight_ranks_buffer || !weight_rank_map) {
       if (query_neighbors) tk_pvec_destroy(query_neighbors);
+      if (query_neighbors_raw) tk_rvec_destroy(query_neighbors_raw);
       if (weight_map) tk_dumap_destroy(weight_map);
       if (weight_ranks_buffer) tk_pvec_destroy(weight_ranks_buffer);
       if (weight_rank_map) tk_dumap_destroy(weight_rank_map);
@@ -1545,56 +1586,100 @@ static inline int tm_score_retrieval (lua_State *L)
       for (uint64_t query_idx = 0; query_idx < eval_offsets->n - 1; query_idx++) {
         int64_t query_id = eval_ids->a[query_idx];
 
-        khint_t code_khi = tk_iumap_get(code_id_to_idx, query_id);
-        if (code_khi == tk_iumap_end(code_id_to_idx))
-          continue;
-        int64_t query_code_idx = tk_iumap_val(code_id_to_idx, code_khi);
+        int64_t query_code_idx = -1;
+        if (!kernel_index) {
+          khint_t code_khi = tk_iumap_get(code_id_to_idx, query_id);
+          if (code_khi == tk_iumap_end(code_id_to_idx))
+            continue;
+          query_code_idx = tk_iumap_val(code_id_to_idx, code_khi);
+        }
 
         int64_t eval_start = eval_offsets->a[query_idx];
         int64_t eval_end = eval_offsets->a[query_idx + 1];
         if (eval_end == eval_start)
           continue;
 
-        char *query_code = codes
-          ? codes + (uint64_t)query_code_idx * chunks
-          : (ann ? tk_ann_get(ann, query_id) : tk_hbi_get(hbi, query_id));
-        if (!query_code)
+        char *query_code = NULL;
+        double *query_raw = NULL;
+        if (kernel_index) {
+          // kernel mode - no codes needed, use query_id directly
+        } else if (raw_codes) {
+          query_raw = raw_codes + (uint64_t)query_code_idx * n_dims;
+        } else if (codes) {
+          query_code = codes + (uint64_t)query_code_idx * chunks;
+        } else {
+          query_code = ann ? tk_ann_get(ann, query_id) : tk_hbi_get(hbi, query_id);
+        }
+        if (!kernel_index && !query_code && !query_raw)
           continue;
 
         tk_pvec_clear(query_neighbors);
+        tk_rvec_clear(query_neighbors_raw);
 
         for (int64_t i = eval_start; i < eval_end; i++) {
           int64_t neighbor_eval_idx = eval_neighbors->a[i];
           int64_t neighbor_id = eval_ids->a[neighbor_eval_idx];
 
-          char *neighbor_code = codes
-            ? NULL
-            : (ann ? tk_ann_get(ann, neighbor_id) : tk_hbi_get(hbi, neighbor_id));
-
-          if (codes) {
+          if (kernel_index) {
+            double kernel_dist = tk_inv_distance(kernel_index, query_id, neighbor_id,
+              kernel_cmp, kernel_alpha, kernel_beta, kernel_combine, kernel_decay);
+            tk_rvec_push(query_neighbors_raw, tk_rank(neighbor_eval_idx, kernel_dist));
+          } else if (raw_codes) {
             khint_t nbr_khi = tk_iumap_get(code_id_to_idx, neighbor_id);
             if (nbr_khi == tk_iumap_end(code_id_to_idx))
               continue;
             int64_t neighbor_code_idx = tk_iumap_val(code_id_to_idx, nbr_khi);
-            neighbor_code = codes + (uint64_t)neighbor_code_idx * chunks;
-          } else if (!neighbor_code) {
+            double *neighbor_raw = raw_codes + (uint64_t)neighbor_code_idx * n_dims;
+            double dot = 0.0, norm_q = 0.0, norm_n = 0.0;
+            for (uint64_t d = 0; d < n_dims; d++) {
+              dot += query_raw[d] * neighbor_raw[d];
+              norm_q += query_raw[d] * query_raw[d];
+              norm_n += neighbor_raw[d] * neighbor_raw[d];
+            }
+            double denom = sqrt(norm_q) * sqrt(norm_n);
+            double cosine_sim = (denom > 1e-12) ? dot / denom : 0.0;
+            double cosine_dist = 1.0 - cosine_sim;
+            tk_rvec_push(query_neighbors_raw, tk_rank(neighbor_eval_idx, cosine_dist));
+          } else {
+            char *neighbor_code = codes
+              ? NULL
+              : (ann ? tk_ann_get(ann, neighbor_id) : tk_hbi_get(hbi, neighbor_id));
+
+            if (codes) {
+              khint_t nbr_khi = tk_iumap_get(code_id_to_idx, neighbor_id);
+              if (nbr_khi == tk_iumap_end(code_id_to_idx))
+                continue;
+              int64_t neighbor_code_idx = tk_iumap_val(code_id_to_idx, nbr_khi);
+              neighbor_code = codes + (uint64_t)neighbor_code_idx * chunks;
+            } else if (!neighbor_code) {
+              continue;
+            }
+
+            uint64_t hamming_dist = tk_cvec_bits_hamming_serial(
+              (const unsigned char*)query_code,
+              (const unsigned char*)neighbor_code,
+              n_dims);
+
+            tk_pvec_push(query_neighbors, tk_pair(neighbor_eval_idx, (int64_t)hamming_dist));
+          }
+        }
+
+        if (kernel_index || raw_codes) {
+          if (query_neighbors_raw->n == 0) {
+            total_queries++;
             continue;
           }
-
-          uint64_t hamming_dist = tk_cvec_bits_hamming_serial(
-            (const unsigned char*)query_code,
-            (const unsigned char*)neighbor_code,
-            n_dims);
-
-          tk_pvec_push(query_neighbors, tk_pair(neighbor_eval_idx, (int64_t)hamming_dist));
+          tk_rvec_asc(query_neighbors_raw, 0, query_neighbors_raw->n);
+          tk_pvec_clear(query_neighbors);
+          for (uint64_t j = 0; j < query_neighbors_raw->n; j++)
+            tk_pvec_push(query_neighbors, tk_pair(query_neighbors_raw->a[j].i, (int64_t)j));
+        } else {
+          if (query_neighbors->n == 0) {
+            total_queries++;
+            continue;
+          }
+          tk_pvec_asc(query_neighbors, 0, query_neighbors->n);
         }
-
-        if (query_neighbors->n == 0) {
-          total_queries++;
-          continue;
-        }
-
-        tk_pvec_asc(query_neighbors, 0, query_neighbors->n);
 
         double ranking_score = 0.0;
         switch (ranking) {
@@ -1619,13 +1704,15 @@ static inline int tm_score_retrieval (lua_State *L)
       }
 
       tk_pvec_destroy(query_neighbors);
+      tk_rvec_destroy(query_neighbors_raw);
       tk_dumap_destroy(weight_map);
       tk_pvec_destroy(weight_ranks_buffer);
       tk_dumap_destroy(weight_rank_map);
     }
   }
 
-  tk_iumap_destroy(code_id_to_idx);
+  if (code_id_to_idx)
+    tk_iumap_destroy(code_id_to_idx);
 
   double avg_score = total_queries > 0 ? total_score / (double)total_queries : 0.0;
 
