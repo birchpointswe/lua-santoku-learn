@@ -505,204 +505,6 @@ static inline void tk_inv_keep (
   tk_iuset_destroy(to_remove_set);
 }
 
-static inline void tk_inv_mutualize (
-  lua_State *L,
-  tk_inv_t *inv,
-  tk_inv_hoods_t *hoods,
-  tk_ivec_t *uids,
-  uint64_t min,
-  int64_t **old_to_newp
-) {
-  if (inv->destroyed)
-    return;
-
-  tk_ivec_t *sids = tk_ivec_create(L, uids->n, 0, 0);
-  for (uint64_t i = 0; i < uids->n; i ++)
-    sids->a[i] = tk_inv_uid_sid(inv, uids->a[i], TK_INV_FIND);
-  tk_iumap_t *sid_idx = tk_iumap_from_ivec(0, sids);
-  if (!sid_idx)
-    tk_error(L, "inv_mutualize: iumap_from_ivec failed", ENOMEM);
-  if (uids->n > SIZE_MAX / sizeof(tk_dumap_t *))
-    tk_error(L, "inv_mutualize: allocation size overflow", ENOMEM);
-  tk_dumap_t **hoods_sets = tk_malloc(L, uids->n * sizeof(tk_dumap_t *));
-  for (uint64_t i = 0; i < uids->n; i ++)
-    hoods_sets[i] = tk_dumap_create(0, 0);
-
-  tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
-  double cmp_alpha = 1.0;
-  double cmp_beta = 0.1;
-
-  tk_inv_rank_weights_t rw;
-  tk_inv_precompute_rank_weights(&rw, inv->n_ranks, 0.0);
-  int64_t *ranks_arr = inv->ranks->a;
-  double *weights_arr = inv->weights->a;
-
-  #pragma omp parallel
-  {
-    double q_weights_buf[TK_INV_MAX_RANKS];
-    double e_weights_buf[TK_INV_MAX_RANKS];
-    double inter_weights_buf[TK_INV_MAX_RANKS];
-
-    #pragma omp for schedule(static) nowait
-    for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
-      tk_rvec_t *uhood = hoods->a[i];
-      tk_dumap_t *uset = hoods_sets[i];
-      int kha;
-      khint_t khi;
-      for (uint64_t j = 0; j < uhood->n; j ++) {
-        khi = tk_dumap_put(uset, uhood->a[j].i, &kha);
-        tk_dumap_setval(uset, khi, uhood->a[j].d);
-      }
-    }
-
-    #pragma omp barrier
-
-    #pragma omp for schedule(static) nowait
-    for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
-      tk_rvec_t *uhood = hoods->a[i];
-      uint64_t orig_n = uhood->n;
-      if (orig_n == 0) {
-        uhood->n = 0;
-        uhood->m = 0;
-        continue;
-      }
-      uint64_t left = 0;
-      uint64_t right = orig_n - 1;
-      khint_t khi;
-      while (left <= right) {
-        int64_t iv = uhood->a[left].i;
-        double d = uhood->a[left].d;
-        tk_dumap_t *vset = hoods_sets[iv];
-        khi = tk_dumap_get(vset, i);
-        if (khi != tk_dumap_end(vset)) {
-          double d0 = tk_dumap_val(vset, khi);
-          if (d0 < d)
-            uhood->a[left].d = d0;
-          left ++;
-        } else {
-          if (left != right) {
-            tk_rank_t tmp = uhood->a[left];
-            uhood->a[left] = uhood->a[right];
-            uhood->a[right] = tmp;
-          }
-          if (right == 0)
-            break;
-          right --;
-        }
-      }
-      uhood->n = left;
-      uhood->m = orig_n;
-      for (uint64_t qi = uhood->n; qi < uhood->m; qi ++) {
-        int64_t iv = uhood->a[qi].i;
-        double d_forward = uhood->a[qi].d;
-        double d_reverse = d_forward;
-        tk_dumap_t *vset = hoods_sets[iv];
-        khi = tk_dumap_get(vset, i);
-        if (khi != tk_dumap_end(vset)) {
-          d_reverse = tk_dumap_val(vset, khi);
-        } else {
-          int64_t usid = sids->a[i];
-          int64_t vsid = sids->a[iv];
-          size_t ulen = 0, vlen = 0;
-          int64_t *ubits = tk_inv_sget(inv, usid, &ulen);
-          int64_t *vbits = tk_inv_sget(inv, vsid, &vlen);
-          if (ubits && vbits) {
-            double sim = tk_inv_similarity_fast(
-              ranks_arr, weights_arr, inv->n_ranks,
-              vbits, vlen, ubits, ulen, cmp, cmp_alpha, cmp_beta,
-              TK_COMBINE_WEIGHTED_AVG, &rw, q_weights_buf, e_weights_buf, inter_weights_buf);
-            d_reverse = 1.0 - sim;
-          }
-        }
-        uhood->a[qi].d = (d_forward < d_reverse) ? d_forward : d_reverse;
-      }
-      tk_rvec_asc(uhood, 0, uhood->n);
-      tk_rvec_asc(uhood, uhood->n, uhood->m);
-    }
-  }
-
-  int64_t *old_to_new = NULL;
-  int64_t keeper_count = 0;
-
-  if (min > 0) {
-    if (uids->n > SIZE_MAX / sizeof(int64_t))
-      tk_error(L, "inv_neighborhoods: allocation size overflow", ENOMEM);
-    old_to_new = tk_malloc(L, uids->n * sizeof(int64_t));
-    for (uint64_t i = 0; i < uids->n; i ++) {
-      if (hoods->a[i]->n >= min) {
-        old_to_new[i] = keeper_count ++;
-      } else {
-        old_to_new[i] = -1;
-      }
-    }
-  }
-
-  if (min > 0 && keeper_count < (int64_t) uids->n) {
-    #pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < (int64_t) hoods->n; i ++) {
-      if (hoods->a[i]->n >= min) {
-        tk_rvec_t *hood = hoods->a[i];
-        uint64_t mutual_write_pos = 0;
-        uint64_t non_mutual_write_pos = 0;
-        for (uint64_t j = 0; j < hood->n; j ++) {
-          int64_t old_neighbor_idx = hood->a[j].i;
-          int64_t new_neighbor_idx = old_to_new[old_neighbor_idx];
-          if (new_neighbor_idx >= 0) {
-            hood->a[mutual_write_pos ++] = tk_rank(new_neighbor_idx, hood->a[j].d);
-          }
-        }
-        for (uint64_t j = hood->n; j < hood->m; j ++) {
-          int64_t old_neighbor_idx = hood->a[j].i;
-          int64_t new_neighbor_idx = old_to_new[old_neighbor_idx];
-          if (new_neighbor_idx >= 0) {
-            hood->a[mutual_write_pos + non_mutual_write_pos ++] = tk_rank(new_neighbor_idx, hood->a[j].d);
-          }
-        }
-        hood->n = mutual_write_pos;
-        hood->m = mutual_write_pos + non_mutual_write_pos;
-      }
-    }
-  }
-
-  if (old_to_new) {
-    tk_ivec_t *new_uids = tk_ivec_create(L, (uint64_t) keeper_count, 0, 0);
-    tk_inv_hoods_t *new_hoods = tk_inv_hoods_create(L, (uint64_t) keeper_count, 0, 0);
-    new_hoods->n = (uint64_t) keeper_count;
-    for (uint64_t i = 0; i < uids->n; i ++) {
-      if (old_to_new[i] >= 0) {
-        new_uids->a[old_to_new[i]] = uids->a[i];
-        new_hoods->a[old_to_new[i]] = hoods->a[i];
-      }
-    }
-    int64_t *old_uids_data = uids->a;
-    tk_inv_hood_t *old_hoods_data = hoods->a;
-    uids->a = new_uids->a;
-    uids->n = (uint64_t) keeper_count;
-    uids->m = (uint64_t) keeper_count;
-    hoods->a = new_hoods->a;
-    hoods->n = (uint64_t) keeper_count;
-    hoods->m = (uint64_t) keeper_count;
-    new_uids->a = old_uids_data;
-    new_hoods->a = old_hoods_data;
-
-    lua_remove(L, -2);
-    lua_remove(L, -1);
-  }
-
-  if (old_to_newp) {
-    *old_to_newp = old_to_new;
-  } else if (old_to_new) {
-    free(old_to_new);
-  }
-
-  tk_iumap_destroy(sid_idx);
-  for (uint64_t i = 0; i < uids->n; i ++)
-    if (hoods_sets[i])
-      tk_dumap_destroy(hoods_sets[i]);
-  free(hoods_sets);
-  lua_pop(L, 1);
-}
-
 static inline void tk_inv_prepare_universe_map (
   lua_State *L,
   tk_inv_t *A,
@@ -731,8 +533,6 @@ static inline void tk_inv_neighborhoods (
   lua_State *L,
   tk_inv_t *inv,
   uint64_t knn,
-  double eps_min,
-  double eps_max,
   tk_ivec_sim_type_t cmp,
   double cmp_alpha,
   double cmp_beta,
@@ -791,8 +591,8 @@ static inline void tk_inv_neighborhoods (
       double *q_weights_by_rank = q_weights_buf;
       tk_inv_compute_query_weights_by_rank(inv, ubits, nubits, q_weights_by_rank);
       touched->n = 0;
-      double cutoff = eps_max;
-      double min_required_sim = 1.0 - cutoff;
+      double cutoff = 1.0;
+      double min_required_sim = 0.0;
       double gate = 1.0;
       for (uint64_t current_rank = 0; current_rank < n_ranks; current_rank ++) {
         bool can_prune_new = gate < min_required_sim;
@@ -837,7 +637,7 @@ static inline void tk_inv_neighborhoods (
       }
       touched->n = tk_ivec_uasc(touched, 0, touched->n);
       double *e_weights_by_rank = e_weights_buf;
-      cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
+      cutoff = (knn && uhood->n >= knn) ? uhood->a[0].d : 1.0;
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
         int64_t vsid = touched->a[ti];
         int64_t iv = sid_to_pos->a[vsid];
@@ -849,9 +649,12 @@ static inline void tk_inv_neighborhoods (
         tk_inv_compute_candidate_weights_by_rank(inv, vbits, nvbits, e_weights_by_rank);
         double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_by_rank, cmp, cmp_alpha, cmp_beta, TK_COMBINE_WEIGHTED_AVG, cutoff, &rw);
         double dist = 1.0 - sim;
-        if (dist >= eps_min && dist <= cutoff) {
-          tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
-          if (uhood->n >= knn)
+        if (dist <= cutoff) {
+          if (knn)
+            tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
+          else
+            tk_rvec_push(uhood, tk_rank(iv, dist));
+          if (knn && uhood->n >= knn)
             cutoff = uhood->a[0].d;
         }
       }
@@ -880,8 +683,6 @@ static inline void tk_inv_neighborhoods_by_ids (
   tk_inv_t *inv,
   tk_ivec_t *query_ids,
   uint64_t knn,
-  double eps_min,
-  double eps_max,
   tk_ivec_sim_type_t cmp,
   double cmp_alpha,
   double cmp_beta,
@@ -899,7 +700,7 @@ static inline void tk_inv_neighborhoods_by_ids (
   int hoods_stack_idx = lua_gettop(L);
   hoods->n = query_ids->n;
   for (uint64_t i = 0; i < hoods->n; i ++) {
-    hoods->a[i] = tk_rvec_create(L, knn, 0, 0);
+    hoods->a[i] = tk_rvec_create(L, knn ? knn : 16, 0, 0);
     hoods->a[i]->n = 0;
     tk_lua_add_ephemeron(L, TK_INV_EPH, hoods_stack_idx, -1);
     lua_pop(L, 1);
@@ -929,8 +730,8 @@ static inline void tk_inv_neighborhoods_by_ids (
       double *q_weights_by_rank = q_weights_buf;
       tk_inv_compute_query_weights_by_rank(inv, ubits, nubits, q_weights_by_rank);
       touched->n = 0;
-      double cutoff = eps_max;
-      double min_required_sim = 1.0 - cutoff;
+      double cutoff = 1.0;
+      double min_required_sim = 0.0;
       double gate = 1.0;
       for (uint64_t current_rank = 0; current_rank < n_ranks; current_rank ++) {
         bool can_prune_new = gate < min_required_sim;
@@ -975,7 +776,7 @@ static inline void tk_inv_neighborhoods_by_ids (
       }
       touched->n = tk_ivec_uasc(touched, 0, touched->n);
       double *e_weights_by_rank = e_weights_buf;
-      cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
+      cutoff = (knn && uhood->n >= knn) ? uhood->a[0].d : 1.0;
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
         int64_t vsid = touched->a[ti];
         int64_t iv = sid_to_pos->a[vsid];
@@ -987,9 +788,12 @@ static inline void tk_inv_neighborhoods_by_ids (
         tk_inv_compute_candidate_weights_by_rank(inv, vbits, nvbits, e_weights_by_rank);
         double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_by_rank, cmp, cmp_alpha, cmp_beta, TK_COMBINE_WEIGHTED_AVG, cutoff, &rw);
         double dist = 1.0 - sim;
-        if (dist >= eps_min && dist <= cutoff) {
-          tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
-          if (uhood->n >= knn)
+        if (dist <= cutoff) {
+          if (knn)
+            tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
+          else
+            tk_rvec_push(uhood, tk_rank(iv, dist));
+          if (knn && uhood->n >= knn)
             cutoff = uhood->a[0].d;
         }
       }
@@ -1019,8 +823,6 @@ static inline void tk_inv_neighborhoods_by_vecs (
   tk_inv_t *inv,
   tk_ivec_t *query_vecs,
   uint64_t knn,
-  double eps_min,
-  double eps_max,
   tk_ivec_sim_type_t cmp,
   double cmp_alpha,
   double cmp_beta,
@@ -1075,7 +877,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
   int hoods_stack_idx = lua_gettop(L);
   hoods->n = n_queries;
   for (uint64_t i = 0; i < hoods->n; i ++) {
-    hoods->a[i] = tk_rvec_create(L, knn, 0, 0);
+    hoods->a[i] = tk_rvec_create(L, knn ? knn : 16, 0, 0);
     hoods->a[i]->n = 0;
     tk_lua_add_ephemeron(L, TK_INV_EPH, hoods_stack_idx, -1);
     lua_pop(L, 1);
@@ -1107,8 +909,8 @@ static inline void tk_inv_neighborhoods_by_vecs (
       double *q_weights_by_rank = q_weights_buf;
       tk_inv_compute_query_weights_by_rank(inv, ubits, nubits, q_weights_by_rank);
       touched->n = 0;
-      double cutoff = eps_max;
-      double min_required_sim = 1.0 - cutoff;
+      double cutoff = 1.0;
+      double min_required_sim = 0.0;
       double gate = 1.0;
       for (uint64_t current_rank = 0; current_rank < n_ranks; current_rank ++) {
         bool can_prune_new = gate < min_required_sim;
@@ -1151,7 +953,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
       }
       touched->n = tk_ivec_uasc(touched, 0, touched->n);
       double *e_weights_by_rank = e_weights_buf;
-      cutoff = (uhood->n >= knn) ? uhood->a[0].d : eps_max;
+      cutoff = (knn && uhood->n >= knn) ? uhood->a[0].d : 1.0;
       for (uint64_t ti = 0; ti < touched->n; ti ++) {
         int64_t vsid = touched->a[ti];
         int64_t iv = sid_to_pos->a[vsid];
@@ -1163,9 +965,12 @@ static inline void tk_inv_neighborhoods_by_vecs (
         tk_inv_compute_candidate_weights_by_rank(inv, vbits, nvbits, e_weights_by_rank);
         double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_by_rank, cmp, cmp_alpha, cmp_beta, TK_COMBINE_WEIGHTED_AVG, cutoff, &rw);
         double dist = 1.0 - sim;
-        if (dist >= eps_min && dist <= cutoff) {
-          tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
-          if (uhood->n >= knn)
+        if (dist <= cutoff) {
+          if (knn)
+            tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
+          else
+            tk_rvec_push(uhood, tk_rank(iv, dist));
+          if (knn && uhood->n >= knn)
             cutoff = uhood->a[0].d;
         }
       }
@@ -1476,8 +1281,6 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   size_t datalen,
   int64_t sid0,
   uint64_t knn,
-  double eps_min,
-  double eps_max,
   tk_rvec_t *out,
   tk_ivec_sim_type_t cmp,
   double cmp_alpha,
@@ -1508,8 +1311,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   for (uint64_t i = 0; i < wacc->n; i++)
     wacc->a[i] = 0.0;
 
-  double cutoff = eps_max;
-  double min_required_sim = 1.0 - cutoff;
+  double min_required_sim = 0.0;
   double gate = 1.0;
 
   for (uint64_t current_rank = 0; current_rank < n_ranks; current_rank ++) {
@@ -1566,10 +1368,10 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
     size_t elen = 0;
     int64_t *ev = tk_inv_sget(inv, vsid, &elen);
     tk_inv_compute_candidate_weights_by_rank(inv, ev, elen, e_weights_by_rank);
-    double current_cutoff = (knn && out->n >= knn) ? out->a[0].d : eps_max;
+    double current_cutoff = (knn && out->n >= knn) ? out->a[0].d : 1.0;
     double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, vsid, q_weights_by_rank, e_weights_by_rank, cmp, cmp_alpha, cmp_beta, TK_COMBINE_WEIGHTED_AVG, current_cutoff, &rw);
     double dist = 1.0 - sim;
-    if (dist >= eps_min && dist <= current_cutoff) {
+    if (dist <= current_cutoff) {
       int64_t vuid = tk_inv_sid_uid(inv, vsid);
       if (vuid >= 0) {
         if (knn)
@@ -1594,8 +1396,6 @@ static inline tk_rvec_t *tk_inv_neighbors_by_id (
   tk_inv_t *inv,
   int64_t uid,
   uint64_t knn,
-  double eps_min,
-  double eps_max,
   tk_rvec_t *out,
   tk_ivec_sim_type_t cmp,
   double cmp_alpha,
@@ -1609,7 +1409,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_id (
   }
   size_t len = 0;
   int64_t *data = tk_inv_get(inv, uid, &len);
-  return tk_inv_neighbors_by_vec(inv, data, len, sid0, knn, eps_min, eps_max, out, cmp, cmp_alpha, cmp_beta, decay);
+  return tk_inv_neighbors_by_vec(inv, data, len, sid0, knn, out, cmp, cmp_alpha, cmp_beta, decay);
 }
 
 static inline int tk_inv_gc_lua (lua_State *L)
@@ -1717,13 +1517,11 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
 {
   tk_inv_t *inv = tk_inv_peek(L, 1);
   uint64_t knn = tk_lua_checkunsigned(L, 2, "knn");
-  double eps_min = tk_lua_optposdouble(L, 3, "eps_min", 0.0);
-  double eps_max = tk_lua_optposdouble(L, 4, "eps_max", 1.0);
-  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 5, "comparator", "jaccard"));
-  double cmp_alpha = tk_lua_optnumber(L, 6, "alpha", 1.0);
-  double cmp_beta = tk_lua_optnumber(L, 7, "beta", 0.1);
-  double decay = tk_lua_optnumber(L, 8, "decay", 0.0);
-  tk_inv_neighborhoods(L, inv, knn, eps_min, eps_max, cmp, cmp_alpha, cmp_beta, decay, NULL, NULL);
+  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 3, "comparator", "jaccard"));
+  double cmp_alpha = tk_lua_optnumber(L, 4, "alpha", 1.0);
+  double cmp_beta = tk_lua_optnumber(L, 5, "beta", 0.1);
+  double decay = tk_lua_optnumber(L, 6, "decay", 0.0);
+  tk_inv_neighborhoods(L, inv, knn, cmp, cmp_alpha, cmp_beta, decay, NULL, NULL);
   return 2;
 }
 
@@ -1732,12 +1530,10 @@ static inline int tk_inv_neighborhoods_by_ids_lua (lua_State *L)
   tk_inv_t *inv = tk_inv_peek(L, 1);
   tk_ivec_t *query_ids = tk_ivec_peek(L, 2, "ids");
   uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
-  double eps_min = tk_lua_optposdouble(L, 4, "eps_min", 0.0);
-  double eps_max = tk_lua_optposdouble(L, 5, "eps_max", 1.0);
-  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 6, "comparator", "jaccard"));
-  double cmp_alpha = tk_lua_optnumber(L, 7, "alpha", 1.0);
-  double cmp_beta = tk_lua_optnumber(L, 8, "beta", 0.1);
-  double decay = tk_lua_optnumber(L, 9, "decay", 0.0);
+  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 4, "comparator", "jaccard"));
+  double cmp_alpha = tk_lua_optnumber(L, 5, "alpha", 1.0);
+  double cmp_beta = tk_lua_optnumber(L, 6, "beta", 0.1);
+  double decay = tk_lua_optnumber(L, 7, "decay", 0.0);
   int64_t write_pos = 0;
   for (int64_t i = 0; i < (int64_t) query_ids->n; i ++) {
     int64_t uid = query_ids->a[i];
@@ -1749,7 +1545,7 @@ static inline int tk_inv_neighborhoods_by_ids_lua (lua_State *L)
   query_ids->n = (uint64_t) write_pos;
 
   tk_inv_hoods_t *hoods;
-  tk_inv_neighborhoods_by_ids(L, inv, query_ids, knn, eps_min, eps_max, cmp, cmp_alpha, cmp_beta, decay, &hoods, &query_ids);
+  tk_inv_neighborhoods_by_ids(L, inv, query_ids, knn, cmp, cmp_alpha, cmp_beta, decay, &hoods, &query_ids);
   return 2;
 }
 
@@ -1758,13 +1554,11 @@ static inline int tk_inv_neighborhoods_by_vecs_lua (lua_State *L)
   tk_inv_t *inv = tk_inv_peek(L, 1);
   tk_ivec_t *query_vecs = tk_ivec_peek(L, 2, "vectors");
   uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
-  double eps_min = tk_lua_optposdouble(L, 4, "eps_min", 0.0);
-  double eps_max = tk_lua_optposdouble(L, 5, "eps_max", 1.0);
-  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 6, "comparator", "jaccard"));
-  double cmp_alpha = tk_lua_optnumber(L, 7, "alpha", 1.0);
-  double cmp_beta = tk_lua_optnumber(L, 8, "beta", 0.1);
-  double decay = tk_lua_optnumber(L, 9, "decay", 0.0);
-  tk_inv_neighborhoods_by_vecs(L, inv, query_vecs, knn, eps_min, eps_max, cmp, cmp_alpha, cmp_beta, decay, NULL, NULL);
+  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 4, "comparator", "jaccard"));
+  double cmp_alpha = tk_lua_optnumber(L, 5, "alpha", 1.0);
+  double cmp_beta = tk_lua_optnumber(L, 6, "beta", 0.1);
+  double decay = tk_lua_optnumber(L, 7, "decay", 0.0);
+  tk_inv_neighborhoods_by_vecs(L, inv, query_vecs, knn, cmp, cmp_alpha, cmp_beta, decay, NULL, NULL);
   return 2;
 }
 
@@ -1800,19 +1594,17 @@ static inline int tk_inv_neighbors_lua (lua_State *L)
 {
   tk_inv_t *inv = tk_inv_peek(L, 1);
   uint64_t knn = tk_lua_optunsigned(L, 3, "knn", 0);
-  double eps_min = tk_lua_optposdouble(L, 4, "eps_min", 0.0);
-  double eps_max = tk_lua_optposdouble(L, 5, "eps_max", 1.0);
-  tk_rvec_t *out = tk_rvec_peek(L, 6, "out");
-  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 7, "comparator", "jaccard"));
-  double cmp_alpha = tk_lua_optnumber(L, 8, "alpha", 1.0);
-  double cmp_beta = tk_lua_optnumber(L, 9, "beta", 0.1);
-  double decay = tk_lua_optnumber(L, 10, "decay", 0.0);
+  tk_rvec_t *out = tk_rvec_peek(L, 4, "out");
+  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 5, "comparator", "jaccard"));
+  double cmp_alpha = tk_lua_optnumber(L, 6, "alpha", 1.0);
+  double cmp_beta = tk_lua_optnumber(L, 7, "beta", 0.1);
+  double decay = tk_lua_optnumber(L, 8, "decay", 0.0);
   if (lua_type(L, 2) == LUA_TNUMBER) {
     int64_t uid = tk_lua_checkinteger(L, 2, "id");
-    tk_inv_neighbors_by_id(inv, uid, knn, eps_min, eps_max, out, cmp, cmp_alpha, cmp_beta, decay);
+    tk_inv_neighbors_by_id(inv, uid, knn, out, cmp, cmp_alpha, cmp_beta, decay);
   } else {
     tk_ivec_t *vec = tk_ivec_peek(L, 2, "vector");
-    tk_inv_neighbors_by_vec(inv, vec->a, vec->n, -1, knn, eps_min, eps_max, out, cmp, cmp_alpha, cmp_beta, decay);
+    tk_inv_neighbors_by_vec(inv, vec->a, vec->n, -1, knn, out, cmp, cmp_alpha, cmp_beta, decay);
   }
   return 0;
 }

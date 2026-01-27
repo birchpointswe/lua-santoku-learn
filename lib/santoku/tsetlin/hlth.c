@@ -15,7 +15,6 @@
 #include <santoku/iumap/ext.h>
 #include <santoku/tsetlin/inv.h>
 #include <santoku/tsetlin/ann.h>
-#include <santoku/tsetlin/hbi.h>
 #include <santoku/tsetlin/graph.h>
 
 #define TK_HLTH_ENCODER_MT "tk_hlth_encoder_t"
@@ -25,8 +24,7 @@
 
 typedef enum {
   TK_HLTH_IDX_INV,
-  TK_HLTH_IDX_ANN,
-  TK_HLTH_IDX_HBI
+  TK_HLTH_IDX_ANN
 } tk_hlth_index_type_t;
 
 typedef enum {
@@ -126,19 +124,15 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
     uint64_t n_samples = tk_lua_checkunsigned(L, 2, "n_samples");
 
     tk_ann_t *feat_ann = enc->feat_idx_type == TK_HLTH_IDX_ANN ? (tk_ann_t *)enc->feat_idx : NULL;
-    tk_hbi_t *feat_hbi = enc->feat_idx_type == TK_HLTH_IDX_HBI ? (tk_hbi_t *)enc->feat_idx : NULL;
 
     tk_ann_hoods_t *ann_hoods = NULL;
-    tk_hbi_hoods_t *hbi_hoods = NULL;
     tk_ivec_t *nbr_ids = NULL;
 
     if (feat_ann) {
       tk_ann_neighborhoods_by_vecs(L, feat_ann, query_cvec, enc->n_landmarks, enc->probe_radius,
-                                   0, ~0ULL, &ann_hoods, &nbr_ids);
-    } else if (feat_hbi) {
-      tk_hbi_neighborhoods_by_vecs(L, feat_hbi, query_cvec, enc->n_landmarks, 0, ~0ULL, &hbi_hoods, &nbr_ids);
+                                   &ann_hoods, &nbr_ids);
     } else {
-      return luaL_error(L, "encode: similarities mode requires ann or hbi landmarks_index");
+      return luaL_error(L, "encode: similarities mode requires ann landmarks_index");
     }
 
     uint64_t hood_size = enc->n_landmarks;
@@ -168,10 +162,9 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
     for (uint64_t k = 0; k < hood_size; k++) {
       for (uint64_t i = 0; i < n_samples; i++) {
         double sim = 0.0;
-        uint64_t cur_size = ann_hoods ? ann_hoods->a[i]->n : hbi_hoods->a[i]->n;
+        uint64_t cur_size = ann_hoods->a[i]->n;
         if (k < cur_size) {
-          if (ann_hoods) sim = (double)ann_hoods->a[i]->a[k].p;
-          else sim = (double)hbi_hoods->a[i]->a[k].p;
+          sim = (double)ann_hoods->a[i]->a[k].p;
         }
         all_sims[i] = sim;
       }
@@ -213,25 +206,20 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
 
   tk_inv_t *feat_inv = enc->feat_idx_type == TK_HLTH_IDX_INV ? (tk_inv_t *)enc->feat_idx : NULL;
   tk_ann_t *feat_ann = enc->feat_idx_type == TK_HLTH_IDX_ANN ? (tk_ann_t *)enc->feat_idx : NULL;
-  tk_hbi_t *feat_hbi = enc->feat_idx_type == TK_HLTH_IDX_HBI ? (tk_hbi_t *)enc->feat_idx : NULL;
 
   tk_ann_t *code_ann = enc->code_idx_type == TK_HLTH_IDX_ANN ? (tk_ann_t *)enc->code_idx : NULL;
-  tk_hbi_t *code_hbi = enc->code_idx_type == TK_HLTH_IDX_HBI ? (tk_hbi_t *)enc->code_idx : NULL;
 
   tk_ann_hoods_t *ann_hoods = NULL;
-  tk_hbi_hoods_t *hbi_hoods = NULL;
   tk_inv_hoods_t *inv_hoods = NULL;
   tk_ivec_t *nbr_ids = NULL;
 
   if (feat_inv && query_ivec) {
-    tk_inv_neighborhoods_by_vecs(L, feat_inv, query_ivec, enc->n_landmarks, 0.0, 1.0,
+    tk_inv_neighborhoods_by_vecs(L, feat_inv, query_ivec, enc->n_landmarks,
                                  enc->cmp, enc->cmp_alpha, enc->cmp_beta,
                                  0.0, &inv_hoods, &nbr_ids);
   } else if (feat_ann && query_cvec) {
     tk_ann_neighborhoods_by_vecs(L, feat_ann, query_cvec, enc->n_landmarks, enc->probe_radius,
-                                 0, ~0ULL, &ann_hoods, &nbr_ids);
-  } else if (feat_hbi && query_cvec) {
-    tk_hbi_neighborhoods_by_vecs(L, feat_hbi, query_cvec, enc->n_landmarks, 0, ~0ULL, &hbi_hoods, &nbr_ids);
+                                 &ann_hoods, &nbr_ids);
   } else {
     return luaL_error(L, "encode: index/query type mismatch");
   }
@@ -269,12 +257,12 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
         memset(bit_counts, 0, enc->n_hidden * sizeof(uint64_t));
         tk_ivec_clear(tmp);
         int64_t nbr_idx, nbr_uid;
-        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, feat_hbi, inv_hoods, ann_hoods, hbi_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
+        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, inv_hoods, ann_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
           tk_ivec_push(tmp, nbr_uid);
         });
         uint64_t n_found = 0;
         for (uint64_t j = 0; j < tmp->n && j < enc->n_landmarks; j++) {
-          char *code_data = code_ann ? tk_ann_get(code_ann, tmp->a[j]) : tk_hbi_get(code_hbi, tmp->a[j]);
+          char *code_data = tk_ann_get(code_ann, tmp->a[j]);
           if (code_data != NULL) {
             for (uint64_t b = 0; b < enc->n_hidden; b++) {
               if (code_data[TK_CVEC_BITS_BYTE(b)] & (1 << TK_CVEC_BITS_BIT(b)))
@@ -342,7 +330,6 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
     }
   } else if (enc->mode == TK_HLTH_MODE_FREQUENCY_WEIGHTED) {
     uint64_t feat_ann_features = feat_ann ? feat_ann->features : 0;
-    uint64_t feat_hbi_features = feat_hbi ? feat_hbi->features : 0;
     #pragma omp parallel
     {
       double *bit_weights = calloc(enc->n_hidden, sizeof(double));
@@ -354,7 +341,7 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
         tk_ivec_clear(tmp);
         tk_dvec_clear(sims);
         int64_t nbr_idx, nbr_uid;
-        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, feat_hbi, inv_hoods, ann_hoods, hbi_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
+        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, inv_hoods, ann_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
           double sim = 1.0;
           if (inv_hoods) {
             tk_rvec_t *hood = inv_hoods->a[i];
@@ -372,21 +359,13 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
                 break;
               }
             }
-          } else if (hbi_hoods && feat_hbi_features > 0) {
-            tk_pvec_t *hood = hbi_hoods->a[i];
-            for (uint64_t j = 0; j < hood->n; j++) {
-              if (hood->a[j].i == nbr_idx) {
-                sim = 1.0 - (double)hood->a[j].p / (double)feat_hbi_features;
-                break;
-              }
-            }
           }
           tk_ivec_push(tmp, nbr_uid);
           tk_dvec_push(sims, sim);
         });
         double total_weight = 0.0;
         for (uint64_t j = 0; j < tmp->n && j < enc->n_landmarks; j++) {
-          char *code_data = code_ann ? tk_ann_get(code_ann, tmp->a[j]) : tk_hbi_get(code_hbi, tmp->a[j]);
+          char *code_data = tk_ann_get(code_ann, tmp->a[j]);
           if (code_data != NULL) {
             double w = sims->a[j];
             total_weight += w;
@@ -422,11 +401,11 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
         memset(bit_votes, 0, enc->n_hidden * sizeof(int64_t));
         tk_ivec_clear(tmp);
         int64_t nbr_idx, nbr_uid;
-        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, feat_hbi, inv_hoods, ann_hoods, hbi_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
+        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, inv_hoods, ann_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
           tk_ivec_push(tmp, nbr_uid);
         });
         for (uint64_t j = 0; j < tmp->n && j < enc->n_landmarks; j++) {
-          char *code_data = code_ann ? tk_ann_get(code_ann, tmp->a[j]) : tk_hbi_get(code_hbi, tmp->a[j]);
+          char *code_data = tk_ann_get(code_ann, tmp->a[j]);
           if (code_data != NULL) {
             for (uint64_t b = 0; b < enc->n_hidden; b++) {
               if (code_data[TK_CVEC_BITS_BYTE(b)] & (1 << TK_CVEC_BITS_BIT(b)))
@@ -448,7 +427,6 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
     }
   } else if (enc->mode == TK_HLTH_MODE_CENTROID_WEIGHTED) {
     uint64_t feat_ann_features = feat_ann ? feat_ann->features : 0;
-    uint64_t feat_hbi_features = feat_hbi ? feat_hbi->features : 0;
     #pragma omp parallel
     {
       double *bit_weights = calloc(enc->n_hidden, sizeof(double));
@@ -460,7 +438,7 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
         tk_ivec_clear(tmp);
         tk_dvec_clear(sims);
         int64_t nbr_idx, nbr_uid;
-        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, feat_hbi, inv_hoods, ann_hoods, hbi_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
+        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, inv_hoods, ann_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
           double sim = 1.0;
           if (inv_hoods) {
             tk_rvec_t *hood = inv_hoods->a[i];
@@ -478,20 +456,12 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
                 break;
               }
             }
-          } else if (hbi_hoods && feat_hbi_features > 0) {
-            tk_pvec_t *hood = hbi_hoods->a[i];
-            for (uint64_t j = 0; j < hood->n; j++) {
-              if (hood->a[j].i == nbr_idx) {
-                sim = 1.0 - (double)hood->a[j].p / (double)feat_hbi_features;
-                break;
-              }
-            }
           }
           tk_ivec_push(tmp, nbr_uid);
           tk_dvec_push(sims, sim);
         });
         for (uint64_t j = 0; j < tmp->n && j < enc->n_landmarks; j++) {
-          char *code_data = code_ann ? tk_ann_get(code_ann, tmp->a[j]) : tk_hbi_get(code_hbi, tmp->a[j]);
+          char *code_data = tk_ann_get(code_ann, tmp->a[j]);
           if (code_data != NULL) {
             double w = sims->a[j];
             for (uint64_t b = 0; b < enc->n_hidden; b++) {
@@ -521,13 +491,13 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
       for (uint64_t i = 0; i < n_samples; i++) {
         tk_ivec_clear(tmp);
         int64_t nbr_idx, nbr_uid;
-        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, feat_hbi, inv_hoods, ann_hoods, hbi_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
+        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, inv_hoods, ann_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
           tk_ivec_push(tmp, nbr_uid);
         });
         uint8_t *sample_dest = (uint8_t *)out->a + i * n_latent_bytes;
         uint64_t bit_offset = 0;
         for (uint64_t j = 0; j < tmp->n && j < enc->n_landmarks; j++) {
-          char *code_data = code_ann ? tk_ann_get(code_ann, tmp->a[j]) : tk_hbi_get(code_hbi, tmp->a[j]);
+          char *code_data = tk_ann_get(code_ann, tmp->a[j]);
           if (code_data != NULL) {
             for (uint64_t b = 0; b < enc->n_hidden; b++) {
               if (code_data[TK_CVEC_BITS_BYTE(b)] & (1 << TK_CVEC_BITS_BIT(b))) {
@@ -562,27 +532,23 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
 
   tk_inv_t *feat_inv = NULL;
   tk_ann_t *feat_ann = NULL;
-  tk_hbi_t *feat_hbi = NULL;
   tk_ann_t *code_ann = NULL;
-  tk_hbi_t *code_hbi = NULL;
 
   lua_getfield(L, 1, "landmarks_index");
   feat_inv = is_similarities ? NULL : tk_inv_peekopt(L, -1);
   feat_ann = tk_ann_peekopt(L, -1);
-  feat_hbi = tk_hbi_peekopt(L, -1);
   lua_pop(L, 1);
 
-  if (!feat_inv && !feat_ann && !feat_hbi)
-    return luaL_error(L, "landmark_encoder: landmarks_index must be %s", is_similarities ? "ann or hbi" : "inv, ann, or hbi");
+  if (!feat_inv && !feat_ann)
+    return luaL_error(L, "landmark_encoder: landmarks_index must be %s", is_similarities ? "ann" : "inv or ann");
 
   if (!is_similarities) {
     lua_getfield(L, 1, "codes_index");
     code_ann = tk_ann_peekopt(L, -1);
-    code_hbi = tk_hbi_peekopt(L, -1);
     lua_pop(L, 1);
 
-    if (!code_ann && !code_hbi)
-      return luaL_error(L, "landmark_encoder: codes_index must be ann or hbi");
+    if (!code_ann)
+      return luaL_error(L, "landmark_encoder: codes_index must be ann");
   }
 
   bool concat_query = tk_lua_foptboolean(L, 1, "landmark_encoder", "concat_query", true);
@@ -623,9 +589,9 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
 
   uint64_t n_hidden = 0;
   if (!is_similarities)
-    n_hidden = code_ann ? code_ann->features : code_hbi->features;
+    n_hidden = code_ann->features;
   else if (concat_query)
-    n_hidden = feat_ann ? feat_ann->features : feat_hbi->features;
+    n_hidden = feat_ann->features;
 
   tk_hlth_encoder_t *enc = tk_lua_newuserdata(L, tk_hlth_encoder_t, TK_HLTH_ENCODER_MT, tk_hlth_encoder_mt_fns, tk_hlth_encoder_gc);
   int Ei = lua_gettop(L);
@@ -635,9 +601,6 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
   } else if (feat_ann) {
     enc->feat_idx = feat_ann;
     enc->feat_idx_type = TK_HLTH_IDX_ANN;
-  } else if (feat_hbi) {
-    enc->feat_idx = feat_hbi;
-    enc->feat_idx_type = TK_HLTH_IDX_HBI;
   } else {
     enc->feat_idx = NULL;
     enc->feat_idx_type = TK_HLTH_IDX_INV;
@@ -646,9 +609,6 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
   if (code_ann) {
     enc->code_idx = code_ann;
     enc->code_idx_type = TK_HLTH_IDX_ANN;
-  } else if (code_hbi) {
-    enc->code_idx = code_hbi;
-    enc->code_idx_type = TK_HLTH_IDX_HBI;
   } else {
     enc->code_idx = NULL;
     enc->code_idx_type = TK_HLTH_IDX_ANN;

@@ -129,7 +129,12 @@ function M.spectral_log (info)
         info.round, info.global_best_score, p.n_landmarks or 0, p.n_dims or 0, p.decay or 0)
     end
   elseif info.event == "sample" then
-    str.printf("[SPECTRAL] L=%d D=%d decay=%.2f\n", info.n_landmarks, info.n_dims, info.decay)
+    if info.round and info.trial then
+      str.printf("[SPECTRAL R%d T%d] L=%d D=%d decay=%.2f\n",
+        info.round, info.trial, info.n_landmarks, info.n_dims, info.decay)
+    else
+      str.printf("[SPECTRAL] L=%d D=%d decay=%.2f\n", info.n_landmarks, info.n_dims, info.decay)
+    end
   elseif info.event == "landmarks_result" then
     str.printf("[SPECTRAL]   -> landmarks: samples=%d landmarks=%d (%.2fs)\n",
       info.n_samples, info.n_landmarks, info.elapsed or 0)
@@ -143,13 +148,14 @@ function M.spectral_log (info)
     end
   elseif info.event == "eval" then
     local m = info.metrics or {}
+    local prefix = info.round and str.format("[SPECTRAL R%d]", info.round) or "[SPECTRAL]"
     if m.kernel_score and m.raw_score then
-      str.printf("[SPECTRAL]   -> eval: kernel=%.4f raw=%.4f binary=%.4f (%.2fs)\n",
-        m.kernel_score, m.raw_score, info.score, info.elapsed or 0)
+      str.printf("%s   -> eval: kernel=%.4f raw=%.4f binary=%.4f (%.2fs)\n",
+        prefix, m.kernel_score, m.raw_score, info.score, info.elapsed or 0)
     elseif m.raw_score then
-      str.printf("[SPECTRAL]   -> eval: raw=%.4f binary=%.4f (%.2fs)\n", m.raw_score, info.score, info.elapsed or 0)
+      str.printf("%s   -> eval: raw=%.4f binary=%.4f (%.2fs)\n", prefix, m.raw_score, info.score, info.elapsed or 0)
     else
-      str.printf("[SPECTRAL]   -> eval: score=%.4f (%.2fs)\n", info.score, info.elapsed or 0)
+      str.printf("%s   -> eval: score=%.4f (%.2fs)\n", prefix, info.score, info.elapsed or 0)
     end
   elseif info.event == "done" then
     print(string.rep("-", 50))

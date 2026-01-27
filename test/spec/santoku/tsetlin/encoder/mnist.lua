@@ -1,7 +1,6 @@
 local ann = require("santoku.tsetlin.ann")
 local cvec = require("santoku.cvec")
 local ds = require("santoku.tsetlin.dataset")
-local dvec = require("santoku.dvec")
 local eval = require("santoku.tsetlin.evaluator")
 local graph = require("santoku.tsetlin.graph")
 local inv = require("santoku.tsetlin.inv")
@@ -20,18 +19,18 @@ local cfg = {
     visible = 784,
   },
   encoder = {
-    clauses = 32,
-    clause_tolerance = { def = 64, min = 8, max = 128, int = true },
-    clause_maximum = { def = 95, min = 16, max = 128, int = true },
-    target = { def = 16, min = 4, max = 64, int = true },
-    specificity = { def = 493, min = 50, max = 2000 },
+    clauses = 64,
+    clause_tolerance = { def = 40, min = 8, max = 128, int = true },
+    clause_maximum = { def = 122, min = 16, max = 128, int = true },
+    target = { def = 9, min = 4, max = 64, int = true },
+    specificity = { def = 62, min = 50, max = 2000 },
     include_bits = { def = 2, min = 1, max = 6, int = true },
     search_patience = 4,
     search_rounds = 6,
-    search_trials = 10,
+    search_trials = 20,
     search_iterations = 10,
-    final_patience = 20,
-    final_iterations = 200,
+    final_patience = 40,
+    final_iterations = 400,
   },
   bit_pruning = {
     enabled = true,
@@ -40,13 +39,13 @@ local cfg = {
   },
   nystrom = {
     n_landmarks = 4096,
-    n_dims = 96,
+    n_dims = 64,
     cmp = "cosine",
     combine = "exponential",
-    decay = { def = 2.4, min = 0.0, max = 3.0 },
+    decay = { def = 2.06, min = 0.0, max = 3.0 },
     binarize = "itq",
     rounds = 6,
-    samples = 10,
+    samples = 20,
   },
   eval = {
     anchors = 16,
@@ -55,18 +54,18 @@ local cfg = {
     cmp = "cosine",
   },
   classifier = {
-    clauses = 32,
-    clause_tolerance = { def = 64, min = 16, max = 128, int = true },
-    clause_maximum = { def = 64, min = 16, max = 128, int = true },
-    target = { def = 32, min = 16, max = 128, int = true },
-    specificity = { def = 1000, min = 400, max = 4000 },
-    include_bits = { def = 1, min = 1, max = 4, int = true },
+    clauses = 64,
+    clause_tolerance = { def = 45, min = 16, max = 128, int = true },
+    clause_maximum = { def = 92, min = 16, max = 128, int = true },
+    target = { def = 91, min = 16, max = 128, int = true },
+    specificity = { def = 2170, min = 400, max = 4000 },
+    include_bits = { def = 2, min = 1, max = 4, int = true },
     search_patience = 4,
-    search_rounds = 4,
-    search_trials = 10,
+    search_rounds = 6,
+    search_trials = 20,
     search_iterations = 10,
-    final_patience = 20,
-    final_iterations = 200,
+    final_patience = 40,
+    final_iterations = 400,
   },
   verbose = true,
 }
@@ -91,7 +90,7 @@ test("mnist", function ()
   dataset.problems:bits_select(nil, validate.ids, n_visible, validate.pixels)
   test_set.pixels = ivec.create()
   dataset.problems:bits_select(nil, test_set.ids, n_visible, test_set.pixels)
-  dataset = nil
+  dataset = nil -- luacheck: ignore
 
   print("\nCreating IDs")
   train.ids = ivec.create(train.n)
@@ -134,13 +133,13 @@ test("mnist", function ()
     n_ranks = 2,
   })
   train.graph_index:add(graph_features, train.ids)
-  graph_features = nil
-  graph_ranks = nil
+  graph_features = nil -- luacheck: ignore
+  graph_ranks = nil -- luacheck: ignore
   str.printf("  Docs: %d  Features: %d (labels=%d, pixels=%d)\n",
     train.n, n_graph_features, n_classes, n_visible)
 
   print("\nBuilding eval_index (labels only) and evaluation adjacency")
-  train.eval_index = inv.create({ features = n_classes, expected_size = train.n })
+  train.eval_index = inv.create({ features = n_classes })
   train.eval_index:add(train_solutions_bitmap, train.ids)
   local train_eval_ids, train_eval_offsets, train_eval_neighbors, train_eval_weights =
     graph.adjacency({
@@ -202,8 +201,8 @@ test("mnist", function ()
   end
   str.printf("  Total near-constant dims (entropy < 0.01): %d / %d\n", zero_entropy_count, train.dims)
   str.printf("  Entropy range: min=%.6f max=%.6f\n", entropy_scores:min(), entropy_scores:max())
-  entropy_ids = nil
-  entropy_scores = nil
+  entropy_ids = nil -- luacheck: ignore
+  entropy_scores = nil -- luacheck: ignore
 
   if cfg.verbose then
     print("\nSpot-checking spectral code KNN (compare to eval adj above)")
@@ -241,7 +240,7 @@ test("mnist", function ()
     n_dims = train.dims,
   })
   str.printf("  Spectral codes ranking: raw=%.4f binary=%.4f\n", spectral_raw_stats.score, spectral_eval_stats.score)
-  model.raw_codes = nil
+  model.raw_codes = nil -- luacheck: ignore
 
   print("\nConverting pixels to sentences for encoder")
   local train_encoder_sentences = train.pixels:bits_to_cvec(train.n, n_visible, true)
@@ -285,11 +284,11 @@ test("mnist", function ()
 
   local train_ham = eval.encoding_accuracy(train_predicted, train_target_codes, train.n, train.dims).mean_hamming
   str.printf("  Train hamming: %.4f\n", train_ham)
-  train_target_codes = nil
-  train_encoder_sentences = nil
+  train_target_codes = nil -- luacheck: ignore
+  train_encoder_sentences = nil -- luacheck: ignore
 
   print("\nEvaluating predicted codes against eval adjacency")
-  local train_pred_ann = ann.create({ features = train.dims, expected_size = train.n })
+  local train_pred_ann = ann.create({ features = train.dims })
   train_pred_ann:add(train_predicted, train.ids)
 
   local pred_eval_stats = eval.ranking_accuracy({
@@ -334,11 +333,11 @@ test("mnist", function ()
       util.spot_check_codes(train_predicted, train.n, dims_final, "train pruned")
     end
   end
-  train_eval_ids = nil
-  train_eval_offsets = nil
-  train_eval_neighbors = nil
-  train_eval_weights = nil
-  train_pred_ann = nil
+  train_eval_ids = nil -- luacheck: ignore
+  train_eval_offsets = nil -- luacheck: ignore
+  train_eval_neighbors = nil -- luacheck: ignore
+  train_eval_weights = nil -- luacheck: ignore
+  train_pred_ann = nil -- luacheck: ignore
 
   print("\nPredicting validate codes")
   local validate_encoder_sentences = validate.pixels:bits_to_cvec(validate.n, n_visible, true)
@@ -351,7 +350,7 @@ test("mnist", function ()
   util.spot_check_codes(validate_predicted, validate.n, dims_final, "validate predicted")
 
   print("\nBuilding validate eval_index (labels only) and evaluation adjacency")
-  validate.eval_index = inv.create({ features = n_classes, expected_size = validate.n })
+  validate.eval_index = inv.create({ features = n_classes })
   validate.eval_index:add(validate_solutions_bitmap, validate.ids)
   local validate_eval_ids, validate_eval_offsets, validate_eval_neighbors, validate_eval_weights =
     graph.adjacency({
@@ -372,7 +371,7 @@ test("mnist", function ()
   end
 
   print("\nEvaluating validate predicted codes")
-  local validate_pred_ann = ann.create({ features = dims_final, expected_size = validate.n })
+  local validate_pred_ann = ann.create({ features = dims_final })
   validate_pred_ann:add(validate_predicted, validate.ids)
   local validate_pred_stats = eval.ranking_accuracy({
     index = validate_pred_ann,
@@ -385,12 +384,12 @@ test("mnist", function ()
     n_dims = dims_final,
   })
   str.printf("  Validate ranking score: %.4f\n", validate_pred_stats.score)
-  validate_encoder_sentences = nil
-  validate_pred_ann = nil
-  validate_eval_ids = nil
-  validate_eval_offsets = nil
-  validate_eval_neighbors = nil
-  validate_eval_weights = nil
+  validate_encoder_sentences = nil -- luacheck: ignore
+  validate_pred_ann = nil -- luacheck: ignore
+  validate_eval_ids = nil -- luacheck: ignore
+  validate_eval_offsets = nil -- luacheck: ignore
+  validate_eval_neighbors = nil -- luacheck: ignore
+  validate_eval_weights = nil -- luacheck: ignore
 
   print("\nPredicting test codes")
   local test_encoder_sentences = test_set.pixels:bits_to_cvec(test_set.n, n_visible, true)
@@ -403,7 +402,7 @@ test("mnist", function ()
   util.spot_check_codes(test_predicted, test_set.n, dims_final, "test predicted")
 
   print("\nBuilding test eval_index (labels only) and evaluation adjacency")
-  test_set.eval_index = inv.create({ features = n_classes, expected_size = test_set.n })
+  test_set.eval_index = inv.create({ features = n_classes })
   test_set.eval_index:add(test_solutions_bitmap, test_set.ids)
   local test_eval_ids, test_eval_offsets, test_eval_neighbors, test_eval_weights =
     graph.adjacency({
@@ -424,7 +423,7 @@ test("mnist", function ()
   end
 
   print("\nEvaluating test predicted codes")
-  local test_pred_ann = ann.create({ features = dims_final, expected_size = test_set.n })
+  local test_pred_ann = ann.create({ features = dims_final })
   test_pred_ann:add(test_predicted, test_set.ids)
   local test_pred_stats = eval.ranking_accuracy({
     index = test_pred_ann,
@@ -437,8 +436,8 @@ test("mnist", function ()
     n_dims = dims_final,
   })
   str.printf("  Test ranking score: %.4f\n", test_pred_stats.score)
-  test_encoder_sentences = nil
-  test_pred_ann = nil
+  test_encoder_sentences = nil -- luacheck: ignore
+  test_pred_ann = nil -- luacheck: ignore
 
   print("\nClassifier evaluation")
   train_predicted:bits_flip_interleave(dims_final)

@@ -2,7 +2,6 @@
 #include <santoku/tsetlin/graph.h>
 #include <santoku/tsetlin/inv.h>
 #include <santoku/tsetlin/ann.h>
-#include <santoku/tsetlin/hbi.h>
 #include <santoku/tsetlin/centroid.h>
 #include <santoku/ivec.h>
 #include <santoku/cvec.h>
@@ -49,7 +48,6 @@ typedef struct {
   tk_ivec_t *ids;
   tk_inv_t *inv;
   tk_ann_t *ann;
-  tk_hbi_t *hbi;
   uint64_t min_pts;
   bool assign_noise;
   tk_dvec_t *inv_thresholds;
@@ -77,7 +75,6 @@ typedef struct {
   lua_State *L;
   tk_inv_hoods_t *inv_hoods;
   tk_ann_hoods_t *ann_hoods;
-  tk_hbi_hoods_t *hbi_hoods;
   tk_ivec_t *uids_hoods;
   tk_eval_metric_t eval_metric;
   uint64_t margin;
@@ -464,9 +461,8 @@ static inline int tm_retrieval_ks (lua_State *L)
   lua_getfield(L, 1, "hoods");
   tk_inv_hoods_t *inv_hoods = tk_inv_hoods_peekopt(L, -1);
   tk_ann_hoods_t *ann_hoods = inv_hoods ? NULL : tk_ann_hoods_peekopt(L, -1);
-  tk_hbi_hoods_t *hbi_hoods = (inv_hoods || ann_hoods) ? NULL : tk_hbi_hoods_peekopt(L, -1);
-  if (!inv_hoods && !ann_hoods && !hbi_hoods)
-    return luaL_error(L, "hoods must be inv_hoods, ann_hoods, or hbi_hoods");
+  if (!inv_hoods && !ann_hoods)
+    return luaL_error(L, "hoods must be inv_hoods or ann_hoods");
   lua_getfield(L, 1, "hood_ids");
   tk_ivec_t *hood_ids = tk_ivec_peek(L, -1, "hood_ids");
   lua_getfield(L, 1, "expected_offsets");
@@ -474,7 +470,7 @@ static inline int tm_retrieval_ks (lua_State *L)
   lua_getfield(L, 1, "expected_neighbors");
   tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
   lua_pop(L, 4);
-  uint64_t n_samples = inv_hoods ? inv_hoods->n : (ann_hoods ? ann_hoods->n : hbi_hoods->n);
+  uint64_t n_samples = inv_hoods ? inv_hoods->n : ann_hoods->n;
   if (exp_off->n != n_samples + 1)
     return luaL_error(L, "expected_offsets length must match hoods count + 1");
   tk_ivec_t *ks = tk_ivec_create(L, n_samples, NULL, NULL);
@@ -482,8 +478,7 @@ static inline int tm_retrieval_ks (lua_State *L)
   for (uint64_t s = 0; s < n_samples; s++) {
     uint64_t hood_size = 0;
     if (inv_hoods) hood_size = inv_hoods->a[s]->n;
-    else if (ann_hoods) hood_size = ann_hoods->a[s]->n;
-    else hood_size = hbi_hoods->a[s]->n;
+    else hood_size = ann_hoods->a[s]->n;
     int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
     uint64_t n_expected = (uint64_t)(ee - es);
     if (n_expected == 0 || hood_size == 0) {
@@ -500,8 +495,7 @@ static inline int tm_retrieval_ks (lua_State *L)
     for (uint64_t k = 1; k <= hood_size; k++) {
       int64_t nbr_pos;
       if (inv_hoods) nbr_pos = inv_hoods->a[s]->a[k-1].i;
-      else if (ann_hoods) nbr_pos = ann_hoods->a[s]->a[k-1].i;
-      else nbr_pos = hbi_hoods->a[s]->a[k-1].i;
+      else nbr_pos = ann_hoods->a[s]->a[k-1].i;
       int64_t nbr_id = hood_ids->a[nbr_pos];
       if (tk_iuset_contains(exp_set, nbr_id)) tp++;
       double prec = (double)tp / k;
@@ -1500,7 +1494,6 @@ static inline int tm_score_retrieval (lua_State *L)
   }
 
   tk_ann_t *ann = NULL;
-  tk_hbi_t *hbi = NULL;
   char *codes = NULL;
   double *raw_codes = NULL;
 
@@ -1513,10 +1506,8 @@ static inline int tm_score_retrieval (lua_State *L)
   } else {
     lua_getfield(L, 1, "index");
     ann = tk_ann_peekopt(L, -1);
-    if (!ann)
-      hbi = tk_hbi_peekopt(L, -1);
     lua_pop(L, 1);
-    if (!ann && !hbi)
+    if (!ann)
       tk_lua_verror(L, 1, "score_retrieval", "codes/index/raw_codes/kernel_index", "codes, raw_codes, index, or kernel_index required");
   }
 
@@ -1608,7 +1599,7 @@ static inline int tm_score_retrieval (lua_State *L)
         } else if (codes) {
           query_code = codes + (uint64_t)query_code_idx * chunks;
         } else {
-          query_code = ann ? tk_ann_get(ann, query_id) : tk_hbi_get(hbi, query_id);
+          query_code = tk_ann_get(ann, query_id);
         }
         if (!kernel_index && !query_code && !query_raw)
           continue;
@@ -1643,7 +1634,7 @@ static inline int tm_score_retrieval (lua_State *L)
           } else {
             char *neighbor_code = codes
               ? NULL
-              : (ann ? tk_ann_get(ann, neighbor_id) : tk_hbi_get(hbi, neighbor_id));
+              : tk_ann_get(ann, neighbor_id);
 
             if (codes) {
               khint_t nbr_khi = tk_iumap_get(code_id_to_idx, neighbor_id);
@@ -1730,7 +1721,6 @@ static inline int tm_score_retrieval (lua_State *L)
 static double tk_compute_reconstruction (
   char *codes,
   tk_ann_t *ann,
-  tk_hbi_t *hbi,
   tk_ivec_t *adjacency_ids,
   uint64_t n_dims,
   tk_ivec_t *offsets,
@@ -1779,8 +1769,7 @@ static double tk_compute_reconstruction (
           node_code = (char *)(codes + node_idx * chunks);
         } else if (adjacency_ids) {
           int64_t node_id = adjacency_ids->a[node_idx];
-          node_code = ann ? tk_ann_get(ann, node_id)
-                                 : tk_hbi_get(hbi, node_id);
+          node_code = tk_ann_get(ann, node_id);
         }
         if (!node_code)
           continue;
@@ -1793,8 +1782,7 @@ static double tk_compute_reconstruction (
             neighbor_code = (char *)(codes + (uint64_t) neighbor_pos * chunks);
           } else if (adjacency_ids) {
             int64_t neighbor_id = adjacency_ids->a[neighbor_pos];
-            neighbor_code = ann ? tk_ann_get(ann, neighbor_id)
-                                       : tk_hbi_get(hbi, neighbor_id);
+            neighbor_code = tk_ann_get(ann, neighbor_id);
           }
           if (!neighbor_code)
             continue;
@@ -1857,7 +1845,7 @@ static double tk_compute_score (
   uint64_t mask_popcount
 ) {
   return tk_compute_reconstruction(
-    state->codes, state->ann, state->hbi, state->adjacency_ids,
+    state->codes, state->ann, state->adjacency_ids,
     state->n_dims, state->offsets, state->neighbors, state->weights,
     state->eval_metric, mask, mask_popcount);
 }
@@ -2075,7 +2063,6 @@ static inline int tm_optimize_bits (lua_State *L)
 
   char *codes = NULL;
   tk_ann_t *ann = NULL;
-  tk_hbi_t *hbi = NULL;
 
   lua_getfield(L, 1, "codes");
   tk_cvec_t *cvec = tk_cvec_peekopt(L, -1);
@@ -2085,10 +2072,8 @@ static inline int tm_optimize_bits (lua_State *L)
   } else {
     lua_getfield(L, 1, "index");
     ann = tk_ann_peekopt(L, -1);
-    if (!ann)
-      hbi = tk_hbi_peekopt(L, -1);
     lua_pop(L, 1);
-    if (!ann && !hbi)
+    if (!ann)
       tk_lua_verror(L, 1, "optimize_bits", "codes/index", "codes or index required");
   }
 
@@ -2102,7 +2087,6 @@ static inline int tm_optimize_bits (lua_State *L)
   memset(&state, 0, sizeof(tk_eval_t));
   state.codes = codes;
   state.ann = ann;
-  state.hbi = hbi;
   state.adjacency_ids = expected_ids;
   state.n_dims = n_dims;
   state.chunks = TK_CVEC_BITS_BYTES(n_dims);
