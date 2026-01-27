@@ -12,25 +12,25 @@ local utc = require("santoku.utc")
 
 local cfg = {
   data = {
-    ttr = 0.5,
+    ttr = 0.8,
     tvr = 0.1,
     max = nil,
     features = 784,
   },
   tm = {
     classes = 10,
-    clauses = 64,
-    clause_tolerance = { def = 78, min = 16, max = 128, int = true },
-    clause_maximum = { def = 91, min = 16, max = 128, int = true },
-    target = { def = 40, min = 16, max = 128, int = true },
-    specificity = { def = 3267, min = 400, max = 4000 },
+    clauses = 256,
+    clause_tolerance = { def = 78, min = 16, max = 256, int = true },
+    clause_maximum = { def = 91, min = 16, max = 256, int = true },
+    target = { def = 40, min = 16, max = 256, int = true },
+    specificity = { def = 3267, min = 400, max = 4000, int = true },
     include_bits = { def = 4, min = 1, max = 4, int = true },
   },
   search = {
     patience = 4,
     rounds = 6,
     trials = 20,
-    iterations = 10,
+    iterations = 40,
   },
   training = {
     patience = 40,
