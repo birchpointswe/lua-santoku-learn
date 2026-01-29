@@ -1,6 +1,8 @@
 /*
 
 Copyright (C) 2025 Birch Point SWE (FuzzyPattern TM added)
+Copyright (C) 2025 Birch Point SWE (Regression and Encoder)
+Copyright (C) 2025 Birch Point SWE (Grouped mode)
 Copyright (C) 2024 Birch Point SWE (Persist to and restore from disk)
 Copyright (C) 2024 Birch Point SWE (Lua integration, train/evaluate)
 Copyright (C) 2024 Birch Point SWE (Loss scaling, multi-threading, auto-vectorizer support)
@@ -30,7 +32,10 @@ SOFTWARE.
 #include <santoku/lua/utils.h>
 #include <santoku/tsetlin/automata.h>
 #include <santoku/cvec.h>
+#include <santoku/dvec.h>
+#include <santoku/rvec.h>
 #include <omp.h>
+#include <math.h>
 
 #ifndef LUA_OK
 #define LUA_OK 0
@@ -81,6 +86,8 @@ typedef struct tk_tsetlin_s {
   size_t regression_out_len;
   double y_min;
   double y_max;
+  bool grouped;
+  bool balanced;
 } tk_tsetlin_t;
 
 static inline uint8_t tk_tsetlin_calculate (
@@ -210,7 +217,7 @@ static inline void tm_update (
   unsigned int chunk,
   unsigned int thread
 ) {
-  if (chunk_class != sample_class && tk_fast_random() <= tm->negative_threshold)
+  if (tm->balanced && chunk_class != sample_class && tk_fast_random() <= tm->negative_threshold)
     return;
   long int vote_target = (long int) tm->target;
   long int chunk_vote = tk_tsetlin_sums(tm, out, votes);
@@ -318,7 +325,9 @@ static inline void tk_tsetlin_init_classifier (
   unsigned int state_bits,
   unsigned int include_bits,
   double targetf,
-  double specificity
+  double specificity,
+  bool grouped,
+  bool balanced
 ) {
   if (!classes)
     tk_lua_verror(L, 3, "create classifier", "classes", "must be greater than 1");
@@ -357,6 +366,8 @@ static inline void tk_tsetlin_init_classifier (
   tm->negative_threshold = UINT32_MAX - UINT32_MAX / tm->classes;
   tm->specificity_threshold = (2 * tm->features) / tm->specificity_uint;
   tm->double_vote_target = 2 * tm->target;
+  tm->grouped = grouped;
+  tm->balanced = balanced;
   if (!(tm->state && tm->actions))
     luaL_error(L, "error in malloc during creation of classifier");
   tm->automata.n_clauses = tm->classes * tm->clauses;
@@ -379,11 +390,13 @@ static inline int tk_tsetlin_init_encoder (
   unsigned int state_bits,
   unsigned int include_bits,
   double targetf,
-  double specificity
+  double specificity,
+  bool grouped,
+  bool balanced
 ) {
   tk_tsetlin_init_classifier(
     L, tm, encoding_bits, features, clauses, clause_tolerance, clause_maximum,
-    state_bits, include_bits, targetf, specificity);
+    state_bits, include_bits, targetf, specificity, grouped, balanced);
   return 0;
 }
 
@@ -398,11 +411,13 @@ static inline int tk_tsetlin_init_regressor (
   unsigned int state_bits,
   unsigned int include_bits,
   double targetf,
-  double specificity
+  double specificity,
+  bool grouped,
+  bool balanced
 ) {
   tk_tsetlin_init_classifier(
     L, tm, outputs, features, clauses, clause_tolerance, clause_maximum,
-    state_bits, include_bits, targetf, specificity);
+    state_bits, include_bits, targetf, specificity, grouped, balanced);
   tm->y_min = 0.0;
   tm->y_max = 1.0;
   return 0;
@@ -421,7 +436,9 @@ static inline void tk_tsetlin_create_classifier (lua_State *L)
       tk_lua_foptunsigned(L, 2, "create classifier", "state", 8),
       tk_lua_foptunsigned(L, 2, "create classifier", "include_bits", 1),
       tk_lua_foptposdouble(L, 2, "create classifier", "target", -1.0),
-      tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity"));
+      tk_lua_fcheckposdouble(L, 2, "create classifier", "specificity"),
+      tk_lua_foptboolean(L, 2, "create classifier", "grouped", false),
+      tk_lua_foptboolean(L, 2, "create classifier", "balanced", true));
   tm->reusable = tk_lua_foptboolean(L, 2, "create classifier", "reusable", false);
   lua_settop(L, 1);
 }
@@ -439,7 +456,9 @@ static inline void tk_tsetlin_create_encoder (lua_State *L)
       tk_lua_foptunsigned(L, 2, "create encoder", "state", 8),
       tk_lua_foptunsigned(L, 2, "create encoder", "include_bits", 1),
       tk_lua_foptposdouble(L, 2, "create encoder", "target", -1.0),
-      tk_lua_fcheckposdouble(L, 2, "create encoder", "specificity"));
+      tk_lua_fcheckposdouble(L, 2, "create encoder", "specificity"),
+      tk_lua_foptboolean(L, 2, "create encoder", "grouped", false),
+      tk_lua_foptboolean(L, 2, "create encoder", "balanced", true));
   tm->reusable = tk_lua_foptboolean(L, 2, "create encoder", "reusable", false);
   lua_settop(L, 1);
 }
@@ -457,7 +476,9 @@ static inline void tk_tsetlin_create_regressor (lua_State *L)
       tk_lua_foptunsigned(L, 2, "create regressor", "state", 8),
       tk_lua_foptunsigned(L, 2, "create regressor", "include_bits", 1),
       tk_lua_foptposdouble(L, 2, "create regressor", "target", -1.0),
-      tk_lua_fcheckposdouble(L, 2, "create regressor", "specificity"));
+      tk_lua_fcheckposdouble(L, 2, "create regressor", "specificity"),
+      tk_lua_foptboolean(L, 2, "create regressor", "grouped", false),
+      tk_lua_foptboolean(L, 2, "create regressor", "balanced", true));
   tm->reusable = tk_lua_foptboolean(L, 2, "create regressor", "reusable", false);
   lua_settop(L, 1);
 }
@@ -526,6 +547,9 @@ static inline int tk_tsetlin_predict_classifier (
   const unsigned int input_chunks = tm->input_chunks;
   const unsigned int clause_chunks = tm->clause_chunks;
   const unsigned int classes = tm->classes;
+  const bool grouped = tm->grouped;
+  const unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
+  const unsigned int input_stride = grouped ? classes * bytes_per_class : 0;
   unsigned int *results = tm->results;
   #pragma omp parallel for schedule(static)
   for (unsigned int s = 0; s < n; s++) {
@@ -534,12 +558,14 @@ static inline int tk_tsetlin_predict_classifier (
       sums[i] = 0;
     unsigned int literals[TK_CVEC_BITS];
     unsigned int votes[TK_CVEC_BITS];
-    char *input = ps->a + s * input_chunks;
     for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
+      unsigned int chunk_class = chunk / clause_chunks;
+      char *input = grouped
+        ? ps->a + s * input_stride + chunk_class * bytes_per_class
+        : ps->a + s * input_chunks;
       uint8_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
       long int score = tk_tsetlin_sums(tm, out, votes);
-      unsigned int class = chunk / clause_chunks;
-      sums[class] += score;
+      sums[chunk_class] += score;
     }
     long int maxval = -INT64_MAX;
     unsigned int maxclass = 0;
@@ -574,26 +600,31 @@ static inline int tk_tsetlin_predict_encoder (
   const unsigned int clause_chunks = tm->clause_chunks;
   const unsigned int classes = tm->classes;
   const unsigned int class_chunks = tm->class_chunks;
+  const bool grouped = tm->grouped;
+  const unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
+  const unsigned int input_stride = grouped ? classes * bytes_per_class : 0;
   char *encodings = tm->encodings;
   #pragma omp parallel for schedule(static)
   for (unsigned int s = 0; s < n; s++) {
-    long int votes[classes];
+    long int sums[classes];
     for (unsigned int i = 0; i < classes; i++)
-      votes[i] = 0;
+      sums[i] = 0;
     unsigned int literals[TK_CVEC_BITS];
-    unsigned int votes_buf[TK_CVEC_BITS];
-    char *input = ps->a + s * input_chunks;
+    unsigned int votes[TK_CVEC_BITS];
     for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
-      uint8_t out = tk_tsetlin_calculate(tm, input, literals, votes_buf, chunk);
-      long int score = tk_tsetlin_sums(tm, out, votes_buf);
-      unsigned int class = chunk / clause_chunks;
-      votes[class] += score;
+      unsigned int chunk_class = chunk / clause_chunks;
+      char *input = grouped
+        ? ps->a + s * input_stride + chunk_class * bytes_per_class
+        : ps->a + s * input_chunks;
+      uint8_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
+      long int score = tk_tsetlin_sums(tm, out, votes);
+      sums[chunk_class] += score;
     }
     uint8_t *e = (uint8_t *)(encodings + s * class_chunks);
     for (unsigned int class = 0; class < classes; class++) {
       unsigned int chunk = TK_CVEC_BITS_BYTE(class);
       unsigned int pos = TK_CVEC_BITS_BIT(class);
-      if (votes[class] > 0)
+      if (sums[class] > 0)
         e[chunk] |= (1 << pos);
       else
         e[chunk] &= ~(1 << pos);
@@ -617,6 +648,9 @@ static inline int tk_tsetlin_predict_regressor (lua_State *L, tk_tsetlin_t *tm) 
   const unsigned int total_chunks = tm->clause_chunks * classes;
   const unsigned int clause_chunks = tm->clause_chunks;
   const unsigned int input_chunks = tm->input_chunks;
+  const bool grouped = tm->grouped;
+  const unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
+  const unsigned int input_stride = grouped ? classes * bytes_per_class : 0;
   const unsigned int target = tm->target;
   const double y_min = tm->y_min;
   const double y_range = tm->y_max - tm->y_min;
@@ -629,16 +663,22 @@ static inline int tk_tsetlin_predict_regressor (lua_State *L, tk_tsetlin_t *tm) 
       votes_per_class[c] = 0;
     unsigned int literals[TK_CVEC_BITS];
     unsigned int votes_buf[TK_CVEC_BITS];
-    char *input = ps->a + s * input_chunks;
     for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
-      uint8_t out = tk_tsetlin_calculate(tm, input, literals, votes_buf, chunk);
       unsigned int c = chunk / clause_chunks;
+      char *input = grouped
+        ? ps->a + s * input_stride + c * bytes_per_class
+        : ps->a + s * input_chunks;
+      uint8_t out = tk_tsetlin_calculate(tm, input, literals, votes_buf, chunk);
+      long int chunk_vote = 0;
       for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
         if (out & (1 << j))
-          votes_per_class[c] += votes_buf[j];
+          chunk_vote += votes_buf[j];
+      if (chunk_vote > (long int)target) chunk_vote = (long int)target;
+      votes_per_class[c] += chunk_vote;
     }
-    for (unsigned int c = 0; c < classes; c++)
+    for (unsigned int c = 0; c < classes; c++) {
       regression_out[s * classes + c] = ((double)votes_per_class[c] / max_possible) * y_range + y_min;
+    }
   }
   tk_dvec_t *out = tk_dvec_create(L, n * classes, 0, 0);
   memcpy(out->a, tm->regression_out, n * classes * sizeof(double));
@@ -679,6 +719,10 @@ static inline int tk_tsetlin_train_classifier (
   unsigned int total_chunks = tm->clause_chunks * tm->classes;
   unsigned int clause_chunks = tm->clause_chunks;
   unsigned int input_chunks = tm->input_chunks;
+  unsigned int classes = tm->classes;
+  bool grouped = tm->grouped;
+  unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
+  unsigned int input_stride = grouped ? classes * bytes_per_class : 0;
   int64_t *lbls = ss->a;
   bool break_flag = false;
   int max_threads = omp_get_max_threads();
@@ -713,7 +757,9 @@ static inline int tk_tsetlin_train_classifier (
         unsigned int chunk_class = chunk / clause_chunks;
         for (unsigned int i = 0; i < n; i++) {
           unsigned int sample = shuffle[i];
-          char *input = ps->a + sample * input_chunks;
+          char *input = grouped
+            ? ps->a + sample * input_stride + chunk_class * bytes_per_class
+            : ps->a + sample * input_chunks;
           uint8_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
           unsigned int sample_class = lbls[sample];
           tm_update(tm, input, out, literals, votes, sample, sample_class, 1, chunk_class, chunk, (unsigned int)tid);
@@ -753,9 +799,11 @@ static inline int tk_tsetlin_train_encoder (
   lua_getfield(L, 2, "sentences");
   tk_cvec_t *ps = tk_cvec_peek(L, -1, "sentences");
   lua_pop(L, 1);
+
   lua_getfield(L, 2, "codes");
-  tk_cvec_t *ls = tk_cvec_peek(L, -1, "codes");
+  tk_cvec_t *codes = tk_cvec_peek(L, -1, "codes");
   lua_pop(L, 1);
+
   unsigned int max_iter = tk_lua_fcheckunsigned(L, 2, "train", "iterations");
   size_t needed = n * tm->class_chunks;
   if (needed > tm->encodings_len) {
@@ -771,7 +819,10 @@ static inline int tk_tsetlin_train_encoder (
   unsigned int class_chunks = tm->class_chunks;
   unsigned int clause_chunks = tm->clause_chunks;
   unsigned int input_chunks = tm->input_chunks;
-  char *lbls = ls->a;
+  unsigned int classes = tm->classes;
+  bool grouped = tm->grouped;
+  unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
+  unsigned int input_stride = grouped ? classes * bytes_per_class : 0;
   bool break_flag = false;
   int max_threads = omp_get_max_threads();
   unsigned int **shuffles = (unsigned int **)tk_malloc(L, (size_t)max_threads * sizeof(unsigned int *));
@@ -791,6 +842,8 @@ static inline int tk_tsetlin_train_encoder (
         tk_automata_setup(&tm->automata, first_clause, last_clause);
     }
   }
+
+  char *lbls = codes->a;
   for (unsigned int iter = 0; iter < max_iter; iter++) {
     if (break_flag) break;
     #pragma omp parallel
@@ -807,7 +860,9 @@ static inline int tk_tsetlin_train_encoder (
         unsigned int enc_bit = TK_CVEC_BITS_BIT(chunk_class);
         for (unsigned int i = 0; i < n; i++) {
           unsigned int sample = shuffle[i];
-          char *input = ps->a + sample * input_chunks;
+          char *input = grouped
+            ? ps->a + sample * input_stride + chunk_class * bytes_per_class
+            : ps->a + sample * input_chunks;
           uint8_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
           bool target_vote = (((uint8_t *)lbls)[sample * class_chunks + enc_chunk] & (1 << enc_bit)) > 0;
           tm_update(tm, input, out, literals, votes, sample, chunk_class, target_vote, chunk_class, chunk, (unsigned int)tid);
@@ -830,6 +885,7 @@ static inline int tk_tsetlin_train_encoder (
       }
     }
   }
+
   for (int t = 0; t < max_threads; t++)
     free(shuffles[t]);
   free(shuffles);
@@ -853,7 +909,7 @@ static inline int tk_tsetlin_train_regressor (lua_State *L, tk_tsetlin_t *tm) {
     lua_getfield(L, 2, "each");
     i_each = tk_lua_absindex(L, -1);
   }
-  double y_min = DBL_MAX, y_max = 0.0;
+  double y_min = DBL_MAX, y_max = -DBL_MAX;
   for (uint64_t i = 0; i < ts->n; i++) {
     if (ts->a[i] > y_max) y_max = ts->a[i];
     if (ts->a[i] < y_min) y_min = ts->a[i];
@@ -866,8 +922,11 @@ static inline int tk_tsetlin_train_regressor (lua_State *L, tk_tsetlin_t *tm) {
   unsigned int clause_chunks = tm->clause_chunks;
   unsigned int total_chunks = clause_chunks * classes;
   unsigned int input_chunks = tm->input_chunks;
+  unsigned int features = tm->features;
+  bool grouped = tm->grouped;
+  unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
+  unsigned int input_stride = grouped ? classes * bytes_per_class : 0;
   long int vote_target = (long int)tm->target;
-  unsigned int double_vote_target = tm->double_vote_target;
   double *targets = ts->a;
   bool break_flag = false;
   int max_threads = omp_get_max_threads();
@@ -885,7 +944,7 @@ static inline int tk_tsetlin_train_regressor (lua_State *L, tk_tsetlin_t *tm) {
       if (last_clause >= tm->automata.n_clauses)
         last_clause = tm->automata.n_clauses - 1;
       if (first_clause < tm->automata.n_clauses)
-        tk_automata_setup(&tm->automata, first_clause, last_clause);
+        tk_automata_setup_midpoint(&tm->automata, first_clause, last_clause, features);
     }
   }
   for (unsigned int iter = 0; iter < max_iter; iter++) {
@@ -902,25 +961,39 @@ static inline int tk_tsetlin_train_regressor (lua_State *L, tk_tsetlin_t *tm) {
         unsigned int chunk_class = chunk / clause_chunks;
         for (unsigned int i = 0; i < n; i++) {
           unsigned int sample = shuffle[i];
-          char *input = ps->a + sample * input_chunks;
+          // Find sample's true class (the one with target=1.0)
+          unsigned int sample_class = 0;
+          for (unsigned int c = 0; c < classes; c++) {
+            if (targets[sample * classes + c] > 0.5) {
+              sample_class = c;
+              break;
+            }
+          }
+          // Skip most negative samples (where sample_class != chunk_class)
+          // Use same threshold as classifier: skip with prob (classes-1)/classes
+          if (tm->balanced && sample_class != chunk_class) {
+            if (tk_fast_random() <= tm->negative_threshold)
+              continue;
+          }
+          char *input = grouped
+            ? ps->a + sample * input_stride + chunk_class * bytes_per_class
+            : ps->a + sample * input_chunks;
           double y_target = targets[sample * classes + chunk_class];
           uint8_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk);
           long int chunk_vote = 0;
           for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
             if (out & (1 << j))
               chunk_vote += votes[j];
-          double target_ratio = (y_target - y_min) / y_range;
-          long int ideal_chunk_vote = (long int)(target_ratio * vote_target);
           if (chunk_vote > vote_target) chunk_vote = vote_target;
-          if (chunk_vote < 0) chunk_vote = 0;
-          unsigned int threshold;
+          double target_ratio = (y_target - y_min) / y_range;
+          long int ideal_chunk_vote = (long int)(target_ratio * (double)vote_target);
+          if (ideal_chunk_vote < 0) ideal_chunk_vote = 0;
+          if (ideal_chunk_vote > vote_target) ideal_chunk_vote = vote_target;
           bool want_more = (chunk_vote < ideal_chunk_vote);
-          if (want_more)
-            threshold = (unsigned int)(ideal_chunk_vote - chunk_vote);
-          else
-            threshold = (unsigned int)(chunk_vote - ideal_chunk_vote);
+          double error_ratio = (double)(chunk_vote - ideal_chunk_vote) / (double)vote_target;
+          double probability = error_ratio * error_ratio;
           for (unsigned int j = 0; j < TK_CVEC_BITS; j++) {
-            if (tk_fast_random() % double_vote_target < threshold)
+            if ((double)tk_fast_random() / 4294967295.0 < probability)
               apply_feedback(tm, j, chunk, input, literals, votes, want_more, (unsigned int)tid);
           }
         }
@@ -986,6 +1059,10 @@ static inline void _tk_tsetlin_persist_classifier (lua_State *L, tk_tsetlin_t *t
   tk_lua_fwrite(L, &tm->specificity, sizeof(double), 1, fh);
   tk_lua_fwrite(L, &tm->tail_mask, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, tm->actions, 1, tm->action_chunks, fh);
+  uint8_t grouped = tm->grouped ? 1 : 0;
+  tk_lua_fwrite(L, &grouped, sizeof(uint8_t), 1, fh);
+  uint8_t balanced = tm->balanced ? 1 : 0;
+  tk_lua_fwrite(L, &balanced, sizeof(uint8_t), 1, fh);
 }
 
 static inline void tk_tsetlin_persist_classifier (lua_State *L, tk_tsetlin_t *tm, FILE *fh)
@@ -1212,6 +1289,16 @@ static inline void _tk_tsetlin_load_classifier (lua_State *L, tk_tsetlin_t *tm, 
   tm->actions = (char *)tk_malloc_aligned(L, tm->action_chunks, TK_CVEC_BITS);
   tk_lua_fread(L, tm->actions, 1, tm->action_chunks, fh);
   tm->state = NULL;
+  uint8_t grouped = 0;
+  if (fread(&grouped, sizeof(uint8_t), 1, fh) == 1)
+    tm->grouped = grouped ? true : false;
+  else
+    tm->grouped = false;
+  uint8_t balanced = 1;
+  if (fread(&balanced, sizeof(uint8_t), 1, fh) == 1)
+    tm->balanced = balanced ? true : false;
+  else
+    tm->balanced = true;
   tm->automata.n_clauses = tm->classes * tm->clauses;
   tm->automata.n_chunks = tm->input_chunks;
   tm->automata.state_bits = tm->state_bits;

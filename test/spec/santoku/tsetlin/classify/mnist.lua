@@ -89,7 +89,7 @@ test("mnist", function ()
     final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,
 
-    search_metric = function (t)
+    validate_metric = function (t)
       local predicted = t:predict(validate.problems, validate.n)
       local accuracy = eval.class_accuracy(predicted, validate.solutions, validate.n, cfg.tm.classes)
       return accuracy.f1, accuracy

@@ -3,12 +3,6 @@
 #include <assert.h>
 #include <stdio.h>
 
-static inline tk_pvec_t *tm_add_anchor_edges_immediate(
-  lua_State *L,
-  int Gi,
-  tk_graph_t *graph
-);
-
 static inline tk_graph_t *tm_graph_create (
   lua_State *L,
   tk_ivec_t *seed_ids,
@@ -25,20 +19,14 @@ static inline tk_graph_t *tm_graph_create (
   double knn_cmp_beta,
   int64_t knn_rank,
   double knn_decay,
-  tk_inv_t *category_inv,
-  tk_ivec_sim_type_t category_cmp,
-  double category_alpha,
-  double category_beta,
-  uint64_t category_anchors,
-  uint64_t category_knn,
-  double category_knn_decay,
-  int64_t category_ranks,
+  tk_combine_type_t knn_combine,
   tk_inv_t *weight_inv,
   tk_ann_t *weight_ann,
   tk_ivec_sim_type_t weight_cmp,
   double weight_alpha,
   double weight_beta,
   double weight_decay,
+  tk_combine_type_t weight_combine,
   tk_graph_weight_pooling_t weight_pooling,
   uint64_t random_pairs,
   double weight_eps,
@@ -49,7 +37,6 @@ static inline tk_graph_t *tm_graph_create (
   uint64_t knn_cache,
   tk_graph_bridge_t bridge,
   uint64_t probe_radius,
-  bool knn_anchor,
   bool knn_seed,
   bool knn_bipartite
 );
@@ -78,7 +65,7 @@ static inline bool tm_needs_hood_reweight (tk_graph_t *graph) {
     return true;
   if (graph->knn_ann_hoods)
     return true;
-  if (graph->knn_seed || graph->knn_bipartite || graph->knn_anchor)
+  if (graph->knn_seed || graph->knn_bipartite)
     return true;
   return false;
 }
@@ -794,315 +781,6 @@ static inline void tm_build_hoods_from_seeds (
   tk_evec_destroy(all_edges);
 }
 
-static inline void tm_build_hoods_from_anchors (
-  lua_State *L,
-  int Gi,
-  tk_graph_t *graph
-) {
-  if (graph->category_inv == NULL || graph->category_anchors == 0)
-    return;
-  if (!graph->knn_anchor)
-    return;
-
-  tm_ensure_hood_structures(L, Gi, graph);
-
-  tk_inv_t *inv = graph->category_inv;
-  uint64_t category_anchors = graph->category_anchors;
-  double category_knn = graph->category_knn;
-  double category_knn_decay = graph->category_knn_decay;
-  int64_t max_rank = (int64_t)inv->n_ranks - 1;
-
-  tk_ivec_t *rank_features = NULL;
-  if (inv->ranks != NULL && graph->category_ranks > 0 && graph->category_ranks < (int64_t)inv->n_ranks) {
-    rank_features = tk_ivec_create(L, 0, 0, 0);
-    tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
-    lua_pop(L, 1);
-    for (uint64_t i = 0; i < inv->ranks->n; i++)
-      if (inv->ranks->a[i] < graph->category_ranks)
-        tk_ivec_push(rank_features, (int64_t)i);
-  }
-  uint64_t n_features = rank_features != NULL ? rank_features->n : inv->features;
-
-  tk_evec_t *all_edges = tk_evec_create(0, 0, 0, 0);
-  bool has_error = false;
-
-  #pragma omp parallel reduction(||:has_error)
-  {
-    tk_evec_t *local_edges = tk_evec_create(0, 0, 0, 0);
-    tk_rvec_t *knn_heap = tk_rvec_create(NULL, 0, 0, 0);
-    tk_ivec_t *anchors = tk_ivec_create(NULL, 0, 0, 0);
-
-    if (!local_edges || !knn_heap || !anchors) {
-      has_error = true;
-    } else {
-      #pragma omp for schedule(static)
-      for (uint64_t fi = 0; fi < n_features; fi++) {
-        if (has_error) continue;
-
-        int64_t f = rank_features == NULL ? (int64_t)fi : rank_features->a[fi];
-        tk_ivec_t *postings = inv->postings->a[f];
-        if (!postings || postings->n == 0)
-          continue;
-
-        int64_t rank = inv->ranks->a[f];
-        int64_t effective_rank = (category_knn_decay < 0.0) ? (max_rank - rank) : rank;
-        double knn_weight = exp(-(double)effective_rank * fabs(category_knn_decay));
-        uint64_t n_wanted = category_knn > 0 ? (uint64_t)category_knn : category_anchors;
-        uint64_t k_nearest = (uint64_t)ceil((double)n_wanted * knn_weight);
-
-        tk_ivec_clear(anchors);
-        for (uint64_t i = 0; i < postings->n; i++) {
-          int64_t sid = postings->a[i];
-          if (sid >= 0 && sid < (int64_t)inv->sid_to_uid->n) {
-            int64_t uid = inv->sid_to_uid->a[sid];
-            if (uid >= 0) {
-              if (tk_ivec_push(anchors, uid) != 0) {
-                has_error = true;
-                break;
-              }
-            }
-          }
-        }
-        if (has_error) continue;
-        if (anchors->n == 0) continue;
-
-        tk_fast_mcg_state = tk_hash_mix((uint64_t)f + 1);
-        tk_ivec_shuffle(anchors, 0, anchors->n);
-        uint64_t n_use = anchors->n < category_anchors ? anchors->n : category_anchors;
-
-        for (uint64_t i = 0; i < n_use; i++) {
-          int64_t u = anchors->a[i];
-          tk_rvec_clear(knn_heap);
-
-          for (uint64_t j = 0; j < n_use; j++) {
-            if (i == j) continue;
-            int64_t v = anchors->a[j];
-
-            double dist = tk_graph_distance(graph, u, v);
-            if (dist == DBL_MAX) continue;
-
-            tk_rvec_hmin(knn_heap, k_nearest, tk_rank(v, dist));
-          }
-
-          for (uint64_t k = 0; k < knn_heap->n; k++) {
-            int64_t v = knn_heap->a[k].i;
-            double d = knn_heap->a[k].d;
-            if (tk_evec_push(local_edges, tk_edge(u, v, d)) != 0) {
-              has_error = true;
-              break;
-            }
-          }
-          if (has_error) break;
-        }
-      }
-
-      #pragma omp critical
-      {
-        for (uint64_t i = 0; i < local_edges->n && !has_error; i++) {
-          if (tk_evec_push(all_edges, local_edges->a[i]) != 0) {
-            has_error = true;
-          }
-        }
-      }
-    }
-
-    if (local_edges) tk_evec_destroy(local_edges);
-    if (knn_heap) tk_rvec_destroy(knn_heap);
-    if (anchors) tk_ivec_destroy(anchors);
-  }
-
-  if (has_error) {
-    tk_evec_destroy(all_edges);
-    tk_lua_verror(L, 2, "build_hoods_from_anchors", "worker allocation failed");
-    return;
-  }
-
-  for (uint64_t i = 0; i < all_edges->n; i++) {
-    int64_t u = all_edges->a[i].u;
-    int64_t v = all_edges->a[i].v;
-    double d = all_edges->a[i].w;
-    if (tm_add_to_hoods(L, Gi, graph, u, v, d) != 0) {
-      tk_evec_destroy(all_edges);
-      tk_lua_verror(L, 2, "build_hoods_from_anchors", "allocation failed");
-      return;
-    }
-  }
-
-  tk_evec_destroy(all_edges);
-}
-
-static inline tk_pvec_t *tm_add_anchor_edges_immediate(
-  lua_State *L,
-  int Gi,
-  tk_graph_t *graph
-) {
-  if (graph->category_inv == NULL || graph->category_anchors == 0)
-    return NULL;
-  tk_pvec_t *new_edges = tk_pvec_create(L, 0, 0, 0);
-  if (!new_edges) {
-    tk_lua_verror(L, 2, "add_anchor_edges", "allocation failed");
-    return NULL;
-  }
-  tk_inv_t *inv = graph->category_inv;
-  uint64_t category_anchors = graph->category_anchors;
-  double category_knn_decay = graph->category_knn_decay;
-  double category_knn = graph->category_knn;
-  double category_cmp = graph->category_cmp;
-  double category_alpha = graph->category_alpha;
-  double category_beta = graph->category_beta;
-  int64_t max_rank = (int64_t)inv->n_ranks - 1;
-  tk_ivec_t *rank_features = NULL;
-  if (inv->ranks != NULL && graph->category_ranks > 0 && graph->category_ranks < (int64_t)inv->n_ranks) {
-    rank_features = tk_ivec_create(L, 0, 0, 0);
-    tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
-    lua_pop(L, 1);
-    for (uint64_t i = 0; i < inv->ranks->n; i++)
-      if (inv->ranks->a[i] < graph->category_ranks)
-        tk_ivec_push(rank_features, (int64_t)i);
-  }
-  uint64_t n_features = rank_features != NULL ? rank_features->n : inv->features;
-  bool need_buffers = inv && inv->ranks && inv->n_ranks > 1;
-  bool has_error = false;
-
-  #pragma omp parallel reduction(||:has_error)
-  {
-    tk_pvec_t *local_pairs = tk_pvec_create(NULL, 0, 0, 0);
-    tk_rvec_t *knn_heap = tk_rvec_create(NULL, 0, 0, 0);
-    tk_ivec_t *anchors = tk_ivec_create(NULL, 0, 0, 0);
-    tk_dvec_t *q_weights = NULL;
-    tk_dvec_t *e_weights = NULL;
-    tk_dvec_t *inter_weights = NULL;
-
-    if (!local_pairs || !knn_heap || !anchors) {
-      has_error = true;
-    } else {
-      if (need_buffers) {
-        q_weights = tk_dvec_create(NULL, 0, 0, 0);
-        e_weights = tk_dvec_create(NULL, 0, 0, 0);
-        inter_weights = tk_dvec_create(NULL, 0, 0, 0);
-        if (!q_weights || !e_weights || !inter_weights) {
-          has_error = true;
-        }
-      }
-
-      if (!has_error) {
-        #pragma omp for schedule(static)
-        for (uint64_t fi = 0; fi < n_features; fi++) {
-          if (has_error) continue;
-
-          int64_t f = rank_features == NULL ? (int64_t)fi : rank_features->a[fi];
-          tk_ivec_t *postings = inv->postings->a[f];
-          if (!postings || postings->n == 0)
-            continue;
-
-          int64_t rank = inv->ranks->a[f];
-          int64_t effective_rank = (category_knn_decay < 0.0) ? (max_rank - rank) : rank;
-          double knn_weight = exp(-(double)effective_rank * fabs(category_knn_decay));
-          uint64_t n_anchors = (uint64_t)category_anchors;
-          uint64_t n_wanted = category_knn > 0 ? category_knn : n_anchors;
-          uint64_t k_nearest = (uint64_t)ceil((double)n_wanted * knn_weight);
-
-          tk_ivec_clear(anchors);
-          for (uint64_t i = 0; i < postings->n; i++) {
-            int64_t sid = postings->a[i];
-            if (sid >= 0 && sid < (int64_t)inv->sid_to_uid->n) {
-              int64_t uid = inv->sid_to_uid->a[sid];
-              if (uid >= 0) {
-                if (tk_ivec_push(anchors, uid) != 0) {
-                  has_error = true;
-                  break;
-                }
-              }
-            }
-          }
-          if (has_error) continue;
-          if (anchors->n == 0)
-            continue;
-
-          tk_fast_mcg_state = tk_hash_mix((uint64_t)f + 1);
-          tk_ivec_shuffle(anchors, 0, anchors->n);
-          for (uint64_t i = 0; i < anchors->n; i++) {
-            int64_t u = anchors->a[i];
-            tk_rvec_clear(knn_heap);
-            for (uint64_t j = 0; j < anchors->n && j < n_anchors; j++) {
-              if (i == j) continue;
-              int64_t v = anchors->a[j];
-              double dist = tk_inv_distance(inv, u, v, category_cmp, category_alpha, category_beta, TK_COMBINE_WEIGHTED_AVG, category_knn_decay);
-              tk_rvec_hmin(knn_heap, k_nearest, tk_rank(v, dist));
-            }
-            for (uint64_t k = 0; k < knn_heap->n; k++) {
-              int64_t v = knn_heap->a[k].i;
-              if (tk_pvec_push(local_pairs, tk_pair(u, v)) != 0) {
-                has_error = true;
-                break;
-              }
-            }
-            if (has_error) break;
-          }
-        }
-
-        #pragma omp critical
-        {
-          for (uint64_t j = 0; j < local_pairs->n; j++) {
-            int64_t u = local_pairs->a[j].i;
-            int64_t v = local_pairs->a[j].p;
-            uint32_t khi_u = tk_iumap_get(graph->uids_idx, u);
-            uint32_t khi_v = tk_iumap_get(graph->uids_idx, v);
-            int kha;
-            uint32_t khi;
-
-            if (khi_u == tk_iumap_end(graph->uids_idx)) {
-              khi_u = tk_iumap_put(graph->uids_idx, u, &kha);
-              if (kha) {
-                tk_iumap_setval(graph->uids_idx, khi_u, (int64_t)graph->uids->n);
-                if (tk_ivec_push(graph->uids, u) != 0) {
-                  has_error = true;
-                }
-              }
-            }
-            if (!has_error && khi_v == tk_iumap_end(graph->uids_idx)) {
-              khi_v = tk_iumap_put(graph->uids_idx, v, &kha);
-              if (kha) {
-                tk_iumap_setval(graph->uids_idx, khi_v, (int64_t)graph->uids->n);
-                if (tk_ivec_push(graph->uids, v) != 0) {
-                  has_error = true;
-                }
-              }
-            }
-            if (!has_error) {
-              double d = tk_graph_distance(graph, u, v);
-              if (d == DBL_MAX) d = 1.0;
-              tk_edge_t e = tk_edge(u, v, d);
-              khi = tk_euset_put(graph->pairs, e, &kha);
-              if (kha) {
-                if (tk_pvec_push(new_edges, tk_pair(u, v)) != 0) {
-                  has_error = true;
-                } else {
-                  graph->n_edges++;
-                }
-              }
-            }
-            if (has_error) break;
-          }
-        }
-      }
-    }
-
-    if (local_pairs) tk_pvec_destroy(local_pairs);
-    if (knn_heap) tk_rvec_destroy(knn_heap);
-    if (anchors) tk_ivec_destroy(anchors);
-    if (q_weights) tk_dvec_destroy(q_weights);
-    if (e_weights) tk_dvec_destroy(e_weights);
-    if (inter_weights) tk_dvec_destroy(inter_weights);
-  }
-
-  if (has_error) {
-    tk_lua_verror(L, 2, "add_anchor_edges", "worker allocation failed");
-  }
-
-  return new_edges;
-}
-
 static inline void tm_adj_init (
   lua_State *L,
   int Gi,
@@ -1142,7 +820,7 @@ static inline void tm_run_knn_queries (
 ) {
   bool have_index = graph->knn_inv != NULL || graph->knn_ann != NULL;
   bool skip_knn_queries = (graph->knn == 0) &&
-      (graph->knn_anchor || graph->knn_seed || graph->knn_bipartite);
+      (graph->knn_seed || graph->knn_bipartite);
   if (skip_knn_queries || !graph->knn_cache || !have_index)
     return;
 
@@ -1297,23 +975,10 @@ static inline int tm_adjacency (lua_State *L)
   double knn_cmp_beta = tk_lua_foptnumber(L, 1, "graph", "knn_cmp_beta", 0.5);
   tk_ivec_sim_type_t knn_cmp = tk_inv_parse_cmp(knn_cmp_str);
 
-  lua_getfield(L, 1, "category_index");
-  tk_inv_t *category_inv = tk_inv_peekopt(L, -1);
-  lua_pop(L, 1);
-
   lua_getfield(L, 1, "weight_index");
   tk_inv_t *weight_inv = tk_inv_peekopt(L, -1);
   tk_ann_t *weight_ann = tk_ann_peekopt(L, -1);
   lua_pop(L, 1);
-
-  const char *category_cmp_str = tk_lua_foptstring(L, 1, "graph", "category_cmp", "jaccard");
-  double category_alpha = tk_lua_foptnumber(L, 1, "graph", "category_alpha", 0.5);
-  double category_beta = tk_lua_foptnumber(L, 1, "graph", "category_beta", 0.5);
-  tk_ivec_sim_type_t category_cmp = tk_inv_parse_cmp(category_cmp_str);
-
-  uint64_t category_anchors = tk_lua_foptunsigned(L, 1, "graph", "category_anchors", 0);
-  uint64_t category_knn = tk_lua_foptunsigned(L, 1, "graph", "category_knn", 0);
-  double category_knn_decay = tk_lua_foptnumber(L, 1, "graph", "category_knn_decay", 0.0);
 
   const char *weight_cmp_str = tk_lua_foptstring(L, 1, "graph", "weight_cmp", "jaccard");
   double weight_alpha = tk_lua_foptnumber(L, 1, "graph", "weight_alpha", 0.5);
@@ -1334,17 +999,13 @@ static inline int tm_adjacency (lua_State *L)
 
   uint64_t knn = tk_lua_foptunsigned(L, 1, "graph", "knn", 0);
   uint64_t knn_cache = tk_lua_foptunsigned(L, 1, "graph", "knn_cache", 0);
-  int64_t category_ranks = tk_lua_foptinteger(L, 1, "graph", "category_ranks", -1);
-
-  int64_t knn_rank_explicit = tk_lua_foptinteger(L, 1, "graph", "knn_rank", -2);
-  int64_t knn_rank;
-  if (knn_rank_explicit == -2) {
-    knn_rank = (knn_inv == category_inv) ? category_ranks : -1;
-  } else {
-    knn_rank = knn_rank_explicit;
-  }
+  int64_t knn_rank = tk_lua_foptinteger(L, 1, "graph", "knn_rank", -1);
   double knn_decay = tk_lua_foptnumber(L, 1, "graph", "knn_decay", 0.0);
+  const char *knn_combine_str = tk_lua_foptstring(L, 1, "graph", "knn_combine", "weighted_avg");
+  tk_combine_type_t knn_combine = tk_inv_parse_combine(knn_combine_str);
   double weight_decay = tk_lua_foptnumber(L, 1, "graph", "weight_decay", 0.0);
+  const char *weight_combine_str = tk_lua_foptstring(L, 1, "graph", "weight_combine", "weighted_avg");
+  tk_combine_type_t weight_combine = tk_inv_parse_combine(weight_combine_str);
 
   const char *bridge_str = tk_lua_foptstring(L, 1, "graph", "bridge", "mst");
   tk_graph_bridge_t bridge = TK_GRAPH_BRIDGE_MST;
@@ -1356,7 +1017,6 @@ static inline int tm_adjacency (lua_State *L)
     bridge = TK_GRAPH_BRIDGE_MST;
   }
   uint64_t probe_radius = tk_lua_foptunsigned(L, 1, "graph", "probe_radius", 3);
-  bool knn_anchor = tk_lua_foptboolean(L, 1, "graph", "knn_anchor", false);
   bool knn_seed = tk_lua_foptboolean(L, 1, "graph", "knn_seed", false);
   bool knn_bipartite = tk_lua_foptboolean(L, 1, "graph", "knn_bipartite", false);
 
@@ -1378,14 +1038,12 @@ static inline int tm_adjacency (lua_State *L)
   tk_graph_t *graph = tm_graph_create(
     L, seed_ids, seed_offsets, seed_neighbors,
     bipartite_ids, bipartite_features, bipartite_nodes, bipartite_dims,
-    knn_inv, knn_ann, knn_cmp, knn_cmp_alpha, knn_cmp_beta, knn_rank, knn_decay,
-    category_inv, category_cmp, category_alpha, category_beta,
-    category_anchors, category_knn, category_knn_decay, category_ranks,
-    weight_inv, weight_ann, weight_cmp, weight_alpha, weight_beta, weight_decay, weight_pooling,
+    knn_inv, knn_ann, knn_cmp, knn_cmp_alpha, knn_cmp_beta, knn_rank, knn_decay, knn_combine,
+    weight_inv, weight_ann, weight_cmp, weight_alpha, weight_beta, weight_decay, weight_combine, weight_pooling,
     random_pairs, weight_eps,
     knn_query_ids, knn_query_ivec, knn_query_cvec,
     knn, knn_cache, bridge, probe_radius,
-    knn_anchor, knn_seed, knn_bipartite);
+    knn_seed, knn_bipartite);
   int Gi = tk_lua_absindex(L, -1);
 
   tm_init_uids(L, Gi, graph);
@@ -1436,44 +1094,6 @@ static inline int tm_adjacency (lua_State *L)
     lua_pushinteger(L, (int64_t) graph->n_edges);
     lua_pushstring(L, "seed");
     lua_call(L, 4, 0);
-  }
-
-  if (graph->category_inv && graph->category_anchors > 0) {
-    if (graph->knn_anchor) {
-      tm_build_hoods_from_anchors(L, Gi, graph);
-      if (i_each != -1) {
-        lua_pushvalue(L, i_each);
-        lua_pushinteger(L, (int64_t)(graph->uids_hoods ? graph->uids_hoods->n : 0));
-        lua_pushinteger(L, 0);
-        lua_pushinteger(L, 0);
-        lua_pushstring(L, "anchor_hoods");
-        lua_call(L, 4, 0);
-      }
-    } else {
-      uint64_t old_uid_count = graph->uids->n;
-      tk_pvec_t *new_edges = tm_add_anchor_edges_immediate(L, Gi, graph);
-      if (new_edges) {
-        if (graph->uids->n > old_uid_count) {
-          tk_dsu_add_ids(L, graph->dsu);
-          tm_adj_resize(L, Gi, graph);
-        }
-        for (uint64_t i = 0; i < new_edges->n; i++) {
-          int64_t u = new_edges->a[i].i;
-          int64_t v = new_edges->a[i].p;
-          tk_graph_add_adj(graph, u, v);
-          tk_dsu_union(graph->dsu, u, v);
-        }
-        tk_pvec_destroy(new_edges);
-        if (i_each != -1) {
-          lua_pushvalue(L, i_each);
-          lua_pushinteger(L, (int64_t)graph->uids->n);
-          lua_pushinteger(L, tk_dsu_components(graph->dsu));
-          lua_pushinteger(L, (int64_t) graph->n_edges);
-          lua_pushstring(L, "anchors");
-          lua_call(L, 4, 0);
-        }
-      }
-    }
   }
 
   if (graph->random_pairs > 0) {
@@ -1553,7 +1173,7 @@ static inline int tm_adjacency (lua_State *L)
     }
   }
 
-  if (graph->knn_anchor || graph->knn_seed || graph->knn_bipartite) {
+  if (graph->knn_seed || graph->knn_bipartite) {
     tm_sort_hoods(graph);
     if (graph->uids_hoods) {
       int kha;
@@ -1575,7 +1195,7 @@ static inline int tm_adjacency (lua_State *L)
     }
   }
 
-  if (graph->knn_cache || graph->knn_anchor || graph->knn_seed || graph->knn_bipartite) {
+  if (graph->knn_cache || graph->knn_seed || graph->knn_bipartite) {
     uint64_t old_uid_count = graph->uids->n;
     tm_run_knn_queries(L, Gi, graph);
     if (graph->uids->n > old_uid_count) {
@@ -1806,20 +1426,14 @@ static inline tk_graph_t *tm_graph_create (
   double knn_cmp_beta,
   int64_t knn_rank,
   double knn_decay,
-  tk_inv_t *category_inv,
-  tk_ivec_sim_type_t category_cmp,
-  double category_alpha,
-  double category_beta,
-  uint64_t category_anchors,
-  uint64_t category_knn,
-  double category_knn_decay,
-  int64_t category_ranks,
+  tk_combine_type_t knn_combine,
   tk_inv_t *weight_inv,
   tk_ann_t *weight_ann,
   tk_ivec_sim_type_t weight_cmp,
   double weight_alpha,
   double weight_beta,
   double weight_decay,
+  tk_combine_type_t weight_combine,
   tk_graph_weight_pooling_t weight_pooling,
   uint64_t random_pairs,
   double weight_eps,
@@ -1830,7 +1444,6 @@ static inline tk_graph_t *tm_graph_create (
   uint64_t knn_cache,
   tk_graph_bridge_t bridge,
   uint64_t probe_radius,
-  bool knn_anchor,
   bool knn_seed,
   bool knn_bipartite
 ) {
@@ -1849,18 +1462,10 @@ static inline tk_graph_t *tm_graph_create (
   graph->knn_cmp_beta = knn_cmp_beta;
   graph->knn_rank = knn_rank;
   graph->knn_decay = knn_decay;
+  graph->knn_combine = knn_combine;
   graph->knn_inv_hoods = NULL;
   graph->knn_ann_hoods = NULL;
   graph->weighted_hoods = NULL;
-
-  graph->category_inv = category_inv;
-  graph->category_cmp = category_cmp;
-  graph->category_alpha = category_alpha;
-  graph->category_beta = category_beta;
-  graph->category_anchors = category_anchors;
-  graph->category_knn = category_knn;
-  graph->category_knn_decay = category_knn_decay;
-  graph->category_ranks = category_ranks;
 
   graph->weight_inv = weight_inv;
   graph->weight_ann = weight_ann;
@@ -1868,6 +1473,7 @@ static inline tk_graph_t *tm_graph_create (
   graph->weight_alpha = weight_alpha;
   graph->weight_beta = weight_beta;
   graph->weight_decay = weight_decay;
+  graph->weight_combine = weight_combine;
   graph->weight_pooling = weight_pooling;
 
   graph->random_pairs = random_pairs;
@@ -1876,7 +1482,6 @@ static inline tk_graph_t *tm_graph_create (
   graph->knn_cache = knn_cache;
   graph->bridge = bridge;
   graph->probe_radius = probe_radius;
-  graph->knn_anchor = knn_anchor;
   graph->knn_seed = knn_seed;
   graph->knn_bipartite = knn_bipartite;
   graph->knn_query_ids = knn_query_ids;

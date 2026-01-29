@@ -1,5 +1,8 @@
 # Current
 
+- Re-implement classifier and encoder on top of regressor architecture instead
+  of separate classifier/encoder implementations.
+
 - Run end to end and update defaults
 - Make heterogeneous (keep spot checks the same; print label/doc nodes together)
 - Create label only index
@@ -11,7 +14,7 @@
 - Rewrite docs in favor of new approach
 - Clean up todo.md
 
-- TM curriculum leaning/re-allocation of capacity during training
+- Auto prune unused literals/clauses/etc via some simulated annealing style method
 
 # Now
 
@@ -33,22 +36,15 @@
           names/etc (pixel coordinates for mnist, tokens for text, etc)
     - Prune unused literals, returning pruned for subsequent filtering of
       tokenizer/booleanizer, giving faster inference
+    - Curriculum leaning: re-allocation/pruning of capacity/literals during
+      training
+
 
 # Next
 
 - Consider explicitly NOT exposing any :destroy() functionality to lua, instead
   accomplishing lua-side explicit cleanup via =nil and collectgarbage. Then, see
   what additional cleanup c-side this enables.
-
-- Extend tests
-    - AmaonCat-13K encoder
-    - snli encoder/classifier
-    - qqp encoder/classifier
-
-- Explore higher-level architectures:
-    - Autoencoder
-    - Triplet-loss trained encoder/regressor
-    - Stacked encoders
 
 - Chores
     - Error checks on dimensions to prevent segfaults everywhere
@@ -79,19 +75,28 @@
   must respect the expected stack semantics strictly); use it consistently
 
 - tk_dsu_t
-    - Full Lua/C API?
+    - Full Lua/C API
 
 # Consider
 
-- Titanic dataset
+- Extend tests
+    - AmaonCat-13K encoder
+    - SNLI encoder/classifier
+    - QQP encoder/classifier
+    - Titanic dataset
 
-- Convolutional
-    - Tried this, see branch
+- Explore higher-level architectures:
+    - Autoencoder
+    - Triplet-loss trained encoder/regressor
+    - Stacked encoders
 
 - Generative model, next token predictor
     - predict visible features from spectral codes
     - spectral embeddings from graph of ngrams as nodes, probabilities as
       weights?
+
+- Convolutional
+    - Tried this, see branch
 
 - Optimize
     - Bayesian optimization

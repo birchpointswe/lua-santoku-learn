@@ -115,7 +115,7 @@ test("imdb", function ()
     final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,
 
-    search_metric = function (t0, _)
+    validate_metric = function (t0, _)
       local predicted = t0:predict(validate.problems, validate.n)
       local accuracy = eval.class_accuracy(predicted, validate.solutions, validate.n, cfg.tm.classes)
       return accuracy.f1, accuracy

@@ -1,3 +1,4 @@
+local _ -- luacheck: ignore
 local arr = require("santoku.array")
 local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
@@ -23,11 +24,13 @@ local cfg = {
     skips = 1,
   },
   feature_selection = {
-    max_vocab = 2^15,
+    grouped = false,
+    max_vocab = 2^16,
+    features_per_class = 2^15,
   },
   tm = {
     classes = 20,
-    clauses = 64,
+    clauses = 32,
     clause_tolerance = { def = 41, min = 16, max = 128, int = true },
     clause_maximum = { def = 108, min = 16, max = 128, int = true },
     target = { def = 98, min = 16, max = 128, int = true },
@@ -38,7 +41,7 @@ local cfg = {
     patience = 4,
     rounds = 6,
     trials = 20,
-    iterations = 10,
+    iterations = 40,
   },
   training = {
     patience = 40,
@@ -71,30 +74,74 @@ test("newsgroups", function ()
   train.problems0 = tok:tokenize(train.problems)
   train.solutions:add_scaled(cfg.tm.classes)
 
-  print("\nFeature selection")
-  local chi2_ids = train.problems0:bits_top_chi2(
-    train.solutions, train.n, n_features, cfg.tm.classes,
-    cfg.feature_selection.max_vocab, "max")
-  local n_top_v = chi2_ids:size()
-  str.printf("  Chi2: %d features\n", n_top_v)
-  train.solutions:add_scaled(-cfg.tm.classes)
-  train.problems0 = nil -- luacheck: ignore
-  tok:restrict(chi2_ids)
-  chi2_ids = nil -- luacheck: ignore
+  local n_top_v, feat_ids, class_offsets
 
-  local function to_bitmap (split)
-    local toks = tok:tokenize(split.problems)
-    local bitmap = toks:bits_to_cvec(split.n, n_top_v, true)
-    toks = nil -- luacheck: ignore
-    return bitmap
+  local tok_index = tok:index()
+
+  if cfg.feature_selection.grouped then
+
+    print("\nFeature selection (GROUPED mode)")
+    local features_per_class = cfg.feature_selection.features_per_class
+    class_offsets, feat_ids, _ = train.problems0:bits_top_chi2_grouped(
+      train.solutions, train.n, n_features, cfg.tm.classes, features_per_class)
+    train.solutions:add_scaled(-cfg.tm.classes)
+
+    print("\nTop 10 tokens per class:")
+    for c = 0, cfg.tm.classes - 1 do
+      local cat = train.categories[c + 1] or ("class_" .. c)
+      local tokens = {}
+      for i = 0, math.min(10, features_per_class) - 1 do
+        local fid = feat_ids:get(c * features_per_class + i)
+        local token = tok_index[fid + 1] or ("?" .. fid)
+        tokens[#tokens + 1] = token
+      end
+      str.printf("  %2d %-24s: %s\n", c, cat, table.concat(tokens, ", "))
+    end
+
+    local bytes_per_class = math.ceil(features_per_class * 2 / 8)
+    str.printf("  Per-class layout: %d bytes/class, %d bytes/sample\n", bytes_per_class, cfg.tm.classes * bytes_per_class)
+
+    local function to_bitmap(split)
+      local toks = tok:tokenize(split.problems)
+      local bitmap, actual_k = toks:bits_to_cvec(split.n, n_features, class_offsets, feat_ids, true)
+      toks = nil -- luacheck: ignore
+      return bitmap, actual_k
+    end
+
+    train.problems, n_top_v = to_bitmap(train)
+    validate.problems = to_bitmap(validate)
+    test.problems = to_bitmap(test)
+
+  else
+
+    print("\nFeature selection (REGULAR mode)")
+    local chi2_ids = train.problems0:bits_top_chi2(
+      train.solutions, train.n, n_features, cfg.tm.classes,
+      cfg.feature_selection.max_vocab, "max")
+    n_top_v = chi2_ids:size()
+    str.printf("  Chi2: %d features selected\n", n_top_v)
+    train.solutions:add_scaled(-cfg.tm.classes)
+    train.problems0 = nil -- luacheck: ignore
+    tok:restrict(chi2_ids)
+    chi2_ids = nil -- luacheck: ignore
+
+    local function to_bitmap(split)
+      local toks = tok:tokenize(split.problems)
+      local bitmap = toks:bits_to_cvec(split.n, n_top_v, true)
+      toks = nil -- luacheck: ignore
+      return bitmap
+    end
+
+    train.problems = to_bitmap(train)
+    validate.problems = to_bitmap(validate)
+    test.problems = to_bitmap(test)
+
   end
 
-  train.problems = to_bitmap(train)
-  validate.problems = to_bitmap(validate)
-  test.problems = to_bitmap(test)
+  train.problems0 = nil -- luacheck: ignore
   tok = nil -- luacheck: ignore
 
-  print("Optimizing Classifier")
+  print("\nOptimizing Classifier")
   local stopwatch = utc.stopwatch()
   local t = optimize.classifier({
 
@@ -106,6 +153,7 @@ test("newsgroups", function ()
     target = cfg.tm.target,
     specificity = cfg.tm.specificity,
     include_bits = cfg.tm.include_bits,
+    grouped = cfg.feature_selection.grouped,
 
     samples = train.n,
     problems = train.problems,
@@ -139,6 +187,7 @@ test("newsgroups", function ()
   local train_pred = t:predict(train.problems, train.n)
   local val_pred = t:predict(validate.problems, validate.n)
   local test_pred = t:predict(test.problems, test.n)
+
   local train_stats = eval.class_accuracy(train_pred, train.solutions, train.n, cfg.tm.classes)
   local val_stats = eval.class_accuracy(val_pred, validate.solutions, validate.n, cfg.tm.classes)
   local test_stats = eval.class_accuracy(test_pred, test.solutions, test.n, cfg.tm.classes)

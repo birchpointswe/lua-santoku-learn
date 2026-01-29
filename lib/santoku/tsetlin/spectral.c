@@ -30,18 +30,18 @@ static inline int tm_encode (lua_State *L)
     return luaL_error(L, "n_dims (%llu) must be <= n_landmarks (%llu)",
       (unsigned long long)n_dims, (unsigned long long)n_landmarks);
 
-  tk_dvec_t *chol_centered = tk_dvec_create(L, n_samples * n_landmarks, 0, 0);
-  chol_centered->n = n_samples * n_landmarks;
-  memcpy(chol_centered->a, chol->a, n_samples * n_landmarks * sizeof(double));
+  tk_dvec_t *chol_processed = tk_dvec_create(L, n_samples * n_landmarks, 0, 0);
+  chol_processed->n = n_samples * n_landmarks;
+  memcpy(chol_processed->a, chol->a, n_samples * n_landmarks * sizeof(double));
 
   #pragma omp parallel for schedule(static)
   for (uint64_t j = 0; j < n_landmarks; j++) {
     double sum = 0.0;
     for (uint64_t i = 0; i < n_samples; i++)
-      sum += chol_centered->a[i * n_landmarks + j];
+      sum += chol_processed->a[i * n_landmarks + j];
     double mu = sum / (double)n_samples;
     for (uint64_t i = 0; i < n_samples; i++)
-      chol_centered->a[i * n_landmarks + j] -= mu;
+      chol_processed->a[i * n_landmarks + j] -= mu;
   }
 
   tk_dvec_t *gram = tk_dvec_create(L, n_landmarks * n_landmarks, 0, 0);
@@ -49,7 +49,7 @@ static inline int tm_encode (lua_State *L)
 
   cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
     (int)n_landmarks, (int)n_landmarks, (int)n_samples,
-    1.0, chol_centered->a, (int)n_landmarks, chol_centered->a, (int)n_landmarks,
+    1.0, chol_processed->a, (int)n_landmarks, chol_processed->a, (int)n_landmarks,
     0.0, gram->a, (int)n_landmarks);
 
   tk_dvec_t *eigenvalues_raw = tk_dvec_create(L, n_dims, 0, 0);

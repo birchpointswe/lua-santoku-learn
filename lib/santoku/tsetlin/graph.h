@@ -62,19 +62,15 @@ typedef struct tk_graph_s {
   double knn_cmp_alpha, knn_cmp_beta;
   int64_t knn_rank;
   double knn_decay;
+  tk_combine_type_t knn_combine;
 
-  tk_inv_t *category_inv;
-  tk_ivec_sim_type_t category_cmp;
-  double category_alpha, category_beta;
-  uint64_t category_anchors;
-  uint64_t category_knn;
-  double category_knn_decay;
 
   tk_inv_t *weight_inv;
   tk_ann_t *weight_ann;
   tk_ivec_sim_type_t weight_cmp;
   double weight_alpha, weight_beta;
   double weight_decay;
+  tk_combine_type_t weight_combine;
   tk_graph_weight_pooling_t weight_pooling;
 
   uint64_t random_pairs;
@@ -91,9 +87,7 @@ typedef struct tk_graph_s {
   uint64_t knn_cache;
   tk_graph_bridge_t bridge;
   uint64_t probe_radius;
-  int64_t category_ranks;
 
-  bool knn_anchor;
   bool knn_seed;
   bool knn_bipartite;
 
@@ -116,7 +110,7 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
   return (tk_graph_t *) luaL_checkudata(L, i, TK_GRAPH_MT);
 }
 
-#define TK_GRAPH_INDEX_DISTANCE(idx_inv, idx_ann, u, v, cmp, alpha, beta, decay, dist_var) \
+#define TK_GRAPH_INDEX_DISTANCE(idx_inv, idx_ann, u, v, cmp, alpha, beta, combine, decay, dist_var) \
   do { \
     tk_inv_t *__idx_inv = (idx_inv); \
     tk_ann_t *__idx_ann = (idx_ann); \
@@ -126,7 +120,7 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
       int64_t *uset = tk_inv_get(__idx_inv, (u), &un); \
       int64_t *vset = tk_inv_get(__idx_inv, (v), &vn); \
       if (uset && vset) { \
-        double sim = tk_inv_similarity(__idx_inv, uset, un, vset, vn, (cmp), (alpha), (beta), TK_COMBINE_WEIGHTED_AVG, (decay)); \
+        double sim = tk_inv_similarity(__idx_inv, uset, un, vset, vn, (cmp), (alpha), (beta), (combine), (decay)); \
         (dist_var) = 1.0 - sim; \
       } else { \
         (dist_var) = 1.0; \
@@ -249,31 +243,14 @@ static inline double tk_graph_distance (
   int64_t v
 ) {
   double d = DBL_MAX;
-
   TK_GRAPH_INDEX_DISTANCE(graph->weight_inv, graph->weight_ann,
                           u, v, graph->weight_cmp, graph->weight_alpha, graph->weight_beta,
-                          graph->weight_decay, d);
+                          graph->weight_combine, graph->weight_decay, d);
   if (d != DBL_MAX)
     return d;
-
-  bool same_index = (graph->category_inv == graph->knn_inv);
-  if (same_index && graph->category_inv != NULL) {
-    TK_GRAPH_INDEX_DISTANCE(graph->category_inv, NULL,
-                            u, v, graph->category_cmp, graph->category_alpha, graph->category_beta,
-                            graph->category_knn_decay, d);
-  } else if (graph->category_inv != NULL) {
-    double obs_distance = DBL_MAX;
-    TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann,
-                            u, v, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
-                            graph->knn_decay, obs_distance);
-    d = tk_inv_distance_extend(
-      graph->category_inv, u, v, obs_distance, graph->category_cmp,
-      graph->category_alpha, graph->category_beta, TK_COMBINE_WEIGHTED_AVG, graph->category_knn_decay);
-  } else {
-    TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann,
-                            u, v, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
-                            graph->knn_decay, d);
-  }
+  TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann,
+                          u, v, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
+                          graph->knn_combine, graph->knn_decay, d);
   return d;
 }
 
@@ -285,7 +262,7 @@ static inline double tk_graph_knn_distance (
   double d = DBL_MAX;
   TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann,
                           u, v, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
-                          graph->knn_decay, d);
+                          graph->knn_combine, graph->knn_decay, d);
   return d;
 }
 
