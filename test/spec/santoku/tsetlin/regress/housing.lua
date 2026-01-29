@@ -6,6 +6,7 @@ local str = require("santoku.string")
 local test = require("santoku.test")
 local tm = require("santoku.tsetlin")
 local utc = require("santoku.utc")
+local util = require("santoku.tsetlin.util")
 
 local cfg = {
   data = {
@@ -28,7 +29,7 @@ local cfg = {
     rounds = 6,
     trials = 20,
     iterations = 10,
-    metric = "mean",
+    metric = "nmae",
   },
   training = {
     patience = 40,
@@ -71,6 +72,8 @@ test("tsetlin regressor", function ()
     problems = train.problems,
     targets = train.targets,
 
+    balanced = false,
+
     clauses = cfg.tm.clauses,
     clause_tolerance = cfg.tm.clause_tolerance,
     clause_maximum = cfg.tm.clause_maximum,
@@ -91,13 +94,7 @@ test("tsetlin regressor", function ()
       return -stats[cfg.search.metric], stats
     end,
 
-    each = function (_, is_final, val_stats, params, epoch, round, trial)
-      local d, dd = stopwatch()
-      local phase = is_final and "F" or str.format("R%d T%d", round, trial)
-      str.printf("[REGRESS %s E%d] C=%d L=%d/%d T=%d S=%.0f IB=%d ACC=%.1f%% (%.2fs +%.2fs)\n",
-        phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
-        params.target, params.specificity, params.include_bits, (1 - val_stats.nmae) * 100, d, dd)
-    end
+    each = util.make_regressor_acc_log(stopwatch)
 
   })
 

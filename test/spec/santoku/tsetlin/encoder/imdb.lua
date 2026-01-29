@@ -1,5 +1,4 @@
 local ann = require("santoku.tsetlin.ann")
-local cvec = require("santoku.cvec")
 local ds = require("santoku.tsetlin.dataset")
 local dvec = require("santoku.dvec")
 local eval = require("santoku.tsetlin.evaluator")
@@ -47,11 +46,6 @@ local cfg = {
     final_patience = 40,
     final_iterations = 400,
   },
-  bit_pruning = {
-    enabled = true,
-    metric = "ndcg",
-    tolerance = 1e-6,
-  },
   nystrom = {
     n_landmarks = 4096,
     n_dims = 64,
@@ -59,6 +53,7 @@ local cfg = {
     combine = "exponential",
     decay = { def = 2.74, min = 0.0, max = 3.0 },
     binarize = "itq",
+    trace_tol = 1e-6,
     rounds = 6,
     samples = 20,
   },
@@ -212,6 +207,7 @@ test("imdb", function()
     combine = cfg.nystrom.combine,
     decay = cfg.nystrom.decay,
     binarize = cfg.nystrom.binarize,
+    trace_tol = cfg.nystrom.trace_tol,
     rounds = cfg.nystrom.rounds,
     samples = cfg.nystrom.samples,
     expected = {
@@ -321,12 +317,7 @@ test("imdb", function()
       local accuracy = eval.encoding_accuracy(predicted, train_target_codes, enc_info.samples, train.dims)
       return accuracy.mean_hamming, accuracy
     end,
-    each = cfg.verbose and function (_, is_final, metrics, params, epoch, round, trial)
-      local phase = is_final and "F" or str.format("R%d T%d", round, trial)
-      str.printf("[ENCODER %s E%d] C=%d L=%d/%d T=%d S=%.0f IB=%d ham=%.4f\n",
-        phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
-        params.target, params.specificity, params.include_bits, metrics.mean_hamming)
-    end or nil,
+    each = cfg.verbose and util.encoder_log or nil,
   }
   train.encoder = optimize.encoder(encoder_args)
 
@@ -356,35 +347,6 @@ test("imdb", function()
   str.printf("  Predicted codes ranking score: %.4f (spectral: %.4f)\n",
     pred_eval_stats.score, spectral_eval_stats.score)
 
-  local dims_final = train.dims
-  local active_bits = nil
-  if cfg.bit_pruning and cfg.bit_pruning.enabled then
-    print("\nOptimizing bits")
-    active_bits = eval.optimize_bits({
-      index = train_pred_ann,
-      expected_ids = train_eval_ids,
-      expected_offsets = train_eval_offsets,
-      expected_neighbors = train_eval_neighbors,
-      expected_weights = train_eval_weights,
-      n_dims = train.dims,
-      start_prefix = train.dims,
-      metric = cfg.bit_pruning.metric,
-      tolerance = cfg.bit_pruning.tolerance,
-      each = cfg.verbose and function (bit, gain, score, event)
-        str.printf("  %s bit=%d gain=%.6f score=%.6f\n", event, bit, gain, score)
-      end or nil,
-    })
-    local n_active = active_bits:size()
-    str.printf("  Active bits: %d / %d (%.0f%% pruned)\n",
-      n_active, train.dims, 100 * (1 - n_active / train.dims))
-    if n_active < train.dims then
-      local train_pruned = cvec.create()
-      train_predicted:bits_select(active_bits, nil, train.dims, train_pruned)
-      train_predicted = train_pruned
-      dims_final = n_active
-      util.spot_check_codes(train_predicted, train.n, dims_final, "train pruned")
-    end
-  end
   train_eval_ids = nil -- luacheck: ignore
   train_eval_offsets = nil -- luacheck: ignore
   train_eval_neighbors = nil -- luacheck: ignore
@@ -398,12 +360,7 @@ test("imdb", function()
   local validate_encoder_sentences = validate_toks:bits_to_cvec(validate.n, train_encoder_visible, true)
   validate_toks = nil -- luacheck: ignore
   local validate_predicted = train.encoder:predict(validate_encoder_sentences, validate.n)
-  if active_bits then
-    local validate_pruned = cvec.create()
-    validate_predicted:bits_select(active_bits, nil, train.dims, validate_pruned)
-    validate_predicted = validate_pruned
-  end
-  util.spot_check_codes(validate_predicted, validate.n, dims_final, "validate predicted")
+  util.spot_check_codes(validate_predicted, validate.n, train.dims, "validate predicted")
 
   print("\nBuilding validate eval_index (labels only) and evaluation adjacency")
   validate.eval_index = inv.create({ features = n_classes })
@@ -427,7 +384,7 @@ test("imdb", function()
   end
 
   print("\nEvaluating validate predicted codes")
-  local validate_pred_ann = ann.create({ features = dims_final })
+  local validate_pred_ann = ann.create({ features = train.dims })
   validate_pred_ann:add(validate_predicted, validate.ids)
   local validate_pred_stats = eval.ranking_accuracy({
     index = validate_pred_ann,
@@ -437,7 +394,7 @@ test("imdb", function()
     eval_neighbors = validate_eval_neighbors,
     eval_weights = validate_eval_weights,
     ranking = cfg.eval.ranking,
-    n_dims = dims_final,
+    n_dims = train.dims,
   })
   str.printf("  Validate ranking score: %.4f\n", validate_pred_stats.score)
   validate_encoder_sentences = nil -- luacheck: ignore
@@ -454,12 +411,7 @@ test("imdb", function()
   local test_encoder_sentences = test_toks:bits_to_cvec(test_set.n, train_encoder_visible, true)
   test_toks = nil -- luacheck: ignore
   local test_predicted = train.encoder:predict(test_encoder_sentences, test_set.n)
-  if active_bits then
-    local test_pruned = cvec.create()
-    test_predicted:bits_select(active_bits, nil, train.dims, test_pruned)
-    test_predicted = test_pruned
-  end
-  util.spot_check_codes(test_predicted, test_set.n, dims_final, "test predicted")
+  util.spot_check_codes(test_predicted, test_set.n, train.dims, "test predicted")
 
   print("\nBuilding test eval_index (labels only) and evaluation adjacency")
   test_set.eval_index = inv.create({ features = n_classes })
@@ -483,7 +435,7 @@ test("imdb", function()
   end
 
   print("\nEvaluating test predicted codes")
-  local test_pred_ann = ann.create({ features = dims_final })
+  local test_pred_ann = ann.create({ features = train.dims })
   test_pred_ann:add(test_predicted, test_set.ids)
   local test_pred_stats = eval.ranking_accuracy({
     index = test_pred_ann,
@@ -493,19 +445,19 @@ test("imdb", function()
     eval_neighbors = test_eval_neighbors,
     eval_weights = test_eval_weights,
     ranking = cfg.eval.ranking,
-    n_dims = dims_final,
+    n_dims = train.dims,
   })
   str.printf("  Test ranking score: %.4f\n", test_pred_stats.score)
   test_encoder_sentences = nil -- luacheck: ignore
   test_pred_ann = nil -- luacheck: ignore
 
   print("\nClassifier evaluation")
-  train_predicted:bits_flip_interleave(dims_final)
-  validate_predicted:bits_flip_interleave(dims_final)
-  test_predicted:bits_flip_interleave(dims_final)
+  train_predicted:bits_flip_interleave(train.dims)
+  validate_predicted:bits_flip_interleave(train.dims)
+  test_predicted:bits_flip_interleave(train.dims)
 
   local classifier = optimize.classifier({
-    features = dims_final,
+    features = train.dims,
     classes = n_classes,
     clauses = cfg.classifier.clauses,
     clause_tolerance = cfg.classifier.clause_tolerance,
@@ -527,13 +479,7 @@ test("imdb", function()
       local accuracy = eval.class_accuracy(predicted, validate.solutions, validate.n, n_classes)
       return accuracy.f1, accuracy
     end,
-    each = cfg.verbose and function (_, is_final, val_accuracy, params, epoch, round, trial)
-      local d, dd = stopwatch()
-      local phase = is_final and "F" or str.format("R%d T%d", round, trial)
-      str.printf("[CLASSIFY %s E%d] C=%d L=%d/%d T=%d S=%.0f IB=%d F1=%.2f (%.2fs +%.2fs)\n",
-        phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
-        params.target, params.specificity, params.include_bits, val_accuracy.f1, d, dd)
-    end or nil,
+    each = cfg.verbose and util.make_classifier_log(stopwatch) or nil,
   })
 
   local train_class_pred = classifier:predict(train_predicted, train.n)
@@ -546,7 +492,7 @@ test("imdb", function()
   print("\n" .. string.rep("=", 60))
   print("SUMMARY")
   print(string.rep("=", 60))
-  str.printf("  Spectral dims: %d -> %d (after pruning)\n", train.dims, dims_final)
+  str.printf("  Spectral dims: %d\n", train.dims)
   str.printf("  Train spectral score: %.4f\n", spectral_eval_stats.score)
   str.printf("  Train predicted score: %.4f  hamming: %.4f\n", pred_eval_stats.score, train_ham)
   str.printf("  Validate predicted score: %.4f\n", validate_pred_stats.score)

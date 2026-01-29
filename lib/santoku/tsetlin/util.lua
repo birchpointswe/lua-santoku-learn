@@ -112,50 +112,58 @@ function M.spot_check_neighbors_with_labels (ids, offsets, neighbors, weights, l
   end
 end
 
+local function format_best_cmp (score, best)
+  if not best or best == -math.huge then
+    return ""
+  end
+  if score > best + 1e-6 then
+    return str.format(" (+%.4f new best)", score - best)
+  else
+    return str.format(" (best=%.4f)", best)
+  end
+end
+
 function M.spectral_log (info)
-  if info.event == "round_start" then
-    str.printf("\n[SPECTRAL R%d]\n", info.round)
-  elseif info.event == "round_end" then
+  if info.event == "round_end" then
     local p = info.best_params or {}
     local m = info.best_metrics or {}
-    if m.kernel_score and m.raw_score then
-      str.printf("[SPECTRAL R%d] best: kernel=%.4f raw=%.4f binary=%.4f L=%d D=%d decay=%.2f\n",
-        info.round, m.kernel_score, m.raw_score, info.global_best_score, p.n_landmarks or 0, p.n_dims or 0, p.decay or 0)
-    elseif m.raw_score then
-      str.printf("[SPECTRAL R%d] best: raw=%.4f binary=%.4f L=%d D=%d decay=%.2f\n",
-        info.round, m.raw_score, info.global_best_score, p.n_landmarks or 0, p.n_dims or 0, p.decay or 0)
+    local skipped = (info.trials or 0) - (info.round_samples or 0)
+    local stats = str.format(" | %d/%d improved", info.round_improvements or 0, info.round_samples or 0)
+    if skipped > 0 then
+      stats = stats .. str.format(", %d skipped", skipped)
+    end
+    if info.adapt_factor and info.adapt_factor ~= 1.0 then
+      stats = stats .. str.format(", jitter×%.2f", info.adapt_factor)
+    end
+    if m.kernel_score then
+      str.printf("[SPECTRAL R%d/%d] best: kernel=%.4f raw=%.4f L=%d D=%d decay=%.2f%s\n",
+        info.round, info.rounds or 0, m.kernel_score, info.global_best_score,
+        p.n_landmarks or 0, p.n_dims or 0, p.decay or 0, stats)
     else
-      str.printf("[SPECTRAL R%d] best: score=%.4f L=%d D=%d decay=%.2f\n",
-        info.round, info.global_best_score, p.n_landmarks or 0, p.n_dims or 0, p.decay or 0)
+      str.printf("[SPECTRAL R%d/%d] best: raw=%.4f L=%d D=%d decay=%.2f%s\n",
+        info.round, info.rounds or 0, info.global_best_score,
+        p.n_landmarks or 0, p.n_dims or 0, p.decay or 0, stats)
     end
   elseif info.event == "sample" then
     if info.round and info.trial then
-      str.printf("[SPECTRAL R%d T%d] L=%d D=%d decay=%.2f\n",
-        info.round, info.trial, info.n_landmarks, info.n_dims, info.decay)
+      str.printf("[SPECTRAL R%d/%d T%d/%d] L=%d D=%d decay=%.2f\n",
+        info.round, info.rounds or 0, info.trial, info.trials or 0,
+        info.n_landmarks, info.n_dims, info.decay)
     else
       str.printf("[SPECTRAL] L=%d D=%d decay=%.2f\n", info.n_landmarks, info.n_dims, info.decay)
     end
-  elseif info.event == "landmarks_result" then
-    str.printf("[SPECTRAL]   -> landmarks: samples=%d landmarks=%d (%.2fs)\n",
-      info.n_samples, info.n_landmarks, info.elapsed or 0)
   elseif info.event == "spectral_result" then
-    str.printf("[SPECTRAL]   -> spectral: eig=[%.4f, %.4f] (%.2fs)\n",
-      info.eig_min, info.eig_max, info.elapsed or 0)
-  elseif info.event == "stage_done" then
-    str.printf("[SPECTRAL]   -> %s: (%.2fs)\n", info.stage, info.elapsed or 0)
-    if info.total then
-      str.printf("[SPECTRAL]   -> total: (%.2fs)\n", info.total)
-    end
+    local trace_info = info.trace_ratio and str.format(" trace=%.2e", info.trace_ratio) or ""
+    str.printf("[SPECTRAL]   -> L=%d eig=[%.4f, %.4f]%s\n",
+      info.n_landmarks or 0, info.eig_min, info.eig_max, trace_info)
   elseif info.event == "eval" then
     local m = info.metrics or {}
-    local prefix = info.round and str.format("[SPECTRAL R%d]", info.round) or "[SPECTRAL]"
-    if m.kernel_score and m.raw_score then
-      str.printf("%s   -> eval: kernel=%.4f raw=%.4f binary=%.4f (%.2fs)\n",
-        prefix, m.kernel_score, m.raw_score, info.score, info.elapsed or 0)
-    elseif m.raw_score then
-      str.printf("%s   -> eval: raw=%.4f binary=%.4f (%.2fs)\n", prefix, m.raw_score, info.score, info.elapsed or 0)
+    local cmp = format_best_cmp(info.score, info.global_best_score)
+    if m.kernel_score then
+      str.printf("[SPECTRAL]   -> eval: kernel=%.4f raw=%.4f%s\n",
+        m.kernel_score, info.score, cmp)
     else
-      str.printf("%s   -> eval: score=%.4f (%.2fs)\n", prefix, info.score, info.elapsed or 0)
+      str.printf("[SPECTRAL]   -> eval: raw=%.4f%s\n", info.score, cmp)
     end
   elseif info.event == "done" then
     print(string.rep("-", 50))
@@ -163,14 +171,130 @@ function M.spectral_log (info)
     local m = info.best_metrics or {}
     str.printf("[SPECTRAL] DONE: L=%d D=%d decay=%.2f",
       p.n_landmarks or 0, p.n_dims or 0, p.decay or 0)
-    if m.kernel_score and m.raw_score and info.best_score then
-      str.printf(" kernel=%.4f raw=%.4f binary=%.4f", m.kernel_score, m.raw_score, info.best_score)
-    elseif m.raw_score and info.best_score then
-      str.printf(" raw=%.4f binary=%.4f", m.raw_score, info.best_score)
+    if m.kernel_score and info.best_score then
+      str.printf(" kernel=%.4f raw=%.4f", m.kernel_score, info.best_score)
     elseif info.best_score then
-      str.printf(" score=%.4f", info.best_score)
+      str.printf(" raw=%.4f", info.best_score)
     end
     print()
+  end
+end
+
+function M.encoder_log (_, is_final, metrics, params, epoch, round, trial, rounds, trials, global_best_score)
+  local phase
+  if is_final then
+    phase = "F"
+  elseif rounds and trials then
+    phase = str.format("R%d/%d T%d/%d", round, rounds, trial, trials)
+  else
+    phase = str.format("R%d T%d", round, trial)
+  end
+  local score = metrics.score or metrics.mean_hamming
+  local cmp = ""
+  if not is_final and global_best_score and global_best_score > -math.huge then
+    if score > global_best_score + 1e-6 then
+      cmp = str.format(" (+%.4f new best)", score - global_best_score)
+    else
+      cmp = str.format(" (best=%.4f)", global_best_score)
+    end
+  end
+  local bit_stats = ""
+  if metrics.ber_min and metrics.ber_max and metrics.ber_std then
+    bit_stats = str.format(" bits=[%.2f,%.2f] std=%.3f", metrics.ber_max, metrics.ber_min, metrics.ber_std)
+  end
+  str.printf("[ENCODER %s E%d] C=%d L=%d/%d T=%d S=%.0f IB=%d score=%.4f%s%s\n",
+    phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
+    params.target, params.specificity, params.include_bits, score, bit_stats, cmp)
+end
+
+function M.make_classifier_log (stopwatch)
+  return function (_, is_final, metrics, params, epoch, round, trial, rounds, trials, global_best_score)
+    local phase
+    if is_final then
+      phase = "F"
+    elseif rounds and trials then
+      phase = str.format("R%d/%d T%d/%d", round, rounds, trial, trials)
+    else
+      phase = str.format("R%d T%d", round, trial)
+    end
+    local cmp = ""
+    if not is_final and global_best_score and global_best_score > -math.huge then
+      if metrics.f1 > global_best_score + 1e-6 then
+        cmp = str.format(" (+%.2f new best)", metrics.f1 - global_best_score)
+      else
+        cmp = str.format(" (best=%.2f)", global_best_score)
+      end
+    end
+    local timing = ""
+    if stopwatch then
+      local d, dd = stopwatch()
+      timing = str.format(" (%.2fs +%.2fs)", d, dd)
+    end
+    str.printf("[CLASSIFY %s E%d] C=%d L=%d/%d T=%d S=%.0f IB=%d F1=%.2f%s%s\n",
+      phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
+      params.target, params.specificity, params.include_bits, metrics.f1, cmp, timing)
+  end
+end
+
+function M.make_regressor_log (stopwatch)
+  return function (_, is_final, metrics, params, epoch, round, trial, rounds, trials, global_best_score)
+    local phase
+    if is_final then
+      phase = "F"
+    elseif rounds and trials then
+      phase = str.format("R%d/%d T%d/%d", round, rounds, trial, trials)
+    else
+      phase = str.format("R%d T%d", round, trial)
+    end
+    local mae = metrics.mean
+    local cmp = ""
+    if not is_final and global_best_score and global_best_score > -math.huge then
+      local best_mae = -global_best_score
+      if mae < best_mae - 1e-6 then
+        cmp = str.format(" (%.4f new best)", mae)
+      else
+        cmp = str.format(" (best=%.4f)", best_mae)
+      end
+    end
+    local timing = ""
+    if stopwatch then
+      local d, dd = stopwatch()
+      timing = str.format(" (%.2fs +%.2fs)", d, dd)
+    end
+    str.printf("[REGRESS %s E%d] C=%d L=%d/%d T=%d S=%.0f IB=%d MAE=%.4f%s%s\n",
+      phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
+      params.target, params.specificity, params.include_bits, mae, cmp, timing)
+  end
+end
+
+function M.make_regressor_acc_log (stopwatch)
+  return function (_, is_final, metrics, params, epoch, round, trial, rounds, trials, global_best_score)
+    local phase
+    if is_final then
+      phase = "F"
+    elseif rounds and trials then
+      phase = str.format("R%d/%d T%d/%d", round, rounds, trial, trials)
+    else
+      phase = str.format("R%d T%d", round, trial)
+    end
+    local acc = (1 - metrics.nmae) * 100
+    local cmp = ""
+    if not is_final and global_best_score and global_best_score > -math.huge then
+      local best_acc = (1 + global_best_score) * 100
+      if acc > best_acc + 1e-4 then
+        cmp = str.format(" (+%.1f new best)", acc - best_acc)
+      else
+        cmp = str.format(" (best=%.1f%%)", best_acc)
+      end
+    end
+    local timing = ""
+    if stopwatch then
+      local d, dd = stopwatch()
+      timing = str.format(" (%.2fs +%.2fs)", d, dd)
+    end
+    str.printf("[REGRESS %s E%d] C=%d L=%d/%d T=%d S=%.0f IB=%d ACC=%.1f%%%s%s\n",
+      phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
+      params.target, params.specificity, params.include_bits, acc, cmp, timing)
   end
 end
 

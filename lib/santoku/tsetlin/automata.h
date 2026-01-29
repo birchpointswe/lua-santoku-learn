@@ -3,6 +3,7 @@
 
 #include <omp.h>
 #include <santoku/cvec.h>
+#include <santoku/lua/utils.h>
 
 typedef struct {
   uint64_t n_clauses;
@@ -82,6 +83,22 @@ static inline void tk_automata_setup (
     }
     uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
     memset(actions, 0, aut->n_chunks);
+  }
+}
+
+static inline void tk_automata_setup_midpoint (
+  tk_automata_t *aut,
+  uint64_t clause_first,
+  uint64_t clause_last,
+  uint64_t n_features
+) {
+  tk_automata_setup(aut, clause_first, clause_last);
+  for (uint64_t clause = clause_first; clause <= clause_last; clause++) {
+    uint64_t neg_bit = n_features + (tk_fast_random() % n_features);
+    uint64_t chunk = neg_bit / 8;
+    uint64_t pos = neg_bit % 8;
+    uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
+    actions[chunk] |= (1 << pos);
   }
 }
 

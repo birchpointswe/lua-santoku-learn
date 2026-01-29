@@ -1094,10 +1094,105 @@ static inline int tk_hlth_nystrom_lift_lua(lua_State *L) {
   return 2;
 }
 
+static inline int tk_hlth_cca_linear_predict_lua(lua_State *L) {
+  lua_settop(L, 1);
+
+  lua_getfield(L, 1, "tokens");
+  tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "feat_ids");
+  tk_ivec_t *feat_ids = tk_ivec_peek(L, -1, "feat_ids");
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "feat_weights");
+  tk_dvec_t *feat_weights = tk_dvec_peek(L, -1, "feat_weights");
+  lua_pop(L, 1);
+
+  uint64_t n_samples = tk_lua_fcheckunsigned(L, 1, "cca_linear_predict", "n_samples");
+  uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "cca_linear_predict", "n_dims");
+  uint64_t n_tokens = tk_lua_fcheckunsigned(L, 1, "cca_linear_predict", "n_tokens");
+  uint64_t features_per_class = tk_lua_fcheckunsigned(L, 1, "cca_linear_predict", "features_per_class");
+
+  uint64_t code_bytes = TK_CVEC_BITS_BYTES(n_dims);
+  tk_cvec_t *out = tk_cvec_create(L, n_samples * code_bytes, NULL, NULL);
+  out->n = n_samples * code_bytes;
+  memset(out->a, 0, out->n);
+
+  int64_t *csr_offsets = tk_malloc(L, (n_samples + 1) * sizeof(int64_t));
+  memset(csr_offsets, 0, (n_samples + 1) * sizeof(int64_t));
+  for (uint64_t i = 0; i < tokens->n; i++) {
+    int64_t v = tokens->a[i];
+    if (v < 0) continue;
+    uint64_t s = (uint64_t)v / n_tokens;
+    if (s < n_samples)
+      csr_offsets[s + 1]++;
+  }
+  for (uint64_t i = 1; i <= n_samples; i++)
+    csr_offsets[i] += csr_offsets[i - 1];
+
+  uint64_t total = (uint64_t)csr_offsets[n_samples];
+  int64_t *tok_ids = tk_malloc(L, (total > 0 ? total : 1) * sizeof(int64_t));
+  int64_t *counts = tk_malloc(L, n_samples * sizeof(int64_t));
+  memset(counts, 0, n_samples * sizeof(int64_t));
+  for (uint64_t i = 0; i < tokens->n; i++) {
+    int64_t v = tokens->a[i];
+    if (v < 0) continue;
+    uint64_t s = (uint64_t)v / n_tokens;
+    uint64_t tok = (uint64_t)v % n_tokens;
+    if (s < n_samples) {
+      uint64_t pos = (uint64_t)csr_offsets[s] + (uint64_t)counts[s];
+      tok_ids[pos] = (int64_t)tok;
+      counts[s]++;
+    }
+  }
+  free(counts);
+
+  tk_iuset_t **sample_sets = tk_malloc(L, n_samples * sizeof(tk_iuset_t *));
+  for (uint64_t i = 0; i < n_samples; i++) {
+    sample_sets[i] = tk_iuset_create(NULL, 0);
+    int64_t start = csr_offsets[i];
+    int64_t end = csr_offsets[i + 1];
+    for (int64_t j = start; j < end; j++) {
+      int kha;
+      tk_iuset_put(sample_sets[i], tok_ids[j], &kha);
+    }
+  }
+  free(csr_offsets);
+  free(tok_ids);
+
+  #pragma omp parallel for schedule(static)
+  for (uint64_t i = 0; i < n_samples; i++) {
+    tk_iuset_t *sample_toks = sample_sets[i];
+    uint8_t *sample_out = (uint8_t *)out->a + i * code_bytes;
+
+    for (uint64_t d = 0; d < n_dims; d++) {
+      double score = 0.0;
+      for (uint64_t f = 0; f < features_per_class; f++) {
+        int64_t fid = feat_ids->a[d * features_per_class + f];
+        if (tk_iuset_contains(sample_toks, fid)) {
+          score += feat_weights->a[d * features_per_class + f];
+        }
+      }
+      if (score > 0.0) {
+        sample_out[TK_CVEC_BITS_BYTE(d)] |= (1 << TK_CVEC_BITS_BIT(d));
+      }
+    }
+  }
+
+  for (uint64_t i = 0; i < n_samples; i++) {
+    tk_iuset_destroy(sample_sets[i]);
+  }
+  free(sample_sets);
+
+  return 1;
+}
+
 static luaL_Reg tk_hlth_fns[] = {
   { "landmark_encoder", tk_hlth_landmark_encoder_lua },
   { "nystrom_encoder", tk_hlth_nystrom_encoder_lua },
   { "nystrom_lift", tk_hlth_nystrom_lift_lua },
+  { "cca_linear_predict", tk_hlth_cca_linear_predict_lua },
   { NULL, NULL }
 };
 

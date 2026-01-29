@@ -48,22 +48,23 @@ local function is_preferred(new_score, new_cost, best_score, best_cost, toleranc
   return false
 end
 
-M.apply_itq = function (raw_codes, n_dims, return_params, binarize)
-  binarize = binarize or "itq"
-  if binarize == "sign" then
+M.apply_itq = function (raw_codes, n_dims, binarize)
+  if binarize == nil or binarize == "none" then
+    return raw_codes
+  elseif binarize == "sign" then
     local codes = itq.sign({ codes = raw_codes, n_dims = n_dims })
-    return codes, nil, nil
+    return codes
   elseif binarize == "median" then
-    local codes, medians = itq.median({ codes = raw_codes, n_dims = n_dims, return_params = return_params })
-    return codes, medians, nil
+    local codes, medians = itq.median({ codes = raw_codes, n_dims = n_dims })
+    return codes, medians
   else
-    return itq.itq({
+    local codes, means, rotation = itq.itq({
       codes = raw_codes,
       n_dims = n_dims,
       iterations = 100,
       tolerance = 1e-8,
-      return_params = return_params,
     })
+    return codes, means, rotation
   end
 end
 
@@ -289,8 +290,11 @@ M.search = function (args)
       if not dominated then
         local score, metrics, result = trial_fn(params, {
           round = r,
+          rounds = rounds,
           trial = t,
+          trials = trials,
           is_final = false,
+          global_best_score = best_score,
         })
         round_samples = round_samples + 1
         if each_cb then
@@ -298,9 +302,11 @@ M.search = function (args)
             event = "trial",
             round = r,
             trial = t,
+            trials = trials,
             params = params,
             score = score,
             metrics = metrics,
+            global_best_score = best_score,
           })
         end
         if score > round_best_score then
@@ -344,10 +350,15 @@ M.search = function (args)
       each_cb({
         event = "round",
         round = r,
+        rounds = rounds,
+        trials = trials,
+        round_samples = round_samples,
+        round_improvements = round_improvements,
         round_best_score = round_best_score,
         round_best_params = round_best_params,
         global_best_score = best_score,
         global_best_params = best_params,
+        global_best_metrics = best_metrics,
         success_rate = success_rate,
         skip_rate = skip_rate,
         adapt_factor = adapt_factor,
@@ -357,23 +368,12 @@ M.search = function (args)
   end
 
   if not skip_final and best_params and rerun_final then
-    if each_cb then
-      each_cb({ event = "final_start", params = best_params })
-    end
     if best_result and cleanup_fn then
       cleanup_fn(best_result)
     end
-    local final_score, final_metrics, final_result = trial_fn(best_params, { is_final = true })
+    local _, final_metrics, final_result = trial_fn(best_params, { is_final = true })
     best_result = final_result
     best_metrics = final_metrics
-    if each_cb then
-      each_cb({
-        event = "final_end",
-        params = best_params,
-        score = final_score,
-        metrics = final_metrics,
-      })
-    end
   end
 
   return best_result, best_params, best_metrics
@@ -392,6 +392,7 @@ local function create_tm (typ, args)
       specificity = 1000,
       include_bits = 1,
       reusable = true,
+      grouped = args.grouped,
     })
   elseif typ == "classifier" then
     return tm.create("classifier", {
@@ -404,6 +405,7 @@ local function create_tm (typ, args)
       specificity = 1000,
       include_bits = 1,
       reusable = true,
+      grouped = args.grouped,
     })
   elseif typ == "regressor" then
     return tm.create("regressor", {
@@ -416,6 +418,7 @@ local function create_tm (typ, args)
       specificity = 1000,
       include_bits = 1,
       reusable = true,
+      grouped = args.grouped,
     })
   else
     err.error("unexpected type", typ)
@@ -433,6 +436,7 @@ local function create_final_tm (typ, args, params)
       target = params.target,
       specificity = params.specificity,
       include_bits = params.include_bits,
+      grouped = args.grouped,
     })
   elseif typ == "classifier" then
     return tm.create("classifier", {
@@ -444,6 +448,7 @@ local function create_final_tm (typ, args, params)
       target = params.target,
       specificity = params.specificity,
       include_bits = params.include_bits,
+      grouped = args.grouped,
     })
   elseif typ == "regressor" then
     return tm.create("regressor", {
@@ -455,6 +460,7 @@ local function create_final_tm (typ, args, params)
       target = params.target,
       specificity = params.specificity,
       include_bits = params.include_bits,
+      grouped = args.grouped,
     })
   else
     err.error("unexpected type", typ)
@@ -482,7 +488,10 @@ local function train_tm (typ, tmobj, args, params, iterations, early_patience, e
     if each_cb then
       local cb_result = each_cb(tmobj, info.is_final, metrics, params, epoch,
         not info.is_final and info.round or nil,
-        not info.is_final and info.trial or nil)
+        not info.is_final and info.trial or nil,
+        not info.is_final and info.rounds or nil,
+        not info.is_final and info.trials or nil,
+        not info.is_final and info.global_best_score or nil)
       if cb_result == false then
         return false
       end
@@ -559,6 +568,7 @@ local function optimize_tm (args, typ)
       features = args.features,
       classes = args.classes,
       outputs = args.outputs,
+      grouped = args.grouped,
     })
   end
 
@@ -568,17 +578,21 @@ local function optimize_tm (args, typ)
     end
     search_tm:reconfigure(params)
     local train_args = {
-      sentences = args.sentences,
-      codes = args.codes,
-      samples = args.samples,
-      problems = args.problems,
-      solutions = args.solutions,
-      targets = args.targets,
+      sentences = args.search_sentences or args.sentences,
+      codes = args.search_codes or args.codes,
+      samples = args.search_samples or args.samples,
+      problems = args.search_problems or args.problems,
+      solutions = args.search_solutions or args.solutions,
+      targets = args.search_targets or args.targets,
     }
     local encoding_info = {
-      sentences = args.sentences,
+      sentences = args.search_sentences or args.sentences,
       visible = args.visible,
-      samples = args.samples,
+      problems = args.search_problems or args.problems,
+      features = args.features,
+      samples = args.search_samples or args.samples,
+      solutions = args.search_solutions or args.solutions,
+      targets = args.search_targets or args.targets,
     }
     local score, metrics = train_tm(typ, search_tm, train_args, params, iters_search,
       use_early_stop and patience or nil, args.early_tolerance, metric_fn, each_cb, info, encoding_info)
@@ -593,7 +607,7 @@ local function optimize_tm (args, typ)
     trial_fn = search_trial_fn,
     skip_final = true,
     preference_tolerance = args.preference_tolerance or 1e-6,
-    size_fn = function(p) return { p.clauses or 0, -(p.specificity or 0) } end,
+    size_fn = function(p) return { p.clauses or 0 } end,
     make_key = function (p)
       return str.format("%s|%s|%s|%s|%s|%s",
         key_int8(p.clauses),
@@ -615,6 +629,7 @@ local function optimize_tm (args, typ)
     features = args.features,
     classes = args.classes,
     outputs = args.outputs,
+    grouped = args.grouped,
   }, best_params)
   local final_train_args = {
     sentences = args.sentences,
@@ -627,7 +642,11 @@ local function optimize_tm (args, typ)
   local final_encoding_info = {
     sentences = args.sentences,
     visible = args.visible,
+    problems = args.problems,
+    features = args.features,
     samples = args.samples,
+    solutions = args.solutions,
+    targets = args.targets,
   }
   local _, final_metrics = train_tm(typ, final_tm, final_train_args, best_params, final_iters,
     use_final_early_stop and final_patience or nil, args.early_tolerance, metric_fn, each_cb, { is_final = true }, final_encoding_info)
@@ -692,90 +711,57 @@ M.score_spectral_eval = function (args)
     eval_neighbors = eval.neighbors,
     eval_weights = eval.weights,
     ranking = eval_params.ranking,
-    n_dims = model.dims,
+    n_dims = model.spectral_dims or model.dims,
   })
 
-  local stats = evaluator.ranking_accuracy({
-    codes = model.codes,
-    index = model.index,
-    ids = model.ids,
-    eval_ids = eval.ids,
-    eval_offsets = eval.offsets,
-    eval_neighbors = eval.neighbors,
-    eval_weights = eval.weights,
-    ranking = eval_params.ranking,
-    n_dims = model.dims,
-  })
-
-  return stats.score, {
-    score = stats.score,
+  return raw_stats.score, {
+    score = raw_stats.score,
     raw_score = raw_stats.score,
     kernel_score = kernel_stats and kernel_stats.score or nil,
     n_dims = model.dims,
-    total_queries = stats.total_queries,
+    total_queries = raw_stats.total_queries,
   }
 end
 
 M.build_spectral_nystrom = function (args)
   local index = args.index
-  local n_landmarks = args.n_landmarks
+  local n_landmarks = args.n_landmarks or 0
   local n_dims = args.n_dims
   local cmp = args.cmp
   local cmp_alpha = args.cmp_alpha
   local cmp_beta = args.cmp_beta
   local decay = args.decay
   local combine = args.combine
+  local trace_tol = args.trace_tol
   local each_cb = args.each
   local binarize = args.binarize or "itq"
 
-  local t0 = utc.time(true)
-
-  if each_cb then
-    each_cb({ event = "stage", stage = "landmarks", decay = decay })
-  end
-
-  local landmark_ids, doc_ids, chol, actual_landmarks =
-    index:sample_landmarks(n_landmarks, cmp, cmp_alpha, cmp_beta, decay, combine)
+  local landmark_ids, doc_ids, chol, actual_landmarks, trace_ratio =
+    index:sample_landmarks(n_landmarks, cmp, cmp_alpha, cmp_beta, decay, combine, trace_tol)
 
   local n_samples = doc_ids:size()
-  local t1 = utc.time(true)
-
-  if each_cb then
-    each_cb({
-      event = "landmarks_result",
-      n_samples = n_samples,
-      n_landmarks = actual_landmarks,
-      requested_landmarks = n_landmarks,
-      elapsed = t1 - t0,
-    })
-  end
-
-  if each_cb then
-    each_cb({ event = "stage", stage = "spectral" })
+  local effective_dims = n_dims or n_landmarks
+  if effective_dims > actual_landmarks then
+    effective_dims = actual_landmarks
   end
 
   local eigenvectors, eigenvalues = spectral.encode({
     chol = chol,
     n_samples = n_samples,
     n_landmarks = actual_landmarks,
-    n_dims = n_dims,
+    n_dims = effective_dims,
     each = args.spectral_each,
   })
-
-  local t2 = utc.time(true)
 
   if each_cb then
     each_cb({
       event = "spectral_result",
-      n_dims = n_dims,
+      n_dims = effective_dims,
+      n_landmarks = actual_landmarks,
+      trace_ratio = trace_ratio,
       eig_min = eigenvalues:min(),
       eig_max = eigenvalues:max(),
-      elapsed = t2 - t1,
     })
-  end
-
-  if each_cb then
-    each_cb({ event = "stage", stage = "lift" })
   end
 
   local col_means, raw_codes = hlth.nystrom_lift({
@@ -784,71 +770,69 @@ M.build_spectral_nystrom = function (args)
     eigenvalues = eigenvalues,
     n_samples = n_samples,
     n_landmarks = actual_landmarks,
-    n_dims = n_dims,
+    n_dims = effective_dims,
   })
 
-  local t3 = utc.time(true)
+  local codes, itq_means_or_medians, itq_rotation, feat_offsets, feat_ids, feat_weights =
+    M.apply_itq(raw_codes, effective_dims, binarize)
 
-  if each_cb then
-    each_cb({ event = "stage_done", stage = "lift", elapsed = t3 - t2 })
-  end
-
-  if each_cb then
-    each_cb({ event = "stage", stage = "binarize", method = binarize })
-  end
-
-  local codes, itq_means_or_medians, itq_rotation = M.apply_itq(raw_codes, n_dims, true, binarize)
-
-  local t4 = utc.time(true)
-
-  if each_cb then
-    each_cb({ event = "stage_done", stage = "binarize", method = binarize, elapsed = t4 - t3 })
-  end
-
-  if each_cb then
-    each_cb({ event = "stage", stage = "index" })
-  end
-
-  local ann_index = ann.create({ features = n_dims })
-  ann_index:add(codes, doc_ids)
-
-  local t5 = utc.time(true)
-
-  if each_cb then
-    each_cb({ event = "stage_done", stage = "index", elapsed = t5 - t4, total = t5 - t0 })
+  local ann_index = nil
+  local is_continuous = (binarize == nil or binarize == "none")
+  if not is_continuous then
+    ann_index = ann.create({ features = effective_dims })
+    ann_index:add(codes, doc_ids)
   end
 
   return {
     ids = doc_ids,
     codes = codes,
     raw_codes = raw_codes,
-    dims = n_dims,
+    dims = effective_dims,
+    spectral_dims = effective_dims,
     index = ann_index,
+    continuous = is_continuous,
     landmark_ids = landmark_ids,
     eigenvectors = eigenvectors,
     eigenvalues = eigenvalues,
     col_means = col_means,
     binarize = binarize,
-    itq_means = binarize == "itq" and itq_means_or_medians or nil,
+    itq_means = (binarize == "itq" or binarize == "cca") and itq_means_or_medians or nil,
     itq_rotation = itq_rotation,
     median_thresholds = binarize == "median" and itq_means_or_medians or nil,
+    feat_offsets = feat_offsets,
+    feat_ids = feat_ids,
+    feat_weights = feat_weights,
     chol = chol,
     n_landmarks = actual_landmarks,
+    cmp = cmp,
+    cmp_alpha = cmp_alpha,
+    cmp_beta = cmp_beta,
+    decay = decay,
+    combine = combine,
   }
 end
 
 M.spectral = function (args)
   local index = err.assert(args.index, "index required")
-  local n_landmarks_cfg = err.assert(args.n_landmarks, "n_landmarks required")
-  local n_dims_cfg = err.assert(args.n_dims, "n_dims required")
+  local n_landmarks_cfg = args.n_landmarks
+  local n_dims_cfg = args.n_dims
+  if not n_landmarks_cfg and not n_dims_cfg then
+    err.error("n_landmarks or n_dims required")
+  end
+  n_landmarks_cfg = n_landmarks_cfg or n_dims_cfg
+  n_dims_cfg = n_dims_cfg or n_landmarks_cfg
   local cmp = args.cmp or "jaccard"
   local cmp_alpha = args.cmp_alpha or 0.5
   local cmp_beta = args.cmp_beta or 0.5
   local decay_cfg = args.decay or 0.0
   local combine = args.combine or "weighted_avg"
+  local trace_tol = args.trace_tol
   local each_cb = args.each
   local tolerance = args.tolerance or 1e-6
   local binarize = args.binarize or "itq"
+  local tokens = args.tokens
+  local n_tokens = args.n_tokens
+  local features_per_class = args.features_per_class
 
   local expected = args.expected and {
     ids = args.expected.ids,
@@ -880,6 +864,11 @@ M.spectral = function (args)
   if not has_search then
     local n_landmarks_val = get_fixed_val(n_landmarks_cfg)
     local n_dims_val = get_fixed_val(n_dims_cfg)
+    n_landmarks_val = n_landmarks_val or n_dims_val
+    n_dims_val = n_dims_val or n_landmarks_val
+    if n_dims_val > n_landmarks_val then
+      n_dims_val = n_landmarks_val
+    end
     local decay_val = get_fixed_val(decay_cfg) or 0.0
     local params = { n_landmarks = n_landmarks_val, n_dims = n_dims_val, decay = decay_val }
     if each_cb then
@@ -894,7 +883,11 @@ M.spectral = function (args)
       cmp_beta = cmp_beta,
       decay = decay_val,
       combine = combine,
+      trace_tol = trace_tol,
       binarize = binarize,
+      tokens = tokens,
+      n_tokens = n_tokens,
+      features_per_class = features_per_class,
       each = each_cb,
     })
     local score = nil
@@ -931,10 +924,13 @@ M.spectral = function (args)
       each_cb({
         event = "sample",
         round = info.round,
+        rounds = info.rounds,
         trial = info.trial,
+        trials = info.trials,
         n_landmarks = params.n_landmarks,
         n_dims = params.n_dims,
         decay = params.decay,
+        global_best_score = info.global_best_score,
       })
     end
     local model = M.build_spectral_nystrom({
@@ -946,7 +942,11 @@ M.spectral = function (args)
       cmp_beta = cmp_beta,
       decay = params.decay,
       combine = combine,
+      trace_tol = trace_tol,
       binarize = binarize,
+      tokens = tokens,
+      n_tokens = n_tokens,
+      features_per_class = features_per_class,
       each = each_cb,
     })
     local score, metrics = M.score_spectral_eval({
@@ -984,20 +984,27 @@ M.spectral = function (args)
         each_cb({
           event = "eval",
           round = ev.round,
+          trial = ev.trial,
+          trials = ev.trials,
           n_landmarks = ev.params.n_landmarks,
           n_dims = ev.params.n_dims,
           decay = ev.params.decay,
           score = ev.score,
           metrics = ev.metrics,
+          global_best_score = ev.global_best_score,
         })
       elseif ev.event == "round" then
         each_cb({
           event = "round_end",
           round = ev.round,
-          rounds = rounds,
+          rounds = ev.rounds,
+          trials = ev.trials,
+          round_samples = ev.round_samples,
+          round_improvements = ev.round_improvements,
           round_best_score = ev.round_best_score,
           global_best_score = ev.global_best_score,
           best_params = ev.global_best_params,
+          best_metrics = ev.global_best_metrics,
           success_rate = ev.success_rate,
           skip_rate = ev.skip_rate,
           adapt_factor = ev.adapt_factor,
