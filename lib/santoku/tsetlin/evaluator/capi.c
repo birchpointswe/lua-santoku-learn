@@ -69,15 +69,13 @@ typedef struct {
   tk_ivec_t *offsets;
   tk_ivec_t *neighbors;
   tk_dvec_t *weights;
-  uint64_t optimal_k;
-  int64_t start_prefix;
-  double tolerance;
   lua_State *L;
   tk_inv_hoods_t *inv_hoods;
   tk_ann_hoods_t *ann_hoods;
   tk_ivec_t *uids_hoods;
-  tk_eval_metric_t eval_metric;
   uint64_t margin;
+  uint64_t target_dims;
+  uint64_t min_dims;
 } tk_eval_t;
 
 static inline int tm_class_accuracy (lua_State *L)
@@ -162,6 +160,88 @@ static inline int tm_class_accuracy (lua_State *L)
   free(f1);
   lua_replace(L, 1);
   lua_settop(L, 1);
+  return 1;
+}
+
+static inline int tm_scores_class_accuracy (lua_State *L)
+{
+  lua_settop(L, 4);
+  tk_dvec_t *scores = tk_dvec_peek(L, 1, "scores");
+  tk_ivec_t *expected = tk_ivec_peek(L, 2, "expected");
+  unsigned int n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
+  unsigned int n_classes = tk_lua_checkunsigned(L, 4, "n_classes");
+  if (n_classes == 0)
+    tk_lua_verror(L, 4, "scores_class_accuracy", "n_classes", "must be > 0");
+  if (scores->n != (uint64_t)n_samples * n_classes)
+    return luaL_error(L, "scores size must equal n_samples * n_classes");
+  if (expected->n != n_samples)
+    return luaL_error(L, "expected size must equal n_samples");
+
+  atomic_ulong *TP = tk_malloc(L, n_classes * sizeof(atomic_ulong));
+  atomic_ulong *FP = tk_malloc(L, n_classes * sizeof(atomic_ulong));
+  atomic_ulong *FN = tk_malloc(L, n_classes * sizeof(atomic_ulong));
+  double *precision = tk_malloc(L, n_classes * sizeof(double));
+  double *recall = tk_malloc(L, n_classes * sizeof(double));
+  double *f1 = tk_malloc(L, n_classes * sizeof(double));
+
+  for (unsigned int i = 0; i < n_classes; i++) {
+    atomic_init(TP + i, 0);
+    atomic_init(FP + i, 0);
+    atomic_init(FN + i, 0);
+  }
+
+  #pragma omp parallel for schedule(static)
+  for (unsigned int i = 0; i < n_samples; i++) {
+    unsigned int y_pred = 0;
+    double best_score = scores->a[i * n_classes];
+    for (unsigned int c = 1; c < n_classes; c++) {
+      double s = scores->a[i * n_classes + c];
+      if (s > best_score) {
+        best_score = s;
+        y_pred = c;
+      }
+    }
+    unsigned int y_true = expected->a[i];
+    if (y_pred >= n_classes || y_true >= n_classes)
+      continue;
+    if (y_pred == y_true)
+      atomic_fetch_add(TP + y_true, 1);
+    else {
+      atomic_fetch_add(FP + y_pred, 1);
+      atomic_fetch_add(FN + y_true, 1);
+    }
+  }
+
+  double precision_avg = 0.0, recall_avg = 0.0, f1_avg = 0.0;
+  for (unsigned int c = 0; c < n_classes; c++) {
+    uint64_t tp = TP[c], fp = FP[c], fn = FN[c];
+    precision[c] = (tp + fp) > 0 ? (double)tp / (tp + fp) : 0.0;
+    recall[c] = (tp + fn) > 0 ? (double)tp / (tp + fn) : 0.0;
+    f1[c] = (precision[c] + recall[c]) > 0 ?
+      2.0 * precision[c] * recall[c] / (precision[c] + recall[c]) : 0.0;
+    precision_avg += precision[c];
+    recall_avg += recall[c];
+    f1_avg += f1[c];
+  }
+
+  free(TP);
+  free(FP);
+  free(FN);
+
+  precision_avg /= n_classes;
+  recall_avg /= n_classes;
+  f1_avg /= n_classes;
+  lua_newtable(L);
+  lua_pushnumber(L, f1_avg);
+  lua_setfield(L, -2, "f1");
+  lua_pushnumber(L, precision_avg);
+  lua_setfield(L, -2, "precision");
+  lua_pushnumber(L, recall_avg);
+  lua_setfield(L, -2, "recall");
+
+  free(precision);
+  free(recall);
+  free(f1);
   return 1;
 }
 
@@ -1508,7 +1588,7 @@ static inline int tm_score_retrieval (lua_State *L)
     ann = tk_ann_peekopt(L, -1);
     lua_pop(L, 1);
     if (!ann)
-      tk_lua_verror(L, 1, "score_retrieval", "codes/index/raw_codes/kernel_index", "codes, raw_codes, index, or kernel_index required");
+      tk_lua_verror(L, 3, "score_retrieval", "codes/index/raw_codes/kernel_index", "codes, raw_codes, index, or kernel_index required");
   }
 
   tk_ivec_t *code_ids = NULL;
@@ -1718,313 +1798,474 @@ static inline int tm_score_retrieval (lua_State *L)
   return 1;
 }
 
-static double tk_compute_reconstruction (
-  char *codes,
-  tk_ann_t *ann,
-  tk_ivec_t *adjacency_ids,
-  uint64_t n_dims,
-  tk_ivec_t *offsets,
-  tk_ivec_t *neighbors,
-  tk_dvec_t *weights,
-  tk_eval_metric_t eval_metric,
-  char *mask,
-  uint64_t mask_popcount
+typedef struct {
+  char *xor_codes;
+  uint16_t *distances;
+  uint64_t n_pairs;
+  uint64_t n_dims;
+  uint64_t chunks;
+  tk_ivec_t *offsets;
+  tk_ivec_t *neighbors;
+  tk_dvec_t *weights;
+} tk_incr_state_t;
+
+static double tk_incr_compute_ndcg (
+  tk_incr_state_t *state,
+  uint64_t bit_to_add,
+  bool commit,
+  uint64_t n_selected_bits
 ) {
-  if (mask_popcount == 0)
-    return -INFINITY;
+  uint64_t n_nodes = state->offsets->n - 1;
+  double total_ndcg = 0.0;
+  uint64_t byte_idx = TK_CVEC_BITS_BYTE(bit_to_add);
+  uint8_t bit_mask = 1 << TK_CVEC_BITS_BIT(bit_to_add);
+  uint64_t n_buckets = n_selected_bits + 2;
 
-  uint64_t chunks = TK_CVEC_BITS_BYTES(n_dims);
-  uint64_t n_nodes = offsets->n - 1;
-  double total = 0.0;
-  uint64_t total_nodes_processed = 0;
+  uint64_t max_neighbors = 0;
+  for (uint64_t i = 0; i < n_nodes; i++) {
+    uint64_t cnt = (uint64_t)(state->offsets->a[i + 1] - state->offsets->a[i]);
+    if (cnt > max_neighbors) max_neighbors = cnt;
+  }
 
-  #pragma omp parallel reduction(+:total) reduction(+:total_nodes_processed)
+  #pragma omp parallel reduction(+:total_ndcg)
   {
-    tk_pvec_t *bin_ranks = tk_pvec_create(NULL, 0, 0, 0);
-    tk_pvec_t *weight_ranks_buffer = tk_pvec_create(NULL, 0, 0, 0);
-    tk_dumap_t *rank_buffer_b = tk_dumap_create(NULL, 0);
-    tk_dumap_t *weight_rank_map = tk_dumap_create(NULL, 0);
-    uint64_t max_hamming = n_dims;
-    tk_ivec_t *count_buffer = tk_ivec_create(NULL, max_hamming + 1, 0, 0);
-    tk_dvec_t *avgrank_buffer = tk_dvec_create(NULL, max_hamming + 1, 0, 0);
-    tk_iuset_t *itmp = tk_iuset_create(NULL, 0);
+    uint64_t *buckets = malloc(n_buckets * sizeof(uint64_t));
+    uint64_t *bucket_counts = calloc(n_buckets, sizeof(uint64_t));
+    int64_t *temp_indices = malloc(max_neighbors * sizeof(int64_t));
+    int64_t *sorted = malloc(max_neighbors * sizeof(int64_t));
+    double *sorted_weights = malloc(max_neighbors * sizeof(double));
+    double *bucket_avg_discounts = malloc(n_buckets * sizeof(double));
 
-    if (!bin_ranks || !weight_ranks_buffer || !rank_buffer_b || !weight_rank_map || !count_buffer || !avgrank_buffer || !itmp) {
-      if (bin_ranks) tk_pvec_destroy(bin_ranks);
-      if (weight_ranks_buffer) tk_pvec_destroy(weight_ranks_buffer);
-      if (rank_buffer_b) tk_dumap_destroy(rank_buffer_b);
-      if (weight_rank_map) tk_dumap_destroy(weight_rank_map);
-      if (count_buffer) tk_ivec_destroy(count_buffer);
-      if (avgrank_buffer) tk_dvec_destroy(avgrank_buffer);
-      if (itmp) tk_iuset_destroy(itmp);
-    } else {
-      #pragma omp for schedule(static)
-      for (uint64_t node_idx = 0; node_idx < n_nodes; node_idx++) {
-        tk_pvec_clear(bin_ranks);
-        int64_t start = offsets->a[node_idx];
-        int64_t end = offsets->a[node_idx + 1];
+    #pragma omp for schedule(static)
+    for (uint64_t node_idx = 0; node_idx < n_nodes; node_idx++) {
+      int64_t start = state->offsets->a[node_idx];
+      int64_t end = state->offsets->a[node_idx + 1];
+      uint64_t n_neighbors = (uint64_t)(end - start);
+      if (n_neighbors == 0)
+        continue;
 
-        char *node_code = NULL;
-        if (codes) {
-          node_code = (char *)(codes + node_idx * chunks);
-        } else if (adjacency_ids) {
-          int64_t node_id = adjacency_ids->a[node_idx];
-          node_code = tk_ann_get(ann, node_id);
+      memset(bucket_counts, 0, n_buckets * sizeof(int64_t));
+
+      for (int64_t j = start; j < end; j++) {
+        uint16_t dist = state->distances[j];
+        if (bit_to_add < state->n_dims) {
+          unsigned char *xor_code = (unsigned char *)(state->xor_codes + (uint64_t)j * state->chunks);
+          if (xor_code[byte_idx] & bit_mask)
+            dist++;
         }
-        if (!node_code)
-          continue;
-
-        for (int64_t j = start; j < end; j ++) {
-          int64_t neighbor_pos = neighbors->a[j];
-
-          char *neighbor_code = NULL;
-          if (codes) {
-            neighbor_code = (char *)(codes + (uint64_t) neighbor_pos * chunks);
-          } else if (adjacency_ids) {
-            int64_t neighbor_id = adjacency_ids->a[neighbor_pos];
-            neighbor_code = tk_ann_get(ann, neighbor_id);
-          }
-          if (!neighbor_code)
-            continue;
-
-          uint64_t hamming_dist = mask
-            ? tk_cvec_bits_hamming_mask_serial(
-                (const unsigned char*)node_code,
-                (const unsigned char*)neighbor_code,
-                (const unsigned char*)mask,
-                n_dims)
-            : tk_cvec_bits_hamming_serial(
-                (const unsigned char*)node_code,
-                (const unsigned char*)neighbor_code,
-                n_dims);
-
-          tk_pvec_push(bin_ranks, tk_pair(neighbor_pos, (int64_t) hamming_dist));
-        }
-
-        double corr;
-        switch (eval_metric) {
-          case TK_EVAL_METRIC_PEARSON:
-            // Same adjacency for both expected and retrieved (single adjacency comparison)
-            corr = tk_csr_pearson_distance(adjacency_ids, neighbors, weights, start, end,
-              adjacency_ids, bin_ranks, rank_buffer_b);
-            break;
-          case TK_EVAL_METRIC_SPEARMAN:
-            tk_pvec_desc(bin_ranks, 0, bin_ranks->n);
-            corr = tk_csr_spearman_distance(adjacency_ids, neighbors, weights, start, end,
-              adjacency_ids, bin_ranks, weight_ranks_buffer, weight_rank_map);
-            break;
-          case TK_EVAL_METRIC_NDCG:
-            tk_pvec_asc(bin_ranks, 0, bin_ranks->n);
-            corr = tk_csr_ndcg_distance(adjacency_ids, neighbors, weights, start, end,
-              adjacency_ids, bin_ranks, rank_buffer_b);
-            break;
-          default:
-            corr = 0.0;
-            break;
-        }
-        total += corr;
-        total_nodes_processed++;
+        bucket_counts[dist]++;
+        temp_indices[j - start] = ((int64_t)dist << 48) | j;
+        sorted_weights[j - start] = state->weights->a[j];
       }
 
-      tk_pvec_destroy(bin_ranks);
-      tk_pvec_destroy(weight_ranks_buffer);
-      tk_dumap_destroy(rank_buffer_b);
-      tk_dumap_destroy(weight_rank_map);
-      tk_ivec_destroy(count_buffer);
-      tk_dvec_destroy(avgrank_buffer);
-      tk_iuset_destroy(itmp);
+      for (uint64_t i = 0; i < n_neighbors; i++) {
+        for (uint64_t k = i + 1; k < n_neighbors; k++) {
+          if (sorted_weights[k] > sorted_weights[i]) {
+            double tmp = sorted_weights[i];
+            sorted_weights[i] = sorted_weights[k];
+            sorted_weights[k] = tmp;
+          }
+        }
+      }
+      double idcg = 0.0;
+      for (uint64_t i = 0; i < n_neighbors; i++)
+        idcg += sorted_weights[i] / log2((double)(i + 2));
+
+      if (idcg <= 0.0)
+        continue;
+
+      buckets[0] = 0;
+      for (uint64_t d = 1; d < n_buckets; d++)
+        buckets[d] = buckets[d-1] + bucket_counts[d-1];
+
+      uint64_t pos = 0;
+      for (uint64_t d = 0; d < n_buckets; d++) {
+        if (bucket_counts[d] == 0) {
+          bucket_avg_discounts[d] = 1.0;
+          continue;
+        }
+        double discount_sum = 0.0;
+        for (uint64_t p = pos; p < pos + bucket_counts[d]; p++)
+          discount_sum += log2((double)(p + 2));
+        bucket_avg_discounts[d] = discount_sum / (double)bucket_counts[d];
+        pos += bucket_counts[d];
+      }
+
+      for (uint64_t i = 0; i < n_neighbors; i++) {
+        int64_t packed = temp_indices[i];
+        uint16_t dist = (uint16_t)(packed >> 48);
+        int64_t j = packed & 0xFFFFFFFFFFFFLL;
+        sorted[buckets[dist]++] = j;
+      }
+
+      double dcg = 0.0;
+      pos = 0;
+      for (uint64_t d = 0; d < n_buckets; d++) {
+        for (uint64_t i = 0; i < bucket_counts[d]; i++) {
+          int64_t j = sorted[pos + i];
+          double w = state->weights->a[j];
+          dcg += w / bucket_avg_discounts[d];
+        }
+        pos += bucket_counts[d];
+      }
+
+      total_ndcg += dcg / idcg;
+    }
+
+    free(buckets);
+    free(bucket_counts);
+    free(temp_indices);
+    free(sorted);
+    free(sorted_weights);
+    free(bucket_avg_discounts);
+  }
+
+  if (commit && bit_to_add < state->n_dims) {
+    #pragma omp parallel for schedule(static)
+    for (uint64_t j = 0; j < state->n_pairs; j++) {
+      unsigned char *xor_code = (unsigned char *)(state->xor_codes + j * state->chunks);
+      if (xor_code[byte_idx] & bit_mask)
+        state->distances[j]++;
     }
   }
 
-  return total_nodes_processed > 0 ? total / (double) total_nodes_processed : 0.0;
+  return n_nodes > 0 ? total_ndcg / (double) n_nodes : 0.0;
 }
 
-static double tk_compute_score (
-  tk_eval_t *state,
-  char *mask,
-  uint64_t mask_popcount
+static double tk_incr_compute_ndcg_sub (
+  tk_incr_state_t *state,
+  uint64_t bit_to_remove,
+  bool commit,
+  uint64_t n_selected_bits
 ) {
-  return tk_compute_reconstruction(
-    state->codes, state->ann, state->adjacency_ids,
-    state->n_dims, state->offsets, state->neighbors, state->weights,
-    state->eval_metric, mask, mask_popcount);
+  uint64_t n_nodes = state->offsets->n - 1;
+  double total_ndcg = 0.0;
+  uint64_t byte_idx = TK_CVEC_BITS_BYTE(bit_to_remove);
+  uint8_t bit_mask = 1 << TK_CVEC_BITS_BIT(bit_to_remove);
+  uint64_t n_buckets = n_selected_bits + 2;
+
+  uint64_t max_neighbors = 0;
+  for (uint64_t i = 0; i < n_nodes; i++) {
+    uint64_t cnt = (uint64_t)(state->offsets->a[i + 1] - state->offsets->a[i]);
+    if (cnt > max_neighbors) max_neighbors = cnt;
+  }
+
+  #pragma omp parallel reduction(+:total_ndcg)
+  {
+    uint64_t *buckets = malloc(n_buckets * sizeof(uint64_t));
+    uint64_t *bucket_counts = calloc(n_buckets, sizeof(uint64_t));
+    int64_t *temp_indices = malloc(max_neighbors * sizeof(int64_t));
+    int64_t *sorted = malloc(max_neighbors * sizeof(int64_t));
+    double *sorted_weights = malloc(max_neighbors * sizeof(double));
+    double *bucket_avg_discounts = malloc(n_buckets * sizeof(double));
+
+    #pragma omp for schedule(static)
+    for (uint64_t node_idx = 0; node_idx < n_nodes; node_idx++) {
+      int64_t start = state->offsets->a[node_idx];
+      int64_t end = state->offsets->a[node_idx + 1];
+      uint64_t n_neighbors = (uint64_t)(end - start);
+      if (n_neighbors == 0)
+        continue;
+
+      memset(bucket_counts, 0, n_buckets * sizeof(int64_t));
+
+      for (int64_t j = start; j < end; j++) {
+        uint16_t dist = state->distances[j];
+        if (bit_to_remove < state->n_dims) {
+          unsigned char *xor_code = (unsigned char *)(state->xor_codes + (uint64_t)j * state->chunks);
+          if (xor_code[byte_idx] & bit_mask)
+            dist--;
+        }
+        bucket_counts[dist]++;
+        temp_indices[j - start] = ((int64_t)dist << 48) | j;
+        sorted_weights[j - start] = state->weights->a[j];
+      }
+
+      for (uint64_t i = 0; i < n_neighbors; i++) {
+        for (uint64_t k = i + 1; k < n_neighbors; k++) {
+          if (sorted_weights[k] > sorted_weights[i]) {
+            double tmp = sorted_weights[i];
+            sorted_weights[i] = sorted_weights[k];
+            sorted_weights[k] = tmp;
+          }
+        }
+      }
+      double idcg = 0.0;
+      for (uint64_t i = 0; i < n_neighbors; i++)
+        idcg += sorted_weights[i] / log2((double)(i + 2));
+
+      if (idcg <= 0.0)
+        continue;
+
+      buckets[0] = 0;
+      for (uint64_t d = 1; d < n_buckets; d++)
+        buckets[d] = buckets[d-1] + bucket_counts[d-1];
+
+      uint64_t pos = 0;
+      for (uint64_t d = 0; d < n_buckets; d++) {
+        if (bucket_counts[d] == 0) {
+          bucket_avg_discounts[d] = 1.0;
+          continue;
+        }
+        double discount_sum = 0.0;
+        for (uint64_t p = pos; p < pos + bucket_counts[d]; p++)
+          discount_sum += log2((double)(p + 2));
+        bucket_avg_discounts[d] = discount_sum / (double)bucket_counts[d];
+        pos += bucket_counts[d];
+      }
+
+      for (uint64_t i = 0; i < n_neighbors; i++) {
+        int64_t packed = temp_indices[i];
+        uint16_t dist = (uint16_t)(packed >> 48);
+        int64_t j = packed & 0xFFFFFFFFFFFFLL;
+        sorted[buckets[dist]++] = j;
+      }
+
+      double dcg = 0.0;
+      pos = 0;
+      for (uint64_t d = 0; d < n_buckets; d++) {
+        for (uint64_t i = 0; i < bucket_counts[d]; i++) {
+          int64_t j = sorted[pos + i];
+          double w = state->weights->a[j];
+          dcg += w / bucket_avg_discounts[d];
+        }
+        pos += bucket_counts[d];
+      }
+
+      total_ndcg += dcg / idcg;
+    }
+
+    free(buckets);
+    free(bucket_counts);
+    free(temp_indices);
+    free(sorted);
+    free(sorted_weights);
+    free(bucket_avg_discounts);
+  }
+
+  if (commit && bit_to_remove < state->n_dims) {
+    #pragma omp parallel for schedule(static)
+    for (uint64_t j = 0; j < state->n_pairs; j++) {
+      unsigned char *xor_code = (unsigned char *)(state->xor_codes + j * state->chunks);
+      if (xor_code[byte_idx] & bit_mask)
+        state->distances[j]--;
+    }
+  }
+
+  return n_nodes > 0 ? total_ndcg / (double) n_nodes : 0.0;
 }
 
-static void tm_optimize_bits_prefix_greedy (
+static void tm_optimize_bits_sfbs (
   lua_State *L,
   tk_eval_t *state,
   int i_each
 ) {
   uint64_t n_dims = state->n_dims;
-  uint64_t keep_prefix = state->optimal_k;
-  int64_t start_prefix = state->start_prefix;
-  double tolerance = state->tolerance;
-  uint64_t bytes_per_mask = TK_CVEC_BITS_BYTES(n_dims);
-  tk_cvec_t *mask_cvec = tk_cvec_create(L, bytes_per_mask, 0, 0);
-  tk_cvec_t *candidate_cvec = tk_cvec_create(L, bytes_per_mask, 0, 0);
-  char *mask = mask_cvec->a;
-  char *candidate = candidate_cvec->a;
+  uint64_t target_dims = state->target_dims;
+  uint64_t min_dims = state->min_dims > 0 ? state->min_dims : 0;
+  uint64_t chunks = TK_CVEC_BITS_BYTES(n_dims);
+  uint64_t n_nodes = state->offsets->n - 1;
+  uint64_t n_pairs = state->neighbors->n;
 
-  uint64_t best_prefix;
-  double best_prefix_score;
+  char *xor_codes = tk_malloc(L, n_pairs * chunks);
+  memset(xor_codes, 0, n_pairs * chunks);
+  uint16_t *distances = tk_malloc(L, n_pairs * sizeof(uint16_t));
+  memset(distances, 0, n_pairs * sizeof(uint16_t));
 
-  if (start_prefix < 0) {
-    uint64_t min_prefix = keep_prefix > 0 ? keep_prefix : 1;
-    best_prefix = min_prefix;
-    best_prefix_score = -INFINITY;
-    for (uint64_t k = min_prefix; k <= n_dims; k ++) {
-      memset(mask, 0, bytes_per_mask);
-      for (uint64_t b = 0; b < k; b ++)
-        mask[TK_CVEC_BITS_BYTE(b)] |= (1 << TK_CVEC_BITS_BIT(b));
-      double score = tk_compute_score(state, mask, k);
-      double gain = best_prefix_score == -INFINITY ? 0 : (score - best_prefix_score);
-      if (i_each >= 0) {
-        lua_pushvalue(L, i_each);
-        lua_pushinteger(L, (lua_Integer) k);
-        lua_pushnumber(L, gain);
-        lua_pushnumber(L, score);
-        lua_pushliteral(L, "scan");
-        lua_call(L, 4, 0);
+  uint64_t pairs_computed = 0;
+  for (uint64_t node_idx = 0; node_idx < n_nodes; node_idx++) {
+    int64_t start = state->offsets->a[node_idx];
+    int64_t end = state->offsets->a[node_idx + 1];
+
+    char *node_code = NULL;
+    if (state->codes) {
+      node_code = state->codes + node_idx * chunks;
+    } else if (state->ann && state->adjacency_ids) {
+      int64_t node_id = state->adjacency_ids->a[node_idx];
+      node_code = tk_ann_get(state->ann, node_id);
+    }
+    if (!node_code)
+      continue;
+
+    for (int64_t j = start; j < end; j++) {
+      int64_t neighbor_pos = state->neighbors->a[j];
+      char *neighbor_code = NULL;
+      if (state->codes) {
+        neighbor_code = state->codes + (uint64_t)neighbor_pos * chunks;
+      } else if (state->ann && state->adjacency_ids) {
+        int64_t neighbor_id = state->adjacency_ids->a[neighbor_pos];
+        neighbor_code = tk_ann_get(state->ann, neighbor_id);
       }
-      if (score > best_prefix_score + 1e-12) {
-        best_prefix_score = score;
-        best_prefix = k;
+      if (!neighbor_code)
+        continue;
+
+      char *xor_dest = xor_codes + (uint64_t)j * chunks;
+      for (uint64_t c = 0; c < chunks; c++) {
+        xor_dest[c] = node_code[c] ^ neighbor_code[c];
       }
-    }
-    if (i_each >= 0) {
-      lua_pushvalue(L, i_each);
-      lua_pushinteger(L, (lua_Integer) best_prefix);
-      lua_pushnumber(L, 0.0);
-      lua_pushnumber(L, best_prefix_score);
-      lua_pushliteral(L, "init");
-      lua_call(L, 4, 0);
-    }
-  } else if (start_prefix == 0) {
-    best_prefix = 1;
-    best_prefix_score = -INFINITY;
-    uint64_t best_bit = 0;
-    for (uint64_t b = 0; b < n_dims; b ++) {
-      memset(mask, 0, bytes_per_mask);
-      mask[TK_CVEC_BITS_BYTE(b)] |= (1 << TK_CVEC_BITS_BIT(b));
-      double score = tk_compute_score(state, mask, 1);
-      if (score > best_prefix_score + 1e-12) {
-        best_prefix_score = score;
-        best_bit = b;
-      }
-    }
-    memset(mask, 0, bytes_per_mask);
-    mask[TK_CVEC_BITS_BYTE(best_bit)] |= (1 << TK_CVEC_BITS_BIT(best_bit));
-    best_prefix = 1;
-    if (i_each >= 0) {
-      lua_pushvalue(L, i_each);
-      lua_pushinteger(L, (lua_Integer) best_bit);
-      lua_pushnumber(L, 0.0);
-      lua_pushnumber(L, best_prefix_score);
-      lua_pushliteral(L, "init");
-      lua_call(L, 4, 0);
-    }
-  } else {
-    best_prefix = (uint64_t) start_prefix;
-    if (best_prefix > n_dims)
-      best_prefix = n_dims;
-    memset(mask, 0, bytes_per_mask);
-    for (uint64_t b = 0; b < best_prefix; b ++)
-      mask[TK_CVEC_BITS_BYTE(b)] |= (1 << TK_CVEC_BITS_BIT(b));
-    best_prefix_score = tk_compute_score(state, mask, best_prefix);
-    if (i_each >= 0) {
-      lua_pushvalue(L, i_each);
-      lua_pushinteger(L, (lua_Integer) best_prefix);
-      lua_pushnumber(L, 0.0);
-      lua_pushnumber(L, best_prefix_score);
-      lua_pushliteral(L, "scan");
-      lua_call(L, 4, 0);
+      pairs_computed++;
     }
   }
 
-  tk_ivec_t *active = tk_ivec_create(L, best_prefix, 0, 0);
-  if (start_prefix == 0) {
-    for (uint64_t b = 0; b < n_dims; b ++) {
-      if (mask[TK_CVEC_BITS_BYTE(b)] & (1 << TK_CVEC_BITS_BIT(b))) {
-        active->a[0] = (int64_t)b;
-        active->n = 1;
-        break;
-      }
+  if (pairs_computed == 0)
+    luaL_error(L, "optimize_bits: no pairs computed (ann lookup failed?)");
+
+  uint64_t *bit_counts = tk_malloc(L, n_dims * sizeof(uint64_t));
+  memset(bit_counts, 0, n_dims * sizeof(uint64_t));
+  for (uint64_t j = 0; j < n_pairs; j++) {
+    unsigned char *xor_code = (unsigned char *)(xor_codes + j * chunks);
+    for (uint64_t b = 0; b < n_dims; b++) {
+      uint64_t byte_idx = TK_CVEC_BITS_BYTE(b);
+      uint8_t bit_mask = 1 << TK_CVEC_BITS_BIT(b);
+      if (xor_code[byte_idx] & bit_mask)
+        bit_counts[b]++;
     }
-  } else {
-    for (uint64_t i = 0; i < best_prefix; i ++)
-      active->a[i] = (int64_t) i;
-    active->n = best_prefix;
   }
 
-  double current_score = best_prefix_score;
+  char *discriminative = tk_malloc(L, n_dims);
+  for (uint64_t b = 0; b < n_dims; b++)
+    discriminative[b] = (bit_counts[b] > 0 && bit_counts[b] < n_pairs) ? 1 : 0;
+  free(bit_counts);
 
-  bool improved = true;
-  while (improved && active->n > 0) {
-    improved = false;
+  tk_incr_state_t incr_state = {
+    .xor_codes = xor_codes,
+    .distances = distances,
+    .n_pairs = n_pairs,
+    .n_dims = n_dims,
+    .chunks = chunks,
+    .offsets = state->offsets,
+    .neighbors = state->neighbors,
+    .weights = state->weights,
+  };
 
-    if (active->n > 1)
+  tk_ivec_t *active = tk_ivec_create(L, n_dims, 0, 0);
+  active->n = 0;
+  char *selected = tk_malloc(L, n_dims);
+  memset(selected, 0, n_dims);
 
-      for (uint64_t i = 0; i < active->n; i ++) {
-        int64_t bit = active->a[i];
-        if (keep_prefix > 0 && bit < (int64_t)keep_prefix)
-          continue;
-        memcpy(candidate, mask, bytes_per_mask);
-        candidate[TK_CVEC_BITS_BYTE(bit)] &= ~(1 << TK_CVEC_BITS_BIT(bit));
-        double score = tk_compute_score(state, candidate, active->n - 1);
-        if (score > current_score + tolerance) {
-          mask[TK_CVEC_BITS_BYTE(bit)] &= ~(1 << TK_CVEC_BITS_BIT(bit));
-          active->a[i] = active->a[active->n - 1];
-          active->n --;
-          double gain = score - current_score;
-          current_score = score;
-          improved = true;
-          if (i_each >= 0) {
-            lua_pushvalue(L, i_each);
-            lua_pushinteger(L, bit);
-            lua_pushnumber(L, gain);
-            lua_pushnumber(L, current_score);
-            lua_pushliteral(L, "remove");
-            lua_call(L, 4, 0);
+  double current_score = 0.0;
+  uint64_t max_bits = target_dims > 0 ? target_dims : n_dims;
+
+  while (1) {
+    bool changed = false;
+
+    if (active->n < max_bits) {
+      int64_t best_add_bit = -1;
+      double best_add_score = -INFINITY;
+
+      #pragma omp parallel
+      {
+        int64_t local_best_bit = -1;
+        double local_best_score = -INFINITY;
+
+        #pragma omp for schedule(dynamic)
+        for (uint64_t b = 0; b < n_dims; b++) {
+          if (selected[b] || !discriminative[b])
+            continue;
+          double score = tk_incr_compute_ndcg(&incr_state, b, false, active->n);
+          if (score > local_best_score) {
+            local_best_score = score;
+            local_best_bit = (int64_t)b;
           }
-          break;
+        }
+
+        #pragma omp critical
+        {
+          if (local_best_score > best_add_score) {
+            best_add_score = local_best_score;
+            best_add_bit = local_best_bit;
+          }
         }
       }
 
-    if (!improved && active->n < n_dims) {
-      for (int64_t bit_add = 0; bit_add < (int64_t) n_dims; bit_add ++) {
-        bool is_active = false;
-        for (uint64_t j = 0; j < active->n; j ++) {
-          if (active->a[j] == bit_add) {
-            is_active = true;
-            break;
-          }
-        }
-        if (is_active)
-          continue;
-        memcpy(candidate, mask, bytes_per_mask);
-        candidate[TK_CVEC_BITS_BYTE(bit_add)] |= (1 << TK_CVEC_BITS_BIT(bit_add));
-        double score = tk_compute_score(state, candidate, active->n + 1);
-        if (score >= current_score + tolerance) {
-          mask[TK_CVEC_BITS_BYTE(bit_add)] |= (1 << TK_CVEC_BITS_BIT(bit_add));
-          if (tk_ivec_push(active, bit_add) != 0)
-            tk_lua_verror(L, 2, "optimize_bits", "allocation failed");
-          double gain = current_score == -INFINITY ? 0 : (score - current_score);
-          current_score = score;
-          improved = true;
+      if (best_add_bit >= 0) {
+        double gain = (active->n == 0) ? best_add_score : (best_add_score - current_score);
+        bool should_add = (gain > 0.0) || (active->n < min_dims);
+
+        if (should_add) {
+          tk_incr_compute_ndcg(&incr_state, (uint64_t)best_add_bit, true, active->n);
+          selected[best_add_bit] = 1;
+          if (tk_ivec_push(active, best_add_bit) != 0)
+            luaL_error(L, "optimize_bits: allocation failed");
+          current_score = best_add_score;
+          changed = true;
+
           if (i_each >= 0) {
             lua_pushvalue(L, i_each);
-            lua_pushinteger(L, bit_add);
+            lua_pushinteger(L, best_add_bit);
             lua_pushnumber(L, gain);
             lua_pushnumber(L, current_score);
             lua_pushliteral(L, "add");
             lua_call(L, 4, 0);
           }
-          break;
         }
       }
     }
 
+    if (active->n > 1 && active->n > min_dims) {
+      int64_t best_remove_bit = -1;
+      double best_remove_score = -INFINITY;
+
+      #pragma omp parallel
+      {
+        int64_t local_best_bit = -1;
+        double local_best_score = -INFINITY;
+
+        #pragma omp for schedule(dynamic)
+        for (uint64_t b = 0; b < n_dims; b++) {
+          if (!selected[b])
+            continue;
+          double score = tk_incr_compute_ndcg_sub(&incr_state, b, false, active->n);
+          if (score > local_best_score) {
+            local_best_score = score;
+            local_best_bit = (int64_t)b;
+          }
+        }
+
+        #pragma omp critical
+        {
+          if (local_best_score > best_remove_score) {
+            best_remove_score = local_best_score;
+            best_remove_bit = local_best_bit;
+          }
+        }
+      }
+
+      if (best_remove_bit >= 0 && best_remove_score > current_score) {
+        double gain = best_remove_score - current_score;
+
+        tk_incr_compute_ndcg_sub(&incr_state, (uint64_t)best_remove_bit, true, active->n);
+        selected[best_remove_bit] = 0;
+        current_score = best_remove_score;
+        changed = true;
+
+        if (i_each >= 0) {
+          lua_pushvalue(L, i_each);
+          lua_pushinteger(L, best_remove_bit);
+          lua_pushnumber(L, gain);
+          lua_pushnumber(L, current_score);
+          lua_pushliteral(L, "remove");
+          lua_call(L, 4, 0);
+        }
+      }
+    }
+
+    if (!changed)
+      break;
   }
+
+  active->n = 0;
+  for (uint64_t b = 0; b < n_dims; b++) {
+    if (selected[b]) {
+      if (tk_ivec_push(active, (int64_t)b) != 0)
+        luaL_error(L, "optimize_bits: allocation failed");
+    }
+  }
+
+  free(xor_codes);
+  free(distances);
+  free(selected);
+  free(discriminative);
 
   tk_ivec_asc(active, 0, active->n);
 }
@@ -2033,17 +2274,9 @@ static inline int tm_optimize_bits (lua_State *L)
 {
   lua_settop(L, 1);
 
-  char *metric_str = tk_lua_foptstring(L, 1, "optimize_bits", "metric", "ndcg");
-  tk_eval_metric_t metric = tk_eval_parse_metric(metric_str);
-  if (metric != TK_EVAL_METRIC_NDCG &&
-      metric != TK_EVAL_METRIC_SPEARMAN &&
-      metric != TK_EVAL_METRIC_PEARSON)
-    tk_lua_verror(L, 1, "optimize_bits", "metric", "must be ndcg, spearman, or pearson");
-
   uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "optimize_bits", "n_dims");
-  uint64_t keep_prefix = tk_lua_foptunsigned(L, 1, "optimize_bits", "keep_prefix", 0);
-  int64_t start_prefix = tk_lua_foptinteger(L, 1, "optimize_bits", "start_prefix", 0);
-  double tolerance = tk_lua_foptnumber(L, 1, "optimize_bits", "tolerance", 1e-12);
+  uint64_t target_dims = tk_lua_foptunsigned(L, 1, "optimize_bits", "target_dims", 0);
+  uint64_t min_dims = tk_lua_foptunsigned(L, 1, "optimize_bits", "min_dims", 0);
 
   lua_getfield(L, 1, "expected_ids");
   tk_ivec_t *expected_ids = tk_ivec_peek(L, -1, "expected_ids");
@@ -2058,8 +2291,13 @@ static inline int tm_optimize_bits (lua_State *L)
   lua_pop(L, 1);
 
   lua_getfield(L, 1, "expected_weights");
-  tk_dvec_t *weights = tk_dvec_peek(L, -1, "expected_weights");
+  tk_dvec_t *weights = tk_dvec_peekopt(L, -1);
   lua_pop(L, 1);
+  if (!weights)
+    tk_lua_verror(L, 1, "optimize_bits", "expected_weights", "required for bit optimization");
+  if (weights->n != neighbors->n)
+    luaL_error(L, "optimize_bits: expected_weights length (%d) must match expected_neighbors length (%d)",
+      (int)weights->n, (int)neighbors->n);
 
   char *codes = NULL;
   tk_ann_t *ann = NULL;
@@ -2093,13 +2331,12 @@ static inline int tm_optimize_bits (lua_State *L)
   state.offsets = offsets;
   state.neighbors = neighbors;
   state.weights = weights;
-  state.optimal_k = keep_prefix;
-  state.start_prefix = start_prefix;
-  state.tolerance = tolerance;
-  state.eval_metric = metric;
+  state.target_dims = target_dims;
+  state.min_dims = min_dims;
   state.L = L;
 
-  tm_optimize_bits_prefix_greedy(L, &state, i_each);
+  tm_optimize_bits_sfbs(L, &state, i_each);
+
   lua_replace(L, 1);
   lua_settop(L, 1);
   return 1;
@@ -2435,6 +2672,7 @@ static inline int tk_dendro_iter_lua(lua_State *L) {
 static luaL_Reg tm_evaluator_fns[] =
 {
   { "class_accuracy", tm_class_accuracy },
+  { "scores_class_accuracy", tm_scores_class_accuracy },
   { "encoding_accuracy", tm_encoding_accuracy },
   { "regression_accuracy", tm_regression_accuracy },
   { "retrieval_accuracy", tm_multilabel_retrieval_accuracy },

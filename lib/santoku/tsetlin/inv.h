@@ -1245,36 +1245,6 @@ static inline double tk_inv_similarity_by_rank (
     cmp, cmp_alpha, cmp_beta, combine, cutoff, &rw);
 }
 
-static inline double tk_inv_distance_extend (
-  tk_inv_t *categories,
-  int64_t uid0,
-  int64_t uid1,
-  double observable_distance,
-  tk_ivec_sim_type_t cmp,
-  double cmp_alpha,
-  double cmp_beta,
-  tk_combine_type_t combine,
-  double decay
-) {
-  if (!categories || categories->n_ranks == 0)
-    return observable_distance;
-  if (observable_distance == DBL_MAX || isnan(observable_distance))
-    return tk_inv_distance(categories, uid0, uid1, cmp, cmp_alpha, cmp_beta, combine, decay);
-  size_t n0 = 0, n1 = 0;
-  int64_t *v0 = tk_inv_get(categories, uid0, &n0);
-  int64_t *v1 = tk_inv_get(categories, uid1, &n1);
-  if (v0 == NULL || v1 == NULL)
-    return observable_distance;
-  double hier_sim = tk_inv_similarity(categories, v0, n0, v1, n1, cmp, cmp_alpha, cmp_beta, combine, decay);
-  double obs_sim = 1.0 - observable_distance;
-  if (obs_sim < 0.0) obs_sim = 0.0;
-  if (obs_sim > 1.0) obs_sim = 1.0;
-  double abs_decay = fabs(decay);
-  double total_weight = 1.0 + abs_decay;
-  double blended_sim = (hier_sim + abs_decay * obs_sim) / total_weight;
-  return 1.0 - blended_sim;
-}
-
 static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   tk_inv_t *inv,
   int64_t *data,
@@ -1679,6 +1649,7 @@ static inline void tk_inv_sample_landmarks (
   lua_State *L,
   tk_inv_t *inv,
   uint64_t n_landmarks,
+  double trace_tol,
   tk_ivec_sim_type_t cmp,
   double cmp_alpha,
   double cmp_beta,
@@ -1687,7 +1658,8 @@ static inline void tk_inv_sample_landmarks (
   tk_ivec_t **ids_out,
   tk_ivec_t **doc_ids_out,
   tk_dvec_t **chol_out,
-  uint64_t *actual_landmarks_out
+  uint64_t *actual_landmarks_out,
+  double *trace_ratio_out
 ) {
   uint64_t n_docs = 0;
   for (int64_t sid = 0; sid < inv->next_sid; sid++) {
@@ -1695,13 +1667,16 @@ static inline void tk_inv_sample_landmarks (
       n_docs++;
   }
 
-  if (n_landmarks > n_docs)
+  if (n_landmarks == 0 || n_landmarks > n_docs)
     n_landmarks = n_docs;
+  if (trace_tol <= 0.0)
+    trace_tol = 1e-12;
   if (n_landmarks == 0) {
     *ids_out = tk_ivec_create(L, 0, 0, 0);
     *doc_ids_out = tk_ivec_create(L, 0, 0, 0);
     *chol_out = tk_dvec_create(L, 0, 0, 0);
     *actual_landmarks_out = 0;
+    *trace_ratio_out = 0.0;
     return;
   }
 
@@ -1780,7 +1755,7 @@ static inline void tk_inv_sample_landmarks (
             trace += residual[i];
         }
 
-        if (trace < 1e-12 * initial_trace || trace < 1e-15) {
+        if (trace < trace_tol * initial_trace || trace < 1e-15) {
           done = true;
         } else {
           double r = tk_fast_drand() * trace;
@@ -1861,26 +1836,30 @@ static inline void tk_inv_sample_landmarks (
   *doc_ids_out = all_doc_ids;
   *chol_out = chol;
   *actual_landmarks_out = actual_landmarks;
+  *trace_ratio_out = (initial_trace > 0.0) ? (trace / initial_trace) : 0.0;
 }
 
 static inline int tk_inv_sample_landmarks_lua (lua_State *L)
 {
-  lua_settop(L, 7);
+  lua_settop(L, 8);
   tk_inv_t *inv = tk_inv_peek(L, 1);
-  uint64_t n_landmarks = tk_lua_checkunsigned(L, 2, "n_landmarks");
+  uint64_t n_landmarks = tk_lua_optunsigned(L, 2, "n_landmarks", 0);
   tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 3, "cmp", "jaccard"));
   double cmp_alpha = tk_lua_optnumber(L, 4, "alpha", 0.5);
   double cmp_beta = tk_lua_optnumber(L, 5, "beta", 0.5);
   double decay = tk_lua_optnumber(L, 6, "decay", 0.0);
   tk_combine_type_t combine = tk_inv_parse_combine(tk_lua_optstring(L, 7, "combine", "weighted_avg"));
+  double trace_tol = tk_lua_optnumber(L, 8, "trace_tol", 1e-12);
   tk_ivec_t *landmark_ids;
   tk_ivec_t *doc_ids;
   tk_dvec_t *chol;
   uint64_t actual_landmarks;
-  tk_inv_sample_landmarks(L, inv, n_landmarks, cmp, cmp_alpha, cmp_beta, decay, combine,
-                          &landmark_ids, &doc_ids, &chol, &actual_landmarks);
+  double trace_ratio;
+  tk_inv_sample_landmarks(L, inv, n_landmarks, trace_tol, cmp, cmp_alpha, cmp_beta, decay, combine,
+                          &landmark_ids, &doc_ids, &chol, &actual_landmarks, &trace_ratio);
   lua_pushinteger(L, (int64_t) actual_landmarks);
-  return 4;
+  lua_pushnumber(L, trace_ratio);
+  return 5;
 }
 
 static inline int tk_inv_destroy_lua (lua_State *L)

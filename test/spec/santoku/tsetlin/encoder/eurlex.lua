@@ -1,5 +1,5 @@
+local _ -- luacheck: ignore
 local ann = require("santoku.tsetlin.ann")
-local cvec = require("santoku.cvec")
 local ds = require("santoku.tsetlin.dataset")
 local dvec = require("santoku.dvec")
 local eval = require("santoku.tsetlin.evaluator")
@@ -14,50 +14,50 @@ local util = require("santoku.tsetlin.util")
 local utc = require("santoku.utc")
 
 local cfg = {
+  exit_after = nil, --"spectral",
   data = {
-    max = nil,
+    max = 4000,
   },
   tokenizer = {
     max_len = 20,
     min_len = 1,
     max_run = 2,
     ngrams = 2,
-    cgrams_min = 3,
-    cgrams_max = 5,
-    cgrams_cross = true,
+    cgrams_min = 0,
+    cgrams_max = 0,
+    cgrams_cross = false,
     skips = 1,
   },
   feature_selection = {
+    grouped = false,
     max_vocab_spectral = 2^16,
-    max_vocab_encoder = 2^14,
+    max_vocab_encoder = 2^15,
+    features_per_class = 2^13,
   },
   encoder = {
-    clauses = 64,
-    clause_tolerance = { def = 70, min = 8, max = 128, int = true },
-    clause_maximum = { def = 78, min = 16, max = 128, int = true },
-    target = { def = 39, min = 4, max = 64, int = true },
-    specificity = { def = 562, min = 50, max = 2000 },
+    clauses = 8, --{ def = 8, min = 8, max = 64, round = 8 },
+    clause_tolerance = { def = 27, min = 8, max = 128, int = true },
+    clause_maximum = { def = 46, min = 16, max = 128, int = true },
+    target = { def = 7, min = 4, max = 64, int = true },
+    specificity = { def = 153, min = 50, max = 2000 },
     include_bits = { def = 1, min = 1, max = 6, int = true },
+    search_frac = 0.2,
     search_patience = 4,
-    search_rounds = 6,
-    search_trials = 20,
+    search_rounds = 4,
+    search_trials = 10,
     search_iterations = 10,
     final_patience = 40,
     final_iterations = 400,
   },
-  bit_pruning = {
-    enabled = true,
-    metric = "ndcg",
-    tolerance = 1e-6,
-  },
   nystrom = {
-    n_landmarks = 4096,
-    n_dims = 64,
+    invert_ranks = false,
+    n_landmarks = 2048,
+    n_dims = 48,
     cmp = "cosine",
     combine = "exponential",
-    decay = { def = 1.35, min = 0.0, max = 3.0 },
-    binarize = "itq",
-    rounds = 6,
+    decay = { def = 2.0, min = 0.0, max = 3.0 },
+    binarize = "median",
+    rounds = 0,
     samples = 20,
   },
   eval = {
@@ -86,6 +86,7 @@ test("eurlex-docs", function()
   tok:train({ corpus = train.problems })
   tok:finalize()
   local n_tokens = tok:features()
+  local tok_index = tok:index()
   train.tokens = tok:tokenize(train.problems)
   dev.tokens = tok:tokenize(dev.problems)
   test_set.tokens = tok:tokenize(test_set.problems)
@@ -126,6 +127,10 @@ test("eurlex-docs", function()
   local idf_gathered = dvec.create()
   idf_gathered:copy(df_scores, bns_ids)
   bns_scores:scalev(idf_gathered)
+  local tok_id_map = ivec.create(bns_ids:size())
+  for i = 0, bns_ids:size() - 1 do
+    tok_id_map:set(i, df_ids:get(bns_ids:get(i)))
+  end
   df_ids = nil -- luacheck: ignore
   df_scores = nil -- luacheck: ignore
   train.tokens:bits_select(bns_ids, nil, n_tokens)
@@ -148,8 +153,13 @@ test("eurlex-docs", function()
   graph_features:copy(train.solutions)
   graph_features:bits_extend(train.tokens, n_labels, n_top_v)
   local graph_ranks = ivec.create(n_graph_features)
-  graph_ranks:fill(0, 0, n_labels)
-  graph_ranks:fill(1, n_labels, n_graph_features)
+  if cfg.nystrom.invert_ranks then
+    graph_ranks:fill(1, 0, n_labels)
+    graph_ranks:fill(0, n_labels, n_graph_features)
+  else
+    graph_ranks:fill(0, 0, n_labels)
+    graph_ranks:fill(1, n_labels, n_graph_features)
+  end
   train.graph_index = inv.create({
     features = graph_weights,
     ranks = graph_ranks,
@@ -250,7 +260,7 @@ test("eurlex-docs", function()
     eval_neighbors = train_eval_neighbors,
     eval_weights = train_eval_weights,
     ranking = cfg.eval.ranking,
-    n_dims = train.dims,
+    n_dims = model.spectral_dims or train.dims,
   })
   local spectral_eval_stats = eval.ranking_accuracy({
     index = train.index,
@@ -265,24 +275,94 @@ test("eurlex-docs", function()
   str.printf("  Spectral codes ranking: raw=%.4f binary=%.4f\n", spectral_raw_stats.score, spectral_eval_stats.score)
   model.raw_codes = nil -- luacheck: ignore
 
-  local encoder_feat_ids = train.tokens:bits_top_chi2(
-    train_target_codes, train.n, n_top_v, train.dims,
-    cfg.feature_selection.max_vocab_encoder, "max")
-  local train_encoder_visible = encoder_feat_ids:size()
-  str.printf("  Chi2: %d features\n", train_encoder_visible)
-  local train_toks = ivec.create()
-  train_toks:copy(train.tokens)
-  train_toks:bits_select(encoder_feat_ids, nil, n_top_v)
-  local train_encoder_sentences = train_toks:bits_to_cvec(train.n, train_encoder_visible, true)
-  train_toks = nil -- luacheck: ignore
+  if cfg.exit_after == "spectral" then
+    return
+  end
+
+  local n_encoder_features, encoder_feat_ids, encoder_class_offsets
+
+  if cfg.feature_selection.grouped then
+
+    print("\nEncoder feature selection (GROUPED mode)")
+    local features_per_class = cfg.feature_selection.features_per_class
+    encoder_class_offsets, encoder_feat_ids, _ = train.tokens:bits_top_chi2_grouped(
+      train_target_codes, train.n, n_top_v, train.dims, features_per_class)
+    n_encoder_features = features_per_class
+    str.printf("  Chi2 grouped: %d features total (%d per class x %d classes)\n",
+      encoder_feat_ids:size(), features_per_class, train.dims)
+
+    print("\nTop 10 tokens per encoding bit:")
+    for c = 0, train.dims - 1 do
+      local tokens = {}
+      for i = 0, math.min(10, features_per_class) - 1 do
+        local fid = encoder_feat_ids:get(c * features_per_class + i)
+        local orig_id = tok_id_map:get(fid)
+        local token = tok_index[orig_id + 1] or ("?" .. orig_id)
+        tokens[#tokens + 1] = token
+      end
+      str.printf("  bit %2d: %s\n", c, table.concat(tokens, ", "))
+    end
+
+    local bytes_per_class = math.ceil(features_per_class * 2 / 8)
+    str.printf("  Per-class layout: %d bytes/class, %d bytes/sample\n", bytes_per_class, train.dims * bytes_per_class)
+
+  else
+
+    print("\nEncoder feature selection (REGULAR mode)")
+    encoder_feat_ids = train.tokens:bits_top_chi2(
+      train_target_codes, train.n, n_top_v, train.dims,
+      cfg.feature_selection.max_vocab_encoder, "max")
+    n_encoder_features = encoder_feat_ids:size()
+    str.printf("  Chi2: %d features selected\n", n_encoder_features)
+
+    print("\nTop 20 tokens selected:")
+    local tokens = {}
+    for i = 0, math.min(20, n_encoder_features) - 1 do
+      local fid = encoder_feat_ids:get(i)
+      local orig_id = tok_id_map:get(fid)
+      local token = tok_index[orig_id + 1] or ("?" .. orig_id)
+      tokens[#tokens + 1] = token
+    end
+    str.printf("  %s\n", table.concat(tokens, ", "))
+
+    encoder_class_offsets = nil
+
+  end
+
+  local function make_encoder_sentences(tokens, n_samples)
+    if cfg.feature_selection.grouped then
+      return tokens:bits_to_cvec(n_samples, n_top_v, encoder_class_offsets, encoder_feat_ids, true)
+    else
+      local selected = ivec.create()
+      selected:copy(tokens)
+      selected:bits_select(encoder_feat_ids, nil, n_top_v)
+      return selected:bits_to_cvec(n_samples, n_encoder_features, true)
+    end
+  end
+
+  local train_encoder_sentences, actual_n_encoder_features = make_encoder_sentences(train.tokens, train.n)
+  if cfg.feature_selection.grouped then
+    n_encoder_features = actual_n_encoder_features
+  end
+
+  local search_n = math.floor(train.n * cfg.encoder.search_frac)
+  local search_ids = ivec.create(search_n)
+  search_ids:copy(train.ids, 0, search_n)
+  local search_codes = train.index:get(search_ids)
+  local search_sentences = make_encoder_sentences(train.tokens, search_n)
+  str.printf("\nSearch subset: %d / %d samples (%.0f%%)\n", search_n, train.n, cfg.encoder.search_frac * 100)
 
   print("\nTraining encoder")
-  local encoder_args = {
+  train.encoder = optimize.encoder({
     hidden = train.dims,
     codes = train_target_codes,
     samples = train.n,
     sentences = train_encoder_sentences,
-    visible = train_encoder_visible,
+    visible = n_encoder_features,
+    grouped = cfg.feature_selection.grouped,
+    search_samples = search_n,
+    search_sentences = search_sentences,
+    search_codes = search_codes,
     clauses = cfg.encoder.clauses,
     clause_tolerance = cfg.encoder.clause_tolerance,
     clause_maximum = cfg.encoder.clause_maximum,
@@ -297,21 +377,15 @@ test("eurlex-docs", function()
     final_iterations = cfg.encoder.final_iterations,
     search_metric = function (t, enc_info)
       local predicted = t:predict(enc_info.sentences, enc_info.samples)
-      local accuracy = eval.encoding_accuracy(predicted, train_target_codes, enc_info.samples, train.dims)
+      local accuracy = eval.encoding_accuracy(predicted, search_codes, enc_info.samples, train.dims)
       return accuracy.mean_hamming, accuracy
     end,
-    each = cfg.verbose and function (_, is_final, metrics, params, epoch, round, trial)
-      local phase = is_final and "F" or str.format("R%d T%d", round, trial)
-      str.printf("[ENCODER %s E%d] C=%d L=%d/%d T=%d S=%.0f IB=%d ham=%.4f\n",
-        phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
-        params.target, params.specificity, params.include_bits, metrics.mean_hamming)
-    end or nil,
-  }
-  train.encoder = optimize.encoder(encoder_args)
+    each = cfg.verbose and util.encoder_log or nil,
+  })
 
   print("\nPredicting train codes")
   local train_predicted = train.encoder:predict(train_encoder_sentences, train.n)
-  util.spot_check_codes(train_predicted, train.n, train.dims, "train predicted")
+  util.spot_check_codes(train_predicted, train.n, train.dims, "train predicted (full)")
 
   local train_ham = eval.encoding_accuracy(train_predicted, train_target_codes, train.n, train.dims).mean_hamming
   str.printf("  Train hamming: %.4f\n", train_ham)
@@ -335,35 +409,6 @@ test("eurlex-docs", function()
   str.printf("  Predicted codes ranking score: %.4f (spectral: %.4f)\n",
     pred_eval_stats.score, spectral_eval_stats.score)
 
-  local dims_final = train.dims
-  local active_bits = nil
-  if cfg.bit_pruning and cfg.bit_pruning.enabled then
-    print("\nOptimizing bits")
-    active_bits = eval.optimize_bits({
-      index = train_pred_ann,
-      expected_ids = train_eval_ids,
-      expected_offsets = train_eval_offsets,
-      expected_neighbors = train_eval_neighbors,
-      expected_weights = train_eval_weights,
-      n_dims = train.dims,
-      start_prefix = train.dims,
-      metric = cfg.bit_pruning.metric,
-      tolerance = cfg.bit_pruning.tolerance,
-      each = cfg.verbose and function (bit, gain, score, event)
-        str.printf("  %s bit=%d gain=%.6f score=%.6f\n", event, bit, gain, score)
-      end or nil,
-    })
-    local n_active = active_bits:size()
-    str.printf("  Active bits: %d / %d (%.0f%% pruned)\n",
-      n_active, train.dims, 100 * (1 - n_active / train.dims))
-    if n_active < train.dims then
-      local train_pruned = cvec.create()
-      train_predicted:bits_select(active_bits, nil, train.dims, train_pruned)
-      train_predicted = train_pruned
-      dims_final = n_active
-      util.spot_check_codes(train_predicted, train.n, dims_final, "train pruned")
-    end
-  end
   train_eval_ids = nil -- luacheck: ignore
   train_eval_offsets = nil -- luacheck: ignore
   train_eval_neighbors = nil -- luacheck: ignore
@@ -371,18 +416,9 @@ test("eurlex-docs", function()
   train_pred_ann = nil -- luacheck: ignore
 
   print("\nPredicting dev codes")
-  local dev_toks = ivec.create()
-  dev_toks:copy(dev.tokens)
-  dev_toks:bits_select(encoder_feat_ids, nil, n_top_v)
-  local dev_encoder_sentences = dev_toks:bits_to_cvec(dev.n, train_encoder_visible, true)
-  dev_toks = nil -- luacheck: ignore
+  local dev_encoder_sentences = make_encoder_sentences(dev.tokens, dev.n)
   local dev_predicted = train.encoder:predict(dev_encoder_sentences, dev.n)
-  if active_bits then
-    local dev_pruned = cvec.create()
-    dev_predicted:bits_select(active_bits, nil, train.dims, dev_pruned)
-    dev_predicted = dev_pruned
-  end
-  util.spot_check_codes(dev_predicted, dev.n, dims_final, "dev predicted")
+  util.spot_check_codes(dev_predicted, dev.n, train.dims, "dev predicted")
 
   print("\nBuilding dev eval_index (labels only) and evaluation adjacency")
   dev.eval_index = inv.create({ features = n_labels })
@@ -406,7 +442,7 @@ test("eurlex-docs", function()
   end
 
   print("\nEvaluating dev predicted codes")
-  local dev_pred_ann = ann.create({ features = dims_final })
+  local dev_pred_ann = ann.create({ features = train.dims })
   dev_pred_ann:add(dev_predicted, dev.ids)
   local dev_pred_stats = eval.ranking_accuracy({
     index = dev_pred_ann,
@@ -416,7 +452,7 @@ test("eurlex-docs", function()
     eval_neighbors = dev_eval_neighbors,
     eval_weights = dev_eval_weights,
     ranking = cfg.eval.ranking,
-    n_dims = dims_final,
+    n_dims = train.dims,
   })
   str.printf("  Dev ranking score: %.4f\n", dev_pred_stats.score)
   dev_encoder_sentences = nil -- luacheck: ignore
@@ -428,18 +464,9 @@ test("eurlex-docs", function()
   dev_eval_weights = nil -- luacheck: ignore
 
   print("\nPredicting test codes")
-  local test_toks = ivec.create()
-  test_toks:copy(test_set.tokens)
-  test_toks:bits_select(encoder_feat_ids, nil, n_top_v)
-  local test_encoder_sentences = test_toks:bits_to_cvec(test_set.n, train_encoder_visible, true)
-  test_toks = nil -- luacheck: ignore
+  local test_encoder_sentences = make_encoder_sentences(test_set.tokens, test_set.n)
   local test_predicted = train.encoder:predict(test_encoder_sentences, test_set.n)
-  if active_bits then
-    local test_pruned = cvec.create()
-    test_predicted:bits_select(active_bits, nil, train.dims, test_pruned)
-    test_predicted = test_pruned
-  end
-  util.spot_check_codes(test_predicted, test_set.n, dims_final, "test predicted")
+  util.spot_check_codes(test_predicted, test_set.n, train.dims, "test predicted")
 
   print("\nBuilding test eval_index (labels only) and evaluation adjacency")
   test_set.eval_index = inv.create({ features = n_labels })
@@ -463,7 +490,7 @@ test("eurlex-docs", function()
   end
 
   print("\nEvaluating test predicted codes")
-  local test_pred_ann = ann.create({ features = dims_final })
+  local test_pred_ann = ann.create({ features = train.dims })
   test_pred_ann:add(test_predicted, test_set.ids)
   local test_pred_stats = eval.ranking_accuracy({
     index = test_pred_ann,
@@ -473,7 +500,7 @@ test("eurlex-docs", function()
     eval_neighbors = test_eval_neighbors,
     eval_weights = test_eval_weights,
     ranking = cfg.eval.ranking,
-    n_dims = dims_final,
+    n_dims = train.dims,
   })
   str.printf("  Test ranking score: %.4f\n", test_pred_stats.score)
   test_encoder_sentences = nil -- luacheck: ignore
@@ -483,7 +510,7 @@ test("eurlex-docs", function()
   print("\n" .. string.rep("=", 60))
   print("SUMMARY")
   print(string.rep("=", 60))
-  str.printf("  Spectral dims: %d -> %d (after pruning)\n", train.dims, dims_final)
+  str.printf("  Spectral dims: %d\n", train.dims)
   str.printf("  Train spectral score: %.4f\n", spectral_eval_stats.score)
   str.printf("  Train predicted score: %.4f  hamming: %.4f\n", pred_eval_stats.score, train_ham)
   str.printf("  Dev predicted score: %.4f\n", dev_pred_stats.score)
