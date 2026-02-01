@@ -1,8 +1,5 @@
 # Current
 
-- Re-implement classifier and encoder on top of regressor architecture instead
-  of separate classifier/encoder implementations.
-
 - Run end to end and update defaults
 - Make heterogeneous (keep spot checks the same; print label/doc nodes together)
 - Create label only index
@@ -13,8 +10,6 @@
 - Evaluate regression-selected tags against train/dev/test
 - Rewrite docs in favor of new approach
 - Clean up todo.md
-
-- Auto prune unused literals/clauses/etc via some simulated annealing style method
 
 # Now
 
@@ -38,6 +33,16 @@
       tokenizer/booleanizer, giving faster inference
     - Curriculum leaning: re-allocation/pruning of capacity/literals during
       training
+
+- Leasing/renting/etc model for multi-output situations
+    - It is likely that some clauses remain empty across the set of TMs/outputs,
+      indicating an over-capacity for that output
+    - It is also likely that some saturate 32 and would really benefit from more
+    - Perhaps stochastically based on some confidence measure in how much a
+      particular clause is actually needed, we can "give" it to a saturated
+      output.
+
+- Auto prune unused literals?
 
 
 # Next
@@ -87,7 +92,7 @@
 
 - Explore higher-level architectures:
     - Autoencoder
-    - Triplet-loss trained encoder/regressor
+    - Direct similarity preserving hashing
     - Stacked encoders
 
 - Generative model, next token predictor
