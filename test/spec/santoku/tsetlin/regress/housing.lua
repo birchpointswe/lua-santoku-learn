@@ -1,4 +1,5 @@
 local ds = require("santoku.tsetlin.dataset")
+local dvec = require("santoku.dvec")
 local eval = require("santoku.tsetlin.evaluator")
 local optimize = require("santoku.tsetlin.optimize")
 local fs = require("santoku.fs")
@@ -22,17 +23,16 @@ local cfg = {
     clause_maximum = { def = 79, min = 16, max = 128, int = true },
     target = { def = 37, min = 4, max = 64, int = true },
     specificity = { def = 925, min = 50, max = 2000 },
-    include_bits = { def = 5, min = 1, max = 6, int = true },
   },
   search = {
-    patience = 4,
     rounds = 6,
-    trials = 20,
-    iterations = 10,
+    trials = 40,
+    iterations = 80,
     metric = "nmae",
   },
   training = {
-    patience = 40,
+    patience = 4,
+    batch = 10,
     iterations = 400,
   },
 }
@@ -63,6 +63,7 @@ test("tsetlin regressor", function ()
 
   print("\nTraining")
   local stopwatch = utc.stopwatch()
+  local predicted_buf = dvec.create()
   local t = optimize.regressor({
 
     features = dataset.n_features,
@@ -72,24 +73,21 @@ test("tsetlin regressor", function ()
     problems = train.problems,
     targets = train.targets,
 
-    balanced = false,
-
     clauses = cfg.tm.clauses,
     clause_tolerance = cfg.tm.clause_tolerance,
     clause_maximum = cfg.tm.clause_maximum,
     target = cfg.tm.target,
     specificity = cfg.tm.specificity,
-    include_bits = cfg.tm.include_bits,
 
-    search_patience = cfg.search.patience,
     search_rounds = cfg.search.rounds,
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
+    final_batch = cfg.training.batch,
     final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,
 
     search_metric = function (regressor)
-      local predicted = regressor:predict(validate.problems, validate.n)
+      local predicted = regressor:regress(validate.problems, validate.n, nil, predicted_buf)
       local stats = eval.regression_accuracy(predicted, validate.targets)
       return -stats[cfg.search.metric], stats
     end,
@@ -106,9 +104,9 @@ test("tsetlin regressor", function ()
   print("Testing restore")
   t = tm.load("regressor.bin", nil, true)
 
-  local train_pred = t:predict(train.problems, train.n)
-  local val_pred = t:predict(validate.problems, validate.n)
-  local test_pred = t:predict(test_set.problems, test_set.n)
+  local train_pred = t:regress(train.problems, train.n)
+  local val_pred = t:regress(validate.problems, validate.n)
+  local test_pred = t:regress(test_set.problems, test_set.n)
 
   local train_stats = eval.regression_accuracy(train_pred, train.targets)
   local val_stats = eval.regression_accuracy(val_pred, validate.targets)

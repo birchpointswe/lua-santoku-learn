@@ -60,29 +60,15 @@ typedef struct {
   double weights[TK_INV_MAX_RANKS];
   double total;
   uint64_t n_ranks;
+  double sigma;
 } tk_inv_rank_weights_t;
 
 typedef enum {
   TK_COMBINE_WEIGHTED_AVG,
   TK_COMBINE_ADDITIVE,
-  TK_COMBINE_EXPONENTIAL
+  TK_COMBINE_EXPONENTIAL,
+  TK_COMBINE_RBF
 } tk_combine_type_t;
-
-typedef struct {
-  int64_t *sid_map;
-  double *residual;
-  double *L_mat;
-  int64_t *landmark_sids;
-} tk_inv_landmarks_ctx_t;
-
-static inline int tk_inv_landmarks_ctx_gc (lua_State *L) {
-  tk_inv_landmarks_ctx_t *ctx = (tk_inv_landmarks_ctx_t *)lua_touserdata(L, 1);
-  if (ctx->sid_map) { free(ctx->sid_map); ctx->sid_map = NULL; }
-  if (ctx->residual) { free(ctx->residual); ctx->residual = NULL; }
-  if (ctx->L_mat) { free(ctx->L_mat); ctx->L_mat = NULL; }
-  if (ctx->landmark_sids) { free(ctx->landmark_sids); ctx->landmark_sids = NULL; }
-  return 0;
-}
 
 static inline void tk_inv_precompute_rank_weights (
   tk_inv_rank_weights_t *rw,
@@ -164,6 +150,7 @@ static inline tk_combine_type_t tk_inv_parse_combine (const char *s) {
   if (!s || !strcmp(s, "weighted_avg")) return TK_COMBINE_WEIGHTED_AVG;
   if (!strcmp(s, "additive")) return TK_COMBINE_ADDITIVE;
   if (!strcmp(s, "exponential")) return TK_COMBINE_EXPONENTIAL;
+  if (!strcmp(s, "rbf")) return TK_COMBINE_RBF;
   return TK_COMBINE_WEIGHTED_AVG;
 }
 
@@ -1013,6 +1000,7 @@ static inline void tk_inv_precompute_rank_weights (
   double abs_decay = fabs(decay);
   rw->n_ranks = n_ranks;
   rw->total = 0.0;
+  rw->sigma = (abs_decay > 0.0) ? abs_decay : 1.0;
   for (uint64_t r = 0; r < n_ranks && r < TK_INV_MAX_RANKS; r++) {
     double eff_r = (decay >= 0.0) ? (double)r : (double)(n_ranks - 1 - r);
     rw->weights[r] = exp(-eff_r * abs_decay);
@@ -1040,6 +1028,11 @@ static inline double tk_inv_combine_ranks (
       return accum;
     case TK_COMBINE_EXPONENTIAL:
       return exp(accum) - 1.0;
+    case TK_COMBINE_RBF: {
+      double avg_sim = (rw->total > 0.0) ? accum / rw->total : 0.0;
+      double distance = 1.0 - avg_sim;
+      return exp(-distance * rw->sigma);
+    }
     default:
       return (rw->total > 0.0) ? accum / rw->total : 0.0;
   }
@@ -1220,6 +1213,11 @@ static inline double tk_inv_similarity_by_rank_fast (
       return accum;
     case TK_COMBINE_EXPONENTIAL:
       return exp(accum) - 1.0;
+    case TK_COMBINE_RBF: {
+      double avg_sim = (rw->total > 0.0) ? accum / rw->total : 0.0;
+      double distance = 1.0 - avg_sim;
+      return exp(-distance * rw->sigma);
+    }
     default:
       return (rw->total > 0.0) ? accum / rw->total : 0.0;
   }
@@ -1645,223 +1643,6 @@ static inline int tk_inv_persist_lua (lua_State *L)
   }
 }
 
-static inline void tk_inv_sample_landmarks (
-  lua_State *L,
-  tk_inv_t *inv,
-  uint64_t n_landmarks,
-  double trace_tol,
-  tk_ivec_sim_type_t cmp,
-  double cmp_alpha,
-  double cmp_beta,
-  double decay,
-  tk_combine_type_t combine,
-  tk_ivec_t **ids_out,
-  tk_ivec_t **doc_ids_out,
-  tk_dvec_t **chol_out,
-  uint64_t *actual_landmarks_out,
-  double *trace_ratio_out
-) {
-  uint64_t n_docs = 0;
-  for (int64_t sid = 0; sid < inv->next_sid; sid++) {
-    if (inv->sid_to_uid->a[sid] >= 0)
-      n_docs++;
-  }
-
-  if (n_landmarks == 0 || n_landmarks > n_docs)
-    n_landmarks = n_docs;
-  if (trace_tol <= 0.0)
-    trace_tol = 1e-12;
-  if (n_landmarks == 0) {
-    *ids_out = tk_ivec_create(L, 0, 0, 0);
-    *doc_ids_out = tk_ivec_create(L, 0, 0, 0);
-    *chol_out = tk_dvec_create(L, 0, 0, 0);
-    *actual_landmarks_out = 0;
-    *trace_ratio_out = 0.0;
-    return;
-  }
-
-  tk_inv_landmarks_ctx_t *ctx = (tk_inv_landmarks_ctx_t *)
-    lua_newuserdata(L, sizeof(tk_inv_landmarks_ctx_t));
-  memset(ctx, 0, sizeof(tk_inv_landmarks_ctx_t));
-  lua_newtable(L);
-  lua_pushcfunction(L, tk_inv_landmarks_ctx_gc);
-  lua_setfield(L, -2, "__gc");
-  lua_setmetatable(L, -2);
-  int ctx_idx = lua_gettop(L);
-
-  ctx->sid_map = (int64_t *)malloc(n_docs * sizeof(int64_t));
-  ctx->residual = (double *)malloc(n_docs * sizeof(double));
-  ctx->L_mat = (double *)malloc(n_docs * n_landmarks * sizeof(double));
-  ctx->landmark_sids = (int64_t *)malloc(n_landmarks * sizeof(int64_t));
-  if (!ctx->sid_map || !ctx->residual || !ctx->L_mat || !ctx->landmark_sids) {
-    luaL_error(L, "sample_landmarks: out of memory");
-    return;
-  }
-
-  int64_t *sid_map = ctx->sid_map;
-  double *residual = ctx->residual;
-  double *L_mat = ctx->L_mat;
-  int64_t *landmark_sids = ctx->landmark_sids;
-
-  uint64_t idx = 0;
-  for (int64_t sid = 0; sid < inv->next_sid; sid++) {
-    if (inv->sid_to_uid->a[sid] >= 0)
-      sid_map[idx++] = sid;
-  }
-
-  tk_inv_rank_weights_t rw;
-  tk_inv_precompute_rank_weights(&rw, inv->n_ranks, decay);
-
-  int64_t *ranks_arr = inv->ranks->a;
-  double *weights_arr = inv->weights->a;
-
-  memset(residual, 0, n_docs * sizeof(double));
-  memset(L_mat, 0, n_docs * n_landmarks * sizeof(double));
-
-  uint64_t actual_landmarks = 0;
-  double initial_trace = 0.0;
-  double trace = 0.0;
-  uint64_t pivot_idx = 0;
-  double scale = 0.0;
-  double *pivot_row = NULL;
-  size_t p_nbits = 0;
-  int64_t *p_bits = NULL;
-  bool done = false;
-
-  #pragma omp parallel
-  {
-    double thr_q[TK_INV_MAX_RANKS];
-    double thr_e[TK_INV_MAX_RANKS];
-    double thr_i[TK_INV_MAX_RANKS];
-
-    #pragma omp for reduction(+:initial_trace)
-    for (uint64_t i = 0; i < n_docs; i++) {
-      size_t i_nbits;
-      int64_t *i_bits = tk_inv_sget(inv, sid_map[i], &i_nbits);
-      residual[i] = tk_inv_similarity_fast(ranks_arr, weights_arr, inv->n_ranks,
-                                           i_bits, i_nbits, i_bits, i_nbits,
-                                           cmp, cmp_alpha, cmp_beta,
-                                           combine, &rw, thr_q, thr_e, thr_i);
-      initial_trace += residual[i];
-    }
-
-    for (uint64_t j = 0; j < n_landmarks && !done; j++) {
-
-      #pragma omp single
-      {
-        trace = 0.0;
-        for (uint64_t i = 0; i < n_docs; i++) {
-          if (residual[i] > 0.0)
-            trace += residual[i];
-        }
-
-        if (trace < trace_tol * initial_trace || trace < 1e-15) {
-          done = true;
-        } else {
-          double r = tk_fast_drand() * trace;
-          pivot_idx = n_docs - 1;
-          double cumsum = 0.0;
-          for (uint64_t i = 0; i < n_docs; i++) {
-            if (residual[i] > 0.0) {
-              cumsum += residual[i];
-              if (cumsum >= r) {
-                pivot_idx = i;
-                break;
-              }
-            }
-          }
-
-          double pivot_residual = residual[pivot_idx];
-          if (pivot_residual < 1e-15) {
-            done = true;
-          } else {
-            landmark_sids[actual_landmarks] = sid_map[pivot_idx];
-            actual_landmarks++;
-            scale = sqrt(pivot_residual);
-            p_bits = tk_inv_sget(inv, sid_map[pivot_idx], &p_nbits);
-            pivot_row = &L_mat[pivot_idx * n_landmarks];
-          }
-        }
-      }
-
-      if (done) continue;
-
-      #pragma omp for
-      for (uint64_t i = 0; i < n_docs; i++) {
-        size_t i_nbits;
-        int64_t *i_bits = tk_inv_sget(inv, sid_map[i], &i_nbits);
-        double kip = tk_inv_similarity_fast(ranks_arr, weights_arr, inv->n_ranks,
-                                            i_bits, i_nbits, p_bits, p_nbits,
-                                            cmp, cmp_alpha, cmp_beta,
-                                            combine, &rw, thr_q, thr_e, thr_i);
-        double dot = (j > 0) ? cblas_ddot((int)j, &L_mat[i * n_landmarks], 1, pivot_row, 1) : 0.0;
-        L_mat[i * n_landmarks + j] = (kip - dot) / scale;
-      }
-
-      #pragma omp for
-      for (uint64_t i = 0; i < n_docs; i++) {
-        double lij = L_mat[i * n_landmarks + j];
-        residual[i] -= lij * lij;
-        if (residual[i] < 0.0)
-          residual[i] = 0.0;
-      }
-
-      #pragma omp single
-      {
-        residual[pivot_idx] = 0.0;
-      }
-    }
-  }
-
-  tk_ivec_t *landmark_ids = tk_ivec_create(L, actual_landmarks, 0, 0);
-  for (uint64_t i = 0; i < actual_landmarks; i++)
-    landmark_ids->a[i] = inv->sid_to_uid->a[landmark_sids[i]];
-  landmark_ids->n = actual_landmarks;
-
-  tk_ivec_t *all_doc_ids = tk_ivec_create(L, n_docs, 0, 0);
-  for (uint64_t i = 0; i < n_docs; i++)
-    all_doc_ids->a[i] = inv->sid_to_uid->a[sid_map[i]];
-  all_doc_ids->n = n_docs;
-
-  tk_dvec_t *chol = tk_dvec_create(L, n_docs * actual_landmarks, 0, 0);
-  for (uint64_t i = 0; i < n_docs; i++) {
-    for (uint64_t jj = 0; jj < actual_landmarks; jj++)
-      chol->a[i * actual_landmarks + jj] = L_mat[i * n_landmarks + jj];
-  }
-  chol->n = n_docs * actual_landmarks;
-
-  lua_remove(L, ctx_idx);
-
-  *ids_out = landmark_ids;
-  *doc_ids_out = all_doc_ids;
-  *chol_out = chol;
-  *actual_landmarks_out = actual_landmarks;
-  *trace_ratio_out = (initial_trace > 0.0) ? (trace / initial_trace) : 0.0;
-}
-
-static inline int tk_inv_sample_landmarks_lua (lua_State *L)
-{
-  lua_settop(L, 8);
-  tk_inv_t *inv = tk_inv_peek(L, 1);
-  uint64_t n_landmarks = tk_lua_optunsigned(L, 2, "n_landmarks", 0);
-  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 3, "cmp", "jaccard"));
-  double cmp_alpha = tk_lua_optnumber(L, 4, "alpha", 0.5);
-  double cmp_beta = tk_lua_optnumber(L, 5, "beta", 0.5);
-  double decay = tk_lua_optnumber(L, 6, "decay", 0.0);
-  tk_combine_type_t combine = tk_inv_parse_combine(tk_lua_optstring(L, 7, "combine", "weighted_avg"));
-  double trace_tol = tk_lua_optnumber(L, 8, "trace_tol", 1e-12);
-  tk_ivec_t *landmark_ids;
-  tk_ivec_t *doc_ids;
-  tk_dvec_t *chol;
-  uint64_t actual_landmarks;
-  double trace_ratio;
-  tk_inv_sample_landmarks(L, inv, n_landmarks, trace_tol, cmp, cmp_alpha, cmp_beta, decay, combine,
-                          &landmark_ids, &doc_ids, &chol, &actual_landmarks, &trace_ratio);
-  lua_pushinteger(L, (int64_t) actual_landmarks);
-  lua_pushnumber(L, trace_ratio);
-  return 5;
-}
-
 static inline int tk_inv_destroy_lua (lua_State *L)
 {
   tk_inv_t *inv = tk_inv_peek(L, 1);
@@ -1919,7 +1700,6 @@ static luaL_Reg tk_inv_lua_mt_fns[] =
   { "shrink", tk_inv_shrink_lua },
   { "ids", tk_inv_ids_lua },
   { "weight", tk_inv_weight_lua },
-  { "sample_landmarks", tk_inv_sample_landmarks_lua },
   { NULL, NULL }
 };
 

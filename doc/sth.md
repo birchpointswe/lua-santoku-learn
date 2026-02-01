@@ -91,7 +91,6 @@ For new sample x:
 | clause_maximum | range | Maximum threshold |
 | target | range | Target activation |
 | specificity | range | Feature specificity |
-| include_bits | range | Bits to include in clauses |
 
 ### Optimization
 

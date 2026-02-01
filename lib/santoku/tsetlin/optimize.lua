@@ -1,14 +1,12 @@
 local tm = require("santoku.tsetlin.capi")
 local spectral = require("santoku.tsetlin.spectral")
-local itq = require("santoku.tsetlin.itq")
-local ann = require("santoku.tsetlin.ann")
 local hlth = require("santoku.tsetlin.hlth")
 local evaluator = require("santoku.tsetlin.evaluator")
+local cvec = require("santoku.cvec")
 local num = require("santoku.num")
 local str = require("santoku.string")
 local err = require("santoku.error")
 local rand = require("santoku.random")
-local cvec = require("santoku.cvec")
 local utc = require("santoku.utc")
 
 local M = {}
@@ -46,26 +44,6 @@ local function is_preferred(new_score, new_cost, best_score, best_cost, toleranc
     return true
   end
   return false
-end
-
-M.apply_itq = function (raw_codes, n_dims, binarize)
-  if binarize == nil or binarize == "none" then
-    return raw_codes
-  elseif binarize == "sign" then
-    local codes = itq.sign({ codes = raw_codes, n_dims = n_dims })
-    return codes
-  elseif binarize == "median" then
-    local codes, medians = itq.median({ codes = raw_codes, n_dims = n_dims })
-    return codes, medians
-  else
-    local codes, means, rotation = itq.itq({
-      codes = raw_codes,
-      n_dims = n_dims,
-      iterations = 100,
-      tolerance = 1e-8,
-    })
-    return codes, means, rotation
-  end
 end
 
 local function round_to_pow2 (x)
@@ -380,222 +358,168 @@ M.search = function (args)
 
 end
 
-local function create_tm (typ, args)
-  if typ == "encoder" then
-    return tm.create("encoder", {
-      visible = args.visible,
-      hidden = args.hidden,
-      clauses = 8,
-      clause_tolerance = 8,
-      clause_maximum = 8,
-      target = 4,
-      specificity = 1000,
-      include_bits = 1,
-      reusable = true,
-      grouped = args.grouped,
-    })
-  elseif typ == "classifier" then
-    return tm.create("classifier", {
-      features = args.features,
-      classes = args.classes,
-      clauses = 8,
-      clause_tolerance = 8,
-      clause_maximum = 8,
-      target = 4,
-      specificity = 1000,
-      include_bits = 1,
-      reusable = true,
-      grouped = args.grouped,
-    })
-  elseif typ == "regressor" then
-    return tm.create("regressor", {
-      features = args.features,
-      outputs = args.outputs,
-      clauses = 8,
-      clause_tolerance = 8,
-      clause_maximum = 8,
-      target = 4,
-      specificity = 1000,
-      include_bits = 1,
-      reusable = true,
-      grouped = args.grouped,
-    })
-  else
-    err.error("unexpected type", typ)
-  end
+local function create_tm (args)
+  return tm.create({
+    features = args.features,
+    outputs = args.outputs,
+    clauses = 8,
+    clause_tolerance = 8,
+    clause_maximum = 8,
+    target = 4,
+    specificity = 1000,
+    reusable = true,
+  })
 end
 
-local function create_final_tm (typ, args, params)
-  if typ == "encoder" then
-    return tm.create("encoder", {
-      visible = args.visible,
-      hidden = args.hidden,
-      clauses = params.clauses,
-      clause_tolerance = params.clause_tolerance,
-      clause_maximum = params.clause_maximum,
-      target = params.target,
-      specificity = params.specificity,
-      include_bits = params.include_bits,
-      grouped = args.grouped,
-    })
-  elseif typ == "classifier" then
-    return tm.create("classifier", {
-      features = args.features,
-      classes = args.classes,
-      clauses = params.clauses,
-      clause_tolerance = params.clause_tolerance,
-      clause_maximum = params.clause_maximum,
-      target = params.target,
-      specificity = params.specificity,
-      include_bits = params.include_bits,
-      grouped = args.grouped,
-    })
-  elseif typ == "regressor" then
-    return tm.create("regressor", {
-      features = args.features,
-      outputs = args.outputs,
-      clauses = params.clauses,
-      clause_tolerance = params.clause_tolerance,
-      clause_maximum = params.clause_maximum,
-      target = params.target,
-      specificity = params.specificity,
-      include_bits = params.include_bits,
-      grouped = args.grouped,
-    })
-  else
-    err.error("unexpected type", typ)
-  end
+local function create_final_tm (args, params)
+  return tm.create({
+    features = args.features,
+    outputs = args.outputs,
+    clauses = params.clauses,
+    clause_tolerance = params.clause_tolerance,
+    clause_maximum = params.clause_maximum,
+    target = params.target,
+    specificity = params.specificity,
+    reusable = true,
+  })
 end
 
-local function train_tm (typ, tmobj, args, params, iterations, early_patience, early_tolerance, metric_fn, each_cb, info, encoding_info)
-  local best_epoch_score = -num.huge
-  local last_epoch_score = -num.huge
-  local last_metrics = nil
-  local epochs_since_improve = 0
-  local checkpoint = (early_patience and early_patience > 0) and cvec.create(0) or nil
-  local has_checkpoint = false
-  local tol = early_tolerance or 1e-6
-
-  local enc_info = encoding_info or {
-    sentences = args.sentences,
+local function train_tm_simple (tmobj, args, params, iterations)
+  tmobj:train({
     samples = args.samples,
-  }
+    problems = args.problems,
+    solutions = args.solutions,
+    codes = args.codes,
+    targets = args.targets,
+    iterations = iterations,
+    grouped = args.grouped,
+  })
+end
 
-  local function on_epoch (epoch)
-    local score, metrics = metric_fn(tmobj, enc_info)
-    last_epoch_score = score
+local function train_tm_batched (tmobj, args, params, iterations, batch_size, patience, tolerance, metric_fn, each_cb, info)
+  local best_score = -num.huge
+  local last_score = -num.huge
+  local last_metrics = nil
+  local batches_since_improve = 0
+  local checkpoint = (patience and patience > 0) and cvec.create(0) or nil
+  local has_checkpoint = false
+  local tol = tolerance or 1e-6
+  local total_epochs = 0
+
+  while total_epochs < iterations do
+    local batch_iters = math.min(batch_size, iterations - total_epochs)
+    tmobj:train({
+      samples = args.samples,
+      problems = args.problems,
+      solutions = args.solutions,
+      codes = args.codes,
+      targets = args.targets,
+      iterations = batch_iters,
+      grouped = args.grouped,
+    })
+    total_epochs = total_epochs + batch_iters
+
+    local score, metrics = metric_fn(tmobj, args)
+    last_score = score
     last_metrics = metrics
+
     if each_cb then
-      local cb_result = each_cb(tmobj, info.is_final, metrics, params, epoch,
+      local cb_result = each_cb(tmobj, info.is_final, metrics, params, total_epochs,
         not info.is_final and info.round or nil,
         not info.is_final and info.trial or nil,
         not info.is_final and info.rounds or nil,
         not info.is_final and info.trials or nil,
-        not info.is_final and info.global_best_score or nil)
+        not info.is_final and info.global_best_score or nil,
+        best_score)
       if cb_result == false then
-        return false
+        break
       end
     end
-    if score > best_epoch_score + tol then
-      best_epoch_score = score
-      epochs_since_improve = 0
+
+    if score > best_score + tol then
+      best_score = score
+      batches_since_improve = 0
       if checkpoint then
         tmobj:checkpoint(checkpoint)
         has_checkpoint = true
       end
     else
-      epochs_since_improve = epochs_since_improve + 1
+      batches_since_improve = batches_since_improve + 1
     end
-    if early_patience and early_patience > 0 and epochs_since_improve >= early_patience then
-      return false
-    end
-  end
 
-  if typ == "encoder" then
-    tmobj:train({
-      sentences = args.sentences,
-      codes = args.codes,
-      samples = args.samples,
-      iterations = iterations,
-      each = on_epoch,
-    })
-  elseif typ == "classifier" then
-    tmobj:train({
-      samples = args.samples,
-      problems = args.problems,
-      solutions = args.solutions,
-      iterations = iterations,
-      each = on_epoch,
-    })
-  elseif typ == "regressor" then
-    tmobj:train({
-      samples = args.samples,
-      problems = args.problems,
-      targets = args.targets,
-      iterations = iterations,
-      each = on_epoch,
-    })
+    if patience and patience > 0 and batches_since_improve >= patience then
+      break
+    end
   end
 
   if checkpoint and has_checkpoint then
     tmobj:restore(checkpoint)
-    last_epoch_score, last_metrics = metric_fn(tmobj, enc_info)
+    last_score, last_metrics = metric_fn(tmobj, args)
   end
 
-  return last_epoch_score, last_metrics
+  return last_score, last_metrics
 end
 
-local function optimize_tm (args, typ)
+local function optimize_tm (args)
 
-  local patience = args.search_patience or 4
-  local use_early_stop = patience > 0
-  local final_patience = args.final_patience or 40
-  local use_final_early_stop = final_patience > 0
-  local iters_search = args.search_iterations or 10
+  local iters_search = args.search_iterations or 40
   local final_iters = args.final_iterations or 400
+  local final_batch = args.final_batch or 10
+  local final_patience = args.final_patience or 4
   local global_dev = args.search_dev or 0.2
   local metric_fn = err.assert(args.search_metric, "search_metric required")
   local each_cb = args.each
 
-  local param_names = { "clauses", "clause_tolerance", "clause_maximum", "target", "specificity", "include_bits" }
+  local param_names = { "clauses", "clause_tolerance", "clause_maximum", "target", "specificity" }
   local samplers = M.build_samplers(args, param_names, global_dev)
 
   local search_tm
   if not M.all_fixed(samplers) then
-    search_tm = create_tm(typ, {
-      visible = args.visible,
-      hidden = args.hidden,
+    search_tm = create_tm({
       features = args.features,
-      classes = args.classes,
       outputs = args.outputs,
-      grouped = args.grouped,
     })
   end
 
-  local function search_trial_fn (params, info)
-    if params.clause_tolerance and params.clause_maximum and params.clause_tolerance > params.clause_maximum then
-      params.clause_tolerance, params.clause_maximum = params.clause_maximum, params.clause_tolerance
+  local function constrain_tm_params (params)
+    if params.target and params.clause_tolerance then
+      local max_target = 8 * params.clause_tolerance
+      if params.target > max_target then
+        params.target = max_target
+      end
+      if params.target < 1 then
+        params.target = 1
+      end
     end
+    if params.specificity and args.features then
+      local max_specificity = 2 * args.features
+      if params.specificity > max_specificity then
+        params.specificity = max_specificity
+      end
+      if params.specificity < 1 then
+        params.specificity = 1
+      end
+    end
+  end
+
+  local function search_trial_fn (params, info)
+    constrain_tm_params(params)
     search_tm:reconfigure(params)
     local train_args = {
-      sentences = args.search_sentences or args.sentences,
-      codes = args.search_codes or args.codes,
-      samples = args.search_samples or args.samples,
-      problems = args.search_problems or args.problems,
-      solutions = args.search_solutions or args.solutions,
-      targets = args.search_targets or args.targets,
+      codes = args.codes,
+      samples = args.samples,
+      problems = args.problems,
+      solutions = args.solutions,
+      targets = args.targets,
+      grouped = args.grouped,
     }
-    local encoding_info = {
-      sentences = args.search_sentences or args.sentences,
-      visible = args.visible,
-      problems = args.search_problems or args.problems,
-      features = args.features,
-      samples = args.search_samples or args.samples,
-      solutions = args.search_solutions or args.solutions,
-      targets = args.search_targets or args.targets,
-    }
-    local score, metrics = train_tm(typ, search_tm, train_args, params, iters_search,
-      use_early_stop and patience or nil, args.early_tolerance, metric_fn, each_cb, info, encoding_info)
+    train_tm_simple(search_tm, train_args, params, iters_search)
+    local score, metrics = metric_fn(search_tm, train_args)
+    if each_cb then
+      each_cb(search_tm, false, metrics, params, iters_search,
+        info.round, info.trial, info.rounds, info.trials,
+        info.global_best_score, nil)
+    end
     return score, metrics, nil
   end
 
@@ -609,13 +533,12 @@ local function optimize_tm (args, typ)
     preference_tolerance = args.preference_tolerance or 1e-6,
     size_fn = function(p) return { p.clauses or 0 } end,
     make_key = function (p)
-      return str.format("%s|%s|%s|%s|%s|%s",
+      return str.format("%s|%s|%s|%s|%s",
         key_int8(p.clauses),
         key_int(p.clause_tolerance),
         key_int(p.clause_maximum),
         key_int(p.target),
-        key_int(p.specificity),
-        key_int(p.include_bits or 1))
+        key_int(p.specificity))
     end,
   })
 
@@ -623,54 +546,32 @@ local function optimize_tm (args, typ)
     search_tm:destroy()
   end
 
-  local final_tm = create_final_tm(typ, {
-    visible = args.visible,
-    hidden = args.hidden,
+  constrain_tm_params(best_params)
+  local final_tm = create_final_tm({
     features = args.features,
-    classes = args.classes,
     outputs = args.outputs,
-    grouped = args.grouped,
   }, best_params)
   local final_train_args = {
-    sentences = args.sentences,
     codes = args.codes,
     samples = args.samples,
     problems = args.problems,
     solutions = args.solutions,
     targets = args.targets,
+    grouped = args.grouped,
   }
-  local final_encoding_info = {
-    sentences = args.sentences,
-    visible = args.visible,
-    problems = args.problems,
-    features = args.features,
-    samples = args.samples,
-    solutions = args.solutions,
-    targets = args.targets,
-  }
-  local _, final_metrics = train_tm(typ, final_tm, final_train_args, best_params, final_iters,
-    use_final_early_stop and final_patience or nil, args.early_tolerance, metric_fn, each_cb, { is_final = true }, final_encoding_info)
+  local _, final_metrics = train_tm_batched(final_tm, final_train_args, best_params, final_iters,
+    final_batch, final_patience, args.early_tolerance, metric_fn, each_cb, { is_final = true })
 
   collectgarbage("collect")
   return final_tm, final_metrics, best_params
 end
 
-M.classifier = function (args)
-  return optimize_tm(args, "classifier")
-end
-
-M.encoder = function (args)
-  return optimize_tm(args, "encoder")
-end
-
 M.regressor = function (args)
-  return optimize_tm(args, "regressor")
+  return optimize_tm(args)
 end
 
 M.destroy_spectral = function (model)
   if not model then return end
-  if model.index then model.index:destroy() end
-  if model.codes then model.codes:destroy() end
   if model.raw_codes then model.raw_codes:destroy() end
   if model.ids then model.ids:destroy() end
   if model.landmark_ids then model.landmark_ids:destroy() end
@@ -734,10 +635,18 @@ M.build_spectral_nystrom = function (args)
   local combine = args.combine
   local trace_tol = args.trace_tol
   local each_cb = args.each
-  local binarize = args.binarize or "itq"
 
   local landmark_ids, doc_ids, chol, actual_landmarks, trace_ratio =
-    index:sample_landmarks(n_landmarks, cmp, cmp_alpha, cmp_beta, decay, combine, trace_tol)
+    spectral.sample_landmarks({
+      inv = index,
+      n_landmarks = n_landmarks,
+      cmp = cmp,
+      cmp_alpha = cmp_alpha,
+      cmp_beta = cmp_beta,
+      decay = decay,
+      combine = combine,
+      trace_tol = trace_tol,
+    })
 
   local n_samples = doc_ids:size()
   local effective_dims = n_dims or n_landmarks
@@ -745,7 +654,7 @@ M.build_spectral_nystrom = function (args)
     effective_dims = actual_landmarks
   end
 
-  local eigenvectors, eigenvalues = spectral.encode({
+  local eigenvectors, eigenvalues, col_means = spectral.encode({
     chol = chol,
     n_samples = n_samples,
     n_landmarks = actual_landmarks,
@@ -764,44 +673,30 @@ M.build_spectral_nystrom = function (args)
     })
   end
 
-  local col_means, raw_codes = hlth.nystrom_lift({
-    chol = chol,
+  local nystrom_encode, _, raw_codes = hlth.nystrom_encoder({
+    features_index = index,
     eigenvectors = eigenvectors,
     eigenvalues = eigenvalues,
-    n_samples = n_samples,
-    n_landmarks = actual_landmarks,
+    landmark_ids = landmark_ids,
+    col_means = col_means,
     n_dims = effective_dims,
+    cmp = cmp,
+    cmp_alpha = cmp_alpha,
+    cmp_beta = cmp_beta,
+    decay = decay,
+    chol = chol,
+    n_samples = n_samples,
   })
-
-  local codes, itq_means_or_medians, itq_rotation, feat_offsets, feat_ids, feat_weights =
-    M.apply_itq(raw_codes, effective_dims, binarize)
-
-  local ann_index = nil
-  local is_continuous = (binarize == nil or binarize == "none")
-  if not is_continuous then
-    ann_index = ann.create({ features = effective_dims })
-    ann_index:add(codes, doc_ids)
-  end
 
   return {
     ids = doc_ids,
-    codes = codes,
     raw_codes = raw_codes,
     dims = effective_dims,
     spectral_dims = effective_dims,
-    index = ann_index,
-    continuous = is_continuous,
     landmark_ids = landmark_ids,
     eigenvectors = eigenvectors,
     eigenvalues = eigenvalues,
     col_means = col_means,
-    binarize = binarize,
-    itq_means = (binarize == "itq" or binarize == "cca") and itq_means_or_medians or nil,
-    itq_rotation = itq_rotation,
-    median_thresholds = binarize == "median" and itq_means_or_medians or nil,
-    feat_offsets = feat_offsets,
-    feat_ids = feat_ids,
-    feat_weights = feat_weights,
     chol = chol,
     n_landmarks = actual_landmarks,
     cmp = cmp,
@@ -809,6 +704,7 @@ M.build_spectral_nystrom = function (args)
     cmp_beta = cmp_beta,
     decay = decay,
     combine = combine,
+    nystrom_encode = nystrom_encode,
   }
 end
 
@@ -829,10 +725,6 @@ M.spectral = function (args)
   local trace_tol = args.trace_tol
   local each_cb = args.each
   local tolerance = args.tolerance or 1e-6
-  local binarize = args.binarize or "itq"
-  local tokens = args.tokens
-  local n_tokens = args.n_tokens
-  local features_per_class = args.features_per_class
 
   local expected = args.expected and {
     ids = args.expected.ids,
@@ -884,10 +776,6 @@ M.spectral = function (args)
       decay = decay_val,
       combine = combine,
       trace_tol = trace_tol,
-      binarize = binarize,
-      tokens = tokens,
-      n_tokens = n_tokens,
-      features_per_class = features_per_class,
       each = each_cb,
     })
     local score = nil
@@ -943,10 +831,6 @@ M.spectral = function (args)
       decay = params.decay,
       combine = combine,
       trace_tol = trace_tol,
-      binarize = binarize,
-      tokens = tokens,
-      n_tokens = n_tokens,
-      features_per_class = features_per_class,
       each = each_cb,
     })
     local score, metrics = M.score_spectral_eval({
