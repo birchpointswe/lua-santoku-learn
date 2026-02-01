@@ -48,7 +48,7 @@ static inline void tk_itq_threshold (
   }
 }
 
-static inline void tk_itq_sign (
+static inline void tk_itq_sign_raw (
   char *out,
   double *X,
   uint64_t N,
@@ -84,16 +84,90 @@ static int tk_itq_cmp_double (const void *a, const void *b) {
   return (da > db) - (da < db);
 }
 
+static inline void tk_itq_center (
+  lua_State *L,
+  tk_dvec_t *codes,
+  uint64_t n_dims,
+  tk_dvec_t **centered_out,
+  tk_dvec_t **means_out
+) {
+  const uint64_t K = n_dims;
+  const size_t N = codes->n / K;
+
+  tk_dvec_t *means = tk_dvec_create(L, K, 0, 0);
+  means->n = K;
+
+  tk_dvec_t *centered = tk_dvec_create(L, N * K, 0, 0);
+  centered->n = N * K;
+  memcpy(centered->a, codes->a, N * K * sizeof(double));
+
+  #pragma omp parallel for
+  for (uint64_t d = 0; d < K; d++) {
+    double sum = 0.0;
+    for (uint64_t i = 0; i < N; i++)
+      sum += centered->a[i * K + d];
+    double mu = sum / (double)N;
+    means->a[d] = mu;
+    for (uint64_t i = 0; i < N; i++)
+      centered->a[i * K + d] -= mu;
+  }
+
+  *centered_out = centered;
+  if (means_out)
+    *means_out = means;
+}
+
+static inline void tk_itq_rotate (
+  lua_State *L,
+  tk_dvec_t *codes,
+  tk_dvec_t *rotation,
+  uint64_t n_dims,
+  tk_dvec_t **rotated_out
+) {
+  const uint64_t K = n_dims;
+  const size_t N = codes->n / K;
+
+  tk_dvec_t *rotated = tk_dvec_create(L, N * K, 0, 0);
+  rotated->n = N * K;
+
+  if (rotation) {
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+      N, K, K,
+      1.0, codes->a, K,
+      rotation->a, K,
+      0.0, rotated->a, K);
+  } else {
+    memcpy(rotated->a, codes->a, N * K * sizeof(double));
+  }
+
+  *rotated_out = rotated;
+}
+
+static inline void tk_itq_sign (
+  lua_State *L,
+  tk_dvec_t *codes,
+  uint64_t n_dims,
+  tk_cvec_t **out
+) {
+  const uint64_t K = n_dims;
+  const size_t N = codes->n / K;
+  tk_cvec_t *binary = tk_cvec_create(L, N * TK_CVEC_BITS_BYTES(K), 0, 0);
+  tk_cvec_zero(binary);
+  tk_itq_sign_raw(binary->a, codes->a, N, K);
+  *out = binary;
+}
+
 static inline void tk_itq_median (
   lua_State *L,
   tk_dvec_t *codes,
   uint64_t n_dims,
+  tk_cvec_t **out,
   tk_dvec_t **medians_out
 ) {
   const uint64_t K = n_dims;
   const size_t N = codes->n / K;
-  tk_cvec_t *out = tk_cvec_create(L, N * TK_CVEC_BITS_BYTES(n_dims), 0, 0);
-  tk_cvec_zero(out);
+  tk_cvec_t *binary = tk_cvec_create(L, N * TK_CVEC_BITS_BYTES(K), 0, 0);
+  tk_cvec_zero(binary);
 
   double *medians = tk_malloc(L, K * sizeof(double));
   double *col_buf = tk_malloc(L, N * sizeof(double));
@@ -106,8 +180,7 @@ static inline void tk_itq_median (
   }
 
   free(col_buf);
-
-  tk_itq_threshold(out->a, codes->a, medians, N, K);
+  tk_itq_threshold(binary->a, codes->a, medians, N, K);
 
   if (medians_out) {
     tk_dvec_t *med_vec = tk_dvec_create(L, K, 0, 0);
@@ -117,24 +190,22 @@ static inline void tk_itq_median (
   }
 
   free(medians);
+  *out = binary;
 }
 
-static inline void tk_itq_encode (
+static inline void tk_itq_itq (
   lua_State *L,
   tk_dvec_t *codes,
   uint64_t n_dims,
   uint64_t max_iterations,
   double tolerance,
   int i_each,
-  tk_dvec_t **means_out,
   tk_dvec_t **rotation_out
 ) {
   const uint64_t K = n_dims;
   const size_t N = codes->n / K;
-  tk_cvec_t *out = tk_cvec_create(L, N * TK_CVEC_BITS_BYTES(n_dims), 0, 0);
-  tk_cvec_zero(out);
 
-  size_t work_size = (N * K * 3 + K * K * 4 + K) * sizeof(double);
+  size_t work_size = (N * K * 3 + K * K * 4) * sizeof(double);
   double *mem = tk_malloc(L, work_size);
   double *X = mem;
   double *V0 = X + N * K;
@@ -143,23 +214,11 @@ static inline void tk_itq_encode (
   double *Y = R + K * K;
   double *YtY = Y + K * K;
   double *tmp = YtY + K * K;
-  double *mean_buf = tmp + K * K;
 
   memcpy(X, codes->a, N * K * sizeof(double));
 
   #pragma omp parallel
   {
-    #pragma omp for
-    for (uint64_t k = 0; k < K; k++) {
-      double sum = 0.0;
-      for (uint64_t i = 0; i < N; i++)
-        sum += X[i * K + k];
-      double mu = sum / (double)N;
-      mean_buf[k] = mu;
-      for (uint64_t i = 0; i < N; i++)
-        X[i * K + k] -= mu;
-    }
-
     #pragma omp for
     for (uint64_t i = 0; i < K * K; i++)
       R[i] = 0.0;
@@ -207,16 +266,6 @@ static inline void tk_itq_encode (
     }
   }
 
-  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, N, K, K, 1.0, X, K, R, K, 0.0, V0, K);
-  tk_itq_sign(out->a, V0, N, K);
-
-  if (means_out) {
-    tk_dvec_t *means = tk_dvec_create(L, K, 0, 0);
-    means->n = K;
-    memcpy(means->a, mean_buf, K * sizeof(double));
-    *means_out = means;
-  }
-
   if (rotation_out) {
     tk_dvec_t *rotation = tk_dvec_create(L, K * K, 0, 0);
     rotation->n = K * K;
@@ -242,15 +291,12 @@ static inline void tk_itq_ica (
   uint64_t max_iterations,
   double tolerance,
   int i_each,
-  tk_dvec_t **means_out,
   tk_dvec_t **unmixing_out
 ) {
   const uint64_t K = n_dims;
   const size_t N = codes->n / K;
-  tk_cvec_t *out = tk_cvec_create(L, N * TK_CVEC_BITS_BYTES(n_dims), 0, 0);
-  tk_cvec_zero(out);
 
-  size_t work_size = (N * K * 2 + K * K * 4 + K * 3) * sizeof(double);
+  size_t work_size = (N * K * 2 + K * K * 4 + K * 2) * sizeof(double);
   double *mem = tk_malloc(L, work_size);
   double *X = mem;
   double *X_white = X + N * K;
@@ -258,22 +304,10 @@ static inline void tk_itq_ica (
   double *W_white = cov + K * K;
   double *W_ica = W_white + K * K;
   double *W_full = W_ica + K * K;
-  double *mean_buf = W_full + K * K;
-  double *eigenvalues = mean_buf + K;
+  double *eigenvalues = W_full + K * K;
   double *w_tmp = eigenvalues + K;
 
   memcpy(X, codes->a, N * K * sizeof(double));
-
-  #pragma omp parallel for
-  for (uint64_t k = 0; k < K; k++) {
-    double sum = 0.0;
-    for (uint64_t i = 0; i < N; i++)
-      sum += X[i * K + k];
-    double mu = sum / (double)N;
-    mean_buf[k] = mu;
-    for (uint64_t i = 0; i < N; i++)
-      X[i * K + k] -= mu;
-  }
 
   cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
     K, K, N, 1.0 / (double)N, X, K, X, K, 0.0, cov, K);
@@ -371,29 +405,6 @@ static inline void tk_itq_ica (
   cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
     K, K, K, 1.0, W_white, K, W_ica, K, 0.0, W_full, K);
 
-  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-    N, K, K, 1.0, X, K, W_full, K, 0.0, X_white, K);
-
-  double *medians = tk_malloc(L, K * sizeof(double));
-  double *col_buf = tk_malloc(L, N * sizeof(double));
-  for (uint64_t k = 0; k < K; k++) {
-    for (uint64_t i = 0; i < N; i++)
-      col_buf[i] = X_white[i * K + k];
-    qsort(col_buf, N, sizeof(double), tk_itq_cmp_double);
-    medians[k] = (N % 2 == 1) ? col_buf[N / 2] : (col_buf[N / 2 - 1] + col_buf[N / 2]) / 2.0;
-  }
-  free(col_buf);
-
-  tk_itq_threshold(out->a, X_white, medians, N, K);
-  free(medians);
-
-  if (means_out) {
-    tk_dvec_t *means = tk_dvec_create(L, K, 0, 0);
-    means->n = K;
-    memcpy(means->a, mean_buf, K * sizeof(double));
-    *means_out = means;
-  }
-
   if (unmixing_out) {
     tk_dvec_t *unmixing = tk_dvec_create(L, K * K, 0, 0);
     unmixing->n = K * K;
@@ -410,19 +421,6 @@ static inline void tk_itq_ica (
   free(mem);
 }
 
-typedef struct {
-  int64_t idx;
-  double val;
-} tk_itq_cca_pair_t;
-
-static int tk_itq_cca_pair_cmp_desc (const void *a, const void *b) {
-  double va = ((const tk_itq_cca_pair_t *)a)->val;
-  double vb = ((const tk_itq_cca_pair_t *)b)->val;
-  if (va > vb) return -1;
-  if (va < vb) return 1;
-  return 0;
-}
-
 static inline void tk_itq_cca (
   lua_State *L,
   tk_dvec_t *codes,
@@ -430,43 +428,19 @@ static inline void tk_itq_cca (
   uint64_t n_samples,
   uint64_t n_dims,
   uint64_t n_tokens,
-  uint64_t features_per_class,
   int i_each,
-  tk_dvec_t **means_out,
-  tk_dvec_t **rotation_out,
-  tk_ivec_t **feat_offsets_out,
-  tk_ivec_t **feat_ids_out,
-  tk_dvec_t **feat_weights_out
+  tk_dvec_t **rotation_out
 ) {
   const uint64_t D = n_dims;
   const uint64_t N = n_samples;
   const uint64_t V = n_tokens;
-  const uint64_t K = features_per_class > 0 ? features_per_class : V;
 
-  tk_cvec_t *out = tk_cvec_create(L, N * TK_CVEC_BITS_BYTES(D), 0, 0);
-  tk_cvec_zero(out);
-
-  double *X = tk_malloc(L, N * D * sizeof(double));
-  double *mean_buf = tk_malloc(L, D * sizeof(double));
   double *C = tk_malloc(L, D * V * sizeof(double));
   double *CCt = tk_malloc(L, D * D * sizeof(double));
   double *R = tk_malloc(L, D * D * sizeof(double));
-  double *V0 = tk_malloc(L, N * D * sizeof(double));
   double *eigenvalues = tk_malloc(L, D * sizeof(double));
 
-  memcpy(X, codes->a, N * D * sizeof(double));
   memset(C, 0, D * V * sizeof(double));
-
-  #pragma omp parallel for schedule(static)
-  for (uint64_t d = 0; d < D; d++) {
-    double sum = 0.0;
-    for (uint64_t i = 0; i < N; i++)
-      sum += X[i * D + d];
-    double mu = sum / (double)N;
-    mean_buf[d] = mu;
-    for (uint64_t i = 0; i < N; i++)
-      X[i * D + d] -= mu;
-  }
 
   int64_t *csr_offsets = tk_malloc(L, (N + 1) * sizeof(int64_t));
   memset(csr_offsets, 0, (N + 1) * sizeof(int64_t));
@@ -499,7 +473,7 @@ static inline void tk_itq_cca (
   for (uint64_t i = 0; i < N; i++) {
     int64_t start = csr_offsets[i];
     int64_t end = csr_offsets[i + 1];
-    double *Xi = X + i * D;
+    double *Xi = codes->a + i * D;
     for (int64_t k = start; k < end; k++) {
       int64_t j = tok_ids[k];
       for (uint64_t d = 0; d < D; d++)
@@ -523,59 +497,11 @@ static inline void tk_itq_cca (
       R[i * D + j] = CCt[i * D + (D - 1 - j)];
   }
 
-  double *Cprime = tk_malloc(L, D * V * sizeof(double));
-  cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-    (int)D, (int)V, (int)D, 1.0, R, (int)D, C, (int)V, 0.0, Cprime, (int)V);
-
-  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-    (int)N, (int)D, (int)D, 1.0, X, (int)D, R, (int)D, 0.0, V0, (int)D);
-
-  tk_itq_sign(out->a, V0, N, D);
-
-  if (means_out) {
-    tk_dvec_t *means = tk_dvec_create(L, D, 0, 0);
-    means->n = D;
-    memcpy(means->a, mean_buf, D * sizeof(double));
-    *means_out = means;
-  }
-
   if (rotation_out) {
     tk_dvec_t *rotation = tk_dvec_create(L, D * D, 0, 0);
     rotation->n = D * D;
     memcpy(rotation->a, R, D * D * sizeof(double));
     *rotation_out = rotation;
-  }
-
-  if (feat_offsets_out && feat_ids_out && feat_weights_out) {
-    uint64_t actual_k = K < V ? K : V;
-    tk_ivec_t *f_offsets = tk_ivec_create(L, D + 1, NULL, NULL);
-    tk_ivec_t *f_ids = tk_ivec_create(L, D * actual_k, NULL, NULL);
-    tk_dvec_t *f_weights = tk_dvec_create(L, D * actual_k, NULL, NULL);
-    f_offsets->n = D + 1;
-    f_ids->n = D * actual_k;
-    f_weights->n = D * actual_k;
-
-    tk_itq_cca_pair_t *pairs = tk_malloc(L, V * sizeof(tk_itq_cca_pair_t));
-
-    for (uint64_t d = 0; d < D; d++) {
-      f_offsets->a[d] = (int64_t)(d * actual_k);
-      double *Cd = Cprime + d * V;
-      for (uint64_t j = 0; j < V; j++) {
-        pairs[j].idx = (int64_t)j;
-        pairs[j].val = fabs(Cd[j]);
-      }
-      qsort(pairs, V, sizeof(tk_itq_cca_pair_t), tk_itq_cca_pair_cmp_desc);
-      for (uint64_t i = 0; i < actual_k; i++) {
-        f_ids->a[d * actual_k + i] = pairs[i].idx;
-        f_weights->a[d * actual_k + i] = Cprime[d * V + (uint64_t) pairs[i].idx];
-      }
-    }
-    f_offsets->a[D] = (int64_t)(D * actual_k);
-
-    free(pairs);
-    *feat_offsets_out = f_offsets;
-    *feat_ids_out = f_ids;
-    *feat_weights_out = f_weights;
   }
 
   if (i_each >= 0) {
@@ -587,13 +513,9 @@ static inline void tk_itq_cca (
     lua_call(L, 2, 0);
   }
 
-  free(X);
-  free(mean_buf);
   free(C);
-  free(Cprime);
   free(CCt);
   free(R);
-  free(V0);
   free(eigenvalues);
 }
 

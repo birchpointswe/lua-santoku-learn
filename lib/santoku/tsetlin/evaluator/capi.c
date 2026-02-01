@@ -163,88 +163,6 @@ static inline int tm_class_accuracy (lua_State *L)
   return 1;
 }
 
-static inline int tm_scores_class_accuracy (lua_State *L)
-{
-  lua_settop(L, 4);
-  tk_dvec_t *scores = tk_dvec_peek(L, 1, "scores");
-  tk_ivec_t *expected = tk_ivec_peek(L, 2, "expected");
-  unsigned int n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
-  unsigned int n_classes = tk_lua_checkunsigned(L, 4, "n_classes");
-  if (n_classes == 0)
-    tk_lua_verror(L, 4, "scores_class_accuracy", "n_classes", "must be > 0");
-  if (scores->n != (uint64_t)n_samples * n_classes)
-    return luaL_error(L, "scores size must equal n_samples * n_classes");
-  if (expected->n != n_samples)
-    return luaL_error(L, "expected size must equal n_samples");
-
-  atomic_ulong *TP = tk_malloc(L, n_classes * sizeof(atomic_ulong));
-  atomic_ulong *FP = tk_malloc(L, n_classes * sizeof(atomic_ulong));
-  atomic_ulong *FN = tk_malloc(L, n_classes * sizeof(atomic_ulong));
-  double *precision = tk_malloc(L, n_classes * sizeof(double));
-  double *recall = tk_malloc(L, n_classes * sizeof(double));
-  double *f1 = tk_malloc(L, n_classes * sizeof(double));
-
-  for (unsigned int i = 0; i < n_classes; i++) {
-    atomic_init(TP + i, 0);
-    atomic_init(FP + i, 0);
-    atomic_init(FN + i, 0);
-  }
-
-  #pragma omp parallel for schedule(static)
-  for (unsigned int i = 0; i < n_samples; i++) {
-    unsigned int y_pred = 0;
-    double best_score = scores->a[i * n_classes];
-    for (unsigned int c = 1; c < n_classes; c++) {
-      double s = scores->a[i * n_classes + c];
-      if (s > best_score) {
-        best_score = s;
-        y_pred = c;
-      }
-    }
-    unsigned int y_true = expected->a[i];
-    if (y_pred >= n_classes || y_true >= n_classes)
-      continue;
-    if (y_pred == y_true)
-      atomic_fetch_add(TP + y_true, 1);
-    else {
-      atomic_fetch_add(FP + y_pred, 1);
-      atomic_fetch_add(FN + y_true, 1);
-    }
-  }
-
-  double precision_avg = 0.0, recall_avg = 0.0, f1_avg = 0.0;
-  for (unsigned int c = 0; c < n_classes; c++) {
-    uint64_t tp = TP[c], fp = FP[c], fn = FN[c];
-    precision[c] = (tp + fp) > 0 ? (double)tp / (tp + fp) : 0.0;
-    recall[c] = (tp + fn) > 0 ? (double)tp / (tp + fn) : 0.0;
-    f1[c] = (precision[c] + recall[c]) > 0 ?
-      2.0 * precision[c] * recall[c] / (precision[c] + recall[c]) : 0.0;
-    precision_avg += precision[c];
-    recall_avg += recall[c];
-    f1_avg += f1[c];
-  }
-
-  free(TP);
-  free(FP);
-  free(FN);
-
-  precision_avg /= n_classes;
-  recall_avg /= n_classes;
-  f1_avg /= n_classes;
-  lua_newtable(L);
-  lua_pushnumber(L, f1_avg);
-  lua_setfield(L, -2, "f1");
-  lua_pushnumber(L, precision_avg);
-  lua_setfield(L, -2, "precision");
-  lua_pushnumber(L, recall_avg);
-  lua_setfield(L, -2, "recall");
-
-  free(precision);
-  free(recall);
-  free(f1);
-  return 1;
-}
-
 static inline int tm_encoding_accuracy (lua_State *L)
 {
   lua_settop(L, 5);
@@ -477,64 +395,6 @@ static inline int tm_multilabel_retrieval_accuracy (lua_State *L)
 
 static inline tk_ivec_t *tk_pvec_dendro_cut(lua_State *L, tk_ivec_t *offsets, tk_pvec_t *merges, uint64_t step, tk_ivec_t *assignments);
 
-static inline int tm_cluster_score (lua_State *L)
-{
-  lua_settop(L, 1);
-  lua_getfield(L, 1, "offsets");
-  tk_ivec_t *offsets = tk_ivec_peek(L, -1, "offsets");
-  lua_getfield(L, 1, "merges");
-  tk_pvec_t *merges = tk_pvec_peek(L, -1, "merges");
-  lua_getfield(L, 1, "expected_offsets");
-  tk_ivec_t *exp_off = tk_ivec_peekopt(L, -1);
-  lua_getfield(L, 1, "expected_neighbors");
-  tk_ivec_t *exp_nbr = tk_ivec_peekopt(L, -1);
-  lua_getfield(L, 1, "expected_weights");
-  tk_dvec_t *exp_wgt = tk_dvec_peekopt(L, -1);
-  lua_getfield(L, 1, "metric");
-  const char *metric = lua_isnil(L, -1) ? "auc" : lua_tostring(L, -1);
-  lua_pop(L, 6);
-  if (strcmp(metric, "auc") != 0)
-    return luaL_error(L, "cluster_score only supports metric='auc' currently");
-  if (!exp_off || !exp_nbr || !exp_wgt)
-    return luaL_error(L, "auc metric requires expected_offsets, expected_neighbors, expected_weights");
-  uint64_t n_samples = 0;
-  for (uint64_t i = 0; i < offsets->n; i++) {
-    if (offsets->a[i] == 0 && i > 0) { n_samples = i; break; }
-  }
-  if (n_samples == 0)
-    return luaL_error(L, "invalid dendrogram offsets");
-  uint64_t n_steps = offsets->n > n_samples + 1 ? offsets->n - n_samples - 1 : 0;
-  tk_dvec_t *curve = tk_dvec_create(L, n_steps + 1, NULL, NULL);
-  curve->n = n_steps + 1;
-  tk_ivec_t *assignments = tk_ivec_create(L, n_samples, NULL, NULL);
-  for (uint64_t step = 0; step <= n_steps; step++) {
-    tk_pvec_dendro_cut(L, offsets, merges, step, assignments);
-    uint64_t concordant = 0, total_pairs = 0;
-    for (uint64_t s = 0; s < n_samples; s++) {
-      int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
-      for (int64_t i = es; i < ee; i++) {
-        int64_t ni = exp_nbr->a[i];
-        if (ni < 0 || (uint64_t)ni >= n_samples) continue;
-        bool same_i = assignments->a[s] == assignments->a[ni];
-        double wi = exp_wgt->a[i];
-        for (int64_t j = i + 1; j < ee; j++) {
-          int64_t nj = exp_nbr->a[j];
-          if (nj < 0 || (uint64_t)nj >= n_samples) continue;
-          bool same_j = assignments->a[s] == assignments->a[nj];
-          if (same_i == same_j) continue;
-          double wj = exp_wgt->a[j];
-          total_pairs++;
-          if ((same_i && wi > wj) || (same_j && wj > wi)) concordant++;
-          else if (wi == wj) concordant++;
-        }
-      }
-    }
-    curve->a[step] = total_pairs > 0 ? (double)concordant / total_pairs : 0.0;
-  }
-  lua_pop(L, 1);
-  return 1;
-}
-
 static inline int tm_retrieval_ks (lua_State *L)
 {
   lua_settop(L, 1);
@@ -686,6 +546,7 @@ typedef struct {
   tk_ivec_t *dendro_offsets;
   tk_pvec_t *dendro_merges;
   tk_dvec_t *quality_curve;
+  tk_dvec_t *auc_curve;
   tk_ivec_t *n_clusters_curve;
   uint64_t n_steps;
 } tm_cluster_result_t;
@@ -823,6 +684,36 @@ static inline double tk_cluster_compute_quality(
   return total_members > 0 ? total_similarity / (double)total_members : 0.0;
 }
 
+static inline double tk_cluster_compute_auc(
+  tk_ivec_t *entity_to_cluster,
+  tk_ivec_t *exp_off,
+  tk_ivec_t *exp_nbr,
+  tk_dvec_t *exp_wgt,
+  uint64_t n_samples
+) {
+  uint64_t concordant = 0, total_pairs = 0;
+  for (uint64_t s = 0; s < n_samples; s++) {
+    int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
+    for (int64_t i = es; i < ee; i++) {
+      int64_t ni = exp_nbr->a[i];
+      if (ni < 0 || (uint64_t)ni >= n_samples) continue;
+      bool same_i = entity_to_cluster->a[s] == entity_to_cluster->a[ni];
+      double wi = exp_wgt->a[i];
+      for (int64_t j = i + 1; j < ee; j++) {
+        int64_t nj = exp_nbr->a[j];
+        if (nj < 0 || (uint64_t)nj >= n_samples) continue;
+        bool same_j = entity_to_cluster->a[s] == entity_to_cluster->a[nj];
+        if (same_i == same_j) continue;
+        double wj = exp_wgt->a[j];
+        total_pairs++;
+        if ((same_i && wi > wj) || (same_j && wj > wi)) concordant++;
+        else if (wi == wj) concordant++;
+      }
+    }
+  }
+  return total_pairs > 0 ? (double)concordant / total_pairs : 0.0;
+}
+
 static inline int tk_cluster_centroid(
   lua_State *L,
   tk_cvec_t *codes,
@@ -833,6 +724,10 @@ static inline int tk_cluster_centroid(
   tk_ivec_t *dendro_offsets,
   tk_pvec_t *dendro_merges,
   tk_dvec_t *quality_curve,
+  tk_dvec_t *auc_curve,
+  tk_ivec_t *exp_off,
+  tk_ivec_t *exp_nbr,
+  tk_dvec_t *exp_wgt,
   tk_ivec_t *n_clusters_curve,
   bool early_exit
 ) {
@@ -1109,12 +1004,12 @@ static inline int tk_cluster_centroid(
   tk_euset_destroy(seen_edges);
   tk_evec_hmin_init(edge_heap);
 
-  if (quality_curve) {
-    double initial_quality = tk_cluster_compute_quality(clusters, n_clusters, codes, n_chunks, n_bits, n_nodes);
-    tk_dvec_push(quality_curve, initial_quality);
-  }
-  if (n_clusters_curve) {
-    tk_ivec_push(n_clusters_curve, (int64_t)n_active);
+  double initial_quality = tk_cluster_compute_quality(clusters, n_clusters, codes, n_chunks, n_bits, n_nodes);
+  tk_dvec_push(quality_curve, initial_quality);
+  tk_ivec_push(n_clusters_curve, (int64_t)n_active);
+  if (auc_curve) {
+    double initial_auc = tk_cluster_compute_auc(entity_to_cluster, exp_off, exp_nbr, exp_wgt, n_nodes);
+    tk_dvec_push(auc_curve, initial_auc);
   }
 
   if (dendro_offsets) {
@@ -1389,12 +1284,12 @@ static inline int tk_cluster_centroid(
         }
         dendro_offsets->a[dendro_offsets->n++] = (int64_t)dendro_merges->n;
 
-        if (quality_curve) {
-          double step_quality = tk_cluster_compute_quality(clusters, n_clusters, codes, n_chunks, n_bits, n_nodes);
-          tk_dvec_push(quality_curve, step_quality);
-        }
-        if (n_clusters_curve) {
-          tk_ivec_push(n_clusters_curve, (int64_t)n_active);
+        double step_quality = tk_cluster_compute_quality(clusters, n_clusters, codes, n_chunks, n_bits, n_nodes);
+        tk_dvec_push(quality_curve, step_quality);
+        tk_ivec_push(n_clusters_curve, (int64_t)n_active);
+        if (auc_curve) {
+          double step_auc = tk_cluster_compute_auc(entity_to_cluster, exp_off, exp_nbr, exp_wgt, n_nodes);
+          tk_dvec_push(auc_curve, step_auc);
         }
       }
 
@@ -1430,7 +1325,9 @@ static inline tm_cluster_result_t tm_cluster_agglo (
   uint64_t n_bits,
   int i_eph,
   bool early_exit,
-  bool compute_quality
+  tk_ivec_t *exp_off,
+  tk_ivec_t *exp_nbr,
+  tk_dvec_t *exp_wgt
 ) {
   tm_cluster_result_t result;
 
@@ -1442,22 +1339,25 @@ static inline tm_cluster_result_t tm_cluster_agglo (
   tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
   lua_pop(L, 1);
 
-  result.quality_curve = NULL;
-  result.n_clusters_curve = NULL;
+  result.quality_curve = tk_dvec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+  lua_pop(L, 1);
 
-  if (compute_quality) {
-    result.quality_curve = tk_dvec_create(L, 0, 0, 0);
-    tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
-    lua_pop(L, 1);
+  result.n_clusters_curve = tk_ivec_create(L, 0, 0, 0);
+  tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+  lua_pop(L, 1);
 
-    result.n_clusters_curve = tk_ivec_create(L, 0, 0, 0);
+  result.auc_curve = NULL;
+  if (exp_off && exp_nbr && exp_wgt) {
+    result.auc_curve = tk_dvec_create(L, 0, 0, 0);
     tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
     lua_pop(L, 1);
   }
 
   tk_cluster_centroid(L, codes, adj_ids, adj_offsets, adj_neighbors,
                      n_bits, result.dendro_offsets, result.dendro_merges,
-                     result.quality_curve, result.n_clusters_curve, early_exit);
+                     result.quality_curve, result.auc_curve, exp_off, exp_nbr, exp_wgt,
+                     result.n_clusters_curve, early_exit);
 
   result.n_steps = result.dendro_offsets->n > adj_ids->n + 1 ?
                    result.dendro_offsets->n - adj_ids->n - 1 : 0;
@@ -1503,16 +1403,30 @@ static inline int tm_cluster (lua_State *L)
   if (!neighbors)
     tk_lua_verror(L, 3, "cluster", "neighbors", "required");
 
+  lua_getfield(L, 1, "expected_offsets");
+  tk_ivec_t *exp_off = tk_ivec_peekopt(L, -1);
+  if (!lua_isnil(L, -1))
+    tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "expected_neighbors");
+  tk_ivec_t *exp_nbr = tk_ivec_peekopt(L, -1);
+  if (!lua_isnil(L, -1))
+    tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "expected_weights");
+  tk_dvec_t *exp_wgt = tk_dvec_peekopt(L, -1);
+  if (!lua_isnil(L, -1))
+    tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+  lua_pop(L, 1);
+
   uint64_t n_bits = tk_lua_fcheckunsigned(L, 1, "cluster", "n_dims");
   bool early_exit = tk_lua_foptboolean(L, 1, "cluster", "early_exit", true);
 
-  lua_getfield(L, 1, "metric");
-  const char *metric = lua_isnil(L, -1) ? NULL : lua_tostring(L, -1);
-  lua_pop(L, 1);
-  bool compute_metric = metric != NULL && strcmp(metric, "radius") == 0;
-
   tm_cluster_result_t result = tm_cluster_agglo(
-    L, codes, ids, offsets, neighbors, n_bits, i_eph, early_exit, compute_metric);
+    L, codes, ids, offsets, neighbors, n_bits, i_eph, early_exit,
+    exp_off, exp_nbr, exp_wgt);
 
   lua_newtable(L);
 
@@ -1528,12 +1442,15 @@ static inline int tm_cluster (lua_State *L)
   tk_lua_get_ephemeron(L, TK_EVAL_EPH, ids);
   lua_setfield(L, -2, "ids");
 
-  if (compute_metric && result.quality_curve && result.n_clusters_curve) {
-    tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.quality_curve);
-    lua_setfield(L, -2, "metric_curve");
+  tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.quality_curve);
+  lua_setfield(L, -2, "radius_curve");
 
-    tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.n_clusters_curve);
-    lua_setfield(L, -2, "n_clusters_curve");
+  tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.n_clusters_curve);
+  lua_setfield(L, -2, "n_clusters_curve");
+
+  if (result.auc_curve) {
+    tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.auc_curve);
+    lua_setfield(L, -2, "auc_curve");
   }
 
   lua_replace(L, 1);
@@ -1799,7 +1716,7 @@ static inline int tm_score_retrieval (lua_State *L)
 }
 
 typedef struct {
-  char *xor_codes;
+  uint8_t *xor_codes;
   uint16_t *distances;
   uint64_t n_pairs;
   uint64_t n_dims;
@@ -2067,7 +1984,7 @@ static void tm_optimize_bits_sfbs (
   uint64_t n_nodes = state->offsets->n - 1;
   uint64_t n_pairs = state->neighbors->n;
 
-  char *xor_codes = tk_malloc(L, n_pairs * chunks);
+  uint8_t *xor_codes = tk_malloc(L, n_pairs * chunks);
   memset(xor_codes, 0, n_pairs * chunks);
   uint16_t *distances = tk_malloc(L, n_pairs * sizeof(uint16_t));
   memset(distances, 0, n_pairs * sizeof(uint16_t));
@@ -2077,29 +1994,29 @@ static void tm_optimize_bits_sfbs (
     int64_t start = state->offsets->a[node_idx];
     int64_t end = state->offsets->a[node_idx + 1];
 
-    char *node_code = NULL;
+    uint8_t *node_code = NULL;
     if (state->codes) {
-      node_code = state->codes + node_idx * chunks;
+      node_code = (uint8_t *)state->codes + node_idx * chunks;
     } else if (state->ann && state->adjacency_ids) {
       int64_t node_id = state->adjacency_ids->a[node_idx];
-      node_code = tk_ann_get(state->ann, node_id);
+      node_code = (uint8_t *)tk_ann_get(state->ann, node_id);
     }
     if (!node_code)
       continue;
 
     for (int64_t j = start; j < end; j++) {
       int64_t neighbor_pos = state->neighbors->a[j];
-      char *neighbor_code = NULL;
+      uint8_t *neighbor_code = NULL;
       if (state->codes) {
-        neighbor_code = state->codes + (uint64_t)neighbor_pos * chunks;
+        neighbor_code = (uint8_t *)state->codes + (uint64_t)neighbor_pos * chunks;
       } else if (state->ann && state->adjacency_ids) {
         int64_t neighbor_id = state->adjacency_ids->a[neighbor_pos];
-        neighbor_code = tk_ann_get(state->ann, neighbor_id);
+        neighbor_code = (uint8_t *)tk_ann_get(state->ann, neighbor_id);
       }
       if (!neighbor_code)
         continue;
 
-      char *xor_dest = xor_codes + (uint64_t)j * chunks;
+      uint8_t *xor_dest = xor_codes + (uint64_t)j * chunks;
       for (uint64_t c = 0; c < chunks; c++) {
         xor_dest[c] = node_code[c] ^ neighbor_code[c];
       }
@@ -2113,16 +2030,16 @@ static void tm_optimize_bits_sfbs (
   uint64_t *bit_counts = tk_malloc(L, n_dims * sizeof(uint64_t));
   memset(bit_counts, 0, n_dims * sizeof(uint64_t));
   for (uint64_t j = 0; j < n_pairs; j++) {
-    unsigned char *xor_code = (unsigned char *)(xor_codes + j * chunks);
+    uint8_t *xor_code = xor_codes + j * chunks;
     for (uint64_t b = 0; b < n_dims; b++) {
       uint64_t byte_idx = TK_CVEC_BITS_BYTE(b);
-      uint8_t bit_mask = 1 << TK_CVEC_BITS_BIT(b);
+      uint8_t bit_mask = (uint8_t)(1 << TK_CVEC_BITS_BIT(b));
       if (xor_code[byte_idx] & bit_mask)
         bit_counts[b]++;
     }
   }
 
-  char *discriminative = tk_malloc(L, n_dims);
+  uint8_t *discriminative = tk_malloc(L, n_dims);
   for (uint64_t b = 0; b < n_dims; b++)
     discriminative[b] = (bit_counts[b] > 0 && bit_counts[b] < n_pairs) ? 1 : 0;
   free(bit_counts);
@@ -2140,7 +2057,7 @@ static void tm_optimize_bits_sfbs (
 
   tk_ivec_t *active = tk_ivec_create(L, n_dims, 0, 0);
   active->n = 0;
-  char *selected = tk_malloc(L, n_dims);
+  uint8_t *selected = tk_malloc(L, n_dims);
   memset(selected, 0, n_dims);
 
   double current_score = 0.0;
@@ -2672,7 +2589,6 @@ static inline int tk_dendro_iter_lua(lua_State *L) {
 static luaL_Reg tm_evaluator_fns[] =
 {
   { "class_accuracy", tm_class_accuracy },
-  { "scores_class_accuracy", tm_scores_class_accuracy },
   { "encoding_accuracy", tm_encoding_accuracy },
   { "regression_accuracy", tm_regression_accuracy },
   { "retrieval_accuracy", tm_multilabel_retrieval_accuracy },
@@ -2680,7 +2596,6 @@ static luaL_Reg tm_evaluator_fns[] =
   { "optimize_bits", tm_optimize_bits },
   { "ranking_accuracy", tm_score_retrieval },
   { "cluster", tm_cluster },
-  { "cluster_score", tm_cluster_score },
   { "entropy_stats", tm_entropy_stats },
   { "dendro_cut", tk_pvec_dendro_cut_lua },
   { "dendro_each", tk_dendro_iter_lua },
