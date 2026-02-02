@@ -70,12 +70,15 @@ typedef struct {
   tk_dvec_t *eigenvalues;
   tk_dvec_t *col_means;
   tk_ivec_t *landmark_ids;
+  tk_dvec_t *landmark_chol;
+  tk_dvec_t *scales;
   uint64_t n_dims;
   uint64_t n_landmarks;
   tk_ivec_sim_type_t cmp;
   double cmp_alpha;
   double cmp_beta;
   double decay;
+  tk_combine_type_t combine;
   bool destroyed;
 } tk_nystrom_encoder_t;
 
@@ -131,6 +134,8 @@ static inline int tk_nystrom_encoder_gc(lua_State *L) {
   enc->eigenvalues = NULL;
   enc->col_means = NULL;
   enc->landmark_ids = NULL;
+  enc->landmark_chol = NULL;
+  enc->scales = NULL;
   enc->destroyed = true;
   return 0;
 }
@@ -760,13 +765,16 @@ static inline int tk_nystrom_encode_lua(lua_State *L) {
   double *weights_arr = feat_inv->weights->a;
   uint64_t n_ranks = feat_inv->n_ranks;
 
+  double *L_mm = enc->landmark_chol->a;
+  double *scales_arr = enc->scales->a;
+
   #pragma omp parallel
   {
     tk_dvec_t *q_weights = tk_dvec_create(NULL, n_ranks, 0, 0);
     tk_dvec_t *e_weights = tk_dvec_create(NULL, n_ranks, 0, 0);
     tk_dvec_t *inter_weights = tk_dvec_create(NULL, n_ranks, 0, 0);
-    tk_dvec_t *sims = tk_dvec_create(NULL, n_landmarks, 0, 0);
-    sims->n = n_landmarks;
+    double *raw_sims = (double *)malloc(n_landmarks * sizeof(double));
+    double *L_q = (double *)malloc(n_landmarks * sizeof(double));
 
     #pragma omp for schedule(static)
     for (uint64_t i = 0; i < n_samples; i++) {
@@ -786,30 +794,40 @@ static inline int tk_nystrom_encode_lua(lua_State *L) {
           if (l_bits && l_nbits > 0) {
             sim = tk_inv_similarity_fast(ranks_arr, weights_arr, n_ranks,
               q_bits, q_len, l_bits, l_nbits,
-              enc->cmp, enc->cmp_alpha, enc->cmp_beta, TK_COMBINE_WEIGHTED_AVG, &rw,
+              enc->cmp, enc->cmp_alpha, enc->cmp_beta, enc->combine, &rw,
               q_weights->a, e_weights->a, inter_weights->a);
           }
         }
-        sims->a[j] = sim;
+        raw_sims[j] = sim;
+      }
+
+      for (uint64_t j = 0; j < n_landmarks; j++) {
+        double dot = 0.0;
+        for (uint64_t k = 0; k < j; k++) {
+          dot += L_q[k] * L_mm[j * n_landmarks + k];
+        }
+        double scale_j = scales_arr[j];
+        L_q[j] = (scale_j > 1e-15) ? (raw_sims[j] - dot) / scale_j : 0.0;
       }
 
       double *sample_out = raw_codes->a + i * n_dims;
       for (uint64_t d = 0; d < n_dims; d++) {
         double sum = 0.0;
         for (uint64_t j = 0; j < n_landmarks; j++) {
-          double centered_sim = sims->a[j] - enc->col_means->a[j];
+          double centered = L_q[j] - enc->col_means->a[j];
           double evec_jd = enc->eigenvectors->a[j * n_dims + d];
-          sum += centered_sim * evec_jd;
+          sum += centered * evec_jd;
         }
         double eig_d = enc->eigenvalues->a[d];
         sample_out[d] = (eig_d > 1e-12) ? sum / sqrt(eig_d) : 0.0;
       }
     }
 
+    free(raw_sims);
+    free(L_q);
     tk_dvec_destroy(q_weights);
     tk_dvec_destroy(e_weights);
     tk_dvec_destroy(inter_weights);
-    tk_dvec_destroy(sims);
   }
 
   lua_pushvalue(L, stack_before_out + 1);
@@ -853,6 +871,18 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
   if (!col_means)
     return luaL_error(L, "nystrom_encoder: col_means required");
 
+  lua_getfield(L, 1, "landmark_chol");
+  tk_dvec_t *landmark_chol = tk_dvec_peekopt(L, -1);
+  lua_pop(L, 1);
+  if (!landmark_chol)
+    return luaL_error(L, "nystrom_encoder: landmark_chol required");
+
+  lua_getfield(L, 1, "scales");
+  tk_dvec_t *scales = tk_dvec_peekopt(L, -1);
+  lua_pop(L, 1);
+  if (!scales)
+    return luaL_error(L, "nystrom_encoder: scales required");
+
   lua_getfield(L, 1, "chol");
   tk_dvec_t *chol = tk_dvec_peekopt(L, -1);
   lua_pop(L, 1);
@@ -877,6 +907,12 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
   if (col_means->n != n_landmarks)
     return luaL_error(L, "nystrom_encoder: col_means size (%llu) != n_landmarks (%llu)",
                       (unsigned long long)col_means->n, (unsigned long long)n_landmarks);
+  if (landmark_chol->n != n_landmarks * n_landmarks)
+    return luaL_error(L, "nystrom_encoder: landmark_chol size (%llu) != n_landmarks^2 (%llu)",
+                      (unsigned long long)landmark_chol->n, (unsigned long long)(n_landmarks * n_landmarks));
+  if (scales->n != n_landmarks)
+    return luaL_error(L, "nystrom_encoder: scales size (%llu) != n_landmarks (%llu)",
+                      (unsigned long long)scales->n, (unsigned long long)n_landmarks);
 
   if (chol) {
     if (n_samples == 0)
@@ -900,6 +936,8 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
   double cmp_alpha = tk_lua_foptnumber(L, 1, "nystrom_encoder", "cmp_alpha", 0.5);
   double cmp_beta = tk_lua_foptnumber(L, 1, "nystrom_encoder", "cmp_beta", 0.5);
   double decay = tk_lua_foptnumber(L, 1, "nystrom_encoder", "decay", 0.0);
+  const char *combine_str = tk_lua_foptstring(L, 1, "nystrom_encoder", "combine", "weighted_avg");
+  tk_combine_type_t combine = tk_inv_parse_combine(combine_str);
 
   tk_dvec_t *raw_codes = NULL;
   if (chol) {
@@ -940,12 +978,15 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
   enc->eigenvalues = eigenvalues;
   enc->col_means = col_means;
   enc->landmark_ids = landmark_ids;
+  enc->landmark_chol = landmark_chol;
+  enc->scales = scales;
   enc->n_dims = n_dims;
   enc->n_landmarks = n_landmarks;
   enc->cmp = cmp;
   enc->cmp_alpha = cmp_alpha;
   enc->cmp_beta = cmp_beta;
   enc->decay = decay;
+  enc->combine = combine;
   enc->destroyed = false;
 
   lua_getfield(L, 1, "features_index");
@@ -965,6 +1006,14 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
   lua_pop(L, 1);
 
   lua_getfield(L, 1, "col_means");
+  tk_lua_add_ephemeron(L, TK_NYSTROM_ENCODER_EPH, Ei, -1);
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "landmark_chol");
+  tk_lua_add_ephemeron(L, TK_NYSTROM_ENCODER_EPH, Ei, -1);
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "scales");
   tk_lua_add_ephemeron(L, TK_NYSTROM_ENCODER_EPH, Ei, -1);
   lua_pop(L, 1);
 
