@@ -1,3 +1,8 @@
+# Active
+
+- Documentation/project cleanup
+- heterogeneous space
+
 # Current
 
 - Run end to end and update defaults

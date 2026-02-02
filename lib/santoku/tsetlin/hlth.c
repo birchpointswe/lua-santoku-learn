@@ -4,6 +4,7 @@
 #include <limits.h>
 #include <math.h>
 #include <cblas.h>
+#include <lapacke.h>
 #include <santoku/lua/utils.h>
 #include <santoku/iuset.h>
 #include <santoku/ivec.h>
@@ -21,8 +22,6 @@
 #define TK_HLTH_ENCODER_EPH "tk_hlth_encoder_eph"
 #define TK_NYSTROM_ENCODER_MT "tk_nystrom_encoder_t"
 #define TK_NYSTROM_ENCODER_EPH "tk_nystrom_encoder_eph"
-#define TK_ITQ_ENCODER_MT "tk_itq_encoder_t"
-#define TK_ITQ_ENCODER_EPH "tk_itq_encoder_eph"
 #define TK_NORMALIZER_MT "tk_normalizer_t"
 #define TK_NORMALIZER_EPH "tk_normalizer_eph"
 #define TK_RP_ENCODER_MT "tk_rp_encoder_t"
@@ -52,9 +51,8 @@ typedef struct {
   uint64_t n_landmarks;
   uint64_t n_hidden;
   uint64_t probe_radius;
-  tk_ivec_sim_type_t cmp;
-  double cmp_alpha;
-  double cmp_beta;
+  double decay;
+  double bandwidth;
   tk_hlth_mode_t mode;
   uint64_t n_thresholds;
   uint64_t n_bins;
@@ -74,19 +72,10 @@ typedef struct {
   tk_dvec_t *scales;
   uint64_t n_dims;
   uint64_t n_landmarks;
-  tk_ivec_sim_type_t cmp;
-  double cmp_alpha;
-  double cmp_beta;
   double decay;
-  tk_combine_type_t combine;
+  double bandwidth;
   bool destroyed;
 } tk_nystrom_encoder_t;
-
-typedef struct {
-  tk_dvec_t *rotation;
-  uint64_t n_dims;
-  bool destroyed;
-} tk_itq_encoder_t;
 
 typedef struct {
   tk_dvec_t *means;
@@ -244,8 +233,7 @@ static inline int tk_hlth_encode_lua(lua_State *L) {
 
   if (feat_inv && query_ivec) {
     tk_inv_neighborhoods_by_vecs(L, feat_inv, query_ivec, enc->n_landmarks,
-                                 enc->cmp, enc->cmp_alpha, enc->cmp_beta,
-                                 0.0, &inv_hoods, &nbr_ids);
+                                 enc->decay, enc->bandwidth, &inv_hoods, &nbr_ids);
   } else if (feat_ann && query_cvec) {
     tk_ann_neighborhoods_by_vecs(L, feat_ann, query_cvec, enc->n_landmarks, enc->probe_radius,
                                  &ann_hoods, &nbr_ids);
@@ -584,19 +572,8 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
 
   uint64_t n_landmarks = tk_lua_foptunsigned(L, 1, "landmark_encoder", "n_landmarks", 24);
 
-  const char *cmp_str = tk_lua_foptstring(L, 1, "landmark_encoder", "cmp", "jaccard");
-  tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
-  if (!strcmp(cmp_str, "jaccard"))
-    cmp = TK_IVEC_JACCARD;
-  else if (!strcmp(cmp_str, "overlap"))
-    cmp = TK_IVEC_OVERLAP;
-  else if (!strcmp(cmp_str, "dice"))
-    cmp = TK_IVEC_DICE;
-  else if (!strcmp(cmp_str, "tversky"))
-    cmp = TK_IVEC_TVERSKY;
-
-  double cmp_alpha = tk_lua_foptnumber(L, 1, "landmark_encoder", "cmp_alpha", 0.5);
-  double cmp_beta = tk_lua_foptnumber(L, 1, "landmark_encoder", "cmp_beta", 0.5);
+  double decay = tk_lua_foptnumber(L, 1, "landmark_encoder", "decay", 0.0);
+  double bandwidth = tk_lua_foptnumber(L, 1, "landmark_encoder", "bandwidth", -1.0);
 
   uint64_t probe_radius = tk_lua_foptunsigned(L, 1, "landmark_encoder", "probe_radius", 2);
 
@@ -646,9 +623,8 @@ static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
   enc->n_landmarks = n_landmarks;
   enc->n_hidden = n_hidden;
   enc->probe_radius = probe_radius;
-  enc->cmp = cmp;
-  enc->cmp_alpha = cmp_alpha;
-  enc->cmp_beta = cmp_beta;
+  enc->decay = decay;
+  enc->bandwidth = bandwidth;
   enc->mode = mode;
   enc->n_thresholds = n_thresholds;
   enc->n_bins = n_bins;
@@ -794,7 +770,7 @@ static inline int tk_nystrom_encode_lua(lua_State *L) {
           if (l_bits && l_nbits > 0) {
             sim = tk_inv_similarity_fast(ranks_arr, weights_arr, n_ranks,
               q_bits, q_len, l_bits, l_nbits,
-              enc->cmp, enc->cmp_alpha, enc->cmp_beta, enc->combine, &rw,
+              enc->bandwidth, &rw,
               q_weights->a, e_weights->a, inter_weights->a);
           }
         }
@@ -922,22 +898,8 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
                         (unsigned long long)chol->n, (unsigned long long)(n_samples * n_landmarks));
   }
 
-  const char *cmp_str = tk_lua_foptstring(L, 1, "nystrom_encoder", "cmp", "jaccard");
-  tk_ivec_sim_type_t cmp = TK_IVEC_JACCARD;
-  if (!strcmp(cmp_str, "jaccard"))
-    cmp = TK_IVEC_JACCARD;
-  else if (!strcmp(cmp_str, "overlap"))
-    cmp = TK_IVEC_OVERLAP;
-  else if (!strcmp(cmp_str, "dice"))
-    cmp = TK_IVEC_DICE;
-  else if (!strcmp(cmp_str, "tversky"))
-    cmp = TK_IVEC_TVERSKY;
-
-  double cmp_alpha = tk_lua_foptnumber(L, 1, "nystrom_encoder", "cmp_alpha", 0.5);
-  double cmp_beta = tk_lua_foptnumber(L, 1, "nystrom_encoder", "cmp_beta", 0.5);
   double decay = tk_lua_foptnumber(L, 1, "nystrom_encoder", "decay", 0.0);
-  const char *combine_str = tk_lua_foptstring(L, 1, "nystrom_encoder", "combine", "weighted_avg");
-  tk_combine_type_t combine = tk_inv_parse_combine(combine_str);
+  double bandwidth = tk_lua_foptnumber(L, 1, "nystrom_encoder", "bandwidth", -1.0);
 
   tk_dvec_t *raw_codes = NULL;
   if (chol) {
@@ -982,11 +944,8 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
   enc->scales = scales;
   enc->n_dims = n_dims;
   enc->n_landmarks = n_landmarks;
-  enc->cmp = cmp;
-  enc->cmp_alpha = cmp_alpha;
-  enc->cmp_beta = cmp_beta;
   enc->decay = decay;
-  enc->combine = combine;
+  enc->bandwidth = bandwidth;
   enc->destroyed = false;
 
   lua_getfield(L, 1, "features_index");
@@ -1024,98 +983,6 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
     lua_pushvalue(L, -3);
     return 3;
   }
-
-  return 2;
-}
-
-static inline tk_itq_encoder_t *tk_itq_encoder_peek(lua_State *L, int i) {
-  return (tk_itq_encoder_t *)luaL_checkudata(L, i, TK_ITQ_ENCODER_MT);
-}
-
-static inline int tk_itq_encoder_gc(lua_State *L) {
-  tk_itq_encoder_t *enc = tk_itq_encoder_peek(L, 1);
-  enc->rotation = NULL;
-  enc->destroyed = true;
-  return 0;
-}
-
-static luaL_Reg tk_itq_encoder_mt_fns[] = {
-  { NULL, NULL }
-};
-
-static inline int tk_itq_encode_lua(lua_State *L) {
-  tk_itq_encoder_t *enc = (tk_itq_encoder_t *)lua_touserdata(L, lua_upvalueindex(1));
-
-  if (enc->destroyed)
-    return luaL_error(L, "itq_encode: encoder has been destroyed");
-
-  tk_dvec_t *codes = tk_dvec_peek(L, 1, "codes");
-  uint64_t n_dims = enc->n_dims;
-  uint64_t n_samples = codes->n / n_dims;
-  uint64_t out_size = n_samples * TK_CVEC_BITS_BYTES(n_dims);
-
-  double *rotated = malloc(n_samples * n_dims * sizeof(double));
-  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-    (int)n_samples, (int)n_dims, (int)n_dims,
-    1.0, codes->a, (int)n_dims,
-    enc->rotation->a, (int)n_dims,
-    0.0, rotated, (int)n_dims);
-
-  tk_cvec_t *out = tk_cvec_peekopt(L, 2);
-  if (out) {
-    tk_cvec_ensure(out, out_size);
-    out->n = out_size;
-    lua_pushvalue(L, 2);
-  } else {
-    out = tk_cvec_create(L, out_size, 0, 0);
-    out->n = out_size;
-  }
-  memset(out->a, 0, out->n);
-
-  #pragma omp parallel for schedule(static)
-  for (uint64_t i = 0; i < n_samples; i++) {
-    uint8_t *sample_out = (uint8_t *)out->a + i * TK_CVEC_BITS_BYTES(n_dims);
-    for (uint64_t d = 0; d < n_dims; d++) {
-      if (rotated[i * n_dims + d] >= 0.0) {
-        sample_out[TK_CVEC_BITS_BYTE(d)] |= (1 << TK_CVEC_BITS_BIT(d));
-      }
-    }
-  }
-
-  free(rotated);
-  return 1;
-}
-
-static inline int tk_hlth_itq_encoder_lua(lua_State *L) {
-  lua_settop(L, 1);
-  luaL_checktype(L, 1, LUA_TTABLE);
-
-  lua_getfield(L, 1, "rotation");
-  tk_dvec_t *rotation = tk_dvec_peekopt(L, -1);
-  lua_pop(L, 1);
-  if (!rotation)
-    return luaL_error(L, "itq_encoder: rotation required");
-
-  uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "itq_encoder", "n_dims");
-  if (n_dims == 0)
-    return luaL_error(L, "itq_encoder: n_dims must be > 0");
-  if (rotation->n != n_dims * n_dims)
-    return luaL_error(L, "itq_encoder: rotation size (%llu) != n_dims^2 (%llu)",
-      (unsigned long long)rotation->n, (unsigned long long)(n_dims * n_dims));
-
-  tk_itq_encoder_t *enc = tk_lua_newuserdata(L, tk_itq_encoder_t, TK_ITQ_ENCODER_MT, tk_itq_encoder_mt_fns, tk_itq_encoder_gc);
-  int Ei = lua_gettop(L);
-
-  enc->rotation = rotation;
-  enc->n_dims = n_dims;
-  enc->destroyed = false;
-
-  lua_getfield(L, 1, "rotation");
-  tk_lua_add_ephemeron(L, TK_ITQ_ENCODER_EPH, Ei, -1);
-  lua_pop(L, 1);
-
-  lua_pushcclosure(L, tk_itq_encode_lua, 1);
-  lua_pushinteger(L, (lua_Integer)n_dims);
 
   return 2;
 }
@@ -1290,10 +1157,15 @@ static inline int tk_rp_encode_lua(lua_State *L) {
   for (uint64_t i = 0; i < n_samples; i++) {
     double *x = codes->a + i * n_dims;
     uint8_t *sample_out = (uint8_t *)out->a + i * TK_CVEC_BITS_BYTES(rp_dims);
+    double norm = 0.0;
+    for (uint64_t d = 0; d < n_dims; d++)
+      norm += x[d] * x[d];
+    norm = sqrt(norm);
+    double inv_norm = (norm > 1e-12) ? 1.0 / norm : 0.0;
     for (uint64_t r = 0; r < rp_dims; r++) {
       double dot = 0.0;
       for (uint64_t d = 0; d < n_dims; d++) {
-        dot += x[d] * enc->weights->a[r * n_dims + d];
+        dot += (x[d] * inv_norm) * enc->weights->a[r * n_dims + d];
       }
       if (dot >= 0.0) {
         sample_out[TK_CVEC_BITS_BYTE(r)] |= (1 << TK_CVEC_BITS_BIT(r));
@@ -1317,20 +1189,77 @@ static inline int tk_hlth_rp_encoder_lua(lua_State *L) {
     return luaL_error(L, "rp_encoder: rp_dims must be > 0");
 
   uint64_t seed = tk_lua_foptunsigned(L, 1, "rp_encoder", "seed", 12345);
+  bool orthogonal = tk_lua_foptboolean(L, 1, "rp_encoder", "orthogonal", true);
+
+  tk_dvec_t *weights = NULL;
+  uint64_t required_size = rp_dims * n_dims;
+
+  lua_getfield(L, 1, "weights");
+  if (!lua_isnil(L, -1)) {
+    weights = tk_dvec_peek(L, -1, "weights");
+    if (weights->m < required_size)
+      weights = NULL;
+  }
+  int Wi = weights ? lua_gettop(L) : 0;
+  if (!weights)
+    lua_pop(L, 1);
+
+  if (!weights) {
+    weights = tk_dvec_create(L, required_size, 0, 0);
+    Wi = lua_gettop(L);
+  }
+  weights->n = required_size;
+
   tk_fast_seed(seed);
-
-  tk_dvec_t *weights = tk_dvec_create(L, rp_dims * n_dims, 0, 0);
-  weights->n = rp_dims * n_dims;
-
-  for (uint64_t i = 0; i < rp_dims * n_dims; i += 2) {
-    double u1 = (double)tk_fast_random() / 4294967295.0;
-    double u2 = (double)tk_fast_random() / 4294967295.0;
-    if (u1 < 1e-10) u1 = 1e-10;
-    double r = sqrt(-2.0 * log(u1));
-    double theta = 2.0 * M_PI * u2;
-    weights->a[i] = r * cos(theta);
-    if (i + 1 < rp_dims * n_dims)
-      weights->a[i + 1] = r * sin(theta);
+  if (orthogonal) {
+    uint64_t n_blocks = (rp_dims + n_dims - 1) / n_dims;
+    double *block = malloc(n_dims * n_dims * sizeof(double));
+    double *tau = malloc(n_dims * sizeof(double));
+    for (uint64_t b = 0; b < n_blocks; b++) {
+      for (uint64_t i = 0; i < n_dims * n_dims; i += 2) {
+        double u1 = (double)tk_fast_random() / 4294967295.0;
+        double u2 = (double)tk_fast_random() / 4294967295.0;
+        if (u1 < 1e-10) u1 = 1e-10;
+        double r = sqrt(-2.0 * log(u1));
+        double theta = 2.0 * M_PI * u2;
+        block[i] = r * cos(theta);
+        if (i + 1 < n_dims * n_dims)
+          block[i + 1] = r * sin(theta);
+      }
+      int m = (int)n_dims;
+      int info = LAPACKE_dgeqrf(LAPACK_ROW_MAJOR, m, m, block, m, tau);
+      if (info != 0) {
+        free(block);
+        free(tau);
+        return luaL_error(L, "rp_encoder: dgeqrf failed with info=%d", info);
+      }
+      info = LAPACKE_dorgqr(LAPACK_ROW_MAJOR, m, m, m, block, m, tau);
+      if (info != 0) {
+        free(block);
+        free(tau);
+        return luaL_error(L, "rp_encoder: dorgqr failed with info=%d", info);
+      }
+      uint64_t start_row = b * n_dims;
+      uint64_t rows_to_copy = (start_row + n_dims <= rp_dims) ? n_dims : (rp_dims - start_row);
+      for (uint64_t i = 0; i < rows_to_copy; i++) {
+        for (uint64_t j = 0; j < n_dims; j++) {
+          weights->a[(start_row + i) * n_dims + j] = block[i * n_dims + j];
+        }
+      }
+    }
+    free(block);
+    free(tau);
+  } else {
+    for (uint64_t i = 0; i < required_size; i += 2) {
+      double u1 = (double)tk_fast_random() / 4294967295.0;
+      double u2 = (double)tk_fast_random() / 4294967295.0;
+      if (u1 < 1e-10) u1 = 1e-10;
+      double r = sqrt(-2.0 * log(u1));
+      double theta = 2.0 * M_PI * u2;
+      weights->a[i] = r * cos(theta);
+      if (i + 1 < required_size)
+        weights->a[i + 1] = r * sin(theta);
+    }
   }
 
   tk_rp_encoder_t *enc = tk_lua_newuserdata(L, tk_rp_encoder_t, TK_RP_ENCODER_MT, tk_rp_encoder_mt_fns, tk_rp_encoder_gc);
@@ -1341,14 +1270,15 @@ static inline int tk_hlth_rp_encoder_lua(lua_State *L) {
   enc->rp_dims = rp_dims;
   enc->destroyed = false;
 
-  lua_pushvalue(L, -2);
+  lua_pushvalue(L, Wi);
   tk_lua_add_ephemeron(L, TK_RP_ENCODER_EPH, Ei, -1);
   lua_pop(L, 1);
 
   lua_pushcclosure(L, tk_rp_encode_lua, 1);
   lua_pushinteger(L, (lua_Integer)rp_dims);
+  lua_pushvalue(L, Wi);
 
-  return 2;
+  return 3;
 }
 
 static inline tk_rff_encoder_t *tk_rff_encoder_peek(lua_State *L, int i) {
@@ -1424,20 +1354,78 @@ static inline int tk_hlth_rff_encoder_lua(lua_State *L) {
   double gamma = tk_lua_foptnumber(L, 1, "rff_encoder", "gamma", 1.0);
 
   uint64_t seed = tk_lua_foptunsigned(L, 1, "rff_encoder", "seed", 12345);
+  bool orthogonal = tk_lua_foptboolean(L, 1, "rff_encoder", "orthogonal", true);
   tk_fast_seed(seed);
 
   tk_dvec_t *weights = tk_dvec_create(L, rff_dims * n_dims, 0, 0);
   weights->n = rff_dims * n_dims;
 
-  for (uint64_t i = 0; i < rff_dims * n_dims; i += 2) {
-    double u1 = (double)tk_fast_random() / 4294967295.0;
-    double u2 = (double)tk_fast_random() / 4294967295.0;
-    if (u1 < 1e-10) u1 = 1e-10;
-    double r = sqrt(-2.0 * log(u1)) * gamma;
-    double theta = 2.0 * M_PI * u2;
-    weights->a[i] = r * cos(theta);
-    if (i + 1 < rff_dims * n_dims)
-      weights->a[i + 1] = r * sin(theta);
+  if (orthogonal) {
+    uint64_t n_blocks = (rff_dims + n_dims - 1) / n_dims;
+    double *block = malloc(n_dims * n_dims * sizeof(double));
+    double *tau = malloc(n_dims * sizeof(double));
+    double *scales = malloc(n_dims * sizeof(double));
+
+    for (uint64_t b = 0; b < n_blocks; b++) {
+      for (uint64_t i = 0; i < n_dims * n_dims; i += 2) {
+        double u1 = (double)tk_fast_random() / 4294967295.0;
+        double u2 = (double)tk_fast_random() / 4294967295.0;
+        if (u1 < 1e-10) u1 = 1e-10;
+        double r = sqrt(-2.0 * log(u1));
+        double theta = 2.0 * M_PI * u2;
+        block[i] = r * cos(theta);
+        if (i + 1 < n_dims * n_dims)
+          block[i + 1] = r * sin(theta);
+      }
+
+      int m = (int)n_dims;
+      int info = LAPACKE_dgeqrf(LAPACK_ROW_MAJOR, m, m, block, m, tau);
+      if (info != 0) {
+        free(block);
+        free(tau);
+        free(scales);
+        return luaL_error(L, "rff_encoder: dgeqrf failed with info=%d", info);
+      }
+
+      info = LAPACKE_dorgqr(LAPACK_ROW_MAJOR, m, m, m, block, m, tau);
+      if (info != 0) {
+        free(block);
+        free(tau);
+        free(scales);
+        return luaL_error(L, "rff_encoder: dorgqr failed with info=%d", info);
+      }
+
+      for (uint64_t i = 0; i < n_dims; i++) {
+        double u1 = (double)tk_fast_random() / 4294967295.0;
+        double u2 = (double)tk_fast_random() / 4294967295.0;
+        if (u1 < 1e-10) u1 = 1e-10;
+        scales[i] = sqrt(-2.0 * log(u1)) * gamma;
+        (void)u2;
+      }
+
+      uint64_t start_row = b * n_dims;
+      uint64_t rows_to_copy = (start_row + n_dims <= rff_dims) ? n_dims : (rff_dims - start_row);
+      for (uint64_t i = 0; i < rows_to_copy; i++) {
+        for (uint64_t j = 0; j < n_dims; j++) {
+          weights->a[(start_row + i) * n_dims + j] = block[i * n_dims + j] * scales[i];
+        }
+      }
+    }
+
+    free(block);
+    free(tau);
+    free(scales);
+  } else {
+    for (uint64_t i = 0; i < rff_dims * n_dims; i += 2) {
+      double u1 = (double)tk_fast_random() / 4294967295.0;
+      double u2 = (double)tk_fast_random() / 4294967295.0;
+      if (u1 < 1e-10) u1 = 1e-10;
+      double r = sqrt(-2.0 * log(u1)) * gamma;
+      double theta = 2.0 * M_PI * u2;
+      weights->a[i] = r * cos(theta);
+      if (i + 1 < rff_dims * n_dims)
+        weights->a[i + 1] = r * sin(theta);
+    }
   }
 
   tk_dvec_t *biases = tk_dvec_create(L, rff_dims, 0, 0);
@@ -1474,7 +1462,6 @@ static inline int tk_hlth_rff_encoder_lua(lua_State *L) {
 static luaL_Reg tk_hlth_fns[] = {
   { "landmark_encoder", tk_hlth_landmark_encoder_lua },
   { "nystrom_encoder", tk_hlth_nystrom_encoder_lua },
-  { "itq_encoder", tk_hlth_itq_encoder_lua },
   { "normalizer", tk_hlth_normalizer_lua },
   { "rp_encoder", tk_hlth_rp_encoder_lua },
   { "rff_encoder", tk_hlth_rff_encoder_lua },

@@ -52,8 +52,6 @@ typedef struct {
   bool assign_noise;
   tk_dvec_t *inv_thresholds;
   uint64_t probe_radius;
-  tk_ivec_sim_type_t cmp;
-  double cmp_alpha, cmp_beta;
   tk_pvec_t *pos, *neg;
   uint64_t n_pos, n_neg;
   double *f1, *precision, *recall;
@@ -1474,20 +1472,12 @@ static inline int tm_score_retrieval (lua_State *L)
   tk_inv_t *kernel_index = tk_inv_peekopt(L, -1);
   lua_pop(L, 1);
 
-  tk_ivec_sim_type_t kernel_cmp = TK_IVEC_COSINE;
-  double kernel_alpha = 0.5;
-  double kernel_beta = 0.5;
   double kernel_decay = 0.0;
-  tk_combine_type_t kernel_combine = TK_COMBINE_EXPONENTIAL;
+  double kernel_bandwidth = -1.0;
 
   if (kernel_index) {
-    const char *cmp_str = tk_lua_foptstring(L, 1, "score_retrieval", "kernel_cmp", "cosine");
-    kernel_cmp = tk_inv_parse_cmp(cmp_str);
-    kernel_alpha = tk_lua_foptnumber(L, 1, "score_retrieval", "kernel_alpha", 0.5);
-    kernel_beta = tk_lua_foptnumber(L, 1, "score_retrieval", "kernel_beta", 0.5);
     kernel_decay = tk_lua_foptnumber(L, 1, "score_retrieval", "kernel_decay", 0.0);
-    const char *combine_str = tk_lua_foptstring(L, 1, "score_retrieval", "kernel_combine", "exponential");
-    kernel_combine = tk_inv_parse_combine(combine_str);
+    kernel_bandwidth = tk_lua_foptnumber(L, 1, "score_retrieval", "kernel_bandwidth", -1.0);
   }
 
   tk_ann_t *ann = NULL;
@@ -1610,7 +1600,7 @@ static inline int tm_score_retrieval (lua_State *L)
 
           if (kernel_index) {
             double kernel_dist = tk_inv_distance(kernel_index, query_id, neighbor_id,
-              kernel_cmp, kernel_alpha, kernel_beta, kernel_combine, kernel_decay);
+              kernel_decay, kernel_bandwidth);
             tk_rvec_push(query_neighbors_raw, tk_rank(neighbor_eval_idx, kernel_dist));
           } else if (raw_codes) {
             khint_t nbr_khi = tk_iumap_get(code_id_to_idx, neighbor_id);

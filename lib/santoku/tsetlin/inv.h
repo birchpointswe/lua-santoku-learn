@@ -60,15 +60,7 @@ typedef struct {
   double weights[TK_INV_MAX_RANKS];
   double total;
   uint64_t n_ranks;
-  double sigma;
 } tk_inv_rank_weights_t;
-
-typedef enum {
-  TK_COMBINE_WEIGHTED_AVG,
-  TK_COMBINE_ADDITIVE,
-  TK_COMBINE_EXPONENTIAL,
-  TK_COMBINE_RBF
-} tk_combine_type_t;
 
 static inline void tk_inv_precompute_rank_weights (
   tk_inv_rank_weights_t *rw,
@@ -79,11 +71,8 @@ static inline double tk_inv_similarity (
   tk_inv_t *inv,
   int64_t *a, size_t na,
   int64_t *b, size_t nb,
-  tk_ivec_sim_type_t cmp,
-  double cmp_alpha,
-  double cmp_beta,
-  tk_combine_type_t combine,
-  double decay
+  double decay,
+  double bandwidth
 );
 static inline double tk_inv_similarity_fast (
   int64_t *ranks_arr,
@@ -91,10 +80,7 @@ static inline double tk_inv_similarity_fast (
   uint64_t n_ranks,
   int64_t *abits, size_t asize,
   int64_t *bbits, size_t bsize,
-  tk_ivec_sim_type_t cmp,
-  double cmp_alpha,
-  double cmp_beta,
-  tk_combine_type_t combine,
+  double bandwidth,
   tk_inv_rank_weights_t *rw,
   double *q_arr,
   double *e_arr,
@@ -118,10 +104,7 @@ static inline double tk_inv_similarity_by_rank_fast (
   int64_t vsid,
   double *q_weights_by_rank,
   double *e_weights_by_rank,
-  tk_ivec_sim_type_t cmp,
-  double cmp_alpha,
-  double cmp_beta,
-  tk_combine_type_t combine,
+  double bandwidth,
   double cutoff,
   tk_inv_rank_weights_t *rw
 );
@@ -134,24 +117,6 @@ static inline tk_inv_t *tk_inv_peek (lua_State *L, int i)
 static inline tk_inv_t *tk_inv_peekopt (lua_State *L, int i)
 {
   return (tk_inv_t *) tk_lua_testuserdata(L, i, TK_INV_MT);
-}
-
-static inline tk_ivec_sim_type_t tk_inv_parse_cmp (const char *s) {
-  if (!s || !strcmp(s, "jaccard")) return TK_IVEC_JACCARD;
-  if (!strcmp(s, "overlap")) return TK_IVEC_OVERLAP;
-  if (!strcmp(s, "dice")) return TK_IVEC_DICE;
-  if (!strcmp(s, "tversky")) return TK_IVEC_TVERSKY;
-  if (!strcmp(s, "cosine")) return TK_IVEC_COSINE;
-  if (!strcmp(s, "min_kernel")) return TK_IVEC_MIN_KERNEL;
-  return TK_IVEC_JACCARD;
-}
-
-static inline tk_combine_type_t tk_inv_parse_combine (const char *s) {
-  if (!s || !strcmp(s, "weighted_avg")) return TK_COMBINE_WEIGHTED_AVG;
-  if (!strcmp(s, "additive")) return TK_COMBINE_ADDITIVE;
-  if (!strcmp(s, "exponential")) return TK_COMBINE_EXPONENTIAL;
-  if (!strcmp(s, "rbf")) return TK_COMBINE_RBF;
-  return TK_COMBINE_WEIGHTED_AVG;
 }
 
 static inline void tk_inv_shrink (
@@ -520,10 +485,8 @@ static inline void tk_inv_neighborhoods (
   lua_State *L,
   tk_inv_t *inv,
   uint64_t knn,
-  tk_ivec_sim_type_t cmp,
-  double cmp_alpha,
-  double cmp_beta,
   double decay,
+  double bandwidth,
   tk_inv_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
@@ -634,7 +597,7 @@ static inline void tk_inv_neighborhoods (
         size_t nvbits;
         int64_t *vbits = tk_inv_sget(inv, vsid, &nvbits);
         tk_inv_compute_candidate_weights_by_rank(inv, vbits, nvbits, e_weights_by_rank);
-        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_by_rank, cmp, cmp_alpha, cmp_beta, TK_COMBINE_WEIGHTED_AVG, cutoff, &rw);
+        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_by_rank, bandwidth, cutoff, &rw);
         double dist = 1.0 - sim;
         if (dist <= cutoff) {
           if (knn)
@@ -670,10 +633,8 @@ static inline void tk_inv_neighborhoods_by_ids (
   tk_inv_t *inv,
   tk_ivec_t *query_ids,
   uint64_t knn,
-  tk_ivec_sim_type_t cmp,
-  double cmp_alpha,
-  double cmp_beta,
   double decay,
+  double bandwidth,
   tk_inv_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
@@ -773,7 +734,7 @@ static inline void tk_inv_neighborhoods_by_ids (
         size_t nvbits;
         int64_t *vbits = tk_inv_sget(inv, vsid, &nvbits);
         tk_inv_compute_candidate_weights_by_rank(inv, vbits, nvbits, e_weights_by_rank);
-        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_by_rank, cmp, cmp_alpha, cmp_beta, TK_COMBINE_WEIGHTED_AVG, cutoff, &rw);
+        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_by_rank, bandwidth, cutoff, &rw);
         double dist = 1.0 - sim;
         if (dist <= cutoff) {
           if (knn)
@@ -810,10 +771,8 @@ static inline void tk_inv_neighborhoods_by_vecs (
   tk_inv_t *inv,
   tk_ivec_t *query_vecs,
   uint64_t knn,
-  tk_ivec_sim_type_t cmp,
-  double cmp_alpha,
-  double cmp_beta,
   double decay,
+  double bandwidth,
   tk_inv_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
@@ -950,7 +909,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
         size_t nvbits;
         int64_t *vbits = tk_inv_sget(inv, vsid, &nvbits);
         tk_inv_compute_candidate_weights_by_rank(inv, vbits, nvbits, e_weights_by_rank);
-        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_by_rank, cmp, cmp_alpha, cmp_beta, TK_COMBINE_WEIGHTED_AVG, cutoff, &rw);
+        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_by_rank, bandwidth, cutoff, &rw);
         double dist = 1.0 - sim;
         if (dist <= cutoff) {
           if (knn)
@@ -990,8 +949,6 @@ static inline double tk_inv_w (
   return W->a[fid];
 }
 
-#define tk_inv_similarity_partial tk_ivec_set_similarity_from_partial
-
 static inline void tk_inv_precompute_rank_weights (
   tk_inv_rank_weights_t *rw,
   uint64_t n_ranks,
@@ -1000,7 +957,6 @@ static inline void tk_inv_precompute_rank_weights (
   double abs_decay = fabs(decay);
   rw->n_ranks = n_ranks;
   rw->total = 0.0;
-  rw->sigma = (abs_decay > 0.0) ? abs_decay : 1.0;
   for (uint64_t r = 0; r < n_ranks && r < TK_INV_MAX_RANKS; r++) {
     double eff_r = (decay >= 0.0) ? (double)r : (double)(n_ranks - 1 - r);
     rw->weights[r] = exp(-eff_r * abs_decay);
@@ -1011,31 +967,21 @@ static inline void tk_inv_precompute_rank_weights (
 static inline double tk_inv_combine_ranks (
   double *i_arr, double *q_arr, double *e_arr,
   uint64_t n_ranks,
-  tk_ivec_sim_type_t sim_type,
-  double alpha, double beta,
-  tk_combine_type_t combine_type,
+  double bandwidth,
   tk_inv_rank_weights_t *rw
 ) {
   double accum = 0.0;
   for (uint64_t r = 0; r < n_ranks; r++) {
-    double s = tk_inv_similarity_partial(i_arr[r], q_arr[r], e_arr[r], sim_type, alpha, beta);
+    double denom = sqrt(q_arr[r] * e_arr[r]);
+    double s = (denom > 0.0) ? i_arr[r] / denom : 0.0;
     accum += rw->weights[r] * s;
   }
-  switch (combine_type) {
-    case TK_COMBINE_WEIGHTED_AVG:
-      return (rw->total > 0.0) ? accum / rw->total : 0.0;
-    case TK_COMBINE_ADDITIVE:
-      return accum;
-    case TK_COMBINE_EXPONENTIAL:
-      return exp(accum) - 1.0;
-    case TK_COMBINE_RBF: {
-      double avg_sim = (rw->total > 0.0) ? accum / rw->total : 0.0;
-      double distance = 1.0 - avg_sim;
-      return exp(-distance * rw->sigma);
-    }
-    default:
-      return (rw->total > 0.0) ? accum / rw->total : 0.0;
+  double avg_sim = (rw->total > 0.0) ? accum / rw->total : 0.0;
+  if (bandwidth >= 0.0) {
+    double distance = 1.0 - avg_sim;
+    return exp(-distance * bandwidth);
   }
+  return avg_sim;
 }
 
 static inline double tk_inv_similarity_fast (
@@ -1044,10 +990,7 @@ static inline double tk_inv_similarity_fast (
   uint64_t n_ranks,
   int64_t *abits, size_t asize,
   int64_t *bbits, size_t bsize,
-  tk_ivec_sim_type_t cmp,
-  double cmp_alpha,
-  double cmp_beta,
-  tk_combine_type_t combine,
+  double bandwidth,
   tk_inv_rank_weights_t *rw,
   double *q_arr,
   double *e_arr,
@@ -1092,18 +1035,15 @@ static inline double tk_inv_similarity_fast (
     e_arr[rank] += weights_arr[fid];
     j++;
   }
-  return tk_inv_combine_ranks(i_arr, q_arr, e_arr, n_ranks, cmp, cmp_alpha, cmp_beta, combine, rw);
+  return tk_inv_combine_ranks(i_arr, q_arr, e_arr, n_ranks, bandwidth, rw);
 }
 
 static inline double tk_inv_similarity (
   tk_inv_t *inv,
   int64_t *abits, size_t asize,
   int64_t *bbits, size_t bsize,
-  tk_ivec_sim_type_t cmp,
-  double cmp_alpha,
-  double cmp_beta,
-  tk_combine_type_t combine,
-  double decay
+  double decay,
+  double bandwidth
 ) {
   tk_inv_rank_weights_t rw;
   tk_inv_precompute_rank_weights(&rw, inv->n_ranks, decay);
@@ -1111,19 +1051,15 @@ static inline double tk_inv_similarity (
   double e_arr[TK_INV_MAX_RANKS] = {0};
   double i_arr[TK_INV_MAX_RANKS] = {0};
   return tk_inv_similarity_fast(inv->ranks->a, inv->weights->a, inv->n_ranks,
-    abits, asize, bbits, bsize, cmp, cmp_alpha, cmp_beta, combine, &rw,
-    q_arr, e_arr, i_arr);
+    abits, asize, bbits, bsize, bandwidth, &rw, q_arr, e_arr, i_arr);
 }
 
 static inline double tk_inv_distance (
   tk_inv_t *inv,
   int64_t uid0,
   int64_t uid1,
-  tk_ivec_sim_type_t cmp,
-  double cmp_alpha,
-  double cmp_beta,
-  tk_combine_type_t combine,
-  double decay
+  double decay,
+  double bandwidth
 ) {
   size_t n0 = 0, n1 = 0;
   int64_t *v0 = tk_inv_get(inv, uid0, &n0);
@@ -1132,7 +1068,7 @@ static inline double tk_inv_distance (
   int64_t *v1 = tk_inv_get(inv, uid1, &n1);
   if (v1 == NULL)
     return 1.0;
-  return 1.0 - tk_inv_similarity(inv, v0, n0, v1, n1, cmp, cmp_alpha, cmp_beta, combine, decay);
+  return 1.0 - tk_inv_similarity(inv, v0, n0, v1, n1, decay, bandwidth);
 }
 
 static inline void tk_inv_compute_query_weights_by_rank (
@@ -1179,10 +1115,7 @@ static inline double tk_inv_similarity_by_rank_fast (
   int64_t vsid,
   double *q_weights_by_rank,
   double *e_weights_by_rank,
-  tk_ivec_sim_type_t cmp,
-  double cmp_alpha,
-  double cmp_beta,
-  tk_combine_type_t combine,
+  double bandwidth,
   double cutoff,
   tk_inv_rank_weights_t *rw
 ) {
@@ -1194,33 +1127,23 @@ static inline double tk_inv_similarity_by_rank_fast (
     double inter_w = wacc_arr[(int64_t)n_ranks * vsid + (int64_t)rank];
     double q_w = q_weights_by_rank[rank];
     double e_w = e_weights_by_rank[rank];
-    double rank_sim = (q_w > 0.0 || e_w > 0.0)
-      ? tk_inv_similarity_partial(inter_w, q_w, e_w, cmp, cmp_alpha, cmp_beta)
-      : 0.0;
+    double denom = sqrt(q_w * e_w);
+    double rank_sim = (denom > 0.0) ? inter_w / denom : 0.0;
     accum += weight * rank_sim;
     total_weight += weight;
-    if (combine == TK_COMBINE_WEIGHTED_AVG && cutoff < 1.0 && rw->total > 0.0) {
+    if (cutoff < 1.0 && rw->total > 0.0) {
       double remaining_weight = rw->total - total_weight;
       double max_possible_sim = (accum + remaining_weight) / rw->total;
       if (max_possible_sim < min_required_sim)
         return 0.0;
     }
   }
-  switch (combine) {
-    case TK_COMBINE_WEIGHTED_AVG:
-      return (rw->total > 0.0) ? accum / rw->total : 0.0;
-    case TK_COMBINE_ADDITIVE:
-      return accum;
-    case TK_COMBINE_EXPONENTIAL:
-      return exp(accum) - 1.0;
-    case TK_COMBINE_RBF: {
-      double avg_sim = (rw->total > 0.0) ? accum / rw->total : 0.0;
-      double distance = 1.0 - avg_sim;
-      return exp(-distance * rw->sigma);
-    }
-    default:
-      return (rw->total > 0.0) ? accum / rw->total : 0.0;
+  double avg_sim = (rw->total > 0.0) ? accum / rw->total : 0.0;
+  if (bandwidth >= 0.0) {
+    double distance = 1.0 - avg_sim;
+    return exp(-distance * bandwidth);
   }
+  return avg_sim;
 }
 
 static inline double tk_inv_similarity_by_rank (
@@ -1229,18 +1152,15 @@ static inline double tk_inv_similarity_by_rank (
   int64_t vsid,
   double *q_weights_by_rank,
   double *e_weights_by_rank,
-  tk_ivec_sim_type_t cmp,
-  double cmp_alpha,
-  double cmp_beta,
-  tk_combine_type_t combine,
-  double cutoff,
-  double decay
+  double decay,
+  double bandwidth,
+  double cutoff
 ) {
   tk_inv_rank_weights_t rw;
   tk_inv_precompute_rank_weights(&rw, inv->n_ranks, decay);
   return tk_inv_similarity_by_rank_fast(
     inv->n_ranks, wacc->a, vsid, q_weights_by_rank, e_weights_by_rank,
-    cmp, cmp_alpha, cmp_beta, combine, cutoff, &rw);
+    bandwidth, cutoff, &rw);
 }
 
 static inline tk_rvec_t *tk_inv_neighbors_by_vec (
@@ -1250,10 +1170,8 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   int64_t sid0,
   uint64_t knn,
   tk_rvec_t *out,
-  tk_ivec_sim_type_t cmp,
-  double cmp_alpha,
-  double cmp_beta,
-  double decay
+  double decay,
+  double bandwidth
 ) {
   if (datalen == 0) {
     tk_rvec_clear(out);
@@ -1337,7 +1255,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
     int64_t *ev = tk_inv_sget(inv, vsid, &elen);
     tk_inv_compute_candidate_weights_by_rank(inv, ev, elen, e_weights_by_rank);
     double current_cutoff = (knn && out->n >= knn) ? out->a[0].d : 1.0;
-    double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, vsid, q_weights_by_rank, e_weights_by_rank, cmp, cmp_alpha, cmp_beta, TK_COMBINE_WEIGHTED_AVG, current_cutoff, &rw);
+    double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, vsid, q_weights_by_rank, e_weights_by_rank, bandwidth, current_cutoff, &rw);
     double dist = 1.0 - sim;
     if (dist <= current_cutoff) {
       int64_t vuid = tk_inv_sid_uid(inv, vsid);
@@ -1365,10 +1283,8 @@ static inline tk_rvec_t *tk_inv_neighbors_by_id (
   int64_t uid,
   uint64_t knn,
   tk_rvec_t *out,
-  tk_ivec_sim_type_t cmp,
-  double cmp_alpha,
-  double cmp_beta,
-  double decay
+  double decay,
+  double bandwidth
 ) {
   int64_t sid0 = tk_inv_uid_sid(inv, uid, false);
   if (sid0 < 0) {
@@ -1377,7 +1293,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_id (
   }
   size_t len = 0;
   int64_t *data = tk_inv_get(inv, uid, &len);
-  return tk_inv_neighbors_by_vec(inv, data, len, sid0, knn, out, cmp, cmp_alpha, cmp_beta, decay);
+  return tk_inv_neighbors_by_vec(inv, data, len, sid0, knn, out, decay, bandwidth);
 }
 
 static inline int tk_inv_gc_lua (lua_State *L)
@@ -1485,11 +1401,9 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
 {
   tk_inv_t *inv = tk_inv_peek(L, 1);
   uint64_t knn = tk_lua_checkunsigned(L, 2, "knn");
-  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 3, "comparator", "jaccard"));
-  double cmp_alpha = tk_lua_optnumber(L, 4, "alpha", 1.0);
-  double cmp_beta = tk_lua_optnumber(L, 5, "beta", 0.1);
-  double decay = tk_lua_optnumber(L, 6, "decay", 0.0);
-  tk_inv_neighborhoods(L, inv, knn, cmp, cmp_alpha, cmp_beta, decay, NULL, NULL);
+  double decay = tk_lua_optnumber(L, 3, "decay", 0.0);
+  double bandwidth = tk_lua_optnumber(L, 4, "bandwidth", -1.0);
+  tk_inv_neighborhoods(L, inv, knn, decay, bandwidth, NULL, NULL);
   return 2;
 }
 
@@ -1498,10 +1412,8 @@ static inline int tk_inv_neighborhoods_by_ids_lua (lua_State *L)
   tk_inv_t *inv = tk_inv_peek(L, 1);
   tk_ivec_t *query_ids = tk_ivec_peek(L, 2, "ids");
   uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
-  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 4, "comparator", "jaccard"));
-  double cmp_alpha = tk_lua_optnumber(L, 5, "alpha", 1.0);
-  double cmp_beta = tk_lua_optnumber(L, 6, "beta", 0.1);
-  double decay = tk_lua_optnumber(L, 7, "decay", 0.0);
+  double decay = tk_lua_optnumber(L, 4, "decay", 0.0);
+  double bandwidth = tk_lua_optnumber(L, 5, "bandwidth", -1.0);
   int64_t write_pos = 0;
   for (int64_t i = 0; i < (int64_t) query_ids->n; i ++) {
     int64_t uid = query_ids->a[i];
@@ -1513,7 +1425,7 @@ static inline int tk_inv_neighborhoods_by_ids_lua (lua_State *L)
   query_ids->n = (uint64_t) write_pos;
 
   tk_inv_hoods_t *hoods;
-  tk_inv_neighborhoods_by_ids(L, inv, query_ids, knn, cmp, cmp_alpha, cmp_beta, decay, &hoods, &query_ids);
+  tk_inv_neighborhoods_by_ids(L, inv, query_ids, knn, decay, bandwidth, &hoods, &query_ids);
   return 2;
 }
 
@@ -1522,11 +1434,9 @@ static inline int tk_inv_neighborhoods_by_vecs_lua (lua_State *L)
   tk_inv_t *inv = tk_inv_peek(L, 1);
   tk_ivec_t *query_vecs = tk_ivec_peek(L, 2, "vectors");
   uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
-  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 4, "comparator", "jaccard"));
-  double cmp_alpha = tk_lua_optnumber(L, 5, "alpha", 1.0);
-  double cmp_beta = tk_lua_optnumber(L, 6, "beta", 0.1);
-  double decay = tk_lua_optnumber(L, 7, "decay", 0.0);
-  tk_inv_neighborhoods_by_vecs(L, inv, query_vecs, knn, cmp, cmp_alpha, cmp_beta, decay, NULL, NULL);
+  double decay = tk_lua_optnumber(L, 4, "decay", 0.0);
+  double bandwidth = tk_lua_optnumber(L, 5, "bandwidth", -1.0);
+  tk_inv_neighborhoods_by_vecs(L, inv, query_vecs, knn, decay, bandwidth, NULL, NULL);
   return 2;
 }
 
@@ -1535,12 +1445,9 @@ static inline int tk_inv_similarity_lua (lua_State *L)
   tk_inv_t *inv = tk_inv_peek(L, 1);
   int64_t uid0 = tk_lua_checkinteger(L, 2, "uid0");
   int64_t uid1 = tk_lua_checkinteger(L, 3, "uid1");
-  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 4, "comparator", "jaccard"));
-  double cmp_alpha = tk_lua_optnumber(L, 5, "alpha", 1.0);
-  double cmp_beta = tk_lua_optnumber(L, 6, "beta", 0.1);
-  double decay = tk_lua_optnumber(L, 7, "decay", 0.0);
-  tk_combine_type_t combine = tk_inv_parse_combine(tk_lua_optstring(L, 8, "combine", "weighted_avg"));
-  lua_pushnumber(L, 1.0 - tk_inv_distance(inv, uid0, uid1, cmp, cmp_alpha, cmp_beta, combine, decay));
+  double decay = tk_lua_optnumber(L, 4, "decay", 0.0);
+  double bandwidth = tk_lua_optnumber(L, 5, "bandwidth", -1.0);
+  lua_pushnumber(L, 1.0 - tk_inv_distance(inv, uid0, uid1, decay, bandwidth));
   return 1;
 }
 
@@ -1549,12 +1456,9 @@ static inline int tk_inv_distance_lua (lua_State *L)
   tk_inv_t *inv = tk_inv_peek(L, 1);
   int64_t uid0 = tk_lua_checkinteger(L, 2, "uid0");
   int64_t uid1 = tk_lua_checkinteger(L, 3, "uid1");
-  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 4, "comparator", "jaccard"));
-  double cmp_alpha = tk_lua_optnumber(L, 5, "alpha", 1.0);
-  double cmp_beta = tk_lua_optnumber(L, 6, "beta", 0.1);
-  double decay = tk_lua_optnumber(L, 7, "decay", 0.0);
-  tk_combine_type_t combine = tk_inv_parse_combine(tk_lua_optstring(L, 8, "combine", "weighted_avg"));
-  lua_pushnumber(L, tk_inv_distance(inv, uid0, uid1, cmp, cmp_alpha, cmp_beta, combine, decay));
+  double decay = tk_lua_optnumber(L, 4, "decay", 0.0);
+  double bandwidth = tk_lua_optnumber(L, 5, "bandwidth", -1.0);
+  lua_pushnumber(L, tk_inv_distance(inv, uid0, uid1, decay, bandwidth));
   return 1;
 }
 
@@ -1563,16 +1467,14 @@ static inline int tk_inv_neighbors_lua (lua_State *L)
   tk_inv_t *inv = tk_inv_peek(L, 1);
   uint64_t knn = tk_lua_optunsigned(L, 3, "knn", 0);
   tk_rvec_t *out = tk_rvec_peek(L, 4, "out");
-  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_optstring(L, 5, "comparator", "jaccard"));
-  double cmp_alpha = tk_lua_optnumber(L, 6, "alpha", 1.0);
-  double cmp_beta = tk_lua_optnumber(L, 7, "beta", 0.1);
-  double decay = tk_lua_optnumber(L, 8, "decay", 0.0);
+  double decay = tk_lua_optnumber(L, 5, "decay", 0.0);
+  double bandwidth = tk_lua_optnumber(L, 6, "bandwidth", -1.0);
   if (lua_type(L, 2) == LUA_TNUMBER) {
     int64_t uid = tk_lua_checkinteger(L, 2, "id");
-    tk_inv_neighbors_by_id(inv, uid, knn, out, cmp, cmp_alpha, cmp_beta, decay);
+    tk_inv_neighbors_by_id(inv, uid, knn, out, decay, bandwidth);
   } else {
     tk_ivec_t *vec = tk_ivec_peek(L, 2, "vector");
-    tk_inv_neighbors_by_vec(inv, vec->a, vec->n, -1, knn, out, cmp, cmp_alpha, cmp_beta, decay);
+    tk_inv_neighbors_by_vec(inv, vec->a, vec->n, -1, knn, out, decay, bandwidth);
   }
   return 0;
 }

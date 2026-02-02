@@ -3,6 +3,8 @@ local spectral = require("santoku.tsetlin.spectral")
 local hlth = require("santoku.tsetlin.hlth")
 local evaluator = require("santoku.tsetlin.evaluator")
 local cvec = require("santoku.cvec")
+local ivec = require("santoku.ivec")
+local dvec = require("santoku.dvec")
 local num = require("santoku.num")
 local str = require("santoku.string")
 local err = require("santoku.error")
@@ -593,11 +595,8 @@ M.score_spectral_eval = function (args)
   if kernel_index and kernel_params then
     kernel_stats = evaluator.ranking_accuracy({
       kernel_index = kernel_index,
-      kernel_cmp = kernel_params.cmp,
-      kernel_alpha = kernel_params.cmp_alpha,
-      kernel_beta = kernel_params.cmp_beta,
       kernel_decay = kernel_params.decay,
-      kernel_combine = kernel_params.combine,
+      kernel_bandwidth = kernel_params.bandwidth,
       eval_ids = eval.ids,
       eval_offsets = eval.offsets,
       eval_neighbors = eval.neighbors,
@@ -630,11 +629,8 @@ M.build_spectral_nystrom = function (args)
   local index = args.index
   local n_landmarks = args.n_landmarks or 0
   local n_dims = args.n_dims
-  local cmp = args.cmp
-  local cmp_alpha = args.cmp_alpha
-  local cmp_beta = args.cmp_beta
   local decay = args.decay
-  local combine = args.combine
+  local bandwidth = args.bandwidth
   local trace_tol = args.trace_tol
   local each_cb = args.each
   local train_tokens = args.train_tokens
@@ -644,11 +640,8 @@ M.build_spectral_nystrom = function (args)
     spectral.sample_landmarks({
       inv = index,
       n_landmarks = n_landmarks,
-      cmp = cmp,
-      cmp_alpha = cmp_alpha,
-      cmp_beta = cmp_beta,
       decay = decay,
-      combine = combine,
+      bandwidth = bandwidth,
       trace_tol = trace_tol,
     })
 
@@ -685,11 +678,8 @@ M.build_spectral_nystrom = function (args)
     landmark_chol = landmark_chol,
     scales = scales,
     n_dims = effective_dims,
-    cmp = cmp,
-    cmp_alpha = cmp_alpha,
-    cmp_beta = cmp_beta,
     decay = decay,
-    combine = combine,
+    bandwidth = bandwidth,
   })
 
   local raw_codes = nil
@@ -711,11 +701,8 @@ M.build_spectral_nystrom = function (args)
     landmark_chol = landmark_chol,
     scales = scales,
     n_landmarks = actual_landmarks,
-    cmp = cmp,
-    cmp_alpha = cmp_alpha,
-    cmp_beta = cmp_beta,
     decay = decay,
-    combine = combine,
+    bandwidth = bandwidth,
     nystrom_encode = nystrom_encode,
   }
 end
@@ -729,11 +716,8 @@ M.spectral = function (args)
   end
   n_landmarks_cfg = n_landmarks_cfg or n_dims_cfg
   n_dims_cfg = n_dims_cfg or n_landmarks_cfg
-  local cmp = args.cmp or "jaccard"
-  local cmp_alpha = args.cmp_alpha or 0.5
-  local cmp_beta = args.cmp_beta or 0.5
   local decay_cfg = args.decay or 0.0
-  local combine = args.combine or "weighted_avg"
+  local bandwidth_cfg = args.bandwidth or -1.0
   local trace_tol = args.trace_tol
   local each_cb = args.each
   local tolerance = args.tolerance or 1e-6
@@ -765,7 +749,8 @@ M.spectral = function (args)
   local landmarks_is_range = is_range(n_landmarks_cfg)
   local dims_is_range = is_range(n_dims_cfg)
   local decay_is_range = is_range(decay_cfg)
-  local has_search = (landmarks_is_range or dims_is_range or decay_is_range) and expected and eval_cfg and rounds > 0
+  local bandwidth_is_range = is_range(bandwidth_cfg)
+  local has_search = (landmarks_is_range or dims_is_range or decay_is_range or bandwidth_is_range) and expected and eval_cfg and rounds > 0
 
   if not has_search then
     local n_landmarks_val = get_fixed_val(n_landmarks_cfg)
@@ -776,19 +761,17 @@ M.spectral = function (args)
       n_dims_val = n_landmarks_val
     end
     local decay_val = get_fixed_val(decay_cfg) or 0.0
-    local params = { n_landmarks = n_landmarks_val, n_dims = n_dims_val, decay = decay_val }
+    local bandwidth_val = get_fixed_val(bandwidth_cfg) or -1.0
+    local params = { n_landmarks = n_landmarks_val, n_dims = n_dims_val, decay = decay_val, bandwidth = bandwidth_val }
     if each_cb then
-      each_cb({ event = "sample", n_landmarks = n_landmarks_val, n_dims = n_dims_val, decay = decay_val })
+      each_cb({ event = "sample", n_landmarks = n_landmarks_val, n_dims = n_dims_val, decay = decay_val, bandwidth = bandwidth_val })
     end
     local model = M.build_spectral_nystrom({
       index = index,
       n_landmarks = n_landmarks_val,
       n_dims = n_dims_val,
-      cmp = cmp,
-      cmp_alpha = cmp_alpha,
-      cmp_beta = cmp_beta,
       decay = decay_val,
-      combine = combine,
+      bandwidth = bandwidth_val,
       trace_tol = trace_tol,
       each = each_cb,
       train_tokens = train_tokens,
@@ -803,11 +786,11 @@ M.spectral = function (args)
         eval_params = eval_cfg,
         eval = expected,
         kernel_index = index,
-        kernel_params = { cmp = cmp, cmp_alpha = cmp_alpha, cmp_beta = cmp_beta, decay = decay_val, combine = combine },
+        kernel_params = { decay = decay_val, bandwidth = bandwidth_val },
       })
       local eval_t1 = utc.time(true)
       if each_cb then
-        each_cb({ event = "eval", n_landmarks = n_landmarks_val, n_dims = n_dims_val, decay = decay_val, score = score, metrics = metrics, elapsed = eval_t1 - eval_t0 })
+        each_cb({ event = "eval", n_landmarks = n_landmarks_val, n_dims = n_dims_val, decay = decay_val, bandwidth = bandwidth_val, score = score, metrics = metrics, elapsed = eval_t1 - eval_t0 })
       end
     end
     if each_cb then
@@ -816,11 +799,12 @@ M.spectral = function (args)
     return model, params
   end
 
-  local param_names = { "n_landmarks", "n_dims", "decay" }
+  local param_names = { "n_landmarks", "n_dims", "decay", "bandwidth" }
   local samplers = {
     n_landmarks = M.build_sampler(n_landmarks_cfg, global_dev),
     n_dims = M.build_sampler(n_dims_cfg, global_dev),
     decay = M.build_sampler(decay_cfg, global_dev),
+    bandwidth = M.build_sampler(bandwidth_cfg, global_dev),
   }
 
   local function trial_fn (params, info)
@@ -834,6 +818,7 @@ M.spectral = function (args)
         n_landmarks = params.n_landmarks,
         n_dims = params.n_dims,
         decay = params.decay,
+        bandwidth = params.bandwidth,
         global_best_score = info.global_best_score,
       })
     end
@@ -841,11 +826,8 @@ M.spectral = function (args)
       index = index,
       n_landmarks = params.n_landmarks,
       n_dims = params.n_dims,
-      cmp = cmp,
-      cmp_alpha = cmp_alpha,
-      cmp_beta = cmp_beta,
       decay = params.decay,
-      combine = combine,
+      bandwidth = params.bandwidth,
       trace_tol = trace_tol,
       each = each_cb,
       train_tokens = train_tokens,
@@ -856,7 +838,7 @@ M.spectral = function (args)
       eval_params = eval_cfg,
       eval = expected,
       kernel_index = index,
-      kernel_params = { cmp = cmp, cmp_alpha = cmp_alpha, cmp_beta = cmp_beta, decay = params.decay, combine = combine },
+      kernel_params = { decay = params.decay, bandwidth = params.bandwidth },
     })
     return score, metrics, model
   end
@@ -871,10 +853,10 @@ M.spectral = function (args)
     rerun_final = false,
     cleanup = M.destroy_spectral,
     size_fn = function (p)
-      return { p.n_dims, p.n_landmarks, num.abs(p.decay) }
+      return { p.n_dims, p.n_landmarks, num.abs(p.decay), num.abs(p.bandwidth) }
     end,
     make_key = function (p)
-      return str.format("%d_%d_%.2f", p.n_landmarks, p.n_dims, p.decay)
+      return str.format("%d_%d_%.2f_%.2f", p.n_landmarks, p.n_dims, p.decay, p.bandwidth)
     end,
     constrain = function (p)
       if p.n_dims > p.n_landmarks then
@@ -891,6 +873,7 @@ M.spectral = function (args)
           n_landmarks = ev.params.n_landmarks,
           n_dims = ev.params.n_dims,
           decay = ev.params.decay,
+          bandwidth = ev.params.bandwidth,
           score = ev.score,
           metrics = ev.metrics,
           global_best_score = ev.global_best_score,
@@ -920,6 +903,108 @@ M.spectral = function (args)
   end
 
   return best_model, best_params
+end
+
+M.rp = function (args)
+  local rvec = require("santoku.rvec")
+
+  local raw_codes = err.assert(args.raw_codes, "raw_codes required")
+  local ids = err.assert(args.ids, "ids required")
+  local n_samples = err.assert(args.n_samples, "n_samples required")
+  local n_dims = err.assert(args.n_dims, "n_dims required")
+  local eval_data = err.assert(args.eval, "eval required")
+  local max_bits = args.max_bits or 512
+  local ranking = args.ranking or "ndcg"
+  local seed = args.seed or 12345
+  local tolerance = args.tolerance or 0.01
+  local each_cb = args.each
+
+  local n_bits_levels = 0
+  local b = 8
+  while b <= max_bits do
+    n_bits_levels = n_bits_levels + 1
+    b = b * 2
+  end
+  local n_results = n_dims * n_bits_levels
+
+  local scores_out = dvec.create(n_results)
+  local dims_out = ivec.create(n_results)
+  local bits_out = ivec.create(n_results)
+
+  local selected_cols = ivec.create(n_dims)
+  local truncated = dvec.create()
+  local rp_codes = cvec.create()
+  local rp_weights = dvec.create(max_bits * n_dims)
+
+  local result_idx = 0
+  for prefix_dims = 1, n_dims do
+    selected_cols:setn(prefix_dims)
+    selected_cols:fill_indices()
+    raw_codes:mtx_select(selected_cols, nil, n_dims, truncated)
+
+    local bits = 8
+    while bits <= max_bits do
+      local rp_encode, rp_n_bits = hlth.rp_encoder({
+        n_dims = prefix_dims,
+        rp_dims = bits,
+        seed = seed,
+        weights = rp_weights,
+      })
+
+      rp_codes:setn(0)
+      rp_encode(truncated, rp_codes)
+
+      local stats = evaluator.ranking_accuracy({
+        codes = rp_codes,
+        ids = ids,
+        n_dims = rp_n_bits,
+        eval_ids = eval_data.ids,
+        eval_offsets = eval_data.offsets,
+        eval_neighbors = eval_data.neighbors,
+        eval_weights = eval_data.weights,
+        ranking = ranking,
+      })
+
+      scores_out:set(result_idx, stats.score)
+      dims_out:set(result_idx, prefix_dims)
+      bits_out:set(result_idx, bits)
+      result_idx = result_idx + 1
+
+      if each_cb then
+        each_cb({ dims = prefix_dims, bits = bits, score = stats.score })
+      end
+
+      bits = bits * 2
+    end
+  end
+
+  selected_cols:destroy()
+  truncated:destroy()
+  rp_codes:destroy()
+  rp_weights:destroy()
+
+  local order = {}
+  for i = 0, n_results - 1 do
+    order[i + 1] = i
+  end
+  table.sort(order, function (a, b)
+    local sa, sb = scores_out:get(a), scores_out:get(b)
+    local ba, bb = bits_out:get(a), bits_out:get(b)
+    local da, db = dims_out:get(a), dims_out:get(b)
+    local band_a = math.floor(sa / tolerance)
+    local band_b = math.floor(sb / tolerance)
+    if band_a ~= band_b then return band_a > band_b end
+    if da ~= db then return da < db end
+    if ba ~= bb then return ba < bb end
+    return false
+  end)
+
+  local ranks = rvec.create()
+  for rank, idx in ipairs(order) do
+    ranks:push(idx, rank - 1)
+  end
+
+  return ranks, scores_out, dims_out, bits_out
 end
 
 return M

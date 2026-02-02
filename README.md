@@ -188,16 +188,6 @@ Graph construction and adjacency computation.
 | `graph:pairs` | `-` | `tk_pvec_t, tk_dvec_t` | Get edge pairs and weights |
 | `graph:adjacency` | `-` | `tk_ivec_t, tk_ivec_t, tk_ivec_t, tk_dvec_t` | Get CSR adjacency representation: node IDs, offsets, neighbors, weights |
 
-### `santoku.tsetlin.itq`
-
-Iterative quantization for binary embeddings.
-
-| Function | Arguments | Returns | Description |
-|----------|------------|---------|-------------|
-| `itq.encode` | `table: {codes, n_dims, iterations?, tolerance?, threads?, each?}` | `tk_ivec_t` | Apply ITQ to continuous embeddings |
-| `itq.sign` | `table: {codes, n_dims}` | `tk_ivec_t` | Simple sign-based binarization |
-| `itq.median` | `table: {codes, n_dims}` | `tk_ivec_t` | Median-based binarization |
-
 ### `santoku.tsetlin.spectral`
 
 Spectral graph embedding.
@@ -256,15 +246,6 @@ Feature booleanization for continuous and categorical data.
 | Function | Arguments | Returns | Description |
 |----------|------------|---------|-------------|
 | `tk_cluster_dsu` | `hbi: tk_hbi_t*, ann: tk_ann_t*, rtmp: tk_rvec_t*, ptmp: tk_pvec_t*, margin: uint64_t, min_pts: uint64_t, assign_noise: bool, ids: tk_ivec_t*, assignments: tk_ivec_t*, ididx: tk_iumap_t*, n_clusters: uint64_t*` | `-` | Perform DSU-based clustering with density constraints |
-
-### `santoku/tsetlin/itq.h`
-
-| Function | Arguments | Returns | Description |
-|----------|------------|---------|-------------|
-| `tk_itq_encode` | `L: lua_State*, codes: tk_dvec_t*, n_dims: uint64_t, max_iterations: uint64_t, tolerance: double, i_each: int, n_threads: uint` | `-` | Perform iterative quantization encoding |
-| `tk_itq_sign` | `out: tk_ivec_t*, X: double*, N: uint64_t, K: uint64_t` | `-` | Extract positive elements from matrix |
-| `tk_itq_median` | `out: tk_ivec_t*, X: double*, N: uint64_t, K: uint64_t` | `-` | Extract above-median elements |
-| `tk_itq_center` | `M: double*, N: size_t, K: size_t` | `-` | Center matrix columns |
 
 ### `santoku/tsetlin/tch.h`
 
