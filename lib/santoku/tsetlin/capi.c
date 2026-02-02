@@ -523,7 +523,7 @@ static inline int tk_tsetlin_encode (lua_State *L)
     }
     char *out_row = encodings + s * out_bytes;
     for (unsigned int c = 0; c < classes; c++) {
-      if (votes_per_class[c] > (long int)(target / 2)) {
+      if (votes_per_class[c] > (long int)(clause_chunks * target / 2)) {
         unsigned int byte_idx = c / 8;
         unsigned int bit_idx = c % 8;
         out_row[byte_idx] |= (1 << bit_idx);
@@ -644,7 +644,7 @@ static inline int tk_tsetlin_train_regressor (lua_State *L, tk_tsetlin_t *tm)
     }
   } else {
     for (unsigned int c = 0; c < classes; c++) {
-      y_min[c] = 0.0;
+      y_min[c] = -1.0;
       y_max[c] = 1.0;
     }
   }
@@ -740,13 +740,13 @@ static inline int tk_tsetlin_train_regressor (lua_State *L, tk_tsetlin_t *tm)
         switch (target_mode) {
           case TM_TARGET_IVEC:
             TM_REGRESSION_INNER_LOOP(
-              (labels[sample] == chunk_class) ? 1.0 : 0.0,
+              (labels[sample] == chunk_class) ? 1.0 : -1.0,
               if (labels[sample] != (int64_t)chunk_class && tk_fast_random() < skip_thresholds[chunk_class]) continue;
             )
             break;
           case TM_TARGET_CVEC:
             TM_REGRESSION_INNER_LOOP(
-              (code_bytes[sample * code_chunks + chunk_class / 8] & (1 << (chunk_class % 8))) ? 1.0 : 0.0,
+              (code_bytes[sample * code_chunks + chunk_class / 8] & (1 << (chunk_class % 8))) ? 1.0 : -1.0,
               if (!(code_bytes[sample * code_chunks + chunk_class / 8] & (1 << (chunk_class % 8))) && tk_fast_random() < skip_thresholds[chunk_class]) continue;
             )
             break;

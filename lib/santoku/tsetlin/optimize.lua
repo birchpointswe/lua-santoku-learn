@@ -577,7 +577,9 @@ M.destroy_spectral = function (model)
   if model.landmark_ids then model.landmark_ids:destroy() end
   if model.eigenvectors then model.eigenvectors:destroy() end
   if model.eigenvalues then model.eigenvalues:destroy() end
-  if model.chol then model.chol:destroy() end
+  if model.landmark_chol then model.landmark_chol:destroy() end
+  if model.scales then model.scales:destroy() end
+  if model.col_means then model.col_means:destroy() end
 end
 
 M.score_spectral_eval = function (args)
@@ -635,8 +637,10 @@ M.build_spectral_nystrom = function (args)
   local combine = args.combine
   local trace_tol = args.trace_tol
   local each_cb = args.each
+  local train_tokens = args.train_tokens
+  local train_ids = args.train_ids
 
-  local landmark_ids, doc_ids, chol, actual_landmarks, trace_ratio =
+  local landmark_ids, landmark_chol, scales, actual_landmarks, trace_ratio =
     spectral.sample_landmarks({
       inv = index,
       n_landmarks = n_landmarks,
@@ -648,15 +652,14 @@ M.build_spectral_nystrom = function (args)
       trace_tol = trace_tol,
     })
 
-  local n_samples = doc_ids:size()
   local effective_dims = n_dims or n_landmarks
   if effective_dims > actual_landmarks then
     effective_dims = actual_landmarks
   end
 
   local eigenvectors, eigenvalues, col_means = spectral.encode({
-    chol = chol,
-    n_samples = n_samples,
+    chol = landmark_chol,
+    n_samples = actual_landmarks,
     n_landmarks = actual_landmarks,
     n_dims = effective_dims,
     each = args.spectral_each,
@@ -673,23 +676,31 @@ M.build_spectral_nystrom = function (args)
     })
   end
 
-  local nystrom_encode, _, raw_codes = hlth.nystrom_encoder({
+  local nystrom_encode, _ = hlth.nystrom_encoder({
     features_index = index,
     eigenvectors = eigenvectors,
     eigenvalues = eigenvalues,
     landmark_ids = landmark_ids,
     col_means = col_means,
+    landmark_chol = landmark_chol,
+    scales = scales,
     n_dims = effective_dims,
     cmp = cmp,
     cmp_alpha = cmp_alpha,
     cmp_beta = cmp_beta,
     decay = decay,
-    chol = chol,
-    n_samples = n_samples,
+    combine = combine,
   })
 
+  local raw_codes = nil
+  local ids = nil
+  if train_tokens then
+    raw_codes = nystrom_encode(train_tokens)
+    ids = train_ids
+  end
+
   return {
-    ids = doc_ids,
+    ids = ids,
     raw_codes = raw_codes,
     dims = effective_dims,
     spectral_dims = effective_dims,
@@ -697,7 +708,8 @@ M.build_spectral_nystrom = function (args)
     eigenvectors = eigenvectors,
     eigenvalues = eigenvalues,
     col_means = col_means,
-    chol = chol,
+    landmark_chol = landmark_chol,
+    scales = scales,
     n_landmarks = actual_landmarks,
     cmp = cmp,
     cmp_alpha = cmp_alpha,
@@ -725,6 +737,8 @@ M.spectral = function (args)
   local trace_tol = args.trace_tol
   local each_cb = args.each
   local tolerance = args.tolerance or 1e-6
+  local train_tokens = args.train_tokens
+  local train_ids = args.train_ids
 
   local expected = args.expected and {
     ids = args.expected.ids,
@@ -777,6 +791,8 @@ M.spectral = function (args)
       combine = combine,
       trace_tol = trace_tol,
       each = each_cb,
+      train_tokens = train_tokens,
+      train_ids = train_ids,
     })
     local score = nil
     local metrics = nil
@@ -832,6 +848,8 @@ M.spectral = function (args)
       combine = combine,
       trace_tol = trace_tol,
       each = each_cb,
+      train_tokens = train_tokens,
+      train_ids = train_ids,
     })
     local score, metrics = M.score_spectral_eval({
       model = model,
