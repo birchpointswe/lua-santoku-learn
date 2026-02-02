@@ -14,19 +14,13 @@ static inline tk_graph_t *tm_graph_create (
   uint64_t bipartite_dims,
   tk_inv_t *knn_inv,
   tk_ann_t *knn_ann,
-  tk_ivec_sim_type_t knn_cmp,
-  double knn_cmp_alpha,
-  double knn_cmp_beta,
   int64_t knn_rank,
   double knn_decay,
-  tk_combine_type_t knn_combine,
+  double knn_bandwidth,
   tk_inv_t *weight_inv,
   tk_ann_t *weight_ann,
-  tk_ivec_sim_type_t weight_cmp,
-  double weight_alpha,
-  double weight_beta,
   double weight_decay,
-  tk_combine_type_t weight_combine,
+  double weight_bandwidth,
   tk_graph_weight_pooling_t weight_pooling,
   uint64_t random_pairs,
   double weight_eps,
@@ -827,8 +821,8 @@ static inline void tm_run_knn_queries (
   if (graph->knn_query_ids) {
     if (graph->knn_inv) {
       tk_inv_neighborhoods_by_vecs(L, graph->knn_inv, graph->knn_query_ivec, graph->knn_cache,
-                                   graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
-                                   graph->knn_decay, &graph->knn_inv_hoods, &graph->uids_hoods);
+                                   graph->knn_decay, graph->knn_bandwidth,
+                                   &graph->knn_inv_hoods, &graph->uids_hoods);
     } else if (graph->knn_ann) {
       tk_ann_neighborhoods_by_vecs(L, graph->knn_ann, graph->knn_query_cvec, graph->knn_cache,
                                    graph->probe_radius, &graph->knn_ann_hoods, &graph->uids_hoods);
@@ -840,7 +834,7 @@ static inline void tm_run_knn_queries (
     TK_INDEX_NEIGHBORHOODS(L,
       graph->knn_inv, graph->knn_ann,
       graph->knn_cache, graph->probe_radius,
-      graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta, graph->knn_decay,
+      graph->knn_decay, graph->knn_bandwidth,
       &graph->knn_inv_hoods, &graph->knn_ann_hoods, &graph->uids_hoods);
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -1);
     tk_lua_add_ephemeron(L, TK_GRAPH_EPH, Gi, -2);
@@ -970,20 +964,10 @@ static inline int tm_adjacency (lua_State *L)
   tk_cvec_t *knn_query_cvec = knn_query_ivec ? NULL : tk_cvec_peekopt(L, -1);
   lua_pop(L, 1);
 
-  const char *knn_cmp_str = tk_lua_foptstring(L, 1, "graph", "knn_cmp", "jaccard");
-  double knn_cmp_alpha = tk_lua_foptnumber(L, 1, "graph", "knn_cmp_alpha", 0.5);
-  double knn_cmp_beta = tk_lua_foptnumber(L, 1, "graph", "knn_cmp_beta", 0.5);
-  tk_ivec_sim_type_t knn_cmp = tk_inv_parse_cmp(knn_cmp_str);
-
   lua_getfield(L, 1, "weight_index");
   tk_inv_t *weight_inv = tk_inv_peekopt(L, -1);
   tk_ann_t *weight_ann = tk_ann_peekopt(L, -1);
   lua_pop(L, 1);
-
-  const char *weight_cmp_str = tk_lua_foptstring(L, 1, "graph", "weight_cmp", "jaccard");
-  double weight_alpha = tk_lua_foptnumber(L, 1, "graph", "weight_alpha", 0.5);
-  double weight_beta = tk_lua_foptnumber(L, 1, "graph", "weight_beta", 0.5);
-  tk_ivec_sim_type_t weight_cmp = tk_inv_parse_cmp(weight_cmp_str);
 
   const char *weight_pooling_str = tk_lua_foptstring(L, 1, "graph", "weight_pooling", "min");
   tk_graph_weight_pooling_t weight_pooling = TK_GRAPH_WEIGHT_POOL_MIN;
@@ -1001,11 +985,9 @@ static inline int tm_adjacency (lua_State *L)
   uint64_t knn_cache = tk_lua_foptunsigned(L, 1, "graph", "knn_cache", 0);
   int64_t knn_rank = tk_lua_foptinteger(L, 1, "graph", "knn_rank", -1);
   double knn_decay = tk_lua_foptnumber(L, 1, "graph", "knn_decay", 0.0);
-  const char *knn_combine_str = tk_lua_foptstring(L, 1, "graph", "knn_combine", "weighted_avg");
-  tk_combine_type_t knn_combine = tk_inv_parse_combine(knn_combine_str);
+  double knn_bandwidth = tk_lua_foptnumber(L, 1, "graph", "knn_bandwidth", -1.0);
   double weight_decay = tk_lua_foptnumber(L, 1, "graph", "weight_decay", 0.0);
-  const char *weight_combine_str = tk_lua_foptstring(L, 1, "graph", "weight_combine", "weighted_avg");
-  tk_combine_type_t weight_combine = tk_inv_parse_combine(weight_combine_str);
+  double weight_bandwidth = tk_lua_foptnumber(L, 1, "graph", "weight_bandwidth", -1.0);
 
   const char *bridge_str = tk_lua_foptstring(L, 1, "graph", "bridge", "mst");
   tk_graph_bridge_t bridge = TK_GRAPH_BRIDGE_MST;
@@ -1038,8 +1020,8 @@ static inline int tm_adjacency (lua_State *L)
   tk_graph_t *graph = tm_graph_create(
     L, seed_ids, seed_offsets, seed_neighbors,
     bipartite_ids, bipartite_features, bipartite_nodes, bipartite_dims,
-    knn_inv, knn_ann, knn_cmp, knn_cmp_alpha, knn_cmp_beta, knn_rank, knn_decay, knn_combine,
-    weight_inv, weight_ann, weight_cmp, weight_alpha, weight_beta, weight_decay, weight_combine, weight_pooling,
+    knn_inv, knn_ann, knn_rank, knn_decay, knn_bandwidth,
+    weight_inv, weight_ann, weight_decay, weight_bandwidth, weight_pooling,
     random_pairs, weight_eps,
     knn_query_ids, knn_query_ivec, knn_query_cvec,
     knn, knn_cache, bridge, probe_radius,
@@ -1421,19 +1403,13 @@ static inline tk_graph_t *tm_graph_create (
   uint64_t bipartite_dims,
   tk_inv_t *knn_inv,
   tk_ann_t *knn_ann,
-  tk_ivec_sim_type_t knn_cmp,
-  double knn_cmp_alpha,
-  double knn_cmp_beta,
   int64_t knn_rank,
   double knn_decay,
-  tk_combine_type_t knn_combine,
+  double knn_bandwidth,
   tk_inv_t *weight_inv,
   tk_ann_t *weight_ann,
-  tk_ivec_sim_type_t weight_cmp,
-  double weight_alpha,
-  double weight_beta,
   double weight_decay,
-  tk_combine_type_t weight_combine,
+  double weight_bandwidth,
   tk_graph_weight_pooling_t weight_pooling,
   uint64_t random_pairs,
   double weight_eps,
@@ -1457,23 +1433,17 @@ static inline tk_graph_t *tm_graph_create (
   graph->bipartite_dims = bipartite_dims;
   graph->knn_inv = knn_inv;
   graph->knn_ann = knn_ann;
-  graph->knn_cmp = knn_cmp;
-  graph->knn_cmp_alpha = knn_cmp_alpha;
-  graph->knn_cmp_beta = knn_cmp_beta;
   graph->knn_rank = knn_rank;
   graph->knn_decay = knn_decay;
-  graph->knn_combine = knn_combine;
+  graph->knn_bandwidth = knn_bandwidth;
   graph->knn_inv_hoods = NULL;
   graph->knn_ann_hoods = NULL;
   graph->weighted_hoods = NULL;
 
   graph->weight_inv = weight_inv;
   graph->weight_ann = weight_ann;
-  graph->weight_cmp = weight_cmp;
-  graph->weight_alpha = weight_alpha;
-  graph->weight_beta = weight_beta;
   graph->weight_decay = weight_decay;
-  graph->weight_combine = weight_combine;
+  graph->weight_bandwidth = weight_bandwidth;
   graph->weight_pooling = weight_pooling;
 
   graph->random_pairs = random_pairs;

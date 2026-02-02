@@ -131,6 +131,5 @@ Extracts eigenvectors from graph Laplacian using PRIMME solver.
 | hbi | Hamming ball index for exact Hamming distance search |
 | graph | Build k-NN/CkNN adjacency graphs with bridging |
 | spectral | Laplacian eigenvector computation via PRIMME |
-| itq | Binarization: ITQ rotation, Otsu, median, sign |
 | eval | Retrieval and clustering evaluation |
 | optimize | Hyperparameter search with adaptive sampling |
