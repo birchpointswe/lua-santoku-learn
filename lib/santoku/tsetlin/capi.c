@@ -385,11 +385,15 @@ static inline int tk_tsetlin_predict_regressor (lua_State *L, tk_tsetlin_t *tm) 
         if (out & (1 << j))
           chunk_vote += votes_buf[j];
       if (chunk_vote > (long int)target) chunk_vote = (long int)target;
-      votes_per_class[c] += chunk_vote;
+      bool is_negative = (chunk % clause_chunks) >= (clause_chunks / 2);
+      if (is_negative)
+        votes_per_class[c] -= chunk_vote;
+      else
+        votes_per_class[c] += chunk_vote;
     }
     for (unsigned int c = 0; c < classes; c++) {
       double y_range = y_max[c] - y_min[c];
-      regression_out[s * classes + c] = ((double)votes_per_class[c] / max_possible) * y_range + y_min[c];
+      regression_out[s * classes + c] = ((double)votes_per_class[c] / max_possible + 0.5) * y_range + y_min[c];
     }
   }
   tk_dvec_t *out;
@@ -444,7 +448,11 @@ static inline int tk_tsetlin_classify (lua_State *L)
       for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
         if (out & (1 << j))
           chunk_vote += votes_buf[j];
-      votes_per_class[c] += chunk_vote;
+      bool is_negative = (chunk % clause_chunks) >= (clause_chunks / 2);
+      if (is_negative)
+        votes_per_class[c] -= chunk_vote;
+      else
+        votes_per_class[c] += chunk_vote;
     }
     long int maxval = LONG_MIN;
     unsigned int maxclass = 0;
@@ -493,7 +501,6 @@ static inline int tk_tsetlin_encode (lua_State *L)
   const unsigned int input_chunks = tm->input_chunks;
   const unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
   const unsigned int input_stride = grouped ? classes * bytes_per_class : 0;
-  const unsigned int target = tm->target;
   const unsigned int out_bytes = TK_CVEC_BITS_BYTES(classes);
   size_t needed = n * out_bytes;
   if (needed > tm->encodings_len) {
@@ -519,11 +526,15 @@ static inline int tk_tsetlin_encode (lua_State *L)
       for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
         if (out & (1 << j))
           chunk_vote += votes_buf[j];
-      votes_per_class[c] += chunk_vote;
+      bool is_negative = (chunk % clause_chunks) >= (clause_chunks / 2);
+      if (is_negative)
+        votes_per_class[c] -= chunk_vote;
+      else
+        votes_per_class[c] += chunk_vote;
     }
     char *out_row = encodings + s * out_bytes;
     for (unsigned int c = 0; c < classes; c++) {
-      if (votes_per_class[c] > (long int)(clause_chunks * target / 2)) {
+      if (votes_per_class[c] > 0) {
         unsigned int byte_idx = c / 8;
         unsigned int bit_idx = c % 8;
         out_row[byte_idx] |= (1 << bit_idx);
@@ -566,6 +577,7 @@ typedef enum {
     double class_y_min = y_min[chunk_class]; \
     double class_y_range = y_max[chunk_class] - class_y_min; \
     double target_ratio = (y_target - class_y_min) / class_y_range; \
+    if (is_negative) target_ratio = 1.0 - target_ratio; \
     long int ideal_chunk_vote = (long int)(target_ratio * (double)vote_target); \
     if (ideal_chunk_vote < 0) ideal_chunk_vote = 0; \
     if (ideal_chunk_vote > vote_target) ideal_chunk_vote = vote_target; \
@@ -737,6 +749,7 @@ static inline int tk_tsetlin_train_regressor (lua_State *L, tk_tsetlin_t *tm)
       #pragma omp for schedule(static)
       for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
         unsigned int chunk_class = chunk / clause_chunks;
+        bool is_negative = (chunk % clause_chunks) >= (clause_chunks / 2);
         switch (target_mode) {
           case TM_TARGET_IVEC:
             TM_REGRESSION_INNER_LOOP(

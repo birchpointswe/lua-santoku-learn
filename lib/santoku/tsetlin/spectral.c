@@ -37,11 +37,8 @@ static inline void tk_spectral_sample_landmarks (
   tk_inv_t *inv,
   uint64_t n_landmarks,
   double trace_tol,
-  tk_ivec_sim_type_t cmp,
-  double cmp_alpha,
-  double cmp_beta,
   double decay,
-  tk_combine_type_t combine,
+  double bandwidth,
   tk_ivec_t **ids_out,
   tk_dvec_t **chol_out,
   tk_dvec_t **scales_out,
@@ -134,8 +131,7 @@ static inline void tk_spectral_sample_landmarks (
       int64_t *i_bits = tk_inv_sget(inv, sid_map[i], &i_nbits);
       residual[i] = tk_inv_similarity_fast(ranks_arr, weights_arr, inv->n_ranks,
                                            i_bits, i_nbits, i_bits, i_nbits,
-                                           cmp, cmp_alpha, cmp_beta,
-                                           combine, &rw, thr_q, thr_e, thr_i);
+                                           bandwidth, &rw, thr_q, thr_e, thr_i);
       initial_trace += residual[i];
     }
 
@@ -188,8 +184,7 @@ static inline void tk_spectral_sample_landmarks (
         int64_t *i_bits = tk_inv_sget(inv, sid_map[i], &i_nbits);
         double kip = tk_inv_similarity_fast(ranks_arr, weights_arr, inv->n_ranks,
                                             i_bits, i_nbits, p_bits, p_nbits,
-                                            cmp, cmp_alpha, cmp_beta,
-                                            combine, &rw, thr_q, thr_e, thr_i);
+                                            bandwidth, &rw, thr_q, thr_e, thr_i);
         double dot = (j > 0) ? cblas_ddot((int)j, &L_mat[i * n_landmarks], 1, pivot_row, 1) : 0.0;
         L_mat[i * n_landmarks + j] = (kip - dot) / scale;
       }
@@ -246,11 +241,8 @@ static inline int tk_spectral_sample_landmarks_lua (lua_State *L)
   lua_pop(L, 1);
 
   uint64_t n_landmarks = tk_lua_foptunsigned(L, 1, "sample_landmarks", "n_landmarks", 0);
-  tk_ivec_sim_type_t cmp = tk_inv_parse_cmp(tk_lua_foptstring(L, 1, "sample_landmarks", "cmp", "jaccard"));
-  double cmp_alpha = tk_lua_foptnumber(L, 1, "sample_landmarks", "cmp_alpha", 0.5);
-  double cmp_beta = tk_lua_foptnumber(L, 1, "sample_landmarks", "cmp_beta", 0.5);
   double decay = tk_lua_foptnumber(L, 1, "sample_landmarks", "decay", 0.0);
-  tk_combine_type_t combine = tk_inv_parse_combine(tk_lua_foptstring(L, 1, "sample_landmarks", "combine", "weighted_avg"));
+  double bandwidth = tk_lua_foptnumber(L, 1, "sample_landmarks", "bandwidth", -1.0);
   double trace_tol = tk_lua_foptnumber(L, 1, "sample_landmarks", "trace_tol", 1e-12);
 
   tk_ivec_t *landmark_ids;
@@ -258,7 +250,7 @@ static inline int tk_spectral_sample_landmarks_lua (lua_State *L)
   tk_dvec_t *scales;
   uint64_t actual_landmarks;
   double trace_ratio;
-  tk_spectral_sample_landmarks(L, inv, n_landmarks, trace_tol, cmp, cmp_alpha, cmp_beta, decay, combine,
+  tk_spectral_sample_landmarks(L, inv, n_landmarks, trace_tol, decay, bandwidth,
                                &landmark_ids, &chol, &scales, &actual_landmarks, &trace_ratio);
   lua_pushinteger(L, (int64_t) actual_landmarks);
   lua_pushnumber(L, trace_ratio);

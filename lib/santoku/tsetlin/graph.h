@@ -58,19 +58,15 @@ typedef struct tk_graph_s {
   tk_ivec_t *knn_query_ids;
   tk_ivec_t *knn_query_ivec;
   tk_cvec_t *knn_query_cvec;
-  tk_ivec_sim_type_t knn_cmp;
-  double knn_cmp_alpha, knn_cmp_beta;
   int64_t knn_rank;
   double knn_decay;
-  tk_combine_type_t knn_combine;
+  double knn_bandwidth;
 
 
   tk_inv_t *weight_inv;
   tk_ann_t *weight_ann;
-  tk_ivec_sim_type_t weight_cmp;
-  double weight_alpha, weight_beta;
   double weight_decay;
-  tk_combine_type_t weight_combine;
+  double weight_bandwidth;
   tk_graph_weight_pooling_t weight_pooling;
 
   uint64_t random_pairs;
@@ -110,7 +106,7 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
   return (tk_graph_t *) luaL_checkudata(L, i, TK_GRAPH_MT);
 }
 
-#define TK_GRAPH_INDEX_DISTANCE(idx_inv, idx_ann, u, v, cmp, alpha, beta, combine, decay, dist_var) \
+#define TK_GRAPH_INDEX_DISTANCE(idx_inv, idx_ann, u, v, decay, bandwidth, dist_var) \
   do { \
     tk_inv_t *__idx_inv = (idx_inv); \
     tk_ann_t *__idx_ann = (idx_ann); \
@@ -120,7 +116,7 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
       int64_t *uset = tk_inv_get(__idx_inv, (u), &un); \
       int64_t *vset = tk_inv_get(__idx_inv, (v), &vn); \
       if (uset && vset) { \
-        double sim = tk_inv_similarity(__idx_inv, uset, un, vset, vn, (cmp), (alpha), (beta), (combine), (decay)); \
+        double sim = tk_inv_similarity(__idx_inv, uset, un, vset, vn, (decay), (bandwidth)); \
         (dist_var) = 1.0 - sim; \
       } else { \
         (dist_var) = 1.0; \
@@ -228,10 +224,10 @@ static inline tk_graph_t *tk_graph_peek (lua_State *L, int i)
     } \
   } while(0)
 
-#define TK_INDEX_NEIGHBORHOODS(L, inv, ann, k, probe_radius, cmp, alpha, beta, decay, inv_hoods_out, ann_hoods_out, uids_out) \
+#define TK_INDEX_NEIGHBORHOODS(L, inv, ann, k, probe_radius, decay, bandwidth, inv_hoods_out, ann_hoods_out, uids_out) \
   do { \
     if ((inv) != NULL) { \
-      tk_inv_neighborhoods((L), (inv), (k), (cmp), (alpha), (beta), (decay), (inv_hoods_out), (uids_out)); \
+      tk_inv_neighborhoods((L), (inv), (k), (decay), (bandwidth), (inv_hoods_out), (uids_out)); \
     } else if ((ann) != NULL) { \
       tk_ann_neighborhoods((L), (ann), (k), (probe_radius), (ann_hoods_out), (uids_out)); \
     } \
@@ -244,13 +240,11 @@ static inline double tk_graph_distance (
 ) {
   double d = DBL_MAX;
   TK_GRAPH_INDEX_DISTANCE(graph->weight_inv, graph->weight_ann,
-                          u, v, graph->weight_cmp, graph->weight_alpha, graph->weight_beta,
-                          graph->weight_combine, graph->weight_decay, d);
+                          u, v, graph->weight_decay, graph->weight_bandwidth, d);
   if (d != DBL_MAX)
     return d;
   TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann,
-                          u, v, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
-                          graph->knn_combine, graph->knn_decay, d);
+                          u, v, graph->knn_decay, graph->knn_bandwidth, d);
   return d;
 }
 
@@ -261,8 +255,7 @@ static inline double tk_graph_knn_distance (
 ) {
   double d = DBL_MAX;
   TK_GRAPH_INDEX_DISTANCE(graph->knn_inv, graph->knn_ann,
-                          u, v, graph->knn_cmp, graph->knn_cmp_alpha, graph->knn_cmp_beta,
-                          graph->knn_combine, graph->knn_decay, d);
+                          u, v, graph->knn_decay, graph->knn_bandwidth, d);
   return d;
 }
 
@@ -673,7 +666,7 @@ static inline int tk_graph_multiclass_pairs (
                 if (index && eps_pos > 0.0) {
                   double dist = tk_inv_distance(
                     index, id, anchor,
-                    TK_IVEC_JACCARD, 0.0, 0.0, TK_COMBINE_WEIGHTED_AVG, 0.0);
+                    0.0, -1.0);
                   if (dist > eps_pos)
                     continue;
                 }
@@ -767,7 +760,7 @@ static inline int tk_graph_multiclass_pairs (
                   if (index && eps_neg > 0.0) {
                     double dist = tk_inv_distance(
                       index, id, other_id,
-                      TK_IVEC_JACCARD, 0.0, 0.0, TK_COMBINE_WEIGHTED_AVG, 0.0);
+                      0.0, -1.0);
                     if (dist < eps_neg) {
                       tries++;
                       continue;
