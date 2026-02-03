@@ -387,10 +387,14 @@ static inline void tk_inv_add (
   for (size_t s = 0; s < nsamples; s ++) {
     int64_t uid = ids->a[s];
     int64_t sid = tk_inv_uid_sid(inv, uid, TK_INV_REPLACE);
-    if (tk_ivec_push(inv->node_offsets, (int64_t) inv->node_bits->n) != 0) {
+    uint64_t required_size = (uint64_t)(sid + 2);
+    if (tk_ivec_ensure(inv->node_offsets, required_size) != 0) {
       tk_lua_verror(L, 2, "add", "allocation failed during indexing");
       return;
     }
+    if (inv->node_offsets->n < required_size)
+      inv->node_offsets->n = required_size;
+    inv->node_offsets->a[sid] = (int64_t) inv->node_bits->n;
     while (i < nb) {
       int64_t b = node_bits->a[i];
       if (b < 0) {
@@ -412,10 +416,7 @@ static inline void tk_inv_add (
       }
       i ++;
     }
-  }
-  if (tk_ivec_push(inv->node_offsets, (int64_t) inv->node_bits->n) != 0) {
-    tk_lua_verror(L, 2, "add", "allocation failed during indexing");
-    return;
+    inv->node_offsets->a[sid + 1] = (int64_t) inv->node_bits->n;
   }
 }
 
@@ -763,7 +764,6 @@ static inline void tk_inv_neighborhoods_by_ids (
 
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = all_uids;
-  lua_remove(L, -2);
 }
 
 static inline void tk_inv_neighborhoods_by_vecs (
