@@ -622,7 +622,6 @@ static inline void tk_ann_neighborhoods_by_ids (
   tk_ivec_destroy(sid_to_pos);
   if (hoodsp) *hoodsp = hoods;
   if (uidsp) *uidsp = all_uids;
-  lua_remove(L, -2);
 }
 
 static inline void tk_ann_neighborhoods_by_vecs (
