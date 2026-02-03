@@ -289,105 +289,58 @@ static inline int tm_regression_accuracy (lua_State *L)
 static inline int tm_multilabel_retrieval_accuracy (lua_State *L)
 {
   lua_settop(L, 1);
-  lua_getfield(L, 1, "predicted_offsets");
-  tk_ivec_t *pred_off = tk_ivec_peek(L, -1, "predicted_offsets");
-  lua_getfield(L, 1, "predicted_neighbors");
-  tk_ivec_t *pred_nbr = tk_ivec_peek(L, -1, "predicted_neighbors");
+  lua_getfield(L, 1, "hoods");
+  tk_ann_hoods_t *ann_hoods = tk_ann_hoods_peekopt(L, -1);
+  tk_inv_hoods_t *inv_hoods = ann_hoods ? NULL : tk_inv_hoods_peekopt(L, -1);
+  if (!ann_hoods && !inv_hoods)
+    return luaL_error(L, "hoods must be ann_hoods or inv_hoods");
+  lua_getfield(L, 1, "hood_ids");
+  tk_ivec_t *hood_ids = tk_ivec_peek(L, -1, "hood_ids");
   lua_getfield(L, 1, "expected_offsets");
   tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
   lua_getfield(L, 1, "expected_neighbors");
   tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
-  lua_getfield(L, 1, "expected_weights");
-  tk_dvec_t *exp_wgt = tk_dvec_peekopt(L, -1);
-  lua_getfield(L, 1, "metric");
-  const char *metric = lua_isnil(L, -1) ? "f1" : lua_tostring(L, -1);
-  lua_pop(L, 6);
-  uint64_t n_samples = pred_off->n > 0 ? pred_off->n - 1 : 0;
-  if (exp_off->n != pred_off->n)
-    return luaL_error(L, "predicted and expected must have same number of samples");
-  if (!strcmp(metric, "f1")) {
-    uint64_t total_tp = 0, total_fp = 0, total_fn = 0;
-    double sum_f1 = 0.0, sum_prec = 0.0, sum_rec = 0.0;
-    uint64_t valid_samples = 0;
-    #pragma omp parallel for reduction(+:total_tp, total_fp, total_fn, sum_f1, sum_prec, sum_rec, valid_samples)
-    for (uint64_t s = 0; s < n_samples; s++) {
-      int64_t ps = pred_off->a[s], pe = pred_off->a[s + 1];
-      int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
-      uint64_t pi = (uint64_t)ps, ei = (uint64_t)es;
-      uint64_t tp = 0;
-      while (pi < (uint64_t)pe && ei < (uint64_t)ee) {
-        if (pred_nbr->a[pi] < exp_nbr->a[ei]) pi++;
-        else if (pred_nbr->a[pi] > exp_nbr->a[ei]) ei++;
-        else { tp++; pi++; ei++; }
-      }
-      uint64_t fp = (uint64_t)(pe - ps) - tp;
-      uint64_t fn = (uint64_t)(ee - es) - tp;
-      total_tp += tp;
-      total_fp += fp;
-      total_fn += fn;
-      double prec = (tp + fp) > 0 ? (double)tp / (tp + fp) : 0.0;
-      double rec = (tp + fn) > 0 ? (double)tp / (tp + fn) : 0.0;
-      double f1 = (prec + rec) > 0 ? 2.0 * prec * rec / (prec + rec) : 0.0;
-      if ((ee - es) > 0) {
-        sum_f1 += f1;
-        sum_prec += prec;
-        sum_rec += rec;
-        valid_samples++;
-      }
+  lua_pop(L, 4);
+  uint64_t n = ann_hoods ? ann_hoods->n : inv_hoods->n;
+  if (exp_off->n != n + 1)
+    return luaL_error(L, "expected_offsets length must be hoods count + 1");
+  uint64_t total_tp = 0, total_pred = 0, total_exp = 0;
+  double sum_f1 = 0.0, sum_p = 0.0, sum_r = 0.0;
+  uint64_t valid = 0;
+  #pragma omp parallel for reduction(+:total_tp,total_pred,total_exp,sum_f1,sum_p,sum_r,valid)
+  for (uint64_t s = 0; s < n; s++) {
+    uint64_t k = ann_hoods ? ann_hoods->a[s]->n : inv_hoods->a[s]->n;
+    int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
+    uint64_t n_exp = (uint64_t)(ee - es);
+    int kha;
+    tk_iuset_t *exp_set = tk_iuset_create(NULL, 0);
+    for (int64_t i = es; i < ee; i++)
+      tk_iuset_put(exp_set, exp_nbr->a[i], &kha);
+    uint64_t tp = 0;
+    for (uint64_t j = 0; j < k; j++) {
+      int64_t pos = ann_hoods ? ann_hoods->a[s]->a[j].i : inv_hoods->a[s]->a[j].i;
+      if (tk_iuset_contains(exp_set, hood_ids->a[pos])) tp++;
     }
-    double micro_prec = (total_tp + total_fp) > 0 ? (double)total_tp / (total_tp + total_fp) : 0.0;
-    double micro_rec = (total_tp + total_fn) > 0 ? (double)total_tp / (total_tp + total_fn) : 0.0;
-    double micro_f1 = (micro_prec + micro_rec) > 0 ? 2.0 * micro_prec * micro_rec / (micro_prec + micro_rec) : 0.0;
-    double macro_prec = valid_samples > 0 ? sum_prec / valid_samples : 0.0;
-    double macro_rec = valid_samples > 0 ? sum_rec / valid_samples : 0.0;
-    double macro_f1 = valid_samples > 0 ? sum_f1 / valid_samples : 0.0;
-    lua_newtable(L);
-    lua_pushnumber(L, micro_prec); lua_setfield(L, -2, "micro_precision");
-    lua_pushnumber(L, micro_rec); lua_setfield(L, -2, "micro_recall");
-    lua_pushnumber(L, micro_f1); lua_setfield(L, -2, "micro_f1");
-    lua_pushnumber(L, macro_prec); lua_setfield(L, -2, "macro_precision");
-    lua_pushnumber(L, macro_rec); lua_setfield(L, -2, "macro_recall");
-    lua_pushnumber(L, macro_f1); lua_setfield(L, -2, "macro_f1");
-  } else if (!strcmp(metric, "auc")) {
-    if (!exp_wgt)
-      return luaL_error(L, "auc metric requires expected_weights");
-    if (exp_wgt->n != exp_nbr->n)
-      return luaL_error(L, "expected_weights length must match expected_neighbors length");
-    uint64_t concordant = 0, total_pairs = 0;
-    #pragma omp parallel for reduction(+:concordant, total_pairs)
-    for (uint64_t s = 0; s < n_samples; s++) {
-      int64_t ps = pred_off->a[s], pe = pred_off->a[s + 1];
-      int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
-      uint64_t n_exp = (uint64_t)(ee - es);
-      if (n_exp == 0) continue;
-      int kha;
-      tk_iuset_t *pred_set = tk_iuset_create(NULL, 0);
-      for (int64_t i = ps; i < pe; i++)
-        tk_iuset_put(pred_set, pred_nbr->a[i], &kha);
-      for (uint64_t i = (uint64_t)es; i < (uint64_t)ee; i++) {
-        bool i_sel = tk_iuset_contains(pred_set, exp_nbr->a[i]);
-        double wi = exp_wgt->a[i];
-        for (uint64_t j = i + 1; j < (uint64_t)ee; j++) {
-          bool j_sel = tk_iuset_contains(pred_set, exp_nbr->a[j]);
-          if (i_sel == j_sel) continue;
-          double wj = exp_wgt->a[j];
-          total_pairs++;
-          if ((i_sel && wi > wj) || (j_sel && wj > wi))
-            concordant++;
-          else if (wi == wj)
-            concordant++;
-        }
-      }
-      tk_iuset_destroy(pred_set);
+    tk_iuset_destroy(exp_set);
+    total_tp += tp; total_pred += k; total_exp += n_exp;
+    if (n_exp > 0 || k > 0) {
+      double p = k > 0 ? (double)tp / k : 0.0;
+      double r = n_exp > 0 ? (double)tp / n_exp : 0.0;
+      double f1 = (p + r) > 0 ? 2.0 * p * r / (p + r) : 0.0;
+      sum_f1 += f1; sum_p += p; sum_r += r;
+      valid++;
     }
-    double auc = total_pairs > 0 ? (double)concordant / total_pairs : 0.0;
-    lua_newtable(L);
-    lua_pushnumber(L, auc); lua_setfield(L, -2, "auc");
-    lua_pushinteger(L, (int64_t)concordant); lua_setfield(L, -2, "concordant");
-    lua_pushinteger(L, (int64_t)total_pairs); lua_setfield(L, -2, "total_pairs");
-  } else {
-    return luaL_error(L, "unknown metric: %s (expected 'f1' or 'auc')", metric);
   }
+  lua_newtable(L);
+  double mp = total_pred > 0 ? (double)total_tp / total_pred : 0.0;
+  double mr = total_exp > 0 ? (double)total_tp / total_exp : 0.0;
+  double mf = (mp + mr) > 0 ? 2.0 * mp * mr / (mp + mr) : 0.0;
+  lua_pushnumber(L, mp); lua_setfield(L, -2, "micro_precision");
+  lua_pushnumber(L, mr); lua_setfield(L, -2, "micro_recall");
+  lua_pushnumber(L, mf); lua_setfield(L, -2, "micro_f1");
+  lua_pushnumber(L, valid > 0 ? sum_p / valid : 0); lua_setfield(L, -2, "macro_precision");
+  lua_pushnumber(L, valid > 0 ? sum_r / valid : 0); lua_setfield(L, -2, "macro_recall");
+  lua_pushnumber(L, valid > 0 ? sum_f1 / valid : 0); lua_setfield(L, -2, "macro_f1");
   return 1;
 }
 
