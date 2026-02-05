@@ -681,12 +681,50 @@ static inline int tk_nystrom_encode_lua(lua_State *L) {
   uint64_t n_landmarks = enc->n_landmarks;
   uint64_t n_dims = enc->n_dims;
 
-  uint64_t n_samples = 0;
+  uint64_t max_sample_idx = 0;
   for (uint64_t i = 0; i < query_vecs->n; i++) {
     int64_t encoded = query_vecs->a[i];
     if (encoded >= 0) {
       uint64_t sample_idx = (uint64_t)encoded / n_features;
-      if (sample_idx >= n_samples) n_samples = sample_idx + 1;
+      if (sample_idx > max_sample_idx) max_sample_idx = sample_idx;
+    }
+  }
+  uint64_t n_possible = max_sample_idx + 1;
+
+  int64_t *sample_feature_counts = (int64_t *)calloc(n_possible, sizeof(int64_t));
+  if (!sample_feature_counts)
+    return luaL_error(L, "nystrom_encode: out of memory");
+
+  for (uint64_t i = 0; i < query_vecs->n; i++) {
+    int64_t encoded = query_vecs->a[i];
+    if (encoded >= 0) {
+      uint64_t sample_idx = (uint64_t)encoded / n_features;
+      sample_feature_counts[sample_idx]++;
+    }
+  }
+
+  uint64_t n_samples = 0;
+  for (uint64_t i = 0; i < n_possible; i++) {
+    if (sample_feature_counts[i] > 0) n_samples++;
+  }
+
+  int64_t *orig_to_compact = (int64_t *)malloc(n_possible * sizeof(int64_t));
+  if (!orig_to_compact) {
+    free(sample_feature_counts);
+    return luaL_error(L, "nystrom_encode: out of memory");
+  }
+
+  tk_ivec_t *encoded_ids = tk_ivec_create(L, n_samples, 0, 0);
+  int encoded_ids_idx = lua_gettop(L);
+  encoded_ids->n = n_samples;
+  uint64_t compact_idx = 0;
+  for (uint64_t i = 0; i < n_possible; i++) {
+    if (sample_feature_counts[i] > 0) {
+      orig_to_compact[i] = (int64_t)compact_idx;
+      encoded_ids->a[compact_idx] = (int64_t)i;
+      compact_idx++;
+    } else {
+      orig_to_compact[i] = -1;
     }
   }
 
@@ -701,7 +739,9 @@ static inline int tk_nystrom_encode_lua(lua_State *L) {
     int64_t encoded = query_vecs->a[i];
     if (encoded >= 0) {
       uint64_t sample_idx = (uint64_t)encoded / n_features;
-      query_offsets->a[sample_idx + 1]++;
+      int64_t compact = orig_to_compact[sample_idx];
+      if (compact >= 0)
+        query_offsets->a[compact + 1]++;
     }
   }
   for (uint64_t i = 1; i <= n_samples; i++)
@@ -714,12 +754,18 @@ static inline int tk_nystrom_encode_lua(lua_State *L) {
     int64_t encoded = query_vecs->a[i];
     if (encoded >= 0) {
       uint64_t sample_idx = (uint64_t)encoded / n_features;
-      int64_t fid = encoded % (int64_t)n_features;
-      int64_t write_pos = write_offsets->a[sample_idx]++;
-      query_features->a[write_pos] = fid;
+      int64_t compact = orig_to_compact[sample_idx];
+      if (compact >= 0) {
+        int64_t fid = encoded % (int64_t)n_features;
+        int64_t write_pos = write_offsets->a[compact]++;
+        query_features->a[write_pos] = fid;
+      }
     }
   }
   query_features->n = (size_t)query_offsets->a[n_samples];
+
+  free(sample_feature_counts);
+  free(orig_to_compact);
 
   uint64_t out_size = n_samples * n_dims;
   int stack_before_out = lua_gettop(L);
@@ -806,8 +852,8 @@ static inline int tk_nystrom_encode_lua(lua_State *L) {
     tk_dvec_destroy(inter_weights);
   }
 
+  lua_pushvalue(L, encoded_ids_idx);
   lua_pushvalue(L, stack_before_out + 1);
-  lua_pushinteger(L, (lua_Integer)n_samples);
 
   return 2;
 }

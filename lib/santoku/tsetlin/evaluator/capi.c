@@ -365,7 +365,9 @@ static inline int tm_retrieval_ks (lua_State *L)
   if (exp_off->n != n_samples + 1)
     return luaL_error(L, "expected_offsets length must match hoods count + 1");
   tk_ivec_t *ks = tk_ivec_create(L, n_samples, NULL, NULL);
-  #pragma omp parallel for
+  uint64_t mi_tp = 0, mi_k = 0, mi_exp = 0, n_valid = 0;
+  double ma_prec = 0, ma_rec = 0, ma_f1 = 0;
+  #pragma omp parallel for reduction(+:mi_tp,mi_k,mi_exp,n_valid,ma_prec,ma_rec,ma_f1)
   for (uint64_t s = 0; s < n_samples; s++) {
     uint64_t hood_size = 0;
     if (inv_hoods) hood_size = inv_hoods->a[s]->n;
@@ -381,7 +383,7 @@ static inline int tm_retrieval_ks (lua_State *L)
     for (int64_t i = es; i < ee; i++)
       tk_iuset_put(exp_set, exp_nbr->a[i], &kha);
     double best_f1 = -1.0;
-    uint64_t best_k = 1;
+    uint64_t best_k = 1, best_tp = 0;
     uint64_t tp = 0;
     for (uint64_t k = 1; k <= hood_size; k++) {
       int64_t nbr_pos;
@@ -395,12 +397,32 @@ static inline int tm_retrieval_ks (lua_State *L)
       if (f1 > best_f1) {
         best_f1 = f1;
         best_k = k;
+        best_tp = tp;
       }
     }
     tk_iuset_destroy(exp_set);
     ks->a[s] = (int64_t)best_k;
+    double s_prec = (double)best_tp / best_k;
+    double s_rec = (double)best_tp / n_expected;
+    mi_tp += best_tp;
+    mi_k += best_k;
+    mi_exp += n_expected;
+    ma_prec += s_prec;
+    ma_rec += s_rec;
+    ma_f1 += best_f1;
+    n_valid++;
   }
-  return 1;
+  lua_newtable(L);
+  double mi_prec = mi_k > 0 ? (double)mi_tp / mi_k : 0;
+  double mi_rec = mi_exp > 0 ? (double)mi_tp / mi_exp : 0;
+  double mi_f1v = (mi_prec + mi_rec) > 0 ? 2.0 * mi_prec * mi_rec / (mi_prec + mi_rec) : 0;
+  lua_pushnumber(L, mi_prec); lua_setfield(L, -2, "micro_precision");
+  lua_pushnumber(L, mi_rec); lua_setfield(L, -2, "micro_recall");
+  lua_pushnumber(L, mi_f1v); lua_setfield(L, -2, "micro_f1");
+  lua_pushnumber(L, n_valid > 0 ? ma_prec / n_valid : 0); lua_setfield(L, -2, "macro_precision");
+  lua_pushnumber(L, n_valid > 0 ? ma_rec / n_valid : 0); lua_setfield(L, -2, "macro_recall");
+  lua_pushnumber(L, n_valid > 0 ? ma_f1 / n_valid : 0); lua_setfield(L, -2, "macro_f1");
+  return 2;
 }
 
 static inline tk_ivec_t *tk_pvec_dendro_cut(
@@ -1503,14 +1525,14 @@ static inline int tm_score_retrieval (lua_State *L)
     tk_pvec_t *query_neighbors = tk_pvec_create(NULL, 0, 0, 0);
     tk_rvec_t *query_neighbors_raw = tk_rvec_create(NULL, 0, 0, 0);
     tk_dumap_t *weight_map = tk_dumap_create(NULL, 0);
-    tk_pvec_t *weight_ranks_buffer = tk_pvec_create(NULL, 0, 0, 0);
+    tk_rvec_t *weight_ranks_buffer = tk_rvec_create(NULL, 0, 0, 0);
     tk_dumap_t *weight_rank_map = tk_dumap_create(NULL, 0);
 
     if (!query_neighbors || !query_neighbors_raw || !weight_map || !weight_ranks_buffer || !weight_rank_map) {
       if (query_neighbors) tk_pvec_destroy(query_neighbors);
       if (query_neighbors_raw) tk_rvec_destroy(query_neighbors_raw);
       if (weight_map) tk_dumap_destroy(weight_map);
-      if (weight_ranks_buffer) tk_pvec_destroy(weight_ranks_buffer);
+      if (weight_ranks_buffer) tk_rvec_destroy(weight_ranks_buffer);
       if (weight_rank_map) tk_dumap_destroy(weight_rank_map);
     } else {
       #pragma omp for schedule(static)
@@ -1637,7 +1659,7 @@ static inline int tm_score_retrieval (lua_State *L)
       tk_pvec_destroy(query_neighbors);
       tk_rvec_destroy(query_neighbors_raw);
       tk_dumap_destroy(weight_map);
-      tk_pvec_destroy(weight_ranks_buffer);
+      tk_rvec_destroy(weight_ranks_buffer);
       tk_dumap_destroy(weight_rank_map);
     }
   }
