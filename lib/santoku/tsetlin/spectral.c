@@ -54,7 +54,7 @@ static inline void tk_spectral_sample_landmarks (
   if (n_landmarks == 0 || n_landmarks > n_docs)
     n_landmarks = n_docs;
   if (trace_tol <= 0.0)
-    trace_tol = 1e-12;
+    trace_tol = 1e-15;
   if (n_landmarks == 0) {
     *ids_out = tk_ivec_create(L, 0, 0, 0);
     *chol_out = tk_dvec_create(L, 0, 0, 0);
@@ -118,7 +118,6 @@ static inline void tk_spectral_sample_landmarks (
   size_t p_nbits = 0;
   int64_t *p_bits = NULL;
   bool done = false;
-
   #pragma omp parallel
   {
     double thr_q[TK_INV_MAX_RANKS];
@@ -243,7 +242,7 @@ static inline int tk_spectral_sample_landmarks_lua (lua_State *L)
   uint64_t n_landmarks = tk_lua_foptunsigned(L, 1, "sample_landmarks", "n_landmarks", 0);
   double decay = tk_lua_foptnumber(L, 1, "sample_landmarks", "decay", 0.0);
   double bandwidth = tk_lua_foptnumber(L, 1, "sample_landmarks", "bandwidth", -1.0);
-  double trace_tol = tk_lua_foptnumber(L, 1, "sample_landmarks", "trace_tol", 1e-12);
+  double trace_tol = tk_lua_foptnumber(L, 1, "sample_landmarks", "trace_tol", 1e-15);
 
   tk_ivec_t *landmark_ids;
   tk_dvec_t *chol;

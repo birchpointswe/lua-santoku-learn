@@ -22,13 +22,39 @@ function M.spot_check_codes (codes, n_samples, n_dims, label)
   end
 end
 
-function M.spot_check_adjacency (ids, offsets, neighbors, weights, label)
+function M.node_type (node_id, n_docs)
+  if n_docs and node_id >= n_docs then
+    return "label", node_id - n_docs
+  else
+    return "doc", node_id
+  end
+end
+
+function M.format_node (node_id, n_docs)
+  local ntype, idx = M.node_type(node_id, n_docs)
+  if ntype == "label" then
+    return str.format("L%d", idx)
+  else
+    return str.format("D%d", idx)
+  end
+end
+
+function M.spot_check_adjacency (ids, offsets, neighbors, weights, label, n_docs)
   local n_nodes = ids:size()
   local n_edges = neighbors:size()
   local avg_deg = n_edges / n_nodes
   str.printf("  [%s] %d nodes, %d edges, avg_deg=%.1f\n", label, n_nodes, n_edges, avg_deg)
   local id_min, id_max = ids:min(), ids:max()
-  str.printf("    ID range: [%d, %d]\n", id_min, id_max)
+  str.printf("    ID range: [%d, %d]", id_min, id_max)
+  if n_docs then
+    local n_doc_nodes, n_label_nodes = 0, 0
+    for i = 0, n_nodes - 1 do
+      if ids:get(i) < n_docs then n_doc_nodes = n_doc_nodes + 1
+      else n_label_nodes = n_label_nodes + 1 end
+    end
+    str.printf(" (docs=%d, labels=%d)", n_doc_nodes, n_label_nodes)
+  end
+  str.printf("\n")
   if weights then
     str.printf("    Weight range: [%.4f, %.4f]\n", weights:min(), weights:max())
   end
@@ -38,14 +64,33 @@ function M.spot_check_adjacency (ids, offsets, neighbors, weights, label)
     local s = offsets:get(i)
     local e = offsets:get(i + 1)
     local deg = e - s
-    local neigh_sample = {}
-    for j = s, math.min(s + 4, e - 1) do
-      local nidx = neighbors:get(j)
-      local nid = ids:get(nidx)
-      neigh_sample[#neigh_sample + 1] = nid
+    if n_docs then
+      local doc_nb, label_nb = {}, {}
+      for j = s, e - 1 do
+        local nidx = neighbors:get(j)
+        local nid = ids:get(nidx)
+        if nid < n_docs then
+          if #doc_nb < 3 then doc_nb[#doc_nb + 1] = M.format_node(nid, n_docs) end
+        else
+          if #label_nb < 3 then label_nb[#label_nb + 1] = M.format_node(nid, n_docs) end
+        end
+        if #doc_nb >= 3 and #label_nb >= 3 then break end
+      end
+      local neigh_sample = {}
+      for _, v in ipairs(doc_nb) do neigh_sample[#neigh_sample + 1] = v end
+      for _, v in ipairs(label_nb) do neigh_sample[#neigh_sample + 1] = v end
+      str.printf("    %s: deg=%d neighbors=[%s%s]\n",
+        M.format_node(node_id, n_docs), deg, table.concat(neigh_sample, ","), deg > 6 and ",..." or "")
+    else
+      local neigh_sample = {}
+      for j = s, math.min(s + 4, e - 1) do
+        local nidx = neighbors:get(j)
+        local nid = ids:get(nidx)
+        neigh_sample[#neigh_sample + 1] = M.format_node(nid, n_docs)
+      end
+      str.printf("    %s: deg=%d neighbors=[%s%s]\n",
+        M.format_node(node_id, n_docs), deg, table.concat(neigh_sample, ","), deg > 5 and ",..." or "")
     end
-    str.printf("    doc %d: deg=%d neighbors=[%s%s]\n",
-      node_id, deg, table.concat(neigh_sample, ","), deg > 5 and ",..." or "")
   end
 end
 
@@ -84,33 +129,65 @@ function M.label_overlap (labels1, labels2)
   return overlap
 end
 
-function M.spot_check_neighbors_with_labels (ids, offsets, neighbors, weights, label_csr, id_offset, label, check_ids, n_neighbors)
+function M.spot_check_neighbors_with_labels (ids, offsets, neighbors, weights, label_csr, id_offset, label, check_ids, n_neighbors, n_docs)
   n_neighbors = n_neighbors or 10
   local n_nodes = ids:size()
   local id_to_idx = {}
   for i = 0, n_nodes - 1 do
     id_to_idx[ids:get(i)] = i
   end
-  str.printf("  [%s] Spot-checking %d docs with up to %d neighbors:\n", label, #check_ids, n_neighbors)
-  for _, doc_id in ipairs(check_ids) do
-    local idx = id_to_idx[doc_id]
+  local per_type = math.max(1, math.floor(n_neighbors / 2))
+  str.printf("  [%s] Spot-checking %d nodes (up to %d docs + %d labels each):\n", label, #check_ids, per_type, per_type)
+  for _, node_id in ipairs(check_ids) do
+    local idx = id_to_idx[node_id]
     if idx then
-      local doc_labels = M.get_doc_labels(doc_id, label_csr, id_offset)
+      local ntype, nidx_local = M.node_type(node_id, n_docs)
       local s = offsets:get(idx)
       local e = offsets:get(idx + 1)
       local deg = e - s
-      str.printf("    Doc %d %s (deg=%d):\n", doc_id, M.format_labels(doc_labels), deg)
-      for j = s, math.min(s + n_neighbors - 1, e - 1) do
-        local nidx = neighbors:get(j)
-        local nid = ids:get(nidx)
-        local n_labels = M.get_doc_labels(nid, label_csr, id_offset)
-        local overlap = M.label_overlap(doc_labels, n_labels)
+      local n_doc_nb, n_label_nb = 0, 0
+      if n_docs then
+        for j = s, e - 1 do
+          local nid = ids:get(neighbors:get(j))
+          if nid < n_docs then n_doc_nb = n_doc_nb + 1
+          else n_label_nb = n_label_nb + 1 end
+        end
+      end
+      if ntype == "label" then
+        str.printf("    Label %d (deg=%d: %d docs, %d labels):\n", nidx_local, deg, n_doc_nb, n_label_nb)
+      else
+        local doc_labels = M.get_doc_labels(node_id, label_csr, id_offset)
+        str.printf("    Doc %d %s (deg=%d: %d docs, %d labels):\n", node_id, M.format_labels(doc_labels), deg, n_doc_nb, n_label_nb)
+      end
+      local doc_shown, label_shown = 0, 0
+      for j = s, e - 1 do
+        local neighbor_idx = neighbors:get(j)
+        local neighbor_id = ids:get(neighbor_idx)
+        local neighbor_type, neighbor_local = M.node_type(neighbor_id, n_docs)
         local w_str = weights and str.format(" w=%.3f", weights:get(j)) or ""
-        str.printf("      -> %d %s overlap=%d/%d%s\n",
-          nid, M.format_labels(n_labels), overlap, #doc_labels, w_str)
+        if neighbor_type == "label" then
+          if label_shown < per_type then
+            str.printf("      -> L%d%s\n", neighbor_local, w_str)
+            label_shown = label_shown + 1
+          end
+        else
+          if doc_shown < per_type then
+            local n_labels = M.get_doc_labels(neighbor_id, label_csr, id_offset)
+            if ntype == "doc" then
+              local doc_labels = M.get_doc_labels(node_id, label_csr, id_offset)
+              local overlap = M.label_overlap(doc_labels, n_labels)
+              str.printf("      -> D%d %s overlap=%d/%d%s\n",
+                neighbor_id, M.format_labels(n_labels), overlap, #doc_labels, w_str)
+            else
+              str.printf("      -> D%d %s%s\n", neighbor_id, M.format_labels(n_labels), w_str)
+            end
+            doc_shown = doc_shown + 1
+          end
+        end
+        if doc_shown >= per_type and label_shown >= per_type then break end
       end
     else
-      str.printf("    Doc %d: not found in index\n", doc_id)
+      str.printf("    Node %d: not found in index\n", node_id)
     end
   end
 end

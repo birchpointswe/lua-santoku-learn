@@ -972,8 +972,12 @@ static inline double tk_inv_combine_ranks (
 ) {
   double accum = 0.0;
   for (uint64_t r = 0; r < n_ranks; r++) {
-    double denom = sqrt(q_arr[r] * e_arr[r]);
-    double s = (denom > 0.0) ? i_arr[r] / denom : 0.0;
+    double log_i = log1p(i_arr[r]);
+    double log_q = log1p(q_arr[r]);
+    double log_e = log1p(e_arr[r]);
+    double denom = sqrt(log_q * log_e);
+    double s = (denom > 0.0) ? log_i / denom : 0.0;
+    if (s > 1.0) s = 1.0;
     accum += rw->weights[r] * s;
   }
   double avg_sim = (rw->total > 0.0) ? accum / rw->total : 0.0;
@@ -1127,8 +1131,12 @@ static inline double tk_inv_similarity_by_rank_fast (
     double inter_w = wacc_arr[(int64_t)n_ranks * vsid + (int64_t)rank];
     double q_w = q_weights_by_rank[rank];
     double e_w = e_weights_by_rank[rank];
-    double denom = sqrt(q_w * e_w);
-    double rank_sim = (denom > 0.0) ? inter_w / denom : 0.0;
+    double log_i = log1p(inter_w);
+    double log_q = log1p(q_w);
+    double log_e = log1p(e_w);
+    double denom = sqrt(log_q * log_e);
+    double rank_sim = (denom > 0.0) ? log_i / denom : 0.0;
+    if (rank_sim > 1.0) rank_sim = 1.0;
     accum += weight * rank_sim;
     total_weight += weight;
     if (cutoff < 1.0 && rw->total > 0.0) {
@@ -1401,7 +1409,7 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
 {
   tk_inv_t *inv = tk_inv_peek(L, 1);
   uint64_t knn = tk_lua_checkunsigned(L, 2, "knn");
-  double decay = tk_lua_optnumber(L, 3, "decay", 0.0);
+  double decay = tk_lua_optnumber(L, 3, "decay", 1.0);
   double bandwidth = tk_lua_optnumber(L, 4, "bandwidth", -1.0);
   tk_inv_neighborhoods(L, inv, knn, decay, bandwidth, NULL, NULL);
   return 2;
@@ -1412,7 +1420,7 @@ static inline int tk_inv_neighborhoods_by_ids_lua (lua_State *L)
   tk_inv_t *inv = tk_inv_peek(L, 1);
   tk_ivec_t *query_ids = tk_ivec_peek(L, 2, "ids");
   uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
-  double decay = tk_lua_optnumber(L, 4, "decay", 0.0);
+  double decay = tk_lua_optnumber(L, 4, "decay", 1.0);
   double bandwidth = tk_lua_optnumber(L, 5, "bandwidth", -1.0);
   int64_t write_pos = 0;
   for (int64_t i = 0; i < (int64_t) query_ids->n; i ++) {
@@ -1434,7 +1442,7 @@ static inline int tk_inv_neighborhoods_by_vecs_lua (lua_State *L)
   tk_inv_t *inv = tk_inv_peek(L, 1);
   tk_ivec_t *query_vecs = tk_ivec_peek(L, 2, "vectors");
   uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
-  double decay = tk_lua_optnumber(L, 4, "decay", 0.0);
+  double decay = tk_lua_optnumber(L, 4, "decay", 1.0);
   double bandwidth = tk_lua_optnumber(L, 5, "bandwidth", -1.0);
   tk_inv_neighborhoods_by_vecs(L, inv, query_vecs, knn, decay, bandwidth, NULL, NULL);
   return 2;
@@ -1445,7 +1453,7 @@ static inline int tk_inv_similarity_lua (lua_State *L)
   tk_inv_t *inv = tk_inv_peek(L, 1);
   int64_t uid0 = tk_lua_checkinteger(L, 2, "uid0");
   int64_t uid1 = tk_lua_checkinteger(L, 3, "uid1");
-  double decay = tk_lua_optnumber(L, 4, "decay", 0.0);
+  double decay = tk_lua_optnumber(L, 4, "decay", 1.0);
   double bandwidth = tk_lua_optnumber(L, 5, "bandwidth", -1.0);
   lua_pushnumber(L, 1.0 - tk_inv_distance(inv, uid0, uid1, decay, bandwidth));
   return 1;
@@ -1456,7 +1464,7 @@ static inline int tk_inv_distance_lua (lua_State *L)
   tk_inv_t *inv = tk_inv_peek(L, 1);
   int64_t uid0 = tk_lua_checkinteger(L, 2, "uid0");
   int64_t uid1 = tk_lua_checkinteger(L, 3, "uid1");
-  double decay = tk_lua_optnumber(L, 4, "decay", 0.0);
+  double decay = tk_lua_optnumber(L, 4, "decay", 1.0);
   double bandwidth = tk_lua_optnumber(L, 5, "bandwidth", -1.0);
   lua_pushnumber(L, tk_inv_distance(inv, uid0, uid1, decay, bandwidth));
   return 1;
@@ -1467,7 +1475,7 @@ static inline int tk_inv_neighbors_lua (lua_State *L)
   tk_inv_t *inv = tk_inv_peek(L, 1);
   uint64_t knn = tk_lua_optunsigned(L, 3, "knn", 0);
   tk_rvec_t *out = tk_rvec_peek(L, 4, "out");
-  double decay = tk_lua_optnumber(L, 5, "decay", 0.0);
+  double decay = tk_lua_optnumber(L, 5, "decay", 1.0);
   double bandwidth = tk_lua_optnumber(L, 6, "bandwidth", -1.0);
   if (lua_type(L, 2) == LUA_TNUMBER) {
     int64_t uid = tk_lua_checkinteger(L, 2, "id");
