@@ -627,6 +627,7 @@ end
 
 M.build_spectral_nystrom = function (args)
   local index = args.index
+  local landmarks_index = args.landmarks_index or index
   local n_landmarks = args.n_landmarks or 0
   local n_dims = args.n_dims
   local decay = args.decay
@@ -638,7 +639,7 @@ M.build_spectral_nystrom = function (args)
 
   local landmark_ids, landmark_chol, scales, actual_landmarks, trace_ratio =
     spectral.sample_landmarks({
-      inv = index,
+      inv = landmarks_index,
       n_landmarks = n_landmarks,
       decay = decay,
       bandwidth = bandwidth,
@@ -685,8 +686,15 @@ M.build_spectral_nystrom = function (args)
   local raw_codes = nil
   local ids = nil
   if train_tokens then
-    raw_codes = nystrom_encode(train_tokens)
-    ids = train_ids
+    local sample_offsets
+    sample_offsets, raw_codes = nystrom_encode(train_tokens)
+    if train_ids and sample_offsets then
+      ids = ivec.create():copy(sample_offsets)
+      ids:lookup(train_ids)
+      sample_offsets:destroy()
+    else
+      ids = sample_offsets
+    end
   end
 
   return {
@@ -709,6 +717,7 @@ end
 
 M.spectral = function (args)
   local index = err.assert(args.index, "index required")
+  local landmarks_index = args.landmarks_index
   local n_landmarks_cfg = args.n_landmarks
   local n_dims_cfg = args.n_dims
   if not n_landmarks_cfg and not n_dims_cfg then
@@ -768,6 +777,7 @@ M.spectral = function (args)
     end
     local model = M.build_spectral_nystrom({
       index = index,
+      landmarks_index = landmarks_index,
       n_landmarks = n_landmarks_val,
       n_dims = n_dims_val,
       decay = decay_val,
@@ -824,6 +834,7 @@ M.spectral = function (args)
     end
     local model = M.build_spectral_nystrom({
       index = index,
+      landmarks_index = landmarks_index,
       n_landmarks = params.n_landmarks,
       n_dims = params.n_dims,
       decay = params.decay,
