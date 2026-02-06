@@ -22,8 +22,6 @@
 #define TK_HLTH_ENCODER_EPH "tk_hlth_encoder_eph"
 #define TK_NYSTROM_ENCODER_MT "tk_nystrom_encoder_t"
 #define TK_NYSTROM_ENCODER_EPH "tk_nystrom_encoder_eph"
-#define TK_NORMALIZER_MT "tk_normalizer_t"
-#define TK_NORMALIZER_EPH "tk_normalizer_eph"
 #define TK_RP_ENCODER_MT "tk_rp_encoder_t"
 #define TK_RP_ENCODER_EPH "tk_rp_encoder_eph"
 #define TK_RFF_ENCODER_MT "tk_rff_encoder_t"
@@ -69,20 +67,14 @@ typedef struct {
   tk_dvec_t *col_means;
   tk_ivec_t *landmark_ids;
   tk_dvec_t *landmark_chol;
-  tk_dvec_t *scales;
+  tk_dvec_t *projection;
+  tk_dvec_t *bias;
   uint64_t n_dims;
   uint64_t n_landmarks;
   double decay;
   double bandwidth;
   bool destroyed;
 } tk_nystrom_encoder_t;
-
-typedef struct {
-  tk_dvec_t *means;
-  tk_dvec_t *stds;
-  uint64_t n_dims;
-  bool destroyed;
-} tk_normalizer_t;
 
 typedef struct {
   tk_dvec_t *weights;
@@ -124,10 +116,12 @@ static inline int tk_nystrom_encoder_gc(lua_State *L) {
   enc->col_means = NULL;
   enc->landmark_ids = NULL;
   enc->landmark_chol = NULL;
-  enc->scales = NULL;
+  enc->projection = NULL;
+  enc->bias = NULL;
   enc->destroyed = true;
   return 0;
 }
+
 
 static inline int tk_hlth_encode_lua(lua_State *L) {
   tk_hlth_encoder_t *enc = (tk_hlth_encoder_t *)lua_touserdata(L, lua_upvalueindex(1));
@@ -787,8 +781,8 @@ static inline int tk_nystrom_encode_lua(lua_State *L) {
   double *weights_arr = feat_inv->weights->a;
   uint64_t n_ranks = feat_inv->n_ranks;
 
-  double *L_mm = enc->landmark_chol->a;
-  double *scales_arr = enc->scales->a;
+  double *proj = enc->projection->a;
+  double *bias = enc->bias->a;
 
   #pragma omp parallel
   {
@@ -796,7 +790,6 @@ static inline int tk_nystrom_encode_lua(lua_State *L) {
     tk_dvec_t *e_weights = tk_dvec_create(NULL, n_ranks, 0, 0);
     tk_dvec_t *inter_weights = tk_dvec_create(NULL, n_ranks, 0, 0);
     double *raw_sims = (double *)malloc(n_landmarks * sizeof(double));
-    double *L_q = (double *)malloc(n_landmarks * sizeof(double));
 
     #pragma omp for schedule(static)
     for (uint64_t i = 0; i < n_samples; i++) {
@@ -823,30 +816,19 @@ static inline int tk_nystrom_encode_lua(lua_State *L) {
         raw_sims[j] = sim;
       }
 
-      for (uint64_t j = 0; j < n_landmarks; j++) {
-        double dot = 0.0;
-        for (uint64_t k = 0; k < j; k++) {
-          dot += L_q[k] * L_mm[j * n_landmarks + k];
-        }
-        double scale_j = scales_arr[j];
-        L_q[j] = (scale_j > 1e-15) ? (raw_sims[j] - dot) / scale_j : 0.0;
-      }
-
       double *sample_out = raw_codes->a + i * n_dims;
-      for (uint64_t d = 0; d < n_dims; d++) {
-        double sum = 0.0;
-        for (uint64_t j = 0; j < n_landmarks; j++) {
-          double centered = L_q[j] - enc->col_means->a[j];
-          double evec_jd = enc->eigenvectors->a[j * n_dims + d];
-          sum += centered * evec_jd;
-        }
-        double eig_d = enc->eigenvalues->a[d];
-        sample_out[d] = (eig_d > 1e-12) ? sum / sqrt(eig_d) : 0.0;
-      }
+      cblas_dgemv(CblasRowMajor, CblasTrans,
+        (int)n_landmarks, (int)n_dims,
+        1.0, proj, (int)n_dims, raw_sims, 1,
+        0.0, sample_out, 1);
+      for (uint64_t d = 0; d < n_dims; d++)
+        sample_out[d] -= bias[d];
+      double norm = cblas_dnrm2((int)n_dims, sample_out, 1);
+      if (norm > 1e-12)
+        cblas_dscal((int)n_dims, 1.0 / norm, sample_out, 1);
     }
 
     free(raw_sims);
-    free(L_q);
     tk_dvec_destroy(q_weights);
     tk_dvec_destroy(e_weights);
     tk_dvec_destroy(inter_weights);
@@ -899,12 +881,6 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
   if (!landmark_chol)
     return luaL_error(L, "nystrom_encoder: landmark_chol required");
 
-  lua_getfield(L, 1, "scales");
-  tk_dvec_t *scales = tk_dvec_peekopt(L, -1);
-  lua_pop(L, 1);
-  if (!scales)
-    return luaL_error(L, "nystrom_encoder: scales required");
-
   lua_getfield(L, 1, "chol");
   tk_dvec_t *chol = tk_dvec_peekopt(L, -1);
   lua_pop(L, 1);
@@ -932,10 +908,6 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
   if (landmark_chol->n != n_landmarks * n_landmarks)
     return luaL_error(L, "nystrom_encoder: landmark_chol size (%llu) != n_landmarks^2 (%llu)",
                       (unsigned long long)landmark_chol->n, (unsigned long long)(n_landmarks * n_landmarks));
-  if (scales->n != n_landmarks)
-    return luaL_error(L, "nystrom_encoder: scales size (%llu) != n_landmarks (%llu)",
-                      (unsigned long long)scales->n, (unsigned long long)n_landmarks);
-
   if (chol) {
     if (n_samples == 0)
       return luaL_error(L, "nystrom_encoder: n_samples required when chol is provided");
@@ -946,6 +918,27 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
 
   double decay = tk_lua_foptnumber(L, 1, "nystrom_encoder", "decay", 0.0);
   double bandwidth = tk_lua_foptnumber(L, 1, "nystrom_encoder", "bandwidth", -1.0);
+
+  tk_dvec_t *projection = tk_dvec_create(L, n_landmarks * n_dims, 0, 0);
+  projection->n = n_landmarks * n_dims;
+  for (uint64_t j = 0; j < n_landmarks; j++) {
+    for (uint64_t d = 0; d < n_dims; d++) {
+      double eig_d = eigenvalues->a[d];
+      double s = (eig_d > 1e-12) ? 1.0 / sqrt(eig_d) : 0.0;
+      projection->a[j * n_dims + d] = eigenvectors->a[j * n_dims + d] * s;
+    }
+  }
+
+  tk_dvec_t *bias = tk_dvec_create(L, n_dims, 0, 0);
+  bias->n = n_dims;
+  cblas_dgemv(CblasRowMajor, CblasTrans,
+    (int)n_landmarks, (int)n_dims,
+    1.0, projection->a, (int)n_dims, col_means->a, 1,
+    0.0, bias->a, 1);
+
+  cblas_dtrsm(CblasRowMajor, CblasLeft, CblasLower, CblasTrans, CblasNonUnit,
+    (int)n_landmarks, (int)n_dims, 1.0, landmark_chol->a, (int)n_landmarks,
+    projection->a, (int)n_dims);
 
   tk_dvec_t *raw_codes = NULL;
   if (chol) {
@@ -972,6 +965,9 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
         double eig_d = eigenvalues->a[d];
         U_row[d] = (eig_d > 1e-12) ? val / sqrt(eig_d) : 0.0;
       }
+      double norm = cblas_dnrm2((int)n_dims, U_row, 1);
+      if (norm > 1e-12)
+        cblas_dscal((int)n_dims, 1.0 / norm, U_row, 1);
     }
 
     free(adjustment);
@@ -987,7 +983,8 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
   enc->col_means = col_means;
   enc->landmark_ids = landmark_ids;
   enc->landmark_chol = landmark_chol;
-  enc->scales = scales;
+  enc->projection = projection;
+  enc->bias = bias;
   enc->n_dims = n_dims;
   enc->n_landmarks = n_landmarks;
   enc->decay = decay;
@@ -1018,7 +1015,11 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
   tk_lua_add_ephemeron(L, TK_NYSTROM_ENCODER_EPH, Ei, -1);
   lua_pop(L, 1);
 
-  lua_getfield(L, 1, "scales");
+  lua_pushvalue(L, -3);
+  tk_lua_add_ephemeron(L, TK_NYSTROM_ENCODER_EPH, Ei, -1);
+  lua_pop(L, 1);
+
+  lua_pushvalue(L, -2);
   tk_lua_add_ephemeron(L, TK_NYSTROM_ENCODER_EPH, Ei, -1);
   lua_pop(L, 1);
 
@@ -1031,134 +1032,6 @@ static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
   }
 
   return 2;
-}
-
-static inline tk_normalizer_t *tk_normalizer_peek(lua_State *L, int i) {
-  return (tk_normalizer_t *)luaL_checkudata(L, i, TK_NORMALIZER_MT);
-}
-
-static inline int tk_normalizer_gc(lua_State *L) {
-  tk_normalizer_t *enc = tk_normalizer_peek(L, 1);
-  enc->means = NULL;
-  enc->stds = NULL;
-  enc->destroyed = true;
-  return 0;
-}
-
-static luaL_Reg tk_normalizer_mt_fns[] = {
-  { NULL, NULL }
-};
-
-static inline int tk_normalize_lua(lua_State *L) {
-  tk_normalizer_t *enc = (tk_normalizer_t *)lua_touserdata(L, lua_upvalueindex(1));
-
-  if (enc->destroyed)
-    return luaL_error(L, "normalize: normalizer has been destroyed");
-
-  tk_dvec_t *codes = tk_dvec_peek(L, 1, "codes");
-  uint64_t n_dims = enc->n_dims;
-  uint64_t n_samples = codes->n / n_dims;
-
-  tk_dvec_t *out = tk_dvec_peekopt(L, 2);
-  if (out) {
-    tk_dvec_ensure(out, codes->n);
-    out->n = codes->n;
-    lua_pushvalue(L, 2);
-  } else {
-    out = tk_dvec_create(L, codes->n, 0, 0);
-    out->n = codes->n;
-  }
-
-  #pragma omp parallel for schedule(static)
-  for (uint64_t i = 0; i < n_samples; i++) {
-    for (uint64_t d = 0; d < n_dims; d++) {
-      double v = codes->a[i * n_dims + d];
-      double std_d = enc->stds->a[d];
-      out->a[i * n_dims + d] = (std_d > 1e-12) ? (v - enc->means->a[d]) / std_d : 0.0;
-    }
-  }
-
-  return 1;
-}
-
-static inline int tk_hlth_normalizer_lua(lua_State *L) {
-  lua_settop(L, 1);
-  luaL_checktype(L, 1, LUA_TTABLE);
-
-  lua_getfield(L, 1, "codes");
-  tk_dvec_t *codes = tk_dvec_peekopt(L, -1);
-  lua_pop(L, 1);
-  if (!codes)
-    return luaL_error(L, "normalizer: codes required");
-
-  uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "normalizer", "n_dims");
-  if (n_dims == 0)
-    return luaL_error(L, "normalizer: n_dims must be > 0");
-
-  uint64_t n_samples = tk_lua_fcheckunsigned(L, 1, "normalizer", "n_samples");
-  if (n_samples == 0)
-    return luaL_error(L, "normalizer: n_samples must be > 0");
-
-  if (codes->n != n_samples * n_dims)
-    return luaL_error(L, "normalizer: codes size (%llu) != n_samples * n_dims (%llu)",
-      (unsigned long long)codes->n, (unsigned long long)(n_samples * n_dims));
-
-  tk_dvec_t *means = tk_dvec_create(L, n_dims, 0, 0);
-  tk_dvec_t *stds = tk_dvec_create(L, n_dims, 0, 0);
-  means->n = n_dims;
-  stds->n = n_dims;
-
-  for (uint64_t d = 0; d < n_dims; d++) {
-    double sum = 0.0;
-    for (uint64_t i = 0; i < n_samples; i++) {
-      sum += codes->a[i * n_dims + d];
-    }
-    means->a[d] = sum / (double)n_samples;
-  }
-
-  for (uint64_t d = 0; d < n_dims; d++) {
-    double mean_d = means->a[d];
-    double sum_sq = 0.0;
-    for (uint64_t i = 0; i < n_samples; i++) {
-      double diff = codes->a[i * n_dims + d] - mean_d;
-      sum_sq += diff * diff;
-    }
-    stds->a[d] = sqrt(sum_sq / (double)n_samples);
-  }
-
-  tk_dvec_t *normalized = tk_dvec_create(L, codes->n, 0, 0);
-  normalized->n = codes->n;
-
-  #pragma omp parallel for schedule(static)
-  for (uint64_t i = 0; i < n_samples; i++) {
-    for (uint64_t d = 0; d < n_dims; d++) {
-      double v = codes->a[i * n_dims + d];
-      double std_d = stds->a[d];
-      normalized->a[i * n_dims + d] = (std_d > 1e-12) ? (v - means->a[d]) / std_d : 0.0;
-    }
-  }
-
-  tk_normalizer_t *enc = tk_lua_newuserdata(L, tk_normalizer_t, TK_NORMALIZER_MT, tk_normalizer_mt_fns, tk_normalizer_gc);
-  int Ei = lua_gettop(L);
-
-  enc->means = means;
-  enc->stds = stds;
-  enc->n_dims = n_dims;
-  enc->destroyed = false;
-
-  lua_pushvalue(L, -4);
-  tk_lua_add_ephemeron(L, TK_NORMALIZER_EPH, Ei, -1);
-  lua_pop(L, 1);
-
-  lua_pushvalue(L, -3);
-  tk_lua_add_ephemeron(L, TK_NORMALIZER_EPH, Ei, -1);
-  lua_pop(L, 1);
-
-  lua_pushcclosure(L, tk_normalize_lua, 1);
-  lua_pushinteger(L, (lua_Integer)n_dims);
-  lua_pushvalue(L, -3);
-
-  return 3;
 }
 
 static inline tk_rp_encoder_t *tk_rp_encoder_peek(lua_State *L, int i) {
@@ -1508,7 +1381,6 @@ static inline int tk_hlth_rff_encoder_lua(lua_State *L) {
 static luaL_Reg tk_hlth_fns[] = {
   { "landmark_encoder", tk_hlth_landmark_encoder_lua },
   { "nystrom_encoder", tk_hlth_nystrom_encoder_lua },
-  { "normalizer", tk_hlth_normalizer_lua },
   { "rp_encoder", tk_hlth_rp_encoder_lua },
   { "rff_encoder", tk_hlth_rff_encoder_lua },
   { NULL, NULL }
