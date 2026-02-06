@@ -640,6 +640,8 @@ M.build_spectral_nystrom = function (args)
       decay = decay,
       bandwidth = bandwidth,
       trace_tol = args.trace_tol,
+      normalized = args.normalized,
+      cholesky = args.cholesky,
     })
 
   if each_cb then
@@ -731,6 +733,8 @@ M.spectral = function (args)
       decay = decay_val,
       bandwidth = bandwidth_val,
       trace_tol = trace_tol,
+      normalized = args.normalized,
+      cholesky = args.cholesky,
       each = each_cb,
       train_tokens = train_tokens,
       train_ids = train_ids,
@@ -788,6 +792,8 @@ M.spectral = function (args)
       decay = params.decay,
       bandwidth = params.bandwidth,
       trace_tol = trace_tol,
+      normalized = args.normalized,
+      cholesky = args.cholesky,
       each = each_cb,
       train_tokens = train_tokens,
       train_ids = train_ids,
@@ -870,9 +876,13 @@ M.rp = function (args)
   local raw_codes = err.assert(args.raw_codes, "raw_codes required")
   local ids = err.assert(args.ids, "ids required")
   local n_samples = err.assert(args.n_samples, "n_samples required")
-  local n_dims = err.assert(args.n_dims, "n_dims required")
+  local n_dims_arg = err.assert(args.n_dims, "n_dims required")
+  local skip_prefix = n_dims_arg < 0
+  local n_dims = math.abs(n_dims_arg)
   local eval_data = err.assert(args.eval, "eval required")
-  local max_bits = args.max_bits or 512
+  local max_bits_arg = args.max_bits or 512
+  local skip_bits = max_bits_arg < 0
+  local max_bits = math.abs(max_bits_arg)
   local ranking = args.ranking or "ndcg"
   local seed = args.seed or 12345
   local tolerance = args.tolerance or 0.01
@@ -884,7 +894,9 @@ M.rp = function (args)
     n_bits_levels = n_bits_levels + 1
     b = b * 2
   end
-  local n_results = n_dims * n_bits_levels
+  if skip_bits then n_bits_levels = 1 end
+  local n_dim_levels = skip_prefix and 1 or n_dims
+  local n_results = n_dim_levels * n_bits_levels
 
   local scores_out = dvec.create(n_results)
   local dims_out = ivec.create(n_results)
@@ -896,12 +908,13 @@ M.rp = function (args)
   local rp_weights = dvec.create(max_bits * n_dims)
 
   local result_idx = 0
-  for prefix_dims = 1, n_dims do
+  local dim_start = skip_prefix and n_dims or 1
+  for prefix_dims = dim_start, n_dims do
     selected_cols:setn(prefix_dims)
     selected_cols:fill_indices()
     raw_codes:mtx_select(selected_cols, nil, n_dims, truncated)
 
-    local bits = 8
+    local bits = skip_bits and max_bits or 8
     while bits <= max_bits do
       local rp_encode, rp_n_bits = hlth.rp_encoder({
         n_dims = prefix_dims,

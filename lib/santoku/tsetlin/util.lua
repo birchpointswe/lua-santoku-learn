@@ -232,8 +232,10 @@ function M.spectral_log (info)
     end
   elseif info.event == "spectral_result" then
     local trace_info = info.trace_ratio and str.format(" trace=%.2e", info.trace_ratio) or ""
-    str.printf("[SPECTRAL]   -> L=%d eig=[%.4f, %.4f]%s\n",
-      info.n_landmarks or 0, info.eig_min, info.eig_max, trace_info)
+    local eig_info = (info.eig_min and info.eig_max) and str.format(" eig=[%.4f, %.4f]", info.eig_min, info.eig_max) or ""
+    local dims_info = info.n_dims and str.format(" D=%d", info.n_dims) or ""
+    str.printf("[SPECTRAL]   -> L=%d%s%s%s\n",
+      info.n_landmarks or 0, dims_info, eig_info, trace_info)
   elseif info.event == "eval" then
     local m = info.metrics or {}
     local best = format_best(info.global_best_score, info.score)
