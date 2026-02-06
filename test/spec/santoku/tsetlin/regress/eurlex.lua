@@ -50,15 +50,17 @@ local cfg = {
     final_iterations = 400,
   },
   nystrom = {
+    normalized = false,
+    cholesky = false,
     n_landmarks = 4096,
-    n_dims = 256,
-    decay = 1.0,
+    n_dims = 32,
+    decay = 0.0,
     bandwidth = -1,
     rounds = 0,
     samples = 20,
   },
   rp = {
-    max_bits = 1024,
+    max_bits = 256,
     tolerance = 0.001
   },
   eval = {
@@ -100,27 +102,55 @@ test("eurlex-docs", function()
   local all_ids = ivec.create(n_total_nodes):fill_indices()
   local label_node_ids = ivec.create(n_labels):fill_indices():add(train.n)
 
-  local all_features, n_graph_features = train.solutions:bits_bipartite(train.n, n_labels, "adjacency")
-  local graph_ranks = ivec.create(n_graph_features):fill(1, 0, train.n):fill(0, train.n, n_graph_features)
-  local idf_ids, idf_scores = all_features:bits_top_df(n_total_nodes, n_graph_features)
-  all_features:bits_select(idf_ids, nil, n_graph_features)
-  n_graph_features = idf_ids:size()
+  local n_edges = train.solutions:size()
+  local edge_features = ivec.create()
+  for i = 0, n_edges - 1 do
+    local bit = train.solutions:get(i)
+    local doc = math.floor(bit / n_labels)
+    edge_features:push(doc * n_edges + i)
+  end
+  for i = 0, n_edges - 1 do
+    local bit = train.solutions:get(i)
+    local label = bit % n_labels
+    edge_features:push((train.n + label) * n_edges + i)
+  end
+  edge_features:asc()
+  local adj_features, n_adj = train.solutions:bits_bipartite(train.n, n_labels, "adjacency")
+  edge_features:bits_extend(adj_features, n_edges, n_adj)
+  local n_combined = n_edges + n_adj
+  local graph_ranks = ivec.create(n_combined)
+    :fill(0, 0, n_edges)
+    :fill(2, n_edges, n_edges + train.n)
+    :fill(1, n_edges + train.n, n_combined)
+  local idf_ids, idf_scores = edge_features:bits_top_df(n_total_nodes, n_combined)
+  edge_features:bits_select(idf_ids, nil, n_combined)
+  local n_graph_features = idf_ids:size()
   local ranks = ivec.create():copy(graph_ranks, idf_ids)
-  train.graph_index = inv.create({ features = idf_scores, ranks = ranks, n_ranks = 2 })
-  train.graph_index:add(all_features, all_ids)
+  train.graph_index = inv.create({ features = idf_scores:size(), ranks = ranks, n_ranks = 3 })
+  train.graph_index:add(edge_features, all_ids)
   local label_features = ivec.create()
-  all_features:bits_select(nil, label_node_ids, n_graph_features, label_features)
-  train.labels_index = inv.create({ features = idf_scores, ranks = ranks, n_ranks = 2 })
+  edge_features:bits_select(nil, label_node_ids, n_graph_features, label_features)
+  train.labels_index = inv.create({ features = idf_scores:size(), ranks = ranks, n_ranks = 3 })
   train.labels_index:add(label_features, label_node_ids)
   local doc_node_ids = ivec.create(train.n):fill_indices()
   local doc_features = ivec.create()
-  all_features:bits_select(nil, doc_node_ids, n_graph_features, doc_features)
-  train.docs_index = inv.create({ features = idf_scores, ranks = ranks, n_ranks = 2 })
+  edge_features:bits_select(nil, doc_node_ids, n_graph_features, doc_features)
+  train.docs_index = inv.create({ features = idf_scores:size(), ranks = ranks, n_ranks = 3 })
   train.docs_index:add(doc_features, doc_node_ids)
-  train.all_features = all_features
+  local lm_adj_ranks = ivec.create(n_adj):fill(1, 0, train.n):fill(0, train.n, n_adj)
+  local lm_idf_ids, lm_idf_scores = adj_features:bits_top_df(n_total_nodes, n_adj)
+  adj_features:bits_select(lm_idf_ids, nil, n_adj)
+  local lm_n_features = lm_idf_ids:size()
+  local lm_ranks = ivec.create():copy(lm_adj_ranks, lm_idf_ids)
+  local lm_label_features = ivec.create()
+  adj_features:bits_select(nil, label_node_ids, lm_n_features, lm_label_features)
+  train.landmarks_index = inv.create({ features = lm_idf_scores:size(), ranks = lm_ranks, n_ranks = 2 })
+  train.landmarks_index:add(lm_label_features, label_node_ids)
+  train.all_features = edge_features
   train.all_ids = all_ids
   train.label_node_ids = label_node_ids
-  str.printf("  Adjacency index: %d idf features, %d nodes, %d label nodes\n", idf_ids:size(), n_total_nodes, n_labels)
+  str.printf("  Combined index: %d idf features (edges=%d adj=%d), landmarks: %d adj-only features, %d nodes, %d label nodes\n",
+    n_graph_features, n_edges, n_adj, lm_n_features, n_total_nodes, n_labels)
 
   print("\nSpot-checking graph index")
   local hood = rvec.create()
@@ -438,15 +468,14 @@ test("eurlex-docs", function()
       total_p / n_labels_eval, total_r / n_labels_eval, n_labels_eval)
   end
 
-  if true then
-    return
-  end
-
   print("\nRunning spectral embedding (Nystrom)")
+  local landmarks_index = train.landmarks_index
   local spectral_metrics
   local model = optimize.spectral({
     index = train.graph_index,
-    landmarks_index = train.labels_index,
+    landmarks_index = landmarks_index,
+    normalized = cfg.nystrom.normalized,
+    cholesky = cfg.nystrom.cholesky,
     train_tokens = train.all_features,
     train_ids = train.all_ids,
     n_landmarks = cfg.nystrom.n_landmarks,
@@ -495,7 +524,7 @@ test("eurlex-docs", function()
     raw_codes = all_raw_codes,
     ids = embedded_ids,
     n_samples = n_embedded,
-    n_dims = spectral_dims,
+    n_dims = cfg.rp.all_dims and -spectral_dims or spectral_dims,
     max_bits = cfg.rp.max_bits,
     tolerance = cfg.rp.tolerance,
     eval = {
@@ -785,6 +814,10 @@ test("eurlex-docs", function()
       if gt_set[sp_hood_ids:get(idx) - train.n] then hits = hits + 1 end
     end
     str.printf("    Retrieval: %d/%d GT in top-%d\n", hits, n_gt, sp_hood:size())
+  end
+
+  if true then
+    return
   end
 
   print("\nTokenizing")
