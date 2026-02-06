@@ -580,7 +580,6 @@ M.destroy_spectral = function (model)
   if model.eigenvectors then model.eigenvectors:destroy() end
   if model.eigenvalues then model.eigenvalues:destroy() end
   if model.landmark_chol then model.landmark_chol:destroy() end
-  if model.scales then model.scales:destroy() end
   if model.col_means then model.col_means:destroy() end
 end
 
@@ -628,36 +627,20 @@ end
 M.build_spectral_nystrom = function (args)
   local index = args.index
   local landmarks_index = args.landmarks_index or index
-  local n_landmarks = args.n_landmarks or 0
-  local n_dims = args.n_dims
+  local each_cb = args.each
   local decay = args.decay
   local bandwidth = args.bandwidth
-  local trace_tol = args.trace_tol
-  local each_cb = args.each
-  local train_tokens = args.train_tokens
-  local train_ids = args.train_ids
 
-  local landmark_ids, landmark_chol, scales, actual_landmarks, trace_ratio =
-    spectral.sample_landmarks({
-      inv = landmarks_index,
-      n_landmarks = n_landmarks,
+  local raw_codes, ids, effective_dims, landmark_ids, actual_landmarks, trace_ratio =
+    spectral.encode_nystrom({
+      inv = index,
+      landmarks_inv = landmarks_index ~= index and landmarks_index or nil,
+      n_landmarks = args.n_landmarks or 0,
+      n_dims = args.n_dims or args.n_landmarks or 0,
       decay = decay,
       bandwidth = bandwidth,
-      trace_tol = trace_tol,
+      trace_tol = args.trace_tol,
     })
-
-  local effective_dims = n_dims or n_landmarks
-  if effective_dims > actual_landmarks then
-    effective_dims = actual_landmarks
-  end
-
-  local eigenvectors, eigenvalues, col_means = spectral.encode({
-    chol = landmark_chol,
-    n_samples = actual_landmarks,
-    n_landmarks = actual_landmarks,
-    n_dims = effective_dims,
-    each = args.spectral_each,
-  })
 
   if each_cb then
     each_cb({
@@ -665,36 +648,7 @@ M.build_spectral_nystrom = function (args)
       n_dims = effective_dims,
       n_landmarks = actual_landmarks,
       trace_ratio = trace_ratio,
-      eig_min = eigenvalues:min(),
-      eig_max = eigenvalues:max(),
     })
-  end
-
-  local nystrom_encode, _ = hlth.nystrom_encoder({
-    features_index = index,
-    eigenvectors = eigenvectors,
-    eigenvalues = eigenvalues,
-    landmark_ids = landmark_ids,
-    col_means = col_means,
-    landmark_chol = landmark_chol,
-    scales = scales,
-    n_dims = effective_dims,
-    decay = decay,
-    bandwidth = bandwidth,
-  })
-
-  local raw_codes = nil
-  local ids = nil
-  if train_tokens then
-    local sample_offsets
-    sample_offsets, raw_codes = nystrom_encode(train_tokens)
-    if train_ids and sample_offsets then
-      ids = ivec.create():copy(sample_offsets)
-      ids:lookup(train_ids)
-      sample_offsets:destroy()
-    else
-      ids = sample_offsets
-    end
   end
 
   return {
@@ -703,15 +657,9 @@ M.build_spectral_nystrom = function (args)
     dims = effective_dims,
     spectral_dims = effective_dims,
     landmark_ids = landmark_ids,
-    eigenvectors = eigenvectors,
-    eigenvalues = eigenvalues,
-    col_means = col_means,
-    landmark_chol = landmark_chol,
-    scales = scales,
     n_landmarks = actual_landmarks,
     decay = decay,
     bandwidth = bandwidth,
-    nystrom_encode = nystrom_encode,
   }
 end
 

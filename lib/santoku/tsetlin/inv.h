@@ -972,11 +972,8 @@ static inline double tk_inv_combine_ranks (
 ) {
   double accum = 0.0;
   for (uint64_t r = 0; r < n_ranks; r++) {
-    double log_i = log1p(i_arr[r]);
-    double log_q = log1p(q_arr[r]);
-    double log_e = log1p(e_arr[r]);
-    double denom = sqrt(log_q * log_e);
-    double s = (denom > 0.0) ? log_i / denom : 0.0;
+    double denom = sqrt(q_arr[r] * e_arr[r]);
+    double s = (denom > 0.0) ? i_arr[r] / denom : 0.0;
     if (s > 1.0) s = 1.0;
     accum += rw->weights[r] * s;
   }
@@ -1131,11 +1128,8 @@ static inline double tk_inv_similarity_by_rank_fast (
     double inter_w = wacc_arr[(int64_t)n_ranks * vsid + (int64_t)rank];
     double q_w = q_weights_by_rank[rank];
     double e_w = e_weights_by_rank[rank];
-    double log_i = log1p(inter_w);
-    double log_q = log1p(q_w);
-    double log_e = log1p(e_w);
-    double denom = sqrt(log_q * log_e);
-    double rank_sim = (denom > 0.0) ? log_i / denom : 0.0;
+    double denom = sqrt(q_w * e_w);
+    double rank_sim = (denom > 0.0) ? inter_w / denom : 0.0;
     if (rank_sim > 1.0) rank_sim = 1.0;
     accum += weight * rank_sim;
     total_weight += weight;
