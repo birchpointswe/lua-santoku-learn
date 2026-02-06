@@ -10,7 +10,7 @@
 #include <santoku/cvec/ext.h>
 #include <omp.h>
 
-#define TK_ANN_SUBSTR_BITS 32
+#define TK_ANN_SUBSTR_BITS 16
 #define tk_ann_hash_t uint32_t
 
 #define TK_ANN_MT "tk_ann_t"
@@ -411,13 +411,13 @@ static inline void tk_ann_query_mih (
   tk_pvec_clear(out);
   tk_iumap_t *seen = tk_iumap_create(NULL, 0);
   const unsigned char *q = (const unsigned char *)query;
-  tk_ann_hash_t hs[16];
-  for (uint64_t ti = 0; ti < A->m && ti < 16; ti++)
+  tk_ann_hash_t hs[A->m];
+  for (uint64_t ti = 0; ti < A->m; ti++)
     hs[ti] = tk_ann_substring(A, query, ti);
   for (int r = 0; r <= (int)max_probe_radius; r++) {
     for (uint64_t ti = 0; ti < A->m; ti++)
       tk_ann_probe_table_at_radius(A, ti, hs[ti], r, skip_sid, seen, q, k, out);
-    if (k && out->n >= k)
+    if (k && out->n >= k && out->a[0].p < (int64_t)(A->m * ((uint64_t)r + 1)))
       break;
   }
   tk_iumap_destroy(seen);
@@ -542,7 +542,7 @@ static inline void tk_ann_neighborhoods (
   #pragma omp parallel
   {
     tk_iumap_t *seen = tk_iumap_create(NULL, 0);
-    tk_ann_hash_t hs[16];
+    tk_ann_hash_t hs[A->m];
     #pragma omp for schedule(static)
     for (uint64_t i = 0; i < hoods->n; i++) {
       tk_pvec_t *hood = hoods->a[i];
@@ -552,12 +552,12 @@ static inline void tk_ann_neighborhoods (
       int64_t sid = tk_ann_uid_sid(A, uid, TK_ANN_FIND);
       const char *vec = tk_ann_sget(A, sid);
       const unsigned char *q = (const unsigned char *)vec;
-      for (uint64_t ti = 0; ti < A->m && ti < 16; ti++)
+      for (uint64_t ti = 0; ti < A->m; ti++)
         hs[ti] = tk_ann_substring(A, vec, ti);
       for (int r = 0; r <= (int)max_probe_radius; r++) {
         for (uint64_t ti = 0; ti < A->m; ti++)
           tk_ann_probe_table_pos_at_radius(A, sid_to_pos, ti, hs[ti], r, sid, seen, q, k, hood);
-        if (k && hood->n >= k)
+        if (k && hood->n >= k && hood->a[0].p < (int64_t)(A->m * ((uint64_t)r + 1)))
           break;
       }
       tk_pvec_asc(hood, 0, hood->n);
@@ -596,7 +596,7 @@ static inline void tk_ann_neighborhoods_by_ids (
   #pragma omp parallel
   {
     tk_iumap_t *seen = tk_iumap_create(NULL, 0);
-    tk_ann_hash_t hs[16];
+    tk_ann_hash_t hs[A->m];
     #pragma omp for schedule(static)
     for (uint64_t i = 0; i < hoods->n; i++) {
       tk_pvec_t *hood = hoods->a[i];
@@ -607,12 +607,12 @@ static inline void tk_ann_neighborhoods_by_ids (
         continue;
       const char *vec = tk_ann_sget(A, sid);
       const unsigned char *q = (const unsigned char *)vec;
-      for (uint64_t ti = 0; ti < A->m && ti < 16; ti++)
+      for (uint64_t ti = 0; ti < A->m; ti++)
         hs[ti] = tk_ann_substring(A, vec, ti);
       for (int r = 0; r <= (int)max_probe_radius; r++) {
         for (uint64_t ti = 0; ti < A->m; ti++)
           tk_ann_probe_table_pos_at_radius(A, sid_to_pos, ti, hs[ti], r, sid, seen, q, k, hood);
-        if (k && hood->n >= k)
+        if (k && hood->n >= k && hood->a[0].p < (int64_t)(A->m * ((uint64_t)r + 1)))
           break;
       }
       tk_pvec_asc(hood, 0, hood->n);
@@ -651,19 +651,19 @@ static inline void tk_ann_neighborhoods_by_vecs (
   #pragma omp parallel
   {
     tk_iumap_t *seen = tk_iumap_create(NULL, 0);
-    tk_ann_hash_t hs[16];
+    tk_ann_hash_t hs[A->m];
     #pragma omp for schedule(static)
     for (uint64_t i = 0; i < hoods->n; i++) {
       tk_pvec_t *hood = hoods->a[i];
       tk_iumap_clear(seen);
       const char *vec = query_vecs->a + i * vec_bytes;
       const unsigned char *q = (const unsigned char *)vec;
-      for (uint64_t ti = 0; ti < A->m && ti < 16; ti++)
+      for (uint64_t ti = 0; ti < A->m; ti++)
         hs[ti] = tk_ann_substring(A, vec, ti);
       for (int r = 0; r <= (int)max_probe_radius; r++) {
         for (uint64_t ti = 0; ti < A->m; ti++)
           tk_ann_probe_table_pos_at_radius(A, sid_to_pos, ti, hs[ti], r, -1, seen, q, k, hood);
-        if (k && hood->n >= k)
+        if (k && hood->n >= k && hood->a[0].p < (int64_t)(A->m * ((uint64_t)r + 1)))
           break;
       }
       tk_pvec_asc(hood, 0, hood->n);
