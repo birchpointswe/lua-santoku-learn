@@ -12,6 +12,7 @@
 #include <santoku/iumap.h>
 #include <math.h>
 #include <float.h>
+#include <omp.h>
 #include <assert.h>
 #include <string.h>
 
@@ -2152,6 +2153,358 @@ static void tm_optimize_bits_sfbs (
   tk_ivec_asc(active, 0, active->n);
 }
 
+static void tk_incr_commit_cont (
+  double *raw_codes,
+  int64_t *pra,
+  int64_t *prb,
+  double *distances,
+  uint64_t n_pairs,
+  uint64_t n_dims,
+  uint64_t dim,
+  double sign
+) {
+  for (uint64_t j = 0; j < n_pairs; j++) {
+    double da = raw_codes[pra[j] * n_dims + dim]
+              - raw_codes[prb[j] * n_dims + dim];
+    distances[j] += sign * da * da;
+  }
+}
+
+static inline double tk_rank_dcg (
+  const double *restrict nd,
+  uint64_t nn,
+  const uint64_t *restrict pos_idx,
+  uint64_t n_pos,
+  const double *restrict weights,
+  const double *restrict discount
+) {
+  double dcg = 0.0;
+  for (uint64_t pi = 0; pi < n_pos; pi++) {
+    double dp = nd[pos_idx[pi]];
+    double rank_d = 0.0;
+    #pragma omp simd reduction(+:rank_d)
+    for (uint64_t q = 0; q < nn; q++)
+      rank_d += (nd[q] < dp) ? 1.0 : 0.0;
+    dcg += weights[pos_idx[pi]] * discount[(uint64_t)rank_d];
+  }
+  return dcg;
+}
+
+static void tm_optimize_bits_sfbs_cont (
+  lua_State *L,
+  double *raw_codes,
+  tk_ivec_t *code_ids,
+  tk_ivec_t *adjacency_ids,
+  tk_ivec_t *offsets,
+  tk_ivec_t *neighbors,
+  tk_dvec_t *weights,
+  uint64_t n_dims,
+  uint64_t target_dims,
+  uint64_t min_dims,
+  int i_each
+) {
+  uint64_t n_nodes = offsets->n - 1;
+  uint64_t n_pairs = neighbors->n;
+
+  int64_t max_uid = -1;
+  for (uint64_t i = 0; i < code_ids->n; i++)
+    if (code_ids->a[i] > max_uid) max_uid = code_ids->a[i];
+
+  int64_t *uid_to_row = (int64_t *)malloc((max_uid + 1) * sizeof(int64_t));
+  memset(uid_to_row, -1, (max_uid + 1) * sizeof(int64_t));
+  for (uint64_t i = 0; i < code_ids->n; i++)
+    uid_to_row[code_ids->a[i]] = (int64_t)i;
+
+  int64_t sentinel_row = 0;
+  int64_t *pair_row_a = (int64_t *)malloc(n_pairs * sizeof(int64_t));
+  int64_t *pair_row_b = (int64_t *)malloc(n_pairs * sizeof(int64_t));
+  for (uint64_t j = 0; j < n_pairs; j++) {
+    pair_row_a[j] = sentinel_row;
+    pair_row_b[j] = sentinel_row;
+  }
+  double *distances = (double *)calloc(n_pairs, sizeof(double));
+  uint64_t max_neighbors = 0;
+
+  for (uint64_t ni = 0; ni < n_nodes; ni++) {
+    int64_t st = offsets->a[ni];
+    int64_t en = offsets->a[ni + 1];
+    uint64_t cnt = (uint64_t)(en - st);
+    if (cnt > max_neighbors) max_neighbors = cnt;
+
+    int64_t node_uid = adjacency_ids->a[ni];
+    if (node_uid < 0 || node_uid > max_uid) continue;
+    int64_t node_row = uid_to_row[node_uid];
+    if (node_row < 0) continue;
+
+    for (int64_t j = st; j < en; j++) {
+      int64_t nbr_pos = neighbors->a[j];
+      int64_t nbr_uid = adjacency_ids->a[nbr_pos];
+      if (nbr_uid < 0 || nbr_uid > max_uid) continue;
+      int64_t nbr_row = uid_to_row[nbr_uid];
+      if (nbr_row < 0) continue;
+      pair_row_a[j] = node_row;
+      pair_row_b[j] = nbr_row;
+    }
+  }
+
+  free(uid_to_row);
+
+  double *discount = (double *)malloc(max_neighbors * sizeof(double));
+  for (uint64_t i = 0; i < max_neighbors; i++)
+    discount[i] = 1.0 / log2((double)(i + 2));
+
+  double *idcg = (double *)calloc(n_nodes, sizeof(double));
+  {
+    double *iw = (double *)malloc(max_neighbors * sizeof(double));
+    for (uint64_t ni = 0; ni < n_nodes; ni++) {
+      int64_t st = offsets->a[ni];
+      int64_t en = offsets->a[ni + 1];
+      uint64_t nn = (uint64_t)(en - st);
+      if (nn == 0) continue;
+      for (uint64_t i = 0; i < nn; i++)
+        iw[i] = weights->a[st + (int64_t)i];
+      for (uint64_t i = 0; i < nn; i++)
+        for (uint64_t k = i + 1; k < nn; k++)
+          if (iw[k] > iw[i]) { double t = iw[i]; iw[i] = iw[k]; iw[k] = t; }
+      for (uint64_t i = 0; i < nn; i++)
+        idcg[ni] += iw[i] * discount[i];
+    }
+    free(iw);
+  }
+
+  double *scores = (double *)calloc(n_dims, sizeof(double));
+  int64_t *offs_a = offsets->a;
+  double *weights_a = weights->a;
+
+  tk_ivec_t *active = tk_ivec_create(L, n_dims, 0, 0);
+  active->n = 0;
+  uint8_t *selected = (uint8_t *)calloc(n_dims, 1);
+
+  double current_score = 0.0;
+  uint64_t max_bits = target_dims > 0 ? target_dims : n_dims;
+
+  int phase = 0;
+  double eval_sign = 1.0;
+  int64_t swap_remove_bit = -1;
+  double pre_swap_score = 0.0;
+
+  int n_threads;
+  double **all_local_scores;
+  #pragma omp parallel
+  {
+    #pragma omp single
+    {
+      n_threads = omp_get_num_threads();
+      all_local_scores = (double **)malloc(n_threads * sizeof(double *));
+    }
+    int tid = omp_get_thread_num();
+    double *local_scores = (double *)calloc(n_dims, sizeof(double));
+    all_local_scores[tid] = local_scores;
+    double *nd = (double *)malloc(max_neighbors * sizeof(double));
+    uint64_t *pos_idx = (uint64_t *)malloc(max_neighbors * sizeof(uint64_t));
+    double **av_ptrs = (double **)malloc(max_neighbors * sizeof(double *));
+    double **bv_ptrs = (double **)malloc(max_neighbors * sizeof(double *));
+
+    while (phase < 3) {
+      memset(local_scores, 0, n_dims * sizeof(double));
+      #pragma omp barrier
+
+      #pragma omp for schedule(dynamic) nowait
+      for (uint64_t ni = 0; ni < n_nodes; ni++) {
+        int64_t st = offs_a[ni];
+        int64_t en = offs_a[ni + 1];
+        uint64_t nn = (uint64_t)(en - st);
+        if (nn == 0 || idcg[ni] <= 0.0) continue;
+
+        for (uint64_t i = 0; i < nn; i++) {
+          uint64_t j = (uint64_t)st + i;
+          av_ptrs[i] = raw_codes + pair_row_a[j] * n_dims;
+          bv_ptrs[i] = raw_codes + pair_row_b[j] * n_dims;
+        }
+
+        double inv_idcg = 1.0 / idcg[ni];
+
+        uint64_t n_pos = 0;
+        for (uint64_t i = 0; i < nn; i++)
+          if (weights_a[st + (int64_t)i] > 0.0)
+            pos_idx[n_pos++] = i;
+
+        for (uint64_t b = 0; b < n_dims; b++) {
+          if (phase == 1 ? !selected[b] : selected[b]) continue;
+
+          for (uint64_t i = 0; i < nn; i++) {
+            double d = av_ptrs[i][b] - bv_ptrs[i][b];
+            nd[i] = distances[(uint64_t)st + i] + eval_sign * d * d;
+          }
+
+          double dcg = tk_rank_dcg(nd, nn, pos_idx, n_pos,
+            weights_a + st, discount);
+
+          local_scores[b] += dcg * inv_idcg;
+        }
+      }
+
+      #pragma omp barrier
+
+      #pragma omp for schedule(static)
+      for (uint64_t b = 0; b < n_dims; b++) {
+        double s = 0.0;
+        for (int t = 0; t < n_threads; t++)
+          s += all_local_scores[t][b];
+        scores[b] = s;
+      }
+
+      #pragma omp single
+      {
+        int64_t best_bit = -1;
+        double best_score = -INFINITY;
+        for (uint64_t b = 0; b < n_dims; b++) {
+          if (phase == 1 ? !selected[b] : selected[b]) continue;
+          if (scores[b] > best_score) { best_score = scores[b]; best_bit = (int64_t)b; }
+        }
+        best_score = n_nodes > 0 ? best_score / (double)n_nodes : 0.0;
+
+        switch (phase) {
+        case 0: {
+          bool added = false;
+          if (best_bit >= 0 && active->n < max_bits) {
+            double gain = (active->n == 0) ? best_score : (best_score - current_score);
+            if (gain > 0.0 || active->n < min_dims) {
+              tk_incr_commit_cont(raw_codes, pair_row_a, pair_row_b,
+                distances, n_pairs, n_dims, (uint64_t)best_bit, 1.0);
+              selected[best_bit] = 1;
+              tk_ivec_push(active, best_bit);
+              current_score = best_score;
+              added = true;
+              if (i_each >= 0) {
+                lua_pushvalue(L, i_each);
+                lua_pushinteger(L, best_bit);
+                lua_pushnumber(L, gain);
+                lua_pushnumber(L, current_score);
+                lua_pushliteral(L, "add");
+                lua_call(L, 4, 0);
+              }
+            }
+          }
+          if (!added) {
+            if (active->n > min_dims) {
+              phase = 1;
+              eval_sign = -1.0;
+            } else {
+              phase = 3;
+            }
+          }
+          break;
+        }
+        case 1: {
+          if (best_bit >= 0) {
+            double gain = best_score - current_score;
+            if (gain > 0.0) {
+              tk_incr_commit_cont(raw_codes, pair_row_a, pair_row_b,
+                distances, n_pairs, n_dims, (uint64_t)best_bit, -1.0);
+              selected[best_bit] = 0;
+              for (uint64_t i = 0; i < (uint64_t)active->n; i++) {
+                if (active->a[i] == best_bit) {
+                  active->a[i] = active->a[active->n - 1];
+                  active->n--;
+                  break;
+                }
+              }
+              current_score = best_score;
+              phase = 0;
+              eval_sign = 1.0;
+              if (i_each >= 0) {
+                lua_pushvalue(L, i_each);
+                lua_pushinteger(L, best_bit);
+                lua_pushnumber(L, gain);
+                lua_pushnumber(L, current_score);
+                lua_pushliteral(L, "remove");
+                lua_call(L, 4, 0);
+              }
+            } else {
+              swap_remove_bit = best_bit;
+              pre_swap_score = current_score;
+              tk_incr_commit_cont(raw_codes, pair_row_a, pair_row_b,
+                distances, n_pairs, n_dims, (uint64_t)best_bit, -1.0);
+              selected[best_bit] = 0;
+              for (uint64_t i = 0; i < (uint64_t)active->n; i++) {
+                if (active->a[i] == best_bit) {
+                  active->a[i] = active->a[active->n - 1];
+                  active->n--;
+                  break;
+                }
+              }
+              current_score = best_score;
+              phase = 2;
+              eval_sign = 1.0;
+            }
+          } else {
+            phase = 3;
+          }
+          break;
+        }
+        case 2: {
+          if (best_bit >= 0 && best_score > pre_swap_score) {
+            tk_incr_commit_cont(raw_codes, pair_row_a, pair_row_b,
+              distances, n_pairs, n_dims, (uint64_t)best_bit, 1.0);
+            selected[best_bit] = 1;
+            tk_ivec_push(active, best_bit);
+            current_score = best_score;
+            phase = 0;
+            eval_sign = 1.0;
+            if (i_each >= 0) {
+              lua_pushvalue(L, i_each);
+              lua_pushinteger(L, swap_remove_bit);
+              lua_pushnumber(L, 0);
+              lua_pushnumber(L, current_score);
+              lua_pushliteral(L, "swap_remove");
+              lua_call(L, 4, 0);
+              lua_pushvalue(L, i_each);
+              lua_pushinteger(L, best_bit);
+              lua_pushnumber(L, best_score - pre_swap_score);
+              lua_pushnumber(L, current_score);
+              lua_pushliteral(L, "swap_add");
+              lua_call(L, 4, 0);
+            }
+          } else {
+            tk_incr_commit_cont(raw_codes, pair_row_a, pair_row_b,
+              distances, n_pairs, n_dims, (uint64_t)swap_remove_bit, 1.0);
+            selected[swap_remove_bit] = 1;
+            tk_ivec_push(active, swap_remove_bit);
+            current_score = pre_swap_score;
+            phase = 3;
+          }
+          break;
+        }
+        }
+      }
+    }
+
+    free(local_scores);
+    free(nd);
+    free(pos_idx);
+    free(av_ptrs);
+    free(bv_ptrs);
+  }
+
+  free(all_local_scores);
+
+  active->n = 0;
+  for (uint64_t b = 0; b < n_dims; b++)
+    if (selected[b])
+      tk_ivec_push(active, (int64_t)b);
+
+  free(scores);
+  free(pair_row_a);
+  free(pair_row_b);
+  free(distances);
+  free(selected);
+  free(discount);
+  free(idcg);
+
+  tk_ivec_asc(active, 0, active->n);
+}
+
 static inline int tm_optimize_bits (lua_State *L)
 {
   lua_settop(L, 1);
@@ -2181,43 +2534,56 @@ static inline int tm_optimize_bits (lua_State *L)
     luaL_error(L, "optimize_bits: expected_weights length (%d) must match expected_neighbors length (%d)",
       (int)weights->n, (int)neighbors->n);
 
-  char *codes = NULL;
-  tk_ann_t *ann = NULL;
-
-  lua_getfield(L, 1, "codes");
-  tk_cvec_t *cvec = tk_cvec_peekopt(L, -1);
-  lua_pop(L, 1);
-  if (cvec) {
-    codes = cvec->a;
-  } else {
-    lua_getfield(L, 1, "index");
-    ann = tk_ann_peekopt(L, -1);
-    lua_pop(L, 1);
-    if (!ann)
-      tk_lua_verror(L, 1, "optimize_bits", "codes/index", "codes or index required");
-  }
-
   int i_each = -1;
   if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
     lua_getfield(L, 1, "each");
     i_each = tk_lua_absindex(L, -1);
   }
 
-  tk_eval_t state;
-  memset(&state, 0, sizeof(tk_eval_t));
-  state.codes = codes;
-  state.ann = ann;
-  state.adjacency_ids = expected_ids;
-  state.n_dims = n_dims;
-  state.chunks = TK_CVEC_BITS_BYTES(n_dims);
-  state.offsets = offsets;
-  state.neighbors = neighbors;
-  state.weights = weights;
-  state.target_dims = target_dims;
-  state.min_dims = min_dims;
-  state.L = L;
+  lua_getfield(L, 1, "raw_codes");
+  tk_dvec_t *raw_codes_dvec = tk_dvec_peekopt(L, -1);
+  lua_pop(L, 1);
 
-  tm_optimize_bits_sfbs(L, &state, i_each);
+  if (raw_codes_dvec) {
+    lua_getfield(L, 1, "ids");
+    tk_ivec_t *code_ids = tk_ivec_peek(L, -1, "ids");
+    lua_pop(L, 1);
+    tm_optimize_bits_sfbs_cont(L, raw_codes_dvec->a, code_ids,
+      expected_ids, offsets, neighbors, weights,
+      n_dims, target_dims, min_dims, i_each);
+  } else {
+    char *codes = NULL;
+    tk_ann_t *ann = NULL;
+
+    lua_getfield(L, 1, "codes");
+    tk_cvec_t *cvec = tk_cvec_peekopt(L, -1);
+    lua_pop(L, 1);
+    if (cvec) {
+      codes = cvec->a;
+    } else {
+      lua_getfield(L, 1, "index");
+      ann = tk_ann_peekopt(L, -1);
+      lua_pop(L, 1);
+      if (!ann)
+        tk_lua_verror(L, 1, "optimize_bits", "codes/index/raw_codes", "codes, index, or raw_codes required");
+    }
+
+    tk_eval_t state;
+    memset(&state, 0, sizeof(tk_eval_t));
+    state.codes = codes;
+    state.ann = ann;
+    state.adjacency_ids = expected_ids;
+    state.n_dims = n_dims;
+    state.chunks = TK_CVEC_BITS_BYTES(n_dims);
+    state.offsets = offsets;
+    state.neighbors = neighbors;
+    state.weights = weights;
+    state.target_dims = target_dims;
+    state.min_dims = min_dims;
+    state.L = L;
+
+    tm_optimize_bits_sfbs(L, &state, i_each);
+  }
 
   lua_replace(L, 1);
   lua_settop(L, 1);
