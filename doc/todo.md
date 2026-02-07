@@ -1,5 +1,8 @@
 # Active
 
+- optimize.regressor separate search/final datasets with different
+  dimensionalities (search first 32 dims, final all 4096, optimize_bits/restrict after)
+
 - Documentation/project cleanup
 - heterogeneous space
 
