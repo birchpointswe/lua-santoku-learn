@@ -10,6 +10,7 @@ local ivec = require("santoku.ivec")
 local pvec = require("santoku.pvec")
 local rvec = require("santoku.rvec")
 local optimize = require("santoku.tsetlin.optimize")
+local spectral = require("santoku.tsetlin.spectral")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local tokenizer = require("santoku.tokenizer")
@@ -52,8 +53,13 @@ local cfg = {
   nystrom = {
     normalized = false,
     cholesky = false,
-    n_landmarks = 4096,
-    n_dims = 1024,
+    n_landmarks = 8192,
+    n_dims = 8192,
+    select = true,
+    n_select = 256,
+    n_select_min = 8,
+    n_select_neg = 32,
+    n_project = nil,
     decay = 1.0,
     bandwidth = -1,
     rounds = 0,
@@ -62,7 +68,7 @@ local cfg = {
   rp = {
     all_dims = true,
     max_bits = -4096,
-    tolerance = 0.001,
+    tolerance = 0.005,
   },
   eval = {
     knn = 16,
@@ -110,15 +116,15 @@ test("eurlex-docs", function()
   features:bits_select(idf_ids, nil, n_feat)
   local n_features = idf_ids:size()
   local ranks = ivec.create():copy(graph_ranks, idf_ids)
-  train.graph_index = inv.create({ features = idf_scores:size(), ranks = ranks, n_ranks = 2 })
+  train.graph_index = inv.create({ features = idf_scores, ranks = ranks, n_ranks = 2 })
   train.graph_index:add(features, all_ids)
   local label_features = ivec.create()
   features:bits_select(nil, label_node_ids, n_features, label_features)
-  train.labels_index = inv.create({ features = idf_scores:size(), ranks = ranks, n_ranks = 2 })
+  train.labels_index = inv.create({ features = idf_scores, ranks = ranks, n_ranks = 2 })
   train.labels_index:add(label_features, label_node_ids)
   local doc_features = ivec.create()
   features:bits_select(nil, doc_node_ids, n_features, doc_features)
-  train.docs_index = inv.create({ features = idf_scores:size(), ranks = ranks, n_ranks = 2 })
+  train.docs_index = inv.create({ features = idf_scores, ranks = ranks, n_ranks = 2 })
   train.docs_index:add(doc_features, doc_node_ids)
   train.all_features = features
   train.all_ids = all_ids
@@ -492,6 +498,85 @@ test("eurlex-docs", function()
   str.printf("  Landmarks: %d docs, %d labels (%.1f%% labels)\n",
     n_doc_landmarks, n_label_landmarks, 100 * n_label_landmarks / model.landmark_ids:size())
   str.printf("  Expected if uniform: %.1f%% labels\n", 100 * n_labels / n_total_nodes)
+
+  if cfg.nystrom.select then
+    print("\nDimension selection (SFBS)")
+    local n_neg = cfg.nystrom.n_select_neg or 16
+    local sel_ids = ivec.create(train.n):fill_indices()
+    sel_ids:copy(ivec.create(n_labels):fill_indices():add(train.n))
+    local sel_offsets = ivec.create()
+    local sel_neighbors = ivec.create()
+    local sel_weights = dvec.create()
+    for d = 0, train.n - 1 do
+      sel_offsets:push(sel_neighbors:size())
+      local gt_start = train.label_csr.offsets:get(d)
+      local gt_end = train.label_csr.offsets:get(d + 1)
+      local gt_set = {}
+      for j = gt_start, gt_end - 1 do
+        local li = train.label_csr.neighbors:get(j)
+        gt_set[li] = true
+        sel_neighbors:push(train.n + li)
+        sel_weights:push(1.0)
+      end
+      local added = 0
+      while added < n_neg do
+        local li = math.random(0, n_labels - 1)
+        if not gt_set[li] then
+          gt_set[li] = true
+          sel_neighbors:push(train.n + li)
+          sel_weights:push(0.0)
+          added = added + 1
+        end
+      end
+    end
+    for _ = 0, n_labels - 1 do
+      sel_offsets:push(sel_neighbors:size())
+    end
+    sel_offsets:push(sel_neighbors:size())
+    str.printf("  Doc->label eval: %d nodes, %d edges (%d neg/doc)\n",
+      sel_ids:size(), sel_neighbors:size(), n_neg)
+    local selected_dims = eval.optimize_bits({
+      raw_codes = all_raw_codes,
+      ids = embedded_ids,
+      screen_k = cfg.nystrom.n_select_screen,
+      proxy_only = cfg.nystrom.n_select_proxy,
+      n_dims = spectral_dims,
+      target_dims = cfg.nystrom.n_select,
+      min_dims = cfg.nystrom.n_select_min or 0,
+      expected_ids = sel_ids,
+      expected_offsets = sel_offsets,
+      expected_neighbors = sel_neighbors,
+      expected_weights = sel_weights,
+      each = function(bit, gain, score, action)
+        str.printf("  %s dim %d: gain=%.6f score=%.4f\n", action, bit, gain, score)
+      end,
+    })
+    str.printf("  Selected %d / %d dims\n", selected_dims:size(), spectral_dims)
+    local filtered = dvec.create()
+    all_raw_codes:mtx_select(selected_dims, nil, spectral_dims, filtered)
+    all_raw_codes = filtered
+    spectral_dims = selected_dims:size()
+  end
+
+  if cfg.nystrom.n_project then
+    print("\nSupervised projection")
+    local proj_n_out = cfg.nystrom.n_project or spectral_dims
+    local gt_doc_ids = ivec.create(train.n):fill_indices()
+    local gt_label_uids = ivec.create():copy(train.label_csr.neighbors):add(train.n)
+    local projected, proj_eigs = spectral.supervised_project({
+      raw_codes = all_raw_codes,
+      ids = embedded_ids,
+      gt_ids = gt_doc_ids,
+      gt_offsets = train.label_csr.offsets,
+      gt_neighbors = gt_label_uids,
+      n_dims = spectral_dims,
+      n_out = proj_n_out,
+    })
+    all_raw_codes = projected
+    spectral_dims = proj_n_out
+    str.printf("  Projected: %d x %d, eigs: %.4f .. %.4f\n",
+      n_embedded, spectral_dims, proj_eigs:get(0), proj_eigs:get(proj_n_out - 1))
+  end
 
   print("\nOptimizing SignRP configuration")
   local rp_ranks, rp_scores, rp_dims, rp_bits = optimize.rp({

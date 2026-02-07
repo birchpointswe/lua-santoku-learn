@@ -756,11 +756,114 @@ static inline int tm_encode_nystrom (lua_State *L) {
   return 6;
 }
 
+static inline int tm_supervised_project (lua_State *L) {
+  lua_settop(L, 1);
+  luaL_checktype(L, 1, LUA_TTABLE);
+
+  lua_getfield(L, 1, "raw_codes");
+  tk_dvec_t *raw_codes = tk_dvec_peek(L, -1, "raw_codes");
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "ids");
+  tk_ivec_t *ids = tk_ivec_peek(L, -1, "ids");
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "gt_ids");
+  tk_ivec_t *gt_ids = tk_ivec_peek(L, -1, "gt_ids");
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "gt_offsets");
+  tk_ivec_t *gt_offsets = tk_ivec_peek(L, -1, "gt_offsets");
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "gt_neighbors");
+  tk_ivec_t *gt_neighbors = tk_ivec_peek(L, -1, "gt_neighbors");
+  lua_pop(L, 1);
+
+  uint64_t D = tk_lua_fcheckunsigned(L, 1, "supervised_project", "n_dims");
+  uint64_t n_out = tk_lua_fcheckunsigned(L, 1, "supervised_project", "n_out");
+
+  uint64_t n_embedded = ids->n;
+
+  int64_t max_uid = -1;
+  for (uint64_t i = 0; i < n_embedded; i++)
+    if (ids->a[i] > max_uid) max_uid = ids->a[i];
+
+  int64_t *uid_to_row = (int64_t *)malloc((max_uid + 1) * sizeof(int64_t));
+  memset(uid_to_row, -1, (max_uid + 1) * sizeof(int64_t));
+  for (uint64_t i = 0; i < n_embedded; i++)
+    uid_to_row[ids->a[i]] = (int64_t)i;
+
+  double *M = (double *)calloc(D * D, sizeof(double));
+
+  for (uint64_t i = 0; i < gt_ids->n; i++) {
+    int64_t uid_d = gt_ids->a[i];
+    if (uid_d < 0 || uid_d > max_uid) continue;
+    int64_t row_d = uid_to_row[uid_d];
+    if (row_d < 0) continue;
+    int64_t o0 = gt_offsets->a[i];
+    int64_t o1 = gt_offsets->a[i + 1];
+    for (int64_t j = o0; j < o1; j++) {
+      int64_t uid_l = gt_neighbors->a[j];
+      if (uid_l < 0 || uid_l > max_uid) continue;
+      int64_t row_l = uid_to_row[uid_l];
+      if (row_l < 0) continue;
+      cblas_dsyr2(CblasRowMajor, CblasUpper, (int)D, 1.0,
+        &raw_codes->a[row_d * D], 1, &raw_codes->a[row_l * D], 1, M, (int)D);
+    }
+  }
+
+  free(uid_to_row);
+
+  double *eig_vals = (double *)malloc(n_out * sizeof(double));
+  double *eig_vecs = (double *)malloc(D * D * sizeof(double));
+  int *isuppz = (int *)malloc(2 * n_out * sizeof(int));
+  int n_found = 0;
+
+  int info = LAPACKE_dsyevr(LAPACK_ROW_MAJOR, 'V', 'I', 'U',
+    (int)D, M, (int)D, 0.0, 0.0,
+    (int)(D - n_out + 1), (int)D,
+    0.0, &n_found, eig_vals, eig_vecs, (int)D, isuppz);
+
+  free(isuppz);
+  free(M);
+
+  if (info != 0) {
+    free(eig_vals);
+    free(eig_vecs);
+    return luaL_error(L, "supervised_project: dsyevr info=%d", info);
+  }
+
+  double *U = (double *)malloc(D * n_out * sizeof(double));
+  for (uint64_t i = 0; i < D; i++)
+    for (uint64_t k = 0; k < n_out; k++)
+      U[i * n_out + k] = eig_vecs[i * D + (n_out - 1 - k)];
+  free(eig_vecs);
+
+  tk_dvec_t *projected = tk_dvec_create(L, n_embedded * n_out, 0, 0);
+  projected->n = n_embedded * n_out;
+
+  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    (int)n_embedded, (int)n_out, (int)D, 1.0,
+    raw_codes->a, (int)D, U, (int)n_out,
+    0.0, projected->a, (int)n_out);
+  free(U);
+
+  tk_dvec_t *evals = tk_dvec_create(L, n_out, 0, 0);
+  evals->n = n_out;
+  for (uint64_t k = 0; k < n_out; k++)
+    evals->a[k] = eig_vals[n_out - 1 - k];
+  free(eig_vals);
+
+  return 2;
+}
+
 static luaL_Reg tm_fns[] =
 {
   { "encode", tm_encode },
   { "encode_nystrom", tm_encode_nystrom },
   { "sample_landmarks", tk_spectral_sample_landmarks_lua },
+  { "supervised_project", tm_supervised_project },
   { NULL, NULL }
 };
 
