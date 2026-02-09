@@ -495,7 +495,7 @@ static inline void tk_inv_neighborhoods (
     return;
 
   tk_ivec_t *uids = tk_ivec_create(L, 0, 0, 0);
-  tk_ivec_t *sid_to_pos = tk_ivec_create(L, (uint64_t)inv->next_sid, 0, 0);
+  tk_ivec_t *sid_to_pos = tk_ivec_create(NULL, (uint64_t)inv->next_sid, 0, 0);
   sid_to_pos->n = (uint64_t)inv->next_sid;
 
   tk_inv_hoods_t *hoods = tk_inv_hoods_create(L, 0, 0, 0);

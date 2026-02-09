@@ -1,1388 +1,651 @@
 #include <lua.h>
 #include <lauxlib.h>
 #include <string.h>
-#include <limits.h>
 #include <math.h>
-#include <cblas.h>
-#include <lapacke.h>
+#include <stdlib.h>
+#include <omp.h>
 #include <santoku/lua/utils.h>
 #include <santoku/iuset.h>
+#include <santoku/iumap.h>
 #include <santoku/ivec.h>
 #include <santoku/cvec.h>
 #include <santoku/dvec.h>
-#include <santoku/pvec.h>
-#include <santoku/rvec.h>
-#include <santoku/iumap.h>
-#include <santoku/iumap/ext.h>
-#include <santoku/tsetlin/inv.h>
-#include <santoku/tsetlin/ann.h>
-#include <santoku/tsetlin/graph.h>
 
-#define TK_HLTH_ENCODER_MT "tk_hlth_encoder_t"
-#define TK_HLTH_ENCODER_EPH "tk_hlth_encoder_eph"
-#define TK_NYSTROM_ENCODER_MT "tk_nystrom_encoder_t"
-#define TK_NYSTROM_ENCODER_EPH "tk_nystrom_encoder_eph"
-#define TK_RP_ENCODER_MT "tk_rp_encoder_t"
-#define TK_RP_ENCODER_EPH "tk_rp_encoder_eph"
-#define TK_RFF_ENCODER_MT "tk_rff_encoder_t"
-#define TK_RFF_ENCODER_EPH "tk_rff_encoder_eph"
-
-typedef enum {
-  TK_HLTH_IDX_INV,
-  TK_HLTH_IDX_ANN
-} tk_hlth_index_type_t;
-
-typedef enum {
-  TK_HLTH_MODE_CONCAT,
-  TK_HLTH_MODE_FREQUENCY,
-  TK_HLTH_MODE_FREQUENCY_WEIGHTED,
-  TK_HLTH_MODE_CENTROID,
-  TK_HLTH_MODE_CENTROID_WEIGHTED,
-  TK_HLTH_MODE_SIMILARITIES
-} tk_hlth_mode_t;
+#define TK_SFBS_ENCODER_MT "tk_sfbs_encoder_t"
 
 typedef struct {
-  tk_hlth_index_type_t feat_idx_type;
-  tk_hlth_index_type_t code_idx_type;
-  void *feat_idx;
-  void *code_idx;
-  uint64_t n_landmarks;
-  uint64_t n_hidden;
-  uint64_t probe_radius;
-  double decay;
-  double bandwidth;
-  tk_hlth_mode_t mode;
-  uint64_t n_thresholds;
-  uint64_t n_bins;
-  bool quantile;
-  bool concat_query;
-  bool destroyed;
-} tk_hlth_encoder_t;
-
-typedef struct {
-  tk_hlth_index_type_t feat_idx_type;
-  void *feat_idx;
-  tk_dvec_t *eigenvectors;
-  tk_dvec_t *eigenvalues;
-  tk_dvec_t *col_means;
-  tk_ivec_t *landmark_ids;
-  tk_dvec_t *landmark_chol;
-  tk_dvec_t *projection;
-  tk_dvec_t *bias;
+  tk_ivec_t *bit_dims;
+  tk_dvec_t *bit_thresholds;
   uint64_t n_dims;
-  uint64_t n_landmarks;
-  double decay;
-  double bandwidth;
+  uint64_t n_bits;
   bool destroyed;
-} tk_nystrom_encoder_t;
+} tk_sfbs_encoder_t;
 
-typedef struct {
-  tk_dvec_t *weights;
-  uint64_t n_dims;
-  uint64_t rp_dims;
-  bool destroyed;
-} tk_rp_encoder_t;
-
-typedef struct {
-  tk_dvec_t *weights;
-  tk_dvec_t *biases;
-  uint64_t n_dims;
-  uint64_t rff_dims;
-  double gamma;
-  bool destroyed;
-} tk_rff_encoder_t;
-
-static inline tk_hlth_encoder_t *tk_hlth_encoder_peek(lua_State *L, int i) {
-  return (tk_hlth_encoder_t *)luaL_checkudata(L, i, TK_HLTH_ENCODER_MT);
+static inline tk_sfbs_encoder_t *tk_sfbs_encoder_peek(lua_State *L, int i) {
+  return (tk_sfbs_encoder_t *)luaL_checkudata(L, i, TK_SFBS_ENCODER_MT);
 }
 
-static inline int tk_hlth_encoder_gc(lua_State *L) {
-  tk_hlth_encoder_t *enc = tk_hlth_encoder_peek(L, 1);
-  enc->feat_idx = NULL;
-  enc->code_idx = NULL;
+static inline int tk_sfbs_encoder_gc(lua_State *L) {
+  tk_sfbs_encoder_t *enc = tk_sfbs_encoder_peek(L, 1);
+  enc->bit_dims = NULL;
+  enc->bit_thresholds = NULL;
   enc->destroyed = true;
   return 0;
 }
 
-static inline tk_nystrom_encoder_t *tk_nystrom_encoder_peek(lua_State *L, int i) {
-  return (tk_nystrom_encoder_t *)luaL_checkudata(L, i, TK_NYSTROM_ENCODER_MT);
-}
-
-static inline int tk_nystrom_encoder_gc(lua_State *L) {
-  tk_nystrom_encoder_t *enc = tk_nystrom_encoder_peek(L, 1);
-  enc->feat_idx = NULL;
-  enc->eigenvectors = NULL;
-  enc->eigenvalues = NULL;
-  enc->col_means = NULL;
-  enc->landmark_ids = NULL;
-  enc->landmark_chol = NULL;
-  enc->projection = NULL;
-  enc->bias = NULL;
-  enc->destroyed = true;
-  return 0;
-}
-
-
-static inline int tk_hlth_encode_lua(lua_State *L) {
-  tk_hlth_encoder_t *enc = (tk_hlth_encoder_t *)lua_touserdata(L, lua_upvalueindex(1));
-
-  if (enc->destroyed)
-    return luaL_error(L, "encode: encoder has been destroyed");
-
-  if (enc->mode == TK_HLTH_MODE_SIMILARITIES) {
-    tk_cvec_t *query_cvec = tk_cvec_peekopt(L, 1);
-    if (!query_cvec)
-      return luaL_error(L, "encode: similarities mode requires cvec query");
-    uint64_t n_samples = tk_lua_checkunsigned(L, 2, "n_samples");
-
-    tk_ann_t *feat_ann = enc->feat_idx_type == TK_HLTH_IDX_ANN ? (tk_ann_t *)enc->feat_idx : NULL;
-
-    tk_ann_hoods_t *ann_hoods = NULL;
-    tk_ivec_t *nbr_ids = NULL;
-
-    if (feat_ann) {
-      tk_ann_neighborhoods_by_vecs(L, feat_ann, query_cvec, enc->n_landmarks, enc->probe_radius,
-                                   &ann_hoods, &nbr_ids);
-    } else {
-      return luaL_error(L, "encode: similarities mode requires ann landmarks_index");
-    }
-
-    uint64_t hood_size = enc->n_landmarks;
-    uint64_t n_bins = enc->n_bins;
-    uint64_t query_bits = enc->concat_query ? enc->n_hidden : 0;
-    uint64_t n_latent_bits = query_bits + hood_size * n_bins;
-    uint64_t n_latent_bytes = TK_CVEC_BITS_BYTES(n_latent_bits);
-    uint64_t query_bytes = TK_CVEC_BITS_BYTES(query_bits);
-
-    int stack_before_out = lua_gettop(L);
-    tk_cvec_t *out = tk_cvec_create(L, n_samples * n_latent_bytes, NULL, NULL);
-    out->n = n_samples * n_latent_bytes;
-    memset(out->a, 0, out->n);
-
-    if (enc->concat_query) {
-      uint64_t src_bytes_per_sample = TK_CVEC_BITS_BYTES(enc->n_hidden);
-      #pragma omp parallel for schedule(static)
-      for (uint64_t i = 0; i < n_samples; i++) {
-        uint8_t *src = (uint8_t *)query_cvec->a + i * src_bytes_per_sample;
-        uint8_t *dst = (uint8_t *)out->a + i * n_latent_bytes;
-        memcpy(dst, src, query_bytes);
-      }
-    }
-
-    double *all_sims = malloc(n_samples * hood_size * sizeof(double));
-    double *thresholds = malloc(hood_size * (n_bins - 1) * sizeof(double));
-    for (uint64_t k = 0; k < hood_size; k++) {
-      for (uint64_t i = 0; i < n_samples; i++) {
-        double sim = 0.0;
-        uint64_t cur_size = ann_hoods->a[i]->n;
-        if (k < cur_size) {
-          sim = (double)ann_hoods->a[i]->a[k].p;
-        }
-        all_sims[i] = sim;
-      }
-      tk_dvec_t *sorted = tk_dvec_create(NULL, n_samples, 0, 0);
-      memcpy(sorted->a, all_sims, n_samples * sizeof(double));
-      tk_dvec_asc(sorted, 0, n_samples);
-      for (uint64_t b = 0; b < n_bins - 1; b++) {
-        uint64_t idx = (b + 1) * n_samples / n_bins;
-        if (idx >= n_samples) idx = n_samples - 1;
-        thresholds[k * (n_bins - 1) + b] = sorted->a[idx];
-      }
-      tk_dvec_destroy(sorted);
-      for (uint64_t i = 0; i < n_samples; i++) {
-        double sim = all_sims[i];
-        uint64_t bin = 0;
-        for (uint64_t b = 0; b < n_bins - 1; b++) {
-          if (sim > thresholds[k * (n_bins - 1) + b]) bin = b + 1;
-        }
-        uint64_t bit_idx = query_bits + k * n_bins + bin;
-        uint8_t *sample_dest = (uint8_t *)out->a + i * n_latent_bytes;
-        sample_dest[TK_CVEC_BITS_BYTE(bit_idx)] |= (1 << TK_CVEC_BITS_BIT(bit_idx));
-      }
-    }
-    free(all_sims);
-    free(thresholds);
-
-    lua_replace(L, stack_before_out);
-    lua_settop(L, stack_before_out);
-    return 1;
-  }
-
-  tk_ivec_t *query_ivec = tk_ivec_peekopt(L, 1);
-  tk_cvec_t *query_cvec = query_ivec ? NULL : tk_cvec_peekopt(L, 1);
-
-  if (!query_ivec && !query_cvec)
-    return luaL_error(L, "encode: expected ivec or cvec query");
-
-  uint64_t n_samples = tk_lua_checkunsigned(L, 2, "n_samples");
-
-  tk_inv_t *feat_inv = enc->feat_idx_type == TK_HLTH_IDX_INV ? (tk_inv_t *)enc->feat_idx : NULL;
-  tk_ann_t *feat_ann = enc->feat_idx_type == TK_HLTH_IDX_ANN ? (tk_ann_t *)enc->feat_idx : NULL;
-
-  tk_ann_t *code_ann = enc->code_idx_type == TK_HLTH_IDX_ANN ? (tk_ann_t *)enc->code_idx : NULL;
-
-  tk_ann_hoods_t *ann_hoods = NULL;
-  tk_inv_hoods_t *inv_hoods = NULL;
-  tk_ivec_t *nbr_ids = NULL;
-
-  if (feat_inv && query_ivec) {
-    tk_inv_neighborhoods_by_vecs(L, feat_inv, query_ivec, enc->n_landmarks,
-                                 enc->decay, enc->bandwidth, &inv_hoods, &nbr_ids);
-  } else if (feat_ann && query_cvec) {
-    tk_ann_neighborhoods_by_vecs(L, feat_ann, query_cvec, enc->n_landmarks, enc->probe_radius,
-                                 &ann_hoods, &nbr_ids);
+static inline int tk_sfbs_encode_lua(lua_State *L) {
+  tk_sfbs_encoder_t *enc = tk_sfbs_encoder_peek(L, 1);
+  tk_dvec_t *codes = tk_dvec_peek(L, 2, "codes");
+  uint64_t n_dims = enc->n_dims;
+  uint64_t n_bits = enc->n_bits;
+  uint64_t n_samples = codes->n / n_dims;
+  uint64_t n_bytes = TK_CVEC_BITS_BYTES(n_bits);
+  uint64_t out_size = n_samples * n_bytes;
+  tk_cvec_t *out = tk_cvec_peekopt(L, 3);
+  if (out) {
+    tk_cvec_ensure(out, out_size);
+    out->n = out_size;
+    lua_pushvalue(L, 3);
   } else {
-    return luaL_error(L, "encode: index/query type mismatch");
+    out = tk_cvec_create(L, out_size, NULL, NULL);
+    out->n = out_size;
   }
-
-  int stack_before_out = lua_gettop(L);
-
-  uint64_t n_latent_bits;
-  if (enc->mode == TK_HLTH_MODE_FREQUENCY || enc->mode == TK_HLTH_MODE_FREQUENCY_WEIGHTED)
-    n_latent_bits = enc->n_hidden * enc->n_thresholds;
-  else if (enc->mode == TK_HLTH_MODE_CENTROID || enc->mode == TK_HLTH_MODE_CENTROID_WEIGHTED)
-    n_latent_bits = enc->n_hidden;
-  else
-    n_latent_bits = enc->n_hidden * enc->n_landmarks;
-
-  uint64_t n_latent_bytes = TK_CVEC_BITS_BYTES(n_latent_bits);
-  tk_cvec_t *out = tk_cvec_create(L, n_samples * n_latent_bytes, NULL, NULL);
-  out->n = n_samples * n_latent_bytes;
   memset(out->a, 0, out->n);
-
-  if (enc->mode == TK_HLTH_MODE_FREQUENCY) {
-    double *all_freqs = NULL;
-    double *quantile_thresholds = NULL;
-
-    if (enc->quantile) {
-      all_freqs = malloc(n_samples * enc->n_hidden * sizeof(double));
-      quantile_thresholds = malloc(enc->n_hidden * enc->n_thresholds * sizeof(double));
-    }
-
-    #pragma omp parallel
-    {
-      uint64_t *bit_counts = calloc(enc->n_hidden, sizeof(uint64_t));
-      tk_ivec_t *tmp = tk_ivec_create(NULL, 0, 0, 0);
-      #pragma omp for schedule(static)
-      for (uint64_t i = 0; i < n_samples; i++) {
-        memset(bit_counts, 0, enc->n_hidden * sizeof(uint64_t));
-        tk_ivec_clear(tmp);
-        int64_t nbr_idx, nbr_uid;
-        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, inv_hoods, ann_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
-          tk_ivec_push(tmp, nbr_uid);
-        });
-        uint64_t n_found = 0;
-        for (uint64_t j = 0; j < tmp->n && j < enc->n_landmarks; j++) {
-          char *code_data = tk_ann_get(code_ann, tmp->a[j]);
-          if (code_data != NULL) {
-            for (uint64_t b = 0; b < enc->n_hidden; b++) {
-              if (code_data[TK_CVEC_BITS_BYTE(b)] & (1 << TK_CVEC_BITS_BIT(b)))
-                bit_counts[b]++;
-            }
-            n_found++;
-          }
-        }
-
-        if (enc->quantile) {
-          for (uint64_t b = 0; b < enc->n_hidden; b++) {
-            double freq = (n_found > 0) ? (double)bit_counts[b] / (double)n_found : 0.0;
-            all_freqs[i * enc->n_hidden + b] = freq;
-          }
-        } else {
-          uint8_t *sample_dest = (uint8_t *)out->a + i * n_latent_bytes;
-          for (uint64_t b = 0; b < enc->n_hidden; b++) {
-            double freq = (n_found > 0) ? (double)bit_counts[b] / (double)n_found : 0.0;
-            for (uint64_t t = 0; t < enc->n_thresholds; t++) {
-              double threshold = (double)(t + 1) / (double)(enc->n_thresholds + 1);
-              if (freq > threshold) {
-                uint64_t out_bit = b * enc->n_thresholds + t;
-                sample_dest[TK_CVEC_BITS_BYTE(out_bit)] |= (1 << TK_CVEC_BITS_BIT(out_bit));
-              }
-            }
-          }
-        }
-      }
-      tk_ivec_destroy(tmp);
-      free(bit_counts);
-    }
-
-    if (enc->quantile) {
-      tk_dvec_t *sorted_freqs = tk_dvec_create(NULL, n_samples, 0, 0);
-      for (uint64_t b = 0; b < enc->n_hidden; b++) {
-        for (uint64_t i = 0; i < n_samples; i++) {
-          sorted_freqs->a[i] = all_freqs[i * enc->n_hidden + b];
-        }
-        tk_dvec_asc(sorted_freqs, 0, n_samples);
-        for (uint64_t t = 0; t < enc->n_thresholds; t++) {
-          double quantile_pos = (double)(t + 1) / (double)(enc->n_thresholds + 1);
-          uint64_t idx = (uint64_t)(quantile_pos * (double)(n_samples - 1));
-          quantile_thresholds[b * enc->n_thresholds + t] = sorted_freqs->a[idx];
-        }
-      }
-      tk_dvec_destroy(sorted_freqs);
-
-      #pragma omp parallel for schedule(static)
-      for (uint64_t i = 0; i < n_samples; i++) {
-        uint8_t *sample_dest = (uint8_t *)out->a + i * n_latent_bytes;
-        for (uint64_t b = 0; b < enc->n_hidden; b++) {
-          double freq = all_freqs[i * enc->n_hidden + b];
-          for (uint64_t t = 0; t < enc->n_thresholds; t++) {
-            double threshold = quantile_thresholds[b * enc->n_thresholds + t];
-            if (freq > threshold) {
-              uint64_t out_bit = b * enc->n_thresholds + t;
-              sample_dest[TK_CVEC_BITS_BYTE(out_bit)] |= (1 << TK_CVEC_BITS_BIT(out_bit));
-            }
-          }
-        }
-      }
-
-      free(all_freqs);
-      free(quantile_thresholds);
-    }
-  } else if (enc->mode == TK_HLTH_MODE_FREQUENCY_WEIGHTED) {
-    uint64_t feat_ann_features = feat_ann ? feat_ann->features : 0;
-    #pragma omp parallel
-    {
-      double *bit_weights = calloc(enc->n_hidden, sizeof(double));
-      tk_ivec_t *tmp = tk_ivec_create(NULL, 0, 0, 0);
-      tk_dvec_t *sims = tk_dvec_create(NULL, 0, 0, 0);
-      #pragma omp for schedule(static)
-      for (uint64_t i = 0; i < n_samples; i++) {
-        memset(bit_weights, 0, enc->n_hidden * sizeof(double));
-        tk_ivec_clear(tmp);
-        tk_dvec_clear(sims);
-        int64_t nbr_idx, nbr_uid;
-        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, inv_hoods, ann_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
-          double sim = 1.0;
-          if (inv_hoods) {
-            tk_rvec_t *hood = inv_hoods->a[i];
-            for (uint64_t j = 0; j < hood->n; j++) {
-              if (hood->a[j].i == nbr_idx) {
-                sim = 1.0 - hood->a[j].d;
-                break;
-              }
-            }
-          } else if (ann_hoods && feat_ann_features > 0) {
-            tk_pvec_t *hood = ann_hoods->a[i];
-            for (uint64_t j = 0; j < hood->n; j++) {
-              if (hood->a[j].i == nbr_idx) {
-                sim = 1.0 - (double)hood->a[j].p / (double)feat_ann_features;
-                break;
-              }
-            }
-          }
-          tk_ivec_push(tmp, nbr_uid);
-          tk_dvec_push(sims, sim);
-        });
-        double total_weight = 0.0;
-        for (uint64_t j = 0; j < tmp->n && j < enc->n_landmarks; j++) {
-          char *code_data = tk_ann_get(code_ann, tmp->a[j]);
-          if (code_data != NULL) {
-            double w = sims->a[j];
-            total_weight += w;
-            for (uint64_t b = 0; b < enc->n_hidden; b++) {
-              if (code_data[TK_CVEC_BITS_BYTE(b)] & (1 << TK_CVEC_BITS_BIT(b)))
-                bit_weights[b] += w;
-            }
-          }
-        }
-        uint8_t *sample_dest = (uint8_t *)out->a + i * n_latent_bytes;
-        for (uint64_t b = 0; b < enc->n_hidden; b++) {
-          double freq = (total_weight > 0.0) ? bit_weights[b] / total_weight : 0.0;
-          for (uint64_t t = 0; t < enc->n_thresholds; t++) {
-            double threshold = (double)(t + 1) / (double)(enc->n_thresholds + 1);
-            if (freq > threshold) {
-              uint64_t out_bit = b * enc->n_thresholds + t;
-              sample_dest[TK_CVEC_BITS_BYTE(out_bit)] |= (1 << TK_CVEC_BITS_BIT(out_bit));
-            }
-          }
-        }
-      }
-      tk_ivec_destroy(tmp);
-      tk_dvec_destroy(sims);
-      free(bit_weights);
-    }
-  } else if (enc->mode == TK_HLTH_MODE_CENTROID) {
-    #pragma omp parallel
-    {
-      int64_t *bit_votes = calloc(enc->n_hidden, sizeof(int64_t));
-      tk_ivec_t *tmp = tk_ivec_create(NULL, 0, 0, 0);
-      #pragma omp for schedule(static)
-      for (uint64_t i = 0; i < n_samples; i++) {
-        memset(bit_votes, 0, enc->n_hidden * sizeof(int64_t));
-        tk_ivec_clear(tmp);
-        int64_t nbr_idx, nbr_uid;
-        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, inv_hoods, ann_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
-          tk_ivec_push(tmp, nbr_uid);
-        });
-        for (uint64_t j = 0; j < tmp->n && j < enc->n_landmarks; j++) {
-          char *code_data = tk_ann_get(code_ann, tmp->a[j]);
-          if (code_data != NULL) {
-            for (uint64_t b = 0; b < enc->n_hidden; b++) {
-              if (code_data[TK_CVEC_BITS_BYTE(b)] & (1 << TK_CVEC_BITS_BIT(b)))
-                bit_votes[b]++;
-              else
-                bit_votes[b]--;
-            }
-          }
-        }
-        uint8_t *sample_dest = (uint8_t *)out->a + i * n_latent_bytes;
-        for (uint64_t b = 0; b < enc->n_hidden; b++) {
-          if (bit_votes[b] >= 0) {
-            sample_dest[TK_CVEC_BITS_BYTE(b)] |= (1 << TK_CVEC_BITS_BIT(b));
-          }
-        }
-      }
-      tk_ivec_destroy(tmp);
-      free(bit_votes);
-    }
-  } else if (enc->mode == TK_HLTH_MODE_CENTROID_WEIGHTED) {
-    uint64_t feat_ann_features = feat_ann ? feat_ann->features : 0;
-    #pragma omp parallel
-    {
-      double *bit_weights = calloc(enc->n_hidden, sizeof(double));
-      tk_ivec_t *tmp = tk_ivec_create(NULL, 0, 0, 0);
-      tk_dvec_t *sims = tk_dvec_create(NULL, 0, 0, 0);
-      #pragma omp for schedule(static)
-      for (uint64_t i = 0; i < n_samples; i++) {
-        memset(bit_weights, 0, enc->n_hidden * sizeof(double));
-        tk_ivec_clear(tmp);
-        tk_dvec_clear(sims);
-        int64_t nbr_idx, nbr_uid;
-        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, inv_hoods, ann_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
-          double sim = 1.0;
-          if (inv_hoods) {
-            tk_rvec_t *hood = inv_hoods->a[i];
-            for (uint64_t j = 0; j < hood->n; j++) {
-              if (hood->a[j].i == nbr_idx) {
-                sim = 1.0 - hood->a[j].d;
-                break;
-              }
-            }
-          } else if (ann_hoods && feat_ann_features > 0) {
-            tk_pvec_t *hood = ann_hoods->a[i];
-            for (uint64_t j = 0; j < hood->n; j++) {
-              if (hood->a[j].i == nbr_idx) {
-                sim = 1.0 - (double)hood->a[j].p / (double)feat_ann_features;
-                break;
-              }
-            }
-          }
-          tk_ivec_push(tmp, nbr_uid);
-          tk_dvec_push(sims, sim);
-        });
-        for (uint64_t j = 0; j < tmp->n && j < enc->n_landmarks; j++) {
-          char *code_data = tk_ann_get(code_ann, tmp->a[j]);
-          if (code_data != NULL) {
-            double w = sims->a[j];
-            for (uint64_t b = 0; b < enc->n_hidden; b++) {
-              if (code_data[TK_CVEC_BITS_BYTE(b)] & (1 << TK_CVEC_BITS_BIT(b)))
-                bit_weights[b] += w;
-              else
-                bit_weights[b] -= w;
-            }
-          }
-        }
-        uint8_t *sample_dest = (uint8_t *)out->a + i * n_latent_bytes;
-        for (uint64_t b = 0; b < enc->n_hidden; b++) {
-          if (bit_weights[b] >= 0.0) {
-            sample_dest[TK_CVEC_BITS_BYTE(b)] |= (1 << TK_CVEC_BITS_BIT(b));
-          }
-        }
-      }
-      tk_ivec_destroy(tmp);
-      tk_dvec_destroy(sims);
-      free(bit_weights);
-    }
-  } else {
-    #pragma omp parallel
-    {
-      tk_ivec_t *tmp = tk_ivec_create(NULL, 0, 0, 0);
-      #pragma omp for schedule(static)
-      for (uint64_t i = 0; i < n_samples; i++) {
-        tk_ivec_clear(tmp);
-        int64_t nbr_idx, nbr_uid;
-        TK_GRAPH_FOREACH_HOOD_NEIGHBOR(feat_inv, feat_ann, inv_hoods, ann_hoods, i, 1.0, nbr_ids, nbr_idx, nbr_uid, {
-          tk_ivec_push(tmp, nbr_uid);
-        });
-        uint8_t *sample_dest = (uint8_t *)out->a + i * n_latent_bytes;
-        uint64_t bit_offset = 0;
-        for (uint64_t j = 0; j < tmp->n && j < enc->n_landmarks; j++) {
-          char *code_data = tk_ann_get(code_ann, tmp->a[j]);
-          if (code_data != NULL) {
-            for (uint64_t b = 0; b < enc->n_hidden; b++) {
-              if (code_data[TK_CVEC_BITS_BYTE(b)] & (1 << TK_CVEC_BITS_BIT(b))) {
-                uint64_t dst_bit = bit_offset + b;
-                sample_dest[TK_CVEC_BITS_BYTE(dst_bit)] |= (1 << TK_CVEC_BITS_BIT(dst_bit));
-              }
-            }
-          }
-          bit_offset += enc->n_hidden;
-        }
-      }
-      tk_ivec_destroy(tmp);
+  int64_t *dims = enc->bit_dims->a;
+  double *thresholds = enc->bit_thresholds->a;
+  #pragma omp parallel for schedule(static)
+  for (uint64_t i = 0; i < n_samples; i++) {
+    double *x = codes->a + i * n_dims;
+    uint8_t *dest = (uint8_t *)out->a + i * n_bytes;
+    for (uint64_t k = 0; k < n_bits; k++) {
+      if (x[dims[k]] > thresholds[k])
+        dest[TK_CVEC_BITS_BYTE(k)] |= (1 << TK_CVEC_BITS_BIT(k));
     }
   }
-
-  lua_replace(L, stack_before_out);
-  lua_settop(L, stack_before_out);
-
   return 1;
 }
 
-static luaL_Reg tk_hlth_encoder_mt_fns[] = {
+static inline int tk_sfbs_n_bits_lua(lua_State *L) {
+  tk_sfbs_encoder_t *enc = tk_sfbs_encoder_peek(L, 1);
+  lua_pushinteger(L, (lua_Integer)enc->n_bits);
+  return 1;
+}
+
+static inline int tk_sfbs_n_dims_lua(lua_State *L) {
+  tk_sfbs_encoder_t *enc = tk_sfbs_encoder_peek(L, 1);
+  lua_pushinteger(L, (lua_Integer)enc->n_dims);
+  return 1;
+}
+
+static inline int tk_sfbs_dims_lua(lua_State *L) {
+  tk_sfbs_encoder_peek(L, 1);
+  lua_getfenv(L, 1);
+  lua_getfield(L, -1, "dims");
+  return 1;
+}
+
+static inline int tk_sfbs_thresholds_lua(lua_State *L) {
+  tk_sfbs_encoder_peek(L, 1);
+  lua_getfenv(L, 1);
+  lua_getfield(L, -1, "thresholds");
+  return 1;
+}
+
+static inline int tk_sfbs_used_dims_lua(lua_State *L) {
+  tk_sfbs_encoder_t *enc = tk_sfbs_encoder_peek(L, 1);
+  tk_ivec_t *out = tk_ivec_create(L, enc->n_bits, 0, 0);
+  out->n = 0;
+  for (uint64_t i = 0; i < enc->n_bits; i++)
+    tk_ivec_push(out, enc->bit_dims->a[i]);
+  out->n = tk_ivec_uasc(out, 0, out->n);
+  return 1;
+}
+
+static inline int tk_sfbs_restrict_lua(lua_State *L) {
+  tk_sfbs_encoder_t *enc = tk_sfbs_encoder_peek(L, 1);
+  tk_ivec_t *kept = tk_ivec_peek(L, 2, "kept_dims");
+  tk_iumap_t *dim_map = tk_iumap_create(NULL, 0);
+  for (uint64_t i = 0; i < kept->n; i++) {
+    int kha;
+    khint_t khi = tk_iumap_put(dim_map, kept->a[i], &kha);
+    tk_iumap_setval(dim_map, khi, (int64_t)i);
+  }
+  uint64_t w = 0;
+  for (uint64_t r = 0; r < enc->n_bits; r++) {
+    khint_t khi = tk_iumap_get(dim_map, enc->bit_dims->a[r]);
+    if (khi != tk_iumap_end(dim_map)) {
+      enc->bit_dims->a[w] = tk_iumap_val(dim_map, khi);
+      enc->bit_thresholds->a[w] = enc->bit_thresholds->a[r];
+      w++;
+    }
+  }
+  enc->n_bits = w;
+  enc->n_dims = kept->n;
+  tk_iumap_destroy(dim_map);
+  return 0;
+}
+
+static luaL_Reg tk_sfbs_encoder_mt_fns[] = {
+  { "encode", tk_sfbs_encode_lua },
+  { "restrict", tk_sfbs_restrict_lua },
+  { "n_bits", tk_sfbs_n_bits_lua },
+  { "n_dims", tk_sfbs_n_dims_lua },
+  { "dims", tk_sfbs_dims_lua },
+  { "thresholds", tk_sfbs_thresholds_lua },
+  { "used_dims", tk_sfbs_used_dims_lua },
   { NULL, NULL }
 };
 
-static inline int tk_hlth_landmark_encoder_lua(lua_State *L) {
+static inline void tk_sfbs_commit(
+  uint8_t *bin, int64_t *pra, int64_t *prb,
+  uint16_t *distances, uint64_t n_pairs, int add
+) {
+  for (uint64_t j = 0; j < n_pairs; j++) {
+    uint8_t ba = (bin[pra[j] >> 3] >> (pra[j] & 7)) & 1;
+    uint8_t bb = (bin[prb[j] >> 3] >> (prb[j] & 7)) & 1;
+    if (add) distances[j] += ba ^ bb;
+    else distances[j] -= ba ^ bb;
+  }
+}
+
+static inline void tk_sfbs_spawn_children(
+  double *raw_codes, uint64_t n_samples, uint64_t n_dims,
+  uint64_t dim, double parent_thresh,
+  uint64_t *cand_dims, double *cand_thresholds, uint8_t **cand_bins,
+  uint8_t *cand_selected, uint64_t *n_candidates, uint64_t max_candidates,
+  uint64_t n_sample_bytes
+) {
+  tk_dvec_t *vals = tk_dvec_create(NULL, n_samples, 0, 0);
+  uint64_t n_lo = 0, n_hi = 0;
+  for (uint64_t i = 0; i < n_samples; i++) {
+    double v = raw_codes[i * n_dims + dim];
+    if (v <= parent_thresh) vals->a[n_lo++] = v;
+  }
+  if (n_lo > 1 && *n_candidates < max_candidates) {
+    tk_dvec_asc(vals, 0, n_lo);
+    double lo_thresh = vals->a[n_lo / 2];
+    uint64_t ci = (*n_candidates)++;
+    cand_dims[ci] = dim;
+    cand_thresholds[ci] = lo_thresh;
+    cand_bins[ci] = (uint8_t *)calloc(n_sample_bytes, 1);
+    cand_selected[ci] = 0;
+    for (uint64_t i = 0; i < n_samples; i++)
+      if (raw_codes[i * n_dims + dim] > lo_thresh)
+        cand_bins[ci][i >> 3] |= (uint8_t)(1 << (i & 7));
+  }
+  n_hi = 0;
+  for (uint64_t i = 0; i < n_samples; i++) {
+    double v = raw_codes[i * n_dims + dim];
+    if (v > parent_thresh) vals->a[n_hi++] = v;
+  }
+  if (n_hi > 1 && *n_candidates < max_candidates) {
+    tk_dvec_asc(vals, 0, n_hi);
+    double hi_thresh = vals->a[n_hi / 2];
+    uint64_t ci = (*n_candidates)++;
+    cand_dims[ci] = dim;
+    cand_thresholds[ci] = hi_thresh;
+    cand_bins[ci] = (uint8_t *)calloc(n_sample_bytes, 1);
+    cand_selected[ci] = 0;
+    for (uint64_t i = 0; i < n_samples; i++)
+      if (raw_codes[i * n_dims + dim] > hi_thresh)
+        cand_bins[ci][i >> 3] |= (uint8_t)(1 << (i & 7));
+  }
+  tk_dvec_destroy(vals);
+}
+
+static inline double tk_sfbs_score_node(
+  uint8_t *bin, int64_t node_row,
+  int64_t *prb, uint16_t *dist, double *wts,
+  int64_t st, uint64_t nn, uint64_t n_buckets, int add,
+  uint64_t *bc, double *bw, double *pd
+) {
+  uint8_t nb = (bin[node_row >> 3] >> (node_row & 7)) & 1;
+  memset(bc, 0, n_buckets * sizeof(uint64_t));
+  memset(bw, 0, n_buckets * sizeof(double));
+  for (uint64_t i = 0; i < nn; i++) {
+    int64_t nr = prb[(uint64_t)st + i];
+    uint8_t xb = nb ^ ((bin[nr >> 3] >> (nr & 7)) & 1);
+    uint16_t nd = add ? dist[(uint64_t)st + i] + xb : dist[(uint64_t)st + i] - xb;
+    bc[nd]++;
+    bw[nd] += wts[st + (int64_t)i];
+  }
+  double dcg = 0.0;
+  uint64_t pos = 0;
+  for (uint64_t d = 0; d < n_buckets; d++) {
+    if (bc[d] > 0)
+      dcg += bw[d] * (pd[pos + bc[d]] - pd[pos]) / (double)bc[d];
+    pos += bc[d];
+  }
+  return dcg;
+}
+
+static inline int tk_hlth_sfbs_quantizer_lua(lua_State *L) {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
 
-  const char *mode_str = tk_lua_foptstring(L, 1, "landmark_encoder", "mode", "concat");
-  bool is_similarities = !strcmp(mode_str, "similarities");
+  lua_getfield(L, 1, "raw_codes");
+  tk_dvec_t *raw_codes_dvec = tk_dvec_peek(L, -1, "raw_codes");
+  lua_pop(L, 1);
+  double *raw_codes = raw_codes_dvec->a;
 
-  tk_inv_t *feat_inv = NULL;
-  tk_ann_t *feat_ann = NULL;
-  tk_ann_t *code_ann = NULL;
+  uint64_t n_samples = tk_lua_fcheckunsigned(L, 1, "sfbs_quantizer", "n_samples");
+  uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "sfbs_quantizer", "n_dims");
+  uint64_t target_bits = tk_lua_foptunsigned(L, 1, "sfbs_quantizer", "target_bits", 0);
+  if (target_bits == 0) target_bits = n_dims;
+  uint64_t min_bits = tk_lua_foptunsigned(L, 1, "sfbs_quantizer", "min_bits", 0);
+  uint64_t max_dims = tk_lua_foptunsigned(L, 1, "sfbs_quantizer", "max_dims", 0);
 
-  lua_getfield(L, 1, "landmarks_index");
-  feat_inv = is_similarities ? NULL : tk_inv_peekopt(L, -1);
-  feat_ann = tk_ann_peekopt(L, -1);
+  lua_getfield(L, 1, "ids");
+  tk_ivec_t *ids = tk_ivec_peek(L, -1, "ids");
   lua_pop(L, 1);
 
-  if (!feat_inv && !feat_ann)
-    return luaL_error(L, "landmark_encoder: landmarks_index must be %s", is_similarities ? "ann" : "inv or ann");
-
-  if (!is_similarities) {
-    lua_getfield(L, 1, "codes_index");
-    code_ann = tk_ann_peekopt(L, -1);
-    lua_pop(L, 1);
-
-    if (!code_ann)
-      return luaL_error(L, "landmark_encoder: codes_index must be ann");
-  }
-
-  bool concat_query = tk_lua_foptboolean(L, 1, "landmark_encoder", "concat_query", true);
-
-  uint64_t n_landmarks = tk_lua_foptunsigned(L, 1, "landmark_encoder", "n_landmarks", 24);
-
-  double decay = tk_lua_foptnumber(L, 1, "landmark_encoder", "decay", 0.0);
-  double bandwidth = tk_lua_foptnumber(L, 1, "landmark_encoder", "bandwidth", -1.0);
-
-  uint64_t probe_radius = tk_lua_foptunsigned(L, 1, "landmark_encoder", "probe_radius", 2);
-
-  tk_hlth_mode_t mode = TK_HLTH_MODE_CONCAT;
-  if (!strcmp(mode_str, "frequency"))
-    mode = TK_HLTH_MODE_FREQUENCY;
-  else if (!strcmp(mode_str, "frequency_weighted"))
-    mode = TK_HLTH_MODE_FREQUENCY_WEIGHTED;
-  else if (!strcmp(mode_str, "centroid"))
-    mode = TK_HLTH_MODE_CENTROID;
-  else if (!strcmp(mode_str, "centroid_weighted"))
-    mode = TK_HLTH_MODE_CENTROID_WEIGHTED;
-  else if (!strcmp(mode_str, "similarities"))
-    mode = TK_HLTH_MODE_SIMILARITIES;
-
-  uint64_t n_thresholds = tk_lua_foptunsigned(L, 1, "landmark_encoder", "n_thresholds", 1);
-  uint64_t n_bins = tk_lua_foptunsigned(L, 1, "landmark_encoder", "n_bins", 8);
-  bool quantile = tk_lua_foptboolean(L, 1, "landmark_encoder", "quantile", false);
-
-  uint64_t n_hidden = 0;
-  if (!is_similarities)
-    n_hidden = code_ann->features;
-  else if (concat_query)
-    n_hidden = feat_ann->features;
-
-  tk_hlth_encoder_t *enc = tk_lua_newuserdata(L, tk_hlth_encoder_t, TK_HLTH_ENCODER_MT, tk_hlth_encoder_mt_fns, tk_hlth_encoder_gc);
-  int Ei = lua_gettop(L);
-  if (feat_inv) {
-    enc->feat_idx = feat_inv;
-    enc->feat_idx_type = TK_HLTH_IDX_INV;
-  } else if (feat_ann) {
-    enc->feat_idx = feat_ann;
-    enc->feat_idx_type = TK_HLTH_IDX_ANN;
-  } else {
-    enc->feat_idx = NULL;
-    enc->feat_idx_type = TK_HLTH_IDX_INV;
-  }
-
-  if (code_ann) {
-    enc->code_idx = code_ann;
-    enc->code_idx_type = TK_HLTH_IDX_ANN;
-  } else {
-    enc->code_idx = NULL;
-    enc->code_idx_type = TK_HLTH_IDX_ANN;
-  }
-
-  enc->n_landmarks = n_landmarks;
-  enc->n_hidden = n_hidden;
-  enc->probe_radius = probe_radius;
-  enc->decay = decay;
-  enc->bandwidth = bandwidth;
-  enc->mode = mode;
-  enc->n_thresholds = n_thresholds;
-  enc->n_bins = n_bins;
-  enc->quantile = quantile;
-  enc->concat_query = concat_query;
-
-  lua_getfield(L, 1, "landmarks_index");
-  tk_lua_add_ephemeron(L, TK_HLTH_ENCODER_EPH, Ei, -1);
+  lua_getfield(L, 1, "expected_ids");
+  tk_ivec_t *adjacency_ids = tk_ivec_peek(L, -1, "expected_ids");
   lua_pop(L, 1);
 
-  if (!is_similarities) {
-    lua_getfield(L, 1, "codes_index");
-    tk_lua_add_ephemeron(L, TK_HLTH_ENCODER_EPH, Ei, -1);
-    lua_pop(L, 1);
+  lua_getfield(L, 1, "expected_offsets");
+  tk_ivec_t *offsets = tk_ivec_peek(L, -1, "expected_offsets");
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "expected_neighbors");
+  tk_ivec_t *neighbors = tk_ivec_peek(L, -1, "expected_neighbors");
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "expected_weights");
+  tk_dvec_t *weights = tk_dvec_peek(L, -1, "expected_weights");
+  lua_pop(L, 1);
+
+  int i_each = -1;
+  if (tk_lua_ftype(L, 1, "each") != LUA_TNIL) {
+    lua_getfield(L, 1, "each");
+    i_each = lua_gettop(L);
   }
 
-  lua_pushcclosure(L, tk_hlth_encode_lua, 1);
+  uint64_t n_nodes = offsets->n - 1;
+  uint64_t n_pairs = neighbors->n;
 
-  int64_t n_latent;
-  if (mode == TK_HLTH_MODE_FREQUENCY || mode == TK_HLTH_MODE_FREQUENCY_WEIGHTED)
-    n_latent = (int64_t) n_hidden * (int64_t) n_thresholds;
-  else if (mode == TK_HLTH_MODE_CENTROID || mode == TK_HLTH_MODE_CENTROID_WEIGHTED)
-    n_latent = (int64_t) n_hidden;
-  else if (mode == TK_HLTH_MODE_SIMILARITIES)
-    n_latent = (int64_t) n_landmarks * (int64_t) n_bins + (concat_query ? (int64_t) n_hidden : 0);
-  else
-    n_latent = (int64_t) n_landmarks * (int64_t) n_hidden;
-  lua_pushinteger(L, n_latent);
+  int64_t max_uid = -1;
+  for (uint64_t i = 0; i < ids->n; i++)
+    if (ids->a[i] > max_uid) max_uid = ids->a[i];
+  for (uint64_t i = 0; i < adjacency_ids->n; i++)
+    if (adjacency_ids->a[i] > max_uid) max_uid = adjacency_ids->a[i];
 
-  return 2;
-}
+  int64_t *uid_to_row = (int64_t *)malloc((uint64_t)(max_uid + 1) * sizeof(int64_t));
+  memset(uid_to_row, -1, (uint64_t)(max_uid + 1) * sizeof(int64_t));
+  for (uint64_t i = 0; i < ids->n; i++) {
+    int64_t uid = ids->a[i];
+    if (uid >= 0 && uid <= max_uid && uid_to_row[uid] < 0)
+      uid_to_row[uid] = (int64_t)i;
+  }
 
-static luaL_Reg tk_nystrom_encoder_mt_fns[] = {
-  { NULL, NULL }
-};
+  int64_t sentinel_row = 0;
+  int64_t *pair_row_a = (int64_t *)malloc(n_pairs * sizeof(int64_t));
+  int64_t *pair_row_b = (int64_t *)malloc(n_pairs * sizeof(int64_t));
+  for (uint64_t j = 0; j < n_pairs; j++) {
+    pair_row_a[j] = sentinel_row;
+    pair_row_b[j] = sentinel_row;
+  }
+  uint16_t *distances = (uint16_t *)calloc(n_pairs, sizeof(uint16_t));
+  uint64_t max_neighbors = 0;
 
-static inline int tk_nystrom_encode_lua(lua_State *L) {
-  tk_nystrom_encoder_t *enc = (tk_nystrom_encoder_t *)lua_touserdata(L, lua_upvalueindex(1));
-
-  if (enc->destroyed)
-    return luaL_error(L, "nystrom_encode: encoder has been destroyed");
-
-  tk_ivec_t *query_vecs = tk_ivec_peekopt(L, 1);
-
-  if (!query_vecs)
-    return luaL_error(L, "nystrom_encode: expected ivec query");
-
-  tk_inv_t *feat_inv = enc->feat_idx_type == TK_HLTH_IDX_INV ? (tk_inv_t *)enc->feat_idx : NULL;
-
-  if (!feat_inv)
-    return luaL_error(L, "nystrom_encode: features_index must be inv");
-
-  uint64_t n_features = feat_inv->features;
-  uint64_t n_landmarks = enc->n_landmarks;
-  uint64_t n_dims = enc->n_dims;
-
-  uint64_t max_sample_idx = 0;
-  for (uint64_t i = 0; i < query_vecs->n; i++) {
-    int64_t encoded = query_vecs->a[i];
-    if (encoded >= 0) {
-      uint64_t sample_idx = (uint64_t)encoded / n_features;
-      if (sample_idx > max_sample_idx) max_sample_idx = sample_idx;
+  for (uint64_t ni = 0; ni < n_nodes; ni++) {
+    int64_t st = offsets->a[ni];
+    int64_t en = offsets->a[ni + 1];
+    uint64_t cnt = (uint64_t)(en - st);
+    if (cnt > max_neighbors) max_neighbors = cnt;
+    int64_t node_uid = adjacency_ids->a[ni];
+    if (node_uid < 0 || node_uid > max_uid) continue;
+    int64_t node_row = uid_to_row[node_uid];
+    if (node_row < 0) continue;
+    for (int64_t j = st; j < en; j++) {
+      pair_row_a[j] = node_row;
+      int64_t nbr_pos = neighbors->a[j];
+      int64_t nbr_uid = adjacency_ids->a[nbr_pos];
+      if (nbr_uid < 0 || nbr_uid > max_uid) continue;
+      int64_t nbr_row = uid_to_row[nbr_uid];
+      if (nbr_row < 0) continue;
+      pair_row_b[j] = nbr_row;
     }
   }
-  uint64_t n_possible = max_sample_idx + 1;
+  free(uid_to_row);
 
-  int64_t *sample_feature_counts = (int64_t *)calloc(n_possible, sizeof(int64_t));
-  if (!sample_feature_counts)
-    return luaL_error(L, "nystrom_encode: out of memory");
+  double *prefix_discount = (double *)malloc((max_neighbors + 1) * sizeof(double));
+  prefix_discount[0] = 0.0;
+  for (uint64_t i = 0; i < max_neighbors; i++)
+    prefix_discount[i + 1] = prefix_discount[i] + 1.0 / log2((double)(i + 2));
 
-  for (uint64_t i = 0; i < query_vecs->n; i++) {
-    int64_t encoded = query_vecs->a[i];
-    if (encoded >= 0) {
-      uint64_t sample_idx = (uint64_t)encoded / n_features;
-      sample_feature_counts[sample_idx]++;
+  double *idcg = (double *)calloc(n_nodes, sizeof(double));
+  {
+    double *iw = (double *)malloc(max_neighbors * sizeof(double));
+    for (uint64_t ni = 0; ni < n_nodes; ni++) {
+      int64_t st = offsets->a[ni];
+      int64_t en = offsets->a[ni + 1];
+      uint64_t nn = (uint64_t)(en - st);
+      if (nn == 0) continue;
+      for (uint64_t i = 0; i < nn; i++)
+        iw[i] = weights->a[st + (int64_t)i];
+      for (uint64_t i = 0; i < nn; i++)
+        for (uint64_t k = i + 1; k < nn; k++)
+          if (iw[k] > iw[i]) { double t = iw[i]; iw[i] = iw[k]; iw[k] = t; }
+      for (uint64_t i = 0; i < nn; i++)
+        idcg[ni] += iw[i] * (prefix_discount[i + 1] - prefix_discount[i]);
     }
+    free(iw);
   }
 
-  uint64_t n_samples = 0;
-  for (uint64_t i = 0; i < n_possible; i++) {
-    if (sample_feature_counts[i] > 0) n_samples++;
-  }
-
-  int64_t *orig_to_compact = (int64_t *)malloc(n_possible * sizeof(int64_t));
-  if (!orig_to_compact) {
-    free(sample_feature_counts);
-    return luaL_error(L, "nystrom_encode: out of memory");
-  }
-
-  tk_ivec_t *encoded_ids = tk_ivec_create(L, n_samples, 0, 0);
-  int encoded_ids_idx = lua_gettop(L);
-  encoded_ids->n = n_samples;
-  uint64_t compact_idx = 0;
-  for (uint64_t i = 0; i < n_possible; i++) {
-    if (sample_feature_counts[i] > 0) {
-      orig_to_compact[i] = (int64_t)compact_idx;
-      encoded_ids->a[compact_idx] = (int64_t)i;
-      compact_idx++;
-    } else {
-      orig_to_compact[i] = -1;
+  double *medians = (double *)malloc(n_dims * sizeof(double));
+  uint64_t n_sample_bytes = (n_samples + 7) / 8;
+  uint64_t max_candidates = n_dims + 16 * target_bits;
+  uint64_t n_candidates = n_dims;
+  uint64_t *cand_dims = (uint64_t *)malloc(max_candidates * sizeof(uint64_t));
+  double *cand_thresholds = (double *)malloc(max_candidates * sizeof(double));
+  uint8_t **cand_bins = (uint8_t **)malloc(max_candidates * sizeof(uint8_t *));
+  uint8_t *cand_selected = (uint8_t *)calloc(max_candidates, 1);
+  #pragma omp parallel
+  {
+    tk_dvec_t *local_vals = tk_dvec_create(NULL, n_samples, 0, 0);
+    #pragma omp for schedule(dynamic)
+    for (uint64_t d = 0; d < n_dims; d++) {
+      for (uint64_t i = 0; i < n_samples; i++)
+        local_vals->a[i] = raw_codes[i * n_dims + d];
+      tk_dvec_asc(local_vals, 0, n_samples);
+      medians[d] = local_vals->a[n_samples / 2];
+      cand_dims[d] = d;
+      cand_thresholds[d] = medians[d];
+      cand_bins[d] = (uint8_t *)calloc(n_sample_bytes, 1);
+      for (uint64_t i = 0; i < n_samples; i++)
+        if (raw_codes[i * n_dims + d] > medians[d])
+          cand_bins[d][i >> 3] |= (uint8_t)(1 << (i & 7));
     }
+    tk_dvec_destroy(local_vals);
   }
+  free(medians);
 
-  tk_ivec_t *query_offsets = tk_ivec_create(L, n_samples + 1, 0, 0);
-  tk_ivec_t *query_features = tk_ivec_create(L, query_vecs->n, 0, 0);
-  query_offsets->n = n_samples + 1;
-  query_features->n = 0;
+  int64_t *offs_a = offsets->a;
+  double *weights_a = weights->a;
 
-  for (uint64_t i = 0; i <= n_samples; i++)
-    query_offsets->a[i] = 0;
-  for (uint64_t i = 0; i < query_vecs->n; i++) {
-    int64_t encoded = query_vecs->a[i];
-    if (encoded >= 0) {
-      uint64_t sample_idx = (uint64_t)encoded / n_features;
-      int64_t compact = orig_to_compact[sample_idx];
-      if (compact >= 0)
-        query_offsets->a[compact + 1]++;
-    }
-  }
-  for (uint64_t i = 1; i <= n_samples; i++)
-    query_offsets->a[i] += query_offsets->a[i - 1];
+  uint64_t n_selected = 0;
+  uint64_t *selected_order = (uint64_t *)malloc(target_bits * sizeof(uint64_t));
+  double current_score = 0.0;
+  uint64_t *dim_refcount = (uint64_t *)calloc(n_dims, sizeof(uint64_t));
+  uint64_t n_used_dims = 0;
 
-  tk_ivec_t *write_offsets = tk_ivec_create(L, n_samples, 0, 0);
-  tk_ivec_copy(write_offsets, query_offsets, 0, (int64_t)n_samples, 0);
+  int phase = 0;
+  int64_t swap_remove_cand = -1;
+  double pre_swap_score = 0.0;
+  uint64_t stalled = 0;
 
-  for (uint64_t i = 0; i < query_vecs->n; i++) {
-    int64_t encoded = query_vecs->a[i];
-    if (encoded >= 0) {
-      uint64_t sample_idx = (uint64_t)encoded / n_features;
-      int64_t compact = orig_to_compact[sample_idx];
-      if (compact >= 0) {
-        int64_t fid = encoded % (int64_t)n_features;
-        int64_t write_pos = write_offsets->a[compact]++;
-        query_features->a[write_pos] = fid;
-      }
-    }
-  }
-  query_features->n = (size_t)query_offsets->a[n_samples];
-
-  free(sample_feature_counts);
-  free(orig_to_compact);
-
-  uint64_t out_size = n_samples * n_dims;
-  int stack_before_out = lua_gettop(L);
-
-  tk_dvec_t *raw_codes = tk_dvec_peekopt(L, 2);
-  if (raw_codes) {
-    tk_dvec_ensure(raw_codes, out_size);
-    raw_codes->n = out_size;
-    lua_pushvalue(L, 2);
-  } else {
-    raw_codes = tk_dvec_create(L, out_size, 0, 0);
-    raw_codes->n = out_size;
-  }
-  memset(raw_codes->a, 0, raw_codes->n * sizeof(double));
-
-  tk_inv_rank_weights_t rw;
-  tk_inv_precompute_rank_weights(&rw, feat_inv->n_ranks, enc->decay);
-  int64_t *ranks_arr = feat_inv->ranks->a;
-  double *weights_arr = feat_inv->weights->a;
-  uint64_t n_ranks = feat_inv->n_ranks;
-
-  double *proj = enc->projection->a;
-  double *bias = enc->bias->a;
+  double cand_score = 0.0;
+  int64_t best_cand = -1;
+  double best_score = -INFINITY;
+  double remove_score = 0.0;
 
   #pragma omp parallel
   {
-    tk_dvec_t *q_weights = tk_dvec_create(NULL, n_ranks, 0, 0);
-    tk_dvec_t *e_weights = tk_dvec_create(NULL, n_ranks, 0, 0);
-    tk_dvec_t *inter_weights = tk_dvec_create(NULL, n_ranks, 0, 0);
-    double *raw_sims = (double *)malloc(n_landmarks * sizeof(double));
+    uint64_t *bucket_counts = (uint64_t *)calloc(target_bits + 2, sizeof(uint64_t));
+    double *bucket_wsums = (double *)calloc(target_bits + 2, sizeof(double));
 
-    #pragma omp for schedule(static)
-    for (uint64_t i = 0; i < n_samples; i++) {
-      int64_t q_start = query_offsets->a[i];
-      int64_t q_end = query_offsets->a[i + 1];
-      int64_t *q_bits = query_features->a + q_start;
-      size_t q_len = (size_t)(q_end - q_start);
+    while (phase < 3) {
 
-      for (uint64_t j = 0; j < n_landmarks; j++) {
-        int64_t landmark_uid = enc->landmark_ids->a[j];
-        int64_t landmark_sid = tk_inv_uid_sid(feat_inv, landmark_uid, TK_INV_FIND);
+      if (phase == 0 || phase == 2) {
 
-        double sim = 0.0;
-        if (landmark_sid >= 0 && q_len > 0) {
-          size_t l_nbits;
-          int64_t *l_bits = tk_inv_sget(feat_inv, landmark_sid, &l_nbits);
-          if (l_bits && l_nbits > 0) {
-            sim = tk_inv_similarity_fast(ranks_arr, weights_arr, n_ranks,
-              q_bits, q_len, l_bits, l_nbits,
-              enc->bandwidth, &rw,
-              q_weights->a, e_weights->a, inter_weights->a);
+        #pragma omp single
+        { best_cand = -1; best_score = -INFINITY; }
+
+        for (uint64_t c = 0; c < n_candidates; c++) {
+          if (cand_selected[c]) continue;
+          if (max_dims > 0 && dim_refcount[cand_dims[c]] == 0
+              && n_used_dims >= max_dims) continue;
+
+          uint8_t *bin = cand_bins[c];
+          uint64_t n_buckets = n_selected + 2;
+
+          #pragma omp for schedule(static) reduction(+:cand_score)
+          for (uint64_t ni = 0; ni < n_nodes; ni++) {
+            int64_t st = offs_a[ni];
+            uint64_t nn = (uint64_t)(offs_a[ni + 1] - st);
+            if (nn == 0 || idcg[ni] <= 0.0) continue;
+            cand_score += tk_sfbs_score_node(
+              bin, pair_row_a[st], pair_row_b, distances, weights_a,
+              st, nn, n_buckets, 1, bucket_counts, bucket_wsums,
+              prefix_discount) / idcg[ni];
+          }
+
+          #pragma omp single
+          {
+            double sc = n_nodes > 0 ? cand_score / (double)n_nodes : 0.0;
+            cand_score = 0.0;
+            if (sc > best_score) {
+              best_score = sc;
+              best_cand = (int64_t)c;
+            }
           }
         }
-        raw_sims[j] = sim;
-      }
 
-      double *sample_out = raw_codes->a + i * n_dims;
-      cblas_dgemv(CblasRowMajor, CblasTrans,
-        (int)n_landmarks, (int)n_dims,
-        1.0, proj, (int)n_dims, raw_sims, 1,
-        0.0, sample_out, 1);
-      for (uint64_t d = 0; d < n_dims; d++)
-        sample_out[d] -= bias[d];
-      double norm = cblas_dnrm2((int)n_dims, sample_out, 1);
-      if (norm > 1e-12)
-        cblas_dscal((int)n_dims, 1.0 / norm, sample_out, 1);
-    }
-
-    free(raw_sims);
-    tk_dvec_destroy(q_weights);
-    tk_dvec_destroy(e_weights);
-    tk_dvec_destroy(inter_weights);
-  }
-
-  lua_pushvalue(L, encoded_ids_idx);
-  lua_pushvalue(L, stack_before_out + 1);
-
-  return 2;
-}
-
-static inline int tk_hlth_nystrom_encoder_lua(lua_State *L) {
-  lua_settop(L, 1);
-  luaL_checktype(L, 1, LUA_TTABLE);
-
-  lua_getfield(L, 1, "features_index");
-  tk_inv_t *feat_inv = tk_inv_peekopt(L, -1);
-  lua_pop(L, 1);
-
-  if (!feat_inv)
-    return luaL_error(L, "nystrom_encoder: features_index must be inv");
-
-  lua_getfield(L, 1, "eigenvectors");
-  tk_dvec_t *eigenvectors = tk_dvec_peekopt(L, -1);
-  lua_pop(L, 1);
-  if (!eigenvectors)
-    return luaL_error(L, "nystrom_encoder: eigenvectors required");
-
-  lua_getfield(L, 1, "eigenvalues");
-  tk_dvec_t *eigenvalues = tk_dvec_peekopt(L, -1);
-  lua_pop(L, 1);
-  if (!eigenvalues)
-    return luaL_error(L, "nystrom_encoder: eigenvalues required");
-
-  lua_getfield(L, 1, "landmark_ids");
-  tk_ivec_t *landmark_ids = tk_ivec_peekopt(L, -1);
-  lua_pop(L, 1);
-  if (!landmark_ids)
-    return luaL_error(L, "nystrom_encoder: landmark_ids required");
-
-  lua_getfield(L, 1, "col_means");
-  tk_dvec_t *col_means = tk_dvec_peekopt(L, -1);
-  lua_pop(L, 1);
-  if (!col_means)
-    return luaL_error(L, "nystrom_encoder: col_means required");
-
-  lua_getfield(L, 1, "landmark_chol");
-  tk_dvec_t *landmark_chol = tk_dvec_peekopt(L, -1);
-  lua_pop(L, 1);
-  if (!landmark_chol)
-    return luaL_error(L, "nystrom_encoder: landmark_chol required");
-
-  lua_getfield(L, 1, "chol");
-  tk_dvec_t *chol = tk_dvec_peekopt(L, -1);
-  lua_pop(L, 1);
-
-  uint64_t n_samples = tk_lua_foptunsigned(L, 1, "nystrom_encoder", "n_samples", 0);
-
-  uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "nystrom_encoder", "n_dims");
-
-  if (n_dims == 0)
-    return luaL_error(L, "nystrom_encoder: n_dims must be > 0");
-  if (eigenvalues->n != n_dims)
-    return luaL_error(L, "nystrom_encoder: eigenvalues size (%llu) != n_dims (%llu)",
-                      (unsigned long long)eigenvalues->n, (unsigned long long)n_dims);
-  if (eigenvectors->n % n_dims != 0)
-    return luaL_error(L, "nystrom_encoder: eigenvectors size (%llu) not divisible by n_dims (%llu)",
-                      (unsigned long long)eigenvectors->n, (unsigned long long)n_dims);
-
-  uint64_t n_landmarks = eigenvectors->n / n_dims;
-  if (landmark_ids->n != n_landmarks)
-    return luaL_error(L, "nystrom_encoder: landmark_ids size (%llu) != eigenvector rows (%llu)",
-                      (unsigned long long)landmark_ids->n, (unsigned long long)n_landmarks);
-  if (col_means->n != n_landmarks)
-    return luaL_error(L, "nystrom_encoder: col_means size (%llu) != n_landmarks (%llu)",
-                      (unsigned long long)col_means->n, (unsigned long long)n_landmarks);
-  if (landmark_chol->n != n_landmarks * n_landmarks)
-    return luaL_error(L, "nystrom_encoder: landmark_chol size (%llu) != n_landmarks^2 (%llu)",
-                      (unsigned long long)landmark_chol->n, (unsigned long long)(n_landmarks * n_landmarks));
-  if (chol) {
-    if (n_samples == 0)
-      return luaL_error(L, "nystrom_encoder: n_samples required when chol is provided");
-    if (chol->n != n_samples * n_landmarks)
-      return luaL_error(L, "nystrom_encoder: chol size (%llu) != n_samples * n_landmarks (%llu)",
-                        (unsigned long long)chol->n, (unsigned long long)(n_samples * n_landmarks));
-  }
-
-  double decay = tk_lua_foptnumber(L, 1, "nystrom_encoder", "decay", 0.0);
-  double bandwidth = tk_lua_foptnumber(L, 1, "nystrom_encoder", "bandwidth", -1.0);
-
-  tk_dvec_t *projection = tk_dvec_create(L, n_landmarks * n_dims, 0, 0);
-  projection->n = n_landmarks * n_dims;
-  for (uint64_t j = 0; j < n_landmarks; j++) {
-    for (uint64_t d = 0; d < n_dims; d++) {
-      double eig_d = eigenvalues->a[d];
-      double s = (eig_d > 1e-12) ? 1.0 / sqrt(eig_d) : 0.0;
-      projection->a[j * n_dims + d] = eigenvectors->a[j * n_dims + d] * s;
-    }
-  }
-
-  tk_dvec_t *bias = tk_dvec_create(L, n_dims, 0, 0);
-  bias->n = n_dims;
-  cblas_dgemv(CblasRowMajor, CblasTrans,
-    (int)n_landmarks, (int)n_dims,
-    1.0, projection->a, (int)n_dims, col_means->a, 1,
-    0.0, bias->a, 1);
-
-  cblas_dtrsm(CblasRowMajor, CblasLeft, CblasLower, CblasTrans, CblasNonUnit,
-    (int)n_landmarks, (int)n_dims, 1.0, landmark_chol->a, (int)n_landmarks,
-    projection->a, (int)n_dims);
-
-  tk_dvec_t *raw_codes = NULL;
-  if (chol) {
-    raw_codes = tk_dvec_create(L, n_samples * n_dims, 0, 0);
-    raw_codes->n = n_samples * n_dims;
-
-    double *adjustment = (double *)malloc(n_dims * sizeof(double));
-
-    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-      (int)n_samples, (int)n_dims, (int)n_landmarks,
-      1.0, chol->a, (int)n_landmarks, eigenvectors->a, (int)n_dims,
-      0.0, raw_codes->a, (int)n_dims);
-
-    cblas_dgemv(CblasRowMajor, CblasTrans,
-      (int)n_landmarks, (int)n_dims,
-      1.0, eigenvectors->a, (int)n_dims, col_means->a, 1,
-      0.0, adjustment, 1);
-
-    #pragma omp parallel for schedule(static)
-    for (uint64_t i = 0; i < n_samples; i++) {
-      double *U_row = raw_codes->a + i * n_dims;
-      for (uint64_t d = 0; d < n_dims; d++) {
-        double val = U_row[d] - adjustment[d];
-        double eig_d = eigenvalues->a[d];
-        U_row[d] = (eig_d > 1e-12) ? val / sqrt(eig_d) : 0.0;
-      }
-      double norm = cblas_dnrm2((int)n_dims, U_row, 1);
-      if (norm > 1e-12)
-        cblas_dscal((int)n_dims, 1.0 / norm, U_row, 1);
-    }
-
-    free(adjustment);
-  }
-
-  tk_nystrom_encoder_t *enc = tk_lua_newuserdata(L, tk_nystrom_encoder_t, TK_NYSTROM_ENCODER_MT, tk_nystrom_encoder_mt_fns, tk_nystrom_encoder_gc);
-  int Ei = lua_gettop(L);
-
-  enc->feat_idx = feat_inv;
-  enc->feat_idx_type = TK_HLTH_IDX_INV;
-  enc->eigenvectors = eigenvectors;
-  enc->eigenvalues = eigenvalues;
-  enc->col_means = col_means;
-  enc->landmark_ids = landmark_ids;
-  enc->landmark_chol = landmark_chol;
-  enc->projection = projection;
-  enc->bias = bias;
-  enc->n_dims = n_dims;
-  enc->n_landmarks = n_landmarks;
-  enc->decay = decay;
-  enc->bandwidth = bandwidth;
-  enc->destroyed = false;
-
-  lua_getfield(L, 1, "features_index");
-  tk_lua_add_ephemeron(L, TK_NYSTROM_ENCODER_EPH, Ei, -1);
-  lua_pop(L, 1);
-
-  lua_getfield(L, 1, "eigenvectors");
-  tk_lua_add_ephemeron(L, TK_NYSTROM_ENCODER_EPH, Ei, -1);
-  lua_pop(L, 1);
-
-  lua_getfield(L, 1, "eigenvalues");
-  tk_lua_add_ephemeron(L, TK_NYSTROM_ENCODER_EPH, Ei, -1);
-  lua_pop(L, 1);
-
-  lua_getfield(L, 1, "landmark_ids");
-  tk_lua_add_ephemeron(L, TK_NYSTROM_ENCODER_EPH, Ei, -1);
-  lua_pop(L, 1);
-
-  lua_getfield(L, 1, "col_means");
-  tk_lua_add_ephemeron(L, TK_NYSTROM_ENCODER_EPH, Ei, -1);
-  lua_pop(L, 1);
-
-  lua_getfield(L, 1, "landmark_chol");
-  tk_lua_add_ephemeron(L, TK_NYSTROM_ENCODER_EPH, Ei, -1);
-  lua_pop(L, 1);
-
-  lua_pushvalue(L, -3);
-  tk_lua_add_ephemeron(L, TK_NYSTROM_ENCODER_EPH, Ei, -1);
-  lua_pop(L, 1);
-
-  lua_pushvalue(L, -2);
-  tk_lua_add_ephemeron(L, TK_NYSTROM_ENCODER_EPH, Ei, -1);
-  lua_pop(L, 1);
-
-  lua_pushcclosure(L, tk_nystrom_encode_lua, 1);
-  lua_pushinteger(L, (lua_Integer)n_dims);
-
-  if (raw_codes) {
-    lua_pushvalue(L, -3);
-    return 3;
-  }
-
-  return 2;
-}
-
-static inline tk_rp_encoder_t *tk_rp_encoder_peek(lua_State *L, int i) {
-  return (tk_rp_encoder_t *)luaL_checkudata(L, i, TK_RP_ENCODER_MT);
-}
-
-static inline int tk_rp_encoder_gc(lua_State *L) {
-  tk_rp_encoder_t *enc = tk_rp_encoder_peek(L, 1);
-  enc->weights = NULL;
-  enc->destroyed = true;
-  return 0;
-}
-
-static luaL_Reg tk_rp_encoder_mt_fns[] = {
-  { NULL, NULL }
-};
-
-static inline int tk_rp_encode_lua(lua_State *L) {
-  tk_rp_encoder_t *enc = (tk_rp_encoder_t *)lua_touserdata(L, lua_upvalueindex(1));
-
-  if (enc->destroyed)
-    return luaL_error(L, "rp_encode: encoder has been destroyed");
-
-  tk_dvec_t *codes = tk_dvec_peek(L, 1, "codes");
-  uint64_t n_dims = enc->n_dims;
-  uint64_t rp_dims = enc->rp_dims;
-  uint64_t n_samples = codes->n / n_dims;
-  uint64_t out_size = n_samples * TK_CVEC_BITS_BYTES(rp_dims);
-
-  tk_cvec_t *out = tk_cvec_peekopt(L, 2);
-  if (out) {
-    tk_cvec_ensure(out, out_size);
-    out->n = out_size;
-    lua_pushvalue(L, 2);
-  } else {
-    out = tk_cvec_create(L, out_size, 0, 0);
-    out->n = out_size;
-  }
-  memset(out->a, 0, out->n);
-
-  #pragma omp parallel for schedule(static)
-  for (uint64_t i = 0; i < n_samples; i++) {
-    double *x = codes->a + i * n_dims;
-    uint8_t *sample_out = (uint8_t *)out->a + i * TK_CVEC_BITS_BYTES(rp_dims);
-    double norm = 0.0;
-    for (uint64_t d = 0; d < n_dims; d++)
-      norm += x[d] * x[d];
-    norm = sqrt(norm);
-    double inv_norm = (norm > 1e-12) ? 1.0 / norm : 0.0;
-    for (uint64_t r = 0; r < rp_dims; r++) {
-      double dot = 0.0;
-      for (uint64_t d = 0; d < n_dims; d++) {
-        dot += (x[d] * inv_norm) * enc->weights->a[r * n_dims + d];
-      }
-      if (dot >= 0.0) {
-        sample_out[TK_CVEC_BITS_BYTE(r)] |= (1 << TK_CVEC_BITS_BIT(r));
-      }
-    }
-  }
-
-  return 1;
-}
-
-static inline int tk_hlth_rp_encoder_lua(lua_State *L) {
-  lua_settop(L, 1);
-  luaL_checktype(L, 1, LUA_TTABLE);
-
-  uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "rp_encoder", "n_dims");
-  if (n_dims == 0)
-    return luaL_error(L, "rp_encoder: n_dims must be > 0");
-
-  uint64_t rp_dims = tk_lua_fcheckunsigned(L, 1, "rp_encoder", "rp_dims");
-  if (rp_dims == 0)
-    return luaL_error(L, "rp_encoder: rp_dims must be > 0");
-
-  uint64_t seed = tk_lua_foptunsigned(L, 1, "rp_encoder", "seed", 12345);
-  bool orthogonal = tk_lua_foptboolean(L, 1, "rp_encoder", "orthogonal", true);
-
-  tk_dvec_t *weights = NULL;
-  uint64_t required_size = rp_dims * n_dims;
-
-  lua_getfield(L, 1, "weights");
-  if (!lua_isnil(L, -1)) {
-    weights = tk_dvec_peek(L, -1, "weights");
-    if (weights->m < required_size)
-      weights = NULL;
-  }
-  int Wi = weights ? lua_gettop(L) : 0;
-  if (!weights)
-    lua_pop(L, 1);
-
-  if (!weights) {
-    weights = tk_dvec_create(L, required_size, 0, 0);
-    Wi = lua_gettop(L);
-  }
-  weights->n = required_size;
-
-  tk_fast_seed(seed);
-  if (orthogonal) {
-    uint64_t n_blocks = (rp_dims + n_dims - 1) / n_dims;
-    double *block = malloc(n_dims * n_dims * sizeof(double));
-    double *tau = malloc(n_dims * sizeof(double));
-    for (uint64_t b = 0; b < n_blocks; b++) {
-      for (uint64_t i = 0; i < n_dims * n_dims; i += 2) {
-        double u1 = (double)tk_fast_random() / 4294967295.0;
-        double u2 = (double)tk_fast_random() / 4294967295.0;
-        if (u1 < 1e-10) u1 = 1e-10;
-        double r = sqrt(-2.0 * log(u1));
-        double theta = 2.0 * M_PI * u2;
-        block[i] = r * cos(theta);
-        if (i + 1 < n_dims * n_dims)
-          block[i + 1] = r * sin(theta);
-      }
-      int m = (int)n_dims;
-      int info = LAPACKE_dgeqrf(LAPACK_ROW_MAJOR, m, m, block, m, tau);
-      if (info != 0) {
-        free(block);
-        free(tau);
-        return luaL_error(L, "rp_encoder: dgeqrf failed with info=%d", info);
-      }
-      info = LAPACKE_dorgqr(LAPACK_ROW_MAJOR, m, m, m, block, m, tau);
-      if (info != 0) {
-        free(block);
-        free(tau);
-        return luaL_error(L, "rp_encoder: dorgqr failed with info=%d", info);
-      }
-      uint64_t start_row = b * n_dims;
-      uint64_t rows_to_copy = (start_row + n_dims <= rp_dims) ? n_dims : (rp_dims - start_row);
-      for (uint64_t i = 0; i < rows_to_copy; i++) {
-        for (uint64_t j = 0; j < n_dims; j++) {
-          weights->a[(start_row + i) * n_dims + j] = block[i * n_dims + j];
+        #pragma omp single
+        {
+          if (phase == 0) {
+            bool added = false;
+            if (best_cand >= 0 && n_selected < target_bits) {
+              double gain = (n_selected == 0) ? best_score : (best_score - current_score);
+              if (gain > 0.0 || n_selected < min_bits) {
+                tk_sfbs_commit(cand_bins[best_cand], pair_row_a, pair_row_b,
+                  distances, n_pairs, 1);
+                cand_selected[best_cand] = 1;
+                if (dim_refcount[cand_dims[best_cand]]++ == 0) n_used_dims++;
+                selected_order[n_selected] = (uint64_t)best_cand;
+                n_selected++;
+                current_score = best_score;
+                added = true;
+                stalled = 0;
+                tk_sfbs_spawn_children(raw_codes, n_samples, n_dims,
+                  cand_dims[best_cand], cand_thresholds[best_cand],
+                  cand_dims, cand_thresholds, cand_bins,
+                  cand_selected, &n_candidates, max_candidates, n_sample_bytes);
+                if (i_each >= 0) {
+                  lua_pushvalue(L, i_each);
+                  lua_pushinteger(L, (int64_t)(n_selected - 1));
+                  lua_pushinteger(L, (int64_t)cand_dims[best_cand]);
+                  lua_pushnumber(L, cand_thresholds[best_cand]);
+                  lua_pushnumber(L, gain);
+                  lua_pushnumber(L, current_score);
+                  lua_pushliteral(L, "add");
+                  lua_call(L, 6, 0);
+                }
+              }
+            }
+            if (!added) {
+              stalled++;
+              if (n_selected > min_bits && stalled < 2) {
+                phase = 1;
+              } else {
+                phase = 3;
+              }
+            }
+          } else {
+            if (best_cand >= 0 && best_score > pre_swap_score) {
+              tk_sfbs_commit(cand_bins[best_cand], pair_row_a, pair_row_b,
+                distances, n_pairs, 1);
+              cand_selected[best_cand] = 1;
+              if (dim_refcount[cand_dims[best_cand]]++ == 0) n_used_dims++;
+              selected_order[n_selected] = (uint64_t)best_cand;
+              n_selected++;
+              current_score = best_score;
+              phase = 0;
+              stalled = 0;
+              tk_sfbs_spawn_children(raw_codes, n_samples, n_dims,
+                cand_dims[best_cand], cand_thresholds[best_cand],
+                cand_dims, cand_thresholds, cand_bins,
+                cand_selected, &n_candidates, max_candidates, n_sample_bytes);
+              if (i_each >= 0) {
+                lua_pushvalue(L, i_each);
+                lua_pushinteger(L, (int64_t)n_selected);
+                lua_pushinteger(L, (int64_t)cand_dims[swap_remove_cand]);
+                lua_pushnumber(L, cand_thresholds[swap_remove_cand]);
+                lua_pushnumber(L, 0);
+                lua_pushnumber(L, current_score);
+                lua_pushliteral(L, "swap_remove");
+                lua_call(L, 6, 0);
+                lua_pushvalue(L, i_each);
+                lua_pushinteger(L, (int64_t)(n_selected - 1));
+                lua_pushinteger(L, (int64_t)cand_dims[best_cand]);
+                lua_pushnumber(L, cand_thresholds[best_cand]);
+                lua_pushnumber(L, best_score - pre_swap_score);
+                lua_pushnumber(L, current_score);
+                lua_pushliteral(L, "swap_add");
+                lua_call(L, 6, 0);
+              }
+            } else {
+              tk_sfbs_commit(cand_bins[swap_remove_cand], pair_row_a, pair_row_b,
+                distances, n_pairs, 1);
+              cand_selected[swap_remove_cand] = 1;
+              if (dim_refcount[cand_dims[swap_remove_cand]]++ == 0) n_used_dims++;
+              selected_order[n_selected] = (uint64_t)swap_remove_cand;
+              n_selected++;
+              current_score = pre_swap_score;
+              phase = 3;
+            }
+          }
         }
-      }
-    }
-    free(block);
-    free(tau);
-  } else {
-    for (uint64_t i = 0; i < required_size; i += 2) {
-      double u1 = (double)tk_fast_random() / 4294967295.0;
-      double u2 = (double)tk_fast_random() / 4294967295.0;
-      if (u1 < 1e-10) u1 = 1e-10;
-      double r = sqrt(-2.0 * log(u1));
-      double theta = 2.0 * M_PI * u2;
-      weights->a[i] = r * cos(theta);
-      if (i + 1 < required_size)
-        weights->a[i + 1] = r * sin(theta);
-    }
-  }
 
-  tk_rp_encoder_t *enc = tk_lua_newuserdata(L, tk_rp_encoder_t, TK_RP_ENCODER_MT, tk_rp_encoder_mt_fns, tk_rp_encoder_gc);
-  int Ei = lua_gettop(L);
+      } else {
 
-  enc->weights = weights;
-  enc->n_dims = n_dims;
-  enc->rp_dims = rp_dims;
-  enc->destroyed = false;
+        #pragma omp single
+        { best_cand = -1; best_score = -INFINITY; }
 
-  lua_pushvalue(L, Wi);
-  tk_lua_add_ephemeron(L, TK_RP_ENCODER_EPH, Ei, -1);
-  lua_pop(L, 1);
+        for (uint64_t s = 0; s < n_selected; s++) {
+          uint64_t c = selected_order[s];
+          uint8_t *bin = cand_bins[c];
+          uint64_t n_buckets = n_selected + 2;
 
-  lua_pushcclosure(L, tk_rp_encode_lua, 1);
-  lua_pushinteger(L, (lua_Integer)rp_dims);
-  lua_pushvalue(L, Wi);
+          #pragma omp for schedule(static) reduction(+:remove_score)
+          for (uint64_t ni = 0; ni < n_nodes; ni++) {
+            int64_t st = offs_a[ni];
+            uint64_t nn = (uint64_t)(offs_a[ni + 1] - st);
+            if (nn == 0 || idcg[ni] <= 0.0) continue;
+            remove_score += tk_sfbs_score_node(
+              bin, pair_row_a[st], pair_row_b, distances, weights_a,
+              st, nn, n_buckets, 0, bucket_counts, bucket_wsums,
+              prefix_discount) / idcg[ni];
+          }
 
-  return 3;
-}
-
-static inline tk_rff_encoder_t *tk_rff_encoder_peek(lua_State *L, int i) {
-  return (tk_rff_encoder_t *)luaL_checkudata(L, i, TK_RFF_ENCODER_MT);
-}
-
-static inline int tk_rff_encoder_gc(lua_State *L) {
-  tk_rff_encoder_t *enc = tk_rff_encoder_peek(L, 1);
-  enc->weights = NULL;
-  enc->biases = NULL;
-  enc->destroyed = true;
-  return 0;
-}
-
-static luaL_Reg tk_rff_encoder_mt_fns[] = {
-  { NULL, NULL }
-};
-
-static inline int tk_rff_encode_lua(lua_State *L) {
-  tk_rff_encoder_t *enc = (tk_rff_encoder_t *)lua_touserdata(L, lua_upvalueindex(1));
-
-  if (enc->destroyed)
-    return luaL_error(L, "rff_encode: encoder has been destroyed");
-
-  tk_dvec_t *codes = tk_dvec_peek(L, 1, "codes");
-  uint64_t n_dims = enc->n_dims;
-  uint64_t rff_dims = enc->rff_dims;
-  uint64_t n_samples = codes->n / n_dims;
-  uint64_t out_size = n_samples * TK_CVEC_BITS_BYTES(rff_dims);
-
-  tk_cvec_t *out = tk_cvec_peekopt(L, 2);
-  if (out) {
-    tk_cvec_ensure(out, out_size);
-    out->n = out_size;
-    lua_pushvalue(L, 2);
-  } else {
-    out = tk_cvec_create(L, out_size, 0, 0);
-    out->n = out_size;
-  }
-  memset(out->a, 0, out->n);
-
-  #pragma omp parallel for schedule(static)
-  for (uint64_t i = 0; i < n_samples; i++) {
-    double *x = codes->a + i * n_dims;
-    uint8_t *sample_out = (uint8_t *)out->a + i * TK_CVEC_BITS_BYTES(rff_dims);
-    for (uint64_t r = 0; r < rff_dims; r++) {
-      double dot = 0.0;
-      for (uint64_t d = 0; d < n_dims; d++) {
-        dot += x[d] * enc->weights->a[r * n_dims + d];
-      }
-      double val = cos(dot + enc->biases->a[r]);
-      if (val >= 0.0) {
-        sample_out[TK_CVEC_BITS_BYTE(r)] |= (1 << TK_CVEC_BITS_BIT(r));
-      }
-    }
-  }
-
-  return 1;
-}
-
-static inline int tk_hlth_rff_encoder_lua(lua_State *L) {
-  lua_settop(L, 1);
-  luaL_checktype(L, 1, LUA_TTABLE);
-
-  uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "rff_encoder", "n_dims");
-  if (n_dims == 0)
-    return luaL_error(L, "rff_encoder: n_dims must be > 0");
-
-  uint64_t rff_dims = tk_lua_fcheckunsigned(L, 1, "rff_encoder", "rff_dims");
-  if (rff_dims == 0)
-    return luaL_error(L, "rff_encoder: rff_dims must be > 0");
-
-  double gamma = tk_lua_foptnumber(L, 1, "rff_encoder", "gamma", 1.0);
-
-  uint64_t seed = tk_lua_foptunsigned(L, 1, "rff_encoder", "seed", 12345);
-  bool orthogonal = tk_lua_foptboolean(L, 1, "rff_encoder", "orthogonal", true);
-  tk_fast_seed(seed);
-
-  tk_dvec_t *weights = tk_dvec_create(L, rff_dims * n_dims, 0, 0);
-  weights->n = rff_dims * n_dims;
-
-  if (orthogonal) {
-    uint64_t n_blocks = (rff_dims + n_dims - 1) / n_dims;
-    double *block = malloc(n_dims * n_dims * sizeof(double));
-    double *tau = malloc(n_dims * sizeof(double));
-    double *scales = malloc(n_dims * sizeof(double));
-
-    for (uint64_t b = 0; b < n_blocks; b++) {
-      for (uint64_t i = 0; i < n_dims * n_dims; i += 2) {
-        double u1 = (double)tk_fast_random() / 4294967295.0;
-        double u2 = (double)tk_fast_random() / 4294967295.0;
-        if (u1 < 1e-10) u1 = 1e-10;
-        double r = sqrt(-2.0 * log(u1));
-        double theta = 2.0 * M_PI * u2;
-        block[i] = r * cos(theta);
-        if (i + 1 < n_dims * n_dims)
-          block[i + 1] = r * sin(theta);
-      }
-
-      int m = (int)n_dims;
-      int info = LAPACKE_dgeqrf(LAPACK_ROW_MAJOR, m, m, block, m, tau);
-      if (info != 0) {
-        free(block);
-        free(tau);
-        free(scales);
-        return luaL_error(L, "rff_encoder: dgeqrf failed with info=%d", info);
-      }
-
-      info = LAPACKE_dorgqr(LAPACK_ROW_MAJOR, m, m, m, block, m, tau);
-      if (info != 0) {
-        free(block);
-        free(tau);
-        free(scales);
-        return luaL_error(L, "rff_encoder: dorgqr failed with info=%d", info);
-      }
-
-      for (uint64_t i = 0; i < n_dims; i++) {
-        double u1 = (double)tk_fast_random() / 4294967295.0;
-        double u2 = (double)tk_fast_random() / 4294967295.0;
-        if (u1 < 1e-10) u1 = 1e-10;
-        scales[i] = sqrt(-2.0 * log(u1)) * gamma;
-        (void)u2;
-      }
-
-      uint64_t start_row = b * n_dims;
-      uint64_t rows_to_copy = (start_row + n_dims <= rff_dims) ? n_dims : (rff_dims - start_row);
-      for (uint64_t i = 0; i < rows_to_copy; i++) {
-        for (uint64_t j = 0; j < n_dims; j++) {
-          weights->a[(start_row + i) * n_dims + j] = block[i * n_dims + j] * scales[i];
+          #pragma omp single
+          {
+            double sc = n_nodes > 0 ? remove_score / (double)n_nodes : 0.0;
+            remove_score = 0.0;
+            if (sc > best_score) {
+              best_score = sc;
+              best_cand = (int64_t)c;
+            }
+          }
         }
+
+        #pragma omp single
+        {
+          if (best_cand >= 0) {
+            double gain = best_score - current_score;
+            if (gain > 0.0) {
+              tk_sfbs_commit(cand_bins[best_cand], pair_row_a, pair_row_b,
+                distances, n_pairs, 0);
+              cand_selected[best_cand] = 0;
+              if (--dim_refcount[cand_dims[best_cand]] == 0) n_used_dims--;
+              for (uint64_t i = 0; i < n_selected; i++) {
+                if (selected_order[i] == (uint64_t)best_cand) {
+                  for (uint64_t j = i; j < n_selected - 1; j++)
+                    selected_order[j] = selected_order[j + 1];
+                  n_selected--;
+                  break;
+                }
+              }
+              current_score = best_score;
+              phase = 0;
+              if (i_each >= 0) {
+                lua_pushvalue(L, i_each);
+                lua_pushinteger(L, (int64_t)n_selected);
+                lua_pushinteger(L, (int64_t)cand_dims[best_cand]);
+                lua_pushnumber(L, cand_thresholds[best_cand]);
+                lua_pushnumber(L, gain);
+                lua_pushnumber(L, current_score);
+                lua_pushliteral(L, "remove");
+                lua_call(L, 6, 0);
+              }
+            } else {
+              swap_remove_cand = best_cand;
+              pre_swap_score = current_score;
+              tk_sfbs_commit(cand_bins[best_cand], pair_row_a, pair_row_b,
+                distances, n_pairs, 0);
+              cand_selected[best_cand] = 0;
+              if (--dim_refcount[cand_dims[best_cand]] == 0) n_used_dims--;
+              for (uint64_t i = 0; i < n_selected; i++) {
+                if (selected_order[i] == (uint64_t)best_cand) {
+                  for (uint64_t j = i; j < n_selected - 1; j++)
+                    selected_order[j] = selected_order[j + 1];
+                  n_selected--;
+                  break;
+                }
+              }
+              current_score = best_score;
+              phase = 2;
+            }
+          } else {
+            phase = 3;
+          }
+        }
+
       }
     }
 
-    free(block);
-    free(tau);
-    free(scales);
-  } else {
-    for (uint64_t i = 0; i < rff_dims * n_dims; i += 2) {
-      double u1 = (double)tk_fast_random() / 4294967295.0;
-      double u2 = (double)tk_fast_random() / 4294967295.0;
-      if (u1 < 1e-10) u1 = 1e-10;
-      double r = sqrt(-2.0 * log(u1)) * gamma;
-      double theta = 2.0 * M_PI * u2;
-      weights->a[i] = r * cos(theta);
-      if (i + 1 < rff_dims * n_dims)
-        weights->a[i + 1] = r * sin(theta);
-    }
+    free(bucket_counts);
+    free(bucket_wsums);
   }
 
-  tk_dvec_t *biases = tk_dvec_create(L, rff_dims, 0, 0);
-  biases->n = rff_dims;
-
-  for (uint64_t i = 0; i < rff_dims; i++) {
-    biases->a[i] = 2.0 * M_PI * (double)tk_fast_random() / 4294967295.0;
+  tk_ivec_t *out_dims = tk_ivec_create(L, n_selected, 0, 0);
+  int out_dims_idx = lua_gettop(L);
+  tk_dvec_t *out_thresholds = tk_dvec_create(L, n_selected, 0, 0);
+  int out_thresholds_idx = lua_gettop(L);
+  out_dims->n = n_selected;
+  out_thresholds->n = n_selected;
+  for (uint64_t k = 0; k < n_selected; k++) {
+    uint64_t c = selected_order[k];
+    out_dims->a[k] = (int64_t)cand_dims[c];
+    out_thresholds->a[k] = cand_thresholds[c];
   }
 
-  tk_rff_encoder_t *enc = tk_lua_newuserdata(L, tk_rff_encoder_t, TK_RFF_ENCODER_MT, tk_rff_encoder_mt_fns, tk_rff_encoder_gc);
+  for (uint64_t c = 0; c < n_candidates; c++) free(cand_bins[c]);
+  free(cand_dims);
+  free(cand_thresholds);
+  free(cand_bins);
+  free(cand_selected);
+  free(distances);
+  free(selected_order);
+  free(dim_refcount);
+  free(pair_row_a);
+  free(pair_row_b);
+  free(idcg);
+  free(prefix_discount);
+
+  tk_sfbs_encoder_t *enc = tk_lua_newuserdata(L, tk_sfbs_encoder_t,
+    TK_SFBS_ENCODER_MT, tk_sfbs_encoder_mt_fns, tk_sfbs_encoder_gc);
   int Ei = lua_gettop(L);
-
-  enc->weights = weights;
-  enc->biases = biases;
+  enc->bit_dims = out_dims;
+  enc->bit_thresholds = out_thresholds;
   enc->n_dims = n_dims;
-  enc->rff_dims = rff_dims;
-  enc->gamma = gamma;
+  enc->n_bits = n_selected;
   enc->destroyed = false;
 
-  lua_pushvalue(L, -3);
-  tk_lua_add_ephemeron(L, TK_RFF_ENCODER_EPH, Ei, -1);
-  lua_pop(L, 1);
+  lua_newtable(L);
+  lua_pushvalue(L, out_dims_idx);
+  lua_setfield(L, -2, "dims");
+  lua_pushvalue(L, out_thresholds_idx);
+  lua_setfield(L, -2, "thresholds");
+  lua_setfenv(L, Ei);
 
-  lua_pushvalue(L, -2);
-  tk_lua_add_ephemeron(L, TK_RFF_ENCODER_EPH, Ei, -1);
-  lua_pop(L, 1);
-
-  lua_pushcclosure(L, tk_rff_encode_lua, 1);
-  lua_pushinteger(L, (lua_Integer)rff_dims);
-
-  return 2;
+  lua_pushvalue(L, Ei);
+  return 1;
 }
 
 static luaL_Reg tk_hlth_fns[] = {
-  { "landmark_encoder", tk_hlth_landmark_encoder_lua },
-  { "nystrom_encoder", tk_hlth_nystrom_encoder_lua },
-  { "rp_encoder", tk_hlth_rp_encoder_lua },
-  { "rff_encoder", tk_hlth_rff_encoder_lua },
+  { "sfbs_quantizer", tk_hlth_sfbs_quantizer_lua },
   { NULL, NULL }
 };
 

@@ -1,6 +1,6 @@
 local str = require("santoku.string")
 local ann = require("santoku.tsetlin.ann")
-local graph = require("santoku.tsetlin.graph")
+local csr = require("santoku.tsetlin.csr")
 local eval = require("santoku.tsetlin.evaluator")
 
 local M = {}
@@ -390,12 +390,8 @@ function M.cluster_stats (args)
   local label = args.label or "codes"
   local codes_ann = ann.create({ features = n_dims })
   codes_ann:add(codes, ids)
-  local adj_ids, adj_offsets, adj_neighbors = graph.adjacency({
-    knn_index = codes_ann,
-    knn = knn,
-    knn_cache = knn,
-    bridge = "none",
-  })
+  local adj_ids, adj_hoods = codes_ann:neighborhoods(knn)
+  local adj_offsets, adj_neighbors, _ = adj_hoods:to_csr(adj_ids, n_dims)
   local result = eval.cluster({
     codes = codes,
     ids = adj_ids,
