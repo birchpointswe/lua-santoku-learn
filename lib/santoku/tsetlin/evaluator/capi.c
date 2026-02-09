@@ -1,8 +1,9 @@
 #include <santoku/iuset.h>
-#include <santoku/tsetlin/graph.h>
+#include <santoku/pumap.h>
 #include <santoku/tsetlin/inv.h>
 #include <santoku/tsetlin/ann.h>
 #include <santoku/tsetlin/centroid.h>
+#include <santoku/tsetlin/csr.h>
 #include <santoku/ivec.h>
 #include <santoku/cvec.h>
 #include <santoku/rvec.h>
@@ -64,7 +65,6 @@ typedef struct {
   tk_ivec_t *adjacency_ids;
   unsigned int n_visible, n_dims, chunks;
   tk_ivec_t *assignments;
-  tk_graph_t *graph;
   tk_ivec_t *offsets;
   tk_ivec_t *neighbors;
   tk_dvec_t *weights;
@@ -2164,8 +2164,8 @@ static void tk_incr_commit_cont (
   double sign
 ) {
   for (uint64_t j = 0; j < n_pairs; j++) {
-    double da = raw_codes[pra[j] * n_dims + dim]
-              - raw_codes[prb[j] * n_dims + dim];
+    double da = raw_codes[(uint64_t)pra[j] * n_dims + dim]
+              - raw_codes[(uint64_t)prb[j] * n_dims + dim];
     distances[j] += sign * da * da;
   }
 }
@@ -2210,8 +2210,8 @@ static void tm_optimize_bits_sfbs_cont (
   for (uint64_t i = 0; i < code_ids->n; i++)
     if (code_ids->a[i] > max_uid) max_uid = code_ids->a[i];
 
-  int64_t *uid_to_row = (int64_t *)malloc((max_uid + 1) * sizeof(int64_t));
-  memset(uid_to_row, -1, (max_uid + 1) * sizeof(int64_t));
+  int64_t *uid_to_row = (int64_t *)malloc((uint64_t)(max_uid + 1) * sizeof(int64_t));
+  memset(uid_to_row, -1, (uint64_t)(max_uid + 1) * sizeof(int64_t));
   for (uint64_t i = 0; i < code_ids->n; i++)
     uid_to_row[code_ids->a[i]] = (int64_t)i;
 
@@ -2237,12 +2237,12 @@ static void tm_optimize_bits_sfbs_cont (
     if (node_row < 0) continue;
 
     for (int64_t j = st; j < en; j++) {
+      pair_row_a[j] = node_row;
       int64_t nbr_pos = neighbors->a[j];
       int64_t nbr_uid = adjacency_ids->a[nbr_pos];
       if (nbr_uid < 0 || nbr_uid > max_uid) continue;
       int64_t nbr_row = uid_to_row[nbr_uid];
       if (nbr_row < 0) continue;
-      pair_row_a[j] = node_row;
       pair_row_b[j] = nbr_row;
     }
   }
@@ -2295,7 +2295,7 @@ static void tm_optimize_bits_sfbs_cont (
     #pragma omp single
     {
       n_threads = omp_get_num_threads();
-      all_local_scores = (double **)malloc(n_threads * sizeof(double *));
+      all_local_scores = (double **)malloc((size_t)n_threads * sizeof(double *));
     }
     int tid = omp_get_thread_num();
     double *local_scores = (double *)calloc(n_dims, sizeof(double));
@@ -2318,8 +2318,8 @@ static void tm_optimize_bits_sfbs_cont (
 
         for (uint64_t i = 0; i < nn; i++) {
           uint64_t j = (uint64_t)st + i;
-          av_ptrs[i] = raw_codes + pair_row_a[j] * n_dims;
-          bv_ptrs[i] = raw_codes + pair_row_b[j] * n_dims;
+          av_ptrs[i] = raw_codes + (uint64_t)pair_row_a[j] * n_dims;
+          bv_ptrs[i] = raw_codes + (uint64_t)pair_row_b[j] * n_dims;
         }
 
         double inv_idcg = 1.0 / idcg[ni];
@@ -2358,9 +2358,10 @@ static void tm_optimize_bits_sfbs_cont (
       {
         int64_t best_bit = -1;
         double best_score = -INFINITY;
+        double tie_eps = (phase == 1) ? -1e-8 : 1e-8;
         for (uint64_t b = 0; b < n_dims; b++) {
           if (phase == 1 ? !selected[b] : selected[b]) continue;
-          if (scores[b] > best_score) { best_score = scores[b]; best_bit = (int64_t)b; }
+          if (scores[b] > best_score + tie_eps) { best_score = scores[b]; best_bit = (int64_t)b; }
         }
         best_score = n_nodes > 0 ? best_score / (double)n_nodes : 0.0;
 
@@ -2369,7 +2370,7 @@ static void tm_optimize_bits_sfbs_cont (
           bool added = false;
           if (best_bit >= 0 && active->n < max_bits) {
             double gain = (active->n == 0) ? best_score : (best_score - current_score);
-            if (gain > 0.0 || active->n < min_dims) {
+            if (gain > 1e-8 || active->n < min_dims) {
               tk_incr_commit_cont(raw_codes, pair_row_a, pair_row_b,
                 distances, n_pairs, n_dims, (uint64_t)best_bit, 1.0);
               selected[best_bit] = 1;
@@ -2399,7 +2400,7 @@ static void tm_optimize_bits_sfbs_cont (
         case 1: {
           if (best_bit >= 0) {
             double gain = best_score - current_score;
-            if (gain > 0.0) {
+            if (gain > -1e-8) {
               tk_incr_commit_cont(raw_codes, pair_row_a, pair_row_b,
                 distances, n_pairs, n_dims, (uint64_t)best_bit, -1.0);
               selected[best_bit] = 0;
@@ -2444,7 +2445,7 @@ static void tm_optimize_bits_sfbs_cont (
           break;
         }
         case 2: {
-          if (best_bit >= 0 && best_score > pre_swap_score) {
+          if (best_bit >= 0 && best_score > pre_swap_score + 1e-8) {
             tk_incr_commit_cont(raw_codes, pair_row_a, pair_row_b,
               distances, n_pairs, n_dims, (uint64_t)best_bit, 1.0);
             selected[best_bit] = 1;

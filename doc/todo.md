@@ -1,22 +1,16 @@
 # Active
 
 - optimize.regressor separate search/final datasets with different
-  dimensionalities (search first 32 dims, final all 4096, optimize_bits/restrict after)
+  dimensionalities (param search on the top 32 dims by number of thresholds, and
+  then a final train with best params all 4096, with dynamic quantizer after)
 
 - Documentation/project cleanup
-- heterogeneous space
 
 # Current
 
-- Run end to end and update defaults
-- Make heterogeneous (keep spot checks the same; print label/doc nodes together)
-- Create label only index
-- Asym neighborhoods lookup for train-spectral/train-predicted/dev/test against
-  spectral label codes
-- Spot check found label neighbors
 - Fit regression predicting k from neighbors lists
 - Evaluate regression-selected tags against train/dev/test
-- Rewrite docs in favor of new approach
+- Rewrite docs in favor of new approach:
 - Clean up todo.md
 
 # Now

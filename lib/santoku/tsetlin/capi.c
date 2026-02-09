@@ -252,6 +252,11 @@ static inline void tk_tsetlin_init (
     tk_lua_verror(L, 3, "create", "clause_tolerance", "must be greater than 0");
   if (!clause_maximum)
     tk_lua_verror(L, 3, "create", "clause_maximum", "must be greater than 0");
+  if (clause_tolerance > clause_maximum) {
+    unsigned int tmp = clause_tolerance;
+    clause_tolerance = clause_maximum;
+    clause_maximum = tmp;
+  }
   if (!target)
     tk_lua_verror(L, 3, "create", "target", "must be greater than 0");
   if (state_bits < 2)
@@ -889,6 +894,11 @@ static inline int tk_tsetlin_reconfigure (lua_State *L)
   unsigned int new_clauses = tk_lua_fcheckunsigned(L, 2, "reconfigure", "clauses");
   unsigned int new_tolerance = tk_lua_fcheckunsigned(L, 2, "reconfigure", "clause_tolerance");
   unsigned int new_maximum = tk_lua_fcheckunsigned(L, 2, "reconfigure", "clause_maximum");
+  if (new_tolerance > new_maximum) {
+    unsigned int tmp = new_tolerance;
+    new_tolerance = new_maximum;
+    new_maximum = tmp;
+  }
   unsigned int new_target = tk_lua_fcheckunsigned(L, 2, "reconfigure", "target");
   double new_specificity = tk_lua_fcheckposdouble(L, 2, "reconfigure", "specificity");
   new_clauses = TK_CVEC_BITS_BYTES(new_clauses) * TK_CVEC_BITS;

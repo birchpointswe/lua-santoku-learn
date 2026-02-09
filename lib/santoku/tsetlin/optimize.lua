@@ -471,9 +471,33 @@ local function optimize_tm (args)
   local global_dev = args.search_dev or 0.2
   local metric_fn = err.assert(args.search_metric, "search_metric required")
   local each_cb = args.each
+  local search_subsample = args.search_subsample
 
   local param_names = { "clauses", "clause_tolerance", "clause_maximum", "target", "specificity" }
   local samplers = M.build_samplers(args, param_names, global_dev)
+
+  local search_data
+  if search_subsample and search_subsample < 1.0 then
+    local search_n = num.floor(args.samples * search_subsample)
+    local search_ids = ivec.create(args.samples):fill_indices():shuffle():setn(search_n):asc()
+    local search_problems = cvec.create()
+    args.problems:bits_select(nil, search_ids, args.features, search_problems)
+    local search_targets = dvec.create()
+    args.targets:mtx_select(nil, search_ids, args.outputs, search_targets)
+    search_data = {
+      samples = search_n,
+      problems = search_problems,
+      targets = search_targets,
+      grouped = args.grouped,
+    }
+  else
+    search_data = {
+      samples = args.samples,
+      problems = args.problems,
+      targets = args.targets,
+      grouped = args.grouped,
+    }
+  end
 
   local search_tm
   if not M.all_fixed(samplers) then
@@ -484,6 +508,9 @@ local function optimize_tm (args)
   end
 
   local function constrain_tm_params (params)
+    if params.clause_tolerance and params.clause_maximum and params.clause_tolerance > params.clause_maximum then
+      params.clause_tolerance, params.clause_maximum = params.clause_maximum, params.clause_tolerance
+    end
     if params.target and params.clause_tolerance then
       local max_target = 8 * params.clause_tolerance
       if params.target > max_target then
@@ -507,16 +534,8 @@ local function optimize_tm (args)
   local function search_trial_fn (params, info)
     constrain_tm_params(params)
     search_tm:reconfigure(params)
-    local train_args = {
-      codes = args.codes,
-      samples = args.samples,
-      problems = args.problems,
-      solutions = args.solutions,
-      targets = args.targets,
-      grouped = args.grouped,
-    }
-    train_tm_simple(search_tm, train_args, params, iters_search)
-    local score, metrics = metric_fn(search_tm, train_args)
+    train_tm_simple(search_tm, search_data, params, iters_search)
+    local score, metrics = metric_fn(search_tm, search_data)
     if each_cb then
       each_cb(search_tm, false, metrics, params, iters_search,
         info.round, info.trial, info.rounds, info.trials,
@@ -631,8 +650,8 @@ M.build_spectral_nystrom = function (args)
   local decay = args.decay
   local bandwidth = args.bandwidth
 
-  local raw_codes, ids, effective_dims, landmark_ids, actual_landmarks, trace_ratio =
-    spectral.encode_nystrom({
+  local raw_codes, ids, encoder =
+    spectral.encode({
       inv = index,
       landmarks_inv = landmarks_index ~= index and landmarks_index or nil,
       n_landmarks = args.n_landmarks or 0,
@@ -643,6 +662,11 @@ M.build_spectral_nystrom = function (args)
       normalized = args.normalized,
       cholesky = args.cholesky,
     })
+
+  local effective_dims = encoder and encoder:dims() or 0
+  local landmark_ids = encoder and encoder:landmark_ids() or nil
+  local actual_landmarks = encoder and encoder:n_landmarks() or 0
+  local trace_ratio = encoder and encoder:trace_ratio() or 0.0
 
   if each_cb then
     each_cb({
@@ -662,6 +686,7 @@ M.build_spectral_nystrom = function (args)
     n_landmarks = actual_landmarks,
     decay = decay,
     bandwidth = bandwidth,
+    encoder = encoder,
   }
 end
 
