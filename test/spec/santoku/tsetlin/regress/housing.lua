@@ -28,6 +28,7 @@ local cfg = {
     rounds = 6,
     trials = 40,
     iterations = 80,
+    subsample = 0.2,
     metric = "nmae",
   },
   training = {
@@ -82,6 +83,7 @@ test("tsetlin regressor", function ()
     search_rounds = cfg.search.rounds,
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
+    search_subsample = cfg.search.subsample,
     final_batch = cfg.training.batch,
     final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,

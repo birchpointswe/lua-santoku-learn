@@ -281,36 +281,61 @@ static inline int tk_nystrom_encoder_gc (lua_State *L) {
 
 static inline int tk_nystrom_encode_lua (lua_State *L) {
   tk_nystrom_encoder_t *enc = tk_nystrom_encoder_peek(L, 1);
-  tk_ivec_t *feats = tk_ivec_peek(L, 2, "features");
+  tk_ivec_t *sparse = tk_ivec_peek(L, 2, "sparse_bits");
+  uint64_t n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
+  uint64_t n_features = tk_lua_checkunsigned(L, 4, "n_features");
   lua_getfenv(L, 1);
   lua_getfield(L, -1, "inv");
   tk_inv_t *inv = tk_inv_peek(L, -1);
   lua_pop(L, 2);
   tk_inv_rank_weights_t rw;
   tk_inv_precompute_rank_weights(&rw, inv->n_ranks, enc->decay);
-  double *sims = malloc(enc->m * sizeof(double));
+  uint64_t d = enc->d;
+  uint64_t m = enc->m;
+  tk_dvec_t *out = tk_dvec_create(L, n_samples * d, 0, 0);
+  out->n = n_samples * d;
   #pragma omp parallel
   {
     double thr_q[TK_INV_MAX_RANKS], thr_e[TK_INV_MAX_RANKS], thr_i[TK_INV_MAX_RANKS];
-    #pragma omp for schedule(static)
-    for (uint64_t j = 0; j < enc->m; j++) {
-      if (enc->lm_sids[j] >= 0) {
-        size_t ln;
-        int64_t *lb = tk_inv_sget(inv, enc->lm_sids[j], &ln);
-        sims[j] = tk_inv_similarity_fast(inv->ranks->a, inv->weights->a, inv->n_ranks,
-          feats->a, (size_t)feats->n, lb, ln, enc->bandwidth, &rw, thr_q, thr_e, thr_i);
-      } else {
-        sims[j] = 0.0;
+    double *sims = (double *)malloc(m * sizeof(double));
+    int64_t *feat_buf = (int64_t *)malloc(n_features * sizeof(int64_t));
+    #pragma omp for schedule(dynamic, 16)
+    for (uint64_t i = 0; i < n_samples; i++) {
+      int64_t lo = (int64_t)(i * n_features);
+      int64_t hi = (int64_t)((i + 1) * n_features);
+      uint64_t start, end;
+      {
+        uint64_t l = 0, r = sparse->n;
+        while (l < r) { uint64_t mid = l + (r - l) / 2; if (sparse->a[mid] < lo) l = mid + 1; else r = mid; }
+        start = l;
       }
+      {
+        uint64_t l = start, r = sparse->n;
+        while (l < r) { uint64_t mid = l + (r - l) / 2; if (sparse->a[mid] < hi) l = mid + 1; else r = mid; }
+        end = l;
+      }
+      uint64_t nf = end - start;
+      for (uint64_t f = 0; f < nf; f++)
+        feat_buf[f] = sparse->a[start + f] - lo;
+      for (uint64_t j = 0; j < m; j++) {
+        if (enc->lm_sids[j] >= 0 && nf > 0) {
+          size_t ln;
+          int64_t *lb = tk_inv_sget(inv, enc->lm_sids[j], &ln);
+          sims[j] = tk_inv_similarity_fast(inv->ranks->a, inv->weights->a, inv->n_ranks,
+            feat_buf, (size_t)nf, lb, ln, enc->bandwidth, &rw, thr_q, thr_e, thr_i);
+        } else {
+          sims[j] = 0.0;
+        }
+      }
+      double *row = out->a + i * d;
+      cblas_dgemv(CblasRowMajor, CblasTrans,
+        (int)m, (int)d, 1.0, enc->projection, (int)d, sims, 1, 0.0, row, 1);
+      for (uint64_t k = 0; k < d; k++)
+        row[k] -= enc->adjustment[k];
     }
+    free(sims);
+    free(feat_buf);
   }
-  tk_dvec_t *out = tk_dvec_create(L, enc->d, 0, 0);
-  out->n = enc->d;
-  cblas_dgemv(CblasRowMajor, CblasTrans,
-    (int)enc->m, (int)enc->d, 1.0, enc->projection, (int)enc->d, sims, 1, 0.0, out->a, 1);
-  for (uint64_t k = 0; k < enc->d; k++)
-    out->a[k] -= enc->adjustment[k];
-  free(sims);
   return 1;
 }
 
