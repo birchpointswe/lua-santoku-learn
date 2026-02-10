@@ -1,5 +1,6 @@
 #include <santoku/tsetlin/csr.h>
 #include <santoku/cvec/ext.h>
+#include <santoku/ivec/ext.h>
 #include <omp.h>
 #include <float.h>
 #include <math.h>
@@ -336,7 +337,46 @@ fail:
   return luaL_error(L, "symmetrize: allocation failed");
 }
 
+static int tm_csr_bits_to_hv_encoder_fn (lua_State *L)
+{
+  tk_ivec_t *features = tk_ivec_peek(L, 1, "features");
+  tk_ivec_t *offsets = tk_ivec_peek(L, 2, "offsets");
+  tk_cvec_t *tokens = tk_cvec_peek(L, lua_upvalueindex(1), "tokens");
+  uint64_t n_tokens = (uint64_t)lua_tointeger(L, lua_upvalueindex(2));
+  uint64_t hv_size = (uint64_t)lua_tointeger(L, lua_upvalueindex(3));
+  uint64_t shift_stride = (uint64_t)lua_tointeger(L, lua_upvalueindex(4));
+  tk_ivec_bits_to_hv(L, offsets, features, tokens, n_tokens, hv_size, shift_stride);
+  return 1;
+}
+
+static int tm_csr_bits_to_hv (lua_State *L)
+{
+  int nargs = lua_gettop(L);
+  tk_ivec_t *features = tk_ivec_peek(L, 1, "features");
+  tk_ivec_t *offsets = tk_ivec_peek(L, 2, "offsets");
+  uint64_t hv_size = tk_lua_checkunsigned(L, 3, "hv_size");
+  uint64_t n_bits = tk_lua_checkunsigned(L, 4, "n_bits");
+  uint64_t shift_stride = (nargs >= 5 && !lua_isnil(L, 5)) ? tk_lua_checkunsigned(L, 5, "shift_stride") : 0;
+  if (hv_size == 0) return luaL_error(L, "hv_size must be > 0");
+  if (n_bits == 0) return luaL_error(L, "n_bits must be > 0");
+  if (n_bits > hv_size) return luaL_error(L, "n_bits must be <= hv_size");
+  uint64_t n_tokens = 0;
+  tk_hv_generate_tokens(L, features, hv_size, n_bits, &n_tokens);
+  int tok_idx = lua_gettop(L);
+  tk_cvec_t *tokens = tk_cvec_peek(L, tok_idx, "tokens");
+  lua_pushvalue(L, tok_idx);
+  lua_pushinteger(L, (lua_Integer)n_tokens);
+  lua_pushinteger(L, (lua_Integer)hv_size);
+  lua_pushinteger(L, (lua_Integer)shift_stride);
+  lua_pushcclosure(L, tm_csr_bits_to_hv_encoder_fn, 4);
+  int enc_idx = lua_gettop(L);
+  tk_ivec_bits_to_hv(L, offsets, features, tokens, n_tokens, hv_size, shift_stride);
+  lua_pushvalue(L, enc_idx);
+  return 2;
+}
+
 static luaL_Reg tm_csr_fns[] = {
+  { "to_hypervector", tm_csr_bits_to_hv },
   { "bipartite_neg", tm_csr_bipartite_neg },
   { "random_pairs", tm_csr_random_pairs },
   { "weight_from_index", tm_csr_weight_from_index },
