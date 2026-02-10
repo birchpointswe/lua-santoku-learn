@@ -972,8 +972,10 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
 static inline int tk_booleanizer_create_lua (lua_State *L)
 {
   lua_settop(L, 1);
-  if (lua_isnil(L, 1))
+  if (lua_isnil(L, 1)) {
     lua_newtable(L);
+    lua_replace(L, 1);
+  }
 
   tk_iuset_t *categorical_user_keys_int = tk_iuset_create(L, 0);
   tk_cuset_t *categorical_user_keys_string = tk_cuset_create(L, 0);
