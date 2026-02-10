@@ -1,5 +1,6 @@
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local booleanizer = require("santoku.tsetlin.booleanizer")
+local hlth = require("santoku.tsetlin.hlth")
 local inv = require("santoku.tsetlin.inv")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
@@ -359,7 +360,7 @@ end
 
 M.read_california_housing = function (fp, opts)
   opts = opts or {}
-  local n_thresholds = opts.n_thresholds or 0
+  local n_bins = opts.n_bins or opts.n_thresholds or 0
   local max = opts.max
   local feature_cols = opts.feature_cols or {
     "longitude", "latitude", "housing_median_age",
@@ -392,12 +393,20 @@ M.read_california_housing = function (fp, opts)
       data[#data + 1] = row
     end
   end
-  local bzr = booleanizer.create({ n_thresholds = n_thresholds })
+  local cont = dvec.create()
   for _, row in ipairs(data) do
     for _, col in ipairs(feature_cols) do
-      local val = tonumber(row[col])
-      if val then bzr:observe(col, val) end
+      cont:push(tonumber(row[col]) or 0)
     end
+  end
+  local encoder = hlth.thermometer_encoder({
+    input = cont,
+    n_samples = #data,
+    n_input_dims = #feature_cols,
+    n_bins = n_bins,
+  })
+  local bzr = booleanizer.create()
+  for _, row in ipairs(data) do
     for _, col in ipairs(categorical_cols) do
       local val = row[col]
       if val then bzr:observe(col, val) end
@@ -411,9 +420,10 @@ M.read_california_housing = function (fp, opts)
   end
   return {
     data = shuffled,
+    encoder = encoder,
     booleanizer = bzr,
     n = #shuffled,
-    n_features = bzr:features(),
+    n_features = encoder:n_bits() + bzr:features(),
     feature_cols = feature_cols,
     categorical_cols = categorical_cols,
     target_col = target_col,
@@ -421,22 +431,36 @@ M.read_california_housing = function (fp, opts)
 end
 
 local function _encode_housing_split (dataset, rows)
+  local encoder = dataset.encoder
   local bzr = dataset.booleanizer
   local feature_cols = dataset.feature_cols
   local categorical_cols = dataset.categorical_cols
   local target_col = dataset.target_col
-  local n_features = dataset.n_features
+  local n_thermo = encoder:n_bits()
+  local n_features = n_thermo + bzr:features()
+  local dims = encoder:dims()
+  local threshs = encoder:thresholds()
   local bits = ivec.create()
   local targets = dvec.create()
   for i, row in ipairs(rows) do
-    local sample_id = i - 1
-    for _, col in ipairs(feature_cols) do
-      local val = tonumber(row[col])
-      if val then bzr:encode(sample_id, col, val, bits) end
+    local base = (i - 1) * n_features
+    local vals = {}
+    for j, col in ipairs(feature_cols) do
+      vals[j] = tonumber(row[col]) or 0
+    end
+    for k = 0, n_thermo - 1 do
+      if vals[dims:get(k) + 1] > threshs:get(k) then
+        bits:push(base + k)
+      end
     end
     for _, col in ipairs(categorical_cols) do
       local val = row[col]
-      if val then bzr:encode(sample_id, col, val, bits) end
+      if val then
+        local bit = bzr:feature(col, val)
+        if bit then
+          bits:push(base + n_thermo + bit)
+        end
+      end
     end
     targets:push(tonumber(row[target_col]))
   end
