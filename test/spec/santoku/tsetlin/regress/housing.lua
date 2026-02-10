@@ -19,10 +19,10 @@ local cfg = {
   tm = {
     outputs = 1,
     clauses = 64,
-    clause_tolerance = { def = 73, min = 8, max = 128, int = true },
-    clause_maximum = { def = 79, min = 16, max = 128, int = true },
-    target = { def = 37, min = 4, max = 64, int = true },
-    specificity = { def = 925, min = 50, max = 2000 },
+    clause_tolerance = { def = 73, min = 8, max = 1024, int = true },
+    clause_maximum = { def = 79, min = 8, max = 1024, int = true },
+    target = { def = 37, min = 8, max = 1024, int = true },
+    specificity = { def = 925, min = 2, max = 2000 },
   },
   search = {
     rounds = 6,
