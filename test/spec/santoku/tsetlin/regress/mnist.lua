@@ -29,6 +29,7 @@ local cfg = {
     rounds = 6,
     trials = 20,
     iterations = 40,
+    subsample = 0.2,
   },
   training = {
     patience = 10,
@@ -81,6 +82,7 @@ test("mnist classifier", function ()
     search_rounds = cfg.search.rounds,
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
+    search_subsample = cfg.search.subsample,
     final_batch = cfg.training.batch,
     final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,

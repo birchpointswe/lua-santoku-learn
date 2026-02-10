@@ -644,8 +644,97 @@ static inline int tk_hlth_sfbs_quantizer_lua(lua_State *L) {
   return 1;
 }
 
+static inline int tk_hlth_thermometer_encoder_lua(lua_State *L) {
+  lua_settop(L, 1);
+  luaL_checktype(L, 1, LUA_TTABLE);
+
+  lua_getfield(L, 1, "input");
+  tk_dvec_t *input_dvec = tk_dvec_peek(L, -1, "input");
+  lua_pop(L, 1);
+  double *inp = input_dvec->a;
+
+  uint64_t n_samples = tk_lua_fcheckunsigned(L, 1, "thermometer_encoder", "n_samples");
+  uint64_t d_in = tk_lua_fcheckunsigned(L, 1, "thermometer_encoder", "n_input_dims");
+  uint64_t B = tk_lua_foptunsigned(L, 1, "thermometer_encoder", "n_bins", 0);
+
+  double **dt = (double **)malloc(d_in * sizeof(double *));
+  uint64_t *dn = (uint64_t *)malloc(d_in * sizeof(uint64_t));
+
+  #pragma omp parallel
+  {
+    double *col = (double *)malloc(n_samples * sizeof(double));
+    #pragma omp for schedule(dynamic)
+    for (uint64_t d = 0; d < d_in; d++) {
+      for (uint64_t i = 0; i < n_samples; i++)
+        col[i] = inp[i * d_in + d];
+      tk_dvec_t tmp = { .a = col, .n = n_samples, .m = n_samples };
+      tk_dvec_asc(&tmp, 0, n_samples);
+      if (B == 0) {
+        uint64_t nu = 0;
+        for (uint64_t i = 0; i < n_samples; i++)
+          if (i == 0 || col[i] != col[i - 1]) nu++;
+        dt[d] = (double *)malloc(nu * sizeof(double));
+        dn[d] = nu;
+        uint64_t j = 0;
+        for (uint64_t i = 0; i < n_samples; i++)
+          if (i == 0 || col[i] != col[i - 1]) dt[d][j++] = col[i];
+      } else {
+        dt[d] = (double *)malloc(B * sizeof(double));
+        dn[d] = B;
+        for (uint64_t b = 0; b < B; b++) {
+          uint64_t qi = (uint64_t)(((double)(b + 1) / (double)(B + 1)) * (double)n_samples);
+          if (qi >= n_samples) qi = n_samples - 1;
+          dt[d][b] = col[qi];
+        }
+      }
+    }
+    free(col);
+  }
+
+  uint64_t total_bits = 0;
+  for (uint64_t d = 0; d < d_in; d++) total_bits += dn[d];
+
+  tk_ivec_t *out_dims = tk_ivec_create(L, total_bits, 0, 0);
+  int out_dims_idx = lua_gettop(L);
+  tk_dvec_t *out_thresholds = tk_dvec_create(L, total_bits, 0, 0);
+  int out_thresholds_idx = lua_gettop(L);
+  out_dims->n = total_bits;
+  out_thresholds->n = total_bits;
+
+  uint64_t pos = 0;
+  for (uint64_t d = 0; d < d_in; d++) {
+    for (uint64_t k = 0; k < dn[d]; k++) {
+      out_dims->a[pos] = (int64_t)d;
+      out_thresholds->a[pos] = dt[d][k];
+      pos++;
+    }
+    free(dt[d]);
+  }
+  free(dt); free(dn);
+
+  tk_sfbs_encoder_t *enc = tk_lua_newuserdata(L, tk_sfbs_encoder_t,
+    TK_SFBS_ENCODER_MT, tk_sfbs_encoder_mt_fns, tk_sfbs_encoder_gc);
+  int Ei = lua_gettop(L);
+  enc->bit_dims = out_dims;
+  enc->bit_thresholds = out_thresholds;
+  enc->n_dims = d_in;
+  enc->n_bits = total_bits;
+  enc->destroyed = false;
+
+  lua_newtable(L);
+  lua_pushvalue(L, out_dims_idx);
+  lua_setfield(L, -2, "dims");
+  lua_pushvalue(L, out_thresholds_idx);
+  lua_setfield(L, -2, "thresholds");
+  lua_setfenv(L, Ei);
+
+  lua_pushvalue(L, Ei);
+  return 1;
+}
+
 static luaL_Reg tk_hlth_fns[] = {
   { "sfbs_quantizer", tk_hlth_sfbs_quantizer_lua },
+  { "thermometer_encoder", tk_hlth_thermometer_encoder_lua },
   { NULL, NULL }
 };
 

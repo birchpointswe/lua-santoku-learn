@@ -13,6 +13,8 @@ local utc = require("santoku.utc")
 
 local M = {}
 
+local _dvec_mt = getmetatable(dvec.create())
+
 local function key_int (v)
   return v and tostring(num.floor(v + 0.5)) or "nil"
 end
@@ -360,8 +362,8 @@ M.search = function (args)
 
 end
 
-local function create_tm (args)
-  return tm.create({
+local function create_tm (capi, args)
+  return capi.create({
     features = args.features,
     outputs = args.outputs,
     clauses = 8,
@@ -373,8 +375,8 @@ local function create_tm (args)
   })
 end
 
-local function create_final_tm (args, params)
-  return tm.create({
+local function create_final_tm (capi, args, params)
+  return capi.create({
     features = args.features,
     outputs = args.outputs,
     clauses = params.clauses,
@@ -472,6 +474,8 @@ local function optimize_tm (args)
   local metric_fn = err.assert(args.search_metric, "search_metric required")
   local each_cb = args.each
   local search_subsample = args.search_subsample
+  local dvec_input = getmetatable(args.problems) == _dvec_mt
+  local capi = dvec_input and regressor or tm
 
   local param_names = { "clauses", "clause_tolerance", "clause_maximum", "target", "specificity" }
   local samplers = M.build_samplers(args, param_names, global_dev)
@@ -480,28 +484,48 @@ local function optimize_tm (args)
   if search_subsample and search_subsample < 1.0 then
     local search_n = num.floor(args.samples * search_subsample)
     local search_ids = ivec.create(args.samples):fill_indices():shuffle():setn(search_n):asc()
-    local search_problems = cvec.create()
-    args.problems:bits_select(nil, search_ids, args.features, search_problems)
-    local search_targets = dvec.create()
-    args.targets:mtx_select(nil, search_ids, args.outputs, search_targets)
+    local search_problems
+    if dvec_input then
+      search_problems = dvec.create()
+      local dvec_cols = (args.grouped and args.outputs or 1) * args.features
+      args.problems:mtx_select(nil, search_ids, dvec_cols, search_problems)
+    else
+      search_problems = cvec.create()
+      local cvec_features = args.cvec_features or ((args.grouped and args.outputs or 1) * args.features * 2)
+      args.problems:bits_select(nil, search_ids, cvec_features, search_problems)
+    end
     search_data = {
       samples = search_n,
       problems = search_problems,
-      targets = search_targets,
       grouped = args.grouped,
     }
+    if args.targets then
+      local search_targets = dvec.create()
+      args.targets:mtx_select(nil, search_ids, args.outputs, search_targets)
+      search_data.targets = search_targets
+    elseif args.solutions then
+      local search_solutions = ivec.create()
+      search_solutions:copy(args.solutions, search_ids)
+      search_data.solutions = search_solutions
+    elseif args.codes then
+      local search_codes = cvec.create()
+      args.codes:bits_select(nil, search_ids, args.outputs, search_codes)
+      search_data.codes = search_codes
+    end
   else
     search_data = {
       samples = args.samples,
       problems = args.problems,
       targets = args.targets,
+      solutions = args.solutions,
+      codes = args.codes,
       grouped = args.grouped,
     }
   end
 
   local search_tm
   if not M.all_fixed(samplers) then
-    search_tm = create_tm({
+    search_tm = create_tm(capi, {
       features = args.features,
       outputs = args.outputs,
     })
@@ -568,7 +592,7 @@ local function optimize_tm (args)
   end
 
   constrain_tm_params(best_params)
-  local final_tm = create_final_tm({
+  local final_tm = create_final_tm(capi, {
     features = args.features,
     outputs = args.outputs,
   }, best_params)
