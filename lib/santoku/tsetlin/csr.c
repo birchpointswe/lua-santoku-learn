@@ -375,7 +375,52 @@ static int tm_csr_bits_to_hv (lua_State *L)
   return 2;
 }
 
+static int tm_csr_to_csc (lua_State *L)
+{
+  tk_ivec_t *tokens = tk_ivec_peek(L, 1, "tokens");
+  uint64_t n_samples = tk_lua_checkunsigned(L, 2, "n_samples");
+  uint64_t n_tokens = tk_lua_checkunsigned(L, 3, "n_tokens");
+
+  uint64_t *counts = (uint64_t *)calloc(n_tokens, sizeof(uint64_t));
+  if (!counts)
+    return luaL_error(L, "to_csc: allocation failed");
+
+  for (uint64_t i = 0; i < tokens->n; i++) {
+    int64_t v = tokens->a[i];
+    if (v < 0) continue;
+    uint64_t tok = (uint64_t)v % n_tokens;
+    uint64_t s = (uint64_t)v / n_tokens;
+    if (s < n_samples)
+      counts[tok]++;
+  }
+
+  tk_ivec_t *off = tk_ivec_create(L, n_tokens + 1, 0, 0);
+  off->n = n_tokens + 1;
+  off->a[0] = 0;
+  for (uint64_t t = 0; t < n_tokens; t++)
+    off->a[t + 1] = off->a[t] + (int64_t)counts[t];
+
+  uint64_t total = (uint64_t)off->a[n_tokens];
+  tk_ivec_t *idx = tk_ivec_create(L, total, 0, 0);
+  idx->n = total;
+
+  memset(counts, 0, n_tokens * sizeof(uint64_t));
+  for (uint64_t i = 0; i < tokens->n; i++) {
+    int64_t v = tokens->a[i];
+    if (v < 0) continue;
+    uint64_t tok = (uint64_t)v % n_tokens;
+    uint64_t s = (uint64_t)v / n_tokens;
+    if (s >= n_samples) continue;
+    idx->a[(uint64_t)off->a[tok] + counts[tok]] = (int64_t)s;
+    counts[tok]++;
+  }
+
+  free(counts);
+  return 2;
+}
+
 static luaL_Reg tm_csr_fns[] = {
+  { "to_csc", tm_csr_to_csc },
   { "to_hypervector", tm_csr_bits_to_hv },
   { "bipartite_neg", tm_csr_bipartite_neg },
   { "random_pairs", tm_csr_random_pairs },

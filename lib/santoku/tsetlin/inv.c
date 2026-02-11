@@ -4,9 +4,7 @@
 
 static inline int tk_inv_create_lua (lua_State *L)
 {
-  int i_weights = -1;
   tk_dvec_t *weights = NULL;
-  int i_ranks = -1;
   tk_ivec_t *ranks = NULL;
   uint64_t features = 0;
   uint64_t n_ranks = 0;
@@ -15,17 +13,15 @@ static inline int tk_inv_create_lua (lua_State *L)
     features = tk_lua_checkunsigned(L, -1, "features");
   } else {
     weights = tk_dvec_peek(L, -1, "features");
-    i_weights = tk_lua_absindex(L, -1);
     features = weights->n;
   }
   lua_getfield(L, 1, "ranks");
   if (!lua_isnil(L, -1)) {
     ranks = tk_ivec_peek(L, -1, "ranks");
-    i_ranks = tk_lua_absindex(L, -1);
   }
   if (ranks != NULL)
     n_ranks = tk_lua_fcheckunsigned(L, 1, "create", "n_ranks");
-  tk_inv_create(L, features, weights, n_ranks, ranks, i_weights, i_ranks);
+  tk_inv_create(L, features, weights, n_ranks, ranks);
   return 1;
 }
 
