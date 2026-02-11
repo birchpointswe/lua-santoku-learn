@@ -291,9 +291,13 @@ function M.make_classifier_log (stopwatch)
       local d, dd = stopwatch()
       timing = str.format(" (%.2fs +%.2fs)", d, dd)
     end
-    str.printf("[CLASSIFY %s E%d] C=%d L=%d/%d T=%d S=%.0f F1=%.4f%s%s\n",
+    local absorb = ""
+    if params.absorb_interval then
+      absorb = str.format(" AI=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
+    end
+    str.printf("[CLASSIFY %s E%d] C=%d L=%d/%d T=%d S=%.0f%s F1=%.4f%s%s\n",
       phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
-      params.target, params.specificity, metrics.f1, best, timing)
+      params.target, params.specificity, absorb, metrics.f1, best, timing)
   end
 end
 
@@ -320,9 +324,13 @@ function M.make_regressor_log (stopwatch)
       local d, dd = stopwatch()
       timing = str.format(" (%.2fs +%.2fs)", d, dd)
     end
-    str.printf("[REGRESS %s E%d] C=%d L=%d/%d T=%d S=%.0f MAE=%.4f%s%s\n",
+    local absorb = ""
+    if params.absorb_interval then
+      absorb = str.format(" AI=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
+    end
+    str.printf("[REGRESS %s E%d] C=%d L=%d/%d T=%d S=%.0f%s MAE=%.4f%s%s\n",
       phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
-      params.target, params.specificity, mae, best, timing)
+      params.target, params.specificity, absorb, mae, best, timing)
   end
 end
 
@@ -349,9 +357,13 @@ function M.make_regressor_acc_log (stopwatch)
       local d, dd = stopwatch()
       timing = str.format(" (%.2fs +%.2fs)", d, dd)
     end
-    str.printf("[REGRESS %s E%d] C=%d L=%d/%d T=%d S=%.0f ACC=%.1f%%%s%s\n",
+    local absorb = ""
+    if params.absorb_interval then
+      absorb = str.format(" AI=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
+    end
+    str.printf("[REGRESS %s E%d] C=%d L=%d/%d T=%d S=%.0f%s ACC=%.1f%%%s%s\n",
       phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
-      params.target, params.specificity, acc, best, timing)
+      params.target, params.specificity, absorb, acc, best, timing)
   end
 end
 
@@ -373,9 +385,13 @@ function M.make_ranking_log (stopwatch)
       local d, dd = stopwatch()
       timing = str.format(" (%.2fs +%.2fs)", d, dd)
     end
-    str.printf("[RANKING %s E%d] C=%d L=%d/%d T=%d S=%.0f score=%.4f%s%s\n",
+    local absorb = ""
+    if params.absorb_interval then
+      absorb = str.format(" AI=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
+    end
+    str.printf("[RANKING %s E%d] C=%d L=%d/%d T=%d S=%.0f%s score=%.4f%s%s\n",
       phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
-      params.target, params.specificity, score, best, timing)
+      params.target, params.specificity, absorb, score, best, timing)
   end
 end
 

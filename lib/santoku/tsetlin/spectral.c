@@ -98,8 +98,7 @@ static inline void tk_spectral_sample_landmarks (
   tk_inv_rank_weights_t rw;
   tk_inv_precompute_rank_weights(&rw, inv->n_ranks, decay);
 
-  int64_t *ranks_arr = inv->ranks->a;
-  double *weights_arr = inv->weights->a;
+  tk_rank_t *rank_weights_arr = inv->rank_weights->a;
 
   memset(residual, 0, n_docs * sizeof(double));
   memset(L_mat, 0, n_docs * n_landmarks * sizeof(double));
@@ -124,7 +123,7 @@ static inline void tk_spectral_sample_landmarks (
     for (uint64_t i = 0; i < n_docs; i++) {
       size_t i_nbits;
       int64_t *i_bits = tk_inv_sget(inv, sid_map[i], &i_nbits);
-      residual[i] = tk_inv_similarity_fast(ranks_arr, weights_arr, inv->n_ranks,
+      residual[i] = tk_inv_similarity_fast(rank_weights_arr, inv->n_ranks,
                                            i_bits, i_nbits, i_bits, i_nbits,
                                            bandwidth, &rw, thr_q, thr_e, thr_i);
       initial_trace += residual[i];
@@ -176,7 +175,7 @@ static inline void tk_spectral_sample_landmarks (
       for (uint64_t i = 0; i < n_docs; i++) {
         size_t i_nbits;
         int64_t *i_bits = tk_inv_sget(inv, sid_map[i], &i_nbits);
-        double kip = tk_inv_similarity_fast(ranks_arr, weights_arr, inv->n_ranks,
+        double kip = tk_inv_similarity_fast(rank_weights_arr, inv->n_ranks,
                                             i_bits, i_nbits, p_bits, p_nbits,
                                             bandwidth, &rw, thr_q, thr_e, thr_i);
         double dot = (j > 0) ? cblas_ddot((int)j, &L_mat[i * n_landmarks], 1, pivot_row, 1) : 0.0;
@@ -321,7 +320,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
         if (enc->lm_sids[j] >= 0 && nf > 0) {
           size_t ln;
           int64_t *lb = tk_inv_sget(inv, enc->lm_sids[j], &ln);
-          sims[j] = tk_inv_similarity_fast(inv->ranks->a, inv->weights->a, inv->n_ranks,
+          sims[j] = tk_inv_similarity_fast(inv->rank_weights->a, inv->n_ranks,
             feat_buf, (size_t)nf, lb, ln, enc->bandwidth, &rw, thr_q, thr_e, thr_i);
         } else {
           sims[j] = 0.0;
@@ -560,7 +559,7 @@ static inline int tm_encode (lua_State *L) {
             size_t ln;
             int64_t *lb = tk_inv_sget(feat_inv, ctx->lm_sids[j], &ln);
             if (lb && ln > 0)
-              sim = tk_inv_similarity_fast(feat_inv->ranks->a, feat_inv->weights->a,
+              sim = tk_inv_similarity_fast(feat_inv->rank_weights->a,
                 feat_inv->n_ranks, qb, qn, lb, ln, bandwidth, &feat_rw, thr_q, thr_e, thr_i);
           }
           sims[j] = sim;
