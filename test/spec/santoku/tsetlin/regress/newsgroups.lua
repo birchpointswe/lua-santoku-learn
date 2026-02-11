@@ -1,4 +1,5 @@
 local arr = require("santoku.array")
+local csr = require("santoku.tsetlin.csr")
 local ds = require("santoku.tsetlin.dataset")
 local eval = require("santoku.tsetlin.evaluator")
 local ivec = require("santoku.ivec")
@@ -19,17 +20,22 @@ local cfg = {
     min_len = 1,
     max_run = 2,
     ngrams = 2,
-    cgrams_min = 3,
-    cgrams_max = 5,
-    cgrams_cross = true,
+    cgrams_min = 0,
+    cgrams_max = 0,
+    cgrams_cross = false,
     skips = 1,
   },
   feature_selection = {
-    per_class = 8192,
+    n_selected = 4096,
   },
   tm = {
     classes = 20,
-    clauses = 256,
+    features = 4096,
+    clauses = 32,
+    absorb_interval = { def = 1, min = 1, max = 10 },
+    absorb_threshold = { def = 0, min = 0, max = 127, int = true },
+    absorb_maximum = { def = 0, min = 0, max = 1024, int = true },
+    absorb_insert = { def = 1, min = 1, max = 126, int = true },
     clause_tolerance = { def = 8, min = 8, max = 1024, int = true },
     clause_maximum = { def = 8, min = 8, max = 1024, int = true },
     target = { def = 8, min = 8, max = 1024, int = true },
@@ -38,13 +44,13 @@ local cfg = {
   search = {
     rounds = 6,
     trials = 20,
-    iterations = 40,
+    iterations = 80,
     subsample = 0.2,
   },
   training = {
-    patience = 10,
+    patience = 400,
     batch = 40,
-    iterations = 400,
+    iterations = 2000,
   },
 }
 
@@ -66,74 +72,54 @@ test("newsgroups regressor", function ()
   local tok = tokenizer.create(cfg.tokenizer)
   tok:train({ corpus = train.problems })
   tok:finalize()
-  local n_features = tok:features()
-  str.printf("  Vocabulary: %d\n", n_features)
+  local n_tokens = tok:features()
+  str.printf("  Vocabulary: %d\n", n_tokens)
 
-  print("\nTokenizing train for feature selection")
-  train.tokens = tok:tokenize(train.problems)
-  train.solutions:add_scaled(cfg.tm.classes)
-
-  local token_index = tok:index()
-
-  print("\nFeature selection (union BNS)")
-  local union_ids, union_scores
-  union_ids, union_scores = train.tokens:bits_top_bns(
-    train.solutions, train.n, n_features, cfg.tm.classes, cfg.feature_selection.per_class, nil, "max")
-  str.printf("  Selected %d union features\n", union_ids:size())
-  str.printf("  BNS scores: min=%.2f max=%.2f mean=%.2f\n",
-    union_scores:min(), union_scores:max(), union_scores:sum() / union_scores:size())
-  train.solutions:add_scaled(-cfg.tm.classes)
-
-  print("\nTop 20 union features:")
-  local top_n = math.min(20, union_ids:size())
-  local feats = {}
-  for i = 0, top_n - 1 do
-    local fid = union_ids:get(i)
-    local score = union_scores:get(i)
-    local token = token_index[fid + 1] or tostring(fid)
-    feats[i + 1] = string.format("%s(%.2f)", token, score)
-  end
-  str.printf("  %s\n", table.concat(feats, ", "))
-
-  print("\nRestricting tokenizer to union features")
-  tok:restrict(union_ids)
-  n_features = union_ids:size()
-  str.printf("  Restricted vocab: %d\n", n_features)
-
-  print("\nTokenizing all splits with restricted tokenizer")
+  print("\nTokenizing")
   train.tokens = tok:tokenize(train.problems)
   validate.tokens = tok:tokenize(validate.problems)
   test_set.tokens = tok:tokenize(test_set.problems)
-  tok = nil -- luacheck: ignore
+  tok = nil
 
-  print("\nConverting to TM representation")
-  train.problems = train.tokens:bits_to_cvec(train.n, n_features, true)
-  validate.problems = validate.tokens:bits_to_cvec(validate.n, n_features, true)
-  test_set.problems = test_set.tokens:bits_to_cvec(test_set.n, n_features, true)
-  local tm_features = n_features
-  str.printf("  TM features: %d\n", tm_features)
+  if cfg.feature_selection.n_selected then
+    print("\nFeature ranking (Chi2)")
+    train.solutions:add_scaled(cfg.tm.classes)
+    local chi2_ranking = train.tokens:bits_top_chi2(
+      train.solutions, train.n, n_tokens, cfg.tm.classes,
+      cfg.feature_selection.n_selected, nil, "max")
+    train.tokens:bits_select(chi2_ranking, nil, n_tokens)
+    validate.tokens:bits_select(chi2_ranking, nil, n_tokens)
+    test_set.tokens:bits_select(chi2_ranking, nil, n_tokens)
+    n_tokens = chi2_ranking:size()
+    train.solutions:add_scaled(-cfg.tm.classes)
+    str.printf("  Selected %d features\n", n_tokens)
+  end
 
-  train.tokens = nil -- luacheck: ignore
-  validate.tokens = nil -- luacheck: ignore
-  test_set.tokens = nil -- luacheck: ignore
+  print("\nBuilding CSC index")
+  local csc_offsets, csc_indices = csr.to_csc(train.tokens, train.n, n_tokens)
+  str.printf("  Tokens: %d  Samples: %d\n", n_tokens, train.n)
 
   print("\nOptimizing Regressor")
   local stopwatch = utc.stopwatch()
   local predicted_buf = ivec.create()
   local t = optimize.regressor({
-
-    features = tm_features,
     outputs = cfg.tm.classes,
+    features = cfg.tm.features,
+    n_tokens = n_tokens,
+    absorb_interval = cfg.tm.absorb_interval,
+    absorb_threshold = cfg.tm.absorb_threshold,
+    absorb_maximum = cfg.tm.absorb_maximum,
+    absorb_insert = cfg.tm.absorb_insert,
     clauses = cfg.tm.clauses,
     clause_tolerance = cfg.tm.clause_tolerance,
     clause_maximum = cfg.tm.clause_maximum,
     target = cfg.tm.target,
     specificity = cfg.tm.specificity,
-
     samples = train.n,
-    problems = train.problems,
     solutions = train.solutions,
-
+    tokens = train.tokens,
+    csc_offsets = csc_offsets,
+    csc_indices = csc_indices,
     search_rounds = cfg.search.rounds,
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
@@ -141,24 +127,23 @@ test("newsgroups regressor", function ()
     final_batch = cfg.training.batch,
     final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,
-
     search_metric = function (regressor)
-      local scores = regressor:classify(validate.problems, validate.n, false, predicted_buf)
+      local scores = regressor:classify(
+        { tokens = validate.tokens, n_samples = validate.n },
+        validate.n, false, predicted_buf)
       local stats = eval.class_accuracy(scores, validate.solutions, validate.n, cfg.tm.classes)
       return stats.f1, stats
     end,
-
-    each = util.make_classifier_log(stopwatch)
-
+    each = util.make_classifier_log(stopwatch),
   })
 
   print()
   print("Final Evaluation")
 
   print("\nClassification metrics:")
-  local train_scores = t:classify(train.problems, train.n)
-  local val_scores = t:classify(validate.problems, validate.n)
-  local test_scores = t:classify(test_set.problems, test_set.n)
+  local train_scores = t:classify({ tokens = train.tokens, n_samples = train.n }, train.n, false)
+  local val_scores = t:classify({ tokens = validate.tokens, n_samples = validate.n }, validate.n, false)
+  local test_scores = t:classify({ tokens = test_set.tokens, n_samples = test_set.n }, test_set.n, false)
 
   local train_stats = eval.class_accuracy(train_scores, train.solutions, train.n, cfg.tm.classes)
   local val_stats = eval.class_accuracy(val_scores, validate.solutions, validate.n, cfg.tm.classes)

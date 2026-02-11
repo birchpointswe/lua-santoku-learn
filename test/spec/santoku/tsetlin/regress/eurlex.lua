@@ -34,10 +34,14 @@ local cfg = {
     skips = 1,
   },
   feature_selection = {
-    per_class = 8192,
+    n_selected = 16384,
   },
   regressor = {
-    clauses = 1024,
+    features = 4096,
+    absorb_interval = { def = 10, min = 1, max = 40 },
+    absorb_threshold = { def = 0, min = 0, max = 127, int = true },
+    absorb_maximum = { def = 0, min = 0, max = 128, int = true },
+    clauses = 256,
     clause_tolerance = { def = 743, min = 8, max = 1024, int = true },
     clause_maximum = { def = 848, min = 8, max = 1024, int = true },
     target = { def = 114, min = 8, max = 1024, int = true },
@@ -45,7 +49,7 @@ local cfg = {
     search_rounds = 6,
     search_trials = 10,
     search_iterations = 10,
-    search_subsample = 0.2,
+    search_subsample = 0.1,
     final_patience = 20,
     final_batch = 40,
     final_iterations = 400,
@@ -435,13 +439,11 @@ test("eurlex-docs", function()
     bandwidth = cfg.nystrom.bandwidth,
     rounds = cfg.nystrom.rounds,
     samples = cfg.nystrom.samples,
-    expected = {
-      ids = train_eval_ids,
-      offsets = train_eval_offsets,
-      neighbors = train_eval_neighbors,
-      weights = train_eval_weights,
-    },
-    eval = { ranking = cfg.eval.ranking },
+    expected_ids = train_eval_ids,
+    expected_offsets = train_eval_offsets,
+    expected_neighbors = train_eval_neighbors,
+    expected_weights = train_eval_weights,
+    ranking = cfg.eval.ranking,
     each = function(ev)
       util.spectral_log(ev)
       if ev.event == "eval" or ev.event == "done" then
@@ -753,35 +755,38 @@ test("eurlex-docs", function()
   dev.problems = nil
   test_set.problems = nil
 
+  local predicted_buf = dvec.create()
+  local n_selected = cfg.feature_selection.n_selected
+
   print("\nFeature selection for regressor (F-score)")
-  local union_feat_ids, _, class_offsets, class_feat_ids, class_scores = train.tokens:bits_top_reg_f(
-    train_raw_codes, train.n, n_tokens, train.dims, cfg.feature_selection.per_class)
-  str.printf("  Features: %d union, %d grouped (%d per dim x %d dims)\n",
-    union_feat_ids:size(), class_feat_ids:size(), cfg.feature_selection.per_class, train.dims)
+  local _, _, class_offsets, class_feat_ids, class_scores = train.tokens:bits_top_reg_f(
+    train_raw_codes, train.n, n_tokens, train.dims, n_selected)
+  str.printf("  Features: %d grouped (%d per dim x %d dims)\n",
+    class_feat_ids:size(), n_selected, train.dims)
   str.printf("  F-scores: min=%.2f max=%.2f mean=%.2f\n",
     class_scores:min(), class_scores:max(), class_scores:sum() / class_scores:size())
 
-  local make_regressor_sentences = function(tokens, n_samples)
-    return tokens:bits_to_cvec(n_samples, n_tokens, class_offsets, class_feat_ids, true)
-  end
-
-  local train_regressor_sentences, max_k = make_regressor_sentences(train.tokens, train.n)
-  local n_regressor_features = max_k
-  str.printf("  Regressor features: %d\n", n_regressor_features)
+  print("\nBuilding CSC index")
+  local csc_offsets, csc_indices = csr.to_csc(train.tokens, train.n, n_tokens)
+  str.printf("  Tokens: %d  Samples: %d\n", n_tokens, train.n)
 
   print("\nTraining TM regressor")
-  local predicted_buf = dvec.create()
   train.tm = optimize.regressor({
     outputs = train.dims,
     samples = train.n,
-    problems = train_regressor_sentences,
-    features = n_regressor_features,
-    grouped = true,
+    features = cfg.regressor.features,
+    n_tokens = n_tokens,
+    absorb_interval = cfg.regressor.absorb_interval,
+    absorb_threshold = cfg.regressor.absorb_threshold,
+    absorb_maximum = cfg.regressor.absorb_maximum,
     clauses = cfg.regressor.clauses,
     clause_tolerance = cfg.regressor.clause_tolerance,
     clause_maximum = cfg.regressor.clause_maximum,
     target = cfg.regressor.target,
     specificity = cfg.regressor.specificity,
+    tokens = train.tokens,
+    csc_offsets = csc_offsets,
+    csc_indices = csc_indices,
     search_rounds = cfg.regressor.search_rounds,
     search_trials = cfg.regressor.search_trials,
     search_iterations = cfg.regressor.search_iterations,
@@ -791,7 +796,8 @@ test("eurlex-docs", function()
     targets = train_raw_codes,
     search_subsample = cfg.regressor.search_subsample,
     search_metric = function (t, targs)
-      local predicted = t:regress(targs.problems, targs.samples, true, predicted_buf)
+      local input = { tokens = targs.tokens, n_samples = targs.samples }
+      local predicted = t:regress(input, targs.samples, true, predicted_buf)
       local stats = eval.regression_accuracy(predicted, targs.targets)
       return -stats.mean, stats
     end,
@@ -799,7 +805,7 @@ test("eurlex-docs", function()
   })
 
   print("\nRegressor predicted raw ranking (train)")
-  local train_predicted_raw = train.tm:regress(train_regressor_sentences, train.n, true, predicted_buf)
+  local train_predicted_raw = train.tm:regress({ tokens = train.tokens, n_samples = train.n }, train.n, true, predicted_buf)
   do
     local combined_raw = dvec.create()
     combined_raw:copy(train_predicted_raw)
@@ -864,8 +870,7 @@ test("eurlex-docs", function()
 
     local function evaluate_split(split, name, eval_adj)
       print("\nEvaluating " .. name)
-      local sentences = make_regressor_sentences(split.tokens, split.n)
-      local predicted_raw = train.tm:regress(sentences, split.n, true)
+      local predicted_raw = train.tm:regress({ tokens = split.tokens, n_samples = split.n }, split.n, true)
       local predicted_bin = encoder:encode(predicted_raw)
       local combined_raw = dvec.create()
       combined_raw:copy(predicted_raw)
