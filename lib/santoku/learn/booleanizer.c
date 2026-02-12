@@ -492,7 +492,11 @@ static inline void tk_booleanizer_persist (
     tk_lua_verror(L, 2, "persist", "finalize must be called before persist");
     return;
   }
-  tk_lua_fwrite(L, (char *) &B->finalized, sizeof(bool), 1, fh);
+  tk_lua_fwrite(L, "TKbl", 1, 4, fh);
+  uint8_t version = 1;
+  tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
+  uint8_t u8 = (uint8_t)B->finalized;
+  tk_lua_fwrite(L, (char *) &u8, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, (char *) &B->next_attr, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, (char *) &B->next_feature, sizeof(uint64_t), 1, fh);
   khint_t sz;
@@ -503,9 +507,9 @@ static inline void tk_booleanizer_persist (
   tk_lua_fwrite(L, (char *) &sz, sizeof(sz), 1, fh);
   const char *z;
   tk_umap_foreach(B->string_features, z, f, ({
-    size_t len = strlen(z);
-    tk_lua_fwrite(L, (char *) &len, sizeof(size_t), 1, fh);
-    tk_lua_fwrite(L, (char *) z, len, 1, fh);
+    uint64_t len64 = (uint64_t)strlen(z);
+    tk_lua_fwrite(L, (char *) &len64, sizeof(uint64_t), 1, fh);
+    tk_lua_fwrite(L, (char *) z, len64, 1, fh);
     tk_lua_fwrite(L, (char *) &f, sizeof(int64_t), 1, fh);
   }));
   sz = tk_cat_bits_string_size(B->cat_bits_string);
@@ -513,9 +517,9 @@ static inline void tk_booleanizer_persist (
   tk_cat_bit_string_t cbs;
   tk_umap_foreach(B->cat_bits_string, cbs, f, ({
     tk_lua_fwrite(L, (char *) &cbs.f, sizeof(int64_t), 1, fh);
-    size_t len = strlen(cbs.v);
-    tk_lua_fwrite(L, (char *) &len, sizeof(size_t), 1, fh);
-    tk_lua_fwrite(L, cbs.v, len, 1, fh);
+    uint64_t len64 = (uint64_t)strlen(cbs.v);
+    tk_lua_fwrite(L, (char *) &len64, sizeof(uint64_t), 1, fh);
+    tk_lua_fwrite(L, cbs.v, len64, 1, fh);
     tk_lua_fwrite(L, (char *) &f, sizeof(int64_t), 1, fh);
   }));
   sz = tk_cat_bits_double_size(B->cat_bits_double);
@@ -902,7 +906,17 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
   tk_booleanizer_t *B = tk_lua_newuserdata(L, tk_booleanizer_t, TK_BOOLEANIZER_MT, tk_booleanizer_mt_fns, tk_booleanizer_gc_lua);
   int Bi = lua_gettop(L);
   memset(B, 0, sizeof(*B));
-  tk_lua_fread(L, (char *) &B->finalized, sizeof(bool), 1, fh);
+  char magic[4];
+  tk_lua_fread(L, magic, 1, 4, fh);
+  if (memcmp(magic, "TKbl", 4) != 0)
+    luaL_error(L, "invalid booleanizer file (bad magic)");
+  uint8_t bversion;
+  tk_lua_fread(L, &bversion, sizeof(uint8_t), 1, fh);
+  if (bversion != 1)
+    luaL_error(L, "unsupported booleanizer version %d", (int)bversion);
+  uint8_t u8;
+  tk_lua_fread(L, (char *) &u8, sizeof(uint8_t), 1, fh);
+  B->finalized = u8;
   tk_lua_fread(L, (char *) &B->next_attr, sizeof(uint64_t), 1, fh);
   tk_lua_fread(L, (char *) &B->next_feature, sizeof(uint64_t), 1, fh);
   khint_t khi, sz;
@@ -917,10 +931,11 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
   B->string_features = tk_zumap_create(L, 0);
   tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
   lua_pop(L, 1);
-  size_t len;
+  uint64_t len64;
   tk_lua_fread(L, (char *) &sz, sizeof(sz), 1, fh);
   for (khint_t i = 0; i < sz; i ++) {
-    tk_lua_fread(L, (char *) &len, sizeof(size_t), 1, fh);
+    tk_lua_fread(L, (char *) &len64, sizeof(uint64_t), 1, fh);
+    size_t len = (size_t)len64;
     char *z = (char *) lua_newuserdata(L, len + 1);
     tk_lua_fread(L, z, len, 1, fh);
     z[len] = '\0';
@@ -938,7 +953,8 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
   for (khint_t i = 0; i < sz; i ++) {
     int64_t feature_id;
     tk_lua_fread(L, (char *) &feature_id, sizeof(int64_t), 1, fh);
-    tk_lua_fread(L, (char *) &len, sizeof(size_t), 1, fh);
+    tk_lua_fread(L, (char *) &len64, sizeof(uint64_t), 1, fh);
+    size_t len = (size_t)len64;
     char *value = (char *) lua_newuserdata(L, len + 1);
     tk_lua_fread(L, value, len, 1, fh);
     value[len] = '\0';
@@ -1034,7 +1050,7 @@ static luaL_Reg tk_booleanizer_fns[] =
   { NULL, NULL }
 };
 
-int luaopen_santoku_tsetlin_booleanizer (lua_State *L)
+int luaopen_santoku_learn_booleanizer (lua_State *L)
 {
   lua_newtable(L);
   tk_lua_register(L, tk_booleanizer_fns, 0);

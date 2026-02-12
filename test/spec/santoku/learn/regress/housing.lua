@@ -1,13 +1,13 @@
-local ds = require("santoku.tsetlin.dataset")
+local ds = require("santoku.learn.dataset")
 local dvec = require("santoku.dvec")
-local eval = require("santoku.tsetlin.evaluator")
-local optimize = require("santoku.tsetlin.optimize")
+local eval = require("santoku.learn.evaluator")
+local optimize = require("santoku.learn.optimize")
 local fs = require("santoku.fs")
 local str = require("santoku.string")
 local test = require("santoku.test")
-local tm = require("santoku.tsetlin")
+local tm = require("santoku.learn")
 local utc = require("santoku.utc")
-local util = require("santoku.tsetlin.util")
+local util = require("santoku.learn.util")
 
 local cfg = {
   data = {
@@ -28,7 +28,7 @@ local cfg = {
     rounds = 6,
     trials = 40,
     iterations = 80,
-    subsample = 0.2,
+    subsample_samples = 0.2,
     metric = "nmae",
   },
   training = {
@@ -38,7 +38,7 @@ local cfg = {
   },
 }
 
-test("tsetlin regressor", function ()
+test("regressor", function ()
 
   print("Reading data")
   local dataset = ds.read_california_housing("test/res/california-housing.csv", {
@@ -83,7 +83,7 @@ test("tsetlin regressor", function ()
     search_rounds = cfg.search.rounds,
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
-    search_subsample = cfg.search.subsample,
+    search_subsample_samples = cfg.search.subsample_samples,
     final_batch = cfg.training.batch,
     final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,

@@ -2,7 +2,7 @@
 #include <santoku/iuset.h>
 #include <santoku/dvec.h>
 #include <santoku/ivec.h>
-#include <santoku/tsetlin/inv.h>
+#include <santoku/learn/inv.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -98,7 +98,12 @@ static inline void tk_spectral_sample_landmarks (
   tk_inv_rank_weights_t rw;
   tk_inv_precompute_rank_weights(&rw, inv->n_ranks, decay);
 
-  tk_rank_t *rank_weights_arr = inv->rank_weights->a;
+  const double *weights_arr = inv->weights->a;
+  const int64_t *node_bits_a = inv->node_bits->a;
+  const int64_t *nro_a = inv->node_rank_offsets->a;
+  const double *node_weights_a = inv->node_weights->a;
+  uint64_t n_ranks = inv->n_ranks;
+  uint64_t stride = n_ranks + 1;
 
   memset(residual, 0, n_docs * sizeof(double));
   memset(L_mat, 0, n_docs * n_landmarks * sizeof(double));
@@ -110,22 +115,19 @@ static inline void tk_spectral_sample_landmarks (
   uint64_t pivot_idx = 0;
   double scale = 0.0;
   double *pivot_row = NULL;
-  size_t p_nbits = 0;
-  int64_t *p_bits = NULL;
   bool done = false;
   #pragma omp parallel
   {
-    double thr_q[TK_INV_MAX_RANKS];
-    double thr_e[TK_INV_MAX_RANKS];
     double thr_i[TK_INV_MAX_RANKS];
 
     #pragma omp for reduction(+:initial_trace)
     for (uint64_t i = 0; i < n_docs; i++) {
-      size_t i_nbits;
-      int64_t *i_bits = tk_inv_sget(inv, sid_map[i], &i_nbits);
-      residual[i] = tk_inv_similarity_fast(rank_weights_arr, inv->n_ranks,
-                                           i_bits, i_nbits, i_bits, i_nbits,
-                                           bandwidth, &rw, thr_q, thr_e, thr_i);
+      const double *nw = node_weights_a + sid_map[i] * (int64_t) n_ranks;
+      double accum = 0.0;
+      for (uint64_t r = 0; r < n_ranks; r++)
+        if (nw[r] > 0.0) accum += rw.weights[r];
+      double avg_sim = (rw.total > 0.0) ? accum / rw.total : 0.0;
+      residual[i] = (bandwidth >= 0.0) ? exp(-(1.0 - avg_sim) * bandwidth) : avg_sim;
       initial_trace += residual[i];
     }
 
@@ -163,7 +165,6 @@ static inline void tk_spectral_sample_landmarks (
             landmark_idx_map[actual_landmarks] = (int64_t)pivot_idx;
             scale = sqrt(pivot_residual);
             actual_landmarks++;
-            p_bits = tk_inv_sget(inv, sid_map[pivot_idx], &p_nbits);
             pivot_row = &L_mat[pivot_idx * n_landmarks];
           }
         }
@@ -171,13 +172,15 @@ static inline void tk_spectral_sample_landmarks (
 
       if (done) continue;
 
-      #pragma omp for
+      #pragma omp for schedule(guided)
       for (uint64_t i = 0; i < n_docs; i++) {
-        size_t i_nbits;
-        int64_t *i_bits = tk_inv_sget(inv, sid_map[i], &i_nbits);
-        double kip = tk_inv_similarity_fast(rank_weights_arr, inv->n_ranks,
-                                            i_bits, i_nbits, p_bits, p_nbits,
-                                            bandwidth, &rw, thr_q, thr_e, thr_i);
+        const int64_t *i_ro = nro_a + sid_map[i] * (int64_t) stride;
+        const int64_t *p_ro = nro_a + sid_map[pivot_idx] * (int64_t) stride;
+        const double *i_nw = node_weights_a + sid_map[i] * (int64_t) n_ranks;
+        const double *p_nw = node_weights_a + sid_map[pivot_idx] * (int64_t) n_ranks;
+        double kip = tk_inv_similarity_fast_cached(weights_arr, n_ranks,
+                                            node_bits_a, i_ro, node_bits_a, p_ro,
+                                            bandwidth, &rw, i_nw, p_nw, thr_i);
         double dot = (j > 0) ? cblas_ddot((int)j, &L_mat[i * n_landmarks], 1, pivot_row, 1) : 0.0;
         L_mat[i * n_landmarks + j] = (kip - dot) / scale;
       }
@@ -293,9 +296,13 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
   uint64_t m = enc->m;
   tk_dvec_t *out = tk_dvec_create(L, n_samples * d, 0, 0);
   out->n = n_samples * d;
+  uint64_t nystrom_stride = inv->n_ranks + 1;
+  const int64_t *nystrom_nro = inv->node_rank_offsets->a;
+  const int64_t *nystrom_nb = inv->node_bits->a;
   #pragma omp parallel
   {
     double thr_q[TK_INV_MAX_RANKS], thr_e[TK_INV_MAX_RANKS], thr_i[TK_INV_MAX_RANKS];
+    int64_t q_ro[TK_INV_MAX_RANKS + 1];
     double *sims = (double *)malloc(m * sizeof(double));
     int64_t *feat_buf = (int64_t *)malloc(n_features * sizeof(int64_t));
     #pragma omp for schedule(dynamic, 16)
@@ -316,12 +323,12 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
       uint64_t nf = end - start;
       for (uint64_t f = 0; f < nf; f++)
         feat_buf[f] = sparse->a[start + f] - lo;
+      tk_inv_partition_by_rank(inv->ranks->a, inv->n_ranks, feat_buf, nf, q_ro);
       for (uint64_t j = 0; j < m; j++) {
         if (enc->lm_sids[j] >= 0 && nf > 0) {
-          size_t ln;
-          int64_t *lb = tk_inv_sget(inv, enc->lm_sids[j], &ln);
-          sims[j] = tk_inv_similarity_fast(inv->rank_weights->a, inv->n_ranks,
-            feat_buf, (size_t)nf, lb, ln, enc->bandwidth, &rw, thr_q, thr_e, thr_i);
+          const int64_t *lm_ro = nystrom_nro + enc->lm_sids[j] * (int64_t) nystrom_stride;
+          sims[j] = tk_inv_similarity_fast(inv->weights->a, inv->n_ranks,
+            feat_buf, q_ro, nystrom_nb, lm_ro, enc->bandwidth, &rw, thr_q, thr_e, thr_i);
         } else {
           sims[j] = 0.0;
         }
@@ -363,12 +370,60 @@ static inline int tk_nystrom_landmark_ids_lua (lua_State *L) {
   return 1;
 }
 
+static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
+  tk_nystrom_encoder_t *enc = tk_nystrom_encoder_peek(L, 1);
+  if (enc->destroyed)
+    return luaL_error(L, "cannot persist a destroyed encoder");
+  FILE *fh;
+  int t = lua_type(L, 2);
+  bool tostr = t == LUA_TBOOLEAN && lua_toboolean(L, 2);
+  if (t == LUA_TSTRING)
+    fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
+  else if (tostr)
+    fh = tk_lua_tmpfile(L);
+  else
+    return tk_lua_verror(L, 2, "persist", "expecting either a filepath or true (for string serialization)");
+  tk_lua_fwrite(L, "TKny", 1, 4, fh);
+  uint8_t version = 1;
+  tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
+  tk_lua_fwrite(L, &enc->m, sizeof(uint64_t), 1, fh);
+  tk_lua_fwrite(L, &enc->d, sizeof(uint64_t), 1, fh);
+  tk_lua_fwrite(L, &enc->bandwidth, sizeof(double), 1, fh);
+  tk_lua_fwrite(L, &enc->decay, sizeof(double), 1, fh);
+  tk_lua_fwrite(L, &enc->trace_ratio, sizeof(double), 1, fh);
+  tk_lua_fwrite(L, enc->projection, sizeof(double), enc->m * enc->d, fh);
+  tk_lua_fwrite(L, enc->adjustment, sizeof(double), enc->d, fh);
+  tk_lua_fwrite(L, enc->lm_sids, sizeof(int64_t), enc->m, fh);
+  lua_getfenv(L, 1);
+  lua_getfield(L, -1, "landmark_ids");
+  tk_ivec_t *lm_ids = tk_ivec_peek(L, -1, "landmark_ids");
+  tk_ivec_persist(L, lm_ids, fh);
+  lua_pop(L, 2);
+  if (!tostr) {
+    tk_lua_fclose(L, fh);
+    return 0;
+  } else {
+    size_t len;
+    char *data = tk_lua_fslurp(L, fh, &len);
+    if (data) {
+      lua_pushlstring(L, data, len);
+      free(data);
+      tk_lua_fclose(L, fh);
+      return 1;
+    } else {
+      tk_lua_fclose(L, fh);
+      return 0;
+    }
+  }
+}
+
 static luaL_Reg tk_nystrom_encoder_mt_fns[] = {
   { "encode", tk_nystrom_encode_lua },
   { "dims", tk_nystrom_dims_lua },
   { "n_landmarks", tk_nystrom_n_landmarks_lua },
   { "landmark_ids", tk_nystrom_landmark_ids_lua },
   { "trace_ratio", tk_nystrom_trace_ratio_lua },
+  { "persist", tk_nystrom_encoder_persist_lua },
   { NULL, NULL }
 };
 
@@ -535,10 +590,14 @@ static inline int tm_encode (lua_State *L) {
   out_ids->n = nf;
   int out_ids_idx = lua_gettop(L);
 
+  uint64_t feat_stride = feat_inv->n_ranks + 1;
+  const int64_t *feat_nro = feat_inv->node_rank_offsets->a;
+  const int64_t *feat_nb = feat_inv->node_bits->a;
+  const double *feat_nw = feat_inv->node_weights->a;
+  uint64_t feat_n_ranks = feat_inv->n_ranks;
+
   #pragma omp parallel
   {
-    double thr_q[TK_INV_MAX_RANKS];
-    double thr_e[TK_INV_MAX_RANKS];
     double thr_i[TK_INV_MAX_RANKS];
     double *sims = (double *)malloc(m * sizeof(double));
 
@@ -551,16 +610,15 @@ static inline int tm_encode (lua_State *L) {
       if (cr >= 0) {
         memcpy(raw_codes->a + i * d, ccodes->a + (uint64_t)cr * d, d * sizeof(double));
       } else {
-        size_t qn;
-        int64_t *qb = tk_inv_sget(feat_inv, sid, &qn);
+        const int64_t *q_ro = feat_nro + sid * (int64_t) feat_stride;
+        const double *q_nw = feat_nw + sid * (int64_t) feat_n_ranks;
         for (uint64_t j = 0; j < m; j++) {
           double sim = 0.0;
-          if (ctx->lm_sids[j] >= 0 && qn > 0) {
-            size_t ln;
-            int64_t *lb = tk_inv_sget(feat_inv, ctx->lm_sids[j], &ln);
-            if (lb && ln > 0)
-              sim = tk_inv_similarity_fast(feat_inv->rank_weights->a,
-                feat_inv->n_ranks, qb, qn, lb, ln, bandwidth, &feat_rw, thr_q, thr_e, thr_i);
+          if (ctx->lm_sids[j] >= 0) {
+            const int64_t *lm_ro = feat_nro + ctx->lm_sids[j] * (int64_t) feat_stride;
+            const double *lm_nw = feat_nw + ctx->lm_sids[j] * (int64_t) feat_n_ranks;
+            sim = tk_inv_similarity_fast_cached(feat_inv->weights->a,
+              feat_n_ranks, feat_nb, q_ro, feat_nb, lm_ro, bandwidth, &feat_rw, q_nw, lm_nw, thr_i);
           }
           sims[j] = sim;
         }
@@ -600,13 +658,79 @@ static inline int tm_encode (lua_State *L) {
   return 3;
 }
 
+static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
+  lua_settop(L, 3);
+  size_t len;
+  const char *data = luaL_checklstring(L, 1, &len);
+  int inv_idx = 2;
+  tk_inv_peek(L, inv_idx);
+  bool isstr = lua_type(L, 3) == LUA_TBOOLEAN && lua_toboolean(L, 3);
+  FILE *fh = isstr
+    ? tk_lua_fmemopen(L, (char *)data, len, "r")
+    : tk_lua_fopen(L, data, "r");
+  char magic[4];
+  tk_lua_fread(L, magic, 1, 4, fh);
+  if (memcmp(magic, "TKny", 4) != 0) {
+    tk_lua_fclose(L, fh);
+    return luaL_error(L, "invalid nystrom encoder file (bad magic)");
+  }
+  uint8_t version;
+  tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
+  if (version != 1) {
+    tk_lua_fclose(L, fh);
+    return luaL_error(L, "unsupported nystrom encoder version %d", (int)version);
+  }
+  uint64_t m, d;
+  double bandwidth, decay, trace_ratio;
+  tk_lua_fread(L, &m, sizeof(uint64_t), 1, fh);
+  tk_lua_fread(L, &d, sizeof(uint64_t), 1, fh);
+  tk_lua_fread(L, &bandwidth, sizeof(double), 1, fh);
+  tk_lua_fread(L, &decay, sizeof(double), 1, fh);
+  tk_lua_fread(L, &trace_ratio, sizeof(double), 1, fh);
+  double *projection = (double *)malloc(m * d * sizeof(double));
+  double *adjustment = (double *)malloc(d * sizeof(double));
+  int64_t *lm_sids = (int64_t *)malloc(m * sizeof(int64_t));
+  if (!projection || !adjustment || !lm_sids) {
+    free(projection); free(adjustment); free(lm_sids);
+    tk_lua_fclose(L, fh);
+    return luaL_error(L, "nystrom load: out of memory");
+  }
+  tk_lua_fread(L, projection, sizeof(double), m * d, fh);
+  tk_lua_fread(L, adjustment, sizeof(double), d, fh);
+  tk_lua_fread(L, lm_sids, sizeof(int64_t), m, fh);
+  tk_ivec_load(L, fh);
+  int lm_ids_idx = lua_gettop(L);
+  tk_lua_fclose(L, fh);
+  tk_nystrom_encoder_t *enc = (tk_nystrom_encoder_t *)tk_lua_newuserdata(L, tk_nystrom_encoder_t,
+    TK_NYSTROM_ENCODER_MT, tk_nystrom_encoder_mt_fns, tk_nystrom_encoder_gc);
+  int enc_idx = lua_gettop(L);
+  enc->projection = projection;
+  enc->adjustment = adjustment;
+  enc->lm_sids = lm_sids;
+  enc->m = m;
+  enc->d = d;
+  enc->bandwidth = bandwidth;
+  enc->decay = decay;
+  enc->trace_ratio = trace_ratio;
+  enc->destroyed = false;
+  lua_newtable(L);
+  lua_pushvalue(L, inv_idx);
+  lua_setfield(L, -2, "inv");
+  lua_pushvalue(L, lm_ids_idx);
+  lua_setfield(L, -2, "landmark_ids");
+  lua_setfenv(L, enc_idx);
+  lua_pushvalue(L, enc_idx);
+  return 1;
+}
+
 static luaL_Reg tm_fns[] =
 {
   { "encode", tm_encode },
+  { "load", tk_nystrom_encoder_load_lua },
   { NULL, NULL }
 };
 
-int luaopen_santoku_tsetlin_spectral (lua_State *L)
+int luaopen_santoku_learn_spectral (lua_State *L)
 {
   lua_newtable(L);
   tk_lua_register(L, tm_fns, 0);

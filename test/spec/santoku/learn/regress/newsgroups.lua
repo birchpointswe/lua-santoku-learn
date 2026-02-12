@@ -1,53 +1,51 @@
 local arr = require("santoku.array")
-local csr = require("santoku.tsetlin.csr")
-local ds = require("santoku.tsetlin.dataset")
-local eval = require("santoku.tsetlin.evaluator")
+local csr = require("santoku.learn.csr")
+local ds = require("santoku.learn.dataset")
+local eval = require("santoku.learn.evaluator")
 local ivec = require("santoku.ivec")
-local optimize = require("santoku.tsetlin.optimize")
+local optimize = require("santoku.learn.optimize")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local tokenizer = require("santoku.tokenizer")
 local utc = require("santoku.utc")
-local util = require("santoku.tsetlin.util")
+local util = require("santoku.learn.util")
 
 local cfg = {
   data = {
-    ttr = 0.5,
-    tvr = 0.1,
     max = nil,
+    tvr = 0.1,
   },
   tokenizer = {
     max_len = 20,
     min_len = 1,
     max_run = 2,
     ngrams = 2,
-    cgrams_min = 3,
-    cgrams_max = 5,
-    cgrams_cross = true,
+    cgrams_min = 0,
+    cgrams_max = 0,
+    cgrams_cross = false,
     skips = 1,
   },
   feature_selection = {
-    n_selected = 8192,
+    n_selected = 4096,
   },
   tm = {
-    state = 8,
-    classes = 2,
-    features = 1024,
+    classes = 20,
+    features = 4096,
     clauses = 32,
-    absorb_interval = { def = 1, min = 1, max = 40 },
-    absorb_threshold = { def = 0, min = 0, max = 127, int = true },
-    absorb_maximum = { def = 0, min = 0, max = 128, int = true },
-    absorb_insert = { def = 1, min = 1, max = 126, int = true },
-    clause_tolerance = { def = 16, min = 8, max = 1024, int = true },
-    clause_maximum = { def = 16, min = 8, max = 1024, int = true },
-    target = { def = 16, min = 8, max = 1024, int = true },
-    specificity = { def = 800, min = 2, max = 2000, int = true },
+    absorb_interval = { def = 1, min = 1, max = 10 },
+    absorb_threshold = { def = 0, min = 0, max = 256, int = true },
+    absorb_maximum = { def = 0, min = 0, max = 256, int = true },
+    absorb_insert = { def = 1, min = 1, max = 256, int = true },
+    clause_tolerance = { def = 8, min = 8, max = 1024, int = true },
+    clause_maximum = { def = 8, min = 8, max = 1024, int = true },
+    target = { def = 8, min = 8, max = 1024, int = true },
+    specificity = { def = 2, min = 2, max = 4000, int = true },
   },
   search = {
     rounds = 6,
     trials = 20,
     iterations = 80,
-    subsample = 0.2,
+    subsample_samples = 0.2,
   },
   training = {
     patience = 400,
@@ -56,11 +54,15 @@ local cfg = {
   },
 }
 
-test("imdb regressor", function ()
+test("newsgroups regressor", function ()
 
   print("Reading data")
-  local dataset = ds.read_imdb("test/res/imdb.50k", cfg.data.max)
-  local train, test_set, validate = ds.split_imdb(dataset, cfg.data.ttr, cfg.data.tvr)
+  local train, test_set, validate = ds.read_20newsgroups_split(
+    "test/res/20news-bydate-train",
+    "test/res/20news-bydate-test",
+    cfg.data.max,
+    nil,
+    cfg.data.tvr)
 
   str.printf("  Train:    %6d\n", train.n)
   str.printf("  Validate: %6d\n", validate.n)
@@ -73,25 +75,24 @@ test("imdb regressor", function ()
   local n_tokens = tok:features()
   str.printf("  Vocabulary: %d\n", n_tokens)
 
-  local class_names = { "negative", "positive" }
-  local stopwatch = utc.stopwatch()
-  local predicted_buf = ivec.create()
-
   print("\nTokenizing")
   train.tokens = tok:tokenize(train.problems)
   validate.tokens = tok:tokenize(validate.problems)
   test_set.tokens = tok:tokenize(test_set.problems)
-  tok = nil
+  tok = nil -- luacheck: ignore
 
+  local class_offsets, class_feat_ids
   if cfg.feature_selection.n_selected then
     print("\nFeature ranking (Chi2)")
     train.solutions:add_scaled(cfg.tm.classes)
-    local chi2_ranking = train.tokens:bits_top_chi2(
+    local chi2_ranking
+    chi2_ranking, _, class_offsets, class_feat_ids = train.tokens:bits_top_chi2( -- luacheck: ignore
       train.solutions, train.n, n_tokens, cfg.tm.classes,
-      cfg.feature_selection.n_selected, nil, "max")
+      cfg.feature_selection.n_selected, nil, "sum")
     train.tokens:bits_select(chi2_ranking, nil, n_tokens)
     validate.tokens:bits_select(chi2_ranking, nil, n_tokens)
     test_set.tokens:bits_select(chi2_ranking, nil, n_tokens)
+    class_offsets, class_feat_ids = csr.bits_select(class_offsets, class_feat_ids, chi2_ranking)
     n_tokens = chi2_ranking:size()
     train.solutions:add_scaled(-cfg.tm.classes)
     str.printf("  Selected %d features\n", n_tokens)
@@ -101,9 +102,12 @@ test("imdb regressor", function ()
   local csc_offsets, csc_indices = csr.to_csc(train.tokens, train.n, n_tokens)
   str.printf("  Tokens: %d  Samples: %d\n", n_tokens, train.n)
 
+  local absorb_ranking_global = ivec.create(n_tokens):fill_indices()
+
   print("\nOptimizing Regressor")
+  local stopwatch = utc.stopwatch()
+  local predicted_buf = ivec.create()
   local t = optimize.regressor({
-    state = cfg.tm.state,
     outputs = cfg.tm.classes,
     features = cfg.tm.features,
     n_tokens = n_tokens,
@@ -121,10 +125,13 @@ test("imdb regressor", function ()
     tokens = train.tokens,
     csc_offsets = csc_offsets,
     csc_indices = csc_indices,
+    absorb_ranking = class_feat_ids,
+    absorb_ranking_offsets = class_offsets,
+    absorb_ranking_global = absorb_ranking_global,
     search_rounds = cfg.search.rounds,
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
-    search_subsample = cfg.search.subsample,
+    search_subsample_samples = cfg.search.subsample_samples,
     final_batch = cfg.training.batch,
     final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,
@@ -158,7 +165,8 @@ test("imdb regressor", function ()
   end)
   for _, c in ipairs(class_order) do
     local ts = test_stats.classes[c]
-    str.printf("  %-12s  F1=%.2f  P=%.2f  R=%.2f\n", class_names[c], ts.f1, ts.precision, ts.recall)
+    local cat = train.categories[c] or ("class_" .. (c - 1))
+    str.printf("  %-28s  F1=%.2f  P=%.2f  R=%.2f\n", cat, ts.f1, ts.precision, ts.recall)
   end
 
 end)

@@ -1,6 +1,7 @@
-#include <santoku/tsetlin/csr.h>
+#include <santoku/learn/csr.h>
 #include <santoku/cvec/ext.h>
 #include <santoku/ivec/ext.h>
+#include <santoku/iumap/ext.h>
 #include <omp.h>
 #include <float.h>
 #include <math.h>
@@ -73,13 +74,12 @@ static int tm_ann_hoods_to_csr (lua_State *L)
   return 3;
 }
 
-static int tm_csr_bipartite_neg (lua_State *L)
+static int tm_csr_bipartite (lua_State *L)
 {
   tk_ivec_t *gt_off = tk_ivec_peek(L, 1, "gt_offsets");
   tk_ivec_t *gt_nbr = tk_ivec_peek(L, 2, "gt_neighbors");
   tk_ivec_t *row_ids = tk_ivec_peek(L, 3, "row_ids");
   tk_ivec_t *col_ids = tk_ivec_peek(L, 4, "col_ids");
-  uint64_t n_neg = tk_lua_checkunsigned(L, 5, "n_neg");
 
   uint64_t n_rows = row_ids->n;
   uint64_t n_cols = col_ids->n;
@@ -100,30 +100,11 @@ static int tm_csr_bipartite_neg (lua_State *L)
   for (uint64_t d = 0; d < n_rows; d++) {
     int64_t gt_start = gt_off->a[d];
     int64_t gt_end = gt_off->a[d + 1];
-
     for (int64_t j = gt_start; j < gt_end; j++) {
       int64_t li = gt_nbr->a[j];
       tk_ivec_push(nbr, (int64_t)(n_rows + (uint64_t)li));
       tk_dvec_push(w, 1.0);
     }
-
-    uint64_t added = 0;
-    uint64_t attempts = 0;
-    uint64_t max_attempts = n_neg * 10;
-    while (added < n_neg && attempts < max_attempts) {
-      attempts++;
-      int64_t li = (int64_t)(tk_fast_random() % n_cols);
-      bool is_gt = false;
-      for (int64_t j = gt_start; j < gt_end; j++) {
-        if (gt_nbr->a[j] == li) { is_gt = true; break; }
-      }
-      if (!is_gt) {
-        tk_ivec_push(nbr, (int64_t)(n_rows + (uint64_t)li));
-        tk_dvec_push(w, 0.0);
-        added++;
-      }
-    }
-
     off->a[d + 1] = (int64_t)nbr->n;
   }
 
@@ -131,6 +112,190 @@ static int tm_csr_bipartite_neg (lua_State *L)
     off->a[n_rows + i + 1] = (int64_t)nbr->n;
 
   off->n = n_total + 1;
+
+  tk_lua_replace(L, 1, 4);
+  lua_settop(L, 4);
+  return 4;
+}
+
+static int tm_csr_bipartite_neg (lua_State *L)
+{
+  tk_ivec_t *gt_off = tk_ivec_peek(L, 1, "gt_offsets");
+  tk_ivec_t *gt_nbr = tk_ivec_peek(L, 2, "gt_neighbors");
+  tk_ivec_t *row_ids = tk_ivec_peek(L, 3, "row_ids");
+  tk_ivec_t *col_ids = tk_ivec_peek(L, 4, "col_ids");
+  uint64_t n_neg = tk_lua_checkunsigned(L, 5, "n_neg");
+  bool has_index = !lua_isnoneornil(L, 6) && !lua_isnoneornil(L, 7);
+  tk_inv_t *source = has_index ? tk_inv_peek(L, 6) : NULL;
+  tk_inv_t *search = has_index ? tk_inv_peek(L, 7) : NULL;
+  double decay = luaL_optnumber(L, 8, 0.0);
+  double bandwidth = luaL_optnumber(L, 9, -1.0);
+
+  uint64_t n_rows = row_ids->n;
+  uint64_t n_cols = col_ids->n;
+  uint64_t n_total = n_rows + n_cols;
+
+  tk_ivec_t *ids = tk_ivec_create(L, n_total, 0, 0);
+  ids->n = n_total;
+  for (uint64_t i = 0; i < n_rows; i++)
+    ids->a[i] = row_ids->a[i];
+  for (uint64_t i = 0; i < n_cols; i++)
+    ids->a[n_rows + i] = col_ids->a[i];
+
+  tk_ivec_t *off = tk_ivec_create(L, n_total + 1, 0, 0);
+  tk_ivec_t *nbr = tk_ivec_create(L, 0, 0, 0);
+  tk_dvec_t *w = tk_dvec_create(L, 0, 0, 0);
+
+  off->a[0] = 0;
+  for (uint64_t d = 0; d < n_rows; d++) {
+    int64_t gt_start = gt_off->a[d];
+    int64_t gt_end = gt_off->a[d + 1];
+    for (int64_t j = gt_start; j < gt_end; j++) {
+      tk_ivec_push(nbr, (int64_t)(n_rows + (uint64_t)gt_nbr->a[j]));
+      tk_dvec_push(w, 1.0);
+    }
+    off->a[d + 1] = (int64_t)nbr->n;
+  }
+  for (uint64_t i = 0; i < n_cols; i++)
+    off->a[n_rows + i + 1] = (int64_t)nbr->n;
+  off->n = n_total + 1;
+
+  tk_iumap_t *col_uid_to_idx = NULL;
+  if (has_index) {
+    col_uid_to_idx = tk_iumap_create(0, 0);
+    if (!col_uid_to_idx)
+      return luaL_error(L, "bipartite_neg: allocation failed");
+    for (uint64_t i = 0; i < n_cols; i++) {
+      int absent;
+      uint32_t k = tk_iumap_put(col_uid_to_idx, col_ids->a[i], &absent);
+      tk_iumap_setval(col_uid_to_idx, k, (int64_t)i);
+    }
+  }
+
+  uint64_t max_new = n_rows * n_neg;
+  int64_t *tmp_nbr = (int64_t *)malloc(max_new * sizeof(int64_t));
+  int64_t *tmp_off = (int64_t *)malloc((n_total + 1) * sizeof(int64_t));
+  int64_t *tmp_cnt = (int64_t *)calloc(n_rows, sizeof(int64_t));
+  if (!tmp_nbr || !tmp_off || !tmp_cnt) {
+    free(tmp_nbr);
+    free(tmp_off);
+    free(tmp_cnt);
+    if (col_uid_to_idx) tk_iumap_destroy(col_uid_to_idx);
+    return luaL_error(L, "bipartite_neg: allocation failed");
+  }
+
+  #pragma omp parallel
+  {
+    tk_rvec_t *my_hood = has_index ? tk_rvec_create(NULL, 0, 0, 0) : NULL;
+
+    #pragma omp for schedule(dynamic, 64)
+    for (uint64_t d = 0; d < n_rows; d++) {
+      int64_t gt_start = gt_off->a[d];
+      int64_t gt_end = gt_off->a[d + 1];
+      uint64_t n_gt = (uint64_t)(gt_end - gt_start);
+      uint64_t added = 0;
+      int64_t *row_out = tmp_nbr + d * n_neg;
+
+      if (has_index && my_hood) {
+        int64_t uid = row_ids->a[d];
+        size_t feat_n = 0;
+        int64_t *feat_data = tk_inv_get(source, uid, &feat_n);
+        if (feat_data && feat_n > 0) {
+          int64_t *query_bits = (int64_t *)malloc(feat_n * sizeof(int64_t));
+          if (query_bits) {
+            memcpy(query_bits, feat_data, feat_n * sizeof(int64_t));
+            int64_t q_ro[TK_INV_MAX_RANKS + 1];
+            tk_inv_partition_by_rank(source->ranks->a, source->n_ranks,
+              query_bits, feat_n, q_ro);
+            uint64_t request_k = n_neg + n_gt;
+            if (request_k < n_neg * 2) request_k = n_neg * 2;
+            tk_inv_neighbors_by_vec(search, query_bits, feat_n, q_ro,
+              -1, request_k, my_hood, decay, bandwidth);
+            free(query_bits);
+            for (uint64_t h = 0; h < my_hood->n && added < n_neg; h++) {
+              int64_t nuid = my_hood->a[h].i;
+              uint32_t ki = tk_iumap_get(col_uid_to_idx, nuid);
+              if (ki == tk_iumap_end(col_uid_to_idx))
+                continue;
+              int64_t col_idx = tk_iumap_val(col_uid_to_idx, ki);
+              bool is_gt = false;
+              for (int64_t j = gt_start; j < gt_end; j++) {
+                if (gt_nbr->a[j] == col_idx) { is_gt = true; break; }
+              }
+              if (!is_gt) {
+                row_out[added++] = (int64_t)(n_rows + (uint64_t)col_idx);
+              }
+            }
+          }
+        }
+      }
+
+      if (added < n_neg) {
+        uint64_t attempts = 0;
+        uint64_t max_attempts = (n_neg - added) * 10;
+        while (added < n_neg && attempts < max_attempts) {
+          attempts++;
+          int64_t li = (int64_t)(tk_fast_random() % n_cols);
+          bool is_gt = false;
+          for (int64_t j = gt_start; j < gt_end; j++) {
+            if (gt_nbr->a[j] == li) { is_gt = true; break; }
+          }
+          if (!is_gt) {
+            row_out[added++] = (int64_t)(n_rows + (uint64_t)li);
+          }
+        }
+      }
+
+      tmp_cnt[d] = (int64_t)added;
+    }
+
+    if (my_hood) tk_rvec_destroy(my_hood);
+  }
+
+  tmp_off[0] = 0;
+  for (uint64_t d = 0; d < n_rows; d++)
+    tmp_off[d + 1] = tmp_off[d] + tmp_cnt[d];
+  for (uint64_t i = n_rows; i < n_total; i++)
+    tmp_off[i + 1] = tmp_off[n_rows];
+  uint64_t tmp_pos = (uint64_t)tmp_off[n_rows];
+
+  for (uint64_t d = 0; d < n_rows; d++) {
+    if (tmp_cnt[d] > 0 && tmp_off[d] != (int64_t)(d * n_neg))
+      memmove(tmp_nbr + tmp_off[d], tmp_nbr + d * n_neg,
+        (size_t)tmp_cnt[d] * sizeof(int64_t));
+  }
+  free(tmp_cnt);
+
+  uint64_t old_total = nbr->n;
+  uint64_t new_total = old_total + tmp_pos;
+  tk_ivec_ensure(nbr, new_total);
+  tk_dvec_ensure(w, new_total);
+  nbr->n = new_total;
+  w->n = new_total;
+
+  int64_t wp = (int64_t)new_total;
+  for (int64_t i = (int64_t)n_total - 1; i >= 0; i--) {
+    int64_t ts = tmp_off[i];
+    int64_t tc = tmp_off[i + 1] - ts;
+    wp -= tc;
+    if (tc > 0) {
+      memcpy(nbr->a + wp, tmp_nbr + ts, (size_t)tc * sizeof(int64_t));
+      for (int64_t j = 0; j < tc; j++)
+        w->a[wp + j] = 0.0;
+    }
+    int64_t os = off->a[i];
+    int64_t oc = off->a[i + 1] - os;
+    wp -= oc;
+    if (oc > 0 && wp != os) {
+      memmove(nbr->a + wp, nbr->a + os, (size_t)oc * sizeof(int64_t));
+      memmove(w->a + wp, w->a + os, (size_t)oc * sizeof(double));
+    }
+    off->a[i + 1] = wp + oc + tc;
+  }
+
+  free(tmp_nbr);
+  free(tmp_off);
+  if (col_uid_to_idx) tk_iumap_destroy(col_uid_to_idx);
 
   tk_lua_replace(L, 1, 4);
   lua_settop(L, 4);
@@ -195,13 +360,17 @@ static int tm_csr_weight_from_index (lua_State *L)
       int64_t v = ids->a[nbr->a[j]];
       double dist = 1.0;
       if (idx_inv) {
-        size_t un = 0, vn = 0;
-        int64_t *uset = tk_inv_get(idx_inv, u, &un);
-        int64_t *vset = tk_inv_get(idx_inv, v, &vn);
-        if (uset && vset)
-          dist = 1.0 - tk_inv_similarity(idx_inv, uset, un, vset, vn, decay, bandwidth);
-        else
+        int64_t usid = tk_inv_uid_sid(idx_inv, u, TK_INV_FIND);
+        int64_t vsid = tk_inv_uid_sid(idx_inv, v, TK_INV_FIND);
+        if (usid >= 0 && vsid >= 0) {
+          uint64_t stride = idx_inv->n_ranks + 1;
+          const int64_t *u_ro = idx_inv->node_rank_offsets->a + usid * (int64_t) stride;
+          const int64_t *v_ro = idx_inv->node_rank_offsets->a + vsid * (int64_t) stride;
+          dist = 1.0 - tk_inv_similarity(idx_inv, idx_inv->node_bits->a, u_ro,
+            idx_inv->node_bits->a, v_ro, decay, bandwidth);
+        } else {
           dist = 1.0;
+        }
       } else {
         char *uset = tk_ann_get(idx_ann, u);
         char *wset = tk_ann_get(idx_ann, v);
@@ -231,32 +400,34 @@ static int tm_csr_merge (lua_State *L)
   tk_dvec_t *w2 = tk_dvec_peek(L, 6, "weights2");
 
   uint64_t n = off1->n - 1;
-  uint64_t total = nbr1->n + nbr2->n;
+  uint64_t add = nbr2->n;
+  uint64_t total = nbr1->n + add;
 
-  tk_ivec_t *off = tk_ivec_create(L, n + 1, 0, 0);
-  tk_ivec_t *nbr = tk_ivec_create(L, total, 0, 0);
-  tk_dvec_t *w = tk_dvec_create(L, total, 0, 0);
-  off->n = n + 1;
-  nbr->n = total;
-  w->n = total;
+  tk_ivec_ensure(nbr1, total);
+  tk_dvec_ensure(w1, total);
+  nbr1->n = total;
+  w1->n = total;
 
-  off->a[0] = 0;
-  int64_t pos = 0;
-  for (uint64_t i = 0; i < n; i++) {
-    for (int64_t j = off1->a[i]; j < off1->a[i + 1]; j++) {
-      nbr->a[pos] = nbr1->a[j];
-      w->a[pos] = w1->a[j];
-      pos++;
+  int64_t wp = (int64_t)total;
+  for (int64_t i = (int64_t)n - 1; i >= 0; i--) {
+    int64_t s2 = off2->a[i];
+    int64_t c2 = off2->a[i + 1] - s2;
+    wp -= c2;
+    if (c2 > 0) {
+      memcpy(nbr1->a + wp, nbr2->a + s2, (size_t)c2 * sizeof(int64_t));
+      memcpy(w1->a + wp, w2->a + s2, (size_t)c2 * sizeof(double));
     }
-    for (int64_t j = off2->a[i]; j < off2->a[i + 1]; j++) {
-      nbr->a[pos] = nbr2->a[j];
-      w->a[pos] = w2->a[j];
-      pos++;
+    int64_t s1 = off1->a[i];
+    int64_t c1 = off1->a[i + 1] - s1;
+    wp -= c1;
+    if (c1 > 0 && wp != s1) {
+      memmove(nbr1->a + wp, nbr1->a + s1, (size_t)c1 * sizeof(int64_t));
+      memmove(w1->a + wp, w1->a + s1, (size_t)c1 * sizeof(double));
     }
-    off->a[i + 1] = pos;
+    off1->a[i + 1] = wp + c1 + c2;
   }
 
-  return 3;
+  return 0;
 }
 
 static int tm_csr_symmetrize (lua_State *L)
@@ -303,24 +474,25 @@ static int tm_csr_symmetrize (lua_State *L)
     tk_rvec_desc(h, 0, h->n);
   }
 
-  tk_ivec_t *off = tk_ivec_create(L, n + 1, 0, 0);
-  off->a[0] = 0;
+  uint64_t total = 0;
   for (uint64_t i = 0; i < n; i++)
-    off->a[i + 1] = off->a[i] + (int64_t)hoods[i]->n;
-  off->n = n + 1;
+    total += hoods[i]->n;
 
-  uint64_t total = (uint64_t)off->a[n];
-  tk_ivec_t *nbr = tk_ivec_create(L, total, 0, 0);
-  tk_dvec_t *w = tk_dvec_create(L, total, 0, 0);
-  nbr->n = total;
-  w->n = total;
+  tk_ivec_ensure(nbr_in, total);
+  tk_dvec_ensure(w_in, total);
+  nbr_in->n = total;
+  w_in->n = total;
+
+  off_in->a[0] = 0;
+  for (uint64_t i = 0; i < n; i++)
+    off_in->a[i + 1] = off_in->a[i] + (int64_t)hoods[i]->n;
 
   for (uint64_t i = 0; i < n; i++) {
-    int64_t pos = off->a[i];
+    int64_t pos = off_in->a[i];
     tk_rvec_t *h = hoods[i];
     for (uint64_t j = 0; j < h->n; j++) {
-      nbr->a[pos + (int64_t)j] = h->a[j].i;
-      w->a[pos + (int64_t)j] = h->a[j].d;
+      nbr_in->a[pos + (int64_t)j] = h->a[j].i;
+      w_in->a[pos + (int64_t)j] = h->a[j].d;
     }
   }
 
@@ -328,7 +500,7 @@ static int tm_csr_symmetrize (lua_State *L)
     tk_rvec_destroy(hoods[i]);
   free(hoods);
 
-  return 3;
+  return 0;
 
 fail:
   for (uint64_t i = 0; i < n; i++)
@@ -419,18 +591,48 @@ static int tm_csr_to_csc (lua_State *L)
   return 2;
 }
 
+static int tm_csr_bits_select (lua_State *L)
+{
+  tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
+  tk_ivec_t *feats = tk_ivec_peek(L, 2, "feats");
+  tk_ivec_t *remap_ids = tk_ivec_peek(L, 3, "remap_ids");
+  tk_iumap_t *inverse = tk_iumap_from_ivec(L, remap_ids);
+  if (!inverse) return luaL_error(L, "bits_select: allocation failed");
+  uint64_t n_classes = offsets->n - 1;
+  tk_ivec_t *new_off = tk_ivec_create(L, n_classes + 1, 0, 0);
+  new_off->n = n_classes + 1;
+  tk_ivec_t *new_feats = tk_ivec_create(L, feats->n, 0, 0);
+  new_off->a[0] = 0;
+  uint64_t pos = 0;
+  for (uint64_t c = 0; c < n_classes; c++) {
+    int64_t start = offsets->a[c];
+    int64_t end = offsets->a[c + 1];
+    for (int64_t j = start; j < end; j++) {
+      int64_t new_id = tk_iumap_get_or(inverse, feats->a[j], -1);
+      if (new_id < 0) continue;
+      new_feats->a[pos++] = new_id;
+    }
+    new_off->a[c + 1] = (int64_t)pos;
+  }
+  new_feats->n = pos;
+  tk_iumap_destroy(inverse);
+  return 2;
+}
+
 static luaL_Reg tm_csr_fns[] = {
   { "to_csc", tm_csr_to_csc },
   { "to_hypervector", tm_csr_bits_to_hv },
+  { "bipartite", tm_csr_bipartite },
   { "bipartite_neg", tm_csr_bipartite_neg },
   { "random_pairs", tm_csr_random_pairs },
   { "weight_from_index", tm_csr_weight_from_index },
   { "merge", tm_csr_merge },
   { "symmetrize", tm_csr_symmetrize },
+  { "bits_select", tm_csr_bits_select },
   { NULL, NULL }
 };
 
-int luaopen_santoku_tsetlin_csr (lua_State *L)
+int luaopen_santoku_learn_csr (lua_State *L)
 {
   lua_newtable(L);
   tk_lua_register(L, tm_csr_fns, 0);

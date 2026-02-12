@@ -1,9 +1,9 @@
 #include <santoku/iuset.h>
 #include <santoku/pumap.h>
-#include <santoku/tsetlin/inv.h>
-#include <santoku/tsetlin/ann.h>
-#include <santoku/tsetlin/centroid.h>
-#include <santoku/tsetlin/csr.h>
+#include <santoku/learn/inv.h>
+#include <santoku/learn/ann.h>
+#include <santoku/learn/centroid.h>
+#include <santoku/learn/csr.h>
 #include <santoku/ivec.h>
 #include <santoku/cvec.h>
 #include <santoku/rvec.h>
@@ -1504,7 +1504,7 @@ static inline int tm_score_retrieval (lua_State *L)
     chunks = TK_CVEC_BITS_BYTES(n_dims);
   }
 
-  const char *ranking_str = tk_lua_fcheckstring(L, 1, "score_retrieval", "ranking");
+  const char *ranking_str = tk_lua_foptstring(L, 1, "score_retrieval", "ranking", "ndcg");
   tk_eval_metric_t ranking = tk_eval_parse_metric(ranking_str);
   if (ranking != TK_EVAL_METRIC_NDCG &&
       ranking != TK_EVAL_METRIC_SPEARMAN &&
@@ -2934,7 +2934,7 @@ static luaL_Reg tm_evaluator_fns[] =
   { NULL, NULL }
 };
 
-int luaopen_santoku_tsetlin_evaluator_capi (lua_State *L)
+int luaopen_santoku_learn_evaluator (lua_State *L)
 {
   lua_newtable(L);
   tk_lua_register(L, tm_evaluator_fns, 0);

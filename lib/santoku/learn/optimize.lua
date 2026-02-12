@@ -1,8 +1,7 @@
-local tm = require("santoku.tsetlin.capi")
-local spectral = require("santoku.tsetlin.spectral")
-local hlth = require("santoku.tsetlin.hlth")
-local evaluator = require("santoku.tsetlin.evaluator")
-local csr = require("santoku.tsetlin.csr")
+local tm = require("santoku.learn.regressor")
+local spectral = require("santoku.learn.spectral")
+local evaluator = require("santoku.learn.evaluator")
+local csr = require("santoku.learn.csr")
 local cvec = require("santoku.cvec")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
@@ -417,7 +416,7 @@ local function create_final_tm (args, params)
   return tm.create(opts)
 end
 
-local function train_tm_simple (tmobj, args, params, iterations)
+local function train_tm_simple (tmobj, args, _, iterations)
   local t = {
     samples = args.samples,
     problems = args.problems,
@@ -430,6 +429,9 @@ local function train_tm_simple (tmobj, args, params, iterations)
   if args.csc_offsets then
     t.csc_offsets = args.csc_offsets
     t.csc_indices = args.csc_indices
+    t.absorb_ranking = args.absorb_ranking
+    t.absorb_ranking_offsets = args.absorb_ranking_offsets
+    t.absorb_ranking_global = args.absorb_ranking_global
     t.problems = nil
   end
   tmobj:train(t)
@@ -459,6 +461,9 @@ local function train_tm_batched (tmobj, args, params, iterations, batch_size, pa
     if args.csc_offsets then
       t.csc_offsets = args.csc_offsets
       t.csc_indices = args.csc_indices
+      t.absorb_ranking = args.absorb_ranking
+      t.absorb_ranking_offsets = args.absorb_ranking_offsets
+      t.absorb_ranking_global = args.absorb_ranking_global
       t.problems = nil
     end
     tmobj:train(t)
@@ -505,6 +510,26 @@ local function train_tm_batched (tmobj, args, params, iterations, batch_size, pa
   return last_score, last_metrics
 end
 
+local function select_ranking_segments (ranking, offsets, dim_ids)
+  if not ranking or not offsets then return ranking, offsets end
+  local n_dims = dim_ids:size()
+  local indices = ivec.create()
+  local new_offsets = ivec.create(n_dims + 1)
+  local pos = 0
+  for i = 0, n_dims - 1 do
+    local c = dim_ids:get(i)
+    local seg_start = offsets:get(c)
+    local seg_end = offsets:get(c + 1)
+    new_offsets:set(i, pos)
+    for j = seg_start, seg_end - 1 do
+      indices:push(j)
+    end
+    pos = pos + (seg_end - seg_start)
+  end
+  new_offsets:set(n_dims, pos)
+  return ivec.create():copy(ranking, indices), new_offsets
+end
+
 local function optimize_tm (args)
 
   local iters_search = args.search_iterations or 40
@@ -514,7 +539,8 @@ local function optimize_tm (args)
   local global_dev = args.search_dev or 0.2
   local metric_fn = err.assert(args.search_metric, "search_metric required")
   local each_cb = args.each
-  local search_subsample = args.search_subsample
+  local search_subsample_samples = args.search_subsample_samples or args.search_subsample
+  local search_subsample_targets = args.search_subsample_targets
   local sparse = not not args.n_tokens
 
   local param_names = { "clauses", "clause_tolerance", "clause_maximum", "target", "specificity" }
@@ -538,74 +564,113 @@ local function optimize_tm (args)
 
   local samplers = M.build_samplers(args, param_names, global_dev)
 
+  local search_n = args.samples
+  local search_ids
+  if search_subsample_samples and search_subsample_samples < 1.0 then
+    search_n = num.floor(args.samples * search_subsample_samples)
+    search_ids = ivec.create(args.samples):fill_indices():shuffle():setn(search_n):asc()
+  end
+
+  local search_outputs = args.outputs
+  local search_dim_ids
+  if search_subsample_targets and (args.targets or args.codes) then
+    local n
+    if search_subsample_targets >= 1 then
+      n = num.min(num.floor(search_subsample_targets), args.outputs)
+    else
+      n = num.max(1, num.floor(args.outputs * search_subsample_targets))
+    end
+    if n < args.outputs then
+      search_outputs = n
+      search_dim_ids = ivec.create(args.outputs):fill_indices():shuffle():setn(search_outputs):asc()
+    end
+  end
+
   local search_data
-  if sparse and search_subsample and search_subsample < 1.0 then
-    local search_n = num.floor(args.samples * search_subsample)
-    local search_ids = ivec.create(args.samples):fill_indices():shuffle():setn(search_n):asc()
-    local search_tokens = ivec.create()
-    args.tokens:bits_select(nil, search_ids, args.n_tokens, search_tokens)
-    local search_csc_offsets, search_csc_indices = csr.to_csc(search_tokens, search_n, args.n_tokens)
+  if sparse then
+    local search_tokens = args.tokens
+    if search_ids then
+      search_tokens = ivec.create()
+      args.tokens:bits_select(nil, search_ids, args.n_tokens, search_tokens)
+    end
+    local search_csc_offsets, search_csc_indices
+    if search_ids then
+      search_csc_offsets, search_csc_indices = csr.to_csc(search_tokens, search_n, args.n_tokens)
+    else
+      search_csc_offsets = args.csc_offsets
+      search_csc_indices = args.csc_indices
+    end
+    local search_ranking = args.absorb_ranking
+    local search_ranking_offsets = args.absorb_ranking_offsets
+    if search_dim_ids and args.absorb_ranking_offsets then
+      search_ranking, search_ranking_offsets = select_ranking_segments(
+        args.absorb_ranking, args.absorb_ranking_offsets, search_dim_ids)
+    end
     search_data = {
       samples = search_n,
       tokens = search_tokens,
       csc_offsets = search_csc_offsets,
       csc_indices = search_csc_indices,
+      absorb_ranking = search_ranking,
+      absorb_ranking_offsets = search_ranking_offsets,
+      absorb_ranking_global = args.absorb_ranking_global,
     }
-    if args.targets then
-      local search_targets = dvec.create()
-      args.targets:mtx_select(nil, search_ids, args.outputs, search_targets)
-      search_data.targets = search_targets
-    elseif args.solutions then
-      search_data.solutions = ivec.create():copy(args.solutions, search_ids)
-    elseif args.codes then
-      search_data.codes = cvec.create()
-      args.codes:bits_select(nil, search_ids, args.outputs, search_data.codes)
+  else
+    local search_problems = args.problems
+    if search_ids then
+      search_problems = cvec.create()
+      local search_cvec_features = args.cvec_features or ((args.grouped and args.outputs or 1) * args.features * 2)
+      args.problems:bits_select(nil, search_ids, search_cvec_features, search_problems)
     end
-  elseif sparse then
-    search_data = {
-      samples = args.samples,
-      solutions = args.solutions,
-      codes = args.codes,
-      targets = args.targets,
-      csc_offsets = args.csc_offsets,
-      csc_indices = args.csc_indices,
-      tokens = args.tokens,
-    }
-  elseif search_subsample and search_subsample < 1.0 then
-    local search_n = num.floor(args.samples * search_subsample)
-    local search_ids = ivec.create(args.samples):fill_indices():shuffle():setn(search_n):asc()
-    local search_problems = cvec.create()
-    local search_cvec_features = args.cvec_features or ((args.grouped and args.outputs or 1) * args.features * 2)
-    args.problems:bits_select(nil, search_ids, search_cvec_features, search_problems)
     search_data = {
       samples = search_n,
       problems = search_problems,
       grouped = args.grouped,
     }
-    if args.targets then
-      local search_targets = dvec.create()
-      args.targets:mtx_select(nil, search_ids, args.outputs, search_targets)
-      search_data.targets = search_targets
-    elseif args.solutions then
-      search_data.solutions = ivec.create():copy(args.solutions, search_ids)
-    elseif args.codes then
-      search_data.codes = cvec.create()
-      args.codes:bits_select(nil, search_ids, args.outputs, search_data.codes)
+  end
+
+  if args.targets then
+    local t = args.targets
+    if search_ids then
+      local tmp = dvec.create()
+      t:mtx_select(nil, search_ids, args.outputs, tmp)
+      t = tmp
     end
-  else
-    search_data = {
-      samples = args.samples,
-      problems = args.problems,
-      targets = args.targets,
-      solutions = args.solutions,
-      codes = args.codes,
-      grouped = args.grouped,
-    }
+    if search_dim_ids then
+      local tmp = dvec.create()
+      t:mtx_select(search_dim_ids, nil, args.outputs, tmp)
+      t = tmp
+    end
+    search_data.targets = t
+  elseif args.solutions then
+    if search_ids then
+      search_data.solutions = ivec.create():copy(args.solutions, search_ids)
+    else
+      search_data.solutions = args.solutions
+    end
+  elseif args.codes then
+    local c = args.codes
+    if search_ids then
+      local tmp = cvec.create()
+      c:bits_select(nil, search_ids, args.outputs, tmp)
+      c = tmp
+    end
+    if search_dim_ids then
+      local tmp = cvec.create()
+      c:bits_select(search_dim_ids, nil, args.outputs, tmp)
+      c = tmp
+    end
+    search_data.codes = c
   end
 
   local search_tm
   if not M.all_fixed(samplers) then
-    search_tm = create_tm(args)
+    search_tm = create_tm({
+      features = args.features,
+      outputs = search_outputs,
+      state = args.state,
+      n_tokens = args.n_tokens,
+    })
   end
 
   local function constrain_tm_params (params)
@@ -719,6 +784,9 @@ local function optimize_tm (args)
   if sparse then
     final_train_args.csc_offsets = args.csc_offsets
     final_train_args.csc_indices = args.csc_indices
+    final_train_args.absorb_ranking = args.absorb_ranking
+    final_train_args.absorb_ranking_offsets = args.absorb_ranking_offsets
+    final_train_args.absorb_ranking_global = args.absorb_ranking_global
     final_train_args.tokens = args.tokens
     final_train_args.problems = nil
   end

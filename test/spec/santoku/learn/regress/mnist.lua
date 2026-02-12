@@ -1,14 +1,14 @@
 local arr = require("santoku.array")
-local ds = require("santoku.tsetlin.dataset")
-local eval = require("santoku.tsetlin.evaluator")
+local ds = require("santoku.learn.dataset")
+local eval = require("santoku.learn.evaluator")
 local fs = require("santoku.fs")
 local ivec = require("santoku.ivec")
-local optimize = require("santoku.tsetlin.optimize")
+local optimize = require("santoku.learn.optimize")
 local str = require("santoku.string")
 local test = require("santoku.test")
-local tm = require("santoku.tsetlin")
+local tm = require("santoku.learn")
 local utc = require("santoku.utc")
-local util = require("santoku.tsetlin.util")
+local util = require("santoku.learn.util")
 
 local cfg = {
   data = {
@@ -29,7 +29,7 @@ local cfg = {
     rounds = 6,
     trials = 20,
     iterations = 40,
-    subsample = 0.2,
+    subsample_samples = 0.2,
   },
   training = {
     patience = 10,
@@ -82,7 +82,7 @@ test("mnist classifier", function ()
     search_rounds = cfg.search.rounds,
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
-    search_subsample = cfg.search.subsample,
+    search_subsample_samples = cfg.search.subsample_samples,
     final_batch = cfg.training.batch,
     final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,
