@@ -9,8 +9,8 @@
 #include <santoku/dvec.h>
 #include <santoku/rvec.h>
 #include <santoku/pvec.h>
-#include <santoku/tsetlin/inv.h>
-#include <santoku/tsetlin/ann.h>
+#include <santoku/learn/inv.h>
+#include <santoku/learn/ann.h>
 
 static inline double tk_csr_pearson_distance(
   tk_ivec_t *expected_ids,

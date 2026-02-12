@@ -1,109 +1,39 @@
 # Active
 
-- optimize.regressor separate search/final datasets with different
-  dimensionalities (param search on the top 32 dims by number of thresholds, and
-  then a final train with best params all 4096, with dynamic quantizer after)
+- EUR-Lex XMLC pipeline
+    - Train top-k regressor from predicted neighborhoods
+    - Evaluate regression-selected tags against train/dev/test
+    - Separate search/final datasets with different dimensionalities (search on
+      top dims by threshold count, final train on full set, dynamic quantizer
+      after)
 
-- Documentation/project cleanup
+- Apply absorb/pruning logic after training/finalizing to remove unused
+  literals.
 
-# Current
-
-- Fit regression predicting k from neighbors lists
-- Evaluate regression-selected tags against train/dev/test
-- Rewrite docs in favor of new approach:
-- Clean up todo.md
-
-# Now
-
-- Allow clustering on tk_inv_t (centroid lower-bound possible?)
-- Batch distance API for ann/inv indices (distance_many or similar) to avoid
-  O(n*k) individual :distance() calls in diagnostics and weighted encoding
-- Parallelize booleanizer and tokenizer
-- Rename library and project to santoku-learn
-
-- tsetlin
-    - Interpretation of learned clauses, e.g. emitting clauses weighted by
-      importance, confidence, memorization strength, etc.
-        - Should show me top clauses or top features by class or overall
-        - Overall top features/literals is similar to bits_top_xxx
-        - By class top features/literals is similar to bits_top_chi2_ind
-        - Overall & by class top clauses, where each "clause" is represented
-          like "143 23 !345 41 !5"
-        - We should demonstrate mapping these clauses back to known/intelligible
-          names/etc (pixel coordinates for mnist, tokens for text, etc)
-    - Prune unused literals, returning pruned for subsequent filtering of
-      tokenizer/booleanizer, giving faster inference
-    - Curriculum leaning: re-allocation/pruning of capacity/literals during
-      training
-
-- Leasing/renting/etc model for multi-output situations
-    - It is likely that some clauses remain empty across the set of TMs/outputs,
-      indicating an over-capacity for that output
-    - It is also likely that some saturate 32 and would really benefit from more
-    - Perhaps stochastically based on some confidence measure in how much a
-      particular clause is actually needed, we can "give" it to a saturated
-      output.
-
-- Auto prune unused literals?
-
+- Prune unused clauses and restructor/defrag for faster inference
 
 # Next
 
-- Consider explicitly NOT exposing any :destroy() functionality to lua, instead
-  accomplishing lua-side explicit cleanup via =nil and collectgarbage. Then, see
-  what additional cleanup c-side this enables.
+- Embedding classification experiments (prove information retention by training
+  classifiers on reduced/binary/projected representations)
+    - Finish newsgroups_embedding
+    - imdb_embedding
+    - mnist_embedding
 
-- Chores
-    - Error checks on dimensions to prevent segfaults everywhere
-    - Persist/load versioning or other safety measures
+# Backlog
 
-- tk_graph_t
-    - speed up init & seed phase (slowest phase of entire pipeline)
-
-- High-level APIs (tbhss 2.0)
-    - santoku.learn.encoder
-      santoku.learn.classifier
-        - Generalizations of encoders and classifiers provided via a high-level
-          API that takes source data, runs the entire optimization pipeline, and
-          returns fully packaged and persistable runtime encoder/classifier
-          constructs. A user should be able to plug in data in a variety of
-          formats, and we auto parse, booleanize, etc according to their
-          configurations.
-    - santoku.learn.explore
-        - Generalization over the existing random search with center-based
-          tightening
-
-- tokenizer
-    - store known tokens contiguously, no need for separate mallocs/etc for each
-      token. Use a single cvec as backend, storing pointers into that cvec
-      insted of separately alloc'd strings. Ensure tokens are null terminated.
-
-- Separate all lua api functions explicitly via x/x_lua variant (_lua variants
-  must respect the expected stack semantics strictly); use it consistently
-
-- tk_dsu_t
-    - Full Lua/C API
+- Rename package to santoku-learn (README done, package-level pending)
+- Batch distance API for ann/inv (avoid O(n*k) individual :distance() calls in
+  diagnostics and weighted encoding)
+- Parallelize booleanizer and tokenizer
+- Allow clustering on tk_inv_t
+- Clause interpretation (top features/clauses by class or overall, map back to
+  intelligible names)
+- Error checks on dimensions to prevent segfaults
+- High-level APIs (santoku.learn.encoder, santoku.learn.classifier)
 
 # Consider
 
-- Extend tests
-    - AmaonCat-13K encoder
-    - SNLI encoder/classifier
-    - QQP encoder/classifier
-    - Titanic dataset
-
-- Explore higher-level architectures:
-    - Autoencoder
-    - Direct similarity preserving hashing
-    - Stacked encoders
-
-- Generative model, next token predictor
-    - predict visible features from spectral codes
-    - spectral embeddings from graph of ngrams as nodes, probabilities as
-      weights?
-
-- Convolutional
-    - Tried this, see branch
-
-- Optimize
-    - Bayesian optimization
+- Additional datasets (AmazonCat-13K, SNLI, QQP)
+- Convolutional input (see branch)
+- Bayesian optimization

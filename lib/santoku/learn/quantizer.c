@@ -2,6 +2,7 @@
 #include <lauxlib.h>
 #include <string.h>
 #include <math.h>
+#include <float.h>
 #include <stdlib.h>
 #include <omp.h>
 #include <santoku/lua/utils.h>
@@ -33,13 +34,67 @@ static inline int tk_sfbs_encoder_gc(lua_State *L) {
   return 0;
 }
 
-static inline int tk_sfbs_encode_lua(lua_State *L) {
-  tk_sfbs_encoder_t *enc = tk_sfbs_encoder_peek(L, 1);
-  tk_dvec_t *codes = tk_dvec_peek(L, 2, "codes");
+static inline void tk_sfbs_report(
+  lua_State *L, int i_each,
+  int64_t a, int64_t b, double c, double d, double e, const char *label
+) {
+  if (i_each < 0) return;
+  lua_pushvalue(L, i_each);
+  lua_pushinteger(L, a);
+  lua_pushinteger(L, b);
+  lua_pushnumber(L, c);
+  lua_pushnumber(L, d);
+  lua_pushnumber(L, e);
+  lua_pushstring(L, label);
+  lua_call(L, 6, 0);
+}
+
+static inline void tk_sfbs_encode_c(
+  tk_sfbs_encoder_t *enc,
+  double *raw_codes, uint64_t n_samples,
+  uint8_t *out, uint64_t n_bytes
+) {
   uint64_t n_dims = enc->n_dims;
   uint64_t n_bits = enc->n_bits;
-  uint64_t n_samples = codes->n / n_dims;
+  int64_t *dims = enc->bit_dims->a;
+  double *thresholds = enc->bit_thresholds->a;
+  memset(out, 0, n_samples * n_bytes);
+  #pragma omp parallel for schedule(static)
+  for (uint64_t i = 0; i < n_samples; i++) {
+    double *x = raw_codes + i * n_dims;
+    uint8_t *dest = out + i * n_bytes;
+    for (uint64_t k = 0; k < n_bits; k++) {
+      if (x[dims[k]] > thresholds[k])
+        dest[TK_CVEC_BITS_BYTE(k)] |= (1 << TK_CVEC_BITS_BIT(k));
+    }
+  }
+}
+
+static inline int tk_sfbs_encode_lua(lua_State *L) {
+  tk_sfbs_encoder_t *enc = tk_sfbs_encoder_peek(L, 1);
+  uint64_t n_bits = enc->n_bits;
   uint64_t n_bytes = TK_CVEC_BITS_BYTES(n_bits);
+  tk_dvec_t *dvec_in = tk_dvec_peekopt(L, 2);
+  if (dvec_in) {
+    uint64_t n_dims = enc->n_dims;
+    uint64_t n_samples = dvec_in->n / n_dims;
+    uint64_t out_size = n_samples * n_bytes;
+    tk_cvec_t *out = tk_cvec_peekopt(L, 3);
+    if (out) {
+      tk_cvec_ensure(out, out_size);
+      out->n = out_size;
+      lua_pushvalue(L, 3);
+    } else {
+      out = tk_cvec_create(L, out_size, NULL, NULL);
+      out->n = out_size;
+    }
+    tk_sfbs_encode_c(enc, dvec_in->a, n_samples, (uint8_t *)out->a, n_bytes);
+    return 1;
+  }
+  tk_cvec_t *cvec_in = tk_cvec_peek(L, 2, "codes (dvec or cvec)");
+  uint64_t src_bits = enc->n_dims;
+  uint64_t src_bytes = TK_CVEC_BITS_BYTES(src_bits);
+  uint64_t n_samples = cvec_in->n / src_bytes;
   uint64_t out_size = n_samples * n_bytes;
   tk_cvec_t *out = tk_cvec_peekopt(L, 3);
   if (out) {
@@ -52,13 +107,13 @@ static inline int tk_sfbs_encode_lua(lua_State *L) {
   }
   memset(out->a, 0, out->n);
   int64_t *dims = enc->bit_dims->a;
-  double *thresholds = enc->bit_thresholds->a;
   #pragma omp parallel for schedule(static)
   for (uint64_t i = 0; i < n_samples; i++) {
-    double *x = codes->a + i * n_dims;
+    uint8_t *src = (uint8_t *)cvec_in->a + i * src_bytes;
     uint8_t *dest = (uint8_t *)out->a + i * n_bytes;
     for (uint64_t k = 0; k < n_bits; k++) {
-      if (x[dims[k]] > thresholds[k])
+      uint64_t sb = (uint64_t)dims[k];
+      if ((src[sb >> 3] >> (sb & 7)) & 1)
         dest[TK_CVEC_BITS_BYTE(k)] |= (1 << TK_CVEC_BITS_BIT(k));
     }
   }
@@ -125,16 +180,48 @@ static inline int tk_sfbs_restrict_lua(lua_State *L) {
   return 0;
 }
 
+static inline int tk_sfbs_restrict_bits_lua(lua_State *L) {
+  tk_sfbs_encoder_t *enc = tk_sfbs_encoder_peek(L, 1);
+  tk_ivec_t *kept_bits = tk_ivec_peek(L, 2, "kept_bits");
+  uint64_t n_new = kept_bits->n;
+  int64_t *dims = enc->bit_dims->a;
+  double *thresholds = enc->bit_thresholds->a;
+  for (uint64_t i = 0; i < n_new; i++) {
+    uint64_t src = (uint64_t)kept_bits->a[i];
+    dims[i] = dims[src];
+    thresholds[i] = thresholds[src];
+  }
+  enc->n_bits = n_new;
+  return 0;
+}
+
+static inline int tk_sfbs_encoder_persist_lua(lua_State *L);
+
 static luaL_Reg tk_sfbs_encoder_mt_fns[] = {
   { "encode", tk_sfbs_encode_lua },
   { "restrict", tk_sfbs_restrict_lua },
+  { "restrict_bits", tk_sfbs_restrict_bits_lua },
   { "n_bits", tk_sfbs_n_bits_lua },
   { "n_dims", tk_sfbs_n_dims_lua },
   { "dims", tk_sfbs_dims_lua },
   { "thresholds", tk_sfbs_thresholds_lua },
   { "used_dims", tk_sfbs_used_dims_lua },
+  { "persist", tk_sfbs_encoder_persist_lua },
   { NULL, NULL }
 };
+
+static inline double tk_sfbs_dcg(
+  uint64_t *bc, double *bw, double *pd, uint64_t n_buckets
+) {
+  double dcg = 0.0;
+  uint64_t pos = 0;
+  for (uint64_t d = 0; d < n_buckets; d++) {
+    if (bc[d] > 0)
+      dcg += bw[d] * (pd[pos + bc[d]] - pd[pos]) / (double)bc[d];
+    pos += bc[d];
+  }
+  return dcg;
+}
 
 static inline void tk_sfbs_commit(
   uint8_t *bin, int64_t *pra, int64_t *prb,
@@ -145,6 +232,17 @@ static inline void tk_sfbs_commit(
     uint8_t bb = (bin[prb[j] >> 3] >> (prb[j] & 7)) & 1;
     if (add) distances[j] += ba ^ bb;
     else distances[j] -= ba ^ bb;
+  }
+}
+
+static inline void tk_sfbs_commit_xor(
+  uint8_t *xor_codes, uint64_t chunks, uint64_t bit,
+  uint16_t *distances, uint64_t n_pairs, int add
+) {
+  for (uint64_t j = 0; j < n_pairs; j++) {
+    uint8_t xbit = (xor_codes[j * chunks + (bit >> 3)] >> (bit & 7)) & 1;
+    if (add) distances[j] += xbit;
+    else distances[j] -= xbit;
   }
 }
 
@@ -209,31 +307,310 @@ static inline double tk_sfbs_score_node(
     bc[nd]++;
     bw[nd] += wts[st + (int64_t)i];
   }
-  double dcg = 0.0;
-  uint64_t pos = 0;
-  for (uint64_t d = 0; d < n_buckets; d++) {
-    if (bc[d] > 0)
-      dcg += bw[d] * (pd[pos + bc[d]] - pd[pos]) / (double)bc[d];
-    pos += bc[d];
-  }
-  return dcg;
+  return tk_sfbs_dcg(bc, bw, pd, n_buckets);
 }
 
-static inline int tk_hlth_sfbs_quantizer_lua(lua_State *L) {
+static uint64_t tk_sfbs_binary_select(
+  lua_State *L, int i_each,
+  unsigned char *codes, uint64_t n_samples, uint64_t n_bits,
+  int64_t *pair_row_a, int64_t *pair_row_b,
+  int64_t *offs_a, double *weights_a, double *idcg, double *prefix_discount,
+  uint64_t n_nodes, uint64_t n_pairs, uint64_t max_neighbors,
+  uint64_t target_bits, double tolerance,
+  uint8_t *selected_out, double *out_score
+) {
+  uint64_t chunks = TK_CVEC_BITS_BYTES(n_bits);
+  uint8_t *xor_codes = (uint8_t *)malloc(n_pairs * chunks);
+  #pragma omp parallel for schedule(static)
+  for (uint64_t j = 0; j < n_pairs; j++) {
+    uint8_t *xa = codes + (uint64_t)pair_row_a[j] * chunks;
+    uint8_t *xb = codes + (uint64_t)pair_row_b[j] * chunks;
+    uint8_t *xd = xor_codes + j * chunks;
+    for (uint64_t c = 0; c < chunks; c++)
+      xd[c] = xa[c] ^ xb[c];
+  }
+
+  uint16_t *distances = (uint16_t *)calloc(n_pairs, sizeof(uint16_t));
+  uint64_t n_buckets = target_bits + 2;
+  uint64_t n_selected = 0;
+  double current_score = 0.0;
+
+  int phase = 0;
+  int64_t swap_remove_bit = -1;
+  double pre_swap_score = 0.0;
+
+  while (phase < 3) {
+
+    if (phase == 0 || phase == 2) {
+      double *global_scores = (double *)calloc(n_bits, sizeof(double));
+      int64_t best_bit = -1;
+      double best_score = -INFINITY;
+
+      #pragma omp parallel
+      {
+        double *ls = (double *)calloc(n_bits, sizeof(double));
+        uint64_t *bc = (uint64_t *)calloc(n_buckets, sizeof(uint64_t));
+        double *bw = (double *)calloc(n_buckets, sizeof(double));
+
+        #pragma omp for schedule(static)
+        for (uint64_t ni = 0; ni < n_nodes; ni++) {
+          int64_t st = offs_a[ni];
+          uint64_t nn = (uint64_t)(offs_a[ni + 1] - st);
+          if (nn == 0 || idcg[ni] <= 0.0) continue;
+          for (uint64_t b = 0; b < n_bits; b++) {
+            if (selected_out[b]) continue;
+            memset(bc, 0, n_buckets * sizeof(uint64_t));
+            memset(bw, 0, n_buckets * sizeof(double));
+            for (uint64_t i = 0; i < nn; i++) {
+              uint64_t j = (uint64_t)st + i;
+              uint8_t xbit = (xor_codes[j * chunks + (b >> 3)] >> (b & 7)) & 1;
+              uint16_t d = distances[j] + xbit;
+              if (d >= n_buckets) d = (uint16_t)(n_buckets - 1);
+              bc[d]++;
+              bw[d] += weights_a[st + (int64_t)i];
+            }
+            ls[b] += tk_sfbs_dcg(bc, bw, prefix_discount, n_buckets) / idcg[ni];
+          }
+        }
+
+        #pragma omp critical
+        for (uint64_t b = 0; b < n_bits; b++)
+          global_scores[b] += ls[b];
+
+        free(ls);
+        free(bc);
+        free(bw);
+      }
+
+      for (uint64_t b = 0; b < n_bits; b++) {
+        if (selected_out[b]) continue;
+        double sc = n_nodes > 0 ? global_scores[b] / (double)n_nodes : 0.0;
+        if (sc > best_score) {
+          best_score = sc;
+          best_bit = (int64_t)b;
+        }
+      }
+      free(global_scores);
+
+      if (phase == 0) {
+        bool added = false;
+        if (best_bit >= 0 && n_selected < target_bits) {
+          double gain = (n_selected == 0) ? best_score : (best_score - current_score);
+          if (gain > tolerance) {
+            selected_out[best_bit] = 1;
+            n_selected++;
+            tk_sfbs_commit_xor(xor_codes, chunks, (uint64_t)best_bit, distances, n_pairs, 1);
+            current_score = best_score;
+            added = true;
+            tk_sfbs_report(L, i_each, (int64_t)best_bit, 0, 0, gain, current_score, "bit_add");
+          }
+        }
+        if (!added) {
+          if (n_selected > 0) phase = 1;
+          else phase = 3;
+        }
+      } else {
+        if (best_bit >= 0 && best_score - pre_swap_score > tolerance) {
+          selected_out[best_bit] = 1;
+          n_selected++;
+          tk_sfbs_commit_xor(xor_codes, chunks, (uint64_t)best_bit, distances, n_pairs, 1);
+          current_score = best_score;
+          phase = 0;
+          tk_sfbs_report(L, i_each, (int64_t)swap_remove_bit, 0, 0, 0, current_score, "bit_swap_remove");
+          tk_sfbs_report(L, i_each, (int64_t)best_bit, 0, 0, best_score - pre_swap_score, current_score, "bit_swap_add");
+        } else {
+          selected_out[swap_remove_bit] = 1;
+          n_selected++;
+          tk_sfbs_commit_xor(xor_codes, chunks, (uint64_t)swap_remove_bit, distances, n_pairs, 1);
+          current_score = pre_swap_score;
+          phase = 3;
+        }
+      }
+
+    } else {
+      double *global_scores = (double *)calloc(n_bits, sizeof(double));
+      int64_t best_bit = -1;
+      double best_score = -INFINITY;
+
+      #pragma omp parallel
+      {
+        double *ls = (double *)calloc(n_bits, sizeof(double));
+        uint64_t *bc = (uint64_t *)calloc(n_buckets, sizeof(uint64_t));
+        double *bw = (double *)calloc(n_buckets, sizeof(double));
+
+        #pragma omp for schedule(static)
+        for (uint64_t ni = 0; ni < n_nodes; ni++) {
+          int64_t st = offs_a[ni];
+          uint64_t nn = (uint64_t)(offs_a[ni + 1] - st);
+          if (nn == 0 || idcg[ni] <= 0.0) continue;
+          for (uint64_t b = 0; b < n_bits; b++) {
+            if (!selected_out[b]) continue;
+            memset(bc, 0, n_buckets * sizeof(uint64_t));
+            memset(bw, 0, n_buckets * sizeof(double));
+            for (uint64_t i = 0; i < nn; i++) {
+              uint64_t j = (uint64_t)st + i;
+              uint8_t xbit = (xor_codes[j * chunks + (b >> 3)] >> (b & 7)) & 1;
+              uint16_t d = distances[j] - xbit;
+              if (d >= n_buckets) d = (uint16_t)(n_buckets - 1);
+              bc[d]++;
+              bw[d] += weights_a[st + (int64_t)i];
+            }
+            ls[b] += tk_sfbs_dcg(bc, bw, prefix_discount, n_buckets) / idcg[ni];
+          }
+        }
+
+        #pragma omp critical
+        for (uint64_t b = 0; b < n_bits; b++)
+          global_scores[b] += ls[b];
+
+        free(ls);
+        free(bc);
+        free(bw);
+      }
+
+      for (uint64_t b = 0; b < n_bits; b++) {
+        if (!selected_out[b]) continue;
+        double sc = n_nodes > 0 ? global_scores[b] / (double)n_nodes : 0.0;
+        if (sc > best_score) {
+          best_score = sc;
+          best_bit = (int64_t)b;
+        }
+      }
+      free(global_scores);
+
+      if (best_bit >= 0) {
+        double gain = best_score - current_score;
+        if (gain > tolerance) {
+          selected_out[best_bit] = 0;
+          n_selected--;
+          tk_sfbs_commit_xor(xor_codes, chunks, (uint64_t)best_bit, distances, n_pairs, 0);
+          current_score = best_score;
+          phase = 0;
+          tk_sfbs_report(L, i_each, (int64_t)best_bit, 0, 0, gain, current_score, "bit_remove");
+        } else {
+          swap_remove_bit = best_bit;
+          pre_swap_score = current_score;
+          selected_out[best_bit] = 0;
+          n_selected--;
+          tk_sfbs_commit_xor(xor_codes, chunks, (uint64_t)best_bit, distances, n_pairs, 0);
+          current_score = best_score;
+          phase = 2;
+        }
+      } else {
+        phase = 3;
+      }
+    }
+  }
+
+  free(xor_codes);
+  free(distances);
+  if (out_score) *out_score = current_score;
+  return n_selected;
+}
+
+static inline int tk_quantizer_create_lua(lua_State *L) {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
 
-  lua_getfield(L, 1, "raw_codes");
-  tk_dvec_t *raw_codes_dvec = tk_dvec_peek(L, -1, "raw_codes");
+  lua_getfield(L, 1, "mode");
+  const char *mode = lua_isstring(L, -1) ? lua_tostring(L, -1) : NULL;
   lua_pop(L, 1);
-  double *raw_codes = raw_codes_dvec->a;
 
-  uint64_t n_samples = tk_lua_fcheckunsigned(L, 1, "sfbs_quantizer", "n_samples");
-  uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "sfbs_quantizer", "n_dims");
-  uint64_t target_bits = tk_lua_foptunsigned(L, 1, "sfbs_quantizer", "target_bits", 0);
+  if (mode && strcmp(mode, "thermometer") == 0) {
+    lua_getfield(L, 1, "raw_codes");
+    tk_dvec_t *input_dvec = tk_dvec_peek(L, -1, "raw_codes");
+    lua_pop(L, 1);
+    double *inp = input_dvec->a;
+    uint64_t n_samples = tk_lua_fcheckunsigned(L, 1, "create", "n_samples");
+    uint64_t d_in = input_dvec->n / n_samples;
+    uint64_t B = tk_lua_foptunsigned(L, 1, "create", "n_bins", 0);
+    double **dt = (double **)malloc(d_in * sizeof(double *));
+    uint64_t *dn = (uint64_t *)malloc(d_in * sizeof(uint64_t));
+    #pragma omp parallel
+    {
+      double *col = (double *)malloc(n_samples * sizeof(double));
+      #pragma omp for schedule(dynamic)
+      for (uint64_t d = 0; d < d_in; d++) {
+        for (uint64_t i = 0; i < n_samples; i++)
+          col[i] = inp[i * d_in + d];
+        tk_dvec_t tmp = { .a = col, .n = n_samples, .m = n_samples };
+        tk_dvec_asc(&tmp, 0, n_samples);
+        if (B == 0) {
+          uint64_t nu = 0;
+          for (uint64_t i = 0; i < n_samples; i++)
+            if (i == 0 || col[i] != col[i - 1]) nu++;
+          dt[d] = (double *)malloc(nu * sizeof(double));
+          dn[d] = nu;
+          uint64_t j = 0;
+          for (uint64_t i = 0; i < n_samples; i++)
+            if (i == 0 || col[i] != col[i - 1]) dt[d][j++] = col[i];
+        } else {
+          dt[d] = (double *)malloc(B * sizeof(double));
+          dn[d] = B;
+          for (uint64_t b = 0; b < B; b++) {
+            uint64_t qi = (uint64_t)(((double)(b + 1) / (double)(B + 1)) * (double)n_samples);
+            if (qi >= n_samples) qi = n_samples - 1;
+            dt[d][b] = col[qi];
+          }
+        }
+      }
+      free(col);
+    }
+    uint64_t total_bits = 0;
+    for (uint64_t d = 0; d < d_in; d++) total_bits += dn[d];
+    tk_ivec_t *out_dims = tk_ivec_create(L, total_bits, 0, 0);
+    int out_dims_idx = lua_gettop(L);
+    tk_dvec_t *out_thresholds = tk_dvec_create(L, total_bits, 0, 0);
+    int out_thresholds_idx = lua_gettop(L);
+    out_dims->n = total_bits;
+    out_thresholds->n = total_bits;
+    uint64_t pos = 0;
+    for (uint64_t d = 0; d < d_in; d++) {
+      for (uint64_t k = 0; k < dn[d]; k++) {
+        out_dims->a[pos] = (int64_t)d;
+        out_thresholds->a[pos] = dt[d][k];
+        pos++;
+      }
+      free(dt[d]);
+    }
+    free(dt); free(dn);
+    tk_sfbs_encoder_t *enc = tk_lua_newuserdata(L, tk_sfbs_encoder_t,
+      TK_SFBS_ENCODER_MT, tk_sfbs_encoder_mt_fns, tk_sfbs_encoder_gc);
+    int Ei = lua_gettop(L);
+    enc->bit_dims = out_dims;
+    enc->bit_thresholds = out_thresholds;
+    enc->n_dims = d_in;
+    enc->n_bits = total_bits;
+    enc->destroyed = false;
+    lua_newtable(L);
+    lua_pushvalue(L, out_dims_idx);
+    lua_setfield(L, -2, "dims");
+    lua_pushvalue(L, out_thresholds_idx);
+    lua_setfield(L, -2, "thresholds");
+    lua_setfenv(L, Ei);
+    lua_pushvalue(L, Ei);
+    return 1;
+  }
+
+  lua_getfield(L, 1, "raw_codes");
+  tk_dvec_t *raw_codes_dvec = tk_dvec_peekopt(L, -1);
+  lua_pop(L, 1);
+  double *raw_codes = raw_codes_dvec ? raw_codes_dvec->a : NULL;
+
+  lua_getfield(L, 1, "codes");
+  tk_cvec_t *codes_cvec = tk_cvec_peekopt(L, -1);
+  lua_pop(L, 1);
+
+  if (!raw_codes_dvec && !codes_cvec)
+    return luaL_error(L, "create: raw_codes or codes required");
+
+  uint64_t n_samples = tk_lua_fcheckunsigned(L, 1, "create", "n_samples");
+  uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "create", "n_dims");
+  uint64_t target_bits = tk_lua_foptunsigned(L, 1, "create", "target_bits", 0);
   if (target_bits == 0) target_bits = n_dims;
-  uint64_t min_bits = tk_lua_foptunsigned(L, 1, "sfbs_quantizer", "min_bits", 0);
-  uint64_t max_dims = tk_lua_foptunsigned(L, 1, "sfbs_quantizer", "max_dims", 0);
+  uint64_t max_dims = tk_lua_foptunsigned(L, 1, "create", "max_dims", 0);
+
+  double tolerance = tk_lua_foptnumber(L, 1, "create", "tolerance", 0.0);
 
   lua_getfield(L, 1, "ids");
   tk_ivec_t *ids = tk_ivec_peek(L, -1, "ids");
@@ -333,6 +710,60 @@ static inline int tk_hlth_sfbs_quantizer_lua(lua_State *L) {
     free(iw);
   }
 
+  int64_t *offs_a = offsets->a;
+  double *weights_a = weights->a;
+
+  if (codes_cvec) {
+    uint64_t src_bits = n_dims;
+    uint8_t *bit_selected = (uint8_t *)calloc(src_bits, 1);
+    double score = 0.0;
+    uint64_t n_sel = tk_sfbs_binary_select(
+      L, i_each, (unsigned char *)codes_cvec->a, n_samples, src_bits,
+      pair_row_a, pair_row_b, offs_a, weights_a, idcg, prefix_discount,
+      n_nodes, n_pairs, max_neighbors, target_bits, tolerance,
+      bit_selected, &score);
+
+    tk_ivec_t *out_dims = tk_ivec_create(L, n_sel, 0, 0);
+    int out_dims_idx = lua_gettop(L);
+    tk_dvec_t *out_thresholds = tk_dvec_create(L, n_sel, 0, 0);
+    int out_thresholds_idx = lua_gettop(L);
+    out_dims->n = n_sel;
+    out_thresholds->n = n_sel;
+    uint64_t w = 0;
+    for (uint64_t b = 0; b < src_bits; b++) {
+      if (bit_selected[b]) {
+        out_dims->a[w] = (int64_t)b;
+        out_thresholds->a[w] = 0.0;
+        w++;
+      }
+    }
+    free(bit_selected);
+
+    tk_sfbs_encoder_t *enc = tk_lua_newuserdata(L, tk_sfbs_encoder_t,
+      TK_SFBS_ENCODER_MT, tk_sfbs_encoder_mt_fns, tk_sfbs_encoder_gc);
+    int Ei = lua_gettop(L);
+    enc->bit_dims = out_dims;
+    enc->bit_thresholds = out_thresholds;
+    enc->n_dims = src_bits;
+    enc->n_bits = n_sel;
+    enc->destroyed = false;
+
+    lua_newtable(L);
+    lua_pushvalue(L, out_dims_idx);
+    lua_setfield(L, -2, "dims");
+    lua_pushvalue(L, out_thresholds_idx);
+    lua_setfield(L, -2, "thresholds");
+    lua_setfenv(L, Ei);
+
+    free(pair_row_a);
+    free(pair_row_b);
+    free(idcg);
+    free(prefix_discount);
+    free(distances);
+    lua_pushvalue(L, Ei);
+    return 1;
+  }
+
   double *medians = (double *)malloc(n_dims * sizeof(double));
   uint64_t n_sample_bytes = (n_samples + 7) / 8;
   uint64_t max_candidates = n_dims + 16 * target_bits;
@@ -361,9 +792,6 @@ static inline int tk_hlth_sfbs_quantizer_lua(lua_State *L) {
   }
   free(medians);
 
-  int64_t *offs_a = offsets->a;
-  double *weights_a = weights->a;
-
   uint64_t n_selected = 0;
   uint64_t *selected_order = (uint64_t *)malloc(target_bits * sizeof(uint64_t));
   double current_score = 0.0;
@@ -373,7 +801,6 @@ static inline int tk_hlth_sfbs_quantizer_lua(lua_State *L) {
   int phase = 0;
   int64_t swap_remove_cand = -1;
   double pre_swap_score = 0.0;
-  uint64_t stalled = 0;
 
   double cand_score = 0.0;
   int64_t best_cand = -1;
@@ -400,6 +827,9 @@ static inline int tk_hlth_sfbs_quantizer_lua(lua_State *L) {
           uint8_t *bin = cand_bins[c];
           uint64_t n_buckets = n_selected + 2;
 
+          #pragma omp single
+          { cand_score = 0.0; }
+
           #pragma omp for schedule(static) reduction(+:cand_score)
           for (uint64_t ni = 0; ni < n_nodes; ni++) {
             int64_t st = offs_a[ni];
@@ -414,7 +844,6 @@ static inline int tk_hlth_sfbs_quantizer_lua(lua_State *L) {
           #pragma omp single
           {
             double sc = n_nodes > 0 ? cand_score / (double)n_nodes : 0.0;
-            cand_score = 0.0;
             if (sc > best_score) {
               best_score = sc;
               best_cand = (int64_t)c;
@@ -428,7 +857,7 @@ static inline int tk_hlth_sfbs_quantizer_lua(lua_State *L) {
             bool added = false;
             if (best_cand >= 0 && n_selected < target_bits) {
               double gain = (n_selected == 0) ? best_score : (best_score - current_score);
-              if (gain > 0.0 || n_selected < min_bits) {
+              if (gain > tolerance) {
                 tk_sfbs_commit(cand_bins[best_cand], pair_row_a, pair_row_b,
                   distances, n_pairs, 1);
                 cand_selected[best_cand] = 1;
@@ -437,33 +866,20 @@ static inline int tk_hlth_sfbs_quantizer_lua(lua_State *L) {
                 n_selected++;
                 current_score = best_score;
                 added = true;
-                stalled = 0;
                 tk_sfbs_spawn_children(raw_codes, n_samples, n_dims,
                   cand_dims[best_cand], cand_thresholds[best_cand],
                   cand_dims, cand_thresholds, cand_bins,
                   cand_selected, &n_candidates, max_candidates, n_sample_bytes);
-                if (i_each >= 0) {
-                  lua_pushvalue(L, i_each);
-                  lua_pushinteger(L, (int64_t)(n_selected - 1));
-                  lua_pushinteger(L, (int64_t)cand_dims[best_cand]);
-                  lua_pushnumber(L, cand_thresholds[best_cand]);
-                  lua_pushnumber(L, gain);
-                  lua_pushnumber(L, current_score);
-                  lua_pushliteral(L, "add");
-                  lua_call(L, 6, 0);
-                }
+                tk_sfbs_report(L, i_each, (int64_t)(n_selected - 1), (int64_t)cand_dims[best_cand],
+                  cand_thresholds[best_cand], gain, current_score, "add");
               }
             }
             if (!added) {
-              stalled++;
-              if (n_selected > min_bits && stalled < 2) {
-                phase = 1;
-              } else {
-                phase = 3;
-              }
+              if (n_selected > 0) phase = 1;
+              else phase = 3;
             }
           } else {
-            if (best_cand >= 0 && best_score > pre_swap_score) {
+            if (best_cand >= 0 && best_score - pre_swap_score > tolerance) {
               tk_sfbs_commit(cand_bins[best_cand], pair_row_a, pair_row_b,
                 distances, n_pairs, 1);
               cand_selected[best_cand] = 1;
@@ -472,29 +888,14 @@ static inline int tk_hlth_sfbs_quantizer_lua(lua_State *L) {
               n_selected++;
               current_score = best_score;
               phase = 0;
-              stalled = 0;
               tk_sfbs_spawn_children(raw_codes, n_samples, n_dims,
                 cand_dims[best_cand], cand_thresholds[best_cand],
                 cand_dims, cand_thresholds, cand_bins,
                 cand_selected, &n_candidates, max_candidates, n_sample_bytes);
-              if (i_each >= 0) {
-                lua_pushvalue(L, i_each);
-                lua_pushinteger(L, (int64_t)n_selected);
-                lua_pushinteger(L, (int64_t)cand_dims[swap_remove_cand]);
-                lua_pushnumber(L, cand_thresholds[swap_remove_cand]);
-                lua_pushnumber(L, 0);
-                lua_pushnumber(L, current_score);
-                lua_pushliteral(L, "swap_remove");
-                lua_call(L, 6, 0);
-                lua_pushvalue(L, i_each);
-                lua_pushinteger(L, (int64_t)(n_selected - 1));
-                lua_pushinteger(L, (int64_t)cand_dims[best_cand]);
-                lua_pushnumber(L, cand_thresholds[best_cand]);
-                lua_pushnumber(L, best_score - pre_swap_score);
-                lua_pushnumber(L, current_score);
-                lua_pushliteral(L, "swap_add");
-                lua_call(L, 6, 0);
-              }
+              tk_sfbs_report(L, i_each, (int64_t)n_selected, (int64_t)cand_dims[swap_remove_cand],
+                cand_thresholds[swap_remove_cand], 0, current_score, "swap_remove");
+              tk_sfbs_report(L, i_each, (int64_t)(n_selected - 1), (int64_t)cand_dims[best_cand],
+                cand_thresholds[best_cand], best_score - pre_swap_score, current_score, "swap_add");
             } else {
               tk_sfbs_commit(cand_bins[swap_remove_cand], pair_row_a, pair_row_b,
                 distances, n_pairs, 1);
@@ -518,6 +919,9 @@ static inline int tk_hlth_sfbs_quantizer_lua(lua_State *L) {
           uint8_t *bin = cand_bins[c];
           uint64_t n_buckets = n_selected + 2;
 
+          #pragma omp single
+          { remove_score = 0.0; }
+
           #pragma omp for schedule(static) reduction(+:remove_score)
           for (uint64_t ni = 0; ni < n_nodes; ni++) {
             int64_t st = offs_a[ni];
@@ -532,7 +936,6 @@ static inline int tk_hlth_sfbs_quantizer_lua(lua_State *L) {
           #pragma omp single
           {
             double sc = n_nodes > 0 ? remove_score / (double)n_nodes : 0.0;
-            remove_score = 0.0;
             if (sc > best_score) {
               best_score = sc;
               best_cand = (int64_t)c;
@@ -544,7 +947,7 @@ static inline int tk_hlth_sfbs_quantizer_lua(lua_State *L) {
         {
           if (best_cand >= 0) {
             double gain = best_score - current_score;
-            if (gain > 0.0) {
+            if (gain > tolerance) {
               tk_sfbs_commit(cand_bins[best_cand], pair_row_a, pair_row_b,
                 distances, n_pairs, 0);
               cand_selected[best_cand] = 0;
@@ -559,16 +962,8 @@ static inline int tk_hlth_sfbs_quantizer_lua(lua_State *L) {
               }
               current_score = best_score;
               phase = 0;
-              if (i_each >= 0) {
-                lua_pushvalue(L, i_each);
-                lua_pushinteger(L, (int64_t)n_selected);
-                lua_pushinteger(L, (int64_t)cand_dims[best_cand]);
-                lua_pushnumber(L, cand_thresholds[best_cand]);
-                lua_pushnumber(L, gain);
-                lua_pushnumber(L, current_score);
-                lua_pushliteral(L, "remove");
-                lua_call(L, 6, 0);
-              }
+              tk_sfbs_report(L, i_each, (int64_t)n_selected, (int64_t)cand_dims[best_cand],
+                cand_thresholds[best_cand], gain, current_score, "remove");
             } else {
               swap_remove_cand = best_cand;
               pre_swap_score = current_score;
@@ -616,13 +1011,8 @@ static inline int tk_hlth_sfbs_quantizer_lua(lua_State *L) {
   free(cand_thresholds);
   free(cand_bins);
   free(cand_selected);
-  free(distances);
   free(selected_order);
   free(dim_refcount);
-  free(pair_row_a);
-  free(pair_row_b);
-  free(idcg);
-  free(prefix_discount);
 
   tk_sfbs_encoder_t *enc = tk_lua_newuserdata(L, tk_sfbs_encoder_t,
     TK_SFBS_ENCODER_MT, tk_sfbs_encoder_mt_fns, tk_sfbs_encoder_gc);
@@ -640,106 +1030,101 @@ static inline int tk_hlth_sfbs_quantizer_lua(lua_State *L) {
   lua_setfield(L, -2, "thresholds");
   lua_setfenv(L, Ei);
 
+  free(distances);
+  free(pair_row_a);
+  free(pair_row_b);
+  free(idcg);
+  free(prefix_discount);
+
   lua_pushvalue(L, Ei);
   return 1;
 }
 
-static inline int tk_hlth_thermometer_encoder_lua(lua_State *L) {
-  lua_settop(L, 1);
-  luaL_checktype(L, 1, LUA_TTABLE);
-
-  lua_getfield(L, 1, "input");
-  tk_dvec_t *input_dvec = tk_dvec_peek(L, -1, "input");
-  lua_pop(L, 1);
-  double *inp = input_dvec->a;
-
-  uint64_t n_samples = tk_lua_fcheckunsigned(L, 1, "thermometer_encoder", "n_samples");
-  uint64_t d_in = tk_lua_fcheckunsigned(L, 1, "thermometer_encoder", "n_input_dims");
-  uint64_t B = tk_lua_foptunsigned(L, 1, "thermometer_encoder", "n_bins", 0);
-
-  double **dt = (double **)malloc(d_in * sizeof(double *));
-  uint64_t *dn = (uint64_t *)malloc(d_in * sizeof(uint64_t));
-
-  #pragma omp parallel
-  {
-    double *col = (double *)malloc(n_samples * sizeof(double));
-    #pragma omp for schedule(dynamic)
-    for (uint64_t d = 0; d < d_in; d++) {
-      for (uint64_t i = 0; i < n_samples; i++)
-        col[i] = inp[i * d_in + d];
-      tk_dvec_t tmp = { .a = col, .n = n_samples, .m = n_samples };
-      tk_dvec_asc(&tmp, 0, n_samples);
-      if (B == 0) {
-        uint64_t nu = 0;
-        for (uint64_t i = 0; i < n_samples; i++)
-          if (i == 0 || col[i] != col[i - 1]) nu++;
-        dt[d] = (double *)malloc(nu * sizeof(double));
-        dn[d] = nu;
-        uint64_t j = 0;
-        for (uint64_t i = 0; i < n_samples; i++)
-          if (i == 0 || col[i] != col[i - 1]) dt[d][j++] = col[i];
-      } else {
-        dt[d] = (double *)malloc(B * sizeof(double));
-        dn[d] = B;
-        for (uint64_t b = 0; b < B; b++) {
-          uint64_t qi = (uint64_t)(((double)(b + 1) / (double)(B + 1)) * (double)n_samples);
-          if (qi >= n_samples) qi = n_samples - 1;
-          dt[d][b] = col[qi];
-        }
-      }
+static inline int tk_sfbs_encoder_persist_lua(lua_State *L) {
+  tk_sfbs_encoder_t *enc = tk_sfbs_encoder_peek(L, 1);
+  FILE *fh;
+  int t = lua_type(L, 2);
+  bool tostr = t == LUA_TBOOLEAN && lua_toboolean(L, 2);
+  if (t == LUA_TSTRING)
+    fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
+  else if (tostr)
+    fh = tk_lua_tmpfile(L);
+  else
+    return tk_lua_verror(L, 2, "persist", "expecting either a filepath or true (for string serialization)");
+  tk_lua_fwrite(L, "TKqt", 1, 4, fh);
+  uint8_t version = 1;
+  tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
+  tk_lua_fwrite(L, (char *)&enc->n_dims, sizeof(uint64_t), 1, fh);
+  tk_lua_fwrite(L, (char *)&enc->n_bits, sizeof(uint64_t), 1, fh);
+  tk_ivec_persist(L, enc->bit_dims, fh);
+  tk_dvec_persist(L, enc->bit_thresholds, fh);
+  if (!tostr) {
+    tk_lua_fclose(L, fh);
+    return 0;
+  } else {
+    size_t len;
+    char *data = tk_lua_fslurp(L, fh, &len);
+    if (data) {
+      lua_pushlstring(L, data, len);
+      free(data);
+      tk_lua_fclose(L, fh);
+      return 1;
+    } else {
+      tk_lua_fclose(L, fh);
+      return 0;
     }
-    free(col);
   }
+}
 
-  uint64_t total_bits = 0;
-  for (uint64_t d = 0; d < d_in; d++) total_bits += dn[d];
-
-  tk_ivec_t *out_dims = tk_ivec_create(L, total_bits, 0, 0);
-  int out_dims_idx = lua_gettop(L);
-  tk_dvec_t *out_thresholds = tk_dvec_create(L, total_bits, 0, 0);
-  int out_thresholds_idx = lua_gettop(L);
-  out_dims->n = total_bits;
-  out_thresholds->n = total_bits;
-
-  uint64_t pos = 0;
-  for (uint64_t d = 0; d < d_in; d++) {
-    for (uint64_t k = 0; k < dn[d]; k++) {
-      out_dims->a[pos] = (int64_t)d;
-      out_thresholds->a[pos] = dt[d][k];
-      pos++;
-    }
-    free(dt[d]);
-  }
-  free(dt); free(dn);
-
+static inline int tk_quantizer_load_lua(lua_State *L) {
+  size_t len;
+  const char *data = tk_lua_checklstring(L, 1, &len, "data");
+  bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && tk_lua_checkboolean(L, 2);
+  FILE *fh = isstr
+    ? tk_lua_fmemopen(L, (char *)data, len, "r")
+    : tk_lua_fopen(L, data, "r");
+  char magic[4];
+  tk_lua_fread(L, magic, 1, 4, fh);
+  if (memcmp(magic, "TKqt", 4) != 0)
+    luaL_error(L, "invalid quantizer file (bad magic)");
+  uint8_t version;
+  tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
+  if (version != 1)
+    luaL_error(L, "unsupported quantizer version %d", (int)version);
+  uint64_t n_dims, n_bits;
+  tk_lua_fread(L, &n_dims, sizeof(uint64_t), 1, fh);
+  tk_lua_fread(L, &n_bits, sizeof(uint64_t), 1, fh);
+  tk_ivec_t *bit_dims = tk_ivec_load(L, fh);
+  int dims_idx = lua_gettop(L);
+  tk_dvec_t *bit_thresholds = tk_dvec_load(L, fh);
+  int thresh_idx = lua_gettop(L);
+  tk_lua_fclose(L, fh);
   tk_sfbs_encoder_t *enc = tk_lua_newuserdata(L, tk_sfbs_encoder_t,
     TK_SFBS_ENCODER_MT, tk_sfbs_encoder_mt_fns, tk_sfbs_encoder_gc);
   int Ei = lua_gettop(L);
-  enc->bit_dims = out_dims;
-  enc->bit_thresholds = out_thresholds;
-  enc->n_dims = d_in;
-  enc->n_bits = total_bits;
+  enc->bit_dims = bit_dims;
+  enc->bit_thresholds = bit_thresholds;
+  enc->n_dims = n_dims;
+  enc->n_bits = n_bits;
   enc->destroyed = false;
-
   lua_newtable(L);
-  lua_pushvalue(L, out_dims_idx);
+  lua_pushvalue(L, dims_idx);
   lua_setfield(L, -2, "dims");
-  lua_pushvalue(L, out_thresholds_idx);
+  lua_pushvalue(L, thresh_idx);
   lua_setfield(L, -2, "thresholds");
   lua_setfenv(L, Ei);
-
   lua_pushvalue(L, Ei);
   return 1;
 }
 
-static luaL_Reg tk_hlth_fns[] = {
-  { "sfbs_quantizer", tk_hlth_sfbs_quantizer_lua },
-  { "thermometer_encoder", tk_hlth_thermometer_encoder_lua },
+static luaL_Reg tk_quantizer_fns[] = {
+  { "create", tk_quantizer_create_lua },
+  { "load", tk_quantizer_load_lua },
   { NULL, NULL }
 };
 
-int luaopen_santoku_tsetlin_hlth(lua_State *L) {
+int luaopen_santoku_learn_quantizer(lua_State *L) {
   lua_newtable(L);
-  tk_lua_register(L, tk_hlth_fns, 0);
+  tk_lua_register(L, tk_quantizer_fns, 0);
   return 1;
 }

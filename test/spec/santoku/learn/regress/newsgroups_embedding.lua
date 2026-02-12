@@ -1,14 +1,14 @@
-local csr = require("santoku.tsetlin.csr")
-local ds = require("santoku.tsetlin.dataset")
+local csr = require("santoku.learn.csr")
+local ds = require("santoku.learn.dataset")
 local dvec = require("santoku.dvec")
-local eval = require("santoku.tsetlin.evaluator")
-local inv = require("santoku.tsetlin.inv")
+local eval = require("santoku.learn.evaluator")
+local inv = require("santoku.learn.inv")
 local ivec = require("santoku.ivec")
-local optimize = require("santoku.tsetlin.optimize")
+local optimize = require("santoku.learn.optimize")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local tokenizer = require("santoku.tokenizer")
-local util = require("santoku.tsetlin.util")
+local util = require("santoku.learn.util")
 local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
@@ -23,14 +23,14 @@ local cfg = {
     min_len = 1,
     max_run = 2,
     ngrams = 1,
-    cgrams_min = 0,
-    cgrams_max = 0,
-    cgrams_cross = false,
-    skips = 0,
+    cgrams_min = 3,
+    cgrams_max = 5,
+    cgrams_cross = true,
+    skips = 1,
   },
   feature_selection = {
     n_bns = nil,
-    n_selected = 8192,
+    n_selected = 65536,
   },
   nystrom = {
     n_landmarks = 4096,
@@ -42,14 +42,13 @@ local cfg = {
   eval = {
     knn = 16,
     random_pairs = 16,
-    ranking = "ndcg",
   },
   regressor = {
-    features = 2048,
+    features = 4096,
     absorb_interval = 1, --{ def = 10, min = 1, max = 40 },
-    absorb_threshold = { def = 0, min = 0, max = 127, int = true },
-    absorb_maximum = { def = 0, min = 0, max = 128, int = true },
-    absorb_insert = { def = 1, min = 1, max = 126, int = true },
+    absorb_threshold = { def = 0, min = 0, max = 256, int = true },
+    absorb_maximum = { def = 0, min = 0, max = 256, int = true },
+    absorb_insert = { def = 1, min = 1, max = 256, int = true },
     clauses = 32,
     clause_tolerance = { def = 16, min = 8, max = 1024, int = true },
     clause_maximum = { def = 16, min = 8, max = 1024, int = true },
@@ -58,7 +57,8 @@ local cfg = {
     search_rounds = 6,
     search_trials = 10,
     search_iterations = 10,
-    search_subsample = 0.2,
+    search_subsample_samples = 0.2,
+    search_subsample_targets = 8,
     final_patience = 20,
     final_batch = 40,
     final_iterations = 400,
@@ -86,7 +86,7 @@ test("newsgroups-embedding", function ()
   train.tokens = tok:tokenize(train.problems)
   validate.tokens = tok:tokenize(validate.problems)
   test_set.tokens = tok:tokenize(test_set.problems)
-  tok = nil
+  tok = nil -- luacheck: ignore
   train.problems = nil
   validate.problems = nil
   test_set.problems = nil
@@ -108,25 +108,20 @@ test("newsgroups-embedding", function ()
 
   print("\nBuilding doc-doc index")
   train.ids = ivec.create(train.n):fill_indices()
-  validate.ids = ivec.create(validate.n):fill_indices():add(train.n)
-  test_set.ids = ivec.create(test_set.n):fill_indices():add(train.n + validate.n)
   local index = inv.create({ features = bns_scores })
   index:add(train.tokens, train.ids)
-  index:add(validate.tokens, validate.ids)
-  index:add(test_set.tokens, test_set.ids)
-  str.printf("  %d docs indexed\n", train.n + validate.n + test_set.n)
+  str.printf("  %d docs indexed\n", train.n)
 
   print("\nBuilding eval adjacency")
   local eval_uids, inv_hoods = index:neighborhoods(cfg.eval.knn, 0, -1)
   local eval_off, eval_nbr, eval_w = inv_hoods:to_csr(eval_uids)
   local rp_off, rp_nbr, rp_w = csr.random_pairs(eval_uids, cfg.eval.random_pairs)
   csr.weight_from_index(eval_uids, rp_off, rp_nbr, rp_w, index, 0, -1)
-  eval_off, eval_nbr, eval_w = csr.merge(eval_off, eval_nbr, eval_w, rp_off, rp_nbr, rp_w)
-  eval_off, eval_nbr, eval_w = csr.symmetrize(eval_off, eval_nbr, eval_w, eval_uids:size())
+  csr.merge(eval_off, eval_nbr, eval_w, rp_off, rp_nbr, rp_w)
+  csr.symmetrize(eval_off, eval_nbr, eval_w, eval_uids:size())
   str.printf("  %d nodes, %d edges\n", eval_uids:size(), eval_nbr:size())
 
   print("\nSpectral embedding (Nystrom)")
-  local spectral_metrics
   local model = optimize.spectral({
     index = index,
     n_landmarks = cfg.nystrom.n_landmarks,
@@ -138,12 +133,8 @@ test("newsgroups-embedding", function ()
     expected_offsets = eval_off,
     expected_neighbors = eval_nbr,
     expected_weights = eval_w,
-    ranking = cfg.eval.ranking,
     each = function (ev)
       util.spectral_log(ev)
-      if ev.event == "eval" or ev.event == "done" then
-        spectral_metrics = ev.metrics or ev.best_metrics
-      end
     end,
   })
   local spectral_dims = model.dims
@@ -160,17 +151,20 @@ test("newsgroups-embedding", function ()
 
   print("\nFeature selection for regressor (F-score)")
   local n_selected = cfg.feature_selection.n_selected
-  local reg_ids = train.tokens:bits_top_reg_f(
-    train_raw_codes, train.n, n_tokens, spectral_dims, n_selected)
-  train.tokens:bits_select(reg_ids, nil, n_tokens)
-  validate.tokens:bits_select(reg_ids, nil, n_tokens)
-  test_set.tokens:bits_select(reg_ids, nil, n_tokens)
-  n_tokens = reg_ids:size()
+  local union_ids, _, class_offsets, class_feat_ids = train.tokens:bits_top_reg_f(
+    train_raw_codes, train.n, n_tokens, spectral_dims, n_selected, nil, "sum")
+  train.tokens:bits_select(union_ids, nil, n_tokens)
+  validate.tokens:bits_select(union_ids, nil, n_tokens)
+  test_set.tokens:bits_select(union_ids, nil, n_tokens)
+  class_offsets, class_feat_ids = csr.bits_select(class_offsets, class_feat_ids, union_ids)
+  n_tokens = union_ids:size()
   str.printf("  %d features selected\n", n_tokens)
 
   print("\nBuilding CSC index")
   local csc_offsets, csc_indices = csr.to_csc(train.tokens, train.n, n_tokens)
   str.printf("  Tokens: %d  Samples: %d\n", n_tokens, train.n)
+
+  local absorb_ranking_global = ivec.create(n_tokens):fill_indices()
 
   print("\nTraining regressor")
   local predicted_buf = dvec.create()
@@ -191,11 +185,15 @@ test("newsgroups-embedding", function ()
     tokens = train.tokens,
     csc_offsets = csc_offsets,
     csc_indices = csc_indices,
+    absorb_ranking = class_feat_ids,
+    absorb_ranking_offsets = class_offsets,
+    absorb_ranking_global = absorb_ranking_global,
     targets = train_raw_codes,
     search_rounds = cfg.regressor.search_rounds,
     search_trials = cfg.regressor.search_trials,
     search_iterations = cfg.regressor.search_iterations,
-    search_subsample = cfg.regressor.search_subsample,
+    search_subsample_samples = cfg.regressor.search_subsample_samples,
+    search_subsample_targets = cfg.regressor.search_subsample_targets,
     final_batch = cfg.regressor.final_batch,
     final_patience = cfg.regressor.final_patience,
     final_iterations = cfg.regressor.final_iterations,
@@ -220,8 +218,8 @@ test("newsgroups-embedding", function ()
     local off, nbr, w = hoods:to_csr(uids)
     local rp_off, rp_nbr, rp_w = csr.random_pairs(uids, cfg.eval.random_pairs)
     csr.weight_from_index(uids, rp_off, rp_nbr, rp_w, idx, 0, -1)
-    off, nbr, w = csr.merge(off, nbr, w, rp_off, rp_nbr, rp_w)
-    off, nbr, w = csr.symmetrize(off, nbr, w, uids:size())
+    csr.merge(off, nbr, w, rp_off, rp_nbr, rp_w)
+    csr.symmetrize(off, nbr, w, uids:size())
     return uids, off, nbr, w
   end
 
@@ -250,7 +248,6 @@ test("newsgroups-embedding", function ()
     n_dims = spectral_dims,
     eval_ids = tr_uids, eval_offsets = tr_off,
     eval_neighbors = tr_nbr, eval_weights = tr_w,
-    ranking = cfg.eval.ranking,
   })
 
   local train_ranking = eval.ranking_accuracy({
@@ -258,7 +255,6 @@ test("newsgroups-embedding", function ()
     n_dims = spectral_dims,
     eval_ids = tr_uids, eval_offsets = tr_off,
     eval_neighbors = tr_nbr, eval_weights = tr_w,
-    ranking = cfg.eval.ranking,
   })
 
   local val_ranking = eval.ranking_accuracy({
@@ -266,7 +262,6 @@ test("newsgroups-embedding", function ()
     n_dims = spectral_dims,
     eval_ids = va_uids, eval_offsets = va_off,
     eval_neighbors = va_nbr, eval_weights = va_w,
-    ranking = cfg.eval.ranking,
   })
 
   local test_ranking = eval.ranking_accuracy({
@@ -274,13 +269,11 @@ test("newsgroups-embedding", function ()
     n_dims = spectral_dims,
     eval_ids = te_uids, eval_offsets = te_off,
     eval_neighbors = te_nbr, eval_weights = te_w,
-    ranking = cfg.eval.ranking,
   })
 
   local train_reg = eval.regression_accuracy(train_predicted, train_raw_codes)
 
   str.printf("\n  Spectral dims: %d\n", spectral_dims)
-  str.printf("\n  Ranking (%s):\n", cfg.eval.ranking)
   str.printf("  %-28s %8.4f\n", "Spectral raw (train ceil):", spectral_raw.score)
   str.printf("  %-28s %8.4f\n", "Predicted train:", train_ranking.score)
   str.printf("  %-28s %8.4f\n", "Predicted validate:", val_ranking.score)

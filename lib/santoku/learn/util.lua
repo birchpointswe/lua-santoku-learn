@@ -1,7 +1,6 @@
 local str = require("santoku.string")
-local ann = require("santoku.tsetlin.ann")
-local csr = require("santoku.tsetlin.csr")
-local eval = require("santoku.tsetlin.evaluator")
+local ann = require("santoku.learn.ann")
+local eval = require("santoku.learn.evaluator")
 
 local M = {}
 
@@ -261,7 +260,7 @@ function M.make_bits_log (log_interval)
   log_interval = log_interval or 8
   local last_logged = 0
   local n_bits = 0
-  return function (bit, gain, score, action)
+  return function (_, gain, score, action)
     if action == "add" then
       n_bits = n_bits + 1
       if n_bits - last_logged >= log_interval or n_bits <= 1 then

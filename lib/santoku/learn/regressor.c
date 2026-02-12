@@ -30,7 +30,7 @@ SOFTWARE.
 
 #include <santoku/iuset.h>
 #include <santoku/lua/utils.h>
-#include <santoku/tsetlin/automata.h>
+#include <santoku/learn/automata.h>
 #include <santoku/cvec.h>
 #include <santoku/dvec.h>
 #include <santoku/ivec.h>
@@ -44,9 +44,9 @@ SOFTWARE.
 #define LUA_OK 0
 #endif
 
-#define TK_TSETLIN_MT "santoku_tsetlin"
+#define TK_LEARN_MT "santoku_learn"
 
-typedef struct tk_tsetlin_s {
+typedef struct tk_learn_s {
   bool has_state;
   bool trained;
   bool destroyed;
@@ -104,11 +104,14 @@ typedef struct tk_tsetlin_s {
 
   int64_t *absorb_ranking;
   unsigned int absorb_ranking_n;
+  int64_t *absorb_ranking_offsets;
+  int64_t *absorb_ranking_global;
+  unsigned int absorb_ranking_global_n;
   unsigned int *absorb_cursor;
-} tk_tsetlin_t;
+} tk_learn_t;
 
-static inline uint8_t tk_tsetlin_calculate (
-  tk_tsetlin_t *tm,
+static inline uint8_t tk_learn_calculate (
+  tk_learn_t *tm,
   char *input,
   unsigned int *literalsp,
   unsigned int *votesp,
@@ -169,7 +172,7 @@ static inline uint8_t tk_tsetlin_calculate (
 }
 
 static inline void apply_feedback (
-  tk_tsetlin_t *tm,
+  tk_learn_t *tm,
   unsigned int clause_idx,
   unsigned int chunk,
   char *input,
@@ -203,7 +206,7 @@ static inline void apply_feedback (
   }
 }
 
-static inline void tk_tsetlin_init_shuffle (
+static inline void tk_learn_init_shuffle (
   unsigned int *shuffle,
   unsigned int n
 ) {
@@ -216,42 +219,42 @@ static inline void tk_tsetlin_init_shuffle (
   }
 }
 
-tk_tsetlin_t *tk_tsetlin_peek (lua_State *L, int i)
+tk_learn_t *tk_learn_peek (lua_State *L, int i)
 {
-  return (tk_tsetlin_t *) luaL_checkudata(L, i, TK_TSETLIN_MT);
+  return (tk_learn_t *) luaL_checkudata(L, i, TK_LEARN_MT);
 }
 
-static inline int tk_tsetlin_train (lua_State *);
-static inline int tk_tsetlin_classify (lua_State *);
-static inline int tk_tsetlin_regress (lua_State *);
-static inline int tk_tsetlin_encode (lua_State *);
-static inline int tk_tsetlin_destroy (lua_State *L);
-static inline int tk_tsetlin_persist (lua_State *);
-static inline int tk_tsetlin_checkpoint (lua_State *);
-static inline int tk_tsetlin_restore (lua_State *);
-static inline int tk_tsetlin_reconfigure (lua_State *);
-static inline int tk_tsetlin_restrict (lua_State *);
-static inline int tk_tsetlin_active_features (lua_State *);
+static inline int tk_learn_train (lua_State *);
+static inline int tk_learn_classify (lua_State *);
+static inline int tk_learn_regress (lua_State *);
+static inline int tk_learn_encode (lua_State *);
+static inline int tk_learn_destroy (lua_State *L);
+static inline int tk_learn_persist (lua_State *);
+static inline int tk_learn_checkpoint (lua_State *);
+static inline int tk_learn_restore (lua_State *);
+static inline int tk_learn_reconfigure (lua_State *);
+static inline int tk_learn_restrict (lua_State *);
+static inline int tk_learn_active_features (lua_State *);
 
-static luaL_Reg tk_tsetlin_mt_fns[] =
+static luaL_Reg tk_learn_mt_fns[] =
 {
-  { "train", tk_tsetlin_train },
-  { "classify", tk_tsetlin_classify },
-  { "regress", tk_tsetlin_regress },
-  { "encode", tk_tsetlin_encode },
-  { "destroy", tk_tsetlin_destroy },
-  { "persist", tk_tsetlin_persist },
-  { "checkpoint", tk_tsetlin_checkpoint },
-  { "restore", tk_tsetlin_restore },
-  { "reconfigure", tk_tsetlin_reconfigure },
-  { "restrict", tk_tsetlin_restrict },
-  { "active_features", tk_tsetlin_active_features },
+  { "train", tk_learn_train },
+  { "classify", tk_learn_classify },
+  { "regress", tk_learn_regress },
+  { "encode", tk_learn_encode },
+  { "destroy", tk_learn_destroy },
+  { "persist", tk_learn_persist },
+  { "checkpoint", tk_learn_checkpoint },
+  { "restore", tk_learn_restore },
+  { "reconfigure", tk_learn_reconfigure },
+  { "restrict", tk_learn_restrict },
+  { "active_features", tk_learn_active_features },
   { NULL, NULL }
 };
 
-static inline tk_tsetlin_t *tk_tsetlin_alloc (lua_State *L, bool has_state)
+static inline tk_learn_t *tk_learn_alloc (lua_State *L, bool has_state)
 {
-  tk_tsetlin_t *tm = tk_lua_newuserdata(L, tk_tsetlin_t, TK_TSETLIN_MT, tk_tsetlin_mt_fns, tk_tsetlin_destroy);
+  tk_learn_t *tm = tk_lua_newuserdata(L, tk_learn_t, TK_LEARN_MT, tk_learn_mt_fns, tk_learn_destroy);
   tm->has_state = has_state;
   tm->sparse_mode = false;
   tm->n_tokens = 0;
@@ -272,13 +275,16 @@ static inline tk_tsetlin_t *tk_tsetlin_alloc (lua_State *L, bool has_state)
   tm->absorb_insert = 1;
   tm->absorb_ranking = NULL;
   tm->absorb_ranking_n = 0;
+  tm->absorb_ranking_offsets = NULL;
+  tm->absorb_ranking_global = NULL;
+  tm->absorb_ranking_global_n = 0;
   tm->absorb_cursor = NULL;
   return tm;
 }
 
-static inline void tk_tsetlin_init (
+static inline void tk_learn_init (
   lua_State *L,
-  tk_tsetlin_t *tm,
+  tk_learn_t *tm,
   unsigned int outputs,
   unsigned int features,
   unsigned int clauses,
@@ -342,11 +348,11 @@ static inline void tk_tsetlin_init (
   tm->automata.actions = tm->actions;
 }
 
-static inline void tk_tsetlin_create_impl (lua_State *L)
+static inline void tk_learn_create_impl (lua_State *L)
 {
-  tk_tsetlin_t *tm = tk_tsetlin_alloc(L, true);
+  tk_learn_t *tm = tk_learn_alloc(L, true);
   lua_insert(L, 1);
-  tk_tsetlin_init(L, tm,
+  tk_learn_init(L, tm,
       tk_lua_foptunsigned(L, 2, "create", "outputs", 1),
       tk_lua_fcheckunsigned(L, 2, "create", "features"),
       tk_lua_fcheckunsigned(L, 2, "create", "clauses"),
@@ -372,25 +378,25 @@ static inline void tk_tsetlin_create_impl (lua_State *L)
   lua_settop(L, 1);
 }
 
-static inline int tk_tsetlin_create (lua_State *L)
+static inline int tk_learn_create (lua_State *L)
 {
-  tk_tsetlin_create_impl(L);
+  tk_learn_create_impl(L);
   return 1;
 }
 
-static inline void tk_tsetlin_shrink (tk_tsetlin_t *tm)
+static inline void tk_learn_shrink (tk_learn_t *tm)
 {
   if (tm == NULL) return;
   tm->reusable = false;
   free(tm->state); tm->state = NULL;
 }
 
-static inline void _tk_tsetlin_destroy (tk_tsetlin_t *tm)
+static inline void _tk_learn_destroy (tk_learn_t *tm)
 {
   if (tm == NULL) return;
   if (tm->destroyed) return;
   tm->destroyed = true;
-  tk_tsetlin_shrink(tm);
+  tk_learn_shrink(tm);
   free(tm->actions); tm->actions = NULL;
   free(tm->results); tm->results = NULL;
   free(tm->encodings); tm->encodings = NULL;
@@ -404,34 +410,38 @@ static inline void _tk_tsetlin_destroy (tk_tsetlin_t *tm)
   free(tm->managed_dense); tm->managed_dense = NULL;
   free(tm->absorb_scratch); tm->absorb_scratch = NULL;
   free(tm->absorb_cursor); tm->absorb_cursor = NULL;
+  free(tm->absorb_ranking_offsets); tm->absorb_ranking_offsets = NULL;
+  if (tm->absorb_ranking_global != tm->absorb_ranking)
+    free(tm->absorb_ranking_global);
+  tm->absorb_ranking_global = NULL;
   free(tm->absorb_ranking); tm->absorb_ranking = NULL;
 }
 
-static inline int tk_tsetlin_destroy (lua_State *L)
+static inline int tk_learn_destroy (lua_State *L)
 {
   lua_settop(L, 1);
-  tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
-  _tk_tsetlin_destroy(tm);
+  tk_learn_t *tm = tk_learn_peek(L, 1);
+  _tk_learn_destroy(tm);
   return 0;
 }
 
-static inline bool sparse_is_active (tk_tsetlin_t *tm, unsigned int c, unsigned int tok) {
+static inline bool sparse_is_active (tk_learn_t *tm, unsigned int c, unsigned int tok) {
   uint64_t idx = (uint64_t)c * tm->active_bytes + tok / 8;
   return (tm->active[idx] >> (tok % 8)) & 1;
 }
 
-static inline void sparse_set_active (tk_tsetlin_t *tm, unsigned int c, unsigned int tok) {
+static inline void sparse_set_active (tk_learn_t *tm, unsigned int c, unsigned int tok) {
   uint64_t idx = (uint64_t)c * tm->active_bytes + tok / 8;
   tm->active[idx] |= (uint8_t)(1 << (tok % 8));
 }
 
-static inline void sparse_clear_active (tk_tsetlin_t *tm, unsigned int c, unsigned int tok) {
+static inline void sparse_clear_active (tk_learn_t *tm, unsigned int c, unsigned int tok) {
   uint64_t idx = (uint64_t)c * tm->active_bytes + tok / 8;
   tm->active[idx] &= (uint8_t)~(1 << (tok % 8));
 }
 
 
-static inline void tk_tsetlin_init_mapping (tk_tsetlin_t *tm, unsigned int c,
+static inline void tk_learn_init_mapping (tk_learn_t *tm, unsigned int c,
     int64_t *init_ids, unsigned int n_init) {
   unsigned int features = tm->features;
   unsigned int n_tokens = tm->n_tokens;
@@ -452,7 +462,7 @@ static inline void tk_tsetlin_init_mapping (tk_tsetlin_t *tm, unsigned int c,
   }
 }
 
-static inline void tk_tsetlin_densify_slot (tk_tsetlin_t *tm, unsigned int c, unsigned int slot, unsigned int new_tok, int64_t old_tok) {
+static inline void tk_learn_densify_slot (tk_learn_t *tm, unsigned int c, unsigned int slot, unsigned int new_tok, int64_t old_tok) {
   unsigned int bpc = tm->dense_bpc;
   unsigned int bps = tm->dense_bps;
   uint8_t *out = (uint8_t *)tm->managed_dense;
@@ -481,7 +491,7 @@ static inline void tk_tsetlin_densify_slot (tk_tsetlin_t *tm, unsigned int c, un
   }
 }
 
-static inline void tk_tsetlin_densify_all (tk_tsetlin_t *tm) {
+static inline void tk_learn_densify_all (tk_learn_t *tm) {
   unsigned int classes = tm->classes;
   unsigned int features = tm->features;
   unsigned int bps = tm->dense_bps;
@@ -494,12 +504,12 @@ static inline void tk_tsetlin_densify_all (tk_tsetlin_t *tm) {
   for (unsigned int c = 0; c < classes; c++) {
     for (unsigned int k = 0; k < features; k++) {
       unsigned int tok = (unsigned int)tm->mapping[(uint64_t)c * features + k];
-      tk_tsetlin_densify_slot(tm, c, k, tok, -1);
+      tk_learn_densify_slot(tm, c, k, tok, -1);
     }
   }
 }
 
-static inline void tk_tsetlin_reset_slot_automata (tk_tsetlin_t *tm, unsigned int c, unsigned int slot) {
+static inline void tk_learn_reset_slot_automata (tk_learn_t *tm, unsigned int c, unsigned int slot) {
   unsigned int clauses = tm->clauses;
   unsigned int state_bits = tm->state_bits;
   unsigned int m = state_bits - 1;
@@ -524,7 +534,7 @@ static inline void tk_tsetlin_reset_slot_automata (tk_tsetlin_t *tm, unsigned in
   }
 }
 
-static inline unsigned int tk_tsetlin_absorb_class (tk_tsetlin_t *tm, unsigned int c) {
+static inline unsigned int tk_learn_absorb_class (tk_learn_t *tm, unsigned int c) {
   unsigned int clauses = tm->clauses;
   unsigned int features = tm->features;
   unsigned int n_tokens = tm->n_tokens;
@@ -550,16 +560,13 @@ static inline unsigned int tk_tsetlin_absorb_class (tk_tsetlin_t *tm, unsigned i
         uint8_t mask = 1 << (bit % 8);
         unsigned int act = (action[byte_idx] & mask) ? 1 : 0;
         unsigned int counter = 0;
-        if (act) {
-          max_states[k] = max_counter + 1;
-          break;
-        }
         for (unsigned int b = 0; b < m; b++) {
           uint8_t *plane = (uint8_t *)tk_automata_counts_plane(&tm->automata, clause_id, b);
           if (plane[byte_idx] & mask) counter |= (1u << b);
         }
-        if (counter > max_states[k])
-          max_states[k] = counter;
+        unsigned int full_state = act ? (max_counter + 1 + counter) : counter;
+        if (full_state > max_states[k])
+          max_states[k] = full_state;
       }
     }
   }
@@ -590,8 +597,8 @@ static inline unsigned int tk_tsetlin_absorb_class (tk_tsetlin_t *tm, unsigned i
   unsigned int active_pop = (unsigned int)tk_cvec_bits_popcount_serial(active_base, n_tokens);
   bool vocab_exhausted = active_pop >= n_tokens;
 
-  int64_t *rank_base = tm->absorb_ranking;
-  unsigned int rank_len = tm->absorb_ranking_n;
+  int64_t *rank_base = tm->absorb_ranking_global;
+  unsigned int rank_len = tm->absorb_ranking_global_n;
 
   unsigned int n_replaced = 0;
   for (unsigned int i = 0; i < max_replace; i++) {
@@ -610,15 +617,15 @@ static inline unsigned int tk_tsetlin_absorb_class (tk_tsetlin_t *tm, unsigned i
     if (sparse_is_active(tm, c, new_tok)) { continue; }
     tm->mapping[(uint64_t)c * features + k] = (int64_t)new_tok;
     sparse_set_active(tm, c, new_tok);
-    tk_tsetlin_densify_slot(tm, c, k, new_tok, old_tok);
-    tk_tsetlin_reset_slot_automata(tm, c, k);
+    tk_learn_densify_slot(tm, c, k, new_tok, old_tok);
+    tk_learn_reset_slot_automata(tm, c, k);
     n_replaced++;
   }
 
   return n_replaced;
 }
 
-static inline char *tk_tsetlin_densify_tokens (tk_tsetlin_t *tm, tk_ivec_t *tokens, unsigned int n_samples) {
+static inline char *tk_learn_densify_tokens (tk_learn_t *tm, tk_ivec_t *tokens, unsigned int n_samples) {
   unsigned int classes = tm->classes;
   unsigned int features = tm->features;
   unsigned int n_tokens = tm->n_tokens;
@@ -660,7 +667,7 @@ static inline char *tk_tsetlin_densify_tokens (tk_tsetlin_t *tm, tk_ivec_t *toke
     for (unsigned int k = 0; k < features; k++)
       if (cm[k] >= 0) reverse[cm[k]] = (int64_t)k;
 
-    #pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(guided)
     for (unsigned int s = 0; s < n_samples; s++) {
       uint8_t *base = data + (uint64_t)s * bps + (uint64_t)c * bpc;
       for (uint64_t bi = sample_offsets[s]; bi < sample_offsets[s + 1]; bi++) {
@@ -686,7 +693,7 @@ static inline char *tk_tsetlin_densify_tokens (tk_tsetlin_t *tm, tk_ivec_t *toke
   return out;
 }
 
-static inline int tk_tsetlin_predict_regressor (lua_State *L, tk_tsetlin_t *tm) {
+static inline int tk_learn_predict_regressor (lua_State *L, tk_learn_t *tm) {
   lua_settop(L, 5);
   unsigned int n = tk_lua_checkunsigned(L, 3, "n_samples");
   bool grouped = lua_toboolean(L, 4);
@@ -699,7 +706,7 @@ static inline int tk_tsetlin_predict_regressor (lua_State *L, tk_tsetlin_t *tm) 
     tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
     lua_pop(L, 1);
     unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "regress", "n_samples") : n;
-    temp_dense = tk_tsetlin_densify_tokens(tm, tokens, n_tok);
+    temp_dense = tk_learn_densify_tokens(tm, tokens, n_tok);
     grouped = true;
   } else {
     ps = tk_cvec_peek(L, 2, "problems");
@@ -733,7 +740,7 @@ static inline int tk_tsetlin_predict_regressor (lua_State *L, tk_tsetlin_t *tm) 
       char *input = grouped
         ? base_ptr + s * input_stride + c * bytes_per_class
         : base_ptr + s * input_chunks;
-      uint8_t out = tk_tsetlin_calculate(tm, input, literals, votes_buf, chunk);
+      uint8_t out = tk_learn_calculate(tm, input, literals, votes_buf, chunk);
       long int chunk_vote = 0;
       for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
         if (out & (1 << j))
@@ -762,9 +769,9 @@ static inline int tk_tsetlin_predict_regressor (lua_State *L, tk_tsetlin_t *tm) 
   return 1;
 }
 
-static inline int tk_tsetlin_classify (lua_State *L)
+static inline int tk_learn_classify (lua_State *L)
 {
-  tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
+  tk_learn_t *tm = tk_learn_peek(L, 1);
   lua_settop(L, 5);
   unsigned int n = tk_lua_checkunsigned(L, 3, "n_samples");
   bool grouped = lua_toboolean(L, 4);
@@ -777,7 +784,7 @@ static inline int tk_tsetlin_classify (lua_State *L)
     tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
     lua_pop(L, 1);
     unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "classify", "n_samples") : n;
-    temp_dense = tk_tsetlin_densify_tokens(tm, tokens, n_tok);
+    temp_dense = tk_learn_densify_tokens(tm, tokens, n_tok);
     grouped = true;
   } else {
     ps = tk_cvec_peek(L, 2, "problems");
@@ -808,7 +815,7 @@ static inline int tk_tsetlin_classify (lua_State *L)
       char *input = grouped
         ? base_ptr + s * input_stride + c * bytes_per_class
         : base_ptr + s * input_chunks;
-      uint8_t out = tk_tsetlin_calculate(tm, input, literals, votes_buf, chunk);
+      uint8_t out = tk_learn_calculate(tm, input, literals, votes_buf, chunk);
       long int chunk_vote = 0;
       for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
         if (out & (1 << j))
@@ -844,15 +851,15 @@ static inline int tk_tsetlin_classify (lua_State *L)
   return 1;
 }
 
-static inline int tk_tsetlin_regress (lua_State *L)
+static inline int tk_learn_regress (lua_State *L)
 {
-  tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
-  return tk_tsetlin_predict_regressor(L, tm);
+  tk_learn_t *tm = tk_learn_peek(L, 1);
+  return tk_learn_predict_regressor(L, tm);
 }
 
-static inline int tk_tsetlin_encode (lua_State *L)
+static inline int tk_learn_encode (lua_State *L)
 {
-  tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
+  tk_learn_t *tm = tk_learn_peek(L, 1);
   lua_settop(L, 5);
   unsigned int n = tk_lua_checkunsigned(L, 3, "n_samples");
   bool grouped = lua_toboolean(L, 4);
@@ -865,7 +872,7 @@ static inline int tk_tsetlin_encode (lua_State *L)
     tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
     lua_pop(L, 1);
     unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "encode", "n_samples") : n;
-    temp_dense = tk_tsetlin_densify_tokens(tm, tokens, n_tok);
+    temp_dense = tk_learn_densify_tokens(tm, tokens, n_tok);
     grouped = true;
   } else {
     ps = tk_cvec_peek(L, 2, "problems");
@@ -898,7 +905,7 @@ static inline int tk_tsetlin_encode (lua_State *L)
       char *input = grouped
         ? base_ptr + s * input_stride + c * bytes_per_class
         : base_ptr + s * input_chunks;
-      uint8_t out = tk_tsetlin_calculate(tm, input, literals, votes_buf, chunk);
+      uint8_t out = tk_learn_calculate(tm, input, literals, votes_buf, chunk);
       long int chunk_vote = 0;
       for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
         if (out & (1 << j))
@@ -943,7 +950,7 @@ typedef enum {
       ? ps->a + sample * input_stride + chunk_class * bytes_per_class \
       : ps->a + sample * input_chunks; \
     double y_target = GET_TARGET; \
-    uint8_t out = tk_tsetlin_calculate(tm, input, literals, votes, chunk); \
+    uint8_t out = tk_learn_calculate(tm, input, literals, votes, chunk); \
     long int chunk_vote = 0; \
     for (unsigned int j = 0; j < TK_CVEC_BITS; j++) \
       if (out & (1 << j)) \
@@ -966,7 +973,7 @@ typedef enum {
     } \
   }
 
-static inline int tk_tsetlin_train_regressor (lua_State *L, tk_tsetlin_t *tm)
+static inline int tk_learn_train_regressor (lua_State *L, tk_learn_t *tm)
 {
   unsigned int n = tk_lua_fcheckunsigned(L, 2, "train", "samples");
 
@@ -986,28 +993,72 @@ static inline int tk_tsetlin_train_regressor (lua_State *L, tk_tsetlin_t *tm)
       tm->csc_offsets = csc_off->a;
       tm->csc_indices = csc_idx->a;
       if (!tm->absorb_ranking) {
-        tm->absorb_ranking_n = tm->n_tokens;
-        tm->absorb_ranking = (int64_t *)malloc((uint64_t)tm->n_tokens * sizeof(int64_t));
-        for (unsigned int i = 0; i < tm->n_tokens; i++)
-          tm->absorb_ranking[i] = (int64_t)i;
-        for (unsigned int i = tm->n_tokens - 1; i > 0; i--) {
-          unsigned int j = tk_fast_random() % (i + 1);
-          int64_t tmp = tm->absorb_ranking[i];
-          tm->absorb_ranking[i] = tm->absorb_ranking[j];
-          tm->absorb_ranking[j] = tmp;
+        lua_getfield(L, 2, "absorb_ranking");
+        if (!lua_isnil(L, -1)) {
+          tk_ivec_t *rank_ivec = tk_ivec_peek(L, -1, "absorb_ranking");
+          tm->absorb_ranking_n = (unsigned int)rank_ivec->n;
+          tm->absorb_ranking = (int64_t *)malloc(rank_ivec->n * sizeof(int64_t));
+          memcpy(tm->absorb_ranking, rank_ivec->a, rank_ivec->n * sizeof(int64_t));
+          lua_pop(L, 1);
+          lua_getfield(L, 2, "absorb_ranking_offsets");
+          if (!lua_isnil(L, -1)) {
+            tk_ivec_t *off_ivec = tk_ivec_peek(L, -1, "absorb_ranking_offsets");
+            tm->absorb_ranking_offsets = (int64_t *)malloc(off_ivec->n * sizeof(int64_t));
+            memcpy(tm->absorb_ranking_offsets, off_ivec->a, off_ivec->n * sizeof(int64_t));
+          }
+          lua_pop(L, 1);
+        } else {
+          lua_pop(L, 1);
+          tm->absorb_ranking_n = tm->n_tokens;
+          tm->absorb_ranking = (int64_t *)malloc((uint64_t)tm->n_tokens * sizeof(int64_t));
+          for (unsigned int i = 0; i < tm->n_tokens; i++)
+            tm->absorb_ranking[i] = (int64_t)i;
+          for (unsigned int i = tm->n_tokens - 1; i > 0; i--) {
+            unsigned int j = tk_fast_random() % (i + 1);
+            int64_t tmp = tm->absorb_ranking[i];
+            tm->absorb_ranking[i] = tm->absorb_ranking[j];
+            tm->absorb_ranking[j] = tmp;
+          }
         }
+      }
+      if (!tm->absorb_ranking_global) {
+        lua_getfield(L, 2, "absorb_ranking_global");
+        if (!lua_isnil(L, -1)) {
+          tk_ivec_t *g = tk_ivec_peek(L, -1, "absorb_ranking_global");
+          tm->absorb_ranking_global_n = (unsigned int)g->n;
+          tm->absorb_ranking_global = (int64_t *)malloc(g->n * sizeof(int64_t));
+          memcpy(tm->absorb_ranking_global, g->a, g->n * sizeof(int64_t));
+        } else if (!tm->absorb_ranking_offsets) {
+          tm->absorb_ranking_global = tm->absorb_ranking;
+          tm->absorb_ranking_global_n = tm->absorb_ranking_n;
+        } else {
+          tm->absorb_ranking_global_n = tm->absorb_ranking_n;
+          tm->absorb_ranking_global = (int64_t *)malloc(tm->absorb_ranking_n * sizeof(int64_t));
+          memcpy(tm->absorb_ranking_global, tm->absorb_ranking, tm->absorb_ranking_n * sizeof(int64_t));
+        }
+        lua_pop(L, 1);
       }
       if (!tm->absorb_cursor)
         tm->absorb_cursor = (unsigned int *)calloc(tm->classes, sizeof(unsigned int));
       memset(tm->absorb_cursor, 0, tm->classes * sizeof(unsigned int));
       tk_fast_seed(42);
-      for (unsigned int c = 0; c < tm->classes; c++)
-        tk_tsetlin_init_mapping(tm, c, NULL, 0);
+      for (unsigned int c = 0; c < tm->classes; c++) {
+        int64_t *init_ids = NULL;
+        unsigned int n_init = 0;
+        if (tm->absorb_ranking_offsets) {
+          init_ids = tm->absorb_ranking + tm->absorb_ranking_offsets[c];
+          n_init = (unsigned int)(tm->absorb_ranking_offsets[c + 1] - tm->absorb_ranking_offsets[c]);
+        } else {
+          init_ids = tm->absorb_ranking;
+          n_init = tm->absorb_ranking_n;
+        }
+        tk_learn_init_mapping(tm, c, init_ids, n_init);
+      }
       tm->dense_bpc = TK_CVEC_BITS_BYTES(tm->features * 2);
       tm->dense_bps = tm->classes * tm->dense_bpc;
       tm->dense_n_samples = n;
       tm->managed_dense = (char *)malloc((uint64_t)n * tm->dense_bps);
-      tk_tsetlin_densify_all(tm);
+      tk_learn_densify_all(tm);
     }
 
     ps = (tk_cvec_t *)malloc(sizeof(tk_cvec_t));
@@ -1168,8 +1219,8 @@ static inline int tk_tsetlin_train_regressor (lua_State *L, tk_tsetlin_t *tm)
     unsigned int votes[TK_CVEC_BITS];
     for (unsigned int iter = 0; iter < max_iter; iter++) {
       if (break_flag) break;
-      tk_tsetlin_init_shuffle(shuffle, n);
-      #pragma omp for schedule(static)
+      tk_learn_init_shuffle(shuffle, n);
+      #pragma omp for schedule(guided)
       for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
         unsigned int chunk_class = chunk / clause_chunks;
         switch (target_mode) {
@@ -1196,7 +1247,7 @@ static inline int tk_tsetlin_train_regressor (lua_State *L, tk_tsetlin_t *tm)
       if (tm->sparse_mode && tm->absorb_interval > 0 && ((iter + 1) % tm->absorb_interval == 0)) {
         #pragma omp for schedule(dynamic)
         for (unsigned int c = 0; c < tm->classes; c++)
-          tk_tsetlin_absorb_class(tm, c);
+          tk_learn_absorb_class(tm, c);
       }
       #pragma omp single
       {
@@ -1227,34 +1278,39 @@ static inline int tk_tsetlin_train_regressor (lua_State *L, tk_tsetlin_t *tm)
   if (sparse_train)
     free(ps);
   if (!tm->reusable)
-    tk_tsetlin_shrink(tm);
+    tk_learn_shrink(tm);
   tm->trained = true;
 
   return 0;
 }
 
-static inline int tk_tsetlin_train (lua_State *L)
+static inline int tk_learn_train (lua_State *L)
 {
-  tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
+  tk_learn_t *tm = tk_learn_peek(L, 1);
   if (!tm->has_state)
     luaL_error(L, "can't train a model loaded without state");
-  return tk_tsetlin_train_regressor(L, tm);
+  return tk_learn_train_regressor(L, tm);
 }
 
-static inline void _tk_tsetlin_persist (lua_State *L, tk_tsetlin_t *tm, FILE *fh)
+static inline void _tk_learn_persist (lua_State *L, tk_learn_t *tm, FILE *fh)
 {
-  tk_lua_fwrite(L, &tm->classes, sizeof(unsigned int), 1, fh);
-  tk_lua_fwrite(L, &tm->features, sizeof(unsigned int), 1, fh);
-  tk_lua_fwrite(L, &tm->clauses, sizeof(unsigned int), 1, fh);
-  tk_lua_fwrite(L, &tm->clause_tolerance, sizeof(unsigned int), 1, fh);
-  tk_lua_fwrite(L, &tm->clause_maximum, sizeof(unsigned int), 1, fh);
-  tk_lua_fwrite(L, &tm->target, sizeof(unsigned int), 1, fh);
-  tk_lua_fwrite(L, &tm->state_bits, sizeof(unsigned int), 1, fh);
-  tk_lua_fwrite(L, &tm->input_bits, sizeof(unsigned int), 1, fh);
-  tk_lua_fwrite(L, &tm->input_chunks, sizeof(unsigned int), 1, fh);
-  tk_lua_fwrite(L, &tm->clause_chunks, sizeof(unsigned int), 1, fh);
-  tk_lua_fwrite(L, &tm->state_chunks, sizeof(size_t), 1, fh);
-  tk_lua_fwrite(L, &tm->action_chunks, sizeof(size_t), 1, fh);
+  tk_lua_fwrite(L, "TKtm", 1, 4, fh);
+  uint8_t version = 1;
+  tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
+  uint32_t u32;
+  u32 = (uint32_t)tm->classes; tk_lua_fwrite(L, &u32, sizeof(uint32_t), 1, fh);
+  u32 = (uint32_t)tm->features; tk_lua_fwrite(L, &u32, sizeof(uint32_t), 1, fh);
+  u32 = (uint32_t)tm->clauses; tk_lua_fwrite(L, &u32, sizeof(uint32_t), 1, fh);
+  u32 = (uint32_t)tm->clause_tolerance; tk_lua_fwrite(L, &u32, sizeof(uint32_t), 1, fh);
+  u32 = (uint32_t)tm->clause_maximum; tk_lua_fwrite(L, &u32, sizeof(uint32_t), 1, fh);
+  u32 = (uint32_t)tm->target; tk_lua_fwrite(L, &u32, sizeof(uint32_t), 1, fh);
+  u32 = (uint32_t)tm->state_bits; tk_lua_fwrite(L, &u32, sizeof(uint32_t), 1, fh);
+  u32 = (uint32_t)tm->input_bits; tk_lua_fwrite(L, &u32, sizeof(uint32_t), 1, fh);
+  u32 = (uint32_t)tm->input_chunks; tk_lua_fwrite(L, &u32, sizeof(uint32_t), 1, fh);
+  u32 = (uint32_t)tm->clause_chunks; tk_lua_fwrite(L, &u32, sizeof(uint32_t), 1, fh);
+  uint64_t u64;
+  u64 = (uint64_t)tm->state_chunks; tk_lua_fwrite(L, &u64, sizeof(uint64_t), 1, fh);
+  u64 = (uint64_t)tm->action_chunks; tk_lua_fwrite(L, &u64, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, &tm->specificity, sizeof(double), 1, fh);
   tk_lua_fwrite(L, &tm->tail_mask, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, tm->actions, 1, tm->action_chunks, fh);
@@ -1262,13 +1318,13 @@ static inline void _tk_tsetlin_persist (lua_State *L, tk_tsetlin_t *tm, FILE *fh
   tk_lua_fwrite(L, tm->y_max, sizeof(double), tm->classes, fh);
 }
 
-static inline int tk_tsetlin_persist (lua_State *L)
+static inline int tk_learn_persist (lua_State *L)
 {
   lua_settop(L, 2);
-  tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
+  tk_learn_t *tm = tk_learn_peek(L, 1);
   bool tostr = lua_type(L, 2) == LUA_TNIL;
   FILE *fh = tostr ? tk_lua_tmpfile(L) : tk_lua_fopen(L, tk_lua_checkstring(L, 2, "persist path"), "w");
-  _tk_tsetlin_persist(L, tm, fh);
+  _tk_learn_persist(L, tm, fh);
   if (!tostr) {
     tk_lua_fclose(L, fh);
     return 0;
@@ -1287,10 +1343,10 @@ static inline int tk_tsetlin_persist (lua_State *L)
   }
 }
 
-static inline int tk_tsetlin_checkpoint (lua_State *L)
+static inline int tk_learn_checkpoint (lua_State *L)
 {
   lua_settop(L, 2);
-  tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
+  tk_learn_t *tm = tk_learn_peek(L, 1);
   tk_cvec_t *checkpoint = tk_cvec_peek(L, 2, "checkpoint");
   size_t mapping_size = tm->sparse_mode ? (size_t)tm->classes * tm->features * sizeof(int64_t) : 0;
   size_t size = tm->action_chunks + mapping_size;
@@ -1303,10 +1359,10 @@ static inline int tk_tsetlin_checkpoint (lua_State *L)
   return 0;
 }
 
-static inline int tk_tsetlin_restore (lua_State *L)
+static inline int tk_learn_restore (lua_State *L)
 {
   lua_settop(L, 2);
-  tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
+  tk_learn_t *tm = tk_learn_peek(L, 1);
   tk_cvec_t *checkpoint = tk_cvec_peek(L, 2, "checkpoint");
   size_t mapping_size = tm->sparse_mode ? (size_t)tm->classes * tm->features * sizeof(int64_t) : 0;
   size_t expected = tm->action_chunks + mapping_size;
@@ -1324,15 +1380,15 @@ static inline int tk_tsetlin_restore (lua_State *L)
       }
     }
     if (tm->managed_dense)
-      tk_tsetlin_densify_all(tm);
+      tk_learn_densify_all(tm);
   }
   return 0;
 }
 
-static inline int tk_tsetlin_reconfigure (lua_State *L)
+static inline int tk_learn_reconfigure (lua_State *L)
 {
   lua_settop(L, 2);
-  tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
+  tk_learn_t *tm = tk_learn_peek(L, 1);
   if (!tm->reusable)
     luaL_error(L, "reconfigure requires reusable=true at creation time");
   unsigned int new_clauses = tk_lua_fcheckunsigned(L, 2, "reconfigure", "clauses");
@@ -1391,7 +1447,7 @@ static inline int tk_tsetlin_reconfigure (lua_State *L)
   return 0;
 }
 
-static inline void tk_tsetlin_restrict_buffer (
+static inline void tk_learn_restrict_buffer (
   char *buf,
   size_t bytes_per_class,
   unsigned int old_classes,
@@ -1408,10 +1464,10 @@ static inline void tk_tsetlin_restrict_buffer (
   free(temp);
 }
 
-static inline int tk_tsetlin_restrict (lua_State *L)
+static inline int tk_learn_restrict (lua_State *L)
 {
   lua_settop(L, 2);
-  tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
+  tk_learn_t *tm = tk_learn_peek(L, 1);
   tk_ivec_t *keep = tk_ivec_peek(L, 2, "classes");
   if (tm->destroyed)
     return luaL_error(L, "cannot restrict a destroyed model");
@@ -1434,10 +1490,10 @@ static inline int tk_tsetlin_restrict (lua_State *L)
   unsigned int new_classes = (unsigned int)keep->n;
   size_t bytes_per_class_actions = (size_t)tm->clauses * tm->input_chunks;
   size_t bytes_per_class_state = (size_t)tm->clauses * (tm->state_bits - 1) * tm->input_chunks;
-  tk_tsetlin_restrict_buffer(tm->actions, bytes_per_class_actions, tm->classes, new_classes, keep->a);
+  tk_learn_restrict_buffer(tm->actions, bytes_per_class_actions, tm->classes, new_classes, keep->a);
   tm->action_chunks = new_classes * bytes_per_class_actions;
   if (tm->state) {
-    tk_tsetlin_restrict_buffer(tm->state, bytes_per_class_state, tm->classes, new_classes, keep->a);
+    tk_learn_restrict_buffer(tm->state, bytes_per_class_state, tm->classes, new_classes, keep->a);
     tm->state_chunks = new_classes * bytes_per_class_state;
   }
   tm->classes = new_classes;
@@ -1446,9 +1502,9 @@ static inline int tk_tsetlin_restrict (lua_State *L)
   return 0;
 }
 
-static inline int tk_tsetlin_active_features (lua_State *L)
+static inline int tk_learn_active_features (lua_State *L)
 {
-  tk_tsetlin_t *tm = tk_tsetlin_peek(L, 1);
+  tk_learn_t *tm = tk_learn_peek(L, 1);
   if (!tm->sparse_mode)
     return luaL_error(L, "active_features requires sparse mode");
   unsigned int classes = tm->classes;
@@ -1463,21 +1519,31 @@ static inline int tk_tsetlin_active_features (lua_State *L)
   return 2;
 }
 
-static inline void _tk_tsetlin_load (lua_State *L, tk_tsetlin_t *tm, FILE *fh)
+static inline void _tk_learn_load (lua_State *L, tk_learn_t *tm, FILE *fh)
 {
-  tk_lua_fread(L, &tm->classes, sizeof(unsigned int), 1, fh);
+  char magic[4];
+  tk_lua_fread(L, magic, 1, 4, fh);
+  if (memcmp(magic, "TKtm", 4) != 0)
+    luaL_error(L, "invalid TM file (bad magic)");
+  uint8_t version;
+  tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
+  if (version != 1)
+    luaL_error(L, "unsupported TM version %d", (int)version);
+  uint32_t u32;
+  tk_lua_fread(L, &u32, sizeof(uint32_t), 1, fh); tm->classes = u32;
   tm->class_chunks = TK_CVEC_BITS_BYTES(tm->classes);
-  tk_lua_fread(L, &tm->features, sizeof(unsigned int), 1, fh);
-  tk_lua_fread(L, &tm->clauses, sizeof(unsigned int), 1, fh);
-  tk_lua_fread(L, &tm->clause_tolerance, sizeof(unsigned int), 1, fh);
-  tk_lua_fread(L, &tm->clause_maximum, sizeof(unsigned int), 1, fh);
-  tk_lua_fread(L, &tm->target, sizeof(unsigned int), 1, fh);
-  tk_lua_fread(L, &tm->state_bits, sizeof(unsigned int), 1, fh);
-  tk_lua_fread(L, &tm->input_bits, sizeof(unsigned int), 1, fh);
-  tk_lua_fread(L, &tm->input_chunks, sizeof(unsigned int), 1, fh);
-  tk_lua_fread(L, &tm->clause_chunks, sizeof(unsigned int), 1, fh);
-  tk_lua_fread(L, &tm->state_chunks, sizeof(size_t), 1, fh);
-  tk_lua_fread(L, &tm->action_chunks, sizeof(size_t), 1, fh);
+  tk_lua_fread(L, &u32, sizeof(uint32_t), 1, fh); tm->features = u32;
+  tk_lua_fread(L, &u32, sizeof(uint32_t), 1, fh); tm->clauses = u32;
+  tk_lua_fread(L, &u32, sizeof(uint32_t), 1, fh); tm->clause_tolerance = u32;
+  tk_lua_fread(L, &u32, sizeof(uint32_t), 1, fh); tm->clause_maximum = u32;
+  tk_lua_fread(L, &u32, sizeof(uint32_t), 1, fh); tm->target = u32;
+  tk_lua_fread(L, &u32, sizeof(uint32_t), 1, fh); tm->state_bits = u32;
+  tk_lua_fread(L, &u32, sizeof(uint32_t), 1, fh); tm->input_bits = u32;
+  tk_lua_fread(L, &u32, sizeof(uint32_t), 1, fh); tm->input_chunks = u32;
+  tk_lua_fread(L, &u32, sizeof(uint32_t), 1, fh); tm->clause_chunks = u32;
+  uint64_t u64;
+  tk_lua_fread(L, &u64, sizeof(uint64_t), 1, fh); tm->state_chunks = (size_t)u64;
+  tk_lua_fread(L, &u64, sizeof(uint64_t), 1, fh); tm->action_chunks = (size_t)u64;
   tk_lua_fread(L, &tm->specificity, sizeof(double), 1, fh);
   tk_lua_fread(L, &tm->tail_mask, sizeof(uint8_t), 1, fh);
   tm->actions = (char *)tk_malloc_aligned(L, tm->action_chunks, TK_CVEC_BITS);
@@ -1495,30 +1561,30 @@ static inline void _tk_tsetlin_load (lua_State *L, tk_tsetlin_t *tm, FILE *fh)
   tm->automata.actions = tm->actions;
 }
 
-static inline int tk_tsetlin_load (lua_State *L)
+static inline int tk_learn_load (lua_State *L)
 {
   lua_settop(L, 2);
   size_t len;
   const char *data = luaL_checklstring(L, 1, &len);
   bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && lua_toboolean(L, 2);
   FILE *fh = isstr ? tk_lua_fmemopen(L, (char *) data, len, "r") : tk_lua_fopen(L, data, "r");
-  tk_tsetlin_t *tm = tk_tsetlin_alloc(L, false);
-  _tk_tsetlin_load(L, tm, fh);
+  tk_learn_t *tm = tk_learn_alloc(L, false);
+  _tk_learn_load(L, tm, fh);
   tk_lua_fclose(L, fh);
   return 1;
 }
 
-static luaL_Reg tk_tsetlin_fns[] =
+static luaL_Reg tk_learn_fns[] =
 {
-  { "create", tk_tsetlin_create },
-  { "load", tk_tsetlin_load },
+  { "create", tk_learn_create },
+  { "load", tk_learn_load },
   { NULL, NULL }
 };
 
-int luaopen_santoku_tsetlin_capi (lua_State *L)
+int luaopen_santoku_learn_regressor (lua_State *L)
 {
   lua_newtable(L);
-  tk_lua_register(L, tk_tsetlin_fns, 0);
+  tk_lua_register(L, tk_learn_fns, 0);
   lua_pushinteger(L, TK_CVEC_BITS);
   lua_setfield(L, -2, "align");
   return 1;

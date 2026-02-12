@@ -1,6 +1,6 @@
 #include <santoku/iuset.h>
 #include <santoku/lua/utils.h>
-#include <santoku/tsetlin/inv.h>
+#include <santoku/learn/inv.h>
 
 static inline int tk_inv_create_lua (lua_State *L)
 {
@@ -64,7 +64,7 @@ static luaL_Reg tk_inv_hoods_ext_fns[] =
   { NULL, NULL }
 };
 
-int luaopen_santoku_tsetlin_inv (lua_State *L)
+int luaopen_santoku_learn_inv (lua_State *L)
 {
   lua_newtable(L);
   tk_lua_register(L, tk_inv_fns, 0);
