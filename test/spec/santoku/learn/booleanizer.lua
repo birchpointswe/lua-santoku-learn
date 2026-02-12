@@ -1,4 +1,4 @@
-local booleanizer = require("santoku.tsetlin.booleanizer")
+local booleanizer = require("santoku.learn.booleanizer")
 local dvec = require("santoku.dvec")
 local ivec = require("santoku.ivec")
 local test = require("santoku.test")

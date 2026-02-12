@@ -238,7 +238,11 @@ static inline void tk_ann_persist (lua_State *L, tk_ann_t *A, FILE *fh)
     tk_lua_verror(L, 2, "persist", "can't persist a destroyed index");
     return;
   }
-  tk_lua_fwrite(L, (char *)&A->destroyed, sizeof(bool), 1, fh);
+  tk_lua_fwrite(L, "TKan", 1, 4, fh);
+  uint8_t version = 1;
+  tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
+  uint8_t u8 = (uint8_t)A->destroyed;
+  tk_lua_fwrite(L, (char *)&u8, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, (char *)&A->next_sid, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, (char *)&A->features, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, (char *)&A->m, sizeof(uint64_t), 1, fh);
@@ -249,9 +253,9 @@ static inline void tk_ann_persist (lua_State *L, tk_ann_t *A, FILE *fh)
     tk_ivec_t *plist;
     tk_umap_foreach(A->tables[ti], hkey, plist, ({
       tk_lua_fwrite(L, (char *)&hkey, sizeof(tk_ann_hash_t), 1, fh);
-      bool has = plist && plist->n;
-      tk_lua_fwrite(L, (char *)&has, sizeof(bool), 1, fh);
-      if (has) {
+      uint8_t has8 = (plist && plist->n) ? 1 : 0;
+      tk_lua_fwrite(L, (char *)&has8, sizeof(uint8_t), 1, fh);
+      if (has8) {
         uint64_t plen = plist->n;
         tk_lua_fwrite(L, (char *)&plen, sizeof(uint64_t), 1, fh);
         tk_lua_fwrite(L, (char *)plist->a, sizeof(int64_t), plen, fh);
@@ -347,11 +351,16 @@ static inline void tk_ann_probe_table_at_radius (
   uint64_t k,
   tk_pvec_t *out
 ) {
+  uint64_t features = A->features;
   uint64_t sub_bits = (ti < A->m - 1) ? TK_ANN_SUBSTR_BITS :
-    (A->features - ti * TK_ANN_SUBSTR_BITS);
+    (features - ti * TK_ANN_SUBSTR_BITS);
   int nbits = (int)sub_bits;
   if (r > nbits)
     return;
+  const char *vectors_a = A->vectors->a;
+  size_t bytes_per_vec = TK_CVEC_BITS_BYTES(features);
+  const int64_t *sid_to_uid_a = A->sid_to_uid->a;
+  int64_t sid_to_uid_n = (int64_t)A->sid_to_uid->n;
   int pos[TK_ANN_SUBSTR_BITS];
   for (int i = 0; i < r; i++)
     pos[i] = i;
@@ -363,21 +372,25 @@ static inline void tk_ann_probe_table_at_radius (
     khint_t khi = kh_get(tk_ann_buckets, A->tables[ti], probe_h);
     if (khi != kh_end(A->tables[ti])) {
       tk_ivec_t *bucket = kh_value(A->tables[ti], khi);
-      for (uint64_t bi = 0; bi < bucket->n; bi++) {
-        int64_t sid = bucket->a[bi];
+      const int64_t *bucket_a = bucket->a;
+      uint64_t bucket_n = bucket->n;
+      for (uint64_t bi = 0; bi < bucket_n; bi++) {
+        int64_t sid = bucket_a[bi];
         if (sid == skip_sid)
           continue;
         khint_t sh = tk_iumap_get(seen, sid);
         if (sh != tk_iumap_end(seen))
           continue;
-        int64_t uid = tk_ann_sid_uid(A, sid);
+        if (sid < 0 || sid >= sid_to_uid_n)
+          continue;
+        int64_t uid = sid_to_uid_a[sid];
         if (uid < 0)
           continue;
         int dummy;
         sh = tk_iumap_put(seen, sid, &dummy);
         tk_iumap_setval(seen, sh, 1);
-        const unsigned char *vec = (const unsigned char *)tk_ann_sget(A, sid);
-        uint64_t dist = tk_cvec_bits_hamming_serial(query, vec, A->features);
+        const unsigned char *vec = (const unsigned char *)(vectors_a + (uint64_t)sid * bytes_per_vec);
+        uint64_t dist = tk_cvec_bits_hamming_serial(query, vec, features);
         if (k)
           tk_pvec_hmax(out, k, tk_pair(uid, (int64_t)dist));
         else
@@ -450,7 +463,8 @@ static inline void tk_ann_prepare_universe_map (
 
 static inline void tk_ann_probe_table_pos_at_radius (
   tk_ann_t *A,
-  tk_ivec_t *sid_to_pos,
+  const int64_t *sid_to_pos_a,
+  int64_t sid_to_pos_n,
   uint64_t ti,
   tk_ann_hash_t h,
   int r,
@@ -458,10 +472,13 @@ static inline void tk_ann_probe_table_pos_at_radius (
   tk_iumap_t *seen,
   const unsigned char *query,
   uint64_t k,
-  tk_pvec_t *out
+  tk_pvec_t *out,
+  const char *vectors_a,
+  size_t bytes_per_vec,
+  uint64_t features
 ) {
   uint64_t sub_bits = (ti < A->m - 1) ? TK_ANN_SUBSTR_BITS :
-    (A->features - ti * TK_ANN_SUBSTR_BITS);
+    (features - ti * TK_ANN_SUBSTR_BITS);
   int nbits = (int)sub_bits;
   if (r > nbits)
     return;
@@ -476,23 +493,25 @@ static inline void tk_ann_probe_table_pos_at_radius (
     khint_t khi = kh_get(tk_ann_buckets, A->tables[ti], probe_h);
     if (khi != kh_end(A->tables[ti])) {
       tk_ivec_t *bucket = kh_value(A->tables[ti], khi);
-      for (uint64_t bi = 0; bi < bucket->n; bi++) {
-        int64_t sid = bucket->a[bi];
+      const int64_t *bucket_a = bucket->a;
+      uint64_t bucket_n = bucket->n;
+      for (uint64_t bi = 0; bi < bucket_n; bi++) {
+        int64_t sid = bucket_a[bi];
         if (sid == skip_sid)
           continue;
         khint_t sh = tk_iumap_get(seen, sid);
         if (sh != tk_iumap_end(seen))
           continue;
-        if (sid < 0 || sid >= (int64_t)sid_to_pos->n)
+        if (sid < 0 || sid >= sid_to_pos_n)
           continue;
-        int64_t id = sid_to_pos->a[sid];
+        int64_t id = sid_to_pos_a[sid];
         if (id < 0)
           continue;
         int dummy;
         sh = tk_iumap_put(seen, sid, &dummy);
         tk_iumap_setval(seen, sh, 1);
-        const unsigned char *vec = (const unsigned char *)tk_ann_sget(A, sid);
-        uint64_t dist = tk_cvec_bits_hamming_serial(query, vec, A->features);
+        const unsigned char *vec = (const unsigned char *)(vectors_a + (uint64_t)sid * bytes_per_vec);
+        uint64_t dist = tk_cvec_bits_hamming_serial(query, vec, features);
         if (k)
           tk_pvec_hmax(out, k, tk_pair(id, (int64_t)dist));
         else
@@ -539,11 +558,16 @@ static inline void tk_ann_neighborhoods (
     lua_pop(L, 1);
     hoods->a[i] = hood;
   }
+  const int64_t *sid_to_pos_a = sid_to_pos->a;
+  int64_t sid_to_pos_n = (int64_t)sid_to_pos->n;
+  uint64_t features = A->features;
+  const char *vectors_a = A->vectors->a;
+  size_t bytes_per_vec = TK_CVEC_BITS_BYTES(features);
   #pragma omp parallel
   {
     tk_iumap_t *seen = tk_iumap_create(NULL, 0);
     tk_ann_hash_t hs[A->m];
-    #pragma omp for schedule(static)
+    #pragma omp for schedule(guided) nowait
     for (uint64_t i = 0; i < hoods->n; i++) {
       tk_pvec_t *hood = hoods->a[i];
       tk_pvec_clear(hood);
@@ -556,7 +580,7 @@ static inline void tk_ann_neighborhoods (
         hs[ti] = tk_ann_substring(A, vec, ti);
       for (int r = 0; r <= (int)max_probe_radius; r++) {
         for (uint64_t ti = 0; ti < A->m; ti++)
-          tk_ann_probe_table_pos_at_radius(A, sid_to_pos, ti, hs[ti], r, sid, seen, q, k, hood);
+          tk_ann_probe_table_pos_at_radius(A, sid_to_pos_a, sid_to_pos_n, ti, hs[ti], r, sid, seen, q, k, hood, vectors_a, bytes_per_vec, features);
         if (k && hood->n >= k && hood->a[0].p < (int64_t)(A->m * ((uint64_t)r + 1)))
           break;
       }
@@ -593,11 +617,16 @@ static inline void tk_ann_neighborhoods_by_ids (
     tk_lua_add_ephemeron(L, TK_ANN_EPH, hoods_stack_idx, -1);
     lua_pop(L, 1);
   }
+  const int64_t *sid_to_pos_a = sid_to_pos->a;
+  int64_t sid_to_pos_n = (int64_t)sid_to_pos->n;
+  uint64_t features = A->features;
+  const char *vectors_a = A->vectors->a;
+  size_t bytes_per_vec = TK_CVEC_BITS_BYTES(features);
   #pragma omp parallel
   {
     tk_iumap_t *seen = tk_iumap_create(NULL, 0);
     tk_ann_hash_t hs[A->m];
-    #pragma omp for schedule(static)
+    #pragma omp for schedule(guided) nowait
     for (uint64_t i = 0; i < hoods->n; i++) {
       tk_pvec_t *hood = hoods->a[i];
       tk_iumap_clear(seen);
@@ -611,7 +640,7 @@ static inline void tk_ann_neighborhoods_by_ids (
         hs[ti] = tk_ann_substring(A, vec, ti);
       for (int r = 0; r <= (int)max_probe_radius; r++) {
         for (uint64_t ti = 0; ti < A->m; ti++)
-          tk_ann_probe_table_pos_at_radius(A, sid_to_pos, ti, hs[ti], r, sid, seen, q, k, hood);
+          tk_ann_probe_table_pos_at_radius(A, sid_to_pos_a, sid_to_pos_n, ti, hs[ti], r, sid, seen, q, k, hood, vectors_a, bytes_per_vec, features);
         if (k && hood->n >= k && hood->a[0].p < (int64_t)(A->m * ((uint64_t)r + 1)))
           break;
       }
@@ -648,11 +677,16 @@ static inline void tk_ann_neighborhoods_by_vecs (
     tk_lua_add_ephemeron(L, TK_ANN_EPH, hoods_stack_idx, -1);
     lua_pop(L, 1);
   }
+  const int64_t *sid_to_pos_a = sid_to_pos->a;
+  int64_t sid_to_pos_n = (int64_t)sid_to_pos->n;
+  uint64_t features = A->features;
+  const char *vectors_a = A->vectors->a;
+  size_t bytes_per_vec = TK_CVEC_BITS_BYTES(features);
   #pragma omp parallel
   {
     tk_iumap_t *seen = tk_iumap_create(NULL, 0);
     tk_ann_hash_t hs[A->m];
-    #pragma omp for schedule(static)
+    #pragma omp for schedule(guided) nowait
     for (uint64_t i = 0; i < hoods->n; i++) {
       tk_pvec_t *hood = hoods->a[i];
       tk_iumap_clear(seen);
@@ -662,7 +696,7 @@ static inline void tk_ann_neighborhoods_by_vecs (
         hs[ti] = tk_ann_substring(A, vec, ti);
       for (int r = 0; r <= (int)max_probe_radius; r++) {
         for (uint64_t ti = 0; ti < A->m; ti++)
-          tk_ann_probe_table_pos_at_radius(A, sid_to_pos, ti, hs[ti], r, -1, seen, q, k, hood);
+          tk_ann_probe_table_pos_at_radius(A, sid_to_pos_a, sid_to_pos_n, ti, hs[ti], r, -1, seen, q, k, hood, vectors_a, bytes_per_vec, features);
         if (k && hood->n >= k && hood->a[0].p < (int64_t)(A->m * ((uint64_t)r + 1)))
           break;
       }
@@ -1042,10 +1076,20 @@ static inline tk_ann_t *tk_ann_create (lua_State *L, uint64_t features)
 
 static inline tk_ann_t *tk_ann_load (lua_State *L, FILE *fh)
 {
+  char magic[4];
+  tk_lua_fread(L, magic, 1, 4, fh);
+  if (memcmp(magic, "TKan", 4) != 0)
+    luaL_error(L, "invalid ANN file (bad magic)");
+  uint8_t version;
+  tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
+  if (version != 1)
+    luaL_error(L, "unsupported ANN version %d", (int)version);
   tk_ann_t *A = tk_lua_newuserdata(L, tk_ann_t, TK_ANN_MT, tk_ann_lua_mt_fns, tk_ann_gc_lua);
   int Ai = tk_lua_absindex(L, -1);
   memset(A, 0, sizeof(tk_ann_t));
-  tk_lua_fread(L, &A->destroyed, sizeof(bool), 1, fh);
+  uint8_t u8;
+  tk_lua_fread(L, &u8, sizeof(uint8_t), 1, fh);
+  A->destroyed = u8;
   if (A->destroyed)
     tk_lua_verror(L, 2, "load", "index was destroyed when saved");
   tk_lua_fread(L, &A->next_sid, sizeof(uint64_t), 1, fh);
@@ -1060,12 +1104,12 @@ static inline tk_ann_t *tk_ann_load (lua_State *L, FILE *fh)
     tk_lua_fread(L, &nb, sizeof(khint_t), 1, fh);
     for (khint_t i = 0; i < nb; i++) {
       tk_ann_hash_t hkey;
-      bool has;
+      uint8_t has8;
       int absent;
       tk_lua_fread(L, &hkey, sizeof(tk_ann_hash_t), 1, fh);
-      tk_lua_fread(L, &has, sizeof(bool), 1, fh);
+      tk_lua_fread(L, &has8, sizeof(uint8_t), 1, fh);
       khint_t k = tk_ann_buckets_put(A->tables[ti], hkey, &absent);
-      if (has) {
+      if (has8) {
         uint64_t plen;
         tk_lua_fread(L, &plen, sizeof(uint64_t), 1, fh);
         tk_ivec_t *plist = tk_ivec_create(L, plen, 0, 0);

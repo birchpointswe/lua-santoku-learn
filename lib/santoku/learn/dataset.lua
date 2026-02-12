@@ -1,7 +1,7 @@
 local serialize = require("santoku.serialize") -- luacheck: ignore
-local booleanizer = require("santoku.tsetlin.booleanizer")
-local hlth = require("santoku.tsetlin.hlth")
-local inv = require("santoku.tsetlin.inv")
+local booleanizer = require("santoku.learn.booleanizer")
+local quantizer = require("santoku.learn.quantizer")
+local inv = require("santoku.learn.inv")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
 local fs = require("santoku.fs")
@@ -399,10 +399,10 @@ M.read_california_housing = function (fp, opts)
       cont:push(tonumber(row[col]) or 0)
     end
   end
-  local encoder = hlth.thermometer_encoder({
-    input = cont,
+  local encoder = quantizer.create({
+    raw_codes = cont,
     n_samples = #data,
-    n_input_dims = #feature_cols,
+    mode = "thermometer",
     n_bins = n_bins,
   })
   local bzr = booleanizer.create()

@@ -1,7 +1,7 @@
 local env = {
-  name = "santoku-tsetlin",
-  version = "0.0.274-1",
-  variable_prefix = "TK_TSETLIN",
+  name = "santoku-learn",
+  version = "0.0.1-1",
+  variable_prefix = "TK_LEARN",
   license = "MIT",
   public = true,
   cflags = {
@@ -19,8 +19,8 @@ local env = {
   dependencies = {
     "lua >= 5.1",
     "santoku >= 0.0.321-1",
-    "santoku-matrix >= 0.0.265-1",
-    "santoku-tokenizer >= 0.0.21-1",
+    "santoku-matrix >= 0.0.269-1",
+    "santoku-tokenizer >= 0.0.22-1",
   },
   test = {
     dependencies = {
