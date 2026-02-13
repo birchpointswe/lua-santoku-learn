@@ -28,16 +28,16 @@ local cfg = {
     skips = 1,
   },
   feature_selection = {
-    n_bns = nil,
-    n_selected = 65536,
+    n_bns = 8192,
+    n_selected = 8192,
   },
   graph = {
     decay = 2,
   },
   nystrom = {
     n_landmarks = 4096,
-    n_dims = nil,
     pls_dims = 256,
+    pls_variance = 0.99,
     bandwidth = -1,
   },
   eval = {
@@ -128,8 +128,8 @@ test("eurlex-embedding", function ()
     index = index,
     pls_index = pls_index,
     n_landmarks = cfg.nystrom.n_landmarks,
-    n_dims = cfg.nystrom.n_dims,
     pls_dims = cfg.nystrom.pls_dims,
+    pls_variance = cfg.nystrom.pls_variance,
     decay = cfg.graph.decay,
     bandwidth = cfg.nystrom.bandwidth,
     expected_ids = eval_uids,
