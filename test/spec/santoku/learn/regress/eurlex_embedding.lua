@@ -4,7 +4,6 @@ local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
 local inv = require("santoku.learn.inv")
 local ivec = require("santoku.ivec")
-local normalizer = require("santoku.learn.normalizer")
 local optimize = require("santoku.learn.optimize")
 local str = require("santoku.string")
 local test = require("santoku.test")
@@ -23,9 +22,9 @@ local cfg = {
     min_len = 1,
     max_run = 2,
     ngrams = 2,
-    cgrams_min = 0,
-    cgrams_max = 0,
-    cgrams_cross = false,
+    cgrams_min = 3,
+    cgrams_max = 5,
+    cgrams_cross = true,
     skips = 1,
   },
   feature_selection = {
@@ -37,7 +36,8 @@ local cfg = {
   },
   nystrom = {
     n_landmarks = 4096,
-    n_dims = 1024,
+    n_dims = nil,
+    pls_dims = 256,
     bandwidth = -1,
   },
   eval = {
@@ -45,7 +45,7 @@ local cfg = {
     random_pairs = 16,
   },
   regressor = {
-    features = 256,
+    features = 4096,
     absorb_interval = 1,
     absorb_threshold = { def = 0, min = 0, max = 256, int = true },
     absorb_maximum = { def = 0, min = 0, max = 256, int = true },
@@ -106,6 +106,14 @@ test("eurlex-embedding", function ()
   str.printf("  %d docs indexed, %d IDF-weighted label features, decay=%.1f\n",
     train.n, n_label_feats, cfg.graph.decay)
 
+  print("\nBuilding text IDF index for PLS")
+  local pls_tokens = ivec.create():copy(train.tokens)
+  local text_idf_ids, text_idf_scores = pls_tokens:bits_top_df(train.n, n_tokens)
+  pls_tokens:bits_select(text_idf_ids, nil, n_tokens)
+  local pls_index = inv.create({ features = text_idf_scores })
+  pls_index:add(pls_tokens, train.ids)
+  str.printf("  %d IDF-weighted text features\n", text_idf_ids:size())
+
   print("\nBuilding eval adjacency")
   local eval_uids, inv_hoods = index:neighborhoods(cfg.eval.knn, cfg.graph.decay, -1)
   local eval_off, eval_nbr, eval_w = inv_hoods:to_csr(eval_uids)
@@ -118,8 +126,10 @@ test("eurlex-embedding", function ()
   print("\nSpectral embedding (Nystrom)")
   local model = optimize.spectral({
     index = index,
+    pls_index = pls_index,
     n_landmarks = cfg.nystrom.n_landmarks,
     n_dims = cfg.nystrom.n_dims,
+    pls_dims = cfg.nystrom.pls_dims,
     decay = cfg.graph.decay,
     bandwidth = cfg.nystrom.bandwidth,
     expected_ids = eval_uids,
@@ -312,26 +322,8 @@ test("eurlex-embedding", function ()
       eval_neighbors = asym_nbr, eval_weights = asym_w,
     })
 
-    local norm = normalizer.create({
-      source = train_predicted,
-      target = train_raw_codes,
-      n_samples_source = n,
-      n_samples_target = n,
-      n_dims = spectral_dims,
-    })
-    local pred_norm = norm:encode(train_predicted)
-    local norm_spec_raw = dvec.create()
-    norm_spec_raw:copy(pred_norm)
-    norm_spec_raw:copy(train_raw_codes)
-    local norm_to_spec = eval.ranking_accuracy({
-      raw_codes = norm_spec_raw, ids = asym_all_ids, n_dims = spectral_dims,
-      eval_ids = asym_ids, eval_offsets = asym_off,
-      eval_neighbors = asym_nbr, eval_weights = asym_w,
-    })
-
     str.printf("  %-28s %8.4f\n", "Spectral->spectral:", spec_to_spec.score)
     str.printf("  %-28s %8.4f\n", "Predicted->spectral:", pred_to_spec.score)
-    str.printf("  %-28s %8.4f\n", "Normalized->spectral:", norm_to_spec.score)
   end
 
   str.printf("\n  Spectral dims: %d\n", spectral_dims)

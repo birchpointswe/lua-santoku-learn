@@ -440,11 +440,17 @@ static inline int tm_encode (lua_State *L) {
   lua_pop(L, 1);
   if (!lm_inv) lm_inv = feat_inv;
 
+  lua_getfield(L, 1, "pls_inv");
+  tk_inv_t *pls_inv = tk_inv_peekopt(L, -1);
+  lua_pop(L, 1);
+  if (!pls_inv) pls_inv = feat_inv;
+
   uint64_t n_lm_req = tk_lua_foptunsigned(L, 1, "encode", "n_landmarks", 0);
   uint64_t n_dims_req = tk_lua_fcheckunsigned(L, 1, "encode", "n_dims");
   double decay = tk_lua_foptnumber(L, 1, "encode", "decay", 0.0);
   double bandwidth = tk_lua_foptnumber(L, 1, "encode", "bandwidth", -1.0);
   double trace_tol = tk_lua_foptnumber(L, 1, "encode", "trace_tol", 1e-15);
+  uint64_t pls_dims = tk_lua_foptunsigned(L, 1, "encode", "pls_dims", 0);
 
   tk_inv_rank_weights_t feat_rw;
   tk_inv_precompute_rank_weights(&feat_rw, feat_inv->n_ranks, decay);
@@ -554,6 +560,101 @@ static inline int tm_encode (lua_State *L) {
     double *r = ccodes->a + i * d;
     for (uint64_t j = 0; j < d; j++)
       r[j] -= ctx->adjustment[j];
+  }
+
+  if (pls_dims > 0 && pls_dims < d) {
+    uint64_t nwf = pls_inv->weights->n;
+    uint64_t fstr = pls_inv->n_ranks + 1;
+    uint64_t *pcnt = (uint64_t *)calloc(nwf, sizeof(uint64_t));
+    for (uint64_t i = 0; i < nc; i++) {
+      int64_t sid = tk_inv_uid_sid(pls_inv, chol_ids->a[i], TK_INV_FIND);
+      if (sid < 0) continue;
+      int64_t fs = pls_inv->node_rank_offsets->a[sid * (int64_t)fstr];
+      int64_t fe = pls_inv->node_rank_offsets->a[sid * (int64_t)fstr + (int64_t)pls_inv->n_ranks];
+      for (int64_t j = fs; j < fe; j++)
+        pcnt[pls_inv->node_bits->a[j]]++;
+    }
+    uint64_t *poff = (uint64_t *)malloc((nwf + 1) * sizeof(uint64_t));
+    poff[0] = 0;
+    for (uint64_t f = 0; f < nwf; f++)
+      poff[f + 1] = poff[f] + pcnt[f];
+    uint64_t tpost = poff[nwf];
+    uint64_t *pdat = (uint64_t *)malloc((tpost > 0 ? tpost : 1) * sizeof(uint64_t));
+    memset(pcnt, 0, nwf * sizeof(uint64_t));
+    for (uint64_t i = 0; i < nc; i++) {
+      int64_t sid = tk_inv_uid_sid(pls_inv, chol_ids->a[i], TK_INV_FIND);
+      if (sid < 0) continue;
+      int64_t fs = pls_inv->node_rank_offsets->a[sid * (int64_t)fstr];
+      int64_t fe = pls_inv->node_rank_offsets->a[sid * (int64_t)fstr + (int64_t)pls_inv->n_ranks];
+      for (int64_t j = fs; j < fe; j++) {
+        uint64_t fid = (uint64_t)pls_inv->node_bits->a[j];
+        pdat[poff[fid] + pcnt[fid]++] = i;
+      }
+    }
+
+    double *CTC = (double *)calloc(d * d, sizeof(double));
+    double *vf = (double *)malloc(d * sizeof(double));
+    for (uint64_t f = 0; f < nwf; f++) {
+      uint64_t ps = poff[f], pe = poff[f + 1];
+      if (pe == ps) continue;
+      double wf = pls_inv->weights->a[f];
+      memset(vf, 0, d * sizeof(double));
+      for (uint64_t p = ps; p < pe; p++)
+        cblas_daxpy((int)d, wf, ccodes->a + pdat[p] * d, 1, vf, 1);
+      cblas_dger(CblasRowMajor, (int)d, (int)d, 1.0, vf, 1, vf, 1, CTC, (int)d);
+    }
+    free(vf);
+    free(pdat);
+    free(poff);
+    free(pcnt);
+
+    double *pls_eigs = (double *)malloc(pls_dims * sizeof(double));
+    double *pls_ev = (double *)malloc(d * d * sizeof(double));
+    int *isuppz2 = (int *)malloc(2 * pls_dims * sizeof(int));
+    int n_pls = 0;
+    int pls_info = LAPACKE_dsyevr(LAPACK_ROW_MAJOR, 'V', 'I', 'U',
+      (int)d, CTC, (int)d, 0.0, 0.0,
+      (int)(d - pls_dims + 1), (int)d,
+      0.0, &n_pls, pls_eigs, pls_ev, (int)d, isuppz2);
+    free(CTC);
+    free(isuppz2);
+    free(pls_eigs);
+    if (pls_info != 0) {
+      free(pls_ev);
+      return luaL_error(L, "encode: PLS dsyevr info=%d", pls_info);
+    }
+
+    double *P = (double *)malloc(d * pls_dims * sizeof(double));
+    for (uint64_t i = 0; i < d; i++)
+      for (uint64_t k = 0; k < pls_dims; k++)
+        P[i * pls_dims + k] = pls_ev[i * d + (pls_dims - 1 - k)];
+    free(pls_ev);
+
+    double *cc_new = (double *)malloc(nc * pls_dims * sizeof(double));
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+      (int)nc, (int)pls_dims, (int)d, 1.0,
+      ccodes->a, (int)d, P, (int)pls_dims,
+      0.0, cc_new, (int)pls_dims);
+    memcpy(ccodes->a, cc_new, nc * pls_dims * sizeof(double));
+    free(cc_new);
+
+    double *ev_new = (double *)malloc(m * pls_dims * sizeof(double));
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+      (int)m, (int)pls_dims, (int)d, 1.0,
+      eigvecs->a, (int)d, P, (int)pls_dims,
+      0.0, ev_new, (int)pls_dims);
+    memcpy(eigvecs->a, ev_new, m * pls_dims * sizeof(double));
+    free(ev_new);
+
+    double *adj_new = (double *)malloc(pls_dims * sizeof(double));
+    cblas_dgemv(CblasRowMajor, CblasTrans,
+      (int)d, (int)pls_dims, 1.0, P, (int)pls_dims,
+      ctx->adjustment, 1, 0.0, adj_new, 1);
+    memcpy(ctx->adjustment, adj_new, pls_dims * sizeof(double));
+    free(adj_new);
+
+    free(P);
+    d = pls_dims;
   }
 
   ctx->projection = (double *)malloc(m * d * sizeof(double));
