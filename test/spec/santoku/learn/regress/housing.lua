@@ -25,8 +25,7 @@ local cfg = {
     specificity = { def = 925, min = 2, max = 2000 },
   },
   search = {
-    rounds = 6,
-    trials = 40,
+    trials = 240,
     iterations = 80,
     subsample_samples = 0.2,
     metric = "nmae",
@@ -80,7 +79,6 @@ test("regressor", function ()
     target = cfg.tm.target,
     specificity = cfg.tm.specificity,
 
-    search_rounds = cfg.search.rounds,
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
     search_subsample_samples = cfg.search.subsample_samples,

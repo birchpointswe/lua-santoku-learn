@@ -1,3 +1,4 @@
+require("santoku.pvec")
 local ann = require("santoku.learn.ann")
 local ds = require("santoku.learn.dataset")
 local dvec = require("santoku.dvec")
@@ -37,44 +38,36 @@ local cfg = {
   regressor = {
     features = 4096,
     absorb_interval = 1,
-    absorb_threshold = { def = 14, min = 0, max = 25, int = true },
-    absorb_maximum = { def = 182, min = 50, max = 512, int = true },
-    absorb_insert = { def = 45, min = 1, max = 126, int = true },
-    clauses = 256,
-    clause_tolerance = { def = 530, min = 300, max = 700, int = true },
-    clause_maximum = { def = 601, min = 400, max = 850, int = true },
-    target = { def = 583, min = 200, max = 1024, int = true },
-    specificity = { def = 7, min = 3, max = 15 },
-    search_rounds = 4,
-    search_trials = 20,
-    search_iterations = 20,
-    search_subsample_samples = nil,
+    absorb_threshold = { def = 22, min = 0, max = 126, int = true },
+    absorb_maximum = { def = 1493, min = 0, max = 4096, int = true },
+    absorb_insert = { def = 41, min = 1, max = 256, int = true },
+    clauses = { def = 128, min = 8, max = 256, int = true, pow2 = true },
+    clause_tolerance = { def = 60, min = 8, max = 4096, int = true },
+    clause_maximum = { def = 696, min = 8, max = 4096, int = true },
+    target = { def = 480, min = 8, max = 4096, int = true },
+    specificity = { def = 12, min = 2, max = 4000 },
+    search_trials = 0,
+    search_iterations = 10,
+    search_subsample_samples = 0.2,
     search_subsample_targets = 8,
-    final_patience = 20,
+    final_patience = 5,
     final_batch = 40,
-    final_iterations = 2000,
+    final_iterations = 400,
   },
   nystrom = {
     n_landmarks = 8192,
     decay = 1.0,
     bandwidth = -1,
-    rounds = 0,
-    samples = 20,
   },
   sfbs = {
     enable_pre = true,
-    enable_post = true,
     pre = {
       tolerance = 1e-6,
       max_dims = 256,
     },
-    post = {
-      tolerance = 1e-6,
-    },
-    n_neg = 4,
+    n_neg = 48,
   },
   eval = {
-    knn = 16,
     random_pairs = 16,
     retrieval_k = 32,
     retrieval_radius = 3,
@@ -95,8 +88,8 @@ test("eurlex", function()
 
   print("\nCreating IDs")
   train.ids = ivec.create(train.n):fill_indices()
-  dev.ids = ivec.create(dev.n):fill_indices():add(train.n)
-  test_set.ids = ivec.create(test_set.n):fill_indices():add(train.n + dev.n)
+  dev.ids = ivec.create(dev.n):fill_indices():add(train.n + n_labels)
+  test_set.ids = ivec.create(test_set.n):fill_indices():add(train.n + n_labels + dev.n)
 
   print("\nBuilding label CSR for lookups")
   local train_label_offsets, train_label_neighbors = train.solutions:bits_to_csr(train.n, n_labels)
@@ -246,99 +239,21 @@ test("eurlex", function()
     end
   end
 
-  print("\nBuilding full evaluation adjacency (bipartite graph)")
-  local eval_uids, inv_hoods = train.graph_index:neighborhoods(cfg.eval.knn, cfg.nystrom.decay, cfg.nystrom.bandwidth)
-  local eval_off, eval_nbr, eval_w = inv_hoods:to_csr(eval_uids)
-  local rp_off, rp_nbr, rp_w = csr.random_pairs(eval_uids, cfg.eval.random_pairs)
-  csr.weight_from_index(eval_uids, rp_off, rp_nbr, rp_w, train.graph_index, cfg.nystrom.decay, cfg.nystrom.bandwidth)
-  csr.merge(eval_off, eval_nbr, eval_w, rp_off, rp_nbr, rp_w)
-  csr.symmetrize(eval_off, eval_nbr, eval_w, eval_uids:size())
-  local train_eval_ids = eval_uids
-  local train_eval_offsets, train_eval_neighbors, train_eval_weights = eval_off, eval_nbr, eval_w
-
-  print("\n--- Kernel quality diagnostics ---")
-
+  print("\nBuilding evaluation adjacency (bipartite neg)")
+  local train_eval_ids, train_eval_offsets, train_eval_neighbors, train_eval_weights = csr.bipartite_neg(
+    train.label_csr.offsets, train.label_csr.neighbors,
+    ivec.create(train.n):fill_indices(), label_node_ids,
+    cfg.eval.random_pairs)
+  str.printf("  %d nodes, %d edges\n", train_eval_ids:size(), train_eval_neighbors:size())
   do
-    local n_eval = train_eval_ids:size()
-    local dd, dl, ld, ll = 0, 0, 0, 0
-    local dd_w, dl_w, ld_w, ll_w = 0, 0, 0, 0
-    local dd_min, dl_min, ld_min, ll_min = 1/0, 1/0, 1/0, 1/0
-    local dd_max, dl_max, ld_max, ll_max = -1/0, -1/0, -1/0, -1/0
-    local dl_gt_w, dl_gt_n, dl_neg_w, dl_neg_n = 0, 0, 0, 0
-    for i = 0, n_eval - 1 do
-      local uid = train_eval_ids:get(i)
-      local o0 = train_eval_offsets:get(i)
-      local o1 = train_eval_offsets:get(i + 1)
-      for j = o0, o1 - 1 do
-        local nid = train_eval_ids:get(train_eval_neighbors:get(j))
-        local w = train_eval_weights:get(j)
-        if uid < train.n then
-          if nid < train.n then
-            dd = dd + 1; dd_w = dd_w + w
-            if w < dd_min then dd_min = w end
-            if w > dd_max then dd_max = w end
-          else
-            dl = dl + 1; dl_w = dl_w + w
-            if w < dl_min then dl_min = w end
-            if w > dl_max then dl_max = w end
-            local li = nid - train.n
-            local is_gt = false
-            local gs = train.label_csr.offsets:get(uid)
-            local ge = train.label_csr.offsets:get(uid + 1)
-            for g = gs, ge - 1 do
-              if train.label_csr.neighbors:get(g) == li then is_gt = true; break end
-            end
-            if is_gt then dl_gt_w = dl_gt_w + w; dl_gt_n = dl_gt_n + 1
-            else dl_neg_w = dl_neg_w + w; dl_neg_n = dl_neg_n + 1 end
-          end
-        else
-          if nid < train.n then
-            ld = ld + 1; ld_w = ld_w + w
-            if w < ld_min then ld_min = w end
-            if w > ld_max then ld_max = w end
-          else
-            ll = ll + 1; ll_w = ll_w + w
-            if w < ll_min then ll_min = w end
-            if w > ll_max then ll_max = w end
-          end
-        end
-      end
-    end
-    str.printf("  Eval adj: %d nodes, %d edges\n", n_eval, train_eval_neighbors:size())
-    str.printf("  %-12s %8s %10s %10s %10s\n", "type", "count", "mean_w", "min_w", "max_w")
-    str.printf("  %-12s %8d %10.4f %10.4f %10.4f\n", "doc-doc", dd, dd > 0 and dd_w/dd or 0, dd_min, dd_max)
-    str.printf("  %-12s %8d %10.4f %10.4f %10.4f\n", "doc-label", dl, dl > 0 and dl_w/dl or 0, dl_min, dl_max)
-    str.printf("  %-12s %8d %10.4f %10.4f %10.4f\n", "label-doc", ld, ld > 0 and ld_w/ld or 0, ld_min, ld_max)
-    str.printf("  %-12s %8d %10.4f %10.4f %10.4f\n", "label-label", ll, ll > 0 and ll_w/ll or 0, ll_min, ll_max)
-    str.printf("  doc->label GT edges: %d mean_w=%.4f\n", dl_gt_n, dl_gt_n > 0 and dl_gt_w/dl_gt_n or 0)
-    str.printf("  doc->label non-GT edges: %d mean_w=%.4f\n", dl_neg_n, dl_neg_n > 0 and dl_neg_w/dl_neg_n or 0)
-  end
-
-  do
-    local kern_all = eval.ranking_accuracy({
+    local kern = eval.ranking_accuracy({
       kernel_index = train.graph_index,
       kernel_decay = cfg.nystrom.decay,
       kernel_bandwidth = cfg.nystrom.bandwidth,
       eval_ids = train_eval_ids, eval_offsets = train_eval_offsets,
       eval_neighbors = train_eval_neighbors, eval_weights = train_eval_weights,
     })
-    str.printf("  Kernel NDCG (full eval adj): %.4f\n", kern_all.score)
-  end
-
-  str.printf("\n  Doc->label kernel ranking (GT + %d random neg):\n", cfg.eval.random_pairs)
-  do
-    local dl_ids, dl_offsets, dl_neighbors, dl_weights = csr.bipartite_neg(
-      train.label_csr.offsets, train.label_csr.neighbors,
-      ivec.create(train.n):fill_indices(), label_node_ids,
-      cfg.eval.random_pairs)
-    local dl_kern = eval.ranking_accuracy({
-      kernel_index = train.graph_index,
-      kernel_decay = cfg.nystrom.decay,
-      kernel_bandwidth = cfg.nystrom.bandwidth,
-      eval_ids = dl_ids, eval_offsets = dl_offsets,
-      eval_neighbors = dl_neighbors, eval_weights = dl_weights,
-    })
-    str.printf("    NDCG: %.4f\n", dl_kern.score)
+    str.printf("  Kernel NDCG: %.4f\n", kern.score)
   end
 
   str.printf("\n  Doc->label kernel retrieval (k=%d):\n", cfg.eval.retrieval_k)
@@ -429,8 +344,6 @@ test("eurlex", function()
     n_dims = cfg.nystrom.n_dims,
     decay = cfg.nystrom.decay,
     bandwidth = cfg.nystrom.bandwidth,
-    rounds = cfg.nystrom.rounds,
-    samples = cfg.nystrom.samples,
     expected_ids = train_eval_ids,
     expected_offsets = train_eval_offsets,
     expected_neighbors = train_eval_neighbors,
@@ -516,7 +429,7 @@ test("eurlex", function()
     local sfbs_ids, sfbs_offsets, sfbs_neighbors, sfbs_weights = csr.bipartite_neg(
       train.label_csr.offsets, train.label_csr.neighbors,
       ivec.create(train.n):fill_indices(), label_node_ids,
-      cfg.sfbs.n_neg) --, train.hard_index, train.hard_labels_index) -- commented so only uniform negs
+      cfg.sfbs.n_neg)
     encoder = quantizer.create({
       raw_codes = all_raw_codes,
       ids = embedded_ids,
@@ -559,7 +472,7 @@ test("eurlex", function()
     all_bin_ids:copy(train.embedded_label_ids)
     spectral_index:add(all_bin, all_bin_ids)
 
-    str.printf("\nRanking accuracy (all<->all eval adjacency)\n")
+    str.printf("\nRanking accuracy (doc->label, GT + %d random neg)\n", cfg.eval.random_pairs)
     local sp_combined_norm = dvec.create()
     sp_combined_norm:copy(train_raw_codes)
     sp_combined_norm:copy(label_raw_codes)
@@ -581,35 +494,6 @@ test("eurlex", function()
     str.printf("  Graph kernel:  %.4f\n", spectral_metrics.kernel_score)
     str.printf("  Raw cosine:    %.4f\n", sp_raw_stats.score)
     str.printf("  Hamming:       %.4f\n", sp_bin_stats.score)
-
-    str.printf("\nDoc->label ranking accuracy (GT + %d random negatives)\n",
-      cfg.eval.random_pairs)
-    do
-      local dl_ids, dl_offsets, dl_neighbors, dl_weights = csr.bipartite_neg(
-        train.label_csr.offsets, train.label_csr.neighbors,
-        ivec.create(train.n):fill_indices(), train.embedded_label_ids,
-        cfg.eval.random_pairs)
-      local dl_kern = eval.ranking_accuracy({
-        kernel_index = train.graph_index,
-        kernel_decay = cfg.nystrom.decay,
-        kernel_bandwidth = cfg.nystrom.bandwidth,
-        eval_ids = dl_ids, eval_offsets = dl_offsets,
-        eval_neighbors = dl_neighbors, eval_weights = dl_weights,
-      })
-      local dl_raw = eval.ranking_accuracy({
-        raw_codes = sp_combined_norm, ids = sp_combined_ids, n_dims = train.dims,
-        eval_ids = dl_ids, eval_offsets = dl_offsets,
-        eval_neighbors = dl_neighbors, eval_weights = dl_weights,
-      })
-      local dl_bin = eval.ranking_accuracy({
-        codes = sp_combined_bin, ids = sp_combined_ids, n_dims = bin_n_bits,
-        eval_ids = dl_ids, eval_offsets = dl_offsets,
-        eval_neighbors = dl_neighbors, eval_weights = dl_weights,
-      })
-      str.printf("  Graph kernel:  %.4f\n", dl_kern.score)
-      str.printf("  Raw cosine:    %.4f\n", dl_raw.score)
-      str.printf("  Hamming:       %.4f\n", dl_bin.score)
-    end
 
     str.printf("\nBinary bit entropy\n")
     sp_entropy = eval.entropy_stats(train_codes_bin, train.n, bin_n_bits)
@@ -749,6 +633,7 @@ test("eurlex", function()
     all_raw_codes:mtx_select(used_dims, nil, spectral_dims)
     train_raw_codes:mtx_select(used_dims, nil, spectral_dims)
     label_raw_codes:mtx_select(used_dims, nil, spectral_dims)
+    encoder:restrict(used_dims)
     train.dims = n_used_dims
 
   end
@@ -813,7 +698,6 @@ test("eurlex", function()
     absorb_ranking = class_feat_ids,
     absorb_ranking_offsets = class_offsets,
     absorb_ranking_global = absorb_ranking_global,
-    search_rounds = cfg.regressor.search_rounds,
     search_trials = cfg.regressor.search_trials,
     search_iterations = cfg.regressor.search_iterations,
     final_batch = cfg.regressor.final_batch,
@@ -846,39 +730,6 @@ test("eurlex", function()
     })
     str.printf("  Predicted raw ranking: %.4f (spectral ceiling: %.4f)\n",
       pred_raw_stats.score, spectral_metrics.raw_score)
-  end
-
-  if cfg.sfbs.enable_post then
-
-    print("\nQuantizing (predictions)")
-    local second_raw = dvec.create()
-    second_raw:copy(train_predicted_raw)
-    second_raw:copy(label_raw_codes)
-    local second_ids = ivec.create(train.n):fill_indices()
-    second_ids:copy(train.embedded_label_ids)
-    local sfbs_ids2, sfbs_offsets2, sfbs_neighbors2, sfbs_weights2 = csr.bipartite_neg(
-      train.label_csr.offsets, train.label_csr.neighbors,
-      ivec.create(train.n):fill_indices(), train.embedded_label_ids,
-      cfg.sfbs.n_neg, train.hard_index, train.hard_labels_index)
-    encoder = quantizer.create({
-      raw_codes = second_raw,
-      ids = second_ids,
-      n_samples = train.n + train.embedded_label_ids:size(),
-      n_dims = train.dims,
-      tolerance = cfg.sfbs.post.tolerance,
-      expected_ids = sfbs_ids2,
-      expected_offsets = sfbs_offsets2,
-      expected_neighbors = sfbs_neighbors2,
-      expected_weights = sfbs_weights2,
-      each = function(bit_idx, dim, threshold, gain, score, action)
-        str.printf("  %s bit %d: dim=%d thresh=%.6f gain=%.6f score=%.4f\n",
-          action, bit_idx, dim, threshold, gain, score)
-      end,
-    })
-    bin_n_bits = encoder:n_bits()
-    str.printf("  Selected %d bits (n_dims=%d)\n", bin_n_bits, encoder:n_dims())
-    label_codes_bin = encoder:encode(label_raw_codes)
-
   end
 
   if encoder then
