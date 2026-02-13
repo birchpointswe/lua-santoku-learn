@@ -26,8 +26,7 @@ local cfg = {
     specificity = { def = 2, min = 2, max = 2000, int = true },
   },
   search = {
-    rounds = 6,
-    trials = 20,
+    trials = 120,
     iterations = 40,
     subsample_samples = 0.2,
   },
@@ -79,7 +78,6 @@ test("mnist classifier", function ()
     target = cfg.tm.target,
     specificity = cfg.tm.specificity,
 
-    search_rounds = cfg.search.rounds,
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
     search_subsample_samples = cfg.search.subsample_samples,
