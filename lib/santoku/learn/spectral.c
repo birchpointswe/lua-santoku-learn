@@ -533,6 +533,12 @@ static inline int tm_encode (lua_State *L) {
       eigvecs->a[i * d + k] = ev_raw[i * m + (d - 1 - k)];
   free(ev_raw);
 
+  for (uint64_t k = 0; k < d; k++) {
+    double s = (eig_raw->a[k] > 1e-15) ? 1.0 / sqrt(eig_raw->a[k]) : 0.0;
+    for (uint64_t i = 0; i < m; i++)
+      eigvecs->a[i * d + k] *= s;
+  }
+
   tk_dvec_t *ccodes = tk_dvec_create(L, nc * d, 0, 0);
   ccodes->n = nc * d;
   cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,

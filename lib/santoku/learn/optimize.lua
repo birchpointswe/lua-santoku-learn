@@ -15,12 +15,38 @@ local utc = require("santoku.utc")
 
 local M = {}
 
+local function lhs_sample (n, d)
+  local grid = {}
+  for j = 1, d do
+    local perm = {}
+    for i = 1, n do perm[i] = i - 1 end
+    for i = n, 2, -1 do
+      local k = num.floor(rand.fast_random() / (rand.fast_max + 1) * i) + 1
+      perm[i], perm[k] = perm[k], perm[i]
+    end
+    grid[j] = perm
+  end
+  local pts = {}
+  for i = 1, n do
+    local row = {}
+    for j = 1, d do
+      row[j] = (grid[j][i] + rand.fast_random() / (rand.fast_max + 1)) / n
+    end
+    pts[i] = row
+  end
+  return pts
+end
+
 local function key_int (v)
   return v and tostring(num.floor(v + 0.5)) or "nil"
 end
 
 local function key_int8 (v)
   return v and tostring(num.floor((v + 4) / 8) * 8) or "nil"
+end
+
+local function key_float2 (v)
+  return v and str.format("%.2f", v) or "nil"
 end
 
 local function cmp_cost(a, b)
@@ -265,17 +291,42 @@ M.search = function (args)
   local X_obs = n_dims > 0 and dvec.create() or nil
   local Y_obs = n_dims > 0 and dvec.create() or nil
 
+  local lhs_pts = n_dims > 0 and lhs_sample(n_initial, n_dims) or nil
+
   local seen = {}
 
   for t = 1, trials do
     local params
 
     if n_dims == 0 or t <= n_initial then
-      params = M.sample_params(samplers, param_names, nil, false, false)
+      params = {}
+      if lhs_pts then
+        local pt = lhs_pts[t]
+        for i, name in ipairs(search_dims) do
+          params[name] = samplers[name].denormalize(pt[i])
+        end
+      end
+      for _, name in ipairs(param_names) do
+        if params[name] == nil then
+          local s = samplers[name]
+          if s then
+            if s.type == "fixed" then
+              params[name] = s.center
+            else
+              params[name] = s.sample()
+            end
+          end
+        end
+      end
     else
+      local cand_pts = lhs_sample(n_candidates, n_dims)
       local cand_flat = dvec.create()
-      for _ = 1, n_candidates do
-        local p = M.sample_params(samplers, param_names, nil, false, false)
+      for i = 1, n_candidates do
+        local pt = cand_pts[i]
+        local p = {}
+        for j, name in ipairs(search_dims) do
+          p[name] = samplers[name].denormalize(pt[j])
+        end
         if constrain_fn then constrain_fn(p) end
         for _, name in ipairs(search_dims) do
           cand_flat:push(samplers[name].normalize(p[name]))
@@ -322,7 +373,7 @@ M.search = function (args)
     end
 
     if not dominated then
-      local phase = (n_dims == 0 or t <= n_initial) and "rand" or "gp"
+      local phase = (n_dims == 0 or t <= n_initial) and "lhs" or "gp"
       local score, metrics, result = trial_fn(params, {
         trial = t,
         trials = trials,
@@ -388,7 +439,7 @@ local function create_tm (args)
     features = args.features,
     outputs = args.outputs,
     state = args.state or 8,
-    clauses = 8,
+    clauses = 1,
     clause_tolerance = 8,
     clause_maximum = 8,
     target = 4,
@@ -555,7 +606,7 @@ local function optimize_tm (args)
   local search_subsample_targets = args.search_subsample_targets
   local sparse = not not args.n_tokens
 
-  local param_names = { "clauses", "clause_tolerance", "clause_maximum", "target", "specificity" }
+  local param_names = { "clauses", "clause_maximum", "clause_tolerance_fraction", "target_fraction", "specificity" }
   if sparse then
     param_names[#param_names + 1] = "absorb_interval"
     param_names[#param_names + 1] = "absorb_threshold"
@@ -564,7 +615,6 @@ local function optimize_tm (args)
   end
 
   local input_bits = 2 * args.features
-  args.clause_tolerance = cap_spec_max(args.clause_tolerance, input_bits)
   args.clause_maximum = cap_spec_max(args.clause_maximum, input_bits)
   args.specificity = cap_spec_max(args.specificity, input_bits)
   if sparse then
@@ -688,24 +738,22 @@ local function optimize_tm (args)
   local function constrain_tm_params (params)
     local input_bits = args.features and 2 * args.features or nil
     if input_bits then
-      if params.clause_tolerance and params.clause_tolerance > input_bits then
-        params.clause_tolerance = input_bits
-      end
       if params.clause_maximum and params.clause_maximum > input_bits then
         params.clause_maximum = input_bits
       end
     end
-    if params.clause_tolerance and params.clause_maximum and params.clause_tolerance > params.clause_maximum then
-      params.clause_tolerance, params.clause_maximum = params.clause_maximum, params.clause_tolerance
+    if params.clause_tolerance_fraction and params.clause_maximum then
+      local f = params.clause_tolerance_fraction
+      if f < 0 then f = 0 end
+      if f > 1 then f = 1 end
+      params.clause_tolerance_fraction = f
+      params.clause_tolerance = num.max(1, num.floor(f * params.clause_maximum + 0.5))
     end
-    if params.target and params.clause_tolerance then
-      local max_target = 8 * params.clause_tolerance
-      if params.target > max_target then
-        params.target = max_target
-      end
-      if params.target < 1 then
-        params.target = 1
-      end
+    if params.target_fraction and params.clause_tolerance then
+      local f = params.target_fraction
+      if f < 0.01 then f = 0.01 end
+      params.target_fraction = f
+      params.target = num.max(1, num.floor(f * 8 * params.clause_tolerance + 0.5))
     end
     if params.specificity and args.features then
       local max_specificity = 2 * args.features
@@ -719,11 +767,6 @@ local function optimize_tm (args)
     if params.absorb_maximum and args.features then
       if params.absorb_maximum > args.features then
         params.absorb_maximum = args.features
-      end
-    end
-    if params.clause_tolerance and params.clause_maximum then
-      if params.clause_tolerance > params.clause_maximum then
-        params.clause_tolerance = params.clause_maximum
       end
     end
     if params.absorb_threshold or params.absorb_insert then
@@ -778,7 +821,7 @@ local function optimize_tm (args)
         key_int(p.clause_tolerance),
         key_int(p.clause_maximum),
         key_int(p.target),
-        key_int(p.specificity))
+        key_float2(p.specificity))
       if p.absorb_interval then
         k = k .. "|" .. key_int(p.absorb_interval) .. "|" .. key_int(p.absorb_threshold) .. "|" .. key_int(p.absorb_maximum) .. "|" .. key_int(p.absorb_insert)
       end
@@ -885,8 +928,6 @@ M.build_spectral_nystrom = function (args)
       decay = decay,
       bandwidth = bandwidth,
       trace_tol = args.trace_tol,
-      normalized = args.normalized,
-      cholesky = args.cholesky,
     })
 
   local effective_dims = encoder and encoder:dims() or 0
@@ -945,8 +986,6 @@ M.spectral = function (args)
     decay = decay,
     bandwidth = bandwidth,
     trace_tol = args.trace_tol,
-    normalized = args.normalized,
-    cholesky = args.cholesky,
     each = each_cb,
     train_tokens = args.train_tokens,
     train_ids = args.train_ids,
