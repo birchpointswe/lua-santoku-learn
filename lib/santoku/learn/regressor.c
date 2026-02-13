@@ -70,7 +70,6 @@ typedef struct tk_learn_s {
   tk_automata_t automata;
   double specificity;
   unsigned int specificity_threshold;
-  unsigned int specificity_uint;
   unsigned int *results;
   size_t results_len;
   char *encodings;
@@ -302,11 +301,8 @@ static inline void tk_learn_init (
     tk_lua_verror(L, 3, "create", "clause_tolerance", "must be greater than 0");
   if (!clause_maximum)
     tk_lua_verror(L, 3, "create", "clause_maximum", "must be greater than 0");
-  if (clause_tolerance > clause_maximum) {
-    unsigned int tmp = clause_tolerance;
-    clause_tolerance = clause_maximum;
-    clause_maximum = tmp;
-  }
+  if (clause_tolerance > clause_maximum)
+    tk_lua_verror(L, 3, "create", "clause_tolerance", "must be <= clause_maximum");
   if (!target)
     tk_lua_verror(L, 3, "create", "target", "must be greater than 0");
   if (state_bits < 2)
@@ -314,7 +310,8 @@ static inline void tk_learn_init (
   tm->reusable = false;
   tm->classes = outputs;
   tm->class_chunks = TK_CVEC_BITS_BYTES(tm->classes);
-  tm->clauses = ((clauses + 15) / 16) * 16;
+  tm->clause_chunks = clauses * 2;
+  tm->clauses = tm->clause_chunks * TK_CVEC_BITS;
   tm->clause_tolerance = clause_tolerance;
   tm->clause_maximum = clause_maximum;
   tm->target = target;
@@ -324,14 +321,12 @@ static inline void tk_learn_init (
   uint64_t tail_bits = tm->input_bits & (TK_CVEC_BITS - 1);
   tm->tail_mask = tail_bits ? (uint8_t)((1u << tail_bits) - 1) : 0xFF;
   tm->input_chunks = TK_CVEC_BITS_BYTES(tm->input_bits);
-  tm->clause_chunks = TK_CVEC_BITS_BYTES(tm->clauses);
   tm->state_chunks = (size_t)tm->classes * tm->clauses * (tm->state_bits - 1) * tm->input_chunks;
   tm->action_chunks = (size_t)tm->classes * tm->clauses * tm->input_chunks;
   tm->state = (char *)tk_malloc_aligned(L, tm->state_chunks, TK_CVEC_BITS);
   tm->actions = (char *)tk_malloc_aligned(L, tm->action_chunks, TK_CVEC_BITS);
   tm->specificity = specificity;
-  tm->specificity_uint = (unsigned int)specificity;
-  tm->specificity_threshold = (2 * tm->features) / tm->specificity_uint;
+  tm->specificity_threshold = (unsigned int)((2.0 * (double)tm->features) / specificity);
   tm->y_min = (double *)tk_malloc(L, tm->classes * sizeof(double));
   tm->y_max = (double *)tk_malloc(L, tm->classes * sizeof(double));
   for (unsigned int c = 0; c < tm->classes; c++) {
@@ -966,7 +961,7 @@ typedef enum {
     if (ideal_chunk_vote > vote_target) ideal_chunk_vote = vote_target; \
     bool want_more = (chunk_vote < ideal_chunk_vote); \
     double error_ratio = (double)(chunk_vote - ideal_chunk_vote) / (double)vote_target; \
-    double probability = error_ratio * error_ratio; \
+    double probability = fabs(error_ratio); \
     for (unsigned int j = 0; j < TK_CVEC_BITS; j++) { \
       if ((double)tk_fast_random() / 4294967295.0 < probability) \
         apply_feedback(tm, j, chunk, input, literals, votes, want_more); \
@@ -1394,15 +1389,12 @@ static inline int tk_learn_reconfigure (lua_State *L)
   unsigned int new_clauses = tk_lua_fcheckunsigned(L, 2, "reconfigure", "clauses");
   unsigned int new_tolerance = tk_lua_fcheckunsigned(L, 2, "reconfigure", "clause_tolerance");
   unsigned int new_maximum = tk_lua_fcheckunsigned(L, 2, "reconfigure", "clause_maximum");
-  if (new_tolerance > new_maximum) {
-    unsigned int tmp = new_tolerance;
-    new_tolerance = new_maximum;
-    new_maximum = tmp;
-  }
+  if (new_tolerance > new_maximum)
+    tk_lua_verror(L, 2, "reconfigure", "clause_tolerance", "must be <= clause_maximum");
   unsigned int new_target = tk_lua_fcheckunsigned(L, 2, "reconfigure", "target");
   double new_specificity = tk_lua_fcheckposdouble(L, 2, "reconfigure", "specificity");
-  new_clauses = ((new_clauses + 15) / 16) * 16;
-  unsigned int new_clause_chunks = TK_CVEC_BITS_BYTES(new_clauses);
+  unsigned int new_clause_chunks = new_clauses * 2;
+  new_clauses = new_clause_chunks * TK_CVEC_BITS;
   size_t new_action_chunks = (size_t)tm->classes * new_clauses * tm->input_chunks;
   size_t new_state_chunks = (size_t)tm->classes * new_clauses * (tm->state_bits - 1) * tm->input_chunks;
   if (new_action_chunks > tm->action_chunks) {
@@ -1426,9 +1418,8 @@ static inline int tk_learn_reconfigure (lua_State *L)
   tm->action_chunks = new_action_chunks;
   tm->state_chunks = new_state_chunks;
   tm->specificity = new_specificity;
-  tm->specificity_uint = (unsigned int)new_specificity;
   tm->target = new_target;
-  tm->specificity_threshold = (2 * tm->features) / tm->specificity_uint;
+  tm->specificity_threshold = (unsigned int)((2.0 * (double)tm->features) / new_specificity);
   tm->automata.n_clauses = tm->classes * tm->clauses;
   tm->automata.counts = tm->state;
   tm->automata.actions = tm->actions;

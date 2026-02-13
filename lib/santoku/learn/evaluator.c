@@ -2918,11 +2918,63 @@ static inline int tk_dendro_iter_lua(lua_State *L) {
   return 1;
 }
 
+static int tm_regression_per_dim (lua_State *L)
+{
+  lua_settop(L, 4);
+  tk_dvec_t *predicted = tk_dvec_peek(L, 1, "predicted");
+  tk_dvec_t *expected = tk_dvec_peek(L, 2, "expected");
+  uint64_t n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
+  uint64_t n_dims = tk_lua_checkunsigned(L, 4, "n_dims");
+  if (predicted->n != n_samples * n_dims || expected->n != n_samples * n_dims)
+    return luaL_error(L, "size mismatch: predicted=%llu expected=%llu, want %llu*%llu=%llu",
+      (unsigned long long)predicted->n, (unsigned long long)expected->n,
+      (unsigned long long)n_samples, (unsigned long long)n_dims,
+      (unsigned long long)(n_samples * n_dims));
+  tk_dvec_t *mae = tk_dvec_create(L, n_dims, 0, 0);
+  tk_dvec_t *corr = tk_dvec_create(L, n_dims, 0, 0);
+  tk_dvec_t *var_ratio = tk_dvec_create(L, n_dims, 0, 0);
+  const double *p = predicted->a;
+  const double *e = expected->a;
+  double inv_n = 1.0 / (double)n_samples;
+  #pragma omp parallel for schedule(static)
+  for (uint64_t d = 0; d < n_dims; d++) {
+    double sum_ae = 0, sum_p = 0, sum_e = 0;
+    double sum_pp = 0, sum_ee = 0, sum_pe = 0;
+    for (uint64_t i = 0; i < n_samples; i++) {
+      double pv = p[i * n_dims + d];
+      double ev = e[i * n_dims + d];
+      sum_ae += fabs(pv - ev);
+      sum_p += pv;
+      sum_e += ev;
+      sum_pp += pv * pv;
+      sum_ee += ev * ev;
+      sum_pe += pv * ev;
+    }
+    mae->a[d] = sum_ae * inv_n;
+    double mp = sum_p * inv_n, me = sum_e * inv_n;
+    double vp = sum_pp * inv_n - mp * mp;
+    double ve = sum_ee * inv_n - me * me;
+    double cov = sum_pe * inv_n - mp * me;
+    corr->a[d] = (vp > 1e-30 && ve > 1e-30) ? cov / sqrt(vp * ve) : 0.0;
+    var_ratio->a[d] = ve > 1e-30 ? vp / ve : 0.0;
+  }
+  int mae_idx = lua_gettop(L) - 2;
+  lua_newtable(L);
+  lua_pushvalue(L, mae_idx);
+  lua_setfield(L, -2, "mae");
+  lua_pushvalue(L, mae_idx + 1);
+  lua_setfield(L, -2, "corr");
+  lua_pushvalue(L, mae_idx + 2);
+  lua_setfield(L, -2, "var_ratio");
+  return 1;
+}
+
 static luaL_Reg tm_evaluator_fns[] =
 {
   { "class_accuracy", tm_class_accuracy },
   { "encoding_accuracy", tm_encoding_accuracy },
   { "regression_accuracy", tm_regression_accuracy },
+  { "regression_per_dim", tm_regression_per_dim },
   { "retrieval_accuracy", tm_multilabel_retrieval_accuracy },
   { "retrieval_ks", tm_retrieval_ks },
   { "optimize_bits", tm_optimize_bits },

@@ -17,16 +17,15 @@ io.stdout:setvbuf("line")
 local cfg = {
   data = {
     max = nil,
-    tvr = 0.1,
   },
   tokenizer = {
     max_len = 20,
     min_len = 1,
     max_run = 2,
-    ngrams = 1,
-    cgrams_min = 3,
-    cgrams_max = 5,
-    cgrams_cross = true,
+    ngrams = 2,
+    cgrams_min = 0,
+    cgrams_max = 0,
+    cgrams_cross = false,
     skips = 1,
   },
   feature_selection = {
@@ -34,11 +33,11 @@ local cfg = {
     n_selected = 65536,
   },
   graph = {
-    decay = -10,
+    decay = 2,
   },
   nystrom = {
     n_landmarks = 4096,
-    n_dims = 256,
+    n_dims = 1024,
     bandwidth = -1,
   },
   eval = {
@@ -46,38 +45,33 @@ local cfg = {
     random_pairs = 16,
   },
   regressor = {
-    features = 4096,
-    absorb_interval = 1, --{ def = 10, min = 1, max = 40 },
+    features = 256,
+    absorb_interval = 1,
     absorb_threshold = { def = 0, min = 0, max = 256, int = true },
     absorb_maximum = { def = 0, min = 0, max = 256, int = true },
     absorb_insert = { def = 1, min = 1, max = 256, int = true },
-    clauses = 2,
+    clauses = { def = 1, min = 1, max = 4, int = true },
     clause_maximum = { def = 16, min = 8, max = 1024, int = true },
     clause_tolerance_fraction = { def = 0.5, min = 0.01, max = 1.0 },
     target_fraction = { def = 0.25, min = 0.01, max = 2.0 },
     specificity = { def = 800, min = 2, max = 2000 },
-    search_trials = 60,
+    search_trials = 200,
     search_iterations = 10,
     search_subsample_samples = 0.2,
     search_subsample_targets = 8,
-    final_patience = 20,
+    final_patience = 2,
     final_batch = 40,
-    final_iterations = 400,
+    final_iterations = 40,
   },
 }
 
-test("newsgroups-embedding", function ()
+test("eurlex-embedding", function ()
 
   local stopwatch = utc.stopwatch()
 
   print("Loading data")
-  local train, test_set, validate = ds.read_20newsgroups_split(
-    "test/res/20news-bydate-train",
-    "test/res/20news-bydate-test",
-    cfg.data.max,
-    nil,
-    cfg.data.tvr)
-  str.printf("  Train: %d  Validate: %d  Test: %d\n", train.n, validate.n, test_set.n)
+  local train = ds.read_eurlex57k("test/res/eurlex57k", cfg.data.max)
+  str.printf("  Train: %d\n", train.n)
 
   print("\nTokenizing")
   local tok = tokenizer.create(cfg.tokenizer)
@@ -85,12 +79,8 @@ test("newsgroups-embedding", function ()
   tok:finalize()
   local n_tokens = tok:features()
   train.tokens = tok:tokenize(train.problems)
-  validate.tokens = tok:tokenize(validate.problems)
-  test_set.tokens = tok:tokenize(test_set.problems)
   tok = nil -- luacheck: ignore
   train.problems = nil
-  validate.problems = nil
-  test_set.problems = nil
   str.printf("  Vocabulary: %d\n", n_tokens)
 
   local n_classes = train.n_labels
@@ -101,29 +91,20 @@ test("newsgroups-embedding", function ()
     cfg.feature_selection.n_bns, nil, "max")
   train.solutions:add_scaled(-n_classes)
   train.tokens:bits_select(bns_ids, nil, n_tokens)
-  validate.tokens:bits_select(bns_ids, nil, n_tokens)
-  test_set.tokens:bits_select(bns_ids, nil, n_tokens)
   local n_features = bns_ids:size()
   n_tokens = n_features
   str.printf("  %d features selected\n", n_features)
 
-  print("\nBuilding doc-doc index (text + label ranks)")
+  print("\nBuilding doc-doc index (labels only)")
   train.ids = ivec.create(train.n):fill_indices()
   local label_sols = ivec.create():copy(train.solutions)
   local label_idf_ids, label_idf_scores = label_sols:bits_top_df(train.n, n_classes)
   label_sols:bits_select(label_idf_ids, nil, n_classes)
   local n_label_feats = label_idf_ids:size()
-  local graph_tokens = ivec.create():copy(train.tokens)
-  graph_tokens:bits_extend(label_sols, n_tokens, n_label_feats)
-  local graph_weights = dvec.create():copy(bns_scores)
-  graph_weights:copy(label_idf_scores)
-  local graph_ranks = ivec.create(n_tokens + n_label_feats)
-  graph_ranks:fill(0, 0, n_tokens)
-  graph_ranks:fill(1, n_tokens, n_tokens + n_label_feats)
-  local index = inv.create({ features = graph_weights, ranks = graph_ranks, n_ranks = 2 })
-  index:add(graph_tokens, train.ids)
-  str.printf("  %d docs indexed, %d text features + %d IDF-weighted label features, decay=%.1f\n",
-    train.n, n_tokens, n_label_feats, cfg.graph.decay)
+  local index = inv.create({ features = label_idf_scores })
+  index:add(label_sols, train.ids)
+  str.printf("  %d docs indexed, %d IDF-weighted label features, decay=%.1f\n",
+    train.n, n_label_feats, cfg.graph.decay)
 
   print("\nBuilding eval adjacency")
   local eval_uids, inv_hoods = index:neighborhoods(cfg.eval.knn, cfg.graph.decay, -1)
@@ -158,16 +139,12 @@ test("newsgroups-embedding", function ()
     all_raw_codes, train.ids, embedded_ids, 0, spectral_dims, true)
 
   local train_bns_tokens = ivec.create():copy(train.tokens)
-  local val_bns_tokens = ivec.create():copy(validate.tokens)
-  local test_bns_tokens = ivec.create():copy(test_set.tokens)
 
   print("\nFeature selection for regressor (F-score)")
   local n_selected = cfg.feature_selection.n_selected
   local union_ids, _, class_offsets, class_feat_ids = train.tokens:bits_top_reg_f(
     train_raw_codes, train.n, n_tokens, spectral_dims, n_selected, nil, "sum")
   train.tokens:bits_select(union_ids, nil, n_tokens)
-  validate.tokens:bits_select(union_ids, nil, n_tokens)
-  test_set.tokens:bits_select(union_ids, nil, n_tokens)
   class_offsets, class_feat_ids = csr.bits_select(class_offsets, class_feat_ids, union_ids)
   n_tokens = union_ids:size()
   str.printf("  %d features selected\n", n_tokens)
@@ -221,38 +198,23 @@ test("newsgroups-embedding", function ()
   print("FINAL EVALUATION")
   print(string.rep("=", 60))
 
-  local function build_split_eval(tokens, n)
-    local ids = ivec.create(n):fill_indices()
-    local idx = inv.create({ features = bns_scores })
-    idx:add(tokens, ids)
-    local uids, hoods = idx:neighborhoods(cfg.eval.knn, 0, -1)
-    local off, nbr, w = hoods:to_csr(uids)
-    local rp_off, rp_nbr, rp_w = csr.random_pairs(uids, cfg.eval.random_pairs)
-    csr.weight_from_index(uids, rp_off, rp_nbr, rp_w, idx, 0, -1)
-    csr.merge(off, nbr, w, rp_off, rp_nbr, rp_w)
-    csr.symmetrize(off, nbr, w, uids:size())
-    return uids, off, nbr, w
-  end
-
-  print("\nBuilding per-split evaluation indexes")
-  local tr_uids, tr_off, tr_nbr, tr_w = build_split_eval(train_bns_tokens, train.n)
-  local va_uids, va_off, va_nbr, va_w = build_split_eval(val_bns_tokens, validate.n)
-  local te_uids, te_off, te_nbr, te_w = build_split_eval(test_bns_tokens, test_set.n)
+  print("\nBuilding train text-only evaluation index")
+  local tr_ids = ivec.create(train.n):fill_indices()
+  local tr_idx = inv.create({ features = bns_scores })
+  tr_idx:add(train_bns_tokens, tr_ids)
+  local tr_uids, tr_hoods = tr_idx:neighborhoods(cfg.eval.knn, 0, -1)
+  local tr_off, tr_nbr, tr_w = tr_hoods:to_csr(tr_uids)
+  local rp_off, rp_nbr, rp_w = csr.random_pairs(tr_uids, cfg.eval.random_pairs)
+  csr.weight_from_index(tr_uids, rp_off, rp_nbr, rp_w, tr_idx, 0, -1)
+  csr.merge(tr_off, tr_nbr, tr_w, rp_off, rp_nbr, rp_w)
+  csr.symmetrize(tr_off, tr_nbr, tr_w, tr_uids:size())
   str.printf("  Train: %d nodes, %d edges\n", tr_uids:size(), tr_nbr:size())
-  str.printf("  Validate: %d nodes, %d edges\n", va_uids:size(), va_nbr:size())
-  str.printf("  Test: %d nodes, %d edges\n", te_uids:size(), te_nbr:size())
 
-  print("\nPredicting embeddings")
+  print("\nPredicting embeddings (train)")
   local train_predicted = tm:regress(
     { tokens = train.tokens, n_samples = train.n }, train.n, true)
-  local val_predicted = tm:regress(
-    { tokens = validate.tokens, n_samples = validate.n }, validate.n, true)
-  local test_predicted = tm:regress(
-    { tokens = test_set.tokens, n_samples = test_set.n }, test_set.n, true)
 
   local train_ids = ivec.create(train.n):fill_indices()
-  local val_ids = ivec.create(validate.n):fill_indices()
-  local test_ids = ivec.create(test_set.n):fill_indices()
 
   local spectral_raw = eval.ranking_accuracy({
     raw_codes = train_raw_codes, ids = train_ids,
@@ -266,20 +228,6 @@ test("newsgroups-embedding", function ()
     n_dims = spectral_dims,
     eval_ids = tr_uids, eval_offsets = tr_off,
     eval_neighbors = tr_nbr, eval_weights = tr_w,
-  })
-
-  local val_ranking = eval.ranking_accuracy({
-    raw_codes = val_predicted, ids = val_ids,
-    n_dims = spectral_dims,
-    eval_ids = va_uids, eval_offsets = va_off,
-    eval_neighbors = va_nbr, eval_weights = va_w,
-  })
-
-  local test_ranking = eval.ranking_accuracy({
-    raw_codes = test_predicted, ids = test_ids,
-    n_dims = spectral_dims,
-    eval_ids = te_uids, eval_offsets = te_off,
-    eval_neighbors = te_nbr, eval_weights = te_w,
   })
 
   local train_reg = eval.regression_accuracy(train_predicted, train_raw_codes)
@@ -389,8 +337,6 @@ test("newsgroups-embedding", function ()
   str.printf("\n  Spectral dims: %d\n", spectral_dims)
   str.printf("  %-28s %8.4f\n", "Spectral raw (train ceil):", spectral_raw.score)
   str.printf("  %-28s %8.4f\n", "Predicted train:", train_ranking.score)
-  str.printf("  %-28s %8.4f\n", "Predicted validate:", val_ranking.score)
-  str.printf("  %-28s %8.4f\n", "Predicted test:", test_ranking.score)
   str.printf("\n  Regression MAE (train): %.4f\n", train_reg.mean)
 
   str.printf("\n  Time: %.1fs\n", stopwatch())

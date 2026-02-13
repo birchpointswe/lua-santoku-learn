@@ -193,7 +193,7 @@ end
 
 local function format_phase (ev)
   if ev.is_final then return "F" end
-  local tag = ev.phase == "gp" and "gp" or "rand"
+  local tag = ev.phase or "lhs"
   return str.format("%s %d/%d", tag, ev.trial or 1, ev.trials or 1)
 end
 
