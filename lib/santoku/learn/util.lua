@@ -191,6 +191,12 @@ function M.spot_check_neighbors_with_labels (ids, offsets, neighbors, weights, l
   end
 end
 
+local function format_phase (ev)
+  if ev.is_final then return "F" end
+  local tag = ev.phase == "gp" and "gp" or "rand"
+  return str.format("%s %d/%d", tag, ev.trial or 1, ev.trials or 1)
+end
+
 local function format_best (best, current)
   if not best or best == -math.huge then
     return ""
@@ -203,32 +209,8 @@ local function format_best (best, current)
 end
 
 function M.spectral_log (info)
-  if info.event == "round_end" then
-    local p = info.best_params or {}
-    local m = info.best_metrics or {}
-    local skipped = (info.trials or 0) - (info.round_samples or 0)
-    local stats = str.format(" | %d/%d improved", info.round_improvements or 0, info.round_samples or 0)
-    if skipped > 0 then
-      stats = stats .. str.format(", %d skipped", skipped)
-    end
-    if info.adapt_factor and info.adapt_factor ~= 1.0 then
-      stats = stats .. str.format(", jitter×%.2f", info.adapt_factor)
-    end
-    local scores = {}
-    if m.kernel_score then scores[#scores + 1] = str.format("kernel=%.4f", m.kernel_score) end
-    scores[#scores + 1] = str.format("raw=%.4f", info.global_best_score or 0)
-    if m.binary_score then scores[#scores + 1] = str.format("bin=%.4f", m.binary_score) end
-    str.printf("[SPECTRAL R%d/%d] best: %s L=%d D=%d decay=%.2f%s\n",
-      info.round, info.rounds or 0, table.concat(scores, " "),
-      p.n_landmarks or 0, p.n_dims or 0, p.decay or 0, stats)
-  elseif info.event == "sample" then
-    if info.round and info.trial then
-      str.printf("[SPECTRAL R%d/%d T%d/%d] L=%d D=%d decay=%.2f\n",
-        info.round, info.rounds or 0, info.trial, info.trials or 0,
-        info.n_landmarks, info.n_dims, info.decay)
-    else
-      str.printf("[SPECTRAL] L=%d D=%d decay=%.2f\n", info.n_landmarks, info.n_dims, info.decay)
-    end
+  if info.event == "sample" then
+    str.printf("[SPECTRAL] L=%d D=%d decay=%.2f\n", info.n_landmarks, info.n_dims, info.decay)
   elseif info.event == "spectral_result" then
     local trace_info = info.trace_ratio and str.format(" trace=%.2e", info.trace_ratio) or ""
     local eig_info = (info.eig_min and info.eig_max) and str.format(" eig=[%.4f, %.4f]", info.eig_min, info.eig_max) or ""
@@ -237,12 +219,11 @@ function M.spectral_log (info)
       info.n_landmarks or 0, dims_info, eig_info, trace_info)
   elseif info.event == "eval" then
     local m = info.metrics or {}
-    local best = format_best(info.global_best_score, info.score)
     local scores = {}
     if m.kernel_score then scores[#scores + 1] = str.format("kernel=%.4f", m.kernel_score) end
     scores[#scores + 1] = str.format("raw=%.4f", info.score or 0)
     if m.binary_score then scores[#scores + 1] = str.format("bin=%.4f", m.binary_score) end
-    str.printf("[SPECTRAL]   -> eval: %s%s\n", table.concat(scores, " "), best)
+    str.printf("[SPECTRAL]   -> eval: %s\n", table.concat(scores, " "))
   elseif info.event == "done" then
     print(string.rep("-", 50))
     local p = info.best_params or {}
@@ -274,17 +255,12 @@ function M.make_bits_log (log_interval)
 end
 
 function M.make_classifier_log (stopwatch)
-  return function (_, is_final, metrics, params, epoch, round, trial, rounds, trials, global_best_score, best_epoch_score)
-    local phase
-    if is_final then
-      phase = "F"
-    elseif rounds and trials then
-      phase = str.format("R%d/%d T%d/%d", round, rounds, trial, trials)
-    else
-      phase = str.format("R%d T%d", round, trial)
-    end
-    local running_best = math.max(global_best_score or -math.huge, best_epoch_score or -math.huge)
-    local best = is_final and "" or format_best(running_best, metrics.f1)
+  return function (ev)
+    local phase = format_phase(ev)
+    local params = ev.params
+    local metrics = ev.metrics
+    local running_best = math.max(ev.global_best_score or -math.huge, ev.best_epoch_score or -math.huge)
+    local best = ev.is_final and "" or format_best(running_best, metrics.f1)
     local timing = ""
     if stopwatch then
       local d, dd = stopwatch()
@@ -295,26 +271,21 @@ function M.make_classifier_log (stopwatch)
       absorb = str.format(" AI=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
     end
     str.printf("[CLASSIFY %s E%d] C=%d L=%d/%d T=%d S=%.0f%s F1=%.4f%s%s\n",
-      phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
+      phase, ev.epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
       params.target, params.specificity, absorb, metrics.f1, best, timing)
   end
 end
 
 function M.make_regressor_log (stopwatch)
-  return function (_, is_final, metrics, params, epoch, round, trial, rounds, trials, global_best_score, best_epoch_score)
-    local phase
-    if is_final then
-      phase = "F"
-    elseif rounds and trials then
-      phase = str.format("R%d/%d T%d/%d", round, rounds, trial, trials)
-    else
-      phase = str.format("R%d T%d", round, trial)
-    end
+  return function (ev)
+    local phase = format_phase(ev)
+    local params = ev.params
+    local metrics = ev.metrics
     local mae = metrics.mean
-    local running_best = math.max(global_best_score or -math.huge, best_epoch_score or -math.huge)
+    local running_best = math.max(ev.global_best_score or -math.huge, ev.best_epoch_score or -math.huge)
     local running_best_mae = (running_best > -math.huge) and -running_best or nil
     local best = ""
-    if not is_final and running_best_mae then
+    if not ev.is_final and running_best_mae then
       local marker = (mae < running_best_mae - 1e-6) and " ++" or ""
       best = str.format(" (best=%.4f%s)", running_best_mae, marker)
     end
@@ -328,26 +299,21 @@ function M.make_regressor_log (stopwatch)
       absorb = str.format(" AI=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
     end
     str.printf("[REGRESS %s E%d] C=%d L=%d/%d T=%d S=%.0f%s MAE=%.4f%s%s\n",
-      phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
+      phase, ev.epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
       params.target, params.specificity, absorb, mae, best, timing)
   end
 end
 
 function M.make_regressor_acc_log (stopwatch)
-  return function (_, is_final, metrics, params, epoch, round, trial, rounds, trials, global_best_score, best_epoch_score)
-    local phase
-    if is_final then
-      phase = "F"
-    elseif rounds and trials then
-      phase = str.format("R%d/%d T%d/%d", round, rounds, trial, trials)
-    else
-      phase = str.format("R%d T%d", round, trial)
-    end
+  return function (ev)
+    local phase = format_phase(ev)
+    local params = ev.params
+    local metrics = ev.metrics
     local acc = (1 - metrics.nmae) * 100
-    local running_best = math.max(global_best_score or -math.huge, best_epoch_score or -math.huge)
+    local running_best = math.max(ev.global_best_score or -math.huge, ev.best_epoch_score or -math.huge)
     local running_best_acc = (running_best > -math.huge) and (1 + running_best) * 100 or nil
     local best = ""
-    if not is_final and running_best_acc then
+    if not ev.is_final and running_best_acc then
       local marker = (acc > running_best_acc + 1e-4) and " ++" or ""
       best = str.format(" (best=%.1f%%%s)", running_best_acc, marker)
     end
@@ -361,24 +327,19 @@ function M.make_regressor_acc_log (stopwatch)
       absorb = str.format(" AI=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
     end
     str.printf("[REGRESS %s E%d] C=%d L=%d/%d T=%d S=%.0f%s ACC=%.1f%%%s%s\n",
-      phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
+      phase, ev.epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
       params.target, params.specificity, absorb, acc, best, timing)
   end
 end
 
 function M.make_ranking_log (stopwatch)
-  return function (_, is_final, metrics, params, epoch, round, trial, rounds, trials, global_best_score, best_epoch_score)
-    local phase
-    if is_final then
-      phase = "F"
-    elseif rounds and trials then
-      phase = str.format("R%d/%d T%d/%d", round, rounds, trial, trials)
-    else
-      phase = str.format("R%d T%d", round, trial)
-    end
+  return function (ev)
+    local phase = format_phase(ev)
+    local params = ev.params
+    local metrics = ev.metrics
     local score = metrics.score or 0
-    local running_best = math.max(global_best_score or -math.huge, best_epoch_score or -math.huge)
-    local best = is_final and "" or format_best(running_best, score)
+    local running_best = math.max(ev.global_best_score or -math.huge, ev.best_epoch_score or -math.huge)
+    local best = ev.is_final and "" or format_best(running_best, score)
     local timing = ""
     if stopwatch then
       local d, dd = stopwatch()
@@ -389,7 +350,7 @@ function M.make_ranking_log (stopwatch)
       absorb = str.format(" AI=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
     end
     str.printf("[RANKING %s E%d] C=%d L=%d/%d T=%d S=%.0f%s score=%.4f%s%s\n",
-      phase, epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
+      phase, ev.epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
       params.target, params.specificity, absorb, score, best, timing)
   end
 end

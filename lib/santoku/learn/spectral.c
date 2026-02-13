@@ -464,7 +464,8 @@ static inline int tm_encode (lua_State *L) {
     tk_dvec_create(L, 0, 0, 0);
     tk_ivec_create(L, 0, 0, 0);
     lua_pushnil(L);
-    return 3;
+    lua_pushnil(L);
+    return 4;
   }
 
   tk_encode_nystrom_ctx_t *ctx = (tk_encode_nystrom_ctx_t *)
@@ -516,6 +517,13 @@ static inline int tm_encode (lua_State *L) {
     return luaL_error(L, "encode: dsyevr info=%d", info);
   }
 
+  for (uint64_t i = 0; i < d / 2; i++) {
+    double tmp = eig_raw->a[i];
+    eig_raw->a[i] = eig_raw->a[d - 1 - i];
+    eig_raw->a[d - 1 - i] = tmp;
+  }
+  int eig_raw_idx = lua_gettop(L);
+
   tk_dvec_t *eigvecs = tk_dvec_create(L, m * d, 0, 0);
   eigvecs->n = m * d;
 
@@ -564,7 +572,8 @@ static inline int tm_encode (lua_State *L) {
     tk_dvec_create(L, 0, 0, 0);
     tk_ivec_create(L, 0, 0, 0);
     lua_pushnil(L);
-    return 3;
+    lua_pushnil(L);
+    return 4;
   }
 
   ctx->uid_to_chol = (int64_t *)malloc((uint64_t)(max_uid + 1) * sizeof(int64_t));
@@ -655,7 +664,8 @@ static inline int tm_encode (lua_State *L) {
   lua_pushvalue(L, raw_codes_idx);
   lua_pushvalue(L, out_ids_idx);
   lua_pushvalue(L, enc_idx);
-  return 3;
+  lua_pushvalue(L, eig_raw_idx);
+  return 4;
 }
 
 static inline int tk_nystrom_encoder_load_lua (lua_State *L) {

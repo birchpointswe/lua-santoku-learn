@@ -42,8 +42,7 @@ local cfg = {
     specificity = { def = 2, min = 2, max = 4000, int = true },
   },
   search = {
-    rounds = 6,
-    trials = 20,
+    trials = 120,
     iterations = 80,
     subsample_samples = 0.2,
   },
@@ -128,7 +127,6 @@ test("newsgroups regressor", function ()
     absorb_ranking = class_feat_ids,
     absorb_ranking_offsets = class_offsets,
     absorb_ranking_global = absorb_ranking_global,
-    search_rounds = cfg.search.rounds,
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
     search_subsample_samples = cfg.search.subsample_samples,
