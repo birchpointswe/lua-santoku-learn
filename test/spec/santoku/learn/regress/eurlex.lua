@@ -8,7 +8,6 @@ local csr = require("santoku.learn.csr")
 local quantizer = require("santoku.learn.quantizer")
 local inv = require("santoku.learn.inv")
 local ivec = require("santoku.ivec")
-local normalizer = require("santoku.learn.normalizer")
 local rvec = require("santoku.rvec")
 local optimize = require("santoku.learn.optimize")
 local str = require("santoku.string")
@@ -811,37 +810,12 @@ test("eurlex", function()
     str.printf("  Worst MAE:  dim %d = %.6f\n", worst_mae_d, pd.mae:get(worst_mae_d))
   end
 
-  print("\nBuilding normalizer (predicted -> spectral scale)")
-  local norm = normalizer.create({
-    source = train_predicted_raw,
-    target = train_raw_codes,
-    n_samples_source = train.n,
-    n_samples_target = train.n,
-    n_dims = train.dims,
-  })
-  local train_predicted_norm = norm:encode(train_predicted_raw)
-
-  print("\nNormalized bipartite ranking (train)")
-  do
-    local combined_raw = dvec.create()
-    combined_raw:copy(train_predicted_norm)
-    combined_raw:copy(label_raw_codes)
-    local combined_ids = ivec.create(train.n):fill_indices()
-    combined_ids:copy(train.embedded_label_ids)
-    local norm_stats = eval.ranking_accuracy({
-      raw_codes = combined_raw, ids = combined_ids, n_dims = train.dims,
-      eval_ids = train_eval_ids, eval_offsets = train_eval_offsets,
-      eval_neighbors = train_eval_neighbors, eval_weights = train_eval_weights,
-    })
-    str.printf("  Normalized bipartite ranking: %.4f\n", norm_stats.score)
-  end
-
   local post_encoder, post_n_bits, post_label_codes
 
   do
-    print("\nTraining post-quantizer on merged normalized+label codes")
+    print("\nTraining post-quantizer on merged predicted+label codes")
     local post_raw = dvec.create()
-    post_raw:copy(train_predicted_norm)
+    post_raw:copy(train_predicted_raw)
     post_raw:copy(label_raw_codes)
     local post_ids = ivec.create(train.n):fill_indices()
     post_ids:copy(train.embedded_label_ids)
@@ -888,10 +862,9 @@ test("eurlex", function()
     local function evaluate_split(split, name, eval_adj)
       print("\nEvaluating " .. name)
       local predicted_raw = train.tm:regress({ tokens = split.tokens, n_samples = split.n }, split.n, true)
-      local predicted_norm = norm:encode(predicted_raw)
-      local predicted_bin = post_encoder:encode(predicted_norm)
+      local predicted_bin = post_encoder:encode(predicted_raw)
       local combined_raw = dvec.create()
-      combined_raw:copy(predicted_norm)
+      combined_raw:copy(predicted_raw)
       combined_raw:copy(label_raw_codes)
       local combined_bin = cvec.create()
       combined_bin:copy(predicted_bin)
