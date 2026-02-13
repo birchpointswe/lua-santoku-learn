@@ -950,7 +950,7 @@ typedef enum {
     for (unsigned int j = 0; j < TK_CVEC_BITS; j++) \
       if (out & (1 << j)) \
         chunk_vote += votes[j]; \
-    if (chunk_vote > vote_target) chunk_vote = vote_target; \
+    /* if (chunk_vote > vote_target) chunk_vote = vote_target; */ \
     bool chunk_neg = (chunk % clause_chunks) >= clause_chunks / 2; \
     double class_y_min = y_min[chunk_class]; \
     double class_y_range = y_max[chunk_class] - class_y_min; \
@@ -963,8 +963,9 @@ typedef enum {
     double error_ratio = (double)(chunk_vote - ideal_chunk_vote) / (double)vote_target; \
     double probability = fabs(error_ratio); \
     for (unsigned int j = 0; j < TK_CVEC_BITS; j++) { \
-      if ((double)tk_fast_random() / 4294967295.0 < probability) \
+      if ((double)tk_fast_random() / 4294967295.0 < probability) { \
         apply_feedback(tm, j, chunk, input, literals, votes, want_more); \
+      } \
     } \
   }
 
@@ -1348,9 +1349,9 @@ static inline int tk_learn_checkpoint (lua_State *L)
   if (tk_cvec_ensure(checkpoint, size) != 0)
     luaL_error(L, "failed to resize checkpoint buffer");
   checkpoint->n = size;
-  memcpy(checkpoint->a, tm->actions, tm->action_chunks);
-  if (mapping_size > 0)
-    memcpy(checkpoint->a + tm->action_chunks, tm->mapping, mapping_size);
+  char *p = checkpoint->a;
+  memcpy(p, tm->actions, tm->action_chunks); p += tm->action_chunks;
+  if (mapping_size > 0) { memcpy(p, tm->mapping, mapping_size); }
   return 0;
 }
 
@@ -1363,9 +1364,10 @@ static inline int tk_learn_restore (lua_State *L)
   size_t expected = tm->action_chunks + mapping_size;
   if (checkpoint->n != expected)
     luaL_error(L, "checkpoint size mismatch: expected %zu bytes, got %zu", expected, checkpoint->n);
-  memcpy(tm->actions, checkpoint->a, tm->action_chunks);
+  const char *p = checkpoint->a;
+  memcpy(tm->actions, p, tm->action_chunks); p += tm->action_chunks;
   if (mapping_size > 0) {
-    memcpy(tm->mapping, checkpoint->a + tm->action_chunks, mapping_size);
+    memcpy(tm->mapping, p, mapping_size);
     memset(tm->active, 0, (uint64_t)tm->classes * tm->active_bytes);
     for (unsigned int c = 0; c < tm->classes; c++) {
       for (unsigned int k = 0; k < tm->features; k++) {

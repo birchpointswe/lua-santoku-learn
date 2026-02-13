@@ -923,11 +923,13 @@ M.build_spectral_nystrom = function (args)
     spectral.encode({
       inv = index,
       landmarks_inv = landmarks_index ~= index and landmarks_index or nil,
+      pls_inv = args.pls_index,
       n_landmarks = args.n_landmarks or 0,
       n_dims = args.n_dims or args.n_landmarks or 0,
       decay = decay,
       bandwidth = bandwidth,
       trace_tol = args.trace_tol,
+      pls_dims = args.pls_dims,
     })
 
   local effective_dims = encoder and encoder:dims() or 0
@@ -986,6 +988,8 @@ M.spectral = function (args)
     decay = decay,
     bandwidth = bandwidth,
     trace_tol = args.trace_tol,
+    pls_dims = args.pls_dims,
+    pls_index = args.pls_index,
     each = each_cb,
     train_tokens = args.train_tokens,
     train_ids = args.train_ids,

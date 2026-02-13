@@ -4,7 +4,6 @@ local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
 local inv = require("santoku.learn.inv")
 local ivec = require("santoku.ivec")
-local normalizer = require("santoku.learn.normalizer")
 local optimize = require("santoku.learn.optimize")
 local str = require("santoku.string")
 local test = require("santoku.test")
@@ -364,26 +363,8 @@ test("newsgroups-embedding", function ()
       eval_neighbors = asym_nbr, eval_weights = asym_w,
     })
 
-    local norm = normalizer.create({
-      source = train_predicted,
-      target = train_raw_codes,
-      n_samples_source = n,
-      n_samples_target = n,
-      n_dims = spectral_dims,
-    })
-    local pred_norm = norm:encode(train_predicted)
-    local norm_spec_raw = dvec.create()
-    norm_spec_raw:copy(pred_norm)
-    norm_spec_raw:copy(train_raw_codes)
-    local norm_to_spec = eval.ranking_accuracy({
-      raw_codes = norm_spec_raw, ids = asym_all_ids, n_dims = spectral_dims,
-      eval_ids = asym_ids, eval_offsets = asym_off,
-      eval_neighbors = asym_nbr, eval_weights = asym_w,
-    })
-
     str.printf("  %-28s %8.4f\n", "Spectral->spectral:", spec_to_spec.score)
     str.printf("  %-28s %8.4f\n", "Predicted->spectral:", pred_to_spec.score)
-    str.printf("  %-28s %8.4f\n", "Normalized->spectral:", norm_to_spec.score)
   end
 
   str.printf("\n  Spectral dims: %d\n", spectral_dims)
