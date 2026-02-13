@@ -19,10 +19,10 @@ local cfg = {
   },
   tm = {
     classes = 10,
-    clauses = 32,
-    clause_tolerance = { def = 8, min = 8, max = 1024, int = true },
+    clauses = 2,
     clause_maximum = { def = 8, min = 8, max = 1024, int = true },
-    target = { def = 8, min = 8, max = 1024, int = true },
+    clause_tolerance_fraction = { def = 0.5, min = 0.01, max = 1.0 },
+    target_fraction = { def = 0.25, min = 0.01, max = 2.0 },
     specificity = { def = 2, min = 2, max = 2000, int = true },
   },
   search = {
@@ -73,9 +73,9 @@ test("mnist classifier", function ()
     solutions = train.solutions,
 
     clauses = cfg.tm.clauses,
-    clause_tolerance = cfg.tm.clause_tolerance,
     clause_maximum = cfg.tm.clause_maximum,
-    target = cfg.tm.target,
+    clause_tolerance_fraction = cfg.tm.clause_tolerance_fraction,
+    target_fraction = cfg.tm.target_fraction,
     specificity = cfg.tm.specificity,
 
     search_trials = cfg.search.trials,
