@@ -930,6 +930,7 @@ M.build_spectral_nystrom = function (args)
       bandwidth = bandwidth,
       trace_tol = args.trace_tol,
       pls_dims = args.pls_dims,
+      pls_variance = args.pls_variance,
     })
 
   local effective_dims = encoder and encoder:dims() or 0
@@ -989,6 +990,7 @@ M.spectral = function (args)
     bandwidth = bandwidth,
     trace_tol = args.trace_tol,
     pls_dims = args.pls_dims,
+    pls_variance = args.pls_variance,
     pls_index = args.pls_index,
     each = each_cb,
     train_tokens = args.train_tokens,

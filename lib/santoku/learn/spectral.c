@@ -451,6 +451,7 @@ static inline int tm_encode (lua_State *L) {
   double bandwidth = tk_lua_foptnumber(L, 1, "encode", "bandwidth", -1.0);
   double trace_tol = tk_lua_foptnumber(L, 1, "encode", "trace_tol", 1e-15);
   uint64_t pls_dims = tk_lua_foptunsigned(L, 1, "encode", "pls_dims", 0);
+  double pls_variance = tk_lua_foptnumber(L, 1, "encode", "pls_variance", 0.0);
 
   tk_inv_rank_weights_t feat_rw;
   tk_inv_precompute_rank_weights(&feat_rw, feat_inv->n_ranks, decay);
@@ -504,6 +505,41 @@ static inline int tm_encode (lua_State *L) {
   gram->n = m * m;
   cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
     (int)m, (int)m, (int)m, 1.0, cw->a, (int)m, cw->a, (int)m, 0.0, gram->a, (int)m);
+
+  if (pls_variance > 0.0) {
+    double *gram_copy = malloc(m * m * sizeof(double));
+    double *all_eigs = malloc(m * sizeof(double));
+    int *isuppz_tmp = malloc(2 * m * sizeof(int));
+    if (!gram_copy || !all_eigs || !isuppz_tmp) {
+      free(gram_copy); free(all_eigs); free(isuppz_tmp);
+      return luaL_error(L, "encode: out of memory");
+    }
+    memcpy(gram_copy, gram->a, m * m * sizeof(double));
+    int n_eig_tmp = 0;
+    int info_tmp = LAPACKE_dsyevr(LAPACK_ROW_MAJOR, 'N', 'A', 'U',
+      (int)m, gram_copy, (int)m, 0.0, 0.0, 0, 0,
+      0.0, &n_eig_tmp, all_eigs, NULL, 1, isuppz_tmp);
+    free(gram_copy);
+    free(isuppz_tmp);
+    if (info_tmp != 0) {
+      free(all_eigs);
+      return luaL_error(L, "encode: dsyevr eigenvalues info=%d", info_tmp);
+    }
+    double total = 0.0;
+    for (int i = 0; i < n_eig_tmp; i++)
+      if (all_eigs[i] > 0.0) total += all_eigs[i];
+    double cumsum = 0.0;
+    uint64_t k = 0;
+    for (int i = n_eig_tmp - 1; i >= 0; i--) {
+      if (all_eigs[i] <= 0.0) break;
+      cumsum += all_eigs[i];
+      k++;
+      if (cumsum / total >= pls_variance) break;
+    }
+    free(all_eigs);
+    if (k < d) d = k;
+    if (d == 0) d = 1;
+  }
 
   tk_dvec_t *eig_raw = tk_dvec_create(L, d, 0, 0);
   eig_raw->n = d;
