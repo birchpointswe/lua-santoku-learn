@@ -619,6 +619,25 @@ static int tm_csr_bits_select (lua_State *L)
   return 2;
 }
 
+static int tm_csr_to_pairs (lua_State *L)
+{
+  tk_ivec_t *off = tk_ivec_peek(L, 1, "offsets");
+  tk_ivec_t *nbr = tk_ivec_peek(L, 2, "neighbors");
+  uint64_t n = off->n - 1;
+  uint64_t total = (uint64_t)off->a[n];
+  tk_pvec_t *pairs = tk_pvec_create(L, total, 0, 0);
+  uint64_t pos = 0;
+  for (uint64_t i = 0; i < n; i++) {
+    int64_t start = off->a[i];
+    int64_t end = off->a[i + 1];
+    for (int64_t j = start; j < end; j++) {
+      pairs->a[pos++] = (tk_pair_t) { (int64_t)i, nbr->a[j] };
+    }
+  }
+  pairs->n = pos;
+  return 1;
+}
+
 static luaL_Reg tm_csr_fns[] = {
   { "to_csc", tm_csr_to_csc },
   { "to_hypervector", tm_csr_bits_to_hv },
@@ -629,6 +648,7 @@ static luaL_Reg tm_csr_fns[] = {
   { "merge", tm_csr_merge },
   { "symmetrize", tm_csr_symmetrize },
   { "bits_select", tm_csr_bits_select },
+  { "to_pairs", tm_csr_to_pairs },
   { NULL, NULL }
 };
 
