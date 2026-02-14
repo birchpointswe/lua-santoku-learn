@@ -1,6 +1,7 @@
 local arr = require("santoku.array")
 local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
+local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
 local ivec = require("santoku.ivec")
 local optimize = require("santoku.learn.optimize")
@@ -33,18 +34,18 @@ local cfg = {
     state = 8,
     classes = 2,
     features = 1024,
-    clauses = 2,
+    clauses = { def = 2, min = 1, max = 4, int = true },
     absorb_interval = { def = 1, min = 1, max = 40 },
     absorb_threshold = { def = 0, min = 0, max = 256, int = true },
-    absorb_maximum = { def = 0, min = 0, max = 256, int = true },
-    absorb_insert = { def = 1, min = 1, max = 256, int = true },
+    absorb_maximum = { def = 256, min = 1, max = 256, int = true },
+    absorb_insert_offset = { def = 1, min = 1, max = 256, int = true },
     clause_maximum = { def = 16, min = 8, max = 1024, int = true },
     clause_tolerance_fraction = { def = 0.5, min = 0.01, max = 1.0 },
     target_fraction = { def = 0.25, min = 0.01, max = 2.0 },
     specificity = { def = 800, min = 2, max = 2000, int = true },
   },
   search = {
-    trials = 120,
+    trials = 200,
     iterations = 80,
     subsample_samples = 0.2,
   },
@@ -105,6 +106,12 @@ test("imdb regressor", function ()
 
   local absorb_ranking_global = ivec.create(n_tokens):fill_indices()
 
+  local output_weights = dvec.create(cfg.tm.classes)
+  for i = 0, train.n - 1 do
+    local c = train.solutions:get(i)
+    output_weights:set(c, output_weights:get(c) + 1)
+  end
+
   print("\nOptimizing Regressor")
   local t = optimize.regressor({
     state = cfg.tm.state,
@@ -114,12 +121,13 @@ test("imdb regressor", function ()
     absorb_interval = cfg.tm.absorb_interval,
     absorb_threshold = cfg.tm.absorb_threshold,
     absorb_maximum = cfg.tm.absorb_maximum,
-    absorb_insert = cfg.tm.absorb_insert,
+    absorb_insert_offset = cfg.tm.absorb_insert_offset,
     clauses = cfg.tm.clauses,
     clause_maximum = cfg.tm.clause_maximum,
     clause_tolerance_fraction = cfg.tm.clause_tolerance_fraction,
     target_fraction = cfg.tm.target_fraction,
     specificity = cfg.tm.specificity,
+    output_weights = output_weights,
     samples = train.n,
     solutions = train.solutions,
     tokens = train.tokens,
