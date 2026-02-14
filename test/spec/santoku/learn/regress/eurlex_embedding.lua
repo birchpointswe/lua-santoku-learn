@@ -29,15 +29,14 @@ local cfg = {
   },
   feature_selection = {
     n_bns = 8192,
-    n_selected = 8192,
+    n_selected = 65536,
   },
   graph = {
     decay = 2,
   },
   nystrom = {
     n_landmarks = 4096,
-    pls_dims = 256,
-    pls_variance = 0.99,
+    n_dims = 256,
     bandwidth = -1,
   },
   eval = {
@@ -50,18 +49,18 @@ local cfg = {
     absorb_threshold = { def = 0, min = 0, max = 256, int = true },
     absorb_maximum = { def = 0, min = 0, max = 256, int = true },
     absorb_insert = { def = 1, min = 1, max = 256, int = true },
-    clauses = { def = 1, min = 1, max = 4, int = true },
+    clauses = { def = 1, min = 1, max = 8, int = true },
     clause_maximum = { def = 16, min = 8, max = 1024, int = true },
     clause_tolerance_fraction = { def = 0.5, min = 0.01, max = 1.0 },
     target_fraction = { def = 0.25, min = 0.01, max = 2.0 },
     specificity = { def = 800, min = 2, max = 2000 },
     search_trials = 200,
-    search_iterations = 10,
-    search_subsample_samples = 0.2,
+    search_iterations = 40,
+    search_subsample_samples = nil,
     search_subsample_targets = 8,
     final_patience = 2,
     final_batch = 40,
-    final_iterations = 40,
+    final_iterations = 400,
   },
 }
 
@@ -106,14 +105,6 @@ test("eurlex-embedding", function ()
   str.printf("  %d docs indexed, %d IDF-weighted label features, decay=%.1f\n",
     train.n, n_label_feats, cfg.graph.decay)
 
-  print("\nBuilding text IDF index for PLS")
-  local pls_tokens = ivec.create():copy(train.tokens)
-  local text_idf_ids, text_idf_scores = pls_tokens:bits_top_df(train.n, n_tokens)
-  pls_tokens:bits_select(text_idf_ids, nil, n_tokens)
-  local pls_index = inv.create({ features = text_idf_scores })
-  pls_index:add(pls_tokens, train.ids)
-  str.printf("  %d IDF-weighted text features\n", text_idf_ids:size())
-
   print("\nBuilding eval adjacency")
   local eval_uids, inv_hoods = index:neighborhoods(cfg.eval.knn, cfg.graph.decay, -1)
   local eval_off, eval_nbr, eval_w = inv_hoods:to_csr(eval_uids)
@@ -126,10 +117,8 @@ test("eurlex-embedding", function ()
   print("\nSpectral embedding (Nystrom)")
   local model = optimize.spectral({
     index = index,
-    pls_index = pls_index,
     n_landmarks = cfg.nystrom.n_landmarks,
-    pls_dims = cfg.nystrom.pls_dims,
-    pls_variance = cfg.nystrom.pls_variance,
+    n_dims = cfg.nystrom.n_dims,
     decay = cfg.graph.decay,
     bandwidth = cfg.nystrom.bandwidth,
     expected_ids = eval_uids,
@@ -165,9 +154,10 @@ test("eurlex-embedding", function ()
 
   local absorb_ranking_global = ivec.create(n_tokens):fill_indices()
 
-  print("\nTraining regressor")
+  print("\nTraining regressor (standardized targets)")
   local predicted_buf = dvec.create()
-  local tm = optimize.regressor({
+  local tm, _, _, retrieval_norm = optimize.regressor({
+    standardize = true,
     outputs = spectral_dims,
     samples = train.n,
     features = cfg.regressor.features,
@@ -226,8 +216,18 @@ test("eurlex-embedding", function ()
 
   local train_ids = ivec.create(train.n):fill_indices()
 
+  print("\nMapping spectral codes to prediction space")
+  local spectral_in_pred_space = retrieval_norm:encode(train_raw_codes)
+
   local spectral_raw = eval.ranking_accuracy({
     raw_codes = train_raw_codes, ids = train_ids,
+    n_dims = spectral_dims,
+    eval_ids = tr_uids, eval_offsets = tr_off,
+    eval_neighbors = tr_nbr, eval_weights = tr_w,
+  })
+
+  local spectral_norm_ranking = eval.ranking_accuracy({
+    raw_codes = spectral_in_pred_space, ids = train_ids,
     n_dims = spectral_dims,
     eval_ids = tr_uids, eval_offsets = tr_off,
     eval_neighbors = tr_nbr, eval_weights = tr_w,
@@ -240,56 +240,7 @@ test("eurlex-embedding", function ()
     eval_neighbors = tr_nbr, eval_weights = tr_w,
   })
 
-  local train_reg = eval.regression_accuracy(train_predicted, train_raw_codes)
-
-  print("\nEigenvalue spectrum")
-  do
-    local ev = model.eigenvalues
-    local n_ev = ev:size()
-    local top = math.min(n_ev, 10)
-    for i = 0, top - 1 do
-      str.printf("  EV[%d] = %.6f\n", i, ev:get(i))
-    end
-    if n_ev > 10 then
-      str.printf("  ... (%d total)\n", n_ev)
-      str.printf("  EV[%d] = %.6f (last)\n", n_ev - 1, ev:get(n_ev - 1))
-    end
-  end
-
-  print("\nPer-dimension regression analysis")
-  do
-    local D = spectral_dims
-    local pd = eval.regression_per_dim(train_predicted, train_raw_codes, train.n, D)
-    str.printf("  %-6s %10s %10s %10s %12s\n", "Dim", "MAE", "Pearson r", "Var ratio", "Eigenvalue")
-    local ev = model.eigenvalues
-    local bands = { { 0, math.min(7, D - 1) } }
-    if D > 8 then bands[#bands + 1] = { 8, math.min(31, D - 1) } end
-    if D > 32 then bands[#bands + 1] = { 32, math.min(63, D - 1) } end
-    if D > 64 then bands[#bands + 1] = { 64, math.min(127, D - 1) } end
-    if D > 128 then bands[#bands + 1] = { 128, math.min(255, D - 1) } end
-    if D > 256 then bands[#bands + 1] = { 256, D - 1 } end
-    for _, band in ipairs(bands) do
-      local lo, hi = band[1], band[2]
-      local cnt = hi - lo + 1
-      local s_mae, s_corr, s_vr, s_ev = 0, 0, 0, 0
-      for d = lo, hi do
-        s_mae = s_mae + pd.mae:get(d)
-        s_corr = s_corr + pd.corr:get(d)
-        s_vr = s_vr + pd.var_ratio:get(d)
-        if d < ev:size() then s_ev = s_ev + ev:get(d) end
-      end
-      str.printf("  [%3d-%3d] %8.6f %10.4f %10.4f %12.6f\n",
-        lo, hi, s_mae / cnt, s_corr / cnt, s_vr / cnt, s_ev / cnt)
-    end
-    local worst_mae_d = pd.mae:rmaxargs(D):get(0)
-    local best_corr_d = pd.corr:rmaxargs(D):get(0)
-    local worst_corr_d = pd.corr:rminargs(D):get(0)
-    str.printf("  Best corr:  dim %d = %.4f\n", best_corr_d, pd.corr:get(best_corr_d))
-    str.printf("  Worst corr: dim %d = %.4f\n", worst_corr_d, pd.corr:get(worst_corr_d))
-    str.printf("  Worst MAE:  dim %d = %.6f\n", worst_mae_d, pd.mae:get(worst_mae_d))
-  end
-
-  print("\nAsymmetric predicted->spectral evaluation (train)")
+  print("\nAsymmetric evaluation (prediction space)")
   do
     local n = train.n
     local pred_ids = ivec.create(n):fill_indices()
@@ -305,8 +256,8 @@ test("eurlex-embedding", function ()
     asym_all_ids:copy(spec_ids)
 
     local spec_spec_raw = dvec.create()
-    spec_spec_raw:copy(train_raw_codes)
-    spec_spec_raw:copy(train_raw_codes)
+    spec_spec_raw:copy(spectral_in_pred_space)
+    spec_spec_raw:copy(spectral_in_pred_space)
     local spec_to_spec = eval.ranking_accuracy({
       raw_codes = spec_spec_raw, ids = asym_all_ids, n_dims = spectral_dims,
       eval_ids = asym_ids, eval_offsets = asym_off,
@@ -315,21 +266,21 @@ test("eurlex-embedding", function ()
 
     local pred_spec_raw = dvec.create()
     pred_spec_raw:copy(train_predicted)
-    pred_spec_raw:copy(train_raw_codes)
+    pred_spec_raw:copy(spectral_in_pred_space)
     local pred_to_spec = eval.ranking_accuracy({
       raw_codes = pred_spec_raw, ids = asym_all_ids, n_dims = spectral_dims,
       eval_ids = asym_ids, eval_offsets = asym_off,
       eval_neighbors = asym_nbr, eval_weights = asym_w,
     })
 
-    str.printf("  %-28s %8.4f\n", "Spectral->spectral:", spec_to_spec.score)
-    str.printf("  %-28s %8.4f\n", "Predicted->spectral:", pred_to_spec.score)
+    str.printf("  %-35s %8.4f\n", "Spectral(norm)->spectral(norm):", spec_to_spec.score)
+    str.printf("  %-35s %8.4f\n", "Predicted->spectral(norm):", pred_to_spec.score)
   end
 
   str.printf("\n  Spectral dims: %d\n", spectral_dims)
-  str.printf("  %-28s %8.4f\n", "Spectral raw (train ceil):", spectral_raw.score)
-  str.printf("  %-28s %8.4f\n", "Predicted train:", train_ranking.score)
-  str.printf("\n  Regression MAE (train): %.4f\n", train_reg.mean)
+  str.printf("  %-35s %8.4f\n", "Spectral raw (train ceil):", spectral_raw.score)
+  str.printf("  %-35s %8.4f\n", "Spectral normalized (train ceil):", spectral_norm_ranking.score)
+  str.printf("  %-35s %8.4f\n", "Predicted train:", train_ranking.score)
 
   str.printf("\n  Time: %.1fs\n", stopwatch())
 
