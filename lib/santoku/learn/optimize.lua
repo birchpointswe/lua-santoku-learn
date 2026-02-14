@@ -3,7 +3,6 @@ local spectral = require("santoku.learn.spectral")
 local evaluator = require("santoku.learn.evaluator")
 local csr = require("santoku.learn.csr")
 local gp = require("santoku.learn.gp")
-local normalizer = require("santoku.learn.normalizer")
 
 local cvec = require("santoku.cvec")
 local ivec = require("santoku.ivec")
@@ -40,10 +39,6 @@ end
 
 local function key_int (v)
   return v and tostring(num.floor(v + 0.5)) or "nil"
-end
-
-local function key_int8 (v)
-  return v and tostring(num.floor((v + 4) / 8) * 8) or "nil"
 end
 
 local function key_float2 (v)
@@ -135,6 +130,8 @@ M.build_sampler = function (spec, global_dev)
         if lin_span == 0 then return 0.5 end
         if is_log then
           return (num.log(x + shift) - log_smin) / log_span
+        elseif is_int then
+          return (x - minv + 0.5) / (maxv - minv + 1)
         else
           return (x - minv) / lin_span
         end
@@ -143,12 +140,16 @@ M.build_sampler = function (spec, global_dev)
         local x
         if is_log then
           x = num.exp(u * log_span + log_smin) - shift
+          if is_pow2 then x = round_to_pow2(x)
+          elseif round_to then x = num.floor(x / round_to + 0.5) * round_to
+          elseif is_int then x = num.floor(x + 0.5) end
+        elseif is_int then
+          x = num.floor(u * (maxv - minv + 1) + minv)
         else
           x = u * lin_span + minv
+          if is_pow2 then x = round_to_pow2(x)
+          elseif round_to then x = num.floor(x / round_to + 0.5) * round_to end
         end
-        if is_pow2 then x = round_to_pow2(x)
-        elseif round_to then x = num.floor(x / round_to + 0.5) * round_to
-        elseif is_int then x = num.floor(x + 0.5) end
         if x < minv then x = minv elseif x > maxv then x = maxv end
         return x
       end,
@@ -472,6 +473,12 @@ local function create_final_tm (args, params)
     opts.absorb_maximum = params.absorb_maximum
     opts.absorb_insert = params.absorb_insert
   end
+  if params.per_class_tolerances then
+    opts.per_class_tolerances = params.per_class_tolerances
+    opts.per_class_maximums = params.per_class_maximums
+    opts.per_class_spec_thresholds = params.per_class_spec_thresholds
+    opts.per_class_targets = params.per_class_targets
+  end
   return tm.create(opts)
 end
 
@@ -574,6 +581,18 @@ local function train_tm_batched (tmobj, args, params, iterations, batch_size, pa
   return last_score, last_metrics
 end
 
+local function compute_per_class_ivec (base, alpha, weights, n, apply_fn)
+  if not weights or alpha == 0 then return nil end
+  local w_min, w_max = weights:min(), weights:max()
+  local result = ivec.create(n)
+  for i = 0, n - 1 do
+    local w_norm = (w_max > w_min) and ((weights:get(i) - w_min) / (w_max - w_min)) or 0.5
+    local val = base * num.exp(alpha * (w_norm - 0.5))
+    result:set(i, apply_fn(val))
+  end
+  return result
+end
+
 local function select_ranking_segments (ranking, offsets, dim_ids)
   if not ranking or not offsets then return ranking, offsets end
   local n_dims = dim_ids:size()
@@ -612,7 +631,18 @@ local function optimize_tm (args)
     param_names[#param_names + 1] = "absorb_interval"
     param_names[#param_names + 1] = "absorb_threshold"
     param_names[#param_names + 1] = "absorb_maximum"
-    param_names[#param_names + 1] = "absorb_insert"
+    param_names[#param_names + 1] = "absorb_insert_offset"
+  end
+  if args.output_weights then
+    local alpha_def = { min = -3, max = 3, def = 0 }
+    if not args.alpha_specificity then args.alpha_specificity = alpha_def end
+    if not args.alpha_target then args.alpha_target = alpha_def end
+    if not args.alpha_tolerance then args.alpha_tolerance = alpha_def end
+    if not args.alpha_maximum then args.alpha_maximum = alpha_def end
+    param_names[#param_names + 1] = "alpha_specificity"
+    param_names[#param_names + 1] = "alpha_target"
+    param_names[#param_names + 1] = "alpha_tolerance"
+    param_names[#param_names + 1] = "alpha_maximum"
   end
 
   local input_bits = 2 * args.features
@@ -622,7 +652,7 @@ local function optimize_tm (args)
     local m = (args.state or 8) - 1
     args.absorb_maximum = cap_spec_max(args.absorb_maximum, args.features)
     args.absorb_threshold = cap_spec_max(args.absorb_threshold, 2 ^ m - 2)
-    args.absorb_insert = cap_spec_max(args.absorb_insert, 2 ^ m - 1)
+    args.absorb_insert_offset = cap_spec_max(args.absorb_insert_offset, 2 ^ m - 1)
   end
 
   local samplers = M.build_samplers(args, param_names, global_dev)
@@ -645,7 +675,18 @@ local function optimize_tm (args)
     end
     if n < args.outputs then
       search_outputs = n
-      search_dim_ids = ivec.create(args.outputs):fill_indices():shuffle():setn(search_outputs):asc()
+      search_dim_ids = ivec.create(search_outputs)
+      for i = 0, search_outputs - 1 do
+        search_dim_ids:set(i, num.floor(i * args.outputs / search_outputs))
+      end
+    end
+  end
+
+  local search_weights = args.output_weights
+  if search_dim_ids and args.output_weights then
+    search_weights = dvec.create(search_outputs)
+    for i = 0, search_outputs - 1 do
+      search_weights:set(i, args.output_weights:get(search_dim_ids:get(i)))
     end
   end
 
@@ -736,7 +777,7 @@ local function optimize_tm (args)
     })
   end
 
-  local function constrain_tm_params (params)
+  local function constrain_tm_params (params, weights, outputs)
     local input_bits = args.features and 2 * args.features or nil
     if input_bits then
       if params.clause_maximum and params.clause_maximum > input_bits then
@@ -770,25 +811,50 @@ local function optimize_tm (args)
         params.absorb_maximum = args.features
       end
     end
-    if params.absorb_threshold or params.absorb_insert then
+    if params.absorb_threshold or params.absorb_insert_offset then
       local m = (args.state or 8) - 1
       local max_excl = 2 ^ m - 1
       if params.absorb_threshold and params.absorb_threshold >= max_excl then
         params.absorb_threshold = max_excl - 1
       end
-      if params.absorb_insert and params.absorb_threshold then
-        if params.absorb_insert <= params.absorb_threshold then
-          params.absorb_insert = params.absorb_threshold + 1
-        end
-        if params.absorb_insert > max_excl then
-          params.absorb_insert = max_excl
+      if params.absorb_insert_offset then
+        params.absorb_insert = num.min(params.absorb_threshold + params.absorb_insert_offset, max_excl)
+      end
+    end
+    if weights then
+      local n = outputs or weights:size()
+      local features = args.features
+      local clamp_int = function (v) return num.max(1, num.floor(v + 0.5)) end
+      params.per_class_tolerances = compute_per_class_ivec(
+        params.clause_tolerance, params.alpha_tolerance or 0, weights, n, clamp_int)
+      params.per_class_maximums = compute_per_class_ivec(
+        params.clause_maximum, params.alpha_maximum or 0, weights, n, clamp_int)
+      params.per_class_spec_thresholds = compute_per_class_ivec(
+        params.specificity, params.alpha_specificity or 0, weights, n, function (v)
+          local s = num.max(1, v)
+          return num.floor((2.0 * features) / s)
+        end)
+      params.per_class_targets = compute_per_class_ivec(
+        params.target, params.alpha_target or 0, weights, n, clamp_int)
+      if params.per_class_tolerances and params.per_class_maximums then
+        for i = 0, n - 1 do
+          local tol = params.per_class_tolerances:get(i)
+          local mx = params.per_class_maximums:get(i)
+          if tol > mx then
+            params.per_class_tolerances:set(i, mx)
+            tol = mx
+          end
+          local tgt = params.per_class_targets and params.per_class_targets:get(i) or params.target
+          if tgt > 8 * tol then
+            if params.per_class_targets then params.per_class_targets:set(i, 8 * tol) end
+          end
         end
       end
     end
   end
 
   local function search_trial_fn (params, info)
-    constrain_tm_params(params)
+    constrain_tm_params(params, search_weights, search_outputs)
     search_tm:reconfigure(params)
     train_tm_simple(search_tm, search_data, params, iters_search)
     local score, metrics = metric_fn(search_tm, search_data)
@@ -815,16 +881,23 @@ local function optimize_tm (args)
     trial_fn = search_trial_fn,
     skip_final = true,
     preference_tolerance = args.preference_tolerance or 1e-6,
+    constrain = function (p) constrain_tm_params(p) end,
     size_fn = function(p) return { p.clauses or 0 } end,
     make_key = function (p)
       local k = str.format("%s|%s|%s|%s|%s",
-        key_int8(p.clauses),
+        key_int(p.clauses),
         key_int(p.clause_tolerance),
         key_int(p.clause_maximum),
         key_int(p.target),
         key_float2(p.specificity))
       if p.absorb_interval then
         k = k .. "|" .. key_int(p.absorb_interval) .. "|" .. key_int(p.absorb_threshold) .. "|" .. key_int(p.absorb_maximum) .. "|" .. key_int(p.absorb_insert)
+      end
+      if p.alpha_specificity then
+        k = k .. "|" .. key_float2(p.alpha_specificity)
+            .. "|" .. key_float2(p.alpha_target)
+            .. "|" .. key_float2(p.alpha_tolerance)
+            .. "|" .. key_float2(p.alpha_maximum)
       end
       return k
     end,
@@ -834,7 +907,7 @@ local function optimize_tm (args)
     search_tm:destroy()
   end
 
-  constrain_tm_params(best_params)
+  constrain_tm_params(best_params, args.output_weights, args.outputs)
   local final_tm = create_final_tm(args, best_params)
   local final_train_args = {
     codes = args.codes,
@@ -861,33 +934,7 @@ local function optimize_tm (args)
 end
 
 M.regressor = function (args)
-  local raw_targets = args.targets
-  local standardizer
-  if args.standardize and raw_targets then
-    standardizer = normalizer.create({
-      source = raw_targets,
-      n_samples_source = args.samples,
-      n_dims = args.outputs,
-    })
-    args.targets = standardizer:encode(raw_targets)
-  end
-  local final_tm, metrics, params = optimize_tm(args)
-  local retrieval_norm
-  if standardizer then
-    args.targets = raw_targets
-    local input = args.n_tokens
-      and { tokens = args.tokens, n_samples = args.samples }
-      or { problems = args.problems, n_samples = args.samples }
-    local predicted = final_tm:regress(input, args.samples, true)
-    retrieval_norm = normalizer.create({
-      source = raw_targets,
-      target = predicted,
-      n_samples_source = args.samples,
-      n_samples_target = args.samples,
-      n_dims = args.outputs,
-    })
-  end
-  return final_tm, metrics, params, retrieval_norm
+  return optimize_tm(args)
 end
 
 M.destroy_spectral = function (model)

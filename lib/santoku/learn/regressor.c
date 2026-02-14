@@ -80,6 +80,11 @@ typedef struct tk_learn_s {
   double *y_min;
   double *y_max;
 
+  unsigned int *clause_tolerances;
+  unsigned int *clause_maximums;
+  unsigned int *specificity_thresholds;
+  unsigned int *targets;
+
   bool sparse_mode;
   unsigned int n_tokens;
   unsigned int absorb_interval;
@@ -115,11 +120,12 @@ static inline uint8_t tk_learn_calculate (
   char *input,
   unsigned int *literalsp,
   unsigned int *votesp,
-  unsigned int chunk
+  unsigned int chunk,
+  unsigned int tolerance,
+  unsigned int empty_vote
 ) {
   uint8_t out = 0;
   const unsigned int input_chunks = tm->input_chunks;
-  const unsigned int tolerance = tm->clause_tolerance;
   const uint8_t tail_mask = tm->tail_mask;
   const uint8_t *input_bytes = (const uint8_t *)input;
   if (input_chunks > 1) {
@@ -135,7 +141,7 @@ static inline uint8_t tk_learn_calculate (
       unsigned int failed = (unsigned int)failed_64 - (unsigned int)__builtin_popcount(garbage_act & ~input_bytes[input_chunks - 1]);
       long int votes;
       if (literals == 0) {
-        votes = 1;
+        votes = empty_vote;
       } else {
         votes = (literals < tolerance ? (long int)literals : (long int)tolerance) - (long int)failed;
         if (votes < 0)
@@ -156,7 +162,7 @@ static inline uint8_t tk_learn_calculate (
       unsigned int failed = (unsigned int)__builtin_popcount(last_act & ~last_in);
       long int votes;
       if (literals == 0) {
-        votes = 1;
+        votes = empty_vote;
       } else {
         votes = (literals < tolerance ? (long int)literals : (long int)tolerance) - (long int)failed;
         if (votes < 0)
@@ -178,9 +184,10 @@ static inline void apply_feedback (
   char *input,
   unsigned int *literals,
   unsigned int *votes,
-  bool positive_feedback
+  bool positive_feedback,
+  unsigned int max_literals,
+  unsigned int specificity_thresh
 ) {
-  unsigned int max_literals = tm->clause_maximum;
   unsigned int input_chunks = tm->input_chunks;
   bool output = votes[clause_idx] > 0;
   unsigned int clause_id = chunk * TK_CVEC_BITS + clause_idx;
@@ -190,7 +197,7 @@ static inline void apply_feedback (
         tk_automata_inc(&tm->automata, clause_id, (uint8_t*)input, input_chunks);
       tk_automata_dec_not_excluded(&tm->automata, clause_id, (uint8_t*)input, input_chunks);
     } else {
-      unsigned int s = tm->specificity_threshold;
+      unsigned int s = specificity_thresh;
       unsigned int input_bits = tm->input_bits;
       for (unsigned int r = 0; r < s; r ++) {
         unsigned int random_input_bit = tk_fast_random() % input_bits;
@@ -279,6 +286,10 @@ static inline tk_learn_t *tk_learn_alloc (lua_State *L, bool has_state)
   tm->absorb_ranking_global = NULL;
   tm->absorb_ranking_global_n = 0;
   tm->absorb_cursor = NULL;
+  tm->clause_tolerances = NULL;
+  tm->clause_maximums = NULL;
+  tm->specificity_thresholds = NULL;
+  tm->targets = NULL;
   return tm;
 }
 
@@ -334,6 +345,16 @@ static inline void tk_learn_init (
     tm->y_min[c] = 0.0;
     tm->y_max[c] = 1.0;
   }
+  tm->clause_tolerances = (unsigned int *)tk_malloc(L, outputs * sizeof(unsigned int));
+  tm->clause_maximums = (unsigned int *)tk_malloc(L, outputs * sizeof(unsigned int));
+  tm->specificity_thresholds = (unsigned int *)tk_malloc(L, outputs * sizeof(unsigned int));
+  tm->targets = (unsigned int *)tk_malloc(L, outputs * sizeof(unsigned int));
+  for (unsigned int c = 0; c < outputs; c++) {
+    tm->clause_tolerances[c] = clause_tolerance;
+    tm->clause_maximums[c] = clause_maximum;
+    tm->specificity_thresholds[c] = tm->specificity_threshold;
+    tm->targets[c] = target;
+  }
   if (!(tm->state && tm->actions && tm->y_min && tm->y_max))
     luaL_error(L, "error in malloc during creation");
   tm->automata.n_clauses = tm->classes * tm->clauses;
@@ -358,6 +379,34 @@ static inline void tk_learn_create_impl (lua_State *L)
       tk_lua_fcheckunsigned(L, 2, "create", "target"),
       tk_lua_fcheckposdouble(L, 2, "create", "specificity"));
   tm->reusable = tk_lua_foptboolean(L, 2, "create", "reusable", false);
+  if (tk_lua_ftype(L, 2, "per_class_tolerances") != LUA_TNIL) {
+    lua_getfield(L, 2, "per_class_tolerances");
+    tk_ivec_t *v = tk_ivec_peek(L, -1, "per_class_tolerances");
+    for (unsigned int c = 0; c < tm->classes; c++)
+      tm->clause_tolerances[c] = (unsigned int)v->a[c];
+    lua_pop(L, 1);
+  }
+  if (tk_lua_ftype(L, 2, "per_class_maximums") != LUA_TNIL) {
+    lua_getfield(L, 2, "per_class_maximums");
+    tk_ivec_t *v = tk_ivec_peek(L, -1, "per_class_maximums");
+    for (unsigned int c = 0; c < tm->classes; c++)
+      tm->clause_maximums[c] = (unsigned int)v->a[c];
+    lua_pop(L, 1);
+  }
+  if (tk_lua_ftype(L, 2, "per_class_spec_thresholds") != LUA_TNIL) {
+    lua_getfield(L, 2, "per_class_spec_thresholds");
+    tk_ivec_t *v = tk_ivec_peek(L, -1, "per_class_spec_thresholds");
+    for (unsigned int c = 0; c < tm->classes; c++)
+      tm->specificity_thresholds[c] = (unsigned int)v->a[c];
+    lua_pop(L, 1);
+  }
+  if (tk_lua_ftype(L, 2, "per_class_targets") != LUA_TNIL) {
+    lua_getfield(L, 2, "per_class_targets");
+    tk_ivec_t *v = tk_ivec_peek(L, -1, "per_class_targets");
+    for (unsigned int c = 0; c < tm->classes; c++)
+      tm->targets[c] = (unsigned int)v->a[c];
+    lua_pop(L, 1);
+  }
   if (tk_lua_ftype(L, 2, "n_tokens") != LUA_TNIL) {
     tm->sparse_mode = true;
     tm->n_tokens = tk_lua_fcheckunsigned(L, 2, "create", "n_tokens");
@@ -399,6 +448,10 @@ static inline void _tk_learn_destroy (tk_learn_t *tm)
   free(tm->regression_out); tm->regression_out = NULL;
   free(tm->y_min); tm->y_min = NULL;
   free(tm->y_max); tm->y_max = NULL;
+  free(tm->clause_tolerances); tm->clause_tolerances = NULL;
+  free(tm->clause_maximums); tm->clause_maximums = NULL;
+  free(tm->specificity_thresholds); tm->specificity_thresholds = NULL;
+  free(tm->targets); tm->targets = NULL;
   tm->csc_offsets = NULL;
   tm->csc_indices = NULL;
   free(tm->mapping); tm->mapping = NULL;
@@ -719,7 +772,7 @@ static inline int tk_learn_predict_regressor (lua_State *L, tk_learn_t *tm) {
   const unsigned int input_chunks = tm->input_chunks;
   const unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
   const unsigned int input_stride = grouped ? classes * bytes_per_class : 0;
-  const unsigned int target = tm->target;
+  const unsigned int *per_class_targets = tm->targets;
   const double *y_min = tm->y_min;
   const double *y_max = tm->y_max;
   double *regression_out = tm->regression_out;
@@ -736,17 +789,18 @@ static inline int tk_learn_predict_regressor (lua_State *L, tk_learn_t *tm) {
       char *input = grouped
         ? base_ptr + s * input_stride + c * bytes_per_class
         : base_ptr + s * input_chunks;
-      uint8_t out = tk_learn_calculate(tm, input, literals, votes_buf, chunk);
+      uint8_t out = tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
       long int chunk_vote = 0;
       for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
         if (out & (1 << j))
           chunk_vote += votes_buf[j];
+      if (chunk_vote > (long int)tm->targets[c]) chunk_vote = (long int)tm->targets[c];
       if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
       votes_per_class[c] += chunk_vote;
     }
     for (unsigned int c = 0; c < classes; c++) {
       double y_range = y_max[c] - y_min[c];
-      regression_out[s * classes + c] = ((double)votes_per_class[c] / ((double)clause_chunks * target) + 0.5) * y_range + y_min[c];
+      regression_out[s * classes + c] = ((double)votes_per_class[c] / ((double)clause_chunks * per_class_targets[c]) + 0.5) * y_range + y_min[c];
     }
   }
   free(temp_dense);
@@ -811,7 +865,7 @@ static inline int tk_learn_classify (lua_State *L)
       char *input = grouped
         ? base_ptr + s * input_stride + c * bytes_per_class
         : base_ptr + s * input_chunks;
-      uint8_t out = tk_learn_calculate(tm, input, literals, votes_buf, chunk);
+      uint8_t out = tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
       long int chunk_vote = 0;
       for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
         if (out & (1 << j))
@@ -901,7 +955,7 @@ static inline int tk_learn_encode (lua_State *L)
       char *input = grouped
         ? base_ptr + s * input_stride + c * bytes_per_class
         : base_ptr + s * input_chunks;
-      uint8_t out = tk_learn_calculate(tm, input, literals, votes_buf, chunk);
+      uint8_t out = tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
       long int chunk_vote = 0;
       for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
         if (out & (1 << j))
@@ -939,6 +993,11 @@ typedef enum {
 } tm_target_mode_t;
 
 #define TM_REGRESSION_INNER_LOOP(GET_TARGET, SKIP_LOGIC) \
+  { \
+  unsigned int chunk_tolerance = tm->clause_tolerances[chunk_class]; \
+  unsigned int chunk_maximum = tm->clause_maximums[chunk_class]; \
+  unsigned int chunk_spec_thresh = tm->specificity_thresholds[chunk_class]; \
+  long int vote_target = (long int)tm->targets[chunk_class]; \
   for (unsigned int i = 0; i < n; i++) { \
     unsigned int sample = shuffle[i]; \
     SKIP_LOGIC \
@@ -946,28 +1005,28 @@ typedef enum {
       ? ps->a + sample * input_stride + chunk_class * bytes_per_class \
       : ps->a + sample * input_chunks; \
     double y_target = GET_TARGET; \
-    uint8_t out = tk_learn_calculate(tm, input, literals, votes, chunk); \
+    uint8_t out = tk_learn_calculate(tm, input, literals, votes, chunk, chunk_tolerance, 1); \
     long int chunk_vote = 0; \
     for (unsigned int j = 0; j < TK_CVEC_BITS; j++) \
       if (out & (1 << j)) \
         chunk_vote += votes[j]; \
-    /* if (chunk_vote > vote_target) chunk_vote = vote_target; */ \
     bool chunk_neg = (chunk % clause_chunks) >= clause_chunks / 2; \
     double class_y_min = y_min[chunk_class]; \
     double class_y_range = y_max[chunk_class] - class_y_min; \
     double target_ratio = (y_target - class_y_min) / class_y_range; \
     if (chunk_neg) target_ratio = 1.0 - target_ratio; \
-    long int ideal_chunk_vote = (long int)(target_ratio * (double)vote_target); \
-    if (ideal_chunk_vote < 0) ideal_chunk_vote = 0; \
-    if (ideal_chunk_vote > vote_target) ideal_chunk_vote = vote_target; \
-    bool want_more = (chunk_vote < ideal_chunk_vote); \
-    double error_ratio = (double)(chunk_vote - ideal_chunk_vote) / (double)vote_target; \
+    double ideal_chunk_vote = target_ratio * (double)vote_target; \
+    if (ideal_chunk_vote < 0.0) ideal_chunk_vote = 0.0; \
+    if (ideal_chunk_vote > (double)vote_target) ideal_chunk_vote = (double)vote_target; \
+    bool want_more = ((double)chunk_vote < ideal_chunk_vote); \
+    double error_ratio = ((double)chunk_vote - ideal_chunk_vote) / (double)vote_target; \
     double probability = fabs(error_ratio); \
     for (unsigned int j = 0; j < TK_CVEC_BITS; j++) { \
       if ((double)tk_fast_random() / 4294967295.0 < probability) { \
-        apply_feedback(tm, j, chunk, input, literals, votes, want_more); \
+        apply_feedback(tm, j, chunk, input, literals, votes, want_more, chunk_maximum, chunk_spec_thresh); \
       } \
     } \
+  } \
   }
 
 static inline int tk_learn_train_regressor (lua_State *L, tk_learn_t *tm)
@@ -1139,7 +1198,6 @@ static inline int tk_learn_train_regressor (lua_State *L, tk_learn_t *tm)
   bool grouped = sparse_train ? true : tk_lua_foptboolean(L, 2, "train", "grouped", false);
   unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
   unsigned int input_stride = grouped ? classes * bytes_per_class : 0;
-  long int vote_target = (long int)tm->target;
 
   uint32_t *skip_thresholds = NULL;
   if (target_mode == TM_TARGET_IVEC) {
@@ -1294,7 +1352,7 @@ static inline int tk_learn_train (lua_State *L)
 static inline void _tk_learn_persist (lua_State *L, tk_learn_t *tm, FILE *fh)
 {
   tk_lua_fwrite(L, "TKtm", 1, 4, fh);
-  uint8_t version = 1;
+  uint8_t version = 2;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   uint32_t u32;
   u32 = (uint32_t)tm->classes; tk_lua_fwrite(L, &u32, sizeof(uint32_t), 1, fh);
@@ -1315,6 +1373,8 @@ static inline void _tk_learn_persist (lua_State *L, tk_learn_t *tm, FILE *fh)
   tk_lua_fwrite(L, tm->actions, 1, tm->action_chunks, fh);
   tk_lua_fwrite(L, tm->y_min, sizeof(double), tm->classes, fh);
   tk_lua_fwrite(L, tm->y_max, sizeof(double), tm->classes, fh);
+  tk_lua_fwrite(L, tm->clause_tolerances, sizeof(unsigned int), tm->classes, fh);
+  tk_lua_fwrite(L, tm->targets, sizeof(unsigned int), tm->classes, fh);
 }
 
 static inline int tk_learn_persist (lua_State *L)
@@ -1425,6 +1485,40 @@ static inline int tk_learn_reconfigure (lua_State *L)
   tm->specificity = new_specificity;
   tm->target = new_target;
   tm->specificity_threshold = (unsigned int)((2.0 * (double)tm->features) / new_specificity);
+  for (unsigned int c = 0; c < tm->classes; c++) {
+    tm->clause_tolerances[c] = new_tolerance;
+    tm->clause_maximums[c] = new_maximum;
+    tm->specificity_thresholds[c] = tm->specificity_threshold;
+    tm->targets[c] = new_target;
+  }
+  if (tk_lua_ftype(L, 2, "per_class_tolerances") != LUA_TNIL) {
+    lua_getfield(L, 2, "per_class_tolerances");
+    tk_ivec_t *v = tk_ivec_peek(L, -1, "per_class_tolerances");
+    for (unsigned int c = 0; c < tm->classes; c++)
+      tm->clause_tolerances[c] = (unsigned int)v->a[c];
+    lua_pop(L, 1);
+  }
+  if (tk_lua_ftype(L, 2, "per_class_maximums") != LUA_TNIL) {
+    lua_getfield(L, 2, "per_class_maximums");
+    tk_ivec_t *v = tk_ivec_peek(L, -1, "per_class_maximums");
+    for (unsigned int c = 0; c < tm->classes; c++)
+      tm->clause_maximums[c] = (unsigned int)v->a[c];
+    lua_pop(L, 1);
+  }
+  if (tk_lua_ftype(L, 2, "per_class_spec_thresholds") != LUA_TNIL) {
+    lua_getfield(L, 2, "per_class_spec_thresholds");
+    tk_ivec_t *v = tk_ivec_peek(L, -1, "per_class_spec_thresholds");
+    for (unsigned int c = 0; c < tm->classes; c++)
+      tm->specificity_thresholds[c] = (unsigned int)v->a[c];
+    lua_pop(L, 1);
+  }
+  if (tk_lua_ftype(L, 2, "per_class_targets") != LUA_TNIL) {
+    lua_getfield(L, 2, "per_class_targets");
+    tk_ivec_t *v = tk_ivec_peek(L, -1, "per_class_targets");
+    for (unsigned int c = 0; c < tm->classes; c++)
+      tm->targets[c] = (unsigned int)v->a[c];
+    lua_pop(L, 1);
+  }
   tm->automata.n_clauses = tm->classes * tm->clauses;
   tm->automata.counts = tm->state;
   tm->automata.actions = tm->actions;
@@ -1492,6 +1586,13 @@ static inline int tk_learn_restrict (lua_State *L)
     tk_learn_restrict_buffer(tm->state, bytes_per_class_state, tm->classes, new_classes, keep->a);
     tm->state_chunks = new_classes * bytes_per_class_state;
   }
+  for (unsigned int i = 0; i < new_classes; i++) {
+    unsigned int src = (unsigned int)keep->a[i];
+    tm->clause_tolerances[i] = tm->clause_tolerances[src];
+    tm->clause_maximums[i] = tm->clause_maximums[src];
+    tm->specificity_thresholds[i] = tm->specificity_thresholds[src];
+    tm->targets[i] = tm->targets[src];
+  }
   tm->classes = new_classes;
   tm->class_chunks = TK_CVEC_BITS_BYTES(tm->classes);
   tm->automata.n_clauses = tm->classes * tm->clauses;
@@ -1523,7 +1624,7 @@ static inline void _tk_learn_load (lua_State *L, tk_learn_t *tm, FILE *fh)
     luaL_error(L, "invalid TM file (bad magic)");
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 1)
+  if (version != 1 && version != 2)
     luaL_error(L, "unsupported TM version %d", (int)version);
   uint32_t u32;
   tk_lua_fread(L, &u32, sizeof(uint32_t), 1, fh); tm->classes = u32;
@@ -1549,6 +1650,26 @@ static inline void _tk_learn_load (lua_State *L, tk_learn_t *tm, FILE *fh)
   tm->y_max = (double *)tk_malloc(L, tm->classes * sizeof(double));
   tk_lua_fread(L, tm->y_min, sizeof(double), tm->classes, fh);
   tk_lua_fread(L, tm->y_max, sizeof(double), tm->classes, fh);
+  tm->specificity_threshold = (unsigned int)((2.0 * (double)tm->features) / tm->specificity);
+  tm->clause_tolerances = (unsigned int *)tk_malloc(L, tm->classes * sizeof(unsigned int));
+  tm->clause_maximums = (unsigned int *)tk_malloc(L, tm->classes * sizeof(unsigned int));
+  tm->specificity_thresholds = (unsigned int *)tk_malloc(L, tm->classes * sizeof(unsigned int));
+  tm->targets = (unsigned int *)tk_malloc(L, tm->classes * sizeof(unsigned int));
+  if (version >= 2) {
+    tk_lua_fread(L, tm->clause_tolerances, sizeof(unsigned int), tm->classes, fh);
+    tk_lua_fread(L, tm->targets, sizeof(unsigned int), tm->classes, fh);
+    for (unsigned int c = 0; c < tm->classes; c++) {
+      tm->clause_maximums[c] = tm->clause_maximum;
+      tm->specificity_thresholds[c] = tm->specificity_threshold;
+    }
+  } else {
+    for (unsigned int c = 0; c < tm->classes; c++) {
+      tm->clause_tolerances[c] = tm->clause_tolerance;
+      tm->clause_maximums[c] = tm->clause_maximum;
+      tm->specificity_thresholds[c] = tm->specificity_threshold;
+      tm->targets[c] = tm->target;
+    }
+  }
   tm->automata.n_clauses = tm->classes * tm->clauses;
   tm->automata.n_chunks = tm->input_chunks;
   tm->automata.state_bits = tm->state_bits;

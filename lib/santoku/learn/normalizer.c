@@ -62,9 +62,10 @@ static int tk_normalizer_encode_lua (lua_State *L) {
   const double *dm = n->dst_mean->a;
   const double *ds = n->dst_std->a;
   for (uint64_t i = 0; i < ns; i++) {
+    double *row = out->a + i * nd;
     for (uint64_t d = 0; d < nd; d++) {
       uint64_t idx = i * nd + d;
-      out->a[idx] = (input->a[idx] - sm[d]) / ss[d] * ds[d] + dm[d];
+      row[d] = (input->a[idx] - sm[d]) / ss[d] * ds[d] + dm[d];
     }
   }
   return 1;
