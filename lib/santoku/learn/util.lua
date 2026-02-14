@@ -270,9 +270,18 @@ function M.make_classifier_log (stopwatch)
     if params.absorb_interval then
       absorb = str.format(" AI=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
     end
-    str.printf("[CLASSIFY %s E%d] C=%d L=%d/%d T=%d S=%.0f%s F1=%.4f%s%s\n",
-      phase, ev.epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
-      params.target, params.specificity, absorb, metrics.f1, best, timing)
+    local lt, lm, tt, ss
+    if params.alpha_specificity then
+      lt = str.format("(%+.1f)", params.alpha_tolerance)
+      lm = str.format("(%+.1f)", params.alpha_maximum)
+      tt = str.format("(%+.1f)", params.alpha_target)
+      ss = str.format("(%+.1f)", params.alpha_specificity)
+    else
+      lt, lm, tt, ss = "", "", "", ""
+    end
+    str.printf("[CLASSIFY %s E%d] C=%d L=%.2f%s/%d%s T=%.2f%s S=%.0f%s%s F1=%.4f%s%s\n",
+      phase, ev.epoch, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum, lm,
+      params.target_fraction, tt, params.specificity, ss, absorb, metrics.f1, best, timing)
   end
 end
 
@@ -298,9 +307,18 @@ function M.make_regressor_log (stopwatch)
     if params.absorb_interval then
       absorb = str.format(" AI=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
     end
-    str.printf("[REGRESS %s E%d] C=%d L=%d/%d T=%d S=%.0f%s MAE=%.4f%s%s\n",
-      phase, ev.epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
-      params.target, params.specificity, absorb, mae, best, timing)
+    local lt, lm, tt, ss
+    if params.alpha_specificity then
+      lt = str.format("(%+.1f)", params.alpha_tolerance)
+      lm = str.format("(%+.1f)", params.alpha_maximum)
+      tt = str.format("(%+.1f)", params.alpha_target)
+      ss = str.format("(%+.1f)", params.alpha_specificity)
+    else
+      lt, lm, tt, ss = "", "", "", ""
+    end
+    str.printf("[REGRESS %s E%d] C=%d L=%.2f%s/%d%s T=%.2f%s S=%.0f%s%s MAE=%.4f%s%s\n",
+      phase, ev.epoch, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum, lm,
+      params.target_fraction, tt, params.specificity, ss, absorb, mae, best, timing)
   end
 end
 
@@ -326,9 +344,18 @@ function M.make_regressor_acc_log (stopwatch)
     if params.absorb_interval then
       absorb = str.format(" AI=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
     end
-    str.printf("[REGRESS %s E%d] C=%d L=%d/%d T=%d S=%.0f%s ACC=%.1f%%%s%s\n",
-      phase, ev.epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
-      params.target, params.specificity, absorb, acc, best, timing)
+    local lt, lm, tt, ss
+    if params.alpha_specificity then
+      lt = str.format("(%+.1f)", params.alpha_tolerance)
+      lm = str.format("(%+.1f)", params.alpha_maximum)
+      tt = str.format("(%+.1f)", params.alpha_target)
+      ss = str.format("(%+.1f)", params.alpha_specificity)
+    else
+      lt, lm, tt, ss = "", "", "", ""
+    end
+    str.printf("[REGRESS %s E%d] C=%d L=%.2f%s/%d%s T=%.2f%s S=%.0f%s%s ACC=%.1f%%%s%s\n",
+      phase, ev.epoch, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum, lm,
+      params.target_fraction, tt, params.specificity, ss, absorb, acc, best, timing)
   end
 end
 
@@ -349,9 +376,18 @@ function M.make_ranking_log (stopwatch)
     if params.absorb_interval then
       absorb = str.format(" AI=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
     end
-    str.printf("[RANKING %s E%d] C=%d L=%d/%d T=%d S=%.0f%s score=%.4f%s%s\n",
-      phase, ev.epoch, params.clauses, params.clause_tolerance, params.clause_maximum,
-      params.target, params.specificity, absorb, score, best, timing)
+    local lt, lm, tt, ss
+    if params.alpha_specificity then
+      lt = str.format("(%+.1f)", params.alpha_tolerance)
+      lm = str.format("(%+.1f)", params.alpha_maximum)
+      tt = str.format("(%+.1f)", params.alpha_target)
+      ss = str.format("(%+.1f)", params.alpha_specificity)
+    else
+      lt, lm, tt, ss = "", "", "", ""
+    end
+    str.printf("[RANKING %s E%d] C=%d L=%.2f%s/%d%s T=%.2f%s S=%.0f%s%s score=%.4f%s%s\n",
+      phase, ev.epoch, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum, lm,
+      params.target_fraction, tt, params.specificity, ss, absorb, score, best, timing)
   end
 end
 

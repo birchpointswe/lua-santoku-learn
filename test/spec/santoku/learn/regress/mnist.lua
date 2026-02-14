@@ -1,5 +1,6 @@
 local arr = require("santoku.array")
 local ds = require("santoku.learn.dataset")
+local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
 local fs = require("santoku.fs")
 local ivec = require("santoku.ivec")
@@ -19,7 +20,7 @@ local cfg = {
   },
   tm = {
     classes = 10,
-    clauses = 2,
+    clauses = { def = 2, min = 1, max = 4, int = true },
     clause_maximum = { def = 8, min = 8, max = 1024, int = true },
     clause_tolerance_fraction = { def = 0.5, min = 0.01, max = 1.0 },
     target_fraction = { def = 0.25, min = 0.01, max = 2.0 },
@@ -60,6 +61,12 @@ test("mnist classifier", function ()
   dataset.problems:bits_select(nil, test_set.ids, cfg.data.features, test_set.tokens)
   test_set.problems = test_set.tokens:bits_to_cvec(test_set.n, cfg.data.features, true)
 
+  local output_weights = dvec.create(cfg.tm.classes)
+  for i = 0, train.n - 1 do
+    local c = train.solutions:get(i)
+    output_weights:set(c, output_weights:get(c) + 1)
+  end
+
   print("\nTraining")
   local stopwatch = utc.stopwatch()
   local predicted_buf = ivec.create()
@@ -71,6 +78,8 @@ test("mnist classifier", function ()
     samples = train.n,
     problems = train.problems,
     solutions = train.solutions,
+
+    output_weights = output_weights,
 
     clauses = cfg.tm.clauses,
     clause_maximum = cfg.tm.clause_maximum,
