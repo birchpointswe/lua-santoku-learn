@@ -34,6 +34,7 @@ SOFTWARE.
 #include <santoku/cvec.h>
 #include <santoku/dvec.h>
 #include <santoku/ivec.h>
+#include <santoku/pvec.h>
 #include <santoku/rvec.h>
 #include <omp.h>
 #include <math.h>
@@ -1100,6 +1101,7 @@ static inline int tk_learn_train_regressor (lua_State *L, tk_learn_t *tm)
   }
 
   unsigned int max_iter = tk_lua_fcheckunsigned(L, 2, "train", "iterations");
+
   int i_each = -1;
   if (tk_lua_ftype(L, 2, "each") != LUA_TNIL) {
     lua_getfield(L, 2, "each");
@@ -1186,9 +1188,10 @@ static inline int tk_learn_train_regressor (lua_State *L, tk_learn_t *tm)
 
   bool break_flag = false;
   int max_threads = omp_get_max_threads();
+  unsigned int shuffle_n = n;
   unsigned int **shuffles = (unsigned int **)tk_malloc(L, (size_t)max_threads * sizeof(unsigned int *));
   for (int t = 0; t < max_threads; t++)
-    shuffles[t] = (unsigned int *)tk_malloc(L, n * sizeof(unsigned int));
+    shuffles[t] = (unsigned int *)tk_malloc(L, shuffle_n * sizeof(unsigned int));
 
   if (!tm->trained) {
     #pragma omp parallel
@@ -1215,7 +1218,7 @@ static inline int tk_learn_train_regressor (lua_State *L, tk_learn_t *tm)
     unsigned int votes[TK_CVEC_BITS];
     for (unsigned int iter = 0; iter < max_iter; iter++) {
       if (break_flag) break;
-      tk_learn_init_shuffle(shuffle, n);
+      tk_learn_init_shuffle(shuffle, shuffle_n);
       #pragma omp for schedule(guided)
       for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
         unsigned int chunk_class = chunk / clause_chunks;

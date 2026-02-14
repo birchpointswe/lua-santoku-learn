@@ -3,6 +3,7 @@ local spectral = require("santoku.learn.spectral")
 local evaluator = require("santoku.learn.evaluator")
 local csr = require("santoku.learn.csr")
 local gp = require("santoku.learn.gp")
+local normalizer = require("santoku.learn.normalizer")
 
 local cvec = require("santoku.cvec")
 local ivec = require("santoku.ivec")
@@ -860,7 +861,33 @@ local function optimize_tm (args)
 end
 
 M.regressor = function (args)
-  return optimize_tm(args)
+  local raw_targets = args.targets
+  local standardizer
+  if args.standardize and raw_targets then
+    standardizer = normalizer.create({
+      source = raw_targets,
+      n_samples_source = args.samples,
+      n_dims = args.outputs,
+    })
+    args.targets = standardizer:encode(raw_targets)
+  end
+  local final_tm, metrics, params = optimize_tm(args)
+  local retrieval_norm
+  if standardizer then
+    args.targets = raw_targets
+    local input = args.n_tokens
+      and { tokens = args.tokens, n_samples = args.samples }
+      or { problems = args.problems, n_samples = args.samples }
+    local predicted = final_tm:regress(input, args.samples, true)
+    retrieval_norm = normalizer.create({
+      source = raw_targets,
+      target = predicted,
+      n_samples_source = args.samples,
+      n_samples_target = args.samples,
+      n_dims = args.outputs,
+    })
+  end
+  return final_tm, metrics, params, retrieval_norm
 end
 
 M.destroy_spectral = function (model)
@@ -923,14 +950,11 @@ M.build_spectral_nystrom = function (args)
     spectral.encode({
       inv = index,
       landmarks_inv = landmarks_index ~= index and landmarks_index or nil,
-      pls_inv = args.pls_index,
       n_landmarks = args.n_landmarks or 0,
       n_dims = args.n_dims or args.n_landmarks or 0,
       decay = decay,
       bandwidth = bandwidth,
       trace_tol = args.trace_tol,
-      pls_dims = args.pls_dims,
-      pls_variance = args.pls_variance,
     })
 
   local effective_dims = encoder and encoder:dims() or 0
@@ -989,9 +1013,6 @@ M.spectral = function (args)
     decay = decay,
     bandwidth = bandwidth,
     trace_tol = args.trace_tol,
-    pls_dims = args.pls_dims,
-    pls_variance = args.pls_variance,
-    pls_index = args.pls_index,
     each = each_cb,
     train_tokens = args.train_tokens,
     train_ids = args.train_ids,
