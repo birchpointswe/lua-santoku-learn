@@ -4,7 +4,6 @@ local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
 local inv = require("santoku.learn.inv")
 local ivec = require("santoku.ivec")
-local normalizer = require("santoku.learn.normalizer")
 local optimize = require("santoku.learn.optimize")
 local str = require("santoku.string")
 local test = require("santoku.test")
@@ -22,11 +21,11 @@ local cfg = {
     max_len = 20,
     min_len = 1,
     max_run = 2,
-    ngrams = 2,
-    cgrams_min = 3,
-    cgrams_max = 5,
-    cgrams_cross = true,
-    skips = 1,
+    ngrams = 1,
+    cgrams_min = 0,
+    cgrams_max = 0,
+    cgrams_cross = false,
+    skips = 0,
   },
   feature_selection = {
     n_bns = 8192,
@@ -36,8 +35,8 @@ local cfg = {
     decay = 2,
   },
   nystrom = {
-    n_landmarks = 4096,
-    n_dims = 256,
+    n_landmarks = 1024, -- full: 4096
+    n_dims = 32,
     bandwidth = -1,
   },
   eval = {
@@ -45,23 +44,26 @@ local cfg = {
     random_pairs = 16,
   },
   regressor = {
-    features = 2048,
+    features = { def = 4096, min = 512, max = 8192, pow2 = true },
     absorb_interval = 1,
-    absorb_threshold = { def = 0, min = 0, max = 256, int = true },
-    absorb_maximum = { def = 256, min = 1, max = 256, int = true },
-    absorb_insert_offset = { def = 1, min = 1, max = 256, int = true },
-    clauses = { def = 1, min = 1, max = 4, int = true },
-    clause_maximum = { def = 16, min = 8, max = 256, int = true },
-    clause_tolerance_fraction = { def = 0.5, min = 0.01, max = 1.0 },
-    target_fraction = { def = 0.25, min = 0.01, max = 2.0 },
-    specificity = { def = 800, min = 2, max = 2000 },
-    search_trials = 200,
+    absorb_threshold = { def = 58, min = 0, max = 256, int = true },
+    absorb_maximum = { def = 120, min = 1, max = 256, int = true },
+    absorb_insert_offset = { def = 17, min = 1, max = 256, int = true },
+    clauses = { def = 5, min = 1, max = 32, int = true },
+    clause_maximum = { def = 102, min = 8, max = 512, int = true },
+    clause_tolerance_fraction = { def = 0.76, min = 0.01, max = 1.0 },
+    target_fraction = { def = 0.32, min = 0.01, max = 2.0 },
+    specificity = { def = 512, min = 2, max = 2000 },
+    alpha_tolerance = { def = -0.3, min = -3, max = 3 },
+    alpha_maximum = { def = 0.7, min = -3, max = 3 },
+    alpha_target = { def = 1.2, min = -3, max = 3 },
+    alpha_specificity = { def = 2.1, min = -3, max = 3 },
+    search_trials = 0, -- full: 100
     search_iterations = 20,
-    search_subsample_samples = 0.2,
-    search_subsample_targets = 8,
+    search_subsample_targets = 32,
     final_patience = 2,
-    final_batch = 40,
-    final_iterations = 200,
+    final_batch = 20,
+    final_iterations = 300,
   },
 }
 
@@ -86,7 +88,7 @@ test("eurlex-embedding", function ()
   local n_classes = train.n_labels
   print("\nBNS feature selection")
   train.solutions:add_scaled(n_classes)
-  local bns_ids, bns_scores = train.tokens:bits_top_bns(
+  local bns_ids, _ = train.tokens:bits_top_bns(
     train.solutions, train.n, n_tokens, n_classes,
     cfg.feature_selection.n_bns, nil, "max")
   train.solutions:add_scaled(-n_classes)
@@ -138,8 +140,6 @@ test("eurlex-embedding", function ()
   local train_raw_codes = dvec.create():mtx_extend(
     all_raw_codes, train.ids, embedded_ids, 0, spectral_dims, true)
 
-  local train_bns_tokens = ivec.create():copy(train.tokens)
-
   print("\nFeature selection for regressor (F-score)")
   local n_selected = cfg.feature_selection.n_selected
   local union_ids, _, class_offsets, class_feat_ids = train.tokens:bits_top_reg_f(
@@ -171,6 +171,10 @@ test("eurlex-embedding", function ()
     clause_tolerance_fraction = cfg.regressor.clause_tolerance_fraction,
     target_fraction = cfg.regressor.target_fraction,
     specificity = cfg.regressor.specificity,
+    alpha_tolerance = cfg.regressor.alpha_tolerance,
+    alpha_maximum = cfg.regressor.alpha_maximum,
+    alpha_target = cfg.regressor.alpha_target,
+    alpha_specificity = cfg.regressor.alpha_specificity,
     output_weights = model.eigenvalues,
     tokens = train.tokens,
     csc_offsets = csc_offsets,
@@ -199,38 +203,11 @@ test("eurlex-embedding", function ()
   print("FINAL EVALUATION")
   print(string.rep("=", 60))
 
-  print("\nBuilding train text-only evaluation index")
-  local tr_ids = ivec.create(train.n):fill_indices()
-  local tr_idx = inv.create({ features = bns_scores })
-  tr_idx:add(train_bns_tokens, tr_ids)
-  local tr_uids, tr_hoods = tr_idx:neighborhoods(cfg.eval.knn, 0, -1)
-  local tr_off, tr_nbr, tr_w = tr_hoods:to_csr(tr_uids)
-  local rp_off, rp_nbr, rp_w = csr.random_pairs(tr_uids, cfg.eval.random_pairs)
-  csr.weight_from_index(tr_uids, rp_off, rp_nbr, rp_w, tr_idx, 0, -1)
-  csr.merge(tr_off, tr_nbr, tr_w, rp_off, rp_nbr, rp_w)
-  csr.symmetrize(tr_off, tr_nbr, tr_w, tr_uids:size())
-  str.printf("  Train: %d nodes, %d edges\n", tr_uids:size(), tr_nbr:size())
-
   print("\nPredicting embeddings (train)")
-  local train_predicted_raw = tm:regress(
+  local train_predicted = tm:regress(
     { tokens = train.tokens, n_samples = train.n }, train.n, true)
-  local retrieval_norm = normalizer.create({
-    source = train_predicted_raw,
-    target = train_raw_codes,
-    n_samples_source = train.n,
-    n_samples_target = train.n,
-    n_dims = spectral_dims,
-  })
-  local train_predicted = retrieval_norm:encode(train_predicted_raw)
 
   local train_ids = ivec.create(train.n):fill_indices()
-
-  local spectral_vs_text = eval.ranking_accuracy({
-    raw_codes = train_raw_codes, ids = train_ids,
-    n_dims = spectral_dims,
-    eval_ids = tr_uids, eval_offsets = tr_off,
-    eval_neighbors = tr_nbr, eval_weights = tr_w,
-  })
 
   local spectral_vs_labels = eval.ranking_accuracy({
     raw_codes = train_raw_codes, ids = train_ids,
@@ -239,33 +216,56 @@ test("eurlex-embedding", function ()
     eval_neighbors = eval_nbr, eval_weights = eval_w,
   })
 
-  local pred_raw_vs_labels = eval.ranking_accuracy({
-    raw_codes = train_predicted_raw, ids = train_ids,
-    n_dims = spectral_dims,
-    eval_ids = eval_uids, eval_offsets = eval_off,
-    eval_neighbors = eval_nbr, eval_weights = eval_w,
-  })
-
-  local pred_norm_vs_labels = eval.ranking_accuracy({
+  local pred_vs_labels = eval.ranking_accuracy({
     raw_codes = train_predicted, ids = train_ids,
     n_dims = spectral_dims,
     eval_ids = eval_uids, eval_offsets = eval_off,
     eval_neighbors = eval_nbr, eval_weights = eval_w,
   })
 
-  local pred_norm_vs_text = eval.ranking_accuracy({
-    raw_codes = train_predicted, ids = train_ids,
+  local n_half = math.floor(train.n / 2)
+  local shuffled = ivec.create(train.n):fill_indices():shuffle()
+  local spec_half = ivec.create():copy(shuffled, 0, n_half, 0)
+  local pred_half = ivec.create():copy(shuffled, n_half, train.n, 0)
+  local spec_rows = dvec.create():copy(train_raw_codes):mtx_select(nil, spec_half, spectral_dims)
+  local pred_rows = dvec.create():copy(train_predicted):mtx_select(nil, pred_half, spectral_dims)
+  local mixed_codes = dvec.create():copy(spec_rows):copy(pred_rows)
+  local mixed_ids = ivec.create():copy(spec_half):copy(pred_half)
+
+  local mixed_vs_labels = eval.ranking_accuracy({
+    raw_codes = mixed_codes, ids = mixed_ids,
     n_dims = spectral_dims,
-    eval_ids = tr_uids, eval_offsets = tr_off,
-    eval_neighbors = tr_nbr, eval_weights = tr_w,
+    eval_ids = eval_uids, eval_offsets = eval_off,
+    eval_neighbors = eval_nbr, eval_weights = eval_w,
   })
 
   str.printf("\n  Spectral dims: %d\n", spectral_dims)
-  str.printf("  %-35s %8.4f\n", "Spectral vs labels:", spectral_vs_labels.score)
-  str.printf("  %-35s %8.4f\n", "Spectral vs text:", spectral_vs_text.score)
-  str.printf("  %-35s %8.4f\n", "Predicted (raw) vs labels:", pred_raw_vs_labels.score)
-  str.printf("  %-35s %8.4f\n", "Predicted (norm) vs labels:", pred_norm_vs_labels.score)
-  str.printf("  %-35s %8.4f\n", "Predicted (norm) vs text:", pred_norm_vs_text.score)
+  str.printf("  %-35s %8.4f\n", "Spectral vs labels (ceiling):", spectral_vs_labels.score)
+  str.printf("  %-35s %8.4f\n", "Predicted vs labels:", pred_vs_labels.score)
+  str.printf("  %-35s %8.4f\n", "Mixed 50/50 vs labels:", mixed_vs_labels.score)
+
+  print("\nPer-dimension regression analysis")
+  local pd = eval.regression_per_dim(train_predicted, train_raw_codes, train.n, spectral_dims)
+  local ev = model.eigenvalues
+  str.printf("  %-10s %10s %10s %10s %12s\n", "Dims", "MAE", "Pearson r", "Var ratio", "Eigenvalue")
+  local bands = { { 0, math.min(7, spectral_dims - 1) } }
+  if spectral_dims > 8 then bands[#bands + 1] = { 8, math.min(31, spectral_dims - 1) } end
+  if spectral_dims > 32 then bands[#bands + 1] = { 32, math.min(63, spectral_dims - 1) } end
+  if spectral_dims > 64 then bands[#bands + 1] = { 64, math.min(127, spectral_dims - 1) } end
+  if spectral_dims > 128 then bands[#bands + 1] = { 128, math.min(255, spectral_dims - 1) } end
+  for _, band in ipairs(bands) do
+    local lo, hi = band[1], band[2]
+    local cnt = hi - lo + 1
+    local s_mae, s_corr, s_vr, s_ev = 0, 0, 0, 0
+    for d = lo, hi do
+      s_mae = s_mae + pd.mae:get(d)
+      s_corr = s_corr + pd.corr:get(d)
+      s_vr = s_vr + pd.var_ratio:get(d)
+      if d < ev:size() then s_ev = s_ev + ev:get(d) end
+    end
+    str.printf("  [%3d-%3d] %10.6f %10.4f %10.4f %12.6f\n",
+      lo, hi, s_mae / cnt, s_corr / cnt, s_vr / cnt, s_ev / cnt)
+  end
 
   str.printf("\n  Time: %.1fs\n", stopwatch())
 

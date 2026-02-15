@@ -7,7 +7,7 @@ local M = {}
 function M.spot_check_codes (codes, n_samples, n_dims, label)
   local samples_to_show = math.min(10, n_samples)
   local bits_to_show = math.min(48, n_dims)
-  str.printf("  [%s] %d samples × %d dims\n", label, n_samples, n_dims)
+  str.printf("[%s] %d samples × %d dims\n", label, n_samples, n_dims)
   for i = 0, samples_to_show - 1 do
     local start_bit = i * n_dims
     local bits_str = codes:bits_to_ascii(start_bit, start_bit + bits_to_show)
@@ -16,7 +16,7 @@ function M.spot_check_codes (codes, n_samples, n_dims, label)
     for j = 1, #full_str do
       if full_str:sub(j, j) == "1" then pop = pop + 1 end
     end
-    str.printf("    [%d] %s%s pop=%d/%d (%.0f%%)\n",
+    str.printf("  [%d] %s%s pop=%d/%d (%.0f%%)\n",
       i, bits_str, n_dims > bits_to_show and "..." or "", pop, n_dims, 100 * pop / n_dims)
   end
 end
@@ -42,9 +42,8 @@ function M.spot_check_adjacency (ids, offsets, neighbors, weights, label, n_docs
   local n_nodes = ids:size()
   local n_edges = neighbors:size()
   local avg_deg = n_edges / n_nodes
-  str.printf("  [%s] %d nodes, %d edges, avg_deg=%.1f\n", label, n_nodes, n_edges, avg_deg)
   local id_min, id_max = ids:min(), ids:max()
-  str.printf("    ID range: [%d, %d]", id_min, id_max)
+  str.printf("[%s] %d nodes, %d edges, avg_deg=%.1f ID range: [%d, %d]", label, n_nodes, n_edges, avg_deg, id_min, id_max)
   if n_docs then
     local n_doc_nodes, n_label_nodes = 0, 0
     for i = 0, n_nodes - 1 do
@@ -53,10 +52,10 @@ function M.spot_check_adjacency (ids, offsets, neighbors, weights, label, n_docs
     end
     str.printf(" (docs=%d, labels=%d)", n_doc_nodes, n_label_nodes)
   end
-  str.printf("\n")
   if weights then
-    str.printf("    Weight range: [%.4f, %.4f]\n", weights:min(), weights:max())
+    str.printf(" weight range: [%.4f, %.4f]", weights:min(), weights:max())
   end
+  str.printf("\n")
   local samples_to_show = math.min(5, n_nodes)
   for i = 0, samples_to_show - 1 do
     local node_id = ids:get(i)
@@ -78,7 +77,7 @@ function M.spot_check_adjacency (ids, offsets, neighbors, weights, label, n_docs
       local neigh_sample = {}
       for _, v in ipairs(doc_nb) do neigh_sample[#neigh_sample + 1] = v end
       for _, v in ipairs(label_nb) do neigh_sample[#neigh_sample + 1] = v end
-      str.printf("    %s: deg=%d neighbors=[%s%s]\n",
+      str.printf("  %s: deg=%d neighbors=[%s%s]\n",
         M.format_node(node_id, n_docs), deg, table.concat(neigh_sample, ","), deg > 6 and ",..." or "")
     else
       local neigh_sample = {}
@@ -87,7 +86,7 @@ function M.spot_check_adjacency (ids, offsets, neighbors, weights, label, n_docs
         local nid = ids:get(nidx)
         neigh_sample[#neigh_sample + 1] = M.format_node(nid, n_docs)
       end
-      str.printf("    %s: deg=%d neighbors=[%s%s]\n",
+      str.printf("  %s: deg=%d neighbors=[%s%s]\n",
         M.format_node(node_id, n_docs), deg, table.concat(neigh_sample, ","), deg > 5 and ",..." or "")
     end
   end
@@ -136,7 +135,7 @@ function M.spot_check_neighbors_with_labels (ids, offsets, neighbors, weights, l
     id_to_idx[ids:get(i)] = i
   end
   local per_type = math.max(1, math.floor(n_neighbors / 2))
-  str.printf("  [%s] Spot-checking %d nodes (up to %d docs + %d labels each):\n", label, #check_ids, per_type, per_type)
+  str.printf("[%s] Spot-checking %d nodes (up to %d docs + %d labels each):\n", label, #check_ids, per_type, per_type)
   for _, node_id in ipairs(check_ids) do
     local idx = id_to_idx[node_id]
     if idx then
@@ -153,10 +152,10 @@ function M.spot_check_neighbors_with_labels (ids, offsets, neighbors, weights, l
         end
       end
       if ntype == "label" then
-        str.printf("    Label %d (deg=%d: %d docs, %d labels):\n", nidx_local, deg, n_doc_nb, n_label_nb)
+        str.printf("  Label %d (deg=%d: %d docs, %d labels):\n", nidx_local, deg, n_doc_nb, n_label_nb)
       else
         local doc_labels = M.get_doc_labels(node_id, label_csr, id_offset)
-        str.printf("    Doc %d %s (deg=%d: %d docs, %d labels):\n", node_id, M.format_labels(doc_labels), deg, n_doc_nb, n_label_nb)
+        str.printf("  Doc %d %s (deg=%d: %d docs, %d labels):\n", node_id, M.format_labels(doc_labels), deg, n_doc_nb, n_label_nb)
       end
       local doc_shown, label_shown = 0, 0
       for j = s, e - 1 do
@@ -175,10 +174,10 @@ function M.spot_check_neighbors_with_labels (ids, offsets, neighbors, weights, l
             if ntype == "doc" then
               local doc_labels = M.get_doc_labels(node_id, label_csr, id_offset)
               local overlap = M.label_overlap(doc_labels, n_labels)
-              str.printf("      -> D%d %s overlap=%d/%d%s\n",
+              str.printf("   -> D%d %s overlap=%d/%d%s\n",
                 neighbor_id, M.format_labels(n_labels), overlap, #doc_labels, w_str)
             else
-              str.printf("      -> D%d %s%s\n", neighbor_id, M.format_labels(n_labels), w_str)
+              str.printf("   -> D%d %s%s\n", neighbor_id, M.format_labels(n_labels), w_str)
             end
             doc_shown = doc_shown + 1
           end
@@ -268,7 +267,7 @@ function M.make_classifier_log (stopwatch)
     end
     local absorb = ""
     if params.absorb_interval then
-      absorb = str.format(" AI=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
+      absorb = str.format(" I=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
     end
     local lt, lm, tt, ss
     if params.alpha_specificity then
@@ -279,8 +278,8 @@ function M.make_classifier_log (stopwatch)
     else
       lt, lm, tt, ss = "", "", "", ""
     end
-    str.printf("[CLASSIFY %s E%d] C=%d L=%.2f%s/%d%s T=%.2f%s S=%.0f%s%s F1=%.4f%s%s\n",
-      phase, ev.epoch, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum, lm,
+    str.printf("[CLASSIFY %s E%d] F=%d C=%d L=%.2f%s/%d%s T=%.2f%s S=%.0f%s%s F1=%.4f%s%s\n",
+      phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum, lm,
       params.target_fraction, tt, params.specificity, ss, absorb, metrics.f1, best, timing)
   end
 end
@@ -305,7 +304,7 @@ function M.make_regressor_log (stopwatch)
     end
     local absorb = ""
     if params.absorb_interval then
-      absorb = str.format(" AI=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
+      absorb = str.format(" I=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
     end
     local lt, lm, tt, ss
     if params.alpha_specificity then
@@ -316,8 +315,8 @@ function M.make_regressor_log (stopwatch)
     else
       lt, lm, tt, ss = "", "", "", ""
     end
-    str.printf("[REGRESS %s E%d] C=%d L=%.2f%s/%d%s T=%.2f%s S=%.0f%s%s MAE=%.4f%s%s\n",
-      phase, ev.epoch, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum, lm,
+    str.printf("[REGRESS %s E%d] F=%d C=%d L=%.2f%s/%d%s T=%.2f%s S=%.0f%s%s MAE=%.4f%s%s\n",
+      phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum, lm,
       params.target_fraction, tt, params.specificity, ss, absorb, mae, best, timing)
   end
 end
@@ -342,7 +341,7 @@ function M.make_regressor_acc_log (stopwatch)
     end
     local absorb = ""
     if params.absorb_interval then
-      absorb = str.format(" AI=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
+      absorb = str.format(" I=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
     end
     local lt, lm, tt, ss
     if params.alpha_specificity then
@@ -353,8 +352,8 @@ function M.make_regressor_acc_log (stopwatch)
     else
       lt, lm, tt, ss = "", "", "", ""
     end
-    str.printf("[REGRESS %s E%d] C=%d L=%.2f%s/%d%s T=%.2f%s S=%.0f%s%s ACC=%.1f%%%s%s\n",
-      phase, ev.epoch, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum, lm,
+    str.printf("[REGRESS %s E%d] F=%d C=%d L=%.2f%s/%d%s T=%.2f%s S=%.0f%s%s ACC=%.1f%%%s%s\n",
+      phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum, lm,
       params.target_fraction, tt, params.specificity, ss, absorb, acc, best, timing)
   end
 end
@@ -374,7 +373,7 @@ function M.make_ranking_log (stopwatch)
     end
     local absorb = ""
     if params.absorb_interval then
-      absorb = str.format(" AI=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
+      absorb = str.format(" I=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
     end
     local lt, lm, tt, ss
     if params.alpha_specificity then
@@ -385,8 +384,8 @@ function M.make_ranking_log (stopwatch)
     else
       lt, lm, tt, ss = "", "", "", ""
     end
-    str.printf("[RANKING %s E%d] C=%d L=%.2f%s/%d%s T=%.2f%s S=%.0f%s%s score=%.4f%s%s\n",
-      phase, ev.epoch, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum, lm,
+    str.printf("[RANKING %s E%d] F=%d C=%d L=%.2f%s/%d%s T=%.2f%s S=%.0f%s%s score=%.4f%s%s\n",
+      phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum, lm,
       params.target_fraction, tt, params.specificity, ss, absorb, score, best, timing)
   end
 end
@@ -421,7 +420,7 @@ function M.cluster_stats (args)
   local rc_min, rc_max = rc:min(), rc:max()
   local rc_elbow_val, rc_elbow_idx = rc:scores_elbow("lmethod")
   local rc_elbow_nc = nc:get(rc_elbow_idx - 1)
-  str.printf("  [%s] clusters: %d→%d, radius: %.4f→%.4f (elbow: %.4f @%d clusters)",
+  str.printf("[%s] clusters: %d→%d, radius: %.4f→%.4f (elbow: %.4f @%d clusters)",
     label, nc_min, nc_max, rc_min, rc_max, rc_elbow_val, rc_elbow_nc)
   if ac then
     local ac_min, ac_max = ac:min(), ac:max()

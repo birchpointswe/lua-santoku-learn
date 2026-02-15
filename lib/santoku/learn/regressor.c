@@ -1458,6 +1458,20 @@ static inline int tk_learn_reconfigure (lua_State *L)
     tk_lua_verror(L, 2, "reconfigure", "clause_tolerance", "must be <= clause_maximum");
   unsigned int new_target = tk_lua_fcheckunsigned(L, 2, "reconfigure", "target");
   double new_specificity = tk_lua_fcheckposdouble(L, 2, "reconfigure", "specificity");
+  unsigned int new_features = tk_lua_foptunsigned(L, 2, "reconfigure", "features", tm->features);
+  if (new_features != tm->features) {
+    tm->features = new_features;
+    tm->input_bits = 2 * tm->features;
+    uint64_t tail_bits = tm->input_bits & (TK_CVEC_BITS - 1);
+    tm->tail_mask = tail_bits ? (uint8_t)((1u << tail_bits) - 1) : 0xFF;
+    tm->input_chunks = TK_CVEC_BITS_BYTES(tm->input_bits);
+    if (tm->sparse_mode) {
+      free(tm->mapping);
+      tm->mapping = (int64_t *)malloc((uint64_t)tm->classes * tm->features * sizeof(int64_t));
+      free(tm->absorb_scratch);
+      tm->absorb_scratch = (uint8_t *)malloc((uint64_t)tm->absorb_threads * tm->features * 2 * sizeof(unsigned int));
+    }
+  }
   unsigned int new_clause_chunks = new_clauses * 2;
   new_clauses = new_clause_chunks * TK_CVEC_BITS;
   size_t new_action_chunks = (size_t)tm->classes * new_clauses * tm->input_chunks;
@@ -1520,6 +1534,8 @@ static inline int tk_learn_reconfigure (lua_State *L)
     lua_pop(L, 1);
   }
   tm->automata.n_clauses = tm->classes * tm->clauses;
+  tm->automata.n_chunks = tm->input_chunks;
+  tm->automata.tail_mask = tm->tail_mask;
   tm->automata.counts = tm->state;
   tm->automata.actions = tm->actions;
   tm->trained = false;

@@ -109,9 +109,9 @@ M.build_sampler = function (spec, global_dev)
   if type(spec) == "table" and spec.min ~= nil and spec.max ~= nil then
     local minv, maxv = spec.min, spec.max
     err.assert(minv and maxv, "range spec missing min|max")
-    local is_log = not not spec.log
     local is_int = not not spec.int
     local is_pow2 = not not spec.pow2
+    local is_log = is_pow2 or not not spec.log
     local round_to = spec.round
     -- For log scale with non-positive min, shift range so shifted_min = 1
     local shift = (is_log and minv <= 0) and (1 - minv) or 0
@@ -436,9 +436,9 @@ M.search = function (args)
 
 end
 
-local function create_tm (args)
+local function create_tm (args, max_features)
   local opts = {
-    features = args.features,
+    features = max_features,
     outputs = args.outputs,
     state = args.state or 8,
     clauses = 1,
@@ -454,9 +454,9 @@ local function create_tm (args)
   return tm.create(opts)
 end
 
-local function create_final_tm (args, params)
+local function create_final_tm (args, params, max_features)
   local opts = {
-    features = args.features,
+    features = params.features or max_features,
     outputs = args.outputs,
     state = args.state or 8,
     clauses = params.clauses,
@@ -626,7 +626,14 @@ local function optimize_tm (args)
   local search_subsample_targets = args.search_subsample_targets
   local sparse = not not args.n_tokens
 
-  local param_names = { "clauses", "clause_maximum", "clause_tolerance_fraction", "target_fraction", "specificity" }
+  local max_features
+  if type(args.features) == "table" and args.features.max then
+    max_features = args.features.max
+  else
+    max_features = args.features
+  end
+
+  local param_names = { "features", "clauses", "clause_maximum", "clause_tolerance_fraction", "target_fraction", "specificity" }
   if sparse then
     param_names[#param_names + 1] = "absorb_interval"
     param_names[#param_names + 1] = "absorb_threshold"
@@ -645,12 +652,12 @@ local function optimize_tm (args)
     param_names[#param_names + 1] = "alpha_maximum"
   end
 
-  local input_bits = 2 * args.features
+  local input_bits = 2 * max_features
   args.clause_maximum = cap_spec_max(args.clause_maximum, input_bits)
   args.specificity = cap_spec_max(args.specificity, input_bits)
   if sparse then
     local m = (args.state or 8) - 1
-    args.absorb_maximum = cap_spec_max(args.absorb_maximum, args.features)
+    args.absorb_maximum = cap_spec_max(args.absorb_maximum, max_features)
     args.absorb_threshold = cap_spec_max(args.absorb_threshold, 2 ^ m - 2)
     args.absorb_insert_offset = cap_spec_max(args.absorb_insert_offset, 2 ^ m - 1)
   end
@@ -770,15 +777,15 @@ local function optimize_tm (args)
   local search_tm
   if not M.all_fixed(samplers) then
     search_tm = create_tm({
-      features = args.features,
       outputs = search_outputs,
       state = args.state,
       n_tokens = args.n_tokens,
-    })
+    }, max_features)
   end
 
   local function constrain_tm_params (params, weights, outputs)
-    local input_bits = args.features and 2 * args.features or nil
+    local feat = params.features or max_features
+    local input_bits = feat and 2 * feat or nil
     if input_bits then
       if params.clause_maximum and params.clause_maximum > input_bits then
         params.clause_maximum = input_bits
@@ -797,8 +804,8 @@ local function optimize_tm (args)
       params.target_fraction = f
       params.target = num.max(1, num.floor(f * 8 * params.clause_tolerance + 0.5))
     end
-    if params.specificity and args.features then
-      local max_specificity = 2 * args.features
+    if params.specificity and feat then
+      local max_specificity = 2 * feat
       if params.specificity > max_specificity then
         params.specificity = max_specificity
       end
@@ -806,9 +813,9 @@ local function optimize_tm (args)
         params.specificity = 1
       end
     end
-    if params.absorb_maximum and args.features then
-      if params.absorb_maximum > args.features then
-        params.absorb_maximum = args.features
+    if params.absorb_maximum and feat then
+      if params.absorb_maximum > feat then
+        params.absorb_maximum = feat
       end
     end
     if params.absorb_threshold or params.absorb_insert_offset then
@@ -823,7 +830,7 @@ local function optimize_tm (args)
     end
     if weights then
       local n = outputs or weights:size()
-      local features = args.features
+      local features = feat
       local clamp_int = function (v) return num.max(1, num.floor(v + 0.5)) end
       params.per_class_tolerances = compute_per_class_ivec(
         params.clause_tolerance, params.alpha_tolerance or 0, weights, n, clamp_int)
@@ -882,9 +889,10 @@ local function optimize_tm (args)
     skip_final = true,
     preference_tolerance = args.preference_tolerance or 1e-6,
     constrain = function (p) constrain_tm_params(p) end,
-    size_fn = function(p) return { p.clauses or 0 } end,
+    size_fn = function(p) return { p.clauses or 0, p.features or 0 } end,
     make_key = function (p)
-      local k = str.format("%s|%s|%s|%s|%s",
+      local k = str.format("%s|%s|%s|%s|%s|%s",
+        key_int(p.features),
         key_int(p.clauses),
         key_int(p.clause_tolerance),
         key_int(p.clause_maximum),
@@ -908,7 +916,7 @@ local function optimize_tm (args)
   end
 
   constrain_tm_params(best_params, args.output_weights, args.outputs)
-  local final_tm = create_final_tm(args, best_params)
+  local final_tm = create_final_tm(args, best_params, max_features)
   local final_train_args = {
     codes = args.codes,
     samples = args.samples,

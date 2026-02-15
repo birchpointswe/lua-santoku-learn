@@ -606,8 +606,7 @@ static inline int tk_quantizer_create_lua(lua_State *L) {
 
   uint64_t n_samples = tk_lua_fcheckunsigned(L, 1, "create", "n_samples");
   uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "create", "n_dims");
-  uint64_t target_bits = tk_lua_foptunsigned(L, 1, "create", "target_bits", 0);
-  if (target_bits == 0) target_bits = n_dims;
+  uint64_t target_bits = tk_lua_foptunsigned(L, 1, "create", "target_bits", n_dims * 8);
   uint64_t max_dims = tk_lua_foptunsigned(L, 1, "create", "max_dims", 0);
 
   double tolerance = tk_lua_foptnumber(L, 1, "create", "tolerance", 0.0);
