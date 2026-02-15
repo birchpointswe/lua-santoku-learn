@@ -1591,9 +1591,8 @@ static inline int tm_score_retrieval (lua_State *L)
               norm_n += neighbor_raw[d] * neighbor_raw[d];
             }
             double denom = sqrt(norm_q) * sqrt(norm_n);
-            double cosine_sim = (denom > 1e-12) ? dot / denom : 0.0;
-            double cosine_dist = 1.0 - cosine_sim;
-            tk_rvec_push(query_neighbors_raw, tk_rank(neighbor_eval_idx, cosine_dist));
+            double dist = 1.0 - ((denom > 1e-12) ? dot / denom : 0.0);
+            tk_rvec_push(query_neighbors_raw, tk_rank(neighbor_eval_idx, dist));
           } else {
             char *neighbor_code = codes
               ? NULL
