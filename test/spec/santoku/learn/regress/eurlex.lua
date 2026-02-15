@@ -26,37 +26,41 @@ local cfg = {
     max_len = 20,
     min_len = 1,
     max_run = 2,
-    ngrams = 2,
-    cgrams_min = 3,
-    cgrams_max = 5,
-    cgrams_cross = true,
-    skips = 1,
+    ngrams = 1,
+    cgrams_min = 0,
+    cgrams_max = 0,
+    cgrams_cross = false,
+    skips = 0,
   },
   feature_selection = {
+    n_bns = 8192,
     n_selected = 65536,
   },
   regressor = {
-    features = 4096,
+    features = { def = 4096, min = 512, max = 8192, pow2 = true },
     absorb_interval = 1,
-    absorb_threshold = { def = 0, min = 0, max = 256, int = true },
-    absorb_maximum = { def = 256, min = 1, max = 256, int = true },
-    absorb_insert_offset = { def = 1, min = 1, max = 256, int = true },
-    clauses = 2,
-    clause_maximum = { def = 16, min = 8, max = 1024, int = true },
-    clause_tolerance_fraction = { def = 0.5, min = 0.01, max = 1.0 },
-    target_fraction = { def = 0.25, min = 0.01, max = 2.0 },
-    specificity = { def = 2, min = 2, max = 40 },
-    search_trials = 60,
-    search_iterations = 10,
-    search_subsample_samples = 0.2,
-    search_subsample_targets = 8,
-    final_patience = 20,
-    final_batch = 40,
-    final_iterations = 400,
+    absorb_threshold = { def = 58, min = 0, max = 256, int = true },
+    absorb_maximum = { def = 120, min = 1, max = 256, int = true },
+    absorb_insert_offset = { def = 17, min = 1, max = 256, int = true },
+    clauses = { def = 5, min = 1, max = 32, int = true },
+    clause_maximum = { def = 102, min = 8, max = 512, int = true },
+    clause_tolerance_fraction = { def = 0.76, min = 0.01, max = 1.0 },
+    target_fraction = { def = 0.32, min = 0.01, max = 2.0 },
+    specificity = { def = 512, min = 2, max = 2000 },
+    alpha_tolerance = { def = -0.3, min = -3, max = 3 },
+    alpha_maximum = { def = 0.7, min = -3, max = 3 },
+    alpha_target = { def = 1.2, min = -3, max = 3 },
+    alpha_specificity = { def = 2.1, min = -3, max = 3 },
+    search_trials = 0,
+    search_iterations = 20,
+    search_subsample_targets = 32,
+    final_patience = 2,
+    final_batch = 20,
+    final_iterations = 300,
   },
   nystrom = {
-    n_landmarks = 8192,
-    n_dims = 256,
+    n_landmarks = 1024,
+    n_dims = 32,
     decay = 0,
     bandwidth = -1,
   },
@@ -132,118 +136,6 @@ test("eurlex", function()
   str.printf("  Adjacency index: %d idf features, %d nodes, %d label nodes\n",
     n_features, n_total_nodes, n_labels)
 
-  print("\nSpot-checking graph index")
-  local hood = rvec.create()
-  local doc_labels = {}
-  for i = 0, train.solutions:size() - 1 do
-    local bit = train.solutions:get(i)
-    local doc = math.floor(bit / n_labels)
-    local label = bit % n_labels
-    if not doc_labels[doc] then doc_labels[doc] = {} end
-    doc_labels[doc][#doc_labels[doc] + 1] = label
-  end
-
-  for _, d in ipairs({ 0, 100, 1000 }) do
-    local labels = doc_labels[d] or {}
-    str.printf("  Doc %d: %d GT labels\n", d, #labels)
-    train.graph_index:neighbors(d, 10, hood, cfg.nystrom.decay, cfg.nystrom.bandwidth)
-    str.printf("    Top 10 neighbors:\n")
-    for i = 0, hood:size() - 1 do
-      local nid, dist = hood:get(i)
-      local kind = nid >= train.n and "label" or "doc"
-      local display_id = nid >= train.n and (nid - train.n) or nid
-      local is_gt = ""
-      if kind == "label" then
-        for _, gl in ipairs(labels) do
-          if gl == display_id then is_gt = " *GT*"; break end
-        end
-      end
-      str.printf("      [%d] %s %d  sim=%.4f%s\n", i, kind, display_id, 1 - dist, is_gt)
-    end
-
-    if #labels > 0 then
-      local l0 = labels[1]
-      str.printf("    doc-%d <-> GT label %d: %.6f\n", d, l0, train.graph_index:similarity(d, train.n + l0, cfg.nystrom.decay, cfg.nystrom.bandwidth))
-      if #labels > 1 then
-        local l1 = labels[2]
-        str.printf("    doc-%d <-> GT label %d: %.6f\n", d, l1, train.graph_index:similarity(d, train.n + l1, cfg.nystrom.decay, cfg.nystrom.bandwidth))
-      end
-      local gt_set = {}
-      for _, gl in ipairs(labels) do gt_set[gl] = true end
-      local neg_l = nil
-      for off = 1, n_labels - 1 do
-        local c = (l0 + off) % n_labels
-        if not gt_set[c] then neg_l = c; break end
-      end
-      if neg_l then
-        str.printf("    doc-%d <-> NEG label %d: %.6f\n", d, neg_l, train.graph_index:similarity(d, train.n + neg_l, cfg.nystrom.decay, cfg.nystrom.bandwidth))
-      end
-
-      local found_sharing = false
-      for d2 = 0, train.n - 1 do
-        if found_sharing then break end
-        if d2 ~= d and doc_labels[d2] then
-          for _, gl in ipairs(doc_labels[d2]) do
-            if gl == l0 then
-              str.printf("    doc-%d <-> doc-%d (share label %d): %.6f\n", d, d2, l0, train.graph_index:similarity(d, d2, cfg.nystrom.decay, cfg.nystrom.bandwidth))
-              found_sharing = true
-              break
-            end
-          end
-        end
-      end
-
-      for d3 = 0, train.n - 1 do
-        if doc_labels[d3] then
-          local has = false
-          for _, gl in ipairs(doc_labels[d3]) do
-            for _, ml in ipairs(labels) do
-              if gl == ml then has = true; break end
-            end
-            if has then break end
-          end
-          if not has then
-            str.printf("    doc-%d <-> doc-%d (no shared labels): %.6f\n", d, d3, train.graph_index:similarity(d, d3, cfg.nystrom.decay, cfg.nystrom.bandwidth))
-            break
-          end
-        end
-      end
-
-      str.printf("    label-%d <-> label-%d: %.6f\n", l0, (l0 + 1) % n_labels,
-        train.graph_index:similarity(train.n + l0, train.n + ((l0 + 1) % n_labels), cfg.nystrom.decay, cfg.nystrom.bandwidth))
-    end
-  end
-
-  print("\n  Doc->label lookup (labels-only index):")
-  local doc_feats = ivec.create()
-  for _, d in ipairs({ 0, 100, 1000 }) do
-    local labels = doc_labels[d] or {}
-    train.graph_index:get(d, doc_feats)
-    train.labels_index:neighbors(doc_feats, 10, hood, cfg.nystrom.decay, cfg.nystrom.bandwidth)
-    str.printf("    Doc %d (%d GT labels): top 10 label neighbors:\n", d, #labels)
-    for i = 0, hood:size() - 1 do
-      local nid, dist = hood:get(i)
-      local lid = nid - train.n
-      local is_gt = ""
-      for _, gl in ipairs(labels) do
-        if gl == lid then is_gt = " *GT*"; break end
-      end
-      str.printf("      [%d] label %d  sim=%.4f%s\n", i, lid, 1 - dist, is_gt)
-    end
-  end
-
-  print("\n  Label neighbors (sample):")
-  for _, l in ipairs({ 0, 100 }) do
-    train.graph_index:neighbors(train.n + l, 5, hood, cfg.nystrom.decay, cfg.nystrom.bandwidth)
-    str.printf("    Label %d: top 5:\n", l)
-    for i = 0, hood:size() - 1 do
-      local nid, dist = hood:get(i)
-      local kind = nid >= train.n and "label" or "doc"
-      local display_id = nid >= train.n and (nid - train.n) or nid
-      str.printf("      [%d] %s %d  sim=%.4f\n", i, kind, display_id, 1 - dist)
-    end
-  end
-
   print("\nBuilding evaluation adjacency (bipartite neg)")
   local train_eval_ids, train_eval_offsets, train_eval_neighbors, train_eval_weights = csr.bipartite_neg(
     train.label_csr.offsets, train.label_csr.neighbors,
@@ -259,83 +151,6 @@ test("eurlex", function()
       eval_neighbors = train_eval_neighbors, eval_weights = train_eval_weights,
     })
     str.printf("  Kernel NDCG: %.4f\n", kern.score)
-  end
-
-  str.printf("\n  Doc->label kernel retrieval (k=%d):\n", cfg.eval.retrieval_k)
-  do
-    local k = cfg.eval.retrieval_k
-    local hood = rvec.create()
-    local doc_feats = ivec.create()
-    local total_p, total_r, total_f1 = 0, 0, 0
-    local n_docs_eval = 0
-    local n_perfect = 0
-    for d = 0, train.n - 1 do
-      local gt_start = train.label_csr.offsets:get(d)
-      local gt_end = train.label_csr.offsets:get(d + 1)
-      local n_gt = gt_end - gt_start
-      if n_gt > 0 then
-        local gt_set = {}
-        for j = gt_start, gt_end - 1 do
-          gt_set[train.label_csr.neighbors:get(j)] = true
-        end
-        train.graph_index:get(d, doc_feats)
-        train.labels_index:neighbors(doc_feats, k, hood, cfg.nystrom.decay, cfg.nystrom.bandwidth)
-        local hits = 0
-        for i = 0, hood:size() - 1 do
-          local nid = hood:get(i)
-          if gt_set[nid - train.n] then hits = hits + 1 end
-        end
-        local p = (hood:size() > 0) and hits / hood:size() or 0
-        local r = hits / n_gt
-        local f1 = (p + r > 0) and 2 * p * r / (p + r) or 0
-        total_p = total_p + p
-        total_r = total_r + r
-        total_f1 = total_f1 + f1
-        n_docs_eval = n_docs_eval + 1
-        if r == 1.0 then n_perfect = n_perfect + 1 end
-      end
-    end
-    str.printf("    P=%.4f R=%.4f F1=%.4f (%d docs, %d perfect recall)\n",
-      total_p / n_docs_eval, total_r / n_docs_eval, total_f1 / n_docs_eval,
-      n_docs_eval, n_perfect)
-  end
-
-  str.printf("\n  Label->doc kernel retrieval (k=%d):\n", cfg.eval.retrieval_k)
-  do
-    local k = cfg.eval.retrieval_k
-    local hood = rvec.create()
-    local label_feats = ivec.create()
-    local label_doc_sets = {}
-    for d = 0, train.n - 1 do
-      local s = train.label_csr.offsets:get(d)
-      local e = train.label_csr.offsets:get(d + 1)
-      for j = s, e - 1 do
-        local l = train.label_csr.neighbors:get(j)
-        if not label_doc_sets[l] then label_doc_sets[l] = {} end
-        label_doc_sets[l][d] = true
-      end
-    end
-    local total_p, total_r = 0, 0
-    local n_labels_eval = 0
-    for l = 0, n_labels - 1 do
-      local gt_docs = label_doc_sets[l]
-      if gt_docs then
-        local n_gt = 0
-        for _ in pairs(gt_docs) do n_gt = n_gt + 1 end
-        train.graph_index:get(train.n + l, label_feats)
-        train.docs_index:neighbors(label_feats, k, hood, cfg.nystrom.decay, cfg.nystrom.bandwidth)
-        local hits = 0
-        for i = 0, hood:size() - 1 do
-          local nid = hood:get(i)
-          if gt_docs[nid] then hits = hits + 1 end
-        end
-        total_p = total_p + ((hood:size() > 0) and hits / hood:size() or 0)
-        total_r = total_r + hits / n_gt
-        n_labels_eval = n_labels_eval + 1
-      end
-    end
-    str.printf("    P=%.4f R=%.4f (%d labels)\n",
-      total_p / n_labels_eval, total_r / n_labels_eval, n_labels_eval)
   end
 
   print("\nRunning spectral embedding (Nystrom)")
@@ -375,55 +190,19 @@ test("eurlex", function()
       eval_neighbors = train_eval_neighbors, eval_weights = train_eval_weights,
     }).score,
   }
-  str.printf("  Spectral dims: %d, embedded: %d, expected: %d (docs=%d, labels=%d)\n",
-    spectral_dims, n_embedded, n_total_nodes, train.n, n_labels)
-  str.printf("  embedded_ids: size=%d, min=%d, max=%d, train.n=%d\n",
-    embedded_ids:size(), embedded_ids:min(), embedded_ids:max(), train.n)
-
-  print("\nAnalyzing landmark selection:")
-  local n_doc_landmarks = 0
-  local n_label_landmarks = 0
-  for i = 0, model.landmark_ids:size() - 1 do
-    local lid = model.landmark_ids:get(i)
-    if lid < train.n then n_doc_landmarks = n_doc_landmarks + 1
-    else n_label_landmarks = n_label_landmarks + 1 end
-  end
-  str.printf("  Landmarks: %d docs, %d labels (%.1f%% labels)\n",
-    n_doc_landmarks, n_label_landmarks, 100 * n_label_landmarks / model.landmark_ids:size())
-  str.printf("  Expected if uniform: %.1f%% labels\n", 100 * n_labels / n_total_nodes)
+  str.printf("  Spectral dims: %d, embedded: %d\n", spectral_dims, n_embedded)
 
   train.dims = spectral_dims
 
   local train_wanted = ivec.create(train.n):fill_indices()
-  str.printf("  train_wanted: size=%d, min=%d, max=%d\n",
-    train_wanted:size(), train_wanted:min(), train_wanted:max())
   local train_embedded_ids = embedded_ids:set_intersect(train_wanted)
-  str.printf("  train_embedded_ids: size=%d\n", train_embedded_ids:size())
   local train_raw_codes = dvec.create():mtx_extend(all_raw_codes, train_embedded_ids, embedded_ids, 0, spectral_dims, true)
 
   local label_wanted = ivec.create(n_labels):fill_indices():add(train.n)
-  str.printf("  label_wanted: size=%d, min=%d, max=%d\n",
-    label_wanted:size(), label_wanted:min(), label_wanted:max())
   local embedded_label_ids = embedded_ids:set_intersect(label_wanted)
-  str.printf("  embedded_label_ids: size=%d\n", embedded_label_ids:size())
   local n_embedded_labels = embedded_label_ids:size()
   local label_raw_codes = dvec.create():mtx_extend(all_raw_codes, embedded_label_ids, embedded_ids, 0, spectral_dims, true)
   train.embedded_label_ids = embedded_label_ids
-
-  print("\nBuilding co-occurrence index for hard negatives")
-  local hard_features, hard_n_feat = train.solutions:bits_bipartite(
-    train.n, n_labels, "inherit", train.solutions, n_labels)
-  local hard_idf_ids, hard_idf_scores = hard_features:bits_top_df(n_total_nodes, hard_n_feat)
-  hard_features:bits_select(hard_idf_ids, nil, hard_n_feat)
-  local hard_n_features = hard_idf_ids:size()
-  train.hard_index = inv.create({ features = hard_idf_scores })
-  train.hard_index:add(hard_features, all_ids)
-  local hard_label_features = ivec.create()
-  hard_features:bits_select(nil, label_node_ids, hard_n_features, hard_label_features)
-  train.hard_labels_index = inv.create({ features = hard_idf_scores })
-  train.hard_labels_index:add(hard_label_features, label_node_ids)
-  str.printf("  %d co-occurrence features, %d nodes, %d label nodes\n",
-    hard_n_features, n_total_nodes, n_labels)
 
   local encoder, bin_n_bits, label_codes_bin
   local sp_raw_stats, sp_bin_stats, sp_entropy, sp_ret
@@ -660,6 +439,18 @@ test("eurlex", function()
   test_set.problems = nil
   str.printf("  Vocabulary: %d\n", n_tokens)
 
+  print("\nBNS feature selection")
+  train.solutions:add_scaled(n_labels)
+  local bns_ids = train.tokens:bits_top_bns(
+    train.solutions, train.n, n_tokens, n_labels,
+    cfg.feature_selection.n_bns, nil, "max")
+  train.solutions:add_scaled(-n_labels)
+  train.tokens:bits_select(bns_ids, nil, n_tokens)
+  dev.tokens:bits_select(bns_ids, nil, n_tokens)
+  test_set.tokens:bits_select(bns_ids, nil, n_tokens)
+  n_tokens = bns_ids:size()
+  str.printf("  %d BNS features selected\n", n_tokens)
+
   print("\nFeature selection for regressor (F-score)")
   local union_ids, _, class_offsets, class_feat_ids, class_scores = train.tokens:bits_top_reg_f(
     train_raw_codes, train.n, n_tokens, train.dims, n_selected, nil, "sum")
@@ -697,6 +488,10 @@ test("eurlex", function()
     clause_tolerance_fraction = cfg.regressor.clause_tolerance_fraction,
     target_fraction = cfg.regressor.target_fraction,
     specificity = cfg.regressor.specificity,
+    alpha_tolerance = cfg.regressor.alpha_tolerance,
+    alpha_maximum = cfg.regressor.alpha_maximum,
+    alpha_target = cfg.regressor.alpha_target,
+    alpha_specificity = cfg.regressor.alpha_specificity,
     output_weights = model.eigenvalues,
     tokens = train.tokens,
     csc_offsets = csc_offsets,
@@ -762,20 +557,6 @@ test("eurlex", function()
     str.printf("  Spectral doc-doc:  %.4f\n", spectral_doc.score)
     str.printf("  Predicted doc-doc: %.4f (%.1f%% of ceiling)\n",
       predicted_doc.score, 100 * predicted_doc.score / spectral_doc.score)
-  end
-
-  print("\nEigenvalue spectrum")
-  do
-    local ev = model.eigenvalues
-    local n_ev = ev:size()
-    local top = math.min(n_ev, 10)
-    for i = 0, top - 1 do
-      str.printf("  EV[%d] = %.6f\n", i, ev:get(i))
-    end
-    if n_ev > 10 then
-      str.printf("  ... (%d total)\n", n_ev)
-      str.printf("  EV[%d] = %.6f (last)\n", n_ev - 1, ev:get(n_ev - 1))
-    end
   end
 
   print("\nPer-dimension regression analysis")
