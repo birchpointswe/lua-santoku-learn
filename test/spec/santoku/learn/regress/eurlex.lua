@@ -33,16 +33,16 @@ local cfg = {
     skips = 0,
   },
   feature_selection = {
-    n_bns = 8192,
-    n_selected = 65536,
+    n_bns = 4096,
+    n_selected = 8192,
   },
   regressor = {
-    features = { def = 4096, min = 512, max = 8192, pow2 = true },
+    features = { def = 4096, min = 512, max = 4096, pow2 = true },
     absorb_interval = 1,
     absorb_threshold = { def = 58, min = 0, max = 256, int = true },
     absorb_maximum = { def = 120, min = 1, max = 256, int = true },
     absorb_insert_offset = { def = 17, min = 1, max = 256, int = true },
-    clauses = { def = 5, min = 1, max = 32, int = true },
+    clauses = { def = 5, min = 1, max = 8, int = true },
     clause_maximum = { def = 102, min = 8, max = 512, int = true },
     clause_tolerance_fraction = { def = 0.76, min = 0.01, max = 1.0 },
     target_fraction = { def = 0.32, min = 0.01, max = 2.0 },
@@ -51,28 +51,28 @@ local cfg = {
     alpha_maximum = { def = 0.7, min = -3, max = 3 },
     alpha_target = { def = 1.2, min = -3, max = 3 },
     alpha_specificity = { def = 2.1, min = -3, max = 3 },
-    search_trials = 0,
+    search_trials = 200,
     search_iterations = 20,
-    search_subsample_targets = 32,
+    search_subsample_targets = 8,
     final_patience = 2,
     final_batch = 20,
-    final_iterations = 300,
+    final_iterations = 400,
   },
   nystrom = {
-    n_landmarks = 1024,
-    n_dims = 32,
+    n_landmarks = 4096,
+    n_dims = 64,
     decay = 0,
     bandwidth = -1,
   },
   sfbs = {
     tolerance = 1e-6,
-    n_neg = 48,
+    n_neg = 24,
   },
   eval = {
     knn = 16,
     random_pairs = 16,
     retrieval_k = 32,
-    retrieval_radius = 3,
+    retrieval_radius = 5,
   },
 }
 
@@ -87,6 +87,7 @@ test("eurlex", function()
   train_lc:asc()
   str.printf("  Train: %d  Dev: %d  Test: %d  Labels: %d  Labels/doc: %.1f median\n",
     train.n, dev.n, test_set.n, n_labels, train_lc:get(train_lc:size() / 2))
+  train_lc = nil -- luacheck: ignore
 
   print("\nCreating IDs")
   train.ids = ivec.create(train.n):fill_indices()
@@ -113,16 +114,21 @@ test("eurlex", function()
   features:bits_select(idf_ids, nil, n_feat)
   local n_features = idf_ids:size()
   local ranks = ivec.create():copy(graph_ranks, idf_ids)
+  graph_ranks = nil -- luacheck: ignore
+  idf_ids = nil -- luacheck: ignore
   train.graph_index = inv.create({ features = idf_scores, ranks = ranks, n_ranks = 2 })
   train.graph_index:add(features, all_ids)
   local label_features = ivec.create()
   features:bits_select(nil, label_node_ids, n_features, label_features)
   train.labels_index = inv.create({ features = idf_scores, ranks = ranks, n_ranks = 2 })
   train.labels_index:add(label_features, label_node_ids)
+  label_features = nil -- luacheck: ignore
   local doc_features = ivec.create()
   features:bits_select(nil, doc_node_ids, n_features, doc_features)
   train.docs_index = inv.create({ features = idf_scores, ranks = ranks, n_ranks = 2 })
   train.docs_index:add(doc_features, doc_node_ids)
+  doc_features = nil -- luacheck: ignore
+  doc_node_ids = nil -- luacheck: ignore
   train.all_features = features
   train.all_ids = all_ids
   train.label_node_ids = label_node_ids
@@ -168,7 +174,8 @@ test("eurlex", function()
   local spectral_dims = model.dims
   local all_raw_codes = model.raw_codes
   local embedded_ids = model.ids
-  local n_embedded = embedded_ids:size()
+  train.all_features = nil
+  train.all_ids = nil
   local spectral_metrics = {
     kernel_score = eval.ranking_accuracy({
       kernel_index = train.graph_index,
@@ -183,19 +190,20 @@ test("eurlex", function()
       eval_neighbors = train_eval_neighbors, eval_weights = train_eval_weights,
     }).score,
   }
-  str.printf("  Spectral dims: %d, embedded: %d\n", spectral_dims, n_embedded)
+  str.printf("  Spectral dims: %d, embedded: %d\n", spectral_dims, embedded_ids:size())
 
   train.dims = spectral_dims
 
-  local train_wanted = ivec.create(train.n):fill_indices()
-  local train_embedded_ids = embedded_ids:set_intersect(train_wanted)
-  local train_raw_codes = dvec.create():mtx_extend(all_raw_codes, train_embedded_ids, embedded_ids, 0, spectral_dims, true)
+  local train_raw_codes = dvec.create():mtx_extend(all_raw_codes,
+    embedded_ids:set_intersect(ivec.create(train.n):fill_indices()),
+    embedded_ids, 0, spectral_dims, true)
 
-  local label_wanted = ivec.create(n_labels):fill_indices():add(train.n)
-  local embedded_label_ids = embedded_ids:set_intersect(label_wanted)
+  local embedded_label_ids = embedded_ids:set_intersect(ivec.create(n_labels):fill_indices():add(train.n))
   local n_embedded_labels = embedded_label_ids:size()
   local label_raw_codes = dvec.create():mtx_extend(all_raw_codes, embedded_label_ids, embedded_ids, 0, spectral_dims, true)
   train.embedded_label_ids = embedded_label_ids
+  all_raw_codes = nil -- luacheck: ignore
+  embedded_ids = nil -- luacheck: ignore
 
   local predicted_buf = dvec.create()
   local n_selected = cfg.feature_selection.n_selected
@@ -220,19 +228,21 @@ test("eurlex", function()
     train.solutions, train.n, n_tokens, n_labels,
     cfg.feature_selection.n_bns, nil, "max")
   train.solutions:add_scaled(-n_labels)
+  train.solutions = nil
+  dev.solutions = nil
+  test_set.solutions = nil
   train.tokens:bits_select(bns_ids, nil, n_tokens)
   dev.tokens:bits_select(bns_ids, nil, n_tokens)
   test_set.tokens:bits_select(bns_ids, nil, n_tokens)
   n_tokens = bns_ids:size()
+  bns_ids = nil -- luacheck: ignore
   str.printf("  %d BNS features selected\n", n_tokens)
 
   print("\nFeature selection for regressor (F-score)")
-  local union_ids, _, class_offsets, class_feat_ids, class_scores = train.tokens:bits_top_reg_f(
+  local union_ids, _, class_offsets, class_feat_ids = train.tokens:bits_top_reg_f(
     train_raw_codes, train.n, n_tokens, train.dims, n_selected, nil, "sum")
   str.printf("  Features: %d grouped (%d per dim x %d dims), union: %d\n",
     class_feat_ids:size(), n_selected, train.dims, union_ids:size())
-  str.printf("  F-scores: min=%.2f max=%.2f mean=%.2f\n",
-    class_scores:min(), class_scores:max(), class_scores:sum() / class_scores:size())
 
   print("\nApplying feature selection")
   train.tokens:bits_select(union_ids, nil, n_tokens)
@@ -240,13 +250,12 @@ test("eurlex", function()
   test_set.tokens:bits_select(union_ids, nil, n_tokens)
   class_offsets, class_feat_ids = csr.bits_select(class_offsets, class_feat_ids, union_ids)
   n_tokens = union_ids:size()
+  union_ids = nil -- luacheck: ignore
   str.printf("  Reduced vocabulary: %d tokens\n", n_tokens)
 
   print("\nBuilding CSC index")
   local csc_offsets, csc_indices = csr.to_csc(train.tokens, train.n, n_tokens)
   str.printf("  Tokens: %d  Samples: %d\n", n_tokens, train.n)
-
-  local absorb_ranking_global = ivec.create(n_tokens):fill_indices()
 
   print("\nTraining TM regressor")
   train.tm = optimize.regressor({
@@ -273,7 +282,6 @@ test("eurlex", function()
     csc_indices = csc_indices,
     absorb_ranking = class_feat_ids,
     absorb_ranking_offsets = class_offsets,
-    absorb_ranking_global = absorb_ranking_global,
     search_trials = cfg.regressor.search_trials,
     search_iterations = cfg.regressor.search_iterations,
     final_batch = cfg.regressor.final_batch,
@@ -417,7 +425,7 @@ test("eurlex", function()
 
     local function evaluate_split(split, name, eval_adj)
       print("\nEvaluating " .. name)
-      local predicted_raw = train.tm:regress({ tokens = split.tokens, n_samples = split.n }, split.n, true)
+      local predicted_raw = train.tm:regress({ tokens = split.tokens, n_samples = split.n }, split.n, true, predicted_buf)
       local predicted_bin = post_encoder:encode(predicted_raw)
       local combined_raw = dvec.create()
       combined_raw:copy(predicted_raw)
