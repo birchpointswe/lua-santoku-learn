@@ -65,14 +65,7 @@ local cfg = {
     bandwidth = -1,
   },
   sfbs = {
-    enable_pre = false,
-    pre = {
-      tolerance = 1e-6,
-      max_dims = 256,
-    },
-    post = {
-      tolerance = 1e-6,
-    },
+    tolerance = 1e-6,
     n_neg = 48,
   },
   eval = {
@@ -203,224 +196,6 @@ test("eurlex", function()
   local n_embedded_labels = embedded_label_ids:size()
   local label_raw_codes = dvec.create():mtx_extend(all_raw_codes, embedded_label_ids, embedded_ids, 0, spectral_dims, true)
   train.embedded_label_ids = embedded_label_ids
-
-  local encoder, bin_n_bits, label_codes_bin
-  local sp_raw_stats, sp_bin_stats, sp_entropy, sp_ret
-
-  if cfg.sfbs.enable_pre then
-
-    print("\nQuantizing (spectral)")
-    local sfbs_ids, sfbs_offsets, sfbs_neighbors, sfbs_weights = csr.bipartite_neg(
-      train.label_csr.offsets, train.label_csr.neighbors,
-      ivec.create(train.n):fill_indices(), label_node_ids,
-      cfg.sfbs.n_neg)
-    encoder = quantizer.create({
-      raw_codes = all_raw_codes,
-      ids = embedded_ids,
-      n_samples = n_embedded,
-      n_dims = spectral_dims,
-      tolerance = cfg.sfbs.pre.tolerance,
-      max_dims = cfg.sfbs.pre.max_dims,
-      expected_ids = sfbs_ids,
-      expected_offsets = sfbs_offsets,
-      expected_neighbors = sfbs_neighbors,
-      expected_weights = sfbs_weights,
-      each = function(bit_idx, dim, threshold, gain, score, action)
-        str.printf("  %s bit %d: dim=%d thresh=%.6f gain=%.6f score=%.4f\n",
-          action, bit_idx, dim, threshold, gain, score)
-      end,
-    })
-    bin_n_bits = encoder:n_bits()
-    str.printf("  Selected %d bits (n_dims=%d)\n", bin_n_bits, encoder:n_dims())
-    train.bin_bits = bin_n_bits
-
-    print("\nPre-computing label binary codes")
-    label_codes_bin = encoder:encode(label_raw_codes)
-    str.printf("  Label codes: %d/%d labels embedded, %d dims, %d binary bits\n",
-      n_embedded_labels, n_labels, train.dims, bin_n_bits)
-
-    print("\n" .. string.rep("=", 60))
-    print("PRE-REGRESSOR DIAGNOSTICS (all similarity [0,1], higher=closer)")
-    print(string.rep("=", 60))
-
-    local train_codes_bin = encoder:encode(train_raw_codes)
-
-    local sp_label_ann = ann.create({ features = bin_n_bits })
-    sp_label_ann:add(label_codes_bin, train.embedded_label_ids)
-
-    local spectral_index = ann.create({ features = bin_n_bits })
-    local all_bin = cvec.create()
-    all_bin:copy(train_codes_bin)
-    all_bin:copy(label_codes_bin)
-    local all_bin_ids = ivec.create(train.n):fill_indices()
-    all_bin_ids:copy(train.embedded_label_ids)
-    spectral_index:add(all_bin, all_bin_ids)
-
-    str.printf("\nRanking accuracy (doc->label, GT + %d random neg)\n", cfg.eval.random_pairs)
-    local sp_combined_norm = dvec.create()
-    sp_combined_norm:copy(train_raw_codes)
-    sp_combined_norm:copy(label_raw_codes)
-    local sp_combined_bin = cvec.create()
-    sp_combined_bin:copy(train_codes_bin)
-    sp_combined_bin:copy(label_codes_bin)
-    local sp_combined_ids = ivec.create(train.n):fill_indices()
-    sp_combined_ids:copy(train.embedded_label_ids)
-    sp_raw_stats = eval.ranking_accuracy({
-      raw_codes = sp_combined_norm, ids = sp_combined_ids, n_dims = train.dims,
-      eval_ids = train_eval_ids, eval_offsets = train_eval_offsets,
-      eval_neighbors = train_eval_neighbors, eval_weights = train_eval_weights,
-    })
-    sp_bin_stats = eval.ranking_accuracy({
-      codes = sp_combined_bin, ids = sp_combined_ids, n_dims = bin_n_bits,
-      eval_ids = train_eval_ids, eval_offsets = train_eval_offsets,
-      eval_neighbors = train_eval_neighbors, eval_weights = train_eval_weights,
-    })
-    str.printf("  Graph kernel:  %.4f\n", spectral_metrics.kernel_score)
-    str.printf("  Raw cosine:    %.4f\n", sp_raw_stats.score)
-    str.printf("  Hamming:       %.4f\n", sp_bin_stats.score)
-
-    str.printf("\nBinary bit entropy\n")
-    sp_entropy = eval.entropy_stats(train_codes_bin, train.n, bin_n_bits)
-    str.printf("  mean=%.4f min=%.4f max=%.4f std=%.4f\n",
-      sp_entropy.mean, sp_entropy.min, sp_entropy.max, sp_entropy.std)
-
-    str.printf("\nLabel retrieval (doc->label, Hamming ANN, k=%d, radius=%d)\n",
-      cfg.eval.retrieval_k, cfg.eval.retrieval_radius)
-    local sp_expected_neighbors = ivec.create():copy(train.label_csr.neighbors):add(train.n)
-    local sp_hood_ids, sp_hoods = sp_label_ann:neighborhoods_by_vecs(
-      train_codes_bin, cfg.eval.retrieval_k, cfg.eval.retrieval_radius)
-    local sp_ks
-    sp_ks, sp_ret = eval.retrieval_ks({
-      hoods = sp_hoods,
-      hood_ids = sp_hood_ids,
-      expected_offsets = train.label_csr.offsets,
-      expected_neighbors = sp_expected_neighbors,
-    })
-    str.printf("  micro: P=%.4f R=%.4f F1=%.4f\n",
-      sp_ret.micro_precision, sp_ret.micro_recall, sp_ret.micro_f1)
-    str.printf("  macro: P=%.4f R=%.4f F1=%.4f\n",
-      sp_ret.macro_precision, sp_ret.macro_recall, sp_ret.macro_f1)
-    str.printf("  optimal k: min=%d max=%d mean=%.1f\n",
-      sp_ks:min(), sp_ks:max(), sp_ks:sum() / sp_ks:size())
-
-    str.printf("\nSeparation analysis (doc->label, sampled)\n")
-    do
-      local n_samples = math.min(200, train.n)
-      local step = math.max(1, math.floor(train.n / n_samples))
-      local g_gt_sum, g_neg_sum, h_gt_sum, h_neg_sum = 0, 0, 0, 0
-      local n_gt_pairs, n_neg_pairs = 0, 0
-      local neg_step = math.max(1, math.floor(n_labels / 10))
-      for si = 0, n_samples - 1 do
-        local d = si * step
-        if d >= train.n then break end
-        local gt_start = train.label_csr.offsets:get(d)
-        local gt_end = train.label_csr.offsets:get(d + 1)
-        local gt_set = {}
-        for j = gt_start, gt_end - 1 do
-          local li = train.label_csr.neighbors:get(j)
-          gt_set[li] = true
-          local nid = li + train.n
-          g_gt_sum = g_gt_sum + train.graph_index:similarity(d, nid, cfg.nystrom.decay, cfg.nystrom.bandwidth)
-          h_gt_sum = h_gt_sum + spectral_index:similarity(d, nid)
-          n_gt_pairs = n_gt_pairs + 1
-        end
-        local nc = 0
-        for l = 0, n_labels - 1, neg_step do
-          if not gt_set[l] and nc < 10 then
-            local nid = l + train.n
-            g_neg_sum = g_neg_sum + train.graph_index:similarity(d, nid, cfg.nystrom.decay, cfg.nystrom.bandwidth)
-            h_neg_sum = h_neg_sum + spectral_index:similarity(d, nid)
-            n_neg_pairs = n_neg_pairs + 1
-            nc = nc + 1
-          end
-        end
-      end
-      local g_gt = n_gt_pairs > 0 and g_gt_sum / n_gt_pairs or 0
-      local g_neg = n_neg_pairs > 0 and g_neg_sum / n_neg_pairs or 0
-      local h_gt = n_gt_pairs > 0 and h_gt_sum / n_gt_pairs or 0
-      local h_neg = n_neg_pairs > 0 and h_neg_sum / n_neg_pairs or 0
-      str.printf("               graph    hamming\n")
-      str.printf("  mean GT:     %.4f   %.4f\n", g_gt, h_gt)
-      str.printf("  mean NEG:    %.4f   %.4f\n", g_neg, h_neg)
-      str.printf("  gap:         %.4f   %.4f\n", g_gt - g_neg, h_gt - h_neg)
-      str.printf("  (%d docs, %d GT pairs, %d NEG pairs)\n", n_samples, n_gt_pairs, n_neg_pairs)
-    end
-
-    str.printf("\nLabel code quality (%d labels, %d binary bits)\n", n_embedded_labels, bin_n_bits)
-    do
-      local sample_step = math.max(1, math.floor(n_embedded_labels / 30))
-      local sim_sum, n_pairs, n_collisions = 0, 0, 0
-      local collision_threshold = 1 - 5 / bin_n_bits
-      for i = 0, n_embedded_labels - 1, sample_step do
-        for j = i + 1, n_embedded_labels - 1, sample_step do
-          local sim = spectral_index:similarity(
-            train.embedded_label_ids:get(i),
-            train.embedded_label_ids:get(j))
-          sim_sum = sim_sum + sim
-          n_pairs = n_pairs + 1
-          if sim >= collision_threshold then
-            n_collisions = n_collisions + 1
-          end
-        end
-      end
-      str.printf("  Mean pairwise label sim: %.4f (random expect: 0.5000)\n",
-        n_pairs > 0 and sim_sum / n_pairs or 0)
-      str.printf("  Near-collisions (<=5 bits): %d/%d pairs (%.1f%%)\n",
-        n_collisions, n_pairs, n_pairs > 0 and 100 * n_collisions / n_pairs or 0)
-    end
-
-    str.printf("\nSpot-checks (GT labels + top non-GT retrieval neighbors)\n")
-    for _, doc_id in ipairs({ 0, 100, 1000 }) do
-      local gt_start = train.label_csr.offsets:get(doc_id)
-      local gt_end = train.label_csr.offsets:get(doc_id + 1)
-      local n_gt = gt_end - gt_start
-      local gt_set = {}
-      for j = gt_start, gt_end - 1 do
-        gt_set[train.label_csr.neighbors:get(j)] = true
-      end
-      str.printf("\n  Doc %d (%d GT labels):\n", doc_id, n_gt)
-      str.printf("    %-8s %-4s %-10s %-10s\n", "label", "GT?", "graph", "hamming")
-      str.printf("    %-8s %-4s %-10s %-10s\n", "-----", "---", "-----", "-------")
-      for j = gt_start, gt_end - 1 do
-        local li = train.label_csr.neighbors:get(j)
-        local nid = li + train.n
-        str.printf("    %-8d  *   %.4f    %.4f\n", li,
-          train.graph_index:similarity(doc_id, nid, cfg.nystrom.decay, cfg.nystrom.bandwidth),
-          spectral_index:similarity(doc_id, nid))
-      end
-      local sp_hood = sp_hoods:get(doc_id)
-      local shown = 0
-      for j = 0, sp_hood:size() - 1 do
-        if shown >= 5 then break end
-        local idx, _ = sp_hood:get(j)
-        local uid = sp_hood_ids:get(idx)
-        local li = uid - train.n
-        if not gt_set[li] then
-          str.printf("    %-8d       %.4f    %.4f  <- non-GT\n", li,
-            train.graph_index:similarity(doc_id, uid, cfg.nystrom.decay, cfg.nystrom.bandwidth),
-            spectral_index:similarity(doc_id, uid))
-          shown = shown + 1
-        end
-      end
-      local hits = 0
-      for j = 0, sp_hood:size() - 1 do
-        local idx, _ = sp_hood:get(j)
-        if gt_set[sp_hood_ids:get(idx) - train.n] then hits = hits + 1 end
-      end
-      str.printf("    Retrieval: %d/%d GT in top-%d\n", hits, n_gt, sp_hood:size())
-    end
-
-    print("\nTrimming spectral dims to used dims")
-    local used_dims = encoder:used_dims()
-    local n_used_dims = used_dims:size()
-    str.printf("  %d / %d dims used\n", n_used_dims, spectral_dims)
-    all_raw_codes:mtx_select(used_dims, nil, spectral_dims)
-    train_raw_codes:mtx_select(used_dims, nil, spectral_dims)
-    label_raw_codes:mtx_select(used_dims, nil, spectral_dims)
-    encoder:restrict(used_dims)
-    train.dims = n_used_dims
-
-  end
 
   local predicted_buf = dvec.create()
   local n_selected = cfg.feature_selection.n_selected
@@ -613,7 +388,7 @@ test("eurlex", function()
       ids = post_ids,
       n_samples = post_n,
       n_dims = train.dims,
-      tolerance = cfg.sfbs.post.tolerance,
+      tolerance = cfg.sfbs.tolerance,
       expected_ids = post_sfbs_ids,
       expected_offsets = post_sfbs_off,
       expected_neighbors = post_sfbs_nbr,
@@ -625,8 +400,7 @@ test("eurlex", function()
     })
     post_n_bits = post_encoder:n_bits()
     post_label_codes = post_encoder:encode(label_raw_codes)
-    str.printf("  Post-quantizer: %d bits (pre: %s bits)\n",
-      post_n_bits, bin_n_bits and tostring(bin_n_bits) or "n/a")
+    str.printf("  Post-quantizer: %d bits\n", post_n_bits)
   end
 
   if post_encoder then
@@ -710,30 +484,15 @@ test("eurlex", function()
     print("\n" .. string.rep("=", 60))
     print("SUMMARY")
     print(string.rep("=", 60))
-    str.printf("  Spectral dims: %d  Pre bits: %s  Post bits: %d\n",
-      train.dims, bin_n_bits and tostring(bin_n_bits) or "n/a", post_n_bits)
+    str.printf("  Spectral dims: %d  Post bits: %d\n", train.dims, post_n_bits)
     str.printf("\n  Ranking Accuracy:\n")
     str.printf("                          Train      Dev      Test\n")
     str.printf("    Spectral kernel:     %.4f\n", spectral_metrics.kernel_score)
     str.printf("    Spectral raw:        %.4f\n", spectral_metrics.raw_score)
-    if sp_raw_stats then
-    str.printf("    Spectral train raw:  %.4f\n", sp_raw_stats.score)
-    str.printf("    Spectral train bin:  %.4f\n", sp_bin_stats.score)
-    end
     str.printf("    Predicted raw:       %.4f   %.4f   %.4f\n", train_raw, dev_raw, test_raw)
     str.printf("    Predicted bin:       %.4f   %.4f   %.4f\n", train_bin, dev_bin, test_bin)
-    if sp_entropy then
-    str.printf("\n  Entropy:\n")
-    str.printf("    Spectral train bin:  mean=%.4f min=%.4f max=%.4f std=%.4f\n",
-      sp_entropy.mean, sp_entropy.min, sp_entropy.max, sp_entropy.std)
-    end
     str.printf("\n  Retrieval (labels-only ANN, k=%d, radius=%d):\n", cfg.eval.retrieval_k, cfg.eval.retrieval_radius)
     str.printf("                          micro P    micro R  micro F1   macro P    macro R  macro F1\n")
-    if sp_ret then
-    str.printf("    Spectral train:      %.4f   %.4f   %.4f   %.4f   %.4f   %.4f\n",
-      sp_ret.micro_precision, sp_ret.micro_recall, sp_ret.micro_f1,
-      sp_ret.macro_precision, sp_ret.macro_recall, sp_ret.macro_f1)
-    end
     str.printf("    Predicted train:     %.4f   %.4f   %.4f   %.4f   %.4f   %.4f\n",
       train_ret.micro_precision, train_ret.micro_recall, train_ret.micro_f1,
       train_ret.macro_precision, train_ret.macro_recall, train_ret.macro_f1)
