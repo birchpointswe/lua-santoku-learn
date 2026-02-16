@@ -646,8 +646,15 @@ static inline unsigned int tk_learn_absorb_class (tk_learn_t *tm, unsigned int c
   unsigned int active_pop = (unsigned int)tk_cvec_bits_popcount_serial(active_base, n_tokens);
   bool vocab_exhausted = active_pop >= n_tokens;
 
-  int64_t *rank_base = tm->absorb_ranking_global;
-  unsigned int rank_len = tm->absorb_ranking_global_n;
+  int64_t *rank_base;
+  unsigned int rank_len;
+  if (tm->absorb_ranking_offsets) {
+    rank_base = tm->absorb_ranking + tm->absorb_ranking_offsets[c];
+    rank_len = (unsigned int)(tm->absorb_ranking_offsets[c + 1] - tm->absorb_ranking_offsets[c]);
+  } else {
+    rank_base = tm->absorb_ranking_global;
+    rank_len = tm->absorb_ranking_global_n;
+  }
 
   unsigned int n_replaced = 0;
   for (unsigned int i = 0; i < max_replace; i++) {
