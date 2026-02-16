@@ -153,8 +153,6 @@ test("eurlex-embedding", function ()
   local csc_offsets, csc_indices = csr.to_csc(train.tokens, train.n, n_tokens)
   str.printf("  Tokens: %d  Samples: %d\n", n_tokens, train.n)
 
-  local absorb_ranking_global = ivec.create(n_tokens):fill_indices()
-
   print("\nTraining regressor")
   local predicted_buf = dvec.create()
   local tm = optimize.regressor({
@@ -181,7 +179,6 @@ test("eurlex-embedding", function ()
     csc_indices = csc_indices,
     absorb_ranking = class_feat_ids,
     absorb_ranking_offsets = class_offsets,
-    absorb_ranking_global = absorb_ranking_global,
     targets = train_raw_codes,
     search_trials = cfg.regressor.search_trials,
     search_iterations = cfg.regressor.search_iterations,
