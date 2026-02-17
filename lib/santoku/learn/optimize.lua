@@ -1010,6 +1010,11 @@ M.build_spectral_nystrom = function (args)
       decay = decay,
       bandwidth = bandwidth,
       trace_tol = args.trace_tol,
+      cca_csc_offsets = args.cca_csc_offsets,
+      cca_csc_indices = args.cca_csc_indices,
+      cca_weights = args.cca_weights,
+      cca_ids = args.cca_ids,
+      cca_dims = args.cca_dims,
     })
 
   local effective_dims = encoder and encoder:dims() or 0
@@ -1071,6 +1076,11 @@ M.spectral = function (args)
     each = each_cb,
     train_tokens = args.train_tokens,
     train_ids = args.train_ids,
+    cca_csc_offsets = args.cca_csc_offsets,
+    cca_csc_indices = args.cca_csc_indices,
+    cca_weights = args.cca_weights,
+    cca_ids = args.cca_ids,
+    cca_dims = args.cca_dims,
   })
   local score = nil
   local metrics = nil
