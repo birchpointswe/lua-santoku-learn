@@ -37,7 +37,7 @@ local cfg = {
     n_selected = 8192,
   },
   regressor = {
-    features = { def = 4096, min = 512, max = 4096, pow2 = true },
+    features = 256,
     absorb_interval = 1,
     absorb_threshold = { def = 58, min = 0, max = 256, int = true },
     absorb_maximum = { def = 120, min = 1, max = 256, int = true },
@@ -56,11 +56,11 @@ local cfg = {
     search_subsample_targets = 8,
     final_patience = 2,
     final_batch = 20,
-    final_iterations = 400,
+    final_iterations = 200,
   },
   nystrom = {
     n_landmarks = 4096,
-    n_dims = 64,
+    n_dims = 256,
     decay = 0,
     bandwidth = -1,
   },
@@ -152,7 +152,41 @@ test("eurlex", function()
     str.printf("  Kernel NDCG: %.4f\n", kern.score)
   end
 
-  print("\nRunning spectral embedding (Nystrom)")
+  print("\nTokenizing")
+  local tok = tokenizer.create(cfg.tokenizer)
+  tok:train({ corpus = train.problems })
+  tok:finalize()
+  local n_tokens = tok:features()
+  train.tokens = tok:tokenize(train.problems)
+  dev.tokens = tok:tokenize(dev.problems)
+  test_set.tokens = tok:tokenize(test_set.problems)
+  tok = nil -- luacheck: ignore
+  train.problems = nil
+  dev.problems = nil
+  test_set.problems = nil
+  str.printf("  Vocabulary: %d\n", n_tokens)
+
+  print("\nBNS feature selection")
+  train.solutions:add_scaled(n_labels)
+  local bns_ids, bns_scores = train.tokens:bits_top_bns(
+    train.solutions, train.n, n_tokens, n_labels,
+    cfg.feature_selection.n_bns, nil, "max")
+  train.solutions:add_scaled(-n_labels)
+  train.solutions = nil
+  dev.solutions = nil
+  test_set.solutions = nil
+  train.tokens:bits_select(bns_ids, nil, n_tokens)
+  dev.tokens:bits_select(bns_ids, nil, n_tokens)
+  test_set.tokens:bits_select(bns_ids, nil, n_tokens)
+  n_tokens = bns_ids:size()
+  bns_ids = nil -- luacheck: ignore
+  str.printf("  %d BNS features selected\n", n_tokens)
+
+  print("\nBuilding CSC for CCA")
+  local cca_offsets, cca_indices = csr.to_csc(train.tokens, train.n, n_tokens)
+  str.printf("  CCA tokens: %d  Samples: %d\n", n_tokens, train.n)
+
+  print("\nRunning spectral embedding (Nystrom + CCA)")
   local landmarks_index = train.labels_index
   local model = optimize.spectral({
     index = train.graph_index,
@@ -163,6 +197,11 @@ test("eurlex", function()
     n_dims = cfg.nystrom.n_dims,
     decay = cfg.nystrom.decay,
     bandwidth = cfg.nystrom.bandwidth,
+    cca_csc_offsets = cca_offsets,
+    cca_csc_indices = cca_indices,
+    cca_weights = bns_scores,
+    cca_ids = train.ids,
+    cca_dims = cfg.nystrom.cca_dims,
     expected_ids = train_eval_ids,
     expected_offsets = train_eval_offsets,
     expected_neighbors = train_eval_neighbors,
@@ -171,6 +210,9 @@ test("eurlex", function()
       util.spectral_log(ev)
     end,
   })
+  cca_offsets = nil -- luacheck: ignore
+  cca_indices = nil -- luacheck: ignore
+  bns_scores = nil -- luacheck: ignore
   local spectral_dims = model.dims
   local all_raw_codes = model.raw_codes
   local embedded_ids = model.ids
@@ -205,38 +247,56 @@ test("eurlex", function()
   all_raw_codes = nil -- luacheck: ignore
   embedded_ids = nil -- luacheck: ignore
 
+  do
+    print("\nSpectral retrieval ceiling (ground-truth codes, no regressor)")
+    local gt_raw = dvec.create()
+    gt_raw:copy(train_raw_codes)
+    gt_raw:copy(label_raw_codes)
+    local gt_ids = ivec.create(train.n):fill_indices()
+    gt_ids:copy(train.embedded_label_ids)
+    local gt_n = train.n + n_embedded_labels
+    local gt_sfbs_ids, gt_sfbs_off, gt_sfbs_nbr, gt_sfbs_w = csr.bipartite_neg(
+      train.label_csr.offsets, train.label_csr.neighbors,
+      ivec.create(train.n):fill_indices(), label_node_ids,
+      cfg.sfbs.n_neg,
+      train.graph_index, train.labels_index,
+      cfg.nystrom.decay, cfg.nystrom.bandwidth)
+    local gt_encoder = quantizer.create({
+      raw_codes = gt_raw,
+      ids = gt_ids,
+      n_samples = gt_n,
+      n_dims = spectral_dims,
+      tolerance = cfg.sfbs.tolerance,
+      expected_ids = gt_sfbs_ids,
+      expected_offsets = gt_sfbs_off,
+      expected_neighbors = gt_sfbs_nbr,
+      expected_weights = gt_sfbs_w,
+    })
+    local gt_n_bits = gt_encoder:n_bits()
+    local gt_label_codes = gt_encoder:encode(label_raw_codes)
+    str.printf("  GT quantizer: %d bits\n", gt_n_bits)
+    local gt_label_ann = ann.create({ features = gt_n_bits })
+    gt_label_ann:add(gt_label_codes, train.embedded_label_ids)
+    local gt_train_codes = gt_encoder:encode(train_raw_codes)
+    local gt_expected_nbr = ivec.create():copy(train.label_csr.neighbors):add(train.n)
+    local hood_ids, hoods = gt_label_ann:neighborhoods_by_vecs(
+      gt_train_codes, cfg.eval.retrieval_k, cfg.eval.retrieval_radius)
+    local ks, ret = eval.retrieval_ks({
+      hoods = hoods,
+      hood_ids = hood_ids,
+      expected_offsets = train.label_csr.offsets,
+      expected_neighbors = gt_expected_nbr,
+    })
+    str.printf("  GT Retrieval micro: P=%.4f R=%.4f F1=%.4f\n",
+      ret.micro_precision, ret.micro_recall, ret.micro_f1)
+    str.printf("  GT Retrieval macro: P=%.4f R=%.4f F1=%.4f\n",
+      ret.macro_precision, ret.macro_recall, ret.macro_f1)
+    str.printf("  GT optimal k: min=%d max=%d mean=%.1f\n",
+      ks:min(), ks:max(), ks:sum() / ks:size())
+  end
+
   local predicted_buf = dvec.create()
   local n_selected = cfg.feature_selection.n_selected
-
-  print("\nTokenizing")
-  local tok = tokenizer.create(cfg.tokenizer)
-  tok:train({ corpus = train.problems })
-  tok:finalize()
-  local n_tokens = tok:features()
-  train.tokens = tok:tokenize(train.problems)
-  dev.tokens = tok:tokenize(dev.problems)
-  test_set.tokens = tok:tokenize(test_set.problems)
-  tok = nil -- luacheck: ignore
-  train.problems = nil
-  dev.problems = nil
-  test_set.problems = nil
-  str.printf("  Vocabulary: %d\n", n_tokens)
-
-  print("\nBNS feature selection")
-  train.solutions:add_scaled(n_labels)
-  local bns_ids = train.tokens:bits_top_bns(
-    train.solutions, train.n, n_tokens, n_labels,
-    cfg.feature_selection.n_bns, nil, "max")
-  train.solutions:add_scaled(-n_labels)
-  train.solutions = nil
-  dev.solutions = nil
-  test_set.solutions = nil
-  train.tokens:bits_select(bns_ids, nil, n_tokens)
-  dev.tokens:bits_select(bns_ids, nil, n_tokens)
-  test_set.tokens:bits_select(bns_ids, nil, n_tokens)
-  n_tokens = bns_ids:size()
-  bns_ids = nil -- luacheck: ignore
-  str.printf("  %d BNS features selected\n", n_tokens)
 
   print("\nFeature selection for regressor (F-score)")
   local union_ids, _, class_offsets, class_feat_ids = train.tokens:bits_top_reg_f(
@@ -389,7 +449,9 @@ test("eurlex", function()
     local post_sfbs_ids, post_sfbs_off, post_sfbs_nbr, post_sfbs_w = csr.bipartite_neg(
       train.label_csr.offsets, train.label_csr.neighbors,
       ivec.create(train.n):fill_indices(), label_node_ids,
-      cfg.sfbs.n_neg)
+      cfg.sfbs.n_neg,
+      train.graph_index, train.labels_index,
+      cfg.nystrom.decay, cfg.nystrom.bandwidth)
 
     post_encoder = quantizer.create({
       raw_codes = post_raw,

@@ -402,7 +402,6 @@ static uint64_t tk_sfbs_binary_select(
             tk_sfbs_commit_xor(xor_codes, chunks, (uint64_t)best_bit, distances, n_pairs, 1);
             current_score = best_score;
             added = true;
-            tk_sfbs_report(L, i_each, (int64_t)best_bit, 0, 0, gain, current_score, "bit_add");
           }
         }
         if (!added) {
@@ -416,8 +415,6 @@ static uint64_t tk_sfbs_binary_select(
           tk_sfbs_commit_xor(xor_codes, chunks, (uint64_t)best_bit, distances, n_pairs, 1);
           current_score = best_score;
           phase = 0;
-          tk_sfbs_report(L, i_each, (int64_t)swap_remove_bit, 0, 0, 0, current_score, "bit_swap_remove");
-          tk_sfbs_report(L, i_each, (int64_t)best_bit, 0, 0, best_score - pre_swap_score, current_score, "bit_swap_add");
         } else {
           selected_out[swap_remove_bit] = 1;
           n_selected++;
@@ -486,7 +483,6 @@ static uint64_t tk_sfbs_binary_select(
           tk_sfbs_commit_xor(xor_codes, chunks, (uint64_t)best_bit, distances, n_pairs, 0);
           current_score = best_score;
           phase = 0;
-          tk_sfbs_report(L, i_each, (int64_t)best_bit, 0, 0, gain, current_score, "bit_remove");
         } else {
           swap_remove_bit = best_bit;
           pre_swap_score = current_score;
@@ -869,8 +865,6 @@ static inline int tk_quantizer_create_lua(lua_State *L) {
                   cand_dims[best_cand], cand_thresholds[best_cand],
                   cand_dims, cand_thresholds, cand_bins,
                   cand_selected, &n_candidates, max_candidates, n_sample_bytes);
-                tk_sfbs_report(L, i_each, (int64_t)(n_selected - 1), (int64_t)cand_dims[best_cand],
-                  cand_thresholds[best_cand], gain, current_score, "add");
               }
             }
             if (!added) {
@@ -891,10 +885,6 @@ static inline int tk_quantizer_create_lua(lua_State *L) {
                 cand_dims[best_cand], cand_thresholds[best_cand],
                 cand_dims, cand_thresholds, cand_bins,
                 cand_selected, &n_candidates, max_candidates, n_sample_bytes);
-              tk_sfbs_report(L, i_each, (int64_t)n_selected, (int64_t)cand_dims[swap_remove_cand],
-                cand_thresholds[swap_remove_cand], 0, current_score, "swap_remove");
-              tk_sfbs_report(L, i_each, (int64_t)(n_selected - 1), (int64_t)cand_dims[best_cand],
-                cand_thresholds[best_cand], best_score - pre_swap_score, current_score, "swap_add");
             } else {
               tk_sfbs_commit(cand_bins[swap_remove_cand], pair_row_a, pair_row_b,
                 distances, n_pairs, 1);
@@ -961,8 +951,6 @@ static inline int tk_quantizer_create_lua(lua_State *L) {
               }
               current_score = best_score;
               phase = 0;
-              tk_sfbs_report(L, i_each, (int64_t)n_selected, (int64_t)cand_dims[best_cand],
-                cand_thresholds[best_cand], gain, current_score, "remove");
             } else {
               swap_remove_cand = best_cand;
               pre_swap_score = current_score;

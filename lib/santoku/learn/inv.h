@@ -603,9 +603,10 @@ static inline void tk_inv_neighborhoods (
       touched->n = 0;
       double cutoff = 1.0;
       double min_required_sim = 0.0;
-      double gate = 1.0;
+      double cumulative_weight = 0.0;
       for (uint64_t current_rank = 0; current_rank < n_ranks; current_rank ++) {
-        bool can_prune_new = gate < min_required_sim;
+        double remaining_frac = rw.total > 0.0 ? (rw.total - cumulative_weight) / rw.total : 0.0;
+        bool can_prune_new = remaining_frac < min_required_sim;
         int64_t r_start = u_ro[current_rank];
         int64_t r_end = u_ro[current_rank + 1];
         for (int64_t k = r_start; k < r_end; k ++) {
@@ -657,7 +658,7 @@ static inline void tk_inv_neighborhoods (
           }
           min_required_sim = 1.0 - cutoff;
         }
-        gate *= decay;
+        cumulative_weight += rw.weights[current_rank];
       }
       touched->n = tk_ivec_uasc(touched, 0, touched->n);
       tk_rvec_clear(uhood);
@@ -761,9 +762,10 @@ static inline void tk_inv_neighborhoods_by_ids (
       touched->n = 0;
       double cutoff = 1.0;
       double min_required_sim = 0.0;
-      double gate = 1.0;
+      double cumulative_weight = 0.0;
       for (uint64_t current_rank = 0; current_rank < n_ranks; current_rank ++) {
-        bool can_prune_new = gate < min_required_sim;
+        double remaining_frac = rw.total > 0.0 ? (rw.total - cumulative_weight) / rw.total : 0.0;
+        bool can_prune_new = remaining_frac < min_required_sim;
         int64_t r_start = u_ro[current_rank];
         int64_t r_end = u_ro[current_rank + 1];
         for (int64_t k = r_start; k < r_end; k ++) {
@@ -815,7 +817,7 @@ static inline void tk_inv_neighborhoods_by_ids (
           }
           min_required_sim = 1.0 - cutoff;
         }
-        gate *= decay;
+        cumulative_weight += rw.weights[current_rank];
       }
       touched->n = tk_ivec_uasc(touched, 0, touched->n);
       tk_rvec_clear(uhood);
@@ -967,9 +969,10 @@ static inline void tk_inv_neighborhoods_by_vecs (
       touched->n = 0;
       double cutoff = 1.0;
       double min_required_sim = 0.0;
-      double gate = 1.0;
+      double cumulative_weight = 0.0;
       for (uint64_t current_rank = 0; current_rank < n_ranks; current_rank ++) {
-        bool can_prune_new = gate < min_required_sim;
+        double remaining_frac = rw.total > 0.0 ? (rw.total - cumulative_weight) / rw.total : 0.0;
+        bool can_prune_new = remaining_frac < min_required_sim;
         int64_t r_start = u_ro[current_rank];
         int64_t r_end = u_ro[current_rank + 1];
         for (int64_t k = r_start; k < r_end; k ++) {
@@ -1019,7 +1022,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
           }
           min_required_sim = 1.0 - cutoff;
         }
-        gate *= decay;
+        cumulative_weight += rw.weights[current_rank];
       }
       touched->n = tk_ivec_uasc(touched, 0, touched->n);
       tk_rvec_clear(uhood);
@@ -1339,10 +1342,11 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
     wacc->a[i] = 0.0;
 
   double min_required_sim = 0.0;
-  double gate = 1.0;
+  double cumulative_weight = 0.0;
 
   for (uint64_t current_rank = 0; current_rank < n_ranks; current_rank ++) {
-    bool can_prune_new = gate < min_required_sim;
+    double remaining_frac = rw.total > 0.0 ? (rw.total - cumulative_weight) / rw.total : 0.0;
+    bool can_prune_new = remaining_frac < min_required_sim;
     int64_t r_start = data_ro[current_rank];
     int64_t r_end = data_ro[current_rank + 1];
     for (int64_t i = r_start; i < r_end; i ++) {
@@ -1376,7 +1380,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
         wacc_base[current_rank] += wf;
       }
     }
-    gate *= decay;
+    cumulative_weight += rw.weights[current_rank];
   }
 
   touched->n = tk_ivec_uasc(touched, 0, touched->n);
