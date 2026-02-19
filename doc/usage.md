@@ -5,30 +5,29 @@
 | Module | Role | Reference |
 |---|---|---|
 | `regressor.c` | Regression TM with sparse absorption | [regressor.md](regressor.md) |
-| `optimize.lua` | Adaptive hyperparameter search | [optimize.md](optimize.md) |
+| `ridge.c` | Ridge regression classifier with propensity weighting | -- |
+| `optimize.lua` | GP-BO hyperparameter search for TM, spectral, and ridge | [optimize.md](optimize.md) |
 | `spectral.c` | Nystrom spectral embedding | [pca.md](pca.md) |
-| `quantizer.c` | SFBS binary quantization and thermometer encoding | [ann.md](ann.md) |
+| `quantizer.c` | SFBS binary quantization, ITQ, and thermometer encoding | [ann.md](ann.md) |
 | `evaluator.c` | Ranking, retrieval, classification, regression metrics; bit selection; clustering | [evaluation.md](evaluation.md) |
 | `inv.h` | Rank-weighted inverted index with cosine similarity kernel | [pca.md](pca.md) |
 | `ann.h` | Multi-index hashing ANN for Hamming-distance search | [ann.md](ann.md) |
-| `csr.c` | CSR/CSC utilities: bipartite graphs, negative sampling, symmetrization | — |
-| `dataset.lua` | Data loaders for standard benchmarks | — |
+| `csr.c` | CSR/CSC utilities: bipartite graphs, negative sampling, symmetrization | -- |
+| `gp.c` | Gaussian Process Bayesian Optimization | [optimize.md](optimize.md) |
+| `dataset.lua` | Data loaders for standard benchmarks | -- |
 
 ## Pipeline Patterns
-
-Five pipeline patterns with increasing complexity. Each successive
-pattern incorporates the machinery of the preceding ones.
 
 ### Dense Classification
 
 Single-label classification from pre-binarized features. No sparse mode,
 no spectral embedding. All features fit in a single cvec input vector.
 
-1. Load and binarize features → ivec of set-bit indices per sample.
+1. Load and binarize features -> ivec of set-bit indices per sample.
 2. `bits_select` to extract per-split subsets by sample ID.
 3. `bits_to_cvec` to produce packed Boolean input.
 4. `optimize.regressor` with `solutions` (ivec of class labels). The TM
-   internally converts labels to per-class ±1 regression targets.
+   internally converts labels to per-class +1/-1 regression targets.
 5. `search_metric` calls `tm:classify` + `eval.class_accuracy` on the
    validation split, optimizing macro F1.
 6. Persist, reload, evaluate per-class P/R/F1.
@@ -36,26 +35,24 @@ no spectral embedding. All features fit in a single cvec input vector.
 Dense mode: `features` equals the input dimensionality. No `n_tokens`,
 no CSC index, no absorption parameters.
 
-Reference: `test/spec/santoku/tsetlin/regress/mnist.lua`
+Reference: `test/spec/santoku/learn/regress/mnist.lua`
 
 ### Continuous Regression
 
-Scalar or multi-output regression from continuous features. The SSL
-regressor path is auto-selected when `targets` is a dvec and neither
-`solutions` nor `codes` is provided.
+Scalar or multi-output regression from continuous features via
+thermometer encoding.
 
-1. Load continuous features and targets. Apply quantile thresholding
-   (`n_thresholds` bins per feature) to produce binary features.
-2. `bits_to_cvec` on the thresholded features.
+1. Load continuous features and targets. Apply thermometer encoding
+   (`quantizer.create` with `mode="thermometer"`, `n_bins` bins per
+   feature) to produce dense binary features.
+2. `bits_to_cvec` on the thermometer-encoded features.
 3. `optimize.regressor` with `targets` (dvec). The optimizer detects
-   dvec input and routes to `regressor.c` (SSL TM with 2 input bits per
-   feature: `x > lower` and `x <= upper`, thresholds learned via
-   Stochastic Searching on the Line).
+   dvec input and routes to `regressor.c`.
 4. `search_metric` calls `tm:regress` + `eval.regression_accuracy`,
    optimizing negated NMAE.
 5. Persist, reload, report NMAE and absolute error statistics.
 
-Reference: `test/spec/santoku/tsetlin/regress/housing.lua`
+Reference: `test/spec/santoku/learn/regress/housing.lua`
 
 ### Sparse Text Classification
 
@@ -106,8 +103,8 @@ of a pre-densified cvec. The TM builds a temporary dense buffer per
 inference call, mapping each sample's tokens through each class's
 current mapping.
 
-Reference: `test/spec/santoku/tsetlin/regress/imdb.lua` (binary
-sentiment), `test/spec/santoku/tsetlin/regress/newsgroups.lua`
+Reference: `test/spec/santoku/learn/regress/imdb.lua` (binary
+sentiment), `test/spec/santoku/learn/regress/newsgroups.lua`
 (20-class)
 
 ### Spectral Embedding from Text
@@ -128,19 +125,19 @@ classification.
 
 **Evaluation adjacency construction** (see [below](#evaluation-adjacency-construction)):
 
-4. `index:neighborhoods(k, decay, bandwidth)` → all-vs-all kNN.
+4. `index:neighborhoods(k, decay, bandwidth)` -> all-vs-all kNN.
 5. Convert to CSR, generate random pairs, weight from kernel, merge,
    symmetrize.
 
-This weighted symmetric adjacency serves as ground truth for NDCG
+This weighted symmetric adjacency is the ground truth for NDCG
 evaluation throughout the pipeline.
 
 **Spectral embedding:**
 
 6. `optimize.spectral` with the inv index, evaluation adjacency, and
    optionally searchable `n_landmarks`, `n_dims`, `decay`, `bandwidth`.
-7. Returns `raw_codes` (dvec, n × d), `ids` (ivec), and an encoder
-   for out-of-sample projection.
+7. Returns model with `raw_codes` (dvec, n * d), `ids` (ivec),
+   `encoder`, and `eigenvalues` (dvec, descending order).
 
 **Feature selection (regression pattern):**
 
@@ -165,100 +162,86 @@ typically `fill_indices` (vocabulary order).
     with `raw_codes` mode: cosine distance between predicted embeddings
     vs. ground-truth neighbor weights from the evaluation adjacency.
 
-Reference: `test/spec/santoku/tsetlin/regress/newsgroups_embedding.lua`
+Reference: `test/spec/santoku/learn/regress/newsgroups_embedding.lua`
 
 ### Full XMLC Pipeline
 
-End-to-end extreme multi-label classification. Embeds documents and
-labels jointly via spectral decomposition of a bipartite graph kernel,
-trains a sparse TM to predict document coordinates from bag-of-words,
-then binary-quantizes for Hamming-distance ANN retrieval against label
-codes.
+End-to-end extreme multi-label classification. Embeds documents via
+spectral decomposition of a label similarity kernel, trains a sparse TM
+to predict document embeddings from bag-of-words, then uses a ridge
+regression classifier to map embeddings to label predictions.
 
-**Bipartite graph construction** (see [below](#bipartite-graph-construction)):
+**Tokenization and feature selection:**
 
-1. Create a joint node space: documents as nodes 0..N-1, labels as
-   nodes N..N+L-1.
-2. `bits_bipartite("adjacency")` on the label assignment matrix →
-   per-node feature sets encoding connection patterns.
-3. IDF weighting via `bits_top_df`. Assign 2-rank structure: label-side
-   features at rank 0, document-side features at rank 1. With `decay >
-   0`, label-side features contribute more to similarity.
-4. Build three inv indexes from the same features: `graph_index`
-   (all nodes), `labels_index` (label nodes only), `docs_index`
-   (doc nodes only).
+1. Tokenize text (ngrams, character grams). Apply BNS feature selection
+   via `bits_top_bns`.
 
-**Hard negative index:**
+**Label similarity index:**
 
-5. `bits_bipartite("inherit")` creates a second feature set where nodes
-   inherit neighbors' features. Build a separate inv index on inherited
-   features for hard negative mining during SFBS quantization.
+2. Build label CSR from training label assignments via `bits_to_csr`.
+3. Build a doc-doc inverted index using label co-occurrence as features.
+   Each label becomes a feature with IDF weight
+   `log(n_docs / doc_count_per_label)`. Single-rank structure (all
+   labels at rank 0).
+4. `inv.create({ features = label_idf, ranks = label_ranks, n_ranks = 1 })`
+   followed by `index:add(solutions, ids)` indexes all training
+   documents.
 
-**Evaluation adjacency:**
+**Spectral embedding:**
 
-6. `graph_index:neighborhoods(k, decay, bandwidth)` → kNN from the
-   bipartite graph kernel over all nodes.
-7. Merge with random pairs, symmetrize.
+5. `optimize.spectral` with the label index. RPCholesky selects
+   landmarks from the document population. Documents receive
+   d-dimensional coordinates reflecting label structure.
+6. Extract training spectral codes via `dvec:mtx_extend`. The model
+   also returns `eigenvalues` (dvec) used for per-output hyperparameter
+   modulation.
 
-**Spectral embedding (asymmetric mode):**
+**Feature selection for regressor (F-score):**
 
-8. `optimize.spectral` with `landmarks_index = labels_index`. RPCholesky
-   selects landmarks from the label population. The eigenspace is defined
-   by the label-label kernel. Documents project into this space via
-   cross-similarity to landmarks.
-9. Both documents and labels receive d-dimensional coordinates in the
-   same space. The coordinate system is defined by label structure;
-   document positions reflect relationships to labels.
+7. `bits_top_reg_f` with spectral codes as continuous targets. Per-dim
+   F-score rankings for absorption initialization.
+8. `bits_select` + `csr.bits_select` to remap vocabulary and rankings.
+9. Build CSC index for sparse TM training.
 
-**First SFBS quantization (pre-regressor):**
+**TM regression (text -> spectral codes):**
 
-10. `csr.bipartite_neg` constructs doc→label evaluation edges: GT label
-    edges plus hard negatives from the inherited-features index.
-11. `quantizer.create` on spectral coordinates with the bipartite
-    evaluation adjacency. Selects bits maximizing NDCG for
-    distinguishing GT labels from hard negatives.
-12. Encode label spectral coordinates → binary label codes.
-13. `encoder:used_dims()` identifies referenced spectral dimensions.
-    `mtx_select` trims all embedding matrices to those dimensions.
+10. `optimize.regressor` with `targets` (dvec spectral codes),
+    `output_weights` (eigenvalues for per-dim alpha modulation),
+    `n_tokens`, `features` (searchable), and absorption parameters.
+11. GP-BO searches over `features`, `clauses`, `specificity`,
+    `clause_tolerance_fraction`, `target_fraction`, `alpha_*` params,
+    and absorption parameters.
+12. `search_metric` calls `tm:regress` + `eval.regression_accuracy`,
+    optimizing negated MAE.
+13. Final batched training with early stopping on the full dataset.
 
-This first quantization serves two purposes: producing binary label
-codes for the ANN index, and identifying the relevant spectral subspace
-to reduce the regressor's output dimensionality.
+**Ridge classifier (spectral codes -> labels):**
 
-**Feature selection and TM regression:**
+14. `optimize.ridge` with spectral codes (or TM-predicted codes),
+    label CSR as ground truth, and searchable `lambda`, `propensity_a`,
+    `propensity_b`.
+15. `ridge.precompute` eigendecomposes `X'X` once. Per-trial
+    `ridge.create({gram=...})` computes W via fast dgemm path.
+16. `r:encode(codes, n, k)` returns CSR predictions: `offsets`, `labels`,
+    `scores` (top-k labels per sample sorted by score descending).
+17. `evaluator.retrieval_ks` with `pred_offsets`, `pred_neighbors`,
+    `pred_scores` computes oracle F1 (per-sample optimal k) and
+    threshold-based F1 (global score cutoff maximizing micro F1).
+18. GP-BO optimizes threshold macro F1 over lambda and propensity.
 
-14. Tokenize documents (ngrams, character grams).
-15. `bits_top_reg_f` with trimmed spectral coordinates as targets.
-16. Build CSC index, construct per-class F-score rankings.
-17. `optimize.regressor` with `targets` (trimmed spectral coordinates)
-    in sparse mode.
+**Evaluation:**
 
-**Second SFBS quantization (post-regressor):**
+19. Run ridge on both spectral codes (ceiling) and TM-predicted codes
+    (pipeline) to quantify the TM regression bottleneck.
+20. Report per-dimension regression analysis: MAE, Pearson r, variance
+    ratio by eigenvalue band.
+21. Comparison table: micro/macro F1, oracle micro/macro F1, threshold,
+    time for each approach.
 
-18. Predict raw coordinates for training documents.
-19. Concatenate predicted doc codes + spectral label codes into a single
-    embedding matrix with corresponding IDs.
-20. `quantizer.create` on the combined matrix with the same bipartite
-    evaluation adjacency. This second pass operates on the TM's actual
-    output distribution rather than the oracle spectral coordinates,
-    adapting bit selection to the regressor's approximation quality.
-21. Re-encode label codes through the post-regressor encoder.
+At inference for a new document: tokenize -> BNS select -> sparse TM
+regress -> ridge encode -> threshold score cutoff -> label IDs.
 
-**Retrieval and evaluation:**
-
-22. Build a labels-only ANN index on the final binary label codes.
-23. For each split: predict raw → encode to binary → retrieve from
-    label ANN via `neighborhoods_by_vecs`.
-24. `retrieval_ks` finds per-sample optimal k and computes micro/macro
-    P/R/F1.
-25. `ranking_accuracy` with both `raw_codes` (cosine) and `codes`
-    (Hamming) modes against bipartite evaluation adjacency.
-
-At inference for a new document: tokenize → sparse TM regress →
-SFBS encode → Hamming ANN lookup against label index → retrieve
-label IDs.
-
-Reference: `test/spec/santoku/tsetlin/regress/eurlex.lua`
+Reference: `test/spec/santoku/learn/regress/eurlex.lua`
 
 ## Supporting Patterns
 
@@ -310,73 +293,19 @@ vocabulary-order indices for absorption.
 
 ### Evaluation Adjacency Construction
 
-The kNN + random pairs pattern appears in every embedding pipeline:
+The kNN + random pairs pattern appears in embedding pipelines that
+evaluate with NDCG ranking accuracy:
 
 1. Compute kNN neighborhoods from an inv kernel.
-2. `hoods:to_csr(uids)` → CSR adjacency with kernel-derived weights.
-3. `csr.random_pairs(uids, n_per_node)` → uniform random node pairs.
-4. `csr.weight_from_index(uids, off, nbr, w, index, decay, bw)` →
+2. `hoods:to_csr(uids)` -> CSR adjacency with kernel-derived weights.
+3. `csr.random_pairs(uids, n_per_node)` -> uniform random node pairs.
+4. `csr.weight_from_index(uids, off, nbr, w, index, decay, bw)` ->
    fill random-pair weights from the kernel.
-5. `csr.merge(off, nbr, w, rp_off, rp_nbr, rp_w)` → in-place merge.
-6. `csr.symmetrize(off, nbr, w, n)` → add reverse edges, deduplicate,
+5. `csr.merge(off, nbr, w, rp_off, rp_nbr, rp_w)` -> in-place merge.
+6. `csr.symmetrize(off, nbr, w, n)` -> add reverse edges, deduplicate,
    sort.
 
 Random pairs prevent evaluation metrics from being blind to
 relationships between distant nodes that kNN retrieval would never
 surface. Kernel-weighting ensures distant pairs carry appropriately low
 weights rather than binary presence/absence.
-
-For XMLC evaluation of specific relationships (e.g., doc→label ranking
-quality), `csr.bipartite_neg` constructs directed evaluation edges:
-GT bipartite edges plus a specified number of random or hard negatives
-per node. This is used for SFBS quantization evaluation and for
-doc→label ranking accuracy measurement.
-
-### Bipartite Graph Construction
-
-For XMLC, documents and labels are joint nodes in a single graph:
-
-- `bits_bipartite("adjacency")`: Edges from the label assignment matrix
-  become shared features. Each node's feature set encodes its connection
-  pattern.
-- `bits_bipartite("inherit", source, n_source)`: Nodes inherit features
-  from bipartite neighbors. Documents acquire label features, labels
-  acquire document features. Creates a richer similarity signal for hard
-  negative mining.
-- Two-rank inv index: one rank for document-side features, another for
-  label-side features. With `decay > 0`, the rank weighting controls
-  relative contribution of each node type to similarity.
-- Separate per-type indexes (docs-only, labels-only) enable directional
-  queries: a document's features queried against the labels-only index
-  retrieves candidate labels without document-document interference.
-
-### Asymmetric Spectral Embedding
-
-When `landmarks_index` differs from `index` in `optimize.spectral`,
-RPCholesky selects landmarks from the landmark population (e.g., labels)
-and builds the eigenspace from that population's kernel. Documents
-project into this space via cross-similarity to landmarks. Both node
-types receive coordinates in the same d-dimensional space.
-
-For XMLC: the label population is typically much smaller than the
-document population (e.g., 4K labels vs. 45K documents). Landmark
-selection from labels produces a coordinate system where label structure
-dominates. Documents are positioned relative to labels, which is the
-geometry needed for retrieval.
-
-### Two-Round SFBS Quantization
-
-The XMLC pipeline applies SFBS quantization twice:
-
-**Pre-regressor** (on spectral coordinates): (1) produces binary label
-codes for the ANN index, (2) identifies which spectral dimensions the
-selected bits reference, enabling dimension trimming before regression.
-
-**Post-regressor** (on TM-predicted coordinates + spectral label codes):
-Adapts the final bit selection to the regressor's actual output
-distribution, which may differ from the spectral oracle due to
-approximation error.
-
-Both rounds use the same bipartite doc→label evaluation adjacency
-(GT + hard negatives). SFBS optimizes NDCG for placing GT labels closer
-in Hamming distance than negatives for each document.

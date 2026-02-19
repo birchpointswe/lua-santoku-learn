@@ -2,18 +2,18 @@
 
 ## Overview
 
-`optimize.lua` provides a generic round-based adaptive search engine and
-two domain-specific wrappers: one for TM regression hyperparameters, one
-for Nystrom spectral embedding parameters. Both wrappers share the same
-`M.search` core and sampler infrastructure.
+`optimize.lua` provides a GP-BO (Gaussian Process Bayesian Optimization)
+search engine and three domain-specific wrappers: TM regression
+hyperparameters, Nystrom spectral embedding parameters, and ridge
+regression classifier parameters. All wrappers share the same `M.search`
+core and sampler infrastructure.
 
-The design prioritizes:
-- Reuse of a single TM object across all search trials via `reconfigure`.
-- Adaptive jitter narrowing via the 1/5th success rule.
-- Deduplication to avoid re-evaluating equivalent configurations.
-- Size preference at equal accuracy to bias toward smaller models.
-- Optional subsampling of training data during the search phase.
-- Final training with batched early stopping on the full dataset.
+A single TM object is reused across all search trials via `reconfigure`.
+LHS initialization fills the space before GP-BO takes over. Duplicate
+configurations (by `make_key`) are skipped. At equal accuracy, smaller
+models are preferred. Training data can be subsampled during search.
+Final training uses batched early stopping on the full dataset. Ridge
+precomputes the gram matrix once to avoid per-trial eigendecomposition.
 
 ## Sampler System
 
@@ -30,33 +30,31 @@ parameter is not searchable.
 ### Range
 
 Table with `min`, `max`, and optional `def`, `log`, `int`, `pow2`,
-`round`, `dev`:
-
+`round`, `dev` --
     clauses = { min = 64, max = 512, def = 256, int = true }
     specificity = { min = 1, max = 2000, log = true, def = 100 }
+    features = { def = 4096, min = 512, max = 8192, pow2 = true }
 
 Sampling behavior:
-- **Round 1**: Uniform random over the range (or log-uniform if `log=true`).
-- **Rounds 2+**: Normal distribution centered on the current best value,
-  with variance controlled by the jitter parameter.
-- **Log scale**: Sampling and jitter operate in log space. Non-positive
-  `min` values are shifted so the shifted minimum is 1 before taking logs.
+- **LHS initialization**: The first `2 * n_dims + 1` trials use Latin
+  Hypercube Sampling for space-filling coverage.
+- **GP-guided**: After LHS, `gp.suggest` generates LHS candidate points,
+  evaluates Expected Improvement via GP posterior, and selects the best.
+- **Log scale**: Sampling operates in log space. Non-positive `min`
+  values are shifted so the shifted minimum is 1 before taking logs.
 - **Boundary reflection**: Samples outside `[min, max]` are reflected
   inward (mirrored at the boundary), then clamped as a final guard.
 - **Rounding**: `int=true` rounds to nearest integer. `pow2=true` rounds
   to nearest power of 2. `round=N` rounds to nearest multiple of N.
-  Rounding is applied after reflection but before final clamping.
 - **Per-param deviation**: `dev` overrides the global `search_dev` for
-  this parameter's initial jitter as a fraction of the span.
+  this parameter's jitter as a fraction of the span.
 
-The jitter starts at `(dev or global_dev or 1.0) * span` where span is
-`log(max) - log(min)` for log-scale or `max - min` otherwise. Jitter is
-the standard deviation of the normal distribution used for centered
-sampling.
+Each range sampler provides `normalize(x) -> [0,1]` and
+`denormalize(u) -> original scale` functions for GP-BO normalization.
 
 ### List
 
-Array of discrete values. Uniform random selection, no jitter adaptation.
+Array of discrete values. Uniform random selection.
 
     loss = { "squared", "absolute" }
 
@@ -69,8 +67,7 @@ Array of discrete values. Uniform random selection, no jitter adaptation.
 | `param_names` | Ordered list of parameter names to search over |
 | `samplers` | Table of name -> sampler objects |
 | `trial_fn(params, info)` | Evaluate a configuration; returns (score, metrics, result) |
-| `rounds` | Number of narrowing rounds (default 6) |
-| `trials` | Configurations per round (default 20) |
+| `trials` | Total number of configurations to evaluate (default 120) |
 | `make_key(params)` | Deduplication key function; trials with seen keys are skipped |
 | `constrain(params)` | In-place constraint enforcement before each trial |
 | `size_fn(params)` | Returns a cost vector for size preference |
@@ -79,20 +76,41 @@ Array of discrete values. Uniform random selection, no jitter adaptation.
 | `skip_final` | If true, return best params without re-running the final trial |
 | `rerun_final` | If false, keep the best trial's result as-is (default true) |
 | `each(event)` | Callback for logging/monitoring |
+| `n_candidates` | LHS candidate pool size for GP-BO (default 500) |
+| `n_hyper_restarts` | GP hyperparameter optimization restarts (default 20) |
 
-### Round structure
+### Search structure
 
-Each round:
-1. Sample `trials` configurations. Round 1 samples uniformly; rounds 2+
-   sample centered on the global best.
-2. Skip duplicates (via `make_key`).
-3. Evaluate each non-duplicate via `trial_fn`.
-4. Track per-round and global bests.
-5. Recenter all range samplers on the global best parameters.
-6. Adapt jitter based on the round's success rate.
+1. Identify searchable dimensions (range samplers with normalize/
+   denormalize).
+2. Generate `2 * n_dims + 1` LHS points for initial space-filling
+   exploration.
+3. For trials 1..n_initial: sample from LHS points. Fixed and list
+   params are sampled independently.
+4. For trials n_initial+1..trials: generate `n_candidates` LHS
+   candidate points, evaluate Expected Improvement via
+   `gp.suggest(X_obs, Y_obs, n_dims, candidates, n_candidates,
+   n_hyper_restarts)`, select the candidate with highest EI.
+5. Skip duplicates (via `make_key`).
+6. Evaluate each non-duplicate via `trial_fn`.
+7. Record normalized observation in `X_obs`/`Y_obs` for GP model.
 
-After all rounds, optionally re-run the best configuration as a "final"
+After all trials, optionally re-run the best configuration as a "final"
 trial (signaled via `info.is_final = true` to the trial function).
+
+### GP-BO Module (`gp.c`)
+
+Single function: `gp.suggest(X_dvec, Y_dvec, n_dims, candidates_dvec,
+n_candidates, n_restarts)` -> `ei_dvec`.
+
+- X_dvec: flat `n_obs * n_dims` (normalized [0,1])
+- Y_dvec: `n_obs` scores
+- Matern 5/2 kernel with ARD length scales
+- Cholesky-based inference with auto-jitter on failure
+- Y standardized internally (zero mean, unit variance)
+- Hyperparameter optimization: random restarts maximizing log marginal
+  likelihood
+- Returns Expected Improvement scores for each candidate
 
 ### All-fixed fast path
 
@@ -109,48 +127,29 @@ A new configuration is preferred over the current best when:
   lexicographically smaller.
 
 Cost comparison is element-wise left-to-right. For the TM wrapper, cost
-is `{ clauses }`, so at equal accuracy, fewer clauses wins. For spectral,
-cost is `{ n_dims, n_landmarks, |decay|, |bandwidth| }`.
-
-This biases toward simpler models without sacrificing meaningful accuracy
-gains.
+is `{ clauses, features }`, so at equal accuracy, fewer clauses wins,
+then fewer features. For spectral, cost is `{ n_dims, n_landmarks,
+|decay|, |bandwidth| }`.
 
 ### Deduplication
 
 The `make_key` function maps parameters to a string. Seen keys are
-skipped within a round (counted toward `skip_rate`) and across all
-rounds. The TM wrapper's key rounds `clauses` to the nearest multiple of
-8 and all other parameters to the nearest integer:
+skipped. The TM wrapper's key rounds specificity to `.2f` precision
+and other parameters to nearest integer:
 
-    key = "256|64|128|32|500"  -- clauses|tol|max|target|spec
-    key = "256|64|128|32|500|10|35|64|36"  -- with absorb params
+    key = "4096|4|64|128|32|500.00"  -- features|clauses|tol|max|target|spec
+    key += "|10|35|64|36"            -- with absorb params
+    key += "|1.20|-0.30|0.70|2.10"   -- with alpha params
 
-This prevents wasting trials on configurations that differ only by
-insignificant amounts after rounding.
+### Callback events
 
-### Jitter adaptation
+`each` receives structured event tables:
 
-After each round, the success rate (fraction of non-duplicate trials that
-improved the global best) determines a multiplicative factor applied to
-every range sampler's jitter:
+    { event = "trial", trial, trials, params, score, metrics,
+      global_best_score, phase }
 
-| Success rate | Factor | Interpretation |
-|---|---|---|
-| > 25% | 1.2x | Too conservative, widen |
-| 15-25% | 1.0x | Sweet spot |
-| 5-15% | 0.85x | Moderate shrink |
-| < 5% | 0.7x | Aggressive shrink |
-
-If > 80% of trials were duplicates (high skip rate), the jitter is
-forcibly expanded (1.3x) regardless of success rate, since the search
-space is exhausted at the current resolution. If fewer than 3 non-
-duplicate samples ran, jitter is left unchanged (insufficient signal).
-
-Jitter is clamped to `[0.1x, 2.0x]` of the initial value to prevent
-runaway collapse or explosion.
-
-This is the 1/5th success rule from evolutionary strategies, adapted with
-four bands instead of the classic binary split.
+Where `phase` is `"lhs"` for initial Latin Hypercube trials or `"gp"`
+for GP-guided trials.
 
 ## TM Hyperparameter Search
 
@@ -159,76 +158,100 @@ with TM-specific logic.
 
 ### Searched parameters
 
-Always searched:
-- `clauses` — per-class clause count
-- `clause_tolerance` — max vote contribution per clause
-- `clause_maximum` — literal budget for Type I reward
-- `target` — vote target for regression scaling
-- `specificity` — pattern granularity
+Core parameters (always present):
+- `features` -- input feature slots per class (searchable with `pow2`)
+- `clauses` -- per-class clause count (chunks per polarity, N -> N*16)
+- `clause_maximum` -- literal budget for Type I reward
+- `clause_tolerance_fraction` -- fraction in [0.01, 1.0]; tolerance =
+  `round(fraction * clause_maximum)`
+- `target_fraction` -- fraction in [0.01, 2.0]; target =
+  `round(fraction * 8 * clause_tolerance)`
+- `specificity` -- pattern granularity
 
-Additionally when `n_tokens` is set (sparse mode):
-- `absorb_interval` — iterations between absorption passes
-- `absorb_threshold` — full-state threshold for eligibility
-- `absorb_maximum` — max slot replacements per class per pass
-- `absorb_insert` — initial state for newly streamed TAs
+Sparse mode (when `n_tokens` is set):
+- `absorb_interval` -- iterations between absorption passes
+- `absorb_threshold` -- full-state threshold for eligibility
+- `absorb_maximum` -- max slot replacements per class per pass
+- `absorb_insert_offset` -- offset above threshold for new TA state;
+  `absorb_insert = absorb_threshold + absorb_insert_offset`
 
-Each parameter is specified as a fixed value or a range spec in `args`.
+Per-output modulation (when `output_weights` provided):
+- `alpha_specificity` -- modulates specificity per output dim
+- `alpha_target` -- modulates target per output dim
+- `alpha_tolerance` -- modulates tolerance per output dim
+- `alpha_maximum` -- modulates maximum per output dim
+
+Each is specified as a fixed value or a range spec in `args`. Default
+alpha spec when `output_weights` is provided: `{ min = -3, max = 3,
+def = 0 }` (no modulation at default).
+
+### Per-output modulation
+
+When `output_weights` (dvec, typically eigenvalues) is provided, each
+output dimension gets its own tolerance, maximum, specificity threshold,
+and target via:
+
+    value_for_dim_i = base * exp(alpha * (w_norm_i - 0.5))
+
+where `w_norm_i = (weight_i - min) / (max - min)`. GP-BO can then
+find that leading eigenvalue dimensions need different hyperparameters
+than trailing ones.
 
 ### Spec capping
 
 Before building samplers, range specs are capped to enforce physical
 limits:
-- `clause_tolerance`, `clause_maximum` capped at `2 * features` (total
-  input bits).
+- `clause_maximum` capped at `2 * features` (total input bits).
 - `specificity` capped at `2 * features`.
 - `absorb_maximum` capped at `features` (total slots).
 - `absorb_threshold` capped at `2^(state_bits-1) - 2`.
-- `absorb_insert` capped at `2^(state_bits-1) - 1`.
-
-`cap_spec_max` adjusts the `min`, `max`, and `def` fields of range specs
-in-place to not exceed the cap.
+- `absorb_insert_offset` capped at `2^(state_bits-1) - 1`.
 
 ### Constraint enforcement
 
-`constrain_tm_params` runs before every trial and before final training.
-Invariants enforced in order:
+`constrain_tm_params` runs before every trial and before final training:
 
-1. `clause_tolerance <= 2 * features`, `clause_maximum <= 2 * features`.
-2. `clause_tolerance <= clause_maximum` (swapped if inverted).
-3. `target <= 8 * clause_tolerance`, `target >= 1`.
-4. `specificity <= 2 * features`, `specificity >= 1`.
+1. `clause_maximum <= 2 * features`.
+2. `clause_tolerance = round(clause_tolerance_fraction * clause_maximum)`,
+   clamped to `[1, clause_maximum]`.
+3. `target = round(target_fraction * 8 * clause_tolerance)`, clamped to
+   `[1, 8 * clause_tolerance]`.
+4. `specificity` clamped to `[1, 2 * features]`.
 5. `absorb_maximum <= features`.
 6. `absorb_threshold < 2^(state_bits-1) - 1`.
-7. `absorb_insert > absorb_threshold`, `absorb_insert <= 2^(state_bits-1) - 1`.
+7. `absorb_insert = min(absorb_threshold + absorb_insert_offset,
+   2^(state_bits-1) - 1)`.
+8. Per-class ivecs computed from alphas + output_weights if applicable.
+   Per-class tolerance/maximum ordering and target capping enforced.
 
-These ensure sampled configurations are physically valid without
-discarding them.
+### Target subsampling
+
+`search_subsample_targets` reduces the number of output dimensions
+during search. When set (e.g., 8), a uniformly-spaced subset of dims
+is selected. Rankings are subselected via `select_ranking_segments`.
+`output_weights` are subselected to match. The full set is used for
+final training.
 
 ### Search phase
 
-1. **Subsampling** (`search_subsample`): When set (e.g., 0.2), a random
-   subset of training samples is selected via `fill_indices:shuffle:setn`.
-   For sparse mode: the token CSR is subselected via `bits_select` and a
-   new CSC index is built. For dense mode: the problems cvec is
-   subselected via `bits_select`. Targets/solutions/codes are subselected
-   accordingly. Rankings are shared (not subselected) — they reference
-   the token vocabulary, not sample indices.
+1. **Sample subsampling** (`search_subsample_samples`): When set
+   (e.g., 0.2), a random subset of training samples is selected.
+   For sparse mode: tokens are subselected via `bits_select` and a
+   new CSC index is built. Rankings are shared (not subselected).
 
 2. **Reusable search TM**: A single TM object is created with minimal
-   placeholder parameters (`clauses=8`, etc.) and `reusable=true`. Each
-   trial calls `reconfigure` with the sampled parameters, then
-   `train_tm_simple` for `search_iterations` epochs (default 40). This
-   avoids repeated allocation/deallocation across hundreds of trials.
+   placeholder parameters and `reusable=true`. Each trial calls
+   `reconfigure` with the sampled parameters, then `train_tm_simple`
+   for `search_iterations` epochs (default 40).
 
 3. **Evaluation**: `search_metric(tm, data)` is called after training.
-   Returns `(score, metrics)`. The metric function is caller-provided,
-   typically NDCG, P@k, or MSE on a held-out set.
+   Returns `(score, metrics)`. Caller-provided, typically negated MAE
+   for regression or macro F1 for classification.
 
-4. **No result retention**: The search phase passes `skip_final=true` to
-   `M.search` and returns `nil` as the result from `trial_fn`. The search
-   TM's state is overwritten each trial. Only the best parameters survive.
+4. **No result retention**: The search phase passes `skip_final=true`
+   to `M.search`. Only the best parameters survive.
 
-5. **Cleanup**: The search TM is destroyed after all rounds complete.
+5. **Cleanup**: The search TM is destroyed after all trials complete.
 
 ### Final training
 
@@ -259,71 +282,110 @@ caller.
 
 ## Spectral Embedding Search
 
-`M.spectral(args)` searches over Nystrom spectral embedding parameters
-using the same `M.search` infrastructure.
+`M.spectral(args)` builds a Nystrom spectral embedding. Currently
+operates as a direct builder (no multi-trial search over spectral
+parameters).
 
-### Searched parameters
+### Parameters
 
-- `n_landmarks` — number of landmark points for Nystrom approximation
-- `n_dims` — number of spectral dimensions to retain
-- `decay` — kernel decay parameter for the inverted index similarity
-- `bandwidth` — kernel bandwidth parameter
+- `n_landmarks` -- number of landmark points for Nystrom approximation
+- `n_dims` -- number of spectral dimensions to retain
+- `decay` -- kernel decay parameter for the inverted index similarity
+- `bandwidth` -- kernel bandwidth parameter
 
 Each can be fixed or a range spec.
 
 ### Constraint
 
-`n_dims <= n_landmarks` is enforced before each trial. The number of
-spectral dimensions cannot exceed the landmark count since the rank of
-the Nystrom approximation is bounded by the number of landmarks.
+`n_dims <= n_landmarks` is enforced before each trial.
 
-### Trial function
+### Builder
 
-Each trial builds a full spectral embedding via
-`M.build_spectral_nystrom`, then evaluates ranking accuracy via
-`M.score_spectral_eval` (NDCG against ground-truth neighbor lists).
-Requires `expected_ids`, `expected_offsets`, `expected_neighbors`,
-`expected_weights` in `args` to have something to evaluate against.
+`M.build_spectral_nystrom` calls `spectral.encode` with the inv index
+and parameters. Returns a model table with `raw_codes`, `ids`, `dims`,
+`encoder`, `eigenvalues`, `landmark_ids`, `n_landmarks`, `decay`,
+`bandwidth`.
 
-### Size preference
+### Evaluation (optional)
 
-Cost vector is `{ n_dims, n_landmarks, |decay|, |bandwidth| }`. At equal
-NDCG: fewer dimensions, then fewer landmarks, then smaller kernel
-parameters.
-
-### No-search fast path
-
-If no parameter is a range spec, or if no evaluation data is provided, or
-`rounds=0`: builds the embedding once with the fixed/default values and
-returns it directly. Optionally evaluates if expected data is available.
+When `expected_ids`, `expected_offsets`, `expected_neighbors`,
+`expected_weights`, and `ranking` are provided, `M.score_spectral_eval`
+evaluates ranking accuracy via NDCG against ground-truth neighbor lists.
+Both raw_codes (cosine) and optionally kernel_index scores are computed.
 
 ### Cleanup
 
-Superseded spectral models are destroyed via `M.destroy_spectral`, which
-frees `raw_codes`, `ids`, `landmark_ids`, `eigenvectors`, `eigenvalues`,
-`landmark_chol`, and `col_means`.
+`M.destroy_spectral` frees `raw_codes`, `ids`, `landmark_ids`,
+`eigenvectors`, `eigenvalues`, `landmark_chol`, and `col_means`.
 
-The final model is returned with `rerun_final=false` — the best trial's
-model is kept as-is since spectral embedding is deterministic for given
-parameters.
+## Ridge Regression Search
+
+`M.ridge(args)` searches over ridge regression classifier
+hyperparameters using the same `M.search` infrastructure.
+
+### Searched parameters
+
+- `lambda` -- L2 regularization strength
+- `propensity_a` -- propensity weighting exponent for tail labels
+- `propensity_b` -- propensity weighting offset
+
+Each can be fixed or a range spec.
+
+### Precomputed gram matrix
+
+Before the search loop, `ridge.precompute(data)` eigendecomposes
+`X'X = Q Λ Q'` once and stores `Q`, eigenvalues, `Q'X'Y`, and per-label
+counts. This is the dominant cost (d² eigendecomposition).
+
+Per-trial `ridge.create({gram=gram, lambda=, propensity_a=,
+propensity_b=})` computes `W = Q * diag(1/(λ_i + λ)) * Q'X'Y_prop`
+via a single dgemm. This is ~2.2x faster than per-trial Cholesky+solve
+for d=4096, 30-trial search.
+
+### Input modes
+
+**Dense mode**: `codes` (dvec) + `n_dims`. XtX via `cblas_dsyrk`.
+
+**Sparse mode**: `feature_offsets` + `feature_indices` + `n_features`
+(+ optional `feature_weights`). XtX via outer product accumulation.
+Encode uses `cblas_daxpy` for SIMD inner loop.
+
+### Trial function
+
+Each trial:
+1. `ridge.create({gram=gram, lambda=, propensity_a=, propensity_b=})`
+2. `r:encode(codes, n_samples, k)` -> `pred_offsets`, `pred_neighbors`,
+   `pred_scores` (CSR, top-k labels per sample sorted by score desc)
+3. `evaluator.retrieval_ks({pred_offsets, pred_neighbors, pred_scores,
+   expected_offsets, expected_neighbors})` -> `ks`, `oracle`, `thresh`
+4. Return `{oracle=oracle, thresh=thresh}` as metrics
+
+### Score function
+
+Default: `score_fn(ret) = ret.thresh.macro_f1` -- optimizes the
+achievable threshold-based macro F1 (not oracle). Can be overridden via
+`args.score_fn`.
+
+### Return values
+
+Returns 3 values (from `M.search`):
+1. Best ridge model (userdata) or nil
+2. Best parameters table `{ lambda, propensity_a, propensity_b }`
+3. Best metrics table `{ oracle = {...}, thresh = {...} }`
 
 ## Callback Protocol
 
-Both wrappers accept an `each` callback that receives structured event
-tables.
-
-TM search events flow through to the callback directly:
-- `each(tm, is_final, metrics, params, epochs, round, trial, rounds, trials, global_best, local_best)` — called after each batch of training.
+TM search events:
+- `each(ev)` where `ev = { tm, is_final, metrics, params, epoch,
+  trial, trials, global_best_score, best_epoch_score, phase }`.
+  Called after each training batch (search and final).
 - Return `false` to abort the current training run.
 
-Spectral search events are wrapped:
-- `{ event = "sample", round, trial, ... }` — before each trial.
-- `{ event = "eval", round, trial, score, metrics, ... }` — after each trial.
-- `{ event = "round_end", round, ... }` — after each round with
-  adaptation stats.
-- `{ event = "done", best_params, best_score, best_metrics }` — search
-  complete.
+Ridge search events flow through `M.search` --- `{ event = "trial", trial, trials, params, score, metrics,
+  global_best_score, phase }`
 
-The generic `M.search` also emits `{ event = "trial" }` and
-`{ event = "round" }` events to its own `each` callback, which the
-spectral wrapper translates into the domain-specific format above.
+Spectral events:
+- `{ event = "spectral_result", n_dims, n_landmarks, trace_ratio }`
+- `{ event = "eval", score, metrics, ... }` (when evaluation data
+  provided)
+- `{ event = "done", best_params, best_score, best_metrics }`
