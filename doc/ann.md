@@ -107,6 +107,33 @@ per-node NDCG reduction.
 
 A second pruning pass follows, operating on the re-encoded selected bits.
 
+## ITQ Quantization
+
+`quantizer.create` with `mode = "itq"`. Iterative Quantization produces
+binary codes via centered alternating sign+SVD rotation.
+
+Algorithm:
+1. Center input: subtract column means.
+2. Alternate for `iterations` rounds (default 50):
+   a. Binary codes B = sign(X * R)
+   b. SVD of B' * X -> rotation R = V * U'
+3. Final codes: sign(X_centered * R)
+
+Uses all input dimensions (k = n_dims). No dimension selection or
+weighting -- the answer was always "max out k".
+
+Parameters:
+- `raw_codes` (dvec): continuous embeddings
+- `n_samples`: number of samples
+- `iterations` (optional): rotation iterations (default 50)
+
+Encoder: `encode(raw_dvec)` -> cvec (center -> rotate -> sign).
+Methods: `n_bits()`, `persist()`.
+
+Persist format: magic `TKqi` + version 1 + k + rotation (dvec) + means
+(dvec). `quantizer.load` dispatches on magic: `TKqi` -> ITQ, `TKqt` ->
+SFBS.
+
 ## Thermometer Quantization
 
 `quantizer.create` with `mode = "thermometer"`. Produces one bit per
@@ -138,30 +165,30 @@ output bit k (thresholds are unused, stored as 0.0).
 
 ### Methods
 
-- `encoder:encode(input [, out])` — input is dvec (continuous) or cvec
+- `encoder:encode(input [, out])` -- input is dvec (continuous) or cvec
   (binary). Returns cvec of `n_samples * ceil(n_bits/8)` bytes.
   Parallelized with `omp parallel for schedule(static)`.
 
-- `encoder:n_bits()` — returns number of output bits.
+- `encoder:n_bits()` -- returns number of output bits.
 
-- `encoder:n_dims()` — returns number of input dimensions.
+- `encoder:n_dims()` -- returns number of input dimensions.
 
-- `encoder:dims()` — returns the bit_dims ivec.
+- `encoder:dims()` -- returns the bit_dims ivec.
 
-- `encoder:thresholds()` — returns the bit_thresholds dvec.
+- `encoder:thresholds()` -- returns the bit_thresholds dvec.
 
-- `encoder:used_dims()` — returns sorted unique ivec of source dimensions
+- `encoder:used_dims()` -- returns sorted unique ivec of source dimensions
   referenced by the selected bits.
 
-- `encoder:restrict(kept_dims)` — remaps bit_dims to new indices defined
+- `encoder:restrict(kept_dims)` -- remaps bit_dims to new indices defined
   by `kept_dims`. Bits referencing dimensions not in `kept_dims` are
   dropped. Updates `n_bits` and `n_dims`. Used when the upstream
   embedding is restricted to fewer dimensions.
 
-- `encoder:restrict_bits(kept_bits)` — keeps only the bits at the given
+- `encoder:restrict_bits(kept_bits)` -- keeps only the bits at the given
   indices. Compacts bit_dims and bit_thresholds in-place.
 
-- `encoder:persist(path_or_true)` — serialize to file or string.
+- `encoder:persist(path_or_true)` -- serialize to file or string.
 
 ### Persist Format
 
@@ -183,10 +210,10 @@ exact and approximate Hamming-distance search over binary codes.
 |---|---|
 | `features` | number of bits per code |
 | `m` | number of hash tables = `ceil(features / 16)` |
-| `tables` | array of m hash maps (uint32 key → ivec of SIDs) |
+| `tables` | array of m hash maps (uint32 key -> ivec of SIDs) |
 | `vectors` | cvec of all stored binary codes, contiguous |
-| `uid_sid` | iumap: user ID → internal slot ID |
-| `sid_to_uid` | ivec: slot ID → user ID (-1 if deleted) |
+| `uid_sid` | iumap: user ID -> internal slot ID |
+| `sid_to_uid` | ivec: slot ID -> user ID (-1 if deleted) |
 
 Each hash table indexes a 16-bit substring (`TK_ANN_SUBSTR_BITS = 16`)
 of the binary code. Table `ti` covers bits `[ti*16, ti*16+16)` (the last
@@ -246,16 +273,16 @@ by more than r bits in every substring, so its total distance is at least
 Three bulk query methods, all parallelized with
 `omp parallel for schedule(guided)`:
 
-**`neighborhoods(k, radius)`** — all-vs-all. Queries every indexed code
+**`neighborhoods(k, radius)`** -- all-vs-all. Queries every indexed code
 against all others. Returns `(hoods, uids)` where `hoods` is a vec of
 pvecs and `uids` is the corresponding ID ordering. Hood entries are
 `(positional_index, hamming_distance)`.
 
-**`neighborhoods_by_ids(query_ids, k, radius)`** — subset query. Queries
+**`neighborhoods_by_ids(query_ids, k, radius)`** -- subset query. Queries
 only the specified UIDs. UIDs not in the index are filtered. Returns
 `(hoods, all_uids)` with positional indices into `all_uids`.
 
-**`neighborhoods_by_vecs(query_vecs, k, radius)`** — external query.
+**`neighborhoods_by_vecs(query_vecs, k, radius)`** -- external query.
 Queries arbitrary binary codes not necessarily in the index. No self-skip.
 Returns `(hoods, all_uids)` with positional indices into `all_uids`.
 
@@ -264,7 +291,7 @@ All three use `tk_ann_prepare_universe_map` to build a positional index
 entries use positional indices (not UIDs directly); dereference via the
 returned `uids` ivec.
 
-**`neighbors(id_or_vec, k, radius, out)`** — single query returning a
+**`neighbors(id_or_vec, k, radius, out)`** -- single query returning a
 pvec of `(uid, hamming_distance)` pairs, sorted ascending by distance.
 
 ### Similarity and Distance
@@ -296,8 +323,8 @@ sid_to_uid (ivec), vectors byte count and raw bytes.
 
 | Parameter | Role | Default |
 |---|---|---|
-| `raw_codes` | Continuous embeddings (dvec), mutually exclusive with codes | — |
-| `codes` | Binary codes (cvec), mutually exclusive with raw_codes | — |
+| `raw_codes` | Continuous embeddings (dvec), mutually exclusive with codes | --|
+| `codes` | Binary codes (cvec), mutually exclusive with raw_codes | --|
 | `n_samples` | Number of samples | required |
 | `n_dims` | Input dimensionality | required |
 | `target_bits` | Maximum output bits | n_dims |

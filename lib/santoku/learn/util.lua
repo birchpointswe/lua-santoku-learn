@@ -224,7 +224,6 @@ function M.spectral_log (info)
     if m.binary_score then scores[#scores + 1] = str.format("bin=%.4f", m.binary_score) end
     str.printf("[SPECTRAL]   -> eval: %s\n", table.concat(scores, " "))
   elseif info.event == "done" then
-    print(string.rep("-", 50))
     local p = info.best_params or {}
     local m = info.best_metrics or {}
     local scores = {}
