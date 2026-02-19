@@ -38,7 +38,7 @@ Clause output is not strict Boolean AND. The vote for a clause is:
   zero. A clause fires (contributes to the chunk vote) when this is positive.
 
 `n_included` is the popcount of the action bits. `n_failed` is the popcount
-of `action & ~input` — included literals whose input is 0.
+of `action & ~input` -- included literals whose input is 0.
 
 This is a soft/fuzzy evaluation: a clause with 10 included literals and 2
 failures still fires with vote 8 (assuming tolerance >= 10). The
@@ -66,11 +66,11 @@ The `want_more` flag (chunk_vote < ideal) selects the feedback type:
 ### Positive feedback (want_more = true)
 
 When the clause fires and is below the literal budget:
-`tk_automata_inc(clause, input)` — increment all TAs where the input bit is
+`tk_automata_inc(clause, input)` -- increment all TAs where the input bit is
 1. Rewards Include for matching literals.
 
 Then unconditionally when the clause fires:
-`tk_automata_dec_not_excluded(clause, input)` — decrement TAs where both
+`tk_automata_dec_not_excluded(clause, input)` -- decrement TAs where both
 the input bit and the action bit are 0. Penalizes Include (rewards Exclude)
 for non-matching, currently-excluded literals.
 
@@ -83,7 +83,7 @@ finer-grained patterns.
 ### Negative feedback (want_more = false)
 
 When the clause fires:
-`tk_automata_inc_not_excluded(clause, input)` — increment excluded TAs
+`tk_automata_inc_not_excluded(clause, input)` -- increment excluded TAs
 where the input bit is 0 (`~input & ~actions`). Forces inclusion of
 literals that would block the clause from firing on this input.
 
@@ -123,7 +123,7 @@ vocabulary of `n_tokens`:
     mapping[class * features + slot] -> token_id
 
 An `active` bitmap (per class, `ceil(n_tokens / 8)` bytes) tracks which
-tokens are currently mapped. This allows O(1) collision checks during
+tokens are currently mapped, giving O(1) collision checks during
 mapping initialization and absorption replacement.
 
 ### Densification
@@ -223,7 +223,7 @@ the max_states and eligible arrays. Allocated once at creation based on
 
 | Parameter | Role | Typical range |
 |---|---|---|
-| `clauses` | Per-class clause count (rounded up to multiple of 16) | 64-512 |
+| `clauses` | Per-class clause count (chunks per polarity, N -> N*16) | 1-32 |
 | `clause_tolerance` | Max vote contribution per clause | 8-1024 |
 | `clause_maximum` | Max literals receiving Type I reward | 8-1024 |
 | `target` | Vote target for regression scaling | 8-1024 |
@@ -238,6 +238,40 @@ the max_states and eligible arrays. Allocated once at creation based on
 order. Both are capped at `2 * features` (total input bits). Target is
 capped at `8 * clause_tolerance` during optimization. Specificity is capped
 at `2 * features`.
+
+Specificity threshold computation uses float division:
+`specificity_threshold = (unsigned int)((2.0 * features) / specificity)`.
+
+## Per-Output Hyperparameters
+
+When `output_weights` (dvec, typically eigenvalues from spectral
+embedding) is provided at training time, each output dimension receives
+its own tolerance, maximum, specificity threshold, and target via
+exponential modulation:
+
+    value_for_dim_i = base * exp(alpha * (w_norm_i - 0.5))
+
+where `w_norm_i = (weight_i - w_min) / (w_max - w_min)` normalizes
+the weight to [0,1].
+
+Four alpha parameters control modulation strength:
+- `alpha_tolerance` -- modulates clause_tolerance per dim
+- `alpha_maximum` -- modulates clause_maximum per dim
+- `alpha_specificity` -- modulates specificity per dim
+- `alpha_target` -- modulates target per dim
+
+Alpha = 0 means no modulation (all dims get the base value). Positive
+alpha gives higher values to dims with larger weights (leading
+eigenvalues). Negative alpha gives higher values to dims with smaller
+weights (trailing eigenvalues).
+
+Per-dim values are stored as ivec arrays (`per_class_tolerances`,
+`per_class_maximums`, `per_class_spec_thresholds`, `per_class_targets`)
+in the TM struct. Ordering constraints are enforced per-dim:
+tolerance <= maximum, target <= 8 * tolerance.
+
+When `output_weights` is nil, no per-class ivecs are created and the
+scalar parameters broadcast to all classes (backward compatible).
 
 ## Inference
 
@@ -277,7 +311,7 @@ available for the training set.
 ## Checkpoint and Restore
 
 `checkpoint` saves actions + mapping into a cvec buffer. Does not save
-counter state planes — only action bits (sufficient for inference) and the
+counter state planes -- only action bits (sufficient for inference) and the
 mapping (needed for sparse routing). `restore` recovers both, rebuilds the
 active bitmap from the mapping, and re-densifies if a managed buffer exists.
 
@@ -292,7 +326,7 @@ reallocating the Lua userdata. Requires `reusable=true` at creation.
 Reallocates state and action arrays if the new configuration needs more
 memory (never shrinks allocations). Resets all sparse mode bookkeeping:
 clears managed_dense, active bitmap, and cursors. Rankings are preserved
-across reconfigure — they are owned memory that persists until destroy.
+across reconfigure -- they are owned memory that persists until destroy.
 
 Used by the hyperparameter search to run many configurations with a single
 TM object: `reconfigure` then `train` on each trial, avoiding repeated

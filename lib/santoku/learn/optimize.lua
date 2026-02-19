@@ -1010,11 +1010,6 @@ M.build_spectral_nystrom = function (args)
       decay = decay,
       bandwidth = bandwidth,
       trace_tol = args.trace_tol,
-      cca_csc_offsets = args.cca_csc_offsets,
-      cca_csc_indices = args.cca_csc_indices,
-      cca_weights = args.cca_weights,
-      cca_ids = args.cca_ids,
-      cca_dims = args.cca_dims,
     })
 
   local effective_dims = encoder and encoder:dims() or 0
@@ -1076,11 +1071,6 @@ M.spectral = function (args)
     each = each_cb,
     train_tokens = args.train_tokens,
     train_ids = args.train_ids,
-    cca_csc_offsets = args.cca_csc_offsets,
-    cca_csc_indices = args.cca_csc_indices,
-    cca_weights = args.cca_weights,
-    cca_ids = args.cca_ids,
-    cca_dims = args.cca_dims,
   })
   local score = nil
   local metrics = nil
@@ -1106,6 +1096,65 @@ M.spectral = function (args)
     each_cb({ event = "done", best_params = params, best_score = score, best_metrics = metrics })
   end
   return model, params
+end
+
+M.ridge = function (args)
+  local ridge = require("santoku.learn.ridge")
+  local param_names = { "lambda", "propensity_a", "propensity_b" }
+  local samplers = M.build_samplers(args, param_names)
+  local k = args.k or 32
+  local each_cb = args.each
+  local score_fn = args.score_fn or function (ret) return ret.thresh.macro_f1 end
+  local is_sparse = args.feature_offsets ~= nil
+  local ga = {
+    n_samples = args.n_samples,
+    n_labels = args.n_labels,
+    label_offsets = args.label_offsets,
+    label_neighbors = args.label_neighbors,
+  }
+  if is_sparse then
+    ga.feature_offsets = args.feature_offsets
+    ga.feature_indices = args.feature_indices
+    ga.n_features = args.n_features
+    ga.feature_weights = args.feature_weights
+  else
+    ga.codes = args.codes
+    ga.n_dims = args.n_dims
+  end
+  local gram = ridge.precompute(ga)
+  local function trial_fn (params, info)
+    local r = ridge.create({
+      gram = gram,
+      lambda = params.lambda,
+      propensity_a = params.propensity_a,
+      propensity_b = params.propensity_b,
+    })
+    local pred_off, pred_nbr, pred_scores
+    if is_sparse then
+      pred_off, pred_nbr, pred_scores = r:encode(args.feature_offsets, args.feature_indices, args.n_samples, k)
+    else
+      pred_off, pred_nbr, pred_scores = r:encode(args.codes, args.n_samples, k)
+    end
+    local _, oracle, thresh = evaluator.retrieval_ks({
+      pred_offsets = pred_off,
+      pred_neighbors = pred_nbr,
+      pred_scores = pred_scores,
+      expected_offsets = args.expected_offsets,
+      expected_neighbors = args.expected_neighbors,
+    })
+    local ret = { oracle = oracle, thresh = thresh }
+    return score_fn(ret), ret, info.is_final and r or nil
+  end
+  return M.search({
+    param_names = param_names,
+    samplers = samplers,
+    trials = args.search_trials or 30,
+    trial_fn = trial_fn,
+    each = each_cb,
+    make_key = function (p)
+      return key_float2(p.lambda) .. "|" .. key_float2(p.propensity_a) .. "|" .. key_float2(p.propensity_b)
+    end,
+  })
 end
 
 return M

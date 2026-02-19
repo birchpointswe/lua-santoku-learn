@@ -151,15 +151,15 @@ cross-similarity: their kernel vector against the landmark set is
 computed using `inv`'s kernel function, then projected through the
 precomputed projection matrix.
 
-This enables embedding one population (e.g., documents) into the
-eigenspace of another population (e.g., labels or a bipartite graph's
-node set). The landmark kernel defines the coordinate system; the cross-
+One population (e.g., documents) is embedded into the eigenspace of
+another (e.g., labels or a bipartite graph's node set). The landmark kernel defines the coordinate system; the cross-
 similarity defines how new samples project into it.
 
 ## Encoder Object
 
-`tm_encode` returns three values: the training embeddings (dvec, n*d),
-the corresponding UIDs (ivec, n), and a `tk_nystrom_encoder_t` userdata.
+`tm_encode` returns four values: the training embeddings (dvec, n*d),
+the corresponding UIDs (ivec, n), a `tk_nystrom_encoder_t` userdata,
+and the eigenvalues (dvec, d, in descending order).
 
 The encoder stores:
 
@@ -179,22 +179,22 @@ evaluation at encode time.
 
 ### Methods
 
-- `encoder:encode(sparse_bits, n_samples, n_features)` — encode new
+- `encoder:encode(sparse_bits, n_samples, n_features)` -- encode new
   samples. Input is a flat ivec of `sample_index * n_features + feature_id`
   packed entries (same format as inv:get with multiple UIDs). For each
   sample: binary-search to extract its features, partition by rank,
   compute similarity to each landmark, project via gemv, subtract
   adjustment. Parallelized with OpenMP (dynamic scheduling, chunk 16).
 
-- `encoder:dims()` — returns d.
+- `encoder:dims()` -- returns d.
 
-- `encoder:n_landmarks()` — returns m.
+- `encoder:n_landmarks()` -- returns m.
 
-- `encoder:landmark_ids()` — returns the landmark UID ivec.
+- `encoder:landmark_ids()` -- returns the landmark UID ivec.
 
-- `encoder:trace_ratio()` — returns remaining/initial trace ratio.
+- `encoder:trace_ratio()` -- returns remaining/initial trace ratio.
 
-- `encoder:persist(path_or_true)` — serialize to file or string. Format:
+- `encoder:persist(path_or_true)` -- serialize to file or string. Format:
   magic `TKny`, version byte (1), m, d, bandwidth, decay, trace_ratio,
   projection (m*d doubles), adjustment (d doubles), lm_sids (m int64s),
   landmark_ids ivec.
@@ -214,5 +214,5 @@ encode calls.
 | `decay` | Rank weight decay (0 = equal ranks) | 0.0 |
 | `bandwidth` | RBF kernel bandwidth (-1 = raw cosine) | -1.0 |
 | `trace_tol` | Early stopping: stop when trace ratio falls below this | 1e-15 |
-| `inv` | Feature inverted index (required) | — |
+| `inv` | Feature inverted index (required) | --|
 | `landmarks_inv` | Landmark inverted index (optional, defaults to inv) | inv |

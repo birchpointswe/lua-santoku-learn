@@ -2,7 +2,7 @@
 
 ## Overview
 
-`evaluator/capi.c` provides evaluation metrics for classification,
+`evaluator.c` provides evaluation metrics for classification,
 regression, encoding, and retrieval; greedy bit/dimension selection
 optimizing ranking quality; and graph-constrained agglomerative
 clustering with dendrogram output.
@@ -33,6 +33,21 @@ statistics over a dvec of predictions against dvec or ivec targets.
 
 Returns `{ total, mean, min, max, std, nmae }` where `nmae = mean / mean(expected)`.
 
+## Regression Per-Dimension
+
+`regression_per_dim(predicted, expected, n_samples, n_dims)` computes
+per-dimension regression statistics for multi-output models. For each
+dimension independently:
+
+- **MAE**: mean absolute error
+- **Pearson r**: linear correlation between predicted and expected
+- **Variance ratio**: `var(predicted) / var(expected)`
+
+Parallelized across dimensions with `omp parallel for`.
+
+Returns `{ mae = dvec, corr = dvec, var_ratio = dvec }` where each dvec
+has `n_dims` elements.
+
 ## Retrieval Accuracy
 
 `retrieval_accuracy({ hoods, hood_ids, expected_offsets, expected_neighbors })`
@@ -47,13 +62,56 @@ Returns micro and macro precision, recall, and F1.
 
 ## Retrieval with Optimal k
 
-`retrieval_ks({ hoods, hood_ids, expected_offsets, expected_neighbors })`
-finds the per-sample k that maximizes F1. For each sample, walks the
-sorted hood from k=1 to hood_size, tracking cumulative TP, and records
-the k with the highest F1.
+`retrieval_ks(args)` finds per-sample optimal k and optionally computes
+a global score threshold maximizing micro F1.
 
-Returns micro/macro P/R/F1 at optimal k, plus an ivec of per-sample
-best-k values.
+### Input modes
+
+Three input modes:
+
+| Mode | Fields | Source |
+|---|---|---|
+| `inv_hoods` | `hoods` (inv_hoods), `hood_ids` (ivec) | Inverted index neighborhoods |
+| `ann_hoods` | `hoods` (ann_hoods), `hood_ids` (ivec) | ANN neighborhoods |
+| CSR predictions | `pred_offsets` (ivec), `pred_neighbors` (ivec), optional `pred_scores` (dvec) | Ridge classifier output |
+
+Ground truth is always `expected_offsets` (ivec) + `expected_neighbors`
+(ivec) in CSR format.
+
+### Oracle metrics (always computed)
+
+For each sample, walks predictions from position 1 to hood_size,
+tracking cumulative TP. Records the k with the highest F1 per sample.
+Aggregates micro and macro precision/recall/F1 at each sample's
+optimal k.
+
+### Threshold metrics (when `pred_scores` provided)
+
+Finds the global score threshold maximizing micro F1 across all samples.
+Algorithm:
+
+1. Build an `is_tp` bitmap during the oracle walk marking each
+   prediction as true positive or false positive.
+2. Construct two dvecs: `all_scores` (all prediction scores) and
+   `tp_scores` (scores of true positives only).
+3. Sort both descending via `tk_dvec_desc`.
+4. Two-pointer group walk: process score groups (ties) from highest to
+   lowest. At each score level, count how many total predictions and how
+   many TPs have scores >= threshold. Compute micro F1. Track the best.
+5. At the best threshold: parallel loop over samples computing
+   per-sample precision/recall/F1 for predictions with score >=
+   threshold.
+
+### Return values
+
+Returns 3 values:
+
+1. `ks` (ivec): per-sample optimal k values
+2. Oracle metrics table: `{ micro_precision, micro_recall, micro_f1,
+   macro_precision, macro_recall, macro_f1 }`
+3. Threshold metrics table (or nil if no `pred_scores`):
+   `{ threshold, micro_precision, micro_recall, micro_f1,
+   macro_precision, macro_recall, macro_f1 }`
 
 ## Ranking Accuracy
 
@@ -242,7 +300,7 @@ Repeat while the heap is non-empty and more than one cluster remains:
 each member to its cluster's centroid code:
 `mean(1 - hamming(member, centroid) / n_bits)`.
 
-**AUC** (`tk_cluster_compute_auc`, optional — requires expected
+**AUC** (`tk_cluster_compute_auc`, optional -- requires expected
 offsets/neighbors/weights): For each sample's expected neighbor list,
 examines all pairs of neighbors where one is in the same cluster and the
 other is not. AUC = fraction of such pairs where the same-cluster
@@ -282,12 +340,12 @@ assignments at a given step of the dendrogram.
 1. Initialize assignments from `offsets[0..n_samples-1]` (initial
    cluster IDs).
 2. Apply merges from steps 0 through `step-1`: build an
-   `absorbed → surviving` map.
+   `absorbed -> surviving` map.
 3. For each sample, follow the merge chain to find its final cluster
    (chain limit 10,000 hops).
 4. Remap final cluster IDs to dense `0..k-1`.
 
-Returns `(cluster_members, cluster_offsets, assignments)` — the members
+Returns `(cluster_members, cluster_offsets, assignments)` -- the members
 are in CSR format indexed by cluster ID.
 
 ## Dendrogram Iterator
@@ -302,8 +360,7 @@ by level.
 **`all_merges = true`**: Each step is a single merge or a batch of merges
 at the same distance producing clusters of the same size. Within a
 distance level, merges that produce different-sized clusters are yielded
-as separate steps. This provides finer granularity for monitoring the
-clustering process.
+as separate steps, giving finer granularity than distance-level steps.
 
 The iterator maintains incremental state: an `absorbed_to_surviving` map
 and per-sample raw assignments. At each step, new merges are applied
