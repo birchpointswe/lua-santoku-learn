@@ -1,5 +1,4 @@
 local ds = require("santoku.learn.dataset")
-local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
 local optimize = require("santoku.learn.optimize")
 local fs = require("santoku.fs")
@@ -19,21 +18,20 @@ local cfg = {
   tm = {
     outputs = 1,
     clauses = { def = 1, min = 1, max = 8, int = true },
-    clause_maximum = { def = 79, min = 8, max = 1024, int = true },
-    clause_tolerance_fraction = { def = 0.92, min = 0.01, max = 1.0 },
-    target_fraction = { def = 0.063, min = 0.01, max = 2.0 },
-    specificity = { def = 925, min = 2, max = 2000 },
+    clause_maximum_fraction = { def = 0.048 },
+    clause_tolerance_fraction = { def = 0.92 },
+    target_fraction = { def = 0.063 },
+    specificity_fraction = { def = 0.0011 },
   },
   search = {
     trials = 200,
-    iterations = 20,
+    iterations = 40,
     subsample_samples = nil,
-    metric = "nmae",
   },
   training = {
     patience = 4,
-    batch = 20,
-    iterations = 400,
+    batch = 40,
+    iterations = 800,
   },
 }
 
@@ -63,7 +61,6 @@ test("regressor", function ()
 
   print("\nTraining")
   local stopwatch = utc.stopwatch()
-  local predicted_buf = dvec.create()
   local t = optimize.regressor({
 
     features = dataset.n_features,
@@ -74,10 +71,10 @@ test("regressor", function ()
     targets = train.targets,
 
     clauses = cfg.tm.clauses,
-    clause_maximum = cfg.tm.clause_maximum,
+    clause_maximum_fraction = cfg.tm.clause_maximum_fraction,
     clause_tolerance_fraction = cfg.tm.clause_tolerance_fraction,
     target_fraction = cfg.tm.target_fraction,
-    specificity = cfg.tm.specificity,
+    specificity_fraction = cfg.tm.specificity_fraction,
 
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
@@ -87,9 +84,8 @@ test("regressor", function ()
     final_iterations = cfg.training.iterations,
 
     search_metric = function (regressor)
-      local predicted = regressor:regress(validate.problems, validate.n, nil, predicted_buf)
-      local stats = eval.regression_accuracy(predicted, validate.targets)
-      return -stats[cfg.search.metric], stats
+      local score, nmae = regressor:regress_nmae(validate.problems, validate.n, validate.targets)
+      return score, { nmae = nmae }
     end,
 
     each = util.make_regressor_acc_log(stopwatch)

@@ -24,32 +24,38 @@ local cfg = {
     cgrams_min = 0,
     cgrams_max = 0,
     cgrams_cross = false,
-    skips = 1,
+    skips = 0,
   },
   feature_selection = {
-    n_selected = 4096,
+    n_selected = 65536,
   },
   tm = {
     classes = 20,
-    features = 4096,
-    clauses = { def = 2, min = 1, max = 4, int = true },
-    absorb_interval = { def = 1, min = 1, max = 10 },
-    absorb_threshold = { def = 0, min = 0, max = 256, int = true },
-    absorb_maximum = { def = 256, min = 1, max = 256, int = true },
-    absorb_insert_offset = { def = 1, min = 1, max = 256, int = true },
-    clause_maximum = { def = 8, min = 8, max = 1024, int = true },
-    clause_tolerance_fraction = { def = 0.5, min = 0.01, max = 1.0 },
-    target_fraction = { def = 0.25, min = 0.01, max = 2.0 },
-    specificity = { def = 2, min = 2, max = 4000, int = true },
+    cost_beta = nil,
+    clauses = { def = 1, min = 1, max = 8 },
+    features = 8192, --{ def = 4096, min = 256, max = 8192, pow2 = true },
+    absorb_threshold = { def = 0 },
+    absorb_maximum_fraction = { def = 0.0625 },
+    absorb_insert_offset = { def = 1 },
+    absorb_ranking_fraction = { def = 0.125 },
+    absorb_ranking_limit = { def = 0.125 },
+    clause_maximum_fraction = { def = 0.001 },
+    clause_tolerance_fraction = { def = 0.5 },
+    target_fraction = { def = 0.25 },
+    specificity_fraction = { def = 0.5 },
+    alpha_tolerance = { def = 0, min = -3, max = 3 },
+    alpha_maximum = { def = 0, min = -3, max = 3 },
+    alpha_target = { def = 0, min = -3, max = 3 },
+    alpha_specificity = { def = 0, min = -3, max = 3 },
   },
   search = {
     trials = 200,
     iterations = 40,
-    subsample_samples = 0.2,
+    subsample_samples = 0.1,
   },
   training = {
-    patience = 10,
-    batch = 20,
+    patience = 4,
+    batch = 40,
     iterations = 800,
   },
 }
@@ -81,22 +87,16 @@ test("newsgroups regressor", function ()
   test_set.tokens = tok:tokenize(test_set.problems)
   tok = nil -- luacheck: ignore
 
-  local class_offsets, class_feat_ids
-  if cfg.feature_selection.n_selected then
-    print("\nFeature ranking (Chi2)")
-    train.solutions:add_scaled(cfg.tm.classes)
-    local chi2_ranking
-    chi2_ranking, _, class_offsets, class_feat_ids = train.tokens:bits_top_chi2( -- luacheck: ignore
-      train.solutions, train.n, n_tokens, cfg.tm.classes,
-      cfg.feature_selection.n_selected, nil, "sum")
-    train.tokens:bits_select(chi2_ranking, nil, n_tokens)
-    validate.tokens:bits_select(chi2_ranking, nil, n_tokens)
-    test_set.tokens:bits_select(chi2_ranking, nil, n_tokens)
-    class_offsets, class_feat_ids = csr.bits_select(class_offsets, class_feat_ids, chi2_ranking)
-    n_tokens = chi2_ranking:size()
-    train.solutions:add_scaled(-cfg.tm.classes)
-    str.printf("  Selected %d features\n", n_tokens)
-  end
+  print("\nFeature ranking (Chi2)")
+  local chi2_ranking, _, class_offsets, class_feat_ids = train.tokens:bits_top_chi2(
+    train.solutions, train.n, n_tokens, cfg.tm.classes,
+    cfg.feature_selection.n_selected, nil, "sum")
+  train.tokens:bits_select(chi2_ranking, nil, n_tokens)
+  validate.tokens:bits_select(chi2_ranking, nil, n_tokens)
+  test_set.tokens:bits_select(chi2_ranking, nil, n_tokens)
+  class_offsets, class_feat_ids = csr.bits_select(class_offsets, class_feat_ids, chi2_ranking)
+  n_tokens = chi2_ranking:size()
+  str.printf("  Selected %d features\n", n_tokens)
 
   print("\nBuilding CSC index")
   local csc_offsets, csc_indices = csr.to_csc(train.tokens, train.n, n_tokens)
@@ -104,31 +104,37 @@ test("newsgroups regressor", function ()
 
   local absorb_ranking_global = ivec.create(n_tokens):fill_indices()
 
-  local output_weights = dvec.create(cfg.tm.classes)
-  for i = 0, train.n - 1 do
-    local c = train.solutions:get(i)
-    output_weights:set(c, output_weights:get(c) + 1)
-  end
+  local df_ids, df_scores = train.solutions:bits_top_df(train.n, cfg.tm.classes)
+  local output_weights = dvec.create():copy(df_scores, df_ids, true)
+
+  print("\nBuilding solution CSR")
+  local sol_offsets, sol_neighbors = train.solutions:bits_to_csr(train.n, cfg.tm.classes)
 
   print("\nOptimizing Regressor")
   local stopwatch = utc.stopwatch()
-  local predicted_buf = ivec.create()
   local t = optimize.regressor({
     outputs = cfg.tm.classes,
+    cost_beta = cfg.tm.cost_beta,
     features = cfg.tm.features,
     n_tokens = n_tokens,
-    absorb_interval = cfg.tm.absorb_interval,
     absorb_threshold = cfg.tm.absorb_threshold,
-    absorb_maximum = cfg.tm.absorb_maximum,
+    absorb_maximum_fraction = cfg.tm.absorb_maximum_fraction,
     absorb_insert_offset = cfg.tm.absorb_insert_offset,
+    absorb_ranking_fraction = cfg.tm.absorb_ranking_fraction,
+    absorb_ranking_limit = cfg.tm.absorb_ranking_limit,
     clauses = cfg.tm.clauses,
-    clause_maximum = cfg.tm.clause_maximum,
+    clause_maximum_fraction = cfg.tm.clause_maximum_fraction,
     clause_tolerance_fraction = cfg.tm.clause_tolerance_fraction,
     target_fraction = cfg.tm.target_fraction,
-    specificity = cfg.tm.specificity,
+    specificity_fraction = cfg.tm.specificity_fraction,
+    alpha_tolerance = cfg.tm.alpha_tolerance,
+    alpha_maximum = cfg.tm.alpha_maximum,
+    alpha_target = cfg.tm.alpha_target,
+    alpha_specificity = cfg.tm.alpha_specificity,
     output_weights = output_weights,
     samples = train.n,
-    solutions = train.solutions,
+    sol_offsets = sol_offsets,
+    sol_neighbors = sol_neighbors,
     tokens = train.tokens,
     csc_offsets = csc_offsets,
     csc_indices = csc_indices,
@@ -142,11 +148,9 @@ test("newsgroups regressor", function ()
     final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,
     search_metric = function (regressor)
-      local scores = regressor:classify(
-        { tokens = validate.tokens, n_samples = validate.n },
-        validate.n, false, predicted_buf)
-      local stats = eval.class_accuracy(scores, validate.solutions, validate.n, cfg.tm.classes)
-      return stats.f1, stats
+      local input = { tokens = validate.tokens, n_samples = validate.n }
+      local f1 = regressor:classify_f1(input, validate.n, validate.solutions, cfg.tm.classes)
+      return f1, { f1 = f1 }
     end,
     each = util.make_classifier_log(stopwatch),
   })

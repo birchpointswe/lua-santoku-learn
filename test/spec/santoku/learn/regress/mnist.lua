@@ -20,20 +20,24 @@ local cfg = {
   },
   tm = {
     classes = 10,
-    clauses = { def = 2, min = 1, max = 4, int = true },
-    clause_maximum = { def = 8, min = 8, max = 1024, int = true },
-    clause_tolerance_fraction = { def = 0.5, min = 0.01, max = 1.0 },
-    target_fraction = { def = 0.25, min = 0.01, max = 2.0 },
-    specificity = { def = 2, min = 2, max = 2000, int = true },
+    clauses = { def = 2, min = 1, max = 8, int = true },
+    clause_maximum_fraction = { def = 0.005 },
+    clause_tolerance_fraction = { def = 0.5 },
+    target_fraction = { def = 0.25 },
+    specificity_fraction = { def = 0.5 },
+    alpha_tolerance = { def = 0, min = -3, max = 3 },
+    alpha_maximum = { def = 0, min = -3, max = 3 },
+    alpha_target = { def = 0, min = -3, max = 3 },
+    alpha_specificity = { def = 0, min = -3, max = 3 },
   },
   search = {
-    trials = 120,
+    trials = 400,
     iterations = 40,
-    subsample_samples = 0.2,
+    -- subsample_samples = 0.2,
   },
   training = {
-    patience = 10,
-    batch = 20,
+    patience = 4,
+    batch = 40,
     iterations = 800,
   },
 }
@@ -61,15 +65,14 @@ test("mnist classifier", function ()
   dataset.problems:bits_select(nil, test_set.ids, cfg.data.features, test_set.tokens)
   test_set.problems = test_set.tokens:bits_to_cvec(test_set.n, cfg.data.features, true)
 
-  local output_weights = dvec.create(cfg.tm.classes)
-  for i = 0, train.n - 1 do
-    local c = train.solutions:get(i)
-    output_weights:set(c, output_weights:get(c) + 1)
-  end
+  local df_ids, df_scores = train.solutions:bits_top_df(train.n, cfg.tm.classes)
+  local output_weights = dvec.create():copy(df_scores, df_ids, true)
+
+  print("\nBuilding solution CSR")
+  local sol_offsets, sol_neighbors = train.solutions:bits_to_csr(train.n, cfg.tm.classes)
 
   print("\nTraining")
   local stopwatch = utc.stopwatch()
-  local predicted_buf = ivec.create()
   local t = optimize.regressor({
 
     features = cfg.data.features,
@@ -77,15 +80,20 @@ test("mnist classifier", function ()
 
     samples = train.n,
     problems = train.problems,
-    solutions = train.solutions,
+    sol_offsets = sol_offsets,
+    sol_neighbors = sol_neighbors,
 
     output_weights = output_weights,
 
     clauses = cfg.tm.clauses,
-    clause_maximum = cfg.tm.clause_maximum,
+    clause_maximum_fraction = cfg.tm.clause_maximum_fraction,
     clause_tolerance_fraction = cfg.tm.clause_tolerance_fraction,
     target_fraction = cfg.tm.target_fraction,
-    specificity = cfg.tm.specificity,
+    specificity_fraction = cfg.tm.specificity_fraction,
+    alpha_tolerance = cfg.tm.alpha_tolerance,
+    alpha_maximum = cfg.tm.alpha_maximum,
+    alpha_target = cfg.tm.alpha_target,
+    alpha_specificity = cfg.tm.alpha_specificity,
 
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
@@ -95,9 +103,8 @@ test("mnist classifier", function ()
     final_iterations = cfg.training.iterations,
 
     search_metric = function (regressor)
-      local predicted = regressor:classify(validate.problems, validate.n, nil, predicted_buf)
-      local stats = eval.class_accuracy(predicted, validate.solutions, validate.n, cfg.tm.classes)
-      return stats.f1, stats
+      local f1 = regressor:classify_f1(validate.problems, validate.n, validate.solutions, cfg.tm.classes)
+      return f1, { f1 = f1 }
     end,
 
     each = util.make_classifier_log(stopwatch)

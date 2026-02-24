@@ -28,12 +28,6 @@ Ranks are combined via exponentially decaying weights:
 
     avg_sim = sum_r(exp(-r * decay) * rank_sim[r]) / sum_r(exp(-r * decay))
 
-When `bandwidth >= 0`, the result is RBF-transformed:
-
-    k(a, b) = exp(-(1 - avg_sim) * bandwidth)
-
-When `bandwidth < 0` (default -1), raw `avg_sim` is returned.
-
 Self-similarity is not always 1.0: ranks with no features contribute 0
 to the numerator but still contribute their weight to the denominator.
 The residual diagonal in RPCholesky reflects this.
@@ -170,7 +164,6 @@ The encoder stores:
 | `lm_sids` | m landmark SIDs in the feature inv |
 | `m` | number of landmarks |
 | `d` | embedding dimensionality |
-| `bandwidth` | kernel bandwidth used |
 | `decay` | kernel decay used |
 | `trace_ratio` | approximation quality |
 
@@ -195,7 +188,7 @@ evaluation at encode time.
 - `encoder:trace_ratio()` -- returns remaining/initial trace ratio.
 
 - `encoder:persist(path_or_true)` -- serialize to file or string. Format:
-  magic `TKny`, version byte (1), m, d, bandwidth, decay, trace_ratio,
+  magic `TKny`, version byte (2), m, d, decay, trace_ratio,
   projection (m*d doubles), adjustment (d doubles), lm_sids (m int64s),
   landmark_ids ivec.
 
@@ -212,7 +205,6 @@ encode calls.
 | `n_landmarks` | Maximum RPCholesky pivots | 0 (= all documents) |
 | `n_dims` | Embedding dimensionality (capped at actual landmarks) | required |
 | `decay` | Rank weight decay (0 = equal ranks) | 0.0 |
-| `bandwidth` | RBF kernel bandwidth (-1 = raw cosine) | -1.0 |
 | `trace_tol` | Early stopping: stop when trace ratio falls below this | 1e-15 |
 | `inv` | Feature inverted index (required) | --|
 | `landmarks_inv` | Landmark inverted index (optional, defaults to inv) | inv |

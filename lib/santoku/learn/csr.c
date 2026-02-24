@@ -129,7 +129,6 @@ static int tm_csr_bipartite_neg (lua_State *L)
   tk_inv_t *source = has_index ? tk_inv_peek(L, 6) : NULL;
   tk_inv_t *search = has_index ? tk_inv_peek(L, 7) : NULL;
   double decay = luaL_optnumber(L, 8, 0.0);
-  double bandwidth = luaL_optnumber(L, 9, -1.0);
 
   uint64_t n_rows = row_ids->n;
   uint64_t n_cols = col_ids->n;
@@ -210,7 +209,7 @@ static int tm_csr_bipartite_neg (lua_State *L)
             uint64_t request_k = n_neg + n_gt;
             if (request_k < n_neg * 2) request_k = n_neg * 2;
             tk_inv_neighbors_by_vec(search, query_bits, feat_n, q_ro,
-              -1, request_k, my_hood, decay, bandwidth);
+              -1, request_k, my_hood, decay);
             free(query_bits);
             for (uint64_t h = 0; h < my_hood->n && added < n_neg; h++) {
               int64_t nuid = my_hood->a[h].i;
@@ -347,7 +346,6 @@ static int tm_csr_weight_from_index (lua_State *L)
     return luaL_error(L, "weight_from_index: arg 5 must be inv or ann index");
 
   double decay = luaL_checknumber(L, 6);
-  double bandwidth = luaL_checknumber(L, 7);
   double eps = 1e-8;
   uint64_t n = ids->n;
 
@@ -367,7 +365,7 @@ static int tm_csr_weight_from_index (lua_State *L)
           const int64_t *u_ro = idx_inv->node_rank_offsets->a + usid * (int64_t) stride;
           const int64_t *v_ro = idx_inv->node_rank_offsets->a + vsid * (int64_t) stride;
           dist = 1.0 - tk_inv_similarity(idx_inv, idx_inv->node_bits->a, u_ro,
-            idx_inv->node_bits->a, v_ro, decay, bandwidth);
+            idx_inv->node_bits->a, v_ro, decay);
         } else {
           dist = 1.0;
         }
@@ -619,22 +617,269 @@ static int tm_csr_bits_select (lua_State *L)
   return 2;
 }
 
-static int tm_csr_to_pairs (lua_State *L)
+static int tm_csr_propagate (lua_State *L)
 {
-  tk_ivec_t *off = tk_ivec_peek(L, 1, "offsets");
-  tk_ivec_t *nbr = tk_ivec_peek(L, 2, "neighbors");
-  uint64_t n = off->n - 1;
-  uint64_t total = (uint64_t)off->a[n];
-  tk_pvec_t *pairs = tk_pvec_create(L, total, 0, 0);
-  uint64_t pos = 0;
-  for (uint64_t i = 0; i < n; i++) {
-    int64_t start = off->a[i];
-    int64_t end = off->a[i + 1];
-    for (int64_t j = start; j < end; j++) {
-      pairs->a[pos++] = (tk_pair_t) { (int64_t)i, nbr->a[j] };
+  tk_ivec_t *bits = tk_ivec_peek(L, 1, "bits");
+  uint64_t n_docs = tk_lua_checkunsigned(L, 2, "n_docs");
+  uint64_t n_feats = tk_lua_checkunsigned(L, 3, "n_feats");
+
+  uint64_t *doc_off = (uint64_t *)calloc(n_docs + 1, sizeof(uint64_t));
+  uint64_t *feat_off = (uint64_t *)calloc(n_feats + 1, sizeof(uint64_t));
+  if (!doc_off || !feat_off) {
+    free(doc_off); free(feat_off);
+    return luaL_error(L, "propagate: allocation failed");
+  }
+
+  for (uint64_t i = 0; i < bits->n; i++) {
+    uint64_t v = (uint64_t)bits->a[i];
+    uint64_t d = v / n_feats, f = v % n_feats;
+    if (d < n_docs) { doc_off[d + 1]++; feat_off[f + 1]++; }
+  }
+  for (uint64_t i = 0; i < n_docs; i++) doc_off[i + 1] += doc_off[i];
+  for (uint64_t i = 0; i < n_feats; i++) feat_off[i + 1] += feat_off[i];
+
+  uint64_t *doc_feats = (uint64_t *)malloc(bits->n * sizeof(uint64_t));
+  uint64_t *feat_docs = (uint64_t *)malloc(bits->n * sizeof(uint64_t));
+  uint64_t *dc = (uint64_t *)calloc(n_docs, sizeof(uint64_t));
+  uint64_t *fc = (uint64_t *)calloc(n_feats, sizeof(uint64_t));
+  if (!doc_feats || !feat_docs || !dc || !fc) {
+    free(doc_off); free(feat_off); free(doc_feats); free(feat_docs); free(dc); free(fc);
+    return luaL_error(L, "propagate: allocation failed");
+  }
+
+  for (uint64_t i = 0; i < bits->n; i++) {
+    uint64_t v = (uint64_t)bits->a[i];
+    uint64_t d = v / n_feats, f = v % n_feats;
+    if (d >= n_docs) continue;
+    doc_feats[doc_off[d] + dc[d]++] = f;
+    feat_docs[feat_off[f] + fc[f]++] = d;
+  }
+  free(dc); free(fc);
+
+  uint64_t bm_bytes = (n_feats + 7) / 8;
+  uint64_t total = 0;
+
+  #pragma omp parallel
+  {
+    uint8_t *bm = (uint8_t *)calloc(1, bm_bytes);
+    uint64_t local_total = 0;
+
+    #pragma omp for schedule(dynamic, 64)
+    for (uint64_t d = 0; d < n_docs; d++) {
+      memset(bm, 0, bm_bytes);
+      for (uint64_t i = doc_off[d]; i < doc_off[d + 1]; i++) {
+        uint64_t f = doc_feats[i];
+        for (uint64_t j = feat_off[f]; j < feat_off[f + 1]; j++) {
+          uint64_t d2 = feat_docs[j];
+          for (uint64_t k = doc_off[d2]; k < doc_off[d2 + 1]; k++) {
+            uint64_t f2 = doc_feats[k];
+            bm[f2 / 8] |= (uint8_t)(1 << (f2 % 8));
+          }
+        }
+      }
+      uint64_t cnt = 0;
+      for (uint64_t b = 0; b < bm_bytes; b++)
+        cnt += (uint64_t)__builtin_popcount((unsigned int)bm[b]);
+      local_total += cnt;
+    }
+
+    #pragma omp atomic
+    total += local_total;
+
+    free(bm);
+  }
+
+  tk_ivec_t *out = tk_ivec_create(L, total, 0, 0);
+
+  uint64_t *offsets = (uint64_t *)malloc((n_docs + 1) * sizeof(uint64_t));
+  if (!offsets) {
+    free(doc_off); free(feat_off); free(doc_feats); free(feat_docs);
+    return luaL_error(L, "propagate: allocation failed");
+  }
+
+  #pragma omp parallel
+  {
+    uint8_t *bm = (uint8_t *)calloc(1, bm_bytes);
+
+    #pragma omp for schedule(dynamic, 64)
+    for (uint64_t d = 0; d < n_docs; d++) {
+      memset(bm, 0, bm_bytes);
+      for (uint64_t i = doc_off[d]; i < doc_off[d + 1]; i++) {
+        uint64_t f = doc_feats[i];
+        for (uint64_t j = feat_off[f]; j < feat_off[f + 1]; j++) {
+          uint64_t d2 = feat_docs[j];
+          for (uint64_t k = doc_off[d2]; k < doc_off[d2 + 1]; k++) {
+            uint64_t f2 = doc_feats[k];
+            bm[f2 / 8] |= (uint8_t)(1 << (f2 % 8));
+          }
+        }
+      }
+      uint64_t cnt = 0;
+      for (uint64_t b = 0; b < bm_bytes; b++)
+        cnt += (uint64_t)__builtin_popcount((unsigned int)bm[b]);
+      offsets[d] = cnt;
+    }
+
+    free(bm);
+  }
+
+  uint64_t prefix = 0;
+  for (uint64_t d = 0; d < n_docs; d++) {
+    uint64_t cnt = offsets[d];
+    offsets[d] = prefix;
+    prefix += cnt;
+  }
+  offsets[n_docs] = prefix;
+
+  #pragma omp parallel
+  {
+    uint8_t *bm = (uint8_t *)calloc(1, bm_bytes);
+
+    #pragma omp for schedule(dynamic, 64)
+    for (uint64_t d = 0; d < n_docs; d++) {
+      memset(bm, 0, bm_bytes);
+      for (uint64_t i = doc_off[d]; i < doc_off[d + 1]; i++) {
+        uint64_t f = doc_feats[i];
+        for (uint64_t j = feat_off[f]; j < feat_off[f + 1]; j++) {
+          uint64_t d2 = feat_docs[j];
+          for (uint64_t k = doc_off[d2]; k < doc_off[d2 + 1]; k++) {
+            uint64_t f2 = doc_feats[k];
+            bm[f2 / 8] |= (uint8_t)(1 << (f2 % 8));
+          }
+        }
+      }
+      uint64_t wp = offsets[d];
+      for (uint64_t f = 0; f < n_feats; f++) {
+        if (bm[f / 8] & (1 << (f % 8)))
+          out->a[wp++] = (int64_t)(d * n_feats + f);
+      }
+    }
+
+    free(bm);
+  }
+
+  out->n = total;
+  free(offsets);
+  free(doc_off); free(feat_off); free(doc_feats); free(feat_docs);
+  return 1;
+}
+
+static int tm_csr_stratified_sample (lua_State *L)
+{
+  tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
+  tk_ivec_t *neighbors = tk_ivec_peek(L, 2, "neighbors");
+  uint64_t n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
+  uint64_t n_labels = tk_lua_checkunsigned(L, 4, "n_labels");
+  uint64_t n_select = tk_lua_checkunsigned(L, 5, "n_select");
+
+  if (n_select > n_samples) n_select = n_samples;
+  if (n_select == n_samples) {
+    tk_ivec_t *r = tk_ivec_create(L, n_samples, 0, 0);
+    r->n = n_samples;
+    for (uint64_t i = 0; i < n_samples; i++) r->a[i] = (int64_t)i;
+    return 1;
+  }
+
+  uint64_t *lcnt = (uint64_t *)calloc(n_labels, sizeof(uint64_t));
+  if (!lcnt) return luaL_error(L, "stratified_sample: alloc failed");
+  for (uint64_t i = 0; i < n_samples; i++) {
+    int64_t lo = offsets->a[i], hi = offsets->a[i + 1];
+    for (int64_t j = lo; j < hi; j++) {
+      uint64_t lab = (uint64_t)neighbors->a[j];
+      if (lab < n_labels) lcnt[lab]++;
     }
   }
-  pairs->n = pos;
+
+  uint64_t *loff = (uint64_t *)malloc((n_labels + 1) * sizeof(uint64_t));
+  if (!loff) { free(lcnt); return luaL_error(L, "stratified_sample: alloc failed"); }
+  loff[0] = 0;
+  for (uint64_t l = 0; l < n_labels; l++)
+    loff[l + 1] = loff[l] + lcnt[l];
+  uint64_t total_entries = loff[n_labels];
+
+  uint64_t *lsamp = (uint64_t *)malloc(total_entries * sizeof(uint64_t));
+  if (!lsamp) { free(lcnt); free(loff); return luaL_error(L, "stratified_sample: alloc failed"); }
+  memset(lcnt, 0, n_labels * sizeof(uint64_t));
+  for (uint64_t i = 0; i < n_samples; i++) {
+    int64_t lo = offsets->a[i], hi = offsets->a[i + 1];
+    for (int64_t j = lo; j < hi; j++) {
+      uint64_t lab = (uint64_t)neighbors->a[j];
+      if (lab < n_labels) {
+        lsamp[loff[lab] + lcnt[lab]] = i;
+        lcnt[lab]++;
+      }
+    }
+  }
+
+  for (uint64_t l = 0; l < n_labels; l++) {
+    uint64_t lo = loff[l], cnt = loff[l + 1] - lo;
+    for (uint64_t i = cnt; i > 1; i--) {
+      uint64_t j = tk_fast_random() % i;
+      uint64_t tmp = lsamp[lo + i - 1];
+      lsamp[lo + i - 1] = lsamp[lo + j];
+      lsamp[lo + j] = tmp;
+    }
+  }
+
+  uint64_t *lorder = (uint64_t *)malloc(n_labels * sizeof(uint64_t));
+  uint64_t *lsz = (uint64_t *)malloc(n_labels * sizeof(uint64_t));
+  if (!lorder || !lsz) {
+    free(lcnt); free(loff); free(lsamp); free(lorder); free(lsz);
+    return luaL_error(L, "stratified_sample: alloc failed");
+  }
+  for (uint64_t l = 0; l < n_labels; l++) {
+    lorder[l] = l;
+    lsz[l] = loff[l + 1] - loff[l];
+  }
+  for (uint64_t i = 1; i < n_labels; i++) {
+    uint64_t key = lorder[i], ksz = lsz[lorder[i]];
+    int64_t j = (int64_t)i - 1;
+    while (j >= 0 && lsz[lorder[(uint64_t)j]] > ksz) {
+      lorder[(uint64_t)j + 1] = lorder[(uint64_t)j];
+      j--;
+    }
+    lorder[(uint64_t)j + 1] = key;
+  }
+
+  uint64_t bm_bytes = (n_samples + 7) / 8;
+  uint8_t *sel = (uint8_t *)calloc(bm_bytes, 1);
+  uint64_t *curs = (uint64_t *)calloc(n_labels, sizeof(uint64_t));
+  if (!sel || !curs) {
+    free(lcnt); free(loff); free(lsamp); free(lorder); free(lsz); free(sel); free(curs);
+    return luaL_error(L, "stratified_sample: alloc failed");
+  }
+
+  tk_ivec_t *result = tk_ivec_create(L, n_select, 0, 0);
+  uint64_t n_sel = 0;
+  bool progress = true;
+  while (n_sel < n_select && progress) {
+    progress = false;
+    for (uint64_t li = 0; li < n_labels && n_sel < n_select; li++) {
+      uint64_t l = lorder[li];
+      uint64_t lo = loff[l], cnt = loff[l + 1] - lo;
+      while (curs[l] < cnt) {
+        uint64_t sid = lsamp[lo + curs[l]];
+        curs[l]++;
+        if (!(sel[sid / 8] & (1 << (sid % 8)))) {
+          sel[sid / 8] |= (uint8_t)(1 << (sid % 8));
+          result->a[n_sel++] = (int64_t)sid;
+          progress = true;
+          break;
+        }
+      }
+    }
+  }
+
+  if (n_sel < n_select) {
+    for (uint64_t i = 0; i < n_samples && n_sel < n_select; i++) {
+      if (!(sel[i / 8] & (1 << (i % 8)))) {
+        result->a[n_sel++] = (int64_t)i;
+      }
+    }
+  }
+
+  result->n = n_sel;
+  free(lcnt); free(loff); free(lsamp); free(lorder); free(lsz); free(sel); free(curs);
   return 1;
 }
 
@@ -648,7 +893,8 @@ static luaL_Reg tm_csr_fns[] = {
   { "merge", tm_csr_merge },
   { "symmetrize", tm_csr_symmetrize },
   { "bits_select", tm_csr_bits_select },
-  { "to_pairs", tm_csr_to_pairs },
+  { "propagate", tm_csr_propagate },
+  { "stratified_sample", tm_csr_stratified_sample },
   { NULL, NULL }
 };
 
