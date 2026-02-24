@@ -8,6 +8,7 @@ local optimize = require("santoku.learn.optimize")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local tokenizer = require("santoku.tokenizer")
+local quantizer = require("santoku.learn.quantizer")
 local util = require("santoku.learn.util")
 local utc = require("santoku.utc")
 
@@ -35,6 +36,10 @@ local cfg = {
     n_dims = 1024,
     decay = 0,
   },
+  eval = {
+    knn = 16,
+    random_pairs = 16,
+  },
   regressor = {
     class_batch = nil,
     cost_beta = nil,
@@ -56,35 +61,24 @@ local cfg = {
     search_trials = 200,
     search_iterations = 20,
     search_subsample_samples = 0.05,
+    search_subsample_targets = nil,
     final_patience = 2,
     final_batch = 40,
     final_iterations = 800,
   },
-  ridge = {
-    lambda = { def = 0.5, min = 0.01, max = 10 },
-    propensity_a = { def = 0.55, min = 0.1, max = 2.0 },
-    propensity_b = { def = 1.5, min = 0.1, max = 5.0 },
-    k = 32,
-    search_trials = 200,
-  },
 }
 
-test("eurlex", function()
+test("eurlex-embedding", function ()
 
   local stopwatch = utc.stopwatch()
 
   print("Loading data")
   local train = ds.read_eurlex57k("test/res/eurlex57k", cfg.data.max)
   local n_labels = train.n_labels
-  local train_lc = train.label_counts:to_dvec()
-  train_lc:asc()
-  str.printf("  Train: %d  Labels: %d  Labels/doc: %.1f median\n",
-    train.n, n_labels, train_lc:get(train_lc:size() / 2))
-  train_lc = nil -- luacheck: ignore
+  str.printf("  Train: %d  Labels: %d\n", train.n, n_labels)
 
   print("\nBuilding label CSR")
-  local train_label_offsets, train_label_neighbors = train.solutions:bits_to_csr(train.n, n_labels)
-  train.label_csr = { offsets = train_label_offsets, neighbors = train_label_neighbors }
+  local label_offsets, label_neighbors = train.solutions:bits_to_csr(train.n, n_labels)
 
   train.ids = ivec.create(train.n):fill_indices()
 
@@ -98,63 +92,28 @@ test("eurlex", function()
   str.printf("  Label index: %d IDF feats, %d docs, decay=%.1f\n",
     n_label_feats, train.n, cfg.nystrom.decay)
 
+  print("\nBuilding eval adjacency")
+  local eval_uids, inv_hoods = label_index:neighborhoods(cfg.eval.knn, cfg.nystrom.decay, -1)
+  local eval_off, eval_nbr, eval_w = inv_hoods:to_csr(eval_uids)
+  local rp_off, rp_nbr, rp_w = csr.random_pairs(eval_uids, cfg.eval.random_pairs)
+  csr.weight_from_index(eval_uids, rp_off, rp_nbr, rp_w, label_index, cfg.nystrom.decay)
+  csr.merge(eval_off, eval_nbr, eval_w, rp_off, rp_nbr, rp_w)
+  csr.symmetrize(eval_off, eval_nbr, eval_w, eval_uids:size())
+  str.printf("  %d nodes, %d edges\n", eval_uids:size(), eval_nbr:size())
+
   print("\nSpectral embedding")
   local model = optimize.spectral({
     index = label_index,
     n_landmarks = cfg.nystrom.n_landmarks,
     n_dims = cfg.nystrom.n_dims,
     decay = cfg.nystrom.decay,
-    each = function(ev) util.spectral_log(ev) end,
+    each = function (ev) util.spectral_log(ev) end,
   })
-
-  local working_dims = model.dims
-  local train_codes = dvec.create():mtx_extend(model.raw_codes,
+  local spectral_dims = model.dims
+  local train_raw_codes = dvec.create():mtx_extend(model.raw_codes,
     model.ids:set_intersect(ivec.create(train.n):fill_indices()),
-    model.ids, 0, working_dims, true)
-  local eigenvalues = model.eigenvalues
-  str.printf("  Spectral: %d dims\n", working_dims)
-
-  local results = {}
-
-  local function run_ridge(name, args)
-    print("\n" .. name)
-    local t0 = utc.time(true)
-    args.label_offsets = train.label_csr.offsets
-    args.label_neighbors = train.label_csr.neighbors
-    args.n_labels = n_labels
-    args.lambda = cfg.ridge.lambda
-    args.propensity_a = cfg.ridge.propensity_a
-    args.propensity_b = cfg.ridge.propensity_b
-    args.expected_offsets = train.label_csr.offsets
-    args.expected_neighbors = train.label_csr.neighbors
-    args.search_trials = cfg.ridge.search_trials
-    args.search_subsample = cfg.ridge.search_subsample
-    args.stratify_offsets = train.label_csr.offsets
-    args.stratify_neighbors = train.label_csr.neighbors
-    args.stratify_labels = n_labels
-    args.k = cfg.ridge.k
-    args.each = function (ev0)
-      local p = ev0.params
-      if ev0.event == "trial" then
-        local marker = ev0.is_new_best and " ++" or ""
-        str.printf("  [%s %d/%d] F1=%.4f (best=%.4f%s) lam=%.2f a=%.2f b=%.2f\n",
-          ev0.phase, ev0.trial, ev0.trials, ev0.score, ev0.global_best_score, marker,
-          p.lambda, p.propensity_a, p.propensity_b)
-      end
-    end
-    local ridge_obj, p, m = optimize.ridge(args)
-    local dt = utc.time(true) - t0
-    local rth = m.thresh
-    local rorc = m.oracle
-    str.printf("  -> thresh=%.4f F1=%.4f (oracle=%.4f) lam=%.4f a=%.2f b=%.2f (%.1fs)\n",
-      rth.threshold, rth.macro_f1, rorc.macro_f1, p.lambda, p.propensity_a, p.propensity_b, dt)
-    return { name = name, params = p, oracle = rorc, thresh = rth, time = dt, ridge = ridge_obj }
-  end
-
-  local ceiling = run_ridge("Ridge on spectral codes (ceiling)", {
-    codes = train_codes, n_samples = train.n, n_dims = working_dims,
-  })
-  results[#results + 1] = ceiling
+    model.ids, 0, spectral_dims, true)
+  str.printf("  Spectral: %d dims\n", spectral_dims)
 
   print("\nTokenizing")
   local tok = tokenizer.create(cfg.tokenizer)
@@ -169,7 +128,7 @@ test("eurlex", function()
   print("\nFeature selection (F-score)")
   local n_selected = cfg.feature_selection.n_selected
   local union_ids, _, class_offsets, class_feat_ids = train.tokens:bits_top_reg_f(
-    train_codes, train.n, n_tokens, working_dims, n_selected, nil, "sum")
+    train_raw_codes, train.n, n_tokens, spectral_dims, n_selected, nil, "sum")
   train.tokens:bits_select(union_ids, nil, n_tokens)
   class_offsets, class_feat_ids = csr.bits_select(class_offsets, class_feat_ids, union_ids)
   n_tokens = union_ids:size()
@@ -183,7 +142,7 @@ test("eurlex", function()
   local tm = optimize.regressor({
     class_batch = cfg.regressor.class_batch,
     cost_beta = cfg.regressor.cost_beta,
-    outputs = working_dims,
+    outputs = spectral_dims,
     samples = train.n,
     features = cfg.regressor.features,
     n_tokens = n_tokens,
@@ -201,19 +160,19 @@ test("eurlex", function()
     alpha_maximum = cfg.regressor.alpha_maximum,
     alpha_target = cfg.regressor.alpha_target,
     alpha_specificity = cfg.regressor.alpha_specificity,
-    output_weights = eigenvalues,
+    output_weights = model.eigenvalues,
     tokens = train.tokens,
     csc_offsets = csc_offsets,
     csc_indices = csc_indices,
     absorb_ranking = class_feat_ids,
     absorb_ranking_offsets = class_offsets,
-    targets = train_codes,
+    targets = train_raw_codes,
     search_trials = cfg.regressor.search_trials,
     search_iterations = cfg.regressor.search_iterations,
     search_subsample_samples = cfg.regressor.search_subsample_samples,
     search_subsample_targets = cfg.regressor.search_subsample_targets,
-    stratify_offsets = train.label_csr.offsets,
-    stratify_neighbors = train.label_csr.neighbors,
+    stratify_offsets = label_offsets,
+    stratify_neighbors = label_neighbors,
     stratify_labels = n_labels,
     final_batch = cfg.regressor.final_batch,
     final_patience = cfg.regressor.final_patience,
@@ -221,27 +180,92 @@ test("eurlex", function()
     each = util.make_regressor_log(stopwatch),
   })
 
+  print("\n" .. string.rep("=", 60))
+  print("FINAL EVALUATION")
+  print(string.rep("=", 60))
+
   print("\nPredicting embeddings (train)")
   local train_predicted = tm:regress(
     { tokens = train.tokens, n_samples = train.n }, train.n, true)
 
-  local pipeline = run_ridge("Ridge on predicted (pipeline)", {
-    codes = train_predicted, n_samples = train.n, n_dims = working_dims,
-  })
-  results[#results + 1] = pipeline
+  local train_ids = ivec.create(train.n):fill_indices()
 
-  print("\n" .. string.rep("=", 90))
-  print("COMPARISON")
-  print(string.rep("=", 90))
-  str.printf("  %-40s %8s %8s %8s %8s %8s %6s\n",
-    "Approach", "micro F1", "macro F1", "orc miF1", "orc maF1", "thresh", "Time")
-  str.printf("  %-40s %8s %8s %8s %8s %8s %6s\n",
-    string.rep("-", 40), "--------", "--------", "--------", "--------", "--------", "-----")
-  for _, r in ipairs(results) do
-    str.printf("  %-40s %8.4f %8.4f %8.4f %8.4f %8.4f %5.0fs\n",
-      r.name, r.thresh.micro_f1, r.thresh.macro_f1,
-      r.oracle.micro_f1, r.oracle.macro_f1, r.thresh.threshold, r.time)
-  end
-  str.printf("\n  Total time: %.1fs\n", stopwatch())
+  local spectral_ranking_cont = eval.ranking_accuracy({
+    raw_codes = train_raw_codes, ids = train_ids,
+    n_dims = spectral_dims,
+    eval_ids = eval_uids, eval_offsets = eval_off,
+    eval_neighbors = eval_nbr, eval_weights = eval_w,
+  })
+
+  local pred_ranking_cont = eval.ranking_accuracy({
+    raw_codes = train_predicted, ids = train_ids,
+    n_dims = spectral_dims,
+    eval_ids = eval_uids, eval_offsets = eval_off,
+    eval_neighbors = eval_nbr, eval_weights = eval_w,
+  })
+
+  local n_half = math.floor(train.n / 2)
+  local shuffled = ivec.create(train.n):fill_indices():shuffle()
+  local spec_half = ivec.create():copy(shuffled, 0, n_half, 0)
+  local pred_half = ivec.create():copy(shuffled, n_half, train.n, 0)
+  local spec_rows = dvec.create():copy(train_raw_codes):mtx_select(nil, spec_half, spectral_dims)
+  local pred_rows = dvec.create():copy(train_predicted):mtx_select(nil, pred_half, spectral_dims)
+  local mixed_codes = dvec.create():copy(spec_rows):copy(pred_rows)
+  local mixed_ids = ivec.create():copy(spec_half):copy(pred_half)
+
+  local mixed_ranking_cont = eval.ranking_accuracy({
+    raw_codes = mixed_codes, ids = mixed_ids,
+    n_dims = spectral_dims,
+    eval_ids = eval_uids, eval_offsets = eval_off,
+    eval_neighbors = eval_nbr, eval_weights = eval_w,
+  })
+
+  local spectral_itq = quantizer.create({
+    mode = "itq", raw_codes = train_raw_codes, n_samples = train.n })
+  local predicted_itq = quantizer.create({
+    mode = "itq", raw_codes = train_predicted, n_samples = train.n })
+
+  local spectral_bin = spectral_itq:encode(train_raw_codes)
+  local pred_bin_sitq = spectral_itq:encode(train_predicted)
+  local pred_bin_pitq = predicted_itq:encode(train_predicted)
+
+  local spectral_ranking_bin = eval.ranking_accuracy({
+    codes = spectral_bin, ids = train_ids, n_dims = spectral_dims,
+    eval_ids = eval_uids, eval_offsets = eval_off,
+    eval_neighbors = eval_nbr, eval_weights = eval_w,
+  })
+
+  local pred_ranking_bin_sitq = eval.ranking_accuracy({
+    codes = pred_bin_sitq, ids = train_ids, n_dims = spectral_dims,
+    eval_ids = eval_uids, eval_offsets = eval_off,
+    eval_neighbors = eval_nbr, eval_weights = eval_w,
+  })
+
+  local pred_ranking_bin_pitq = eval.ranking_accuracy({
+    codes = pred_bin_pitq, ids = train_ids, n_dims = spectral_dims,
+    eval_ids = eval_uids, eval_offsets = eval_off,
+    eval_neighbors = eval_nbr, eval_weights = eval_w,
+  })
+
+  local joint_itq = quantizer.create({
+    mode = "itq", raw_codes = mixed_codes, n_samples = mixed_ids:size() })
+  local mixed_bin_jitq = joint_itq:encode(mixed_codes)
+
+  local mixed_ranking_bin_jitq = eval.ranking_accuracy({
+    codes = mixed_bin_jitq, ids = mixed_ids, n_dims = spectral_dims,
+    eval_ids = eval_uids, eval_offsets = eval_off,
+    eval_neighbors = eval_nbr, eval_weights = eval_w,
+  })
+
+  str.printf("\n  Spectral dims: %d\n", spectral_dims)
+  str.printf("  %-50s %8.4f\n", "Spectral (cont):", spectral_ranking_cont.score)
+  str.printf("  %-50s %8.4f\n", "Predicted (cont):", pred_ranking_cont.score)
+  str.printf("  %-50s %8.4f\n", "Mixed (cont):", mixed_ranking_cont.score)
+  str.printf("  %-50s %8.4f\n", "Spectral (bin):", spectral_ranking_bin.score)
+  str.printf("  %-50s %8.4f\n", "Predicted (bin, spectral ITQ):", pred_ranking_bin_sitq.score)
+  str.printf("  %-50s %8.4f\n", "Predicted (bin, predicted ITQ):", pred_ranking_bin_pitq.score)
+  str.printf("  %-50s %8.4f\n", "Mixed (bin, joint ITQ):", mixed_ranking_bin_jitq.score)
+
+  str.printf("\n  Time: %.1fs\n", stopwatch())
 
 end)
