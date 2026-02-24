@@ -1005,14 +1005,7 @@ end
 
 M.ridge = function (args)
   local ridge = require("santoku.learn.ridge")
-  if type(args.n_used_dims) == "table" then
-    args.n_used_dims = spec_defaults(args.n_used_dims, { min = 1, max = args.n_dims, int = true })
-  end
-  local param_names = { "lambda", "propensity_a", "propensity_b", "n_used_dims" }
-  if args.output_weights then
-    if not args.alpha_lambda then args.alpha_lambda = { min = -3, max = 3, def = 0 } end
-    param_names[#param_names + 1] = "alpha_lambda"
-  end
+  local param_names = { "lambda", "propensity_a", "propensity_b" }
   local samplers = M.build_samplers(args, param_names)
   local k = args.k or 32
   local each_cb = args.each
@@ -1065,29 +1058,13 @@ M.ridge = function (args)
     args.codes:mtx_select(nil, search_ids, args.n_dims, s_codes)
     search_data.codes = s_codes
   end
-  local ow = args.output_weights
-  local ow_min, ow_max
-  if ow then ow_min, ow_max = ow:min(), ow:max() end
   local wb
   local function trial_fn (params, info)
-    local lam_dvec
-    if ow and params.alpha_lambda and params.alpha_lambda ~= 0 then
-      local nd = params.n_used_dims or args.n_dims
-      lam_dvec = dvec.create(nd)
-      local alpha = params.alpha_lambda
-      local base = params.lambda
-      for i = 0, nd - 1 do
-        local w_norm = (ow_max > ow_min) and ((ow:get(i) - ow_min) / (ow_max - ow_min)) or 0.5
-        lam_dvec:set(i, num.max(1e-8, base * num.exp(alpha * (w_norm - 0.5))))
-      end
-    end
     local r; r, wb = ridge.create({
       gram = gram,
       lambda = params.lambda,
-      lambda_dvec = lam_dvec,
       propensity_a = params.propensity_a,
       propensity_b = params.propensity_b,
-      n_used_dims = params.n_used_dims,
       w_buf = wb,
     })
     local data = info.is_final and full_data or search_data
@@ -1108,7 +1085,7 @@ M.ridge = function (args)
     trials = args.search_trials or 30,
     trial_fn = trial_fn,
     each = each_cb,
-    cost_fn = args.cost_fn or function (p) return p.n_used_dims or args.n_dims or 1 end,
+    cost_fn = args.cost_fn or function () return 1 end,
     cost_beta = args.cost_beta,
   })
   return result, best_params, best_metrics
