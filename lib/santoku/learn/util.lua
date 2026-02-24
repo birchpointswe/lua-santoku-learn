@@ -208,30 +208,17 @@ local function format_best (best, current)
 end
 
 function M.spectral_log (info)
-  if info.event == "sample" then
-    str.printf("[SPECTRAL] L=%d D=%d decay=%.2f\n", info.n_landmarks, info.n_dims, info.decay)
-  elseif info.event == "spectral_result" then
-    local trace_info = info.trace_ratio and str.format(" trace=%.2e", info.trace_ratio) or ""
-    local eig_info = (info.eig_min and info.eig_max) and str.format(" eig=[%.4f, %.4f]", info.eig_min, info.eig_max) or ""
-    local dims_info = info.n_dims and str.format(" D=%d", info.n_dims) or ""
-    str.printf("[SPECTRAL]   -> L=%d%s%s%s\n",
-      info.n_landmarks or 0, dims_info, eig_info, trace_info)
-  elseif info.event == "eval" then
+  if info.event == "spectral_result" then
+    str.printf("[SPECTRAL] L=%d D=%d decay=%.2f trace=%.2e embedded=%d\n",
+      info.n_landmarks or 0, info.n_dims or 0, info.decay or 0,
+      info.trace_ratio or 0, info.n_embedded or 0)
+  elseif info.event == "trial" then
+    local p = info.params or {}
     local m = info.metrics or {}
-    local scores = {}
-    if m.kernel_score then scores[#scores + 1] = str.format("kernel=%.4f", m.kernel_score) end
-    scores[#scores + 1] = str.format("raw=%.4f", info.score or 0)
-    if m.binary_score then scores[#scores + 1] = str.format("bin=%.4f", m.binary_score) end
-    str.printf("[SPECTRAL]   -> eval: %s\n", table.concat(scores, " "))
-  elseif info.event == "done" then
-    local p = info.best_params or {}
-    local m = info.best_metrics or {}
-    local scores = {}
-    if m.kernel_score then scores[#scores + 1] = str.format("kernel=%.4f", m.kernel_score) end
-    if info.best_score then scores[#scores + 1] = str.format("raw=%.4f", info.best_score) end
-    if m.binary_score then scores[#scores + 1] = str.format("bin=%.4f", m.binary_score) end
-    str.printf("[SPECTRAL] DONE: L=%d D=%d decay=%.2f %s\n",
-      p.n_landmarks or 0, p.n_dims or 0, p.decay or 0, table.concat(scores, " "))
+    local marker = info.is_new_best and " ++" or ""
+    str.printf("[SPECTRAL] [%s %d/%d] trace=%.2e (best=%.2e%s) L=%d D=%d\n",
+      info.phase, info.trial, info.trials, m.trace_ratio or 0,
+      info.global_best_score or 0, marker, p.n_landmarks or 0, p.n_dims or 0)
   end
 end
 
@@ -265,8 +252,8 @@ function M.make_classifier_log (stopwatch)
       timing = str.format(" (%.2fs +%.2fs)", d, dd)
     end
     local absorb = ""
-    if params.absorb_interval then
-      absorb = str.format(" I=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
+    if params.absorb_threshold then
+      absorb = str.format(" A=%d/%d/%.3f R=%.3f", params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum_fraction or 0, params.absorb_ranking_fraction or 0)
     end
     local lt, lm, tt, ss
     if params.alpha_specificity then
@@ -277,9 +264,9 @@ function M.make_classifier_log (stopwatch)
     else
       lt, lm, tt, ss = "", "", "", ""
     end
-    str.printf("[CLASSIFY %s E%d] F=%d C=%d L=%.2f%s/%d%s T=%.2f%s S=%.0f%s%s F1=%.4f%s%s\n",
-      phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum, lm,
-      params.target_fraction, tt, params.specificity, ss, absorb, metrics.f1, best, timing)
+    str.printf("[CLASSIFY %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s F1=%.4f%s%s\n",
+      phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum_fraction, lm,
+      params.target_fraction, tt, params.specificity_fraction, ss, absorb, metrics.f1, best, timing)
   end
 end
 
@@ -302,8 +289,8 @@ function M.make_regressor_log (stopwatch)
       timing = str.format(" (%.2fs +%.2fs)", d, dd)
     end
     local absorb = ""
-    if params.absorb_interval then
-      absorb = str.format(" I=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
+    if params.absorb_threshold then
+      absorb = str.format(" A=%d/%d/%.3f R=%.3f", params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum_fraction or 0, params.absorb_ranking_fraction or 0)
     end
     local lt, lm, tt, ss
     if params.alpha_specificity then
@@ -314,9 +301,45 @@ function M.make_regressor_log (stopwatch)
     else
       lt, lm, tt, ss = "", "", "", ""
     end
-    str.printf("[REGRESS %s E%d] F=%d C=%d L=%.2f%s/%d%s T=%.2f%s S=%.0f%s%s MAE=%.4f%s%s\n",
-      phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum, lm,
-      params.target_fraction, tt, params.specificity, ss, absorb, mae, best, timing)
+    str.printf("[REGRESS %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s MAE=%.4f%s%s\n",
+      phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum_fraction, lm,
+      params.target_fraction, tt, params.specificity_fraction, ss, absorb, mae, best, timing)
+  end
+end
+
+function M.make_hamming_log (stopwatch)
+  return function (ev)
+    local phase = format_phase(ev)
+    local params = ev.params
+    local metrics = ev.metrics
+    local acc = metrics.accuracy
+    local running_best = math.max(ev.global_best_score or -math.huge, ev.best_epoch_score or -math.huge)
+    local best = ""
+    if not ev.is_final and running_best > -math.huge then
+      local marker = (acc > running_best + 1e-6) and " ++" or ""
+      best = str.format(" (best=%.4f%s)", running_best, marker)
+    end
+    local timing = ""
+    if stopwatch then
+      local d, dd = stopwatch()
+      timing = str.format(" (%.2fs +%.2fs)", d, dd)
+    end
+    local absorb = ""
+    if params.absorb_threshold then
+      absorb = str.format(" A=%d/%d/%.3f R=%.3f", params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum_fraction or 0, params.absorb_ranking_fraction or 0)
+    end
+    local lt, lm, tt, ss
+    if params.alpha_specificity then
+      lt = str.format("(%+.1f)", params.alpha_tolerance)
+      lm = str.format("(%+.1f)", params.alpha_maximum)
+      tt = str.format("(%+.1f)", params.alpha_target)
+      ss = str.format("(%+.1f)", params.alpha_specificity)
+    else
+      lt, lm, tt, ss = "", "", "", ""
+    end
+    str.printf("[HAMMING %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s ACC=%.4f%s%s\n",
+      phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum_fraction, lm,
+      params.target_fraction, tt, params.specificity_fraction, ss, absorb, acc, best, timing)
   end
 end
 
@@ -339,8 +362,8 @@ function M.make_regressor_acc_log (stopwatch)
       timing = str.format(" (%.2fs +%.2fs)", d, dd)
     end
     local absorb = ""
-    if params.absorb_interval then
-      absorb = str.format(" I=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
+    if params.absorb_threshold then
+      absorb = str.format(" A=%d/%d/%.3f R=%.3f", params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum_fraction or 0, params.absorb_ranking_fraction or 0)
     end
     local lt, lm, tt, ss
     if params.alpha_specificity then
@@ -351,9 +374,9 @@ function M.make_regressor_acc_log (stopwatch)
     else
       lt, lm, tt, ss = "", "", "", ""
     end
-    str.printf("[REGRESS %s E%d] F=%d C=%d L=%.2f%s/%d%s T=%.2f%s S=%.0f%s%s ACC=%.1f%%%s%s\n",
-      phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum, lm,
-      params.target_fraction, tt, params.specificity, ss, absorb, acc, best, timing)
+    str.printf("[REGRESS %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s ACC=%.1f%%%s%s\n",
+      phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum_fraction, lm,
+      params.target_fraction, tt, params.specificity_fraction, ss, absorb, acc, best, timing)
   end
 end
 
@@ -371,8 +394,8 @@ function M.make_ranking_log (stopwatch)
       timing = str.format(" (%.2fs +%.2fs)", d, dd)
     end
     local absorb = ""
-    if params.absorb_interval then
-      absorb = str.format(" I=%d A=%d/%d/%d", params.absorb_interval, params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum or 0)
+    if params.absorb_threshold then
+      absorb = str.format(" A=%d/%d/%.3f R=%.3f", params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum_fraction or 0, params.absorb_ranking_fraction or 0)
     end
     local lt, lm, tt, ss
     if params.alpha_specificity then
@@ -383,9 +406,42 @@ function M.make_ranking_log (stopwatch)
     else
       lt, lm, tt, ss = "", "", "", ""
     end
-    str.printf("[RANKING %s E%d] F=%d C=%d L=%.2f%s/%d%s T=%.2f%s S=%.0f%s%s score=%.4f%s%s\n",
-      phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum, lm,
-      params.target_fraction, tt, params.specificity, ss, absorb, score, best, timing)
+    str.printf("[RANKING %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s score=%.4f%s%s\n",
+      phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum_fraction, lm,
+      params.target_fraction, tt, params.specificity_fraction, ss, absorb, score, best, timing)
+  end
+end
+
+function M.make_labeler_log (stopwatch)
+  return function (ev)
+    local phase = format_phase(ev)
+    local params = ev.params
+    local metrics = ev.metrics
+    local micro = metrics.micro_f1 or 0
+    local macro = metrics.macro_f1 or 0
+    local running_best = math.max(ev.global_best_score or -math.huge, ev.best_epoch_score or -math.huge)
+    local best = ev.is_final and "" or format_best(running_best, micro)
+    local timing = ""
+    if stopwatch then
+      local d, dd = stopwatch()
+      timing = str.format(" (%.2fs +%.2fs)", d, dd)
+    end
+    local absorb = ""
+    if params.absorb_threshold then
+      absorb = str.format(" A=%d/%d/%.3f R=%.3f", params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum_fraction or 0, params.absorb_ranking_fraction or 0)
+    end
+    local lt, lm, tt, ss
+    if params.alpha_specificity then
+      lt = str.format("(%+.1f)", params.alpha_tolerance)
+      lm = str.format("(%+.1f)", params.alpha_maximum)
+      tt = str.format("(%+.1f)", params.alpha_target)
+      ss = str.format("(%+.1f)", params.alpha_specificity)
+    else
+      lt, lm, tt, ss = "", "", "", ""
+    end
+    str.printf("[LABEL %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s miF1=%.4f maF1=%.4f%s%s\n",
+      phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum_fraction, lm,
+      params.target_fraction, tt, params.specificity_fraction, ss, absorb, micro, macro, best, timing)
   end
 end
 

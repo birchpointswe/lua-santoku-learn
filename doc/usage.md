@@ -8,7 +8,7 @@
 | `ridge.c` | Ridge regression classifier with propensity weighting | -- |
 | `optimize.lua` | GP-BO hyperparameter search for TM, spectral, and ridge | [optimize.md](optimize.md) |
 | `spectral.c` | Nystrom spectral embedding | [pca.md](pca.md) |
-| `quantizer.c` | SFBS binary quantization, ITQ, and thermometer encoding | [ann.md](ann.md) |
+| `quantizer.c` | Iterative quantization and thermometer encoding | [ann.md](ann.md) |
 | `evaluator.c` | Ranking, retrieval, classification, regression metrics; bit selection; clustering | [evaluation.md](evaluation.md) |
 | `inv.h` | Rank-weighted inverted index with cosine similarity kernel | [pca.md](pca.md) |
 | `ann.h` | Multi-index hashing ANN for Hamming-distance search | [ann.md](ann.md) |
@@ -125,7 +125,7 @@ classification.
 
 **Evaluation adjacency construction** (see [below](#evaluation-adjacency-construction)):
 
-4. `index:neighborhoods(k, decay, bandwidth)` -> all-vs-all kNN.
+4. `index:neighborhoods(k, decay)` -> all-vs-all kNN.
 5. Convert to CSR, generate random pairs, weight from kernel, merge,
    symmetrize.
 
@@ -135,7 +135,7 @@ evaluation throughout the pipeline.
 **Spectral embedding:**
 
 6. `optimize.spectral` with the inv index, evaluation adjacency, and
-   optionally searchable `n_landmarks`, `n_dims`, `decay`, `bandwidth`.
+   optionally searchable `n_landmarks`, `n_dims`, `decay`.
 7. Returns model with `raw_codes` (dvec, n * d), `ids` (ivec),
    `encoder`, and `eigenvalues` (dvec, descending order).
 

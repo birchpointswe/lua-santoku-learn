@@ -47,11 +47,13 @@ end
 local function _split_binary_mnist (dataset, s, e)
   local ids = ivec.create()
   ids:copy(dataset.ids, s - 1, e, 0)
-  local ss = ivec.create()
-  ss:copy(dataset.solutions, s - 1, e, 0)
+  local bits = ivec.create()
+  for i = 0, e - s do
+    bits:push(i * dataset.n_labels + dataset.solutions:get(s - 1 + i))
+  end
   return {
     ids = ids,
-    solutions = ss,
+    solutions = bits,
     n_labels = dataset.n_labels,
     n_features = dataset.n_features,
     n = e - s + 1,
@@ -127,11 +129,14 @@ end
 local function _split_imdb (dataset, s, e)
   local ps = arr.copy({}, dataset.problems, s, e)
   local ss = arr.copy({}, dataset.solutions, s, e)
-  ss = ivec.create(ss)
+  local bits = ivec.create()
+  for i = 1, #ss do
+    bits:push((i - 1) * 2 + ss[i])
+  end
   return {
     n = #ps,
     problems = ps,
-    solutions = ss
+    solutions = bits
   }
 end
 
@@ -219,12 +224,16 @@ M.read_20newsgroups = function (dir, max_per_class, remove, max)
     shuffled_problems = ps
     shuffled_solutions = ss
   end
+  local bits = ivec.create()
+  for i = 1, total do
+    bits:push((i - 1) * cat_idx + shuffled_solutions[i])
+  end
   return {
     n = total,
     n_labels = cat_idx,
     categories = categories,
     problems = shuffled_problems,
-    solutions = ivec.create(shuffled_solutions)
+    solutions = bits
   }
 end
 
@@ -241,17 +250,25 @@ M.read_20newsgroups_split = function (train_dir, test_dir, max, remove, tvr)
   if not tvr or tvr <= 0 then
     return all_train, test
   end
+  local n_labels = all_train.n_labels
+  local all_classes = {}
+  for j = 0, all_train.solutions:size() - 1 do
+    local v = all_train.solutions:get(j)
+    local s = math.floor(v / n_labels)
+    local c = v % n_labels
+    all_classes[s] = c
+  end
   local val_n = math.floor(all_train.n * tvr)
   local train_n = all_train.n - val_n
   local train_problems, val_problems = {}, {}
   local train_solutions, val_solutions = ivec.create(), ivec.create()
   for i = 1, train_n do
     train_problems[i] = all_train.problems[i]
-    train_solutions:push(all_train.solutions:get(i - 1))
+    train_solutions:push((i - 1) * n_labels + all_classes[i - 1])
   end
   for i = train_n + 1, all_train.n do
     val_problems[i - train_n] = all_train.problems[i]
-    val_solutions:push(all_train.solutions:get(i - 1))
+    val_solutions:push((i - train_n - 1) * n_labels + all_classes[i - 1])
   end
   local train = {
     n = train_n,
