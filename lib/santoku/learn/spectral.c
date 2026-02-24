@@ -405,10 +405,10 @@ static inline int tk_nystrom_restrict_lua (lua_State *L) {
   double *new_ise = (double *)malloc(new_d * sizeof(double));
   for (uint64_t j = 0; j < enc->m; j++)
     for (uint64_t i = 0; i < new_d; i++)
-      new_proj[j * new_d + i] = enc->projection[j * enc->d + keep->a[i]];
+      new_proj[j * new_d + i] = enc->projection[j * enc->d + (uint64_t)keep->a[i]];
   for (uint64_t i = 0; i < new_d; i++) {
-    new_adj[i] = enc->adjustment[keep->a[i]];
-    new_ise[i] = enc->inv_sqrt_eig[keep->a[i]];
+    new_adj[i] = enc->adjustment[(uint64_t)keep->a[i]];
+    new_ise[i] = enc->inv_sqrt_eig[(uint64_t)keep->a[i]];
   }
   free(enc->projection);
   free(enc->adjustment);
