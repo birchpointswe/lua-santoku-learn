@@ -239,37 +239,6 @@ function M.make_bits_log (log_interval)
   end
 end
 
-function M.make_classifier_log (stopwatch)
-  return function (ev)
-    local phase = format_phase(ev)
-    local params = ev.params
-    local metrics = ev.metrics
-    local running_best = math.max(ev.global_best_score or -math.huge, ev.best_epoch_score or -math.huge)
-    local best = ev.is_final and "" or format_best(running_best, metrics.f1)
-    local timing = ""
-    if stopwatch then
-      local d, dd = stopwatch()
-      timing = str.format(" (%.2fs +%.2fs)", d, dd)
-    end
-    local absorb = ""
-    if params.absorb_threshold then
-      absorb = str.format(" A=%d/%d/%.3f R=%.3f", params.absorb_threshold or 0, params.absorb_insert or 0, params.absorb_maximum_fraction or 0, params.absorb_ranking_fraction or 0)
-    end
-    local lt, lm, tt, ss
-    if params.alpha_specificity then
-      lt = str.format("(%+.1f)", params.alpha_tolerance)
-      lm = str.format("(%+.1f)", params.alpha_maximum)
-      tt = str.format("(%+.1f)", params.alpha_target)
-      ss = str.format("(%+.1f)", params.alpha_specificity)
-    else
-      lt, lm, tt, ss = "", "", "", ""
-    end
-    str.printf("[CLASSIFY %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s F1=%.4f%s%s\n",
-      phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum_fraction, lm,
-      params.target_fraction, tt, params.specificity_fraction, ss, absorb, metrics.f1, best, timing)
-  end
-end
-
 function M.make_regressor_log (stopwatch)
   return function (ev)
     local phase = format_phase(ev)

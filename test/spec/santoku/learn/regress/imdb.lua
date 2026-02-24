@@ -24,16 +24,16 @@ local cfg = {
     ngrams = 2,
     cgrams_min = 3,
     cgrams_max = 5,
-    cgrams_cross = true,
+    cgrams_cross = false,
     skips = 1,
   },
   feature_selection = {
-    n_selected = 8192,
+    n_selected = 65536,
   },
   tm = {
     classes = 2,
-    features = { def = 8192, min = 256, max = 8192, pow2 = true },
-    clauses = { def = 8, min = 1, max = 8, int = true },
+    clauses = { def = 1, min = 1, max = 8 },
+    features = 8192, --{ def = 8192, min = 256, max = 8192, pow2 = true },
     absorb_threshold = { def = 0 },
     absorb_maximum_fraction = { def = 0.031 },
     absorb_insert_offset = { def = 1 },
@@ -49,9 +49,9 @@ local cfg = {
     alpha_specificity = { def = 0, min = -3, max = 3 },
   },
   search = {
-    trials = 200,
-    iterations = 40,
-    subsample_samples = 0.2,
+    trials = 800,
+    iterations = 80,
+    subsample_samples = 0.1,
   },
   training = {
     patience = 4,
@@ -107,6 +107,7 @@ test("imdb regressor", function ()
 
   print("\nBuilding solution CSR")
   local sol_offsets, sol_neighbors = train.solutions:bits_to_csr(train.n, cfg.tm.classes)
+  local val_label_off, val_label_nbr = validate.solutions:bits_to_csr(validate.n, cfg.tm.classes)
 
   print("\nOptimizing Regressor")
   local stopwatch = utc.stopwatch()
@@ -146,23 +147,23 @@ test("imdb regressor", function ()
     final_iterations = cfg.training.iterations,
     search_metric = function (regressor)
       local input = { tokens = validate.tokens, n_samples = validate.n }
-      local f1 = regressor:classify_f1(input, validate.n, validate.solutions, cfg.tm.classes)
-      return f1, { f1 = f1 }
+      local micro_f1, macro_f1 = regressor:label_f1(input, validate.n, val_label_off, val_label_nbr)
+      return macro_f1, { micro_f1 = micro_f1, macro_f1 = macro_f1 }
     end,
-    each = util.make_classifier_log(stopwatch),
+    each = util.make_labeler_log(stopwatch),
   })
 
   print()
   print("Final Evaluation")
 
   print("\nClassification metrics:")
-  local train_scores = t:classify({ tokens = train.tokens, n_samples = train.n }, train.n, false)
-  local val_scores = t:classify({ tokens = validate.tokens, n_samples = validate.n }, validate.n, false)
-  local test_scores = t:classify({ tokens = test_set.tokens, n_samples = test_set.n }, test_set.n, false)
+  local _, train_labels = t:label({ tokens = train.tokens, n_samples = train.n }, train.n, 1)
+  local _, val_labels = t:label({ tokens = validate.tokens, n_samples = validate.n }, validate.n, 1)
+  local _, test_labels = t:label({ tokens = test_set.tokens, n_samples = test_set.n }, test_set.n, 1)
 
-  local train_stats = eval.class_accuracy(train_scores, train.solutions, train.n, cfg.tm.classes)
-  local val_stats = eval.class_accuracy(val_scores, validate.solutions, validate.n, cfg.tm.classes)
-  local test_stats = eval.class_accuracy(test_scores, test_set.solutions, test_set.n, cfg.tm.classes)
+  local train_stats = eval.class_accuracy(train_labels, train.solutions, train.n, cfg.tm.classes)
+  local val_stats = eval.class_accuracy(val_labels, validate.solutions, validate.n, cfg.tm.classes)
+  local test_stats = eval.class_accuracy(test_labels, test_set.solutions, test_set.n, cfg.tm.classes)
   str.printf("  F1:   Train=%.2f  Val=%.2f  Test=%.2f\n", train_stats.f1, val_stats.f1, test_stats.f1)
 
   print("\nPer-class Test Accuracy (sorted by difficulty):\n")
