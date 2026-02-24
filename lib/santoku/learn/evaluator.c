@@ -263,104 +263,26 @@ static inline int tm_regression_accuracy (lua_State *L)
   return 1;
 }
 
-static inline int tm_multilabel_retrieval_accuracy (lua_State *L)
-{
-  lua_settop(L, 1);
-  lua_getfield(L, 1, "hoods");
-  tk_ann_hoods_t *ann_hoods = tk_ann_hoods_peekopt(L, -1);
-  tk_inv_hoods_t *inv_hoods = ann_hoods ? NULL : tk_inv_hoods_peekopt(L, -1);
-  if (!ann_hoods && !inv_hoods)
-    return luaL_error(L, "hoods must be ann_hoods or inv_hoods");
-  lua_getfield(L, 1, "hood_ids");
-  tk_ivec_t *hood_ids = tk_ivec_peek(L, -1, "hood_ids");
-  lua_getfield(L, 1, "expected_offsets");
-  tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
-  lua_getfield(L, 1, "expected_neighbors");
-  tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
-  lua_pop(L, 4);
-  uint64_t n = ann_hoods ? ann_hoods->n : inv_hoods->n;
-  if (exp_off->n != n + 1)
-    return luaL_error(L, "expected_offsets length must be hoods count + 1");
-  uint64_t total_tp = 0, total_pred = 0, total_exp = 0;
-  double sum_f1 = 0.0, sum_p = 0.0, sum_r = 0.0;
-  uint64_t valid = 0;
-  #pragma omp parallel for reduction(+:total_tp,total_pred,total_exp,sum_f1,sum_p,sum_r,valid)
-  for (uint64_t s = 0; s < n; s++) {
-    uint64_t k = ann_hoods ? ann_hoods->a[s]->n : inv_hoods->a[s]->n;
-    int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
-    uint64_t n_exp = (uint64_t)(ee - es);
-    int kha;
-    tk_iuset_t *exp_set = tk_iuset_create(NULL, 0);
-    for (int64_t i = es; i < ee; i++)
-      tk_iuset_put(exp_set, exp_nbr->a[i], &kha);
-    uint64_t tp = 0;
-    for (uint64_t j = 0; j < k; j++) {
-      int64_t pos = ann_hoods ? ann_hoods->a[s]->a[j].i : inv_hoods->a[s]->a[j].i;
-      if (tk_iuset_contains(exp_set, hood_ids->a[pos])) tp++;
-    }
-    tk_iuset_destroy(exp_set);
-    total_tp += tp; total_pred += k; total_exp += n_exp;
-    if (n_exp > 0 || k > 0) {
-      double p = k > 0 ? (double)tp / k : 0.0;
-      double r = n_exp > 0 ? (double)tp / n_exp : 0.0;
-      double f1 = (p + r) > 0 ? 2.0 * p * r / (p + r) : 0.0;
-      sum_f1 += f1; sum_p += p; sum_r += r;
-      valid++;
-    }
-  }
-  lua_newtable(L);
-  double mp = total_pred > 0 ? (double)total_tp / total_pred : 0.0;
-  double mr = total_exp > 0 ? (double)total_tp / total_exp : 0.0;
-  double mf = (mp + mr) > 0 ? 2.0 * mp * mr / (mp + mr) : 0.0;
-  lua_pushnumber(L, mp); lua_setfield(L, -2, "micro_precision");
-  lua_pushnumber(L, mr); lua_setfield(L, -2, "micro_recall");
-  lua_pushnumber(L, mf); lua_setfield(L, -2, "micro_f1");
-  lua_pushnumber(L, valid > 0 ? sum_p / valid : 0); lua_setfield(L, -2, "macro_precision");
-  lua_pushnumber(L, valid > 0 ? sum_r / valid : 0); lua_setfield(L, -2, "macro_recall");
-  lua_pushnumber(L, valid > 0 ? sum_f1 / valid : 0); lua_setfield(L, -2, "macro_f1");
-  return 1;
-}
-
 static inline tk_ivec_t *tk_pvec_dendro_cut(lua_State *L, tk_ivec_t *offsets, tk_pvec_t *merges, uint64_t step, tk_ivec_t *assignments);
 
 static inline int tm_retrieval_ks (lua_State *L)
 {
   lua_settop(L, 1);
-  lua_getfield(L, 1, "hoods");
-  tk_inv_hoods_t *inv_hoods = tk_inv_hoods_peekopt(L, -1);
-  tk_ann_hoods_t *ann_hoods = inv_hoods ? NULL : tk_ann_hoods_peekopt(L, -1);
-  lua_pop(L, 1);
-  tk_ivec_t *hood_ids = NULL;
-  tk_ivec_t *pred_off = NULL, *pred_nbr = NULL;
-  if (inv_hoods || ann_hoods) {
-    lua_getfield(L, 1, "hood_ids");
-    hood_ids = tk_ivec_peek(L, -1, "hood_ids");
-    lua_pop(L, 1);
-  } else {
-    lua_getfield(L, 1, "pred_offsets");
-    pred_off = tk_ivec_peekopt(L, -1);
-    lua_getfield(L, 1, "pred_neighbors");
-    pred_nbr = pred_off ? tk_ivec_peek(L, -1, "pred_neighbors") : NULL;
-    lua_pop(L, 2);
-    if (!pred_off)
-      return luaL_error(L, "hoods or pred_offsets/pred_neighbors required");
-  }
-  tk_dvec_t *pred_scores = NULL;
-  if (pred_off) {
-    lua_getfield(L, 1, "pred_scores");
-    pred_scores = tk_dvec_peekopt(L, -1);
-    lua_pop(L, 1);
-  }
+  lua_getfield(L, 1, "pred_offsets");
+  tk_ivec_t *pred_off = tk_ivec_peek(L, -1, "pred_offsets");
+  lua_getfield(L, 1, "pred_neighbors");
+  tk_ivec_t *pred_nbr = tk_ivec_peek(L, -1, "pred_neighbors");
+  lua_getfield(L, 1, "pred_scores");
+  tk_dvec_t *pred_scores = tk_dvec_peekopt(L, -1);
   lua_getfield(L, 1, "expected_offsets");
   tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
   lua_getfield(L, 1, "expected_neighbors");
   tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
-  lua_pop(L, 2);
-  uint64_t n_samples = pred_off ? pred_off->n - 1 :
-    (inv_hoods ? inv_hoods->n : ann_hoods->n);
+  lua_pop(L, 5);
+  uint64_t n_samples = pred_off->n - 1;
   if (exp_off->n != n_samples + 1)
     return luaL_error(L, "expected_offsets length must match sample count + 1");
-  uint64_t total_preds = pred_off ? (uint64_t)pred_off->a[n_samples] : 0;
+  uint64_t total_preds = (uint64_t)pred_off->a[n_samples];
   uint8_t *is_tp = NULL;
   if (pred_scores)
     is_tp = (uint8_t *)calloc(total_preds, sizeof(uint8_t));
@@ -369,10 +291,7 @@ static inline int tm_retrieval_ks (lua_State *L)
   double ma_prec = 0, ma_rec = 0, ma_f1 = 0;
   #pragma omp parallel for reduction(+:mi_tp,mi_k,mi_exp,n_valid,ma_prec,ma_rec,ma_f1)
   for (uint64_t s = 0; s < n_samples; s++) {
-    uint64_t hood_size;
-    if (pred_off) hood_size = (uint64_t)(pred_off->a[s + 1] - pred_off->a[s]);
-    else if (inv_hoods) hood_size = inv_hoods->a[s]->n;
-    else hood_size = ann_hoods->a[s]->n;
+    uint64_t hood_size = (uint64_t)(pred_off->a[s + 1] - pred_off->a[s]);
     int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
     uint64_t n_expected = (uint64_t)(ee - es);
     if (n_expected == 0 || hood_size == 0) {
@@ -387,21 +306,11 @@ static inline int tm_retrieval_ks (lua_State *L)
     uint64_t best_k = 1, best_tp = 0;
     uint64_t tp = 0;
     for (uint64_t k = 1; k <= hood_size; k++) {
-      int64_t nbr_id;
-      int64_t pos;
-      if (pred_off) {
-        pos = pred_off->a[s] + (int64_t)(k - 1);
-        nbr_id = pred_nbr->a[pos];
-      } else if (inv_hoods) {
-        pos = -1;
-        nbr_id = hood_ids->a[inv_hoods->a[s]->a[k-1].i];
-      } else {
-        pos = -1;
-        nbr_id = hood_ids->a[ann_hoods->a[s]->a[k-1].i];
-      }
+      int64_t pos = pred_off->a[s] + (int64_t)(k - 1);
+      int64_t nbr_id = pred_nbr->a[pos];
       bool hit = tk_iuset_contains(exp_set, nbr_id) != 0;
       if (hit) tp++;
-      if (is_tp && pos >= 0)
+      if (is_tp)
         is_tp[pos] = hit ? 1 : 0;
       double prec = (double)tp / k;
       double rec = (double)tp / n_expected;
@@ -434,7 +343,7 @@ static inline int tm_retrieval_ks (lua_State *L)
   lua_pushnumber(L, n_valid > 0 ? ma_prec / n_valid : 0); lua_setfield(L, -2, "macro_precision");
   lua_pushnumber(L, n_valid > 0 ? ma_rec / n_valid : 0); lua_setfield(L, -2, "macro_recall");
   lua_pushnumber(L, n_valid > 0 ? ma_f1 / n_valid : 0); lua_setfield(L, -2, "macro_f1");
-  if (pred_scores && is_tp && pred_off) {
+  if (pred_scores && is_tp) {
     uint64_t total_true = 0;
     for (uint64_t s = 0; s < n_samples; s++)
       total_true += (uint64_t)(exp_off->a[s + 1] - exp_off->a[s]);
@@ -1517,7 +1426,7 @@ static inline int tm_cluster (lua_State *L)
   return 1;
 }
 
-static inline int tm_score_retrieval (lua_State *L)
+static inline int tm_ranking_accuracy (lua_State *L)
 {
   lua_settop(L, 1);
 
@@ -1536,7 +1445,7 @@ static inline int tm_score_retrieval (lua_State *L)
   double kernel_decay = 0.0;
 
   if (kernel_index) {
-    kernel_decay = tk_lua_foptnumber(L, 1, "score_retrieval", "kernel_decay", 0.0);
+    kernel_decay = tk_lua_foptnumber(L, 1, "ranking_accuracy", "kernel_decay", 0.0);
   }
 
   tk_ann_t *ann = NULL;
@@ -1554,7 +1463,7 @@ static inline int tm_score_retrieval (lua_State *L)
     ann = tk_ann_peekopt(L, -1);
     lua_pop(L, 1);
     if (!ann)
-      tk_lua_verror(L, 3, "score_retrieval", "codes/index/raw_codes/kernel_index", "codes, raw_codes, index, or kernel_index required");
+      tk_lua_verror(L, 3, "ranking_accuracy", "codes/index/raw_codes/kernel_index", "codes, raw_codes, index, or kernel_index required");
   }
 
   tk_ivec_t *code_ids = NULL;
@@ -1583,22 +1492,22 @@ static inline int tm_score_retrieval (lua_State *L)
   uint64_t n_dims = 0;
   uint64_t chunks = 0;
   if (!kernel_index) {
-    n_dims = tk_lua_fcheckunsigned(L, 1, "score_retrieval", "n_dims");
+    n_dims = tk_lua_fcheckunsigned(L, 1, "ranking_accuracy", "n_dims");
     chunks = TK_CVEC_BITS_BYTES(n_dims);
   }
 
-  const char *ranking_str = tk_lua_foptstring(L, 1, "score_retrieval", "ranking", "ndcg");
+  const char *ranking_str = tk_lua_foptstring(L, 1, "ranking_accuracy", "ranking", "ndcg");
   tk_eval_metric_t ranking = tk_eval_parse_metric(ranking_str);
   if (ranking != TK_EVAL_METRIC_NDCG &&
       ranking != TK_EVAL_METRIC_SPEARMAN &&
       ranking != TK_EVAL_METRIC_PEARSON)
-    tk_lua_verror(L, 1, "score_retrieval", "ranking", "must be ndcg, spearman, or pearson");
+    tk_lua_verror(L, 1, "ranking_accuracy", "ranking", "must be ndcg, spearman, or pearson");
 
   tk_iumap_t *code_id_to_idx = NULL;
   if (!kernel_index) {
     code_id_to_idx = tk_iumap_from_ivec(NULL, code_ids);
     if (!code_id_to_idx)
-      tk_error(L, "score_retrieval: failed to create code ID mapping", ENOMEM);
+      tk_error(L, "ranking_accuracy: failed to create code ID mapping", ENOMEM);
   }
 
   double total_score = 0.0;
@@ -2084,66 +1993,13 @@ static inline int tk_dendro_iter_lua(lua_State *L) {
   return 1;
 }
 
-static int tm_regression_per_dim (lua_State *L)
-{
-  lua_settop(L, 4);
-  tk_dvec_t *predicted = tk_dvec_peek(L, 1, "predicted");
-  tk_dvec_t *expected = tk_dvec_peek(L, 2, "expected");
-  uint64_t n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
-  uint64_t n_dims = tk_lua_checkunsigned(L, 4, "n_dims");
-  if (predicted->n != n_samples * n_dims || expected->n != n_samples * n_dims)
-    return luaL_error(L, "size mismatch: predicted=%llu expected=%llu, want %llu*%llu=%llu",
-      (unsigned long long)predicted->n, (unsigned long long)expected->n,
-      (unsigned long long)n_samples, (unsigned long long)n_dims,
-      (unsigned long long)(n_samples * n_dims));
-  tk_dvec_t *mae = tk_dvec_create(L, n_dims, 0, 0);
-  tk_dvec_t *corr = tk_dvec_create(L, n_dims, 0, 0);
-  tk_dvec_t *var_ratio = tk_dvec_create(L, n_dims, 0, 0);
-  const double *p = predicted->a;
-  const double *e = expected->a;
-  double inv_n = 1.0 / (double)n_samples;
-  #pragma omp parallel for schedule(static)
-  for (uint64_t d = 0; d < n_dims; d++) {
-    double sum_ae = 0, sum_p = 0, sum_e = 0;
-    double sum_pp = 0, sum_ee = 0, sum_pe = 0;
-    for (uint64_t i = 0; i < n_samples; i++) {
-      double pv = p[i * n_dims + d];
-      double ev = e[i * n_dims + d];
-      sum_ae += fabs(pv - ev);
-      sum_p += pv;
-      sum_e += ev;
-      sum_pp += pv * pv;
-      sum_ee += ev * ev;
-      sum_pe += pv * ev;
-    }
-    mae->a[d] = sum_ae * inv_n;
-    double mp = sum_p * inv_n, me = sum_e * inv_n;
-    double vp = sum_pp * inv_n - mp * mp;
-    double ve = sum_ee * inv_n - me * me;
-    double cov = sum_pe * inv_n - mp * me;
-    corr->a[d] = (vp > 1e-30 && ve > 1e-30) ? cov / sqrt(vp * ve) : 0.0;
-    var_ratio->a[d] = ve > 1e-30 ? vp / ve : 0.0;
-  }
-  int mae_idx = lua_gettop(L) - 2;
-  lua_newtable(L);
-  lua_pushvalue(L, mae_idx);
-  lua_setfield(L, -2, "mae");
-  lua_pushvalue(L, mae_idx + 1);
-  lua_setfield(L, -2, "corr");
-  lua_pushvalue(L, mae_idx + 2);
-  lua_setfield(L, -2, "var_ratio");
-  return 1;
-}
-
 static luaL_Reg tm_evaluator_fns[] =
 {
   { "class_accuracy", tm_class_accuracy },
   { "encoding_accuracy", tm_encoding_accuracy },
   { "regression_accuracy", tm_regression_accuracy },
-  { "regression_per_dim", tm_regression_per_dim },
-  { "retrieval_accuracy", tm_multilabel_retrieval_accuracy },
+  { "ranking_accuracy", tm_ranking_accuracy },
   { "retrieval_ks", tm_retrieval_ks },
-  { "ranking_accuracy", tm_score_retrieval },
   { "cluster", tm_cluster },
   { "entropy_stats", tm_entropy_stats },
   { "dendro_cut", tk_pvec_dendro_cut_lua },
