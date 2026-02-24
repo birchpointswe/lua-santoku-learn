@@ -24,7 +24,7 @@ local cfg = {
     ngrams = 2,
     cgrams_min = 3,
     cgrams_max = 5,
-    cgrams_cross = true,
+    cgrams_cross = false,
     skips = 1,
   },
   feature_selection = {
@@ -32,14 +32,14 @@ local cfg = {
   },
   nystrom = {
     n_landmarks = 4096,
-    n_dims = 256,
+    n_dims = 1024,
     decay = 0,
   },
   regressor = {
     class_batch = nil,
     cost_beta = nil,
     features = 8192, --{ def = 1024, min = 256, max = 2048, pow2 = true },
-    clauses = 8, --{ def = 4, min = 2, max = 6, int = true },
+    clauses = { def = 4, min = 2, max = 8, int = true },
     absorb_threshold = { def = 9 },
     absorb_maximum_fraction = { def = 0.029 },
     absorb_insert_offset = { def = 49 },
@@ -53,21 +53,18 @@ local cfg = {
     alpha_maximum = { def = 0.7, min = -3, max = 3 },
     alpha_target = { def = 1.2, min = -3, max = 3 },
     alpha_specificity = { def = 2.1, min = -3, max = 3 },
-    search_trials = 200,
-    search_iterations = 20,
+    search_trials = 400,
+    search_iterations = 40,
     search_subsample_samples = 0.1,
     final_patience = 2,
-    final_batch = 20,
-    final_iterations = 300,
+    final_batch = 40,
+    final_iterations = 800,
   },
   ridge = {
     lambda = { def = 0.5, min = 0.01, max = 10 },
     propensity_a = { def = 0.55, min = 0.1, max = 2.0 },
     propensity_b = { def = 1.5, min = 0.1, max = 5.0 },
-    alpha_lambda = { def = 0, min = -3, max = 3 },
     k = 32,
-    n_used_dims = { def = 256 },
-    cost_beta = nil,
     search_trials = 200,
   },
 }
@@ -96,7 +93,7 @@ test("eurlex", function()
   local label_idf_ids, label_idf_scores = label_sols:bits_top_idf(train.n, n_labels)
   label_sols:bits_select(label_idf_ids, nil, n_labels)
   local n_label_feats = label_idf_ids:size()
-  local label_index = inv.create({ features = label_idf_scores:size() })
+  local label_index = inv.create({ features = label_idf_scores })
   label_index:add(label_sols, train.ids)
   str.printf("  Label index: %d IDF feats, %d docs, decay=%.1f\n",
     n_label_feats, train.n, cfg.nystrom.decay)
@@ -128,7 +125,6 @@ test("eurlex", function()
     args.lambda = cfg.ridge.lambda
     args.propensity_a = cfg.ridge.propensity_a
     args.propensity_b = cfg.ridge.propensity_b
-    args.alpha_lambda = args.output_weights and cfg.ridge.alpha_lambda or nil
     args.expected_offsets = train.label_csr.offsets
     args.expected_neighbors = train.label_csr.neighbors
     args.search_trials = cfg.ridge.search_trials
@@ -141,27 +137,22 @@ test("eurlex", function()
       local p = ev0.params
       if ev0.event == "trial" then
         local marker = ev0.is_new_best and " ++" or ""
-        local dims_str = p.n_used_dims and string.format(" d=%d", p.n_used_dims) or ""
-        local al_str = p.alpha_lambda and string.format(" al=%+.2f", p.alpha_lambda) or ""
-        str.printf("  [%s %d/%d] F1=%.4f (best=%.4f%s) lam=%.2f a=%.2f b=%.2f%s%s\n",
+        str.printf("  [%s %d/%d] F1=%.4f (best=%.4f%s) lam=%.2f a=%.2f b=%.2f\n",
           ev0.phase, ev0.trial, ev0.trials, ev0.score, ev0.global_best_score, marker,
-          p.lambda, p.propensity_a, p.propensity_b, dims_str, al_str)
+          p.lambda, p.propensity_a, p.propensity_b)
       end
     end
     local ridge_obj, p, m = optimize.ridge(args)
     local dt = utc.time(true) - t0
     local rth = m.thresh
     local rorc = m.oracle
-    local dims_str = p.n_used_dims and string.format(" d=%d", p.n_used_dims) or ""
-    local al_str = p.alpha_lambda and string.format(" al=%+.2f", p.alpha_lambda) or ""
-    str.printf("  -> thresh=%.4f F1=%.4f (oracle=%.4f) lam=%.4f a=%.2f b=%.2f%s%s (%.1fs)\n",
-      rth.threshold, rth.macro_f1, rorc.macro_f1, p.lambda, p.propensity_a, p.propensity_b, dims_str, al_str, dt)
+    str.printf("  -> thresh=%.4f F1=%.4f (oracle=%.4f) lam=%.4f a=%.2f b=%.2f (%.1fs)\n",
+      rth.threshold, rth.macro_f1, rorc.macro_f1, p.lambda, p.propensity_a, p.propensity_b, dt)
     return { name = name, params = p, oracle = rorc, thresh = rth, time = dt, ridge = ridge_obj }
   end
 
   local ceiling = run_ridge("Ridge on spectral codes (ceiling)", {
     codes = train_codes, n_samples = train.n, n_dims = working_dims,
-    output_weights = eigenvalues,
   })
   results[#results + 1] = ceiling
 
@@ -246,45 +237,21 @@ test("eurlex", function()
   str.printf("  Regression MAE: %.6f\n", pred_stats.mean)
 
   local pd = eval.regression_per_dim(train_predicted, train_codes, train.n, working_dims)
-  local corr_order = pd.corr:rdesc(pd.corr:size())
-  local reordered_predicted = dvec.create()
-  train_predicted:mtx_select(corr_order, nil, working_dims, reordered_predicted)
+  str.printf("  Per-dim Pearson: min=%.4f max=%.4f\n", pd.corr:min(), pd.corr:max())
 
-  local reordered_corr = dvec.create():copy(pd.corr, corr_order)
   local pipeline = run_ridge("Ridge on predicted (pipeline)", {
-    codes = reordered_predicted, n_samples = train.n, n_dims = working_dims,
-    n_used_dims = cfg.ridge.n_used_dims, cost_beta = cfg.ridge.cost_beta,
-    output_weights = reordered_corr,
+    codes = train_predicted, n_samples = train.n, n_dims = working_dims,
   })
   results[#results + 1] = pipeline
 
-  print("\nPer-dim regression stats (ordered by Pearson r)")
+  print("\nPer-dim regression stats")
   local pipeline_dw = pipeline.ridge:dim_weights()
-  local pipeline_nd = pipeline.ridge:n_dims()
-  str.printf("  %4s %4s %10s %10s %10s %10s %10s\n",
-    "Rank", "Dim", "Pearson r", "MAE", "Var ratio", "Eigenvalue", "Ridge |W|")
-  for rank = 0, working_dims - 1 do
-    local d = corr_order:get(rank)
+  str.printf("  %4s %10s %10s %10s %10s %10s\n",
+    "Dim", "Pearson r", "MAE", "Var ratio", "Eigenvalue", "Ridge |W|")
+  for d = 0, working_dims - 1 do
     local ev = d < eigenvalues:size() and eigenvalues:get(d) or 0
-    local rw = rank < pipeline_nd and pipeline_dw:get(rank) or 0
-    str.printf("  %4d %4d %10.4f %10.6f %10.4f %10.6f %10.6f\n",
-      rank, d, pd.corr:get(d), pd.mae:get(d), pd.var_ratio:get(d), ev, rw)
-  end
-
-  if pipeline.params.n_used_dims then
-    local keep = pipeline.params.n_used_dims
-    str.printf("  Keeping %d/%d dims (corr %.4f..%.4f)\n",
-      keep, working_dims,
-      pd.corr:get(corr_order:get(0)),
-      pd.corr:get(corr_order:get(keep - 1)))
-    corr_order:setn(keep)
-    tm:restrict(corr_order)
-    eigenvalues = dvec.create():copy(eigenvalues, corr_order)
-    local rp = tm:regress({ tokens = train.tokens, n_samples = train.n }, train.n, true)
-    local rr = dvec.create()
-    train_codes:mtx_select(corr_order, nil, working_dims, rr)
-    local rs = eval.regression_accuracy(rp, rr)
-    str.printf("  Restricted TM to %d dims, MAE: %.6f\n", keep, rs.mean)
+    str.printf("  %4d %10.4f %10.6f %10.4f %10.6f %10.6f\n",
+      d, pd.corr:get(d), pd.mae:get(d), pd.var_ratio:get(d), ev, pipeline_dw:get(d))
   end
 
   print("\n" .. string.rep("=", 90))

@@ -18,7 +18,6 @@ typedef struct {
   tk_dvec_t *W;
   int64_t n_dims;
   int64_t n_labels;
-  int64_t codes_stride;
   bool destroyed;
 } tk_ridge_t;
 
@@ -106,7 +105,7 @@ static inline int tk_ridge_encode_lua (lua_State *L) {
   double *sbuf = (double *)malloc((uint64_t)block * (uint64_t)nl * sizeof(double));
   for (int64_t base = 0; base < n; base += block) {
     int64_t bs = (base + block <= n) ? block : n - base;
-    int64_t cs = r->codes_stride;
+    int64_t cs = r->n_dims;
     cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
       (int)bs, (int)nl, (int)d, 1.0, codes->a + base * cs, (int)cs,
       r->W->a, (int)nl, 0.0, sbuf, (int)nl);
@@ -269,11 +268,8 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     int gram_lua_idx = lua_gettop(L);
     int64_t d = gram->n_dims, nl = gram->n_labels;
     lua_getfield(L, 1, "lambda");
-    double lambda_scalar = lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0;
+    double lambda = lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0;
     lua_pop(L, 1);
-    lua_getfield(L, 1, "lambda_dvec");
-    tk_dvec_t *lambda_dvec = lua_isnil(L, -1) ? NULL : tk_dvec_peek(L, -1, "lambda_dvec");
-    if (!lambda_dvec) lua_pop(L, 1);
     lua_getfield(L, 1, "propensity_a");
     bool do_prop = lua_isnumber(L, -1);
     double prop_a = do_prop ? lua_tonumber(L, -1) : 0.0;
@@ -281,53 +277,41 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     lua_getfield(L, 1, "propensity_b");
     double prop_b = do_prop ? (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.5) : 0.0;
     lua_pop(L, 1);
-    lua_getfield(L, 1, "n_used_dims");
-    int64_t k = lua_isnumber(L, -1) ? (int64_t)lua_tointeger(L, -1) : d;
-    lua_pop(L, 1);
-    if (k > d) k = d;
-    if (k < 1) k = 1;
     lua_getfield(L, 1, "w_buf");
     tk_dvec_t *w_buf = lua_isnil(L, -1) ? NULL : tk_dvec_peek(L, -1, "w_buf");
     int w_buf_lua_idx = w_buf ? lua_gettop(L) : 0;
     if (!w_buf) lua_pop(L, 1);
-    double *XtX = (double *)malloc((uint64_t)k * (uint64_t)k * sizeof(double));
-    for (int64_t i = 0; i < k; i++)
-      memcpy(XtX + i * k, gram->XtX->a + i * d, (uint64_t)k * sizeof(double));
+    double *XtX = (double *)malloc((uint64_t)d * (uint64_t)d * sizeof(double));
+    memcpy(XtX, gram->XtX->a, (uint64_t)d * (uint64_t)d * sizeof(double));
     tk_dvec_t *W_dvec;
     int W_idx;
     if (w_buf) {
-      tk_dvec_ensure(w_buf, (uint64_t)(k * nl));
-      w_buf->n = (uint64_t)(k * nl);
+      tk_dvec_ensure(w_buf, (uint64_t)(d * nl));
+      w_buf->n = (uint64_t)(d * nl);
       W_dvec = w_buf;
       W_idx = w_buf_lua_idx;
     } else {
-      W_dvec = tk_dvec_create(L, (uint64_t)(k * nl), NULL, NULL);
+      W_dvec = tk_dvec_create(L, (uint64_t)(d * nl), NULL, NULL);
       W_idx = lua_gettop(L);
     }
-    for (int64_t i = 0; i < k; i++)
-      memcpy(W_dvec->a + i * nl, gram->XtY->a + i * nl, (uint64_t)nl * sizeof(double));
+    memcpy(W_dvec->a, gram->XtY->a, (uint64_t)d * (uint64_t)nl * sizeof(double));
     if (do_prop) {
       int64_t n = gram->n_samples;
       double C = (log((double)n) - 1.0) * pow(prop_b + 1.0, prop_a);
       for (int64_t l = 0; l < nl; l++) {
         double w = 1.0 + C / pow(gram->label_counts->a[l] + prop_b, prop_a);
-        for (int64_t i = 0; i < k; i++)
+        for (int64_t i = 0; i < d; i++)
           W_dvec->a[i * nl + l] *= w;
       }
     }
-    if (lambda_dvec) {
-      for (int64_t i = 0; i < k; i++)
-        XtX[i * k + i] += lambda_dvec->a[i];
-    } else {
-      for (int64_t i = 0; i < k; i++)
-        XtX[i * k + i] += lambda_scalar;
-    }
-    int info = LAPACKE_dpotrf(LAPACK_ROW_MAJOR, 'U', (int)k, XtX, (int)k);
+    for (int64_t i = 0; i < d; i++)
+      XtX[i * d + i] += lambda;
+    int info = LAPACKE_dpotrf(LAPACK_ROW_MAJOR, 'U', (int)d, XtX, (int)d);
     if (info != 0) {
       free(XtX);
       return luaL_error(L, "ridge create: Cholesky failed (info=%d)", info);
     }
-    info = LAPACKE_dpotrs(LAPACK_ROW_MAJOR, 'U', (int)k, (int)nl, XtX, (int)k, W_dvec->a, (int)nl);
+    info = LAPACKE_dpotrs(LAPACK_ROW_MAJOR, 'U', (int)d, (int)nl, XtX, (int)d, W_dvec->a, (int)nl);
     free(XtX);
     if (info != 0) {
       return luaL_error(L, "ridge create: solve failed (info=%d)", info);
@@ -336,9 +320,8 @@ static inline int tk_ridge_create_lua (lua_State *L) {
       TK_RIDGE_MT, tk_ridge_mt_fns, tk_ridge_gc);
     int Ei = lua_gettop(L);
     r->W = W_dvec;
-    r->n_dims = k;
+    r->n_dims = d;
     r->n_labels = nl;
-    r->codes_stride = d;
     r->destroyed = false;
     lua_newtable(L);
     lua_pushvalue(L, W_idx);
@@ -384,7 +367,6 @@ static inline int tk_ridge_load_lua (lua_State *L) {
   r->W = W;
   r->n_dims = n_dims;
   r->n_labels = n_labels;
-  r->codes_stride = n_dims;
   r->destroyed = false;
   lua_newtable(L);
   lua_pushvalue(L, W_idx);

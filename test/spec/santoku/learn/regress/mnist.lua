@@ -70,6 +70,7 @@ test("mnist classifier", function ()
 
   print("\nBuilding solution CSR")
   local sol_offsets, sol_neighbors = train.solutions:bits_to_csr(train.n, cfg.tm.classes)
+  local val_label_off, val_label_nbr = validate.solutions:bits_to_csr(validate.n, cfg.tm.classes)
 
   print("\nTraining")
   local stopwatch = utc.stopwatch()
@@ -103,11 +104,11 @@ test("mnist classifier", function ()
     final_iterations = cfg.training.iterations,
 
     search_metric = function (regressor)
-      local f1 = regressor:classify_f1(validate.problems, validate.n, validate.solutions, cfg.tm.classes)
-      return f1, { f1 = f1 }
+      local micro_f1, macro_f1 = regressor:label_f1(validate.problems, validate.n, val_label_off, val_label_nbr)
+      return macro_f1, { micro_f1 = micro_f1, macro_f1 = macro_f1 }
     end,
 
-    each = util.make_classifier_log(stopwatch)
+    each = util.make_labeler_log(stopwatch)
 
   })
 
@@ -120,13 +121,13 @@ test("mnist classifier", function ()
   t = tm.load("regressor.bin", nil, true)
 
   print("\nClassification metrics:")
-  local train_scores = t:classify(train.problems, train.n)
-  local val_scores = t:classify(validate.problems, validate.n)
-  local test_scores = t:classify(test_set.problems, test_set.n)
+  local _, train_labels = t:label(train.problems, train.n, 1)
+  local _, val_labels = t:label(validate.problems, validate.n, 1)
+  local _, test_labels = t:label(test_set.problems, test_set.n, 1)
 
-  local train_stats = eval.class_accuracy(train_scores, train.solutions, train.n, cfg.tm.classes)
-  local val_stats = eval.class_accuracy(val_scores, validate.solutions, validate.n, cfg.tm.classes)
-  local test_stats = eval.class_accuracy(test_scores, test_set.solutions, test_set.n, cfg.tm.classes)
+  local train_stats = eval.class_accuracy(train_labels, train.solutions, train.n, cfg.tm.classes)
+  local val_stats = eval.class_accuracy(val_labels, validate.solutions, validate.n, cfg.tm.classes)
+  local test_stats = eval.class_accuracy(test_labels, test_set.solutions, test_set.n, cfg.tm.classes)
   str.printf("  F1:   Train=%.2f  Val=%.2f  Test=%.2f\n", train_stats.f1, val_stats.f1, test_stats.f1)
 
   print("\nPer-class Test Accuracy (sorted by difficulty):\n")
