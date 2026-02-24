@@ -7,8 +7,11 @@
 
 #ifdef __AVX512F__
 #include <immintrin.h>
+#elif defined(__aarch64__)
+#include <arm_neon.h>
 #endif
 
+typedef uint64_t tk_u64a __attribute__((__may_alias__));
 #define TK_AUTOMATA_CARRY_STACK 8192
 
 typedef struct {
@@ -154,9 +157,9 @@ static inline void tk_automata_inc_byte_excluded (
 }
 
 #define TK_CARRY_ALLOC(name, n) \
-  uint8_t name##_stack_[TK_AUTOMATA_CARRY_STACK]; \
+  uint64_t name##_stack64_[TK_AUTOMATA_CARRY_STACK / 8]; \
   uint8_t *name##_heap_ = ((n) >= TK_AUTOMATA_CARRY_STACK) ? (uint8_t *)malloc(n) : NULL; \
-  uint8_t *name = name##_heap_ ? name##_heap_ : name##_stack_
+  uint8_t *name = name##_heap_ ? name##_heap_ : (uint8_t *)name##_stack64_
 
 #define TK_CARRY_FREE(name) free(name##_heap_)
 
@@ -563,13 +566,129 @@ done:
   TK_CARRY_FREE(carry);
 }
 
-#else
+static inline void tk_automata_inc_and_dec_not_excluded (
+  tk_automata_t *aut,
+  uint64_t clause,
+  const uint8_t *input,
+  uint64_t n_chunks
+) {
+  uint64_t m = aut->state_bits - 1;
+  uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
+  uint8_t *counts_planes[m];
+  for (uint64_t b = 0; b < m; b++)
+    counts_planes[b] = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
+
+  TK_CARRY_ALLOC(carry, n_chunks);
+  TK_CARRY_ALLOC(borrow, n_chunks);
+  memcpy(carry, input, n_chunks);
+  {
+    uint64_t k = 0;
+    for (; k + 63 < n_chunks; k += 64) {
+      __m512i vi = _mm512_loadu_si512(input + k);
+      __m512i va = _mm512_loadu_si512(actions + k);
+      _mm512_storeu_si512(borrow + k, _mm512_ternarylogic_epi64(vi, va, vi, 0x03));
+    }
+    for (; k < n_chunks; k++) borrow[k] = ~input[k] & ~actions[k];
+  }
+
+  uint64_t b = 0;
+  for (; b + 1 < m; b += 2) {
+    uint8_t *p0 = counts_planes[b], *p1 = counts_planes[b + 1];
+    uint64_t k = 0;
+    for (; k + 63 < n_chunks; k += 64) {
+      __m512i vo0 = _mm512_loadu_si512(p0 + k);
+      __m512i vo1 = _mm512_loadu_si512(p1 + k);
+      __m512i vc  = _mm512_loadu_si512(carry + k);
+      __m512i vd  = _mm512_loadu_si512(borrow + k);
+      __m512i ti = _mm512_and_si512(vo0, vc);
+      __m512i td = _mm512_andnot_si512(vo0, vd);
+      _mm512_storeu_si512(p0 + k, _mm512_ternarylogic_epi64(vo0, vc, vd, 0x96));
+      _mm512_storeu_si512(p1 + k, _mm512_ternarylogic_epi64(vo1, ti, td, 0x96));
+      _mm512_storeu_si512(carry + k, _mm512_and_si512(vo1, ti));
+      _mm512_storeu_si512(borrow + k, _mm512_andnot_si512(vo1, td));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t o0 = p0[k], o1 = p1[k], c = carry[k], d = borrow[k];
+      uint8_t ti = o0 & c, td = ~o0 & d;
+      p0[k] = o0 ^ c ^ d; p1[k] = o1 ^ ti ^ td;
+      carry[k] = o1 & ti; borrow[k] = ~o1 & td;
+    }
+    if (tk_automata_carry_zero(carry, n_chunks) && tk_automata_carry_zero(borrow, n_chunks))
+      goto done;
+  }
+  for (; b < m; b++) {
+    uint8_t *plane = counts_planes[b];
+    uint64_t k = 0;
+    for (; k + 63 < n_chunks; k += 64) {
+      __m512i vo = _mm512_loadu_si512(plane + k);
+      __m512i vc = _mm512_loadu_si512(carry + k);
+      __m512i vd = _mm512_loadu_si512(borrow + k);
+      _mm512_storeu_si512(plane + k, _mm512_ternarylogic_epi64(vo, vc, vd, 0x96));
+      _mm512_storeu_si512(carry + k, _mm512_and_si512(vo, vc));
+      _mm512_storeu_si512(borrow + k, _mm512_andnot_si512(vo, vd));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t o = plane[k], c = carry[k], d = borrow[k];
+      plane[k] = o ^ c ^ d; carry[k] = o & c; borrow[k] = ~o & d;
+    }
+    if (tk_automata_carry_zero(carry, n_chunks) && tk_automata_carry_zero(borrow, n_chunks))
+      goto done;
+  }
+
+  {
+    uint64_t k = 0;
+    for (; k + 63 < n_chunks; k += 64) {
+      __m512i va = _mm512_loadu_si512(actions + k);
+      __m512i vc = _mm512_loadu_si512(carry + k);
+      __m512i vd = _mm512_loadu_si512(borrow + k);
+      _mm512_storeu_si512(actions + k, _mm512_ternarylogic_epi64(va, vc, vd, 0x96));
+      _mm512_storeu_si512(carry + k, _mm512_and_si512(va, vc));
+      _mm512_storeu_si512(borrow + k, _mm512_andnot_si512(va, vd));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t o = actions[k], c = carry[k], d = borrow[k];
+      actions[k] = o ^ c ^ d; carry[k] = o & c; borrow[k] = ~o & d;
+    }
+    if (tk_automata_carry_zero(carry, n_chunks) && tk_automata_carry_zero(borrow, n_chunks))
+      goto done;
+  }
+
+  for (uint64_t b2 = 0; b2 < m; b2++) {
+    uint8_t *plane = counts_planes[b2];
+    uint64_t k = 0;
+    for (; k + 63 < n_chunks; k += 64) {
+      __m512i vp = _mm512_loadu_si512(plane + k);
+      vp = _mm512_or_si512(vp, _mm512_loadu_si512(carry + k));
+      _mm512_storeu_si512(plane + k, _mm512_andnot_si512(_mm512_loadu_si512(borrow + k), vp));
+    }
+    for (; k < n_chunks; k++) plane[k] = (plane[k] | carry[k]) & ~borrow[k];
+  }
+  {
+    uint64_t k = 0;
+    for (; k + 63 < n_chunks; k += 64) {
+      __m512i va = _mm512_loadu_si512(actions + k);
+      va = _mm512_or_si512(va, _mm512_loadu_si512(carry + k));
+      _mm512_storeu_si512(actions + k, _mm512_andnot_si512(_mm512_loadu_si512(borrow + k), va));
+    }
+    for (; k < n_chunks; k++) actions[k] = (actions[k] | carry[k]) & ~borrow[k];
+  }
+
+done:
+  TK_CARRY_FREE(borrow);
+  TK_CARRY_FREE(carry);
+}
+
+#elif defined(__aarch64__)
 
 static inline int tk_automata_carry_zero (const uint8_t *buf, uint64_t n) {
-  uint64_t acc = 0;
-  for (uint64_t k = 0; k < n; k++)
-    acc |= buf[k];
-  return !acc;
+  uint8x16_t acc = vdupq_n_u8(0);
+  uint64_t k = 0;
+  for (; k + 15 < n; k += 16)
+    acc = vorrq_u8(acc, vld1q_u8(buf + k));
+  if (vmaxvq_u8(acc)) return 0;
+  for (; k < n; k++)
+    if (buf[k]) return 0;
+  return 1;
 }
 
 static inline void tk_automata_inc (
@@ -580,7 +699,6 @@ static inline void tk_automata_inc (
 ) {
   uint64_t m = aut->state_bits - 1;
   uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
-
   uint8_t *counts_planes[m];
   for (uint64_t b = 0; b < m; b++)
     counts_planes[b] = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
@@ -588,30 +706,63 @@ static inline void tk_automata_inc (
   TK_CARRY_ALLOC(carry, n_chunks);
   memcpy(carry, input, n_chunks);
 
-  for (uint64_t b = 0; b < m; b++) {
+  uint64_t b = 0;
+  for (; b + 1 < m; b += 2) {
+    uint8_t *p0 = counts_planes[b], *p1 = counts_planes[b + 1];
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16) {
+      uint8x16_t vo0 = vld1q_u8(p0 + k), vo1 = vld1q_u8(p1 + k), vc = vld1q_u8(carry + k);
+      uint8x16_t t = vandq_u8(vo0, vc);
+      vst1q_u8(p0 + k, veorq_u8(vo0, vc));
+      vst1q_u8(p1 + k, veorq_u8(vo1, t));
+      vst1q_u8(carry + k, vandq_u8(vo1, t));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t o0 = p0[k], o1 = p1[k], c = carry[k];
+      p0[k] = o0 ^ c; p1[k] = o1 ^ (o0 & c); carry[k] = o1 & o0 & c;
+    }
+    if (tk_automata_carry_zero(carry, n_chunks)) goto done;
+  }
+  for (; b < m; b++) {
     uint8_t *plane = counts_planes[b];
-    for (uint64_t k = 0; k < n_chunks; k++) {
-      uint8_t old = plane[k];
-      plane[k] = old ^ carry[k];
-      carry[k] = old & carry[k];
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16) {
+      uint8x16_t vo = vld1q_u8(plane + k), vc = vld1q_u8(carry + k);
+      vst1q_u8(plane + k, veorq_u8(vo, vc));
+      vst1q_u8(carry + k, vandq_u8(vo, vc));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t old = plane[k]; plane[k] = old ^ carry[k]; carry[k] = old & carry[k];
     }
     if (tk_automata_carry_zero(carry, n_chunks)) goto done;
   }
 
-  for (uint64_t k = 0; k < n_chunks; k++) {
-    uint8_t old = actions[k];
-    actions[k] = old ^ carry[k];
-    carry[k] = old & carry[k];
+  {
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16) {
+      uint8x16_t va = vld1q_u8(actions + k), vc = vld1q_u8(carry + k);
+      vst1q_u8(actions + k, veorq_u8(va, vc));
+      vst1q_u8(carry + k, vandq_u8(va, vc));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t old = actions[k]; actions[k] = old ^ carry[k]; carry[k] = old & carry[k];
+    }
+    if (tk_automata_carry_zero(carry, n_chunks)) goto done;
   }
-  if (tk_automata_carry_zero(carry, n_chunks)) goto done;
 
-  for (uint64_t b = 0; b < m; b++) {
-    uint8_t *plane = counts_planes[b];
-    for (uint64_t k = 0; k < n_chunks; k++)
-      plane[k] |= carry[k];
+  for (uint64_t b2 = 0; b2 < m; b2++) {
+    uint8_t *plane = counts_planes[b2];
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16)
+      vst1q_u8(plane + k, vorrq_u8(vld1q_u8(plane + k), vld1q_u8(carry + k)));
+    for (; k < n_chunks; k++) plane[k] |= carry[k];
   }
-  for (uint64_t k = 0; k < n_chunks; k++)
-    actions[k] |= carry[k];
+  {
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16)
+      vst1q_u8(actions + k, vorrq_u8(vld1q_u8(actions + k), vld1q_u8(carry + k)));
+    for (; k < n_chunks; k++) actions[k] |= carry[k];
+  }
 
 done:
   TK_CARRY_FREE(carry);
@@ -625,7 +776,6 @@ static inline void tk_automata_dec (
 ) {
   uint64_t m = aut->state_bits - 1;
   uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
-
   uint8_t *counts_planes[m];
   for (uint64_t b = 0; b < m; b++)
     counts_planes[b] = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
@@ -633,30 +783,63 @@ static inline void tk_automata_dec (
   TK_CARRY_ALLOC(borrow, n_chunks);
   memcpy(borrow, input, n_chunks);
 
-  for (uint64_t b = 0; b < m; b++) {
+  uint64_t b = 0;
+  for (; b + 1 < m; b += 2) {
+    uint8_t *p0 = counts_planes[b], *p1 = counts_planes[b + 1];
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16) {
+      uint8x16_t vo0 = vld1q_u8(p0 + k), vo1 = vld1q_u8(p1 + k), vc = vld1q_u8(borrow + k);
+      uint8x16_t t = vbicq_u8(vc, vo0);
+      vst1q_u8(p0 + k, veorq_u8(vo0, vc));
+      vst1q_u8(p1 + k, veorq_u8(vo1, t));
+      vst1q_u8(borrow + k, vbicq_u8(t, vo1));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t o0 = p0[k], o1 = p1[k], c = borrow[k];
+      p0[k] = o0 ^ c; p1[k] = o1 ^ (~o0 & c); borrow[k] = ~o1 & ~o0 & c;
+    }
+    if (tk_automata_carry_zero(borrow, n_chunks)) goto done;
+  }
+  for (; b < m; b++) {
     uint8_t *plane = counts_planes[b];
-    for (uint64_t k = 0; k < n_chunks; k++) {
-      uint8_t old = plane[k];
-      plane[k] = old ^ borrow[k];
-      borrow[k] = ~old & borrow[k];
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16) {
+      uint8x16_t vo = vld1q_u8(plane + k), vc = vld1q_u8(borrow + k);
+      vst1q_u8(plane + k, veorq_u8(vo, vc));
+      vst1q_u8(borrow + k, vbicq_u8(vc, vo));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t old = plane[k]; plane[k] = old ^ borrow[k]; borrow[k] = ~old & borrow[k];
     }
     if (tk_automata_carry_zero(borrow, n_chunks)) goto done;
   }
 
-  for (uint64_t k = 0; k < n_chunks; k++) {
-    uint8_t old = actions[k];
-    actions[k] = old ^ borrow[k];
-    borrow[k] = ~old & borrow[k];
+  {
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16) {
+      uint8x16_t va = vld1q_u8(actions + k), vc = vld1q_u8(borrow + k);
+      vst1q_u8(actions + k, veorq_u8(va, vc));
+      vst1q_u8(borrow + k, vbicq_u8(vc, va));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t old = actions[k]; actions[k] = old ^ borrow[k]; borrow[k] = ~old & borrow[k];
+    }
+    if (tk_automata_carry_zero(borrow, n_chunks)) goto done;
   }
-  if (tk_automata_carry_zero(borrow, n_chunks)) goto done;
 
-  for (uint64_t b = 0; b < m; b++) {
-    uint8_t *plane = counts_planes[b];
-    for (uint64_t k = 0; k < n_chunks; k++)
-      plane[k] &= ~borrow[k];
+  for (uint64_t b2 = 0; b2 < m; b2++) {
+    uint8_t *plane = counts_planes[b2];
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16)
+      vst1q_u8(plane + k, vbicq_u8(vld1q_u8(plane + k), vld1q_u8(borrow + k)));
+    for (; k < n_chunks; k++) plane[k] &= ~borrow[k];
   }
-  for (uint64_t k = 0; k < n_chunks; k++)
-    actions[k] &= ~borrow[k];
+  {
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16)
+      vst1q_u8(actions + k, vbicq_u8(vld1q_u8(actions + k), vld1q_u8(borrow + k)));
+    for (; k < n_chunks; k++) actions[k] &= ~borrow[k];
+  }
 
 done:
   TK_CARRY_FREE(borrow);
@@ -670,39 +853,75 @@ static inline void tk_automata_dec_not_excluded (
 ) {
   uint64_t m = aut->state_bits - 1;
   uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
-
   uint8_t *counts_planes[m];
   for (uint64_t b = 0; b < m; b++)
     counts_planes[b] = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
 
   TK_CARRY_ALLOC(borrow, n_chunks);
-  for (uint64_t k = 0; k < n_chunks; k++)
-    borrow[k] = ~input[k] & ~actions[k];
+  {
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16)
+      vst1q_u8(borrow + k, vmvnq_u8(vorrq_u8(vld1q_u8(input + k), vld1q_u8(actions + k))));
+    for (; k < n_chunks; k++) borrow[k] = ~input[k] & ~actions[k];
+  }
 
-  for (uint64_t b = 0; b < m; b++) {
+  uint64_t b = 0;
+  for (; b + 1 < m; b += 2) {
+    uint8_t *p0 = counts_planes[b], *p1 = counts_planes[b + 1];
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16) {
+      uint8x16_t vo0 = vld1q_u8(p0 + k), vo1 = vld1q_u8(p1 + k), vc = vld1q_u8(borrow + k);
+      uint8x16_t t = vbicq_u8(vc, vo0);
+      vst1q_u8(p0 + k, veorq_u8(vo0, vc));
+      vst1q_u8(p1 + k, veorq_u8(vo1, t));
+      vst1q_u8(borrow + k, vbicq_u8(t, vo1));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t o0 = p0[k], o1 = p1[k], c = borrow[k];
+      p0[k] = o0 ^ c; p1[k] = o1 ^ (~o0 & c); borrow[k] = ~o1 & ~o0 & c;
+    }
+    if (tk_automata_carry_zero(borrow, n_chunks)) goto done;
+  }
+  for (; b < m; b++) {
     uint8_t *plane = counts_planes[b];
-    for (uint64_t k = 0; k < n_chunks; k++) {
-      uint8_t old = plane[k];
-      plane[k] = old ^ borrow[k];
-      borrow[k] = ~old & borrow[k];
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16) {
+      uint8x16_t vo = vld1q_u8(plane + k), vc = vld1q_u8(borrow + k);
+      vst1q_u8(plane + k, veorq_u8(vo, vc));
+      vst1q_u8(borrow + k, vbicq_u8(vc, vo));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t old = plane[k]; plane[k] = old ^ borrow[k]; borrow[k] = ~old & borrow[k];
     }
     if (tk_automata_carry_zero(borrow, n_chunks)) goto done;
   }
 
-  for (uint64_t k = 0; k < n_chunks; k++) {
-    uint8_t old = actions[k];
-    actions[k] = old ^ borrow[k];
-    borrow[k] = ~old & borrow[k];
+  {
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16) {
+      uint8x16_t va = vld1q_u8(actions + k), vc = vld1q_u8(borrow + k);
+      vst1q_u8(actions + k, veorq_u8(va, vc));
+      vst1q_u8(borrow + k, vbicq_u8(vc, va));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t old = actions[k]; actions[k] = old ^ borrow[k]; borrow[k] = ~old & borrow[k];
+    }
+    if (tk_automata_carry_zero(borrow, n_chunks)) goto done;
   }
-  if (tk_automata_carry_zero(borrow, n_chunks)) goto done;
 
-  for (uint64_t b = 0; b < m; b++) {
-    uint8_t *plane = counts_planes[b];
-    for (uint64_t k = 0; k < n_chunks; k++)
-      plane[k] &= ~borrow[k];
+  for (uint64_t b2 = 0; b2 < m; b2++) {
+    uint8_t *plane = counts_planes[b2];
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16)
+      vst1q_u8(plane + k, vbicq_u8(vld1q_u8(plane + k), vld1q_u8(borrow + k)));
+    for (; k < n_chunks; k++) plane[k] &= ~borrow[k];
   }
-  for (uint64_t k = 0; k < n_chunks; k++)
-    actions[k] &= ~borrow[k];
+  {
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16)
+      vst1q_u8(actions + k, vbicq_u8(vld1q_u8(actions + k), vld1q_u8(borrow + k)));
+    for (; k < n_chunks; k++) actions[k] &= ~borrow[k];
+  }
 
 done:
   TK_CARRY_FREE(borrow);
@@ -716,41 +935,422 @@ static inline void tk_automata_inc_not_excluded (
 ) {
   uint64_t m = aut->state_bits - 1;
   uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
-
   uint8_t *counts_planes[m];
   for (uint64_t b = 0; b < m; b++)
     counts_planes[b] = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
 
   TK_CARRY_ALLOC(carry, n_chunks);
-  for (uint64_t k = 0; k < n_chunks; k++)
-    carry[k] = ~input[k] & ~actions[k];
+  {
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16)
+      vst1q_u8(carry + k, vmvnq_u8(vorrq_u8(vld1q_u8(input + k), vld1q_u8(actions + k))));
+    for (; k < n_chunks; k++) carry[k] = ~input[k] & ~actions[k];
+  }
 
-  for (uint64_t b = 0; b < m; b++) {
+  uint64_t b = 0;
+  for (; b + 1 < m; b += 2) {
+    uint8_t *p0 = counts_planes[b], *p1 = counts_planes[b + 1];
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16) {
+      uint8x16_t vo0 = vld1q_u8(p0 + k), vo1 = vld1q_u8(p1 + k), vc = vld1q_u8(carry + k);
+      uint8x16_t t = vandq_u8(vo0, vc);
+      vst1q_u8(p0 + k, veorq_u8(vo0, vc));
+      vst1q_u8(p1 + k, veorq_u8(vo1, t));
+      vst1q_u8(carry + k, vandq_u8(vo1, t));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t o0 = p0[k], o1 = p1[k], c = carry[k];
+      p0[k] = o0 ^ c; p1[k] = o1 ^ (o0 & c); carry[k] = o1 & o0 & c;
+    }
+    if (tk_automata_carry_zero(carry, n_chunks)) goto done;
+  }
+  for (; b < m; b++) {
     uint8_t *plane = counts_planes[b];
-    for (uint64_t k = 0; k < n_chunks; k++) {
-      uint8_t old = plane[k];
-      plane[k] = old ^ carry[k];
-      carry[k] = old & carry[k];
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16) {
+      uint8x16_t vo = vld1q_u8(plane + k), vc = vld1q_u8(carry + k);
+      vst1q_u8(plane + k, veorq_u8(vo, vc));
+      vst1q_u8(carry + k, vandq_u8(vo, vc));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t old = plane[k]; plane[k] = old ^ carry[k]; carry[k] = old & carry[k];
     }
     if (tk_automata_carry_zero(carry, n_chunks)) goto done;
   }
 
-  for (uint64_t k = 0; k < n_chunks; k++) {
-    uint8_t old = actions[k];
-    actions[k] = old ^ carry[k];
-    carry[k] = old & carry[k];
+  {
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16) {
+      uint8x16_t va = vld1q_u8(actions + k), vc = vld1q_u8(carry + k);
+      vst1q_u8(actions + k, veorq_u8(va, vc));
+      vst1q_u8(carry + k, vandq_u8(va, vc));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t old = actions[k]; actions[k] = old ^ carry[k]; carry[k] = old & carry[k];
+    }
+    if (tk_automata_carry_zero(carry, n_chunks)) goto done;
   }
-  if (tk_automata_carry_zero(carry, n_chunks)) goto done;
 
-  for (uint64_t b = 0; b < m; b++) {
-    uint8_t *plane = counts_planes[b];
-    for (uint64_t k = 0; k < n_chunks; k++)
-      plane[k] |= carry[k];
+  for (uint64_t b2 = 0; b2 < m; b2++) {
+    uint8_t *plane = counts_planes[b2];
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16)
+      vst1q_u8(plane + k, vorrq_u8(vld1q_u8(plane + k), vld1q_u8(carry + k)));
+    for (; k < n_chunks; k++) plane[k] |= carry[k];
   }
-  for (uint64_t k = 0; k < n_chunks; k++)
-    actions[k] |= carry[k];
+  {
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16)
+      vst1q_u8(actions + k, vorrq_u8(vld1q_u8(actions + k), vld1q_u8(carry + k)));
+    for (; k < n_chunks; k++) actions[k] |= carry[k];
+  }
 
 done:
+  TK_CARRY_FREE(carry);
+}
+
+static inline void tk_automata_inc_and_dec_not_excluded (
+  tk_automata_t *aut,
+  uint64_t clause,
+  const uint8_t *input,
+  uint64_t n_chunks
+) {
+  uint64_t m = aut->state_bits - 1;
+  uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
+  uint8_t *counts_planes[m];
+  for (uint64_t b = 0; b < m; b++)
+    counts_planes[b] = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
+
+  TK_CARRY_ALLOC(carry, n_chunks);
+  TK_CARRY_ALLOC(borrow, n_chunks);
+  memcpy(carry, input, n_chunks);
+  {
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16)
+      vst1q_u8(borrow + k, vmvnq_u8(vorrq_u8(vld1q_u8(input + k), vld1q_u8(actions + k))));
+    for (; k < n_chunks; k++) borrow[k] = ~input[k] & ~actions[k];
+  }
+
+  uint64_t b = 0;
+  for (; b + 1 < m; b += 2) {
+    uint8_t *p0 = counts_planes[b], *p1 = counts_planes[b + 1];
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16) {
+      uint8x16_t vo0 = vld1q_u8(p0 + k), vo1 = vld1q_u8(p1 + k);
+      uint8x16_t vi = vld1q_u8(carry + k), vd = vld1q_u8(borrow + k);
+      uint8x16_t ti = vandq_u8(vo0, vi);
+      uint8x16_t td = vbicq_u8(vd, vo0);
+      vst1q_u8(p0 + k, veorq_u8(veorq_u8(vo0, vi), vd));
+      vst1q_u8(p1 + k, veorq_u8(veorq_u8(vo1, ti), td));
+      vst1q_u8(carry + k, vandq_u8(vo1, ti));
+      vst1q_u8(borrow + k, vbicq_u8(td, vo1));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t o0 = p0[k], o1 = p1[k], c = carry[k], d = borrow[k];
+      uint8_t ti = o0 & c, td = ~o0 & d;
+      p0[k] = o0 ^ c ^ d; p1[k] = o1 ^ ti ^ td;
+      carry[k] = o1 & ti; borrow[k] = ~o1 & td;
+    }
+    if (tk_automata_carry_zero(carry, n_chunks) && tk_automata_carry_zero(borrow, n_chunks))
+      goto done;
+  }
+  for (; b < m; b++) {
+    uint8_t *plane = counts_planes[b];
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16) {
+      uint8x16_t vo = vld1q_u8(plane + k);
+      uint8x16_t vi = vld1q_u8(carry + k), vd = vld1q_u8(borrow + k);
+      vst1q_u8(plane + k, veorq_u8(veorq_u8(vo, vi), vd));
+      vst1q_u8(carry + k, vandq_u8(vo, vi));
+      vst1q_u8(borrow + k, vbicq_u8(vd, vo));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t o = plane[k], c = carry[k], d = borrow[k];
+      plane[k] = o ^ c ^ d; carry[k] = o & c; borrow[k] = ~o & d;
+    }
+    if (tk_automata_carry_zero(carry, n_chunks) && tk_automata_carry_zero(borrow, n_chunks))
+      goto done;
+  }
+
+  {
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16) {
+      uint8x16_t va = vld1q_u8(actions + k);
+      uint8x16_t vi = vld1q_u8(carry + k), vd = vld1q_u8(borrow + k);
+      vst1q_u8(actions + k, veorq_u8(veorq_u8(va, vi), vd));
+      vst1q_u8(carry + k, vandq_u8(va, vi));
+      vst1q_u8(borrow + k, vbicq_u8(vd, va));
+    }
+    for (; k < n_chunks; k++) {
+      uint8_t o = actions[k], c = carry[k], d = borrow[k];
+      actions[k] = o ^ c ^ d; carry[k] = o & c; borrow[k] = ~o & d;
+    }
+    if (tk_automata_carry_zero(carry, n_chunks) && tk_automata_carry_zero(borrow, n_chunks))
+      goto done;
+  }
+
+  for (uint64_t b2 = 0; b2 < m; b2++) {
+    uint8_t *plane = counts_planes[b2];
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16) {
+      uint8x16_t vp = vld1q_u8(plane + k);
+      vst1q_u8(plane + k, vbicq_u8(vorrq_u8(vp, vld1q_u8(carry + k)), vld1q_u8(borrow + k)));
+    }
+    for (; k < n_chunks; k++) plane[k] = (plane[k] | carry[k]) & ~borrow[k];
+  }
+  {
+    uint64_t k = 0;
+    for (; k + 15 < n_chunks; k += 16) {
+      uint8x16_t va = vld1q_u8(actions + k);
+      vst1q_u8(actions + k, vbicq_u8(vorrq_u8(va, vld1q_u8(carry + k)), vld1q_u8(borrow + k)));
+    }
+    for (; k < n_chunks; k++) actions[k] = (actions[k] | carry[k]) & ~borrow[k];
+  }
+
+done:
+  TK_CARRY_FREE(borrow);
+  TK_CARRY_FREE(carry);
+}
+
+#else
+
+static inline int tk_automata_carry_zero (const uint8_t *buf, uint64_t n) {
+  const tk_u64a *p = (const tk_u64a *)buf;
+  uint64_t acc = 0;
+  uint64_t n8 = n / 8;
+  for (uint64_t k = 0; k < n8; k++)
+    acc |= p[k];
+  for (uint64_t k = n8 * 8; k < n; k++)
+    acc |= buf[k];
+  return !acc;
+}
+
+#define TK_AUT_LOOP8_INC(plane, carry, n) do { \
+  tk_u64a *p_ = (tk_u64a *)(plane); tk_u64a *c_ = (tk_u64a *)(carry); \
+  uint64_t n8_ = (n) / 8; \
+  for (uint64_t i_ = 0; i_ < n8_; i_++) { \
+    uint64_t vo_ = p_[i_], vc_ = c_[i_]; \
+    p_[i_] = vo_ ^ vc_; c_[i_] = vo_ & vc_; \
+  } \
+  for (uint64_t i_ = n8_ * 8; i_ < (n); i_++) { \
+    uint8_t o_ = (plane)[i_]; (plane)[i_] = o_ ^ (carry)[i_]; (carry)[i_] = o_ & (carry)[i_]; \
+  } \
+} while(0)
+
+#define TK_AUT_LOOP8_DEC(plane, borrow, n) do { \
+  tk_u64a *p_ = (tk_u64a *)(plane); tk_u64a *c_ = (tk_u64a *)(borrow); \
+  uint64_t n8_ = (n) / 8; \
+  for (uint64_t i_ = 0; i_ < n8_; i_++) { \
+    uint64_t vo_ = p_[i_], vc_ = c_[i_]; \
+    p_[i_] = vo_ ^ vc_; c_[i_] = ~vo_ & vc_; \
+  } \
+  for (uint64_t i_ = n8_ * 8; i_ < (n); i_++) { \
+    uint8_t o_ = (plane)[i_]; (plane)[i_] = o_ ^ (borrow)[i_]; (borrow)[i_] = ~o_ & (borrow)[i_]; \
+  } \
+} while(0)
+
+#define TK_AUT_LOOP8_OR(plane, src, n) do { \
+  tk_u64a *p_ = (tk_u64a *)(plane); const tk_u64a *s_ = (const tk_u64a *)(src); \
+  uint64_t n8_ = (n) / 8; \
+  for (uint64_t i_ = 0; i_ < n8_; i_++) p_[i_] |= s_[i_]; \
+  for (uint64_t i_ = n8_ * 8; i_ < (n); i_++) (plane)[i_] |= (src)[i_]; \
+} while(0)
+
+#define TK_AUT_LOOP8_ANDNOT(plane, src, n) do { \
+  tk_u64a *p_ = (tk_u64a *)(plane); const tk_u64a *s_ = (const tk_u64a *)(src); \
+  uint64_t n8_ = (n) / 8; \
+  for (uint64_t i_ = 0; i_ < n8_; i_++) p_[i_] &= ~s_[i_]; \
+  for (uint64_t i_ = n8_ * 8; i_ < (n); i_++) (plane)[i_] &= ~(src)[i_]; \
+} while(0)
+
+#define TK_AUT_LOOP8_INIT_ANDNOT(dst, a, b, n) do { \
+  tk_u64a *d_ = (tk_u64a *)(dst); \
+  const tk_u64a *a_ = (const tk_u64a *)(a); const tk_u64a *b_ = (const tk_u64a *)(b); \
+  uint64_t n8_ = (n) / 8; \
+  for (uint64_t i_ = 0; i_ < n8_; i_++) d_[i_] = ~a_[i_] & ~b_[i_]; \
+  for (uint64_t i_ = n8_ * 8; i_ < (n); i_++) (dst)[i_] = ~(a)[i_] & ~(b)[i_]; \
+} while(0)
+
+#define TK_AUT_LOOP8_FUSED(plane, carry, borrow, n) do { \
+  tk_u64a *fp_ = (tk_u64a *)(plane); \
+  tk_u64a *fc_ = (tk_u64a *)(carry); \
+  tk_u64a *fd_ = (tk_u64a *)(borrow); \
+  uint64_t fn8_ = (n) / 8; \
+  for (uint64_t fi_ = 0; fi_ < fn8_; fi_++) { \
+    uint64_t vo_ = fp_[fi_], vc_ = fc_[fi_], vd_ = fd_[fi_]; \
+    fp_[fi_] = vo_ ^ vc_ ^ vd_; \
+    fc_[fi_] = vo_ & vc_; \
+    fd_[fi_] = ~vo_ & vd_; \
+  } \
+  for (uint64_t fi_ = fn8_ * 8; fi_ < (n); fi_++) { \
+    uint8_t o_ = (plane)[fi_], c_ = (carry)[fi_], d_ = (borrow)[fi_]; \
+    (plane)[fi_] = o_ ^ c_ ^ d_; \
+    (carry)[fi_] = o_ & c_; \
+    (borrow)[fi_] = ~o_ & d_; \
+  } \
+} while(0)
+
+#define TK_AUT_LOOP8_SAT_FUSED(plane, carry, borrow, n) do { \
+  tk_u64a *fp_ = (tk_u64a *)(plane); \
+  const tk_u64a *fc_ = (const tk_u64a *)(carry); \
+  const tk_u64a *fd_ = (const tk_u64a *)(borrow); \
+  uint64_t fn8_ = (n) / 8; \
+  for (uint64_t fi_ = 0; fi_ < fn8_; fi_++) fp_[fi_] = (fp_[fi_] | fc_[fi_]) & ~fd_[fi_]; \
+  for (uint64_t fi_ = fn8_ * 8; fi_ < (n); fi_++) (plane)[fi_] = ((plane)[fi_] | (carry)[fi_]) & ~(borrow)[fi_]; \
+} while(0)
+
+static inline void tk_automata_inc (
+  tk_automata_t *aut,
+  uint64_t clause,
+  const uint8_t *input,
+  uint64_t n_chunks
+) {
+  uint64_t m = aut->state_bits - 1;
+  uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
+  uint8_t *counts_planes[m];
+  for (uint64_t b = 0; b < m; b++)
+    counts_planes[b] = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
+
+  TK_CARRY_ALLOC(carry, n_chunks);
+  memcpy(carry, input, n_chunks);
+
+  for (uint64_t b = 0; b < m; b++) {
+    TK_AUT_LOOP8_INC(counts_planes[b], carry, n_chunks);
+    if (tk_automata_carry_zero(carry, n_chunks)) goto done;
+  }
+  TK_AUT_LOOP8_INC(actions, carry, n_chunks);
+  if (tk_automata_carry_zero(carry, n_chunks)) goto done;
+
+  for (uint64_t b = 0; b < m; b++)
+    TK_AUT_LOOP8_OR(counts_planes[b], carry, n_chunks);
+  TK_AUT_LOOP8_OR(actions, carry, n_chunks);
+
+done:
+  TK_CARRY_FREE(carry);
+}
+
+static inline void tk_automata_dec (
+  tk_automata_t *aut,
+  uint64_t clause,
+  const uint8_t *input,
+  uint64_t n_chunks
+) {
+  uint64_t m = aut->state_bits - 1;
+  uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
+  uint8_t *counts_planes[m];
+  for (uint64_t b = 0; b < m; b++)
+    counts_planes[b] = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
+
+  TK_CARRY_ALLOC(borrow, n_chunks);
+  memcpy(borrow, input, n_chunks);
+
+  for (uint64_t b = 0; b < m; b++) {
+    TK_AUT_LOOP8_DEC(counts_planes[b], borrow, n_chunks);
+    if (tk_automata_carry_zero(borrow, n_chunks)) goto done;
+  }
+  TK_AUT_LOOP8_DEC(actions, borrow, n_chunks);
+  if (tk_automata_carry_zero(borrow, n_chunks)) goto done;
+
+  for (uint64_t b = 0; b < m; b++)
+    TK_AUT_LOOP8_ANDNOT(counts_planes[b], borrow, n_chunks);
+  TK_AUT_LOOP8_ANDNOT(actions, borrow, n_chunks);
+
+done:
+  TK_CARRY_FREE(borrow);
+}
+
+static inline void tk_automata_dec_not_excluded (
+  tk_automata_t *aut,
+  uint64_t clause,
+  const uint8_t *input,
+  uint64_t n_chunks
+) {
+  uint64_t m = aut->state_bits - 1;
+  uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
+  uint8_t *counts_planes[m];
+  for (uint64_t b = 0; b < m; b++)
+    counts_planes[b] = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
+
+  TK_CARRY_ALLOC(borrow, n_chunks);
+  TK_AUT_LOOP8_INIT_ANDNOT(borrow, input, actions, n_chunks);
+
+  for (uint64_t b = 0; b < m; b++) {
+    TK_AUT_LOOP8_DEC(counts_planes[b], borrow, n_chunks);
+    if (tk_automata_carry_zero(borrow, n_chunks)) goto done;
+  }
+  TK_AUT_LOOP8_DEC(actions, borrow, n_chunks);
+  if (tk_automata_carry_zero(borrow, n_chunks)) goto done;
+
+  for (uint64_t b = 0; b < m; b++)
+    TK_AUT_LOOP8_ANDNOT(counts_planes[b], borrow, n_chunks);
+  TK_AUT_LOOP8_ANDNOT(actions, borrow, n_chunks);
+
+done:
+  TK_CARRY_FREE(borrow);
+}
+
+static inline void tk_automata_inc_not_excluded (
+  tk_automata_t *aut,
+  uint64_t clause,
+  const uint8_t *input,
+  uint64_t n_chunks
+) {
+  uint64_t m = aut->state_bits - 1;
+  uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
+  uint8_t *counts_planes[m];
+  for (uint64_t b = 0; b < m; b++)
+    counts_planes[b] = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
+
+  TK_CARRY_ALLOC(carry, n_chunks);
+  TK_AUT_LOOP8_INIT_ANDNOT(carry, input, actions, n_chunks);
+
+  for (uint64_t b = 0; b < m; b++) {
+    TK_AUT_LOOP8_INC(counts_planes[b], carry, n_chunks);
+    if (tk_automata_carry_zero(carry, n_chunks)) goto done;
+  }
+  TK_AUT_LOOP8_INC(actions, carry, n_chunks);
+  if (tk_automata_carry_zero(carry, n_chunks)) goto done;
+
+  for (uint64_t b = 0; b < m; b++)
+    TK_AUT_LOOP8_OR(counts_planes[b], carry, n_chunks);
+  TK_AUT_LOOP8_OR(actions, carry, n_chunks);
+
+done:
+  TK_CARRY_FREE(carry);
+}
+
+static inline void tk_automata_inc_and_dec_not_excluded (
+  tk_automata_t *aut,
+  uint64_t clause,
+  const uint8_t *input,
+  uint64_t n_chunks
+) {
+  uint64_t m = aut->state_bits - 1;
+  uint8_t *actions = (uint8_t *)tk_automata_actions(aut, clause);
+  uint8_t *counts_planes[m];
+  for (uint64_t b = 0; b < m; b++)
+    counts_planes[b] = (uint8_t *)tk_automata_counts_plane(aut, clause, b);
+
+  TK_CARRY_ALLOC(carry, n_chunks);
+  TK_CARRY_ALLOC(borrow, n_chunks);
+  memcpy(carry, input, n_chunks);
+  TK_AUT_LOOP8_INIT_ANDNOT(borrow, input, actions, n_chunks);
+
+  for (uint64_t b = 0; b < m; b++) {
+    TK_AUT_LOOP8_FUSED(counts_planes[b], carry, borrow, n_chunks);
+    if (tk_automata_carry_zero(carry, n_chunks) && tk_automata_carry_zero(borrow, n_chunks))
+      goto done;
+  }
+  TK_AUT_LOOP8_FUSED(actions, carry, borrow, n_chunks);
+  if (tk_automata_carry_zero(carry, n_chunks) && tk_automata_carry_zero(borrow, n_chunks))
+    goto done;
+
+  for (uint64_t b = 0; b < m; b++)
+    TK_AUT_LOOP8_SAT_FUSED(counts_planes[b], carry, borrow, n_chunks);
+  TK_AUT_LOOP8_SAT_FUSED(actions, carry, borrow, n_chunks);
+
+done:
+  TK_CARRY_FREE(borrow);
   TK_CARRY_FREE(carry);
 }
 

@@ -71,7 +71,6 @@ static inline double tk_inv_similarity_fast (
   uint64_t n_ranks,
   const int64_t *abits, const int64_t *a_ro,
   const int64_t *bbits, const int64_t *b_ro,
-  double bandwidth,
   tk_inv_rank_weights_t *rw,
   double *q_arr,
   double *e_arr,
@@ -90,7 +89,6 @@ static inline double tk_inv_similarity_by_rank_fast (
   int64_t vsid,
   double *q_weights_by_rank,
   double *e_weights_by_rank,
-  double bandwidth,
   double cutoff,
   tk_inv_rank_weights_t *rw
 );
@@ -537,7 +535,6 @@ static inline void tk_inv_neighborhoods (
   tk_inv_t *inv,
   uint64_t knn,
   double decay,
-  double bandwidth,
   tk_inv_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
@@ -648,7 +645,7 @@ static inline void tk_inv_neighborhoods (
             if (wacc_base[0] < 0)
               continue;
             memcpy(e_weights_buf, node_weights_a + vsid * (int64_t) n_ranks, n_ranks * sizeof(double));
-            double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, bandwidth, cutoff, &rw);
+            double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw);
             double dist = 1.0 - sim;
             if (dist <= cutoff) {
               tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
@@ -669,7 +666,7 @@ static inline void tk_inv_neighborhoods (
         if (wacc_base[0] < 0)
           continue;
         memcpy(e_weights_buf, node_weights_a + vsid * (int64_t) n_ranks, n_ranks * sizeof(double));
-        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, bandwidth, cutoff, &rw);
+        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw);
         double dist = 1.0 - sim;
         if (dist <= cutoff) {
           if (knn)
@@ -708,7 +705,6 @@ static inline void tk_inv_neighborhoods_by_ids (
   tk_ivec_t *query_ids,
   uint64_t knn,
   double decay,
-  double bandwidth,
   tk_inv_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
@@ -807,7 +803,7 @@ static inline void tk_inv_neighborhoods_by_ids (
             if (wacc_base[0] < 0)
               continue;
             memcpy(e_weights_buf, node_weights_a + vsid * (int64_t) n_ranks, n_ranks * sizeof(double));
-            double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, bandwidth, cutoff, &rw);
+            double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw);
             double dist = 1.0 - sim;
             if (dist <= cutoff) {
               tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
@@ -828,7 +824,7 @@ static inline void tk_inv_neighborhoods_by_ids (
         if (wacc_base[0] < 0)
           continue;
         memcpy(e_weights_buf, node_weights_a + vsid * (int64_t) n_ranks, n_ranks * sizeof(double));
-        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, bandwidth, cutoff, &rw);
+        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw);
         double dist = 1.0 - sim;
         if (dist <= cutoff) {
           if (knn)
@@ -867,7 +863,6 @@ static inline void tk_inv_neighborhoods_by_vecs (
   tk_ivec_t *query_vecs,
   uint64_t knn,
   double decay,
-  double bandwidth,
   tk_inv_hoods_t **hoodsp,
   tk_ivec_t **uidsp
 ) {
@@ -1012,7 +1007,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
             if (wacc_base[0] < 0)
               continue;
             memcpy(e_weights_buf, node_weights_a + vsid * (int64_t) n_ranks, n_ranks * sizeof(double));
-            double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, bandwidth, cutoff, &rw);
+            double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw);
             double dist = 1.0 - sim;
             if (dist <= cutoff) {
               tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
@@ -1033,7 +1028,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
         if (wacc_base[0] < 0)
           continue;
         memcpy(e_weights_buf, node_weights_a + vsid * (int64_t) n_ranks, n_ranks * sizeof(double));
-        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, bandwidth, cutoff, &rw);
+        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw);
         double dist = 1.0 - sim;
         if (dist <= cutoff) {
           if (knn)
@@ -1087,22 +1082,16 @@ static inline void tk_inv_precompute_rank_weights (
 static inline double tk_inv_combine_ranks (
   double *i_arr, double *q_arr, double *e_arr,
   uint64_t n_ranks,
-  double bandwidth,
   tk_inv_rank_weights_t *rw
 ) {
   double accum = 0.0;
   for (uint64_t r = 0; r < n_ranks; r++) {
-    double denom = sqrt(q_arr[r] * e_arr[r]);
+    double denom = q_arr[r] + e_arr[r] - i_arr[r];
     double s = (denom > 0.0) ? i_arr[r] / denom : 0.0;
     if (s > 1.0) s = 1.0;
     accum += rw->weights[r] * s;
   }
-  double avg_sim = (rw->total > 0.0) ? accum / rw->total : 0.0;
-  if (bandwidth >= 0.0) {
-    double distance = 1.0 - avg_sim;
-    return exp(-distance * bandwidth);
-  }
-  return avg_sim;
+  return (rw->total > 0.0) ? accum / rw->total : 0.0;
 }
 
 static inline double tk_inv_similarity_fast (
@@ -1110,7 +1099,6 @@ static inline double tk_inv_similarity_fast (
   uint64_t n_ranks,
   const int64_t *abits, const int64_t *a_ro,
   const int64_t *bbits, const int64_t *b_ro,
-  double bandwidth,
   tk_inv_rank_weights_t *rw,
   double *q_arr,
   double *e_arr,
@@ -1137,7 +1125,7 @@ static inline double tk_inv_similarity_fast (
     while (ai < ae) { q_arr[r] += weights_a[abits[ai]]; ai ++; }
     while (bi < be) { e_arr[r] += weights_a[bbits[bi]]; bi ++; }
   }
-  return tk_inv_combine_ranks(i_arr, q_arr, e_arr, n_ranks, bandwidth, rw);
+  return tk_inv_combine_ranks(i_arr, q_arr, e_arr, n_ranks, rw);
 }
 
 static inline double tk_inv_similarity_fast_cached (
@@ -1145,7 +1133,6 @@ static inline double tk_inv_similarity_fast_cached (
   uint64_t n_ranks,
   const int64_t *abits, const int64_t *a_ro,
   const int64_t *bbits, const int64_t *b_ro,
-  double bandwidth,
   tk_inv_rank_weights_t *rw,
   const double *q_arr,
   const double *e_arr,
@@ -1167,15 +1154,14 @@ static inline double tk_inv_similarity_fast_cached (
       }
     }
   }
-  return tk_inv_combine_ranks(i_arr, (double *)q_arr, (double *)e_arr, n_ranks, bandwidth, rw);
+  return tk_inv_combine_ranks(i_arr, (double *)q_arr, (double *)e_arr, n_ranks, rw);
 }
 
 static inline double tk_inv_similarity (
   tk_inv_t *inv,
   const int64_t *abits, const int64_t *a_ro,
   const int64_t *bbits, const int64_t *b_ro,
-  double decay,
-  double bandwidth
+  double decay
 ) {
   tk_inv_rank_weights_t rw;
   tk_inv_precompute_rank_weights(&rw, inv->n_ranks, decay);
@@ -1183,15 +1169,14 @@ static inline double tk_inv_similarity (
   double e_arr[TK_INV_MAX_RANKS] = {0};
   double i_arr[TK_INV_MAX_RANKS] = {0};
   return tk_inv_similarity_fast(inv->weights->a, inv->n_ranks,
-    abits, a_ro, bbits, b_ro, bandwidth, &rw, q_arr, e_arr, i_arr);
+    abits, a_ro, bbits, b_ro, &rw, q_arr, e_arr, i_arr);
 }
 
 static inline double tk_inv_distance (
   tk_inv_t *inv,
   int64_t uid0,
   int64_t uid1,
-  double decay,
-  double bandwidth
+  double decay
 ) {
   int64_t sid0 = tk_inv_uid_sid(inv, uid0, TK_INV_FIND);
   if (sid0 < 0) return 1.0;
@@ -1201,7 +1186,7 @@ static inline double tk_inv_distance (
   const int64_t *a_ro = inv->node_rank_offsets->a + sid0 * (int64_t) stride;
   const int64_t *b_ro = inv->node_rank_offsets->a + sid1 * (int64_t) stride;
   return 1.0 - tk_inv_similarity(inv, inv->node_bits->a, a_ro,
-    inv->node_bits->a, b_ro, decay, bandwidth);
+    inv->node_bits->a, b_ro, decay);
 }
 
 static inline void tk_inv_compute_weights_by_rank (
@@ -1252,7 +1237,6 @@ static inline double tk_inv_similarity_by_rank_fast (
   int64_t vsid,
   double *q_weights_by_rank,
   double *e_weights_by_rank,
-  double bandwidth,
   double cutoff,
   tk_inv_rank_weights_t *rw
 ) {
@@ -1264,7 +1248,7 @@ static inline double tk_inv_similarity_by_rank_fast (
     double inter_w = wacc_arr[(int64_t)n_ranks * vsid + (int64_t)rank];
     double q_w = q_weights_by_rank[rank];
     double e_w = e_weights_by_rank[rank];
-    double denom = sqrt(q_w * e_w);
+    double denom = q_w + e_w - inter_w;
     double rank_sim = (denom > 0.0) ? inter_w / denom : 0.0;
     if (rank_sim > 1.0) rank_sim = 1.0;
     accum += weight * rank_sim;
@@ -1276,12 +1260,7 @@ static inline double tk_inv_similarity_by_rank_fast (
         return 0.0;
     }
   }
-  double avg_sim = (rw->total > 0.0) ? accum / rw->total : 0.0;
-  if (bandwidth >= 0.0) {
-    double distance = 1.0 - avg_sim;
-    return exp(-distance * bandwidth);
-  }
-  return avg_sim;
+  return (rw->total > 0.0) ? accum / rw->total : 0.0;
 }
 
 static inline double tk_inv_similarity_by_rank (
@@ -1291,14 +1270,13 @@ static inline double tk_inv_similarity_by_rank (
   double *q_weights_by_rank,
   double *e_weights_by_rank,
   double decay,
-  double bandwidth,
   double cutoff
 ) {
   tk_inv_rank_weights_t rw;
   tk_inv_precompute_rank_weights(&rw, inv->n_ranks, decay);
   return tk_inv_similarity_by_rank_fast(
     inv->n_ranks, wacc->a, vsid, q_weights_by_rank, e_weights_by_rank,
-    bandwidth, cutoff, &rw);
+    cutoff, &rw);
 }
 
 static inline tk_rvec_t *tk_inv_neighbors_by_vec (
@@ -1309,8 +1287,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
   int64_t sid0,
   uint64_t knn,
   tk_rvec_t *out,
-  double decay,
-  double bandwidth
+  double decay
 ) {
   if (datalen == 0) {
     tk_rvec_clear(out);
@@ -1397,7 +1374,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
 
     memcpy(e_weights_by_rank, inv->node_weights->a + vsid * (int64_t) n_ranks, n_ranks * sizeof(double));
     double current_cutoff = (knn && out->n >= knn) ? out->a[0].d : 1.0;
-    double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, vsid, q_weights_by_rank, e_weights_by_rank, bandwidth, current_cutoff, &rw);
+    double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, vsid, q_weights_by_rank, e_weights_by_rank, current_cutoff, &rw);
     double dist = 1.0 - sim;
     if (dist <= current_cutoff) {
       int64_t vuid = tk_inv_sid_uid(inv, vsid);
@@ -1425,8 +1402,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_id (
   int64_t uid,
   uint64_t knn,
   tk_rvec_t *out,
-  double decay,
-  double bandwidth
+  double decay
 ) {
   int64_t sid0 = tk_inv_uid_sid(inv, uid, false);
   if (sid0 < 0) {
@@ -1439,7 +1415,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_id (
     return out;
   }
   size_t len = (size_t)(ro[inv->n_ranks] - ro[0]);
-  return tk_inv_neighbors_by_vec(inv, inv->node_bits->a, len, ro, sid0, knn, out, decay, bandwidth);
+  return tk_inv_neighbors_by_vec(inv, inv->node_bits->a, len, ro, sid0, knn, out, decay);
 }
 
 static inline int tk_inv_gc_lua (lua_State *L)
@@ -1548,8 +1524,7 @@ static inline int tk_inv_neighborhoods_lua (lua_State *L)
   tk_inv_t *inv = tk_inv_peek(L, 1);
   uint64_t knn = tk_lua_checkunsigned(L, 2, "knn");
   double decay = tk_lua_optnumber(L, 3, "decay", 1.0);
-  double bandwidth = tk_lua_optnumber(L, 4, "bandwidth", -1.0);
-  tk_inv_neighborhoods(L, inv, knn, decay, bandwidth, NULL, NULL);
+  tk_inv_neighborhoods(L, inv, knn, decay, NULL, NULL);
   return 2;
 }
 
@@ -1559,7 +1534,6 @@ static inline int tk_inv_neighborhoods_by_ids_lua (lua_State *L)
   tk_ivec_t *query_ids = tk_ivec_peek(L, 2, "ids");
   uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
   double decay = tk_lua_optnumber(L, 4, "decay", 1.0);
-  double bandwidth = tk_lua_optnumber(L, 5, "bandwidth", -1.0);
   int64_t write_pos = 0;
   for (int64_t i = 0; i < (int64_t) query_ids->n; i ++) {
     int64_t uid = query_ids->a[i];
@@ -1571,7 +1545,7 @@ static inline int tk_inv_neighborhoods_by_ids_lua (lua_State *L)
   query_ids->n = (uint64_t) write_pos;
 
   tk_inv_hoods_t *hoods;
-  tk_inv_neighborhoods_by_ids(L, inv, query_ids, knn, decay, bandwidth, &hoods, &query_ids);
+  tk_inv_neighborhoods_by_ids(L, inv, query_ids, knn, decay, &hoods, &query_ids);
   return 2;
 }
 
@@ -1581,8 +1555,7 @@ static inline int tk_inv_neighborhoods_by_vecs_lua (lua_State *L)
   tk_ivec_t *query_vecs = tk_ivec_peek(L, 2, "vectors");
   uint64_t knn = tk_lua_checkunsigned(L, 3, "knn");
   double decay = tk_lua_optnumber(L, 4, "decay", 1.0);
-  double bandwidth = tk_lua_optnumber(L, 5, "bandwidth", -1.0);
-  tk_inv_neighborhoods_by_vecs(L, inv, query_vecs, knn, decay, bandwidth, NULL, NULL);
+  tk_inv_neighborhoods_by_vecs(L, inv, query_vecs, knn, decay, NULL, NULL);
   return 2;
 }
 
@@ -1592,8 +1565,7 @@ static inline int tk_inv_similarity_lua (lua_State *L)
   int64_t uid0 = tk_lua_checkinteger(L, 2, "uid0");
   int64_t uid1 = tk_lua_checkinteger(L, 3, "uid1");
   double decay = tk_lua_optnumber(L, 4, "decay", 1.0);
-  double bandwidth = tk_lua_optnumber(L, 5, "bandwidth", -1.0);
-  lua_pushnumber(L, 1.0 - tk_inv_distance(inv, uid0, uid1, decay, bandwidth));
+  lua_pushnumber(L, 1.0 - tk_inv_distance(inv, uid0, uid1, decay));
   return 1;
 }
 
@@ -1603,8 +1575,7 @@ static inline int tk_inv_distance_lua (lua_State *L)
   int64_t uid0 = tk_lua_checkinteger(L, 2, "uid0");
   int64_t uid1 = tk_lua_checkinteger(L, 3, "uid1");
   double decay = tk_lua_optnumber(L, 4, "decay", 1.0);
-  double bandwidth = tk_lua_optnumber(L, 5, "bandwidth", -1.0);
-  lua_pushnumber(L, tk_inv_distance(inv, uid0, uid1, decay, bandwidth));
+  lua_pushnumber(L, tk_inv_distance(inv, uid0, uid1, decay));
   return 1;
 }
 
@@ -1614,15 +1585,14 @@ static inline int tk_inv_neighbors_lua (lua_State *L)
   uint64_t knn = tk_lua_optunsigned(L, 3, "knn", 0);
   tk_rvec_t *out = tk_rvec_peek(L, 4, "out");
   double decay = tk_lua_optnumber(L, 5, "decay", 1.0);
-  double bandwidth = tk_lua_optnumber(L, 6, "bandwidth", -1.0);
   if (lua_type(L, 2) == LUA_TNUMBER) {
     int64_t uid = tk_lua_checkinteger(L, 2, "id");
-    tk_inv_neighbors_by_id(inv, uid, knn, out, decay, bandwidth);
+    tk_inv_neighbors_by_id(inv, uid, knn, out, decay);
   } else {
     tk_ivec_t *vec = tk_ivec_peek(L, 2, "vector");
     int64_t q_ro[TK_INV_MAX_RANKS + 1];
     tk_inv_partition_by_rank(inv->ranks->a, inv->n_ranks, vec->a, vec->n, q_ro);
-    tk_inv_neighbors_by_vec(inv, vec->a, vec->n, q_ro, -1, knn, out, decay, bandwidth);
+    tk_inv_neighbors_by_vec(inv, vec->a, vec->n, q_ro, -1, knn, out, decay);
   }
   return 0;
 }

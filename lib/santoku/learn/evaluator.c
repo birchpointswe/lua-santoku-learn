@@ -68,10 +68,17 @@ static inline int tm_class_accuracy (lua_State *L)
     atomic_init(FN + i, 0);
   }
 
+  unsigned int *true_classes = (unsigned int *)calloc(n_samples, sizeof(unsigned int));
+  for (uint64_t j = 0; j < expected->n; j++) {
+    int64_t v = expected->a[j];
+    unsigned int s = (unsigned int)(v / n_dims);
+    unsigned int c = (unsigned int)(v % n_dims);
+    if (s < n_samples) true_classes[s] = c;
+  }
   #pragma omp parallel for schedule(static)
   for (unsigned int i = 0; i < n_samples; i ++) {
     unsigned int y_pred = predicted->a[i];
-    unsigned int y_true = expected->a[i];
+    unsigned int y_true = true_classes[i];
     if (y_pred >= n_dims || y_true >= n_dims)
       continue;
     if (y_pred == y_true)
@@ -81,6 +88,7 @@ static inline int tm_class_accuracy (lua_State *L)
       atomic_fetch_add(FN + y_true, 1);
     }
   }
+  free(true_classes);
 
   double precision_avg = 0.0, recall_avg = 0.0, f1_avg = 0.0;
   for (unsigned int c = 0; c < n_dims; c ++) {
@@ -430,8 +438,8 @@ static inline int tm_retrieval_ks (lua_State *L)
     uint64_t total_true = 0;
     for (uint64_t s = 0; s < n_samples; s++)
       total_true += (uint64_t)(exp_off->a[s + 1] - exp_off->a[s]);
-    tk_dvec_t *all_scores = tk_dvec_create(L, total_preds, NULL, NULL);
-    tk_dvec_t *tp_scores_v = tk_dvec_create(L, total_preds, NULL, NULL);
+    tk_dvec_t *all_scores = tk_dvec_create(NULL, total_preds, NULL, NULL);
+    tk_dvec_t *tp_scores_v = tk_dvec_create(NULL, total_preds, NULL, NULL);
     memcpy(all_scores->a, pred_scores->a, total_preds * sizeof(double));
     uint64_t n_tp_sorted = 0;
     for (uint64_t i = 0; i < total_preds; i++)
@@ -460,7 +468,8 @@ static inline int tm_retrieval_ks (lua_State *L)
         best_threshold = cur;
       }
     }
-    lua_pop(L, 2);
+    tk_dvec_destroy(all_scores);
+    tk_dvec_destroy(tp_scores_v);
     double th_ma_prec = 0, th_ma_rec = 0, th_ma_f1 = 0;
     uint64_t th_mi_tp = 0, th_mi_k = 0, th_mi_exp = 0, th_n_valid = 0;
     #pragma omp parallel for reduction(+:th_ma_prec,th_ma_rec,th_ma_f1,th_mi_tp,th_mi_k,th_mi_exp,th_n_valid)
@@ -534,9 +543,7 @@ static inline tk_ivec_t *tk_pvec_dendro_cut(
   }
   assignments->n = n_samples;
 
-  tk_iumap_t *absorbed_to_surviving = tk_iumap_create(L, 0);
-  tk_lua_add_ephemeron(L, TK_EVAL_EPH, -1, -1);
-  lua_pop(L, 1);
+  tk_iumap_t *absorbed_to_surviving = tk_iumap_create(NULL, 0);
 
   for (uint64_t s = 0; s < step && s + n_samples < offsets->n; s++) {
     int64_t start = offsets->a[n_samples + s];
@@ -570,9 +577,7 @@ static inline tk_ivec_t *tk_pvec_dendro_cut(
     assignments->a[i] = cluster;
   }
 
-  tk_iumap_t *cluster_remap = tk_iumap_create(L, 0);
-  tk_lua_add_ephemeron(L, TK_EVAL_EPH, -1, -1);
-  lua_pop(L, 1);
+  tk_iumap_t *cluster_remap = tk_iumap_create(NULL, 0);
 
   int64_t next_id = 0;
   for (uint64_t i = 0; i < n_samples; i++) {
@@ -1529,11 +1534,9 @@ static inline int tm_score_retrieval (lua_State *L)
   lua_pop(L, 1);
 
   double kernel_decay = 0.0;
-  double kernel_bandwidth = -1.0;
 
   if (kernel_index) {
     kernel_decay = tk_lua_foptnumber(L, 1, "score_retrieval", "kernel_decay", 0.0);
-    kernel_bandwidth = tk_lua_foptnumber(L, 1, "score_retrieval", "kernel_bandwidth", -1.0);
   }
 
   tk_ann_t *ann = NULL;
@@ -1656,7 +1659,7 @@ static inline int tm_score_retrieval (lua_State *L)
 
           if (kernel_index) {
             double kernel_dist = tk_inv_distance(kernel_index, query_id, neighbor_id,
-              kernel_decay, kernel_bandwidth);
+              kernel_decay);
             tk_rvec_push(query_neighbors_raw, tk_rank(neighbor_eval_idx, kernel_dist));
           } else if (raw_codes) {
             khint_t nbr_khi = tk_iumap_get(code_id_to_idx, neighbor_id);
@@ -1864,10 +1867,7 @@ static inline int tk_pvec_dendro_cut_lua (lua_State *L)
   tk_ivec_ensure(cluster_members, n_samples);
   cluster_members->n = n_samples;
 
-  tk_ivec_t *cluster_positions = tk_ivec_create(L, 0, 0, 0);
-  tk_lua_add_ephemeron(L, TK_EVAL_EPH, -1, -1);
-  tk_ivec_ensure(cluster_positions, (uint64_t)n_clusters);
-  cluster_positions->n = (uint64_t)n_clusters;
+  tk_ivec_t *cluster_positions = tk_ivec_create(NULL, (uint64_t)n_clusters, 0, 0);
   for (int64_t i = 0; i < n_clusters; i++) {
     cluster_positions->a[i] = cluster_offsets->a[i];
   }
@@ -1880,7 +1880,6 @@ static inline int tk_pvec_dendro_cut_lua (lua_State *L)
   }
 
   tk_ivec_destroy(cluster_positions);
-  lua_pop(L, 1);
 
   lua_pushvalue(L, i_members);
   lua_pushvalue(L, i_offsets);
@@ -2018,9 +2017,7 @@ static inline int tk_dendro_iter_next(lua_State *L) {
     iter->assignments->a[i] = cluster;
   }
   iter->assignments->n = iter->n_samples;
-  tk_iumap_t *cluster_remap = tk_iumap_create(L, 0);
-  tk_lua_add_ephemeron(L, TK_EVAL_EPH, -1, -1);
-  lua_pop(L, 1);
+  tk_iumap_t *cluster_remap = tk_iumap_create(NULL, 0);
   int64_t next_id = 0;
   for (uint64_t i = 0; i < iter->n_samples; i++) {
     int64_t cluster = iter->assignments->a[i];

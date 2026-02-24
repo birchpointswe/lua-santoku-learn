@@ -11,7 +11,6 @@ local num = require("santoku.num")
 local str = require("santoku.string")
 local err = require("santoku.error")
 local rand = require("santoku.random")
-local utc = require("santoku.utc")
 
 local M = {}
 
@@ -37,44 +36,17 @@ local function lhs_sample (n, d)
   return pts
 end
 
-local function key_int (v)
-  return v and tostring(num.floor(v + 0.5)) or "nil"
-end
-
-local function key_float2 (v)
-  return v and str.format("%.2f", v) or "nil"
-end
-
-local function cmp_cost(a, b)
-  if b == nil then return -1 end
-  if type(a) == "number" then
-    if a < b then return -1 end
-    if a > b then return 1 end
-    return 0
-  end
-  for i = 1, #a do
-    if a[i] < b[i] then return -1 end
-    if a[i] > b[i] then return 1 end
-  end
-  return 0
-end
-
-local function is_preferred(new_score, new_cost, best_score, best_cost, tolerance)
-  if best_cost == nil then
-    return true
-  end
-  if new_score > best_score + tolerance then
-    return true
-  end
-  if new_score >= best_score - tolerance and cmp_cost(new_cost, best_cost) < 0 then
-    return true
-  end
-  return false
-end
-
 local function round_to_pow2 (x)
   local log2x = num.log(x) / num.log(2)
   return num.pow(2, num.floor(log2x + 0.5))
+end
+
+local function spec_defaults (spec, defs)
+  if type(spec) ~= "table" then return spec end
+  local s = {}
+  for k, v in pairs(defs) do s[k] = v end
+  for k, v in pairs(spec) do s[k] = v end
+  return s
 end
 
 local function cap_spec_max (spec, cap)
@@ -252,18 +224,16 @@ M.search = function (args)
   local samplers = err.assert(args.samplers, "samplers required")
   local trial_fn = err.assert(args.trial_fn, "trial_fn required")
   local trials = args.trials or 120
-  local make_key = args.make_key
   local each_cb = args.each
   local cleanup_fn = args.cleanup
   local skip_final = args.skip_final
   local rerun_final = args.rerun_final ~= false
-  local preference_tolerance = args.preference_tolerance or 1e-6
-  local size_fn = args.size_fn or function() return 0 end
   local constrain_fn = args.constrain
+  local cost_fn = args.cost_fn
+  local cost_beta = args.cost_beta or 0.0
   local n_candidates = args.n_candidates or 500
   local n_hyper_restarts = args.n_hyper_restarts or 20
   local best_score = -num.huge
-  local best_size = nil
   local best_params = nil
   local best_result = nil
   local best_metrics = nil
@@ -295,8 +265,6 @@ M.search = function (args)
 
   local lhs_pts = n_dims > 0 and lhs_sample(n_initial, n_dims) or nil
 
-  local seen = {}
-
   for t = 1, trials do
     local params
 
@@ -323,6 +291,7 @@ M.search = function (args)
     else
       local cand_pts = lhs_sample(n_candidates, n_dims)
       local cand_flat = dvec.create()
+      local cand_costs = (cost_fn and cost_beta > 0) and dvec.create() or nil
       for i = 1, n_candidates do
         local pt = cand_pts[i]
         local p = {}
@@ -333,17 +302,15 @@ M.search = function (args)
         for _, name in ipairs(search_dims) do
           cand_flat:push(samplers[name].normalize(p[name]))
         end
+        if cand_costs then cand_costs:push(cost_fn(p)) end
       end
       local ei = gp.suggest(X_obs, Y_obs, n_dims, cand_flat, n_candidates, n_hyper_restarts)
-      local best_c = 0
-      local best_ei = ei:get(0)
-      for i = 1, n_candidates - 1 do
-        local v = ei:get(i)
-        if v > best_ei then
-          best_ei = v
-          best_c = i
-        end
+      if cand_costs then
+        local _, cmax = cand_costs:max()
+        if cmax > 0 then cand_costs:scale(1.0 / cmax) end
+        ei:scalev(cand_costs:clamp(1e-12, 1.0):pow(-cost_beta))
       end
+      local _, best_c = ei:max()
       params = {}
       for i, name in ipairs(search_dims) do
         params[name] = samplers[name].denormalize(cand_flat:get(best_c * n_dims + i - 1))
@@ -364,59 +331,47 @@ M.search = function (args)
 
     if constrain_fn then constrain_fn(params) end
 
-    local dominated = false
-    if make_key then
-      local key = make_key(params)
-      if seen[key] then
-        dominated = true
-      else
-        seen[key] = true
+    local phase = (n_dims == 0 or t <= n_initial) and "lhs" or "gp"
+    local score, metrics, result = trial_fn(params, {
+      trial = t,
+      trials = trials,
+      is_final = false,
+      global_best_score = best_score,
+      phase = phase,
+    })
+
+    if n_dims > 0 then
+      for _, name in ipairs(search_dims) do
+        X_obs:push(samplers[name].normalize(params[name]))
       end
+      Y_obs:push(score)
     end
 
-    if not dominated then
-      local phase = (n_dims == 0 or t <= n_initial) and "lhs" or "gp"
-      local score, metrics, result = trial_fn(params, {
+    local new_best = score > best_score
+    if each_cb then
+      each_cb({
+        event = "trial",
         trial = t,
         trials = trials,
-        is_final = false,
+        params = params,
+        score = score,
+        metrics = metrics,
         global_best_score = best_score,
+        is_new_best = new_best,
         phase = phase,
       })
-
-      if n_dims > 0 then
-        for _, name in ipairs(search_dims) do
-          X_obs:push(samplers[name].normalize(params[name]))
-        end
-        Y_obs:push(score)
+    end
+    if new_best then
+      if best_result and cleanup_fn then
+        cleanup_fn(best_result)
       end
-
-      if each_cb then
-        each_cb({
-          event = "trial",
-          trial = t,
-          trials = trials,
-          params = params,
-          score = score,
-          metrics = metrics,
-          global_best_score = best_score,
-          phase = phase,
-        })
-      end
-      local current_size = size_fn(params)
-      if is_preferred(score, current_size, best_score, best_size, preference_tolerance) then
-        if best_result and cleanup_fn then
-          cleanup_fn(best_result)
-        end
-        best_score = score
-        best_size = current_size
-        best_params = params
-        best_result = result
-        best_metrics = metrics
-      else
-        if result and cleanup_fn then
-          cleanup_fn(result)
-        end
+      best_score = score
+      best_params = params
+      best_result = result
+      best_metrics = metrics
+    else
+      if result and cleanup_fn then
+        cleanup_fn(result)
       end
     end
   end
@@ -451,6 +406,9 @@ local function create_tm (args, max_features)
   if args.n_tokens then
     opts.n_tokens = args.n_tokens
   end
+  if args.class_batch then
+    opts.class_batch = args.class_batch
+  end
   return tm.create(opts)
 end
 
@@ -468,10 +426,13 @@ local function create_final_tm (args, params, max_features)
   }
   if args.n_tokens then
     opts.n_tokens = args.n_tokens
-    opts.absorb_interval = params.absorb_interval
     opts.absorb_threshold = params.absorb_threshold
     opts.absorb_maximum = params.absorb_maximum
     opts.absorb_insert = params.absorb_insert
+    opts.absorb_ranking_limit = params.absorb_ranking_limit
+  end
+  if args.class_batch then
+    opts.class_batch = args.class_batch
   end
   if params.per_class_tolerances then
     opts.per_class_tolerances = params.per_class_tolerances
@@ -486,11 +447,11 @@ local function train_tm_simple (tmobj, args, _, iterations)
   local t = {
     samples = args.samples,
     problems = args.problems,
-    solutions = args.solutions,
+    sol_offsets = args.sol_offsets,
+    sol_neighbors = args.sol_neighbors,
     codes = args.codes,
     targets = args.targets,
     iterations = iterations,
-    grouped = args.grouped,
   }
   if args.csc_offsets then
     t.csc_offsets = args.csc_offsets
@@ -518,11 +479,11 @@ local function train_tm_batched (tmobj, args, params, iterations, batch_size, pa
     local t = {
       samples = args.samples,
       problems = args.problems,
-      solutions = args.solutions,
+      sol_offsets = args.sol_offsets,
+      sol_neighbors = args.sol_neighbors,
       codes = args.codes,
       targets = args.targets,
       iterations = batch_iters,
-      grouped = args.grouped,
     }
     if args.csc_offsets then
       t.csc_offsets = args.csc_offsets
@@ -620,7 +581,28 @@ local function optimize_tm (args)
   local final_batch = args.final_batch or 10
   local final_patience = args.final_patience or 4
   local global_dev = args.search_dev or 0.2
-  local metric_fn = err.assert(args.search_metric, "search_metric required")
+  local metric_fn = args.search_metric
+  if not metric_fn and args.targets then
+    metric_fn = function (t, targs)
+      local input = targs.tokens
+        and { tokens = targs.tokens, n_samples = targs.samples }
+        or targs.problems
+      local score, mae = t:regress_mae(input, targs.samples, targs.targets)
+      return score, { mean = mae }
+    end
+  end
+  if not metric_fn and args.codes then
+    metric_fn = function (t, targs)
+      local input = targs.tokens
+        and { tokens = targs.tokens, n_samples = targs.samples }
+        or targs.problems
+      local acc = t:encode_hamming(input, targs.samples, targs.codes)
+      return acc, { accuracy = acc }
+    end
+  end
+  if not metric_fn then
+    err.error("search_metric required (or provide targets for default regressor metric)")
+  end
   local each_cb = args.each
   local search_subsample_samples = args.search_subsample_samples or args.search_subsample
   local search_subsample_targets = args.search_subsample_targets
@@ -633,12 +615,12 @@ local function optimize_tm (args)
     max_features = args.features
   end
 
-  local param_names = { "features", "clauses", "clause_maximum", "clause_tolerance_fraction", "target_fraction", "specificity" }
+  local param_names = { "features", "clauses", "clause_maximum_fraction", "clause_tolerance_fraction", "target_fraction", "specificity_fraction" }
   if sparse then
-    param_names[#param_names + 1] = "absorb_interval"
     param_names[#param_names + 1] = "absorb_threshold"
-    param_names[#param_names + 1] = "absorb_maximum"
+    param_names[#param_names + 1] = "absorb_maximum_fraction"
     param_names[#param_names + 1] = "absorb_insert_offset"
+    param_names[#param_names + 1] = "absorb_ranking_fraction"
   end
   if args.output_weights then
     local alpha_def = { min = -3, max = 3, def = 0 }
@@ -653,12 +635,25 @@ local function optimize_tm (args)
   end
 
   local input_bits = 2 * max_features
-  args.clause_maximum = cap_spec_max(args.clause_maximum, input_bits)
-  args.specificity = cap_spec_max(args.specificity, input_bits)
+  args.clause_maximum_fraction = spec_defaults(args.clause_maximum_fraction,
+    { min = 0.001, max = 1.0, log = true })
+  args.clause_tolerance_fraction = spec_defaults(args.clause_tolerance_fraction,
+    { min = 0.01, max = 1.0 })
+  args.target_fraction = spec_defaults(args.target_fraction,
+    { min = 0.01, max = 2.0 })
+  args.specificity_fraction = spec_defaults(args.specificity_fraction,
+    { min = 0.0005, max = 0.5, log = true })
   if sparse then
     local m = (args.state or 8) - 1
-    args.absorb_maximum = cap_spec_max(args.absorb_maximum, max_features)
-    args.absorb_threshold = cap_spec_max(args.absorb_threshold, 2 ^ m - 2)
+    args.absorb_maximum_fraction = spec_defaults(args.absorb_maximum_fraction,
+      { min = 0.001, max = 1.0, log = true })
+    args.absorb_threshold = spec_defaults(args.absorb_threshold,
+      { min = 0, max = 2 ^ (m + 1) - 1, int = true })
+    args.absorb_insert_offset = spec_defaults(args.absorb_insert_offset,
+      { min = 1, max = 2 ^ m - 1, int = true })
+    args.absorb_ranking_fraction = spec_defaults(args.absorb_ranking_fraction,
+      { min = 0.01, max = 1.0, log = true })
+    args.absorb_threshold = cap_spec_max(args.absorb_threshold, 2 ^ (m + 1) - 1)
     args.absorb_insert_offset = cap_spec_max(args.absorb_insert_offset, 2 ^ m - 1)
   end
 
@@ -668,7 +663,14 @@ local function optimize_tm (args)
   local search_ids
   if search_subsample_samples and search_subsample_samples < 1.0 then
     search_n = num.floor(args.samples * search_subsample_samples)
-    search_ids = ivec.create(args.samples):fill_indices():shuffle():setn(search_n):asc()
+    if args.stratify_offsets and args.stratify_neighbors and args.stratify_labels then
+      search_ids = csr.stratified_sample(
+        args.stratify_offsets, args.stratify_neighbors,
+        args.samples, args.stratify_labels, search_n):asc()
+      search_n = search_ids:size()
+    else
+      search_ids = ivec.create(args.samples):fill_indices():shuffle():setn(search_n):asc()
+    end
   end
 
   local search_outputs = args.outputs
@@ -691,10 +693,7 @@ local function optimize_tm (args)
 
   local search_weights = args.output_weights
   if search_dim_ids and args.output_weights then
-    search_weights = dvec.create(search_outputs)
-    for i = 0, search_outputs - 1 do
-      search_weights:set(i, args.output_weights:get(search_dim_ids:get(i)))
-    end
+    search_weights = dvec.create():copy(args.output_weights, search_dim_ids)
   end
 
   local search_data
@@ -730,13 +729,12 @@ local function optimize_tm (args)
     local search_problems = args.problems
     if search_ids then
       search_problems = cvec.create()
-      local search_cvec_features = args.cvec_features or ((args.grouped and args.outputs or 1) * args.features * 2)
+      local search_cvec_features = args.cvec_features or (args.features * 2)
       args.problems:bits_select(nil, search_ids, search_cvec_features, search_problems)
     end
     search_data = {
       samples = search_n,
       problems = search_problems,
-      grouped = args.grouped,
     }
   end
 
@@ -753,11 +751,25 @@ local function optimize_tm (args)
       t = tmp
     end
     search_data.targets = t
-  elseif args.solutions then
+  elseif args.sol_offsets then
     if search_ids then
-      search_data.solutions = ivec.create():copy(args.solutions, search_ids)
+      local new_off = ivec.create(search_n + 1)
+      local new_nbr = ivec.create()
+      local pos = 0
+      for i = 0, search_n - 1 do
+        local sid = search_ids:get(i)
+        local lo = args.sol_offsets:get(sid)
+        local hi = args.sol_offsets:get(sid + 1)
+        new_off:set(i, pos)
+        if hi > lo then new_nbr:copy(args.sol_neighbors, lo, hi, pos) end
+        pos = pos + hi - lo
+      end
+      new_off:set(search_n, pos)
+      search_data.sol_offsets = new_off
+      search_data.sol_neighbors = new_nbr
     else
-      search_data.solutions = args.solutions
+      search_data.sol_offsets = args.sol_offsets
+      search_data.sol_neighbors = args.sol_neighbors
     end
   elseif args.codes then
     local c = args.codes
@@ -780,16 +792,19 @@ local function optimize_tm (args)
       outputs = search_outputs,
       state = args.state,
       n_tokens = args.n_tokens,
+      class_batch = args.class_batch,
     }, max_features)
   end
 
   local function constrain_tm_params (params, weights, outputs)
     local feat = params.features or max_features
     local input_bits = feat and 2 * feat or nil
-    if input_bits then
-      if params.clause_maximum and params.clause_maximum > input_bits then
-        params.clause_maximum = input_bits
-      end
+    if params.clause_maximum_fraction and input_bits then
+      local f = params.clause_maximum_fraction
+      if f < 0 then f = 0 end
+      if f > 1 then f = 1 end
+      params.clause_maximum_fraction = f
+      params.clause_maximum = num.max(1, num.floor(f * input_bits + 0.5))
     end
     if params.clause_tolerance_fraction and params.clause_maximum then
       local f = params.clause_tolerance_fraction
@@ -804,25 +819,32 @@ local function optimize_tm (args)
       params.target_fraction = f
       params.target = num.max(1, num.floor(f * 8 * params.clause_tolerance + 0.5))
     end
-    if params.specificity and feat then
-      local max_specificity = 2 * feat
-      if params.specificity > max_specificity then
-        params.specificity = max_specificity
-      end
-      if params.specificity < 1 then
-        params.specificity = 1
-      end
+    if params.specificity_fraction then
+      local f = params.specificity_fraction
+      if f < 0.0005 then f = 0.0005 end
+      if f > 0.5 then f = 0.5 end
+      params.specificity_fraction = f
+      params.specificity = num.max(1, num.floor(1.0 / f + 0.5))
     end
-    if params.absorb_maximum and feat then
-      if params.absorb_maximum > feat then
-        params.absorb_maximum = feat
-      end
+    if params.absorb_maximum_fraction and feat then
+      local f = params.absorb_maximum_fraction
+      if f < 0 then f = 0 end
+      if f > 1 then f = 1 end
+      params.absorb_maximum_fraction = f
+      params.absorb_maximum = num.max(1, num.floor(f * feat + 0.5))
+    end
+    if params.absorb_ranking_fraction and args.n_tokens then
+      local f = params.absorb_ranking_fraction
+      if f < 0.01 then f = 0.01 end
+      if f > 1 then f = 1 end
+      params.absorb_ranking_fraction = f
+      params.absorb_ranking_limit = num.max(1, num.floor(f * args.n_tokens + 0.5))
     end
     if params.absorb_threshold or params.absorb_insert_offset then
       local m = (args.state or 8) - 1
       local max_excl = 2 ^ m - 1
-      if params.absorb_threshold and params.absorb_threshold >= max_excl then
-        params.absorb_threshold = max_excl - 1
+      if params.absorb_threshold and params.absorb_threshold >= 2 * max_excl + 1 then
+        params.absorb_threshold = 2 * max_excl
       end
       if params.absorb_insert_offset then
         params.absorb_insert = num.min(params.absorb_threshold + params.absorb_insert_offset, max_excl)
@@ -887,28 +909,9 @@ local function optimize_tm (args)
     trials = args.search_trials or 120,
     trial_fn = search_trial_fn,
     skip_final = true,
-    preference_tolerance = args.preference_tolerance or 1e-6,
+    cost_fn = args.cost_fn or function (p) return (p.features or max_features) * (p.clauses or 1) end,
+    cost_beta = args.cost_beta,
     constrain = function (p) constrain_tm_params(p) end,
-    size_fn = function(p) return { p.clauses or 0, p.features or 0 } end,
-    make_key = function (p)
-      local k = str.format("%s|%s|%s|%s|%s|%s",
-        key_int(p.features),
-        key_int(p.clauses),
-        key_int(p.clause_tolerance),
-        key_int(p.clause_maximum),
-        key_int(p.target),
-        key_float2(p.specificity))
-      if p.absorb_interval then
-        k = k .. "|" .. key_int(p.absorb_interval) .. "|" .. key_int(p.absorb_threshold) .. "|" .. key_int(p.absorb_maximum) .. "|" .. key_int(p.absorb_insert)
-      end
-      if p.alpha_specificity then
-        k = k .. "|" .. key_float2(p.alpha_specificity)
-            .. "|" .. key_float2(p.alpha_target)
-            .. "|" .. key_float2(p.alpha_tolerance)
-            .. "|" .. key_float2(p.alpha_maximum)
-      end
-      return k
-    end,
   })
 
   if search_tm then
@@ -921,9 +924,9 @@ local function optimize_tm (args)
     codes = args.codes,
     samples = args.samples,
     problems = args.problems,
-    solutions = args.solutions,
+    sol_offsets = args.sol_offsets,
+    sol_neighbors = args.sol_neighbors,
     targets = args.targets,
-    grouped = args.grouped,
   }
   if sparse then
     final_train_args.csc_offsets = args.csc_offsets
@@ -945,216 +948,170 @@ M.regressor = function (args)
   return optimize_tm(args)
 end
 
-M.destroy_spectral = function (model)
-  if not model then return end
-  if model.raw_codes then model.raw_codes:destroy() end
-  if model.ids then model.ids:destroy() end
-  if model.landmark_ids then model.landmark_ids:destroy() end
-  if model.eigenvectors then model.eigenvectors:destroy() end
-  if model.eigenvalues then model.eigenvalues:destroy() end
-  if model.landmark_chol then model.landmark_chol:destroy() end
-  if model.col_means then model.col_means:destroy() end
-end
-
-M.score_spectral_eval = function (args)
-  local model = args.model
-  local kernel_index = args.kernel_index
-
-  local kernel_stats = nil
-  if kernel_index and args.kernel_decay then
-    kernel_stats = evaluator.ranking_accuracy({
-      kernel_index = kernel_index,
-      kernel_decay = args.kernel_decay,
-      kernel_bandwidth = args.kernel_bandwidth,
-      eval_ids = args.eval_ids,
-      eval_offsets = args.eval_offsets,
-      eval_neighbors = args.eval_neighbors,
-      eval_weights = args.eval_weights,
-      ranking = args.ranking,
-    })
-  end
-
-  local raw_stats = evaluator.ranking_accuracy({
-    raw_codes = model.raw_codes,
-    ids = model.ids,
-    eval_ids = args.eval_ids,
-    eval_offsets = args.eval_offsets,
-    eval_neighbors = args.eval_neighbors,
-    eval_weights = args.eval_weights,
-    ranking = args.ranking,
-    n_dims = model.spectral_dims or model.dims,
-  })
-
-  return raw_stats.score, {
-    score = raw_stats.score,
-    raw_score = raw_stats.score,
-    kernel_score = kernel_stats and kernel_stats.score or nil,
-    n_dims = model.dims,
-    total_queries = raw_stats.total_queries,
-  }
-end
-
-M.build_spectral_nystrom = function (args)
-  local index = args.index
-  local landmarks_index = args.landmarks_index or index
-  local each_cb = args.each
-  local decay = args.decay
-  local bandwidth = args.bandwidth
-
-  local raw_codes, ids, encoder, eigenvalues =
-    spectral.encode({
-      inv = index,
-      landmarks_inv = landmarks_index ~= index and landmarks_index or nil,
-      n_landmarks = args.n_landmarks or 0,
-      n_dims = args.n_dims or args.n_landmarks or 0,
-      decay = decay,
-      bandwidth = bandwidth,
-      trace_tol = args.trace_tol,
-    })
-
-  local effective_dims = encoder and encoder:dims() or 0
-  local landmark_ids = encoder and encoder:landmark_ids() or nil
-  local actual_landmarks = encoder and encoder:n_landmarks() or 0
-  local trace_ratio = encoder and encoder:trace_ratio() or 0.0
-
-  if each_cb then
-    each_cb({
-      event = "spectral_result",
-      n_dims = effective_dims,
-      n_landmarks = actual_landmarks,
-      trace_ratio = trace_ratio,
-    })
-  end
-
-  return {
-    ids = ids,
-    raw_codes = raw_codes,
-    dims = effective_dims,
-    spectral_dims = effective_dims,
-    landmark_ids = landmark_ids,
-    n_landmarks = actual_landmarks,
-    decay = decay,
-    bandwidth = bandwidth,
-    encoder = encoder,
-    eigenvalues = eigenvalues,
-  }
-end
-
 M.spectral = function (args)
   local index = err.assert(args.index, "index required")
-  local landmarks_index = args.landmarks_index
-  local n_landmarks = args.n_landmarks
-  local n_dims = args.n_dims
-  if not n_landmarks and not n_dims then
-    err.error("n_landmarks or n_dims required")
-  end
-  n_landmarks = n_landmarks or n_dims
-  n_dims = n_dims or n_landmarks
-  if n_dims > n_landmarks then
-    n_dims = n_landmarks
-  end
   local decay = args.decay or 0.0
-  local bandwidth = args.bandwidth or -1.0
   local each_cb = args.each
-  local params = { n_landmarks = n_landmarks, n_dims = n_dims, decay = decay, bandwidth = bandwidth }
-  if each_cb then
-    each_cb({ event = "sample", n_landmarks = n_landmarks, n_dims = n_dims, decay = decay, bandwidth = bandwidth })
-  end
-  local model = M.build_spectral_nystrom({
-    index = index,
-    landmarks_index = landmarks_index,
-    n_landmarks = n_landmarks,
-    n_dims = n_dims,
-    decay = decay,
-    bandwidth = bandwidth,
-    trace_tol = args.trace_tol,
-    each = each_cb,
-    train_tokens = args.train_tokens,
-    train_ids = args.train_ids,
-  })
-  local score = nil
-  local metrics = nil
-  if args.expected_ids and args.ranking then
-    local eval_t0 = utc.time(true)
-    score, metrics = M.score_spectral_eval({
-      model = model,
-      ranking = args.ranking,
-      eval_ids = args.expected_ids,
-      eval_offsets = args.expected_offsets,
-      eval_neighbors = args.expected_neighbors,
-      eval_weights = args.expected_weights,
-      kernel_index = index,
-      kernel_decay = decay,
-      kernel_bandwidth = bandwidth,
-    })
-    local eval_t1 = utc.time(true)
-    if each_cb then
-      each_cb({ event = "eval", n_landmarks = n_landmarks, n_dims = n_dims, decay = decay, bandwidth = bandwidth, score = score, metrics = metrics, elapsed = eval_t1 - eval_t0 })
-    end
-  end
-  if each_cb then
-    each_cb({ event = "done", best_params = params, best_score = score, best_metrics = metrics })
-  end
-  return model, params
-end
+  local score_fn = args.score_fn or function (enc) return enc:trace_ratio() end
 
-M.ridge = function (args)
-  local ridge = require("santoku.learn.ridge")
-  local param_names = { "lambda", "propensity_a", "propensity_b" }
+  local param_names = { "n_landmarks", "n_dims" }
   local samplers = M.build_samplers(args, param_names)
-  local k = args.k or 32
-  local each_cb = args.each
-  local score_fn = args.score_fn or function (ret) return ret.thresh.macro_f1 end
-  local is_sparse = args.feature_offsets ~= nil
-  local ga = {
-    n_samples = args.n_samples,
-    n_labels = args.n_labels,
-    label_offsets = args.label_offsets,
-    label_neighbors = args.label_neighbors,
-  }
-  if is_sparse then
-    ga.feature_offsets = args.feature_offsets
-    ga.feature_indices = args.feature_indices
-    ga.n_features = args.n_features
-    ga.feature_weights = args.feature_weights
-  else
-    ga.codes = args.codes
-    ga.n_dims = args.n_dims
-  end
-  local gram = ridge.precompute(ga)
+
   local function trial_fn (params, info)
-    local r = ridge.create({
-      gram = gram,
-      lambda = params.lambda,
-      propensity_a = params.propensity_a,
-      propensity_b = params.propensity_b,
-    })
-    local pred_off, pred_nbr, pred_scores
-    if is_sparse then
-      pred_off, pred_nbr, pred_scores = r:encode(args.feature_offsets, args.feature_indices, args.n_samples, k)
-    else
-      pred_off, pred_nbr, pred_scores = r:encode(args.codes, args.n_samples, k)
+    local raw_codes, ids, encoder, eigenvalues =
+      spectral.encode({
+        inv = index,
+        n_landmarks = params.n_landmarks,
+        n_dims = params.n_dims,
+        decay = decay,
+      })
+    local effective_dims = encoder and encoder:dims() or 0
+    local actual_landmarks = encoder and encoder:n_landmarks() or 0
+    local score = encoder and score_fn(encoder) or 0
+    local trace_ratio = encoder and encoder:trace_ratio() or 0
+    local result = {
+      ids = ids,
+      raw_codes = raw_codes,
+      dims = effective_dims,
+      landmark_ids = encoder and encoder:landmark_ids() or nil,
+      n_landmarks = actual_landmarks,
+      decay = decay,
+      encoder = encoder,
+      eigenvalues = eigenvalues,
+    }
+    if each_cb then
+      each_cb({
+        event = "spectral_result",
+        n_landmarks = actual_landmarks, n_dims = effective_dims,
+        n_embedded = ids and ids:size() or 0,
+        trace_ratio = trace_ratio, decay = decay,
+      })
     end
-    local _, oracle, thresh = evaluator.retrieval_ks({
-      pred_offsets = pred_off,
-      pred_neighbors = pred_nbr,
-      pred_scores = pred_scores,
-      expected_offsets = args.expected_offsets,
-      expected_neighbors = args.expected_neighbors,
-    })
-    local ret = { oracle = oracle, thresh = thresh }
-    return score_fn(ret), ret, info.is_final and r or nil
+    return score, { trace_ratio = trace_ratio }, result
   end
-  return M.search({
+
+  local result, best_params, best_metrics = M.search({
     param_names = param_names,
     samplers = samplers,
     trials = args.search_trials or 30,
     trial_fn = trial_fn,
     each = each_cb,
-    make_key = function (p)
-      return key_float2(p.lambda) .. "|" .. key_float2(p.propensity_a) .. "|" .. key_float2(p.propensity_b)
-    end,
+    cost_fn = args.cost_fn or function (p) return (p.n_landmarks or 1) * (p.n_dims or 1) end,
+    cost_beta = args.cost_beta,
   })
+
+  return result, best_params, best_metrics
+end
+
+M.ridge = function (args)
+  local ridge = require("santoku.learn.ridge")
+  if type(args.n_used_dims) == "table" then
+    args.n_used_dims = spec_defaults(args.n_used_dims, { min = 1, max = args.n_dims, int = true })
+  end
+  local param_names = { "lambda", "propensity_a", "propensity_b", "n_used_dims" }
+  if args.output_weights then
+    if not args.alpha_lambda then args.alpha_lambda = { min = -3, max = 3, def = 0 } end
+    param_names[#param_names + 1] = "alpha_lambda"
+  end
+  local samplers = M.build_samplers(args, param_names)
+  local k = args.k or 32
+  local each_cb = args.each
+  local score_fn = args.score_fn or function (ret) return ret.thresh.macro_f1 end
+  local ga = {
+    n_samples = args.n_samples,
+    n_labels = args.n_labels,
+    n_dims = args.n_dims,
+    codes = args.codes,
+    label_offsets = args.label_offsets,
+    label_neighbors = args.label_neighbors,
+  }
+  local gram = ridge.precompute(ga)
+  local full_data = {
+    codes = args.codes, n_samples = args.n_samples,
+    expected_offsets = args.expected_offsets, expected_neighbors = args.expected_neighbors,
+  }
+  local search_data = full_data
+  local search_subsample = args.search_subsample
+  if search_subsample and search_subsample < 1.0 then
+    local search_n = num.floor(args.n_samples * search_subsample)
+    local search_ids
+    if args.stratify_offsets and args.stratify_neighbors and args.stratify_labels then
+      search_ids = csr.stratified_sample(
+        args.stratify_offsets, args.stratify_neighbors,
+        args.n_samples, args.stratify_labels, search_n):asc()
+      search_n = search_ids:size()
+    else
+      search_ids = ivec.create(args.n_samples):fill_indices():shuffle():setn(search_n):asc()
+    end
+    local function subsample_csr(offsets, neighbors, ids, n)
+      local new_off = ivec.create(n + 1)
+      local new_nbr = ivec.create()
+      local pos = 0
+      for i = 0, n - 1 do
+        local sid = ids:get(i)
+        local lo, hi = offsets:get(sid), offsets:get(sid + 1)
+        new_off:set(i, pos)
+        if hi > lo then
+          new_nbr:copy(neighbors, lo, hi, pos)
+        end
+        pos = pos + hi - lo
+      end
+      new_off:set(n, pos)
+      return new_off, new_nbr
+    end
+    local s_eoff, s_enbr = subsample_csr(args.expected_offsets, args.expected_neighbors, search_ids, search_n)
+    search_data = { n_samples = search_n, expected_offsets = s_eoff, expected_neighbors = s_enbr }
+    local s_codes = dvec.create(search_n * args.n_dims)
+    args.codes:mtx_select(nil, search_ids, args.n_dims, s_codes)
+    search_data.codes = s_codes
+  end
+  local ow = args.output_weights
+  local ow_min, ow_max
+  if ow then ow_min, ow_max = ow:min(), ow:max() end
+  local wb
+  local function trial_fn (params, info)
+    local lam_dvec
+    if ow and params.alpha_lambda and params.alpha_lambda ~= 0 then
+      local nd = params.n_used_dims or args.n_dims
+      lam_dvec = dvec.create(nd)
+      local alpha = params.alpha_lambda
+      local base = params.lambda
+      for i = 0, nd - 1 do
+        local w_norm = (ow_max > ow_min) and ((ow:get(i) - ow_min) / (ow_max - ow_min)) or 0.5
+        lam_dvec:set(i, num.max(1e-8, base * num.exp(alpha * (w_norm - 0.5))))
+      end
+    end
+    local r; r, wb = ridge.create({
+      gram = gram,
+      lambda = params.lambda,
+      lambda_dvec = lam_dvec,
+      propensity_a = params.propensity_a,
+      propensity_b = params.propensity_b,
+      n_used_dims = params.n_used_dims,
+      w_buf = wb,
+    })
+    local data = info.is_final and full_data or search_data
+    local pred_off, pred_nbr, pred_scores = r:label(data.codes, data.n_samples, k)
+    local _, oracle, thresh = evaluator.retrieval_ks({
+      pred_offsets = pred_off,
+      pred_neighbors = pred_nbr,
+      pred_scores = pred_scores,
+      expected_offsets = data.expected_offsets,
+      expected_neighbors = data.expected_neighbors,
+    })
+    local ret = { oracle = oracle, thresh = thresh }
+    return score_fn(ret), ret, info.is_final and r or nil
+  end
+  local result, best_params, best_metrics = M.search({
+    param_names = param_names,
+    samplers = samplers,
+    trials = args.search_trials or 30,
+    trial_fn = trial_fn,
+    each = each_cb,
+    cost_fn = args.cost_fn or function (p) return p.n_used_dims or args.n_dims or 1 end,
+    cost_beta = args.cost_beta,
+  })
+  return result, best_params, best_metrics
 end
 
 return M

@@ -34,7 +34,6 @@ SOFTWARE.
 #include <santoku/cvec.h>
 #include <santoku/dvec.h>
 #include <santoku/ivec.h>
-#include <santoku/pvec.h>
 #include <santoku/rvec.h>
 #include <omp.h>
 #include <math.h>
@@ -46,6 +45,13 @@ SOFTWARE.
 #endif
 
 #define TK_LEARN_MT "santoku_learn"
+
+typedef struct {
+  uint64_t *sample_offsets;
+  uint32_t *binned;
+  int64_t *reverse;
+  unsigned int n_samples;
+} tk_token_bin_t;
 
 typedef struct tk_learn_s {
   bool has_state;
@@ -84,24 +90,29 @@ typedef struct tk_learn_s {
   unsigned int *clause_maximums;
   unsigned int *specificity_thresholds;
   unsigned int *targets;
+  uint8_t *specificity_pts;
 
   bool sparse_mode;
   unsigned int n_tokens;
-  unsigned int absorb_interval;
 
   int64_t *csc_offsets;
   int64_t *csc_indices;
 
   int64_t *mapping;
+  uint64_t mapping_alloc;
   uint8_t *active;
   unsigned int active_bytes;
 
   char *managed_dense;
+  uint64_t dense_alloc;
   unsigned int dense_n_samples;
   unsigned int dense_bpc;
   unsigned int dense_bps;
+  unsigned int dense_batch_size;
+  unsigned int dense_batch_start;
 
   uint8_t *absorb_scratch;
+  uint64_t scratch_alloc;
   int absorb_threads;
   unsigned int absorb_threshold;
   unsigned int absorb_maximum;
@@ -112,7 +123,15 @@ typedef struct tk_learn_s {
   int64_t *absorb_ranking_offsets;
   int64_t *absorb_ranking_global;
   unsigned int absorb_ranking_global_n;
+  unsigned int absorb_ranking_limit;
   unsigned int *absorb_cursor;
+
+  bool dense_stale;
+
+  tk_token_bin_t cached_bin;
+  const int64_t *cached_bin_tokens;
+  bool has_cached_bin;
+
 } tk_learn_t;
 
 static inline uint8_t tk_learn_calculate (
@@ -138,7 +157,7 @@ static inline uint8_t tk_learn_calculate (
       tk_cvec_bits_popcount_andnot_serial(actions, input_bytes, all_bits, &literals_64, &failed_64);
       const uint8_t garbage_act = actions[input_chunks - 1] & garbage_mask;
       unsigned int literals = (unsigned int)literals_64 - (unsigned int)__builtin_popcount(garbage_act);
-      unsigned int failed = (unsigned int)failed_64 - (unsigned int)__builtin_popcount(garbage_act & ~input_bytes[input_chunks - 1]);
+      unsigned int failed = (unsigned int)failed_64 - (unsigned int)__builtin_popcount((unsigned)(garbage_act & ~input_bytes[input_chunks - 1]));
       long int votes;
       if (literals == 0) {
         votes = empty_vote;
@@ -159,7 +178,7 @@ static inline uint8_t tk_learn_calculate (
       const uint8_t last_act = actions[0] & tail_mask;
       const uint8_t last_in = input_bytes[0];
       unsigned int literals = (unsigned int)__builtin_popcount(last_act);
-      unsigned int failed = (unsigned int)__builtin_popcount(last_act & ~last_in);
+      unsigned int failed = (unsigned int)__builtin_popcount((unsigned)(last_act & ~last_in));
       long int votes;
       if (literals == 0) {
         votes = empty_vote;
@@ -186,7 +205,8 @@ static inline void apply_feedback (
   unsigned int *votes,
   bool positive_feedback,
   unsigned int max_literals,
-  unsigned int specificity_thresh
+  unsigned int specificity_thresh,
+  uint8_t specificity_pt
 ) {
   unsigned int input_chunks = tm->input_chunks;
   bool output = votes[clause_idx] > 0;
@@ -194,16 +214,37 @@ static inline void apply_feedback (
   if (positive_feedback) {
     if (output) {
       if (literals[clause_idx] < max_literals)
-        tk_automata_inc(&tm->automata, clause_id, (uint8_t*)input, input_chunks);
-      tk_automata_dec_not_excluded(&tm->automata, clause_id, (uint8_t*)input, input_chunks);
+        tk_automata_inc_and_dec_not_excluded(&tm->automata, clause_id, (uint8_t*)input, input_chunks);
+      else
+        tk_automata_dec_not_excluded(&tm->automata, clause_id, (uint8_t*)input, input_chunks);
     } else {
       unsigned int s = specificity_thresh;
-      unsigned int input_bits = tm->input_bits;
-      for (unsigned int r = 0; r < s; r ++) {
-        unsigned int random_input_bit = tk_fast_random() % input_bits;
-        unsigned int random_chunk = random_input_bit / 8;
-        uint8_t random_mask = 1 << (random_input_bit % 8);
-        tk_automata_dec_byte(&tm->automata, clause_id, random_chunk, random_mask);
+      if (s > input_chunks && input_chunks > 0) {
+        TK_CARRY_ALLOC(bmap, input_chunks);
+        for (unsigned int k = 0; k < input_chunks; k++) {
+          uint32_t r1 = tk_fast_random(), r2 = tk_fast_random();
+          uint8_t mask = 0;
+          if ((uint8_t)(r1       ) < specificity_pt) mask |= 0x01;
+          if ((uint8_t)(r1 >>   8) < specificity_pt) mask |= 0x02;
+          if ((uint8_t)(r1 >>  16) < specificity_pt) mask |= 0x04;
+          if ((uint8_t)(r1 >>  24) < specificity_pt) mask |= 0x08;
+          if ((uint8_t)(r2       ) < specificity_pt) mask |= 0x10;
+          if ((uint8_t)(r2 >>   8) < specificity_pt) mask |= 0x20;
+          if ((uint8_t)(r2 >>  16) < specificity_pt) mask |= 0x40;
+          if ((uint8_t)(r2 >>  24) < specificity_pt) mask |= 0x80;
+          bmap[k] = mask;
+        }
+        bmap[input_chunks - 1] &= tm->tail_mask;
+        tk_automata_dec(&tm->automata, clause_id, bmap, input_chunks);
+        TK_CARRY_FREE(bmap);
+      } else {
+        unsigned int input_bits = tm->input_bits;
+        for (unsigned int r = 0; r < s; r ++) {
+          unsigned int random_input_bit = tk_fast_random() % input_bits;
+          unsigned int random_chunk = random_input_bit / 8;
+          uint8_t random_mask = 1 << (random_input_bit % 8);
+          tk_automata_dec_byte(&tm->automata, clause_id, random_chunk, random_mask);
+        }
       }
     }
   } else {
@@ -233,8 +274,12 @@ tk_learn_t *tk_learn_peek (lua_State *L, int i)
 
 static inline int tk_learn_train (lua_State *);
 static inline int tk_learn_classify (lua_State *);
+static inline int tk_learn_classify_f1 (lua_State *);
 static inline int tk_learn_regress (lua_State *);
+static inline int tk_learn_regress_mae (lua_State *);
+static inline int tk_learn_regress_nmae (lua_State *);
 static inline int tk_learn_encode (lua_State *);
+static inline int tk_learn_encode_hamming (lua_State *);
 static inline int tk_learn_destroy (lua_State *L);
 static inline int tk_learn_persist (lua_State *);
 static inline int tk_learn_checkpoint (lua_State *);
@@ -242,13 +287,21 @@ static inline int tk_learn_restore (lua_State *);
 static inline int tk_learn_reconfigure (lua_State *);
 static inline int tk_learn_restrict (lua_State *);
 static inline int tk_learn_active_features (lua_State *);
+static inline int tk_learn_label (lua_State *);
+static inline int tk_learn_label_f1 (lua_State *);
 
 static luaL_Reg tk_learn_mt_fns[] =
 {
   { "train", tk_learn_train },
   { "classify", tk_learn_classify },
+  { "classify_f1", tk_learn_classify_f1 },
   { "regress", tk_learn_regress },
+  { "regress_mae", tk_learn_regress_mae },
+  { "regress_nmae", tk_learn_regress_nmae },
   { "encode", tk_learn_encode },
+  { "encode_hamming", tk_learn_encode_hamming },
+  { "label", tk_learn_label },
+  { "label_f1", tk_learn_label_f1 },
   { "destroy", tk_learn_destroy },
   { "persist", tk_learn_persist },
   { "checkpoint", tk_learn_checkpoint },
@@ -265,17 +318,22 @@ static inline tk_learn_t *tk_learn_alloc (lua_State *L, bool has_state)
   tm->has_state = has_state;
   tm->sparse_mode = false;
   tm->n_tokens = 0;
-  tm->absorb_interval = 10;
   tm->csc_offsets = NULL;
   tm->csc_indices = NULL;
   tm->mapping = NULL;
+  tm->mapping_alloc = 0;
   tm->active = NULL;
   tm->active_bytes = 0;
   tm->managed_dense = NULL;
+  tm->dense_alloc = 0;
+  tm->dense_stale = false;
   tm->dense_n_samples = 0;
   tm->dense_bpc = 0;
   tm->dense_bps = 0;
+  tm->dense_batch_size = 0;
+  tm->dense_batch_start = 0;
   tm->absorb_scratch = NULL;
+  tm->scratch_alloc = 0;
   tm->absorb_threads = 0;
   tm->absorb_threshold = 0;
   tm->absorb_maximum = 0;
@@ -285,11 +343,15 @@ static inline tk_learn_t *tk_learn_alloc (lua_State *L, bool has_state)
   tm->absorb_ranking_offsets = NULL;
   tm->absorb_ranking_global = NULL;
   tm->absorb_ranking_global_n = 0;
+  tm->absorb_ranking_limit = 0;
   tm->absorb_cursor = NULL;
+  tm->has_cached_bin = false;
+  tm->cached_bin_tokens = NULL;
   tm->clause_tolerances = NULL;
   tm->clause_maximums = NULL;
   tm->specificity_thresholds = NULL;
   tm->targets = NULL;
+  tm->specificity_pts = NULL;
   return tm;
 }
 
@@ -349,6 +411,7 @@ static inline void tk_learn_init (
   tm->clause_maximums = (unsigned int *)tk_malloc(L, outputs * sizeof(unsigned int));
   tm->specificity_thresholds = (unsigned int *)tk_malloc(L, outputs * sizeof(unsigned int));
   tm->targets = (unsigned int *)tk_malloc(L, outputs * sizeof(unsigned int));
+  tm->specificity_pts = (uint8_t *)tk_malloc(L, outputs * sizeof(uint8_t));
   for (unsigned int c = 0; c < outputs; c++) {
     tm->clause_tolerances[c] = clause_tolerance;
     tm->clause_maximums[c] = clause_maximum;
@@ -363,6 +426,13 @@ static inline void tk_learn_init (
   tm->automata.tail_mask = tm->tail_mask;
   tm->automata.counts = tm->state;
   tm->automata.actions = tm->actions;
+}
+
+static inline void tk_learn_recompute_specificity_pts (tk_learn_t *tm) {
+  for (unsigned int c = 0; c < tm->classes; c++) {
+    double p = 1.0 - exp(-(double)tm->specificity_thresholds[c] / (double)tm->input_bits);
+    tm->specificity_pts[c] = (uint8_t)(p * 255.0);
+  }
 }
 
 static inline void tk_learn_create_impl (lua_State *L)
@@ -407,19 +477,23 @@ static inline void tk_learn_create_impl (lua_State *L)
       tm->targets[c] = (unsigned int)v->a[c];
     lua_pop(L, 1);
   }
+  tm->dense_batch_size = tk_lua_foptunsigned(L, 2, "create", "class_batch", 0);
   if (tk_lua_ftype(L, 2, "n_tokens") != LUA_TNIL) {
     tm->sparse_mode = true;
     tm->n_tokens = tk_lua_fcheckunsigned(L, 2, "create", "n_tokens");
-    tm->absorb_interval = tk_lua_foptunsigned(L, 2, "create", "absorb_interval", 10);
     tm->absorb_threshold = tk_lua_foptunsigned(L, 2, "create", "absorb_threshold", 0);
     tm->absorb_maximum = tk_lua_foptunsigned(L, 2, "create", "absorb_maximum", 0);
     tm->absorb_insert = tk_lua_foptunsigned(L, 2, "create", "absorb_insert", tm->absorb_threshold + 1);
+    tm->absorb_ranking_limit = tk_lua_foptunsigned(L, 2, "create", "absorb_ranking_limit", 0);
     tm->active_bytes = TK_CVEC_BITS_BYTES(tm->n_tokens);
     tm->active = (uint8_t *)calloc((uint64_t)tm->classes * tm->active_bytes, 1);
-    tm->mapping = (int64_t *)malloc((uint64_t)tm->classes * tm->features * sizeof(int64_t));
+    tm->mapping_alloc = (uint64_t)tm->classes * tm->features * sizeof(int64_t);
+    tm->mapping = (int64_t *)malloc(tm->mapping_alloc);
     tm->absorb_threads = omp_get_max_threads();
-    tm->absorb_scratch = (uint8_t *)malloc((uint64_t)tm->absorb_threads * tm->features * 2 * sizeof(unsigned int));
+    tm->scratch_alloc = (uint64_t)tm->absorb_threads * tm->features * 2 * sizeof(unsigned int);
+    tm->absorb_scratch = (uint8_t *)malloc(tm->scratch_alloc);
   }
+  tk_learn_recompute_specificity_pts(tm);
   lua_settop(L, 1);
 }
 
@@ -434,6 +508,12 @@ static inline void tk_learn_shrink (tk_learn_t *tm)
   if (tm == NULL) return;
   tm->reusable = false;
   free(tm->state); tm->state = NULL;
+}
+
+static inline void tk_learn_bin_free (tk_token_bin_t *bin) {
+  free(bin->reverse);
+  free(bin->binned);
+  free(bin->sample_offsets);
 }
 
 static inline void _tk_learn_destroy (tk_learn_t *tm)
@@ -452,6 +532,7 @@ static inline void _tk_learn_destroy (tk_learn_t *tm)
   free(tm->clause_maximums); tm->clause_maximums = NULL;
   free(tm->specificity_thresholds); tm->specificity_thresholds = NULL;
   free(tm->targets); tm->targets = NULL;
+  free(tm->specificity_pts); tm->specificity_pts = NULL;
   tm->csc_offsets = NULL;
   tm->csc_indices = NULL;
   free(tm->mapping); tm->mapping = NULL;
@@ -464,6 +545,10 @@ static inline void _tk_learn_destroy (tk_learn_t *tm)
     free(tm->absorb_ranking_global);
   tm->absorb_ranking_global = NULL;
   free(tm->absorb_ranking); tm->absorb_ranking = NULL;
+  if (tm->has_cached_bin) {
+    tk_learn_bin_free(&tm->cached_bin);
+    tm->has_cached_bin = false;
+  }
 }
 
 static inline int tk_learn_destroy (lua_State *L)
@@ -513,20 +598,22 @@ static inline void tk_learn_init_mapping (tk_learn_t *tm, unsigned int c,
 
 static inline void tk_learn_densify_slot (tk_learn_t *tm, unsigned int c, unsigned int slot, unsigned int new_tok, int64_t old_tok) {
   unsigned int bpc = tm->dense_bpc;
-  unsigned int bps = tm->dense_bps;
+  unsigned int n_samples = tm->dense_n_samples;
   uint8_t *out = (uint8_t *)tm->managed_dense;
   unsigned int bit_pos = (2 * slot) % 8;
   uint8_t pair_mask = (uint8_t)(0x3 << bit_pos);
   uint8_t absent_bits = (uint8_t)(0x2 << bit_pos);
   uint8_t present_bits = (uint8_t)(0x1 << bit_pos);
   unsigned int local_byte = (2 * slot) / 8;
+  unsigned int dense_c = (tm->dense_batch_size > 0) ? (c - tm->dense_batch_start) : c;
+  uint64_t class_base = (uint64_t)dense_c * n_samples * bpc;
 
   if (old_tok >= 0) {
     int64_t csc_start = tm->csc_offsets[old_tok];
     int64_t csc_end = tm->csc_offsets[old_tok + 1];
     for (int64_t i = csc_start; i < csc_end; i++) {
       uint32_t s = (uint32_t)tm->csc_indices[i];
-      uint8_t *byte = out + (uint64_t)s * bps + (uint64_t)c * bpc + local_byte;
+      uint8_t *byte = out + class_base + (uint64_t)s * bpc + local_byte;
       *byte = (*byte & ~pair_mask) | absent_bits;
     }
   }
@@ -535,27 +622,38 @@ static inline void tk_learn_densify_slot (tk_learn_t *tm, unsigned int c, unsign
   int64_t csc_end = tm->csc_offsets[new_tok + 1];
   for (int64_t i = csc_start; i < csc_end; i++) {
     uint32_t s = (uint32_t)tm->csc_indices[i];
-    uint8_t *byte = out + (uint64_t)s * bps + (uint64_t)c * bpc + local_byte;
+    uint8_t *byte = out + class_base + (uint64_t)s * bpc + local_byte;
     *byte = (*byte & ~pair_mask) | present_bits;
   }
 }
 
-static inline void tk_learn_densify_all (tk_learn_t *tm) {
-  unsigned int classes = tm->classes;
+static inline void tk_learn_densify_batch (tk_learn_t *tm, unsigned int batch_start, unsigned int batch_size) {
   unsigned int features = tm->features;
-  unsigned int bps = tm->dense_bps;
+  unsigned int bpc = tm->dense_bpc;
   unsigned int n_samples = tm->dense_n_samples;
   uint8_t *out = (uint8_t *)tm->managed_dense;
+  uint64_t class_stride = (uint64_t)n_samples * bpc;
 
-  memset(out, 0xAA, (uint64_t)n_samples * bps);
+  tm->dense_batch_start = batch_start;
 
-  #pragma omp parallel for schedule(dynamic)
-  for (unsigned int c = 0; c < classes; c++) {
-    for (unsigned int k = 0; k < features; k++) {
-      unsigned int tok = (unsigned int)tm->mapping[(uint64_t)c * features + k];
-      tk_learn_densify_slot(tm, c, k, tok, -1);
+  #pragma omp parallel
+  {
+    #pragma omp for schedule(static)
+    for (unsigned int ci = 0; ci < batch_size; ci++)
+      memset(out + (uint64_t)ci * class_stride, 0xAA, class_stride);
+    #pragma omp for schedule(dynamic)
+    for (unsigned int c = batch_start; c < batch_start + batch_size; c++) {
+      for (unsigned int k = 0; k < features; k++) {
+        unsigned int tok = (unsigned int)tm->mapping[(uint64_t)c * features + k];
+        tk_learn_densify_slot(tm, c, k, tok, -1);
+      }
     }
   }
+}
+
+static inline void tk_learn_densify_all (tk_learn_t *tm) {
+  tm->dense_batch_start = 0;
+  tk_learn_densify_batch(tm, 0, tm->classes);
 }
 
 static inline void tk_learn_reset_slot_automata (tk_learn_t *tm, unsigned int c, unsigned int slot) {
@@ -646,15 +744,10 @@ static inline unsigned int tk_learn_absorb_class (tk_learn_t *tm, unsigned int c
   unsigned int active_pop = (unsigned int)tk_cvec_bits_popcount_serial(active_base, n_tokens);
   bool vocab_exhausted = active_pop >= n_tokens;
 
-  int64_t *rank_base;
-  unsigned int rank_len;
-  if (tm->absorb_ranking_offsets) {
-    rank_base = tm->absorb_ranking + tm->absorb_ranking_offsets[c];
-    rank_len = (unsigned int)(tm->absorb_ranking_offsets[c + 1] - tm->absorb_ranking_offsets[c]);
-  } else {
-    rank_base = tm->absorb_ranking_global;
-    rank_len = tm->absorb_ranking_global_n;
-  }
+  int64_t *rank_base = tm->absorb_ranking_global;
+  unsigned int rank_len = tm->absorb_ranking_global_n;
+  if (tm->absorb_ranking_limit > 0 && rank_len > tm->absorb_ranking_limit)
+    rank_len = tm->absorb_ranking_limit;
 
   unsigned int n_replaced = 0;
   for (unsigned int i = 0; i < max_replace; i++) {
@@ -673,7 +766,8 @@ static inline unsigned int tk_learn_absorb_class (tk_learn_t *tm, unsigned int c
     if (sparse_is_active(tm, c, new_tok)) { continue; }
     tm->mapping[(uint64_t)c * features + k] = (int64_t)new_tok;
     sparse_set_active(tm, c, new_tok);
-    tk_learn_densify_slot(tm, c, k, new_tok, old_tok);
+    if (!(tm->dense_batch_size > 0 && tm->dense_batch_size < tm->classes))
+      tk_learn_densify_slot(tm, c, k, new_tok, old_tok);
     tk_learn_reset_slot_automata(tm, c, k);
     n_replaced++;
   }
@@ -681,17 +775,8 @@ static inline unsigned int tk_learn_absorb_class (tk_learn_t *tm, unsigned int c
   return n_replaced;
 }
 
-static inline char *tk_learn_densify_tokens (tk_learn_t *tm, tk_ivec_t *tokens, unsigned int n_samples) {
-  unsigned int classes = tm->classes;
-  unsigned int features = tm->features;
+static inline tk_token_bin_t tk_learn_bin_tokens (tk_learn_t *tm, tk_ivec_t *tokens, unsigned int n_samples) {
   unsigned int n_tokens = tm->n_tokens;
-  unsigned int bpc = TK_CVEC_BITS_BYTES(features * 2);
-  unsigned int bps = classes * bpc;
-  uint64_t out_size = (uint64_t)n_samples * bps;
-  char *out = (char *)malloc(out_size);
-  memset(out, 0xAA, out_size);
-  uint8_t *data = (uint8_t *)out;
-
   uint64_t *counts = (uint64_t *)calloc(n_samples, sizeof(uint64_t));
   for (uint64_t i = 0; i < tokens->n; i++) {
     int64_t v = tokens->a[i];
@@ -714,115 +799,206 @@ static inline char *tk_learn_densify_tokens (tk_learn_t *tm, tk_ivec_t *tokens, 
     counts[s]++;
   }
   free(counts);
-
   int64_t *reverse = (int64_t *)malloc((uint64_t)n_tokens * sizeof(int64_t));
   memset(reverse, 0xFF, (uint64_t)n_tokens * sizeof(int64_t));
+  return (tk_token_bin_t){ sample_offsets, binned, reverse, n_samples };
+}
 
-  for (unsigned int c = 0; c < classes; c++) {
-    int64_t *cm = tm->mapping + (uint64_t)c * features;
-    for (unsigned int k = 0; k < features; k++)
-      if (cm[k] >= 0) reverse[cm[k]] = (int64_t)k;
+static inline tk_token_bin_t *tk_learn_get_bin (tk_learn_t *tm, tk_ivec_t *tokens, unsigned int n_samples) {
+  if (tm->has_cached_bin && tm->cached_bin_tokens == tokens->a && tm->cached_bin.n_samples == n_samples)
+    return &tm->cached_bin;
+  if (tm->has_cached_bin)
+    tk_learn_bin_free(&tm->cached_bin);
+  tm->cached_bin = tk_learn_bin_tokens(tm, tokens, n_samples);
+  tm->cached_bin_tokens = tokens->a;
+  tm->has_cached_bin = true;
+  return &tm->cached_bin;
+}
 
-    #pragma omp parallel for schedule(guided)
-    for (unsigned int s = 0; s < n_samples; s++) {
-      uint8_t *base = data + (uint64_t)s * bps + (uint64_t)c * bpc;
-      for (uint64_t bi = sample_offsets[s]; bi < sample_offsets[s + 1]; bi++) {
-        uint32_t tok = binned[bi];
-        int64_t slot = reverse[tok];
-        if (slot < 0) continue;
-        unsigned int k = (unsigned int)slot;
-        unsigned int bit_pos = (2 * k) % 8;
-        uint8_t pair_mask = (uint8_t)(0x3 << bit_pos);
-        uint8_t present_bits = (uint8_t)(0x1 << bit_pos);
-        unsigned int local_byte = (2 * k) / 8;
-        base[local_byte] = (base[local_byte] & ~pair_mask) | present_bits;
+static inline void tk_learn_densify_tokens_range (
+  tk_learn_t *tm, tk_token_bin_t *bin,
+  char *out, unsigned int batch_start, unsigned int batch_size
+) {
+  unsigned int features = tm->features;
+  unsigned int n_tokens = tm->n_tokens;
+  unsigned int bpc = TK_CVEC_BITS_BYTES(features * 2);
+  unsigned int n_samples = bin->n_samples;
+  uint64_t class_stride = (uint64_t)n_samples * bpc;
+  uint8_t *data = (uint8_t *)out;
+  #pragma omp parallel
+  {
+    #pragma omp for schedule(static)
+    for (unsigned int ci = 0; ci < batch_size; ci++)
+      memset(data + ci * class_stride, 0xAA, class_stride);
+    int64_t *local_reverse = (int64_t *)malloc((uint64_t)n_tokens * sizeof(int64_t));
+    memset(local_reverse, 0xFF, (uint64_t)n_tokens * sizeof(int64_t));
+    #pragma omp for schedule(dynamic)
+    for (unsigned int ci = 0; ci < batch_size; ci++) {
+      unsigned int c = batch_start + ci;
+      int64_t *cm = tm->mapping + (uint64_t)c * features;
+      for (unsigned int k = 0; k < features; k++)
+        if (cm[k] >= 0) local_reverse[cm[k]] = (int64_t)k;
+      for (unsigned int s = 0; s < n_samples; s++) {
+        uint8_t *base = data + ci * class_stride + (uint64_t)s * bpc;
+        for (uint64_t bi = bin->sample_offsets[s]; bi < bin->sample_offsets[s + 1]; bi++) {
+          uint32_t tok = bin->binned[bi];
+          int64_t slot = local_reverse[tok];
+          if (slot < 0) continue;
+          unsigned int k = (unsigned int)slot;
+          unsigned int bit_pos = (2 * k) % 8;
+          uint8_t pair_mask = (uint8_t)(0x3 << bit_pos);
+          uint8_t present_bits = (uint8_t)(0x1 << bit_pos);
+          unsigned int local_byte = (2 * k) / 8;
+          base[local_byte] = (base[local_byte] & ~pair_mask) | present_bits;
+        }
       }
+      for (unsigned int k = 0; k < features; k++)
+        if (cm[k] >= 0) local_reverse[cm[k]] = -1;
     }
-
-    for (unsigned int k = 0; k < features; k++)
-      if (cm[k] >= 0) reverse[cm[k]] = -1;
+    free(local_reverse);
   }
+}
 
-  free(reverse);
-  free(binned);
-  free(sample_offsets);
+static inline char *tk_learn_densify_tokens (tk_learn_t *tm, tk_ivec_t *tokens, unsigned int n_samples) {
+  unsigned int classes = tm->classes;
+  tk_token_bin_t bin = tk_learn_bin_tokens(tm, tokens, n_samples);
+  unsigned int bpc = TK_CVEC_BITS_BYTES(tm->features * 2);
+  char *out = (char *)malloc((uint64_t)n_samples * classes * bpc);
+  tk_learn_densify_tokens_range(tm, &bin, out, 0, classes);
+  tk_learn_bin_free(&bin);
   return out;
 }
 
 static inline int tk_learn_predict_regressor (lua_State *L, tk_learn_t *tm) {
   lua_settop(L, 5);
   unsigned int n = tk_lua_checkunsigned(L, 3, "n_samples");
-  bool grouped = lua_toboolean(L, 4);
+  bool grouped = false;
   tk_dvec_t *out_buf = lua_isnil(L, 5) ? NULL : tk_dvec_peek(L, 5, "output");
 
-  tk_cvec_t *ps = NULL;
-  char *temp_dense = NULL;
-  if (tm->sparse_mode && lua_type(L, 2) != LUA_TUSERDATA) {
+  const unsigned int classes = tm->classes;
+  size_t n_elems = (size_t)n * classes;
+  double *regression_out;
+  if (out_buf) {
+    tk_dvec_ensure(out_buf, n_elems);
+    out_buf->n = n_elems;
+    regression_out = out_buf->a;
+  } else {
+    size_t needed = n_elems * sizeof(double);
+    if (needed > tm->regression_out_len) {
+      tm->regression_out = (double *)tk_realloc(L, tm->regression_out, needed);
+      tm->regression_out_len = needed;
+    }
+    regression_out = tm->regression_out;
+  }
+  const unsigned int clause_chunks = tm->clause_chunks;
+  const unsigned int *per_class_targets = tm->targets;
+  const double *y_min = tm->y_min;
+  const double *y_max = tm->y_max;
+
+  bool use_batching = tm->sparse_mode && tm->dense_batch_size > 0 && tm->dense_batch_size < classes;
+
+  if (use_batching && lua_type(L, 2) != LUA_TUSERDATA) {
     lua_getfield(L, 2, "tokens");
     tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
     lua_pop(L, 1);
     unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "regress", "n_samples") : n;
-    temp_dense = tk_learn_densify_tokens(tm, tokens, n_tok);
-    grouped = true;
+    unsigned int B = tm->dense_batch_size;
+    unsigned int bpc = TK_CVEC_BITS_BYTES(tm->features * 2);
+    tk_token_bin_t *bin = tk_learn_get_bin(tm, tokens, n_tok);
+    bool own_buf = !tm->managed_dense || tm->dense_n_samples < n_tok;
+    char *buf = own_buf ? (char *)malloc((uint64_t)n_tok * B * bpc) : tm->managed_dense;
+    for (unsigned int batch_start = 0; batch_start < classes; batch_start += B) {
+      unsigned int actual_batch = (batch_start + B <= classes) ? B : (classes - batch_start);
+      uint64_t batch_class_stride = (uint64_t)n_tok * bpc;
+      tk_learn_densify_tokens_range(tm, bin, buf, batch_start, actual_batch);
+      unsigned int batch_total_chunks = clause_chunks * actual_batch;
+      unsigned int chunk_offset = batch_start * clause_chunks;
+      #pragma omp parallel for schedule(static)
+      for (unsigned int s = 0; s < n; s++) {
+        unsigned int literals[TK_CVEC_BITS];
+        unsigned int votes_buf[TK_CVEC_BITS];
+        for (unsigned int lc = 0; lc < batch_total_chunks; lc++) {
+          unsigned int chunk = chunk_offset + lc;
+          unsigned int ci = lc / clause_chunks;
+          unsigned int c = batch_start + ci;
+          char *input = buf + ci * batch_class_stride + s * bpc;
+          tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+          long int chunk_vote = 0;
+          for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+              chunk_vote += votes_buf[j];
+          if (chunk_vote > (long int)tm->targets[c]) chunk_vote = (long int)tm->targets[c];
+          if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+          if (lc % clause_chunks == 0)
+            regression_out[s * classes + c] = 0.0;
+          regression_out[s * classes + c] += (double)chunk_vote;
+        }
+        for (unsigned int ci = 0; ci < actual_batch; ci++) {
+          unsigned int c = batch_start + ci;
+          double y_range = y_max[c] - y_min[c];
+          regression_out[s * classes + c] = (regression_out[s * classes + c] / ((double)clause_chunks * per_class_targets[c]) + 0.5) * y_range + y_min[c];
+        }
+      }
+    }
+    if (own_buf) free(buf);
   } else {
-    ps = tk_cvec_peek(L, 2, "problems");
+    tk_cvec_t *ps = NULL;
+    char *temp_dense = NULL;
+    unsigned int class_n = 0;
+    bool reuse_dense = tm->managed_dense && tm->dense_n_samples == n
+      && !(tm->dense_batch_size > 0 && tm->dense_batch_size < tm->classes);
+    if (reuse_dense) {
+      grouped = true;
+      class_n = n;
+    } else if (tm->sparse_mode && lua_type(L, 2) != LUA_TUSERDATA) {
+      lua_getfield(L, 2, "tokens");
+      tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+      lua_pop(L, 1);
+      unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "regress", "n_samples") : n;
+      temp_dense = tk_learn_densify_tokens(tm, tokens, n_tok);
+      grouped = true;
+      class_n = n_tok;
+    } else {
+      ps = tk_cvec_peek(L, 2, "problems");
+    }
+    const unsigned int total_chunks = clause_chunks * classes;
+    const unsigned int input_chunks = tm->input_chunks;
+    const unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
+    const uint64_t class_stride = grouped ? (uint64_t)class_n * bytes_per_class : 0;
+    char *base_ptr = reuse_dense ? tm->managed_dense : (temp_dense ? temp_dense : ps->a);
+    #pragma omp parallel for schedule(static)
+    for (unsigned int s = 0; s < n; s++) {
+      long int votes_per_class[classes];
+      for (unsigned int c = 0; c < classes; c++)
+        votes_per_class[c] = 0;
+      unsigned int literals[TK_CVEC_BITS];
+      unsigned int votes_buf[TK_CVEC_BITS];
+      for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
+        unsigned int c = chunk / clause_chunks;
+        char *input = grouped
+          ? base_ptr + c * class_stride + s * bytes_per_class
+          : base_ptr + s * input_chunks;
+        tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+        long int chunk_vote = 0;
+        for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+            chunk_vote += votes_buf[j];
+        if (chunk_vote > (long int)tm->targets[c]) chunk_vote = (long int)tm->targets[c];
+        if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+        votes_per_class[c] += chunk_vote;
+      }
+      for (unsigned int c = 0; c < classes; c++) {
+        double y_range = y_max[c] - y_min[c];
+        regression_out[s * classes + c] = ((double)votes_per_class[c] / ((double)clause_chunks * per_class_targets[c]) + 0.5) * y_range + y_min[c];
+      }
+    }
+    free(temp_dense);
   }
 
-  const unsigned int classes = tm->classes;
-  size_t needed = n * classes * sizeof(double);
-  if (needed > tm->regression_out_len) {
-    tm->regression_out = (double *)tk_realloc(L, tm->regression_out, needed);
-    tm->regression_out_len = needed;
-  }
-  const unsigned int total_chunks = tm->clause_chunks * classes;
-  const unsigned int clause_chunks = tm->clause_chunks;
-  const unsigned int input_chunks = tm->input_chunks;
-  const unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
-  const unsigned int input_stride = grouped ? classes * bytes_per_class : 0;
-  const unsigned int *per_class_targets = tm->targets;
-  const double *y_min = tm->y_min;
-  const double *y_max = tm->y_max;
-  double *regression_out = tm->regression_out;
-  char *base_ptr = temp_dense ? temp_dense : ps->a;
-  #pragma omp parallel for schedule(static)
-  for (unsigned int s = 0; s < n; s++) {
-    long int votes_per_class[classes];
-    for (unsigned int c = 0; c < classes; c++)
-      votes_per_class[c] = 0;
-    unsigned int literals[TK_CVEC_BITS];
-    unsigned int votes_buf[TK_CVEC_BITS];
-    for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
-      unsigned int c = chunk / clause_chunks;
-      char *input = grouped
-        ? base_ptr + s * input_stride + c * bytes_per_class
-        : base_ptr + s * input_chunks;
-      uint8_t out = tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
-      long int chunk_vote = 0;
-      for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
-        if (out & (1 << j))
-          chunk_vote += votes_buf[j];
-      if (chunk_vote > (long int)tm->targets[c]) chunk_vote = (long int)tm->targets[c];
-      if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
-      votes_per_class[c] += chunk_vote;
-    }
-    for (unsigned int c = 0; c < classes; c++) {
-      double y_range = y_max[c] - y_min[c];
-      regression_out[s * classes + c] = ((double)votes_per_class[c] / ((double)clause_chunks * per_class_targets[c]) + 0.5) * y_range + y_min[c];
-    }
-  }
-  free(temp_dense);
-  tk_dvec_t *out;
   if (out_buf) {
-    tk_dvec_ensure(out_buf, n * classes);
-    out_buf->n = n * classes;
-    memcpy(out_buf->a, tm->regression_out, n * classes * sizeof(double));
     lua_pushvalue(L, 5);
-    out = out_buf;
   } else {
-    out = tk_dvec_create(L, n * classes, 0, 0);
-    memcpy(out->a, tm->regression_out, n * classes * sizeof(double));
+    tk_dvec_t *out = tk_dvec_create(L, n_elems, 0, 0);
+    memcpy(out->a, regression_out, n_elems * sizeof(double));
   }
-  (void)out;
   return 1;
 }
 
@@ -831,66 +1007,126 @@ static inline int tk_learn_classify (lua_State *L)
   tk_learn_t *tm = tk_learn_peek(L, 1);
   lua_settop(L, 5);
   unsigned int n = tk_lua_checkunsigned(L, 3, "n_samples");
-  bool grouped = lua_toboolean(L, 4);
+  bool grouped = false;
   tk_ivec_t *out_buf = lua_isnil(L, 5) ? NULL : tk_ivec_peek(L, 5, "output");
 
-  tk_cvec_t *ps = NULL;
-  char *temp_dense = NULL;
-  if (tm->sparse_mode && lua_type(L, 2) != LUA_TUSERDATA) {
-    lua_getfield(L, 2, "tokens");
-    tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
-    lua_pop(L, 1);
-    unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "classify", "n_samples") : n;
-    temp_dense = tk_learn_densify_tokens(tm, tokens, n_tok);
-    grouped = true;
-  } else {
-    ps = tk_cvec_peek(L, 2, "problems");
-  }
-
   const unsigned int classes = tm->classes;
-  const unsigned int total_chunks = tm->clause_chunks * classes;
   const unsigned int clause_chunks = tm->clause_chunks;
-  const unsigned int input_chunks = tm->input_chunks;
-  const unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
-  const unsigned int input_stride = grouped ? classes * bytes_per_class : 0;
   size_t needed = n * sizeof(unsigned int);
   if (needed > tm->results_len) {
     tm->results = tk_realloc(L, tm->results, needed);
     tm->results_len = needed;
   }
   unsigned int *results = tm->results;
-  char *base_ptr = temp_dense ? temp_dense : ps->a;
-  #pragma omp parallel for schedule(static)
-  for (unsigned int s = 0; s < n; s++) {
-    long int votes_per_class[classes];
-    for (unsigned int c = 0; c < classes; c++)
-      votes_per_class[c] = 0;
-    unsigned int literals[TK_CVEC_BITS];
-    unsigned int votes_buf[TK_CVEC_BITS];
-    for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
-      unsigned int c = chunk / clause_chunks;
-      char *input = grouped
-        ? base_ptr + s * input_stride + c * bytes_per_class
-        : base_ptr + s * input_chunks;
-      uint8_t out = tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
-      long int chunk_vote = 0;
-      for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
-        if (out & (1 << j))
-          chunk_vote += votes_buf[j];
-      if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
-      votes_per_class[c] += chunk_vote;
-    }
-    long int maxval = LONG_MIN;
-    unsigned int maxclass = 0;
-    for (unsigned int c = 0; c < classes; c++) {
-      if (votes_per_class[c] > maxval) {
-        maxval = votes_per_class[c];
-        maxclass = c;
+
+  bool use_batching = tm->sparse_mode && tm->dense_batch_size > 0 && tm->dense_batch_size < classes;
+
+  if (use_batching && lua_type(L, 2) != LUA_TUSERDATA) {
+    lua_getfield(L, 2, "tokens");
+    tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+    lua_pop(L, 1);
+    unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "classify", "n_samples") : n;
+    unsigned int B = tm->dense_batch_size;
+    unsigned int bpc = TK_CVEC_BITS_BYTES(tm->features * 2);
+    tk_token_bin_t *bin = tk_learn_get_bin(tm, tokens, n_tok);
+    bool own_buf = !tm->managed_dense || tm->dense_n_samples < n_tok;
+    char *buf = own_buf ? (char *)malloc((uint64_t)n_tok * B * bpc) : tm->managed_dense;
+    long int *max_votes = (long int *)malloc(n * sizeof(long int));
+    unsigned int *max_class = (unsigned int *)calloc(n, sizeof(unsigned int));
+    for (unsigned int s = 0; s < n; s++) max_votes[s] = LONG_MIN;
+    for (unsigned int batch_start = 0; batch_start < classes; batch_start += B) {
+      unsigned int actual_batch = (batch_start + B <= classes) ? B : (classes - batch_start);
+      uint64_t batch_class_stride = (uint64_t)n_tok * bpc;
+      tk_learn_densify_tokens_range(tm, bin, buf, batch_start, actual_batch);
+      unsigned int batch_total_chunks = clause_chunks * actual_batch;
+      unsigned int chunk_offset = batch_start * clause_chunks;
+      #pragma omp parallel for schedule(static)
+      for (unsigned int s = 0; s < n; s++) {
+        long int batch_votes[actual_batch];
+        for (unsigned int ci = 0; ci < actual_batch; ci++) batch_votes[ci] = 0;
+        unsigned int literals[TK_CVEC_BITS];
+        unsigned int votes_buf[TK_CVEC_BITS];
+        for (unsigned int lc = 0; lc < batch_total_chunks; lc++) {
+          unsigned int chunk = chunk_offset + lc;
+          unsigned int ci = lc / clause_chunks;
+          unsigned int c = batch_start + ci;
+          char *input = buf + ci * batch_class_stride + s * bpc;
+          tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+          long int chunk_vote = 0;
+          for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+              chunk_vote += votes_buf[j];
+          if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+          batch_votes[ci] += chunk_vote;
+        }
+        for (unsigned int ci = 0; ci < actual_batch; ci++) {
+          if (batch_votes[ci] > max_votes[s]) {
+            max_votes[s] = batch_votes[ci];
+            max_class[s] = batch_start + ci;
+          }
+        }
       }
     }
-    results[s] = maxclass;
+    for (unsigned int s = 0; s < n; s++) results[s] = max_class[s];
+    free(max_votes);
+    free(max_class);
+    if (own_buf) free(buf);
+  } else {
+    tk_cvec_t *ps = NULL;
+    char *temp_dense = NULL;
+    unsigned int class_n = 0;
+    bool reuse_dense = tm->managed_dense && tm->dense_n_samples == n
+      && !(tm->dense_batch_size > 0 && tm->dense_batch_size < tm->classes);
+    if (reuse_dense) {
+      grouped = true;
+      class_n = n;
+    } else if (tm->sparse_mode && lua_type(L, 2) != LUA_TUSERDATA) {
+      lua_getfield(L, 2, "tokens");
+      tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+      lua_pop(L, 1);
+      unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "classify", "n_samples") : n;
+      temp_dense = tk_learn_densify_tokens(tm, tokens, n_tok);
+      grouped = true;
+      class_n = n_tok;
+    } else {
+      ps = tk_cvec_peek(L, 2, "problems");
+    }
+    const unsigned int total_chunks = clause_chunks * classes;
+    const unsigned int input_chunks = tm->input_chunks;
+    const unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
+    const uint64_t class_stride = grouped ? (uint64_t)class_n * bytes_per_class : 0;
+    char *base_ptr = reuse_dense ? tm->managed_dense : (temp_dense ? temp_dense : ps->a);
+    #pragma omp parallel for schedule(static)
+    for (unsigned int s = 0; s < n; s++) {
+      long int votes_per_class[classes];
+      for (unsigned int c = 0; c < classes; c++)
+        votes_per_class[c] = 0;
+      unsigned int literals[TK_CVEC_BITS];
+      unsigned int votes_buf[TK_CVEC_BITS];
+      for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
+        unsigned int c = chunk / clause_chunks;
+        char *input = grouped
+          ? base_ptr + c * class_stride + s * bytes_per_class
+          : base_ptr + s * input_chunks;
+        tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+        long int chunk_vote = 0;
+        for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+            chunk_vote += votes_buf[j];
+        if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+        votes_per_class[c] += chunk_vote;
+      }
+      long int maxval = LONG_MIN;
+      unsigned int maxclass = 0;
+      for (unsigned int c = 0; c < classes; c++) {
+        if (votes_per_class[c] > maxval) {
+          maxval = votes_per_class[c];
+          maxclass = c;
+        }
+      }
+      results[s] = maxclass;
+    }
+    free(temp_dense);
   }
-  free(temp_dense);
+
   tk_ivec_t *out;
   if (out_buf) {
     tk_ivec_ensure(out_buf, n);
@@ -908,10 +1144,725 @@ static inline int tk_learn_classify (lua_State *L)
   return 1;
 }
 
+static inline int tk_learn_classify_f1 (lua_State *L)
+{
+  tk_learn_t *tm = tk_learn_peek(L, 1);
+  lua_settop(L, 5);
+  unsigned int n = tk_lua_checkunsigned(L, 3, "n_samples");
+  tk_ivec_t *expected = tk_ivec_peek(L, 4, "expected");
+  unsigned int n_classes = tk_lua_checkunsigned(L, 5, "n_classes");
+
+  const unsigned int classes = tm->classes;
+  const unsigned int clause_chunks = tm->clause_chunks;
+  size_t needed = n * sizeof(unsigned int);
+  if (needed > tm->results_len) {
+    tm->results = tk_realloc(L, tm->results, needed);
+    tm->results_len = needed;
+  }
+  unsigned int *results = tm->results;
+
+  bool use_batching = tm->sparse_mode && tm->dense_batch_size > 0 && tm->dense_batch_size < classes;
+
+  if (use_batching && lua_type(L, 2) != LUA_TUSERDATA) {
+    lua_getfield(L, 2, "tokens");
+    tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+    lua_pop(L, 1);
+    unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "classify_f1", "n_samples") : n;
+    unsigned int B = tm->dense_batch_size;
+    unsigned int bpc = TK_CVEC_BITS_BYTES(tm->features * 2);
+    tk_token_bin_t *bin = tk_learn_get_bin(tm, tokens, n_tok);
+    bool own_buf = !tm->managed_dense || tm->dense_n_samples < n_tok;
+    char *buf = own_buf ? (char *)malloc((uint64_t)n_tok * B * bpc) : tm->managed_dense;
+    long int *max_votes = (long int *)malloc(n * sizeof(long int));
+    unsigned int *max_class = (unsigned int *)calloc(n, sizeof(unsigned int));
+    for (unsigned int s = 0; s < n; s++) max_votes[s] = LONG_MIN;
+    for (unsigned int batch_start = 0; batch_start < classes; batch_start += B) {
+      unsigned int actual_batch = (batch_start + B <= classes) ? B : (classes - batch_start);
+      uint64_t batch_class_stride = (uint64_t)n_tok * bpc;
+      tk_learn_densify_tokens_range(tm, bin, buf, batch_start, actual_batch);
+      unsigned int batch_total_chunks = clause_chunks * actual_batch;
+      unsigned int chunk_offset = batch_start * clause_chunks;
+      #pragma omp parallel for schedule(static)
+      for (unsigned int s = 0; s < n; s++) {
+        long int batch_votes[actual_batch];
+        for (unsigned int ci = 0; ci < actual_batch; ci++) batch_votes[ci] = 0;
+        unsigned int literals[TK_CVEC_BITS];
+        unsigned int votes_buf[TK_CVEC_BITS];
+        for (unsigned int lc = 0; lc < batch_total_chunks; lc++) {
+          unsigned int chunk = chunk_offset + lc;
+          unsigned int ci = lc / clause_chunks;
+          unsigned int c = batch_start + ci;
+          char *input = buf + ci * batch_class_stride + s * bpc;
+          tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+          long int chunk_vote = 0;
+          for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+              chunk_vote += votes_buf[j];
+          if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+          batch_votes[ci] += chunk_vote;
+        }
+        for (unsigned int ci = 0; ci < actual_batch; ci++) {
+          if (batch_votes[ci] > max_votes[s]) {
+            max_votes[s] = batch_votes[ci];
+            max_class[s] = batch_start + ci;
+          }
+        }
+      }
+    }
+    for (unsigned int s = 0; s < n; s++) results[s] = max_class[s];
+    free(max_votes);
+    free(max_class);
+    if (own_buf) free(buf);
+  } else {
+    tk_cvec_t *ps = NULL;
+    char *temp_dense = NULL;
+    bool grouped = false;
+    unsigned int class_n = 0;
+    bool reuse_dense = tm->managed_dense && tm->dense_n_samples == n
+      && !(tm->dense_batch_size > 0 && tm->dense_batch_size < tm->classes);
+    if (reuse_dense) {
+      grouped = true;
+      class_n = n;
+    } else if (tm->sparse_mode && lua_type(L, 2) != LUA_TUSERDATA) {
+      lua_getfield(L, 2, "tokens");
+      tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+      lua_pop(L, 1);
+      unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "classify_f1", "n_samples") : n;
+      temp_dense = tk_learn_densify_tokens(tm, tokens, n_tok);
+      grouped = true;
+      class_n = n_tok;
+    } else {
+      ps = tk_cvec_peek(L, 2, "problems");
+    }
+    const unsigned int total_chunks = clause_chunks * classes;
+    const unsigned int input_chunks = tm->input_chunks;
+    const unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
+    const uint64_t class_stride = grouped ? (uint64_t)class_n * bytes_per_class : 0;
+    char *base_ptr = reuse_dense ? tm->managed_dense : (temp_dense ? temp_dense : ps->a);
+    #pragma omp parallel for schedule(static)
+    for (unsigned int s = 0; s < n; s++) {
+      long int votes_per_class[classes];
+      for (unsigned int c = 0; c < classes; c++)
+        votes_per_class[c] = 0;
+      unsigned int literals[TK_CVEC_BITS];
+      unsigned int votes_buf[TK_CVEC_BITS];
+      for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
+        unsigned int c = chunk / clause_chunks;
+        char *input = grouped
+          ? base_ptr + c * class_stride + s * bytes_per_class
+          : base_ptr + s * input_chunks;
+        tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+        long int chunk_vote = 0;
+        for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+            chunk_vote += votes_buf[j];
+        if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+        votes_per_class[c] += chunk_vote;
+      }
+      long int maxval = LONG_MIN;
+      unsigned int maxclass = 0;
+      for (unsigned int c = 0; c < classes; c++) {
+        if (votes_per_class[c] > maxval) {
+          maxval = votes_per_class[c];
+          maxclass = c;
+        }
+      }
+      results[s] = maxclass;
+    }
+    free(temp_dense);
+  }
+
+  unsigned int *true_classes = (unsigned int *)calloc(n, sizeof(unsigned int));
+  for (size_t j = 0; j < expected->n; j++) {
+    int64_t v = expected->a[j];
+    unsigned int s = (unsigned int)(v / n_classes);
+    unsigned int c = (unsigned int)(v % n_classes);
+    if (s < n) true_classes[s] = c;
+  }
+  uint64_t *tp = (uint64_t *)calloc(n_classes, sizeof(uint64_t));
+  uint64_t *fp = (uint64_t *)calloc(n_classes, sizeof(uint64_t));
+  uint64_t *fn = (uint64_t *)calloc(n_classes, sizeof(uint64_t));
+  for (unsigned int i = 0; i < n; i++) {
+    unsigned int pred = results[i];
+    unsigned int true_c = true_classes[i];
+    if (pred >= n_classes || true_c >= n_classes) continue;
+    if (pred == true_c)
+      tp[true_c]++;
+    else {
+      fp[pred]++;
+      fn[true_c]++;
+    }
+  }
+  free(true_classes);
+  double f1_sum = 0.0;
+  for (unsigned int c = 0; c < n_classes; c++) {
+    double p = (tp[c] + fp[c]) > 0 ? (double)tp[c] / (tp[c] + fp[c]) : 0.0;
+    double r = (tp[c] + fn[c]) > 0 ? (double)tp[c] / (tp[c] + fn[c]) : 0.0;
+    f1_sum += (p + r) > 0 ? 2.0 * p * r / (p + r) : 0.0;
+  }
+  free(tp); free(fp); free(fn);
+  double f1 = f1_sum / n_classes;
+  lua_pushnumber(L, f1);
+  lua_pushnumber(L, f1);
+  return 2;
+}
+
+static inline int tk_learn_label (lua_State *L)
+{
+  tk_learn_t *tm = tk_learn_peek(L, 1);
+  lua_settop(L, 4);
+  unsigned int n = tk_lua_checkunsigned(L, 3, "n_samples");
+  unsigned int k = tk_lua_checkunsigned(L, 4, "k");
+  const unsigned int classes = tm->classes;
+  const unsigned int clause_chunks = tm->clause_chunks;
+  if (k > classes) k = classes;
+  if (k < 1) k = 1;
+  tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t)(n + 1), NULL, NULL);
+  int off_idx = lua_gettop(L);
+  tk_ivec_t *labels = tk_ivec_create(L, (uint64_t)n * k, NULL, NULL);
+  int lab_idx = lua_gettop(L);
+  tk_dvec_t *scores = tk_dvec_create(L, (uint64_t)n * k, NULL, NULL);
+  int sco_idx = lua_gettop(L);
+  for (unsigned int i = 0; i <= n; i++)
+    offsets->a[i] = (int64_t)i * k;
+  bool use_batching = tm->sparse_mode && tm->dense_batch_size > 0 && tm->dense_batch_size < classes;
+  if (use_batching && lua_type(L, 2) != LUA_TUSERDATA) {
+    lua_getfield(L, 2, "tokens");
+    tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+    lua_pop(L, 1);
+    unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "label", "n_samples") : n;
+    unsigned int B = tm->dense_batch_size;
+    unsigned int bpc = TK_CVEC_BITS_BYTES(tm->features * 2);
+    tk_token_bin_t *bin = tk_learn_get_bin(tm, tokens, n_tok);
+    bool own_buf = !tm->managed_dense || tm->dense_n_samples < n_tok;
+    char *buf = own_buf ? (char *)malloc((uint64_t)n_tok * B * bpc) : tm->managed_dense;
+    long int *all_votes = (long int *)calloc((uint64_t)n * classes, sizeof(long int));
+    for (unsigned int batch_start = 0; batch_start < classes; batch_start += B) {
+      unsigned int actual_batch = (batch_start + B <= classes) ? B : (classes - batch_start);
+      uint64_t batch_class_stride = (uint64_t)n_tok * bpc;
+      tk_learn_densify_tokens_range(tm, bin, buf, batch_start, actual_batch);
+      unsigned int batch_total_chunks = clause_chunks * actual_batch;
+      unsigned int chunk_offset = batch_start * clause_chunks;
+      #pragma omp parallel for schedule(static)
+      for (unsigned int s = 0; s < n; s++) {
+        unsigned int literals[TK_CVEC_BITS];
+        unsigned int votes_buf[TK_CVEC_BITS];
+        for (unsigned int lc = 0; lc < batch_total_chunks; lc++) {
+          unsigned int chunk = chunk_offset + lc;
+          unsigned int ci = lc / clause_chunks;
+          unsigned int c = batch_start + ci;
+          char *input = buf + ci * batch_class_stride + s * bpc;
+          tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+          long int chunk_vote = 0;
+          for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+            chunk_vote += votes_buf[j];
+          if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+          all_votes[(uint64_t)s * classes + c] += chunk_vote;
+        }
+      }
+    }
+    #pragma omp parallel
+    {
+      tk_rvec_t heap = { .n = 0, .m = k, .lua_managed = false,
+                         .a = (tk_rank_t *)malloc(k * sizeof(tk_rank_t)) };
+      #pragma omp for schedule(static)
+      for (unsigned int s = 0; s < n; s++) {
+        heap.n = 0;
+        for (unsigned int c = 0; c < classes; c++)
+          tk_rvec_hmin(&heap, k, tk_rank((int64_t)c, (double)all_votes[(uint64_t)s * classes + c]));
+        tk_rvec_desc(&heap, 0, heap.n);
+        uint64_t base = (uint64_t)s * k;
+        for (uint64_t j = 0; j < heap.n; j++) {
+          labels->a[base + j] = heap.a[j].i;
+          scores->a[base + j] = heap.a[j].d;
+        }
+      }
+      free(heap.a);
+    }
+    free(all_votes);
+    if (own_buf) free(buf);
+  } else {
+    tk_cvec_t *ps = NULL;
+    char *temp_dense = NULL;
+    bool grouped = false;
+    unsigned int class_n = 0;
+    bool reuse_dense = tm->managed_dense && tm->dense_n_samples == n
+      && !(tm->dense_batch_size > 0 && tm->dense_batch_size < tm->classes);
+    if (reuse_dense) {
+      grouped = true;
+      class_n = n;
+    } else if (tm->sparse_mode && lua_type(L, 2) != LUA_TUSERDATA) {
+      lua_getfield(L, 2, "tokens");
+      tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+      lua_pop(L, 1);
+      unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "label", "n_samples") : n;
+      temp_dense = tk_learn_densify_tokens(tm, tokens, n_tok);
+      grouped = true;
+      class_n = n_tok;
+    } else {
+      ps = tk_cvec_peek(L, 2, "problems");
+    }
+    const unsigned int total_chunks = clause_chunks * classes;
+    const unsigned int input_chunks = tm->input_chunks;
+    const unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
+    const uint64_t class_stride = grouped ? (uint64_t)class_n * bytes_per_class : 0;
+    char *base_ptr = reuse_dense ? tm->managed_dense : (temp_dense ? temp_dense : ps->a);
+    #pragma omp parallel
+    {
+      tk_rvec_t heap = { .n = 0, .m = k, .lua_managed = false,
+                         .a = (tk_rank_t *)malloc(k * sizeof(tk_rank_t)) };
+      #pragma omp for schedule(static)
+      for (unsigned int s = 0; s < n; s++) {
+        long int votes_per_class[classes];
+        for (unsigned int c = 0; c < classes; c++)
+          votes_per_class[c] = 0;
+        unsigned int literals[TK_CVEC_BITS];
+        unsigned int votes_buf[TK_CVEC_BITS];
+        for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
+          unsigned int c = chunk / clause_chunks;
+          char *input = grouped
+            ? base_ptr + c * class_stride + s * bytes_per_class
+            : base_ptr + s * input_chunks;
+          tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+          long int chunk_vote = 0;
+          for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+            chunk_vote += votes_buf[j];
+          if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+          votes_per_class[c] += chunk_vote;
+        }
+        heap.n = 0;
+        for (unsigned int c = 0; c < classes; c++)
+          tk_rvec_hmin(&heap, k, tk_rank((int64_t)c, (double)votes_per_class[c]));
+        tk_rvec_desc(&heap, 0, heap.n);
+        uint64_t base = (uint64_t)s * k;
+        for (uint64_t j = 0; j < heap.n; j++) {
+          labels->a[base + j] = heap.a[j].i;
+          scores->a[base + j] = heap.a[j].d;
+        }
+      }
+      free(heap.a);
+    }
+    free(temp_dense);
+  }
+  lua_pushvalue(L, off_idx);
+  lua_pushvalue(L, lab_idx);
+  lua_pushvalue(L, sco_idx);
+  return 3;
+}
+
+static inline int tk_learn_label_f1 (lua_State *L)
+{
+  tk_learn_t *tm = tk_learn_peek(L, 1);
+  lua_settop(L, 5);
+  unsigned int n = tk_lua_checkunsigned(L, 3, "n_samples");
+  tk_ivec_t *exp_off = tk_ivec_peek(L, 4, "expected_offsets");
+  tk_ivec_t *exp_nbr = tk_ivec_peek(L, 5, "expected_neighbors");
+  const unsigned int classes = tm->classes;
+  const unsigned int clause_chunks = tm->clause_chunks;
+  bool use_batching = tm->sparse_mode && tm->dense_batch_size > 0 && tm->dense_batch_size < classes;
+  long int *all_votes = NULL;
+  if (use_batching && lua_type(L, 2) != LUA_TUSERDATA) {
+    lua_getfield(L, 2, "tokens");
+    tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+    lua_pop(L, 1);
+    unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "label_f1", "n_samples") : n;
+    unsigned int B = tm->dense_batch_size;
+    unsigned int bpc = TK_CVEC_BITS_BYTES(tm->features * 2);
+    tk_token_bin_t *bin = tk_learn_get_bin(tm, tokens, n_tok);
+    bool own_buf = !tm->managed_dense || tm->dense_n_samples < n_tok;
+    char *buf = own_buf ? (char *)malloc((uint64_t)n_tok * B * bpc) : tm->managed_dense;
+    all_votes = (long int *)calloc((uint64_t)n * classes, sizeof(long int));
+    for (unsigned int batch_start = 0; batch_start < classes; batch_start += B) {
+      unsigned int actual_batch = (batch_start + B <= classes) ? B : (classes - batch_start);
+      uint64_t batch_class_stride = (uint64_t)n_tok * bpc;
+      tk_learn_densify_tokens_range(tm, bin, buf, batch_start, actual_batch);
+      unsigned int batch_total_chunks = clause_chunks * actual_batch;
+      unsigned int chunk_offset = batch_start * clause_chunks;
+      #pragma omp parallel for schedule(static)
+      for (unsigned int s = 0; s < n; s++) {
+        unsigned int literals[TK_CVEC_BITS];
+        unsigned int votes_buf[TK_CVEC_BITS];
+        for (unsigned int lc = 0; lc < batch_total_chunks; lc++) {
+          unsigned int chunk = chunk_offset + lc;
+          unsigned int ci = lc / clause_chunks;
+          unsigned int c = batch_start + ci;
+          char *input = buf + ci * batch_class_stride + s * bpc;
+          tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+          long int chunk_vote = 0;
+          for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+            chunk_vote += votes_buf[j];
+          if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+          all_votes[(uint64_t)s * classes + c] += chunk_vote;
+        }
+      }
+    }
+    if (own_buf) free(buf);
+  } else {
+    tk_cvec_t *ps = NULL;
+    char *temp_dense = NULL;
+    bool grouped = false;
+    unsigned int class_n = 0;
+    bool reuse_dense = tm->managed_dense && tm->dense_n_samples == n
+      && !(tm->dense_batch_size > 0 && tm->dense_batch_size < tm->classes);
+    if (reuse_dense) {
+      grouped = true;
+      class_n = n;
+    } else if (tm->sparse_mode && lua_type(L, 2) != LUA_TUSERDATA) {
+      lua_getfield(L, 2, "tokens");
+      tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+      lua_pop(L, 1);
+      unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "label_f1", "n_samples") : n;
+      temp_dense = tk_learn_densify_tokens(tm, tokens, n_tok);
+      grouped = true;
+      class_n = n_tok;
+    } else {
+      ps = tk_cvec_peek(L, 2, "problems");
+    }
+    const unsigned int total_chunks = clause_chunks * classes;
+    const unsigned int input_chunks = tm->input_chunks;
+    const unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
+    const uint64_t class_stride = grouped ? (uint64_t)class_n * bytes_per_class : 0;
+    char *base_ptr = reuse_dense ? tm->managed_dense : (temp_dense ? temp_dense : ps->a);
+    all_votes = (long int *)calloc((uint64_t)n * classes, sizeof(long int));
+    #pragma omp parallel for schedule(static)
+    for (unsigned int s = 0; s < n; s++) {
+      long int votes_per_class[classes];
+      for (unsigned int c = 0; c < classes; c++)
+        votes_per_class[c] = 0;
+      unsigned int literals[TK_CVEC_BITS];
+      unsigned int votes_buf[TK_CVEC_BITS];
+      for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
+        unsigned int c = chunk / clause_chunks;
+        char *input = grouped
+          ? base_ptr + c * class_stride + s * bytes_per_class
+          : base_ptr + s * input_chunks;
+        tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+        long int chunk_vote = 0;
+        for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+          chunk_vote += votes_buf[j];
+        if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+        votes_per_class[c] += chunk_vote;
+      }
+      for (unsigned int c = 0; c < classes; c++)
+        all_votes[(uint64_t)s * classes + c] = votes_per_class[c];
+    }
+    free(temp_dense);
+  }
+  uint64_t mi_tp = 0, mi_k = 0, mi_exp = 0, n_valid = 0;
+  double ma_f1 = 0;
+  #pragma omp parallel for reduction(+:mi_tp,mi_k,mi_exp,n_valid,ma_f1)
+  for (unsigned int s = 0; s < n; s++) {
+    int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
+    uint64_t n_expected = (uint64_t)(ee - es);
+    if (n_expected == 0) continue;
+    int kha;
+    tk_iuset_t *exp_set = tk_iuset_create(NULL, 0);
+    for (int64_t i = es; i < ee; i++)
+      tk_iuset_put(exp_set, exp_nbr->a[i], &kha);
+    tk_rvec_t sorted_rv = { .n = classes, .m = classes, .lua_managed = false,
+                            .a = (tk_rank_t *)malloc(classes * sizeof(tk_rank_t)) };
+    for (unsigned int c = 0; c < classes; c++)
+      sorted_rv.a[c] = tk_rank((int64_t)c, (double)all_votes[(uint64_t)s * classes + c]);
+    tk_rvec_desc(&sorted_rv, 0, sorted_rv.n);
+    tk_rank_t *sorted = sorted_rv.a;
+    double best_f1 = 0;
+    uint64_t best_k = 1, best_tp = 0, tp = 0;
+    for (unsigned int ki = 1; ki <= classes; ki++) {
+      if (tk_iuset_contains(exp_set, sorted[ki - 1].i)) tp++;
+      double prec = (double)tp / ki;
+      double rec = (double)tp / n_expected;
+      double f1 = (prec + rec) > 0 ? 2.0 * prec * rec / (prec + rec) : 0.0;
+      if (f1 > best_f1) {
+        best_f1 = f1;
+        best_k = ki;
+        best_tp = tp;
+      }
+    }
+    tk_iuset_destroy(exp_set);
+    free(sorted_rv.a);
+    mi_tp += best_tp;
+    mi_k += best_k;
+    mi_exp += n_expected;
+    ma_f1 += best_f1;
+    n_valid++;
+  }
+  free(all_votes);
+  double mi_prec = mi_k > 0 ? (double)mi_tp / mi_k : 0;
+  double mi_rec = mi_exp > 0 ? (double)mi_tp / mi_exp : 0;
+  double micro_f1 = (mi_prec + mi_rec) > 0 ? 2.0 * mi_prec * mi_rec / (mi_prec + mi_rec) : 0;
+  double macro_f1 = n_valid > 0 ? ma_f1 / n_valid : 0;
+  lua_pushnumber(L, micro_f1);
+  lua_pushnumber(L, macro_f1);
+  return 2;
+}
+
 static inline int tk_learn_regress (lua_State *L)
 {
   tk_learn_t *tm = tk_learn_peek(L, 1);
   return tk_learn_predict_regressor(L, tm);
+}
+
+static inline int tk_learn_regress_mae (lua_State *L)
+{
+  tk_learn_t *tm = tk_learn_peek(L, 1);
+  lua_settop(L, 4);
+  unsigned int n = tk_lua_checkunsigned(L, 3, "n_samples");
+  tk_dvec_t *targets = tk_dvec_peek(L, 4, "targets");
+
+  const unsigned int classes = tm->classes;
+  const unsigned int clause_chunks = tm->clause_chunks;
+  const unsigned int *per_class_targets = tm->targets;
+  const double *y_min = tm->y_min;
+  const double *y_max = tm->y_max;
+  const double *tgt = targets->a;
+  size_t n_elems = (size_t)n * classes;
+  if (targets->n < n_elems)
+    return luaL_error(L, "targets length %d < n_samples * classes %d", (int)targets->n, (int)n_elems);
+
+  double total_err = 0.0;
+
+  bool use_batching = tm->sparse_mode && tm->dense_batch_size > 0 && tm->dense_batch_size < classes;
+
+  if (use_batching && lua_type(L, 2) != LUA_TUSERDATA) {
+    lua_getfield(L, 2, "tokens");
+    tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+    lua_pop(L, 1);
+    unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "regress_mae", "n_samples") : n;
+    unsigned int B = tm->dense_batch_size;
+    unsigned int bpc = TK_CVEC_BITS_BYTES(tm->features * 2);
+    tk_token_bin_t *bin = tk_learn_get_bin(tm, tokens, n_tok);
+    bool own_buf = !tm->managed_dense || tm->dense_n_samples < n_tok;
+    char *buf = own_buf ? (char *)malloc((uint64_t)n_tok * B * bpc) : tm->managed_dense;
+    for (unsigned int batch_start = 0; batch_start < classes; batch_start += B) {
+      unsigned int actual_batch = (batch_start + B <= classes) ? B : (classes - batch_start);
+      uint64_t batch_class_stride = (uint64_t)n_tok * bpc;
+      tk_learn_densify_tokens_range(tm, bin, buf, batch_start, actual_batch);
+      unsigned int batch_total_chunks = clause_chunks * actual_batch;
+      unsigned int chunk_offset = batch_start * clause_chunks;
+      double batch_err = 0.0;
+      #pragma omp parallel for schedule(static) reduction(+:batch_err)
+      for (unsigned int s = 0; s < n; s++) {
+        unsigned int literals[TK_CVEC_BITS];
+        unsigned int votes_buf[TK_CVEC_BITS];
+        double local_votes[actual_batch];
+        for (unsigned int ci = 0; ci < actual_batch; ci++) local_votes[ci] = 0.0;
+        for (unsigned int lc = 0; lc < batch_total_chunks; lc++) {
+          unsigned int chunk = chunk_offset + lc;
+          unsigned int ci = lc / clause_chunks;
+          unsigned int c = batch_start + ci;
+          char *input = buf + ci * batch_class_stride + s * bpc;
+          tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+          long int chunk_vote = 0;
+          for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+              chunk_vote += votes_buf[j];
+          if (chunk_vote > (long int)tm->targets[c]) chunk_vote = (long int)tm->targets[c];
+          if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+          local_votes[ci] += (double)chunk_vote;
+        }
+        for (unsigned int ci = 0; ci < actual_batch; ci++) {
+          unsigned int c = batch_start + ci;
+          double y_range = y_max[c] - y_min[c];
+          double pred = (local_votes[ci] / ((double)clause_chunks * per_class_targets[c]) + 0.5) * y_range + y_min[c];
+          batch_err += fabs(pred - tgt[s * classes + c]);
+        }
+      }
+      total_err += batch_err;
+    }
+    if (own_buf) free(buf);
+  } else {
+    tk_cvec_t *ps = NULL;
+    char *temp_dense = NULL;
+    bool grouped = false;
+    unsigned int class_n = 0;
+    bool reuse_dense = tm->managed_dense && tm->dense_n_samples == n
+      && !(tm->dense_batch_size > 0 && tm->dense_batch_size < tm->classes);
+    if (reuse_dense) {
+      grouped = true;
+      class_n = n;
+    } else if (tm->sparse_mode && lua_type(L, 2) != LUA_TUSERDATA) {
+      lua_getfield(L, 2, "tokens");
+      tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+      lua_pop(L, 1);
+      unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "regress_mae", "n_samples") : n;
+      temp_dense = tk_learn_densify_tokens(tm, tokens, n_tok);
+      grouped = true;
+      class_n = n_tok;
+    } else {
+      ps = tk_cvec_peek(L, 2, "problems");
+    }
+    const unsigned int total_chunks = clause_chunks * classes;
+    const unsigned int input_chunks = tm->input_chunks;
+    const unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
+    const uint64_t class_stride = grouped ? (uint64_t)class_n * bytes_per_class : 0;
+    char *base_ptr = reuse_dense ? tm->managed_dense : (temp_dense ? temp_dense : ps->a);
+    #pragma omp parallel for schedule(static) reduction(+:total_err)
+    for (unsigned int s = 0; s < n; s++) {
+      long int votes_per_class[classes];
+      for (unsigned int c = 0; c < classes; c++)
+        votes_per_class[c] = 0;
+      unsigned int literals[TK_CVEC_BITS];
+      unsigned int votes_buf[TK_CVEC_BITS];
+      for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
+        unsigned int c = chunk / clause_chunks;
+        char *input = grouped
+          ? base_ptr + c * class_stride + s * bytes_per_class
+          : base_ptr + s * input_chunks;
+        tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+        long int chunk_vote = 0;
+        for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+            chunk_vote += votes_buf[j];
+        if (chunk_vote > (long int)tm->targets[c]) chunk_vote = (long int)tm->targets[c];
+        if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+        votes_per_class[c] += chunk_vote;
+      }
+      for (unsigned int c = 0; c < classes; c++) {
+        double y_range = y_max[c] - y_min[c];
+        double pred = ((double)votes_per_class[c] / ((double)clause_chunks * per_class_targets[c]) + 0.5) * y_range + y_min[c];
+        total_err += fabs(pred - tgt[s * classes + c]);
+      }
+    }
+    free(temp_dense);
+  }
+
+  double mae = n_elems > 0 ? total_err / (double)n_elems : 0.0;
+  lua_pushnumber(L, -mae);
+  lua_pushnumber(L, mae);
+  return 2;
+}
+
+static inline int tk_learn_regress_nmae (lua_State *L)
+{
+  tk_learn_t *tm = tk_learn_peek(L, 1);
+  lua_settop(L, 4);
+  unsigned int n = tk_lua_checkunsigned(L, 3, "n_samples");
+  tk_dvec_t *targets = tk_dvec_peek(L, 4, "targets");
+
+  const unsigned int classes = tm->classes;
+  const unsigned int clause_chunks = tm->clause_chunks;
+  const unsigned int *per_class_targets = tm->targets;
+  const double *y_min = tm->y_min;
+  const double *y_max = tm->y_max;
+  const double *tgt = targets->a;
+  size_t n_elems = (size_t)n * classes;
+  if (targets->n < n_elems)
+    return luaL_error(L, "targets length %d < n_samples * classes %d", (int)targets->n, (int)n_elems);
+
+  double total_err = 0.0;
+  double sum_exp = 0.0;
+
+  bool use_batching = tm->sparse_mode && tm->dense_batch_size > 0 && tm->dense_batch_size < classes;
+
+  if (use_batching && lua_type(L, 2) != LUA_TUSERDATA) {
+    lua_getfield(L, 2, "tokens");
+    tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+    lua_pop(L, 1);
+    unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "regress_nmae", "n_samples") : n;
+    unsigned int B = tm->dense_batch_size;
+    unsigned int bpc = TK_CVEC_BITS_BYTES(tm->features * 2);
+    tk_token_bin_t *bin = tk_learn_get_bin(tm, tokens, n_tok);
+    bool own_buf = !tm->managed_dense || tm->dense_n_samples < n_tok;
+    char *buf = own_buf ? (char *)malloc((uint64_t)n_tok * B * bpc) : tm->managed_dense;
+    for (unsigned int batch_start = 0; batch_start < classes; batch_start += B) {
+      unsigned int actual_batch = (batch_start + B <= classes) ? B : (classes - batch_start);
+      uint64_t batch_class_stride = (uint64_t)n_tok * bpc;
+      tk_learn_densify_tokens_range(tm, bin, buf, batch_start, actual_batch);
+      unsigned int batch_total_chunks = clause_chunks * actual_batch;
+      unsigned int chunk_offset = batch_start * clause_chunks;
+      double batch_err = 0.0;
+      double batch_exp = 0.0;
+      #pragma omp parallel for schedule(static) reduction(+:batch_err,batch_exp)
+      for (unsigned int s = 0; s < n; s++) {
+        unsigned int literals[TK_CVEC_BITS];
+        unsigned int votes_buf[TK_CVEC_BITS];
+        double local_votes[actual_batch];
+        for (unsigned int ci = 0; ci < actual_batch; ci++) local_votes[ci] = 0.0;
+        for (unsigned int lc = 0; lc < batch_total_chunks; lc++) {
+          unsigned int chunk = chunk_offset + lc;
+          unsigned int ci = lc / clause_chunks;
+          unsigned int c = batch_start + ci;
+          char *input = buf + ci * batch_class_stride + s * bpc;
+          tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+          long int chunk_vote = 0;
+          for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+              chunk_vote += votes_buf[j];
+          if (chunk_vote > (long int)tm->targets[c]) chunk_vote = (long int)tm->targets[c];
+          if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+          local_votes[ci] += (double)chunk_vote;
+        }
+        for (unsigned int ci = 0; ci < actual_batch; ci++) {
+          unsigned int c = batch_start + ci;
+          double y_range = y_max[c] - y_min[c];
+          double pred = (local_votes[ci] / ((double)clause_chunks * per_class_targets[c]) + 0.5) * y_range + y_min[c];
+          double exp_val = tgt[s * classes + c];
+          batch_err += fabs(pred - exp_val);
+          batch_exp += exp_val;
+        }
+      }
+      total_err += batch_err;
+      sum_exp += batch_exp;
+    }
+    if (own_buf) free(buf);
+  } else {
+    tk_cvec_t *ps = NULL;
+    char *temp_dense = NULL;
+    bool grouped = false;
+    unsigned int class_n = 0;
+    bool reuse_dense = tm->managed_dense && tm->dense_n_samples == n
+      && !(tm->dense_batch_size > 0 && tm->dense_batch_size < tm->classes);
+    if (reuse_dense) {
+      grouped = true;
+      class_n = n;
+    } else if (tm->sparse_mode && lua_type(L, 2) != LUA_TUSERDATA) {
+      lua_getfield(L, 2, "tokens");
+      tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+      lua_pop(L, 1);
+      unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "regress_nmae", "n_samples") : n;
+      temp_dense = tk_learn_densify_tokens(tm, tokens, n_tok);
+      grouped = true;
+      class_n = n_tok;
+    } else {
+      ps = tk_cvec_peek(L, 2, "problems");
+    }
+    const unsigned int total_chunks = clause_chunks * classes;
+    const unsigned int input_chunks = tm->input_chunks;
+    const unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
+    const uint64_t class_stride = grouped ? (uint64_t)class_n * bytes_per_class : 0;
+    char *base_ptr = reuse_dense ? tm->managed_dense : (temp_dense ? temp_dense : ps->a);
+    #pragma omp parallel for schedule(static) reduction(+:total_err,sum_exp)
+    for (unsigned int s = 0; s < n; s++) {
+      long int votes_per_class[classes];
+      for (unsigned int c = 0; c < classes; c++)
+        votes_per_class[c] = 0;
+      unsigned int literals[TK_CVEC_BITS];
+      unsigned int votes_buf[TK_CVEC_BITS];
+      for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
+        unsigned int c = chunk / clause_chunks;
+        char *input = grouped
+          ? base_ptr + c * class_stride + s * bytes_per_class
+          : base_ptr + s * input_chunks;
+        tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+        long int chunk_vote = 0;
+        for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+            chunk_vote += votes_buf[j];
+        if (chunk_vote > (long int)tm->targets[c]) chunk_vote = (long int)tm->targets[c];
+        if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+        votes_per_class[c] += chunk_vote;
+      }
+      for (unsigned int c = 0; c < classes; c++) {
+        double y_range = y_max[c] - y_min[c];
+        double pred = ((double)votes_per_class[c] / ((double)clause_chunks * per_class_targets[c]) + 0.5) * y_range + y_min[c];
+        double exp_val = tgt[s * classes + c];
+        total_err += fabs(pred - exp_val);
+        sum_exp += exp_val;
+      }
+    }
+    free(temp_dense);
+  }
+
+  double mean_err = n_elems > 0 ? total_err / (double)n_elems : 0.0;
+  double mean_exp = n_elems > 0 ? sum_exp / (double)n_elems : 0.0;
+  double nmae = mean_exp > 0.0 ? mean_err / mean_exp : 0.0;
+  lua_pushnumber(L, -nmae);
+  lua_pushnumber(L, nmae);
+  return 2;
 }
 
 static inline int tk_learn_encode (lua_State *L)
@@ -919,28 +1870,11 @@ static inline int tk_learn_encode (lua_State *L)
   tk_learn_t *tm = tk_learn_peek(L, 1);
   lua_settop(L, 5);
   unsigned int n = tk_lua_checkunsigned(L, 3, "n_samples");
-  bool grouped = lua_toboolean(L, 4);
+  bool grouped = false;
   tk_cvec_t *out_buf = lua_isnil(L, 5) ? NULL : tk_cvec_peek(L, 5, "output");
 
-  tk_cvec_t *ps = NULL;
-  char *temp_dense = NULL;
-  if (tm->sparse_mode && lua_type(L, 2) != LUA_TUSERDATA) {
-    lua_getfield(L, 2, "tokens");
-    tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
-    lua_pop(L, 1);
-    unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "encode", "n_samples") : n;
-    temp_dense = tk_learn_densify_tokens(tm, tokens, n_tok);
-    grouped = true;
-  } else {
-    ps = tk_cvec_peek(L, 2, "problems");
-  }
-
   const unsigned int classes = tm->classes;
-  const unsigned int total_chunks = tm->clause_chunks * classes;
   const unsigned int clause_chunks = tm->clause_chunks;
-  const unsigned int input_chunks = tm->input_chunks;
-  const unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
-  const unsigned int input_stride = grouped ? classes * bytes_per_class : 0;
   const unsigned int out_bytes = TK_CVEC_BITS_BYTES(classes);
   size_t needed = n * out_bytes;
   if (needed > tm->encodings_len) {
@@ -949,37 +1883,111 @@ static inline int tk_learn_encode (lua_State *L)
   }
   char *encodings = tm->encodings;
   memset(encodings, 0, needed);
-  char *base_ptr = temp_dense ? temp_dense : ps->a;
-  #pragma omp parallel for schedule(static)
-  for (unsigned int s = 0; s < n; s++) {
-    long int votes_per_class[classes];
-    for (unsigned int c = 0; c < classes; c++)
-      votes_per_class[c] = 0;
-    unsigned int literals[TK_CVEC_BITS];
-    unsigned int votes_buf[TK_CVEC_BITS];
-    for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
-      unsigned int c = chunk / clause_chunks;
-      char *input = grouped
-        ? base_ptr + s * input_stride + c * bytes_per_class
-        : base_ptr + s * input_chunks;
-      uint8_t out = tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
-      long int chunk_vote = 0;
-      for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
-        if (out & (1 << j))
-          chunk_vote += votes_buf[j];
-      if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
-      votes_per_class[c] += chunk_vote;
-    }
-    char *out_row = encodings + s * out_bytes;
-    for (unsigned int c = 0; c < classes; c++) {
-      if (votes_per_class[c] > 0) {
-        unsigned int byte_idx = c / 8;
-        unsigned int bit_idx = c % 8;
-        out_row[byte_idx] |= (1 << bit_idx);
+
+  bool use_batching = tm->sparse_mode && tm->dense_batch_size > 0 && tm->dense_batch_size < classes;
+
+  if (use_batching && lua_type(L, 2) != LUA_TUSERDATA) {
+    lua_getfield(L, 2, "tokens");
+    tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+    lua_pop(L, 1);
+    unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "encode", "n_samples") : n;
+    unsigned int B = tm->dense_batch_size;
+    unsigned int bpc = TK_CVEC_BITS_BYTES(tm->features * 2);
+    tk_token_bin_t *bin = tk_learn_get_bin(tm, tokens, n_tok);
+    bool own_buf = !tm->managed_dense || tm->dense_n_samples < n_tok;
+    char *buf = own_buf ? (char *)malloc((uint64_t)n_tok * B * bpc) : tm->managed_dense;
+    for (unsigned int batch_start = 0; batch_start < classes; batch_start += B) {
+      unsigned int actual_batch = (batch_start + B <= classes) ? B : (classes - batch_start);
+      uint64_t batch_class_stride = (uint64_t)n_tok * bpc;
+      tk_learn_densify_tokens_range(tm, bin, buf, batch_start, actual_batch);
+      unsigned int batch_total_chunks = clause_chunks * actual_batch;
+      unsigned int chunk_offset = batch_start * clause_chunks;
+      #pragma omp parallel for schedule(static)
+      for (unsigned int s = 0; s < n; s++) {
+        long int batch_votes[actual_batch];
+        for (unsigned int ci = 0; ci < actual_batch; ci++) batch_votes[ci] = 0;
+        unsigned int literals[TK_CVEC_BITS];
+        unsigned int votes_buf[TK_CVEC_BITS];
+        for (unsigned int lc = 0; lc < batch_total_chunks; lc++) {
+          unsigned int chunk = chunk_offset + lc;
+          unsigned int ci = lc / clause_chunks;
+          unsigned int c = batch_start + ci;
+          char *input = buf + ci * batch_class_stride + s * bpc;
+          tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+          long int chunk_vote = 0;
+          for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+              chunk_vote += votes_buf[j];
+          if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+          batch_votes[ci] += chunk_vote;
+        }
+        char *out_row = encodings + s * out_bytes;
+        for (unsigned int ci = 0; ci < actual_batch; ci++) {
+          if (batch_votes[ci] > 0) {
+            unsigned int c = batch_start + ci;
+            unsigned int byte_idx = c / 8;
+            unsigned int bit_idx = c % 8;
+            out_row[byte_idx] |= (1 << bit_idx);
+          }
+        }
       }
     }
+    if (own_buf) free(buf);
+  } else {
+    tk_cvec_t *ps = NULL;
+    char *temp_dense = NULL;
+    unsigned int class_n = 0;
+    bool reuse_dense = tm->managed_dense && tm->dense_n_samples == n
+      && !(tm->dense_batch_size > 0 && tm->dense_batch_size < tm->classes);
+    if (reuse_dense) {
+      grouped = true;
+      class_n = n;
+    } else if (tm->sparse_mode && lua_type(L, 2) != LUA_TUSERDATA) {
+      lua_getfield(L, 2, "tokens");
+      tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+      lua_pop(L, 1);
+      unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "encode", "n_samples") : n;
+      temp_dense = tk_learn_densify_tokens(tm, tokens, n_tok);
+      grouped = true;
+      class_n = n_tok;
+    } else {
+      ps = tk_cvec_peek(L, 2, "problems");
+    }
+    const unsigned int total_chunks = clause_chunks * classes;
+    const unsigned int input_chunks = tm->input_chunks;
+    const unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
+    const uint64_t class_stride = grouped ? (uint64_t)class_n * bytes_per_class : 0;
+    char *base_ptr = reuse_dense ? tm->managed_dense : (temp_dense ? temp_dense : ps->a);
+    #pragma omp parallel for schedule(static)
+    for (unsigned int s = 0; s < n; s++) {
+      long int votes_per_class[classes];
+      for (unsigned int c = 0; c < classes; c++)
+        votes_per_class[c] = 0;
+      unsigned int literals[TK_CVEC_BITS];
+      unsigned int votes_buf[TK_CVEC_BITS];
+      for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
+        unsigned int c = chunk / clause_chunks;
+        char *input = grouped
+          ? base_ptr + c * class_stride + s * bytes_per_class
+          : base_ptr + s * input_chunks;
+        tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+        long int chunk_vote = 0;
+        for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+            chunk_vote += votes_buf[j];
+        if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+        votes_per_class[c] += chunk_vote;
+      }
+      char *out_row = encodings + s * out_bytes;
+      for (unsigned int c = 0; c < classes; c++) {
+        if (votes_per_class[c] > 0) {
+          unsigned int byte_idx = c / 8;
+          unsigned int bit_idx = c % 8;
+          out_row[byte_idx] |= (1 << bit_idx);
+        }
+      }
+    }
+    free(temp_dense);
   }
-  free(temp_dense);
+
   if (out_buf) {
     if (tk_cvec_ensure(out_buf, needed) != 0)
       luaL_error(L, "failed to resize output buffer");
@@ -993,6 +2001,128 @@ static inline int tk_learn_encode (lua_State *L)
   return 1;
 }
 
+static inline int tk_learn_encode_hamming (lua_State *L)
+{
+  tk_learn_t *tm = tk_learn_peek(L, 1);
+  lua_settop(L, 4);
+  unsigned int n = tk_lua_checkunsigned(L, 3, "n_samples");
+  tk_cvec_t *expected = tk_cvec_peek(L, 4, "expected");
+
+  const unsigned int classes = tm->classes;
+  const unsigned int clause_chunks = tm->clause_chunks;
+  const unsigned int out_bytes = TK_CVEC_BITS_BYTES(classes);
+  const uint8_t *exp_data = (const uint8_t *)expected->a;
+
+  uint64_t total_match = 0;
+  uint64_t total_bits = (uint64_t)n * classes;
+
+  bool use_batching = tm->sparse_mode && tm->dense_batch_size > 0 && tm->dense_batch_size < classes;
+
+  if (use_batching && lua_type(L, 2) != LUA_TUSERDATA) {
+    lua_getfield(L, 2, "tokens");
+    tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+    lua_pop(L, 1);
+    unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "encode_hamming", "n_samples") : n;
+    unsigned int B = tm->dense_batch_size;
+    unsigned int bpc = TK_CVEC_BITS_BYTES(tm->features * 2);
+    tk_token_bin_t *bin = tk_learn_get_bin(tm, tokens, n_tok);
+    bool own_buf = !tm->managed_dense || tm->dense_n_samples < n_tok;
+    char *buf = own_buf ? (char *)malloc((uint64_t)n_tok * B * bpc) : tm->managed_dense;
+    for (unsigned int batch_start = 0; batch_start < classes; batch_start += B) {
+      unsigned int actual_batch = (batch_start + B <= classes) ? B : (classes - batch_start);
+      uint64_t batch_class_stride = (uint64_t)n_tok * bpc;
+      tk_learn_densify_tokens_range(tm, bin, buf, batch_start, actual_batch);
+      unsigned int batch_total_chunks = clause_chunks * actual_batch;
+      unsigned int chunk_offset = batch_start * clause_chunks;
+      uint64_t batch_match = 0;
+      #pragma omp parallel for schedule(static) reduction(+:batch_match)
+      for (unsigned int s = 0; s < n; s++) {
+        long int batch_votes[actual_batch];
+        for (unsigned int ci = 0; ci < actual_batch; ci++) batch_votes[ci] = 0;
+        unsigned int literals[TK_CVEC_BITS];
+        unsigned int votes_buf[TK_CVEC_BITS];
+        for (unsigned int lc = 0; lc < batch_total_chunks; lc++) {
+          unsigned int chunk = chunk_offset + lc;
+          unsigned int ci = lc / clause_chunks;
+          unsigned int c = batch_start + ci;
+          char *input = buf + ci * batch_class_stride + s * bpc;
+          tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+          long int chunk_vote = 0;
+          for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+              chunk_vote += votes_buf[j];
+          if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+          batch_votes[ci] += chunk_vote;
+        }
+        for (unsigned int ci = 0; ci < actual_batch; ci++) {
+          unsigned int c = batch_start + ci;
+          unsigned int pred_bit = batch_votes[ci] > 0 ? 1 : 0;
+          unsigned int exp_bit = (exp_data[s * out_bytes + c / 8] >> (c % 8)) & 1;
+          if (pred_bit == exp_bit) batch_match++;
+        }
+      }
+      total_match += batch_match;
+    }
+    if (own_buf) free(buf);
+  } else {
+    tk_cvec_t *ps = NULL;
+    char *temp_dense = NULL;
+    bool grouped = false;
+    unsigned int class_n = 0;
+    bool reuse_dense = tm->managed_dense && tm->dense_n_samples == n
+      && !(tm->dense_batch_size > 0 && tm->dense_batch_size < tm->classes);
+    if (reuse_dense) {
+      grouped = true;
+      class_n = n;
+    } else if (tm->sparse_mode && lua_type(L, 2) != LUA_TUSERDATA) {
+      lua_getfield(L, 2, "tokens");
+      tk_ivec_t *tokens = tk_ivec_peek(L, -1, "tokens");
+      lua_pop(L, 1);
+      unsigned int n_tok = lua_type(L, 2) == LUA_TTABLE ? tk_lua_fcheckunsigned(L, 2, "encode_hamming", "n_samples") : n;
+      temp_dense = tk_learn_densify_tokens(tm, tokens, n_tok);
+      grouped = true;
+      class_n = n_tok;
+    } else {
+      ps = tk_cvec_peek(L, 2, "problems");
+    }
+    const unsigned int total_chunks = clause_chunks * classes;
+    const unsigned int input_chunks = tm->input_chunks;
+    const unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
+    const uint64_t class_stride = grouped ? (uint64_t)class_n * bytes_per_class : 0;
+    char *base_ptr = reuse_dense ? tm->managed_dense : (temp_dense ? temp_dense : ps->a);
+    #pragma omp parallel for schedule(static) reduction(+:total_match)
+    for (unsigned int s = 0; s < n; s++) {
+      long int votes_per_class[classes];
+      for (unsigned int c = 0; c < classes; c++)
+        votes_per_class[c] = 0;
+      unsigned int literals[TK_CVEC_BITS];
+      unsigned int votes_buf[TK_CVEC_BITS];
+      for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
+        unsigned int c = chunk / clause_chunks;
+        char *input = grouped
+          ? base_ptr + c * class_stride + s * bytes_per_class
+          : base_ptr + s * input_chunks;
+        tk_learn_calculate(tm, input, literals, votes_buf, chunk, tm->clause_tolerances[c], 0);
+        long int chunk_vote = 0;
+        for (unsigned int j = 0; j < TK_CVEC_BITS; j++)
+            chunk_vote += votes_buf[j];
+        if ((chunk % clause_chunks) >= clause_chunks / 2) chunk_vote = -chunk_vote;
+        votes_per_class[c] += chunk_vote;
+      }
+      for (unsigned int c = 0; c < classes; c++) {
+        unsigned int pred_bit = votes_per_class[c] > 0 ? 1 : 0;
+        unsigned int exp_bit = (exp_data[s * out_bytes + c / 8] >> (c % 8)) & 1;
+        if (pred_bit == exp_bit) total_match++;
+      }
+    }
+    free(temp_dense);
+  }
+
+  double accuracy = total_bits > 0 ? (double)total_match / (double)total_bits : 0.0;
+  lua_pushnumber(L, accuracy);
+  lua_pushnumber(L, accuracy);
+  return 2;
+}
+
 typedef enum {
   TM_TARGET_IVEC,
   TM_TARGET_CVEC,
@@ -1004,19 +2134,19 @@ typedef enum {
   unsigned int chunk_tolerance = tm->clause_tolerances[chunk_class]; \
   unsigned int chunk_maximum = tm->clause_maximums[chunk_class]; \
   unsigned int chunk_spec_thresh = tm->specificity_thresholds[chunk_class]; \
+  uint8_t chunk_spec_pt = tm->specificity_pts[chunk_class]; \
   long int vote_target = (long int)tm->targets[chunk_class]; \
   for (unsigned int i = 0; i < n; i++) { \
     unsigned int sample = shuffle[i]; \
     SKIP_LOGIC \
     char *input = grouped \
-      ? ps->a + sample * input_stride + chunk_class * bytes_per_class \
+      ? ps->a + local_class * class_stride + sample * bytes_per_class \
       : ps->a + sample * input_chunks; \
     double y_target = GET_TARGET; \
-    uint8_t out = tk_learn_calculate(tm, input, literals, votes, chunk, chunk_tolerance, 1); \
+    tk_learn_calculate(tm, input, literals, votes, chunk, chunk_tolerance, 1); \
     long int chunk_vote = 0; \
     for (unsigned int j = 0; j < TK_CVEC_BITS; j++) \
-      if (out & (1 << j)) \
-        chunk_vote += votes[j]; \
+      chunk_vote += votes[j]; \
     bool chunk_neg = (chunk % clause_chunks) >= clause_chunks / 2; \
     double class_y_min = y_min[chunk_class]; \
     double class_y_range = y_max[chunk_class] - class_y_min; \
@@ -1028,9 +2158,10 @@ typedef enum {
     bool want_more = ((double)chunk_vote < ideal_chunk_vote); \
     double error_ratio = ((double)chunk_vote - ideal_chunk_vote) / (double)vote_target; \
     double probability = fabs(error_ratio); \
+    uint32_t prob_thresh = (uint32_t)(probability * 4294967295.0); \
     for (unsigned int j = 0; j < TK_CVEC_BITS; j++) { \
-      if ((double)tk_fast_random() / 4294967295.0 < probability) { \
-        apply_feedback(tm, j, chunk, input, literals, votes, want_more, chunk_maximum, chunk_spec_thresh); \
+      if (tk_fast_random() < prob_thresh) { \
+        apply_feedback(tm, j, chunk, input, literals, votes, want_more, chunk_maximum, chunk_spec_thresh, chunk_spec_pt); \
       } \
     } \
   } \
@@ -1046,7 +2177,7 @@ static inline int tk_learn_train_regressor (lua_State *L, tk_learn_t *tm)
   if (tm->sparse_mode && tk_lua_ftype(L, 2, "csc_offsets") != LUA_TNIL) {
     sparse_train = true;
 
-    if (!tm->managed_dense) {
+    if (!tm->managed_dense || tm->dense_stale) {
       lua_getfield(L, 2, "csc_offsets");
       tk_ivec_t *csc_off = tk_ivec_peek(L, -1, "csc_offsets");
       lua_pop(L, 1);
@@ -1115,13 +2246,27 @@ static inline int tk_learn_train_regressor (lua_State *L, tk_learn_t *tm)
           init_ids = tm->absorb_ranking;
           n_init = tm->absorb_ranking_n;
         }
+        if (tm->absorb_ranking_limit > 0 && n_init > tm->absorb_ranking_limit)
+          n_init = tm->absorb_ranking_limit;
         tk_learn_init_mapping(tm, c, init_ids, n_init);
       }
       tm->dense_bpc = TK_CVEC_BITS_BYTES(tm->features * 2);
-      tm->dense_bps = tm->classes * tm->dense_bpc;
+      unsigned int alloc_classes;
+      if (tm->dense_batch_size > 0 && tm->dense_batch_size < tm->classes)
+        alloc_classes = tm->dense_batch_size;
+      else
+        alloc_classes = tm->classes;
+      tm->dense_bps = alloc_classes * tm->dense_bpc;
       tm->dense_n_samples = n;
-      tm->managed_dense = (char *)malloc((uint64_t)n * tm->dense_bps);
-      tk_learn_densify_all(tm);
+      uint64_t dense_needed = (uint64_t)n * tm->dense_bps;
+      if (!tm->managed_dense || dense_needed > tm->dense_alloc) {
+        free(tm->managed_dense);
+        tm->managed_dense = (char *)malloc(dense_needed);
+        tm->dense_alloc = dense_needed;
+      }
+      if (!(tm->dense_batch_size > 0 && tm->dense_batch_size < tm->classes))
+        tk_learn_densify_all(tm);
+      tm->dense_stale = false;
     }
 
     ps = (tk_cvec_t *)malloc(sizeof(tk_cvec_t));
@@ -1134,20 +2279,26 @@ static inline int tk_learn_train_regressor (lua_State *L, tk_learn_t *tm)
   }
 
   tm_target_mode_t target_mode;
-  tk_ivec_t *solutions = NULL;
   tk_cvec_t *codes = NULL;
   tk_dvec_t *targets_dvec = NULL;
   double *targets = NULL;
-  int64_t *labels = NULL;
+  int64_t *sol_offsets = NULL;
+  int64_t *sol_neighbors = NULL;
+  size_t sol_neighbors_n = 0;
   uint8_t *code_bytes = NULL;
   unsigned int code_chunks = 0;
 
-  if (tk_lua_ftype(L, 2, "solutions") != LUA_TNIL) {
+  if (tk_lua_ftype(L, 2, "sol_offsets") != LUA_TNIL) {
     target_mode = TM_TARGET_IVEC;
-    lua_getfield(L, 2, "solutions");
-    solutions = tk_ivec_peek(L, -1, "solutions");
+    lua_getfield(L, 2, "sol_offsets");
+    tk_ivec_t *soff = tk_ivec_peek(L, -1, "sol_offsets");
     lua_pop(L, 1);
-    labels = solutions->a;
+    lua_getfield(L, 2, "sol_neighbors");
+    tk_ivec_t *snbr = tk_ivec_peek(L, -1, "sol_neighbors");
+    lua_pop(L, 1);
+    sol_offsets = soff->a;
+    sol_neighbors = snbr->a;
+    sol_neighbors_n = snbr->n;
   } else if (tk_lua_ftype(L, 2, "codes") != LUA_TNIL) {
     target_mode = TM_TARGET_CVEC;
     lua_getfield(L, 2, "codes");
@@ -1163,7 +2314,7 @@ static inline int tk_learn_train_regressor (lua_State *L, tk_learn_t *tm)
     targets = targets_dvec->a;
   } else {
     if (sparse_train) free(ps);
-    return luaL_error(L, "regressor train requires solutions (ivec), codes (cvec), or targets (dvec)");
+    return luaL_error(L, "regressor train requires sol_offsets+sol_neighbors (CSR), codes (cvec), or targets (dvec)");
   }
 
   unsigned int max_iter = tk_lua_fcheckunsigned(L, 2, "train", "iterations");
@@ -1202,15 +2353,16 @@ static inline int tk_learn_train_regressor (lua_State *L, tk_learn_t *tm)
   unsigned int clause_chunks = tm->clause_chunks;
   unsigned int total_chunks = clause_chunks * classes;
   unsigned int input_chunks = tm->input_chunks;
-  bool grouped = sparse_train ? true : tk_lua_foptboolean(L, 2, "train", "grouped", false);
+  bool grouped = sparse_train;
   unsigned int bytes_per_class = grouped ? TK_CVEC_BITS_BYTES(tm->features * 2) : 0;
-  unsigned int input_stride = grouped ? classes * bytes_per_class : 0;
+  bool use_batching = sparse_train && tm->dense_batch_size > 0 && tm->dense_batch_size < classes;
+  uint64_t class_stride = grouped ? (uint64_t)n * bytes_per_class : 0;
 
   uint32_t *skip_thresholds = NULL;
   if (target_mode == TM_TARGET_IVEC) {
     uint64_t *class_counts = (uint64_t *)calloc(classes, sizeof(uint64_t));
-    for (unsigned int i = 0; i < n; i++) {
-      unsigned int c = (unsigned int)labels[i];
+    for (size_t j = 0; j < sol_neighbors_n; j++) {
+      unsigned int c = (unsigned int)sol_neighbors[j];
       if (c < classes) class_counts[c]++;
     }
     skip_thresholds = (uint32_t *)tk_malloc(L, classes * sizeof(uint32_t));
@@ -1275,59 +2427,147 @@ static inline int tk_learn_train_regressor (lua_State *L, tk_learn_t *tm)
     }
   }
 
-  #pragma omp parallel
-  {
-    int tid = omp_get_thread_num();
-    unsigned int *shuffle = shuffles[tid];
-    unsigned int literals[TK_CVEC_BITS];
-    unsigned int votes[TK_CVEC_BITS];
-    for (unsigned int iter = 0; iter < max_iter; iter++) {
-      if (break_flag) break;
-      tk_learn_init_shuffle(shuffle, shuffle_n);
-      #pragma omp for schedule(guided)
-      for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
-        unsigned int chunk_class = chunk / clause_chunks;
-        switch (target_mode) {
-          case TM_TARGET_IVEC:
-            TM_REGRESSION_INNER_LOOP(
-              (labels[sample] == chunk_class) ? 1.0 : -1.0,
-              if (labels[sample] != (int64_t)chunk_class && tk_fast_random() < skip_thresholds[chunk_class]) continue;
-            )
-            break;
-          case TM_TARGET_CVEC:
-            TM_REGRESSION_INNER_LOOP(
-              (code_bytes[sample * code_chunks + chunk_class / 8] & (1 << (chunk_class % 8))) ? 1.0 : -1.0,
-              if (!(code_bytes[sample * code_chunks + chunk_class / 8] & (1 << (chunk_class % 8))) && tk_fast_random() < skip_thresholds[chunk_class]) continue;
-            )
-            break;
-          case TM_TARGET_DVEC:
-            TM_REGRESSION_INNER_LOOP(
-              targets[sample * classes + chunk_class],
-              /* no skip */
-            )
-            break;
+  if (use_batching) {
+    unsigned int B = tm->dense_batch_size;
+    #pragma omp parallel
+    {
+      int tid = omp_get_thread_num();
+      unsigned int *shuffle = shuffles[tid];
+      unsigned int literals[TK_CVEC_BITS];
+      unsigned int votes[TK_CVEC_BITS];
+      for (unsigned int iter = 0; iter < max_iter; iter++) {
+        if (break_flag) break;
+        tk_learn_init_shuffle(shuffle, shuffle_n);
+        for (unsigned int batch_start = 0; batch_start < classes; batch_start += B) {
+          unsigned int actual_batch = (batch_start + B <= classes) ? B : (classes - batch_start);
+          #pragma omp single
+          {
+            tm->dense_batch_start = batch_start;
+          }
+          #pragma omp for schedule(static)
+          for (unsigned int ci = 0; ci < actual_batch; ci++)
+            memset((uint8_t *)tm->managed_dense + (uint64_t)ci * n * tm->dense_bpc, 0xAA, (uint64_t)n * tm->dense_bpc);
+          #pragma omp for schedule(dynamic)
+          for (unsigned int dc = batch_start; dc < batch_start + actual_batch; dc++) {
+            for (unsigned int dk = 0; dk < tm->features; dk++) {
+              unsigned int dtok = (unsigned int)tm->mapping[(uint64_t)dc * tm->features + dk];
+              tk_learn_densify_slot(tm, dc, dk, dtok, -1);
+            }
+          }
+          unsigned int batch_chunks = clause_chunks * actual_batch;
+          unsigned int chunk_offset = batch_start * clause_chunks;
+          #pragma omp for schedule(dynamic)
+          for (unsigned int local_chunk = 0; local_chunk < batch_chunks; local_chunk++) {
+            unsigned int chunk = chunk_offset + local_chunk;
+            unsigned int chunk_class = batch_start + local_chunk / clause_chunks;
+            unsigned int local_class = local_chunk / clause_chunks;
+            switch (target_mode) {
+              case TM_TARGET_IVEC:
+                TM_REGRESSION_INNER_LOOP(
+                  _sample_is_pos ? 1.0 : -1.0,
+                  bool _sample_is_pos = false;
+                  for (int64_t _k = sol_offsets[sample]; _k < sol_offsets[sample + 1]; _k++)
+                    if ((unsigned int)sol_neighbors[_k] == chunk_class) { _sample_is_pos = true; break; }
+                  if (!_sample_is_pos && tk_fast_random() < skip_thresholds[chunk_class]) continue;
+                )
+                break;
+              case TM_TARGET_CVEC:
+                TM_REGRESSION_INNER_LOOP(
+                  (code_bytes[sample * code_chunks + chunk_class / 8] & (1 << (chunk_class % 8))) ? 1.0 : -1.0,
+                  if (!(code_bytes[sample * code_chunks + chunk_class / 8] & (1 << (chunk_class % 8))) && tk_fast_random() < skip_thresholds[chunk_class]) continue;
+                )
+                break;
+              case TM_TARGET_DVEC:
+                TM_REGRESSION_INNER_LOOP(
+                  targets[sample * classes + chunk_class],
+                  /* no skip */
+                )
+                break;
+            }
+          }
         }
-      }
-      if (tm->sparse_mode && tm->absorb_interval > 0 && ((iter + 1) % tm->absorb_interval == 0)) {
         #pragma omp for schedule(dynamic)
         for (unsigned int c = 0; c < tm->classes; c++)
           tk_learn_absorb_class(tm, c);
+        #pragma omp single
+        {
+          if (i_each > -1) {
+            lua_pushvalue(L, i_each);
+            lua_pushinteger(L, iter + 1);
+            int status = lua_pcall(L, 1, 1, 0);
+            if (status != LUA_OK) {
+              fprintf(stderr, "Error in Lua callback: %s\n", lua_tostring(L, -1));
+              lua_pop(L, 1);
+              break_flag = true;
+            } else if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0) {
+              lua_pop(L, 1);
+              break_flag = true;
+            } else {
+              lua_pop(L, 1);
+            }
+          }
+        }
       }
-      #pragma omp single
-      {
-        if (i_each > -1) {
-          lua_pushvalue(L, i_each);
-          lua_pushinteger(L, iter + 1);
-          int status = lua_pcall(L, 1, 1, 0);
-          if (status != LUA_OK) {
-            fprintf(stderr, "Error in Lua callback: %s\n", lua_tostring(L, -1));
-            lua_pop(L, 1);
-            break_flag = true;
-          } else if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0) {
-            lua_pop(L, 1);
-            break_flag = true;
-          } else {
-            lua_pop(L, 1);
+    }
+  } else {
+    #pragma omp parallel
+    {
+      int tid = omp_get_thread_num();
+      unsigned int *shuffle = shuffles[tid];
+      unsigned int literals[TK_CVEC_BITS];
+      unsigned int votes[TK_CVEC_BITS];
+      for (unsigned int iter = 0; iter < max_iter; iter++) {
+        if (break_flag) break;
+        tk_learn_init_shuffle(shuffle, shuffle_n);
+        #pragma omp for schedule(dynamic)
+        for (unsigned int chunk = 0; chunk < total_chunks; chunk++) {
+          unsigned int chunk_class = chunk / clause_chunks;
+          unsigned int local_class = chunk_class;
+          switch (target_mode) {
+            case TM_TARGET_IVEC:
+              TM_REGRESSION_INNER_LOOP(
+                _sample_is_pos ? 1.0 : -1.0,
+                bool _sample_is_pos = false;
+                for (int64_t _k = sol_offsets[sample]; _k < sol_offsets[sample + 1]; _k++)
+                  if ((unsigned int)sol_neighbors[_k] == chunk_class) { _sample_is_pos = true; break; }
+                if (!_sample_is_pos && tk_fast_random() < skip_thresholds[chunk_class]) continue;
+              )
+              break;
+            case TM_TARGET_CVEC:
+              TM_REGRESSION_INNER_LOOP(
+                (code_bytes[sample * code_chunks + chunk_class / 8] & (1 << (chunk_class % 8))) ? 1.0 : -1.0,
+                if (!(code_bytes[sample * code_chunks + chunk_class / 8] & (1 << (chunk_class % 8))) && tk_fast_random() < skip_thresholds[chunk_class]) continue;
+              )
+              break;
+            case TM_TARGET_DVEC:
+              TM_REGRESSION_INNER_LOOP(
+                targets[sample * classes + chunk_class],
+                /* no skip */
+              )
+              break;
+          }
+        }
+        if (tm->sparse_mode) {
+          #pragma omp for schedule(dynamic)
+          for (unsigned int c = 0; c < tm->classes; c++)
+            tk_learn_absorb_class(tm, c);
+        }
+        #pragma omp single
+        {
+          if (i_each > -1) {
+            lua_pushvalue(L, i_each);
+            lua_pushinteger(L, iter + 1);
+            int status = lua_pcall(L, 1, 1, 0);
+            if (status != LUA_OK) {
+              fprintf(stderr, "Error in Lua callback: %s\n", lua_tostring(L, -1));
+              lua_pop(L, 1);
+              break_flag = true;
+            } else if (lua_type(L, -1) == LUA_TBOOLEAN && lua_toboolean(L, -1) == 0) {
+              lua_pop(L, 1);
+              break_flag = true;
+            } else {
+              lua_pop(L, 1);
+            }
           }
         }
       }
@@ -1446,7 +2686,7 @@ static inline int tk_learn_restore (lua_State *L)
           sparse_set_active(tm, c, (unsigned int)tok);
       }
     }
-    if (tm->managed_dense)
+    if (tm->managed_dense && !(tm->dense_batch_size > 0 && tm->dense_batch_size < tm->classes))
       tk_learn_densify_all(tm);
   }
   return 0;
@@ -1466,23 +2706,34 @@ static inline int tk_learn_reconfigure (lua_State *L)
   unsigned int new_target = tk_lua_fcheckunsigned(L, 2, "reconfigure", "target");
   double new_specificity = tk_lua_fcheckposdouble(L, 2, "reconfigure", "specificity");
   unsigned int new_features = tk_lua_foptunsigned(L, 2, "reconfigure", "features", tm->features);
-  if (new_features != tm->features) {
+  bool features_changed = (new_features != tm->features);
+  if (features_changed) {
     tm->features = new_features;
     tm->input_bits = 2 * tm->features;
     uint64_t tail_bits = tm->input_bits & (TK_CVEC_BITS - 1);
     tm->tail_mask = tail_bits ? (uint8_t)((1u << tail_bits) - 1) : 0xFF;
     tm->input_chunks = TK_CVEC_BITS_BYTES(tm->input_bits);
     if (tm->sparse_mode) {
-      free(tm->mapping);
-      tm->mapping = (int64_t *)malloc((uint64_t)tm->classes * tm->features * sizeof(int64_t));
-      free(tm->absorb_scratch);
-      tm->absorb_scratch = (uint8_t *)malloc((uint64_t)tm->absorb_threads * tm->features * 2 * sizeof(unsigned int));
+      uint64_t mapping_needed = (uint64_t)tm->classes * tm->features * sizeof(int64_t);
+      if (mapping_needed > tm->mapping_alloc) {
+        free(tm->mapping);
+        tm->mapping = (int64_t *)malloc(mapping_needed);
+        tm->mapping_alloc = mapping_needed;
+      }
+      unsigned int scratch_threads = (unsigned int)tm->absorb_threads;
+      uint64_t scratch_needed = (uint64_t)scratch_threads * tm->features * 2 * sizeof(unsigned int);
+      if (scratch_needed > tm->scratch_alloc) {
+        free(tm->absorb_scratch);
+        tm->absorb_scratch = (uint8_t *)malloc(scratch_needed);
+        tm->scratch_alloc = scratch_needed;
+      }
     }
   }
   unsigned int new_clause_chunks = new_clauses * 2;
   new_clauses = new_clause_chunks * TK_CVEC_BITS;
-  size_t new_action_chunks = (size_t)tm->classes * new_clauses * tm->input_chunks;
-  size_t new_state_chunks = (size_t)tm->classes * new_clauses * (tm->state_bits - 1) * tm->input_chunks;
+  unsigned int clause_mult = tm->classes;
+  size_t new_action_chunks = (size_t)clause_mult * new_clauses * tm->input_chunks;
+  size_t new_state_chunks = (size_t)clause_mult * new_clauses * (tm->state_bits - 1) * tm->input_chunks;
   if (new_action_chunks > tm->action_chunks) {
     free(tm->actions);
     tm->actions = (char *)tk_malloc_aligned(L, new_action_chunks, TK_CVEC_BITS);
@@ -1540,19 +2791,20 @@ static inline int tk_learn_reconfigure (lua_State *L)
       tm->targets[c] = (unsigned int)v->a[c];
     lua_pop(L, 1);
   }
-  tm->automata.n_clauses = tm->classes * tm->clauses;
+  tk_learn_recompute_specificity_pts(tm);
+  tm->automata.n_clauses = clause_mult * tm->clauses;
   tm->automata.n_chunks = tm->input_chunks;
   tm->automata.tail_mask = tm->tail_mask;
   tm->automata.counts = tm->state;
   tm->automata.actions = tm->actions;
   tm->trained = false;
+  tm->dense_batch_size = tk_lua_foptunsigned(L, 2, "reconfigure", "class_batch", tm->dense_batch_size);
   if (tm->sparse_mode) {
-    tm->absorb_interval = tk_lua_foptunsigned(L, 2, "reconfigure", "absorb_interval", tm->absorb_interval);
     tm->absorb_threshold = tk_lua_foptunsigned(L, 2, "reconfigure", "absorb_threshold", tm->absorb_threshold);
     tm->absorb_maximum = tk_lua_foptunsigned(L, 2, "reconfigure", "absorb_maximum", tm->absorb_maximum);
     tm->absorb_insert = tk_lua_foptunsigned(L, 2, "reconfigure", "absorb_insert", tm->absorb_insert);
-    free(tm->managed_dense);
-    tm->managed_dense = NULL;
+    tm->absorb_ranking_limit = tk_lua_foptunsigned(L, 2, "reconfigure", "absorb_ranking_limit", tm->absorb_ranking_limit);
+    tm->dense_stale = true;
     memset(tm->active, 0, (uint64_t)tm->classes * tm->active_bytes);
     if (tm->absorb_cursor)
       memset(tm->absorb_cursor, 0, tm->classes * sizeof(unsigned int));
@@ -1615,6 +2867,9 @@ static inline int tk_learn_restrict (lua_State *L)
     tm->clause_maximums[i] = tm->clause_maximums[src];
     tm->specificity_thresholds[i] = tm->specificity_thresholds[src];
     tm->targets[i] = tm->targets[src];
+    tm->specificity_pts[i] = tm->specificity_pts[src];
+    tm->y_min[i] = tm->y_min[src];
+    tm->y_max[i] = tm->y_max[src];
   }
   tm->classes = new_classes;
   tm->class_chunks = TK_CVEC_BITS_BYTES(tm->classes);
@@ -1627,8 +2882,8 @@ static inline int tk_learn_active_features (lua_State *L)
   tk_learn_t *tm = tk_learn_peek(L, 1);
   if (!tm->sparse_mode)
     return luaL_error(L, "active_features requires sparse mode");
-  unsigned int classes = tm->classes;
   unsigned int features = tm->features;
+  unsigned int classes = tm->classes;
   tk_ivec_t *offsets = tk_ivec_create(L, classes + 1, 0, 0);
   for (unsigned int c = 0; c <= classes; c++)
     offsets->a[c] = (int64_t)c * features;
@@ -1647,8 +2902,8 @@ static inline void _tk_learn_load (lua_State *L, tk_learn_t *tm, FILE *fh)
     luaL_error(L, "invalid TM file (bad magic)");
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 1 && version != 2)
-    luaL_error(L, "unsupported TM version %d", (int)version);
+  if (version != 2)
+    luaL_error(L, "unsupported TM version %d (expected 2)", (int)version);
   uint32_t u32;
   tk_lua_fread(L, &u32, sizeof(uint32_t), 1, fh); tm->classes = u32;
   tm->class_chunks = TK_CVEC_BITS_BYTES(tm->classes);
@@ -1678,20 +2933,12 @@ static inline void _tk_learn_load (lua_State *L, tk_learn_t *tm, FILE *fh)
   tm->clause_maximums = (unsigned int *)tk_malloc(L, tm->classes * sizeof(unsigned int));
   tm->specificity_thresholds = (unsigned int *)tk_malloc(L, tm->classes * sizeof(unsigned int));
   tm->targets = (unsigned int *)tk_malloc(L, tm->classes * sizeof(unsigned int));
-  if (version >= 2) {
-    tk_lua_fread(L, tm->clause_tolerances, sizeof(unsigned int), tm->classes, fh);
-    tk_lua_fread(L, tm->targets, sizeof(unsigned int), tm->classes, fh);
-    for (unsigned int c = 0; c < tm->classes; c++) {
-      tm->clause_maximums[c] = tm->clause_maximum;
-      tm->specificity_thresholds[c] = tm->specificity_threshold;
-    }
-  } else {
-    for (unsigned int c = 0; c < tm->classes; c++) {
-      tm->clause_tolerances[c] = tm->clause_tolerance;
-      tm->clause_maximums[c] = tm->clause_maximum;
-      tm->specificity_thresholds[c] = tm->specificity_threshold;
-      tm->targets[c] = tm->target;
-    }
+  tm->specificity_pts = (uint8_t *)tk_malloc(L, tm->classes * sizeof(uint8_t));
+  tk_lua_fread(L, tm->clause_tolerances, sizeof(unsigned int), tm->classes, fh);
+  tk_lua_fread(L, tm->targets, sizeof(unsigned int), tm->classes, fh);
+  for (unsigned int c = 0; c < tm->classes; c++) {
+    tm->clause_maximums[c] = tm->clause_maximum;
+    tm->specificity_thresholds[c] = tm->specificity_threshold;
   }
   tm->automata.n_clauses = tm->classes * tm->clauses;
   tm->automata.n_chunks = tm->input_chunks;
@@ -1699,6 +2946,7 @@ static inline void _tk_learn_load (lua_State *L, tk_learn_t *tm, FILE *fh)
   tm->automata.tail_mask = tm->tail_mask;
   tm->automata.counts = tm->state;
   tm->automata.actions = tm->actions;
+  tk_learn_recompute_specificity_pts(tm);
 }
 
 static inline int tk_learn_load (lua_State *L)

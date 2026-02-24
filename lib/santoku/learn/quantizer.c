@@ -341,10 +341,8 @@ static inline int tk_quantizer_create_lua(lua_State *L) {
     double *projected = (double *)malloc(n_samples * k * sizeof(double));
     double *B = (double *)malloc(n_samples * k * sizeof(double));
     double *BtV = (double *)malloc(k * k * sizeof(double));
-    double *U_svd = (double *)malloc(k * k * sizeof(double));
-    double *S_svd = (double *)malloc(k * sizeof(double));
-    double *Vt_svd = (double *)malloc(k * k * sizeof(double));
-    double *superb = (double *)malloc(k * sizeof(double));
+    double *XtX = (double *)malloc(k * k * sizeof(double));
+    double *tmp = (double *)malloc(k * k * sizeof(double));
     for (uint64_t iter = 0; iter < iterations; iter++) {
       cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
         (int)n_samples, (int)k, (int)k, 1.0, data, (int)k,
@@ -355,18 +353,22 @@ static inline int tk_quantizer_create_lua(lua_State *L) {
       cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
         (int)k, (int)k, (int)n_samples, 1.0, B, (int)k,
         data, (int)k, 0.0, BtV, (int)k);
-      int info = LAPACKE_dgesvd(LAPACK_ROW_MAJOR, 'A', 'A',
-        (int)k, (int)k, BtV, (int)k, S_svd, U_svd, (int)k, Vt_svd, (int)k, superb);
-      if (info != 0) break;
-      double *newR = (double *)malloc(k * k * sizeof(double));
-      cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-        (int)k, (int)k, (int)k, 1.0, Vt_svd, (int)k,
-        U_svd, (int)k, 0.0, newR, (int)k);
-      memcpy(R, newR, k * k * sizeof(double));
-      free(newR);
+      double nrm = cblas_dnrm2((int)(k * k), BtV, 1);
+      if (nrm < 1e-15) break;
+      cblas_dscal((int)(k * k), 1.0 / nrm, BtV, 1);
+      for (int ns = 0; ns < 15; ns++) {
+        cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+          (int)k, (int)k, (int)k, 1.0, BtV, (int)k,
+          BtV, (int)k, 0.0, XtX, (int)k);
+        memcpy(tmp, BtV, k * k * sizeof(double));
+        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+          (int)k, (int)k, (int)k, -0.5, tmp, (int)k,
+          XtX, (int)k, 1.5, BtV, (int)k);
+      }
+      memcpy(R, BtV, k * k * sizeof(double));
     }
     free(projected); free(B); free(BtV);
-    free(U_svd); free(S_svd); free(Vt_svd); free(superb);
+    free(XtX); free(tmp);
     free(data);
     tk_dvec_t *rot_out = tk_dvec_create(L, k * k, 0, 0);
     int rot_idx = lua_gettop(L);

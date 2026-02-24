@@ -129,7 +129,7 @@ A new configuration is preferred over the current best when:
 Cost comparison is element-wise left-to-right. For the TM wrapper, cost
 is `{ clauses, features }`, so at equal accuracy, fewer clauses wins,
 then fewer features. For spectral, cost is `{ n_dims, n_landmarks,
-|decay|, |bandwidth| }`.
+|decay| }`.
 
 ### Deduplication
 
@@ -291,7 +291,6 @@ parameters).
 - `n_landmarks` -- number of landmark points for Nystrom approximation
 - `n_dims` -- number of spectral dimensions to retain
 - `decay` -- kernel decay parameter for the inverted index similarity
-- `bandwidth` -- kernel bandwidth parameter
 
 Each can be fixed or a range spec.
 
@@ -303,8 +302,7 @@ Each can be fixed or a range spec.
 
 `M.build_spectral_nystrom` calls `spectral.encode` with the inv index
 and parameters. Returns a model table with `raw_codes`, `ids`, `dims`,
-`encoder`, `eigenvalues`, `landmark_ids`, `n_landmarks`, `decay`,
-`bandwidth`.
+`encoder`, `eigenvalues`, `landmark_ids`, `n_landmarks`, `decay`.
 
 ### Evaluation (optional)
 
