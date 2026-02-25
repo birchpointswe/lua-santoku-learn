@@ -1,7 +1,6 @@
 # Active
 
 - Finish Eurlex XMLC
-    - Merge eurlex-ranking tests into eurlex.lua
     - Add dev/test evaluations
 
 - Apply absorb/pruning logic after training/finalizing to remove unused

@@ -358,8 +358,10 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
       double *row = out->a + i * d;
       cblas_dgemv(CblasRowMajor, CblasTrans,
         (int)m, (int)d, 1.0, enc->projection, (int)d, sims, 1, 0.0, row, 1);
-      for (uint64_t k = 0; k < d; k++)
-        row[k] = (row[k] - enc->adjustment[k]) * enc->inv_sqrt_eig[k];
+      for (uint64_t k = 0; k < d; k++) {
+        row[k] -= enc->adjustment[k];
+        row[k] *= enc->inv_sqrt_eig[k];
+      }
     }
     free(sims);
     free(feat_buf);
@@ -434,7 +436,7 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
   else
     return tk_lua_verror(L, 2, "persist", "expecting either a filepath or true (for string serialization)");
   tk_lua_fwrite(L, "TKny", 1, 4, fh);
-  uint8_t version = 3;
+  uint8_t version = 4;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &enc->m, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, &enc->d, sizeof(uint64_t), 1, fh);
@@ -487,7 +489,7 @@ static inline int tm_encode (lua_State *L) {
   int feat_inv_idx = lua_gettop(L);
 
   uint64_t n_lm_req = tk_lua_foptunsigned(L, 1, "encode", "n_landmarks", 0);
-  uint64_t n_dims_req = tk_lua_fcheckunsigned(L, 1, "encode", "n_dims");
+  uint64_t n_dims_req = tk_lua_foptunsigned(L, 1, "encode", "n_dims", 0);
   double decay = tk_lua_foptnumber(L, 1, "encode", "decay", 0.0);
 
   tk_ivec_t *lm_ids = NULL, *chol_ids = NULL;
@@ -555,7 +557,7 @@ static inline int tm_encode (lua_State *L) {
   tk_dvec_t *eig_raw = tk_dvec_create(L, d, 0, 0);
   eig_raw->n = d;
   double *ev_raw = malloc(m * m * sizeof(double));
-  int *isuppz = malloc(2 * d * sizeof(int));
+  int *isuppz = malloc(2 * m * sizeof(int));
   if (!ev_raw || !isuppz) {
     free(ev_raw); free(isuppz);
     return luaL_error(L, "encode: out of memory");
@@ -601,16 +603,16 @@ static inline int tm_encode (lua_State *L) {
   tk_dvec_destroy(cmeans); ctx->cmeans = NULL;
 
   ctx->inv_sqrt_eig = (double *)malloc(d * sizeof(double));
-  for (uint64_t k = 0; k < d; k++) {
-    double ev = eig_raw->a[k];
-    ctx->inv_sqrt_eig[k] = ev > 1e-12 ? 1.0 / sqrt(ev) : 0.0;
-  }
+  for (uint64_t j = 0; j < d; j++)
+    ctx->inv_sqrt_eig[j] = 1.0 / sqrt(eig_raw->a[j]);
 
   #pragma omp parallel for schedule(static)
   for (uint64_t i = 0; i < nc; i++) {
     double *r = ccodes->a + i * d;
-    for (uint64_t j = 0; j < d; j++)
-      r[j] = (r[j] - ctx->adjustment[j]) * ctx->inv_sqrt_eig[j];
+    for (uint64_t j = 0; j < d; j++) {
+      r[j] -= ctx->adjustment[j];
+      r[j] *= ctx->inv_sqrt_eig[j];
+    }
   }
 
   ctx->projection = (double *)malloc(m * d * sizeof(double));
@@ -672,9 +674,9 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 3) {
+  if (version != 4) {
     tk_lua_fclose(L, fh);
-    return luaL_error(L, "unsupported nystrom encoder version %d (expected 3)", (int)version);
+    return luaL_error(L, "unsupported nystrom encoder version %d (expected 4)", (int)version);
   }
   uint64_t m, d;
   double decay, trace_ratio;
