@@ -29,11 +29,11 @@ local cfg = {
     skips = 1,
   },
   feature_selection = {
-    n_selected = 65536,
+    n_selected = 8192,
   },
   nystrom = {
     n_landmarks = 4096,
-    n_dims = 1024,
+    n_dims = 0,
     decay = 0,
   },
   eval = {
@@ -110,10 +110,13 @@ test("eurlex-embedding", function ()
     each = function (ev) util.spectral_log(ev) end,
   })
   local spectral_dims = model.dims
-  local train_raw_codes = dvec.create():mtx_extend(model.raw_codes,
+  local wide_codes = dvec.create():mtx_extend(model.raw_codes,
     model.ids:set_intersect(ivec.create(train.n):fill_indices()),
     model.ids, 0, spectral_dims, true)
-  str.printf("  Spectral: %d dims\n", spectral_dims)
+  str.printf("  Spectral: %d dims (full width)\n", spectral_dims)
+
+  local train_codes = wide_codes
+  local working_dims = spectral_dims
 
   print("\nTokenizing")
   local tok = tokenizer.create(cfg.tokenizer)
@@ -128,7 +131,7 @@ test("eurlex-embedding", function ()
   print("\nFeature selection (F-score)")
   local n_selected = cfg.feature_selection.n_selected
   local union_ids, _, class_offsets, class_feat_ids = train.tokens:bits_top_reg_f(
-    train_raw_codes, train.n, n_tokens, spectral_dims, n_selected, nil, "sum")
+    train_codes, train.n, n_tokens, working_dims, n_selected)
   train.tokens:bits_select(union_ids, nil, n_tokens)
   class_offsets, class_feat_ids = csr.bits_select(class_offsets, class_feat_ids, union_ids)
   n_tokens = union_ids:size()
@@ -142,7 +145,7 @@ test("eurlex-embedding", function ()
   local tm = optimize.regressor({
     class_batch = cfg.regressor.class_batch,
     cost_beta = cfg.regressor.cost_beta,
-    outputs = spectral_dims,
+    outputs = working_dims,
     samples = train.n,
     features = cfg.regressor.features,
     n_tokens = n_tokens,
@@ -166,7 +169,7 @@ test("eurlex-embedding", function ()
     csc_indices = csc_indices,
     absorb_ranking = class_feat_ids,
     absorb_ranking_offsets = class_offsets,
-    targets = train_raw_codes,
+    targets = train_codes,
     search_trials = cfg.regressor.search_trials,
     search_iterations = cfg.regressor.search_iterations,
     search_subsample_samples = cfg.regressor.search_subsample_samples,
@@ -191,15 +194,15 @@ test("eurlex-embedding", function ()
   local train_ids = ivec.create(train.n):fill_indices()
 
   local spectral_ranking_cont = eval.ranking_accuracy({
-    raw_codes = train_raw_codes, ids = train_ids,
-    n_dims = spectral_dims,
+    raw_codes = train_codes, ids = train_ids,
+    n_dims = working_dims,
     eval_ids = eval_uids, eval_offsets = eval_off,
     eval_neighbors = eval_nbr, eval_weights = eval_w,
   })
 
   local pred_ranking_cont = eval.ranking_accuracy({
     raw_codes = train_predicted, ids = train_ids,
-    n_dims = spectral_dims,
+    n_dims = working_dims,
     eval_ids = eval_uids, eval_offsets = eval_off,
     eval_neighbors = eval_nbr, eval_weights = eval_w,
   })
@@ -208,41 +211,41 @@ test("eurlex-embedding", function ()
   local shuffled = ivec.create(train.n):fill_indices():shuffle()
   local spec_half = ivec.create():copy(shuffled, 0, n_half, 0)
   local pred_half = ivec.create():copy(shuffled, n_half, train.n, 0)
-  local spec_rows = dvec.create():copy(train_raw_codes):mtx_select(nil, spec_half, spectral_dims)
-  local pred_rows = dvec.create():copy(train_predicted):mtx_select(nil, pred_half, spectral_dims)
+  local spec_rows = dvec.create():copy(train_codes):mtx_select(nil, spec_half, working_dims)
+  local pred_rows = dvec.create():copy(train_predicted):mtx_select(nil, pred_half, working_dims)
   local mixed_codes = dvec.create():copy(spec_rows):copy(pred_rows)
   local mixed_ids = ivec.create():copy(spec_half):copy(pred_half)
 
   local mixed_ranking_cont = eval.ranking_accuracy({
     raw_codes = mixed_codes, ids = mixed_ids,
-    n_dims = spectral_dims,
+    n_dims = working_dims,
     eval_ids = eval_uids, eval_offsets = eval_off,
     eval_neighbors = eval_nbr, eval_weights = eval_w,
   })
 
   local spectral_itq = quantizer.create({
-    mode = "itq", raw_codes = train_raw_codes, n_samples = train.n })
+    mode = "itq", raw_codes = train_codes, n_samples = train.n })
   local predicted_itq = quantizer.create({
     mode = "itq", raw_codes = train_predicted, n_samples = train.n })
 
-  local spectral_bin = spectral_itq:encode(train_raw_codes)
+  local spectral_bin = spectral_itq:encode(train_codes)
   local pred_bin_sitq = spectral_itq:encode(train_predicted)
   local pred_bin_pitq = predicted_itq:encode(train_predicted)
 
   local spectral_ranking_bin = eval.ranking_accuracy({
-    codes = spectral_bin, ids = train_ids, n_dims = spectral_dims,
+    codes = spectral_bin, ids = train_ids, n_dims = working_dims,
     eval_ids = eval_uids, eval_offsets = eval_off,
     eval_neighbors = eval_nbr, eval_weights = eval_w,
   })
 
   local pred_ranking_bin_sitq = eval.ranking_accuracy({
-    codes = pred_bin_sitq, ids = train_ids, n_dims = spectral_dims,
+    codes = pred_bin_sitq, ids = train_ids, n_dims = working_dims,
     eval_ids = eval_uids, eval_offsets = eval_off,
     eval_neighbors = eval_nbr, eval_weights = eval_w,
   })
 
   local pred_ranking_bin_pitq = eval.ranking_accuracy({
-    codes = pred_bin_pitq, ids = train_ids, n_dims = spectral_dims,
+    codes = pred_bin_pitq, ids = train_ids, n_dims = working_dims,
     eval_ids = eval_uids, eval_offsets = eval_off,
     eval_neighbors = eval_nbr, eval_weights = eval_w,
   })
@@ -252,12 +255,12 @@ test("eurlex-embedding", function ()
   local mixed_bin_jitq = joint_itq:encode(mixed_codes)
 
   local mixed_ranking_bin_jitq = eval.ranking_accuracy({
-    codes = mixed_bin_jitq, ids = mixed_ids, n_dims = spectral_dims,
+    codes = mixed_bin_jitq, ids = mixed_ids, n_dims = working_dims,
     eval_ids = eval_uids, eval_offsets = eval_off,
     eval_neighbors = eval_nbr, eval_weights = eval_w,
   })
 
-  str.printf("\n  Spectral dims: %d\n", spectral_dims)
+  str.printf("\n  Spectral dims: %d\n", working_dims)
   str.printf("  %-50s %8.4f\n", "Spectral (cont):", spectral_ranking_cont.score)
   str.printf("  %-50s %8.4f\n", "Predicted (cont):", pred_ranking_cont.score)
   str.printf("  %-50s %8.4f\n", "Mixed (cont):", mixed_ranking_cont.score)

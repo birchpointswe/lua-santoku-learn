@@ -1,3 +1,4 @@
+local ann = require("santoku.learn.ann")
 local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
 local dvec = require("santoku.dvec")
@@ -5,6 +6,7 @@ local eval = require("santoku.learn.evaluator")
 local inv = require("santoku.learn.inv")
 local ivec = require("santoku.ivec")
 local optimize = require("santoku.learn.optimize")
+local quantizer = require("santoku.learn.quantizer")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local tokenizer = require("santoku.tokenizer")
@@ -22,23 +24,30 @@ local cfg = {
     min_len = 1,
     max_run = 2,
     ngrams = 2,
-    cgrams_min = 3,
-    cgrams_max = 5,
+    cgrams_min = 0,
+    cgrams_max = 0,
     cgrams_cross = false,
     skips = 1,
   },
   feature_selection = {
-    n_selected = 65536,
+    n_selected = 8192,
   },
   nystrom = {
     n_landmarks = 4096,
-    n_dims = 1024,
+    n_dims = 256,
     decay = 0,
+  },
+  eval = {
+    knn = 16,
+    random_pairs = 16,
+  },
+  augmented = {
+    knn = 32,
   },
   regressor = {
     class_batch = nil,
     cost_beta = nil,
-    features = 256, --{ def = 4096, min = 256, max = 4096, pow2 = true },
+    features = { def = 4096, min = 256, max = 4096, pow2 = true },
     clauses = { def = 4, min = 1, max = 8, int = true },
     clause_maximum_fraction = { def = 0.03 },
     clause_tolerance_fraction = { def = 0.57 },
@@ -55,7 +64,7 @@ local cfg = {
     alpha_specificity = { def = 2.1, min = -3, max = 3 },
     search_trials = 200,
     search_iterations = 20,
-    search_subsample_samples = 0.05,
+    search_subsample_samples = 0.1,
     final_patience = 2,
     final_batch = 40,
     final_iterations = 800,
@@ -66,6 +75,7 @@ local cfg = {
     propensity_b = { def = 1.5, min = 0.1, max = 5.0 },
     k = 32,
     search_trials = 200,
+    search_subsample = 0.1,
   },
 }
 
@@ -98,6 +108,15 @@ test("eurlex", function()
   str.printf("  Label index: %d IDF feats, %d docs, decay=%.1f\n",
     n_label_feats, train.n, cfg.nystrom.decay)
 
+  print("\nBuilding eval adjacency")
+  local eval_uids, inv_hoods = label_index:neighborhoods(cfg.eval.knn, cfg.nystrom.decay, -1)
+  local eval_off, eval_nbr, eval_w = inv_hoods:to_csr(eval_uids)
+  local rp_off, rp_nbr, rp_w = csr.random_pairs(eval_uids, cfg.eval.random_pairs)
+  csr.weight_from_index(eval_uids, rp_off, rp_nbr, rp_w, label_index, cfg.nystrom.decay)
+  csr.merge(eval_off, eval_nbr, eval_w, rp_off, rp_nbr, rp_w)
+  csr.symmetrize(eval_off, eval_nbr, eval_w, eval_uids:size())
+  str.printf("  %d nodes, %d edges\n", eval_uids:size(), eval_nbr:size())
+
   print("\nSpectral embedding")
   local model = optimize.spectral({
     index = label_index,
@@ -107,12 +126,14 @@ test("eurlex", function()
     each = function(ev) util.spectral_log(ev) end,
   })
 
-  local working_dims = model.dims
-  local train_codes = dvec.create():mtx_extend(model.raw_codes,
+  local spectral_dims = model.dims
+  local wide_codes = dvec.create():mtx_extend(model.raw_codes,
     model.ids:set_intersect(ivec.create(train.n):fill_indices()),
-    model.ids, 0, working_dims, true)
-  local eigenvalues = model.eigenvalues
-  str.printf("  Spectral: %d dims\n", working_dims)
+    model.ids, 0, spectral_dims, true)
+  str.printf("  Spectral: %d dims (full width)\n", spectral_dims)
+
+  local train_codes = wide_codes
+  local working_dims = spectral_dims
 
   local results = {}
 
@@ -152,7 +173,7 @@ test("eurlex", function()
   end
 
   local ceiling = run_ridge("Ridge on spectral codes (ceiling)", {
-    codes = train_codes, n_samples = train.n, n_dims = working_dims,
+    codes = wide_codes, n_samples = train.n, n_dims = spectral_dims,
   })
   results[#results + 1] = ceiling
 
@@ -169,7 +190,7 @@ test("eurlex", function()
   print("\nFeature selection (F-score)")
   local n_selected = cfg.feature_selection.n_selected
   local union_ids, _, class_offsets, class_feat_ids = train.tokens:bits_top_reg_f(
-    train_codes, train.n, n_tokens, working_dims, n_selected, nil, "sum")
+    train_codes, train.n, n_tokens, working_dims, n_selected)
   train.tokens:bits_select(union_ids, nil, n_tokens)
   class_offsets, class_feat_ids = csr.bits_select(class_offsets, class_feat_ids, union_ids)
   n_tokens = union_ids:size()
@@ -201,7 +222,7 @@ test("eurlex", function()
     alpha_maximum = cfg.regressor.alpha_maximum,
     alpha_target = cfg.regressor.alpha_target,
     alpha_specificity = cfg.regressor.alpha_specificity,
-    output_weights = eigenvalues,
+    output_weights = model.eigenvalues,
     tokens = train.tokens,
     csc_offsets = csc_offsets,
     csc_indices = csc_indices,
@@ -225,10 +246,71 @@ test("eurlex", function()
   local train_predicted = tm:regress(
     { tokens = train.tokens, n_samples = train.n }, train.n, true)
 
+  local train_ids = ivec.create(train.n):fill_indices()
+
+  local spectral_ranking = eval.ranking_accuracy({
+    raw_codes = train_codes, ids = train_ids, n_dims = working_dims,
+    eval_ids = eval_uids, eval_offsets = eval_off,
+    eval_neighbors = eval_nbr, eval_weights = eval_w,
+  })
+  local predicted_ranking = eval.ranking_accuracy({
+    raw_codes = train_predicted, ids = train_ids, n_dims = working_dims,
+    eval_ids = eval_uids, eval_offsets = eval_off,
+    eval_neighbors = eval_nbr, eval_weights = eval_w,
+  })
+
+  local spectral_itq = quantizer.create({
+    mode = "itq", raw_codes = train_codes, n_samples = train.n })
+  local spectral_bin = spectral_itq:encode(train_codes)
+  local pred_bin_sitq = spectral_itq:encode(train_predicted)
+
+  local spectral_ranking_bin = eval.ranking_accuracy({
+    codes = spectral_bin, ids = train_ids, n_dims = working_dims,
+    eval_ids = eval_uids, eval_offsets = eval_off,
+    eval_neighbors = eval_nbr, eval_weights = eval_w,
+  })
+  local pred_ranking_bin = eval.ranking_accuracy({
+    codes = pred_bin_sitq, ids = train_ids, n_dims = working_dims,
+    eval_ids = eval_uids, eval_offsets = eval_off,
+    eval_neighbors = eval_nbr, eval_weights = eval_w,
+  })
+
+  str.printf("\n  Ranking (spectral, cont):  %.4f\n", spectral_ranking.score)
+  str.printf("  Ranking (predicted, cont): %.4f\n", predicted_ranking.score)
+  str.printf("  Ranking (spectral, bin):   %.4f\n", spectral_ranking_bin.score)
+  str.printf("  Ranking (predicted, bin):  %.4f\n", pred_ranking_bin.score)
+
   local pipeline = run_ridge("Ridge on predicted (pipeline)", {
     codes = train_predicted, n_samples = train.n, n_dims = working_dims,
   })
   results[#results + 1] = pipeline
+
+  print("\nBuilding augmented codes")
+  local codes_ann = ann.create({ features = working_dims })
+  codes_ann:add(spectral_bin, train_ids)
+  local hood_ids, ann_hoods = codes_ann:neighborhoods_by_vecs(pred_bin_sitq, cfg.augmented.knn)
+  local nn_off, nn_nbr, nn_w = ann_hoods:to_csr(working_dims)
+
+  local pseudo_bits = csr.label_union(nn_off, nn_nbr, hood_ids,
+    train_label_offsets, train_label_neighbors, n_labels)
+  pseudo_bits:bits_select(label_idf_ids, nil, n_labels)
+  local pseudo_nystrom = model.encoder:encode(pseudo_bits, train.n, n_label_feats)
+  local augmented_codes = dvec.create():copy(train_predicted)
+  augmented_codes:mtx_extend(pseudo_nystrom, working_dims, working_dims)
+
+  local augmented = run_ridge("Ridge on augmented (pseudo doc)", {
+    codes = augmented_codes, n_samples = train.n, n_dims = 2 * working_dims,
+  })
+  results[#results + 1] = augmented
+
+  local pseudo_avg = csr.neighbor_average(nn_off, nn_nbr, nn_w, hood_ids, train_codes, train_ids, working_dims)
+  local aug_avg_codes = dvec.create():copy(train_predicted)
+  aug_avg_codes:mtx_extend(pseudo_avg, working_dims, working_dims)
+
+  local aug_cavg = run_ridge("Ridge on augmented (code avg)", {
+    codes = aug_avg_codes, n_samples = train.n, n_dims = 2 * working_dims,
+  })
+  results[#results + 1] = aug_cavg
 
   print("\n" .. string.rep("=", 90))
   print("COMPARISON")

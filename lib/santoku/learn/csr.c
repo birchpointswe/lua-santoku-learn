@@ -10,9 +10,16 @@ static int tm_inv_hoods_to_csr (lua_State *L)
 {
   tk_inv_hoods_t *hoods = tk_inv_hoods_peek(L, 1, "hoods");
   tk_ivec_t *ids = tk_ivec_peek(L, 2, "ids");
-  uint64_t n = ids->n;
-  if (hoods->n != n)
-    return luaL_error(L, "hoods size %d != ids size %d", (int)hoods->n, (int)n);
+  uint64_t n = hoods->n;
+
+  tk_iumap_t *uid_to_pos = tk_iumap_create(0, 0);
+  if (!uid_to_pos)
+    return luaL_error(L, "inv_hoods_to_csr: allocation failed");
+  for (uint64_t i = 0; i < ids->n; i++) {
+    int absent;
+    uint32_t k = tk_iumap_put(uid_to_pos, ids->a[i], &absent);
+    tk_iumap_setval(uid_to_pos, k, (int64_t)i);
+  }
 
   tk_ivec_t *off = tk_ivec_create(L, n + 1, 0, 0);
   off->a[0] = 0;
@@ -26,27 +33,26 @@ static int tm_inv_hoods_to_csr (lua_State *L)
   nbr->n = total;
   w->n = total;
 
-  #pragma omp parallel for schedule(static)
   for (uint64_t i = 0; i < n; i++) {
     tk_rvec_t *hood = hoods->a[i];
     int64_t pos = off->a[i];
     for (uint64_t j = 0; j < hood->n; j++) {
-      nbr->a[pos + (int64_t)j] = hood->a[j].i;
+      uint32_t ki = tk_iumap_get(uid_to_pos, hood->a[j].i);
+      nbr->a[pos + (int64_t)j] = (ki != tk_iumap_end(uid_to_pos))
+        ? tk_iumap_val(uid_to_pos, ki) : -1;
       w->a[pos + (int64_t)j] = 1.0 - hood->a[j].d;
     }
   }
 
+  tk_iumap_destroy(uid_to_pos);
   return 3;
 }
 
 static int tm_ann_hoods_to_csr (lua_State *L)
 {
   tk_ann_hoods_t *hoods = tk_ann_hoods_peek(L, 1, "hoods");
-  tk_ivec_t *ids = tk_ivec_peek(L, 2, "ids");
-  uint64_t features = tk_lua_checkunsigned(L, 3, "features");
-  uint64_t n = ids->n;
-  if (hoods->n != n)
-    return luaL_error(L, "hoods size %d != ids size %d", (int)hoods->n, (int)n);
+  uint64_t features = tk_lua_checkunsigned(L, 2, "features");
+  uint64_t n = hoods->n;
 
   tk_ivec_t *off = tk_ivec_create(L, n + 1, 0, 0);
   off->a[0] = 0;
@@ -883,6 +889,141 @@ static int tm_csr_stratified_sample (lua_State *L)
   return 1;
 }
 
+static int tm_csr_label_union (lua_State *L)
+{
+  tk_ivec_t *nn_off = tk_ivec_peek(L, 1, "nn_offsets");
+  tk_ivec_t *nn_nbr = tk_ivec_peek(L, 2, "nn_neighbors");
+  tk_ivec_t *hood_ids = tk_ivec_peek(L, 3, "hood_ids");
+  tk_ivec_t *lab_off = tk_ivec_peek(L, 4, "label_offsets");
+  tk_ivec_t *lab_nbr = tk_ivec_peek(L, 5, "label_neighbors");
+  uint64_t n_labels = tk_lua_checkunsigned(L, 6, "n_labels");
+
+  uint64_t n_queries = nn_off->n - 1;
+  uint64_t bm_bytes = (n_labels + 7) / 8;
+
+  uint64_t *counts = (uint64_t *)calloc(n_queries, sizeof(uint64_t));
+  if (!counts)
+    return luaL_error(L, "label_union: allocation failed");
+
+  #pragma omp parallel
+  {
+    uint8_t *bm = (uint8_t *)calloc(1, bm_bytes);
+    #pragma omp for schedule(dynamic, 64)
+    for (uint64_t i = 0; i < n_queries; i++) {
+      memset(bm, 0, bm_bytes);
+      int64_t ns = nn_off->a[i], ne = nn_off->a[i + 1];
+      for (int64_t j = ns; j < ne; j++) {
+        int64_t uid = hood_ids->a[nn_nbr->a[j]];
+        int64_t ls = lab_off->a[uid], le = lab_off->a[uid + 1];
+        for (int64_t k = ls; k < le; k++) {
+          uint64_t lab = (uint64_t)lab_nbr->a[k];
+          bm[lab / 8] |= (uint8_t)(1 << (lab % 8));
+        }
+      }
+      uint64_t cnt = 0;
+      for (uint64_t b = 0; b < bm_bytes; b++)
+        cnt += (uint64_t)__builtin_popcount((unsigned int)bm[b]);
+      counts[i] = cnt;
+    }
+    free(bm);
+  }
+
+  uint64_t total = 0;
+  for (uint64_t i = 0; i < n_queries; i++)
+    total += counts[i];
+
+  tk_ivec_t *out = tk_ivec_create(L, total, 0, 0);
+  out->n = total;
+
+  uint64_t *prefix = (uint64_t *)malloc((n_queries + 1) * sizeof(uint64_t));
+  if (!prefix) {
+    free(counts);
+    return luaL_error(L, "label_union: allocation failed");
+  }
+  prefix[0] = 0;
+  for (uint64_t i = 0; i < n_queries; i++)
+    prefix[i + 1] = prefix[i] + counts[i];
+  free(counts);
+
+  #pragma omp parallel
+  {
+    uint8_t *bm = (uint8_t *)calloc(1, bm_bytes);
+    #pragma omp for schedule(dynamic, 64)
+    for (uint64_t i = 0; i < n_queries; i++) {
+      memset(bm, 0, bm_bytes);
+      int64_t ns = nn_off->a[i], ne = nn_off->a[i + 1];
+      for (int64_t j = ns; j < ne; j++) {
+        int64_t uid = hood_ids->a[nn_nbr->a[j]];
+        int64_t ls = lab_off->a[uid], le = lab_off->a[uid + 1];
+        for (int64_t k = ls; k < le; k++) {
+          uint64_t lab = (uint64_t)lab_nbr->a[k];
+          bm[lab / 8] |= (uint8_t)(1 << (lab % 8));
+        }
+      }
+      uint64_t wp = prefix[i];
+      uint64_t base = i * n_labels;
+      for (uint64_t f = 0; f < n_labels; f++) {
+        if (bm[f / 8] & (1 << (f % 8)))
+          out->a[wp++] = (int64_t)(base + f);
+      }
+    }
+    free(bm);
+  }
+
+  free(prefix);
+  return 1;
+}
+
+static int tm_csr_neighbor_average (lua_State *L)
+{
+  tk_ivec_t *nn_off = tk_ivec_peek(L, 1, "nn_offsets");
+  tk_ivec_t *nn_nbr = tk_ivec_peek(L, 2, "nn_neighbors");
+  tk_dvec_t *nn_w = tk_dvec_peek(L, 3, "nn_weights");
+  tk_ivec_t *hood_ids = tk_ivec_peek(L, 4, "hood_ids");
+  tk_dvec_t *raw_codes = tk_dvec_peek(L, 5, "raw_codes");
+  tk_ivec_t *code_ids = tk_ivec_peek(L, 6, "code_ids");
+  uint64_t d = tk_lua_checkunsigned(L, 7, "n_dims");
+
+  tk_iumap_t *uid_to_pos = tk_iumap_create(0, 0);
+  if (!uid_to_pos)
+    return luaL_error(L, "neighbor_average: allocation failed");
+  for (uint64_t i = 0; i < code_ids->n; i++) {
+    int absent;
+    uint32_t k = tk_iumap_put(uid_to_pos, code_ids->a[i], &absent);
+    tk_iumap_setval(uid_to_pos, k, (int64_t)i);
+  }
+
+  uint64_t n_queries = nn_off->n - 1;
+  tk_dvec_t *out = tk_dvec_create(L, n_queries * d, 0, 0);
+  out->n = n_queries * d;
+  memset(out->a, 0, n_queries * d * sizeof(double));
+
+  #pragma omp parallel for schedule(dynamic, 64)
+  for (uint64_t i = 0; i < n_queries; i++) {
+    int64_t ns = nn_off->a[i], ne = nn_off->a[i + 1];
+    double wsum = 0.0;
+    double *row = out->a + i * d;
+    for (int64_t j = ns; j < ne; j++) {
+      int64_t uid = hood_ids->a[nn_nbr->a[j]];
+      uint32_t ki = tk_iumap_get(uid_to_pos, uid);
+      if (ki == tk_iumap_end(uid_to_pos))
+        continue;
+      int64_t pos = tk_iumap_val(uid_to_pos, ki);
+      double w = nn_w->a[j];
+      wsum += w;
+      const double *src = raw_codes->a + pos * (int64_t)d;
+      for (uint64_t k = 0; k < d; k++)
+        row[k] += w * src[k];
+    }
+    if (wsum > 0.0)
+      for (uint64_t k = 0; k < d; k++)
+        row[k] /= wsum;
+  }
+
+  tk_iumap_destroy(uid_to_pos);
+  return 1;
+}
+
 static luaL_Reg tm_csr_fns[] = {
   { "to_csc", tm_csr_to_csc },
   { "to_hypervector", tm_csr_bits_to_hv },
@@ -895,6 +1036,8 @@ static luaL_Reg tm_csr_fns[] = {
   { "bits_select", tm_csr_bits_select },
   { "propagate", tm_csr_propagate },
   { "stratified_sample", tm_csr_stratified_sample },
+  { "label_union", tm_csr_label_union },
+  { "neighbor_average", tm_csr_neighbor_average },
   { NULL, NULL }
 };
 
