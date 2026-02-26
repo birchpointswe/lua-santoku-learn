@@ -397,17 +397,23 @@ local function create_tm (args, max_features)
     outputs = args.outputs,
     state = args.state or 8,
     clauses = 1,
-    clause_tolerance = 8,
-    clause_maximum = 8,
-    target = 4,
-    specificity = 1000,
+    clause_maximum_fraction = 0.5,
+    clause_tolerance_fraction = 0.5,
+    target_fraction = 0.5,
+    specificity_fraction = 0.01,
     reusable = true,
+    n_tokens = args.n_tokens,
   }
-  if args.n_tokens then
-    opts.n_tokens = args.n_tokens
-  end
   if args.class_batch then
     opts.class_batch = args.class_batch
+  end
+  if args.flat then
+    opts.flat = true
+    opts.flat_encoding = args.flat_encoding
+    opts.flat_encoding_dims = args.flat_encoding_dims
+    opts.flat_encoding_cvec = args.flat_encoding_cvec
+    opts.flat_evict = args.flat_evict
+    opts.flat_skip = (args.outputs - 1) / args.outputs
   end
   return tm.create(opts)
 end
@@ -418,50 +424,50 @@ local function create_final_tm (args, params, max_features)
     outputs = args.outputs,
     state = args.state or 8,
     clauses = params.clauses,
-    clause_tolerance = params.clause_tolerance,
-    clause_maximum = params.clause_maximum,
-    target = params.target,
-    specificity = params.specificity,
+    clause_maximum_fraction = params.clause_maximum_fraction,
+    clause_tolerance_fraction = params.clause_tolerance_fraction,
+    target_fraction = params.target_fraction,
+    specificity_fraction = params.specificity_fraction,
+    output_weights = params.output_weights,
+    alpha_tolerance = params.alpha_tolerance,
+    alpha_maximum = params.alpha_maximum,
+    alpha_specificity = params.alpha_specificity,
+    alpha_target = params.alpha_target,
     reusable = true,
+    n_tokens = args.n_tokens,
+    absorb_threshold = params.absorb_threshold or 0,
+    absorb_maximum_fraction = params.absorb_maximum_fraction,
+    absorb_ranking_fraction = params.absorb_ranking_fraction,
+    absorb_insert = params.absorb_insert,
   }
-  if args.n_tokens then
-    opts.n_tokens = args.n_tokens
-    opts.absorb_threshold = params.absorb_threshold
-    opts.absorb_maximum = params.absorb_maximum
-    opts.absorb_insert = params.absorb_insert
-    opts.absorb_ranking_limit = params.absorb_ranking_limit
-  end
   if args.class_batch then
     opts.class_batch = args.class_batch
   end
-  if params.per_class_tolerances then
-    opts.per_class_tolerances = params.per_class_tolerances
-    opts.per_class_maximums = params.per_class_maximums
-    opts.per_class_spec_thresholds = params.per_class_spec_thresholds
-    opts.per_class_targets = params.per_class_targets
+  if args.flat then
+    opts.flat = true
+    opts.flat_encoding = args.flat_encoding
+    opts.flat_encoding_dims = args.flat_encoding_dims
+    opts.flat_encoding_cvec = args.flat_encoding_cvec
+    opts.flat_evict = args.flat_evict
+    opts.flat_skip = params.flat_skip or (args.outputs - 1) / args.outputs
   end
   return tm.create(opts)
 end
 
 local function train_tm_simple (tmobj, args, _, iterations)
-  local t = {
+  tmobj:train({
     samples = args.samples,
-    problems = args.problems,
+    csc_offsets = args.csc_offsets,
+    csc_indices = args.csc_indices,
+    absorb_ranking = args.absorb_ranking,
+    absorb_ranking_offsets = args.absorb_ranking_offsets,
+    absorb_ranking_global = args.absorb_ranking_global,
     sol_offsets = args.sol_offsets,
     sol_neighbors = args.sol_neighbors,
     codes = args.codes,
     targets = args.targets,
     iterations = iterations,
-  }
-  if args.csc_offsets then
-    t.csc_offsets = args.csc_offsets
-    t.csc_indices = args.csc_indices
-    t.absorb_ranking = args.absorb_ranking
-    t.absorb_ranking_offsets = args.absorb_ranking_offsets
-    t.absorb_ranking_global = args.absorb_ranking_global
-    t.problems = nil
-  end
-  tmobj:train(t)
+  })
 end
 
 local function train_tm_batched (tmobj, args, params, iterations, batch_size, patience, tolerance, metric_fn, each_cb, info)
@@ -476,24 +482,19 @@ local function train_tm_batched (tmobj, args, params, iterations, batch_size, pa
 
   while total_epochs < iterations do
     local batch_iters = math.min(batch_size, iterations - total_epochs)
-    local t = {
+    tmobj:train({
       samples = args.samples,
-      problems = args.problems,
+      csc_offsets = args.csc_offsets,
+      csc_indices = args.csc_indices,
+      absorb_ranking = args.absorb_ranking,
+      absorb_ranking_offsets = args.absorb_ranking_offsets,
+      absorb_ranking_global = args.absorb_ranking_global,
       sol_offsets = args.sol_offsets,
       sol_neighbors = args.sol_neighbors,
       codes = args.codes,
       targets = args.targets,
       iterations = batch_iters,
-    }
-    if args.csc_offsets then
-      t.csc_offsets = args.csc_offsets
-      t.csc_indices = args.csc_indices
-      t.absorb_ranking = args.absorb_ranking
-      t.absorb_ranking_offsets = args.absorb_ranking_offsets
-      t.absorb_ranking_global = args.absorb_ranking_global
-      t.problems = nil
-    end
-    tmobj:train(t)
+    })
     total_epochs = total_epochs + batch_iters
 
     local score, metrics = metric_fn(tmobj, args)
@@ -542,38 +543,6 @@ local function train_tm_batched (tmobj, args, params, iterations, batch_size, pa
   return last_score, last_metrics
 end
 
-local function compute_per_class_ivec (base, alpha, weights, n, apply_fn)
-  if not weights or alpha == 0 then return nil end
-  local w_min, w_max = weights:min(), weights:max()
-  local result = ivec.create(n)
-  for i = 0, n - 1 do
-    local w_norm = (w_max > w_min) and ((weights:get(i) - w_min) / (w_max - w_min)) or 0.5
-    local val = base * num.exp(alpha * (w_norm - 0.5))
-    result:set(i, apply_fn(val))
-  end
-  return result
-end
-
-local function select_ranking_segments (ranking, offsets, dim_ids)
-  if not ranking or not offsets then return ranking, offsets end
-  local n_dims = dim_ids:size()
-  local indices = ivec.create()
-  local new_offsets = ivec.create(n_dims + 1)
-  local pos = 0
-  for i = 0, n_dims - 1 do
-    local c = dim_ids:get(i)
-    local seg_start = offsets:get(c)
-    local seg_end = offsets:get(c + 1)
-    new_offsets:set(i, pos)
-    for j = seg_start, seg_end - 1 do
-      indices:push(j)
-    end
-    pos = pos + (seg_end - seg_start)
-  end
-  new_offsets:set(n_dims, pos)
-  return ivec.create():copy(ranking, indices), new_offsets
-end
-
 local function optimize_tm (args)
 
   local iters_search = args.search_iterations or 40
@@ -584,18 +553,14 @@ local function optimize_tm (args)
   local metric_fn = args.search_metric
   if not metric_fn and args.targets then
     metric_fn = function (t, targs)
-      local input = targs.tokens
-        and { tokens = targs.tokens, n_samples = targs.samples }
-        or targs.problems
+      local input = { tokens = targs.tokens, n_samples = targs.samples }
       local score, mae = t:regress_mae(input, targs.samples, targs.targets)
       return score, { mean = mae }
     end
   end
   if not metric_fn and args.codes then
     metric_fn = function (t, targs)
-      local input = targs.tokens
-        and { tokens = targs.tokens, n_samples = targs.samples }
-        or targs.problems
+      local input = { tokens = targs.tokens, n_samples = targs.samples }
       local acc = t:encode_hamming(input, targs.samples, targs.codes)
       return acc, { accuracy = acc }
     end
@@ -604,9 +569,7 @@ local function optimize_tm (args)
     err.error("search_metric required (or provide targets for default regressor metric)")
   end
   local each_cb = args.each
-  local search_subsample_samples = args.search_subsample_samples or args.search_subsample
-  local search_subsample_targets = args.search_subsample_targets
-  local sparse = not not args.n_tokens
+  local search_subsample = args.search_subsample
 
   local max_features
   if type(args.features) == "table" and args.features.max then
@@ -615,14 +578,9 @@ local function optimize_tm (args)
     max_features = args.features
   end
 
-  local param_names = { "features", "clauses", "clause_maximum_fraction", "clause_tolerance_fraction", "target_fraction", "specificity_fraction" }
-  if sparse then
-    param_names[#param_names + 1] = "absorb_threshold"
-    param_names[#param_names + 1] = "absorb_maximum_fraction"
-    param_names[#param_names + 1] = "absorb_insert_offset"
-    param_names[#param_names + 1] = "absorb_ranking_fraction"
-  end
-  if args.output_weights then
+  local param_names = { "features", "clauses", "clause_maximum_fraction", "clause_tolerance_fraction", "target_fraction", "specificity_fraction",
+    "absorb_threshold", "absorb_maximum_fraction", "absorb_insert_offset", "absorb_ranking_fraction" }
+  if args.output_weights and not args.flat then
     local alpha_def = { min = -3, max = 3, def = 0 }
     if not args.alpha_specificity then args.alpha_specificity = alpha_def end
     if not args.alpha_target then args.alpha_target = alpha_def end
@@ -633,36 +591,40 @@ local function optimize_tm (args)
     param_names[#param_names + 1] = "alpha_tolerance"
     param_names[#param_names + 1] = "alpha_maximum"
   end
+  if args.flat then
+    param_names[#param_names + 1] = "flat_skip"
+  end
 
-  local input_bits = 2 * max_features
   args.clause_maximum_fraction = spec_defaults(args.clause_maximum_fraction,
-    { min = 0.001, max = 1.0, log = true })
+    { min = 0, max = 1.0, log = true })
   args.clause_tolerance_fraction = spec_defaults(args.clause_tolerance_fraction,
-    { min = 0.01, max = 1.0 })
+    { min = 0, max = 1.0, log = true })
   args.target_fraction = spec_defaults(args.target_fraction,
-    { min = 0.01, max = 2.0 })
+    { min = 0, max = 1.0, log = true })
   args.specificity_fraction = spec_defaults(args.specificity_fraction,
-    { min = 0.0005, max = 0.5, log = true })
-  if sparse then
-    local m = (args.state or 8) - 1
-    args.absorb_maximum_fraction = spec_defaults(args.absorb_maximum_fraction,
-      { min = 0.001, max = 1.0, log = true })
-    args.absorb_threshold = spec_defaults(args.absorb_threshold,
-      { min = 0, max = 2 ^ (m + 1) - 1, int = true })
-    args.absorb_insert_offset = spec_defaults(args.absorb_insert_offset,
-      { min = 1, max = 2 ^ m - 1, int = true })
-    args.absorb_ranking_fraction = spec_defaults(args.absorb_ranking_fraction,
-      { min = 0.01, max = 1.0, log = true })
-    args.absorb_threshold = cap_spec_max(args.absorb_threshold, 2 ^ (m + 1) - 1)
-    args.absorb_insert_offset = cap_spec_max(args.absorb_insert_offset, 2 ^ m - 1)
+    { min = 0, max = 1.0, log = true })
+  local m = (args.state or 8) - 1
+  args.absorb_maximum_fraction = spec_defaults(args.absorb_maximum_fraction,
+    { min = 0, max = 1.0, log = true })
+  args.absorb_threshold = spec_defaults(args.absorb_threshold,
+    { min = 0, max = 2 ^ (m + 1) - 1, int = true })
+  args.absorb_insert_offset = spec_defaults(args.absorb_insert_offset,
+    { min = 0, max = 2 ^ m - 1, int = true })
+  args.absorb_ranking_fraction = spec_defaults(args.absorb_ranking_fraction,
+    { min = 0, max = 1.0, log = true })
+  args.absorb_threshold = cap_spec_max(args.absorb_threshold, 2 ^ (m + 1) - 1)
+  args.absorb_insert_offset = cap_spec_max(args.absorb_insert_offset, 2 ^ m - 1)
+  if args.flat then
+    local flat_skip_def = (args.outputs - 1) / args.outputs
+    args.flat_skip = spec_defaults(args.flat_skip, { min = 0, max = 1.0, def = flat_skip_def })
   end
 
   local samplers = M.build_samplers(args, param_names, global_dev)
 
   local search_n = args.samples
   local search_ids
-  if search_subsample_samples and search_subsample_samples < 1.0 then
-    search_n = num.floor(args.samples * search_subsample_samples)
+  if search_subsample and search_subsample < 1.0 then
+    search_n = num.floor(args.samples * search_subsample)
     if args.stratify_offsets and args.stratify_neighbors and args.stratify_labels then
       search_ids = csr.stratified_sample(
         args.stratify_offsets, args.stratify_neighbors,
@@ -673,81 +635,37 @@ local function optimize_tm (args)
     end
   end
 
-  local search_outputs = args.outputs
-  local search_dim_ids
-  if search_subsample_targets and (args.targets or args.codes) then
-    local n
-    if search_subsample_targets >= 1 then
-      n = num.min(num.floor(search_subsample_targets), args.outputs)
-    else
-      n = num.max(1, num.floor(args.outputs * search_subsample_targets))
-    end
-    if n < args.outputs then
-      search_outputs = n
-      search_dim_ids = ivec.create(search_outputs)
-      for i = 0, search_outputs - 1 do
-        search_dim_ids:set(i, num.floor(i * args.outputs / search_outputs))
-      end
-    end
-  end
+  local search_weights = args.flat and nil or args.output_weights
 
-  local search_weights = args.output_weights
-  if search_dim_ids and args.output_weights then
-    search_weights = dvec.create():copy(args.output_weights, search_dim_ids)
+  local search_tokens = args.tokens
+  if search_ids then
+    search_tokens = ivec.create()
+    args.tokens:bits_select(nil, search_ids, args.n_tokens, search_tokens)
   end
-
-  local search_data
-  if sparse then
-    local search_tokens = args.tokens
-    if search_ids then
-      search_tokens = ivec.create()
-      args.tokens:bits_select(nil, search_ids, args.n_tokens, search_tokens)
-    end
-    local search_csc_offsets, search_csc_indices
-    if search_ids then
-      search_csc_offsets, search_csc_indices = csr.to_csc(search_tokens, search_n, args.n_tokens)
-    else
-      search_csc_offsets = args.csc_offsets
-      search_csc_indices = args.csc_indices
-    end
-    local search_ranking = args.absorb_ranking
-    local search_ranking_offsets = args.absorb_ranking_offsets
-    if search_dim_ids and args.absorb_ranking_offsets then
-      search_ranking, search_ranking_offsets = select_ranking_segments(
-        args.absorb_ranking, args.absorb_ranking_offsets, search_dim_ids)
-    end
-    search_data = {
-      samples = search_n,
-      tokens = search_tokens,
-      csc_offsets = search_csc_offsets,
-      csc_indices = search_csc_indices,
-      absorb_ranking = search_ranking,
-      absorb_ranking_offsets = search_ranking_offsets,
-      absorb_ranking_global = args.absorb_ranking_global,
-    }
+  local search_csc_offsets, search_csc_indices
+  if search_ids then
+    search_csc_offsets, search_csc_indices = csr.to_csc(search_tokens, search_n, args.n_tokens)
   else
-    local search_problems = args.problems
-    if search_ids then
-      search_problems = cvec.create()
-      local search_cvec_features = args.cvec_features or (args.features * 2)
-      args.problems:bits_select(nil, search_ids, search_cvec_features, search_problems)
-    end
-    search_data = {
-      samples = search_n,
-      problems = search_problems,
-    }
+    search_csc_offsets = args.csc_offsets
+    search_csc_indices = args.csc_indices
   end
+  local search_ranking = args.absorb_ranking
+  local search_ranking_offsets = args.flat and nil or args.absorb_ranking_offsets
+  local search_data = {
+    samples = search_n,
+    tokens = search_tokens,
+    csc_offsets = search_csc_offsets,
+    csc_indices = search_csc_indices,
+    absorb_ranking = search_ranking,
+    absorb_ranking_offsets = search_ranking_offsets,
+    absorb_ranking_global = args.absorb_ranking_global,
+  }
 
   if args.targets then
     local t = args.targets
     if search_ids then
       local tmp = dvec.create()
       t:mtx_select(nil, search_ids, args.outputs, tmp)
-      t = tmp
-    end
-    if search_dim_ids then
-      local tmp = dvec.create()
-      t:mtx_select(search_dim_ids, nil, args.outputs, tmp)
       t = tmp
     end
     search_data.targets = t
@@ -778,112 +696,29 @@ local function optimize_tm (args)
       c:bits_select(nil, search_ids, args.outputs, tmp)
       c = tmp
     end
-    if search_dim_ids then
-      local tmp = cvec.create()
-      c:bits_select(search_dim_ids, nil, args.outputs, tmp)
-      c = tmp
-    end
     search_data.codes = c
   end
 
   local search_tm
   if not M.all_fixed(samplers) then
     search_tm = create_tm({
-      outputs = search_outputs,
+      outputs = args.outputs,
       state = args.state,
       n_tokens = args.n_tokens,
       class_batch = args.class_batch,
+      flat = args.flat,
     }, max_features)
   end
 
-  local function constrain_tm_params (params, weights, outputs)
-    local feat = params.features or max_features
-    local input_bits = feat and 2 * feat or nil
-    if params.clause_maximum_fraction and input_bits then
-      local f = params.clause_maximum_fraction
-      if f < 0 then f = 0 end
-      if f > 1 then f = 1 end
-      params.clause_maximum_fraction = f
-      params.clause_maximum = num.max(1, num.floor(f * input_bits + 0.5))
-    end
-    if params.clause_tolerance_fraction and params.clause_maximum then
-      local f = params.clause_tolerance_fraction
-      if f < 0 then f = 0 end
-      if f > 1 then f = 1 end
-      params.clause_tolerance_fraction = f
-      params.clause_tolerance = num.max(1, num.floor(f * params.clause_maximum + 0.5))
-    end
-    if params.target_fraction and params.clause_tolerance then
-      local f = params.target_fraction
-      if f < 0.01 then f = 0.01 end
-      params.target_fraction = f
-      params.target = num.max(1, num.floor(f * 8 * params.clause_tolerance + 0.5))
-    end
-    if params.specificity_fraction then
-      local f = params.specificity_fraction
-      if f < 0.0005 then f = 0.0005 end
-      if f > 0.5 then f = 0.5 end
-      params.specificity_fraction = f
-      params.specificity = num.max(1, num.floor(1.0 / f + 0.5))
-    end
-    if params.absorb_maximum_fraction and feat then
-      local f = params.absorb_maximum_fraction
-      if f < 0 then f = 0 end
-      if f > 1 then f = 1 end
-      params.absorb_maximum_fraction = f
-      params.absorb_maximum = num.max(1, num.floor(f * feat + 0.5))
-    end
-    if params.absorb_ranking_fraction and args.n_tokens then
-      local f = params.absorb_ranking_fraction
-      if f < 0.01 then f = 0.01 end
-      if f > 1 then f = 1 end
-      params.absorb_ranking_fraction = f
-      params.absorb_ranking_limit = num.max(1, num.floor(f * args.n_tokens + 0.5))
-    end
-    if params.absorb_threshold or params.absorb_insert_offset then
-      local m = (args.state or 8) - 1
-      local max_excl = 2 ^ m - 1
-      if params.absorb_threshold and params.absorb_threshold >= 2 * max_excl + 1 then
-        params.absorb_threshold = 2 * max_excl
-      end
-      if params.absorb_insert_offset then
-        params.absorb_insert = num.min(params.absorb_threshold + params.absorb_insert_offset, max_excl)
-      end
-    end
-    if weights then
-      local n = outputs or weights:size()
-      local features = feat
-      local clamp_int = function (v) return num.max(1, num.floor(v + 0.5)) end
-      params.per_class_tolerances = compute_per_class_ivec(
-        params.clause_tolerance, params.alpha_tolerance or 0, weights, n, clamp_int)
-      params.per_class_maximums = compute_per_class_ivec(
-        params.clause_maximum, params.alpha_maximum or 0, weights, n, clamp_int)
-      params.per_class_spec_thresholds = compute_per_class_ivec(
-        params.specificity, params.alpha_specificity or 0, weights, n, function (v)
-          local s = num.max(1, v)
-          return num.floor((2.0 * features) / s)
-        end)
-      params.per_class_targets = compute_per_class_ivec(
-        params.target, params.alpha_target or 0, weights, n, clamp_int)
-      if params.per_class_tolerances and params.per_class_maximums then
-        for i = 0, n - 1 do
-          local tol = params.per_class_tolerances:get(i)
-          local mx = params.per_class_maximums:get(i)
-          if tol > mx then
-            params.per_class_tolerances:set(i, mx)
-            tol = mx
-          end
-          local tgt = params.per_class_targets and params.per_class_targets:get(i) or params.target
-          if tgt > 8 * tol then
-            if params.per_class_targets then params.per_class_targets:set(i, 8 * tol) end
-          end
-        end
-      end
+  local function constrain_tm_params (params)
+    if params.absorb_insert_offset then
+      params.absorb_insert = (params.absorb_threshold or 0) + params.absorb_insert_offset
     end
   end
 
   local function search_trial_fn (params, info)
-    constrain_tm_params(params, search_weights, search_outputs)
+    constrain_tm_params(params)
+    params.output_weights = search_weights
     search_tm:reconfigure(params)
     train_tm_simple(search_tm, search_data, params, iters_search)
     local score, metrics = metric_fn(search_tm, search_data)
@@ -918,25 +753,22 @@ local function optimize_tm (args)
     search_tm:destroy()
   end
 
-  constrain_tm_params(best_params, args.output_weights, args.outputs)
+  constrain_tm_params(best_params)
+  best_params.output_weights = args.flat and nil or args.output_weights
   local final_tm = create_final_tm(args, best_params, max_features)
   local final_train_args = {
-    codes = args.codes,
     samples = args.samples,
-    problems = args.problems,
+    tokens = args.tokens,
+    csc_offsets = args.csc_offsets,
+    csc_indices = args.csc_indices,
+    absorb_ranking = args.absorb_ranking,
+    absorb_ranking_offsets = args.flat and nil or args.absorb_ranking_offsets,
+    absorb_ranking_global = args.absorb_ranking_global,
+    codes = args.codes,
     sol_offsets = args.sol_offsets,
     sol_neighbors = args.sol_neighbors,
     targets = args.targets,
   }
-  if sparse then
-    final_train_args.csc_offsets = args.csc_offsets
-    final_train_args.csc_indices = args.csc_indices
-    final_train_args.absorb_ranking = args.absorb_ranking
-    final_train_args.absorb_ranking_offsets = args.absorb_ranking_offsets
-    final_train_args.absorb_ranking_global = args.absorb_ranking_global
-    final_train_args.tokens = args.tokens
-    final_train_args.problems = nil
-  end
   local _, final_metrics = train_tm_batched(final_tm, final_train_args, best_params, final_iters,
     final_batch, final_patience, args.early_tolerance, metric_fn, each_cb, { is_final = true })
 
@@ -1005,24 +837,55 @@ end
 
 M.ridge = function (args)
   local ridge = require("santoku.learn.ridge")
-  local param_names = { "lambda", "propensity_a", "propensity_b" }
+  local dense = args.targets ~= nil
+  local param_names
+  if dense then
+    param_names = { "lambda" }
+  else
+    param_names = { "lambda", "propensity_a", "propensity_b" }
+  end
+  args.lambda = spec_defaults(args.lambda, { min = 0, max = 200 })
+  args.propensity_a = spec_defaults(args.propensity_a, { min = 0, max = 4 })
+  args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 4 })
   local samplers = M.build_samplers(args, param_names)
-  local k = args.k or 32
+  local k = not dense and (args.k or 32) or nil
   local each_cb = args.each
-  local score_fn = args.score_fn or function (ret) return ret.thresh.macro_f1 end
-  local ga = {
-    n_samples = args.n_samples,
-    n_labels = args.n_labels,
-    n_dims = args.n_dims,
-    codes = args.codes,
-    label_offsets = args.label_offsets,
-    label_neighbors = args.label_neighbors,
-  }
+  local score_fn
+  if dense then
+    score_fn = err.assert(args.score_fn, "score_fn required for dense ridge")
+  else
+    score_fn = args.score_fn or function (ret) return ret.thresh.macro_f1 end
+  end
+  local n_targets = args.n_targets or args.n_dims
+  local ga
+  if dense then
+    ga = {
+      n_samples = args.n_samples,
+      n_dims = args.n_dims,
+      n_targets = n_targets,
+      codes = args.codes,
+      targets = args.targets,
+    }
+  else
+    ga = {
+      n_samples = args.n_samples,
+      n_labels = args.n_labels,
+      n_dims = args.n_dims,
+      codes = args.codes,
+      label_offsets = args.label_offsets,
+      label_neighbors = args.label_neighbors,
+    }
+  end
   local gram = ridge.precompute(ga)
-  local full_data = {
-    codes = args.codes, n_samples = args.n_samples,
-    expected_offsets = args.expected_offsets, expected_neighbors = args.expected_neighbors,
-  }
+  local full_data
+  if dense then
+    full_data = { codes = args.codes, n_samples = args.n_samples, targets = args.targets }
+  else
+    full_data = {
+      codes = args.codes, n_samples = args.n_samples,
+      expected_offsets = args.expected_offsets, expected_neighbors = args.expected_neighbors,
+    }
+  end
   local search_data = full_data
   local search_subsample = args.search_subsample
   if search_subsample and search_subsample < 1.0 then
@@ -1036,48 +899,58 @@ M.ridge = function (args)
     else
       search_ids = ivec.create(args.n_samples):fill_indices():shuffle():setn(search_n):asc()
     end
-    local function subsample_csr(offsets, neighbors, ids, n)
-      local new_off = ivec.create(n + 1)
-      local new_nbr = ivec.create()
-      local pos = 0
-      for i = 0, n - 1 do
-        local sid = ids:get(i)
-        local lo, hi = offsets:get(sid), offsets:get(sid + 1)
-        new_off:set(i, pos)
-        if hi > lo then
-          new_nbr:copy(neighbors, lo, hi, pos)
-        end
-        pos = pos + hi - lo
-      end
-      new_off:set(n, pos)
-      return new_off, new_nbr
-    end
-    local s_eoff, s_enbr = subsample_csr(args.expected_offsets, args.expected_neighbors, search_ids, search_n)
-    search_data = { n_samples = search_n, expected_offsets = s_eoff, expected_neighbors = s_enbr }
     local s_codes = dvec.create(search_n * args.n_dims)
     args.codes:mtx_select(nil, search_ids, args.n_dims, s_codes)
-    search_data.codes = s_codes
+    if dense then
+      local s_targets = dvec.create(search_n * n_targets)
+      args.targets:mtx_select(nil, search_ids, n_targets, s_targets)
+      search_data = { n_samples = search_n, codes = s_codes, targets = s_targets }
+    else
+      local function subsample_csr(offsets, neighbors, ids, n)
+        local new_off = ivec.create(n + 1)
+        local new_nbr = ivec.create()
+        local pos = 0
+        for i = 0, n - 1 do
+          local sid = ids:get(i)
+          local lo, hi = offsets:get(sid), offsets:get(sid + 1)
+          new_off:set(i, pos)
+          if hi > lo then
+            new_nbr:copy(neighbors, lo, hi, pos)
+          end
+          pos = pos + hi - lo
+        end
+        new_off:set(n, pos)
+        return new_off, new_nbr
+      end
+      local s_eoff, s_enbr = subsample_csr(args.expected_offsets, args.expected_neighbors, search_ids, search_n)
+      search_data = { n_samples = search_n, expected_offsets = s_eoff, expected_neighbors = s_enbr, codes = s_codes }
+    end
   end
   local wb
   local function trial_fn (params, info)
     local r; r, wb = ridge.create({
       gram = gram,
       lambda = params.lambda,
-      propensity_a = params.propensity_a,
-      propensity_b = params.propensity_b,
+      propensity_a = not dense and params.propensity_a or nil,
+      propensity_b = not dense and params.propensity_b or nil,
       w_buf = wb,
     })
     local data = info.is_final and full_data or search_data
-    local pred_off, pred_nbr, pred_scores = r:label(data.codes, data.n_samples, k)
-    local _, oracle, thresh = evaluator.retrieval_ks({
-      pred_offsets = pred_off,
-      pred_neighbors = pred_nbr,
-      pred_scores = pred_scores,
-      expected_offsets = data.expected_offsets,
-      expected_neighbors = data.expected_neighbors,
-    })
-    local ret = { oracle = oracle, thresh = thresh }
-    return score_fn(ret), ret, info.is_final and r or nil
+    if dense then
+      local score, metrics = score_fn(r, data)
+      return score, metrics, info.is_final and r or nil
+    else
+      local pred_off, pred_nbr, pred_scores = r:label(data.codes, data.n_samples, k)
+      local _, oracle, thresh = evaluator.retrieval_ks({
+        pred_offsets = pred_off,
+        pred_neighbors = pred_nbr,
+        pred_scores = pred_scores,
+        expected_offsets = data.expected_offsets,
+        expected_neighbors = data.expected_neighbors,
+      })
+      local ret = { oracle = oracle, thresh = thresh }
+      return score_fn(ret), ret, info.is_final and r or nil
+    end
   end
   local result, best_params, best_metrics = M.search({
     param_names = param_names,
@@ -1089,6 +962,260 @@ M.ridge = function (args)
     cost_beta = args.cost_beta,
   })
   return result, best_params, best_metrics
+end
+
+local function elm_make_obj (ridge_obj, nh, nt, sd, lk, fw)
+  local elm = require("santoku.learn.elm")
+  local hbuf = dvec.create()
+  local function proj (self, csc_off, csc_idx, n)
+    return elm.project({
+      csc_offsets = csc_off, csc_indices = csc_idx,
+      n_samples = n, n_tokens = self.n_tokens,
+      n_hidden = self.n_hidden, seed = self.seed, out = self._hbuf,
+      feature_weights = self.feature_weights,
+    })
+  end
+  return {
+    ridge = ridge_obj,
+    n_hidden = nh,
+    n_tokens = nt,
+    seed = sd,
+    k = lk,
+    feature_weights = fw,
+    _hbuf = hbuf,
+    project = proj,
+    transform = function (self, csc_off, csc_idx, n)
+      local h = proj(self, csc_off, csc_idx, n)
+      return self.ridge:transform(h, n)
+    end,
+    regress = function (self, csc_off, csc_idx, n)
+      local h = proj(self, csc_off, csc_idx, n)
+      return self.ridge:transform(h, n)
+    end,
+    regress_mae = function (self, csc_off, csc_idx, n, targets)
+      local h = proj(self, csc_off, csc_idx, n)
+      local predicted = self.ridge:transform(h, n)
+      local ra = evaluator.regression_accuracy(predicted, targets)
+      return -ra.mean, ra.mean
+    end,
+    label = function (self, csc_off, csc_idx, n, k0)
+      local h = proj(self, csc_off, csc_idx, n)
+      return self.ridge:label(h, n, k0 or self.k or 32)
+    end,
+    label_f1 = function (self, csc_off, csc_idx, n, exp_off, exp_nbr)
+      local h = proj(self, csc_off, csc_idx, n)
+      local k0 = self.k or 32
+      local pred_off, pred_nbr, pred_scores = self.ridge:label(h, n, k0)
+      local _, _, thresh = evaluator.retrieval_ks({
+        pred_offsets = pred_off, pred_neighbors = pred_nbr, pred_scores = pred_scores,
+        expected_offsets = exp_off, expected_neighbors = exp_nbr,
+      })
+      return thresh.micro_f1, thresh.macro_f1
+    end,
+    persist = function (self, dest)
+      local ridge_data = self.ridge:persist(true)
+      local fw_data = ""
+      local fw_n = 0
+      if self.feature_weights then
+        fw_n = self.feature_weights:size()
+        fw_data = self.feature_weights:persist()
+      end
+      local header = str.format("TKelm\1%d %d %d %d %d",
+        self.n_hidden, self.n_tokens, self.seed, self.k or 0, fw_n)
+      local blob = header .. "\n" .. fw_data .. ridge_data
+      if dest == true then
+        return blob
+      else
+        local fh = io.open(dest, "wb")
+        fh:write(blob)
+        fh:close()
+      end
+    end,
+  }
+end
+
+M.elm_load = function (data, is_string)
+  local ridge = require("santoku.learn.ridge")
+  local blob
+  if is_string then
+    blob = data
+  else
+    local fh = io.open(data, "rb")
+    blob = fh:read("*a")
+    fh:close()
+  end
+  local nl = blob:find("\n", 1, true)
+  err.assert(nl, "invalid ELM file")
+  local header = blob:sub(1, nl - 1)
+  local nh, nt, sd, lk, fw_n = header:match("TKelm\1(%d+) (%d+) (%d+) (%d+) (%d+)")
+  err.assert(nh, "invalid ELM header")
+  nh, nt, sd, lk, fw_n = tonumber(nh), tonumber(nt), tonumber(sd), tonumber(lk), tonumber(fw_n)
+  if lk == 0 then lk = nil end
+  local pos = nl + 1
+  local fw = nil
+  if fw_n > 0 then
+    local fw_bytes = 8 + fw_n * 8
+    fw = dvec.load(blob:sub(pos, pos + fw_bytes - 1), true)
+    pos = pos + fw_bytes
+  end
+  local ridge_obj = ridge.load(blob:sub(pos), true)
+  return elm_make_obj(ridge_obj, nh, nt, sd, lk, fw)
+end
+
+M.elm = function (args)
+  local elm = require("santoku.learn.elm")
+  local ridge = require("santoku.learn.ridge")
+  local dense = args.targets ~= nil
+  local n_samples = err.assert(args.n_samples, "n_samples required")
+  local n_tokens = err.assert(args.n_tokens, "n_tokens required")
+  local seed = args.seed or 42
+  local n_targets = args.n_targets
+  local param_names = { "n_hidden", "lambda" }
+  if not dense then
+    param_names[#param_names + 1] = "propensity_a"
+    param_names[#param_names + 1] = "propensity_b"
+  end
+  args.n_hidden = spec_defaults(args.n_hidden, { min = 64, max = 8192, int = true, log = true })
+  args.lambda = spec_defaults(args.lambda, { min = 0, max = 200 })
+  args.propensity_a = spec_defaults(args.propensity_a, { min = 0, max = 4 })
+  args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 4 })
+  local samplers = M.build_samplers(args, param_names)
+  local k = not dense and (args.k or 32) or nil
+  local each_cb = args.each
+  local score_fn
+  if dense then
+    score_fn = err.assert(args.score_fn, "score_fn required for dense elm")
+  else
+    score_fn = args.score_fn or function (ret) return ret.thresh.macro_f1 end
+  end
+  local search_subsample = args.search_subsample
+  local search_ids, search_n
+  local s_expected_offsets, s_expected_neighbors
+  local s_targets
+  if search_subsample and search_subsample < 1.0 then
+    search_n = num.floor(n_samples * search_subsample)
+    if args.stratify_offsets and args.stratify_neighbors and args.stratify_labels then
+      search_ids = csr.stratified_sample(
+        args.stratify_offsets, args.stratify_neighbors,
+        n_samples, args.stratify_labels, search_n):asc()
+      search_n = search_ids:size()
+    else
+      search_ids = ivec.create(n_samples):fill_indices():shuffle():setn(search_n):asc()
+    end
+    if dense then
+      s_targets = dvec.create(search_n * n_targets)
+      args.targets:mtx_select(nil, search_ids, n_targets, s_targets)
+    else
+      local new_off = ivec.create(search_n + 1)
+      local new_nbr = ivec.create()
+      local pos = 0
+      for i = 0, search_n - 1 do
+        local sid = search_ids:get(i)
+        local lo, hi = args.expected_offsets:get(sid), args.expected_offsets:get(sid + 1)
+        new_off:set(i, pos)
+        if hi > lo then new_nbr:copy(args.expected_neighbors, lo, hi, pos) end
+        pos = pos + hi - lo
+      end
+      new_off:set(search_n, pos)
+      s_expected_offsets = new_off
+      s_expected_neighbors = new_nbr
+    end
+  end
+  local cached_nh, cached_hidden, cached_gram, cached_full, cached_search
+  local hbuf = dvec.create()
+  local function ensure_cached (nh)
+    if nh == cached_nh then return end
+    cached_nh = nh
+    cached_hidden = elm.project({
+      csc_offsets = args.csc_offsets,
+      csc_indices = args.csc_indices,
+      n_samples = n_samples,
+      n_tokens = n_tokens,
+      n_hidden = nh,
+      seed = seed,
+      out = hbuf,
+      feature_weights = args.feature_weights,
+    })
+    local ga
+    if dense then
+      ga = {
+        n_samples = n_samples, n_dims = nh,
+        n_targets = n_targets, codes = cached_hidden,
+        targets = args.targets,
+      }
+    else
+      ga = {
+        n_samples = n_samples, n_dims = nh,
+        n_labels = args.n_labels, codes = cached_hidden,
+        label_offsets = args.label_offsets,
+        label_neighbors = args.label_neighbors,
+      }
+    end
+    cached_gram = ridge.precompute(ga)
+    if dense then
+      cached_full = { codes = cached_hidden, n_samples = n_samples, targets = args.targets }
+    else
+      cached_full = {
+        codes = cached_hidden, n_samples = n_samples,
+        expected_offsets = args.expected_offsets, expected_neighbors = args.expected_neighbors,
+      }
+    end
+    if search_ids then
+      local s_codes = dvec.create(search_n * nh)
+      cached_hidden:mtx_select(nil, search_ids, nh, s_codes)
+      if dense then
+        cached_search = { n_samples = search_n, codes = s_codes, targets = s_targets }
+      else
+        cached_search = {
+          n_samples = search_n, codes = s_codes,
+          expected_offsets = s_expected_offsets, expected_neighbors = s_expected_neighbors,
+        }
+      end
+    else
+      cached_search = cached_full
+    end
+    wb = nil
+    collectgarbage("collect")
+  end
+  local wb
+  local function trial_fn (params, info)
+    ensure_cached(params.n_hidden)
+    local r; r, wb = ridge.create({
+      gram = cached_gram,
+      lambda = params.lambda,
+      propensity_a = not dense and params.propensity_a or nil,
+      propensity_b = not dense and params.propensity_b or nil,
+      w_buf = wb,
+    })
+    local data = info.is_final and cached_full or cached_search
+    if dense then
+      local score, metrics = score_fn(r, data)
+      return score, metrics, info.is_final and r or nil
+    else
+      local pred_off, pred_nbr, pred_scores = r:label(data.codes, data.n_samples, k)
+      local _, oracle, thresh = evaluator.retrieval_ks({
+        pred_offsets = pred_off,
+        pred_neighbors = pred_nbr,
+        pred_scores = pred_scores,
+        expected_offsets = data.expected_offsets,
+        expected_neighbors = data.expected_neighbors,
+      })
+      local ret = { oracle = oracle, thresh = thresh }
+      return score_fn(ret), ret, info.is_final and r or nil
+    end
+  end
+  local ridge_obj, best_params, best_metrics = M.search({
+    param_names = param_names,
+    samplers = samplers,
+    trials = args.search_trials or 30,
+    trial_fn = trial_fn,
+    each = each_cb,
+    cost_fn = args.cost_fn or function (p) return p.n_hidden end,
+    cost_beta = args.cost_beta,
+  })
+  local best_nh = best_params.n_hidden
+  ensure_cached(best_nh)
+  return elm_make_obj(ridge_obj, best_nh, n_tokens, seed, k, args.feature_weights), best_params, best_metrics
 end
 
 return M

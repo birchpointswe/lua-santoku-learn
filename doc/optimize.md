@@ -224,20 +224,12 @@ limits:
 8. Per-class ivecs computed from alphas + output_weights if applicable.
    Per-class tolerance/maximum ordering and target capping enforced.
 
-### Target subsampling
-
-`search_subsample_targets` reduces the number of output dimensions
-during search. When set (e.g., 8), a uniformly-spaced subset of dims
-is selected. Rankings are subselected via `select_ranking_segments`.
-`output_weights` are subselected to match. The full set is used for
-final training.
-
 ### Search phase
 
-1. **Sample subsampling** (`search_subsample_samples`): When set
-   (e.g., 0.2), a random subset of training samples is selected.
-   For sparse mode: tokens are subselected via `bits_select` and a
-   new CSC index is built. Rankings are shared (not subselected).
+1. **Sample subsampling** (`search_subsample`): When set (e.g., 0.2),
+   a random subset of training samples is selected. For sparse mode:
+   tokens are subselected via `bits_select` and a new CSC index is
+   built. Rankings are shared (not subselected).
 
 2. **Reusable search TM**: A single TM object is created with minimal
    placeholder parameters and `reusable=true`. Each trial calls
