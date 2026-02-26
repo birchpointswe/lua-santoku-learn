@@ -1,4 +1,5 @@
 local arr = require("santoku.array")
+local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
 local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
@@ -19,24 +20,25 @@ local cfg = {
     features = 784,
   },
   tm = {
+    flat = true,
     classes = 10,
-    clauses = { def = 2, min = 1, max = 8, int = true },
-    clause_maximum_fraction = { def = 0.005 },
-    clause_tolerance_fraction = { def = 0.5 },
-    target_fraction = { def = 0.25 },
-    specificity_fraction = { def = 0.5 },
-    alpha_tolerance = { def = 0, min = -3, max = 3 },
-    alpha_maximum = { def = 0, min = -3, max = 3 },
-    alpha_target = { def = 0, min = -3, max = 3 },
-    alpha_specificity = { def = 0, min = -3, max = 3 },
+    clauses = { def = 8, min = 1, max = 16, int = true },
+    clause_maximum_fraction = { def = 0.14 },
+    clause_tolerance_fraction = { def = 0.082 },
+    target_fraction = { def = 0.12 },
+    specificity_fraction = { def = 0.0108 },
+    alpha_tolerance = { def = -2.5, min = -3, max = 3 },
+    alpha_maximum = { def = -0.1, min = -3, max = 3 },
+    alpha_target = { def = -0.1, min = -3, max = 3 },
+    alpha_specificity = { def = 0.7, min = -3, max = 3 },
   },
   search = {
-    trials = 400,
+    trials = 200,
     iterations = 40,
-    -- subsample_samples = 0.2,
+    subsample = 0.2,
   },
   training = {
-    patience = 4,
+    patience = 8,
     batch = 40,
     iterations = 800,
   },
@@ -55,15 +57,14 @@ test("mnist classifier", function ()
   print("\nConverting to TM representation")
   train.tokens = ivec.create()
   dataset.problems:bits_select(nil, train.ids, cfg.data.features, train.tokens)
-  train.problems = train.tokens:bits_to_cvec(train.n, cfg.data.features, true)
 
   validate.tokens = ivec.create()
   dataset.problems:bits_select(nil, validate.ids, cfg.data.features, validate.tokens)
-  validate.problems = validate.tokens:bits_to_cvec(validate.n, cfg.data.features, true)
 
   test_set.tokens = ivec.create()
   dataset.problems:bits_select(nil, test_set.ids, cfg.data.features, test_set.tokens)
-  test_set.problems = test_set.tokens:bits_to_cvec(test_set.n, cfg.data.features, true)
+
+  local train_csc_off, train_csc_idx = csr.to_csc(train.tokens, train.n, cfg.data.features)
 
   local df_ids, df_scores = train.solutions:bits_top_df(train.n, cfg.tm.classes)
   local output_weights = dvec.create():copy(df_scores, df_ids, true)
@@ -78,14 +79,18 @@ test("mnist classifier", function ()
 
     features = cfg.data.features,
     outputs = cfg.tm.classes,
+    n_tokens = cfg.data.features,
 
     samples = train.n,
-    problems = train.problems,
+    tokens = train.tokens,
+    csc_offsets = train_csc_off,
+    csc_indices = train_csc_idx,
     sol_offsets = sol_offsets,
     sol_neighbors = sol_neighbors,
 
     output_weights = output_weights,
 
+    flat = cfg.tm.flat,
     clauses = cfg.tm.clauses,
     clause_maximum_fraction = cfg.tm.clause_maximum_fraction,
     clause_tolerance_fraction = cfg.tm.clause_tolerance_fraction,
@@ -98,13 +103,15 @@ test("mnist classifier", function ()
 
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
-    search_subsample_samples = cfg.search.subsample_samples,
+    search_subsample = cfg.search.subsample,
     final_batch = cfg.training.batch,
     final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,
 
     search_metric = function (regressor)
-      local micro_f1, macro_f1 = regressor:label_f1(validate.problems, validate.n, val_label_off, val_label_nbr)
+      local micro_f1, macro_f1 = regressor:label_f1(
+        { tokens = validate.tokens, n_samples = validate.n },
+        validate.n, val_label_off, val_label_nbr)
       return macro_f1, { micro_f1 = micro_f1, macro_f1 = macro_f1 }
     end,
 
@@ -115,15 +122,15 @@ test("mnist classifier", function ()
   print()
   print("Persisting")
   fs.rm("regressor.bin", true)
-  t:persist("regressor.bin", true)
+  t:persist("regressor.bin")
 
   print("Testing restore")
-  t = tm.load("regressor.bin", nil, true)
+  t = tm.load("regressor.bin")
 
   print("\nClassification metrics:")
-  local _, train_labels = t:label(train.problems, train.n, 1)
-  local _, val_labels = t:label(validate.problems, validate.n, 1)
-  local _, test_labels = t:label(test_set.problems, test_set.n, 1)
+  local _, train_labels = t:label({ tokens = train.tokens, n_samples = train.n }, train.n, 1)
+  local _, val_labels = t:label({ tokens = validate.tokens, n_samples = validate.n }, validate.n, 1)
+  local _, test_labels = t:label({ tokens = test_set.tokens, n_samples = test_set.n }, test_set.n, 1)
 
   local train_stats = eval.class_accuracy(train_labels, train.solutions, train.n, cfg.tm.classes)
   local val_stats = eval.class_accuracy(val_labels, validate.solutions, validate.n, cfg.tm.classes)

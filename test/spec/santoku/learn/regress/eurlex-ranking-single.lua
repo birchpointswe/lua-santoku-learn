@@ -29,7 +29,7 @@ local cfg = {
     skips = 1,
   },
   feature_selection = {
-    n_selected = 8192,
+    n_selected = 65536,
   },
   nystrom = {
     n_landmarks = 4096,
@@ -40,11 +40,18 @@ local cfg = {
     knn = 16,
     random_pairs = 16,
   },
+  align = {
+    lambda = { def = 1.0, min = 0.001, max = 1000, log = true },
+    search_trials = 80,
+  },
   regressor = {
-    class_batch = nil,
+    flat = true,
+    flat_evict = false,
+    flat_encoding = "hadamard",
+    flat_skip = nil, --{ def = 0.9, min = 0.9, max = 1.0 },
     cost_beta = nil,
-    features = { def = 4096, min = 256, max = 4096, pow2 = true },
-    clauses = { def = 4, min = 1, max = 8, int = true },
+    features = 1024, --{ def = 4096, min = 256, max = 8192, pow2 = true },
+    clauses = 4, --{ def = 4, min = 1, max = 16, int = true },
     clause_maximum_fraction = { def = 0.03 },
     clause_tolerance_fraction = { def = 0.57 },
     specificity_fraction = { def = 0.00095 },
@@ -54,10 +61,6 @@ local cfg = {
     absorb_ranking_fraction = { def = 0.125 },
     absorb_ranking_limit = { def = 0.125 },
     target_fraction = { def = 0.10 },
-    alpha_tolerance = { def = -0.3, min = -3, max = 3 },
-    alpha_maximum = { def = 0.7, min = -3, max = 3 },
-    alpha_target = { def = 1.2, min = -3, max = 3 },
-    alpha_specificity = { def = 2.1, min = -3, max = 3 },
     search_trials = 200,
     search_iterations = 20,
     search_subsample = 0.05,
@@ -67,7 +70,7 @@ local cfg = {
   },
 }
 
-test("eurlex-embedding", function ()
+test("eurlex-embedding-single", function ()
 
   local stopwatch = utc.stopwatch()
 
@@ -117,6 +120,26 @@ test("eurlex-embedding", function ()
   local train_codes = wide_codes
   local working_dims = spectral_dims
 
+  local train_ids = ivec.create(train.n):fill_indices()
+
+  print("\nPre-training baselines")
+  local spectral_ranking_cont = eval.ranking_accuracy({
+    raw_codes = train_codes, ids = train_ids,
+    n_dims = working_dims,
+    eval_ids = eval_uids, eval_offsets = eval_off,
+    eval_neighbors = eval_nbr, eval_weights = eval_w,
+  })
+  local spectral_itq = quantizer.create({
+    mode = "itq", raw_codes = train_codes, n_samples = train.n })
+  local spectral_bin = spectral_itq:encode(train_codes)
+  local spectral_ranking_bin = eval.ranking_accuracy({
+    codes = spectral_bin, ids = train_ids, n_dims = working_dims,
+    eval_ids = eval_uids, eval_offsets = eval_off,
+    eval_neighbors = eval_nbr, eval_weights = eval_w,
+  })
+  str.printf("  %-50s %8.4f\n", "Spectral (cont):", spectral_ranking_cont.score)
+  str.printf("  %-50s %8.4f\n", "Spectral (bin):", spectral_ranking_bin.score)
+
   print("\nTokenizing")
   local tok = tokenizer.create(cfg.tokenizer)
   tok:train({ corpus = train.problems })
@@ -130,7 +153,7 @@ test("eurlex-embedding", function ()
   print("\nFeature selection (F-score)")
   local n_selected = cfg.feature_selection.n_selected
   local union_ids, _, class_offsets, class_feat_ids = train.tokens:bits_top_reg_f(
-    train_codes, train.n, n_tokens, working_dims, n_selected)
+    train_codes, train.n, n_tokens, working_dims, n_selected, nil, "max")
   train.tokens:bits_select(union_ids, nil, n_tokens)
   class_offsets, class_feat_ids = csr.bits_select(class_offsets, class_feat_ids, union_ids)
   n_tokens = union_ids:size()
@@ -140,9 +163,12 @@ test("eurlex-embedding", function ()
   local csc_offsets, csc_indices = csr.to_csc(train.tokens, train.n, n_tokens)
   str.printf("  Tokens: %d  Samples: %d\n", n_tokens, train.n)
 
-  print("\nTraining regressor")
-  local tm = optimize.regressor({
-    class_batch = cfg.regressor.class_batch,
+  print("\nTraining flat regressor")
+  local tm_obj = optimize.regressor({
+    flat = cfg.regressor.flat,
+    flat_evict = cfg.regressor.flat_evict,
+    flat_encoding = cfg.regressor.flat_encoding,
+    flat_skip = cfg.regressor.flat_skip,
     cost_beta = cfg.regressor.cost_beta,
     outputs = working_dims,
     samples = train.n,
@@ -158,16 +184,12 @@ test("eurlex-embedding", function ()
     clause_tolerance_fraction = cfg.regressor.clause_tolerance_fraction,
     target_fraction = cfg.regressor.target_fraction,
     specificity_fraction = cfg.regressor.specificity_fraction,
-    alpha_tolerance = cfg.regressor.alpha_tolerance,
-    alpha_maximum = cfg.regressor.alpha_maximum,
-    alpha_target = cfg.regressor.alpha_target,
-    alpha_specificity = cfg.regressor.alpha_specificity,
-    output_weights = model.eigenvalues,
     tokens = train.tokens,
     csc_offsets = csc_offsets,
     csc_indices = csc_indices,
     absorb_ranking = class_feat_ids,
     absorb_ranking_offsets = class_offsets,
+    absorb_ranking_global = ivec.create(n_tokens):fill_indices(),
     targets = train_codes,
     search_trials = cfg.regressor.search_trials,
     search_iterations = cfg.regressor.search_iterations,
@@ -186,17 +208,28 @@ test("eurlex-embedding", function ()
   print(string.rep("=", 60))
 
   print("\nPredicting embeddings (train)")
-  local train_predicted = tm:regress(
+  local train_predicted = tm_obj:regress(
     { tokens = train.tokens, n_samples = train.n }, train.n, true)
 
-  local train_ids = ivec.create(train.n):fill_indices()
-
-  local spectral_ranking_cont = eval.ranking_accuracy({
-    raw_codes = train_codes, ids = train_ids,
-    n_dims = working_dims,
-    eval_ids = eval_uids, eval_offsets = eval_off,
-    eval_neighbors = eval_nbr, eval_weights = eval_w,
+  print("\nFitting ridge alignment")
+  local align_model = optimize.ridge({
+    n_samples = train.n, n_dims = working_dims, n_targets = working_dims,
+    codes = train_predicted, targets = train_codes,
+    lambda = cfg.align.lambda,
+    search_trials = cfg.align.search_trials,
+    score_fn = function (r, data)
+      local transformed = r:transform(data.codes, data.n_samples)
+      local ids = ivec.create(data.n_samples):fill_indices()
+      local ra = eval.ranking_accuracy({
+        raw_codes = transformed, ids = ids, n_dims = working_dims,
+        eval_ids = eval_uids, eval_offsets = eval_off,
+        eval_neighbors = eval_nbr, eval_weights = eval_w,
+      })
+      return ra.score, { score = ra.score }
+    end,
+    each = util.make_ridge_log(),
   })
+  local train_aligned = align_model:transform(train_predicted, train.n)
 
   local pred_ranking_cont = eval.ranking_accuracy({
     raw_codes = train_predicted, ids = train_ids,
@@ -205,36 +238,18 @@ test("eurlex-embedding", function ()
     eval_neighbors = eval_nbr, eval_weights = eval_w,
   })
 
-  local n_half = math.floor(train.n / 2)
-  local shuffled = ivec.create(train.n):fill_indices():shuffle()
-  local spec_half = ivec.create():copy(shuffled, 0, n_half, 0)
-  local pred_half = ivec.create():copy(shuffled, n_half, train.n, 0)
-  local spec_rows = dvec.create():copy(train_codes):mtx_select(nil, spec_half, working_dims)
-  local pred_rows = dvec.create():copy(train_predicted):mtx_select(nil, pred_half, working_dims)
-  local mixed_codes = dvec.create():copy(spec_rows):copy(pred_rows)
-  local mixed_ids = ivec.create():copy(spec_half):copy(pred_half)
-
-  local mixed_ranking_cont = eval.ranking_accuracy({
-    raw_codes = mixed_codes, ids = mixed_ids,
+  local aligned_ranking_cont = eval.ranking_accuracy({
+    raw_codes = train_aligned, ids = train_ids,
     n_dims = working_dims,
     eval_ids = eval_uids, eval_offsets = eval_off,
     eval_neighbors = eval_nbr, eval_weights = eval_w,
   })
 
-  local spectral_itq = quantizer.create({
-    mode = "itq", raw_codes = train_codes, n_samples = train.n })
   local predicted_itq = quantizer.create({
     mode = "itq", raw_codes = train_predicted, n_samples = train.n })
 
-  local spectral_bin = spectral_itq:encode(train_codes)
   local pred_bin_sitq = spectral_itq:encode(train_predicted)
   local pred_bin_pitq = predicted_itq:encode(train_predicted)
-
-  local spectral_ranking_bin = eval.ranking_accuracy({
-    codes = spectral_bin, ids = train_ids, n_dims = working_dims,
-    eval_ids = eval_uids, eval_offsets = eval_off,
-    eval_neighbors = eval_nbr, eval_weights = eval_w,
-  })
 
   local pred_ranking_bin_sitq = eval.ranking_accuracy({
     codes = pred_bin_sitq, ids = train_ids, n_dims = working_dims,
@@ -248,24 +263,13 @@ test("eurlex-embedding", function ()
     eval_neighbors = eval_nbr, eval_weights = eval_w,
   })
 
-  local joint_itq = quantizer.create({
-    mode = "itq", raw_codes = mixed_codes, n_samples = mixed_ids:size() })
-  local mixed_bin_jitq = joint_itq:encode(mixed_codes)
-
-  local mixed_ranking_bin_jitq = eval.ranking_accuracy({
-    codes = mixed_bin_jitq, ids = mixed_ids, n_dims = working_dims,
-    eval_ids = eval_uids, eval_offsets = eval_off,
-    eval_neighbors = eval_nbr, eval_weights = eval_w,
-  })
-
   str.printf("\n  Spectral dims: %d\n", working_dims)
   str.printf("  %-50s %8.4f\n", "Spectral (cont):", spectral_ranking_cont.score)
   str.printf("  %-50s %8.4f\n", "Predicted (cont):", pred_ranking_cont.score)
-  str.printf("  %-50s %8.4f\n", "Mixed (cont):", mixed_ranking_cont.score)
+  str.printf("  %-50s %8.4f\n", "Aligned (cont):", aligned_ranking_cont.score)
   str.printf("  %-50s %8.4f\n", "Spectral (bin):", spectral_ranking_bin.score)
   str.printf("  %-50s %8.4f\n", "Predicted (bin, spectral ITQ):", pred_ranking_bin_sitq.score)
   str.printf("  %-50s %8.4f\n", "Predicted (bin, predicted ITQ):", pred_ranking_bin_pitq.score)
-  str.printf("  %-50s %8.4f\n", "Mixed (bin, joint ITQ):", mixed_ranking_bin_jitq.score)
 
   str.printf("\n  Time: %.1fs\n", stopwatch())
 
