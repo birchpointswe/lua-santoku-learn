@@ -563,7 +563,7 @@ static inline int tm_encode (lua_State *L) {
     return luaL_error(L, "encode: out of memory");
   }
   int n_eig = 0;
-  int info = LAPACKE_dsyevr(LAPACK_ROW_MAJOR, 'V', 'I', 'U',
+  int info = LAPACKE_dsyevr(LAPACK_COL_MAJOR, 'V', 'I', 'U',
     (int)m, gram->a, (int)m, 0.0, 0.0, (int)(m - d + 1), (int)m,
     0.0, &n_eig, eig_raw->a, ev_raw, (int)m, isuppz);
   free(isuppz);
@@ -587,7 +587,7 @@ static inline int tm_encode (lua_State *L) {
   #pragma omp parallel for schedule(static)
   for (uint64_t i = 0; i < m; i++)
     for (uint64_t k = 0; k < d; k++)
-      eigvecs->a[i * d + k] = ev_raw[i * m + (d - 1 - k)];
+      eigvecs->a[i * d + k] = ev_raw[(d - 1 - k) * m + i];
   free(ev_raw);
 
   tk_dvec_t *ccodes = tk_dvec_create(L, nc * d, 0, 0);

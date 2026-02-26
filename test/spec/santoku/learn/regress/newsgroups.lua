@@ -49,9 +49,9 @@ local cfg = {
     alpha_specificity = { def = 0, min = -3, max = 3 },
   },
   search = {
-    trials = 800,
-    iterations = 80,
-    subsample_samples = 0.1,
+    trials = 200,
+    iterations = 40,
+    subsample = 0.2,
   },
   training = {
     patience = 4,
@@ -144,7 +144,7 @@ test("newsgroups regressor", function ()
     absorb_ranking_global = absorb_ranking_global,
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
-    search_subsample_samples = cfg.search.subsample_samples,
+    search_subsample = cfg.search.subsample,
     final_batch = cfg.training.batch,
     final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,

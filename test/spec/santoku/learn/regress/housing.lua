@@ -1,3 +1,4 @@
+local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
 local optimize = require("santoku.learn.optimize")
@@ -26,7 +27,6 @@ local cfg = {
   search = {
     trials = 200,
     iterations = 40,
-    subsample_samples = nil,
   },
   training = {
     patience = 4,
@@ -55,19 +55,20 @@ test("regressor", function ()
   str.printf("  Target range: %.0f - %.0f\n", target_min, target_max)
 
   local n_features = dataset.n_features
-  train.problems = train.bits:bits_to_cvec(train.n, n_features, true)
-  validate.problems = validate.bits:bits_to_cvec(validate.n, n_features, true)
-  test_set.problems = test_set.bits:bits_to_cvec(test_set.n, n_features, true)
+  local train_csc_off, train_csc_idx = csr.to_csc(train.bits, train.n, n_features)
 
   print("\nTraining")
   local stopwatch = utc.stopwatch()
   local t = optimize.regressor({
 
-    features = dataset.n_features,
+    features = n_features,
     outputs = cfg.tm.outputs,
+    n_tokens = n_features,
 
     samples = train.n,
-    problems = train.problems,
+    tokens = train.bits,
+    csc_offsets = train_csc_off,
+    csc_indices = train_csc_idx,
     targets = train.targets,
 
     clauses = cfg.tm.clauses,
@@ -78,13 +79,14 @@ test("regressor", function ()
 
     search_trials = cfg.search.trials,
     search_iterations = cfg.search.iterations,
-    search_subsample_samples = cfg.search.subsample_samples,
     final_batch = cfg.training.batch,
     final_patience = cfg.training.patience,
     final_iterations = cfg.training.iterations,
 
     search_metric = function (regressor)
-      local score, nmae = regressor:regress_nmae(validate.problems, validate.n, validate.targets)
+      local score, nmae = regressor:regress_nmae(
+        { tokens = validate.bits, n_samples = validate.n },
+        validate.n, validate.targets)
       return score, { nmae = nmae }
     end,
 
@@ -95,14 +97,14 @@ test("regressor", function ()
   print()
   print("Persisting")
   fs.rm("regressor.bin", true)
-  t:persist("regressor.bin", true)
+  t:persist("regressor.bin")
 
   print("Testing restore")
-  t = tm.load("regressor.bin", nil, true)
+  t = tm.load("regressor.bin")
 
-  local train_pred = t:regress(train.problems, train.n)
-  local val_pred = t:regress(validate.problems, validate.n)
-  local test_pred = t:regress(test_set.problems, test_set.n)
+  local train_pred = t:regress({ tokens = train.bits, n_samples = train.n }, train.n)
+  local val_pred = t:regress({ tokens = validate.bits, n_samples = validate.n }, validate.n)
+  local test_pred = t:regress({ tokens = test_set.bits, n_samples = test_set.n }, test_set.n)
 
   local train_stats = eval.regression_accuracy(train_pred, train.targets)
   local val_stats = eval.regression_accuracy(val_pred, validate.targets)

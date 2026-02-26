@@ -270,9 +270,10 @@ function M.make_regressor_log (stopwatch)
     else
       lt, lm, tt, ss = "", "", "", ""
     end
-    str.printf("[REGRESS %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s MAE=%.4f%s%s\n",
+    local skip = params.flat_skip and str.format(" SK=%.2f", params.flat_skip) or ""
+    str.printf("[REGRESS %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s%s MAE=%.4f%s%s\n",
       phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum_fraction, lm,
-      params.target_fraction, tt, params.specificity_fraction, ss, absorb, mae, best, timing)
+      params.target_fraction, tt, params.specificity_fraction, ss, absorb, skip, mae, best, timing)
   end
 end
 
@@ -306,9 +307,10 @@ function M.make_hamming_log (stopwatch)
     else
       lt, lm, tt, ss = "", "", "", ""
     end
-    str.printf("[HAMMING %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s ACC=%.4f%s%s\n",
+    local skip = params.flat_skip and str.format(" SK=%.2f", params.flat_skip) or ""
+    str.printf("[HAMMING %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s%s ACC=%.4f%s%s\n",
       phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum_fraction, lm,
-      params.target_fraction, tt, params.specificity_fraction, ss, absorb, acc, best, timing)
+      params.target_fraction, tt, params.specificity_fraction, ss, absorb, skip, acc, best, timing)
   end
 end
 
@@ -343,9 +345,10 @@ function M.make_regressor_acc_log (stopwatch)
     else
       lt, lm, tt, ss = "", "", "", ""
     end
-    str.printf("[REGRESS %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s ACC=%.1f%%%s%s\n",
+    local skip = params.flat_skip and str.format(" SK=%.2f", params.flat_skip) or ""
+    str.printf("[REGRESS %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s%s ACC=%.1f%%%s%s\n",
       phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum_fraction, lm,
-      params.target_fraction, tt, params.specificity_fraction, ss, absorb, acc, best, timing)
+      params.target_fraction, tt, params.specificity_fraction, ss, absorb, skip, acc, best, timing)
   end
 end
 
@@ -375,9 +378,10 @@ function M.make_ranking_log (stopwatch)
     else
       lt, lm, tt, ss = "", "", "", ""
     end
-    str.printf("[RANKING %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s score=%.4f%s%s\n",
+    local skip = params.flat_skip and str.format(" SK=%.2f", params.flat_skip) or ""
+    str.printf("[RANKING %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s%s score=%.4f%s%s\n",
       phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum_fraction, lm,
-      params.target_fraction, tt, params.specificity_fraction, ss, absorb, score, best, timing)
+      params.target_fraction, tt, params.specificity_fraction, ss, absorb, skip, score, best, timing)
   end
 end
 
@@ -408,9 +412,56 @@ function M.make_labeler_log (stopwatch)
     else
       lt, lm, tt, ss = "", "", "", ""
     end
-    str.printf("[LABEL %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s miF1=%.4f maF1=%.4f%s%s\n",
+    local skip = params.flat_skip and str.format(" SK=%.2f", params.flat_skip) or ""
+    str.printf("[LABEL %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s%s miF1=%.4f maF1=%.4f%s%s\n",
       phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum_fraction, lm,
-      params.target_fraction, tt, params.specificity_fraction, ss, absorb, micro, macro, best, timing)
+      params.target_fraction, tt, params.specificity_fraction, ss, absorb, skip, micro, macro, best, timing)
+  end
+end
+
+function M.make_ridge_log ()
+  return function (ev)
+    local phase = format_phase(ev)
+    local p = ev.params or {}
+    local m = ev.metrics or {}
+    local best = format_best(ev.global_best_score, ev.score)
+    local prop = ""
+    if p.propensity_a then
+      prop = str.format(" pa=%.2f pb=%.2f", p.propensity_a, p.propensity_b)
+    end
+    local score_str
+    if m.mae then
+      score_str = str.format(" mae=%.6f", m.mae)
+    elseif m.thresh then
+      score_str = str.format(" maF1=%.4f miF1=%.4f", m.thresh.macro_f1, m.thresh.micro_f1)
+    else
+      score_str = str.format(" score=%.4f", ev.score or 0)
+    end
+    str.printf("[RIDGE %s] lambda=%.4e%s%s%s\n",
+      phase, p.lambda or 0, prop, score_str, best)
+  end
+end
+
+function M.make_elm_log ()
+  return function (ev)
+    local phase = format_phase(ev)
+    local p = ev.params or {}
+    local m = ev.metrics or {}
+    local best = format_best(ev.global_best_score, ev.score)
+    local prop = ""
+    if p.propensity_a then
+      prop = str.format(" pa=%.2f pb=%.2f", p.propensity_a, p.propensity_b)
+    end
+    local score_str
+    if m.mae then
+      score_str = str.format(" mae=%.6f", m.mae)
+    elseif m.thresh then
+      score_str = str.format(" maF1=%.4f miF1=%.4f", m.thresh.macro_f1, m.thresh.micro_f1)
+    else
+      score_str = str.format(" score=%.4f", ev.score or 0)
+    end
+    str.printf("[ELM %s] H=%d lambda=%.4e%s%s%s\n",
+      phase, p.n_hidden or 0, p.lambda or 0, prop, score_str, best)
   end
 end
 
