@@ -832,9 +832,9 @@ M.ridge = function (args)
   else
     param_names = { "lambda", "propensity_a", "propensity_b" }
   end
-  args.lambda = spec_defaults(args.lambda, { min = 1e-8, max = 100, log = true })
-  args.propensity_a = spec_defaults(args.propensity_a, { min = 0, max = 4 })
-  args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 4 })
+  args.lambda = spec_defaults(args.lambda, { min = 0, max = 100 })
+  args.propensity_a = spec_defaults(args.propensity_a, { min = 0, max = 100 })
+  args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 100 })
   local samplers = M.build_samplers(args, param_names)
   local k = not dense and (args.k or 32) or nil
   local each_cb = args.each
@@ -950,24 +950,15 @@ M.ridge = function (args)
   return result, best_params, best_metrics
 end
 
-local function elm_make_obj (ridge_obj, nh, nt, sd, lk, fw, nd)
-  local elm = require("santoku.learn.elm")
+local function elm_make_obj (ridge_obj, elm_encoder, lk)
   return {
     ridge = ridge_obj,
-    n_hidden = nh,
-    n_tokens = nt,
-    seed = sd,
+    encoder = elm_encoder,
     k = lk,
-    feature_weights = fw,
-    n_dense = nd,
     project = function (self, csc_off, csc_idx, n, dense_features)
-      return elm.project({
+      return self.encoder:encode({
         csc_offsets = csc_off, csc_indices = csc_idx,
-        n_samples = n, n_tokens = self.n_tokens,
-        n_hidden = self.n_hidden, seed = self.seed,
-        feature_weights = self.feature_weights,
-        dense_features = dense_features,
-        n_dense = self.n_dense,
+        n_samples = n, dense_features = dense_features,
       })
     end,
     transform = function (self, csc_off, csc_idx, n, dense_features)
@@ -994,15 +985,20 @@ local function elm_make_obj (ridge_obj, nh, nt, sd, lk, fw, nd)
       return -ra.mean, ra.mean, ra
     end,
     persist = function (self, dest)
-      local fw_data = ""
-      local fw_n = 0
-      if self.feature_weights then
-        fw_n = self.feature_weights:size()
-        fw_data = self.feature_weights:persist()
-      end
-      local header = str.format("TKelm\2%d %d %d %d %d %d",
-        self.n_hidden, self.n_tokens or 0, self.seed, self.k or 0, fw_n, self.n_dense or 0)
-      local blob = header .. "\n" .. fw_data .. self.ridge:persist(true)
+      local enc_blob = self.encoder:persist(true)
+      local ridge_blob = self.ridge:persist(true)
+      local header = str.format("TKelm\3%d\n", self.k or 0)
+      local enc_len = #enc_blob
+      local len_bytes = string.char(
+        enc_len % 256,
+        math.floor(enc_len / 256) % 256,
+        math.floor(enc_len / 65536) % 256,
+        math.floor(enc_len / 16777216) % 256,
+        math.floor(enc_len / 4294967296) % 256,
+        math.floor(enc_len / 1099511627776) % 256,
+        math.floor(enc_len / 281474976710656) % 256,
+        math.floor(enc_len / 72057594037927936) % 256)
+      local blob = header .. len_bytes .. enc_blob .. ridge_blob
       if dest == true then
         return blob
       else
@@ -1012,103 +1008,10 @@ local function elm_make_obj (ridge_obj, nh, nt, sd, lk, fw, nd)
       end
     end,
   }
-end
-
-local function elm_ensemble_obj (models, n_labels_or_targets, lk)
-  local ridge = require("santoku.learn.ridge")
-  local nm = #models
-  local inv_nm = 1.0 / nm
-  return {
-    models = models,
-    n_models = nm,
-    transform = function (self, csc_off, csc_idx, n, dense_features)
-      local scores = self.models[1]:transform(csc_off, csc_idx, n, dense_features)
-      for i = 2, self.n_models do
-        scores:addv(self.models[i]:transform(csc_off, csc_idx, n, dense_features))
-      end
-      scores:scale(inv_nm)
-      return scores
-    end,
-    label = function (self, csc_off, csc_idx, n, k, dense_features)
-      local scores = self:transform(csc_off, csc_idx, n, dense_features)
-      return ridge.label_from_scores(scores, n, n_labels_or_targets, k or lk)
-    end,
-    label_f1 = function (self, csc_off, csc_idx, n, exp_off, exp_nbr, dense_features)
-      local evaluator = require("santoku.learn.evaluator")
-      local off, nbr = self:label(csc_off, csc_idx, n, nil, dense_features)
-      local _, oracle = evaluator.retrieval_ks({
-        pred_offsets = off, pred_neighbors = nbr,
-        expected_offsets = exp_off, expected_neighbors = exp_nbr,
-      })
-      return oracle.macro_f1, oracle.micro_f1, oracle
-    end,
-    regress_mae = function (self, csc_off, csc_idx, n, targets, dense_features)
-      local evaluator = require("santoku.learn.evaluator")
-      local pred = self:transform(csc_off, csc_idx, n, dense_features)
-      local ra = evaluator.regression_accuracy(pred, targets)
-      return -ra.mean, ra.mean, ra
-    end,
-    persist = function (self, dest)
-      local parts = { str.format("TKem\1%d\n", self.n_models) }
-      for i = 1, self.n_models do
-        local rd = self.models[i]:persist(true)
-        local len = #rd
-        parts[#parts + 1] = str.char(
-          len % 256,
-          num.floor(len / 256) % 256,
-          num.floor(len / 65536) % 256,
-          num.floor(len / 16777216) % 256,
-          num.floor(len / 4294967296) % 256,
-          num.floor(len / 1099511627776) % 256,
-          num.floor(len / 281474976710656) % 256,
-          num.floor(len / 72057594037927936) % 256)
-        parts[#parts + 1] = rd
-      end
-      local blob = table.concat(parts)
-      if dest == true then
-        return blob
-      else
-        local fh = io.open(dest, "wb")
-        fh:write(blob)
-        fh:close()
-      end
-    end,
-  }
-end
-
-local function read_int64_le (blob, pos)
-  local b1, b2, b3, b4, b5, b6, b7, b8 = blob:byte(pos, pos + 7)
-  return b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
-    + b5 * 4294967296 + b6 * 1099511627776
-    + b7 * 281474976710656 + b8 * 72057594037927936
-end
-
-M.elm_ensemble_load = function (data, is_string)
-  local blob
-  if is_string then
-    blob = data
-  else
-    local fh = io.open(data, "rb")
-    blob = fh:read("*a")
-    fh:close()
-  end
-  local nl = blob:find("\n", 1, true)
-  err.assert(nl, "invalid ensemble file")
-  local header = blob:sub(1, nl - 1)
-  local nm = tonumber(header:match("TKem.(%d+)"))
-  err.assert(nm, "invalid ensemble header")
-  local pos = nl + 1
-  local models = {}
-  for i = 1, nm do
-    local rlen = read_int64_le(blob, pos)
-    pos = pos + 8
-    models[i] = M.elm_load(blob:sub(pos, pos + rlen - 1), true)
-    pos = pos + rlen
-  end
-  return elm_ensemble_obj(models, models[1].ridge:n_labels(), models[1].k)
 end
 
 M.elm_load = function (data, is_string)
+  local elm = require("santoku.learn.elm")
   local ridge = require("santoku.learn.ridge")
   local blob
   if is_string then
@@ -1122,24 +1025,21 @@ M.elm_load = function (data, is_string)
   err.assert(nl, "invalid ELM file")
   local header = blob:sub(1, nl - 1)
   local ver = blob:byte(6)
-  err.assert(ver == 2, "unsupported ELM version " .. tostring(ver))
-  local nh, nt, sd, lk, fw_n, nd =
-    header:match("TKelm.(%d+) (%d+) (%d+) (%d+) (%d+) (%d+)")
-  err.assert(nh, "invalid ELM header")
-  nh, nt, sd, lk, fw_n = tonumber(nh), tonumber(nt), tonumber(sd), tonumber(lk), tonumber(fw_n)
-  nd = tonumber(nd) or 0
+  err.assert(ver == 3, "unsupported ELM version " .. tostring(ver))
+  local lk = header:match("TKelm.(%d+)")
+  err.assert(lk, "invalid ELM header")
+  lk = tonumber(lk)
   if lk == 0 then lk = nil end
-  if nt == 0 then nt = nil end
-  if nd == 0 then nd = nil end
   local pos = nl + 1
-  local fw = nil
-  if fw_n > 0 then
-    local fw_bytes = 8 + fw_n * 8
-    fw = dvec.load(blob:sub(pos, pos + fw_bytes - 1), true)
-    pos = pos + fw_bytes
+  local enc_len = 0
+  for i = 0, 7 do
+    enc_len = enc_len + blob:byte(pos + i) * (256 ^ i)
   end
+  pos = pos + 8
+  local enc = elm.load(blob:sub(pos, pos + enc_len - 1), true)
+  pos = pos + enc_len
   local r = ridge.load(blob:sub(pos), true)
-  return elm_make_obj(r, nh, nt, sd, lk, fw, nd)
+  return elm_make_obj(r, enc, lk)
 end
 
 M.elm = function (args)
@@ -1160,9 +1060,9 @@ M.elm = function (args)
     param_names[#param_names + 1] = "propensity_a"
     param_names[#param_names + 1] = "propensity_b"
   end
-  args.lambda = spec_defaults(args.lambda, { min = 1e-8, max = 100, log = true })
-  args.propensity_a = spec_defaults(args.propensity_a, { min = 0, max = 4 })
-  args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 4 })
+  args.lambda = spec_defaults(args.lambda, { min = 0, max = 100 })
+  args.propensity_a = spec_defaults(args.propensity_a, { min = 0, max = 100 })
+  args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 100 })
   local samplers = M.build_samplers(args, param_names)
   local k = not dense and (args.k or 32) or nil
   local score_fn
@@ -1174,15 +1074,15 @@ M.elm = function (args)
   else
     score_fn = args.score_fn or function (ret) return ret.oracle.macro_f1 end
   end
-  local sidecar = n_tokens and n_dense
-  local dims = sidecar and (n_hidden + n_dense) or n_hidden
-  local train_h = elm.project({
+  local dims = (n_tokens and n_dense) and (n_hidden + n_dense) or n_hidden
+  local elm_encoder, train_h = elm.create({
     csc_offsets = args.csc_offsets,
     csc_indices = args.csc_indices,
     n_samples = n_samples,
     n_tokens = n_tokens,
     n_hidden = n_hidden,
     seed = seed,
+    mode = args.mode,
     feature_weights = args.feature_weights,
     dense_features = args.dense_features,
     n_dense = n_dense,
@@ -1205,16 +1105,11 @@ M.elm = function (args)
   local eval_data
   local has_val = args.val_csc_offsets or args.val_dense_features
   if has_val then
-    local val_h = elm.project({
+    local val_h = elm_encoder:encode({
       csc_offsets = args.val_csc_offsets,
       csc_indices = args.val_csc_indices,
       n_samples = args.val_n_samples,
-      n_tokens = n_tokens,
-      n_hidden = n_hidden,
-      seed = seed,
-      feature_weights = args.feature_weights,
       dense_features = args.val_dense_features,
-      n_dense = n_dense,
     })
     if dense then
       eval_data = { n_samples = args.val_n_samples, codes = val_h, targets = args.val_targets }
@@ -1294,53 +1189,7 @@ M.elm = function (args)
     cost_beta = args.cost_beta,
   })
   best_params.n_hidden = n_hidden
-  local n_models = args.n_models or 1
-  local train_scores = ridge_obj:transform(train_h, n_samples)
-  if n_models <= 1 then
-    return elm_make_obj(ridge_obj, n_hidden, n_tokens, seed, k, args.feature_weights, n_dense), best_params, best_metrics, train_scores
-  end
-  local models = {}
-  models[1] = elm_make_obj(ridge_obj, n_hidden, n_tokens, seed, k, args.feature_weights, n_dense)
-  for m = 2, n_models do
-    local mseed = seed + m - 1
-    local mh = elm.project({
-      csc_offsets = args.csc_offsets,
-      csc_indices = args.csc_indices,
-      n_samples = n_samples,
-      n_tokens = n_tokens,
-      n_hidden = n_hidden,
-      seed = mseed,
-      feature_weights = args.feature_weights,
-      dense_features = args.dense_features,
-      n_dense = n_dense,
-    })
-    local mgram
-    if dense then
-      mgram = ridge.precompute({
-        n_samples = n_samples, n_dims = dims,
-        n_targets = n_targets, codes = mh,
-        targets = args.targets,
-      })
-    else
-      mgram = ridge.precompute({
-        n_samples = n_samples, n_dims = dims,
-        n_labels = args.n_labels, codes = mh,
-        label_offsets = args.label_offsets,
-        label_neighbors = args.label_neighbors,
-      })
-    end
-    local mr = ridge.create({
-      gram = mgram,
-      lambda = best_params.lambda,
-      propensity_a = not dense and best_params.propensity_a or nil,
-      propensity_b = not dense and best_params.propensity_b or nil,
-    })
-    models[m] = elm_make_obj(mr, n_hidden, n_tokens, mseed, k, args.feature_weights, n_dense)
-    train_scores:addv(mr:transform(mh, n_samples))
-  end
-  train_scores:scale(1.0 / n_models)
-  local nl_or_nt = dense and n_targets or args.n_labels
-  return elm_ensemble_obj(models, nl_or_nt, k), best_params, best_metrics, train_scores
+  return elm_make_obj(ridge_obj, elm_encoder, k), best_params, best_metrics, train_h
 end
 
 return M

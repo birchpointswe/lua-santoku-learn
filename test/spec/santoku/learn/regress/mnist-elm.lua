@@ -4,7 +4,6 @@ local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
 local ivec = require("santoku.ivec")
 local optimize = require("santoku.learn.optimize")
-local ridge = require("santoku.learn.ridge")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local util = require("santoku.learn.util")
@@ -26,7 +25,6 @@ local cfg = {
     propensity_b = { def = 1.5 },
     search_trials = 400,
     k = 1,
-    n_models = 1,
   },
 }
 
@@ -69,11 +67,12 @@ test("mnist elm classifier", function ()
 
   print("\nTraining ELM")
   local stopwatch = utc.stopwatch()
-  local elm_obj, elm_params, _, train_scores = optimize.elm({
+  local elm_obj, elm_params, _, train_h = optimize.elm({
     n_samples = train.n,
     n_tokens = n_tokens,
     n_hidden = cfg.elm.n_hidden,
     seed = cfg.elm.seed,
+    mode = cfg.elm.mode,
     csc_offsets = train_csc_off,
     csc_indices = train_csc_idx,
     feature_weights = bns_scores,
@@ -92,7 +91,6 @@ test("mnist elm classifier", function ()
     propensity_b = cfg.elm.propensity_b,
     k = cfg.elm.k,
     search_trials = cfg.elm.search_trials,
-    n_models = cfg.elm.n_models,
     each = util.make_elm_log(stopwatch),
   })
   str.printf("\nBest: n_hidden=%d lambda=%.4e\n", elm_params.n_hidden, elm_params.lambda)
@@ -101,7 +99,7 @@ test("mnist elm classifier", function ()
   local n_classes = cfg.elm.classes
 
   print("\nEvaluating splits")
-  local train_off, train_labels = ridge.label_from_scores(train_scores, train.n, n_classes, 1)
+  local train_off, train_labels = elm_obj.ridge:label(train_h, train.n, 1)
   local val_off, val_labels = elm_obj:label(val_csc_off, val_csc_idx, validate.n, 1)
   local _, test_labels = elm_obj:label(test_csc_off, test_csc_idx, test_set.n, 1)
 

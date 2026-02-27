@@ -531,42 +531,10 @@ static inline int tk_ridge_load_lua (lua_State *L) {
   return 1;
 }
 
-static inline int tk_ridge_label_from_scores_lua (lua_State *L) {
-  tk_dvec_t *scores = tk_dvec_peek(L, 1, "scores");
-  int64_t n = (int64_t)luaL_checkinteger(L, 2);
-  int64_t nl = (int64_t)luaL_checkinteger(L, 3);
-  int64_t k = (int64_t)luaL_checkinteger(L, 4);
-  if (k > nl) k = nl;
-  if (k < 1) k = 1;
-  tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t)(n + 1), NULL, NULL);
-  int off_idx = lua_gettop(L);
-  tk_ivec_t *labels = tk_ivec_create(L, (uint64_t)(n * k), NULL, NULL);
-  int lab_idx = lua_gettop(L);
-  tk_dvec_t *scores_out = tk_dvec_create(L, (uint64_t)(n * k), NULL, NULL);
-  int sco_idx = lua_gettop(L);
-  for (int64_t i = 0; i <= n; i++)
-    offsets->a[i] = i * k;
-  int64_t block = 256;
-  while (block > 1 && (uint64_t)block * (uint64_t)nl * sizeof(double) > 64ULL * 1024 * 1024)
-    block /= 2;
-  double *sbuf = (double *)malloc((uint64_t)block * (uint64_t)nl * sizeof(double));
-  for (int64_t base = 0; base < n; base += block) {
-    int64_t bs = (base + block <= n) ? block : n - base;
-    memcpy(sbuf, scores->a + base * nl, (uint64_t)(bs * nl) * sizeof(double));
-    tk_ridge_topk_block(sbuf, bs, nl, k, base, offsets, labels, scores_out);
-  }
-  free(sbuf);
-  lua_pushvalue(L, off_idx);
-  lua_pushvalue(L, lab_idx);
-  lua_pushvalue(L, sco_idx);
-  return 3;
-}
-
 static luaL_Reg tk_ridge_fns[] = {
   { "create", tk_ridge_create_lua },
   { "precompute", tk_ridge_precompute_lua },
   { "load", tk_ridge_load_lua },
-  { "label_from_scores", tk_ridge_label_from_scores_lua },
   { NULL, NULL }
 };
 

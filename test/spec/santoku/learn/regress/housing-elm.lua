@@ -19,7 +19,6 @@ local cfg = {
     seed = 42,
     lambda = { def = 1.0 },
     search_trials = 400,
-    n_models = 1,
   },
 }
 
@@ -51,11 +50,12 @@ test("housing elm regressor", function ()
 
   print("\nTraining ELM")
   local stopwatch = utc.stopwatch()
-  local elm_obj, elm_params, _, train_scores = optimize.elm({
+  local elm_obj, elm_params, _, train_h = optimize.elm({
     n_samples = train.n,
     n_tokens = n_features,
     n_hidden = cfg.elm.n_hidden,
     seed = cfg.elm.seed,
+    mode = cfg.elm.mode,
     csc_offsets = train_csc_off,
     csc_indices = train_csc_idx,
     dense_features = train.continuous,
@@ -69,14 +69,13 @@ test("housing elm regressor", function ()
     val_targets = validate.targets,
     lambda = cfg.elm.lambda,
     search_trials = cfg.elm.search_trials,
-    n_models = cfg.elm.n_models,
     each = util.make_elm_log(stopwatch),
   })
   str.printf("\nBest: H=%d lambda=%.4e\n", elm_params.n_hidden, elm_params.lambda)
   str.printf("Time: %.1fs\n", stopwatch())
 
   print("\nEvaluating splits")
-  local train_stats = eval.regression_accuracy(train_scores, train.targets)
+  local train_stats = eval.regression_accuracy(elm_obj.ridge:transform(train_h, train.n), train.targets)
   local val_pred = elm_obj:transform(val_csc_off, val_csc_idx, validate.n, validate.continuous)
   local val_stats = eval.regression_accuracy(val_pred, validate.targets)
   local test_pred = elm_obj:transform(test_csc_off, test_csc_idx, test_set.n, test_set.continuous)
