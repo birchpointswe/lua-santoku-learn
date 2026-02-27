@@ -106,7 +106,7 @@ test("eurlex-embedding", function ()
     n_landmarks = cfg.nystrom.n_landmarks,
     n_dims = cfg.nystrom.n_dims,
     decay = cfg.nystrom.decay,
-    each = function (ev) util.spectral_log(ev) end,
+    each = util.make_spectral_log(stopwatch),
   })
   local spectral_dims = model.dims
   local wide_codes = dvec.create():mtx_extend(model.raw_codes,

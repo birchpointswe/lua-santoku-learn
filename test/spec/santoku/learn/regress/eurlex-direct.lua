@@ -150,32 +150,26 @@ test("eurlex-direct", function ()
   print(string.rep("=", 60))
 
   print("\nPredicting labels (train)")
-  local train_off, train_labels, train_scores = t:label(
+  local train_off, train_labels = t:label(
     { tokens = train.tokens, n_samples = train.n }, train.n, 32)
-  local train_oracle, train_thresh = eval.retrieval_ks({
-    pred_offsets = train_off, pred_neighbors = train_labels, pred_scores = train_scores,
+  local _, train_oracle = eval.retrieval_ks({
+    pred_offsets = train_off, pred_neighbors = train_labels,
     expected_offsets = sol_offsets, expected_neighbors = sol_neighbors,
   })
 
   print("\nPredicting labels (dev)")
-  local dev_off, dev_labels, dev_scores = t:label(
+  local dev_off, dev_labels = t:label(
     { tokens = dev.tokens, n_samples = dev.n }, dev.n, 32)
-  local dev_oracle, dev_thresh = eval.retrieval_ks({
-    pred_offsets = dev_off, pred_neighbors = dev_labels, pred_scores = dev_scores,
+  local _, dev_oracle = eval.retrieval_ks({
+    pred_offsets = dev_off, pred_neighbors = dev_labels,
     expected_offsets = dev_label_off, expected_neighbors = dev_label_nbr,
   })
 
   str.printf("\n  Labels: %d\n", n_labels)
-  str.printf("  %-40s %8s %8s %8s %8s\n",
-    "", "micro F1", "macro F1", "orc miF1", "orc maF1")
-  str.printf("  %-40s %8s %8s %8s %8s\n",
-    string.rep("-", 40), "--------", "--------", "--------", "--------")
-  str.printf("  %-40s %8.4f %8.4f %8.4f %8.4f\n",
-    "Train (threshold)", train_thresh.micro_f1, train_thresh.macro_f1,
-    train_oracle.micro_f1, train_oracle.macro_f1)
-  str.printf("  %-40s %8.4f %8.4f %8.4f %8.4f\n",
-    "Dev (threshold)", dev_thresh.micro_f1, dev_thresh.macro_f1,
-    dev_oracle.micro_f1, dev_oracle.macro_f1)
+  str.printf("  %-40s %8s %8s\n", "", "micro F1", "macro F1")
+  str.printf("  %-40s %8s %8s\n", string.rep("-", 40), "--------", "--------")
+  str.printf("  %-40s %8.4f %8.4f\n", "Train", train_oracle.micro_f1, train_oracle.macro_f1)
+  str.printf("  %-40s %8.4f %8.4f\n", "Dev", dev_oracle.micro_f1, dev_oracle.macro_f1)
 
   str.printf("\n  Time: %.1fs\n", stopwatch())
 

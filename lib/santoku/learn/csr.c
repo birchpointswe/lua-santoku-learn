@@ -1070,6 +1070,33 @@ static int tm_csr_neighbor_average (lua_State *L)
   return 1;
 }
 
+static int tm_csr_subsample (lua_State *L)
+{
+  lua_settop(L, 3);
+  tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
+  tk_ivec_t *neighbors = tk_ivec_peek(L, 2, "neighbors");
+  tk_ivec_t *sample_ids = tk_ivec_peek(L, 3, "sample_ids");
+  int64_t n = (int64_t)sample_ids->n;
+  tk_ivec_t *new_off = tk_ivec_create(L, (uint64_t)(n + 1), NULL, NULL);
+  int64_t total = 0;
+  for (int64_t i = 0; i < n; i++) {
+    int64_t sid = sample_ids->a[i];
+    total += offsets->a[sid + 1] - offsets->a[sid];
+  }
+  tk_ivec_t *new_nbr = tk_ivec_create(L, (uint64_t)total, NULL, NULL);
+  int64_t pos = 0;
+  for (int64_t i = 0; i < n; i++) {
+    int64_t sid = sample_ids->a[i];
+    int64_t lo = offsets->a[sid];
+    int64_t hi = offsets->a[sid + 1];
+    new_off->a[i] = pos;
+    for (int64_t j = lo; j < hi; j++)
+      new_nbr->a[pos++] = neighbors->a[j];
+  }
+  new_off->a[n] = pos;
+  return 2;
+}
+
 static luaL_Reg tm_csr_fns[] = {
   { "to_csc", tm_csr_to_csc },
   { "cvec_to_csc", tm_csr_cvec_to_csc },
@@ -1085,6 +1112,7 @@ static luaL_Reg tm_csr_fns[] = {
   { "stratified_sample", tm_csr_stratified_sample },
   { "label_union", tm_csr_label_union },
   { "neighbor_average", tm_csr_neighbor_average },
+  { "subsample", tm_csr_subsample },
   { NULL, NULL }
 };
 
