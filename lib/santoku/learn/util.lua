@@ -454,6 +454,59 @@ function M.make_ridge_log (stopwatch)
   end
 end
 
+function M.train_kpred (args)
+  local eval = require("santoku.learn.evaluator")
+  local optimize = require("santoku.learn.optimize")
+  local k = args.k
+  local nl = args.n_labels
+  local train_feats = eval.gather_label_scores({
+    scores = args.train_scores, pred_offsets = args.train_pred_off,
+    pred_neighbors = args.train_pred_nbr, n_labels = nl, normalize = true,
+  })
+  local train_ks, _ = eval.retrieval_ks({
+    pred_offsets = args.train_pred_off, pred_neighbors = args.train_pred_nbr,
+    expected_offsets = args.train_exp_off, expected_neighbors = args.train_exp_nbr,
+  })
+  local elm_obj, kp_params = optimize.elm({
+    n_samples = args.train_n,
+    n_tokens = args.n_tokens,
+    csc_offsets = args.train_csc_offsets,
+    csc_indices = args.train_csc_indices,
+    feature_weights = args.feature_weights,
+    dense_features = train_feats, n_dense = k,
+    n_hidden = args.n_hidden or 512, seed = args.seed or 42,
+    mode = args.mode or "relu",
+    targets = train_ks:to_dvec(), n_targets = 1,
+    lambda = args.lambda or { def = 1.0 },
+    search_trials = args.search_trials or 50,
+    each = args.each,
+  })
+  local test_feats = eval.gather_label_scores({
+    scores = args.test_scores, pred_offsets = args.test_pred_off,
+    pred_neighbors = args.test_pred_nbr, n_labels = nl, normalize = true,
+  })
+  local ts_pred_raw = elm_obj:transform(args.test_csc_offsets, args.test_csc_indices, args.test_n, test_feats)
+  local ts_pred_ks = ts_pred_raw:round():clamp(1, k):to_ivec()
+  return elm_obj, kp_params, ts_pred_ks
+end
+
+function M.make_kpred_log (stopwatch)
+  return function (ev)
+    local phase = format_phase(ev)
+    local p = ev.params or {}
+    local m = ev.metrics or {}
+    local best = format_best(ev.global_best_score, ev.score)
+    local score_str = m.mae and str.format(" mae=%.4f", m.mae) or str.format(" score=%.4f", ev.score or 0)
+    local timing = ""
+    if stopwatch then
+      local d, dd = stopwatch()
+      timing = str.format(" (%.1fs +%.1fs)", d, dd)
+    end
+    str.printf("[KPRED %s] H=%d lambda=%.4e%s%s%s\n",
+      phase, p.n_hidden or 0, p.lambda or 0, score_str, best, timing)
+  end
+end
+
 function M.make_elm_log (stopwatch)
   return function (ev)
     local phase = format_phase(ev)
