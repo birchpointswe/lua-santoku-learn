@@ -123,7 +123,7 @@ test("eurlex", function()
     n_landmarks = cfg.nystrom.n_landmarks,
     n_dims = cfg.nystrom.n_dims,
     decay = cfg.nystrom.decay,
-    each = function(ev) util.spectral_log(ev) end,
+    each = util.make_spectral_log(stopwatch),
   })
 
   local spectral_dims = model.dims
@@ -154,15 +154,7 @@ test("eurlex", function()
     args.stratify_neighbors = train.label_csr.neighbors
     args.stratify_labels = n_labels
     args.k = cfg.ridge.k
-    args.each = function (ev0)
-      local p = ev0.params
-      if ev0.event == "trial" then
-        local marker = ev0.is_new_best and " ++" or ""
-        str.printf("  [%s %d/%d] F1=%.4f (best=%.4f%s) lam=%.2f a=%.2f b=%.2f\n",
-          ev0.phase, ev0.trial, ev0.trials, ev0.score, ev0.global_best_score, marker,
-          p.lambda, p.propensity_a, p.propensity_b)
-      end
-    end
+    args.each = util.make_ridge_log(stopwatch)
     local ridge_obj, p, m = optimize.ridge(args)
     local dt = utc.time(true) - t0
     local rth = m.thresh

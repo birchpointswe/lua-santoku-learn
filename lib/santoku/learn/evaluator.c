@@ -272,20 +272,14 @@ static inline int tm_retrieval_ks (lua_State *L)
   tk_ivec_t *pred_off = tk_ivec_peek(L, -1, "pred_offsets");
   lua_getfield(L, 1, "pred_neighbors");
   tk_ivec_t *pred_nbr = tk_ivec_peek(L, -1, "pred_neighbors");
-  lua_getfield(L, 1, "pred_scores");
-  tk_dvec_t *pred_scores = tk_dvec_peekopt(L, -1);
   lua_getfield(L, 1, "expected_offsets");
   tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
   lua_getfield(L, 1, "expected_neighbors");
   tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
-  lua_pop(L, 5);
+  lua_pop(L, 4);
   uint64_t n_samples = pred_off->n - 1;
   if (exp_off->n != n_samples + 1)
     return luaL_error(L, "expected_offsets length must match sample count + 1");
-  uint64_t total_preds = (uint64_t)pred_off->a[n_samples];
-  uint8_t *is_tp = NULL;
-  if (pred_scores)
-    is_tp = (uint8_t *)calloc(total_preds, sizeof(uint8_t));
   tk_ivec_t *ks = tk_ivec_create(L, n_samples, NULL, NULL);
   uint64_t mi_tp = 0, mi_k = 0, mi_exp = 0, n_valid = 0;
   double ma_prec = 0, ma_rec = 0, ma_f1 = 0;
@@ -308,10 +302,7 @@ static inline int tm_retrieval_ks (lua_State *L)
     for (uint64_t k = 1; k <= hood_size; k++) {
       int64_t pos = pred_off->a[s] + (int64_t)(k - 1);
       int64_t nbr_id = pred_nbr->a[pos];
-      bool hit = tk_iuset_contains(exp_set, nbr_id) != 0;
-      if (hit) tp++;
-      if (is_tp)
-        is_tp[pos] = hit ? 1 : 0;
+      if (tk_iuset_contains(exp_set, nbr_id) != 0) tp++;
       double prec = (double)tp / k;
       double rec = (double)tp / n_expected;
       double f1 = (prec + rec) > 0 ? 2.0 * prec * rec / (prec + rec) : 0.0;
@@ -343,85 +334,68 @@ static inline int tm_retrieval_ks (lua_State *L)
   lua_pushnumber(L, n_valid > 0 ? ma_prec / n_valid : 0); lua_setfield(L, -2, "macro_precision");
   lua_pushnumber(L, n_valid > 0 ? ma_rec / n_valid : 0); lua_setfield(L, -2, "macro_recall");
   lua_pushnumber(L, n_valid > 0 ? ma_f1 / n_valid : 0); lua_setfield(L, -2, "macro_f1");
-  if (pred_scores && is_tp) {
-    uint64_t total_true = 0;
-    for (uint64_t s = 0; s < n_samples; s++)
-      total_true += (uint64_t)(exp_off->a[s + 1] - exp_off->a[s]);
-    tk_dvec_t *all_scores = tk_dvec_create(NULL, total_preds, NULL, NULL);
-    tk_dvec_t *tp_scores_v = tk_dvec_create(NULL, total_preds, NULL, NULL);
-    memcpy(all_scores->a, pred_scores->a, total_preds * sizeof(double));
-    uint64_t n_tp_sorted = 0;
-    for (uint64_t i = 0; i < total_preds; i++)
-      if (is_tp[i]) tp_scores_v->a[n_tp_sorted++] = pred_scores->a[i];
-    tp_scores_v->n = n_tp_sorted;
-    tk_dvec_desc(all_scores, 0, all_scores->n);
-    if (n_tp_sorted > 0) tk_dvec_desc(tp_scores_v, 0, tp_scores_v->n);
-    uint64_t t_tp = 0, t_all = 0, tp_ptr = 0;
-    double best_thresh_f1 = 0, best_threshold = 0;
-    uint64_t i = 0;
-    while (i < total_preds) {
-      double cur = all_scores->a[i];
-      uint64_t cnt_all = 0;
-      while (i + cnt_all < total_preds && all_scores->a[i + cnt_all] == cur) cnt_all++;
-      uint64_t cnt_tp = 0;
-      while (tp_ptr + cnt_tp < n_tp_sorted && tp_scores_v->a[tp_ptr + cnt_tp] == cur) cnt_tp++;
-      t_all += cnt_all;
-      t_tp += cnt_tp;
-      tp_ptr += cnt_tp;
-      i += cnt_all;
-      double prec = (double)t_tp / t_all;
-      double rec = total_true > 0 ? (double)t_tp / total_true : 0;
-      double f1 = (prec + rec) > 0 ? 2.0 * prec * rec / (prec + rec) : 0;
-      if (f1 > best_thresh_f1) {
-        best_thresh_f1 = f1;
-        best_threshold = cur;
-      }
-    }
-    tk_dvec_destroy(all_scores);
-    tk_dvec_destroy(tp_scores_v);
-    double th_ma_prec = 0, th_ma_rec = 0, th_ma_f1 = 0;
-    uint64_t th_mi_tp = 0, th_mi_k = 0, th_mi_exp = 0, th_n_valid = 0;
-    #pragma omp parallel for reduction(+:th_ma_prec,th_ma_rec,th_ma_f1,th_mi_tp,th_mi_k,th_mi_exp,th_n_valid)
-    for (uint64_t s = 0; s < n_samples; s++) {
-      int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
-      uint64_t n_expected = (uint64_t)(ee - es);
-      if (n_expected == 0) continue;
-      th_n_valid++;
-      int64_t ps = pred_off->a[s], pe = pred_off->a[s + 1];
-      uint64_t s_tp = 0, s_k = 0;
-      for (int64_t j = ps; j < pe; j++) {
-        if (pred_scores->a[j] >= best_threshold) {
-          s_k++;
-          if (is_tp[j]) s_tp++;
-        }
-      }
-      th_mi_tp += s_tp;
-      th_mi_k += s_k;
-      th_mi_exp += n_expected;
-      if (s_k == 0) continue;
-      double s_prec = (double)s_tp / s_k;
-      double s_rec = (double)s_tp / n_expected;
-      double s_f1 = (s_prec + s_rec) > 0 ? 2.0 * s_prec * s_rec / (s_prec + s_rec) : 0;
-      th_ma_prec += s_prec;
-      th_ma_rec += s_rec;
-      th_ma_f1 += s_f1;
-    }
-    lua_newtable(L);
-    lua_pushnumber(L, best_threshold); lua_setfield(L, -2, "threshold");
-    double tmi_prec = th_mi_k > 0 ? (double)th_mi_tp / th_mi_k : 0;
-    double tmi_rec = th_mi_exp > 0 ? (double)th_mi_tp / th_mi_exp : 0;
-    double tmi_f1 = (tmi_prec + tmi_rec) > 0 ? 2.0 * tmi_prec * tmi_rec / (tmi_prec + tmi_rec) : 0;
-    lua_pushnumber(L, tmi_prec); lua_setfield(L, -2, "micro_precision");
-    lua_pushnumber(L, tmi_rec); lua_setfield(L, -2, "micro_recall");
-    lua_pushnumber(L, tmi_f1); lua_setfield(L, -2, "micro_f1");
-    lua_pushnumber(L, th_n_valid > 0 ? th_ma_prec / th_n_valid : 0); lua_setfield(L, -2, "macro_precision");
-    lua_pushnumber(L, th_n_valid > 0 ? th_ma_rec / th_n_valid : 0); lua_setfield(L, -2, "macro_recall");
-    lua_pushnumber(L, th_n_valid > 0 ? th_ma_f1 / th_n_valid : 0); lua_setfield(L, -2, "macro_f1");
-  } else {
-    lua_pushnil(L);
+  return 2;
+}
+
+static inline int tm_retrieval_at_ks (lua_State *L)
+{
+  lua_settop(L, 1);
+  lua_getfield(L, 1, "pred_offsets");
+  tk_ivec_t *pred_off = tk_ivec_peek(L, -1, "pred_offsets");
+  lua_getfield(L, 1, "pred_neighbors");
+  tk_ivec_t *pred_nbr = tk_ivec_peek(L, -1, "pred_neighbors");
+  lua_getfield(L, 1, "ks");
+  tk_ivec_t *ks = tk_ivec_peek(L, -1, "ks");
+  lua_getfield(L, 1, "expected_offsets");
+  tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
+  lua_getfield(L, 1, "expected_neighbors");
+  tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
+  lua_pop(L, 5);
+  uint64_t n_samples = pred_off->n - 1;
+  uint64_t mi_tp = 0, mi_k = 0, mi_exp = 0, n_valid = 0;
+  double ma_prec = 0, ma_rec = 0, ma_f1 = 0;
+  #pragma omp parallel for reduction(+:mi_tp,mi_k,mi_exp,n_valid,ma_prec,ma_rec,ma_f1)
+  for (uint64_t s = 0; s < n_samples; s++) {
+    int64_t ps = pred_off->a[s], pe = pred_off->a[s + 1];
+    int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
+    uint64_t n_expected = (uint64_t)(ee - es);
+    if (n_expected == 0) continue;
+    int64_t sk = ks->a[s];
+    if (sk < 1) sk = 1;
+    uint64_t use_k = (uint64_t)sk;
+    uint64_t avail = (uint64_t)(pe - ps);
+    if (use_k > avail) use_k = avail;
+    if (use_k == 0) continue;
+    int kha;
+    tk_iuset_t *exp_set = tk_iuset_create(NULL, 0);
+    for (int64_t i = es; i < ee; i++)
+      tk_iuset_put(exp_set, exp_nbr->a[i], &kha);
+    uint64_t tp = 0;
+    for (uint64_t j = 0; j < use_k; j++)
+      if (tk_iuset_contains(exp_set, pred_nbr->a[ps + (int64_t)j]) != 0) tp++;
+    tk_iuset_destroy(exp_set);
+    double prec = (double)tp / use_k;
+    double rec = (double)tp / n_expected;
+    double f1 = (prec + rec) > 0 ? 2.0 * prec * rec / (prec + rec) : 0;
+    n_valid++;
+    mi_tp += tp;
+    mi_k += use_k;
+    mi_exp += n_expected;
+    ma_prec += prec;
+    ma_rec += rec;
+    ma_f1 += f1;
   }
-  if (is_tp) free(is_tp);
-  return 3;
+  lua_newtable(L);
+  double mi_prec = mi_k > 0 ? (double)mi_tp / mi_k : 0;
+  double mi_rec = mi_exp > 0 ? (double)mi_tp / mi_exp : 0;
+  double mi_f1v = (mi_prec + mi_rec) > 0 ? 2.0 * mi_prec * mi_rec / (mi_prec + mi_rec) : 0;
+  lua_pushnumber(L, mi_prec); lua_setfield(L, -2, "micro_precision");
+  lua_pushnumber(L, mi_rec); lua_setfield(L, -2, "micro_recall");
+  lua_pushnumber(L, mi_f1v); lua_setfield(L, -2, "micro_f1");
+  lua_pushnumber(L, n_valid > 0 ? ma_prec / n_valid : 0); lua_setfield(L, -2, "macro_precision");
+  lua_pushnumber(L, n_valid > 0 ? ma_rec / n_valid : 0); lua_setfield(L, -2, "macro_recall");
+  lua_pushnumber(L, n_valid > 0 ? ma_f1 / n_valid : 0); lua_setfield(L, -2, "macro_f1");
+  return 1;
 }
 
 static inline tk_ivec_t *tk_pvec_dendro_cut(
@@ -1993,6 +1967,180 @@ static inline int tk_dendro_iter_lua(lua_State *L) {
   return 1;
 }
 
+typedef struct { double score; uint64_t idx; } tk_score_entry_t;
+
+static int tk_score_entry_cmp_desc (const void *a, const void *b) {
+  double sa = ((const tk_score_entry_t *)a)->score;
+  double sb = ((const tk_score_entry_t *)b)->score;
+  return (sb > sa) - (sb < sa);
+}
+
+static inline int tm_label_thresholds (lua_State *L)
+{
+  lua_settop(L, 1);
+  luaL_checktype(L, 1, LUA_TTABLE);
+  lua_getfield(L, 1, "scores");
+  tk_dvec_t *scores = tk_dvec_peek(L, -1, "scores");
+  lua_getfield(L, 1, "expected_offsets");
+  tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
+  lua_getfield(L, 1, "expected_neighbors");
+  tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
+  lua_pop(L, 3);
+  int64_t n = (int64_t)tk_lua_fcheckunsigned(L, 1, "label_thresholds", "n_samples");
+  int64_t nl = (int64_t)tk_lua_fcheckunsigned(L, 1, "label_thresholds", "n_labels");
+
+  uint8_t *is_pos = (uint8_t *)calloc((uint64_t)(n * nl), sizeof(uint8_t));
+  uint64_t *label_pos_count = (uint64_t *)calloc((uint64_t)nl, sizeof(uint64_t));
+  for (int64_t s = 0; s < n; s++) {
+    int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
+    for (int64_t j = es; j < ee; j++) {
+      int64_t lab = exp_nbr->a[j];
+      if (lab >= 0 && lab < nl) {
+        is_pos[s * nl + lab] = 1;
+        label_pos_count[lab]++;
+      }
+    }
+  }
+
+  tk_dvec_t *thresholds = tk_dvec_create(L, (uint64_t)nl, NULL, NULL);
+  int thr_idx = lua_gettop(L);
+
+  double sum_f1 = 0, sum_prec = 0, sum_rec = 0;
+  uint64_t mi_tp = 0, mi_k = 0, mi_exp = 0, n_valid = 0;
+
+  #pragma omp parallel reduction(+:sum_f1,sum_prec,sum_rec,mi_tp,mi_k,mi_exp,n_valid)
+  {
+    tk_score_entry_t *buf = (tk_score_entry_t *)malloc((uint64_t)n * sizeof(tk_score_entry_t));
+    #pragma omp for schedule(dynamic, 16)
+    for (int64_t l = 0; l < nl; l++) {
+      uint64_t pos_total = label_pos_count[l];
+      if (pos_total == 0) {
+        thresholds->a[l] = INFINITY;
+        continue;
+      }
+      n_valid++;
+      mi_exp += pos_total;
+      for (int64_t s = 0; s < n; s++) {
+        buf[s].score = scores->a[s * nl + l];
+        buf[s].idx = (uint64_t)s;
+      }
+      qsort(buf, (uint64_t)n, sizeof(tk_score_entry_t), tk_score_entry_cmp_desc);
+      uint64_t tp = 0, fp = 0;
+      double best_f1 = 0, best_thresh = buf[0].score;
+      uint64_t best_tp = 0, best_k = 0;
+      int64_t i = 0;
+      while (i < n) {
+        double cur = buf[i].score;
+        while (i < n && buf[i].score == cur) {
+          if (is_pos[buf[i].idx * (uint64_t)nl + (uint64_t)l]) tp++; else fp++;
+          i++;
+        }
+        uint64_t k = tp + fp;
+        double prec = (double)tp / k;
+        double rec = (double)tp / pos_total;
+        double f1 = (prec + rec > 0) ? 2.0 * prec * rec / (prec + rec) : 0;
+        if (f1 > best_f1) {
+          best_f1 = f1;
+          best_thresh = cur;
+          best_tp = tp;
+          best_k = k;
+        }
+      }
+      thresholds->a[l] = best_thresh;
+      sum_f1 += best_f1;
+      if (best_k > 0) {
+        sum_prec += (double)best_tp / best_k;
+        sum_rec += (double)best_tp / pos_total;
+      }
+      mi_tp += best_tp;
+      mi_k += best_k;
+    }
+    free(buf);
+  }
+
+  free(is_pos);
+  free(label_pos_count);
+
+  lua_pushvalue(L, thr_idx);
+  lua_newtable(L);
+  double mi_prec = mi_k > 0 ? (double)mi_tp / mi_k : 0;
+  double mi_rec = mi_exp > 0 ? (double)mi_tp / mi_exp : 0;
+  double mi_f1 = (mi_prec + mi_rec) > 0 ? 2.0 * mi_prec * mi_rec / (mi_prec + mi_rec) : 0;
+  lua_pushnumber(L, mi_prec); lua_setfield(L, -2, "micro_precision");
+  lua_pushnumber(L, mi_rec); lua_setfield(L, -2, "micro_recall");
+  lua_pushnumber(L, mi_f1); lua_setfield(L, -2, "micro_f1");
+  lua_pushnumber(L, n_valid > 0 ? sum_prec / n_valid : 0); lua_setfield(L, -2, "macro_precision");
+  lua_pushnumber(L, n_valid > 0 ? sum_rec / n_valid : 0); lua_setfield(L, -2, "macro_recall");
+  lua_pushnumber(L, n_valid > 0 ? sum_f1 / n_valid : 0); lua_setfield(L, -2, "macro_f1");
+  return 2;
+}
+
+static inline int tm_apply_label_thresholds (lua_State *L)
+{
+  lua_settop(L, 1);
+  luaL_checktype(L, 1, LUA_TTABLE);
+  lua_getfield(L, 1, "scores");
+  tk_dvec_t *scores = tk_dvec_peek(L, -1, "scores");
+  lua_getfield(L, 1, "thresholds");
+  tk_dvec_t *thresholds = tk_dvec_peek(L, -1, "thresholds");
+  lua_getfield(L, 1, "expected_offsets");
+  tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
+  lua_getfield(L, 1, "expected_neighbors");
+  tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
+  lua_pop(L, 4);
+  int64_t n = (int64_t)tk_lua_fcheckunsigned(L, 1, "apply_label_thresholds", "n_samples");
+  int64_t nl = (int64_t)tk_lua_fcheckunsigned(L, 1, "apply_label_thresholds", "n_labels");
+
+  double ma_prec = 0, ma_rec = 0, ma_f1 = 0;
+  uint64_t mi_tp = 0, mi_k = 0, mi_exp = 0, n_valid = 0;
+
+  #pragma omp parallel reduction(+:ma_prec,ma_rec,ma_f1,mi_tp,mi_k,mi_exp,n_valid)
+  {
+    int kha;
+    #pragma omp for schedule(static)
+    for (int64_t s = 0; s < n; s++) {
+      int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
+      uint64_t n_expected = (uint64_t)(ee - es);
+      if (n_expected == 0) continue;
+      n_valid++;
+      tk_iuset_t *exp_set = tk_iuset_create(NULL, 0);
+      for (int64_t i = es; i < ee; i++)
+        tk_iuset_put(exp_set, exp_nbr->a[i], &kha);
+      uint64_t tp = 0, k = 0;
+      double *row = scores->a + s * nl;
+      for (int64_t l = 0; l < nl; l++) {
+        if (row[l] >= thresholds->a[l]) {
+          k++;
+          if (tk_iuset_contains(exp_set, l) != 0) tp++;
+        }
+      }
+      tk_iuset_destroy(exp_set);
+      mi_tp += tp;
+      mi_k += k;
+      mi_exp += n_expected;
+      if (k == 0) continue;
+      double prec = (double)tp / k;
+      double rec = (double)tp / n_expected;
+      double f1 = (prec + rec > 0) ? 2.0 * prec * rec / (prec + rec) : 0;
+      ma_prec += prec;
+      ma_rec += rec;
+      ma_f1 += f1;
+    }
+  }
+
+  lua_newtable(L);
+  double mi_prec = mi_k > 0 ? (double)mi_tp / mi_k : 0;
+  double mi_rec = mi_exp > 0 ? (double)mi_tp / mi_exp : 0;
+  double mi_f1 = (mi_prec + mi_rec) > 0 ? 2.0 * mi_prec * mi_rec / (mi_prec + mi_rec) : 0;
+  lua_pushnumber(L, mi_prec); lua_setfield(L, -2, "micro_precision");
+  lua_pushnumber(L, mi_rec); lua_setfield(L, -2, "micro_recall");
+  lua_pushnumber(L, mi_f1); lua_setfield(L, -2, "micro_f1");
+  lua_pushnumber(L, n_valid > 0 ? ma_prec / n_valid : 0); lua_setfield(L, -2, "macro_precision");
+  lua_pushnumber(L, n_valid > 0 ? ma_rec / n_valid : 0); lua_setfield(L, -2, "macro_recall");
+  lua_pushnumber(L, n_valid > 0 ? ma_f1 / n_valid : 0); lua_setfield(L, -2, "macro_f1");
+  return 1;
+}
+
 static luaL_Reg tm_evaluator_fns[] =
 {
   { "class_accuracy", tm_class_accuracy },
@@ -2000,6 +2148,9 @@ static luaL_Reg tm_evaluator_fns[] =
   { "regression_accuracy", tm_regression_accuracy },
   { "ranking_accuracy", tm_ranking_accuracy },
   { "retrieval_ks", tm_retrieval_ks },
+  { "retrieval_at_ks", tm_retrieval_at_ks },
+  { "label_thresholds", tm_label_thresholds },
+  { "apply_label_thresholds", tm_apply_label_thresholds },
   { "cluster", tm_cluster },
   { "entropy_stats", tm_entropy_stats },
   { "dendro_cut", tk_pvec_dendro_cut_lua },

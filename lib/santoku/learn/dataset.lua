@@ -197,19 +197,20 @@ M.read_20newsgroups = function (dir, max_per_class, remove, max)
   local problems = {}
   local solutions = {}
   local categories = {}
-  local cat_idx = 0
   for cat_dir in fs.dirs(dir) do
-    local cat_name = fs.basename(cat_dir)
-    categories[#categories + 1] = cat_name
+    categories[#categories + 1] = { name = fs.basename(cat_dir), path = cat_dir }
+  end
+  table.sort(categories, function (a, b) return a.name < b.name end)
+  for cat_idx, cat in ipairs(categories) do
+    categories[cat_idx] = cat.name
     local n = 0
-    for fp in fs.files(cat_dir) do
+    for fp in fs.files(cat.path) do
       if max_per_class and n >= max_per_class then break end
-      solutions[#solutions + 1] = cat_idx
+      solutions[#solutions + 1] = cat_idx - 1
       local raw = fs.readfile(fp)
       problems[#problems + 1] = clean_newsgroup_text(raw, remove)
       n = n + 1
     end
-    cat_idx = cat_idx + 1
   end
   local idxs = arr.shuffle(arr.range(1, #problems))
   local shuffled_problems = arr.lookup(idxs, problems, {})
@@ -224,13 +225,14 @@ M.read_20newsgroups = function (dir, max_per_class, remove, max)
     shuffled_problems = ps
     shuffled_solutions = ss
   end
+  local n_cats = #categories
   local bits = ivec.create()
   for i = 1, total do
-    bits:push((i - 1) * cat_idx + shuffled_solutions[i])
+    bits:push((i - 1) * n_cats + shuffled_solutions[i])
   end
   return {
     n = total,
-    n_labels = cat_idx,
+    n_labels = n_cats,
     categories = categories,
     problems = shuffled_problems,
     solutions = bits
@@ -457,13 +459,18 @@ local function _encode_housing_split (dataset, rows)
   local n_features = n_thermo + bzr:features()
   local dims = encoder:dims()
   local threshs = encoder:thresholds()
+  local n_cont = #feature_cols
   local bits = ivec.create()
   local targets = dvec.create()
+  local continuous = dvec.create()
   for i, row in ipairs(rows) do
     local base = (i - 1) * n_features
     local vals = {}
     for j, col in ipairs(feature_cols) do
       vals[j] = tonumber(row[col]) or 0
+    end
+    for j = 1, n_cont do
+      continuous:push(vals[j])
     end
     for k = 0, n_thermo - 1 do
       if vals[dims:get(k) + 1] > threshs:get(k) then
@@ -484,7 +491,9 @@ local function _encode_housing_split (dataset, rows)
   return {
     n = #rows,
     n_features = n_features,
+    n_continuous = n_cont,
     bits = bits,
+    continuous = continuous,
     targets = targets,
   }
 end
