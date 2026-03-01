@@ -235,8 +235,16 @@ static int tm_gp_suggest (lua_State *L)
     gp_build(X, Ys, n, d, bls, bsf, bsn, K, alpha, tmp);
   }
 
-  tk_dvec_t *ei = tk_dvec_create(L, nc, 0, 0);
-  ei->n = nc;
+  tk_dvec_t *ei;
+  if (lua_gettop(L) >= 7 && !lua_isnil(L, 7)) {
+    ei = tk_dvec_peek(L, 7, "ei_buf");
+    tk_dvec_ensure(ei, nc);
+    ei->n = nc;
+    lua_pushvalue(L, 7);
+  } else {
+    ei = tk_dvec_create(L, nc, 0, 0);
+    ei->n = nc;
+  }
 
   double *v = malloc(n * sizeof(double));
 
