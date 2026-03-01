@@ -19,7 +19,7 @@ local env = {
   dependencies = {
     "lua >= 5.1",
     "santoku >= 0.0.321-1",
-    "santoku-matrix >= 0.0.279-1",
+    "santoku-matrix >= 0.0.280-1",
     "santoku-tokenizer >= 0.0.22-1",
   },
   test = {

@@ -36,8 +36,14 @@ typedef enum {
   TK_INV_REPLACE
 } tk_inv_uid_mode_t;
 
+typedef enum {
+  TK_INV_COSINE = 0,
+  TK_INV_JACCARD = 1
+} tk_inv_kernel_t;
+
 typedef struct tk_inv_s {
   bool destroyed;
+  tk_inv_kernel_t kernel;
   int64_t next_sid;
   uint64_t features;
   uint64_t n_ranks;
@@ -74,7 +80,8 @@ static inline double tk_inv_similarity_fast (
   tk_inv_rank_weights_t *rw,
   double *q_arr,
   double *e_arr,
-  double *i_arr
+  double *i_arr,
+  tk_inv_kernel_t kernel
 );
 static inline void tk_inv_compute_weights_by_rank (
   const double *weights_a,
@@ -90,7 +97,8 @@ static inline double tk_inv_similarity_by_rank_fast (
   double *q_weights_by_rank,
   double *e_weights_by_rank,
   double cutoff,
-  tk_inv_rank_weights_t *rw
+  tk_inv_rank_weights_t *rw,
+  tk_inv_kernel_t kernel
 );
 static inline void tk_inv_partition_by_rank (
   const int64_t *ranks_a,
@@ -255,9 +263,11 @@ static inline void tk_inv_persist (
     return;
   }
   tk_lua_fwrite(L, "TKin", 1, 4, fh);
-  uint8_t version = 1;
+  uint8_t version = 2;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   uint8_t u8 = (uint8_t)inv->destroyed;
+  tk_lua_fwrite(L, (char *) &u8, sizeof(uint8_t), 1, fh);
+  u8 = (uint8_t)inv->kernel;
   tk_lua_fwrite(L, (char *) &u8, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, (char *) &inv->next_sid, sizeof(int64_t), 1, fh);
   tk_lua_fwrite(L, (char *) &inv->features, sizeof(uint64_t), 1, fh);
@@ -645,7 +655,7 @@ static inline void tk_inv_neighborhoods (
             if (wacc_base[0] < 0)
               continue;
             memcpy(e_weights_buf, node_weights_a + vsid * (int64_t) n_ranks, n_ranks * sizeof(double));
-            double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw);
+            double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw, inv->kernel);
             double dist = 1.0 - sim;
             if (dist <= cutoff) {
               tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
@@ -666,7 +676,7 @@ static inline void tk_inv_neighborhoods (
         if (wacc_base[0] < 0)
           continue;
         memcpy(e_weights_buf, node_weights_a + vsid * (int64_t) n_ranks, n_ranks * sizeof(double));
-        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw);
+        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw, inv->kernel);
         double dist = 1.0 - sim;
         if (dist <= cutoff) {
           if (knn)
@@ -803,7 +813,7 @@ static inline void tk_inv_neighborhoods_by_ids (
             if (wacc_base[0] < 0)
               continue;
             memcpy(e_weights_buf, node_weights_a + vsid * (int64_t) n_ranks, n_ranks * sizeof(double));
-            double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw);
+            double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw, inv->kernel);
             double dist = 1.0 - sim;
             if (dist <= cutoff) {
               tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
@@ -824,7 +834,7 @@ static inline void tk_inv_neighborhoods_by_ids (
         if (wacc_base[0] < 0)
           continue;
         memcpy(e_weights_buf, node_weights_a + vsid * (int64_t) n_ranks, n_ranks * sizeof(double));
-        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw);
+        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw, inv->kernel);
         double dist = 1.0 - sim;
         if (dist <= cutoff) {
           if (knn)
@@ -1007,7 +1017,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
             if (wacc_base[0] < 0)
               continue;
             memcpy(e_weights_buf, node_weights_a + vsid * (int64_t) n_ranks, n_ranks * sizeof(double));
-            double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw);
+            double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw, inv->kernel);
             double dist = 1.0 - sim;
             if (dist <= cutoff) {
               tk_rvec_hmax(uhood, knn, tk_rank(iv, dist));
@@ -1028,7 +1038,7 @@ static inline void tk_inv_neighborhoods_by_vecs (
         if (wacc_base[0] < 0)
           continue;
         memcpy(e_weights_buf, node_weights_a + vsid * (int64_t) n_ranks, n_ranks * sizeof(double));
-        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw);
+        double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, iv, q_weights_by_rank, e_weights_buf, cutoff, &rw, inv->kernel);
         double dist = 1.0 - sim;
         if (dist <= cutoff) {
           if (knn)
@@ -1082,11 +1092,14 @@ static inline void tk_inv_precompute_rank_weights (
 static inline double tk_inv_combine_ranks (
   double *i_arr, double *q_arr, double *e_arr,
   uint64_t n_ranks,
-  tk_inv_rank_weights_t *rw
+  tk_inv_rank_weights_t *rw,
+  tk_inv_kernel_t kernel
 ) {
   double accum = 0.0;
   for (uint64_t r = 0; r < n_ranks; r++) {
-    double denom = sqrt(q_arr[r] * e_arr[r]);
+    double denom = (kernel == TK_INV_JACCARD)
+      ? (q_arr[r] + e_arr[r] - i_arr[r])
+      : sqrt(q_arr[r] * e_arr[r]);
     double s = (denom > 0.0) ? i_arr[r] / denom : 0.0;
     if (s > 1.0) s = 1.0;
     accum += rw->weights[r] * s;
@@ -1102,7 +1115,8 @@ static inline double tk_inv_similarity_fast (
   tk_inv_rank_weights_t *rw,
   double *q_arr,
   double *e_arr,
-  double *i_arr
+  double *i_arr,
+  tk_inv_kernel_t kernel
 ) {
   for (uint64_t r = 0; r < n_ranks; r++) {
     q_arr[r] = 0.0;
@@ -1125,7 +1139,7 @@ static inline double tk_inv_similarity_fast (
     while (ai < ae) { q_arr[r] += weights_a[abits[ai]]; ai ++; }
     while (bi < be) { e_arr[r] += weights_a[bbits[bi]]; bi ++; }
   }
-  return tk_inv_combine_ranks(i_arr, q_arr, e_arr, n_ranks, rw);
+  return tk_inv_combine_ranks(i_arr, q_arr, e_arr, n_ranks, rw, kernel);
 }
 
 static inline double tk_inv_similarity_fast_cached (
@@ -1136,7 +1150,8 @@ static inline double tk_inv_similarity_fast_cached (
   tk_inv_rank_weights_t *rw,
   const double *q_arr,
   const double *e_arr,
-  double *i_arr
+  double *i_arr,
+  tk_inv_kernel_t kernel
 ) {
   for (uint64_t r = 0; r < n_ranks; r++) {
     i_arr[r] = 0.0;
@@ -1154,7 +1169,7 @@ static inline double tk_inv_similarity_fast_cached (
       }
     }
   }
-  return tk_inv_combine_ranks(i_arr, (double *)q_arr, (double *)e_arr, n_ranks, rw);
+  return tk_inv_combine_ranks(i_arr, (double *)q_arr, (double *)e_arr, n_ranks, rw, kernel);
 }
 
 static inline double tk_inv_similarity (
@@ -1169,7 +1184,7 @@ static inline double tk_inv_similarity (
   double e_arr[TK_INV_MAX_RANKS] = {0};
   double i_arr[TK_INV_MAX_RANKS] = {0};
   return tk_inv_similarity_fast(inv->weights->a, inv->n_ranks,
-    abits, a_ro, bbits, b_ro, &rw, q_arr, e_arr, i_arr);
+    abits, a_ro, bbits, b_ro, &rw, q_arr, e_arr, i_arr, inv->kernel);
 }
 
 static inline double tk_inv_distance (
@@ -1238,7 +1253,8 @@ static inline double tk_inv_similarity_by_rank_fast (
   double *q_weights_by_rank,
   double *e_weights_by_rank,
   double cutoff,
-  tk_inv_rank_weights_t *rw
+  tk_inv_rank_weights_t *rw,
+  tk_inv_kernel_t kernel
 ) {
   double accum = 0.0;
   double total_weight = 0.0;
@@ -1248,7 +1264,9 @@ static inline double tk_inv_similarity_by_rank_fast (
     double inter_w = wacc_arr[(int64_t)n_ranks * vsid + (int64_t)rank];
     double q_w = q_weights_by_rank[rank];
     double e_w = e_weights_by_rank[rank];
-    double denom = sqrt(q_w * e_w);
+    double denom = (kernel == TK_INV_JACCARD)
+      ? (q_w + e_w - inter_w)
+      : sqrt(q_w * e_w);
     double rank_sim = (denom > 0.0) ? inter_w / denom : 0.0;
     if (rank_sim > 1.0) rank_sim = 1.0;
     accum += weight * rank_sim;
@@ -1276,7 +1294,7 @@ static inline double tk_inv_similarity_by_rank (
   tk_inv_precompute_rank_weights(&rw, inv->n_ranks, decay);
   return tk_inv_similarity_by_rank_fast(
     inv->n_ranks, wacc->a, vsid, q_weights_by_rank, e_weights_by_rank,
-    cutoff, &rw);
+    cutoff, &rw, inv->kernel);
 }
 
 static inline tk_rvec_t *tk_inv_neighbors_by_vec (
@@ -1374,7 +1392,7 @@ static inline tk_rvec_t *tk_inv_neighbors_by_vec (
 
     memcpy(e_weights_by_rank, inv->node_weights->a + vsid * (int64_t) n_ranks, n_ranks * sizeof(double));
     double current_cutoff = (knn && out->n >= knn) ? out->a[0].d : 1.0;
-    double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, vsid, q_weights_by_rank, e_weights_by_rank, current_cutoff, &rw);
+    double sim = tk_inv_similarity_by_rank_fast(n_ranks, wacc->a, vsid, q_weights_by_rank, e_weights_by_rank, current_cutoff, &rw, inv->kernel);
     double dist = 1.0 - sim;
     if (dist <= current_cutoff) {
       int64_t vuid = tk_inv_sid_uid(inv, vsid);
@@ -1731,7 +1749,8 @@ static inline tk_inv_t *tk_inv_create (
   uint64_t features,
   tk_dvec_t *weights,
   uint64_t n_ranks,
-  tk_ivec_t *ranks
+  tk_ivec_t *ranks,
+  tk_inv_kernel_t kernel
 ) {
   if (!features)
     tk_lua_verror(L, 2, "create", "features must be > 0");
@@ -1741,6 +1760,7 @@ static inline tk_inv_t *tk_inv_create (
   tk_inv_t *inv = tk_lua_newuserdata(L, tk_inv_t, TK_INV_MT, tk_inv_lua_mt_fns, tk_inv_gc_lua);
   int Ii = tk_lua_absindex(L, -1);
   inv->destroyed = false;
+  inv->kernel = kernel;
   inv->next_sid = 0;
   inv->features = features;
   inv->n_ranks = n_ranks >= 1 ? n_ranks : 1;
@@ -1802,7 +1822,7 @@ static inline tk_inv_t *tk_inv_load (
     luaL_error(L, "invalid INV file (bad magic)");
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 1)
+  if (version != 1 && version != 2)
     luaL_error(L, "unsupported INV version %d", (int)version);
   tk_inv_t *inv = tk_lua_newuserdata(L, tk_inv_t, TK_INV_MT, tk_inv_lua_mt_fns, tk_inv_gc_lua);
   int Ii = tk_lua_absindex(L, -1);
@@ -1810,6 +1830,12 @@ static inline tk_inv_t *tk_inv_load (
   uint8_t u8;
   tk_lua_fread(L, &u8, sizeof(uint8_t), 1, fh);
   inv->destroyed = u8;
+  if (version >= 2) {
+    tk_lua_fread(L, &u8, sizeof(uint8_t), 1, fh);
+    inv->kernel = (tk_inv_kernel_t)u8;
+  } else {
+    inv->kernel = TK_INV_COSINE;
+  }
   if (inv->destroyed)
     tk_lua_verror(L, 2, "load", "index was destroyed when saved");
   tk_lua_fread(L, &inv->next_sid, sizeof(int64_t), 1, fh);
