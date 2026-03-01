@@ -191,7 +191,7 @@ static inline void tk_spectral_sample_landmarks (
         const double *p_nw = node_weights_a + sid_map[pivot_idx] * (int64_t) n_ranks;
         double kip = tk_inv_similarity_fast_cached(weights_arr, n_ranks,
                                             node_bits_a, i_ro, node_bits_a, p_ro,
-                                            &rw, i_nw, p_nw, thr_i);
+                                            &rw, i_nw, p_nw, thr_i, inv->kernel);
         double dot = (j > 0) ? cblas_ddot((int)j, &L_mat[i * L_stride], 1, pivot_row, 1) : 0.0;
         L_mat[i * L_stride + j] = (kip - dot) / scale;
       }
@@ -350,7 +350,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
         if (enc->lm_sids[j] >= 0 && nf > 0) {
           const int64_t *lm_ro = nystrom_nro + enc->lm_sids[j] * (int64_t) nystrom_stride;
           sims[j] = tk_inv_similarity_fast(inv->weights->a, inv->n_ranks,
-            feat_buf, q_ro, nystrom_nb, lm_ro, &rw, thr_q, thr_e, thr_i);
+            feat_buf, q_ro, nystrom_nb, lm_ro, &rw, thr_q, thr_e, thr_i, inv->kernel);
         } else {
           sims[j] = 0.0;
         }
@@ -577,6 +577,21 @@ static inline int tm_encode (lua_State *L) {
     double tmp = eig_raw->a[i];
     eig_raw->a[i] = eig_raw->a[d - 1 - i];
     eig_raw->a[d - 1 - i] = tmp;
+  }
+  if (d > 0 && eig_raw->a[0] > 0.0) {
+    double eig_floor = eig_raw->a[0] * 1e-10;
+    uint64_t d_safe = d;
+    for (uint64_t j = 0; j < d; j++) {
+      if (eig_raw->a[j] <= eig_floor) {
+        d_safe = j;
+        break;
+      }
+    }
+    if (d_safe == 0) d_safe = 1;
+    if (d_safe < d) {
+      d = d_safe;
+      eig_raw->n = d;
+    }
   }
   int eig_raw_idx = lua_gettop(L);
 

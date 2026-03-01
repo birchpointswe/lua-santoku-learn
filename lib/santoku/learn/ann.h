@@ -139,6 +139,8 @@ static inline void tk_ann_destroy (tk_ann_t *A)
 {
   if (A->destroyed)
     return;
+  free(A->tables);
+  A->tables = NULL;
   A->destroyed = true;
 }
 

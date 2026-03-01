@@ -21,7 +21,16 @@ static inline int tk_inv_create_lua (lua_State *L)
   }
   if (ranks != NULL)
     n_ranks = tk_lua_fcheckunsigned(L, 1, "create", "n_ranks");
-  tk_inv_create(L, features, weights, n_ranks, ranks);
+  tk_inv_kernel_t kernel = TK_INV_COSINE;
+  lua_getfield(L, 1, "kernel");
+  if (lua_isstring(L, -1)) {
+    const char *k = lua_tostring(L, -1);
+    if (strcmp(k, "jaccard") == 0) kernel = TK_INV_JACCARD;
+    else if (strcmp(k, "cosine") != 0)
+      return luaL_error(L, "invalid kernel: %s", k);
+  }
+  lua_pop(L, 1);
+  tk_inv_create(L, features, weights, n_ranks, ranks, kernel);
   return 1;
 }
 
@@ -36,31 +45,10 @@ static inline int tk_inv_load_lua (lua_State *L)
   return 1;
 }
 
-static inline int tk_inv_hoods_select_topk_lua (lua_State *L)
-{
-  lua_settop(L, 2);
-  tk_inv_hoods_t *hoods = tk_inv_hoods_peek(L, 1, "hoods");
-  tk_ivec_t *ks = tk_ivec_peek(L, 2, "ks");
-  if (ks->n != hoods->n)
-    return luaL_error(L, "ks length must match hoods count");
-  for (uint64_t i = 0; i < hoods->n; i++) {
-    uint64_t k = ks->a[i] > 0 ? (uint64_t)ks->a[i] : 0;
-    uint64_t cur = hoods->a[i]->n;
-    tk_rvec_setn(hoods->a[i], k < cur ? k : cur);
-  }
-  return 0;
-}
-
 static luaL_Reg tk_inv_fns[] =
 {
   { "create", tk_inv_create_lua },
   { "load", tk_inv_load_lua },
-  { NULL, NULL }
-};
-
-static luaL_Reg tk_inv_hoods_ext_fns[] =
-{
-  { "select_topk", tk_inv_hoods_select_topk_lua },
   { NULL, NULL }
 };
 
@@ -71,7 +59,6 @@ int luaopen_santoku_learn_inv (lua_State *L)
   tk_inv_hoods_create(L, 0, 0, 0);
   luaL_getmetafield(L, -1, "__index");
   luaL_register(L, NULL, tk_inv_hoods_lua_mt_fns);
-  luaL_register(L, NULL, tk_inv_hoods_ext_fns);
   lua_pop(L, 2);
   return 1;
 }

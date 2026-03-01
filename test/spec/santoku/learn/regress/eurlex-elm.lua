@@ -3,6 +3,7 @@ local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
 local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
+local gfm = require("santoku.learn.gfm")
 local inv = require("santoku.learn.inv")
 local ivec = require("santoku.ivec")
 local optimize = require("santoku.learn.optimize")
@@ -16,49 +17,35 @@ local utc = require("santoku.utc")
 io.stdout:setvbuf("line")
 
 local cfg = {
-  data = { max = nil, toks_per_class = 4096, toks_overall = nil },
+  kernel = "cosine",
+  data = { max = nil, toks_per_class = nil, toks_overall = nil },
   tokenizer = {
     max_len = 20, min_len = 1, max_run = 2,
     ngrams = 2, cgrams_min = 3, cgrams_max = 5,
     cgrams_cross = true, skips = 1,
   },
-  nystrom = {
-    n_landmarks = 4096, n_dims = nil, decay = 0,
-  },
-  augmented = { knn = 32 },
-  ridge_label = {
-    lambda = { def = 1.0 },
-    propensity_a = { def = 0.55 },
-    propensity_b = { def = 1.5 },
-    search_trials = 200, k = 32,
-  },
   elm_direct = {
-    mode = "relu",
-    n_hidden = 8192, seed = 42,
+    n_hidden = 1024, seed = 42,
     lambda = { def = 1.0 },
     propensity_a = { def = 0.55 },
     propensity_b = { def = 1.5 },
-    search_trials = 200, k = 32,
+    search_trials = 80, k = 32, n_folds = 5,
   },
-  elm_spectral = {
-    mode = "relu",
-    n_hidden = 8192, seed = 42,
-    lambda = { def = 1.0 },
-    search_trials = 200,
-  },
-  elm_sidecar = {
-    mode = "relu",
-    n_hidden = 8192, seed = 42,
+  elm_stacked = {
+    n_hidden = 1024,
+    seed = 42,
     lambda = { def = 1.0 },
     propensity_a = { def = 0.55 },
     propensity_b = { def = 1.5 },
-    search_trials = 200, k = 32,
+    search_trials = 80, k = 32, n_folds = 5,
   },
-  elm_kpred = {
-    mode = "relu",
-    n_hidden = 8192, seed = 42,
-    lambda = { def = 1.0 },
-    search_trials = 200,
+  emb = {
+    k = 256, n_folds = 5,
+    n_landmarks = 4096, n_dims = 64, decay = 0,
+    distill = {
+      n_hidden = 1024, seed = 42,
+      lambda = { def = 1.0 }, search_trials = 80,
+    },
   },
 }
 
@@ -75,8 +62,6 @@ test("eurlex-aligned", function ()
   local train_label_off, train_label_nbr = train.solutions:bits_to_csr(train.n, n_labels)
   local dev_label_off, dev_label_nbr = dev.solutions:bits_to_csr(dev.n, n_labels)
   local test_label_off, test_label_nbr = test_set.solutions:bits_to_csr(test_set.n, n_labels)
-  local train_ids = ivec.create(train.n):fill_indices()
-
   local function eval_oracle(pred_off, pred_nbr, exp_off, exp_nbr, ks)
     local _, oracle = eval.retrieval_ks({
       pred_offsets = pred_off, pred_neighbors = pred_nbr,
@@ -100,11 +85,11 @@ test("eurlex-aligned", function ()
   test_set.problems = nil
   str.printf("  Vocabulary: %d\n", n_tokens_raw)
 
-  print("\nFeature selection (BNS/max) for text->labels")
+  print("\nFeature selection for text->labels")
   local bns_ids, bns_scores = train.tokens:bits_top_chi2(
     train.solutions, train.n, n_tokens_raw, n_labels, cfg.data.toks_per_class, cfg.data.toks_overall, "max")
   local n_bns_tokens = bns_ids:size()
-  str.printf("  BNS features: %d\n", n_bns_tokens)
+  str.printf("  Selected features: %d\n", n_bns_tokens)
 
   local function make_bns_csc(tokens, n)
     local bits = ivec.create():copy(tokens)
@@ -115,59 +100,84 @@ test("eurlex-aligned", function ()
   local dev_bns_off, dev_bns_idx = make_bns_csc(dev.tokens, dev.n)
   local test_bns_off, test_bns_idx = make_bns_csc(test_set.tokens, test_set.n)
 
+  local function print_result(label, m)
+    str.printf("  %-10s miP=%.4f miR=%.4f miF1=%.4f maP=%.4f maR=%.4f maF1=%.4f\n",
+      label, m.micro_precision, m.micro_recall, m.micro_f1,
+      m.macro_precision, m.macro_recall, m.macro_f1)
+  end
+
+  local at_ks = { 1, 2, 3, 5, 8, 10, 15, 20, 25, 32 }
+  local function compute_at_ks(scores, n, nl, exp_off, exp_nbr)
+    local diag_ks = ivec.create()
+    for _, k in ipairs(at_ks) do diag_ks:push(k) end
+    return eval.scores_at_ks({
+      scores = scores, n_samples = n, n_labels = nl,
+      expected_offsets = exp_off, expected_neighbors = exp_nbr, ks = diag_ks,
+    })
+  end
+  local function print_at_ks_table(diag)
+    for _, k in ipairs(at_ks) do
+      local m = diag[k]
+      str.printf("  @%-3d miP=%.3f miR=%.3f miF1=%.3f maF1=%.3f NDCG=%.3f\n",
+        k, m.micro_precision, m.micro_recall, m.micro_f1, m.macro_f1, m.ndcg)
+    end
+  end
+  local function print_k_err(label, pred_ks, oracle_ks, n)
+    local err_sum, abs_sum = 0, 0
+    local hi, lo, eq = 0, 0, 0
+    for i = 0, n - 1 do
+      local e = pred_ks:get(i) - oracle_ks:get(i)
+      err_sum = err_sum + e
+      abs_sum = abs_sum + math.abs(e)
+      if e > 0 then hi = hi + 1
+      elseif e < 0 then lo = lo + 1
+      else eq = eq + 1 end
+    end
+    str.printf("  %-10s k MAE=%.2f bias=%.2f exact=%d high=%d low=%d\n",
+      label, abs_sum / n, err_sum / n, eq, hi, lo)
+  end
+
+  local function print_k_buckets(label, pred_ks, oracle_ks, n)
+    local buckets = {}
+    local bounds = { 1, 2, 3, 4, 5, 8, 12, 20, 999 }
+    local bnames = { "1", "2", "3", "4", "5", "6-8", "9-12", "13-20", "21+" }
+    for b = 1, #bounds do
+      buckets[b] = { cnt = 0, sum_err = 0, sum_abs = 0, sum_sq = 0, hi = 0, lo = 0, eq = 0 }
+    end
+    for i = 0, n - 1 do
+      local ok = oracle_ks:get(i)
+      local e = pred_ks:get(i) - ok
+      local bi = #bounds
+      for b = 1, #bounds do
+        if ok <= bounds[b] then bi = b; break end
+      end
+      local bk = buckets[bi]
+      bk.cnt = bk.cnt + 1
+      bk.sum_err = bk.sum_err + e
+      bk.sum_abs = bk.sum_abs + math.abs(e)
+      bk.sum_sq = bk.sum_sq + e * e
+      if e > 0 then bk.hi = bk.hi + 1
+      elseif e < 0 then bk.lo = bk.lo + 1
+      else bk.eq = bk.eq + 1 end
+    end
+    str.printf("  %s k-error by oracle-k bucket:\n", label)
+    str.printf("  %-6s %6s %7s %7s %7s %5s %5s %5s\n",
+      "k*", "n", "bias", "MAE", "RMSE", "hi", "lo", "eq")
+    for b = 1, #bounds do
+      local bk = buckets[b]
+      if bk.cnt > 0 then
+        str.printf("  %-6s %6d %+7.2f %7.2f %7.2f %5d %5d %5d\n",
+          bnames[b], bk.cnt, bk.sum_err / bk.cnt, bk.sum_abs / bk.cnt,
+          math.sqrt(bk.sum_sq / bk.cnt), bk.hi, bk.lo, bk.eq)
+      end
+    end
+  end
+
   local function eval_elm(obj, train_h, k, dense_dv, dense_ts)
-    local tr_off, tr_nbr = obj.ridge:label(train_h, train.n, k)
-    local tr_oracle = eval_oracle(tr_off, tr_nbr, train_label_off, train_label_nbr)
     local dv_off, dv_nbr = obj:label(dev_bns_off, dev_bns_idx, dev.n, k, dense_dv)
     local dv_oracle = eval_oracle(dv_off, dv_nbr, dev_label_off, dev_label_nbr)
-    local ts_off, ts_nbr = obj:label(test_bns_off, test_bns_idx, test_set.n, k, dense_ts)
-    local ts_oracle = eval_oracle(ts_off, ts_nbr, test_label_off, test_label_nbr)
-    str.printf("  Oracle:   Train maF1=%.4f  Dev maF1=%.4f  Test maF1=%.4f\n",
-      tr_oracle.macro_f1, dv_oracle.macro_f1, ts_oracle.macro_f1)
-    local tr_scores = obj.ridge:transform(train_h, train.n)
-    local dv_scores = obj:transform(dev_bns_off, dev_bns_idx, dev.n, dense_dv)
-    local ts_scores = obj:transform(test_bns_off, test_bns_idx, test_set.n, dense_ts)
-    local thresholds = eval.label_thresholds({
-      scores = dv_scores, n_samples = dev.n, n_labels = n_labels,
-      expected_offsets = dev_label_off, expected_neighbors = dev_label_nbr,
-    })
-    local tr_thr = eval.apply_label_thresholds({
-      scores = tr_scores, n_samples = train.n, n_labels = n_labels,
-      thresholds = thresholds,
-      expected_offsets = train_label_off, expected_neighbors = train_label_nbr,
-    })
-    local dv_thr = eval.apply_label_thresholds({
-      scores = dv_scores, n_samples = dev.n, n_labels = n_labels,
-      thresholds = thresholds,
-      expected_offsets = dev_label_off, expected_neighbors = dev_label_nbr,
-    })
-    local ts_thr = eval.apply_label_thresholds({
-      scores = ts_scores, n_samples = test_set.n, n_labels = n_labels,
-      thresholds = thresholds,
-      expected_offsets = test_label_off, expected_neighbors = test_label_nbr,
-    })
-    str.printf("  Thresh:   Train maF1=%.4f  Dev maF1=%.4f  Test maF1=%.4f\n",
-      tr_thr.macro_f1, dv_thr.macro_f1, ts_thr.macro_f1)
-    local _, kp_params, ts_pred_ks = util.train_kpred({
-      k = k, n_labels = n_labels,
-      n_tokens = n_bns_tokens, feature_weights = bns_scores,
-      train_csc_offsets = dev_bns_off, train_csc_indices = dev_bns_idx,
-      test_csc_offsets = test_bns_off, test_csc_indices = test_bns_idx,
-      train_scores = dv_scores, train_pred_off = dv_off, train_pred_nbr = dv_nbr,
-      train_exp_off = dev_label_off, train_exp_nbr = dev_label_nbr, train_n = dev.n,
-      test_scores = ts_scores, test_pred_off = ts_off, test_pred_nbr = ts_nbr, test_n = test_set.n,
-      n_hidden = cfg.elm_kpred.n_hidden, seed = cfg.elm_kpred.seed,
-      mode = cfg.elm_kpred.mode,
-      lambda = cfg.elm_kpred.lambda, search_trials = cfg.elm_kpred.search_trials,
-      each = util.make_kpred_log(stopwatch),
-    })
-    local ts_kpred = eval_oracle(ts_off, ts_nbr, test_label_off, test_label_nbr, ts_pred_ks)
-    str.printf("  K-pred:   Test maF1=%.4f (lambda=%.4e)\n", ts_kpred.macro_f1, kp_params.lambda)
-    return {
-      tr_oracle = tr_oracle, dv_oracle = dv_oracle, ts_oracle = ts_oracle,
-      tr_thr = tr_thr, dv_thr = dv_thr, ts_thr = ts_thr,
-      ts_kpred = ts_kpred,
-    }
+    print_result("Oracle", dv_oracle)
+    return dv_oracle
   end
 
   print("\n#1: Direct ELM text->labels (baseline)")
@@ -176,7 +186,6 @@ test("eurlex-aligned", function ()
     n_tokens = n_bns_tokens,
     n_hidden = cfg.elm_direct.n_hidden,
     seed = cfg.elm_direct.seed,
-    mode = cfg.elm_direct.mode,
     csc_offsets = train_bns_off,
     csc_indices = train_bns_idx,
     feature_weights = bns_scores,
@@ -198,200 +207,329 @@ test("eurlex-aligned", function ()
     each = util.make_elm_log(stopwatch),
   })
   str.printf("  lambda=%.4e\n", elm_direct_params.lambda)
-  local d1 = eval_elm(elm_direct_obj, d1_train_h, cfg.elm_direct.k)
-  elm_direct_obj = nil; d1_train_h = nil -- luacheck: ignore
-  collectgarbage("collect")
+  local dv_oracle = eval_elm(elm_direct_obj, d1_train_h, cfg.elm_direct.k, nil, nil)
 
-  print("\nLabel spectral embedding")
-  local label_sols = ivec.create():copy(train.solutions)
-  local label_idf_ids, label_idf_scores = label_sols:bits_top_idf(train.n, n_labels)
-  label_sols:bits_select(label_idf_ids, nil, n_labels)
-  local label_index = inv.create({ features = label_idf_scores })
-  label_index:add(label_sols, train_ids)
-  str.printf("  Label index: %d IDF feats, %d docs\n", label_idf_ids:size(), train.n)
-  local label_model = optimize.spectral({
-    index = label_index,
-    n_landmarks = cfg.nystrom.n_landmarks,
-    n_dims = cfg.nystrom.n_dims,
-    decay = cfg.nystrom.decay,
-    each = util.make_spectral_log(stopwatch),
-  })
-  local label_dims = label_model.dims
-  str.printf("  Label spectral: %d dims\n", label_dims)
-  local label_codes = dvec.create():mtx_extend(label_model.raw_codes,
-    label_model.ids:set_intersect(ivec.create(train.n):fill_indices()),
-    label_model.ids, 0, label_dims, true)
-  label_index = nil; label_model = nil; label_sols = nil -- luacheck: ignore
-
-  print("\n#2: Ridge label spectral -> labels (ceiling, train only)")
-  local ceiling_ridge, _, ceiling_metrics = optimize.ridge({
-    n_samples = train.n, n_dims = label_dims,
-    n_labels = n_labels, codes = label_codes,
+  print("\n#2: GFM (OOF scores->k)")
+  local kp_k = cfg.elm_direct.k
+  local elm_dims = elm_direct_obj.ridge:n_dims()
+  local oof_off, oof_nbr, oof_scores, oof_transform = optimize.elm_oof({
+    n_samples = train.n, train_h = d1_train_h, dims = elm_dims,
+    n_labels = n_labels,
     label_offsets = train_label_off, label_neighbors = train_label_nbr,
-    expected_offsets = train_label_off, expected_neighbors = train_label_nbr,
-    lambda = cfg.ridge_label.lambda,
-    propensity_a = cfg.ridge_label.propensity_a,
-    propensity_b = cfg.ridge_label.propensity_b,
-    k = cfg.ridge_label.k,
-    search_trials = cfg.ridge_label.search_trials,
-    each = util.make_ridge_log(stopwatch),
+    lambda = elm_direct_params.lambda,
+    propensity_a = elm_direct_params.propensity_a,
+    propensity_b = elm_direct_params.propensity_b,
+    k = kp_k, n_folds = cfg.elm_direct.n_folds, transform = true,
   })
-  local ceiling_oracle = ceiling_metrics.oracle
-  ceiling_ridge = nil -- luacheck: ignore
-  str.printf("  Oracle:   maF1=%.4f miF1=%.4f\n", ceiling_oracle.macro_f1, ceiling_oracle.micro_f1)
+  local d1_dv_off, d1_dv_nbr, d1_dv_scores = elm_direct_obj:label(dev_bns_off, dev_bns_idx, dev.n, kp_k)
+  local d1_ts_off, d1_ts_nbr, d1_ts_scores = elm_direct_obj:label(test_bns_off, test_bns_idx, test_set.n, kp_k)
+  local gfm_obj = gfm.create({
+    pred_offsets = oof_off, pred_neighbors = oof_nbr, pred_scores = oof_scores,
+    n_samples = train.n, n_labels = n_labels,
+    expected_offsets = train_label_off, expected_neighbors = train_label_nbr,
+  })
+  local kp_dv_scores = elm_direct_obj:transform(dev_bns_off, dev_bns_idx, dev.n)
+  local kp_ts_scores = elm_direct_obj:transform(test_bns_off, test_bns_idx, test_set.n)
+  local dv_ks = gfm_obj:predict({
+    offsets = d1_dv_off, neighbors = d1_dv_nbr, scores = d1_dv_scores,
+    n_samples = dev.n,
+  })
+  local ts_ks = gfm_obj:predict({
+    offsets = d1_ts_off, neighbors = d1_ts_nbr, scores = d1_ts_scores,
+    n_samples = test_set.n,
+  })
+  local _, dv_gfm = eval.retrieval_ks({
+    pred_offsets = d1_dv_off, pred_neighbors = d1_dv_nbr,
+    expected_offsets = dev_label_off, expected_neighbors = dev_label_nbr,
+    ks = dv_ks,
+  })
+  local _, ts_gfm = eval.retrieval_ks({
+    pred_offsets = d1_ts_off, pred_neighbors = d1_ts_nbr,
+    expected_offsets = test_label_off, expected_neighbors = test_label_nbr,
+    ks = ts_ks,
+  })
+  print_result("GFM", dv_gfm)
 
-  print("\nFeature selection for text->spectral")
-  local r2_ids, r2_scores = train.tokens:bits_top_reg_auc(
-    label_codes, train.n, n_tokens_raw, label_dims, cfg.data.toks_per_class, cfg.data.toks_overall, "max")
-  local n_r2_tokens = r2_ids:size()
-  str.printf("  Selected features: %d\n", n_r2_tokens)
-
-  local function make_r2_csc(tokens, n)
-    local bits = ivec.create():copy(tokens)
-    bits:bits_select(r2_ids, nil, n_tokens_raw)
-    return csr.to_csc(bits, n, n_r2_tokens)
-  end
-  local train_r2_off, train_r2_idx = make_r2_csc(train.tokens, train.n)
-  local dev_r2_off, dev_r2_idx = make_r2_csc(dev.tokens, dev.n)
-  local test_r2_off, test_r2_idx = make_r2_csc(test_set.tokens, test_set.n)
-
-  print("\nDistillation: ELM text->spectral")
-  local elm_spec_obj, elm_spec_params, _, spec_train_h = optimize.elm({
+  print("\n#3: Stacked ELM (OOF scores->labels) + GFM")
+  local elm2_obj, elm2_params, _, elm2_train_h = optimize.elm({
     n_samples = train.n,
-    n_tokens = n_r2_tokens,
-    n_hidden = cfg.elm_spectral.n_hidden,
-    seed = cfg.elm_spectral.seed,
-    mode = cfg.elm_spectral.mode,
-    csc_offsets = train_r2_off,
-    csc_indices = train_r2_idx,
-    feature_weights = r2_scores,
-    targets = label_codes,
-    n_targets = label_dims,
-    lambda = cfg.elm_spectral.lambda,
-    search_trials = cfg.elm_spectral.search_trials,
+    dense_features = oof_transform,
+    n_dense = n_labels,
+    n_hidden = cfg.elm_stacked.n_hidden,
+    seed = cfg.elm_stacked.seed,
+    n_labels = n_labels,
+    label_offsets = train_label_off,
+    label_neighbors = train_label_nbr,
+    expected_offsets = train_label_off,
+    expected_neighbors = train_label_nbr,
+    val_dense_features = kp_dv_scores,
+    val_n_samples = dev.n,
+    val_expected_offsets = dev_label_off,
+    val_expected_neighbors = dev_label_nbr,
+    lambda = cfg.elm_stacked.lambda,
+    propensity_a = cfg.elm_stacked.propensity_a,
+    propensity_b = cfg.elm_stacked.propensity_b,
+    search_trials = cfg.elm_stacked.search_trials,
     each = util.make_elm_log(stopwatch),
   })
-  str.printf("  H=%d lambda=%.4e\n", elm_spec_params.n_hidden, elm_spec_params.lambda)
+  str.printf("  lambda=%.4e\n", elm2_params.lambda)
+  local kp_k2 = cfg.elm_stacked.k
+  local elm2_dims = elm2_obj.ridge:n_dims()
+  local e2_oof_off, e2_oof_nbr, e2_oof_scores = optimize.elm_oof({
+    n_samples = train.n, train_h = elm2_train_h, dims = elm2_dims,
+    n_labels = n_labels,
+    label_offsets = train_label_off, label_neighbors = train_label_nbr,
+    lambda = elm2_params.lambda,
+    propensity_a = elm2_params.propensity_a,
+    propensity_b = elm2_params.propensity_b,
+    k = kp_k2, n_folds = cfg.elm_stacked.n_folds,
+  })
+  local e2_dv_off, e2_dv_nbr, e2_dv_scores = elm2_obj:label(nil, nil, dev.n, kp_k2, kp_dv_scores)
+  local e2_ts_off, e2_ts_nbr, e2_ts_scores = elm2_obj:label(nil, nil, test_set.n, kp_k2, kp_ts_scores)
+  local e2_dv_oracle = eval_oracle(e2_dv_off, e2_dv_nbr, dev_label_off, dev_label_nbr)
+  local e2_ts_oracle = eval_oracle(e2_ts_off, e2_ts_nbr, test_label_off, test_label_nbr)
+  print_result("Stk Orc", e2_dv_oracle)
+  local gfm2_obj = gfm.create({
+    pred_offsets = e2_oof_off, pred_neighbors = e2_oof_nbr, pred_scores = e2_oof_scores,
+    n_samples = train.n, n_labels = n_labels,
+    expected_offsets = train_label_off, expected_neighbors = train_label_nbr,
+  })
+  local stk_dv_scores = elm2_obj:transform(nil, nil, dev.n, kp_dv_scores)
+  local stk_ts_scores = elm2_obj:transform(nil, nil, test_set.n, kp_ts_scores)
+  local e2_dv_ks = gfm2_obj:predict({
+    offsets = e2_dv_off, neighbors = e2_dv_nbr, scores = e2_dv_scores,
+    n_samples = dev.n,
+  })
+  local e2_ts_ks = gfm2_obj:predict({
+    offsets = e2_ts_off, neighbors = e2_ts_nbr, scores = e2_ts_scores,
+    n_samples = test_set.n,
+  })
+  local _, e2_dv_gfm = eval.retrieval_ks({
+    pred_offsets = e2_dv_off, pred_neighbors = e2_dv_nbr,
+    expected_offsets = dev_label_off, expected_neighbors = dev_label_nbr, ks = e2_dv_ks,
+  })
+  local _, e2_ts_gfm = eval.retrieval_ks({
+    pred_offsets = e2_ts_off, pred_neighbors = e2_ts_nbr,
+    expected_offsets = test_label_off, expected_neighbors = test_label_nbr, ks = e2_ts_ks,
+  })
+  print_result("Stk GFM", e2_dv_gfm)
 
-  local train_pred = elm_spec_obj.ridge:transform(spec_train_h, train.n)
-  spec_train_h = nil -- luacheck: ignore
-  local dev_pred = elm_spec_obj:transform(dev_r2_off, dev_r2_idx, dev.n)
-  local test_pred = elm_spec_obj:transform(test_r2_off, test_r2_idx, test_set.n)
-  elm_spec_obj = nil -- luacheck: ignore
+  print("\n  --- Diagnostics (dev) ---")
+  local dv_oracle_ks = eval.retrieval_ks({
+    pred_offsets = d1_dv_off, pred_neighbors = d1_dv_nbr,
+    expected_offsets = dev_label_off, expected_neighbors = dev_label_nbr,
+  })
+  d1_dv_atk = compute_at_ks(kp_dv_scores, dev.n, n_labels, dev_label_off, dev_label_nbr)
+  d1_ts_atk = compute_at_ks(kp_ts_scores, test_set.n, n_labels, test_label_off, test_label_nbr)
+  print("\n  #1 scores@k (dev):")
+  print_at_ks_table(d1_dv_atk)
+  print_k_err("GFM", dv_ks, dv_oracle_ks, dev.n)
+  print_k_buckets("GFM", dv_ks, dv_oracle_ks, dev.n)
+  e2_dv_atk = compute_at_ks(stk_dv_scores, dev.n, n_labels, dev_label_off, dev_label_nbr)
+  e2_ts_atk = compute_at_ks(stk_ts_scores, test_set.n, n_labels, test_label_off, test_label_nbr)
+  print("\n  #3 scores@k (dev):")
+  print_at_ks_table(e2_dv_atk)
+  print_k_err("Stk GFM", e2_dv_ks, dv_oracle_ks, dev.n)
+  print_k_buckets("Stk GFM", e2_dv_ks, dv_oracle_ks, dev.n)
+  print("  --- End diagnostics ---")
 
-  local pred_mae = eval.regression_accuracy(train_pred, label_codes)
-  str.printf("  MAE: %.6f\n", pred_mae.mean)
-
-  print("\nBuilding neighbor averages")
-  local pred_itq = quantizer.create({ mode = "itq", raw_codes = train_pred, n_samples = train.n })
-  local train_bin = pred_itq:encode(train_pred)
-  local pred_ann = ann.create({ features = label_dims })
-  pred_ann:add(train_bin, train_ids)
-
-  local function build_neighbor_avg(pred)
-    local bin = pred_itq:encode(pred)
-    local hood_ids, ann_hoods = pred_ann:neighborhoods_by_vecs(bin, cfg.augmented.knn)
-    local nn_off, nn_nbr, nn_w = ann_hoods:to_csr(label_dims)
-    return csr.neighbor_average(nn_off, nn_nbr, nn_w, hood_ids, label_codes, train_ids, label_dims)
-  end
-
-  local train_avg = build_neighbor_avg(train_pred)
-  local dev_avg = build_neighbor_avg(dev_pred)
-  local test_avg = build_neighbor_avg(test_pred)
-  pred_itq = nil; pred_ann = nil; train_bin = nil -- luacheck: ignore
-  str.printf("  knn=%d, dims=%d\n", cfg.augmented.knn, label_dims)
-
-  local train_both = dvec.create():copy(train_pred)
-  train_both:mtx_extend(train_avg, label_dims, label_dims)
-  local dev_both = dvec.create():copy(dev_pred)
-  dev_both:mtx_extend(dev_avg, label_dims, label_dims)
-  local test_both = dvec.create():copy(test_pred)
-  test_both:mtx_extend(test_avg, label_dims, label_dims)
-  local both_dims = label_dims * 2
+  d1_train_h = nil; oof_transform = nil -- luacheck: ignore
+  elm2_obj = nil; elm2_train_h = nil; gfm2_obj = nil -- luacheck: ignore
+  oof_off = nil; oof_nbr = nil; oof_scores = nil -- luacheck: ignore
+  d1_dv_off = nil; d1_dv_nbr = nil; d1_dv_scores = nil -- luacheck: ignore
+  d1_ts_off = nil; d1_ts_nbr = nil; d1_ts_scores = nil -- luacheck: ignore
+  stk_dv_scores = nil; stk_ts_scores = nil -- luacheck: ignore
   collectgarbage("collect")
 
-  local function train_sidecar_elm(dense_tr, dense_dv, dense_ts, n_dense)
-    local sc = cfg.elm_sidecar
-    local obj, params, _, train_h = optimize.elm({
-      n_samples = train.n,
-      n_tokens = n_bns_tokens,
-      n_hidden = sc.n_hidden,
-      seed = sc.seed,
-      mode = sc.mode,
-      csc_offsets = train_bns_off,
-      csc_indices = train_bns_idx,
-      feature_weights = bns_scores,
-      dense_features = dense_tr,
-      n_dense = n_dense,
-      n_labels = n_labels,
-      label_offsets = train_label_off,
-      label_neighbors = train_label_nbr,
-      expected_offsets = train_label_off,
-      expected_neighbors = train_label_nbr,
-      val_csc_offsets = dev_bns_off,
-      val_csc_indices = dev_bns_idx,
-      val_n_samples = dev.n,
-      val_dense_features = dense_dv,
-      val_expected_offsets = dev_label_off,
-      val_expected_neighbors = dev_label_nbr,
-      lambda = sc.lambda,
-      propensity_a = sc.propensity_a,
-      propensity_b = sc.propensity_b,
-      k = sc.k,
-      search_trials = sc.search_trials,
-      each = util.make_elm_log(stopwatch),
-    })
-    str.printf("  lambda=%.4e\n", params.lambda)
-    local result = eval_elm(obj, train_h, sc.k, dense_dv, dense_ts)
-    obj = nil; train_h = nil -- luacheck: ignore
-    collectgarbage("collect")
-    return result
+  print("\n#4: Doc-embedding retrieval pipeline")
+
+  print("\nPhase A: Doc spectral embedding")
+  local doc_idf_ids, doc_idf_scores = train.solutions:bits_top_idf(train.n, n_labels)
+  local doc_bits = ivec.create():copy(train.solutions)
+  doc_bits:bits_select(doc_idf_ids, nil, n_labels)
+  local n_doc_feats = doc_idf_ids:size()
+  str.printf("  IDF label-features: %d\n", n_doc_feats)
+  local doc_ids = ivec.create(train.n):fill_indices()
+  local doc_index = inv.create({ features = doc_idf_scores, kernel = cfg.kernel })
+  doc_index:add(doc_bits, doc_ids)
+  doc_bits = nil -- luacheck: ignore
+  local doc_model = optimize.spectral({
+    index = doc_index,
+    n_landmarks = cfg.emb.n_landmarks,
+    n_dims = cfg.emb.n_dims,
+    decay = cfg.emb.decay,
+    each = util.make_spectral_log(stopwatch),
+  })
+  local doc_dims = doc_model.dims
+  str.printf("  Doc spectral: %d dims, %d embedded\n", doc_dims, doc_model.ids:size())
+  local all_doc_ids = ivec.create(train.n):fill_indices()
+  local doc_embs = dvec.create():mtx_extend(
+    doc_model.raw_codes, all_doc_ids, doc_model.ids, 0, doc_dims, true)
+  doc_index = nil; doc_model = nil -- luacheck: ignore
+
+  print("\nPhase B: Distill text -> doc embedding")
+  local distill_ids, distill_scores = train.tokens:bits_top_reg_auc(
+    doc_embs, train.n, n_tokens_raw, doc_dims,
+    cfg.data.toks_per_class, cfg.data.toks_overall, "max")
+  local n_distill_tokens = distill_ids:size()
+  str.printf("  Distill features: %d\n", n_distill_tokens)
+  local function make_distill_csc(tokens, n)
+    local bits = ivec.create():copy(tokens)
+    bits:bits_select(distill_ids, nil, n_tokens_raw)
+    return csr.to_csc(bits, n, n_distill_tokens)
   end
+  local tr_d_off, tr_d_idx = make_distill_csc(train.tokens, train.n)
+  local dv_d_off, dv_d_idx = make_distill_csc(dev.tokens, dev.n)
+  local ts_d_off, ts_d_idx = make_distill_csc(test_set.tokens, test_set.n)
+  train.tokens = nil; dev.tokens = nil; test_set.tokens = nil -- luacheck: ignore
+  collectgarbage("collect")
+  local distill_obj, distill_params, _, distill_train_h = optimize.elm({
+    n_samples = train.n,
+    n_tokens = n_distill_tokens,
+    n_hidden = cfg.emb.distill.n_hidden,
+    seed = cfg.emb.distill.seed,
+    csc_offsets = tr_d_off, csc_indices = tr_d_idx,
+    feature_weights = distill_scores,
+    targets = doc_embs,
+    n_targets = doc_dims,
+    lambda = cfg.emb.distill.lambda,
+    search_trials = cfg.emb.distill.search_trials,
+    each = util.make_elm_log(stopwatch),
+  })
+  str.printf("  Distill lambda=%.4e\n", distill_params.lambda)
 
-  print("\n#3: Distilled (sparse + predicted spectral sidecar)")
-  local d3 = train_sidecar_elm(train_pred, dev_pred, test_pred, label_dims)
+  print("\nPhase C: OOF + ITQ + ANN")
+  local oof_doc_embs = optimize.elm_oof_dense({
+    n_samples = train.n,
+    train_h = distill_train_h,
+    dims = cfg.emb.distill.n_hidden,
+    targets = doc_embs,
+    n_targets = doc_dims,
+    lambda = distill_params.lambda,
+    n_folds = cfg.emb.n_folds,
+  })
+  doc_embs = nil -- luacheck: ignore
+  local itq = quantizer.create({
+    mode = "itq", raw_codes = oof_doc_embs, n_samples = train.n,
+  })
+  local train_bin = itq:encode(oof_doc_embs)
+  oof_doc_embs = nil -- luacheck: ignore
+  local doc_ann = ann.create({ features = doc_dims })
+  doc_ann:add(train_bin, doc_ids)
+  train_bin = nil -- luacheck: ignore
 
-  print("\n#4: Augmented (sparse + neighbor avg sidecar)")
-  local d4 = train_sidecar_elm(train_avg, dev_avg, test_avg, label_dims)
-
-  print("\n#5: Combined (sparse + pred + avg sidecar)")
-  local d5 = train_sidecar_elm(train_both, dev_both, test_both, both_dims)
-
-  train_pred = nil; dev_pred = nil; test_pred = nil -- luacheck: ignore
-  train_avg = nil; dev_avg = nil; test_avg = nil -- luacheck: ignore
-  train_both = nil; dev_both = nil; test_both = nil -- luacheck: ignore
+  print("\nPhase D: Shortlisting (ANN -> neighbor docs -> label union)")
+  local K = cfg.emb.k
+  local function shortlist(d_off, d_idx, n)
+    local pred = distill_obj:transform(d_off, d_idx, n)
+    local bin = itq:encode(pred)
+    local hood_ids, ann_hoods = doc_ann:neighborhoods_by_vecs(bin, K)
+    local a_off, a_nbr = ann_hoods:to_csr(doc_dims)
+    local union_bits = csr.label_union(
+      a_off, a_nbr, hood_ids, train_label_off, train_label_nbr, n_labels)
+    return union_bits:bits_to_csr(n, n_labels)
+  end
+  local dv_short_off, dv_short_nbr = shortlist(dv_d_off, dv_d_idx, dev.n)
+  local ts_short_off, ts_short_nbr = shortlist(ts_d_off, ts_d_idx, test_set.n)
+  distill_obj = nil; distill_train_h = nil -- luacheck: ignore
   collectgarbage("collect")
 
-  print("\n" .. string.rep("=", 60))
-  print("RESULTS")
-  print(string.rep("=", 60))
-  str.printf("\n  #1 Direct ELM (baseline):\n")
-  str.printf("    Oracle:   Train maF1=%.4f  Dev maF1=%.4f  Test maF1=%.4f\n",
-    d1.tr_oracle.macro_f1, d1.dv_oracle.macro_f1, d1.ts_oracle.macro_f1)
-  str.printf("    Thresh:   Train maF1=%.4f  Dev maF1=%.4f  Test maF1=%.4f\n",
-    d1.tr_thr.macro_f1, d1.dv_thr.macro_f1, d1.ts_thr.macro_f1)
-  str.printf("    K-pred:   Test maF1=%.4f\n", d1.ts_kpred.macro_f1)
-  str.printf("  #2 Ceiling (train):\n")
-  str.printf("    Oracle:   maF1=%.4f miF1=%.4f\n", ceiling_oracle.macro_f1, ceiling_oracle.micro_f1)
-  str.printf("  #3 Distilled (sparse + pred spectral):\n")
-  str.printf("    Oracle:   Train maF1=%.4f  Dev maF1=%.4f  Test maF1=%.4f\n",
-    d3.tr_oracle.macro_f1, d3.dv_oracle.macro_f1, d3.ts_oracle.macro_f1)
-  str.printf("    Thresh:   Train maF1=%.4f  Dev maF1=%.4f  Test maF1=%.4f\n",
-    d3.tr_thr.macro_f1, d3.dv_thr.macro_f1, d3.ts_thr.macro_f1)
-  str.printf("    K-pred:   Test maF1=%.4f\n", d3.ts_kpred.macro_f1)
-  str.printf("  #4 Augmented (sparse + neighbor avg):\n")
-  str.printf("    Oracle:   Train maF1=%.4f  Dev maF1=%.4f  Test maF1=%.4f\n",
-    d4.tr_oracle.macro_f1, d4.dv_oracle.macro_f1, d4.ts_oracle.macro_f1)
-  str.printf("    Thresh:   Train maF1=%.4f  Dev maF1=%.4f  Test maF1=%.4f\n",
-    d4.tr_thr.macro_f1, d4.dv_thr.macro_f1, d4.ts_thr.macro_f1)
-  str.printf("    K-pred:   Test maF1=%.4f\n", d4.ts_kpred.macro_f1)
-  str.printf("  #5 Combined (sparse + pred + avg):\n")
-  str.printf("    Oracle:   Train maF1=%.4f  Dev maF1=%.4f  Test maF1=%.4f\n",
-    d5.tr_oracle.macro_f1, d5.dv_oracle.macro_f1, d5.ts_oracle.macro_f1)
-  str.printf("    Thresh:   Train maF1=%.4f  Dev maF1=%.4f  Test maF1=%.4f\n",
-    d5.tr_thr.macro_f1, d5.dv_thr.macro_f1, d5.ts_thr.macro_f1)
-  str.printf("    K-pred:   Test maF1=%.4f\n", d5.ts_kpred.macro_f1)
-  str.printf("  Distillation MAE: %.6f\n", pred_mae.mean)
+  local function csr_recall(short_off, short_nbr, gt_off, gt_nbr, n)
+    local found, total, rsum, nv = 0, 0, 0, 0
+    for i = 0, n - 1 do
+      local ss, se = short_off:get(i), short_off:get(i + 1)
+      local gs, ge = gt_off:get(i), gt_off:get(i + 1)
+      local nt = ge - gs
+      local nf = 0
+      local si, gi = ss, gs
+      while si < se and gi < ge do
+        local sv, gv = short_nbr:get(si), gt_nbr:get(gi)
+        if sv == gv then nf = nf + 1; si = si + 1; gi = gi + 1
+        elseif sv < gv then si = si + 1
+        else gi = gi + 1 end
+      end
+      found = found + nf
+      total = total + nt
+      if nt > 0 then rsum = rsum + nf / nt; nv = nv + 1 end
+    end
+    return found / total, rsum / nv
+  end
+  do
+    local mir, mar = csr_recall(dv_short_off, dv_short_nbr, dev_label_off, dev_label_nbr, dev.n)
+    str.printf("  Dev retrieval recall: miR=%.4f maR=%.4f avg_short=%.1f\n",
+      mir, mar, (dv_short_off:get(dev.n) - dv_short_off:get(0)) / dev.n)
+  end
+  do
+    local mir, mar = csr_recall(ts_short_off, ts_short_nbr, test_label_off, test_label_nbr, test_set.n)
+    str.printf("  Test retrieval recall: miR=%.4f maR=%.4f avg_short=%.1f\n",
+      mir, mar, (ts_short_off:get(test_set.n) - ts_short_off:get(0)) / test_set.n)
+  end
+
+  print("\nPhase E: OVA re-ranking + GFM")
+  local dv_short_scores = eval.gather_label_scores({
+    scores = kp_dv_scores, pred_offsets = dv_short_off,
+    pred_neighbors = dv_short_nbr, n_labels = n_labels,
+  })
+  local dv_sorted_nbr, dv_sorted_sc = csr.sort_csr_desc(dv_short_off, dv_short_nbr, dv_short_scores)
+  local ts_short_scores = eval.gather_label_scores({
+    scores = kp_ts_scores, pred_offsets = ts_short_off,
+    pred_neighbors = ts_short_nbr, n_labels = n_labels,
+  })
+  local ts_sorted_nbr, ts_sorted_sc = csr.sort_csr_desc(ts_short_off, ts_short_nbr, ts_short_scores)
+
+  local _, dv_emb_orc = eval.retrieval_ks({
+    pred_offsets = dv_short_off, pred_neighbors = dv_sorted_nbr,
+    expected_offsets = dev_label_off, expected_neighbors = dev_label_nbr,
+  })
+  print_result("Orc D", dv_emb_orc)
+  local dv_ks4 = gfm_obj:predict({
+    offsets = dv_short_off, neighbors = dv_sorted_nbr, scores = dv_sorted_sc,
+    n_samples = dev.n,
+  })
+  local _, dv_emb_gfm = eval.retrieval_ks({
+    pred_offsets = dv_short_off, pred_neighbors = dv_sorted_nbr,
+    expected_offsets = dev_label_off, expected_neighbors = dev_label_nbr, ks = dv_ks4,
+  })
+  print_result("GFM D", dv_emb_gfm)
+  local ts_ks4 = gfm_obj:predict({
+    offsets = ts_short_off, neighbors = ts_sorted_nbr, scores = ts_sorted_sc,
+    n_samples = test_set.n,
+  })
+  local _, ts_emb_gfm = eval.retrieval_ks({
+    pred_offsets = ts_short_off, pred_neighbors = ts_sorted_nbr,
+    expected_offsets = test_label_off, expected_neighbors = test_label_nbr, ks = ts_ks4,
+  })
+  print_result("GFM T", ts_emb_gfm)
+  elm_direct_obj = nil; gfm_obj = nil -- luacheck: ignore
+
   str.printf("\n  Time: %.1fs\n", stopwatch())
+
+  print("\n========== Summary ==========")
+  print("#1 Direct ELM: text->labels, oracle-k")
+  print_result("  Dev", dv_oracle)
+  print("#2 Direct ELM + GFM: OOF calibration")
+  print_result("  Dev GFM", dv_gfm)
+  print_result("  Tst GFM", ts_gfm)
+  print_k_err("GFM", dv_ks, dv_oracle_ks, dev.n)
+  print_k_buckets("GFM", dv_ks, dv_oracle_ks, dev.n)
+  print("  Dev @k:")
+  print_at_ks_table(d1_dv_atk)
+  print("  Tst @k:")
+  print_at_ks_table(d1_ts_atk)
+  print("#3 Stacked ELM + GFM: OOF scores->labels")
+  print_result("  Dev Orc", e2_dv_oracle)
+  print_result("  Tst Orc", e2_ts_oracle)
+  print_result("  Dev GFM", e2_dv_gfm)
+  print_result("  Tst GFM", e2_ts_gfm)
+  print_k_err("Stk GFM", e2_dv_ks, dv_oracle_ks, dev.n)
+  print_k_buckets("Stk GFM", e2_dv_ks, dv_oracle_ks, dev.n)
+  print("  Dev @k:")
+  print_at_ks_table(e2_dv_atk)
+  print("  Tst @k:")
+  print_at_ks_table(e2_ts_atk)
+  print("#4 Doc-embedding retrieval + OVA re-ranking + GFM")
+  print_result("  Dev Orc", dv_emb_orc)
+  print_result("  Dev GFM", dv_emb_gfm)
+  print_result("  Tst GFM", ts_emb_gfm)
 
 end)

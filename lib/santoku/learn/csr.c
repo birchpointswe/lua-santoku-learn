@@ -551,51 +551,6 @@ static int tm_csr_bits_to_hv (lua_State *L)
   return 2;
 }
 
-static int tm_csr_cvec_to_csc (lua_State *L)
-{
-  tk_cvec_t *cv = tk_cvec_peek(L, 1, "cvec");
-  uint64_t n_samples = tk_lua_checkunsigned(L, 2, "n_samples");
-  uint64_t n_features = tk_lua_checkunsigned(L, 3, "n_features");
-  uint64_t bits_per_sample = 2 * n_features;
-  uint64_t bytes_per_sample = (bits_per_sample + 7) / 8;
-
-  uint64_t *counts = (uint64_t *)calloc(n_features, sizeof(uint64_t));
-  if (!counts)
-    return luaL_error(L, "cvec_to_csc: allocation failed");
-
-  const uint8_t *data = (const uint8_t *)cv->a;
-  for (uint64_t s = 0; s < n_samples; s++) {
-    const uint8_t *row = data + s * bytes_per_sample;
-    for (uint64_t f = 0; f < n_features; f++) {
-      if (row[f / 8] & (1 << (f % 8)))
-        counts[f]++;
-    }
-  }
-
-  tk_ivec_t *off = tk_ivec_create(L, n_features + 1, 0, 0);
-  off->n = n_features + 1;
-  off->a[0] = 0;
-  for (uint64_t f = 0; f < n_features; f++)
-    off->a[f + 1] = off->a[f] + (int64_t)counts[f];
-
-  uint64_t total = (uint64_t)off->a[n_features];
-  tk_ivec_t *idx = tk_ivec_create(L, total, 0, 0);
-  idx->n = total;
-
-  memset(counts, 0, n_features * sizeof(uint64_t));
-  for (uint64_t s = 0; s < n_samples; s++) {
-    const uint8_t *row = data + s * bytes_per_sample;
-    for (uint64_t f = 0; f < n_features; f++) {
-      if (row[f / 8] & (1 << (f % 8))) {
-        idx->a[(uint64_t)off->a[f] + counts[f]] = (int64_t)s;
-        counts[f]++;
-      }
-    }
-  }
-
-  free(counts);
-  return 2;
-}
 
 static int tm_csr_to_csc (lua_State *L)
 {
@@ -1070,6 +1025,63 @@ static int tm_csr_neighbor_average (lua_State *L)
   return 1;
 }
 
+static int tm_csr_ivec_complement (lua_State *L)
+{
+  tk_ivec_t *subset = tk_ivec_peek(L, 1, "subset");
+  uint64_t n = tk_lua_checkunsigned(L, 2, "n");
+  uint64_t cn = n - subset->n;
+  tk_ivec_t *out = tk_ivec_create(L, cn, 0, 0);
+  out->n = cn;
+  uint64_t si = 0, oi = 0;
+  for (uint64_t i = 0; i < n; i++) {
+    if (si < subset->n && (uint64_t)subset->a[si] == i)
+      si++;
+    else
+      out->a[oi++] = (int64_t)i;
+  }
+  return 1;
+}
+
+static int tm_csr_scatter_fixed_k (lua_State *L)
+{
+  tk_ivec_t *dst_nbr = tk_ivec_peek(L, 1, "dst_neighbors");
+  tk_dvec_t *dst_sco = tk_dvec_peek(L, 2, "dst_scores");
+  tk_ivec_t *src_off = tk_ivec_peek(L, 3, "src_offsets");
+  tk_ivec_t *src_nbr = tk_ivec_peek(L, 4, "src_neighbors");
+  tk_dvec_t *src_sco = tk_dvec_peek(L, 5, "src_scores");
+  tk_ivec_t *val_ids = tk_ivec_peek(L, 6, "val_ids");
+  uint64_t k = tk_lua_checkunsigned(L, 7, "k");
+  uint64_t val_n = val_ids->n;
+  #pragma omp parallel for schedule(static)
+  for (uint64_t i = 0; i < val_n; i++) {
+    int64_t orig = val_ids->a[i];
+    int64_t dst = orig * (int64_t)k;
+    int64_t src = src_off->a[i];
+    for (uint64_t j = 0; j < k; j++) {
+      dst_nbr->a[dst + (int64_t)j] = src_nbr->a[src + (int64_t)j];
+      dst_sco->a[dst + (int64_t)j] = src_sco->a[src + (int64_t)j];
+    }
+  }
+  return 0;
+}
+
+static int tm_csr_scatter_rows (lua_State *L)
+{
+  tk_dvec_t *dst = tk_dvec_peek(L, 1, "dst");
+  tk_dvec_t *src = tk_dvec_peek(L, 2, "src");
+  tk_ivec_t *val_ids = tk_ivec_peek(L, 3, "val_ids");
+  uint64_t stride = tk_lua_checkunsigned(L, 4, "stride");
+  uint64_t val_n = val_ids->n;
+  #pragma omp parallel for schedule(static)
+  for (uint64_t i = 0; i < val_n; i++) {
+    int64_t orig = val_ids->a[i];
+    memcpy(dst->a + orig * (int64_t)stride,
+           src->a + (int64_t)(i * stride),
+           stride * sizeof(double));
+  }
+  return 0;
+}
+
 static int tm_csr_subsample (lua_State *L)
 {
   lua_settop(L, 3);
@@ -1097,9 +1109,37 @@ static int tm_csr_subsample (lua_State *L)
   return 2;
 }
 
+static int tm_csr_sort_csr_desc (lua_State *L)
+{
+  tk_ivec_t *off = tk_ivec_peek(L, 1, "offsets");
+  tk_ivec_t *nbr = tk_ivec_peek(L, 2, "neighbors");
+  tk_dvec_t *scores = tk_dvec_peek(L, 3, "scores");
+  uint64_t n = off->n - 1;
+  tk_ivec_t *out_n = tk_ivec_create(L, nbr->n, NULL, NULL);
+  tk_dvec_t *out_s = tk_dvec_create(L, scores->n, NULL, NULL);
+  memcpy(out_n->a, nbr->a, nbr->n * sizeof(int64_t));
+  memcpy(out_s->a, scores->a, scores->n * sizeof(double));
+  #pragma omp parallel for schedule(dynamic, 64)
+  for (uint64_t i = 0; i < n; i++) {
+    int64_t s = off->a[i], e = off->a[i + 1];
+    for (int64_t j = s + 1; j < e; j++) {
+      double ks = out_s->a[j];
+      int64_t kn = out_n->a[j];
+      int64_t p = j - 1;
+      while (p >= s && out_s->a[p] < ks) {
+        out_s->a[p + 1] = out_s->a[p];
+        out_n->a[p + 1] = out_n->a[p];
+        p--;
+      }
+      out_s->a[p + 1] = ks;
+      out_n->a[p + 1] = kn;
+    }
+  }
+  return 2;
+}
+
 static luaL_Reg tm_csr_fns[] = {
   { "to_csc", tm_csr_to_csc },
-  { "cvec_to_csc", tm_csr_cvec_to_csc },
   { "to_hypervector", tm_csr_bits_to_hv },
   { "bipartite", tm_csr_bipartite },
   { "bipartite_neg", tm_csr_bipartite_neg },
@@ -1112,7 +1152,11 @@ static luaL_Reg tm_csr_fns[] = {
   { "stratified_sample", tm_csr_stratified_sample },
   { "label_union", tm_csr_label_union },
   { "neighbor_average", tm_csr_neighbor_average },
+  { "ivec_complement", tm_csr_ivec_complement },
+  { "scatter_fixed_k", tm_csr_scatter_fixed_k },
+  { "scatter_rows", tm_csr_scatter_rows },
   { "subsample", tm_csr_subsample },
+  { "sort_csr_desc", tm_csr_sort_csr_desc },
   { NULL, NULL }
 };
 

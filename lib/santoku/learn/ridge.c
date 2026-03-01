@@ -112,12 +112,39 @@ static inline int tk_ridge_encode_lua (lua_State *L) {
   int64_t k = (int64_t)luaL_checkinteger(L, 4);
   if (k > nl) k = nl;
   if (k < 1) k = 1;
-  tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t)(n + 1), NULL, NULL);
-  int off_idx = lua_gettop(L);
-  tk_ivec_t *labels = tk_ivec_create(L, (uint64_t)(n * k), NULL, NULL);
-  int lab_idx = lua_gettop(L);
-  tk_dvec_t *scores_out = tk_dvec_create(L, (uint64_t)(n * k), NULL, NULL);
-  int sco_idx = lua_gettop(L);
+  tk_ivec_t *offsets;
+  int off_idx;
+  if (lua_gettop(L) >= 5 && !lua_isnil(L, 5)) {
+    offsets = tk_ivec_peek(L, 5, "offsets_buf");
+    tk_ivec_ensure(offsets, (uint64_t)(n + 1));
+    offsets->n = (uint64_t)(n + 1);
+    off_idx = 5;
+  } else {
+    offsets = tk_ivec_create(L, (uint64_t)(n + 1), NULL, NULL);
+    off_idx = lua_gettop(L);
+  }
+  tk_ivec_t *labels;
+  int lab_idx;
+  if (lua_gettop(L) >= 6 && !lua_isnil(L, 6)) {
+    labels = tk_ivec_peek(L, 6, "labels_buf");
+    tk_ivec_ensure(labels, (uint64_t)(n * k));
+    labels->n = (uint64_t)(n * k);
+    lab_idx = 6;
+  } else {
+    labels = tk_ivec_create(L, (uint64_t)(n * k), NULL, NULL);
+    lab_idx = lua_gettop(L);
+  }
+  tk_dvec_t *scores_out;
+  int sco_idx;
+  if (lua_gettop(L) >= 7 && !lua_isnil(L, 7)) {
+    scores_out = tk_dvec_peek(L, 7, "scores_buf");
+    tk_dvec_ensure(scores_out, (uint64_t)(n * k));
+    scores_out->n = (uint64_t)(n * k);
+    sco_idx = 7;
+  } else {
+    scores_out = tk_dvec_create(L, (uint64_t)(n * k), NULL, NULL);
+    sco_idx = lua_gettop(L);
+  }
   for (int64_t i = 0; i <= n; i++)
     offsets->a[i] = i * k;
   int64_t block = 256;
@@ -142,11 +169,6 @@ static inline int tk_ridge_encode_lua (lua_State *L) {
 
 static inline int tk_ridge_n_dims_lua (lua_State *L) {
   lua_pushinteger(L, (lua_Integer)tk_ridge_peek(L, 1)->n_dims);
-  return 1;
-}
-
-static inline int tk_ridge_n_labels_lua (lua_State *L) {
-  lua_pushinteger(L, (lua_Integer)tk_ridge_peek(L, 1)->n_labels);
   return 1;
 }
 
@@ -189,26 +211,20 @@ static inline int tk_ridge_persist_lua (lua_State *L) {
   }
 }
 
-static inline int tk_ridge_dim_weights_lua (lua_State *L) {
-  tk_ridge_t *r = tk_ridge_peek(L, 1);
-  int64_t d = r->n_dims, nl = r->n_labels;
-  tk_dvec_t *out = tk_dvec_create(L, (uint64_t)d, NULL, NULL);
-  for (int64_t i = 0; i < d; i++) {
-    double s = 0.0;
-    double *row = r->W->a + i * nl;
-    for (int64_t j = 0; j < nl; j++)
-      s += fabs(row[j]);
-    out->a[i] = s / (double)nl;
-  }
-  return 1;
-}
-
 static inline int tk_ridge_transform_lua (lua_State *L) {
   tk_ridge_t *r = tk_ridge_peek(L, 1);
   tk_dvec_t *codes = tk_dvec_peek(L, 2, "codes");
   int64_t n = (int64_t)luaL_checkinteger(L, 3);
   int64_t d = r->n_dims, nl = r->n_labels;
-  tk_dvec_t *out = tk_dvec_create(L, (uint64_t)(n * nl), NULL, NULL);
+  tk_dvec_t *out;
+  if (lua_gettop(L) >= 4 && !lua_isnil(L, 4)) {
+    out = tk_dvec_peek(L, 4, "out_buf");
+    tk_dvec_ensure(out, (uint64_t)(n * nl));
+    out->n = (uint64_t)(n * nl);
+    lua_pushvalue(L, 4);
+  } else {
+    out = tk_dvec_create(L, (uint64_t)(n * nl), NULL, NULL);
+  }
   cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
     (int)n, (int)nl, (int)d, 1.0, codes->a, (int)d,
     r->W->a, (int)nl, 0.0, out->a, (int)nl);
@@ -220,8 +236,6 @@ static inline int tk_ridge_transform_lua (lua_State *L) {
 static luaL_Reg tk_ridge_mt_fns[] = {
   { "label", tk_ridge_encode_lua },
   { "n_dims", tk_ridge_n_dims_lua },
-  { "n_labels", tk_ridge_n_labels_lua },
-  { "dim_weights", tk_ridge_dim_weights_lua },
   { "persist", tk_ridge_persist_lua },
   { "transform", tk_ridge_transform_lua },
   { NULL, NULL }
@@ -235,6 +249,18 @@ static inline int tk_ridge_precompute_lua (lua_State *L) {
   tk_dvec_t *codes = tk_dvec_peek(L, -1, "codes");
   lua_pop(L, 1);
   int64_t d = (int64_t)tk_lua_fcheckunsigned(L, 1, "precompute", "n_dims");
+  lua_getfield(L, 1, "sample_weights");
+  tk_dvec_t *sw = lua_isnil(L, -1) ? NULL : tk_dvec_peek(L, -1, "sample_weights");
+  lua_pop(L, 1);
+  double *w = NULL;
+  if (sw) {
+    w = (double *)malloc((uint64_t)n * sizeof(double));
+    if (!w) return luaL_error(L, "precompute: malloc failed");
+    double wsum = 0.0;
+    for (int64_t i = 0; i < n; i++) wsum += sw->a[i];
+    double winv = 1.0 / wsum;
+    for (int64_t i = 0; i < n; i++) w[i] = sw->a[i] * winv;
+  }
   lua_getfield(L, 1, "targets");
   bool dense = !lua_isnil(L, -1);
   tk_dvec_t *targets = dense ? tk_dvec_peek(L, -1, "targets") : NULL;
@@ -257,15 +283,27 @@ static inline int tk_ridge_precompute_lua (lua_State *L) {
   tk_dvec_t *cm_dvec = tk_dvec_create(L, (uint64_t)d, NULL, NULL);
   int cm_idx = lua_gettop(L);
   memset(cm_dvec->a, 0, (uint64_t)d * sizeof(double));
-  for (int64_t i = 0; i < n; i++)
+  for (int64_t i = 0; i < n; i++) {
+    double wi = w ? w[i] : inv_n;
     for (int64_t j = 0; j < d; j++)
-      cm_dvec->a[j] += codes->a[i * d + j];
-  cblas_dscal((int)d, inv_n, cm_dvec->a, 1);
+      cm_dvec->a[j] += wi * codes->a[i * d + j];
+  }
 
   tk_dvec_t *ev_dvec = tk_dvec_create(L, (uint64_t)(d * d), NULL, NULL);
   int ev_idx = lua_gettop(L);
-  cblas_dsyrk(CblasRowMajor, CblasUpper, CblasTrans,
-    (int)d, (int)n, inv_n, codes->a, (int)d, 0.0, ev_dvec->a, (int)d);
+  if (w) {
+    memset(ev_dvec->a, 0, (uint64_t)(d * d) * sizeof(double));
+    for (int64_t i = 0; i < n; i++) {
+      double wi = w[i];
+      const double *xi = codes->a + i * d;
+      for (int64_t p = 0; p < d; p++)
+        for (int64_t q = p; q < d; q++)
+          ev_dvec->a[p * d + q] += wi * xi[p] * xi[q];
+    }
+  } else {
+    cblas_dsyrk(CblasRowMajor, CblasUpper, CblasTrans,
+      (int)d, (int)n, inv_n, codes->a, (int)d, 0.0, ev_dvec->a, (int)d);
+  }
   cblas_dsyr(CblasRowMajor, CblasUpper, (int)d, -1.0,
     cm_dvec->a, 1, ev_dvec->a, (int)d);
   for (int64_t i = 0; i < d; i++)
@@ -290,9 +328,10 @@ static inline int tk_ridge_precompute_lua (lua_State *L) {
     cnt_idx = lua_gettop(L);
     memset(cnt_dvec->a, 0, (uint64_t)nl * sizeof(double));
     for (int64_t i = 0; i < n; i++) {
+      double wi = w ? w[i] * (double)n : 1.0;
       int64_t lo = lab_off->a[i], hi = lab_off->a[i + 1];
       for (int64_t j = lo; j < hi; j++)
-        cnt_dvec->a[lab_nbr->a[j]] += 1.0;
+        cnt_dvec->a[lab_nbr->a[j]] += wi;
     }
   }
 
@@ -300,10 +339,11 @@ static inline int tk_ridge_precompute_lua (lua_State *L) {
   int ym_idx = lua_gettop(L);
   if (dense) {
     memset(ym_dvec->a, 0, (uint64_t)nl * sizeof(double));
-    for (int64_t i = 0; i < n; i++)
+    for (int64_t i = 0; i < n; i++) {
+      double wi = w ? w[i] : inv_n;
       for (int64_t l = 0; l < nl; l++)
-        ym_dvec->a[l] += targets->a[i * nl + l];
-    cblas_dscal((int)nl, inv_n, ym_dvec->a, 1);
+        ym_dvec->a[l] += wi * targets->a[i * nl + l];
+    }
   } else {
     for (int64_t l = 0; l < nl; l++)
       ym_dvec->a[l] = cnt_dvec->a[l] * inv_n;
@@ -314,15 +354,28 @@ static inline int tk_ridge_precompute_lua (lua_State *L) {
   if (!xty) return luaL_error(L, "precompute: malloc failed");
   memset(xty, 0, dnl * sizeof(double));
   if (dense) {
-    cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-      (int)d, (int)nl, (int)n, inv_n, codes->a, (int)d,
-      targets->a, (int)nl, 0.0, xty, (int)nl);
+    if (w) {
+      #pragma omp parallel for schedule(static)
+      for (int64_t dd = 0; dd < d; dd++) {
+        double *xty_row = xty + dd * nl;
+        for (int64_t i = 0; i < n; i++) {
+          double wxi = w[i] * codes->a[i * d + dd];
+          const double *yi = targets->a + i * nl;
+          for (int64_t l = 0; l < nl; l++)
+            xty_row[l] += wxi * yi[l];
+        }
+      }
+    } else {
+      cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+        (int)d, (int)nl, (int)n, inv_n, codes->a, (int)d,
+        targets->a, (int)nl, 0.0, xty, (int)nl);
+    }
   } else {
     #pragma omp parallel for schedule(static)
     for (int64_t dd = 0; dd < d; dd++) {
       double *xty_row = xty + dd * nl;
       for (int64_t i = 0; i < n; i++) {
-        double xi_dd = codes->a[i * d + dd];
+        double xi_dd = w ? w[i] * (double)n * codes->a[i * d + dd] : codes->a[i * d + dd];
         int64_t lo = lab_off->a[i], hi = lab_off->a[i + 1];
         for (int64_t j = lo; j < hi; j++)
           xty_row[lab_nbr->a[j]] += xi_dd;
@@ -339,6 +392,7 @@ static inline int tk_ridge_precompute_lua (lua_State *L) {
     (int)d, (int)nl, (int)d, 1.0, ev_dvec->a, (int)d,
     xty, (int)nl, 0.0, rxty_dvec->a, (int)nl);
   free(xty);
+  free(w);
 
   tk_dvec_t *work_dvec = tk_dvec_create(L, dnl, NULL, NULL);
   int work_idx = lua_gettop(L);
@@ -405,6 +459,10 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     tk_dvec_t *w_buf = lua_isnil(L, -1) ? NULL : tk_dvec_peek(L, -1, "w_buf");
     int w_buf_lua_idx = w_buf ? lua_gettop(L) : 0;
     if (!w_buf) lua_pop(L, 1);
+    lua_getfield(L, 1, "intercept_buf");
+    tk_dvec_t *ib = lua_isnil(L, -1) ? NULL : tk_dvec_peek(L, -1, "intercept_buf");
+    int ib_lua_idx = ib ? lua_gettop(L) : 0;
+    if (!ib) lua_pop(L, 1);
     tk_dvec_t *W_dvec;
     int W_idx;
     if (w_buf) {
@@ -438,8 +496,17 @@ static inline int tk_ridge_create_lua (lua_State *L) {
       (int)d, (int)nl, (int)d, 1.0, gram->evecs->a, (int)d,
       Z, (int)nl, 0.0, W_dvec->a, (int)nl);
 
-    tk_dvec_t *b_dvec = tk_dvec_create(L, (uint64_t)nl, NULL, NULL);
-    int b_idx = lua_gettop(L);
+    tk_dvec_t *b_dvec;
+    int b_idx;
+    if (ib) {
+      tk_dvec_ensure(ib, (uint64_t)nl);
+      ib->n = (uint64_t)nl;
+      b_dvec = ib;
+      b_idx = ib_lua_idx;
+    } else {
+      b_dvec = tk_dvec_create(L, (uint64_t)nl, NULL, NULL);
+      b_idx = lua_gettop(L);
+    }
     if (do_prop) {
       int64_t ns = gram->n_samples;
       double C = (log((double)ns) - 1.0) * pow(prop_b + 1.0, prop_a);
@@ -471,7 +538,8 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     lua_setfenv(L, Ei);
     lua_pushvalue(L, Ei);
     lua_pushvalue(L, W_idx);
-    return 2;
+    lua_pushvalue(L, b_idx);
+    return 3;
   }
   return luaL_error(L, "ridge create: gram required");
 }

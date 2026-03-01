@@ -10,11 +10,6 @@
 
 #define TK_ELM_MT "tk_elm_t"
 
-typedef enum {
-  TK_ELM_RELU = 0, TK_ELM_RFF = 1,
-  TK_ELM_LINEAR = 2, TK_ELM_SIGMOID = 3, TK_ELM_TANH = 4
-} tk_elm_mode_t;
-
 typedef struct {
   tk_dvec_t *col_mean;
   tk_dvec_t *col_inv_std;
@@ -25,7 +20,6 @@ typedef struct {
   int64_t n_tokens;
   int64_t n_dense;
   uint64_t seed;
-  tk_elm_mode_t mode;
   bool destroyed;
 } tk_elm_t;
 
@@ -64,7 +58,6 @@ static inline double elm_rand_normal (uint64_t *s)
 static void tk_elm_project_core (
   double *out, int64_t n_samples, int64_t n_hidden,
   int64_t n_tokens, int64_t n_dense, uint64_t seed,
-  tk_elm_mode_t mode,
   tk_ivec_t *csc_off, tk_ivec_t *csc_idx, double *fw,
   double *df,
   double *dense_mean, double *dense_inv_std,
@@ -149,24 +142,7 @@ static void tk_elm_project_core (
             col[s] += w * df_work[s * n_dense + d];
         }
       }
-      if (mode == TK_ELM_RFF) {
-        double u = ((double)(elm_splitmix64(&rng) >> 11) + 0.5) / (double)(1ULL << 53);
-        double bias = u * 6.283185307179586;
-        for (int64_t s = 0; s < n_samples; s++)
-          out[s * out_cols + h] = cos(col[s] + bias);
-      } else if (mode == TK_ELM_LINEAR) {
-        double bias = elm_rand_normal(&rng);
-        for (int64_t s = 0; s < n_samples; s++)
-          out[s * out_cols + h] = col[s] + bias;
-      } else if (mode == TK_ELM_SIGMOID) {
-        double bias = elm_rand_normal(&rng);
-        for (int64_t s = 0; s < n_samples; s++)
-          out[s * out_cols + h] = 1.0 / (1.0 + exp(-(col[s] + bias)));
-      } else if (mode == TK_ELM_TANH) {
-        double bias = elm_rand_normal(&rng);
-        for (int64_t s = 0; s < n_samples; s++)
-          out[s * out_cols + h] = tanh(col[s] + bias);
-      } else {
+      {
         double bias = elm_rand_normal(&rng);
         for (int64_t s = 0; s < n_samples; s++) {
           double v = col[s] + bias;
@@ -207,10 +183,11 @@ static void tk_elm_project_core (
   }
 
   if (sidecar && df_work) {
+    double ds = (n_dense > 0) ? sqrt((double)n_hidden / (double)n_dense) : 1.0;
     #pragma omp parallel for schedule(static)
     for (int64_t s = 0; s < n_samples; s++)
       for (int64_t d = 0; d < n_dense; d++)
-        out[s * out_cols + n_hidden + d] = df_work[s * n_dense + d];
+        out[s * out_cols + n_hidden + d] = ds * df_work[s * n_dense + d];
   }
   free(df_work);
 }
@@ -280,19 +257,6 @@ static int tk_elm_create_lua (lua_State *L)
   uint64_t seed = lua_isnumber(L, -1) ? (uint64_t)lua_tointeger(L, -1) : 42;
   lua_pop(L, 1);
 
-  lua_getfield(L, 1, "mode");
-  tk_elm_mode_t mode = TK_ELM_RELU;
-  if (lua_isstring(L, -1)) {
-    const char *m = lua_tostring(L, -1);
-    if (strcmp(m, "rff") == 0) mode = TK_ELM_RFF;
-    else if (strcmp(m, "linear") == 0) mode = TK_ELM_LINEAR;
-    else if (strcmp(m, "sigmoid") == 0) mode = TK_ELM_SIGMOID;
-    else if (strcmp(m, "tanh") == 0) mode = TK_ELM_TANH;
-    else if (strcmp(m, "relu") != 0)
-      return luaL_error(L, "invalid elm mode: %s", m);
-  }
-  lua_pop(L, 1);
-
   int sidecar = has_sparse && has_dense && n_dense > 0;
   int64_t out_cols = sidecar ? n_hidden + n_dense : n_hidden;
   uint64_t total = (uint64_t)(n_samples * out_cols);
@@ -327,7 +291,7 @@ static int tk_elm_create_lua (lua_State *L)
 
   tk_elm_project_core(
     out->a, n_samples, n_hidden,
-    n_tokens, n_dense, seed, mode,
+    n_tokens, n_dense, seed,
     csc_off, csc_idx, fw,
     df,
     NULL, NULL,
@@ -348,7 +312,6 @@ static int tk_elm_create_lua (lua_State *L)
   e->n_tokens = n_tokens;
   e->n_dense = n_dense;
   e->seed = seed;
-  e->mode = mode;
   e->destroyed = false;
 
   lua_newtable(L);
@@ -411,7 +374,7 @@ static int tk_elm_encode_lua (lua_State *L)
 
   tk_elm_project_core(
     out->a, n_samples, e->n_hidden,
-    n_tokens_parsed, e->n_dense, e->seed, e->mode,
+    n_tokens_parsed, e->n_dense, e->seed,
     csc_off, csc_idx, fw_parsed,
     df,
     e->dense_mean ? e->dense_mean->a : NULL,
@@ -444,7 +407,7 @@ static int tk_elm_persist_lua (lua_State *L) {
   tk_lua_fwrite(L, &e->seed, sizeof(uint64_t), 1, fh);
   uint8_t has_fw = e->fw ? 1 : 0;
   tk_lua_fwrite(L, &has_fw, sizeof(uint8_t), 1, fh);
-  uint8_t mode_byte = (uint8_t)e->mode;
+  uint8_t mode_byte = 0;
   tk_lua_fwrite(L, &mode_byte, sizeof(uint8_t), 1, fh);
   tk_dvec_persist(L, e->col_mean, fh);
   tk_dvec_persist(L, e->col_inv_std, fh);
@@ -500,11 +463,9 @@ static int tk_elm_load_lua (lua_State *L)
   tk_lua_fread(L, &n_dense, sizeof(int64_t), 1, fh);
   tk_lua_fread(L, &seed, sizeof(uint64_t), 1, fh);
   tk_lua_fread(L, &has_fw, sizeof(uint8_t), 1, fh);
-  tk_elm_mode_t mode = TK_ELM_RELU;
   if (version >= 2) {
     uint8_t mode_byte;
     tk_lua_fread(L, &mode_byte, sizeof(uint8_t), 1, fh);
-    mode = (tk_elm_mode_t)mode_byte;
   }
   tk_dvec_t *cm = tk_dvec_load(L, fh);
   int cm_idx = lua_gettop(L);
@@ -538,7 +499,6 @@ static int tk_elm_load_lua (lua_State *L)
   e->n_tokens = n_tokens;
   e->n_dense = n_dense;
   e->seed = seed;
-  e->mode = mode;
   e->destroyed = false;
 
   lua_newtable(L);
@@ -568,14 +528,271 @@ static luaL_Reg tk_elm_mt_fns[] = {
   { NULL, NULL }
 };
 
+#define TK_ELM_OBJ_MT "tk_elm_obj_t"
+
+typedef struct {
+  int64_t k;
+  bool destroyed;
+} tk_elm_obj_t;
+
+static inline tk_elm_obj_t *tk_elm_obj_peek (lua_State *L, int i) {
+  return (tk_elm_obj_t *)luaL_checkudata(L, i, TK_ELM_OBJ_MT);
+}
+
+static inline int tk_elm_obj_gc (lua_State *L) {
+  tk_elm_obj_t *o = tk_elm_obj_peek(L, 1);
+  o->destroyed = true;
+  return 0;
+}
+
+static int tk_elm_obj_index_lua (lua_State *L) {
+  const char *key = lua_tostring(L, 2);
+  if (key && (strcmp(key, "ridge") == 0 || strcmp(key, "encoder") == 0)) {
+    lua_getfenv(L, 1);
+    lua_pushvalue(L, 2);
+    lua_gettable(L, -2);
+    return 1;
+  }
+  lua_pushvalue(L, 2);
+  lua_gettable(L, lua_upvalueindex(1));
+  return 1;
+}
+
+static void tk_elm_obj_do_project (
+  lua_State *L, int fenv_idx,
+  int off_arg, int idx_arg, int n_arg, int df_arg
+) {
+  lua_getfield(L, fenv_idx, "encoder");
+  int enc = lua_gettop(L);
+  lua_getfield(L, enc, "encode");
+  lua_pushvalue(L, enc);
+  lua_newtable(L);
+  if (!lua_isnil(L, off_arg)) {
+    lua_pushvalue(L, off_arg); lua_setfield(L, -2, "csc_offsets");
+    lua_pushvalue(L, idx_arg); lua_setfield(L, -2, "csc_indices");
+  }
+  lua_pushvalue(L, n_arg); lua_setfield(L, -2, "n_samples");
+  if (df_arg > 0 && !lua_isnil(L, df_arg)) {
+    lua_pushvalue(L, df_arg); lua_setfield(L, -2, "dense_features");
+  }
+  lua_call(L, 2, 1);
+}
+
+static int tk_elm_obj_wrap_lua (lua_State *L) {
+  luaL_checkudata(L, 1, TK_ELM_MT);
+  luaL_checktype(L, 2, LUA_TUSERDATA);
+  int64_t k = lua_isnil(L, 3) ? 0 : (int64_t)luaL_checkinteger(L, 3);
+  tk_elm_obj_t *o = tk_lua_newuserdata(L, tk_elm_obj_t,
+    TK_ELM_OBJ_MT, NULL, tk_elm_obj_gc);
+  int oi = lua_gettop(L);
+  o->k = k;
+  o->destroyed = false;
+  lua_newtable(L);
+  lua_pushvalue(L, 1);
+  lua_setfield(L, -2, "encoder");
+  lua_pushvalue(L, 2);
+  lua_setfield(L, -2, "ridge");
+  lua_setfenv(L, oi);
+  lua_pushvalue(L, oi);
+  return 1;
+}
+
+static int tk_elm_obj_project_lua (lua_State *L) {
+  tk_elm_obj_peek(L, 1);
+  lua_settop(L, 5);
+  lua_getfenv(L, 1);
+  tk_elm_obj_do_project(L, 6, 2, 3, 4, 5);
+  return 1;
+}
+
+static int tk_elm_obj_transform_lua (lua_State *L) {
+  tk_elm_obj_peek(L, 1);
+  lua_settop(L, 5);
+  lua_getfenv(L, 1);
+  tk_elm_obj_do_project(L, 6, 2, 3, 4, 5);
+  int h = lua_gettop(L);
+  lua_getfield(L, 6, "ridge");
+  lua_getfield(L, -1, "transform");
+  lua_pushvalue(L, -2);
+  lua_pushvalue(L, h);
+  lua_pushvalue(L, 4);
+  lua_call(L, 3, 1);
+  return 1;
+}
+
+static int tk_elm_obj_label_lua (lua_State *L) {
+  tk_elm_obj_t *o = tk_elm_obj_peek(L, 1);
+  lua_settop(L, 6);
+  int64_t lk = lua_isnil(L, 5) ? o->k : (int64_t)luaL_checkinteger(L, 5);
+  lua_getfenv(L, 1);
+  tk_elm_obj_do_project(L, 7, 2, 3, 4, 6);
+  int h = lua_gettop(L);
+  lua_getfield(L, 7, "ridge");
+  lua_getfield(L, -1, "label");
+  lua_pushvalue(L, -2);
+  lua_pushvalue(L, h);
+  lua_pushvalue(L, 4);
+  lua_pushinteger(L, (lua_Integer)lk);
+  lua_call(L, 4, 3);
+  return 3;
+}
+
+static int tk_elm_obj_persist_lua (lua_State *L) {
+  tk_elm_obj_t *o = tk_elm_obj_peek(L, 1);
+  int t = lua_type(L, 2);
+  bool tostr = t == LUA_TBOOLEAN && lua_toboolean(L, 2);
+  FILE *fh;
+  if (t == LUA_TSTRING)
+    fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
+  else if (tostr)
+    fh = tk_lua_tmpfile(L);
+  else
+    return tk_lua_verror(L, 2, "persist", "expecting filepath or true");
+  lua_getfenv(L, 1);
+  int fi = lua_gettop(L);
+  lua_getfield(L, fi, "encoder");
+  lua_getfield(L, -1, "persist");
+  lua_pushvalue(L, -2);
+  lua_pushboolean(L, 1);
+  lua_call(L, 2, 1);
+  size_t enc_len;
+  const char *enc_data = lua_tolstring(L, -1, &enc_len);
+  lua_getfield(L, fi, "ridge");
+  lua_getfield(L, -1, "persist");
+  lua_pushvalue(L, -2);
+  lua_pushboolean(L, 1);
+  lua_call(L, 2, 1);
+  size_t ridge_len;
+  const char *ridge_data = lua_tolstring(L, -1, &ridge_len);
+  tk_lua_fwrite(L, "TKelm", 1, 5, fh);
+  uint8_t version = 4;
+  tk_lua_fwrite(L, (char *)&version, sizeof(uint8_t), 1, fh);
+  tk_lua_fwrite(L, (char *)&o->k, sizeof(int64_t), 1, fh);
+  uint64_t enc_len64 = (uint64_t)enc_len;
+  tk_lua_fwrite(L, (char *)&enc_len64, sizeof(uint64_t), 1, fh);
+  tk_lua_fwrite(L, (char *)enc_data, 1, enc_len, fh);
+  tk_lua_fwrite(L, (char *)ridge_data, 1, ridge_len, fh);
+  if (!tostr) {
+    tk_lua_fclose(L, fh);
+    return 0;
+  } else {
+    size_t len;
+    char *data = tk_lua_fslurp(L, fh, &len);
+    if (data) {
+      lua_pushlstring(L, data, len);
+      free(data);
+      tk_lua_fclose(L, fh);
+      return 1;
+    } else {
+      tk_lua_fclose(L, fh);
+      return 0;
+    }
+  }
+}
+
+static int tk_elm_obj_load_lua (lua_State *L) {
+  size_t len;
+  const char *data = tk_lua_checklstring(L, 1, &len, "data");
+  bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && tk_lua_checkboolean(L, 2);
+  FILE *fh = isstr
+    ? tk_lua_fmemopen(L, (char *)data, len, "r")
+    : tk_lua_fopen(L, data, "r");
+  char magic[5];
+  tk_lua_fread(L, magic, 1, 5, fh);
+  if (memcmp(magic, "TKelm", 5) != 0) {
+    tk_lua_fclose(L, fh);
+    return luaL_error(L, "invalid elm obj file (bad magic)");
+  }
+  uint8_t version;
+  tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
+  if (version != 4) {
+    tk_lua_fclose(L, fh);
+    return luaL_error(L, "unsupported elm obj version %d", (int)version);
+  }
+  int64_t k;
+  tk_lua_fread(L, &k, sizeof(int64_t), 1, fh);
+  uint64_t enc_len;
+  tk_lua_fread(L, &enc_len, sizeof(uint64_t), 1, fh);
+  char *enc_buf = (char *)malloc(enc_len > 0 ? (size_t)enc_len : 1);
+  if (enc_len > 0)
+    tk_lua_fread(L, enc_buf, 1, (size_t)enc_len, fh);
+  size_t header_used = 5 + 1 + 8 + 8 + (size_t)enc_len;
+  size_t ridge_len;
+  if (isstr) {
+    ridge_len = len - header_used;
+  } else {
+    long cur = ftell(fh);
+    fseek(fh, 0, SEEK_END);
+    ridge_len = (size_t)(ftell(fh) - cur);
+    fseek(fh, cur, SEEK_SET);
+  }
+  char *ridge_buf = (char *)malloc(ridge_len > 0 ? ridge_len : 1);
+  if (ridge_len > 0)
+    tk_lua_fread(L, ridge_buf, 1, ridge_len, fh);
+  tk_lua_fclose(L, fh);
+  lua_getglobal(L, "require");
+  lua_pushliteral(L, "santoku.learn.elm");
+  lua_call(L, 1, 1);
+  lua_getfield(L, -1, "load");
+  lua_remove(L, -2);
+  lua_pushlstring(L, enc_buf, (size_t)enc_len);
+  lua_pushboolean(L, 1);
+  lua_call(L, 2, 1);
+  int enc_idx = lua_gettop(L);
+  free(enc_buf);
+  lua_getglobal(L, "require");
+  lua_pushliteral(L, "santoku.learn.ridge");
+  lua_call(L, 1, 1);
+  lua_getfield(L, -1, "load");
+  lua_remove(L, -2);
+  lua_pushlstring(L, ridge_buf, ridge_len);
+  lua_pushboolean(L, 1);
+  lua_call(L, 2, 1);
+  int ri_idx = lua_gettop(L);
+  free(ridge_buf);
+  tk_elm_obj_t *o = tk_lua_newuserdata(L, tk_elm_obj_t,
+    TK_ELM_OBJ_MT, NULL, tk_elm_obj_gc);
+  int oi = lua_gettop(L);
+  o->k = k;
+  o->destroyed = false;
+  lua_newtable(L);
+  lua_pushvalue(L, enc_idx);
+  lua_setfield(L, -2, "encoder");
+  lua_pushvalue(L, ri_idx);
+  lua_setfield(L, -2, "ridge");
+  lua_setfenv(L, oi);
+  lua_pushvalue(L, oi);
+  return 1;
+}
+
+static luaL_Reg tk_elm_obj_mt_fns[] = {
+  { "project", tk_elm_obj_project_lua },
+  { "transform", tk_elm_obj_transform_lua },
+  { "label", tk_elm_obj_label_lua },
+  { "persist", tk_elm_obj_persist_lua },
+  { NULL, NULL }
+};
+
 static luaL_Reg tk_elm_fns[] = {
   { "create", tk_elm_create_lua },
   { "load", tk_elm_load_lua },
+  { "wrap", tk_elm_obj_wrap_lua },
+  { "obj_load", tk_elm_obj_load_lua },
   { NULL, NULL }
 };
 
 int luaopen_santoku_learn_elm (lua_State *L)
 {
+  luaL_newmetatable(L, TK_ELM_OBJ_MT);
+  lua_pushstring(L, TK_ELM_OBJ_MT);
+  lua_setfield(L, -2, "__name");
+  lua_pushcfunction(L, tk_elm_obj_gc);
+  lua_setfield(L, -2, "__gc");
+  lua_newtable(L);
+  tk_lua_register(L, tk_elm_obj_mt_fns, 0);
+  lua_pushcclosure(L, tk_elm_obj_index_lua, 1);
+  lua_setfield(L, -2, "__index");
+  lua_pop(L, 1);
   lua_newtable(L);
   tk_lua_register(L, tk_elm_fns, 0);
   return 1;

@@ -368,7 +368,6 @@ static inline int tk_learn_checkpoint (lua_State *);
 static inline int tk_learn_restore (lua_State *);
 static inline int tk_learn_reconfigure (lua_State *);
 static inline int tk_learn_restrict (lua_State *);
-static inline int tk_learn_active_features (lua_State *);
 static inline int tk_learn_label (lua_State *);
 static inline int tk_learn_label_f1 (lua_State *);
 
@@ -388,7 +387,6 @@ static luaL_Reg tk_learn_mt_fns[] =
   { "restore", tk_learn_restore },
   { "reconfigure", tk_learn_reconfigure },
   { "restrict", tk_learn_restrict },
-  { "active_features", tk_learn_active_features },
   { NULL, NULL }
 };
 
@@ -3105,21 +3103,6 @@ static inline int tk_learn_restrict (lua_State *L)
   tm->automata.n_clauses = tm->classes * tm->clauses;
   tm->dense_stale = true;
   return 0;
-}
-
-static inline int tk_learn_active_features (lua_State *L)
-{
-  tk_learn_t *tm = tk_learn_peek(L, 1);
-  unsigned int features = tm->features;
-  unsigned int classes = tm->classes;
-  tk_ivec_t *offsets = tk_ivec_create(L, classes + 1, 0, 0);
-  for (unsigned int c = 0; c <= classes; c++)
-    offsets->a[c] = (int64_t)c * features;
-  tk_ivec_t *feat_ids = tk_ivec_create(L, (uint64_t)classes * features, 0, 0);
-  for (unsigned int c = 0; c < classes; c++)
-    for (unsigned int k = 0; k < features; k++)
-      feat_ids->a[(uint64_t)c * features + k] = tm->mapping[(uint64_t)c * features + k];
-  return 2;
 }
 
 static inline void _tk_learn_load (lua_State *L, tk_learn_t *tm, FILE *fh)
