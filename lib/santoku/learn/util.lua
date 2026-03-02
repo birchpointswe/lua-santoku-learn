@@ -205,6 +205,23 @@ function M.make_ridge_log (stopwatch)
   end
 end
 
+function M.make_gfm_log (stopwatch)
+  return function (ev)
+    local phase = format_phase(ev)
+    local p = ev.params or {}
+    local m = ev.metrics or {}
+    local o = m.oracle or {}
+    local best = format_best(ev.global_best_score, ev.score)
+    local timing = ""
+    if stopwatch then
+      local d, dd = stopwatch()
+      timing = str.format(" (%.1fs +%.1fs)", d, dd)
+    end
+    str.printf("[GFM %s] beta=%.4f gamma=%.4f maF1=%.4f miF1=%.4f%s%s\n",
+      phase, p.beta or 0, p.gamma or 0, o.macro_f1 or 0, o.micro_f1 or 0, best, timing)
+  end
+end
+
 function M.cluster_stats (args)
   local codes = args.codes
   local ids = args.ids

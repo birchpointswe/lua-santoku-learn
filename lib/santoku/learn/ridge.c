@@ -33,8 +33,12 @@ typedef struct {
   int64_t n_dims;
   int64_t n_labels;
   int64_t n_samples;
-  double mean_eig;
   bool destroyed;
+  double *H_val;
+  double *VCM;
+  double *sbuf;
+  double *intercept_buf;
+  int64_t val_n;
 } tk_ridge_gram_t;
 
 static inline tk_ridge_t *tk_ridge_peek (lua_State *L, int i) {
@@ -55,6 +59,10 @@ static inline int tk_ridge_gc (lua_State *L) {
 
 static inline int tk_ridge_gram_gc (lua_State *L) {
   tk_ridge_gram_t *g = tk_ridge_gram_peek(L, 1);
+  free(g->H_val);
+  free(g->VCM);
+  free(g->sbuf);
+  free(g->intercept_buf);
   g->evecs = NULL;
   g->eigenvals = NULL;
   g->RXtY = NULL;
@@ -241,6 +249,131 @@ static luaL_Reg tk_ridge_mt_fns[] = {
   { NULL, NULL }
 };
 
+static inline int tk_ridge_gram_prepare_val_lua (lua_State *L) {
+  tk_ridge_gram_t *g = tk_ridge_gram_peek(L, 1);
+  tk_dvec_t *val_codes = tk_dvec_peek(L, 2, "val_codes");
+  int64_t val_n = (int64_t)luaL_checkinteger(L, 3);
+  int64_t d = g->n_dims, nl = g->n_labels;
+  free(g->H_val); free(g->VCM); free(g->sbuf); free(g->intercept_buf);
+  g->H_val = (double *)malloc((uint64_t)val_n * (uint64_t)d * sizeof(double));
+  g->VCM = (double *)malloc((uint64_t)d * sizeof(double));
+  g->sbuf = (double *)malloc((uint64_t)val_n * (uint64_t)nl * sizeof(double));
+  g->intercept_buf = (double *)malloc((uint64_t)nl * sizeof(double));
+  g->val_n = val_n;
+  if (!g->H_val || !g->VCM || !g->sbuf || !g->intercept_buf) {
+    free(g->H_val); free(g->VCM); free(g->sbuf); free(g->intercept_buf);
+    g->H_val = NULL; g->VCM = NULL; g->sbuf = NULL; g->intercept_buf = NULL;
+    return luaL_error(L, "prepare_val: malloc failed");
+  }
+  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+    (int)val_n, (int)d, (int)d, 1.0, val_codes->a, (int)d,
+    g->evecs->a, (int)d, 0.0, g->H_val, (int)d);
+  cblas_dgemv(CblasRowMajor, CblasNoTrans, (int)d, (int)d, 1.0,
+    g->evecs->a, (int)d, g->col_mean->a, 1, 0.0, g->VCM, 1);
+  return 0;
+}
+
+static inline int tk_ridge_gram_trial_label_lua (lua_State *L) {
+  tk_ridge_gram_t *g = tk_ridge_gram_peek(L, 1);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  if (!g->H_val) return luaL_error(L, "trial_label: call prepare_val first");
+  int64_t d = g->n_dims, nl = g->n_labels, val_n = g->val_n;
+  lua_getfield(L, 2, "lambda");
+  double lambda = (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0);
+  lua_pop(L, 1);
+  lua_getfield(L, 2, "propensity_a");
+  bool do_prop = lua_isnumber(L, -1);
+  double prop_a = do_prop ? lua_tonumber(L, -1) : 0.0;
+  lua_pop(L, 1);
+  lua_getfield(L, 2, "propensity_b");
+  double prop_b = do_prop ? (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.5) : 0.0;
+  lua_pop(L, 1);
+  int64_t k = (int64_t)tk_lua_fcheckunsigned(L, 2, "trial_label", "k");
+  if (k > nl) k = nl;
+  if (k < 1) k = 1;
+  lua_getfield(L, 2, "off_buf");
+  tk_ivec_t *offsets;
+  int off_idx;
+  if (!lua_isnil(L, -1)) {
+    offsets = tk_ivec_peek(L, -1, "off_buf");
+    tk_ivec_ensure(offsets, (uint64_t)(val_n + 1));
+    offsets->n = (uint64_t)(val_n + 1);
+    off_idx = lua_gettop(L);
+  } else {
+    lua_pop(L, 1);
+    offsets = tk_ivec_create(L, (uint64_t)(val_n + 1), NULL, NULL);
+    off_idx = lua_gettop(L);
+  }
+  lua_getfield(L, 2, "nbr_buf");
+  tk_ivec_t *labels;
+  int lab_idx;
+  if (!lua_isnil(L, -1)) {
+    labels = tk_ivec_peek(L, -1, "nbr_buf");
+    tk_ivec_ensure(labels, (uint64_t)(val_n * k));
+    labels->n = (uint64_t)(val_n * k);
+    lab_idx = lua_gettop(L);
+  } else {
+    lua_pop(L, 1);
+    labels = tk_ivec_create(L, (uint64_t)(val_n * k), NULL, NULL);
+    lab_idx = lua_gettop(L);
+  }
+  lua_getfield(L, 2, "sco_buf");
+  tk_dvec_t *scores_out;
+  int sco_idx;
+  if (!lua_isnil(L, -1)) {
+    scores_out = tk_dvec_peek(L, -1, "sco_buf");
+    tk_dvec_ensure(scores_out, (uint64_t)(val_n * k));
+    scores_out->n = (uint64_t)(val_n * k);
+    sco_idx = lua_gettop(L);
+  } else {
+    lua_pop(L, 1);
+    scores_out = tk_dvec_create(L, (uint64_t)(val_n * k), NULL, NULL);
+    sco_idx = lua_gettop(L);
+  }
+  for (int64_t i = 0; i <= val_n; i++)
+    offsets->a[i] = i * k;
+  double *SZ = g->work->a;
+  double *intercept = g->intercept_buf;
+  if (do_prop) {
+    if (!g->label_counts)
+      return luaL_error(L, "trial_label: propensity requires label precompute");
+    double C = (log((double)g->n_samples) - 1.0) * pow(prop_b + 1.0, prop_a);
+    for (int64_t l = 0; l < nl; l++)
+      intercept[l] = 1.0 + C / pow(g->label_counts->a[l] + prop_b, prop_a);
+    for (int64_t i = 0; i < d; i++) {
+      double s = 1.0 / (g->eigenvals->a[i] + lambda);
+      for (int64_t l = 0; l < nl; l++)
+        SZ[i * nl + l] = s * intercept[l] * g->RXtY->a[i * nl + l];
+    }
+    for (int64_t l = 0; l < nl; l++)
+      intercept[l] *= g->y_mean->a[l];
+  } else {
+    for (int64_t i = 0; i < d; i++) {
+      double s = 1.0 / (g->eigenvals->a[i] + lambda);
+      for (int64_t l = 0; l < nl; l++)
+        SZ[i * nl + l] = s * g->RXtY->a[i * nl + l];
+    }
+    memcpy(intercept, g->y_mean->a, (uint64_t)nl * sizeof(double));
+  }
+  cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)nl, -1.0,
+    SZ, (int)nl, g->VCM, 1, 1.0, intercept, 1);
+  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    (int)val_n, (int)nl, (int)d, 1.0, g->H_val, (int)d,
+    SZ, (int)nl, 0.0, g->sbuf, (int)nl);
+  tk_ridge_add_intercept(g->sbuf, val_n, nl, intercept);
+  tk_ridge_topk_block(g->sbuf, val_n, nl, k, 0, offsets, labels, scores_out);
+  lua_pushvalue(L, off_idx);
+  lua_pushvalue(L, lab_idx);
+  lua_pushvalue(L, sco_idx);
+  return 3;
+}
+
+static luaL_Reg tk_ridge_gram_mt_fns[] = {
+  { "prepare_val", tk_ridge_gram_prepare_val_lua },
+  { "trial_label", tk_ridge_gram_trial_label_lua },
+  { NULL, NULL }
+};
+
 static inline int tk_ridge_precompute_lua (lua_State *L) {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
@@ -315,11 +448,6 @@ static inline int tk_ridge_precompute_lua (lua_State *L) {
   int info = LAPACKE_dsyevd(LAPACK_COL_MAJOR, 'V', 'U', (int)d, ev_dvec->a, (int)d, eig_dvec->a);
   if (info != 0)
     return luaL_error(L, "precompute: eigendecomposition failed (info=%d)", info);
-
-  double mean_eig = 0.0;
-  for (int64_t i = 0; i < d; i++) mean_eig += eig_dvec->a[i];
-  mean_eig /= (double)d;
-  if (mean_eig < 1e-12) mean_eig = 1e-12;
 
   tk_dvec_t *cnt_dvec = NULL;
   int cnt_idx = 0;
@@ -398,7 +526,7 @@ static inline int tk_ridge_precompute_lua (lua_State *L) {
   int work_idx = lua_gettop(L);
 
   tk_ridge_gram_t *g = tk_lua_newuserdata(L, tk_ridge_gram_t,
-    TK_RIDGE_GRAM_MT, NULL, tk_ridge_gram_gc);
+    TK_RIDGE_GRAM_MT, tk_ridge_gram_mt_fns, tk_ridge_gram_gc);
   int Gi = lua_gettop(L);
   g->evecs = ev_dvec;
   g->eigenvals = eig_dvec;
@@ -410,8 +538,12 @@ static inline int tk_ridge_precompute_lua (lua_State *L) {
   g->n_dims = d;
   g->n_labels = nl;
   g->n_samples = n;
-  g->mean_eig = mean_eig;
   g->destroyed = false;
+  g->H_val = NULL;
+  g->VCM = NULL;
+  g->sbuf = NULL;
+  g->intercept_buf = NULL;
+  g->val_n = 0;
 
   lua_newtable(L);
   lua_pushvalue(L, ev_idx);
@@ -446,7 +578,7 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     int64_t d = gram->n_dims, nl = gram->n_labels;
     uint64_t dnl = (uint64_t)d * (uint64_t)nl;
     lua_getfield(L, 1, "lambda");
-    double lambda = (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0) * gram->mean_eig;
+    double lambda = (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0);
     lua_pop(L, 1);
     lua_getfield(L, 1, "propensity_a");
     bool do_prop = lua_isnumber(L, -1);
@@ -599,10 +731,762 @@ static inline int tk_ridge_load_lua (lua_State *L) {
   return 1;
 }
 
+static inline int tk_ridge_solve_lua (lua_State *L) {
+  lua_settop(L, 1);
+  luaL_checktype(L, 1, LUA_TTABLE);
+  int64_t n = (int64_t)tk_lua_fcheckunsigned(L, 1, "solve", "n_samples");
+  int64_t d = (int64_t)tk_lua_fcheckunsigned(L, 1, "solve", "n_dims");
+  lua_getfield(L, 1, "codes");
+  tk_dvec_t *codes = tk_dvec_peek(L, -1, "codes");
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "sample_weights");
+  tk_dvec_t *sw = lua_isnil(L, -1) ? NULL : tk_dvec_peek(L, -1, "sample_weights");
+  lua_pop(L, 1);
+  double *w = NULL;
+  if (sw) {
+    w = (double *)malloc((uint64_t)n * sizeof(double));
+    if (!w) return luaL_error(L, "solve: malloc failed");
+    double wsum = 0.0;
+    for (int64_t i = 0; i < n; i++) wsum += sw->a[i];
+    double winv = 1.0 / wsum;
+    for (int64_t i = 0; i < n; i++) w[i] = sw->a[i] * winv;
+  }
+  lua_getfield(L, 1, "targets");
+  bool dense = !lua_isnil(L, -1);
+  tk_dvec_t *targets = dense ? tk_dvec_peek(L, -1, "targets") : NULL;
+  lua_pop(L, 1);
+  int64_t nl;
+  tk_ivec_t *lab_off = NULL, *lab_nbr = NULL;
+  if (dense) {
+    nl = (int64_t)tk_lua_fcheckunsigned(L, 1, "solve", "n_targets");
+  } else {
+    nl = (int64_t)tk_lua_fcheckunsigned(L, 1, "solve", "n_labels");
+    lua_getfield(L, 1, "label_offsets");
+    lab_off = tk_ivec_peek(L, -1, "label_offsets");
+    lua_getfield(L, 1, "label_neighbors");
+    lab_nbr = tk_ivec_peek(L, -1, "label_neighbors");
+    lua_pop(L, 2);
+  }
+  lua_getfield(L, 1, "lambda");
+  double lambda_raw = lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0;
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "propensity_a");
+  bool do_prop = lua_isnumber(L, -1);
+  double prop_a = do_prop ? lua_tonumber(L, -1) : 0.0;
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "propensity_b");
+  double prop_b = do_prop ? (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.5) : 0.0;
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "w_buf");
+  tk_dvec_t *w_buf = lua_isnil(L, -1) ? NULL : tk_dvec_peek(L, -1, "w_buf");
+  int w_buf_lua_idx = w_buf ? lua_gettop(L) : 0;
+  if (!w_buf) lua_pop(L, 1);
+  lua_getfield(L, 1, "intercept_buf");
+  tk_dvec_t *ib = lua_isnil(L, -1) ? NULL : tk_dvec_peek(L, -1, "intercept_buf");
+  int ib_lua_idx = ib ? lua_gettop(L) : 0;
+  if (!ib) lua_pop(L, 1);
+
+  double inv_n = 1.0 / (double)n;
+  uint64_t dd = (uint64_t)d;
+  uint64_t dnl = dd * (uint64_t)nl;
+
+  double *col_mean = (double *)calloc(dd, sizeof(double));
+  double *gram = (double *)calloc(dd * dd, sizeof(double));
+  double *xty = (double *)calloc(dnl, sizeof(double));
+  double *y_mean = (double *)calloc((uint64_t)nl, sizeof(double));
+  double *label_counts = (!dense) ? (double *)calloc((uint64_t)nl, sizeof(double)) : NULL;
+  if (!col_mean || !gram || !xty || !y_mean || (!dense && !label_counts)) {
+    free(col_mean); free(gram); free(xty); free(y_mean); free(label_counts); free(w);
+    return luaL_error(L, "solve: malloc failed");
+  }
+
+  for (int64_t i = 0; i < n; i++) {
+    double wi = w ? w[i] : inv_n;
+    for (int64_t j = 0; j < d; j++)
+      col_mean[j] += wi * codes->a[i * d + j];
+  }
+
+  if (w) {
+    for (int64_t i = 0; i < n; i++) {
+      double wi = w[i];
+      const double *xi = codes->a + i * d;
+      for (int64_t p = 0; p < d; p++)
+        for (int64_t q = p; q < d; q++)
+          gram[p * d + q] += wi * xi[p] * xi[q];
+    }
+  } else {
+    cblas_dsyrk(CblasRowMajor, CblasUpper, CblasTrans,
+      (int)d, (int)n, inv_n, codes->a, (int)d, 0.0, gram, (int)d);
+  }
+  cblas_dsyr(CblasRowMajor, CblasUpper, (int)d, -1.0,
+    col_mean, 1, gram, (int)d);
+
+  if (!dense) {
+    for (int64_t i = 0; i < n; i++) {
+      double wi = w ? w[i] * (double)n : 1.0;
+      int64_t lo = lab_off->a[i], hi = lab_off->a[i + 1];
+      for (int64_t j = lo; j < hi; j++)
+        label_counts[lab_nbr->a[j]] += wi;
+    }
+  }
+
+  if (dense) {
+    for (int64_t i = 0; i < n; i++) {
+      double wi = w ? w[i] : inv_n;
+      for (int64_t l = 0; l < nl; l++)
+        y_mean[l] += wi * targets->a[i * nl + l];
+    }
+  } else {
+    for (int64_t l = 0; l < nl; l++)
+      y_mean[l] = label_counts[l] * inv_n;
+  }
+
+  if (dense) {
+    if (w) {
+      #pragma omp parallel for schedule(static)
+      for (int64_t dd2 = 0; dd2 < d; dd2++) {
+        double *xty_row = xty + dd2 * nl;
+        for (int64_t i = 0; i < n; i++) {
+          double wxi = w[i] * codes->a[i * d + dd2];
+          const double *yi = targets->a + i * nl;
+          for (int64_t l = 0; l < nl; l++)
+            xty_row[l] += wxi * yi[l];
+        }
+      }
+    } else {
+      cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+        (int)d, (int)nl, (int)n, inv_n, codes->a, (int)d,
+        targets->a, (int)nl, 0.0, xty, (int)nl);
+    }
+  } else {
+    #pragma omp parallel for schedule(static)
+    for (int64_t dd2 = 0; dd2 < d; dd2++) {
+      double *xty_row = xty + dd2 * nl;
+      for (int64_t i = 0; i < n; i++) {
+        double xi_dd = w ? w[i] * (double)n * codes->a[i * d + dd2] : codes->a[i * d + dd2];
+        int64_t lo = lab_off->a[i], hi = lab_off->a[i + 1];
+        for (int64_t j = lo; j < hi; j++)
+          xty_row[lab_nbr->a[j]] += xi_dd;
+      }
+    }
+    cblas_dscal((int)(d * nl), inv_n, xty, 1);
+  }
+  cblas_dger(CblasRowMajor, (int)d, (int)nl, -1.0,
+    col_mean, 1, y_mean, 1, xty, (int)nl);
+
+  double *prop_y_mean = (double *)malloc((uint64_t)nl * sizeof(double));
+  if (!prop_y_mean) {
+    free(col_mean); free(gram); free(xty); free(y_mean); free(label_counts); free(w);
+    return luaL_error(L, "solve: malloc failed");
+  }
+  if (do_prop && !dense) {
+    double C = (log((double)n) - 1.0) * pow(prop_b + 1.0, prop_a);
+    for (int64_t l = 0; l < nl; l++) {
+      double pw = 1.0 + C / pow(label_counts[l] + prop_b, prop_a);
+      prop_y_mean[l] = pw * y_mean[l];
+      for (int64_t i = 0; i < d; i++)
+        xty[i * nl + l] *= pw;
+    }
+  } else {
+    memcpy(prop_y_mean, y_mean, (uint64_t)nl * sizeof(double));
+  }
+
+  for (int64_t i = 0; i < d; i++)
+    for (int64_t j = i + 1; j < d; j++)
+      gram[j * d + i] = gram[i * d + j];
+
+  double lambda = lambda_raw;
+  for (int64_t i = 0; i < d; i++)
+    gram[i * d + i] += lambda;
+
+  int info = LAPACKE_dpotrf(LAPACK_ROW_MAJOR, 'U', (int)d, gram, (int)d);
+  if (info != 0) {
+    free(col_mean); free(gram); free(xty); free(y_mean); free(label_counts); free(w); free(prop_y_mean);
+    return luaL_error(L, "solve: Cholesky failed (info=%d)", info);
+  }
+  info = LAPACKE_dpotrs(LAPACK_ROW_MAJOR, 'U', (int)d, (int)nl, gram, (int)d, xty, (int)nl);
+  if (info != 0) {
+    free(col_mean); free(gram); free(xty); free(y_mean); free(label_counts); free(w); free(prop_y_mean);
+    return luaL_error(L, "solve: Cholesky solve failed (info=%d)", info);
+  }
+
+  tk_dvec_t *W_dvec;
+  int W_idx;
+  if (w_buf) {
+    tk_dvec_ensure(w_buf, dnl);
+    w_buf->n = dnl;
+    W_dvec = w_buf;
+    W_idx = w_buf_lua_idx;
+  } else {
+    W_dvec = tk_dvec_create(L, dnl, NULL, NULL);
+    W_idx = lua_gettop(L);
+  }
+  memcpy(W_dvec->a, xty, dnl * sizeof(double));
+
+  tk_dvec_t *b_dvec;
+  int b_idx;
+  if (ib) {
+    tk_dvec_ensure(ib, (uint64_t)nl);
+    ib->n = (uint64_t)nl;
+    b_dvec = ib;
+    b_idx = ib_lua_idx;
+  } else {
+    b_dvec = tk_dvec_create(L, (uint64_t)nl, NULL, NULL);
+    b_idx = lua_gettop(L);
+  }
+  memcpy(b_dvec->a, prop_y_mean, (uint64_t)nl * sizeof(double));
+  cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)nl, -1.0,
+    W_dvec->a, (int)nl, col_mean, 1, 1.0, b_dvec->a, 1);
+
+  free(col_mean); free(gram); free(xty); free(y_mean); free(label_counts); free(w); free(prop_y_mean);
+
+  tk_ridge_t *r = tk_lua_newuserdata(L, tk_ridge_t,
+    TK_RIDGE_MT, tk_ridge_mt_fns, tk_ridge_gc);
+  int Ei = lua_gettop(L);
+  r->W = W_dvec;
+  r->intercept = b_dvec;
+  r->n_dims = d;
+  r->n_labels = nl;
+  r->destroyed = false;
+  lua_newtable(L);
+  lua_pushvalue(L, W_idx);
+  lua_setfield(L, -2, "W");
+  lua_pushvalue(L, b_idx);
+  lua_setfield(L, -2, "intercept");
+  lua_setfenv(L, Ei);
+  lua_pushvalue(L, Ei);
+  lua_pushvalue(L, W_idx);
+  lua_pushvalue(L, b_idx);
+  return 3;
+}
+
+static inline int tk_ridge_solve_oof_lua (lua_State *L) {
+  lua_settop(L, 1);
+  luaL_checktype(L, 1, LUA_TTABLE);
+  int64_t n = (int64_t)tk_lua_fcheckunsigned(L, 1, "solve_oof", "n_samples");
+  int64_t d = (int64_t)tk_lua_fcheckunsigned(L, 1, "solve_oof", "n_dims");
+  lua_getfield(L, 1, "codes");
+  tk_dvec_t *codes = tk_dvec_peek(L, -1, "codes");
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "sample_weights");
+  tk_dvec_t *sw = lua_isnil(L, -1) ? NULL : tk_dvec_peek(L, -1, "sample_weights");
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "targets");
+  bool dense = !lua_isnil(L, -1);
+  tk_dvec_t *targets = dense ? tk_dvec_peek(L, -1, "targets") : NULL;
+  lua_pop(L, 1);
+  int64_t nl;
+  tk_ivec_t *lab_off = NULL, *lab_nbr = NULL;
+  if (dense) {
+    nl = (int64_t)tk_lua_fcheckunsigned(L, 1, "solve_oof", "n_targets");
+  } else {
+    nl = (int64_t)tk_lua_fcheckunsigned(L, 1, "solve_oof", "n_labels");
+    lua_getfield(L, 1, "label_offsets");
+    lab_off = tk_ivec_peek(L, -1, "label_offsets");
+    lua_getfield(L, 1, "label_neighbors");
+    lab_nbr = tk_ivec_peek(L, -1, "label_neighbors");
+    lua_pop(L, 2);
+  }
+  lua_getfield(L, 1, "lambda");
+  double lambda_raw = lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0;
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "propensity_a");
+  bool do_prop = !dense && lua_isnumber(L, -1);
+  double prop_a = do_prop ? lua_tonumber(L, -1) : 0.0;
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "propensity_b");
+  double prop_b = do_prop ? (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.5) : 0.0;
+  lua_pop(L, 1);
+  int64_t k = 0;
+  if (!dense) {
+    k = (int64_t)tk_lua_fcheckunsigned(L, 1, "solve_oof", "k");
+    if (k > nl) k = nl;
+    if (k < 1) k = 1;
+  }
+  lua_getfield(L, 1, "n_folds");
+  int64_t nf = lua_isnumber(L, -1) ? (int64_t)lua_tointeger(L, -1) : 5;
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "transform");
+  bool do_transform = !dense && lua_toboolean(L, -1);
+  lua_pop(L, 1);
+
+  uint64_t dd = (uint64_t)d;
+  uint64_t dnl = dd * (uint64_t)nl;
+
+  int64_t *perm = (int64_t *)malloc((uint64_t)n * sizeof(int64_t));
+  for (int64_t i = 0; i < n; i++) perm[i] = i;
+  for (int64_t i = n - 1; i > 0; i--) {
+    int64_t j = (int64_t)(tk_fast_random() % (uint32_t)(i + 1));
+    int64_t tmp = perm[i]; perm[i] = perm[j]; perm[j] = tmp;
+  }
+
+  double *w = NULL;
+  if (sw) {
+    w = (double *)malloc((uint64_t)n * sizeof(double));
+    double wsum = 0.0;
+    for (int64_t i = 0; i < n; i++) wsum += sw->a[i];
+    double winv = 1.0 / wsum;
+    for (int64_t i = 0; i < n; i++) w[i] = sw->a[i] * winv;
+  }
+
+  double *full_col_sum = (double *)calloc(dd, sizeof(double));
+  double *full_XtX = (double *)calloc(dd * dd, sizeof(double));
+  double *full_XtY = (double *)calloc(dnl, sizeof(double));
+  double *full_y_sum = (double *)calloc((uint64_t)nl, sizeof(double));
+  double *full_label_counts = (!dense) ? (double *)calloc((uint64_t)nl, sizeof(double)) : NULL;
+  if (!full_col_sum || !full_XtX || !full_XtY || !full_y_sum || (!dense && !full_label_counts)) {
+    free(perm); free(w); free(full_col_sum); free(full_XtX); free(full_XtY); free(full_y_sum); free(full_label_counts);
+    return luaL_error(L, "solve_oof: malloc failed");
+  }
+
+  for (int64_t i = 0; i < n; i++) {
+    double wi = w ? w[i] * (double)n : 1.0;
+    for (int64_t j = 0; j < d; j++)
+      full_col_sum[j] += wi * codes->a[i * d + j];
+  }
+
+  if (w) {
+    for (int64_t i = 0; i < n; i++) {
+      double wi = w[i] * (double)n;
+      const double *xi = codes->a + i * d;
+      for (int64_t p = 0; p < d; p++)
+        for (int64_t q = p; q < d; q++)
+          full_XtX[p * d + q] += wi * xi[p] * xi[q];
+    }
+  } else {
+    cblas_dsyrk(CblasRowMajor, CblasUpper, CblasTrans,
+      (int)d, (int)n, 1.0, codes->a, (int)d, 0.0, full_XtX, (int)d);
+  }
+
+  if (dense) {
+    if (w) {
+      #pragma omp parallel for schedule(static)
+      for (int64_t dd2 = 0; dd2 < d; dd2++) {
+        double *xty_row = full_XtY + dd2 * nl;
+        for (int64_t i = 0; i < n; i++) {
+          double wxi = w[i] * (double)n * codes->a[i * d + dd2];
+          const double *yi = targets->a + i * nl;
+          for (int64_t l = 0; l < nl; l++)
+            xty_row[l] += wxi * yi[l];
+        }
+      }
+    } else {
+      cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+        (int)d, (int)nl, (int)n, 1.0, codes->a, (int)d,
+        targets->a, (int)nl, 0.0, full_XtY, (int)nl);
+    }
+    for (int64_t i = 0; i < n; i++) {
+      double wi = w ? w[i] * (double)n : 1.0;
+      for (int64_t l = 0; l < nl; l++)
+        full_y_sum[l] += wi * targets->a[i * nl + l];
+    }
+  } else {
+    #pragma omp parallel for schedule(static)
+    for (int64_t dd2 = 0; dd2 < d; dd2++) {
+      double *xty_row = full_XtY + dd2 * nl;
+      for (int64_t i = 0; i < n; i++) {
+        double xi_dd = w ? w[i] * (double)n * codes->a[i * d + dd2] : codes->a[i * d + dd2];
+        int64_t lo = lab_off->a[i], hi = lab_off->a[i + 1];
+        for (int64_t j = lo; j < hi; j++)
+          xty_row[lab_nbr->a[j]] += xi_dd;
+      }
+    }
+    for (int64_t i = 0; i < n; i++) {
+      double wi = w ? w[i] * (double)n : 1.0;
+      int64_t lo = lab_off->a[i], hi = lab_off->a[i + 1];
+      for (int64_t j = lo; j < hi; j++)
+        full_label_counts[lab_nbr->a[j]] += wi;
+    }
+    for (int64_t l = 0; l < nl; l++)
+      full_y_sum[l] = full_label_counts[l];
+  }
+
+  tk_ivec_t *oof_off = NULL;
+  tk_ivec_t *oof_nbr = NULL;
+  tk_dvec_t *oof_sco = NULL;
+  tk_dvec_t *oof_dense = NULL;
+  tk_dvec_t *oof_transform = NULL;
+  int oof_off_idx = 0, oof_nbr_idx = 0, oof_sco_idx = 0, oof_dense_idx = 0, oof_tr_idx = 0;
+  if (!dense) {
+    oof_off = tk_ivec_create(L, (uint64_t)(n + 1), NULL, NULL);
+    oof_off_idx = lua_gettop(L);
+    for (int64_t i = 0; i <= n; i++) oof_off->a[i] = i * k;
+    oof_nbr = tk_ivec_create(L, (uint64_t)(n * k), NULL, NULL);
+    oof_nbr_idx = lua_gettop(L);
+    memset(oof_nbr->a, 0, (uint64_t)(n * k) * sizeof(int64_t));
+    oof_sco = tk_dvec_create(L, (uint64_t)(n * k), NULL, NULL);
+    oof_sco_idx = lua_gettop(L);
+    memset(oof_sco->a, 0, (uint64_t)(n * k) * sizeof(double));
+    if (do_transform) {
+      oof_transform = tk_dvec_create(L, (uint64_t)(n * nl), NULL, NULL);
+      oof_tr_idx = lua_gettop(L);
+      memset(oof_transform->a, 0, (uint64_t)(n * nl) * sizeof(double));
+    }
+  } else {
+    oof_dense = tk_dvec_create(L, (uint64_t)(n * nl), NULL, NULL);
+    oof_dense_idx = lua_gettop(L);
+    memset(oof_dense->a, 0, (uint64_t)(n * nl) * sizeof(double));
+  }
+
+  if (nf < 2) {
+    double inv_n = 1.0 / (double)n;
+    for (int64_t j = 0; j < d; j++) full_col_sum[j] *= inv_n;
+    for (int64_t p = 0; p < d; p++)
+      for (int64_t q = p; q < d; q++)
+        full_XtX[p * d + q] *= inv_n;
+    cblas_dsyr(CblasRowMajor, CblasUpper, (int)d, -1.0, full_col_sum, 1, full_XtX, (int)d);
+    for (int64_t l = 0; l < nl; l++) full_y_sum[l] *= inv_n;
+    for (int64_t p = 0; p < d; p++)
+      for (int64_t l = 0; l < nl; l++)
+        full_XtY[p * nl + l] *= inv_n;
+    cblas_dger(CblasRowMajor, (int)d, (int)nl, -1.0,
+      full_col_sum, 1, full_y_sum, 1, full_XtY, (int)nl);
+    double *intercept = (double *)malloc((uint64_t)nl * sizeof(double));
+    if (!intercept) {
+      free(perm); free(w); free(full_col_sum); free(full_XtX); free(full_XtY);
+      free(full_y_sum); free(full_label_counts);
+      return luaL_error(L, "solve_oof: malloc failed");
+    }
+    if (do_prop) {
+      double C = (log((double)n) - 1.0) * pow(prop_b + 1.0, prop_a);
+      for (int64_t l = 0; l < nl; l++) {
+        double pw = 1.0 + C / pow(full_label_counts[l] + prop_b, prop_a);
+        intercept[l] = pw * full_y_sum[l];
+        for (int64_t i = 0; i < d; i++)
+          full_XtY[i * nl + l] *= pw;
+      }
+    } else {
+      memcpy(intercept, full_y_sum, (uint64_t)nl * sizeof(double));
+    }
+    for (int64_t i = 0; i < d; i++)
+      for (int64_t j = i + 1; j < d; j++)
+        full_XtX[j * d + i] = full_XtX[i * d + j];
+    double lambda = lambda_raw;
+    for (int64_t i = 0; i < d; i++)
+      full_XtX[i * d + i] += lambda;
+    int info = LAPACKE_dpotrf(LAPACK_ROW_MAJOR, 'U', (int)d, full_XtX, (int)d);
+    if (info != 0) {
+      free(perm); free(w); free(full_col_sum); free(full_XtX); free(full_XtY);
+      free(full_y_sum); free(full_label_counts); free(intercept);
+      return luaL_error(L, "solve_oof: Cholesky failed (info=%d)", info);
+    }
+    info = LAPACKE_dpotrs(LAPACK_ROW_MAJOR, 'U', (int)d, (int)nl, full_XtX, (int)d, full_XtY, (int)nl);
+    if (info != 0) {
+      free(perm); free(w); free(full_col_sum); free(full_XtX); free(full_XtY);
+      free(full_y_sum); free(full_label_counts); free(intercept);
+      return luaL_error(L, "solve_oof: solve failed (info=%d)", info);
+    }
+    double *W = full_XtY;
+    cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)nl, -1.0,
+      W, (int)nl, full_col_sum, 1, 1.0, intercept, 1);
+    if (dense) {
+      cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+        (int)n, (int)nl, (int)d, 1.0, codes->a, (int)d,
+        W, (int)nl, 0.0, oof_dense->a, (int)nl);
+      tk_ridge_add_intercept(oof_dense->a, n, nl, intercept);
+    } else {
+      int64_t chunk = 256;
+      double *sbuf2 = (double *)malloc((uint64_t)chunk * (uint64_t)nl * sizeof(double));
+      tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
+                         .a = (tk_rank_t *)malloc((uint64_t)k * sizeof(tk_rank_t)) };
+      if (!sbuf2 || !heap.a) {
+        free(perm); free(w); free(full_col_sum); free(full_XtX); free(full_XtY);
+        free(full_y_sum); free(full_label_counts); free(intercept);
+        free(sbuf2); free(heap.a);
+        return luaL_error(L, "solve_oof: malloc failed");
+      }
+      for (int64_t s = 0; s < n; s += chunk) {
+        int64_t cn = (s + chunk > n) ? (n - s) : chunk;
+        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+          (int)cn, (int)nl, (int)d, 1.0, codes->a + s * d, (int)d,
+          W, (int)nl, 0.0, sbuf2, (int)nl);
+        tk_ridge_add_intercept(sbuf2, cn, nl, intercept);
+        for (int64_t vi = 0; vi < cn; vi++) {
+          int64_t orig = s + vi;
+          double *row = sbuf2 + vi * nl;
+          int64_t dst = orig * k;
+          heap.n = 0;
+          for (int64_t l = 0; l < nl; l++)
+            tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, row[l]));
+          tk_rvec_desc(&heap, 0, heap.n);
+          for (int64_t j = 0; j < (int64_t)heap.n; j++) {
+            oof_nbr->a[dst + j] = heap.a[j].i;
+            oof_sco->a[dst + j] = heap.a[j].d;
+          }
+          if (do_transform)
+            memcpy(oof_transform->a + orig * nl, row, (uint64_t)nl * sizeof(double));
+        }
+      }
+      free(sbuf2);
+      free(heap.a);
+    }
+    free(perm); free(w); free(full_col_sum); free(full_XtX); free(full_XtY);
+    free(full_y_sum); free(full_label_counts); free(intercept);
+    if (!dense) {
+      lua_pushvalue(L, oof_off_idx);
+      lua_pushvalue(L, oof_nbr_idx);
+      lua_pushvalue(L, oof_sco_idx);
+      if (do_transform) {
+        lua_pushvalue(L, oof_tr_idx);
+        return 4;
+      }
+      return 3;
+    } else {
+      lua_pushvalue(L, oof_dense_idx);
+      return 1;
+    }
+  }
+
+  double *fold_col_sum = (double *)calloc(dd, sizeof(double));
+  double *fold_XtX = (double *)calloc(dd * dd, sizeof(double));
+  double *fold_XtY = (double *)calloc(dnl, sizeof(double));
+  double *fold_y_sum = (double *)calloc((uint64_t)nl, sizeof(double));
+  double *fold_label_counts = (!dense) ? (double *)calloc((uint64_t)nl, sizeof(double)) : NULL;
+  double *train_gram = (double *)malloc(dd * dd * sizeof(double));
+  double *train_xty = (double *)malloc(dnl * sizeof(double));
+  double *train_col_mean = (double *)malloc(dd * sizeof(double));
+  double *train_y_mean = (double *)malloc((uint64_t)nl * sizeof(double));
+  double *prop_y_mean = (double *)malloc((uint64_t)nl * sizeof(double));
+  int64_t fold_size = n / nf;
+  int64_t max_val = n - (nf - 1) * fold_size;
+  double *sbuf = (double *)malloc((uint64_t)max_val * (uint64_t)nl * sizeof(double));
+  double *val_codes_buf = (double *)malloc((uint64_t)max_val * dd * sizeof(double));
+
+  if (!fold_col_sum || !fold_XtX || !fold_XtY || !fold_y_sum || !train_gram ||
+      !train_xty || !train_col_mean || !train_y_mean || !prop_y_mean ||
+      !sbuf || !val_codes_buf || (!dense && !fold_label_counts)) {
+    free(perm); free(w); free(full_col_sum); free(full_XtX); free(full_XtY);
+    free(full_y_sum); free(full_label_counts);
+    free(fold_col_sum); free(fold_XtX); free(fold_XtY); free(fold_y_sum); free(fold_label_counts);
+    free(train_gram); free(train_xty); free(train_col_mean); free(train_y_mean); free(prop_y_mean);
+    free(sbuf); free(val_codes_buf);
+    return luaL_error(L, "solve_oof: malloc failed");
+  }
+
+  for (int64_t f = 0; f < nf; f++) {
+    int64_t val_s = f * fold_size;
+    int64_t val_e = (f == nf - 1) ? n : (val_s + fold_size);
+    int64_t val_n = val_e - val_s;
+    int64_t tr_n = n - val_n;
+    double tr_inv = 1.0 / (double)tr_n;
+
+    memset(fold_col_sum, 0, dd * sizeof(double));
+    memset(fold_XtX, 0, dd * dd * sizeof(double));
+    memset(fold_XtY, 0, dnl * sizeof(double));
+    memset(fold_y_sum, 0, (uint64_t)nl * sizeof(double));
+    if (!dense) memset(fold_label_counts, 0, (uint64_t)nl * sizeof(double));
+
+    for (int64_t vi = 0; vi < val_n; vi++)
+      memcpy(val_codes_buf + vi * d, codes->a + perm[val_s + vi] * d, dd * sizeof(double));
+
+    if (w) {
+      for (int64_t vi = 0; vi < val_n; vi++) {
+        double wi = w[perm[val_s + vi]] * (double)n;
+        const double *xi = val_codes_buf + vi * d;
+        for (int64_t j = 0; j < d; j++)
+          fold_col_sum[j] += wi * xi[j];
+      }
+      #pragma omp parallel for schedule(static)
+      for (int64_t p = 0; p < d; p++) {
+        for (int64_t vi = 0; vi < val_n; vi++) {
+          double xip = w[perm[val_s + vi]] * (double)n * val_codes_buf[vi * d + p];
+          const double *xi = val_codes_buf + vi * d;
+          for (int64_t q = p; q < d; q++)
+            fold_XtX[p * d + q] += xip * xi[q];
+        }
+      }
+    } else {
+      for (int64_t vi = 0; vi < val_n; vi++) {
+        const double *xi = val_codes_buf + vi * d;
+        for (int64_t j = 0; j < d; j++)
+          fold_col_sum[j] += xi[j];
+      }
+      cblas_dsyrk(CblasRowMajor, CblasUpper, CblasTrans,
+        (int)d, (int)val_n, 1.0, val_codes_buf, (int)d, 0.0, fold_XtX, (int)d);
+    }
+
+    if (dense) {
+      if (w) {
+        #pragma omp parallel for schedule(static)
+        for (int64_t dd2 = 0; dd2 < d; dd2++) {
+          double *xty_row = fold_XtY + dd2 * nl;
+          for (int64_t vi = 0; vi < val_n; vi++) {
+            int64_t idx = perm[val_s + vi];
+            double wxi = w[idx] * (double)n * val_codes_buf[vi * d + dd2];
+            const double *yi = targets->a + idx * nl;
+            for (int64_t l = 0; l < nl; l++)
+              xty_row[l] += wxi * yi[l];
+          }
+        }
+        for (int64_t vi = 0; vi < val_n; vi++) {
+          int64_t idx = perm[val_s + vi];
+          double wi = w[idx] * (double)n;
+          const double *yi = targets->a + idx * nl;
+          for (int64_t l = 0; l < nl; l++)
+            fold_y_sum[l] += wi * yi[l];
+        }
+      } else {
+        for (int64_t vi = 0; vi < val_n; vi++) {
+          int64_t idx = perm[val_s + vi];
+          const double *yi = targets->a + idx * nl;
+          memcpy(sbuf + vi * nl, yi, (uint64_t)nl * sizeof(double));
+          for (int64_t l = 0; l < nl; l++)
+            fold_y_sum[l] += yi[l];
+        }
+        cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+          (int)d, (int)nl, (int)val_n, 1.0, val_codes_buf, (int)d,
+          sbuf, (int)nl, 0.0, fold_XtY, (int)nl);
+      }
+    } else {
+      #pragma omp parallel for schedule(static)
+      for (int64_t dd2 = 0; dd2 < d; dd2++) {
+        double *xty_row = fold_XtY + dd2 * nl;
+        for (int64_t vi = 0; vi < val_n; vi++) {
+          int64_t idx = perm[val_s + vi];
+          double wxi = w ? w[idx] * (double)n * val_codes_buf[vi * d + dd2] : val_codes_buf[vi * d + dd2];
+          int64_t lo = lab_off->a[idx], hi = lab_off->a[idx + 1];
+          for (int64_t j = lo; j < hi; j++)
+            xty_row[lab_nbr->a[j]] += wxi;
+        }
+      }
+      for (int64_t vi = 0; vi < val_n; vi++) {
+        int64_t idx = perm[val_s + vi];
+        double wi = w ? w[idx] * (double)n : 1.0;
+        int64_t lo = lab_off->a[idx], hi = lab_off->a[idx + 1];
+        for (int64_t j = lo; j < hi; j++)
+          fold_label_counts[lab_nbr->a[j]] += wi;
+      }
+      for (int64_t l = 0; l < nl; l++)
+        fold_y_sum[l] = fold_label_counts[l];
+    }
+
+    for (int64_t j = 0; j < d; j++)
+      train_col_mean[j] = (full_col_sum[j] - fold_col_sum[j]) * tr_inv;
+    for (int64_t p = 0; p < d; p++)
+      for (int64_t q = p; q < d; q++)
+        train_gram[p * d + q] = (full_XtX[p * d + q] - fold_XtX[p * d + q]) * tr_inv;
+    cblas_dsyr(CblasRowMajor, CblasUpper, (int)d, -1.0,
+      train_col_mean, 1, train_gram, (int)d);
+
+    for (int64_t l = 0; l < nl; l++)
+      train_y_mean[l] = (full_y_sum[l] - fold_y_sum[l]) * tr_inv;
+
+    for (int64_t p = 0; p < d; p++)
+      for (int64_t l = 0; l < nl; l++)
+        train_xty[p * nl + l] = (full_XtY[p * nl + l] - fold_XtY[p * nl + l]) * tr_inv;
+    cblas_dger(CblasRowMajor, (int)d, (int)nl, -1.0,
+      train_col_mean, 1, train_y_mean, 1, train_xty, (int)nl);
+
+    if (do_prop) {
+      double *tr_lc = (double *)malloc((uint64_t)nl * sizeof(double));
+      for (int64_t l = 0; l < nl; l++)
+        tr_lc[l] = full_label_counts[l] - fold_label_counts[l];
+      double C = (log((double)tr_n) - 1.0) * pow(prop_b + 1.0, prop_a);
+      for (int64_t l = 0; l < nl; l++) {
+        double pw = 1.0 + C / pow(tr_lc[l] + prop_b, prop_a);
+        prop_y_mean[l] = pw * train_y_mean[l];
+        for (int64_t i = 0; i < d; i++)
+          train_xty[i * nl + l] *= pw;
+      }
+      free(tr_lc);
+    } else {
+      memcpy(prop_y_mean, train_y_mean, (uint64_t)nl * sizeof(double));
+    }
+
+    for (int64_t i = 0; i < d; i++)
+      for (int64_t j = i + 1; j < d; j++)
+        train_gram[j * d + i] = train_gram[i * d + j];
+
+    double lambda = lambda_raw;
+    for (int64_t i = 0; i < d; i++)
+      train_gram[i * d + i] += lambda;
+
+    int info = LAPACKE_dpotrf(LAPACK_ROW_MAJOR, 'U', (int)d, train_gram, (int)d);
+    if (info != 0) {
+      free(perm); free(w); free(full_col_sum); free(full_XtX); free(full_XtY);
+      free(full_y_sum); free(full_label_counts);
+      free(fold_col_sum); free(fold_XtX); free(fold_XtY); free(fold_y_sum); free(fold_label_counts);
+      free(train_gram); free(train_xty); free(train_col_mean); free(train_y_mean); free(prop_y_mean);
+      free(sbuf); free(val_codes_buf);
+      return luaL_error(L, "solve_oof: Cholesky failed fold %d (info=%d)", (int)f, info);
+    }
+    info = LAPACKE_dpotrs(LAPACK_ROW_MAJOR, 'U', (int)d, (int)nl, train_gram, (int)d, train_xty, (int)nl);
+    if (info != 0) {
+      free(perm); free(w); free(full_col_sum); free(full_XtX); free(full_XtY);
+      free(full_y_sum); free(full_label_counts);
+      free(fold_col_sum); free(fold_XtX); free(fold_XtY); free(fold_y_sum); free(fold_label_counts);
+      free(train_gram); free(train_xty); free(train_col_mean); free(train_y_mean); free(prop_y_mean);
+      free(sbuf); free(val_codes_buf);
+      return luaL_error(L, "solve_oof: solve failed fold %d (info=%d)", (int)f, info);
+    }
+
+    double *W = train_xty;
+    double *intercept = prop_y_mean;
+    cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)nl, -1.0,
+      W, (int)nl, train_col_mean, 1, 1.0, intercept, 1);
+
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+      (int)val_n, (int)nl, (int)d, 1.0, val_codes_buf, (int)d,
+      W, (int)nl, 0.0, sbuf, (int)nl);
+    tk_ridge_add_intercept(sbuf, val_n, nl, intercept);
+
+    if (!dense) {
+      tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
+                         .a = (tk_rank_t *)malloc((uint64_t)k * sizeof(tk_rank_t)) };
+      for (int64_t vi = 0; vi < val_n; vi++) {
+        int64_t orig = perm[val_s + vi];
+        double *row = sbuf + vi * nl;
+        int64_t dst = orig * k;
+        heap.n = 0;
+        for (int64_t l = 0; l < nl; l++)
+          tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, row[l]));
+        tk_rvec_desc(&heap, 0, heap.n);
+        for (int64_t j = 0; j < (int64_t)heap.n; j++) {
+          oof_nbr->a[dst + j] = heap.a[j].i;
+          oof_sco->a[dst + j] = heap.a[j].d;
+        }
+        if (do_transform) {
+          memcpy(oof_transform->a + orig * nl, row, (uint64_t)nl * sizeof(double));
+        }
+      }
+      free(heap.a);
+    } else {
+      for (int64_t vi = 0; vi < val_n; vi++) {
+        int64_t orig = perm[val_s + vi];
+        memcpy(oof_dense->a + orig * nl, sbuf + vi * nl, (uint64_t)nl * sizeof(double));
+      }
+    }
+
+    memcpy(prop_y_mean, train_y_mean, (uint64_t)nl * sizeof(double));
+  }
+
+  free(perm); free(w);
+  free(full_col_sum); free(full_XtX); free(full_XtY); free(full_y_sum); free(full_label_counts);
+  free(fold_col_sum); free(fold_XtX); free(fold_XtY); free(fold_y_sum); free(fold_label_counts);
+  free(train_gram); free(train_xty); free(train_col_mean); free(train_y_mean); free(prop_y_mean);
+  free(sbuf); free(val_codes_buf);
+
+  if (!dense) {
+    lua_pushvalue(L, oof_off_idx);
+    lua_pushvalue(L, oof_nbr_idx);
+    lua_pushvalue(L, oof_sco_idx);
+    if (do_transform) {
+      lua_pushvalue(L, oof_tr_idx);
+      return 4;
+    }
+    return 3;
+  } else {
+    lua_pushvalue(L, oof_dense_idx);
+    return 1;
+  }
+}
+
 static luaL_Reg tk_ridge_fns[] = {
   { "create", tk_ridge_create_lua },
   { "precompute", tk_ridge_precompute_lua },
   { "load", tk_ridge_load_lua },
+  { "solve", tk_ridge_solve_lua },
+  { "solve_oof", tk_ridge_solve_oof_lua },
   { NULL, NULL }
 };
 

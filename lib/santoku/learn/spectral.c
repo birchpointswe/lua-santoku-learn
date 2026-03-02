@@ -358,10 +358,8 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
       double *row = out->a + i * d;
       cblas_dgemv(CblasRowMajor, CblasTrans,
         (int)m, (int)d, 1.0, enc->projection, (int)d, sims, 1, 0.0, row, 1);
-      for (uint64_t k = 0; k < d; k++) {
+      for (uint64_t k = 0; k < d; k++)
         row[k] -= enc->adjustment[k];
-        row[k] *= enc->inv_sqrt_eig[k];
-      }
     }
     free(sims);
     free(feat_buf);
@@ -624,10 +622,8 @@ static inline int tm_encode (lua_State *L) {
   #pragma omp parallel for schedule(static)
   for (uint64_t i = 0; i < nc; i++) {
     double *r = ccodes->a + i * d;
-    for (uint64_t j = 0; j < d; j++) {
+    for (uint64_t j = 0; j < d; j++)
       r[j] -= ctx->adjustment[j];
-      r[j] *= ctx->inv_sqrt_eig[j];
-    }
   }
 
   ctx->projection = (double *)malloc(m * d * sizeof(double));
@@ -737,9 +733,121 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   return 1;
 }
 
+static inline int tk_spectral_pca_lua (lua_State *L) {
+  lua_settop(L, 1);
+  luaL_checktype(L, 1, LUA_TTABLE);
+  lua_getfield(L, 1, "codes");
+  tk_dvec_t *codes = tk_dvec_peek(L, -1, "codes");
+  lua_pop(L, 1);
+  int64_t n = (int64_t)tk_lua_fcheckunsigned(L, 1, "pca", "n_samples");
+  int64_t d = (int64_t)(codes->n / (uint64_t)n);
+  int64_t nd = (int64_t)tk_lua_foptunsigned(L, 1, "pca", "n_dims", 0);
+  if (nd <= 0 || nd > d) nd = d;
+
+  double *col_mean = (double *)calloc((uint64_t)d, sizeof(double));
+  double *gram = (double *)malloc((uint64_t)(d * d) * sizeof(double));
+  if (!col_mean || !gram) {
+    free(col_mean); free(gram);
+    return luaL_error(L, "pca: out of memory");
+  }
+
+  double inv_n = 1.0 / (double)n;
+  for (int64_t i = 0; i < n; i++)
+    for (int64_t j = 0; j < d; j++)
+      col_mean[j] += codes->a[i * d + j];
+  for (int64_t j = 0; j < d; j++) col_mean[j] *= inv_n;
+
+  cblas_dsyrk(CblasRowMajor, CblasUpper, CblasTrans,
+    (int)d, (int)n, inv_n, codes->a, (int)d, 0.0, gram, (int)d);
+  cblas_dsyr(CblasRowMajor, CblasUpper, (int)d, -1.0,
+    col_mean, 1, gram, (int)d);
+
+  tk_dvec_t *eig_raw = tk_dvec_create(L, (uint64_t)nd, NULL, NULL);
+  int eig_idx = lua_gettop(L);
+  double *ev_raw = (double *)malloc((uint64_t)(d * d) * sizeof(double));
+  int *isuppz = (int *)malloc(2 * (uint64_t)d * sizeof(int));
+  if (!ev_raw || !isuppz) {
+    free(col_mean); free(gram); free(ev_raw); free(isuppz);
+    return luaL_error(L, "pca: out of memory");
+  }
+  int n_eig = 0;
+  int info = LAPACKE_dsyevr(LAPACK_COL_MAJOR, 'V', 'I', 'U',
+    (int)d, gram, (int)d, 0.0, 0.0,
+    (int)(d - nd + 1), (int)d,
+    0.0, &n_eig, eig_raw->a, ev_raw, (int)d, isuppz);
+  free(isuppz);
+  free(gram);
+  if (info != 0) {
+    free(col_mean); free(ev_raw);
+    return luaL_error(L, "pca: dsyevr info=%d", info);
+  }
+  if ((int64_t)n_eig < nd) nd = (int64_t)n_eig;
+  eig_raw->n = (uint64_t)nd;
+
+  for (int64_t i = 0; i < nd / 2; i++) {
+    double tmp = eig_raw->a[i];
+    eig_raw->a[i] = eig_raw->a[nd - 1 - i];
+    eig_raw->a[nd - 1 - i] = tmp;
+  }
+  if (nd > 0 && eig_raw->a[0] > 0.0) {
+    double eig_floor = eig_raw->a[0] * 1e-10;
+    for (int64_t j = 0; j < nd; j++) {
+      if (eig_raw->a[j] <= eig_floor) {
+        nd = j > 0 ? j : 1;
+        eig_raw->n = (uint64_t)nd;
+        break;
+      }
+    }
+  }
+
+  double *eigvecs = (double *)malloc((uint64_t)(d * nd) * sizeof(double));
+  if (!eigvecs) {
+    free(col_mean); free(ev_raw);
+    return luaL_error(L, "pca: out of memory");
+  }
+  #pragma omp parallel for schedule(static)
+  for (int64_t i = 0; i < d; i++)
+    for (int64_t k = 0; k < nd; k++)
+      eigvecs[i * nd + k] = ev_raw[(nd - 1 - k) * d + i];
+  free(ev_raw);
+
+  double *adjustment = (double *)malloc((uint64_t)nd * sizeof(double));
+  double *inv_sqrt_eig = (double *)malloc((uint64_t)nd * sizeof(double));
+  if (!adjustment || !inv_sqrt_eig) {
+    free(col_mean); free(eigvecs); free(adjustment); free(inv_sqrt_eig);
+    return luaL_error(L, "pca: out of memory");
+  }
+  cblas_dgemv(CblasRowMajor, CblasTrans,
+    (int)d, (int)nd, 1.0, eigvecs, (int)nd, col_mean, 1, 0.0, adjustment, 1);
+  free(col_mean);
+  for (int64_t j = 0; j < nd; j++)
+    inv_sqrt_eig[j] = 1.0 / sqrt(eig_raw->a[j]);
+
+  tk_dvec_t *codes_out = tk_dvec_create(L, (uint64_t)(n * nd), NULL, NULL);
+  int codes_idx = lua_gettop(L);
+  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    (int)n, (int)nd, (int)d, 1.0, codes->a, (int)d,
+    eigvecs, (int)nd, 0.0, codes_out->a, (int)nd);
+  free(eigvecs);
+
+  #pragma omp parallel for schedule(static)
+  for (int64_t i = 0; i < n; i++) {
+    double *r = codes_out->a + i * nd;
+    for (int64_t j = 0; j < nd; j++)
+      r[j] -= adjustment[j];
+  }
+  free(adjustment);
+  free(inv_sqrt_eig);
+
+  lua_pushvalue(L, codes_idx);
+  lua_pushvalue(L, eig_idx);
+  return 2;
+}
+
 static luaL_Reg tm_fns[] =
 {
   { "encode", tm_encode },
+  { "pca", tk_spectral_pca_lua },
   { "load", tk_nystrom_encoder_load_lua },
   { NULL, NULL }
 };
