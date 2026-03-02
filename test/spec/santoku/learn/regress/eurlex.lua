@@ -70,7 +70,7 @@ local cfg = {
     final_iterations = 800,
   },
   ridge = {
-    lambda = { def = 0.5, min = 0.01, max = 10 },
+    lambda = { def = 1.0 },
     propensity_a = { def = 0.55, min = 0.1, max = 2.0 },
     propensity_b = { def = 1.5, min = 0.1, max = 5.0 },
     k = 32,

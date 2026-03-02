@@ -16,6 +16,9 @@ typedef struct {
   tk_ivec_t *label_offsets;
   int64_t n_labels;
   double avg_n_true;
+  double *mu_thresh;
+  double *mu_val;
+  int64_t mu_n;
   bool destroyed;
 } tk_gfm_t;
 
@@ -25,6 +28,8 @@ static inline tk_gfm_t *tk_gfm_peek (lua_State *L, int i) {
 
 static inline int tk_gfm_gc (lua_State *L) {
   tk_gfm_t *g = tk_gfm_peek(L, 1);
+  free(g->mu_thresh);
+  free(g->mu_val);
   g->thresholds = NULL;
   g->values = NULL;
   g->label_offsets = NULL;
@@ -255,6 +260,9 @@ static int tk_gfm_create_lua (lua_State *L)
   g->label_offsets = label_off_iv;
   g->n_labels = nl;
   g->avg_n_true = avg_n_true;
+  g->mu_thresh = NULL;
+  g->mu_val = NULL;
+  g->mu_n = 0;
   g->destroyed = false;
 
   lua_newtable(L);
@@ -270,6 +278,98 @@ static int tk_gfm_create_lua (lua_State *L)
   return 1;
 }
 
+static int tk_gfm_calibrate_sums_lua (lua_State *L)
+{
+  tk_gfm_t *g = tk_gfm_peek(L, 1);
+  tk_dvec_t *scores = tk_dvec_peek(L, 2, "scores");
+  int64_t ns = (int64_t)luaL_checkinteger(L, 3);
+  int64_t nl = g->n_labels;
+  double *th = g->thresholds->a;
+  double *va = g->values->a;
+  int64_t *loff = g->label_offsets->a;
+  double default_prob = nl > 0 ? g->avg_n_true / (double)nl : 0.0;
+  tk_dvec_t *out = tk_dvec_create(L, (uint64_t)ns, NULL, NULL);
+  #pragma omp parallel for schedule(static)
+  for (int64_t i = 0; i < ns; i++) {
+    double sum = 0;
+    double *row = scores->a + i * nl;
+    for (int64_t j = 0; j < nl; j++)
+      sum += isotonic_lookup(th, va, loff[j], loff[j + 1], row[j], default_prob);
+    out->a[i] = sum;
+  }
+  return 1;
+}
+
+typedef struct { double x, y; } tk_iso_reg_t;
+
+static int tk_iso_reg_asc (const void *a, const void *b) {
+  double sa = ((const tk_iso_reg_t *)a)->x;
+  double sb = ((const tk_iso_reg_t *)b)->x;
+  return (sa > sb) - (sa < sb);
+}
+
+static int64_t isotonic_fit_reg (
+  const double *x, const double *y, int64_t n,
+  double *out_thresh, double *out_val
+) {
+  if (n == 0) return 0;
+  tk_iso_reg_t *pts = (tk_iso_reg_t *)malloc((uint64_t)n * sizeof(tk_iso_reg_t));
+  for (int64_t i = 0; i < n; i++) { pts[i].x = x[i]; pts[i].y = y[i]; }
+  qsort(pts, (size_t)n, sizeof(tk_iso_reg_t), tk_iso_reg_asc);
+  double *bsum = (double *)malloc((uint64_t)n * sizeof(double));
+  double *bwt = (double *)malloc((uint64_t)n * sizeof(double));
+  double *bth = (double *)malloc((uint64_t)n * sizeof(double));
+  int64_t nb = 0;
+  for (int64_t i = 0; i < n; i++) {
+    if (nb > 0 && pts[i].x == bth[nb - 1]) {
+      bsum[nb - 1] += pts[i].y;
+      bwt[nb - 1] += 1.0;
+    } else {
+      bsum[nb] = pts[i].y;
+      bwt[nb] = 1.0;
+      bth[nb] = pts[i].x;
+      nb++;
+    }
+    while (nb >= 2 && bsum[nb - 2] * bwt[nb - 1] > bsum[nb - 1] * bwt[nb - 2]) {
+      bsum[nb - 2] += bsum[nb - 1];
+      bwt[nb - 2] += bwt[nb - 1];
+      bth[nb - 2] = bth[nb - 1];
+      nb--;
+    }
+  }
+  for (int64_t i = 0; i < nb; i++) {
+    out_thresh[i] = bth[i];
+    out_val[i] = bsum[i] / bwt[i];
+  }
+  free(pts); free(bsum); free(bwt); free(bth);
+  return nb;
+}
+
+static int tk_gfm_fit_mu_lua (lua_State *L)
+{
+  tk_gfm_t *g = tk_gfm_peek(L, 1);
+  tk_dvec_t *mu = tk_dvec_peek(L, 2, "mu_hat");
+  tk_ivec_t *ks = tk_ivec_peek(L, 3, "oracle_ks");
+  int64_t ns = (int64_t)luaL_checkinteger(L, 4);
+  double *y = (double *)malloc((uint64_t)ns * sizeof(double));
+  for (int64_t i = 0; i < ns; i++) y[i] = (double)ks->a[i];
+  double *thresh = (double *)malloc((uint64_t)ns * sizeof(double));
+  double *val = (double *)malloc((uint64_t)ns * sizeof(double));
+  int64_t nb = isotonic_fit_reg(mu->a, y, ns, thresh, val);
+  free(y);
+  free(g->mu_thresh);
+  free(g->mu_val);
+  if (nb > 0) {
+    g->mu_thresh = (double *)realloc(thresh, (uint64_t)nb * sizeof(double));
+    g->mu_val = (double *)realloc(val, (uint64_t)nb * sizeof(double));
+  } else {
+    free(thresh); free(val);
+    g->mu_thresh = NULL; g->mu_val = NULL;
+  }
+  g->mu_n = nb;
+  return 0;
+}
+
 static int tk_gfm_predict_lua (lua_State *L)
 {
   tk_gfm_t *g = tk_gfm_peek(L, 1);
@@ -282,6 +382,21 @@ static int tk_gfm_predict_lua (lua_State *L)
   tk_dvec_t *scores = tk_dvec_peek(L, -1, "scores");
   lua_pop(L, 3);
   int64_t ns = (int64_t)tk_lua_fcheckunsigned(L, 2, "gfm.predict", "n_samples");
+  lua_getfield(L, 2, "mu_hat");
+  tk_dvec_t *mu_hat = lua_isnil(L, -1) ? NULL : tk_dvec_peek(L, -1, "mu_hat");
+  lua_pop(L, 1);
+  double beta_sq = 1.0;
+  lua_getfield(L, 2, "beta");
+  if (!lua_isnil(L, -1)) { double b = lua_tonumber(L, -1); beta_sq = b * b; }
+  lua_pop(L, 1);
+  double gamma = 1.0;
+  lua_getfield(L, 2, "gamma");
+  if (!lua_isnil(L, -1)) gamma = lua_tonumber(L, -1);
+  lua_pop(L, 1);
+  int64_t probs_k = 0;
+  lua_getfield(L, 2, "probs_k");
+  if (!lua_isnil(L, -1)) probs_k = (int64_t)lua_tointeger(L, -1);
+  lua_pop(L, 1);
 
   double *th = g->thresholds->a;
   double *va = g->values->a;
@@ -290,6 +405,12 @@ static int tk_gfm_predict_lua (lua_State *L)
   double default_prob = g->n_labels > 0 ? avg_n / (double)g->n_labels : 0.0;
 
   tk_ivec_t *ks = tk_ivec_create(L, (uint64_t)ns, NULL, NULL);
+  tk_dvec_t *feat = NULL;
+  int64_t feat_stride = probs_k + 1;
+  if (probs_k > 0) {
+    feat = tk_dvec_create(L, (uint64_t)(ns * feat_stride), NULL, NULL);
+    memset(feat->a, 0, (uint64_t)(ns * feat_stride) * sizeof(double));
+  }
 
   #pragma omp parallel
   {
@@ -308,8 +429,22 @@ static int tk_gfm_predict_lua (lua_State *L)
         psum += probs[j];
       }
 
-      double mu_tail = avg_n - psum;
-      if (mu_tail < 0) mu_tail = 0;
+      double mu = mu_hat ? mu_hat->a[s] : avg_n;
+      if (g->mu_n > 0 && mu_hat)
+        mu = isotonic_lookup(g->mu_thresh, g->mu_val, 0, g->mu_n, mu, g->mu_val[0]);
+      if (psum > 1e-9) {
+        double scale = mu / psum;
+        for (int64_t j = 0; j < hood; j++)
+          probs[j] *= scale;
+      }
+      if (gamma != 1.0)
+        for (int64_t j = 0; j < hood; j++)
+          probs[j] = pow(probs[j], gamma);
+      if (feat) {
+        int64_t cn = hood < probs_k ? hood : probs_k;
+        memcpy(&feat->a[s * feat_stride], probs, (uint64_t)cn * sizeof(double));
+      }
+      double mu_tail = 0;
 
       int64_t m = hood;
       double *sfx = (double *)calloc((uint64_t)(m + 1) * (uint64_t)(m + 1), sizeof(double));
@@ -349,7 +484,7 @@ static int tk_gfm_predict_lua (lua_State *L)
           for (int64_t fn = 0; fn <= max_fn; fn++) {
             double p_fn = SFX(k, fn);
             if (p_fn < 1e-15) continue;
-            ef1 += p_tp * p_fn * (double)tp / ((double)k + (double)tp + (double)fn + mu_tail);
+            ef1 += p_tp * p_fn * (double)tp / ((double)k + beta_sq * ((double)tp + (double)fn + mu_tail));
           }
         }
         ef1 *= 2.0;
@@ -361,10 +496,11 @@ static int tk_gfm_predict_lua (lua_State *L)
       free(probs);
       #undef SFX
       ks->a[s] = best_k;
+      if (feat) feat->a[s * feat_stride + probs_k] = (double)best_k;
     }
   }
 
-  return 1;
+  return feat ? 2 : 1;
 }
 
 static int tk_gfm_persist_lua (lua_State *L) {
@@ -444,6 +580,9 @@ static int tk_gfm_load_lua (lua_State *L)
   g->label_offsets = label_off;
   g->n_labels = n_labels;
   g->avg_n_true = avg_n_true;
+  g->mu_thresh = NULL;
+  g->mu_val = NULL;
+  g->mu_n = 0;
   g->destroyed = false;
 
   lua_newtable(L);
@@ -460,6 +599,8 @@ static int tk_gfm_load_lua (lua_State *L)
 }
 
 static luaL_Reg tk_gfm_mt_fns[] = {
+  { "calibrate_sums", tk_gfm_calibrate_sums_lua },
+  { "fit_mu", tk_gfm_fit_mu_lua },
   { "predict", tk_gfm_predict_lua },
   { "persist", tk_gfm_persist_lua },
   { NULL, NULL }

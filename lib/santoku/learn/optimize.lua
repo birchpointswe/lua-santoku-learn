@@ -834,9 +834,9 @@ M.ridge = function (args)
   else
     param_names = { "lambda", "propensity_a", "propensity_b" }
   end
-  args.lambda = spec_defaults(args.lambda, { min = 0, max = 100 })
-  args.propensity_a = spec_defaults(args.propensity_a, { min = 0, max = 100 })
-  args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 100 })
+  args.lambda = spec_defaults(args.lambda, { min = 0, max = 10, def = 1.0 })
+  args.propensity_a = spec_defaults(args.propensity_a, { min = 0.01, max = 2.0, def = 0.55 })
+  args.propensity_b = spec_defaults(args.propensity_b, { min = 0.01, max = 4.0, def = 1.5 })
   local samplers = M.build_samplers(args, param_names)
   local k = not dense and (args.k or 32) or nil
   local each_cb = args.each
@@ -852,6 +852,22 @@ M.ridge = function (args)
     score_fn = args.score_fn or function (ret) return ret.oracle.macro_f1 end
   end
   local n_targets = dense and err.assert(args.n_targets, "n_targets required for dense ridge") or nil
+  if M.all_fixed(samplers) then
+    local params = M.sample_params(samplers, param_names, nil, true)
+    local sa = {
+      n_samples = args.n_samples, n_dims = args.n_dims, codes = args.codes,
+      lambda = params.lambda, sample_weights = args.sample_weights,
+    }
+    if dense then
+      sa.targets = args.targets; sa.n_targets = n_targets
+    else
+      sa.n_labels = args.n_labels; sa.label_offsets = args.label_offsets
+      sa.label_neighbors = args.label_neighbors
+      sa.propensity_a = params.propensity_a; sa.propensity_b = params.propensity_b
+    end
+    local r = ridge.solve(sa)
+    return r, params, nil
+  end
   local ga
   if dense then
     ga = {
@@ -918,9 +934,31 @@ M.ridge = function (args)
       end
     end
   end
+  local fast_val = has_val and not dense
+  if fast_val then
+    gram:prepare_val(search_data.codes, search_data.n_samples)
+  end
   local wb, ib
   local lbl_off_buf, lbl_nbr_buf, lbl_sco_buf
   local function trial_fn (params, info)
+    if fast_val and not info.is_final then
+      local pred_off, pred_nbr, pred_sco = gram:trial_label({
+        lambda = params.lambda,
+        propensity_a = params.propensity_a,
+        propensity_b = params.propensity_b,
+        k = k,
+        off_buf = lbl_off_buf, nbr_buf = lbl_nbr_buf, sco_buf = lbl_sco_buf,
+      })
+      lbl_off_buf, lbl_nbr_buf, lbl_sco_buf = pred_off, pred_nbr, pred_sco
+      local _, oracle = evaluator.retrieval_ks({
+        pred_offsets = pred_off,
+        pred_neighbors = pred_nbr,
+        expected_offsets = search_data.expected_offsets,
+        expected_neighbors = search_data.expected_neighbors,
+      })
+      local ret = { oracle = oracle }
+      return score_fn(ret), ret, nil
+    end
     local r
     r, wb, ib = ridge.create({
       gram = gram,
@@ -969,7 +1007,6 @@ M.elm = function (args)
   if not n_tokens and not n_dense then
     err.error("n_tokens or n_dense required")
   end
-  local seed = args.seed or 42
   local n_targets = dense and err.assert(args.n_targets, "n_targets required for dense elm") or nil
   local n_hidden = args.n_hidden or 8192
   local param_names = { "lambda" }
@@ -977,9 +1014,9 @@ M.elm = function (args)
     param_names[#param_names + 1] = "propensity_a"
     param_names[#param_names + 1] = "propensity_b"
   end
-  args.lambda = spec_defaults(args.lambda, { min = 0, max = 100 })
-  args.propensity_a = spec_defaults(args.propensity_a, { min = 0, max = 100 })
-  args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 100 })
+  args.lambda = spec_defaults(args.lambda, { min = 0, max = 10, def = 1.0 })
+  args.propensity_a = spec_defaults(args.propensity_a, { min = 0.01, max = 2.0, def = 0.55 })
+  args.propensity_b = spec_defaults(args.propensity_b, { min = 0.01, max = 4.0, def = 1.5 })
   local samplers = M.build_samplers(args, param_names)
   local k = not dense and (args.k or 32) or nil
   local score_fn
@@ -991,222 +1028,209 @@ M.elm = function (args)
   else
     score_fn = args.score_fn or function (ret) return ret.oracle.macro_f1 end
   end
-  local dims = (n_tokens and n_dense) and (n_hidden + n_dense) or n_hidden
-  local elm_encoder, train_h = elm.create({
+  local encoder, train_h = elm.create({
     csc_offsets = args.csc_offsets,
     csc_indices = args.csc_indices,
     n_samples = n_samples,
     n_tokens = n_tokens,
     n_hidden = n_hidden,
-    seed = seed,
     feature_weights = args.feature_weights,
     dense_features = args.dense_features,
     n_dense = n_dense,
+    mode = args.mode,
+    norm = args.norm,
   })
-  local gram
-  if dense then
-    gram = ridge.precompute({
-      n_samples = n_samples, n_dims = dims,
-      n_targets = n_targets, codes = train_h,
-      targets = args.targets,
-      sample_weights = args.sample_weights,
-    })
-  else
-    gram = ridge.precompute({
-      n_samples = n_samples, n_dims = dims,
-      n_labels = args.n_labels, codes = train_h,
-      label_offsets = args.label_offsets,
-      label_neighbors = args.label_neighbors,
-      sample_weights = args.sample_weights,
-    })
+  local dims = (n_tokens and n_dense) and (n_hidden + n_dense) or n_hidden
+  local ridge_obj, best_params, best_metrics
+  if M.all_fixed(samplers) then
+    best_params = M.sample_params(samplers, param_names, nil, true)
+    best_params.n_hidden = n_hidden
+    local sa = {
+      n_samples = n_samples, n_dims = dims, codes = train_h,
+      lambda = best_params.lambda, sample_weights = args.sample_weights,
+    }
+    if dense then
+      sa.targets = args.targets; sa.n_targets = n_targets
+    else
+      sa.n_labels = args.n_labels; sa.label_offsets = args.label_offsets
+      sa.label_neighbors = args.label_neighbors
+      sa.propensity_a = best_params.propensity_a; sa.propensity_b = best_params.propensity_b
+    end
+    ridge_obj = ridge.solve(sa)
   end
-  local eval_data
-  local has_val = args.val_csc_offsets or args.val_dense_features
-  if has_val then
-    local val_h = elm_encoder:encode({
-      csc_offsets = args.val_csc_offsets,
-      csc_indices = args.val_csc_indices,
-      n_samples = args.val_n_samples,
-      dense_features = args.val_dense_features,
-    })
+  if not ridge_obj then
+    local gram
     if dense then
-      eval_data = { n_samples = args.val_n_samples, codes = val_h, targets = args.val_targets }
-    else
-      eval_data = {
-        n_samples = args.val_n_samples, codes = val_h,
-        expected_offsets = args.val_expected_offsets, expected_neighbors = args.val_expected_neighbors,
-      }
-    end
-  else
-    if dense then
-      eval_data = { codes = train_h, n_samples = n_samples, targets = args.targets }
-    else
-      eval_data = {
-        codes = train_h, n_samples = n_samples,
-        expected_offsets = args.expected_offsets, expected_neighbors = args.expected_neighbors,
-      }
-    end
-    local search_subsample = args.search_subsample
-    if search_subsample and search_subsample < 1.0 then
-      local search_n = num.floor(n_samples * search_subsample)
-      local search_ids
-      if args.stratify_offsets and args.stratify_neighbors and args.stratify_labels then
-        search_ids = csr.stratified_sample(
-          args.stratify_offsets, args.stratify_neighbors,
-          n_samples, args.stratify_labels, search_n):asc()
-        search_n = search_ids:size()
-      else
-        search_ids = ivec.create(n_samples):fill_indices():shuffle():setn(search_n):asc()
-      end
-      local s_codes = dvec.create()
-      train_h:mtx_select(nil, search_ids, dims, s_codes)
-      if dense then
-        local s_targets = dvec.create()
-        args.targets:mtx_select(nil, search_ids, n_targets, s_targets)
-        eval_data = { n_samples = search_n, codes = s_codes, targets = s_targets }
-      else
-        local s_eoff, s_enbr = csr.subsample(args.expected_offsets, args.expected_neighbors, search_ids)
-        eval_data = { n_samples = search_n, expected_offsets = s_eoff, expected_neighbors = s_enbr, codes = s_codes }
-      end
-    end
-  end
-  collectgarbage("collect")
-  local wb, ib
-  local lbl_off_buf, lbl_nbr_buf, lbl_sco_buf
-  local transform_buf
-  local function trial_fn (params, info)
-    params.n_hidden = n_hidden
-    local r
-    r, wb, ib = ridge.create({
-      gram = gram,
-      lambda = params.lambda,
-      propensity_a = not dense and params.propensity_a or nil,
-      propensity_b = not dense and params.propensity_b or nil,
-      w_buf = wb, intercept_buf = ib,
-    })
-    if dense then
-      transform_buf = r:transform(eval_data.codes, eval_data.n_samples, transform_buf)
-      local score, metrics = score_fn(transform_buf, eval_data)
-      return score, metrics, info.is_final and r or nil
-    else
-      local pred_off, pred_nbr, pred_sco = r:label(
-        eval_data.codes, eval_data.n_samples, k,
-        lbl_off_buf, lbl_nbr_buf, lbl_sco_buf)
-      lbl_off_buf, lbl_nbr_buf, lbl_sco_buf = pred_off, pred_nbr, pred_sco
-      local _, oracle = evaluator.retrieval_ks({
-        pred_offsets = pred_off,
-        pred_neighbors = pred_nbr,
-        expected_offsets = eval_data.expected_offsets,
-        expected_neighbors = eval_data.expected_neighbors,
+      gram = ridge.precompute({
+        n_samples = n_samples, n_dims = dims,
+        n_targets = n_targets, codes = train_h,
+        targets = args.targets,
+        sample_weights = args.sample_weights,
       })
-      return score_fn({ oracle = oracle }), { oracle = oracle }, info.is_final and r or nil
+    else
+      gram = ridge.precompute({
+        n_samples = n_samples, n_dims = dims,
+        n_labels = args.n_labels, codes = train_h,
+        label_offsets = args.label_offsets,
+        label_neighbors = args.label_neighbors,
+        sample_weights = args.sample_weights,
+      })
+    end
+    local eval_data
+    local has_val = args.val_csc_offsets or args.val_dense_features
+    if has_val then
+      local val_h = encoder:encode({
+        csc_offsets = args.val_csc_offsets,
+        csc_indices = args.val_csc_indices,
+        n_samples = args.val_n_samples,
+        dense_features = args.val_dense_features,
+      })
+      if dense then
+        eval_data = { n_samples = args.val_n_samples, codes = val_h, targets = args.val_targets }
+      else
+        eval_data = {
+          n_samples = args.val_n_samples, codes = val_h,
+          expected_offsets = args.val_expected_offsets, expected_neighbors = args.val_expected_neighbors,
+        }
+      end
+    else
+      if dense then
+        eval_data = { codes = train_h, n_samples = n_samples, targets = args.targets }
+      else
+        eval_data = {
+          codes = train_h, n_samples = n_samples,
+          expected_offsets = args.expected_offsets, expected_neighbors = args.expected_neighbors,
+        }
+      end
+      local search_subsample = args.search_subsample
+      if search_subsample and search_subsample < 1.0 then
+        local search_n = num.floor(n_samples * search_subsample)
+        local search_ids
+        if args.stratify_offsets and args.stratify_neighbors and args.stratify_labels then
+          search_ids = csr.stratified_sample(
+            args.stratify_offsets, args.stratify_neighbors,
+            n_samples, args.stratify_labels, search_n):asc()
+          search_n = search_ids:size()
+        else
+          search_ids = ivec.create(n_samples):fill_indices():shuffle():setn(search_n):asc()
+        end
+        local s_codes = dvec.create()
+        train_h:mtx_select(nil, search_ids, dims, s_codes)
+        if dense then
+          local s_targets = dvec.create()
+          args.targets:mtx_select(nil, search_ids, n_targets, s_targets)
+          eval_data = { n_samples = search_n, codes = s_codes, targets = s_targets }
+        else
+          local s_eoff, s_enbr = csr.subsample(args.expected_offsets, args.expected_neighbors, search_ids)
+          eval_data = { n_samples = search_n, expected_offsets = s_eoff, expected_neighbors = s_enbr, codes = s_codes }
+        end
+      end
+    end
+    collectgarbage("collect")
+    local wb, ib
+    local lbl_off_buf, lbl_nbr_buf, lbl_sco_buf
+    local transform_buf
+    local function trial_fn (params, info)
+      params.n_hidden = n_hidden
+      local r
+      r, wb, ib = ridge.create({
+        gram = gram,
+        lambda = params.lambda,
+        propensity_a = not dense and params.propensity_a or nil,
+        propensity_b = not dense and params.propensity_b or nil,
+        w_buf = wb, intercept_buf = ib,
+      })
+      if dense then
+        transform_buf = r:transform(eval_data.codes, eval_data.n_samples, transform_buf)
+        local score, metrics = score_fn(transform_buf, eval_data)
+        return score, metrics, info.is_final and r or nil
+      else
+        local pred_off, pred_nbr, pred_sco = r:label(
+          eval_data.codes, eval_data.n_samples, k,
+          lbl_off_buf, lbl_nbr_buf, lbl_sco_buf)
+        lbl_off_buf, lbl_nbr_buf, lbl_sco_buf = pred_off, pred_nbr, pred_sco
+        local _, oracle = evaluator.retrieval_ks({
+          pred_offsets = pred_off,
+          pred_neighbors = pred_nbr,
+          expected_offsets = eval_data.expected_offsets,
+          expected_neighbors = eval_data.expected_neighbors,
+        })
+        return score_fn({ oracle = oracle }), { oracle = oracle }, info.is_final and r or nil
+      end
+    end
+    ridge_obj, best_params, best_metrics = M.search({
+      param_names = param_names,
+      samplers = samplers,
+      trials = args.search_trials or 30,
+      trial_fn = trial_fn,
+      each = args.each,
+      cost_fn = args.cost_fn,
+      cost_beta = args.cost_beta,
+    })
+    best_params.n_hidden = n_hidden
+  end
+  local oof
+  if args.n_folds then
+    local sa = {
+      n_samples = n_samples, n_dims = dims, codes = train_h,
+      lambda = best_params.lambda, n_folds = args.n_folds,
+    }
+    if dense then
+      sa.targets = args.targets; sa.n_targets = n_targets
+    else
+      sa.n_labels = args.n_labels
+      sa.label_offsets = args.label_offsets
+      sa.label_neighbors = args.label_neighbors
+      sa.propensity_a = best_params.propensity_a
+      sa.propensity_b = best_params.propensity_b
+      sa.k = k; sa.transform = args.transform
+    end
+    if dense then
+      oof = { predictions = ridge.solve_oof(sa) }
+    else
+      local off, nbr, sco, tr = ridge.solve_oof(sa)
+      oof = { offsets = off, neighbors = nbr, scores = sco, transform = tr }
     end
   end
-  local ridge_obj, best_params, best_metrics = M.search({
+  return elm.wrap(encoder, ridge_obj, k), best_params, best_metrics, train_h, oof
+end
+
+
+M.gfm = function (args)
+  local gfm_obj = err.assert(args.gfm, "gfm required")
+  local offsets = err.assert(args.offsets, "offsets required")
+  local neighbors = err.assert(args.neighbors, "neighbors required")
+  local scores = err.assert(args.scores, "scores required")
+  local ns = err.assert(args.n_samples, "n_samples required")
+  local exp_off = err.assert(args.expected_offsets, "expected_offsets required")
+  local exp_nbr = err.assert(args.expected_neighbors, "expected_neighbors required")
+  local mu_hat = args.mu_hat
+  args.beta = spec_defaults(args.beta, { min = 0.5, max = 3.0 })
+  args.gamma = spec_defaults(args.gamma, { min = 0.3, max = 3.0 })
+  local param_names = { "beta", "gamma" }
+  local samplers = M.build_samplers(args, param_names)
+  local score_fn = args.score_fn or function (ret) return ret.oracle.macro_f1 end
+  local function trial_fn (params, info)
+    local ks = gfm_obj:predict({
+      offsets = offsets, neighbors = neighbors, scores = scores,
+      n_samples = ns, mu_hat = mu_hat, beta = params.beta, gamma = params.gamma,
+    })
+    local _, oracle = evaluator.retrieval_ks({
+      pred_offsets = offsets, pred_neighbors = neighbors,
+      expected_offsets = exp_off, expected_neighbors = exp_nbr, ks = ks,
+    })
+    local ret = { oracle = oracle, ks = ks }
+    return score_fn(ret), ret, info.is_final and ks or nil
+  end
+  local result, best_params, best_metrics = M.search({
     param_names = param_names,
     samplers = samplers,
     trials = args.search_trials or 30,
     trial_fn = trial_fn,
     each = args.each,
-    cost_fn = args.cost_fn,
-    cost_beta = args.cost_beta,
   })
-  best_params.n_hidden = n_hidden
-  return elm.wrap(elm_encoder, ridge_obj, k), best_params, best_metrics, train_h
+  return result, best_params, best_metrics
 end
 
-M.elm_oof = function (args)
-  local ridge = require("santoku.learn.ridge")
-  local n = err.assert(args.n_samples, "n_samples required")
-  local train_h = err.assert(args.train_h, "train_h required")
-  local dims = err.assert(args.dims, "dims required")
-  local nl = err.assert(args.n_labels, "n_labels required")
-  local lab_off = err.assert(args.label_offsets, "label_offsets required")
-  local lab_nbr = err.assert(args.label_neighbors, "label_neighbors required")
-  local lambda = err.assert(args.lambda, "lambda required")
-  local k = args.k or 32
-  local nf = args.n_folds or 5
-  local prop_a = args.propensity_a
-  local prop_b = args.propensity_b
-  local do_transform = args.transform
-  local all_ids = ivec.create(n):fill_indices():shuffle()
-  local fold_size = num.floor(n / nf)
-  local oof_off = ivec.create(n + 1):fill_indices():scale(k)
-  local oof_nbr = ivec.create(n * k)
-  local oof_scores = dvec.create(n * k)
-  local oof_transform = do_transform and dvec.create(n * nl) or nil
-  for f = 0, nf - 1 do
-    local val_s = f * fold_size
-    local val_e = (f == nf - 1) and n or (val_s + fold_size)
-    local val_n = val_e - val_s
-    local val_ids = ivec.create():copy(all_ids, val_s, val_e, 0):asc()
-    local tr_ids = csr.ivec_complement(val_ids, n)
-    local tr_n = tr_ids:size()
-    local fold_h = dvec.create()
-    train_h:mtx_select(nil, tr_ids, dims, fold_h)
-    local val_h = dvec.create()
-    train_h:mtx_select(nil, val_ids, dims, val_h)
-    local fold_lab_off, fold_lab_nbr = csr.subsample(lab_off, lab_nbr, tr_ids)
-    local gram = ridge.precompute({
-      n_samples = tr_n, n_dims = dims,
-      n_labels = nl, codes = fold_h,
-      label_offsets = fold_lab_off, label_neighbors = fold_lab_nbr,
-    })
-    local r = ridge.create({
-      gram = gram, lambda = lambda,
-      propensity_a = prop_a, propensity_b = prop_b,
-    })
-    local f_off, f_nbr, f_sco = r:label(val_h, val_n, k)
-    csr.scatter_fixed_k(oof_nbr, oof_scores, f_off, f_nbr, f_sco, val_ids, k)
-    if do_transform then
-      local f_tr = r:transform(val_h, val_n)
-      csr.scatter_rows(oof_transform, f_tr, val_ids, nl)
-    end
-    fold_h = nil; val_h = nil; gram = nil; r = nil -- luacheck: ignore
-  end
-  collectgarbage("collect")
-  if do_transform then
-    return oof_off, oof_nbr, oof_scores, oof_transform
-  end
-  return oof_off, oof_nbr, oof_scores
-end
-
-M.elm_oof_dense = function (args)
-  local ridge = require("santoku.learn.ridge")
-  local n = err.assert(args.n_samples, "n_samples required")
-  local train_h = err.assert(args.train_h, "train_h required")
-  local dims = err.assert(args.dims, "dims required")
-  local targets = err.assert(args.targets, "targets required")
-  local nt = err.assert(args.n_targets, "n_targets required")
-  local lambda = err.assert(args.lambda, "lambda required")
-  local nf = args.n_folds or 5
-  local all_ids = ivec.create(n):fill_indices():shuffle()
-  local fold_size = num.floor(n / nf)
-  local oof = dvec.create(n * nt)
-  for f = 0, nf - 1 do
-    local val_s = f * fold_size
-    local val_e = (f == nf - 1) and n or (val_s + fold_size)
-    local val_ids = ivec.create():copy(all_ids, val_s, val_e, 0):asc()
-    local tr_ids = csr.ivec_complement(val_ids, n)
-    local tr_n = tr_ids:size()
-    local val_n = val_ids:size()
-    local fold_h = dvec.create()
-    train_h:mtx_select(nil, tr_ids, dims, fold_h)
-    local val_h = dvec.create()
-    train_h:mtx_select(nil, val_ids, dims, val_h)
-    local fold_t = dvec.create()
-    targets:mtx_select(nil, tr_ids, nt, fold_t)
-    local gram = ridge.precompute({
-      n_samples = tr_n, n_dims = dims,
-      n_targets = nt, codes = fold_h, targets = fold_t,
-    })
-    local r = ridge.create({ gram = gram, lambda = lambda })
-    local pred = r:transform(val_h, val_n)
-    csr.scatter_rows(oof, pred, val_ids, nt)
-    fold_h = nil; val_h = nil; fold_t = nil; gram = nil; r = nil -- luacheck: ignore
-  end
-  collectgarbage("collect")
-  return oof
-end
 
 return M
