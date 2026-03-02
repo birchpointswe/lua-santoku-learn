@@ -26,11 +26,13 @@ local cfg = {
     skips = 0,
   },
   elm = {
+    norm = "l2",
+    mode = "sigmoid",
     classes = 20,
     n_hidden = 8192,
     seed = 42,
     lambda = { def = 1.0 },
-    propensity_a = { def = 0.55 },
+    propensity_a = { def = 0.5 },
     propensity_b = { def = 1.5 },
     search_trials = 400,
     k = 1,
@@ -84,11 +86,12 @@ test("newsgroups elm classifier", function ()
   print("\nTraining ELM")
   local stopwatch = utc.stopwatch()
   local elm_obj, elm_params, _, train_h = optimize.elm({
+    norm = cfg.elm.norm,
+    mode = cfg.elm.mode,
     n_samples = train.n,
     n_tokens = n_tokens,
     n_hidden = cfg.elm.n_hidden,
     seed = cfg.elm.seed,
-    mode = cfg.elm.mode,
     csc_offsets = train_csc_off,
     csc_indices = train_csc_idx,
     feature_weights = bns_scores,

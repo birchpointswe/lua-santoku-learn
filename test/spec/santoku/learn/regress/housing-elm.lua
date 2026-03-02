@@ -15,9 +15,10 @@ local cfg = {
     n_thresholds = 64,
   },
   elm = {
+    norm = "l2",
+    mode = "sin",
     n_hidden = 8192,
-    seed = 42,
-    lambda = { def = 1.0 },
+    lambda = { def = 1.0, min = 0, max = 1 },
     search_trials = 400,
   },
 }
@@ -51,11 +52,11 @@ test("housing elm regressor", function ()
   print("\nTraining ELM")
   local stopwatch = utc.stopwatch()
   local elm_obj, elm_params, _, train_h = optimize.elm({
+    norm = cfg.elm.norm,
+    mode = cfg.elm.mode,
     n_samples = train.n,
     n_tokens = n_features,
     n_hidden = cfg.elm.n_hidden,
-    seed = cfg.elm.seed,
-    mode = cfg.elm.mode,
     csc_offsets = train_csc_off,
     csc_indices = train_csc_idx,
     dense_features = train.continuous,

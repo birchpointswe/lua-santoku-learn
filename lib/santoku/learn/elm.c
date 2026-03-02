@@ -11,8 +11,6 @@
 #define TK_ELM_MT "tk_elm_t"
 
 typedef struct {
-  tk_dvec_t *col_mean;
-  tk_dvec_t *col_inv_std;
   tk_dvec_t *dense_mean;
   tk_dvec_t *dense_inv_std;
   tk_dvec_t *fw;
@@ -20,6 +18,8 @@ typedef struct {
   int64_t n_tokens;
   int64_t n_dense;
   uint64_t seed;
+  uint8_t mode;
+  uint8_t norm;
   bool destroyed;
 } tk_elm_t;
 
@@ -29,8 +29,6 @@ static inline tk_elm_t *tk_elm_peek (lua_State *L, int i) {
 
 static inline int tk_elm_gc (lua_State *L) {
   tk_elm_t *e = tk_elm_peek(L, 1);
-  e->col_mean = NULL;
-  e->col_inv_std = NULL;
   e->dense_mean = NULL;
   e->dense_inv_std = NULL;
   e->fw = NULL;
@@ -58,11 +56,10 @@ static inline double elm_rand_normal (uint64_t *s)
 static void tk_elm_project_core (
   double *out, int64_t n_samples, int64_t n_hidden,
   int64_t n_tokens, int64_t n_dense, uint64_t seed,
+  uint8_t mode, uint8_t norm,
   tk_ivec_t *csc_off, tk_ivec_t *csc_idx, double *fw,
   double *df,
   double *dense_mean, double *dense_inv_std,
-  double *col_mean, double *col_inv_std,
-  double *save_col_mean, double *save_col_inv_std,
   double *save_dense_mean, double *save_dense_inv_std
 )
 {
@@ -72,7 +69,7 @@ static void tk_elm_project_core (
   int64_t out_cols = sidecar ? n_hidden + n_dense : n_hidden;
 
   double *inv_norm = NULL;
-  if (has_sparse) {
+  if (has_sparse && norm != 1) {
     inv_norm = (double *)calloc((uint64_t)n_samples, sizeof(double));
     for (int64_t t = 0; t < n_tokens; t++) {
       double fw_sq = fw ? fw[t] * fw[t] : 1.0;
@@ -80,9 +77,16 @@ static void tk_elm_project_core (
       for (int64_t i = lo; i < hi; i++)
         inv_norm[csc_idx->a[i]] += fw_sq;
     }
-    for (int64_t s = 0; s < n_samples; s++) {
-      double n2 = inv_norm[s];
-      inv_norm[s] = n2 > 0.0 ? 1.0 / sqrt(n2) : 0.0;
+    if (norm == 0) {
+      for (int64_t s = 0; s < n_samples; s++) {
+        double n2 = inv_norm[s];
+        inv_norm[s] = n2 > 0.0 ? 1.0 / sqrt(n2) : 0.0;
+      }
+    } else {
+      for (int64_t s = 0; s < n_samples; s++) {
+        double n1 = inv_norm[s];
+        inv_norm[s] = n1 > 0.0 ? 1.0 / n1 : 0.0;
+      }
     }
   }
 
@@ -131,8 +135,12 @@ static void tk_elm_project_core (
           if (fw) w *= fw[t];
           int64_t lo = csc_off->a[t];
           int64_t hi = csc_off->a[t + 1];
-          for (int64_t i = lo; i < hi; i++)
-            col[csc_idx->a[i]] += w * inv_norm[csc_idx->a[i]];
+          if (inv_norm)
+            for (int64_t i = lo; i < hi; i++)
+              col[csc_idx->a[i]] += w * inv_norm[csc_idx->a[i]];
+          else
+            for (int64_t i = lo; i < hi; i++)
+              col[csc_idx->a[i]] += w;
         }
       }
       if (has_dense && !sidecar) {
@@ -146,7 +154,19 @@ static void tk_elm_project_core (
         double bias = elm_rand_normal(&rng);
         for (int64_t s = 0; s < n_samples; s++) {
           double v = col[s] + bias;
-          out[s * out_cols + h] = v > 0.0 ? v : 0.0;
+          double a;
+          switch (mode) {
+            case 1: a = 1.0 / (1.0 + exp(-v)); break;
+            case 2: a = tanh(v); break;
+            case 3: { double t = 0.7978845608 * (v + 0.044715 * v * v * v);
+                      a = 0.5 * v * (1.0 + tanh(t)); break; }
+            case 4: a = log(1.0 + exp(v)); break;
+            case 5: a = v > 0.0 ? v : exp(v) - 1.0; break;
+            case 6: a = sin(v); break;
+            case 7: a = v; break;
+            default: a = v > 0.0 ? v : 0.0; break;
+          }
+          out[s * out_cols + h] = a;
         }
       }
     }
@@ -155,40 +175,14 @@ static void tk_elm_project_core (
 
   free(inv_norm);
 
-  if (save_col_mean) {
-    #pragma omp parallel for schedule(static)
-    for (int64_t j = 0; j < n_hidden; j++) {
-      double sum = 0, sum2 = 0;
-      for (int64_t i = 0; i < n_samples; i++) {
-        double v = out[i * out_cols + j];
-        sum += v;
-        sum2 += v * v;
-      }
-      double mean = sum / (double)n_samples;
-      double var = sum2 / (double)n_samples - mean * mean;
-      double istd = var > 1e-24 ? 1.0 / sqrt(var) : 0.0;
-      save_col_mean[j] = mean;
-      save_col_inv_std[j] = istd;
-      for (int64_t i = 0; i < n_samples; i++)
-        out[i * out_cols + j] = (out[i * out_cols + j] - mean) * istd;
-    }
-  } else if (col_mean) {
-    #pragma omp parallel for schedule(static)
-    for (int64_t j = 0; j < n_hidden; j++) {
-      double mean = col_mean[j];
-      double istd = col_inv_std[j];
-      for (int64_t i = 0; i < n_samples; i++)
-        out[i * out_cols + j] = (out[i * out_cols + j] - mean) * istd;
-    }
-  }
-
   if (sidecar && df_work) {
-    double ds = (n_dense > 0) ? sqrt((double)n_hidden / (double)n_dense) : 1.0;
+    double scale = sqrt((double)n_hidden / (double)n_dense);
     #pragma omp parallel for schedule(static)
     for (int64_t s = 0; s < n_samples; s++)
       for (int64_t d = 0; d < n_dense; d++)
-        out[s * out_cols + n_hidden + d] = ds * df_work[s * n_dense + d];
+        out[s * out_cols + n_hidden + d] = df_work[s * n_dense + d] * scale;
   }
+
   free(df_work);
 }
 
@@ -253,20 +247,38 @@ static int tk_elm_create_lua (lua_State *L)
   int64_t n_samples = (int64_t)tk_lua_fcheckunsigned(L, 1, "create", "n_samples");
   int64_t n_hidden = (int64_t)tk_lua_fcheckunsigned(L, 1, "create", "n_hidden");
 
-  lua_getfield(L, 1, "seed");
-  uint64_t seed = lua_isnumber(L, -1) ? (uint64_t)lua_tointeger(L, -1) : 42;
+  uint64_t seed = ((uint64_t)tk_fast_random() << 32) | tk_fast_random();
+
+  uint8_t mode = 1;
+  lua_getfield(L, 1, "mode");
+  if (lua_isstring(L, -1)) {
+    const char *ms = lua_tostring(L, -1);
+    if (strcmp(ms, "relu") == 0) mode = 0;
+    else if (strcmp(ms, "sigmoid") == 0) mode = 1;
+    else if (strcmp(ms, "tanh") == 0) mode = 2;
+    else if (strcmp(ms, "gelu") == 0) mode = 3;
+    else if (strcmp(ms, "softplus") == 0) mode = 4;
+    else if (strcmp(ms, "elu") == 0) mode = 5;
+    else if (strcmp(ms, "sin") == 0) mode = 6;
+    else if (strcmp(ms, "linear") == 0) mode = 7;
+  }
   lua_pop(L, 1);
 
-  int sidecar = has_sparse && has_dense && n_dense > 0;
+  uint8_t norm = 0;
+  lua_getfield(L, 1, "norm");
+  if (lua_isstring(L, -1)) {
+    const char *ns = lua_tostring(L, -1);
+    if (strcmp(ns, "l2") == 0) norm = 0;
+    else if (strcmp(ns, "none") == 0) norm = 1;
+    else if (strcmp(ns, "l1") == 0) norm = 2;
+  }
+  lua_pop(L, 1);
+
+  int sidecar = has_sparse && has_dense;
   int64_t out_cols = sidecar ? n_hidden + n_dense : n_hidden;
   uint64_t total = (uint64_t)(n_samples * out_cols);
   tk_dvec_t *out = tk_dvec_create(L, total, NULL, NULL);
   int out_idx = lua_gettop(L);
-
-  tk_dvec_t *cm = tk_dvec_create(L, (uint64_t)n_hidden, NULL, NULL);
-  int cm_idx = lua_gettop(L);
-  tk_dvec_t *cis = tk_dvec_create(L, (uint64_t)n_hidden, NULL, NULL);
-  int cis_idx = lua_gettop(L);
 
   tk_dvec_t *dm = NULL, *dis = NULL;
   int dm_idx = 0, dis_idx = 0;
@@ -291,20 +303,16 @@ static int tk_elm_create_lua (lua_State *L)
 
   tk_elm_project_core(
     out->a, n_samples, n_hidden,
-    n_tokens, n_dense, seed,
+    n_tokens, n_dense, seed, mode, norm,
     csc_off, csc_idx, fw,
     df,
     NULL, NULL,
-    NULL, NULL,
-    cm->a, cis->a,
     dm ? dm->a : NULL, dis ? dis->a : NULL
   );
 
   tk_elm_t *e = tk_lua_newuserdata(L, tk_elm_t,
     TK_ELM_MT, tk_elm_mt_fns, tk_elm_gc);
   int Ei = lua_gettop(L);
-  e->col_mean = cm;
-  e->col_inv_std = cis;
   e->dense_mean = dm;
   e->dense_inv_std = dis;
   e->fw = fw_dvec;
@@ -312,13 +320,11 @@ static int tk_elm_create_lua (lua_State *L)
   e->n_tokens = n_tokens;
   e->n_dense = n_dense;
   e->seed = seed;
+  e->mode = mode;
+  e->norm = norm;
   e->destroyed = false;
 
   lua_newtable(L);
-  lua_pushvalue(L, cm_idx);
-  lua_setfield(L, -2, "col_mean");
-  lua_pushvalue(L, cis_idx);
-  lua_setfield(L, -2, "col_inv_std");
   if (dm_idx > 0) {
     lua_pushvalue(L, dm_idx);
     lua_setfield(L, -2, "dense_mean");
@@ -365,22 +371,29 @@ static int tk_elm_encode_lua (lua_State *L)
   df = has_dense ? tk_dvec_peek(L, -1, "dense_features")->a : NULL;
   lua_pop(L, 1);
 
+  int created_sparse = e->n_tokens > 0;
+  int created_dense = e->n_dense > 0;
+  if (has_sparse != created_sparse)
+    return luaL_error(L, "encode: sparse modality mismatch (encoder %s sparse, input %s)",
+      created_sparse ? "has" : "lacks", has_sparse ? "has" : "lacks");
+  if (has_dense != created_dense)
+    return luaL_error(L, "encode: dense modality mismatch (encoder %s dense, input %s)",
+      created_dense ? "has" : "lacks", has_dense ? "has" : "lacks");
+
   int64_t n_samples = (int64_t)tk_lua_fcheckunsigned(L, 2, "encode", "n_samples");
 
-  int sidecar = has_sparse && has_dense && e->n_dense > 0;
+  int sidecar = (e->n_tokens > 0) && (e->n_dense > 0);
   int64_t out_cols = sidecar ? e->n_hidden + e->n_dense : e->n_hidden;
   uint64_t total = (uint64_t)(n_samples * out_cols);
   tk_dvec_t *out = tk_dvec_create(L, total, NULL, NULL);
 
   tk_elm_project_core(
     out->a, n_samples, e->n_hidden,
-    n_tokens_parsed, e->n_dense, e->seed,
+    n_tokens_parsed, e->n_dense, e->seed, e->mode, e->norm,
     csc_off, csc_idx, fw_parsed,
     df,
     e->dense_mean ? e->dense_mean->a : NULL,
     e->dense_inv_std ? e->dense_inv_std->a : NULL,
-    e->col_mean->a, e->col_inv_std->a,
-    NULL, NULL,
     NULL, NULL
   );
 
@@ -399,7 +412,7 @@ static int tk_elm_persist_lua (lua_State *L) {
   else
     return tk_lua_verror(L, 2, "persist", "expecting filepath or true");
   tk_lua_fwrite(L, "TKel", 1, 4, fh);
-  uint8_t version = 2;
+  uint8_t version = 3;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &e->n_hidden, sizeof(int64_t), 1, fh);
   tk_lua_fwrite(L, &e->n_tokens, sizeof(int64_t), 1, fh);
@@ -407,10 +420,8 @@ static int tk_elm_persist_lua (lua_State *L) {
   tk_lua_fwrite(L, &e->seed, sizeof(uint64_t), 1, fh);
   uint8_t has_fw = e->fw ? 1 : 0;
   tk_lua_fwrite(L, &has_fw, sizeof(uint8_t), 1, fh);
-  uint8_t mode_byte = 0;
-  tk_lua_fwrite(L, &mode_byte, sizeof(uint8_t), 1, fh);
-  tk_dvec_persist(L, e->col_mean, fh);
-  tk_dvec_persist(L, e->col_inv_std, fh);
+  tk_lua_fwrite(L, &e->mode, sizeof(uint8_t), 1, fh);
+  tk_lua_fwrite(L, &e->norm, sizeof(uint8_t), 1, fh);
   if (e->n_dense > 0) {
     tk_dvec_persist(L, e->dense_mean, fh);
     tk_dvec_persist(L, e->dense_inv_std, fh);
@@ -451,7 +462,7 @@ static int tk_elm_load_lua (lua_State *L)
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 1 && version != 2) {
+  if (version != 3) {
     tk_lua_fclose(L, fh);
     return luaL_error(L, "unsupported elm version %d", (int)version);
   }
@@ -463,14 +474,10 @@ static int tk_elm_load_lua (lua_State *L)
   tk_lua_fread(L, &n_dense, sizeof(int64_t), 1, fh);
   tk_lua_fread(L, &seed, sizeof(uint64_t), 1, fh);
   tk_lua_fread(L, &has_fw, sizeof(uint8_t), 1, fh);
-  if (version >= 2) {
-    uint8_t mode_byte;
-    tk_lua_fread(L, &mode_byte, sizeof(uint8_t), 1, fh);
-  }
-  tk_dvec_t *cm = tk_dvec_load(L, fh);
-  int cm_idx = lua_gettop(L);
-  tk_dvec_t *cis = tk_dvec_load(L, fh);
-  int cis_idx = lua_gettop(L);
+  uint8_t mode_byte;
+  tk_lua_fread(L, &mode_byte, sizeof(uint8_t), 1, fh);
+  uint8_t norm_byte;
+  tk_lua_fread(L, &norm_byte, sizeof(uint8_t), 1, fh);
   tk_dvec_t *dm = NULL, *dis = NULL;
   int dm_idx = 0, dis_idx = 0;
   if (n_dense > 0) {
@@ -490,8 +497,6 @@ static int tk_elm_load_lua (lua_State *L)
   tk_elm_t *e = tk_lua_newuserdata(L, tk_elm_t,
     TK_ELM_MT, tk_elm_mt_fns, tk_elm_gc);
   int Ei = lua_gettop(L);
-  e->col_mean = cm;
-  e->col_inv_std = cis;
   e->dense_mean = dm;
   e->dense_inv_std = dis;
   e->fw = fw;
@@ -499,13 +504,11 @@ static int tk_elm_load_lua (lua_State *L)
   e->n_tokens = n_tokens;
   e->n_dense = n_dense;
   e->seed = seed;
+  e->mode = mode_byte;
+  e->norm = norm_byte;
   e->destroyed = false;
 
   lua_newtable(L);
-  lua_pushvalue(L, cm_idx);
-  lua_setfield(L, -2, "col_mean");
-  lua_pushvalue(L, cis_idx);
-  lua_setfield(L, -2, "col_inv_std");
   if (dm_idx > 0) {
     lua_pushvalue(L, dm_idx);
     lua_setfield(L, -2, "dense_mean");
@@ -572,9 +575,8 @@ static void tk_elm_obj_do_project (
     lua_pushvalue(L, idx_arg); lua_setfield(L, -2, "csc_indices");
   }
   lua_pushvalue(L, n_arg); lua_setfield(L, -2, "n_samples");
-  if (df_arg > 0 && !lua_isnil(L, df_arg)) {
-    lua_pushvalue(L, df_arg); lua_setfield(L, -2, "dense_features");
-  }
+  if (df_arg > 0 && !lua_isnil(L, df_arg))
+    lua_pushvalue(L, df_arg), lua_setfield(L, -2, "dense_features");
   lua_call(L, 2, 1);
 }
 
@@ -716,16 +718,10 @@ static int tk_elm_obj_load_lua (lua_State *L) {
   char *enc_buf = (char *)malloc(enc_len > 0 ? (size_t)enc_len : 1);
   if (enc_len > 0)
     tk_lua_fread(L, enc_buf, 1, (size_t)enc_len, fh);
-  size_t header_used = 5 + 1 + 8 + 8 + (size_t)enc_len;
-  size_t ridge_len;
-  if (isstr) {
-    ridge_len = len - header_used;
-  } else {
-    long cur = ftell(fh);
-    fseek(fh, 0, SEEK_END);
-    ridge_len = (size_t)(ftell(fh) - cur);
-    fseek(fh, cur, SEEK_SET);
-  }
+  long cur = ftell(fh);
+  fseek(fh, 0, SEEK_END);
+  size_t ridge_len = (size_t)(ftell(fh) - cur);
+  fseek(fh, cur, SEEK_SET);
   char *ridge_buf = (char *)malloc(ridge_len > 0 ? ridge_len : 1);
   if (ridge_len > 0)
     tk_lua_fread(L, ridge_buf, 1, ridge_len, fh);
@@ -733,8 +729,8 @@ static int tk_elm_obj_load_lua (lua_State *L) {
   lua_getglobal(L, "require");
   lua_pushliteral(L, "santoku.learn.elm");
   lua_call(L, 1, 1);
-  lua_getfield(L, -1, "load");
-  lua_remove(L, -2);
+  int elm_mod = lua_gettop(L);
+  lua_getfield(L, elm_mod, "load");
   lua_pushlstring(L, enc_buf, (size_t)enc_len);
   lua_pushboolean(L, 1);
   lua_call(L, 2, 1);
