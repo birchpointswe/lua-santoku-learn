@@ -771,21 +771,29 @@ M.regressor = function (args)
 end
 
 M.spectral = function (args)
-  local index = err.assert(args.index, "index required")
+  local index = args.index
+  local codes = args.codes
+  local n_samples = args.n_samples
   local decay = args.decay or 0.0
+  local trace_tol = args.trace_tol or 0.0
+  local cholesky = args.cholesky or false
   local each_cb = args.each
   local score_fn = args.score_fn or function (enc) return enc:trace_ratio() end
 
-  local param_names = { "n_landmarks", "n_dims" }
+  local param_names = cholesky and { "n_landmarks" } or { "n_landmarks", "n_dims" }
   local samplers = M.build_samplers(args, param_names)
 
   local function trial_fn (params, info)
+    local n_dims = cholesky and params.n_landmarks or params.n_dims
     local raw_codes, ids, encoder, eigenvalues =
       spectral.encode({
         inv = index,
+        codes = codes,
+        n_samples = n_samples,
         n_landmarks = params.n_landmarks,
-        n_dims = params.n_dims,
+        n_dims = n_dims,
         decay = decay,
+        trace_tol = trace_tol,
       })
     local effective_dims = encoder and encoder:dims() or 0
     local actual_landmarks = encoder and encoder:n_landmarks() or 0
@@ -818,7 +826,7 @@ M.spectral = function (args)
     trials = args.search_trials or 30,
     trial_fn = trial_fn,
     each = each_cb,
-    cost_fn = args.cost_fn or function (p) return (p.n_landmarks or 1) * (p.n_dims or 1) end,
+    cost_fn = args.cost_fn or function (p) return (p.n_landmarks or 1) * (p.n_dims or p.n_landmarks or 1) end,
     cost_beta = args.cost_beta,
   })
 
@@ -834,9 +842,9 @@ M.ridge = function (args)
   else
     param_names = { "lambda", "propensity_a", "propensity_b" }
   end
-  args.lambda = spec_defaults(args.lambda, { min = 0, max = 10, def = 1.0 })
-  args.propensity_a = spec_defaults(args.propensity_a, { min = 0.01, max = 2.0, def = 0.55 })
-  args.propensity_b = spec_defaults(args.propensity_b, { min = 0.01, max = 4.0, def = 1.5 })
+  args.lambda = spec_defaults(args.lambda, { min = 0, max = 4, def = 1.0 })
+  args.propensity_a = spec_defaults(args.propensity_a, { min = 0, max = 4.0, def = 0.5 })
+  args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 8.0, def = 1.5 })
   local samplers = M.build_samplers(args, param_names)
   local k = not dense and (args.k or 32) or nil
   local each_cb = args.each
@@ -934,7 +942,7 @@ M.ridge = function (args)
       end
     end
   end
-  local fast_val = has_val and not dense
+  local fast_val = has_val and not dense and not args.score_fn
   if fast_val then
     gram:prepare_val(search_data.codes, search_data.n_samples)
   end
@@ -982,7 +990,7 @@ M.ridge = function (args)
         expected_neighbors = search_data.expected_neighbors,
       })
       local ret = { oracle = oracle }
-      return score_fn(ret), ret, info.is_final and r or nil
+      return score_fn(ret, r, search_data), ret, info.is_final and r or nil
     end
   end
   local result, best_params, best_metrics = M.search({
@@ -1003,172 +1011,74 @@ M.elm = function (args)
   local dense = args.targets ~= nil
   local n_samples = err.assert(args.n_samples, "n_samples required")
   local n_tokens = args.n_tokens
-  local n_dense = args.n_dense
-  if not n_tokens and not n_dense then
-    err.error("n_tokens or n_dense required")
+  if not n_tokens and not args.codes then
+    err.error("n_tokens or codes required")
   end
   local n_targets = dense and err.assert(args.n_targets, "n_targets required for dense elm") or nil
   local n_hidden = args.n_hidden or 8192
-  local param_names = { "lambda" }
-  if not dense then
-    param_names[#param_names + 1] = "propensity_a"
-    param_names[#param_names + 1] = "propensity_b"
-  end
-  args.lambda = spec_defaults(args.lambda, { min = 0, max = 10, def = 1.0 })
-  args.propensity_a = spec_defaults(args.propensity_a, { min = 0.01, max = 2.0, def = 0.55 })
-  args.propensity_b = spec_defaults(args.propensity_b, { min = 0.01, max = 4.0, def = 1.5 })
-  local samplers = M.build_samplers(args, param_names)
-  local k = not dense and (args.k or 32) or nil
-  local score_fn
-  if dense then
-    score_fn = args.score_fn or function (pred, data)
-      local ra = evaluator.regression_accuracy(pred, data.targets)
-      return -ra.mean, { mae = ra.mean, nmae = ra.nmae }
-    end
-  else
-    score_fn = args.score_fn or function (ret) return ret.oracle.macro_f1 end
-  end
   local encoder, train_h = elm.create({
+    codes = args.codes,
+    n_input_dims = args.n_input_dims,
     csc_offsets = args.csc_offsets,
     csc_indices = args.csc_indices,
     n_samples = n_samples,
     n_tokens = n_tokens,
     n_hidden = n_hidden,
     feature_weights = args.feature_weights,
-    dense_features = args.dense_features,
-    n_dense = n_dense,
     mode = args.mode,
     norm = args.norm,
   })
-  local dims = (n_tokens and n_dense) and (n_hidden + n_dense) or n_hidden
-  local ridge_obj, best_params, best_metrics
-  if M.all_fixed(samplers) then
-    best_params = M.sample_params(samplers, param_names, nil, true)
-    best_params.n_hidden = n_hidden
-    local sa = {
-      n_samples = n_samples, n_dims = dims, codes = train_h,
-      lambda = best_params.lambda, sample_weights = args.sample_weights,
-    }
-    if dense then
-      sa.targets = args.targets; sa.n_targets = n_targets
-    else
-      sa.n_labels = args.n_labels; sa.label_offsets = args.label_offsets
-      sa.label_neighbors = args.label_neighbors
-      sa.propensity_a = best_params.propensity_a; sa.propensity_b = best_params.propensity_b
-    end
-    ridge_obj = ridge.solve(sa)
+  local dims = n_hidden
+  local k = not dense and (args.k or 32) or nil
+  local each_cb = args.each
+  local ridge_args = {
+    n_samples = n_samples, n_dims = dims, codes = train_h,
+    lambda = args.lambda, propensity_a = args.propensity_a, propensity_b = args.propensity_b,
+    sample_weights = args.sample_weights,
+    search_trials = args.search_trials,
+    search_subsample = args.search_subsample,
+    stratify_offsets = args.stratify_offsets,
+    stratify_neighbors = args.stratify_neighbors,
+    stratify_labels = args.stratify_labels,
+    cost_fn = args.cost_fn, cost_beta = args.cost_beta,
+    k = k,
+  }
+  if dense then
+    ridge_args.targets = args.targets
+    ridge_args.n_targets = n_targets
+  else
+    ridge_args.n_labels = args.n_labels
+    ridge_args.label_offsets = args.label_offsets
+    ridge_args.label_neighbors = args.label_neighbors
+    ridge_args.expected_offsets = args.expected_offsets
+    ridge_args.expected_neighbors = args.expected_neighbors
   end
-  if not ridge_obj then
-    local gram
-    if dense then
-      gram = ridge.precompute({
-        n_samples = n_samples, n_dims = dims,
-        n_targets = n_targets, codes = train_h,
-        targets = args.targets,
-        sample_weights = args.sample_weights,
-      })
-    else
-      gram = ridge.precompute({
-        n_samples = n_samples, n_dims = dims,
-        n_labels = args.n_labels, codes = train_h,
-        label_offsets = args.label_offsets,
-        label_neighbors = args.label_neighbors,
-        sample_weights = args.sample_weights,
-      })
-    end
-    local eval_data
-    local has_val = args.val_csc_offsets or args.val_dense_features
-    if has_val then
-      local val_h = encoder:encode({
-        csc_offsets = args.val_csc_offsets,
-        csc_indices = args.val_csc_indices,
-        n_samples = args.val_n_samples,
-        dense_features = args.val_dense_features,
-      })
-      if dense then
-        eval_data = { n_samples = args.val_n_samples, codes = val_h, targets = args.val_targets }
-      else
-        eval_data = {
-          n_samples = args.val_n_samples, codes = val_h,
-          expected_offsets = args.val_expected_offsets, expected_neighbors = args.val_expected_neighbors,
-        }
-      end
-    else
-      if dense then
-        eval_data = { codes = train_h, n_samples = n_samples, targets = args.targets }
-      else
-        eval_data = {
-          codes = train_h, n_samples = n_samples,
-          expected_offsets = args.expected_offsets, expected_neighbors = args.expected_neighbors,
-        }
-      end
-      local search_subsample = args.search_subsample
-      if search_subsample and search_subsample < 1.0 then
-        local search_n = num.floor(n_samples * search_subsample)
-        local search_ids
-        if args.stratify_offsets and args.stratify_neighbors and args.stratify_labels then
-          search_ids = csr.stratified_sample(
-            args.stratify_offsets, args.stratify_neighbors,
-            n_samples, args.stratify_labels, search_n):asc()
-          search_n = search_ids:size()
-        else
-          search_ids = ivec.create(n_samples):fill_indices():shuffle():setn(search_n):asc()
-        end
-        local s_codes = dvec.create()
-        train_h:mtx_select(nil, search_ids, dims, s_codes)
-        if dense then
-          local s_targets = dvec.create()
-          args.targets:mtx_select(nil, search_ids, n_targets, s_targets)
-          eval_data = { n_samples = search_n, codes = s_codes, targets = s_targets }
-        else
-          local s_eoff, s_enbr = csr.subsample(args.expected_offsets, args.expected_neighbors, search_ids)
-          eval_data = { n_samples = search_n, expected_offsets = s_eoff, expected_neighbors = s_enbr, codes = s_codes }
-        end
-      end
-    end
-    collectgarbage("collect")
-    local wb, ib
-    local lbl_off_buf, lbl_nbr_buf, lbl_sco_buf
-    local transform_buf
-    local function trial_fn (params, info)
-      params.n_hidden = n_hidden
-      local r
-      r, wb, ib = ridge.create({
-        gram = gram,
-        lambda = params.lambda,
-        propensity_a = not dense and params.propensity_a or nil,
-        propensity_b = not dense and params.propensity_b or nil,
-        w_buf = wb, intercept_buf = ib,
-      })
-      if dense then
-        transform_buf = r:transform(eval_data.codes, eval_data.n_samples, transform_buf)
-        local score, metrics = score_fn(transform_buf, eval_data)
-        return score, metrics, info.is_final and r or nil
-      else
-        local pred_off, pred_nbr, pred_sco = r:label(
-          eval_data.codes, eval_data.n_samples, k,
-          lbl_off_buf, lbl_nbr_buf, lbl_sco_buf)
-        lbl_off_buf, lbl_nbr_buf, lbl_sco_buf = pred_off, pred_nbr, pred_sco
-        local _, oracle = evaluator.retrieval_ks({
-          pred_offsets = pred_off,
-          pred_neighbors = pred_nbr,
-          expected_offsets = eval_data.expected_offsets,
-          expected_neighbors = eval_data.expected_neighbors,
-        })
-        return score_fn({ oracle = oracle }), { oracle = oracle }, info.is_final and r or nil
-      end
-    end
-    ridge_obj, best_params, best_metrics = M.search({
-      param_names = param_names,
-      samplers = samplers,
-      trials = args.search_trials or 30,
-      trial_fn = trial_fn,
-      each = args.each,
-      cost_fn = args.cost_fn,
-      cost_beta = args.cost_beta,
+  local has_val = args.val_csc_offsets or args.val_codes
+  if has_val then
+    local val_h = encoder:encode({
+      codes = args.val_codes,
+      csc_offsets = args.val_csc_offsets,
+      csc_indices = args.val_csc_indices,
+      n_samples = args.val_n_samples,
     })
-    best_params.n_hidden = n_hidden
+    ridge_args.val_codes = val_h
+    ridge_args.val_n_samples = args.val_n_samples
+    if dense then
+      ridge_args.val_targets = args.val_targets
+    else
+      ridge_args.val_expected_offsets = args.val_expected_offsets
+      ridge_args.val_expected_neighbors = args.val_expected_neighbors
+    end
   end
+  if each_cb then
+    ridge_args.each = function (ev)
+      if ev.params then ev.params.n_hidden = n_hidden end
+      return each_cb(ev)
+    end
+  end
+  collectgarbage("collect")
+  local ridge_obj, best_params, best_metrics = M.ridge(ridge_args)
+  best_params.n_hidden = n_hidden
   local oof
   if args.n_folds then
     local sa = {
@@ -1192,44 +1102,7 @@ M.elm = function (args)
       oof = { offsets = off, neighbors = nbr, scores = sco, transform = tr }
     end
   end
-  return elm.wrap(encoder, ridge_obj, k), best_params, best_metrics, train_h, oof
-end
-
-
-M.gfm = function (args)
-  local gfm_obj = err.assert(args.gfm, "gfm required")
-  local offsets = err.assert(args.offsets, "offsets required")
-  local neighbors = err.assert(args.neighbors, "neighbors required")
-  local scores = err.assert(args.scores, "scores required")
-  local ns = err.assert(args.n_samples, "n_samples required")
-  local exp_off = err.assert(args.expected_offsets, "expected_offsets required")
-  local exp_nbr = err.assert(args.expected_neighbors, "expected_neighbors required")
-  local mu_hat = args.mu_hat
-  args.beta = spec_defaults(args.beta, { min = 0.5, max = 3.0 })
-  args.gamma = spec_defaults(args.gamma, { min = 0.3, max = 3.0 })
-  local param_names = { "beta", "gamma" }
-  local samplers = M.build_samplers(args, param_names)
-  local score_fn = args.score_fn or function (ret) return ret.oracle.macro_f1 end
-  local function trial_fn (params, info)
-    local ks = gfm_obj:predict({
-      offsets = offsets, neighbors = neighbors, scores = scores,
-      n_samples = ns, mu_hat = mu_hat, beta = params.beta, gamma = params.gamma,
-    })
-    local _, oracle = evaluator.retrieval_ks({
-      pred_offsets = offsets, pred_neighbors = neighbors,
-      expected_offsets = exp_off, expected_neighbors = exp_nbr, ks = ks,
-    })
-    local ret = { oracle = oracle, ks = ks }
-    return score_fn(ret), ret, info.is_final and ks or nil
-  end
-  local result, best_params, best_metrics = M.search({
-    param_names = param_names,
-    samplers = samplers,
-    trials = args.search_trials or 30,
-    trial_fn = trial_fn,
-    each = args.each,
-  })
-  return result, best_params, best_metrics
+  return encoder, ridge_obj, best_params, best_metrics, train_h, oof
 end
 
 

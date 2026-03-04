@@ -279,8 +279,10 @@ static inline int tk_ridge_gram_trial_label_lua (lua_State *L) {
   if (!g->H_val) return luaL_error(L, "trial_label: call prepare_val first");
   int64_t d = g->n_dims, nl = g->n_labels, val_n = g->val_n;
   lua_getfield(L, 2, "lambda");
-  double lambda = (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0);
+  double lambda_raw = (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0);
   lua_pop(L, 1);
+  double max_eig = d > 0 ? g->eigenvals->a[d - 1] : 1.0;
+  double lambda = lambda_raw * max_eig + max_eig * 1e-7;
   lua_getfield(L, 2, "propensity_a");
   bool do_prop = lua_isnumber(L, -1);
   double prop_a = do_prop ? lua_tonumber(L, -1) : 0.0;
@@ -578,8 +580,10 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     int64_t d = gram->n_dims, nl = gram->n_labels;
     uint64_t dnl = (uint64_t)d * (uint64_t)nl;
     lua_getfield(L, 1, "lambda");
-    double lambda = (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0);
+    double lambda_raw = (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0);
     lua_pop(L, 1);
+    double max_eig = d > 0 ? gram->eigenvals->a[d - 1] : 1.0;
+    double lambda = lambda_raw * max_eig + max_eig * 1e-7;
     lua_getfield(L, 1, "propensity_a");
     bool do_prop = lua_isnumber(L, -1);
     double prop_a = do_prop ? lua_tonumber(L, -1) : 0.0;
@@ -895,7 +899,11 @@ static inline int tk_ridge_solve_lua (lua_State *L) {
     for (int64_t j = i + 1; j < d; j++)
       gram[j * d + i] = gram[i * d + j];
 
-  double lambda = lambda_raw;
+  double max_diag = 0.0;
+  for (int64_t i = 0; i < d; i++)
+    if (gram[i * d + i] > max_diag) max_diag = gram[i * d + i];
+  if (max_diag <= 0.0) max_diag = 1.0;
+  double lambda = lambda_raw * max_diag + max_diag * 1e-7;
   for (int64_t i = 0; i < d; i++)
     gram[i * d + i] += lambda;
 
@@ -1004,7 +1012,7 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
     if (k < 1) k = 1;
   }
   lua_getfield(L, 1, "n_folds");
-  int64_t nf = lua_isnumber(L, -1) ? (int64_t)lua_tointeger(L, -1) : 5;
+  int64_t nf = lua_isnumber(L, -1) ? (int64_t)lua_tointeger(L, -1) : 0;
   lua_pop(L, 1);
   lua_getfield(L, 1, "transform");
   bool do_transform = !dense && lua_toboolean(L, -1);
@@ -1161,7 +1169,11 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
     for (int64_t i = 0; i < d; i++)
       for (int64_t j = i + 1; j < d; j++)
         full_XtX[j * d + i] = full_XtX[i * d + j];
-    double lambda = lambda_raw;
+    double max_diag = 0.0;
+    for (int64_t i = 0; i < d; i++)
+      if (full_XtX[i * d + i] > max_diag) max_diag = full_XtX[i * d + i];
+    if (max_diag <= 0.0) max_diag = 1.0;
+    double lambda = lambda_raw * max_diag + max_diag * 1e-7;
     for (int64_t i = 0; i < d; i++)
       full_XtX[i * d + i] += lambda;
     int info = LAPACKE_dpotrf(LAPACK_ROW_MAJOR, 'U', (int)d, full_XtX, (int)d);
@@ -1187,12 +1199,9 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
     } else {
       int64_t chunk = 256;
       double *sbuf2 = (double *)malloc((uint64_t)chunk * (uint64_t)nl * sizeof(double));
-      tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
-                         .a = (tk_rank_t *)malloc((uint64_t)k * sizeof(tk_rank_t)) };
-      if (!sbuf2 || !heap.a) {
+      if (!sbuf2) {
         free(perm); free(w); free(full_col_sum); free(full_XtX); free(full_XtY);
         free(full_y_sum); free(full_label_counts); free(intercept);
-        free(sbuf2); free(heap.a);
         return luaL_error(L, "solve_oof: malloc failed");
       }
       for (int64_t s = 0; s < n; s += chunk) {
@@ -1201,24 +1210,30 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
           (int)cn, (int)nl, (int)d, 1.0, codes->a + s * d, (int)d,
           W, (int)nl, 0.0, sbuf2, (int)nl);
         tk_ridge_add_intercept(sbuf2, cn, nl, intercept);
-        for (int64_t vi = 0; vi < cn; vi++) {
-          int64_t orig = s + vi;
-          double *row = sbuf2 + vi * nl;
-          int64_t dst = orig * k;
-          heap.n = 0;
-          for (int64_t l = 0; l < nl; l++)
-            tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, row[l]));
-          tk_rvec_desc(&heap, 0, heap.n);
-          for (int64_t j = 0; j < (int64_t)heap.n; j++) {
-            oof_nbr->a[dst + j] = heap.a[j].i;
-            oof_sco->a[dst + j] = heap.a[j].d;
+        #pragma omp parallel
+        {
+          tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
+                             .a = (tk_rank_t *)malloc((uint64_t)k * sizeof(tk_rank_t)) };
+          #pragma omp for schedule(static)
+          for (int64_t vi = 0; vi < cn; vi++) {
+            int64_t orig = s + vi;
+            double *row = sbuf2 + vi * nl;
+            int64_t dst = orig * k;
+            heap.n = 0;
+            for (int64_t l = 0; l < nl; l++)
+              tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, row[l]));
+            tk_rvec_desc(&heap, 0, heap.n);
+            for (int64_t j = 0; j < (int64_t)heap.n; j++) {
+              oof_nbr->a[dst + j] = heap.a[j].i;
+              oof_sco->a[dst + j] = heap.a[j].d;
+            }
+            if (do_transform)
+              memcpy(oof_transform->a + orig * nl, row, (uint64_t)nl * sizeof(double));
           }
-          if (do_transform)
-            memcpy(oof_transform->a + orig * nl, row, (uint64_t)nl * sizeof(double));
+          free(heap.a);
         }
       }
       free(sbuf2);
-      free(heap.a);
     }
     free(perm); free(w); free(full_col_sum); free(full_XtX); free(full_XtY);
     free(full_y_sum); free(full_label_counts); free(intercept);
@@ -1397,7 +1412,11 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
       for (int64_t j = i + 1; j < d; j++)
         train_gram[j * d + i] = train_gram[i * d + j];
 
-    double lambda = lambda_raw;
+    double max_diag = 0.0;
+    for (int64_t i = 0; i < d; i++)
+      if (train_gram[i * d + i] > max_diag) max_diag = train_gram[i * d + i];
+    if (max_diag <= 0.0) max_diag = 1.0;
+    double lambda = lambda_raw * max_diag + max_diag * 1e-7;
     for (int64_t i = 0; i < d; i++)
       train_gram[i * d + i] += lambda;
 
@@ -1431,25 +1450,28 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
     tk_ridge_add_intercept(sbuf, val_n, nl, intercept);
 
     if (!dense) {
-      tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
-                         .a = (tk_rank_t *)malloc((uint64_t)k * sizeof(tk_rank_t)) };
-      for (int64_t vi = 0; vi < val_n; vi++) {
-        int64_t orig = perm[val_s + vi];
-        double *row = sbuf + vi * nl;
-        int64_t dst = orig * k;
-        heap.n = 0;
-        for (int64_t l = 0; l < nl; l++)
-          tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, row[l]));
-        tk_rvec_desc(&heap, 0, heap.n);
-        for (int64_t j = 0; j < (int64_t)heap.n; j++) {
-          oof_nbr->a[dst + j] = heap.a[j].i;
-          oof_sco->a[dst + j] = heap.a[j].d;
+      #pragma omp parallel
+      {
+        tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
+                           .a = (tk_rank_t *)malloc((uint64_t)k * sizeof(tk_rank_t)) };
+        #pragma omp for schedule(static)
+        for (int64_t vi = 0; vi < val_n; vi++) {
+          int64_t orig = perm[val_s + vi];
+          double *row = sbuf + vi * nl;
+          int64_t dst = orig * k;
+          heap.n = 0;
+          for (int64_t l = 0; l < nl; l++)
+            tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, row[l]));
+          tk_rvec_desc(&heap, 0, heap.n);
+          for (int64_t j = 0; j < (int64_t)heap.n; j++) {
+            oof_nbr->a[dst + j] = heap.a[j].i;
+            oof_sco->a[dst + j] = heap.a[j].d;
+          }
+          if (do_transform)
+            memcpy(oof_transform->a + orig * nl, row, (uint64_t)nl * sizeof(double));
         }
-        if (do_transform) {
-          memcpy(oof_transform->a + orig * nl, row, (uint64_t)nl * sizeof(double));
-        }
+        free(heap.a);
       }
-      free(heap.a);
     } else {
       for (int64_t vi = 0; vi < val_n; vi++) {
         int64_t orig = perm[val_s + vi];

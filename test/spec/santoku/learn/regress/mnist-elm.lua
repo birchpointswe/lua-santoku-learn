@@ -21,7 +21,6 @@ local cfg = {
     mode = "sigmoid",
     classes = 10,
     n_hidden = 8192,
-    seed = 42,
     lambda = { def = 1.0 },
     propensity_a = { def = 0.55 },
     propensity_b = { def = 1.5 },
@@ -69,13 +68,12 @@ test("mnist elm classifier", function ()
 
   print("\nTraining ELM")
   local stopwatch = utc.stopwatch()
-  local elm_obj, elm_params, _, train_h = optimize.elm({
+  local encoder, ridge_obj, elm_params, _, train_h = optimize.elm({
     norm = cfg.elm.norm,
     mode = cfg.elm.mode,
     n_samples = train.n,
     n_tokens = n_tokens,
     n_hidden = cfg.elm.n_hidden,
-    seed = cfg.elm.seed,
     csc_offsets = train_csc_off,
     csc_indices = train_csc_idx,
     feature_weights = bns_scores,
@@ -102,9 +100,11 @@ test("mnist elm classifier", function ()
   local n_classes = cfg.elm.classes
 
   print("\nEvaluating splits")
-  local train_off, train_labels = elm_obj.ridge:label(train_h, train.n, 1)
-  local val_off, val_labels = elm_obj:label(val_csc_off, val_csc_idx, validate.n, 1)
-  local _, test_labels = elm_obj:label(test_csc_off, test_csc_idx, test_set.n, 1)
+  local train_off, train_labels = ridge_obj:label(train_h, train.n, 1)
+  local val_h = encoder:encode({ csc_offsets = val_csc_off, csc_indices = val_csc_idx, n_samples = validate.n })
+  local val_off, val_labels = ridge_obj:label(val_h, validate.n, 1)
+  local test_h = encoder:encode({ csc_offsets = test_csc_off, csc_indices = test_csc_idx, n_samples = test_set.n })
+  local _, test_labels = ridge_obj:label(test_h, test_set.n, 1)
 
   print("\nClassification metrics (class_accuracy):")
   local train_stats = eval.class_accuracy(train_labels, train.solutions, train.n, n_classes)

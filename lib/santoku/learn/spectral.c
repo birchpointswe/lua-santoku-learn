@@ -32,8 +32,10 @@ static inline int tk_spectral_landmarks_ctx_gc (lua_State *L) {
 static inline void tk_spectral_sample_landmarks (
   lua_State *L,
   tk_inv_t *inv,
+  double *dense, int64_t d_input, uint64_t n_docs_hint,
   uint64_t n_landmarks,
   double decay,
+  double trace_tol,
   tk_ivec_t **ids_out,
   tk_dvec_t **chol_out,
   tk_dvec_t **full_chol_out,
@@ -41,10 +43,15 @@ static inline void tk_spectral_sample_landmarks (
   uint64_t *actual_landmarks_out,
   double *trace_ratio_out
 ) {
+  int is_dense = (inv == NULL && dense != NULL);
   uint64_t n_docs = 0;
-  for (int64_t sid = 0; sid < inv->next_sid; sid++) {
-    if (inv->sid_to_uid->a[sid] >= 0)
-      n_docs++;
+  if (is_dense) {
+    n_docs = n_docs_hint;
+  } else {
+    for (int64_t sid = 0; sid < inv->next_sid; sid++) {
+      if (inv->sid_to_uid->a[sid] >= 0)
+        n_docs++;
+    }
   }
 
   if (n_landmarks == 0 || n_landmarks > n_docs)
@@ -88,20 +95,33 @@ static inline void tk_spectral_sample_landmarks (
   int64_t *landmark_idx_map = ctx->landmark_idx_map;
 
   uint64_t idx = 0;
-  for (int64_t sid = 0; sid < inv->next_sid; sid++) {
-    if (inv->sid_to_uid->a[sid] >= 0)
-      sid_map[idx++] = sid;
+  if (is_dense) {
+    for (uint64_t i = 0; i < n_docs; i++)
+      sid_map[i] = (int64_t)i;
+    idx = n_docs;
+  } else {
+    for (int64_t sid = 0; sid < inv->next_sid; sid++) {
+      if (inv->sid_to_uid->a[sid] >= 0)
+        sid_map[idx++] = sid;
+    }
   }
 
   tk_inv_rank_weights_t rw;
-  tk_inv_precompute_rank_weights(&rw, inv->n_ranks, decay);
-
-  const double *weights_arr = inv->weights->a;
-  const int64_t *node_bits_a = inv->node_bits->a;
-  const int64_t *nro_a = inv->node_rank_offsets->a;
-  const double *node_weights_a = inv->node_weights->a;
-  uint64_t n_ranks = inv->n_ranks;
-  uint64_t stride = n_ranks + 1;
+  const double *weights_arr = NULL;
+  const int64_t *node_bits_a = NULL;
+  const int64_t *nro_a = NULL;
+  const double *node_weights_a = NULL;
+  uint64_t n_ranks = 0;
+  uint64_t stride = 0;
+  if (!is_dense) {
+    tk_inv_precompute_rank_weights(&rw, inv->n_ranks, decay);
+    weights_arr = inv->weights->a;
+    node_bits_a = inv->node_bits->a;
+    nro_a = inv->node_rank_offsets->a;
+    node_weights_a = inv->node_weights->a;
+    n_ranks = inv->n_ranks;
+    stride = n_ranks + 1;
+  }
 
   memset(residual, 0, n_docs * sizeof(double));
   memset(landmark_idx_map, -1, n_landmarks * sizeof(int64_t));
@@ -113,107 +133,135 @@ static inline void tk_spectral_sample_landmarks (
   double scale = 0.0;
   double *pivot_row = NULL;
   bool done = false;
-  #pragma omp parallel
-  {
-    double thr_i[TK_INV_MAX_RANKS];
 
-    #pragma omp for reduction(+:initial_trace)
-    for (uint64_t i = 0; i < n_docs; i++) {
+  double *kip_buf = (double *)malloc(n_docs * sizeof(double));
+  double *dot_buf = (double *)malloc(n_docs * sizeof(double));
+  if (!kip_buf || !dot_buf) {
+    free(kip_buf); free(dot_buf);
+    luaL_error(L, "sample_landmarks: out of memory (buffers)");
+    return;
+  }
+
+  #pragma omp parallel for reduction(+:initial_trace)
+  for (uint64_t i = 0; i < n_docs; i++) {
+    if (is_dense) {
+      residual[i] = cblas_ddot((int)d_input, dense + i * (uint64_t)d_input, 1, dense + i * (uint64_t)d_input, 1);
+    } else {
       const double *nw = node_weights_a + sid_map[i] * (int64_t) n_ranks;
       double accum = 0.0;
       for (uint64_t r = 0; r < n_ranks; r++)
         if (nw[r] > 0.0) accum += rw.weights[r];
-      double avg_sim = (rw.total > 0.0) ? accum / rw.total : 0.0;
-      residual[i] = avg_sim;
-      initial_trace += residual[i];
+      residual[i] = (rw.total > 0.0) ? accum / rw.total : 0.0;
     }
-
-    for (uint64_t j = 0; j < n_landmarks && !done; j++) {
-
-      #pragma omp single
-      {
-        if (j >= L_stride) {
-          uint64_t new_stride = L_stride * 2;
-          if (new_stride > n_landmarks) new_stride = n_landmarks;
-          double *new_L = (double *)calloc(n_docs * new_stride, sizeof(double));
-          if (!new_L) { done = true; } else {
-            for (uint64_t ri = 0; ri < n_docs; ri++)
-              memcpy(new_L + ri * new_stride, L_mat + ri * L_stride, j * sizeof(double));
-            free(L_mat);
-            L_mat = new_L;
-            ctx->L_mat = new_L;
-            L_stride = new_stride;
-          }
-        }
-
-        trace = 0.0;
-        for (uint64_t i = 0; i < n_docs; i++) {
-          if (residual[i] > 0.0)
-            trace += residual[i];
-        }
-
-        if (trace < 1e-15) {
-          done = true;
-        } else {
-          double r = tk_fast_drand() * trace;
-          pivot_idx = n_docs - 1;
-          double cumsum = 0.0;
-          for (uint64_t i = 0; i < n_docs; i++) {
-            if (residual[i] > 0.0) {
-              cumsum += residual[i];
-              if (cumsum >= r) {
-                pivot_idx = i;
-                break;
-              }
-            }
-          }
-
-          double pivot_residual = residual[pivot_idx];
-          if (pivot_residual < 1e-15) {
-            done = true;
-          } else {
-            landmark_sids[actual_landmarks] = sid_map[pivot_idx];
-            landmark_idx_map[actual_landmarks] = (int64_t)pivot_idx;
-            scale = sqrt(pivot_residual);
-            actual_landmarks++;
-            pivot_row = &L_mat[pivot_idx * L_stride];
-          }
-        }
-      }
-
-      if (done) continue;
-
-      #pragma omp for schedule(guided)
-      for (uint64_t i = 0; i < n_docs; i++) {
-        const int64_t *i_ro = nro_a + sid_map[i] * (int64_t) stride;
-        const int64_t *p_ro = nro_a + sid_map[pivot_idx] * (int64_t) stride;
-        const double *i_nw = node_weights_a + sid_map[i] * (int64_t) n_ranks;
-        const double *p_nw = node_weights_a + sid_map[pivot_idx] * (int64_t) n_ranks;
-        double kip = tk_inv_similarity_fast_cached(weights_arr, n_ranks,
-                                            node_bits_a, i_ro, node_bits_a, p_ro,
-                                            &rw, i_nw, p_nw, thr_i, inv->kernel);
-        double dot = (j > 0) ? cblas_ddot((int)j, &L_mat[i * L_stride], 1, pivot_row, 1) : 0.0;
-        L_mat[i * L_stride + j] = (kip - dot) / scale;
-      }
-
-      #pragma omp for
-      for (uint64_t i = 0; i < n_docs; i++) {
-        double lij = L_mat[i * L_stride + j];
-        residual[i] -= lij * lij;
-        if (residual[i] < 0.0)
-          residual[i] = 0.0;
-      }
-
-      #pragma omp single
-      {
-        residual[pivot_idx] = 0.0;
-      }
-    }
+    initial_trace += residual[i];
   }
+
+  for (uint64_t j = 0; j < n_landmarks && !done; j++) {
+
+    if (j >= L_stride) {
+      uint64_t new_stride = L_stride * 2;
+      if (new_stride > n_landmarks) new_stride = n_landmarks;
+      double *new_L = (double *)calloc(n_docs * new_stride, sizeof(double));
+      if (!new_L) { done = true; } else {
+        for (uint64_t ri = 0; ri < n_docs; ri++)
+          memcpy(new_L + ri * new_stride, L_mat + ri * L_stride, j * sizeof(double));
+        free(L_mat);
+        L_mat = new_L;
+        ctx->L_mat = new_L;
+        L_stride = new_stride;
+      }
+    }
+
+    trace = 0.0;
+    for (uint64_t i = 0; i < n_docs; i++) {
+      if (residual[i] > 0.0)
+        trace += residual[i];
+    }
+
+    if (trace < 1e-15 || (trace_tol > 0.0 && initial_trace > 0.0 && trace / initial_trace < trace_tol)) {
+      done = true;
+    } else {
+      double r = tk_fast_drand() * trace;
+      pivot_idx = n_docs - 1;
+      double cumsum = 0.0;
+      for (uint64_t i = 0; i < n_docs; i++) {
+        if (residual[i] > 0.0) {
+          cumsum += residual[i];
+          if (cumsum >= r) {
+            pivot_idx = i;
+            break;
+          }
+        }
+      }
+
+      double pivot_residual = residual[pivot_idx];
+      if (pivot_residual < 1e-15) {
+        done = true;
+      } else {
+        landmark_sids[actual_landmarks] = sid_map[pivot_idx];
+        landmark_idx_map[actual_landmarks] = (int64_t)pivot_idx;
+        scale = sqrt(pivot_residual);
+        actual_landmarks++;
+        pivot_row = &L_mat[pivot_idx * L_stride];
+      }
+    }
+
+    if (done) continue;
+
+    if (is_dense) {
+      cblas_dgemv(CblasRowMajor, CblasNoTrans,
+        (int)n_docs, (int)d_input, 1.0,
+        dense, (int)d_input,
+        dense + pivot_idx * (uint64_t)d_input, 1,
+        0.0, kip_buf, 1);
+    }
+
+    if (j > 0) {
+      cblas_dgemv(CblasRowMajor, CblasNoTrans,
+        (int)n_docs, (int)j, 1.0,
+        L_mat, (int)L_stride,
+        pivot_row, 1,
+        0.0, dot_buf, 1);
+    }
+
+    if (is_dense) {
+      #pragma omp parallel for schedule(static)
+      for (uint64_t i = 0; i < n_docs; i++) {
+        double lij = (kip_buf[i] - (j > 0 ? dot_buf[i] : 0.0)) / scale;
+        L_mat[i * L_stride + j] = lij;
+        residual[i] -= lij * lij;
+        if (residual[i] < 0.0) residual[i] = 0.0;
+      }
+    } else {
+      #pragma omp parallel
+      {
+        double thr_i[TK_INV_MAX_RANKS];
+        #pragma omp for schedule(guided)
+        for (uint64_t i = 0; i < n_docs; i++) {
+          const int64_t *i_ro = nro_a + sid_map[i] * (int64_t) stride;
+          const int64_t *p_ro = nro_a + sid_map[pivot_idx] * (int64_t) stride;
+          const double *i_nw = node_weights_a + sid_map[i] * (int64_t) n_ranks;
+          const double *p_nw = node_weights_a + sid_map[pivot_idx] * (int64_t) n_ranks;
+          double kip = tk_inv_similarity_fast_cached(weights_arr, n_ranks,
+                                              node_bits_a, i_ro, node_bits_a, p_ro,
+                                              &rw, i_nw, p_nw, thr_i, inv->kernel);
+          double lij = (kip - (j > 0 ? dot_buf[i] : 0.0)) / scale;
+          L_mat[i * L_stride + j] = lij;
+          residual[i] -= lij * lij;
+          if (residual[i] < 0.0) residual[i] = 0.0;
+        }
+      }
+    }
+
+    residual[pivot_idx] = 0.0;
+  }
+
+  free(kip_buf);
+  free(dot_buf);
 
   tk_ivec_t *landmark_ids = tk_ivec_create(L, actual_landmarks, 0, 0);
   for (uint64_t i = 0; i < actual_landmarks; i++)
-    landmark_ids->a[i] = inv->sid_to_uid->a[landmark_sids[i]];
+    landmark_ids->a[i] = is_dense ? landmark_sids[i] : inv->sid_to_uid->a[landmark_sids[i]];
   landmark_ids->n = actual_landmarks;
 
   tk_dvec_t *chol = tk_dvec_create(NULL, actual_landmarks * actual_landmarks, 0, 0);
@@ -234,7 +282,7 @@ static inline void tk_spectral_sample_landmarks (
 
   tk_ivec_t *full_chol_ids = tk_ivec_create(L, n_docs, 0, 0);
   for (uint64_t i = 0; i < n_docs; i++)
-    full_chol_ids->a[i] = inv->sid_to_uid->a[sid_map[i]];
+    full_chol_ids->a[i] = is_dense ? (int64_t)i : inv->sid_to_uid->a[sid_map[i]];
   full_chol_ids->n = n_docs;
 
   lua_remove(L, ctx_idx);
@@ -280,10 +328,13 @@ typedef struct {
   double *adjustment;
   double *inv_sqrt_eig;
   int64_t *lm_sids;
+  double *lm_vecs;
   uint64_t m;
   uint64_t d;
+  int64_t d_input;
   double decay;
   double trace_ratio;
+  uint8_t dense_mode;
   bool destroyed;
 } tk_nystrom_encoder_t;
 
@@ -298,6 +349,7 @@ static inline int tk_nystrom_encoder_gc (lua_State *L) {
     free(enc->adjustment);
     free(enc->inv_sqrt_eig);
     free(enc->lm_sids);
+    free(enc->lm_vecs);
     enc->destroyed = true;
   }
   return 0;
@@ -305,6 +357,39 @@ static inline int tk_nystrom_encoder_gc (lua_State *L) {
 
 static inline int tk_nystrom_encode_lua (lua_State *L) {
   tk_nystrom_encoder_t *enc = tk_nystrom_encoder_peek(L, 1);
+  uint64_t d = enc->d;
+  uint64_t m = enc->m;
+
+  if (enc->dense_mode) {
+    tk_dvec_t *codes = tk_dvec_peek(L, 2, "codes");
+    uint64_t n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
+    int64_t d_in = enc->d_input;
+    tk_dvec_t *out = tk_dvec_create(L, n_samples * d, 0, 0);
+    out->n = n_samples * d;
+    double *sims = (double *)malloc(n_samples * m * sizeof(double));
+    if (!sims) return luaL_error(L, "encode: out of memory");
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+      (int)n_samples, (int)m, (int)d_in, 1.0,
+      codes->a, (int)d_in,
+      enc->lm_vecs, (int)d_in,
+      0.0, sims, (int)m);
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+      (int)n_samples, (int)d, (int)m, 1.0,
+      sims, (int)m,
+      enc->projection, (int)d,
+      0.0, out->a, (int)d);
+    free(sims);
+    #pragma omp parallel for schedule(static)
+    for (uint64_t i = 0; i < n_samples; i++) {
+      double *row = out->a + i * d;
+      for (uint64_t k = 0; k < d; k++) {
+        row[k] -= enc->adjustment[k];
+        row[k] *= enc->inv_sqrt_eig[k];
+      }
+    }
+    return 1;
+  }
+
   tk_ivec_t *sparse = tk_ivec_peek(L, 2, "sparse_bits");
   uint64_t n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
   uint64_t n_features = tk_lua_checkunsigned(L, 4, "n_features");
@@ -314,18 +399,17 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
   lua_pop(L, 2);
   tk_inv_rank_weights_t rw;
   tk_inv_precompute_rank_weights(&rw, inv->n_ranks, enc->decay);
-  uint64_t d = enc->d;
-  uint64_t m = enc->m;
   tk_dvec_t *out = tk_dvec_create(L, n_samples * d, 0, 0);
   out->n = n_samples * d;
   uint64_t nystrom_stride = inv->n_ranks + 1;
   const int64_t *nystrom_nro = inv->node_rank_offsets->a;
   const int64_t *nystrom_nb = inv->node_bits->a;
+  double *sims_all = (double *)malloc(n_samples * m * sizeof(double));
+  if (!sims_all) return luaL_error(L, "encode: out of memory");
   #pragma omp parallel
   {
     double thr_q[TK_INV_MAX_RANKS], thr_e[TK_INV_MAX_RANKS], thr_i[TK_INV_MAX_RANKS];
     int64_t q_ro[TK_INV_MAX_RANKS + 1];
-    double *sims = (double *)malloc(m * sizeof(double));
     int64_t *feat_buf = (int64_t *)malloc(n_features * sizeof(int64_t));
     #pragma omp for schedule(dynamic, 16)
     for (uint64_t i = 0; i < n_samples; i++) {
@@ -346,23 +430,32 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
       for (uint64_t f = 0; f < nf; f++)
         feat_buf[f] = sparse->a[start + f] - lo;
       tk_inv_partition_by_rank(inv->ranks->a, inv->n_ranks, feat_buf, nf, q_ro);
+      double *sims_row = sims_all + i * m;
       for (uint64_t j = 0; j < m; j++) {
         if (enc->lm_sids[j] >= 0 && nf > 0) {
           const int64_t *lm_ro = nystrom_nro + enc->lm_sids[j] * (int64_t) nystrom_stride;
-          sims[j] = tk_inv_similarity_fast(inv->weights->a, inv->n_ranks,
+          sims_row[j] = tk_inv_similarity_fast(inv->weights->a, inv->n_ranks,
             feat_buf, q_ro, nystrom_nb, lm_ro, &rw, thr_q, thr_e, thr_i, inv->kernel);
         } else {
-          sims[j] = 0.0;
+          sims_row[j] = 0.0;
         }
       }
-      double *row = out->a + i * d;
-      cblas_dgemv(CblasRowMajor, CblasTrans,
-        (int)m, (int)d, 1.0, enc->projection, (int)d, sims, 1, 0.0, row, 1);
-      for (uint64_t k = 0; k < d; k++)
-        row[k] -= enc->adjustment[k];
     }
-    free(sims);
     free(feat_buf);
+  }
+  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    (int)n_samples, (int)d, (int)m, 1.0,
+    sims_all, (int)m,
+    enc->projection, (int)d,
+    0.0, out->a, (int)d);
+  free(sims_all);
+  #pragma omp parallel for schedule(static)
+  for (uint64_t i = 0; i < n_samples; i++) {
+    double *row = out->a + i * d;
+    for (uint64_t k = 0; k < d; k++) {
+      row[k] -= enc->adjustment[k];
+      row[k] *= enc->inv_sqrt_eig[k];
+    }
   }
   return 1;
 }
@@ -434,8 +527,9 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
   else
     return tk_lua_verror(L, 2, "persist", "expecting either a filepath or true (for string serialization)");
   tk_lua_fwrite(L, "TKny", 1, 4, fh);
-  uint8_t version = 4;
+  uint8_t version = 5;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
+  tk_lua_fwrite(L, &enc->dense_mode, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &enc->m, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, &enc->d, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, &enc->decay, sizeof(double), 1, fh);
@@ -443,7 +537,12 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
   tk_lua_fwrite(L, enc->projection, sizeof(double), enc->m * enc->d, fh);
   tk_lua_fwrite(L, enc->adjustment, sizeof(double), enc->d, fh);
   tk_lua_fwrite(L, enc->inv_sqrt_eig, sizeof(double), enc->d, fh);
-  tk_lua_fwrite(L, enc->lm_sids, sizeof(int64_t), enc->m, fh);
+  if (enc->dense_mode) {
+    tk_lua_fwrite(L, &enc->d_input, sizeof(int64_t), 1, fh);
+    tk_lua_fwrite(L, enc->lm_vecs, sizeof(double), enc->m * (uint64_t)enc->d_input, fh);
+  } else {
+    tk_lua_fwrite(L, enc->lm_sids, sizeof(int64_t), enc->m, fh);
+  }
   lua_getfenv(L, 1);
   lua_getfield(L, -1, "landmark_ids");
   tk_ivec_t *lm_ids = tk_ivec_peek(L, -1, "landmark_ids");
@@ -483,18 +582,35 @@ static inline int tm_encode (lua_State *L) {
   luaL_checktype(L, 1, LUA_TTABLE);
 
   lua_getfield(L, 1, "inv");
-  tk_inv_t *feat_inv = tk_inv_peek(L, -1);
+  int has_inv = !lua_isnil(L, -1);
+  tk_inv_t *feat_inv = has_inv ? tk_inv_peek(L, -1) : NULL;
   int feat_inv_idx = lua_gettop(L);
+
+  double *dense_data = NULL;
+  int64_t dense_d_input = 0;
+  uint64_t dense_n_samples = 0;
+  if (!has_inv) {
+    lua_pop(L, 1);
+    lua_getfield(L, 1, "codes");
+    tk_dvec_t *codes_dv = tk_dvec_peek(L, -1, "codes");
+    dense_data = codes_dv->a;
+    dense_n_samples = tk_lua_fcheckunsigned(L, 1, "encode", "n_samples");
+    dense_d_input = (int64_t)(codes_dv->n / dense_n_samples);
+    lua_pop(L, 1);
+  }
 
   uint64_t n_lm_req = tk_lua_foptunsigned(L, 1, "encode", "n_landmarks", 0);
   uint64_t n_dims_req = tk_lua_foptunsigned(L, 1, "encode", "n_dims", 0);
   double decay = tk_lua_foptnumber(L, 1, "encode", "decay", 0.0);
+  double trace_tol = tk_lua_foptnumber(L, 1, "encode", "trace_tol", 0.0);
 
   tk_ivec_t *lm_ids = NULL, *chol_ids = NULL;
   tk_dvec_t *lm_chol = NULL, *full_chol = NULL;
   uint64_t m;
   double trace_ratio;
-  tk_spectral_sample_landmarks(L, feat_inv, n_lm_req, decay,
+  tk_spectral_sample_landmarks(L, feat_inv,
+    dense_data, dense_d_input, dense_n_samples,
+    n_lm_req, decay, trace_tol,
     &lm_ids, &lm_chol, &full_chol, &chol_ids, &m, &trace_ratio);
   int lm_ids_idx = lua_gettop(L) - 1;
   int chol_ids_idx = lua_gettop(L);
@@ -622,8 +738,10 @@ static inline int tm_encode (lua_State *L) {
   #pragma omp parallel for schedule(static)
   for (uint64_t i = 0; i < nc; i++) {
     double *r = ccodes->a + i * d;
-    for (uint64_t j = 0; j < d; j++)
+    for (uint64_t j = 0; j < d; j++) {
       r[j] -= ctx->adjustment[j];
+      r[j] *= ctx->inv_sqrt_eig[j];
+    }
   }
 
   ctx->projection = (double *)malloc(m * d * sizeof(double));
@@ -636,9 +754,11 @@ static inline int tm_encode (lua_State *L) {
 
   int raw_codes_idx = lua_gettop(L);
 
-  ctx->lm_sids = (int64_t *)malloc(m * sizeof(int64_t));
-  for (uint64_t j = 0; j < m; j++)
-    ctx->lm_sids[j] = tk_inv_uid_sid(feat_inv, lm_ids->a[j], TK_INV_FIND);
+  if (has_inv) {
+    ctx->lm_sids = (int64_t *)malloc(m * sizeof(int64_t));
+    for (uint64_t j = 0; j < m; j++)
+      ctx->lm_sids[j] = tk_inv_uid_sid(feat_inv, lm_ids->a[j], TK_INV_FIND);
+  }
 
   tk_nystrom_encoder_t *enc = (tk_nystrom_encoder_t *)tk_lua_newuserdata(L, tk_nystrom_encoder_t,
     TK_NYSTROM_ENCODER_MT, tk_nystrom_encoder_mt_fns, tk_nystrom_encoder_gc);
@@ -646,16 +766,35 @@ static inline int tm_encode (lua_State *L) {
   enc->projection = ctx->projection; ctx->projection = NULL;
   enc->adjustment = ctx->adjustment; ctx->adjustment = NULL;
   enc->inv_sqrt_eig = ctx->inv_sqrt_eig; ctx->inv_sqrt_eig = NULL;
-  enc->lm_sids = ctx->lm_sids; ctx->lm_sids = NULL;
   enc->m = m;
   enc->d = d;
   enc->decay = decay;
   enc->trace_ratio = trace_ratio;
   enc->destroyed = false;
 
+  if (has_inv) {
+    enc->lm_sids = ctx->lm_sids; ctx->lm_sids = NULL;
+    enc->lm_vecs = NULL;
+    enc->dense_mode = 0;
+    enc->d_input = 0;
+  } else {
+    enc->lm_sids = NULL;
+    double *lmv = (double *)malloc(m * (uint64_t)dense_d_input * sizeof(double));
+    for (uint64_t j = 0; j < m; j++) {
+      int64_t row = lm_ids->a[j];
+      memcpy(lmv + j * (uint64_t)dense_d_input, dense_data + (uint64_t)row * (uint64_t)dense_d_input,
+             (uint64_t)dense_d_input * sizeof(double));
+    }
+    enc->lm_vecs = lmv;
+    enc->dense_mode = 1;
+    enc->d_input = dense_d_input;
+  }
+
   lua_newtable(L);
-  lua_pushvalue(L, feat_inv_idx);
-  lua_setfield(L, -2, "inv");
+  if (has_inv) {
+    lua_pushvalue(L, feat_inv_idx);
+    lua_setfield(L, -2, "inv");
+  }
   lua_pushvalue(L, lm_ids_idx);
   lua_setfield(L, -2, "landmark_ids");
   lua_setfenv(L, enc_idx);
@@ -672,7 +811,6 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   size_t len;
   const char *data = luaL_checklstring(L, 1, &len);
   int inv_idx = 2;
-  tk_inv_peek(L, inv_idx);
   bool isstr = lua_type(L, 3) == LUA_TBOOLEAN && lua_toboolean(L, 3);
   FILE *fh = isstr
     ? tk_lua_fmemopen(L, (char *)data, len, "r")
@@ -685,10 +823,13 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 4) {
+  if (version != 4 && version != 5) {
     tk_lua_fclose(L, fh);
-    return luaL_error(L, "unsupported nystrom encoder version %d (expected 4)", (int)version);
+    return luaL_error(L, "unsupported nystrom encoder version %d (expected 4 or 5)", (int)version);
   }
+  uint8_t dense_mode = 0;
+  if (version >= 5)
+    tk_lua_fread(L, &dense_mode, sizeof(uint8_t), 1, fh);
   uint64_t m, d;
   double decay, trace_ratio;
   tk_lua_fread(L, &m, sizeof(uint64_t), 1, fh);
@@ -698,16 +839,35 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   double *projection = (double *)malloc(m * d * sizeof(double));
   double *adjustment = (double *)malloc(d * sizeof(double));
   double *inv_sqrt_eig = (double *)malloc(d * sizeof(double));
-  int64_t *lm_sids = (int64_t *)malloc(m * sizeof(int64_t));
-  if (!projection || !adjustment || !inv_sqrt_eig || !lm_sids) {
-    free(projection); free(adjustment); free(inv_sqrt_eig); free(lm_sids);
+  if (!projection || !adjustment || !inv_sqrt_eig) {
+    free(projection); free(adjustment); free(inv_sqrt_eig);
     tk_lua_fclose(L, fh);
     return luaL_error(L, "nystrom load: out of memory");
   }
   tk_lua_fread(L, projection, sizeof(double), m * d, fh);
   tk_lua_fread(L, adjustment, sizeof(double), d, fh);
   tk_lua_fread(L, inv_sqrt_eig, sizeof(double), d, fh);
-  tk_lua_fread(L, lm_sids, sizeof(int64_t), m, fh);
+  int64_t *lm_sids = NULL;
+  double *lm_vecs = NULL;
+  int64_t d_input = 0;
+  if (dense_mode) {
+    tk_lua_fread(L, &d_input, sizeof(int64_t), 1, fh);
+    lm_vecs = (double *)malloc(m * (uint64_t)d_input * sizeof(double));
+    if (!lm_vecs) {
+      free(projection); free(adjustment); free(inv_sqrt_eig);
+      tk_lua_fclose(L, fh);
+      return luaL_error(L, "nystrom load: out of memory");
+    }
+    tk_lua_fread(L, lm_vecs, sizeof(double), m * (uint64_t)d_input, fh);
+  } else {
+    lm_sids = (int64_t *)malloc(m * sizeof(int64_t));
+    if (!lm_sids) {
+      free(projection); free(adjustment); free(inv_sqrt_eig);
+      tk_lua_fclose(L, fh);
+      return luaL_error(L, "nystrom load: out of memory");
+    }
+    tk_lua_fread(L, lm_sids, sizeof(int64_t), m, fh);
+  }
   tk_ivec_load(L, fh);
   int lm_ids_idx = lua_gettop(L);
   tk_lua_fclose(L, fh);
@@ -718,14 +878,20 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   enc->adjustment = adjustment;
   enc->inv_sqrt_eig = inv_sqrt_eig;
   enc->lm_sids = lm_sids;
+  enc->lm_vecs = lm_vecs;
   enc->m = m;
   enc->d = d;
+  enc->d_input = d_input;
   enc->decay = decay;
   enc->trace_ratio = trace_ratio;
+  enc->dense_mode = dense_mode;
   enc->destroyed = false;
   lua_newtable(L);
-  lua_pushvalue(L, inv_idx);
-  lua_setfield(L, -2, "inv");
+  if (!dense_mode) {
+    tk_inv_peek(L, inv_idx);
+    lua_pushvalue(L, inv_idx);
+    lua_setfield(L, -2, "inv");
+  }
   lua_pushvalue(L, lm_ids_idx);
   lua_setfield(L, -2, "landmark_ids");
   lua_setfenv(L, enc_idx);
@@ -733,121 +899,9 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   return 1;
 }
 
-static inline int tk_spectral_pca_lua (lua_State *L) {
-  lua_settop(L, 1);
-  luaL_checktype(L, 1, LUA_TTABLE);
-  lua_getfield(L, 1, "codes");
-  tk_dvec_t *codes = tk_dvec_peek(L, -1, "codes");
-  lua_pop(L, 1);
-  int64_t n = (int64_t)tk_lua_fcheckunsigned(L, 1, "pca", "n_samples");
-  int64_t d = (int64_t)(codes->n / (uint64_t)n);
-  int64_t nd = (int64_t)tk_lua_foptunsigned(L, 1, "pca", "n_dims", 0);
-  if (nd <= 0 || nd > d) nd = d;
-
-  double *col_mean = (double *)calloc((uint64_t)d, sizeof(double));
-  double *gram = (double *)malloc((uint64_t)(d * d) * sizeof(double));
-  if (!col_mean || !gram) {
-    free(col_mean); free(gram);
-    return luaL_error(L, "pca: out of memory");
-  }
-
-  double inv_n = 1.0 / (double)n;
-  for (int64_t i = 0; i < n; i++)
-    for (int64_t j = 0; j < d; j++)
-      col_mean[j] += codes->a[i * d + j];
-  for (int64_t j = 0; j < d; j++) col_mean[j] *= inv_n;
-
-  cblas_dsyrk(CblasRowMajor, CblasUpper, CblasTrans,
-    (int)d, (int)n, inv_n, codes->a, (int)d, 0.0, gram, (int)d);
-  cblas_dsyr(CblasRowMajor, CblasUpper, (int)d, -1.0,
-    col_mean, 1, gram, (int)d);
-
-  tk_dvec_t *eig_raw = tk_dvec_create(L, (uint64_t)nd, NULL, NULL);
-  int eig_idx = lua_gettop(L);
-  double *ev_raw = (double *)malloc((uint64_t)(d * d) * sizeof(double));
-  int *isuppz = (int *)malloc(2 * (uint64_t)d * sizeof(int));
-  if (!ev_raw || !isuppz) {
-    free(col_mean); free(gram); free(ev_raw); free(isuppz);
-    return luaL_error(L, "pca: out of memory");
-  }
-  int n_eig = 0;
-  int info = LAPACKE_dsyevr(LAPACK_COL_MAJOR, 'V', 'I', 'U',
-    (int)d, gram, (int)d, 0.0, 0.0,
-    (int)(d - nd + 1), (int)d,
-    0.0, &n_eig, eig_raw->a, ev_raw, (int)d, isuppz);
-  free(isuppz);
-  free(gram);
-  if (info != 0) {
-    free(col_mean); free(ev_raw);
-    return luaL_error(L, "pca: dsyevr info=%d", info);
-  }
-  if ((int64_t)n_eig < nd) nd = (int64_t)n_eig;
-  eig_raw->n = (uint64_t)nd;
-
-  for (int64_t i = 0; i < nd / 2; i++) {
-    double tmp = eig_raw->a[i];
-    eig_raw->a[i] = eig_raw->a[nd - 1 - i];
-    eig_raw->a[nd - 1 - i] = tmp;
-  }
-  if (nd > 0 && eig_raw->a[0] > 0.0) {
-    double eig_floor = eig_raw->a[0] * 1e-10;
-    for (int64_t j = 0; j < nd; j++) {
-      if (eig_raw->a[j] <= eig_floor) {
-        nd = j > 0 ? j : 1;
-        eig_raw->n = (uint64_t)nd;
-        break;
-      }
-    }
-  }
-
-  double *eigvecs = (double *)malloc((uint64_t)(d * nd) * sizeof(double));
-  if (!eigvecs) {
-    free(col_mean); free(ev_raw);
-    return luaL_error(L, "pca: out of memory");
-  }
-  #pragma omp parallel for schedule(static)
-  for (int64_t i = 0; i < d; i++)
-    for (int64_t k = 0; k < nd; k++)
-      eigvecs[i * nd + k] = ev_raw[(nd - 1 - k) * d + i];
-  free(ev_raw);
-
-  double *adjustment = (double *)malloc((uint64_t)nd * sizeof(double));
-  double *inv_sqrt_eig = (double *)malloc((uint64_t)nd * sizeof(double));
-  if (!adjustment || !inv_sqrt_eig) {
-    free(col_mean); free(eigvecs); free(adjustment); free(inv_sqrt_eig);
-    return luaL_error(L, "pca: out of memory");
-  }
-  cblas_dgemv(CblasRowMajor, CblasTrans,
-    (int)d, (int)nd, 1.0, eigvecs, (int)nd, col_mean, 1, 0.0, adjustment, 1);
-  free(col_mean);
-  for (int64_t j = 0; j < nd; j++)
-    inv_sqrt_eig[j] = 1.0 / sqrt(eig_raw->a[j]);
-
-  tk_dvec_t *codes_out = tk_dvec_create(L, (uint64_t)(n * nd), NULL, NULL);
-  int codes_idx = lua_gettop(L);
-  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-    (int)n, (int)nd, (int)d, 1.0, codes->a, (int)d,
-    eigvecs, (int)nd, 0.0, codes_out->a, (int)nd);
-  free(eigvecs);
-
-  #pragma omp parallel for schedule(static)
-  for (int64_t i = 0; i < n; i++) {
-    double *r = codes_out->a + i * nd;
-    for (int64_t j = 0; j < nd; j++)
-      r[j] -= adjustment[j];
-  }
-  free(adjustment);
-  free(inv_sqrt_eig);
-
-  lua_pushvalue(L, codes_idx);
-  lua_pushvalue(L, eig_idx);
-  return 2;
-}
-
 static luaL_Reg tm_fns[] =
 {
   { "encode", tm_encode },
-  { "pca", tk_spectral_pca_lua },
   { "load", tk_nystrom_encoder_load_lua },
   { NULL, NULL }
 };
