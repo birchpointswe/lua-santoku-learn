@@ -200,25 +200,12 @@ function M.make_ridge_log (stopwatch)
       local d, dd = stopwatch()
       timing = str.format(" (%.1fs +%.1fs)", d, dd)
     end
-    str.printf("[Ridge %s] lambda=%.4e%s%s%s\n",
-      phase, p.lambda or 0, score_str, best, timing)
-  end
-end
-
-function M.make_gfm_log (stopwatch)
-  return function (ev)
-    local phase = format_phase(ev)
-    local p = ev.params or {}
-    local m = ev.metrics or {}
-    local o = m.oracle or {}
-    local best = format_best(ev.global_best_score, ev.score)
-    local timing = ""
-    if stopwatch then
-      local d, dd = stopwatch()
-      timing = str.format(" (%.1fs +%.1fs)", d, dd)
+    local prop = ""
+    if p.propensity_a then
+      prop = str.format(" pa=%.2f pb=%.2f", p.propensity_a, p.propensity_b)
     end
-    str.printf("[GFM %s] beta=%.4f gamma=%.4f maF1=%.4f miF1=%.4f%s%s\n",
-      phase, p.beta or 0, p.gamma or 0, o.macro_f1 or 0, o.micro_f1 or 0, best, timing)
+    str.printf("[Ridge %s] lambda=%.4e%s%s%s%s\n",
+      phase, p.lambda or 0, prop, score_str, best, timing)
   end
 end
 

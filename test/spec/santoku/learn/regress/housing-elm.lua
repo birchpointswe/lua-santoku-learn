@@ -1,6 +1,8 @@
 local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
+local dvec = require("santoku.dvec")
+local elm = require("santoku.learn.elm")
 local optimize = require("santoku.learn.optimize")
 local str = require("santoku.string")
 local test = require("santoku.test")
@@ -51,36 +53,57 @@ test("housing elm regressor", function ()
 
   print("\nTraining ELM")
   local stopwatch = utc.stopwatch()
-  local elm_obj, elm_params, _, train_h = optimize.elm({
-    norm = cfg.elm.norm,
-    mode = cfg.elm.mode,
-    n_samples = train.n,
-    n_tokens = n_features,
-    n_hidden = cfg.elm.n_hidden,
-    csc_offsets = train_csc_off,
-    csc_indices = train_csc_idx,
-    dense_features = train.continuous,
-    n_dense = n_continuous,
-    targets = train.targets,
-    n_targets = 1,
-    val_csc_offsets = val_csc_off,
-    val_csc_indices = val_csc_idx,
-    val_n_samples = validate.n,
-    val_dense_features = validate.continuous,
-    val_targets = validate.targets,
+
+  local encoder, train_h = elm.create({
+    mode = cfg.elm.mode, norm = cfg.elm.norm,
+    n_samples = train.n, n_tokens = n_features, n_hidden = cfg.elm.n_hidden,
+    csc_offsets = train_csc_off, csc_indices = train_csc_idx,
+  })
+
+  local train_dense = dvec.create():copy(train.continuous)
+  local dense_mean, dense_istd = train_dense:mtx_standardize(n_continuous)
+
+  local scale = math.sqrt(cfg.elm.n_hidden / n_continuous)
+  train_dense:scale(scale)
+  local dims = cfg.elm.n_hidden + n_continuous
+  train_h:mtx_extend(train_dense, cfg.elm.n_hidden, n_continuous)
+
+  local val_h = encoder:encode({
+    csc_offsets = val_csc_off, csc_indices = val_csc_idx, n_samples = validate.n,
+  })
+  local val_dense = dvec.create():copy(validate.continuous)
+  val_dense:mtx_standardize(n_continuous, dense_mean, dense_istd)
+  val_dense:scale(scale)
+  val_h:mtx_extend(val_dense, cfg.elm.n_hidden, n_continuous)
+
+  local ridge_obj, best_params = optimize.ridge({
+    n_samples = train.n, n_dims = dims, codes = train_h,
+    targets = train.targets, n_targets = 1,
     lambda = cfg.elm.lambda,
     search_trials = cfg.elm.search_trials,
-    each = util.make_elm_log(stopwatch),
+    val_codes = val_h, val_n_samples = validate.n,
+    val_targets = validate.targets,
+    each = util.make_ridge_log(stopwatch),
   })
-  str.printf("\nBest: H=%d lambda=%.4e\n", elm_params.n_hidden, elm_params.lambda)
+  str.printf("\nBest: H=%d lambda=%.4e\n", cfg.elm.n_hidden, best_params.lambda)
   str.printf("Time: %.1fs\n", stopwatch())
 
+  local function encode_split(csc_off, csc_idx, dense_dv, n)
+    local h = encoder:encode({
+      csc_offsets = csc_off, csc_indices = csc_idx, n_samples = n,
+    })
+    local d = dvec.create():copy(dense_dv)
+    d:mtx_standardize(n_continuous, dense_mean, dense_istd)
+    d:scale(scale)
+    h:mtx_extend(d, cfg.elm.n_hidden, n_continuous)
+    return h
+  end
+
   print("\nEvaluating splits")
-  local train_stats = eval.regression_accuracy(elm_obj.ridge:transform(train_h, train.n), train.targets)
-  local val_pred = elm_obj:transform(val_csc_off, val_csc_idx, validate.n, validate.continuous)
-  local val_stats = eval.regression_accuracy(val_pred, validate.targets)
-  local test_pred = elm_obj:transform(test_csc_off, test_csc_idx, test_set.n, test_set.continuous)
-  local test_stats = eval.regression_accuracy(test_pred, test_set.targets)
+  local train_stats = eval.regression_accuracy(ridge_obj:transform(train_h, train.n), train.targets)
+  local val_stats = eval.regression_accuracy(ridge_obj:transform(val_h, validate.n), validate.targets)
+  local test_h = encode_split(test_csc_off, test_csc_idx, test_set.continuous, test_set.n)
+  local test_stats = eval.regression_accuracy(ridge_obj:transform(test_h, test_set.n), test_set.targets)
 
   str.printf("\nResults (Accuracy):\n")
   str.printf("  Train:    %.1f%%\n", (1 - train_stats.nmae) * 100)

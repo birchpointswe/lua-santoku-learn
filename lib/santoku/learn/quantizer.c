@@ -4,9 +4,9 @@
 #include <math.h>
 #include <stdlib.h>
 #include <omp.h>
-#include <lapacke.h>
 #include <cblas.h>
 #include <santoku/lua/utils.h>
+#include <santoku/iumap.h>
 #include <santoku/ivec.h>
 #include <santoku/cvec.h>
 #include <santoku/dvec.h>
@@ -82,6 +82,55 @@ static inline int tk_thresh_thresholds_lua(lua_State *L) {
   return 1;
 }
 
+static inline int tk_thresh_restrict_lua(lua_State *L) {
+  tk_thresh_encoder_t *enc = tk_thresh_encoder_peek(L, 1);
+  tk_ivec_t *kept = tk_ivec_peek(L, 2, "kept_dims");
+  tk_iumap_t *dim_map = tk_iumap_create(NULL, 0);
+  for (uint64_t i = 0; i < kept->n; i++) {
+    int kha;
+    khint_t khi = tk_iumap_put(dim_map, kept->a[i], &kha);
+    tk_iumap_setval(dim_map, khi, (int64_t)i);
+  }
+  uint64_t w = 0;
+  for (uint64_t r = 0; r < enc->n_bits; r++) {
+    khint_t khi = tk_iumap_get(dim_map, enc->bit_dims->a[r]);
+    if (khi != tk_iumap_end(dim_map)) {
+      enc->bit_dims->a[w] = tk_iumap_val(dim_map, khi);
+      enc->bit_thresholds->a[w] = enc->bit_thresholds->a[r];
+      w++;
+    }
+  }
+  enc->n_bits = w;
+  enc->n_dims = kept->n;
+  tk_iumap_destroy(dim_map);
+  return 0;
+}
+
+static inline int tk_thresh_restrict_bits_lua(lua_State *L) {
+  tk_thresh_encoder_t *enc = tk_thresh_encoder_peek(L, 1);
+  tk_ivec_t *kept_bits = tk_ivec_peek(L, 2, "kept_bits");
+  uint64_t n_new = kept_bits->n;
+  int64_t *dims = enc->bit_dims->a;
+  double *thresholds = enc->bit_thresholds->a;
+  for (uint64_t i = 0; i < n_new; i++) {
+    uint64_t src = (uint64_t)kept_bits->a[i];
+    dims[i] = dims[src];
+    thresholds[i] = thresholds[src];
+  }
+  enc->n_bits = n_new;
+  return 0;
+}
+
+static inline int tk_thresh_used_dims_lua(lua_State *L) {
+  tk_thresh_encoder_t *enc = tk_thresh_encoder_peek(L, 1);
+  tk_ivec_t *out = tk_ivec_create(L, enc->n_bits, 0, 0);
+  out->n = 0;
+  for (uint64_t i = 0; i < enc->n_bits; i++)
+    tk_ivec_push(out, enc->bit_dims->a[i]);
+  out->n = tk_ivec_uasc(out, 0, out->n);
+  return 1;
+}
+
 static inline int tk_thresh_encoder_persist_lua(lua_State *L) {
   tk_thresh_encoder_t *enc = tk_thresh_encoder_peek(L, 1);
   FILE *fh;
@@ -120,10 +169,13 @@ static inline int tk_thresh_encoder_persist_lua(lua_State *L) {
 
 static luaL_Reg tk_thresh_encoder_mt_fns[] = {
   { "encode", tk_thresh_encode_lua },
+  { "restrict", tk_thresh_restrict_lua },
+  { "restrict_bits", tk_thresh_restrict_bits_lua },
   { "n_bits", tk_thresh_n_bits_lua },
   { "n_dims", tk_thresh_n_dims_lua },
   { "dims", tk_thresh_dims_lua },
   { "thresholds", tk_thresh_thresholds_lua },
+  { "used_dims", tk_thresh_used_dims_lua },
   { "persist", tk_thresh_encoder_persist_lua },
   { NULL, NULL }
 };
