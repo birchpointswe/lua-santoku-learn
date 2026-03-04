@@ -1309,7 +1309,6 @@ static inline int tm_ranking_accuracy (lua_State *L)
   double *raw_codes = NULL;
 
   if (kernel_index) {
-    // kernel mode - no codes needed
   } else if (raw_codes_dvec) {
     raw_codes = raw_codes_dvec->a;
   } else if (codes_cvec) {
@@ -1404,7 +1403,6 @@ static inline int tm_ranking_accuracy (lua_State *L)
         char *query_code = NULL;
         double *query_raw = NULL;
         if (kernel_index) {
-          // kernel mode - no codes needed, use query_id directly
         } else if (raw_codes) {
           query_raw = raw_codes + (uint64_t)query_code_idx * n_dims;
         } else if (codes) {
@@ -1989,6 +1987,34 @@ static inline int tm_scores_at_ks (lua_State *L)
   return 1;
 }
 
+static inline int tm_csr_topk_dense (lua_State *L)
+{
+  lua_settop(L, 1);
+  luaL_checktype(L, 1, LUA_TTABLE);
+  lua_getfield(L, 1, "offsets");
+  tk_ivec_t *off = tk_ivec_peek(L, -1, "offsets");
+  lua_getfield(L, 1, "values");
+  tk_dvec_t *vals = tk_dvec_peek(L, -1, "values");
+  lua_pop(L, 2);
+  int64_t ns = (int64_t)tk_lua_fcheckunsigned(L, 1, "csr_topk_dense", "n_samples");
+  int64_t k = (int64_t)tk_lua_fcheckunsigned(L, 1, "csr_topk_dense", "k");
+  uint64_t total = (uint64_t)ns * (uint64_t)k;
+  tk_dvec_t *out = tk_dvec_create(L, total, NULL, NULL);
+  out->n = total;
+  #pragma omp parallel for schedule(static)
+  for (int64_t s = 0; s < ns; s++) {
+    int64_t s0 = off->a[s], s1 = off->a[s + 1];
+    int64_t nk = s1 - s0;
+    if (nk > k) nk = k;
+    double *row = out->a + s * k;
+    for (int64_t j = 0; j < nk; j++)
+      row[j] = vals->a[s0 + j];
+    for (int64_t j = nk; j < k; j++)
+      row[j] = 0.0;
+  }
+  return 1;
+}
+
 static luaL_Reg tm_evaluator_fns[] =
 {
   { "class_accuracy", tm_class_accuracy },
@@ -1996,6 +2022,7 @@ static luaL_Reg tm_evaluator_fns[] =
   { "ranking_accuracy", tm_ranking_accuracy },
   { "retrieval_ks", tm_retrieval_ks },
   { "gather_label_scores", tm_gather_label_scores },
+  { "csr_topk_dense", tm_csr_topk_dense },
   { "cluster", tm_cluster },
   { "scores_at_ks", tm_scores_at_ks },
   { "dendro_cut", tk_pvec_dendro_cut_lua },
