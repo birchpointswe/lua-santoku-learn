@@ -144,15 +144,20 @@ test("eurlex-hvelm", function ()
   local ngram_map, train_tok, n_hdc_tokens = hdc.tokenize({
     texts = train.problems, hdc_ngram = cfg.hdc.ngram, n_samples = train.n,
   })
-  str.printf("[HDC] tokens=%d d=%d ngram=%d %s\n", n_hdc_tokens, cfg.hdc.d, cfg.hdc.ngram, sw())
+  str.printf("[HDC] d=%d ngram=%d tokens=%d %s\n", cfg.hdc.d, cfg.hdc.ngram, n_hdc_tokens, sw())
   local bns_ids, bns_scores = train_tok:bits_top_bns(
-    train.solutions, train.n, n_hdc_tokens, n_labels, cfg.data.max_per_label)
+    train.solutions, train.n, n_hdc_tokens, n_labels)
+  train_tok = nil -- luacheck: ignore
+  collectgarbage("collect")
   str.printf("[BNS] selected=%d %s\n", bns_ids:size(), sw())
   local hdc_enc, train_h = hdc.create({
     texts = train.problems, n_samples = train.n,
     d = cfg.hdc.d, hdc_ngram = cfg.hdc.ngram,
-    weight_map = ngram_map, weight_ids = bns_ids, weights = bns_scores,
+    weight_map = ngram_map,
+    weight_ids = bns_ids,
+    weights = bns_scores,
   })
+  ngram_map = nil; bns_ids = nil; bns_scores = nil -- luacheck: ignore
   local dev_h = hdc_enc:encode({ texts = dev.problems, n_samples = dev.n })
   local test_h = hdc_enc:encode({ texts = test_set.problems, n_samples = test_set.n })
   local hdc_out_d = hdc_enc:out_d()
