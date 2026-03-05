@@ -17,7 +17,6 @@ typedef struct {
   int64_t n_tokens;
   uint64_t seed;
   uint8_t mode;
-  uint8_t norm;
   uint8_t dense;
   bool destroyed;
 } tk_elm_t;
@@ -50,10 +49,31 @@ static inline double elm_rand_normal (uint64_t *s)
   return sqrt(-2.0 * log(u1)) * cos(6.283185307179586 * u2);
 }
 
+static uint8_t tk_elm_mode_from_str (const char *ms)
+{
+  if (strcmp(ms, "relu") == 0) return 0;
+  if (strcmp(ms, "sigmoid") == 0) return 1;
+  if (strcmp(ms, "tanh") == 0) return 2;
+  if (strcmp(ms, "gelu") == 0) return 3;
+  if (strcmp(ms, "softplus") == 0) return 4;
+  if (strcmp(ms, "elu") == 0) return 5;
+  if (strcmp(ms, "sin") == 0) return 6;
+  if (strcmp(ms, "linear") == 0) return 7;
+  if (strcmp(ms, "selu") == 0) return 8;
+  if (strcmp(ms, "mish") == 0) return 9;
+  if (strcmp(ms, "rff") == 0) return 10;
+  if (strcmp(ms, "gaussian") == 0) return 11;
+  if (strcmp(ms, "welsch") == 0) return 12;
+  if (strcmp(ms, "sexp") == 0) return 13;
+  if (strcmp(ms, "swish") == 0) return 14;
+  if (strcmp(ms, "silu") == 0) return 14;
+  return 1;
+}
+
 static void tk_elm_project_core (
   double *out, int64_t n_samples, int64_t n_hidden,
   int64_t n_tokens, uint64_t seed,
-  uint8_t mode, uint8_t norm,
+  uint8_t mode,
   tk_ivec_t *csc_off, tk_ivec_t *csc_idx, double *fw,
   double *dense_in, int64_t n_input_dims
 )
@@ -62,18 +82,17 @@ static void tk_elm_project_core (
   int has_dense = dense_in != NULL;
 
   double *inv_norm = NULL;
-  if (has_dense && norm != 1) {
+  if (has_dense) {
     inv_norm = (double *)calloc((uint64_t)n_samples, sizeof(double));
     for (int64_t s = 0; s < n_samples; s++) {
       double acc = 0.0;
       for (int64_t d = 0; d < n_input_dims; d++) {
         double v = dense_in[s * n_input_dims + d];
-        if (norm == 0) acc += v * v;
-        else acc += fabs(v);
+        acc += v * v;
       }
-      inv_norm[s] = acc > 0.0 ? (norm == 0 ? 1.0 / sqrt(acc) : 1.0 / acc) : 0.0;
+      inv_norm[s] = acc > 0.0 ? 1.0 / sqrt(acc) : 0.0;
     }
-  } else if (has_csc && norm != 1) {
+  } else if (has_csc) {
     inv_norm = (double *)calloc((uint64_t)n_samples, sizeof(double));
     for (int64_t t = 0; t < n_tokens; t++) {
       double fw_sq = fw ? fw[t] * fw[t] : 1.0;
@@ -81,16 +100,9 @@ static void tk_elm_project_core (
       for (int64_t i = lo; i < hi; i++)
         inv_norm[csc_idx->a[i]] += fw_sq;
     }
-    if (norm == 0) {
-      for (int64_t s = 0; s < n_samples; s++) {
-        double n2 = inv_norm[s];
-        inv_norm[s] = n2 > 0.0 ? 1.0 / sqrt(n2) : 0.0;
-      }
-    } else {
-      for (int64_t s = 0; s < n_samples; s++) {
-        double n1 = inv_norm[s];
-        inv_norm[s] = n1 > 0.0 ? 1.0 / n1 : 0.0;
-      }
+    for (int64_t s = 0; s < n_samples; s++) {
+      double n2 = inv_norm[s];
+      inv_norm[s] = n2 > 0.0 ? 1.0 / sqrt(n2) : 0.0;
     }
   }
 
@@ -153,6 +165,8 @@ static void tk_elm_project_core (
             case 10: a = ((h0 + j) % 2 == 0) ? sin(v) : cos(v); break;
             case 11: a = exp(-v * v); break;
             case 12: a = 1.0 - exp(-v * v * 0.5); break;
+            case 13: a = fmax(v, 0.0) + log(1.0 + exp(-fabs(v))); break;
+            case 14: a = v / (1.0 + exp(-v)); break;
             default: a = v > 0.0 ? v : 0.0; break;
           }
           row[j] = a;
@@ -206,6 +220,8 @@ static void tk_elm_project_core (
           case 10: a = (h % 2 == 0) ? sin(v) : cos(v); break;
           case 11: a = exp(-v * v); break;
           case 12: a = 1.0 - exp(-v * v * 0.5); break;
+          case 13: a = fmax(v, 0.0) + log(1.0 + exp(-fabs(v))); break;
+          case 14: a = v / (1.0 + exp(-v)); break;
           default: a = v > 0.0 ? v : 0.0; break;
         }
         out[s * n_hidden + h] = a;
@@ -273,32 +289,8 @@ static int tk_elm_create_lua (lua_State *L)
 
   uint8_t mode = 1;
   lua_getfield(L, 1, "mode");
-  if (lua_isstring(L, -1)) {
-    const char *ms = lua_tostring(L, -1);
-    if (strcmp(ms, "relu") == 0) mode = 0;
-    else if (strcmp(ms, "sigmoid") == 0) mode = 1;
-    else if (strcmp(ms, "tanh") == 0) mode = 2;
-    else if (strcmp(ms, "gelu") == 0) mode = 3;
-    else if (strcmp(ms, "softplus") == 0) mode = 4;
-    else if (strcmp(ms, "elu") == 0) mode = 5;
-    else if (strcmp(ms, "sin") == 0) mode = 6;
-    else if (strcmp(ms, "linear") == 0) mode = 7;
-    else if (strcmp(ms, "selu") == 0) mode = 8;
-    else if (strcmp(ms, "mish") == 0) mode = 9;
-    else if (strcmp(ms, "rff") == 0) mode = 10;
-    else if (strcmp(ms, "gaussian") == 0) mode = 11;
-    else if (strcmp(ms, "welsch") == 0) mode = 12;
-  }
-  lua_pop(L, 1);
-
-  uint8_t norm = 0;
-  lua_getfield(L, 1, "norm");
-  if (lua_isstring(L, -1)) {
-    const char *ns = lua_tostring(L, -1);
-    if (strcmp(ns, "l2") == 0) norm = 0;
-    else if (strcmp(ns, "none") == 0) norm = 1;
-    else if (strcmp(ns, "l1") == 0) norm = 2;
-  }
+  if (lua_isstring(L, -1))
+    mode = tk_elm_mode_from_str(lua_tostring(L, -1));
   lua_pop(L, 1);
 
   uint64_t total = (uint64_t)(n_samples * n_hidden);
@@ -320,7 +312,7 @@ static int tk_elm_create_lua (lua_State *L)
 
   tk_elm_project_core(
     out->a, n_samples, n_hidden,
-    has_dense_in ? n_input_dims : n_tokens, seed, mode, norm,
+    has_dense_in ? n_input_dims : n_tokens, seed, mode,
     csc_off, csc_idx, fw,
     has_dense_in ? codes_dvec->a : NULL, n_input_dims
   );
@@ -333,7 +325,6 @@ static int tk_elm_create_lua (lua_State *L)
   e->n_tokens = has_dense_in ? n_input_dims : n_tokens;
   e->seed = seed;
   e->mode = mode;
-  e->norm = norm;
   e->dense = has_dense_in ? 1 : 0;
   e->destroyed = false;
 
@@ -385,7 +376,7 @@ static int tk_elm_encode_lua (lua_State *L)
 
   tk_elm_project_core(
     out->a, n_samples, e->n_hidden,
-    e->n_tokens, e->seed, e->mode, e->norm,
+    e->n_tokens, e->seed, e->mode,
     csc_off, csc_idx, fw_parsed,
     dense_in, e->n_tokens
   );
@@ -405,7 +396,7 @@ static int tk_elm_persist_lua (lua_State *L) {
   else
     return tk_lua_verror(L, 2, "persist", "expecting filepath or true");
   tk_lua_fwrite(L, "TKel", 1, 4, fh);
-  uint8_t version = 11;
+  uint8_t version = 12;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &e->n_hidden, sizeof(int64_t), 1, fh);
   tk_lua_fwrite(L, &e->n_tokens, sizeof(int64_t), 1, fh);
@@ -413,7 +404,6 @@ static int tk_elm_persist_lua (lua_State *L) {
   uint8_t has_fw = e->fw ? 1 : 0;
   tk_lua_fwrite(L, &has_fw, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &e->mode, sizeof(uint8_t), 1, fh);
-  tk_lua_fwrite(L, &e->norm, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &e->dense, sizeof(uint8_t), 1, fh);
   if (e->fw)
     tk_dvec_persist(L, e->fw, fh);
@@ -451,7 +441,7 @@ static int tk_elm_load_lua (lua_State *L)
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 11) {
+  if (version != 12) {
     tk_lua_fclose(L, fh);
     return luaL_error(L, "unsupported elm version %d", (int)version);
   }
@@ -464,8 +454,6 @@ static int tk_elm_load_lua (lua_State *L)
   tk_lua_fread(L, &has_fw, sizeof(uint8_t), 1, fh);
   uint8_t mode_byte;
   tk_lua_fread(L, &mode_byte, sizeof(uint8_t), 1, fh);
-  uint8_t norm_byte;
-  tk_lua_fread(L, &norm_byte, sizeof(uint8_t), 1, fh);
   uint8_t dense_byte;
   tk_lua_fread(L, &dense_byte, sizeof(uint8_t), 1, fh);
   tk_dvec_t *fw = NULL;
@@ -484,7 +472,6 @@ static int tk_elm_load_lua (lua_State *L)
   e->n_tokens = n_tokens;
   e->seed = seed;
   e->mode = mode_byte;
-  e->norm = norm_byte;
   e->dense = dense_byte;
   e->destroyed = false;
 
@@ -499,15 +486,80 @@ static int tk_elm_load_lua (lua_State *L)
   return 1;
 }
 
+static int tk_elm_activate_lua (lua_State *L)
+{
+  tk_dvec_t *raw = tk_dvec_peek(L, 1, "raw");
+  int64_t n_samples = (int64_t)luaL_checkinteger(L, 2);
+  int64_t n_hidden = (int64_t)luaL_checkinteger(L, 3);
+  uint8_t mode = tk_elm_mode_from_str(luaL_checkstring(L, 4));
+  int64_t total = n_samples * n_hidden;
+  tk_dvec_t *out = tk_dvec_peekopt(L, 5);
+  if (out) {
+    tk_dvec_ensure(out, (uint64_t)total);
+    out->n = (uint64_t)total;
+    lua_pushvalue(L, 5);
+  } else {
+    out = tk_dvec_create(L, (uint64_t)total, NULL, NULL);
+    out->n = (uint64_t)total;
+  }
+  #pragma omp parallel for schedule(static)
+  for (int64_t s = 0; s < n_samples; s++) {
+    double *src = raw->a + s * n_hidden;
+    double *dst = out->a + s * n_hidden;
+    for (int64_t h = 0; h < n_hidden; h++) {
+      double v = src[h];
+      double a;
+      switch (mode) {
+        case 1: a = 1.0 / (1.0 + exp(-v)); break;
+        case 2: a = tanh(v); break;
+        case 3: { double t = 0.7978845608 * (v + 0.044715 * v * v * v);
+                  a = 0.5 * v * (1.0 + tanh(t)); break; }
+        case 4: a = log(1.0 + exp(v)); break;
+        case 5: a = v > 0.0 ? v : exp(v) - 1.0; break;
+        case 6: a = sin(v); break;
+        case 7: a = v; break;
+        case 8: a = v > 0.0 ? 1.0507009873554805 * v
+                  : 1.0507009873554805 * 1.6732632423543773 * (exp(v) - 1.0); break;
+        case 9: a = v * tanh(log(1.0 + exp(v))); break;
+        case 10: a = (h % 2 == 0) ? sin(v) : cos(v); break;
+        case 11: a = exp(-v * v); break;
+        case 12: a = 1.0 - exp(-v * v * 0.5); break;
+        case 13: a = fmax(v, 0.0) + log(1.0 + exp(-fabs(v))); break;
+        case 14: a = v / (1.0 + exp(-v)); break;
+        default: a = v > 0.0 ? v : 0.0; break;
+      }
+      dst[h] = a;
+    }
+  }
+  return 1;
+}
+
+static int tk_elm_set_mode_lua (lua_State *L)
+{
+  tk_elm_t *e = tk_elm_peek(L, 1);
+  e->mode = tk_elm_mode_from_str(luaL_checkstring(L, 2));
+  return 0;
+}
+
+static int tk_elm_out_d_lua (lua_State *L)
+{
+  tk_elm_t *e = tk_elm_peek(L, 1);
+  lua_pushinteger(L, (lua_Integer)e->n_hidden);
+  return 1;
+}
+
 static luaL_Reg tk_elm_mt_fns[] = {
   { "encode", tk_elm_encode_lua },
   { "persist", tk_elm_persist_lua },
+  { "set_mode", tk_elm_set_mode_lua },
+  { "out_d", tk_elm_out_d_lua },
   { NULL, NULL }
 };
 
 static luaL_Reg tk_elm_fns[] = {
   { "create", tk_elm_create_lua },
   { "load", tk_elm_load_lua },
+  { "activate", tk_elm_activate_lua },
   { NULL, NULL }
 };
 

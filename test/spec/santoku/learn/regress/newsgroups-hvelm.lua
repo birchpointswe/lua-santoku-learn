@@ -46,8 +46,8 @@ local function eval_classifier (label, ridge_obj, hdc_enc, train_h, train, valid
     pred_offsets = val_off, pred_neighbors = val_labels,
     expected_offsets = val_label_off, expected_neighbors = val_label_nbr,
   })
-  str.printf("  Train: maF1=%.4f miF1=%.4f\n", train_oracle.macro_f1, train_oracle.micro_f1)
-  str.printf("  Val:   maF1=%.4f miF1=%.4f\n", val_oracle.macro_f1, val_oracle.micro_f1)
+  str.printf("  Train: saF1=%.4f miF1=%.4f\n", train_oracle.sample_f1, train_oracle.micro_f1)
+  str.printf("  Val:   saF1=%.4f miF1=%.4f\n", val_oracle.sample_f1, val_oracle.micro_f1)
 
   print("\nPer-class Test Accuracy (sorted by difficulty):\n")
   local class_order = arr.range(1, n_classes)
@@ -102,7 +102,7 @@ test("newsgroups hdc", function ()
   })
   local val_h = hdc_enc:encode({ texts = validate.problems, n_samples = validate.n })
   local hdc_out_d = hdc_enc:out_d()
-  local ridge_obj, elm_params = optimize.ridge({
+  local _, ridge_obj, elm_params = optimize.ridge({
     n_samples = train.n,
     n_dims = hdc_out_d,
     codes = train_h,
