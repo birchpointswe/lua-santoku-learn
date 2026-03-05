@@ -17,7 +17,6 @@ local cfg = {
     n_thresholds = 64,
   },
   elm = {
-    norm = "l2",
     mode = "sin",
     n_hidden = 8192,
     lambda = { def = 1.0, min = 0, max = 1 },
@@ -55,7 +54,7 @@ test("housing elm regressor", function ()
   local stopwatch = utc.stopwatch()
 
   local encoder, train_h = elm.create({
-    mode = cfg.elm.mode, norm = cfg.elm.norm,
+    mode = cfg.elm.mode,
     n_samples = train.n, n_tokens = n_features, n_hidden = cfg.elm.n_hidden,
     csc_offsets = train_csc_off, csc_indices = train_csc_idx,
   })
@@ -76,7 +75,7 @@ test("housing elm regressor", function ()
   val_dense:scale(scale)
   val_h:mtx_extend(val_dense, cfg.elm.n_hidden, n_continuous)
 
-  local ridge_obj, best_params = optimize.ridge({
+  local _, ridge_obj, best_params = optimize.ridge({
     n_samples = train.n, n_dims = dims, codes = train_h,
     targets = train.targets, n_targets = 1,
     lambda = cfg.elm.lambda,
@@ -100,10 +99,10 @@ test("housing elm regressor", function ()
   end
 
   print("\nEvaluating splits")
-  local train_stats = eval.regression_accuracy(ridge_obj:transform(train_h, train.n), train.targets)
-  local val_stats = eval.regression_accuracy(ridge_obj:transform(val_h, validate.n), validate.targets)
+  local train_stats = eval.regression_accuracy(ridge_obj:regress(train_h, train.n), train.targets)
+  local val_stats = eval.regression_accuracy(ridge_obj:regress(val_h, validate.n), validate.targets)
   local test_h = encode_split(test_csc_off, test_csc_idx, test_set.continuous, test_set.n)
-  local test_stats = eval.regression_accuracy(ridge_obj:transform(test_h, test_set.n), test_set.targets)
+  local test_stats = eval.regression_accuracy(ridge_obj:regress(test_h, test_set.n), test_set.targets)
 
   str.printf("\nResults (Accuracy):\n")
   str.printf("  Train:    %.1f%%\n", (1 - train_stats.nmae) * 100)
