@@ -109,10 +109,10 @@ test("mnist classifier", function ()
     final_iterations = cfg.training.iterations,
 
     search_metric = function (regressor)
-      local micro_f1, macro_f1 = regressor:label_f1(
+      local micro_f1, sample_f1 = regressor:label_f1(
         { tokens = validate.tokens, n_samples = validate.n },
         validate.n, val_label_off, val_label_nbr)
-      return macro_f1, { micro_f1 = micro_f1, macro_f1 = macro_f1 }
+      return sample_f1, { micro_f1 = micro_f1, sample_f1 = sample_f1 }
     end,
 
     each = util.make_labeler_log(stopwatch)

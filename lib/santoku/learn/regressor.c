@@ -1582,9 +1582,9 @@ static inline int tk_learn_label_f1 (lua_State *L)
   double mi_prec = mi_k > 0 ? (double)mi_tp / mi_k : 0;
   double mi_rec = mi_exp > 0 ? (double)mi_tp / mi_exp : 0;
   double micro_f1 = (mi_prec + mi_rec) > 0 ? 2.0 * mi_prec * mi_rec / (mi_prec + mi_rec) : 0;
-  double macro_f1 = n_valid > 0 ? ma_f1 / n_valid : 0;
+  double sample_f1 = n_valid > 0 ? ma_f1 / n_valid : 0;
   lua_pushnumber(L, micro_f1);
-  lua_pushnumber(L, macro_f1);
+  lua_pushnumber(L, sample_f1);
   return 2;
 }
 

@@ -1,6 +1,7 @@
 local arr = require("santoku.array")
 local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
+local elm = require("santoku.learn.elm")
 local eval = require("santoku.learn.evaluator")
 local ivec = require("santoku.ivec")
 local optimize = require("santoku.learn.optimize")
@@ -17,7 +18,6 @@ local cfg = {
     features = 784,
   },
   elm = {
-    norm = "l2",
     mode = "sigmoid",
     classes = 10,
     n_hidden = 8192,
@@ -68,40 +68,34 @@ test("mnist elm classifier", function ()
 
   print("\nTraining ELM")
   local stopwatch = utc.stopwatch()
-  local encoder, ridge_obj, elm_params, _, train_h = optimize.elm({
-    norm = cfg.elm.norm,
-    mode = cfg.elm.mode,
-    n_samples = train.n,
-    n_tokens = n_tokens,
-    n_hidden = cfg.elm.n_hidden,
-    csc_offsets = train_csc_off,
-    csc_indices = train_csc_idx,
+  local encoder, train_h = elm.create({
+    n_samples = train.n, n_tokens = n_tokens,
+    n_hidden = cfg.elm.n_hidden, mode = cfg.elm.mode,
+    csc_offsets = train_csc_off, csc_indices = train_csc_idx,
     feature_weights = bns_scores,
-    n_labels = cfg.elm.classes,
-    label_offsets = label_off,
-    label_neighbors = label_nbr,
-    expected_offsets = label_off,
-    expected_neighbors = label_nbr,
-    val_csc_offsets = val_csc_off,
-    val_csc_indices = val_csc_idx,
-    val_n_samples = validate.n,
-    val_expected_offsets = val_label_off,
-    val_expected_neighbors = val_label_nbr,
-    lambda = cfg.elm.lambda,
-    propensity_a = cfg.elm.propensity_a,
-    propensity_b = cfg.elm.propensity_b,
-    k = cfg.elm.k,
-    search_trials = cfg.elm.search_trials,
-    each = util.make_elm_log(stopwatch),
   })
-  str.printf("\nBest: n_hidden=%d lambda=%.4e\n", elm_params.n_hidden, elm_params.lambda)
+  local val_h = encoder:encode({
+    csc_offsets = val_csc_off, csc_indices = val_csc_idx, n_samples = validate.n,
+  })
+  local _, ridge_obj, elm_params = optimize.ridge({
+    n_samples = train.n, n_dims = cfg.elm.n_hidden, codes = train_h,
+    n_labels = cfg.elm.classes,
+    label_offsets = label_off, label_neighbors = label_nbr,
+    expected_offsets = label_off, expected_neighbors = label_nbr,
+    val_codes = val_h, val_n_samples = validate.n,
+    val_expected_offsets = val_label_off, val_expected_neighbors = val_label_nbr,
+    lambda = cfg.elm.lambda, propensity_a = cfg.elm.propensity_a,
+    propensity_b = cfg.elm.propensity_b,
+    k = cfg.elm.k, search_trials = cfg.elm.search_trials,
+    each = util.make_ridge_log(stopwatch),
+  })
+  str.printf("\nBest: lambda=%.4e\n", elm_params.lambda)
   str.printf("Time: %.1fs\n", stopwatch())
 
   local n_classes = cfg.elm.classes
 
   print("\nEvaluating splits")
   local train_off, train_labels = ridge_obj:label(train_h, train.n, 1)
-  local val_h = encoder:encode({ csc_offsets = val_csc_off, csc_indices = val_csc_idx, n_samples = validate.n })
   local val_off, val_labels = ridge_obj:label(val_h, validate.n, 1)
   local test_h = encoder:encode({ csc_offsets = test_csc_off, csc_indices = test_csc_idx, n_samples = test_set.n })
   local _, test_labels = ridge_obj:label(test_h, test_set.n, 1)
@@ -121,8 +115,8 @@ test("mnist elm classifier", function ()
     pred_offsets = val_off, pred_neighbors = val_labels,
     expected_offsets = val_label_off, expected_neighbors = val_label_nbr,
   })
-  str.printf("  Train: maF1=%.4f miF1=%.4f\n", train_oracle.macro_f1, train_oracle.micro_f1)
-  str.printf("  Val:   maF1=%.4f miF1=%.4f\n", val_oracle.macro_f1, val_oracle.micro_f1)
+  str.printf("  Train: saF1=%.4f miF1=%.4f\n", train_oracle.sample_f1, train_oracle.micro_f1)
+  str.printf("  Val:   saF1=%.4f miF1=%.4f\n", val_oracle.sample_f1, val_oracle.micro_f1)
 
   print("\nPer-class Test Accuracy (sorted by difficulty):\n")
   local class_order = arr.range(1, n_classes)

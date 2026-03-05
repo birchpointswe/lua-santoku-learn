@@ -21,28 +21,6 @@ local function format_best (best, current)
   end
 end
 
-function M.make_spectral_log (stopwatch)
-  return function (info)
-    local timing = ""
-    if stopwatch then
-      local d, dd = stopwatch()
-      timing = str.format(" (%.1fs +%.1fs)", d, dd)
-    end
-    if info.event == "spectral_result" then
-      str.printf("[SPECTRAL] L=%d D=%d decay=%.2f trace=%.2e embedded=%d%s\n",
-        info.n_landmarks or 0, info.n_dims or 0, info.decay or 0,
-        info.trace_ratio or 0, info.n_embedded or 0, timing)
-    elseif info.event == "trial" then
-      local p = info.params or {}
-      local m = info.metrics or {}
-      local best = format_best(info.global_best_score, info.score)
-      str.printf("[SPECTRAL %s] trace=%.2e%s L=%d D=%d%s\n",
-        format_phase(info), m.trace_ratio or 0, best,
-        p.n_landmarks or 0, p.n_dims or 0, timing)
-    end
-  end
-end
-
 function M.make_regressor_log (stopwatch)
   return function (ev)
     local phase = format_phase(ev)
@@ -125,7 +103,7 @@ function M.make_labeler_log (stopwatch)
     local params = ev.params
     local metrics = ev.metrics
     local micro = metrics.micro_f1 or 0
-    local macro = metrics.macro_f1 or 0
+    local macro = metrics.sample_f1 or 0
     local running_best = math.max(ev.global_best_score or -math.huge, ev.best_epoch_score or -math.huge)
     local best = ev.is_final and "" or format_best(running_best, micro)
     local timing = ""
@@ -147,37 +125,9 @@ function M.make_labeler_log (stopwatch)
       lt, lm, tt, ss = "", "", "", ""
     end
     local skip = params.flat_skip and str.format(" SK=%.2f", params.flat_skip) or ""
-    str.printf("[LABEL %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s%s miF1=%.4f maF1=%.4f%s%s\n",
+    str.printf("[LABEL %s E%d] F=%d C=%d L=%.2f%s/%.3f%s T=%.2f%s S=%.4f%s%s%s miF1=%.4f saF1=%.4f%s%s\n",
       phase, ev.epoch, params.features, params.clauses, params.clause_tolerance_fraction, lt, params.clause_maximum_fraction, lm,
       params.target_fraction, tt, params.specificity_fraction, ss, absorb, skip, micro, macro, best, timing)
-  end
-end
-
-function M.make_elm_log (stopwatch)
-  return function (ev)
-    local phase = format_phase(ev)
-    local p = ev.params or {}
-    local m = ev.metrics or {}
-    local best = format_best(ev.global_best_score, ev.score)
-    local prop = ""
-    if p.propensity_a then
-      prop = str.format(" pa=%.2f pb=%.2f", p.propensity_a, p.propensity_b)
-    end
-    local score_str
-    if m.mae then
-      score_str = str.format(" mae=%.6f", m.mae)
-    elseif m.oracle then
-      score_str = str.format(" maF1=%.4f miF1=%.4f", m.oracle.macro_f1, m.oracle.micro_f1)
-    else
-      score_str = str.format(" score=%.4f", ev.score or 0)
-    end
-    local timing = ""
-    if stopwatch then
-      local d, dd = stopwatch()
-      timing = str.format(" (%.1fs +%.1fs)", d, dd)
-    end
-    str.printf("[ELM %s] H=%d lambda=%.4e%s%s%s%s\n",
-      phase, p.n_hidden or 0, p.lambda or 0, prop, score_str, best, timing)
   end
 end
 
@@ -186,14 +136,13 @@ function M.make_ridge_log (stopwatch)
     local phase = format_phase(ev)
     local p = ev.params or {}
     local m = ev.metrics or {}
-    local best = format_best(ev.global_best_score, ev.score)
-    local score_str
+    local score = ev.score or 0
+    local best = format_best(ev.global_best_score, score)
+    local detail = ""
     if m.mae then
-      score_str = str.format(" mae=%.6f", m.mae)
+      detail = str.format(" mae=%.6f", m.mae)
     elseif m.oracle then
-      score_str = str.format(" maF1=%.4f miF1=%.4f", m.oracle.macro_f1, m.oracle.micro_f1)
-    else
-      score_str = str.format(" score=%.4f", ev.score or 0)
+      detail = str.format(" saF1=%.4f miF1=%.4f", m.oracle.sample_f1, m.oracle.micro_f1)
     end
     local timing = ""
     if stopwatch then
@@ -204,8 +153,9 @@ function M.make_ridge_log (stopwatch)
     if p.propensity_a then
       prop = str.format(" pa=%.2f pb=%.2f", p.propensity_a, p.propensity_b)
     end
-    str.printf("[Ridge %s] lambda=%.4e%s%s%s%s\n",
-      phase, p.lambda or 0, prop, score_str, best, timing)
+    local mode = (p.elm or p.mode) and str.format(" mode=%s", p.elm or p.mode) or ""
+    str.printf("[Ridge %s]%s lambda=%.4e%s score=%.4f%s%s%s\n",
+      phase, mode, p.lambda or 0, prop, score, detail, best, timing)
   end
 end
 
