@@ -1005,6 +1005,132 @@ static inline int tk_ridge_solve_lua (lua_State *L) {
   return 3;
 }
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-overflow"
+static inline void tk_ridge_feed_heap(
+  tk_rank_t *heaps, int64_t *hcounts, int64_t orig, int64_t k,
+  const double *row, int64_t l0, int64_t bw)
+{
+  tk_rvec_t h = { .a = heaps + orig * k, .m = (size_t)k,
+                   .n = (size_t)hcounts[orig] };
+  for (int64_t l = 0; l < bw; l++)
+    tk_rvec_hmin(&h, (size_t)k, tk_rank(l0 + l, row[l]));
+  hcounts[orig] = (int64_t)h.n;
+}
+#pragma GCC diagnostic pop
+
+static inline void tk_ridge_gather_from_row(
+  double *sco, const tk_ivec_t *off, const tk_ivec_t *nbr,
+  int64_t orig, const double *row, int64_t l0, int64_t bw)
+{
+  for (int64_t j = off->a[orig]; j < off->a[orig + 1]; j++) {
+    int64_t lbl = nbr->a[j];
+    if (lbl >= l0 && lbl < l0 + bw)
+      sco[j] = row[lbl - l0];
+  }
+}
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-overflow"
+static void tk_ridge_predict_chunk(
+  const double *codes, int64_t ns, int64_t d,
+  const double *W, int64_t bw, const double *intercept,
+  int64_t l0, int64_t sample_block,
+  tk_rank_t *heaps, int64_t *hcounts, int64_t k,
+  double *gather_sco, const tk_ivec_t *gather_off, const tk_ivec_t *gather_nbr,
+  double *transform_buf,
+  const int64_t *sample_ids, double *sbuf)
+{
+  for (int64_t s = 0; s < ns; s += sample_block) {
+    int64_t cn = (s + sample_block > ns) ? (ns - s) : sample_block;
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+      (int)cn, (int)bw, (int)d, 1.0, codes + s * d, (int)d,
+      W, (int)bw, 0.0, sbuf, (int)bw);
+    for (int64_t vi = 0; vi < cn; vi++) {
+      double *row = sbuf + vi * bw;
+      for (int64_t l = 0; l < bw; l++) row[l] += intercept[l];
+      int64_t orig = sample_ids ? sample_ids[s + vi] : (s + vi);
+      if (k > 0)
+        tk_ridge_feed_heap(heaps, hcounts, orig, k, row, l0, bw);
+      if (gather_sco)
+        tk_ridge_gather_from_row(gather_sco, gather_off, gather_nbr, orig, row, l0, bw);
+      if (transform_buf)
+        memcpy(transform_buf + orig * bw, row, (uint64_t)bw * sizeof(double));
+    }
+  }
+}
+#pragma GCC diagnostic pop
+
+static void tk_ridge_build_xty_chunk_csc(
+  const double *codes, const int64_t *csc_off, const int64_t *csc_rows,
+  int64_t d, int64_t l0, int64_t bw, double *out)
+{
+  memset(out, 0, (uint64_t)d * (uint64_t)bw * sizeof(double));
+  #pragma omp parallel for schedule(dynamic, 16)
+  for (int64_t l = l0; l < l0 + bw; l++) {
+    int64_t lcol = l - l0;
+    for (int64_t p = csc_off[l]; p < csc_off[l + 1]; p++) {
+      int64_t s = csc_rows[p];
+      for (int64_t dd2 = 0; dd2 < d; dd2++)
+        out[dd2 * bw + lcol] += codes[s * d + dd2];
+    }
+  }
+}
+
+static void tk_ridge_build_xty_chunk_fold(
+  const double *val_codes, const tk_ivec_t *lab_off, const tk_ivec_t *lab_nbr,
+  const int64_t *perm, int64_t val_s, int64_t val_n,
+  int64_t d, int64_t l0, int64_t bw, double *out)
+{
+  memset(out, 0, (uint64_t)d * (uint64_t)bw * sizeof(double));
+  for (int64_t vi = 0; vi < val_n; vi++) {
+    int64_t idx = perm[val_s + vi];
+    for (int64_t j = lab_off->a[idx]; j < lab_off->a[idx + 1]; j++) {
+      int64_t lbl = lab_nbr->a[j];
+      if (lbl >= l0 && lbl < l0 + bw) {
+        int64_t lcol = lbl - l0;
+        for (int64_t dd2 = 0; dd2 < d; dd2++)
+          out[dd2 * bw + lcol] += val_codes[vi * d + dd2];
+      }
+    }
+  }
+}
+
+static void tk_ridge_solve_chunk(
+  const double *L_chol, int64_t d,
+  const double *full_xty, const double *fold_xty,
+  double scale, const double *col_mean, const double *y_mean_slice,
+  const double *label_counts_slice, bool do_prop,
+  double prop_a, double prop_b, double C,
+  int64_t bw, double *W_out, double *intercept_out)
+{
+  if (fold_xty) {
+    for (int64_t i = 0; i < d * bw; i++)
+      W_out[i] = (full_xty[i] - fold_xty[i]) * scale;
+  } else {
+    for (int64_t i = 0; i < d * bw; i++)
+      W_out[i] = full_xty[i] * scale;
+  }
+  cblas_dger(CblasRowMajor, (int)d, (int)bw, -1.0,
+    col_mean, 1, y_mean_slice, 1, W_out, (int)bw);
+  if (do_prop) {
+    for (int64_t l = 0; l < bw; l++) {
+      double pw = 1.0 + C / pow(label_counts_slice[l] + prop_b, prop_a);
+      intercept_out[l] = pw * y_mean_slice[l];
+      for (int64_t dd2 = 0; dd2 < d; dd2++)
+        W_out[dd2 * bw + l] *= pw;
+    }
+  } else {
+    memcpy(intercept_out, y_mean_slice, (uint64_t)bw * sizeof(double));
+  }
+  cblas_dtrsm(CblasRowMajor, CblasLeft, CblasUpper, CblasTrans, CblasNonUnit,
+    (int)d, (int)bw, 1.0, L_chol, (int)d, W_out, (int)bw);
+  cblas_dtrsm(CblasRowMajor, CblasLeft, CblasUpper, CblasNoTrans, CblasNonUnit,
+    (int)d, (int)bw, 1.0, L_chol, (int)d, W_out, (int)bw);
+  cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)bw, -1.0,
+    W_out, (int)bw, col_mean, 1, 1.0, intercept_out, 1);
+}
+
 static inline int tk_ridge_solve_oof_lua (lua_State *L) {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
@@ -1057,8 +1183,31 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
   lua_getfield(L, 1, "transform");
   bool do_transform = !dense && lua_toboolean(L, -1);
   lua_pop(L, 1);
-  if (!dense && !have_k && !do_transform)
-    return luaL_error(L, "solve_oof: label mode requires k and/or transform");
+  tk_ivec_t *gather_off = NULL, *gather_nbr = NULL;
+  bool do_gather = false;
+  if (!dense) {
+    lua_getfield(L, 1, "gather_offsets");
+    if (!lua_isnil(L, -1)) {
+      gather_off = tk_ivec_peek(L, -1, "gather_offsets");
+      lua_getfield(L, 1, "gather_neighbors");
+      gather_nbr = tk_ivec_peek(L, -1, "gather_neighbors");
+      lua_pop(L, 2);
+      do_gather = true;
+    } else {
+      lua_pop(L, 1);
+    }
+  }
+  int64_t label_batch = 0;
+  lua_getfield(L, 1, "label_batch");
+  if (lua_isnumber(L, -1)) label_batch = (int64_t)lua_tointeger(L, -1);
+  lua_pop(L, 1);
+  bool do_batch = !dense && label_batch > 0 && nl > label_batch;
+  if (do_gather && do_transform)
+    return luaL_error(L, "oof: cannot use both transform and gather");
+  if (do_batch && do_transform)
+    return luaL_error(L, "oof: label_batch does not support transform");
+  if (!dense && !have_k && !do_transform && !do_gather)
+    return luaL_error(L, "oof: label mode requires k, transform, or gather");
 
   uint64_t dd = (uint64_t)d;
   uint64_t dnl = dd * (uint64_t)nl;
@@ -1072,12 +1221,13 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
 
   double *full_col_sum = (double *)calloc(dd, sizeof(double));
   double *full_XtX = (double *)calloc(dd * dd, sizeof(double));
-  double *full_XtY = (double *)calloc(dnl, sizeof(double));
+  double *full_XtY = do_batch ? NULL : (double *)calloc(dnl, sizeof(double));
   double *full_y_sum = (double *)calloc((uint64_t)nl, sizeof(double));
   double *full_label_counts = (!dense) ? (double *)calloc((uint64_t)nl, sizeof(double)) : NULL;
-  if (!perm || !full_col_sum || !full_XtX || !full_XtY || !full_y_sum || (!dense && !full_label_counts)) {
+  if (!perm || !full_col_sum || !full_XtX || (!do_batch && !full_XtY) ||
+      !full_y_sum || (!dense && !full_label_counts)) {
     free(perm); free(full_col_sum); free(full_XtX); free(full_XtY); free(full_y_sum); free(full_label_counts);
-    return luaL_error(L, "solve_oof: malloc failed");
+    return luaL_error(L, "oof: malloc failed");
   }
 
   for (int64_t i = 0; i < n; i++)
@@ -1095,14 +1245,16 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
       for (int64_t l = 0; l < nl; l++)
         full_y_sum[l] += targets->a[i * nl + l];
   } else {
-    #pragma omp parallel for schedule(static)
-    for (int64_t dd2 = 0; dd2 < d; dd2++) {
-      double *xty_row = full_XtY + dd2 * nl;
-      for (int64_t i = 0; i < n; i++) {
-        double xi_dd = codes->a[i * d + dd2];
-        int64_t lo = lab_off->a[i], hi = lab_off->a[i + 1];
-        for (int64_t j = lo; j < hi; j++)
-          xty_row[lab_nbr->a[j]] += xi_dd;
+    if (!do_batch) {
+      #pragma omp parallel for schedule(static)
+      for (int64_t dd2 = 0; dd2 < d; dd2++) {
+        double *xty_row = full_XtY + dd2 * nl;
+        for (int64_t i = 0; i < n; i++) {
+          double xi_dd = codes->a[i * d + dd2];
+          int64_t lo = lab_off->a[i], hi = lab_off->a[i + 1];
+          for (int64_t j = lo; j < hi; j++)
+            xty_row[lab_nbr->a[j]] += xi_dd;
+        }
       }
     }
     for (int64_t i = 0; i < n; i++) {
@@ -1114,12 +1266,10 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
       full_y_sum[l] = full_label_counts[l];
   }
 
-  tk_ivec_t *oof_off = NULL;
-  tk_ivec_t *oof_nbr = NULL;
-  tk_dvec_t *oof_sco = NULL;
-  tk_dvec_t *oof_dense = NULL;
-  tk_dvec_t *oof_transform = NULL;
-  int oof_off_idx = 0, oof_nbr_idx = 0, oof_sco_idx = 0, oof_dense_idx = 0, oof_tr_idx = 0;
+  tk_ivec_t *oof_off = NULL, *oof_nbr = NULL;
+  tk_dvec_t *oof_sco = NULL, *oof_dense = NULL, *oof_transform = NULL, *gather_sco_dv = NULL;
+  int oof_off_idx = 0, oof_nbr_idx = 0, oof_sco_idx = 0, oof_dense_idx = 0,
+      oof_tr_idx = 0, gather_sco_idx = 0;
   if (!dense) {
     if (have_k) {
       oof_off = tk_ivec_create(L, (uint64_t)(n + 1), NULL, NULL);
@@ -1133,14 +1283,33 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
       memset(oof_sco->a, 0, (uint64_t)(n * k) * sizeof(double));
     }
     if (do_transform) {
-      oof_transform = tk_dvec_create(L, (uint64_t)(n * nl), NULL, NULL);
+      oof_transform = tk_dvec_create(L, (uint64_t)((uint64_t)n * (uint64_t)nl), NULL, NULL);
       oof_tr_idx = lua_gettop(L);
-      memset(oof_transform->a, 0, (uint64_t)(n * nl) * sizeof(double));
+      memset(oof_transform->a, 0, (uint64_t)n * (uint64_t)nl * sizeof(double));
+    }
+    if (do_gather) {
+      int64_t gather_nnz = gather_off->a[n];
+      gather_sco_dv = tk_dvec_create(L, (uint64_t)gather_nnz, NULL, NULL);
+      gather_sco_idx = lua_gettop(L);
+      memset(gather_sco_dv->a, 0, (uint64_t)gather_nnz * sizeof(double));
     }
   } else {
-    oof_dense = tk_dvec_create(L, (uint64_t)(n * nl), NULL, NULL);
+    oof_dense = tk_dvec_create(L, (uint64_t)((uint64_t)n * (uint64_t)nl), NULL, NULL);
     oof_dense_idx = lua_gettop(L);
-    memset(oof_dense->a, 0, (uint64_t)(n * nl) * sizeof(double));
+    memset(oof_dense->a, 0, (uint64_t)n * (uint64_t)nl * sizeof(double));
+  }
+
+  tk_rank_t *oof_heaps = NULL;
+  int64_t *oof_hcounts = NULL;
+  if (have_k && !dense) {
+    oof_heaps = (tk_rank_t *)malloc((uint64_t)n * (uint64_t)k * sizeof(tk_rank_t));
+    oof_hcounts = (int64_t *)calloc((uint64_t)n, sizeof(int64_t));
+    if (!oof_heaps || !oof_hcounts) {
+      free(perm); free(full_col_sum); free(full_XtX); free(full_XtY);
+      free(full_y_sum); free(full_label_counts);
+      free(oof_heaps); free(oof_hcounts);
+      return luaL_error(L, "oof: malloc failed");
+    }
   }
 
   if (nf < 2) {
@@ -1151,28 +1320,6 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
         full_XtX[p * d + q] *= inv_n;
     cblas_dsyr(CblasRowMajor, CblasUpper, (int)d, -1.0, full_col_sum, 1, full_XtX, (int)d);
     for (int64_t l = 0; l < nl; l++) full_y_sum[l] *= inv_n;
-    for (int64_t p = 0; p < d; p++)
-      for (int64_t l = 0; l < nl; l++)
-        full_XtY[p * nl + l] *= inv_n;
-    cblas_dger(CblasRowMajor, (int)d, (int)nl, -1.0,
-      full_col_sum, 1, full_y_sum, 1, full_XtY, (int)nl);
-    double *intercept = (double *)malloc((uint64_t)nl * sizeof(double));
-    if (!intercept) {
-      free(perm); free(full_col_sum); free(full_XtX); free(full_XtY);
-      free(full_y_sum); free(full_label_counts);
-      return luaL_error(L, "solve_oof: malloc failed");
-    }
-    if (do_prop) {
-      double C = (log((double)n) - 1.0) * pow(prop_b + 1.0, prop_a);
-      for (int64_t l = 0; l < nl; l++) {
-        double pw = 1.0 + C / pow(full_label_counts[l] + prop_b, prop_a);
-        intercept[l] = pw * full_y_sum[l];
-        for (int64_t i = 0; i < d; i++)
-          full_XtY[i * nl + l] *= pw;
-      }
-    } else {
-      memcpy(intercept, full_y_sum, (uint64_t)nl * sizeof(double));
-    }
     for (int64_t i = 0; i < d; i++)
       for (int64_t j = i + 1; j < d; j++)
         full_XtX[j * d + i] = full_XtX[i * d + j];
@@ -1186,89 +1333,210 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
     int info = LAPACKE_dpotrf(LAPACK_COL_MAJOR, 'L', (int)d, full_XtX, (int)d);
     if (info != 0) {
       free(perm); free(full_col_sum); free(full_XtX); free(full_XtY);
-      free(full_y_sum); free(full_label_counts); free(intercept);
-      return luaL_error(L, "solve_oof: Cholesky failed (info=%d)", info);
+      free(full_y_sum); free(full_label_counts);
+      free(oof_heaps); free(oof_hcounts);
+      return luaL_error(L, "oof: Cholesky failed (info=%d)", info);
     }
-    cblas_dtrsm(CblasRowMajor, CblasLeft, CblasUpper, CblasTrans, CblasNonUnit,
-      (int)d, (int)nl, 1.0, full_XtX, (int)d, full_XtY, (int)nl);
-    cblas_dtrsm(CblasRowMajor, CblasLeft, CblasUpper, CblasNoTrans, CblasNonUnit,
-      (int)d, (int)nl, 1.0, full_XtX, (int)d, full_XtY, (int)nl);
-    double *W = full_XtY;
-    cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)nl, -1.0,
-      W, (int)nl, full_col_sum, 1, 1.0, intercept, 1);
-    if (dense) {
+    if (do_batch) {
+      int64_t lb = label_batch;
+      int64_t sample_block = 256;
+      double C = do_prop ? (log((double)n) - 1.0) * pow(prop_b + 1.0, prop_a) : 0.0;
+      int64_t nnz = lab_off->a[n];
+      int64_t *csc_off = (int64_t *)calloc((uint64_t)(nl + 1), sizeof(int64_t));
+      int64_t *csc_rows = (int64_t *)malloc((uint64_t)nnz * sizeof(int64_t));
+      uint64_t ulb = (uint64_t)lb;
+      double *full_xty_chunk = (double *)malloc(dd * ulb * sizeof(double));
+      double *W_chunk = (double *)malloc(dd * ulb * sizeof(double));
+      double *intercept_chunk = (double *)malloc(ulb * sizeof(double));
+      double *sbuf_chunk = (double *)malloc((uint64_t)sample_block * ulb * sizeof(double));
+      if (!csc_off || !csc_rows || !full_xty_chunk || !W_chunk || !intercept_chunk || !sbuf_chunk) {
+        free(perm); free(full_col_sum); free(full_XtX); free(full_XtY);
+        free(full_y_sum); free(full_label_counts);
+        free(oof_heaps); free(oof_hcounts);
+        free(csc_off); free(csc_rows);
+        free(full_xty_chunk); free(W_chunk); free(intercept_chunk); free(sbuf_chunk);
+        return luaL_error(L, "oof: malloc failed");
+      }
+      for (int64_t j = 0; j < nnz; j++)
+        csc_off[lab_nbr->a[j] + 1]++;
+      for (int64_t l = 0; l < nl; l++)
+        csc_off[l + 1] += csc_off[l];
+      { int64_t *csc_pos = (int64_t *)calloc((uint64_t)nl, sizeof(int64_t));
+        for (int64_t i = 0; i < n; i++)
+          for (int64_t j = lab_off->a[i]; j < lab_off->a[i + 1]; j++) {
+            int64_t l = lab_nbr->a[j];
+            csc_rows[csc_off[l] + csc_pos[l]++] = i;
+          }
+        free(csc_pos); }
+      for (int64_t l0 = 0; l0 < nl; l0 += lb) {
+        int64_t bw = (l0 + lb > nl) ? (nl - l0) : lb;
+        tk_ridge_build_xty_chunk_csc(codes->a, csc_off, csc_rows, d, l0, bw, full_xty_chunk);
+        tk_ridge_solve_chunk(full_XtX, d, full_xty_chunk, NULL, inv_n,
+          full_col_sum, full_y_sum + l0,
+          full_label_counts + l0, do_prop, prop_a, prop_b, C,
+          bw, W_chunk, intercept_chunk);
+        tk_ridge_predict_chunk(codes->a, n, d, W_chunk, bw, intercept_chunk,
+          l0, sample_block, oof_heaps, oof_hcounts, k,
+          do_gather ? gather_sco_dv->a : NULL, gather_off, gather_nbr,
+          NULL, NULL, sbuf_chunk);
+      }
+      free(csc_off); free(csc_rows);
+      free(full_xty_chunk); free(W_chunk); free(intercept_chunk); free(sbuf_chunk);
+    } else if (dense) {
+      for (int64_t p = 0; p < d; p++)
+        for (int64_t l = 0; l < nl; l++)
+          full_XtY[p * nl + l] *= inv_n;
+      cblas_dger(CblasRowMajor, (int)d, (int)nl, -1.0,
+        full_col_sum, 1, full_y_sum, 1, full_XtY, (int)nl);
+      double *intercept = (double *)malloc((uint64_t)nl * sizeof(double));
+      if (!intercept) {
+        free(perm); free(full_col_sum); free(full_XtX); free(full_XtY);
+        free(full_y_sum); free(full_label_counts);
+        free(oof_heaps); free(oof_hcounts);
+        return luaL_error(L, "oof: malloc failed");
+      }
+      memcpy(intercept, full_y_sum, (uint64_t)nl * sizeof(double));
+      cblas_dtrsm(CblasRowMajor, CblasLeft, CblasUpper, CblasTrans, CblasNonUnit,
+        (int)d, (int)nl, 1.0, full_XtX, (int)d, full_XtY, (int)nl);
+      cblas_dtrsm(CblasRowMajor, CblasLeft, CblasUpper, CblasNoTrans, CblasNonUnit,
+        (int)d, (int)nl, 1.0, full_XtX, (int)d, full_XtY, (int)nl);
+      cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)nl, -1.0,
+        full_XtY, (int)nl, full_col_sum, 1, 1.0, intercept, 1);
       cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
         (int)n, (int)nl, (int)d, 1.0, codes->a, (int)d,
-        W, (int)nl, 0.0, oof_dense->a, (int)nl);
+        full_XtY, (int)nl, 0.0, oof_dense->a, (int)nl);
       tk_ridge_add_intercept(oof_dense->a, n, nl, intercept);
+      free(intercept);
     } else {
-      int64_t chunk = 256;
-      double *sbuf2 = (double *)malloc((uint64_t)chunk * (uint64_t)nl * sizeof(double));
-      tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
-                         .a = (tk_rank_t *)malloc((uint64_t)k * sizeof(tk_rank_t)) };
-      if (!sbuf2 || (have_k && !heap.a)) {
+      for (int64_t p = 0; p < d; p++)
+        for (int64_t l = 0; l < nl; l++)
+          full_XtY[p * nl + l] *= inv_n;
+      cblas_dger(CblasRowMajor, (int)d, (int)nl, -1.0,
+        full_col_sum, 1, full_y_sum, 1, full_XtY, (int)nl);
+      double *intercept = (double *)malloc((uint64_t)nl * sizeof(double));
+      if (!intercept) {
+        free(perm); free(full_col_sum); free(full_XtX); free(full_XtY);
+        free(full_y_sum); free(full_label_counts);
+        free(oof_heaps); free(oof_hcounts);
+        return luaL_error(L, "oof: malloc failed");
+      }
+      if (do_prop) {
+        double C = (log((double)n) - 1.0) * pow(prop_b + 1.0, prop_a);
+        for (int64_t l = 0; l < nl; l++) {
+          double pw = 1.0 + C / pow(full_label_counts[l] + prop_b, prop_a);
+          intercept[l] = pw * full_y_sum[l];
+          for (int64_t i = 0; i < d; i++)
+            full_XtY[i * nl + l] *= pw;
+        }
+      } else {
+        memcpy(intercept, full_y_sum, (uint64_t)nl * sizeof(double));
+      }
+      cblas_dtrsm(CblasRowMajor, CblasLeft, CblasUpper, CblasTrans, CblasNonUnit,
+        (int)d, (int)nl, 1.0, full_XtX, (int)d, full_XtY, (int)nl);
+      cblas_dtrsm(CblasRowMajor, CblasLeft, CblasUpper, CblasNoTrans, CblasNonUnit,
+        (int)d, (int)nl, 1.0, full_XtX, (int)d, full_XtY, (int)nl);
+      cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)nl, -1.0,
+        full_XtY, (int)nl, full_col_sum, 1, 1.0, intercept, 1);
+      int64_t sample_block = 256;
+      double *sbuf2 = (double *)malloc((uint64_t)sample_block * (uint64_t)nl * sizeof(double));
+      if (!sbuf2) {
         free(perm); free(full_col_sum); free(full_XtX); free(full_XtY);
         free(full_y_sum); free(full_label_counts); free(intercept);
-        free(sbuf2); free(heap.a);
-        return luaL_error(L, "solve_oof: malloc failed");
+        free(oof_heaps); free(oof_hcounts);
+        return luaL_error(L, "oof: malloc failed");
       }
-      for (int64_t s = 0; s < n; s += chunk) {
-        int64_t cn = (s + chunk > n) ? (n - s) : chunk;
-        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-          (int)cn, (int)nl, (int)d, 1.0, codes->a + s * d, (int)d,
-          W, (int)nl, 0.0, sbuf2, (int)nl);
-        tk_ridge_add_intercept(sbuf2, cn, nl, intercept);
-        for (int64_t vi = 0; vi < cn; vi++) {
-          int64_t orig = s + vi;
-          double *row = sbuf2 + vi * nl;
-          if (have_k) {
-            int64_t dst = orig * k;
-            heap.n = 0;
-            for (int64_t l = 0; l < nl; l++)
-              tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, row[l]));
-            tk_rvec_desc(&heap, 0, heap.n);
-            for (int64_t j = 0; j < (int64_t)heap.n; j++) {
-              oof_nbr->a[dst + j] = heap.a[j].i;
-              oof_sco->a[dst + j] = heap.a[j].d;
-            }
-          }
-          if (do_transform)
-            memcpy(oof_transform->a + orig * nl, row, (uint64_t)nl * sizeof(double));
+      tk_ridge_predict_chunk(codes->a, n, d, full_XtY, nl, intercept,
+        0, sample_block, oof_heaps, oof_hcounts, k,
+        do_gather ? gather_sco_dv->a : NULL, gather_off, gather_nbr,
+        do_transform ? oof_transform->a : NULL, NULL, sbuf2);
+      free(sbuf2); free(intercept);
+    }
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-overflow"
+    if (oof_heaps) {
+      for (int64_t i = 0; i < n; i++) {
+        int64_t dst = i * k;
+        int64_t cnt = oof_hcounts[i];
+        tk_rvec_t h = { .a = oof_heaps + dst, .m = (size_t)k, .n = (size_t)cnt };
+        tk_rvec_desc(&h, 0, h.n);
+        for (int64_t j = 0; j < cnt; j++) {
+          oof_nbr->a[dst + j] = h.a[j].i;
+          oof_sco->a[dst + j] = h.a[j].d;
         }
       }
-      free(sbuf2);
-      free(heap.a);
     }
+#pragma GCC diagnostic pop
+    free(oof_heaps); free(oof_hcounts);
     free(perm); free(full_col_sum); free(full_XtX); free(full_XtY);
-    free(full_y_sum); free(full_label_counts); free(intercept);
+    free(full_y_sum); free(full_label_counts);
     goto push_results;
   }
 
   {
+    int64_t fold_size = n / nf;
+    int64_t max_val = n - (nf - 1) * fold_size;
+    int64_t sample_block = 256;
     double *fold_col_sum = (double *)calloc(dd, sizeof(double));
     double *fold_XtX = (double *)calloc(dd * dd, sizeof(double));
-    double *fold_XtY = (double *)calloc(dnl, sizeof(double));
     double *fold_y_sum = (double *)calloc((uint64_t)nl, sizeof(double));
     double *fold_label_counts = (!dense) ? (double *)calloc((uint64_t)nl, sizeof(double)) : NULL;
     double *train_gram = (double *)malloc(dd * dd * sizeof(double));
-    double *train_xty = (double *)malloc(dnl * sizeof(double));
     double *train_col_mean = (double *)malloc(dd * sizeof(double));
     double *train_y_mean = (double *)malloc((uint64_t)nl * sizeof(double));
-    double *prop_y_mean = (double *)malloc((uint64_t)nl * sizeof(double));
-    int64_t fold_size = n / nf;
-    int64_t max_val = n - (nf - 1) * fold_size;
-    double *sbuf = (double *)malloc((uint64_t)max_val * (uint64_t)nl * sizeof(double));
     double *val_codes_buf = (double *)malloc((uint64_t)max_val * dd * sizeof(double));
 
-    if (!fold_col_sum || !fold_XtX || !fold_XtY || !fold_y_sum || !train_gram ||
-        !train_xty || !train_col_mean || !train_y_mean || !prop_y_mean ||
-        !sbuf || !val_codes_buf || (!dense && !fold_label_counts)) {
+    double *fold_XtY = NULL, *prop_y_mean = NULL, *sbuf = NULL;
+    int64_t *csc_off = NULL, *csc_rows = NULL;
+    double *full_xty_chunk = NULL, *fold_xty_chunk = NULL;
+    double *W_chunk = NULL, *intercept_chunk = NULL, *sbuf_chunk = NULL;
+
+    if (do_batch) {
+      int64_t nnz = lab_off->a[n];
+      uint64_t ulb = (uint64_t)label_batch;
+      csc_off = (int64_t *)calloc((uint64_t)(nl + 1), sizeof(int64_t));
+      csc_rows = (int64_t *)malloc((uint64_t)nnz * sizeof(int64_t));
+      full_xty_chunk = (double *)malloc(dd * ulb * sizeof(double));
+      fold_xty_chunk = (double *)malloc(dd * ulb * sizeof(double));
+      W_chunk = (double *)malloc(dd * ulb * sizeof(double));
+      intercept_chunk = (double *)malloc(ulb * sizeof(double));
+      sbuf_chunk = (double *)malloc((uint64_t)sample_block * ulb * sizeof(double));
+    } else {
+      fold_XtY = (double *)calloc(dnl, sizeof(double));
+      prop_y_mean = (double *)malloc((uint64_t)nl * sizeof(double));
+      int64_t sbuf_rows = dense ? max_val : sample_block;
+      sbuf = (double *)malloc((uint64_t)sbuf_rows * (uint64_t)nl * sizeof(double));
+    }
+
+    if (!fold_col_sum || !fold_XtX || !fold_y_sum || !train_gram ||
+        !train_col_mean || !train_y_mean || !val_codes_buf ||
+        (!dense && !fold_label_counts) ||
+        (do_batch && (!csc_off || !csc_rows || !full_xty_chunk || !fold_xty_chunk ||
+                      !W_chunk || !intercept_chunk || !sbuf_chunk)) ||
+        (!do_batch && (!fold_XtY || !prop_y_mean || !sbuf))) {
       free(perm); free(full_col_sum); free(full_XtX); free(full_XtY);
       free(full_y_sum); free(full_label_counts);
-      free(fold_col_sum); free(fold_XtX); free(fold_XtY); free(fold_y_sum); free(fold_label_counts);
-      free(train_gram); free(train_xty); free(train_col_mean); free(train_y_mean); free(prop_y_mean);
-      free(sbuf); free(val_codes_buf);
-      return luaL_error(L, "solve_oof: malloc failed");
+      free(oof_heaps); free(oof_hcounts);
+      free(fold_col_sum); free(fold_XtX); free(fold_y_sum); free(fold_label_counts);
+      free(train_gram); free(train_col_mean); free(train_y_mean); free(val_codes_buf);
+      free(fold_XtY); free(prop_y_mean); free(sbuf);
+      free(csc_off); free(csc_rows); free(full_xty_chunk); free(fold_xty_chunk);
+      free(W_chunk); free(intercept_chunk); free(sbuf_chunk);
+      return luaL_error(L, "oof: malloc failed");
+    }
+
+    if (do_batch) {
+      int64_t nnz = lab_off->a[n];
+      for (int64_t j = 0; j < nnz; j++)
+        csc_off[lab_nbr->a[j] + 1]++;
+      for (int64_t l = 0; l < nl; l++)
+        csc_off[l + 1] += csc_off[l];
+      { int64_t *csc_pos = (int64_t *)calloc((uint64_t)nl, sizeof(int64_t));
+        for (int64_t i = 0; i < n; i++)
+          for (int64_t j = lab_off->a[i]; j < lab_off->a[i + 1]; j++) {
+            int64_t l = lab_nbr->a[j];
+            csc_rows[csc_off[l] + csc_pos[l]++] = i;
+          }
+        free(csc_pos); }
     }
 
     for (int64_t f = 0; f < nf; f++) {
@@ -1280,13 +1548,11 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
 
       memset(fold_col_sum, 0, dd * sizeof(double));
       memset(fold_XtX, 0, dd * dd * sizeof(double));
-      memset(fold_XtY, 0, dnl * sizeof(double));
       memset(fold_y_sum, 0, (uint64_t)nl * sizeof(double));
       if (!dense) memset(fold_label_counts, 0, (uint64_t)nl * sizeof(double));
 
       for (int64_t vi = 0; vi < val_n; vi++)
         memcpy(val_codes_buf + vi * d, codes->a + perm[val_s + vi] * d, dd * sizeof(double));
-
       for (int64_t vi = 0; vi < val_n; vi++) {
         const double *xi = val_codes_buf + vi * d;
         for (int64_t j = 0; j < d; j++)
@@ -1307,17 +1573,6 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
           (int)d, (int)nl, (int)val_n, 1.0, val_codes_buf, (int)d,
           sbuf, (int)nl, 0.0, fold_XtY, (int)nl);
       } else {
-        #pragma omp parallel for schedule(static)
-        for (int64_t dd2 = 0; dd2 < d; dd2++) {
-          double *xty_row = fold_XtY + dd2 * nl;
-          for (int64_t vi = 0; vi < val_n; vi++) {
-            int64_t idx = perm[val_s + vi];
-            double xval = val_codes_buf[vi * d + dd2];
-            int64_t lo = lab_off->a[idx], hi = lab_off->a[idx + 1];
-            for (int64_t j = lo; j < hi; j++)
-              xty_row[lab_nbr->a[j]] += xval;
-          }
-        }
         for (int64_t vi = 0; vi < val_n; vi++) {
           int64_t idx = perm[val_s + vi];
           int64_t lo = lab_off->a[idx], hi = lab_off->a[idx + 1];
@@ -1326,6 +1581,20 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
         }
         for (int64_t l = 0; l < nl; l++)
           fold_y_sum[l] = fold_label_counts[l];
+        if (!do_batch) {
+          memset(fold_XtY, 0, dnl * sizeof(double));
+          #pragma omp parallel for schedule(static)
+          for (int64_t dd2 = 0; dd2 < d; dd2++) {
+            double *xty_row = fold_XtY + dd2 * nl;
+            for (int64_t vi = 0; vi < val_n; vi++) {
+              int64_t idx = perm[val_s + vi];
+              double xval = val_codes_buf[vi * d + dd2];
+              int64_t lo = lab_off->a[idx], hi = lab_off->a[idx + 1];
+              for (int64_t j = lo; j < hi; j++)
+                xty_row[lab_nbr->a[j]] += xval;
+            }
+          }
+        }
       }
 
       for (int64_t j = 0; j < d; j++)
@@ -1335,36 +1604,12 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
           train_gram[p * d + q] = (full_XtX[p * d + q] - fold_XtX[p * d + q]) * tr_inv;
       cblas_dsyr(CblasRowMajor, CblasUpper, (int)d, -1.0,
         train_col_mean, 1, train_gram, (int)d);
-
       for (int64_t l = 0; l < nl; l++)
         train_y_mean[l] = (full_y_sum[l] - fold_y_sum[l]) * tr_inv;
-
-      for (int64_t p = 0; p < d; p++)
-        for (int64_t l = 0; l < nl; l++)
-          train_xty[p * nl + l] = (full_XtY[p * nl + l] - fold_XtY[p * nl + l]) * tr_inv;
-      cblas_dger(CblasRowMajor, (int)d, (int)nl, -1.0,
-        train_col_mean, 1, train_y_mean, 1, train_xty, (int)nl);
-
-      if (do_prop) {
-        double *tr_lc = (double *)malloc((uint64_t)nl * sizeof(double));
-        for (int64_t l = 0; l < nl; l++)
-          tr_lc[l] = full_label_counts[l] - fold_label_counts[l];
-        double C = (log((double)tr_n) - 1.0) * pow(prop_b + 1.0, prop_a);
-        for (int64_t l = 0; l < nl; l++) {
-          double pw = 1.0 + C / pow(tr_lc[l] + prop_b, prop_a);
-          prop_y_mean[l] = pw * train_y_mean[l];
-          for (int64_t i = 0; i < d; i++)
-            train_xty[i * nl + l] *= pw;
-        }
-        free(tr_lc);
-      } else {
-        memcpy(prop_y_mean, train_y_mean, (uint64_t)nl * sizeof(double));
-      }
 
       for (int64_t i = 0; i < d; i++)
         for (int64_t j = i + 1; j < d; j++)
           train_gram[j * d + i] = train_gram[i * d + j];
-
       double max_diag = 0.0;
       for (int64_t i = 0; i < d; i++)
         if (train_gram[i * d + i] > max_diag) max_diag = train_gram[i * d + i];
@@ -1372,76 +1617,114 @@ static inline int tk_ridge_solve_oof_lua (lua_State *L) {
       double lambda = lambda_raw * max_diag + max_diag * 1e-7;
       for (int64_t i = 0; i < d; i++)
         train_gram[i * d + i] += lambda;
-
       int info = LAPACKE_dpotrf(LAPACK_COL_MAJOR, 'L', (int)d, train_gram, (int)d);
       if (info != 0) {
         free(perm); free(full_col_sum); free(full_XtX); free(full_XtY);
         free(full_y_sum); free(full_label_counts);
-        free(fold_col_sum); free(fold_XtX); free(fold_XtY); free(fold_y_sum); free(fold_label_counts);
-        free(train_gram); free(train_xty); free(train_col_mean); free(train_y_mean); free(prop_y_mean);
-        free(sbuf); free(val_codes_buf);
-        return luaL_error(L, "solve_oof: Cholesky failed fold %d (info=%d)", (int)f, info);
+        free(oof_heaps); free(oof_hcounts);
+        free(fold_col_sum); free(fold_XtX); free(fold_y_sum); free(fold_label_counts);
+        free(train_gram); free(train_col_mean); free(train_y_mean); free(val_codes_buf);
+        free(fold_XtY); free(prop_y_mean); free(sbuf);
+        free(csc_off); free(csc_rows); free(full_xty_chunk); free(fold_xty_chunk);
+        free(W_chunk); free(intercept_chunk); free(sbuf_chunk);
+        return luaL_error(L, "oof: Cholesky failed fold %d (info=%d)", (int)f, info);
       }
-      cblas_dtrsm(CblasRowMajor, CblasLeft, CblasUpper, CblasTrans, CblasNonUnit,
-        (int)d, (int)nl, 1.0, train_gram, (int)d, train_xty, (int)nl);
-      cblas_dtrsm(CblasRowMajor, CblasLeft, CblasUpper, CblasNoTrans, CblasNonUnit,
-        (int)d, (int)nl, 1.0, train_gram, (int)d, train_xty, (int)nl);
 
-      double *W = train_xty;
-      double *intercept = prop_y_mean;
-      cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)nl, -1.0,
-        W, (int)nl, train_col_mean, 1, 1.0, intercept, 1);
-
-      cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-        (int)val_n, (int)nl, (int)d, 1.0, val_codes_buf, (int)d,
-        W, (int)nl, 0.0, sbuf, (int)nl);
-      tk_ridge_add_intercept(sbuf, val_n, nl, intercept);
-
-      if (!dense) {
-        tk_rvec_t heap = { .n = 0, .m = have_k ? (size_t)k : 0, .lua_managed = false,
-                           .a = have_k ? (tk_rank_t *)malloc((uint64_t)k * sizeof(tk_rank_t)) : NULL };
-        for (int64_t vi = 0; vi < val_n; vi++) {
-          int64_t orig = perm[val_s + vi];
-          double *row = sbuf + vi * nl;
-          if (have_k) {
-            int64_t dst = orig * k;
-            heap.n = 0;
-            for (int64_t l = 0; l < nl; l++)
-              tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, row[l]));
-            tk_rvec_desc(&heap, 0, heap.n);
-            for (int64_t j = 0; j < (int64_t)heap.n; j++) {
-              oof_nbr->a[dst + j] = heap.a[j].i;
-              oof_sco->a[dst + j] = heap.a[j].d;
-            }
-          }
-          if (do_transform)
-            memcpy(oof_transform->a + orig * nl, row, (uint64_t)nl * sizeof(double));
+      if (do_batch) {
+        int64_t lb = label_batch;
+        for (int64_t l = 0; l < nl; l++)
+          fold_label_counts[l] = full_label_counts[l] - fold_label_counts[l];
+        double C = do_prop ? (log((double)tr_n) - 1.0) * pow(prop_b + 1.0, prop_a) : 0.0;
+        for (int64_t l0 = 0; l0 < nl; l0 += lb) {
+          int64_t bw = (l0 + lb > nl) ? (nl - l0) : lb;
+          tk_ridge_build_xty_chunk_csc(codes->a, csc_off, csc_rows, d, l0, bw, full_xty_chunk);
+          tk_ridge_build_xty_chunk_fold(val_codes_buf, lab_off, lab_nbr, perm,
+            val_s, val_n, d, l0, bw, fold_xty_chunk);
+          tk_ridge_solve_chunk(train_gram, d, full_xty_chunk, fold_xty_chunk, tr_inv,
+            train_col_mean, train_y_mean + l0,
+            fold_label_counts + l0, do_prop, prop_a, prop_b, C,
+            bw, W_chunk, intercept_chunk);
+          tk_ridge_predict_chunk(val_codes_buf, val_n, d, W_chunk, bw, intercept_chunk,
+            l0, sample_block, oof_heaps, oof_hcounts, k,
+            do_gather ? gather_sco_dv->a : NULL, gather_off, gather_nbr,
+            NULL, perm + val_s, sbuf_chunk);
         }
-        free(heap.a);
       } else {
-        for (int64_t vi = 0; vi < val_n; vi++) {
-          int64_t orig = perm[val_s + vi];
-          memcpy(oof_dense->a + orig * nl, sbuf + vi * nl, (uint64_t)nl * sizeof(double));
+        for (int64_t i = 0; i < (int64_t)dnl; i++)
+          fold_XtY[i] = (full_XtY[i] - fold_XtY[i]) * tr_inv;
+        cblas_dger(CblasRowMajor, (int)d, (int)nl, -1.0,
+          train_col_mean, 1, train_y_mean, 1, fold_XtY, (int)nl);
+        if (do_prop) {
+          for (int64_t l = 0; l < nl; l++)
+            fold_label_counts[l] = full_label_counts[l] - fold_label_counts[l];
+          double C = (log((double)tr_n) - 1.0) * pow(prop_b + 1.0, prop_a);
+          for (int64_t l = 0; l < nl; l++) {
+            double pw = 1.0 + C / pow(fold_label_counts[l] + prop_b, prop_a);
+            prop_y_mean[l] = pw * train_y_mean[l];
+            for (int64_t i = 0; i < d; i++)
+              fold_XtY[i * nl + l] *= pw;
+          }
+        } else {
+          memcpy(prop_y_mean, train_y_mean, (uint64_t)nl * sizeof(double));
+        }
+        cblas_dtrsm(CblasRowMajor, CblasLeft, CblasUpper, CblasTrans, CblasNonUnit,
+          (int)d, (int)nl, 1.0, train_gram, (int)d, fold_XtY, (int)nl);
+        cblas_dtrsm(CblasRowMajor, CblasLeft, CblasUpper, CblasNoTrans, CblasNonUnit,
+          (int)d, (int)nl, 1.0, train_gram, (int)d, fold_XtY, (int)nl);
+        double *W = fold_XtY;
+        double *intercept = prop_y_mean;
+        cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)nl, -1.0,
+          W, (int)nl, train_col_mean, 1, 1.0, intercept, 1);
+        if (!dense) {
+          tk_ridge_predict_chunk(val_codes_buf, val_n, d, W, nl, intercept,
+            0, sample_block, oof_heaps, oof_hcounts, k,
+            do_gather ? gather_sco_dv->a : NULL, gather_off, gather_nbr,
+            do_transform ? oof_transform->a : NULL, perm + val_s, sbuf);
+        } else {
+          cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+            (int)val_n, (int)nl, (int)d, 1.0, val_codes_buf, (int)d,
+            W, (int)nl, 0.0, sbuf, (int)nl);
+          tk_ridge_add_intercept(sbuf, val_n, nl, intercept);
+          for (int64_t vi = 0; vi < val_n; vi++) {
+            int64_t orig = perm[val_s + vi];
+            memcpy(oof_dense->a + orig * nl, sbuf + vi * nl, (uint64_t)nl * sizeof(double));
+          }
         }
       }
-
-      memcpy(prop_y_mean, train_y_mean, (uint64_t)nl * sizeof(double));
     }
 
-    free(perm);
-    free(full_col_sum); free(full_XtX); free(full_XtY); free(full_y_sum); free(full_label_counts);
-    free(fold_col_sum); free(fold_XtX); free(fold_XtY); free(fold_y_sum); free(fold_label_counts);
-    free(train_gram); free(train_xty); free(train_col_mean); free(train_y_mean); free(prop_y_mean);
-    free(sbuf); free(val_codes_buf);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-overflow"
+    if (oof_heaps) {
+      for (int64_t i = 0; i < n; i++) {
+        int64_t dst = i * k;
+        int64_t cnt = oof_hcounts[i];
+        tk_rvec_t h = { .a = oof_heaps + dst, .m = (size_t)k, .n = (size_t)cnt };
+        tk_rvec_desc(&h, 0, h.n);
+        for (int64_t j = 0; j < cnt; j++) {
+          oof_nbr->a[dst + j] = h.a[j].i;
+          oof_sco->a[dst + j] = h.a[j].d;
+        }
+      }
+    }
+#pragma GCC diagnostic pop
+    free(oof_heaps); free(oof_hcounts);
+    free(perm); free(full_col_sum); free(full_XtX); free(full_XtY);
+    free(full_y_sum); free(full_label_counts);
+    free(fold_col_sum); free(fold_XtX); free(fold_y_sum); free(fold_label_counts);
+    free(train_gram); free(train_col_mean); free(train_y_mean); free(val_codes_buf);
+    free(fold_XtY); free(prop_y_mean); free(sbuf);
+    free(csc_off); free(csc_rows); free(full_xty_chunk); free(fold_xty_chunk);
+    free(W_chunk); free(intercept_chunk); free(sbuf_chunk);
   }
 
 push_results:
   if (!dense) {
-    if (have_k && do_transform) {
+    if (have_k && (do_transform || do_gather)) {
       lua_pushvalue(L, oof_off_idx);
       lua_pushvalue(L, oof_nbr_idx);
       lua_pushvalue(L, oof_sco_idx);
-      lua_pushvalue(L, oof_tr_idx);
+      lua_pushvalue(L, do_gather ? gather_sco_idx : oof_tr_idx);
       return 4;
     }
     if (have_k) {
@@ -1450,7 +1733,7 @@ push_results:
       lua_pushvalue(L, oof_sco_idx);
       return 3;
     }
-    lua_pushvalue(L, oof_tr_idx);
+    lua_pushvalue(L, do_gather ? gather_sco_idx : oof_tr_idx);
     return 1;
   } else {
     lua_pushvalue(L, oof_dense_idx);
