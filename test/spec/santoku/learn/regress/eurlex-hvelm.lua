@@ -15,7 +15,7 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
-local SCALE = 2
+local SCALE = 2.0
 
 local cfg = {
   data = {
@@ -298,7 +298,7 @@ test("eurlex-hvelm", function ()
   local ts_sorted_nbr, ts_sorted_sc = csr.sort_csr_desc(ts_short_off, ts_short_nbr, ts_short_scores)
   local tr_short_scores_is = ridge_obj:regress(r1_th, train.n, tr_short_off, tr_short_nbr)
   local tr_sorted_nbr_is = csr.sort_csr_desc(tr_short_off, tr_short_nbr, tr_short_scores_is)
-  local d2_tr_oracle = eval_oracle(tr_short_off, tr_sorted_nbr_is, train_label_off, train_label_nbr)
+  d2_tr_oracle = eval_oracle(tr_short_off, tr_sorted_nbr_is, train_label_off, train_label_nbr) -- luacheck: ignore
   tr_short_scores_is = nil; tr_sorted_nbr_is = nil -- luacheck: ignore
   local tr_short_scores = eval.gather_dense({
     scores = oof_transform, n_labels = n_labels,
@@ -310,15 +310,15 @@ test("eurlex-hvelm", function ()
   local tr_sorted_nbr, tr_sorted_sc = csr.sort_csr_desc(tr_short_off, tr_short_nbr, tr_short_scores)
   str.printf("[OVA] scored %s\n", sw())
 
-  local d2_oof_oracle = eval_oracle(tr_short_off, tr_sorted_nbr, train_label_off, train_label_nbr)
-  local d2_dv_oracle = eval_oracle(dv_short_off, dv_sorted_nbr, dev_label_off, dev_label_nbr)
-  local d2_ts_oracle = eval_oracle(ts_short_off, ts_sorted_nbr, test_label_off, test_label_nbr)
+  d2_oof_oracle = eval_oracle(tr_short_off, tr_sorted_nbr, train_label_off, train_label_nbr) -- luacheck: ignore
+  d2_dv_oracle = eval_oracle(dv_short_off, dv_sorted_nbr, dev_label_off, dev_label_nbr) -- luacheck: ignore
+  d2_ts_oracle = eval_oracle(ts_short_off, ts_sorted_nbr, test_label_off, test_label_nbr) -- luacheck: ignore
   str.printf("[Tr Orc]  %s\n", fmt_metrics(d2_tr_oracle))
   str.printf("[Oo Orc] %s\n", fmt_metrics(d2_oof_oracle))
   str.printf("[Dv Orc]  %s\n", fmt_metrics(d2_dv_oracle))
   str.printf("[Ts Orc]  %s %s\n", fmt_metrics(d2_ts_oracle), sw())
 
-  local gfm2_dm, gfm2_tm, gfm2_p = run_gfm("GFM", cfg.gfm2,
+  gfm2_dm, gfm2_tm, gfm2_p = run_gfm("GFM", cfg.gfm2, -- luacheck: ignore
     tr_short_off, tr_sorted_nbr, tr_sorted_sc,
     dv_short_off, dv_sorted_nbr, dv_sorted_sc,
     ts_short_off, ts_sorted_nbr, ts_sorted_sc)
