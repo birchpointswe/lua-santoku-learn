@@ -18,22 +18,24 @@ io.stdout:setvbuf("line")
 local SCALE = 2
 
 local cfg = {
-  data = { max = nil },
-  hdc = { d = 8192*SCALE, ngram = 7 },
-  elm = {
-    mode = nil,
-    -- n_hidden = 8192*SCALE, -- not used when mode=nil
+  data = {
+    max = nil
+  },
+  hdc = {
+    d = 8192*SCALE,
+    ngram = 7
+  },
+  ridge = {
     lambda = 3.8814e-05, --{ def = 3.8814e-05 },
     propensity_a = 0.41, --{ def = 0.41 },
     propensity_b = 0.18, --{ def = 0.18 },
     search_trials = 0,
   },
-  -- emb = {
-  --   k = 256,
-  --   n_landmarks = 4096,
-  --   n_dims = 1024,
-  --   binarize = "sign",
-  -- },
+  emb = {
+    k = 256,
+    n_dims = 1024,
+    binarize = "sign",
+  },
   gfm1 = { beta = { def = 1.0 }, search_trials = 400, k = 256 },
   gfm2 = { beta = { def = 1.0 }, search_trials = 400, k = 256 },
   oof = { n_folds = 20 },
@@ -231,7 +233,7 @@ test("eurlex-hvelm", function ()
 
   str.printf("\n[#1] BNS-HDC + OVA Ridge + Topk GFM\n")
   local r1_enc, ridge_obj, elm_params, _, r1_th, r1_dvh = optimize.ridge({
-    elm = cfg.elm.mode, n_hidden = cfg.elm.n_hidden,
+    elm = cfg.ridge.mode, n_hidden = cfg.ridge.n_hidden,
     codes = train_h, n_input_dims = hdc_out_d,
     n_samples = train.n,
     n_labels = n_labels,
@@ -239,8 +241,8 @@ test("eurlex-hvelm", function ()
     expected_offsets = train_label_off, expected_neighbors = train_label_nbr,
     val_codes = dev_h, val_n_samples = dev.n,
     val_expected_offsets = dev_label_off, val_expected_neighbors = dev_label_nbr,
-    lambda = cfg.elm.lambda, propensity_a = cfg.elm.propensity_a, propensity_b = cfg.elm.propensity_b,
-    k = k1, search_trials = cfg.elm.search_trials,
+    lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a, propensity_b = cfg.ridge.propensity_b,
+    k = k1, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
   local r1_tsh = r1_enc and r1_enc:encode({ codes = test_h, n_samples = test_set.n }) or test_h
@@ -280,6 +282,9 @@ test("eurlex-hvelm", function ()
   d1_dv_off = nil; d1_dv_nbr = nil; d1_dv_sco = nil -- luacheck: ignore
   d1_ts_off = nil; d1_ts_nbr = nil; d1_ts_sco = nil -- luacheck: ignore
   collectgarbage("collect")
+
+  local d2_tr_oracle, d2_oof_oracle, d2_dv_oracle, d2_ts_oracle
+  local gfm2_dm, gfm2_tm, gfm2_p
 
   if cfg.emb then
 
@@ -326,7 +331,7 @@ test("eurlex-hvelm", function ()
 
   str.printf("\n#1: BNS-HDC + OVA Ridge + Topk GFM\n")
   if elm_params.elm then
-    str.printf("  %-10s mode=%s input=%d hidden=%d\n", "ELM", elm_params.elm, hdc_out_d, cfg.elm.n_hidden)
+    str.printf("  %-10s mode=%s input=%d hidden=%d\n", "ELM", elm_params.elm, hdc_out_d, cfg.ridge.n_hidden)
   end
   str.printf("  %-10s lambda=%.4e pa=%.4f pb=%.4f\n",
     "Ridge", elm_params.lambda, elm_params.propensity_a, elm_params.propensity_b)
@@ -341,7 +346,7 @@ test("eurlex-hvelm", function ()
   if cfg.emb then
   str.printf("\n#2: BNS-HDC + Truncate + ITQ + ANN Shortlist + OVA Ridge + Topk GFM\n")
   if elm_params.elm then
-    str.printf("  %-10s mode=%s input=%d hidden=%d\n", "ELM", elm_params.elm, hdc_out_d, cfg.elm.n_hidden)
+    str.printf("  %-10s mode=%s input=%d hidden=%d\n", "ELM", elm_params.elm, hdc_out_d, cfg.ridge.n_hidden)
   end
   str.printf("  %-10s lambda=%.4e pa=%.4f pb=%.4f\n",
     "Ridge", elm_params.lambda, elm_params.propensity_a, elm_params.propensity_b)
