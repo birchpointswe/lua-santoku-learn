@@ -629,12 +629,14 @@ static int tm_csr_seq_select (lua_State *L)
   tk_ivec_t *tokens = tk_ivec_peek(L, 1, "tokens");
   tk_ivec_t *offsets = tk_ivec_peek(L, 2, "offsets");
   tk_ivec_t *keep_ids = tk_ivec_peek(L, 3, "keep_ids");
+  tk_dvec_t *values = tk_dvec_peekopt(L, 4);
   tk_iumap_t *inverse = tk_iumap_from_ivec(L, keep_ids);
   if (!inverse) return luaL_error(L, "seq_select: allocation failed");
   uint64_t n_docs = offsets->n - 1;
   tk_ivec_t *new_tok = tk_ivec_create(L, tokens->n, 0, 0);
   tk_ivec_t *new_off = tk_ivec_create(L, n_docs + 1, 0, 0);
   new_off->n = n_docs + 1;
+  tk_dvec_t *new_val = values ? tk_dvec_create(L, tokens->n, 0, 0) : NULL;
   new_off->a[0] = 0;
   uint64_t pos = 0;
   for (uint64_t d = 0; d < n_docs; d++) {
@@ -643,13 +645,17 @@ static int tm_csr_seq_select (lua_State *L)
     for (int64_t j = start; j < end; j++) {
       int64_t new_id = tk_iumap_get_or(inverse, tokens->a[j], -1);
       if (new_id < 0) continue;
-      new_tok->a[pos++] = new_id;
+      new_tok->a[pos] = new_id;
+      if (new_val)
+        new_val->a[pos] = values->a[j];
+      pos++;
     }
     new_off->a[d + 1] = (int64_t)pos;
   }
   new_tok->n = pos;
+  if (new_val) new_val->n = pos;
   tk_iumap_destroy(inverse);
-  return 2;
+  return values ? 3 : 2;
 }
 
 static int tm_csr_propagate (lua_State *L)

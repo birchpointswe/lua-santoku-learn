@@ -785,264 +785,72 @@ M.ridge = function (args)
   local ridge = require("santoku.learn.ridge")
   local dense = args.targets ~= nil
 
-  local elm_mod, encoder, elm_modes, elm_sweep
-  local train_h, val_h, train_raw, val_raw
-  local n_hidden = args.n_hidden
-  if args.elm then
-    elm_mod = require("santoku.learn.elm")
-    elm_modes = type(args.elm) == "string" and { args.elm } or args.elm
-    elm_sweep = #elm_modes > 1
-    local ca = {
-      mode = elm_sweep and "linear" or elm_modes[1],
-      n_samples = args.n_samples, n_hidden = n_hidden,
-    }
-    if args.csc_offsets then
-      ca.csc_offsets = args.csc_offsets; ca.csc_indices = args.csc_indices
-      ca.n_tokens = args.n_tokens; ca.feature_weights = args.feature_weights
-    else
-      ca.codes = args.codes; ca.n_input_dims = args.n_input_dims
-    end
-    local h_out
-    encoder, h_out = elm_mod.create(ca)
-    local va = { n_samples = args.val_n_samples }
-    if args.val_csc_offsets then
-      va.csc_offsets = args.val_csc_offsets; va.csc_indices = args.val_csc_indices
-    elseif args.val_codes then
-      va.codes = args.val_codes
-    end
-    local vh_out = encoder:encode(va)
-    if elm_sweep then
-      train_raw, val_raw = h_out, vh_out
-    else
-      train_h, val_h = h_out, vh_out
-    end
+  local n_dims = args.n_dims or args.n_input_dims
+  local pre_mean = args.pre_mean
+  local pre_istd = args.pre_istd
+  local std = pre_mean and { pre_mean = pre_mean, pre_istd = pre_istd } or nil
+  if pre_mean and args.val_codes then
+    args.val_codes:mtx_standardize(n_dims, pre_mean, pre_istd)
   end
-
-  local codes = train_h or args.codes
-  local val_codes = val_h or args.val_codes
-  local n_dims = n_hidden or args.n_dims or args.n_input_dims
-
-  local param_names
+  local ga = {
+    n_samples = args.n_samples, n_dims = n_dims,
+    XtX = args.XtX, XtY = args.XtY,
+    col_mean = args.col_mean, y_mean = args.y_mean,
+  }
   if dense then
-    param_names = { "lambda" }
+    ga.n_targets = err.assert(args.n_targets, "n_targets required for dense ridge")
   else
-    param_names = { "lambda", "propensity_a", "propensity_b" }
+    ga.n_labels = args.n_labels
+    ga.label_counts = args.label_counts
   end
+  local gram = ridge.prepare(ga)
+  local param_names
+  if dense then param_names = { "lambda" }
+  else param_names = { "lambda", "propensity_a", "propensity_b" } end
   args.lambda = spec_defaults(args.lambda, { min = 0, max = 4, def = 1.0 })
   args.propensity_a = spec_defaults(args.propensity_a, { min = 0, max = 4.0, def = 0.5 })
   args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 8.0, def = 1.5 })
   local samplers = build_samplers(args, param_names)
   local k = not dense and (args.k or 32) or nil
-  local each_cb = args.each
-  local transform_buf
-  local score_fn
-  if dense then
-    score_fn = args.score_fn or function (r, data)
-      transform_buf = r:regress(data.codes, data.n_samples, transform_buf)
-      local ra = evaluator.regression_accuracy(transform_buf, data.targets)
-      return -ra.mean, { mae = ra.mean, nmae = ra.nmae }
-    end
-  else
-    score_fn = args.score_fn or function (ret) return ret.oracle.micro_f1 end
-  end
-  local n_targets = dense and err.assert(args.n_targets, "n_targets required for dense ridge") or nil
-
-  if not elm_sweep and (all_fixed(samplers) or (args.search_trials or 30) <= 0) then
+  if all_fixed(samplers) or (args.search_trials or 30) <= 0 then
     local params = sample_params(samplers, param_names, nil, true)
-    local sa = {
-      n_samples = args.n_samples, n_dims = n_dims, codes = codes,
-      lambda = params.lambda,
-    }
-    if dense then
-      sa.targets = args.targets; sa.n_targets = n_targets
-    else
-      sa.n_labels = args.n_labels; sa.label_offsets = args.label_offsets
-      sa.label_neighbors = args.label_neighbors
-      sa.propensity_a = params.propensity_a; sa.propensity_b = params.propensity_b
-    end
-    local r = ridge.solve(sa)
-    if encoder then
-      params.elm = elm_modes[1]
-    end
-    return encoder, r, params, nil, train_h or codes, val_h or val_codes
-  end
-
-  local function make_ga (c)
-    if dense then
-      return { n_samples = args.n_samples, n_dims = n_dims, n_targets = n_targets,
-               codes = c, targets = args.targets }
-    else
-      return { n_samples = args.n_samples, n_labels = args.n_labels, n_dims = n_dims,
-               codes = c, label_offsets = args.label_offsets,
-               label_neighbors = args.label_neighbors }
-    end
-  end
-
-  if elm_sweep then
-    local fast_val = not dense and not args.score_fn
-    local grams = {}
-    local val_activated = {}
-    local h_buf, vh_buf
-    for i, mode in ipairs(elm_modes) do
-      h_buf = elm_mod.activate(train_raw, args.n_samples, n_hidden, mode, h_buf)
-      vh_buf = elm_mod.activate(val_raw, args.val_n_samples, n_hidden, mode, vh_buf)
-      grams[i] = ridge.prepare(make_ga(h_buf))
-      if fast_val then
-        grams[i]:prepare(vh_buf, args.val_n_samples)
-      else
-        val_activated[i] = elm_mod.activate(val_raw, args.val_n_samples, n_hidden, mode)
-      end
-    end
-    h_buf = nil -- luacheck: ignore
-    if fast_val then vh_buf = nil end -- luacheck: ignore
-    collectgarbage("collect")
-    local lbl_bufs = {}
-    for i = 1, #elm_modes do lbl_bufs[i] = {} end
-    local wb, ib
-    local function trial_fn (params, info)
-      local bs, bi, bm, br = -num.huge, 1, nil, nil
-      for i = 1, #elm_modes do
-        local sc, mt, res
-        if fast_val and not info.is_final then
-          local po, pn, ps = grams[i]:label({
-            lambda = params.lambda, propensity_a = params.propensity_a,
-            propensity_b = params.propensity_b, k = k,
-            off_buf = lbl_bufs[i][1], nbr_buf = lbl_bufs[i][2], sco_buf = lbl_bufs[i][3],
-          })
-          lbl_bufs[i] = { po, pn, ps }
-          local _, oracle = evaluator.retrieval_ks({
-            pred_offsets = po, pred_neighbors = pn,
-            expected_offsets = args.val_expected_offsets,
-            expected_neighbors = args.val_expected_neighbors,
-
-          })
-          mt = { oracle = oracle }
-          sc = score_fn(mt)
-        else
-          local r
-          local cw, ci = not info.is_final and wb or nil, not info.is_final and ib or nil
-          r, wb, ib = ridge.create({
-            gram = grams[i], lambda = params.lambda,
-            propensity_a = not dense and params.propensity_a or nil,
-            propensity_b = not dense and params.propensity_b or nil,
-            w_buf = cw, intercept_buf = ci,
-          })
-          local vh = val_activated[i] or elm_mod.activate(val_raw, args.val_n_samples, n_hidden, elm_modes[i])
-          if dense then
-            sc, mt = score_fn(r, { codes = vh, n_samples = args.val_n_samples, targets = args.val_targets })
-          else
-            local sd = { codes = vh, n_samples = args.val_n_samples }
-            if args.score_fn then
-              mt = {}
-              sc = score_fn(mt, r, sd)
-            else
-              local po, pn, ps = r:label(vh, args.val_n_samples, k,
-                lbl_bufs[i][1], lbl_bufs[i][2], lbl_bufs[i][3])
-              lbl_bufs[i] = { po, pn, ps }
-              local _, oracle = evaluator.retrieval_ks({
-                pred_offsets = po, pred_neighbors = pn,
-                expected_offsets = args.val_expected_offsets,
-                expected_neighbors = args.val_expected_neighbors,
-              })
-              mt = { oracle = oracle }
-              sc = score_fn(mt)
-            end
-          end
-          res = info.is_final and r or nil
-        end
-        if sc > bs then bs, bi, bm, br = sc, i, mt, res end
-      end
-      params.elm = elm_modes[bi]
-      return bs, bm, br
-    end
-    local result, best_params, best_metrics = search({
-      param_names = param_names, samplers = samplers,
-      trials = args.search_trials or 30, trial_fn = trial_fn, each = each_cb,
-    })
-    local best_mode = best_params.elm
-    encoder:set_mode(best_mode)
-    train_h = elm_mod.activate(train_raw, args.n_samples, n_hidden, best_mode)
-    val_h = elm_mod.activate(val_raw, args.val_n_samples, n_hidden, best_mode)
-    return encoder, result, best_params, best_metrics, train_h, val_h
-  end
-
-  local gram = ridge.prepare(make_ga(codes))
-  local search_data
-  if dense then
-    search_data = { codes = val_codes, n_samples = args.val_n_samples, targets = args.val_targets }
-  else
-    search_data = {
-      codes = val_codes, n_samples = args.val_n_samples,
-      expected_offsets = args.val_expected_offsets, expected_neighbors = args.val_expected_neighbors,
-    }
-  end
-  local fast_val = not dense and not args.score_fn
-  if fast_val then
-    gram:prepare(search_data.codes, search_data.n_samples)
-  end
-  local wb, ib
-  local lbl_off_buf, lbl_nbr_buf, lbl_sco_buf
-  local function trial_fn (params, info)
-    if fast_val and not info.is_final then
-      local pred_off, pred_nbr, pred_sco = gram:label({
-        lambda = params.lambda,
-        propensity_a = params.propensity_a,
-        propensity_b = params.propensity_b,
-        k = k,
-        off_buf = lbl_off_buf, nbr_buf = lbl_nbr_buf, sco_buf = lbl_sco_buf,
-      })
-      lbl_off_buf, lbl_nbr_buf, lbl_sco_buf = pred_off, pred_nbr, pred_sco
-      local _, oracle = evaluator.retrieval_ks({
-        pred_offsets = pred_off,
-        pred_neighbors = pred_nbr,
-        expected_offsets = search_data.expected_offsets,
-        expected_neighbors = search_data.expected_neighbors,
-      })
-      local ret = { oracle = oracle }
-      return score_fn(ret), ret, nil
-    end
-    local r
-    r, wb, ib = ridge.create({
-      gram = gram,
-      lambda = params.lambda,
+    local r = ridge.create({
+      gram = gram, lambda = params.lambda,
       propensity_a = not dense and params.propensity_a or nil,
       propensity_b = not dense and params.propensity_b or nil,
-      w_buf = wb, intercept_buf = ib,
     })
+    return nil, r, params, nil, nil, args.val_codes, std
+  end
+  gram:prepare(args.val_codes, args.val_n_samples)
+  local lbl_off_buf, lbl_nbr_buf, lbl_sco_buf, regress_buf
+  local function trial_fn (params)
     if dense then
-      local score, metrics = score_fn(r, search_data)
-      return score, metrics, info.is_final and r or nil
-    else
-      if args.score_fn then
-        local ret = {}
-        return score_fn(ret, r, search_data), ret, info.is_final and r or nil
-      else
-        local pred_off, pred_nbr, pred_sco = r:label(
-          search_data.codes, search_data.n_samples, k,
-          lbl_off_buf, lbl_nbr_buf, lbl_sco_buf)
-        lbl_off_buf, lbl_nbr_buf, lbl_sco_buf = pred_off, pred_nbr, pred_sco
-        local _, oracle = evaluator.retrieval_ks({
-          pred_offsets = pred_off,
-          pred_neighbors = pred_nbr,
-          expected_offsets = search_data.expected_offsets,
-          expected_neighbors = search_data.expected_neighbors,
-        })
-        local ret = { oracle = oracle }
-        return score_fn(ret), ret, info.is_final and r or nil
-      end
+      regress_buf = gram:regress(params.lambda, nil, nil, regress_buf)
+      local ra = evaluator.regression_accuracy(regress_buf, args.val_targets)
+      return -ra.mean, { mae = ra.mean, nmae = ra.nmae }
     end
+    local po, pn, ps = gram:label(params.lambda, k,
+      params.propensity_a, params.propensity_b,
+      lbl_off_buf, lbl_nbr_buf, lbl_sco_buf, args.label_block)
+    lbl_off_buf, lbl_nbr_buf, lbl_sco_buf = po, pn, ps
+    local _, oracle = evaluator.retrieval_ks({
+      pred_offsets = po, pred_neighbors = pn,
+      expected_offsets = args.val_expected_offsets,
+      expected_neighbors = args.val_expected_neighbors,
+    })
+    return oracle.micro_f1, { oracle = oracle }
   end
-  local result, best_params, best_metrics = search({
-    param_names = param_names,
-    samplers = samplers,
-    trials = args.search_trials or 30,
-    trial_fn = trial_fn,
-    each = each_cb,
+  local _, best_params, best_metrics = search({
+    param_names = param_names, samplers = samplers,
+    trials = args.search_trials or 30, trial_fn = trial_fn, each = args.each,
+    skip_final = true,
   })
-  if encoder then
-    best_params.elm = elm_modes[1]
-  end
-  return encoder, result, best_params, best_metrics, train_h or codes, val_h or val_codes
+  local r = ridge.create({
+    gram = gram, lambda = best_params.lambda,
+    propensity_a = not dense and best_params.propensity_a or nil,
+    propensity_b = not dense and best_params.propensity_b or nil,
+  })
+  return nil, r, best_params, best_metrics, nil, args.val_codes, std
 end
 
 
