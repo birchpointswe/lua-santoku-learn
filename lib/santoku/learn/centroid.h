@@ -129,6 +129,21 @@ static inline void tk_centroid_add_member (
   }
 }
 
+static inline void tk_centroid_add_member_batch (
+  tk_centroid_t *centroid,
+  uint64_t item_idx,
+  const char *member_code,
+  uint64_t code_chunks
+) {
+  int32_t *votes = centroid->votes + item_idx * centroid->n_dims;
+  for (uint64_t chunk = 0; chunk < code_chunks; chunk++) {
+    uint8_t byte = ((const uint8_t *)member_code)[chunk];
+    int32_t *vp = votes + chunk * TK_CVEC_BITS;
+    for (uint64_t b = 0; b < TK_CVEC_BITS; b++)
+      vp[b] += ((byte >> b) & 1) * 2 - 1;
+  }
+}
+
 static inline bool tk_centroid_merge (
   tk_centroid_t *dst,
   tk_centroid_t *src

@@ -1,13 +1,13 @@
 local ann = require("santoku.learn.ann")
 local csr = require("santoku.learn.csr")
+local cvec = require("santoku.cvec")
 local ds = require("santoku.learn.dataset")
 local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
 local hdc = require("santoku.learn.hdc")
 local ivec = require("santoku.ivec")
 local optimize = require("santoku.learn.optimize")
-local quantizer = require("santoku.learn.quantizer")
-local ridge = require("santoku.learn.ridge")
+local spectral = require("santoku.learn.spectral")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local util = require("santoku.learn.util")
@@ -15,30 +15,18 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
-local SCALE = 2.0
-
 local cfg = {
-  data = {
-    max = nil
-  },
-  hdc = {
-    d = 8192*SCALE,
-    ngram = 7
-  },
+  data = { max = nil },
+  hdc = { d = 2^18, ngram = 7, ann_bits = 1024 },
+  emb = { n_landmarks = 8192, trace_tol = 0.01, cholesky = true, n_dims = nil, k = 256 },
   ridge = {
-    lambda = 3.8814e-05, --{ def = 3.8814e-05 },
-    propensity_a = 0.41, --{ def = 0.41 },
-    propensity_b = 0.18, --{ def = 0.18 },
-    search_trials = 0,
+    lambda = { def = 3.8814e-05 },
+    propensity_a = { def = 0.41 },
+    propensity_b = { def = 0.18 },
+    search_trials = 400,
   },
-  emb = {
-    k = 256,
-    n_dims = 1024,
-    binarize = "sign",
-  },
-  gfm1 = { beta = { def = 1.0 }, search_trials = 400, k = 256 },
+  gfm1 = { beta = { def = 1.039 }, search_trials = 400, k = 256 },
   gfm2 = { beta = { def = 1.0 }, search_trials = 400, k = 256 },
-  oof = { n_folds = 20 },
 }
 
 test("eurlex-hvelm", function ()
@@ -143,75 +131,54 @@ test("eurlex-hvelm", function ()
     return dm, tm, gfm_p
   end
 
-  local ngram_map, train_tok, n_hdc_tokens = hdc.tokenize({
+  local ngram_map, set_bits, n_hdc_tokens = hdc.tokenize({
     texts = train.problems, hdc_ngram = cfg.hdc.ngram, n_samples = train.n,
   })
-  str.printf("[HDC] d=%d ngram=%d tokens=%d %s\n", cfg.hdc.d, cfg.hdc.ngram, n_hdc_tokens, sw())
-  local bns_ids, bns_scores = train_tok:bits_top_bns(
+  local bns_ids, bns_scores = set_bits:bits_top_bns(
     train.solutions, train.n, n_hdc_tokens, n_labels)
-  train_tok = nil -- luacheck: ignore
+  str.printf("[Tokenize] ngram=%d tokens=%d bns=%d %s\n",
+    cfg.hdc.ngram, n_hdc_tokens, bns_ids:size(), sw())
+  set_bits = nil -- luacheck: ignore
   collectgarbage("collect")
-  str.printf("[BNS] selected=%d %s\n", bns_ids:size(), sw())
-  local hdc_enc, train_h = hdc.create({
+
+  str.printf("[HDC] Encoding d=%d\n", cfg.hdc.d)
+  local hdc_enc, train_cvec = hdc.create({
     texts = train.problems, n_samples = train.n,
     d = cfg.hdc.d, hdc_ngram = cfg.hdc.ngram,
     weight_map = ngram_map,
-    weight_ids = bns_ids,
-    weights = bns_scores,
+    weight_ids = bns_ids, weights = bns_scores,
   })
-  ngram_map = nil; bns_ids = nil; bns_scores = nil -- luacheck: ignore
-  local dev_h = hdc_enc:encode({ texts = dev.problems, n_samples = dev.n })
-  local test_h = hdc_enc:encode({ texts = test_set.problems, n_samples = test_set.n })
-  local hdc_out_d = hdc_enc:out_d()
-  str.printf("[HDC] encoded %s\n", sw())
-  hdc_enc = nil -- luacheck: ignore
+  local dev_cvec = hdc_enc:encode({ texts = dev.problems, n_samples = dev.n })
+  local test_cvec = hdc_enc:encode({ texts = test_set.problems, n_samples = test_set.n })
+  str.printf("[HDC] d=%d encoded %s\n", cfg.hdc.d, sw())
 
-  local dv_short_off, dv_short_nbr, ts_short_off, ts_short_nbr, tr_short_off, tr_short_nbr
-
-  if cfg.emb then
-
-  str.printf("\n[Truncate]\n")
-  local trunc_d = cfg.emb.n_dims
-  local keep = ivec.create(trunc_d):fill_indices()
-  local doc_embs = train_h:mtx_select(keep, nil, hdc_out_d)
-  local dev_embs = dev_h:mtx_select(keep, nil, hdc_out_d)
-  local test_embs = test_h:mtx_select(keep, nil, hdc_out_d)
-  str.printf("[Truncate] dims=%d %s\n", trunc_d, sw())
-
-  local post_n_bits, post_train_bin, binarize
-  if cfg.emb.binarize == "sign" then
-    post_train_bin, post_n_bits = doc_embs:mtx_sign(trunc_d)
-    binarize = function (embs) return (embs:mtx_sign(trunc_d)) end
-    str.printf("[Sign] bits=%d %s\n", post_n_bits, sw())
-  else
-    local post_itq = quantizer.create({
-      mode = "itq", raw_codes = doc_embs, n_samples = train.n,
-    })
-    post_n_bits = post_itq:n_bits()
-    post_train_bin = post_itq:encode(doc_embs)
-    binarize = function (embs) return post_itq:encode(embs) end
-    str.printf("[ITQ] bits=%d %s\n", post_n_bits, sw())
+  str.printf("\n[Shortlist] ann_bits=%d\n", cfg.hdc.ann_bits)
+  local ann_bits = cfg.hdc.ann_bits
+  local prefix_ids = ivec.create(ann_bits):fill_indices()
+  local function cvec_prefix(src)
+    local dst = cvec.create()
+    src:bits_select(prefix_ids, nil, cfg.hdc.d, dst)
+    return dst
   end
-  local doc_ann = ann.create({ features = post_n_bits })
+  local train_ann_cvec = cvec_prefix(train_cvec)
+  local doc_ann = ann.create({ features = ann_bits })
   local doc_ids = ivec.create(train.n):fill_indices()
-  doc_ann:add(post_train_bin, doc_ids)
-  post_train_bin = nil -- luacheck: ignore
+  doc_ann:add(train_ann_cvec, doc_ids)
   str.printf("[ANN] indexed %s\n", sw())
 
   local K = cfg.emb.k
-  local function shortlist(embs, n)
-    local bin = binarize(embs)
-    local hood_ids, ann_hoods = doc_ann:neighborhoods_by_vecs(bin, K)
-    local a_off, a_nbr = ann_hoods:to_csr(post_n_bits)
-    local union_bits = csr.label_union(
-      a_off, a_nbr, hood_ids, train_label_off, train_label_nbr, n_labels)
+  local function shortlist(full_bits, n)
+    local trunc = cvec_prefix(full_bits)
+    local hood_ids, ann_hoods = doc_ann:neighborhoods_by_vecs(trunc, K)
+    local a_off, a_nbr = ann_hoods:to_csr(ann_bits)
+    local union_bits = csr.label_union(a_off, a_nbr, hood_ids, train_label_off, train_label_nbr, n_labels)
     local sl_off, sl_nbr = union_bits:bits_to_csr(n, n_labels)
     return sl_off, sl_nbr
   end
-  dv_short_off, dv_short_nbr = shortlist(dev_embs, dev.n)
-  ts_short_off, ts_short_nbr = shortlist(test_embs, test_set.n)
-  tr_short_off, tr_short_nbr = shortlist(doc_embs, train.n)
-  doc_embs = nil -- luacheck: ignore
+  local dv_short_off, dv_short_nbr = shortlist(dev_cvec, dev.n)
+  local ts_short_off, ts_short_nbr = shortlist(test_cvec, test_set.n)
+  local tr_short_off, tr_short_nbr = shortlist(train_cvec, train.n)
+  train_ann_cvec = nil -- luacheck: ignore
   collectgarbage("collect")
   str.printf("[Shortlist] built %s\n", sw())
 
@@ -229,92 +196,73 @@ test("eurlex-hvelm", function ()
   shortlist_recall("Dev", dv_short_off, dv_short_nbr, dev_label_off, dev_label_nbr, dev.n)
   shortlist_recall("Test", ts_short_off, ts_short_nbr, test_label_off, test_label_nbr, test_set.n)
 
-  end -- cfg.emb
+  str.printf("[Spectral] Cholesky trace_tol=%s\n", tostring(cfg.emb.trace_tol))
+  local train_codes, _, sp_enc, _, xtx, xty, col_mean, y_mean, label_counts, pre_mean, pre_istd =
+    spectral.encode({
+      bits = train_cvec, n_samples = train.n, d_bits = cfg.hdc.d,
+      n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
+      cholesky = cfg.emb.cholesky, n_dims = cfg.emb.n_dims,
+      label_offsets = train_label_off, label_neighbors = train_label_nbr, n_labels = n_labels,
+    })
+  local emb_d = sp_enc:dims()
+  local dev_codes = sp_enc:encode(dev_cvec, dev.n)
+  local test_codes = sp_enc:encode(test_cvec, test_set.n)
+  str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
 
-  str.printf("\n[#1] BNS-HDC + OVA Ridge + Topk GFM\n")
-  local r1_enc, ridge_obj, elm_params, _, r1_th, r1_dvh = optimize.ridge({
-    elm = cfg.ridge.mode, n_hidden = cfg.ridge.n_hidden,
-    codes = train_h, n_input_dims = hdc_out_d,
-    n_samples = train.n,
-    n_labels = n_labels,
-    label_offsets = train_label_off, label_neighbors = train_label_nbr,
-    expected_offsets = train_label_off, expected_neighbors = train_label_nbr,
-    val_codes = dev_h, val_n_samples = dev.n,
+  str.printf("\n[#1] HDC + OVA Ridge + Topk GFM\n")
+  local _, ridge_obj, best_params, _, _, _, std = optimize.ridge({
+    XtX = xtx, XtY = xty, col_mean = col_mean, y_mean = y_mean,
+    label_counts = label_counts, pre_mean = pre_mean, pre_istd = pre_istd,
+    n_samples = train.n, n_dims = emb_d, n_labels = n_labels,
+    val_codes = dev_codes, val_n_samples = dev.n,
     val_expected_offsets = dev_label_off, val_expected_neighbors = dev_label_nbr,
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a, propensity_b = cfg.ridge.propensity_b,
     k = k1, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
-  local r1_tsh = r1_enc and r1_enc:encode({ codes = test_h, n_samples = test_set.n }) or test_h
-  local r1_n_dims = r1_enc and r1_enc:out_d() or hdc_out_d
-  train_h = nil; dev_h = nil; test_h = nil; r1_enc = nil -- luacheck: ignore
-  collectgarbage("collect")
-  str.printf("[Ridge] mode=%s lambda=%.4e pa=%.4f pb=%.4f %s\n",
-    elm_params.elm or "none", elm_params.lambda, elm_params.propensity_a, elm_params.propensity_b, sw())
-  local oof_off, oof_nbr, oof_sco, oof_transform = ridge.oof({
-    codes = r1_th, n_samples = train.n, n_dims = r1_n_dims,
-    n_labels = n_labels,
-    label_offsets = train_label_off, label_neighbors = train_label_nbr,
-    lambda = elm_params.lambda, propensity_a = elm_params.propensity_a,
-    propensity_b = elm_params.propensity_b,
-    k = k1, n_folds = cfg.oof.n_folds, transform = cfg.emb and true,
-  })
-  str.printf("[OOF] %d-fold %s\n", cfg.oof.n_folds, sw())
-  local d1_tr_off, d1_tr_nbr = ridge_obj:label(r1_th, train.n, k1)
-  local d1_dv_off, d1_dv_nbr, d1_dv_sco = ridge_obj:label(r1_dvh, dev.n, k1)
-  local d1_ts_off, d1_ts_nbr, d1_ts_sco = ridge_obj:label(r1_tsh, test_set.n, k1)
+  train_codes:mtx_standardize(emb_d, std.pre_mean, std.pre_istd)
+  test_codes:mtx_standardize(emb_d, std.pre_mean, std.pre_istd)
+  str.printf("[Ridge] lambda=%.4e pa=%.4f pb=%.4f %s\n",
+    best_params.lambda, best_params.propensity_a, best_params.propensity_b, sw())
+
+  local d1_dv_off, d1_dv_nbr, d1_dv_sco = ridge_obj:label(dev_codes, dev.n, k1)
+  local d1_ts_off, d1_ts_nbr, d1_ts_sco = ridge_obj:label(test_codes, test_set.n, k1)
+  local d1_tr_off, d1_tr_nbr, d1_tr_sco = ridge_obj:label(train_codes, train.n, k1)
 
   local d1_tr_oracle = eval_oracle(d1_tr_off, d1_tr_nbr, train_label_off, train_label_nbr)
-  local d1_oof_oracle = eval_oracle(oof_off, oof_nbr, train_label_off, train_label_nbr)
   local d1_dv_oracle = eval_oracle(d1_dv_off, d1_dv_nbr, dev_label_off, dev_label_nbr)
   local d1_ts_oracle = eval_oracle(d1_ts_off, d1_ts_nbr, test_label_off, test_label_nbr)
   str.printf("[Tr Orc]  %s\n", fmt_metrics(d1_tr_oracle))
-  str.printf("[Oo Orc] %s\n", fmt_metrics(d1_oof_oracle))
   str.printf("[Dv Orc]  %s\n", fmt_metrics(d1_dv_oracle))
   str.printf("[Ts Orc]  %s %s\n", fmt_metrics(d1_ts_oracle), sw())
 
   local gfm1_dm, gfm1_tm, gfm1_p = run_gfm("GFM", cfg.gfm1,
-    oof_off, oof_nbr, oof_sco,
+    d1_tr_off, d1_tr_nbr, d1_tr_sco,
     d1_dv_off, d1_dv_nbr, d1_dv_sco,
     d1_ts_off, d1_ts_nbr, d1_ts_sco)
 
-  oof_off = nil; oof_nbr = nil; oof_sco = nil -- luacheck: ignore
   d1_dv_off = nil; d1_dv_nbr = nil; d1_dv_sco = nil -- luacheck: ignore
   d1_ts_off = nil; d1_ts_nbr = nil; d1_ts_sco = nil -- luacheck: ignore
   collectgarbage("collect")
 
-  local d2_tr_oracle, d2_oof_oracle, d2_dv_oracle, d2_ts_oracle
+  local d2_tr_oracle, d2_dv_oracle, d2_ts_oracle
   local gfm2_dm, gfm2_tm, gfm2_p
 
-  if cfg.emb then
-
-  str.printf("\n[#2] BNS-HDC + Truncate + ITQ + ANN Shortlist + OVA Ridge + Topk GFM\n")
+  str.printf("\n[#2] HDC + ANN Shortlist + OVA Ridge + Topk GFM\n")
   str.printf("[OVA] Scoring shortlists\n")
-  local dv_short_scores = ridge_obj:regress(r1_dvh, dev.n, dv_short_off, dv_short_nbr)
-  r1_dvh = nil -- luacheck: ignore
+  local dv_short_scores = ridge_obj:regress(dev_codes, dev.n, dv_short_off, dv_short_nbr)
   local dv_sorted_nbr, dv_sorted_sc = csr.sort_csr_desc(dv_short_off, dv_short_nbr, dv_short_scores)
-  local ts_short_scores = ridge_obj:regress(r1_tsh, test_set.n, ts_short_off, ts_short_nbr)
-  r1_tsh = nil -- luacheck: ignore
+  local ts_short_scores = ridge_obj:regress(test_codes, test_set.n, ts_short_off, ts_short_nbr)
   local ts_sorted_nbr, ts_sorted_sc = csr.sort_csr_desc(ts_short_off, ts_short_nbr, ts_short_scores)
-  local tr_short_scores_is = ridge_obj:regress(r1_th, train.n, tr_short_off, tr_short_nbr)
-  local tr_sorted_nbr_is = csr.sort_csr_desc(tr_short_off, tr_short_nbr, tr_short_scores_is)
-  d2_tr_oracle = eval_oracle(tr_short_off, tr_sorted_nbr_is, train_label_off, train_label_nbr) -- luacheck: ignore
-  tr_short_scores_is = nil; tr_sorted_nbr_is = nil -- luacheck: ignore
-  local tr_short_scores = eval.gather_dense({
-    scores = oof_transform, n_labels = n_labels,
-    offsets = tr_short_off, neighbors = tr_short_nbr,
-  })
-  oof_transform = nil -- luacheck: ignore
-  r1_th = nil; ridge_obj = nil -- luacheck: ignore
+  local tr_short_scores = ridge_obj:regress(train_codes, train.n, tr_short_off, tr_short_nbr)
   collectgarbage("collect")
   local tr_sorted_nbr, tr_sorted_sc = csr.sort_csr_desc(tr_short_off, tr_short_nbr, tr_short_scores)
   str.printf("[OVA] scored %s\n", sw())
 
-  d2_oof_oracle = eval_oracle(tr_short_off, tr_sorted_nbr, train_label_off, train_label_nbr) -- luacheck: ignore
+  d2_tr_oracle = eval_oracle(tr_short_off, tr_sorted_nbr, train_label_off, train_label_nbr) -- luacheck: ignore
   d2_dv_oracle = eval_oracle(dv_short_off, dv_sorted_nbr, dev_label_off, dev_label_nbr) -- luacheck: ignore
   d2_ts_oracle = eval_oracle(ts_short_off, ts_sorted_nbr, test_label_off, test_label_nbr) -- luacheck: ignore
   str.printf("[Tr Orc]  %s\n", fmt_metrics(d2_tr_oracle))
-  str.printf("[Oo Orc] %s\n", fmt_metrics(d2_oof_oracle))
   str.printf("[Dv Orc]  %s\n", fmt_metrics(d2_dv_oracle))
   str.printf("[Ts Orc]  %s %s\n", fmt_metrics(d2_ts_oracle), sw())
 
@@ -323,41 +271,27 @@ test("eurlex-hvelm", function ()
     dv_short_off, dv_sorted_nbr, dv_sorted_sc,
     ts_short_off, ts_sorted_nbr, ts_sorted_sc)
 
-  else
-  oof_transform = nil; r1_dvh = nil; r1_tsh = nil -- luacheck: ignore
-  r1_th = nil; ridge_obj = nil -- luacheck: ignore
   collectgarbage("collect")
-  end -- cfg.emb
 
-  str.printf("\n#1: BNS-HDC + OVA Ridge + Topk GFM\n")
-  if elm_params.elm then
-    str.printf("  %-10s mode=%s input=%d hidden=%d\n", "ELM", elm_params.elm, hdc_out_d, cfg.ridge.n_hidden)
-  end
+  str.printf("\n#1: HDC + OVA Ridge + Topk GFM\n")
   str.printf("  %-10s lambda=%.4e pa=%.4f pb=%.4f\n",
-    "Ridge", elm_params.lambda, elm_params.propensity_a, elm_params.propensity_b)
+    "Ridge", best_params.lambda, best_params.propensity_a, best_params.propensity_b)
   str.printf("  %-10s beta=%.3f\n", "GFM", gfm1_p.beta)
   str.printf("  %-10s %s\n", "Tr Orc", fmt_metrics(d1_tr_oracle))
-  str.printf("  %-10s %s\n", "OOF Orc", fmt_metrics(d1_oof_oracle))
   str.printf("  %-10s %s\n", "Dv Orc", fmt_metrics(d1_dv_oracle))
   str.printf("  %-10s %s\n", "Ts Orc", fmt_metrics(d1_ts_oracle))
   str.printf("  %-10s %s\n", "Dv GFM", fmt_metrics(gfm1_dm))
   str.printf("  %-10s %s\n", "Ts GFM", fmt_metrics(gfm1_tm))
 
-  if cfg.emb then
-  str.printf("\n#2: BNS-HDC + Truncate + ITQ + ANN Shortlist + OVA Ridge + Topk GFM\n")
-  if elm_params.elm then
-    str.printf("  %-10s mode=%s input=%d hidden=%d\n", "ELM", elm_params.elm, hdc_out_d, cfg.ridge.n_hidden)
-  end
+  str.printf("\n#2: HDC + ANN Shortlist + OVA Ridge + Topk GFM\n")
   str.printf("  %-10s lambda=%.4e pa=%.4f pb=%.4f\n",
-    "Ridge", elm_params.lambda, elm_params.propensity_a, elm_params.propensity_b)
+    "Ridge", best_params.lambda, best_params.propensity_a, best_params.propensity_b)
   str.printf("  %-10s beta=%.3f\n", "GFM", gfm2_p.beta)
   str.printf("  %-10s %s\n", "Tr Orc", fmt_metrics(d2_tr_oracle))
-  str.printf("  %-10s %s\n", "OOF Orc", fmt_metrics(d2_oof_oracle))
   str.printf("  %-10s %s\n", "Dv Orc", fmt_metrics(d2_dv_oracle))
   str.printf("  %-10s %s\n", "Ts Orc", fmt_metrics(d2_ts_oracle))
   str.printf("  %-10s %s\n", "Dv GFM", fmt_metrics(gfm2_dm))
   str.printf("  %-10s %s\n", "Ts GFM", fmt_metrics(gfm2_tm))
-  end -- cfg.emb
 
   local _, total = stopwatch()
   str.printf("\nTotal: %.1fs\n", total)
