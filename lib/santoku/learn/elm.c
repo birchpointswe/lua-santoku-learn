@@ -4,10 +4,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <omp.h>
+#include <lapacke.h>
+#include <cblas.h>
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
 #include <santoku/dvec.h>
 #include <santoku/cvec.h>
+#include <santoku/rvec.h>
+#include <santoku/learn/gram.h>
+#include <santoku/learn/activation.h>
 
 #define TK_ELM_MT "tk_elm_t"
 
@@ -51,293 +56,154 @@ static inline double elm_rand_normal (uint64_t *s)
 
 static uint8_t tk_elm_mode_from_str (const char *ms)
 {
-  if (strcmp(ms, "relu") == 0) return 0;
-  if (strcmp(ms, "sigmoid") == 0) return 1;
-  if (strcmp(ms, "tanh") == 0) return 2;
-  if (strcmp(ms, "gelu") == 0) return 3;
-  if (strcmp(ms, "softplus") == 0) return 4;
-  if (strcmp(ms, "elu") == 0) return 5;
-  if (strcmp(ms, "sin") == 0) return 6;
-  if (strcmp(ms, "linear") == 0) return 7;
-  if (strcmp(ms, "selu") == 0) return 8;
-  if (strcmp(ms, "mish") == 0) return 9;
-  if (strcmp(ms, "rff") == 0) return 10;
-  if (strcmp(ms, "gaussian") == 0) return 11;
-  if (strcmp(ms, "welsch") == 0) return 12;
-  if (strcmp(ms, "sexp") == 0) return 13;
-  if (strcmp(ms, "swish") == 0) return 14;
-  if (strcmp(ms, "silu") == 0) return 14;
-  return 1;
+  uint8_t m = tk_activation_mode_from_str(ms);
+  return m ? m : 2;
 }
 
 static void tk_elm_project_core (
   double *out, int64_t n_samples, int64_t n_hidden,
-  int64_t n_tokens, uint64_t seed,
-  uint8_t mode,
-  tk_ivec_t *csc_off, tk_ivec_t *csc_idx, double *fw,
-  double *dense_in, int64_t n_input_dims
+  int64_t n_input_dims, uint64_t seed, uint8_t mode,
+  double *dense_in
 )
 {
-  int has_csc = csc_off != NULL;
-  int has_dense = dense_in != NULL;
-
-  double *inv_norm = NULL;
-  if (has_dense) {
-    inv_norm = (double *)calloc((uint64_t)n_samples, sizeof(double));
-    for (int64_t s = 0; s < n_samples; s++) {
-      double acc = 0.0;
-      for (int64_t d = 0; d < n_input_dims; d++) {
-        double v = dense_in[s * n_input_dims + d];
-        acc += v * v;
-      }
-      inv_norm[s] = acc > 0.0 ? 1.0 / sqrt(acc) : 0.0;
-    }
-  } else if (has_csc) {
-    inv_norm = (double *)calloc((uint64_t)n_samples, sizeof(double));
-    for (int64_t t = 0; t < n_tokens; t++) {
-      double fw_sq = fw ? fw[t] * fw[t] : 1.0;
-      int64_t lo = csc_off->a[t], hi = csc_off->a[t + 1];
-      for (int64_t i = lo; i < hi; i++)
-        inv_norm[csc_idx->a[i]] += fw_sq;
-    }
-    for (int64_t s = 0; s < n_samples; s++) {
-      double n2 = inv_norm[s];
-      inv_norm[s] = n2 > 0.0 ? 1.0 / sqrt(n2) : 0.0;
-    }
+  double *normed = (double *)malloc((uint64_t)n_samples * (uint64_t)n_input_dims * sizeof(double));
+  #pragma omp parallel for schedule(static)
+  for (int64_t s = 0; s < n_samples; s++) {
+    const double *src = dense_in + s * n_input_dims;
+    double *dst = normed + s * n_input_dims;
+    double acc = 0.0;
+    for (int64_t d = 0; d < n_input_dims; d++)
+      acc += src[d] * src[d];
+    double inv = acc > 0.0 ? 1.0 / sqrt(acc) : 0.0;
+    for (int64_t d = 0; d < n_input_dims; d++)
+      dst[d] = src[d] * inv;
   }
-
-  if (has_dense) {
-    double *normed = dense_in;
-    if (inv_norm) {
-      normed = (double *)malloc((uint64_t)n_samples * (uint64_t)n_input_dims * sizeof(double));
-      #pragma omp parallel for schedule(static)
-      for (int64_t s = 0; s < n_samples; s++) {
-        double nv = inv_norm[s];
-        const double *src = dense_in + s * n_input_dims;
-        double *dst = normed + s * n_input_dims;
-        for (int64_t d = 0; d < n_input_dims; d++)
-          dst[d] = src[d] * nv;
-      }
-    }
-    int64_t bh = n_hidden;
-    {
-      int64_t max_bh = (16 * 1024 * 1024 / (int64_t)sizeof(double)) / (n_input_dims > 0 ? n_input_dims : 1);
-      if (max_bh < 1) max_bh = 1;
-      if (bh > max_bh) bh = max_bh;
-    }
-    double *Wbuf = (double *)malloc((uint64_t)bh * (uint64_t)n_input_dims * sizeof(double));
-    double *biases = (double *)malloc((uint64_t)bh * sizeof(double));
-    for (int64_t h0 = 0; h0 < n_hidden; h0 += bh) {
-      int64_t cur = (h0 + bh <= n_hidden) ? bh : (n_hidden - h0);
-      for (int64_t j = 0; j < cur; j++) {
-        int64_t ah = h0 + j;
-        uint64_t rng_h = (mode == 10) ? (uint64_t)(ah / 2) : (uint64_t)ah;
-        uint64_t rng = seed ^ (rng_h * (uint64_t)0x517cc1b727220a95);
-        elm_splitmix64(&rng);
-        double *Wr = Wbuf + j * n_input_dims;
-        for (int64_t d = 0; d < n_input_dims; d++)
-          Wr[d] = elm_rand_normal(&rng);
-        biases[j] = elm_rand_normal(&rng);
-      }
-      cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-        (int)n_samples, (int)cur, (int)n_input_dims,
-        1.0, normed, (int)n_input_dims,
-        Wbuf, (int)n_input_dims,
-        0.0, out + h0, (int)n_hidden);
-      #pragma omp parallel for schedule(static)
-      for (int64_t s = 0; s < n_samples; s++) {
-        double *row = out + s * n_hidden + h0;
-        for (int64_t j = 0; j < cur; j++) {
-          double v = row[j] + biases[j];
-          double a;
-          switch (mode) {
-            case 1: a = 1.0 / (1.0 + exp(-v)); break;
-            case 2: a = tanh(v); break;
-            case 3: { double t = 0.7978845608 * (v + 0.044715 * v * v * v);
-                      a = 0.5 * v * (1.0 + tanh(t)); break; }
-            case 4: a = log(1.0 + exp(v)); break;
-            case 5: a = v > 0.0 ? v : exp(v) - 1.0; break;
-            case 6: a = sin(v); break;
-            case 7: a = v; break;
-            case 8: a = v > 0.0 ? 1.0507009873554805 * v
-                      : 1.0507009873554805 * 1.6732632423543773 * (exp(v) - 1.0); break;
-            case 9: a = v * tanh(log(1.0 + exp(v))); break;
-            case 10: a = ((h0 + j) % 2 == 0) ? sin(v) : cos(v); break;
-            case 11: a = exp(-v * v); break;
-            case 12: a = 1.0 - exp(-v * v * 0.5); break;
-            case 13: a = fmax(v, 0.0) + log(1.0 + exp(-fabs(v))); break;
-            case 14: a = v / (1.0 + exp(-v)); break;
-            default: a = v > 0.0 ? v : 0.0; break;
-          }
-          row[j] = a;
-        }
-      }
-    }
-    free(Wbuf);
-    free(biases);
-    if (normed != dense_in) free(normed);
-    free(inv_norm);
-    return;
-  }
-
-  #pragma omp parallel
+  int64_t bh = n_hidden;
   {
-    double *col = (double *)malloc((uint64_t)n_samples * sizeof(double));
-    #pragma omp for schedule(static)
-    for (int64_t h = 0; h < n_hidden; h++) {
-      memset(col, 0, (uint64_t)n_samples * sizeof(double));
-      uint64_t rng_h = (mode == 10) ? (uint64_t)(h / 2) : (uint64_t)h;
+    int64_t max_bh = (16 * 1024 * 1024 / (int64_t)sizeof(double)) / (n_input_dims > 0 ? n_input_dims : 1);
+    if (max_bh < 1) max_bh = 1;
+    if (bh > max_bh) bh = max_bh;
+  }
+  double *Wbuf = (double *)malloc((uint64_t)bh * (uint64_t)n_input_dims * sizeof(double));
+  double *biases = (double *)malloc((uint64_t)bh * sizeof(double));
+  for (int64_t h0 = 0; h0 < n_hidden; h0 += bh) {
+    int64_t cur = (h0 + bh <= n_hidden) ? bh : (n_hidden - h0);
+    for (int64_t j = 0; j < cur; j++) {
+      int64_t ah = h0 + j;
+      uint64_t rng_h = (mode == 11) ? (uint64_t)(ah / 2) : (uint64_t)ah;
       uint64_t rng = seed ^ (rng_h * (uint64_t)0x517cc1b727220a95);
       elm_splitmix64(&rng);
-      for (int64_t t = 0; t < n_tokens; t++) {
-        double w = elm_rand_normal(&rng);
-        if (fw) w *= fw[t];
-        int64_t lo = csc_off->a[t];
-        int64_t hi = csc_off->a[t + 1];
-        if (inv_norm)
-          for (int64_t i = lo; i < hi; i++)
-            col[csc_idx->a[i]] += w * inv_norm[csc_idx->a[i]];
-        else
-          for (int64_t i = lo; i < hi; i++)
-            col[csc_idx->a[i]] += w;
-      }
-      double bias = elm_rand_normal(&rng);
-      for (int64_t s = 0; s < n_samples; s++) {
-        double v = col[s] + bias;
-        double a;
-        switch (mode) {
-          case 1: a = 1.0 / (1.0 + exp(-v)); break;
-          case 2: a = tanh(v); break;
-          case 3: { double t = 0.7978845608 * (v + 0.044715 * v * v * v);
-                    a = 0.5 * v * (1.0 + tanh(t)); break; }
-          case 4: a = log(1.0 + exp(v)); break;
-          case 5: a = v > 0.0 ? v : exp(v) - 1.0; break;
-          case 6: a = sin(v); break;
-          case 7: a = v; break;
-          case 8: a = v > 0.0 ? 1.0507009873554805 * v
-                    : 1.0507009873554805 * 1.6732632423543773 * (exp(v) - 1.0); break;
-          case 9: a = v * tanh(log(1.0 + exp(v))); break;
-          case 10: a = (h % 2 == 0) ? sin(v) : cos(v); break;
-          case 11: a = exp(-v * v); break;
-          case 12: a = 1.0 - exp(-v * v * 0.5); break;
-          case 13: a = fmax(v, 0.0) + log(1.0 + exp(-fabs(v))); break;
-          case 14: a = v / (1.0 + exp(-v)); break;
-          default: a = v > 0.0 ? v : 0.0; break;
-        }
-        out[s * n_hidden + h] = a;
+      double *Wr = Wbuf + j * n_input_dims;
+      for (int64_t d = 0; d < n_input_dims; d++)
+        Wr[d] = elm_rand_normal(&rng);
+      biases[j] = elm_rand_normal(&rng);
+    }
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+      (int)n_samples, (int)cur, (int)n_input_dims,
+      1.0, normed, (int)n_input_dims,
+      Wbuf, (int)n_input_dims,
+      0.0, out + h0, (int)n_hidden);
+    #pragma omp parallel for schedule(static)
+    for (int64_t s = 0; s < n_samples; s++) {
+      double *row = out + s * n_hidden + h0;
+      for (int64_t j = 0; j < cur; j++) {
+        row[j] = tk_activate(row[j] + biases[j], mode, h0 + j);
       }
     }
-    free(col);
   }
-  free(inv_norm);
-}
-
-static inline void tk_elm_parse_sparse (
-  lua_State *L, int ti,
-  int *has_sparse, tk_ivec_t **csc_off, tk_ivec_t **csc_idx,
-  int64_t *n_tokens, double **fw
-)
-{
-  lua_getfield(L, ti, "csc_offsets");
-  *has_sparse = !lua_isnil(L, -1);
-  *csc_off = *has_sparse ? tk_ivec_peek(L, -1, "csc_offsets") : NULL;
-  lua_pop(L, 1);
-  *csc_idx = NULL;
-  *n_tokens = 0;
-  *fw = NULL;
-  if (*has_sparse) {
-    lua_getfield(L, ti, "csc_indices");
-    *csc_idx = tk_ivec_peek(L, -1, "csc_indices");
-    lua_pop(L, 1);
-    *n_tokens = (int64_t)tk_lua_fcheckunsigned(L, ti, "project", "n_tokens");
-    lua_getfield(L, ti, "feature_weights");
-    if (!lua_isnil(L, -1))
-      *fw = tk_dvec_peek(L, -1, "feature_weights")->a;
-    lua_pop(L, 1);
-  }
+  free(Wbuf);
+  free(biases);
+  free(normed);
 }
 
 static int tk_elm_create_lua (lua_State *L)
 {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
-
-  int has_dense_in = 0;
-  tk_dvec_t *codes_dvec = NULL;
-  int64_t n_input_dims = 0;
-  int has_sparse = 0;
-  tk_ivec_t *csc_off = NULL, *csc_idx = NULL;
-  int64_t n_tokens = 0;
-  double *fw = NULL;
-
-  lua_getfield(L, 1, "codes");
-  has_dense_in = !lua_isnil(L, -1);
-  if (has_dense_in) {
-    codes_dvec = tk_dvec_peek(L, -1, "codes");
-    n_input_dims = (int64_t)tk_lua_fcheckunsigned(L, 1, "create", "n_input_dims");
-  }
-  lua_pop(L, 1);
-  if (!has_dense_in)
-    tk_elm_parse_sparse(L, 1, &has_sparse, &csc_off, &csc_idx, &n_tokens, &fw);
-
-  if (!has_sparse && !has_dense_in)
-    return luaL_error(L, "create: codes or csc_offsets required");
-
-  int64_t n_samples = (int64_t)tk_lua_fcheckunsigned(L, 1, "create", "n_samples");
+  int64_t n_input_dims = (int64_t)tk_lua_fcheckunsigned(L, 1, "create", "n_input_dims");
   int64_t n_hidden = (int64_t)tk_lua_fcheckunsigned(L, 1, "create", "n_hidden");
   uint64_t seed = ((uint64_t)tk_fast_random() << 32) | tk_fast_random();
-
-  uint8_t mode = 1;
+  uint8_t mode = 2;
   lua_getfield(L, 1, "mode");
   if (lua_isstring(L, -1))
     mode = tk_elm_mode_from_str(lua_tostring(L, -1));
   lua_pop(L, 1);
-
-  uint64_t total = (uint64_t)(n_samples * n_hidden);
-  tk_dvec_t *out = tk_dvec_create(L, total, NULL, NULL);
-  out->n = total;
-  int out_idx = lua_gettop(L);
-
-  tk_dvec_t *fw_dvec = NULL;
-  int fw_idx = 0;
-  if (has_sparse) {
-    lua_getfield(L, 1, "feature_weights");
-    if (!lua_isnil(L, -1)) {
-      fw_dvec = tk_dvec_peek(L, -1, "feature_weights");
-      fw_idx = lua_gettop(L);
-    } else {
-      lua_pop(L, 1);
-    }
-  }
-
-  tk_elm_project_core(
-    out->a, n_samples, n_hidden,
-    has_dense_in ? n_input_dims : n_tokens, seed, mode,
-    csc_off, csc_idx, fw,
-    has_dense_in ? codes_dvec->a : NULL, n_input_dims
-  );
-
   tk_elm_t *e = tk_lua_newuserdata(L, tk_elm_t,
     TK_ELM_MT, tk_elm_mt_fns, tk_elm_gc);
   int Ei = lua_gettop(L);
-  e->fw = fw_dvec;
+  e->fw = NULL;
   e->n_hidden = n_hidden;
-  e->n_tokens = has_dense_in ? n_input_dims : n_tokens;
+  e->n_tokens = n_input_dims;
   e->seed = seed;
   e->mode = mode;
-  e->dense = has_dense_in ? 1 : 0;
+  e->dense = 1;
   e->destroyed = false;
-
   lua_newtable(L);
-  if (fw_idx > 0) {
-    lua_pushvalue(L, fw_idx);
-    lua_setfield(L, -2, "fw");
-  }
   lua_setfenv(L, Ei);
-
   lua_pushvalue(L, Ei);
-  lua_pushvalue(L, out_idx);
-  return 2;
+  return 1;
+}
+
+static void tk_elm_project_binary (
+  double *out, int64_t n_samples, int64_t n_hidden,
+  int64_t n_input_dims, uint64_t seed, uint8_t mode,
+  const uint8_t *packed)
+{
+  int64_t d = n_input_dims;
+  int64_t row_bytes = (int64_t)TK_CVEC_BITS_BYTES((uint64_t)d);
+  double inv_norm = 1.0 / sqrt((double)d);
+  int64_t bh = n_hidden;
+  {
+    int64_t max_bh = (16 * 1024 * 1024 / (int64_t)sizeof(double)) / (d > 0 ? d : 1);
+    if (max_bh < 1) max_bh = 1;
+    if (bh > max_bh) bh = max_bh;
+  }
+  int64_t bs = 256;
+  {
+    int64_t max_bs = (16 * 1024 * 1024 / (int64_t)sizeof(double)) / (d > 0 ? d : 1);
+    if (max_bs < 1) max_bs = 1;
+    if (bs > max_bs) bs = max_bs;
+  }
+  double *Wbuf = (double *)malloc((uint64_t)bh * (uint64_t)d * sizeof(double));
+  double *biases = (double *)malloc((uint64_t)bh * sizeof(double));
+  double *Xbuf = (double *)malloc((uint64_t)bs * (uint64_t)d * sizeof(double));
+  for (int64_t s0 = 0; s0 < n_samples; s0 += bs) {
+    int64_t cur_s = (s0 + bs <= n_samples) ? bs : (n_samples - s0);
+    #pragma omp parallel for schedule(static)
+    for (int64_t i = 0; i < cur_s; i++) {
+      const uint8_t *row = packed + (s0 + i) * row_bytes;
+      double *dst = Xbuf + i * d;
+      for (int64_t j = 0; j < d; j++)
+        dst[j] = ((row[j / 8] >> (j % 8)) & 1) ? inv_norm : -inv_norm;
+    }
+    for (int64_t h0 = 0; h0 < n_hidden; h0 += bh) {
+      int64_t cur_h = (h0 + bh <= n_hidden) ? bh : (n_hidden - h0);
+      for (int64_t j = 0; j < cur_h; j++) {
+        int64_t ah = h0 + j;
+        uint64_t rng_h = (mode == 11) ? (uint64_t)(ah / 2) : (uint64_t)ah;
+        uint64_t rng = seed ^ (rng_h * (uint64_t)0x517cc1b727220a95);
+        elm_splitmix64(&rng);
+        double *Wr = Wbuf + j * d;
+        for (int64_t dd = 0; dd < d; dd++)
+          Wr[dd] = elm_rand_normal(&rng);
+        biases[j] = elm_rand_normal(&rng);
+      }
+      cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+        (int)cur_s, (int)cur_h, (int)d,
+        1.0, Xbuf, (int)d, Wbuf, (int)d,
+        0.0, out + s0 * n_hidden + h0, (int)n_hidden);
+      #pragma omp parallel for schedule(static)
+      for (int64_t i = 0; i < cur_s; i++) {
+        double *hr = out + (s0 + i) * n_hidden + h0;
+        for (int64_t j = 0; j < cur_h; j++) {
+          hr[j] = tk_activate(hr[j] + biases[j], mode, h0 + j);
+        }
+      }
+    }
+  }
+  free(Wbuf);
+  free(biases);
+  free(Xbuf);
 }
 
 static int tk_elm_encode_lua (lua_State *L)
@@ -345,42 +211,28 @@ static int tk_elm_encode_lua (lua_State *L)
   tk_elm_t *e = tk_elm_peek(L, 1);
   luaL_checktype(L, 2, LUA_TTABLE);
   int64_t n_samples = (int64_t)tk_lua_fcheckunsigned(L, 2, "encode", "n_samples");
-
-  double *dense_in = NULL;
-  tk_ivec_t *csc_off = NULL, *csc_idx = NULL;
-  double *fw_parsed = NULL;
-
-  if (e->dense) {
-    lua_getfield(L, 2, "codes");
-    if (lua_isnil(L, -1))
-      return luaL_error(L, "encode: dense encoder requires codes");
-    tk_dvec_t *codes = tk_dvec_peek(L, -1, "codes");
-    dense_in = codes->a;
-    lua_pop(L, 1);
-  } else {
-    lua_getfield(L, 2, "csc_offsets");
-    int has_sparse = !lua_isnil(L, -1);
-    csc_off = has_sparse ? tk_ivec_peek(L, -1, "csc_offsets") : NULL;
-    lua_pop(L, 1);
-    if (has_sparse) {
-      lua_getfield(L, 2, "csc_indices");
-      csc_idx = tk_ivec_peek(L, -1, "csc_indices");
-      lua_pop(L, 1);
-    }
-    fw_parsed = e->fw ? e->fw->a : NULL;
-  }
-
+  lua_getfield(L, 2, "codes");
+  if (lua_isnil(L, -1))
+    return luaL_error(L, "encode: codes required");
+  tk_dvec_t *codes_dvec = tk_dvec_peekopt(L, -1);
+  lua_pop(L, 1);
   uint64_t total = (uint64_t)(n_samples * e->n_hidden);
   tk_dvec_t *out = tk_dvec_create(L, total, NULL, NULL);
   out->n = total;
-
-  tk_elm_project_core(
-    out->a, n_samples, e->n_hidden,
-    e->n_tokens, e->seed, e->mode,
-    csc_off, csc_idx, fw_parsed,
-    dense_in, e->n_tokens
-  );
-
+  if (codes_dvec) {
+    tk_elm_project_core(
+      out->a, n_samples, e->n_hidden,
+      e->n_tokens, e->seed, e->mode,
+      codes_dvec->a);
+  } else {
+    lua_getfield(L, 2, "codes");
+    tk_cvec_t *codes_cvec = tk_cvec_peek(L, -1, "codes");
+    lua_pop(L, 1);
+    tk_elm_project_binary(
+      out->a, n_samples, e->n_hidden,
+      e->n_tokens, e->seed, e->mode,
+      (const uint8_t *)codes_cvec->a);
+  }
   return 1;
 }
 
@@ -396,7 +248,7 @@ static int tk_elm_persist_lua (lua_State *L) {
   else
     return tk_lua_verror(L, 2, "persist", "expecting filepath or true");
   tk_lua_fwrite(L, "TKel", 1, 4, fh);
-  uint8_t version = 12;
+  uint8_t version = 13;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &e->n_hidden, sizeof(int64_t), 1, fh);
   tk_lua_fwrite(L, &e->n_tokens, sizeof(int64_t), 1, fh);
@@ -441,7 +293,7 @@ static int tk_elm_load_lua (lua_State *L)
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 12) {
+  if (version != 12 && version != 13) {
     tk_lua_fclose(L, fh);
     return luaL_error(L, "unsupported elm version %d", (int)version);
   }
@@ -454,8 +306,13 @@ static int tk_elm_load_lua (lua_State *L)
   tk_lua_fread(L, &has_fw, sizeof(uint8_t), 1, fh);
   uint8_t mode_byte;
   tk_lua_fread(L, &mode_byte, sizeof(uint8_t), 1, fh);
+  if (version == 12) mode_byte = (uint8_t)(mode_byte + 1);
   uint8_t dense_byte;
   tk_lua_fread(L, &dense_byte, sizeof(uint8_t), 1, fh);
+  if (dense_byte != 1) {
+    tk_lua_fclose(L, fh);
+    return luaL_error(L, "unsupported elm format (CSC models no longer supported)");
+  }
   tk_dvec_t *fw = NULL;
   int fw_idx = 0;
   if (has_fw) {
@@ -506,30 +363,8 @@ static int tk_elm_activate_lua (lua_State *L)
   for (int64_t s = 0; s < n_samples; s++) {
     double *src = raw->a + s * n_hidden;
     double *dst = out->a + s * n_hidden;
-    for (int64_t h = 0; h < n_hidden; h++) {
-      double v = src[h];
-      double a;
-      switch (mode) {
-        case 1: a = 1.0 / (1.0 + exp(-v)); break;
-        case 2: a = tanh(v); break;
-        case 3: { double t = 0.7978845608 * (v + 0.044715 * v * v * v);
-                  a = 0.5 * v * (1.0 + tanh(t)); break; }
-        case 4: a = log(1.0 + exp(v)); break;
-        case 5: a = v > 0.0 ? v : exp(v) - 1.0; break;
-        case 6: a = sin(v); break;
-        case 7: a = v; break;
-        case 8: a = v > 0.0 ? 1.0507009873554805 * v
-                  : 1.0507009873554805 * 1.6732632423543773 * (exp(v) - 1.0); break;
-        case 9: a = v * tanh(log(1.0 + exp(v))); break;
-        case 10: a = (h % 2 == 0) ? sin(v) : cos(v); break;
-        case 11: a = exp(-v * v); break;
-        case 12: a = 1.0 - exp(-v * v * 0.5); break;
-        case 13: a = fmax(v, 0.0) + log(1.0 + exp(-fabs(v))); break;
-        case 14: a = v / (1.0 + exp(-v)); break;
-        default: a = v > 0.0 ? v : 0.0; break;
-      }
-      dst[h] = a;
-    }
+    for (int64_t h = 0; h < n_hidden; h++)
+      dst[h] = tk_activate(src[h], mode, h);
   }
   return 1;
 }
@@ -537,7 +372,8 @@ static int tk_elm_activate_lua (lua_State *L)
 static int tk_elm_set_mode_lua (lua_State *L)
 {
   tk_elm_t *e = tk_elm_peek(L, 1);
-  e->mode = tk_elm_mode_from_str(luaL_checkstring(L, 2));
+  uint8_t m = tk_activation_mode_from_str(luaL_checkstring(L, 2));
+  e->mode = m ? m : 2;
   return 0;
 }
 
