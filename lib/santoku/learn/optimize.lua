@@ -833,7 +833,7 @@ M.ridge = function (args)
     end
     local po, pn, ps = gram:label(params.lambda, k,
       params.propensity_a, params.propensity_b,
-      lbl_off_buf, lbl_nbr_buf, lbl_sco_buf, args.label_block)
+      lbl_off_buf, lbl_nbr_buf, lbl_sco_buf)
     lbl_off_buf, lbl_nbr_buf, lbl_sco_buf = po, pn, ps
     local _, oracle = evaluator.retrieval_ks({
       pred_offsets = po, pred_neighbors = pn,
