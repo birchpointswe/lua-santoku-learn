@@ -21,6 +21,7 @@ local env = {
     "santoku >= 0.0.321-1",
     "santoku-matrix >= 0.0.286-1",
     "santoku-tokenizer >= 0.0.22-1",
+    "lpeg >= 1.1.0-2",
   },
   test = {
     dependencies = {

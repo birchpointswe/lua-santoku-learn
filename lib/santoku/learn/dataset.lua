@@ -8,6 +8,7 @@ local str = require("santoku.string")
 local arr = require("santoku.array")
 local num = require("santoku.num")
 local json = require("cjson")
+local lpeg_utils = require("santoku.learn.lpeg")
 
 local M = {}
 
@@ -308,9 +309,25 @@ end
 
 M.read_eurlex57k = function (dir, max)
   local label_map = { n_labels = 0 }
+  local text_fields = { "title", "header", "recitals", "main_body" }
+  local label_fields = { "eurovoc_concepts" }
+  local function make_text_iter(fp, n_max)
+    local count = 0
+    local lines = fs.lines(fp)
+    return function ()
+      if n_max and count >= n_max then return nil end
+      local line = lines()
+      if not line then return nil end
+      count = count + 1
+      local parts = {}
+      for s, e in lpeg_utils.json_fields(line, text_fields) do
+        parts[#parts + 1] = line:sub(s, e)
+      end
+      return table.concat(parts, "\n")
+    end
+  end
   local function read_file(fname)
     local fp = dir .. "/" .. fname
-    local problems = {}
     local sol_off = ivec.create()
     local sol_nbr = ivec.create()
     local label_counts = ivec.create()
@@ -318,22 +335,9 @@ M.read_eurlex57k = function (dir, max)
     sol_off:push(0)
     for line in fs.lines(fp) do
       if max and n >= max then break end
-      local doc = json.decode(line)
-      local parts = {}
-      if doc.title then parts[#parts + 1] = doc.title end
-      if doc.header then parts[#parts + 1] = doc.header end
-      if doc.recitals then parts[#parts + 1] = doc.recitals end
-      if doc.main_body then
-        if type(doc.main_body) == "table" then
-          for _, p in ipairs(doc.main_body) do parts[#parts + 1] = p end
-        else
-          parts[#parts + 1] = doc.main_body
-        end
-      end
-      problems[#problems + 1] = table.concat(parts, "\n")
-      local labels = doc.eurovoc_concepts or {}
       local doc_labels = {}
-      for _, lbl in ipairs(labels) do
+      for s, e in lpeg_utils.json_fields(line, label_fields) do
+        local lbl = line:sub(s, e)
         local idx = label_map[lbl]
         if not idx then
           idx = label_map.n_labels
@@ -350,7 +354,8 @@ M.read_eurlex57k = function (dir, max)
     end
     collectgarbage("collect")
     return {
-      n = n, problems = problems,
+      n = n,
+      text_iter = function () return make_text_iter(fp, max) end,
       sol_offsets = sol_off, sol_neighbors = sol_nbr,
       label_counts = label_counts,
     }

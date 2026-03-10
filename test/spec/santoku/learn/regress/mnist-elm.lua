@@ -48,7 +48,7 @@ test("mnist csr+pos2d", function ()
 
   str.printf("[Spectral] Cholesky trace_tol=%s\n",
     tostring(cfg.emb.trace_tol))
-  local _, _, sp_enc, _, xtx, xty, col_mean, y_mean, label_counts = spectral.encode({
+  local train_codes, _, sp_enc, _, xtx, xty, col_mean, y_mean, label_counts = spectral.encode({
     kernel = cfg.emb.kernel, offsets = train_p_off, tokens = train_p_nbr,
     n_samples = train.n, n_tokens = n_features,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
@@ -95,7 +95,6 @@ test("mnist csr+pos2d", function ()
   local _, test_labels = ridge_obj:label(test_codes, test_set.n, 1)
   str.printf("[Eval] Labels done %s\n", sw())
 
-  local train_codes = encode(train.ids, train.n)
   local _, train_labels = ridge_obj:label(train_codes, train.n, 1)
   local train_stats = eval.class_accuracy(train_labels, train.sol_offsets, train.sol_neighbors, train.n, n_classes)
   local val_stats = eval.class_accuracy(val_labels, validate.sol_offsets, validate.sol_neighbors, validate.n, n_classes)

@@ -57,10 +57,6 @@ typedef struct { int64_t tok; double val; } tk_csr_sort_entry_t;
 #define tk_csr_sort_entry_lt(a, b) ((a).tok < (b).tok)
 KSORT_INIT(tk_csr_sort_entry, tk_csr_sort_entry_t, tk_csr_sort_entry_lt)
 
-typedef struct { int64_t tok; double val; uint8_t piv; } tk_pivot_entry_t;
-#define tk_pivot_entry_lt(a, b) ((a).tok < (b).tok)
-KSORT_INIT(tk_pivot_entry, tk_pivot_entry_t, tk_pivot_entry_lt)
-
 #define TK_CHOL_BLOCK 64
 
 static inline void tk_spectral_sample_landmarks (
@@ -69,7 +65,7 @@ static inline void tk_spectral_sample_landmarks (
   double *dense, int64_t d_input, uint64_t n_docs_hint,
   const uint8_t *bits_data, uint64_t bits_d, uint64_t bits_n_samples,
   const int64_t *csr_offsets, const int64_t *csr_tokens,
-  const double *csr_values, const double *csr_norms, uint64_t csr_n_samples,
+  const double *csr_values, const double *csr_norms, uint64_t csr_n_samples, uint64_t csr_n_tokens,
   tk_spectral_kernel_t kernel, const double *dense_norms,
   uint64_t n_landmarks,
   double decay,
@@ -289,64 +285,57 @@ static inline void tk_spectral_sample_landmarks (
       }
 
       {
-        uint64_t total_pnnz = 0;
+        int64_t *piv_csc_off = (int64_t *)calloc(csr_n_tokens + 1, sizeof(int64_t));
         for (uint64_t b = 0; b < np; b++) {
           int64_t p = plo_arr[b];
           while (p < phi_arr[b]) {
             int64_t tok = csr_tokens[p];
+            piv_csc_off[tok + 1]++;
             while (p < phi_arr[b] && csr_tokens[p] == tok) p++;
-            total_pnnz++;
           }
         }
-        tk_pivot_entry_t *combined = (tk_pivot_entry_t *)malloc(
-          total_pnnz * sizeof(tk_pivot_entry_t));
-        uint64_t ci = 0;
+        for (uint64_t t = 0; t < csr_n_tokens; t++)
+          piv_csc_off[t + 1] += piv_csc_off[t];
+        uint64_t total_pnnz = (uint64_t)piv_csc_off[csr_n_tokens];
+        uint8_t *piv_csc_piv = (uint8_t *)malloc(total_pnnz);
+        double *piv_csc_val = (double *)malloc(total_pnnz * sizeof(double));
+        int64_t *piv_csc_pos = (int64_t *)malloc(csr_n_tokens * sizeof(int64_t));
+        memcpy(piv_csc_pos, piv_csc_off, csr_n_tokens * sizeof(int64_t));
         for (uint64_t b = 0; b < np; b++) {
           int64_t p = plo_arr[b];
           while (p < phi_arr[b]) {
             int64_t tok = csr_tokens[p];
             double sum = 0.0;
             while (p < phi_arr[b] && csr_tokens[p] == tok) { sum += csr_values[p]; p++; }
-            combined[ci].tok = tok;
-            combined[ci].val = sum;
-            combined[ci].piv = (uint8_t)b;
-            ci++;
+            int64_t pos = piv_csc_pos[tok]++;
+            piv_csc_piv[pos] = (uint8_t)b;
+            piv_csc_val[pos] = sum;
           }
         }
-        ks_introsort_tk_pivot_entry(ci, combined);
-        uint64_t cn = ci;
+        free(piv_csc_pos);
+        const int64_t *restrict pc_off = piv_csc_off;
+        const uint8_t *restrict pc_piv = piv_csc_piv;
+        const double *restrict pc_val = piv_csc_val;
+        const int64_t *restrict c_off = csr_offsets;
+        const int64_t *restrict c_tok = csr_tokens;
+        const double *restrict c_val = csr_values;
         #pragma omp parallel for schedule(static)
         for (uint64_t i = 0; i < n_docs; i++) {
-          int64_t ii = csr_offsets[i], ihi = csr_offsets[i + 1];
           double kip_row[TK_CHOL_BLOCK];
           memset(kip_row, 0, np * sizeof(double));
-          uint64_t cc = 0;
-          while (ii < ihi && cc < cn) {
-            int64_t dtok = csr_tokens[ii];
-            int64_t ctok = combined[cc].tok;
-            if (dtok < ctok) {
-              ii++;
-            } else if (dtok > ctok) {
-              uint64_t step = 1;
-              while (cc + step < cn && combined[cc + step].tok < dtok) step <<= 1;
-              uint64_t glo = cc + (step >> 1), ghi = cc + step < cn ? cc + step : cn;
-              while (glo < ghi) {
-                uint64_t mid = glo + (ghi - glo) / 2;
-                if (combined[mid].tok < dtok) glo = mid + 1; else ghi = mid;
-              }
-              cc = glo;
-            } else {
-              double doc_sum = 0.0;
-              while (ii < ihi && csr_tokens[ii] == dtok) { doc_sum += csr_values[ii]; ii++; }
-              while (cc < cn && combined[cc].tok == dtok) {
-                kip_row[combined[cc].piv] += doc_sum * combined[cc].val;
-                cc++;
-              }
-            }
+          int64_t jlo = c_off[i], jhi = c_off[i + 1];
+          for (int64_t j = jlo; j < jhi; j++) {
+            int64_t tok = c_tok[j];
+            double val = c_val[j];
+            int64_t clo = pc_off[tok], chi = pc_off[tok + 1];
+            for (int64_t c = clo; c < chi; c++)
+              kip_row[pc_piv[c]] += val * pc_val[c];
           }
           memcpy(kip_block + i * np, kip_row, np * sizeof(double));
         }
-        free(combined);
+        free(piv_csc_off);
+        free(piv_csc_piv);
+        free(piv_csc_val);
       }
 
       if (kernel != TK_SPECTRAL_LINEAR) {
@@ -774,13 +763,23 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
       sims = (double *)calloc(sims_need, sizeof(double));
       if (!sims) { free(sval); free(norms); return luaL_error(L, "encode: out of memory"); }
     }
+    const int64_t *restrict csc_off = enc->lm_csc_offsets;
+    const int64_t *restrict csc_rows = enc->lm_csc_rows;
+    const double *restrict csc_vals = enc->lm_csc_values;
+    const int64_t *restrict off_a = offsets->a;
+    const int64_t *restrict tok_a = tokens->a;
+    const double *restrict sv = sval;
+    double *restrict sim = sims;
     #pragma omp parallel for schedule(static)
     for (uint64_t i = 0; i < n_samples; i++) {
-      for (int64_t j = offsets->a[i]; j < offsets->a[i + 1]; j++) {
-        int64_t tok = tokens->a[j];
-        double val = sval[j];
-        for (int64_t c = enc->lm_csc_offsets[tok]; c < enc->lm_csc_offsets[tok + 1]; c++)
-          sims[i * m + (uint64_t)enc->lm_csc_rows[c]] += val * enc->lm_csc_values[c];
+      double *restrict sims_row = sim + i * m;
+      int64_t jlo = off_a[i], jhi = off_a[i + 1];
+      for (int64_t j = jlo; j < jhi; j++) {
+        int64_t tok = tok_a[j];
+        double val = sv[j];
+        int64_t clo = csc_off[tok], chi = csc_off[tok + 1];
+        for (int64_t c = clo; c < chi; c++)
+          sims_row[(uint64_t)csc_rows[c]] += val * csc_vals[c];
       }
     }
     if (enc->kernel != TK_SPECTRAL_LINEAR) {
@@ -1142,9 +1141,9 @@ static inline int tm_encode (lua_State *L) {
   }
 
   lua_getfield(L, 1, "kernel");
-  const char *kernel_str = lua_isnil(L, -1) ? "linear" : lua_tostring(L, -1);
+  const char *kernel_str = lua_isnil(L, -1) ? "cosine" : lua_tostring(L, -1);
   lua_pop(L, 1);
-  tk_spectral_kernel_t kernel = TK_SPECTRAL_LINEAR;
+  tk_spectral_kernel_t kernel = TK_SPECTRAL_COSINE;
   if (strcmp(kernel_str, "cosine") == 0) kernel = TK_SPECTRAL_COSINE;
   else if (strcmp(kernel_str, "arccos0") == 0) kernel = TK_SPECTRAL_ARCCOS0;
   else if (strcmp(kernel_str, "arccos1") == 0) kernel = TK_SPECTRAL_ARCCOS1;
@@ -1220,7 +1219,7 @@ static inline int tm_encode (lua_State *L) {
   tk_spectral_sample_landmarks(L, feat_inv,
     dense_data, dense_d_input, dense_n_samples,
     bits_data, bits_d, bits_n_samples,
-    csr_offsets_a, sorted_csr_tokens, sorted_csr_values, csr_norms_a, csr_n_samples,
+    csr_offsets_a, sorted_csr_tokens, sorted_csr_values, csr_norms_a, csr_n_samples, csr_n_tokens,
     kernel, dense_norms,
     n_lm_req, decay, trace_tol,
     &lm_ids, &lm_chol, &full_chol, &chol_ids, &m, &trace_ratio);
@@ -1304,6 +1303,14 @@ static inline int tm_encode (lua_State *L) {
       col[i] *= row_norms[i];
   }
   free(row_norms);
+
+  tk_dvec_t *train_codes = tk_dvec_create(L, nc * d, 0, 0);
+  train_codes->n = nc * d;
+  int train_codes_idx = lua_gettop(L);
+  #pragma omp parallel for schedule(static)
+  for (uint64_t i = 0; i < nc; i++)
+    for (uint64_t j = 0; j < d; j++)
+      train_codes->a[i * d + j] = full_chol[j * nc + i];
 
   ctx->projection = (double *)calloc(m * m, sizeof(double));
   for (uint64_t i = 0; i < m; i++) ctx->projection[i * m + i] = 1.0;
@@ -1536,7 +1543,7 @@ static inline int tm_encode (lua_State *L) {
   lua_setfield(L, -2, "landmark_ids");
   lua_setfenv(L, enc_idx);
 
-  lua_pushnil(L);
+  lua_pushvalue(L, train_codes_idx);
   lua_pushvalue(L, chol_ids_idx);
   lua_pushvalue(L, enc_idx);
   lua_pushvalue(L, eig_raw_idx);
