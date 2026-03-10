@@ -19,14 +19,9 @@ local cfg = {
   tok = { ngram = 7 },
   emb = {
     n_landmarks = 16384,
-    binarize = "sign",
-    binarize_dims = nil,
     trace_tol = 0.01,
-    cholesky = true,
-    n_dims = nil,
-    k = 1024,
-    kernel = "arccos1",
-    pos_window = nil
+    k = 256,
+    kernel = "arccos0",
   },
   ridge = {
     lambda = { def = 6.1894e-04 },
@@ -35,11 +30,11 @@ local cfg = {
     search_trials = 0,
   },
   -- ann = true
-  gfm1 = { beta = { def = 1.004 }, search_trials = 0, k = 1024 },
+  gfm1 = { beta = { def = 1.004 }, search_trials = 0, k = 256 },
   -- gfm2 = { beta = { def = 1.027 }, search_trials = 0, k = 256 },
 }
 
-test("eurlex csr+kernel", function ()
+test("eurlex", function ()
 
   local stopwatch = utc.stopwatch()
   local function sw()
@@ -152,29 +147,21 @@ test("eurlex csr+kernel", function ()
   local sel_tokens, sel_offsets = csr.seq_select(
     tokens, offsets, bns_ids)
   local n_sel = bns_ids:size()
-  offsets = nil; tokens = nil; train.problems = nil
+  offsets = nil; tokens = nil
   collectgarbage("collect")
 
   str.printf("[Spectral] Cholesky trace_tol=%s kernel=%s\n",
     tostring(cfg.emb.trace_tol), cfg.emb.kernel)
-  local train_codes, _, sp_enc = spectral.encode({
+  local _, _, sp_enc, _, xtx, xty, col_mean, y_mean, label_counts = spectral.encode({
     offsets = sel_offsets, tokens = sel_tokens,
     n_samples = train.n, n_tokens = n_sel,
     feature_weights = bns_scores, kernel = cfg.emb.kernel,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
-    cholesky = cfg.emb.cholesky, n_dims = cfg.emb.n_dims,
-    pos_window = cfg.emb.pos_window,
-    binarize = cfg.emb.binarize,
-    binarize_dims = cfg.emb.binarize_dims,
+    label_offsets = train_label_off, label_neighbors = train_label_nbr, n_labels = n_labels,
   })
   sel_offsets = nil; sel_tokens = nil; bns_scores = nil
   collectgarbage("collect")
   local emb_d = sp_enc:dims()
-  local xtx, xty, col_mean, y_mean, label_counts = spectral.gram({
-    codes = train_codes, n_samples = train.n, n_dims = emb_d,
-    label_offsets = train_label_off, label_neighbors = train_label_nbr, n_labels = n_labels,
-  })
-  collectgarbage("collect")
   str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
 
   local enc_sims_buf = dvec.create()
@@ -193,22 +180,20 @@ test("eurlex csr+kernel", function ()
   local dev_codes = encode_texts(dev.problems, dev.n)
   local test_codes = encode_texts(test_set.problems, test_set.n)
   dev.problems = nil; test_set.problems = nil
+  local train_codes = encode_texts(train.problems, train.n)
+  train.problems = nil
   if not cfg.ann then sp_enc:shrink() end
   collectgarbage("collect")
 
-  local d0_tr_oracle, d0_dv_oracle, d0_ts_oracle
-
   local dv_short_off, dv_short_nbr, ts_short_off, ts_short_nbr, tr_short_off, tr_short_nbr
   if cfg.ann then
-    local n_ann_bits = sp_enc:binarize_dims()
-    str.printf("\n[Shortlist] binarized codes, ann_bits=%d\n", n_ann_bits)
-    local train_sign = sp_enc:binarize(train_codes, train.n)
+    local train_sign, n_ann_bits = train_codes:mtx_sign(emb_d)
     local doc_ids = ivec.create(train.n):fill_indices()
     local mih = ann.create({ data = train_sign, features = n_ann_bits, codes = train_codes, n_dims = emb_d })
     str.printf("[ANN] indexed %s\n", sw())
     local K = cfg.emb.k
     local function shortlist(codes, n)
-      local sign_cvec = sp_enc:binarize(codes, n)
+      local sign_cvec = codes:mtx_sign(emb_d)
       local a_off, a_nbr = mih:neighborhoods_by_vecs(sign_cvec, K, codes)
       local sl_off, sl_nbr = csr.label_union(a_off, a_nbr, doc_ids, train_label_off, train_label_nbr, n_labels)
       return sl_off, sl_nbr
@@ -216,7 +201,8 @@ test("eurlex csr+kernel", function ()
     dv_short_off, dv_short_nbr = shortlist(dev_codes, dev.n)
     ts_short_off, ts_short_nbr = shortlist(test_codes, test_set.n)
     tr_short_off, tr_short_nbr = shortlist(train_codes, train.n)
-    train_sign = nil -- luacheck: ignore
+    train_sign = nil
+    sp_enc:shrink()
     collectgarbage("collect")
     str.printf("[Shortlist] built %s\n", sw())
     local function shortlist_recall(tag, short_off, short_nbr, gt_off, gt_nbr, n)
@@ -234,7 +220,7 @@ test("eurlex csr+kernel", function ()
     shortlist_recall("Test", ts_short_off, ts_short_nbr, test_label_off, test_label_nbr, test_set.n)
   end
 
-  str.printf("\n[#1] CSR+Kernel + OVA Ridge + Topk GFM\n")
+  str.printf("\n[#1] RP-Cholesky + OVA Ridge + Topk GFM\n")
   local _, ridge_obj, best_params = optimize.ridge({
     XtX = xtx, XtY = xty, col_mean = col_mean, y_mean = y_mean,
     label_counts = label_counts,
@@ -266,13 +252,12 @@ test("eurlex csr+kernel", function ()
     d1_dv_off, d1_dv_nbr, d1_dv_sco,
     d1_ts_off, d1_ts_nbr, d1_ts_sco)
 
-
   collectgarbage("collect")
 
   local d2_tr_oracle, d2_dv_oracle, d2_ts_oracle
   local gfm2_dm, gfm2_tm, gfm2_p
   if tr_short_off and cfg.gfm2 then
-    str.printf("\n[#2] CSR+Kernel + ANN Shortlist + OVA Ridge + Topk GFM\n")
+    str.printf("\n[#2] RP-Cholesky + ANN Shortlist + OVA Ridge + Topk GFM\n")
     str.printf("[OVA] Scoring shortlists\n")
     local regress_buf = dvec.create()
     local dv_short_scores = ridge_obj:regress(dev_codes, dev.n, dv_short_off, dv_short_nbr, regress_buf)
@@ -298,14 +283,7 @@ test("eurlex csr+kernel", function ()
     collectgarbage("collect")
   end
 
-  if d0_tr_oracle then
-    str.printf("\n#0: kNN baseline (mtx_topk + weighted label predict)\n")
-    str.printf("  %-10s %s\n", "Tr Orc", fmt_metrics(d0_tr_oracle))
-    str.printf("  %-10s %s\n", "Dv Orc", fmt_metrics(d0_dv_oracle))
-    str.printf("  %-10s %s\n", "Ts Orc", fmt_metrics(d0_ts_oracle))
-  end
-
-  str.printf("\n#1: CSR+Kernel + OVA Ridge + Topk GFM\n")
+  str.printf("\n#1: RP-Cholesky + OVA Ridge + Topk GFM\n")
   str.printf("  %-10s lambda=%.4e pa=%.4f pb=%.4f\n",
     "Ridge", best_params.lambda, best_params.propensity_a, best_params.propensity_b)
   str.printf("  %-10s beta=%.3f\n", "GFM", gfm1_p.beta)
@@ -316,7 +294,7 @@ test("eurlex csr+kernel", function ()
   str.printf("  %-10s %s\n", "Ts GFM", fmt_metrics(gfm1_tm))
 
   if d2_tr_oracle then
-    str.printf("\n#2: CSR+Kernel + ANN Shortlist + OVA Ridge + Topk GFM\n")
+    str.printf("\n#2: RP-Cholesky + ANN Shortlist + OVA Ridge + Topk GFM\n")
     str.printf("  %-10s %s\n", "Tr Orc", fmt_metrics(d2_tr_oracle))
     str.printf("  %-10s %s\n", "Dv Orc", fmt_metrics(d2_dv_oracle))
     str.printf("  %-10s %s\n", "Ts Orc", fmt_metrics(d2_ts_oracle))
