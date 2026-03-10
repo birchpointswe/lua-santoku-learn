@@ -1,10 +1,10 @@
 local arr = require("santoku.array")
 local csr = require("santoku.learn.csr")
+local csr_m = require("santoku.csr")
 local ds = require("santoku.learn.dataset")
 local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
 local fs = require("santoku.fs")
-local ivec = require("santoku.ivec")
 local optimize = require("santoku.learn.optimize")
 local str = require("santoku.string")
 local test = require("santoku.test")
@@ -55,23 +55,19 @@ test("mnist classifier", function ()
   str.printf("  Test:     %6d\n", test_set.n)
 
   print("\nConverting to TM representation")
-  train.tokens = ivec.create()
-  dataset.problems:bits_select(nil, train.ids, cfg.data.features, train.tokens)
+  local train_tok_off, train_tok_nbr = csr_m.subsample(dataset.problem_offsets, dataset.problem_neighbors, train.ids)
 
-  validate.tokens = ivec.create()
-  dataset.problems:bits_select(nil, validate.ids, cfg.data.features, validate.tokens)
+  local val_tok_off, val_tok_nbr = csr_m.subsample(dataset.problem_offsets, dataset.problem_neighbors, validate.ids)
+  validate.tokens = csr.to_bits(val_tok_off, val_tok_nbr, validate.n, cfg.data.features)
 
-  test_set.tokens = ivec.create()
-  dataset.problems:bits_select(nil, test_set.ids, cfg.data.features, test_set.tokens)
+  local test_tok_off, test_tok_nbr = csr_m.subsample(dataset.problem_offsets, dataset.problem_neighbors, test_set.ids)
+  test_set.tokens = csr.to_bits(test_tok_off, test_tok_nbr, test_set.n, cfg.data.features)
 
-  local train_csc_off, train_csc_idx = csr.to_csc(train.tokens, train.n, cfg.data.features)
-
-  local df_ids, df_scores = train.solutions:bits_top_df(train.n, cfg.tm.classes)
+  local df_ids, df_scores = csr_m.top_df(train.sol_offsets, train.sol_neighbors, cfg.tm.classes)
   local output_weights = dvec.create():copy(df_scores, df_ids, true)
 
-  print("\nBuilding solution CSR")
-  local sol_offsets, sol_neighbors = train.solutions:bits_to_csr(train.n, cfg.tm.classes)
-  local val_label_off, val_label_nbr = validate.solutions:bits_to_csr(validate.n, cfg.tm.classes)
+  local sol_offsets, sol_neighbors = train.sol_offsets, train.sol_neighbors
+  local val_label_off, val_label_nbr = validate.sol_offsets, validate.sol_neighbors
 
   print("\nTraining")
   local stopwatch = utc.stopwatch()
@@ -82,9 +78,8 @@ test("mnist classifier", function ()
     n_tokens = cfg.data.features,
 
     samples = train.n,
-    tokens = train.tokens,
-    csc_offsets = train_csc_off,
-    csc_indices = train_csc_idx,
+    token_offsets = train_tok_off,
+    token_neighbors = train_tok_nbr,
     sol_offsets = sol_offsets,
     sol_neighbors = sol_neighbors,
 
@@ -128,13 +123,14 @@ test("mnist classifier", function ()
   t = tm.load("regressor.bin")
 
   print("\nClassification metrics:")
+  train.tokens = csr.to_bits(train_tok_off, train_tok_nbr, train.n, cfg.data.features)
   local _, train_labels = t:label({ tokens = train.tokens, n_samples = train.n }, train.n, 1)
   local _, val_labels = t:label({ tokens = validate.tokens, n_samples = validate.n }, validate.n, 1)
   local _, test_labels = t:label({ tokens = test_set.tokens, n_samples = test_set.n }, test_set.n, 1)
 
-  local train_stats = eval.class_accuracy(train_labels, train.solutions, train.n, cfg.tm.classes)
-  local val_stats = eval.class_accuracy(val_labels, validate.solutions, validate.n, cfg.tm.classes)
-  local test_stats = eval.class_accuracy(test_labels, test_set.solutions, test_set.n, cfg.tm.classes)
+  local train_stats = eval.class_accuracy(train_labels, train.sol_offsets, train.sol_neighbors, train.n, cfg.tm.classes)
+  local val_stats = eval.class_accuracy(val_labels, validate.sol_offsets, validate.sol_neighbors, validate.n, cfg.tm.classes)
+  local test_stats = eval.class_accuracy(test_labels, test_set.sol_offsets, test_set.sol_neighbors, test_set.n, cfg.tm.classes)
   str.printf("  F1:   Train=%.2f  Val=%.2f  Test=%.2f\n", train_stats.f1, val_stats.f1, test_stats.f1)
 
   print("\nPer-class Test Accuracy (sorted by difficulty):\n")

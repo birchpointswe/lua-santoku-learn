@@ -4,46 +4,30 @@
 static inline int tk_ann_create_lua (lua_State *L)
 {
   uint64_t features = tk_lua_fcheckunsigned(L, 1, "create", "features");
-  tk_ann_create(L, features);
-  return 1;
-}
-
-static inline int tk_ann_load_lua (lua_State *L)
-{
-  size_t len;
-  const char *data = tk_lua_checklstring(L, 1, &len, "data");
-  bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && tk_lua_checkboolean(L, 2);
-  FILE *fh = isstr ? tk_lua_fmemopen(L, (char *) data, len, "r") : tk_lua_fopen(L, data, "r");
-  tk_ann_load(L, fh);
-  tk_lua_fclose(L, fh);
-  return 1;
-}
-
-static inline int tk_ann_hoods_select_topk_lua (lua_State *L)
-{
-  lua_settop(L, 2);
-  tk_ann_hoods_t *hoods = tk_ann_hoods_peek(L, 1, "hoods");
-  tk_ivec_t *ks = tk_ivec_peek(L, 2, "ks");
-  if (ks->n != hoods->n)
-    return luaL_error(L, "ks length must match hoods count");
-  for (uint64_t i = 0; i < hoods->n; i++) {
-    uint64_t k = ks->a[i] > 0 ? (uint64_t)ks->a[i] : 0;
-    uint64_t cur = hoods->a[i]->n;
-    hoods->a[i]->n = k < cur ? k : cur;
+  lua_getfield(L, 1, "data");
+  tk_cvec_t *data = tk_cvec_peek(L, -1, "data");
+  int data_idx = lua_gettop(L);
+  uint64_t N = data->n / TK_CVEC_BITS_BYTES(features);
+  tk_ann_flat_create(L, data->a, N, features);
+  int flat_idx = lua_gettop(L);
+  tk_lua_add_ephemeron(L, TK_ANN_EPH, flat_idx, data_idx);
+  lua_getfield(L, 1, "codes");
+  tk_dvec_t *codes = tk_dvec_peekopt(L, -1);
+  if (codes) {
+    tk_ann_flat_t *flat = tk_ann_flat_peek(L, flat_idx);
+    uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "create", "n_dims");
+    flat->codes = codes->a;
+    flat->n_dims = n_dims;
+    tk_lua_add_ephemeron(L, TK_ANN_EPH, flat_idx, lua_gettop(L));
   }
-  return 0;
+  lua_pop(L, 1);
+  lua_settop(L, flat_idx);
+  return 1;
 }
 
 static luaL_Reg tk_ann_fns[] =
 {
   { "create", tk_ann_create_lua },
-  { "load", tk_ann_load_lua },
-  { NULL, NULL }
-};
-
-static luaL_Reg tk_ann_hoods_ext_fns[] =
-{
-  { "select_topk", tk_ann_hoods_select_topk_lua },
   { NULL, NULL }
 };
 
@@ -51,10 +35,5 @@ int luaopen_santoku_learn_ann (lua_State *L)
 {
   lua_newtable(L);
   tk_lua_register(L, tk_ann_fns, 0);
-  tk_ann_hoods_create(L, 0, 0, 0);
-  luaL_getmetafield(L, -1, "__index");
-  luaL_register(L, NULL, tk_ann_hoods_lua_mt_fns);
-  luaL_register(L, NULL, tk_ann_hoods_ext_fns);
-  lua_pop(L, 2);
   return 1;
 }
