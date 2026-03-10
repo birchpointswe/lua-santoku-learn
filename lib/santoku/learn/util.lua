@@ -168,13 +168,11 @@ function M.cluster_stats (args)
   local eval_neighbors = args.eval_neighbors
   local eval_weights = args.eval_weights
   local label = args.label or "codes"
-  local codes_ann = ann.create({ features = n_dims })
-  codes_ann:add(codes, ids)
-  local adj_ids, adj_hoods = codes_ann:neighborhoods(knn)
-  local adj_offsets, adj_neighbors, _ = adj_hoods:to_csr(n_dims)
+  local mih = ann.create({ data = codes, features = n_dims })
+  local adj_offsets, adj_neighbors = mih:neighborhoods(knn)
   local result = eval.cluster({
     codes = codes,
-    ids = adj_ids,
+    ids = ids,
     offsets = adj_offsets,
     neighbors = adj_neighbors,
     n_dims = n_dims,

@@ -1,5 +1,6 @@
 local arr = require("santoku.array")
 local csr = require("santoku.learn.csr")
+local csr_m = require("santoku.csr")
 local ds = require("santoku.learn.dataset")
 local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
@@ -80,34 +81,36 @@ test("imdb regressor", function ()
   str.printf("  Vocabulary: %d\n", n_tokens)
 
   print("\nTokenizing")
-  train.tokens = tok:tokenize(train.problems)
-  validate.tokens = tok:tokenize(validate.problems)
-  test_set.tokens = tok:tokenize(test_set.problems)
+  local train_tok_off, train_tok_nbr = tok:tokenize(train.problems)
+  local val_tok_off, val_tok_nbr = tok:tokenize(validate.problems)
+  local test_tok_off, test_tok_nbr = tok:tokenize(test_set.problems)
   tok = nil -- luacheck: ignore
 
   print("\nFeature ranking (Chi2)")
-  local chi2_ranking, _, class_offsets, class_feat_ids = train.tokens:bits_top_chi2(
-    train.solutions, train.n, n_tokens, cfg.tm.classes,
+  local chi2_ranking, _, class_offsets, class_feat_ids = csr_m.top_chi2(
+    train_tok_off, train_tok_nbr,
+    train.sol_offsets, train.sol_neighbors,
+    n_tokens, cfg.tm.classes,
     cfg.feature_selection.n_selected, nil, "sum")
-  train.tokens:bits_select(chi2_ranking, nil, n_tokens)
-  validate.tokens:bits_select(chi2_ranking, nil, n_tokens)
-  test_set.tokens:bits_select(chi2_ranking, nil, n_tokens)
-  class_offsets, class_feat_ids = csr.bits_select(class_offsets, class_feat_ids, chi2_ranking)
+  train_tok_off, train_tok_nbr = csr_m.select(train_tok_off, train_tok_nbr, chi2_ranking)
+  val_tok_off, val_tok_nbr = csr_m.select(val_tok_off, val_tok_nbr, chi2_ranking)
+  test_tok_off, test_tok_nbr = csr_m.select(test_tok_off, test_tok_nbr, chi2_ranking)
+  class_offsets, class_feat_ids = csr_m.select(class_offsets, class_feat_ids, chi2_ranking)
   n_tokens = chi2_ranking:size()
   str.printf("  Selected %d features\n", n_tokens)
 
-  print("\nBuilding CSC index")
-  local csc_offsets, csc_indices = csr.to_csc(train.tokens, train.n, n_tokens)
+  print("\nConverting to TM representation")
+  validate.tokens = csr.to_bits(val_tok_off, val_tok_nbr, validate.n, n_tokens)
+  test_set.tokens = csr.to_bits(test_tok_off, test_tok_nbr, test_set.n, n_tokens)
   str.printf("  Tokens: %d  Samples: %d\n", n_tokens, train.n)
 
   local absorb_ranking_global = ivec.create(n_tokens):fill_indices()
 
-  local df_ids, df_scores = train.solutions:bits_top_df(train.n, cfg.tm.classes)
+  local df_ids, df_scores = csr_m.top_df(train.sol_offsets, train.sol_neighbors, cfg.tm.classes)
   local output_weights = dvec.create():copy(df_scores, df_ids, true)
 
-  print("\nBuilding solution CSR")
-  local sol_offsets, sol_neighbors = train.solutions:bits_to_csr(train.n, cfg.tm.classes)
-  local val_label_off, val_label_nbr = validate.solutions:bits_to_csr(validate.n, cfg.tm.classes)
+  local sol_offsets, sol_neighbors = train.sol_offsets, train.sol_neighbors
+  local val_label_off, val_label_nbr = validate.sol_offsets, validate.sol_neighbors
 
   print("\nOptimizing Regressor")
   local stopwatch = utc.stopwatch()
@@ -133,9 +136,8 @@ test("imdb regressor", function ()
     samples = train.n,
     sol_offsets = sol_offsets,
     sol_neighbors = sol_neighbors,
-    tokens = train.tokens,
-    csc_offsets = csc_offsets,
-    csc_indices = csc_indices,
+    token_offsets = train_tok_off,
+    token_neighbors = train_tok_nbr,
     absorb_ranking = class_feat_ids,
     absorb_ranking_offsets = class_offsets,
     absorb_ranking_global = absorb_ranking_global,
@@ -157,13 +159,14 @@ test("imdb regressor", function ()
   print("Final Evaluation")
 
   print("\nClassification metrics:")
+  train.tokens = csr.to_bits(train_tok_off, train_tok_nbr, train.n, n_tokens)
   local _, train_labels = t:label({ tokens = train.tokens, n_samples = train.n }, train.n, 1)
   local _, val_labels = t:label({ tokens = validate.tokens, n_samples = validate.n }, validate.n, 1)
   local _, test_labels = t:label({ tokens = test_set.tokens, n_samples = test_set.n }, test_set.n, 1)
 
-  local train_stats = eval.class_accuracy(train_labels, train.solutions, train.n, cfg.tm.classes)
-  local val_stats = eval.class_accuracy(val_labels, validate.solutions, validate.n, cfg.tm.classes)
-  local test_stats = eval.class_accuracy(test_labels, test_set.solutions, test_set.n, cfg.tm.classes)
+  local train_stats = eval.class_accuracy(train_labels, train.sol_offsets, train.sol_neighbors, train.n, cfg.tm.classes)
+  local val_stats = eval.class_accuracy(val_labels, validate.sol_offsets, validate.sol_neighbors, validate.n, cfg.tm.classes)
+  local test_stats = eval.class_accuracy(test_labels, test_set.sol_offsets, test_set.sol_neighbors, test_set.n, cfg.tm.classes)
   str.printf("  F1:   Train=%.2f  Val=%.2f  Test=%.2f\n", train_stats.f1, val_stats.f1, test_stats.f1)
 
   print("\nPer-class Test Accuracy (sorted by difficulty):\n")
