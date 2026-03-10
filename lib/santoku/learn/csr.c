@@ -4,48 +4,6 @@
 #include <omp.h>
 #include <assert.h>
 
-static int tm_inv_hoods_to_csr (lua_State *L)
-{
-  tk_inv_hoods_t *hoods = tk_inv_hoods_peek(L, 1, "hoods");
-  tk_ivec_t *ids = tk_ivec_peek(L, 2, "ids");
-  uint64_t n = hoods->n;
-
-  tk_iumap_t *uid_to_pos = tk_iumap_create(0, 0);
-  if (!uid_to_pos)
-    return luaL_error(L, "inv_hoods_to_csr: allocation failed");
-  for (uint64_t i = 0; i < ids->n; i++) {
-    int absent;
-    uint32_t k = tk_iumap_put(uid_to_pos, ids->a[i], &absent);
-    tk_iumap_setval(uid_to_pos, k, (int64_t)i);
-  }
-
-  tk_ivec_t *off = tk_ivec_create(L, n + 1, 0, 0);
-  off->a[0] = 0;
-  for (uint64_t i = 0; i < n; i++)
-    off->a[i + 1] = off->a[i] + (int64_t)hoods->a[i]->n;
-  off->n = n + 1;
-
-  uint64_t total = (uint64_t)off->a[n];
-  tk_ivec_t *nbr = tk_ivec_create(L, total, 0, 0);
-  tk_dvec_t *w = tk_dvec_create(L, total, 0, 0);
-  nbr->n = total;
-  w->n = total;
-
-  for (uint64_t i = 0; i < n; i++) {
-    tk_rvec_t *hood = hoods->a[i];
-    int64_t pos = off->a[i];
-    for (uint64_t j = 0; j < hood->n; j++) {
-      uint32_t ki = tk_iumap_get(uid_to_pos, hood->a[j].i);
-      nbr->a[pos + (int64_t)j] = (ki != tk_iumap_end(uid_to_pos))
-        ? tk_iumap_val(uid_to_pos, ki) : -1;
-      w->a[pos + (int64_t)j] = 1.0 - hood->a[j].d;
-    }
-  }
-
-  tk_iumap_destroy(uid_to_pos);
-  return 3;
-}
-
 static int tm_csr_seq_select (lua_State *L)
 {
   tk_ivec_t *tokens = tk_ivec_peek(L, 1, "tokens");
@@ -389,62 +347,6 @@ static int tm_csr_to_bits (lua_State *L)
   return 1;
 }
 
-static int tm_csr_knn_predict (lua_State *L)
-{
-  tk_ivec_t *nn_off = tk_ivec_peek(L, 1, "nn_offsets");
-  tk_ivec_t *nn_nbr = tk_ivec_peek(L, 2, "nn_neighbors");
-  tk_dvec_t *nn_sco = tk_dvec_peek(L, 3, "nn_scores");
-  tk_ivec_t *lab_off = tk_ivec_peek(L, 4, "label_offsets");
-  tk_ivec_t *lab_nbr = tk_ivec_peek(L, 5, "label_neighbors");
-  uint64_t n_labels = tk_lua_checkunsigned(L, 6, "n_labels");
-  uint64_t k = tk_lua_checkunsigned(L, 7, "k");
-  uint64_t n_queries = nn_off->n - 1;
-  if (k > n_labels) k = n_labels;
-  uint64_t total = n_queries * k;
-  tk_ivec_t *out_off = tk_ivec_create(L, n_queries + 1, 0, 0);
-  out_off->n = n_queries + 1;
-  for (uint64_t i = 0; i <= n_queries; i++)
-    out_off->a[i] = (int64_t)(i * k);
-  tk_ivec_t *out_nbr = tk_ivec_create(L, total, 0, 0);
-  out_nbr->n = total;
-  tk_dvec_t *out_sco = tk_dvec_create(L, total, 0, 0);
-  out_sco->n = total;
-  memset(out_nbr->a, 0, total * sizeof(int64_t));
-  memset(out_sco->a, 0, total * sizeof(double));
-  #pragma omp parallel
-  {
-    double *acc = (double *)calloc(n_labels, sizeof(double));
-    tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
-                       .a = (tk_rank_t *)malloc(k * sizeof(tk_rank_t)) };
-    #pragma omp for schedule(dynamic, 64)
-    for (uint64_t q = 0; q < n_queries; q++) {
-      memset(acc, 0, n_labels * sizeof(double));
-      int64_t ns = nn_off->a[q], ne = nn_off->a[q + 1];
-      for (int64_t j = ns; j < ne; j++) {
-        int64_t nbr_id = nn_nbr->a[j];
-        double sim = nn_sco->a[j];
-        int64_t ls = lab_off->a[nbr_id], le = lab_off->a[nbr_id + 1];
-        for (int64_t l = ls; l < le; l++)
-          acc[lab_nbr->a[l]] += sim;
-      }
-      heap.n = 0;
-      for (uint64_t l = 0; l < n_labels; l++) {
-        if (acc[l] > 0.0)
-          tk_rvec_hmin(&heap, (size_t)k, tk_rank((int64_t)l, acc[l]));
-      }
-      tk_rvec_desc(&heap, 0, heap.n);
-      int64_t base = (int64_t)(q * k);
-      for (uint64_t h = 0; h < heap.n; h++) {
-        out_nbr->a[base + (int64_t)h] = heap.a[h].i;
-        out_sco->a[base + (int64_t)h] = heap.a[h].d;
-      }
-    }
-    free(acc);
-    free(heap.a);
-  }
-  return 3;
-}
-
 static inline size_t tm_csr_pack_ngrams (
   const char *text, size_t len, int n, int64_t *out)
 {
@@ -668,7 +570,6 @@ static luaL_Reg tm_csr_fns[] = {
   { "subsample", tm_csr_subsample },
   { "sort_csr_desc", tm_csr_sort_csr_desc },
   { "transpose", tm_csr_transpose },
-  { "knn_predict", tm_csr_knn_predict },
   { "tokenize", tm_csr_tokenize },
   { NULL, NULL }
 };
@@ -677,12 +578,5 @@ int luaopen_santoku_learn_csr (lua_State *L)
 {
   lua_newtable(L);
   tk_lua_register(L, tm_csr_fns, 0);
-
-  tk_inv_hoods_create(L, 0, 0, 0);
-  luaL_getmetafield(L, -1, "__index");
-  lua_pushcfunction(L, tm_inv_hoods_to_csr);
-  lua_setfield(L, -2, "to_csr");
-  lua_pop(L, 2);
-
   return 1;
 }

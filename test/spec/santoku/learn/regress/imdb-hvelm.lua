@@ -62,7 +62,7 @@ test("imdb csr+kernel", function ()
 
   str.printf("[Spectral] Cholesky trace_tol=%s kernel=%s\n",
     tostring(cfg.emb.trace_tol), cfg.emb.kernel)
-  local train_codes, _, sp_enc, _, xtx, xty, col_mean, y_mean, label_counts = spectral.encode({
+  local train_codes, sp_enc, xtx, xty, col_mean, y_mean, label_counts = spectral.encode({
     offsets = sel_offsets, tokens = sel_tokens,
     n_samples = train.n, n_tokens = n_sel,
     feature_weights = bns_scores, kernel = cfg.emb.kernel,
