@@ -48,7 +48,7 @@ test("mnist csr+pos2d", function ()
 
   str.printf("[Spectral] Cholesky trace_tol=%s\n",
     tostring(cfg.emb.trace_tol))
-  local train_codes, _, sp_enc, _, xtx, xty, col_mean, y_mean, label_counts = spectral.encode({
+  local train_codes, sp_enc, xtx, xty, col_mean, y_mean, label_counts = spectral.encode({
     kernel = cfg.emb.kernel, offsets = train_p_off, tokens = train_p_nbr,
     n_samples = train.n, n_tokens = n_features,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
