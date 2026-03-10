@@ -18,7 +18,6 @@ typedef struct {
   double *sy_thresholds;
   double *sy_values;
   int64_t *sy_offsets;
-  double *p_sy;
   int64_t pis_max_s;
   double p_sy0;
   bool destroyed;
@@ -36,7 +35,6 @@ static inline int tk_gfm_gc (lua_State *L) {
   free(g->sy_thresholds);
   free(g->sy_values);
   free(g->sy_offsets);
-  free(g->p_sy);
   g->destroyed = true;
   return 0;
 }
@@ -187,15 +185,6 @@ static int tk_gfm_create_lua (lua_State *L)
   double default_prob = nl > 0 ? avg_n_true / (double)nl : 0.0;
   double p_sy0 = ns > 0 ? (double)n_sy0 / (double)ns : 0.0;
 
-  double *p_sy = (double *)calloc((uint64_t)(max_s + 1), sizeof(double));
-  for (int64_t s = 0; s < ns; s++) {
-    int64_t gt_n = exp_off->a[s + 1] - exp_off->a[s];
-    int64_t sy = gt_n < max_s ? gt_n : max_s;
-    p_sy[sy] += 1.0;
-  }
-  for (int64_t si = 0; si <= max_s; si++)
-    p_sy[si] /= (double)ns;
-
   int64_t total_cands = pred_off->a[ns] - pred_off->a[0];
 
   int64_t *lcount = (int64_t *)calloc((uint64_t)nl, sizeof(int64_t));
@@ -310,7 +299,6 @@ static int tk_gfm_create_lua (lua_State *L)
     g->sy_thresholds = NULL;
     g->sy_values = NULL;
     g->sy_offsets = NULL;
-    g->p_sy = p_sy;
     g->pis_max_s = 0;
     g->p_sy0 = p_sy0;
     g->destroyed = false;
@@ -386,7 +374,6 @@ static int tk_gfm_create_lua (lua_State *L)
   g->sy_thresholds = sy_thresh;
   g->sy_values = sy_val;
   g->sy_offsets = sy_off;
-  g->p_sy = p_sy;
   g->pis_max_s = max_s;
   g->p_sy0 = p_sy0;
   g->destroyed = false;
@@ -450,7 +437,7 @@ static int tk_gfm_predict_lua (lua_State *L)
           prefix[si] += isotonic_lookup(sth, sva, soff[si], soff[si + 1], cal_p, 0.0);
         double ef = 0;
         for (int64_t si = 1; si <= pis_max_s; si++)
-          ef += g->p_sy[si] * prefix[si] * (1.0 + beta_sq) / (beta_sq * (double)si + (double)k);
+          ef += prefix[si] * (1.0 + beta_sq) / (beta_sq * (double)si + (double)k);
         if (ef > best_ef) { best_ef = ef; best_k = k; }
       }
 
@@ -474,7 +461,7 @@ static int tk_gfm_persist_lua (lua_State *L) {
   else
     return tk_lua_verror(L, 2, "persist", "expecting filepath or true");
   tk_lua_fwrite(L, "TKgf", 1, 4, fh);
-  uint8_t version = 6;
+  uint8_t version = 5;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &g->n_labels, sizeof(int64_t), 1, fh);
   tk_lua_fwrite(L, &g->default_prob, sizeof(double), 1, fh);
@@ -487,7 +474,6 @@ static int tk_gfm_persist_lua (lua_State *L) {
   tk_lua_fwrite(L, &g->pis_max_s, sizeof(int64_t), 1, fh);
   tk_lua_fwrite(L, &g->p_sy0, sizeof(double), 1, fh);
   if (g->pis_max_s > 0 && g->sy_offsets) {
-    tk_lua_fwrite(L, g->p_sy, sizeof(double), (uint64_t)(g->pis_max_s + 1), fh);
     int64_t n_sy_off = g->pis_max_s + 2;
     tk_lua_fwrite(L, g->sy_offsets, sizeof(int64_t), (uint64_t)n_sy_off, fh);
     int64_t total_sy_blocks = g->sy_offsets[g->pis_max_s + 1];
@@ -530,7 +516,7 @@ static int tk_gfm_load_lua (lua_State *L)
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 6) {
+  if (version != 5) {
     tk_lua_fclose(L, fh);
     return luaL_error(L, "unsupported gfm version %d", (int)version);
   }
@@ -553,13 +539,10 @@ static int tk_gfm_load_lua (lua_State *L)
   double p_sy0;
   tk_lua_fread(L, &pis_max_s, sizeof(int64_t), 1, fh);
   tk_lua_fread(L, &p_sy0, sizeof(double), 1, fh);
-  double *p_sy = NULL;
   int64_t *sy_offsets = NULL;
   double *sy_thresholds = NULL;
   double *sy_values = NULL;
   if (pis_max_s > 0) {
-    p_sy = (double *)malloc((uint64_t)(pis_max_s + 1) * sizeof(double));
-    tk_lua_fread(L, p_sy, sizeof(double), (uint64_t)(pis_max_s + 1), fh);
     int64_t n_sy_off = pis_max_s + 2;
     sy_offsets = (int64_t *)malloc((uint64_t)n_sy_off * sizeof(int64_t));
     tk_lua_fread(L, sy_offsets, sizeof(int64_t), (uint64_t)n_sy_off, fh);
@@ -583,7 +566,6 @@ static int tk_gfm_load_lua (lua_State *L)
   g->sy_thresholds = sy_thresholds;
   g->sy_values = sy_values;
   g->sy_offsets = sy_offsets;
-  g->p_sy = p_sy;
   g->pis_max_s = pis_max_s;
   g->p_sy0 = p_sy0;
   g->destroyed = false;

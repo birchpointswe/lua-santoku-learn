@@ -22,7 +22,7 @@ local cfg = {
     propensity_a = { def = 3.0326 },
     propensity_b = { def = 4.2558 },
     classes = 2,
-    search_trials = 200,
+    search_trials = 0,
     k = 1,
   },
 }
