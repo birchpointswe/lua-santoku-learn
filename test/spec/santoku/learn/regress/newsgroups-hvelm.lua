@@ -16,13 +16,13 @@ io.stdout:setvbuf("line")
 local cfg = {
   data = { max = nil, tvr = 0.1 },
   tok = { ngram = 5 },
-  emb = { n_landmarks = 4096, trace_tol = 0.01, cholesky = true, n_dims = nil, kernel = "arccos1", pos_window = nil },
+  emb = { n_landmarks = 8192, trace_tol = 0.01, cholesky = true, n_dims = nil, kernel = "arccos1", pos_window = nil },
   ridge = {
     lambda = { def = 4.3945e-04 },
     propensity_a = { def = 0.3774 },
     propensity_b = { def = 4.0500 },
     classes = 20,
-    search_trials = 0,
+    search_trials = 200,
     k = 1,
   },
 }

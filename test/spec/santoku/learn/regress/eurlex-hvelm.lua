@@ -32,12 +32,12 @@ local cfg = {
     lambda = { def = 1.8951e-03 },
     propensity_a = { def = 0.06 },
     propensity_b = { def = 3.71 },
-    search_trials = 400,
+    search_trials = 200,
   },
 
 
 
-  gfm1 = { beta = { def = 1.007 }, search_trials = 400, k = 256 },
+  gfm1 = { beta = { def = 1.007 }, search_trials = 200, k = 256 },
 
 }
 
