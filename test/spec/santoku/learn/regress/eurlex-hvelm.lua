@@ -18,19 +18,19 @@ local cfg = {
   data = { max = nil },
   tok = { ngram = 7 },
   emb = {
-    n_landmarks = 16384,
+    n_landmarks = 8192*2,
     trace_tol = 0.01,
     k = 256,
-    kernel = "arccos0",
+    kernel = "arccos1",
   },
   ridge = {
     lambda = { def = 6.1894e-04 },
     propensity_a = { def = 0.06 },
     propensity_b = { def = 3.47 },
-    search_trials = 0,
+    search_trials = 400,
   },
   -- ann = true
-  gfm1 = { beta = { def = 1.004 }, search_trials = 0, k = 256 },
+  gfm1 = { beta = { def = 1.004 }, search_trials = 400, k = 256 },
   -- gfm2 = { beta = { def = 1.027 }, search_trials = 0, k = 256 },
 }
 
@@ -137,7 +137,7 @@ test("eurlex", function ()
   end
 
   local ngram_map, offsets, tokens, n_tokens = csr.tokenize({
-    texts = train.problems, hdc_ngram = cfg.tok.ngram, n_samples = train.n,
+    texts = train.text_iter(), hdc_ngram = cfg.tok.ngram, n_samples = train.n,
   })
   local bns_ids, bns_scores = csr_m.top_bns(
     offsets, tokens, train_label_off, train_label_nbr, n_tokens, n_labels)
@@ -152,7 +152,7 @@ test("eurlex", function ()
 
   str.printf("[Spectral] Cholesky trace_tol=%s kernel=%s\n",
     tostring(cfg.emb.trace_tol), cfg.emb.kernel)
-  local _, _, sp_enc, _, xtx, xty, col_mean, y_mean, label_counts = spectral.encode({
+  local train_codes, _, sp_enc, _, xtx, xty, col_mean, y_mean, label_counts = spectral.encode({
     offsets = sel_offsets, tokens = sel_tokens,
     n_samples = train.n, n_tokens = n_sel,
     feature_weights = bns_scores, kernel = cfg.emb.kernel,
@@ -165,9 +165,9 @@ test("eurlex", function ()
   str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
 
   local enc_sims_buf = dvec.create()
-  local function encode_texts(texts, n)
+  local function encode_texts(text_iter_fn, n)
     local _, off, tok = csr.tokenize({
-      texts = texts, hdc_ngram = cfg.tok.ngram,
+      texts = text_iter_fn(), hdc_ngram = cfg.tok.ngram,
       n_samples = n, ngram_map = ngram_map,
     })
     local st, so = csr.seq_select(tok, off, bns_ids)
@@ -177,11 +177,8 @@ test("eurlex", function ()
     })
   end
 
-  local dev_codes = encode_texts(dev.problems, dev.n)
-  local test_codes = encode_texts(test_set.problems, test_set.n)
-  dev.problems = nil; test_set.problems = nil
-  local train_codes = encode_texts(train.problems, train.n)
-  train.problems = nil
+  local dev_codes = encode_texts(dev.text_iter, dev.n)
+  local test_codes = encode_texts(test_set.text_iter, test_set.n)
   if not cfg.ann then sp_enc:shrink() end
   collectgarbage("collect")
 
