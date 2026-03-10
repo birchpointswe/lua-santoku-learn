@@ -29,15 +29,13 @@ local cfg = {
     pos_window = nil
   },
   ridge = {
-    lambda = { def = 1.8951e-03 },
+    lambda = { def = 6.1894e-04 },
     propensity_a = { def = 0.06 },
-    propensity_b = { def = 3.71 },
+    propensity_b = { def = 3.47 },
     search_trials = 200,
   },
   -- ann = true
-  -- knn = { k_neighbors = 256, k_labels = 256 },
-  -- gfm0 = { beta = { def = 1.0 }, search_trials = 0, k = 256 },
-  gfm1 = { beta = { def = 1.007 }, search_trials = 200, k = 256 },
+  gfm1 = { beta = { def = 1.004 }, search_trials = 0, k = 256 },
   -- gfm2 = { beta = { def = 1.027 }, search_trials = 0, k = 256 },
 }
 
@@ -199,33 +197,6 @@ test("eurlex csr+kernel", function ()
   collectgarbage("collect")
 
   local d0_tr_oracle, d0_dv_oracle, d0_ts_oracle
-  local gfm0_dm, gfm0_tm, gfm0_p
-  if cfg.knn then
-    str.printf("\n[#0] kNN baseline (mtx_topk + weighted label predict)\n")
-    local knn_K = cfg.knn.k_neighbors
-    local knn_k1 = cfg.knn.k_labels
-    local function knn_predict(codes)
-      local nn_off, nn_idx, nn_sim = codes:mtx_topk(train_codes, emb_d, knn_K)
-      return csr.knn_predict(nn_off, nn_idx, nn_sim, train_label_off, train_label_nbr, n_labels, knn_k1)
-    end
-    local d0_tr_off, d0_tr_nbr, d0_tr_sco = knn_predict(train_codes)
-    local d0_dv_off, d0_dv_nbr, d0_dv_sco = knn_predict(dev_codes)
-    local d0_ts_off, d0_ts_nbr, d0_ts_sco = knn_predict(test_codes)
-    str.printf("[kNN] predicted %s\n", sw())
-    d0_tr_oracle = eval_oracle(d0_tr_off, d0_tr_nbr, train_label_off, train_label_nbr)
-    d0_dv_oracle = eval_oracle(d0_dv_off, d0_dv_nbr, dev_label_off, dev_label_nbr)
-    d0_ts_oracle = eval_oracle(d0_ts_off, d0_ts_nbr, test_label_off, test_label_nbr)
-    str.printf("[Tr Orc]  %s\n", fmt_metrics(d0_tr_oracle))
-    str.printf("[Dv Orc]  %s\n", fmt_metrics(d0_dv_oracle))
-    str.printf("[Ts Orc]  %s %s\n", fmt_metrics(d0_ts_oracle), sw())
-    if cfg.gfm0 then
-      gfm0_dm, gfm0_tm, gfm0_p = run_gfm("GFM0", cfg.gfm0,
-        d0_tr_off, d0_tr_nbr, d0_tr_sco,
-        d0_dv_off, d0_dv_nbr, d0_dv_sco,
-        d0_ts_off, d0_ts_nbr, d0_ts_sco)
-    end
-    collectgarbage("collect")
-  end
 
   local dv_short_off, dv_short_nbr, ts_short_off, ts_short_nbr, tr_short_off, tr_short_nbr
   if cfg.ann then
@@ -332,11 +303,6 @@ test("eurlex csr+kernel", function ()
     str.printf("  %-10s %s\n", "Tr Orc", fmt_metrics(d0_tr_oracle))
     str.printf("  %-10s %s\n", "Dv Orc", fmt_metrics(d0_dv_oracle))
     str.printf("  %-10s %s\n", "Ts Orc", fmt_metrics(d0_ts_oracle))
-    if gfm0_p then
-      str.printf("  %-10s beta=%.3f\n", "GFM", gfm0_p.beta)
-      str.printf("  %-10s %s\n", "Dv GFM", fmt_metrics(gfm0_dm))
-      str.printf("  %-10s %s\n", "Ts GFM", fmt_metrics(gfm0_tm))
-    end
   end
 
   str.printf("\n#1: CSR+Kernel + OVA Ridge + Topk GFM\n")
