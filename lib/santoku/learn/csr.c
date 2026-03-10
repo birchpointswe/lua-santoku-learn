@@ -462,13 +462,111 @@ static inline size_t tm_csr_pack_ngrams (
   return count;
 }
 
+static int tm_csr_tokenize_fn (lua_State *L, int fn_idx, int64_t ngram, int64_t n_samples)
+{
+  lua_getfield(L, 1, "ngram_map");
+  bool have_map = !lua_isnil(L, -1);
+  tk_iumap_t *ngram_map;
+  int64_t next_id;
+  if (have_map) {
+    ngram_map = tk_iumap_peek(L, -1, "ngram_map");
+    next_id = (int64_t)tk_iumap_size(ngram_map);
+  } else {
+    lua_pop(L, 1);
+    ngram_map = tk_iumap_create(L, 0);
+    next_id = 0;
+  }
+  int map_idx = lua_gettop(L);
+  uint32_t map_end = tk_iumap_end(ngram_map);
+  tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t)(n_samples + 1), 0, 0);
+  offsets->n = (uint64_t)(n_samples + 1);
+  offsets->a[0] = 0;
+  size_t tok_cap = 1024 * 1024;
+  int64_t *tok_buf = (int64_t *)malloc(tok_cap * sizeof(int64_t));
+  int64_t tok_n = 0;
+  size_t pack_cap = 4096;
+  int64_t *packed = (int64_t *)malloc(pack_cap * sizeof(int64_t));
+  for (int64_t s = 0; s < n_samples; s++) {
+    lua_pushvalue(L, fn_idx);
+    lua_call(L, 0, 3);
+    if (lua_isnil(L, -3)) {
+      lua_pop(L, 3);
+      for (int64_t r = s; r < n_samples; r++)
+        offsets->a[r + 1] = tok_n;
+      break;
+    }
+    const char *str;
+    size_t len;
+    if (!lua_isnil(L, -2) && !lua_isnil(L, -1)) {
+      size_t full_len;
+      const char *full_str = lua_tolstring(L, -3, &full_len);
+      int64_t sub_s = lua_tointeger(L, -2);
+      int64_t sub_e = lua_tointeger(L, -1);
+      if (sub_s < 1) sub_s = 1;
+      if ((uint64_t)sub_e > full_len) sub_e = (int64_t)full_len;
+      str = full_str + (sub_s - 1);
+      len = (sub_e >= sub_s) ? (size_t)(sub_e - sub_s + 1) : 0;
+    } else {
+      str = lua_tolstring(L, -3, &len);
+    }
+    lua_pop(L, 3);
+    if (!str || len == 0) {
+      offsets->a[s + 1] = tok_n;
+      continue;
+    }
+    if (len > pack_cap) {
+      pack_cap = len;
+      packed = (int64_t *)realloc(packed, pack_cap * sizeof(int64_t));
+    }
+    size_t count = tm_csr_pack_ngrams(str, len, (int)ngram, packed);
+    for (size_t i = 0; i < count; i++) {
+      int64_t token_id;
+      if (!have_map) {
+        int absent;
+        uint32_t it = tk_iumap_put(ngram_map, packed[i], &absent);
+        if (absent) {
+          tk_iumap_setval(ngram_map, it, next_id);
+          token_id = next_id++;
+        } else {
+          token_id = tk_iumap_val(ngram_map, it);
+        }
+      } else {
+        uint32_t it = tk_iumap_get(ngram_map, packed[i]);
+        if (it == map_end) continue;
+        token_id = tk_iumap_val(ngram_map, it);
+      }
+      if (tok_n >= (int64_t)tok_cap) {
+        tok_cap *= 2;
+        tok_buf = (int64_t *)realloc(tok_buf, tok_cap * sizeof(int64_t));
+      }
+      tok_buf[tok_n++] = token_id;
+    }
+    offsets->a[s + 1] = tok_n;
+  }
+  free(packed);
+  tk_ivec_t *tok_out = tk_ivec_create(L, (uint64_t)tok_n, 0, 0);
+  tok_out->n = (uint64_t)tok_n;
+  if (tok_n > 0)
+    memcpy(tok_out->a, tok_buf, (size_t)tok_n * sizeof(int64_t));
+  free(tok_buf);
+  uint64_t n_tokens = have_map ? (uint64_t)tk_iumap_size(ngram_map) : (uint64_t)next_id;
+  lua_pushvalue(L, map_idx);
+  lua_pushvalue(L, map_idx + 1);
+  lua_pushvalue(L, map_idx + 2);
+  lua_pushinteger(L, (lua_Integer)n_tokens);
+  return 4;
+}
+
 static int tm_csr_tokenize (lua_State *L)
 {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
   lua_getfield(L, 1, "texts");
+  if (lua_isfunction(L, -1))
+    return tm_csr_tokenize_fn(L, lua_gettop(L), (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "hdc_ngram"),
+      (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "n_samples"));
   if (!lua_istable(L, -1))
-    return luaL_error(L, "tokenize: texts required");
+    return luaL_error(L, "tokenize: texts must be table or function");
   int texts_idx = lua_gettop(L);
   int64_t ngram = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "hdc_ngram");
   if (ngram < 1 || ngram > 8)
