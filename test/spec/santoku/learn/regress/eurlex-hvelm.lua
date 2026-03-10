@@ -5,7 +5,9 @@ local ds = require("santoku.learn.dataset")
 local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
 local ivec = require("santoku.ivec")
+local gfm = require("santoku.learn.gfm")
 local optimize = require("santoku.learn.optimize")
+local ridge = require("santoku.learn.ridge")
 local spectral = require("santoku.learn.spectral")
 local str = require("santoku.string")
 local test = require("santoku.test")
@@ -18,20 +20,20 @@ local cfg = {
   data = { max = nil },
   tok = { ngram = 7 },
   emb = {
-    n_landmarks = 8192*2,
+    n_landmarks = 8192, -- 16384 for max
     trace_tol = 0.01,
     k = 256,
-    kernel = "arccos1",
+    kernel = "cosine",
   },
   ridge = {
     lambda = { def = 6.1894e-04 },
     propensity_a = { def = 0.06 },
     propensity_b = { def = 3.47 },
-    search_trials = 400,
+    search_trials = 0,
   },
   -- ann = true
-  gfm1 = { beta = { def = 1.004 }, search_trials = 400, k = 256 },
-  -- gfm2 = { beta = { def = 1.027 }, search_trials = 0, k = 256 },
+  gfm1 = { k = 256 },
+  -- gfm2 = { k = 256 },
 }
 
 test("eurlex", function ()
@@ -102,38 +104,25 @@ test("eurlex", function ()
     tr_off, tr_nbr, tr_sco = csr_topk(tr_off, tr_nbr, tr_sco, k)
     dv_off, dv_nbr, dv_sco = csr_topk(dv_off, dv_nbr, dv_sco, k)
     ts_off, ts_nbr, ts_sco = csr_topk(ts_off, ts_nbr, ts_sco, k)
-    local gfm_obj, gfm_p = optimize.gfm({
+    local gfm_obj = gfm.create({
       pred_offsets = tr_off, pred_neighbors = tr_nbr,
       pred_scores = tr_sco, n_samples = train.n, n_labels = n_labels,
       expected_offsets = train_label_off, expected_neighbors = train_label_nbr,
-      val_offsets = dv_off, val_neighbors = dv_nbr,
-      val_scores = dv_sco, val_n_samples = dev.n,
-      val_expected_offsets = dev_label_off, val_expected_neighbors = dev_label_nbr,
-      beta = gfm_cfg.beta,
-      search_trials = gfm_cfg.search_trials,
-      each = function (ev)
-        local best = ev.global_best_score > -math.huge
-          and str.format(" (best=%.4f%s)", ev.global_best_score, ev.score > ev.global_best_score + 1e-6 and " ++" or "")
-          or ""
-        str.printf("[%s %d/%d] beta=%.3f miF1=%.4f%s %s\n",
-          tag, ev.trial, ev.trials, ev.params.beta,
-          ev.metrics.micro_f1, best, sw())
-      end,
     })
-    str.printf("[%s] beta=%.3f %s\n", tag, gfm_p.beta, sw())
+    str.printf("[%s] created %s\n", tag, sw())
     local dk = gfm_obj:predict({
       offsets = dv_off, neighbors = dv_nbr, scores = dv_sco,
-      n_samples = dev.n, beta = gfm_p.beta,
+      n_samples = dev.n,
     })
     local dm = eval_oracle(dv_off, dv_nbr, dev_label_off, dev_label_nbr, dk)
     local tk = gfm_obj:predict({
       offsets = ts_off, neighbors = ts_nbr, scores = ts_sco,
-      n_samples = test_set.n, beta = gfm_p.beta,
+      n_samples = test_set.n,
     })
     local tm = eval_oracle(ts_off, ts_nbr, test_label_off, test_label_nbr, tk)
     str.printf("[Dv %s] %s %s\n", tag, fmt_metrics(dm), sw())
     str.printf("[Ts %s] %s %s\n", tag, fmt_metrics(tm), sw())
-    return dm, tm, gfm_p
+    return dm, tm, gfm_obj
   end
 
   local ngram_map, offsets, tokens, n_tokens = csr.tokenize({
@@ -152,7 +141,7 @@ test("eurlex", function ()
 
   str.printf("[Spectral] Cholesky trace_tol=%s kernel=%s\n",
     tostring(cfg.emb.trace_tol), cfg.emb.kernel)
-  local train_codes, _, sp_enc, _, xtx, xty, col_mean, y_mean, label_counts = spectral.encode({
+  local train_codes, sp_enc, xtx, xty, col_mean, y_mean, label_counts = spectral.encode({
     offsets = sel_offsets, tokens = sel_tokens,
     n_samples = train.n, n_tokens = n_sel,
     feature_weights = bns_scores, kernel = cfg.emb.kernel,
@@ -235,24 +224,23 @@ test("eurlex", function ()
 
   local d1_dv_off, d1_dv_nbr, d1_dv_sco = ridge_obj:label(dev_codes, dev.n, k1)
   local d1_ts_off, d1_ts_nbr, d1_ts_sco = ridge_obj:label(test_codes, test_set.n, k1)
-  local d1_tr_off, d1_tr_nbr, d1_tr_sco = ridge_obj:label(train_codes, train.n, k1)
 
-  local d1_tr_oracle = eval_oracle(d1_tr_off, d1_tr_nbr, train_label_off, train_label_nbr)
   local d1_dv_oracle = eval_oracle(d1_dv_off, d1_dv_nbr, dev_label_off, dev_label_nbr)
   local d1_ts_oracle = eval_oracle(d1_ts_off, d1_ts_nbr, test_label_off, test_label_nbr)
-  str.printf("[Tr Orc]  %s\n", fmt_metrics(d1_tr_oracle))
   str.printf("[Dv Orc]  %s\n", fmt_metrics(d1_dv_oracle))
   str.printf("[Ts Orc]  %s %s\n", fmt_metrics(d1_ts_oracle), sw())
 
-  local gfm1_dm, gfm1_tm, gfm1_p = run_gfm("GFM", cfg.gfm1,
-    d1_tr_off, d1_tr_nbr, d1_tr_sco,
+  local tr_off, tr_nbr, tr_sco = ridge_obj:label(train_codes, train.n, k1)
+
+  local gfm1_dm, gfm1_tm = run_gfm("GFM", cfg.gfm1,
+    tr_off, tr_nbr, tr_sco,
     d1_dv_off, d1_dv_nbr, d1_dv_sco,
     d1_ts_off, d1_ts_nbr, d1_ts_sco)
 
   collectgarbage("collect")
 
   local d2_tr_oracle, d2_dv_oracle, d2_ts_oracle
-  local gfm2_dm, gfm2_tm, gfm2_p
+  local gfm2_dm, gfm2_tm
   if tr_short_off and cfg.gfm2 then
     str.printf("\n[#2] RP-Cholesky + ANN Shortlist + OVA Ridge + Topk GFM\n")
     str.printf("[OVA] Scoring shortlists\n")
@@ -272,7 +260,7 @@ test("eurlex", function ()
     str.printf("[Dv Orc]  %s\n", fmt_metrics(d2_dv_oracle))
     str.printf("[Ts Orc]  %s %s\n", fmt_metrics(d2_ts_oracle), sw())
     if cfg.gfm2 then
-      gfm2_dm, gfm2_tm, gfm2_p = run_gfm("GFM", cfg.gfm2,
+      gfm2_dm, gfm2_tm = run_gfm("GFM", cfg.gfm2,
         tr_short_off, tr_sorted_nbr, tr_sorted_sc,
         dv_short_off, dv_sorted_nbr, dv_sorted_sc,
         ts_short_off, ts_sorted_nbr, ts_sorted_sc)
@@ -283,8 +271,6 @@ test("eurlex", function ()
   str.printf("\n#1: RP-Cholesky + OVA Ridge + Topk GFM\n")
   str.printf("  %-10s lambda=%.4e pa=%.4f pb=%.4f\n",
     "Ridge", best_params.lambda, best_params.propensity_a, best_params.propensity_b)
-  str.printf("  %-10s beta=%.3f\n", "GFM", gfm1_p.beta)
-  str.printf("  %-10s %s\n", "Tr Orc", fmt_metrics(d1_tr_oracle))
   str.printf("  %-10s %s\n", "Dv Orc", fmt_metrics(d1_dv_oracle))
   str.printf("  %-10s %s\n", "Ts Orc", fmt_metrics(d1_ts_oracle))
   str.printf("  %-10s %s\n", "Dv GFM", fmt_metrics(gfm1_dm))
@@ -295,8 +281,7 @@ test("eurlex", function ()
     str.printf("  %-10s %s\n", "Tr Orc", fmt_metrics(d2_tr_oracle))
     str.printf("  %-10s %s\n", "Dv Orc", fmt_metrics(d2_dv_oracle))
     str.printf("  %-10s %s\n", "Ts Orc", fmt_metrics(d2_ts_oracle))
-    if gfm2_p then
-      str.printf("  %-10s beta=%.3f\n", "GFM", gfm2_p.beta)
+    if gfm2_dm then
       str.printf("  %-10s %s\n", "Dv GFM", fmt_metrics(gfm2_dm))
       str.printf("  %-10s %s\n", "Ts GFM", fmt_metrics(gfm2_tm))
     end

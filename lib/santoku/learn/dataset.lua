@@ -1,6 +1,5 @@
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local booleanizer = require("santoku.learn.booleanizer")
-local inv = require("santoku.learn.inv")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
 local fs = require("santoku.fs")
@@ -87,27 +86,6 @@ M.split_binary_mnist = function (dataset, ratio, tvr)
       _split_binary_mnist(dataset, n_train_total + 1, dataset.n),
       _split_binary_mnist(dataset, n_train + 1, n_train_total)
   end
-end
-
-M.classes_index = function (ids, classes)
-  local fids = ivec.create(classes:size())
-  local nfid = 0
-  local fididx = {}
-  for idx, lbl in classes:ieach() do
-    local fid = fididx[lbl]
-    if not fid then
-      fid = nfid
-      nfid = nfid + 1
-      fididx[lbl] = fid
-    end
-    fids:set(idx, fid)
-  end
-  for idx, fid in fids:ieach() do
-    fids:set(idx, idx * nfid + fid)
-  end
-  local index = inv.create({ features = nfid })
-  index:add(fids, ids)
-  return index
 end
 
 M.read_imdb = function (dir, max)

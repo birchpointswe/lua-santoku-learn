@@ -393,10 +393,6 @@ static int tk_gfm_predict_lua (lua_State *L)
   tk_dvec_t *scores = tk_dvec_peek(L, -1, "scores");
   lua_pop(L, 3);
   int64_t ns = (int64_t)tk_lua_fcheckunsigned(L, 2, "gfm.predict", "n_samples");
-  double beta_sq = 1.0;
-  lua_getfield(L, 2, "beta");
-  if (!lua_isnil(L, -1)) { double b = lua_tonumber(L, -1); beta_sq = b * b; }
-  lua_pop(L, 1);
 
   double *lth = g->label_thresholds;
   double *lva = g->label_values;
@@ -437,7 +433,7 @@ static int tk_gfm_predict_lua (lua_State *L)
           prefix[si] += isotonic_lookup(sth, sva, soff[si], soff[si + 1], cal_p, 0.0);
         double ef = 0;
         for (int64_t si = 1; si <= pis_max_s; si++)
-          ef += prefix[si] * (1.0 + beta_sq) / (beta_sq * (double)si + (double)k);
+          ef += prefix[si] * 2.0 / ((double)si + (double)k);
         if (ef > best_ef) { best_ef = ef; best_k = k; }
       }
 

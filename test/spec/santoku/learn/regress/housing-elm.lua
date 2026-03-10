@@ -39,7 +39,7 @@ test("housing regressor", function ()
 
   str.printf("[Spectral Cat] Cholesky kernel=%s\n", cfg.cat_emb.kernel)
   local train_cat_dv = csr_m.to_dvec(train.bit_offsets, train.bit_neighbors, nil, train.n, n_cat)
-  local train_cat_codes, _, cat_enc = spectral.encode({
+  local train_cat_codes, cat_enc = spectral.encode({
     codes = train_cat_dv, n_samples = train.n,
     kernel = cfg.cat_emb.kernel,
     n_landmarks = cfg.cat_emb.n_landmarks, trace_tol = cfg.cat_emb.trace_tol,
@@ -50,7 +50,7 @@ test("housing regressor", function ()
   str.printf("[Spectral Cat] emb_d=%d %s\n", cat_d, sw())
 
   str.printf("[Spectral Cont] Cholesky kernel=%s\n", cfg.cont_emb.kernel)
-  local train_cont_codes, _, cont_enc = spectral.encode({
+  local train_cont_codes, cont_enc = spectral.encode({
     codes = train.continuous, n_samples = train.n,
     kernel = cfg.cont_emb.kernel,
     n_landmarks = cfg.cont_emb.n_landmarks, trace_tol = cfg.cont_emb.trace_tol,
