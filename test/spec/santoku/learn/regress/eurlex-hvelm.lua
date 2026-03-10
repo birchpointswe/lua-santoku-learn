@@ -24,7 +24,7 @@ local cfg = {
     trace_tol = 0.01,
     cholesky = true,
     n_dims = nil,
-    k = 256,
+    k = 1024,
     kernel = "arccos1",
     pos_window = nil
   },
@@ -32,10 +32,10 @@ local cfg = {
     lambda = { def = 6.1894e-04 },
     propensity_a = { def = 0.06 },
     propensity_b = { def = 3.47 },
-    search_trials = 200,
+    search_trials = 0,
   },
   -- ann = true
-  gfm1 = { beta = { def = 1.004 }, search_trials = 0, k = 256 },
+  gfm1 = { beta = { def = 1.004 }, search_trials = 0, k = 1024 },
   -- gfm2 = { beta = { def = 1.027 }, search_trials = 0, k = 256 },
 }
 
