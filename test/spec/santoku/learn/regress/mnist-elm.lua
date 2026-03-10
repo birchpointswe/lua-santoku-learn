@@ -1,7 +1,8 @@
 local arr = require("santoku.array")
+local csr_m = require("santoku.csr")
 local ds = require("santoku.learn.dataset")
+local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
-local hdc = require("santoku.learn.hdc")
 local optimize = require("santoku.learn.optimize")
 local spectral = require("santoku.learn.spectral")
 local str = require("santoku.string")
@@ -13,8 +14,7 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   data = { ttr = 0.8, tvr = 0.1, max = nil, features = 784 },
-  hdc = { d = 2^16, ngram = 5, row_length = 28 },
-  emb = { n_landmarks = 8192, trace_tol = 0.01, cholesky = true, n_dims = nil },
+  emb = { n_landmarks = 8192, trace_tol = 0.01, cholesky = true, n_dims = nil, pos_window = nil, row_length = nil, kernel = "arccos1" },
   ridge = {
     lambda = { def = 2.3163e-05 },
     propensity_a = { def = 0.55 },
@@ -25,7 +25,7 @@ local cfg = {
   },
 }
 
-test("mnist hdc", function ()
+test("mnist csr+pos2d", function ()
 
   local stopwatch = utc.stopwatch()
   local function sw()
@@ -38,45 +38,50 @@ test("mnist hdc", function ()
   local train, test_set, validate = ds.split_binary_mnist(dataset, cfg.data.ttr, cfg.data.tvr)
   local n_features = cfg.data.features
   local n_classes = cfg.ridge.classes
-  local label_off, label_nbr = train.solutions:bits_to_csr(train.n, n_classes)
-  local val_label_off, val_label_nbr = validate.solutions:bits_to_csr(validate.n, n_classes)
+  local label_off, label_nbr = train.sol_offsets, train.sol_neighbors
+  local val_label_off, val_label_nbr = validate.sol_offsets, validate.sol_neighbors
   str.printf("[Data] train=%d val=%d test=%d features=%d classes=%d %s\n",
     train.n, validate.n, test_set.n, n_features, n_classes, sw())
 
-  str.printf("[HDC] Encoding train\n")
-  local train_bits = require("santoku.ivec").create()
-  dataset.problems:bits_select(nil, train.ids, n_features, train_bits)
-  local train_bmp = train_bits:bits_to_cvec(train.n, n_features)
-  train_bits = nil -- luacheck: ignore
-  local hdc_enc, train_cvec = hdc.create({
-    bits = train_bmp, n_dims = n_features,
-    n_samples = train.n, d = cfg.hdc.d,
-    hdc_ngram = cfg.hdc.ngram, row_length = cfg.hdc.row_length,
+  local train_p_off, train_p_nbr = csr_m.subsample(
+    dataset.problem_offsets, dataset.problem_neighbors, train.ids)
+
+  str.printf("[Spectral] Cholesky trace_tol=%s pos_window=%s row_length=%s\n",
+    tostring(cfg.emb.trace_tol), tostring(cfg.emb.pos_window), tostring(cfg.emb.row_length))
+  local train_codes, _, sp_enc = spectral.encode({
+    kernel = cfg.emb.kernel,
+    offsets = train_p_off, tokens = train_p_nbr,
+    n_samples = train.n, n_tokens = n_features,
+    n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
+    cholesky = cfg.emb.cholesky, n_dims = cfg.emb.n_dims,
+    pos_window = cfg.emb.pos_window, row_length = cfg.emb.row_length,
   })
-  str.printf("[HDC] d=%d %s\n", cfg.hdc.d, sw())
-
-  str.printf("[Spectral] Cholesky trace_tol=%s\n", tostring(cfg.emb.trace_tol))
-  local _, _, sp_enc, _, xtx, xty, col_mean, y_mean, label_counts, pre_mean, pre_istd =
-    spectral.encode({
-      bits = train_cvec, n_samples = train.n, d_bits = cfg.hdc.d,
-      n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
-      cholesky = cfg.emb.cholesky, n_dims = cfg.emb.n_dims,
-      label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
-    })
+  train_p_off = nil; train_p_nbr = nil -- luacheck: ignore
+  collectgarbage("collect")
   local emb_d = sp_enc:dims()
-
-  str.printf("[HDC] Encoding val\n")
-  local val_bits = require("santoku.ivec").create()
-  dataset.problems:bits_select(nil, validate.ids, n_features, val_bits)
-  local val_bmp = val_bits:bits_to_cvec(validate.n, n_features)
-  val_bits = nil -- luacheck: ignore
-  local val_codes = sp_enc:encode(hdc_enc:encode({ bits = val_bmp, n_samples = validate.n }), validate.n)
+  local xtx, xty, col_mean, y_mean, label_counts = spectral.gram({
+    codes = train_codes, n_samples = train.n, n_dims = emb_d,
+    label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
+  })
   str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
 
+  local enc_sims_buf = dvec.create()
+  local enc_out_buf = dvec.create()
+  local function encode(ids, n)
+    local p_off, p_nbr = csr_m.subsample(
+      dataset.problem_offsets, dataset.problem_neighbors, ids)
+    return sp_enc:encode({
+      offsets = p_off, tokens = p_nbr, n_samples = n,
+      sims = enc_sims_buf, output = enc_out_buf,
+    })
+  end
+
+  local val_codes = encode(validate.ids, validate.n)
+
   str.printf("[Ridge] Training\n")
-  local _, ridge_obj, best_params, _, _, _, std = optimize.ridge({
+  local _, ridge_obj, best_params = optimize.ridge({
     XtX = xtx, XtY = xty, col_mean = col_mean, y_mean = y_mean,
-    label_counts = label_counts, pre_mean = pre_mean, pre_istd = pre_istd,
+    label_counts = label_counts,
     n_samples = train.n, n_dims = emb_d, n_labels = n_classes,
     val_codes = val_codes, val_n_samples = validate.n,
     val_expected_offsets = val_label_off, val_expected_neighbors = val_label_nbr,
@@ -85,24 +90,23 @@ test("mnist hdc", function ()
     k = cfg.ridge.k, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
+  xtx = nil; xty = nil; col_mean = nil; y_mean = nil; label_counts = nil
+  collectgarbage("collect")
   str.printf("[Ridge] lambda=%.4e pa=%.4f pb=%.4f %s\n",
     best_params.lambda, best_params.propensity_a, best_params.propensity_b, sw())
 
   str.printf("[Eval] Labeling splits\n")
   local val_off, val_labels = ridge_obj:label(val_codes, validate.n, 1)
-  local test_bits = require("santoku.ivec").create()
-  dataset.problems:bits_select(nil, test_set.ids, n_features, test_bits)
-  local test_bmp = test_bits:bits_to_cvec(test_set.n, n_features)
-  test_bits = nil -- luacheck: ignore
-  local test_codes = sp_enc:encode(hdc_enc:encode({ bits = test_bmp, n_samples = test_set.n }), test_set.n)
-  test_codes:mtx_standardize(emb_d, std.pre_mean, std.pre_istd)
+  local test_codes = encode(test_set.ids, test_set.n)
   local _, test_labels = ridge_obj:label(test_codes, test_set.n, 1)
   str.printf("[Eval] Labels done %s\n", sw())
 
-  local val_stats = eval.class_accuracy(val_labels, validate.solutions, validate.n, n_classes)
-  local test_stats = eval.class_accuracy(test_labels, test_set.solutions, test_set.n, n_classes)
-  str.printf("[Class] F1: val=%.2f test=%.2f %s\n",
-    val_stats.f1, test_stats.f1, sw())
+  local _, train_labels = ridge_obj:label(train_codes, train.n, 1)
+  local train_stats = eval.class_accuracy(train_labels, train.sol_offsets, train.sol_neighbors, train.n, n_classes)
+  local val_stats = eval.class_accuracy(val_labels, validate.sol_offsets, validate.sol_neighbors, validate.n, n_classes)
+  local test_stats = eval.class_accuracy(test_labels, test_set.sol_offsets, test_set.sol_neighbors, test_set.n, n_classes)
+  str.printf("[Class] F1: train=%.2f val=%.2f test=%.2f %s\n",
+    train_stats.f1, val_stats.f1, test_stats.f1, sw())
 
   local _, val_oracle = eval.retrieval_ks({
     pred_offsets = val_off, pred_neighbors = val_labels,

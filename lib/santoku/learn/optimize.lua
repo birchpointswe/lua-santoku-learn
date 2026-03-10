@@ -1,6 +1,7 @@
 local tm = require("santoku.learn.regressor")
 local evaluator = require("santoku.learn.evaluator")
 local csr = require("santoku.learn.csr")
+local csr_m = require("santoku.csr")
 local gp = require("santoku.learn.gp")
 
 local cvec = require("santoku.cvec")
@@ -650,18 +651,13 @@ local function optimize_tm (args)
 
   local search_weights = args.flat and nil or args.output_weights
 
-  local search_tokens = args.tokens
+  local search_tok_off = args.token_offsets
+  local search_tok_nbr = args.token_neighbors
   if search_ids then
-    search_tokens = ivec.create()
-    args.tokens:bits_select(nil, search_ids, args.n_tokens, search_tokens)
+    search_tok_off, search_tok_nbr = csr_m.subsample(args.token_offsets, args.token_neighbors, search_ids)
   end
-  local search_csc_offsets, search_csc_indices
-  if search_ids then
-    search_csc_offsets, search_csc_indices = csr.to_csc(search_tokens, search_n, args.n_tokens)
-  else
-    search_csc_offsets = args.csc_offsets
-    search_csc_indices = args.csc_indices
-  end
+  local search_tokens = csr.to_bits(search_tok_off, search_tok_nbr, search_n, args.n_tokens)
+  local search_csc_offsets, search_csc_indices = csr_m.transpose(search_tok_off, search_tok_nbr, search_n, args.n_tokens)
   local search_ranking = args.absorb_ranking
   local search_ranking_offsets = args.flat and nil or args.absorb_ranking_offsets
   local search_data = {
@@ -757,11 +753,13 @@ local function optimize_tm (args)
   constrain_tm_params(best_params)
   best_params.output_weights = args.flat and nil or args.output_weights
   local final_tm = create_final_tm(args, best_params, max_features)
+  local final_tokens = csr.to_bits(args.token_offsets, args.token_neighbors, args.samples, args.n_tokens)
+  local final_csc_off, final_csc_idx = csr_m.transpose(args.token_offsets, args.token_neighbors, args.samples, args.n_tokens)
   local final_train_args = {
     samples = args.samples,
-    tokens = args.tokens,
-    csc_offsets = args.csc_offsets,
-    csc_indices = args.csc_indices,
+    tokens = final_tokens,
+    csc_offsets = final_csc_off,
+    csc_indices = final_csc_idx,
     absorb_ranking = args.absorb_ranking,
     absorb_ranking_offsets = args.flat and nil or args.absorb_ranking_offsets,
     absorb_ranking_global = args.absorb_ranking_global,
@@ -796,6 +794,7 @@ M.ridge = function (args)
     n_samples = args.n_samples, n_dims = n_dims,
     XtX = args.XtX, XtY = args.XtY,
     col_mean = args.col_mean, y_mean = args.y_mean,
+    destructive = true,
   }
   if dense then
     ga.n_targets = err.assert(args.n_targets, "n_targets required for dense ridge")
@@ -804,6 +803,9 @@ M.ridge = function (args)
     ga.label_counts = args.label_counts
   end
   local gram = ridge.prepare(ga)
+  ga = nil
+  args.XtX = nil; args.XtY = nil
+  args.col_mean = nil; args.y_mean = nil; args.label_counts = nil
   local param_names
   if dense then param_names = { "lambda" }
   else param_names = { "lambda", "propensity_a", "propensity_b" } end

@@ -1,7 +1,6 @@
 #include <santoku/iuset.h>
 #include <santoku/pumap.h>
 #include <santoku/learn/inv.h>
-#include <santoku/learn/ann.h>
 #include <santoku/learn/centroid.h>
 #include <santoku/learn/csr.h>
 #include <santoku/ivec.h>
@@ -49,11 +48,12 @@ static inline int tm_class_accuracy (lua_State *L)
 {
   lua_settop(L, 5);
   tk_ivec_t *predicted = tk_ivec_peek(L, 1, "predicted");
-  tk_ivec_t *expected = tk_ivec_peek(L, 2, "expected");
-  unsigned int n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
-  unsigned int n_dims = tk_lua_checkunsigned(L, 4, "n_classes");
+  tk_ivec_t *exp_offsets = tk_ivec_peek(L, 2, "expected_offsets");
+  tk_ivec_t *exp_neighbors = tk_ivec_peek(L, 3, "expected_neighbors");
+  unsigned int n_samples = tk_lua_checkunsigned(L, 4, "n_samples");
+  unsigned int n_dims = tk_lua_checkunsigned(L, 5, "n_classes");
   if (n_dims == 0)
-    tk_lua_verror(L, 3, "class_accuracy", "n_classes", "must be > 0");
+    tk_lua_verror(L, 4, "class_accuracy", "n_classes", "must be > 0");
 
   atomic_ulong *TP = tk_malloc(L, n_dims * sizeof(atomic_ulong));
   atomic_ulong *FP = tk_malloc(L, n_dims * sizeof(atomic_ulong));
@@ -69,11 +69,9 @@ static inline int tm_class_accuracy (lua_State *L)
   }
 
   unsigned int *true_classes = (unsigned int *)calloc(n_samples, sizeof(unsigned int));
-  for (uint64_t j = 0; j < expected->n; j++) {
-    int64_t v = expected->a[j];
-    unsigned int s = (unsigned int)(v / n_dims);
-    unsigned int c = (unsigned int)(v % n_dims);
-    if (s < n_samples) true_classes[s] = c;
+  for (unsigned int s = 0; s < n_samples; s++) {
+    int64_t lo = exp_offsets->a[s], hi = exp_offsets->a[s + 1];
+    if (lo < hi) true_classes[s] = (unsigned int)exp_neighbors->a[lo];
   }
   #pragma omp parallel for schedule(static)
   for (unsigned int i = 0; i < n_samples; i ++) {
@@ -1307,7 +1305,6 @@ static inline int tm_ranking_accuracy (lua_State *L)
     kernel_decay = tk_lua_foptnumber(L, 1, "ranking_accuracy", "kernel_decay", 0.0);
   }
 
-  tk_ann_t *ann = NULL;
   char *codes = NULL;
   double *raw_codes = NULL;
 
@@ -1317,11 +1314,7 @@ static inline int tm_ranking_accuracy (lua_State *L)
   } else if (codes_cvec) {
     codes = codes_cvec->a;
   } else {
-    lua_getfield(L, 1, "index");
-    ann = tk_ann_peekopt(L, -1);
-    lua_pop(L, 1);
-    if (!ann)
-      tk_lua_verror(L, 3, "ranking_accuracy", "codes/index/raw_codes/kernel_index", "codes, raw_codes, index, or kernel_index required");
+    tk_lua_verror(L, 3, "ranking_accuracy", "codes/raw_codes/kernel_index", "codes, raw_codes, or kernel_index required");
   }
 
   tk_ivec_t *code_ids = NULL;
@@ -1410,8 +1403,6 @@ static inline int tm_ranking_accuracy (lua_State *L)
           query_raw = raw_codes + (uint64_t)query_code_idx * n_dims;
         } else if (codes) {
           query_code = codes + (uint64_t)query_code_idx * chunks;
-        } else {
-          query_code = tk_ann_get(ann, query_id);
         }
         if (!kernel_index && !query_code && !query_raw)
           continue;
@@ -1443,19 +1434,11 @@ static inline int tm_ranking_accuracy (lua_State *L)
             double dist = 1.0 - ((denom > 1e-12) ? dot / denom : 0.0);
             tk_rvec_push(query_neighbors_raw, tk_rank(neighbor_eval_idx, dist));
           } else {
-            char *neighbor_code = codes
-              ? NULL
-              : tk_ann_get(ann, neighbor_id);
-
-            if (codes) {
-              khint_t nbr_khi = tk_iumap_get(code_id_to_idx, neighbor_id);
-              if (nbr_khi == tk_iumap_end(code_id_to_idx))
-                continue;
-              int64_t neighbor_code_idx = tk_iumap_val(code_id_to_idx, nbr_khi);
-              neighbor_code = codes + (uint64_t)neighbor_code_idx * chunks;
-            } else if (!neighbor_code) {
+            khint_t nbr_khi = tk_iumap_get(code_id_to_idx, neighbor_id);
+            if (nbr_khi == tk_iumap_end(code_id_to_idx))
               continue;
-            }
+            int64_t neighbor_code_idx = tk_iumap_val(code_id_to_idx, nbr_khi);
+            char *neighbor_code = codes + (uint64_t)neighbor_code_idx * chunks;
 
             uint64_t hamming_dist = tk_cvec_bits_hamming_serial(
               (const unsigned char*)query_code,

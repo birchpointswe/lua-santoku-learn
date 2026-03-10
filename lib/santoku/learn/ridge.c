@@ -19,6 +19,9 @@ typedef struct {
   tk_dvec_t *intercept;
   int64_t n_dims;
   int64_t n_labels;
+  double *Wt;
+  double *sbuf;
+  uint64_t sbuf_size;
   bool destroyed;
 } tk_ridge_t;
 
@@ -28,19 +31,24 @@ static inline tk_ridge_t *tk_ridge_peek (lua_State *L, int i) {
 
 static inline int tk_ridge_gc (lua_State *L) {
   tk_ridge_t *r = tk_ridge_peek(L, 1);
+  free(r->Wt);
+  free(r->sbuf);
   r->W = NULL;
   r->intercept = NULL;
+  r->Wt = NULL;
+  r->sbuf = NULL;
   r->destroyed = true;
   return 0;
 }
 
-static inline double *tk_ridge_transpose_w (tk_ridge_t *r) {
+static inline double *tk_ridge_get_wt (tk_ridge_t *r) {
+  if (r->Wt) return r->Wt;
   int64_t d = r->n_dims, nl = r->n_labels;
-  double *wt = (double *)malloc((uint64_t)nl * (uint64_t)d * sizeof(double));
+  r->Wt = (double *)malloc((uint64_t)nl * (uint64_t)d * sizeof(double));
   for (int64_t i = 0; i < d; i++)
     for (int64_t j = 0; j < nl; j++)
-      wt[j * d + i] = r->W->a[i * nl + j];
-  return wt;
+      r->Wt[j * d + i] = r->W->a[i * nl + j];
+  return r->Wt;
 }
 
 
@@ -63,7 +71,7 @@ static inline int tk_ridge_encode_lua (lua_State *L) {
   if (sparse) {
     tk_ivec_t *csr_off = tk_ivec_peek(L, 8, "csr_off");
     tk_ivec_t *csr_nbr = tk_ivec_peek(L, 9, "csr_nbr");
-    double *wt = tk_ridge_transpose_w(r);
+    double *wt = tk_ridge_get_wt(r);
     double *intercept = r->intercept ? r->intercept->a : NULL;
     #pragma omp parallel
     {
@@ -93,22 +101,25 @@ static inline int tk_ridge_encode_lua (lua_State *L) {
       }
       free(heap.a);
     }
-    free(wt);
   } else {
     int64_t block = 256;
     while (block > 1 && (uint64_t)block * (uint64_t)nl * sizeof(double) > 64ULL * 1024 * 1024)
       block /= 2;
-    double *sbuf = (double *)malloc((uint64_t)block * (uint64_t)nl * sizeof(double));
+    uint64_t need = (uint64_t)block * (uint64_t)nl;
+    if (!r->sbuf || r->sbuf_size < need) {
+      free(r->sbuf);
+      r->sbuf = (double *)malloc(need * sizeof(double));
+      r->sbuf_size = need;
+    }
     for (int64_t base = 0; base < n; base += block) {
       int64_t bs = (base + block <= n) ? block : n - base;
       cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
         (int)bs, (int)nl, (int)d, 1.0, codes_a + base * d, (int)d,
-        r->W->a, (int)nl, 0.0, sbuf, (int)nl);
+        r->W->a, (int)nl, 0.0, r->sbuf, (int)nl);
       if (r->intercept)
-        tk_gram_add_intercept(sbuf, bs, nl, r->intercept->a);
-      tk_gram_topk_block(sbuf, bs, nl, k, base, offsets, labels, scores_out);
+        tk_gram_add_intercept(r->sbuf, bs, nl, r->intercept->a);
+      tk_gram_topk_block(r->sbuf, bs, nl, k, base, offsets, labels, scores_out);
     }
-    free(sbuf);
   }
   lua_pushvalue(L, offsets_idx);
   lua_pushvalue(L, labels_idx);
@@ -165,8 +176,8 @@ static inline int tk_ridge_transform_lua (lua_State *L) {
     tk_ivec_t *csr_off = tk_ivec_peek(L, 4, "csr_off");
     tk_ivec_t *csr_nbr = tk_ivec_peek(L, 5, "csr_nbr");
     int64_t total = csr_off->a[n];
-    tk_dvec_t *out = tk_dvec_create(L, (uint64_t)total, NULL, NULL);
-    double *wt = tk_ridge_transpose_w(r);
+    TK_DVEC_BUF(out, 6, total);
+    double *wt = tk_ridge_get_wt(r);
     double *intercept = r->intercept ? r->intercept->a : NULL;
     #pragma omp parallel for schedule(dynamic, 64)
     for (int64_t i = 0; i < n; i++) {
@@ -179,7 +190,7 @@ static inline int tk_ridge_transform_lua (lua_State *L) {
         out->a[j] = s;
       }
     }
-    free(wt);
+    lua_pushvalue(L, out_idx);
     return 1;
   }
   TK_DVEC_BUF(out, 4, n * nl);
@@ -207,12 +218,18 @@ static inline int tk_ridge_precompute_lua (lua_State *L) {
   int64_t n = (int64_t)tk_lua_fcheckunsigned(L, 1, "prepare", "n_samples");
   int64_t d = (int64_t)tk_lua_fcheckunsigned(L, 1, "prepare", "n_dims");
 
+  lua_getfield(L, 1, "destructive");
+  bool destructive = lua_toboolean(L, -1);
+  lua_pop(L, 1);
+
   lua_getfield(L, 1, "XtX");
   tk_dvec_t *in_xtx = tk_dvec_peek(L, -1, "XtX");
-  lua_pop(L, 1);
+  int in_xtx_idx = lua_gettop(L);
+  if (!destructive) lua_pop(L, 1);
   lua_getfield(L, 1, "XtY");
   tk_dvec_t *in_xty = tk_dvec_peek(L, -1, "XtY");
-  lua_pop(L, 1);
+  int in_xty_idx = lua_gettop(L);
+  if (!destructive) lua_pop(L, 1);
   lua_getfield(L, 1, "col_mean");
   tk_dvec_t *in_cm = tk_dvec_peek(L, -1, "col_mean");
   lua_pop(L, 1);
@@ -233,14 +250,28 @@ static inline int tk_ridge_precompute_lua (lua_State *L) {
   int cm_idx = lua_gettop(L);
   memcpy(cm_dvec->a, in_cm->a, (uint64_t)d * sizeof(double));
 
-  tk_dvec_t *ev_dvec = tk_dvec_create(L, (uint64_t)(d * d), NULL, NULL);
-  int ev_idx = lua_gettop(L);
-  memcpy(ev_dvec->a, in_xtx->a, (uint64_t)(d * d) * sizeof(double));
+  tk_dvec_t *ev_dvec;
+  int ev_idx;
+  if (destructive) {
+    ev_dvec = in_xtx;
+    ev_idx = in_xtx_idx;
+  } else {
+    ev_dvec = tk_dvec_create(L, (uint64_t)(d * d), NULL, NULL);
+    ev_idx = lua_gettop(L);
+    memcpy(ev_dvec->a, in_xtx->a, (uint64_t)(d * d) * sizeof(double));
+  }
 
   uint64_t dnl = (uint64_t)d * (uint64_t)nl;
-  tk_dvec_t *work_dvec = tk_dvec_create(L, dnl, NULL, NULL);
-  int work_idx = lua_gettop(L);
-  memcpy(work_dvec->a, in_xty->a, dnl * sizeof(double));
+  tk_dvec_t *work_dvec;
+  int work_idx;
+  if (destructive) {
+    work_dvec = in_xty;
+    work_idx = in_xty_idx;
+  } else {
+    work_dvec = tk_dvec_create(L, dnl, NULL, NULL);
+    work_idx = lua_gettop(L);
+    memcpy(work_dvec->a, in_xty->a, dnl * sizeof(double));
+  }
   double *xty = work_dvec->a;
 
   cblas_dsyr(CblasRowMajor, CblasUpper, (int)d, -1.0,
@@ -412,6 +443,9 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     r->intercept = b_dvec;
     r->n_dims = d;
     r->n_labels = nl;
+    r->Wt = NULL;
+    r->sbuf = NULL;
+    r->sbuf_size = 0;
     r->destroyed = false;
     lua_newtable(L);
     lua_pushvalue(L, W_idx);
@@ -444,7 +478,7 @@ static inline int tk_ridge_load_lua (lua_State *L) {
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 1 && version != 2) {
+  if (version != 2) {
     tk_lua_fclose(L, fh);
     return luaL_error(L, "unsupported ridge version %d", (int)version);
   }
@@ -455,13 +489,11 @@ static inline int tk_ridge_load_lua (lua_State *L) {
   int W_idx = lua_gettop(L);
   tk_dvec_t *intercept = NULL;
   int b_idx = 0;
-  if (version >= 2) {
-    uint8_t has_intercept;
-    tk_lua_fread(L, &has_intercept, sizeof(uint8_t), 1, fh);
-    if (has_intercept) {
-      intercept = tk_dvec_load(L, fh);
-      b_idx = lua_gettop(L);
-    }
+  uint8_t has_intercept;
+  tk_lua_fread(L, &has_intercept, sizeof(uint8_t), 1, fh);
+  if (has_intercept) {
+    intercept = tk_dvec_load(L, fh);
+    b_idx = lua_gettop(L);
   }
   tk_lua_fclose(L, fh);
   tk_ridge_t *r = tk_lua_newuserdata(L, tk_ridge_t,
@@ -471,6 +503,9 @@ static inline int tk_ridge_load_lua (lua_State *L) {
   r->intercept = intercept;
   r->n_dims = n_dims;
   r->n_labels = n_labels;
+  r->Wt = NULL;
+  r->sbuf = NULL;
+  r->sbuf_size = 0;
   r->destroyed = false;
   lua_newtable(L);
   lua_pushvalue(L, W_idx);
