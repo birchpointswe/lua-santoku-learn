@@ -15,7 +15,7 @@ local cfg = {
   data = { ttr = 0.8, tvr = 0.10, max = nil },
   cat_emb = { n_landmarks = 4096, trace_tol = 0.01, cholesky = true, n_dims = nil, kernel = "arccos1" },
   cont_emb = { n_landmarks = 4096, trace_tol = 0.01, cholesky = true, n_dims = nil, kernel = "arccos1" },
-  ridge = { lambda = { def = 1.5612e-02 }, search_trials = 0 },
+  ridge = { lambda = { def = 1.5612e-02 }, search_trials = 200 },
 }
 
 test("housing regressor", function ()
