@@ -13,8 +13,8 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   data = { ttr = 0.8, tvr = 0.10, max = nil },
-  cat_emb = { n_landmarks = 4096, trace_tol = 0.01, cholesky = true, n_dims = nil, kernel = "arccos1" },
-  cont_emb = { n_landmarks = 4096, trace_tol = 0.01, cholesky = true, n_dims = nil, kernel = "arccos1" },
+  cat_emb = { n_landmarks = 4096, trace_tol = 0.01, kernel = "arccos1" },
+  cont_emb = { n_landmarks = 4096, trace_tol = 0.01, kernel = "arccos1" },
   ridge = { lambda = { def = 1.5612e-02 }, search_trials = 0 },
 }
 
@@ -39,24 +39,24 @@ test("housing regressor", function ()
 
   str.printf("[Spectral Cat] Cholesky kernel=%s\n", cfg.cat_emb.kernel)
   local train_cat_dv = csr_m.to_dvec(train.bit_offsets, train.bit_neighbors, nil, train.n, n_cat)
-  local train_cat_codes, _, cat_enc = spectral.encode({
+  local _, _, cat_enc = spectral.encode({
     codes = train_cat_dv, n_samples = train.n,
     kernel = cfg.cat_emb.kernel,
     n_landmarks = cfg.cat_emb.n_landmarks, trace_tol = cfg.cat_emb.trace_tol,
-    cholesky = cfg.cat_emb.cholesky, n_dims = cfg.cat_emb.n_dims,
   })
+  local train_cat_codes = cat_enc:encode(train_cat_dv, train.n)
   train_cat_dv = nil -- luacheck: ignore
   collectgarbage("collect")
   local cat_d = cat_enc:dims()
   str.printf("[Spectral Cat] emb_d=%d %s\n", cat_d, sw())
 
   str.printf("[Spectral Cont] Cholesky kernel=%s\n", cfg.cont_emb.kernel)
-  local train_cont_codes, _, cont_enc = spectral.encode({
+  local _, _, cont_enc = spectral.encode({
     codes = train.continuous, n_samples = train.n,
     kernel = cfg.cont_emb.kernel,
     n_landmarks = cfg.cont_emb.n_landmarks, trace_tol = cfg.cont_emb.trace_tol,
-    cholesky = cfg.cont_emb.cholesky, n_dims = cfg.cont_emb.n_dims,
   })
+  local train_cont_codes = cont_enc:encode(train.continuous, train.n)
   local cont_d = cont_enc:dims()
   str.printf("[Spectral Cont] emb_d=%d %s\n", cont_d, sw())
 

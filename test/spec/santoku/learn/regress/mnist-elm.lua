@@ -14,7 +14,7 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   data = { ttr = 0.8, tvr = 0.1, max = nil, features = 784 },
-  emb = { n_landmarks = 8192, trace_tol = 0.01, cholesky = true, n_dims = nil, pos_window = nil, row_length = nil, kernel = "arccos1" },
+  emb = { n_landmarks = 8192, trace_tol = 0.01, kernel = "arccos1" },
   ridge = {
     lambda = { def = 2.3163e-05 },
     propensity_a = { def = 0.55 },
@@ -46,23 +46,17 @@ test("mnist csr+pos2d", function ()
   local train_p_off, train_p_nbr = csr_m.subsample(
     dataset.problem_offsets, dataset.problem_neighbors, train.ids)
 
-  str.printf("[Spectral] Cholesky trace_tol=%s pos_window=%s row_length=%s\n",
-    tostring(cfg.emb.trace_tol), tostring(cfg.emb.pos_window), tostring(cfg.emb.row_length))
-  local train_codes, _, sp_enc = spectral.encode({
-    kernel = cfg.emb.kernel,
-    offsets = train_p_off, tokens = train_p_nbr,
+  str.printf("[Spectral] Cholesky trace_tol=%s\n",
+    tostring(cfg.emb.trace_tol))
+  local _, _, sp_enc, _, xtx, xty, col_mean, y_mean, label_counts = spectral.encode({
+    kernel = cfg.emb.kernel, offsets = train_p_off, tokens = train_p_nbr,
     n_samples = train.n, n_tokens = n_features,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
-    cholesky = cfg.emb.cholesky, n_dims = cfg.emb.n_dims,
-    pos_window = cfg.emb.pos_window, row_length = cfg.emb.row_length,
+    label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
   })
   train_p_off = nil; train_p_nbr = nil -- luacheck: ignore
   collectgarbage("collect")
   local emb_d = sp_enc:dims()
-  local xtx, xty, col_mean, y_mean, label_counts = spectral.gram({
-    codes = train_codes, n_samples = train.n, n_dims = emb_d,
-    label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
-  })
   str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
 
   local enc_sims_buf = dvec.create()
@@ -101,6 +95,7 @@ test("mnist csr+pos2d", function ()
   local _, test_labels = ridge_obj:label(test_codes, test_set.n, 1)
   str.printf("[Eval] Labels done %s\n", sw())
 
+  local train_codes = encode(train.ids, train.n)
   local _, train_labels = ridge_obj:label(train_codes, train.n, 1)
   local train_stats = eval.class_accuracy(train_labels, train.sol_offsets, train.sol_neighbors, train.n, n_classes)
   local val_stats = eval.class_accuracy(val_labels, validate.sol_offsets, validate.sol_neighbors, validate.n, n_classes)

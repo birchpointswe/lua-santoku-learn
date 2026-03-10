@@ -179,15 +179,10 @@ static inline int tk_gram_trial_label_lua (lua_State *L) {
     offsets->a[i] = i * k;
   int err = tk_gram_compute_sz(L, g, lambda_raw, do_prop, prop_a, prop_b);
   if (err) return err;
-  int64_t block = lua_isnumber(L, 9) ? (int64_t)lua_tointeger(L, 9) : val_n;
-  if (block < 1) block = 1;
-  if (block > val_n) block = val_n;
-  double *sbuf = (double *)malloc((uint64_t)block * (uint64_t)nl * sizeof(double));
-  for (int64_t base = 0; base < val_n; base += block) {
-    int64_t bs = (base + block <= val_n) ? block : val_n - base;
-    tk_gram_fill_scores(g, sbuf, bs, base);
-    tk_gram_topk_block(sbuf, bs, nl, k, base, offsets, labels, scores_out);
-  }
+  double *sbuf = (double *)malloc((uint64_t)val_n * (uint64_t)nl * sizeof(double));
+  if (!sbuf) return luaL_error(L, "label: malloc failed");
+  tk_gram_fill_scores(g, sbuf, val_n, 0);
+  tk_gram_topk_block(sbuf, val_n, nl, k, 0, offsets, labels, scores_out);
   free(sbuf);
   lua_pushvalue(L, offsets_idx);
   lua_pushvalue(L, labels_idx);

@@ -16,7 +16,7 @@ io.stdout:setvbuf("line")
 local cfg = {
   data = { max = nil, ttr = 0.5, tvr = 0.1 },
   tok = { ngram = 5 },
-  emb = { n_landmarks = 8192, trace_tol = 0.01, cholesky = true, n_dims = nil, kernel = "arccos1", pos_window = nil },
+  emb = { n_landmarks = 8192, trace_tol = 0.01, kernel = "arccos1" },
   ridge = {
     lambda = { def = 6.6967e-03 },
     propensity_a = { def = 3.0326 },
@@ -57,27 +57,21 @@ test("imdb csr+kernel", function ()
   local sel_tokens, sel_offsets = csr.seq_select(
     tokens, offsets, bns_ids)
   local n_sel = bns_ids:size()
-  offsets = nil; tokens = nil; train.problems = nil
+  offsets = nil; tokens = nil
   collectgarbage("collect")
 
   str.printf("[Spectral] Cholesky trace_tol=%s kernel=%s\n",
     tostring(cfg.emb.trace_tol), cfg.emb.kernel)
-  local train_codes, _, sp_enc = spectral.encode({
+  local _, _, sp_enc, _, xtx, xty, col_mean, y_mean, label_counts = spectral.encode({
     offsets = sel_offsets, tokens = sel_tokens,
     n_samples = train.n, n_tokens = n_sel,
     feature_weights = bns_scores, kernel = cfg.emb.kernel,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
-    cholesky = cfg.emb.cholesky, n_dims = cfg.emb.n_dims,
-    pos_window = cfg.emb.pos_window,
+    label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
   })
   sel_offsets = nil; sel_tokens = nil; bns_scores = nil
   collectgarbage("collect")
   local emb_d = sp_enc:dims()
-  local xtx, xty, col_mean, y_mean, label_counts = spectral.gram({
-    codes = train_codes, n_samples = train.n, n_dims = emb_d,
-    label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
-  })
-  collectgarbage("collect")
   str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
 
   local enc_sims_buf = dvec.create()
@@ -122,6 +116,9 @@ test("imdb csr+kernel", function ()
   local _, test_labels = ridge_obj:label(test_codes, test_set.n, 1)
   str.printf("[Eval] Labels done %s\n", sw())
 
+  local train_codes = encode_texts(train.problems, train.n)
+  train.problems = nil
+  collectgarbage("collect")
   local _, train_labels = ridge_obj:label(train_codes, train.n, 1)
   local train_stats = eval.class_accuracy(train_labels, train.sol_offsets, train.sol_neighbors, train.n, n_classes)
   local val_stats = eval.class_accuracy(val_labels, validate.sol_offsets, validate.sol_neighbors, validate.n, n_classes)
