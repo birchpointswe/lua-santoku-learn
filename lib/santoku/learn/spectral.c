@@ -373,14 +373,16 @@ static inline void tk_spectral_sample_landmarks (
       landmark_sids[col] = sid_map[pi];
       landmark_idx_map[col] = (int64_t)pi;
 
+      double within_pi[TK_CHOL_BLOCK];
+      for (uint64_t k = 0; k < within_accepted; k++)
+        within_pi[k] = L_mat[(jb + k) * n_docs + pi];
       #pragma omp parallel for schedule(static)
       for (uint64_t i = 0; i < n_docs; i++) {
         double raw = kip_block[i * np + b];
         double cross = (jb > 0) ? cross_dots[b * n_docs + i] : 0.0;
         double within = 0.0;
         for (uint64_t k = 0; k < within_accepted; k++)
-          within += L_mat[(jb + k) * n_docs + i] *
-                    L_mat[(jb + k) * n_docs + pi];
+          within += L_mat[(jb + k) * n_docs + i] * within_pi[k];
         double lij = (raw - cross - within) / sc;
         L_mat[col * n_docs + i] = lij;
         residual[i] -= lij * lij;
@@ -556,35 +558,38 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
       src = tmp_scaled;
     }
     TK_FVEC_BUF(out, 4, n_samples * d);
+    uint64_t nd = n_samples * (uint64_t)d_in;
+    float *src_f = (float *)malloc(nd * sizeof(float));
+    if (!src_f) { free(tmp_scaled); return luaL_error(L, "encode: out of memory"); }
+    for (uint64_t i = 0; i < nd; i++) src_f[i] = (float)src[i];
+    free(tmp_scaled);
+    float *lm_f = (float *)malloc(m * (uint64_t)d_in * sizeof(float));
+    if (!lm_f) { free(src_f); return luaL_error(L, "encode: out of memory"); }
+    for (uint64_t i = 0; i < m * (uint64_t)d_in; i++) lm_f[i] = (float)enc->lm_vecs[i];
     uint64_t sims_need = n_samples * m;
-    double *sims = (double *)malloc(sims_need * sizeof(double));
-    if (!sims) { free(tmp_scaled); return luaL_error(L, "encode: out of memory"); }
-    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-      (int)n_samples, (int)m, (int)d_in, 1.0,
-      src, (int)d_in,
-      enc->lm_vecs, (int)d_in,
-      0.0, sims, (int)m);
+    float *sims_f = (float *)malloc(sims_need * sizeof(float));
+    if (!sims_f) { free(lm_f); free(src_f); return luaL_error(L, "encode: out of memory"); }
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+      (int)n_samples, (int)m, (int)d_in, 1.0f,
+      src_f, (int)d_in, lm_f, (int)d_in,
+      0.0f, sims_f, (int)m);
+    free(lm_f);
     {
-      double *new_norms = (double *)malloc(n_samples * sizeof(double));
-      if (!new_norms) { free(sims); free(tmp_scaled); return luaL_error(L, "encode: out of memory"); }
+      float *new_norms = (float *)malloc(n_samples * sizeof(float));
+      if (!new_norms) { free(sims_f); free(src_f); return luaL_error(L, "encode: out of memory"); }
       #pragma omp parallel for schedule(static)
       for (uint64_t i = 0; i < n_samples; i++)
-        new_norms[i] = cblas_dnrm2((int)d_in, src + i * (uint64_t)d_in, 1);
+        new_norms[i] = cblas_snrm2((int)d_in, src_f + i * (uint64_t)d_in, 1);
+      free(src_f);
       #pragma omp parallel for schedule(static)
       for (uint64_t i = 0; i < n_samples; i++)
         for (uint64_t j = 0; j < m; j++) {
-          double denom = new_norms[i] * enc->lm_dense_norms[j];
-          sims[i * m + j] = tk_spectral_kernel_apply(enc->kernel,
-            denom > 1e-15 ? sims[i * m + j] / denom : 0.0);
+          double denom = (double)new_norms[i] * enc->lm_dense_norms[j];
+          sims_f[i * m + j] = (float)tk_spectral_kernel_apply(enc->kernel,
+            denom > 1e-15 ? (double)sims_f[i * m + j] / denom : 0.0);
         }
       free(new_norms);
     }
-    free(tmp_scaled);
-    float *sims_f = (float *)malloc(sims_need * sizeof(float));
-    if (!sims_f) { free(sims); return luaL_error(L, "encode: out of memory"); }
-    for (uint64_t i = 0; i < sims_need; i++)
-      sims_f[i] = (float)sims[i];
-    free(sims);
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
       (int)n_samples, (int)d, (int)m, 1.0f,
       sims_f, (int)m,
@@ -640,42 +645,40 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
       free(tmp);
     }
     uint64_t sims_need = n_samples * m;
-    double *sims = (double *)calloc(sims_need, sizeof(double));
-    if (!sims) { free(sval); free(norms); return luaL_error(L, "encode: out of memory"); }
-    const int64_t *restrict csc_off = enc->lm_csc_offsets;
-    const int64_t *restrict csc_rows = enc->lm_csc_rows;
-    const double *restrict csc_vals = enc->lm_csc_values;
-    const int64_t *restrict off_a = offsets->a;
-    const int64_t *restrict tok_a = tokens->a;
-    const double *restrict sv = sval;
-    double *restrict sim = sims;
-    #pragma omp parallel for schedule(static)
-    for (uint64_t i = 0; i < n_samples; i++) {
-      double *restrict sims_row = sim + i * m;
-      int64_t jlo = off_a[i], jhi = off_a[i + 1];
-      for (int64_t j = jlo; j < jhi; j++) {
-        int64_t tok = tok_a[j];
-        double val = sv[j];
-        int64_t clo = csc_off[tok], chi = csc_off[tok + 1];
-        for (int64_t c = clo; c < chi; c++)
-          sims_row[(uint64_t)csc_rows[c]] += val * csc_vals[c];
+    float *sims_f = (float *)malloc(sims_need * sizeof(float));
+    if (!sims_f) { free(sval); free(norms); return luaL_error(L, "encode: out of memory"); }
+    {
+      const int64_t *restrict csc_off = enc->lm_csc_offsets;
+      const int64_t *restrict csc_rows = enc->lm_csc_rows;
+      const double *restrict csc_vals = enc->lm_csc_values;
+      const int64_t *restrict off_a = offsets->a;
+      const int64_t *restrict tok_a = tokens->a;
+      const double *restrict sv = sval;
+      #pragma omp parallel
+      {
+        double *row_buf = (double *)calloc(m, sizeof(double));
+        #pragma omp for schedule(static)
+        for (uint64_t i = 0; i < n_samples; i++) {
+          float *restrict sims_row = sims_f + i * m;
+          int64_t jlo = off_a[i], jhi = off_a[i + 1];
+          for (int64_t j = jlo; j < jhi; j++) {
+            int64_t tok = tok_a[j];
+            double val = sv[j];
+            int64_t clo = csc_off[tok], chi = csc_off[tok + 1];
+            for (int64_t c = clo; c < chi; c++)
+              row_buf[(uint64_t)csc_rows[c]] += val * csc_vals[c];
+          }
+          for (uint64_t j = 0; j < m; j++) {
+            double denom = norms[i] * enc->lm_csr_norms[j];
+            sims_row[j] = (float)tk_spectral_kernel_apply(enc->kernel,
+              denom > 1e-15 ? row_buf[j] / denom : 0.0);
+            row_buf[j] = 0.0;
+          }
+        }
+        free(row_buf);
       }
     }
-    {
-      #pragma omp parallel for schedule(static)
-      for (uint64_t i = 0; i < n_samples; i++)
-        for (uint64_t j = 0; j < m; j++) {
-          double denom = norms[i] * enc->lm_csr_norms[j];
-          sims[i * m + j] = tk_spectral_kernel_apply(enc->kernel,
-            denom > 1e-15 ? sims[i * m + j] / denom : 0.0);
-        }
-    }
     free(sval); free(norms);
-    float *sims_f = (float *)malloc(sims_need * sizeof(float));
-    if (!sims_f) { free(sims); return luaL_error(L, "encode: out of memory"); }
-    for (uint64_t i = 0; i < sims_need; i++)
-      sims_f[i] = (float)sims[i];
-    free(sims);
     tk_fvec_t *out;
     if (out_fv) {
       tk_fvec_ensure(out_fv, n_samples * d);
