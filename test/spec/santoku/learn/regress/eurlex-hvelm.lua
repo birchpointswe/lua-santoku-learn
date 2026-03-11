@@ -20,10 +20,10 @@ local cfg = {
   data = { max = nil },
   tok = { ngram = 7 },
   emb = {
-    n_landmarks = 8192*4,
+    n_landmarks = 8192*2,
     trace_tol = 0.01,
     k = 1024,
-    kernel = "arccos1",
+    kernel = "cosine",
   },
   ridge = {
     lambda = { def = 3.6832e-03 },
