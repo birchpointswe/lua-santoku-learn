@@ -3,6 +3,7 @@
 #include <santoku/learn/centroid.h>
 #include <santoku/learn/csr.h>
 #include <santoku/ivec.h>
+#include <santoku/fvec.h>
 #include <santoku/cvec.h>
 #include <santoku/rvec.h>
 #include <santoku/pvec.h>
@@ -138,17 +139,19 @@ static inline int tm_class_accuracy (lua_State *L)
 static inline int tm_regression_accuracy (lua_State *L)
 {
   lua_settop(L, 2);
-  tk_dvec_t *predicted = tk_dvec_peek(L, 1, "predicted");
+  tk_fvec_t *predicted_f = tk_fvec_peekopt(L, 1);
+  tk_dvec_t *predicted_d = predicted_f ? NULL : tk_dvec_peek(L, 1, "predicted");
   tk_dvec_t *expected_d = tk_dvec_peekopt(L, 2);
   tk_ivec_t *expected_i = expected_d ? NULL : tk_ivec_peek(L, 2, "expected");
-  uint64_t n = predicted->n;
+  uint64_t n = predicted_f ? predicted_f->n : predicted_d->n;
   if ((expected_d && expected_d->n != n) || (expected_i && expected_i->n != n))
     return luaL_error(L, "predicted and expected must have same length");
   double total = 0.0, min_err = DBL_MAX, max_err = 0.0, sum_exp = 0.0;
   #pragma omp parallel for reduction(+:total,sum_exp) reduction(min:min_err) reduction(max:max_err)
   for (uint64_t i = 0; i < n; i++) {
     double exp_val = expected_d ? expected_d->a[i] : (double)expected_i->a[i];
-    double err = fabs(predicted->a[i] - exp_val);
+    double pred_val = predicted_f ? (double)predicted_f->a[i] : predicted_d->a[i];
+    double err = fabs(pred_val - exp_val);
     total += err;
     sum_exp += exp_val;
     if (err < min_err) min_err = err;
@@ -161,7 +164,8 @@ static inline int tm_regression_accuracy (lua_State *L)
   #pragma omp parallel for reduction(+:var)
   for (uint64_t i = 0; i < n; i++) {
     double exp_val = expected_d ? expected_d->a[i] : (double)expected_i->a[i];
-    double err = fabs(predicted->a[i] - exp_val);
+    double pred_val = predicted_f ? (double)predicted_f->a[i] : predicted_d->a[i];
+    double err = fabs(pred_val - exp_val);
     var += (err - mean) * (err - mean);
   }
   double std = n > 1 ? sqrt(var / (n - 1)) : 0.0;
