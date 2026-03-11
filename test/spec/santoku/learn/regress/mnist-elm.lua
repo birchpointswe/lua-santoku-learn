@@ -1,7 +1,6 @@
 local arr = require("santoku.array")
 local csr_m = require("santoku.csr")
 local ds = require("santoku.learn.dataset")
-local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
 local optimize = require("santoku.learn.optimize")
 local spectral = require("santoku.learn.spectral")
@@ -59,14 +58,11 @@ test("mnist csr+pos2d", function ()
   local emb_d = sp_enc:dims()
   str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
 
-  local enc_sims_buf = dvec.create()
-  local enc_out_buf = dvec.create()
   local function encode(ids, n)
     local p_off, p_nbr = csr_m.subsample(
       dataset.problem_offsets, dataset.problem_neighbors, ids)
     return sp_enc:encode({
       offsets = p_off, tokens = p_nbr, n_samples = n,
-      sims = enc_sims_buf, output = enc_out_buf,
     })
   end
 

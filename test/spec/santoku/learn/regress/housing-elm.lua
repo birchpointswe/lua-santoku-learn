@@ -1,7 +1,7 @@
 local csr_m = require("santoku.csr")
 local ds = require("santoku.learn.dataset")
-local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
+local fvec = require("santoku.fvec")
 local optimize = require("santoku.learn.optimize")
 local spectral = require("santoku.learn.spectral")
 local str = require("santoku.string")
@@ -60,7 +60,7 @@ test("housing regressor", function ()
 
   local emb_d = cat_d + cont_d
   local function concat_codes(cat_codes, cont_codes, n)
-    local out = dvec.create(n * emb_d)
+    local out = fvec.create(n * emb_d)
     for i = 0, n - 1 do
       out:copy(cat_codes, i * cat_d, (i + 1) * cat_d, i * emb_d)
       out:copy(cont_codes, i * cont_d, (i + 1) * cont_d, i * emb_d + cat_d)
@@ -77,14 +77,12 @@ test("housing regressor", function ()
     targets = train.targets, n_targets = 1,
   })
 
-  local cat_sims_buf = dvec.create()
-  local cat_out_buf = dvec.create()
-  local cont_sims_buf = dvec.create()
-  local cont_out_buf = dvec.create()
+  local cat_out_buf = fvec.create()
+  local cont_out_buf = fvec.create()
   local function encode(bit_off, bit_nbr, continuous, n)
     local cat_dv = csr_m.to_dvec(bit_off, bit_nbr, nil, n, n_cat)
-    local cc = cat_enc:encode(cat_dv, n, cat_sims_buf, cat_out_buf)
-    local co = cont_enc:encode(continuous, n, cont_sims_buf, cont_out_buf)
+    local cc = cat_enc:encode(cat_dv, n, cat_out_buf)
+    local co = cont_enc:encode(continuous, n, cont_out_buf)
     return concat_codes(cc, co, n)
   end
 
@@ -105,7 +103,7 @@ test("housing regressor", function ()
   str.printf("[Ridge] lambda=%.4e %s\n", best_params.lambda, sw())
 
   str.printf("\n[Eval] Scoring splits\n")
-  local regress_buf = dvec.create()
+  local regress_buf = fvec.create()
   local train_stats = eval.regression_accuracy(ridge_obj:regress(train_codes, train.n, regress_buf), train.targets)
   local val_stats = eval.regression_accuracy(ridge_obj:regress(val_codes, validate.n, regress_buf), validate.targets)
   local test_codes = encode(test_set.bit_offsets, test_set.bit_neighbors, test_set.continuous, test_set.n)

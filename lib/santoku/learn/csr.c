@@ -1,4 +1,5 @@
 #include <santoku/learn/csr.h>
+#include <santoku/fvec.h>
 #include <santoku/ivec/ext.h>
 #include <santoku/iumap/ext.h>
 #include <omp.h>
@@ -9,14 +10,17 @@ static int tm_csr_seq_select (lua_State *L)
   tk_ivec_t *tokens = tk_ivec_peek(L, 1, "tokens");
   tk_ivec_t *offsets = tk_ivec_peek(L, 2, "offsets");
   tk_ivec_t *keep_ids = tk_ivec_peek(L, 3, "keep_ids");
-  tk_dvec_t *values = tk_dvec_peekopt(L, 4);
+  tk_fvec_t *values_f = tk_fvec_peekopt(L, 4);
+  tk_dvec_t *values_d = values_f ? NULL : tk_dvec_peekopt(L, 4);
+  int has_values = values_f || values_d;
   tk_iumap_t *inverse = tk_iumap_from_ivec(L, keep_ids);
   if (!inverse) return luaL_error(L, "seq_select: allocation failed");
   uint64_t n_docs = offsets->n - 1;
   tk_ivec_t *new_tok = tk_ivec_create(L, tokens->n, 0, 0);
   tk_ivec_t *new_off = tk_ivec_create(L, n_docs + 1, 0, 0);
   new_off->n = n_docs + 1;
-  tk_dvec_t *new_val = values ? tk_dvec_create(L, tokens->n, 0, 0) : NULL;
+  tk_fvec_t *new_val_f = (has_values && values_f) ? tk_fvec_create(L, tokens->n, 0, 0) : NULL;
+  tk_dvec_t *new_val_d = (has_values && values_d) ? tk_dvec_create(L, tokens->n, 0, 0) : NULL;
   new_off->a[0] = 0;
   uint64_t pos = 0;
   for (uint64_t d = 0; d < n_docs; d++) {
@@ -26,16 +30,19 @@ static int tm_csr_seq_select (lua_State *L)
       int64_t new_id = tk_iumap_get_or(inverse, tokens->a[j], -1);
       if (new_id < 0) continue;
       new_tok->a[pos] = new_id;
-      if (new_val)
-        new_val->a[pos] = values->a[j];
+      if (new_val_f)
+        new_val_f->a[pos] = values_f->a[j];
+      else if (new_val_d)
+        new_val_d->a[pos] = values_d->a[j];
       pos++;
     }
     new_off->a[d + 1] = (int64_t)pos;
   }
   new_tok->n = pos;
-  if (new_val) new_val->n = pos;
+  if (new_val_f) new_val_f->n = pos;
+  if (new_val_d) new_val_d->n = pos;
   tk_iumap_destroy(inverse);
-  return values ? 3 : 2;
+  return has_values ? 3 : 2;
 }
 
 static int tm_csr_stratified_sample (lua_State *L)
@@ -270,7 +277,9 @@ static int tm_csr_transpose (lua_State *L)
   tk_ivec_t *tokens = tk_ivec_peek(L, 2, "tokens");
   uint64_t n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
   uint64_t n_tokens = tk_lua_checkunsigned(L, 4, "n_tokens");
-  tk_dvec_t *values = tk_dvec_peekopt(L, 5);
+  tk_fvec_t *values_f = tk_fvec_peekopt(L, 5);
+  tk_dvec_t *values_d = values_f ? NULL : tk_dvec_peekopt(L, 5);
+  int has_values = values_f || values_d;
   uint64_t nnz = tokens->n;
   int64_t *counts = (int64_t *)calloc(n_tokens + 1, sizeof(int64_t));
   if (!counts)
@@ -284,44 +293,69 @@ static int tm_csr_transpose (lua_State *L)
   memcpy(csc_off->a, counts, (n_tokens + 1) * sizeof(int64_t));
   tk_ivec_t *csc_rows = tk_ivec_create(L, nnz, 0, 0);
   csc_rows->n = nnz;
-  tk_dvec_t *csc_vals = values ? tk_dvec_create(L, nnz, 0, 0) : NULL;
-  if (csc_vals) csc_vals->n = nnz;
+  tk_fvec_t *csc_vals_f = (has_values && values_f) ? tk_fvec_create(L, nnz, 0, 0) : NULL;
+  tk_dvec_t *csc_vals_d = (has_values && values_d) ? tk_dvec_create(L, nnz, 0, 0) : NULL;
+  if (csc_vals_f) csc_vals_f->n = nnz;
+  if (csc_vals_d) csc_vals_d->n = nnz;
   for (uint64_t s = 0; s < n_samples; s++) {
     for (int64_t j = offsets->a[s]; j < offsets->a[s + 1]; j++) {
       int64_t tok = tokens->a[j];
       int64_t pos = counts[tok]++;
       csc_rows->a[pos] = (int64_t)s;
-      if (csc_vals) csc_vals->a[pos] = values->a[j];
+      if (csc_vals_f) csc_vals_f->a[pos] = values_f->a[j];
+      else if (csc_vals_d) csc_vals_d->a[pos] = values_d->a[j];
     }
   }
   free(counts);
-  return values ? 3 : 2;
+  return has_values ? 3 : 2;
 }
 
 static int tm_csr_sort_csr_desc (lua_State *L)
 {
   tk_ivec_t *off = tk_ivec_peek(L, 1, "offsets");
   tk_ivec_t *nbr = tk_ivec_peek(L, 2, "neighbors");
-  tk_dvec_t *scores = tk_dvec_peek(L, 3, "scores");
+  tk_fvec_t *scores_f = tk_fvec_peekopt(L, 3);
+  tk_dvec_t *scores_d = scores_f ? NULL : tk_dvec_peek(L, 3, "scores");
   uint64_t n = off->n - 1;
   tk_ivec_t *out_n = tk_ivec_create(L, nbr->n, NULL, NULL);
-  tk_dvec_t *out_s = tk_dvec_create(L, scores->n, NULL, NULL);
   memcpy(out_n->a, nbr->a, nbr->n * sizeof(int64_t));
-  memcpy(out_s->a, scores->a, scores->n * sizeof(double));
-  #pragma omp parallel for schedule(dynamic, 64)
-  for (uint64_t i = 0; i < n; i++) {
-    int64_t s = off->a[i], e = off->a[i + 1];
-    for (int64_t j = s + 1; j < e; j++) {
-      double ks = out_s->a[j];
-      int64_t kn = out_n->a[j];
-      int64_t p = j - 1;
-      while (p >= s && out_s->a[p] < ks) {
-        out_s->a[p + 1] = out_s->a[p];
-        out_n->a[p + 1] = out_n->a[p];
-        p--;
+  if (scores_f) {
+    tk_fvec_t *out_s = tk_fvec_create(L, scores_f->n, NULL, NULL);
+    memcpy(out_s->a, scores_f->a, scores_f->n * sizeof(float));
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (uint64_t i = 0; i < n; i++) {
+      int64_t s = off->a[i], e = off->a[i + 1];
+      for (int64_t j = s + 1; j < e; j++) {
+        float ks = out_s->a[j];
+        int64_t kn = out_n->a[j];
+        int64_t p = j - 1;
+        while (p >= s && out_s->a[p] < ks) {
+          out_s->a[p + 1] = out_s->a[p];
+          out_n->a[p + 1] = out_n->a[p];
+          p--;
+        }
+        out_s->a[p + 1] = ks;
+        out_n->a[p + 1] = kn;
       }
-      out_s->a[p + 1] = ks;
-      out_n->a[p + 1] = kn;
+    }
+  } else {
+    tk_dvec_t *out_s = tk_dvec_create(L, scores_d->n, NULL, NULL);
+    memcpy(out_s->a, scores_d->a, scores_d->n * sizeof(double));
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (uint64_t i = 0; i < n; i++) {
+      int64_t s = off->a[i], e = off->a[i + 1];
+      for (int64_t j = s + 1; j < e; j++) {
+        double ks = out_s->a[j];
+        int64_t kn = out_n->a[j];
+        int64_t p = j - 1;
+        while (p >= s && out_s->a[p] < ks) {
+          out_s->a[p + 1] = out_s->a[p];
+          out_n->a[p + 1] = out_n->a[p];
+          p--;
+        }
+        out_s->a[p + 1] = ks;
+        out_n->a[p + 1] = kn;
+      }
     }
   }
   return 2;
@@ -562,6 +596,54 @@ static int tm_csr_tokenize (lua_State *L)
   return 4;
 }
 
+static int tm_csr_truncate (lua_State *L)
+{
+  tk_ivec_t *off = tk_ivec_peek(L, 1, "offsets");
+  tk_ivec_t *nbr = tk_ivec_peek(L, 2, "neighbors");
+  tk_fvec_t *sco_f = tk_fvec_peekopt(L, 3);
+  tk_dvec_t *sco_d = sco_f ? NULL : tk_dvec_peekopt(L, 3);
+  int64_t k = (int64_t)luaL_checkinteger(L, 4);
+  uint64_t ns = off->n - 1;
+  tk_ivec_t *new_off = tk_ivec_create(L, ns + 1, 0, 0);
+  new_off->n = ns + 1;
+  int64_t total = 0;
+  new_off->a[0] = 0;
+  for (uint64_t i = 0; i < ns; i++) {
+    int64_t rlen = off->a[i + 1] - off->a[i];
+    if (rlen > k) rlen = k;
+    total += rlen;
+    new_off->a[i + 1] = total;
+  }
+  tk_ivec_t *new_nbr = tk_ivec_create(L, (uint64_t)total, 0, 0);
+  new_nbr->n = (uint64_t)total;
+  if (sco_f) {
+    tk_fvec_t *new_sco = tk_fvec_create(L, (uint64_t)total, 0, 0);
+    new_sco->n = (uint64_t)total;
+    for (uint64_t i = 0; i < ns; i++) {
+      int64_t src = off->a[i], dst = new_off->a[i];
+      int64_t rlen = new_off->a[i + 1] - dst;
+      memcpy(new_nbr->a + dst, nbr->a + src, (uint64_t)rlen * sizeof(int64_t));
+      memcpy(new_sco->a + dst, sco_f->a + src, (uint64_t)rlen * sizeof(float));
+    }
+  } else if (sco_d) {
+    tk_dvec_t *new_sco = tk_dvec_create(L, (uint64_t)total, 0, 0);
+    new_sco->n = (uint64_t)total;
+    for (uint64_t i = 0; i < ns; i++) {
+      int64_t src = off->a[i], dst = new_off->a[i];
+      int64_t rlen = new_off->a[i + 1] - dst;
+      memcpy(new_nbr->a + dst, nbr->a + src, (uint64_t)rlen * sizeof(int64_t));
+      memcpy(new_sco->a + dst, sco_d->a + src, (uint64_t)rlen * sizeof(double));
+    }
+  } else {
+    for (uint64_t i = 0; i < ns; i++) {
+      int64_t src = off->a[i], dst = new_off->a[i];
+      int64_t rlen = new_off->a[i + 1] - dst;
+      memcpy(new_nbr->a + dst, nbr->a + src, (uint64_t)rlen * sizeof(int64_t));
+    }
+  }
+  return sco_f || sco_d ? 3 : 2;
+}
+
 static luaL_Reg tm_csr_fns[] = {
   { "to_bits", tm_csr_to_bits },
   { "seq_select", tm_csr_seq_select },
@@ -569,6 +651,7 @@ static luaL_Reg tm_csr_fns[] = {
   { "label_union", tm_csr_label_union },
   { "subsample", tm_csr_subsample },
   { "sort_csr_desc", tm_csr_sort_csr_desc },
+  { "truncate", tm_csr_truncate },
   { "transpose", tm_csr_transpose },
   { "tokenize", tm_csr_tokenize },
   { NULL, NULL }

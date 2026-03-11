@@ -2,8 +2,8 @@ local ann = require("santoku.learn.ann")
 local csr = require("santoku.learn.csr")
 local csr_m = require("santoku.csr")
 local ds = require("santoku.learn.dataset")
-local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
+local fvec = require("santoku.fvec")
 local ivec = require("santoku.ivec")
 local gfm = require("santoku.learn.gfm")
 local optimize = require("santoku.learn.optimize")
@@ -20,20 +20,20 @@ local cfg = {
   data = { max = nil },
   tok = { ngram = 7 },
   emb = {
-    n_landmarks = 8192*2, -- 16384 for max
+    n_landmarks = 8192*2,
     trace_tol = 0.01,
     k = 256,
-    kernel = "arccos1", -- arccos1 best
+    kernel = "arccos1",
   },
   ridge = {
-    lambda = { def = 6.1894e-04 },
-    propensity_a = { def = 0.06 },
-    propensity_b = { def = 3.47 },
-    search_trials = 400,
+    lambda = { def = 3.6832e-03 },
+    propensity_a = { def = 0.04 },
+    propensity_b = { def = 4.32 },
+    search_trials = 0,
   },
-  -- ann = true
+  ann = true,
   gfm1 = { k = 256 },
-  -- gfm2 = { k = 256 },
+  gfm2 = { k = 256 },
 }
 
 test("eurlex", function ()
@@ -71,29 +71,7 @@ test("eurlex", function ()
 
   local function csr_topk(off, nbr, sco, k)
     if not k then return off, nbr, sco end
-    local ns = off:size() - 1
-    local new_off = ivec.create(ns + 1)
-    local pos = 0
-    for s = 0, ns - 1 do
-      new_off:set(s, pos)
-      local rlen = off:get(s + 1) - off:get(s)
-      if rlen > k then rlen = k end
-      pos = pos + rlen
-    end
-    new_off:set(ns, pos)
-    local new_nbr = ivec.create(pos)
-    local new_sco = dvec.create(pos)
-    local di = 0
-    for s = 0, ns - 1 do
-      local si = off:get(s)
-      local rlen = new_off:get(s + 1) - new_off:get(s)
-      for j = 0, rlen - 1 do
-        new_nbr:set(di, nbr:get(si + j))
-        new_sco:set(di, sco:get(si + j))
-        di = di + 1
-      end
-    end
-    return new_off, new_nbr, new_sco
+    return csr.truncate(off, nbr, sco, k)
   end
 
   local function run_gfm(tag, gfm_cfg,
@@ -153,7 +131,6 @@ test("eurlex", function ()
   local emb_d = sp_enc:dims()
   str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
 
-  local enc_sims_buf = dvec.create()
   local function encode_texts(text_iter_fn, n)
     local _, off, tok = csr.tokenize({
       texts = text_iter_fn(), hdc_ngram = cfg.tok.ngram,
@@ -162,7 +139,6 @@ test("eurlex", function ()
     local st, so = csr.seq_select(tok, off, bns_ids)
     return sp_enc:encode({
       offsets = so, tokens = st, n_samples = n,
-      sims = enc_sims_buf,
     })
   end
 
@@ -229,6 +205,7 @@ test("eurlex", function ()
   str.printf("[Ts Orc]  %s %s\n", fmt_metrics(d1_ts_oracle), sw())
 
   local tr_off, tr_nbr, tr_sco = ridge_obj:label(train_codes, train.n, k1)
+  if not cfg.ann then train_codes = nil; collectgarbage("collect") end
 
   local gfm1_dm, gfm1_tm = run_gfm("GFM", cfg.gfm1,
     tr_off, tr_nbr, tr_sco,
@@ -242,7 +219,7 @@ test("eurlex", function ()
   if tr_short_off and cfg.gfm2 then
     str.printf("\n[#2] OVA KRR + ANN Shortlist + Topk GFM\n")
     str.printf("[OVA] Scoring shortlists\n")
-    local regress_buf = dvec.create()
+    local regress_buf = fvec.create()
     local dv_short_scores = ridge_obj:regress(dev_codes, dev.n, dv_short_off, dv_short_nbr, regress_buf)
     local dv_sorted_nbr, dv_sorted_sc = csr.sort_csr_desc(dv_short_off, dv_short_nbr, dv_short_scores)
     local ts_short_scores = ridge_obj:regress(test_codes, test_set.n, ts_short_off, ts_short_nbr, regress_buf)
