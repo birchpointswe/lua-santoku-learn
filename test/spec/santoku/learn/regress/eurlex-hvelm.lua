@@ -20,9 +20,9 @@ local cfg = {
   data = { max = nil },
   tok = { ngram = 7 },
   emb = {
-    n_landmarks = 8192*2,
+    n_landmarks = 8192*4,
     trace_tol = 0.01,
-    k = 256,
+    k = 1024,
     kernel = "arccos1",
   },
   ridge = {
@@ -32,8 +32,8 @@ local cfg = {
     search_trials = 0,
   },
   ann = true,
-  gfm1 = { k = 256 },
-  gfm2 = { k = 256 },
+  gfm1 = { k = 1024 },
+  gfm2 = { k = 1024 },
 }
 
 test("eurlex", function ()
@@ -243,7 +243,7 @@ test("eurlex", function ()
     collectgarbage("collect")
   end
 
-  str.printf("\n#1: RP-Cholesky + OVA Ridge + Topk GFM\n")
+  str.printf("\n#1: OVA KRR + Topk GFM\n")
   str.printf("  %-10s lambda=%.4e pa=%.4f pb=%.4f\n",
     "Ridge", best_params.lambda, best_params.propensity_a, best_params.propensity_b)
   str.printf("  %-10s %s\n", "Dv Orc", fmt_metrics(d1_dv_oracle))
@@ -252,7 +252,7 @@ test("eurlex", function ()
   str.printf("  %-10s %s\n", "Ts GFM", fmt_metrics(gfm1_tm))
 
   if d2_tr_oracle then
-    str.printf("\n#2: RP-Cholesky + ANN Shortlist + OVA Ridge + Topk GFM\n")
+    str.printf("\n#2: OVA KRR + ANN Shortlist + Topk GFM\n")
     str.printf("  %-10s %s\n", "Tr Orc", fmt_metrics(d2_tr_oracle))
     str.printf("  %-10s %s\n", "Dv Orc", fmt_metrics(d2_dv_oracle))
     str.printf("  %-10s %s\n", "Ts Orc", fmt_metrics(d2_ts_oracle))

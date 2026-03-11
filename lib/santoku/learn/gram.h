@@ -182,10 +182,6 @@ static inline int tk_gram_prepare_val_lua (lua_State *L) {
   for (uint64_t i = 0; i < nd; i++)
     val_F_d[i] = (double)val_fvec->a[i];
   if (g->col_mean) {
-    #pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < val_n; i++)
-      for (int64_t j = 0; j < d; j++)
-        val_F_d[i * d + j] -= g->col_mean[j];
     if (!g->cm_proj)
       g->cm_proj = (double *)malloc((uint64_t)d * sizeof(double));
     cblas_dgemv(CblasRowMajor, CblasNoTrans, (int)d, (int)d,
