@@ -12,6 +12,7 @@
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
 #include <santoku/dvec.h>
+#include <santoku/fvec.h>
 #include <santoku/rvec.h>
 #include <santoku/learn/buf.h>
 
@@ -23,13 +24,18 @@ typedef struct {
   double *PQtY;
   tk_dvec_t *label_counts;
   double *W_work;
-  double *sbuf;
-  double *val_F;
+  float *W_work_f;
+  float *sbuf_f;
+  float *val_F_f;
   double mean_eig;
   int64_t n_dims;
   int64_t n_labels;
   int64_t n_samples;
   int64_t val_n;
+  double *col_mean;
+  double *y_mean;
+  double *cm_proj;
+  double *intercept;
   bool destroyed;
 } tk_gram_t;
 
@@ -43,8 +49,13 @@ static inline int tk_gram_gc (lua_State *L) {
   free(g->eigenvals);
   free(g->PQtY);
   free(g->W_work);
-  free(g->sbuf);
-  free(g->val_F);
+  free(g->W_work_f);
+  free(g->sbuf_f);
+  free(g->val_F_f);
+  free(g->col_mean);
+  free(g->y_mean);
+  free(g->cm_proj);
+  free(g->intercept);
   g->label_counts = NULL;
   g->destroyed = true;
   return 0;
@@ -57,6 +68,15 @@ static inline void tk_gram_add_intercept (
   for (int64_t i = 0; i < bs; i++)
     for (int64_t l = 0; l < nl; l++)
       sbuf[i * nl + l] += intercept[l];
+}
+
+static inline void tk_gram_add_intercept_f (
+  float *sbuf, int64_t bs, int64_t nl, double *intercept)
+{
+  #pragma omp parallel for schedule(static)
+  for (int64_t i = 0; i < bs; i++)
+    for (int64_t l = 0; l < nl; l++)
+      sbuf[i * nl + l] += (float)intercept[l];
 }
 
 #pragma GCC diagnostic push
@@ -85,12 +105,38 @@ static inline void tk_gram_topk_block (
     free(heap.a);
   }
 }
+
+static inline void tk_gram_topk_block_f (
+  float *sbuf, int64_t bs, int64_t nl, int64_t k, int64_t base,
+  tk_ivec_t *offsets, tk_ivec_t *labels, tk_fvec_t *scores_out)
+{
+  #pragma omp parallel
+  {
+    tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
+                       .a = (tk_rank_t *)malloc((uint64_t)k * sizeof(tk_rank_t)) };
+    #pragma omp for schedule(static)
+    for (int64_t i = 0; i < bs; i++) {
+      float *row = sbuf + i * nl;
+      int64_t out_base = (base + i) * k;
+      heap.n = 0;
+      for (int64_t l = 0; l < nl; l++)
+        tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, (double)row[l]));
+      tk_rvec_desc(&heap, 0, heap.n);
+      for (int64_t j = 0; j < (int64_t)heap.n; j++) {
+        labels->a[out_base + j] = heap.a[j].i;
+        scores_out->a[out_base + j] = (float)heap.a[j].d;
+      }
+    }
+    free(heap.a);
+  }
+}
 #pragma GCC diagnostic pop
 
 static inline void tk_gram_solve_w (
   tk_gram_t *g, double lambda_raw, bool do_prop, double prop_a, double prop_b)
 {
   int64_t d = g->n_dims, nl = g->n_labels;
+  uint64_t dnl = (uint64_t)d * (uint64_t)nl;
   double mu = lambda_raw * g->mean_eig + g->mean_eig * 1e-7;
   if (do_prop && g->label_counts) {
     double C = (log((double)g->n_samples) - 1.0) * pow(prop_b + 1.0, prop_a);
@@ -110,27 +156,59 @@ static inline void tk_gram_solve_w (
         g->W_work[i * nl + l] = g->PQtY[i * nl + l] * inv;
     }
   }
+  if (!g->W_work_f)
+    g->W_work_f = (float *)malloc(dnl * sizeof(float));
+  for (uint64_t i = 0; i < dnl; i++)
+    g->W_work_f[i] = (float)g->W_work[i];
+  if (g->cm_proj) {
+    if (!g->intercept)
+      g->intercept = (double *)malloc((uint64_t)nl * sizeof(double));
+    memcpy(g->intercept, g->y_mean, (uint64_t)nl * sizeof(double));
+    cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)nl,
+      -1.0, g->W_work, (int)nl, g->cm_proj, 1, 1.0, g->intercept, 1);
+  }
 }
 
 static inline int tk_gram_prepare_val_lua (lua_State *L) {
   tk_gram_t *g = tk_gram_peek(L, 1);
-  tk_dvec_t *val_dvec = tk_dvec_peek(L, 2, "val_codes");
+  tk_fvec_t *val_fvec = tk_fvec_peek(L, 2, "val_codes");
   int64_t val_n = (int64_t)luaL_checkinteger(L, 3);
   int64_t d = g->n_dims;
-  free(g->val_F);
-  free(g->sbuf); g->sbuf = NULL;
-  g->val_F = (double *)malloc((uint64_t)val_n * (uint64_t)d * sizeof(double));
-  if (!g->val_F) return luaL_error(L, "prepare: out of memory");
-  g->val_n = val_n;
+  free(g->val_F_f);
+  free(g->sbuf_f); g->sbuf_f = NULL;
+  uint64_t nd = (uint64_t)val_n * (uint64_t)d;
+  double *val_F_d = (double *)malloc(nd * sizeof(double));
+  if (!val_F_d) return luaL_error(L, "prepare: out of memory");
+  for (uint64_t i = 0; i < nd; i++)
+    val_F_d[i] = (double)val_fvec->a[i];
+  if (g->col_mean) {
+    #pragma omp parallel for schedule(static)
+    for (int64_t i = 0; i < val_n; i++)
+      for (int64_t j = 0; j < d; j++)
+        val_F_d[i * d + j] -= g->col_mean[j];
+    if (!g->cm_proj)
+      g->cm_proj = (double *)malloc((uint64_t)d * sizeof(double));
+    cblas_dgemv(CblasRowMajor, CblasNoTrans, (int)d, (int)d,
+      1.0, g->evecs, (int)d, g->col_mean, 1, 0.0, g->cm_proj, 1);
+  }
+  double *proj_d = (double *)malloc(nd * sizeof(double));
+  if (!proj_d) { free(val_F_d); return luaL_error(L, "prepare: out of memory"); }
   cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-    (int)val_n, (int)d, (int)d, 1.0, val_dvec->a, (int)d,
-    g->evecs, (int)d, 0.0, g->val_F, (int)d);
+    (int)val_n, (int)d, (int)d, 1.0, val_F_d, (int)d,
+    g->evecs, (int)d, 0.0, proj_d, (int)d);
+  g->val_F_f = (float *)malloc(nd * sizeof(float));
+  if (!g->val_F_f) { free(val_F_d); free(proj_d); return luaL_error(L, "prepare: out of memory"); }
+  for (uint64_t i = 0; i < nd; i++)
+    g->val_F_f[i] = (float)proj_d[i];
+  free(val_F_d);
+  free(proj_d);
+  g->val_n = val_n;
   return 0;
 }
 
 static inline int tk_gram_trial_label_lua (lua_State *L) {
   tk_gram_t *g = tk_gram_peek(L, 1);
-  if (!g->val_F) return luaL_error(L, "label: call prepare first");
+  if (!g->val_F_f) return luaL_error(L, "label: call prepare first");
   int64_t d = g->n_dims, nl = g->n_labels, val_n = g->val_n;
   double lambda_raw = luaL_checknumber(L, 2);
   int64_t k = (int64_t)luaL_checkinteger(L, 3);
@@ -141,19 +219,21 @@ static inline int tk_gram_trial_label_lua (lua_State *L) {
   double prop_b = do_prop ? (lua_isnumber(L, 5) ? lua_tonumber(L, 5) : 1.5) : 0.0;
   TK_IVEC_BUF(offsets, 6, val_n + 1);
   TK_IVEC_BUF(labels, 7, val_n * k);
-  TK_DVEC_BUF(scores_out, 8, val_n * k);
+  TK_FVEC_BUF(scores_out, 8, val_n * k);
   for (int64_t i = 0; i <= val_n; i++)
     offsets->a[i] = i * k;
   tk_gram_solve_w(g, lambda_raw, do_prop, prop_a, prop_b);
   uint64_t need = (uint64_t)val_n * (uint64_t)nl;
-  if (!g->sbuf) {
-    g->sbuf = (double *)malloc(need * sizeof(double));
-    if (!g->sbuf) return luaL_error(L, "label: malloc failed");
+  if (!g->sbuf_f) {
+    g->sbuf_f = (float *)malloc(need * sizeof(float));
+    if (!g->sbuf_f) return luaL_error(L, "label: malloc failed");
   }
-  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-    (int)val_n, (int)nl, (int)d, 1.0, g->val_F, (int)d,
-    g->W_work, (int)nl, 0.0, g->sbuf, (int)nl);
-  tk_gram_topk_block(g->sbuf, val_n, nl, k, 0, offsets, labels, scores_out);
+  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    (int)val_n, (int)nl, (int)d, 1.0f, g->val_F_f, (int)d,
+    g->W_work_f, (int)nl, 0.0f, g->sbuf_f, (int)nl);
+  if (g->intercept)
+    tk_gram_add_intercept_f(g->sbuf_f, val_n, nl, g->intercept);
+  tk_gram_topk_block_f(g->sbuf_f, val_n, nl, k, 0, offsets, labels, scores_out);
   lua_pushvalue(L, offsets_idx);
   lua_pushvalue(L, labels_idx);
   lua_pushvalue(L, scores_out_idx);
@@ -162,17 +242,19 @@ static inline int tk_gram_trial_label_lua (lua_State *L) {
 
 static inline int tk_gram_regress_lua (lua_State *L) {
   tk_gram_t *g = tk_gram_peek(L, 1);
-  if (!g->val_F) return luaL_error(L, "regress: call prepare first");
+  if (!g->val_F_f) return luaL_error(L, "regress: call prepare first");
   int64_t d = g->n_dims, nl = g->n_labels, val_n = g->val_n;
   double lambda_raw = luaL_checknumber(L, 2);
   bool do_prop = lua_isnumber(L, 3);
   double prop_a = do_prop ? lua_tonumber(L, 3) : 0.0;
   double prop_b = do_prop ? (lua_isnumber(L, 4) ? lua_tonumber(L, 4) : 1.5) : 0.0;
-  TK_DVEC_BUF(out, 5, val_n * nl);
+  TK_FVEC_BUF(out, 5, val_n * nl);
   tk_gram_solve_w(g, lambda_raw, do_prop, prop_a, prop_b);
-  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-    (int)val_n, (int)nl, (int)d, 1.0, g->val_F, (int)d,
-    g->W_work, (int)nl, 0.0, out->a, (int)nl);
+  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    (int)val_n, (int)nl, (int)d, 1.0f, g->val_F_f, (int)d,
+    g->W_work_f, (int)nl, 0.0f, out->a, (int)nl);
+  if (g->intercept)
+    tk_gram_add_intercept_f(out->a, val_n, nl, g->intercept);
   lua_pushvalue(L, out_idx);
   return 1;
 }

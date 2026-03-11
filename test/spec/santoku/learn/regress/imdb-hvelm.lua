@@ -2,7 +2,6 @@ local arr = require("santoku.array")
 local csr = require("santoku.learn.csr")
 local csr_m = require("santoku.csr")
 local ds = require("santoku.learn.dataset")
-local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
 local optimize = require("santoku.learn.optimize")
 local spectral = require("santoku.learn.spectral")
@@ -74,8 +73,6 @@ test("imdb csr+kernel", function ()
   local emb_d = sp_enc:dims()
   str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
 
-  local enc_sims_buf = dvec.create()
-  local enc_out_buf = dvec.create()
   local function encode_texts(texts, n)
     local _, off, tok = csr.tokenize({
       texts = texts, hdc_ngram = cfg.tok.ngram,
@@ -84,7 +81,6 @@ test("imdb csr+kernel", function ()
     local st, so = csr.seq_select(tok, off, bns_ids)
     return sp_enc:encode({
       offsets = so, tokens = st, n_samples = n,
-      sims = enc_sims_buf, output = enc_out_buf,
     })
   end
 

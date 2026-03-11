@@ -4,6 +4,7 @@
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
 #include <santoku/dvec.h>
+#include <santoku/fvec.h>
 #include <santoku/pvec.h>
 #include <santoku/rvec.h>
 #include <santoku/cvec/ext.h>
@@ -22,7 +23,7 @@ typedef struct {
   uint64_t N, m, features;
   const char *data;
   size_t bytes_per_vec;
-  const double *codes;
+  const float *codes;
   uint64_t n_dims;
 } tk_ann_flat_t;
 
@@ -192,8 +193,8 @@ static inline void tk_ann_flat_query_csr (
   bool skip_self,
   uint64_t k,
   uint64_t max_radius,
-  const double *query_codes,
-  const double *corpus_codes,
+  const float *query_codes,
+  const float *corpus_codes,
   uint64_t n_dims
 ) {
   uint64_t features = flat->features;
@@ -225,11 +226,11 @@ static inline void tk_ann_flat_query_csr (
       int64_t base = (int64_t)(i * k);
 
       if (rerank) {
-        const double *qrow = query_codes + i * n_dims;
+        const float *qrow = query_codes + i * n_dims;
         rerank_buf->n = 0;
         for (uint64_t j = 0; j < cnt; j++) {
           int64_t cand = heap->a[j].i;
-          double dot = cblas_ddot((int)n_dims, qrow, 1,
+          double dot = (double)cblas_sdot((int)n_dims, qrow, 1,
             corpus_codes + (uint64_t)cand * n_dims, 1);
           tk_rvec_push(rerank_buf, tk_rank(cand, dot));
         }
@@ -285,9 +286,9 @@ static inline int tk_ann_flat_nbr_by_vecs_lua (lua_State *L)
   tk_cvec_t *query_vecs = tk_cvec_peek(L, 2, "vectors");
   uint64_t k = tk_lua_checkunsigned(L, 3, "k");
   uint64_t nq = query_vecs->n / flat->bytes_per_vec;
-  tk_dvec_t *qcodes = tk_dvec_peekopt(L, 4);
-  const double *query_codes = NULL;
-  const double *corpus_codes = flat->codes;
+  tk_fvec_t *qcodes = tk_fvec_peekopt(L, 4);
+  const float *query_codes = NULL;
+  const float *corpus_codes = flat->codes;
   uint64_t n_dims = flat->n_dims;
   uint64_t max_radius;
   if (qcodes) {
@@ -310,7 +311,7 @@ static inline int tk_ann_flat_nbr_lua (lua_State *L)
   if (lua_isboolean(L, 3))
     do_rerank = lua_toboolean(L, 3);
   uint64_t max_radius = tk_lua_optunsigned(L, lua_isboolean(L, 3) ? 4 : 3, "radius", 3);
-  const double *corpus = do_rerank ? flat->codes : NULL;
+  const float *corpus = do_rerank ? flat->codes : NULL;
   uint64_t n_dims = do_rerank ? flat->n_dims : 0;
   tk_ann_flat_query_csr(L, flat, flat->data, flat->N, true, k, max_radius,
     corpus, corpus, n_dims);

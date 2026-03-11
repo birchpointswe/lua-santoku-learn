@@ -12,7 +12,7 @@ static inline int tk_ann_create_lua (lua_State *L)
   int flat_idx = lua_gettop(L);
   tk_lua_add_ephemeron(L, TK_ANN_EPH, flat_idx, data_idx);
   lua_getfield(L, 1, "codes");
-  tk_dvec_t *codes = tk_dvec_peekopt(L, -1);
+  tk_fvec_t *codes = tk_fvec_peekopt(L, -1);
   if (codes) {
     tk_ann_flat_t *flat = tk_ann_flat_peek(L, flat_idx);
     uint64_t n_dims = tk_lua_fcheckunsigned(L, 1, "create", "n_dims");

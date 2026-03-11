@@ -6,6 +6,7 @@
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
 #include <santoku/dvec.h>
+#include <santoku/fvec.h>
 
 #define TK_GFM_MT "tk_gfm_t"
 
@@ -162,7 +163,8 @@ static int tk_gfm_create_lua (lua_State *L)
   lua_getfield(L, 1, "pred_neighbors");
   tk_ivec_t *pred_nbr = tk_ivec_peek(L, -1, "pred_neighbors");
   lua_getfield(L, 1, "pred_scores");
-  tk_dvec_t *pred_sco = tk_dvec_peek(L, -1, "pred_scores");
+  tk_fvec_t *pred_sco_f = tk_fvec_peekopt(L, -1);
+  tk_dvec_t *pred_sco_d = pred_sco_f ? NULL : tk_dvec_peek(L, -1, "pred_scores");
   lua_getfield(L, 1, "expected_offsets");
   tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
   lua_getfield(L, 1, "expected_neighbors");
@@ -222,7 +224,7 @@ static int tk_gfm_create_lua (lua_State *L)
       int64_t l = pred_nbr->a[j];
       int64_t pos = plsoff[l] + plfill[l];
       plsamp[pos] = s;
-      plscore[pos] = pred_sco->a[j];
+      plscore[pos] = pred_sco_f ? (double)pred_sco_f->a[j] : pred_sco_d->a[j];
       plfill[l]++;
     }
   }
@@ -321,7 +323,7 @@ static int tk_gfm_create_lua (lua_State *L)
       gt_bm[exp_nbr->a[j]] = 1;
     for (int64_t j = pred_off->a[s]; j < pred_off->a[s + 1]; j++) {
       int64_t label = pred_nbr->a[j];
-      double raw_score = pred_sco->a[j];
+      double raw_score = pred_sco_f ? (double)pred_sco_f->a[j] : pred_sco_d->a[j];
       double cal_p = isotonic_lookup(label_thresh, label_val,
         label_off_raw[label], label_off_raw[label + 1], raw_score, default_prob);
       cands[ci].score = cal_p;
@@ -390,7 +392,8 @@ static int tk_gfm_predict_lua (lua_State *L)
   lua_getfield(L, 2, "neighbors");
   tk_ivec_t *neighbors = tk_ivec_peek(L, -1, "neighbors");
   lua_getfield(L, 2, "scores");
-  tk_dvec_t *scores = tk_dvec_peek(L, -1, "scores");
+  tk_fvec_t *scores_f = tk_fvec_peekopt(L, -1);
+  tk_dvec_t *scores_d = scores_f ? NULL : tk_dvec_peek(L, -1, "scores");
   lua_pop(L, 3);
   int64_t ns = (int64_t)tk_lua_fcheckunsigned(L, 2, "gfm.predict", "n_samples");
 
@@ -427,7 +430,7 @@ static int tk_gfm_predict_lua (lua_State *L)
 
       for (int64_t k = 1; k <= m; k++) {
         int64_t label = neighbors->a[ps + k - 1];
-        double sc = scores->a[ps + k - 1];
+        double sc = scores_f ? (double)scores_f->a[ps + k - 1] : scores_d->a[ps + k - 1];
         double cal_p = isotonic_lookup(lth, lva, loff[label], loff[label + 1], sc, defp);
         for (int64_t si = 1; si <= pis_max_s; si++)
           prefix[si] += isotonic_lookup(sth, sva, soff[si], soff[si + 1], cal_p, 0.0);
