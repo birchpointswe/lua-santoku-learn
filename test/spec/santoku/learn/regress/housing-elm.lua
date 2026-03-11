@@ -72,7 +72,7 @@ test("housing regressor", function ()
   train_cat_codes = nil; train_cont_codes = nil -- luacheck: ignore
   collectgarbage("collect")
 
-  local xtx, xty, col_mean, y_mean = spectral.gram({
+  local gram = spectral.gram({
     codes = train_codes, n_samples = train.n, n_dims = emb_d,
     targets = train.targets, n_targets = 1,
   })
@@ -92,8 +92,7 @@ test("housing regressor", function ()
 
   str.printf("[Ridge] Training\n")
   local _, ridge_obj, best_params = optimize.ridge({
-    XtX = xtx, XtY = xty, col_mean = col_mean, y_mean = y_mean,
-    n_samples = train.n, n_dims = emb_d, n_targets = 1,
+    gram = gram,
     targets = true,
     val_codes = val_codes, val_n_samples = validate.n,
     val_targets = validate.targets,
@@ -101,7 +100,7 @@ test("housing regressor", function ()
     search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
-  xtx = nil; xty = nil; col_mean = nil; y_mean = nil
+  gram = nil
   collectgarbage("collect")
   str.printf("[Ridge] lambda=%.4e %s\n", best_params.lambda, sw())
 
