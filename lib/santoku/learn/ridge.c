@@ -212,144 +212,6 @@ static luaL_Reg tk_ridge_mt_fns[] = {
 
 
 
-static inline int tk_ridge_precompute_lua (lua_State *L) {
-  lua_settop(L, 1);
-  luaL_checktype(L, 1, LUA_TTABLE);
-  int64_t n = (int64_t)tk_lua_fcheckunsigned(L, 1, "prepare", "n_samples");
-  int64_t d = (int64_t)tk_lua_fcheckunsigned(L, 1, "prepare", "n_dims");
-
-  lua_getfield(L, 1, "destructive");
-  bool destructive = lua_toboolean(L, -1);
-  lua_pop(L, 1);
-
-  lua_getfield(L, 1, "XtX");
-  tk_dvec_t *in_xtx = tk_dvec_peek(L, -1, "XtX");
-  int in_xtx_idx = lua_gettop(L);
-  if (!destructive) lua_pop(L, 1);
-  lua_getfield(L, 1, "XtY");
-  tk_dvec_t *in_xty = tk_dvec_peek(L, -1, "XtY");
-  int in_xty_idx = lua_gettop(L);
-  if (!destructive) lua_pop(L, 1);
-  lua_getfield(L, 1, "col_mean");
-  tk_dvec_t *in_cm = tk_dvec_peek(L, -1, "col_mean");
-  lua_pop(L, 1);
-  lua_getfield(L, 1, "y_mean");
-  tk_dvec_t *in_ym = tk_dvec_peek(L, -1, "y_mean");
-  lua_pop(L, 1);
-  lua_getfield(L, 1, "label_counts");
-  bool dense = lua_isnil(L, -1);
-  tk_dvec_t *in_lc = dense ? NULL : tk_dvec_peek(L, -1, "label_counts");
-  lua_pop(L, 1);
-  int64_t nl;
-  if (dense)
-    nl = (int64_t)tk_lua_fcheckunsigned(L, 1, "prepare", "n_targets");
-  else
-    nl = (int64_t)tk_lua_fcheckunsigned(L, 1, "prepare", "n_labels");
-
-  tk_dvec_t *cm_dvec = tk_dvec_create(L, (uint64_t)d, NULL, NULL);
-  int cm_idx = lua_gettop(L);
-  memcpy(cm_dvec->a, in_cm->a, (uint64_t)d * sizeof(double));
-
-  tk_dvec_t *ev_dvec;
-  int ev_idx;
-  if (destructive) {
-    ev_dvec = in_xtx;
-    ev_idx = in_xtx_idx;
-  } else {
-    ev_dvec = tk_dvec_create(L, (uint64_t)(d * d), NULL, NULL);
-    ev_idx = lua_gettop(L);
-    memcpy(ev_dvec->a, in_xtx->a, (uint64_t)(d * d) * sizeof(double));
-  }
-
-  uint64_t dnl = (uint64_t)d * (uint64_t)nl;
-  tk_dvec_t *work_dvec;
-  int work_idx;
-  if (destructive) {
-    work_dvec = in_xty;
-    work_idx = in_xty_idx;
-  } else {
-    work_dvec = tk_dvec_create(L, dnl, NULL, NULL);
-    work_idx = lua_gettop(L);
-    memcpy(work_dvec->a, in_xty->a, dnl * sizeof(double));
-  }
-  double *xty = work_dvec->a;
-
-  cblas_dsyr(CblasRowMajor, CblasUpper, (int)d, -1.0,
-    cm_dvec->a, 1, ev_dvec->a, (int)d);
-  for (int64_t i = 0; i < d; i++)
-    for (int64_t j = i + 1; j < d; j++)
-      ev_dvec->a[j * d + i] = ev_dvec->a[i * d + j];
-
-  tk_dvec_t *eig_dvec = tk_dvec_create(L, (uint64_t)d, NULL, NULL);
-  int eig_idx = lua_gettop(L);
-  int info = LAPACKE_dsyevd(LAPACK_COL_MAJOR, 'V', 'U', (int)d,
-    ev_dvec->a, (int)d, eig_dvec->a);
-  if (info != 0)
-    return luaL_error(L, "prepare: eigendecomposition failed (info=%d)", info);
-
-  tk_dvec_t *cnt_dvec = NULL;
-  int cnt_idx = 0;
-  if (!dense) {
-    cnt_dvec = tk_dvec_create(L, (uint64_t)nl, NULL, NULL);
-    cnt_idx = lua_gettop(L);
-    memcpy(cnt_dvec->a, in_lc->a, (uint64_t)nl * sizeof(double));
-  }
-
-  tk_dvec_t *ym_dvec = tk_dvec_create(L, (uint64_t)nl, NULL, NULL);
-  int ym_idx = lua_gettop(L);
-  memcpy(ym_dvec->a, in_ym->a, (uint64_t)nl * sizeof(double));
-
-  cblas_dger(CblasRowMajor, (int)d, (int)nl, -1.0,
-    cm_dvec->a, 1, ym_dvec->a, 1, xty, (int)nl);
-
-  tk_dvec_t *rxty_dvec = tk_dvec_create(L, dnl, NULL, NULL);
-  int rxty_idx = lua_gettop(L);
-  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-    (int)d, (int)nl, (int)d, 1.0, ev_dvec->a, (int)d,
-    xty, (int)nl, 0.0, rxty_dvec->a, (int)nl);
-
-  tk_gram_t *g = tk_lua_newuserdata(L, tk_gram_t,
-    TK_GRAM_MT, tk_gram_mt_fns, tk_gram_gc);
-  int Gi = lua_gettop(L);
-  g->evecs = ev_dvec;
-  g->eigenvals = eig_dvec;
-  g->RXtY = rxty_dvec;
-  g->label_counts = cnt_dvec;
-  g->work = work_dvec;
-  g->col_mean = cm_dvec;
-  g->y_mean = ym_dvec;
-  g->n_dims = d;
-  g->n_labels = nl;
-  g->n_samples = n;
-  g->destroyed = false;
-  g->H_val = NULL;
-  g->VCM = NULL;
-  g->intercept_buf = NULL;
-  g->val_n = 0;
-
-  lua_newtable(L);
-  lua_pushvalue(L, ev_idx);
-  lua_setfield(L, -2, "evecs");
-  lua_pushvalue(L, eig_idx);
-  lua_setfield(L, -2, "eigenvals");
-  lua_pushvalue(L, rxty_idx);
-  lua_setfield(L, -2, "RXtY");
-  lua_pushvalue(L, work_idx);
-  lua_setfield(L, -2, "work");
-  lua_pushvalue(L, cm_idx);
-  lua_setfield(L, -2, "col_mean");
-  lua_pushvalue(L, ym_idx);
-  lua_setfield(L, -2, "y_mean");
-  if (cnt_idx > 0) {
-    lua_pushvalue(L, cnt_idx);
-    lua_setfield(L, -2, "label_counts");
-  }
-  lua_setfenv(L, Gi);
-  lua_pushvalue(L, Gi);
-  return 1;
-}
-
-
 static inline int tk_ridge_create_lua (lua_State *L) {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
@@ -362,8 +224,6 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     lua_getfield(L, 1, "lambda");
     double lambda_raw = (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0);
     lua_pop(L, 1);
-    double max_eig = d > 0 ? gram->eigenvals->a[d - 1] : 1.0;
-    double lambda = lambda_raw * max_eig + max_eig * 1e-7;
     lua_getfield(L, 1, "propensity_a");
     bool do_prop = lua_isnumber(L, -1);
     double prop_a = do_prop ? lua_tonumber(L, -1) : 0.0;
@@ -371,76 +231,33 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     lua_getfield(L, 1, "propensity_b");
     double prop_b = do_prop ? (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.5) : 0.0;
     lua_pop(L, 1);
+    if (do_prop && !gram->label_counts)
+      return luaL_error(L, "ridge create: propensity requires label_counts");
+    tk_gram_solve_w(gram, lambda_raw, do_prop, prop_a, prop_b);
     lua_getfield(L, 1, "w_buf");
     tk_dvec_t *w_buf = lua_isnil(L, -1) ? NULL : tk_dvec_peek(L, -1, "w_buf");
     int w_buf_lua_idx = w_buf ? lua_gettop(L) : 0;
     if (!w_buf) lua_pop(L, 1);
-    lua_getfield(L, 1, "intercept_buf");
-    tk_dvec_t *ib = lua_isnil(L, -1) ? NULL : tk_dvec_peek(L, -1, "intercept_buf");
-    int ib_lua_idx = ib ? lua_gettop(L) : 0;
-    if (!ib) lua_pop(L, 1);
     tk_dvec_t *W_dvec;
     int W_idx;
     if (w_buf) {
-      tk_dvec_ensure(w_buf, (uint64_t)(d * nl));
-      w_buf->n = (uint64_t)(d * nl);
+      tk_dvec_ensure(w_buf, dnl);
+      w_buf->n = dnl;
       W_dvec = w_buf;
       W_idx = w_buf_lua_idx;
     } else {
-      W_dvec = tk_dvec_create(L, (uint64_t)(d * nl), NULL, NULL);
+      W_dvec = tk_dvec_create(L, dnl, NULL, NULL);
       W_idx = lua_gettop(L);
     }
-    double *Z = gram->work->a;
-    memcpy(Z, gram->RXtY->a, dnl * sizeof(double));
-    if (do_prop) {
-      if (!gram->label_counts)
-        return luaL_error(L, "ridge create: propensity requires label prepare");
-      int64_t ns = gram->n_samples;
-      double C = (log((double)ns) - 1.0) * pow(prop_b + 1.0, prop_a);
-      for (int64_t l = 0; l < nl; l++) {
-        double w = 1.0 + C / pow(gram->label_counts->a[l] + prop_b, prop_a);
-        for (int64_t i = 0; i < d; i++)
-          Z[i * nl + l] *= w;
-      }
-    }
-    for (int64_t i = 0; i < d; i++) {
-      double s = 1.0 / (gram->eigenvals->a[i] + lambda);
-      for (int64_t j = 0; j < nl; j++)
-        Z[i * nl + j] *= s;
-    }
     cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-      (int)d, (int)nl, (int)d, 1.0, gram->evecs->a, (int)d,
-      Z, (int)nl, 0.0, W_dvec->a, (int)nl);
-
-    tk_dvec_t *b_dvec;
-    int b_idx;
-    if (ib) {
-      tk_dvec_ensure(ib, (uint64_t)nl);
-      ib->n = (uint64_t)nl;
-      b_dvec = ib;
-      b_idx = ib_lua_idx;
-    } else {
-      b_dvec = tk_dvec_create(L, (uint64_t)nl, NULL, NULL);
-      b_idx = lua_gettop(L);
-    }
-    if (do_prop) {
-      int64_t ns = gram->n_samples;
-      double C = (log((double)ns) - 1.0) * pow(prop_b + 1.0, prop_a);
-      for (int64_t l = 0; l < nl; l++) {
-        double w = 1.0 + C / pow(gram->label_counts->a[l] + prop_b, prop_a);
-        b_dvec->a[l] = w * gram->y_mean->a[l];
-      }
-    } else {
-      memcpy(b_dvec->a, gram->y_mean->a, (uint64_t)nl * sizeof(double));
-    }
-    cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)nl, -1.0,
-      W_dvec->a, (int)nl, gram->col_mean->a, 1, 1.0, b_dvec->a, 1);
+      (int)d, (int)nl, (int)d, 1.0, gram->evecs, (int)d,
+      gram->W_work, (int)nl, 0.0, W_dvec->a, (int)nl);
 
     tk_ridge_t *r = tk_lua_newuserdata(L, tk_ridge_t,
       TK_RIDGE_MT, tk_ridge_mt_fns, tk_ridge_gc);
     int Ei = lua_gettop(L);
     r->W = W_dvec;
-    r->intercept = b_dvec;
+    r->intercept = NULL;
     r->n_dims = d;
     r->n_labels = nl;
     r->Wt = NULL;
@@ -450,15 +267,12 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     lua_newtable(L);
     lua_pushvalue(L, W_idx);
     lua_setfield(L, -2, "W");
-    lua_pushvalue(L, b_idx);
-    lua_setfield(L, -2, "intercept");
     lua_pushvalue(L, gram_lua_idx);
     lua_setfield(L, -2, "gram");
     lua_setfenv(L, Ei);
     lua_pushvalue(L, Ei);
     lua_pushvalue(L, W_idx);
-    lua_pushvalue(L, b_idx);
-    return 3;
+    return 2;
   }
   return luaL_error(L, "ridge create: gram required");
 }
@@ -521,7 +335,6 @@ static inline int tk_ridge_load_lua (lua_State *L) {
 
 static luaL_Reg tk_ridge_fns[] = {
   { "create", tk_ridge_create_lua },
-  { "prepare", tk_ridge_precompute_lua },
   { "load", tk_ridge_load_lua },
   { NULL, NULL }
 };

@@ -783,29 +783,8 @@ M.ridge = function (args)
   local ridge = require("santoku.learn.ridge")
   local dense = args.targets ~= nil
 
-  local n_dims = args.n_dims or args.n_input_dims
-  local pre_mean = args.pre_mean
-  local pre_istd = args.pre_istd
-  local std = pre_mean and { pre_mean = pre_mean, pre_istd = pre_istd } or nil
-  if pre_mean and args.val_codes then
-    args.val_codes:mtx_standardize(n_dims, pre_mean, pre_istd)
-  end
-  local ga = {
-    n_samples = args.n_samples, n_dims = n_dims,
-    XtX = args.XtX, XtY = args.XtY,
-    col_mean = args.col_mean, y_mean = args.y_mean,
-    destructive = true,
-  }
-  if dense then
-    ga.n_targets = err.assert(args.n_targets, "n_targets required for dense ridge")
-  else
-    ga.n_labels = args.n_labels
-    ga.label_counts = args.label_counts
-  end
-  local gram = ridge.prepare(ga)
-  ga = nil
-  args.XtX = nil; args.XtY = nil
-  args.col_mean = nil; args.y_mean = nil; args.label_counts = nil
+  local gram = err.assert(args.gram, "gram required")
+  args.gram = nil
   local param_names
   if dense then param_names = { "lambda" }
   else param_names = { "lambda", "propensity_a", "propensity_b" } end
@@ -821,7 +800,7 @@ M.ridge = function (args)
       propensity_a = not dense and params.propensity_a or nil,
       propensity_b = not dense and params.propensity_b or nil,
     })
-    return nil, r, params, nil, nil, args.val_codes, std
+    return nil, r, params, nil, nil, args.val_codes
   end
   gram:prepare(args.val_codes, args.val_n_samples)
   local lbl_off_buf, lbl_nbr_buf, lbl_sco_buf, regress_buf
@@ -852,7 +831,7 @@ M.ridge = function (args)
     propensity_a = not dense and best_params.propensity_a or nil,
     propensity_b = not dense and best_params.propensity_b or nil,
   })
-  return nil, r, best_params, best_metrics, nil, args.val_codes, std
+  return nil, r, best_params, best_metrics, nil, args.val_codes
 end
 
 

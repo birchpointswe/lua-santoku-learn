@@ -20,16 +20,16 @@ local cfg = {
   data = { max = nil },
   tok = { ngram = 7 },
   emb = {
-    n_landmarks = 8192, -- 16384 for max
+    n_landmarks = 8192*2, -- 16384 for max
     trace_tol = 0.01,
     k = 256,
-    kernel = "cosine",
+    kernel = "arccos1", -- arccos1 best
   },
   ridge = {
     lambda = { def = 6.1894e-04 },
     propensity_a = { def = 0.06 },
     propensity_b = { def = 3.47 },
-    search_trials = 0,
+    search_trials = 400,
   },
   -- ann = true
   gfm1 = { k = 256 },
@@ -141,7 +141,7 @@ test("eurlex", function ()
 
   str.printf("[Spectral] Cholesky trace_tol=%s kernel=%s\n",
     tostring(cfg.emb.trace_tol), cfg.emb.kernel)
-  local train_codes, sp_enc, xtx, xty, col_mean, y_mean, label_counts = spectral.encode({
+  local train_codes, sp_enc, gram = spectral.encode({
     offsets = sel_offsets, tokens = sel_tokens,
     n_samples = train.n, n_tokens = n_sel,
     feature_weights = bns_scores, kernel = cfg.emb.kernel,
@@ -206,18 +206,16 @@ test("eurlex", function ()
     shortlist_recall("Test", ts_short_off, ts_short_nbr, test_label_off, test_label_nbr, test_set.n)
   end
 
-  str.printf("\n[#1] RP-Cholesky + OVA Ridge + Topk GFM\n")
+  str.printf("\n[#1] OVA KRR + Topk GFM\n")
   local _, ridge_obj, best_params = optimize.ridge({
-    XtX = xtx, XtY = xty, col_mean = col_mean, y_mean = y_mean,
-    label_counts = label_counts,
-    n_samples = train.n, n_dims = emb_d, n_labels = n_labels,
+    gram = gram,
     val_codes = dev_codes, val_n_samples = dev.n,
     val_expected_offsets = dev_label_off, val_expected_neighbors = dev_label_nbr,
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a, propensity_b = cfg.ridge.propensity_b,
     k = k1, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
-  xtx = nil; xty = nil; col_mean = nil; y_mean = nil; label_counts = nil
+  gram = nil
   collectgarbage("collect")
   str.printf("[Ridge] lambda=%.4e pa=%.4f pb=%.4f %s\n",
     best_params.lambda, best_params.propensity_a, best_params.propensity_b, sw())
@@ -242,7 +240,7 @@ test("eurlex", function ()
   local d2_tr_oracle, d2_dv_oracle, d2_ts_oracle
   local gfm2_dm, gfm2_tm
   if tr_short_off and cfg.gfm2 then
-    str.printf("\n[#2] RP-Cholesky + ANN Shortlist + OVA Ridge + Topk GFM\n")
+    str.printf("\n[#2] OVA KRR + ANN Shortlist + Topk GFM\n")
     str.printf("[OVA] Scoring shortlists\n")
     local regress_buf = dvec.create()
     local dv_short_scores = ridge_obj:regress(dev_codes, dev.n, dv_short_off, dv_short_nbr, regress_buf)
