@@ -46,125 +46,6 @@ static int tm_csr_seq_select (lua_State *L)
   return has_values ? 3 : 2;
 }
 
-static int tm_csr_stratified_sample (lua_State *L)
-{
-  tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
-  tk_ivec_t *neighbors = tk_ivec_peek(L, 2, "neighbors");
-  uint64_t n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
-  uint64_t n_labels = tk_lua_checkunsigned(L, 4, "n_labels");
-  uint64_t n_select = tk_lua_checkunsigned(L, 5, "n_select");
-
-  if (n_select > n_samples) n_select = n_samples;
-  if (n_select == n_samples) {
-    tk_ivec_t *r = tk_ivec_create(L, n_samples, 0, 0);
-    r->n = n_samples;
-    for (uint64_t i = 0; i < n_samples; i++) r->a[i] = (int64_t)i;
-    return 1;
-  }
-
-  uint64_t *lcnt = (uint64_t *)calloc(n_labels, sizeof(uint64_t));
-  if (!lcnt) return luaL_error(L, "stratified_sample: alloc failed");
-  for (uint64_t i = 0; i < n_samples; i++) {
-    int64_t lo = offsets->a[i], hi = offsets->a[i + 1];
-    for (int64_t j = lo; j < hi; j++) {
-      uint64_t lab = (uint64_t)neighbors->a[j];
-      if (lab < n_labels) lcnt[lab]++;
-    }
-  }
-
-  uint64_t *loff = (uint64_t *)malloc((n_labels + 1) * sizeof(uint64_t));
-  if (!loff) { free(lcnt); return luaL_error(L, "stratified_sample: alloc failed"); }
-  loff[0] = 0;
-  for (uint64_t l = 0; l < n_labels; l++)
-    loff[l + 1] = loff[l] + lcnt[l];
-  uint64_t total_entries = loff[n_labels];
-
-  uint64_t *lsamp = (uint64_t *)malloc(total_entries * sizeof(uint64_t));
-  if (!lsamp) { free(lcnt); free(loff); return luaL_error(L, "stratified_sample: alloc failed"); }
-  memset(lcnt, 0, n_labels * sizeof(uint64_t));
-  for (uint64_t i = 0; i < n_samples; i++) {
-    int64_t lo = offsets->a[i], hi = offsets->a[i + 1];
-    for (int64_t j = lo; j < hi; j++) {
-      uint64_t lab = (uint64_t)neighbors->a[j];
-      if (lab < n_labels) {
-        lsamp[loff[lab] + lcnt[lab]] = i;
-        lcnt[lab]++;
-      }
-    }
-  }
-
-  for (uint64_t l = 0; l < n_labels; l++) {
-    uint64_t lo = loff[l], cnt = loff[l + 1] - lo;
-    for (uint64_t i = cnt; i > 1; i--) {
-      uint64_t j = tk_fast_random() % i;
-      uint64_t tmp = lsamp[lo + i - 1];
-      lsamp[lo + i - 1] = lsamp[lo + j];
-      lsamp[lo + j] = tmp;
-    }
-  }
-
-  uint64_t *lorder = (uint64_t *)malloc(n_labels * sizeof(uint64_t));
-  uint64_t *lsz = (uint64_t *)malloc(n_labels * sizeof(uint64_t));
-  if (!lorder || !lsz) {
-    free(lcnt); free(loff); free(lsamp); free(lorder); free(lsz);
-    return luaL_error(L, "stratified_sample: alloc failed");
-  }
-  for (uint64_t l = 0; l < n_labels; l++) {
-    lorder[l] = l;
-    lsz[l] = loff[l + 1] - loff[l];
-  }
-  for (uint64_t i = 1; i < n_labels; i++) {
-    uint64_t key = lorder[i], ksz = lsz[lorder[i]];
-    int64_t j = (int64_t)i - 1;
-    while (j >= 0 && lsz[lorder[(uint64_t)j]] > ksz) {
-      lorder[(uint64_t)j + 1] = lorder[(uint64_t)j];
-      j--;
-    }
-    lorder[(uint64_t)j + 1] = key;
-  }
-
-  uint64_t bm_bytes = (n_samples + 7) / 8;
-  uint8_t *sel = (uint8_t *)calloc(bm_bytes, 1);
-  uint64_t *curs = (uint64_t *)calloc(n_labels, sizeof(uint64_t));
-  if (!sel || !curs) {
-    free(lcnt); free(loff); free(lsamp); free(lorder); free(lsz); free(sel); free(curs);
-    return luaL_error(L, "stratified_sample: alloc failed");
-  }
-
-  tk_ivec_t *result = tk_ivec_create(L, n_select, 0, 0);
-  uint64_t n_sel = 0;
-  bool progress = true;
-  while (n_sel < n_select && progress) {
-    progress = false;
-    for (uint64_t li = 0; li < n_labels && n_sel < n_select; li++) {
-      uint64_t l = lorder[li];
-      uint64_t lo = loff[l], cnt = loff[l + 1] - lo;
-      while (curs[l] < cnt) {
-        uint64_t sid = lsamp[lo + curs[l]];
-        curs[l]++;
-        if (!(sel[sid / 8] & (1 << (sid % 8)))) {
-          sel[sid / 8] |= (uint8_t)(1 << (sid % 8));
-          result->a[n_sel++] = (int64_t)sid;
-          progress = true;
-          break;
-        }
-      }
-    }
-  }
-
-  if (n_sel < n_select) {
-    for (uint64_t i = 0; i < n_samples && n_sel < n_select; i++) {
-      if (!(sel[i / 8] & (1 << (i % 8)))) {
-        result->a[n_sel++] = (int64_t)i;
-      }
-    }
-  }
-
-  result->n = n_sel;
-  free(lcnt); free(loff); free(lsamp); free(lorder); free(lsz); free(sel); free(curs);
-  return 1;
-}
-
 static int tm_csr_label_union (lua_State *L)
 {
   tk_ivec_t *nn_off = tk_ivec_peek(L, 1, "nn_offsets");
@@ -242,33 +123,6 @@ static int tm_csr_label_union (lua_State *L)
     free(bm);
   }
 
-  return 2;
-}
-
-static int tm_csr_subsample (lua_State *L)
-{
-  lua_settop(L, 3);
-  tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
-  tk_ivec_t *neighbors = tk_ivec_peek(L, 2, "neighbors");
-  tk_ivec_t *sample_ids = tk_ivec_peek(L, 3, "sample_ids");
-  int64_t n = (int64_t)sample_ids->n;
-  tk_ivec_t *new_off = tk_ivec_create(L, (uint64_t)(n + 1), NULL, NULL);
-  int64_t total = 0;
-  for (int64_t i = 0; i < n; i++) {
-    int64_t sid = sample_ids->a[i];
-    total += offsets->a[sid + 1] - offsets->a[sid];
-  }
-  tk_ivec_t *new_nbr = tk_ivec_create(L, (uint64_t)total, NULL, NULL);
-  int64_t pos = 0;
-  for (int64_t i = 0; i < n; i++) {
-    int64_t sid = sample_ids->a[i];
-    int64_t lo = offsets->a[sid];
-    int64_t hi = offsets->a[sid + 1];
-    new_off->a[i] = pos;
-    for (int64_t j = lo; j < hi; j++)
-      new_nbr->a[pos++] = neighbors->a[j];
-  }
-  new_off->a[n] = pos;
   return 2;
 }
 
@@ -360,26 +214,6 @@ static int tm_csr_sort_csr_desc (lua_State *L)
     }
   }
   return 2;
-}
-
-static int tm_csr_to_bits (lua_State *L)
-{
-  tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
-  tk_ivec_t *tokens = tk_ivec_peek(L, 2, "tokens");
-  uint64_t n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
-  uint64_t n_tokens = tk_lua_checkunsigned(L, 4, "n_tokens");
-  uint64_t total = 0;
-  for (uint64_t s = 0; s < n_samples; s++)
-    total += (uint64_t)(offsets->a[s + 1] - offsets->a[s]);
-  tk_ivec_t *out = tk_ivec_create(L, total, 0, 0);
-  out->n = total;
-  uint64_t pos = 0;
-  for (uint64_t s = 0; s < n_samples; s++) {
-    int64_t lo = offsets->a[s], hi = offsets->a[s + 1];
-    for (int64_t j = lo; j < hi; j++)
-      out->a[pos++] = (int64_t)(s * n_tokens + (uint64_t)tokens->a[j]);
-  }
-  return 1;
 }
 
 static inline size_t tm_csr_pack_ngrams (
@@ -975,11 +809,8 @@ static int tm_csr_standardize (lua_State *L)
 }
 
 static luaL_Reg tm_csr_fns[] = {
-  { "to_bits", tm_csr_to_bits },
   { "seq_select", tm_csr_seq_select },
-  { "stratified_sample", tm_csr_stratified_sample },
   { "label_union", tm_csr_label_union },
-  { "subsample", tm_csr_subsample },
   { "sort_csr_desc", tm_csr_sort_csr_desc },
   { "truncate", tm_csr_truncate },
   { "transpose", tm_csr_transpose },

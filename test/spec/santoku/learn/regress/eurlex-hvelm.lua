@@ -1,6 +1,7 @@
 local ann = require("santoku.learn.ann")
 local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
+local dvec = require("santoku.dvec")
 local eval = require("santoku.learn.evaluator")
 local fvec = require("santoku.fvec")
 local ivec = require("santoku.ivec")
@@ -20,7 +21,7 @@ local cfg = {
   emb = {
     n_landmarks = 8192*2,
     trace_tol = 0.01,
-    kernel = "arccos1",
+    kernel = "cosine",
     k = 256,
   },
   ridge = {
@@ -30,6 +31,11 @@ local cfg = {
     search_trials = nil,
   },
   gfm = true,
+  kridge = {
+    k = 32,
+    lambda = { def = 1.0 },
+    search_trials = nil,
+  },
   -- ann = true,
 }
 
@@ -108,6 +114,54 @@ test("eurlex", function ()
     local tm = eval_oracle(ts_off, ts_nbr, test_label_off, test_label_nbr, tk)
     str.printf("[Ts %s] %s %s\n", tag, fmt_metrics(tm), sw())
     return trm, dm, tm, gfm_obj
+  end
+
+  local function run_kridge(tag, kr_k,
+    tr_off, tr_nbr, tr_sco,
+    ts_off, ts_nbr, ts_sco,
+    dv_off, dv_nbr, dv_sco)
+    local tr_feat, nd = eval.topk_features({ offsets = tr_off, scores = tr_sco, k = kr_k })
+    local dv_feat = eval.topk_features({ offsets = dv_off, scores = dv_sco, k = kr_k })
+    local ts_feat = eval.topk_features({ offsets = ts_off, scores = ts_sco, k = kr_k })
+    local inv_std = tr_feat:mtx_zscore(nd)
+    dv_feat:mtx_zscore(nd, inv_std)
+    ts_feat:mtx_zscore(nd, inv_std)
+    local tr_ks = eval.retrieval_ks({
+      pred_offsets = tr_off, pred_neighbors = tr_nbr,
+      expected_offsets = train_label_off, expected_neighbors = train_label_nbr,
+    })
+    local dv_ks = eval.retrieval_ks({
+      pred_offsets = dv_off, pred_neighbors = dv_nbr,
+      expected_offsets = dev_label_off, expected_neighbors = dev_label_nbr,
+    })
+    local tr_targets = tr_ks:to_dvec()
+    local dv_targets = dv_ks:to_dvec()
+    local kr_obj = optimize.ridge({
+      train_codes = tr_feat, n_samples = train.n, n_dims = nd,
+      targets = tr_targets, n_targets = 1,
+      val_codes = dv_feat, val_n_samples = dev.n,
+      val_targets = dv_targets,
+      lambda = cfg.kridge.lambda,
+      search_trials = cfg.kridge.search_trials,
+      each = cfg.kridge.search_trials and util.make_ridge_log(stopwatch) or nil,
+    })
+    str.printf("[%s] fit %s\n", tag, sw())
+    local function predict_ks(feat, n)
+      return kr_obj:regress(feat, n):round():to_ivec():clamp(1, kr_k)
+    end
+    local trk = predict_ks(tr_feat, train.n)
+    local trm = eval_oracle(tr_off, tr_nbr, train_label_off, train_label_nbr, trk)
+    str.printf("[Tr %s] %s %s\n", tag, fmt_metrics(trm), sw())
+    local dm
+    if dv_off then
+      local dvk = predict_ks(dv_feat, dev.n)
+      dm = eval_oracle(dv_off, dv_nbr, dev_label_off, dev_label_nbr, dvk)
+      str.printf("[Dv %s] %s %s\n", tag, fmt_metrics(dm), sw())
+    end
+    local tsk = predict_ks(ts_feat, test_set.n)
+    local tm = eval_oracle(ts_off, ts_nbr, test_label_off, test_label_nbr, tsk)
+    str.printf("[Ts %s] %s %s\n", tag, fmt_metrics(tm), sw())
+    return trm, dm, tm, kr_obj
   end
 
   local ngram_map, offsets, tokens, values, n_tokens = csr.tokenize({
@@ -202,6 +256,14 @@ test("eurlex", function ()
       dv_off, dv_nbr, dv_sco)
   end
 
+  local kr_trm, kr_dvm, kr_tsm
+  if cfg.kridge then
+    kr_trm, kr_dvm, kr_tsm = run_kridge("KR", cfg.kridge.k,
+      tr_off, tr_nbr, tr_sco,
+      ts_off, ts_nbr, ts_sco,
+      dv_off, dv_nbr, dv_sco)
+  end
+
   str.printf("\nSummary\n")
   str.printf("  %-10s lambda=%.4e pa=%.4f pb=%.4f\n",
     "Ridge", best_params.lambda, best_params.propensity_a, best_params.propensity_b)
@@ -210,6 +272,9 @@ test("eurlex", function ()
   if gfm_trm then str.printf("  %-10s %s\n", "Tr GFM", fmt_metrics(gfm_trm)) end
   if gfm_dvm then str.printf("  %-10s %s\n", "Dv GFM", fmt_metrics(gfm_dvm)) end
   if gfm_tsm then str.printf("  %-10s %s\n", "Ts GFM", fmt_metrics(gfm_tsm)) end
+  if kr_trm then str.printf("  %-10s %s\n", "Tr KR", fmt_metrics(kr_trm)) end
+  if kr_dvm then str.printf("  %-10s %s\n", "Dv KR", fmt_metrics(kr_dvm)) end
+  if kr_tsm then str.printf("  %-10s %s\n", "Ts KR", fmt_metrics(kr_tsm)) end
 
   local _, total = stopwatch()
   str.printf("\nTotal: %.1fs\n", total)
