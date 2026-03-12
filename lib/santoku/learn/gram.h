@@ -163,7 +163,14 @@ static inline void tk_gram_solve_w (
   if (g->cm_proj) {
     if (!g->intercept)
       g->intercept = (double *)malloc((uint64_t)nl * sizeof(double));
-    memcpy(g->intercept, g->y_mean, (uint64_t)nl * sizeof(double));
+    if (do_prop && g->label_counts) {
+      double C = (log((double)g->n_samples) - 1.0) * pow(prop_b + 1.0, prop_a);
+      double *lc = g->label_counts->a;
+      for (int64_t l = 0; l < nl; l++)
+        g->intercept[l] = (1.0 + C / pow(lc[l] + prop_b, prop_a)) * g->y_mean[l];
+    } else {
+      memcpy(g->intercept, g->y_mean, (uint64_t)nl * sizeof(double));
+    }
     cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)nl,
       -1.0, g->W_work, (int)nl, g->cm_proj, 1, 1.0, g->intercept, 1);
   }

@@ -6,7 +6,7 @@ local fs = require("santoku.fs")
 local str = require("santoku.string")
 local arr = require("santoku.array")
 local num = require("santoku.num")
-local json = require("cjson")
+local json = require("cjson") -- luacheck: ignore
 local lpeg_utils = require("santoku.learn.lpeg")
 
 local M = {}

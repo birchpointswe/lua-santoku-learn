@@ -63,15 +63,17 @@ static inline int tk_ridge_encode_lua (lua_State *L) {
   if (k > nl) k = nl;
   if (k < 1) k = 1;
   int orig_top = lua_gettop(L);
-  TK_IVEC_BUF(offsets, 5, n + 1);
-  TK_IVEC_BUF(labels, 6, n * k);
-  TK_FVEC_BUF(scores_out, 7, n * k);
+  bool sparse = orig_top >= 5 && !lua_isnil(L, 5);
+  int buf_base = sparse ? 7 : 5;
+  lua_settop(L, buf_base - 1);
+  TK_IVEC_BUF(offsets, buf_base, n + 1);
+  TK_IVEC_BUF(labels, buf_base + 1, n * k);
+  TK_FVEC_BUF(scores_out, buf_base + 2, n * k);
   for (int64_t i = 0; i <= n; i++)
     offsets->a[i] = i * k;
-  bool sparse = orig_top >= 8 && !lua_isnil(L, 8);
   if (sparse) {
-    tk_ivec_t *csr_off = tk_ivec_peek(L, 8, "csr_off");
-    tk_ivec_t *csr_nbr = tk_ivec_peek(L, 9, "csr_nbr");
+    tk_ivec_t *csr_off = tk_ivec_peek(L, 5, "csr_off");
+    tk_ivec_t *csr_nbr = tk_ivec_peek(L, 6, "csr_nbr");
     float *wt = tk_ridge_get_wt(r);
     double *intercept = r->intercept ? r->intercept->a : NULL;
     #pragma omp parallel
@@ -195,11 +197,17 @@ static inline int tk_ridge_transform_lua (lua_State *L) {
     return 1;
   }
   TK_FVEC_BUF(out, 4, n * nl);
-  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-    (int)n, (int)nl, (int)d, 1.0f, codes_a, (int)d,
-    r->W->a, (int)nl, 0.0f, out->a, (int)nl);
-  if (r->intercept)
-    tk_gram_add_intercept_f(out->a, n, nl, r->intercept->a);
+  int64_t block = 256;
+  while (block > 1 && (uint64_t)block * (uint64_t)nl * sizeof(float) > 64ULL * 1024 * 1024)
+    block /= 2;
+  for (int64_t base = 0; base < n; base += block) {
+    int64_t bs = (base + block <= n) ? block : n - base;
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+      (int)bs, (int)nl, (int)d, 1.0f, codes_a + base * d, (int)d,
+      r->W->a, (int)nl, 0.0f, out->a + base * nl, (int)nl);
+    if (r->intercept)
+      tk_gram_add_intercept_f(out->a + base * nl, bs, nl, r->intercept->a);
+  }
   lua_pushvalue(L, out_idx);
   return 1;
 }
@@ -213,6 +221,174 @@ static luaL_Reg tk_ridge_mt_fns[] = {
 
 
 
+
+static inline int tk_ridge_gram_lua (lua_State *L) {
+  lua_settop(L, 1);
+  luaL_checktype(L, 1, LUA_TTABLE);
+  lua_getfield(L, 1, "codes");
+  tk_fvec_t *codes_fv = tk_fvec_peek(L, -1, "codes");
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "n_samples");
+  int64_t nc = (int64_t)luaL_checkinteger(L, -1);
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "n_dims");
+  int64_t m = (int64_t)luaL_checkinteger(L, -1);
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "label_offsets");
+  int has_labels = !lua_isnil(L, -1);
+  tk_ivec_t *lbl_off = has_labels ? tk_ivec_peek(L, -1, "label_offsets") : NULL;
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "label_neighbors");
+  tk_ivec_t *lbl_nbr = has_labels ? tk_ivec_peek(L, -1, "label_neighbors") : NULL;
+  lua_pop(L, 1);
+  int64_t nl = 0;
+  if (has_labels) {
+    lua_getfield(L, 1, "n_labels");
+    nl = (int64_t)luaL_checkinteger(L, -1);
+    lua_pop(L, 1);
+  }
+  lua_getfield(L, 1, "targets");
+  int has_targets = !lua_isnil(L, -1);
+  tk_dvec_t *targets_dv = has_targets ? tk_dvec_peek(L, -1, "targets") : NULL;
+  lua_pop(L, 1);
+  if (has_targets) {
+    lua_getfield(L, 1, "n_targets");
+    nl = (int64_t)luaL_checkinteger(L, -1);
+    lua_pop(L, 1);
+  }
+  if (!has_labels && !has_targets)
+    return luaL_error(L, "gram: need label_offsets/label_neighbors or targets");
+
+  uint64_t um = (uint64_t)m;
+  uint64_t unc = (uint64_t)nc;
+  uint64_t unl = (uint64_t)nl;
+  uint64_t dd = um * um;
+  uint64_t dnl = um * unl;
+
+  double *codes_d = (double *)malloc(unc * um * sizeof(double));
+  double *XtX = (double *)calloc(dd, sizeof(double));
+  double *eigenvals = (double *)malloc(um * sizeof(double));
+  double *xty = (double *)calloc(dnl, sizeof(double));
+  double *col_mean = (double *)calloc(um, sizeof(double));
+  double *y_mean_arr = (double *)malloc(unl * sizeof(double));
+  if (!codes_d || !XtX || !eigenvals || !xty || !col_mean || !y_mean_arr) {
+    free(codes_d); free(XtX); free(eigenvals); free(xty);
+    free(col_mean); free(y_mean_arr);
+    return luaL_error(L, "gram: out of memory");
+  }
+
+  for (uint64_t j = 0; j < um; j++) {
+    double s = 0.0;
+    for (uint64_t i = 0; i < unc; i++) {
+      double v = (double)codes_fv->a[i * um + j];
+      codes_d[j * unc + i] = v;
+      s += v;
+    }
+    col_mean[j] = s / (double)nc;
+  }
+
+  tk_dvec_t *lc = NULL;
+  int lc_idx = 0;
+  if (has_labels) {
+    lc = tk_dvec_create(L, unl, 0, 0);
+    lc->n = unl;
+    lc_idx = lua_gettop(L);
+    memset(lc->a, 0, unl * sizeof(double));
+    for (uint64_t s = 0; s < unc; s++)
+      for (int64_t j = lbl_off->a[s]; j < lbl_off->a[s + 1]; j++)
+        lc->a[lbl_nbr->a[j]] += 1.0;
+  }
+
+  cblas_dsyrk(CblasColMajor, CblasUpper, CblasTrans,
+    (int)m, (int)nc, 1.0, codes_d, (int)nc,
+    0.0, XtX, (int)m);
+
+  if (has_targets)
+    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+      (int)m, (int)nl, (int)nc, 1.0, codes_d, (int)nc,
+      targets_dv->a, (int)nl, 0.0, xty, (int)nl);
+  if (has_labels) {
+    #pragma omp parallel for schedule(static)
+    for (int64_t k = 0; k < m; k++) {
+      double *col = codes_d + (uint64_t)k * unc;
+      for (uint64_t i = 0; i < unc; i++) {
+        for (int64_t j = lbl_off->a[i]; j < lbl_off->a[i + 1]; j++)
+          xty[k * nl + lbl_nbr->a[j]] += col[i];
+      }
+    }
+  }
+
+  free(codes_d);
+
+  cblas_dsyr(CblasColMajor, CblasUpper, (int)m,
+    -(double)nc, col_mean, 1, XtX, (int)m);
+
+  if (has_labels) {
+    for (int64_t l = 0; l < nl; l++)
+      y_mean_arr[l] = lc->a[l] / (double)nc;
+  } else {
+    for (int64_t l = 0; l < nl; l++) {
+      double s = 0.0;
+      for (uint64_t i = 0; i < unc; i++)
+        s += targets_dv->a[i * unl + (uint64_t)l];
+      y_mean_arr[l] = s / (double)nc;
+    }
+  }
+  cblas_dger(CblasRowMajor, (int)m, (int)nl,
+    -(double)nc, col_mean, 1, y_mean_arr, 1, xty, (int)nl);
+
+  LAPACKE_dsyevd(LAPACK_COL_MAJOR, 'V', 'U', (int)m, XtX, (int)m, eigenvals);
+  double mean_eig = 0.0;
+  for (uint64_t i = 0; i < um; i++)
+    mean_eig += eigenvals[i];
+  mean_eig /= (double)m;
+
+  double *PQtY = (double *)malloc(dnl * sizeof(double));
+  double *W_work = (double *)malloc(dnl * sizeof(double));
+  if (!PQtY || !W_work) {
+    free(PQtY); free(W_work); free(xty);
+    free(XtX); free(eigenvals);
+    free(col_mean); free(y_mean_arr);
+    return luaL_error(L, "gram: out of memory");
+  }
+  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    (int)m, (int)nl, (int)m, 1.0, XtX, (int)m,
+    xty, (int)nl, 0.0, PQtY, (int)nl);
+  free(xty);
+
+  tk_gram_t *g = tk_lua_newuserdata(L, tk_gram_t,
+    TK_GRAM_MT, tk_gram_mt_fns, tk_gram_gc);
+  int gram_idx = lua_gettop(L);
+  g->evecs = XtX;
+  g->eigenvals = eigenvals;
+  g->PQtY = PQtY;
+  g->label_counts = lc;
+  g->W_work = W_work;
+  g->W_work_f = NULL;
+  g->sbuf_f = NULL;
+  g->val_F_f = NULL;
+  g->col_mean = col_mean;
+  g->y_mean = y_mean_arr;
+  g->cm_proj = NULL;
+  g->intercept = NULL;
+  g->mean_eig = mean_eig;
+  g->n_dims = m;
+  g->n_labels = nl;
+  g->n_samples = nc;
+  g->val_n = 0;
+  g->destroyed = false;
+
+  lua_newtable(L);
+  if (lc_idx > 0) {
+    lua_pushvalue(L, lc_idx);
+    lua_setfield(L, -2, "label_counts");
+  }
+  lua_setfenv(L, gram_idx);
+
+  lua_pushvalue(L, gram_idx);
+  return 1;
+}
 
 static inline int tk_ridge_create_lua (lua_State *L) {
   lua_settop(L, 1);
@@ -262,7 +438,14 @@ static inline int tk_ridge_create_lua (lua_State *L) {
       intercept_dv = tk_dvec_create(L, (uint64_t)nl, 0, 0);
       intercept_dv->n = (uint64_t)nl;
       intercept_idx = lua_gettop(L);
-      memcpy(intercept_dv->a, gram->y_mean, (uint64_t)nl * sizeof(double));
+      if (do_prop && gram->label_counts) {
+        double C = (log((double)gram->n_samples) - 1.0) * pow(prop_b + 1.0, prop_a);
+        double *lc = gram->label_counts->a;
+        for (int64_t l = 0; l < nl; l++)
+          intercept_dv->a[l] = (1.0 + C / pow(lc[l] + prop_b, prop_a)) * gram->y_mean[l];
+      } else {
+        memcpy(intercept_dv->a, gram->y_mean, (uint64_t)nl * sizeof(double));
+      }
       cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)nl,
         -1.0, W_d, (int)nl, gram->col_mean, 1, 1.0, intercept_dv->a, 1);
     }
@@ -356,6 +539,7 @@ static inline int tk_ridge_load_lua (lua_State *L) {
 
 static luaL_Reg tk_ridge_fns[] = {
   { "create", tk_ridge_create_lua },
+  { "gram", tk_ridge_gram_lua },
   { "load", tk_ridge_load_lua },
   { NULL, NULL }
 };

@@ -4,6 +4,7 @@
 #include <santoku/iumap/ext.h>
 #include <omp.h>
 #include <assert.h>
+#include <math.h>
 
 static int tm_csr_seq_select (lua_State *L)
 {
@@ -419,6 +420,7 @@ static int tm_csr_tokenize_fn (lua_State *L, int fn_idx, int64_t ngram, int64_t 
   offsets->a[0] = 0;
   size_t tok_cap = 1024 * 1024;
   int64_t *tok_buf = (int64_t *)malloc(tok_cap * sizeof(int64_t));
+  float *vbuf = (float *)malloc(tok_cap * sizeof(float));
   int64_t tok_n = 0;
   size_t pack_cap = 4096;
   int64_t *packed = (int64_t *)malloc(pack_cap * sizeof(int64_t));
@@ -455,27 +457,36 @@ static int tm_csr_tokenize_fn (lua_State *L, int fn_idx, int64_t ngram, int64_t 
       packed = (int64_t *)realloc(packed, pack_cap * sizeof(int64_t));
     }
     size_t count = tm_csr_pack_ngrams(str, len, (int)ngram, packed);
+    int64_t row_n = 0;
     for (size_t i = 0; i < count; i++) {
-      int64_t token_id;
       if (!have_map) {
         int absent;
         uint32_t it = tk_iumap_put(ngram_map, packed[i], &absent);
         if (absent) {
           tk_iumap_setval(ngram_map, it, next_id);
-          token_id = next_id++;
+          packed[row_n++] = next_id++;
         } else {
-          token_id = tk_iumap_val(ngram_map, it);
+          packed[row_n++] = tk_iumap_val(ngram_map, it);
         }
       } else {
         uint32_t it = tk_iumap_get(ngram_map, packed[i]);
         if (it == map_end) continue;
-        token_id = tk_iumap_val(ngram_map, it);
+        packed[row_n++] = tk_iumap_val(ngram_map, it);
       }
+    }
+    ks_introsort(tk_ivec_asc, (size_t)row_n, packed);
+    for (int64_t i = 0; i < row_n; ) {
+      int64_t tok = packed[i];
+      float cnt = 0.0f;
+      while (i < row_n && packed[i] == tok) { cnt += 1.0f; i++; }
       if (tok_n >= (int64_t)tok_cap) {
         tok_cap *= 2;
         tok_buf = (int64_t *)realloc(tok_buf, tok_cap * sizeof(int64_t));
+        vbuf = (float *)realloc(vbuf, tok_cap * sizeof(float));
       }
-      tok_buf[tok_n++] = token_id;
+      tok_buf[tok_n] = tok;
+      vbuf[tok_n] = cnt;
+      tok_n++;
     }
     offsets->a[s + 1] = tok_n;
   }
@@ -485,12 +496,18 @@ static int tm_csr_tokenize_fn (lua_State *L, int fn_idx, int64_t ngram, int64_t 
   if (tok_n > 0)
     memcpy(tok_out->a, tok_buf, (size_t)tok_n * sizeof(int64_t));
   free(tok_buf);
+  tk_fvec_t *val_out = tk_fvec_create(L, (uint64_t)tok_n, 0, 0);
+  val_out->n = (uint64_t)tok_n;
+  if (tok_n > 0)
+    memcpy(val_out->a, vbuf, (size_t)tok_n * sizeof(float));
+  free(vbuf);
   uint64_t n_tokens = have_map ? (uint64_t)tk_iumap_size(ngram_map) : (uint64_t)next_id;
   lua_pushvalue(L, map_idx);
   lua_pushvalue(L, map_idx + 1);
   lua_pushvalue(L, map_idx + 2);
+  lua_pushvalue(L, map_idx + 3);
   lua_pushinteger(L, (lua_Integer)n_tokens);
-  return 4;
+  return 5;
 }
 
 static int tm_csr_tokenize (lua_State *L)
@@ -552,12 +569,16 @@ static int tm_csr_tokenize (lua_State *L)
     #pragma omp for schedule(dynamic)
     for (int64_t s = 0; s < n_samples; s++) {
       size_t count = tm_csr_pack_ngrams(strs[s], lens[s], (int)ngram, packed_buf);
-      int64_t valid = 0;
+      int64_t nv = 0;
       for (size_t i = 0; i < count; i++) {
         uint32_t iter = tk_iumap_get(ngram_map, packed_buf[i]);
-        if (iter != map_end) valid++;
+        if (iter != map_end) packed_buf[nv++] = tk_iumap_val(ngram_map, iter);
       }
-      sample_counts[s] = valid;
+      ks_introsort(tk_ivec_asc, (size_t)nv, packed_buf);
+      int64_t unique = 0;
+      for (int64_t i = 0; i < nv; i++)
+        if (i == 0 || packed_buf[i] != packed_buf[i - 1]) unique++;
+      sample_counts[s] = unique;
     }
     free(packed_buf);
   }
@@ -572,17 +593,28 @@ static int tm_csr_tokenize (lua_State *L)
   free(sample_counts);
   tk_ivec_t *tok_out = tk_ivec_create(L, (uint64_t)total, 0, 0);
   tok_out->n = (uint64_t)total;
+  tk_fvec_t *val_out = tk_fvec_create(L, (uint64_t)total, 0, 0);
+  val_out->n = (uint64_t)total;
   #pragma omp parallel
   {
     int64_t *packed_buf = (int64_t *)malloc(max_len * sizeof(int64_t));
     #pragma omp for schedule(dynamic)
     for (int64_t s = 0; s < n_samples; s++) {
       size_t count = tm_csr_pack_ngrams(strs[s], lens[s], (int)ngram, packed_buf);
-      int64_t pos = offsets->a[s];
+      int64_t nv = 0;
       for (size_t i = 0; i < count; i++) {
         uint32_t iter = tk_iumap_get(ngram_map, packed_buf[i]);
-        if (iter == map_end) continue;
-        tok_out->a[pos++] = tk_iumap_val(ngram_map, iter);
+        if (iter != map_end) packed_buf[nv++] = tk_iumap_val(ngram_map, iter);
+      }
+      ks_introsort(tk_ivec_asc, (size_t)nv, packed_buf);
+      int64_t pos = offsets->a[s];
+      for (int64_t i = 0; i < nv; ) {
+        int64_t tok = packed_buf[i];
+        float cnt = 0.0f;
+        while (i < nv && packed_buf[i] == tok) { cnt += 1.0f; i++; }
+        tok_out->a[pos] = tok;
+        val_out->a[pos] = cnt;
+        pos++;
       }
     }
     free(packed_buf);
@@ -592,8 +624,9 @@ static int tm_csr_tokenize (lua_State *L)
   lua_pushvalue(L, map_idx);
   lua_pushvalue(L, map_idx + 1);
   lua_pushvalue(L, map_idx + 2);
+  lua_pushvalue(L, map_idx + 3);
   lua_pushinteger(L, (lua_Integer)n_tokens);
-  return 4;
+  return 5;
 }
 
 static int tm_csr_truncate (lua_State *L)
@@ -644,6 +677,303 @@ static int tm_csr_truncate (lua_State *L)
   return sco_f || sco_d ? 3 : 2;
 }
 
+static int tm_csr_sqrt (lua_State *L)
+{
+  tk_fvec_t *values = tk_fvec_peek(L, 1, "values");
+  for (uint64_t i = 0; i < values->n; i++)
+    values->a[i] = sqrtf(values->a[i]);
+  lua_pushvalue(L, 1);
+  return 1;
+}
+
+static inline double tm_probit (double p)
+{
+  if (p <= 0.0) return -1e10;
+  if (p >= 1.0) return 1e10;
+  static const double a[] = {
+    -3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
+     1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00
+  };
+  static const double b[] = {
+    -5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
+     6.680131188771972e+01, -1.328068155288572e+01
+  };
+  static const double c[] = {
+    -7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
+    -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00
+  };
+  static const double d[] = {
+    7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
+    3.754408661907416e+00
+  };
+  double plow = 0.02425, phigh = 1.0 - plow;
+  double q, r;
+  if (p < plow) {
+    q = sqrt(-2.0 * log(p));
+    return (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) /
+           ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1.0);
+  } else if (p <= phigh) {
+    q = p - 0.5;
+    r = q * q;
+    return (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q /
+           (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1.0);
+  } else {
+    q = sqrt(-2.0 * log(1.0 - p));
+    return -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) /
+            ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1.0);
+  }
+}
+
+#define TM_SMOOTH_EPS 0.5
+
+static inline double tm_bns (double N, double C, double P, double A)
+{
+  if (C <= 0 || C >= N || P <= 0 || P >= N) return 0.0;
+  double tpr = (A + TM_SMOOTH_EPS) / (P + 2.0 * TM_SMOOTH_EPS);
+  double fpr = (C - A + TM_SMOOTH_EPS) / (N - P + 2.0 * TM_SMOOTH_EPS);
+  return fabs(tm_probit(tpr) - tm_probit(fpr));
+}
+
+static inline void tm_csr_gather_mul (
+  tk_fvec_t *values, tk_ivec_t *tokens, tk_fvec_t *scores)
+{
+  for (uint64_t j = 0; j < values->n; j++)
+    values->a[j] *= scores->a[tokens->a[j]];
+}
+
+static int tm_csr_apply_bns (lua_State *L)
+{
+  tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
+  tk_ivec_t *tokens = tk_ivec_peek(L, 2, "tokens");
+  tk_fvec_t *values = tk_fvec_peek(L, 3, "values");
+  tk_fvec_t *scores = tk_fvec_peekopt(L, 4);
+  if (scores) {
+    tm_csr_gather_mul(values, tokens, scores);
+    lua_pushvalue(L, 4);
+    return 1;
+  }
+  tk_ivec_t *label_off = tk_ivec_peek(L, 5, "label_offsets");
+  tk_ivec_t *label_nbr = tk_ivec_peek(L, 6, "label_neighbors");
+  uint64_t n_tokens = tk_lua_checkunsigned(L, 7, "n_tokens");
+  uint64_t n_labels = tk_lua_checkunsigned(L, 8, "n_labels");
+  uint64_t n_samples = offsets->n - 1;
+  double N = (double)n_samples;
+  uint32_t *doc_freq = (uint32_t *)calloc(n_tokens, sizeof(uint32_t));
+  uint32_t *label_freq = (uint32_t *)calloc(n_labels, sizeof(uint32_t));
+  uint32_t *lbl_off = (uint32_t *)malloc((n_labels + 1) * sizeof(uint32_t));
+  if (!doc_freq || !label_freq || !lbl_off) {
+    free(doc_freq); free(label_freq); free(lbl_off);
+    return luaL_error(L, "apply_bns: alloc failed");
+  }
+  for (uint64_t j = 0; j < tokens->n; j++)
+    doc_freq[tokens->a[j]]++;
+  for (uint64_t d = 0; d < n_samples; d++) {
+    int64_t lo = label_off->a[d], hi = label_off->a[d + 1];
+    for (int64_t j = lo; j < hi; j++) {
+      uint64_t b = (uint64_t)label_nbr->a[j];
+      if (b < n_labels) label_freq[b]++;
+    }
+  }
+  lbl_off[0] = 0;
+  for (uint64_t b = 0; b < n_labels; b++)
+    lbl_off[b + 1] = lbl_off[b] + label_freq[b];
+  uint32_t *lbl_docs = (uint32_t *)malloc((uint64_t)lbl_off[n_labels] * sizeof(uint32_t));
+  uint32_t *lbl_pos = (uint32_t *)calloc(n_labels, sizeof(uint32_t));
+  if (!lbl_docs || !lbl_pos) {
+    free(doc_freq); free(label_freq); free(lbl_off); free(lbl_docs); free(lbl_pos);
+    return luaL_error(L, "apply_bns: alloc failed");
+  }
+  for (uint64_t d = 0; d < n_samples; d++) {
+    int64_t lo = label_off->a[d], hi = label_off->a[d + 1];
+    for (int64_t j = lo; j < hi; j++) {
+      uint64_t b = (uint64_t)label_nbr->a[j];
+      if (b < n_labels) {
+        lbl_docs[lbl_off[b] + lbl_pos[b]] = (uint32_t)d;
+        lbl_pos[b]++;
+      }
+    }
+  }
+  free(lbl_pos);
+  scores = tk_fvec_create(L, n_tokens, NULL, NULL);
+  scores->n = n_tokens;
+  memset(scores->a, 0, n_tokens * sizeof(float));
+  float *cooc = (float *)calloc(n_tokens, sizeof(float));
+  int32_t *touched = (int32_t *)malloc(n_tokens * sizeof(int32_t));
+  if (!cooc || !touched) {
+    free(doc_freq); free(label_freq); free(lbl_off); free(lbl_docs);
+    free(cooc); free(touched);
+    return luaL_error(L, "apply_bns: alloc failed");
+  }
+  for (uint64_t b = 0; b < n_labels; b++) {
+    double P = (double)label_freq[b];
+    if (P <= 0.0 || P >= N) continue;
+    uint32_t n_touched = 0;
+    for (uint32_t di = lbl_off[b]; di < lbl_off[b + 1]; di++) {
+      uint32_t dd = lbl_docs[di];
+      int64_t lo = offsets->a[dd], hi = offsets->a[dd + 1];
+      for (int64_t j = lo; j < hi; j++) {
+        int32_t f = (int32_t)tokens->a[j];
+        if (cooc[f] == 0.0f) touched[n_touched++] = f;
+        cooc[f] += 1.0f;
+      }
+    }
+    for (uint32_t i = 0; i < n_touched; i++) {
+      int32_t f = touched[i];
+      float bns = (float)tm_bns(N, (double)doc_freq[f], P, (double)cooc[f]);
+      if (bns > scores->a[f]) scores->a[f] = bns;
+      cooc[f] = 0.0f;
+    }
+  }
+  free(cooc); free(touched);
+  free(doc_freq); free(label_freq);
+  free(lbl_off); free(lbl_docs);
+  tm_csr_gather_mul(values, tokens, scores);
+  return 1;
+}
+
+static int tm_csr_apply_auc (lua_State *L)
+{
+  tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
+  tk_ivec_t *tokens = tk_ivec_peek(L, 2, "tokens");
+  tk_fvec_t *values = tk_fvec_peek(L, 3, "values");
+  tk_fvec_t *scores = tk_fvec_peekopt(L, 4);
+  if (scores) {
+    tm_csr_gather_mul(values, tokens, scores);
+    lua_pushvalue(L, 4);
+    return 1;
+  }
+  tk_dvec_t *targets = tk_dvec_peek(L, 5, "targets");
+  uint64_t n_tokens = tk_lua_checkunsigned(L, 6, "n_tokens");
+  uint64_t n_hidden = tk_lua_checkunsigned(L, 7, "n_hidden");
+  uint64_t n_samples = offsets->n - 1;
+  uint32_t *doc_freq = (uint32_t *)calloc(n_tokens, sizeof(uint32_t));
+  if (!doc_freq) return luaL_error(L, "apply_auc: alloc failed");
+  for (uint64_t j = 0; j < tokens->n; j++)
+    doc_freq[tokens->a[j]]++;
+  scores = tk_fvec_create(L, n_tokens, NULL, NULL);
+  scores->n = n_tokens;
+  memset(scores->a, 0, n_tokens * sizeof(float));
+  tk_rank_t *pairs = (tk_rank_t *)malloc(n_samples * sizeof(tk_rank_t));
+  double *ranks = (double *)malloc(n_samples * sizeof(double));
+  double *rank_sums = (double *)calloc(n_tokens, sizeof(double));
+  if (!pairs || !ranks || !rank_sums) {
+    free(doc_freq); free(pairs); free(ranks); free(rank_sums);
+    return luaL_error(L, "apply_auc: alloc failed");
+  }
+  for (uint64_t h = 0; h < n_hidden; h++) {
+    for (uint64_t s = 0; s < n_samples; s++) {
+      pairs[s].i = (int64_t)s;
+      pairs[s].d = targets->a[s * n_hidden + h];
+    }
+    ks_introsort(tk_rvec_asc, (size_t)n_samples, pairs);
+    uint64_t i = 0;
+    while (i < n_samples) {
+      uint64_t j = i + 1;
+      while (j < n_samples && pairs[j].d == pairs[i].d) j++;
+      double avg_rank = (double)(i + 1 + j) / 2.0;
+      for (uint64_t k = i; k < j; k++)
+        ranks[pairs[k].i] = avg_rank;
+      i = j;
+    }
+    memset(rank_sums, 0, n_tokens * sizeof(double));
+    for (uint64_t dd = 0; dd < n_samples; dd++) {
+      double rd = ranks[dd];
+      int64_t lo = offsets->a[dd], hi = offsets->a[dd + 1];
+      for (int64_t j = lo; j < hi; j++)
+        rank_sums[tokens->a[j]] += rd;
+    }
+    for (uint64_t f = 0; f < n_tokens; f++) {
+      uint32_t n1 = doc_freq[f];
+      if (n1 == 0) continue;
+      uint32_t n0 = (uint32_t)n_samples - n1;
+      if (n0 == 0) continue;
+      double auc = (rank_sums[f] - (double)n1 * ((double)n1 + 1.0) / 2.0)
+                 / ((double)n1 * (double)n0);
+      float score = (float)fabs(tm_probit(auc));
+      if (score > scores->a[f]) scores->a[f] = score;
+    }
+  }
+  free(pairs); free(ranks); free(rank_sums); free(doc_freq);
+  tm_csr_gather_mul(values, tokens, scores);
+  return 1;
+}
+
+static int tm_csr_merge (lua_State *L)
+{
+  tk_ivec_t *off1 = tk_ivec_peek(L, 1, "off1");
+  tk_ivec_t *nbr1 = tk_ivec_peek(L, 2, "nbr1");
+  tk_fvec_t *val1_f = tk_fvec_peekopt(L, 3);
+  tk_dvec_t *val1_d = val1_f ? NULL : tk_dvec_peekopt(L, 3);
+  tk_ivec_t *off2 = tk_ivec_peek(L, 4, "off2");
+  tk_ivec_t *nbr2 = tk_ivec_peek(L, 5, "nbr2");
+  tk_fvec_t *val2_f = tk_fvec_peekopt(L, 6);
+  tk_dvec_t *val2_d = val2_f ? NULL : tk_dvec_peekopt(L, 6);
+  int64_t shift = (int64_t)tk_lua_checkunsigned(L, 7, "token_shift");
+  uint64_t n = off1->n - 1;
+  uint64_t total = nbr1->n + nbr2->n;
+  tk_ivec_t *out_off = tk_ivec_create(L, n + 1, NULL, NULL);
+  tk_ivec_t *out_nbr = tk_ivec_create(L, total, NULL, NULL);
+  out_nbr->n = total;
+  tk_fvec_t *out_val = tk_fvec_create(L, total, NULL, NULL);
+  out_val->n = total;
+  out_off->a[0] = 0;
+  uint64_t pos = 0;
+  for (uint64_t i = 0; i < n; i++) {
+    int64_t s1 = off1->a[i], e1 = off1->a[i + 1];
+    for (int64_t j = s1; j < e1; j++) {
+      out_nbr->a[pos] = nbr1->a[j];
+      out_val->a[pos] = val1_f ? val1_f->a[j] : val1_d ? (float)val1_d->a[j] : 1.0f;
+      pos++;
+    }
+    int64_t s2 = off2->a[i], e2 = off2->a[i + 1];
+    for (int64_t j = s2; j < e2; j++) {
+      out_nbr->a[pos] = nbr2->a[j] + shift;
+      out_val->a[pos] = val2_f ? val2_f->a[j] : val2_d ? (float)val2_d->a[j] : 1.0f;
+      pos++;
+    }
+    out_off->a[i + 1] = (int64_t)pos;
+  }
+  return 3;
+}
+
+static int tm_csr_standardize (lua_State *L)
+{
+  tk_ivec_t *tokens = tk_ivec_peek(L, 2, "tokens");
+  tk_fvec_t *values = tk_fvec_peek(L, 3, "values");
+  tk_fvec_t *scores = tk_fvec_peekopt(L, 4);
+  if (scores) {
+    tm_csr_gather_mul(values, tokens, scores);
+    lua_pushvalue(L, 4);
+    return 1;
+  }
+  uint64_t n_tokens = tk_lua_checkunsigned(L, 5, "n_tokens");
+  tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
+  uint64_t n_samples = offsets->n - 1;
+  double *sum = (double *)calloc(n_tokens, sizeof(double));
+  double *sum_sq = (double *)calloc(n_tokens, sizeof(double));
+  if (!sum || !sum_sq) {
+    free(sum); free(sum_sq);
+    return luaL_error(L, "standardize: alloc failed");
+  }
+  for (uint64_t j = 0; j < tokens->n; j++) {
+    double v = (double)values->a[j];
+    sum[tokens->a[j]] += v;
+    sum_sq[tokens->a[j]] += v * v;
+  }
+  scores = tk_fvec_create(L, n_tokens, NULL, NULL);
+  scores->n = n_tokens;
+  double n = (double)n_samples;
+  for (uint64_t t = 0; t < n_tokens; t++) {
+    double mean = sum[t] / n;
+    double var = sum_sq[t] / n - mean * mean;
+    double std = sqrt(var);
+    scores->a[t] = std > 1e-10 ? (float)(1.0 / std) : 0.0f;
+  }
+  free(sum); free(sum_sq);
+  tm_csr_gather_mul(values, tokens, scores);
+  return 1;
+}
+
 static luaL_Reg tm_csr_fns[] = {
   { "to_bits", tm_csr_to_bits },
   { "seq_select", tm_csr_seq_select },
@@ -654,6 +984,11 @@ static luaL_Reg tm_csr_fns[] = {
   { "truncate", tm_csr_truncate },
   { "transpose", tm_csr_transpose },
   { "tokenize", tm_csr_tokenize },
+  { "sqrt", tm_csr_sqrt },
+  { "apply_bns", tm_csr_apply_bns },
+  { "apply_auc", tm_csr_apply_auc },
+  { "merge", tm_csr_merge },
+  { "standardize", tm_csr_standardize },
   { NULL, NULL }
 };
 
