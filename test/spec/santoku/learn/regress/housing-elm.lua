@@ -1,3 +1,4 @@
+local csr = require("santoku.learn.csr")
 local csr_m = require("santoku.csr")
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
@@ -13,9 +14,8 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   data = { ttr = 0.8, tvr = 0.10, max = nil },
-  cat_emb = { n_landmarks = 4096, trace_tol = 0.01, kernel = "arccos1" },
-  cont_emb = { n_landmarks = 4096, trace_tol = 0.01, kernel = "arccos1" },
-  ridge = { lambda = { def = 1.5612e-02 }, search_trials = 0 },
+  emb = { n_landmarks = 1024*8, trace_tol = nil, kernel = "arccos1" },
+  ridge = { lambda = { min = 0, max = 4, def = 1.5612e-02 }, search_trials = 80 },
 }
 
 test("housing regressor", function ()
@@ -33,72 +33,56 @@ test("housing regressor", function ()
   local train, test_set, validate = ds.split_california_housing(dataset, cfg.data.ttr, cfg.data.tvr)
   local n_cat = dataset.n_features
   local n_cont = train.n_continuous
+  local cont_mean = train.continuous:mtx_center(n_cont)
+  validate.continuous:mtx_center(n_cont, cont_mean)
+  test_set.continuous:mtx_center(n_cont, cont_mean)
   str.printf("[Data] train=%d val=%d test=%d cat=%d cont=%d target=%.0f-%.0f %s\n",
     train.n, validate.n, test_set.n, n_cat, n_cont,
     train.targets:min(), train.targets:max(), sw())
 
-  str.printf("[Spectral Cat] Cholesky kernel=%s\n", cfg.cat_emb.kernel)
-  local train_cat_dv = csr_m.to_dvec(train.bit_offsets, train.bit_neighbors, nil, train.n, n_cat)
-  local train_cat_codes, cat_enc = spectral.encode({
-    codes = train_cat_dv, n_samples = train.n,
-    kernel = cfg.cat_emb.kernel,
-    n_landmarks = cfg.cat_emb.n_landmarks, trace_tol = cfg.cat_emb.trace_tol,
-  })
-  train_cat_dv = nil -- luacheck: ignore
-  collectgarbage("collect")
-  local cat_d = cat_enc:dims()
-  str.printf("[Spectral Cat] emb_d=%d %s\n", cat_d, sw())
-
-  str.printf("[Spectral Cont] Cholesky kernel=%s\n", cfg.cont_emb.kernel)
-  local train_cont_codes, cont_enc = spectral.encode({
-    codes = train.continuous, n_samples = train.n,
-    kernel = cfg.cont_emb.kernel,
-    n_landmarks = cfg.cont_emb.n_landmarks, trace_tol = cfg.cont_emb.trace_tol,
-  })
-  local cont_d = cont_enc:dims()
-  str.printf("[Spectral Cont] emb_d=%d %s\n", cont_d, sw())
-
-  local emb_d = cat_d + cont_d
-  local function concat_codes(cat_codes, cont_codes, n)
-    local out = fvec.create(n * emb_d)
-    for i = 0, n - 1 do
-      out:copy(cat_codes, i * cat_d, (i + 1) * cat_d, i * emb_d)
-      out:copy(cont_codes, i * cont_d, (i + 1) * cont_d, i * emb_d + cat_d)
-    end
-    return out
+  local function merge_features(bit_off, bit_nbr, continuous, n)
+    local cont_off, cont_nbr, cont_val = csr_m.from_dvec(continuous, n, n_cont)
+    return csr.merge(bit_off, bit_nbr, nil, cont_off, cont_nbr, cont_val, n_cat)
   end
 
-  local train_codes = concat_codes(train_cat_codes, train_cont_codes, train.n)
-  train_cat_codes = nil; train_cont_codes = nil -- luacheck: ignore
-  collectgarbage("collect")
+  local n_tokens = n_cat + n_cont
+  local offsets, tokens, values = merge_features(
+    train.bit_offsets, train.bit_neighbors, train.continuous, train.n)
+  local std_scores = csr.standardize(offsets, tokens, values, nil, n_tokens)
 
-  local gram = spectral.gram({
-    codes = train_codes, n_samples = train.n, n_dims = emb_d,
-    targets = train.targets, n_targets = 1,
+  str.printf("[Spectral] Encoding n_landmarks=%d kernel=%s n_tokens=%d\n",
+    cfg.emb.n_landmarks, cfg.emb.kernel, n_tokens)
+  local train_codes, sp_enc = spectral.encode({
+    offsets = offsets, tokens = tokens, values = values, n_tokens = n_tokens,
+    n_samples = train.n,
+    n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
+    kernel = cfg.emb.kernel,
   })
+  offsets = nil; tokens = nil; values = nil -- luacheck: ignore
+  collectgarbage("collect")
+  local emb_d = sp_enc:dims()
+  str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
 
-  local cat_out_buf = fvec.create()
-  local cont_out_buf = fvec.create()
   local function encode(bit_off, bit_nbr, continuous, n)
-    local cat_dv = csr_m.to_dvec(bit_off, bit_nbr, nil, n, n_cat)
-    local cc = cat_enc:encode(cat_dv, n, cat_out_buf)
-    local co = cont_enc:encode(continuous, n, cont_out_buf)
-    return concat_codes(cc, co, n)
+    local off, tok, val = merge_features(bit_off, bit_nbr, continuous, n)
+    csr.standardize(off, tok, val, std_scores)
+    return sp_enc:encode({
+      offsets = off, tokens = tok, values = val, n_samples = n,
+    })
   end
 
   local val_codes = encode(validate.bit_offsets, validate.bit_neighbors, validate.continuous, validate.n)
 
   str.printf("[Ridge] Training\n")
-  local _, ridge_obj, best_params = optimize.ridge({
-    gram = gram,
-    targets = true,
+  local ridge_obj, best_params = optimize.ridge({
+    train_codes = train_codes, n_samples = train.n, n_dims = emb_d,
+    targets = train.targets, n_targets = 1,
     val_codes = val_codes, val_n_samples = validate.n,
     val_targets = validate.targets,
     lambda = cfg.ridge.lambda,
     search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
-  gram = nil
   collectgarbage("collect")
   str.printf("[Ridge] lambda=%.4e %s\n", best_params.lambda, sw())
 
