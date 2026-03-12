@@ -1,46 +1,42 @@
 # Santoku Learn
 
 A Lua/C library for classification, regression, and retrieval built on
-Tsetlin Machines with a spectral embedding pipeline for extreme
-multi-label classification (XMLC).
+spectral embedding and ridge regression for extreme multi-label
+classification (XMLC).
 
 ## Components
 
-**Tsetlin Machine** — Regression TM with bit-planar state
-representation, soft clause evaluation, per-chunk squared-error
-feedback, and sparse mode with per-class token mapping and
-absorption-driven feature streaming. A separate SSL (Stochastic
-Searching on the Line) path handles continuous-feature regression.
-([doc/regressor.md](doc/regressor.md))
+**Spectral Embedding** — Kernel spectral embedding via RP-Cholesky
+factorization. Supports cosine, arccos, and Hellinger kernels over
+sparse, dense, or binary input. Float32 inference pipeline.
+([doc/spectral.md](doc/spectral.md))
 
-**Hyperparameter Search** — Round-based adaptive search with the 1/5th
-success rule for jitter adaptation, deduplication, size preference at
-equal accuracy, and batched early stopping for final training.
-([doc/optimize.md](doc/optimize.md))
+**Ridge Regression** — Centered ridge with intercept, propensity
+weighting for tail labels, and precomputed gram matrix for fast
+hyperparameter search. Dense regression and sparse label prediction
+modes. ([doc/optimize.md](doc/optimize.md))
 
-**Spectral Embedding** — Nystrom approximation via RPCholesky landmark
-selection on a rank-weighted cosine similarity kernel defined over
-sparse binary features. Supports asymmetric mode for cross-population
-embedding (e.g., documents into label eigenspace).
-([doc/pca.md](doc/pca.md))
+**Hyperparameter Search** — GP-BO search with LHS initialization,
+cost-cooled Expected Improvement, and Latin Hypercube candidate
+generation. ([doc/optimize.md](doc/optimize.md))
 
-**Binary Quantization and ANN** — SFBS (Sequential Forward Bit
-Selection) quantizes continuous or binary embeddings into compact codes
-optimizing NDCG against a ground-truth neighbor structure. Multi-index
-hashing provides Hamming-distance nearest neighbor retrieval with
-early termination. ([doc/ann.md](doc/ann.md))
+**Binary Quantization and ANN** — Multi-index hashing for
+Hamming-distance nearest neighbor retrieval with optional float
+reranking. ([doc/ann.md](doc/ann.md))
 
-**Evaluation and Bit Selection** — Classification, regression, ranking
-(NDCG, Spearman, Pearson), and retrieval (P/R/F1 with optimal-k)
-metrics. Greedy SFBS bit/dimension selection. Graph-constrained
-agglomerative clustering with complete-linkage distance and
-majority-vote centroids. ([doc/evaluation.md](doc/evaluation.md))
+**Evaluation** — Classification, regression, ranking (NDCG, Spearman,
+Pearson), and retrieval (P/R/F1 with optimal-k) metrics. Graph-
+constrained agglomerative clustering.
+([doc/evaluation.md](doc/evaluation.md))
+
+**GFM** — General F-Measure optimization for per-label threshold
+selection.
 
 ## Usage Patterns
 
-The library supports five pipeline patterns from simple dense
-classification to full XMLC with bipartite spectral embedding, two-round
-SFBS quantization, and Hamming ANN retrieval.
+The library supports pipeline patterns from dense regression to full
+XMLC with spectral embedding, ANN shortlisting, ridge classification,
+and GFM thresholding.
 ([doc/usage.md](doc/usage.md))
 
 ## License
