@@ -8,7 +8,6 @@ local cvec = require("santoku.cvec")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
 local num = require("santoku.num")
-local str = require("santoku.string")
 local err = require("santoku.error")
 local rand = require("santoku.random")
 
@@ -157,13 +156,6 @@ local build_sampler = function (spec, global_dev)
         if x < minv then x = minv elseif x > maxv then x = maxv end
         return x
       end,
-      adapt = function (factor)
-        jitter = jitter * factor
-        local min_jitter = init_jitter * 0.1
-        local max_jitter = init_jitter * 2.0
-        if jitter < min_jitter then jitter = min_jitter end
-        if jitter > max_jitter then jitter = max_jitter end
-      end,
     }
   end
   if type(spec) == "table" and #spec > 0 then
@@ -202,7 +194,7 @@ local build_samplers = function (args, param_names, global_dev)
   return samplers
 end
 
-local sample_params = function (samplers, param_names, base_cfg, use_exact_defaults, use_center)
+local sample_params = function (samplers, param_names, base_cfg, use_exact_defaults)
   local p = {}
   if base_cfg then
     for k, v in pairs(base_cfg) do
@@ -214,8 +206,6 @@ local sample_params = function (samplers, param_names, base_cfg, use_exact_defau
     if s then
       if use_exact_defaults and s.center ~= nil then
         p[name] = s.center
-      elseif s.type == "range" then
-        p[name] = s.sample(use_center and s.center or nil)
       else
         p[name] = s.sample()
       end
@@ -486,7 +476,6 @@ end
 
 local function train_tm_batched (tmobj, args, params, iterations, batch_size, patience, tolerance, metric_fn, each_cb, info)
   local best_score = -num.huge
-  local last_score = -num.huge
   local last_metrics = nil
   local batches_since_improve = 0
   local checkpoint = (patience and patience > 0) and cvec.create(0) or nil
@@ -512,7 +501,6 @@ local function train_tm_batched (tmobj, args, params, iterations, batch_size, pa
     total_epochs = total_epochs + batch_iters
 
     local score, metrics = metric_fn(tmobj, args)
-    last_score = score
     last_metrics = metrics
 
     if each_cb then
@@ -551,10 +539,11 @@ local function train_tm_batched (tmobj, args, params, iterations, batch_size, pa
 
   if checkpoint and has_checkpoint then
     tmobj:restore(checkpoint)
-    last_score, last_metrics = metric_fn(tmobj, args)
+    local _, m = metric_fn(tmobj, args)
+    last_metrics = m
   end
 
-  return last_score, last_metrics
+  return last_metrics
 end
 
 local function optimize_tm (args)
@@ -732,19 +721,25 @@ local function optimize_tm (args)
         phase = info.phase,
       })
     end
-    return score, metrics, nil
+    return score, metrics
   end
 
-  local _, best_params, _ = search({
-    param_names = param_names,
-    samplers = samplers,
-    trials = args.search_trials or 120,
-    trial_fn = search_trial_fn,
-    skip_final = true,
-    cost_fn = args.cost_fn or function (p) return (p.features or max_features) * (p.clauses or 1) end,
-    cost_beta = args.cost_beta,
-    constrain = function (p) constrain_tm_params(p) end,
-  })
+  local _, best_params
+  if not all_fixed(samplers) and args.search_trials and args.search_trials > 0 then
+    _, best_params = search({
+      param_names = param_names,
+      samplers = samplers,
+      trials = args.search_trials,
+      trial_fn = search_trial_fn,
+      skip_final = true,
+      cost_fn = args.cost_fn or function (p) return (p.features or max_features) * (p.clauses or 1) end,
+      cost_beta = args.cost_beta,
+      constrain = function (p) constrain_tm_params(p) end,
+    })
+  else
+    best_params = sample_params(samplers, param_names, nil, true)
+    constrain_tm_params(best_params)
+  end
 
   if search_tm then
     search_tm:destroy()
@@ -768,7 +763,7 @@ local function optimize_tm (args)
     sol_neighbors = args.sol_neighbors,
     targets = args.targets,
   }
-  local _, final_metrics = train_tm_batched(final_tm, final_train_args, best_params, final_iters,
+  local final_metrics = train_tm_batched(final_tm, final_train_args, best_params, final_iters,
     final_batch, final_patience, args.early_tolerance, metric_fn, each_cb, { is_final = true })
 
   collectgarbage("collect")
@@ -781,10 +776,15 @@ end
 
 M.ridge = function (args)
   local ridge = require("santoku.learn.ridge")
-  local dense = args.targets ~= nil
-
-  local gram = err.assert(args.gram, "gram required")
-  args.gram = nil
+  local dense = args.val_targets ~= nil
+  local train_codes = err.assert(args.train_codes, "train_codes required")
+  local n_samples = err.assert(args.n_samples, "n_samples required")
+  local n_dims = err.assert(args.n_dims, "n_dims required")
+  local gram = ridge.gram({
+    codes = train_codes, n_samples = n_samples, n_dims = n_dims,
+    label_offsets = args.label_offsets, label_neighbors = args.label_neighbors, n_labels = args.n_labels,
+    targets = args.targets, n_targets = args.n_targets,
+  })
   local param_names
   if dense then param_names = { "lambda" }
   else param_names = { "lambda", "propensity_a", "propensity_b" } end
@@ -793,14 +793,14 @@ M.ridge = function (args)
   args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 8.0, def = 1.5 })
   local samplers = build_samplers(args, param_names)
   local k = not dense and (args.k or 32) or nil
-  if all_fixed(samplers) or (args.search_trials or 30) <= 0 then
+  if all_fixed(samplers) or not args.search_trials or args.search_trials <= 0 then
     local params = sample_params(samplers, param_names, nil, true)
     local r = ridge.create({
       gram = gram, lambda = params.lambda,
       propensity_a = not dense and params.propensity_a or nil,
       propensity_b = not dense and params.propensity_b or nil,
     })
-    return nil, r, params, nil, nil, args.val_codes
+    return r, params
   end
   gram:prepare(args.val_codes, args.val_n_samples)
   local lbl_off_buf, lbl_nbr_buf, lbl_sco_buf, regress_buf
@@ -821,7 +821,7 @@ M.ridge = function (args)
     })
     return oracle.micro_f1, { oracle = oracle }
   end
-  local _, best_params, best_metrics = search({
+  local _, best_params = search({
     param_names = param_names, samplers = samplers,
     trials = args.search_trials or 30, trial_fn = trial_fn, each = args.each,
     skip_final = true,
@@ -831,7 +831,7 @@ M.ridge = function (args)
     propensity_a = not dense and best_params.propensity_a or nil,
     propensity_b = not dense and best_params.propensity_b or nil,
   })
-  return nil, r, best_params, best_metrics, nil, args.val_codes
+  return r, best_params
 end
 
 

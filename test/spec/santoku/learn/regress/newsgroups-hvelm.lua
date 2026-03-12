@@ -1,6 +1,6 @@
 local arr = require("santoku.array")
 local csr = require("santoku.learn.csr")
-local csr_m = require("santoku.csr")
+
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
 local optimize = require("santoku.learn.optimize")
@@ -15,7 +15,7 @@ io.stdout:setvbuf("line")
 local cfg = {
   data = { max = nil, tvr = 0.1 },
   tok = { ngram = 5 },
-  emb = { n_landmarks = 8192, trace_tol = 0.01, kernel = "arccos1" },
+  emb = { n_landmarks = 8192, trace_tol = 0.01, kernel = "cosine" },
   ridge = {
     lambda = { def = 4.3945e-04 },
     propensity_a = { def = 0.3774 },
@@ -45,42 +45,36 @@ test("newsgroups csr+kernel", function ()
   str.printf("[Data] train=%d val=%d test=%d classes=%d %s\n",
     train.n, validate.n, test_set.n, n_classes, sw())
 
-  local ngram_map, offsets, tokens, n_tokens = csr.tokenize({
+  local ngram_map, offsets, tokens, values, n_tokens = csr.tokenize({
     texts = train.problems, hdc_ngram = cfg.tok.ngram, n_samples = train.n,
   })
-  local bns_ids, bns_scores = csr_m.top_bns(
-    offsets, tokens, label_off, label_nbr, n_tokens, n_classes)
-  str.printf("[Tokenize] ngram=%d tokens=%d bns=%d %s\n",
-    cfg.tok.ngram, n_tokens, bns_ids:size(), sw())
-
-  local sel_tokens, sel_offsets = csr.seq_select(
-    tokens, offsets, bns_ids)
-  local n_sel = bns_ids:size()
-  offsets = nil; tokens = nil
-  collectgarbage("collect")
+  local bns_scores = csr.apply_bns(
+    offsets, tokens, values, nil,
+    label_off, label_nbr, n_tokens, n_classes)
+  str.printf("[Tokenize] ngram=%d tokens=%d %s\n",
+    cfg.tok.ngram, n_tokens, sw())
 
   str.printf("[Spectral] Cholesky trace_tol=%s kernel=%s\n",
     tostring(cfg.emb.trace_tol), cfg.emb.kernel)
-  local train_codes, sp_enc, gram = spectral.encode({
-    offsets = sel_offsets, tokens = sel_tokens,
-    n_samples = train.n, n_tokens = n_sel,
-    feature_weights = bns_scores, kernel = cfg.emb.kernel,
+  local train_codes, sp_enc = spectral.encode({
+    offsets = offsets, tokens = tokens, values = values,
+    n_samples = train.n, n_tokens = n_tokens,
+    kernel = cfg.emb.kernel,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
-    label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
   })
-  sel_offsets = nil; sel_tokens = nil; bns_scores = nil
+  offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   collectgarbage("collect")
   local emb_d = sp_enc:dims()
   str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
 
   local function encode_texts(texts, n)
-    local _, off, tok = csr.tokenize({
+    local _, off, tok, val = csr.tokenize({
       texts = texts, hdc_ngram = cfg.tok.ngram,
       n_samples = n, ngram_map = ngram_map,
     })
-    local st, so = csr.seq_select(tok, off, bns_ids)
+    csr.apply_bns(off, tok, val, bns_scores)
     return sp_enc:encode({
-      offsets = so, tokens = st, n_samples = n,
+      offsets = off, tokens = tok, values = val, n_samples = n,
     })
   end
 
@@ -89,8 +83,9 @@ test("newsgroups csr+kernel", function ()
   collectgarbage("collect")
 
   str.printf("[Ridge] Training\n")
-  local _, ridge_obj, best_params = optimize.ridge({
-    gram = gram,
+  local ridge_obj, best_params = optimize.ridge({
+    train_codes = train_codes, n_samples = train.n, n_dims = emb_d,
+    label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
     val_codes = val_codes, val_n_samples = validate.n,
     val_expected_offsets = val_label_off, val_expected_neighbors = val_label_nbr,
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
@@ -98,7 +93,6 @@ test("newsgroups csr+kernel", function ()
     k = cfg.ridge.k, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
-  gram = nil
   collectgarbage("collect")
   str.printf("[Ridge] lambda=%.4e pa=%.4f pb=%.4f %s\n",
     best_params.lambda, best_params.propensity_a, best_params.propensity_b, sw())
