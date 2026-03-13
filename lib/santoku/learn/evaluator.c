@@ -1749,52 +1749,12 @@ static inline int tk_dendro_iter_lua(lua_State *L) {
   return 1;
 }
 
-static inline int tm_topk_features (lua_State *L)
-{
-  lua_settop(L, 1);
-  luaL_checktype(L, 1, LUA_TTABLE);
-  lua_getfield(L, 1, "offsets");
-  tk_ivec_t *off = tk_ivec_peek(L, -1, "offsets");
-  lua_getfield(L, 1, "scores");
-  tk_fvec_t *sco = tk_fvec_peek(L, -1, "scores");
-  lua_pop(L, 2);
-  int64_t k = (int64_t)tk_lua_fcheckunsigned(L, 1, "topk_features", "k");
-  int64_t ns = (int64_t)(off->n - 1);
-  int64_t fppos = 3;
-  int64_t nd = k * fppos;
-  tk_fvec_t *out = tk_fvec_create(L, (uint64_t)(ns * nd), NULL, NULL);
-  memset(out->a, 0, (uint64_t)(ns * nd) * sizeof(float));
-  #pragma omp parallel for
-  for (int64_t s = 0; s < ns; s++) {
-    int64_t ps = off->a[s], pe = off->a[s + 1];
-    int64_t cnt = pe - ps;
-    if (cnt > k) cnt = k;
-    float *row = out->a + s * nd;
-    if (cnt <= 0) continue;
-    float s0 = sco->a[ps];
-    if (s0 <= 0.0f) continue;
-    float inv_s0 = 1.0f / s0;
-    for (int64_t j = 0; j < cnt; j++) {
-      float sj = sco->a[ps + j];
-      float sj1 = (j + 1 < cnt) ? sco->a[ps + j + 1] : 0.0f;
-      float ratio = sj * inv_s0;
-      float *f = row + j * fppos;
-      f[0] = ratio;
-      f[1] = (sj - sj1) * inv_s0;
-      f[2] = logf(ratio + 1e-7f);
-    }
-  }
-  lua_pushinteger(L, nd);
-  return 2;
-}
-
 static luaL_Reg tm_evaluator_fns[] =
 {
   { "class_accuracy", tm_class_accuracy },
   { "regression_accuracy", tm_regression_accuracy },
   { "ranking_accuracy", tm_ranking_accuracy },
   { "retrieval_ks", tm_retrieval_ks },
-  { "topk_features", tm_topk_features },
   { "cluster", tm_cluster },
   { "dendro_cut", tk_pvec_dendro_cut_lua },
   { "dendro_each", tk_dendro_iter_lua },

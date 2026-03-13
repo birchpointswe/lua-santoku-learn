@@ -20,6 +20,7 @@
 
 typedef struct {
   double *evecs;
+  float *evecs_f;
   double *eigenvals;
   double *PQtY;
   tk_dvec_t *label_counts;
@@ -39,6 +40,8 @@ typedef struct {
   bool destroyed;
 } tk_gram_t;
 
+__attribute__((unused)) static luaL_Reg tk_gram_mt_fns[];
+
 static inline tk_gram_t *tk_gram_peek (lua_State *L, int i) {
   return (tk_gram_t *)luaL_checkudata(L, i, TK_GRAM_MT);
 }
@@ -46,6 +49,7 @@ static inline tk_gram_t *tk_gram_peek (lua_State *L, int i) {
 static inline int tk_gram_gc (lua_State *L) {
   tk_gram_t *g = tk_gram_peek(L, 1);
   free(g->evecs);
+  free(g->evecs_f);
   free(g->eigenvals);
   free(g->PQtY);
   free(g->W_work);
@@ -77,6 +81,75 @@ static inline void tk_gram_add_intercept_f (
   for (int64_t i = 0; i < bs; i++)
     for (int64_t l = 0; l < nl; l++)
       sbuf[i * nl + l] += (float)intercept[l];
+}
+
+static inline int tk_gram_finalize (
+  lua_State *L,
+  double *XtX,
+  double *xty,
+  double *col_mean,
+  double *y_mean_arr,
+  double *eigenvals,
+  tk_dvec_t *lc,
+  int lc_idx,
+  int64_t nc, int64_t m, int64_t nl)
+{
+  uint64_t um = (uint64_t)m;
+  uint64_t dd = um * um;
+  uint64_t dnl = um * (uint64_t)nl;
+  cblas_dsyr(CblasColMajor, CblasUpper, (int)m,
+    -(double)nc, col_mean, 1, XtX, (int)m);
+  cblas_dger(CblasRowMajor, (int)m, (int)nl,
+    -(double)nc, col_mean, 1, y_mean_arr, 1, xty, (int)nl);
+  LAPACKE_dsyevd(LAPACK_COL_MAJOR, 'V', 'U', (int)m, XtX, (int)m, eigenvals);
+  double mean_eig = 0.0;
+  for (uint64_t i = 0; i < um; i++)
+    mean_eig += eigenvals[i];
+  mean_eig /= (double)m;
+  double *PQtY = (double *)malloc(dnl * sizeof(double));
+  double *W_work = (double *)malloc(dnl * sizeof(double));
+  if (!PQtY || !W_work) {
+    free(PQtY); free(W_work); free(xty);
+    free(XtX); free(eigenvals); free(col_mean); free(y_mean_arr);
+    return luaL_error(L, "gram: out of memory");
+  }
+  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    (int)m, (int)nl, (int)m, 1.0, XtX, (int)m,
+    xty, (int)nl, 0.0, PQtY, (int)nl);
+  free(xty);
+  float *evecs_f = (float *)malloc(dd * sizeof(float));
+  for (uint64_t i = 0; i < dd; i++)
+    evecs_f[i] = (float)XtX[i];
+  tk_gram_t *g = tk_lua_newuserdata(L, tk_gram_t,
+    TK_GRAM_MT, tk_gram_mt_fns, tk_gram_gc);
+  int gram_idx = lua_gettop(L);
+  g->evecs = XtX;
+  g->evecs_f = evecs_f;
+  g->eigenvals = eigenvals;
+  g->PQtY = PQtY;
+  g->label_counts = lc;
+  g->W_work = W_work;
+  g->W_work_f = NULL;
+  g->sbuf_f = NULL;
+  g->val_F_f = NULL;
+  g->col_mean = col_mean;
+  g->y_mean = y_mean_arr;
+  g->cm_proj = NULL;
+  g->intercept = NULL;
+  g->mean_eig = mean_eig;
+  g->n_dims = m;
+  g->n_labels = nl;
+  g->n_samples = nc;
+  g->val_n = 0;
+  g->destroyed = false;
+  lua_newtable(L);
+  if (lc_idx > 0) {
+    lua_pushvalue(L, lc_idx);
+    lua_setfield(L, -2, "label_counts");
+  }
+  lua_setfenv(L, gram_idx);
+  lua_pushvalue(L, gram_idx);
+  return 1;
 }
 
 #pragma GCC diagnostic push
@@ -184,27 +257,17 @@ static inline int tk_gram_prepare_val_lua (lua_State *L) {
   free(g->val_F_f);
   free(g->sbuf_f); g->sbuf_f = NULL;
   uint64_t nd = (uint64_t)val_n * (uint64_t)d;
-  double *val_F_d = (double *)malloc(nd * sizeof(double));
-  if (!val_F_d) return luaL_error(L, "prepare: out of memory");
-  for (uint64_t i = 0; i < nd; i++)
-    val_F_d[i] = (double)val_fvec->a[i];
   if (g->col_mean) {
     if (!g->cm_proj)
       g->cm_proj = (double *)malloc((uint64_t)d * sizeof(double));
     cblas_dgemv(CblasRowMajor, CblasNoTrans, (int)d, (int)d,
       1.0, g->evecs, (int)d, g->col_mean, 1, 0.0, g->cm_proj, 1);
   }
-  double *proj_d = (double *)malloc(nd * sizeof(double));
-  if (!proj_d) { free(val_F_d); return luaL_error(L, "prepare: out of memory"); }
-  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-    (int)val_n, (int)d, (int)d, 1.0, val_F_d, (int)d,
-    g->evecs, (int)d, 0.0, proj_d, (int)d);
   g->val_F_f = (float *)malloc(nd * sizeof(float));
-  if (!g->val_F_f) { free(val_F_d); free(proj_d); return luaL_error(L, "prepare: out of memory"); }
-  for (uint64_t i = 0; i < nd; i++)
-    g->val_F_f[i] = (float)proj_d[i];
-  free(val_F_d);
-  free(proj_d);
+  if (!g->val_F_f) return luaL_error(L, "prepare: out of memory");
+  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+    (int)val_n, (int)d, (int)d, 1.0f, val_fvec->a, (int)d,
+    g->evecs_f, (int)d, 0.0f, g->val_F_f, (int)d);
   g->val_n = val_n;
   return 0;
 }
