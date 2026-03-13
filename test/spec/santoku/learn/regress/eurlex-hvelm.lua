@@ -22,9 +22,9 @@ local cfg = {
     k = 1024,
   },
   ridge = {
-    lambda = { def = 2.9785e-02 },
-    propensity_a = { def = 0.02 },
-    propensity_b = { def = 0.74 },
+    lambda = { def = 8.3797e-04 },
+    propensity_a = { def = 0.0126 },
+    propensity_b = { def = 1.0342 },
     search_trials = 0,
   },
 }
@@ -96,7 +96,7 @@ test("eurlex", function ()
 
   local dev_codes = encode_texts(dev.text_iter, dev.n)
 
-  local dv_short_off, dv_short_nbr, tr_short_off, tr_short_nbr
+  local dv_short_off, dv_short_nbr
   if cfg.ann then
     local train_sign, n_ann_bits = train_codes:mtx_sign(emb_d)
     local doc_ids = ivec.create(train.n):fill_indices()
@@ -110,50 +110,41 @@ test("eurlex", function ()
       return sl_off, sl_nbr
     end
     dv_short_off, dv_short_nbr = shortlist(dev_codes, dev.n)
-    tr_short_off, tr_short_nbr = shortlist(train_codes, train.n)
     train_sign = nil
     collectgarbage("collect")
     str.printf("[Shortlist] built %s\n", sw())
   end
+  train_codes = nil
 
   str.printf("\n[Ridge]\n")
-  local ridge_obj, best_params = optimize.ridge({
-    gram = gram,
+  local ridge_obj, best_params, gfm_obj = optimize.ridge({
+    gram = gram, gfm = true,
     val_codes = dev_codes, val_n_samples = dev.n,
     val_expected_offsets = dev_label_off, val_expected_neighbors = dev_label_nbr,
     n_labels = n_labels,
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
     propensity_b = cfg.ridge.propensity_b,
     k = k, search_trials = cfg.ridge.search_trials,
-    each = util.make_ridge_log(stopwatch),
+    each = util.make_ridge_log(stopwatch, function (m)
+      if m.gfm_f1 then return "oracle: " .. fmt_metrics(m.oracle) end
+      if m.oracle then return fmt_metrics(m.oracle) end
+      return ""
+    end),
   })
   gram = nil
   collectgarbage("collect")
   str.printf("[Ridge] lambda=%.4e pa=%.4f pb=%.4f %s\n",
     best_params.lambda, best_params.propensity_a, best_params.propensity_b, sw())
 
-  local tr_off, tr_nbr, tr_sco = ridge_obj:label(train_codes, train.n, k, tr_short_off, tr_short_nbr)
   local dv_off, dv_nbr, dv_sco = ridge_obj:label(dev_codes, dev.n, k, dv_short_off, dv_short_nbr)
 
-  local tr_oracle = oracle_metrics(tr_off, tr_nbr, train_label_off, train_label_nbr)
   local dv_oracle = oracle_metrics(dv_off, dv_nbr, dev_label_off, dev_label_nbr)
-  str.printf("[Tr Oracle] %s %s\n", fmt_metrics(tr_oracle), sw())
   str.printf("[Dv Oracle] %s %s\n", fmt_metrics(dv_oracle), sw())
 
-  train_codes = nil; dev_codes = nil
+  dev_codes = nil
   collectgarbage("collect")
 
-  local gfm_obj, gfm_params = optimize.gfm({
-    pred_offsets = tr_off, pred_neighbors = tr_nbr, pred_scores = tr_sco,
-    expected_offsets = train_label_off, expected_neighbors = train_label_nbr,
-    n_samples = train.n, n_labels = n_labels,
-    val_offsets = dv_off, val_neighbors = dv_nbr, val_scores = dv_sco,
-    val_n_samples = dev.n,
-    val_expected_offsets = dev_label_off, val_expected_neighbors = dev_label_nbr,
-  })
-  str.printf("[GFM] alpha=%.4f f1=%.4f %s\n",
-    gfm_params.alpha, gfm_params.f1, sw())
-
+  str.printf("[GFM] %s\n", sw())
 
   local test_codes = encode_texts(test_set.text_iter, test_set.n)
   local ts_off, ts_nbr, ts_sco = ridge_obj:label(test_codes, test_set.n, k)
@@ -171,8 +162,6 @@ test("eurlex", function ()
     })
     return m
   end
-  local gfm_trm = gfm_score(tr_off, tr_nbr, tr_sco, train.n, train_label_off, train_label_nbr)
-  str.printf("[Tr GFM] %s %s\n", fmt_metrics(gfm_trm), sw())
   local gfm_dvm = gfm_score(dv_off, dv_nbr, dv_sco, dev.n, dev_label_off, dev_label_nbr)
   str.printf("[Dv GFM] %s %s\n", fmt_metrics(gfm_dvm), sw())
   local gfm_tsm = gfm_score(ts_off, ts_nbr, ts_sco, test_set.n, test_label_off, test_label_nbr)
@@ -187,15 +176,13 @@ test("eurlex", function ()
   str.printf("[Ts Pred] %s %s\n", fmt_metrics(ts_pred_m), sw())
 
   str.printf("\nSummary\n")
-  str.printf("  %-10s lambda=%.4e pa=%.4f pb=%.4f alpha=%.4f\n",
-    "Params", best_params.lambda, best_params.propensity_a, best_params.propensity_b,
-    gfm_params.alpha)
-  str.printf("  %-10s %s\n", "Tr Oracle", fmt_metrics(tr_oracle))
+  str.printf("  %-10s lambda=%.4e pa=%.4f pb=%.4f\n",
+    "Params", best_params.lambda, best_params.propensity_a, best_params.propensity_b)
   str.printf("  %-10s %s\n", "Dv Oracle", fmt_metrics(dv_oracle))
   str.printf("  %-10s %s\n", "Ts Oracle", fmt_metrics(ts_oracle))
-  str.printf("  %-10s %s\n", "Tr GFM", fmt_metrics(gfm_trm))
   str.printf("  %-10s %s\n", "Dv GFM", fmt_metrics(gfm_dvm))
   str.printf("  %-10s %s\n", "Ts GFM", fmt_metrics(gfm_tsm))
+  str.printf("  %-10s %s\n", "Ts Pred", fmt_metrics(ts_pred_m))
   local _, total = stopwatch()
   str.printf("\nTotal: %.1fs\n", total)
 

@@ -10,9 +10,7 @@
 
 typedef struct {
   int64_t nl;
-  double *platt_a;
-  double *platt_b;
-  double alpha;
+  double *thresholds;
   bool destroyed;
 } tk_gfm_t;
 

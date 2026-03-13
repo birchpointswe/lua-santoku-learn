@@ -373,49 +373,78 @@ static int tm_csr_tokenize (lua_State *L)
   tk_iumap_t *ngram_map;
   int map_idx;
   int64_t next_id;
+  int64_t *sample_counts = (int64_t *)calloc((size_t)n_samples, sizeof(int64_t));
   if (have_map) {
     ngram_map = tk_iumap_peek(L, -1, "ngram_map");
     map_idx = lua_gettop(L);
     next_id = (int64_t)tk_iumap_size(ngram_map);
+    uint32_t me = tk_iumap_end(ngram_map);
+    #pragma omp parallel
+    {
+      int64_t *packed_buf = (int64_t *)malloc(max_len * sizeof(int64_t));
+      #pragma omp for schedule(dynamic)
+      for (int64_t s = 0; s < n_samples; s++) {
+        size_t count = tm_csr_pack_ngrams(strs[s], lens[s], (int)ngram, packed_buf);
+        int64_t nv = 0;
+        for (size_t i = 0; i < count; i++) {
+          uint32_t iter = tk_iumap_get(ngram_map, packed_buf[i]);
+          if (iter != me) packed_buf[nv++] = tk_iumap_val(ngram_map, iter);
+        }
+        ks_introsort(tk_ivec_asc, (size_t)nv, packed_buf);
+        int64_t unique = 0;
+        for (int64_t i = 0; i < nv; i++)
+          if (i == 0 || packed_buf[i] != packed_buf[i - 1]) unique++;
+        sample_counts[s] = unique;
+      }
+      free(packed_buf);
+    }
   } else {
     lua_pop(L, 1);
-    ngram_map = tk_iumap_create(L, 0);
-    map_idx = lua_gettop(L);
-    next_id = 0;
-    int64_t *packed_buf = (int64_t *)malloc(max_len * sizeof(int64_t));
-    for (int64_t s = 0; s < n_samples; s++) {
-      size_t count = tm_csr_pack_ngrams(strs[s], lens[s], (int)ngram, packed_buf);
-      for (size_t i = 0; i < count; i++) {
-        int absent;
-        uint32_t iter = tk_iumap_put(ngram_map, packed_buf[i], &absent);
-        if (absent)
-          tk_iumap_setval(ngram_map, iter, next_id++);
+    int max_threads = omp_get_max_threads();
+    tk_iumap_t **local_maps = (tk_iumap_t **)calloc((size_t)max_threads, sizeof(tk_iumap_t *));
+    #pragma omp parallel
+    {
+      int tid = omp_get_thread_num();
+      tk_iumap_t *lm = tk_iumap_create(NULL, 0);
+      local_maps[tid] = lm;
+      int64_t *packed_buf = (int64_t *)malloc(max_len * sizeof(int64_t));
+      #pragma omp for schedule(dynamic)
+      for (int64_t s = 0; s < n_samples; s++) {
+        size_t count = tm_csr_pack_ngrams(strs[s], lens[s], (int)ngram, packed_buf);
+        for (size_t i = 0; i < count; i++) {
+          int absent;
+          tk_iumap_put(lm, packed_buf[i], &absent);
+        }
+        ks_introsort(tk_ivec_asc, count, packed_buf);
+        int64_t unique = 0;
+        for (size_t i = 0; i < count; i++)
+          if (i == 0 || packed_buf[i] != packed_buf[i - 1]) unique++;
+        sample_counts[s] = unique;
       }
+      free(packed_buf);
     }
-    free(packed_buf);
+    uint32_t est = 0;
+    for (int t = 0; t < max_threads; t++)
+      if (local_maps[t] && tk_iumap_size(local_maps[t]) > est)
+        est = tk_iumap_size(local_maps[t]);
+    ngram_map = tk_iumap_create(L, est);
+    next_id = 0;
+    for (int t = 0; t < max_threads; t++) {
+      if (!local_maps[t]) continue;
+      int64_t k;
+      tk_umap_foreach_keys(local_maps[t], k, ({
+        int absent;
+        uint32_t gi = tk_iumap_put(ngram_map, k, &absent);
+        if (absent)
+          tk_iumap_setval(ngram_map, gi, next_id++);
+      }));
+      tk_iumap_destroy(local_maps[t]);
+    }
+    free(local_maps);
+    map_idx = lua_gettop(L);
   }
   uint64_t n_tokens = (uint64_t)next_id;
   uint32_t map_end = tk_iumap_end(ngram_map);
-  int64_t *sample_counts = (int64_t *)calloc((size_t)n_samples, sizeof(int64_t));
-  #pragma omp parallel
-  {
-    int64_t *packed_buf = (int64_t *)malloc(max_len * sizeof(int64_t));
-    #pragma omp for schedule(dynamic)
-    for (int64_t s = 0; s < n_samples; s++) {
-      size_t count = tm_csr_pack_ngrams(strs[s], lens[s], (int)ngram, packed_buf);
-      int64_t nv = 0;
-      for (size_t i = 0; i < count; i++) {
-        uint32_t iter = tk_iumap_get(ngram_map, packed_buf[i]);
-        if (iter != map_end) packed_buf[nv++] = tk_iumap_val(ngram_map, iter);
-      }
-      ks_introsort(tk_ivec_asc, (size_t)nv, packed_buf);
-      int64_t unique = 0;
-      for (int64_t i = 0; i < nv; i++)
-        if (i == 0 || packed_buf[i] != packed_buf[i - 1]) unique++;
-      sample_counts[s] = unique;
-    }
-    free(packed_buf);
-  }
   tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t)(n_samples + 1), 0, 0);
   offsets->n = (uint64_t)(n_samples + 1);
   offsets->a[0] = 0;

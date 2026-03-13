@@ -53,7 +53,7 @@ test("mnist csr+pos2d", function ()
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
   })
-  train_p_off = nil; train_p_nbr = nil -- luacheck: ignore
+  train_p_off = nil; train_p_nbr = nil; train_codes = nil -- luacheck: ignore
   collectgarbage("collect")
   local emb_d = sp_enc:dims()
   str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
@@ -91,12 +91,10 @@ test("mnist csr+pos2d", function ()
   test_codes = nil
   str.printf("[Eval] Labels done %s\n", sw())
 
-  local _, train_labels = ridge_obj:label(train_codes, train.n, 1)
-  local train_stats = eval.class_accuracy(train_labels, train.sol_offsets, train.sol_neighbors, train.n, n_classes)
   local val_stats = eval.class_accuracy(val_labels, validate.sol_offsets, validate.sol_neighbors, validate.n, n_classes)
   local test_stats = eval.class_accuracy(test_labels, test_set.sol_offsets, test_set.sol_neighbors, test_set.n, n_classes)
-  str.printf("[Class] F1: train=%.2f val=%.2f test=%.2f %s\n",
-    train_stats.f1, val_stats.f1, test_stats.f1, sw())
+  str.printf("[Class] F1: val=%.2f test=%.2f %s\n",
+    val_stats.f1, test_stats.f1, sw())
 
   local _, val_oracle = eval.retrieval_ks({
     pred_offsets = val_off, pred_neighbors = val_labels,
