@@ -47,13 +47,13 @@ test("mnist csr+pos2d", function ()
 
   str.printf("[Spectral] Cholesky trace_tol=%s\n",
     tostring(cfg.emb.trace_tol))
-  local train_codes, sp_enc, gram = spectral.encode({
+  local _, sp_enc, gram = spectral.encode({
     kernel = cfg.emb.kernel, offsets = train_p_off, tokens = train_p_nbr,
     n_samples = train.n, n_tokens = n_features,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
   })
-  train_p_off = nil; train_p_nbr = nil; train_codes = nil -- luacheck: ignore
+  train_p_off = nil; train_p_nbr = nil -- luacheck: ignore
   collectgarbage("collect")
   local emb_d = sp_enc:dims()
   str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
