@@ -43,22 +43,6 @@ local function spec_defaults (spec, defs)
   return s
 end
 
-local function cap_spec_max (spec, cap)
-  if spec == nil then return nil end
-  if type(spec) == "number" then
-    return spec > cap and cap or spec
-  end
-  if type(spec) == "table" and spec.min ~= nil then
-    local s = {}
-    for k, v in pairs(spec) do s[k] = v end
-    if s.max > cap then s.max = cap end
-    if s.min > cap then s.min = cap end
-    if s.def and s.def > cap then s.def = cap end
-    return s
-  end
-  return spec
-end
-
 local build_sampler = function (spec, global_dev)
   if spec == nil then
     return nil
@@ -392,14 +376,17 @@ end
 M.ridge = function (args)
   local ridge = require("santoku.learn.ridge")
   local dense = args.val_targets ~= nil
-  local train_codes = err.assert(args.train_codes, "train_codes required")
-  local n_samples = err.assert(args.n_samples, "n_samples required")
-  local n_dims = err.assert(args.n_dims, "n_dims required")
-  local gram = ridge.gram({
-    codes = train_codes, n_samples = n_samples, n_dims = n_dims,
-    label_offsets = args.label_offsets, label_neighbors = args.label_neighbors, n_labels = args.n_labels,
-    targets = args.targets, n_targets = args.n_targets,
-  })
+  local gram = args.gram
+  if not gram then
+    local train_codes = err.assert(args.train_codes, "train_codes required")
+    local n_samples = err.assert(args.n_samples, "n_samples required")
+    local n_dims = err.assert(args.n_dims, "n_dims required")
+    gram = ridge.gram({
+      codes = train_codes, n_samples = n_samples, n_dims = n_dims,
+      label_offsets = args.label_offsets, label_neighbors = args.label_neighbors, n_labels = args.n_labels,
+      targets = args.targets, n_targets = args.n_targets,
+    })
+  end
   local param_names
   if dense then param_names = { "lambda" }
   else param_names = { "lambda", "propensity_a", "propensity_b" } end
@@ -410,12 +397,11 @@ M.ridge = function (args)
   local k = not dense and (args.k or 32) or nil
   if all_fixed(samplers) or not args.search_trials or args.search_trials <= 0 then
     local params = sample_params(samplers, param_names, nil, true)
-    local r = ridge.create({
+    return ridge.create({
       gram = gram, lambda = params.lambda,
       propensity_a = not dense and params.propensity_a or nil,
       propensity_b = not dense and params.propensity_b or nil,
-    })
-    return r, params
+    }), params
   end
   gram:prepare(args.val_codes, args.val_n_samples)
   local lbl_off_buf, lbl_nbr_buf, lbl_sco_buf, regress_buf
@@ -441,13 +427,34 @@ M.ridge = function (args)
     trials = args.search_trials or 30, trial_fn = trial_fn, each = args.each,
     skip_final = true,
   })
-  local r = ridge.create({
+  return ridge.create({
     gram = gram, lambda = best_params.lambda,
     propensity_a = not dense and best_params.propensity_a or nil,
     propensity_b = not dense and best_params.propensity_b or nil,
-  })
-  return r, best_params
+  }), best_params
 end
 
+M.gfm = function (args)
+  local gfm = require("santoku.learn.gfm")
+  local g = gfm.create({ n_labels = args.n_labels })
+  g:fit({
+    pred_offsets = args.pred_offsets,
+    pred_neighbors = args.pred_neighbors,
+    pred_scores = args.pred_scores,
+    expected_offsets = args.expected_offsets,
+    expected_neighbors = args.expected_neighbors,
+    n_samples = args.n_samples,
+  })
+  local best_a, best_f1 = g:alpha_search({
+    offsets = args.val_offsets,
+    neighbors = args.val_neighbors,
+    scores = args.val_scores,
+    n_samples = args.val_n_samples,
+    expected_offsets = args.val_expected_offsets,
+    expected_neighbors = args.val_expected_neighbors,
+  })
+  g:set_alpha(best_a)
+  return g, { alpha = best_a, f1 = best_f1 }
+end
 
 return M
