@@ -624,8 +624,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
       const float *restrict csc_vals = enc->csc_values;
       #pragma omp parallel
       {
-        // float *row_buf = (float *)calloc(m, sizeof(float));
-        double *row_buf = (double *)calloc(m, sizeof(double));
+        float *row_buf = (float *)calloc(m, sizeof(float));
         #pragma omp for schedule(static)
         for (uint64_t i = 0; i < blk; i++) {
           float *restrict sims_row = sims_f + i * m;
@@ -633,8 +632,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
           int64_t jlo = off_a[si], jhi = off_a[si + 1];
           for (int64_t j = jlo; j < jhi; j++) {
             int64_t tok = tok_a[j];
-            // float val = csr_sv[j];
-            double val = (double)csr_sv[j];
+            float val = csr_sv[j];
             int64_t clo = csc_off[tok], chi = csc_off[tok + 1];
             for (int64_t c = clo; c < chi; c++)
               row_buf[(uint64_t)csc_rows_a[c]] += val * csc_vals[c];
@@ -643,8 +641,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
             double denom = (double)csr_norms[si] * (double)enc->csr_norms[j];
             sims_row[j] = (float)tk_spectral_kernel_apply(enc->kernel,
               (double)row_buf[j], denom);
-            // row_buf[j] = 0.0f;
-            row_buf[j] = 0.0;
+            row_buf[j] = 0.0f;
           }
         }
         free(row_buf);
