@@ -59,7 +59,7 @@ test("housing regressor", function ()
     kernel = cfg.emb.kernel,
     targets = train.targets, n_targets = 1,
   })
-  offsets = nil; tokens = nil; values = nil -- luacheck: ignore
+  offsets = nil; tokens = nil; values = nil; train_codes = nil -- luacheck: ignore
   collectgarbage("collect")
   local emb_d = sp_enc:dims()
   str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
@@ -89,14 +89,13 @@ test("housing regressor", function ()
 
   str.printf("\n[Eval] Scoring splits\n")
   local regress_buf = fvec.create()
-  local train_stats = eval.regression_accuracy(ridge_obj:regress(train_codes, train.n, regress_buf), train.targets)
   local val_stats = eval.regression_accuracy(ridge_obj:regress(val_codes, validate.n, regress_buf), validate.targets)
   val_codes = nil
   local test_codes = encode(test_set.bit_offsets, test_set.bit_neighbors, test_set.continuous, test_set.n)
   local test_stats = eval.regression_accuracy(ridge_obj:regress(test_codes, test_set.n, regress_buf), test_set.targets)
   test_codes = nil
-  str.printf("[Eval] Accuracy: train=%.1f%% val=%.1f%% test=%.1f%% %s\n",
-    (1 - train_stats.nmae) * 100, (1 - val_stats.nmae) * 100, (1 - test_stats.nmae) * 100, sw())
+  str.printf("[Eval] Accuracy: val=%.1f%% test=%.1f%% %s\n",
+    (1 - val_stats.nmae) * 100, (1 - test_stats.nmae) * 100, sw())
 
   local _, total = stopwatch()
   str.printf("\nTotal: %.1fs\n", total)
