@@ -21,7 +21,7 @@ local function format_best (best, current)
   end
 end
 
-function M.make_ridge_log (stopwatch)
+function M.make_ridge_log (stopwatch, metric_fmt)
   return function (ev)
     local phase = format_phase(ev)
     local p = ev.params or {}
@@ -29,8 +29,12 @@ function M.make_ridge_log (stopwatch)
     local score = ev.score or 0
     local best = format_best(ev.global_best_score, score)
     local detail = ""
-    if m.mae then
+    if metric_fmt then
+      detail = " " .. metric_fmt(m)
+    elseif m.mae then
       detail = str.format(" mae=%.6f", m.mae)
+    elseif m.gfm_f1 then
+      detail = str.format(" oracle=%.4f", m.oracle.micro_f1)
     elseif m.oracle then
       detail = str.format(" saF1=%.4f miF1=%.4f", m.oracle.sample_f1, m.oracle.micro_f1)
     end
@@ -43,12 +47,8 @@ function M.make_ridge_log (stopwatch)
     if p.propensity_a then
       prop = str.format(" pa=%.2f pb=%.2f", p.propensity_a, p.propensity_b)
     end
-    local thr = ""
-    if p.threshold then
-      thr = str.format(" thr=%.4f", p.threshold)
-    end
-    str.printf("[Ridge %s] lambda=%.4e%s%s score=%.4f%s%s%s\n",
-      phase, p.lambda or 0, prop, thr, score, detail, best, timing)
+    str.printf("[Ridge %s] lambda=%.4e%s score=%.4f%s%s%s\n",
+      phase, p.lambda or 0, prop, score, detail, best, timing)
   end
 end
 

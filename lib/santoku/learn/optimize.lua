@@ -244,6 +244,16 @@ local search = function (args)
   local X_obs = n_dims > 0 and dvec.create() or nil
   local Y_obs = n_dims > 0 and dvec.create() or nil
 
+  local seed = 2166136261
+  for _, name in ipairs(param_names) do
+    local s = samplers[name]
+    if s and s.center ~= nil then
+      local v = s.normalize and s.normalize(s.center) or (type(s.center) == "number" and s.center or 0)
+      seed = (seed * 16777619 + num.floor(v * 2147483647)) % 4294967296
+    end
+  end
+  rand.fast_seed(seed)
+
   local lhs_pts = n_dims > 0 and lhs_sample(n_initial, n_dims) or nil
   if lhs_pts then
     local def_pt = {}
@@ -395,13 +405,29 @@ M.ridge = function (args)
   args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 8.0, def = 1.5 })
   local samplers = build_samplers(args, param_names)
   local k = not dense and (args.k or 32) or nil
+  local use_gfm = not dense and args.gfm
   if all_fixed(samplers) or not args.search_trials or args.search_trials <= 0 then
     local params = sample_params(samplers, param_names, nil, true)
-    return ridge.create({
+    local r = ridge.create({
       gram = gram, lambda = params.lambda,
       propensity_a = not dense and params.propensity_a or nil,
       propensity_b = not dense and params.propensity_b or nil,
-    }), params
+    })
+    if use_gfm then
+      gram:prepare(args.val_codes, args.val_n_samples)
+      local po, pn, ps = gram:label(params.lambda, k,
+        params.propensity_a, params.propensity_b)
+      local gfm = require("santoku.learn.gfm")
+      local g = gfm.create({ n_labels = args.n_labels })
+      g:threshold_search({
+        offsets = po, neighbors = pn, scores = ps,
+        n_samples = args.val_n_samples,
+        expected_offsets = args.val_expected_offsets,
+        expected_neighbors = args.val_expected_neighbors,
+      })
+      return r, params, g
+    end
+    return r, params
   end
   gram:prepare(args.val_codes, args.val_n_samples)
   local lbl_off_buf, lbl_nbr_buf, lbl_sco_buf, regress_buf
@@ -420,6 +446,17 @@ M.ridge = function (args)
       expected_offsets = args.val_expected_offsets,
       expected_neighbors = args.val_expected_neighbors,
     })
+    if use_gfm then
+      local gfm = require("santoku.learn.gfm")
+      local g = gfm.create({ n_labels = args.n_labels })
+      local gf1 = g:threshold_search({
+        offsets = po, neighbors = pn, scores = ps,
+        n_samples = args.val_n_samples,
+        expected_offsets = args.val_expected_offsets,
+        expected_neighbors = args.val_expected_neighbors,
+      })
+      return gf1, { oracle = oracle, gfm_f1 = gf1 }
+    end
     return oracle.micro_f1, { oracle = oracle }
   end
   local _, best_params = search({
@@ -427,25 +464,31 @@ M.ridge = function (args)
     trials = args.search_trials or 30, trial_fn = trial_fn, each = args.each,
     skip_final = true,
   })
-  return ridge.create({
+  local r = ridge.create({
     gram = gram, lambda = best_params.lambda,
     propensity_a = not dense and best_params.propensity_a or nil,
     propensity_b = not dense and best_params.propensity_b or nil,
-  }), best_params
+  })
+  if use_gfm then
+    local po, pn, ps = gram:label(best_params.lambda, k,
+      best_params.propensity_a, best_params.propensity_b)
+    local gfm = require("santoku.learn.gfm")
+    local g = gfm.create({ n_labels = args.n_labels })
+    g:threshold_search({
+      offsets = po, neighbors = pn, scores = ps,
+      n_samples = args.val_n_samples,
+      expected_offsets = args.val_expected_offsets,
+      expected_neighbors = args.val_expected_neighbors,
+    })
+    return r, best_params, g
+  end
+  return r, best_params
 end
 
 M.gfm = function (args)
   local gfm = require("santoku.learn.gfm")
   local g = gfm.create({ n_labels = args.n_labels })
-  g:fit({
-    pred_offsets = args.pred_offsets,
-    pred_neighbors = args.pred_neighbors,
-    pred_scores = args.pred_scores,
-    expected_offsets = args.expected_offsets,
-    expected_neighbors = args.expected_neighbors,
-    n_samples = args.n_samples,
-  })
-  local best_a, best_f1 = g:alpha_search({
+  local best_f1 = g:threshold_search({
     offsets = args.val_offsets,
     neighbors = args.val_neighbors,
     scores = args.val_scores,
@@ -453,8 +496,7 @@ M.gfm = function (args)
     expected_offsets = args.val_expected_offsets,
     expected_neighbors = args.val_expected_neighbors,
   })
-  g:set_alpha(best_a)
-  return g, { alpha = best_a, f1 = best_f1 }
+  return g, { f1 = best_f1 }
 end
 
 return M

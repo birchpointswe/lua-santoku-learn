@@ -23,6 +23,8 @@ typedef struct {
   float *Wt;
   float *sbuf;
   uint64_t sbuf_size;
+  tk_rank_t *heap_buf;
+  uint64_t heap_buf_size;
   bool destroyed;
 } tk_ridge_t;
 
@@ -34,10 +36,12 @@ static inline int tk_ridge_gc (lua_State *L) {
   tk_ridge_t *r = tk_ridge_peek(L, 1);
   free(r->Wt);
   free(r->sbuf);
+  free(r->heap_buf);
   r->W = NULL;
   r->intercept = NULL;
   r->Wt = NULL;
   r->sbuf = NULL;
+  r->heap_buf = NULL;
   r->destroyed = true;
   return 0;
 }
@@ -76,10 +80,17 @@ static inline int tk_ridge_encode_lua (lua_State *L) {
     tk_ivec_t *csr_nbr = tk_ivec_peek(L, 6, "csr_nbr");
     float *wt = tk_ridge_get_wt(r);
     double *intercept = r->intercept ? r->intercept->a : NULL;
+    int nt = omp_get_max_threads();
+    uint64_t heap_need = (uint64_t)nt * (uint64_t)k;
+    if (!r->heap_buf || r->heap_buf_size < heap_need) {
+      free(r->heap_buf);
+      r->heap_buf = (tk_rank_t *)malloc(heap_need * sizeof(tk_rank_t));
+      r->heap_buf_size = heap_need;
+    }
     #pragma omp parallel
     {
       tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
-                         .a = (tk_rank_t *)malloc((uint64_t)k * sizeof(tk_rank_t)) };
+                         .a = r->heap_buf + (uint64_t)omp_get_thread_num() * (uint64_t)k };
       #pragma omp for schedule(dynamic, 64)
       for (int64_t i = 0; i < n; i++) {
         float *row = codes_a + i * d;
@@ -102,7 +113,6 @@ static inline int tk_ridge_encode_lua (lua_State *L) {
           scores_out->a[out_base + j] = -1e30f;
         }
       }
-      free(heap.a);
     }
   } else {
     int64_t block = 256;
@@ -216,6 +226,7 @@ static inline int tk_ridge_shrink_lua (lua_State *L) {
   tk_ridge_t *r = tk_ridge_peek(L, 1);
   free(r->Wt); r->Wt = NULL;
   free(r->sbuf); r->sbuf = NULL; r->sbuf_size = 0;
+  free(r->heap_buf); r->heap_buf = NULL; r->heap_buf_size = 0;
   return 0;
 }
 
@@ -420,6 +431,8 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     r->Wt = NULL;
     r->sbuf = NULL;
     r->sbuf_size = 0;
+    r->heap_buf = NULL;
+    r->heap_buf_size = 0;
     r->destroyed = false;
     lua_newtable(L);
     lua_pushvalue(L, W_idx);
@@ -479,6 +492,8 @@ static inline int tk_ridge_load_lua (lua_State *L) {
   r->Wt = NULL;
   r->sbuf = NULL;
   r->sbuf_size = 0;
+  r->heap_buf = NULL;
+  r->heap_buf_size = 0;
   r->destroyed = false;
   lua_newtable(L);
   lua_pushvalue(L, W_idx);
