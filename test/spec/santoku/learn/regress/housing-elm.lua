@@ -52,14 +52,14 @@ test("housing regressor", function ()
 
   str.printf("[Spectral] Encoding n_landmarks=%d kernel=%s n_tokens=%d\n",
     cfg.emb.n_landmarks, cfg.emb.kernel, n_tokens)
-  local train_codes, sp_enc, gram = spectral.encode({
+  local _, sp_enc, gram = spectral.encode({
     offsets = offsets, tokens = tokens, values = values, n_tokens = n_tokens,
     n_samples = train.n,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     kernel = cfg.emb.kernel,
     targets = train.targets, n_targets = 1,
   })
-  offsets = nil; tokens = nil; values = nil; train_codes = nil -- luacheck: ignore
+  offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   collectgarbage("collect")
   local emb_d = sp_enc:dims()
   str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())

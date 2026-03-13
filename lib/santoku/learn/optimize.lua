@@ -419,7 +419,7 @@ M.ridge = function (args)
         params.propensity_a, params.propensity_b)
       local gfm = require("santoku.learn.gfm")
       local g = gfm.create({ n_labels = args.n_labels })
-      g:threshold_search({
+      g:calibrate({
         offsets = po, neighbors = pn, scores = ps,
         n_samples = args.val_n_samples,
         expected_offsets = args.val_expected_offsets,
@@ -449,7 +449,7 @@ M.ridge = function (args)
     if use_gfm then
       local gfm = require("santoku.learn.gfm")
       local g = gfm.create({ n_labels = args.n_labels })
-      local gf1 = g:threshold_search({
+      local gf1 = g:calibrate({
         offsets = po, neighbors = pn, scores = ps,
         n_samples = args.val_n_samples,
         expected_offsets = args.val_expected_offsets,
@@ -474,7 +474,7 @@ M.ridge = function (args)
       best_params.propensity_a, best_params.propensity_b)
     local gfm = require("santoku.learn.gfm")
     local g = gfm.create({ n_labels = args.n_labels })
-    g:threshold_search({
+    g:calibrate({
       offsets = po, neighbors = pn, scores = ps,
       n_samples = args.val_n_samples,
       expected_offsets = args.val_expected_offsets,
@@ -488,7 +488,7 @@ end
 M.gfm = function (args)
   local gfm = require("santoku.learn.gfm")
   local g = gfm.create({ n_labels = args.n_labels })
-  local best_f1 = g:threshold_search({
+  local best_f1 = g:calibrate({
     offsets = args.val_offsets,
     neighbors = args.val_neighbors,
     scores = args.val_scores,

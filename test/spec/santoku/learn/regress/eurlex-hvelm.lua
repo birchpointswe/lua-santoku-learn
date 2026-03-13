@@ -22,9 +22,9 @@ local cfg = {
     k = 1024,
   },
   ridge = {
-    lambda = { def = 8.3797e-04 },
-    propensity_a = { def = 0.0126 },
-    propensity_b = { def = 1.0342 },
+    lambda = { def = 1.5727e-02 },
+    propensity_a = { def = 0.0020 },
+    propensity_b = { def = 3.3063 },
     search_trials = 0,
   },
 }
@@ -71,15 +71,14 @@ test("eurlex", function ()
 
   str.printf("[Spectral] Cholesky trace_tol=%s kernel=%s\n",
     tostring(cfg.emb.trace_tol), cfg.emb.kernel)
-  local train_codes, sp_enc, gram = spectral.encode({
+  local train_sign, sp_enc, gram = spectral.encode({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
     kernel = cfg.emb.kernel,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     label_offsets = train_label_off, label_neighbors = train_label_nbr, n_labels = n_labels,
+    transform = cfg.ann and "sign" or nil,
   })
-  offsets = nil; tokens = nil; values = nil
-  collectgarbage("collect")
   local emb_d = sp_enc:dims()
   str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
 
@@ -96,25 +95,26 @@ test("eurlex", function ()
 
   local dev_codes = encode_texts(dev.text_iter, dev.n)
 
+  offsets = nil; tokens = nil; values = nil -- luacheck: ignore
+  collectgarbage("collect")
+
   local dv_short_off, dv_short_nbr
   if cfg.ann then
-    local train_sign, n_ann_bits = train_codes:mtx_sign(emb_d)
     local doc_ids = ivec.create(train.n):fill_indices()
-    local mih = ann.create({ data = train_sign, features = n_ann_bits, codes = train_codes, n_dims = emb_d })
+    local mih = ann.create({ data = train_sign, features = emb_d })
     str.printf("[ANN] indexed %s\n", sw())
     local K = cfg.emb.k
     local function shortlist(codes, n)
       local sign_cvec = codes:mtx_sign(emb_d)
-      local a_off, a_nbr = mih:neighborhoods_by_vecs(sign_cvec, K, codes)
+      local a_off, a_nbr = mih:neighborhoods_by_vecs(sign_cvec, K)
       local sl_off, sl_nbr = csr.label_union(a_off, a_nbr, doc_ids, train_label_off, train_label_nbr, n_labels)
       return sl_off, sl_nbr
     end
     dv_short_off, dv_short_nbr = shortlist(dev_codes, dev.n)
-    train_sign = nil
     collectgarbage("collect")
     str.printf("[Shortlist] built %s\n", sw())
   end
-  train_codes = nil
+  train_sign = nil -- luacheck: ignore
 
   str.printf("\n[Ridge]\n")
   local ridge_obj, best_params, gfm_obj = optimize.ridge({
