@@ -212,15 +212,20 @@ static inline int tk_ridge_transform_lua (lua_State *L) {
   return 1;
 }
 
+static inline int tk_ridge_shrink_lua (lua_State *L) {
+  tk_ridge_t *r = tk_ridge_peek(L, 1);
+  free(r->Wt); r->Wt = NULL;
+  free(r->sbuf); r->sbuf = NULL; r->sbuf_size = 0;
+  return 0;
+}
+
 static luaL_Reg tk_ridge_mt_fns[] = {
   { "label", tk_ridge_encode_lua },
   { "persist", tk_ridge_persist_lua },
   { "regress", tk_ridge_transform_lua },
+  { "shrink", tk_ridge_shrink_lua },
   { NULL, NULL }
 };
-
-
-
 
 static inline int tk_ridge_gram_lua (lua_State *L) {
   lua_settop(L, 1);
@@ -263,29 +268,18 @@ static inline int tk_ridge_gram_lua (lua_State *L) {
   uint64_t um = (uint64_t)m;
   uint64_t unc = (uint64_t)nc;
   uint64_t unl = (uint64_t)nl;
-  uint64_t dd = um * um;
-  uint64_t dnl = um * unl;
 
-  double *codes_d = (double *)malloc(unc * um * sizeof(double));
-  double *XtX = (double *)calloc(dd, sizeof(double));
+  int64_t tile_size = 1024;
+  double *XtX = (double *)calloc(um * um, sizeof(double));
   double *eigenvals = (double *)malloc(um * sizeof(double));
-  double *xty = (double *)calloc(dnl, sizeof(double));
+  double *xty = (double *)calloc(um * unl, sizeof(double));
   double *col_mean = (double *)calloc(um, sizeof(double));
   double *y_mean_arr = (double *)malloc(unl * sizeof(double));
-  if (!codes_d || !XtX || !eigenvals || !xty || !col_mean || !y_mean_arr) {
-    free(codes_d); free(XtX); free(eigenvals); free(xty);
-    free(col_mean); free(y_mean_arr);
+  double *tile_buf = (double *)malloc((uint64_t)tile_size * um * sizeof(double));
+  if (!XtX || !eigenvals || !xty || !col_mean || !y_mean_arr || !tile_buf) {
+    free(XtX); free(eigenvals); free(xty);
+    free(col_mean); free(y_mean_arr); free(tile_buf);
     return luaL_error(L, "gram: out of memory");
-  }
-
-  for (uint64_t j = 0; j < um; j++) {
-    double s = 0.0;
-    for (uint64_t i = 0; i < unc; i++) {
-      double v = (double)codes_fv->a[i * um + j];
-      codes_d[j * unc + i] = v;
-      s += v;
-    }
-    col_mean[j] = s / (double)nc;
   }
 
   tk_dvec_t *lc = NULL;
@@ -300,29 +294,42 @@ static inline int tk_ridge_gram_lua (lua_State *L) {
         lc->a[lbl_nbr->a[j]] += 1.0;
   }
 
-  cblas_dsyrk(CblasColMajor, CblasUpper, CblasTrans,
-    (int)m, (int)nc, 1.0, codes_d, (int)nc,
-    0.0, XtX, (int)m);
-
-  if (has_targets)
-    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-      (int)m, (int)nl, (int)nc, 1.0, codes_d, (int)nc,
-      targets_dv->a, (int)nl, 0.0, xty, (int)nl);
-  if (has_labels) {
-    #pragma omp parallel for schedule(static)
-    for (int64_t k = 0; k < m; k++) {
-      double *col = codes_d + (uint64_t)k * unc;
-      for (uint64_t i = 0; i < unc; i++) {
-        for (int64_t j = lbl_off->a[i]; j < lbl_off->a[i + 1]; j++)
-          xty[k * nl + lbl_nbr->a[j]] += col[i];
+  for (int64_t base = 0; base < nc; base += tile_size) {
+    int64_t bs = (base + tile_size <= nc) ? tile_size : nc - base;
+    uint64_t ubs = (uint64_t)bs;
+    for (uint64_t j = 0; j < um; j++) {
+      double *col = tile_buf + j * ubs;
+      float *src = codes_fv->a + (uint64_t)base * um + j;
+      for (uint64_t i = 0; i < ubs; i++) {
+        double v = (double)src[i * um];
+        col[i] = v;
+        col_mean[j] += v;
+      }
+    }
+    cblas_dsyrk(CblasColMajor, CblasUpper, CblasTrans,
+      (int)m, (int)bs, 1.0, tile_buf, (int)bs,
+      1.0, XtX, (int)m);
+    if (has_targets)
+      cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+        (int)m, (int)nl, (int)bs, 1.0, tile_buf, (int)bs,
+        targets_dv->a + (uint64_t)base * unl, (int)nl,
+        1.0, xty, (int)nl);
+    if (has_labels) {
+      #pragma omp parallel for schedule(static)
+      for (int64_t k = 0; k < m; k++) {
+        double *col = tile_buf + (uint64_t)k * ubs;
+        for (uint64_t i = 0; i < ubs; i++) {
+          uint64_t si = (uint64_t)base + i;
+          for (int64_t j = lbl_off->a[si]; j < lbl_off->a[si + 1]; j++)
+            xty[k * nl + lbl_nbr->a[j]] += col[i];
+        }
       }
     }
   }
+  free(tile_buf);
 
-  free(codes_d);
-
-  cblas_dsyr(CblasColMajor, CblasUpper, (int)m,
-    -(double)nc, col_mean, 1, XtX, (int)m);
+  for (uint64_t j = 0; j < um; j++)
+    col_mean[j] /= (double)nc;
 
   if (has_labels) {
     for (int64_t l = 0; l < nl; l++)
@@ -335,59 +342,9 @@ static inline int tk_ridge_gram_lua (lua_State *L) {
       y_mean_arr[l] = s / (double)nc;
     }
   }
-  cblas_dger(CblasRowMajor, (int)m, (int)nl,
-    -(double)nc, col_mean, 1, y_mean_arr, 1, xty, (int)nl);
 
-  LAPACKE_dsyevd(LAPACK_COL_MAJOR, 'V', 'U', (int)m, XtX, (int)m, eigenvals);
-  double mean_eig = 0.0;
-  for (uint64_t i = 0; i < um; i++)
-    mean_eig += eigenvals[i];
-  mean_eig /= (double)m;
-
-  double *PQtY = (double *)malloc(dnl * sizeof(double));
-  double *W_work = (double *)malloc(dnl * sizeof(double));
-  if (!PQtY || !W_work) {
-    free(PQtY); free(W_work); free(xty);
-    free(XtX); free(eigenvals);
-    free(col_mean); free(y_mean_arr);
-    return luaL_error(L, "gram: out of memory");
-  }
-  cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-    (int)m, (int)nl, (int)m, 1.0, XtX, (int)m,
-    xty, (int)nl, 0.0, PQtY, (int)nl);
-  free(xty);
-
-  tk_gram_t *g = tk_lua_newuserdata(L, tk_gram_t,
-    TK_GRAM_MT, tk_gram_mt_fns, tk_gram_gc);
-  int gram_idx = lua_gettop(L);
-  g->evecs = XtX;
-  g->eigenvals = eigenvals;
-  g->PQtY = PQtY;
-  g->label_counts = lc;
-  g->W_work = W_work;
-  g->W_work_f = NULL;
-  g->sbuf_f = NULL;
-  g->val_F_f = NULL;
-  g->col_mean = col_mean;
-  g->y_mean = y_mean_arr;
-  g->cm_proj = NULL;
-  g->intercept = NULL;
-  g->mean_eig = mean_eig;
-  g->n_dims = m;
-  g->n_labels = nl;
-  g->n_samples = nc;
-  g->val_n = 0;
-  g->destroyed = false;
-
-  lua_newtable(L);
-  if (lc_idx > 0) {
-    lua_pushvalue(L, lc_idx);
-    lua_setfield(L, -2, "label_counts");
-  }
-  lua_setfenv(L, gram_idx);
-
-  lua_pushvalue(L, gram_idx);
-  return 1;
+  return tk_gram_finalize(L, XtX, xty, col_mean, y_mean_arr,
+    eigenvals, lc, lc_idx, nc, m, nl);
 }
 
 static inline int tk_ridge_create_lua (lua_State *L) {
@@ -396,7 +353,6 @@ static inline int tk_ridge_create_lua (lua_State *L) {
   lua_getfield(L, 1, "gram");
   if (!lua_isnil(L, -1)) {
     tk_gram_t *gram = tk_gram_peek(L, -1);
-    int gram_lua_idx = lua_gettop(L);
     int64_t d = gram->n_dims, nl = gram->n_labels;
     uint64_t dnl = (uint64_t)d * (uint64_t)nl;
     lua_getfield(L, 1, "lambda");
@@ -458,6 +414,7 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     int Ei = lua_gettop(L);
     r->W = W_fvec;
     r->intercept = intercept_dv;
+
     r->n_dims = d;
     r->n_labels = nl;
     r->Wt = NULL;
@@ -471,8 +428,6 @@ static inline int tk_ridge_create_lua (lua_State *L) {
       lua_pushvalue(L, intercept_idx);
       lua_setfield(L, -2, "intercept");
     }
-    lua_pushvalue(L, gram_lua_idx);
-    lua_setfield(L, -2, "gram");
     lua_setfenv(L, Ei);
     lua_pushvalue(L, Ei);
     lua_pushvalue(L, W_idx);

@@ -47,10 +47,11 @@ test("mnist csr+pos2d", function ()
 
   str.printf("[Spectral] Cholesky trace_tol=%s\n",
     tostring(cfg.emb.trace_tol))
-  local train_codes, sp_enc = spectral.encode({
+  local train_codes, sp_enc, gram = spectral.encode({
     kernel = cfg.emb.kernel, offsets = train_p_off, tokens = train_p_nbr,
     n_samples = train.n, n_tokens = n_features,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
+    label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
   })
   train_p_off = nil; train_p_nbr = nil -- luacheck: ignore
   collectgarbage("collect")
@@ -69,8 +70,7 @@ test("mnist csr+pos2d", function ()
 
   str.printf("[Ridge] Training\n")
   local ridge_obj, best_params = optimize.ridge({
-    train_codes = train_codes, n_samples = train.n, n_dims = emb_d,
-    label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
+    gram = gram,
     val_codes = val_codes, val_n_samples = validate.n,
     val_expected_offsets = val_label_off, val_expected_neighbors = val_label_nbr,
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
@@ -78,14 +78,17 @@ test("mnist csr+pos2d", function ()
     k = cfg.ridge.k, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
+  gram = nil
   collectgarbage("collect")
   str.printf("[Ridge] lambda=%.4e pa=%.4f pb=%.4f %s\n",
     best_params.lambda, best_params.propensity_a, best_params.propensity_b, sw())
 
   str.printf("[Eval] Labeling splits\n")
   local val_off, val_labels = ridge_obj:label(val_codes, validate.n, 1)
+  val_codes = nil
   local test_codes = encode(test_set.ids, test_set.n)
   local _, test_labels = ridge_obj:label(test_codes, test_set.n, 1)
+  test_codes = nil
   str.printf("[Eval] Labels done %s\n", sw())
 
   local _, train_labels = ridge_obj:label(train_codes, train.n, 1)

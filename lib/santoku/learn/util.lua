@@ -43,9 +43,12 @@ function M.make_ridge_log (stopwatch)
     if p.propensity_a then
       prop = str.format(" pa=%.2f pb=%.2f", p.propensity_a, p.propensity_b)
     end
-    local mode = (p.elm or p.mode) and str.format(" mode=%s", p.elm or p.mode) or ""
-    str.printf("[Ridge %s]%s lambda=%.4e%s score=%.4f%s%s%s\n",
-      phase, mode, p.lambda or 0, prop, score, detail, best, timing)
+    local thr = ""
+    if p.threshold then
+      thr = str.format(" thr=%.4f", p.threshold)
+    end
+    str.printf("[Ridge %s] lambda=%.4e%s%s score=%.4f%s%s%s\n",
+      phase, p.lambda or 0, prop, thr, score, detail, best, timing)
   end
 end
 

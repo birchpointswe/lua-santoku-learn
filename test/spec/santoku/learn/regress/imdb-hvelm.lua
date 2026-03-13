@@ -56,11 +56,12 @@ test("imdb csr+kernel", function ()
 
   str.printf("[Spectral] Cholesky trace_tol=%s kernel=%s\n",
     tostring(cfg.emb.trace_tol), cfg.emb.kernel)
-  local train_codes, sp_enc = spectral.encode({
+  local train_codes, sp_enc, gram = spectral.encode({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
     kernel = cfg.emb.kernel,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
+    label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
   })
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   collectgarbage("collect")
@@ -84,8 +85,7 @@ test("imdb csr+kernel", function ()
 
   str.printf("[Ridge] Training\n")
   local ridge_obj, best_params = optimize.ridge({
-    train_codes = train_codes, n_samples = train.n, n_dims = emb_d,
-    label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
+    gram = gram,
     val_codes = val_codes, val_n_samples = validate.n,
     val_expected_offsets = val_label_off, val_expected_neighbors = val_label_nbr,
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
@@ -93,15 +93,18 @@ test("imdb csr+kernel", function ()
     k = cfg.ridge.k, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
+  gram = nil
   collectgarbage("collect")
   str.printf("[Ridge] lambda=%.4e pa=%.4f pb=%.4f %s\n",
     best_params.lambda, best_params.propensity_a, best_params.propensity_b, sw())
 
   str.printf("[Eval] Labeling splits\n")
   local _, val_labels = ridge_obj:label(val_codes, validate.n, 1)
+  val_codes = nil
   local test_codes = encode_texts(test_set.problems, test_set.n)
   test_set.problems = nil
   local _, test_labels = ridge_obj:label(test_codes, test_set.n, 1)
+  test_codes = nil
   str.printf("[Eval] Labels done %s\n", sw())
 
   local _, train_labels = ridge_obj:label(train_codes, train.n, 1)

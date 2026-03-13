@@ -5,6 +5,7 @@
 #include <santoku/ivec.h>
 #include <santoku/cvec.h>
 #include <santoku/learn/buf.h>
+#include <santoku/learn/gram.h>
 #include <math.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -1030,6 +1031,30 @@ static inline int tm_encode (lua_State *L) {
 
   uint64_t d = m;
 
+  lua_getfield(L, 1, "label_offsets");
+  int has_gram_labels = !lua_isnil(L, -1);
+  tk_ivec_t *gram_lbl_off = has_gram_labels ? tk_ivec_peek(L, -1, "label_offsets") : NULL;
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "label_neighbors");
+  tk_ivec_t *gram_lbl_nbr = has_gram_labels ? tk_ivec_peek(L, -1, "label_neighbors") : NULL;
+  lua_pop(L, 1);
+  int64_t gram_nl = 0;
+  if (has_gram_labels) {
+    lua_getfield(L, 1, "n_labels");
+    gram_nl = (int64_t)luaL_checkinteger(L, -1);
+    lua_pop(L, 1);
+  }
+  lua_getfield(L, 1, "targets");
+  int has_gram_targets = !lua_isnil(L, -1);
+  tk_dvec_t *gram_targets_dv = has_gram_targets ? tk_dvec_peek(L, -1, "targets") : NULL;
+  lua_pop(L, 1);
+  if (has_gram_targets) {
+    lua_getfield(L, 1, "n_targets");
+    gram_nl = (int64_t)luaL_checkinteger(L, -1);
+    lua_pop(L, 1);
+  }
+  int build_gram = has_gram_labels || has_gram_targets;
+
   if (m == 0) {
     if (lm_chol) tk_dvec_destroy(lm_chol);
     free(full_chol);
@@ -1060,6 +1085,64 @@ static inline int tm_encode (lua_State *L) {
   cblas_dtrsm(CblasRowMajor, CblasLeft, CblasLower, CblasTrans, CblasNonUnit,
     (int)m, (int)m, 1.0, lm_chol->a, (int)m, ctx->projection, (int)m);
   tk_dvec_destroy(lm_chol); ctx->lm_chol = NULL;
+
+  int gram_result_idx = 0;
+  if (build_gram) {
+    uint64_t unl = (uint64_t)gram_nl;
+    double *XtX = (double *)calloc(d * d, sizeof(double));
+    double *xty = (double *)calloc(d * unl, sizeof(double));
+    double *col_mean = (double *)calloc(d, sizeof(double));
+    double *y_mean_arr = (double *)malloc(unl * sizeof(double));
+    double *eigenvals = (double *)malloc(d * sizeof(double));
+    if (!XtX || !xty || !col_mean || !y_mean_arr || !eigenvals) {
+      free(XtX); free(xty); free(col_mean); free(y_mean_arr); free(eigenvals);
+      return luaL_error(L, "gram fusion: out of memory");
+    }
+    for (uint64_t j = 0; j < d; j++) {
+      double *col = full_chol + j * nc;
+      double s = 0.0;
+      for (uint64_t i = 0; i < nc; i++)
+        s += col[i];
+      col_mean[j] = s / (double)nc;
+    }
+    cblas_dsyrk(CblasColMajor, CblasUpper, CblasTrans,
+      (int)d, (int)nc, 1.0, full_chol, (int)nc,
+      0.0, XtX, (int)d);
+    tk_dvec_t *lc = NULL;
+    int lc_idx = 0;
+    if (has_gram_labels) {
+      lc = tk_dvec_create(L, unl, 0, 0);
+      lc->n = unl;
+      lc_idx = lua_gettop(L);
+      memset(lc->a, 0, unl * sizeof(double));
+      for (uint64_t s = 0; s < nc; s++)
+        for (int64_t j = gram_lbl_off->a[s]; j < gram_lbl_off->a[s + 1]; j++)
+          lc->a[gram_lbl_nbr->a[j]] += 1.0;
+      #pragma omp parallel for schedule(static)
+      for (int64_t k = 0; k < (int64_t)d; k++) {
+        double *col = full_chol + (uint64_t)k * nc;
+        for (uint64_t i = 0; i < nc; i++)
+          for (int64_t j = gram_lbl_off->a[i]; j < gram_lbl_off->a[i + 1]; j++)
+            xty[k * gram_nl + gram_lbl_nbr->a[j]] += col[i];
+      }
+      for (int64_t l = 0; l < gram_nl; l++)
+        y_mean_arr[l] = lc->a[l] / (double)nc;
+    }
+    if (has_gram_targets) {
+      cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+        (int)d, (int)gram_nl, (int)nc, 1.0, full_chol, (int)nc,
+        gram_targets_dv->a, (int)gram_nl, 0.0, xty, (int)gram_nl);
+      for (int64_t l = 0; l < gram_nl; l++) {
+        double s = 0.0;
+        for (uint64_t i = 0; i < nc; i++)
+          s += gram_targets_dv->a[i * unl + (uint64_t)l];
+        y_mean_arr[l] = s / (double)nc;
+      }
+    }
+    tk_gram_finalize(L, XtX, xty, col_mean, y_mean_arr,
+      eigenvals, lc, lc_idx, (int64_t)nc, (int64_t)d, gram_nl);
+    gram_result_idx = lua_gettop(L);
+  }
 
   #pragma omp parallel for schedule(static)
   for (uint64_t j = 0; j < d; j++) {
@@ -1182,6 +1265,10 @@ static inline int tm_encode (lua_State *L) {
 
   lua_pushvalue(L, train_codes_idx);
   lua_pushvalue(L, enc_idx);
+  if (gram_result_idx > 0) {
+    lua_pushvalue(L, gram_result_idx);
+    return 3;
+  }
   return 2;
 }
 

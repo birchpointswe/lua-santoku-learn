@@ -52,11 +52,12 @@ test("housing regressor", function ()
 
   str.printf("[Spectral] Encoding n_landmarks=%d kernel=%s n_tokens=%d\n",
     cfg.emb.n_landmarks, cfg.emb.kernel, n_tokens)
-  local train_codes, sp_enc = spectral.encode({
+  local train_codes, sp_enc, gram = spectral.encode({
     offsets = offsets, tokens = tokens, values = values, n_tokens = n_tokens,
     n_samples = train.n,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     kernel = cfg.emb.kernel,
+    targets = train.targets, n_targets = 1,
   })
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   collectgarbage("collect")
@@ -75,14 +76,14 @@ test("housing regressor", function ()
 
   str.printf("[Ridge] Training\n")
   local ridge_obj, best_params = optimize.ridge({
-    train_codes = train_codes, n_samples = train.n, n_dims = emb_d,
-    targets = train.targets, n_targets = 1,
+    gram = gram,
     val_codes = val_codes, val_n_samples = validate.n,
     val_targets = validate.targets,
     lambda = cfg.ridge.lambda,
     search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
+  gram = nil
   collectgarbage("collect")
   str.printf("[Ridge] lambda=%.4e %s\n", best_params.lambda, sw())
 
@@ -90,8 +91,10 @@ test("housing regressor", function ()
   local regress_buf = fvec.create()
   local train_stats = eval.regression_accuracy(ridge_obj:regress(train_codes, train.n, regress_buf), train.targets)
   local val_stats = eval.regression_accuracy(ridge_obj:regress(val_codes, validate.n, regress_buf), validate.targets)
+  val_codes = nil
   local test_codes = encode(test_set.bit_offsets, test_set.bit_neighbors, test_set.continuous, test_set.n)
   local test_stats = eval.regression_accuracy(ridge_obj:regress(test_codes, test_set.n, regress_buf), test_set.targets)
+  test_codes = nil
   str.printf("[Eval] Accuracy: train=%.1f%% val=%.1f%% test=%.1f%% %s\n",
     (1 - train_stats.nmae) * 100, (1 - val_stats.nmae) * 100, (1 - test_stats.nmae) * 100, sw())
 
