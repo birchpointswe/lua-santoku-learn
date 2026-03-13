@@ -526,7 +526,8 @@ static inline double tm_bns (double N, double C, double P, double A)
   if (C <= 0 || C >= N || P <= 0 || P >= N) return 0.0;
   double tpr = (A + TM_SMOOTH_EPS) / (P + 2.0 * TM_SMOOTH_EPS);
   double fpr = (C - A + TM_SMOOTH_EPS) / (N - P + 2.0 * TM_SMOOTH_EPS);
-  return fabs(tm_probit(tpr) - tm_probit(fpr));
+  double bns = tm_probit(tpr) - tm_probit(fpr);
+  return bns > 0.0 ? bns : 0.0;
 }
 
 static inline void tm_csr_gather_mul (
@@ -602,6 +603,8 @@ static int tm_csr_apply_bns (lua_State *L)
   for (uint64_t b = 0; b < n_labels; b++) {
     double P = (double)label_freq[b];
     if (P <= 0.0 || P >= N) continue;
+    double rarity = tm_probit(1.0 - P / N);
+    if (rarity <= 0.0) continue;
     uint32_t n_touched = 0;
     for (uint32_t di = lbl_off[b]; di < lbl_off[b + 1]; di++) {
       uint32_t dd = lbl_docs[di];
@@ -614,8 +617,8 @@ static int tm_csr_apply_bns (lua_State *L)
     }
     for (uint32_t i = 0; i < n_touched; i++) {
       int32_t f = touched[i];
-      float bns = (float)tm_bns(N, (double)doc_freq[f], P, (double)cooc[f]);
-      if (bns > scores->a[f]) scores->a[f] = bns;
+      float w = (float)(tm_bns(N, (double)doc_freq[f], P, (double)cooc[f]) * rarity);
+      if (w > scores->a[f]) scores->a[f] = w;
       cooc[f] = 0.0f;
     }
   }
@@ -684,7 +687,7 @@ static int tm_csr_apply_auc (lua_State *L)
       if (n0 == 0) continue;
       double auc = (rank_sums[f] - (double)n1 * ((double)n1 + 1.0) / 2.0)
                  / ((double)n1 * (double)n0);
-      float score = (float)fabs(tm_probit(auc));
+      float score = (float)(fabs(tm_probit(auc)) * M_SQRT2);
       if (score > scores->a[f]) scores->a[f] = score;
     }
   }

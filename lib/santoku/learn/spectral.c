@@ -20,6 +20,8 @@ typedef enum {
   TK_SPECTRAL_ARCCOS0 = 1,
   TK_SPECTRAL_ARCCOS1 = 2,
   TK_SPECTRAL_HELLINGER = 3,
+  TK_SPECTRAL_POLY2 = 4,
+  TK_SPECTRAL_POLY3 = 5,
 } tk_spectral_kernel_t;
 
 static inline double tk_spectral_kernel_apply (tk_spectral_kernel_t k, double raw, double denom) {
@@ -33,6 +35,14 @@ static inline double tk_spectral_kernel_apply (tk_spectral_kernel_t k, double ra
   if (k == TK_SPECTRAL_ARCCOS1) {
     double t = acos(c);
     return denom * (sin(t) + (M_PI - t) * c) / M_PI;
+  }
+  if (k == TK_SPECTRAL_POLY2) {
+    double p = c + 1.0;
+    return p * p;
+  }
+  if (k == TK_SPECTRAL_POLY3) {
+    double p = c + 1.0;
+    return p * p * p;
   }
   return c;
 }
@@ -61,7 +71,7 @@ typedef struct {
 typedef struct {
   int64_t *sid_map;
   double *residual;
-  double *L_mat;
+  float *L_mat;
   int64_t *landmark_sids;
   int64_t *landmark_idx_map;
 } tk_spectral_landmarks_ctx_t;
@@ -86,8 +96,8 @@ static inline void tk_spectral_sample_landmarks (
   uint64_t n_landmarks,
   double trace_tol,
   tk_ivec_t **ids_out,
-  tk_dvec_t **chol_out,
-  double **full_chol_out,
+  tk_fvec_t **chol_out,
+  float **full_chol_out,
   uint64_t *n_docs_out,
   uint64_t *actual_landmarks_out,
   double *trace_ratio_out
@@ -117,7 +127,7 @@ static inline void tk_spectral_sample_landmarks (
 
   ctx->sid_map = (int64_t *)malloc(n_docs * sizeof(int64_t));
   ctx->residual = (double *)malloc(n_docs * sizeof(double));
-  ctx->L_mat = (double *)calloc(n_landmarks * n_docs, sizeof(double));
+  ctx->L_mat = (float *)calloc(n_landmarks * n_docs, sizeof(float));
   ctx->landmark_sids = (int64_t *)malloc(n_landmarks * sizeof(int64_t));
   ctx->landmark_idx_map = (int64_t *)malloc(n_landmarks * sizeof(int64_t));
   if (!ctx->sid_map || !ctx->residual || !ctx->L_mat || !ctx->landmark_sids ||
@@ -128,7 +138,7 @@ static inline void tk_spectral_sample_landmarks (
 
   int64_t *sid_map = ctx->sid_map;
   double *residual = ctx->residual;
-  double *L_mat = ctx->L_mat;
+  float *L_mat = ctx->L_mat;
   int64_t *landmark_sids = ctx->landmark_sids;
   int64_t *landmark_idx_map = ctx->landmark_idx_map;
 
@@ -143,9 +153,9 @@ static inline void tk_spectral_sample_landmarks (
   double trace = 0.0;
   bool done = false;
 
-  double *kip_block = (double *)malloc(n_docs * TK_CHOL_BLOCK * sizeof(double));
-  double *cross_dots = (double *)malloc(n_docs * TK_CHOL_BLOCK * sizeof(double));
-  double *pivot_prev_L = (double *)malloc(TK_CHOL_BLOCK * n_landmarks * sizeof(double));
+  float *kip_block = (float *)malloc(n_docs * TK_CHOL_BLOCK * sizeof(float));
+  float *cross_dots = (float *)malloc(n_docs * TK_CHOL_BLOCK * sizeof(float));
+  float *pivot_prev_L = (float *)malloc(TK_CHOL_BLOCK * n_landmarks * sizeof(float));
   int64_t max_d_input = 0;
   if (mod->type == TK_MOD_DENSE && mod->d_input > max_d_input)
     max_d_input = mod->d_input;
@@ -175,6 +185,10 @@ static inline void tk_spectral_sample_landmarks (
         diag = mod->csr_norms[i] * mod->csr_norms[i];
       else if (mod->type == TK_MOD_DENSE)
         diag = mod->dense_norms[i] * mod->dense_norms[i];
+    } else if (kernel == TK_SPECTRAL_POLY2) {
+      diag = 4.0;
+    } else if (kernel == TK_SPECTRAL_POLY3) {
+      diag = 8.0;
     }
     residual[i] = diag;
     initial_trace += diag;
@@ -247,7 +261,7 @@ static inline void tk_spectral_sample_landmarks (
     total_proposed += n_propose;
     if (np == 0) { done = true; break; }
 
-    memset(kip_block, 0, n_docs * np * sizeof(double));
+    memset(kip_block, 0, n_docs * np * sizeof(float));
 
     if (mod->type == TK_MOD_CSR) {
       const int64_t *csr_offsets = mod->csr_offsets;
@@ -307,7 +321,8 @@ static inline void tk_spectral_sample_landmarks (
             for (int64_t c = clo; c < chi; c++)
               kip_row[pc_piv[c]] += val * (double)pc_val[c];
           }
-          memcpy(kip_block + i * np, kip_row, np * sizeof(double));
+          for (uint64_t b = 0; b < np; b++)
+            kip_block[i * np + b] = (float)kip_row[b];
         }
         free(piv_csc_off);
         free(piv_csc_piv);
@@ -349,11 +364,12 @@ static inline void tk_spectral_sample_landmarks (
         memcpy(pivot_dense_rows + b * (uint64_t)di,
                dense + blk_pivots[b] * (uint64_t)di,
                (uint64_t)di * sizeof(double));
+      double *dense_kip = (double *)malloc(n_docs * np * sizeof(double));
       cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
         (int)n_docs, (int)np, (int)di, 1.0,
         dense, (int)di,
         pivot_dense_rows, (int)di,
-        0.0, kip_block, (int)np);
+        0.0, dense_kip, (int)np);
       {
         double pnorms[TK_CHOL_BLOCK];
         for (uint64_t b = 0; b < np; b++)
@@ -362,10 +378,11 @@ static inline void tk_spectral_sample_landmarks (
         for (uint64_t i = 0; i < n_docs; i++)
           for (uint64_t b = 0; b < np; b++) {
             double denom = dnorms[i] * pnorms[b];
-            kip_block[i * np + b] = tk_spectral_kernel_apply(kernel,
-              kip_block[i * np + b], denom);
+            kip_block[i * np + b] = (float)tk_spectral_kernel_apply(kernel,
+              dense_kip[i * np + b], denom);
           }
       }
+      free(dense_kip);
     }
 
     uint64_t jb = actual_landmarks;
@@ -373,11 +390,11 @@ static inline void tk_spectral_sample_landmarks (
       for (uint64_t k = 0; k < jb; k++)
         for (uint64_t b = 0; b < np; b++)
           pivot_prev_L[b * jb + k] = L_mat[k * n_docs + blk_pivots[b]];
-      cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans,
-        (int)n_docs, (int)np, (int)jb, 1.0,
+      cblas_sgemm(CblasColMajor, CblasNoTrans, CblasNoTrans,
+        (int)n_docs, (int)np, (int)jb, 1.0f,
         L_mat, (int)n_docs,
         pivot_prev_L, (int)jb,
-        0.0, cross_dots, (int)n_docs);
+        0.0f, cross_dots, (int)n_docs);
     }
 
     uint64_t within_accepted = 0;
@@ -434,7 +451,7 @@ static inline void tk_spectral_sample_landmarks (
     landmark_ids->a[i] = landmark_sids[i];
   landmark_ids->n = actual_landmarks;
 
-  tk_dvec_t *chol = tk_dvec_create(NULL, actual_landmarks * actual_landmarks, 0, 0);
+  tk_fvec_t *chol = tk_fvec_create(NULL, actual_landmarks * actual_landmarks, 0, 0);
   #pragma omp parallel for schedule(static)
   for (uint64_t li = 0; li < actual_landmarks; li++) {
     uint64_t doc_idx = (uint64_t)landmark_idx_map[li];
@@ -444,11 +461,11 @@ static inline void tk_spectral_sample_landmarks (
   chol->n = actual_landmarks * actual_landmarks;
 
   if (actual_landmarks > 0 && actual_landmarks < n_landmarks) {
-    double *shrunk = realloc(L_mat, actual_landmarks * n_docs * sizeof(double));
+    float *shrunk = realloc(L_mat, actual_landmarks * n_docs * sizeof(float));
     if (shrunk) L_mat = shrunk;
   }
 
-  double *full_chol = L_mat;
+  float *full_chol = L_mat;
   ctx->L_mat = NULL;
 
   lua_remove(L, ctx_idx);
@@ -462,15 +479,15 @@ static inline void tk_spectral_sample_landmarks (
 }
 
 typedef struct {
-  double *projection;
-  tk_dvec_t *lm_chol;
-  double *full_chol;
+  float *projection;
+  tk_fvec_t *lm_chol;
+  float *full_chol;
 } tk_encode_nystrom_ctx_t;
 
 static inline int tk_encode_nystrom_ctx_gc (lua_State *L) {
   tk_encode_nystrom_ctx_t *c = (tk_encode_nystrom_ctx_t *)lua_touserdata(L, 1);
   free(c->projection);
-  if (c->lm_chol) tk_dvec_destroy(c->lm_chol);
+  if (c->lm_chol) tk_fvec_destroy(c->lm_chol);
   free(c->full_chol);
   return 0;
 }
@@ -923,6 +940,8 @@ static inline int tm_encode (lua_State *L) {
   else if (strcmp(kernel_str, "arccos0") == 0) kernel = TK_SPECTRAL_ARCCOS0;
   else if (strcmp(kernel_str, "arccos1") == 0) kernel = TK_SPECTRAL_ARCCOS1;
   else if (strcmp(kernel_str, "hellinger") == 0) kernel = TK_SPECTRAL_HELLINGER;
+  else if (strcmp(kernel_str, "poly2") == 0) kernel = TK_SPECTRAL_POLY2;
+  else if (strcmp(kernel_str, "poly3") == 0) kernel = TK_SPECTRAL_POLY3;
   else return luaL_error(L, "encode: unknown kernel '%s'", kernel_str);
 
   if (has_csr) {
@@ -964,9 +983,17 @@ static inline int tm_encode (lua_State *L) {
   uint64_t n_lm_req = tk_lua_foptunsigned(L, 1, "encode", "n_landmarks", 0);
   double trace_tol = tk_lua_foptnumber(L, 1, "encode", "trace_tol", 0.0);
 
+  lua_getfield(L, 1, "transform");
+  int transform_sign = 0, transform_codes = 0;
+  if (lua_isstring(L, -1) && strcmp(lua_tostring(L, -1), "sign") == 0)
+    transform_sign = 1;
+  else if (lua_toboolean(L, -1))
+    transform_codes = 1;
+  lua_pop(L, 1);
+
   tk_ivec_t *lm_ids = NULL;
-  tk_dvec_t *lm_chol = NULL;
-  double *full_chol = NULL;
+  tk_fvec_t *lm_chol = NULL;
+  float *full_chol = NULL;
   uint64_t nc, m;
   double trace_ratio;
   tk_spectral_sample_landmarks(L,
@@ -1002,7 +1029,7 @@ static inline int tm_encode (lua_State *L) {
   int build_gram = has_gram_labels || has_gram_targets;
 
   if (m == 0) {
-    if (lm_chol) tk_dvec_destroy(lm_chol);
+    if (lm_chol) tk_fvec_destroy(lm_chol);
     free(full_chol);
     free(csr_values_owned); free(csr_norms_owned);
     free(dense_owned); free(dense_norms_owned);
@@ -1021,15 +1048,31 @@ static inline int tm_encode (lua_State *L) {
   ctx->lm_chol = lm_chol;
   ctx->full_chol = full_chol;
 
-  tk_fvec_t *train_codes = tk_fvec_create(L, nc * d, 0, 0);
-  train_codes->n = nc * d;
-  int train_codes_idx = lua_gettop(L);
+  tk_fvec_t *train_codes = NULL;
+  int train_codes_idx = 0;
+  tk_cvec_t *sign_cvec = NULL;
+  int sign_cvec_idx = 0;
+  uint64_t sign_row_bytes = 0;
+  uint8_t *sign_data = NULL;
 
-  ctx->projection = (double *)calloc(m * m, sizeof(double));
-  for (uint64_t i = 0; i < m; i++) ctx->projection[i * m + i] = 1.0;
-  cblas_dtrsm(CblasRowMajor, CblasLeft, CblasLower, CblasTrans, CblasNonUnit,
-    (int)m, (int)m, 1.0, lm_chol->a, (int)m, ctx->projection, (int)m);
-  tk_dvec_destroy(lm_chol); ctx->lm_chol = NULL;
+  if (transform_codes) {
+    train_codes = tk_fvec_create(L, nc * d, 0, 0);
+    train_codes->n = nc * d;
+    train_codes_idx = lua_gettop(L);
+  } else if (transform_sign) {
+    sign_row_bytes = TK_CVEC_BITS_BYTES(d);
+    sign_cvec = tk_cvec_create(L, nc * sign_row_bytes, 0, 0);
+    sign_cvec->n = nc * sign_row_bytes;
+    tk_cvec_zero(sign_cvec);
+    sign_cvec_idx = lua_gettop(L);
+    sign_data = (uint8_t *)sign_cvec->a;
+  }
+
+  ctx->projection = (float *)calloc(m * m, sizeof(float));
+  for (uint64_t i = 0; i < m; i++) ctx->projection[i * m + i] = 1.0f;
+  cblas_strsm(CblasRowMajor, CblasLeft, CblasLower, CblasTrans, CblasNonUnit,
+    (int)m, (int)m, 1.0f, lm_chol->a, (int)m, ctx->projection, (int)m);
+  tk_fvec_destroy(lm_chol); ctx->lm_chol = NULL;
 
   int gram_result_idx = 0;
   if (build_gram) {
@@ -1043,16 +1086,51 @@ static inline int tm_encode (lua_State *L) {
       free(XtX); free(xty); free(col_mean); free(y_mean_arr); free(eigenvals);
       return luaL_error(L, "gram fusion: out of memory");
     }
-    for (uint64_t j = 0; j < d; j++) {
-      double *col = full_chol + j * nc;
-      double s = 0.0;
-      for (uint64_t i = 0; i < nc; i++)
-        s += col[i];
-      col_mean[j] = s / (double)nc;
+    int64_t tile_size = 1024;
+    double *tile_buf = (double *)malloc((uint64_t)tile_size * d * sizeof(double));
+    if (!tile_buf) {
+      free(XtX); free(xty); free(col_mean); free(y_mean_arr); free(eigenvals);
+      return luaL_error(L, "gram fusion: out of memory (tile_buf)");
     }
-    cblas_dsyrk(CblasColMajor, CblasUpper, CblasTrans,
-      (int)d, (int)nc, 1.0, full_chol, (int)nc,
-      0.0, XtX, (int)d);
+    for (int64_t base = 0; base < (int64_t)nc; base += tile_size) {
+      int64_t bs = (base + tile_size <= (int64_t)nc) ? tile_size : (int64_t)nc - base;
+      uint64_t ubs = (uint64_t)bs;
+      for (uint64_t j = 0; j < d; j++) {
+        double *col = tile_buf + j * ubs;
+        float *src = full_chol + j * nc + base;
+        for (uint64_t i = 0; i < ubs; i++) {
+          double v = (double)src[i];
+          col[i] = v;
+          col_mean[j] += v;
+          if (transform_codes)
+            train_codes->a[((uint64_t)base + i) * d + j] = src[i];
+          else if (transform_sign && v >= 0.0)
+            sign_data[((uint64_t)base + i) * sign_row_bytes + j / 8] |= (1u << (j % 8));
+        }
+      }
+      cblas_dsyrk(CblasColMajor, CblasUpper, CblasTrans,
+        (int)d, (int)bs, 1.0, tile_buf, (int)bs, 1.0, XtX, (int)d);
+      if (has_gram_labels) {
+        #pragma omp parallel for schedule(static)
+        for (int64_t k = 0; k < (int64_t)d; k++) {
+          double *col = tile_buf + (uint64_t)k * ubs;
+          for (uint64_t i = 0; i < ubs; i++)
+            for (int64_t j = gram_lbl_off->a[(uint64_t)base + i];
+                 j < gram_lbl_off->a[(uint64_t)base + i + 1]; j++)
+              xty[k * gram_nl + gram_lbl_nbr->a[j]] += col[i];
+        }
+      }
+      if (has_gram_targets) {
+        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+          (int)d, (int)gram_nl, (int)bs, 1.0, tile_buf, (int)bs,
+          gram_targets_dv->a + (uint64_t)base * unl, (int)gram_nl,
+          1.0, xty, (int)gram_nl);
+      }
+    }
+    free(tile_buf);
+    free(full_chol); ctx->full_chol = NULL;
+    for (uint64_t j = 0; j < d; j++)
+      col_mean[j] /= (double)nc;
     tk_dvec_t *lc = NULL;
     int lc_idx = 0;
     if (has_gram_labels) {
@@ -1063,20 +1141,10 @@ static inline int tm_encode (lua_State *L) {
       for (uint64_t s = 0; s < nc; s++)
         for (int64_t j = gram_lbl_off->a[s]; j < gram_lbl_off->a[s + 1]; j++)
           lc->a[gram_lbl_nbr->a[j]] += 1.0;
-      #pragma omp parallel for schedule(static)
-      for (int64_t k = 0; k < (int64_t)d; k++) {
-        double *col = full_chol + (uint64_t)k * nc;
-        for (uint64_t i = 0; i < nc; i++)
-          for (int64_t j = gram_lbl_off->a[i]; j < gram_lbl_off->a[i + 1]; j++)
-            xty[k * gram_nl + gram_lbl_nbr->a[j]] += col[i];
-      }
       for (int64_t l = 0; l < gram_nl; l++)
         y_mean_arr[l] = lc->a[l] / (double)nc;
     }
     if (has_gram_targets) {
-      cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-        (int)d, (int)gram_nl, (int)nc, 1.0, full_chol, (int)nc,
-        gram_targets_dv->a, (int)gram_nl, 0.0, xty, (int)gram_nl);
       for (int64_t l = 0; l < gram_nl; l++) {
         double s = 0.0;
         for (uint64_t i = 0; i < nc; i++)
@@ -1089,24 +1157,30 @@ static inline int tm_encode (lua_State *L) {
     gram_result_idx = lua_gettop(L);
   }
 
-  #pragma omp parallel for schedule(static)
-  for (uint64_t j = 0; j < d; j++) {
-    double *col = full_chol + j * nc;
-    for (uint64_t i = 0; i < nc; i++)
-      train_codes->a[i * d + j] = (float)col[i];
+  if (!build_gram) {
+    if (transform_codes) {
+      #pragma omp parallel for schedule(static)
+      for (uint64_t j = 0; j < d; j++) {
+        float *col = full_chol + j * nc;
+        for (uint64_t i = 0; i < nc; i++)
+          train_codes->a[i * d + j] = col[i];
+      }
+    } else if (transform_sign) {
+      for (uint64_t j = 0; j < d; j++) {
+        float *col = full_chol + j * nc;
+        for (uint64_t i = 0; i < nc; i++)
+          if (col[i] >= 0.0f)
+            sign_data[i * sign_row_bytes + j / 8] |= (1u << (j % 8));
+      }
+    }
+    free(full_chol); ctx->full_chol = NULL;
   }
-  free(full_chol); ctx->full_chol = NULL;
 
   tk_nystrom_encoder_t *enc = (tk_nystrom_encoder_t *)tk_lua_newuserdata(L, tk_nystrom_encoder_t,
     TK_NYSTROM_ENCODER_MT, tk_nystrom_encoder_mt_fns, tk_nystrom_encoder_gc);
   int enc_idx = lua_gettop(L);
-  {
-    uint64_t proj_n = m * d;
-    enc->projection = (float *)malloc(proj_n * sizeof(float));
-    for (uint64_t i = 0; i < proj_n; i++)
-      enc->projection[i] = (float)ctx->projection[i];
-    free(ctx->projection); ctx->projection = NULL;
-  }
+  enc->projection = ctx->projection;
+  ctx->projection = NULL;
   enc->m = m;
   enc->d = d;
   enc->trace_ratio = trace_ratio;
@@ -1206,7 +1280,12 @@ static inline int tm_encode (lua_State *L) {
   lua_setfield(L, -2, "landmark_ids");
   lua_setfenv(L, enc_idx);
 
-  lua_pushvalue(L, train_codes_idx);
+  if (transform_codes)
+    lua_pushvalue(L, train_codes_idx);
+  else if (transform_sign)
+    lua_pushvalue(L, sign_cvec_idx);
+  else
+    lua_pushnil(L);
   lua_pushvalue(L, enc_idx);
   if (gram_result_idx > 0) {
     lua_pushvalue(L, gram_result_idx);

@@ -40,7 +40,7 @@ static int tk_gfm_create_lua (lua_State *L)
   return 1;
 }
 
-static int tk_gfm_threshold_search_lua (lua_State *L)
+static int tk_gfm_calibrate_lua (lua_State *L)
 {
   tk_gfm_t *g = tk_gfm_peek(L, 1);
   luaL_checktype(L, 2, LUA_TTABLE);
@@ -56,7 +56,7 @@ static int tk_gfm_threshold_search_lua (lua_State *L)
   lua_getfield(L, 2, "expected_neighbors");
   tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
   lua_pop(L, 5);
-  int64_t ns = (int64_t)tk_lua_fcheckunsigned(L, 2, "gfm.threshold_search", "n_samples");
+  int64_t ns = (int64_t)tk_lua_fcheckunsigned(L, 2, "gfm.calibrate", "n_samples");
   int64_t nl = g->nl;
 
   int64_t total_entries = offsets->a[ns] - offsets->a[0];
@@ -161,29 +161,38 @@ static int tk_gfm_score_lua (lua_State *L)
   int64_t ns = (int64_t)tk_lua_fcheckunsigned(L, 2, "gfm.score", "n_samples");
   int64_t nl = g->nl;
   double *thresholds = g->thresholds;
-  uint64_t total_expected = (uint64_t)(exp_off->a[ns] - exp_off->a[0]);
-  uint64_t tp = 0, predicted = 0;
-  #pragma omp parallel reduction(+:tp,predicted)
+  uint64_t tp = 0, predicted = 0, total_expected = 0;
+  #pragma omp parallel reduction(+:tp,predicted,total_expected)
   {
     uint8_t *my_bm = (uint8_t *)calloc((uint64_t)nl, sizeof(uint8_t));
     #pragma omp for schedule(static)
     for (int64_t s = 0; s < ns; s++) {
-      for (int64_t j = exp_off->a[s]; j < exp_off->a[s + 1]; j++) {
+      int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
+      uint64_t n_expected = (uint64_t)(ee - es);
+      int64_t ps = offsets->a[s], pe = offsets->a[s + 1];
+      uint64_t hood_size = (uint64_t)(pe - ps);
+      if (n_expected == 0 || hood_size == 0) continue;
+      total_expected += n_expected;
+      for (int64_t j = es; j < ee; j++) {
         int64_t l = exp_nbr->a[j];
         if (l >= 0 && l < nl) my_bm[l] = 1;
       }
-      int64_t ps = offsets->a[s], pe = offsets->a[s + 1];
+      int64_t k = 0;
       for (int64_t j = ps; j < pe; j++) {
         int64_t l = neighbors->a[j];
         if (l >= 0 && l < nl) {
           double sc = sf ? (double)sf->a[j] : sd->a[j];
-          if (sc >= thresholds[l]) {
-            predicted++;
-            if (my_bm[l]) tp++;
-          }
+          if (sc >= thresholds[l]) k++;
         }
       }
-      for (int64_t j = exp_off->a[s]; j < exp_off->a[s + 1]; j++) {
+      if (k < 1) k = 1;
+      if (k > (int64_t)hood_size) k = (int64_t)hood_size;
+      for (int64_t j = ps; j < ps + k; j++) {
+        predicted++;
+        int64_t l = neighbors->a[j];
+        if (l >= 0 && l < nl && my_bm[l]) tp++;
+      }
+      for (int64_t j = es; j < ee; j++) {
         int64_t l = exp_nbr->a[j];
         if (l >= 0 && l < nl) my_bm[l] = 0;
       }
@@ -276,7 +285,7 @@ static int tk_gfm_load_lua (lua_State *L)
 }
 
 static luaL_Reg tk_gfm_mt_fns[] = {
-  { "threshold_search", tk_gfm_threshold_search_lua },
+  { "calibrate", tk_gfm_calibrate_lua },
   { "predict", tk_gfm_predict_lua },
   { "score", tk_gfm_score_lua },
   { "set_threshold", tk_gfm_set_threshold_lua },

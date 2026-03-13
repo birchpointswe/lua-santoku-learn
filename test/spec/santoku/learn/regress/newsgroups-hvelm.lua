@@ -56,14 +56,14 @@ test("newsgroups csr+kernel", function ()
 
   str.printf("[Spectral] Cholesky trace_tol=%s kernel=%s\n",
     tostring(cfg.emb.trace_tol), cfg.emb.kernel)
-  local train_codes, sp_enc, gram = spectral.encode({
+  local _, sp_enc, gram = spectral.encode({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
     kernel = cfg.emb.kernel,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
   })
-  offsets = nil; tokens = nil; values = nil; train_codes = nil -- luacheck: ignore
+  offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   collectgarbage("collect")
   local emb_d = sp_enc:dims()
   str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
