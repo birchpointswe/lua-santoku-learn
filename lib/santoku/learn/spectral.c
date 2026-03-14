@@ -567,7 +567,8 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
   tk_dvec_t *in_values_d = in_values_f ? NULL : tk_dvec_peekopt(L, -1);
   lua_pop(L, 1);
   lua_getfield(L, 2, "codes");
-  tk_dvec_t *in_codes = tk_dvec_peekopt(L, -1);
+  tk_dvec_t *in_codes_dv = tk_dvec_peekopt(L, -1);
+  tk_fvec_t *in_codes_fv = in_codes_dv ? NULL : tk_fvec_peekopt(L, -1);
   lua_pop(L, 1);
   lua_getfield(L, 2, "d_input");
   int64_t in_d_input_scalar = lua_isnumber(L, -1) ? (int64_t)lua_tointeger(L, -1) : 0;
@@ -668,23 +669,22 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
       int64_t di = enc->d_input;
       float *src_f = (float *)malloc(blk * (uint64_t)di * sizeof(float));
       if (!src_f) { free(sims_f); free(csr_sval); free(csr_norms); return luaL_error(L, "encode: out of memory"); }
-      uint64_t src_off_base;
-      if (in_d_input_scalar > 0) {
-        src_off_base = base * (uint64_t)in_d_input_scalar;
+      uint64_t ddi = in_d_input_scalar > 0 ? (uint64_t)in_d_input_scalar : (uint64_t)di;
+      uint64_t src_off_base = base * ddi;
+      uint64_t cnt = blk * (uint64_t)di;
+      if (in_codes_fv) {
         if (enc->kernel == TK_SPECTRAL_HELLINGER)
-          for (uint64_t i = 0; i < blk * (uint64_t)di; i++)
-            src_f[i] = sqrtf(fabsf((float)in_codes->a[src_off_base + i]));
+          for (uint64_t i = 0; i < cnt; i++)
+            src_f[i] = sqrtf(fabsf(in_codes_fv->a[src_off_base + i]));
         else
-          for (uint64_t i = 0; i < blk * (uint64_t)di; i++)
-            src_f[i] = (float)in_codes->a[src_off_base + i];
+          memcpy(src_f, in_codes_fv->a + src_off_base, cnt * sizeof(float));
       } else {
-        src_off_base = base * (uint64_t)di;
         if (enc->kernel == TK_SPECTRAL_HELLINGER)
-          for (uint64_t i = 0; i < blk * (uint64_t)di; i++)
-            src_f[i] = sqrtf(fabsf((float)in_codes->a[src_off_base + i]));
+          for (uint64_t i = 0; i < cnt; i++)
+            src_f[i] = sqrtf(fabsf((float)in_codes_dv->a[src_off_base + i]));
         else
-          for (uint64_t i = 0; i < blk * (uint64_t)di; i++)
-            src_f[i] = (float)in_codes->a[src_off_base + i];
+          for (uint64_t i = 0; i < cnt; i++)
+            src_f[i] = (float)in_codes_dv->a[src_off_base + i];
       }
       cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
         (int)blk, (int)m, (int)di, 1.0f,
@@ -883,11 +883,11 @@ static inline int tm_encode (lua_State *L) {
     mod.csr_n_tokens = tk_lua_fcheckunsigned(L, 1, "encode", "n_tokens");
     lua_pop(L, 1);
     lua_getfield(L, 1, "values");
-    tk_fvec_t *val_fv = tk_fvec_peek(L, -1, "values");
+    tk_fvec_t *val_fv = tk_fvec_peekopt(L, -1);
     lua_pop(L, 1);
     mod.csr_offsets = off_iv->a;
     mod.csr_tokens = tok_iv->a;
-    mod.csr_values = val_fv->a;
+    mod.csr_values = val_fv ? val_fv->a : NULL;
     mod.type = TK_MOD_CSR;
   } else {
     lua_pop(L, 1);
@@ -895,19 +895,31 @@ static inline int tm_encode (lua_State *L) {
 
   lua_getfield(L, 1, "codes");
   int has_dense = !lua_isnil(L, -1);
+  double *dense_from_fvec = NULL;
   if (has_dense) {
-    tk_dvec_t *codes_dv = tk_dvec_peek(L, -1, "codes");
+    tk_dvec_t *codes_dv = tk_dvec_peekopt(L, -1);
+    tk_fvec_t *codes_fv = codes_dv ? NULL : tk_fvec_peekopt(L, -1);
+    if (!codes_dv && !codes_fv)
+      return luaL_error(L, "codes: expected dvec or fvec");
     lua_pop(L, 1);
+    uint64_t cn = codes_dv ? codes_dv->n : codes_fv->n;
     lua_getfield(L, 1, "d_input");
     int64_t di;
     if (lua_isnumber(L, -1))
       di = (int64_t)lua_tointeger(L, -1);
     else
-      di = (int64_t)(codes_dv->n / n_samples);
+      di = (int64_t)(cn / n_samples);
     lua_pop(L, 1);
     mod.type = TK_MOD_DENSE;
-    mod.dense = codes_dv->a;
     mod.d_input = di;
+    if (codes_dv) {
+      mod.dense = codes_dv->a;
+    } else {
+      dense_from_fvec = (double *)malloc(cn * sizeof(double));
+      for (uint64_t i = 0; i < cn; i++)
+        dense_from_fvec[i] = (double)codes_fv->a[i];
+      mod.dense = dense_from_fvec;
+    }
   } else {
     lua_pop(L, 1);
   }
@@ -946,10 +958,15 @@ static inline int tm_encode (lua_State *L) {
 
   if (has_csr) {
     uint64_t nnz = (uint64_t)(mod.csr_offsets[n_samples] - mod.csr_offsets[0]);
-    if (kernel == TK_SPECTRAL_HELLINGER) {
+    if (!mod.csr_values || kernel == TK_SPECTRAL_HELLINGER) {
       csr_values_owned = (float *)malloc(nnz * sizeof(float));
-      for (uint64_t i = 0; i < nnz; i++)
-        csr_values_owned[i] = sqrtf(fabsf(mod.csr_values[i]));
+      if (mod.csr_values) {
+        for (uint64_t i = 0; i < nnz; i++)
+          csr_values_owned[i] = sqrtf(fabsf(mod.csr_values[i]));
+      } else {
+        for (uint64_t i = 0; i < nnz; i++)
+          csr_values_owned[i] = 1.0f;
+      }
       mod.csr_values = csr_values_owned;
     }
     csr_norms_owned = (double *)calloc(n_samples, sizeof(double));
@@ -1032,7 +1049,7 @@ static inline int tm_encode (lua_State *L) {
     if (lm_chol) tk_fvec_destroy(lm_chol);
     free(full_chol);
     free(csr_values_owned); free(csr_norms_owned);
-    free(dense_owned); free(dense_norms_owned);
+    free(dense_owned); free(dense_norms_owned); free(dense_from_fvec);
     lua_pushnil(L);
     lua_pushnil(L);
     return 2;
@@ -1262,7 +1279,7 @@ static inline int tm_encode (lua_State *L) {
     enc->dense_norms = (float *)malloc(m * sizeof(float));
     for (uint64_t j = 0; j < m; j++)
       enc->dense_norms[j] = cblas_snrm2((int)di, lmv + j * (uint64_t)di, 1);
-    free(dense_owned); free(dense_norms_owned);
+    free(dense_owned); free(dense_norms_owned); free(dense_from_fvec);
   }
 
   if (has_bits) {

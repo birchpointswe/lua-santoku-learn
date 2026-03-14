@@ -1,3 +1,5 @@
+require("santoku.fvec")
+require("santoku.dvec")
 local ann = require("santoku.learn.ann")
 local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
@@ -14,12 +16,13 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   data = { max = nil },
-  tok = { ngram = 7 },
+  tok = { ngram = 6 },
+  ann = false,
   emb = {
-    n_landmarks = 1024*16,
+    n_landmarks = 1024*8, -- 1024*32 yields 0.75+ test performance
     trace_tol = 0.01,
     kernel = "cosine",
-    k = 1024,
+    k = 256,
   },
   ridge = {
     lambda = { def = 1.5727e-02 },
@@ -52,22 +55,13 @@ test("eurlex", function ()
       m.micro_precision, m.micro_recall, m.micro_f1)
   end
 
-  local function oracle_metrics(off, nbr, e_off, e_nbr)
-    local _, m = eval.retrieval_ks({
-      pred_offsets = off, pred_neighbors = nbr,
-      expected_offsets = e_off, expected_neighbors = e_nbr,
-    })
-    return m
-  end
-
   local ngram_map, offsets, tokens, values, n_tokens = csr.tokenize({
-    texts = train.text_iter(), hdc_ngram = cfg.tok.ngram, n_samples = train.n,
+    texts = train.text_iter(), ngram = cfg.tok.ngram, ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max, n_samples = train.n,
   })
   local bns_scores = csr.apply_bns(
     offsets, tokens, values, nil,
     train_label_off, train_label_nbr, n_tokens, n_labels)
-  str.printf("[Tokenize] ngram=%d tokens=%d %s\n",
-    cfg.tok.ngram, n_tokens, sw())
+  str.printf("[Tokenize] ngram=%d ngram_min=%d ngram_max=%d tokens=%d %s\n", cfg.tok.ngram or 0, cfg.tok.ngram_min or 0, cfg.tok.ngram_max or 0, n_tokens, sw())
 
   str.printf("[Spectral] Cholesky trace_tol=%s kernel=%s\n",
     tostring(cfg.emb.trace_tol), cfg.emb.kernel)
@@ -84,7 +78,7 @@ test("eurlex", function ()
 
   local function encode_texts(text_iter_fn, n)
     local _, off, tok, val = csr.tokenize({
-      texts = text_iter_fn(), hdc_ngram = cfg.tok.ngram,
+      texts = text_iter_fn(), ngram = cfg.tok.ngram, ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max,
       n_samples = n, ngram_map = ngram_map,
     })
     csr.apply_bns(off, tok, val, bns_scores)
@@ -137,21 +131,24 @@ test("eurlex", function ()
     best_params.lambda, best_params.propensity_a, best_params.propensity_b, sw())
 
   local dv_off, dv_nbr, dv_sco = ridge_obj:label(dev_codes, dev.n, k, dv_short_off, dv_short_nbr)
-
-  local dv_oracle = oracle_metrics(dv_off, dv_nbr, dev_label_off, dev_label_nbr)
+  local _, dv_oracle = eval.retrieval_ks({
+    pred_offsets = dv_off, pred_neighbors = dv_nbr,
+    expected_offsets = dev_label_off, expected_neighbors = dev_label_nbr,
+  })
   str.printf("[Dv Oracle] %s %s\n", fmt_metrics(dv_oracle), sw())
 
   dev_codes = nil
   collectgarbage("collect")
-
-  str.printf("[GFM] %s\n", sw())
 
   local test_codes = encode_texts(test_set.text_iter, test_set.n)
   local ts_off, ts_nbr, ts_sco = ridge_obj:label(test_codes, test_set.n, k)
   test_codes = nil; ridge_obj:shrink(); sp_enc:shrink()
   collectgarbage("collect")
 
-  local ts_oracle = oracle_metrics(ts_off, ts_nbr, test_label_off, test_label_nbr)
+  local _, ts_oracle = eval.retrieval_ks({
+    pred_offsets = ts_off, pred_neighbors = ts_nbr,
+    expected_offsets = test_label_off, expected_neighbors = test_label_nbr,
+  })
   str.printf("[Ts Oracle] %s %s\n", fmt_metrics(ts_oracle), sw())
 
   local function gfm_score(off, nbr, sco, ns, e_off, e_nbr)
