@@ -13,7 +13,7 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   data = { ttr = 0.8, tvr = 0.1, max = nil, features = 784 },
-  emb = { n_landmarks = 8192, trace_tol = 0.01, kernel = "arccos1" },
+  emb = { n_landmarks = 1024*8, trace_tol = 0.01, kernel = "arccos1" },
   ridge = {
     lambda = { def = 2.3163e-05 },
     propensity_a = { def = 0.55 },

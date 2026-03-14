@@ -234,8 +234,9 @@ static inline size_t tm_csr_pack_ngrams (
 }
 
 static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
-    size_t max_len, int64_t n_samples, int64_t ngram)
+    size_t max_len, int64_t n_samples, int64_t ngram_min, int64_t ngram_max)
 {
+  size_t buf_size = (size_t)(ngram_max - ngram_min + 1) * max_len;
   lua_getfield(L, 1, "ngram_map");
   bool have_map = !lua_isnil(L, -1);
   tk_iumap_t *ngram_map;
@@ -249,11 +250,13 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
     uint32_t me = tk_iumap_end(ngram_map);
     #pragma omp parallel
     {
-      int64_t *packed_buf = (int64_t *)malloc(max_len * sizeof(int64_t));
+      int64_t *packed_buf = (int64_t *)malloc(buf_size * sizeof(int64_t));
       #pragma omp for schedule(dynamic)
       for (int64_t s = 0; s < n_samples; s++) {
         if (!strs[s] || !lens[s]) continue;
-        size_t count = tm_csr_pack_ngrams(strs[s], lens[s], (int)ngram, packed_buf);
+        size_t count = 0;
+        for (int64_t ng = ngram_min; ng <= ngram_max; ng++)
+          count += tm_csr_pack_ngrams(strs[s], lens[s], (int)ng, packed_buf + count);
         int64_t nv = 0;
         for (size_t i = 0; i < count; i++) {
           uint32_t iter = tk_iumap_get(ngram_map, packed_buf[i]);
@@ -276,11 +279,13 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
       int tid = omp_get_thread_num();
       tk_iumap_t *lm = tk_iumap_create(NULL, 0);
       local_maps[tid] = lm;
-      int64_t *packed_buf = (int64_t *)malloc(max_len * sizeof(int64_t));
+      int64_t *packed_buf = (int64_t *)malloc(buf_size * sizeof(int64_t));
       #pragma omp for schedule(dynamic)
       for (int64_t s = 0; s < n_samples; s++) {
         if (!strs[s] || !lens[s]) continue;
-        size_t count = tm_csr_pack_ngrams(strs[s], lens[s], (int)ngram, packed_buf);
+        size_t count = 0;
+        for (int64_t ng = ngram_min; ng <= ngram_max; ng++)
+          count += tm_csr_pack_ngrams(strs[s], lens[s], (int)ng, packed_buf + count);
         for (size_t i = 0; i < count; i++) {
           int absent;
           tk_iumap_put(lm, packed_buf[i], &absent);
@@ -330,11 +335,13 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
   val_out->n = (uint64_t)total;
   #pragma omp parallel
   {
-    int64_t *packed_buf = (int64_t *)malloc(max_len * sizeof(int64_t));
+    int64_t *packed_buf = (int64_t *)malloc(buf_size * sizeof(int64_t));
     #pragma omp for schedule(dynamic)
     for (int64_t s = 0; s < n_samples; s++) {
       if (!strs[s] || !lens[s]) continue;
-      size_t count = tm_csr_pack_ngrams(strs[s], lens[s], (int)ngram, packed_buf);
+      size_t count = 0;
+      for (int64_t ng = ngram_min; ng <= ngram_max; ng++)
+        count += tm_csr_pack_ngrams(strs[s], lens[s], (int)ng, packed_buf + count);
       int64_t nv = 0;
       for (size_t i = 0; i < count; i++) {
         uint32_t iter = tk_iumap_get(ngram_map, packed_buf[i]);
@@ -365,9 +372,17 @@ static int tm_csr_tokenize (lua_State *L)
 {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
-  int64_t ngram = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "hdc_ngram");
-  if (ngram < 1 || ngram > 8)
-    return luaL_error(L, "tokenize: hdc_ngram must be 1-8");
+  int64_t ngram = (int64_t)tk_lua_foptunsigned(L, 1, "tokenize", "ngram", 0);
+  int64_t ngram_min, ngram_max;
+  if (ngram) {
+    ngram_min = ngram;
+    ngram_max = ngram;
+  } else {
+    ngram_min = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "ngram_min");
+    ngram_max = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "ngram_max");
+  }
+  if (ngram_min < 1 || ngram_max > 8 || ngram_min > ngram_max)
+    return luaL_error(L, "tokenize: need 1 <= ngram_min <= ngram_max <= 8");
   int64_t n_samples = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "n_samples");
   lua_getfield(L, 1, "texts");
   const char **strs = (const char **)malloc((uint64_t)n_samples * sizeof(const char *));
@@ -418,7 +433,7 @@ static int tm_csr_tokenize (lua_State *L)
     free(lens);
     return luaL_error(L, "tokenize: texts must be table or function");
   }
-  int result = tm_csr_tokenize_core(L, strs, lens, max_len, n_samples, ngram);
+  int result = tm_csr_tokenize_core(L, strs, lens, max_len, n_samples, ngram_min, ngram_max);
   free(strs);
   free(lens);
   return result;
@@ -576,7 +591,8 @@ static int tm_csr_apply_bns (lua_State *L)
   uint32_t *lbl_docs = (uint32_t *)malloc((uint64_t)lbl_off[n_labels] * sizeof(uint32_t));
   uint32_t *lbl_pos = (uint32_t *)calloc(n_labels, sizeof(uint32_t));
   if (!lbl_docs || !lbl_pos) {
-    free(doc_freq); free(label_freq); free(lbl_off); free(lbl_docs); free(lbl_pos);
+    free(doc_freq); free(label_freq); free(lbl_off);
+    free(lbl_docs); free(lbl_pos);
     return luaL_error(L, "apply_bns: alloc failed");
   }
   for (uint64_t d = 0; d < n_samples; d++) {
@@ -603,8 +619,6 @@ static int tm_csr_apply_bns (lua_State *L)
   for (uint64_t b = 0; b < n_labels; b++) {
     double P = (double)label_freq[b];
     if (P <= 0.0 || P >= N) continue;
-    double rarity = tm_probit(1.0 - P / N);
-    if (rarity <= 0.0) continue;
     uint32_t n_touched = 0;
     for (uint32_t di = lbl_off[b]; di < lbl_off[b + 1]; di++) {
       uint32_t dd = lbl_docs[di];
@@ -617,7 +631,7 @@ static int tm_csr_apply_bns (lua_State *L)
     }
     for (uint32_t i = 0; i < n_touched; i++) {
       int32_t f = touched[i];
-      float w = (float)(tm_bns(N, (double)doc_freq[f], P, (double)cooc[f]) * rarity);
+      float w = (float)tm_bns(N, (double)doc_freq[f], P, (double)cooc[f]);
       if (w > scores->a[f]) scores->a[f] = w;
       cooc[f] = 0.0f;
     }
