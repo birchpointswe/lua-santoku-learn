@@ -14,8 +14,8 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   data = { max = nil, ttr = 0.5, tvr = 0.1 },
-  tok = { ngram = 5 },
-  emb = { n_landmarks = 8192, trace_tol = 0.01, kernel = "cosine" },
+  tok = { ngram_min = 5, ngram_max = 5 },
+  emb = { n_landmarks = 1024*8, trace_tol = 0.01, kernel = "cosine" },
   ridge = {
     lambda = { def = 6.6967e-03 },
     propensity_a = { def = 3.0326 },
@@ -46,13 +46,13 @@ test("imdb csr+kernel", function ()
     train.n, validate.n, test_set.n, n_classes, sw())
 
   local ngram_map, offsets, tokens, values, n_tokens = csr.tokenize({
-    texts = train.problems, hdc_ngram = cfg.tok.ngram, n_samples = train.n,
+    texts = train.problems, ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max, n_samples = train.n,
   })
   local bns_scores = csr.apply_bns(
     offsets, tokens, values, nil,
     label_off, label_nbr, n_tokens, n_classes)
-  str.printf("[Tokenize] ngram=%d tokens=%d %s\n",
-    cfg.tok.ngram, n_tokens, sw())
+  str.printf("[Tokenize] ngram_min=%d ngram_max=%d tokens=%d %s\n",
+    cfg.tok.ngram_min, cfg.tok.ngram_max, n_tokens, sw())
 
   str.printf("[Spectral] Cholesky trace_tol=%s kernel=%s\n",
     tostring(cfg.emb.trace_tol), cfg.emb.kernel)
@@ -70,7 +70,7 @@ test("imdb csr+kernel", function ()
 
   local function encode_texts(texts, n)
     local _, off, tok, val = csr.tokenize({
-      texts = texts, hdc_ngram = cfg.tok.ngram,
+      texts = texts, ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max,
       n_samples = n, ngram_map = ngram_map,
     })
     csr.apply_bns(off, tok, val, bns_scores)
