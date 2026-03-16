@@ -1,6 +1,4 @@
-local arr = require("santoku.array")
 local csr = require("santoku.learn.csr")
-
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
 local optimize = require("santoku.learn.optimize")
@@ -15,20 +13,18 @@ io.stdout:setvbuf("line")
 local cfg = {
   data = { max = nil, ttr = 0.5, tvr = 0.1 },
   tok = { ngram_min = 5, ngram_max = 5 },
-  emb = { n_landmarks = 1024*8, trace_tol = 0.01, kernel = "cosine" },
+  emb = { n_landmarks = 1024*4, trace_tol = 0.01, kernel = "cosine" },
   ridge = {
-    lambda = { def = 6.6967e-03 },
-    propensity_a = { def = 3.0326 },
-    propensity_b = { def = 4.2558 },
+    lambda = { def = 1.68e-01 },
+    propensity_a = { def = 3.07 },
+    propensity_b = { def = 0.06 },
     classes = 2,
     search_trials = 0,
     k = 1,
   },
 }
 
-local class_names = { "negative", "positive" }
-
-test("imdb csr+kernel", function ()
+test("imdb classifier", function ()
 
   local stopwatch = utc.stopwatch()
   local function sw()
@@ -111,17 +107,6 @@ test("imdb csr+kernel", function ()
   local test_stats = eval.class_accuracy(test_labels, test_set.sol_offsets, test_set.sol_neighbors, test_set.n, n_classes)
   str.printf("[Class] F1: val=%.2f test=%.2f %s\n",
     val_stats.f1, test_stats.f1, sw())
-
-  str.printf("\n[Per-class Test Accuracy]\n")
-  local class_order = arr.range(1, n_classes)
-  arr.sort(class_order, function (a, b)
-    return test_stats.classes[a].f1 < test_stats.classes[b].f1
-  end)
-  for _, c in ipairs(class_order) do
-    local ts = test_stats.classes[c]
-    local cat = class_names[c] or ("class_" .. (c - 1))
-    str.printf("  %-12s  F1=%.2f  P=%.2f  R=%.2f\n", cat, ts.f1, ts.precision, ts.recall)
-  end
 
   local _, total = stopwatch()
   str.printf("\nTotal: %.1fs\n", total)

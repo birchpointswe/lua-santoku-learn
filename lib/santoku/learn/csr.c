@@ -710,6 +710,35 @@ static int tm_csr_apply_auc (lua_State *L)
   return 1;
 }
 
+static int tm_csr_apply_idf (lua_State *L)
+{
+  tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
+  tk_ivec_t *tokens = tk_ivec_peek(L, 2, "tokens");
+  tk_fvec_t *values = tk_fvec_peek(L, 3, "values");
+  tk_fvec_t *scores = tk_fvec_peekopt(L, 4);
+  if (scores) {
+    tm_csr_gather_mul(values, tokens, scores);
+    lua_pushvalue(L, 4);
+    return 1;
+  }
+  uint64_t n_tokens = tk_lua_checkunsigned(L, 5, "n_tokens");
+  uint64_t n_samples = offsets->n - 1;
+  double N = (double)n_samples;
+  uint32_t *doc_freq = (uint32_t *)calloc(n_tokens, sizeof(uint32_t));
+  if (!doc_freq) return luaL_error(L, "apply_idf: alloc failed");
+  for (uint64_t j = 0; j < tokens->n; j++)
+    doc_freq[tokens->a[j]]++;
+  scores = tk_fvec_create(L, n_tokens, NULL, NULL);
+  scores->n = n_tokens;
+  for (uint64_t t = 0; t < n_tokens; t++) {
+    double df = (double)doc_freq[t];
+    scores->a[t] = (float)log((N - df + 0.5) / (df + 0.5));
+  }
+  free(doc_freq);
+  tm_csr_gather_mul(values, tokens, scores);
+  return 1;
+}
+
 static int tm_csr_merge (lua_State *L)
 {
   tk_ivec_t *off1 = tk_ivec_peek(L, 1, "off1");
@@ -796,6 +825,7 @@ static luaL_Reg tm_csr_fns[] = {
   { "sqrt", tm_csr_sqrt },
   { "apply_bns", tm_csr_apply_bns },
   { "apply_auc", tm_csr_apply_auc },
+  { "apply_idf", tm_csr_apply_idf },
   { "merge", tm_csr_merge },
   { "standardize", tm_csr_standardize },
   { NULL, NULL }

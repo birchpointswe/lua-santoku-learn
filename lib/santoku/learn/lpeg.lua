@@ -113,25 +113,55 @@ end
 
 local script = block_elem("script")
 local style = block_elem("style")
-local tag = P("<") * tag_body
-local text_span = Cp() * (1 - P("<")) ^ 1 * Cp()
 
-local html_patt = Ct((comment + script + style + tag + text_span) ^ 0)
+local comment_cp, script_cp, style_cp, any_tag_cp, tag_name_only, block_elems
 
 local function html_text(str)
-  local caps = match(html_patt, str)
-  local i = 0
-  local n = #caps
-  return function ()
-    while i < n do
-      local s = caps[i + 1]
-      local e = caps[i + 2]
-      i = i + 2
-      if e > s then
-        return s, e - 1
+  return wrap(function ()
+    local buf = {}
+    local pos = 1
+    local len = #str
+    while pos <= len do
+      if str:byte(pos) == 60 then
+        local npos = match(comment_cp, str, pos)
+          or match(script_cp, str, pos)
+          or match(style_cp, str, pos)
+        if npos then
+          if #buf > 0 then
+            local text = table.concat(buf)
+            buf = {}
+            if #text > 0 then yield(text) end
+          end
+          pos = npos
+        else
+          local tname = match(tag_name_only, str, pos)
+          if tname and block_elems[tname:lower()] then
+            if #buf > 0 then
+              local text = table.concat(buf)
+              buf = {}
+              if #text > 0 then yield(text) end
+            end
+          end
+          npos = match(any_tag_cp, str, pos)
+          if npos then
+            pos = npos
+          else
+            buf[#buf + 1] = "<"
+            pos = pos + 1
+          end
+        end
+      else
+        local next_lt = str:find("<", pos, true)
+        local text_end = next_lt and (next_lt - 1) or len
+        buf[#buf + 1] = str:sub(pos, text_end)
+        pos = text_end + 1
       end
     end
-  end
+    if #buf > 0 then
+      local text = table.concat(buf)
+      if #text > 0 then yield(text) end
+    end
+  end)
 end
 
 local tag_name_ch = R("az", "AZ") + R("09") + S("-_:")
@@ -150,16 +180,31 @@ local open_tag_cap = P("<") * tag_name_cap * attrs_raw * ws * (
   P(">") * Cp() * Cc(false)
 )
 
-local comment_cp = comment * Cp()
-local script_cp = script * Cp()
-local style_cp = style * Cp()
-local any_tag_cp = P("<") * tag_body * Cp()
+comment_cp = comment * Cp()
+script_cp = script * Cp()
+style_cp = style * Cp()
+any_tag_cp = P("<") * tag_body * Cp()
 
 local void_elems = {
   area = true, base = true, br = true, col = true, embed = true,
   hr = true, img = true, input = true, link = true, meta = true,
   source = true, track = true, wbr = true,
 }
+
+block_elems = {
+  address = true, article = true, aside = true, blockquote = true,
+  br = true, dd = true, details = true, div = true,
+  dl = true, dt = true, fieldset = true, figcaption = true,
+  figure = true, footer = true, form = true,
+  h1 = true, h2 = true, h3 = true, h4 = true, h5 = true, h6 = true,
+  header = true, hr = true, li = true, main = true,
+  nav = true, ol = true, p = true, pre = true,
+  section = true, summary = true, table = true,
+  tbody = true, td = true, tfoot = true, th = true, thead = true, tr = true,
+  ul = true,
+}
+
+tag_name_only = P("<") * P("/") ^ -1 * C(tag_name_ch ^ 1)
 
 local function html_extract(str)
   local parts = {}
@@ -273,10 +318,36 @@ local function html_inject(text, tags)
   return table.concat(parts)
 end
 
+local function html_spans(tags)
+  local pvec = require("santoku.pvec")
+  local spans = pvec.create()
+  for i = 1, #tags do
+    spans:push(tags[i].s - 1, tags[i].e)
+  end
+  return spans
+end
+
+local function html_match_tags(ids, starts, ends, names, prefix)
+  local tags = {}
+  for i = 0, ids:size() - 1 do
+    local cls = names and names[ids:get(i)] or tostring(ids:get(i))
+    if prefix then cls = prefix .. cls end
+    tags[#tags + 1] = {
+      name = "span",
+      s = starts:get(i) + 1,
+      e = ends:get(i),
+      attrs = { class = cls },
+    }
+  end
+  return tags
+end
+
 return {
   json_fields = json_fields,
   html_text = html_text,
   html_extract = html_extract,
   html_tags = html_tags,
   html_inject = html_inject,
+  html_spans = html_spans,
+  html_match_tags = html_match_tags,
 }

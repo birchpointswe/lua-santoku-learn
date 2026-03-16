@@ -49,8 +49,10 @@ typedef struct {
   bool destroyed;
   uint64_t next_attr;
   uint64_t next_feature;
+  uint64_t n_dense;
 
   tk_iuset_t *categorical;
+  tk_iuset_t *continuous;
 
   tk_iuset_t *categorical_user_keys_int;
   tk_cuset_t *categorical_user_keys_string;
@@ -63,6 +65,8 @@ typedef struct {
   tk_cat_bits_string_t *cat_bits_string;
   tk_cat_bits_double_t *cat_bits_double;
 
+  tk_iumap_t *dense_col_map;
+
 } tk_booleanizer_t;
 
 #define TK_BOOLEANIZER_MT "tk_booleanizer_t"
@@ -73,59 +77,28 @@ static inline tk_booleanizer_t *tk_booleanizer_peek (lua_State *L, int i)
   return (tk_booleanizer_t *) luaL_checkudata(L, i, TK_BOOLEANIZER_MT);
 }
 
-static inline int tk_booleanizer_encode_string (
-  lua_State *L,
+static inline void tk_booleanizer_encode_string (
   tk_booleanizer_t *B,
-  uint64_t id_sample,
   int64_t id_feature,
   const char *value,
   tk_ivec_t *out
 ) {
-  if (!B->finalized) {
-    tk_lua_verror(L, 2, "encode", "finalize must be called before encode");
-    return -1;
-  }
   tk_cat_bit_string_t key = { .f = id_feature, .v = (char *) value };
   khint_t k = tk_cat_bits_string_get(B->cat_bits_string, key);
-  if (k != tk_cat_bits_string_end(B->cat_bits_string)) {
-    int64_t bit_id = tk_cat_bits_string_val(B->cat_bits_string, k);
-    if (tk_ivec_push(out, (int64_t) id_sample * (int64_t) B->next_feature + bit_id) != 0)
-      return -1;
-  }
-  return 0;
+  if (k != tk_cat_bits_string_end(B->cat_bits_string))
+    tk_ivec_push(out, tk_cat_bits_string_val(B->cat_bits_string, k));
 }
 
-static inline int tk_booleanizer_encode_double (
-  lua_State *L,
+static inline void tk_booleanizer_encode_double (
   tk_booleanizer_t *B,
-  uint64_t id_sample,
   int64_t id_feature,
   double value,
   tk_ivec_t *out
 ) {
-  if (!B->finalized) {
-    tk_lua_verror(L, 2, "encode", "finalize must be called before encode");
-    return -1;
-  }
   tk_cat_bit_double_t key = { .f = id_feature, .v = value };
   khint_t k = tk_cat_bits_double_get(B->cat_bits_double, key);
-  if (k != tk_cat_bits_double_end(B->cat_bits_double)) {
-    int64_t bit_id = tk_cat_bits_double_val(B->cat_bits_double, k);
-    if (tk_ivec_push(out, (int64_t) id_sample * (int64_t) B->next_feature + bit_id) != 0)
-      return -1;
-  }
-  return 0;
-}
-
-static inline int tk_booleanizer_encode_integer (
-  lua_State *L,
-  tk_booleanizer_t *B,
-  uint64_t id_sample,
-  int64_t id_feature,
-  int64_t value,
-  tk_ivec_t *out
-) {
-  return tk_booleanizer_encode_double(L, B, id_sample, id_feature, (double) value, out);
+  if (k != tk_cat_bits_double_end(B->cat_bits_double))
+    tk_ivec_push(out, tk_cat_bits_double_val(B->cat_bits_double, k));
 }
 
 static inline int64_t tk_booleanizer_bit_integer (
@@ -302,7 +275,6 @@ static inline void tk_booleanizer_finalize (
     tk_iuset_put(seen_features, id_feature, &kha);
   }));
   tk_umap_foreach_keys(seen_features, id_feature, ({
-    tk_iuset_put(B->categorical, id_feature, &kha);
     kho = tk_observed_strings_get(B->observed_strings, id_feature);
     if (kho != tk_observed_strings_end(B->observed_strings)) {
       tk_cuset_t *values = tk_observed_strings_val(B->observed_strings, kho);
@@ -328,6 +300,11 @@ static inline void tk_booleanizer_finalize (
         tk_cat_bits_double_setval(B->cat_bits_double, outk, (int64_t) B->next_feature ++);
       }));
     }
+  }));
+  int64_t id_cont;
+  tk_umap_foreach_keys(B->continuous, id_cont, ({
+    khint_t khi2 = tk_iumap_put(B->dense_col_map, id_cont, &kha);
+    tk_iumap_setval(B->dense_col_map, khi2, (int64_t) B->n_dense ++);
   }));
   tk_booleanizer_shrink(B);
   B->finalized = true;
@@ -493,7 +470,7 @@ static inline void tk_booleanizer_persist (
     return;
   }
   tk_lua_fwrite(L, "TKbl", 1, 4, fh);
-  uint8_t version = 1;
+  uint8_t version = 2;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   uint8_t u8 = (uint8_t)B->finalized;
   tk_lua_fwrite(L, (char *) &u8, sizeof(uint8_t), 1, fh);
@@ -530,6 +507,9 @@ static inline void tk_booleanizer_persist (
     tk_lua_fwrite(L, (char *) &cbd.v, sizeof(double),  1, fh);
     tk_lua_fwrite(L, (char *) &f, sizeof(int64_t), 1, fh);
   }));
+  tk_iuset_persist(L, B->continuous, fh);
+  tk_iumap_persist(L, B->dense_col_map, fh);
+  tk_lua_fwrite(L, (char *) &B->n_dense, sizeof(uint64_t), 1, fh);
 }
 
 static inline int tk_booleanizer_gc_lua (lua_State *L)
@@ -567,77 +547,74 @@ static inline int tk_booleanizer_bit_lua (lua_State *L)
 static inline int tk_booleanizer_encode_lua (lua_State *L)
 {
   tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
-  uint64_t id_sample = tk_lua_checkunsigned(L, 2, "id_sample");
+  if (!B->finalized) {
+    tk_lua_verror(L, 2, "encode", "finalize must be called before encode");
+    return 0;
+  }
   lua_pushcfunction(L, tk_booleanizer_bit_lua);
   lua_pushvalue(L, 1);
-  lua_pushvalue(L, 3);
+  lua_pushvalue(L, 2);
   lua_call(L, 2, 1);
   if (lua_isnoneornil(L, -1)) {
     lua_pop(L, 1);
-    tk_ivec_t *out = tk_ivec_peekopt(L, 5);
-    if (out == NULL)
-      out = tk_ivec_create(L, 0, 0, 0);
-    else
-      lua_pushvalue(L, 5);
-    return 1;
+    return 0;
   }
   int64_t id_feature = (int64_t) tk_lua_checkunsigned(L, -1, "id_feature");
-  tk_ivec_t *out = tk_ivec_peekopt(L, 5);
-  if (out == NULL)
-    out = tk_ivec_create(L, 0, 0, 0);
-  else
-    lua_pushvalue(L, 5);
-  int t = lua_type(L, 4);
-  int rc = 0;
+  lua_pop(L, 1);
+  if (tk_iuset_contains(B->continuous, id_feature)) {
+    tk_dvec_t *dense = tk_dvec_peek(L, 5, "dense");
+    tk_dvec_push(dense, luaL_checknumber(L, 3));
+    return 0;
+  }
+  tk_ivec_t *neighbors = tk_ivec_peek(L, 4, "neighbors");
+  int t = lua_type(L, 3);
   switch (t) {
     case LUA_TSTRING:
-      rc = tk_booleanizer_encode_string(L, B, id_sample, id_feature, luaL_checkstring(L, 4), out);
+      tk_booleanizer_encode_string(B, id_feature, luaL_checkstring(L, 3), neighbors);
       break;
     case LUA_TNUMBER:
-      rc = tk_booleanizer_encode_double(L, B, id_sample, id_feature, luaL_checknumber(L, 4), out);
+      tk_booleanizer_encode_double(B, id_feature, luaL_checknumber(L, 3), neighbors);
       break;
     case LUA_TBOOLEAN:
-      rc = tk_booleanizer_encode_integer(L, B, id_sample, id_feature, lua_toboolean(L, 4), out);
+      tk_booleanizer_encode_double(B, id_feature, (double)lua_toboolean(L, 3), neighbors);
       break;
     case LUA_TNIL:
       break;
-    default:
-      tk_lua_verror(L, 2, "encode", "unexpected type passed to encode", lua_typename(L, t));
-      break;
   }
-  if (rc != 0)
-    return 0;
-  return 1;
+  return 0;
 }
 
 static inline int tk_booleanizer_observe_lua (lua_State *L)
 {
   tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
-  int nargs = lua_gettop(L);
-  int feature_arg, value_arg;
-  if (nargs >= 3 && !lua_isnil(L, 3)) {
-    feature_arg = 2;
-    value_arg = 3;
-  } else {
-    feature_arg = 2;
-    value_arg = 2;
-  }
   lua_pushcfunction(L, tk_booleanizer_bit_lua);
   lua_pushvalue(L, 1);
-  lua_pushvalue(L, feature_arg);
+  lua_pushvalue(L, 2);
   lua_pushboolean(L, true);
   lua_call(L, 3, 1);
   int64_t id_feature = (int64_t) tk_lua_checkunsigned(L, -1, "id_feature");
-  int t = lua_type(L, value_arg);
+  lua_pop(L, 1);
+  if (tk_iuset_contains(B->continuous, id_feature))
+    return 0;
+  int kha;
+  int t = lua_type(L, 3);
+  if (!tk_iuset_contains(B->categorical, id_feature)) {
+    if (t == LUA_TSTRING) {
+      tk_iuset_put(B->categorical, id_feature, &kha);
+    } else {
+      tk_iuset_put(B->continuous, id_feature, &kha);
+      return 0;
+    }
+  }
   switch (t) {
     case LUA_TSTRING:
-      tk_booleanizer_observe_string(L, B, id_feature, luaL_checkstring(L, value_arg));
+      tk_booleanizer_observe_string(L, B, id_feature, luaL_checkstring(L, 3));
       break;
     case LUA_TNUMBER:
-      tk_booleanizer_observe_double(L, B, id_feature, luaL_checknumber(L, value_arg));
+      tk_booleanizer_observe_double(L, B, id_feature, luaL_checknumber(L, 3));
       break;
     case LUA_TBOOLEAN:
-      tk_booleanizer_observe_integer(L, B, id_feature, lua_toboolean(L, value_arg));
+      tk_booleanizer_observe_integer(L, B, id_feature, lua_toboolean(L, 3));
       break;
     case LUA_TNIL:
       break;
@@ -645,7 +622,7 @@ static inline int tk_booleanizer_observe_lua (lua_State *L)
       tk_lua_verror(L, 2, "observe", "unexpected type passed to observe", lua_typename(L, t));
       break;
   }
-  return 1;
+  return 0;
 }
 
 static inline int tk_booleanizer_finalize_lua (lua_State *L)
@@ -659,7 +636,8 @@ static inline int tk_booleanizer_features_lua (lua_State *L)
 {
   tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
   lua_pushinteger(L, tk_booleanizer_features(L, B));
-  return 1;
+  lua_pushinteger(L, (lua_Integer) B->n_dense);
+  return 2;
 }
 
 static inline int tk_booleanizer_bit_offsets_lua (lua_State *L)
@@ -872,6 +850,9 @@ static inline tk_booleanizer_t *tk_booleanizer_create (
     tk_error(L, "booleanizer: iuset_create failed", ENOMEM);
   tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
   lua_pop(L, 1);
+  B->continuous = tk_iuset_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
   B->categorical_user_keys_int = categorical_user_keys_int;
   B->categorical_user_keys_string = categorical_user_keys_string;
   B->integer_features = tk_iumap_create(L, 0);
@@ -892,8 +873,12 @@ static inline tk_booleanizer_t *tk_booleanizer_create (
   B->cat_bits_double = tk_cat_bits_double_create(L, 0);
   tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
   lua_pop(L, 1);
+  B->dense_col_map = tk_iumap_create(L, 0);
+  tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+  lua_pop(L, 1);
   B->next_attr = 0;
   B->next_feature = 0;
+  B->n_dense = 0;
   B->finalized = false;
   B->destroyed = false;
   return B;
@@ -912,7 +897,7 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
     luaL_error(L, "invalid booleanizer file (bad magic)");
   uint8_t bversion;
   tk_lua_fread(L, &bversion, sizeof(uint8_t), 1, fh);
-  if (bversion != 1)
+  if (bversion != 1 && bversion != 2)
     luaL_error(L, "unsupported booleanizer version %d", (int)bversion);
   uint8_t u8;
   tk_lua_fread(L, (char *) &u8, sizeof(uint8_t), 1, fh);
@@ -980,6 +965,23 @@ static inline tk_booleanizer_t *tk_booleanizer_load (
     tk_cat_bit_double_t key = { .f = feature_id, .v = dval };
     khint_t k = tk_cat_bits_double_put(B->cat_bits_double, key, &kha);
     tk_cat_bits_double_setval(B->cat_bits_double, k, bit_id);
+  }
+  if (bversion >= 2) {
+    B->continuous = tk_iuset_load(L, fh);
+    tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+    lua_pop(L, 1);
+    B->dense_col_map = tk_iumap_load(L, fh);
+    tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+    lua_pop(L, 1);
+    tk_lua_fread(L, (char *) &B->n_dense, sizeof(uint64_t), 1, fh);
+  } else {
+    B->continuous = tk_iuset_create(L, 0);
+    tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+    lua_pop(L, 1);
+    B->dense_col_map = tk_iumap_create(L, 0);
+    tk_lua_add_ephemeron(L, TK_BOOLEANIZER_EPH, Bi, -1);
+    lua_pop(L, 1);
+    B->n_dense = 0;
   }
   B->destroyed = false;
   return B;

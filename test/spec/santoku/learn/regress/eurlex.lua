@@ -1,10 +1,6 @@
-require("santoku.fvec")
-require("santoku.dvec")
-local ann = require("santoku.learn.ann")
 local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
-local ivec = require("santoku.ivec")
 local optimize = require("santoku.learn.optimize")
 local spectral = require("santoku.learn.spectral")
 local str = require("santoku.string")
@@ -17,27 +13,26 @@ io.stdout:setvbuf("line")
 local cfg = {
   data = { max = nil },
   tok = { ngram = 6 },
-  ann = false,
-  emb = {
-    n_landmarks = 1024*8, -- 1024*32 yields 0.75+ test performance
-    trace_tol = 0.01,
-    kernel = "cosine",
-    k = 256,
-  },
+  emb = { n_landmarks = 1024*4, trace_tol = 0.01, kernel = "cosine", k = 256 },
   ridge = {
-    lambda = { def = 1.5727e-02 },
-    propensity_a = { def = 0.0020 },
-    propensity_b = { def = 3.3063 },
+    lambda = { def = 1.01e-03 },
+    propensity_a = { def = 0.12 },
+    propensity_b = { def = 3.03 },
     search_trials = 0,
   },
 }
 
-test("eurlex", function ()
+test("eurlex classifier", function ()
 
   local stopwatch = utc.stopwatch()
   local function sw()
     local d, dd = stopwatch()
     return str.format("(%.1fs +%.1fs)", d, dd)
+  end
+
+  local function fmt_metrics(m)
+    return str.format("miP=%.4f miR=%.4f miF1=%.4f",
+      m.micro_precision, m.micro_recall, m.micro_f1)
   end
 
   str.printf("[Data] Loading\n")
@@ -50,36 +45,31 @@ test("eurlex", function ()
   local dev_label_off, dev_label_nbr = dev.sol_offsets, dev.sol_neighbors
   local test_label_off, test_label_nbr = test_set.sol_offsets, test_set.sol_neighbors
 
-  local function fmt_metrics(m)
-    return str.format("miP=%.4f miR=%.4f miF1=%.4f",
-      m.micro_precision, m.micro_recall, m.micro_f1)
-  end
-
   local ngram_map, offsets, tokens, values, n_tokens = csr.tokenize({
-    texts = train.text_iter(), ngram = cfg.tok.ngram, ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max, n_samples = train.n,
+    texts = train.text_iter(), ngram = cfg.tok.ngram, n_samples = train.n,
   })
   local bns_scores = csr.apply_bns(
     offsets, tokens, values, nil,
     train_label_off, train_label_nbr, n_tokens, n_labels)
-  str.printf("[Tokenize] ngram=%d ngram_min=%d ngram_max=%d tokens=%d %s\n", cfg.tok.ngram or 0, cfg.tok.ngram_min or 0, cfg.tok.ngram_max or 0, n_tokens, sw())
+  str.printf("[Tokenize] ngram=%d tokens=%d %s\n", cfg.tok.ngram, n_tokens, sw())
 
   str.printf("[Spectral] Cholesky trace_tol=%s kernel=%s\n",
     tostring(cfg.emb.trace_tol), cfg.emb.kernel)
-  local train_sign, sp_enc, gram = spectral.encode({
+  local _, sp_enc, gram = spectral.encode({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
     kernel = cfg.emb.kernel,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     label_offsets = train_label_off, label_neighbors = train_label_nbr, n_labels = n_labels,
-    transform = cfg.ann and "sign" or nil,
   })
+  offsets = nil; tokens = nil; values = nil -- luacheck: ignore
+  collectgarbage("collect")
   local emb_d = sp_enc:dims()
   str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
 
   local function encode_texts(text_iter_fn, n)
     local _, off, tok, val = csr.tokenize({
-      texts = text_iter_fn(), ngram = cfg.tok.ngram, ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max,
-      n_samples = n, ngram_map = ngram_map,
+      texts = text_iter_fn(), ngram = cfg.tok.ngram, n_samples = n, ngram_map = ngram_map,
     })
     csr.apply_bns(off, tok, val, bns_scores)
     return sp_enc:encode({
@@ -88,27 +78,7 @@ test("eurlex", function ()
   end
 
   local dev_codes = encode_texts(dev.text_iter, dev.n)
-
-  offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   collectgarbage("collect")
-
-  local dv_short_off, dv_short_nbr
-  if cfg.ann then
-    local doc_ids = ivec.create(train.n):fill_indices()
-    local mih = ann.create({ data = train_sign, features = emb_d })
-    str.printf("[ANN] indexed %s\n", sw())
-    local K = cfg.emb.k
-    local function shortlist(codes, n)
-      local sign_cvec = codes:mtx_sign(emb_d)
-      local a_off, a_nbr = mih:neighborhoods_by_vecs(sign_cvec, K)
-      local sl_off, sl_nbr = csr.label_union(a_off, a_nbr, doc_ids, train_label_off, train_label_nbr, n_labels)
-      return sl_off, sl_nbr
-    end
-    dv_short_off, dv_short_nbr = shortlist(dev_codes, dev.n)
-    collectgarbage("collect")
-    str.printf("[Shortlist] built %s\n", sw())
-  end
-  train_sign = nil -- luacheck: ignore
 
   str.printf("\n[Ridge]\n")
   local ridge_obj, best_params, gfm_obj = optimize.ridge({
@@ -130,7 +100,7 @@ test("eurlex", function ()
   str.printf("[Ridge] lambda=%.4e pa=%.4f pb=%.4f %s\n",
     best_params.lambda, best_params.propensity_a, best_params.propensity_b, sw())
 
-  local dv_off, dv_nbr, dv_sco = ridge_obj:label(dev_codes, dev.n, k, dv_short_off, dv_short_nbr)
+  local dv_off, dv_nbr, _ = ridge_obj:label(dev_codes, dev.n, k)
   local _, dv_oracle = eval.retrieval_ks({
     pred_offsets = dv_off, pred_neighbors = dv_nbr,
     expected_offsets = dev_label_off, expected_neighbors = dev_label_nbr,
@@ -151,19 +121,6 @@ test("eurlex", function ()
   })
   str.printf("[Ts Oracle] %s %s\n", fmt_metrics(ts_oracle), sw())
 
-  local function gfm_score(off, nbr, sco, ns, e_off, e_nbr)
-    local _, m = gfm_obj:score({
-      offsets = off, neighbors = nbr, scores = sco,
-      n_samples = ns,
-      expected_offsets = e_off, expected_neighbors = e_nbr,
-    })
-    return m
-  end
-  local gfm_dvm = gfm_score(dv_off, dv_nbr, dv_sco, dev.n, dev_label_off, dev_label_nbr)
-  str.printf("[Dv GFM] %s %s\n", fmt_metrics(gfm_dvm), sw())
-  local gfm_tsm = gfm_score(ts_off, ts_nbr, ts_sco, test_set.n, test_label_off, test_label_nbr)
-  str.printf("[Ts GFM] %s %s\n", fmt_metrics(gfm_tsm), sw())
-
   local ts_ks = gfm_obj:predict({ offsets = ts_off, neighbors = ts_nbr, scores = ts_sco, n_samples = test_set.n })
   local _, ts_pred_m = eval.retrieval_ks({
     pred_offsets = ts_off, pred_neighbors = ts_nbr,
@@ -177,8 +134,6 @@ test("eurlex", function ()
     "Params", best_params.lambda, best_params.propensity_a, best_params.propensity_b)
   str.printf("  %-10s %s\n", "Dv Oracle", fmt_metrics(dv_oracle))
   str.printf("  %-10s %s\n", "Ts Oracle", fmt_metrics(ts_oracle))
-  str.printf("  %-10s %s\n", "Dv GFM", fmt_metrics(gfm_dvm))
-  str.printf("  %-10s %s\n", "Ts GFM", fmt_metrics(gfm_tsm))
   str.printf("  %-10s %s\n", "Ts Pred", fmt_metrics(ts_pred_m))
   local _, total = stopwatch()
   str.printf("\nTotal: %.1fs\n", total)

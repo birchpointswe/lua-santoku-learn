@@ -1,6 +1,4 @@
-local arr = require("santoku.array")
 local csr = require("santoku.learn.csr")
-
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
 local optimize = require("santoku.learn.optimize")
@@ -15,18 +13,18 @@ io.stdout:setvbuf("line")
 local cfg = {
   data = { max = nil, tvr = 0.1 },
   tok = { ngram_min = 5, ngram_max = 5 },
-  emb = { n_landmarks = 1024*8, trace_tol = 0.01, kernel = "cosine" },
+  emb = { n_landmarks = 1024*4, trace_tol = 0.01, kernel = "cosine" },
   ridge = {
-    lambda = { def = 4.3945e-04 },
-    propensity_a = { def = 0.3774 },
-    propensity_b = { def = 4.0500 },
+    lambda = { def = 1.55e-01 },
+    propensity_a = { def = 0.57 },
+    propensity_b = { def = 7.80 },
     classes = 20,
     search_trials = 0,
     k = 1,
   },
 }
 
-test("newsgroups csr+kernel", function ()
+test("newsgroups classifier", function ()
 
   local stopwatch = utc.stopwatch()
   local function sw()
@@ -99,7 +97,7 @@ test("newsgroups csr+kernel", function ()
     best_params.lambda, best_params.propensity_a, best_params.propensity_b, sw())
 
   str.printf("[Eval] Labeling splits\n")
-  local val_off, val_labels = ridge_obj:label(val_codes, validate.n, 1)
+  local _, val_labels = ridge_obj:label(val_codes, validate.n, 1)
   val_codes = nil
   local test_codes = encode_texts(test_set.problems, test_set.n)
   test_set.problems = nil
@@ -111,24 +109,6 @@ test("newsgroups csr+kernel", function ()
   local test_stats = eval.class_accuracy(test_labels, test_set.sol_offsets, test_set.sol_neighbors, test_set.n, n_classes)
   str.printf("[Class] F1: val=%.2f test=%.2f %s\n",
     val_stats.f1, test_stats.f1, sw())
-
-  local _, val_oracle = eval.retrieval_ks({
-    pred_offsets = val_off, pred_neighbors = val_labels,
-    expected_offsets = val_label_off, expected_neighbors = val_label_nbr,
-  })
-  str.printf("[Retrieval] val: saF1=%.4f miF1=%.4f %s\n",
-    val_oracle.sample_f1, val_oracle.micro_f1, sw())
-
-  str.printf("\n[Per-class Test Accuracy]\n")
-  local class_order = arr.range(1, n_classes)
-  arr.sort(class_order, function (a, b)
-    return test_stats.classes[a].f1 < test_stats.classes[b].f1
-  end)
-  for _, c in ipairs(class_order) do
-    local ts = test_stats.classes[c]
-    local cat = train.categories[c] or ("class_" .. (c - 1))
-    str.printf("  %-28s  F1=%.2f  P=%.2f  R=%.2f\n", cat, ts.f1, ts.precision, ts.recall)
-  end
 
   local _, total = stopwatch()
   str.printf("\nTotal: %.1fs\n", total)
