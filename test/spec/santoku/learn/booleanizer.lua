@@ -1,28 +1,75 @@
 local booleanizer = require("santoku.learn.booleanizer")
-local dvec = require("santoku.dvec")
 local ivec = require("santoku.ivec")
+local dvec = require("santoku.dvec")
 local test = require("santoku.test")
--- local serialize = require("santoku.serialize")
 
 test("booleanizer", function ()
 
   test("continuous", function ()
-    local bzr = booleanizer.create({ n_thresholds = 1 })
-    local data = dvec.create({ 1, 2, 3, 4, 5, 6, 7, 8, 9 })
+    local bzr = booleanizer.create()
+    local data = { 1, 2, 3, 4, 5, 6, 7, 8, 9 }
     local dims = 3
-    bzr:observe(data, dims)
+    local samples = #data / dims
+    for s = 0, samples - 1 do
+      for d = 0, dims - 1 do
+        bzr:observe(d, data[s * dims + d + 1])
+      end
+    end
     bzr:finalize()
-    local bits = bzr:encode(data, dims) -- luacheck: ignore
-    -- print(serialize(bits:table()))
-    local top_v = ivec.create(2)
+    local n_bits, n_dense = bzr:features()
+    assert(n_bits == 0)
+    assert(n_dense == 3)
+    local offsets = ivec.create()
+    local neighbors = ivec.create()
+    local dense = dvec.create()
+    offsets:push(0)
+    for s = 0, samples - 1 do
+      for d = 0, dims - 1 do
+        bzr:encode(d, data[s * dims + d + 1], neighbors, dense)
+      end
+      offsets:push(neighbors:size())
+    end
+    assert(offsets:size() == 4)
+    assert(neighbors:size() == 0)
+    assert(dense:size() == 9)
+  end)
+
+  test("mixed", function ()
+    local bzr = booleanizer.create({ categorical = { 0 } })
+    local data = { 1, 2, 3, 1, 5, 6, 2, 8, 9 }
+    local dims = 3
+    local samples = #data / dims
+    for s = 0, samples - 1 do
+      for d = 0, dims - 1 do
+        bzr:observe(d, data[s * dims + d + 1])
+      end
+    end
+    bzr:finalize()
+    local n_bits, n_dense = bzr:features()
+    assert(n_bits == 2)
+    assert(n_dense == 2)
+    local offsets = ivec.create()
+    local neighbors = ivec.create()
+    local dense = dvec.create()
+    offsets:push(0)
+    for s = 0, samples - 1 do
+      for d = 0, dims - 1 do
+        bzr:encode(d, data[s * dims + d + 1], neighbors, dense)
+      end
+      offsets:push(neighbors:size())
+    end
+    assert(offsets:size() == 4)
+    assert(neighbors:size() == 3)
+    assert(dense:size() == 6)
+    local top_v = ivec.create(1)
     top_v:fill_indices()
     bzr:restrict(top_v)
+    local n_bits2 = bzr:features()
+    assert(n_bits2 == 1)
   end)
 
   test("entity-attribute-value", function ()
-    local bzr = booleanizer.create({ n_thresholds = 2 })
-
-    -- Observe: (feature_name, value)
+    local bzr = booleanizer.create()
     bzr:observe("title", "The Great Gatsby")
     bzr:observe("title", "1984")
     bzr:observe("author", "F. Scott Fitzgerald")
@@ -31,25 +78,26 @@ test("booleanizer", function ()
     bzr:observe("year", 1949)
     bzr:observe("rating", 4.5)
     bzr:observe("rating", 4.8)
-
     bzr:finalize()
-
-    -- Encode: (sample_id, feature_name, value, output_ivec)
-    local bits1 = ivec.create()
-    bzr:encode(0, "title", "The Great Gatsby", bits1)
-    bzr:encode(0, "author", "F. Scott Fitzgerald", bits1)
-    bzr:encode(0, "year", 1925, bits1)
-    bzr:encode(0, "rating", 4.5, bits1)
-
-    local bits2 = ivec.create()
-    bzr:encode(1, "title", "1984", bits2)
-    bzr:encode(1, "author", "George Orwell", bits2)
-    bzr:encode(1, "year", 1949, bits2)
-    bzr:encode(1, "rating", 4.8, bits2)
-
-    assert(bits1:size() > 0)
-    assert(bits2:size() > 0)
+    local n_bits, n_dense = bzr:features()
+    assert(n_bits == 4)
+    assert(n_dense == 2)
+    local offsets = ivec.create()
+    local neighbors = ivec.create()
+    local dense = dvec.create()
+    offsets:push(0)
+    bzr:encode("title", "The Great Gatsby", neighbors, dense)
+    bzr:encode("author", "F. Scott Fitzgerald", neighbors, dense)
+    bzr:encode("year", 1925, neighbors, dense)
+    bzr:encode("rating", 4.5, neighbors, dense)
+    offsets:push(neighbors:size())
+    bzr:encode("title", "1984", neighbors, dense)
+    bzr:encode("author", "George Orwell", neighbors, dense)
+    bzr:encode("year", 1949, neighbors, dense)
+    bzr:encode("rating", 4.8, neighbors, dense)
+    offsets:push(neighbors:size())
+    assert(neighbors:size() == 4)
+    assert(dense:size() == 4)
   end)
 
 end)
-
