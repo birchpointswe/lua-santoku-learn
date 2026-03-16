@@ -13,9 +13,9 @@ local utc = require("santoku.utc")
 io.stdout:setvbuf("line")
 
 local cfg = {
-  data = { ttr = 0.8, tvr = 0.10, max = nil },
-  emb = { n_landmarks = 1024*8, trace_tol = nil, kernel = "arccos1" },
-  ridge = { lambda = { min = 0, max = 4, def = 1.5612e-02 }, search_trials = 80 },
+  data = { ttr = 0.8, tvr = 0.1, max = nil },
+  emb = { n_landmarks = 1024*4, trace_tol = 0.01, kernel = "ntk" },
+  ridge = { lambda = { def = 1.11e-02 }, search_trials = 0 },
 }
 
 test("housing regressor", function ()

@@ -167,7 +167,7 @@ typedef struct {
 
 static tk_aho_scan_result_t tk_aho_scan (
   tk_aho_t *a, const char **texts, size_t *tlens,
-  int n_texts, bool longest
+  int n_texts, bool longest, tk_pvec_t *exc
 ) {
   tk_aho_match_t **pt_matches = (tk_aho_match_t **)calloc((uint64_t)n_texts, sizeof(tk_aho_match_t *));
   int64_t *pt_counts = (int64_t *)calloc((uint64_t)n_texts, sizeof(int64_t));
@@ -220,6 +220,20 @@ static tk_aho_scan_result_t tk_aho_scan (
             local_m[write++] = local_m[j];
             last_end = local_m[j].end;
           }
+        }
+        m_n = write;
+      }
+
+      if (exc && exc->n > 0 && m_n > 0) {
+        int64_t write = 0;
+        for (int64_t j = 0; j < m_n; j++) {
+          bool excluded = false;
+          for (uint64_t k = 0; k < exc->n; k++) {
+            if (local_m[j].start < exc->a[k].p && local_m[j].end > exc->a[k].i) {
+              excluded = true; break;
+            }
+          }
+          if (!excluded) local_m[write++] = local_m[j];
         }
         m_n = write;
       }
@@ -432,6 +446,12 @@ static int tk_aho_predict_lua (lua_State *L)
 
   bool longest = tk_lua_foptboolean(L, 2, "aho.predict", "longest", false);
 
+  tk_pvec_t *exc = NULL;
+  lua_getfield(L, 2, "exclude");
+  if (lua_type(L, -1) == LUA_TUSERDATA)
+    exc = tk_pvec_peek(L, -1, "exclude");
+  lua_pop(L, 1);
+
   const char **texts = (const char **)malloc((uint64_t)n_texts * sizeof(const char *));
   size_t *tlens = (size_t *)malloc((uint64_t)n_texts * sizeof(size_t));
   for (int ti = 0; ti < n_texts; ti++) {
@@ -440,7 +460,7 @@ static int tk_aho_predict_lua (lua_State *L)
     lua_pop(L, 1);
   }
 
-  tk_aho_scan_result_t res = tk_aho_scan(a, texts, tlens, n_texts, longest);
+  tk_aho_scan_result_t res = tk_aho_scan(a, texts, tlens, n_texts, longest, exc);
   free(texts);
   free(tlens);
 
@@ -484,6 +504,12 @@ static int tk_aho_tag_lua (lua_State *L)
 
   bool longest = tk_lua_foptboolean(L, 2, "aho.tag", "longest", false);
 
+  tk_pvec_t *exc = NULL;
+  lua_getfield(L, 2, "exclude");
+  if (lua_type(L, -1) == LUA_TUSERDATA)
+    exc = tk_pvec_peek(L, -1, "exclude");
+  lua_pop(L, 1);
+
   lua_getfenv(L, 1);
   lua_getfield(L, -1, "names");
   int names_idx = lua_gettop(L);
@@ -497,7 +523,7 @@ static int tk_aho_tag_lua (lua_State *L)
     lua_pop(L, 1);
   }
 
-  tk_aho_scan_result_t res = tk_aho_scan(a, texts, tlens, n_texts, longest);
+  tk_aho_scan_result_t res = tk_aho_scan(a, texts, tlens, n_texts, longest, exc);
 
   lua_newtable(L);
   int result_idx = lua_gettop(L);

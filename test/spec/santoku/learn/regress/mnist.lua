@@ -1,4 +1,3 @@
-local arr = require("santoku.array")
 local csr_m = require("santoku.csr")
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
@@ -13,18 +12,18 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   data = { ttr = 0.8, tvr = 0.1, max = nil, features = 784 },
-  emb = { n_landmarks = 1024*8, trace_tol = 0.01, kernel = "arccos1" },
+  emb = { n_landmarks = 1024*4, trace_tol = 0.01, kernel = "expcos" },
   ridge = {
-    lambda = { def = 2.3163e-05 },
+    lambda = { def = 2.32e-05 },
     propensity_a = { def = 0.55 },
-    propensity_b = { def = 1.5 },
+    propensity_b = { def = 1.50 },
     classes = 10,
     search_trials = 0,
     k = 1,
   },
 }
 
-test("mnist csr+pos2d", function ()
+test("mnist classifier", function ()
 
   local stopwatch = utc.stopwatch()
   local function sw()
@@ -45,8 +44,8 @@ test("mnist csr+pos2d", function ()
   local train_p_off, train_p_nbr = csr_m.subsample(
     dataset.problem_offsets, dataset.problem_neighbors, train.ids)
 
-  str.printf("[Spectral] Cholesky trace_tol=%s\n",
-    tostring(cfg.emb.trace_tol))
+  str.printf("[Spectral] Cholesky trace_tol=%s kernel=%s\n",
+    tostring(cfg.emb.trace_tol), cfg.emb.kernel)
   local _, sp_enc, gram = spectral.encode({
     kernel = cfg.emb.kernel, offsets = train_p_off, tokens = train_p_nbr,
     n_samples = train.n, n_tokens = n_features,
@@ -84,7 +83,7 @@ test("mnist csr+pos2d", function ()
     best_params.lambda, best_params.propensity_a, best_params.propensity_b, sw())
 
   str.printf("[Eval] Labeling splits\n")
-  local val_off, val_labels = ridge_obj:label(val_codes, validate.n, 1)
+  local _, val_labels = ridge_obj:label(val_codes, validate.n, 1)
   val_codes = nil
   local test_codes = encode(test_set.ids, test_set.n)
   local _, test_labels = ridge_obj:label(test_codes, test_set.n, 1)
@@ -95,23 +94,6 @@ test("mnist csr+pos2d", function ()
   local test_stats = eval.class_accuracy(test_labels, test_set.sol_offsets, test_set.sol_neighbors, test_set.n, n_classes)
   str.printf("[Class] F1: val=%.2f test=%.2f %s\n",
     val_stats.f1, test_stats.f1, sw())
-
-  local _, val_oracle = eval.retrieval_ks({
-    pred_offsets = val_off, pred_neighbors = val_labels,
-    expected_offsets = val_label_off, expected_neighbors = val_label_nbr,
-  })
-  str.printf("[Retrieval] val: saF1=%.4f miF1=%.4f %s\n",
-    val_oracle.sample_f1, val_oracle.micro_f1, sw())
-
-  str.printf("\n[Per-class Test Accuracy]\n")
-  local class_order = arr.range(1, n_classes)
-  arr.sort(class_order, function (a, b)
-    return test_stats.classes[a].f1 < test_stats.classes[b].f1
-  end)
-  for _, c in ipairs(class_order) do
-    local ts = test_stats.classes[c]
-    str.printf("  digit_%-2d  F1=%.2f  P=%.2f  R=%.2f\n", c - 1, ts.f1, ts.precision, ts.recall)
-  end
 
   local _, total = stopwatch()
   str.printf("\nTotal: %.1fs\n", total)

@@ -17,32 +17,29 @@
 
 typedef enum {
   TK_SPECTRAL_COSINE = 0,
-  TK_SPECTRAL_ARCCOS0 = 1,
-  TK_SPECTRAL_ARCCOS1 = 2,
-  TK_SPECTRAL_HELLINGER = 3,
-  TK_SPECTRAL_POLY2 = 4,
-  TK_SPECTRAL_POLY3 = 5,
+  TK_SPECTRAL_NNGP = 1,
+  TK_SPECTRAL_NTK = 2,
+  TK_SPECTRAL_EXPCOS = 3,
+  TK_SPECTRAL_GEOLAPLACE = 4,
 } tk_spectral_kernel_t;
 
 static inline double tk_spectral_kernel_apply (tk_spectral_kernel_t k, double raw, double denom) {
-  if (k == TK_SPECTRAL_HELLINGER)
-    return raw;
   double c = denom > 1e-15 ? raw / denom : 0.0;
   if (c > 1.0) c = 1.0;
   if (c < -1.0) c = -1.0;
-  if (k == TK_SPECTRAL_ARCCOS0)
-    return 1.0 - acos(c) / M_PI;
-  if (k == TK_SPECTRAL_ARCCOS1) {
+  if (k == TK_SPECTRAL_NNGP) {
     double t = acos(c);
     return denom * (sin(t) + (M_PI - t) * c) / M_PI;
   }
-  if (k == TK_SPECTRAL_POLY2) {
-    double p = c + 1.0;
-    return p * p;
+  if (k == TK_SPECTRAL_NTK) {
+    double t = acos(c);
+    return raw * (1.0 - t / M_PI) + denom * (sin(t) + (M_PI - t) * c) / M_PI;
   }
-  if (k == TK_SPECTRAL_POLY3) {
-    double p = c + 1.0;
-    return p * p * p;
+  if (k == TK_SPECTRAL_EXPCOS)
+    return exp(c - 1.0);
+  if (k == TK_SPECTRAL_GEOLAPLACE) {
+    double d2 = 2.0 * (1.0 - c);
+    return exp(-sqrt(d2 > 0.0 ? d2 : 0.0));
   }
   return c;
 }
@@ -166,13 +163,40 @@ static inline void tk_spectral_sample_landmarks (
   double *proposal = (double *)malloc(n_docs * sizeof(double));
   double *proposal_cdf = (double *)malloc(n_docs * sizeof(double));
 
+  int64_t *piv_csc_off = NULL;
+  uint8_t *piv_csc_piv = NULL;
+  float *piv_csc_val = NULL;
+  int64_t *piv_csc_pos = NULL;
+  uint64_t piv_csc_cap = 0;
+  if (mod->type == TK_MOD_CSR) {
+    uint64_t csr_n_tokens = mod->csr_n_tokens;
+    piv_csc_off = (int64_t *)calloc(csr_n_tokens + 1, sizeof(int64_t));
+    piv_csc_pos = (int64_t *)malloc(csr_n_tokens * sizeof(int64_t));
+    uint64_t max_nnz = 0;
+    for (uint64_t i = 0; i < n_docs; i++) {
+      uint64_t nnz = (uint64_t)(mod->csr_offsets[i + 1] - mod->csr_offsets[i]);
+      if (nnz > max_nnz) max_nnz = nnz;
+    }
+    piv_csc_cap = TK_CHOL_BLOCK * max_nnz;
+    piv_csc_piv = (uint8_t *)malloc(piv_csc_cap);
+    piv_csc_val = (float *)malloc(piv_csc_cap * sizeof(float));
+  }
+
+  double *dense_kip = NULL;
+  if (mod->type == TK_MOD_DENSE)
+    dense_kip = (double *)malloc(n_docs * TK_CHOL_BLOCK * sizeof(double));
+
   if (!kip_block || !cross_dots || !pivot_prev_L
       || (max_d_input > 0 && !pivot_dense_rows)
-      || !proposal || !proposal_cdf) {
+      || !proposal || !proposal_cdf
+      || (mod->type == TK_MOD_CSR && (!piv_csc_off || !piv_csc_piv || !piv_csc_val || !piv_csc_pos))
+      || (mod->type == TK_MOD_DENSE && !dense_kip)) {
     free(kip_block); free(cross_dots);
     free(pivot_prev_L);
     free(pivot_dense_rows);
     free(proposal); free(proposal_cdf);
+    free(piv_csc_off); free(piv_csc_piv); free(piv_csc_val); free(piv_csc_pos);
+    free(dense_kip);
     luaL_error(L, "sample_landmarks: out of memory (buffers)");
     return;
   }
@@ -180,15 +204,14 @@ static inline void tk_spectral_sample_landmarks (
   #pragma omp parallel for reduction(+:initial_trace)
   for (uint64_t i = 0; i < n_docs; i++) {
     double diag = 1.0;
-    if (kernel == TK_SPECTRAL_ARCCOS1 || kernel == TK_SPECTRAL_HELLINGER) {
+    if (kernel != TK_SPECTRAL_COSINE && kernel != TK_SPECTRAL_EXPCOS && kernel != TK_SPECTRAL_GEOLAPLACE) {
+      double n2 = 1.0;
       if (mod->type == TK_MOD_CSR)
-        diag = mod->csr_norms[i] * mod->csr_norms[i];
+        n2 = mod->csr_norms[i] * mod->csr_norms[i];
       else if (mod->type == TK_MOD_DENSE)
-        diag = mod->dense_norms[i] * mod->dense_norms[i];
-    } else if (kernel == TK_SPECTRAL_POLY2) {
-      diag = 4.0;
-    } else if (kernel == TK_SPECTRAL_POLY3) {
-      diag = 8.0;
+        n2 = mod->dense_norms[i] * mod->dense_norms[i];
+      if (kernel == TK_SPECTRAL_NTK) diag = 2.0 * n2;
+      else diag = n2;
     }
     residual[i] = diag;
     initial_trace += diag;
@@ -275,7 +298,6 @@ static inline void tk_spectral_sample_landmarks (
         phi_arr[b] = csr_offsets[blk_pivots[b] + 1];
       }
       {
-        int64_t *piv_csc_off = (int64_t *)calloc(csr_n_tokens + 1, sizeof(int64_t));
         for (uint64_t b = 0; b < np; b++) {
           int64_t p = plo_arr[b];
           while (p < phi_arr[b]) {
@@ -287,9 +309,11 @@ static inline void tk_spectral_sample_landmarks (
         for (uint64_t t = 0; t < csr_n_tokens; t++)
           piv_csc_off[t + 1] += piv_csc_off[t];
         uint64_t total_pnnz = (uint64_t)piv_csc_off[csr_n_tokens];
-        uint8_t *piv_csc_piv = (uint8_t *)malloc(total_pnnz);
-        float *piv_csc_val = (float *)malloc(total_pnnz * sizeof(float));
-        int64_t *piv_csc_pos = (int64_t *)malloc(csr_n_tokens * sizeof(int64_t));
+        if (total_pnnz > piv_csc_cap) {
+          piv_csc_cap = total_pnnz;
+          piv_csc_piv = (uint8_t *)realloc(piv_csc_piv, piv_csc_cap);
+          piv_csc_val = (float *)realloc(piv_csc_val, piv_csc_cap * sizeof(float));
+        }
         memcpy(piv_csc_pos, piv_csc_off, csr_n_tokens * sizeof(int64_t));
         for (uint64_t b = 0; b < np; b++) {
           int64_t p = plo_arr[b];
@@ -302,7 +326,6 @@ static inline void tk_spectral_sample_landmarks (
             piv_csc_val[pos] = sum;
           }
         }
-        free(piv_csc_pos);
         const int64_t *restrict pc_off = piv_csc_off;
         const uint8_t *restrict pc_piv = piv_csc_piv;
         const float *restrict pc_val = piv_csc_val;
@@ -324,9 +347,7 @@ static inline void tk_spectral_sample_landmarks (
           for (uint64_t b = 0; b < np; b++)
             kip_block[i * np + b] = (float)kip_row[b];
         }
-        free(piv_csc_off);
-        free(piv_csc_piv);
-        free(piv_csc_val);
+        memset(piv_csc_off, 0, (csr_n_tokens + 1) * sizeof(int64_t));
       }
       {
         double pnorms[TK_CHOL_BLOCK];
@@ -364,7 +385,6 @@ static inline void tk_spectral_sample_landmarks (
         memcpy(pivot_dense_rows + b * (uint64_t)di,
                dense + blk_pivots[b] * (uint64_t)di,
                (uint64_t)di * sizeof(double));
-      double *dense_kip = (double *)malloc(n_docs * np * sizeof(double));
       cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
         (int)n_docs, (int)np, (int)di, 1.0,
         dense, (int)di,
@@ -382,7 +402,6 @@ static inline void tk_spectral_sample_landmarks (
               dense_kip[i * np + b], denom);
           }
       }
-      free(dense_kip);
     }
 
     uint64_t jb = actual_landmarks;
@@ -445,6 +464,11 @@ static inline void tk_spectral_sample_landmarks (
   free(pivot_dense_rows);
   free(proposal);
   free(proposal_cdf);
+  free(piv_csc_off);
+  free(piv_csc_piv);
+  free(piv_csc_val);
+  free(piv_csc_pos);
+  free(dense_kip);
 
   tk_ivec_t *landmark_ids = tk_ivec_create(L, actual_landmarks, 0, 0);
   for (uint64_t i = 0; i < actual_landmarks; i++)
@@ -605,21 +629,18 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
   if (enc->mod_type == TK_MOD_CSR) {
     if (!in_offsets) { free(sims_f); return luaL_error(L, "encode: CSR modality but no offsets"); }
     uint64_t nnz = in_tokens->n;
-    if (!in_values_f || enc->kernel == TK_SPECTRAL_HELLINGER) {
+    if (!in_values_f) {
       csr_sval = (float *)malloc(nnz * sizeof(float));
-      if (in_values_f)
-        memcpy(csr_sval, in_values_f->a, nnz * sizeof(float));
-      else if (in_values_d)
+      if (in_values_d)
         for (uint64_t i = 0; i < nnz; i++) csr_sval[i] = (float)in_values_d->a[i];
       else
         for (uint64_t i = 0; i < nnz; i++) csr_sval[i] = 1.0f;
-      if (enc->kernel == TK_SPECTRAL_HELLINGER)
-        for (uint64_t i = 0; i < nnz; i++) csr_sval[i] = sqrtf(fabsf(csr_sval[i]));
       csr_sv = csr_sval;
     } else {
       csr_sv = in_values_f->a;
     }
     csr_norms = (float *)calloc(n_samples, sizeof(float));
+    #pragma omp parallel for schedule(static)
     for (uint64_t s = 0; s < n_samples; s++) {
       int64_t lo = in_offsets->a[s], hi = in_offsets->a[s + 1];
       double ss = 0.0;
@@ -628,6 +649,16 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
         ss += v * v;
       }
       csr_norms[s] = (float)sqrt(ss);
+    }
+  }
+
+  int nt = omp_get_max_threads();
+  float *row_bufs = NULL;
+  if (enc->mod_type == TK_MOD_CSR) {
+    row_bufs = (float *)calloc((uint64_t)nt * m, sizeof(float));
+    if (!row_bufs) {
+      free(sims_f); free(csr_sval); free(csr_norms);
+      return luaL_error(L, "encode: out of memory (row_bufs)");
     }
   }
 
@@ -642,7 +673,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
       const float *restrict csc_vals = enc->csc_values;
       #pragma omp parallel
       {
-        float *row_buf = (float *)calloc(m, sizeof(float));
+        float *row_buf = row_bufs + (uint64_t)omp_get_thread_num() * m;
         #pragma omp for schedule(static)
         for (uint64_t i = 0; i < blk; i++) {
           float *restrict sims_row = sims_f + i * m;
@@ -662,7 +693,6 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
             row_buf[j] = 0.0f;
           }
         }
-        free(row_buf);
       }
 
     } else if (enc->mod_type == TK_MOD_DENSE) {
@@ -673,18 +703,10 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
       uint64_t src_off_base = base * ddi;
       uint64_t cnt = blk * (uint64_t)di;
       if (in_codes_fv) {
-        if (enc->kernel == TK_SPECTRAL_HELLINGER)
-          for (uint64_t i = 0; i < cnt; i++)
-            src_f[i] = sqrtf(fabsf(in_codes_fv->a[src_off_base + i]));
-        else
-          memcpy(src_f, in_codes_fv->a + src_off_base, cnt * sizeof(float));
+        memcpy(src_f, in_codes_fv->a + src_off_base, cnt * sizeof(float));
       } else {
-        if (enc->kernel == TK_SPECTRAL_HELLINGER)
-          for (uint64_t i = 0; i < cnt; i++)
-            src_f[i] = sqrtf(fabsf((float)in_codes_dv->a[src_off_base + i]));
-        else
-          for (uint64_t i = 0; i < cnt; i++)
-            src_f[i] = (float)in_codes_dv->a[src_off_base + i];
+        for (uint64_t i = 0; i < cnt; i++)
+          src_f[i] = (float)in_codes_dv->a[src_off_base + i];
       }
       cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
         (int)blk, (int)m, (int)di, 1.0f,
@@ -726,6 +748,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
   }
 
   free(sims_f);
+  free(row_bufs);
   free(csr_sval);
   free(csr_norms);
   lua_pushvalue(L, out_fv_idx);
@@ -868,7 +891,6 @@ static inline int tm_encode (lua_State *L) {
   memset(&mod, 0, sizeof(mod));
   float *csr_values_owned = NULL;
   double *csr_norms_owned = NULL;
-  double *dense_owned = NULL;
   double *dense_norms_owned = NULL;
 
   lua_getfield(L, 1, "offsets");
@@ -949,24 +971,18 @@ static inline int tm_encode (lua_State *L) {
   lua_pop(L, 1);
   tk_spectral_kernel_t kernel = TK_SPECTRAL_COSINE;
   if (strcmp(kernel_str, "cosine") == 0) kernel = TK_SPECTRAL_COSINE;
-  else if (strcmp(kernel_str, "arccos0") == 0) kernel = TK_SPECTRAL_ARCCOS0;
-  else if (strcmp(kernel_str, "arccos1") == 0) kernel = TK_SPECTRAL_ARCCOS1;
-  else if (strcmp(kernel_str, "hellinger") == 0) kernel = TK_SPECTRAL_HELLINGER;
-  else if (strcmp(kernel_str, "poly2") == 0) kernel = TK_SPECTRAL_POLY2;
-  else if (strcmp(kernel_str, "poly3") == 0) kernel = TK_SPECTRAL_POLY3;
+  else if (strcmp(kernel_str, "nngp") == 0) kernel = TK_SPECTRAL_NNGP;
+  else if (strcmp(kernel_str, "ntk") == 0) kernel = TK_SPECTRAL_NTK;
+  else if (strcmp(kernel_str, "expcos") == 0) kernel = TK_SPECTRAL_EXPCOS;
+  else if (strcmp(kernel_str, "geolaplace") == 0) kernel = TK_SPECTRAL_GEOLAPLACE;
   else return luaL_error(L, "encode: unknown kernel '%s'", kernel_str);
 
   if (has_csr) {
     uint64_t nnz = (uint64_t)(mod.csr_offsets[n_samples] - mod.csr_offsets[0]);
-    if (!mod.csr_values || kernel == TK_SPECTRAL_HELLINGER) {
+    if (!mod.csr_values) {
       csr_values_owned = (float *)malloc(nnz * sizeof(float));
-      if (mod.csr_values) {
-        for (uint64_t i = 0; i < nnz; i++)
-          csr_values_owned[i] = sqrtf(fabsf(mod.csr_values[i]));
-      } else {
-        for (uint64_t i = 0; i < nnz; i++)
-          csr_values_owned[i] = 1.0f;
-      }
+      for (uint64_t i = 0; i < nnz; i++)
+        csr_values_owned[i] = 1.0f;
       mod.csr_values = csr_values_owned;
     }
     csr_norms_owned = (double *)calloc(n_samples, sizeof(double));
@@ -984,13 +1000,6 @@ static inline int tm_encode (lua_State *L) {
 
   if (has_dense) {
     int64_t di = mod.d_input;
-    if (kernel == TK_SPECTRAL_HELLINGER) {
-      uint64_t nd = n_samples * (uint64_t)di;
-      dense_owned = (double *)malloc(nd * sizeof(double));
-      for (uint64_t i = 0; i < nd; i++)
-        dense_owned[i] = sqrt(fabs(mod.dense[i]));
-      mod.dense = dense_owned;
-    }
     dense_norms_owned = (double *)malloc(n_samples * sizeof(double));
     for (uint64_t i = 0; i < n_samples; i++)
       dense_norms_owned[i] = cblas_dnrm2((int)di, mod.dense + i * (uint64_t)di, 1);
@@ -1049,7 +1058,7 @@ static inline int tm_encode (lua_State *L) {
     if (lm_chol) tk_fvec_destroy(lm_chol);
     free(full_chol);
     free(csr_values_owned); free(csr_norms_owned);
-    free(dense_owned); free(dense_norms_owned); free(dense_from_fvec);
+    free(dense_norms_owned); free(dense_from_fvec);
     lua_pushnil(L);
     lua_pushnil(L);
     return 2;
@@ -1112,17 +1121,38 @@ static inline int tm_encode (lua_State *L) {
     for (int64_t base = 0; base < (int64_t)nc; base += tile_size) {
       int64_t bs = (base + tile_size <= (int64_t)nc) ? tile_size : (int64_t)nc - base;
       uint64_t ubs = (uint64_t)bs;
-      for (uint64_t j = 0; j < d; j++) {
-        double *col = tile_buf + j * ubs;
-        float *src = full_chol + j * nc + base;
-        for (uint64_t i = 0; i < ubs; i++) {
-          double v = (double)src[i];
-          col[i] = v;
-          col_mean[j] += v;
-          if (transform_codes)
+      if (transform_codes) {
+        for (uint64_t j = 0; j < d; j++) {
+          double *col = tile_buf + j * ubs;
+          float *src = full_chol + j * nc + base;
+          for (uint64_t i = 0; i < ubs; i++) {
+            double v = (double)src[i];
+            col[i] = v;
+            col_mean[j] += v;
             train_codes->a[((uint64_t)base + i) * d + j] = src[i];
-          else if (transform_sign && v >= 0.0)
-            sign_data[((uint64_t)base + i) * sign_row_bytes + j / 8] |= (1u << (j % 8));
+          }
+        }
+      } else if (transform_sign) {
+        for (uint64_t j = 0; j < d; j++) {
+          double *col = tile_buf + j * ubs;
+          float *src = full_chol + j * nc + base;
+          for (uint64_t i = 0; i < ubs; i++) {
+            double v = (double)src[i];
+            col[i] = v;
+            col_mean[j] += v;
+            if (v >= 0.0)
+              sign_data[((uint64_t)base + i) * sign_row_bytes + j / 8] |= (1u << (j % 8));
+          }
+        }
+      } else {
+        for (uint64_t j = 0; j < d; j++) {
+          double *col = tile_buf + j * ubs;
+          float *src = full_chol + j * nc + base;
+          for (uint64_t i = 0; i < ubs; i++) {
+            double v = (double)src[i];
+            col[i] = v;
+            col_mean[j] += v;
+          }
         }
       }
       cblas_dsyrk(CblasColMajor, CblasUpper, CblasTrans,
@@ -1175,21 +1205,29 @@ static inline int tm_encode (lua_State *L) {
   }
 
   if (!build_gram) {
+    #define TK_TILE 32
     if (transform_codes) {
-      #pragma omp parallel for schedule(static)
-      for (uint64_t j = 0; j < d; j++) {
-        float *col = full_chol + j * nc;
-        for (uint64_t i = 0; i < nc; i++)
-          train_codes->a[i * d + j] = col[i];
-      }
+      #pragma omp parallel for schedule(static) collapse(2)
+      for (uint64_t jj = 0; jj < d; jj += TK_TILE)
+        for (uint64_t ii = 0; ii < nc; ii += TK_TILE) {
+          uint64_t je = jj + TK_TILE < d ? jj + TK_TILE : d;
+          uint64_t ie = ii + TK_TILE < nc ? ii + TK_TILE : nc;
+          for (uint64_t j = jj; j < je; j++)
+            for (uint64_t i = ii; i < ie; i++)
+              train_codes->a[i * d + j] = full_chol[j * nc + i];
+        }
     } else if (transform_sign) {
-      for (uint64_t j = 0; j < d; j++) {
-        float *col = full_chol + j * nc;
-        for (uint64_t i = 0; i < nc; i++)
-          if (col[i] >= 0.0f)
-            sign_data[i * sign_row_bytes + j / 8] |= (1u << (j % 8));
-      }
+      for (uint64_t jj = 0; jj < d; jj += TK_TILE)
+        for (uint64_t ii = 0; ii < nc; ii += TK_TILE) {
+          uint64_t je = jj + TK_TILE < d ? jj + TK_TILE : d;
+          uint64_t ie = ii + TK_TILE < nc ? ii + TK_TILE : nc;
+          for (uint64_t j = jj; j < je; j++)
+            for (uint64_t i = ii; i < ie; i++)
+              if (full_chol[j * nc + i] >= 0.0f)
+                sign_data[i * sign_row_bytes + j / 8] |= (1u << (j % 8));
+        }
     }
+    #undef TK_TILE
     free(full_chol); ctx->full_chol = NULL;
   }
 
@@ -1279,7 +1317,7 @@ static inline int tm_encode (lua_State *L) {
     enc->dense_norms = (float *)malloc(m * sizeof(float));
     for (uint64_t j = 0; j < m; j++)
       enc->dense_norms[j] = cblas_snrm2((int)di, lmv + j * (uint64_t)di, 1);
-    free(dense_owned); free(dense_norms_owned); free(dense_from_fvec);
+    free(dense_norms_owned); free(dense_from_fvec);
   }
 
   if (has_bits) {
