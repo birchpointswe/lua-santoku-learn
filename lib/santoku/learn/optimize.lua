@@ -485,6 +485,131 @@ M.ridge = function (args)
   return r, best_params
 end
 
+M.krr = function (args)
+  local spectral = require("santoku.learn.spectral")
+  local ridge = require("santoku.learn.ridge")
+  local dense = args.val_targets ~= nil
+  local kernel_spec = args.kernel or "cosine"
+  local kernels = type(kernel_spec) == "table" and kernel_spec or { kernel_spec }
+  local param_names
+  if dense then param_names = { "kernel", "lambda" }
+  else param_names = { "kernel", "lambda", "propensity_a", "propensity_b" } end
+  args.kernel = kernels
+  args.lambda = spec_defaults(args.lambda, { min = 0, max = 4, def = 1.0 })
+  args.propensity_a = spec_defaults(args.propensity_a, { min = 0, max = 4.0, def = 0.5 })
+  args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 8.0, def = 1.5 })
+  local samplers = build_samplers(args, param_names)
+  local do_search = not all_fixed(samplers) and args.search_trials and args.search_trials > 0
+  local k = not dense and (args.k or 32) or nil
+  local use_gfm = not dense and args.gfm
+  local spectral_args = {
+    offsets = args.offsets, tokens = args.tokens, values = args.values,
+    n_tokens = args.n_tokens, n_samples = args.n_samples,
+    codes = args.codes, d_input = args.d_input,
+    bits = args.bits, d_bits = args.d_bits,
+    n_landmarks = args.n_landmarks, trace_tol = args.trace_tol,
+    label_offsets = args.label_offsets, label_neighbors = args.label_neighbors,
+    n_labels = args.n_labels,
+    targets = args.targets, n_targets = args.n_targets,
+  }
+  local kernel_data = {}
+  local encode_kernels = do_search and kernels or { samplers.kernel.center or kernels[1] }
+  for _, kname in ipairs(encode_kernels) do
+    spectral_args.kernel = kname
+    local _, sp_enc, gram = spectral.encode(spectral_args)
+    local val_codes
+    if args.val_encode then
+      val_codes = args.val_encode(sp_enc)
+    else
+      val_codes = sp_enc:encode({
+        offsets = args.val_offsets, tokens = args.val_tokens,
+        values = args.val_values, n_samples = args.val_n_samples,
+      })
+    end
+    gram:prepare(val_codes, args.val_n_samples)
+    kernel_data[kname] = { sp_enc = sp_enc, gram = gram, val_codes = val_codes }
+  end
+  collectgarbage("collect")
+  if not do_search then
+    local params = sample_params(samplers, param_names, nil, true)
+    local kd = kernel_data[params.kernel]
+    local r = ridge.create({
+      gram = kd.gram, lambda = params.lambda,
+      propensity_a = not dense and params.propensity_a or nil,
+      propensity_b = not dense and params.propensity_b or nil,
+    })
+    if use_gfm then
+      local po, pn, ps = kd.gram:label(params.lambda, k,
+        params.propensity_a, params.propensity_b)
+      local gfm = require("santoku.learn.gfm")
+      local g = gfm.create({ n_labels = args.n_labels })
+      g:calibrate({
+        offsets = po, neighbors = pn, scores = ps,
+        n_samples = args.val_n_samples,
+        expected_offsets = args.val_expected_offsets,
+        expected_neighbors = args.val_expected_neighbors,
+      })
+      return kd.sp_enc, r, kd.val_codes, params, g
+    end
+    return kd.sp_enc, r, kd.val_codes, params
+  end
+  local lbl_off_buf, lbl_nbr_buf, lbl_sco_buf, regress_buf
+  local function trial_fn (params)
+    local kd = kernel_data[params.kernel]
+    if dense then
+      regress_buf = kd.gram:regress(params.lambda, nil, nil, regress_buf)
+      local ra = evaluator.regression_accuracy(regress_buf, args.val_targets)
+      return -ra.mean, { mae = ra.mean, nmae = ra.nmae }
+    end
+    local po, pn, ps = kd.gram:label(params.lambda, k,
+      params.propensity_a, params.propensity_b,
+      lbl_off_buf, lbl_nbr_buf, lbl_sco_buf)
+    lbl_off_buf, lbl_nbr_buf, lbl_sco_buf = po, pn, ps
+    local _, oracle = evaluator.retrieval_ks({
+      pred_offsets = po, pred_neighbors = pn,
+      expected_offsets = args.val_expected_offsets,
+      expected_neighbors = args.val_expected_neighbors,
+    })
+    if use_gfm then
+      local gfm = require("santoku.learn.gfm")
+      local g = gfm.create({ n_labels = args.n_labels })
+      local gf1 = g:calibrate({
+        offsets = po, neighbors = pn, scores = ps,
+        n_samples = args.val_n_samples,
+        expected_offsets = args.val_expected_offsets,
+        expected_neighbors = args.val_expected_neighbors,
+      })
+      return gf1, { oracle = oracle, gfm_f1 = gf1 }
+    end
+    return oracle.micro_f1, { oracle = oracle }
+  end
+  local _, best_params = search({
+    param_names = param_names, samplers = samplers,
+    trials = args.search_trials or 30, trial_fn = trial_fn, each = args.each,
+    skip_final = true,
+  })
+  local best_kd = kernel_data[best_params.kernel]
+  local r = ridge.create({
+    gram = best_kd.gram, lambda = best_params.lambda,
+    propensity_a = not dense and best_params.propensity_a or nil,
+    propensity_b = not dense and best_params.propensity_b or nil,
+  })
+  if use_gfm then
+    local po, pn, ps = best_kd.gram:label(best_params.lambda, k,
+      best_params.propensity_a, best_params.propensity_b)
+    local gfm = require("santoku.learn.gfm")
+    local g = gfm.create({ n_labels = args.n_labels })
+    g:calibrate({
+      offsets = po, neighbors = pn, scores = ps,
+      n_samples = args.val_n_samples,
+      expected_offsets = args.val_expected_offsets,
+      expected_neighbors = args.val_expected_neighbors,
+    })
+    return best_kd.sp_enc, r, best_kd.val_codes, best_params, g
+  end
+  return best_kd.sp_enc, r, best_kd.val_codes, best_params
+end
+
 M.gfm = function (args)
   local gfm = require("santoku.learn.gfm")
   local g = gfm.create({ n_labels = args.n_labels })
