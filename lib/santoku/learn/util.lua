@@ -43,12 +43,16 @@ function M.make_ridge_log (stopwatch, metric_fmt)
       local d, dd = stopwatch()
       timing = str.format(" (%.1fs +%.1fs)", d, dd)
     end
+    local kern = ""
+    if p.kernel then
+      kern = str.format(" kernel=%s", p.kernel)
+    end
     local prop = ""
     if p.propensity_a then
       prop = str.format(" pa=%.2f pb=%.2f", p.propensity_a, p.propensity_b)
     end
-    str.printf("[Ridge %s] lambda=%.4e%s score=%.4f%s%s%s\n",
-      phase, p.lambda or 0, prop, score, detail, best, timing)
+    str.printf("[Ridge %s]%s lambda=%.4e%s score=%.4f%s%s%s\n",
+      phase, kern, p.lambda or 0, prop, score, detail, best, timing)
   end
 end
 

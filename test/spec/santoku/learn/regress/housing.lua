@@ -4,7 +4,6 @@ local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
 local fvec = require("santoku.fvec")
 local optimize = require("santoku.learn.optimize")
-local spectral = require("santoku.learn.spectral")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local util = require("santoku.learn.util")
@@ -14,8 +13,8 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   data = { ttr = 0.8, tvr = 0.1, max = nil },
-  emb = { n_landmarks = 1024*4, trace_tol = 0.01, kernel = "ntk" },
-  ridge = { lambda = { def = 1.11e-02 }, search_trials = 0 },
+  emb = { n_landmarks = 1024*32, trace_tol = 0.01, kernel = { "ntk", "cosine", "nngp", "expcos", "geolaplace" } },
+  ridge = { lambda = { def = 1.33e-01 }, search_trials = 800 },
 }
 
 test("housing regressor", function ()
@@ -50,19 +49,30 @@ test("housing regressor", function ()
     train.bit_offsets, train.bit_neighbors, train.continuous, train.n)
   local std_scores = csr.standardize(offsets, tokens, values, nil, n_tokens)
 
-  str.printf("[Spectral] Encoding n_landmarks=%d kernel=%s n_tokens=%d\n",
-    cfg.emb.n_landmarks, cfg.emb.kernel, n_tokens)
-  local _, sp_enc, gram = spectral.encode({
+  local val_off, val_tok, val_val = merge_features(
+    validate.bit_offsets, validate.bit_neighbors, validate.continuous, validate.n)
+  csr.standardize(val_off, val_tok, val_val, std_scores)
+
+  str.printf("[KRR] Encoding n_landmarks=%d n_tokens=%d\n",
+    cfg.emb.n_landmarks, n_tokens)
+  local sp_enc, ridge_obj, val_codes, best_params = optimize.krr({
     offsets = offsets, tokens = tokens, values = values, n_tokens = n_tokens,
     n_samples = train.n,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     kernel = cfg.emb.kernel,
     targets = train.targets, n_targets = 1,
+    val_offsets = val_off, val_tokens = val_tok, val_values = val_val,
+    val_n_samples = validate.n,
+    val_targets = validate.targets,
+    lambda = cfg.ridge.lambda,
+    search_trials = cfg.ridge.search_trials,
+    each = util.make_ridge_log(stopwatch),
   })
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   collectgarbage("collect")
   local emb_d = sp_enc:dims()
-  str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
+  str.printf("[KRR] emb_d=%d kernel=%s lambda=%.4e %s\n",
+    emb_d, best_params.kernel, best_params.lambda, sw())
 
   local function encode(bit_off, bit_nbr, continuous, n)
     local off, tok, val = merge_features(bit_off, bit_nbr, continuous, n)
@@ -72,28 +82,13 @@ test("housing regressor", function ()
     })
   end
 
-  local val_codes = encode(validate.bit_offsets, validate.bit_neighbors, validate.continuous, validate.n)
-
-  str.printf("[Ridge] Training\n")
-  local ridge_obj, best_params = optimize.ridge({
-    gram = gram,
-    val_codes = val_codes, val_n_samples = validate.n,
-    val_targets = validate.targets,
-    lambda = cfg.ridge.lambda,
-    search_trials = cfg.ridge.search_trials,
-    each = util.make_ridge_log(stopwatch),
-  })
-  gram = nil
-  collectgarbage("collect")
-  str.printf("[Ridge] lambda=%.4e %s\n", best_params.lambda, sw())
-
   str.printf("\n[Eval] Scoring splits\n")
   local regress_buf = fvec.create()
   local val_stats = eval.regression_accuracy(ridge_obj:regress(val_codes, validate.n, regress_buf), validate.targets)
-  val_codes = nil
+  val_codes = nil -- luacheck: ignore
   local test_codes = encode(test_set.bit_offsets, test_set.bit_neighbors, test_set.continuous, test_set.n)
   local test_stats = eval.regression_accuracy(ridge_obj:regress(test_codes, test_set.n, regress_buf), test_set.targets)
-  test_codes = nil
+  test_codes = nil -- luacheck: ignore
   str.printf("[Eval] Accuracy: val=%.1f%% test=%.1f%% %s\n",
     (1 - val_stats.nmae) * 100, (1 - test_stats.nmae) * 100, sw())
 

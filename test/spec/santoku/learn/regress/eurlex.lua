@@ -2,7 +2,6 @@ local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
 local optimize = require("santoku.learn.optimize")
-local spectral = require("santoku.learn.spectral")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local util = require("santoku.learn.util")
@@ -13,12 +12,12 @@ io.stdout:setvbuf("line")
 local cfg = {
   data = { max = nil },
   tok = { ngram = 6 },
-  emb = { n_landmarks = 1024*4, trace_tol = 0.01, kernel = "cosine", k = 256 },
+  emb = { n_landmarks = 1024*32, trace_tol = 0.01, kernel = { "cosine", "nngp", "ntk", "expcos", "geolaplace" }, k = 256 },
   ridge = {
-    lambda = { def = 1.01e-03 },
-    propensity_a = { def = 0.12 },
-    propensity_b = { def = 3.03 },
-    search_trials = 0,
+    lambda = { def = 8.70e-03 },
+    propensity_a = { def = 0.08 },
+    propensity_b = { def = 3.95 },
+    search_trials = 800,
   },
 }
 
@@ -53,19 +52,36 @@ test("eurlex classifier", function ()
     train_label_off, train_label_nbr, n_tokens, n_labels)
   str.printf("[Tokenize] ngram=%d tokens=%d %s\n", cfg.tok.ngram, n_tokens, sw())
 
-  str.printf("[Spectral] Cholesky trace_tol=%s kernel=%s\n",
-    tostring(cfg.emb.trace_tol), cfg.emb.kernel)
-  local _, sp_enc, gram = spectral.encode({
+  local _, val_off, val_tok, val_val = csr.tokenize({
+    texts = dev.text_iter(), ngram = cfg.tok.ngram, n_samples = dev.n, ngram_map = ngram_map,
+  })
+  csr.apply_bns(val_off, val_tok, val_val, bns_scores)
+
+  str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
+  local sp_enc, ridge_obj, dev_codes, best_params, gfm_obj = optimize.krr({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
     kernel = cfg.emb.kernel,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     label_offsets = train_label_off, label_neighbors = train_label_nbr, n_labels = n_labels,
+    val_offsets = val_off, val_tokens = val_tok, val_values = val_val,
+    val_n_samples = dev.n, gfm = true,
+    val_expected_offsets = dev_label_off, val_expected_neighbors = dev_label_nbr,
+    lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
+    propensity_b = cfg.ridge.propensity_b,
+    k = k, search_trials = cfg.ridge.search_trials,
+    each = util.make_ridge_log(stopwatch, function (m)
+      if m.gfm_f1 then return "oracle: " .. fmt_metrics(m.oracle) end
+      if m.oracle then return fmt_metrics(m.oracle) end
+      return ""
+    end),
   })
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   collectgarbage("collect")
   local emb_d = sp_enc:dims()
-  str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
+  str.printf("[KRR] emb_d=%d kernel=%s lambda=%.4e pa=%.4f pb=%.4f %s\n",
+    emb_d, best_params.kernel, best_params.lambda,
+    best_params.propensity_a, best_params.propensity_b, sw())
 
   local function encode_texts(text_iter_fn, n)
     local _, off, tok, val = csr.tokenize({
@@ -77,29 +93,6 @@ test("eurlex classifier", function ()
     })
   end
 
-  local dev_codes = encode_texts(dev.text_iter, dev.n)
-  collectgarbage("collect")
-
-  str.printf("\n[Ridge]\n")
-  local ridge_obj, best_params, gfm_obj = optimize.ridge({
-    gram = gram, gfm = true,
-    val_codes = dev_codes, val_n_samples = dev.n,
-    val_expected_offsets = dev_label_off, val_expected_neighbors = dev_label_nbr,
-    n_labels = n_labels,
-    lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
-    propensity_b = cfg.ridge.propensity_b,
-    k = k, search_trials = cfg.ridge.search_trials,
-    each = util.make_ridge_log(stopwatch, function (m)
-      if m.gfm_f1 then return "oracle: " .. fmt_metrics(m.oracle) end
-      if m.oracle then return fmt_metrics(m.oracle) end
-      return ""
-    end),
-  })
-  gram = nil
-  collectgarbage("collect")
-  str.printf("[Ridge] lambda=%.4e pa=%.4f pb=%.4f %s\n",
-    best_params.lambda, best_params.propensity_a, best_params.propensity_b, sw())
-
   local dv_off, dv_nbr, _ = ridge_obj:label(dev_codes, dev.n, k)
   local _, dv_oracle = eval.retrieval_ks({
     pred_offsets = dv_off, pred_neighbors = dv_nbr,
@@ -107,12 +100,12 @@ test("eurlex classifier", function ()
   })
   str.printf("[Dv Oracle] %s %s\n", fmt_metrics(dv_oracle), sw())
 
-  dev_codes = nil
+  dev_codes = nil -- luacheck: ignore
   collectgarbage("collect")
 
   local test_codes = encode_texts(test_set.text_iter, test_set.n)
   local ts_off, ts_nbr, ts_sco = ridge_obj:label(test_codes, test_set.n, k)
-  test_codes = nil; ridge_obj:shrink(); sp_enc:shrink()
+  test_codes = nil; ridge_obj:shrink(); sp_enc:shrink() -- luacheck: ignore
   collectgarbage("collect")
 
   local _, ts_oracle = eval.retrieval_ks({

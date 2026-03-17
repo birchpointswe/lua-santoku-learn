@@ -2,7 +2,6 @@ local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
 local optimize = require("santoku.learn.optimize")
-local spectral = require("santoku.learn.spectral")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local util = require("santoku.learn.util")
@@ -13,13 +12,13 @@ io.stdout:setvbuf("line")
 local cfg = {
   data = { max = nil, ttr = 0.5, tvr = 0.1 },
   tok = { ngram_min = 5, ngram_max = 5 },
-  emb = { n_landmarks = 1024*4, trace_tol = 0.01, kernel = "cosine" },
+  emb = { n_landmarks = 1024*32, trace_tol = 0.01, kernel = { "cosine", "nngp", "ntk", "expcos", "geolaplace" } },
   ridge = {
-    lambda = { def = 1.68e-01 },
-    propensity_a = { def = 3.07 },
-    propensity_b = { def = 0.06 },
+    lambda = { def = 9.74e-01 },
+    propensity_a = { def = 1.45 },
+    propensity_b = { def = 0.52 },
     classes = 2,
-    search_trials = 0,
+    search_trials = 800,
     k = 1,
   },
 }
@@ -50,19 +49,34 @@ test("imdb classifier", function ()
   str.printf("[Tokenize] ngram_min=%d ngram_max=%d tokens=%d %s\n",
     cfg.tok.ngram_min, cfg.tok.ngram_max, n_tokens, sw())
 
-  str.printf("[Spectral] Cholesky trace_tol=%s kernel=%s\n",
-    tostring(cfg.emb.trace_tol), cfg.emb.kernel)
-  local _, sp_enc, gram = spectral.encode({
+  local _, val_off, val_tok, val_val = csr.tokenize({
+    texts = validate.problems, ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max,
+    n_samples = validate.n, ngram_map = ngram_map,
+  })
+  csr.apply_bns(val_off, val_tok, val_val, bns_scores)
+
+  str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
+  local sp_enc, ridge_obj, val_codes, best_params = optimize.krr({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
     kernel = cfg.emb.kernel,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
+    val_offsets = val_off, val_tokens = val_tok, val_values = val_val,
+    val_n_samples = validate.n,
+    val_expected_offsets = val_label_off, val_expected_neighbors = val_label_nbr,
+    lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
+    propensity_b = cfg.ridge.propensity_b,
+    k = cfg.ridge.k, search_trials = cfg.ridge.search_trials,
+    each = util.make_ridge_log(stopwatch),
   })
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
+  validate.problems = nil
   collectgarbage("collect")
   local emb_d = sp_enc:dims()
-  str.printf("[Spectral] emb_d=%d %s\n", emb_d, sw())
+  str.printf("[KRR] emb_d=%d kernel=%s lambda=%.4e pa=%.4f pb=%.4f %s\n",
+    emb_d, best_params.kernel, best_params.lambda,
+    best_params.propensity_a, best_params.propensity_b, sw())
 
   local function encode_texts(texts, n)
     local _, off, tok, val = csr.tokenize({
@@ -75,32 +89,13 @@ test("imdb classifier", function ()
     })
   end
 
-  local val_codes = encode_texts(validate.problems, validate.n)
-  validate.problems = nil
-  collectgarbage("collect")
-
-  str.printf("[Ridge] Training\n")
-  local ridge_obj, best_params = optimize.ridge({
-    gram = gram,
-    val_codes = val_codes, val_n_samples = validate.n,
-    val_expected_offsets = val_label_off, val_expected_neighbors = val_label_nbr,
-    lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
-    propensity_b = cfg.ridge.propensity_b,
-    k = cfg.ridge.k, search_trials = cfg.ridge.search_trials,
-    each = util.make_ridge_log(stopwatch),
-  })
-  gram = nil
-  collectgarbage("collect")
-  str.printf("[Ridge] lambda=%.4e pa=%.4f pb=%.4f %s\n",
-    best_params.lambda, best_params.propensity_a, best_params.propensity_b, sw())
-
   str.printf("[Eval] Labeling splits\n")
   local _, val_labels = ridge_obj:label(val_codes, validate.n, 1)
-  val_codes = nil
+  val_codes = nil -- luacheck: ignore
   local test_codes = encode_texts(test_set.problems, test_set.n)
   test_set.problems = nil
   local _, test_labels = ridge_obj:label(test_codes, test_set.n, 1)
-  test_codes = nil
+  test_codes = nil -- luacheck: ignore
   str.printf("[Eval] Labels done %s\n", sw())
 
   local val_stats = eval.class_accuracy(val_labels, validate.sol_offsets, validate.sol_neighbors, validate.n, n_classes)
