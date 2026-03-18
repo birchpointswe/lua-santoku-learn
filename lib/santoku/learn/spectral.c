@@ -430,7 +430,7 @@ static inline void tk_spectral_sample_landmarks (
 
       uint64_t col = actual_landmarks;
       double sc_sq = residual[pi];
-      if (sc_sq < 1e-15) continue;
+      if (sc_sq < 1.2e-6) continue; // 10*machine_epsilon (float32)
       double sc = sqrt(sc_sq);
 
       landmark_sids[col] = sid_map[pi];
