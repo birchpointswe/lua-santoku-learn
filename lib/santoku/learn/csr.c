@@ -739,6 +739,38 @@ static int tm_csr_apply_idf (lua_State *L)
   return 1;
 }
 
+static int tm_csr_gather_rows (lua_State *L)
+{
+  tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
+  tk_ivec_t *tokens = tk_ivec_peek(L, 2, "tokens");
+  tk_fvec_t *values = tk_fvec_peek(L, 3, "values");
+  tk_ivec_t *indices = tk_ivec_peek(L, 4, "indices");
+  uint64_t n_out = indices->n;
+  int64_t total = 0;
+  for (uint64_t i = 0; i < n_out; i++) {
+    int64_t idx = indices->a[i];
+    total += offsets->a[idx + 1] - offsets->a[idx];
+  }
+  tk_ivec_t *out_off = tk_ivec_create(L, n_out + 1, 0, 0);
+  out_off->n = n_out + 1;
+  tk_ivec_t *out_tok = tk_ivec_create(L, (uint64_t)total, 0, 0);
+  out_tok->n = (uint64_t)total;
+  tk_fvec_t *out_val = tk_fvec_create(L, (uint64_t)total, 0, 0);
+  out_val->n = (uint64_t)total;
+  out_off->a[0] = 0;
+  int64_t pos = 0;
+  for (uint64_t i = 0; i < n_out; i++) {
+    int64_t idx = indices->a[i];
+    int64_t s = offsets->a[idx], e = offsets->a[idx + 1];
+    int64_t len = e - s;
+    memcpy(out_tok->a + pos, tokens->a + s, (uint64_t)len * sizeof(int64_t));
+    memcpy(out_val->a + pos, values->a + s, (uint64_t)len * sizeof(float));
+    pos += len;
+    out_off->a[i + 1] = pos;
+  }
+  return 3;
+}
+
 static int tm_csr_merge (lua_State *L)
 {
   tk_ivec_t *off1 = tk_ivec_peek(L, 1, "off1");
@@ -826,6 +858,7 @@ static luaL_Reg tm_csr_fns[] = {
   { "apply_bns", tm_csr_apply_bns },
   { "apply_auc", tm_csr_apply_auc },
   { "apply_idf", tm_csr_apply_idf },
+  { "gather_rows", tm_csr_gather_rows },
   { "merge", tm_csr_merge },
   { "standardize", tm_csr_standardize },
   { NULL, NULL }
