@@ -13,11 +13,11 @@ local cfg = {
   data = { ttr = 0.8, tvr = 0.1, max = nil, features = 784 },
   emb = { n_landmarks = 1024*24, trace_tol = 0.01, kernel = { "expcos", "cosine", "nngp", "ntk", "geolaplace" } },
   ridge = {
-    lambda = { def = 2.32e-05 },
-    propensity_a = { def = 0.55 },
-    propensity_b = { def = 1.50 },
+    lambda = { def = 3.82e-03 },
+    propensity_a = { def = 1.01 },
+    propensity_b = { def = 3.61 },
     classes = 10,
-    search_trials = 800,
+    search_trials = 0,
     k = 1,
   },
 }

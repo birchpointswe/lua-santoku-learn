@@ -14,10 +14,10 @@ local cfg = {
   tok = { ngram = 6 },
   emb = { n_landmarks = 1024*24, trace_tol = 0.01, kernel = { "cosine", "nngp", "ntk", "expcos", "geolaplace" }, k = 256 },
   ridge = {
-    lambda = { def = 8.70e-03 },
-    propensity_a = { def = 0.08 },
-    propensity_b = { def = 3.95 },
-    search_trials = 800,
+    lambda = { def = 2.73e-02 },
+    propensity_a = { def = 0.04 },
+    propensity_b = { def = 6.31 },
+    search_trials = 0,
   },
 }
 
@@ -122,12 +122,30 @@ test("eurlex classifier", function ()
   })
   str.printf("[Ts Pred] %s %s\n", fmt_metrics(ts_pred_m), sw())
 
+  local dv_rp = eval.rp_at_k({
+    pred_offsets = dv_off, pred_neighbors = dv_nbr,
+    expected_offsets = dev_label_off, expected_neighbors = dev_label_nbr,
+    max_k = 8,
+  })
+  local ts_rp = eval.rp_at_k({
+    pred_offsets = ts_off, pred_neighbors = ts_nbr,
+    expected_offsets = test_label_off, expected_neighbors = test_label_nbr,
+    max_k = 8,
+  })
+
   str.printf("\nSummary\n")
   str.printf("  %-10s lambda=%.4e pa=%.4f pb=%.4f\n",
     "Params", best_params.lambda, best_params.propensity_a, best_params.propensity_b)
   str.printf("  %-10s %s\n", "Dv Oracle", fmt_metrics(dv_oracle))
   str.printf("  %-10s %s\n", "Ts Oracle", fmt_metrics(ts_oracle))
   str.printf("  %-10s %s\n", "Ts Pred", fmt_metrics(ts_pred_m))
+  str.printf("\n  RP@K       ")
+  for i = 1, 8 do str.printf("%-7d", i) end
+  str.printf("\n  %-10s ", "Dev")
+  for i = 1, 8 do str.printf("%-7.4f", dv_rp[i]) end
+  str.printf("\n  %-10s ", "Test")
+  for i = 1, 8 do str.printf("%-7.4f", ts_rp[i]) end
+  str.printf("\n")
   local _, total = stopwatch()
   str.printf("\nTotal: %.1fs\n", total)
 

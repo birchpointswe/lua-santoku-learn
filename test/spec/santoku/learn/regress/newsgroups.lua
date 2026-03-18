@@ -14,11 +14,11 @@ local cfg = {
   tok = { ngram_min = 5, ngram_max = 5 },
   emb = { n_landmarks = 1024*24, trace_tol = 0.01, kernel = { "cosine", "nngp", "ntk", "expcos", "geolaplace" } },
   ridge = {
-    lambda = { def = 1.43e-01 },
-    propensity_a = { def = 0.09 },
-    propensity_b = { def = 4.97 },
+    lambda = { def = 5.49e-02 },
+    propensity_a = { def = 0.16 },
+    propensity_b = { def = 2.06 },
     classes = 20,
-    search_trials = 800,
+    search_trials = 0,
     k = 1,
   },
 }
