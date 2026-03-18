@@ -6,6 +6,7 @@
 #include <omp.h>
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
+#include <santoku/iuset.h>
 
 #define TK_AHO_MT "tk_aho_t"
 
@@ -167,7 +168,7 @@ typedef struct {
 
 static tk_aho_scan_result_t tk_aho_scan (
   tk_aho_t *a, const char **texts, size_t *tlens,
-  int n_texts, bool longest, tk_pvec_t *exc
+  int n_texts, bool longest, tk_pvec_t *exc, tk_iuset_t *inc
 ) {
   tk_aho_match_t **pt_matches = (tk_aho_match_t **)calloc((uint64_t)n_texts, sizeof(tk_aho_match_t *));
   int64_t *pt_counts = (int64_t *)calloc((uint64_t)n_texts, sizeof(int64_t));
@@ -234,6 +235,15 @@ static tk_aho_scan_result_t tk_aho_scan (
             }
           }
           if (!excluded) local_m[write++] = local_m[j];
+        }
+        m_n = write;
+      }
+
+      if (inc && m_n > 0) {
+        int64_t write = 0;
+        for (int64_t j = 0; j < m_n; j++) {
+          if (tk_iuset_contains(inc, local_m[j].id))
+            local_m[write++] = local_m[j];
         }
         m_n = write;
       }
@@ -452,6 +462,25 @@ static int tk_aho_predict_lua (lua_State *L)
     exc = tk_pvec_peek(L, -1, "exclude");
   lua_pop(L, 1);
 
+  tk_iuset_t *inc = NULL;
+  int inc_allocated = 0;
+  lua_getfield(L, 2, "include");
+  if (lua_type(L, -1) == LUA_TUSERDATA) {
+    inc = tk_iuset_peekopt(L, -1);
+    if (!inc) {
+      tk_ivec_t *iv = tk_ivec_peekopt(L, -1);
+      if (iv) {
+        inc = tk_iuset_create(NULL, (uint32_t)iv->n);
+        inc_allocated = 1;
+        for (uint64_t i = 0; i < iv->n; i++) {
+          int absent;
+          tk_iuset_put(inc, iv->a[i], &absent);
+        }
+      }
+    }
+  }
+  lua_pop(L, 1);
+
   const char **texts = (const char **)malloc((uint64_t)n_texts * sizeof(const char *));
   size_t *tlens = (size_t *)malloc((uint64_t)n_texts * sizeof(size_t));
   for (int ti = 0; ti < n_texts; ti++) {
@@ -460,9 +489,10 @@ static int tk_aho_predict_lua (lua_State *L)
     lua_pop(L, 1);
   }
 
-  tk_aho_scan_result_t res = tk_aho_scan(a, texts, tlens, n_texts, longest, exc);
+  tk_aho_scan_result_t res = tk_aho_scan(a, texts, tlens, n_texts, longest, exc, inc);
   free(texts);
   free(tlens);
+  if (inc_allocated) { tk_iuset_destroy(inc); free(inc); }
 
   uint64_t mn = res.total > 0 ? (uint64_t)res.total : 1;
   tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t)(n_texts + 1), NULL, NULL);
@@ -510,6 +540,25 @@ static int tk_aho_tag_lua (lua_State *L)
     exc = tk_pvec_peek(L, -1, "exclude");
   lua_pop(L, 1);
 
+  tk_iuset_t *inc = NULL;
+  int inc_allocated = 0;
+  lua_getfield(L, 2, "include");
+  if (lua_type(L, -1) == LUA_TUSERDATA) {
+    inc = tk_iuset_peekopt(L, -1);
+    if (!inc) {
+      tk_ivec_t *iv = tk_ivec_peekopt(L, -1);
+      if (iv) {
+        inc = tk_iuset_create(NULL, (uint32_t)iv->n);
+        inc_allocated = 1;
+        for (uint64_t i = 0; i < iv->n; i++) {
+          int absent;
+          tk_iuset_put(inc, iv->a[i], &absent);
+        }
+      }
+    }
+  }
+  lua_pop(L, 1);
+
   lua_getfenv(L, 1);
   lua_getfield(L, -1, "names");
   int names_idx = lua_gettop(L);
@@ -523,7 +572,7 @@ static int tk_aho_tag_lua (lua_State *L)
     lua_pop(L, 1);
   }
 
-  tk_aho_scan_result_t res = tk_aho_scan(a, texts, tlens, n_texts, longest, exc);
+  tk_aho_scan_result_t res = tk_aho_scan(a, texts, tlens, n_texts, longest, exc, inc);
 
   lua_newtable(L);
   int result_idx = lua_gettop(L);
@@ -611,6 +660,7 @@ static int tk_aho_tag_lua (lua_State *L)
 
   free(texts);
   free(tlens);
+  if (inc_allocated) { tk_iuset_destroy(inc); free(inc); }
   tk_aho_scan_free(&res);
 
   lua_pushvalue(L, result_idx);
