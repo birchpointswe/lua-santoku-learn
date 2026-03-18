@@ -273,7 +273,7 @@ static inline void tk_spectral_sample_landmarks (
     uint64_t np = 0;
     for (uint64_t b = 0; b < n_propose; b++) {
       uint64_t pi = SAMPLE_PROPOSAL();
-      if (residual[pi] < 1e-15) continue;
+      if (residual[pi] < 1.2e-6) continue; // 10*machine_epsilon (float32)
       int dup = 0;
       for (uint64_t k = 0; k < np; k++)
         if (blk_pivots[k] == pi) { dup = 1; break; }
