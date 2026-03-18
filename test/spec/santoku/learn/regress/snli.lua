@@ -13,7 +13,8 @@ io.stdout:setvbuf("line")
 local cfg = {
   data = { max = nil, tvr = 0.1 },
   tok = { ngram_min = 7, ngram_max = 7 },
-  emb = { n_landmarks = 1024*24, trace_tol = 0.01, kernel = "cosine"  },
+
+  emb = { n_landmarks = 1024*8, trace_tol = 0.01, kernel = "cosine"  },
   ridge = {
     lambda = { def = 1.9316e-02 },
     propensity_a = { def = 3.5412 },
