@@ -469,4 +469,101 @@ M.split_california_housing = function (dataset, ttr, tvr)
   return train, test
 end
 
+local snli_label_map = { entailment = 0, neutral = 1, contradiction = 2 }
+
+local function _read_snli_file (fp, max)
+  local raw_s1, raw_s2 = {}, {}
+  local sol_off = ivec.create()
+  local sol_nbr = ivec.create()
+  local n = 0
+  local fields = { "gold_label", "sentence1", "sentence2" }
+  sol_off:push(0)
+  for line in fs.lines(fp) do
+    if max and n >= max then break end
+    local vals = {}
+    for s, e in lpeg_utils.json_fields(line, fields) do
+      vals[#vals + 1] = line:sub(s, e)
+    end
+    if #vals == 3 then
+      local label = vals[1]
+      local cls = snli_label_map[label]
+      if cls then
+        n = n + 1
+        raw_s1[n] = vals[2]
+        raw_s2[n] = vals[3]
+        sol_off:push(n)
+        sol_nbr:push(cls)
+      end
+    end
+  end
+  local unique_texts = {}
+  local text_idx = {}
+  local n_unique = 0
+  local idx1_v = ivec.create()
+  local idx2_v = ivec.create()
+  for i = 1, n do
+    if not text_idx[raw_s1[i]] then
+      n_unique = n_unique + 1
+      text_idx[raw_s1[i]] = n_unique
+      unique_texts[n_unique] = raw_s1[i]
+    end
+    if not text_idx[raw_s2[i]] then
+      n_unique = n_unique + 1
+      text_idx[raw_s2[i]] = n_unique
+      unique_texts[n_unique] = raw_s2[i]
+    end
+    idx1_v:push(text_idx[raw_s1[i]] - 1)
+    idx2_v:push(text_idx[raw_s2[i]] - 1)
+  end
+  return {
+    n = n, unique_texts = unique_texts, n_unique = n_unique,
+    idx1 = idx1_v, idx2 = idx2_v,
+    sol_offsets = sol_off, sol_neighbors = sol_nbr,
+    n_labels = 3,
+  }
+end
+
+M.read_snli = function (dir, max, tvr)
+  local train = _read_snli_file(dir .. "/snli_1.0_train.jsonl", max)
+  local dev = _read_snli_file(dir .. "/snli_1.0_dev.jsonl", max)
+  local test = _read_snli_file(dir .. "/snli_1.0_test.jsonl", max)
+  if tvr and tvr > 0 then
+    local val_n = num.floor(train.n * tvr)
+    local train_n = train.n - val_n
+    local t_sol_off, t_sol_nbr = ivec.create(), ivec.create()
+    local v_sol_off, v_sol_nbr = ivec.create(), ivec.create()
+    local t_idx1, t_idx2 = ivec.create(), ivec.create()
+    local v_idx1, v_idx2 = ivec.create(), ivec.create()
+    t_sol_off:push(0)
+    v_sol_off:push(0)
+    for i = 1, train_n do
+      t_idx1:push(train.idx1:get(i - 1))
+      t_idx2:push(train.idx2:get(i - 1))
+      t_sol_off:push(i)
+      t_sol_nbr:push(train.sol_neighbors:get(i - 1))
+    end
+    for i = train_n + 1, train.n do
+      local j = i - train_n
+      v_idx1:push(train.idx1:get(i - 1))
+      v_idx2:push(train.idx2:get(i - 1))
+      v_sol_off:push(j)
+      v_sol_nbr:push(train.sol_neighbors:get(i - 1))
+    end
+    local validate = {
+      n = val_n, unique_texts = train.unique_texts, n_unique = train.n_unique,
+      idx1 = v_idx1, idx2 = v_idx2,
+      sol_offsets = v_sol_off, sol_neighbors = v_sol_nbr,
+      n_labels = 3,
+    }
+    train = {
+      n = train_n, unique_texts = train.unique_texts, n_unique = train.n_unique,
+      idx1 = t_idx1, idx2 = t_idx2,
+      sol_offsets = t_sol_off, sol_neighbors = t_sol_nbr,
+      n_labels = 3,
+    }
+    return train, dev, test, validate
+  end
+  return train, dev, test
+end
+
 return M
