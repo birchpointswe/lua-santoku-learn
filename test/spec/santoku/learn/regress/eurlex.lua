@@ -12,7 +12,8 @@ io.stdout:setvbuf("line")
 local cfg = {
   data = { max = nil },
   tok = { ngram = 6 },
-  emb = { n_landmarks = 1024*24, trace_tol = 0.01, kernel = { "cosine", "nngp", "ntk", "expcos", "geolaplace" }, k = 256 },
+  -- n_landmarks = 1024*24 for max (high memory)
+  emb = { n_landmarks = 1024*8, trace_tol = 0.01, kernel = { "cosine", "nngp", "ntk", "expcos", "geolaplace" }, k = 256 },
   ridge = {
     lambda = { def = 2.73e-02 },
     propensity_a = { def = 0.04 },
