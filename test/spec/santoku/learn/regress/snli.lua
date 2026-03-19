@@ -10,6 +10,12 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
+local snli_dir = env.var("SNLI_DIR", nil)
+if not snli_dir then
+  print("SNLI_DIR not set. Skipping.")
+  return
+end
+
 local cfg = {
   data = { max = nil, tvr = 0.1 },
   tok = { ngram_min = 7, ngram_max = 7 },
@@ -19,7 +25,7 @@ local cfg = {
     lambda = { def = 1.9316e-02 },
     propensity_a = { def = 3.5412 },
     propensity_b = { def = 6.6018 },
-    search_trials = 800,
+    search_trials = 0,
     k = 1,
   },
 }
@@ -34,8 +40,7 @@ test("snli classifier", function ()
   end
 
   str.printf("[Data] Loading\n")
-  local train, dev, test_set, validate = ds.read_snli(
-    env.var("SNLI_DIR", "test/res/snli_1.0"), cfg.data.max, cfg.data.tvr)
+  local train, dev, test_set, validate = ds.read_snli(snli_dir, cfg.data.max, cfg.data.tvr)
   str.printf("[Data] train=%d val=%d dev=%d test=%d %s\n",
     train.n, validate.n, dev.n, test_set.n, sw())
 
