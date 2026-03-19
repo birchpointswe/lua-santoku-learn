@@ -446,7 +446,7 @@ static inline void tk_spectral_sample_landmarks (
         double within = 0.0;
         for (uint64_t k = 0; k < within_accepted; k++)
           within += L_mat[(jb + k) * n_docs + i] * within_pi[k];
-        double lij = (raw - cross - within) / sc;
+        double lij = (i == pi) ? sc : (raw - cross - within) / sc;
         L_mat[col * n_docs + i] = lij;
         residual[i] -= lij * lij;
         if (residual[i] < 0.0) residual[i] = 0.0;
