@@ -447,8 +447,9 @@ static inline void tk_spectral_sample_landmarks (
         for (uint64_t k = 0; k < within_accepted; k++)
           within += L_mat[(jb + k) * n_docs + i] * within_pi[k];
         double lij = (i == pi) ? sc : (raw - cross - within) / sc;
-        L_mat[col * n_docs + i] = lij;
-        residual[i] -= lij * lij;
+        float fij = (float)lij;
+        L_mat[col * n_docs + i] = fij;
+        residual[i] -= (double)fij * (double)fij;
         if (residual[i] < 0.0) residual[i] = 0.0;
       }
       residual[pi] = 0.0;
@@ -1217,6 +1218,7 @@ static inline int tm_encode (lua_State *L) {
               train_codes->a[i * d + j] = full_chol[j * nc + i];
         }
     } else if (transform_sign) {
+      #pragma omp parallel for schedule(static) collapse(2)
       for (uint64_t jj = 0; jj < d; jj += TK_TILE)
         for (uint64_t ii = 0; ii < nc; ii += TK_TILE) {
           uint64_t je = jj + TK_TILE < d ? jj + TK_TILE : d;
@@ -1274,10 +1276,10 @@ static inline int tm_encode (lua_State *L) {
       int64_t lo = mod.csr_offsets[si], hi = mod.csr_offsets[si + 1];
       int64_t cnt = hi - lo;
       memcpy(enc->csr_tokens + enc->csr_offsets[j],
-             ((const int64_t *)mod.csr_tokens) + (lo - mod.csr_offsets[0]),
+             mod.csr_tokens + lo,
              (uint64_t)cnt * sizeof(int64_t));
       memcpy(enc->csr_values + enc->csr_offsets[j],
-             ((const float *)mod.csr_values) + (lo - mod.csr_offsets[0]),
+             mod.csr_values + lo,
              (uint64_t)cnt * sizeof(float));
       enc->csr_norms[j] = (float)csr_norms_owned[si];
       enc->csr_offsets[j + 1] = enc->csr_offsets[j] + cnt;
