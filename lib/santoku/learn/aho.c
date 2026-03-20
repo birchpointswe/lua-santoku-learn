@@ -400,7 +400,7 @@ static int tk_aho_predict_lua (lua_State *L)
   tk_aho_scan_result_t res = tk_aho_scan(a, texts, tlens, n_texts, longest, exc, inc);
   free(texts);
   free(tlens);
-  if (inc_allocated) { tk_iuset_destroy(inc); free(inc); }
+  if (inc_allocated) { tk_iuset_destroy(inc); }
 
   uint64_t mn = res.total > 0 ? (uint64_t)res.total : 1;
   tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t)(n_texts + 1), NULL, NULL);
@@ -568,7 +568,7 @@ static int tk_aho_tag_lua (lua_State *L)
 
   free(texts);
   free(tlens);
-  if (inc_allocated) { tk_iuset_destroy(inc); free(inc); }
+  if (inc_allocated) { tk_iuset_destroy(inc); }
   tk_aho_scan_free(&res);
 
   lua_pushvalue(L, result_idx);
