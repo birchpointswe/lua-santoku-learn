@@ -383,6 +383,8 @@ local search = function (args)
 
 end
 
+local default_score_fn = function (oracle) return oracle.micro_f1 end
+
 M.ridge = function (args)
   local ridge = require("santoku.learn.ridge")
   local dense = args.val_targets ~= nil
@@ -406,6 +408,7 @@ M.ridge = function (args)
   local samplers = build_samplers(args, param_names)
   local k = not dense and (args.k or 32) or nil
   local use_gfm = not dense and args.gfm
+  local score_fn = args.score_fn or default_score_fn
   if all_fixed(samplers) or not args.search_trials or args.search_trials <= 0 then
     local params = sample_params(samplers, param_names, nil, true)
     local r = ridge.create({
@@ -457,7 +460,7 @@ M.ridge = function (args)
       })
       return gf1, { oracle = oracle, gfm_f1 = gf1 }
     end
-    return oracle.micro_f1, { oracle = oracle }
+    return score_fn(oracle), { oracle = oracle }
   end
   local _, best_params = search({
     param_names = param_names, samplers = samplers,
@@ -502,6 +505,7 @@ M.krr = function (args)
   local do_search = not all_fixed(samplers) and args.search_trials and args.search_trials > 0
   local k = not dense and (args.k or 32) or nil
   local use_gfm = not dense and args.gfm
+  local score_fn = args.score_fn or default_score_fn
   local spectral_args = {
     offsets = args.offsets, tokens = args.tokens, values = args.values,
     n_tokens = args.n_tokens, n_samples = args.n_samples,
@@ -581,7 +585,7 @@ M.krr = function (args)
       })
       return gf1, { oracle = oracle, gfm_f1 = gf1 }
     end
-    return oracle.micro_f1, { oracle = oracle }
+    return score_fn(oracle), { oracle = oracle }
   end
   local _, best_params = search({
     param_names = param_names, samplers = samplers,
