@@ -104,7 +104,7 @@ static inline void tk_spectral_sample_landmarks (
   if (n_landmarks == 0 || n_landmarks > n_docs)
     n_landmarks = n_docs;
   if (n_landmarks == 0) {
-    *ids_out = tk_ivec_create(L, 0, 0, 0);
+    *ids_out = tk_ivec_create(L, 0);
     *chol_out = NULL;
     *full_chol_out = NULL;
     *n_docs_out = 0;
@@ -471,12 +471,12 @@ static inline void tk_spectral_sample_landmarks (
   free(piv_csc_pos);
   free(dense_kip);
 
-  tk_ivec_t *landmark_ids = tk_ivec_create(L, actual_landmarks, 0, 0);
+  tk_ivec_t *landmark_ids = tk_ivec_create(L, actual_landmarks);
   for (uint64_t i = 0; i < actual_landmarks; i++)
     landmark_ids->a[i] = landmark_sids[i];
   landmark_ids->n = actual_landmarks;
 
-  tk_fvec_t *chol = tk_fvec_create(NULL, actual_landmarks * actual_landmarks, 0, 0);
+  tk_fvec_t *chol = tk_fvec_create(NULL, actual_landmarks * actual_landmarks);
   #pragma omp parallel for schedule(static)
   for (uint64_t li = 0; li < actual_landmarks; li++) {
     uint64_t doc_idx = (uint64_t)landmark_idx_map[li];
@@ -612,7 +612,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
     out_fv->n = n_samples * d;
     out = out_fv;
   } else {
-    out = tk_fvec_create(L, n_samples * d, 0, 0);
+    out = tk_fvec_create(L, n_samples * d);
     out->n = n_samples * d;
     out_fv_idx = lua_gettop(L);
   }
@@ -1083,12 +1083,12 @@ static inline int tm_encode (lua_State *L) {
   uint8_t *sign_data = NULL;
 
   if (transform_codes) {
-    train_codes = tk_fvec_create(L, nc * d, 0, 0);
+    train_codes = tk_fvec_create(L, nc * d);
     train_codes->n = nc * d;
     train_codes_idx = lua_gettop(L);
   } else if (transform_sign) {
     sign_row_bytes = TK_CVEC_BITS_BYTES(d);
-    sign_cvec = tk_cvec_create(L, nc * sign_row_bytes, 0, 0);
+    sign_cvec = tk_cvec_create(L, nc * sign_row_bytes);
     sign_cvec->n = nc * sign_row_bytes;
     tk_cvec_zero(sign_cvec);
     sign_cvec_idx = lua_gettop(L);
@@ -1182,7 +1182,7 @@ static inline int tm_encode (lua_State *L) {
     tk_dvec_t *lc = NULL;
     int lc_idx = 0;
     if (has_gram_labels) {
-      lc = tk_dvec_create(L, unl, 0, 0);
+      lc = tk_dvec_create(L, unl);
       lc->n = unl;
       lc_idx = lua_gettop(L);
       memset(lc->a, 0, unl * sizeof(double));

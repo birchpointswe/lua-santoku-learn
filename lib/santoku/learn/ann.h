@@ -200,19 +200,19 @@ static inline void tk_ann_flat_query_csr (
   uint64_t features = flat->features;
   bool rerank = (query_codes && corpus_codes && n_dims > 0);
 
-  tk_ivec_t *off = tk_ivec_create(L, nq + 1, 0, 0);
+  tk_ivec_t *off = tk_ivec_create(L, nq + 1);
   off->n = nq + 1;
-  tk_ivec_t *nbr = tk_ivec_create(L, nq * k, 0, 0);
+  tk_ivec_t *nbr = tk_ivec_create(L, nq * k);
   nbr->n = nq * k;
-  tk_dvec_t *wt = tk_dvec_create(L, nq * k, 0, 0);
+  tk_dvec_t *wt = tk_dvec_create(L, nq * k);
   wt->n = nq * k;
 
   int64_t *counts = tk_malloc(L, nq * sizeof(int64_t));
 
   #pragma omp parallel
   {
-    tk_pvec_t *heap = tk_pvec_create(NULL, k, 0, 0);
-    tk_rvec_t *rerank_buf = rerank ? tk_rvec_create(NULL, k, 0, 0) : NULL;
+    tk_pvec_t *heap = tk_pvec_create(NULL, k);
+    tk_rvec_t *rerank_buf = rerank ? tk_rvec_create(NULL, k) : NULL;
     uint64_t seen_bytes = (flat->N + 7) / 8;
     uint8_t *seen = (uint8_t *)calloc(1, seen_bytes);
 

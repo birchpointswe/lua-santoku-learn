@@ -125,7 +125,7 @@ static int tk_gfm_predict_lua (lua_State *L)
   int64_t ns = (int64_t)tk_lua_fcheckunsigned(L, 2, "gfm.predict", "n_samples");
   int64_t nl = g->nl;
   double *thresholds = g->thresholds;
-  tk_ivec_t *ks = tk_ivec_create(L, (uint64_t)ns, NULL, NULL);
+  tk_ivec_t *ks = tk_ivec_create(L, (uint64_t)ns);
   #pragma omp parallel for schedule(static)
   for (int64_t s = 0; s < ns; s++) {
     int64_t ps = offsets->a[s], pe = offsets->a[s + 1];

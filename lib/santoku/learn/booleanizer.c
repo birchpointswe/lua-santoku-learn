@@ -338,7 +338,7 @@ static inline tk_ivec_t *tk_booleanizer_bit_offsets (
     tk_lua_verror(L, 2, "bit_offsets", "finalize must be called before bit_offsets");
     return NULL;
   }
-  tk_ivec_t *offsets = tk_ivec_create(L, 0, 0, 0);
+  tk_ivec_t *offsets = tk_ivec_create(L, 0);
   tk_iumap_t *cat_attr_starts = tk_iumap_create(0, 0);
   tk_cat_bit_string_t cbs;
   int64_t bit_id;

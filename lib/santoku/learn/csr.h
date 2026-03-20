@@ -180,7 +180,7 @@ static inline double tk_csr_ndcg_distance(
   }
 
   uint64_t k = n;
-  tk_dvec_t *sorted_weights = tk_dvec_create(NULL, m, 0, 0);
+  tk_dvec_t *sorted_weights = tk_dvec_create(NULL, m);
   if (!sorted_weights)
     return 0.0;
   for (i = 0; i < m; i++)

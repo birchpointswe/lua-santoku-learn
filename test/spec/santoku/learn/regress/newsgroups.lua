@@ -93,18 +93,26 @@ test("newsgroups classifier", function ()
   end
 
   str.printf("[Eval] Labeling splits\n")
-  local _, val_labels = ridge_obj:label(val_codes, validate.n, 1)
+  local val_off, val_nbr = ridge_obj:label(val_codes, validate.n, 1)
   val_codes = nil -- luacheck: ignore
   local test_codes = encode_texts(test_set.problems, test_set.n)
   test_set.problems = nil
-  local _, test_labels = ridge_obj:label(test_codes, test_set.n, 1)
+  local test_off, test_nbr = ridge_obj:label(test_codes, test_set.n, 1)
   test_codes = nil -- luacheck: ignore
   str.printf("[Eval] Labels done %s\n", sw())
 
-  local val_stats = eval.class_accuracy(val_labels, validate.sol_offsets, validate.sol_neighbors, validate.n, n_classes)
-  local test_stats = eval.class_accuracy(test_labels, test_set.sol_offsets, test_set.sol_neighbors, test_set.n, n_classes)
+  local _, val_stats = eval.label_accuracy({
+    pred_offsets = val_off, pred_neighbors = val_nbr,
+    expected_offsets = validate.sol_offsets, expected_neighbors = validate.sol_neighbors,
+    ks = 1,
+  })
+  local _, test_stats = eval.label_accuracy({
+    pred_offsets = test_off, pred_neighbors = test_nbr,
+    expected_offsets = test_set.sol_offsets, expected_neighbors = test_set.sol_neighbors,
+    ks = 1,
+  })
   str.printf("[Class] F1: val=%.2f test=%.2f %s\n",
-    val_stats.f1, test_stats.f1, sw())
+    val_stats.micro_f1, test_stats.micro_f1, sw())
 
   local _, total = stopwatch()
   str.printf("\nTotal: %.1fs\n", total)
