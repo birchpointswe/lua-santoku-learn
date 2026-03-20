@@ -201,13 +201,20 @@ static inline int tm_retrieval_ks (lua_State *L)
   tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
   lua_getfield(L, 1, "ks");
   bool have_ks = !lua_isnil(L, -1);
-  tk_ivec_t *ks = have_ks ? tk_ivec_peek(L, -1, "ks") : NULL;
+  bool scalar_ks = have_ks && lua_isnumber(L, -1);
+  int64_t scalar_k_val = scalar_ks ? (int64_t)lua_tointeger(L, -1) : 0;
+  tk_ivec_t *ks = (have_ks && !scalar_ks) ? tk_ivec_peek(L, -1, "ks") : NULL;
   lua_pop(L, 5);
   uint64_t n_samples = pred_off->n - 1;
   if (exp_off->n != n_samples + 1)
     return luaL_error(L, "expected_offsets length must match sample count + 1");
-  if (!have_ks)
+  if (scalar_ks) {
     ks = tk_ivec_create(L, n_samples, NULL, NULL);
+    for (uint64_t i = 0; i < n_samples; i++) ks->a[i] = scalar_k_val;
+    have_ks = true;
+  } else if (!have_ks) {
+    ks = tk_ivec_create(L, n_samples, NULL, NULL);
+  }
   uint64_t mi_tp = 0, mi_k = 0, mi_exp = 0, n_valid = 0;
   double ma_prec = 0, ma_rec = 0, ma_f1 = 0;
   #pragma omp parallel for reduction(+:mi_tp,mi_k,mi_exp,n_valid,ma_prec,ma_rec,ma_f1)

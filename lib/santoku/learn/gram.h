@@ -14,6 +14,7 @@
 #include <santoku/dvec.h>
 #include <santoku/fvec.h>
 #include <santoku/rvec.h>
+#include <santoku/iuset.h>
 #include <santoku/learn/buf.h>
 
 #define TK_GRAM_MT "tk_gram_t"
@@ -325,10 +326,250 @@ static inline int tk_gram_regress_lua (lua_State *L) {
   return 1;
 }
 
+typedef struct { double score; uint8_t hit; } tk_gram_entry_t;
+
+static int tk_gram_entry_desc (const void *a, const void *b) {
+  double sa = ((const tk_gram_entry_t *)a)->score;
+  double sb = ((const tk_gram_entry_t *)b)->score;
+  return (sa > sb) ? -1 : (sa < sb) ? 1 : 0;
+}
+
+static inline int tk_gram_label_f1_lua (lua_State *L) {
+  tk_gram_t *g = tk_gram_peek(L, 1);
+  if (!g->val_F_f) return luaL_error(L, "label_f1: call prepare first");
+  int64_t d = g->n_dims, nl = g->n_labels, val_n = g->val_n;
+  double lambda_raw = luaL_checknumber(L, 2);
+  int64_t topk = (int64_t)luaL_checkinteger(L, 3);
+  if (topk > nl) topk = nl;
+  if (topk < 1) topk = 1;
+  bool do_prop = lua_isnumber(L, 4);
+  double prop_a = do_prop ? lua_tonumber(L, 4) : 0.0;
+  double prop_b = do_prop ? (lua_isnumber(L, 5) ? lua_tonumber(L, 5) : 1.5) : 0.0;
+  tk_ivec_t *exp_off = tk_ivec_peek(L, 6, "exp_off");
+  tk_ivec_t *exp_nbr = tk_ivec_peek(L, 7, "exp_nbr");
+  int mode = 0;
+  int64_t fixed_k = 0;
+  if (lua_isnumber(L, 8)) {
+    mode = 1;
+    fixed_k = (int64_t)lua_tointeger(L, 8);
+    if (fixed_k > topk) fixed_k = topk;
+    if (fixed_k < 1) fixed_k = 1;
+  } else if (lua_isstring(L, 8)) {
+    mode = 2;
+  }
+  tk_gram_solve_w(g, lambda_raw, do_prop, prop_a, prop_b);
+  uint64_t need = (uint64_t)val_n * (uint64_t)nl;
+  if (!g->sbuf_f) {
+    g->sbuf_f = (float *)malloc(need * sizeof(float));
+    if (!g->sbuf_f) return luaL_error(L, "label_f1: malloc failed");
+  }
+  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    (int)val_n, (int)nl, (int)d, 1.0f, g->val_F_f, (int)d,
+    g->W_work_f, (int)nl, 0.0f, g->sbuf_f, (int)nl);
+  if (g->intercept)
+    tk_gram_add_intercept_f(g->sbuf_f, val_n, nl, g->intercept);
+  double f1 = 0.0, prec = 0.0, rec = 0.0;
+  if (mode == 1) {
+    uint64_t total_tp = 0, total_pred = 0, total_exp = 0;
+    #pragma omp parallel reduction(+:total_tp,total_pred,total_exp)
+    {
+      tk_rvec_t heap = { .n = 0, .m = (size_t)fixed_k, .lua_managed = false,
+                         .a = (tk_rank_t *)malloc((uint64_t)fixed_k * sizeof(tk_rank_t)) };
+      #pragma omp for schedule(static)
+      for (int64_t i = 0; i < val_n; i++) {
+        float *row = g->sbuf_f + i * nl;
+        heap.n = 0;
+        for (int64_t l = 0; l < nl; l++)
+          tk_rvec_hmin(&heap, (size_t)fixed_k, tk_rank(l, (double)row[l]));
+        int64_t es = exp_off->a[i], ee = exp_off->a[i + 1];
+        total_exp += (uint64_t)(ee - es);
+        total_pred += (uint64_t)heap.n;
+        if (ee <= es || heap.n == 0) continue;
+        int kha;
+        tk_iuset_t *exp_set = tk_iuset_create(NULL, 0);
+        for (int64_t j = es; j < ee; j++)
+          tk_iuset_put(exp_set, exp_nbr->a[j], &kha);
+        uint64_t hits = 0;
+        for (size_t j = 0; j < heap.n; j++)
+          if (tk_iuset_contains(exp_set, heap.a[j].i)) hits++;
+        tk_iuset_destroy(exp_set);
+        total_tp += hits;
+      }
+      free(heap.a);
+    }
+    prec = total_pred > 0 ? (double)total_tp / (double)total_pred : 0.0;
+    rec = total_exp > 0 ? (double)total_tp / (double)total_exp : 0.0;
+    f1 = (total_pred + total_exp) > 0
+      ? 2.0 * (double)total_tp / ((double)total_pred + (double)total_exp) : 0.0;
+  } else if (mode == 0) {
+    uint64_t total_tp = 0, total_pred = 0, total_exp = 0;
+    #pragma omp parallel reduction(+:total_tp,total_pred,total_exp)
+    {
+      tk_rvec_t heap = { .n = 0, .m = (size_t)topk, .lua_managed = false,
+                         .a = (tk_rank_t *)malloc((uint64_t)topk * sizeof(tk_rank_t)) };
+      #pragma omp for schedule(static)
+      for (int64_t i = 0; i < val_n; i++) {
+        float *row = g->sbuf_f + i * nl;
+        heap.n = 0;
+        for (int64_t l = 0; l < nl; l++)
+          tk_rvec_hmin(&heap, (size_t)topk, tk_rank(l, (double)row[l]));
+        int64_t es = exp_off->a[i], ee = exp_off->a[i + 1];
+        uint64_t n_exp = (uint64_t)(ee - es);
+        total_exp += n_exp;
+        if (n_exp == 0 || heap.n == 0) continue;
+        tk_rvec_desc(&heap, 0, heap.n);
+        int kha;
+        tk_iuset_t *exp_set = tk_iuset_create(NULL, 0);
+        for (int64_t j = es; j < ee; j++)
+          tk_iuset_put(exp_set, exp_nbr->a[j], &kha);
+        uint64_t running_hits = 0, best_tp_i = 0;
+        int64_t best_k_i = 0;
+        double best_f1_i = 0.0;
+        for (size_t j = 0; j < heap.n; j++) {
+          if (tk_iuset_contains(exp_set, heap.a[j].i)) running_hits++;
+          double f1_j = 2.0 * (double)running_hits / ((double)(j + 1) + (double)n_exp);
+          if (f1_j > best_f1_i) {
+            best_f1_i = f1_j;
+            best_tp_i = running_hits;
+            best_k_i = (int64_t)(j + 1);
+          }
+        }
+        tk_iuset_destroy(exp_set);
+        total_tp += best_tp_i;
+        total_pred += (uint64_t)best_k_i;
+      }
+      free(heap.a);
+    }
+    prec = total_pred > 0 ? (double)total_tp / (double)total_pred : 0.0;
+    rec = total_exp > 0 ? (double)total_tp / (double)total_exp : 0.0;
+    f1 = (total_pred + total_exp) > 0
+      ? 2.0 * (double)total_tp / ((double)total_pred + (double)total_exp) : 0.0;
+  } else {
+    uint64_t total_entries = (uint64_t)val_n * (uint64_t)topk;
+    uint64_t total_expected = 0;
+    for (int64_t i = 0; i < val_n; i++)
+      total_expected += (uint64_t)(exp_off->a[i + 1] - exp_off->a[i]);
+    if (total_entries == 0 || total_expected == 0) {
+      lua_pushnumber(L, 0.0);
+      lua_pushnumber(L, 0.0);
+      lua_pushnumber(L, 0.0);
+      return 3;
+    }
+    int64_t *topk_labels = (int64_t *)malloc(total_entries * sizeof(int64_t));
+    double *topk_scores = (double *)malloc(total_entries * sizeof(double));
+    if (!topk_labels || !topk_scores) {
+      free(topk_labels); free(topk_scores);
+      return luaL_error(L, "label_f1: malloc failed");
+    }
+    #pragma omp parallel
+    {
+      tk_rvec_t heap = { .n = 0, .m = (size_t)topk, .lua_managed = false,
+                         .a = (tk_rank_t *)malloc((uint64_t)topk * sizeof(tk_rank_t)) };
+      #pragma omp for schedule(static)
+      for (int64_t i = 0; i < val_n; i++) {
+        float *row = g->sbuf_f + i * nl;
+        int64_t base = i * topk;
+        heap.n = 0;
+        for (int64_t l = 0; l < nl; l++)
+          tk_rvec_hmin(&heap, (size_t)topk, tk_rank(l, (double)row[l]));
+        tk_rvec_desc(&heap, 0, heap.n);
+        for (size_t j = 0; j < heap.n; j++) {
+          topk_labels[base + (int64_t)j] = heap.a[j].i;
+          topk_scores[base + (int64_t)j] = heap.a[j].d;
+        }
+        for (size_t j = heap.n; j < (size_t)topk; j++) {
+          topk_labels[base + (int64_t)j] = -1;
+          topk_scores[base + (int64_t)j] = -HUGE_VAL;
+        }
+      }
+      free(heap.a);
+    }
+    tk_gram_entry_t *pool = (tk_gram_entry_t *)malloc(total_entries * sizeof(tk_gram_entry_t));
+    uint8_t *bm = (uint8_t *)calloc((uint64_t)nl, sizeof(uint8_t));
+    int64_t pi = 0;
+    for (int64_t i = 0; i < val_n; i++) {
+      for (int64_t j = exp_off->a[i]; j < exp_off->a[i + 1]; j++)
+        if (exp_nbr->a[j] >= 0 && exp_nbr->a[j] < nl) bm[exp_nbr->a[j]] = 1;
+      int64_t base = i * topk;
+      for (int64_t j = 0; j < topk; j++) {
+        int64_t lbl = topk_labels[base + j];
+        if (lbl < 0) continue;
+        pool[pi].score = topk_scores[base + j];
+        pool[pi].hit = (lbl < nl && bm[lbl]) ? 1 : 0;
+        pi++;
+      }
+      for (int64_t j = exp_off->a[i]; j < exp_off->a[i + 1]; j++)
+        if (exp_nbr->a[j] >= 0 && exp_nbr->a[j] < nl) bm[exp_nbr->a[j]] = 0;
+    }
+    free(bm);
+    free(topk_labels);
+    free(topk_scores);
+    qsort(pool, (uint64_t)pi, sizeof(tk_gram_entry_t), tk_gram_entry_desc);
+    uint64_t tp = 0, best_tp = 0;
+    int64_t best_pred = 0;
+    double best_f1 = 0.0;
+    for (int64_t i = 0; i < pi; i++) {
+      tp += pool[i].hit;
+      double f1_val = 2.0 * (double)tp / ((double)(i + 1) + (double)total_expected);
+      if (f1_val > best_f1) {
+        best_f1 = f1_val;
+        best_tp = tp;
+        best_pred = i + 1;
+      }
+    }
+    free(pool);
+    f1 = best_f1;
+    prec = best_pred > 0 ? (double)best_tp / (double)best_pred : 0.0;
+    rec = total_expected > 0 ? (double)best_tp / (double)total_expected : 0.0;
+  }
+  lua_pushnumber(L, f1);
+  lua_pushnumber(L, prec);
+  lua_pushnumber(L, rec);
+  return 3;
+}
+
+static inline int tk_gram_regress_accuracy_lua (lua_State *L) {
+  tk_gram_t *g = tk_gram_peek(L, 1);
+  if (!g->val_F_f) return luaL_error(L, "regress_accuracy: call prepare first");
+  int64_t d = g->n_dims, nl = g->n_labels, val_n = g->val_n;
+  double lambda_raw = luaL_checknumber(L, 2);
+  bool do_prop = lua_isnumber(L, 3);
+  double prop_a = do_prop ? lua_tonumber(L, 3) : 0.0;
+  double prop_b = do_prop ? (lua_isnumber(L, 4) ? lua_tonumber(L, 4) : 1.5) : 0.0;
+  tk_dvec_t *targets = tk_dvec_peek(L, 5, "targets");
+  uint64_t n = (uint64_t)val_n * (uint64_t)nl;
+  if (targets->n != n)
+    return luaL_error(L, "regress_accuracy: targets length mismatch");
+  tk_gram_solve_w(g, lambda_raw, do_prop, prop_a, prop_b);
+  if (!g->sbuf_f) {
+    g->sbuf_f = (float *)malloc(n * sizeof(float));
+    if (!g->sbuf_f) return luaL_error(L, "regress_accuracy: malloc failed");
+  }
+  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    (int)val_n, (int)nl, (int)d, 1.0f, g->val_F_f, (int)d,
+    g->W_work_f, (int)nl, 0.0f, g->sbuf_f, (int)nl);
+  if (g->intercept)
+    tk_gram_add_intercept_f(g->sbuf_f, val_n, nl, g->intercept);
+  double total_err = 0.0, sum_exp = 0.0;
+  #pragma omp parallel for reduction(+:total_err,sum_exp)
+  for (uint64_t i = 0; i < n; i++) {
+    total_err += fabs((double)g->sbuf_f[i] - targets->a[i]);
+    sum_exp += targets->a[i];
+  }
+  double mae = n > 0 ? total_err / (double)n : 0.0;
+  double mean_exp = n > 0 ? sum_exp / (double)n : 0.0;
+  double nmae = mean_exp > 0.0 ? mae / mean_exp : 0.0;
+  lua_pushnumber(L, mae);
+  lua_pushnumber(L, nmae);
+  return 2;
+}
+
 __attribute__((unused)) static luaL_Reg tk_gram_mt_fns[] = {
   { "prepare", tk_gram_prepare_val_lua },
   { "label", tk_gram_trial_label_lua },
+  { "label_f1", tk_gram_label_f1_lua },
   { "regress", tk_gram_regress_lua },
+  { "regress_accuracy", tk_gram_regress_accuracy_lua },
   { NULL, NULL }
 };
 
