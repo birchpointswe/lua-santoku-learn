@@ -33,6 +33,8 @@ function M.make_ridge_log (stopwatch, metric_fmt)
       detail = " " .. metric_fmt(m)
     elseif m.mae then
       detail = str.format(" mae=%.6f nmae=%.4f", m.mae, m.nmae)
+    elseif m.ndcg then
+      detail = str.format(" NDCG=%.4f", m.ndcg)
     elseif m.f1 then
       detail = str.format(" F1=%.4f P=%.4f R=%.4f", m.f1, m.precision, m.recall)
     end

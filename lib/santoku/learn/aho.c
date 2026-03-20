@@ -403,12 +403,12 @@ static int tk_aho_predict_lua (lua_State *L)
   if (inc_allocated) { tk_iuset_destroy(inc); }
 
   uint64_t mn = res.total > 0 ? (uint64_t)res.total : 1;
-  tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t)(n_texts + 1), NULL, NULL);
+  tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t)(n_texts + 1));
   memcpy(offsets->a, res.text_offsets, (uint64_t)(n_texts + 1) * sizeof(int64_t));
 
-  tk_ivec_t *out_ids = tk_ivec_create(L, mn, NULL, NULL);
-  tk_ivec_t *out_starts = tk_ivec_create(L, mn, NULL, NULL);
-  tk_ivec_t *out_ends = tk_ivec_create(L, mn, NULL, NULL);
+  tk_ivec_t *out_ids = tk_ivec_create(L, mn);
+  tk_ivec_t *out_starts = tk_ivec_create(L, mn);
+  tk_ivec_t *out_ends = tk_ivec_create(L, mn);
   if (res.total == 0) {
     out_ids->n = 0;
     out_starts->n = 0;

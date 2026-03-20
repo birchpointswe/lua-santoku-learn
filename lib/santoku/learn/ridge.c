@@ -296,7 +296,7 @@ static inline int tk_ridge_gram_lua (lua_State *L) {
   tk_dvec_t *lc = NULL;
   int lc_idx = 0;
   if (has_labels) {
-    lc = tk_dvec_create(L, unl, 0, 0);
+    lc = tk_dvec_create(L, unl);
     lc->n = unl;
     lc_idx = lua_gettop(L);
     memset(lc->a, 0, unl * sizeof(double));
@@ -396,13 +396,13 @@ static inline int tk_ridge_create_lua (lua_State *L) {
       W_fvec = w_buf;
       W_idx = w_buf_lua_idx;
     } else {
-      W_fvec = tk_fvec_create(L, dnl, NULL, NULL);
+      W_fvec = tk_fvec_create(L, dnl);
       W_idx = lua_gettop(L);
     }
     tk_dvec_t *intercept_dv = NULL;
     int intercept_idx = 0;
     if (gram->col_mean && gram->y_mean) {
-      intercept_dv = tk_dvec_create(L, (uint64_t)nl, 0, 0);
+      intercept_dv = tk_dvec_create(L, (uint64_t)nl);
       intercept_dv->n = (uint64_t)nl;
       intercept_idx = lua_gettop(L);
       if (do_prop && gram->label_counts) {
