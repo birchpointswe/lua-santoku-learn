@@ -14,7 +14,7 @@
     var->n = (uint64_t)(sz); \
     lua_pushvalue(L, (pos)); \
   } else { \
-    var = tk_ivec_create(L, (uint64_t)(sz), NULL, NULL); \
+    var = tk_ivec_create(L, (uint64_t)(sz)); \
   } \
   var##_idx = lua_gettop(L)
 
@@ -26,7 +26,7 @@
     var->n = (uint64_t)(sz); \
     lua_pushvalue(L, (pos)); \
   } else { \
-    var = tk_dvec_create(L, (uint64_t)(sz), NULL, NULL); \
+    var = tk_dvec_create(L, (uint64_t)(sz)); \
   } \
   var##_idx = lua_gettop(L)
 
@@ -38,7 +38,7 @@
     var->n = (uint64_t)(sz); \
     lua_pushvalue(L, (pos)); \
   } else { \
-    var = tk_fvec_create(L, (uint64_t)(sz), NULL, NULL); \
+    var = tk_fvec_create(L, (uint64_t)(sz)); \
   } \
   var##_idx = lua_gettop(L)
 

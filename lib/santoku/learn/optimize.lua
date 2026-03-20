@@ -434,8 +434,13 @@ M.ridge = function (args)
     if dense then
       local mae, nmae = gram:regress_accuracy(params.lambda, nil, nil, args.val_targets)
       return -mae, { mae = mae, nmae = nmae }
+    elseif args.ndcg then
+      local ndcg = gram:label_ranking(params.lambda, k,
+        params.propensity_a, params.propensity_b,
+        args.val_expected_offsets, args.val_expected_neighbors)
+      return ndcg, { ndcg = ndcg }
     else
-      local f1, p, r = gram:label_f1(params.lambda, k,
+      local f1, p, r = gram:label_accuracy(params.lambda, k,
         params.propensity_a, params.propensity_b,
         args.val_expected_offsets, args.val_expected_neighbors, eval_k)
       return f1, { f1 = f1, precision = p, recall = r }
@@ -541,8 +546,13 @@ M.krr = function (args)
     if dense then
       local mae, nmae = kd.gram:regress_accuracy(params.lambda, nil, nil, args.val_targets)
       return -mae, { mae = mae, nmae = nmae }
+    elseif args.ndcg then
+      local ndcg = kd.gram:label_ranking(params.lambda, k,
+        params.propensity_a, params.propensity_b,
+        args.val_expected_offsets, args.val_expected_neighbors)
+      return ndcg, { ndcg = ndcg }
     else
-      local f1, p, r = kd.gram:label_f1(params.lambda, k,
+      local f1, p, r = kd.gram:label_accuracy(params.lambda, k,
         params.propensity_a, params.propensity_b,
         args.val_expected_offsets, args.val_expected_neighbors, eval_k)
       return f1, { f1 = f1, precision = p, recall = r }

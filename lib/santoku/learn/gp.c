@@ -242,7 +242,7 @@ static int tm_gp_suggest (lua_State *L)
     ei->n = nc;
     lua_pushvalue(L, 7);
   } else {
-    ei = tk_dvec_create(L, nc, 0, 0);
+    ei = tk_dvec_create(L, nc);
     ei->n = nc;
   }
 

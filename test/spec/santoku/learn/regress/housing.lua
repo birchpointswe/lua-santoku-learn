@@ -85,10 +85,10 @@ test("housing regressor", function ()
 
   str.printf("\n[Eval] Scoring splits\n")
   local regress_buf = fvec.create()
-  local val_stats = eval.regression_accuracy(ridge_obj:regress(val_codes, validate.n, regress_buf), validate.targets)
+  local val_stats = eval.regress_accuracy(ridge_obj:regress(val_codes, validate.n, regress_buf), validate.targets)
   val_codes = nil -- luacheck: ignore
   local test_codes = encode(test_set.bit_offsets, test_set.bit_neighbors, test_set.continuous, test_set.n)
-  local test_stats = eval.regression_accuracy(ridge_obj:regress(test_codes, test_set.n, regress_buf), test_set.targets)
+  local test_stats = eval.regress_accuracy(ridge_obj:regress(test_codes, test_set.n, regress_buf), test_set.targets)
   test_codes = nil -- luacheck: ignore
   str.printf("[Eval] Accuracy: val=%.1f%% test=%.1f%% %s\n",
     (1 - val_stats.nmae) * 100, (1 - test_stats.nmae) * 100, sw())

@@ -334,9 +334,9 @@ static int tk_gram_entry_desc (const void *a, const void *b) {
   return (sa > sb) ? -1 : (sa < sb) ? 1 : 0;
 }
 
-static inline int tk_gram_label_f1_lua (lua_State *L) {
+static inline int tk_gram_label_accuracy_lua (lua_State *L) {
   tk_gram_t *g = tk_gram_peek(L, 1);
-  if (!g->val_F_f) return luaL_error(L, "label_f1: call prepare first");
+  if (!g->val_F_f) return luaL_error(L, "label_accuracy: call prepare first");
   int64_t d = g->n_dims, nl = g->n_labels, val_n = g->val_n;
   double lambda_raw = luaL_checknumber(L, 2);
   int64_t topk = (int64_t)luaL_checkinteger(L, 3);
@@ -361,7 +361,7 @@ static inline int tk_gram_label_f1_lua (lua_State *L) {
   uint64_t need = (uint64_t)val_n * (uint64_t)nl;
   if (!g->sbuf_f) {
     g->sbuf_f = (float *)malloc(need * sizeof(float));
-    if (!g->sbuf_f) return luaL_error(L, "label_f1: malloc failed");
+    if (!g->sbuf_f) return luaL_error(L, "label_accuracy: malloc failed");
   }
   cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
     (int)val_n, (int)nl, (int)d, 1.0f, g->val_F_f, (int)d,
@@ -459,7 +459,7 @@ static inline int tk_gram_label_f1_lua (lua_State *L) {
     double *topk_scores = (double *)malloc(total_entries * sizeof(double));
     if (!topk_labels || !topk_scores) {
       free(topk_labels); free(topk_scores);
-      return luaL_error(L, "label_f1: malloc failed");
+      return luaL_error(L, "label_accuracy: malloc failed");
     }
     #pragma omp parallel
     {
@@ -528,6 +528,70 @@ static inline int tk_gram_label_f1_lua (lua_State *L) {
   return 3;
 }
 
+static inline int tk_gram_label_ranking_lua (lua_State *L) {
+  tk_gram_t *g = tk_gram_peek(L, 1);
+  if (!g->val_F_f) return luaL_error(L, "label_ranking: call prepare first");
+  int64_t d = g->n_dims, nl = g->n_labels, val_n = g->val_n;
+  double lambda_raw = luaL_checknumber(L, 2);
+  int64_t topk = (int64_t)luaL_checkinteger(L, 3);
+  if (topk > nl) topk = nl;
+  if (topk < 1) topk = 1;
+  bool do_prop = lua_isnumber(L, 4);
+  double prop_a = do_prop ? lua_tonumber(L, 4) : 0.0;
+  double prop_b = do_prop ? (lua_isnumber(L, 5) ? lua_tonumber(L, 5) : 1.5) : 0.0;
+  tk_ivec_t *exp_off = tk_ivec_peek(L, 6, "exp_off");
+  tk_ivec_t *exp_nbr = tk_ivec_peek(L, 7, "exp_nbr");
+  tk_gram_solve_w(g, lambda_raw, do_prop, prop_a, prop_b);
+  uint64_t need = (uint64_t)val_n * (uint64_t)nl;
+  if (!g->sbuf_f) {
+    g->sbuf_f = (float *)malloc(need * sizeof(float));
+    if (!g->sbuf_f) return luaL_error(L, "label_ranking: malloc failed");
+  }
+  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    (int)val_n, (int)nl, (int)d, 1.0f, g->val_F_f, (int)d,
+    g->W_work_f, (int)nl, 0.0f, g->sbuf_f, (int)nl);
+  if (g->intercept)
+    tk_gram_add_intercept_f(g->sbuf_f, val_n, nl, g->intercept);
+  double sum_ndcg = 0.0;
+  uint64_t n_valid = 0;
+  #pragma omp parallel reduction(+:sum_ndcg,n_valid)
+  {
+    tk_rvec_t heap = { .n = 0, .m = (size_t)topk, .lua_managed = false,
+                       .a = (tk_rank_t *)malloc((uint64_t)topk * sizeof(tk_rank_t)) };
+    #pragma omp for schedule(static)
+    for (int64_t i = 0; i < val_n; i++) {
+      float *row = g->sbuf_f + i * nl;
+      int64_t es = exp_off->a[i], ee = exp_off->a[i + 1];
+      int64_t n_exp = ee - es;
+      if (n_exp == 0) continue;
+      heap.n = 0;
+      for (int64_t l = 0; l < nl; l++)
+        tk_rvec_hmin(&heap, (size_t)topk, tk_rank(l, (double)row[l]));
+      tk_rvec_desc(&heap, 0, heap.n);
+      int kha;
+      tk_iuset_t *exp_set = tk_iuset_create(NULL, 0);
+      for (int64_t j = es; j < ee; j++)
+        tk_iuset_put(exp_set, exp_nbr->a[j], &kha);
+      double dcg = 0.0;
+      for (size_t j = 0; j < heap.n; j++)
+        if (tk_iuset_contains(exp_set, heap.a[j].i))
+          dcg += 1.0 / log2((double)(j + 2));
+      tk_iuset_destroy(exp_set);
+      int64_t ideal_n = n_exp < (int64_t)heap.n ? n_exp : (int64_t)heap.n;
+      double idcg = 0.0;
+      for (int64_t j = 0; j < ideal_n; j++)
+        idcg += 1.0 / log2((double)(j + 2));
+      if (idcg > 0.0)
+        sum_ndcg += dcg / idcg;
+      n_valid++;
+    }
+    free(heap.a);
+  }
+  double ndcg = n_valid > 0 ? sum_ndcg / (double)n_valid : 0.0;
+  lua_pushnumber(L, ndcg);
+  return 1;
+}
+
 static inline int tk_gram_regress_accuracy_lua (lua_State *L) {
   tk_gram_t *g = tk_gram_peek(L, 1);
   if (!g->val_F_f) return luaL_error(L, "regress_accuracy: call prepare first");
@@ -567,7 +631,8 @@ static inline int tk_gram_regress_accuracy_lua (lua_State *L) {
 __attribute__((unused)) static luaL_Reg tk_gram_mt_fns[] = {
   { "prepare", tk_gram_prepare_val_lua },
   { "label", tk_gram_trial_label_lua },
-  { "label_f1", tk_gram_label_f1_lua },
+  { "label_accuracy", tk_gram_label_accuracy_lua },
+  { "label_ranking", tk_gram_label_ranking_lua },
   { "regress", tk_gram_regress_lua },
   { "regress_accuracy", tk_gram_regress_accuracy_lua },
   { NULL, NULL }

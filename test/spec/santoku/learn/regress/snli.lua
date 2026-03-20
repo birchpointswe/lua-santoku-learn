@@ -94,7 +94,7 @@ test("snli classifier", function ()
     best_params.propensity_a, best_params.propensity_b, sw())
 
   str.printf("[Eval] Labeling splits\n")
-  local _, val_labels = ridge_obj:label(val_codes, validate.n, 1)
+  local val_off, val_nbr = ridge_obj:label(val_codes, validate.n, 1)
   val_codes = nil -- luacheck: ignore
 
   local function eval_split (name, split)
@@ -102,16 +102,24 @@ test("snli classifier", function ()
     local codes = sp_enc:encode({
       offsets = pair_off, tokens = pair_tok, values = pair_val, n_samples = split.n,
     })
-    local _, labels = ridge_obj:label(codes, split.n, 1)
-    local stats = eval.class_accuracy(labels, split.sol_offsets, split.sol_neighbors, split.n, n_classes)
+    local off, nbr = ridge_obj:label(codes, split.n, 1)
+    local _, stats = eval.label_accuracy({
+      pred_offsets = off, pred_neighbors = nbr,
+      expected_offsets = split.sol_offsets, expected_neighbors = split.sol_neighbors,
+      ks = 1,
+    })
     str.printf("[%s] F1=%.4f precision=%.4f recall=%.4f %s\n",
-      name, stats.f1, stats.precision, stats.recall, sw())
+      name, stats.micro_f1, stats.micro_precision, stats.micro_recall, sw())
     return stats
   end
 
-  local val_stats = eval.class_accuracy(val_labels, validate.sol_offsets, validate.sol_neighbors, validate.n, n_classes)
+  local _, val_stats = eval.label_accuracy({
+    pred_offsets = val_off, pred_neighbors = val_nbr,
+    expected_offsets = validate.sol_offsets, expected_neighbors = validate.sol_neighbors,
+    ks = 1,
+  })
   str.printf("[Val] F1=%.4f precision=%.4f recall=%.4f %s\n",
-    val_stats.f1, val_stats.precision, val_stats.recall, sw())
+    val_stats.micro_f1, val_stats.micro_precision, val_stats.micro_recall, sw())
 
   eval_split("Dev", dev)
   eval_split("Test", test_set)

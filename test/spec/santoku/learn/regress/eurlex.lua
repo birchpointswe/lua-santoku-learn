@@ -91,7 +91,7 @@ test("eurlex classifier", function ()
   end
 
   local dv_off, dv_nbr, _ = ridge_obj:label(dev_codes, dev.n, k)
-  local _, dv_oracle = eval.retrieval_ks({
+  local _, dv_oracle = eval.label_accuracy({
     pred_offsets = dv_off, pred_neighbors = dv_nbr,
     expected_offsets = dev_label_off, expected_neighbors = dev_label_nbr,
   })
@@ -105,14 +105,14 @@ test("eurlex classifier", function ()
   test_codes = nil; ridge_obj:shrink(); sp_enc:shrink() -- luacheck: ignore
   collectgarbage("collect")
 
-  local _, ts_oracle = eval.retrieval_ks({
+  local _, ts_oracle = eval.label_accuracy({
     pred_offsets = ts_off, pred_neighbors = ts_nbr,
     expected_offsets = test_label_off, expected_neighbors = test_label_nbr,
   })
   str.printf("[Ts Oracle] %s %s\n", fmt_metrics(ts_oracle), sw())
 
   local ts_ks = gfm_obj:predict({ offsets = ts_off, neighbors = ts_nbr, scores = ts_sco, n_samples = test_set.n })
-  local _, ts_pred_m = eval.retrieval_ks({
+  local _, ts_pred_m = eval.label_accuracy({
     pred_offsets = ts_off, pred_neighbors = ts_nbr,
     expected_offsets = test_label_off, expected_neighbors = test_label_nbr,
     ks = ts_ks,
