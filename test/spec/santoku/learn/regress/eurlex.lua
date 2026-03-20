@@ -59,19 +59,25 @@ test("eurlex classifier", function ()
   csr.apply_bns(val_off, val_tok, val_val, bns_scores)
 
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
-  local sp_enc, ridge_obj, dev_codes, best_params, gfm_obj = optimize.krr({
+  local sp_enc, ridge_obj, dev_codes, best_params = optimize.krr({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
     kernel = cfg.emb.kernel,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     label_offsets = train_label_off, label_neighbors = train_label_nbr, n_labels = n_labels,
     val_offsets = val_off, val_tokens = val_tok, val_values = val_val,
-    val_n_samples = dev.n, gfm = true,
+    val_n_samples = dev.n,
     val_expected_offsets = dev_label_off, val_expected_neighbors = dev_label_nbr,
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
     propensity_b = cfg.ridge.propensity_b,
     k = k, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
+    trial_fn = function (gram, params)
+      local f1, p, r = gram:label_accuracy(params.lambda, k,
+        params.propensity_a, params.propensity_b,
+        dev_label_off, dev_label_nbr, "gfm")
+      return f1, { f1 = f1, precision = p, recall = r }
+    end,
   })
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   collectgarbage("collect")
@@ -90,12 +96,19 @@ test("eurlex classifier", function ()
     })
   end
 
-  local dv_off, dv_nbr, _ = ridge_obj:label(dev_codes, dev.n, k)
+  local dv_off, dv_nbr, dv_sco = ridge_obj:label(dev_codes, dev.n, k)
   local _, dv_oracle = eval.label_accuracy({
     pred_offsets = dv_off, pred_neighbors = dv_nbr,
     expected_offsets = dev_label_off, expected_neighbors = dev_label_nbr,
   })
   str.printf("[Dv Oracle] %s %s\n", fmt_metrics(dv_oracle), sw())
+
+  local gfm_obj = optimize.gfm({
+    n_labels = n_labels,
+    val_offsets = dv_off, val_neighbors = dv_nbr, val_scores = dv_sco,
+    val_n_samples = dev.n,
+    val_expected_offsets = dev_label_off, val_expected_neighbors = dev_label_nbr,
+  })
 
   dev_codes = nil -- luacheck: ignore
   collectgarbage("collect")
