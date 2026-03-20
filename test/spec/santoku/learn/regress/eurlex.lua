@@ -71,11 +71,7 @@ test("eurlex classifier", function ()
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
     propensity_b = cfg.ridge.propensity_b,
     k = k, search_trials = cfg.ridge.search_trials,
-    each = util.make_ridge_log(stopwatch, function (m)
-      if m.gfm_f1 then return "oracle: " .. fmt_metrics(m.oracle) end
-      if m.oracle then return fmt_metrics(m.oracle) end
-      return ""
-    end),
+    each = util.make_ridge_log(stopwatch),
   })
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   collectgarbage("collect")

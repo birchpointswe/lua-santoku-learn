@@ -1,8 +1,6 @@
-local evaluator = require("santoku.learn.evaluator")
 local gp = require("santoku.learn.gp")
 
 local dvec = require("santoku.dvec")
-local ivec = require("santoku.ivec")
 local num = require("santoku.num")
 local err = require("santoku.error")
 local rand = require("santoku.random")
@@ -384,8 +382,6 @@ local search = function (args)
 
 end
 
-local default_score_fn = function (oracle) return oracle.micro_f1 end
-
 M.ridge = function (args)
   local ridge = require("santoku.learn.ridge")
   local dense = args.val_targets ~= nil
@@ -409,7 +405,7 @@ M.ridge = function (args)
   local samplers = build_samplers(args, param_names)
   local k = not dense and (args.k or 32) or nil
   local use_gfm = not dense and args.gfm
-  local score_fn = args.score_fn or default_score_fn
+  local eval_k = not dense and (args.fixed_k or (use_gfm and "gfm") or nil) or nil
   if all_fixed(samplers) or not args.search_trials or args.search_trials <= 0 then
     local params = sample_params(samplers, param_names, nil, true)
     local r = ridge.create({
@@ -434,34 +430,16 @@ M.ridge = function (args)
     return r, params
   end
   gram:prepare(args.val_codes, args.val_n_samples)
-  local lbl_off_buf, lbl_nbr_buf, lbl_sco_buf, regress_buf
   local function trial_fn (params)
     if dense then
-      regress_buf = gram:regress(params.lambda, nil, nil, regress_buf)
-      local ra = evaluator.regression_accuracy(regress_buf, args.val_targets)
-      return -ra.mean, { mae = ra.mean, nmae = ra.nmae }
+      local mae, nmae = gram:regress_accuracy(params.lambda, nil, nil, args.val_targets)
+      return -mae, { mae = mae, nmae = nmae }
+    else
+      local f1, p, r = gram:label_f1(params.lambda, k,
+        params.propensity_a, params.propensity_b,
+        args.val_expected_offsets, args.val_expected_neighbors, eval_k)
+      return f1, { f1 = f1, precision = p, recall = r }
     end
-    local po, pn, ps = gram:label(params.lambda, k,
-      params.propensity_a, params.propensity_b,
-      lbl_off_buf, lbl_nbr_buf, lbl_sco_buf)
-    lbl_off_buf, lbl_nbr_buf, lbl_sco_buf = po, pn, ps
-    local _, oracle = evaluator.retrieval_ks({
-      pred_offsets = po, pred_neighbors = pn,
-      expected_offsets = args.val_expected_offsets,
-      expected_neighbors = args.val_expected_neighbors,
-    })
-    if use_gfm then
-      local gfm = require("santoku.learn.gfm")
-      local g = gfm.create({ n_labels = args.n_labels })
-      local gf1 = g:calibrate({
-        offsets = po, neighbors = pn, scores = ps,
-        n_samples = args.val_n_samples,
-        expected_offsets = args.val_expected_offsets,
-        expected_neighbors = args.val_expected_neighbors,
-      })
-      return gf1, { oracle = oracle, gfm_f1 = gf1 }
-    end
-    return score_fn(oracle), { oracle = oracle }
   end
   local _, best_params = search({
     param_names = param_names, samplers = samplers,
@@ -506,7 +484,7 @@ M.krr = function (args)
   local do_search = not all_fixed(samplers) and args.search_trials and args.search_trials > 0
   local k = not dense and (args.k or 32) or nil
   local use_gfm = not dense and args.gfm
-  local score_fn = args.score_fn or default_score_fn
+  local eval_k = not dense and (args.fixed_k or (use_gfm and "gfm") or nil) or nil
   local spectral_args = {
     offsets = args.offsets, tokens = args.tokens, values = args.values,
     n_tokens = args.n_tokens, n_samples = args.n_samples,
@@ -534,7 +512,6 @@ M.krr = function (args)
     gram:prepare(val_codes, args.val_n_samples)
     kernel_data[kname] = { sp_enc = sp_enc, gram = gram, val_codes = val_codes }
   end
-  local eval_ks = args.fixed_k and ivec.create(args.val_n_samples):fill(args.fixed_k) or nil
   collectgarbage("collect")
   if not do_search then
     local params = sample_params(samplers, param_names, nil, true)
@@ -559,36 +536,17 @@ M.krr = function (args)
     end
     return kd.sp_enc, r, kd.val_codes, params
   end
-  local lbl_off_buf, lbl_nbr_buf, lbl_sco_buf, regress_buf
   local function trial_fn (params)
     local kd = kernel_data[params.kernel]
     if dense then
-      regress_buf = kd.gram:regress(params.lambda, nil, nil, regress_buf)
-      local ra = evaluator.regression_accuracy(regress_buf, args.val_targets)
-      return -ra.mean, { mae = ra.mean, nmae = ra.nmae }
+      local mae, nmae = kd.gram:regress_accuracy(params.lambda, nil, nil, args.val_targets)
+      return -mae, { mae = mae, nmae = nmae }
+    else
+      local f1, p, r = kd.gram:label_f1(params.lambda, k,
+        params.propensity_a, params.propensity_b,
+        args.val_expected_offsets, args.val_expected_neighbors, eval_k)
+      return f1, { f1 = f1, precision = p, recall = r }
     end
-    local po, pn, ps = kd.gram:label(params.lambda, k,
-      params.propensity_a, params.propensity_b,
-      lbl_off_buf, lbl_nbr_buf, lbl_sco_buf)
-    lbl_off_buf, lbl_nbr_buf, lbl_sco_buf = po, pn, ps
-    local _, oracle = evaluator.retrieval_ks({
-      pred_offsets = po, pred_neighbors = pn,
-      expected_offsets = args.val_expected_offsets,
-      expected_neighbors = args.val_expected_neighbors,
-      ks = eval_ks,
-    })
-    if use_gfm then
-      local gfm = require("santoku.learn.gfm")
-      local g = gfm.create({ n_labels = args.n_labels })
-      local gf1 = g:calibrate({
-        offsets = po, neighbors = pn, scores = ps,
-        n_samples = args.val_n_samples,
-        expected_offsets = args.val_expected_offsets,
-        expected_neighbors = args.val_expected_neighbors,
-      })
-      return gf1, { oracle = oracle, gfm_f1 = gf1 }
-    end
-    return score_fn(oracle), { oracle = oracle }
   end
   local _, best_params = search({
     param_names = param_names, samplers = samplers,

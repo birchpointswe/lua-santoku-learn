@@ -32,11 +32,9 @@ function M.make_ridge_log (stopwatch, metric_fmt)
     if metric_fmt then
       detail = " " .. metric_fmt(m)
     elseif m.mae then
-      detail = str.format(" mae=%.6f", m.mae)
-    elseif m.gfm_f1 then
-      detail = str.format(" oracle=%.4f", m.oracle.micro_f1)
-    elseif m.oracle then
-      detail = str.format(" saF1=%.4f miF1=%.4f", m.oracle.sample_f1, m.oracle.micro_f1)
+      detail = str.format(" mae=%.6f nmae=%.4f", m.mae, m.nmae)
+    elseif m.f1 then
+      detail = str.format(" F1=%.4f P=%.4f R=%.4f", m.f1, m.precision, m.recall)
     end
     local timing = ""
     if stopwatch then
