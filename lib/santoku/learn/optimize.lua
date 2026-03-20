@@ -2,6 +2,7 @@ local evaluator = require("santoku.learn.evaluator")
 local gp = require("santoku.learn.gp")
 
 local dvec = require("santoku.dvec")
+local ivec = require("santoku.ivec")
 local num = require("santoku.num")
 local err = require("santoku.error")
 local rand = require("santoku.random")
@@ -533,6 +534,7 @@ M.krr = function (args)
     gram:prepare(val_codes, args.val_n_samples)
     kernel_data[kname] = { sp_enc = sp_enc, gram = gram, val_codes = val_codes }
   end
+  local eval_ks = args.fixed_k and ivec.create(args.val_n_samples):fill(args.fixed_k) or nil
   collectgarbage("collect")
   if not do_search then
     local params = sample_params(samplers, param_names, nil, true)
@@ -573,6 +575,7 @@ M.krr = function (args)
       pred_offsets = po, pred_neighbors = pn,
       expected_offsets = args.val_expected_offsets,
       expected_neighbors = args.val_expected_neighbors,
+      ks = eval_ks,
     })
     if use_gfm then
       local gfm = require("santoku.learn.gfm")
