@@ -60,14 +60,11 @@ typedef struct {
   int64_t end;
 } tk_aho_match_t;
 
+#define tk_aho_match_lt(a, b) \
+  ((a).start != (b).start ? (a).start < (b).start : \
+   ((a).end - (a).start) > ((b).end - (b).start))
 
-static int tk_aho_match_cmp (const void *a, const void *b) {
-  const tk_aho_match_t *ma = (const tk_aho_match_t *)a;
-  const tk_aho_match_t *mb = (const tk_aho_match_t *)b;
-  if (ma->start != mb->start) return (ma->start > mb->start) - (ma->start < mb->start);
-  int64_t la = ma->end - ma->start, lb = mb->end - mb->start;
-  return (lb > la) - (lb < la);
-}
+KSORT_INIT(tk_aho_match, tk_aho_match_t, tk_aho_match_lt)
 
 typedef struct {
   tk_aho_match_t *matches;
@@ -133,15 +130,11 @@ static tk_aho_scan_result_t tk_aho_scan (
         }
       }
 
-      if (longest && m_n > 0) {
-        qsort(local_m, (size_t)m_n, sizeof(tk_aho_match_t), tk_aho_match_cmp);
+      if (inc && m_n > 0) {
         int64_t write = 0;
-        int64_t last_end = -1;
         for (int64_t j = 0; j < m_n; j++) {
-          if (local_m[j].start >= last_end) {
+          if (tk_iuset_contains(inc, local_m[j].id))
             local_m[write++] = local_m[j];
-            last_end = local_m[j].end;
-          }
         }
         m_n = write;
       }
@@ -160,11 +153,15 @@ static tk_aho_scan_result_t tk_aho_scan (
         m_n = write;
       }
 
-      if (inc && m_n > 0) {
+      if (longest && m_n > 0) {
+        ks_introsort(tk_aho_match, (size_t)m_n, local_m);
         int64_t write = 0;
+        int64_t last_end = -1;
         for (int64_t j = 0; j < m_n; j++) {
-          if (tk_iuset_contains(inc, local_m[j].id))
+          if (local_m[j].start >= last_end) {
             local_m[write++] = local_m[j];
+            last_end = local_m[j].end;
+          }
         }
         m_n = write;
       }
