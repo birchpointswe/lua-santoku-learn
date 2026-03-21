@@ -539,6 +539,13 @@ typedef struct {
   int64_t d_input;
   uint8_t *bits_data;
   uint64_t bits_d;
+  float *sims_buf;
+  float *row_bufs;
+  float *dense_tile_buf;
+  float *norms_buf;
+  uint64_t norms_buf_cap;
+  uint64_t tile;
+  int n_threads;
   bool destroyed;
 } tk_nystrom_encoder_t;
 
@@ -564,6 +571,10 @@ static inline int tk_nystrom_encoder_gc (lua_State *L) {
     } else if (enc->mod_type == TK_MOD_BITS) {
       free(enc->bits_data);
     }
+    free(enc->sims_buf);
+    free(enc->row_bufs);
+    free(enc->dense_tile_buf);
+    free(enc->norms_buf);
     enc->destroyed = true;
   }
   return 0;
@@ -617,18 +628,23 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
     out_fv_idx = lua_gettop(L);
   }
 
-  uint64_t tile = 4096;
-  while (tile > 1 && tile * m * sizeof(float) > 256ULL * 1024 * 1024)
-    tile /= 2;
+  if (!enc->sims_buf) {
+    uint64_t tile = 4096;
+    while (tile > 1 && tile * m * sizeof(float) > 256ULL * 1024 * 1024)
+      tile /= 2;
+    enc->tile = tile;
+    enc->sims_buf = (float *)malloc(tile * m * sizeof(float));
+    if (!enc->sims_buf) return luaL_error(L, "encode: out of memory");
+  }
+  uint64_t tile = enc->tile;
   if (tile > n_samples) tile = n_samples;
-  float *sims_f = (float *)malloc(tile * m * sizeof(float));
-  if (!sims_f) return luaL_error(L, "encode: out of memory");
+  float *sims_f = enc->sims_buf;
 
   float *csr_sval = NULL;
   const float *csr_sv = NULL;
   float *csr_norms = NULL;
   if (enc->mod_type == TK_MOD_CSR) {
-    if (!in_offsets) { free(sims_f); return luaL_error(L, "encode: CSR modality but no offsets"); }
+    if (!in_offsets) return luaL_error(L, "encode: CSR modality but no offsets");
     uint64_t nnz = in_tokens->n;
     if (!in_values_f) {
       csr_sval = (float *)malloc(nnz * sizeof(float));
@@ -640,7 +656,14 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
     } else {
       csr_sv = in_values_f->a;
     }
-    csr_norms = (float *)calloc(n_samples, sizeof(float));
+    if (enc->norms_buf_cap < n_samples) {
+      free(enc->norms_buf);
+      enc->norms_buf = (float *)calloc(n_samples, sizeof(float));
+      enc->norms_buf_cap = n_samples;
+    } else {
+      memset(enc->norms_buf, 0, n_samples * sizeof(float));
+    }
+    csr_norms = enc->norms_buf;
     #pragma omp parallel for schedule(static)
     for (uint64_t s = 0; s < n_samples; s++) {
       int64_t lo = in_offsets->a[s], hi = in_offsets->a[s + 1];
@@ -653,14 +676,19 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
     }
   }
 
-  int nt = omp_get_max_threads();
   float *row_bufs = NULL;
   if (enc->mod_type == TK_MOD_CSR) {
-    row_bufs = (float *)calloc((uint64_t)nt * m, sizeof(float));
-    if (!row_bufs) {
-      free(sims_f); free(csr_sval); free(csr_norms);
-      return luaL_error(L, "encode: out of memory (row_bufs)");
+    int nt = omp_get_max_threads();
+    if (!enc->row_bufs || nt > enc->n_threads) {
+      free(enc->row_bufs);
+      enc->row_bufs = (float *)calloc((uint64_t)nt * m, sizeof(float));
+      enc->n_threads = nt;
+      if (!enc->row_bufs) {
+        free(csr_sval);
+        return luaL_error(L, "encode: out of memory (row_bufs)");
+      }
     }
+    row_bufs = enc->row_bufs;
   }
 
   for (uint64_t base = 0; base < n_samples; base += tile) {
@@ -698,8 +726,9 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
 
     } else if (enc->mod_type == TK_MOD_DENSE) {
       int64_t di = enc->d_input;
-      float *src_f = (float *)malloc(blk * (uint64_t)di * sizeof(float));
-      if (!src_f) { free(sims_f); free(csr_sval); free(csr_norms); return luaL_error(L, "encode: out of memory"); }
+      if (!enc->dense_tile_buf)
+        enc->dense_tile_buf = (float *)malloc(enc->tile * (uint64_t)di * sizeof(float));
+      float *src_f = enc->dense_tile_buf;
       uint64_t ddi = in_d_input_scalar > 0 ? (uint64_t)in_d_input_scalar : (uint64_t)di;
       uint64_t src_off_base = base * ddi;
       uint64_t cnt = blk * (uint64_t)di;
@@ -722,7 +751,6 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
             (double)sims_f[i * m + j], denom);
         }
       }
-      free(src_f);
 
     } else if (enc->mod_type == TK_MOD_BITS) {
       uint64_t bd = enc->bits_d;
@@ -748,10 +776,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
       0.0f, out->a + base * d, (int)d);
   }
 
-  free(sims_f);
-  free(row_bufs);
   free(csr_sval);
-  free(csr_norms);
   lua_pushvalue(L, out_fv_idx);
   return 1;
 }
@@ -867,6 +892,11 @@ static inline int tk_nystrom_shrink_lua (lua_State *L) {
   tk_nystrom_encoder_t *enc = tk_nystrom_encoder_peek(L, 1);
   free(enc->projection);
   enc->projection = NULL;
+  free(enc->sims_buf); enc->sims_buf = NULL;
+  free(enc->row_bufs); enc->row_bufs = NULL;
+  free(enc->dense_tile_buf); enc->dense_tile_buf = NULL;
+  free(enc->norms_buf); enc->norms_buf = NULL;
+  enc->norms_buf_cap = 0;
   return 0;
 }
 
@@ -1257,6 +1287,13 @@ static inline int tm_encode (lua_State *L) {
   enc->d_input = 0;
   enc->bits_data = NULL;
   enc->bits_d = 0;
+  enc->sims_buf = NULL;
+  enc->row_bufs = NULL;
+  enc->dense_tile_buf = NULL;
+  enc->norms_buf = NULL;
+  enc->norms_buf_cap = 0;
+  enc->tile = 0;
+  enc->n_threads = 0;
 
   if (has_csr) {
     uint64_t csr_nt = mod.csr_n_tokens;
@@ -1405,6 +1442,9 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   enc->csr_n_tokens = 0;
   enc->dense_vecs = NULL; enc->dense_norms = NULL; enc->d_input = 0;
   enc->bits_data = NULL; enc->bits_d = 0;
+  enc->sims_buf = NULL; enc->row_bufs = NULL; enc->dense_tile_buf = NULL;
+  enc->norms_buf = NULL; enc->norms_buf_cap = 0;
+  enc->tile = 0; enc->n_threads = 0;
 
   uint8_t kernel_byte;
   tk_lua_fread(L, &kernel_byte, sizeof(uint8_t), 1, fh);
