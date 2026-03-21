@@ -60,6 +60,7 @@ typedef struct {
   int64_t end;
 } tk_aho_match_t;
 
+
 static int tk_aho_match_cmp (const void *a, const void *b) {
   const tk_aho_match_t *ma = (const tk_aho_match_t *)a;
   const tk_aho_match_t *mb = (const tk_aho_match_t *)b;
@@ -76,7 +77,8 @@ typedef struct {
 
 static tk_aho_scan_result_t tk_aho_scan (
   tk_aho_t *a, const char **texts, size_t *tlens,
-  int n_texts, bool longest, tk_pvec_t *exc, tk_iuset_t *inc
+  int n_texts, bool longest, tk_pvec_t *exc, tk_iuset_t *inc,
+  const uint8_t *wbound
 ) {
   tk_aho_match_t **pt_matches = (tk_aho_match_t **)calloc((uint64_t)n_texts, sizeof(tk_aho_match_t *));
   int64_t *pt_counts = (int64_t *)calloc((uint64_t)n_texts, sizeof(int64_t));
@@ -106,15 +108,26 @@ static tk_aho_scan_result_t tk_aho_scan (
         int32_t tmp = state;
         while (tmp > 0) {
           if (a->output_id[tmp] >= 0) {
-            if (m_n >= local_cap) {
-              local_cap *= 2;
-              local_m = (tk_aho_match_t *)realloc(local_m, (uint64_t)local_cap * sizeof(tk_aho_match_t));
-            }
             int64_t ns = pos - a->output_len[tmp] + 1;
-            local_m[m_n].id = a->output_id[tmp];
-            local_m[m_n].start = pm_buf[ns];
-            local_m[m_n].end = pm_buf[pos + 1];
-            m_n++;
+            int64_t os = pm_buf[ns];
+            int64_t oe = pm_buf[pos + 1];
+            int skip = 0;
+            if (wbound) {
+              if (os > 0 && wbound[(uint8_t)texts[ti][os - 1]])
+                skip = 1;
+              if (!skip && (size_t)oe < tlen && wbound[(uint8_t)texts[ti][oe]])
+                skip = 1;
+            }
+            if (!skip) {
+              if (m_n >= local_cap) {
+                local_cap *= 2;
+                local_m = (tk_aho_match_t *)realloc(local_m, (uint64_t)local_cap * sizeof(tk_aho_match_t));
+              }
+              local_m[m_n].id = a->output_id[tmp];
+              local_m[m_n].start = os;
+              local_m[m_n].end = oe;
+              m_n++;
+            }
           }
           tmp = a->output_link[tmp];
         }
@@ -389,6 +402,17 @@ static int tk_aho_predict_lua (lua_State *L)
   }
   lua_pop(L, 1);
 
+  uint8_t *wbound = NULL;
+  lua_getfield(L, 2, "boundary");
+  if (lua_type(L, -1) == LUA_TSTRING) {
+    size_t blen;
+    const char *bs = lua_tolstring(L, -1, &blen);
+    wbound = (uint8_t *)calloc(256, 1);
+    for (size_t i = 0; i < blen; i++)
+      wbound[(uint8_t)bs[i]] = 1;
+  }
+  lua_pop(L, 1);
+
   const char **texts = (const char **)malloc((uint64_t)n_texts * sizeof(const char *));
   size_t *tlens = (size_t *)malloc((uint64_t)n_texts * sizeof(size_t));
   for (int ti = 0; ti < n_texts; ti++) {
@@ -397,9 +421,10 @@ static int tk_aho_predict_lua (lua_State *L)
     lua_pop(L, 1);
   }
 
-  tk_aho_scan_result_t res = tk_aho_scan(a, texts, tlens, n_texts, longest, exc, inc);
+  tk_aho_scan_result_t res = tk_aho_scan(a, texts, tlens, n_texts, longest, exc, inc, wbound);
   free(texts);
   free(tlens);
+  free(wbound);
   if (inc_allocated) { tk_iuset_destroy(inc); }
 
   uint64_t mn = res.total > 0 ? (uint64_t)res.total : 1;
@@ -467,6 +492,17 @@ static int tk_aho_tag_lua (lua_State *L)
   }
   lua_pop(L, 1);
 
+  uint8_t *wbound = NULL;
+  lua_getfield(L, 2, "boundary");
+  if (lua_type(L, -1) == LUA_TSTRING) {
+    size_t blen;
+    const char *bs = lua_tolstring(L, -1, &blen);
+    wbound = (uint8_t *)calloc(256, 1);
+    for (size_t i = 0; i < blen; i++)
+      wbound[(uint8_t)bs[i]] = 1;
+  }
+  lua_pop(L, 1);
+
   lua_getfenv(L, 1);
   lua_getfield(L, -1, "names");
   int names_idx = lua_gettop(L);
@@ -480,7 +516,7 @@ static int tk_aho_tag_lua (lua_State *L)
     lua_pop(L, 1);
   }
 
-  tk_aho_scan_result_t res = tk_aho_scan(a, texts, tlens, n_texts, longest, exc, inc);
+  tk_aho_scan_result_t res = tk_aho_scan(a, texts, tlens, n_texts, longest, exc, inc, wbound);
 
   lua_newtable(L);
   int result_idx = lua_gettop(L);
@@ -568,6 +604,7 @@ static int tk_aho_tag_lua (lua_State *L)
 
   free(texts);
   free(tlens);
+  free(wbound);
   if (inc_allocated) { tk_iuset_destroy(inc); }
   tk_aho_scan_free(&res);
 
