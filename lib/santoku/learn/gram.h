@@ -14,7 +14,6 @@
 #include <santoku/dvec.h>
 #include <santoku/fvec.h>
 #include <santoku/rvec.h>
-#include <santoku/iuset.h>
 #include <santoku/learn/buf.h>
 
 #define TK_GRAM_MT "tk_gram_t"
@@ -38,6 +37,14 @@ typedef struct {
   double *y_mean;
   double *cm_proj;
   double *intercept;
+  int n_threads;
+  tk_rank_t **thread_heaps;
+  int64_t thread_heap_cap;
+  uint8_t **thread_bitmaps;
+  int64_t *gfm_labels;
+  double *gfm_scores;
+  tk_rank_t *gfm_pool;
+  int64_t gfm_cap;
   bool destroyed;
 } tk_gram_t;
 
@@ -45,6 +52,49 @@ __attribute__((unused)) static luaL_Reg tk_gram_mt_fns[];
 
 static inline tk_gram_t *tk_gram_peek (lua_State *L, int i) {
   return (tk_gram_t *)luaL_checkudata(L, i, TK_GRAM_MT);
+}
+
+static inline void tk_gram_free_threads (tk_gram_t *g) {
+  if (g->thread_heaps) {
+    for (int t = 0; t < g->n_threads; t++)
+      free(g->thread_heaps[t]);
+    free(g->thread_heaps);
+    g->thread_heaps = NULL;
+  }
+  if (g->thread_bitmaps) {
+    for (int t = 0; t < g->n_threads; t++)
+      free(g->thread_bitmaps[t]);
+    free(g->thread_bitmaps);
+    g->thread_bitmaps = NULL;
+  }
+  g->thread_heap_cap = 0;
+  g->n_threads = 0;
+}
+
+static inline void tk_gram_ensure_heaps (tk_gram_t *g, int64_t cap) {
+  int nt = omp_get_max_threads();
+  if (g->thread_heaps && cap <= g->thread_heap_cap && nt <= g->n_threads)
+    return;
+  tk_gram_free_threads(g);
+  g->n_threads = nt;
+  g->thread_heaps = (tk_rank_t **)calloc((uint64_t)nt, sizeof(tk_rank_t *));
+  g->thread_bitmaps = (uint8_t **)calloc((uint64_t)nt, sizeof(uint8_t *));
+  for (int t = 0; t < nt; t++) {
+    g->thread_heaps[t] = (tk_rank_t *)malloc((uint64_t)cap * sizeof(tk_rank_t));
+    g->thread_bitmaps[t] = (uint8_t *)calloc((uint64_t)g->n_labels, sizeof(uint8_t));
+  }
+  g->thread_heap_cap = cap;
+}
+
+static inline void tk_gram_ensure_gfm (tk_gram_t *g, int64_t cap) {
+  if (cap <= g->gfm_cap) return;
+  free(g->gfm_labels);
+  free(g->gfm_scores);
+  free(g->gfm_pool);
+  g->gfm_labels = (int64_t *)malloc((uint64_t)cap * sizeof(int64_t));
+  g->gfm_scores = (double *)malloc((uint64_t)cap * sizeof(double));
+  g->gfm_pool = (tk_rank_t *)malloc((uint64_t)cap * sizeof(tk_rank_t));
+  g->gfm_cap = cap;
 }
 
 static inline int tk_gram_gc (lua_State *L) {
@@ -61,6 +111,10 @@ static inline int tk_gram_gc (lua_State *L) {
   free(g->y_mean);
   free(g->cm_proj);
   free(g->intercept);
+  tk_gram_free_threads(g);
+  free(g->gfm_labels);
+  free(g->gfm_scores);
+  free(g->gfm_pool);
   g->label_counts = NULL;
   g->destroyed = true;
   return 0;
@@ -137,6 +191,14 @@ static inline int tk_gram_finalize (
   g->y_mean = y_mean_arr;
   g->cm_proj = NULL;
   g->intercept = NULL;
+  g->n_threads = 0;
+  g->thread_heaps = NULL;
+  g->thread_heap_cap = 0;
+  g->thread_bitmaps = NULL;
+  g->gfm_labels = NULL;
+  g->gfm_scores = NULL;
+  g->gfm_pool = NULL;
+  g->gfm_cap = 0;
   g->mean_eig = mean_eig;
   g->n_dims = m;
   g->n_labels = nl;
@@ -153,58 +215,6 @@ static inline int tk_gram_finalize (
   return 1;
 }
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wstrict-overflow"
-static inline void tk_gram_topk_block (
-  double *sbuf, int64_t bs, int64_t nl, int64_t k, int64_t base,
-  tk_ivec_t *offsets, tk_ivec_t *labels, tk_dvec_t *scores_out)
-{
-  #pragma omp parallel
-  {
-    tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
-                       .a = (tk_rank_t *)malloc((uint64_t)k * sizeof(tk_rank_t)) };
-    #pragma omp for schedule(static)
-    for (int64_t i = 0; i < bs; i++) {
-      double *row = sbuf + i * nl;
-      int64_t out_base = (base + i) * k;
-      heap.n = 0;
-      for (int64_t l = 0; l < nl; l++)
-        tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, row[l]));
-      tk_rvec_desc(&heap, 0, heap.n);
-      for (int64_t j = 0; j < (int64_t)heap.n; j++) {
-        labels->a[out_base + j] = heap.a[j].i;
-        scores_out->a[out_base + j] = heap.a[j].d;
-      }
-    }
-    free(heap.a);
-  }
-}
-
-static inline void tk_gram_topk_block_f (
-  float *sbuf, int64_t bs, int64_t nl, int64_t k, int64_t base,
-  tk_ivec_t *offsets, tk_ivec_t *labels, tk_fvec_t *scores_out)
-{
-  #pragma omp parallel
-  {
-    tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
-                       .a = (tk_rank_t *)malloc((uint64_t)k * sizeof(tk_rank_t)) };
-    #pragma omp for schedule(static)
-    for (int64_t i = 0; i < bs; i++) {
-      float *row = sbuf + i * nl;
-      int64_t out_base = (base + i) * k;
-      heap.n = 0;
-      for (int64_t l = 0; l < nl; l++)
-        tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, (double)row[l]));
-      tk_rvec_desc(&heap, 0, heap.n);
-      for (int64_t j = 0; j < (int64_t)heap.n; j++) {
-        labels->a[out_base + j] = heap.a[j].i;
-        scores_out->a[out_base + j] = (float)heap.a[j].d;
-      }
-    }
-    free(heap.a);
-  }
-}
-#pragma GCC diagnostic pop
 
 static inline void tk_gram_solve_w (
   tk_gram_t *g, double lambda_raw, bool do_prop, double prop_a, double prop_b)
@@ -300,7 +310,26 @@ static inline int tk_gram_trial_label_lua (lua_State *L) {
     g->W_work_f, (int)nl, 0.0f, g->sbuf_f, (int)nl);
   if (g->intercept)
     tk_gram_add_intercept_f(g->sbuf_f, val_n, nl, g->intercept);
-  tk_gram_topk_block_f(g->sbuf_f, val_n, nl, k, 0, offsets, labels, scores_out);
+  tk_gram_ensure_heaps(g, k);
+  #pragma omp parallel
+  {
+    int tid = omp_get_thread_num();
+    tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
+                       .a = g->thread_heaps[tid] };
+    #pragma omp for schedule(static)
+    for (int64_t i = 0; i < val_n; i++) {
+      float *row = g->sbuf_f + i * nl;
+      int64_t out_base = i * k;
+      heap.n = 0;
+      for (int64_t l = 0; l < nl; l++)
+        tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, (double)row[l]));
+      tk_rvec_desc(&heap, 0, heap.n);
+      for (int64_t j = 0; j < (int64_t)heap.n; j++) {
+        labels->a[out_base + j] = heap.a[j].i;
+        scores_out->a[out_base + j] = (float)heap.a[j].d;
+      }
+    }
+  }
   lua_pushvalue(L, offsets_idx);
   lua_pushvalue(L, labels_idx);
   lua_pushvalue(L, scores_out_idx);
@@ -324,14 +353,6 @@ static inline int tk_gram_regress_lua (lua_State *L) {
     tk_gram_add_intercept_f(out->a, val_n, nl, g->intercept);
   lua_pushvalue(L, out_idx);
   return 1;
-}
-
-typedef struct { double score; uint8_t hit; } tk_gram_entry_t;
-
-static int tk_gram_entry_desc (const void *a, const void *b) {
-  double sa = ((const tk_gram_entry_t *)a)->score;
-  double sb = ((const tk_gram_entry_t *)b)->score;
-  return (sa > sb) ? -1 : (sa < sb) ? 1 : 0;
 }
 
 static inline int tk_gram_label_accuracy_lua (lua_State *L) {
@@ -368,13 +389,16 @@ static inline int tk_gram_label_accuracy_lua (lua_State *L) {
     g->W_work_f, (int)nl, 0.0f, g->sbuf_f, (int)nl);
   if (g->intercept)
     tk_gram_add_intercept_f(g->sbuf_f, val_n, nl, g->intercept);
+  tk_gram_ensure_heaps(g, topk);
   double f1 = 0.0, prec = 0.0, rec = 0.0;
   if (mode == 1) {
     uint64_t total_tp = 0, total_pred = 0, total_exp = 0;
     #pragma omp parallel reduction(+:total_tp,total_pred,total_exp)
     {
+      int tid = omp_get_thread_num();
       tk_rvec_t heap = { .n = 0, .m = (size_t)fixed_k, .lua_managed = false,
-                         .a = (tk_rank_t *)malloc((uint64_t)fixed_k * sizeof(tk_rank_t)) };
+                         .a = g->thread_heaps[tid] };
+      uint8_t *bm = g->thread_bitmaps[tid];
       #pragma omp for schedule(static)
       for (int64_t i = 0; i < val_n; i++) {
         float *row = g->sbuf_f + i * nl;
@@ -385,17 +409,15 @@ static inline int tk_gram_label_accuracy_lua (lua_State *L) {
         total_exp += (uint64_t)(ee - es);
         total_pred += (uint64_t)heap.n;
         if (ee <= es || heap.n == 0) continue;
-        int kha;
-        tk_iuset_t *exp_set = tk_iuset_create(NULL, 0);
         for (int64_t j = es; j < ee; j++)
-          tk_iuset_put(exp_set, exp_nbr->a[j], &kha);
+          if (exp_nbr->a[j] >= 0 && exp_nbr->a[j] < nl) bm[exp_nbr->a[j]] = 1;
         uint64_t hits = 0;
         for (size_t j = 0; j < heap.n; j++)
-          if (tk_iuset_contains(exp_set, heap.a[j].i)) hits++;
-        tk_iuset_destroy(exp_set);
+          if (heap.a[j].i >= 0 && heap.a[j].i < nl && bm[heap.a[j].i]) hits++;
+        for (int64_t j = es; j < ee; j++)
+          if (exp_nbr->a[j] >= 0 && exp_nbr->a[j] < nl) bm[exp_nbr->a[j]] = 0;
         total_tp += hits;
       }
-      free(heap.a);
     }
     prec = total_pred > 0 ? (double)total_tp / (double)total_pred : 0.0;
     rec = total_exp > 0 ? (double)total_tp / (double)total_exp : 0.0;
@@ -405,8 +427,10 @@ static inline int tk_gram_label_accuracy_lua (lua_State *L) {
     uint64_t total_tp = 0, total_pred = 0, total_exp = 0;
     #pragma omp parallel reduction(+:total_tp,total_pred,total_exp)
     {
+      int tid = omp_get_thread_num();
       tk_rvec_t heap = { .n = 0, .m = (size_t)topk, .lua_managed = false,
-                         .a = (tk_rank_t *)malloc((uint64_t)topk * sizeof(tk_rank_t)) };
+                         .a = g->thread_heaps[tid] };
+      uint8_t *bm = g->thread_bitmaps[tid];
       #pragma omp for schedule(static)
       for (int64_t i = 0; i < val_n; i++) {
         float *row = g->sbuf_f + i * nl;
@@ -418,15 +442,13 @@ static inline int tk_gram_label_accuracy_lua (lua_State *L) {
         total_exp += n_exp;
         if (n_exp == 0 || heap.n == 0) continue;
         tk_rvec_desc(&heap, 0, heap.n);
-        int kha;
-        tk_iuset_t *exp_set = tk_iuset_create(NULL, 0);
         for (int64_t j = es; j < ee; j++)
-          tk_iuset_put(exp_set, exp_nbr->a[j], &kha);
+          if (exp_nbr->a[j] >= 0 && exp_nbr->a[j] < nl) bm[exp_nbr->a[j]] = 1;
         uint64_t running_hits = 0, best_tp_i = 0;
         int64_t best_k_i = 0;
         double best_f1_i = 0.0;
         for (size_t j = 0; j < heap.n; j++) {
-          if (tk_iuset_contains(exp_set, heap.a[j].i)) running_hits++;
+          if (heap.a[j].i >= 0 && heap.a[j].i < nl && bm[heap.a[j].i]) running_hits++;
           double f1_j = 2.0 * (double)running_hits / ((double)(j + 1) + (double)n_exp);
           if (f1_j > best_f1_i) {
             best_f1_i = f1_j;
@@ -434,11 +456,11 @@ static inline int tk_gram_label_accuracy_lua (lua_State *L) {
             best_k_i = (int64_t)(j + 1);
           }
         }
-        tk_iuset_destroy(exp_set);
+        for (int64_t j = es; j < ee; j++)
+          if (exp_nbr->a[j] >= 0 && exp_nbr->a[j] < nl) bm[exp_nbr->a[j]] = 0;
         total_tp += best_tp_i;
         total_pred += (uint64_t)best_k_i;
       }
-      free(heap.a);
     }
     prec = total_pred > 0 ? (double)total_tp / (double)total_pred : 0.0;
     rec = total_exp > 0 ? (double)total_tp / (double)total_exp : 0.0;
@@ -455,16 +477,14 @@ static inline int tk_gram_label_accuracy_lua (lua_State *L) {
       lua_pushnumber(L, 0.0);
       return 3;
     }
-    int64_t *topk_labels = (int64_t *)malloc(total_entries * sizeof(int64_t));
-    double *topk_scores = (double *)malloc(total_entries * sizeof(double));
-    if (!topk_labels || !topk_scores) {
-      free(topk_labels); free(topk_scores);
-      return luaL_error(L, "label_accuracy: malloc failed");
-    }
+    tk_gram_ensure_gfm(g, (int64_t)total_entries);
+    int64_t *topk_labels = g->gfm_labels;
+    double *topk_scores = g->gfm_scores;
     #pragma omp parallel
     {
+      int tid = omp_get_thread_num();
       tk_rvec_t heap = { .n = 0, .m = (size_t)topk, .lua_managed = false,
-                         .a = (tk_rank_t *)malloc((uint64_t)topk * sizeof(tk_rank_t)) };
+                         .a = g->thread_heaps[tid] };
       #pragma omp for schedule(static)
       for (int64_t i = 0; i < val_n; i++) {
         float *row = g->sbuf_f + i * nl;
@@ -482,11 +502,10 @@ static inline int tk_gram_label_accuracy_lua (lua_State *L) {
           topk_scores[base + (int64_t)j] = -HUGE_VAL;
         }
       }
-      free(heap.a);
     }
-    tk_gram_entry_t *pool = (tk_gram_entry_t *)malloc(total_entries * sizeof(tk_gram_entry_t));
-    uint8_t *bm = (uint8_t *)calloc((uint64_t)nl, sizeof(uint8_t));
-    int64_t pi = 0;
+    uint8_t *bm = g->thread_bitmaps[0];
+    tk_rvec_t pool = { .n = 0, .m = (size_t)total_entries, .lua_managed = false,
+                       .a = g->gfm_pool };
     for (int64_t i = 0; i < val_n; i++) {
       for (int64_t j = exp_off->a[i]; j < exp_off->a[i + 1]; j++)
         if (exp_nbr->a[j] >= 0 && exp_nbr->a[j] < nl) bm[exp_nbr->a[j]] = 1;
@@ -494,30 +513,26 @@ static inline int tk_gram_label_accuracy_lua (lua_State *L) {
       for (int64_t j = 0; j < topk; j++) {
         int64_t lbl = topk_labels[base + j];
         if (lbl < 0) continue;
-        pool[pi].score = topk_scores[base + j];
-        pool[pi].hit = (lbl < nl && bm[lbl]) ? 1 : 0;
-        pi++;
+        pool.a[pool.n].i = (lbl < nl && bm[lbl]) ? 1 : 0;
+        pool.a[pool.n].d = topk_scores[base + j];
+        pool.n++;
       }
       for (int64_t j = exp_off->a[i]; j < exp_off->a[i + 1]; j++)
         if (exp_nbr->a[j] >= 0 && exp_nbr->a[j] < nl) bm[exp_nbr->a[j]] = 0;
     }
-    free(bm);
-    free(topk_labels);
-    free(topk_scores);
-    qsort(pool, (uint64_t)pi, sizeof(tk_gram_entry_t), tk_gram_entry_desc);
+    tk_rvec_desc(&pool, 0, pool.n);
     uint64_t tp = 0, best_tp = 0;
     int64_t best_pred = 0;
     double best_f1 = 0.0;
-    for (int64_t i = 0; i < pi; i++) {
-      tp += pool[i].hit;
+    for (size_t i = 0; i < pool.n; i++) {
+      tp += (uint64_t)pool.a[i].i;
       double f1_val = 2.0 * (double)tp / ((double)(i + 1) + (double)total_expected);
       if (f1_val > best_f1) {
         best_f1 = f1_val;
         best_tp = tp;
-        best_pred = i + 1;
+        best_pred = (int64_t)(i + 1);
       }
     }
-    free(pool);
     f1 = best_f1;
     prec = best_pred > 0 ? (double)best_tp / (double)best_pred : 0.0;
     rec = total_expected > 0 ? (double)best_tp / (double)total_expected : 0.0;
@@ -552,12 +567,15 @@ static inline int tk_gram_label_ranking_lua (lua_State *L) {
     g->W_work_f, (int)nl, 0.0f, g->sbuf_f, (int)nl);
   if (g->intercept)
     tk_gram_add_intercept_f(g->sbuf_f, val_n, nl, g->intercept);
+  tk_gram_ensure_heaps(g, topk);
   double sum_ndcg = 0.0;
   uint64_t n_valid = 0;
   #pragma omp parallel reduction(+:sum_ndcg,n_valid)
   {
+    int tid = omp_get_thread_num();
     tk_rvec_t heap = { .n = 0, .m = (size_t)topk, .lua_managed = false,
-                       .a = (tk_rank_t *)malloc((uint64_t)topk * sizeof(tk_rank_t)) };
+                       .a = g->thread_heaps[tid] };
+    uint8_t *bm = g->thread_bitmaps[tid];
     #pragma omp for schedule(static)
     for (int64_t i = 0; i < val_n; i++) {
       float *row = g->sbuf_f + i * nl;
@@ -568,15 +586,14 @@ static inline int tk_gram_label_ranking_lua (lua_State *L) {
       for (int64_t l = 0; l < nl; l++)
         tk_rvec_hmin(&heap, (size_t)topk, tk_rank(l, (double)row[l]));
       tk_rvec_desc(&heap, 0, heap.n);
-      int kha;
-      tk_iuset_t *exp_set = tk_iuset_create(NULL, 0);
       for (int64_t j = es; j < ee; j++)
-        tk_iuset_put(exp_set, exp_nbr->a[j], &kha);
+        if (exp_nbr->a[j] >= 0 && exp_nbr->a[j] < nl) bm[exp_nbr->a[j]] = 1;
       double dcg = 0.0;
       for (size_t j = 0; j < heap.n; j++)
-        if (tk_iuset_contains(exp_set, heap.a[j].i))
+        if (heap.a[j].i >= 0 && heap.a[j].i < nl && bm[heap.a[j].i])
           dcg += 1.0 / log2((double)(j + 2));
-      tk_iuset_destroy(exp_set);
+      for (int64_t j = es; j < ee; j++)
+        if (exp_nbr->a[j] >= 0 && exp_nbr->a[j] < nl) bm[exp_nbr->a[j]] = 0;
       int64_t ideal_n = n_exp < (int64_t)heap.n ? n_exp : (int64_t)heap.n;
       double idcg = 0.0;
       for (int64_t j = 0; j < ideal_n; j++)
@@ -585,7 +602,6 @@ static inline int tk_gram_label_ranking_lua (lua_State *L) {
         sum_ndcg += dcg / idcg;
       n_valid++;
     }
-    free(heap.a);
   }
   double ndcg = n_valid > 0 ? sum_ndcg / (double)n_valid : 0.0;
   lua_pushnumber(L, ndcg);

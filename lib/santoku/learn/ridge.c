@@ -75,11 +75,7 @@ static inline int tk_ridge_encode_lua (lua_State *L) {
   TK_FVEC_BUF(scores_out, buf_base + 2, n * k);
   for (int64_t i = 0; i <= n; i++)
     offsets->a[i] = i * k;
-  if (sparse) {
-    tk_ivec_t *csr_off = tk_ivec_peek(L, 5, "csr_off");
-    tk_ivec_t *csr_nbr = tk_ivec_peek(L, 6, "csr_nbr");
-    float *wt = tk_ridge_get_wt(r);
-    double *intercept = r->intercept ? r->intercept->a : NULL;
+  {
     int nt = omp_get_max_threads();
     uint64_t heap_need = (uint64_t)nt * (uint64_t)k;
     if (!r->heap_buf || r->heap_buf_size < heap_need) {
@@ -87,6 +83,12 @@ static inline int tk_ridge_encode_lua (lua_State *L) {
       r->heap_buf = (tk_rank_t *)malloc(heap_need * sizeof(tk_rank_t));
       r->heap_buf_size = heap_need;
     }
+  }
+  if (sparse) {
+    tk_ivec_t *csr_off = tk_ivec_peek(L, 5, "csr_off");
+    tk_ivec_t *csr_nbr = tk_ivec_peek(L, 6, "csr_nbr");
+    float *wt = tk_ridge_get_wt(r);
+    double *intercept = r->intercept ? r->intercept->a : NULL;
     #pragma omp parallel
     {
       tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
@@ -131,7 +133,24 @@ static inline int tk_ridge_encode_lua (lua_State *L) {
         r->W->a, (int)nl, 0.0f, r->sbuf, (int)nl);
       if (r->intercept)
         tk_gram_add_intercept_f(r->sbuf, bs, nl, r->intercept->a);
-      tk_gram_topk_block_f(r->sbuf, bs, nl, k, base, offsets, labels, scores_out);
+      #pragma omp parallel
+      {
+        tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
+                           .a = r->heap_buf + (uint64_t)omp_get_thread_num() * (uint64_t)k };
+        #pragma omp for schedule(static)
+        for (int64_t i = 0; i < bs; i++) {
+          float *row = r->sbuf + i * nl;
+          int64_t out_base = (base + i) * k;
+          heap.n = 0;
+          for (int64_t l = 0; l < nl; l++)
+            tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, (double)row[l]));
+          tk_rvec_desc(&heap, 0, heap.n);
+          for (int64_t j = 0; j < (int64_t)heap.n; j++) {
+            labels->a[out_base + j] = heap.a[j].i;
+            scores_out->a[out_base + j] = (float)heap.a[j].d;
+          }
+        }
+      }
     }
   }
   lua_pushvalue(L, offsets_idx);
