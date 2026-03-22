@@ -37,64 +37,63 @@ static const char tk_text_c5[64] = {
   'y','z','z','z','z','z','z','s'
 };
 
-static inline int64_t tk_text_normalize (const char *in, size_t len, uint8_t *out, int64_t *pm) {
-  int64_t j = 0;
-  for (size_t i = 0; i < len; ) {
-    uint8_t c = (uint8_t)in[i];
-    if (c < 0x80) {
-      if (pm) pm[j] = (int64_t)i;
-      out[j++] = (c >= 'A' && c <= 'Z') ? c + 32 : c;
-      i++;
-    } else if ((c == 0xC3 || c == 0xC4 || c == 0xC5) &&
-               i + 1 < len && ((uint8_t)in[i + 1] & 0xC0) == 0x80) {
-      uint8_t c2 = (uint8_t)in[i + 1];
-      const char *tbl = (c == 0xC3) ? tk_text_c3 : (c == 0xC4) ? tk_text_c4 : tk_text_c5;
-      char base = tbl[c2 - 0x80];
-      if (base) {
-        if (pm) pm[j] = (int64_t)i;
-        out[j++] = (uint8_t)base;
-      } else {
-        if (pm) pm[j] = (int64_t)i;
-        out[j++] = c;
-        if (pm) pm[j] = (int64_t)(i + 1);
-        out[j++] = c2;
-      }
-      i += 2;
-    } else if (c == 0xC2 && i + 1 < len && (uint8_t)in[i + 1] == 0xA0) {
-      if (pm) pm[j] = (int64_t)i;
-      out[j++] = ' ';
-      i += 2;
-    } else if (c == 0xCC && i + 1 < len && ((uint8_t)in[i + 1] & 0xC0) == 0x80) {
-      i += 2;
-    } else if (c == 0xCD && i + 1 < len &&
-               (uint8_t)in[i + 1] >= 0x80 && (uint8_t)in[i + 1] <= 0xAF) {
-      i += 2;
-    } else if ((c & 0xE0) == 0xC0 && i + 1 < len) {
-      if (pm) pm[j] = (int64_t)i;
-      out[j++] = c;
-      if (pm) pm[j] = (int64_t)(i + 1);
-      out[j++] = (uint8_t)in[i + 1];
-      i += 2;
-    } else if ((c & 0xF0) == 0xE0 && i + 2 < len) {
-      for (int k = 0; k < 3; k++) {
-        if (pm) pm[j] = (int64_t)(i + (size_t)k);
-        out[j++] = (uint8_t)in[i + (size_t)k];
-      }
-      i += 3;
-    } else if ((c & 0xF8) == 0xF0 && i + 3 < len) {
-      for (int k = 0; k < 4; k++) {
-        if (pm) pm[j] = (int64_t)(i + (size_t)k);
-        out[j++] = (uint8_t)in[i + (size_t)k];
-      }
-      i += 4;
+typedef struct {
+  uint8_t bytes[4];
+  int n_out;
+  int n_in;
+} tk_norm_result_t;
+
+static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t pos, size_t len) {
+  tk_norm_result_t r;
+  r.n_out = 0;
+  r.n_in = 1;
+  uint8_t c = (uint8_t)in[pos];
+  if (c < 0x80) {
+    r.bytes[0] = (c >= 'A' && c <= 'Z') ? c + 32 : c;
+    r.n_out = 1;
+  } else if ((c == 0xC3 || c == 0xC4 || c == 0xC5) &&
+             pos + 1 < len && ((uint8_t)in[pos + 1] & 0xC0) == 0x80) {
+    uint8_t c2 = (uint8_t)in[pos + 1];
+    const char *tbl = (c == 0xC3) ? tk_text_c3 : (c == 0xC4) ? tk_text_c4 : tk_text_c5;
+    char base = tbl[c2 - 0x80];
+    if (base) {
+      r.bytes[0] = (uint8_t)base;
+      r.n_out = 1;
     } else {
-      if (pm) pm[j] = (int64_t)i;
-      out[j++] = c;
-      i++;
+      r.bytes[0] = c;
+      r.bytes[1] = c2;
+      r.n_out = 2;
     }
+    r.n_in = 2;
+  } else if (c == 0xC2 && pos + 1 < len && (uint8_t)in[pos + 1] == 0xA0) {
+    r.bytes[0] = ' ';
+    r.n_out = 1;
+    r.n_in = 2;
+  } else if (c == 0xCC && pos + 1 < len && ((uint8_t)in[pos + 1] & 0xC0) == 0x80) {
+    r.n_in = 2;
+  } else if (c == 0xCD && pos + 1 < len &&
+             (uint8_t)in[pos + 1] >= 0x80 && (uint8_t)in[pos + 1] <= 0xAF) {
+    r.n_in = 2;
+  } else if ((c & 0xE0) == 0xC0 && pos + 1 < len) {
+    r.bytes[0] = c;
+    r.bytes[1] = (uint8_t)in[pos + 1];
+    r.n_out = 2;
+    r.n_in = 2;
+  } else if ((c & 0xF0) == 0xE0 && pos + 2 < len) {
+    for (int k = 0; k < 3; k++)
+      r.bytes[k] = (uint8_t)in[pos + (size_t)k];
+    r.n_out = 3;
+    r.n_in = 3;
+  } else if ((c & 0xF8) == 0xF0 && pos + 3 < len) {
+    for (int k = 0; k < 4; k++)
+      r.bytes[k] = (uint8_t)in[pos + (size_t)k];
+    r.n_out = 4;
+    r.n_in = 4;
+  } else {
+    r.bytes[0] = c;
+    r.n_out = 1;
   }
-  if (pm) pm[j] = (int64_t)len;
-  return j;
+  return r;
 }
 
 #endif

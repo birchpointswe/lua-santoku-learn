@@ -19,6 +19,7 @@ typedef struct {
   int32_t *output_link;
   int64_t n_states;
   int64_t n_patterns;
+  int64_t max_output_len;
   bool normalize;
   bool destroyed;
 } tk_aho_t;
@@ -83,59 +84,82 @@ static tk_aho_scan_result_t tk_aho_scan (
 
   #pragma omp parallel
   {
-    size_t nb_cap = 256;
-    uint8_t *norm_buf = (uint8_t *)malloc(nb_cap);
-    int64_t *pm_buf = (int64_t *)malloc((nb_cap + 1) * sizeof(int64_t));
+    int64_t ring_size = a->max_output_len > 0 ? a->max_output_len : 1;
+    int64_t *ring = a->normalize ? (int64_t *)malloc((uint64_t)ring_size * sizeof(int64_t)) : NULL;
     int64_t local_cap = 64;
     tk_aho_match_t *local_m = (tk_aho_match_t *)malloc((uint64_t)local_cap * sizeof(tk_aho_match_t));
 
     #pragma omp for schedule(dynamic)
     for (int ti = 0; ti < n_texts; ti++) {
       size_t tlen = tlens[ti];
-      if (tlen >= nb_cap) {
-        nb_cap = tlen + 1;
-        norm_buf = (uint8_t *)realloc(norm_buf, nb_cap);
-        pm_buf = (int64_t *)realloc(pm_buf, (nb_cap + 1) * sizeof(int64_t));
-      }
-      int64_t nlen;
-      if (a->normalize) {
-        nlen = tk_text_normalize(texts[ti], tlen, norm_buf, pm_buf);
-      } else {
-        memcpy(norm_buf, texts[ti], tlen);
-        nlen = (int64_t)tlen;
-        if (pm_buf)
-          for (int64_t pi = 0; pi <= nlen; pi++) pm_buf[pi] = pi;
-      }
-
       int64_t m_n = 0;
       int32_t state = 0;
-      for (int64_t pos = 0; pos < nlen; pos++) {
-        state = a->goto_base[(int64_t)state * 256 + norm_buf[pos]];
-        int32_t tmp = state;
-        while (tmp > 0) {
-          if (a->output_id[tmp] >= 0) {
-            int64_t ns = pos - a->output_len[tmp] + 1;
-            int64_t os = pm_buf[ns];
-            int64_t oe = pm_buf[pos + 1];
-            int skip = 0;
-            if (wbound) {
-              if (os > 0 && wbound[(uint8_t)texts[ti][os - 1]])
-                skip = 1;
-              if (!skip && (size_t)oe < tlen && wbound[(uint8_t)texts[ti][oe]])
-                skip = 1;
-            }
-            if (!skip) {
-              if (m_n >= local_cap) {
-                local_cap *= 2;
-                local_m = (tk_aho_match_t *)realloc(local_m, (uint64_t)local_cap * sizeof(tk_aho_match_t));
+
+      if (a->normalize) {
+        int64_t npos = 0;
+        size_t i = 0;
+        while (i < tlen) {
+          tk_norm_result_t nr = tk_text_normalize_next(texts[ti], i, tlen);
+          for (int bi = 0; bi < nr.n_out; bi++) {
+            ring[npos % ring_size] = (nr.n_out == nr.n_in) ? (int64_t)(i + (size_t)bi) : (int64_t)i;
+            state = a->goto_base[(int64_t)state * 256 + nr.bytes[bi]];
+            int32_t tmp = state;
+            while (tmp > 0) {
+              if (a->output_id[tmp] >= 0) {
+                int64_t os = ring[(npos - a->output_len[tmp] + 1) % ring_size];
+                int64_t oe = (nr.n_out == nr.n_in) ? (int64_t)(i + (size_t)bi + 1) : (int64_t)(i + (size_t)nr.n_in);
+                int skip = 0;
+                if (wbound) {
+                  if (os > 0 && wbound[(uint8_t)texts[ti][os - 1]])
+                    skip = 1;
+                  if (!skip && (size_t)oe < tlen && wbound[(uint8_t)texts[ti][oe]])
+                    skip = 1;
+                }
+                if (!skip) {
+                  if (m_n >= local_cap) {
+                    local_cap *= 2;
+                    local_m = (tk_aho_match_t *)realloc(local_m, (uint64_t)local_cap * sizeof(tk_aho_match_t));
+                  }
+                  local_m[m_n].id = a->output_id[tmp];
+                  local_m[m_n].start = os;
+                  local_m[m_n].end = oe;
+                  m_n++;
+                }
               }
-              local_m[m_n].id = a->output_id[tmp];
-              local_m[m_n].start = os;
-              local_m[m_n].end = oe;
-              m_n++;
+              tmp = a->output_link[tmp];
             }
+            npos++;
           }
-          tmp = a->output_link[tmp];
+          i += (size_t)nr.n_in;
+        }
+      } else {
+        for (size_t i = 0; i < tlen; i++) {
+          state = a->goto_base[(int64_t)state * 256 + (uint8_t)texts[ti][i]];
+          int32_t tmp = state;
+          while (tmp > 0) {
+            if (a->output_id[tmp] >= 0) {
+              int64_t os = (int64_t)i - a->output_len[tmp] + 1;
+              int64_t oe = (int64_t)(i + 1);
+              int skip = 0;
+              if (wbound) {
+                if (os > 0 && wbound[(uint8_t)texts[ti][os - 1]])
+                  skip = 1;
+                if (!skip && (size_t)oe < tlen && wbound[(uint8_t)texts[ti][oe]])
+                  skip = 1;
+              }
+              if (!skip) {
+                if (m_n >= local_cap) {
+                  local_cap *= 2;
+                  local_m = (tk_aho_match_t *)realloc(local_m, (uint64_t)local_cap * sizeof(tk_aho_match_t));
+                }
+                local_m[m_n].id = a->output_id[tmp];
+                local_m[m_n].start = os;
+                local_m[m_n].end = oe;
+                m_n++;
+              }
+            }
+            tmp = a->output_link[tmp];
+          }
         }
       }
 
@@ -182,8 +206,7 @@ static tk_aho_scan_result_t tk_aho_scan (
       pt_counts[ti] = m_n;
     }
 
-    free(norm_buf);
-    free(pm_buf);
+    free(ring);
     free(local_m);
   }
 
@@ -266,54 +289,55 @@ static int tk_aho_create_lua (lua_State *L)
     output_link[i] = -1;
   }
 
-  size_t norm_cap = (size_t)(total_chars > 0 ? total_chars : 1);
-  uint8_t *norm_buf = (uint8_t *)malloc(norm_cap);
-
   for (int64_t p = 0; p < n_patterns; p++) {
     lua_rawgeti(L, ptab, (int)(p + 1));
     size_t len;
     const char *pat = luaL_checklstring(L, -1, &len);
-    if (len > norm_cap) {
-      norm_cap = len;
-      norm_buf = (uint8_t *)realloc(norm_buf, norm_cap);
-    }
-    int64_t nlen;
-    if (do_normalize) {
-      nlen = tk_text_normalize(pat, len, norm_buf, NULL);
-    } else {
-      memcpy(norm_buf, pat, len);
-      nlen = (int64_t)len;
-    }
     int32_t cur = 0;
-    for (int64_t j = 0; j < nlen; j++) {
-      uint8_t c = norm_buf[j];
-      int32_t nxt = goto_base[(int64_t)cur * 256 + c];
-      if (nxt == 0 && (cur != 0 || c != 0)) {
-        nxt = (int32_t)n_states;
-        goto_base[(int64_t)cur * 256 + c] = nxt;
-        if (n_states >= cap) {
-          cap *= 2;
-          goto_base = (int32_t *)realloc(goto_base, (uint64_t)cap * 256 * sizeof(int32_t));
-          fail = (int32_t *)realloc(fail, (uint64_t)cap * sizeof(int32_t));
-          output_id = (int64_t *)realloc(output_id, (uint64_t)cap * sizeof(int64_t));
-          output_len = (int64_t *)realloc(output_len, (uint64_t)cap * sizeof(int64_t));
-          output_link = (int32_t *)realloc(output_link, (uint64_t)cap * sizeof(int32_t));
-        }
-        memset(goto_base + (int64_t)n_states * 256, 0, 256 * sizeof(int32_t));
-        fail[n_states] = 0;
-        output_id[n_states] = -1;
-        output_len[n_states] = 0;
-        output_link[n_states] = -1;
-        n_states++;
+    int64_t nlen = 0;
+    size_t pi = 0;
+    while (pi < len) {
+      uint8_t buf[4];
+      int n_out;
+      if (do_normalize) {
+        tk_norm_result_t nr = tk_text_normalize_next(pat, pi, len);
+        memcpy(buf, nr.bytes, (size_t)nr.n_out);
+        n_out = nr.n_out;
+        pi += (size_t)nr.n_in;
+      } else {
+        buf[0] = (uint8_t)pat[pi];
+        n_out = 1;
+        pi++;
       }
-      cur = nxt;
+      for (int bi = 0; bi < n_out; bi++) {
+        uint8_t c = buf[bi];
+        int32_t nxt = goto_base[(int64_t)cur * 256 + c];
+        if (nxt == 0 && (cur != 0 || c != 0)) {
+          nxt = (int32_t)n_states;
+          goto_base[(int64_t)cur * 256 + c] = nxt;
+          if (n_states >= cap) {
+            cap *= 2;
+            goto_base = (int32_t *)realloc(goto_base, (uint64_t)cap * 256 * sizeof(int32_t));
+            fail = (int32_t *)realloc(fail, (uint64_t)cap * sizeof(int32_t));
+            output_id = (int64_t *)realloc(output_id, (uint64_t)cap * sizeof(int64_t));
+            output_len = (int64_t *)realloc(output_len, (uint64_t)cap * sizeof(int64_t));
+            output_link = (int32_t *)realloc(output_link, (uint64_t)cap * sizeof(int32_t));
+          }
+          memset(goto_base + (int64_t)n_states * 256, 0, 256 * sizeof(int32_t));
+          fail[n_states] = 0;
+          output_id[n_states] = -1;
+          output_len[n_states] = 0;
+          output_link[n_states] = -1;
+          n_states++;
+        }
+        cur = nxt;
+        nlen++;
+      }
     }
     output_id[cur] = ids->a[p];
     output_len[cur] = nlen;
     lua_pop(L, 1);
   }
-
-  free(norm_buf);
 
   int32_t *queue = (int32_t *)malloc((uint64_t)n_states * sizeof(int32_t));
   int64_t qh = 0, qt = 0;
@@ -358,6 +382,10 @@ static int tk_aho_create_lua (lua_State *L)
   a->output_link = output_link;
   a->n_states = n_states;
   a->n_patterns = n_patterns;
+  int64_t max_ol = 0;
+  for (int64_t s = 0; s < n_states; s++)
+    if (output_len[s] > max_ol) max_ol = output_len[s];
+  a->max_output_len = max_ol;
   a->normalize = do_normalize;
   a->destroyed = false;
 
@@ -763,6 +791,10 @@ static int tk_aho_load_lua (lua_State *L)
   a->output_link = output_link;
   a->n_states = n_states;
   a->n_patterns = n_patterns;
+  int64_t max_ol = 0;
+  for (int64_t s = 0; s < n_states; s++)
+    if (output_len[s] > max_ol) max_ol = output_len[s];
+  a->max_output_len = max_ol;
   a->normalize = do_normalize;
   a->destroyed = false;
 
