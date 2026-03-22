@@ -11,7 +11,41 @@ local lpeg_utils = require("santoku.learn.lpeg")
 
 local M = {}
 
+local function shell_quote (s)
+  return "'" .. string.gsub(s, "'", "'\\''") .. "'"
+end
+
+local function ensure_plain_file (fp)
+  if fs.exists(fp) then
+    return fp
+  end
+  local gz = fp .. ".gz"
+  if fs.exists(gz) then
+    local rc = os.execute("gunzip -c " .. shell_quote(gz) .. " > " .. shell_quote(fp))
+    if rc ~= 0 or not fs.exists(fp) then
+      error("failed to unpack dataset file: " .. gz)
+    end
+  end
+  return fp
+end
+
+local function ensure_extracted_dir (dir)
+  if fs.exists(dir) then
+    return dir
+  end
+  local tar_gz = dir .. ".tar.gz"
+  if fs.exists(tar_gz) then
+    local parent = fs.dirname(dir)
+    local rc = os.execute("tar -xzf " .. shell_quote(tar_gz) .. " -C " .. shell_quote(parent))
+    if rc ~= 0 or not fs.exists(dir) then
+      error("failed to extract dataset archive: " .. tar_gz)
+    end
+  end
+  return dir
+end
+
 M.read_binary_mnist = function (fp, n_features, max)
+  fp = ensure_plain_file(fp)
   local p_off = ivec.create()
   local p_nbr = ivec.create()
   local ss = ivec.create()
@@ -89,6 +123,7 @@ M.split_binary_mnist = function (dataset, ratio, tvr)
 end
 
 M.read_imdb = function (dir, max)
+  dir = ensure_extracted_dir(dir)
   local problems = {}
   local solutions = {}
   local n = 0
@@ -186,6 +221,7 @@ local function clean_newsgroup_text (text, remove)
 end
 
 M.read_20newsgroups = function (dir, max_per_class, remove, max)
+  dir = ensure_extracted_dir(dir)
   local problems = {}
   local solutions = {}
   local categories = {}
@@ -286,6 +322,7 @@ M.read_20newsgroups_split = function (train_dir, test_dir, max, remove, tvr)
 end
 
 M.read_eurlex57k = function (dir, max)
+  dir = ensure_extracted_dir(dir)
   local label_map = { n_labels = 0 }
   local text_fields = { "title", "header", "recitals", "main_body" }
   local label_fields = { "eurovoc_concepts" }
@@ -348,6 +385,7 @@ M.read_eurlex57k = function (dir, max)
 end
 
 M.read_california_housing = function (fp, opts)
+  fp = ensure_plain_file(fp)
   opts = opts or {}
   local max = opts.max
   local feature_cols = opts.feature_cols or {
