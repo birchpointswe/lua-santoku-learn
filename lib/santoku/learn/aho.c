@@ -19,6 +19,7 @@ typedef struct {
   int32_t *output_link;
   int64_t n_states;
   int64_t n_patterns;
+  bool normalize;
   bool destroyed;
 } tk_aho_t;
 
@@ -96,7 +97,15 @@ static tk_aho_scan_result_t tk_aho_scan (
         norm_buf = (uint8_t *)realloc(norm_buf, nb_cap);
         pm_buf = (int64_t *)realloc(pm_buf, (nb_cap + 1) * sizeof(int64_t));
       }
-      int64_t nlen = tk_text_normalize(texts[ti], tlen, norm_buf, pm_buf);
+      int64_t nlen;
+      if (a->normalize) {
+        nlen = tk_text_normalize(texts[ti], tlen, norm_buf, pm_buf);
+      } else {
+        memcpy(norm_buf, texts[ti], tlen);
+        nlen = (int64_t)tlen;
+        if (pm_buf)
+          for (int64_t pi = 0; pi <= nlen; pi++) pm_buf[pi] = pi;
+      }
 
       int64_t m_n = 0;
       int32_t state = 0;
@@ -220,6 +229,7 @@ static int tk_aho_create_lua (lua_State *L)
 {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
+  bool do_normalize = tk_lua_foptboolean(L, 1, "aho.create", "normalize", false);
 
   lua_getfield(L, 1, "ids");
   tk_ivec_t *ids = tk_ivec_peek(L, -1, "ids");
@@ -267,7 +277,13 @@ static int tk_aho_create_lua (lua_State *L)
       norm_cap = len;
       norm_buf = (uint8_t *)realloc(norm_buf, norm_cap);
     }
-    int64_t nlen = tk_text_normalize(pat, len, norm_buf, NULL);
+    int64_t nlen;
+    if (do_normalize) {
+      nlen = tk_text_normalize(pat, len, norm_buf, NULL);
+    } else {
+      memcpy(norm_buf, pat, len);
+      nlen = (int64_t)len;
+    }
     int32_t cur = 0;
     for (int64_t j = 0; j < nlen; j++) {
       uint8_t c = norm_buf[j];
@@ -342,6 +358,7 @@ static int tk_aho_create_lua (lua_State *L)
   a->output_link = output_link;
   a->n_states = n_states;
   a->n_patterns = n_patterns;
+  a->normalize = do_normalize;
   a->destroyed = false;
 
   lua_newtable(L);
@@ -621,10 +638,12 @@ static int tk_aho_persist_lua (lua_State *L) {
   else
     return tk_lua_verror(L, 2, "persist", "expecting filepath or true");
   tk_lua_fwrite(L, "TKac", 1, 4, fh);
-  uint8_t version = 1;
+  uint8_t version = 2;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &a->n_states, sizeof(int64_t), 1, fh);
   tk_lua_fwrite(L, &a->n_patterns, sizeof(int64_t), 1, fh);
+  uint8_t norm_byte = a->normalize ? 1 : 0;
+  tk_lua_fwrite(L, &norm_byte, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, a->goto_base, sizeof(int32_t), (size_t)(a->n_states * 256), fh);
   tk_lua_fwrite(L, a->fail, sizeof(int32_t), (size_t)a->n_states, fh);
   tk_lua_fwrite(L, a->output_id, sizeof(int64_t), (size_t)a->n_states, fh);
@@ -690,13 +709,19 @@ static int tk_aho_load_lua (lua_State *L)
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 1) {
+  if (version < 1 || version > 2) {
     tk_lua_fclose(L, fh);
     return luaL_error(L, "unsupported aho version %d", (int)version);
   }
   int64_t n_states, n_patterns;
   tk_lua_fread(L, &n_states, sizeof(int64_t), 1, fh);
   tk_lua_fread(L, &n_patterns, sizeof(int64_t), 1, fh);
+  bool do_normalize = true;
+  if (version >= 2) {
+    uint8_t norm_byte;
+    tk_lua_fread(L, &norm_byte, sizeof(uint8_t), 1, fh);
+    do_normalize = norm_byte != 0;
+  }
 
   int32_t *goto_base = (int32_t *)malloc((uint64_t)n_states * 256 * sizeof(int32_t));
   int32_t *fail = (int32_t *)malloc((uint64_t)n_states * sizeof(int32_t));
@@ -738,6 +763,7 @@ static int tk_aho_load_lua (lua_State *L)
   a->output_link = output_link;
   a->n_states = n_states;
   a->n_patterns = n_patterns;
+  a->normalize = do_normalize;
   a->destroyed = false;
 
   lua_newtable(L);

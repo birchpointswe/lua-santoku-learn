@@ -409,7 +409,7 @@ static int tm_csr_tokenize (lua_State *L)
   }
   if (ngram_min < 1 || ngram_max > 8 || ngram_min > ngram_max)
     return luaL_error(L, "tokenize: need 1 <= ngram_min <= ngram_max <= 8");
-  bool do_normalize = tk_lua_foptboolean(L, 1, "tokenize", "normalize", true);
+  bool do_normalize = tk_lua_foptboolean(L, 1, "tokenize", "normalize", false);
   int64_t n_samples = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "n_samples");
   lua_getfield(L, 1, "texts");
   const char **strs = (const char **)malloc((uint64_t)n_samples * sizeof(const char *));
