@@ -234,6 +234,32 @@ static inline size_t tm_csr_pack_ngrams (
   return count;
 }
 
+static inline size_t tm_csr_pack_ngrams_normalize (
+  const char *text, size_t len, int ng_min, int ng_max, int64_t *out)
+{
+  uint64_t ids[8] = {0};
+  uint64_t masks[8];
+  int fed[8] = {0};
+  for (int n = ng_min; n <= ng_max; n++)
+    masks[n - 1] = (n < 8) ? ((1ULL << (n * 8)) - 1) : ~0ULL;
+  size_t total = 0;
+  size_t i = 0;
+  while (i < len) {
+    tk_norm_result_t nr = tk_text_normalize_next(text, i, len);
+    for (int bi = 0; bi < nr.n_out; bi++) {
+      uint8_t b = nr.bytes[bi];
+      for (int n = ng_min; n <= ng_max; n++) {
+        ids[n - 1] = ((ids[n - 1] << 8) | b) & masks[n - 1];
+        fed[n - 1]++;
+        if (fed[n - 1] >= n)
+          out[total++] = (int64_t)ids[n - 1];
+      }
+    }
+    i += (size_t)nr.n_in;
+  }
+  return total;
+}
+
 static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
     size_t max_len, int64_t n_samples, int64_t ngram_min, int64_t ngram_max,
     bool normalize)
@@ -253,19 +279,17 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
     #pragma omp parallel
     {
       int64_t *packed_buf = (int64_t *)malloc(buf_size * sizeof(int64_t));
-      uint8_t *norm_buf = normalize ? (uint8_t *)malloc(max_len) : NULL;
       #pragma omp for schedule(dynamic)
       for (int64_t s = 0; s < n_samples; s++) {
         if (!strs[s] || !lens[s]) continue;
-        const char *src = strs[s];
-        size_t src_len = lens[s];
-        if (normalize) {
-          src_len = (size_t)tk_text_normalize(strs[s], lens[s], norm_buf, NULL);
-          src = (const char *)norm_buf;
+        size_t count;
+        if (normalize)
+          count = tm_csr_pack_ngrams_normalize(strs[s], lens[s], (int)ngram_min, (int)ngram_max, packed_buf);
+        else {
+          count = 0;
+          for (int64_t ng = ngram_min; ng <= ngram_max; ng++)
+            count += tm_csr_pack_ngrams(strs[s], lens[s], (int)ng, packed_buf + count);
         }
-        size_t count = 0;
-        for (int64_t ng = ngram_min; ng <= ngram_max; ng++)
-          count += tm_csr_pack_ngrams(src, src_len, (int)ng, packed_buf + count);
         int64_t nv = 0;
         for (size_t i = 0; i < count; i++) {
           uint32_t iter = tk_iumap_get(ngram_map, packed_buf[i]);
@@ -278,7 +302,6 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
         sample_counts[s] = unique;
       }
       free(packed_buf);
-      free(norm_buf);
     }
   } else {
     lua_pop(L, 1);
@@ -290,19 +313,17 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
       tk_iumap_t *lm = tk_iumap_create(NULL, 0);
       local_maps[tid] = lm;
       int64_t *packed_buf = (int64_t *)malloc(buf_size * sizeof(int64_t));
-      uint8_t *norm_buf = normalize ? (uint8_t *)malloc(max_len) : NULL;
       #pragma omp for schedule(dynamic)
       for (int64_t s = 0; s < n_samples; s++) {
         if (!strs[s] || !lens[s]) continue;
-        const char *src = strs[s];
-        size_t src_len = lens[s];
-        if (normalize) {
-          src_len = (size_t)tk_text_normalize(strs[s], lens[s], norm_buf, NULL);
-          src = (const char *)norm_buf;
+        size_t count;
+        if (normalize)
+          count = tm_csr_pack_ngrams_normalize(strs[s], lens[s], (int)ngram_min, (int)ngram_max, packed_buf);
+        else {
+          count = 0;
+          for (int64_t ng = ngram_min; ng <= ngram_max; ng++)
+            count += tm_csr_pack_ngrams(strs[s], lens[s], (int)ng, packed_buf + count);
         }
-        size_t count = 0;
-        for (int64_t ng = ngram_min; ng <= ngram_max; ng++)
-          count += tm_csr_pack_ngrams(src, src_len, (int)ng, packed_buf + count);
         for (size_t i = 0; i < count; i++) {
           int absent;
           tk_iumap_put(lm, packed_buf[i], &absent);
@@ -314,7 +335,6 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
         sample_counts[s] = unique;
       }
       free(packed_buf);
-      free(norm_buf);
     }
     uint32_t est = 0;
     for (int t = 0; t < max_threads; t++)
@@ -354,19 +374,17 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
   #pragma omp parallel
   {
     int64_t *packed_buf = (int64_t *)malloc(buf_size * sizeof(int64_t));
-    uint8_t *norm_buf = normalize ? (uint8_t *)malloc(max_len) : NULL;
     #pragma omp for schedule(dynamic)
     for (int64_t s = 0; s < n_samples; s++) {
       if (!strs[s] || !lens[s]) continue;
-      const char *src = strs[s];
-      size_t src_len = lens[s];
-      if (normalize) {
-        src_len = (size_t)tk_text_normalize(strs[s], lens[s], norm_buf, NULL);
-        src = (const char *)norm_buf;
+      size_t count;
+      if (normalize)
+        count = tm_csr_pack_ngrams_normalize(strs[s], lens[s], (int)ngram_min, (int)ngram_max, packed_buf);
+      else {
+        count = 0;
+        for (int64_t ng = ngram_min; ng <= ngram_max; ng++)
+          count += tm_csr_pack_ngrams(strs[s], lens[s], (int)ng, packed_buf + count);
       }
-      size_t count = 0;
-      for (int64_t ng = ngram_min; ng <= ngram_max; ng++)
-        count += tm_csr_pack_ngrams(src, src_len, (int)ng, packed_buf + count);
       int64_t nv = 0;
       for (size_t i = 0; i < count; i++) {
         uint32_t iter = tk_iumap_get(ngram_map, packed_buf[i]);
@@ -384,7 +402,6 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
       }
     }
     free(packed_buf);
-    free(norm_buf);
   }
   lua_pushvalue(L, map_idx);
   lua_pushvalue(L, map_idx + 1);
