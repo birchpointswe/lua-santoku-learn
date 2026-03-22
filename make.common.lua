@@ -1,6 +1,6 @@
 local env = {
   name = "santoku-learn",
-  version = "0.0.22-1",
+  version = "0.0.23-1",
   variable_prefix = "TK_LEARN",
   license = "MIT",
   public = true,
