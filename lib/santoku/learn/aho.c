@@ -108,6 +108,15 @@ static tk_aho_scan_result_t tk_aho_scan (
               if (a->output_id[tmp] >= 0) {
                 int64_t os = ring[(npos - a->output_len[tmp] + 1) % ring_size];
                 int64_t oe = (nr.n_out == nr.n_in) ? (int64_t)(i + (size_t)bi + 1) : (int64_t)(i + (size_t)nr.n_in);
+                while ((size_t)oe + 1 < tlen) {
+                  uint8_t cb = (uint8_t)texts[ti][oe];
+                  if (cb == 0xCC && ((uint8_t)texts[ti][oe + 1] & 0xC0) == 0x80)
+                    oe += 2;
+                  else if (cb == 0xCD && (uint8_t)texts[ti][oe + 1] >= 0x80 && (uint8_t)texts[ti][oe + 1] <= 0xAF)
+                    oe += 2;
+                  else
+                    break;
+                }
                 int skip = 0;
                 if (wbound) {
                   if (os > 0 && wbound[(uint8_t)texts[ti][os - 1]])
