@@ -392,7 +392,8 @@ M.ridge = function (args)
     local n_dims = err.assert(args.n_dims, "n_dims required")
     gram = ridge.gram({
       codes = train_codes, n_samples = n_samples, n_dims = n_dims,
-      label_offsets = args.label_offsets, label_neighbors = args.label_neighbors, n_labels = args.n_labels,
+      label_offsets = args.label_offsets, label_neighbors = args.label_neighbors,
+      label_values = args.label_values, n_labels = args.n_labels,
       targets = args.targets, n_targets = args.n_targets,
     })
   end
@@ -467,7 +468,7 @@ M.krr = function (args)
     bits = args.bits, d_bits = args.d_bits,
     n_landmarks = args.n_landmarks, trace_tol = args.trace_tol,
     label_offsets = args.label_offsets, label_neighbors = args.label_neighbors,
-    n_labels = args.n_labels,
+    label_values = args.label_values, n_labels = args.n_labels,
     targets = args.targets, n_targets = args.n_targets,
   }
   local kernel_data = {}
