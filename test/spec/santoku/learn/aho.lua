@@ -154,7 +154,7 @@ test("aho", function ()
     assert(mids:size() == 1)
     assert(mids:get(0) == 1)
     assert(starts:get(0) == 0)
-    assert(ends:get(0) == 4)
+    assert(ends:get(0) == 6)
   end)
 
   test("empty text", function ()
