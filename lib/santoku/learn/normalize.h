@@ -44,7 +44,7 @@ typedef struct {
 } tk_norm_result_t;
 
 static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t pos, size_t len) {
-  tk_norm_result_t r;
+  tk_norm_result_t r = {0};
   r.n_out = 0;
   r.n_in = 1;
   uint8_t c = (uint8_t)in[pos];
