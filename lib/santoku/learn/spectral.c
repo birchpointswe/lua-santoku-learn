@@ -1068,6 +1068,10 @@ static inline int tm_encode (lua_State *L) {
   lua_getfield(L, 1, "label_neighbors");
   tk_ivec_t *gram_lbl_nbr = has_gram_labels ? tk_ivec_peek(L, -1, "label_neighbors") : NULL;
   lua_pop(L, 1);
+  lua_getfield(L, 1, "label_values");
+  int has_gram_lbl_val = has_gram_labels && !lua_isnil(L, -1);
+  tk_dvec_t *gram_lbl_val = has_gram_lbl_val ? tk_dvec_peek(L, -1, "label_values") : NULL;
+  lua_pop(L, 1);
   int64_t gram_nl = 0;
   if (has_gram_labels) {
     lua_getfield(L, 1, "n_labels");
@@ -1195,7 +1199,7 @@ static inline int tm_encode (lua_State *L) {
           for (uint64_t i = 0; i < ubs; i++)
             for (int64_t j = gram_lbl_off->a[(uint64_t)base + i];
                  j < gram_lbl_off->a[(uint64_t)base + i + 1]; j++)
-              xty[k * gram_nl + gram_lbl_nbr->a[j]] += col[i];
+              xty[k * gram_nl + gram_lbl_nbr->a[j]] += has_gram_lbl_val ? col[i] * gram_lbl_val->a[j] : col[i];
         }
       }
       if (has_gram_targets) {
@@ -1218,9 +1222,18 @@ static inline int tm_encode (lua_State *L) {
       memset(lc->a, 0, unl * sizeof(double));
       for (uint64_t s = 0; s < nc; s++)
         for (int64_t j = gram_lbl_off->a[s]; j < gram_lbl_off->a[s + 1]; j++)
-          lc->a[gram_lbl_nbr->a[j]] += 1.0;
-      for (int64_t l = 0; l < gram_nl; l++)
-        y_mean_arr[l] = lc->a[l] / (double)nc;
+          lc->a[gram_lbl_nbr->a[j]] += has_gram_lbl_val ? fabs(gram_lbl_val->a[j]) : 1.0;
+      if (has_gram_lbl_val) {
+        memset(y_mean_arr, 0, unl * sizeof(double));
+        for (uint64_t s = 0; s < nc; s++)
+          for (int64_t j = gram_lbl_off->a[s]; j < gram_lbl_off->a[s + 1]; j++)
+            y_mean_arr[gram_lbl_nbr->a[j]] += gram_lbl_val->a[j];
+        for (int64_t l = 0; l < gram_nl; l++)
+          y_mean_arr[l] /= (double)nc;
+      } else {
+        for (int64_t l = 0; l < gram_nl; l++)
+          y_mean_arr[l] = lc->a[l] / (double)nc;
+      }
     }
     if (has_gram_targets) {
       for (int64_t l = 0; l < gram_nl; l++) {
