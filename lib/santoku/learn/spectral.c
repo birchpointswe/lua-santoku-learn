@@ -69,6 +69,7 @@ typedef struct {
   int64_t *sid_map;
   double *residual;
   float *L_mat;
+  int L_mat_external;
   int64_t *landmark_sids;
   int64_t *landmark_idx_map;
 } tk_spectral_landmarks_ctx_t;
@@ -77,7 +78,7 @@ static inline int tk_spectral_landmarks_ctx_gc (lua_State *L) {
   tk_spectral_landmarks_ctx_t *ctx = (tk_spectral_landmarks_ctx_t *)lua_touserdata(L, 1);
   if (ctx->sid_map) { free(ctx->sid_map); ctx->sid_map = NULL; }
   if (ctx->residual) { free(ctx->residual); ctx->residual = NULL; }
-  if (ctx->L_mat) { free(ctx->L_mat); ctx->L_mat = NULL; }
+  if (ctx->L_mat && !ctx->L_mat_external) { free(ctx->L_mat); ctx->L_mat = NULL; }
   if (ctx->landmark_sids) { free(ctx->landmark_sids); ctx->landmark_sids = NULL; }
   if (ctx->landmark_idx_map) { free(ctx->landmark_idx_map); ctx->landmark_idx_map = NULL; }
   return 0;
@@ -92,6 +93,7 @@ static inline void tk_spectral_sample_landmarks (
   tk_spectral_kernel_t kernel,
   uint64_t n_landmarks,
   double trace_tol,
+  float *ext_chol,
   tk_ivec_t **ids_out,
   tk_fvec_t **chol_out,
   float **full_chol_out,
@@ -124,7 +126,14 @@ static inline void tk_spectral_sample_landmarks (
 
   ctx->sid_map = (int64_t *)malloc(n_docs * sizeof(int64_t));
   ctx->residual = (double *)malloc(n_docs * sizeof(double));
-  ctx->L_mat = (float *)calloc(n_landmarks * n_docs, sizeof(float));
+  if (ext_chol) {
+    ctx->L_mat = ext_chol;
+    ctx->L_mat_external = 1;
+    memset(ext_chol, 0, n_landmarks * n_docs * sizeof(float));
+  } else {
+    ctx->L_mat = (float *)calloc(n_landmarks * n_docs, sizeof(float));
+    ctx->L_mat_external = 0;
+  }
   ctx->landmark_sids = (int64_t *)malloc(n_landmarks * sizeof(int64_t));
   ctx->landmark_idx_map = (int64_t *)malloc(n_landmarks * sizeof(int64_t));
   if (!ctx->sid_map || !ctx->residual || !ctx->L_mat || !ctx->landmark_sids ||
@@ -485,7 +494,7 @@ static inline void tk_spectral_sample_landmarks (
   }
   chol->n = actual_landmarks * actual_landmarks;
 
-  if (actual_landmarks > 0 && actual_landmarks < n_landmarks) {
+  if (!ext_chol && actual_landmarks > 0 && actual_landmarks < n_landmarks) {
     float *shrunk = realloc(L_mat, actual_landmarks * n_docs * sizeof(float));
     if (shrunk) L_mat = shrunk;
   }
@@ -507,13 +516,14 @@ typedef struct {
   float *projection;
   tk_fvec_t *lm_chol;
   float *full_chol;
+  int full_chol_external;
 } tk_encode_nystrom_ctx_t;
 
 static inline int tk_encode_nystrom_ctx_gc (lua_State *L) {
   tk_encode_nystrom_ctx_t *c = (tk_encode_nystrom_ctx_t *)lua_touserdata(L, 1);
   free(c->projection);
   if (c->lm_chol) tk_fvec_destroy(c->lm_chol);
-  free(c->full_chol);
+  if (!c->full_chol_external) free(c->full_chol);
   return 0;
 }
 
@@ -1048,6 +1058,10 @@ static inline int tm_encode (lua_State *L) {
     transform_codes = 1;
   lua_pop(L, 1);
 
+  lua_getfield(L, 1, "chol_buf");
+  tk_fvec_t *chol_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "chol_buf");
+  lua_pop(L, 1);
+
   tk_ivec_t *lm_ids = NULL;
   tk_fvec_t *lm_chol = NULL;
   float *full_chol = NULL;
@@ -1056,6 +1070,7 @@ static inline int tm_encode (lua_State *L) {
   tk_spectral_sample_landmarks(L,
     &mod, n_samples, kernel,
     n_lm_req, trace_tol,
+    chol_buf ? chol_buf->a : NULL,
     &lm_ids, &lm_chol, &full_chol, &nc, &m, &trace_ratio);
   int lm_ids_idx = lua_gettop(L);
 
@@ -1097,7 +1112,7 @@ static inline int tm_encode (lua_State *L) {
 
   if (m == 0) {
     if (lm_chol) tk_fvec_destroy(lm_chol);
-    free(full_chol);
+    if (!chol_buf) free(full_chol);
     free(csr_values_owned); free(csr_norms_owned);
     free(dense_norms_owned); free(dense_from_fvec);
     lua_pushnil(L);
@@ -1114,6 +1129,7 @@ static inline int tm_encode (lua_State *L) {
   lua_setmetatable(L, -2);
   ctx->lm_chol = lm_chol;
   ctx->full_chol = full_chol;
+  ctx->full_chol_external = (chol_buf != NULL);
 
   tk_fvec_t *train_codes = NULL;
   int train_codes_idx = 0;
@@ -1140,6 +1156,11 @@ static inline int tm_encode (lua_State *L) {
   cblas_strsm(CblasRowMajor, CblasLeft, CblasLower, CblasTrans, CblasNonUnit,
     (int)m, (int)m, 1.0f, lm_chol->a, (int)m, ctx->projection, (int)m);
   tk_fvec_destroy(lm_chol); ctx->lm_chol = NULL;
+
+  lua_getfield(L, 1, "w_buf");
+  tk_fvec_t *w_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "w_buf");
+  int w_buf_lua_idx = w_buf ? lua_gettop(L) : 0;
+  if (!w_buf) lua_pop(L, 1);
 
   int gram_result_idx = 0;
   if (build_gram_tiled) {
@@ -1244,9 +1265,16 @@ static inline int tm_encode (lua_State *L) {
       free(XtX); free(col_mean); free(eigenvals); free(tile_buf);
       return luaL_error(L, "gram tiled: out of memory (tile buffers)");
     }
-    tk_fvec_t *W_fvec = tk_fvec_create(L, d * unl);
+    tk_fvec_t *W_fvec;
+    int W_fvec_idx;
+    if (w_buf) {
+      W_fvec = w_buf;
+      W_fvec_idx = w_buf_lua_idx;
+    } else {
+      W_fvec = tk_fvec_create(L, d * unl);
+      W_fvec_idx = lua_gettop(L);
+    }
     W_fvec->n = d * unl;
-    int W_fvec_idx = lua_gettop(L);
     tk_dvec_t *intercept_dv = tk_dvec_create(L, unl);
     intercept_dv->n = unl;
     int intercept_dv_idx = lua_gettop(L);
@@ -1310,7 +1338,8 @@ static inline int tm_encode (lua_State *L) {
     free(label_counts); free(y_mean_arr);
     free(XtX); free(eigenvals); free(col_mean);
     free(tile_buf);
-    free(full_chol); ctx->full_chol = NULL;
+    if (!ctx->full_chol_external) free(full_chol);
+    ctx->full_chol = NULL;
     lua_newtable(L);
     lua_pushvalue(L, W_fvec_idx);
     lua_setfield(L, -2, "W");
@@ -1395,7 +1424,8 @@ static inline int tm_encode (lua_State *L) {
       }
     }
     free(tile_buf);
-    free(full_chol); ctx->full_chol = NULL;
+    if (!ctx->full_chol_external) free(full_chol);
+    ctx->full_chol = NULL;
     for (uint64_t j = 0; j < d; j++)
       col_mean[j] /= (double)nc;
     tk_dvec_t *lc = NULL;
@@ -1458,7 +1488,8 @@ static inline int tm_encode (lua_State *L) {
         }
     }
     #undef TK_TILE
-    free(full_chol); ctx->full_chol = NULL;
+    if (!ctx->full_chol_external) free(full_chol);
+    ctx->full_chol = NULL;
   }
 
   tk_nystrom_encoder_t *enc = (tk_nystrom_encoder_t *)tk_lua_newuserdata(L, tk_nystrom_encoder_t,

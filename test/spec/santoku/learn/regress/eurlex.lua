@@ -1,6 +1,7 @@
 local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
+local fvec = require("santoku.fvec")
 local optimize = require("santoku.learn.optimize")
 local str = require("santoku.string")
 local test = require("santoku.test")
@@ -59,6 +60,10 @@ test("eurlex classifier", function ()
   csr.apply_bns(val_off, val_tok, val_val, bns_scores)
 
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
+  local chol_path = os.tmpname()
+  local w_path = os.tmpname()
+  local chol_buf = fvec.mmap_create(chol_path, cfg.emb.n_landmarks * train.n)
+  local w_buf = fvec.mmap_create(w_path, cfg.emb.n_landmarks * n_labels)
   local sp_enc, ridge_obj, dev_codes, best_params = optimize.krr({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
@@ -71,6 +76,7 @@ test("eurlex classifier", function ()
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
     propensity_b = cfg.ridge.propensity_b,
     k = k, search_trials = cfg.ridge.search_trials, label_tile_size = 1024,
+    chol_buf = chol_buf, w_buf = w_buf,
     each = util.make_ridge_log(stopwatch),
     trial_fn = function (gram, params)
       local f1, p, r = gram:label_accuracy(params.lambda, k,
@@ -80,7 +86,10 @@ test("eurlex classifier", function ()
     end,
   })
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
+  chol_buf = nil; w_buf = nil -- luacheck: ignore
   collectgarbage("collect")
+  os.remove(chol_path)
+  os.remove(w_path)
   local emb_d = sp_enc:dims()
   str.printf("[KRR] emb_d=%d kernel=%s lambda=%.4e pa=%.4f pb=%.4f %s\n",
     emb_d, best_params.kernel, best_params.lambda,
