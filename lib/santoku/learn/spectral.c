@@ -1083,10 +1083,6 @@ static inline int tm_encode (lua_State *L) {
   lua_getfield(L, 1, "label_neighbors");
   tk_ivec_t *gram_lbl_nbr = has_gram_labels ? tk_ivec_peek(L, -1, "label_neighbors") : NULL;
   lua_pop(L, 1);
-  lua_getfield(L, 1, "label_values");
-  int has_gram_lbl_val = has_gram_labels && !lua_isnil(L, -1);
-  tk_dvec_t *gram_lbl_val = has_gram_lbl_val ? tk_dvec_peek(L, -1, "label_values") : NULL;
-  lua_pop(L, 1);
   int64_t gram_nl = 0;
   if (has_gram_labels) {
     lua_getfield(L, 1, "n_labels");
@@ -1226,33 +1222,19 @@ static inline int tm_encode (lua_State *L) {
       col_mean[j] /= (double)nc;
     double *label_counts = (double *)calloc(unl, sizeof(double));
     double *y_mean_arr = (double *)calloc(unl, sizeof(double));
-    double *y_sq_sum = (double *)calloc(unl, sizeof(double));
-    if (!label_counts || !y_mean_arr || !y_sq_sum) {
-      free(label_counts); free(y_mean_arr); free(y_sq_sum);
+    if (!label_counts || !y_mean_arr) {
+      free(label_counts); free(y_mean_arr);
       free(XtX); free(col_mean); free(eigenvals); free(tile_buf);
       return luaL_error(L, "gram tiled: out of memory (label stats)");
     }
     for (uint64_t s = 0; s < nc; s++)
       for (int64_t j = gram_lbl_off->a[s]; j < gram_lbl_off->a[s + 1]; j++) {
         int64_t lbl = gram_lbl_nbr->a[j];
-        double val = has_gram_lbl_val ? gram_lbl_val->a[j] : 1.0;
-        label_counts[lbl] += fabs(val);
-        y_mean_arr[lbl] += val;
-        y_sq_sum[lbl] += val * val;
+        label_counts[lbl] += 1.0;
+        y_mean_arr[lbl] += 1.0;
       }
     for (int64_t l = 0; l < gram_nl; l++)
       y_mean_arr[l] /= (double)nc;
-    double *y_sigma = (double *)malloc(unl * sizeof(double));
-    if (!y_sigma) {
-      free(label_counts); free(y_mean_arr); free(y_sq_sum);
-      free(XtX); free(col_mean); free(eigenvals); free(tile_buf);
-      return luaL_error(L, "gram tiled: out of memory (y_sigma)");
-    }
-    for (int64_t l = 0; l < gram_nl; l++) {
-      double var = y_sq_sum[l] / (double)nc - y_mean_arr[l] * y_mean_arr[l];
-      y_sigma[l] = var > 0.0 ? sqrt(var) : 1.0;
-    }
-    free(y_sq_sum);
     cblas_dsyr(CblasColMajor, CblasUpper, (int)d,
       -(double)nc, col_mean, 1, XtX, (int)d);
     LAPACKE_dsyevd(LAPACK_COL_MAJOR, 'V', 'U', (int)d, XtX, (int)d, eigenvals);
@@ -1318,7 +1300,7 @@ static inline int tm_encode (lua_State *L) {
               int64_t lbl = gram_lbl_nbr->a[j];
               if (lbl >= tl_start && lbl < tl_start + actual_B) {
                 int64_t tl = lbl - tl_start;
-                xty_tile[k * actual_B + tl] += has_gram_lbl_val ? col[i] * gram_lbl_val->a[j] : col[i];
+                xty_tile[k * actual_B + tl] += col[i];
               }
             }
           }
@@ -1326,9 +1308,6 @@ static inline int tm_encode (lua_State *L) {
       }
       cblas_dger(CblasRowMajor, (int)d, (int)actual_B,
         -(double)nc, col_mean, 1, y_mean_arr + tl_start, 1, xty_tile, (int)actual_B);
-      for (int64_t k = 0; k < (int64_t)d; k++)
-        for (int64_t tl = 0; tl < actual_B; tl++)
-          xty_tile[k * actual_B + tl] /= y_sigma[tl_start + tl];
       cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
         (int)d, (int)actual_B, (int)d, 1.0, XtX, (int)d,
         xty_tile, (int)actual_B, 0.0, work_tile, (int)actual_B);
@@ -1351,13 +1330,13 @@ static inline int tm_encode (lua_State *L) {
         double prop = 1.0;
         if (do_prop)
           prop = 1.0 + C / pow(label_counts[tl_start + tl] + prop_b, prop_a);
-        intercept_dv->a[tl_start + tl] = prop * y_mean_arr[tl_start + tl] / y_sigma[tl_start + tl];
+        intercept_dv->a[tl_start + tl] = prop * y_mean_arr[tl_start + tl];
       }
       cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)actual_B,
         -1.0, W_d_tile, (int)actual_B, col_mean, 1, 1.0, intercept_dv->a + tl_start, 1);
     }
     free(xty_tile); free(work_tile); free(W_d_tile);
-    free(label_counts); free(y_mean_arr); free(y_sigma);
+    free(label_counts); free(y_mean_arr);
     free(XtX); free(eigenvals); free(col_mean);
     free(tile_buf);
     if (!ctx->full_chol_external) free(full_chol);
@@ -1435,7 +1414,7 @@ static inline int tm_encode (lua_State *L) {
           for (uint64_t i = 0; i < ubs; i++)
             for (int64_t j = gram_lbl_off->a[(uint64_t)base + i];
                  j < gram_lbl_off->a[(uint64_t)base + i + 1]; j++)
-              xty[k * gram_nl + gram_lbl_nbr->a[j]] += has_gram_lbl_val ? col[i] * gram_lbl_val->a[j] : col[i];
+              xty[k * gram_nl + gram_lbl_nbr->a[j]] += col[i];
         }
       }
       if (has_gram_targets) {
@@ -1457,34 +1436,11 @@ static inline int tm_encode (lua_State *L) {
       lc->n = unl;
       lc_idx = lua_gettop(L);
       memset(lc->a, 0, unl * sizeof(double));
-      double *y_sq_sum = (double *)calloc(unl, sizeof(double));
       for (uint64_t s = 0; s < nc; s++)
-        for (int64_t j = gram_lbl_off->a[s]; j < gram_lbl_off->a[s + 1]; j++) {
-          double val = has_gram_lbl_val ? gram_lbl_val->a[j] : 1.0;
-          lc->a[gram_lbl_nbr->a[j]] += fabs(val);
-          y_sq_sum[gram_lbl_nbr->a[j]] += val * val;
-        }
-      if (has_gram_lbl_val) {
-        memset(y_mean_arr, 0, unl * sizeof(double));
-        for (uint64_t s = 0; s < nc; s++)
-          for (int64_t j = gram_lbl_off->a[s]; j < gram_lbl_off->a[s + 1]; j++)
-            y_mean_arr[gram_lbl_nbr->a[j]] += gram_lbl_val->a[j];
-        for (int64_t l = 0; l < gram_nl; l++)
-          y_mean_arr[l] /= (double)nc;
-      } else {
-        for (int64_t l = 0; l < gram_nl; l++)
-          y_mean_arr[l] = lc->a[l] / (double)nc;
-      }
-      if (!has_gram_targets) {
-        for (int64_t l = 0; l < gram_nl; l++) {
-          double var = y_sq_sum[l] / (double)nc - y_mean_arr[l] * y_mean_arr[l];
-          double sigma = var > 0.0 ? sqrt(var) : 1.0;
-          y_mean_arr[l] /= sigma;
-          for (int64_t k = 0; k < (int64_t)d; k++)
-            xty[k * gram_nl + l] /= sigma;
-        }
-      }
-      free(y_sq_sum);
+        for (int64_t j = gram_lbl_off->a[s]; j < gram_lbl_off->a[s + 1]; j++)
+          lc->a[gram_lbl_nbr->a[j]] += 1.0;
+      for (int64_t l = 0; l < gram_nl; l++)
+        y_mean_arr[l] = lc->a[l] / (double)nc;
     }
     if (has_gram_targets) {
       for (int64_t l = 0; l < gram_nl; l++) {
