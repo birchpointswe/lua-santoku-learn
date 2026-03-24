@@ -461,6 +461,7 @@ M.krr = function (args)
   local samplers = build_samplers(args, param_names)
   local do_search = not all_fixed(samplers) and args.search_trials and args.search_trials > 0
   local k = not dense and (args.k or 32) or nil
+  local use_tile_search = do_search and not dense and args.tile_labels and args.tile_labels > 0
   local use_tile = not do_search and not dense and args.tile_labels and args.tile_labels > 0
   local spectral_args = {
     offsets = args.offsets, tokens = args.tokens, values = args.values,
@@ -472,7 +473,44 @@ M.krr = function (args)
     n_labels = args.n_labels,
     targets = args.targets, n_targets = args.n_targets,
   }
-  if use_tile then
+  if use_tile_search then
+    local params = sample_params(samplers, param_names, nil, true)
+    spectral_args.kernel = params.kernel
+    spectral_args.tile_labels = args.tile_labels
+    spectral_args.tile_samples = args.tile_samples
+    spectral_args.chol_buf = args.chol_buf
+    spectral_args.pqty_buf = args.pqty_buf
+    local _, sp_enc, gram = spectral.encode(spectral_args)
+    local val_codes
+    if args.val_encode then
+      val_codes = args.val_encode(sp_enc)
+    else
+      val_codes = sp_enc:encode({
+        offsets = args.val_offsets, tokens = args.val_tokens,
+        values = args.val_values, n_samples = args.val_n_samples,
+      })
+    end
+    gram:prepare(val_codes, args.val_n_samples)
+    local trial_fn = args.trial_fn or function(g, p)
+      local f1, p2, r = g:label_accuracy(p.lambda, k,
+        p.propensity_a, p.propensity_b,
+        args.val_expected_offsets, args.val_expected_neighbors, "gfm")
+      return f1, { f1 = f1, precision = p2, recall = r }
+    end
+    local _, best_params = search({
+      param_names = param_names, samplers = samplers,
+      trials = args.search_trials or 30,
+      trial_fn = function(p) return trial_fn(gram, p) end,
+      each = args.each, skip_final = true,
+    })
+    local r = ridge.create({
+      gram = gram, lambda = best_params.lambda,
+      propensity_a = not dense and best_params.propensity_a or nil,
+      propensity_b = not dense and best_params.propensity_b or nil,
+      w_buf = args.w_buf, tile_labels = args.tile_labels,
+    })
+    return sp_enc, r, val_codes, best_params
+  elseif use_tile then
     local params = sample_params(samplers, param_names, nil, true)
     spectral_args.kernel = params.kernel
     spectral_args.tile_labels = args.tile_labels
@@ -483,7 +521,6 @@ M.krr = function (args)
     spectral_args.propensity_a = params.propensity_a
     spectral_args.propensity_b = params.propensity_b
     local _, sp_enc, tiled = spectral.encode(spectral_args)
-    os.execute("echo '=== After spectral.encode (tiled) ===' && cat /proc/meminfo | grep -E 'AnonPages|Mapped:'")
     local r = ridge.create({
       W = tiled.W, intercept = tiled.intercept,
       n_dims = tiled.n_dims, n_labels = tiled.n_labels,
