@@ -1104,11 +1104,15 @@ static inline int tm_encode (lua_State *L) {
   }
   int build_gram = has_gram_labels || has_gram_targets;
 
-  int64_t label_tile_size = 0;
-  lua_getfield(L, 1, "label_tile_size");
-  if (lua_isnumber(L, -1)) label_tile_size = (int64_t)lua_tointeger(L, -1);
+  int64_t tile_labels = 0;
+  lua_getfield(L, 1, "tile_labels");
+  if (lua_isnumber(L, -1)) tile_labels = (int64_t)lua_tointeger(L, -1);
   lua_pop(L, 1);
-  int build_gram_tiled = label_tile_size > 0 && has_gram_labels && !has_gram_targets;
+  int64_t sample_tile_size = 1024;
+  lua_getfield(L, 1, "tile_samples");
+  if (lua_isnumber(L, -1)) sample_tile_size = (int64_t)lua_tointeger(L, -1);
+  lua_pop(L, 1);
+  int build_gram_tiled = tile_labels > 0 && has_gram_labels && !has_gram_targets;
 
   if (m == 0) {
     if (lm_chol) tk_fvec_destroy(lm_chol);
@@ -1172,7 +1176,7 @@ static inline int tm_encode (lua_State *L) {
       free(XtX); free(col_mean); free(eigenvals);
       return luaL_error(L, "gram tiled: out of memory");
     }
-    int64_t tile_size = 1024;
+    int64_t tile_size = sample_tile_size;
     double *tile_buf = (double *)malloc((uint64_t)tile_size * d * sizeof(double));
     if (!tile_buf) {
       free(XtX); free(col_mean); free(eigenvals);
@@ -1222,18 +1226,33 @@ static inline int tm_encode (lua_State *L) {
       col_mean[j] /= (double)nc;
     double *label_counts = (double *)calloc(unl, sizeof(double));
     double *y_mean_arr = (double *)calloc(unl, sizeof(double));
-    if (!label_counts || !y_mean_arr) {
-      free(label_counts); free(y_mean_arr);
+    double *y_sq_sum = (double *)calloc(unl, sizeof(double));
+    if (!label_counts || !y_mean_arr || !y_sq_sum) {
+      free(label_counts); free(y_mean_arr); free(y_sq_sum);
       free(XtX); free(col_mean); free(eigenvals); free(tile_buf);
       return luaL_error(L, "gram tiled: out of memory (label stats)");
     }
     for (uint64_t s = 0; s < nc; s++)
       for (int64_t j = gram_lbl_off->a[s]; j < gram_lbl_off->a[s + 1]; j++) {
-        label_counts[gram_lbl_nbr->a[j]] += has_gram_lbl_val ? fabs(gram_lbl_val->a[j]) : 1.0;
-        y_mean_arr[gram_lbl_nbr->a[j]] += has_gram_lbl_val ? gram_lbl_val->a[j] : 1.0;
+        int64_t lbl = gram_lbl_nbr->a[j];
+        double val = has_gram_lbl_val ? gram_lbl_val->a[j] : 1.0;
+        label_counts[lbl] += fabs(val);
+        y_mean_arr[lbl] += val;
+        y_sq_sum[lbl] += val * val;
       }
     for (int64_t l = 0; l < gram_nl; l++)
       y_mean_arr[l] /= (double)nc;
+    double *y_sigma = (double *)malloc(unl * sizeof(double));
+    if (!y_sigma) {
+      free(label_counts); free(y_mean_arr); free(y_sq_sum);
+      free(XtX); free(col_mean); free(eigenvals); free(tile_buf);
+      return luaL_error(L, "gram tiled: out of memory (y_sigma)");
+    }
+    for (int64_t l = 0; l < gram_nl; l++) {
+      double var = y_sq_sum[l] / (double)nc - y_mean_arr[l] * y_mean_arr[l];
+      y_sigma[l] = var > 0.0 ? sqrt(var) : 1.0;
+    }
+    free(y_sq_sum);
     cblas_dsyr(CblasColMajor, CblasUpper, (int)d,
       -(double)nc, col_mean, 1, XtX, (int)d);
     LAPACKE_dsyevd(LAPACK_COL_MAJOR, 'V', 'U', (int)d, XtX, (int)d, eigenvals);
@@ -1255,7 +1274,7 @@ static inline int tm_encode (lua_State *L) {
     double C = 0.0;
     if (do_prop)
       C = (log((double)nc) - 1.0) * pow(prop_b + 1.0, prop_a);
-    int64_t B = label_tile_size;
+    int64_t B = tile_labels;
     double *xty_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
     double *work_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
     double *W_d_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
@@ -1307,6 +1326,9 @@ static inline int tm_encode (lua_State *L) {
       }
       cblas_dger(CblasRowMajor, (int)d, (int)actual_B,
         -(double)nc, col_mean, 1, y_mean_arr + tl_start, 1, xty_tile, (int)actual_B);
+      for (int64_t k = 0; k < (int64_t)d; k++)
+        for (int64_t tl = 0; tl < actual_B; tl++)
+          xty_tile[k * actual_B + tl] /= y_sigma[tl_start + tl];
       cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
         (int)d, (int)actual_B, (int)d, 1.0, XtX, (int)d,
         xty_tile, (int)actual_B, 0.0, work_tile, (int)actual_B);
@@ -1329,13 +1351,13 @@ static inline int tm_encode (lua_State *L) {
         double prop = 1.0;
         if (do_prop)
           prop = 1.0 + C / pow(label_counts[tl_start + tl] + prop_b, prop_a);
-        intercept_dv->a[tl_start + tl] = prop * y_mean_arr[tl_start + tl];
+        intercept_dv->a[tl_start + tl] = prop * y_mean_arr[tl_start + tl] / y_sigma[tl_start + tl];
       }
       cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)actual_B,
         -1.0, W_d_tile, (int)actual_B, col_mean, 1, 1.0, intercept_dv->a + tl_start, 1);
     }
     free(xty_tile); free(work_tile); free(W_d_tile);
-    free(label_counts); free(y_mean_arr);
+    free(label_counts); free(y_mean_arr); free(y_sigma);
     free(XtX); free(eigenvals); free(col_mean);
     free(tile_buf);
     if (!ctx->full_chol_external) free(full_chol);
@@ -1361,7 +1383,7 @@ static inline int tm_encode (lua_State *L) {
       free(XtX); free(xty); free(col_mean); free(y_mean_arr); free(eigenvals);
       return luaL_error(L, "gram fusion: out of memory");
     }
-    int64_t tile_size = 1024;
+    int64_t tile_size = sample_tile_size;
     double *tile_buf = (double *)malloc((uint64_t)tile_size * d * sizeof(double));
     if (!tile_buf) {
       free(XtX); free(xty); free(col_mean); free(y_mean_arr); free(eigenvals);
@@ -1435,9 +1457,13 @@ static inline int tm_encode (lua_State *L) {
       lc->n = unl;
       lc_idx = lua_gettop(L);
       memset(lc->a, 0, unl * sizeof(double));
+      double *y_sq_sum = (double *)calloc(unl, sizeof(double));
       for (uint64_t s = 0; s < nc; s++)
-        for (int64_t j = gram_lbl_off->a[s]; j < gram_lbl_off->a[s + 1]; j++)
-          lc->a[gram_lbl_nbr->a[j]] += has_gram_lbl_val ? fabs(gram_lbl_val->a[j]) : 1.0;
+        for (int64_t j = gram_lbl_off->a[s]; j < gram_lbl_off->a[s + 1]; j++) {
+          double val = has_gram_lbl_val ? gram_lbl_val->a[j] : 1.0;
+          lc->a[gram_lbl_nbr->a[j]] += fabs(val);
+          y_sq_sum[gram_lbl_nbr->a[j]] += val * val;
+        }
       if (has_gram_lbl_val) {
         memset(y_mean_arr, 0, unl * sizeof(double));
         for (uint64_t s = 0; s < nc; s++)
@@ -1449,6 +1475,16 @@ static inline int tm_encode (lua_State *L) {
         for (int64_t l = 0; l < gram_nl; l++)
           y_mean_arr[l] = lc->a[l] / (double)nc;
       }
+      if (!has_gram_targets) {
+        for (int64_t l = 0; l < gram_nl; l++) {
+          double var = y_sq_sum[l] / (double)nc - y_mean_arr[l] * y_mean_arr[l];
+          double sigma = var > 0.0 ? sqrt(var) : 1.0;
+          y_mean_arr[l] /= sigma;
+          for (int64_t k = 0; k < (int64_t)d; k++)
+            xty[k * gram_nl + l] /= sigma;
+        }
+      }
+      free(y_sq_sum);
     }
     if (has_gram_targets) {
       for (int64_t l = 0; l < gram_nl; l++) {
