@@ -1110,6 +1110,12 @@ static inline int tm_encode (lua_State *L) {
   lua_pop(L, 1);
   int build_gram_tiled = tile_labels > 0 && has_gram_labels && !has_gram_targets;
 
+  lua_getfield(L, 1, "lambda");
+  int has_lambda = lua_isnumber(L, -1);
+  lua_pop(L, 1);
+  int build_gram_tiled_w = build_gram_tiled && has_lambda;
+  int build_gram_tiled_gram = build_gram_tiled && !has_lambda;
+
   if (m == 0) {
     if (lm_chol) tk_fvec_destroy(lm_chol);
     if (!chol_buf) free(full_chol);
@@ -1238,119 +1244,197 @@ static inline int tm_encode (lua_State *L) {
     cblas_dsyr(CblasColMajor, CblasUpper, (int)d,
       -(double)nc, col_mean, 1, XtX, (int)d);
     LAPACKE_dsyevd(LAPACK_COL_MAJOR, 'V', 'U', (int)d, XtX, (int)d, eigenvals);
-    double mean_eig = 0.0;
-    for (uint64_t i = 0; i < d; i++)
-      mean_eig += eigenvals[i];
-    mean_eig /= (double)d;
-    lua_getfield(L, 1, "lambda");
-    double lambda_raw = lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0;
-    lua_pop(L, 1);
-    lua_getfield(L, 1, "propensity_a");
-    int do_prop = lua_isnumber(L, -1);
-    double prop_a = do_prop ? lua_tonumber(L, -1) : 0.0;
-    lua_pop(L, 1);
-    lua_getfield(L, 1, "propensity_b");
-    double prop_b = do_prop ? (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.5) : 0.0;
-    lua_pop(L, 1);
-    double mu = lambda_raw * mean_eig + mean_eig * 1e-7;
-    double C = 0.0;
-    if (do_prop)
-      C = (log((double)nc) - 1.0) * pow(prop_b + 1.0, prop_a);
-    int64_t B = tile_labels;
-    double *xty_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
-    double *work_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
-    double *W_d_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
-    if (!xty_tile || !work_tile || !W_d_tile) {
-      free(xty_tile); free(work_tile); free(W_d_tile);
-      free(label_counts); free(y_mean_arr);
-      free(XtX); free(col_mean); free(eigenvals); free(tile_buf);
-      return luaL_error(L, "gram tiled: out of memory (tile buffers)");
-    }
-    tk_fvec_t *W_fvec;
-    int W_fvec_idx;
-    if (w_buf) {
-      W_fvec = w_buf;
-      W_fvec_idx = w_buf_lua_idx;
-    } else {
-      W_fvec = tk_fvec_create(L, d * unl);
-      W_fvec_idx = lua_gettop(L);
-    }
-    W_fvec->n = d * unl;
-    tk_dvec_t *intercept_dv = tk_dvec_create(L, unl);
-    intercept_dv->n = unl;
-    int intercept_dv_idx = lua_gettop(L);
-    for (int64_t tl_start = 0; tl_start < gram_nl; tl_start += B) {
-      int64_t actual_B = (tl_start + B <= gram_nl) ? B : gram_nl - tl_start;
-      memset(xty_tile, 0, d * (uint64_t)actual_B * sizeof(double));
-      for (int64_t base = 0; base < (int64_t)nc; base += tile_size) {
-        int64_t bs = (base + tile_size <= (int64_t)nc) ? tile_size : (int64_t)nc - base;
-        uint64_t ubs = (uint64_t)bs;
-        for (uint64_t j = 0; j < d; j++) {
-          double *col = tile_buf + j * ubs;
-          float *src = full_chol + j * nc + base;
-          for (uint64_t i = 0; i < ubs; i++)
-            col[i] = (double)src[i];
-        }
-        #pragma omp parallel for schedule(static)
-        for (int64_t k = 0; k < (int64_t)d; k++) {
-          double *col = tile_buf + (uint64_t)k * ubs;
-          for (uint64_t i = 0; i < ubs; i++) {
-            uint64_t si = (uint64_t)base + i;
-            for (int64_t j = gram_lbl_off->a[si]; j < gram_lbl_off->a[si + 1]; j++) {
-              int64_t lbl = gram_lbl_nbr->a[j];
-              if (lbl >= tl_start && lbl < tl_start + actual_B) {
-                int64_t tl = lbl - tl_start;
-                xty_tile[k * actual_B + tl] += col[i];
+
+    if (build_gram_tiled_gram) {
+      int64_t B = tile_labels;
+      lua_getfield(L, 1, "pqty_buf");
+      tk_fvec_t *pqty_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "pqty_buf");
+      int pqty_buf_idx = pqty_buf ? lua_gettop(L) : 0;
+      if (!pqty_buf) lua_pop(L, 1);
+      float *pqty_f;
+      if (pqty_buf) {
+        tk_fvec_ensure(pqty_buf, d * unl);
+        pqty_buf->n = d * unl;
+        pqty_f = pqty_buf->a;
+      } else {
+        pqty_f = (float *)calloc(d * unl, sizeof(float));
+      }
+      double *xty_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
+      double *pqty_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
+      if (!xty_tile || !pqty_tile) {
+        free(xty_tile); free(pqty_tile);
+        if (!pqty_buf) free(pqty_f);
+        free(label_counts); free(y_mean_arr);
+        free(XtX); free(col_mean); free(eigenvals); free(tile_buf);
+        return luaL_error(L, "gram tiled gram: out of memory");
+      }
+      for (int64_t tl_start = 0; tl_start < gram_nl; tl_start += B) {
+        int64_t actual_B = (tl_start + B <= gram_nl) ? B : gram_nl - tl_start;
+        memset(xty_tile, 0, d * (uint64_t)actual_B * sizeof(double));
+        for (int64_t base = 0; base < (int64_t)nc; base += tile_size) {
+          int64_t bs = (base + tile_size <= (int64_t)nc) ? tile_size : (int64_t)nc - base;
+          uint64_t ubs = (uint64_t)bs;
+          for (uint64_t j = 0; j < d; j++) {
+            double *col = tile_buf + j * ubs;
+            float *src = full_chol + j * nc + base;
+            for (uint64_t i = 0; i < ubs; i++)
+              col[i] = (double)src[i];
+          }
+          #pragma omp parallel for schedule(static)
+          for (int64_t k = 0; k < (int64_t)d; k++) {
+            double *col = tile_buf + (uint64_t)k * ubs;
+            for (uint64_t i = 0; i < ubs; i++) {
+              uint64_t si = (uint64_t)base + i;
+              for (int64_t j = gram_lbl_off->a[si]; j < gram_lbl_off->a[si + 1]; j++) {
+                int64_t lbl = gram_lbl_nbr->a[j];
+                if (lbl >= tl_start && lbl < tl_start + actual_B)
+                  xty_tile[k * actual_B + (lbl - tl_start)] += col[i];
               }
             }
           }
         }
+        cblas_dger(CblasRowMajor, (int)d, (int)actual_B,
+          -(double)nc, col_mean, 1, y_mean_arr + tl_start, 1, xty_tile, (int)actual_B);
+        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+          (int)d, (int)actual_B, (int)d, 1.0, XtX, (int)d,
+          xty_tile, (int)actual_B, 0.0, pqty_tile, (int)actual_B);
+        for (int64_t i = 0; i < (int64_t)d; i++)
+          for (int64_t tl = 0; tl < actual_B; tl++)
+            pqty_f[i * gram_nl + tl_start + tl] = (float)pqty_tile[i * actual_B + tl];
       }
-      cblas_dger(CblasRowMajor, (int)d, (int)actual_B,
-        -(double)nc, col_mean, 1, y_mean_arr + tl_start, 1, xty_tile, (int)actual_B);
-      cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-        (int)d, (int)actual_B, (int)d, 1.0, XtX, (int)d,
-        xty_tile, (int)actual_B, 0.0, work_tile, (int)actual_B);
-      for (int64_t i = 0; i < (int64_t)d; i++) {
-        double inv = 1.0 / (eigenvals[i] + mu);
+      free(xty_tile); free(pqty_tile); free(tile_buf);
+      if (!ctx->full_chol_external) free(full_chol);
+      ctx->full_chol = NULL;
+      tk_dvec_t *lc = tk_dvec_create(L, unl);
+      lc->n = unl;
+      int lc_idx = lua_gettop(L);
+      memcpy(lc->a, label_counts, unl * sizeof(double));
+      free(label_counts);
+      tk_gram_finalize_tiled(L, XtX, col_mean, y_mean_arr,
+        eigenvals, pqty_f, lc, lc_idx,
+        (int64_t)nc, (int64_t)d, gram_nl, tile_labels);
+      gram_result_idx = lua_gettop(L);
+      if (pqty_buf_idx > 0) {
+        lua_getfenv(L, gram_result_idx);
+        lua_pushvalue(L, pqty_buf_idx);
+        lua_setfield(L, -2, "pqty_buf");
+        lua_pop(L, 1);
+      }
+    } else {
+      double mean_eig = 0.0;
+      for (uint64_t i = 0; i < d; i++)
+        mean_eig += eigenvals[i];
+      mean_eig /= (double)d;
+      lua_getfield(L, 1, "lambda");
+      double lambda_raw = lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0;
+      lua_pop(L, 1);
+      lua_getfield(L, 1, "propensity_a");
+      int do_prop = lua_isnumber(L, -1);
+      double prop_a = do_prop ? lua_tonumber(L, -1) : 0.0;
+      lua_pop(L, 1);
+      lua_getfield(L, 1, "propensity_b");
+      double prop_b = do_prop ? (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.5) : 0.0;
+      lua_pop(L, 1);
+      double mu = lambda_raw * mean_eig + mean_eig * 1e-7;
+      double C = 0.0;
+      if (do_prop)
+        C = (log((double)nc) - 1.0) * pow(prop_b + 1.0, prop_a);
+      int64_t B = tile_labels;
+      double *xty_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
+      double *work_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
+      double *W_d_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
+      if (!xty_tile || !work_tile || !W_d_tile) {
+        free(xty_tile); free(work_tile); free(W_d_tile);
+        free(label_counts); free(y_mean_arr);
+        free(XtX); free(col_mean); free(eigenvals); free(tile_buf);
+        return luaL_error(L, "gram tiled: out of memory (tile buffers)");
+      }
+      tk_fvec_t *W_fvec;
+      int W_fvec_idx;
+      if (w_buf) {
+        W_fvec = w_buf;
+        W_fvec_idx = w_buf_lua_idx;
+      } else {
+        W_fvec = tk_fvec_create(L, d * unl);
+        W_fvec_idx = lua_gettop(L);
+      }
+      W_fvec->n = d * unl;
+      tk_dvec_t *intercept_dv = tk_dvec_create(L, unl);
+      intercept_dv->n = unl;
+      int intercept_dv_idx = lua_gettop(L);
+      for (int64_t tl_start = 0; tl_start < gram_nl; tl_start += B) {
+        int64_t actual_B = (tl_start + B <= gram_nl) ? B : gram_nl - tl_start;
+        memset(xty_tile, 0, d * (uint64_t)actual_B * sizeof(double));
+        for (int64_t base = 0; base < (int64_t)nc; base += tile_size) {
+          int64_t bs = (base + tile_size <= (int64_t)nc) ? tile_size : (int64_t)nc - base;
+          uint64_t ubs = (uint64_t)bs;
+          for (uint64_t j = 0; j < d; j++) {
+            double *col = tile_buf + j * ubs;
+            float *src = full_chol + j * nc + base;
+            for (uint64_t i = 0; i < ubs; i++)
+              col[i] = (double)src[i];
+          }
+          #pragma omp parallel for schedule(static)
+          for (int64_t k = 0; k < (int64_t)d; k++) {
+            double *col = tile_buf + (uint64_t)k * ubs;
+            for (uint64_t i = 0; i < ubs; i++) {
+              uint64_t si = (uint64_t)base + i;
+              for (int64_t j = gram_lbl_off->a[si]; j < gram_lbl_off->a[si + 1]; j++) {
+                int64_t lbl = gram_lbl_nbr->a[j];
+                if (lbl >= tl_start && lbl < tl_start + actual_B) {
+                  int64_t tl = lbl - tl_start;
+                  xty_tile[k * actual_B + tl] += col[i];
+                }
+              }
+            }
+          }
+        }
+        cblas_dger(CblasRowMajor, (int)d, (int)actual_B,
+          -(double)nc, col_mean, 1, y_mean_arr + tl_start, 1, xty_tile, (int)actual_B);
+        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+          (int)d, (int)actual_B, (int)d, 1.0, XtX, (int)d,
+          xty_tile, (int)actual_B, 0.0, work_tile, (int)actual_B);
+        for (int64_t i = 0; i < (int64_t)d; i++) {
+          double inv = 1.0 / (eigenvals[i] + mu);
+          for (int64_t tl = 0; tl < actual_B; tl++) {
+            double prop = 1.0;
+            if (do_prop)
+              prop = 1.0 + C / pow(label_counts[tl_start + tl] + prop_b, prop_a);
+            work_tile[i * actual_B + tl] *= prop * inv;
+          }
+        }
+        cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+          (int)d, (int)actual_B, (int)d, 1.0, XtX, (int)d,
+          work_tile, (int)actual_B, 0.0, W_d_tile, (int)actual_B);
+        for (int64_t i = 0; i < (int64_t)d; i++)
+          for (int64_t tl = 0; tl < actual_B; tl++)
+            W_fvec->a[i * gram_nl + tl_start + tl] = (float)W_d_tile[i * actual_B + tl];
         for (int64_t tl = 0; tl < actual_B; tl++) {
           double prop = 1.0;
           if (do_prop)
             prop = 1.0 + C / pow(label_counts[tl_start + tl] + prop_b, prop_a);
-          work_tile[i * actual_B + tl] *= prop * inv;
+          intercept_dv->a[tl_start + tl] = prop * y_mean_arr[tl_start + tl];
         }
+        cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)actual_B,
+          -1.0, W_d_tile, (int)actual_B, col_mean, 1, 1.0, intercept_dv->a + tl_start, 1);
       }
-      cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-        (int)d, (int)actual_B, (int)d, 1.0, XtX, (int)d,
-        work_tile, (int)actual_B, 0.0, W_d_tile, (int)actual_B);
-      for (int64_t i = 0; i < (int64_t)d; i++)
-        for (int64_t tl = 0; tl < actual_B; tl++)
-          W_fvec->a[i * gram_nl + tl_start + tl] = (float)W_d_tile[i * actual_B + tl];
-      for (int64_t tl = 0; tl < actual_B; tl++) {
-        double prop = 1.0;
-        if (do_prop)
-          prop = 1.0 + C / pow(label_counts[tl_start + tl] + prop_b, prop_a);
-        intercept_dv->a[tl_start + tl] = prop * y_mean_arr[tl_start + tl];
-      }
-      cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)actual_B,
-        -1.0, W_d_tile, (int)actual_B, col_mean, 1, 1.0, intercept_dv->a + tl_start, 1);
+      free(xty_tile); free(work_tile); free(W_d_tile);
+      free(label_counts); free(y_mean_arr);
+      free(XtX); free(eigenvals); free(col_mean);
+      free(tile_buf);
+      if (!ctx->full_chol_external) free(full_chol);
+      ctx->full_chol = NULL;
+      lua_newtable(L);
+      lua_pushvalue(L, W_fvec_idx);
+      lua_setfield(L, -2, "W");
+      lua_pushvalue(L, intercept_dv_idx);
+      lua_setfield(L, -2, "intercept");
+      lua_pushinteger(L, (lua_Integer)d);
+      lua_setfield(L, -2, "n_dims");
+      lua_pushinteger(L, (lua_Integer)gram_nl);
+      lua_setfield(L, -2, "n_labels");
+      gram_result_idx = lua_gettop(L);
     }
-    free(xty_tile); free(work_tile); free(W_d_tile);
-    free(label_counts); free(y_mean_arr);
-    free(XtX); free(eigenvals); free(col_mean);
-    free(tile_buf);
-    if (!ctx->full_chol_external) free(full_chol);
-    ctx->full_chol = NULL;
-    lua_newtable(L);
-    lua_pushvalue(L, W_fvec_idx);
-    lua_setfield(L, -2, "W");
-    lua_pushvalue(L, intercept_dv_idx);
-    lua_setfield(L, -2, "intercept");
-    lua_pushinteger(L, (lua_Integer)d);
-    lua_setfield(L, -2, "n_dims");
-    lua_pushinteger(L, (lua_Integer)gram_nl);
-    lua_setfield(L, -2, "n_labels");
-    gram_result_idx = lua_gettop(L);
   } else if (build_gram) {
     uint64_t unl = (uint64_t)gram_nl;
     double *XtX = (double *)calloc(d * d, sizeof(double));
