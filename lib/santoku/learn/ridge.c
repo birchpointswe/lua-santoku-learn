@@ -6,6 +6,7 @@
 #include <omp.h>
 #include <lapacke.h>
 #include <cblas.h>
+#include <sys/mman.h>
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
 #include <santoku/dvec.h>
@@ -171,11 +172,17 @@ static inline int tk_ridge_persist_lua (lua_State *L) {
   else
     return tk_lua_verror(L, 2, "persist", "expecting filepath or true");
   tk_lua_fwrite(L, "TKri", 1, 4, fh);
-  uint8_t version = 3;
+  uint8_t version = 4;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &r->n_dims, sizeof(int64_t), 1, fh);
   tk_lua_fwrite(L, &r->n_labels, sizeof(int64_t), 1, fh);
-  tk_fvec_persist(L, r->W, fh);
+  uint8_t w_external = (r->W->lua_managed == 2) ? 1 : 0;
+  tk_lua_fwrite(L, &w_external, sizeof(uint8_t), 1, fh);
+  if (w_external) {
+    msync(r->W->a, r->W->n * sizeof(float), MS_SYNC);
+  } else {
+    tk_fvec_persist(L, r->W, fh);
+  }
   uint8_t has_intercept = r->intercept ? 1 : 0;
   tk_lua_fwrite(L, &has_intercept, sizeof(uint8_t), 1, fh);
   if (r->intercept)
@@ -540,15 +547,38 @@ static inline int tk_ridge_load_lua (lua_State *L) {
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 3) {
+  if (version != 3 && version != 4) {
     tk_lua_fclose(L, fh);
     return luaL_error(L, "unsupported ridge version %d", (int)version);
   }
   int64_t n_dims, n_labels;
   tk_lua_fread(L, &n_dims, sizeof(int64_t), 1, fh);
   tk_lua_fread(L, &n_labels, sizeof(int64_t), 1, fh);
-  tk_fvec_t *W = tk_fvec_load(L, fh);
-  int W_idx = lua_gettop(L);
+  tk_fvec_t *W = NULL;
+  int W_idx = 0;
+  bool have_arg_w = lua_gettop(L) >= 3 && !lua_isnil(L, 3);
+  if (version == 4) {
+    uint8_t w_external;
+    tk_lua_fread(L, &w_external, sizeof(uint8_t), 1, fh);
+    if (w_external) {
+      if (!have_arg_w) {
+        tk_lua_fclose(L, fh);
+        return luaL_error(L, "ridge load: external W requires fvec arg 3");
+      }
+      W = tk_fvec_peek(L, 3, "W");
+      W_idx = 3;
+    } else {
+      W = tk_fvec_load(L, fh);
+      W_idx = lua_gettop(L);
+    }
+  } else {
+    W = tk_fvec_load(L, fh);
+    W_idx = lua_gettop(L);
+  }
+  if (have_arg_w && W_idx != 3) {
+    W = tk_fvec_peek(L, 3, "W");
+    W_idx = 3;
+  }
   tk_dvec_t *intercept = NULL;
   int b_idx = 0;
   uint8_t has_intercept;
