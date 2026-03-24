@@ -478,7 +478,51 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     lua_pushvalue(L, W_idx);
     return 2;
   }
-  return luaL_error(L, "ridge create: gram required");
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "W");
+  if (!lua_isnil(L, -1)) {
+    tk_fvec_t *W_fvec = tk_fvec_peek(L, -1, "W");
+    int W_idx = lua_gettop(L);
+    lua_getfield(L, 1, "n_dims");
+    int64_t d = (int64_t)luaL_checkinteger(L, -1);
+    lua_pop(L, 1);
+    lua_getfield(L, 1, "n_labels");
+    int64_t nl = (int64_t)luaL_checkinteger(L, -1);
+    lua_pop(L, 1);
+    tk_dvec_t *intercept_dv = NULL;
+    int intercept_idx = 0;
+    lua_getfield(L, 1, "intercept");
+    if (!lua_isnil(L, -1)) {
+      intercept_dv = tk_dvec_peek(L, -1, "intercept");
+      intercept_idx = lua_gettop(L);
+    } else {
+      lua_pop(L, 1);
+    }
+    tk_ridge_t *r = tk_lua_newuserdata(L, tk_ridge_t,
+      TK_RIDGE_MT, tk_ridge_mt_fns, tk_ridge_gc);
+    int Ei = lua_gettop(L);
+    r->W = W_fvec;
+    r->intercept = intercept_dv;
+    r->n_dims = d;
+    r->n_labels = nl;
+    r->Wt = NULL;
+    r->sbuf = NULL;
+    r->sbuf_size = 0;
+    r->heap_buf = NULL;
+    r->heap_buf_size = 0;
+    r->destroyed = false;
+    lua_newtable(L);
+    lua_pushvalue(L, W_idx);
+    lua_setfield(L, -2, "W");
+    if (intercept_idx > 0) {
+      lua_pushvalue(L, intercept_idx);
+      lua_setfield(L, -2, "intercept");
+    }
+    lua_setfenv(L, Ei);
+    lua_pushvalue(L, Ei);
+    return 1;
+  }
+  return luaL_error(L, "ridge create: gram or W required");
 }
 
 static inline int tk_ridge_load_lua (lua_State *L) {

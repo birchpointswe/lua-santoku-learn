@@ -70,7 +70,7 @@ test("eurlex classifier", function ()
     val_expected_offsets = dev_label_off, val_expected_neighbors = dev_label_nbr,
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
     propensity_b = cfg.ridge.propensity_b,
-    k = k, search_trials = cfg.ridge.search_trials,
+    k = k, search_trials = cfg.ridge.search_trials, label_tile_size = 1024,
     each = util.make_ridge_log(stopwatch),
     trial_fn = function (gram, params)
       local f1, p, r = gram:label_accuracy(params.lambda, k,

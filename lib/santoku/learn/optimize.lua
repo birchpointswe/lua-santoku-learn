@@ -461,6 +461,7 @@ M.krr = function (args)
   local samplers = build_samplers(args, param_names)
   local do_search = not all_fixed(samplers) and args.search_trials and args.search_trials > 0
   local k = not dense and (args.k or 32) or nil
+  local use_tile = not do_search and not dense and args.label_tile_size and args.label_tile_size > 0
   local spectral_args = {
     offsets = args.offsets, tokens = args.tokens, values = args.values,
     n_tokens = args.n_tokens, n_samples = args.n_samples,
@@ -471,6 +472,29 @@ M.krr = function (args)
     label_values = args.label_values, n_labels = args.n_labels,
     targets = args.targets, n_targets = args.n_targets,
   }
+  if use_tile then
+    local params = sample_params(samplers, param_names, nil, true)
+    spectral_args.kernel = params.kernel
+    spectral_args.label_tile_size = args.label_tile_size
+    spectral_args.lambda = params.lambda
+    spectral_args.propensity_a = params.propensity_a
+    spectral_args.propensity_b = params.propensity_b
+    local _, sp_enc, tiled = spectral.encode(spectral_args)
+    local r = ridge.create({
+      W = tiled.W, intercept = tiled.intercept,
+      n_dims = tiled.n_dims, n_labels = tiled.n_labels,
+    })
+    local val_codes
+    if args.val_encode then
+      val_codes = args.val_encode(sp_enc)
+    else
+      val_codes = sp_enc:encode({
+        offsets = args.val_offsets, tokens = args.val_tokens,
+        values = args.val_values, n_samples = args.val_n_samples,
+      })
+    end
+    return sp_enc, r, val_codes, params
+  end
   local kernel_data = {}
   local encode_kernels = do_search and kernels or { samplers.kernel.center or kernels[1] }
   for _, kname in ipairs(encode_kernels) do
