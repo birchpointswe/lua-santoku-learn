@@ -64,6 +64,9 @@ test("eurlex classifier", function ()
   local w_path = "test/res/eurlex57k/w_tmp"
   local chol_buf = fvec.mmap_create(chol_path, cfg.emb.n_landmarks * train.n)
   local w_buf = fvec.mmap_create(w_path, cfg.emb.n_landmarks * n_labels)
+  local pqty_path = "test/res/eurlex57k/pqty_tmp"
+  local pqty_buf = cfg.ridge.search_trials > 0
+    and fvec.mmap_create(pqty_path, cfg.emb.n_landmarks * n_labels) or nil
   local sp_enc, ridge_obj, dev_codes, best_params = optimize.krr({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
@@ -76,7 +79,7 @@ test("eurlex classifier", function ()
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
     propensity_b = cfg.ridge.propensity_b,
     k = k, search_trials = cfg.ridge.search_trials, tile_labels = 1024,
-    chol_buf = chol_buf, w_buf = w_buf,
+    chol_buf = chol_buf, w_buf = w_buf, pqty_buf = pqty_buf,
     each = util.make_ridge_log(stopwatch),
     trial_fn = function (gram, params)
       local f1, p, r = gram:label_accuracy(params.lambda, k,
@@ -86,10 +89,11 @@ test("eurlex classifier", function ()
     end,
   })
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
-  chol_buf = nil; w_buf = nil -- luacheck: ignore
+  chol_buf = nil; w_buf = nil; pqty_buf = nil -- luacheck: ignore
   collectgarbage("collect")
   os.remove(chol_path)
   os.remove(w_path)
+  os.remove(pqty_path)
   local emb_d = sp_enc:dims()
   str.printf("[KRR] emb_d=%d kernel=%s lambda=%.4e pa=%.4f pb=%.4f %s\n",
     emb_d, best_params.kernel, best_params.lambda,
