@@ -60,8 +60,8 @@ test("eurlex classifier", function ()
   csr.apply_bns(val_off, val_tok, val_val, bns_scores)
 
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
-  local chol_path = os.tmpname()
-  local w_path = os.tmpname()
+  local chol_path = "test/res/eurlex57k/chol_tmp"
+  local w_path = "test/res/eurlex57k/w_tmp"
   local chol_buf = fvec.mmap_create(chol_path, cfg.emb.n_landmarks * train.n)
   local w_buf = fvec.mmap_create(w_path, cfg.emb.n_landmarks * n_labels)
   local sp_enc, ridge_obj, dev_codes, best_params = optimize.krr({
@@ -75,7 +75,7 @@ test("eurlex classifier", function ()
     val_expected_offsets = dev_label_off, val_expected_neighbors = dev_label_nbr,
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
     propensity_b = cfg.ridge.propensity_b,
-    k = k, search_trials = cfg.ridge.search_trials, label_tile_size = 1024,
+    k = k, search_trials = cfg.ridge.search_trials, tile_labels = 1024,
     chol_buf = chol_buf, w_buf = w_buf,
     each = util.make_ridge_log(stopwatch),
     trial_fn = function (gram, params)

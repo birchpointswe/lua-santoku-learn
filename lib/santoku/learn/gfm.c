@@ -87,13 +87,13 @@ static int tk_gfm_calibrate_lua (lua_State *L)
   free(bm);
 
   qsort(pool, te, sizeof(tk_entry_t), tk_entry_desc);
-  uint64_t tp = 0;
+  uint64_t tp = 0, best_tp = 0;
   double best_f1 = 0.0;
   int64_t best_k = 0;
   for (int64_t i = 0; i < (int64_t)te; i++) {
     tp += pool[i].hit;
     double f1 = 2.0 * (double)tp / ((double)(i + 1) + (double)total_expected);
-    if (f1 > best_f1) { best_f1 = f1; best_k = i + 1; }
+    if (f1 > best_f1) { best_f1 = f1; best_k = i + 1; best_tp = tp; }
   }
 
   double threshold;
@@ -106,8 +106,12 @@ static int tk_gfm_calibrate_lua (lua_State *L)
   free(pool);
 
   for (int64_t l = 0; l < nl; l++) g->thresholds[l] = threshold;
+  double precision = best_k > 0 ? (double)best_tp / (double)best_k : 0.0;
+  double recall = total_expected > 0 ? (double)best_tp / (double)total_expected : 0.0;
   lua_pushnumber(L, best_f1);
-  return 1;
+  lua_pushnumber(L, precision);
+  lua_pushnumber(L, recall);
+  return 3;
 }
 
 static int tk_gfm_predict_lua (lua_State *L)

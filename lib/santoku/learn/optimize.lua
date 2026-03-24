@@ -461,7 +461,7 @@ M.krr = function (args)
   local samplers = build_samplers(args, param_names)
   local do_search = not all_fixed(samplers) and args.search_trials and args.search_trials > 0
   local k = not dense and (args.k or 32) or nil
-  local use_tile = not do_search and not dense and args.label_tile_size and args.label_tile_size > 0
+  local use_tile = not do_search and not dense and args.tile_labels and args.tile_labels > 0
   local spectral_args = {
     offsets = args.offsets, tokens = args.tokens, values = args.values,
     n_tokens = args.n_tokens, n_samples = args.n_samples,
@@ -475,13 +475,15 @@ M.krr = function (args)
   if use_tile then
     local params = sample_params(samplers, param_names, nil, true)
     spectral_args.kernel = params.kernel
-    spectral_args.label_tile_size = args.label_tile_size
+    spectral_args.tile_labels = args.tile_labels
+    spectral_args.tile_samples = args.tile_samples
     spectral_args.chol_buf = args.chol_buf
     spectral_args.w_buf = args.w_buf
     spectral_args.lambda = params.lambda
     spectral_args.propensity_a = params.propensity_a
     spectral_args.propensity_b = params.propensity_b
     local _, sp_enc, tiled = spectral.encode(spectral_args)
+    os.execute("echo '=== After spectral.encode (tiled) ===' && cat /proc/meminfo | grep -E 'AnonPages|Mapped:'")
     local r = ridge.create({
       W = tiled.W, intercept = tiled.intercept,
       n_dims = tiled.n_dims, n_labels = tiled.n_labels,
@@ -562,7 +564,7 @@ end
 M.gfm = function (args)
   local gfm = require("santoku.learn.gfm")
   local g = gfm.create({ n_labels = args.n_labels })
-  local best_f1 = g:calibrate({
+  local best_f1, precision, recall = g:calibrate({
     offsets = args.val_offsets,
     neighbors = args.val_neighbors,
     scores = args.val_scores,
@@ -570,7 +572,7 @@ M.gfm = function (args)
     expected_offsets = args.val_expected_offsets,
     expected_neighbors = args.val_expected_neighbors,
   })
-  return g, { f1 = best_f1 }
+  return g, { f1 = best_f1, precision = precision, recall = recall }
 end
 
 return M
