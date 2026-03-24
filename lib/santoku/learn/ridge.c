@@ -284,10 +284,6 @@ static inline int tk_ridge_gram_lua (lua_State *L) {
   lua_getfield(L, 1, "label_neighbors");
   tk_ivec_t *lbl_nbr = has_labels ? tk_ivec_peek(L, -1, "label_neighbors") : NULL;
   lua_pop(L, 1);
-  lua_getfield(L, 1, "label_values");
-  int has_lbl_val = has_labels && !lua_isnil(L, -1);
-  tk_dvec_t *lbl_val = has_lbl_val ? tk_dvec_peek(L, -1, "label_values") : NULL;
-  lua_pop(L, 1);
   int64_t nl = 0;
   if (has_labels) {
     lua_getfield(L, 1, "n_labels");
@@ -332,7 +328,7 @@ static inline int tk_ridge_gram_lua (lua_State *L) {
     memset(lc->a, 0, unl * sizeof(double));
     for (uint64_t s = 0; s < unc; s++)
       for (int64_t j = lbl_off->a[s]; j < lbl_off->a[s + 1]; j++)
-        lc->a[lbl_nbr->a[j]] += has_lbl_val ? fabs(lbl_val->a[j]) : 1.0;
+        lc->a[lbl_nbr->a[j]] += 1.0;
   }
 
   for (int64_t base = 0; base < nc; base += tile_size) {
@@ -362,7 +358,7 @@ static inline int tk_ridge_gram_lua (lua_State *L) {
         for (uint64_t i = 0; i < ubs; i++) {
           uint64_t si = (uint64_t)base + i;
           for (int64_t j = lbl_off->a[si]; j < lbl_off->a[si + 1]; j++)
-            xty[k * nl + lbl_nbr->a[j]] += has_lbl_val ? col[i] * lbl_val->a[j] : col[i];
+            xty[k * nl + lbl_nbr->a[j]] += col[i];
         }
       }
     }
@@ -373,17 +369,8 @@ static inline int tk_ridge_gram_lua (lua_State *L) {
     col_mean[j] /= (double)nc;
 
   if (has_labels) {
-    if (has_lbl_val) {
-      memset(y_mean_arr, 0, unl * sizeof(double));
-      for (uint64_t s = 0; s < unc; s++)
-        for (int64_t j = lbl_off->a[s]; j < lbl_off->a[s + 1]; j++)
-          y_mean_arr[lbl_nbr->a[j]] += lbl_val->a[j];
-      for (int64_t l = 0; l < nl; l++)
-        y_mean_arr[l] /= (double)nc;
-    } else {
-      for (int64_t l = 0; l < nl; l++)
-        y_mean_arr[l] = lc->a[l] / (double)nc;
-    }
+    for (int64_t l = 0; l < nl; l++)
+      y_mean_arr[l] = lc->a[l] / (double)nc;
   } else {
     for (int64_t l = 0; l < nl; l++) {
       double s = 0.0;
