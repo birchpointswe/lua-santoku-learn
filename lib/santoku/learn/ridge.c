@@ -416,96 +416,61 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     int W_idx;
     tk_dvec_t *intercept_dv = NULL;
     int intercept_idx = 0;
-    if (tile_labels > 0 && gram->PQtY_f) {
-      if (w_buf) {
-        tk_fvec_ensure(w_buf, dnl);
-        w_buf->n = dnl;
-        W_fvec = w_buf;
-        W_idx = w_buf_lua_idx;
-      } else {
-        W_fvec = tk_fvec_create(L, dnl);
-        W_idx = lua_gettop(L);
-      }
-      if (gram->col_mean && gram->y_mean) {
-        intercept_dv = tk_dvec_create(L, (uint64_t)nl);
-        intercept_dv->n = (uint64_t)nl;
-        intercept_idx = lua_gettop(L);
-      }
-      double mu = lambda_raw * gram->mean_eig + gram->mean_eig * 1e-7;
-      double C = 0.0;
-      double *lc = NULL;
-      if (do_prop && gram->label_counts) {
-        C = (log((double)gram->n_samples) - 1.0) * pow(prop_b + 1.0, prop_a);
-        lc = gram->label_counts->a;
-      }
-      int64_t B = tile_labels;
-      double *W_tile = (double *)malloc((uint64_t)d * (uint64_t)B * sizeof(double));
-      double *W_d_tile = (double *)malloc((uint64_t)d * (uint64_t)B * sizeof(double));
-      if (!W_tile || !W_d_tile) {
-        free(W_tile); free(W_d_tile);
-        return luaL_error(L, "ridge create tiled: out of memory");
-      }
-      for (int64_t tl_start = 0; tl_start < nl; tl_start += B) {
-        int64_t aB = (tl_start + B <= nl) ? B : nl - tl_start;
-        for (int64_t i = 0; i < d; i++) {
-          double inv = 1.0 / (gram->eigenvals[i] + mu);
-          for (int64_t l = 0; l < aB; l++) {
-            double pqty = (double)gram->PQtY_f[i * nl + tl_start + l];
-            double prop = (lc) ? (1.0 + C / pow(lc[tl_start + l] + prop_b, prop_a)) : 1.0;
-            W_tile[i * aB + l] = pqty * prop * inv;
-          }
-        }
-        cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-          (int)d, (int)aB, (int)d, 1.0, gram->evecs, (int)d,
-          W_tile, (int)aB, 0.0, W_d_tile, (int)aB);
-        for (int64_t i = 0; i < d; i++)
-          for (int64_t l = 0; l < aB; l++)
-            W_fvec->a[i * nl + tl_start + l] = (float)W_d_tile[i * aB + l];
-        if (intercept_dv) {
-          for (int64_t l = 0; l < aB; l++) {
-            double prop = (lc) ? (1.0 + C / pow(lc[tl_start + l] + prop_b, prop_a)) : 1.0;
-            intercept_dv->a[tl_start + l] = prop * gram->y_mean[tl_start + l];
-          }
-          cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)aB,
-            -1.0, W_d_tile, (int)aB, gram->col_mean, 1, 1.0, intercept_dv->a + tl_start, 1);
-        }
-      }
-      free(W_tile); free(W_d_tile);
+    if (tile_labels <= 0) tile_labels = 1024;
+    if (w_buf) {
+      tk_fvec_ensure(w_buf, dnl);
+      w_buf->n = dnl;
+      W_fvec = w_buf;
+      W_idx = w_buf_lua_idx;
     } else {
-      tk_gram_solve_w(gram, lambda_raw, do_prop, prop_a, prop_b);
-      double *W_d = (double *)malloc(dnl * sizeof(double));
-      if (!W_d) return luaL_error(L, "ridge create: out of memory");
-      cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-        (int)d, (int)nl, (int)d, 1.0, gram->evecs, (int)d,
-        gram->W_work, (int)nl, 0.0, W_d, (int)nl);
-      if (w_buf) {
-        tk_fvec_ensure(w_buf, dnl);
-        w_buf->n = dnl;
-        W_fvec = w_buf;
-        W_idx = w_buf_lua_idx;
-      } else {
-        W_fvec = tk_fvec_create(L, dnl);
-        W_idx = lua_gettop(L);
-      }
-      if (gram->col_mean && gram->y_mean) {
-        intercept_dv = tk_dvec_create(L, (uint64_t)nl);
-        intercept_dv->n = (uint64_t)nl;
-        intercept_idx = lua_gettop(L);
-        if (do_prop && gram->label_counts) {
-          double C = (log((double)gram->n_samples) - 1.0) * pow(prop_b + 1.0, prop_a);
-          double *lc_arr = gram->label_counts->a;
-          for (int64_t l = 0; l < nl; l++)
-            intercept_dv->a[l] = (1.0 + C / pow(lc_arr[l] + prop_b, prop_a)) * gram->y_mean[l];
-        } else {
-          memcpy(intercept_dv->a, gram->y_mean, (uint64_t)nl * sizeof(double));
-        }
-        cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)nl,
-          -1.0, W_d, (int)nl, gram->col_mean, 1, 1.0, intercept_dv->a, 1);
-      }
-      for (uint64_t i = 0; i < dnl; i++)
-        W_fvec->a[i] = (float)W_d[i];
-      free(W_d);
+      W_fvec = tk_fvec_create(L, dnl);
+      W_idx = lua_gettop(L);
     }
+    if (gram->col_mean && gram->y_mean) {
+      intercept_dv = tk_dvec_create(L, (uint64_t)nl);
+      intercept_dv->n = (uint64_t)nl;
+      intercept_idx = lua_gettop(L);
+    }
+    double mu = lambda_raw * gram->mean_eig + gram->mean_eig * 1e-7;
+    double C = 0.0;
+    double *lc = NULL;
+    if (do_prop && gram->label_counts) {
+      C = (log((double)gram->n_samples) - 1.0) * pow(prop_b + 1.0, prop_a);
+      lc = gram->label_counts->a;
+    }
+    int64_t B = tile_labels;
+    double *W_tile = (double *)malloc((uint64_t)d * (uint64_t)B * sizeof(double));
+    double *W_d_tile = (double *)malloc((uint64_t)d * (uint64_t)B * sizeof(double));
+    if (!W_tile || !W_d_tile) {
+      free(W_tile); free(W_d_tile);
+      return luaL_error(L, "ridge create tiled: out of memory");
+    }
+    for (int64_t tl_start = 0; tl_start < nl; tl_start += B) {
+      int64_t aB = (tl_start + B <= nl) ? B : nl - tl_start;
+      for (int64_t i = 0; i < d; i++) {
+        double inv = 1.0 / (gram->eigenvals[i] + mu);
+        for (int64_t l = 0; l < aB; l++) {
+          double pqty = (double)gram->PQtY_f[i * nl + tl_start + l];
+          double prop = (lc) ? (1.0 + C / pow(lc[tl_start + l] + prop_b, prop_a)) : 1.0;
+          W_tile[i * aB + l] = pqty * prop * inv;
+        }
+      }
+      cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+        (int)d, (int)aB, (int)d, 1.0, gram->evecs, (int)d,
+        W_tile, (int)aB, 0.0, W_d_tile, (int)aB);
+      for (int64_t i = 0; i < d; i++)
+        for (int64_t l = 0; l < aB; l++)
+          W_fvec->a[i * nl + tl_start + l] = (float)W_d_tile[i * aB + l];
+      if (intercept_dv) {
+        for (int64_t l = 0; l < aB; l++) {
+          double prop = (lc) ? (1.0 + C / pow(lc[tl_start + l] + prop_b, prop_a)) : 1.0;
+          intercept_dv->a[tl_start + l] = prop * gram->y_mean[tl_start + l];
+        }
+        cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)aB,
+          -1.0, W_d_tile, (int)aB, gram->col_mean, 1, 1.0, intercept_dv->a + tl_start, 1);
+      }
+    }
+    free(W_tile); free(W_d_tile);
 
     tk_ridge_t *r = tk_lua_newuserdata(L, tk_ridge_t,
       TK_RIDGE_MT, tk_ridge_mt_fns, tk_ridge_gc);

@@ -461,8 +461,9 @@ M.krr = function (args)
   local samplers = build_samplers(args, param_names)
   local do_search = not all_fixed(samplers) and args.search_trials and args.search_trials > 0
   local k = not dense and (args.k or 32) or nil
-  local use_tile_search = do_search and not dense and args.tile_labels and args.tile_labels > 0
-  local use_tile = not do_search and not dense and args.tile_labels and args.tile_labels > 0
+  local tile_labels = not dense and (args.tile_labels or 1024) or nil
+  local use_tile_search = do_search and tile_labels and tile_labels > 0
+  local use_tile = not do_search and tile_labels and tile_labels > 0
   local spectral_args = {
     offsets = args.offsets, tokens = args.tokens, values = args.values,
     n_tokens = args.n_tokens, n_samples = args.n_samples,
@@ -476,7 +477,7 @@ M.krr = function (args)
   if use_tile_search then
     local params = sample_params(samplers, param_names, nil, true)
     spectral_args.kernel = params.kernel
-    spectral_args.tile_labels = args.tile_labels
+    spectral_args.tile_labels = tile_labels
     spectral_args.tile_samples = args.tile_samples
     spectral_args.chol_buf = args.chol_buf
     spectral_args.pqty_buf = args.pqty_buf
@@ -507,13 +508,13 @@ M.krr = function (args)
       gram = gram, lambda = best_params.lambda,
       propensity_a = not dense and best_params.propensity_a or nil,
       propensity_b = not dense and best_params.propensity_b or nil,
-      w_buf = args.w_buf, tile_labels = args.tile_labels,
+      w_buf = args.w_buf, tile_labels = tile_labels,
     })
     return sp_enc, r, val_codes, best_params
   elseif use_tile then
     local params = sample_params(samplers, param_names, nil, true)
     spectral_args.kernel = params.kernel
-    spectral_args.tile_labels = args.tile_labels
+    spectral_args.tile_labels = tile_labels
     spectral_args.tile_samples = args.tile_samples
     spectral_args.chol_buf = args.chol_buf
     spectral_args.w_buf = args.w_buf
