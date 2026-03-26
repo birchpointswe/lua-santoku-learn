@@ -172,10 +172,10 @@ static int tk_gfm_score_lua (lua_State *L)
     #pragma omp for schedule(static)
     for (int64_t s = 0; s < ns; s++) {
       int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
-      uint64_t n_expected = (uint64_t)(ee - es);
       int64_t ps = offsets->a[s], pe = offsets->a[s + 1];
-      uint64_t hood_size = (uint64_t)(pe - ps);
-      if (n_expected == 0 || hood_size == 0) continue;
+      int64_t hood_size = pe - ps;
+      if (hood_size == 0) continue;
+      uint64_t n_expected = (uint64_t)(ee - es);
       total_expected += n_expected;
       for (int64_t j = es; j < ee; j++) {
         int64_t l = exp_nbr->a[j];
@@ -189,8 +189,7 @@ static int tk_gfm_score_lua (lua_State *L)
           if (sc >= thresholds[l]) k++;
         }
       }
-      if (k < 1) k = 1;
-      if (k > (int64_t)hood_size) k = (int64_t)hood_size;
+      if (k > hood_size) k = hood_size;
       for (int64_t j = ps; j < ps + k; j++) {
         predicted++;
         int64_t l = neighbors->a[j];

@@ -155,10 +155,10 @@ local function _split_imdb (dataset, s, e)
   local sol_off = ivec.create()
   local sol_nbr = ivec.create()
   for i = 1, n do
-    sol_off:push(i - 1)
-    sol_nbr:push(ss[i])
+    sol_off:push(sol_nbr:size())
+    if ss[i] == 1 then sol_nbr:push(0) end
   end
-  sol_off:push(n)
+  sol_off:push(sol_nbr:size())
   return {
     n = n,
     problems = ps,

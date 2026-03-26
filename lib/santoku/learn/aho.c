@@ -15,6 +15,7 @@ typedef struct {
   int32_t *goto_base;
   int32_t *fail;
   int64_t *output_id;
+  int64_t *output_pri;
   int64_t *output_len;
   int32_t *output_link;
   int64_t n_states;
@@ -34,6 +35,7 @@ static inline int tk_aho_gc (lua_State *L) {
     free(a->goto_base);
     free(a->fail);
     free(a->output_id);
+    free(a->output_pri);
     free(a->output_len);
     free(a->output_link);
   }
@@ -60,11 +62,14 @@ typedef struct {
   int64_t id;
   int64_t start;
   int64_t end;
+  int64_t priority;
 } tk_aho_match_t;
 
 #define tk_aho_match_lt(a, b) \
   ((a).start != (b).start ? (a).start < (b).start : \
-   ((a).end - (a).start) > ((b).end - (b).start))
+   ((a).end - (a).start) != ((b).end - (b).start) ? \
+     ((a).end - (a).start) > ((b).end - (b).start) : \
+   (a).priority < (b).priority)
 
 KSORT_INIT(tk_aho_match, tk_aho_match_t, tk_aho_match_lt)
 
@@ -132,6 +137,7 @@ static tk_aho_scan_result_t tk_aho_scan (
                   local_m[m_n].id = a->output_id[tmp];
                   local_m[m_n].start = os;
                   local_m[m_n].end = oe;
+                  local_m[m_n].priority = a->output_pri[tmp];
                   m_n++;
                 }
               }
@@ -164,6 +170,7 @@ static tk_aho_scan_result_t tk_aho_scan (
                 local_m[m_n].id = a->output_id[tmp];
                 local_m[m_n].start = os;
                 local_m[m_n].end = oe;
+                local_m[m_n].priority = a->output_pri[tmp];
                 m_n++;
               }
             }
@@ -267,6 +274,10 @@ static int tk_aho_create_lua (lua_State *L)
   tk_ivec_t *ids = tk_ivec_peek(L, -1, "ids");
   lua_pop(L, 1);
 
+  lua_getfield(L, 1, "priorities");
+  tk_ivec_t *priorities = tk_ivec_peekopt(L, -1);
+  lua_pop(L, 1);
+
   lua_getfield(L, 1, "patterns");
   luaL_checktype(L, -1, LUA_TTABLE);
   int ptab = lua_gettop(L);
@@ -289,12 +300,14 @@ static int tk_aho_create_lua (lua_State *L)
   int32_t *goto_base = (int32_t *)malloc((uint64_t)cap * 256 * sizeof(int32_t));
   int32_t *fail = (int32_t *)calloc((uint64_t)cap, sizeof(int32_t));
   int64_t *output_id = (int64_t *)malloc((uint64_t)cap * sizeof(int64_t));
+  int64_t *output_pri = (int64_t *)malloc((uint64_t)cap * sizeof(int64_t));
   int64_t *output_len = (int64_t *)calloc((uint64_t)cap, sizeof(int64_t));
   int32_t *output_link = (int32_t *)malloc((uint64_t)cap * sizeof(int32_t));
 
   memset(goto_base, 0, 256 * sizeof(int32_t));
   for (int64_t i = 0; i < cap; i++) {
     output_id[i] = -1;
+    output_pri[i] = INT64_MAX;
     output_link[i] = -1;
   }
 
@@ -329,12 +342,14 @@ static int tk_aho_create_lua (lua_State *L)
             goto_base = (int32_t *)realloc(goto_base, (uint64_t)cap * 256 * sizeof(int32_t));
             fail = (int32_t *)realloc(fail, (uint64_t)cap * sizeof(int32_t));
             output_id = (int64_t *)realloc(output_id, (uint64_t)cap * sizeof(int64_t));
+            output_pri = (int64_t *)realloc(output_pri, (uint64_t)cap * sizeof(int64_t));
             output_len = (int64_t *)realloc(output_len, (uint64_t)cap * sizeof(int64_t));
             output_link = (int32_t *)realloc(output_link, (uint64_t)cap * sizeof(int32_t));
           }
           memset(goto_base + (int64_t)n_states * 256, 0, 256 * sizeof(int32_t));
           fail[n_states] = 0;
           output_id[n_states] = -1;
+          output_pri[n_states] = INT64_MAX;
           output_len[n_states] = 0;
           output_link[n_states] = -1;
           n_states++;
@@ -343,8 +358,12 @@ static int tk_aho_create_lua (lua_State *L)
         nlen++;
       }
     }
-    output_id[cur] = ids->a[p];
-    output_len[cur] = nlen;
+    int64_t new_pri = priorities ? priorities->a[p] : 0;
+    if (output_id[cur] < 0 || new_pri < output_pri[cur]) {
+      output_id[cur] = ids->a[p];
+      output_pri[cur] = new_pri;
+      output_len[cur] = nlen;
+    }
     lua_pop(L, 1);
   }
 
@@ -387,6 +406,7 @@ static int tk_aho_create_lua (lua_State *L)
   a->goto_base = goto_base;
   a->fail = fail;
   a->output_id = output_id;
+  a->output_pri = output_pri;
   a->output_len = output_len;
   a->output_link = output_link;
   a->n_states = n_states;
@@ -675,7 +695,7 @@ static int tk_aho_persist_lua (lua_State *L) {
   else
     return tk_lua_verror(L, 2, "persist", "expecting filepath or true");
   tk_lua_fwrite(L, "TKac", 1, 4, fh);
-  uint8_t version = 2;
+  uint8_t version = 3;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &a->n_states, sizeof(int64_t), 1, fh);
   tk_lua_fwrite(L, &a->n_patterns, sizeof(int64_t), 1, fh);
@@ -684,6 +704,7 @@ static int tk_aho_persist_lua (lua_State *L) {
   tk_lua_fwrite(L, a->goto_base, sizeof(int32_t), (size_t)(a->n_states * 256), fh);
   tk_lua_fwrite(L, a->fail, sizeof(int32_t), (size_t)a->n_states, fh);
   tk_lua_fwrite(L, a->output_id, sizeof(int64_t), (size_t)a->n_states, fh);
+  tk_lua_fwrite(L, a->output_pri, sizeof(int64_t), (size_t)a->n_states, fh);
   tk_lua_fwrite(L, a->output_len, sizeof(int64_t), (size_t)a->n_states, fh);
   tk_lua_fwrite(L, a->output_link, sizeof(int32_t), (size_t)a->n_states, fh);
 
@@ -746,29 +767,28 @@ static int tk_aho_load_lua (lua_State *L)
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version < 1 || version > 2) {
+  if (version != 3) {
     tk_lua_fclose(L, fh);
     return luaL_error(L, "unsupported aho version %d", (int)version);
   }
   int64_t n_states, n_patterns;
   tk_lua_fread(L, &n_states, sizeof(int64_t), 1, fh);
   tk_lua_fread(L, &n_patterns, sizeof(int64_t), 1, fh);
-  bool do_normalize = true;
-  if (version >= 2) {
-    uint8_t norm_byte;
-    tk_lua_fread(L, &norm_byte, sizeof(uint8_t), 1, fh);
-    do_normalize = norm_byte != 0;
-  }
+  uint8_t norm_byte;
+  tk_lua_fread(L, &norm_byte, sizeof(uint8_t), 1, fh);
+  bool do_normalize = norm_byte != 0;
 
   int32_t *goto_base = (int32_t *)malloc((uint64_t)n_states * 256 * sizeof(int32_t));
   int32_t *fail = (int32_t *)malloc((uint64_t)n_states * sizeof(int32_t));
   int64_t *output_id = (int64_t *)malloc((uint64_t)n_states * sizeof(int64_t));
+  int64_t *output_pri = (int64_t *)malloc((uint64_t)n_states * sizeof(int64_t));
   int64_t *output_len = (int64_t *)malloc((uint64_t)n_states * sizeof(int64_t));
   int32_t *output_link = (int32_t *)malloc((uint64_t)n_states * sizeof(int32_t));
 
   tk_lua_fread(L, goto_base, sizeof(int32_t), (size_t)(n_states * 256), fh);
   tk_lua_fread(L, fail, sizeof(int32_t), (size_t)n_states, fh);
   tk_lua_fread(L, output_id, sizeof(int64_t), (size_t)n_states, fh);
+  tk_lua_fread(L, output_pri, sizeof(int64_t), (size_t)n_states, fh);
   tk_lua_fread(L, output_len, sizeof(int64_t), (size_t)n_states, fh);
   tk_lua_fread(L, output_link, sizeof(int32_t), (size_t)n_states, fh);
 
@@ -796,6 +816,7 @@ static int tk_aho_load_lua (lua_State *L)
   a->goto_base = goto_base;
   a->fail = fail;
   a->output_id = output_id;
+  a->output_pri = output_pri;
   a->output_len = output_len;
   a->output_link = output_link;
   a->n_states = n_states;
