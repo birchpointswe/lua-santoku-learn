@@ -586,7 +586,7 @@ static inline double tm_bns (double N, double C, double P, double A)
   double tpr = (A + TM_SMOOTH_EPS) / (P + 2.0 * TM_SMOOTH_EPS);
   double fpr = (C - A + TM_SMOOTH_EPS) / (N - P + 2.0 * TM_SMOOTH_EPS);
   double bns = tm_probit(tpr) - tm_probit(fpr);
-  return bns > 0.0 ? bns : 0.0;
+  return fabs(bns);
 }
 
 static inline void tm_csr_gather_mul (
