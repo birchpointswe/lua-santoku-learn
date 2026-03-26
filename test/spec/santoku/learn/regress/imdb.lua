@@ -1,6 +1,5 @@
 local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
-local eval = require("santoku.learn.evaluator")
 local optimize = require("santoku.learn.optimize")
 local str = require("santoku.string")
 local test = require("santoku.test")
@@ -18,7 +17,7 @@ local cfg = {
     lambda = { def = 4.20e-01 },
     propensity_a = { def = 0.62 },
     propensity_b = { def = 2.15 },
-    classes = 2,
+    classes = 1,
     search_trials = 0,
     k = 1,
   },
@@ -91,26 +90,30 @@ test("imdb classifier", function ()
   end
 
   str.printf("[Eval] Labeling splits\n")
-  local val_off, val_nbr = ridge_obj:label(val_codes, validate.n, 1)
+  local val_off, val_nbr, val_sco = ridge_obj:label(val_codes, validate.n, 1)
   val_codes = nil -- luacheck: ignore
   local test_codes = encode_texts(test_set.problems, test_set.n)
   test_set.problems = nil
-  local test_off, test_nbr = ridge_obj:label(test_codes, test_set.n, 1)
+  local test_off, test_nbr, test_sco = ridge_obj:label(test_codes, test_set.n, 1)
   test_codes = nil -- luacheck: ignore
   str.printf("[Eval] Labels done %s\n", sw())
 
-  local _, val_stats = eval.label_accuracy({
-    pred_offsets = val_off, pred_neighbors = val_nbr,
-    expected_offsets = validate.sol_offsets, expected_neighbors = validate.sol_neighbors,
-    ks = 1,
+  local gfm_obj, gfm_metrics = optimize.gfm({
+    n_labels = n_classes,
+    val_offsets = val_off, val_neighbors = val_nbr, val_scores = val_sco,
+    val_n_samples = validate.n,
+    val_expected_offsets = val_label_off, val_expected_neighbors = val_label_nbr,
   })
-  local _, test_stats = eval.label_accuracy({
-    pred_offsets = test_off, pred_neighbors = test_nbr,
+  str.printf("[GFM] val: f1=%.4f p=%.4f r=%.4f %s\n",
+    gfm_metrics.f1, gfm_metrics.precision, gfm_metrics.recall, sw())
+
+  local _, test_stats = gfm_obj:score({
+    offsets = test_off, neighbors = test_nbr, scores = test_sco,
     expected_offsets = test_set.sol_offsets, expected_neighbors = test_set.sol_neighbors,
-    ks = 1,
+    n_samples = test_set.n,
   })
   str.printf("[Class] F1: val=%.2f test=%.2f %s\n",
-    val_stats.micro_f1, test_stats.micro_f1, sw())
+    gfm_metrics.f1, test_stats.micro_f1, sw())
 
   local _, total = stopwatch()
   str.printf("\nTotal: %.1fs\n", total)

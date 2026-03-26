@@ -1490,76 +1490,11 @@ static inline int tk_dendro_iter_lua(lua_State *L) {
   return 1;
 }
 
-static inline int tm_rp_at_k (lua_State *L)
-{
-  lua_settop(L, 1);
-  luaL_checktype(L, 1, LUA_TTABLE);
-  lua_getfield(L, 1, "pred_offsets");
-  tk_ivec_t *pred_off = tk_ivec_peek(L, -1, "pred_offsets");
-  lua_getfield(L, 1, "pred_neighbors");
-  tk_ivec_t *pred_nbr = tk_ivec_peek(L, -1, "pred_neighbors");
-  lua_getfield(L, 1, "expected_offsets");
-  tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
-  lua_getfield(L, 1, "expected_neighbors");
-  tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
-  lua_getfield(L, 1, "max_k");
-  int64_t max_k = luaL_optinteger(L, -1, 20);
-  lua_pop(L, 5);
-  uint64_t n_samples = pred_off->n - 1;
-  double *sums = calloc((uint64_t)max_k, sizeof(double));
-  uint64_t *counts = calloc((uint64_t)max_k, sizeof(uint64_t));
-  #pragma omp parallel
-  {
-    double *ls = calloc((uint64_t)max_k, sizeof(double));
-    uint64_t *lc = calloc((uint64_t)max_k, sizeof(uint64_t));
-    #pragma omp for
-    for (uint64_t s = 0; s < n_samples; s++) {
-      int64_t ps = pred_off->a[s], pe = pred_off->a[s + 1];
-      uint64_t hood = (uint64_t)(pe - ps);
-      int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
-      uint64_t n_exp = (uint64_t)(ee - es);
-      if (n_exp == 0 || hood == 0) continue;
-      int kha;
-      tk_iuset_t *exp_set = tk_iuset_create(NULL, 0);
-      for (int64_t i = es; i < ee; i++)
-        tk_iuset_put(exp_set, exp_nbr->a[i], &kha);
-      uint64_t tp = 0, tp_frozen = 0;
-      for (int64_t ki = 0; ki < max_k; ki++) {
-        uint64_t K = (uint64_t)(ki + 1);
-        if (K > hood) break;
-        if (tk_iuset_contains(exp_set, pred_nbr->a[ps + ki]) != 0)
-          tp++;
-        if (K <= n_exp) tp_frozen = tp;
-        uint64_t eff_k = K < n_exp ? K : n_exp;
-        ls[ki] += (double)(K <= n_exp ? tp : tp_frozen) / eff_k;
-        lc[ki]++;
-      }
-      tk_iuset_destroy(exp_set);
-    }
-    #pragma omp critical
-    for (int64_t ki = 0; ki < max_k; ki++) {
-      sums[ki] += ls[ki];
-      counts[ki] += lc[ki];
-    }
-    free(ls);
-    free(lc);
-  }
-  lua_newtable(L);
-  for (int64_t ki = 0; ki < max_k; ki++) {
-    lua_pushnumber(L, counts[ki] > 0 ? sums[ki] / counts[ki] : 0);
-    lua_rawseti(L, -2, ki + 1);
-  }
-  free(sums);
-  free(counts);
-  return 1;
-}
-
 static luaL_Reg tm_evaluator_fns[] =
 {
   { "regress_accuracy", tm_regress_accuracy },
   { "label_accuracy", tm_label_accuracy },
   { "label_ranking", tm_label_ranking },
-  { "rp_at_k", tm_rp_at_k },
   { "cluster", tm_cluster },
   { "dendro_cut", tk_pvec_dendro_cut_lua },
   { "dendro_each", tk_dendro_iter_lua },
