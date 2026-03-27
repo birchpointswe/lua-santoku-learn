@@ -94,11 +94,6 @@ test("eurlex classifier", function ()
   os.remove(chol_path)
   os.remove(w_path)
   os.remove(pqty_path)
-  local emb_d = sp_enc:dims()
-  str.printf("[KRR] emb_d=%d kernel=%s lambda=%.4e pa=%.4f pb=%.4f %s\n",
-    emb_d, best_params.kernel, best_params.lambda,
-    best_params.propensity_a, best_params.propensity_b, sw())
-
   local function encode_texts(text_iter_fn, n)
     local _, off, tok, val = csr.tokenize({
       texts = text_iter_fn(), ngram = cfg.tok.ngram, n_samples = n, ngram_map = ngram_map,

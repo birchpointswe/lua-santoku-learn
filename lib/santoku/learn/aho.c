@@ -71,7 +71,10 @@ typedef struct {
      ((a).end - (a).start) > ((b).end - (b).start) : \
    (a).priority < (b).priority)
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
 KSORT_INIT(tk_aho_match, tk_aho_match_t, tk_aho_match_lt)
+#pragma GCC diagnostic pop
 
 typedef struct {
   tk_aho_match_t *matches;

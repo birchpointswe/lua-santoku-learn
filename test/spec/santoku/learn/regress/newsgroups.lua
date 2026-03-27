@@ -76,11 +76,6 @@ test("newsgroups classifier", function ()
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   validate.problems = nil
   collectgarbage("collect")
-  local emb_d = sp_enc:dims()
-  str.printf("[KRR] emb_d=%d kernel=%s lambda=%.4e pa=%.4f pb=%.4f %s\n",
-    emb_d, best_params.kernel, best_params.lambda,
-    best_params.propensity_a, best_params.propensity_b, sw())
-
   local function encode_texts(texts, n)
     local _, off, tok, val = csr.tokenize({
       texts = texts, ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max,

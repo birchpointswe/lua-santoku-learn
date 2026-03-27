@@ -412,6 +412,7 @@ M.ridge = function (args)
       propensity_a = not dense and params.propensity_a or nil,
       propensity_b = not dense and params.propensity_b or nil,
     })
+    if args.each then args.each({ event = "done", params = params }) end
     return r, params
   end
   gram:prepare(args.val_codes, args.val_n_samples)
@@ -442,6 +443,7 @@ M.ridge = function (args)
     propensity_a = not dense and best_params.propensity_a or nil,
     propensity_b = not dense and best_params.propensity_b or nil,
   })
+  if args.each then args.each({ event = "done", params = best_params }) end
   return r, best_params
 end
 
@@ -510,6 +512,7 @@ M.krr = function (args)
       propensity_b = not dense and best_params.propensity_b or nil,
       w_buf = args.w_buf, tile_labels = tile_labels,
     })
+    if args.each then args.each({ event = "done", params = best_params, emb_d = sp_enc:dims() }) end
     return sp_enc, r, val_codes, best_params
   elseif use_tile then
     local params = sample_params(samplers, param_names, nil, true)
@@ -535,6 +538,7 @@ M.krr = function (args)
         values = args.val_values, n_samples = args.val_n_samples,
       })
     end
+    if args.each then args.each({ event = "done", params = params, emb_d = sp_enc:dims() }) end
     return sp_enc, r, val_codes, params
   end
   local kernel_data = {}
@@ -563,6 +567,7 @@ M.krr = function (args)
       propensity_a = not dense and params.propensity_a or nil,
       propensity_b = not dense and params.propensity_b or nil,
     })
+    if args.each then args.each({ event = "done", params = params, emb_d = kd.sp_enc:dims() }) end
     return kd.sp_enc, r, kd.val_codes, params
   end
   local trial_fn = args.trial_fn
@@ -596,6 +601,7 @@ M.krr = function (args)
     propensity_a = not dense and best_params.propensity_a or nil,
     propensity_b = not dense and best_params.propensity_b or nil,
   })
+  if args.each then args.each({ event = "done", params = best_params, emb_d = best_kd.sp_enc:dims() }) end
   return best_kd.sp_enc, r, best_kd.val_codes, best_params
 end
 

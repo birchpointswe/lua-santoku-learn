@@ -23,6 +23,22 @@ end
 
 function M.make_ridge_log (stopwatch, metric_fmt)
   return function (ev)
+    if ev.event == "done" then
+      local p = ev.params or {}
+      local emb = ev.emb_d and str.format(" emb_d=%d", ev.emb_d) or ""
+      local kern = p.kernel and str.format(" kernel=%s", p.kernel) or ""
+      local prop = ""
+      if p.propensity_a then
+        prop = str.format(" pa=%.4f pb=%.4f", p.propensity_a, p.propensity_b)
+      end
+      local timing = ""
+      if stopwatch then
+        local d, dd = stopwatch()
+        timing = str.format(" (%.1fs +%.1fs)", d, dd)
+      end
+      str.printf("[Ridge Done]%s%s lambda=%.4e%s%s\n", emb, kern, p.lambda or 0, prop, timing)
+      return
+    end
     local phase = format_phase(ev)
     local p = ev.params or {}
     local m = ev.metrics or {}
