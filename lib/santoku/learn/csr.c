@@ -427,6 +427,7 @@ static int tm_csr_tokenize (lua_State *L)
   if (ngram_min < 1 || ngram_max > 8 || ngram_min > ngram_max)
     return luaL_error(L, "tokenize: need 1 <= ngram_min <= ngram_max <= 8");
   bool do_normalize = tk_lua_foptboolean(L, 1, "tokenize", "normalize", false);
+  bool terminals = tk_lua_foptboolean(L, 1, "tokenize", "terminals", false);
   int64_t n_samples = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "n_samples");
   lua_getfield(L, 1, "texts");
   const char **strs = (const char **)malloc((uint64_t)n_samples * sizeof(const char *));
@@ -477,7 +478,26 @@ static int tm_csr_tokenize (lua_State *L)
     free(lens);
     return luaL_error(L, "tokenize: texts must be table or function");
   }
+  char *term_pool = NULL;
+  if (terminals) {
+    size_t total_bytes = 0;
+    for (int64_t s = 0; s < n_samples; s++)
+      if (strs[s] && lens[s]) total_bytes += lens[s] + 2;
+    term_pool = (char *)malloc(total_bytes);
+    char *p = term_pool;
+    for (int64_t s = 0; s < n_samples; s++) {
+      if (!strs[s] || !lens[s]) continue;
+      p[0] = '\x03';
+      memcpy(p + 1, strs[s], lens[s]);
+      p[1 + lens[s]] = '\x04';
+      strs[s] = p;
+      lens[s] += 2;
+      p += lens[s];
+    }
+    max_len += 2;
+  }
   int result = tm_csr_tokenize_core(L, strs, lens, max_len, n_samples, ngram_min, ngram_max, do_normalize);
+  free(term_pool);
   free(strs);
   free(lens);
   return result;

@@ -71,10 +71,6 @@ test("housing regressor", function ()
   })
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   collectgarbage("collect")
-  local emb_d = sp_enc:dims()
-  str.printf("[KRR] emb_d=%d kernel=%s lambda=%.4e %s\n",
-    emb_d, best_params.kernel, best_params.lambda, sw())
-
   local function encode(bit_off, bit_nbr, continuous, n)
     local off, tok, val = merge_features(bit_off, bit_nbr, continuous, n)
     csr.standardize(off, tok, val, std_scores)

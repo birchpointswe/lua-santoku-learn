@@ -88,11 +88,6 @@ test("snli classifier", function ()
   })
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   collectgarbage("collect")
-  local emb_d = sp_enc:dims()
-  str.printf("[KRR] emb_d=%d kernel=%s lambda=%.4e pa=%.4f pb=%.4f %s\n",
-    emb_d, best_params.kernel, best_params.lambda,
-    best_params.propensity_a, best_params.propensity_b, sw())
-
   str.printf("[Eval] Labeling splits\n")
   local val_off, val_nbr = ridge_obj:label(val_codes, validate.n, 1)
   val_codes = nil -- luacheck: ignore

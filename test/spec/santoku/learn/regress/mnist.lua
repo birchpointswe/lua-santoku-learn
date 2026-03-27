@@ -63,11 +63,6 @@ test("mnist classifier", function ()
   })
   train_p_off = nil; train_p_nbr = nil -- luacheck: ignore
   collectgarbage("collect")
-  local emb_d = sp_enc:dims()
-  str.printf("[KRR] emb_d=%d kernel=%s lambda=%.4e pa=%.4f pb=%.4f %s\n",
-    emb_d, best_params.kernel, best_params.lambda,
-    best_params.propensity_a, best_params.propensity_b, sw())
-
   local function encode(ids, n)
     local p_off, p_nbr = csr_m.subsample(
       dataset.problem_offsets, dataset.problem_neighbors, ids)
