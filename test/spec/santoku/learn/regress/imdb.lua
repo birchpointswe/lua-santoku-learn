@@ -15,8 +15,6 @@ local cfg = {
   emb = { n_landmarks = 1024*8, trace_tol = 0.01, kernel = { "expcos", "cosine", "nngp", "ntk", "geolaplace" } },
   ridge = {
     lambda = { def = 4.20e-01 },
-    propensity_a = { def = 0.62 },
-    propensity_b = { def = 2.15 },
     classes = 1,
     search_trials = 0,
     k = 1,
@@ -65,19 +63,13 @@ test("imdb classifier", function ()
     val_offsets = val_off, val_tokens = val_tok, val_values = val_val,
     val_n_samples = validate.n,
     val_expected_offsets = val_label_off, val_expected_neighbors = val_label_nbr,
-    lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
-    propensity_b = cfg.ridge.propensity_b,
+    lambda = cfg.ridge.lambda,
     k = cfg.ridge.k, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   validate.problems = nil
   collectgarbage("collect")
-  local emb_d = sp_enc:dims()
-  str.printf("[KRR] emb_d=%d kernel=%s lambda=%.4e pa=%.4f pb=%.4f %s\n",
-    emb_d, best_params.kernel, best_params.lambda,
-    best_params.propensity_a, best_params.propensity_b, sw())
-
   local function encode_texts(texts, n)
     local _, off, tok, val = csr.tokenize({
       texts = texts, ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max,
