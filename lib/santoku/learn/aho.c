@@ -109,13 +109,13 @@ static tk_aho_scan_result_t tk_aho_scan (
         while (i < tlen) {
           tk_norm_result_t nr = tk_text_normalize_next(texts[ti], i, tlen);
           for (int bi = 0; bi < nr.n_out; bi++) {
-            ring[npos % ring_size] = (nr.n_out == nr.n_in) ? (int64_t)(i + (size_t)bi) : (int64_t)i;
+            ring[npos % ring_size] = (nr.n_in == 1) ? (int64_t)(i + (size_t)bi) : (int64_t)i;
             state = a->goto_base[(int64_t)state * 256 + nr.bytes[bi]];
             int32_t tmp = state;
             while (tmp > 0) {
               if (a->output_id[tmp] >= 0) {
                 int64_t os = ring[(npos - a->output_len[tmp] + 1) % ring_size];
-                int64_t oe = (nr.n_out == nr.n_in) ? (int64_t)(i + (size_t)bi + 1) : (int64_t)(i + (size_t)nr.n_in);
+                int64_t oe = (nr.n_in == 1) ? (int64_t)(i + (size_t)bi + 1) : (int64_t)(i + (size_t)nr.n_in);
                 while ((size_t)oe + 1 < tlen) {
                   uint8_t cb = (uint8_t)texts[ti][oe];
                   if (cb == 0xCC && ((uint8_t)texts[ti][oe + 1] & 0xC0) == 0x80)

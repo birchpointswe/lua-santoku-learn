@@ -171,7 +171,7 @@ local attr_dqv = P("\"") * C((1 - P("\"")) ^ 0) * P("\"")
 local attr_sqv = P("'") * C((1 - P("'")) ^ 0) * P("'")
 local attr_uqv = C((1 - S(" \t\n\r>\"'")) ^ 1)
 local attr_kv = C(attr_key_patt) * ws * P("=") * ws * (attr_dqv + attr_sqv + attr_uqv)
-local attr_bare = (1 - S(" \t\n\r=/>\"'")) ^ 1
+local attr_bare = C((1 - S(" \t\n\r=/>\"'")) ^ 1) * Cc(true)
 local attrs_raw = Ct((ws * (attr_kv + attr_bare)) ^ 0)
 
 local close_tag_cap = P("</") * ws * tag_name_cap * ws * P(">") * Cp()
@@ -304,7 +304,11 @@ local function html_inject(text, tags)
     parts[#parts + 1] = "<" .. t.name
     if t.attrs then
       for k, v in pairs(t.attrs) do
-        parts[#parts + 1] = " " .. k .. "=\"" .. v:gsub("\"", "&quot;") .. "\""
+        if v == true then
+          parts[#parts + 1] = " " .. k
+        elseif v then
+          parts[#parts + 1] = " " .. k .. "=\"" .. v:gsub("\"", "&quot;") .. "\""
+        end
       end
     end
     parts[#parts + 1] = ">"
