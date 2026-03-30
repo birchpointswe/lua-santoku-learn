@@ -4,12 +4,15 @@
 #include <string.h>
 #include <stdio.h>
 #include <omp.h>
+#include <sys/mman.h>
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
+#include <santoku/svec.h>
 #include <santoku/iuset.h>
 #include <santoku/learn/normalize.h>
 
 #define TK_AHO_MT "tk_aho_t"
+#define TK_AHO_BUILDER_MT "tk_aho_builder_t"
 
 typedef struct {
   int32_t *goto_base;
@@ -22,8 +25,23 @@ typedef struct {
   int64_t n_patterns;
   int64_t max_output_len;
   bool normalize;
+  tk_svec_t *goto_svec;
   bool destroyed;
 } tk_aho_t;
+
+typedef struct {
+  int32_t *goto_base;
+  int32_t *fail;
+  int64_t *output_id;
+  int64_t *output_pri;
+  int64_t *output_len;
+  int32_t *output_link;
+  int64_t n_states;
+  int64_t n_patterns;
+  int64_t max_output_len;
+  bool normalize;
+  bool consumed;
+} tk_aho_builder_t;
 
 static inline tk_aho_t *tk_aho_peek (lua_State *L, int i) {
   return (tk_aho_t *)luaL_checkudata(L, i, TK_AHO_MT);
@@ -32,7 +50,8 @@ static inline tk_aho_t *tk_aho_peek (lua_State *L, int i) {
 static inline int tk_aho_gc (lua_State *L) {
   tk_aho_t *a = tk_aho_peek(L, 1);
   if (!a->destroyed) {
-    free(a->goto_base);
+    if (!a->goto_svec)
+      free(a->goto_base);
     free(a->fail);
     free(a->output_id);
     free(a->output_pri);
@@ -43,7 +62,26 @@ static inline int tk_aho_gc (lua_State *L) {
   return 0;
 }
 
+static inline tk_aho_builder_t *tk_aho_builder_peek (lua_State *L, int i) {
+  return (tk_aho_builder_t *)luaL_checkudata(L, i, TK_AHO_BUILDER_MT);
+}
+
+static inline int tk_aho_builder_gc (lua_State *L) {
+  tk_aho_builder_t *b = tk_aho_builder_peek(L, 1);
+  if (!b->consumed) {
+    free(b->goto_base);
+    free(b->fail);
+    free(b->output_id);
+    free(b->output_pri);
+    free(b->output_len);
+    free(b->output_link);
+  }
+  b->consumed = true;
+  return 0;
+}
+
 static luaL_Reg tk_aho_mt_fns[];
+static luaL_Reg tk_aho_builder_mt_fns[];
 
 static void tk_aho_html_escape (luaL_Buffer *B, const char *s, size_t len) {
   for (size_t i = 0; i < len; i++) {
@@ -267,11 +305,10 @@ static void tk_aho_scan_free (tk_aho_scan_result_t *r) {
   free(r->text_offsets);
 }
 
-static int tk_aho_create_lua (lua_State *L)
+static void tk_aho_build_trie (lua_State *L)
 {
-  lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
-  bool do_normalize = tk_lua_foptboolean(L, 1, "aho.create", "normalize", false);
+  bool do_normalize = tk_lua_foptboolean(L, 1, "aho.prepare", "normalize", false);
 
   lua_getfield(L, 1, "ids");
   tk_ivec_t *ids = tk_ivec_peek(L, -1, "ids");
@@ -403,23 +440,24 @@ static int tk_aho_create_lua (lua_State *L)
 
   lua_pop(L, 1);
 
-  tk_aho_t *a = tk_lua_newuserdata(L, tk_aho_t,
-    TK_AHO_MT, tk_aho_mt_fns, tk_aho_gc);
-  int gi = lua_gettop(L);
-  a->goto_base = goto_base;
-  a->fail = fail;
-  a->output_id = output_id;
-  a->output_pri = output_pri;
-  a->output_len = output_len;
-  a->output_link = output_link;
-  a->n_states = n_states;
-  a->n_patterns = n_patterns;
   int64_t max_ol = 0;
   for (int64_t s = 0; s < n_states; s++)
     if (output_len[s] > max_ol) max_ol = output_len[s];
-  a->max_output_len = max_ol;
-  a->normalize = do_normalize;
-  a->destroyed = false;
+
+  tk_aho_builder_t *b = tk_lua_newuserdata(L, tk_aho_builder_t,
+    TK_AHO_BUILDER_MT, tk_aho_builder_mt_fns, tk_aho_builder_gc);
+  int bi = lua_gettop(L);
+  b->goto_base = goto_base;
+  b->fail = fail;
+  b->output_id = output_id;
+  b->output_pri = output_pri;
+  b->output_len = output_len;
+  b->output_link = output_link;
+  b->n_states = n_states;
+  b->n_patterns = n_patterns;
+  b->max_output_len = max_ol;
+  b->normalize = do_normalize;
+  b->consumed = false;
 
   lua_newtable(L);
   lua_getfield(L, 1, "names");
@@ -431,12 +469,94 @@ static int tk_aho_create_lua (lua_State *L)
       lua_rawgeti(L, ntab, (int)(i + 1));
       lua_settable(L, -3);
     }
+    lua_setfield(L, bi + 1, "names");
+  }
+  lua_pop(L, 1);
+  lua_setfenv(L, bi);
+}
+
+static int tk_aho_finalize (lua_State *L, int builder_idx, int svec_idx)
+{
+  tk_aho_builder_t *b = tk_aho_builder_peek(L, builder_idx);
+  if (b->consumed)
+    return luaL_error(L, "builder already consumed");
+
+  tk_svec_t *sv = svec_idx ? tk_svec_peek(L, svec_idx, "goto_buf") : NULL;
+  if (sv) {
+    uint64_t need = (uint64_t)b->n_states * 256;
+    if (sv->n < need)
+      return luaL_error(L, "build: svec too small (%d < %d)", (int)sv->n, (int)need);
+    memcpy(sv->a, b->goto_base, need * sizeof(int32_t));
+    free(b->goto_base);
+  }
+
+  tk_aho_t *a = tk_lua_newuserdata(L, tk_aho_t,
+    TK_AHO_MT, tk_aho_mt_fns, tk_aho_gc);
+  int gi = lua_gettop(L);
+  a->goto_base = sv ? sv->a : b->goto_base;
+  a->fail = b->fail;
+  a->output_id = b->output_id;
+  a->output_pri = b->output_pri;
+  a->output_len = b->output_len;
+  a->output_link = b->output_link;
+  a->n_states = b->n_states;
+  a->n_patterns = b->n_patterns;
+  a->max_output_len = b->max_output_len;
+  a->normalize = b->normalize;
+  a->goto_svec = sv;
+  a->destroyed = false;
+
+  lua_newtable(L);
+  if (svec_idx) {
+    lua_pushvalue(L, svec_idx);
+    lua_setfield(L, -2, "goto_buf");
+  }
+  lua_getfenv(L, builder_idx);
+  lua_getfield(L, -1, "names");
+  if (lua_type(L, -1) == LUA_TTABLE) {
     lua_setfield(L, gi + 1, "names");
+  } else {
+    lua_pop(L, 1);
   }
   lua_pop(L, 1);
   lua_setfenv(L, gi);
 
+  b->goto_base = NULL;
+  b->fail = NULL;
+  b->output_id = NULL;
+  b->output_pri = NULL;
+  b->output_len = NULL;
+  b->output_link = NULL;
+  b->consumed = true;
+
   return 1;
+}
+
+static int tk_aho_builder_n_states_lua (lua_State *L)
+{
+  tk_aho_builder_t *b = tk_aho_builder_peek(L, 1);
+  lua_pushinteger(L, (lua_Integer)b->n_states);
+  return 1;
+}
+
+static int tk_aho_builder_build_lua (lua_State *L)
+{
+  int svec_idx = (lua_gettop(L) >= 2 && !lua_isnil(L, 2)) ? 2 : 0;
+  return tk_aho_finalize(L, 1, svec_idx);
+}
+
+static int tk_aho_prepare_lua (lua_State *L)
+{
+  lua_settop(L, 1);
+  tk_aho_build_trie(L);
+  return 1;
+}
+
+static int tk_aho_create_lua (lua_State *L)
+{
+  lua_settop(L, 1);
+  tk_aho_build_trie(L);
+  return tk_aho_finalize(L, 2, 0);
 }
 
 static int tk_aho_predict_lua (lua_State *L)
@@ -698,13 +818,19 @@ static int tk_aho_persist_lua (lua_State *L) {
   else
     return tk_lua_verror(L, 2, "persist", "expecting filepath or true");
   tk_lua_fwrite(L, "TKac", 1, 4, fh);
-  uint8_t version = 3;
+  uint8_t version = 4;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &a->n_states, sizeof(int64_t), 1, fh);
   tk_lua_fwrite(L, &a->n_patterns, sizeof(int64_t), 1, fh);
   uint8_t norm_byte = a->normalize ? 1 : 0;
   tk_lua_fwrite(L, &norm_byte, sizeof(uint8_t), 1, fh);
-  tk_lua_fwrite(L, a->goto_base, sizeof(int32_t), (size_t)(a->n_states * 256), fh);
+  uint8_t goto_ext_byte = (a->goto_svec && a->goto_svec->lua_managed == 2) ? 1 : 0;
+  tk_lua_fwrite(L, &goto_ext_byte, sizeof(uint8_t), 1, fh);
+  if (goto_ext_byte) {
+    msync(a->goto_base, (size_t)(a->n_states * 256) * sizeof(int32_t), MS_SYNC);
+  } else {
+    tk_lua_fwrite(L, a->goto_base, sizeof(int32_t), (size_t)(a->n_states * 256), fh);
+  }
   tk_lua_fwrite(L, a->fail, sizeof(int32_t), (size_t)a->n_states, fh);
   tk_lua_fwrite(L, a->output_id, sizeof(int64_t), (size_t)a->n_states, fh);
   tk_lua_fwrite(L, a->output_pri, sizeof(int64_t), (size_t)a->n_states, fh);
@@ -759,6 +885,9 @@ static int tk_aho_load_lua (lua_State *L)
   size_t len;
   const char *data = tk_lua_checklstring(L, 1, &len, "data");
   bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && tk_lua_checkboolean(L, 2);
+  tk_svec_t *goto_buf = (lua_gettop(L) >= 3 && !lua_isnil(L, 3))
+    ? tk_svec_peek(L, 3, "goto_buf") : NULL;
+  int goto_buf_idx = goto_buf ? 3 : 0;
   FILE *fh = isstr
     ? tk_lua_fmemopen(L, (char *)data, len, "r")
     : tk_lua_fopen(L, data, "r");
@@ -770,7 +899,7 @@ static int tk_aho_load_lua (lua_State *L)
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 3) {
+  if (version != 3 && version != 4) {
     tk_lua_fclose(L, fh);
     return luaL_error(L, "unsupported aho version %d", (int)version);
   }
@@ -781,14 +910,44 @@ static int tk_aho_load_lua (lua_State *L)
   tk_lua_fread(L, &norm_byte, sizeof(uint8_t), 1, fh);
   bool do_normalize = norm_byte != 0;
 
-  int32_t *goto_base = (int32_t *)malloc((uint64_t)n_states * 256 * sizeof(int32_t));
+  bool goto_external = false;
+  if (version >= 4) {
+    uint8_t goto_ext_byte;
+    tk_lua_fread(L, &goto_ext_byte, sizeof(uint8_t), 1, fh);
+    goto_external = goto_ext_byte != 0;
+  }
+
+  int32_t *goto_base;
+  if (goto_external) {
+    if (!goto_buf) {
+      tk_lua_fclose(L, fh);
+      return luaL_error(L, "aho load: external goto_base requires svec arg 3");
+    }
+    uint64_t need = (uint64_t)n_states * 256;
+    if (goto_buf->n < need) {
+      tk_lua_fclose(L, fh);
+      return luaL_error(L, "aho load: svec too small (%d < %d)", (int)goto_buf->n, (int)need);
+    }
+    goto_base = goto_buf->a;
+  } else if (goto_buf) {
+    uint64_t need = (uint64_t)n_states * 256;
+    if (goto_buf->n < need) {
+      tk_lua_fclose(L, fh);
+      return luaL_error(L, "aho load: svec too small (%d < %d)", (int)goto_buf->n, (int)need);
+    }
+    tk_lua_fread(L, goto_buf->a, sizeof(int32_t), (size_t)(n_states * 256), fh);
+    goto_base = goto_buf->a;
+  } else {
+    goto_base = (int32_t *)malloc((uint64_t)n_states * 256 * sizeof(int32_t));
+    tk_lua_fread(L, goto_base, sizeof(int32_t), (size_t)(n_states * 256), fh);
+  }
+
   int32_t *fail = (int32_t *)malloc((uint64_t)n_states * sizeof(int32_t));
   int64_t *output_id = (int64_t *)malloc((uint64_t)n_states * sizeof(int64_t));
   int64_t *output_pri = (int64_t *)malloc((uint64_t)n_states * sizeof(int64_t));
   int64_t *output_len = (int64_t *)malloc((uint64_t)n_states * sizeof(int64_t));
   int32_t *output_link = (int32_t *)malloc((uint64_t)n_states * sizeof(int32_t));
 
-  tk_lua_fread(L, goto_base, sizeof(int32_t), (size_t)(n_states * 256), fh);
   tk_lua_fread(L, fail, sizeof(int32_t), (size_t)n_states, fh);
   tk_lua_fread(L, output_id, sizeof(int64_t), (size_t)n_states, fh);
   tk_lua_fread(L, output_pri, sizeof(int64_t), (size_t)n_states, fh);
@@ -829,9 +988,14 @@ static int tk_aho_load_lua (lua_State *L)
     if (output_len[s] > max_ol) max_ol = output_len[s];
   a->max_output_len = max_ol;
   a->normalize = do_normalize;
+  a->goto_svec = goto_buf;
   a->destroyed = false;
 
   lua_newtable(L);
+  if (goto_buf && goto_buf_idx) {
+    lua_pushvalue(L, goto_buf_idx);
+    lua_setfield(L, -2, "goto_buf");
+  }
   if (n_names > 0) {
     lua_newtable(L);
     for (int64_t i = 0; i < n_names; i++) {
@@ -857,8 +1021,15 @@ static luaL_Reg tk_aho_mt_fns[] = {
   { NULL, NULL }
 };
 
+static luaL_Reg tk_aho_builder_mt_fns[] = {
+  { "n_states", tk_aho_builder_n_states_lua },
+  { "build", tk_aho_builder_build_lua },
+  { NULL, NULL }
+};
+
 static luaL_Reg tk_aho_fns[] = {
   { "create", tk_aho_create_lua },
+  { "prepare", tk_aho_prepare_lua },
   { "load", tk_aho_load_lua },
   { NULL, NULL }
 };
