@@ -503,6 +503,82 @@ static int tm_csr_tokenize (lua_State *L)
   return result;
 }
 
+static int tm_csr_tokenize_annotated (lua_State *L)
+{
+  lua_settop(L, 1);
+  luaL_checktype(L, 1, LUA_TTABLE);
+  int64_t ngram_min = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize_annotated", "ngram_min");
+  int64_t ngram_max = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize_annotated", "ngram_max");
+  if (ngram_min < 1 || ngram_max > 8 || ngram_min > ngram_max)
+    return luaL_error(L, "tokenize_annotated: need 1 <= ngram_min <= ngram_max <= 8");
+  bool do_normalize = tk_lua_foptboolean(L, 1, "tokenize_annotated", "normalize", false);
+  bool terminals = tk_lua_foptboolean(L, 1, "tokenize_annotated", "terminals", false);
+  lua_getfield(L, 1, "doc_span_offsets");
+  tk_ivec_t *doc_span_offsets = tk_ivec_peek(L, -1, "doc_span_offsets");
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "span_starts");
+  tk_ivec_t *span_starts = tk_ivec_peek(L, -1, "span_starts");
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "span_ends");
+  tk_ivec_t *span_ends = tk_ivec_peek(L, -1, "span_ends");
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "texts");
+  luaL_checktype(L, -1, LUA_TTABLE);
+  int texts_idx = lua_gettop(L);
+  int64_t n_docs = (int64_t)(doc_span_offsets->n - 1);
+  int64_t total_spans = doc_span_offsets->a[n_docs];
+  size_t total_bytes = 0;
+  size_t *text_lens = (size_t *)malloc((uint64_t)n_docs * sizeof(size_t));
+  const char **text_ptrs = (const char **)malloc((uint64_t)n_docs * sizeof(const char *));
+  for (int64_t d = 0; d < n_docs; d++) {
+    lua_rawgeti(L, texts_idx, (int)(d + 1));
+    text_ptrs[d] = lua_tolstring(L, -1, &text_lens[d]);
+    lua_pop(L, 1);
+    int64_t ds = doc_span_offsets->a[d];
+    int64_t de = doc_span_offsets->a[d + 1];
+    size_t extra = terminals ? 4 : 2;
+    for (int64_t i = ds; i < de; i++)
+      total_bytes += text_lens[d] + extra;
+  }
+  char *pool = (char *)malloc(total_bytes ? total_bytes : 1);
+  const char **strs = (const char **)malloc((uint64_t)total_spans * sizeof(const char *));
+  size_t *lens = (size_t *)malloc((uint64_t)total_spans * sizeof(size_t));
+  size_t max_len = 0;
+  char *p = pool;
+  for (int64_t d = 0; d < n_docs; d++) {
+    int64_t ds = doc_span_offsets->a[d];
+    int64_t de = doc_span_offsets->a[d + 1];
+    const char *text = text_ptrs[d];
+    size_t tlen = text_lens[d];
+    for (int64_t i = ds; i < de; i++) {
+      size_t s = (size_t)span_starts->a[i];
+      size_t e = (size_t)span_ends->a[i];
+      size_t w = 0;
+      if (terminals) p[w++] = '\x03';
+      memcpy(p + w, text, s);
+      w += s;
+      p[w++] = '\x01';
+      memcpy(p + w, text + s, e - s);
+      w += e - s;
+      p[w++] = '\x02';
+      memcpy(p + w, text + e, tlen - e);
+      w += tlen - e;
+      if (terminals) p[w++] = '\x04';
+      strs[i] = p;
+      lens[i] = w;
+      if (w > max_len) max_len = w;
+      p += w;
+    }
+  }
+  free(text_ptrs);
+  free(text_lens);
+  int result = tm_csr_tokenize_core(L, strs, lens, max_len, total_spans, ngram_min, ngram_max, do_normalize);
+  free(pool);
+  free(strs);
+  free(lens);
+  return result;
+}
+
 static int tm_csr_truncate (lua_State *L)
 {
   tk_ivec_t *off = tk_ivec_peek(L, 1, "offsets");
@@ -918,6 +994,7 @@ static luaL_Reg tm_csr_fns[] = {
   { "truncate", tm_csr_truncate },
   { "transpose", tm_csr_transpose },
   { "tokenize", tm_csr_tokenize },
+  { "tokenize_annotated", tm_csr_tokenize_annotated },
   { "sqrt", tm_csr_sqrt },
   { "apply_bns", tm_csr_apply_bns },
   { "apply_auc", tm_csr_apply_auc },
