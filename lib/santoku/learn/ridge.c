@@ -334,13 +334,15 @@ static inline int tk_ridge_gram_lua (lua_State *L) {
   for (int64_t base = 0; base < nc; base += tile_size) {
     int64_t bs = (base + tile_size <= nc) ? tile_size : nc - base;
     uint64_t ubs = (uint64_t)bs;
-    for (uint64_t j = 0; j < um; j++) {
-      double *col = tile_buf + j * ubs;
-      float *src = codes_fv->a + (uint64_t)base * um + j;
+    {
+      float *tile_src = codes_fv->a + (uint64_t)base * um;
       for (uint64_t i = 0; i < ubs; i++) {
-        double v = (double)src[i * um];
-        col[i] = v;
-        col_mean[j] += v;
+        float *row = tile_src + i * um;
+        for (uint64_t j = 0; j < um; j++) {
+          double v = (double)row[j];
+          tile_buf[j * ubs + i] = v;
+          col_mean[j] += v;
+        }
       }
     }
     cblas_dsyrk(CblasColMajor, CblasUpper, CblasTrans,
