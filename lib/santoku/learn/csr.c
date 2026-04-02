@@ -1,9 +1,17 @@
 #include <santoku/learn/csr.h>
 #include <santoku/learn/normalize.h>
 #include <santoku/fvec.h>
+#include <santoku/svec.h>
+#include <santoku/cvec.h>
 #include <santoku/ivec/ext.h>
 #include <santoku/iumap/ext.h>
+#if defined(_OPENMP) && !defined(__EMSCRIPTEN__)
 #include <omp.h>
+#else
+#define omp_get_max_threads() 1
+#define omp_get_num_threads() 1
+#define omp_get_thread_num() 0
+#endif
 #include <assert.h>
 #include <math.h>
 
@@ -234,6 +242,47 @@ static inline size_t tm_csr_pack_ngrams (
   return count;
 }
 
+static inline uint64_t tm_csr_seq_elem (const void *data, size_t idx, int elem_bytes) {
+  switch (elem_bytes) {
+    case 1: return ((const uint8_t *)data)[idx];
+    case 4: return (uint64_t)(uint32_t)((const int32_t *)data)[idx];
+    case 8: return (uint64_t)((const int64_t *)data)[idx];
+  }
+  return 0;
+}
+
+static inline size_t tm_csr_pack_ngrams_w (
+  const void *data, size_t n_elems, int n, int elem_bits, int64_t *out)
+{
+  if (n_elems < (size_t)n) return 0;
+  size_t count = n_elems - (size_t)n + 1;
+  int eb = elem_bits / 8;
+  if (n * elem_bits <= 64) {
+    uint64_t mask = (n * elem_bits < 64) ? ((1ULL << (n * elem_bits)) - 1) : ~0ULL;
+    uint64_t id = 0;
+    for (int i = 0; i < n - 1; i++)
+      id = (id << elem_bits) | tm_csr_seq_elem(data, i, eb);
+    for (size_t i = 0; i < count; i++) {
+      id = ((id << elem_bits) | tm_csr_seq_elem(data, (size_t)(n - 1) + i, eb)) & mask;
+      out[i] = (int64_t)id;
+    }
+  } else {
+    const uint64_t P = 0x9E3779B97F4A7C15ULL;
+    uint64_t p_pow_n = 1;
+    for (int j = 0; j < n - 1; j++) p_pow_n *= P;
+    uint64_t h = 0;
+    for (int j = 0; j < n; j++)
+      h = h * P + tm_csr_seq_elem(data, j, eb);
+    out[0] = (int64_t)h;
+    for (size_t i = 1; i < count; i++) {
+      h = (h - tm_csr_seq_elem(data, i - 1, eb) * p_pow_n) * P
+          + tm_csr_seq_elem(data, i + (size_t)n - 1, eb);
+      out[i] = (int64_t)h;
+    }
+  }
+  return count;
+}
+
 static inline size_t tm_csr_pack_ngrams_normalize (
   const char *text, size_t len, int ng_min, int ng_max, int64_t *out)
 {
@@ -260,16 +309,35 @@ static inline size_t tm_csr_pack_ngrams_normalize (
   return total;
 }
 
+static inline size_t tm_csr_do_pack (
+  const char *str, size_t len, int64_t ngram_min, int64_t ngram_max,
+  bool normalize, int elem_bits, int64_t *out)
+{
+  if (elem_bits == 8) {
+    if (normalize)
+      return tm_csr_pack_ngrams_normalize(str, len, (int)ngram_min, (int)ngram_max, out);
+    size_t count = 0;
+    for (int64_t ng = ngram_min; ng <= ngram_max; ng++)
+      count += tm_csr_pack_ngrams(str, len, (int)ng, out + count);
+    return count;
+  }
+  size_t count = 0;
+  for (int64_t ng = ngram_min; ng <= ngram_max; ng++)
+    count += tm_csr_pack_ngrams_w(str, len, (int)ng, elem_bits, out + count);
+  return count;
+}
+
 static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
     size_t max_len, int64_t n_samples, int64_t ngram_min, int64_t ngram_max,
-    bool normalize)
+    bool normalize, int elem_bits)
 {
   size_t buf_size = (size_t)(ngram_max - ngram_min + 1) * max_len;
   lua_getfield(L, 1, "ngram_map");
-  bool have_map = !lua_isnil(L, -1);
-  tk_iumap_t *ngram_map;
+  bool raw_mode = lua_isboolean(L, -1) && !lua_toboolean(L, -1);
+  bool have_map = !lua_isnil(L, -1) && !raw_mode;
+  tk_iumap_t *ngram_map = NULL;
   int map_idx;
-  int64_t next_id;
+  int64_t next_id = 0;
   int64_t *sample_counts = (int64_t *)calloc((size_t)n_samples, sizeof(int64_t));
   if (have_map) {
     ngram_map = tk_iumap_peek(L, -1, "ngram_map");
@@ -282,14 +350,7 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
       #pragma omp for schedule(dynamic)
       for (int64_t s = 0; s < n_samples; s++) {
         if (!strs[s] || !lens[s]) continue;
-        size_t count;
-        if (normalize)
-          count = tm_csr_pack_ngrams_normalize(strs[s], lens[s], (int)ngram_min, (int)ngram_max, packed_buf);
-        else {
-          count = 0;
-          for (int64_t ng = ngram_min; ng <= ngram_max; ng++)
-            count += tm_csr_pack_ngrams(strs[s], lens[s], (int)ng, packed_buf + count);
-        }
+        size_t count = tm_csr_do_pack(strs[s], lens[s], ngram_min, ngram_max, normalize, elem_bits, packed_buf);
         int64_t nv = 0;
         for (size_t i = 0; i < count; i++) {
           uint32_t iter = tk_iumap_get(ngram_map, packed_buf[i]);
@@ -303,6 +364,25 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
       }
       free(packed_buf);
     }
+  } else if (raw_mode) {
+    lua_pop(L, 1);
+    #pragma omp parallel
+    {
+      int64_t *packed_buf = (int64_t *)malloc(buf_size * sizeof(int64_t));
+      #pragma omp for schedule(dynamic)
+      for (int64_t s = 0; s < n_samples; s++) {
+        if (!strs[s] || !lens[s]) continue;
+        size_t count = tm_csr_do_pack(strs[s], lens[s], ngram_min, ngram_max, normalize, elem_bits, packed_buf);
+        ks_introsort(tk_ivec_asc, count, packed_buf);
+        int64_t unique = 0;
+        for (size_t i = 0; i < count; i++)
+          if (i == 0 || packed_buf[i] != packed_buf[i - 1]) unique++;
+        sample_counts[s] = unique;
+      }
+      free(packed_buf);
+    }
+    lua_pushnil(L);
+    map_idx = lua_gettop(L);
   } else {
     lua_pop(L, 1);
     int max_threads = omp_get_max_threads();
@@ -316,14 +396,7 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
       #pragma omp for schedule(dynamic)
       for (int64_t s = 0; s < n_samples; s++) {
         if (!strs[s] || !lens[s]) continue;
-        size_t count;
-        if (normalize)
-          count = tm_csr_pack_ngrams_normalize(strs[s], lens[s], (int)ngram_min, (int)ngram_max, packed_buf);
-        else {
-          count = 0;
-          for (int64_t ng = ngram_min; ng <= ngram_max; ng++)
-            count += tm_csr_pack_ngrams(strs[s], lens[s], (int)ng, packed_buf + count);
-        }
+        size_t count = tm_csr_do_pack(strs[s], lens[s], ngram_min, ngram_max, normalize, elem_bits, packed_buf);
         for (size_t i = 0; i < count; i++) {
           int absent;
           tk_iumap_put(lm, packed_buf[i], &absent);
@@ -356,8 +429,8 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
     free(local_maps);
     map_idx = lua_gettop(L);
   }
-  uint64_t n_tokens = (uint64_t)next_id;
-  uint32_t map_end = tk_iumap_end(ngram_map);
+  uint64_t n_tokens = raw_mode ? 0 : (uint64_t)next_id;
+  uint32_t map_end = ngram_map ? tk_iumap_end(ngram_map) : 0;
   tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t)(n_samples + 1));
   offsets->n = (uint64_t)(n_samples + 1);
   offsets->a[0] = 0;
@@ -377,20 +450,19 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
     #pragma omp for schedule(dynamic)
     for (int64_t s = 0; s < n_samples; s++) {
       if (!strs[s] || !lens[s]) continue;
-      size_t count;
-      if (normalize)
-        count = tm_csr_pack_ngrams_normalize(strs[s], lens[s], (int)ngram_min, (int)ngram_max, packed_buf);
-      else {
-        count = 0;
-        for (int64_t ng = ngram_min; ng <= ngram_max; ng++)
-          count += tm_csr_pack_ngrams(strs[s], lens[s], (int)ng, packed_buf + count);
+      size_t count = tm_csr_do_pack(strs[s], lens[s], ngram_min, ngram_max, normalize, elem_bits, packed_buf);
+      int64_t nv;
+      if (raw_mode) {
+        ks_introsort(tk_ivec_asc, count, packed_buf);
+        nv = (int64_t)count;
+      } else {
+        nv = 0;
+        for (size_t i = 0; i < count; i++) {
+          uint32_t iter = tk_iumap_get(ngram_map, packed_buf[i]);
+          if (iter != map_end) packed_buf[nv++] = tk_iumap_val(ngram_map, iter);
+        }
+        ks_introsort(tk_ivec_asc, (size_t)nv, packed_buf);
       }
-      int64_t nv = 0;
-      for (size_t i = 0; i < count; i++) {
-        uint32_t iter = tk_iumap_get(ngram_map, packed_buf[i]);
-        if (iter != map_end) packed_buf[nv++] = tk_iumap_val(ngram_map, iter);
-      }
-      ks_introsort(tk_ivec_asc, (size_t)nv, packed_buf);
       int64_t pos = offsets->a[s];
       for (int64_t i = 0; i < nv; ) {
         int64_t tok = packed_buf[i];
@@ -429,6 +501,47 @@ static int tm_csr_tokenize (lua_State *L)
   bool do_normalize = tk_lua_foptboolean(L, 1, "tokenize", "normalize", false);
   bool terminals = tk_lua_foptboolean(L, 1, "tokenize", "terminals", false);
   int64_t n_samples = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "n_samples");
+
+  lua_getfield(L, 1, "sequences");
+  if (!lua_isnil(L, -1)) {
+    lua_getfield(L, 1, "sequence_offsets");
+    tk_ivec_t *seq_off = tk_ivec_peek(L, -1, "sequence_offsets");
+    lua_pop(L, 1);
+    int elem_bits;
+    const void *seq_data;
+    tk_ivec_t *seq_iv = tk_ivec_peekopt(L, -1);
+    if (seq_iv) {
+      seq_data = seq_iv->a;
+      elem_bits = 64;
+    } else {
+      tk_svec_t *seq_sv = tk_svec_peekopt(L, -1);
+      if (seq_sv) {
+        seq_data = seq_sv->a;
+        elem_bits = 32;
+      } else {
+        tk_cvec_t *seq_cv = tk_cvec_peek(L, -1, "sequences");
+        seq_data = seq_cv->a;
+        elem_bits = 8;
+      }
+    }
+    lua_pop(L, 1);
+    const char **strs = (const char **)malloc((uint64_t)n_samples * sizeof(const char *));
+    size_t *lens = (size_t *)malloc((uint64_t)n_samples * sizeof(size_t));
+    size_t max_len = 0;
+    int eb = elem_bits / 8;
+    for (int64_t s = 0; s < n_samples; s++) {
+      int64_t s0 = seq_off->a[s], s1 = seq_off->a[s + 1];
+      strs[s] = (const char *)seq_data + s0 * eb;
+      lens[s] = (size_t)(s1 - s0);
+      if (lens[s] > max_len) max_len = lens[s];
+    }
+    int result = tm_csr_tokenize_core(L, strs, lens, max_len, n_samples, ngram_min, ngram_max, do_normalize, elem_bits);
+    free(strs);
+    free(lens);
+    return result;
+  }
+  lua_pop(L, 1);
+
   lua_getfield(L, 1, "texts");
   const char **strs = (const char **)malloc((uint64_t)n_samples * sizeof(const char *));
   size_t *lens = (size_t *)malloc((uint64_t)n_samples * sizeof(size_t));
@@ -496,7 +609,7 @@ static int tm_csr_tokenize (lua_State *L)
     }
     max_len += 2;
   }
-  int result = tm_csr_tokenize_core(L, strs, lens, max_len, n_samples, ngram_min, ngram_max, do_normalize);
+  int result = tm_csr_tokenize_core(L, strs, lens, max_len, n_samples, ngram_min, ngram_max, do_normalize, 8);
   free(term_pool);
   free(strs);
   free(lens);
@@ -521,6 +634,9 @@ static int tm_csr_tokenize_annotated (lua_State *L)
   lua_pop(L, 1);
   lua_getfield(L, 1, "span_ends");
   tk_ivec_t *span_ends = tk_ivec_peek(L, -1, "span_ends");
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "span_types");
+  tk_ivec_t *span_types = tk_ivec_peekopt(L, -1);
   lua_pop(L, 1);
   lua_getfield(L, 1, "texts");
   luaL_checktype(L, -1, LUA_TTABLE);
@@ -553,14 +669,20 @@ static int tm_csr_tokenize_annotated (lua_State *L)
     for (int64_t i = ds; i < de; i++) {
       size_t s = (size_t)span_starts->a[i];
       size_t e = (size_t)span_ends->a[i];
+      char delim_open = '\x01', delim_close = '\x02';
+      if (span_types) {
+        int64_t t = span_types->a[i];
+        delim_open = (char)(0x05 + 2 * t);
+        delim_close = (char)(0x06 + 2 * t);
+      }
       size_t w = 0;
       if (terminals) p[w++] = '\x03';
       memcpy(p + w, text, s);
       w += s;
-      p[w++] = '\x01';
+      p[w++] = delim_open;
       memcpy(p + w, text + s, e - s);
       w += e - s;
-      p[w++] = '\x02';
+      p[w++] = delim_close;
       memcpy(p + w, text + e, tlen - e);
       w += tlen - e;
       if (terminals) p[w++] = '\x04';
@@ -572,7 +694,7 @@ static int tm_csr_tokenize_annotated (lua_State *L)
   }
   free(text_ptrs);
   free(text_lens);
-  int result = tm_csr_tokenize_core(L, strs, lens, max_len, total_spans, ngram_min, ngram_max, do_normalize);
+  int result = tm_csr_tokenize_core(L, strs, lens, max_len, total_spans, ngram_min, ngram_max, do_normalize, 8);
   free(pool);
   free(strs);
   free(lens);
