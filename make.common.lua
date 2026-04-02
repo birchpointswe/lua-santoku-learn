@@ -1,6 +1,6 @@
 local env = {
   name = "santoku-learn",
-  version = "0.0.45-1",
+  version = "0.0.46-1",
   variable_prefix = "TK_LEARN",
   license = "MIT",
   public = true,
@@ -10,23 +10,42 @@ local env = {
     "-Wpointer-sign", "-Wno-unused-parameter", "-Wno-unused-but-set-variable",
     "-I$(shell luarocks show santoku --rock-dir)/include/",
     "-I$(shell luarocks show santoku-matrix --rock-dir)/include/",
-    "-fopenmp", "$(MATHLIBS_CFLAGS)"
   },
   ldflags = {
-    "-lm", "-fopenmp", "$(MATHLIBS_LDFLAGS)"
+    "-lm",
+  },
+  native = {
+    cflags = {
+      "-fopenmp", "$(MATHLIBS_CFLAGS)",
+    },
+    ldflags = {
+      "-fopenmp", "$(MATHLIBS_LDFLAGS)",
+    },
+  },
+  build = {
+    wasm = {
+      ldflags = {
+        "-sWASM_BIGINT",
+      },
+    },
+  },
+  test = {
+    wasm = {
+      ldflags = {
+        "-sWASM_BIGINT",
+      },
+    },
+    dependencies = {
+      "santoku-system >= 0.0.62-1",
+    },
   },
   dependencies = {
     "lua == 5.1",
-    "santoku >= 0.0.322-1",
-    "santoku-matrix >= 0.0.304-1",
+    "santoku >= 0.0.324-1",
+    "santoku-matrix >= 0.0.305-1",
     "santoku-fs >= 0.0.43-1",
     "lpeg >= 1.1.0-2",
     "lua-cjson >= 2.1.0.10-1",
-  },
-  test = {
-    dependencies = {
-      "santoku-system >= 0.0.62-1",
-    }
   },
 }
 

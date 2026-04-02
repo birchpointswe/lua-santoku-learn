@@ -496,8 +496,8 @@ static int tm_csr_tokenize (lua_State *L)
     ngram_min = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "ngram_min");
     ngram_max = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "ngram_max");
   }
-  if (ngram_min < 1 || ngram_max > 8 || ngram_min > ngram_max)
-    return luaL_error(L, "tokenize: need 1 <= ngram_min <= ngram_max <= 8");
+  if (ngram_min < 1 || ngram_min > ngram_max)
+    return luaL_error(L, "tokenize: need 1 <= ngram_min <= ngram_max");
   bool do_normalize = tk_lua_foptboolean(L, 1, "tokenize", "normalize", false);
   bool terminals = tk_lua_foptboolean(L, 1, "tokenize", "terminals", false);
   int64_t n_samples = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "n_samples");
@@ -525,6 +525,8 @@ static int tm_csr_tokenize (lua_State *L)
       }
     }
     lua_pop(L, 1);
+    if (elem_bits == 8 && ngram_max > 8)
+      return luaL_error(L, "tokenize: ngram_max <= 8 for byte sequences");
     const char **strs = (const char **)malloc((uint64_t)n_samples * sizeof(const char *));
     size_t *lens = (size_t *)malloc((uint64_t)n_samples * sizeof(size_t));
     size_t max_len = 0;
@@ -542,6 +544,8 @@ static int tm_csr_tokenize (lua_State *L)
   }
   lua_pop(L, 1);
 
+  if (ngram_max > 8)
+    return luaL_error(L, "tokenize: ngram_max <= 8 for text");
   lua_getfield(L, 1, "texts");
   const char **strs = (const char **)malloc((uint64_t)n_samples * sizeof(const char *));
   size_t *lens = (size_t *)malloc((uint64_t)n_samples * sizeof(size_t));
