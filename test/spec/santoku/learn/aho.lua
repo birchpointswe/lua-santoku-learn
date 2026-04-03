@@ -1,7 +1,9 @@
+require("santoku.error")
 local aho = require("santoku.learn.aho")
 local ivec = require("santoku.ivec")
 local pvec = require("santoku.pvec")
 local test = require("santoku.test")
+
 
 test("aho", function ()
 
@@ -122,20 +124,6 @@ test("aho", function ()
     assert(offsets:get(1) == 0)
   end)
 
-  test("persist and load string", function ()
-    local ids = ivec.create({ 5, 10 })
-    local ac = aho.create({ ids = ids, patterns = { "alpha", "beta" } })
-    local s = ac:persist(true)
-    local ac2 = aho.load(s, true)
-    local _, mids, starts, ends = ac2:predict({ texts = { "alpha and beta" } })
-    assert(mids:size() == 2)
-    assert(mids:get(0) == 5)
-    assert(starts:get(0) == 0)
-    assert(ends:get(0) == 5)
-    assert(mids:get(1) == 10)
-    assert(starts:get(1) == 10)
-    assert(ends:get(1) == 14)
-  end)
 
   test("latin extended-a", function ()
     local ids = ivec.create({ 1 })
@@ -280,18 +268,6 @@ test("aho", function ()
     assert(result[1] == "<span title='it&#39;s'>it</span> works")
   end)
 
-  test("tag persist load with names", function ()
-    local ids = ivec.create({ 5, 10 })
-    local ac = aho.create({
-      ids = ids,
-      patterns = { "alpha", "beta" },
-      names = { "Alpha Entity", "Beta Entity" }
-    })
-    local s = ac:persist(true)
-    local ac2 = aho.load(s, true)
-    local result = ac2:tag({ texts = { "alpha and beta" }, fmt = "%name(%id)" })
-    assert(result[1] == "Alpha Entity(5) and Beta Entity(10)")
-  end)
 
   test("predict with exclude", function ()
     local ids = ivec.create({ 1, 2, 3 })

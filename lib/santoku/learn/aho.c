@@ -3,8 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <omp.h>
-#include <sys/mman.h>
+#include <santoku/learn/mathlibs.h>
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
 #include <santoku/svec.h>
@@ -808,15 +807,7 @@ static int tk_aho_tag_lua (lua_State *L)
 
 static int tk_aho_persist_lua (lua_State *L) {
   tk_aho_t *a = tk_aho_peek(L, 1);
-  FILE *fh;
-  int t = lua_type(L, 2);
-  bool tostr = t == LUA_TBOOLEAN && lua_toboolean(L, 2);
-  if (t == LUA_TSTRING)
-    fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
-  else if (tostr)
-    fh = tk_lua_tmpfile(L);
-  else
-    return tk_lua_verror(L, 2, "persist", "expecting filepath or true");
+  FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
   tk_lua_fwrite(L, "TKac", 1, 4, fh);
   uint8_t version = 4;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
@@ -827,7 +818,9 @@ static int tk_aho_persist_lua (lua_State *L) {
   uint8_t goto_ext_byte = (a->goto_svec && a->goto_svec->lua_managed == 2) ? 1 : 0;
   tk_lua_fwrite(L, &goto_ext_byte, sizeof(uint8_t), 1, fh);
   if (goto_ext_byte) {
+#if !defined(__EMSCRIPTEN__)
     msync(a->goto_base, (size_t)(a->n_states * 256) * sizeof(int32_t), MS_SYNC);
+#endif
   } else {
     tk_lua_fwrite(L, a->goto_base, sizeof(int32_t), (size_t)(a->n_states * 256), fh);
   }
@@ -862,35 +855,17 @@ static int tk_aho_persist_lua (lua_State *L) {
   }
   lua_pop(L, 2);
 
-  if (!tostr) {
-    tk_lua_fclose(L, fh);
-    return 0;
-  } else {
-    size_t len;
-    char *data = tk_lua_fslurp(L, fh, &len);
-    if (data) {
-      lua_pushlstring(L, data, len);
-      free(data);
-      tk_lua_fclose(L, fh);
-      return 1;
-    } else {
-      tk_lua_fclose(L, fh);
-      return 0;
-    }
-  }
+  tk_lua_fclose(L, fh);
+  return 0;
 }
 
 static int tk_aho_load_lua (lua_State *L)
 {
-  size_t len;
-  const char *data = tk_lua_checklstring(L, 1, &len, "data");
-  bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && tk_lua_checkboolean(L, 2);
-  tk_svec_t *goto_buf = (lua_gettop(L) >= 3 && !lua_isnil(L, 3))
-    ? tk_svec_peek(L, 3, "goto_buf") : NULL;
-  int goto_buf_idx = goto_buf ? 3 : 0;
-  FILE *fh = isstr
-    ? tk_lua_fmemopen(L, (char *)data, len, "r")
-    : tk_lua_fopen(L, data, "r");
+  const char *data = luaL_checkstring(L, 1);
+  tk_svec_t *goto_buf = (lua_gettop(L) >= 2 && !lua_isnil(L, 2))
+    ? tk_svec_peek(L, 2, "goto_buf") : NULL;
+  int goto_buf_idx = goto_buf ? 2 : 0;
+  FILE *fh = tk_lua_fopen(L, data, "r");
   char magic[4];
   tk_lua_fread(L, magic, 1, 4, fh);
   if (memcmp(magic, "TKac", 4) != 0) {
