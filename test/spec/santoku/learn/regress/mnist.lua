@@ -48,7 +48,7 @@ test("mnist classifier", function ()
     dataset.problem_offsets, dataset.problem_neighbors, validate.ids)
 
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
-  local sp_enc, ridge_obj, val_codes, best_params = optimize.krr({
+  local sp_enc, ridge_obj, val_codes = optimize.krr({
     kernel = cfg.emb.kernel, offsets = train_p_off, tokens = train_p_nbr,
     n_samples = train.n, n_tokens = n_features,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
