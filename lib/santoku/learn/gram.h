@@ -6,9 +6,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
-#include <cblas.h>
-#include <lapacke.h>
-#include <omp.h>
+#include <santoku/learn/mathlibs.h>
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
 #include <santoku/dvec.h>

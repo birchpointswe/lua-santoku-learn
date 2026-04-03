@@ -8,8 +8,7 @@
 #include <santoku/pvec.h>
 #include <santoku/rvec.h>
 #include <santoku/cvec/ext.h>
-#include <cblas.h>
-#include <omp.h>
+#include <santoku/learn/mathlibs.h>
 
 #define TK_ANN_SUBSTR_BITS 16
 #define TK_ANN_BUCKETS (1 << TK_ANN_SUBSTR_BITS)

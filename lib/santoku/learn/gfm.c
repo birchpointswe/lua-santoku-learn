@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <omp.h>
+#include <santoku/learn/mathlibs.h>
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
 #include <santoku/dvec.h>
@@ -222,46 +222,20 @@ static int tk_gfm_set_threshold_lua (lua_State *L) {
 
 static int tk_gfm_persist_lua (lua_State *L) {
   tk_gfm_t *g = tk_gfm_peek(L, 1);
-  FILE *fh;
-  int t = lua_type(L, 2);
-  bool tostr = t == LUA_TBOOLEAN && lua_toboolean(L, 2);
-  if (t == LUA_TSTRING)
-    fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
-  else if (tostr)
-    fh = tk_lua_tmpfile(L);
-  else
-    return tk_lua_verror(L, 2, "persist", "expecting filepath or true");
+  FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
   tk_lua_fwrite(L, "TKgf", 1, 4, fh);
   uint8_t version = 13;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &g->nl, sizeof(int64_t), 1, fh);
   tk_lua_fwrite(L, g->thresholds, sizeof(double), (size_t)g->nl, fh);
-  if (!tostr) {
-    tk_lua_fclose(L, fh);
-    return 0;
-  } else {
-    size_t len;
-    char *data = tk_lua_fslurp(L, fh, &len);
-    if (data) {
-      lua_pushlstring(L, data, len);
-      free(data);
-      tk_lua_fclose(L, fh);
-      return 1;
-    } else {
-      tk_lua_fclose(L, fh);
-      return 0;
-    }
-  }
+  tk_lua_fclose(L, fh);
+  return 0;
 }
 
 static int tk_gfm_load_lua (lua_State *L)
 {
-  size_t len;
-  const char *data = tk_lua_checklstring(L, 1, &len, "data");
-  bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && tk_lua_checkboolean(L, 2);
-  FILE *fh = isstr
-    ? tk_lua_fmemopen(L, (char *)data, len, "r")
-    : tk_lua_fopen(L, data, "r");
+  const char *data = luaL_checkstring(L, 1);
+  FILE *fh = tk_lua_fopen(L, data, "r");
   char magic[4];
   tk_lua_fread(L, magic, 1, 4, fh);
   if (memcmp(magic, "TKgf", 4) != 0) {

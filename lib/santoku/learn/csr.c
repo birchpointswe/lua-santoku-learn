@@ -5,13 +5,7 @@
 #include <santoku/cvec.h>
 #include <santoku/ivec/ext.h>
 #include <santoku/iumap/ext.h>
-#if defined(_OPENMP) && !defined(__EMSCRIPTEN__)
-#include <omp.h>
-#else
-#define omp_get_max_threads() 1
-#define omp_get_num_threads() 1
-#define omp_get_thread_num() 0
-#endif
+#include <santoku/learn/mathlibs.h>
 #include <assert.h>
 #include <math.h>
 
@@ -261,7 +255,7 @@ static inline size_t tm_csr_pack_ngrams_w (
     uint64_t mask = (n * elem_bits < 64) ? ((1ULL << (n * elem_bits)) - 1) : ~0ULL;
     uint64_t id = 0;
     for (int i = 0; i < n - 1; i++)
-      id = (id << elem_bits) | tm_csr_seq_elem(data, i, eb);
+      id = (id << elem_bits) | tm_csr_seq_elem(data, (size_t)i, eb);
     for (size_t i = 0; i < count; i++) {
       id = ((id << elem_bits) | tm_csr_seq_elem(data, (size_t)(n - 1) + i, eb)) & mask;
       out[i] = (int64_t)id;
@@ -272,7 +266,7 @@ static inline size_t tm_csr_pack_ngrams_w (
     for (int j = 0; j < n - 1; j++) p_pow_n *= P;
     uint64_t h = 0;
     for (int j = 0; j < n; j++)
-      h = h * P + tm_csr_seq_elem(data, j, eb);
+      h = h * P + tm_csr_seq_elem(data, (size_t)j, eb);
     out[0] = (int64_t)h;
     for (size_t i = 1; i < count; i++) {
       h = (h - tm_csr_seq_elem(data, i - 1, eb) * p_pow_n) * P

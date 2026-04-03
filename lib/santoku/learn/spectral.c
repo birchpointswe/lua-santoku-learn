@@ -11,9 +11,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <lapacke.h>
-#include <cblas.h>
-#include <omp.h>
+#include <santoku/learn/mathlibs.h>
 
 typedef enum {
   TK_SPECTRAL_COSINE = 0,
@@ -840,15 +838,7 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
     return luaL_error(L, "cannot persist a destroyed encoder");
   if (!enc->projection)
     return luaL_error(L, "cannot persist: projection released");
-  FILE *fh;
-  int t = lua_type(L, 2);
-  bool tostr = t == LUA_TBOOLEAN && lua_toboolean(L, 2);
-  if (t == LUA_TSTRING)
-    fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
-  else if (tostr)
-    fh = tk_lua_tmpfile(L);
-  else
-    return tk_lua_verror(L, 2, "persist", "expecting either a filepath or true (for string serialization)");
+  FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
   tk_lua_fwrite(L, "TKny", 1, 4, fh);
   uint8_t version = 21;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
@@ -880,22 +870,8 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
   tk_ivec_t *lm_ids = tk_ivec_peek(L, -1, "landmark_ids");
   tk_ivec_persist(L, lm_ids, fh);
   lua_pop(L, 2);
-  if (!tostr) {
-    tk_lua_fclose(L, fh);
-    return 0;
-  } else {
-    size_t len;
-    char *data = tk_lua_fslurp(L, fh, &len);
-    if (data) {
-      lua_pushlstring(L, data, len);
-      free(data);
-      tk_lua_fclose(L, fh);
-      return 1;
-    } else {
-      tk_lua_fclose(L, fh);
-      return 0;
-    }
-  }
+  tk_lua_fclose(L, fh);
+  return 0;
 }
 
 static inline int tk_nystrom_shrink_lua (lua_State *L) {
@@ -1691,13 +1667,9 @@ static inline void tk_nystrom_build_csc (tk_nystrom_encoder_t *enc) {
 }
 
 static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
-  lua_settop(L, 2);
-  size_t len;
-  const char *data = luaL_checklstring(L, 1, &len);
-  bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && lua_toboolean(L, 2);
-  FILE *fh = isstr
-    ? tk_lua_fmemopen(L, (char *)data, len, "r")
-    : tk_lua_fopen(L, data, "r");
+  lua_settop(L, 1);
+  const char *data = luaL_checkstring(L, 1);
+  FILE *fh = tk_lua_fopen(L, data, "r");
   char magic[4];
   tk_lua_fread(L, magic, 1, 4, fh);
   if (memcmp(magic, "TKny", 4) != 0) {
