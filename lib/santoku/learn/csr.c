@@ -9,9 +9,22 @@
 #include <assert.h>
 #include <math.h>
 
+static inline const int32_t *tk_peek_tokens (lua_State *L, int idx, uint64_t *out_n) {
+  tk_svec_t *sv = tk_svec_peekopt(L, idx);
+  if (sv) { *out_n = sv->n; return sv->a; }
+  tk_ivec_t *iv = tk_ivec_peekopt(L, idx);
+  if (!iv) { *out_n = 0; return NULL; }
+  tk_svec_t *conv = tk_svec_create(L, iv->n);
+  conv->n = iv->n;
+  for (uint64_t i = 0; i < iv->n; i++) conv->a[i] = (int32_t)iv->a[i];
+  lua_replace(L, idx);
+  *out_n = conv->n;
+  return conv->a;
+}
+
 static int tm_csr_seq_select (lua_State *L)
 {
-  tk_ivec_t *tokens = tk_ivec_peek(L, 1, "tokens");
+  tk_svec_t *tokens = tk_svec_peek(L, 1, "tokens");
   tk_ivec_t *offsets = tk_ivec_peek(L, 2, "offsets");
   tk_ivec_t *keep_ids = tk_ivec_peek(L, 3, "keep_ids");
   tk_fvec_t *values_f = tk_fvec_peekopt(L, 4);
@@ -20,7 +33,7 @@ static int tm_csr_seq_select (lua_State *L)
   tk_iumap_t *inverse = tk_iumap_from_ivec(L, keep_ids);
   if (!inverse) return luaL_error(L, "seq_select: allocation failed");
   uint64_t n_docs = offsets->n - 1;
-  tk_ivec_t *new_tok = tk_ivec_create(L, tokens->n);
+  tk_svec_t *new_tok = tk_svec_create(L, tokens->n);
   tk_ivec_t *new_off = tk_ivec_create(L, n_docs + 1);
   new_off->n = n_docs + 1;
   tk_fvec_t *new_val_f = (has_values && values_f) ? tk_fvec_create(L, tokens->n) : NULL;
@@ -31,9 +44,9 @@ static int tm_csr_seq_select (lua_State *L)
     int64_t start = offsets->a[d];
     int64_t end = offsets->a[d + 1];
     for (int64_t j = start; j < end; j++) {
-      int64_t new_id = tk_iumap_get_or(inverse, tokens->a[j], -1);
+      int64_t new_id = tk_iumap_get_or(inverse, (int64_t)tokens->a[j], -1);
       if (new_id < 0) continue;
-      new_tok->a[pos] = new_id;
+      new_tok->a[pos] = (int32_t)new_id;
       if (new_val_f)
         new_val_f->a[pos] = values_f->a[j];
       else if (new_val_d)
@@ -132,7 +145,7 @@ static int tm_csr_label_union (lua_State *L)
 static int tm_csr_transpose (lua_State *L)
 {
   tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
-  tk_ivec_t *tokens = tk_ivec_peek(L, 2, "tokens");
+  tk_svec_t *tokens = tk_svec_peek(L, 2, "tokens");
   uint64_t n_samples = tk_lua_checkunsigned(L, 3, "n_samples");
   uint64_t n_tokens = tk_lua_checkunsigned(L, 4, "n_tokens");
   tk_fvec_t *values_f = tk_fvec_peekopt(L, 5);
@@ -157,7 +170,7 @@ static int tm_csr_transpose (lua_State *L)
   if (csc_vals_d) csc_vals_d->n = nnz;
   for (uint64_t s = 0; s < n_samples; s++) {
     for (int64_t j = offsets->a[s]; j < offsets->a[s + 1]; j++) {
-      int64_t tok = tokens->a[j];
+      int32_t tok = tokens->a[j];
       int64_t pos = counts[tok]++;
       csc_rows->a[pos] = (int64_t)s;
       if (csc_vals_f) csc_vals_f->a[pos] = values_f->a[j];
@@ -822,12 +835,6 @@ static inline void tm_csr_gather_mul (
     values->a[j] *= scores->a[tokens->a[j]];
 }
 
-static inline void tm_csr_gather_mul_iv (
-  tk_fvec_t *values, tk_ivec_t *tokens, tk_fvec_t *scores)
-{
-  for (uint64_t j = 0; j < values->n; j++)
-    values->a[j] *= scores->a[tokens->a[j]];
-}
 
 static int tm_csr_apply_bns (lua_State *L)
 {
@@ -923,11 +930,11 @@ static int tm_csr_apply_bns (lua_State *L)
 static int tm_csr_apply_auc (lua_State *L)
 {
   tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
-  tk_ivec_t *tokens = tk_ivec_peek(L, 2, "tokens");
+  tk_svec_t *tokens = tk_svec_peek(L, 2, "tokens");
   tk_fvec_t *values = tk_fvec_peek(L, 3, "values");
   tk_fvec_t *scores = tk_fvec_peekopt(L, 4);
   if (scores) {
-    tm_csr_gather_mul_iv(values, tokens, scores);
+    tm_csr_gather_mul(values, tokens, scores);
     lua_pushvalue(L, 4);
     return 1;
   }
@@ -983,7 +990,7 @@ static int tm_csr_apply_auc (lua_State *L)
     }
   }
   free(pairs); free(ranks); free(rank_sums); free(doc_freq);
-  tm_csr_gather_mul_iv(values, tokens, scores);
+  tm_csr_gather_mul(values, tokens, scores);
   return 1;
 }
 
@@ -1051,16 +1058,20 @@ static int tm_csr_gather_rows (lua_State *L)
 static int tm_csr_merge (lua_State *L)
 {
   tk_ivec_t *off1 = tk_ivec_peek(L, 1, "off1");
-  tk_ivec_t *nbr1 = tk_ivec_peek(L, 2, "nbr1");
+  uint64_t nbr1_n;
+  const int32_t *nbr1_a = tk_peek_tokens(L, 2, &nbr1_n);
+  if (!nbr1_a) return luaL_error(L, "nbr1: expected svec or ivec");
   tk_fvec_t *val1_f = tk_fvec_peekopt(L, 3);
   tk_dvec_t *val1_d = val1_f ? NULL : tk_dvec_peekopt(L, 3);
   tk_ivec_t *off2 = tk_ivec_peek(L, 4, "off2");
-  tk_ivec_t *nbr2 = tk_ivec_peek(L, 5, "nbr2");
+  uint64_t nbr2_n;
+  const int32_t *nbr2_a = tk_peek_tokens(L, 5, &nbr2_n);
+  if (!nbr2_a) return luaL_error(L, "nbr2: expected svec or ivec");
   tk_fvec_t *val2_f = tk_fvec_peekopt(L, 6);
   tk_dvec_t *val2_d = val2_f ? NULL : tk_dvec_peekopt(L, 6);
   int64_t shift = (int64_t)tk_lua_checkunsigned(L, 7, "token_shift");
   uint64_t n = off1->n - 1;
-  uint64_t total = nbr1->n + nbr2->n;
+  uint64_t total = nbr1_n + nbr2_n;
   tk_ivec_t *out_off = tk_ivec_create(L, n + 1);
   tk_svec_t *out_nbr = tk_svec_create(L, total);
   out_nbr->n = total;
@@ -1071,13 +1082,13 @@ static int tm_csr_merge (lua_State *L)
   for (uint64_t i = 0; i < n; i++) {
     int64_t s1 = off1->a[i], e1 = off1->a[i + 1];
     for (int64_t j = s1; j < e1; j++) {
-      out_nbr->a[pos] = (int32_t)nbr1->a[j];
+      out_nbr->a[pos] = nbr1_a[j];
       out_val->a[pos] = val1_f ? val1_f->a[j] : val1_d ? (float)val1_d->a[j] : 1.0f;
       pos++;
     }
     int64_t s2 = off2->a[i], e2 = off2->a[i + 1];
     for (int64_t j = s2; j < e2; j++) {
-      out_nbr->a[pos] = (int32_t)(nbr2->a[j] + shift);
+      out_nbr->a[pos] = (int32_t)((int64_t)nbr2_a[j] + shift);
       out_val->a[pos] = val2_f ? val2_f->a[j] : val2_d ? (float)val2_d->a[j] : 1.0f;
       pos++;
     }
