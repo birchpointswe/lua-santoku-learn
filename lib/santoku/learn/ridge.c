@@ -544,17 +544,17 @@ static inline int tk_ridge_load_lua (lua_State *L) {
   tk_lua_fread(L, &n_labels, sizeof(int64_t), 1, fh);
   tk_fvec_t *W = NULL;
   int W_idx = 0;
-  bool have_arg_w = lua_gettop(L) >= 3 && !lua_isnil(L, 3);
+  bool have_arg_w = lua_gettop(L) >= 2 && !lua_isnil(L, 2);
   if (version == 4) {
     uint8_t w_external;
     tk_lua_fread(L, &w_external, sizeof(uint8_t), 1, fh);
     if (w_external) {
       if (!have_arg_w) {
         tk_lua_fclose(L, fh);
-        return luaL_error(L, "ridge load: external W requires fvec arg 3");
+        return luaL_error(L, "ridge load: external W requires fvec arg 2");
       }
-      W = tk_fvec_peek(L, 3, "W");
-      W_idx = 3;
+      W = tk_fvec_peek(L, 2, "W");
+      W_idx = 2;
     } else {
       W = tk_fvec_load(L, fh);
       W_idx = lua_gettop(L);
@@ -563,9 +563,9 @@ static inline int tk_ridge_load_lua (lua_State *L) {
     W = tk_fvec_load(L, fh);
     W_idx = lua_gettop(L);
   }
-  if (have_arg_w && W_idx != 3) {
-    W = tk_fvec_peek(L, 3, "W");
-    W_idx = 3;
+  if (have_arg_w && W_idx != 2) {
+    W = tk_fvec_peek(L, 2, "W");
+    W_idx = 2;
   }
   tk_dvec_t *intercept = NULL;
   int b_idx = 0;
