@@ -3,6 +3,7 @@
 #include <santoku/dvec.h>
 #include <santoku/fvec.h>
 #include <santoku/ivec.h>
+#include <santoku/svec.h>
 #include <santoku/cvec.h>
 #include <santoku/learn/buf.h>
 #include <santoku/learn/gram.h>
@@ -12,6 +13,19 @@
 #include <stdbool.h>
 #include <string.h>
 #include <santoku/learn/mathlibs.h>
+
+static inline const int32_t *tk_peek_tokens (lua_State *L, int idx, uint64_t *out_n) {
+  tk_svec_t *sv = tk_svec_peekopt(L, idx);
+  if (sv) { *out_n = sv->n; return sv->a; }
+  tk_ivec_t *iv = tk_ivec_peekopt(L, idx);
+  if (!iv) { *out_n = 0; return NULL; }
+  tk_svec_t *conv = tk_svec_create(L, iv->n);
+  conv->n = iv->n;
+  for (uint64_t i = 0; i < iv->n; i++) conv->a[i] = (int32_t)iv->a[i];
+  lua_replace(L, idx);
+  *out_n = conv->n;
+  return conv->a;
+}
 
 typedef enum {
   TK_SPECTRAL_COSINE = 0,
@@ -52,7 +66,7 @@ static inline double tk_spectral_kernel_apply (tk_spectral_kernel_t k, double ra
 typedef struct {
   uint8_t type;
   const int64_t *csr_offsets;
-  const int64_t *csr_tokens;
+  const int32_t *csr_tokens;
   const float *csr_values;
   const double *csr_norms;
   uint64_t csr_n_tokens;
@@ -295,7 +309,7 @@ static inline void tk_spectral_sample_landmarks (
 
     if (mod->type == TK_MOD_CSR) {
       const int64_t *csr_offsets = mod->csr_offsets;
-      const int64_t *csr_tokens = mod->csr_tokens;
+      const int32_t *csr_tokens = mod->csr_tokens;
       const float *csr_values = mod->csr_values;
       const double *csr_norms = mod->csr_norms;
       uint64_t csr_n_tokens = mod->csr_n_tokens;
@@ -308,7 +322,7 @@ static inline void tk_spectral_sample_landmarks (
         for (uint64_t b = 0; b < np; b++) {
           int64_t p = plo_arr[b];
           while (p < phi_arr[b]) {
-            int64_t tok = csr_tokens[p];
+            int32_t tok = csr_tokens[p];
             piv_csc_off[tok + 1]++;
             while (p < phi_arr[b] && csr_tokens[p] == tok) p++;
           }
@@ -325,7 +339,7 @@ static inline void tk_spectral_sample_landmarks (
         for (uint64_t b = 0; b < np; b++) {
           int64_t p = plo_arr[b];
           while (p < phi_arr[b]) {
-            int64_t tok = csr_tokens[p];
+            int32_t tok = csr_tokens[p];
             float sum = 0.0f;
             while (p < phi_arr[b] && csr_tokens[p] == tok) { sum += csr_values[p]; p++; }
             int64_t pos = piv_csc_pos[tok]++;
@@ -337,7 +351,7 @@ static inline void tk_spectral_sample_landmarks (
         const uint8_t *restrict pc_piv = piv_csc_piv;
         const float *restrict pc_val = piv_csc_val;
         const int64_t *restrict c_off = csr_offsets;
-        const int64_t *restrict c_tok = csr_tokens;
+        const int32_t *restrict c_tok = csr_tokens;
         const float *restrict c_val = csr_values;
         #pragma omp parallel for schedule(static)
         for (uint64_t i = 0; i < n_docs; i++) {
@@ -345,7 +359,7 @@ static inline void tk_spectral_sample_landmarks (
           memset(kip_row, 0, np * sizeof(double));
           int64_t jlo = c_off[i], jhi = c_off[i + 1];
           for (int64_t j = jlo; j < jhi; j++) {
-            int64_t tok = c_tok[j];
+            int32_t tok = c_tok[j];
             double val = (double)c_val[j];
             int64_t clo = pc_off[tok], chi = pc_off[tok + 1];
             for (int64_t c = clo; c < chi; c++)
@@ -535,7 +549,7 @@ typedef struct {
   tk_spectral_kernel_t kernel;
   uint8_t mod_type;
   int64_t *csr_offsets;
-  int64_t *csr_tokens;
+  int32_t *csr_tokens;
   float *csr_values;
   float *csr_norms;
   int64_t *csc_offsets;
@@ -604,8 +618,9 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
   tk_ivec_t *in_offsets = tk_ivec_peekopt(L, -1);
   lua_pop(L, 1);
   lua_getfield(L, 2, "tokens");
-  tk_ivec_t *in_tokens = tk_ivec_peekopt(L, -1);
-  lua_pop(L, 1);
+  uint64_t in_tok_n;
+  const int32_t *in_tok_a = tk_peek_tokens(L, -1, &in_tok_n);
+  lua_setfield(L, 2, "tokens");
   lua_getfield(L, 2, "values");
   tk_fvec_t *in_values_f = tk_fvec_peekopt(L, -1);
   tk_dvec_t *in_values_d = in_values_f ? NULL : tk_dvec_peekopt(L, -1);
@@ -653,7 +668,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
   float *csr_norms = NULL;
   if (enc->mod_type == TK_MOD_CSR) {
     if (!in_offsets) return luaL_error(L, "encode: CSR modality but no offsets");
-    uint64_t nnz = in_tokens->n;
+    uint64_t nnz = in_tok_n;
     if (!in_values_f) {
       csr_sval = (float *)malloc(nnz * sizeof(float));
       if (in_values_d)
@@ -704,7 +719,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
 
     if (enc->mod_type == TK_MOD_CSR) {
       const int64_t *off_a = in_offsets->a;
-      const int64_t *tok_a = in_tokens->a;
+      const int32_t *tok_a = in_tok_a;
       const int64_t *restrict csc_off = enc->csc_offsets;
       const int64_t *restrict csc_rows_a = enc->csc_rows;
       const float *restrict csc_vals = enc->csc_values;
@@ -717,7 +732,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
           uint64_t si = base + i;
           int64_t jlo = off_a[si], jhi = off_a[si + 1];
           for (int64_t j = jlo; j < jhi; j++) {
-            int64_t tok = tok_a[j];
+            int32_t tok = tok_a[j];
             float val = csr_sv[j];
             int64_t clo = csc_off[tok], chi = csc_off[tok + 1];
             for (int64_t c = clo; c < chi; c++)
@@ -840,7 +855,7 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
     return luaL_error(L, "cannot persist: projection released");
   FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
   tk_lua_fwrite(L, "TKny", 1, 4, fh);
-  uint8_t version = 21;
+  uint8_t version = 22;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   uint8_t kernel_byte = (uint8_t)enc->kernel;
   tk_lua_fwrite(L, &kernel_byte, sizeof(uint8_t), 1, fh);
@@ -853,7 +868,7 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
     tk_lua_fwrite(L, &enc->csr_n_tokens, sizeof(uint64_t), 1, fh);
     uint64_t total_csr = (uint64_t)enc->csr_offsets[enc->m];
     tk_lua_fwrite(L, enc->csr_offsets, sizeof(int64_t), enc->m + 1, fh);
-    tk_lua_fwrite(L, enc->csr_tokens, sizeof(int64_t), total_csr, fh);
+    tk_lua_fwrite(L, enc->csr_tokens, sizeof(int32_t), total_csr, fh);
     tk_lua_fwrite(L, enc->csr_values, sizeof(float), total_csr, fh);
     tk_lua_fwrite(L, enc->csr_norms, sizeof(float), enc->m, fh);
   } else if (enc->mod_type == TK_MOD_DENSE) {
@@ -909,15 +924,16 @@ static inline int tm_encode (lua_State *L) {
   float *csr_values_owned = NULL;
   double *csr_norms_owned = NULL;
   double *dense_norms_owned = NULL;
-
   lua_getfield(L, 1, "offsets");
   int has_csr = !lua_isnil(L, -1);
   if (has_csr) {
     tk_ivec_t *off_iv = tk_ivec_peek(L, -1, "offsets");
     lua_pop(L, 1);
     lua_getfield(L, 1, "tokens");
-    tk_ivec_t *tok_iv = tk_ivec_peek(L, -1, "tokens");
-    lua_pop(L, 1);
+    uint64_t tok_n;
+    const int32_t *tok_a = tk_peek_tokens(L, -1, &tok_n);
+    if (!tok_a) return luaL_error(L, "tokens: expected svec or ivec");
+    lua_setfield(L, 1, "tokens");
     lua_getfield(L, 1, "n_tokens");
     mod.csr_n_tokens = tk_lua_fcheckunsigned(L, 1, "encode", "n_tokens");
     lua_pop(L, 1);
@@ -925,7 +941,7 @@ static inline int tm_encode (lua_State *L) {
     tk_fvec_t *val_fv = tk_fvec_peekopt(L, -1);
     lua_pop(L, 1);
     mod.csr_offsets = off_iv->a;
-    mod.csr_tokens = tok_iv->a;
+    mod.csr_tokens = tok_a;
     mod.csr_values = val_fv ? val_fv->a : NULL;
     mod.type = TK_MOD_CSR;
   } else {
@@ -1559,7 +1575,7 @@ static inline int tm_encode (lua_State *L) {
       lm_total += (uint64_t)(mod.csr_offsets[si + 1] - mod.csr_offsets[si]);
     }
     enc->csr_offsets = (int64_t *)malloc((m + 1) * sizeof(int64_t));
-    enc->csr_tokens = (int64_t *)malloc(lm_total * sizeof(int64_t));
+    enc->csr_tokens = (int32_t *)malloc(lm_total * sizeof(int32_t));
     enc->csr_values = (float *)malloc(lm_total * sizeof(float));
     enc->csr_norms = (float *)malloc(m * sizeof(float));
     enc->csr_offsets[0] = 0;
@@ -1569,7 +1585,7 @@ static inline int tm_encode (lua_State *L) {
       int64_t cnt = hi - lo;
       memcpy(enc->csr_tokens + enc->csr_offsets[j],
              mod.csr_tokens + lo,
-             (uint64_t)cnt * sizeof(int64_t));
+             (uint64_t)cnt * sizeof(int32_t));
       memcpy(enc->csr_values + enc->csr_offsets[j],
              mod.csr_values + lo,
              (uint64_t)cnt * sizeof(float));
@@ -1587,7 +1603,7 @@ static inline int tm_encode (lua_State *L) {
     memcpy(csc_pos, enc->csc_offsets, (csr_nt + 1) * sizeof(int64_t));
     for (uint64_t j = 0; j < m; j++) {
       for (int64_t a = enc->csr_offsets[j]; a < enc->csr_offsets[j + 1]; a++) {
-        int64_t tok = enc->csr_tokens[a];
+        int32_t tok = enc->csr_tokens[a];
         int64_t p = csc_pos[tok]++;
         enc->csc_rows[p] = (int64_t)j;
         enc->csc_values[p] = enc->csr_values[a];
@@ -1657,7 +1673,7 @@ static inline void tk_nystrom_build_csc (tk_nystrom_encoder_t *enc) {
   memcpy(csc_pos, enc->csc_offsets, (csr_nt + 1) * sizeof(int64_t));
   for (uint64_t j = 0; j < enc->m; j++) {
     for (int64_t a = enc->csr_offsets[j]; a < enc->csr_offsets[j + 1]; a++) {
-      int64_t tok = enc->csr_tokens[a];
+      int32_t tok = enc->csr_tokens[a];
       int64_t p = csc_pos[tok]++;
       enc->csc_rows[p] = (int64_t)j;
       enc->csc_values[p] = enc->csr_values[a];
@@ -1678,7 +1694,7 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 21) {
+  if (version != 22) {
     tk_lua_fclose(L, fh);
     return luaL_error(L, "unsupported nystrom encoder version %d", (int)version);
   }
@@ -1711,10 +1727,10 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
     enc->csr_offsets = (int64_t *)malloc((enc->m + 1) * sizeof(int64_t));
     tk_lua_fread(L, enc->csr_offsets, sizeof(int64_t), enc->m + 1, fh);
     uint64_t total_csr = (uint64_t)enc->csr_offsets[enc->m];
-    enc->csr_tokens = (int64_t *)malloc(total_csr * sizeof(int64_t));
+    enc->csr_tokens = (int32_t *)malloc(total_csr * sizeof(int32_t));
     enc->csr_values = (float *)malloc(total_csr * sizeof(float));
     enc->csr_norms = (float *)malloc(enc->m * sizeof(float));
-    tk_lua_fread(L, enc->csr_tokens, sizeof(int64_t), total_csr, fh);
+    tk_lua_fread(L, enc->csr_tokens, sizeof(int32_t), total_csr, fh);
     tk_lua_fread(L, enc->csr_values, sizeof(float), total_csr, fh);
     tk_lua_fread(L, enc->csr_norms, sizeof(float), enc->m, fh);
     tk_nystrom_build_csc(enc);

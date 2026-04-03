@@ -54,7 +54,7 @@ test("imdb classifier", function ()
   csr.apply_bns(val_off, val_tok, val_val, bns_scores)
 
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
-  local sp_enc, ridge_obj, val_codes, best_params = optimize.krr({
+  local sp_enc, ridge_obj, val_codes = optimize.krr({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
     kernel = cfg.emb.kernel,
