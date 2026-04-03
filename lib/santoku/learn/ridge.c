@@ -3,10 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
-#include <omp.h>
-#include <lapacke.h>
-#include <cblas.h>
-#include <sys/mman.h>
+#include <santoku/learn/mathlibs.h>
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
 #include <santoku/dvec.h>
@@ -162,15 +159,7 @@ static inline int tk_ridge_encode_lua (lua_State *L) {
 
 static inline int tk_ridge_persist_lua (lua_State *L) {
   tk_ridge_t *r = tk_ridge_peek(L, 1);
-  FILE *fh;
-  int t = lua_type(L, 2);
-  bool tostr = t == LUA_TBOOLEAN && lua_toboolean(L, 2);
-  if (t == LUA_TSTRING)
-    fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
-  else if (tostr)
-    fh = tk_lua_tmpfile(L);
-  else
-    return tk_lua_verror(L, 2, "persist", "expecting filepath or true");
+  FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
   tk_lua_fwrite(L, "TKri", 1, 4, fh);
   uint8_t version = 4;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
@@ -179,7 +168,9 @@ static inline int tk_ridge_persist_lua (lua_State *L) {
   uint8_t w_external = (r->W->lua_managed == 2) ? 1 : 0;
   tk_lua_fwrite(L, &w_external, sizeof(uint8_t), 1, fh);
   if (w_external) {
+#if !defined(__EMSCRIPTEN__)
     msync(r->W->a, r->W->n * sizeof(float), MS_SYNC);
+#endif
   } else {
     tk_fvec_persist(L, r->W, fh);
   }
@@ -187,22 +178,8 @@ static inline int tk_ridge_persist_lua (lua_State *L) {
   tk_lua_fwrite(L, &has_intercept, sizeof(uint8_t), 1, fh);
   if (r->intercept)
     tk_dvec_persist(L, r->intercept, fh);
-  if (!tostr) {
-    tk_lua_fclose(L, fh);
-    return 0;
-  } else {
-    size_t len;
-    char *data = tk_lua_fslurp(L, fh, &len);
-    if (data) {
-      lua_pushlstring(L, data, len);
-      free(data);
-      tk_lua_fclose(L, fh);
-      return 1;
-    } else {
-      tk_lua_fclose(L, fh);
-      return 0;
-    }
-  }
+  tk_lua_fclose(L, fh);
+  return 0;
 }
 
 static inline int tk_ridge_transform_lua (lua_State *L) {
@@ -548,12 +525,8 @@ static inline int tk_ridge_create_lua (lua_State *L) {
 }
 
 static inline int tk_ridge_load_lua (lua_State *L) {
-  size_t len;
-  const char *data = tk_lua_checklstring(L, 1, &len, "data");
-  bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && tk_lua_checkboolean(L, 2);
-  FILE *fh = isstr
-    ? tk_lua_fmemopen(L, (char *)data, len, "r")
-    : tk_lua_fopen(L, data, "r");
+  const char *data = luaL_checkstring(L, 1);
+  FILE *fh = tk_lua_fopen(L, data, "r");
   char magic[4];
   tk_lua_fread(L, magic, 1, 4, fh);
   if (memcmp(magic, "TKri", 4) != 0) {

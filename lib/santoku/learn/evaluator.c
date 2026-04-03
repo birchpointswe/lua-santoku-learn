@@ -12,7 +12,7 @@
 #include <santoku/iumap.h>
 #include <math.h>
 #include <float.h>
-#include <omp.h>
+#include <santoku/learn/mathlibs.h>
 #include <assert.h>
 #include <string.h>
 

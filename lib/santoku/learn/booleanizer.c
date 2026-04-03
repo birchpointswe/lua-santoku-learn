@@ -1,5 +1,5 @@
 #include <assert.h>
-#include <omp.h>
+#include <santoku/learn/mathlibs.h>
 #include <santoku/lua/utils.h>
 #include <santoku/iuset.h>
 #include <santoku/ivec.h>
@@ -659,32 +659,10 @@ static inline int tk_booleanizer_restrict_lua (lua_State *L)
 static inline int tk_booleanizer_persist_lua (lua_State *L)
 {
   tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
-  FILE *fh;
-  int t = lua_type(L, 2);
-  bool tostr = t == LUA_TBOOLEAN && lua_toboolean(L, 2);
-  if (t == LUA_TSTRING)
-    fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
-  else if (tostr)
-    fh = tk_lua_tmpfile(L);
-  else
-    return tk_lua_verror(L, 2, "persist", "expecting either a filepath or true (for string serialization)");
+  FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
   tk_booleanizer_persist(L, B, fh);
-  if (!tostr) {
-    tk_lua_fclose(L, fh);
-    return 0;
-  } else {
-    size_t len;
-    char *data = tk_lua_fslurp(L, fh, &len);
-    if (data) {
-      lua_pushlstring(L, data, len);
-      free(data);
-      tk_lua_fclose(L, fh);
-      return 1;
-    } else {
-      tk_lua_fclose(L, fh);
-      return 0;
-    }
-  }
+  tk_lua_fclose(L, fh);
+  return 0;
 }
 
 static inline int tk_booleanizer_destroy_lua (lua_State *L)
@@ -1036,10 +1014,8 @@ static inline int tk_booleanizer_create_lua (lua_State *L)
 
 static inline int tk_booleanizer_load_lua (lua_State *L)
 {
-  size_t len;
-  const char *data = tk_lua_checklstring(L, 1, &len, "data");
-  bool isstr = lua_type(L, 2) == LUA_TBOOLEAN && tk_lua_checkboolean(L, 2);
-  FILE *fh = isstr ? tk_lua_fmemopen(L, (char *) data, len, "r") : tk_lua_fopen(L, data, "r");
+  const char *data = luaL_checkstring(L, 1);
+  FILE *fh = tk_lua_fopen(L, data, "r");
   tk_booleanizer_load(L, fh);
   tk_lua_fclose(L, fh);
   return 1;
