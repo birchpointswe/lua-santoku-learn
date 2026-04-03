@@ -72,7 +72,7 @@ test("snli classifier", function ()
   local val_off, val_tok, val_val = tokenize_pairs(validate)
 
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
-  local sp_enc, ridge_obj, val_codes, best_params = optimize.krr({
+  local sp_enc, ridge_obj, val_codes = optimize.krr({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_pair_tokens,
     kernel = cfg.emb.kernel,

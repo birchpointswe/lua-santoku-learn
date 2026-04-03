@@ -56,7 +56,7 @@ test("housing regressor", function ()
 
   str.printf("[KRR] Encoding n_landmarks=%d n_tokens=%d\n",
     cfg.emb.n_landmarks, n_tokens)
-  local sp_enc, ridge_obj, val_codes, best_params = optimize.krr({
+  local sp_enc, ridge_obj, val_codes = optimize.krr({
     offsets = offsets, tokens = tokens, values = values, n_tokens = n_tokens,
     n_samples = train.n,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,

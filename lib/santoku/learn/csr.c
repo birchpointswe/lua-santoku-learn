@@ -434,8 +434,15 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
     offsets->a[s + 1] = total;
   }
   free(sample_counts);
-  tk_ivec_t *tok_out = tk_ivec_create(L, (uint64_t)total);
-  tok_out->n = (uint64_t)total;
+  tk_svec_t *stok_out = NULL;
+  tk_ivec_t *itok_out = NULL;
+  if (raw_mode) {
+    itok_out = tk_ivec_create(L, (uint64_t)total);
+    itok_out->n = (uint64_t)total;
+  } else {
+    stok_out = tk_svec_create(L, (uint64_t)total);
+    stok_out->n = (uint64_t)total;
+  }
   tk_fvec_t *val_out = tk_fvec_create(L, (uint64_t)total);
   val_out->n = (uint64_t)total;
   #pragma omp parallel
@@ -462,7 +469,10 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
         int64_t tok = packed_buf[i];
         float cnt = 0.0f;
         while (i < nv && packed_buf[i] == tok) { cnt += 1.0f; i++; }
-        tok_out->a[pos] = tok;
+        if (raw_mode)
+          itok_out->a[pos] = tok;
+        else
+          stok_out->a[pos] = (int32_t)tok;
         val_out->a[pos] = cnt;
         pos++;
       }
@@ -806,6 +816,13 @@ static inline double tm_bns (double N, double C, double P, double A)
 }
 
 static inline void tm_csr_gather_mul (
+  tk_fvec_t *values, tk_svec_t *tokens, tk_fvec_t *scores)
+{
+  for (uint64_t j = 0; j < values->n; j++)
+    values->a[j] *= scores->a[tokens->a[j]];
+}
+
+static inline void tm_csr_gather_mul_iv (
   tk_fvec_t *values, tk_ivec_t *tokens, tk_fvec_t *scores)
 {
   for (uint64_t j = 0; j < values->n; j++)
@@ -815,7 +832,7 @@ static inline void tm_csr_gather_mul (
 static int tm_csr_apply_bns (lua_State *L)
 {
   tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
-  tk_ivec_t *tokens = tk_ivec_peek(L, 2, "tokens");
+  tk_svec_t *tokens = tk_svec_peek(L, 2, "tokens");
   tk_fvec_t *values = tk_fvec_peek(L, 3, "values");
   tk_fvec_t *scores = tk_fvec_peekopt(L, 4);
   if (scores) {
@@ -910,7 +927,7 @@ static int tm_csr_apply_auc (lua_State *L)
   tk_fvec_t *values = tk_fvec_peek(L, 3, "values");
   tk_fvec_t *scores = tk_fvec_peekopt(L, 4);
   if (scores) {
-    tm_csr_gather_mul(values, tokens, scores);
+    tm_csr_gather_mul_iv(values, tokens, scores);
     lua_pushvalue(L, 4);
     return 1;
   }
@@ -966,14 +983,14 @@ static int tm_csr_apply_auc (lua_State *L)
     }
   }
   free(pairs); free(ranks); free(rank_sums); free(doc_freq);
-  tm_csr_gather_mul(values, tokens, scores);
+  tm_csr_gather_mul_iv(values, tokens, scores);
   return 1;
 }
 
 static int tm_csr_apply_idf (lua_State *L)
 {
   tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
-  tk_ivec_t *tokens = tk_ivec_peek(L, 2, "tokens");
+  tk_svec_t *tokens = tk_svec_peek(L, 2, "tokens");
   tk_fvec_t *values = tk_fvec_peek(L, 3, "values");
   tk_fvec_t *scores = tk_fvec_peekopt(L, 4);
   if (scores) {
@@ -1002,7 +1019,7 @@ static int tm_csr_apply_idf (lua_State *L)
 static int tm_csr_gather_rows (lua_State *L)
 {
   tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
-  tk_ivec_t *tokens = tk_ivec_peek(L, 2, "tokens");
+  tk_svec_t *tokens = tk_svec_peek(L, 2, "tokens");
   tk_fvec_t *values = tk_fvec_peek(L, 3, "values");
   tk_ivec_t *indices = tk_ivec_peek(L, 4, "indices");
   uint64_t n_out = indices->n;
@@ -1013,7 +1030,7 @@ static int tm_csr_gather_rows (lua_State *L)
   }
   tk_ivec_t *out_off = tk_ivec_create(L, n_out + 1);
   out_off->n = n_out + 1;
-  tk_ivec_t *out_tok = tk_ivec_create(L, (uint64_t)total);
+  tk_svec_t *out_tok = tk_svec_create(L, (uint64_t)total);
   out_tok->n = (uint64_t)total;
   tk_fvec_t *out_val = tk_fvec_create(L, (uint64_t)total);
   out_val->n = (uint64_t)total;
@@ -1023,7 +1040,7 @@ static int tm_csr_gather_rows (lua_State *L)
     int64_t idx = indices->a[i];
     int64_t s = offsets->a[idx], e = offsets->a[idx + 1];
     int64_t len = e - s;
-    memcpy(out_tok->a + pos, tokens->a + s, (uint64_t)len * sizeof(int64_t));
+    memcpy(out_tok->a + pos, tokens->a + s, (uint64_t)len * sizeof(int32_t));
     memcpy(out_val->a + pos, values->a + s, (uint64_t)len * sizeof(float));
     pos += len;
     out_off->a[i + 1] = pos;
@@ -1045,7 +1062,7 @@ static int tm_csr_merge (lua_State *L)
   uint64_t n = off1->n - 1;
   uint64_t total = nbr1->n + nbr2->n;
   tk_ivec_t *out_off = tk_ivec_create(L, n + 1);
-  tk_ivec_t *out_nbr = tk_ivec_create(L, total);
+  tk_svec_t *out_nbr = tk_svec_create(L, total);
   out_nbr->n = total;
   tk_fvec_t *out_val = tk_fvec_create(L, total);
   out_val->n = total;
@@ -1054,13 +1071,13 @@ static int tm_csr_merge (lua_State *L)
   for (uint64_t i = 0; i < n; i++) {
     int64_t s1 = off1->a[i], e1 = off1->a[i + 1];
     for (int64_t j = s1; j < e1; j++) {
-      out_nbr->a[pos] = nbr1->a[j];
+      out_nbr->a[pos] = (int32_t)nbr1->a[j];
       out_val->a[pos] = val1_f ? val1_f->a[j] : val1_d ? (float)val1_d->a[j] : 1.0f;
       pos++;
     }
     int64_t s2 = off2->a[i], e2 = off2->a[i + 1];
     for (int64_t j = s2; j < e2; j++) {
-      out_nbr->a[pos] = nbr2->a[j] + shift;
+      out_nbr->a[pos] = (int32_t)(nbr2->a[j] + shift);
       out_val->a[pos] = val2_f ? val2_f->a[j] : val2_d ? (float)val2_d->a[j] : 1.0f;
       pos++;
     }
@@ -1071,7 +1088,7 @@ static int tm_csr_merge (lua_State *L)
 
 static int tm_csr_standardize (lua_State *L)
 {
-  tk_ivec_t *tokens = tk_ivec_peek(L, 2, "tokens");
+  tk_svec_t *tokens = tk_svec_peek(L, 2, "tokens");
   tk_fvec_t *values = tk_fvec_peek(L, 3, "values");
   tk_fvec_t *scores = tk_fvec_peekopt(L, 4);
   if (scores) {
