@@ -648,7 +648,6 @@ static int tm_csr_tokenize_annotated (lua_State *L)
   bool do_normalize = tk_lua_foptboolean(L, 1, "tokenize_annotated", "normalize", false);
   bool terminals = tk_lua_foptboolean(L, 1, "tokenize_annotated", "terminals", false);
   bool collapse_span = tk_lua_foptboolean(L, 1, "tokenize_annotated", "collapse_span", false);
-  bool collapse_context = tk_lua_foptboolean(L, 1, "tokenize_annotated", "collapse_context", false);
   lua_getfield(L, 1, "doc_span_offsets");
   tk_ivec_t *doc_span_offsets = tk_ivec_peek(L, -1, "doc_span_offsets");
   lua_pop(L, 1);
@@ -699,26 +698,7 @@ static int tm_csr_tokenize_annotated (lua_State *L)
         delim_close = (char)(0x06 + 2 * t);
       }
       size_t w = 0;
-      if (collapse_context) {
-        if (terminals) p[w++] = '\x03';
-        size_t pos = 0;
-        for (int64_t j = ds; j < de; j++) {
-          size_t js = (size_t)span_starts->a[j];
-          size_t je = (size_t)span_ends->a[j];
-          if (js > pos) p[w++] = '\x0F';
-          if (j == i) {
-            p[w++] = delim_open;
-            p[w++] = delim_close;
-          } else {
-            char ot = '\x01';
-            if (span_types) ot = (char)(0x05 + 2 * span_types->a[j]);
-            p[w++] = ot;
-          }
-          pos = je;
-        }
-        if (pos < tlen) p[w++] = '\x0F';
-        if (terminals) p[w++] = '\x04';
-      } else if (collapse_span) {
+      if (collapse_span) {
         if (terminals) p[w++] = '\x03';
         memcpy(p + w, text, s);
         w += s;
