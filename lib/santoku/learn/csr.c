@@ -252,6 +252,7 @@ static inline size_t tm_csr_pack_ngrams (
 static inline uint64_t tm_csr_seq_elem (const void *data, size_t idx, int elem_bytes) {
   switch (elem_bytes) {
     case 1: return ((const uint8_t *)data)[idx];
+    case 2: return ((const uint16_t *)data)[idx];
     case 4: return (uint64_t)(uint32_t)((const int32_t *)data)[idx];
     case 8: return (uint64_t)((const int64_t *)data)[idx];
   }
@@ -637,6 +638,20 @@ static int tm_csr_tokenize (lua_State *L)
   return result;
 }
 
+#define MAX_1B_TYPES 12
+#define WIDE_OPEN(t)  ((uint16_t)(256 + 2 * (t)))
+#define WIDE_CLOSE(t) ((uint16_t)(257 + 2 * (t)))
+#define WIDE_FOCUS    ((uint16_t)512)
+
+static const char safe_open[12] = {
+  '\x02','\x06','\x08','\x0C','\x0F','\x11',
+  '\x13','\x15','\x17','\x19','\x1B','\x1D'
+};
+static const char safe_close[12] = {
+  '\x05','\x07','\x0B','\x0E','\x10','\x12',
+  '\x14','\x16','\x18','\x1A','\x1C','\x1E'
+};
+
 static int tm_csr_tokenize_annotated (lua_State *L)
 {
   lua_settop(L, 1);
@@ -647,7 +662,11 @@ static int tm_csr_tokenize_annotated (lua_State *L)
     return luaL_error(L, "tokenize_annotated: need 1 <= ngram_min <= ngram_max <= 8");
   bool do_normalize = tk_lua_foptboolean(L, 1, "tokenize_annotated", "normalize", false);
   bool terminals = tk_lua_foptboolean(L, 1, "tokenize_annotated", "terminals", false);
-  bool collapse_span = tk_lua_foptboolean(L, 1, "tokenize_annotated", "collapse_span", false);
+  lua_getfield(L, 1, "collapse_span");
+  const char *collapse_span_str = lua_tostring(L, -1);
+  lua_pop(L, 1);
+  bool collapse_all = collapse_span_str && strcmp(collapse_span_str, "all") == 0;
+  bool collapse_focus = collapse_span_str && strcmp(collapse_span_str, "focus") == 0;
   lua_getfield(L, 1, "doc_span_offsets");
   tk_ivec_t *doc_span_offsets = tk_ivec_peek(L, -1, "doc_span_offsets");
   lua_pop(L, 1);
@@ -665,69 +684,211 @@ static int tm_csr_tokenize_annotated (lua_State *L)
   int texts_idx = lua_gettop(L);
   int64_t n_docs = (int64_t)(doc_span_offsets->n - 1);
   int64_t total_spans = doc_span_offsets->a[n_docs];
-  size_t total_bytes = 0;
   size_t *text_lens = (size_t *)malloc((uint64_t)n_docs * sizeof(size_t));
   const char **text_ptrs = (const char **)malloc((uint64_t)n_docs * sizeof(const char *));
   for (int64_t d = 0; d < n_docs; d++) {
     lua_rawgeti(L, texts_idx, (int)(d + 1));
     text_ptrs[d] = lua_tolstring(L, -1, &text_lens[d]);
     lua_pop(L, 1);
-    int64_t ds = doc_span_offsets->a[d];
-    int64_t de = doc_span_offsets->a[d + 1];
-    size_t extra = terminals ? 4 : 2;
-    for (int64_t i = ds; i < de; i++)
-      total_bytes += text_lens[d] + extra;
   }
-  char *pool = (char *)malloc(total_bytes ? total_bytes : 1);
+  int64_t max_type = 0;
+  if (span_types)
+    for (int64_t i = 0; i < total_spans; i++)
+      if (span_types->a[i] > max_type) max_type = span_types->a[i];
+  bool wide = max_type >= MAX_1B_TYPES;
   const char **strs = (const char **)malloc((uint64_t)total_spans * sizeof(const char *));
   size_t *lens = (size_t *)malloc((uint64_t)total_spans * sizeof(size_t));
   size_t max_len = 0;
-  char *p = pool;
-  for (int64_t d = 0; d < n_docs; d++) {
-    int64_t ds = doc_span_offsets->a[d];
-    int64_t de = doc_span_offsets->a[d + 1];
-    const char *text = text_ptrs[d];
-    size_t tlen = text_lens[d];
-    for (int64_t i = ds; i < de; i++) {
-      size_t s = (size_t)span_starts->a[i];
-      size_t e = (size_t)span_ends->a[i];
-      char delim_open = '\x01', delim_close = '\x02';
-      if (span_types) {
-        int64_t t = span_types->a[i];
-        delim_open = (char)(0x05 + 2 * t);
-        delim_close = (char)(0x06 + 2 * t);
-      }
-      size_t w = 0;
-      if (collapse_span) {
-        if (terminals) p[w++] = '\x03';
-        memcpy(p + w, text, s);
-        w += s;
-        p[w++] = delim_open;
-        memcpy(p + w, text + e, tlen - e);
-        w += tlen - e;
-        if (terminals) p[w++] = '\x04';
-      } else {
-        if (terminals) p[w++] = '\x03';
-        memcpy(p + w, text, s);
-        w += s;
-        p[w++] = delim_open;
-        memcpy(p + w, text + s, e - s);
-        w += e - s;
-        p[w++] = delim_close;
-        memcpy(p + w, text + e, tlen - e);
-        w += tlen - e;
-        if (terminals) p[w++] = '\x04';
-      }
-      strs[i] = p;
-      lens[i] = w;
-      if (w > max_len) max_len = w;
-      p += w;
+  int result;
+  if (!wide) {
+    size_t total_bytes = 0;
+    for (int64_t d = 0; d < n_docs; d++) {
+      int64_t ds = doc_span_offsets->a[d];
+      int64_t de = doc_span_offsets->a[d + 1];
+      size_t extra = collapse_all
+        ? (terminals ? 2 : 0) + (size_t)(de - ds) + 1
+        : (terminals ? 4 : 2);
+      for (int64_t i = ds; i < de; i++)
+        total_bytes += text_lens[d] + extra;
     }
+    char *pool = (char *)malloc(total_bytes ? total_bytes : 1);
+    char *p = pool;
+    for (int64_t d = 0; d < n_docs; d++) {
+      int64_t ds = doc_span_offsets->a[d];
+      int64_t de = doc_span_offsets->a[d + 1];
+      const char *text = text_ptrs[d];
+      size_t tlen = text_lens[d];
+      for (int64_t i = ds; i < de; i++) {
+        size_t s = (size_t)span_starts->a[i];
+        size_t e = (size_t)span_ends->a[i];
+        int64_t ti = span_types ? span_types->a[i] : 0;
+        size_t w = 0;
+        if (collapse_all) {
+          if (terminals) p[w++] = '\x03';
+          size_t pos = 0;
+          for (int64_t j = ds; j < de; j++) {
+            size_t js = (size_t)span_starts->a[j];
+            size_t je = (size_t)span_ends->a[j];
+            if (js > pos) {
+              memcpy(p + w, text + pos, js - pos);
+              w += js - pos;
+            }
+            int64_t tj = span_types ? span_types->a[j] : 0;
+            if (j == i) p[w++] = '\x01';
+            p[w++] = safe_open[tj];
+            pos = je;
+          }
+          if (pos < tlen) {
+            memcpy(p + w, text + pos, tlen - pos);
+            w += tlen - pos;
+          }
+          if (terminals) p[w++] = '\x04';
+        } else if (collapse_focus) {
+          if (terminals) p[w++] = '\x03';
+          memcpy(p + w, text, s);
+          w += s;
+          p[w++] = '\x01';
+          p[w++] = safe_open[ti];
+          memcpy(p + w, text + e, tlen - e);
+          w += tlen - e;
+          if (terminals) p[w++] = '\x04';
+        } else {
+          if (terminals) p[w++] = '\x03';
+          memcpy(p + w, text, s);
+          w += s;
+          p[w++] = safe_open[ti];
+          memcpy(p + w, text + s, e - s);
+          w += e - s;
+          p[w++] = safe_close[ti];
+          memcpy(p + w, text + e, tlen - e);
+          w += tlen - e;
+          if (terminals) p[w++] = '\x04';
+        }
+        strs[i] = p;
+        lens[i] = w;
+        if (w > max_len) max_len = w;
+        p += w;
+      }
+    }
+    free(text_ptrs);
+    free(text_lens);
+    result = tm_csr_tokenize_core(L, strs, lens, max_len, total_spans, ngram_min, ngram_max, do_normalize, 8);
+    free(pool);
+  } else {
+    size_t total_elems = 0;
+    for (int64_t d = 0; d < n_docs; d++) {
+      int64_t ds = doc_span_offsets->a[d];
+      int64_t de = doc_span_offsets->a[d + 1];
+      size_t extra = collapse_all
+        ? (terminals ? 2 : 0) + (size_t)(de - ds) + 1
+        : (terminals ? 4 : 2);
+      for (int64_t i = ds; i < de; i++)
+        total_elems += 4 * text_lens[d] + extra;
+    }
+    uint16_t *pool = (uint16_t *)malloc((total_elems ? total_elems : 1) * sizeof(uint16_t));
+    uint16_t *p = pool;
+    for (int64_t d = 0; d < n_docs; d++) {
+      int64_t ds = doc_span_offsets->a[d];
+      int64_t de = doc_span_offsets->a[d + 1];
+      const char *text = text_ptrs[d];
+      size_t tlen = text_lens[d];
+      for (int64_t i = ds; i < de; i++) {
+        size_t s = (size_t)span_starts->a[i];
+        size_t e = (size_t)span_ends->a[i];
+        int64_t ti = span_types ? span_types->a[i] : 0;
+        size_t w = 0;
+        if (collapse_all) {
+          if (terminals) p[w++] = '\x03';
+          size_t pos = 0;
+          for (int64_t j = ds; j < de; j++) {
+            size_t js = (size_t)span_starts->a[j];
+            size_t je = (size_t)span_ends->a[j];
+            if (js > pos) {
+              size_t bi = pos;
+              while (bi < js) {
+                tk_norm_result_t nr = tk_text_normalize_next(text, bi, tlen);
+                for (int k = 0; k < nr.n_out; k++)
+                  p[w++] = nr.bytes[k];
+                bi += (size_t)nr.n_in;
+              }
+            }
+            int64_t tj = span_types ? span_types->a[j] : 0;
+            if (j == i) p[w++] = WIDE_FOCUS;
+            p[w++] = WIDE_OPEN(tj);
+            pos = je;
+          }
+          if (pos < tlen) {
+            size_t bi = pos;
+            while (bi < tlen) {
+              tk_norm_result_t nr = tk_text_normalize_next(text, bi, tlen);
+              for (int k = 0; k < nr.n_out; k++)
+                p[w++] = nr.bytes[k];
+              bi += (size_t)nr.n_in;
+            }
+          }
+          if (terminals) p[w++] = '\x04';
+        } else if (collapse_focus) {
+          if (terminals) p[w++] = '\x03';
+          { size_t bi = 0;
+            while (bi < s) {
+              tk_norm_result_t nr = tk_text_normalize_next(text, bi, tlen);
+              for (int k = 0; k < nr.n_out; k++)
+                p[w++] = nr.bytes[k];
+              bi += (size_t)nr.n_in;
+            }
+          }
+          p[w++] = WIDE_FOCUS;
+          p[w++] = WIDE_OPEN(ti);
+          { size_t bi = e;
+            while (bi < tlen) {
+              tk_norm_result_t nr = tk_text_normalize_next(text, bi, tlen);
+              for (int k = 0; k < nr.n_out; k++)
+                p[w++] = nr.bytes[k];
+              bi += (size_t)nr.n_in;
+            }
+          }
+          if (terminals) p[w++] = '\x04';
+        } else {
+          if (terminals) p[w++] = '\x03';
+          { size_t bi = 0;
+            while (bi < s) {
+              tk_norm_result_t nr = tk_text_normalize_next(text, bi, tlen);
+              for (int k = 0; k < nr.n_out; k++)
+                p[w++] = nr.bytes[k];
+              bi += (size_t)nr.n_in;
+            }
+          }
+          p[w++] = WIDE_OPEN(ti);
+          { size_t bi = s;
+            while (bi < e) {
+              tk_norm_result_t nr = tk_text_normalize_next(text, bi, tlen);
+              for (int k = 0; k < nr.n_out; k++)
+                p[w++] = nr.bytes[k];
+              bi += (size_t)nr.n_in;
+            }
+          }
+          p[w++] = WIDE_CLOSE(ti);
+          { size_t bi = e;
+            while (bi < tlen) {
+              tk_norm_result_t nr = tk_text_normalize_next(text, bi, tlen);
+              for (int k = 0; k < nr.n_out; k++)
+                p[w++] = nr.bytes[k];
+              bi += (size_t)nr.n_in;
+            }
+          }
+          if (terminals) p[w++] = '\x04';
+        }
+        strs[i] = (const char *)p;
+        lens[i] = w;
+        if (w > max_len) max_len = w;
+        p += w;
+      }
+    }
+    free(text_ptrs);
+    free(text_lens);
+    result = tm_csr_tokenize_core(L, strs, lens, max_len, total_spans, ngram_min, ngram_max, false, 16);
+    free(pool);
   }
-  free(text_ptrs);
-  free(text_lens);
-  int result = tm_csr_tokenize_core(L, strs, lens, max_len, total_spans, ngram_min, ngram_max, do_normalize, 8);
-  free(pool);
   free(strs);
   free(lens);
   return result;
