@@ -662,11 +662,15 @@ static int tm_csr_tokenize_annotated (lua_State *L)
     return luaL_error(L, "tokenize_annotated: need 1 <= ngram_min <= ngram_max <= 8");
   bool do_normalize = tk_lua_foptboolean(L, 1, "tokenize_annotated", "normalize", false);
   bool terminals = tk_lua_foptboolean(L, 1, "tokenize_annotated", "terminals", false);
-  lua_getfield(L, 1, "collapse_span");
-  const char *collapse_span_str = lua_tostring(L, -1);
+  lua_getfield(L, 1, "collapse");
+  const char *collapse_str = lua_tostring(L, -1);
   lua_pop(L, 1);
-  bool collapse_all = collapse_span_str && strcmp(collapse_span_str, "all") == 0;
-  bool collapse_focus = collapse_span_str && strcmp(collapse_span_str, "focus") == 0;
+  enum { COL_NONE, COL_FOCUS, COL_SPANS, COL_ALL } collapse = COL_NONE;
+  if (collapse_str) {
+    if (strcmp(collapse_str, "focus") == 0) collapse = COL_FOCUS;
+    else if (strcmp(collapse_str, "spans") == 0) collapse = COL_SPANS;
+    else if (strcmp(collapse_str, "all") == 0) collapse = COL_ALL;
+  }
   lua_getfield(L, 1, "doc_span_offsets");
   tk_ivec_t *doc_span_offsets = tk_ivec_peek(L, -1, "doc_span_offsets");
   lua_pop(L, 1);
@@ -705,11 +709,16 @@ static int tm_csr_tokenize_annotated (lua_State *L)
     for (int64_t d = 0; d < n_docs; d++) {
       int64_t ds = doc_span_offsets->a[d];
       int64_t de = doc_span_offsets->a[d + 1];
-      size_t extra = collapse_all
-        ? (terminals ? 2 : 0) + (size_t)(de - ds) + 1
-        : (terminals ? 4 : 2);
+      size_t nspans = (size_t)(de - ds);
+      size_t extra;
+      if (collapse == COL_ALL)
+        extra = (terminals ? 2 : 0) + nspans * 2;
+      else if (collapse == COL_SPANS)
+        extra = (terminals ? 2 : 0) + nspans + 1;
+      else
+        extra = (terminals ? 4 : 2);
       for (int64_t i = ds; i < de; i++)
-        total_bytes += text_lens[d] + extra;
+        total_bytes += (collapse == COL_ALL ? 0 : text_lens[d]) + extra;
     }
     char *pool = (char *)malloc(total_bytes ? total_bytes : 1);
     char *p = pool;
@@ -723,7 +732,15 @@ static int tm_csr_tokenize_annotated (lua_State *L)
         size_t e = (size_t)span_ends->a[i];
         int64_t ti = span_types ? span_types->a[i] : 0;
         size_t w = 0;
-        if (collapse_all) {
+        if (collapse == COL_ALL) {
+          if (terminals) p[w++] = '\x03';
+          for (int64_t j = ds; j < de; j++) {
+            int64_t tj = span_types ? span_types->a[j] : 0;
+            if (j == i) p[w++] = '\x01';
+            p[w++] = safe_open[tj];
+          }
+          if (terminals) p[w++] = '\x04';
+        } else if (collapse == COL_SPANS) {
           if (terminals) p[w++] = '\x03';
           size_t pos = 0;
           for (int64_t j = ds; j < de; j++) {
@@ -743,7 +760,7 @@ static int tm_csr_tokenize_annotated (lua_State *L)
             w += tlen - pos;
           }
           if (terminals) p[w++] = '\x04';
-        } else if (collapse_focus) {
+        } else if (collapse == COL_FOCUS) {
           if (terminals) p[w++] = '\x03';
           memcpy(p + w, text, s);
           w += s;
@@ -779,11 +796,16 @@ static int tm_csr_tokenize_annotated (lua_State *L)
     for (int64_t d = 0; d < n_docs; d++) {
       int64_t ds = doc_span_offsets->a[d];
       int64_t de = doc_span_offsets->a[d + 1];
-      size_t extra = collapse_all
-        ? (terminals ? 2 : 0) + (size_t)(de - ds) + 1
-        : (terminals ? 4 : 2);
+      size_t nspans = (size_t)(de - ds);
+      size_t extra;
+      if (collapse == COL_ALL)
+        extra = (terminals ? 2 : 0) + nspans * 2;
+      else if (collapse == COL_SPANS)
+        extra = (terminals ? 2 : 0) + nspans + 1;
+      else
+        extra = (terminals ? 4 : 2);
       for (int64_t i = ds; i < de; i++)
-        total_elems += 4 * text_lens[d] + extra;
+        total_elems += (collapse == COL_ALL ? 0 : 4 * text_lens[d]) + extra;
     }
     uint16_t *pool = (uint16_t *)malloc((total_elems ? total_elems : 1) * sizeof(uint16_t));
     uint16_t *p = pool;
@@ -797,7 +819,15 @@ static int tm_csr_tokenize_annotated (lua_State *L)
         size_t e = (size_t)span_ends->a[i];
         int64_t ti = span_types ? span_types->a[i] : 0;
         size_t w = 0;
-        if (collapse_all) {
+        if (collapse == COL_ALL) {
+          if (terminals) p[w++] = '\x03';
+          for (int64_t j = ds; j < de; j++) {
+            int64_t tj = span_types ? span_types->a[j] : 0;
+            if (j == i) p[w++] = WIDE_FOCUS;
+            p[w++] = WIDE_OPEN(tj);
+          }
+          if (terminals) p[w++] = '\x04';
+        } else if (collapse == COL_SPANS) {
           if (terminals) p[w++] = '\x03';
           size_t pos = 0;
           for (int64_t j = ds; j < de; j++) {
@@ -827,7 +857,7 @@ static int tm_csr_tokenize_annotated (lua_State *L)
             }
           }
           if (terminals) p[w++] = '\x04';
-        } else if (collapse_focus) {
+        } else if (collapse == COL_FOCUS) {
           if (terminals) p[w++] = '\x03';
           { size_t bi = 0;
             while (bi < s) {
@@ -1157,6 +1187,7 @@ static int tm_csr_apply_auc (lua_State *L)
       if (n0 == 0) continue;
       double auc = (rank_sums[f] - (double)n1 * ((double)n1 + 1.0) / 2.0)
                  / ((double)n1 * (double)n0);
+      auc = (auc + TM_SMOOTH_EPS) / (1.0 + 2.0 * TM_SMOOTH_EPS);
       float score = (float)(fabs(tm_probit(auc)) * M_SQRT2);
       if (score > scores->a[f]) scores->a[f] = score;
     }
