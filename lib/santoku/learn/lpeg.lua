@@ -290,7 +290,7 @@ local function html_tags(str)
   end
 end
 
-local function html_inject(text, tags)
+local function html_inject(text, tags, attr_order)
   local sorted = {}
   for i = 1, #tags do sorted[i] = tags[i] end
   table.sort(sorted, function(a, b) return a.s < b.s end)
@@ -303,12 +303,26 @@ local function html_inject(text, tags)
     end
     parts[#parts + 1] = "<" .. t.name
     if t.attrs then
-      for k, v in pairs(t.attrs) do
+      local function emit(k)
+        local v = t.attrs[k]
+        if v == nil then return end
         if v == true then
           parts[#parts + 1] = " " .. k
-        elseif v then
+        else
           parts[#parts + 1] = " " .. k .. "=\"" .. v:gsub("\"", "&quot;") .. "\""
         end
+      end
+      if attr_order then
+        local seen = {}
+        for _, k in ipairs(attr_order) do
+          emit(k)
+          seen[k] = true
+        end
+        for k in pairs(t.attrs) do
+          if not seen[k] then emit(k) end
+        end
+      else
+        for k in pairs(t.attrs) do emit(k) end
       end
     end
     parts[#parts + 1] = ">"
