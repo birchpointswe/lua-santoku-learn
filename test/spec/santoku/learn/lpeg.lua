@@ -219,6 +219,21 @@ test("html_inject", function ()
     assert(rebuilt:find("span"))
   end)
 
+  test("attr_order", function ()
+    local text = "hello Germany world"
+    local tags = {{
+      name = "span", s = 7, e = 13,
+      attrs = { class = "country", id = "276", ["data-country-iso"] = "276" }
+    }}
+    local result = lp.html_inject(text, tags, { "class", "id" })
+    local s = result:find('class=')
+    local i = result:find('id=')
+    local d = result:find('data%-country%-iso=')
+    assert(s and i and d)
+    assert(s < i, "class before id")
+    assert(i < d, "id before data-country-iso")
+  end)
+
   test("canonicalization via text override", function ()
     local html = '<span class="author">J. Smith</span>'
     local text, tags = lp.html_extract(html)
