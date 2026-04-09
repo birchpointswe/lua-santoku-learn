@@ -1,5 +1,5 @@
 local test = require("santoku.test")
-local lp = require("santoku.learn.lpeg")
+local lp = require("santoku.lpeg")
 
 test("json_fields", function ()
 
