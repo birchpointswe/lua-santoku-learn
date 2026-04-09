@@ -308,4 +308,66 @@ test("aho", function ()
     assert(mids:size() == 0)
   end)
 
+  test("exclude_hits returned for recognized regions", function ()
+    local ids = ivec.create({ 1, 2, 3 })
+    local ac = aho.create({ ids = ids, patterns = { "foo", "bar", "baz" } })
+    local exc = pvec.create()
+    exc:push(0, 3)
+    exc:push(4, 7)
+    exc:push(8, 11)
+    local _, mids, _, _, exc_hits = ac:predict({
+      texts = { "foo bar baz" },
+      exclude = exc
+    })
+    assert(mids:size() == 0)
+    assert(exc_hits:size() == 3)
+    assert(exc_hits:get(0) == 1)
+    assert(exc_hits:get(1) == 1)
+    assert(exc_hits:get(2) == 1)
+  end)
+
+  test("exclude_hits zero for unrecognized regions", function ()
+    local ids = ivec.create({ 1 })
+    local ac = aho.create({ ids = ids, patterns = { "foo" } })
+    local exc = pvec.create()
+    exc:push(0, 3)
+    exc:push(4, 11)
+    local _, mids, _, _, exc_hits = ac:predict({
+      texts = { "foo hello world" },
+      exclude = exc
+    })
+    assert(mids:size() == 0)
+    assert(exc_hits:size() == 2)
+    assert(exc_hits:get(0) == 1)
+    assert(exc_hits:get(1) == 0)
+  end)
+
+  test("exclude_hits not returned when no exclude", function ()
+    local ids = ivec.create({ 1 })
+    local ac = aho.create({ ids = ids, patterns = { "foo" } })
+    local _, mids, _, _, exc_hits = ac:predict({
+      texts = { "foo bar" },
+    })
+    assert(mids:size() == 1)
+    assert(exc_hits == nil)
+  end)
+
+  test("exclude_hits with mixed recognized and unrecognized", function ()
+    local ids = ivec.create({ 1, 2 })
+    local ac = aho.create({ ids = ids, patterns = { "Alice", "Bob" } })
+    local exc = pvec.create()
+    exc:push(0, 5)
+    exc:push(10, 17)
+    exc:push(21, 24)
+    local _, mids, _, _, exc_hits = ac:predict({
+      texts = { "Alice and Unknown and Bob" },
+      exclude = exc
+    })
+    assert(mids:size() == 0)
+    assert(exc_hits:size() == 3)
+    assert(exc_hits:get(0) == 1)
+    assert(exc_hits:get(1) == 0)
+    assert(exc_hits:get(2) == 1)
+  end)
+
 end)

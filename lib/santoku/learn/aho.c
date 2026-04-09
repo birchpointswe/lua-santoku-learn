@@ -117,6 +117,8 @@ typedef struct {
   tk_aho_match_t *matches;
   int64_t *text_offsets;
   int64_t total;
+  int32_t *exclude_hits;
+  uint64_t n_exclude;
 } tk_aho_scan_result_t;
 
 static tk_aho_scan_result_t tk_aho_scan (
@@ -126,6 +128,8 @@ static tk_aho_scan_result_t tk_aho_scan (
 ) {
   tk_aho_match_t **pt_matches = (tk_aho_match_t **)calloc((uint64_t)n_texts, sizeof(tk_aho_match_t *));
   int64_t *pt_counts = (int64_t *)calloc((uint64_t)n_texts, sizeof(int64_t));
+  uint64_t n_exc = exc ? exc->n : 0;
+  int32_t *exc_hits = n_exc > 0 ? (int32_t *)calloc(n_exc, sizeof(int32_t)) : NULL;
 
   #pragma omp parallel
   {
@@ -234,6 +238,7 @@ static tk_aho_scan_result_t tk_aho_scan (
           bool excluded = false;
           for (uint64_t k = 0; k < exc->n; k++) {
             if (local_m[j].start < exc->a[k].p && local_m[j].end > exc->a[k].i) {
+              if (exc_hits) exc_hits[k] = 1;
               excluded = true; break;
             }
           }
@@ -296,12 +301,15 @@ static tk_aho_scan_result_t tk_aho_scan (
   r.matches = flat;
   r.text_offsets = text_offsets;
   r.total = total;
+  r.exclude_hits = exc_hits;
+  r.n_exclude = n_exc;
   return r;
 }
 
 static void tk_aho_scan_free (tk_aho_scan_result_t *r) {
   free(r->matches);
   free(r->text_offsets);
+  free(r->exclude_hits);
 }
 
 static void tk_aho_build_trie (lua_State *L)
@@ -639,8 +647,15 @@ static int tk_aho_predict_lua (lua_State *L)
     out_ends->a[i] = res.matches[i].end;
   }
 
+  tk_svec_t *out_exc_hits = NULL;
+  if (res.exclude_hits) {
+    out_exc_hits = tk_svec_create(L, res.n_exclude);
+    out_exc_hits->n = res.n_exclude;
+    memcpy(out_exc_hits->a, res.exclude_hits, res.n_exclude * sizeof(int32_t));
+  }
+
   tk_aho_scan_free(&res);
-  return 4;
+  return out_exc_hits ? 5 : 4;
 }
 
 static int tk_aho_tag_lua (lua_State *L)
