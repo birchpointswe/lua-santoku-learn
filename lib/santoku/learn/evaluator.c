@@ -16,7 +16,19 @@
 #include <assert.h>
 #include <string.h>
 
-#define TK_EVAL_EPH "tk_eval_eph"
+static inline void tk_eval_eph_add (lua_State *L, int eph)
+{
+  lua_pushlightuserdata(L, lua_touserdata(L, -1));
+  lua_pushvalue(L, -2);
+  lua_rawset(L, eph);
+}
+
+static inline int tk_eval_eph_get (lua_State *L, int eph, void *p)
+{
+  lua_pushlightuserdata(L, p);
+  lua_rawget(L, eph);
+  return lua_type(L, -1);
+}
 
 static inline int tm_regress_accuracy (lua_State *L)
 {
@@ -1049,25 +1061,25 @@ static inline tm_cluster_result_t tm_cluster_agglo (
   tm_cluster_result_t result;
 
   result.dendro_offsets = tk_ivec_create(L, 0);
-  tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+  tk_eval_eph_add(L, i_eph);
   lua_pop(L, 1);
 
   result.dendro_merges = tk_pvec_create(L, 0);
-  tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+  tk_eval_eph_add(L, i_eph);
   lua_pop(L, 1);
 
   result.quality_curve = tk_dvec_create(L, 0);
-  tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+  tk_eval_eph_add(L, i_eph);
   lua_pop(L, 1);
 
   result.n_clusters_curve = tk_ivec_create(L, 0);
-  tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+  tk_eval_eph_add(L, i_eph);
   lua_pop(L, 1);
 
   result.auc_curve = NULL;
   if (exp_off && exp_nbr && exp_wgt) {
     result.auc_curve = tk_dvec_create(L, 0);
-    tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+    tk_eval_eph_add(L, i_eph);
     lua_pop(L, 1);
   }
 
@@ -1091,26 +1103,26 @@ static inline int tm_cluster (lua_State *L)
   lua_getfield(L, 1, "ids");
   tk_ivec_t *ids = tk_ivec_peekopt(L, -1);
   if (!lua_isnil(L, -1))
-    tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+    tk_eval_eph_add(L, i_eph);
   lua_pop(L, 1);
 
   lua_getfield(L, 1, "offsets");
   tk_ivec_t *offsets = tk_ivec_peekopt(L, -1);
   if (!lua_isnil(L, -1))
-    tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+    tk_eval_eph_add(L, i_eph);
   lua_pop(L, 1);
 
   lua_getfield(L, 1, "neighbors");
   tk_ivec_t *neighbors = tk_ivec_peekopt(L, -1);
   if (!lua_isnil(L, -1))
-    tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+    tk_eval_eph_add(L, i_eph);
   lua_pop(L, 1);
 
   lua_getfield(L, 1, "codes");
   tk_cvec_t *codes = tk_cvec_peekopt(L, -1);
   if (!codes)
     tk_lua_verror(L, 3, "cluster", "codes", "required (binary codes)");
-  tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+  tk_eval_eph_add(L, i_eph);
   lua_pop(L, 1);
 
   if (!ids)
@@ -1123,19 +1135,19 @@ static inline int tm_cluster (lua_State *L)
   lua_getfield(L, 1, "expected_offsets");
   tk_ivec_t *exp_off = tk_ivec_peekopt(L, -1);
   if (!lua_isnil(L, -1))
-    tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+    tk_eval_eph_add(L, i_eph);
   lua_pop(L, 1);
 
   lua_getfield(L, 1, "expected_neighbors");
   tk_ivec_t *exp_nbr = tk_ivec_peekopt(L, -1);
   if (!lua_isnil(L, -1))
-    tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+    tk_eval_eph_add(L, i_eph);
   lua_pop(L, 1);
 
   lua_getfield(L, 1, "expected_weights");
   tk_dvec_t *exp_wgt = tk_dvec_peekopt(L, -1);
   if (!lua_isnil(L, -1))
-    tk_lua_add_ephemeron(L, TK_EVAL_EPH, i_eph, -1);
+    tk_eval_eph_add(L, i_eph);
   lua_pop(L, 1);
 
   uint64_t n_bits = tk_lua_fcheckunsigned(L, 1, "cluster", "n_dims");
@@ -1147,26 +1159,26 @@ static inline int tm_cluster (lua_State *L)
 
   lua_newtable(L);
 
-  tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.dendro_offsets);
+  tk_eval_eph_get(L, i_eph, result.dendro_offsets);
   lua_setfield(L, -2, "offsets");
 
-  tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.dendro_merges);
+  tk_eval_eph_get(L, i_eph, result.dendro_merges);
   lua_setfield(L, -2, "merges");
 
   lua_pushinteger(L, (lua_Integer)result.n_steps);
   lua_setfield(L, -2, "n_steps");
 
-  tk_lua_get_ephemeron(L, TK_EVAL_EPH, ids);
+  tk_eval_eph_get(L, i_eph, ids);
   lua_setfield(L, -2, "ids");
 
-  tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.quality_curve);
+  tk_eval_eph_get(L, i_eph, result.quality_curve);
   lua_setfield(L, -2, "radius_curve");
 
-  tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.n_clusters_curve);
+  tk_eval_eph_get(L, i_eph, result.n_clusters_curve);
   lua_setfield(L, -2, "n_clusters_curve");
 
   if (result.auc_curve) {
-    tk_lua_get_ephemeron(L, TK_EVAL_EPH, result.auc_curve);
+    tk_eval_eph_get(L, i_eph, result.auc_curve);
     lua_setfield(L, -2, "auc_curve");
   }
 
@@ -1250,7 +1262,6 @@ static inline int tk_pvec_dendro_cut_lua (lua_State *L)
       n_clusters = assignments->a[i] + 1;
 
   tk_ivec_t *cluster_offsets = tk_ivec_create(L, 0);
-  tk_lua_add_ephemeron(L, TK_EVAL_EPH, -1, -1);
   int i_offsets = tk_lua_absindex(L, -1);
   tk_ivec_ensure(cluster_offsets, (uint64_t)(n_clusters + 1));
   cluster_offsets->n = (uint64_t)(n_clusters + 1);
@@ -1268,7 +1279,6 @@ static inline int tk_pvec_dendro_cut_lua (lua_State *L)
   }
 
   tk_ivec_t *cluster_members = tk_ivec_create(L, 0);
-  tk_lua_add_ephemeron(L, TK_EVAL_EPH, -1, -1);
   int i_members = tk_lua_absindex(L, -1);
   tk_ivec_ensure(cluster_members, n_samples);
   cluster_members->n = n_samples;
@@ -1441,8 +1451,11 @@ static inline int tk_dendro_iter_next(lua_State *L) {
   tk_iumap_destroy(cluster_remap);
   iter->current_step++;
   lua_pushinteger(L, (lua_Integer)step);
-  tk_lua_get_ephemeron(L, TK_EVAL_EPH, iter->ids);
-  tk_lua_get_ephemeron(L, TK_EVAL_EPH, iter->assignments);
+  lua_getfenv(L, lua_upvalueindex(1));
+  int eph = lua_gettop(L);
+  tk_eval_eph_get(L, eph, iter->ids);
+  tk_eval_eph_get(L, eph, iter->assignments);
+  lua_remove(L, eph);
   return 3;
 }
 
@@ -1461,8 +1474,12 @@ static inline int tk_dendro_iter_lua(lua_State *L) {
   if (n_samples == 0 || n_samples > offsets->n)
     tk_error(L, "tk_dendro_iter: invalid dendro_offsets structure", EINVAL);
   uint64_t n_steps = all_merges ? merges->n : (offsets->n > n_samples ? offsets->n - n_samples : 0);
-  tk_dendro_iter_t *iter = tk_lua_newuserdata(L, tk_dendro_iter_t, TK_EVAL_EPH, NULL, tk_dendro_iter_gc);
+  tk_dendro_iter_t *iter = tk_lua_newuserdata(L, tk_dendro_iter_t, "tk_eval_eph", NULL, tk_dendro_iter_gc);
   int iter_idx = lua_gettop(L);
+  lua_newtable(L);
+  lua_setfenv(L, iter_idx);
+  lua_getfenv(L, iter_idx);
+  int eph = lua_gettop(L);
   iter->offsets = offsets;
   iter->merges = merges;
   iter->n_samples = n_samples;
@@ -1471,19 +1488,20 @@ static inline int tk_dendro_iter_lua(lua_State *L) {
   iter->current_merge_idx = 0;
   iter->all_merges = all_merges;
   iter->ids = tk_ivec_create(L, n_samples);
-  tk_lua_add_ephemeron(L, TK_EVAL_EPH, iter_idx, -1);
+  tk_eval_eph_add(L, eph);
   lua_pop(L, 1);
   iter->raw_assignments = tk_ivec_create(L, n_samples);
-  tk_lua_add_ephemeron(L, TK_EVAL_EPH, iter_idx, -1);
+  tk_eval_eph_add(L, eph);
   lua_pop(L, 1);
   iter->assignments = tk_ivec_create(L, n_samples);
-  tk_lua_add_ephemeron(L, TK_EVAL_EPH, iter_idx, -1);
+  tk_eval_eph_add(L, eph);
   lua_pop(L, 1);
   iter->absorbed_to_surviving = tk_iumap_create(L, 0);
-  tk_lua_add_ephemeron(L, TK_EVAL_EPH, iter_idx, -1);
+  tk_eval_eph_add(L, eph);
   lua_pop(L, 1);
   iter->cluster_sizes = tk_iumap_create(L, 0);
-  tk_lua_add_ephemeron(L, TK_EVAL_EPH, iter_idx, -1);
+  tk_eval_eph_add(L, eph);
+  lua_pop(L, 1);
   lua_pop(L, 1);
   lua_pushvalue(L, iter_idx);
   lua_pushcclosure(L, tk_dendro_iter_next, 1);

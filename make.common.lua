@@ -1,6 +1,6 @@
 local env = {
   name = "santoku-learn",
-  version = "0.0.57-1",
+  version = "0.0.58-1",
   variable_prefix = "TK_LEARN",
   license = "MIT",
   public = true,
@@ -49,7 +49,7 @@ local env = {
   },
 }
 
-env.homepage = "https://github.com/treadwelllane/lua-" .. env.name
+env.homepage = "https://github.com/birchpointswe/lua-" .. env.name
 env.tarball = env.name .. "-" .. env.version .. ".tar.gz"
 env.download = env.homepage .. "/releases/download/" .. env.version .. "/" .. env.tarball
 
