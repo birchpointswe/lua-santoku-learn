@@ -1,6 +1,6 @@
 local env = {
   name = "santoku-learn",
-  version = "0.0.58-1",
+  version = "0.0.59-1",
   variable_prefix = "TK_LEARN",
   license = "MIT",
   public = true,
@@ -41,7 +41,7 @@ local env = {
   },
   dependencies = {
     "lua == 5.1",
-    "santoku >= 0.0.324-1",
+    "santoku >= 0.0.327-1",
     "santoku-matrix >= 0.0.306-1",
     "santoku-fs >= 0.0.43-1",
     "santoku-lpeg >= 0.0.1-1",
