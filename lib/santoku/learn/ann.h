@@ -14,7 +14,6 @@
 #define TK_ANN_BUCKETS (1 << TK_ANN_SUBSTR_BITS)
 
 #define TK_ANN_MT "tk_ann_flat_t"
-#define TK_ANN_EPH "tk_ann_flat_eph"
 
 typedef struct {
   int64_t *sorted_sids;
