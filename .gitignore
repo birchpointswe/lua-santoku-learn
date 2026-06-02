@@ -11,4 +11,13 @@ test/res/Eurlex-4K.jsonld
 test/res/Eurlex-4K.tar.gz
 test/res/eurlex57k/
 test/res/california-housing.csv
+test/res/conll2003.zip
+test/res/conll2003/
+test/res/20news-bydate.tar.gz
+test/res/california-housing.csv.gz
+test/res/eurlex57k.tar.gz
+test/res/imdb.50k.tar.gz
+test/res/mnist.70k.txt.gz
+test/res/aclImdb/
+test/res.bak/
 tmp*
