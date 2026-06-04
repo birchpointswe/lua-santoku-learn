@@ -270,7 +270,10 @@ static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t po
 
   if (c < 0x80) {
 
-    r.bytes[0] = (c >= 'A' && c <= 'Z') ? c + 32 : c;
+    if (c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r')
+      r.bytes[0] = ' ';
+    else
+      r.bytes[0] = (c >= 'A' && c <= 'Z') ? c + 32 : c;
     r.n_out = 1;
 
   } else if ((c & 0xE0) == 0xC0 && pos + 1 < len && ((uint8_t)in[pos + 1] & 0xC0) == 0x80) {
@@ -524,6 +527,32 @@ static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t po
   }
 
   return r;
+}
+
+// Full normalization of a byte buffer into `out` (caller-sized at >= len, since
+// this is contraction-only): per-codepoint fold (incl. whitespace-class -> space),
+// then collapse repeated spaces and trim leading/trailing whitespace. Returns the
+// output length.
+static inline size_t tk_text_normalize_buffer (const char *in, size_t len, uint8_t *out) {
+  size_t nlen = 0, i = 0;
+  int prev_space = 1; // treat start as space so leading whitespace is trimmed
+  while (i < len) {
+    tk_norm_result_t nr = tk_text_normalize_next(in, i, len);
+    i += (size_t)nr.n_in;
+    for (int bi = 0; bi < nr.n_out; bi++) {
+      uint8_t b = nr.bytes[bi];
+      if (b == ' ') {
+        if (prev_space) continue;
+        out[nlen++] = ' ';
+        prev_space = 1;
+      } else {
+        out[nlen++] = b;
+        prev_space = 0;
+      }
+    }
+  }
+  if (nlen > 0 && out[nlen - 1] == ' ') nlen--; // trim trailing
+  return nlen;
 }
 
 #endif

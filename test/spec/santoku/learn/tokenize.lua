@@ -55,6 +55,19 @@ test("tokenize", function ()
     assert(o_up:get(1) == o_lo:get(1))
   end)
 
+  test("normalize collapses whitespace and trims", function ()
+    local map, o1, t1 = csr.tokenize({
+      texts = { "hi there" }, ngram_min = 3, ngram_max = 3, normalize = true, n_samples = 1,
+    })
+    local _, o2, t2 = csr.tokenize({
+      texts = { "  hi\t\t there \n " }, ngram_min = 3, ngram_max = 3, normalize = true,
+      ngram_map = map, n_samples = 1,
+    })
+    assert(o1:get(1) > 0)
+    assert(o1:get(1) == o2:get(1))
+    for i = 0, t1:size() - 1 do assert(t1:get(i) == t2:get(i)) end
+  end)
+
   test("terminals add features", function ()
     local _, o_no = csr.tokenize({ texts = { "hello" }, ngram_min = 3, ngram_max = 3, n_samples = 1 })
     local _, o_t = csr.tokenize({

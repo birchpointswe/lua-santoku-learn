@@ -17,7 +17,7 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   data = { ttr = 0.8, tvr = 0.1, max = nil },
-  emb = { n_landmarks = 1024 * 16, trace_tol = 0.01, kernel = { "geolaplace", "ntk", "cosine", "nngp", "expcos" } },
+  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "geolaplace", "cosine", "expcos", "angular", "matern32", "matern52", "rq", "arccos1" } },
   ridge = { lambda = { def = 1.2765e-01 }, search_trials = 100 },
 }
 

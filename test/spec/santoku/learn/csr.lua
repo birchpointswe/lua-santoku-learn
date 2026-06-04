@@ -1,6 +1,7 @@
 local csr = require("santoku.learn.csr")
 local aho = require("santoku.learn.aho")
 local ivec = require("santoku.ivec")
+local cvec = require("santoku.cvec")
 local test = require("santoku.test")
 
 test("csr", function ()
@@ -208,20 +209,95 @@ test("csr", function ()
       assert(n_tokens > 0)
     end)
 
-    test("wide span types (>12)", function ()
+    test("too many span types without markers errors", function ()
       local texts = { "foo bar" }
       local doc = ivec.create({ 0, 1 })
       local ss = ivec.create({ 0 })
       local se = ivec.create({ 3 })
-      local types = ivec.create({ 20 })
-      local _, offsets, tokens, _, n_tokens = csr.tokenize_annotated({
-        texts = texts, doc_span_offsets = doc,
-        span_starts = ss, span_ends = se, span_types = types,
-        ngram_min = 3, ngram_max = 3,
+      local types = ivec.create({ 20 }) -- needs 45 marker bytes; default has 27
+      local ok = pcall(function ()
+        csr.tokenize_annotated({
+          texts = texts, doc_span_offsets = doc,
+          span_starts = ss, span_ends = se, span_types = types,
+          ngram_min = 3, ngram_max = 3,
+        })
+      end)
+      assert(not ok)
+    end)
+
+    test("supplied markers string works", function ()
+      local texts = { "foo bar baz" }
+      local doc = ivec.create({ 0, 1 })
+      local ss = ivec.create({ 0 })
+      local se = ivec.create({ 3 })
+      local types = ivec.create({ 0 })
+      local markers = string.char(200, 201, 202, 203, 204)
+      local _, offsets, tokens = csr.tokenize_annotated({
+        texts = texts, doc_span_offsets = doc, span_starts = ss, span_ends = se,
+        span_types = types, markers = markers, ngram_min = 3, ngram_max = 3,
       })
       assert(offsets:size() == 2)
       assert(tokens:size() > 0)
-      assert(n_tokens > 0)
+    end)
+
+    test("cvec input matches texts", function ()
+      local text = "hello world"
+      local doc = ivec.create({ 0, 1 })
+      local ss = ivec.create({ 0 })
+      local se = ivec.create({ 5 })
+      local _, o1, t1 = csr.tokenize_annotated({
+        texts = { text }, doc_span_offsets = doc,
+        span_starts = ss, span_ends = se, ngram_min = 3, ngram_max = 3,
+      })
+      local cv = cvec.from_raw(text)
+      local so = ivec.create({ 0, #text })
+      local _, o2, t2 = csr.tokenize_annotated({
+        cvec = cv, sequence_offsets = so, doc_span_offsets = doc,
+        span_starts = ss, span_ends = se, ngram_min = 3, ngram_max = 3,
+      })
+      assert(o1:get(1) == o2:get(1))
+      assert(t1:size() == t2:size())
+      for i = 0, t1:size() - 1 do assert(t1:get(i) == t2:get(i)) end
+    end)
+
+    test("collapse modes with context spans", function ()
+      local text = "John Smith works at Acme Corp"
+      local doc = ivec.create({ 0, 1 })
+      local fs = ivec.create({ 0 })
+      local fe = ivec.create({ 10 })   -- focus "John Smith"
+      local ft = ivec.create({ 0 })
+      local cdoc = ivec.create({ 0, 1 })
+      local cs = ivec.create({ 20 })
+      local ce = ivec.create({ 29 })   -- context "Acme Corp"
+      local ct = ivec.create({ 1 })
+      local function tok (mode)
+        local _, off = csr.tokenize_annotated({
+          texts = { text }, doc_span_offsets = doc,
+          span_starts = fs, span_ends = fe, span_types = ft,
+          context_offsets = cdoc, context_starts = cs, context_ends = ce, context_types = ct,
+          collapse = mode, ngram_min = 2, ngram_max = 2,
+        })
+        return off:get(1)
+      end
+      local none, mark, spans, all = tok("none"), tok("mark"), tok("spans"), tok("all")
+      assert(none > 0 and mark > 0 and spans > 0 and all > 0)
+      assert(all < mark)       -- all drops all text
+      assert(spans < mark)     -- spans drops context surface, mark keeps it
+      assert(mark > none)      -- mark adds context markers
+    end)
+
+    test("mark without context falls back to focus set", function ()
+      local text = "aaa bbb ccc"
+      local doc = ivec.create({ 0, 2 })       -- 2 focus spans
+      local ss = ivec.create({ 0, 8 })
+      local se = ivec.create({ 3, 11 })
+      local _, off, tokens = csr.tokenize_annotated({
+        texts = { text }, doc_span_offsets = doc,
+        span_starts = ss, span_ends = se,
+        collapse = "mark", ngram_min = 2, ngram_max = 2,
+      })
+      assert(off:size() == 3)
+      assert(tokens:size() > 0)
     end)
 
   end)
