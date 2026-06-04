@@ -17,7 +17,7 @@ hyperparameter search. Dense regression and sparse label prediction
 modes. ([doc/optimize.md](doc/optimize.md))
 
 **Hyperparameter Search** — GP-BO search with LHS initialization,
-cost-cooled Expected Improvement, and Latin Hypercube candidate
+Expected Improvement acquisition, and Latin Hypercube candidate
 generation. ([doc/optimize.md](doc/optimize.md))
 
 **Binary Quantization and ANN** — Multi-index hashing for

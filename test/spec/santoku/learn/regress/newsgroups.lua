@@ -9,17 +9,20 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
+
+
+
+
 local cfg = {
   data = { max = nil, tvr = 0.1 },
   tok = { ngram_min = 5, ngram_max = 5 },
-
-  emb = { n_landmarks = 1024*8, trace_tol = 0.01, kernel = { "cosine", "nngp", "ntk", "expcos", "geolaplace" } },
+  emb = { n_landmarks = 1024 * 16, trace_tol = 0.01, kernel = { "cosine", "nngp", "ntk", "expcos", "geolaplace" } },
   ridge = {
-    lambda = { def = 5.49e-02 },
-    propensity_a = { def = 0.16 },
-    propensity_b = { def = 2.06 },
+    lambda = { def = 7.8684e-02 },
+    propensity_a = { def = 3.1706 },
+    propensity_b = { def = 7.7209 },
     classes = 20,
-    search_trials = 0,
+    search_trials = 100,
     k = 1,
   },
 }

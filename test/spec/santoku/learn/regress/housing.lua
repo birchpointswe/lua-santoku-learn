@@ -11,11 +11,14 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
+
+
+
+
 local cfg = {
   data = { ttr = 0.8, tvr = 0.1, max = nil },
-
-  emb = { n_landmarks = 1024*8, trace_tol = 0.01, kernel = { "ntk", "cosine", "nngp", "expcos", "geolaplace" } },
-  ridge = { lambda = { def = 1.38e-01 }, search_trials = 0 },
+  emb = { n_landmarks = 1024 * 16, trace_tol = 0.01, kernel = { "geolaplace", "ntk", "cosine", "nngp", "expcos" } },
+  ridge = { lambda = { def = 1.2765e-01 }, search_trials = 100 },
 }
 
 test("housing regressor", function ()
@@ -49,6 +52,17 @@ test("housing regressor", function ()
   local offsets, tokens, values = merge_features(
     train.bit_offsets, train.bit_neighbors, train.continuous, train.n)
   local std_scores = csr.standardize(offsets, tokens, values, nil, n_tokens)
+
+
+
+
+  local ss = csr.block_sumsq(tokens, values, { 0, n_cat, n_tokens })
+  local ss_cat, ss_cont = ss:get(0), ss:get(1)
+  local block = fvec.create(n_tokens)
+  block:fill(ss_cat > 0 and math.sqrt(train.n / ss_cat) or 0.0, 0, n_cat)
+  block:fill(ss_cont > 0 and math.sqrt(train.n / ss_cont) or 0.0, n_cat, n_tokens)
+  csr.standardize(offsets, tokens, values, block)
+  std_scores:scalev(block)
 
   local val_off, val_tok, val_val = merge_features(
     validate.bit_offsets, validate.bit_neighbors, validate.continuous, validate.n)
