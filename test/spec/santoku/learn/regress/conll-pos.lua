@@ -13,7 +13,7 @@ io.stdout:setvbuf("line")
 local cfg = {
   data = { dir = "test/res/conll2003", max = nil },
   tok = { ngram_min = 3, ngram_max = 5, collapse = "none" },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "cosine", "nngp", "ntk", "expcos", "geolaplace" } },
+  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "cosine", "expcos", "geolaplace", "angular", "matern32", "matern52", "rq", "arccos1" } },
   ridge = { lambda = { def = 2.7e-03 }, search_trials = 100 },
 }
 
