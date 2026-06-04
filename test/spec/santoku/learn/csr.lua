@@ -171,5 +171,58 @@ test("csr", function ()
       assert(n_tokens > 0)
     end)
 
+    test("collapse modes differ", function ()
+      local texts = { "foo bar baz qux" }
+      local doc = ivec.create({ 0, 2 })
+      local ss = ivec.create({ 0, 8 })
+      local se = ivec.create({ 3, 11 })
+      local function total (mode)
+        local _, off = csr.tokenize_annotated({
+          texts = texts, doc_span_offsets = doc,
+          span_starts = ss, span_ends = se,
+          ngram_min = 3, ngram_max = 3, collapse = mode,
+        })
+        return off:get(2)
+      end
+      local none = total("none")
+      assert(none > 0)
+      assert(total("focus") > 0)
+      assert(total("all") > 0)
+      assert(total("all") < none)
+      assert(total("spans") ~= none)
+    end)
+
+    test("span_types", function ()
+      local texts = { "foo bar" }
+      local doc = ivec.create({ 0, 2 })
+      local ss = ivec.create({ 0, 4 })
+      local se = ivec.create({ 3, 7 })
+      local types = ivec.create({ 0, 1 })
+      local _, offsets, tokens, _, n_tokens = csr.tokenize_annotated({
+        texts = texts, doc_span_offsets = doc,
+        span_starts = ss, span_ends = se, span_types = types,
+        ngram_min = 3, ngram_max = 3,
+      })
+      assert(offsets:size() == 3)
+      assert(tokens:size() > 0)
+      assert(n_tokens > 0)
+    end)
+
+    test("wide span types (>12)", function ()
+      local texts = { "foo bar" }
+      local doc = ivec.create({ 0, 1 })
+      local ss = ivec.create({ 0 })
+      local se = ivec.create({ 3 })
+      local types = ivec.create({ 20 })
+      local _, offsets, tokens, _, n_tokens = csr.tokenize_annotated({
+        texts = texts, doc_span_offsets = doc,
+        span_starts = ss, span_ends = se, span_types = types,
+        ngram_min = 3, ngram_max = 3,
+      })
+      assert(offsets:size() == 2)
+      assert(tokens:size() > 0)
+      assert(n_tokens > 0)
+    end)
+
   end)
 end)

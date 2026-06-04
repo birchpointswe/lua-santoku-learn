@@ -232,23 +232,6 @@ static int tm_csr_sort_csr_desc (lua_State *L)
   return 2;
 }
 
-static inline size_t tm_csr_pack_ngrams (
-  const char *text, size_t len, int n, int64_t *out)
-{
-  assert(n >= 1 && n <= 8);
-  if (len < (size_t)n) return 0;
-  uint64_t mask = (n < 8) ? ((1ULL << (n * 8)) - 1) : ~0ULL;
-  uint64_t id = 0;
-  for (int i = 0; i < n - 1; i++)
-    id = (id << 8) | (uint8_t)text[i];
-  size_t count = len - (size_t)n + 1;
-  for (size_t i = 0; i < count; i++) {
-    id = ((id << 8) | (uint8_t)text[(size_t)(n - 1) + i]) & mask;
-    out[i] = (int64_t)id;
-  }
-  return count;
-}
-
 static inline uint64_t tm_csr_seq_elem (const void *data, size_t idx, int elem_bytes) {
   switch (elem_bytes) {
     case 1: return ((const uint8_t *)data)[idx];
@@ -271,7 +254,8 @@ static inline size_t tm_csr_pack_ngrams_w (
     for (int i = 0; i < n - 1; i++)
       id = (id << elem_bits) | tm_csr_seq_elem(data, (size_t)i, eb);
     for (size_t i = 0; i < count; i++) {
-      id = ((id << elem_bits) | tm_csr_seq_elem(data, (size_t)(n - 1) + i, eb)) & mask;
+      uint64_t e = tm_csr_seq_elem(data, (size_t)(n - 1) + i, eb);
+      id = (elem_bits >= 64) ? e : (((id << elem_bits) | e) & mask);
       out[i] = (int64_t)id;
     }
   } else {
@@ -291,42 +275,21 @@ static inline size_t tm_csr_pack_ngrams_w (
   return count;
 }
 
-static inline size_t tm_csr_pack_ngrams_normalize (
-  const char *text, size_t len, int ng_min, int ng_max, int64_t *out)
-{
-  uint64_t ids[8] = {0};
-  uint64_t masks[8];
-  int fed[8] = {0};
-  for (int n = ng_min; n <= ng_max; n++)
-    masks[n - 1] = (n < 8) ? ((1ULL << (n * 8)) - 1) : ~0ULL;
-  size_t total = 0;
-  size_t i = 0;
-  while (i < len) {
-    tk_norm_result_t nr = tk_text_normalize_next(text, i, len);
-    for (int bi = 0; bi < nr.n_out; bi++) {
-      uint8_t b = nr.bytes[bi];
-      for (int n = ng_min; n <= ng_max; n++) {
-        ids[n - 1] = ((ids[n - 1] << 8) | b) & masks[n - 1];
-        fed[n - 1]++;
-        if (fed[n - 1] >= n)
-          out[total++] = (int64_t)ids[n - 1];
-      }
-    }
-    i += (size_t)nr.n_in;
-  }
-  return total;
-}
-
 static inline size_t tm_csr_do_pack (
   const char *str, size_t len, int64_t ngram_min, int64_t ngram_max,
-  bool normalize, int elem_bits, int64_t *out)
+  bool normalize, int elem_bits, int64_t *out, uint8_t *norm)
 {
-  if (elem_bits == 8) {
-    if (normalize)
-      return tm_csr_pack_ngrams_normalize(str, len, (int)ngram_min, (int)ngram_max, out);
+  if (elem_bits == 8 && normalize) {
+    size_t nlen = 0, i = 0;
+    while (i < len) {
+      tk_norm_result_t nr = tk_text_normalize_next(str, i, len);
+      for (int bi = 0; bi < nr.n_out; bi++)
+        norm[nlen++] = nr.bytes[bi];
+      i += (size_t)nr.n_in;
+    }
     size_t count = 0;
     for (int64_t ng = ngram_min; ng <= ngram_max; ng++)
-      count += tm_csr_pack_ngrams(str, len, (int)ng, out + count);
+      count += tm_csr_pack_ngrams_w(norm, nlen, (int)ng, 8, out + count);
     return count;
   }
   size_t count = 0;
@@ -355,10 +318,11 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
     #pragma omp parallel
     {
       int64_t *packed_buf = (int64_t *)malloc(buf_size * sizeof(int64_t));
+      uint8_t *norm_buf = (uint8_t *)malloc(max_len ? max_len : 1);
       #pragma omp for schedule(dynamic)
       for (int64_t s = 0; s < n_samples; s++) {
         if (!strs[s] || !lens[s]) continue;
-        size_t count = tm_csr_do_pack(strs[s], lens[s], ngram_min, ngram_max, normalize, elem_bits, packed_buf);
+        size_t count = tm_csr_do_pack(strs[s], lens[s], ngram_min, ngram_max, normalize, elem_bits, packed_buf, norm_buf);
         int64_t nv = 0;
         for (size_t i = 0; i < count; i++) {
           uint32_t iter = tk_iumap_get(ngram_map, packed_buf[i]);
@@ -371,16 +335,18 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
         sample_counts[s] = unique;
       }
       free(packed_buf);
+      free(norm_buf);
     }
   } else if (raw_mode) {
     lua_pop(L, 1);
     #pragma omp parallel
     {
       int64_t *packed_buf = (int64_t *)malloc(buf_size * sizeof(int64_t));
+      uint8_t *norm_buf = (uint8_t *)malloc(max_len ? max_len : 1);
       #pragma omp for schedule(dynamic)
       for (int64_t s = 0; s < n_samples; s++) {
         if (!strs[s] || !lens[s]) continue;
-        size_t count = tm_csr_do_pack(strs[s], lens[s], ngram_min, ngram_max, normalize, elem_bits, packed_buf);
+        size_t count = tm_csr_do_pack(strs[s], lens[s], ngram_min, ngram_max, normalize, elem_bits, packed_buf, norm_buf);
         ks_introsort(tk_ivec_asc, count, packed_buf);
         int64_t unique = 0;
         for (size_t i = 0; i < count; i++)
@@ -388,6 +354,7 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
         sample_counts[s] = unique;
       }
       free(packed_buf);
+      free(norm_buf);
     }
     lua_pushnil(L);
     map_idx = lua_gettop(L);
@@ -401,10 +368,11 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
       tk_iumap_t *lm = tk_iumap_create(NULL, 0);
       local_maps[tid] = lm;
       int64_t *packed_buf = (int64_t *)malloc(buf_size * sizeof(int64_t));
+      uint8_t *norm_buf = (uint8_t *)malloc(max_len ? max_len : 1);
       #pragma omp for schedule(dynamic)
       for (int64_t s = 0; s < n_samples; s++) {
         if (!strs[s] || !lens[s]) continue;
-        size_t count = tm_csr_do_pack(strs[s], lens[s], ngram_min, ngram_max, normalize, elem_bits, packed_buf);
+        size_t count = tm_csr_do_pack(strs[s], lens[s], ngram_min, ngram_max, normalize, elem_bits, packed_buf, norm_buf);
         for (size_t i = 0; i < count; i++) {
           int absent;
           tk_iumap_put(lm, packed_buf[i], &absent);
@@ -416,6 +384,7 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
         sample_counts[s] = unique;
       }
       free(packed_buf);
+      free(norm_buf);
     }
     uint32_t est = 0;
     for (int t = 0; t < max_threads; t++)
@@ -462,10 +431,11 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
   #pragma omp parallel
   {
     int64_t *packed_buf = (int64_t *)malloc(buf_size * sizeof(int64_t));
+    uint8_t *norm_buf = (uint8_t *)malloc(max_len ? max_len : 1);
     #pragma omp for schedule(dynamic)
     for (int64_t s = 0; s < n_samples; s++) {
       if (!strs[s] || !lens[s]) continue;
-      size_t count = tm_csr_do_pack(strs[s], lens[s], ngram_min, ngram_max, normalize, elem_bits, packed_buf);
+      size_t count = tm_csr_do_pack(strs[s], lens[s], ngram_min, ngram_max, normalize, elem_bits, packed_buf, norm_buf);
       int64_t nv;
       if (raw_mode) {
         ks_introsort(tk_ivec_asc, count, packed_buf);
@@ -492,6 +462,7 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
       }
     }
     free(packed_buf);
+    free(norm_buf);
   }
   lua_pushvalue(L, map_idx);
   lua_pushvalue(L, map_idx + 1);
@@ -505,15 +476,8 @@ static int tm_csr_tokenize (lua_State *L)
 {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
-  int64_t ngram = (int64_t)tk_lua_foptunsigned(L, 1, "tokenize", "ngram", 0);
-  int64_t ngram_min, ngram_max;
-  if (ngram) {
-    ngram_min = ngram;
-    ngram_max = ngram;
-  } else {
-    ngram_min = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "ngram_min");
-    ngram_max = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "ngram_max");
-  }
+  int64_t ngram_min = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "ngram_min");
+  int64_t ngram_max = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "ngram_max");
   if (ngram_min < 1 || ngram_min > ngram_max)
     return luaL_error(L, "tokenize: need 1 <= ngram_min <= ngram_max");
   bool do_normalize = tk_lua_foptboolean(L, 1, "tokenize", "normalize", false);
@@ -525,26 +489,10 @@ static int tm_csr_tokenize (lua_State *L)
     lua_getfield(L, 1, "sequence_offsets");
     tk_ivec_t *seq_off = tk_ivec_peek(L, -1, "sequence_offsets");
     lua_pop(L, 1);
-    int elem_bits;
-    const void *seq_data;
-    tk_ivec_t *seq_iv = tk_ivec_peekopt(L, -1);
-    if (seq_iv) {
-      seq_data = seq_iv->a;
-      elem_bits = 64;
-    } else {
-      tk_svec_t *seq_sv = tk_svec_peekopt(L, -1);
-      if (seq_sv) {
-        seq_data = seq_sv->a;
-        elem_bits = 32;
-      } else {
-        tk_cvec_t *seq_cv = tk_cvec_peek(L, -1, "sequences");
-        seq_data = seq_cv->a;
-        elem_bits = 8;
-      }
-    }
+    tk_cvec_t *seq_cv = tk_cvec_peek(L, -1, "sequences");
+    const void *seq_data = seq_cv->a;
+    int elem_bits = 8;
     lua_pop(L, 1);
-    if (elem_bits == 8 && ngram_max > 8)
-      return luaL_error(L, "tokenize: ngram_max <= 8 for byte sequences");
     const char **strs = (const char **)malloc((uint64_t)n_samples * sizeof(const char *));
     size_t *lens = (size_t *)malloc((uint64_t)n_samples * sizeof(size_t));
     size_t max_len = 0;
@@ -562,8 +510,6 @@ static int tm_csr_tokenize (lua_State *L)
   }
   lua_pop(L, 1);
 
-  if (ngram_max > 8)
-    return luaL_error(L, "tokenize: ngram_max <= 8 for text");
   lua_getfield(L, 1, "texts");
   const char **strs = (const char **)malloc((uint64_t)n_samples * sizeof(const char *));
   size_t *lens = (size_t *)malloc((uint64_t)n_samples * sizeof(size_t));
@@ -658,8 +604,8 @@ static int tm_csr_tokenize_annotated (lua_State *L)
   luaL_checktype(L, 1, LUA_TTABLE);
   int64_t ngram_min = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize_annotated", "ngram_min");
   int64_t ngram_max = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize_annotated", "ngram_max");
-  if (ngram_min < 1 || ngram_max > 8 || ngram_min > ngram_max)
-    return luaL_error(L, "tokenize_annotated: need 1 <= ngram_min <= ngram_max <= 8");
+  if (ngram_min < 1 || ngram_min > ngram_max)
+    return luaL_error(L, "tokenize_annotated: need 1 <= ngram_min <= ngram_max");
   bool do_normalize = tk_lua_foptboolean(L, 1, "tokenize_annotated", "normalize", false);
   bool terminals = tk_lua_foptboolean(L, 1, "tokenize_annotated", "terminals", false);
   lua_getfield(L, 1, "collapse");
@@ -683,6 +629,7 @@ static int tm_csr_tokenize_annotated (lua_State *L)
   lua_getfield(L, 1, "span_types");
   tk_ivec_t *span_types = tk_ivec_peekopt(L, -1);
   lua_pop(L, 1);
+
   lua_getfield(L, 1, "texts");
   luaL_checktype(L, -1, LUA_TTABLE);
   int texts_idx = lua_gettop(L);
@@ -805,7 +752,7 @@ static int tm_csr_tokenize_annotated (lua_State *L)
       else
         extra = (terminals ? 4 : 2);
       for (int64_t i = ds; i < de; i++)
-        total_elems += (collapse == COL_ALL ? 0 : 4 * text_lens[d]) + extra;
+        total_elems += (collapse == COL_ALL ? 0 : text_lens[d]) + extra;
     }
     uint16_t *pool = (uint16_t *)malloc((total_elems ? total_elems : 1) * sizeof(uint16_t));
     uint16_t *p = pool;
@@ -1338,6 +1285,41 @@ static int tm_csr_standardize (lua_State *L)
   return 1;
 }
 
+// Sum of squared values per token-block. bounds is a table of ascending cut points
+// {b0, b1, ..., bn}; returns dvec[n] with out[k] = sum of values[j]^2 for tokens in [bk, bk+1).
+static int tm_csr_block_sumsq (lua_State *L)
+{
+  uint64_t nnz;
+  const int32_t *toks = tk_peek_tokens(L, 1, &nnz);
+  if (!toks)
+    return luaL_error(L, "block_sumsq: tokens expected svec or ivec");
+  tk_fvec_t *values_f = tk_fvec_peekopt(L, 2);
+  tk_dvec_t *values_d = values_f ? NULL : tk_dvec_peekopt(L, 2);
+  if (!values_f && !values_d)
+    return luaL_error(L, "block_sumsq: values expected fvec or dvec");
+  luaL_checktype(L, 3, LUA_TTABLE);
+  int nb = (int) lua_objlen(L, 3) - 1;
+  if (nb < 1)
+    return luaL_error(L, "block_sumsq: bounds needs >= 2 entries");
+  int64_t *bounds = (int64_t *) malloc((size_t) (nb + 1) * sizeof(int64_t));
+  for (int b = 0; b <= nb; b++) {
+    lua_rawgeti(L, 3, b + 1);
+    bounds[b] = (int64_t) lua_tointeger(L, -1);
+    lua_pop(L, 1);
+  }
+  tk_dvec_t *out = tk_dvec_create(L, (uint64_t) nb);
+  out->n = (uint64_t) nb;
+  memset(out->a, 0, (size_t) nb * sizeof(double));
+  for (uint64_t j = 0; j < nnz; j++) {
+    int64_t tok = (int64_t) toks[j];
+    double v = values_f ? (double) values_f->a[j] : values_d->a[j];
+    for (int b = 0; b < nb; b++)
+      if (tok >= bounds[b] && tok < bounds[b + 1]) { out->a[b] += v * v; break; }
+  }
+  free(bounds);
+  return 1;
+}
+
 static luaL_Reg tm_csr_fns[] = {
   { "seq_select", tm_csr_seq_select },
   { "label_union", tm_csr_label_union },
@@ -1353,6 +1335,7 @@ static luaL_Reg tm_csr_fns[] = {
   { "gather_rows", tm_csr_gather_rows },
   { "merge", tm_csr_merge },
   { "standardize", tm_csr_standardize },
+  { "block_sumsq", tm_csr_block_sumsq },
   { NULL, NULL }
 };
 

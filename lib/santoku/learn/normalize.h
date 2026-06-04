@@ -257,6 +257,11 @@ typedef struct {
   int n_in;
 } tk_norm_result_t;
 
+// INVARIANT: contraction-only. Every step emits no more bytes than it consumes
+// (n_out <= n_in). Downstream buffer sizing relies on this at 1x input length:
+// tm_csr_do_pack's normalize scratch, tokenize_core's buf_size, and the wide
+// annotated pool. If an EXPANDING mapping (n_out > n_in) is ever added, add
+// matching headroom at all those sites or they overflow.
 static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t pos, size_t len) {
   tk_norm_result_t r = {0};
   r.n_out = 0;

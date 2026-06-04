@@ -566,4 +566,85 @@ M.read_snli = function (dir, max, tvr)
   return train, dev, test
 end
 
+local conll_types = { PER = 0, ORG = 1, LOC = 2, MISC = 3 }
+local conll_type_names = { [0] = "PER", [1] = "ORG", [2] = "LOC", [3] = "MISC" }
+
+local function read_conll_file (fp, pos_map, max)
+  local texts, sent_tokens, sent_ents = {}, {}, {}
+  local n = 0
+  local words, poss, ners = {}, {}, {}
+  local function flush ()
+    if #words == 0 then return end
+    if max and n >= max then return "stop" end
+    local parts, toks = {}, {}
+    local off = 0
+    for i = 1, #words do
+      if i > 1 then parts[#parts + 1] = " "; off = off + 1 end
+      local w = words[i]
+      local s = off
+      parts[#parts + 1] = w
+      off = off + #w
+      local pid = pos_map[poss[i]]
+      if not pid then pid = pos_map.n; pos_map[poss[i]] = pid; pos_map.n = pid + 1 end
+      toks[i] = { s = s, e = off, pos = pid }
+    end
+    local ents = {}
+    local ct, cs, ce
+    for i = 1, #words do
+      local tag = ners[i]
+      local bio = tag:sub(1, 1)
+      local typ = conll_types[tag:sub(3)]
+      if bio == "B" then
+        if ct then ents[#ents + 1] = { s = cs, e = ce, t = ct } end
+        ct, cs, ce = typ, toks[i].s, toks[i].e
+      elseif bio == "I" and ct and typ == ct then
+        ce = toks[i].e
+      else
+        if ct then ents[#ents + 1] = { s = cs, e = ce, t = ct }; ct = nil end
+        if bio == "I" and typ then ct, cs, ce = typ, toks[i].s, toks[i].e end
+      end
+    end
+    if ct then ents[#ents + 1] = { s = cs, e = ce, t = ct } end
+    n = n + 1
+    texts[n] = table.concat(parts)
+    sent_tokens[n] = toks
+    sent_ents[n] = ents
+    words, poss, ners = {}, {}, {}
+  end
+  for line in fs.lines(fp) do
+    if line == "" then
+      if flush() == "stop" then break end
+    elseif line:sub(1, 9) == "-DOCSTART" then
+      words, poss, ners = {}, {}, {}
+    else
+      local w, p, _, nr = line:match("^(%S+)%s+(%S+)%s+(%S+)%s+(%S+)")
+      if w then
+        words[#words + 1] = w
+        poss[#poss + 1] = p
+        ners[#ners + 1] = nr
+      end
+    end
+  end
+  if not (max and n >= max) then flush() end
+  return { n = n, texts = texts, sent_tokens = sent_tokens, sent_ents = sent_ents }
+end
+
+M.read_conll2003 = function (dir, max)
+  local pos_map = { n = 0 }
+  local train = read_conll_file(dir .. "/train.txt", pos_map, max)
+  local dev = read_conll_file(dir .. "/valid.txt", pos_map, max)
+  local test = read_conll_file(dir .. "/test.txt", pos_map, max)
+  local pos_names = {}
+  for k, v in pairs(pos_map) do
+    if k ~= "n" then pos_names[v] = k end
+  end
+  for _, s in ipairs({ train, dev, test }) do
+    s.n_pos = pos_map.n
+    s.pos_names = pos_names
+    s.n_types = 4
+    s.type_names = conll_type_names
+  end
+  return train, dev, test
+end
+
 return M

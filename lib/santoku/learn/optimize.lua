@@ -209,8 +209,6 @@ local search = function (args)
   local each_cb = args.each
   local skip_final = args.skip_final
   local constrain_fn = args.constrain
-  local cost_fn = args.cost_fn
-  local cost_beta = args.cost_beta or 0.0
   local n_candidates = args.n_candidates or 500
   local n_hyper_restarts = args.n_hyper_restarts or 20
   local best_score = -num.huge
@@ -264,7 +262,6 @@ local search = function (args)
     n_initial = n_initial + 1
   end
   local cand_flat = n_dims > 0 and dvec.create(n_candidates * n_dims) or nil
-  local cand_costs = (n_dims > 0 and cost_fn and cost_beta > 0) and dvec.create(n_candidates) or nil
   local ei_buf
 
   for t = 1, trials do
@@ -303,14 +300,8 @@ local search = function (args)
         for j, name in ipairs(search_dims) do
           cand_flat:set(base + j - 1, samplers[name].normalize(p[name]))
         end
-        if cand_costs then cand_costs:set(i - 1, cost_fn(p)) end
       end
       ei_buf = gp.suggest(X_obs, Y_obs, n_dims, cand_flat, n_candidates, n_hyper_restarts, ei_buf)
-      if cand_costs then
-        local _, cmax = cand_costs:max()
-        if cmax > 0 then cand_costs:scale(1.0 / cmax) end
-        ei_buf:scalev(cand_costs:clamp(1e-12, 1.0):pow(-cost_beta))
-      end
       local _, best_c = ei_buf:max()
       params = {}
       for i, name in ipairs(search_dims) do
@@ -477,23 +468,38 @@ M.krr = function (args)
     targets = args.targets, n_targets = args.n_targets,
   }
   if use_tile_search then
-    local params = sample_params(samplers, param_names, nil, true)
-    spectral_args.kernel = params.kernel
-    spectral_args.tile_labels = tile_labels
-    spectral_args.tile_samples = args.tile_samples
-    spectral_args.chol_buf = args.chol_buf
-    spectral_args.pqty_buf = args.pqty_buf
-    local _, sp_enc, gram = spectral.encode(spectral_args)
-    local val_codes
-    if args.val_encode then
-      val_codes = args.val_encode(sp_enc)
-    else
-      val_codes = sp_enc:encode({
-        offsets = args.val_offsets, tokens = args.val_tokens,
-        values = args.val_values, n_samples = args.val_n_samples,
-      })
+    -- Lazy per-kernel tiled grams. Each kernel gets its own PQtY (internal alloc, or a
+    -- per-kernel mmap when args.pqty_buf is a factory fn(kname)->fvec); chol_buf/w_buf stay
+    -- shared (chol is transient per encode; w is only used for the final winning solve).
+    local kernel_data = {}
+    local function pqty_for (kname)
+      if type(args.pqty_buf) == "function" then return args.pqty_buf(kname) end
+      return args.pqty_buf
     end
-    gram:prepare(val_codes, args.val_n_samples)
+    local function ensure_kernel (kname)
+      local kd = kernel_data[kname]
+      if kd then return kd end
+      spectral_args.kernel = kname
+      spectral_args.tile_labels = tile_labels
+      spectral_args.tile_samples = args.tile_samples
+      spectral_args.chol_buf = args.chol_buf
+      spectral_args.pqty_buf = pqty_for(kname)
+      local _, sp_enc, gram = spectral.encode(spectral_args)
+      local val_codes
+      if args.val_encode then
+        val_codes = args.val_encode(sp_enc)
+      else
+        val_codes = sp_enc:encode({
+          offsets = args.val_offsets, tokens = args.val_tokens,
+          values = args.val_values, n_samples = args.val_n_samples,
+        })
+      end
+      gram:prepare(val_codes, args.val_n_samples)
+      kd = { sp_enc = sp_enc, gram = gram, val_codes = val_codes }
+      kernel_data[kname] = kd
+      collectgarbage("collect")
+      return kd
+    end
     local trial_fn = args.trial_fn or function(g, p)
       local f1, p2, r = g:label_accuracy(p.lambda, k,
         p.propensity_a, p.propensity_b,
@@ -503,17 +509,18 @@ M.krr = function (args)
     local _, best_params = search({
       param_names = param_names, samplers = samplers,
       trials = args.search_trials or 30,
-      trial_fn = function(p) return trial_fn(gram, p) end,
+      trial_fn = function(p) return trial_fn(ensure_kernel(p.kernel).gram, p) end,
       each = args.each, skip_final = true,
     })
+    local best_kd = ensure_kernel(best_params.kernel)
     local r = ridge.create({
-      gram = gram, lambda = best_params.lambda,
+      gram = best_kd.gram, lambda = best_params.lambda,
       propensity_a = not dense and best_params.propensity_a or nil,
       propensity_b = not dense and best_params.propensity_b or nil,
       w_buf = args.w_buf, tile_labels = tile_labels,
     })
-    if args.each then args.each({ event = "done", params = best_params, emb_d = sp_enc:dims() }) end
-    return sp_enc, r, val_codes, best_params
+    if args.each then args.each({ event = "done", params = best_params, emb_d = best_kd.sp_enc:dims() }) end
+    return best_kd.sp_enc, r, best_kd.val_codes, best_params
   elseif use_tile then
     local params = sample_params(samplers, param_names, nil, true)
     spectral_args.kernel = params.kernel
@@ -541,9 +548,12 @@ M.krr = function (args)
     if args.each then args.each({ event = "done", params = params, emb_d = sp_enc:dims() }) end
     return sp_enc, r, val_codes, params
   end
+  -- Lazy: build + cache (sp_enc, gram, val_codes) per kernel on first request, only for the
+  -- kernels the search actually visits (single-modality is the 1-kernel case of this).
   local kernel_data = {}
-  local encode_kernels = do_search and kernels or { samplers.kernel.center or kernels[1] }
-  for _, kname in ipairs(encode_kernels) do
+  local function ensure_kernel (kname)
+    local kd = kernel_data[kname]
+    if kd then return kd end
     spectral_args.kernel = kname
     local _, sp_enc, gram = spectral.encode(spectral_args)
     local val_codes
@@ -556,12 +566,14 @@ M.krr = function (args)
       })
     end
     gram:prepare(val_codes, args.val_n_samples)
-    kernel_data[kname] = { sp_enc = sp_enc, gram = gram, val_codes = val_codes }
+    kd = { sp_enc = sp_enc, gram = gram, val_codes = val_codes }
+    kernel_data[kname] = kd
+    collectgarbage("collect")
+    return kd
   end
-  collectgarbage("collect")
   if not do_search then
     local params = sample_params(samplers, param_names, nil, true)
-    local kd = kernel_data[params.kernel]
+    local kd = ensure_kernel(params.kernel)
     local r = ridge.create({
       gram = kd.gram, lambda = params.lambda,
       propensity_a = not dense and params.propensity_a or nil,
@@ -590,12 +602,12 @@ M.krr = function (args)
     param_names = param_names, samplers = samplers,
     trials = args.search_trials or 30,
     trial_fn = function (params)
-      local kd = kernel_data[params.kernel]
+      local kd = ensure_kernel(params.kernel)
       return trial_fn(kd.gram, params)
     end,
     each = args.each, skip_final = true,
   })
-  local best_kd = kernel_data[best_params.kernel]
+  local best_kd = ensure_kernel(best_params.kernel)
   local r = ridge.create({
     gram = best_kd.gram, lambda = best_params.lambda,
     propensity_a = not dense and best_params.propensity_a or nil,

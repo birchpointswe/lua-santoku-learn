@@ -10,16 +10,19 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
+-- Reported metrics (search_trials=100; splits train=44999 dev=5999 test=5999; 4270 labels):
+--   n_landmarks=8192:  miF1 dv-oracle=0.808 ts-oracle=0.796 ts-pred=0.732 (best: cosine, lambda=3.09e-03, pa=0.12 pb=6.45)
+--   n_landmarks=16384: miF1 dv-oracle=0.818 ts-oracle=0.809 ts-pred=0.744  (best: cosine, lambda=3.82e-03, pa=0.08 pb=3.67)
+
 local cfg = {
   data = { max = nil },
   tok = { ngram = 6 },
-  -- n_landmarks = 1024*24 for max (high memory)
-  emb = { n_landmarks = 1024*8, trace_tol = 0.01, kernel = { "cosine", "nngp", "ntk", "expcos", "geolaplace" }, k = 256 },
+  emb = { n_landmarks = 1024 * 16, trace_tol = 0.01, kernel = { "cosine", "nngp", "ntk", "expcos", "geolaplace" }, k = 256 },
   ridge = {
-    lambda = { def = 2.73e-02 },
-    propensity_a = { def = 0.04 },
-    propensity_b = { def = 6.31 },
-    search_trials = 0,
+    lambda = { def = 3.8157e-03 },
+    propensity_a = { def = 0.0751 },
+    propensity_b = { def = 3.6673 },
+    search_trials = 100,
   },
 }
 
@@ -47,7 +50,7 @@ test("eurlex classifier", function ()
   local test_label_off, test_label_nbr = test_set.sol_offsets, test_set.sol_neighbors
 
   local ngram_map, offsets, tokens, values, n_tokens = csr.tokenize({
-    texts = train.text_iter(), ngram = cfg.tok.ngram, n_samples = train.n,
+    texts = train.text_iter(), ngram_min = cfg.tok.ngram, ngram_max = cfg.tok.ngram, n_samples = train.n,
   })
   local bns_scores = csr.apply_bns(
     offsets, tokens, values, nil,
@@ -55,7 +58,7 @@ test("eurlex classifier", function ()
   str.printf("[Tokenize] ngram=%d tokens=%d %s\n", cfg.tok.ngram, n_tokens, sw())
 
   local _, val_off, val_tok, val_val = csr.tokenize({
-    texts = dev.text_iter(), ngram = cfg.tok.ngram, n_samples = dev.n, ngram_map = ngram_map,
+    texts = dev.text_iter(), ngram_min = cfg.tok.ngram, ngram_max = cfg.tok.ngram, n_samples = dev.n, ngram_map = ngram_map,
   })
   csr.apply_bns(val_off, val_tok, val_val, bns_scores)
 
@@ -65,8 +68,10 @@ test("eurlex classifier", function ()
   local chol_buf = fvec.mmap_create(chol_path, cfg.emb.n_landmarks * train.n)
   local w_buf = fvec.mmap_create(w_path, cfg.emb.n_landmarks * n_labels)
   local pqty_path = "test/res/eurlex57k/pqty_tmp"
+  -- Per-kernel PQtY factory: the lazy kernel cache creates one mmap per kernel it builds.
   local pqty_buf = cfg.ridge.search_trials > 0
-    and fvec.mmap_create(pqty_path, cfg.emb.n_landmarks * n_labels) or nil
+    and function (kname) return fvec.mmap_create(pqty_path .. "_" .. kname, cfg.emb.n_landmarks * n_labels) end
+    or nil
   local sp_enc, ridge_obj, dev_codes, best_params = optimize.krr({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
@@ -93,10 +98,10 @@ test("eurlex classifier", function ()
   collectgarbage("collect")
   os.remove(chol_path)
   os.remove(w_path)
-  os.remove(pqty_path)
+  for _, kn in ipairs(cfg.emb.kernel) do os.remove(pqty_path .. "_" .. kn) end
   local function encode_texts(text_iter_fn, n)
     local _, off, tok, val = csr.tokenize({
-      texts = text_iter_fn(), ngram = cfg.tok.ngram, n_samples = n, ngram_map = ngram_map,
+      texts = text_iter_fn(), ngram_min = cfg.tok.ngram, ngram_max = cfg.tok.ngram, n_samples = n, ngram_map = ngram_map,
     })
     csr.apply_bns(off, tok, val, bns_scores)
     return sp_enc:encode({

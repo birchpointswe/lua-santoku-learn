@@ -62,8 +62,6 @@ Array of discrete values. Uniform random selection.
 | `trial_fn(params, info)` | Evaluate a configuration; returns (score, metrics, result) |
 | `trials` | Total number of configurations to evaluate (default 120) |
 | `constrain(params)` | In-place constraint enforcement before each trial |
-| `cost_fn(params)` | Returns a cost scalar for cost-cooled EI |
-| `cost_beta` | Exponent for cost cooling (default 0.0 = disabled) |
 | `skip_final` | If true, return best params without re-running the final trial |
 | `each(event)` | Callback for logging/monitoring |
 | `n_candidates` | LHS candidate pool size for GP-BO (default 500) |
@@ -100,14 +98,6 @@ n_candidates, n_restarts)` -> `ei_dvec`.
 - Hyperparameter optimization: random restarts maximizing log marginal
   likelihood
 - Returns Expected Improvement scores for each candidate
-
-### Cost-cooled EI
-
-When `cost_fn` and `cost_beta > 0` are provided, EI is modulated:
-
-    acquisition = EI * (cost / max_cost) ^ (-cost_beta)
-
-This biases search toward cheaper configurations at equal EI.
 
 ### All-fixed fast path
 

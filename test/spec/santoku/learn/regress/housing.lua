@@ -11,11 +11,14 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
+-- Reported metrics (search_trials=100; splits train=16512 val=2064 test=2064):
+--   n_landmarks=8192:  acc val=82.9% test=82.8%  (best: geolaplace, lambda=1.04e-01)
+--   n_landmarks=16384: acc val=83.1% test=82.9%  (best: geolaplace, lambda=1.28e-01)
+
 local cfg = {
   data = { ttr = 0.8, tvr = 0.1, max = nil },
-  -- n_landmarks = 1024*24 for max (high memory)
-  emb = { n_landmarks = 1024*8, trace_tol = 0.01, kernel = { "ntk", "cosine", "nngp", "expcos", "geolaplace" } },
-  ridge = { lambda = { def = 1.38e-01 }, search_trials = 0 },
+  emb = { n_landmarks = 1024 * 16, trace_tol = 0.01, kernel = { "geolaplace", "ntk", "cosine", "nngp", "expcos" } },
+  ridge = { lambda = { def = 1.2765e-01 }, search_trials = 100 },
 }
 
 test("housing regressor", function ()
@@ -49,6 +52,17 @@ test("housing regressor", function ()
   local offsets, tokens, values = merge_features(
     train.bit_offsets, train.bit_neighbors, train.continuous, train.n)
   local std_scores = csr.standardize(offsets, tokens, values, nil, n_tokens)
+  -- Per-block normalization: scale each modality to unit mean per-row squared norm,
+  -- MEASURED on the standardized train matrix. This counts each block's actual
+  -- contribution (correct for sparse one-hot, where 1/sqrt(n_cols) is wrong since only
+  -- the active bits contribute). block_sumsq groups by token-block entirely in C.
+  local ss = csr.block_sumsq(tokens, values, { 0, n_cat, n_tokens })
+  local ss_cat, ss_cont = ss:get(0), ss:get(1)
+  local block = fvec.create(n_tokens)
+  block:fill(ss_cat > 0 and math.sqrt(train.n / ss_cat) or 0.0, 0, n_cat)
+  block:fill(ss_cont > 0 and math.sqrt(train.n / ss_cont) or 0.0, n_cat, n_tokens)
+  csr.standardize(offsets, tokens, values, block)
+  std_scores:scalev(block)
 
   local val_off, val_tok, val_val = merge_features(
     validate.bit_offsets, validate.bit_neighbors, validate.continuous, validate.n)

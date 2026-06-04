@@ -8,15 +8,18 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
+-- Reported metrics (search_trials=100; splits train=22500 val=2500 test=25000; 1 class):
+--   n_landmarks=8192:  F1 val=0.92 test=0.90  (best: cosine, lambda=3.43e-02)
+--   n_landmarks=16384: F1 val=0.92 test=0.91  (best: expcos, lambda=3.04e-01)
+
 local cfg = {
   data = { max = nil, ttr = 0.5, tvr = 0.1 },
   tok = { ngram_min = 5, ngram_max = 5 },
-  -- n_landmarks = 1024*24 for max (high memory)
-  emb = { n_landmarks = 1024*8, trace_tol = 0.01, kernel = { "expcos", "cosine", "nngp", "ntk", "geolaplace" } },
+  emb = { n_landmarks = 1024 * 16, trace_tol = 0.01, kernel = { "expcos", "cosine", "nngp", "ntk", "geolaplace" } },
   ridge = {
-    lambda = { def = 4.20e-01 },
+    lambda = { def = 3.0376e-01 },
     classes = 1,
-    search_trials = 0,
+    search_trials = 100,
     k = 1,
   },
 }
