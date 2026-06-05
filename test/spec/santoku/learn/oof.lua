@@ -9,8 +9,13 @@ test("oof", function ()
     local n, k = 7, 3
     local fold = ivec.create({ 0, 1, 2, 0, 1, 2, 0 })
     local fit_calls = 0
+    local each_seen = {}
     local out = optimize.oof({
       n = n, k = k, fold = fold,
+      each = function (ev)
+        each_seen[ev.fold] = ev.folds
+        assert(ev.n_train + ev.n_eval == n)
+      end,
       fit = function (train_idx)
         fit_calls = fit_calls + 1
         local seen = {}
@@ -28,6 +33,7 @@ test("oof", function ()
       end,
     })
     assert(fit_calls == k)
+    for f = 1, k do assert(each_seen[f] == k) end
     assert(out:size() == n)
     for i = 0, n - 1 do
       assert(out:get(i) == i + 1,
