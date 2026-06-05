@@ -617,6 +617,33 @@ M.krr = function (args)
   return best_kd.sp_enc, r, best_kd.val_codes, best_params
 end
 
+M.oof = function (args)
+  local ivec = require("santoku.ivec")
+  local fvec = require("santoku.fvec")
+  local n = err.assert(args.n, "oof: n required")
+  local k = err.assert(args.k, "oof: k required")
+  local fold = err.assert(args.fold, "oof: fold required")
+  local fit = err.assert(args.fit, "oof: fit required")
+  local predict = err.assert(args.predict, "oof: predict required")
+  local order, offsets = fold:bucket(k)
+  local out = fvec.create(n)
+  out:zero()
+  local train, eval = ivec.create(), ivec.create()
+  for kk = 0, k - 1 do
+    local s, e = offsets:get(kk), offsets:get(kk + 1)
+    eval:setn(0)
+    eval:copy(order, s, e, 0)
+    train:setn(0)
+    train:copy(order, 0, s, 0)
+    train:copy(order, e, n, s)
+    local h = fit(train)
+    local scores = predict(h, eval)
+    out:copy(scores, eval, true)
+    collectgarbage("collect")
+  end
+  return out
+end
+
 M.gfm = function (args)
   local gfm = require("santoku.learn.gfm")
   local g = gfm.create({ n_labels = args.n_labels })
