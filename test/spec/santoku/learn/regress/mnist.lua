@@ -1,7 +1,9 @@
 local csr_m = require("santoku.csr")
+local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
 local optimize = require("santoku.learn.optimize")
+local spectral = require("santoku.learn.spectral")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local util = require("santoku.learn.util")
@@ -10,18 +12,18 @@ local utc = require("santoku.utc")
 io.stdout:setvbuf("line")
 
 -- Reported metrics (search_trials=100; splits train=50400 val=5600 test=14000; 10 classes):
---   n_landmarks=8192:  (prior best was nngp, now removed; re-run to refresh)
---   n_landmarks=16384: F1 val=0.98 test=0.98  (best: expcos, lambda=4.05e-04, pa=0.46 pb=0.29)
+--   n_landmarks=8192:  F1 val=0.98 test=0.98  (best: matern52, lambda=8.38e-03, pa=3.91 pb=7.28)
+--   n_landmarks=16384: F1 val=0.98 test=0.98  (best: expcos, lambda=4.05e-04, pa=0.46 pb=0.29; pre-kernel-expansion)
 
 local cfg = {
   data = { ttr = 0.8, tvr = 0.1, max = nil, features = 784 },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "expcos", "cosine", "geolaplace", "angular", "matern32", "matern52", "rq", "arccos1" } },
+  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "matern52", "expcos", "cosine", "geolaplace", "angular", "matern32", "rq", "arccos1" } },
   ridge = {
-    lambda = { def = 4.0499e-04 },
-    propensity_a = { def = 0.4593 },
-    propensity_b = { def = 0.2879 },
+    lambda = { def = 8.3774e-03 },
+    propensity_a = { def = 3.9068 },
+    propensity_b = { def = 7.2766 },
     classes = 10,
-    search_trials = 100,
+    search_trials = 0,
     k = 1,
   },
 }
@@ -46,17 +48,19 @@ test("mnist classifier", function ()
 
   local train_p_off, train_p_nbr = csr_m.subsample(
     dataset.problem_offsets, dataset.problem_neighbors, train.ids)
+  local train_p_val = csr.normalize(train_p_off)
 
   local val_p_off, val_p_nbr = csr_m.subsample(
     dataset.problem_offsets, dataset.problem_neighbors, validate.ids)
+  local val_p_val = csr.normalize(val_p_off)
 
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
   local sp_enc, ridge_obj, val_codes = optimize.krr({
-    kernel = cfg.emb.kernel, offsets = train_p_off, tokens = train_p_nbr,
+    kernel = cfg.emb.kernel, offsets = train_p_off, tokens = train_p_nbr, values = train_p_val,
     n_samples = train.n, n_tokens = n_features,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
-    val_offsets = val_p_off, val_tokens = val_p_nbr,
+    val_offsets = val_p_off, val_tokens = val_p_nbr, val_values = val_p_val,
     val_n_samples = validate.n,
     val_expected_offsets = val_label_off, val_expected_neighbors = val_label_nbr,
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
@@ -64,13 +68,27 @@ test("mnist classifier", function ()
     k = cfg.ridge.k, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
+  do  -- persist/load parity: round-tripped encoder must produce identical codes
+    local p = os.tmpname()
+    sp_enc:persist(p)
+    local enc2 = spectral.load(p)
+    os.remove(p)
+    local vc2 = enc2:encode({ offsets = val_p_off, tokens = val_p_nbr, values = val_p_val, n_samples = validate.n })
+    local nchk = val_codes:size()
+    if nchk > 100000 then nchk = 100000 end
+    for i = 0, nchk - 1 do
+      assert(val_codes:get(i) == vc2:get(i), "persist/load parity mismatch at " .. i)
+    end
+    str.printf("[Persist] load parity OK (%d codes)\n", nchk)
+  end
   train_p_off = nil; train_p_nbr = nil -- luacheck: ignore
   collectgarbage("collect")
   local function encode(ids, n)
     local p_off, p_nbr = csr_m.subsample(
       dataset.problem_offsets, dataset.problem_neighbors, ids)
+    local p_val = csr.normalize(p_off)
     return sp_enc:encode({
-      offsets = p_off, tokens = p_nbr, n_samples = n,
+      offsets = p_off, tokens = p_nbr, values = p_val, n_samples = n,
     })
   end
 

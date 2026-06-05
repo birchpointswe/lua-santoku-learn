@@ -1174,6 +1174,41 @@ static int tm_csr_standardize (lua_State *L)
   return 1;
 }
 
+// Per-row L2 normalize. normalize(offsets, [values]) -> values.
+// With a values fvec: scale each row's values by 1/sqrt(sum v^2) in place. Without values (binary
+// CSR, implicit 1.0): create and return an fvec[offsets[n]] holding 1/sqrt(nnz_row) per nonzero.
+// Empty / zero-norm rows are left at 0. After this, the per-row L2 norm is 1, so a cosine-family
+// kernel's similarity is just the sparse dot (no denom needed).
+static int tm_csr_normalize (lua_State *L)
+{
+  tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
+  uint64_t n = offsets->n - 1;
+  tk_fvec_t *values = tk_fvec_peekopt(L, 2);
+  if (values) {
+    for (uint64_t i = 0; i < n; i++) {
+      int64_t lo = offsets->a[i], hi = offsets->a[i + 1];
+      double ss = 0.0;
+      for (int64_t j = lo; j < hi; j++) { double v = (double) values->a[j]; ss += v * v; }
+      if (ss > 1e-20) {
+        float inv = (float) (1.0 / sqrt(ss));
+        for (int64_t j = lo; j < hi; j++) values->a[j] *= inv;
+      }
+    }
+    lua_pushvalue(L, 2);
+    return 1;
+  }
+  uint64_t total = (uint64_t) offsets->a[n];
+  values = tk_fvec_create(L, total);
+  values->n = total;
+  for (uint64_t i = 0; i < n; i++) {
+    int64_t lo = offsets->a[i], hi = offsets->a[i + 1];
+    uint64_t cnt = (uint64_t) (hi - lo);
+    float v = cnt > 0 ? (float) (1.0 / sqrt((double) cnt)) : 0.0f;
+    for (int64_t j = lo; j < hi; j++) values->a[j] = v;
+  }
+  return 1;
+}
+
 // Sum of squared values per token-block. bounds is a table of ascending cut points
 // {b0, b1, ..., bn}; returns dvec[n] with out[k] = sum of values[j]^2 for tokens in [bk, bk+1).
 static int tm_csr_block_sumsq (lua_State *L)
@@ -1224,6 +1259,7 @@ static luaL_Reg tm_csr_fns[] = {
   { "gather_rows", tm_csr_gather_rows },
   { "merge", tm_csr_merge },
   { "standardize", tm_csr_standardize },
+  { "normalize", tm_csr_normalize },
   { "block_sumsq", tm_csr_block_sumsq },
   { NULL, NULL }
 };

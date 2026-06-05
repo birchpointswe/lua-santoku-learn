@@ -2,6 +2,7 @@ local ds = require("santoku.learn.dataset")
 local csr = require("santoku.learn.csr")
 local aho = require("santoku.learn.aho")
 local optimize = require("santoku.learn.optimize")
+local spectral = require("santoku.learn.spectral")
 local ivec = require("santoku.ivec")
 local util = require("santoku.learn.util")
 local str = require("santoku.string")
@@ -121,10 +122,12 @@ test("conll ner", function ()
     tokenize(train, tr_off, tr_s, tr_e, tr_ty, nil)
   local tr_loff, tr_lnbr = build_label_csr(tr_lab, tr_n)
   local bns = csr.apply_bns(offsets, tokens, values, nil, tr_loff, tr_lnbr, n_tokens, 1)
+  csr.normalize(offsets, values)
   str.printf("[Tokenize] tokens=%d %s\n", n_tokens, sw())
 
   local _, dv_o, dv_t, dv_v = tokenize(dev, dv_off, dv_s, dv_e, dv_ty, ngram_map)
   csr.apply_bns(dv_o, dv_t, dv_v, bns)
+  csr.normalize(dv_o, dv_v)
   local dv_loff, dv_lnbr = build_label_csr(dv_lab, dv_n)
 
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
@@ -146,6 +149,20 @@ test("conll ner", function ()
       return f1, { f1 = f1, precision = p, recall = r }
     end,
   })
+
+  do  -- persist/load parity: round-tripped encoder must produce identical codes
+    local pth = os.tmpname()
+    sp_enc:persist(pth)
+    local enc2 = spectral.load(pth)
+    os.remove(pth)
+    local dvc2 = enc2:encode({ offsets = dv_o, tokens = dv_t, values = dv_v, n_samples = dv_n })
+    local nchk = dv_codes:size()
+    if nchk > 100000 then nchk = 100000 end
+    for i = 0, nchk - 1 do
+      assert(dv_codes:get(i) == dvc2:get(i), "persist/load parity mismatch at " .. i)
+    end
+    str.printf("[Persist] load parity OK (%d codes)\n", nchk)
+  end
 
   local d_off, d_nbr, d_sco = ridge_obj:label(dv_codes, dv_n, 1)
   local gfm_obj, gfm_m = optimize.gfm({
@@ -173,6 +190,7 @@ test("conll ner", function ()
 
   local _, te_o, te_t, te_v = tokenize(test_set, te_off, te_s, te_e, te_ty, ngram_map)
   csr.apply_bns(te_o, te_t, te_v, bns)
+  csr.normalize(te_o, te_v)
   local te_codes = sp_enc:encode({
     offsets = te_o, tokens = te_t, values = te_v, n_samples = te_n,
   })

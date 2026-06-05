@@ -1,6 +1,7 @@
 local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
 local optimize = require("santoku.learn.optimize")
+local spectral = require("santoku.learn.spectral")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local util = require("santoku.learn.util")
@@ -9,17 +10,17 @@ local utc = require("santoku.utc")
 io.stdout:setvbuf("line")
 
 -- Reported metrics (search_trials=100; splits train=22500 val=2500 test=25000; 1 class):
---   n_landmarks=8192:  F1 val=0.92 test=0.90  (best: cosine, lambda=3.43e-02)
---   n_landmarks=16384: F1 val=0.92 test=0.91  (best: expcos, lambda=3.04e-01)
+--   n_landmarks=8192:  F1 val=0.92 test=0.91  (best: arccos1, lambda=1.32e-02; post-norm)
+--   n_landmarks=16384: F1 val=0.92 test=0.91  (best: expcos, lambda=3.04e-01; pre-kernel-expansion)
 
 local cfg = {
   data = { max = nil, ttr = 0.5, tvr = 0.1 },
   tok = { ngram_min = 5, ngram_max = 5 },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "expcos", "cosine", "geolaplace", "angular", "matern32", "matern52", "rq", "arccos1" } },
+  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "arccos1", "angular", "expcos", "cosine", "geolaplace", "matern32", "matern52", "rq" } },
   ridge = {
-    lambda = { def = 3.0376e-01 },
+    lambda = { def = 1.3163e-02 },
     classes = 1,
-    search_trials = 100,
+    search_trials = 0,
     k = 1,
   },
 }
@@ -47,6 +48,7 @@ test("imdb classifier", function ()
   local bns_scores = csr.apply_bns(
     offsets, tokens, values, nil,
     label_off, label_nbr, n_tokens, n_classes)
+  csr.normalize(offsets, values)
   str.printf("[Tokenize] ngram_min=%d ngram_max=%d tokens=%d %s\n",
     cfg.tok.ngram_min, cfg.tok.ngram_max, n_tokens, sw())
 
@@ -55,6 +57,7 @@ test("imdb classifier", function ()
     n_samples = validate.n, ngram_map = ngram_map,
   })
   csr.apply_bns(val_off, val_tok, val_val, bns_scores)
+  csr.normalize(val_off, val_val)
 
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
   local sp_enc, ridge_obj, val_codes = optimize.krr({
@@ -70,6 +73,19 @@ test("imdb classifier", function ()
     k = cfg.ridge.k, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
+  do  -- persist/load parity: round-tripped encoder must produce identical codes
+    local p = os.tmpname()
+    sp_enc:persist(p)
+    local enc2 = spectral.load(p)
+    os.remove(p)
+    local vc2 = enc2:encode({ offsets = val_off, tokens = val_tok, values = val_val, n_samples = validate.n })
+    local nchk = val_codes:size()
+    if nchk > 100000 then nchk = 100000 end
+    for i = 0, nchk - 1 do
+      assert(val_codes:get(i) == vc2:get(i), "persist/load parity mismatch at " .. i)
+    end
+    str.printf("[Persist] load parity OK (%d codes)\n", nchk)
+  end
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   validate.problems = nil
   collectgarbage("collect")
@@ -79,6 +95,7 @@ test("imdb classifier", function ()
       n_samples = n, ngram_map = ngram_map,
     })
     csr.apply_bns(off, tok, val, bns_scores)
+    csr.normalize(off, val)
     return sp_enc:encode({
       offsets = off, tokens = tok, values = val, n_samples = n,
     })

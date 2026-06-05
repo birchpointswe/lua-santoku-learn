@@ -1,6 +1,7 @@
 local ds = require("santoku.learn.dataset")
 local csr = require("santoku.learn.csr")
 local optimize = require("santoku.learn.optimize")
+local spectral = require("santoku.learn.spectral")
 local eval = require("santoku.learn.evaluator")
 local ivec = require("santoku.ivec")
 local util = require("santoku.learn.util")
@@ -67,10 +68,12 @@ test("conll pos", function ()
   local ngram_map, offsets, tokens, values, n_tokens =
     tokenize(train, tr_off, tr_s, tr_e, tr_ty, nil)
   local bns = csr.apply_bns(offsets, tokens, values, nil, tr_loff, tr_lnbr, n_tokens, n_pos)
+  csr.normalize(offsets, values)
   str.printf("[Tokenize] tokens=%d %s\n", n_tokens, sw())
 
   local _, dv_o, dv_t, dv_v = tokenize(dev, dv_off, dv_s, dv_e, dv_ty, ngram_map)
   csr.apply_bns(dv_o, dv_t, dv_v, bns)
+  csr.normalize(dv_o, dv_v)
 
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
   local sp_enc, ridge_obj, dv_codes = optimize.krr({
@@ -86,6 +89,19 @@ test("conll pos", function ()
     k = 1, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
+  do  -- persist/load parity: round-tripped encoder must produce identical codes
+    local p = os.tmpname()
+    sp_enc:persist(p)
+    local enc2 = spectral.load(p)
+    os.remove(p)
+    local dvc2 = enc2:encode({ offsets = dv_o, tokens = dv_t, values = dv_v, n_samples = dv_n })
+    local nchk = dv_codes:size()
+    if nchk > 100000 then nchk = 100000 end
+    for i = 0, nchk - 1 do
+      assert(dv_codes:get(i) == dvc2:get(i), "persist/load parity mismatch at " .. i)
+    end
+    str.printf("[Persist] load parity OK (%d codes)\n", nchk)
+  end
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   collectgarbage("collect")
 
@@ -97,6 +113,7 @@ test("conll pos", function ()
 
   local _, te_o, te_t, te_v = tokenize(test_set, te_off, te_s, te_e, te_ty, ngram_map)
   csr.apply_bns(te_o, te_t, te_v, bns)
+  csr.normalize(te_o, te_v)
   local te_codes = sp_enc:encode({
     offsets = te_o, tokens = te_t, values = te_v, n_samples = te_n,
   })

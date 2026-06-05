@@ -3,6 +3,7 @@ local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
 local fvec = require("santoku.fvec")
 local optimize = require("santoku.learn.optimize")
+local spectral = require("santoku.learn.spectral")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local util = require("santoku.learn.util")
@@ -11,8 +12,8 @@ local utc = require("santoku.utc")
 io.stdout:setvbuf("line")
 
 -- Reported metrics (search_trials=100; splits train=44999 dev=5999 test=5999; 4270 labels):
---   n_landmarks=8192:  miF1 dv-oracle=0.808 ts-oracle=0.796 ts-pred=0.732 (best: cosine, lambda=3.09e-03, pa=0.12 pb=6.45)
---   n_landmarks=16384: miF1 dv-oracle=0.818 ts-oracle=0.809 ts-pred=0.744  (best: cosine, lambda=3.82e-03, pa=0.08 pb=3.67)
+--   n_landmarks=8192:  miF1 dv-oracle=0.808 ts-oracle=0.796 ts-pred=0.733 (best: cosine, lambda=3.82e-03, pa=0.08 pb=3.67)
+--   n_landmarks=16384: miF1 dv-oracle=0.818 ts-oracle=0.809 ts-pred=0.744  (best: cosine, lambda=3.82e-03, pa=0.08 pb=3.67; pre-kernel-expansion)
 
 local cfg = {
   data = { max = nil },
@@ -22,7 +23,7 @@ local cfg = {
     lambda = { def = 3.8157e-03 },
     propensity_a = { def = 0.0751 },
     propensity_b = { def = 3.6673 },
-    search_trials = 100,
+    search_trials = 0,
   },
 }
 
@@ -55,12 +56,14 @@ test("eurlex classifier", function ()
   local bns_scores = csr.apply_bns(
     offsets, tokens, values, nil,
     train_label_off, train_label_nbr, n_tokens, n_labels)
+  csr.normalize(offsets, values)
   str.printf("[Tokenize] ngram=%d tokens=%d %s\n", cfg.tok.ngram, n_tokens, sw())
 
   local _, val_off, val_tok, val_val = csr.tokenize({
     texts = dev.text_iter(), ngram_min = cfg.tok.ngram, ngram_max = cfg.tok.ngram, n_samples = dev.n, ngram_map = ngram_map,
   })
   csr.apply_bns(val_off, val_tok, val_val, bns_scores)
+  csr.normalize(val_off, val_val)
 
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
   local chol_path = "test/res/eurlex57k/chol_tmp"
@@ -93,6 +96,19 @@ test("eurlex classifier", function ()
       return f1, { f1 = f1, precision = p, recall = r }
     end,
   })
+  do  -- persist/load parity: round-tripped encoder must produce identical codes
+    local pth = os.tmpname()
+    sp_enc:persist(pth)
+    local enc2 = spectral.load(pth)
+    os.remove(pth)
+    local vc2 = enc2:encode({ offsets = val_off, tokens = val_tok, values = val_val, n_samples = dev.n })
+    local nchk = dev_codes:size()
+    if nchk > 100000 then nchk = 100000 end
+    for i = 0, nchk - 1 do
+      assert(dev_codes:get(i) == vc2:get(i), "persist/load parity mismatch at " .. i)
+    end
+    str.printf("[Persist] load parity OK (%d codes)\n", nchk)
+  end
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   chol_buf = nil; w_buf = nil; pqty_buf = nil -- luacheck: ignore
   collectgarbage("collect")
@@ -104,6 +120,7 @@ test("eurlex classifier", function ()
       texts = text_iter_fn(), ngram_min = cfg.tok.ngram, ngram_max = cfg.tok.ngram, n_samples = n, ngram_map = ngram_map,
     })
     csr.apply_bns(off, tok, val, bns_scores)
+    csr.normalize(off, val)
     return sp_enc:encode({
       offsets = off, tokens = tok, values = val, n_samples = n,
     })

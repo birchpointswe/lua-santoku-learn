@@ -4,6 +4,7 @@ local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
 local fvec = require("santoku.fvec")
 local optimize = require("santoku.learn.optimize")
+local spectral = require("santoku.learn.spectral")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local util = require("santoku.learn.util")
@@ -12,13 +13,13 @@ local utc = require("santoku.utc")
 io.stdout:setvbuf("line")
 
 -- Reported metrics (search_trials=100; splits train=16512 val=2064 test=2064):
---   n_landmarks=8192:  acc val=82.9% test=82.8%  (best: geolaplace, lambda=1.04e-01)
---   n_landmarks=16384: acc val=83.1% test=82.9%  (best: geolaplace, lambda=1.28e-01)
+--   n_landmarks=8192:  acc val=83.0% test=82.8%  (best: angular, lambda=2.31e-02)
+--   n_landmarks=16384: acc val=83.1% test=82.9%  (best: geolaplace, lambda=1.28e-01; pre-kernel-expansion)
 
 local cfg = {
   data = { ttr = 0.8, tvr = 0.1, max = nil },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "geolaplace", "cosine", "expcos", "angular", "matern32", "matern52", "rq", "arccos1" } },
-  ridge = { lambda = { def = 1.2765e-01 }, search_trials = 100 },
+  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "angular", "cosine", "expcos", "geolaplace", "matern32", "matern52", "rq", "arccos1" } },
+  ridge = { lambda = { def = 2.3081e-02 }, search_trials = 0 },
 }
 
 test("housing regressor", function ()
@@ -63,10 +64,12 @@ test("housing regressor", function ()
   block:fill(ss_cont > 0 and math.sqrt(train.n / ss_cont) or 0.0, n_cat, n_tokens)
   csr.standardize(offsets, tokens, values, block)
   std_scores:scalev(block)
+  csr.normalize(offsets, values)
 
   local val_off, val_tok, val_val = merge_features(
     validate.bit_offsets, validate.bit_neighbors, validate.continuous, validate.n)
   csr.standardize(val_off, val_tok, val_val, std_scores)
+  csr.normalize(val_off, val_val)
 
   str.printf("[KRR] Encoding n_landmarks=%d n_tokens=%d\n",
     cfg.emb.n_landmarks, n_tokens)
@@ -83,11 +86,25 @@ test("housing regressor", function ()
     search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
+  do  -- persist/load parity: round-tripped encoder must produce identical codes
+    local p = os.tmpname()
+    sp_enc:persist(p)
+    local enc2 = spectral.load(p)
+    os.remove(p)
+    local vc2 = enc2:encode({ offsets = val_off, tokens = val_tok, values = val_val, n_samples = validate.n })
+    local nchk = val_codes:size()
+    if nchk > 100000 then nchk = 100000 end
+    for i = 0, nchk - 1 do
+      assert(val_codes:get(i) == vc2:get(i), "persist/load parity mismatch at " .. i)
+    end
+    str.printf("[Persist] load parity OK (%d codes)\n", nchk)
+  end
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   collectgarbage("collect")
   local function encode(bit_off, bit_nbr, continuous, n)
     local off, tok, val = merge_features(bit_off, bit_nbr, continuous, n)
     csr.standardize(off, tok, val, std_scores)
+    csr.normalize(off, val)
     return sp_enc:encode({
       offsets = off, tokens = tok, values = val, n_samples = n,
     })
