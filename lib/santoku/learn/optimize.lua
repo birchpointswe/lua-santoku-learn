@@ -57,7 +57,6 @@ local build_sampler = function (spec, global_dev)
   end
   if type(spec) == "table" and spec.min ~= nil and spec.max ~= nil then
     local minv, maxv = spec.min, spec.max
-    err.assert(minv and maxv, "range spec missing min|max")
     local is_int = not not spec.int
     local is_pow2 = not not spec.pow2
     local is_log = is_pow2 or not not spec.log
@@ -467,6 +466,17 @@ M.krr = function (args)
     n_labels = args.n_labels,
     targets = args.targets, n_targets = args.n_targets,
   }
+  -- Deterministic landmark selection: reseed the global RNG to a fixed value before every
+  -- spectral.encode so a kernel's landmarks depend only on its inputs, not on build order /
+  -- prior RNG state. Makes locked == in-search and runs reproducible.
+  local seed = args.seed or 1
+  local function val_encode (sp_enc)
+    if args.val_encode then return args.val_encode(sp_enc) end
+    return sp_enc:encode({
+      offsets = args.val_offsets, tokens = args.val_tokens,
+      values = args.val_values, n_samples = args.val_n_samples,
+    })
+  end
   if use_tile_search then
     -- Lazy per-kernel tiled grams. Each kernel gets its own PQtY (internal alloc, or a
     -- per-kernel mmap when args.pqty_buf is a factory fn(kname)->fvec); chol_buf/w_buf stay
@@ -484,16 +494,9 @@ M.krr = function (args)
       spectral_args.tile_samples = args.tile_samples
       spectral_args.chol_buf = args.chol_buf
       spectral_args.pqty_buf = pqty_for(kname)
+      rand.fast_seed(seed)
       local _, sp_enc, gram = spectral.encode(spectral_args)
-      local val_codes
-      if args.val_encode then
-        val_codes = args.val_encode(sp_enc)
-      else
-        val_codes = sp_enc:encode({
-          offsets = args.val_offsets, tokens = args.val_tokens,
-          values = args.val_values, n_samples = args.val_n_samples,
-        })
-      end
+      local val_codes = val_encode(sp_enc)
       gram:prepare(val_codes, args.val_n_samples)
       kd = { sp_enc = sp_enc, gram = gram, val_codes = val_codes }
       kernel_data[kname] = kd
@@ -512,6 +515,9 @@ M.krr = function (args)
       trial_fn = function(p) return trial_fn(ensure_kernel(p.kernel).gram, p) end,
       each = args.each, skip_final = true,
     })
+    -- Parity: the final model must reuse the exact gram the search scored (a cache hit). With the
+    -- deterministic seed above, a cache miss would still rebuild identically, but assert anyway.
+    assert(kernel_data[best_params.kernel], "krr: best kernel not in cache")
     local best_kd = ensure_kernel(best_params.kernel)
     local r = ridge.create({
       gram = best_kd.gram, lambda = best_params.lambda,
@@ -527,24 +533,15 @@ M.krr = function (args)
     spectral_args.tile_labels = tile_labels
     spectral_args.tile_samples = args.tile_samples
     spectral_args.chol_buf = args.chol_buf
-    spectral_args.w_buf = args.w_buf
-    spectral_args.lambda = params.lambda
-    spectral_args.propensity_a = params.propensity_a
-    spectral_args.propensity_b = params.propensity_b
-    local _, sp_enc, tiled = spectral.encode(spectral_args)
+    rand.fast_seed(seed)
+    local _, sp_enc, gram = spectral.encode(spectral_args)
     local r = ridge.create({
-      W = tiled.W, intercept = tiled.intercept,
-      n_dims = tiled.n_dims, n_labels = tiled.n_labels,
+      gram = gram, lambda = params.lambda,
+      propensity_a = not dense and params.propensity_a or nil,
+      propensity_b = not dense and params.propensity_b or nil,
+      w_buf = args.w_buf, tile_labels = tile_labels,
     })
-    local val_codes
-    if args.val_encode then
-      val_codes = args.val_encode(sp_enc)
-    else
-      val_codes = sp_enc:encode({
-        offsets = args.val_offsets, tokens = args.val_tokens,
-        values = args.val_values, n_samples = args.val_n_samples,
-      })
-    end
+    local val_codes = val_encode(sp_enc)
     if args.each then args.each({ event = "done", params = params, emb_d = sp_enc:dims() }) end
     return sp_enc, r, val_codes, params
   end
@@ -555,16 +552,9 @@ M.krr = function (args)
     local kd = kernel_data[kname]
     if kd then return kd end
     spectral_args.kernel = kname
+    rand.fast_seed(seed)
     local _, sp_enc, gram = spectral.encode(spectral_args)
-    local val_codes
-    if args.val_encode then
-      val_codes = args.val_encode(sp_enc)
-    else
-      val_codes = sp_enc:encode({
-        offsets = args.val_offsets, tokens = args.val_tokens,
-        values = args.val_values, n_samples = args.val_n_samples,
-      })
-    end
+    local val_codes = val_encode(sp_enc)
     gram:prepare(val_codes, args.val_n_samples)
     kd = { sp_enc = sp_enc, gram = gram, val_codes = val_codes }
     kernel_data[kname] = kd
@@ -607,6 +597,7 @@ M.krr = function (args)
     end,
     each = args.each, skip_final = true,
   })
+  assert(kernel_data[best_params.kernel], "krr: best kernel not in cache")
   local best_kd = ensure_kernel(best_params.kernel)
   local r = ridge.create({
     gram = best_kd.gram, lambda = best_params.lambda,
@@ -625,6 +616,7 @@ M.oof = function (args)
   local fold = err.assert(args.fold, "oof: fold required")
   local fit = err.assert(args.fit, "oof: fit required")
   local predict = err.assert(args.predict, "oof: predict required")
+  local each = args.each
   local order, offsets = fold:bucket(k)
   local out = fvec.create(n)
   out:zero()
@@ -636,6 +628,9 @@ M.oof = function (args)
     train:setn(0)
     train:copy(order, 0, s, 0)
     train:copy(order, e, n, s)
+    if each then
+      each({ fold = kk + 1, folds = k, n_train = train:size(), n_eval = eval:size() })
+    end
     local h = fit(train)
     local scores = predict(h, eval)
     out:copy(scores, eval, true)

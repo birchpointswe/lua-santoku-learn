@@ -1094,6 +1094,68 @@ static int tm_csr_gather_rows (lua_State *L)
   return 3;
 }
 
+// binary_label_csr(lab) -> off, nbr
+// lab: ivec length n with 0/1 indicators. Builds the binary label CSR: off[n+1] is the
+// exclusive prefix count of positives, nbr[npos] is all zeros (single label 0 per positive).
+static int tm_csr_binary_label_csr (lua_State *L)
+{
+  tk_ivec_t *lab = tk_ivec_peek(L, 1, "lab");
+  uint64_t n = lab->n;
+  int64_t npos = 0;
+  for (uint64_t i = 0; i < n; i++)
+    if (lab->a[i] != 0) npos++;
+  tk_ivec_t *off = tk_ivec_create(L, n + 1);
+  off->n = n + 1;
+  tk_ivec_t *nbr = tk_ivec_create(L, (uint64_t) npos);
+  nbr->n = (uint64_t) npos;
+  int64_t c = 0;
+  off->a[0] = 0;
+  for (uint64_t i = 0; i < n; i++) {
+    if (lab->a[i] != 0) { nbr->a[c] = 0; c++; }
+    off->a[i + 1] = c;
+  }
+  return 2;
+}
+
+// filter_spans(doc_off, starts, ends, types, mask) -> coff, cs, ce, cty
+// Per doc d (span range [doc_off[d], doc_off[d+1])), keep spans where mask[j] != 0, emitting
+// their start/end/type compacted, with per-doc offsets coff[n_docs+1]. types is optional (0 when nil).
+static int tm_csr_filter_spans (lua_State *L)
+{
+  tk_ivec_t *doc_off = tk_ivec_peek(L, 1, "doc_offsets");
+  tk_ivec_t *starts = tk_ivec_peek(L, 2, "starts");
+  tk_ivec_t *ends = tk_ivec_peek(L, 3, "ends");
+  tk_ivec_t *types = tk_ivec_peekopt(L, 4);
+  tk_ivec_t *mask = tk_ivec_peek(L, 5, "mask");
+  int64_t n_docs = (int64_t) (doc_off->n - 1);
+  int64_t total = doc_off->a[n_docs];
+  int64_t kept = 0;
+  for (int64_t j = 0; j < total; j++)
+    if (mask->a[j] != 0) kept++;
+  tk_ivec_t *coff = tk_ivec_create(L, (uint64_t) (n_docs + 1));
+  coff->n = (uint64_t) (n_docs + 1);
+  tk_ivec_t *cs = tk_ivec_create(L, (uint64_t) kept);
+  cs->n = (uint64_t) kept;
+  tk_ivec_t *ce = tk_ivec_create(L, (uint64_t) kept);
+  ce->n = (uint64_t) kept;
+  tk_ivec_t *cty = tk_ivec_create(L, (uint64_t) kept);
+  cty->n = (uint64_t) kept;
+  int64_t c = 0;
+  coff->a[0] = 0;
+  for (int64_t d = 0; d < n_docs; d++) {
+    for (int64_t j = doc_off->a[d]; j < doc_off->a[d + 1]; j++) {
+      if (mask->a[j] != 0) {
+        cs->a[c] = starts->a[j];
+        ce->a[c] = ends->a[j];
+        cty->a[c] = types ? types->a[j] : 0;
+        c++;
+      }
+    }
+    coff->a[d + 1] = c;
+  }
+  return 4;
+}
+
 static int tm_csr_merge (lua_State *L)
 {
   tk_ivec_t *off1 = tk_ivec_peek(L, 1, "off1");
@@ -1257,6 +1319,8 @@ static luaL_Reg tm_csr_fns[] = {
   { "apply_auc", tm_csr_apply_auc },
   { "apply_idf", tm_csr_apply_idf },
   { "gather_rows", tm_csr_gather_rows },
+  { "binary_label_csr", tm_csr_binary_label_csr },
+  { "filter_spans", tm_csr_filter_spans },
   { "merge", tm_csr_merge },
   { "standardize", tm_csr_standardize },
   { "normalize", tm_csr_normalize },

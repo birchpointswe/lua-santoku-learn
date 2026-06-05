@@ -89,7 +89,6 @@ static inline double tk_spectral_kernel_apply (tk_spectral_kernel_t k, double c)
 
 typedef struct {
   uint8_t type;
-  tk_spectral_kernel_t kernel;
   const int64_t *csr_offsets;
   const int32_t *csr_tokens;
   const float *csr_values;
@@ -121,125 +120,11 @@ static inline int tk_spectral_landmarks_ctx_gc (lua_State *L) {
 
 #define TK_CHOL_BLOCK 64
 
-// Per-modality kip scratch (one per modality, sized to its type).
-typedef struct {
-  int64_t *piv_csc_off, *piv_csc_pos;   // CSR
-  uint8_t *piv_csc_piv;
-  float *piv_csc_val;
-  uint64_t piv_csc_cap;
-  double *pivot_dense_rows, *dense_kip;  // DENSE
-} tk_kip_scratch_t;
-
-// Compute one modality's kernel similarities k_m(doc_i, pivot_b) into out[i*np + b] (kernel-applied).
-// Inputs are unit-L2-normalized, so the dot is the cosine c; out gets kernel_apply(mod->kernel, c).
-static inline void tk_spectral_kip_one (
-  tk_spectral_modality_t *mod, tk_kip_scratch_t *sc,
-  uint64_t n_docs, uint64_t np, const uint64_t *blk_pivots, float *out)
-{
-  memset(out, 0, n_docs * np * sizeof(float));
-  if (mod->type == TK_MOD_CSR) {
-    const int64_t *csr_offsets = mod->csr_offsets;
-    const int32_t *csr_tokens = mod->csr_tokens;
-    const float *csr_values = mod->csr_values;
-    uint64_t csr_n_tokens = mod->csr_n_tokens;
-    int64_t plo_arr[TK_CHOL_BLOCK], phi_arr[TK_CHOL_BLOCK];
-    for (uint64_t b = 0; b < np; b++) {
-      plo_arr[b] = csr_offsets[blk_pivots[b]];
-      phi_arr[b] = csr_offsets[blk_pivots[b] + 1];
-    }
-    for (uint64_t b = 0; b < np; b++) {
-      int64_t p = plo_arr[b];
-      while (p < phi_arr[b]) {
-        int32_t tok = csr_tokens[p];
-        sc->piv_csc_off[tok + 1]++;
-        while (p < phi_arr[b] && csr_tokens[p] == tok) p++;
-      }
-    }
-    for (uint64_t t = 0; t < csr_n_tokens; t++)
-      sc->piv_csc_off[t + 1] += sc->piv_csc_off[t];
-    uint64_t total_pnnz = (uint64_t)sc->piv_csc_off[csr_n_tokens];
-    if (total_pnnz > sc->piv_csc_cap) {
-      sc->piv_csc_cap = total_pnnz;
-      sc->piv_csc_piv = (uint8_t *)realloc(sc->piv_csc_piv, sc->piv_csc_cap);
-      sc->piv_csc_val = (float *)realloc(sc->piv_csc_val, sc->piv_csc_cap * sizeof(float));
-    }
-    memcpy(sc->piv_csc_pos, sc->piv_csc_off, csr_n_tokens * sizeof(int64_t));
-    for (uint64_t b = 0; b < np; b++) {
-      int64_t p = plo_arr[b];
-      while (p < phi_arr[b]) {
-        int32_t tok = csr_tokens[p];
-        float sum = 0.0f;
-        while (p < phi_arr[b] && csr_tokens[p] == tok) { sum += csr_values[p]; p++; }
-        int64_t pos = sc->piv_csc_pos[tok]++;
-        sc->piv_csc_piv[pos] = (uint8_t)b;
-        sc->piv_csc_val[pos] = sum;
-      }
-    }
-    const int64_t *restrict pc_off = sc->piv_csc_off;
-    const uint8_t *restrict pc_piv = sc->piv_csc_piv;
-    const float *restrict pc_val = sc->piv_csc_val;
-    const int64_t *restrict c_off = csr_offsets;
-    const int32_t *restrict c_tok = csr_tokens;
-    const float *restrict c_val = csr_values;
-    tk_spectral_kernel_t kern = mod->kernel;
-    #pragma omp parallel for schedule(static)
-    for (uint64_t i = 0; i < n_docs; i++) {
-      double kip_row[TK_CHOL_BLOCK];
-      memset(kip_row, 0, np * sizeof(double));
-      int64_t jlo = c_off[i], jhi = c_off[i + 1];
-      for (int64_t j = jlo; j < jhi; j++) {
-        int32_t tok = c_tok[j];
-        double val = (double)c_val[j];
-        int64_t clo = pc_off[tok], chi = pc_off[tok + 1];
-        for (int64_t c = clo; c < chi; c++)
-          kip_row[pc_piv[c]] += val * (double)pc_val[c];
-      }
-      for (uint64_t b = 0; b < np; b++)
-        out[i * np + b] = (float)tk_spectral_kernel_apply(kern, (double)(float)kip_row[b]);
-    }
-    memset(sc->piv_csc_off, 0, (csr_n_tokens + 1) * sizeof(int64_t));
-
-  } else if (mod->type == TK_MOD_BITS) {
-    uint64_t bd = mod->bits_d;
-    uint64_t row_bytes = TK_CVEC_BITS_BYTES(bd);
-    const uint8_t *bdata = mod->bits_data;
-    double inv_bd = 1.0 / (double)bd;
-    #pragma omp parallel for schedule(static)
-    for (uint64_t i = 0; i < n_docs; i++) {
-      const uint8_t *row_i = bdata + i * row_bytes;
-      for (uint64_t b = 0; b < np; b++) {
-        uint64_t ham = tk_cvec_bits_hamming_serial(
-          row_i, bdata + blk_pivots[b] * row_bytes, bd);
-        out[i * np + b] = 1.0 - (double)ham * inv_bd;
-      }
-    }
-
-  } else if (mod->type == TK_MOD_DENSE) {
-    int64_t di = mod->d_input;
-    const double *dense = mod->dense;
-    tk_spectral_kernel_t kern = mod->kernel;
-    for (uint64_t b = 0; b < np; b++)
-      memcpy(sc->pivot_dense_rows + b * (uint64_t)di,
-             dense + blk_pivots[b] * (uint64_t)di,
-             (uint64_t)di * sizeof(double));
-    cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-      (int)n_docs, (int)np, (int)di, 1.0,
-      dense, (int)di,
-      sc->pivot_dense_rows, (int)di,
-      0.0, sc->dense_kip, (int)np);
-    #pragma omp parallel for schedule(static)
-    for (uint64_t i = 0; i < n_docs; i++)
-      for (uint64_t b = 0; b < np; b++)
-        out[i * np + b] = (float)tk_spectral_kernel_apply(kern, sc->dense_kip[i * np + b]);
-  }
-}
-
 static inline void tk_spectral_sample_landmarks (
   lua_State *L,
-  tk_spectral_modality_t *mods,
-  int n_mods,
-  int product,
+  tk_spectral_modality_t *mod,
   uint64_t n_samples,
+  tk_spectral_kernel_t kernel,
   uint64_t n_landmarks,
   double trace_tol,
   float *ext_chol,
@@ -311,62 +196,58 @@ static inline void tk_spectral_sample_landmarks (
   float *kip_block = (float *)malloc(n_docs * TK_CHOL_BLOCK * sizeof(float));
   float *cross_dots = (float *)malloc(n_docs * TK_CHOL_BLOCK * sizeof(float));
   float *pivot_prev_L = (float *)malloc(TK_CHOL_BLOCK * n_landmarks * sizeof(float));
+  int64_t max_d_input = 0;
+  if (mod->type == TK_MOD_DENSE && mod->d_input > max_d_input)
+    max_d_input = mod->d_input;
+  double *pivot_dense_rows = max_d_input > 0
+    ? (double *)malloc(TK_CHOL_BLOCK * (uint64_t)max_d_input * sizeof(double)) : NULL;
   uint64_t blk_pivots[TK_CHOL_BLOCK];
 
   double *proposal = (double *)malloc(n_docs * sizeof(double));
   double *proposal_cdf = (double *)malloc(n_docs * sizeof(double));
 
-  // Per-modality kip scratch; kip_tmp holds one modality's k_m during product fusion.
-  tk_kip_scratch_t scr[TK_MAX_MOD];
-  memset(scr, 0, sizeof(scr));
-  for (int mm = 0; mm < n_mods; mm++) {
-    tk_spectral_modality_t *mdm = &mods[mm];
-    if (mdm->type == TK_MOD_CSR) {
-      uint64_t csr_n_tokens = mdm->csr_n_tokens;
-      scr[mm].piv_csc_off = (int64_t *)calloc(csr_n_tokens + 1, sizeof(int64_t));
-      scr[mm].piv_csc_pos = (int64_t *)malloc(csr_n_tokens * sizeof(int64_t));
-      uint64_t max_nnz = 0;
-      for (uint64_t i = 0; i < n_docs; i++) {
-        uint64_t nnz = (uint64_t)(mdm->csr_offsets[i + 1] - mdm->csr_offsets[i]);
-        if (nnz > max_nnz) max_nnz = nnz;
-      }
-      scr[mm].piv_csc_cap = TK_CHOL_BLOCK * max_nnz;
-      scr[mm].piv_csc_piv = (uint8_t *)malloc(scr[mm].piv_csc_cap);
-      scr[mm].piv_csc_val = (float *)malloc(scr[mm].piv_csc_cap * sizeof(float));
-    } else if (mdm->type == TK_MOD_DENSE) {
-      scr[mm].pivot_dense_rows =
-        (double *)malloc(TK_CHOL_BLOCK * (uint64_t)mdm->d_input * sizeof(double));
-      scr[mm].dense_kip = (double *)malloc(n_docs * TK_CHOL_BLOCK * sizeof(double));
+  int64_t *piv_csc_off = NULL;
+  uint8_t *piv_csc_piv = NULL;
+  float *piv_csc_val = NULL;
+  int64_t *piv_csc_pos = NULL;
+  uint64_t piv_csc_cap = 0;
+  if (mod->type == TK_MOD_CSR) {
+    uint64_t csr_n_tokens = mod->csr_n_tokens;
+    piv_csc_off = (int64_t *)calloc(csr_n_tokens + 1, sizeof(int64_t));
+    piv_csc_pos = (int64_t *)malloc(csr_n_tokens * sizeof(int64_t));
+    uint64_t max_nnz = 0;
+    for (uint64_t i = 0; i < n_docs; i++) {
+      uint64_t nnz = (uint64_t)(mod->csr_offsets[i + 1] - mod->csr_offsets[i]);
+      if (nnz > max_nnz) max_nnz = nnz;
     }
+    piv_csc_cap = TK_CHOL_BLOCK * max_nnz;
+    piv_csc_piv = (uint8_t *)malloc(piv_csc_cap);
+    piv_csc_val = (float *)malloc(piv_csc_cap * sizeof(float));
   }
-  float *kip_tmp = product ? (float *)malloc(n_docs * TK_CHOL_BLOCK * sizeof(float)) : NULL;
 
-  int alloc_ok = kip_block && cross_dots && pivot_prev_L && proposal && proposal_cdf
-    && (!product || kip_tmp);
-  for (int mm = 0; mm < n_mods && alloc_ok; mm++) {
-    if (mods[mm].type == TK_MOD_CSR)
-      alloc_ok = scr[mm].piv_csc_off && scr[mm].piv_csc_pos
-        && scr[mm].piv_csc_piv && scr[mm].piv_csc_val;
-    else if (mods[mm].type == TK_MOD_DENSE)
-      alloc_ok = scr[mm].pivot_dense_rows && scr[mm].dense_kip;
-  }
-  if (!alloc_ok) {
-    free(kip_block); free(cross_dots); free(pivot_prev_L);
-    free(proposal); free(proposal_cdf); free(kip_tmp);
-    for (int mm = 0; mm < n_mods; mm++) {
-      free(scr[mm].piv_csc_off); free(scr[mm].piv_csc_pos);
-      free(scr[mm].piv_csc_piv); free(scr[mm].piv_csc_val);
-      free(scr[mm].pivot_dense_rows); free(scr[mm].dense_kip);
-    }
+  double *dense_kip = NULL;
+  if (mod->type == TK_MOD_DENSE)
+    dense_kip = (double *)malloc(n_docs * TK_CHOL_BLOCK * sizeof(double));
+
+  if (!kip_block || !cross_dots || !pivot_prev_L
+      || (max_d_input > 0 && !pivot_dense_rows)
+      || !proposal || !proposal_cdf
+      || (mod->type == TK_MOD_CSR && (!piv_csc_off || !piv_csc_piv || !piv_csc_val || !piv_csc_pos))
+      || (mod->type == TK_MOD_DENSE && !dense_kip)) {
+    free(kip_block); free(cross_dots);
+    free(pivot_prev_L);
+    free(pivot_dense_rows);
+    free(proposal); free(proposal_cdf);
+    free(piv_csc_off); free(piv_csc_piv); free(piv_csc_val); free(piv_csc_pos);
+    free(dense_kip);
     luaL_error(L, "sample_landmarks: out of memory (buffers)");
     return;
   }
 
-  double diag_const = product ? (double)((1ULL << n_mods) - 1ULL) : 1.0;
   #pragma omp parallel for
   for (uint64_t i = 0; i < n_docs; i++)
-    residual[i] = diag_const;
-  initial_trace = (double)n_docs * diag_const;
+    residual[i] = 1.0;
+  initial_trace = (double)n_docs;
 
   memcpy(proposal, residual, n_docs * sizeof(double));
   double proposal_total = initial_trace;
@@ -435,18 +316,112 @@ static inline void tk_spectral_sample_landmarks (
     total_proposed += n_propose;
     if (np == 0) { done = true; break; }
 
-    // Fused kip: product = ∏_m(1 + k_m) − 1; single = bare k_0. kip_one memsets its own out.
-    if (product) {
-      uint64_t N = n_docs * np;
-      tk_spectral_kip_one(&mods[0], &scr[0], n_docs, np, blk_pivots, kip_block);
-      for (uint64_t e = 0; e < N; e++) kip_block[e] += 1.0f;
-      for (int mm = 1; mm < n_mods; mm++) {
-        tk_spectral_kip_one(&mods[mm], &scr[mm], n_docs, np, blk_pivots, kip_tmp);
-        for (uint64_t e = 0; e < N; e++) kip_block[e] *= (1.0f + kip_tmp[e]);
+    memset(kip_block, 0, n_docs * np * sizeof(float));
+
+    if (mod->type == TK_MOD_CSR) {
+      const int64_t *csr_offsets = mod->csr_offsets;
+      const int32_t *csr_tokens = mod->csr_tokens;
+      const float *csr_values = mod->csr_values;
+      uint64_t csr_n_tokens = mod->csr_n_tokens;
+      int64_t plo_arr[TK_CHOL_BLOCK], phi_arr[TK_CHOL_BLOCK];
+      for (uint64_t b = 0; b < np; b++) {
+        plo_arr[b] = csr_offsets[blk_pivots[b]];
+        phi_arr[b] = csr_offsets[blk_pivots[b] + 1];
       }
-      for (uint64_t e = 0; e < N; e++) kip_block[e] -= 1.0f;
-    } else {
-      tk_spectral_kip_one(&mods[0], &scr[0], n_docs, np, blk_pivots, kip_block);
+      {
+        for (uint64_t b = 0; b < np; b++) {
+          int64_t p = plo_arr[b];
+          while (p < phi_arr[b]) {
+            int32_t tok = csr_tokens[p];
+            piv_csc_off[tok + 1]++;
+            while (p < phi_arr[b] && csr_tokens[p] == tok) p++;
+          }
+        }
+        for (uint64_t t = 0; t < csr_n_tokens; t++)
+          piv_csc_off[t + 1] += piv_csc_off[t];
+        uint64_t total_pnnz = (uint64_t)piv_csc_off[csr_n_tokens];
+        if (total_pnnz > piv_csc_cap) {
+          piv_csc_cap = total_pnnz;
+          piv_csc_piv = (uint8_t *)realloc(piv_csc_piv, piv_csc_cap);
+          piv_csc_val = (float *)realloc(piv_csc_val, piv_csc_cap * sizeof(float));
+        }
+        memcpy(piv_csc_pos, piv_csc_off, csr_n_tokens * sizeof(int64_t));
+        for (uint64_t b = 0; b < np; b++) {
+          int64_t p = plo_arr[b];
+          while (p < phi_arr[b]) {
+            int32_t tok = csr_tokens[p];
+            float sum = 0.0f;
+            while (p < phi_arr[b] && csr_tokens[p] == tok) { sum += csr_values[p]; p++; }
+            int64_t pos = piv_csc_pos[tok]++;
+            piv_csc_piv[pos] = (uint8_t)b;
+            piv_csc_val[pos] = sum;
+          }
+        }
+        const int64_t *restrict pc_off = piv_csc_off;
+        const uint8_t *restrict pc_piv = piv_csc_piv;
+        const float *restrict pc_val = piv_csc_val;
+        const int64_t *restrict c_off = csr_offsets;
+        const int32_t *restrict c_tok = csr_tokens;
+        const float *restrict c_val = csr_values;
+        #pragma omp parallel for schedule(static)
+        for (uint64_t i = 0; i < n_docs; i++) {
+          double kip_row[TK_CHOL_BLOCK];
+          memset(kip_row, 0, np * sizeof(double));
+          int64_t jlo = c_off[i], jhi = c_off[i + 1];
+          for (int64_t j = jlo; j < jhi; j++) {
+            int32_t tok = c_tok[j];
+            double val = (double)c_val[j];
+            int64_t clo = pc_off[tok], chi = pc_off[tok + 1];
+            for (int64_t c = clo; c < chi; c++)
+              kip_row[pc_piv[c]] += val * (double)pc_val[c];
+          }
+          for (uint64_t b = 0; b < np; b++)
+            kip_block[i * np + b] = (float)kip_row[b];
+        }
+        memset(piv_csc_off, 0, (csr_n_tokens + 1) * sizeof(int64_t));
+      }
+      {
+        #pragma omp parallel for schedule(static)
+        for (uint64_t i = 0; i < n_docs; i++)
+          for (uint64_t b = 0; b < np; b++)
+            kip_block[i * np + b] = (float)tk_spectral_kernel_apply(kernel,
+              (double)kip_block[i * np + b]);
+      }
+
+    } else if (mod->type == TK_MOD_BITS) {
+      uint64_t bd = mod->bits_d;
+      uint64_t row_bytes = TK_CVEC_BITS_BYTES(bd);
+      const uint8_t *bdata = mod->bits_data;
+      double inv_bd = 1.0 / (double)bd;
+      #pragma omp parallel for schedule(static)
+      for (uint64_t i = 0; i < n_docs; i++) {
+        const uint8_t *row_i = bdata + i * row_bytes;
+        for (uint64_t b = 0; b < np; b++) {
+          uint64_t ham = tk_cvec_bits_hamming_serial(
+            row_i, bdata + blk_pivots[b] * row_bytes, bd);
+          kip_block[i * np + b] = 1.0 - (double)ham * inv_bd;
+        }
+      }
+
+    } else if (mod->type == TK_MOD_DENSE) {
+      int64_t di = mod->d_input;
+      const double *dense = mod->dense;
+      for (uint64_t b = 0; b < np; b++)
+        memcpy(pivot_dense_rows + b * (uint64_t)di,
+               dense + blk_pivots[b] * (uint64_t)di,
+               (uint64_t)di * sizeof(double));
+      cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+        (int)n_docs, (int)np, (int)di, 1.0,
+        dense, (int)di,
+        pivot_dense_rows, (int)di,
+        0.0, dense_kip, (int)np);
+      {
+        #pragma omp parallel for schedule(static)
+        for (uint64_t i = 0; i < n_docs; i++)
+          for (uint64_t b = 0; b < np; b++)
+            kip_block[i * np + b] = (float)tk_spectral_kernel_apply(kernel,
+              dense_kip[i * np + b]);
+      }
     }
 
     uint64_t jb = actual_landmarks;
@@ -507,14 +482,14 @@ static inline void tk_spectral_sample_landmarks (
   free(kip_block);
   free(cross_dots);
   free(pivot_prev_L);
+  free(pivot_dense_rows);
   free(proposal);
   free(proposal_cdf);
-  free(kip_tmp);
-  for (int mm = 0; mm < n_mods; mm++) {
-    free(scr[mm].piv_csc_off); free(scr[mm].piv_csc_pos);
-    free(scr[mm].piv_csc_piv); free(scr[mm].piv_csc_val);
-    free(scr[mm].pivot_dense_rows); free(scr[mm].dense_kip);
-  }
+  free(piv_csc_off);
+  free(piv_csc_piv);
+  free(piv_csc_val);
+  free(piv_csc_pos);
+  free(dense_kip);
 
   tk_ivec_t *landmark_ids = tk_ivec_create(L, actual_landmarks);
   for (uint64_t i = 0; i < actual_landmarks; i++)
@@ -565,12 +540,13 @@ static inline int tk_encode_nystrom_ctx_gc (lua_State *L) {
 
 #define TK_NYSTROM_ENCODER_MT "tk_nystrom_encoder_t"
 
-// Per-modality landmark representation + per-modality encode scratch. The encoder owns an array of
-// these; single-modality is n_mods=1, product=0 (encode writes mods[0] straight to sims_buf, no
-// fusion -> byte-identical to the pre-multimodal path).
 typedef struct {
-  uint8_t type;
+  float *projection;
+  uint64_t m;
+  uint64_t d;
+  double trace_ratio;
   tk_spectral_kernel_t kernel;
+  uint8_t mod_type;
   int64_t *csr_offsets;
   int32_t *csr_tokens;
   float *csr_values;
@@ -582,22 +558,11 @@ typedef struct {
   int64_t d_input;
   uint8_t *bits_data;
   uint64_t bits_d;
-  float *row_bufs;        // per-modality CSR encode scratch
-  float *dense_tile_buf;  // per-modality dense encode scratch
-  int n_threads;
-} tk_nystrom_mod_t;
-
-typedef struct {
-  float *projection;
-  uint64_t m;
-  uint64_t d;
-  double trace_ratio;
-  uint8_t product;
-  int n_mods;
-  tk_nystrom_mod_t mods[TK_MAX_MOD];
   float *sims_buf;
-  float *sims_tmp;        // per-modality sims before fusion (product path)
+  float *row_bufs;
+  float *dense_tile_buf;
   uint64_t tile;
+  int n_threads;
   bool destroyed;
 } tk_nystrom_encoder_t;
 
@@ -609,25 +574,21 @@ static inline int tk_nystrom_encoder_gc (lua_State *L) {
   tk_nystrom_encoder_t *enc = tk_nystrom_encoder_peek(L, 1);
   if (!enc->destroyed) {
     free(enc->projection);
-    for (int i = 0; i < enc->n_mods; i++) {
-      tk_nystrom_mod_t *md = &enc->mods[i];
-      if (md->type == TK_MOD_CSR) {
-        free(md->csr_offsets);
-        free(md->csr_tokens);
-        free(md->csr_values);
-        free(md->csc_offsets);
-        free(md->csc_rows);
-        free(md->csc_values);
-      } else if (md->type == TK_MOD_DENSE) {
-        free(md->dense_vecs);
-      } else if (md->type == TK_MOD_BITS) {
-        free(md->bits_data);
-      }
-      free(md->row_bufs);
-      free(md->dense_tile_buf);
+    if (enc->mod_type == TK_MOD_CSR) {
+      free(enc->csr_offsets);
+      free(enc->csr_tokens);
+      free(enc->csr_values);
+      free(enc->csc_offsets);
+      free(enc->csc_rows);
+      free(enc->csc_values);
+    } else if (enc->mod_type == TK_MOD_DENSE) {
+      free(enc->dense_vecs);
+    } else if (enc->mod_type == TK_MOD_BITS) {
+      free(enc->bits_data);
     }
     free(enc->sims_buf);
-    free(enc->sims_tmp);
+    free(enc->row_bufs);
+    free(enc->dense_tile_buf);
     enc->destroyed = true;
   }
   return 0;
@@ -639,7 +600,6 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
     return luaL_error(L, "encode: projection released");
   uint64_t d = enc->d;
   uint64_t m = enc->m;
-  tk_nystrom_mod_t *md = &enc->mods[0];  // Step A: single modality; B/D generalize to a loop
 
   luaL_checktype(L, 2, LUA_TTABLE);
   lua_getfield(L, 2, "n_samples");
@@ -697,7 +657,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
 
   float *csr_sval = NULL;
   const float *csr_sv = NULL;
-  if (md->type == TK_MOD_CSR) {
+  if (enc->mod_type == TK_MOD_CSR) {
     if (!in_offsets) return luaL_error(L, "encode: CSR modality but no offsets");
     uint64_t nnz = in_tok_n;
     if (!in_values_f) {
@@ -710,46 +670,32 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
     } else {
       csr_sv = in_values_f->a;
     }
-    // Precondition: rows are unit-L2-normalized by the caller (csr.normalize), so the sparse dot is
-    // the cosine c. Cheap guard on the first non-empty row to catch a forgotten normalize.
-    for (uint64_t s = 0; s < n_samples; s++) {
-      int64_t lo = in_offsets->a[s], hi = in_offsets->a[s + 1];
-      if (hi <= lo) continue;
-      double ss = 0.0;
-      for (int64_t j = lo; j < hi; j++) { double v = (double)csr_sv[j]; ss += v * v; }
-      if (ss > 1e-12 && fabs(sqrt(ss) - 1.0) > 1e-2) {
-        free(csr_sval);
-        return luaL_error(L, "encode: CSR rows must be unit-L2-normalized (csr.normalize); row %d norm=%g",
-          (int)s, sqrt(ss));
-      }
-      break;
-    }
   }
 
   float *row_bufs = NULL;
-  if (md->type == TK_MOD_CSR) {
+  if (enc->mod_type == TK_MOD_CSR) {
     int nt = omp_get_max_threads();
-    if (!md->row_bufs || nt > md->n_threads) {
-      free(md->row_bufs);
-      md->row_bufs = (float *)calloc((uint64_t)nt * m, sizeof(float));
-      md->n_threads = nt;
-      if (!md->row_bufs) {
+    if (!enc->row_bufs || nt > enc->n_threads) {
+      free(enc->row_bufs);
+      enc->row_bufs = (float *)calloc((uint64_t)nt * m, sizeof(float));
+      enc->n_threads = nt;
+      if (!enc->row_bufs) {
         free(csr_sval);
         return luaL_error(L, "encode: out of memory (row_bufs)");
       }
     }
-    row_bufs = md->row_bufs;
+    row_bufs = enc->row_bufs;
   }
 
   for (uint64_t base = 0; base < n_samples; base += tile) {
     uint64_t blk = base + tile <= n_samples ? tile : n_samples - base;
 
-    if (md->type == TK_MOD_CSR) {
+    if (enc->mod_type == TK_MOD_CSR) {
       const int64_t *off_a = in_offsets->a;
       const int32_t *tok_a = in_tok_a;
-      const int64_t *restrict csc_off = md->csc_offsets;
-      const int64_t *restrict csc_rows_a = md->csc_rows;
-      const float *restrict csc_vals = md->csc_values;
+      const int64_t *restrict csc_off = enc->csc_offsets;
+      const int64_t *restrict csc_rows_a = enc->csc_rows;
+      const float *restrict csc_vals = enc->csc_values;
       #pragma omp parallel
       {
         float *row_buf = row_bufs + (uint64_t)omp_get_thread_num() * m;
@@ -766,17 +712,17 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
               row_buf[(uint64_t)csc_rows_a[c]] += val * csc_vals[c];
           }
           for (uint64_t j = 0; j < m; j++) {
-            sims_row[j] = (float)tk_spectral_kernel_apply(md->kernel, (double)row_buf[j]);
+            sims_row[j] = (float)tk_spectral_kernel_apply(enc->kernel, (double)row_buf[j]);
             row_buf[j] = 0.0f;
           }
         }
       }
 
-    } else if (md->type == TK_MOD_DENSE) {
-      int64_t di = md->d_input;
-      if (!md->dense_tile_buf)
-        md->dense_tile_buf = (float *)malloc(enc->tile * (uint64_t)di * sizeof(float));
-      float *src_f = md->dense_tile_buf;
+    } else if (enc->mod_type == TK_MOD_DENSE) {
+      int64_t di = enc->d_input;
+      if (!enc->dense_tile_buf)
+        enc->dense_tile_buf = (float *)malloc(enc->tile * (uint64_t)di * sizeof(float));
+      float *src_f = enc->dense_tile_buf;
       uint64_t ddi = in_d_input_scalar > 0 ? (uint64_t)in_d_input_scalar : (uint64_t)di;
       uint64_t src_off_base = base * ddi;
       uint64_t cnt = blk * (uint64_t)di;
@@ -788,16 +734,16 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
       }
       cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
         (int)blk, (int)m, (int)di, 1.0f,
-        src_f, (int)di, md->dense_vecs, (int)di,
+        src_f, (int)di, enc->dense_vecs, (int)di,
         0.0f, sims_f, (int)m);
       #pragma omp parallel for schedule(static)
       for (uint64_t i = 0; i < blk; i++)
         for (uint64_t j = 0; j < m; j++)
-          sims_f[i * m + j] = (float)tk_spectral_kernel_apply(md->kernel,
+          sims_f[i * m + j] = (float)tk_spectral_kernel_apply(enc->kernel,
             (double)sims_f[i * m + j]);
 
-    } else if (md->type == TK_MOD_BITS) {
-      uint64_t bd = md->bits_d;
+    } else if (enc->mod_type == TK_MOD_BITS) {
+      uint64_t bd = enc->bits_d;
       uint64_t row_bytes = TK_CVEC_BITS_BYTES(bd);
       const uint8_t *bdata = (const uint8_t *)in_bits->a;
       double inv_bd = 1.0 / (double)bd;
@@ -807,7 +753,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
         float *sims_row = sims_f + i * m;
         for (uint64_t j = 0; j < m; j++) {
           uint64_t ham = tk_cvec_bits_hamming_serial(
-            row_i, md->bits_data + j * row_bytes, bd);
+            row_i, enc->bits_data + j * row_bytes, bd);
           sims_row[j] = (float)(1.0 - (double)ham * inv_bd);
         }
       }
@@ -876,29 +822,28 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
     return luaL_error(L, "cannot persist: projection released");
   FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
   tk_lua_fwrite(L, "TKny", 1, 4, fh);
-  uint8_t version = 24;  // Step A keeps the v24 single-modality format; Step E bumps to v25 (M mods)
+  uint8_t version = 24;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
-  tk_nystrom_mod_t *md = &enc->mods[0];
-  uint8_t kernel_byte = (uint8_t)md->kernel;
+  uint8_t kernel_byte = (uint8_t)enc->kernel;
   tk_lua_fwrite(L, &kernel_byte, sizeof(uint8_t), 1, fh);
-  tk_lua_fwrite(L, &md->type, sizeof(uint8_t), 1, fh);
+  tk_lua_fwrite(L, &enc->mod_type, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &enc->m, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, &enc->d, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, &enc->trace_ratio, sizeof(double), 1, fh);
   tk_lua_fwrite(L, enc->projection, sizeof(float), enc->m * enc->d, fh);
-  if (md->type == TK_MOD_CSR) {
-    tk_lua_fwrite(L, &md->csr_n_tokens, sizeof(uint64_t), 1, fh);
-    uint64_t total_csr = (uint64_t)md->csr_offsets[enc->m];
-    tk_lua_fwrite(L, md->csr_offsets, sizeof(int64_t), enc->m + 1, fh);
-    tk_lua_fwrite(L, md->csr_tokens, sizeof(int32_t), total_csr, fh);
-    tk_lua_fwrite(L, md->csr_values, sizeof(float), total_csr, fh);
-  } else if (md->type == TK_MOD_DENSE) {
-    tk_lua_fwrite(L, &md->d_input, sizeof(int64_t), 1, fh);
-    tk_lua_fwrite(L, md->dense_vecs, sizeof(float), enc->m * (uint64_t)md->d_input, fh);
-  } else if (md->type == TK_MOD_BITS) {
-    tk_lua_fwrite(L, &md->bits_d, sizeof(uint64_t), 1, fh);
-    uint64_t row_bytes = TK_CVEC_BITS_BYTES(md->bits_d);
-    tk_lua_fwrite(L, md->bits_data, 1, enc->m * row_bytes, fh);
+  if (enc->mod_type == TK_MOD_CSR) {
+    tk_lua_fwrite(L, &enc->csr_n_tokens, sizeof(uint64_t), 1, fh);
+    uint64_t total_csr = (uint64_t)enc->csr_offsets[enc->m];
+    tk_lua_fwrite(L, enc->csr_offsets, sizeof(int64_t), enc->m + 1, fh);
+    tk_lua_fwrite(L, enc->csr_tokens, sizeof(int32_t), total_csr, fh);
+    tk_lua_fwrite(L, enc->csr_values, sizeof(float), total_csr, fh);
+  } else if (enc->mod_type == TK_MOD_DENSE) {
+    tk_lua_fwrite(L, &enc->d_input, sizeof(int64_t), 1, fh);
+    tk_lua_fwrite(L, enc->dense_vecs, sizeof(float), enc->m * (uint64_t)enc->d_input, fh);
+  } else if (enc->mod_type == TK_MOD_BITS) {
+    tk_lua_fwrite(L, &enc->bits_d, sizeof(uint64_t), 1, fh);
+    uint64_t row_bytes = TK_CVEC_BITS_BYTES(enc->bits_d);
+    tk_lua_fwrite(L, enc->bits_data, 1, enc->m * row_bytes, fh);
   }
   lua_getfenv(L, 1);
   lua_getfield(L, -1, "landmark_ids");
@@ -914,11 +859,8 @@ static inline int tk_nystrom_shrink_lua (lua_State *L) {
   free(enc->projection);
   enc->projection = NULL;
   free(enc->sims_buf); enc->sims_buf = NULL;
-  free(enc->sims_tmp); enc->sims_tmp = NULL;
-  for (int i = 0; i < enc->n_mods; i++) {
-    free(enc->mods[i].row_bufs); enc->mods[i].row_bufs = NULL;
-    free(enc->mods[i].dense_tile_buf); enc->mods[i].dense_tile_buf = NULL;
-  }
+  free(enc->row_bufs); enc->row_bufs = NULL;
+  free(enc->dense_tile_buf); enc->dense_tile_buf = NULL;
   return 0;
 }
 
@@ -1031,7 +973,6 @@ static inline int tm_encode (lua_State *L) {
   else if (strcmp(kernel_str, "rq") == 0) kernel = TK_SPECTRAL_RQ;
   else if (strcmp(kernel_str, "arccos1") == 0) kernel = TK_SPECTRAL_ARCCOS1;
   else return luaL_error(L, "encode: unknown kernel '%s'", kernel_str);
-  mod.kernel = kernel;
 
   if (has_csr && !mod.csr_values) {
     uint64_t nnz = (uint64_t)(mod.csr_offsets[n_samples] - mod.csr_offsets[0]);
@@ -1062,7 +1003,7 @@ static inline int tm_encode (lua_State *L) {
   uint64_t nc, m;
   double trace_ratio;
   tk_spectral_sample_landmarks(L,
-    &mod, 1, 0, n_samples,
+    &mod, n_samples, kernel,
     n_lm_req, trace_tol,
     chol_buf ? chol_buf->a : NULL,
     &lm_ids, &lm_chol, &full_chol, &nc, &m, &trace_ratio);
@@ -1105,11 +1046,6 @@ static inline int tm_encode (lua_State *L) {
   if (lua_isnumber(L, -1)) sample_tile_size = (int64_t)lua_tointeger(L, -1);
   lua_pop(L, 1);
   int build_gram_tiled = tile_labels > 0 && has_gram_labels && !has_gram_targets;
-
-  lua_getfield(L, 1, "lambda");
-  int has_lambda = lua_isnumber(L, -1);
-  lua_pop(L, 1);
-  int build_gram_tiled_gram = build_gram_tiled && !has_lambda;
 
   if (m == 0) {
     if (lm_chol) tk_fvec_destroy(lm_chol);
@@ -1156,11 +1092,6 @@ static inline int tm_encode (lua_State *L) {
   cblas_strsm(CblasRowMajor, CblasLeft, CblasLower, CblasTrans, CblasNonUnit,
     (int)m, (int)m, 1.0f, lm_chol->a, (int)m, ctx->projection, (int)m);
   tk_fvec_destroy(lm_chol); ctx->lm_chol = NULL;
-
-  lua_getfield(L, 1, "w_buf");
-  tk_fvec_t *w_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "w_buf");
-  int w_buf_lua_idx = w_buf ? lua_gettop(L) : 0;
-  if (!w_buf) lua_pop(L, 1);
 
   int gram_result_idx = 0;
   if (build_gram_tiled) {
@@ -1239,7 +1170,7 @@ static inline int tm_encode (lua_State *L) {
       -(double)nc, col_mean, 1, XtX, (int)d);
     LAPACKE_dsyevd(LAPACK_COL_MAJOR, 'V', 'U', (int)d, XtX, (int)d, eigenvals);
 
-    if (build_gram_tiled_gram) {
+    {
       int64_t B = tile_labels;
       lua_getfield(L, 1, "pqty_buf");
       tk_fvec_t *pqty_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "pqty_buf");
@@ -1314,120 +1245,6 @@ static inline int tm_encode (lua_State *L) {
         lua_setfield(L, -2, "pqty_buf");
         lua_pop(L, 1);
       }
-    } else {
-      double mean_eig = 0.0;
-      for (uint64_t i = 0; i < d; i++)
-        mean_eig += eigenvals[i];
-      mean_eig /= (double)d;
-      lua_getfield(L, 1, "lambda");
-      double lambda_raw = lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0;
-      lua_pop(L, 1);
-      lua_getfield(L, 1, "propensity_a");
-      int do_prop = lua_isnumber(L, -1);
-      double prop_a = do_prop ? lua_tonumber(L, -1) : 0.0;
-      lua_pop(L, 1);
-      lua_getfield(L, 1, "propensity_b");
-      double prop_b = do_prop ? (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.5) : 0.0;
-      lua_pop(L, 1);
-      double mu = lambda_raw * mean_eig + mean_eig * 1e-7;
-      double C = 0.0;
-      if (do_prop)
-        C = (log((double)nc) - 1.0) * pow(prop_b + 1.0, prop_a);
-      int64_t B = tile_labels;
-      double *xty_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
-      double *work_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
-      double *W_d_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
-      if (!xty_tile || !work_tile || !W_d_tile) {
-        free(xty_tile); free(work_tile); free(W_d_tile);
-        free(label_counts); free(y_mean_arr);
-        free(XtX); free(col_mean); free(eigenvals); free(tile_buf);
-        return luaL_error(L, "gram tiled: out of memory (tile buffers)");
-      }
-      tk_fvec_t *W_fvec;
-      int W_fvec_idx;
-      if (w_buf) {
-        W_fvec = w_buf;
-        W_fvec_idx = w_buf_lua_idx;
-      } else {
-        W_fvec = tk_fvec_create(L, d * unl);
-        W_fvec_idx = lua_gettop(L);
-      }
-      W_fvec->n = d * unl;
-      tk_dvec_t *intercept_dv = tk_dvec_create(L, unl);
-      intercept_dv->n = unl;
-      int intercept_dv_idx = lua_gettop(L);
-      for (int64_t tl_start = 0; tl_start < gram_nl; tl_start += B) {
-        int64_t actual_B = (tl_start + B <= gram_nl) ? B : gram_nl - tl_start;
-        memset(xty_tile, 0, d * (uint64_t)actual_B * sizeof(double));
-        for (int64_t base = 0; base < (int64_t)nc; base += tile_size) {
-          int64_t bs = (base + tile_size <= (int64_t)nc) ? tile_size : (int64_t)nc - base;
-          uint64_t ubs = (uint64_t)bs;
-          for (uint64_t j = 0; j < d; j++) {
-            double *col = tile_buf + j * ubs;
-            float *src = full_chol + j * nc + base;
-            for (uint64_t i = 0; i < ubs; i++)
-              col[i] = (double)src[i];
-          }
-          #pragma omp parallel for schedule(static)
-          for (int64_t k = 0; k < (int64_t)d; k++) {
-            double *col = tile_buf + (uint64_t)k * ubs;
-            for (uint64_t i = 0; i < ubs; i++) {
-              uint64_t si = (uint64_t)base + i;
-              for (int64_t j = gram_lbl_off->a[si]; j < gram_lbl_off->a[si + 1]; j++) {
-                int64_t lbl = gram_lbl_nbr->a[j];
-                if (lbl >= tl_start && lbl < tl_start + actual_B) {
-                  int64_t tl = lbl - tl_start;
-                  xty_tile[k * actual_B + tl] += col[i];
-                }
-              }
-            }
-          }
-        }
-        cblas_dger(CblasRowMajor, (int)d, (int)actual_B,
-          -(double)nc, col_mean, 1, y_mean_arr + tl_start, 1, xty_tile, (int)actual_B);
-        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-          (int)d, (int)actual_B, (int)d, 1.0, XtX, (int)d,
-          xty_tile, (int)actual_B, 0.0, work_tile, (int)actual_B);
-        for (int64_t i = 0; i < (int64_t)d; i++) {
-          double inv = 1.0 / (eigenvals[i] + mu);
-          for (int64_t tl = 0; tl < actual_B; tl++) {
-            double prop = 1.0;
-            if (do_prop)
-              prop = 1.0 + C / pow(label_counts[tl_start + tl] + prop_b, prop_a);
-            work_tile[i * actual_B + tl] *= prop * inv;
-          }
-        }
-        cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-          (int)d, (int)actual_B, (int)d, 1.0, XtX, (int)d,
-          work_tile, (int)actual_B, 0.0, W_d_tile, (int)actual_B);
-        for (int64_t i = 0; i < (int64_t)d; i++)
-          for (int64_t tl = 0; tl < actual_B; tl++)
-            W_fvec->a[i * gram_nl + tl_start + tl] = (float)W_d_tile[i * actual_B + tl];
-        for (int64_t tl = 0; tl < actual_B; tl++) {
-          double prop = 1.0;
-          if (do_prop)
-            prop = 1.0 + C / pow(label_counts[tl_start + tl] + prop_b, prop_a);
-          intercept_dv->a[tl_start + tl] = prop * y_mean_arr[tl_start + tl];
-        }
-        cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)actual_B,
-          -1.0, W_d_tile, (int)actual_B, col_mean, 1, 1.0, intercept_dv->a + tl_start, 1);
-      }
-      free(xty_tile); free(work_tile); free(W_d_tile);
-      free(label_counts); free(y_mean_arr);
-      free(XtX); free(eigenvals); free(col_mean);
-      free(tile_buf);
-      if (!ctx->full_chol_external) free(full_chol);
-      ctx->full_chol = NULL;
-      lua_newtable(L);
-      lua_pushvalue(L, W_fvec_idx);
-      lua_setfield(L, -2, "W");
-      lua_pushvalue(L, intercept_dv_idx);
-      lua_setfield(L, -2, "intercept");
-      lua_pushinteger(L, (lua_Integer)d);
-      lua_setfield(L, -2, "n_dims");
-      lua_pushinteger(L, (lua_Integer)gram_nl);
-      lua_setfield(L, -2, "n_labels");
-      gram_result_idx = lua_gettop(L);
     }
   } else if (build_gram) {
     uint64_t unl = (uint64_t)gram_nl;
@@ -1544,55 +1361,64 @@ static inline int tm_encode (lua_State *L) {
   enc->d = d;
   enc->trace_ratio = trace_ratio;
   enc->destroyed = false;
-  enc->product = 0;        // Step A: single modality, no fusion
-  enc->n_mods = 1;
+  enc->kernel = kernel;
+  enc->mod_type = mod.type;
+  enc->csr_offsets = NULL;
+  enc->csr_tokens = NULL;
+  enc->csr_values = NULL;
+  enc->csc_offsets = NULL;
+  enc->csc_rows = NULL;
+  enc->csc_values = NULL;
+  enc->csr_n_tokens = 0;
+  enc->dense_vecs = NULL;
+  enc->d_input = 0;
+  enc->bits_data = NULL;
+  enc->bits_d = 0;
   enc->sims_buf = NULL;
-  enc->sims_tmp = NULL;
+  enc->row_bufs = NULL;
+  enc->dense_tile_buf = NULL;
   enc->tile = 0;
-  memset(enc->mods, 0, sizeof(enc->mods));
-  tk_nystrom_mod_t *md = &enc->mods[0];
-  md->kernel = kernel;
-  md->type = mod.type;
+  enc->n_threads = 0;
 
   if (has_csr) {
     uint64_t csr_nt = mod.csr_n_tokens;
-    md->csr_n_tokens = csr_nt;
+    enc->csr_n_tokens = csr_nt;
     uint64_t lm_total = 0;
     for (uint64_t j = 0; j < m; j++) {
       uint64_t si = (uint64_t)lm_ids->a[j];
       lm_total += (uint64_t)(mod.csr_offsets[si + 1] - mod.csr_offsets[si]);
     }
-    md->csr_offsets = (int64_t *)malloc((m + 1) * sizeof(int64_t));
-    md->csr_tokens = (int32_t *)malloc(lm_total * sizeof(int32_t));
-    md->csr_values = (float *)malloc(lm_total * sizeof(float));
-    md->csr_offsets[0] = 0;
+    enc->csr_offsets = (int64_t *)malloc((m + 1) * sizeof(int64_t));
+    enc->csr_tokens = (int32_t *)malloc(lm_total * sizeof(int32_t));
+    enc->csr_values = (float *)malloc(lm_total * sizeof(float));
+    enc->csr_offsets[0] = 0;
     for (uint64_t j = 0; j < m; j++) {
       uint64_t si = (uint64_t)lm_ids->a[j];
       int64_t lo = mod.csr_offsets[si], hi = mod.csr_offsets[si + 1];
       int64_t cnt = hi - lo;
-      memcpy(md->csr_tokens + md->csr_offsets[j],
+      memcpy(enc->csr_tokens + enc->csr_offsets[j],
              mod.csr_tokens + lo,
              (uint64_t)cnt * sizeof(int32_t));
-      memcpy(md->csr_values + md->csr_offsets[j],
+      memcpy(enc->csr_values + enc->csr_offsets[j],
              mod.csr_values + lo,
              (uint64_t)cnt * sizeof(float));
-      md->csr_offsets[j + 1] = md->csr_offsets[j] + cnt;
+      enc->csr_offsets[j + 1] = enc->csr_offsets[j] + cnt;
     }
-    md->csc_offsets = (int64_t *)calloc(csr_nt + 1, sizeof(int64_t));
+    enc->csc_offsets = (int64_t *)calloc(csr_nt + 1, sizeof(int64_t));
     for (uint64_t i = 0; i < lm_total; i++)
-      md->csc_offsets[md->csr_tokens[i] + 1]++;
+      enc->csc_offsets[enc->csr_tokens[i] + 1]++;
     for (uint64_t t = 0; t < csr_nt; t++)
-      md->csc_offsets[t + 1] += md->csc_offsets[t];
-    md->csc_rows = (int64_t *)malloc(lm_total * sizeof(int64_t));
-    md->csc_values = (float *)malloc(lm_total * sizeof(float));
+      enc->csc_offsets[t + 1] += enc->csc_offsets[t];
+    enc->csc_rows = (int64_t *)malloc(lm_total * sizeof(int64_t));
+    enc->csc_values = (float *)malloc(lm_total * sizeof(float));
     int64_t *csc_pos = (int64_t *)malloc((csr_nt + 1) * sizeof(int64_t));
-    memcpy(csc_pos, md->csc_offsets, (csr_nt + 1) * sizeof(int64_t));
+    memcpy(csc_pos, enc->csc_offsets, (csr_nt + 1) * sizeof(int64_t));
     for (uint64_t j = 0; j < m; j++) {
-      for (int64_t a = md->csr_offsets[j]; a < md->csr_offsets[j + 1]; a++) {
-        int32_t tok = md->csr_tokens[a];
+      for (int64_t a = enc->csr_offsets[j]; a < enc->csr_offsets[j + 1]; a++) {
+        int32_t tok = enc->csr_tokens[a];
         int64_t p = csc_pos[tok]++;
-        md->csc_rows[p] = (int64_t)j;
-        md->csc_values[p] = md->csr_values[a];
+        enc->csc_rows[p] = (int64_t)j;
+        enc->csc_values[p] = enc->csr_values[a];
       }
     }
     free(csc_pos);
@@ -1601,7 +1427,7 @@ static inline int tm_encode (lua_State *L) {
 
   if (has_dense) {
     int64_t di = mod.d_input;
-    md->d_input = di;
+    enc->d_input = di;
     float *lmv = (float *)malloc(m * (uint64_t)di * sizeof(float));
     for (uint64_t j = 0; j < m; j++) {
       uint64_t off = j * (uint64_t)di;
@@ -1609,18 +1435,18 @@ static inline int tm_encode (lua_State *L) {
       for (int64_t k = 0; k < di; k++)
         lmv[off + (uint64_t)k] = (float)mod.dense[src + (uint64_t)k];
     }
-    md->dense_vecs = lmv;
+    enc->dense_vecs = lmv;
     free(dense_from_fvec);
   }
 
   if (has_bits) {
     uint64_t bd = mod.bits_d;
-    md->bits_d = bd;
+    enc->bits_d = bd;
     uint64_t row_bytes = TK_CVEC_BITS_BYTES(bd);
     uint8_t *lmb = (uint8_t *)malloc(m * row_bytes);
     for (uint64_t j = 0; j < m; j++)
       memcpy(lmb + j * row_bytes, mod.bits_data + (uint64_t)lm_ids->a[j] * row_bytes, row_bytes);
-    md->bits_data = lmb;
+    enc->bits_data = lmb;
   }
 
   lua_newtable(L);
@@ -1642,24 +1468,24 @@ static inline int tm_encode (lua_State *L) {
   return 2;
 }
 
-static inline void tk_nystrom_build_csc (tk_nystrom_mod_t *md, uint64_t m) {
-  uint64_t csr_nt = md->csr_n_tokens;
-  uint64_t lm_total = (uint64_t)md->csr_offsets[m];
-  md->csc_offsets = (int64_t *)calloc(csr_nt + 1, sizeof(int64_t));
+static inline void tk_nystrom_build_csc (tk_nystrom_encoder_t *enc) {
+  uint64_t csr_nt = enc->csr_n_tokens;
+  uint64_t lm_total = (uint64_t)enc->csr_offsets[enc->m];
+  enc->csc_offsets = (int64_t *)calloc(csr_nt + 1, sizeof(int64_t));
   for (uint64_t i = 0; i < lm_total; i++)
-    md->csc_offsets[md->csr_tokens[i] + 1]++;
+    enc->csc_offsets[enc->csr_tokens[i] + 1]++;
   for (uint64_t t = 0; t < csr_nt; t++)
-    md->csc_offsets[t + 1] += md->csc_offsets[t];
-  md->csc_rows = (int64_t *)malloc(lm_total * sizeof(int64_t));
-  md->csc_values = (float *)malloc(lm_total * sizeof(float));
+    enc->csc_offsets[t + 1] += enc->csc_offsets[t];
+  enc->csc_rows = (int64_t *)malloc(lm_total * sizeof(int64_t));
+  enc->csc_values = (float *)malloc(lm_total * sizeof(float));
   int64_t *csc_pos = (int64_t *)malloc((csr_nt + 1) * sizeof(int64_t));
-  memcpy(csc_pos, md->csc_offsets, (csr_nt + 1) * sizeof(int64_t));
-  for (uint64_t j = 0; j < m; j++) {
-    for (int64_t a = md->csr_offsets[j]; a < md->csr_offsets[j + 1]; a++) {
-      int32_t tok = md->csr_tokens[a];
+  memcpy(csc_pos, enc->csc_offsets, (csr_nt + 1) * sizeof(int64_t));
+  for (uint64_t j = 0; j < enc->m; j++) {
+    for (int64_t a = enc->csr_offsets[j]; a < enc->csr_offsets[j + 1]; a++) {
+      int32_t tok = enc->csr_tokens[a];
       int64_t p = csc_pos[tok]++;
-      md->csc_rows[p] = (int64_t)j;
-      md->csc_values[p] = md->csr_values[a];
+      enc->csc_rows[p] = (int64_t)j;
+      enc->csc_values[p] = enc->csr_values[a];
     }
   }
   free(csc_pos);
@@ -1687,41 +1513,42 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   int enc_idx = lua_gettop(L);
   enc->destroyed = false;
   enc->projection = NULL;
-  enc->product = 0;
-  enc->n_mods = 1;
-  enc->sims_buf = NULL; enc->sims_tmp = NULL;
-  enc->tile = 0;
-  memset(enc->mods, 0, sizeof(enc->mods));
-  tk_nystrom_mod_t *md = &enc->mods[0];
+  enc->csr_offsets = NULL; enc->csr_tokens = NULL; enc->csr_values = NULL;
+  enc->csc_offsets = NULL; enc->csc_rows = NULL; enc->csc_values = NULL;
+  enc->csr_n_tokens = 0;
+  enc->dense_vecs = NULL; enc->d_input = 0;
+  enc->bits_data = NULL; enc->bits_d = 0;
+  enc->sims_buf = NULL; enc->row_bufs = NULL; enc->dense_tile_buf = NULL;
+  enc->tile = 0; enc->n_threads = 0;
 
   uint8_t kernel_byte;
   tk_lua_fread(L, &kernel_byte, sizeof(uint8_t), 1, fh);
-  md->kernel = (tk_spectral_kernel_t)kernel_byte;
-  tk_lua_fread(L, &md->type, sizeof(uint8_t), 1, fh);
+  enc->kernel = (tk_spectral_kernel_t)kernel_byte;
+  tk_lua_fread(L, &enc->mod_type, sizeof(uint8_t), 1, fh);
   tk_lua_fread(L, &enc->m, sizeof(uint64_t), 1, fh);
   tk_lua_fread(L, &enc->d, sizeof(uint64_t), 1, fh);
   tk_lua_fread(L, &enc->trace_ratio, sizeof(double), 1, fh);
   enc->projection = (float *)malloc(enc->m * enc->d * sizeof(float));
   tk_lua_fread(L, enc->projection, sizeof(float), enc->m * enc->d, fh);
-  if (md->type == TK_MOD_CSR) {
-    tk_lua_fread(L, &md->csr_n_tokens, sizeof(uint64_t), 1, fh);
-    md->csr_offsets = (int64_t *)malloc((enc->m + 1) * sizeof(int64_t));
-    tk_lua_fread(L, md->csr_offsets, sizeof(int64_t), enc->m + 1, fh);
-    uint64_t total_csr = (uint64_t)md->csr_offsets[enc->m];
-    md->csr_tokens = (int32_t *)malloc(total_csr * sizeof(int32_t));
-    md->csr_values = (float *)malloc(total_csr * sizeof(float));
-    tk_lua_fread(L, md->csr_tokens, sizeof(int32_t), total_csr, fh);
-    tk_lua_fread(L, md->csr_values, sizeof(float), total_csr, fh);
-    tk_nystrom_build_csc(md, enc->m);
-  } else if (md->type == TK_MOD_DENSE) {
-    tk_lua_fread(L, &md->d_input, sizeof(int64_t), 1, fh);
-    md->dense_vecs = (float *)malloc(enc->m * (uint64_t)md->d_input * sizeof(float));
-    tk_lua_fread(L, md->dense_vecs, sizeof(float), enc->m * (uint64_t)md->d_input, fh);
-  } else if (md->type == TK_MOD_BITS) {
-    tk_lua_fread(L, &md->bits_d, sizeof(uint64_t), 1, fh);
-    uint64_t row_bytes = TK_CVEC_BITS_BYTES(md->bits_d);
-    md->bits_data = (uint8_t *)malloc(enc->m * row_bytes);
-    tk_lua_fread(L, md->bits_data, 1, enc->m * row_bytes, fh);
+  if (enc->mod_type == TK_MOD_CSR) {
+    tk_lua_fread(L, &enc->csr_n_tokens, sizeof(uint64_t), 1, fh);
+    enc->csr_offsets = (int64_t *)malloc((enc->m + 1) * sizeof(int64_t));
+    tk_lua_fread(L, enc->csr_offsets, sizeof(int64_t), enc->m + 1, fh);
+    uint64_t total_csr = (uint64_t)enc->csr_offsets[enc->m];
+    enc->csr_tokens = (int32_t *)malloc(total_csr * sizeof(int32_t));
+    enc->csr_values = (float *)malloc(total_csr * sizeof(float));
+    tk_lua_fread(L, enc->csr_tokens, sizeof(int32_t), total_csr, fh);
+    tk_lua_fread(L, enc->csr_values, sizeof(float), total_csr, fh);
+    tk_nystrom_build_csc(enc);
+  } else if (enc->mod_type == TK_MOD_DENSE) {
+    tk_lua_fread(L, &enc->d_input, sizeof(int64_t), 1, fh);
+    enc->dense_vecs = (float *)malloc(enc->m * (uint64_t)enc->d_input * sizeof(float));
+    tk_lua_fread(L, enc->dense_vecs, sizeof(float), enc->m * (uint64_t)enc->d_input, fh);
+  } else if (enc->mod_type == TK_MOD_BITS) {
+    tk_lua_fread(L, &enc->bits_d, sizeof(uint64_t), 1, fh);
+    uint64_t row_bytes = TK_CVEC_BITS_BYTES(enc->bits_d);
+    enc->bits_data = (uint8_t *)malloc(enc->m * row_bytes);
+    tk_lua_fread(L, enc->bits_data, 1, enc->m * row_bytes, fh);
   }
 
   tk_ivec_load(L, fh);
