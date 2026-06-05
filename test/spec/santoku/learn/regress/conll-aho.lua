@@ -101,7 +101,7 @@ local function build_fold (off, n, k)
   return fold
 end
 
-test("conll ner aho", function ()
+test("conll aho", function ()
 
   local stopwatch = utc.stopwatch()
   local function sw ()

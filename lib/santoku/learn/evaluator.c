@@ -1508,10 +1508,53 @@ static inline int tk_dendro_iter_lua(lua_State *L) {
   return 1;
 }
 
+// span_f1(pred_off, pred_s, pred_e, pred_ty, gold_off, gold_s, gold_e, gold_ty) -> f1, p, r
+// Micro exact-match PRF over spans, matched per document. A predicted span counts as a hit if a
+// gold span in the same doc has the same (start, end[, type]). Types optional (nil on either side
+// => boundary-only match). Spans are unique per doc, so a simple nested scan suffices.
+static inline int tm_span_f1 (lua_State *L)
+{
+  tk_ivec_t *po = tk_ivec_peek(L, 1, "pred_offsets");
+  tk_ivec_t *ps = tk_ivec_peek(L, 2, "pred_starts");
+  tk_ivec_t *pe = tk_ivec_peek(L, 3, "pred_ends");
+  tk_ivec_t *pty = tk_ivec_peekopt(L, 4);
+  tk_ivec_t *go = tk_ivec_peek(L, 5, "gold_offsets");
+  tk_ivec_t *gs = tk_ivec_peek(L, 6, "gold_starts");
+  tk_ivec_t *ge = tk_ivec_peek(L, 7, "gold_ends");
+  tk_ivec_t *gty = tk_ivec_peekopt(L, 8);
+  int64_t n_docs = (int64_t) (po->n - 1);
+  if ((int64_t) (go->n - 1) != n_docs)
+    return luaL_error(L, "span_f1: pred and gold doc counts differ");
+  bool use_ty = pty && gty;
+  int64_t tp = 0, npred = 0, ngold = 0;
+  for (int64_t d = 0; d < n_docs; d++) {
+    int64_t p0 = po->a[d], p1 = po->a[d + 1];
+    int64_t g0 = go->a[d], g1 = go->a[d + 1];
+    ngold += g1 - g0;
+    for (int64_t i = p0; i < p1; i++) {
+      npred++;
+      for (int64_t j = g0; j < g1; j++) {
+        if (ps->a[i] == gs->a[j] && pe->a[i] == ge->a[j] &&
+            (!use_ty || pty->a[i] == gty->a[j])) {
+          tp++; break;
+        }
+      }
+    }
+  }
+  double p = npred > 0 ? (double) tp / (double) npred : 0.0;
+  double r = ngold > 0 ? (double) tp / (double) ngold : 0.0;
+  double f1 = (p + r > 0.0) ? 2.0 * p * r / (p + r) : 0.0;
+  lua_pushnumber(L, f1);
+  lua_pushnumber(L, p);
+  lua_pushnumber(L, r);
+  return 3;
+}
+
 static luaL_Reg tm_evaluator_fns[] =
 {
   { "regress_accuracy", tm_regress_accuracy },
   { "label_accuracy", tm_label_accuracy },
+  { "span_f1", tm_span_f1 },
   { "label_ranking", tm_label_ranking },
   { "cluster", tm_cluster },
   { "dendro_cut", tk_pvec_dendro_cut_lua },

@@ -1156,6 +1156,87 @@ static int tm_csr_filter_spans (lua_State *L)
   return 4;
 }
 
+// bio_encode(doc_off, tok_starts, tok_ends, ent_off, ent_starts, ent_ends, ent_types, n_types)
+//   -> lab_off, lab_nbr
+// Per token, assign a BIO x type class from its doc's entity char-spans:
+//   O = 0; B-<t> = 1 + t; I-<t> = 1 + n_types + t.  (n_classes = 2*n_types + 1)
+// lab_off is the stride-1 single-label CSR (one class per token). ent_types optional (0 if nil).
+static int tm_csr_bio_encode (lua_State *L)
+{
+  tk_ivec_t *doc_off = tk_ivec_peek(L, 1, "doc_offsets");
+  tk_ivec_t *tok_s = tk_ivec_peek(L, 2, "tok_starts");
+  tk_ivec_t *tok_e = tk_ivec_peek(L, 3, "tok_ends");
+  tk_ivec_t *ent_off = tk_ivec_peek(L, 4, "ent_offsets");
+  tk_ivec_t *ent_s = tk_ivec_peek(L, 5, "ent_starts");
+  tk_ivec_t *ent_e = tk_ivec_peek(L, 6, "ent_ends");
+  tk_ivec_t *ent_ty = tk_ivec_peekopt(L, 7);
+  int64_t n_types = tk_lua_checkinteger(L, 8, "n_types");
+  int64_t n_docs = (int64_t) (doc_off->n - 1);
+  int64_t n_tok = doc_off->a[n_docs];
+  tk_ivec_t *lab_off = tk_ivec_create(L, (uint64_t) (n_tok + 1));
+  lab_off->n = (uint64_t) (n_tok + 1);
+  tk_ivec_t *lab_nbr = tk_ivec_create(L, (uint64_t) n_tok);
+  lab_nbr->n = (uint64_t) n_tok;
+  for (int64_t i = 0; i <= n_tok; i++) lab_off->a[i] = i;
+  for (int64_t d = 0; d < n_docs; d++) {
+    int64_t e0 = ent_off->a[d], e1 = ent_off->a[d + 1];
+    for (int64_t j = doc_off->a[d]; j < doc_off->a[d + 1]; j++) {
+      int64_t ts = tok_s->a[j], te = tok_e->a[j];
+      int64_t lab = 0;
+      for (int64_t k = e0; k < e1; k++) {
+        int64_t es = ent_s->a[k], ee = ent_e->a[k];
+        int64_t typ = ent_ty ? ent_ty->a[k] : 0;
+        if (ts == es) { lab = 1 + typ; break; }
+        else if (ts > es && te <= ee) { lab = 1 + n_types + typ; break; }
+      }
+      lab_nbr->a[j] = lab;
+    }
+  }
+  return 2;
+}
+
+// bio_decode(doc_off, tok_starts, tok_ends, classes, n_types) -> ent_off, ent_starts, ent_ends, ent_types
+// Inverse of bio_encode: collapse per-token classes into entity spans (deterministic run-merge).
+static int tm_csr_bio_decode (lua_State *L)
+{
+  tk_ivec_t *doc_off = tk_ivec_peek(L, 1, "doc_offsets");
+  tk_ivec_t *tok_s = tk_ivec_peek(L, 2, "tok_starts");
+  tk_ivec_t *tok_e = tk_ivec_peek(L, 3, "tok_ends");
+  tk_ivec_t *cls = tk_ivec_peek(L, 4, "classes");
+  int64_t n_types = tk_lua_checkinteger(L, 5, "n_types");
+  int64_t n_docs = (int64_t) (doc_off->n - 1);
+  tk_ivec_t *ent_off = tk_ivec_create(L, (uint64_t) (n_docs + 1));
+  ent_off->n = (uint64_t) (n_docs + 1);
+  tk_ivec_t *ent_s = tk_ivec_create(L, 0);
+  tk_ivec_t *ent_e = tk_ivec_create(L, 0);
+  tk_ivec_t *ent_ty = tk_ivec_create(L, 0);
+  ent_off->a[0] = 0;
+  int64_t ct, cs, ce;
+  #define TK_BIO_FLUSH() do { \
+    if (ct >= 0) { tk_ivec_push(ent_s, cs); tk_ivec_push(ent_e, ce); tk_ivec_push(ent_ty, ct); ct = -1; } \
+  } while (0)
+  for (int64_t d = 0; d < n_docs; d++) {
+    ct = -1; cs = 0; ce = 0;
+    for (int64_t j = doc_off->a[d]; j < doc_off->a[d + 1]; j++) {
+      int64_t lab = cls->a[j];
+      int64_t ts = tok_s->a[j], te = tok_e->a[j];
+      if (lab >= 1 && lab <= n_types) {
+        TK_BIO_FLUSH(); ct = lab - 1; cs = ts; ce = te;
+      } else if (lab > n_types) {
+        int64_t typ = lab - n_types - 1;
+        if (ct == typ) { ce = te; }
+        else { TK_BIO_FLUSH(); ct = typ; cs = ts; ce = te; }
+      } else {
+        TK_BIO_FLUSH();
+      }
+    }
+    TK_BIO_FLUSH();
+    ent_off->a[d + 1] = (int64_t) ent_s->n;
+  }
+  #undef TK_BIO_FLUSH
+  return 4;
+}
+
 static int tm_csr_merge (lua_State *L)
 {
   tk_ivec_t *off1 = tk_ivec_peek(L, 1, "off1");
@@ -1321,6 +1402,8 @@ static luaL_Reg tm_csr_fns[] = {
   { "gather_rows", tm_csr_gather_rows },
   { "binary_label_csr", tm_csr_binary_label_csr },
   { "filter_spans", tm_csr_filter_spans },
+  { "bio_encode", tm_csr_bio_encode },
+  { "bio_decode", tm_csr_bio_decode },
   { "merge", tm_csr_merge },
   { "standardize", tm_csr_standardize },
   { "normalize", tm_csr_normalize },
