@@ -2,6 +2,7 @@ local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
 local optimize = require("santoku.learn.optimize")
+local spectral = require("santoku.learn.spectral")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local util = require("santoku.learn.util")
@@ -18,11 +19,11 @@ local cfg = {
   tok = { ngram_min = 5, ngram_max = 5 },
   emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "cosine", "expcos", "geolaplace", "angular", "matern32", "matern52", "rq", "arccos1" } },
   ridge = {
-    lambda = { def = 7.8684e-02 },
-    propensity_a = { def = 3.1706 },
-    propensity_b = { def = 7.7209 },
+    lambda = { def = 1.8408e-01 },
+    propensity_a = { def = 0.0847 },
+    propensity_b = { def = 0.8065 },
     classes = 20,
-    search_trials = 100,
+    search_trials = 0,
     k = 1,
   },
 }
@@ -52,6 +53,7 @@ test("newsgroups classifier", function ()
   local bns_scores = csr.apply_bns(
     offsets, tokens, values, nil,
     label_off, label_nbr, n_tokens, n_classes)
+  csr.normalize(offsets, values)
   str.printf("[Tokenize] ngram_min=%d ngram_max=%d tokens=%d %s\n",
     cfg.tok.ngram_min, cfg.tok.ngram_max, n_tokens, sw())
 
@@ -60,6 +62,7 @@ test("newsgroups classifier", function ()
     n_samples = validate.n, ngram_map = ngram_map,
   })
   csr.apply_bns(val_off, val_tok, val_val, bns_scores)
+  csr.normalize(val_off, val_val)
 
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
   local sp_enc, ridge_obj, val_codes = optimize.krr({
@@ -76,6 +79,19 @@ test("newsgroups classifier", function ()
     k = cfg.ridge.k, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
+  do
+    local p = os.tmpname()
+    sp_enc:persist(p)
+    local enc2 = spectral.load(p)
+    os.remove(p)
+    local vc2 = enc2:encode({ offsets = val_off, tokens = val_tok, values = val_val, n_samples = validate.n })
+    local nchk = val_codes:size()
+    if nchk > 100000 then nchk = 100000 end
+    for i = 0, nchk - 1 do
+      assert(val_codes:get(i) == vc2:get(i), "persist/load parity mismatch at " .. i)
+    end
+    str.printf("[Persist] load parity OK (%d codes)\n", nchk)
+  end
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
   validate.problems = nil
   collectgarbage("collect")
@@ -85,6 +101,7 @@ test("newsgroups classifier", function ()
       n_samples = n, ngram_map = ngram_map,
     })
     csr.apply_bns(off, tok, val, bns_scores)
+    csr.normalize(off, val)
     return sp_enc:encode({
       offsets = off, tokens = tok, values = val, n_samples = n,
     })

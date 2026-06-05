@@ -1176,6 +1176,41 @@ static int tm_csr_standardize (lua_State *L)
 
 
 
+
+
+
+static int tm_csr_normalize (lua_State *L)
+{
+  tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");
+  uint64_t n = offsets->n - 1;
+  tk_fvec_t *values = tk_fvec_peekopt(L, 2);
+  if (values) {
+    for (uint64_t i = 0; i < n; i++) {
+      int64_t lo = offsets->a[i], hi = offsets->a[i + 1];
+      double ss = 0.0;
+      for (int64_t j = lo; j < hi; j++) { double v = (double) values->a[j]; ss += v * v; }
+      if (ss > 1e-20) {
+        float inv = (float) (1.0 / sqrt(ss));
+        for (int64_t j = lo; j < hi; j++) values->a[j] *= inv;
+      }
+    }
+    lua_pushvalue(L, 2);
+    return 1;
+  }
+  uint64_t total = (uint64_t) offsets->a[n];
+  values = tk_fvec_create(L, total);
+  values->n = total;
+  for (uint64_t i = 0; i < n; i++) {
+    int64_t lo = offsets->a[i], hi = offsets->a[i + 1];
+    uint64_t cnt = (uint64_t) (hi - lo);
+    float v = cnt > 0 ? (float) (1.0 / sqrt((double) cnt)) : 0.0f;
+    for (int64_t j = lo; j < hi; j++) values->a[j] = v;
+  }
+  return 1;
+}
+
+
+
 static int tm_csr_block_sumsq (lua_State *L)
 {
   uint64_t nnz;
@@ -1224,6 +1259,7 @@ static luaL_Reg tm_csr_fns[] = {
   { "gather_rows", tm_csr_gather_rows },
   { "merge", tm_csr_merge },
   { "standardize", tm_csr_standardize },
+  { "normalize", tm_csr_normalize },
   { "block_sumsq", tm_csr_block_sumsq },
   { NULL, NULL }
 };
