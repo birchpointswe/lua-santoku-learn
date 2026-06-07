@@ -461,7 +461,6 @@ M.krr = function (args)
     offsets = args.offsets, tokens = args.tokens, values = args.values,
     n_tokens = args.n_tokens, n_samples = args.n_samples,
     codes = args.codes, d_input = args.d_input,
-    bits = args.bits, d_bits = args.d_bits,
     n_landmarks = args.n_landmarks, trace_tol = args.trace_tol,
     label_offsets = args.label_offsets, label_neighbors = args.label_neighbors,
     n_labels = args.n_labels,
