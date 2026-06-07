@@ -23,6 +23,9 @@ typedef struct {
   double *PQtY;
   float *PQtY_f;
   bool PQtY_f_external;
+  bool baked;
+  float *W_baked_f;
+  float *val_ext;
   tk_dvec_t *label_counts;
   double *W_work;
   float *W_work_f;
@@ -107,6 +110,7 @@ static inline int tk_gram_gc (lua_State *L) {
   free(g->eigenvals);
   free(g->PQtY);
   if (!g->PQtY_f_external) free(g->PQtY_f);
+  free(g->W_baked_f);
   free(g->W_work);
   free(g->W_work_f);
   free(g->sbuf_f);
@@ -191,6 +195,9 @@ static inline int tk_gram_finalize (
   for (uint64_t i = 0; i < dnl; i++)
     g->PQtY_f[i] = (float)PQtY[i];
   g->PQtY_f_external = false;
+  g->baked = false;
+  g->W_baked_f = NULL;
+  g->val_ext = NULL;
   g->label_counts = lc;
   g->W_work = W_work;
   g->W_work_f = NULL;
@@ -259,6 +266,9 @@ static inline int tk_gram_finalize_tiled (
   g->PQtY = NULL;
   g->PQtY_f = PQtY_f;
   g->PQtY_f_external = pqty_external;
+  g->baked = false;
+  g->W_baked_f = NULL;
+  g->val_ext = NULL;
   g->label_counts = lc;
   g->W_work = NULL;
   g->W_work_f = NULL;
@@ -293,6 +303,137 @@ static inline int tk_gram_finalize_tiled (
   lua_setfenv(L, gram_idx);
   lua_pushvalue(L, gram_idx);
   return 1;
+}
+
+// Package an already-solved (baked) model into a gram userdata. Takes ownership of
+// W_baked_f / intercept / col_mean / y_mean_arr (freed in gc). Used by the cholesky
+// shortcut: when lambda+propensity are fixed the eigendecomposition is never reused, so we
+// solve W once via Cholesky and skip storing evecs/eigenvals/PQtY.
+static inline int tk_gram_make_baked (
+  lua_State *L,
+  float *W_baked_f,
+  double *intercept,
+  double *col_mean,
+  double *y_mean_arr,
+  tk_dvec_t *lc, int lc_idx,
+  double mean_eig,
+  int64_t nc, int64_t m, int64_t nl, int64_t tile_labels)
+{
+  tk_gram_t *g = tk_lua_newuserdata(L, tk_gram_t,
+    TK_GRAM_MT, tk_gram_mt_fns, tk_gram_gc);
+  int gram_idx = lua_gettop(L);
+  g->evecs = NULL;
+  g->evecs_f = NULL;
+  g->eigenvals = NULL;
+  g->PQtY = NULL;
+  g->PQtY_f = NULL;
+  g->PQtY_f_external = false;
+  g->baked = true;
+  g->W_baked_f = W_baked_f;
+  g->val_ext = NULL;
+  g->label_counts = lc;
+  g->W_work = NULL;
+  g->W_work_f = NULL;
+  g->sbuf_f = NULL;
+  g->val_F_f = NULL;
+  g->col_mean = col_mean;
+  g->y_mean = y_mean_arr;
+  g->cm_proj = NULL;
+  g->intercept = intercept;
+  g->n_threads = 0;
+  g->thread_heaps = NULL;
+  g->thread_heap_cap = 0;
+  g->thread_bitmaps = NULL;
+  g->sample_heaps = NULL;
+  g->sample_heap_cap = 0;
+  g->gfm_labels = NULL;
+  g->gfm_scores = NULL;
+  g->gfm_pool = NULL;
+  g->gfm_cap = 0;
+  g->mean_eig = mean_eig;
+  g->n_dims = m;
+  g->n_labels = nl;
+  g->n_samples = nc;
+  g->tile_labels = tile_labels > 0 ? tile_labels : 1024;
+  g->val_n = 0;
+  g->destroyed = false;
+  lua_newtable(L);
+  if (lc_idx > 0) {
+    lua_pushvalue(L, lc_idx);
+    lua_setfield(L, -2, "label_counts");
+  }
+  lua_setfenv(L, gram_idx);
+  lua_pushvalue(L, gram_idx);
+  return 1;
+}
+
+// Non-tiled cholesky finalize. XtX arrives ColMajor/Upper (dsyrk), xty RowMajor m×nl,
+// col_mean already divided by nc. Consumes (frees) XtX and xty.
+static inline int tk_gram_finalize_cholesky (
+  lua_State *L,
+  double *XtX,
+  double *xty,
+  double *col_mean,
+  double *y_mean_arr,
+  tk_dvec_t *lc,
+  int lc_idx,
+  int64_t nc, int64_t m, int64_t nl,
+  double lambda, bool do_prop, double prop_a, double prop_b)
+{
+  uint64_t um = (uint64_t)m;
+  uint64_t unl = (uint64_t)nl;
+  uint64_t dnl = um * unl;
+  cblas_dsyr(CblasColMajor, CblasUpper, (int)m,
+    -(double)nc, col_mean, 1, XtX, (int)m);
+  cblas_dger(CblasRowMajor, (int)m, (int)nl,
+    -(double)nc, col_mean, 1, y_mean_arr, 1, xty, (int)nl);
+  double mean_eig = 0.0;
+  for (uint64_t i = 0; i < um; i++)
+    mean_eig += XtX[i * um + i];
+  mean_eig /= (double)m;
+  double mu = lambda * mean_eig + mean_eig * 1e-7;
+  for (uint64_t i = 0; i < um; i++)
+    XtX[i * um + i] += mu;
+  double C = 0.0;
+  double *lca = NULL;
+  if (do_prop && lc) {
+    C = (log((double)nc) - 1.0) * pow(prop_b + 1.0, prop_a);
+    lca = lc->a;
+  }
+  if (lca) {
+    for (uint64_t k = 0; k < um; k++)
+      for (int64_t l = 0; l < nl; l++)
+        xty[k * unl + (uint64_t)l] *= (1.0 + C / pow(lca[l] + prop_b, prop_a));
+  }
+  int info = LAPACKE_dpotrf(LAPACK_COL_MAJOR, 'U', (int)m, XtX, (int)m);
+  if (info != 0) {
+    free(XtX); free(xty);
+    return luaL_error(L, "gram cholesky: dpotrf failed (info=%d)", info);
+  }
+  double *Bcm = (double *)malloc(dnl * sizeof(double));
+  float *W_baked_f = (float *)malloc(dnl * sizeof(float));
+  double *intercept = (double *)malloc(unl * sizeof(double));
+  if (!Bcm || !W_baked_f || !intercept) {
+    free(Bcm); free(W_baked_f); free(intercept); free(XtX); free(xty);
+    return luaL_error(L, "gram cholesky: out of memory");
+  }
+  for (uint64_t k = 0; k < um; k++)
+    for (uint64_t l = 0; l < unl; l++)
+      Bcm[l * um + k] = xty[k * unl + l];
+  LAPACKE_dpotrs(LAPACK_COL_MAJOR, 'U', (int)m, (int)nl, XtX, (int)m, Bcm, (int)m);
+  for (uint64_t k = 0; k < um; k++)
+    for (uint64_t l = 0; l < unl; l++)
+      W_baked_f[k * unl + l] = (float)Bcm[l * um + k];
+  for (int64_t l = 0; l < nl; l++) {
+    double prop = lca ? (1.0 + C / pow(lca[l] + prop_b, prop_a)) : 1.0;
+    intercept[l] = prop * y_mean_arr[l]
+      - cblas_ddot((int)m, Bcm + (uint64_t)l * um, 1, col_mean, 1);
+  }
+  free(Bcm);
+  free(XtX);
+  free(xty);
+  return tk_gram_make_baked(L, W_baked_f, intercept, col_mean, y_mean_arr,
+    lc, lc_idx, mean_eig, nc, m, nl, 1024);
 }
 
 static inline void tk_gram_solve_w (
@@ -344,6 +485,17 @@ static inline int tk_gram_prepare_val_lua (lua_State *L) {
   tk_fvec_t *val_fvec = tk_fvec_peek(L, 2, "val_codes");
   int64_t val_n = (int64_t)luaL_checkinteger(L, 3);
   int64_t d = g->n_dims;
+  if (g->baked) {
+    // baked W is in the original feature basis: reference the un-projected val codes
+    // (no projection, no copy). Stash the fvec in the gram fenv to keep it alive.
+    g->val_ext = val_fvec->a;
+    g->val_n = val_n;
+    lua_getfenv(L, 1);
+    lua_pushvalue(L, 2);
+    lua_setfield(L, -2, "val_codes");
+    lua_pop(L, 1);
+    return 0;
+  }
   free(g->val_F_f);
   free(g->sbuf_f); g->sbuf_f = NULL;
   uint64_t nd = (uint64_t)val_n * (uint64_t)d;

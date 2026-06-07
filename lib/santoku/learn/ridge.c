@@ -359,6 +359,23 @@ static inline int tk_ridge_gram_lua (lua_State *L) {
     }
   }
 
+  lua_getfield(L, 1, "solve_lambda");
+  int do_solve = lua_isnumber(L, -1);
+  double solve_lambda = do_solve ? lua_tonumber(L, -1) : 0.0;
+  lua_pop(L, 1);
+  if (do_solve) {
+    lua_getfield(L, 1, "solve_propensity_a");
+    bool do_prop = lua_isnumber(L, -1);
+    double prop_a = do_prop ? lua_tonumber(L, -1) : 0.0;
+    lua_pop(L, 1);
+    lua_getfield(L, 1, "solve_propensity_b");
+    double prop_b = do_prop ? (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.5) : 0.0;
+    lua_pop(L, 1);
+    free(eigenvals);
+    return tk_gram_finalize_cholesky(L, XtX, xty, col_mean, y_mean_arr,
+      lc, lc_idx, nc, m, nl, solve_lambda, do_prop, prop_a, prop_b);
+  }
+
   return tk_gram_finalize(L, XtX, xty, col_mean, y_mean_arr,
     eigenvals, lc, lc_idx, nc, m, nl);
 }
@@ -371,6 +388,56 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     tk_gram_t *gram = tk_gram_peek(L, -1);
     int64_t d = gram->n_dims, nl = gram->n_labels;
     uint64_t dnl = (uint64_t)d * (uint64_t)nl;
+    if (gram->baked) {
+      // W already solved at the fixed lambda/propensity; ignore lambda/prop/tile_labels.
+      lua_getfield(L, 1, "w_buf");
+      tk_fvec_t *w_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "w_buf");
+      int w_buf_idx = w_buf ? lua_gettop(L) : 0;
+      if (!w_buf) lua_pop(L, 1);
+      tk_fvec_t *W_fvec;
+      int W_idx;
+      if (w_buf) {
+        tk_fvec_ensure(w_buf, dnl);
+        w_buf->n = dnl;
+        W_fvec = w_buf;
+        W_idx = w_buf_idx;
+      } else {
+        W_fvec = tk_fvec_create(L, dnl);
+        W_idx = lua_gettop(L);
+      }
+      memcpy(W_fvec->a, gram->W_baked_f, dnl * sizeof(float));
+      tk_dvec_t *intercept_dv = NULL;
+      int intercept_idx = 0;
+      if (gram->intercept) {
+        intercept_dv = tk_dvec_create(L, (uint64_t)nl);
+        intercept_dv->n = (uint64_t)nl;
+        memcpy(intercept_dv->a, gram->intercept, (uint64_t)nl * sizeof(double));
+        intercept_idx = lua_gettop(L);
+      }
+      tk_ridge_t *r = tk_lua_newuserdata(L, tk_ridge_t,
+        TK_RIDGE_MT, tk_ridge_mt_fns, tk_ridge_gc);
+      int Ei = lua_gettop(L);
+      r->W = W_fvec;
+      r->intercept = intercept_dv;
+      r->n_dims = d;
+      r->n_labels = nl;
+      r->Wt = NULL;
+      r->sbuf = NULL;
+      r->sbuf_size = 0;
+      r->heap_buf = NULL;
+      r->heap_buf_size = 0;
+      r->destroyed = false;
+      lua_newtable(L);
+      lua_pushvalue(L, W_idx);
+      lua_setfield(L, -2, "W");
+      if (intercept_idx > 0) {
+        lua_pushvalue(L, intercept_idx);
+        lua_setfield(L, -2, "intercept");
+      }
+      lua_setfenv(L, Ei);
+      lua_pushvalue(L, Ei);
+      return 1;
+    }
     lua_getfield(L, 1, "lambda");
     double lambda_raw = (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0);
     lua_pop(L, 1);

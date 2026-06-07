@@ -261,7 +261,7 @@ test("annotation flow", function ()
       exclude = lp.html_spans(existing)
     })
     assert(mids:size() == 2)
-    local pred = lp.html_match_tags(mids, starts, ends, { [2] = "f", [3] = "b" }, "predicted ")
+    local pred = lp.html_match_tags(mids, starts, ends, { [1] = "f", [2] = "b" }, "predicted ")
     for _, t in ipairs(pred) do existing[#existing + 1] = t end
     local result = lp.html_inject(text, existing)
     assert(result:find("gold"))

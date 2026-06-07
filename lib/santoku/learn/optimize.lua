@@ -392,18 +392,6 @@ end
 M.ridge = function (args)
   local ridge = require("santoku.learn.ridge")
   local dense = args.val_targets ~= nil
-  local gram = args.gram
-  if not gram then
-    local train_codes = err.assert(args.train_codes, "train_codes required")
-    local n_samples = err.assert(args.n_samples, "n_samples required")
-    local n_dims = err.assert(args.n_dims, "n_dims required")
-    gram = ridge.gram({
-      codes = train_codes, n_samples = n_samples, n_dims = n_dims,
-      label_offsets = args.label_offsets, label_neighbors = args.label_neighbors,
-      n_labels = args.n_labels,
-      targets = args.targets, n_targets = args.n_targets,
-    })
-  end
   local param_names
   if dense then param_names = { "lambda" }
   else param_names = { "lambda", "propensity_a", "propensity_b" } end
@@ -412,8 +400,31 @@ M.ridge = function (args)
   args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 8.0, def = 1.5 })
   local samplers = build_samplers(args, param_names)
   local k = not dense and (args.k or 32) or nil
-  if all_fixed(samplers) or not args.search_trials or args.search_trials <= 0 then
-    local params = sample_params(samplers, param_names, nil, true)
+  local locked = all_fixed(samplers) or not args.search_trials or args.search_trials <= 0
+  local locked_params = locked and sample_params(samplers, param_names, nil, true) or nil
+  local gram = args.gram
+  if not gram then
+    local train_codes = err.assert(args.train_codes, "train_codes required")
+    local n_samples = err.assert(args.n_samples, "n_samples required")
+    local n_dims = err.assert(args.n_dims, "n_dims required")
+    local gram_args = {
+      codes = train_codes, n_samples = n_samples, n_dims = n_dims,
+      label_offsets = args.label_offsets, label_neighbors = args.label_neighbors,
+      n_labels = args.n_labels,
+      targets = args.targets, n_targets = args.n_targets,
+    }
+    -- Fixed lambda+propensity and we own the gram: bake W via Cholesky, skip eigendecomp.
+    if locked then
+      gram_args.solve_lambda = locked_params.lambda
+      if not dense then
+        gram_args.solve_propensity_a = locked_params.propensity_a
+        gram_args.solve_propensity_b = locked_params.propensity_b
+      end
+    end
+    gram = ridge.gram(gram_args)
+  end
+  if locked then
+    local params = locked_params
     local r = ridge.create({
       gram = gram, lambda = params.lambda,
       propensity_a = not dense and params.propensity_a or nil,
@@ -515,6 +526,13 @@ M.krr = function (args)
   end
   if not do_search then
     local params = sample_params(samplers, param_names, nil, true)
+    -- Fixed kernel+lambda+propensity: bake W via Cholesky in spectral.encode, skip the
+    -- eigendecomposition (the gram returned is "baked" and ridge.create just copies W).
+    spectral_args.solve_lambda = params.lambda
+    if not dense then
+      spectral_args.solve_propensity_a = params.propensity_a
+      spectral_args.solve_propensity_b = params.propensity_b
+    end
     return finish(ensure_kernel(params.kernel), params)
   end
   local trial_fn = args.trial_fn or default_trial_fn(args, dense, tiled, k)

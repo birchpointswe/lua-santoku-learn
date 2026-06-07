@@ -935,6 +935,20 @@ static inline int tm_encode (lua_State *L) {
   lua_pop(L, 1);
   int build_gram_tiled = tile_labels > 0 && has_gram_labels && !has_gram_targets;
 
+  // Cholesky shortcut: when lambda (and propensity, for labels) are fixed, the
+  // eigendecomposition is never reused, so solve W once via Cholesky and skip dsyevd.
+  lua_getfield(L, 1, "solve_lambda");
+  int do_solve = lua_isnumber(L, -1);
+  double solve_lambda = do_solve ? lua_tonumber(L, -1) : 0.0;
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "solve_propensity_a");
+  int solve_do_prop = do_solve && lua_isnumber(L, -1);
+  double solve_prop_a = solve_do_prop ? lua_tonumber(L, -1) : 0.0;
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "solve_propensity_b");
+  double solve_prop_b = solve_do_prop ? (lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.5) : 0.0;
+  lua_pop(L, 1);
+
   if (m == 0) {
     if (lm_chol) tk_fvec_destroy(lm_chol);
     if (!chol_buf) free(full_chol);
@@ -1056,6 +1070,94 @@ static inline int tm_encode (lua_State *L) {
       y_mean_arr[l] /= (double)nc;
     cblas_dsyr(CblasColMajor, CblasUpper, (int)d,
       -(double)nc, col_mean, 1, XtX, (int)d);
+    if (do_solve) {
+      double mean_eig = 0.0;
+      for (uint64_t i = 0; i < d; i++) mean_eig += XtX[i * d + i];
+      mean_eig /= (double)d;
+      double mu = solve_lambda * mean_eig + mean_eig * 1e-7;
+      for (uint64_t i = 0; i < d; i++) XtX[i * d + i] += mu;
+      int info = LAPACKE_dpotrf(LAPACK_COL_MAJOR, 'U', (int)d, XtX, (int)d);
+      if (info != 0) {
+        free(label_counts); free(y_mean_arr);
+        free(XtX); free(col_mean); free(eigenvals); free(tile_buf);
+        return luaL_error(L, "gram tiled cholesky: dpotrf failed (info=%d)", info);
+      }
+      free(eigenvals);
+      int64_t B = tile_labels;
+      float *W_baked_f = (float *)malloc((uint64_t)d * unl * sizeof(float));
+      double *intercept = (double *)malloc(unl * sizeof(double));
+      double *xty_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
+      double *Bcm = (double *)malloc(d * (uint64_t)B * sizeof(double));
+      if (!W_baked_f || !intercept || !xty_tile || !Bcm) {
+        free(W_baked_f); free(intercept); free(xty_tile); free(Bcm);
+        free(label_counts); free(y_mean_arr);
+        free(XtX); free(col_mean); free(tile_buf);
+        return luaL_error(L, "gram tiled cholesky: out of memory");
+      }
+      double C = 0.0;
+      if (solve_do_prop)
+        C = (log((double)nc) - 1.0) * pow(solve_prop_b + 1.0, solve_prop_a);
+      for (int64_t tl_start = 0; tl_start < gram_nl; tl_start += B) {
+        int64_t actual_B = (tl_start + B <= gram_nl) ? B : gram_nl - tl_start;
+        memset(xty_tile, 0, d * (uint64_t)actual_B * sizeof(double));
+        for (int64_t base = 0; base < (int64_t)nc; base += tile_size) {
+          int64_t bs = (base + tile_size <= (int64_t)nc) ? tile_size : (int64_t)nc - base;
+          uint64_t ubs = (uint64_t)bs;
+          for (uint64_t j = 0; j < d; j++) {
+            double *col = tile_buf + j * ubs;
+            float *src = full_chol + j * nc + base;
+            for (uint64_t i = 0; i < ubs; i++)
+              col[i] = (double)src[i];
+          }
+          #pragma omp parallel for schedule(static)
+          for (int64_t k = 0; k < (int64_t)d; k++) {
+            double *col = tile_buf + (uint64_t)k * ubs;
+            for (uint64_t i = 0; i < ubs; i++) {
+              uint64_t si = (uint64_t)base + i;
+              for (int64_t j = gram_lbl_off->a[si]; j < gram_lbl_off->a[si + 1]; j++) {
+                int64_t lbl = gram_lbl_nbr->a[j];
+                if (lbl >= tl_start && lbl < tl_start + actual_B)
+                  xty_tile[k * actual_B + (lbl - tl_start)] += col[i];
+              }
+            }
+          }
+        }
+        cblas_dger(CblasRowMajor, (int)d, (int)actual_B,
+          -(double)nc, col_mean, 1, y_mean_arr + tl_start, 1, xty_tile, (int)actual_B);
+        if (solve_do_prop) {
+          for (int64_t k = 0; k < (int64_t)d; k++)
+            for (int64_t tl = 0; tl < actual_B; tl++)
+              xty_tile[k * actual_B + tl] *=
+                (1.0 + C / pow(label_counts[tl_start + tl] + solve_prop_b, solve_prop_a));
+        }
+        for (int64_t k = 0; k < (int64_t)d; k++)
+          for (int64_t tl = 0; tl < actual_B; tl++)
+            Bcm[(uint64_t)tl * d + (uint64_t)k] = xty_tile[k * actual_B + tl];
+        LAPACKE_dpotrs(LAPACK_COL_MAJOR, 'U', (int)d, (int)actual_B, XtX, (int)d, Bcm, (int)d);
+        for (int64_t k = 0; k < (int64_t)d; k++)
+          for (int64_t tl = 0; tl < actual_B; tl++)
+            W_baked_f[(uint64_t)k * unl + (uint64_t)(tl_start + tl)] =
+              (float)Bcm[(uint64_t)tl * d + (uint64_t)k];
+        for (int64_t tl = 0; tl < actual_B; tl++) {
+          double prop = solve_do_prop
+            ? (1.0 + C / pow(label_counts[tl_start + tl] + solve_prop_b, solve_prop_a)) : 1.0;
+          intercept[tl_start + tl] = prop * y_mean_arr[tl_start + tl]
+            - cblas_ddot((int)d, Bcm + (uint64_t)tl * d, 1, col_mean, 1);
+        }
+      }
+      free(xty_tile); free(Bcm); free(tile_buf);
+      if (!ctx->full_chol_external) free(full_chol);
+      ctx->full_chol = NULL;
+      free(XtX);
+      tk_dvec_t *lc = tk_dvec_create(L, unl);
+      lc->n = unl;
+      int lc_idx = lua_gettop(L);
+      memcpy(lc->a, label_counts, unl * sizeof(double));
+      free(label_counts);
+      tk_gram_make_baked(L, W_baked_f, intercept, col_mean, y_mean_arr,
+        lc, lc_idx, mean_eig, (int64_t)nc, (int64_t)d, gram_nl, tile_labels);
+      gram_result_idx = lua_gettop(L);
+    } else {
     LAPACKE_dsyevd(LAPACK_COL_MAJOR, 'V', 'U', (int)d, XtX, (int)d, eigenvals);
 
     {
@@ -1134,6 +1236,7 @@ static inline int tm_encode (lua_State *L) {
         lua_pop(L, 1);
       }
     }
+    }
   } else if (build_gram) {
     uint64_t unl = (uint64_t)gram_nl;
     double *XtX = (double *)calloc(d * d, sizeof(double));
@@ -1206,8 +1309,15 @@ static inline int tm_encode (lua_State *L) {
         s += gram_targets_dv->a[i * unl + (uint64_t)l];
       y_mean_arr[l] = s / (double)nc;
     }
-    tk_gram_finalize(L, XtX, xty, col_mean, y_mean_arr,
-      eigenvals, NULL, 0, (int64_t)nc, (int64_t)d, gram_nl);
+    if (do_solve) {
+      free(eigenvals);
+      tk_gram_finalize_cholesky(L, XtX, xty, col_mean, y_mean_arr,
+        NULL, 0, (int64_t)nc, (int64_t)d, gram_nl,
+        solve_lambda, false, 0.0, 0.0);
+    } else {
+      tk_gram_finalize(L, XtX, xty, col_mean, y_mean_arr,
+        eigenvals, NULL, 0, (int64_t)nc, (int64_t)d, gram_nl);
+    }
     gram_result_idx = lua_gettop(L);
   }
 

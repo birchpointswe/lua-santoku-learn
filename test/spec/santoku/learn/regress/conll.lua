@@ -63,18 +63,32 @@ local function build_gazetteer (train)
       c[e.t + 1] = c[e.t + 1] + 1
     end
   end
-  local patterns, ids = {}, ivec.create()
+  -- one pattern per surface; aho returns the pattern index, and types_by_idx maps that index -> every
+  -- entity type the surface was seen as (multi-type recall, not just the majority type).
+  local patterns, types_by_idx = {}, {}
   for surf, c in pairs(counts) do
-    local bt, bn = 0, -1
-    for t = 0, 3 do if c[t + 1] > bn then bn = c[t + 1]; bt = t end end
-    patterns[#patterns + 1] = surf; ids:push(bt)
+    patterns[#patterns + 1] = surf
+    local ts = {}
+    for t = 0, 3 do if c[t + 1] > 0 then ts[#ts + 1] = t end end
+    types_by_idx[#patterns] = ts
   end
-  return aho.create({ ids = ids, patterns = patterns, normalize = true })
+  return aho.create({ patterns = patterns, normalize = true }), types_by_idx
 end
 
-local function gaz_candidates (ac, split)
+local function gaz_candidates (ac, types_by_idx, split)
   local off, mids, starts, ends = ac:predict({ texts = split.texts, longest = true, boundary = boundary })
-  return off, starts, ends, mids
+  -- expand each match (a surface index) into one typed candidate per type seen for that surface
+  local eoff, es, ee, ety = ivec.create(), ivec.create(), ivec.create(), ivec.create()
+  eoff:push(0)
+  for d = 0, off:size() - 2 do
+    for j = off:get(d), off:get(d + 1) - 1 do
+      for _, t in ipairs(types_by_idx[mids:get(j) + 1]) do
+        es:push(starts:get(j)); ee:push(ends:get(j)); ety:push(t)
+      end
+    end
+    eoff:push(es:size())
+  end
+  return eoff, es, ee, ety
 end
 
 -- per-token spans + gold entity spans; BIO x type labels via csr.bio_encode
@@ -199,9 +213,10 @@ test("conll", function ()
         offsets = so, tokens = st, values = sv, n_tokens = b_ntok, n_samples = idx:size(),
         kernel = l1_best.kernel, n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
         label_offsets = sloff, label_neighbors = slab, n_labels = N_CLASSES,
+        solve_lambda = l1_best.lambda,
+        solve_propensity_a = l1_best.propensity_a, solve_propensity_b = l1_best.propensity_b,
       })
-      return { sp = sp, r = ridge.create({ gram = gram, lambda = l1_best.lambda,
-        propensity_a = l1_best.propensity_a, propensity_b = l1_best.propensity_b }), bns = sbns }
+      return { sp = sp, r = ridge.create({ gram = gram }), bns = sbns }
     end,
     predict = function (h, idx)
       local so, st, sv = csr.gather_rows(raw_off, raw_tok, raw_val, idx)
@@ -259,7 +274,7 @@ test("conll", function ()
   end
 
   -- ===== candidates = gazetteer UNION stacked-BIO, labeled by gold =====
-  local ac = build_gazetteer(train)
+  local ac, gaz_types = build_gazetteer(train)
   local function union (g_off, g_s, g_e, g_ty, b_o, b_s2, b_e2, b_ty2, eoff, es, ee, ety)
     return csr.union_spans({
       a_offsets = g_off, a_starts = g_s, a_ends = g_e, a_types = g_ty,
@@ -267,9 +282,9 @@ test("conll", function ()
       gold_offsets = eoff, gold_starts = es, gold_ends = ee, gold_types = ety,
     })
   end
-  local g_tro, g_trs, g_tre, g_trty = gaz_candidates(ac, train)
-  local g_dvo, g_dvs, g_dve, g_dvty = gaz_candidates(ac, dev)
-  local g_teo, g_tes, g_tee, g_tety = gaz_candidates(ac, test_set)
+  local g_tro, g_trs, g_tre, g_trty = gaz_candidates(ac, gaz_types, train)
+  local g_dvo, g_dvs, g_dve, g_dvty = gaz_candidates(ac, gaz_types, dev)
+  local g_teo, g_tes, g_tee, g_tety = gaz_candidates(ac, gaz_types, test_set)
   local u_tro, u_trs, u_tre, u_trty, u_trlab =
     union(g_tro, g_trs, g_tre, g_trty, tr_bo, tr_bs, tr_be, tr_bty, tr_eoff, tr_es, tr_ee, tr_ety)
   local u_dvo, u_dvs, u_dve, u_dvty, u_dvlab =

@@ -317,10 +317,6 @@ static void tk_aho_build_trie (lua_State *L)
   luaL_checktype(L, 1, LUA_TTABLE);
   bool do_normalize = tk_lua_foptboolean(L, 1, "aho.prepare", "normalize", false);
 
-  lua_getfield(L, 1, "ids");
-  tk_ivec_t *ids = tk_ivec_peek(L, -1, "ids");
-  lua_pop(L, 1);
-
   lua_getfield(L, 1, "priorities");
   tk_ivec_t *priorities = tk_ivec_peekopt(L, -1);
   lua_pop(L, 1);
@@ -329,7 +325,8 @@ static void tk_aho_build_trie (lua_State *L)
   luaL_checktype(L, -1, LUA_TTABLE);
   int ptab = lua_gettop(L);
 
-  int64_t n_patterns = (int64_t)ids->n;
+  // A match reports the pattern index (0-based); callers own the index->meaning mapping.
+  int64_t n_patterns = (int64_t)lua_objlen(L, ptab);
 
   int64_t total_chars = 0;
   for (int64_t i = 0; i < n_patterns; i++) {
@@ -407,7 +404,7 @@ static void tk_aho_build_trie (lua_State *L)
     }
     int64_t new_pri = priorities ? priorities->a[p] : 0;
     if (output_id[cur] < 0 || new_pri < output_pri[cur]) {
-      output_id[cur] = ids->a[p];
+      output_id[cur] = p;
       output_pri[cur] = new_pri;
       output_len[cur] = nlen;
     }
@@ -472,7 +469,7 @@ static void tk_aho_build_trie (lua_State *L)
     int ntab = lua_gettop(L);
     lua_newtable(L);
     for (int64_t i = 0; i < n_patterns; i++) {
-      lua_pushinteger(L, (lua_Integer)ids->a[i]);
+      lua_pushinteger(L, (lua_Integer)i);
       lua_rawgeti(L, ntab, (int)(i + 1));
       lua_settable(L, -3);
     }
