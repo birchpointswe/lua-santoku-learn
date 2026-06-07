@@ -14,14 +14,13 @@ io.stdout:setvbuf("line")
 
 
 
-
 local cfg = {
   data = { ttr = 0.8, tvr = 0.1, max = nil, features = 784 },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "matern52", "expcos", "cosine", "geolaplace", "angular", "matern32", "rq", "arccos1" } },
+  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "matern52", "cosine", "expcos", "geolaplace", "rq", "arccos1" } },
   ridge = {
-    lambda = { def = 8.3774e-03 },
-    propensity_a = { def = 3.9068 },
-    propensity_b = { def = 7.2766 },
+    lambda = { min = 1e-4, max = 1e1, log = true, def = 5.2580e-03 },
+    propensity_a = { min = 0, max = 4, def = 0.4503 },
+    propensity_b = { min = 0, max = 8, def = 6.7864 },
     classes = 10,
     search_trials = 0,
     k = 1,

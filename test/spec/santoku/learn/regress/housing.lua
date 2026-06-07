@@ -15,11 +15,10 @@ io.stdout:setvbuf("line")
 
 
 
-
 local cfg = {
   data = { ttr = 0.8, tvr = 0.1, max = nil },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "angular", "cosine", "expcos", "geolaplace", "matern32", "matern52", "rq", "arccos1" } },
-  ridge = { lambda = { def = 2.3081e-02 }, search_trials = 0 },
+  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "geolaplace", "cosine", "expcos", "matern52", "rq", "arccos1" } },
+  ridge = { lambda = { min = 1e-4, max = 1e1, log = true, def = 6.7149e-02 }, search_trials = 0 },
 }
 
 test("housing regressor", function ()
