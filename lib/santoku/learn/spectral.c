@@ -72,7 +72,6 @@ static inline double tk_spectral_kernel_apply (tk_spectral_kernel_t k, double c)
 
 #define TK_MOD_CSR   0
 #define TK_MOD_DENSE 1
-#define TK_MOD_BITS  2
 #define TK_MERGE_MEAN    0
 #define TK_MERGE_PRODUCT 1
 #define TK_MAX_MOD 8
@@ -85,8 +84,6 @@ typedef struct {
   uint64_t csr_n_tokens;
   const double *dense;
   int64_t d_input;
-  const uint8_t *bits_data;
-  uint64_t bits_d;
 } tk_spectral_modality_t;
 
 typedef struct {
@@ -378,21 +375,6 @@ static inline void tk_spectral_sample_landmarks (
               (double)kip_block[i * np + b]);
       }
 
-    } else if (mod->type == TK_MOD_BITS) {
-      uint64_t bd = mod->bits_d;
-      uint64_t row_bytes = TK_CVEC_BITS_BYTES(bd);
-      const uint8_t *bdata = mod->bits_data;
-      double inv_bd = 1.0 / (double)bd;
-      #pragma omp parallel for schedule(static)
-      for (uint64_t i = 0; i < n_docs; i++) {
-        const uint8_t *row_i = bdata + i * row_bytes;
-        for (uint64_t b = 0; b < np; b++) {
-          uint64_t ham = tk_cvec_bits_hamming_serial(
-            row_i, bdata + blk_pivots[b] * row_bytes, bd);
-          kip_block[i * np + b] = 1.0 - (double)ham * inv_bd;
-        }
-      }
-
     } else if (mod->type == TK_MOD_DENSE) {
       int64_t di = mod->d_input;
       const double *dense = mod->dense;
@@ -546,8 +528,6 @@ typedef struct {
   uint64_t csr_n_tokens;
   float *dense_vecs;
   int64_t d_input;
-  uint8_t *bits_data;
-  uint64_t bits_d;
   float *sims_buf;
   float *row_bufs;
   float *dense_tile_buf;
@@ -573,8 +553,6 @@ static inline int tk_nystrom_encoder_gc (lua_State *L) {
       free(enc->csc_values);
     } else if (enc->mod_type == TK_MOD_DENSE) {
       free(enc->dense_vecs);
-    } else if (enc->mod_type == TK_MOD_BITS) {
-      free(enc->bits_data);
     }
     free(enc->sims_buf);
     free(enc->row_bufs);
@@ -613,9 +591,6 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
   lua_pop(L, 1);
   lua_getfield(L, 2, "d_input");
   int64_t in_d_input_scalar = lua_isnumber(L, -1) ? (int64_t)lua_tointeger(L, -1) : 0;
-  lua_pop(L, 1);
-  lua_getfield(L, 2, "bits");
-  tk_cvec_t *in_bits = tk_cvec_peekopt(L, -1);
   lua_pop(L, 1);
   lua_getfield(L, 2, "output");
   tk_fvec_t *out_fv = tk_fvec_peekopt(L, -1);
@@ -731,22 +706,6 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
         for (uint64_t j = 0; j < m; j++)
           sims_f[i * m + j] = (float)tk_spectral_kernel_apply(enc->kernel,
             (double)sims_f[i * m + j]);
-
-    } else if (enc->mod_type == TK_MOD_BITS) {
-      uint64_t bd = enc->bits_d;
-      uint64_t row_bytes = TK_CVEC_BITS_BYTES(bd);
-      const uint8_t *bdata = (const uint8_t *)in_bits->a;
-      double inv_bd = 1.0 / (double)bd;
-      #pragma omp parallel for schedule(static)
-      for (uint64_t i = 0; i < blk; i++) {
-        const uint8_t *row_i = bdata + (base + i) * row_bytes;
-        float *sims_row = sims_f + i * m;
-        for (uint64_t j = 0; j < m; j++) {
-          uint64_t ham = tk_cvec_bits_hamming_serial(
-            row_i, enc->bits_data + j * row_bytes, bd);
-          sims_row[j] = (float)(1.0 - (double)ham * inv_bd);
-        }
-      }
     }
 
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
@@ -793,10 +752,6 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
   } else if (enc->mod_type == TK_MOD_DENSE) {
     tk_lua_fwrite(L, &enc->d_input, sizeof(int64_t), 1, fh);
     tk_lua_fwrite(L, enc->dense_vecs, sizeof(float), enc->m * (uint64_t)enc->d_input, fh);
-  } else if (enc->mod_type == TK_MOD_BITS) {
-    tk_lua_fwrite(L, &enc->bits_d, sizeof(uint64_t), 1, fh);
-    uint64_t row_bytes = TK_CVEC_BITS_BYTES(enc->bits_d);
-    tk_lua_fwrite(L, enc->bits_data, 1, enc->m * row_bytes, fh);
   }
   lua_getfenv(L, 1);
   lua_getfield(L, -1, "landmark_ids");
@@ -889,25 +844,11 @@ static inline int tm_encode (lua_State *L) {
     lua_pop(L, 1);
   }
 
-  lua_getfield(L, 1, "bits");
-  int has_bits = !lua_isnil(L, -1);
-  if (has_bits) {
-    tk_cvec_t *bits_cv = tk_cvec_peek(L, -1, "bits");
-    lua_pop(L, 1);
-    lua_getfield(L, 1, "d_bits");
-    mod.bits_d = tk_lua_fcheckunsigned(L, 1, "encode", "d_bits");
-    lua_pop(L, 1);
-    mod.type = TK_MOD_BITS;
-    mod.bits_data = (const uint8_t *)bits_cv->a;
-  } else {
-    lua_pop(L, 1);
-  }
-
-  int n_provided = has_csr + has_dense + has_bits;
+  int n_provided = has_csr + has_dense;
   if (n_provided == 0)
     return luaL_error(L, "encode: no modality provided");
   if (n_provided > 1)
-    return luaL_error(L, "encode: provide exactly one modality (csr, dense, or bits)");
+    return luaL_error(L, "encode: provide exactly one modality (csr or dense)");
 
   lua_getfield(L, 1, "kernel");
   const char *kernel_str = lua_isnil(L, -1) ? "cosine" : lua_tostring(L, -1);
@@ -1319,8 +1260,6 @@ static inline int tm_encode (lua_State *L) {
   enc->csr_n_tokens = 0;
   enc->dense_vecs = NULL;
   enc->d_input = 0;
-  enc->bits_data = NULL;
-  enc->bits_d = 0;
   enc->sims_buf = NULL;
   enc->row_bufs = NULL;
   enc->dense_tile_buf = NULL;
@@ -1384,16 +1323,6 @@ static inline int tm_encode (lua_State *L) {
     }
     enc->dense_vecs = lmv;
     free(dense_from_fvec);
-  }
-
-  if (has_bits) {
-    uint64_t bd = mod.bits_d;
-    enc->bits_d = bd;
-    uint64_t row_bytes = TK_CVEC_BITS_BYTES(bd);
-    uint8_t *lmb = (uint8_t *)malloc(m * row_bytes);
-    for (uint64_t j = 0; j < m; j++)
-      memcpy(lmb + j * row_bytes, mod.bits_data + (uint64_t)lm_ids->a[j] * row_bytes, row_bytes);
-    enc->bits_data = lmb;
   }
 
   lua_newtable(L);
@@ -1464,7 +1393,6 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   enc->csc_offsets = NULL; enc->csc_rows = NULL; enc->csc_values = NULL;
   enc->csr_n_tokens = 0;
   enc->dense_vecs = NULL; enc->d_input = 0;
-  enc->bits_data = NULL; enc->bits_d = 0;
   enc->sims_buf = NULL; enc->row_bufs = NULL; enc->dense_tile_buf = NULL;
   enc->tile = 0; enc->n_threads = 0;
 
@@ -1491,11 +1419,6 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
     tk_lua_fread(L, &enc->d_input, sizeof(int64_t), 1, fh);
     enc->dense_vecs = (float *)malloc(enc->m * (uint64_t)enc->d_input * sizeof(float));
     tk_lua_fread(L, enc->dense_vecs, sizeof(float), enc->m * (uint64_t)enc->d_input, fh);
-  } else if (enc->mod_type == TK_MOD_BITS) {
-    tk_lua_fread(L, &enc->bits_d, sizeof(uint64_t), 1, fh);
-    uint64_t row_bytes = TK_CVEC_BITS_BYTES(enc->bits_d);
-    enc->bits_data = (uint8_t *)malloc(enc->m * row_bytes);
-    tk_lua_fread(L, enc->bits_data, 1, enc->m * row_bytes, fh);
   }
 
   tk_ivec_load(L, fh);

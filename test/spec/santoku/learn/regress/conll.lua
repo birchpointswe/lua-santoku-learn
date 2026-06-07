@@ -163,14 +163,29 @@ test("conll", function ()
     local _, o, t, v = tokenize(split, off, s, e, ty, l1_ngram)
     csr.apply_bns(o, t, v, b_bns); csr.normalize(o, v)
     local codes = sp1:encode({ offsets = o, tokens = t, values = v, n_samples = n })
-    local _, amax = ridge1:label(codes, n, 1)
-    return csr.bio_decode(off, s, e, amax, N_TYPES)
+    local so, sn, sv = ridge1:label(codes, n, N_CLASSES)
+    local cls = csr.bio_viterbi(off, so, sn, sv, N_TYPES)
+    return csr.bio_decode(off, s, e, cls, N_TYPES)
   end
   local dv_c1o, dv_c1s, dv_c1e, dv_c1y = l1_context(dev, dv_off, dv_s, dv_e, dv_ty, dv_n)
   local te_c1o, te_c1s, te_c1e, te_c1y = l1_context(test_set, te_off, te_s, te_e, te_ty, te_n)
 
-  -- OOF L1 argmax tags on train -> train backdrop spans (honest context for L2 train)
+  -- OOF L1 Viterbi tags on train -> train backdrop spans (honest context for L2 train)
   local fold = build_fold(tr_off, tr_n, cfg.stack.k)
+  -- Local per-doc offsets for an OOF eval fold: folds are assigned per document and bucket() returns
+  -- ascending indices, so the fold is the ascending concatenation of whole sentences. This lets the
+  -- L1 Viterbi decode each complete sentence within the fold (matching the dev/test L1 decode).
+  local function fold_doc_offsets (idx)
+    local doff = ivec.create(); doff:push(0)
+    local p, m = 0, idx:size()
+    for d = 0, tr_off:size() - 2 do
+      if p < m and idx:get(p) == tr_off:get(d) then
+        p = p + (tr_off:get(d + 1) - tr_off:get(d))
+        doff:push(p)
+      end
+    end
+    return doff
+  end
   local oof_tags = optimize.oof({
     n = tr_n, k = cfg.stack.k, fold = fold, out = ivec.create(tr_n),
     each = function (ev) str.printf("[BIO L1 OOF] fold %d/%d %s\n", ev.fold, ev.folds, sw()) end,
@@ -192,8 +207,8 @@ test("conll", function ()
       local so, st, sv = csr.gather_rows(raw_off, raw_tok, raw_val, idx)
       csr.apply_bns(so, st, sv, h.bns); csr.normalize(so, sv)
       local codes = h.sp:encode({ offsets = so, tokens = st, values = sv, n_samples = idx:size() })
-      local _, nbr = h.r:label(codes, idx:size(), 1)
-      return nbr
+      local eo, en, ev = h.r:label(codes, idx:size(), N_CLASSES)
+      return csr.bio_viterbi(fold_doc_offsets(idx), eo, en, ev, N_TYPES)
     end,
   })
   local tr_c1o, tr_c1s, tr_c1e, tr_c1y = csr.bio_decode(tr_off, tr_s, tr_e, oof_tags, N_TYPES)
@@ -227,8 +242,11 @@ test("conll", function ()
       tokenize_ctx(split, off, s, e, ty, co, cs, ce, cy, l2_ngram, cfg.bio_l2.collapse)
     csr.apply_bns(lo, lt, lv, l2_bns); csr.normalize(lo, lv)
     local codes = sp2:encode({ offsets = lo, tokens = lt, values = lv, n_samples = n })
-    local _, amax = ridge2:label(codes, n, 1)
-    return csr.bio_decode(off, s, e, amax, N_TYPES)
+    -- Viterbi transition layer: per-class emissions -> best BIO-valid sequence (no orphan I-, no
+    -- invalid type transitions), unlike the unconstrained per-token argmax.
+    local so, sn, sv = ridge2:label(codes, n, N_CLASSES)
+    local cls = csr.bio_viterbi(off, so, sn, sv, N_TYPES)
+    return csr.bio_decode(off, s, e, cls, N_TYPES)
   end
   dv_bo, dv_bs, dv_be, dv_bty = stacked_spans(dev, dv_off, dv_s, dv_e, dv_ty, dv_n, dv_c1o, dv_c1s, dv_c1e, dv_c1y)
   te_bo, te_bs, te_be, te_bty = stacked_spans(test_set, te_off, te_s, te_e, te_ty, te_n, te_c1o, te_c1s, te_c1e, te_c1y)
