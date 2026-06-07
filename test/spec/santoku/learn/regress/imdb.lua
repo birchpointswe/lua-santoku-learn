@@ -10,15 +10,14 @@ local utc = require("santoku.utc")
 io.stdout:setvbuf("line")
 
 -- Reported metrics (search_trials=100; splits train=22500 val=2500 test=25000; 1 class):
---   n_landmarks=8192:  F1 val=0.92 test=0.91  (best: arccos1, lambda=1.32e-02; post-norm)
---   n_landmarks=16384: F1 val=0.92 test=0.91  (best: expcos, lambda=3.04e-01; pre-kernel-expansion)
+--   n_landmarks=8192:  F1 val=0.92 test=0.91  (best: arccos1, lambda=2.0497e-02)
 
 local cfg = {
   data = { max = nil, ttr = 0.5, tvr = 0.1 },
   tok = { ngram_min = 5, ngram_max = 5 },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "arccos1", "angular", "expcos", "cosine", "geolaplace", "matern32", "matern52", "rq" } },
+  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "arccos1", "cosine", "expcos", "geolaplace", "matern52", "rq" } },
   ridge = {
-    lambda = { def = 1.3163e-02 },
+    lambda = { min = 1e-4, max = 1e1, log = true, def = 2.0497e-02 },
     classes = 1,
     search_trials = 0,
     k = 1,
@@ -72,6 +71,11 @@ test("imdb classifier", function ()
     lambda = cfg.ridge.lambda,
     k = cfg.ridge.k, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
+    trial_fn = function (gram, params)
+      local f1, p, r = gram:label_accuracy(params.lambda, cfg.ridge.k, nil, nil,
+        val_label_off, val_label_nbr, "gfm")
+      return f1, { f1 = f1, precision = p, recall = r }
+    end,
   })
   do  -- persist/load parity: round-tripped encoder must produce identical codes
     local p = os.tmpname()

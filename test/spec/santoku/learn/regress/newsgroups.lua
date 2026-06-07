@@ -12,16 +12,15 @@ io.stdout:setvbuf("line")
 
 -- Reported metrics (search_trials=100; splits train=10183 val=1131 test=7532; 20 classes):
 --   n_landmarks=8192:  F1 val=0.91 test=0.83  (best: cosine, lambda=1.84e-01, pa=0.08 pb=0.81)
---   n_landmarks=16384: F1 val=0.91 test=0.83  (best: cosine, lambda=7.87e-02, pa=3.17 pb=7.72; pre-kernel-expansion)
 
 local cfg = {
   data = { max = nil, tvr = 0.1 },
   tok = { ngram_min = 5, ngram_max = 5 },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "cosine", "expcos", "geolaplace", "angular", "matern32", "matern52", "rq", "arccos1" } },
+  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "cosine", "expcos", "geolaplace", "matern52", "rq", "arccos1" } },
   ridge = {
-    lambda = { def = 1.8408e-01 },
-    propensity_a = { def = 0.0847 },
-    propensity_b = { def = 0.8065 },
+    lambda = { min = 1e-4, max = 1e1, log = true, def = 1.8408e-01 },
+    propensity_a = { min = 0, max = 4, def = 0.0847 },
+    propensity_b = { min = 0, max = 8, def = 0.8065 },
     classes = 20,
     search_trials = 0,
     k = 1,

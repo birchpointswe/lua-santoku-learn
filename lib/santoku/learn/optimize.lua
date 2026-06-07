@@ -372,6 +372,23 @@ local search = function (args)
 
 end
 
+-- Default validation metric for a (gram, params) trial: MAE for dense regression, candidate-F1 for
+-- classification (gfm=true adds GFM calibration, used by the tiled XMLC path).
+local function default_trial_fn (args, dense, gfm, k)
+  if dense then
+    return function (g, params)
+      local mae, nmae = g:regress_accuracy(params.lambda, nil, nil, args.val_targets)
+      return -mae, { mae = mae, nmae = nmae }
+    end
+  end
+  return function (g, params)
+    local f1, p, r = g:label_accuracy(params.lambda, k,
+      params.propensity_a, params.propensity_b,
+      args.val_expected_offsets, args.val_expected_neighbors, gfm and "gfm" or nil)
+    return f1, { f1 = f1, precision = p, recall = r }
+  end
+end
+
 M.ridge = function (args)
   local ridge = require("santoku.learn.ridge")
   local dense = args.val_targets ~= nil
@@ -406,22 +423,7 @@ M.ridge = function (args)
     return r, params
   end
   gram:prepare(args.val_codes, args.val_n_samples)
-  local trial_fn = args.trial_fn
-  if not trial_fn then
-    if dense then
-      trial_fn = function (g, params)
-        local mae, nmae = g:regress_accuracy(params.lambda, nil, nil, args.val_targets)
-        return -mae, { mae = mae, nmae = nmae }
-      end
-    else
-      trial_fn = function (g, params)
-        local f1, p, r = g:label_accuracy(params.lambda, k,
-          params.propensity_a, params.propensity_b,
-          args.val_expected_offsets, args.val_expected_neighbors)
-        return f1, { f1 = f1, precision = p, recall = r }
-      end
-    end
-  end
+  local trial_fn = args.trial_fn or default_trial_fn(args, dense, false, k)
   local _, best_params = search({
     param_names = param_names, samplers = samplers,
     trials = args.search_trials or 30,
@@ -454,8 +456,7 @@ M.krr = function (args)
   local do_search = not all_fixed(samplers) and args.search_trials and args.search_trials > 0
   local k = not dense and (args.k or 32) or nil
   local tile_labels = not dense and (args.tile_labels or 1024) or nil
-  local use_tile_search = do_search and tile_labels and tile_labels > 0
-  local use_tile = not do_search and tile_labels and tile_labels > 0
+  local tiled = tile_labels ~= nil and tile_labels > 0
   local spectral_args = {
     offsets = args.offsets, tokens = args.tokens, values = args.values,
     n_tokens = args.n_tokens, n_samples = args.n_samples,
@@ -466,6 +467,11 @@ M.krr = function (args)
     n_labels = args.n_labels,
     targets = args.targets, n_targets = args.n_targets,
   }
+  if tiled then
+    spectral_args.tile_labels = tile_labels
+    spectral_args.tile_samples = args.tile_samples
+    spectral_args.chol_buf = args.chol_buf
+  end
   -- Deterministic landmark selection: reseed the global RNG to a fixed value before every
   -- spectral.encode so a kernel's landmarks depend only on its inputs, not on build order /
   -- prior RNG state. Makes locked == in-search and runs reproducible.
@@ -477,81 +483,17 @@ M.krr = function (args)
       values = args.val_values, n_samples = args.val_n_samples,
     })
   end
-  if use_tile_search then
-    -- Lazy per-kernel tiled grams. Each kernel gets its own PQtY (internal alloc, or a
-    -- per-kernel mmap when args.pqty_buf is a factory fn(kname)->fvec); chol_buf/w_buf stay
-    -- shared (chol is transient per encode; w is only used for the final winning solve).
-    local kernel_data = {}
-    local function pqty_for (kname)
-      if type(args.pqty_buf) == "function" then return args.pqty_buf(kname) end
-      return args.pqty_buf
-    end
-    local function ensure_kernel (kname)
-      local kd = kernel_data[kname]
-      if kd then return kd end
-      spectral_args.kernel = kname
-      spectral_args.tile_labels = tile_labels
-      spectral_args.tile_samples = args.tile_samples
-      spectral_args.chol_buf = args.chol_buf
-      spectral_args.pqty_buf = pqty_for(kname)
-      rand.fast_seed(seed)
-      local _, sp_enc, gram = spectral.encode(spectral_args)
-      local val_codes = val_encode(sp_enc)
-      gram:prepare(val_codes, args.val_n_samples)
-      kd = { sp_enc = sp_enc, gram = gram, val_codes = val_codes }
-      kernel_data[kname] = kd
-      collectgarbage("collect")
-      return kd
-    end
-    local trial_fn = args.trial_fn or function(g, p)
-      local f1, p2, r = g:label_accuracy(p.lambda, k,
-        p.propensity_a, p.propensity_b,
-        args.val_expected_offsets, args.val_expected_neighbors, "gfm")
-      return f1, { f1 = f1, precision = p2, recall = r }
-    end
-    local _, best_params = search({
-      param_names = param_names, samplers = samplers,
-      trials = args.search_trials or 30,
-      trial_fn = function(p) return trial_fn(ensure_kernel(p.kernel).gram, p) end,
-      each = args.each, skip_final = true,
-    })
-    -- Parity: the final model must reuse the exact gram the search scored (a cache hit). With the
-    -- deterministic seed above, a cache miss would still rebuild identically, but assert anyway.
-    assert(kernel_data[best_params.kernel], "krr: best kernel not in cache")
-    local best_kd = ensure_kernel(best_params.kernel)
-    local r = ridge.create({
-      gram = best_kd.gram, lambda = best_params.lambda,
-      propensity_a = not dense and best_params.propensity_a or nil,
-      propensity_b = not dense and best_params.propensity_b or nil,
-      w_buf = args.w_buf, tile_labels = tile_labels,
-    })
-    if args.each then args.each({ event = "done", params = best_params, emb_d = best_kd.sp_enc:dims() }) end
-    return best_kd.sp_enc, r, best_kd.val_codes, best_params
-  elseif use_tile then
-    local params = sample_params(samplers, param_names, nil, true)
-    spectral_args.kernel = params.kernel
-    spectral_args.tile_labels = tile_labels
-    spectral_args.tile_samples = args.tile_samples
-    spectral_args.chol_buf = args.chol_buf
-    rand.fast_seed(seed)
-    local _, sp_enc, gram = spectral.encode(spectral_args)
-    local r = ridge.create({
-      gram = gram, lambda = params.lambda,
-      propensity_a = not dense and params.propensity_a or nil,
-      propensity_b = not dense and params.propensity_b or nil,
-      w_buf = args.w_buf, tile_labels = tile_labels,
-    })
-    local val_codes = val_encode(sp_enc)
-    if args.each then args.each({ event = "done", params = params, emb_d = sp_enc:dims() }) end
-    return sp_enc, r, val_codes, params
-  end
-  -- Lazy: build + cache (sp_enc, gram, val_codes) per kernel on first request, only for the
-  -- kernels the search actually visits (single-modality is the 1-kernel case of this).
+  -- Lazy per-kernel build+cache. Tiled (XMLC) and non-tiled (regression / few-label) paths differ
+  -- only in the tiled spectral_args set above, the per-kernel PQtY, and the ridge.create args.
   local kernel_data = {}
   local function ensure_kernel (kname)
     local kd = kernel_data[kname]
     if kd then return kd end
     spectral_args.kernel = kname
+    if tiled and args.pqty_buf then
+      spectral_args.pqty_buf = type(args.pqty_buf) == "function"
+        and args.pqty_buf(kname) or args.pqty_buf
+    end
     rand.fast_seed(seed)
     local _, sp_enc, gram = spectral.encode(spectral_args)
     local val_codes = val_encode(sp_enc)
@@ -561,51 +503,32 @@ M.krr = function (args)
     collectgarbage("collect")
     return kd
   end
-  if not do_search then
-    local params = sample_params(samplers, param_names, nil, true)
-    local kd = ensure_kernel(params.kernel)
+  local function finish (kd, params)
     local r = ridge.create({
       gram = kd.gram, lambda = params.lambda,
       propensity_a = not dense and params.propensity_a or nil,
       propensity_b = not dense and params.propensity_b or nil,
+      w_buf = tiled and args.w_buf or nil,
+      tile_labels = tiled and tile_labels or nil,
     })
     if args.each then args.each({ event = "done", params = params, emb_d = kd.sp_enc:dims() }) end
     return kd.sp_enc, r, kd.val_codes, params
   end
-  local trial_fn = args.trial_fn
-  if not trial_fn then
-    if dense then
-      trial_fn = function (g, params)
-        local mae, nmae = g:regress_accuracy(params.lambda, nil, nil, args.val_targets)
-        return -mae, { mae = mae, nmae = nmae }
-      end
-    else
-      trial_fn = function (g, params)
-        local f1, p, r = g:label_accuracy(params.lambda, k,
-          params.propensity_a, params.propensity_b,
-          args.val_expected_offsets, args.val_expected_neighbors)
-        return f1, { f1 = f1, precision = p, recall = r }
-      end
-    end
+  if not do_search then
+    local params = sample_params(samplers, param_names, nil, true)
+    return finish(ensure_kernel(params.kernel), params)
   end
+  local trial_fn = args.trial_fn or default_trial_fn(args, dense, tiled, k)
   local _, best_params = search({
     param_names = param_names, samplers = samplers,
     trials = args.search_trials or 30,
-    trial_fn = function (params)
-      local kd = ensure_kernel(params.kernel)
-      return trial_fn(kd.gram, params)
-    end,
+    trial_fn = function (params) return trial_fn(ensure_kernel(params.kernel).gram, params) end,
     each = args.each, skip_final = true,
   })
+  -- The returned model reuses the exact gram the search scored (a cache hit; the deterministic seed
+  -- means even a miss would rebuild identically).
   assert(kernel_data[best_params.kernel], "krr: best kernel not in cache")
-  local best_kd = ensure_kernel(best_params.kernel)
-  local r = ridge.create({
-    gram = best_kd.gram, lambda = best_params.lambda,
-    propensity_a = not dense and best_params.propensity_a or nil,
-    propensity_b = not dense and best_params.propensity_b or nil,
-  })
-  if args.each then args.each({ event = "done", params = best_params, emb_d = best_kd.sp_enc:dims() }) end
-  return best_kd.sp_enc, r, best_kd.val_codes, best_params
+  return finish(ensure_kernel(best_params.kernel), best_params)
 end
 
 M.oof = function (args)
@@ -617,9 +540,18 @@ M.oof = function (args)
   local fit = err.assert(args.fit, "oof: fit required")
   local predict = err.assert(args.predict, "oof: predict required")
   local each = args.each
-  local order, offsets = fold:bucket(k)
-  local out = fvec.create(n)
+  err.assert(k >= 1, "oof: k must be >= 1")
+  local out = args.out or fvec.create(n)  -- caller may supply a typed out (e.g. ivec for class ids)
   out:zero()
+  if k == 1 then
+    -- no holdout: one model fit on all n, in-sample predictions (fast, leaky; for iteration)
+    local all = ivec.create(n); all:fill_indices()
+    if each then each({ fold = 1, folds = 1, n_train = n, n_eval = n }) end
+    local h = fit(all)
+    out:copy(predict(h, all), all, true)
+    return out
+  end
+  local order, offsets = fold:bucket(k)
   local train, eval = ivec.create(), ivec.create()
   for kk = 0, k - 1 do
     local s, e = offsets:get(kk), offsets:get(kk + 1)

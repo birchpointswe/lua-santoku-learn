@@ -12,17 +12,16 @@ local utc = require("santoku.utc")
 io.stdout:setvbuf("line")
 
 -- Reported metrics (search_trials=100; splits train=44999 dev=5999 test=5999; 4270 labels):
---   n_landmarks=8192:  miF1 dv-oracle=0.808 ts-oracle=0.796 ts-pred=0.733 (best: cosine, lambda=3.82e-03, pa=0.08 pb=3.67)
---   n_landmarks=16384: miF1 dv-oracle=0.818 ts-oracle=0.809 ts-pred=0.744  (best: cosine, lambda=3.82e-03, pa=0.08 pb=3.67; pre-kernel-expansion)
+--   n_landmarks=8192:  miF1 dv-oracle=0.808 ts-oracle=0.791 ts-pred=0.732 (best: cosine, lambda=1.6012e-04, pa=0.03 pb=7.84)
 
 local cfg = {
   data = { max = nil },
   tok = { ngram = 6 },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "cosine", "expcos", "geolaplace", "angular", "matern32", "matern52", "rq", "arccos1" }, k = 256 },
+  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "cosine", "expcos", "geolaplace", "matern52", "rq", "arccos1" }, k = 256 },
   ridge = {
-    lambda = { def = 3.8157e-03 },
-    propensity_a = { def = 0.0751 },
-    propensity_b = { def = 3.6673 },
+    lambda = { min = 1e-4, max = 1e1, log = true, def = 1.6012e-04 },
+    propensity_a = { min = 0, max = 4, def = 0.0304 },
+    propensity_b = { min = 0, max = 8, def = 7.8351 },
     search_trials = 0,
   },
 }

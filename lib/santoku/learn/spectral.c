@@ -30,24 +30,21 @@ static inline const int32_t *tk_peek_tokens (lua_State *L, int idx, uint64_t *ou
 // All supported kernels are self-similarity=1: each is a function f of the cosine c only
 // (scale-invariant, ignores magnitude) with f(1)=1, so k(x,x)=1 always. Inputs are unit-L2-normalized
 // by the caller, so c is just the sparse/dense dot (no denom here). This keeps downstream well
-// behaved: the residual/trace diagonal is a constant 1, and the multimodal product kernel
-// prod(1+k_m)-1 stays magnitude-balanced (no modality can dominate via an unbounded norm) with a
-// constant 2^M-1 diagonal that leaves trace_tol invariant. Any kernel added here MUST satisfy
-// f(1)=1 and be PSD on the sphere. Norm-scaled kernels (e.g. nngp/ntk, where k(x,x)=||x||^2) were
+// behaved: the residual/trace diagonal is a constant 1, which leaves trace_tol invariant. Any
+// kernel added here MUST satisfy f(1)=1 and be PSD on the sphere. Norm-scaled kernels (e.g. nngp/ntk, where k(x,x)=||x||^2) were
 // removed for breaking these guarantees. The sphere identities: d^2 = 2(1-c) is the squared
 // chordal distance, so expcos = Gaussian (exp(-d^2/2)) and geolaplace = Laplacian/Matern-1/2
-// (exp(-d)); matern32/matern52 continue that smoothness ladder; angular is arc-cosine order 0 and
-// arccos1 is arc-cosine order 1 normalized to self-sim=1 (the old nngp with the ||x|| denom divided
-// out); rq is the rational-quadratic (alpha=1) heavy-tailed kernel. All at the natural scale (l=1).
+// (exp(-d)); matern52 continues that smoothness ladder; arccos1 is arc-cosine order 1 normalized to
+// self-sim=1 (the old nngp with the ||x|| denom divided out); rq is the rational-quadratic (alpha=1)
+// heavy-tailed kernel. All at the natural scale (l=1). (The full-search-dominated angular and
+// matern32 were pruned: each was a never-winning interpolator between two retained kernels.)
 typedef enum {
   TK_SPECTRAL_COSINE = 0,
   TK_SPECTRAL_EXPCOS = 1,
   TK_SPECTRAL_GEOLAPLACE = 2,
-  TK_SPECTRAL_ANGULAR = 3,
-  TK_SPECTRAL_MATERN32 = 4,
-  TK_SPECTRAL_MATERN52 = 5,
-  TK_SPECTRAL_RQ = 6,
-  TK_SPECTRAL_ARCCOS1 = 7,
+  TK_SPECTRAL_MATERN52 = 3,
+  TK_SPECTRAL_RQ = 4,
+  TK_SPECTRAL_ARCCOS1 = 5,
 } tk_spectral_kernel_t;
 
 static inline double tk_spectral_kernel_apply (tk_spectral_kernel_t k, double c) {
@@ -58,13 +55,6 @@ static inline double tk_spectral_kernel_apply (tk_spectral_kernel_t k, double c)
   if (k == TK_SPECTRAL_GEOLAPLACE) {
     double d2 = 2.0 * (1.0 - c);
     return exp(-sqrt(d2 > 0.0 ? d2 : 0.0));
-  }
-  if (k == TK_SPECTRAL_ANGULAR)
-    return 1.0 - acos(c) / M_PI;
-  if (k == TK_SPECTRAL_MATERN32) {
-    double d2 = 2.0 * (1.0 - c);
-    double a = sqrt(3.0 * (d2 > 0.0 ? d2 : 0.0));
-    return (1.0 + a) * exp(-a);
   }
   if (k == TK_SPECTRAL_MATERN52) {
     double d2 = 2.0 * (1.0 - c);
@@ -777,43 +767,6 @@ static inline int tk_nystrom_dims_lua (lua_State *L) {
   return 1;
 }
 
-static inline int tk_nystrom_n_landmarks_lua (lua_State *L) {
-  tk_nystrom_encoder_t *enc = tk_nystrom_encoder_peek(L, 1);
-  lua_pushinteger(L, (lua_Integer)enc->m);
-  return 1;
-}
-
-static inline int tk_nystrom_trace_ratio_lua (lua_State *L) {
-  tk_nystrom_encoder_t *enc = tk_nystrom_encoder_peek(L, 1);
-  lua_pushnumber(L, enc->trace_ratio);
-  return 1;
-}
-
-static inline int tk_nystrom_landmark_ids_lua (lua_State *L) {
-  tk_nystrom_encoder_peek(L, 1);
-  lua_getfenv(L, 1);
-  lua_getfield(L, -1, "landmark_ids");
-  return 1;
-}
-
-static inline int tk_nystrom_restrict_lua (lua_State *L) {
-  tk_nystrom_encoder_t *enc = tk_nystrom_encoder_peek(L, 1);
-  tk_ivec_t *keep = tk_ivec_peek(L, 2, "keep_dims");
-  uint64_t new_d = keep->n;
-  if (new_d == 0) return luaL_error(L, "restrict: empty keep_dims");
-  for (uint64_t i = 0; i < new_d; i++)
-    if (keep->a[i] < 0 || (uint64_t)keep->a[i] >= enc->d)
-      return luaL_error(L, "restrict: dim %d out of range [0,%d)", (int)keep->a[i], (int)enc->d);
-  float *new_proj = (float *)malloc(enc->m * new_d * sizeof(float));
-  for (uint64_t j = 0; j < enc->m; j++)
-    for (uint64_t i = 0; i < new_d; i++)
-      new_proj[j * new_d + i] = enc->projection[j * enc->d + (uint64_t)keep->a[i]];
-  free(enc->projection);
-  enc->projection = new_proj;
-  enc->d = new_d;
-  return 0;
-}
-
 static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
   tk_nystrom_encoder_t *enc = tk_nystrom_encoder_peek(L, 1);
   if (enc->destroyed)
@@ -867,10 +820,6 @@ static inline int tk_nystrom_shrink_lua (lua_State *L) {
 static luaL_Reg tk_nystrom_encoder_mt_fns[] = {
   { "encode", tk_nystrom_encode_lua },
   { "dims", tk_nystrom_dims_lua },
-  { "n_landmarks", tk_nystrom_n_landmarks_lua },
-  { "landmark_ids", tk_nystrom_landmark_ids_lua },
-  { "trace_ratio", tk_nystrom_trace_ratio_lua },
-  { "restrict", tk_nystrom_restrict_lua },
   { "persist", tk_nystrom_encoder_persist_lua },
   { "shrink", tk_nystrom_shrink_lua },
   { NULL, NULL }
@@ -967,8 +916,6 @@ static inline int tm_encode (lua_State *L) {
   if (strcmp(kernel_str, "cosine") == 0) kernel = TK_SPECTRAL_COSINE;
   else if (strcmp(kernel_str, "expcos") == 0) kernel = TK_SPECTRAL_EXPCOS;
   else if (strcmp(kernel_str, "geolaplace") == 0) kernel = TK_SPECTRAL_GEOLAPLACE;
-  else if (strcmp(kernel_str, "angular") == 0) kernel = TK_SPECTRAL_ANGULAR;
-  else if (strcmp(kernel_str, "matern32") == 0) kernel = TK_SPECTRAL_MATERN32;
   else if (strcmp(kernel_str, "matern52") == 0) kernel = TK_SPECTRAL_MATERN52;
   else if (strcmp(kernel_str, "rq") == 0) kernel = TK_SPECTRAL_RQ;
   else if (strcmp(kernel_str, "arccos1") == 0) kernel = TK_SPECTRAL_ARCCOS1;

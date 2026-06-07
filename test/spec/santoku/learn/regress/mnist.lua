@@ -12,16 +12,15 @@ local utc = require("santoku.utc")
 io.stdout:setvbuf("line")
 
 -- Reported metrics (search_trials=100; splits train=50400 val=5600 test=14000; 10 classes):
---   n_landmarks=8192:  F1 val=0.98 test=0.98  (best: matern52, lambda=8.38e-03, pa=3.91 pb=7.28)
---   n_landmarks=16384: F1 val=0.98 test=0.98  (best: expcos, lambda=4.05e-04, pa=0.46 pb=0.29; pre-kernel-expansion)
+--   n_landmarks=8192:  F1 val=0.98 test=0.98  (best: matern52, lambda=5.258e-03, pa=0.45 pb=6.79)
 
 local cfg = {
   data = { ttr = 0.8, tvr = 0.1, max = nil, features = 784 },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "matern52", "expcos", "cosine", "geolaplace", "angular", "matern32", "rq", "arccos1" } },
+  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "matern52", "cosine", "expcos", "geolaplace", "rq", "arccos1" } },
   ridge = {
-    lambda = { def = 8.3774e-03 },
-    propensity_a = { def = 3.9068 },
-    propensity_b = { def = 7.2766 },
+    lambda = { min = 1e-4, max = 1e1, log = true, def = 5.2580e-03 },
+    propensity_a = { min = 0, max = 4, def = 0.4503 },
+    propensity_b = { min = 0, max = 8, def = 6.7864 },
     classes = 10,
     search_trials = 0,
     k = 1,

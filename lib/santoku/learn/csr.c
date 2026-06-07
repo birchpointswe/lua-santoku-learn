@@ -1237,6 +1237,129 @@ static int tm_csr_bio_decode (lua_State *L)
   return 4;
 }
 
+// bio_viterbi(doc_off, score_off, score_nbr, score_val, n_types) -> classes
+// Hard-constraint linear-chain decode: per doc, the best VALID BIO x type label sequence maximizing
+// summed emission scores subject to BIO validity (I-<t> may only follow B-<t> or I-<t>; an entity
+// can't start with I). Emissions come from ridge:label(codes, n, n_classes): score_off/nbr/val is
+// that top-(n_classes) CSR (sorted, scattered back to class order here). Returns one class per token.
+static int tm_csr_bio_viterbi (lua_State *L)
+{
+  tk_ivec_t *doc_off = tk_ivec_peek(L, 1, "doc_offsets");
+  tk_ivec_t *s_off = tk_ivec_peek(L, 2, "score_offsets");
+  tk_ivec_t *s_nbr = tk_ivec_peek(L, 3, "score_neighbors");
+  tk_fvec_t *s_val = tk_fvec_peek(L, 4, "score_values");
+  int64_t n_types = tk_lua_checkinteger(L, 5, "n_types");
+  int64_t nc = 2 * n_types + 1;
+  int64_t n_docs = (int64_t) (doc_off->n - 1);
+  int64_t n_tok = doc_off->a[n_docs];
+  tk_ivec_t *out = tk_ivec_create(L, (uint64_t) n_tok);
+  out->n = (uint64_t) n_tok;
+  int64_t maxT = 0;
+  for (int64_t d = 0; d < n_docs; d++) {
+    int64_t t = doc_off->a[d + 1] - doc_off->a[d];
+    if (t > maxT) maxT = t;
+  }
+  if (maxT == 0) return 1;
+  const double NEG = -1e30;
+  double *emis = (double *) malloc((size_t) (maxT * nc) * sizeof(double));
+  double *dp = (double *) malloc((size_t) (maxT * nc) * sizeof(double));
+  int64_t *bp = (int64_t *) malloc((size_t) (maxT * nc) * sizeof(int64_t));
+  if (!emis || !dp || !bp) {
+    free(emis); free(dp); free(bp);
+    return luaL_error(L, "bio_viterbi: alloc failed");
+  }
+  for (int64_t d = 0; d < n_docs; d++) {
+    int64_t t0 = doc_off->a[d], T = doc_off->a[d + 1] - t0;
+    if (T == 0) continue;
+    for (int64_t i = 0; i < T; i++) {
+      int64_t j = t0 + i;
+      for (int64_t c = 0; c < nc; c++) emis[i * nc + c] = NEG;
+      for (int64_t k = s_off->a[j]; k < s_off->a[j + 1]; k++) {
+        int64_t c = s_nbr->a[k];
+        if (c >= 0 && c < nc) emis[i * nc + c] = (double) s_val->a[k];
+      }
+    }
+    for (int64_t c = 0; c < nc; c++) {       // t = 0: from virtual O (no I start)
+      dp[c] = (c > n_types) ? NEG : emis[c];
+      bp[c] = -1;
+    }
+    for (int64_t i = 1; i < T; i++) {
+      for (int64_t c = 0; c < nc; c++) {
+        double best = NEG; int64_t barg = -1;
+        for (int64_t a = 0; a < nc; a++) {
+          if (dp[(i - 1) * nc + a] <= NEG) continue;
+          if (c > n_types) {                 // c = I-tc: only B-tc or I-tc may precede
+            int64_t tc = c - n_types - 1;
+            if (a != 1 + tc && a != 1 + n_types + tc) continue;
+          }
+          double v = dp[(i - 1) * nc + a];
+          if (v > best) { best = v; barg = a; }
+        }
+        dp[i * nc + c] = (best <= NEG) ? NEG : best + emis[i * nc + c];
+        bp[i * nc + c] = barg;
+      }
+    }
+    int64_t cur = 0; double bv = NEG;
+    for (int64_t c = 0; c < nc; c++)
+      if (dp[(T - 1) * nc + c] > bv) { bv = dp[(T - 1) * nc + c]; cur = c; }
+    for (int64_t i = T - 1; i >= 0; i--) {
+      out->a[t0 + i] = cur;
+      if (i > 0) { cur = bp[i * nc + cur]; if (cur < 0) cur = 0; }
+    }
+  }
+  free(emis); free(dp); free(bp);
+  return 1;
+}
+
+// union_spans{ a_offsets,a_starts,a_ends,a_types, b_offsets,b_starts,b_ends,b_types,
+//   gold_offsets,gold_starts,gold_ends,gold_types } -> off, starts, ends, types, labels
+// Per doc, the deduped union of candidate sets A and B (matched on (start,end,type)), each candidate
+// labeled 1 if it matches a gold span in that doc else 0. Spans/doc are small, so a nested scan is fine.
+static int tm_csr_union_spans (lua_State *L)
+{
+  luaL_checktype(L, 1, LUA_TTABLE);
+  tk_ivec_t *fields[12];
+  const char *names[12] = {
+    "a_offsets", "a_starts", "a_ends", "a_types",
+    "b_offsets", "b_starts", "b_ends", "b_types",
+    "gold_offsets", "gold_starts", "gold_ends", "gold_types" };
+  for (int i = 0; i < 12; i++) {
+    lua_getfield(L, 1, names[i]);
+    fields[i] = tk_ivec_peek(L, -1, names[i]);
+    lua_pop(L, 1);
+  }
+  tk_ivec_t *ao = fields[0], *as = fields[1], *ae = fields[2], *at = fields[3];
+  tk_ivec_t *bo = fields[4], *bs = fields[5], *be = fields[6], *bt = fields[7];
+  tk_ivec_t *go = fields[8], *gs = fields[9], *ge = fields[10], *gt = fields[11];
+  int64_t n_docs = (int64_t) (ao->n - 1);
+  tk_ivec_t *uoff = tk_ivec_create(L, (uint64_t) (n_docs + 1));
+  uoff->n = (uint64_t) (n_docs + 1);
+  tk_ivec_t *us = tk_ivec_create(L, 0);
+  tk_ivec_t *ue = tk_ivec_create(L, 0);
+  tk_ivec_t *ut = tk_ivec_create(L, 0);
+  tk_ivec_t *ulab = tk_ivec_create(L, 0);
+  uoff->a[0] = 0;
+  for (int64_t d = 0; d < n_docs; d++) {
+    int64_t doc_start = (int64_t) us->n;
+    for (int pass = 0; pass < 2; pass++) {
+      tk_ivec_t *po = pass ? bo : ao, *ps = pass ? bs : as, *pe = pass ? be : ae, *pt = pass ? bt : at;
+      for (int64_t j = po->a[d]; j < po->a[d + 1]; j++) {
+        int64_t sj = ps->a[j], ej = pe->a[j], tj = pt->a[j];
+        int dup = 0;
+        for (int64_t k = doc_start; k < (int64_t) us->n; k++)
+          if (us->a[k] == sj && ue->a[k] == ej && ut->a[k] == tj) { dup = 1; break; }
+        if (dup) continue;
+        int64_t lab = 0;
+        for (int64_t g = go->a[d]; g < go->a[d + 1]; g++)
+          if (gs->a[g] == sj && ge->a[g] == ej && gt->a[g] == tj) { lab = 1; break; }
+        tk_ivec_push(us, sj); tk_ivec_push(ue, ej); tk_ivec_push(ut, tj); tk_ivec_push(ulab, lab);
+      }
+    }
+    uoff->a[d + 1] = (int64_t) us->n;
+  }
+  return 5;
+}
+
 static int tm_csr_merge (lua_State *L)
 {
   tk_ivec_t *off1 = tk_ivec_peek(L, 1, "off1");
@@ -1404,6 +1527,8 @@ static luaL_Reg tm_csr_fns[] = {
   { "filter_spans", tm_csr_filter_spans },
   { "bio_encode", tm_csr_bio_encode },
   { "bio_decode", tm_csr_bio_decode },
+  { "bio_viterbi", tm_csr_bio_viterbi },
+  { "union_spans", tm_csr_union_spans },
   { "merge", tm_csr_merge },
   { "standardize", tm_csr_standardize },
   { "normalize", tm_csr_normalize },
