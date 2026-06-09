@@ -290,18 +290,32 @@ static inline void tk_spectral_sample_landmarks (
     uint64_t n_propose = max_blk * 2;
     if (n_propose > TK_CHOL_BLOCK) n_propose = TK_CHOL_BLOCK;
     uint64_t np = 0;
-    for (uint64_t b = 0; b < n_propose; b++) {
+    uint64_t n_valid = 0;
+    for (uint64_t b = 0; b < n_propose && np < max_blk; b++) {
       uint64_t pi = SAMPLE_PROPOSAL();
       if (residual[pi] < 1.2e-6) continue;
       int dup = 0;
       for (uint64_t k = 0; k < np; k++)
         if (blk_pivots[k] == pi) { dup = 1; break; }
       if (dup) continue;
+      n_valid++;
+
+
+
+
+      if (proposal[pi] > 1e-15) {
+        double accept_prob = residual[pi] / proposal[pi];
+        if (tk_fast_drand() > accept_prob) continue;
+      } else {
+        continue;
+      }
       blk_pivots[np] = pi;
       np++;
     }
     total_proposed += n_propose;
-    if (np == 0) { done = true; break; }
+    total_accepted += np;
+    if (n_valid == 0) { done = true; break; }
+    if (np == 0) continue;
 
     memset(kip_block, 0, n_docs * np * sizeof(float));
 
@@ -411,14 +425,6 @@ static inline void tk_spectral_sample_landmarks (
     uint64_t within_accepted = 0;
     for (uint64_t b = 0; b < np && actual_landmarks < n_landmarks; b++) {
       uint64_t pi = blk_pivots[b];
-
-      if (proposal[pi] > 1e-15) {
-        double accept_prob = residual[pi] / proposal[pi];
-        if (tk_fast_drand() > accept_prob) continue;
-      } else {
-        continue;
-      }
-      total_accepted++;
 
       uint64_t col = actual_landmarks;
       double sc_sq = residual[pi];
