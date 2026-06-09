@@ -272,7 +272,7 @@ static inline size_t tm_csr_do_pack (
   const char *src = str;
   size_t srclen = len;
   if (normalize) {
-    srclen = tk_text_normalize_buffer(str, len, norm);
+    srclen = tk_text_normalize_buffer(str, len, norm, NULL);
     src = (const char *)norm;
   }
   size_t count = 0;
@@ -281,9 +281,31 @@ static inline size_t tm_csr_do_pack (
   return count;
 }
 
+// Like tm_csr_do_pack, but also emits each gram's RAW byte start position into pos[]. Under normalize,
+// translates the normalized buffer index through src_index back to raw input coordinates.
+static inline size_t tm_csr_do_pack_pos (
+  const char *str, size_t len, int64_t ngram_min, int64_t ngram_max,
+  bool normalize, int64_t *out, int64_t *pos, uint8_t *norm, size_t *src_index)
+{
+  const char *src = str;
+  size_t srclen = len;
+  if (normalize) {
+    srclen = tk_text_normalize_buffer(str, len, norm, src_index);
+    src = (const char *)norm;
+  }
+  size_t count = 0;
+  for (int64_t ng = ngram_min; ng <= ngram_max; ng++) {
+    size_t c = tm_csr_pack_ngrams_w(src, srclen, (int)ng, out + count);
+    for (size_t j = 0; j < c; j++)
+      pos[count + j] = normalize ? (int64_t)src_index[j] : (int64_t)j;
+    count += c;
+  }
+  return count;
+}
+
 static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
     size_t max_len, int64_t n_samples, int64_t ngram_min, int64_t ngram_max,
-    bool normalize)
+    bool normalize, bool sequence)
 {
   size_t buf_size = (size_t)(ngram_max - ngram_min + 1) * max_len;
   lua_getfield(L, 1, "ngram_map");
@@ -311,11 +333,15 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
           uint32_t iter = tk_iumap_get(ngram_map, packed_buf[i]);
           if (iter != me) packed_buf[nv++] = tk_iumap_val(ngram_map, iter);
         }
-        ks_introsort(tk_ivec_asc, (size_t)nv, packed_buf);
-        int64_t unique = 0;
-        for (int64_t i = 0; i < nv; i++)
-          if (i == 0 || packed_buf[i] != packed_buf[i - 1]) unique++;
-        sample_counts[s] = unique;
+        if (sequence) {
+          sample_counts[s] = nv;
+        } else {
+          ks_introsort(tk_ivec_asc, (size_t)nv, packed_buf);
+          int64_t unique = 0;
+          for (int64_t i = 0; i < nv; i++)
+            if (i == 0 || packed_buf[i] != packed_buf[i - 1]) unique++;
+          sample_counts[s] = unique;
+        }
       }
       free(packed_buf);
       free(norm_buf);
@@ -330,11 +356,15 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
       for (int64_t s = 0; s < n_samples; s++) {
         if (!strs[s] || !lens[s]) continue;
         size_t count = tm_csr_do_pack(strs[s], lens[s], ngram_min, ngram_max, normalize, packed_buf, norm_buf);
-        ks_introsort(tk_ivec_asc, count, packed_buf);
-        int64_t unique = 0;
-        for (size_t i = 0; i < count; i++)
-          if (i == 0 || packed_buf[i] != packed_buf[i - 1]) unique++;
-        sample_counts[s] = unique;
+        if (sequence) {
+          sample_counts[s] = (int64_t)count;
+        } else {
+          ks_introsort(tk_ivec_asc, count, packed_buf);
+          int64_t unique = 0;
+          for (size_t i = 0; i < count; i++)
+            if (i == 0 || packed_buf[i] != packed_buf[i - 1]) unique++;
+          sample_counts[s] = unique;
+        }
       }
       free(packed_buf);
       free(norm_buf);
@@ -360,11 +390,15 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
           int absent;
           tk_iumap_put(lm, packed_buf[i], &absent);
         }
-        ks_introsort(tk_ivec_asc, count, packed_buf);
-        int64_t unique = 0;
-        for (size_t i = 0; i < count; i++)
-          if (i == 0 || packed_buf[i] != packed_buf[i - 1]) unique++;
-        sample_counts[s] = unique;
+        if (sequence) {
+          sample_counts[s] = (int64_t)count;
+        } else {
+          ks_introsort(tk_ivec_asc, count, packed_buf);
+          int64_t unique = 0;
+          for (size_t i = 0; i < count; i++)
+            if (i == 0 || packed_buf[i] != packed_buf[i - 1]) unique++;
+          sample_counts[s] = unique;
+        }
       }
       free(packed_buf);
       free(norm_buf);
@@ -409,15 +443,44 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
     stok_out = tk_svec_create(L, (uint64_t)total);
     stok_out->n = (uint64_t)total;
   }
-  tk_fvec_t *val_out = tk_fvec_create(L, (uint64_t)total);
-  val_out->n = (uint64_t)total;
+  tk_fvec_t *val_out = NULL;
+  tk_ivec_t *pos_out = NULL;
+  if (sequence) {
+    pos_out = tk_ivec_create(L, (uint64_t)total);
+    pos_out->n = (uint64_t)total;
+  } else {
+    val_out = tk_fvec_create(L, (uint64_t)total);
+    val_out->n = (uint64_t)total;
+  }
   #pragma omp parallel
   {
     int64_t *packed_buf = (int64_t *)malloc(buf_size * sizeof(int64_t));
     uint8_t *norm_buf = (uint8_t *)malloc(max_len ? max_len : 1);
+    int64_t *pos_buf = sequence ? (int64_t *)malloc(buf_size * sizeof(int64_t)) : NULL;
+    size_t *src_index = (sequence && normalize) ? (size_t *)malloc((max_len ? max_len : 1) * sizeof(size_t)) : NULL;
     #pragma omp for schedule(dynamic)
     for (int64_t s = 0; s < n_samples; s++) {
       if (!strs[s] || !lens[s]) continue;
+      if (sequence) {
+        size_t count = tm_csr_do_pack_pos(strs[s], lens[s], ngram_min, ngram_max, normalize, packed_buf, pos_buf, norm_buf, src_index);
+        int64_t w = offsets->a[s];
+        if (raw_mode) {
+          for (size_t i = 0; i < count; i++) {
+            itok_out->a[w] = packed_buf[i];
+            pos_out->a[w] = pos_buf[i];
+            w++;
+          }
+        } else {
+          for (size_t i = 0; i < count; i++) {
+            uint32_t iter = tk_iumap_get(ngram_map, packed_buf[i]);
+            if (iter == map_end) continue;
+            stok_out->a[w] = (int32_t)tk_iumap_val(ngram_map, iter);
+            pos_out->a[w] = pos_buf[i];
+            w++;
+          }
+        }
+        continue;
+      }
       size_t count = tm_csr_do_pack(strs[s], lens[s], ngram_min, ngram_max, normalize, packed_buf, norm_buf);
       int64_t nv;
       if (raw_mode) {
@@ -446,6 +509,8 @@ static int tm_csr_tokenize_core (lua_State *L, const char **strs, size_t *lens,
     }
     free(packed_buf);
     free(norm_buf);
+    free(pos_buf);
+    free(src_index);
   }
   lua_pushvalue(L, map_idx);
   lua_pushvalue(L, map_idx + 1);
@@ -465,6 +530,7 @@ static int tm_csr_tokenize (lua_State *L)
     return luaL_error(L, "tokenize: need 1 <= ngram_min <= ngram_max");
   bool do_normalize = tk_lua_foptboolean(L, 1, "tokenize", "normalize", false);
   bool terminals = tk_lua_foptboolean(L, 1, "tokenize", "terminals", false);
+  bool sequence = tk_lua_foptboolean(L, 1, "tokenize", "sequence", false);
   int64_t n_samples = (int64_t)tk_lua_fcheckunsigned(L, 1, "tokenize", "n_samples");
 
   lua_getfield(L, 1, "sequences");
@@ -484,7 +550,7 @@ static int tm_csr_tokenize (lua_State *L)
       lens[s] = (size_t)(s1 - s0);
       if (lens[s] > max_len) max_len = lens[s];
     }
-    int result = tm_csr_tokenize_core(L, strs, lens, max_len, n_samples, ngram_min, ngram_max, do_normalize);
+    int result = tm_csr_tokenize_core(L, strs, lens, max_len, n_samples, ngram_min, ngram_max, do_normalize, sequence);
     free(strs);
     free(lens);
     return result;
@@ -558,7 +624,7 @@ static int tm_csr_tokenize (lua_State *L)
     }
     max_len += 2;
   }
-  int result = tm_csr_tokenize_core(L, strs, lens, max_len, n_samples, ngram_min, ngram_max, do_normalize);
+  int result = tm_csr_tokenize_core(L, strs, lens, max_len, n_samples, ngram_min, ngram_max, do_normalize, sequence);
   free(term_pool);
   free(strs);
   free(lens);
@@ -578,12 +644,13 @@ static int tm_csr_tokenize_annotated (lua_State *L)
   lua_getfield(L, 1, "collapse");
   const char *collapse_str = lua_tostring(L, -1);
   lua_pop(L, 1);
-  enum { COL_NONE, COL_FOCUS, COL_MARK, COL_SPANS, COL_ALL } collapse = COL_NONE;
+  enum { COL_NONE, COL_FOCUS, COL_MARK, COL_SPANS, COL_ALL, COL_CONTEXT } collapse = COL_NONE;
   if (collapse_str) {
     if (strcmp(collapse_str, "focus") == 0) collapse = COL_FOCUS;
     else if (strcmp(collapse_str, "mark") == 0) collapse = COL_MARK;
     else if (strcmp(collapse_str, "spans") == 0) collapse = COL_SPANS;
     else if (strcmp(collapse_str, "all") == 0) collapse = COL_ALL;
+    else if (strcmp(collapse_str, "context") == 0) collapse = COL_CONTEXT;
   }
   lua_getfield(L, 1, "doc_span_offsets");
   tk_ivec_t *doc_span_offsets = tk_ivec_peek(L, -1, "doc_span_offsets");
@@ -672,7 +739,7 @@ static int tm_csr_tokenize_annotated (lua_State *L)
       int64_t ds = doc_span_offsets->a[d];
       int64_t de = doc_span_offsets->a[d + 1];
       int64_t nctx = ctx_off->a[d + 1] - ctx_off->a[d];
-      size_t per = (size_t)((collapse == COL_ALL ? 0 : (int64_t)text_lens[d])
+      size_t per = (size_t)(((collapse == COL_ALL || collapse == COL_CONTEXT) ? 0 : (int64_t)text_lens[d])
                             + 3 + 2 * nctx + (terminals ? 2 : 0));
       total_bytes += (size_t)(de - ds) * per;
     }
@@ -701,6 +768,19 @@ static int tm_csr_tokenize_annotated (lua_State *L)
           p[w++] = (char)M_FOCUS;
           p[w++] = (char)M_OPEN(ti);
           memcpy(p + w, text + e, tlen - e); w += tlen - e;
+        } else if (collapse == COL_CONTEXT) {
+          // every context span (token) -> its type marker, including those inside the focus; the focus
+          // span's tokens are bracketed by M_FOCUS. Text is dropped: the candidate becomes its tag-type
+          // signature within the tagged sentence.
+          bool fopen = false, fclose = false;
+          for (int64_t cj = c0; cj < c1; cj++) {
+            int64_t cstart = ctx_starts->a[cj];
+            int64_t tc = ctx_types ? ctx_types->a[cj] : 0;
+            if (!fopen && (size_t)cstart >= s) { p[w++] = (char)M_FOCUS; fopen = true; }
+            if (fopen && !fclose && (size_t)cstart >= e) { p[w++] = (char)M_FOCUS; fclose = true; }
+            p[w++] = (char)M_OPEN(tc);
+          }
+          if (fopen && !fclose) p[w++] = (char)M_FOCUS;
         } else {
           // mark / spans / all: backdrop from context spans, focus overlaid (focus wins on overlap)
           size_t pos = 0;
@@ -750,7 +830,7 @@ static int tm_csr_tokenize_annotated (lua_State *L)
     }
     free(text_ptrs);
     free(text_lens);
-    result = tm_csr_tokenize_core(L, strs, lens, max_len, total_spans, ngram_min, ngram_max, do_normalize);
+    result = tm_csr_tokenize_core(L, strs, lens, max_len, total_spans, ngram_min, ngram_max, do_normalize, false);
     free(pool);
   }
   #undef M_OPEN
@@ -1311,6 +1391,206 @@ static int tm_csr_bio_viterbi (lua_State *L)
   return 1;
 }
 
+// bio_band_mask(labels, lo, hi) -> mask : token-wise 0/1, 1 iff lo <= label <= hi. Used to pull the
+// B-class band [1, n_types] out of a bio_encode label vector (O=0, B=1..nt, I=nt+1..2nt) for the
+// segment stage's B targets.
+static int tm_csr_bio_band_mask (lua_State *L)
+{
+  tk_ivec_t *lab = tk_ivec_peek(L, 1, "labels");
+  int64_t lo = tk_lua_checkinteger(L, 2, "lo");
+  int64_t hi = tk_lua_checkinteger(L, 3, "hi");
+  int64_t n = (int64_t) lab->n;
+  tk_ivec_t *out = tk_ivec_create(L, (uint64_t) n);
+  out->n = (uint64_t) n;
+  for (int64_t i = 0; i < n; i++) {
+    int64_t v = lab->a[i];
+    out->a[i] = (v >= lo && v <= hi) ? 1 : 0;
+  }
+  return 1;
+}
+
+// bio_token_type(bio_labels, n_types) -> per-token class for the tag stage: the entity type (0..n_types-1,
+// dropping the B/I distinction) for an entity token, else n_types (= O / outer). bio_encode scheme is
+// O=0, B-t=1..n_types, I-t=n_types+1..2*n_types.
+static int tm_csr_bio_token_type (lua_State *L)
+{
+  tk_ivec_t *lab = tk_ivec_peek(L, 1, "bio_labels");
+  int64_t nt = tk_lua_checkinteger(L, 2, "n_types");
+  int64_t n = (int64_t) lab->n;
+  tk_ivec_t *out = tk_ivec_create(L, (uint64_t) n);
+  out->n = (uint64_t) n;
+  for (int64_t i = 0; i < n; i++) {
+    int64_t v = lab->a[i];
+    out->a[i] = (v == 0) ? nt : (v <= nt ? v - 1 : v - nt - 1);
+  }
+  return 1;
+}
+
+// enumerate_subspans(doc_offsets, tok_starts, tok_ends, tok_types, max_span, outer) -> off, starts, ends:
+// within each maximal run of contiguous non-outer tokens, emit every contiguous subspan of 1..max_span
+// tokens (as char start..end). The tag stage over-generates candidate spans; the type stage prunes them.
+static int tm_csr_enumerate_subspans (lua_State *L)
+{
+  tk_ivec_t *doc_off = tk_ivec_peek(L, 1, "doc_offsets");
+  tk_ivec_t *ts = tk_ivec_peek(L, 2, "tok_starts");
+  tk_ivec_t *te = tk_ivec_peek(L, 3, "tok_ends");
+  tk_ivec_t *ty = tk_ivec_peek(L, 4, "tok_types");
+  int64_t max_span = tk_lua_checkinteger(L, 5, "max_span");
+  int64_t outer = tk_lua_checkinteger(L, 6, "outer");
+  int64_t n_docs = (int64_t) (doc_off->n - 1);
+  tk_ivec_t *coff = tk_ivec_create(L, (uint64_t) (n_docs + 1));
+  coff->n = (uint64_t) (n_docs + 1);
+  tk_ivec_t *cs = tk_ivec_create(L, 0);
+  tk_ivec_t *ce = tk_ivec_create(L, 0);
+  coff->a[0] = 0;
+  for (int64_t d = 0; d < n_docs; d++) {
+    int64_t j = doc_off->a[d], end = doc_off->a[d + 1];
+    while (j < end) {
+      if (ty->a[j] == outer) { j++; continue; }
+      int64_t r0 = j;
+      while (j < end && ty->a[j] != outer) j++;
+      int64_t r1 = j;
+      for (int64_t i = r0; i < r1; i++)
+        for (int64_t len = 1; len <= max_span && i + len <= r1; len++) {
+          tk_ivec_push(cs, ts->a[i]);
+          tk_ivec_push(ce, te->a[i + len - 1]);
+        }
+    }
+    coff->a[d + 1] = (int64_t) cs->n;
+  }
+  return 3;
+}
+
+// type_labels(cand_off,cand_s,cand_e, gold_off,gold_s,gold_e,gold_ty, n_types) -> class id per candidate:
+// the gold type if (start,end) matches a gold span in the same doc, else reject (= n_types). One label
+// per untyped candidate for the (n_types+1)-class type head.
+static int tm_csr_type_labels (lua_State *L)
+{
+  tk_ivec_t *co = tk_ivec_peek(L, 1, "cand_offsets");
+  tk_ivec_t *cs = tk_ivec_peek(L, 2, "cand_starts");
+  tk_ivec_t *ce = tk_ivec_peek(L, 3, "cand_ends");
+  tk_ivec_t *go = tk_ivec_peek(L, 4, "gold_offsets");
+  tk_ivec_t *gs = tk_ivec_peek(L, 5, "gold_starts");
+  tk_ivec_t *ge = tk_ivec_peek(L, 6, "gold_ends");
+  tk_ivec_t *gt = tk_ivec_peek(L, 7, "gold_types");
+  int64_t n_types = tk_lua_checkinteger(L, 8, "n_types");
+  int64_t n_docs = (int64_t) (co->n - 1);
+  int64_t ncand = (int64_t) cs->n;
+  tk_ivec_t *out = tk_ivec_create(L, (uint64_t) ncand);
+  out->n = (uint64_t) ncand;
+  for (int64_t d = 0; d < n_docs; d++) {
+    for (int64_t c = co->a[d]; c < co->a[d + 1]; c++) {
+      int64_t a = cs->a[c], b = ce->a[c], lab = n_types;
+      for (int64_t g = go->a[d]; g < go->a[d + 1]; g++)
+        if (gs->a[g] == a && ge->a[g] == b) { lab = gt->a[g]; break; }
+      out->a[c] = lab;
+    }
+  }
+  return 1;
+}
+
+// nms(cand_off, cand_s, cand_e, classes, scores, reject) -> keep mask (0/1): per doc, greedily keep the
+// highest-scoring non-reject candidate, suppress any candidate that overlaps a kept one (type-agnostic,
+// flat NER; [s1,e1) overlaps [s2,e2) iff s1<e2 && s2<e1), repeat. Reject candidates are never kept.
+static int tm_csr_nms (lua_State *L)
+{
+  tk_ivec_t *co = tk_ivec_peek(L, 1, "cand_offsets");
+  tk_ivec_t *cs = tk_ivec_peek(L, 2, "cand_starts");
+  tk_ivec_t *ce = tk_ivec_peek(L, 3, "cand_ends");
+  tk_ivec_t *cls = tk_ivec_peek(L, 4, "classes");
+  tk_fvec_t *sco = tk_fvec_peek(L, 5, "scores");
+  int64_t reject = tk_lua_checkinteger(L, 6, "reject");
+  int64_t n_docs = (int64_t) (co->n - 1);
+  int64_t ncand = (int64_t) cs->n;
+  tk_ivec_t *keep = tk_ivec_create(L, (uint64_t) ncand);
+  keep->n = (uint64_t) ncand;
+  for (int64_t i = 0; i < ncand; i++) keep->a[i] = 0;
+  char *done = (char *) calloc(ncand ? (size_t) ncand : 1, 1);
+  if (!done) return luaL_error(L, "nms: alloc failed");
+  for (int64_t d = 0; d < n_docs; d++) {
+    int64_t lo = co->a[d], hi = co->a[d + 1];
+    for (int64_t i = lo; i < hi; i++) if (cls->a[i] == reject) done[i] = 1;
+    for (;;) {
+      int64_t best = -1; double bestsco = 0;
+      for (int64_t i = lo; i < hi; i++) {
+        if (done[i]) continue;
+        double s = (double) sco->a[i];
+        if (best < 0 || s > bestsco) { best = i; bestsco = s; }
+      }
+      if (best < 0) break;
+      keep->a[best] = 1; done[best] = 1;
+      int64_t bs = cs->a[best], be = ce->a[best];
+      for (int64_t i = lo; i < hi; i++)
+        if (!done[i] && cs->a[i] < be && bs < ce->a[i]) done[i] = 1;
+    }
+  }
+  free(done);
+  return 1;
+}
+
+typedef struct { int64_t s, e, oi; double w; } tk_wis_iv;
+static int tk_wis_cmp (const void *a, const void *b) {
+  int64_t ea = ((const tk_wis_iv *) a)->e, eb = ((const tk_wis_iv *) b)->e;
+  return (ea < eb) ? -1 : (ea > eb) ? 1 : 0;
+}
+
+// nms_dp(cand_off, cand_s, cand_e, labels, scores, k, reject) -> keep mask, argmax class: labels/scores are
+// ridge:label top-k output (k>=2). Per candidate the argmax class is labels[c*k] and the DP weight is the
+// margin scores[c*k]-scores[c*k+1] (>=0). Per doc this returns the max-total-margin set of NON-OVERLAPPING
+// non-reject candidates (weighted interval scheduling, optimal) -- unlike greedy nms it can keep two short
+// correct spans over one higher-scoring wrong long one. Compatible iff end[j] <= start[i].
+static int tm_csr_nms_dp (lua_State *L)
+{
+  tk_ivec_t *co = tk_ivec_peek(L, 1, "cand_offsets");
+  tk_ivec_t *cs = tk_ivec_peek(L, 2, "cand_starts");
+  tk_ivec_t *ce = tk_ivec_peek(L, 3, "cand_ends");
+  tk_ivec_t *lab = tk_ivec_peek(L, 4, "labels");
+  tk_fvec_t *sco = tk_fvec_peek(L, 5, "scores");
+  int64_t k = tk_lua_checkinteger(L, 6, "k");
+  int64_t reject = tk_lua_checkinteger(L, 7, "reject");
+  int64_t n_docs = (int64_t) (co->n - 1);
+  int64_t ncand = (int64_t) cs->n;
+  tk_ivec_t *keep = tk_ivec_create(L, (uint64_t) ncand);
+  keep->n = (uint64_t) ncand;
+  tk_ivec_t *cls = tk_ivec_create(L, (uint64_t) ncand);
+  cls->n = (uint64_t) ncand;
+  for (int64_t c = 0; c < ncand; c++) { keep->a[c] = 0; cls->a[c] = lab->a[c * k]; }
+  int64_t maxn = 0;
+  for (int64_t d = 0; d < n_docs; d++) { int64_t n = co->a[d + 1] - co->a[d]; if (n > maxn) maxn = n; }
+  if (maxn == 0) return 2;
+  tk_wis_iv *iv = (tk_wis_iv *) malloc((size_t) maxn * sizeof(tk_wis_iv));
+  double *M = (double *) malloc((size_t) (maxn + 1) * sizeof(double));
+  int64_t *P = (int64_t *) malloc((size_t) (maxn + 1) * sizeof(int64_t));
+  if (!iv || !M || !P) { free(iv); free(M); free(P); return luaL_error(L, "nms_dp: alloc failed"); }
+  for (int64_t d = 0; d < n_docs; d++) {
+    int64_t m = 0;
+    for (int64_t c = co->a[d]; c < co->a[d + 1]; c++) {
+      if (lab->a[c * k] == reject) continue;
+      iv[m].s = cs->a[c]; iv[m].e = ce->a[c]; iv[m].oi = c;
+      iv[m].w = (double) sco->a[c * k] - (double) sco->a[c * k + 1];
+      m++;
+    }
+    if (m == 0) continue;
+    qsort(iv, (size_t) m, sizeof(tk_wis_iv), tk_wis_cmp);
+    M[0] = 0.0;
+    for (int64_t i = 1; i <= m; i++) {
+      int64_t target = iv[i - 1].s, lo = 0, hi = i - 1;
+      while (lo < hi) { int64_t mid = (lo + hi) / 2; if (iv[mid].e <= target) lo = mid + 1; else hi = mid; }
+      P[i] = lo;
+      double take = iv[i - 1].w + M[P[i]];
+      M[i] = (take >= M[i - 1]) ? take : M[i - 1];
+    }
+    int64_t i = m;
+    while (i >= 1) {
+      double take = iv[i - 1].w + M[P[i]];
+      if (take >= M[i - 1]) { keep->a[iv[i - 1].oi] = 1; i = P[i]; }
+      else i = i - 1;
+    }
+  }
+  free(iv); free(M); free(P);
+  return 2;
+}
+
 // union_spans{ a_offsets,a_starts,a_ends,a_types, b_offsets,b_starts,b_ends,b_types,
 //   gold_offsets,gold_starts,gold_ends,gold_types } -> off, starts, ends, types, labels
 // Per doc, the deduped union of candidate sets A and B (matched on (start,end,type)), each candidate
@@ -1358,6 +1638,188 @@ static int tm_csr_union_spans (lua_State *L)
     uoff->a[d + 1] = (int64_t) us->n;
   }
   return 5;
+}
+
+// span_miss_report{ gaz_offsets,gaz_starts,gaz_ends,gaz_types,
+//   bio_offsets,bio_starts,bio_ends,bio_types, gold_offsets,gold_starts,gold_ends,gold_types, n_types }
+//   -> { gold, covered, wrong_type, over, under, cross, none,
+//        under_gaz, under_bio, under_both, under_by_type = { [0..n_types-1] } }
+// Decomposes why each gold span is/isn't recovered by the candidate pool (gaz UNION bio). Spans are
+// [start,end). Per missed gold, the highest-priority relationship to any same-doc candidate is counted:
+//   covered    exact (start,end,type) match
+//   wrong_type exact (start,end), type differs  -> a type-only model recovers it
+//   over       gold strictly inside a candidate -> sub-span enumeration recovers it
+//   under      candidate strictly inside gold   -> merge / looser emit recovers it
+//   cross      overlaps, neither contains        -> boundary error
+//   none       no candidate overlaps             -> detector miss, unrecoverable by decode
+// For the `under` bucket: which source(s) supplied the strictly-inside candidate (gaz / bio / both),
+// and the per-gold-type counts, to localize whether under-spanning is gazetteer sub-surfaces or BIO
+// terminating early, and whether it concentrates in the longer entity types.
+static int tm_csr_span_miss_report (lua_State *L)
+{
+  luaL_checktype(L, 1, LUA_TTABLE);
+  const char *names[12] = {
+    "gaz_offsets", "gaz_starts", "gaz_ends", "gaz_types",
+    "bio_offsets", "bio_starts", "bio_ends", "bio_types",
+    "gold_offsets", "gold_starts", "gold_ends", "gold_types" };
+  tk_ivec_t *f[12];
+  for (int i = 0; i < 12; i++) {
+    lua_getfield(L, 1, names[i]);
+    f[i] = tk_ivec_peek(L, -1, names[i]);
+    lua_pop(L, 1);
+  }
+  lua_getfield(L, 1, "n_types");
+  int64_t n_types = tk_lua_checkinteger(L, -1, "n_types");
+  lua_pop(L, 1);
+  // [0]=gaz, [1]=bio for both candidate sources
+  tk_ivec_t *so[2] = { f[0], f[4] }, *ss[2] = { f[1], f[5] }, *se[2] = { f[2], f[6] }, *st[2] = { f[3], f[7] };
+  tk_ivec_t *go = f[8], *gs = f[9], *ge = f[10], *gt = f[11];
+  int64_t n_docs = (int64_t) (go->n - 1);
+  int64_t n_gold = 0, covered = 0, wrong = 0, over = 0, under = 0, cross = 0, none = 0;
+  int64_t under_gaz = 0, under_bio = 0, under_both = 0;
+  int64_t *under_ty = (int64_t *) calloc((size_t) (n_types > 0 ? n_types : 1), sizeof(int64_t));
+  if (!under_ty) return luaL_error(L, "span_miss_report: alloc failed");
+  for (int64_t d = 0; d < n_docs; d++) {
+    for (int64_t g = go->a[d]; g < go->a[d + 1]; g++) {
+      int64_t a = gs->a[g], b = ge->a[g], t = gt->a[g];
+      n_gold++;
+      int exact = 0, fwrong = 0, fover = 0, fcross = 0;
+      int funder_s[2] = { 0, 0 };
+      for (int src = 0; src < 2 && !exact; src++) {
+        for (int64_t c = so[src]->a[d]; c < so[src]->a[d + 1]; c++) {
+          int64_t x = ss[src]->a[c], y = se[src]->a[c];
+          if (x >= b || a >= y) continue;          // no overlap
+          if (x == a && y == b) {
+            if (st[src]->a[c] == t) { exact = 1; break; }
+            fwrong = 1;
+          } else if (x <= a && b <= y) {
+            fover = 1;
+          } else if (a <= x && y <= b) {
+            funder_s[src] = 1;
+          } else {
+            fcross = 1;
+          }
+        }
+      }
+      int funder = funder_s[0] || funder_s[1];
+      if (exact) covered++;
+      else if (fwrong) wrong++;
+      else if (fover) over++;
+      else if (funder) {
+        under++;
+        if (funder_s[0] && funder_s[1]) under_both++;
+        else if (funder_s[0]) under_gaz++;
+        else under_bio++;
+        if (t >= 0 && t < n_types) under_ty[t]++;
+      }
+      else if (fcross) cross++;
+      else none++;
+    }
+  }
+  lua_newtable(L);
+  lua_pushinteger(L, (lua_Integer) n_gold); lua_setfield(L, -2, "gold");
+  lua_pushinteger(L, (lua_Integer) covered); lua_setfield(L, -2, "covered");
+  lua_pushinteger(L, (lua_Integer) wrong); lua_setfield(L, -2, "wrong_type");
+  lua_pushinteger(L, (lua_Integer) over); lua_setfield(L, -2, "over");
+  lua_pushinteger(L, (lua_Integer) under); lua_setfield(L, -2, "under");
+  lua_pushinteger(L, (lua_Integer) cross); lua_setfield(L, -2, "cross");
+  lua_pushinteger(L, (lua_Integer) none); lua_setfield(L, -2, "none");
+  lua_pushinteger(L, (lua_Integer) under_gaz); lua_setfield(L, -2, "under_gaz");
+  lua_pushinteger(L, (lua_Integer) under_bio); lua_setfield(L, -2, "under_bio");
+  lua_pushinteger(L, (lua_Integer) under_both); lua_setfield(L, -2, "under_both");
+  lua_newtable(L);
+  for (int64_t i = 0; i < n_types; i++) {
+    lua_pushinteger(L, (lua_Integer) under_ty[i]);
+    lua_rawseti(L, -2, (int) i);
+  }
+  lua_setfield(L, -2, "under_by_type");
+  free(under_ty);
+  return 1;
+}
+
+// type_decode_report{ cand_offsets, cand_starts, cand_ends, cand_pred, pred_stride,
+//   gold_offsets, gold_starts, gold_ends, gold_types, n_types }
+//   -> { gold, in_pool, not_in_pool, correct, false_reject, mistype,
+//        correct_by_type={[0..n_types-1]}, reject_by_type={..}, mistype_by_type={..},
+//        confusion={[t*n_types+L]} }
+// For each gold span, finds the candidate with the exact (start,end) and inspects the TYPE head's
+// top-1 prediction (cand_pred[c*pred_stride]; class == n_types means REJECT). Splits the conversion
+// loss (golds present in the pool but not emitted correctly) into false_reject vs mistype, with a
+// gold->pred confusion matrix to localize confusable type pairs. Golds with no exact candidate are
+// not_in_pool (the coverage miss already decomposed by span_miss_report).
+static int tm_csr_type_decode_report (lua_State *L)
+{
+  luaL_checktype(L, 1, LUA_TTABLE);
+  const char *names[8] = {
+    "cand_offsets", "cand_starts", "cand_ends", "cand_pred",
+    "gold_offsets", "gold_starts", "gold_ends", "gold_types" };
+  tk_ivec_t *f[8];
+  for (int i = 0; i < 8; i++) {
+    lua_getfield(L, 1, names[i]);
+    f[i] = tk_ivec_peek(L, -1, names[i]);
+    lua_pop(L, 1);
+  }
+  lua_getfield(L, 1, "n_types");
+  int64_t n_types = tk_lua_checkinteger(L, -1, "n_types");
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "pred_stride");
+  int64_t stride = tk_lua_checkinteger(L, -1, "pred_stride");
+  lua_pop(L, 1);
+  tk_ivec_t *co = f[0], *cs = f[1], *ce = f[2], *cp = f[3];
+  tk_ivec_t *go = f[4], *gs = f[5], *ge = f[6], *gt = f[7];
+  int64_t n_docs = (int64_t) (go->n - 1);
+  int64_t n_gold = 0, in_pool = 0, not_in_pool = 0, correct = 0, freject = 0, mistype = 0;
+  size_t nt = (size_t) (n_types > 0 ? n_types : 1);
+  int64_t *corr_ty = (int64_t *) calloc(nt, sizeof(int64_t));
+  int64_t *rej_ty = (int64_t *) calloc(nt, sizeof(int64_t));
+  int64_t *mis_ty = (int64_t *) calloc(nt, sizeof(int64_t));
+  int64_t *conf = (int64_t *) calloc(nt * nt, sizeof(int64_t));
+  if (!corr_ty || !rej_ty || !mis_ty || !conf) {
+    free(corr_ty); free(rej_ty); free(mis_ty); free(conf);
+    return luaL_error(L, "type_decode_report: alloc failed");
+  }
+  for (int64_t d = 0; d < n_docs; d++) {
+    for (int64_t g = go->a[d]; g < go->a[d + 1]; g++) {
+      int64_t a = gs->a[g], b = ge->a[g], t = gt->a[g];
+      n_gold++;
+      int64_t cmatch = -1;
+      for (int64_t c = co->a[d]; c < co->a[d + 1]; c++)
+        if (cs->a[c] == a && ce->a[c] == b) { cmatch = c; break; }
+      if (cmatch < 0) { not_in_pool++; continue; }
+      in_pool++;
+      int64_t pred = cp->a[cmatch * stride];
+      if (pred == n_types) { freject++; if (t >= 0 && t < n_types) rej_ty[t]++; }
+      else if (pred == t) { correct++; if (t >= 0 && t < n_types) corr_ty[t]++; }
+      else {
+        mistype++;
+        if (t >= 0 && t < n_types) {
+          mis_ty[t]++;
+          if (pred >= 0 && pred < n_types) conf[t * n_types + pred]++;
+        }
+      }
+    }
+  }
+  lua_newtable(L);
+  lua_pushinteger(L, (lua_Integer) n_gold); lua_setfield(L, -2, "gold");
+  lua_pushinteger(L, (lua_Integer) in_pool); lua_setfield(L, -2, "in_pool");
+  lua_pushinteger(L, (lua_Integer) not_in_pool); lua_setfield(L, -2, "not_in_pool");
+  lua_pushinteger(L, (lua_Integer) correct); lua_setfield(L, -2, "correct");
+  lua_pushinteger(L, (lua_Integer) freject); lua_setfield(L, -2, "false_reject");
+  lua_pushinteger(L, (lua_Integer) mistype); lua_setfield(L, -2, "mistype");
+  lua_newtable(L);
+  for (int64_t i = 0; i < n_types; i++) { lua_pushinteger(L, (lua_Integer) corr_ty[i]); lua_rawseti(L, -2, (int) i); }
+  lua_setfield(L, -2, "correct_by_type");
+  lua_newtable(L);
+  for (int64_t i = 0; i < n_types; i++) { lua_pushinteger(L, (lua_Integer) rej_ty[i]); lua_rawseti(L, -2, (int) i); }
+  lua_setfield(L, -2, "reject_by_type");
+  lua_newtable(L);
+  for (int64_t i = 0; i < n_types; i++) { lua_pushinteger(L, (lua_Integer) mis_ty[i]); lua_rawseti(L, -2, (int) i); }
+  lua_setfield(L, -2, "mistype_by_type");
+  lua_newtable(L);
+  for (int64_t i = 0; i < n_types * n_types; i++) { lua_pushinteger(L, (lua_Integer) conf[i]); lua_rawseti(L, -2, (int) i); }
+  lua_setfield(L, -2, "confusion");
+  free(corr_ty); free(rej_ty); free(mis_ty); free(conf);
+  return 1;
 }
 
 static int tm_csr_merge (lua_State *L)
@@ -1510,7 +1972,289 @@ static int tm_csr_block_sumsq (lua_State *L)
   return 1;
 }
 
+typedef enum {
+  TK_SEG_LEAD = 0, TK_SEG_INNER_FWD = 1, TK_SEG_INNER_BWD = 2, TK_SEG_TRAIL = 3
+} tk_seg_t;
+
+// Gather one focus's windowed segment into acc/touched (acc indexed by gram id, reset to 0 by caller
+// via the touched list). Returns Σweight; sets *nt_out = #distinct ids touched.
+static inline double tm_seg_gather_sparse (
+  tk_seg_t seg, int64_t a, int64_t b, int64_t W, const float *alpha_pow,
+  const int64_t *boff, const int32_t *bucket_id, int64_t maxpos,
+  float *acc, int32_t *touched, int64_t *nt_out)
+{
+  int64_t lo, hi;
+  if (seg == TK_SEG_LEAD) { lo = a - W; hi = a; }
+  else if (seg == TK_SEG_TRAIL) { lo = b; hi = b + W; }
+  else { lo = a; hi = b; }                 // inner_fwd / inner_bwd
+  if (lo < 0) lo = 0;
+  if (hi > maxpos + 1) hi = maxpos + 1;
+  double z = 0.0;
+  int64_t nt = 0;
+  for (int64_t p = lo; p < hi; p++) {
+    int64_t dist;
+    if (seg == TK_SEG_LEAD) dist = (a - 1) - p;
+    else if (seg == TK_SEG_TRAIL) dist = p - b;
+    else if (seg == TK_SEG_INNER_FWD) dist = (b - 1) - p;
+    else dist = p - a;                     // inner_bwd
+    if (dist < 0 || dist >= W) continue;
+    float w = alpha_pow[dist];
+    int64_t s0 = boff[p], s1 = boff[p + 1];
+    for (int64_t slot = s0; slot < s1; slot++) {
+      int32_t id = bucket_id[slot];
+      if (acc[id] == 0.0f) touched[nt++] = id;
+      acc[id] += w;
+    }
+    z += w * (double)(s1 - s0);
+  }
+  *nt_out = nt;
+  return z;
+}
+
+// csr.segment_pool: PCNN-segment EMA pool of one segment around each focus span.
+// Sparse (stream_*): windowed decayed gram histogram. Dense (features): exact prefix/suffix EMA.
+static int tm_csr_segment_pool (lua_State *L)
+{
+  lua_settop(L, 1);
+  luaL_checktype(L, 1, LUA_TTABLE);
+  lua_getfield(L, 1, "segment");
+  const char *seg_str = luaL_checkstring(L, -1);
+  tk_seg_t seg;
+  if (!strcmp(seg_str, "lead")) seg = TK_SEG_LEAD;
+  else if (!strcmp(seg_str, "inner_fwd")) seg = TK_SEG_INNER_FWD;
+  else if (!strcmp(seg_str, "inner_bwd")) seg = TK_SEG_INNER_BWD;
+  else if (!strcmp(seg_str, "trail")) seg = TK_SEG_TRAIL;
+  else return luaL_error(L, "segment_pool: bad segment '%s'", seg_str);
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "alpha");
+  double alpha = luaL_checknumber(L, -1);
+  lua_pop(L, 1);
+  if (!(alpha > 0.0 && alpha < 1.0))
+    return luaL_error(L, "segment_pool: alpha must be in (0,1)");
+  lua_getfield(L, 1, "doc_span_offsets");
+  tk_ivec_t *doc_off = tk_ivec_peek(L, -1, "doc_span_offsets"); lua_pop(L, 1);
+  lua_getfield(L, 1, "span_starts");
+  tk_ivec_t *span_s = tk_ivec_peek(L, -1, "span_starts"); lua_pop(L, 1);
+  lua_getfield(L, 1, "span_ends");
+  tk_ivec_t *span_e = tk_ivec_peek(L, -1, "span_ends"); lua_pop(L, 1);
+  int64_t n_docs = (int64_t)doc_off->n - 1;
+  int64_t n_focus = doc_off->a[n_docs];
+
+  lua_getfield(L, 1, "features");
+  int dense = !lua_isnil(L, -1);
+  tk_fvec_t *feat_f = NULL; tk_dvec_t *feat_d = NULL;
+  int64_t dcols = 0;
+  tk_ivec_t *tok_off = NULL, *tok_s = NULL, *tok_e = NULL;
+  int64_t W = 0; float *alpha_pow = NULL;
+  tk_ivec_t *stream_off = NULL, *stream_pos = NULL; const int32_t *stream_tok = NULL;
+  if (dense) {
+    feat_f = tk_fvec_peekopt(L, -1);
+    feat_d = feat_f ? NULL : tk_dvec_peekopt(L, -1);
+    if (!feat_f && !feat_d) return luaL_error(L, "segment_pool: features expected fvec or dvec");
+    lua_pop(L, 1);
+    lua_getfield(L, 1, "d"); dcols = (int64_t)tk_lua_checkunsigned(L, -1, "d"); lua_pop(L, 1);
+    if (dcols > 64) return luaL_error(L, "segment_pool: dense d must be <= 64");
+    lua_getfield(L, 1, "token_offsets"); tok_off = tk_ivec_peek(L, -1, "token_offsets"); lua_pop(L, 1);
+    lua_getfield(L, 1, "token_starts"); tok_s = tk_ivec_peek(L, -1, "token_starts"); lua_pop(L, 1);
+    lua_getfield(L, 1, "token_ends"); tok_e = tk_ivec_peek(L, -1, "token_ends"); lua_pop(L, 1);
+  } else {
+    lua_pop(L, 1);
+    lua_getfield(L, 1, "stream_offsets"); stream_off = tk_ivec_peek(L, -1, "stream_offsets"); lua_pop(L, 1);
+    lua_getfield(L, 1, "stream_tokens");
+    uint64_t stok_n; stream_tok = tk_peek_tokens(L, -1, &stok_n);
+    if (!stream_tok) return luaL_error(L, "segment_pool: stream_tokens expected svec or ivec");
+    lua_setfield(L, 1, "stream_tokens");
+    lua_getfield(L, 1, "stream_positions"); stream_pos = tk_ivec_peek(L, -1, "stream_positions"); lua_pop(L, 1);
+    lua_getfield(L, 1, "n_stream"); int64_t n_stream = (int64_t)tk_lua_checkunsigned(L, -1, "n_stream"); lua_pop(L, 1);
+    dcols = n_stream; // not used for emission, kept for clarity
+    W = (int64_t)ceil(log(1e-6) / log(alpha));
+    if (W < 1) W = 1;
+    if (W > 4096) W = 4096;
+    alpha_pow = (float *)malloc((size_t)(W + 1) * sizeof(float));
+    double ap = 1.0;
+    for (int64_t k = 0; k <= W; k++) { alpha_pow[k] = (float)ap; ap *= alpha; }
+  }
+  int64_t U = dense ? dcols : 0; // sparse acc sized to vocab
+  if (!dense) { lua_getfield(L, 1, "n_stream"); U = (int64_t)tk_lua_checkunsigned(L, -1, "n_stream"); lua_pop(L, 1); }
+
+  tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t)(n_focus + 1));
+  offsets->n = (uint64_t)(n_focus + 1);
+  int off_idx = lua_gettop(L);
+  int64_t *row_nnz = (int64_t *)calloc((size_t)(n_focus > 0 ? n_focus : 1), sizeof(int64_t));
+
+  // PASS 1: row_nnz
+  #pragma omp parallel
+  {
+    float *acc = dense ? NULL : (float *)calloc((size_t)U, sizeof(float));
+    int32_t *touched = dense ? NULL : (int32_t *)malloc((size_t)U * sizeof(int32_t));
+    #pragma omp for schedule(dynamic)
+    for (int64_t d = 0; d < n_docs; d++) {
+      int64_t f0 = doc_off->a[d], f1 = doc_off->a[d + 1];
+      if (dense) {
+        int64_t t0 = tok_off->a[d], t1 = tok_off->a[d + 1], nt = t1 - t0;
+        for (int64_t f = f0; f < f1; f++) {
+          int64_t a = span_s->a[f], b = span_e->a[f];
+          int64_t ia = 0; while (ia < nt && tok_e->a[t0 + ia] <= a) ia++;
+          int64_t ib = 0; while (ib < nt && tok_s->a[t0 + ib] < b) ib++;
+          int ne = (seg == TK_SEG_LEAD) ? (ia > 0)
+                 : (seg == TK_SEG_TRAIL) ? (ib < nt) : (ia < ib);
+          row_nnz[f] = ne ? dcols : 0;
+        }
+      } else {
+        int64_t e0 = stream_off->a[d], e1 = stream_off->a[d + 1];
+        int64_t maxpos = -1;
+        for (int64_t j = e0; j < e1; j++) if (stream_pos->a[j] > maxpos) maxpos = stream_pos->a[j];
+        if (maxpos < 0) { for (int64_t f = f0; f < f1; f++) row_nnz[f] = 0; continue; }
+        int64_t *boff = (int64_t *)calloc((size_t)(maxpos + 2), sizeof(int64_t));
+        int32_t *bucket_id = (int32_t *)malloc((size_t)(e1 - e0) * sizeof(int32_t));
+        for (int64_t j = e0; j < e1; j++) boff[stream_pos->a[j] + 1]++;
+        for (int64_t p = 1; p <= maxpos + 1; p++) boff[p] += boff[p - 1];
+        int64_t *bpos = (int64_t *)malloc((size_t)(maxpos + 2) * sizeof(int64_t));
+        memcpy(bpos, boff, (size_t)(maxpos + 2) * sizeof(int64_t));
+        for (int64_t j = e0; j < e1; j++) { int64_t p = stream_pos->a[j]; bucket_id[bpos[p]++] = stream_tok[j]; }
+        free(bpos);
+        for (int64_t f = f0; f < f1; f++) {
+          int64_t nt = 0;
+          tm_seg_gather_sparse(seg, span_s->a[f], span_e->a[f], W, alpha_pow,
+            boff, bucket_id, maxpos, acc, touched, &nt);
+          for (int64_t i = 0; i < nt; i++) acc[touched[i]] = 0.0f;
+          row_nnz[f] = nt;
+        }
+        free(boff); free(bucket_id);
+      }
+    }
+    free(acc); free(touched);
+  }
+
+  offsets->a[0] = 0;
+  for (int64_t f = 0; f < n_focus; f++) offsets->a[f + 1] = offsets->a[f] + row_nnz[f];
+  int64_t total = offsets->a[n_focus];
+
+  tk_svec_t *tok_out = tk_svec_create(L, (uint64_t)total);
+  tok_out->n = (uint64_t)total; int tok_idx = lua_gettop(L);
+  tk_fvec_t *val_out = tk_fvec_create(L, (uint64_t)total);
+  val_out->n = (uint64_t)total; int val_idx = lua_gettop(L);
+
+  // PASS 2: fill
+  #pragma omp parallel
+  {
+    float *acc = dense ? NULL : (float *)calloc((size_t)U, sizeof(float));
+    int32_t *touched = dense ? NULL : (int32_t *)malloc((size_t)U * sizeof(int32_t));
+    double *F = NULL, *B = NULL, *Zf = NULL, *Zb = NULL; int64_t cap_nt = 0;
+    #pragma omp for schedule(dynamic)
+    for (int64_t d = 0; d < n_docs; d++) {
+      int64_t f0 = doc_off->a[d], f1 = doc_off->a[d + 1];
+      if (dense) {
+        int64_t t0 = tok_off->a[d], t1 = tok_off->a[d + 1], nt = t1 - t0;
+        if (nt > cap_nt) {
+          cap_nt = nt;
+          F = (double *)realloc(F, (size_t)nt * (size_t)dcols * sizeof(double));
+          B = (double *)realloc(B, (size_t)nt * (size_t)dcols * sizeof(double));
+          Zf = (double *)realloc(Zf, (size_t)nt * sizeof(double));
+          Zb = (double *)realloc(Zb, (size_t)nt * sizeof(double));
+        }
+        for (int64_t i = 0; i < nt; i++) {
+          int64_t gi = t0 + i;
+          for (int64_t k = 0; k < dcols; k++) {
+            double v = feat_f ? (double)feat_f->a[gi * dcols + k] : feat_d->a[gi * dcols + k];
+            F[i * dcols + k] = (i > 0 ? alpha * F[(i - 1) * dcols + k] : 0.0) + v;
+          }
+          Zf[i] = (i > 0 ? alpha * Zf[i - 1] : 0.0) + 1.0;
+        }
+        for (int64_t i = nt - 1; i >= 0; i--) {
+          int64_t gi = t0 + i;
+          for (int64_t k = 0; k < dcols; k++) {
+            double v = feat_f ? (double)feat_f->a[gi * dcols + k] : feat_d->a[gi * dcols + k];
+            B[i * dcols + k] = (i < nt - 1 ? alpha * B[(i + 1) * dcols + k] : 0.0) + v;
+          }
+          Zb[i] = (i < nt - 1 ? alpha * Zb[i + 1] : 0.0) + 1.0;
+        }
+        for (int64_t f = f0; f < f1; f++) {
+          int64_t a = span_s->a[f], b = span_e->a[f];
+          int64_t ia = 0; while (ia < nt && tok_e->a[t0 + ia] <= a) ia++;
+          int64_t ib = 0; while (ib < nt && tok_s->a[t0 + ib] < b) ib++;
+          int64_t w = offsets->a[f];
+          if (seg == TK_SEG_LEAD) {
+            if (ia <= 0) continue;
+            double zz = Zf[ia - 1];
+            for (int64_t k = 0; k < dcols; k++) { tok_out->a[w] = (int32_t)k; val_out->a[w] = (float)(F[(ia - 1) * dcols + k] / zz); w++; }
+          } else if (seg == TK_SEG_TRAIL) {
+            if (ib >= nt) continue;
+            double zz = Zb[ib];
+            for (int64_t k = 0; k < dcols; k++) { tok_out->a[w] = (int32_t)k; val_out->a[w] = (float)(B[ib * dcols + k] / zz); w++; }
+          } else {
+            if (ia >= ib) continue;
+            // inner: running weight; fwd dominates tail (start at ib-1), bwd dominates head (start at ia)
+            double zz = 0.0;
+            double tmp[64];
+            for (int64_t k = 0; k < dcols; k++) tmp[k] = 0.0;
+            if (seg == TK_SEG_INNER_FWD) {
+              double wt = 1.0;
+              for (int64_t i = ib - 1; i >= ia; i--) {
+                int64_t gi = t0 + i;
+                for (int64_t k = 0; k < dcols; k++) {
+                  double v = feat_f ? (double)feat_f->a[gi * dcols + k] : feat_d->a[gi * dcols + k];
+                  tmp[k] += wt * v;
+                }
+                zz += wt; wt *= alpha;
+              }
+            } else {
+              double wt = 1.0;
+              for (int64_t i = ia; i < ib; i++) {
+                int64_t gi = t0 + i;
+                for (int64_t k = 0; k < dcols; k++) {
+                  double v = feat_f ? (double)feat_f->a[gi * dcols + k] : feat_d->a[gi * dcols + k];
+                  tmp[k] += wt * v;
+                }
+                zz += wt; wt *= alpha;
+              }
+            }
+            for (int64_t k = 0; k < dcols; k++) { tok_out->a[w] = (int32_t)k; val_out->a[w] = (float)(tmp[k] / zz); w++; }
+          }
+        }
+      } else {
+        int64_t e0 = stream_off->a[d], e1 = stream_off->a[d + 1];
+        int64_t maxpos = -1;
+        for (int64_t j = e0; j < e1; j++) if (stream_pos->a[j] > maxpos) maxpos = stream_pos->a[j];
+        if (maxpos < 0) continue;
+        int64_t *boff = (int64_t *)calloc((size_t)(maxpos + 2), sizeof(int64_t));
+        int32_t *bucket_id = (int32_t *)malloc((size_t)(e1 - e0) * sizeof(int32_t));
+        for (int64_t j = e0; j < e1; j++) boff[stream_pos->a[j] + 1]++;
+        for (int64_t p = 1; p <= maxpos + 1; p++) boff[p] += boff[p - 1];
+        int64_t *bpos = (int64_t *)malloc((size_t)(maxpos + 2) * sizeof(int64_t));
+        memcpy(bpos, boff, (size_t)(maxpos + 2) * sizeof(int64_t));
+        for (int64_t j = e0; j < e1; j++) { int64_t p = stream_pos->a[j]; bucket_id[bpos[p]++] = stream_tok[j]; }
+        free(bpos);
+        for (int64_t f = f0; f < f1; f++) {
+          int64_t nt = 0;
+          double z = tm_seg_gather_sparse(seg, span_s->a[f], span_e->a[f], W, alpha_pow,
+            boff, bucket_id, maxpos, acc, touched, &nt);
+          int64_t w = offsets->a[f];
+          if (z > 0.0) {
+            for (int64_t i = 0; i < nt; i++) {
+              int32_t id = touched[i];
+              tok_out->a[w] = id; val_out->a[w] = (float)(acc[id] / z); w++;
+            }
+          }
+          for (int64_t i = 0; i < nt; i++) acc[touched[i]] = 0.0f;
+        }
+        free(boff); free(bucket_id);
+      }
+    }
+    free(acc); free(touched);
+    free(F); free(B); free(Zf); free(Zb);
+  }
+
+  free(row_nnz);
+  free(alpha_pow);
+  lua_pushvalue(L, off_idx);
+  lua_pushvalue(L, tok_idx);
+  lua_pushvalue(L, val_idx);
+  return 3;
+}
+
 static luaL_Reg tm_csr_fns[] = {
+  { "segment_pool", tm_csr_segment_pool },
   { "seq_select", tm_csr_seq_select },
   { "label_union", tm_csr_label_union },
   { "sort_csr_desc", tm_csr_sort_csr_desc },
@@ -1528,7 +2272,15 @@ static luaL_Reg tm_csr_fns[] = {
   { "bio_encode", tm_csr_bio_encode },
   { "bio_decode", tm_csr_bio_decode },
   { "bio_viterbi", tm_csr_bio_viterbi },
+  { "bio_band_mask", tm_csr_bio_band_mask },
+  { "bio_token_type", tm_csr_bio_token_type },
+  { "enumerate_subspans", tm_csr_enumerate_subspans },
+  { "type_labels", tm_csr_type_labels },
+  { "nms", tm_csr_nms },
+  { "nms_dp", tm_csr_nms_dp },
   { "union_spans", tm_csr_union_spans },
+  { "span_miss_report", tm_csr_span_miss_report },
+  { "type_decode_report", tm_csr_type_decode_report },
   { "merge", tm_csr_merge },
   { "standardize", tm_csr_standardize },
   { "normalize", tm_csr_normalize },

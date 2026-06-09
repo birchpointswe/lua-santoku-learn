@@ -533,20 +533,28 @@ static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t po
 // this is contraction-only): per-codepoint fold (incl. whitespace-class -> space),
 // then collapse repeated spaces and trim leading/trailing whitespace. Returns the
 // output length.
-static inline size_t tk_text_normalize_buffer (const char *in, size_t len, uint8_t *out) {
+// If src_index != NULL, src_index[k] receives the raw input byte offset that produced output byte k
+// (monotone non-decreasing). Lets callers that need positions (e.g. tokenize sequence mode) map a
+// normalized index back to a raw byte offset. Sized like out (>= len, contraction-only).
+static inline size_t tk_text_normalize_buffer (const char *in, size_t len, uint8_t *out, size_t *src_index) {
   size_t nlen = 0, i = 0;
   int prev_space = 1; // treat start as space so leading whitespace is trimmed
   while (i < len) {
     tk_norm_result_t nr = tk_text_normalize_next(in, i, len);
+    size_t cp_start = i;
     i += (size_t)nr.n_in;
     for (int bi = 0; bi < nr.n_out; bi++) {
       uint8_t b = nr.bytes[bi];
       if (b == ' ') {
         if (prev_space) continue;
-        out[nlen++] = ' ';
+        out[nlen] = ' ';
+        if (src_index) src_index[nlen] = cp_start;
+        nlen++;
         prev_space = 1;
       } else {
-        out[nlen++] = b;
+        out[nlen] = b;
+        if (src_index) src_index[nlen] = cp_start;
+        nlen++;
         prev_space = 0;
       }
     }

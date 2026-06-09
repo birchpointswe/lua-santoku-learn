@@ -27,6 +27,7 @@ function M.make_ridge_log (stopwatch, metric_fmt)
       local p = ev.params or {}
       local emb = ev.emb_d and str.format(" emb_d=%d", ev.emb_d) or ""
       local kern = p.kernel and str.format(" kernel=%s", p.kernel) or ""
+      local solve = ev.solve and str.format(" solve=%s", ev.solve) or ""
       local prop = ""
       if p.propensity_a then
         prop = str.format(" pa=%.4f pb=%.4f", p.propensity_a, p.propensity_b)
@@ -36,7 +37,7 @@ function M.make_ridge_log (stopwatch, metric_fmt)
         local d, dd = stopwatch()
         timing = str.format(" (%.1fs +%.1fs)", d, dd)
       end
-      str.printf("[Ridge Done]%s%s lambda=%.4e%s%s\n", emb, kern, p.lambda or 0, prop, timing)
+      str.printf("[Ridge Done]%s%s%s lambda=%.4e%s%s\n", emb, kern, solve, p.lambda or 0, prop, timing)
       return
     end
     local phase = format_phase(ev)

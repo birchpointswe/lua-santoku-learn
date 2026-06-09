@@ -423,6 +423,9 @@ M.ridge = function (args)
     end
     gram = ridge.gram(gram_args)
   end
+  -- We bake (Cholesky) only when locked AND we built the gram ourselves; a caller-supplied
+  -- gram is used as-is (eigen).
+  local baked = locked and args.gram == nil
   if locked then
     local params = locked_params
     local r = ridge.create({
@@ -430,7 +433,8 @@ M.ridge = function (args)
       propensity_a = not dense and params.propensity_a or nil,
       propensity_b = not dense and params.propensity_b or nil,
     })
-    if args.each then args.each({ event = "done", params = params }) end
+    if args.each then args.each({ event = "done", params = params,
+      solve = baked and "cholesky" or "eigen" }) end
     return r, params
   end
   gram:prepare(args.val_codes, args.val_n_samples)
@@ -446,7 +450,7 @@ M.ridge = function (args)
     propensity_a = not dense and best_params.propensity_a or nil,
     propensity_b = not dense and best_params.propensity_b or nil,
   })
-  if args.each then args.each({ event = "done", params = best_params }) end
+  if args.each then args.each({ event = "done", params = best_params, solve = "eigen" }) end
   return r, best_params
 end
 
@@ -521,7 +525,8 @@ M.krr = function (args)
       w_buf = tiled and args.w_buf or nil,
       tile_labels = tiled and tile_labels or nil,
     })
-    if args.each then args.each({ event = "done", params = params, emb_d = kd.sp_enc:dims() }) end
+    if args.each then args.each({ event = "done", params = params, emb_d = kd.sp_enc:dims(),
+      solve = spectral_args.solve_lambda and "cholesky" or "eigen" }) end
     return kd.sp_enc, r, kd.val_codes, params
   end
   if not do_search then
@@ -551,21 +556,27 @@ end
 M.oof = function (args)
   local ivec = require("santoku.ivec")
   local fvec = require("santoku.fvec")
+  local mcsr = require("santoku.csr")
   local n = err.assert(args.n, "oof: n required")
   local k = err.assert(args.k, "oof: k required")
   local fold = err.assert(args.fold, "oof: fold required")
   local fit = err.assert(args.fit, "oof: fit required")
   local predict = err.assert(args.predict, "oof: predict required")
   local each = args.each
+  local width = args.width or 1  -- >1: predict returns n_eval x width row-major; scatter width-sized rows
   err.assert(k >= 1, "oof: k must be >= 1")
-  local out = args.out or fvec.create(n)  -- caller may supply a typed out (e.g. ivec for class ids)
+  local out = args.out or fvec.create(n * width)  -- caller may supply a typed out (e.g. ivec for class ids)
   out:zero()
+  local function place (scores, idx)
+    if width == 1 then out:copy(scores, idx, true)
+    else mcsr.scatter_rows(out, scores, idx, width) end
+  end
   if k == 1 then
     -- no holdout: one model fit on all n, in-sample predictions (fast, leaky; for iteration)
     local all = ivec.create(n); all:fill_indices()
     if each then each({ fold = 1, folds = 1, n_train = n, n_eval = n }) end
     local h = fit(all)
-    out:copy(predict(h, all), all, true)
+    place(predict(h, all), all)
     return out
   end
   local order, offsets = fold:bucket(k)
@@ -582,7 +593,7 @@ M.oof = function (args)
     end
     local h = fit(train)
     local scores = predict(h, eval)
-    out:copy(scores, eval, true)
+    place(scores, eval)
     collectgarbage("collect")
   end
   return out
