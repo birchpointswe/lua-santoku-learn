@@ -556,27 +556,21 @@ end
 M.oof = function (args)
   local ivec = require("santoku.ivec")
   local fvec = require("santoku.fvec")
-  local mcsr = require("santoku.csr")
   local n = err.assert(args.n, "oof: n required")
   local k = err.assert(args.k, "oof: k required")
   local fold = err.assert(args.fold, "oof: fold required")
   local fit = err.assert(args.fit, "oof: fit required")
   local predict = err.assert(args.predict, "oof: predict required")
   local each = args.each
-  local width = args.width or 1  -- >1: predict returns n_eval x width row-major; scatter width-sized rows
   err.assert(k >= 1, "oof: k must be >= 1")
-  local out = args.out or fvec.create(n * width)  -- caller may supply a typed out (e.g. ivec for class ids)
+  local out = args.out or fvec.create(n)  -- caller may supply a typed out (e.g. ivec for class ids)
   out:zero()
-  local function place (scores, idx)
-    if width == 1 then out:copy(scores, idx, true)
-    else mcsr.scatter_rows(out, scores, idx, width) end
-  end
   if k == 1 then
     -- no holdout: one model fit on all n, in-sample predictions (fast, leaky; for iteration)
     local all = ivec.create(n); all:fill_indices()
     if each then each({ fold = 1, folds = 1, n_train = n, n_eval = n }) end
     local h = fit(all)
-    place(predict(h, all), all)
+    out:copy(predict(h, all), all, true)
     return out
   end
   local order, offsets = fold:bucket(k)
@@ -593,7 +587,7 @@ M.oof = function (args)
     end
     local h = fit(train)
     local scores = predict(h, eval)
-    place(scores, eval)
+    out:copy(scores, eval, true)
     collectgarbage("collect")
   end
   return out

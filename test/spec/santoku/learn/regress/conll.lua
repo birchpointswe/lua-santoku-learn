@@ -37,7 +37,7 @@ local cfg = {
   type = { kernel = { "arccos1", "cosine", "expcos", "geolaplace", "matern52", "rq" },
     lambda = { min = 1e-4, max = 1e1, log = true, def = 4.5416e-04 },
     propensity_a = { min = 0, max = 8, def = 7.5553 }, propensity_b = { min = 0, max = 16, def = 6.0956 },
-    search_trials = 200 },                            -- stage 2: per-span type-or-reject (re-search on 3-block features)
+    search_trials = 0 },                              -- stage 2: per-span type-or-reject (locked to searched winner)
   stack = { k = 5 },
 }
 
