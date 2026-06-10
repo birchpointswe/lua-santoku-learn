@@ -146,6 +146,73 @@ static int tk_gfm_predict_lua (lua_State *L)
   return 1;
 }
 
+static int tk_gfm_score_lua (lua_State *L)
+{
+  tk_gfm_t *g = tk_gfm_peek(L, 1);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  lua_getfield(L, 2, "offsets");
+  tk_ivec_t *offsets = tk_ivec_peek(L, -1, "offsets");
+  lua_getfield(L, 2, "neighbors");
+  tk_ivec_t *neighbors = tk_ivec_peek(L, -1, "neighbors");
+  lua_getfield(L, 2, "scores");
+  tk_fvec_t *sf = tk_fvec_peekopt(L, -1);
+  tk_dvec_t *sd = sf ? NULL : tk_dvec_peek(L, -1, "scores");
+  lua_getfield(L, 2, "expected_offsets");
+  tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
+  lua_getfield(L, 2, "expected_neighbors");
+  tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
+  lua_pop(L, 5);
+  int64_t ns = (int64_t)tk_lua_fcheckunsigned(L, 2, "gfm.score", "n_samples");
+  int64_t nl = g->nl;
+  double *thresholds = g->thresholds;
+  uint64_t tp = 0, predicted = 0, total_expected = 0;
+  #pragma omp parallel reduction(+:tp,predicted,total_expected)
+  {
+    uint8_t *my_bm = (uint8_t *)calloc((uint64_t)nl, sizeof(uint8_t));
+    #pragma omp for schedule(static)
+    for (int64_t s = 0; s < ns; s++) {
+      int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
+      int64_t ps = offsets->a[s], pe = offsets->a[s + 1];
+      int64_t hood_size = pe - ps;
+      if (hood_size == 0) continue;
+      uint64_t n_expected = (uint64_t)(ee - es);
+      total_expected += n_expected;
+      for (int64_t j = es; j < ee; j++) {
+        int64_t l = exp_nbr->a[j];
+        if (l >= 0 && l < nl) my_bm[l] = 1;
+      }
+      int64_t k = 0;
+      for (int64_t j = ps; j < pe; j++) {
+        int64_t l = neighbors->a[j];
+        if (l >= 0 && l < nl) {
+          double sc = sf ? (double)sf->a[j] : sd->a[j];
+          if (sc >= thresholds[l]) k++;
+        }
+      }
+      if (k > hood_size) k = hood_size;
+      for (int64_t j = ps; j < ps + k; j++) {
+        predicted++;
+        int64_t l = neighbors->a[j];
+        if (l >= 0 && l < nl && my_bm[l]) tp++;
+      }
+      for (int64_t j = es; j < ee; j++) {
+        int64_t l = exp_nbr->a[j];
+        if (l >= 0 && l < nl) my_bm[l] = 0;
+      }
+    }
+    free(my_bm);
+  }
+  double prec = predicted > 0 ? (double)tp / (double)predicted : 0.0;
+  double rec = total_expected > 0 ? (double)tp / (double)total_expected : 0.0;
+  double f1 = (prec + rec) > 0 ? 2.0 * prec * rec / (prec + rec) : 0.0;
+  lua_pushnumber(L, f1);
+  lua_newtable(L);
+  lua_pushnumber(L, prec); lua_setfield(L, -2, "micro_precision");
+  lua_pushnumber(L, rec); lua_setfield(L, -2, "micro_recall");
+  lua_pushnumber(L, f1); lua_setfield(L, -2, "micro_f1");
+  return 2;
+}
+
 static int tk_gfm_persist_lua (lua_State *L) {
   tk_gfm_t *g = tk_gfm_peek(L, 1);
   FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
@@ -190,6 +257,7 @@ static int tk_gfm_load_lua (lua_State *L)
 static luaL_Reg tk_gfm_mt_fns[] = {
   { "calibrate", tk_gfm_calibrate_lua },
   { "predict", tk_gfm_predict_lua },
+  { "score", tk_gfm_score_lua },
   { "persist", tk_gfm_persist_lua },
   { NULL, NULL }
 };
