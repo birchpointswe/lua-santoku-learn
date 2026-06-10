@@ -690,13 +690,6 @@ static inline int tk_booleanizer_persist_lua (lua_State *L)
   return 0;
 }
 
-static inline int tk_booleanizer_destroy_lua (lua_State *L)
-{
-  tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
-  tk_booleanizer_destroy(B);
-  return 0;
-}
-
 static inline int tk_booleanizer_feature_lua (lua_State *L)
 {
   lua_settop(L, 3);
@@ -837,7 +830,6 @@ static luaL_Reg tk_booleanizer_mt_fns[] =
   { "finalize", tk_booleanizer_finalize_lua },
   { "restrict", tk_booleanizer_restrict_lua },
   { "persist", tk_booleanizer_persist_lua },
-  { "destroy", tk_booleanizer_destroy_lua },
   { NULL, NULL }
 };
 
