@@ -261,7 +261,6 @@ typedef struct {
 
 
 
-
 static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t pos, size_t len) {
   tk_norm_result_t r = {0};
   r.n_out = 0;
@@ -536,31 +535,51 @@ static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t po
 
 
 
-static inline size_t tk_text_normalize_buffer (const char *in, size_t len, uint8_t *out, size_t *src_index) {
-  size_t nlen = 0, i = 0;
-  int prev_space = 1;
+typedef struct {
+  uint8_t *out;
+  size_t nlen;
+  int prev_space;
+} tk_norm_stream_t;
+
+static inline void tk_norm_stream_init (tk_norm_stream_t *s, uint8_t *out) {
+  s->out = out;
+  s->nlen = 0;
+  s->prev_space = 1;
+}
+
+
+static inline void tk_norm_stream_run (tk_norm_stream_t *s, const char *in, size_t len) {
+  size_t i = 0;
   while (i < len) {
     tk_norm_result_t nr = tk_text_normalize_next(in, i, len);
-    size_t cp_start = i;
     i += (size_t)nr.n_in;
     for (int bi = 0; bi < nr.n_out; bi++) {
       uint8_t b = nr.bytes[bi];
+      if (b < 0x20 || b == 0x7F) b = ' ';
       if (b == ' ') {
-        if (prev_space) continue;
-        out[nlen] = ' ';
-        if (src_index) src_index[nlen] = cp_start;
-        nlen++;
-        prev_space = 1;
+        if (s->prev_space) continue;
+        s->out[s->nlen++] = ' ';
+        s->prev_space = 1;
       } else {
-        out[nlen] = b;
-        if (src_index) src_index[nlen] = cp_start;
-        nlen++;
-        prev_space = 0;
+        s->out[s->nlen++] = b;
+        s->prev_space = 0;
       }
     }
   }
-  if (nlen > 0 && out[nlen - 1] == ' ') nlen--;
-  return nlen;
+}
+
+
+
+
+static inline void tk_norm_stream_mark (tk_norm_stream_t *s, uint8_t byte) {
+  s->out[s->nlen++] = byte;
+  s->prev_space = 0;
+}
+
+
+static inline size_t tk_norm_stream_finish (tk_norm_stream_t *s) {
+  if (s->nlen > 0 && s->out[s->nlen - 1] == ' ') s->nlen--;
+  return s->nlen;
 }
 
 #endif
