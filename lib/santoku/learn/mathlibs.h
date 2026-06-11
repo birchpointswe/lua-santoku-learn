@@ -48,6 +48,13 @@ static inline double cblas_dnrm2 (int n, const double *x, int incx) {
   return sqrt(s);
 }
 
+static inline double cblas_ddot (int n, const double *x, int incx, const double *y, int incy) {
+  double s = 0;
+  for (int i = 0; i < n; i++)
+    s += x[i * incx] * y[i * incy];
+  return s;
+}
+
 static inline void cblas_dgemv (enum CBLAS_ORDER order, enum CBLAS_TRANSPOSE trans,
     int m, int n, double alpha, const double *A, int lda,
     const double *x, int incx, double beta, double *y, int incy) {
@@ -270,6 +277,50 @@ static inline int LAPACKE_dsyevd (int matrix_layout, char jobz, char uplo,
         A[j * lda + i] = V[i * n + j];
   free(V);
   free(M);
+  return 0;
+}
+
+// Cholesky factor A = U^T U (upper, column-major) in place; gram.c's fast-path
+// ridge solve calls these with LAPACK_COL_MAJOR + 'U'. Returns 0, or the 1-based
+// leading minor that wasn't positive definite (LAPACK dpotrf convention).
+static inline int LAPACKE_dpotrf (int matrix_layout, char uplo, int n, double *A, int lda) {
+  (void)matrix_layout; (void)uplo;
+  for (int j = 0; j < n; j++) {
+    for (int i = 0; i <= j; i++) {
+      double s = A[i + j * lda];
+      for (int k = 0; k < i; k++)
+        s -= A[k + i * lda] * A[k + j * lda];
+      if (i == j) {
+        if (s <= 0.0) return j + 1;
+        A[j + j * lda] = sqrt(s);
+      } else {
+        A[i + j * lda] = s / A[i + i * lda];
+      }
+    }
+  }
+  return 0;
+}
+
+// Solve A X = B given the upper Cholesky factor U from LAPACKE_dpotrf: forward
+// solve U^T Y = B then back solve U X = Y, per right-hand-side column. In place on B.
+static inline int LAPACKE_dpotrs (int matrix_layout, char uplo, int n, int nrhs,
+    const double *A, int lda, double *B, int ldb) {
+  (void)matrix_layout; (void)uplo;
+  for (int c = 0; c < nrhs; c++) {
+    double *b = B + c * ldb;
+    for (int i = 0; i < n; i++) {
+      double s = b[i];
+      for (int k = 0; k < i; k++)
+        s -= A[k + i * lda] * b[k];
+      b[i] = s / A[i + i * lda];
+    }
+    for (int i = n - 1; i >= 0; i--) {
+      double s = b[i];
+      for (int k = i + 1; k < n; k++)
+        s -= A[i + k * lda] * b[k];
+      b[i] = s / A[i + i * lda];
+    }
+  }
   return 0;
 }
 

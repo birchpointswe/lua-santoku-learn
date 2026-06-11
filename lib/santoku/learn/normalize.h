@@ -258,10 +258,9 @@ typedef struct {
 } tk_norm_result_t;
 
 // INVARIANT: contraction-only. Every step emits no more bytes than it consumes
-// (n_out <= n_in). Downstream buffer sizing relies on this at 1x input length:
-// tm_csr_do_pack's normalize scratch, tokenize_core's buf_size, and the wide
-// annotated pool. If an EXPANDING mapping (n_out > n_in) is ever added, add
-// matching headroom at all those sites or they overflow.
+// (n_out <= n_in). The streaming normalizer and the tokenizer row buffer rely on
+// this to size `out` at 1x input length. If an EXPANDING mapping (n_out > n_in) is
+// ever added, add matching headroom at those sites or they overflow.
 static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t pos, size_t len) {
   tk_norm_result_t r = {0};
   r.n_out = 0;
@@ -529,38 +528,58 @@ static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t po
   return r;
 }
 
-// Full normalization of a byte buffer into `out` (caller-sized at >= len, since
-// this is contraction-only): per-codepoint fold (incl. whitespace-class -> space),
-// then collapse repeated spaces and trim leading/trailing whitespace. Returns the
-// output length.
-// If src_index != NULL, src_index[k] receives the raw input byte offset that produced output byte k
-// (monotone non-decreasing). Lets callers that need positions (e.g. tokenize sequence mode) map a
-// normalized index back to a raw byte offset. Sized like out (>= len, contraction-only).
-static inline size_t tk_text_normalize_buffer (const char *in, size_t len, uint8_t *out, size_t *src_index) {
-  size_t nlen = 0, i = 0;
-  int prev_space = 1; // treat start as space so leading whitespace is trimmed
+// ---------------------------------------------------------------------------
+// Streaming normalizer (the one normalize path): normalize LITERAL RUNS ONLY,
+// appended across calls, so markers injected AFTER normalization are never folded.
+// Each codepoint is folded via tk_text_normalize_next, then C0+0x7F control-fold
+// to space, repeated spaces collapse (prev_space carries across runs), trailing
+// trim is row-level (call _finish once per output row). Contraction-only: `out`
+// must be sized >= the total run-byte count.
+typedef struct {
+  uint8_t *out;
+  size_t nlen;
+  int prev_space;
+} tk_norm_stream_t;
+
+static inline void tk_norm_stream_init (tk_norm_stream_t *s, uint8_t *out) {
+  s->out = out;
+  s->nlen = 0;
+  s->prev_space = 1; // row start treated as space so leading whitespace trims
+}
+
+// Normalize one literal run in[0..len) and append it to the stream.
+static inline void tk_norm_stream_run (tk_norm_stream_t *s, const char *in, size_t len) {
+  size_t i = 0;
   while (i < len) {
     tk_norm_result_t nr = tk_text_normalize_next(in, i, len);
-    size_t cp_start = i;
     i += (size_t)nr.n_in;
     for (int bi = 0; bi < nr.n_out; bi++) {
       uint8_t b = nr.bytes[bi];
+      if (b < 0x20 || b == 0x7F) b = ' '; // control-fold (scrub C0 + DEL)
       if (b == ' ') {
-        if (prev_space) continue;
-        out[nlen] = ' ';
-        if (src_index) src_index[nlen] = cp_start;
-        nlen++;
-        prev_space = 1;
+        if (s->prev_space) continue;
+        s->out[s->nlen++] = ' ';
+        s->prev_space = 1;
       } else {
-        out[nlen] = b;
-        if (src_index) src_index[nlen] = cp_start;
-        nlen++;
-        prev_space = 0;
+        s->out[s->nlen++] = b;
+        s->prev_space = 0;
       }
     }
   }
-  if (nlen > 0 && out[nlen - 1] == ' ') nlen--; // trim trailing
-  return nlen;
+}
+
+// Append a marker byte to the stream. Markers are injected AFTER normalization, so
+// they bypass folding/space-collapse and reset prev_space (a marker is non-space).
+// Lets callers add markers without reaching into the struct internals.
+static inline void tk_norm_stream_mark (tk_norm_stream_t *s, uint8_t byte) {
+  s->out[s->nlen++] = byte;
+  s->prev_space = 0;
+}
+
+// Row-level trailing trim; returns final output length. Call once per row after all runs.
+static inline size_t tk_norm_stream_finish (tk_norm_stream_t *s) {
+  if (s->nlen > 0 && s->out[s->nlen - 1] == ' ') s->nlen--;
+  return s->nlen;
 }
 
 #endif

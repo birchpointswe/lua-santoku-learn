@@ -1,4 +1,5 @@
 local csr = require("santoku.learn.csr")
+local tokenizer = require("santoku.learn.tokenizer")
 local ds = require("santoku.learn.dataset")
 local optimize = require("santoku.learn.optimize")
 local spectral = require("santoku.learn.spectral")
@@ -14,7 +15,7 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   data = { max = nil, ttr = 0.5, tvr = 0.1 },
-  tok = { ngram_min = 5, ngram_max = 5 },
+  tok = { ngram_min = 5, ngram_max = 5, normalize = false, bpx = false, bpx_fork = 4 },
   emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "arccos1", "cosine", "expcos", "geolaplace", "matern52", "rq" } },
   ridge = {
     lambda = { min = 1e-4, max = 1e1, log = true, def = 2.0497e-02 },
@@ -23,6 +24,18 @@ local cfg = {
     k = 1,
   },
 }
+
+-- plain tokenize via a tokenizer object; the object threads as the old ngram_map
+-- (nil => create + grow the vocab; object => frozen). bpx/normalize from cfg.tok.
+local function tokenize (texts, n, nmin, nmax, tok)
+  local grow = tok == nil
+  if grow then tok = tokenizer.create({
+    ngram_min = nmin, ngram_max = nmax,
+    normalize = cfg.tok.normalize, bpx = cfg.tok.bpx, bpx_fork = cfg.tok.bpx_fork })
+  end
+  local o, t, v = tok:tokenize({ texts = texts, n_samples = n, grow = grow })
+  return tok, o, t, v, tok:n_tokens()
+end
 
 test("imdb classifier", function ()
 
@@ -41,9 +54,8 @@ test("imdb classifier", function ()
   str.printf("[Data] train=%d val=%d test=%d classes=%d %s\n",
     train.n, validate.n, test_set.n, n_classes, sw())
 
-  local ngram_map, offsets, tokens, values, n_tokens = csr.tokenize({
-    texts = train.problems, ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max, n_samples = train.n,
-  })
+  local ngram_map, offsets, tokens, values, n_tokens =
+    tokenize(train.problems, train.n, cfg.tok.ngram_min, cfg.tok.ngram_max)
   local bns_scores = csr.apply_bns(
     offsets, tokens, values, nil,
     label_off, label_nbr, n_tokens, n_classes)
@@ -51,10 +63,8 @@ test("imdb classifier", function ()
   str.printf("[Tokenize] ngram_min=%d ngram_max=%d tokens=%d %s\n",
     cfg.tok.ngram_min, cfg.tok.ngram_max, n_tokens, sw())
 
-  local _, val_off, val_tok, val_val = csr.tokenize({
-    texts = validate.problems, ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max,
-    n_samples = validate.n, ngram_map = ngram_map,
-  })
+  local _, val_off, val_tok, val_val =
+    tokenize(validate.problems, validate.n, cfg.tok.ngram_min, cfg.tok.ngram_max, ngram_map)
   csr.apply_bns(val_off, val_tok, val_val, bns_scores)
   csr.normalize(val_off, val_val)
 
@@ -94,10 +104,8 @@ test("imdb classifier", function ()
   validate.problems = nil
   collectgarbage("collect")
   local function encode_texts(texts, n)
-    local _, off, tok, val = csr.tokenize({
-      texts = texts, ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max,
-      n_samples = n, ngram_map = ngram_map,
-    })
+    local _, off, tok, val =
+      tokenize(texts, n, cfg.tok.ngram_min, cfg.tok.ngram_max, ngram_map)
     csr.apply_bns(off, tok, val, bns_scores)
     csr.normalize(off, val)
     return sp_enc:encode({

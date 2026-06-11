@@ -1,4 +1,15 @@
 local csr = require("santoku.learn.csr")
+local tokenizer = require("santoku.learn.tokenizer")
+-- materialize the streaming text iterator into a table, then tokenize via a tokenizer
+-- object (object threads as the old ngram_map: nil => create+grow; object => frozen).
+local function tokenize (iter, n, ng, tok)
+  local texts, x = {}, iter()
+  while x do texts[#texts + 1] = x; x = iter() end
+  local grow = tok == nil
+  if grow then tok = tokenizer.create({ ngram_min = ng, ngram_max = ng }) end
+  local o, t, v = tok:tokenize({ texts = texts, n_samples = n, grow = grow })
+  return tok, o, t, v, tok:n_tokens()
+end
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
 local fvec = require("santoku.fvec")
@@ -49,18 +60,16 @@ test("eurlex classifier", function ()
   local dev_label_off, dev_label_nbr = dev.sol_offsets, dev.sol_neighbors
   local test_label_off, test_label_nbr = test_set.sol_offsets, test_set.sol_neighbors
 
-  local ngram_map, offsets, tokens, values, n_tokens = csr.tokenize({
-    texts = train.text_iter(), ngram_min = cfg.tok.ngram, ngram_max = cfg.tok.ngram, n_samples = train.n,
-  })
+  local ngram_map, offsets, tokens, values, n_tokens =
+    tokenize(train.text_iter(), train.n, cfg.tok.ngram)
   local bns_scores = csr.apply_bns(
     offsets, tokens, values, nil,
     train_label_off, train_label_nbr, n_tokens, n_labels)
   csr.normalize(offsets, values)
   str.printf("[Tokenize] ngram=%d tokens=%d %s\n", cfg.tok.ngram, n_tokens, sw())
 
-  local _, val_off, val_tok, val_val = csr.tokenize({
-    texts = dev.text_iter(), ngram_min = cfg.tok.ngram, ngram_max = cfg.tok.ngram, n_samples = dev.n, ngram_map = ngram_map,
-  })
+  local _, val_off, val_tok, val_val =
+    tokenize(dev.text_iter(), dev.n, cfg.tok.ngram, ngram_map)
   csr.apply_bns(val_off, val_tok, val_val, bns_scores)
   csr.normalize(val_off, val_val)
 
@@ -115,9 +124,8 @@ test("eurlex classifier", function ()
   os.remove(w_path)
   for _, kn in ipairs(cfg.emb.kernel) do os.remove(pqty_path .. "_" .. kn) end
   local function encode_texts(text_iter_fn, n)
-    local _, off, tok, val = csr.tokenize({
-      texts = text_iter_fn(), ngram_min = cfg.tok.ngram, ngram_max = cfg.tok.ngram, n_samples = n, ngram_map = ngram_map,
-    })
+    local _, off, tok, val =
+      tokenize(text_iter_fn(), n, cfg.tok.ngram, ngram_map)
     csr.apply_bns(off, tok, val, bns_scores)
     csr.normalize(off, val)
     return sp_enc:encode({
