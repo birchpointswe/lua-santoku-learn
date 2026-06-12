@@ -26,8 +26,7 @@
 #define TK_TOK_FORK_MAX 6         // hard cap on fork budget
 
 typedef enum { TK_STREAM_TEXT = 0, TK_STREAM_TYPE = 1, TK_STREAM_SHAPE = 2 } tk_stream_t;
-typedef enum { TK_FOCUS_NONE = 0, TK_FOCUS_TRUE = 1, TK_FOCUS_TYPED = 2 } tk_focus_t;
-typedef enum { TK_MARKS_NONE = 0, TK_MARKS_BRACKET = 1, TK_MARKS_REPLACE = 2 } tk_marks_t;
+typedef enum { TK_FOCUS_NONE = 0, TK_FOCUS_TRUE = 1 } tk_focus_t;
 
 // Byte roles, assigned in this fixed order from the free-byte pool (terminals,
 // focus, type marks, UNK, shapes, [bpx last]). UNK is the type-mark slot at index
@@ -41,16 +40,11 @@ typedef struct {
   int bpx;
   int terminals;
   tk_focus_t focus;
-  tk_marks_t marks;
 
   // byte assignments (0 = unassigned)
   uint8_t b_bos, b_eos;                          // terminals
   uint8_t b_focus_open, b_focus_close;           // focus = true
-  uint8_t b_tfocus_open[TK_TOK_MAXTYPES + 2];    // focus = typed: per {types, O, UNK}
-  uint8_t b_tfocus_close[TK_TOK_MAXTYPES + 2];
-  uint8_t b_type[TK_TOK_MAXTYPES + 2];           // type/replace byte per {types, O, UNK}
-  uint8_t b_mopen[TK_TOK_MAXTYPES + 2];          // marks = bracket: open per {types, O, UNK}
-  uint8_t b_mclose[TK_TOK_MAXTYPES + 2];
+  uint8_t b_type[TK_TOK_MAXTYPES + 2];           // type byte per {types, O, UNK}
   uint8_t b_shape[TK_TOK_NSHAPE];                // shape classes
   int n_assigned;                                // count drawn from pool (for persist check)
 
@@ -111,11 +105,8 @@ static int tk_tokenizer_assign (lua_State *L, tk_tokenizer_t *t) {
   // upper bound on roles, for the error message
   int need = (t->terminals ? 2 : 0)
            + (t->focus == TK_FOCUS_TRUE ? 2 : 0)
-           + (t->focus == TK_FOCUS_TYPED ? 2 * (nt + 2) : 0)
            + (t->stream == TK_STREAM_TYPE ? (nt + 2) : 0)
-           + (t->stream == TK_STREAM_SHAPE ? TK_TOK_NSHAPE : 0)
-           + (t->marks == TK_MARKS_REPLACE ? (nt + 2) : 0)
-           + (t->marks == TK_MARKS_BRACKET ? 2 * (nt + 2) : 0);
+           + (t->stream == TK_STREAM_SHAPE ? TK_TOK_NSHAPE : 0);
 
   if (t->terminals) {
     t->b_bos = tk_assign(L, &a, "terminals", need);
@@ -124,25 +115,14 @@ static int tk_tokenizer_assign (lua_State *L, tk_tokenizer_t *t) {
   if (t->focus == TK_FOCUS_TRUE) {
     t->b_focus_open = tk_assign(L, &a, "focus", need);
     t->b_focus_close = tk_assign(L, &a, "focus", need);
-  } else if (t->focus == TK_FOCUS_TYPED) {
-    for (int k = 0; k < nt + 2; k++) {
-      t->b_tfocus_open[k] = tk_assign(L, &a, "typed-focus", need);
-      t->b_tfocus_close[k] = tk_assign(L, &a, "typed-focus", need);
-    }
   }
-  if (t->stream == TK_STREAM_TYPE || t->marks == TK_MARKS_REPLACE) {
+  if (t->stream == TK_STREAM_TYPE) {
     for (int k = 0; k < nt + 2; k++)
       t->b_type[k] = tk_assign(L, &a, "type", need);
   }
   if (t->stream == TK_STREAM_SHAPE) {
     for (int k = 0; k < TK_TOK_NSHAPE; k++)
       t->b_shape[k] = tk_assign(L, &a, "shape", need);
-  }
-  if (t->marks == TK_MARKS_BRACKET) {
-    for (int k = 0; k < nt + 2; k++) {
-      t->b_mopen[k] = tk_assign(L, &a, "mark", need);
-      t->b_mclose[k] = tk_assign(L, &a, "mark", need);
-    }
   }
   // bpx takes ALL remaining free bytes, last. Merges are allocated from this pool
   // (in order) during learning; an empty pool degrades bpx to the all-raw path.
@@ -159,13 +139,6 @@ static int tk_tokenizer_assign (lua_State *L, tk_tokenizer_t *t) {
 // ---------------------------------------------------------------------------
 // create
 // ---------------------------------------------------------------------------
-static const char *tk_optstr (lua_State *L, int idx, const char *field, const char *dflt) {
-  lua_getfield(L, idx, field);
-  const char *s = lua_isnil(L, -1) ? dflt : lua_tostring(L, -1);
-  lua_pop(L, 1);
-  return s;
-}
-
 static int tk_tokenizer_create_lua (lua_State *L) {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
@@ -177,11 +150,14 @@ static int tk_tokenizer_create_lua (lua_State *L) {
   if (cfg.ngram_min < 1 || cfg.ngram_min > cfg.ngram_max)
     return luaL_error(L, "tokenizer: need 1 <= ngram_min <= ngram_max");
 
-  const char *sstream = tk_optstr(L, 1, "stream", "text");
-  if (!strcmp(sstream, "text")) cfg.stream = TK_STREAM_TEXT;
-  else if (!strcmp(sstream, "type")) cfg.stream = TK_STREAM_TYPE;
-  else if (!strcmp(sstream, "shape")) cfg.stream = TK_STREAM_SHAPE;
-  else return luaL_error(L, "tokenizer: stream must be text|type|shape");
+  // types=true: replace token spans with the external tagger's type byte (skeleton).
+  // shapes=true: per-token shape byte, boundaries+class derived internally (no input).
+  // Mutually exclusive; neither => plain text stream.
+  int want_types = tk_lua_foptboolean(L, 1, "tokenizer", "types", false);
+  int want_shapes = tk_lua_foptboolean(L, 1, "tokenizer", "shapes", false);
+  if (want_types && want_shapes)
+    return luaL_error(L, "tokenizer: types and shapes are mutually exclusive");
+  cfg.stream = want_types ? TK_STREAM_TYPE : (want_shapes ? TK_STREAM_SHAPE : TK_STREAM_TEXT);
 
   cfg.normalize = tk_lua_foptboolean(L, 1, "tokenizer", "normalize", false);
   cfg.bpx = tk_lua_foptboolean(L, 1, "tokenizer", "bpx", false);
@@ -196,38 +172,21 @@ static int tk_tokenizer_create_lua (lua_State *L) {
   lua_getfield(L, 1, "focus");
   if (lua_isnil(L, -1) || (lua_isboolean(L, -1) && !lua_toboolean(L, -1))) cfg.focus = TK_FOCUS_NONE;
   else if (lua_isboolean(L, -1) && lua_toboolean(L, -1)) cfg.focus = TK_FOCUS_TRUE;
-  else if (lua_isstring(L, -1) && !strcmp(lua_tostring(L, -1), "typed")) cfg.focus = TK_FOCUS_TYPED;
-  else return luaL_error(L, "tokenizer: focus must be false|true|\"typed\"");
+  else return luaL_error(L, "tokenizer: focus must be false|true");
   lua_pop(L, 1);
 
-  lua_getfield(L, 1, "marks");   // reject a present-but-non-string marks (e.g. marks=true)
-  if (!lua_isnil(L, -1) && !lua_isstring(L, -1)) return luaL_error(L, "tokenizer: marks must be \"bracket\"|\"replace\"");
-  lua_pop(L, 1);
-  const char *smarks = tk_optstr(L, 1, "marks", NULL);
-  if (!smarks) cfg.marks = TK_MARKS_NONE;
-  else if (!strcmp(smarks, "bracket")) cfg.marks = TK_MARKS_BRACKET;
-  else if (!strcmp(smarks, "replace")) cfg.marks = TK_MARKS_REPLACE;
-  else return luaL_error(L, "tokenizer: marks must be \"bracket\"|\"replace\"");
-
-  // n_types: required by typed focus, type stream, or marks
-  int needs_types = (cfg.focus == TK_FOCUS_TYPED) || (cfg.stream == TK_STREAM_TYPE) || (cfg.marks != TK_MARKS_NONE);
+  // n_types: required by the type stream (sizes the external tagger's byte block)
   lua_getfield(L, 1, "n_types");
   if (!lua_isnil(L, -1)) cfg.n_types = (int) lua_tointeger(L, -1);
   lua_pop(L, 1);
-  if (needs_types && cfg.n_types <= 0)
-    return luaL_error(L, "tokenizer: n_types required for typed focus / type stream / marks");
+  if (cfg.stream == TK_STREAM_TYPE && cfg.n_types <= 0)
+    return luaL_error(L, "tokenizer: n_types required when types=true");
   if (cfg.n_types > TK_TOK_MAXTYPES)
     return luaL_error(L, "tokenizer: n_types exceeds ceiling %d", TK_TOK_MAXTYPES);
 
   // VALIDITY hard errors
   if (cfg.normalize && cfg.stream != TK_STREAM_TEXT)
-    return luaL_error(L, "tokenizer: normalize only valid on stream=text");
-  if (cfg.marks != TK_MARKS_NONE && cfg.stream != TK_STREAM_TEXT)
-    return luaL_error(L, "tokenizer: marks only valid on stream=text");
-  // typed focus brackets are only rendered in the plain-text branch; the
-  // type/shape/marks branches would emit the untyped b_focus_open instead.
-  if (cfg.focus == TK_FOCUS_TYPED && (cfg.stream != TK_STREAM_TEXT || cfg.marks != TK_MARKS_NONE))
-    return luaL_error(L, "tokenizer: focus=\"typed\" requires stream=text and marks=nil");
+    return luaL_error(L, "tokenizer: normalize only valid on the text stream (no types/shapes)");
 
   tk_tokenizer_t *t = tk_lua_newuserdata(L, tk_tokenizer_t, TK_TOK_MT,
     tk_tokenizer_mt_fns, tk_tokenizer_gc);
@@ -341,8 +300,8 @@ static int tk_shape_class (const char *t, int64_t s, int64_t e) {
   return 5;                                                         // mix
 }
 
-// map a focus_type value to the typed-focus / type-mark slot: types 0..n-1, O=n, UNK=n+1.
-// focus_types uses -1 for UNK (no entity-typed tokens handled caller-side as O = n).
+// map a context_types value to the type-mark slot: types 0..n-1, O=n, UNK=n+1.
+// context_types uses -1 for UNK (no type provided == below-confidence downstream).
 static inline int tk_type_slot (int t, int n_types) {
   if (t < 0) return n_types + 1;        // UNK
   if (t >= n_types) return n_types;     // O (or out-of-range) -> O slot
@@ -358,8 +317,8 @@ static inline int tk_type_slot (int t, int n_types) {
 typedef struct { uint8_t *buf; uint8_t *mask; size_t w; int norm; tk_norm_stream_t ns; } tk_render_t;
 static inline void tk_render_init (tk_render_t *r, uint8_t *buf, uint8_t *mask, int norm) {
   r->buf = buf; r->mask = mask; r->w = 0; r->norm = norm;
-  if (norm) tk_norm_stream_init(&r->ns, buf);
-}
+  tk_norm_stream_init(&r->ns, buf);   // always init: ns is unused when !norm, but
+}                                     // this keeps it fully defined (silences -Wmaybe-uninitialized)
 static inline void tk_render_lit (tk_render_t *r, const char *text, size_t a, size_t b) {
   if (b <= a) return;
   size_t w0 = r->w;
@@ -384,15 +343,14 @@ static inline size_t tk_render_finish (tk_render_t *r) {
 }
 
 // Render one output row's byte stream into rowbuf (+ maskbuf marker flags if
-// non-NULL). `s`,`e` are the focus span (ignored when per_span==0). `focus_type`
-// is the raw type of the focus span for focus="typed" (else -1). Returns length.
+// non-NULL). `s`,`e` are the focus span (ignored when per_span==0).
 // `suppress_focus` (bpx doc-level learning): render the whole doc/context as one
 // stream with NO focus brackets, so merges are learned over doc-level streams
 // (v6.1: "learned GLOBALLY per block over doc-level streams; APPLIED PER ROW").
 static size_t tk_render_row (
   tk_tokenizer_t *t, uint8_t *rowbuf, uint8_t *maskbuf,
   const char *text, size_t tlen, int per_span, size_t s, size_t e,
-  int focus_type, int64_t c0, int64_t c1,
+  int64_t c0, int64_t c1,
   tk_ivec_t *cs, tk_ivec_t *ce, tk_ivec_t *cty, int suppress_focus)
 {
   (void) per_span;
@@ -401,44 +359,14 @@ static size_t tk_render_row (
   tk_render_init(&r, rowbuf, maskbuf, (t->stream == TK_STREAM_TEXT && t->normalize));
   if (t->terminals) tk_render_mark(&r, t->b_bos);
 
-  if (t->stream == TK_STREAM_TEXT && t->marks != TK_MARKS_NONE) {
-    size_t pos = 0; bool fdone = false;
-    for (int64_t cj = c0; cj <= c1; cj++) {
-      int64_t cstart = (cj < c1) ? cs->a[cj] : (int64_t) tlen;
-      int64_t cend = (cj < c1) ? ce->a[cj] : (int64_t) tlen;
-      int slot = (cj < c1) ? tk_type_slot(cty ? (int) cty->a[cj] : t->n_types, t->n_types) : 0;
-      if (!fdone && (cj == c1 || (size_t) cstart >= s)) {
-        tk_render_lit(&r, text, pos, s);
-        if (efocus != TK_FOCUS_NONE) tk_render_mark(&r, t->b_focus_open);
-        tk_render_lit(&r, text, s, e);
-        if (efocus != TK_FOCUS_NONE) tk_render_mark(&r, t->b_focus_close);
-        pos = e; fdone = true;
-      }
-      if (cj == c1) break;
-      if ((size_t) cstart < e && (size_t) cend > s) continue;
-      tk_render_lit(&r, text, pos, (size_t) cstart);
-      if (t->marks == TK_MARKS_BRACKET) {
-        tk_render_mark(&r, t->b_mopen[slot]);
-        tk_render_lit(&r, text, (size_t) cstart, (size_t) cend);
-        tk_render_mark(&r, t->b_mclose[slot]);
-      } else {
-        tk_render_mark(&r, t->b_type[slot]);
-      }
-      pos = (size_t) cend;
-    }
-    tk_render_lit(&r, text, pos, tlen);
-
-  } else if (t->stream == TK_STREAM_TEXT) {
-    int ft_slot = (t->focus == TK_FOCUS_TYPED) ? tk_type_slot(focus_type, t->n_types) : 0;
-    uint8_t fopen = (t->focus == TK_FOCUS_TYPED) ? t->b_tfocus_open[ft_slot] : t->b_focus_open;
-    uint8_t fclose = (t->focus == TK_FOCUS_TYPED) ? t->b_tfocus_close[ft_slot] : t->b_focus_close;
+  if (t->stream == TK_STREAM_TEXT) {
     if (efocus == TK_FOCUS_NONE) {
       tk_render_lit(&r, text, 0, tlen);
     } else {
       tk_render_lit(&r, text, 0, s);
-      tk_render_mark(&r, fopen);
+      tk_render_mark(&r, t->b_focus_open);
       tk_render_lit(&r, text, s, e);
-      tk_render_mark(&r, fclose);
+      tk_render_mark(&r, t->b_focus_close);
       tk_render_lit(&r, text, e, tlen);
     }
 
@@ -453,13 +381,17 @@ static size_t tk_render_row (
     }
     if (efocus != TK_FOCUS_NONE && fo_done && !fc_done) tk_render_mark(&r, t->b_focus_close);
 
-  } else { // TK_STREAM_SHAPE
+  } else { // TK_STREAM_SHAPE: word tokens derived from whitespace (no external spans)
     bool fo_done = false, fc_done = false;
-    for (int64_t cj = c0; cj < c1; cj++) {
-      size_t cstart = (size_t) cs->a[cj];
-      int sc = tk_shape_class(text, cs->a[cj], ce->a[cj]);
-      if (efocus != TK_FOCUS_NONE && !fo_done && cstart >= s) { tk_render_mark(&r, t->b_focus_open); fo_done = true; }
-      if (efocus != TK_FOCUS_NONE && fo_done && !fc_done && cstart >= e) { tk_render_mark(&r, t->b_focus_close); fc_done = true; }
+    size_t p = 0;
+    while (p < tlen) {
+      while (p < tlen && text[p] == ' ') p++;
+      if (p >= tlen) break;
+      size_t ws = p;
+      while (p < tlen && text[p] != ' ') p++;
+      int sc = tk_shape_class(text, (int64_t) ws, (int64_t) p);
+      if (efocus != TK_FOCUS_NONE && !fo_done && ws >= s) { tk_render_mark(&r, t->b_focus_open); fo_done = true; }
+      if (efocus != TK_FOCUS_NONE && fo_done && !fc_done && ws >= e) { tk_render_mark(&r, t->b_focus_close); fc_done = true; }
       tk_render_content(&r, t->b_shape[sc]);
     }
     if (efocus != TK_FOCUS_NONE && fo_done && !fc_done) tk_render_mark(&r, t->b_focus_close);
@@ -656,9 +588,9 @@ static void tk_bpx_learn (
   for (int64_t d = 0; d < n_samples; d++) {
     const char *text = text_ptrs[d]; size_t tlen = text_lens[d];
     int64_t c0 = co ? co->a[d] : 0, c1 = co ? co->a[d + 1] : 0;
-    // s = e = tlen: focus never matches (suppressed anyway), and the marks branch
-    // renders + splits its runs correctly instead of swallowing the whole doc.
-    size_t w = tk_render_row(t, rowbuf, maskbuf, text, tlen, 0, tlen, tlen, -1, c0, c1, cs, ce, cty, 1);
+    // s = e = tlen: focus never matches (suppressed anyway); literal/content runs
+    // are split below on the marker mask instead of swallowing the whole doc.
+    size_t w = tk_render_row(t, rowbuf, maskbuf, text, tlen, 0, tlen, tlen, c0, c1, cs, ce, cty, 1);
     for (size_t i = 0; i < w; ) {       // each maximal literal/content run -> one run
       if (maskbuf[i]) { i++; continue; }
       size_t j = i; while (j < w && !maskbuf[j]) j++;
@@ -720,30 +652,37 @@ static int tk_tokenizer_tokenize_lua (lua_State *L) {
   lua_getfield(L, 2, "texts");
   luaL_checktype(L, -1, LUA_TTABLE);
   int texts_idx = lua_gettop(L);
-  lua_getfield(L, 2, "doc_span_offsets");
-  tk_ivec_t *fo = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
-  lua_getfield(L, 2, "span_starts"); tk_ivec_t *fs = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
-  lua_getfield(L, 2, "span_ends");   tk_ivec_t *fe = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
-  lua_getfield(L, 2, "focus_types"); tk_ivec_t *fty = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
-  lua_getfield(L, 2, "context_offsets"); tk_ivec_t *co = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
-  lua_getfield(L, 2, "context_starts"); tk_ivec_t *cs = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
-  lua_getfield(L, 2, "context_ends");   tk_ivec_t *ce = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
-  lua_getfield(L, 2, "context_types");  tk_ivec_t *cty = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
+  // focus = { offsets, starts, ends } -- which span to bracket (rows).
+  // types  = { offsets, starts, ends, types } -- token spans + tagger byte (skeleton).
+  // shapes need no input (boundaries + class derived from the text internally).
+  tk_ivec_t *fo = NULL, *fs = NULL, *fe = NULL;
+  lua_getfield(L, 2, "focus");
+  if (!lua_isnil(L, -1)) {
+    luaL_checktype(L, -1, LUA_TTABLE);
+    lua_getfield(L, -1, "offsets"); fo = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
+    lua_getfield(L, -1, "starts");  fs = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
+    lua_getfield(L, -1, "ends");    fe = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
+  }
+  lua_pop(L, 1);
+  tk_ivec_t *co = NULL, *cs = NULL, *ce = NULL, *cty = NULL;
+  lua_getfield(L, 2, "types");
+  if (!lua_isnil(L, -1)) {
+    luaL_checktype(L, -1, LUA_TTABLE);
+    lua_getfield(L, -1, "offsets"); co = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
+    lua_getfield(L, -1, "starts");  cs = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
+    lua_getfield(L, -1, "ends");    ce = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
+    lua_getfield(L, -1, "types");   cty = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
+  }
+  lua_pop(L, 1);
 
   // VALIDITY -- hoisted above the mallocs below so an error never leaks them.
   bool per_span = (fo != NULL);
   if (per_span && (!fs || !fe))
-    return luaL_error(L, "tokenizer: doc_span_offsets given but span_starts/ends missing");
-  if (t->stream != TK_STREAM_TEXT && (!co || !cs || !ce))
-    return luaL_error(L, "tokenizer: stream=type/shape requires context spans + starts/ends");
-  if (t->stream == TK_STREAM_TYPE && !cty)
-    return luaL_error(L, "tokenizer: stream=type requires context_types");
-  if (t->marks != TK_MARKS_NONE && (!per_span || !co || !cs || !ce))
-    return luaL_error(L, "tokenizer: marks requires focus spans + context spans");
+    return luaL_error(L, "tokenizer: focus.offsets given but focus.starts/ends missing");
+  if (t->stream == TK_STREAM_TYPE && (!co || !cs || !ce || !cty))
+    return luaL_error(L, "tokenizer: types=true requires types.offsets/starts/ends/types");
   if (t->focus != TK_FOCUS_NONE && !per_span)
-    return luaL_error(L, "tokenizer: focus set but no focus spans (doc_span_offsets/span_starts/ends)");
-  if (t->focus == TK_FOCUS_TYPED && !fty)
-    return luaL_error(L, "tokenizer: focus=\"typed\" requires focus_types");
+    return luaL_error(L, "tokenizer: focus set at create but no focus spans passed");
 
   // text pointers per doc
   const char **text_ptrs = (const char **) malloc((size_t) n_samples * sizeof(char *));
@@ -756,14 +695,14 @@ static int tk_tokenizer_tokenize_lua (lua_State *L) {
 
   int64_t n_rows = per_span ? fo->a[(int64_t)(fo->n - 1)] : n_samples;
 
-  // worst-case row buffer: doc bytes (+2/ctx-span for marks) OR ctx-span count, + markers
+  // worst-case row buffer: doc bytes (text/shape rows <= text+markers) OR the
+  // type-skeleton's one-byte-per-token count, whichever is larger, + markers.
   size_t maxbuf = 8;
   for (int64_t d = 0; d < n_samples; d++) {
     size_t need = text_lens[d] + 8;
-    if (t->marks != TK_MARKS_NONE && co) need += 2 * (size_t) (co->a[d + 1] - co->a[d]);
     if (need > maxbuf) maxbuf = need;
   }
-  if (co && t->stream != TK_STREAM_TEXT) {
+  if (co && t->stream == TK_STREAM_TYPE) {
     for (int64_t d = 0; d + 1 < (int64_t) co->n; d++) {
       size_t nc = (size_t) (co->a[d + 1] - co->a[d]) + 8;
       if (nc > maxbuf) maxbuf = nc;
@@ -826,8 +765,7 @@ static int tk_tokenizer_tokenize_lua (lua_State *L) {
     for (int64_t fi = fa; fi < fb; fi++) {
       size_t s = per_span ? (size_t) fs->a[fi] : 0;
       size_t e = per_span ? (size_t) fe->a[fi] : tlen;
-      int ftype = (fty && per_span) ? (int) fty->a[fi] : -1;
-      size_t w = tk_render_row(t, rowbuf, maskbuf, text, tlen, per_span, s, e, ftype, c0, c1, cs, ce, cty, 0);
+      size_t w = tk_render_row(t, rowbuf, maskbuf, text, tlen, per_span, s, e, c0, c1, cs, ce, cty, 0);
 
       // --- pack + map this row ---
       size_t count = t->bpx
@@ -876,7 +814,7 @@ static int tk_tokenizer_persist_lua (lua_State *L) {
   tk_tokenizer_t *t = tk_tokenizer_peek(L, 1);
   FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
   tk_lua_fwrite(L, "TKtk", 1, 4, fh);
-  uint8_t version = 2;   // v2 added the bpx block to the config region; v1 layout differs
+  uint8_t version = 4;   // v4 dropped the marks axis (b_mopen/b_mclose) from the config block
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   size_t cfgsz = offsetof(tk_tokenizer_t, ngram_map);
   tk_lua_fwrite(L, t, 1, cfgsz, fh);
@@ -894,8 +832,8 @@ static int tk_tokenizer_load_lua (lua_State *L) {
   if (memcmp(magic, "TKtk", 4) != 0) { tk_lua_fclose(L, fh); return luaL_error(L, "tokenizer.load: bad magic"); }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 2) { tk_lua_fclose(L, fh);
-    return luaL_error(L, "tokenizer.load: unsupported version %d (pre-bpx format; refit required)", (int) version); }
+  if (version != 4) { tk_lua_fclose(L, fh);
+    return luaL_error(L, "tokenizer.load: unsupported version %d (old layout; refit required)", (int) version); }
   tk_tokenizer_t cfg;
   memset(&cfg, 0, sizeof(cfg));
   size_t cfgsz = offsetof(tk_tokenizer_t, ngram_map);

@@ -411,54 +411,6 @@ static int tm_csr_type_labels (lua_State *L)
   return 1;
 }
 
-// candidate_focus_types(cand_off,cand_s,cand_e, tok_off,tok_s,tok_e,tok_ty, n_types) -> per-candidate
-// focus type for focus="typed": reduce the tagger's per-token types over the tokens FULLY INSIDE each
-// candidate span. Majority over entity-typed tokens (type < n_types); O tokens (== n_types) abstain;
-// tie among entity types -> UNK (-1); no entity-typed token inside -> O (= n_types). Token types must be
-// the tagger's predictions (OOF on train, predicted on dev/test) -- never gold.
-static int tm_csr_candidate_focus_types (lua_State *L)
-{
-  tk_ivec_t *co = tk_ivec_peek(L, 1, "cand_offsets");
-  tk_ivec_t *cs = tk_ivec_peek(L, 2, "cand_starts");
-  tk_ivec_t *ce = tk_ivec_peek(L, 3, "cand_ends");
-  tk_ivec_t *to = tk_ivec_peek(L, 4, "tok_offsets");
-  tk_ivec_t *ts = tk_ivec_peek(L, 5, "tok_starts");
-  tk_ivec_t *te = tk_ivec_peek(L, 6, "tok_ends");
-  tk_ivec_t *tt = tk_ivec_peek(L, 7, "tok_types");
-  int64_t n_types = tk_lua_checkinteger(L, 8, "n_types");
-  if (n_types < 1 || n_types > 256) return luaL_error(L, "candidate_focus_types: n_types out of range");
-  int64_t n_docs = (int64_t) (co->n - 1);
-  int64_t ncand = (int64_t) cs->n;
-  tk_ivec_t *out = tk_ivec_create(L, (uint64_t) ncand);
-  out->n = (uint64_t) ncand;
-  int64_t cnt[256];
-  for (int64_t d = 0; d < n_docs; d++) {
-    int64_t t0 = to->a[d], t1 = to->a[d + 1];
-    for (int64_t c = co->a[d]; c < co->a[d + 1]; c++) {
-      int64_t a = cs->a[c], b = ce->a[c];
-      for (int64_t k = 0; k < n_types; k++) cnt[k] = 0;
-      int64_t nent = 0;
-      for (int64_t j = t0; j < t1; j++)
-        if (ts->a[j] >= a && te->a[j] <= b) {
-          int64_t ty = tt->a[j];
-          if (ty >= 0 && ty < n_types) { cnt[ty]++; nent++; }
-        }
-      int64_t out_ty;
-      if (nent == 0) {
-        out_ty = n_types;                       // O: tagger sees no entity-typed token
-      } else {
-        int64_t bestc = 0;
-        for (int64_t k = 0; k < n_types; k++) if (cnt[k] > bestc) bestc = cnt[k];
-        int64_t nbest = 0, best = -1;
-        for (int64_t k = 0; k < n_types; k++) if (cnt[k] == bestc) { nbest++; best = k; }
-        out_ty = (nbest == 1) ? best : -1;      // unique majority, else UNK
-      }
-      out->a[c] = out_ty;
-    }
-  }
-  return 1;
-}
-
 // nms(cand_off, cand_s, cand_e, classes, scores, reject) -> keep mask (0/1): per doc, greedily keep the
 // highest-scoring non-reject candidate, suppress any candidate that overlaps a kept one (type-agnostic,
 // flat NER; [s1,e1) overlaps [s2,e2) iff s1<e2 && s2<e1), repeat. Reject candidates are never kept.
@@ -943,7 +895,6 @@ static luaL_Reg tm_csr_fns[] = {
   { "bio_token_type", tm_csr_bio_token_type },
   { "enumerate_subspans", tm_csr_enumerate_subspans },
   { "type_labels", tm_csr_type_labels },
-  { "candidate_focus_types", tm_csr_candidate_focus_types },
   { "nms_dp", tm_csr_nms_dp },
   { "union_spans", tm_csr_union_spans },
   { "span_miss_report", tm_csr_span_miss_report },

@@ -467,6 +467,16 @@ M.krr = function (args)
   args.lambda = spec_defaults(args.lambda, { min = 0, max = 4, def = 1.0 })
   args.propensity_a = spec_defaults(args.propensity_a, { min = 0, max = 4.0, def = 0.5 })
   args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 8.0, def = 1.5 })
+  -- args.extra = ordered list of pass-through search dims { { name=, min=, max=, log=, def= }, ... }:
+  -- GP-searched and handed to trial_fn in params (and returned in best_params), but ignored by the
+  -- gram/kernel logic -- e.g. a Viterbi transition weight decoded inside a custom trial_fn.
+  if args.extra then
+    for _, e in ipairs(args.extra) do
+      param_names[#param_names + 1] = e.name
+      args[e.name] = spec_defaults({ min = e.min, max = e.max, log = e.log, def = e.def },
+        { min = 0, max = 1, def = 0.5 })
+    end
+  end
   local samplers = build_samplers(args, param_names)
   local do_search = not all_fixed(samplers) and args.search_trials and args.search_trials > 0
   local k = not dense and (args.k or 32) or nil
@@ -541,10 +551,15 @@ M.krr = function (args)
     return finish(ensure_kernel(params.kernel), params)
   end
   local trial_fn = args.trial_fn or default_trial_fn(args, dense, tiled, k)
+  -- trial_fn(gram, params, kd): kd = { sp_enc, gram, val_codes } so a custom trial can solve a ridge
+  -- at the trial's (lambda, prop) and regress val_codes itself (e.g. to decode + score span-F1).
   local _, best_params = search({
     param_names = param_names, samplers = samplers,
     trials = args.search_trials or 30,
-    trial_fn = function (params) return trial_fn(ensure_kernel(params.kernel).gram, params) end,
+    trial_fn = function (params)
+      local kd = ensure_kernel(params.kernel)
+      return trial_fn(kd.gram, params, kd)
+    end,
     each = args.each, skip_final = true,
   })
   -- The returned model reuses the exact gram the search scored (a cache hit; the deterministic seed
@@ -605,6 +620,111 @@ M.gfm = function (args)
     expected_neighbors = args.val_expected_neighbors,
   })
   return g, { f1 = best_f1, precision = precision, recall = recall }
+end
+
+-- ===== Viterbi: sequence decode + dev-side weight calibration (the sequence analog of M.gfm) =====
+-- Owns only the sequence magick: first-order transition log-probs (+ start prior) estimated from train
+-- labels, per-document DP decode with a tunable transition weight w, and selection of w on a caller-
+-- supplied dev scorer. The label scheme (e.g. BIO->spans) and metric (e.g. span-F1) stay in the caller.
+local function vit_transitions (off, lab, nl)
+  local T, S = {}, {}
+  for p = 0, nl - 1 do T[p] = {}; for c = 0, nl - 1 do T[p][c] = 0 end end
+  for c = 0, nl - 1 do S[c] = 0 end
+  local nd = off:size() - 1
+  for d = 0, nd - 1 do
+    local s, e = off:get(d), off:get(d + 1)
+    if e > s then
+      S[lab:get(s)] = S[lab:get(s)] + 1
+      for i = s, e - 2 do T[lab:get(i)][lab:get(i + 1)] = T[lab:get(i)][lab:get(i + 1)] + 1 end
+    end
+  end
+  local logT, logS = {}, {}
+  local stot = 0; for c = 0, nl - 1 do stot = stot + S[c] end
+  for c = 0, nl - 1 do logS[c] = S[c] > 0 and math.log(S[c] / stot) or -1e9 end
+  for p = 0, nl - 1 do
+    logT[p] = {}
+    local rt = 0; for c = 0, nl - 1 do rt = rt + T[p][c] end
+    for c = 0, nl - 1 do logT[p][c] = (T[p][c] > 0 and rt > 0) and math.log(T[p][c] / rt) or -1e9 end
+  end
+  return logT, logS
+end
+
+local function vit_decode (off, emit, n, logT, logS, w, nl)
+  local ivec = require("santoku.ivec")
+  local out = ivec.create(n)
+  local nd = off:size() - 1
+  for d = 0, nd - 1 do
+    local s, e = off:get(d), off:get(d + 1)
+    local len = e - s
+    if len > 0 then
+      local dp, bp = {}, {}
+      dp[0] = {}
+      for c = 0, nl - 1 do dp[0][c] = logS[c] + emit:get(s * nl + c) end
+      for i = 1, len - 1 do
+        dp[i] = {}; bp[i] = {}
+        local gi = s + i
+        for c = 0, nl - 1 do
+          local best, bestp = -1e30, 0
+          for pc = 0, nl - 1 do
+            local val = dp[i - 1][pc] + w * logT[pc][c]
+            if val > best then best = val; bestp = pc end
+          end
+          dp[i][c] = best + emit:get(gi * nl + c); bp[i][c] = bestp
+        end
+      end
+      local last = len - 1
+      local bc, bv = 0, -1e30
+      for c = 0, nl - 1 do if dp[last][c] > bv then bv = dp[last][c]; bc = c end end
+      local seq = {}; seq[last] = bc
+      for i = last, 1, -1 do seq[i - 1] = bp[i][seq[i]] end
+      for i = 0, len - 1 do out:set(s + i, seq[i]) end
+    end
+  end
+  return out
+end
+
+local vit_mt = {}
+vit_mt.__index = vit_mt
+-- decode(off, emit, n, w) -> per-token label ivec (emit laid out as emit[token*n_labels + class])
+function vit_mt:decode (off, emit, n, w)
+  return vit_decode(off, emit, n, self.logT, self.logS, w, self.n_labels)
+end
+-- select_w(off, emit, n, spec, score_fn[, each]) -> best_w, best_score. Golden-section search for the
+-- weight maximizing the caller's dev scorer (score_fn(labels, w) -> number), which is unimodal in w
+-- (w=0 ignores transitions; too-large w over-smooths). spec = { min, max, tol }. each(w, score) optional.
+function vit_mt:select_w (off, emit, n, spec, score_fn, each)
+  local lo, hi, tol = spec.min or 0, spec.max or 1, spec.tol or 0.01
+  local phi = (math.sqrt(5) - 1) / 2
+  local best_w, best_s = nil, -math.huge
+  local function eval (w)
+    local s = score_fn(self:decode(off, emit, n, w), w)
+    if each then each(w, s) end
+    if s > best_s then best_s, best_w = s, w end
+    return s
+  end
+  local c, d = hi - phi * (hi - lo), lo + phi * (hi - lo)
+  local fc, fd = eval(c), eval(d)
+  while (hi - lo) > tol do
+    if fc > fd then
+      hi, d, fd = d, c, fc
+      c = hi - phi * (hi - lo); fc = eval(c)
+    else
+      lo, c, fc = c, d, fd
+      d = lo + phi * (hi - lo); fd = eval(d)
+    end
+  end
+  return best_w, best_s
+end
+
+M.viterbi = function (args)
+  local nl = err.assert(args.n_labels, "viterbi: n_labels required")
+  local logT, logS = args.log_transitions, args.log_starts
+  if not (logT and logS) then
+    err.assert(args.train_offsets and args.train_neighbors,
+      "viterbi: need train_offsets+train_neighbors or log_transitions+log_starts")
+    logT, logS = vit_transitions(args.train_offsets, args.train_neighbors, nl)
+  end
+  return setmetatable({ logT = logT, logS = logS, n_labels = nl }, vit_mt)
 end
 
 return M
