@@ -80,14 +80,22 @@ end
 
 
 
-local function build_word_gaz (train)
+
+local function char_ngrams (s, nmin, nmax)
+  local out, L = {}, #s
+  for n = nmin, nmax do
+    for i = 1, L - n + 1 do out[#out + 1] = s:sub(i, i + n - 1) end
+  end
+  return out
+end
+local function build_char_gaz (train, nmin, nmax)
   local gaz = {}
   for d = 1, train.n do
     local text = train.texts[d]
     for _, e in ipairs(train.sent_ents[d]) do
-      for w in text:sub(e.s + 1, e.e):lower():gmatch("%S+") do
-        local c = gaz[w]
-        if not c then c = { total = 0 }; for ty = 0, N_TYPES - 1 do c[ty] = 0 end; gaz[w] = c end
+      for _, gram in ipairs(char_ngrams(text:sub(e.s + 1, e.e):lower(), nmin, nmax)) do
+        local c = gaz[gram]
+        if not c then c = { total = 0 }; for ty = 0, N_TYPES - 1 do c[ty] = 0 end; gaz[gram] = c end
         c[e.t] = c[e.t] + 1
         c.total = c.total + 1
       end
@@ -345,8 +353,8 @@ test("conll", function ()
 
 
 
-  local word_gaz = build_word_gaz(train)
-  local function head_gaz_block (split, co, cs, ce, tlab)
+  local char_gaz = build_char_gaz(train, cfg.tok.ngram_min, cfg.tok.ngram_max)
+  local function char_gaz_block (split, co, cs, ce, tlab)
     local off, tok, val = ivec.create(), ivec.create(), fvec.create()
     off:push(0)
     local nd = co:size() - 1
@@ -354,14 +362,16 @@ test("conll", function ()
       local text = split.texts[d]
       for i = co:get(d - 1), co:get(d) - 1 do
         local g = tlab and tlab:get(i) or N_TYPES
+        local own = (g < N_TYPES) and 1 or 0
         local acc = {}
-        for w in text:sub(cs:get(i) + 1, ce:get(i)):lower():gmatch("%S+") do
-          local c = word_gaz[w]
+        for _, gram in ipairs(char_ngrams(text:sub(cs:get(i) + 1, ce:get(i)):lower(),
+          cfg.tok.ngram_min, cfg.tok.ngram_max)) do
+          local c = char_gaz[gram]
           if c then
-            local den = c.total - (g < N_TYPES and 1 or 0)
+            local den = c.total - own
             if den > 0 then
               for ty = 0, N_TYPES - 1 do
-                local cnt = c[ty] - (ty == g and 1 or 0)
+                local cnt = c[ty] - (ty == g and own or 0)
                 if cnt > 0 then acc[ty] = (acc[ty] or 0) + cnt / den end
               end
             end
@@ -379,8 +389,8 @@ test("conll", function ()
   ty_bns = csr.apply_bns(ty_off, ty_tok, ty_val, nil, tr_tloff, tr_tlab, ty_ntok, N_TYPES + 1)
   local g_off, g_tok, g_val = gaz_block(train, tr_co, tr_cs, tr_ce, tr_tlab)
   ty_off, ty_tok, ty_val = csr.merge(ty_off, ty_tok, ty_val, g_off, g_tok, g_val, ty_ntok)
-  local h_off, h_tok, h_val = head_gaz_block(train, tr_co, tr_cs, tr_ce, tr_tlab)
-  ty_off, ty_tok, ty_val = csr.merge(ty_off, ty_tok, ty_val, h_off, h_tok, h_val, ty_ntok + N_TYPES)
+  local cg_off, cg_tok, cg_val = char_gaz_block(train, tr_co, tr_cs, tr_ce, tr_tlab)
+  ty_off, ty_tok, ty_val = csr.merge(ty_off, ty_tok, ty_val, cg_off, cg_tok, cg_val, ty_ntok + N_TYPES)
   local ty_ntok_all = ty_ntok + 2 * N_TYPES
 
   local bounds = { 0, ty_nt1, ty_nt2, ty_ntok, ty_ntok + N_TYPES, ty_ntok_all }
@@ -397,8 +407,8 @@ test("conll", function ()
     csr.apply_bns(off, tok, val, ty_bns)
     local go, gt, gv = gaz_block(split, co, cs, ce, nil)
     off, tok, val = csr.merge(off, tok, val, go, gt, gv, ty_ntok)
-    local ho, ht, hv = head_gaz_block(split, co, cs, ce, nil)
-    off, tok, val = csr.merge(off, tok, val, ho, ht, hv, ty_ntok + N_TYPES)
+    local cgo, cgt, cgv = char_gaz_block(split, co, cs, ce, nil)
+    off, tok, val = csr.merge(off, tok, val, cgo, cgt, cgv, ty_ntok + N_TYPES)
     csr.standardize(off, tok, val, ty_block)
     csr.normalize(off, val)
     return off, tok, val
