@@ -15,7 +15,7 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   data = { max = nil, ttr = 0.5, tvr = 0.1 },
-  tok = { ngram_min = 5, ngram_max = 5, normalize = false, bpx = false, bpx_fork = 4 },
+  tok = { ngram_min = 5, ngram_max = 5, normalize = false },
   emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "arccos1", "cosine", "expcos", "geolaplace", "matern52", "rq" } },
   ridge = {
     lambda = { min = 1e-4, max = 1e1, log = true, def = 2.0497e-02 },
@@ -26,12 +26,11 @@ local cfg = {
 }
 
 -- plain tokenize via a tokenizer object; the object threads as the old ngram_map
--- (nil => create + grow the vocab; object => frozen). bpx/normalize from cfg.tok.
+-- (nil => create + grow the vocab; object => frozen). normalize from cfg.tok.
 local function tokenize (texts, n, nmin, nmax, tok)
   local grow = tok == nil
   if grow then tok = tokenizer.create({
-    ngram_min = nmin, ngram_max = nmax,
-    normalize = cfg.tok.normalize, bpx = cfg.tok.bpx, bpx_fork = cfg.tok.bpx_fork })
+    ngram_min = nmin, ngram_max = nmax, normalize = cfg.tok.normalize })
   end
   local o, t, v = tok:tokenize({ texts = texts, n_samples = n, grow = grow })
   return tok, o, t, v, tok:n_tokens()

@@ -36,7 +36,7 @@ local cfg = {
   type = { kernel = { "arccos1", "cosine", "expcos", "geolaplace", "matern52", "rq" },
     lambda = { min = 1e-4, max = 1e1, log = true, def = 4.5416e-04 },
     propensity_a = { min = 0, max = 8, def = 7.5553 }, propensity_b = { min = 0, max = 16, def = 6.0956 },
-    search_trials = 0 },                              -- stage 2: locked winner = 0.8131 (solver-agnostic; re-search overfits)
+    search_trials = 0 },                              -- stage 2: locked winner (solver-agnostic; re-search overfits)
 }
 
 local N_TYPES = 4
@@ -77,17 +77,25 @@ local function build_typed_gaz (train)
   return gaz
 end
 
--- per-WORD typed gazetteer: each lowercased word of a train entity surface -> per-type counts, for the
--- head_gaz P(type|word) feature. Keys on component words so an unseen full surface still gets a type prior
--- from its parts (e.g. "...United"/"...Inc"/"...FC" -> ORG), targeting the ORG->PER/LOC mistypes.
-local function build_word_gaz (train)
+-- per-CHAR-NGRAM typed gazetteer: each char-ngram (nmin..nmax) of a lowercased train entity surface ->
+-- per-type counts, counted per gram occurrence. Keys on sub-surface byte-grams (no whitespace/word
+-- segmentation), so an unseen surface still gets a type prior from shared grams (e.g. "-inc", "unit"),
+-- targeting the ORG->PER/LOC mistypes. The byte-native sub-surface counterpart to full-surface surf_gaz.
+local function char_ngrams (s, nmin, nmax)
+  local out, L = {}, #s
+  for n = nmin, nmax do
+    for i = 1, L - n + 1 do out[#out + 1] = s:sub(i, i + n - 1) end
+  end
+  return out
+end
+local function build_char_gaz (train, nmin, nmax)
   local gaz = {}
   for d = 1, train.n do
     local text = train.texts[d]
     for _, e in ipairs(train.sent_ents[d]) do
-      for w in text:sub(e.s + 1, e.e):lower():gmatch("%S+") do
-        local c = gaz[w]
-        if not c then c = { total = 0 }; for ty = 0, N_TYPES - 1 do c[ty] = 0 end; gaz[w] = c end
+      for _, gram in ipairs(char_ngrams(text:sub(e.s + 1, e.e):lower(), nmin, nmax)) do
+        local c = gaz[gram]
+        if not c then c = { total = 0 }; for ty = 0, N_TYPES - 1 do c[ty] = 0 end; gaz[gram] = c end
         c[e.t] = c[e.t] + 1
         c.total = c.total + 1
       end
@@ -301,10 +309,10 @@ test("conll", function ()
   -- ===== Stage 2: TYPE (per-span type-or-reject; argmax) =====
   -- The 5-block feature set per candidate:
   --   TEXT  (focus char-grams) + CTX (per-token tag-type skeleton) + SHAPE (per-token shape skeleton)
-  --   are BNS'd together; surf_gaz (P(type|full surface)) + head_gaz (sum of P(type|word) over component
-  --   words) are appended (continuous, not BNS'd). All per-block scaled (housing) then L2-normalized. Train
-  --   CTX uses OOF tag types; both gaz blocks use leave-one-out so a train mention can't read its own answer.
-  -- ty_nt1/ty_nt2 = TEXT/CTX ends; ty_ntok = end of the BNS'd group; +N_TYPES = surf_gaz, +N_TYPES = head_gaz.
+  --   are BNS'd together; surf_gaz (P(type|full surface)) + char_gaz (sum of P(type|char-ngram) over the
+  --   surface's grams) are appended (continuous, not BNS'd). All per-block scaled (housing) then
+  --   L2-normalized; both gaz blocks use leave-one-out so a train mention can't read its own answer.
+  -- ty_nt1/ty_nt2 = TEXT/CTX ends; ty_ntok = end of the BNS'd group; +N_TYPES = surf_gaz, +N_TYPES = char_gaz.
   local ty_ng1, ty_ng2, ty_ng3, ty_nt1, ty_nt2, ty_ntok, ty_bns, ty_block
   local function type_feats (split, co, cs, ce, n, toff, ts, te, ttypes, is_train)
     local m1, o1, t1, v1, k1 = tokenize(split, co, cs, ce, zeros(n), ty_ng1)
@@ -342,11 +350,11 @@ test("conll", function ()
     end
     return off, tok, val
   end
-  -- head_gaz: per-candidate sum over its component words of P(type|word). Aggregating all words beats
-  -- picking the single most-peaked one (that reliably selects the place-name -- england/paris are far more
-  -- peaked than designators like bank/united -- amplifying ORG->LOC). N_TYPES cols, LOO on train.
-  local word_gaz = build_word_gaz(train)
-  local function head_gaz_block (split, co, cs, ce, tlab)
+  -- char_gaz: per-candidate sum over its char-ngrams of P(type|char-ngram), LOO on train (subtract this
+  -- occurrence's contribution per gram). No whitespace prior; generalizes to unseen surfaces via shared
+  -- sub-surface grams. N_TYPES cols, targeting the ORG->PER/LOC mistypes.
+  local char_gaz = build_char_gaz(train, cfg.tok.ngram_min, cfg.tok.ngram_max)
+  local function char_gaz_block (split, co, cs, ce, tlab)
     local off, tok, val = ivec.create(), ivec.create(), fvec.create()
     off:push(0)
     local nd = co:size() - 1
@@ -354,14 +362,16 @@ test("conll", function ()
       local text = split.texts[d]
       for i = co:get(d - 1), co:get(d) - 1 do
         local g = tlab and tlab:get(i) or N_TYPES
+        local own = (g < N_TYPES) and 1 or 0
         local acc = {}
-        for w in text:sub(cs:get(i) + 1, ce:get(i)):lower():gmatch("%S+") do
-          local c = word_gaz[w]
+        for _, gram in ipairs(char_ngrams(text:sub(cs:get(i) + 1, ce:get(i)):lower(),
+          cfg.tok.ngram_min, cfg.tok.ngram_max)) do
+          local c = char_gaz[gram]
           if c then
-            local den = c.total - (g < N_TYPES and 1 or 0)
+            local den = c.total - own
             if den > 0 then
               for ty = 0, N_TYPES - 1 do
-                local cnt = c[ty] - (ty == g and 1 or 0)
+                local cnt = c[ty] - (ty == g and own or 0)
                 if cnt > 0 then acc[ty] = (acc[ty] or 0) + cnt / den end
               end
             end
@@ -379,10 +389,10 @@ test("conll", function ()
   ty_bns = csr.apply_bns(ty_off, ty_tok, ty_val, nil, tr_tloff, tr_tlab, ty_ntok, N_TYPES + 1)
   local g_off, g_tok, g_val = gaz_block(train, tr_co, tr_cs, tr_ce, tr_tlab)
   ty_off, ty_tok, ty_val = csr.merge(ty_off, ty_tok, ty_val, g_off, g_tok, g_val, ty_ntok)
-  local h_off, h_tok, h_val = head_gaz_block(train, tr_co, tr_cs, tr_ce, tr_tlab)
-  ty_off, ty_tok, ty_val = csr.merge(ty_off, ty_tok, ty_val, h_off, h_tok, h_val, ty_ntok + N_TYPES)
+  local cg_off, cg_tok, cg_val = char_gaz_block(train, tr_co, tr_cs, tr_ce, tr_tlab)
+  ty_off, ty_tok, ty_val = csr.merge(ty_off, ty_tok, ty_val, cg_off, cg_tok, cg_val, ty_ntok + N_TYPES)
   local ty_ntok_all = ty_ntok + 2 * N_TYPES
-  -- per-block scale (housing): TEXT, CTX, SHAPE, surf_gaz, head_gaz each scaled independently.
+  -- per-block scale (housing): TEXT, CTX, SHAPE, surf_gaz, char_gaz each scaled independently.
   local bounds = { 0, ty_nt1, ty_nt2, ty_ntok, ty_ntok + N_TYPES, ty_ntok_all }
   local ss = csr.block_sumsq(ty_tok, ty_val, bounds)
   ty_block = fvec.create(ty_ntok_all)
@@ -397,8 +407,8 @@ test("conll", function ()
     csr.apply_bns(off, tok, val, ty_bns)
     local go, gt, gv = gaz_block(split, co, cs, ce, nil)
     off, tok, val = csr.merge(off, tok, val, go, gt, gv, ty_ntok)
-    local ho, ht, hv = head_gaz_block(split, co, cs, ce, nil)
-    off, tok, val = csr.merge(off, tok, val, ho, ht, hv, ty_ntok + N_TYPES)
+    local cgo, cgt, cgv = char_gaz_block(split, co, cs, ce, nil)
+    off, tok, val = csr.merge(off, tok, val, cgo, cgt, cgv, ty_ntok + N_TYPES)
     csr.standardize(off, tok, val, ty_block)
     csr.normalize(off, val)
     return off, tok, val
