@@ -29,7 +29,7 @@ Scalar regression from mixed categorical/continuous features.
 6. `ridge_obj:regress` on each split, `eval.regression_accuracy` for
    MAE/NMAE.
 
-Reference: `test/spec/santoku/learn/regress/housing-elm.lua`
+Reference: `test/spec/santoku/learn/regress/housing.lua`
 
 ### XMLC Pipeline (Spectral + Ridge + GFM)
 

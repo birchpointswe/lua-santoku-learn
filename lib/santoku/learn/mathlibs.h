@@ -374,7 +374,7 @@ static inline int LAPACKE_dpotrs (int matrix_layout, char uplo, int n, int nrhs,
 }
 
 // Single-precision counterparts of LAPACKE_dpotrf / dpotrs (upper, column-major) for the float
-// Cholesky path (elm's gram solve). Same algorithm in float.
+// gram Cholesky bake. Same algorithm in float.
 static inline int LAPACKE_spotrf (int matrix_layout, char uplo, int n, float *A, int lda) {
   (void)matrix_layout; (void)uplo;
   for (int j = 0; j < n; j++) {

@@ -391,8 +391,8 @@ static inline int tk_gram_finalize_f (
   return 1;
 }
 
-// Fully float-native eigen finalize for the elm relu/linear path: the moment matrix XtX and the
-// cross-moment xty are ALREADY float (accumulated via ssyrk/sger in elm), so there is no double
+// Fully float-native eigen finalize (spectral's float gram path): the moment matrix XtX and the
+// cross-moment xty are ALREADY float (accumulated via ssyrk/sger), so there is no double
 // XtX to widen. Centering correction runs in float (ssyr/sger), ssyevd decomposes XtX in place
 // (it becomes evecs_f), and PQtY_f = V^T xty. Takes ownership of XtX (-> evecs_f, freed to pool in
 // gc), xty (freed here), col_mean/y_mean_arr/eigenvals (owned by gram). cm_f/ym_f are transient.
@@ -914,77 +914,13 @@ static inline int tk_gram_finalize_cholesky_f_baked (
     lc, lc_idx, mean_eig, nc, m, nl, 1024);
 }
 
-// Single-precision non-tiled cholesky SOLVE for the elm path. XtX (ColMajor/Upper), xty (RowMajor m×nl),
-// col_mean and y_mean_arr are all consumed (freed here); cm_f/ym_f are float copies of the centering means
-// for the float BLAS downdates (the caller owns + frees them). Solves W via Cholesky and pushes W (fvec,
-// d×nl) + intercept (dvec, nl) on the Lua stack -- the elm path consumes W directly (ridge.create
-// references it), so no gram userdata is built. Returns 2. Float math (ssyr/sger/spotrf/spotrs/sdot).
-static inline int tk_gram_finalize_cholesky_f (
-  lua_State *L,
-  float *XtX,
-  float *xty,
-  const float *cm_f,
-  const float *ym_f,
-  double *col_mean,
-  double *y_mean_arr,
-  tk_dvec_t *lc,
-  int64_t nc, int64_t m, int64_t nl,
-  double lambda, bool do_prop, double prop_a, double prop_b)
-{
-  uint64_t um = (uint64_t)m;
-  uint64_t unl = (uint64_t)nl;
-  uint64_t dnl = um * unl;
-  cblas_ssyr(CblasColMajor, CblasUpper, (int)m,
-    -(float)nc, cm_f, 1, XtX, (int)m);
-  cblas_sger(CblasRowMajor, (int)m, (int)nl,
-    -(float)nc, cm_f, 1, ym_f, 1, xty, (int)nl);
-  double mean_eig = 0.0;
-  for (uint64_t i = 0; i < um; i++)
-    mean_eig += (double)XtX[i * um + i];
-  mean_eig /= (double)m;
-  double C = 0.0;
-  double *lca = NULL;
-  if (do_prop && lc) {
-    C = (log((double)nc) - 1.0) * pow(prop_b + 1.0, prop_a);
-    lca = lc->a;
-  }
-  if (lca) {
-    for (uint64_t k = 0; k < um; k++)
-      for (int64_t l = 0; l < nl; l++)
-        xty[k * unl + (uint64_t)l] *= (float)(1.0 + C / pow(lca[l] + prop_b, prop_a));
-  }
-  if (tk_spotrf_escalate(XtX, m, lambda, mean_eig) < 0.0) {
-    free(XtX); free(xty); free(col_mean); free(y_mean_arr);
-    return luaL_error(L, "gram cholesky: spotrf failed (singular even after jitter escalation)");
-  }
-  float *Bcm = (float *)malloc(dnl * sizeof(float));
-  if (!Bcm) { free(XtX); free(xty); free(col_mean); free(y_mean_arr);
-    return luaL_error(L, "gram cholesky: out of memory"); }
-  for (uint64_t k = 0; k < um; k++)
-    for (uint64_t l = 0; l < unl; l++)
-      Bcm[l * um + k] = xty[k * unl + l];
-  LAPACKE_spotrs(LAPACK_COL_MAJOR, 'U', (int)m, (int)nl, XtX, (int)m, Bcm, (int)m);
-  tk_fvec_t *W_fv = tk_fvec_create(L, dnl); W_fv->n = dnl;
-  for (uint64_t k = 0; k < um; k++)
-    for (uint64_t l = 0; l < unl; l++)
-      W_fv->a[k * unl + l] = Bcm[l * um + k];
-  tk_dvec_t *int_dv = tk_dvec_create(L, unl); int_dv->n = unl;
-  for (int64_t l = 0; l < nl; l++) {
-    double prop = lca ? (1.0 + C / pow(lca[l] + prop_b, prop_a)) : 1.0;
-    int_dv->a[l] = prop * y_mean_arr[l]
-      - (double)cblas_sdot((int)m, Bcm + (uint64_t)l * um, 1, cm_f, 1);
-  }
-  free(Bcm); free(XtX); free(xty); free(col_mean); free(y_mean_arr);
-  return 2;   // W (fvec) then intercept (dvec) on the Lua stack
-}
-
 static inline void tk_gram_solve_w (
   tk_gram_t *g, double lambda_raw, bool do_prop, double prop_a, double prop_b)
 {
   int64_t d = g->n_dims, nl = g->n_labels;
   uint64_t dnl = (uint64_t)d * (uint64_t)nl;
   double mu = lambda_raw * g->mean_eig + g->mean_eig * 1e-7;
-  // Float-eigen grams (elm relu/linear) store PQtY_f only; spectral's double grams store PQtY.
+  // Float-eigen grams (spectral float path) store PQtY_f only; the double grams store PQtY.
   const double *PQtY_d = g->PQtY;
   const float *PQtY_f = g->PQtY_f;
   if (do_prop && g->label_counts) {

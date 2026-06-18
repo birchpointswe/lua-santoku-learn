@@ -486,7 +486,7 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     }
     int64_t B = tile_labels < nl ? tile_labels : nl;   // a tile is never wider than n_labels
     uint64_t tsz = (uint64_t)d * (uint64_t)B;
-    // Float-eigen grams (elm relu/linear, tk_gram_finalize_f_native) store only evecs_f -- no double
+    // Float-eigen grams (tk_gram_finalize_f_native) store only evecs_f -- no double
     // evecs/PQtY. Two specialized paths: the double path is the spectral/M.krr original; the float path
     // keeps everything in float (sgemm/sgemv, evecs_f), writing W_fvec directly and forming the intercept
     // from a float col_mean -- no double scratch, no widen round-trips.

@@ -90,7 +90,7 @@ function M.make_ridge_log (stopwatch, metric_fmt)
       kern = str.format(" act=%s", p.activation)
     end
     local gam = p.gamma and str.format(" gamma=%.4g", p.gamma) or ""
-    -- In the nested elm BO the outer (gamma) trial carries lambda/propensity in its metrics (the inner
+    -- In a nested BO the outer (kernel) trial carries lambda/propensity in its metrics (the inner
     -- winner), not its params; fall back to metrics so the outer line shows the inner winner.
     local lambda = p.lambda or m.lambda or 0
     local pa = p.propensity_a or m.propensity_a
