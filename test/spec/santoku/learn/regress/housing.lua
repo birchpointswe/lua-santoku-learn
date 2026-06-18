@@ -12,14 +12,24 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
-
-
-
 local cfg = {
-  data = { ttr = 0.8, tvr = 0.1, max = nil },
+  data = {
+    ttr = 0.8,
+    tvr = 0.1,
+    max = nil
+  },
+  emb = {
+    n_landmarks = 1024 * 8,
+    trace_tol = 0.01,
 
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "geolaplace", "cosine", "expcos", "matern52", "rq", "arccos1" } },
-  ridge = { lambda = { min = 1e-4, max = 1e1, log = true, def = 7.7147e-02 }, search_trials = 0 },
+
+
+    kernel = { "geolaplace", "cosine", "expcos", "matern52", "rq", "arccos1", "rbf" }
+  },
+  ridge = {
+    lambda = { def = 6.3981e-02 },
+    search_trials = 0
+  },
 }
 
 test("housing regressor", function ()
@@ -53,10 +63,6 @@ test("housing regressor", function ()
   local offsets, tokens, values = merge_features(
     train.bit_offsets, train.bit_neighbors, train.continuous, train.n)
   local std_scores = csr.standardize(offsets, tokens, values, nil, n_tokens)
-
-
-
-
   local ss = csr.block_sumsq(tokens, values, { 0, n_cat, n_tokens })
   local ss_cat, ss_cont = ss:get(0), ss:get(1)
   local block = fvec.create(n_tokens)

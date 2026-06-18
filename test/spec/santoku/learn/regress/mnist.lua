@@ -10,20 +10,26 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
-
-
-
 local cfg = {
-  data = { ttr = 0.8, tvr = 0.1, max = nil, features = 784 },
-
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "expcos", "rq", "matern52", "cosine", "geolaplace", "arccos1" } },
+  data = {
+    ttr = 0.8,
+    tvr = 0.1,
+    max = nil,
+    features = 784
+  },
+  emb = {
+    n_landmarks = 1024 * 8,
+    trace_tol = 0.01,
+    kernel = { "rbf", "rq", "expcos", "matern52", "cosine", "geolaplace", "arccos1" },
+    gamma = { def = 3.21 }
+  },
   ridge = {
-    lambda = { min = 1e-4, max = 1e1, log = true, def = 1.6265e-03 },
-    propensity_a = { min = 0, max = 4, def = 3.1609 },
-    propensity_b = { min = 0, max = 8, def = 0.2904 },
+    lambda = { def = 1.1289e-04 },
+    propensity_a = { def = 2.1277 },
+    propensity_b = { def = 2.6922 },
     classes = 10,
     search_trials = 0,
-    k = 1,
+    k = 1
   },
 }
 
@@ -55,7 +61,8 @@ test("mnist classifier", function ()
 
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
   local sp_enc, ridge_obj, val_codes, _, decider = optimize.krr({
-    kernel = cfg.emb.kernel, offsets = train_p_off, tokens = train_p_nbr, values = train_p_val,
+    kernel = cfg.emb.kernel, rbf_gamma = cfg.emb.gamma,
+    offsets = train_p_off, tokens = train_p_nbr, values = train_p_val,
     n_samples = train.n, n_tokens = n_features,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
@@ -98,9 +105,6 @@ test("mnist classifier", function ()
   local test_scores = ridge_obj:regress(test_codes, test_set.n)
   test_codes = nil -- luacheck: ignore
   str.printf("[Eval] Labels done %s\n", sw())
-
-
-
 
   local decide = require("santoku.learn.decide")
   local argmax = decide.create({ n_labels = n_classes, single = true })

@@ -1,6 +1,4 @@
 local str = require("santoku.string")
-local ann = require("santoku.learn.ann")
-local eval = require("santoku.learn.evaluator")
 
 local M = {}
 
@@ -104,44 +102,5 @@ function M.make_ridge_log (stopwatch, metric_fmt)
   end
 end
 
-function M.cluster_stats (args)
-  local codes = args.codes
-  local ids = args.ids
-  local n_dims = args.n_dims
-  local knn = args.knn or 16
-  local eval_offsets = args.eval_offsets
-  local eval_neighbors = args.eval_neighbors
-  local eval_weights = args.eval_weights
-  local label = args.label or "codes"
-  local mih = ann.create({ data = codes, features = n_dims })
-  local adj_offsets, adj_neighbors = mih:neighborhoods(knn)
-  local result = eval.cluster({
-    codes = codes,
-    ids = ids,
-    offsets = adj_offsets,
-    neighbors = adj_neighbors,
-    n_dims = n_dims,
-    expected_offsets = eval_offsets,
-    expected_neighbors = eval_neighbors,
-    expected_weights = eval_weights,
-  })
-  local nc = result.n_clusters_curve
-  local rc = result.radius_curve
-  local ac = result.auc_curve
-  local nc_min, nc_max = nc:get(0), nc:get(nc:size() - 1)
-  local rc_min, rc_max = rc:min(), rc:max()
-  local rc_elbow_val, rc_elbow_idx = rc:scores_elbow("lmethod")
-  local rc_elbow_nc = nc:get(rc_elbow_idx - 1)
-  str.printf("[%s] clusters: %d→%d, radius: %.4f→%.4f (elbow: %.4f @%d clusters)",
-    label, nc_min, nc_max, rc_min, rc_max, rc_elbow_val, rc_elbow_nc)
-  if ac then
-    local ac_min, ac_max = ac:min(), ac:max()
-    local ac_elbow_val, ac_elbow_idx = ac:scores_elbow("lmethod")
-    local ac_elbow_nc = nc:get(ac_elbow_idx - 1)
-    str.printf(", auc: %.4f→%.4f (elbow: %.4f @%d)", ac_min, ac_max, ac_elbow_val, ac_elbow_nc)
-  end
-  str.printf("\n")
-  return result
-end
 
 return M

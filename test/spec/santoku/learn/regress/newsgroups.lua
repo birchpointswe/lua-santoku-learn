@@ -1,7 +1,5 @@
 local csr = require("santoku.learn.csr")
 local tokenizer = require("santoku.learn.tokenizer")
-
-
 local function tokenize (texts, n, nmin, nmax, tok)
   local grow = tok == nil
   if grow then tok = tokenizer.create({ ngram_min = nmin, ngram_max = nmax }) end
@@ -18,20 +16,27 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
-
-
-
 local cfg = {
-  data = { max = nil, tvr = 0.1 },
-  tok = { ngram_min = 5, ngram_max = 5 },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "cosine", "expcos", "geolaplace", "matern52", "rq", "arccos1" } },
+  data = {
+    max = nil,
+    tvr = 0.1
+  },
+  tok = {
+    ngram_min = 5,
+    ngram_max = 5
+  },
+  emb = {
+    n_landmarks = 1024 * 8,
+    trace_tol = 0.01,
+    kernel = { "cosine", "expcos", "geolaplace", "matern52", "rq", "arccos1", "rbf" }
+  },
   ridge = {
-    lambda = { min = 1e-4, max = 1e1, log = true, def = 2.1801e-02 },
-    propensity_a = { min = 0, max = 4, def = 0.4673 },
-    propensity_b = { min = 0, max = 8, def = 0.8029 },
+    lambda = { def = 7.8376e-02 },
+    propensity_a = { def = 7.9786 },
+    propensity_b = { def = 8.1669 },
     classes = 20,
     search_trials = 0,
-    k = 1,
+    k = 1
   },
 }
 
@@ -117,9 +122,6 @@ test("newsgroups classifier", function ()
   local test_scores = ridge_obj:regress(test_codes, test_set.n)
   test_codes = nil -- luacheck: ignore
   str.printf("[Eval] Labels done %s\n", sw())
-
-
-
 
   local decide = require("santoku.learn.decide")
   local argmax = decide.create({ n_labels = n_classes, single = true })

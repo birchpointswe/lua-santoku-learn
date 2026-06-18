@@ -612,6 +612,12 @@ M.krr = function (args)
   args.kernel = kernels
 
 
+  local has_rbf, pf_kernels = false, {}
+  for _, kn in ipairs(kernels) do
+    if kn == "rbf" then has_rbf = true else pf_kernels[#pf_kernels + 1] = kn end
+  end
+
+
 
   local inner_names = {}
   add_label_params(inner_names, args, dense)
@@ -636,6 +642,7 @@ M.krr = function (args)
     n_tokens = args.n_tokens, n_samples = args.n_samples,
     codes = args.codes, d_input = args.d_input,
     n_landmarks = args.n_landmarks, trace_tol = args.trace_tol,
+    chol_block = args.chol_block,
     label_offsets = args.label_offsets, label_neighbors = args.label_neighbors,
     n_labels = args.n_labels,
     targets = args.targets, n_targets = args.n_targets,
@@ -657,9 +664,11 @@ M.krr = function (args)
   end
 
 
-  local function build_kd (kname)
+
+  local function build_kd (kname, gamma)
     collectgarbage("collect")
     spectral_args.kernel = kname
+    spectral_args.gamma = gamma
     spectral_args.solve_lambda = nil
     spectral_args.solve_propensity_a = nil
     spectral_args.solve_propensity_b = nil
@@ -693,9 +702,13 @@ M.krr = function (args)
 
   if not do_search then
     local kname = kernels.def or kernels[1]
+
+    local gamma = kname == "rbf"
+      and (type(args.rbf_gamma) == "table" and args.rbf_gamma.def or args.rbf_gamma) or nil
     local lp = sample_params(inner_samplers, inner_names, nil, true)
     collectgarbage("collect")
     spectral_args.kernel = kname
+    spectral_args.gamma = gamma
     spectral_args.solve_lambda = lp.lambda
     if not dense then
       spectral_args.solve_propensity_a = lp.propensity_a
@@ -708,7 +721,7 @@ M.krr = function (args)
     rand.fast_seed(seed)
     local _, sp_enc, gram = spectral.encode(spectral_args)
     local val_codes = val_encode(sp_enc)
-    local params = { kernel = kname }
+    local params = { kernel = kname, gamma = gamma }
     for _, n in ipairs(inner_names) do params[n] = lp[n] end
     return finish({ sp_enc = sp_enc, gram = gram, val_codes = val_codes }, params, "cholesky")
   end
@@ -720,8 +733,9 @@ M.krr = function (args)
 
 
 
-  local best_kd, best_params, best_score = nil, nil, -num.huge
-  for ki, kname in ipairs(kernels) do
+
+  local best_params, best_score = nil, -num.huge
+  for ki, kname in ipairs(pf_kernels) do
     local kd = build_kd(kname)
     local _, ib = search({
       param_names = inner_names, samplers = inner_samplers,
@@ -732,14 +746,48 @@ M.krr = function (args)
     ib.kernel = kname
     local sc, sm = trial_fn(kd.gram, ib, kd)
     if args.each then
-      args.each({ event = "trial", phase = "kernel", trial = ki, trials = #kernels,
+      args.each({ event = "trial", phase = "kernel", trial = ki, trials = #pf_kernels,
         params = ib, score = sc, metrics = sm,
         global_best_score = best_score, is_new_best = sc > best_score })
     end
     if sc > best_score then
-      best_score, best_params, best_kd = sc, ib, kd
+      best_score, best_params = sc, ib
     end
   end
+
+
+
+
+  if has_rbf then
+    args.rbf_gamma = spec_defaults(args.rbf_gamma, { min = 1e-2, max = 4, log = true, def = 1.0 })
+    local gamma_samplers = build_samplers(args, { "rbf_gamma" })
+    local rbf_trials = args.rbf_trials or 20
+    local gi = 0
+    search({
+      param_names = { "rbf_gamma" }, samplers = gamma_samplers, trials = rbf_trials, skip_final = true,
+      trial_fn = function (gp)
+        gi = gi + 1
+        local kd = build_kd("rbf", gp.rbf_gamma)
+        local _, ib = search({
+          param_names = inner_names, samplers = inner_samplers, trials = inner_trials,
+          trial_fn = function (p) return trial_fn(kd.gram, p, kd) end, skip_final = true,
+        })
+        ib.kernel = "rbf"; ib.gamma = gp.rbf_gamma
+        local sc, sm = trial_fn(kd.gram, ib, kd)
+        if args.each then
+          args.each({ event = "trial", phase = "kernel", trial = gi, trials = rbf_trials,
+            params = ib, score = sc, metrics = sm,
+            global_best_score = best_score, is_new_best = sc > best_score })
+        end
+        if sc > best_score then best_score, best_params = sc, ib end
+        return sc, sm
+      end,
+    })
+  end
+
+
+
+  local best_kd = build_kd(best_params.kernel, best_params.gamma)
   return finish(best_kd, best_params, "eigen")
 end
 

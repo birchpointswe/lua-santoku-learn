@@ -10,22 +10,30 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
-
-
-
 local cfg = {
-  data = { max = nil, ttr = 0.5, tvr = 0.1 },
-  tok = { ngram_min = 5, ngram_max = 5, normalize = false },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "cosine", "arccos1", "expcos", "geolaplace", "matern52", "rq" } },
+  data = {
+    max = nil,
+    ttr = 0.5,
+    tvr = 0.1
+  },
+  tok = {
+    ngram_min = 5,
+    ngram_max = 5,
+    normalize = false
+  },
+  emb = {
+    n_landmarks = 1024 * 8,
+    trace_tol = 0.01,
+    kernel = { "rbf", "arccos1", "cosine", "expcos", "geolaplace", "matern52", "rq" },
+    gamma = { def = 0.2421 }
+  },
   ridge = {
-    lambda = { min = 1e-4, max = 1e1, log = true, def = 1.4750e-01 },
+    lambda = { def = 1.1771e-01 },
     classes = 1,
     search_trials = 0,
-    k = 1,
+    k = 1
   },
 }
-
-
 
 local function tokenize (texts, n, nmin, nmax, tok)
   local grow = tok == nil
@@ -71,7 +79,7 @@ test("imdb classifier", function ()
   local sp_enc, ridge_obj, val_codes, _, decider, dec_metrics = optimize.krr({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
-    kernel = cfg.emb.kernel,
+    kernel = cfg.emb.kernel, rbf_gamma = cfg.emb.gamma,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
     val_offsets = val_off, val_tokens = val_tok, val_values = val_val,
@@ -114,7 +122,6 @@ test("imdb classifier", function ()
   local test_off, test_nbr, test_sco = ridge_obj:label(test_codes, test_set.n, 1)
   test_codes = nil -- luacheck: ignore
   str.printf("[Eval] Labels done %s\n", sw())
-
 
   local _, test_stats = decider:score({
     offsets = test_off, neighbors = test_nbr, scores = test_sco,

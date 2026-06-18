@@ -1,7 +1,5 @@
 local csr = require("santoku.learn.csr")
 local tokenizer = require("santoku.learn.tokenizer")
-
-
 local function tokenize (iter, n, ng, tok)
   local texts, x = {}, iter()
   while x do texts[#texts + 1] = x; x = iter() end
@@ -22,18 +20,25 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
-
-
-
 local cfg = {
-  data = { max = nil },
-  tok = { ngram = 6 },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "cosine", "expcos", "geolaplace", "matern52", "rq", "arccos1" }, k = 256 },
+  data = {
+    max = nil
+  },
+  tok = {
+    ngram = 6
+  },
+  emb = {
+    n_landmarks = 1024 * 8,
+    trace_tol = 0.01,
+    kernel = { "rbf", "cosine", "expcos", "geolaplace", "matern52", "rq", "arccos1" },
+    gamma = { def = 0.3163 },
+    k = 256
+  },
   ridge = {
-    lambda = { min = 1e-4, max = 1e1, log = true, def = 1.7559e-04 },
-    propensity_a = { min = 0, max = 4, def = 0.0520 },
-    propensity_b = { min = 0, max = 8, def = 6.8075 },
-    search_trials = 0,
+    lambda = { def = 2.3652e-04 },
+    propensity_a = { def = 0.0536 },
+    propensity_b = { def = 13.1522 },
+    search_trials = 0
   },
 }
 
@@ -76,14 +81,13 @@ test("eurlex classifier", function ()
   local chol_buf = fvec.mmap_create(chol_path, cfg.emb.n_landmarks * train.n)
   local w_buf = fvec.mmap_create(w_path, cfg.emb.n_landmarks * n_labels)
   local pqty_path = "test/res/eurlex57k/pqty_tmp"
-
   local pqty_buf = cfg.ridge.search_trials > 0
     and function (kname) return fvec.mmap_create(pqty_path .. "_" .. kname, cfg.emb.n_landmarks * n_labels) end
     or nil
   local sp_enc, ridge_obj, dev_codes, best_params, decider, dec_metrics = optimize.krr({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
-    kernel = cfg.emb.kernel,
+    kernel = cfg.emb.kernel, rbf_gamma = cfg.emb.gamma,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     label_offsets = train_label_off, label_neighbors = train_label_nbr, n_labels = n_labels,
     val_offsets = val_off, val_tokens = val_tok, val_values = val_val,
@@ -132,7 +136,6 @@ test("eurlex classifier", function ()
   })
   str.printf("[Oracle] dev %s %s\n", fmt_metrics(dv_oracle), sw())
 
-
   dev_codes = nil -- luacheck: ignore
   collectgarbage("collect")
 
@@ -146,8 +149,6 @@ test("eurlex classifier", function ()
     expected_offsets = test_label_off, expected_neighbors = test_label_nbr,
   })
   str.printf("[Oracle] test %s %s\n", fmt_metrics(ts_oracle), sw())
-
-
 
   local _, ts_pred_m = decider:score({
     offsets = ts_off, neighbors = ts_nbr, scores = ts_sco,
