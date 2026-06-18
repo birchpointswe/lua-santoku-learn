@@ -12,9 +12,8 @@ local function tokenize (iter, n, ng, tok)
 end
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
-local fvec = require("santoku.fvec")
 local optimize = require("santoku.learn.optimize")
-local spectral = require("santoku.learn.spectral")
+local elm = require("santoku.learn.elm")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local util = require("santoku.learn.util")
@@ -25,19 +24,22 @@ io.stdout:setvbuf("line")
 
 
 
+
 local cfg = {
   data = { max = nil },
   tok = { ngram = 6 },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "cosine", "expcos", "geolaplace", "matern52", "rq", "arccos1" }, k = 256 },
+  emb = { n_hidden = 1024 * 8, k = 256 },
   ridge = {
-    lambda = { min = 1e-4, max = 1e1, log = true, def = 1.7559e-04 },
-    propensity_a = { min = 0, max = 4, def = 0.0520 },
-    propensity_b = { min = 0, max = 8, def = 6.8075 },
+    mode = { "linear", "relu" },
+    lambda = { def = 5.6112e-04 },
+    propensity_a = { def = 0.0806 },
+    propensity_b = { def = 1.2087 },
+    gamma = { def = 0.4588 },
     search_trials = 0,
   },
 }
 
-test("eurlex classifier", function ()
+test("eurlex-elm classifier", function ()
 
   local stopwatch = utc.stopwatch()
   local function sw()
@@ -70,35 +72,25 @@ test("eurlex classifier", function ()
   csr.apply_bns(val_off, val_tok, val_val, bns_scores)
   csr.normalize(val_off, val_val)
 
-  str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
-  local chol_path = "test/res/eurlex57k/chol_tmp"
-  local w_path = "test/res/eurlex57k/w_tmp"
-  local chol_buf = fvec.mmap_create(chol_path, cfg.emb.n_landmarks * train.n)
-  local w_buf = fvec.mmap_create(w_path, cfg.emb.n_landmarks * n_labels)
-  local pqty_path = "test/res/eurlex57k/pqty_tmp"
-
-  local pqty_buf = cfg.ridge.search_trials > 0
-    and function (kname) return fvec.mmap_create(pqty_path .. "_" .. kname, cfg.emb.n_landmarks * n_labels) end
-    or nil
-  local sp_enc, ridge_obj, dev_codes, best_params, decider, dec_metrics = optimize.krr({
+  str.printf("[ELM] Encoding n_hidden=%d\n", cfg.emb.n_hidden)
+  local sp_enc, ridge_obj, dev_codes, best_params, decider, dec_metrics = optimize.elm({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
-    kernel = cfg.emb.kernel,
-    n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
+    n_hidden = cfg.emb.n_hidden,
     label_offsets = train_label_off, label_neighbors = train_label_nbr, n_labels = n_labels,
     val_offsets = val_off, val_tokens = val_tok, val_values = val_val,
     val_n_samples = dev.n,
     val_expected_offsets = dev_label_off, val_expected_neighbors = dev_label_nbr,
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
-    propensity_b = cfg.ridge.propensity_b,
-    k = k, search_trials = cfg.ridge.search_trials, tile_labels = 1024,
-    chol_buf = chol_buf, w_buf = w_buf, pqty_buf = pqty_buf,
+    propensity_b = cfg.ridge.propensity_b, gamma = cfg.ridge.gamma,
+    mode = cfg.ridge.mode,
+    k = k, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
   do
     local pth = os.tmpname()
     sp_enc:persist(pth)
-    local enc2 = spectral.load(pth)
+    local enc2 = elm.load(pth)
     os.remove(pth)
     local vc2 = enc2:encode({ offsets = val_off, tokens = val_tok, values = val_val, n_samples = dev.n })
     local nchk = dev_codes:size()
@@ -109,12 +101,7 @@ test("eurlex classifier", function ()
     str.printf("[Persist] load parity OK (%d codes)\n", nchk)
   end
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
-  chol_buf = nil; w_buf = nil; pqty_buf = nil -- luacheck: ignore
   collectgarbage("collect")
-  os.remove(chol_path)
-  os.remove(w_path)
-  local kernels = type(cfg.emb.kernel) == "table" and cfg.emb.kernel or { cfg.emb.kernel }
-  for _, kn in ipairs(kernels) do os.remove(pqty_path .. "_" .. kn) end
   local function encode_texts(text_iter_fn, n)
     local _, off, tok, val =
       tokenize(text_iter_fn(), n, cfg.tok.ngram, ngram_map)
@@ -146,8 +133,6 @@ test("eurlex classifier", function ()
     expected_offsets = test_label_off, expected_neighbors = test_label_nbr,
   })
   str.printf("[Oracle] test %s %s\n", fmt_metrics(ts_oracle), sw())
-
-
 
   local _, ts_pred_m = decider:score({
     offsets = ts_off, neighbors = ts_nbr, scores = ts_sco,

@@ -27,20 +27,23 @@ io.stdout:setvbuf("line")
 local cfg = {
   data = { dir = "test/res/conll2003", max = nil },
   tok = { ngram_min = 3, ngram_max = 5, normalize = false },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01 },
+  emb = { n_hidden = 1024 * 8 },
 
 
 
   tag = {
+    mode = { "linear", "relu" },
 
-    kernel = { "arccos1", "cosine", "expcos", "geolaplace", "matern52", "rq" },
-    lambda = { min = 1e-4, max = 1e1, log = true, def = 1.4118e-04 },
+    lambda = { def = 7.7642e-02 },
+    gamma = { def = 0.2762 },
     search_trials = 0 },
   type = {
+    mode = { "relu", "linear" },
 
-    kernel = { "expcos", "arccos1", "cosine", "geolaplace", "matern52", "rq" },
-    lambda = { min = 1e-4, max = 1e1, log = true, def = 8.7293e-04 },
-    propensity_a = { min = 0, max = 8, def = 0.3870 }, propensity_b = { min = 0, max = 16, def = 12.2517 },
+    lambda = { def = 2.5332e-02 },
+    propensity_a = { def = 0.2333 },
+    propensity_b = { def = 8.2676 },
+    gamma = { def = 0.6653 },
     search_trials = 0 },
   shape = { n_cuts = 5 },
 }
@@ -258,7 +261,7 @@ local function tokenize_shape (split, off, starts, ends, shp, k, tok)
   return tok, o, t, v, tok:n_tokens()
 end
 
-test("conll", function ()
+test("conll-elm", function ()
 
   local stopwatch = utc.stopwatch()
   local function sw () local d, dd = stopwatch(); return str.format("(%.1fs +%.1fs)", d, dd) end
@@ -332,17 +335,19 @@ test("conll", function ()
 
 
 
-    local sp, rg, _, best, decider = optimize.krr({
+    local sp, rg, _, best, decider = optimize.elm({
       offsets = o, tokens = t, values = v, n_samples = n, n_tokens = ntok,
-      kernel = scfg.kernel, n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
+      n_hidden = cfg.emb.n_hidden,
       label_offsets = loff, label_neighbors = lnbr, n_labels = nl,
       val_offsets = dvo, val_tokens = dvt, val_values = dvv, val_n_samples = dvn,
       val_expected_offsets = dloff, val_expected_neighbors = dlnbr,
-      lambda = scfg.lambda,
+      lambda = scfg.lambda, gamma = scfg.gamma,
+      mode = scfg.mode,
       k = 1, search_trials = scfg.search_trials,
       each = util.make_ridge_log(stopwatch),
     })
-    str.printf("[%s] kernel=%s lambda=%.4e %s\n", label, best.kernel, best.lambda, sw())
+    str.printf("[%s] mode=%s%s lambda=%.4e %s\n", label, best.mode or "rbf",
+      best.gamma and str.format(" gamma=%.4g", best.gamma) or "", best.lambda, sw())
     return sp, rg, bns, best, decider
   end
 
@@ -550,15 +555,17 @@ test("conll", function ()
   str.printf("[Type] Encoding\n")
 
 
-  local sp_ty, ridge_ty, _, _, decider_ty = optimize.krr({
+  local sp_ty, ridge_ty, _, _, decider_ty = optimize.elm({
     offsets = ty_off, tokens = ty_tok, values = ty_val, n_samples = n_trc, n_tokens = ty_ntok_all,
-    kernel = cfg.type.kernel, n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
+    n_hidden = cfg.emb.n_hidden,
     label_offsets = tr_tloff, label_neighbors = tr_tlab, n_labels = N_TYPES + 1,
     val_offsets = ty_dvo, val_tokens = ty_dvt, val_values = ty_dvv, val_n_samples = n_dvc,
     val_expected_offsets = dv_tloff, val_expected_neighbors = dv_tlab,
     val_spans = { cand_offsets = dv_co, cand_starts = dv_cs, cand_ends = dv_ce,
       gold_offsets = dv_eoff, gold_starts = dv_es, gold_ends = dv_ee, gold_types = dv_ety },
     lambda = cfg.type.lambda, propensity_a = cfg.type.propensity_a, propensity_b = cfg.type.propensity_b,
+    gamma = cfg.type.gamma,
+    mode = cfg.type.mode,
     k = 1, search_trials = cfg.type.search_trials,
     each = util.make_ridge_log(stopwatch),
   })

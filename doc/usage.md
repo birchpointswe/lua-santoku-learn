@@ -11,7 +11,7 @@
 | `ann.h` | Multi-index hashing ANN with optional float reranking | [ann.md](ann.md) |
 | `csr.c` | CSR/CSC utilities: tokenization, BNS/AUC feature weighting, merge, standardize | -- |
 | `gp.c` | Gaussian Process Bayesian Optimization | [optimize.md](optimize.md) |
-| `gfm.c` | General F-Measure optimization (per-label thresholds) | -- |
+| `decide.c` | Decode ridge outputs: multilabel micro-F1 threshold, or single-label per-label offsets | -- |
 | `dataset.lua` | Data loaders for standard benchmarks | -- |
 
 ## Pipeline Patterns
@@ -65,14 +65,18 @@ to label predictions.
    labels, scores (top-k per sample sorted by score descending).
 10. `eval.retrieval_ks` computes oracle F1 (per-sample optimal k).
 
-**GFM thresholding:**
+**Decode (decide):**
 
-11. `gfm.create` with expected labels, `gfm_obj:fit` with ridge
-    predictions to learn per-label score thresholds.
-12. `gfm_obj:predict` produces per-sample k values for final
-    label assignment.
+11. `optimize.decide` (multilabel): `calibrate` on dev ranked predictions learns one global
+    score threshold maximizing micro-F1.
+12. `decide_obj:predict` produces per-sample k values for final label assignment;
+    `decide_obj:score` reports micro-P/R/F1.
 
-Reference: `test/spec/santoku/learn/regress/eurlex-hvelm.lua`
+For single-label (pass dense dev scores from `ridge:regress`, no offsets): `calibrate`
+fits per-label offsets by coordinate-ascent on macro-F1; `predict` returns argmax(score - offset).
+
+Reference: `test/spec/santoku/learn/regress/eurlex.lua` (multilabel),
+`test/spec/santoku/learn/regress/newsgroups.lua` (single-label)
 
 ## Supporting Patterns
 

@@ -7,6 +7,46 @@ local rand = require("santoku.random")
 
 local M = {}
 
+
+
+
+
+
+M.plateaus = function (curve, n, klo, khi)
+  klo = klo or 2
+  khi = khi or #curve
+  local m = khi - klo + 1
+  if n >= m then local out = {}; for k = klo, khi do out[#out + 1] = k end; return out end
+  local s1, s2 = { [0] = 0 }, { [0] = 0 }
+  for i = 1, m do local v = curve[klo + i - 1]; s1[i] = s1[i - 1] + v; s2[i] = s2[i - 1] + v * v end
+  local function ssd (a, b)
+    local c = b - a + 1; local sm = s1[b] - s1[a - 1]
+    return (s2[b] - s2[a - 1]) - sm * sm / c
+  end
+
+  local cost, back = {}, {}
+  for c = 1, n do cost[c] = {}; back[c] = {} end
+  for i = 1, m do cost[1][i] = ssd(1, i); back[1][i] = 1 end
+  for c = 2, n do
+    for i = c, m do
+      local bc, bj = math.huge, c
+      for j = c - 1, i - 1 do
+        local cc = cost[c - 1][j] + ssd(j + 1, i)
+        if cc < bc then bc, bj = cc, j + 1 end
+      end
+      cost[c][i], back[c][i] = bc, bj
+    end
+  end
+  local cuts, i = {}, m
+  for c = n, 1, -1 do
+    local start = back[c][i]
+    cuts[#cuts + 1] = klo + start - 1
+    i = start - 1
+  end
+  table.sort(cuts)
+  return cuts
+end
+
 local function lhs_sample (n, d)
   local grid = {}
   for j = 1, d do
@@ -34,7 +74,12 @@ local function round_to_pow2 (x)
   return num.pow(2, num.floor(log2x + 0.5))
 end
 
+
+
+
+
 local function spec_defaults (spec, defs)
+  if spec == nil then return defs end
   if type(spec) ~= "table" then return spec end
   local s = {}
   for k, v in pairs(defs) do s[k] = v end
@@ -240,15 +285,20 @@ local search = function (args)
   local X_obs = n_dims > 0 and dvec.create() or nil
   local Y_obs = n_dims > 0 and dvec.create() or nil
 
-  local seed = 2166136261
-  for _, name in ipairs(param_names) do
-    local s = samplers[name]
-    if s and s.center ~= nil then
-      local v = s.normalize and s.normalize(s.center) or (type(s.center) == "number" and s.center or 0)
-      seed = (seed * 16777619 + num.floor(v * 2147483647)) % 4294967296
+
+
+
+  if args.reseed ~= false then
+    local seed = 2166136261
+    for _, name in ipairs(param_names) do
+      local s = samplers[name]
+      if s and s.center ~= nil then
+        local v = s.normalize and s.normalize(s.center) or (type(s.center) == "number" and s.center or 0)
+        seed = (seed * 16777619 + num.floor(v * 2147483647)) % 4294967296
+      end
     end
+    rand.fast_seed(seed)
   end
-  rand.fast_seed(seed)
 
   local lhs_pts = n_dims > 0 and lhs_sample(n_initial, n_dims) or nil
   if lhs_pts then
@@ -374,32 +424,125 @@ end
 
 
 
-local function default_trial_fn (args, dense, gfm, k)
+
+
+
+
+
+local function default_trial_fn (args, dense, metric, k)
   if dense then
     return function (g, params)
       local mae, nmae = g:regress_accuracy(params.lambda, nil, nil, args.val_targets)
       return -mae, { mae = mae, nmae = nmae }
     end
   end
+  if metric == "single" or metric == "span" then
+    local ridge = require("santoku.learn.ridge")
+    local decide = require("santoku.learn.decide")
+    local fvec = require("santoku.fvec")
+    local nl, vn = args.n_labels, args.val_n_samples
+
+
+    local scores = fvec.create(vn * nl)
+    local sp = args.val_spans
+    local probe = (metric == "span")
+      and decide.create({ n_labels = nl, span = true, reject = args.reject })
+      or decide.create({ n_labels = nl, single = true })
+    local n_docs = sp and (sp.cand_offsets:size() - 1) or nil
+    return function (g, params, kd)
+      local rt = ridge.create({ gram = g, lambda = params.lambda,
+        propensity_a = params.propensity_a, propensity_b = params.propensity_b })
+      rt:regress((kd and kd.val_codes) or args.val_codes, vn, scores)
+      if metric == "span" then
+        local f1 = probe:calibrate({ scores = scores, n_samples = n_docs,
+          cand_offsets = sp.cand_offsets, cand_starts = sp.cand_starts, cand_ends = sp.cand_ends,
+          expected_offsets = sp.gold_offsets, expected_starts = sp.gold_starts,
+          expected_ends = sp.gold_ends, expected_types = sp.gold_types })
+        return f1, { span_f1 = f1 }
+      end
+      local macro = probe:calibrate({ scores = scores, n_samples = vn,
+        expected_offsets = args.val_expected_offsets,
+        expected_neighbors = args.val_expected_neighbors })
+      return macro, { macro_f1 = macro }
+    end
+  end
   return function (g, params)
     local f1, p, r = g:label_accuracy(params.lambda, k,
       params.propensity_a, params.propensity_b,
-      args.val_expected_offsets, args.val_expected_neighbors, gfm and "gfm" or nil)
+      args.val_expected_offsets, args.val_expected_neighbors, metric)
     return f1, { f1 = f1, precision = p, recall = r }
   end
+end
+
+
+
+
+local function add_label_params (param_names, args, dense)
+
+
+  args.lambda = spec_defaults(args.lambda, { min = 1e-4, max = 16, log = true, def = 1.0 })
+  param_names[#param_names + 1] = "lambda"
+  if not dense and (args.n_labels or 0) > 1 then
+    args.propensity_a = spec_defaults(args.propensity_a, { min = 0, max = 8.0, def = 0.5 })
+    args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 16.0, def = 1.5 })
+    param_names[#param_names + 1] = "propensity_a"
+    param_names[#param_names + 1] = "propensity_b"
+  end
+end
+
+
+
+
+
+
+local function decode_mode (args, dense)
+  if dense or args.trial_fn ~= nil then return false, nil end
+  if args.val_spans then return true, "span" end
+  if (args.n_labels or 0) > 1 and args.val_expected_offsets then
+    local eo = args.val_expected_offsets
+    for i = 0, args.val_n_samples - 1 do
+      if eo:get(i + 1) - eo:get(i) ~= 1 then return true, "multilabel" end
+    end
+    return true, "single"
+  end
+  return true, "multilabel"
+end
+
+
+local function bundle_decider (r, val_codes, args, mode, k)
+  if mode == "span" then
+    local sp = args.val_spans
+    local scores = r:regress(val_codes, args.val_n_samples)
+    return M.decide({ n_labels = args.n_labels, reject = args.reject, val_scores = scores,
+      val_n_samples = sp.cand_offsets:size() - 1,
+      val_cand_offsets = sp.cand_offsets, val_cand_starts = sp.cand_starts, val_cand_ends = sp.cand_ends,
+      val_expected_offsets = sp.gold_offsets, val_expected_starts = sp.gold_starts,
+      val_expected_ends = sp.gold_ends, val_expected_types = sp.gold_types })
+  end
+  if mode == "single" then
+    local scores = r:regress(val_codes, args.val_n_samples)
+    return M.decide({ n_labels = args.n_labels, val_scores = scores,
+      val_n_samples = args.val_n_samples,
+      val_expected_offsets = args.val_expected_offsets,
+      val_expected_neighbors = args.val_expected_neighbors })
+  end
+  local voff, vnbr, vsco = r:label(val_codes, args.val_n_samples, k)
+  return M.decide({ n_labels = args.n_labels, val_offsets = voff, val_neighbors = vnbr,
+    val_scores = vsco, val_n_samples = args.val_n_samples,
+    val_expected_offsets = args.val_expected_offsets,
+    val_expected_neighbors = args.val_expected_neighbors })
 end
 
 M.ridge = function (args)
   local ridge = require("santoku.learn.ridge")
   local dense = args.val_targets ~= nil
-  local param_names
-  if dense then param_names = { "lambda" }
-  else param_names = { "lambda", "propensity_a", "propensity_b" } end
-  args.lambda = spec_defaults(args.lambda, { min = 0, max = 4, def = 1.0 })
-  args.propensity_a = spec_defaults(args.propensity_a, { min = 0, max = 4.0, def = 0.5 })
-  args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 8.0, def = 1.5 })
+
+
+  local param_names = {}
+  add_label_params(param_names, args, dense)
   local samplers = build_samplers(args, param_names)
   local k = not dense and (args.k or 32) or nil
+  local want_decode, mode = decode_mode(args, dense)
   local locked = all_fixed(samplers) or not args.search_trials or args.search_trials <= 0
   local locked_params = locked and sample_params(samplers, param_names, nil, true) or nil
   local gram = args.gram
@@ -424,8 +567,17 @@ M.ridge = function (args)
     gram = ridge.gram(gram_args)
   end
 
-
   local baked = locked and args.gram == nil
+
+
+  local function finish (r, params, solve)
+    if args.each then args.each({ event = "done", params = params, solve = solve }) end
+    local decider, decider_metrics
+    if want_decode then
+      decider, decider_metrics = bundle_decider(r, args.val_codes, args, mode, k)
+    end
+    return r, params, decider, decider_metrics
+  end
   if locked then
     local params = locked_params
     local r = ridge.create({
@@ -433,12 +585,10 @@ M.ridge = function (args)
       propensity_a = not dense and params.propensity_a or nil,
       propensity_b = not dense and params.propensity_b or nil,
     })
-    if args.each then args.each({ event = "done", params = params,
-      solve = baked and "cholesky" or "eigen" }) end
-    return r, params
+    return finish(r, params, baked and "cholesky" or "eigen")
   end
   gram:prepare(args.val_codes, args.val_n_samples)
-  local trial_fn = args.trial_fn or default_trial_fn(args, dense, false, k)
+  local trial_fn = args.trial_fn or default_trial_fn(args, dense, mode == "multilabel" and "fmeasure" or mode, k)
   local _, best_params = search({
     param_names = param_names, samplers = samplers,
     trials = args.search_trials or 30,
@@ -450,8 +600,7 @@ M.ridge = function (args)
     propensity_a = not dense and best_params.propensity_a or nil,
     propensity_b = not dense and best_params.propensity_b or nil,
   })
-  if args.each then args.each({ event = "done", params = best_params, solve = "eigen" }) end
-  return r, best_params
+  return finish(r, best_params, "eigen")
 end
 
 M.krr = function (args)
@@ -460,28 +609,28 @@ M.krr = function (args)
   local dense = args.val_targets ~= nil
   local kernel_spec = args.kernel or "cosine"
   local kernels = type(kernel_spec) == "table" and kernel_spec or { kernel_spec }
-  local param_names
-  if dense then param_names = { "kernel", "lambda" }
-  else param_names = { "kernel", "lambda", "propensity_a", "propensity_b" } end
   args.kernel = kernels
-  args.lambda = spec_defaults(args.lambda, { min = 0, max = 4, def = 1.0 })
-  args.propensity_a = spec_defaults(args.propensity_a, { min = 0, max = 4.0, def = 0.5 })
-  args.propensity_b = spec_defaults(args.propensity_b, { min = 0, max = 8.0, def = 1.5 })
 
 
 
+  local inner_names = {}
+  add_label_params(inner_names, args, dense)
   if args.extra then
     for _, e in ipairs(args.extra) do
-      param_names[#param_names + 1] = e.name
+      inner_names[#inner_names + 1] = e.name
       args[e.name] = spec_defaults({ min = e.min, max = e.max, log = e.log, def = e.def },
         { min = 0, max = 1, def = 0.5 })
     end
   end
-  local samplers = build_samplers(args, param_names)
-  local do_search = not all_fixed(samplers) and args.search_trials and args.search_trials > 0
+  local inner_samplers = build_samplers(args, inner_names)
+  local do_search = args.search_trials and args.search_trials > 0
   local k = not dense and (args.k or 32) or nil
-  local tile_labels = not dense and (args.tile_labels or 1024) or nil
-  local tiled = tile_labels ~= nil and tile_labels > 0
+
+
+
+  local tiled = not dense
+  local tile_labels = tiled and (args.tile_labels or 1024) or nil
+  local want_decode, mode = decode_mode(args, dense)
   local spectral_args = {
     offsets = args.offsets, tokens = args.tokens, values = args.values,
     n_tokens = args.n_tokens, n_samples = args.n_samples,
@@ -498,7 +647,6 @@ M.krr = function (args)
   end
 
 
-
   local seed = args.seed or 1
   local function val_encode (sp_enc)
     if args.val_encode then return args.val_encode(sp_enc) end
@@ -509,11 +657,12 @@ M.krr = function (args)
   end
 
 
-  local kernel_data = {}
-  local function ensure_kernel (kname)
-    local kd = kernel_data[kname]
-    if kd then return kd end
+  local function build_kd (kname)
+    collectgarbage("collect")
     spectral_args.kernel = kname
+    spectral_args.solve_lambda = nil
+    spectral_args.solve_propensity_a = nil
+    spectral_args.solve_propensity_b = nil
     if tiled and args.pqty_buf then
       spectral_args.pqty_buf = type(args.pqty_buf) == "function"
         and args.pqty_buf(kname) or args.pqty_buf
@@ -522,12 +671,9 @@ M.krr = function (args)
     local _, sp_enc, gram = spectral.encode(spectral_args)
     local val_codes = val_encode(sp_enc)
     gram:prepare(val_codes, args.val_n_samples)
-    kd = { sp_enc = sp_enc, gram = gram, val_codes = val_codes }
-    kernel_data[kname] = kd
-    collectgarbage("collect")
-    return kd
+    return { sp_enc = sp_enc, gram = gram, val_codes = val_codes }
   end
-  local function finish (kd, params)
+  local function finish (kd, params, solve)
     local r = ridge.create({
       gram = kd.gram, lambda = params.lambda,
       propensity_a = not dense and params.propensity_a or nil,
@@ -536,81 +682,278 @@ M.krr = function (args)
       tile_labels = tiled and tile_labels or nil,
     })
     if args.each then args.each({ event = "done", params = params, emb_d = kd.sp_enc:dims(),
-      solve = spectral_args.solve_lambda and "cholesky" or "eigen" }) end
-    return kd.sp_enc, r, kd.val_codes, params
+      solve = solve }) end
+    local decider, decider_metrics
+    if want_decode then
+      decider, decider_metrics = bundle_decider(r, kd.val_codes, args, mode, k)
+    end
+    return kd.sp_enc, r, kd.val_codes, params, decider, decider_metrics
   end
+
+
   if not do_search then
-    local params = sample_params(samplers, param_names, nil, true)
-
-
-    spectral_args.solve_lambda = params.lambda
-    if not dense then
-      spectral_args.solve_propensity_a = params.propensity_a
-      spectral_args.solve_propensity_b = params.propensity_b
-    end
-    return finish(ensure_kernel(params.kernel), params)
-  end
-  local trial_fn = args.trial_fn or default_trial_fn(args, dense, tiled, k)
-
-
-  local _, best_params = search({
-    param_names = param_names, samplers = samplers,
-    trials = args.search_trials or 30,
-    trial_fn = function (params)
-      local kd = ensure_kernel(params.kernel)
-      return trial_fn(kd.gram, params, kd)
-    end,
-    each = args.each, skip_final = true,
-  })
-
-
-  assert(kernel_data[best_params.kernel], "krr: best kernel not in cache")
-  return finish(ensure_kernel(best_params.kernel), best_params)
-end
-
-M.oof = function (args)
-  local ivec = require("santoku.ivec")
-  local fvec = require("santoku.fvec")
-  local n = err.assert(args.n, "oof: n required")
-  local k = err.assert(args.k, "oof: k required")
-  local fold = err.assert(args.fold, "oof: fold required")
-  local fit = err.assert(args.fit, "oof: fit required")
-  local predict = err.assert(args.predict, "oof: predict required")
-  local each = args.each
-  err.assert(k >= 1, "oof: k must be >= 1")
-  local out = args.out or fvec.create(n)
-  out:zero()
-  if k == 1 then
-
-    local all = ivec.create(n); all:fill_indices()
-    if each then each({ fold = 1, folds = 1, n_train = n, n_eval = n }) end
-    local h = fit(all)
-    out:copy(predict(h, all), all, true)
-    return out
-  end
-  local order, offsets = fold:bucket(k)
-  local train, eval = ivec.create(), ivec.create()
-  for kk = 0, k - 1 do
-    local s, e = offsets:get(kk), offsets:get(kk + 1)
-    eval:setn(0)
-    eval:copy(order, s, e, 0)
-    train:setn(0)
-    train:copy(order, 0, s, 0)
-    train:copy(order, e, n, s)
-    if each then
-      each({ fold = kk + 1, folds = k, n_train = train:size(), n_eval = eval:size() })
-    end
-    local h = fit(train)
-    local scores = predict(h, eval)
-    out:copy(scores, eval, true)
+    local kname = kernels.def or kernels[1]
+    local lp = sample_params(inner_samplers, inner_names, nil, true)
     collectgarbage("collect")
+    spectral_args.kernel = kname
+    spectral_args.solve_lambda = lp.lambda
+    if not dense then
+      spectral_args.solve_propensity_a = lp.propensity_a
+      spectral_args.solve_propensity_b = lp.propensity_b
+    end
+    if tiled and args.pqty_buf then
+      spectral_args.pqty_buf = type(args.pqty_buf) == "function"
+        and args.pqty_buf(kname) or args.pqty_buf
+    end
+    rand.fast_seed(seed)
+    local _, sp_enc, gram = spectral.encode(spectral_args)
+    local val_codes = val_encode(sp_enc)
+    local params = { kernel = kname }
+    for _, n in ipairs(inner_names) do params[n] = lp[n] end
+    return finish({ sp_enc = sp_enc, gram = gram, val_codes = val_codes }, params, "cholesky")
   end
-  return out
+  local trial_fn = args.trial_fn or default_trial_fn(args, dense, mode == "multilabel" and "fmeasure" or mode, k)
+
+
+  local inner_trials = args.inner_trials or args.search_trials or 30
+
+
+
+
+  local best_kd, best_params, best_score = nil, nil, -num.huge
+  for ki, kname in ipairs(kernels) do
+    local kd = build_kd(kname)
+    local _, ib = search({
+      param_names = inner_names, samplers = inner_samplers,
+      trials = inner_trials,
+      trial_fn = function (p) return trial_fn(kd.gram, p, kd) end,
+      skip_final = true,
+    })
+    ib.kernel = kname
+    local sc, sm = trial_fn(kd.gram, ib, kd)
+    if args.each then
+      args.each({ event = "trial", phase = "kernel", trial = ki, trials = #kernels,
+        params = ib, score = sc, metrics = sm,
+        global_best_score = best_score, is_new_best = sc > best_score })
+    end
+    if sc > best_score then
+      best_score, best_params, best_kd = sc, ib, kd
+    end
+  end
+  return finish(best_kd, best_params, "eigen")
 end
 
-M.gfm = function (args)
-  local gfm = require("santoku.learn.gfm")
-  local g = gfm.create({ n_labels = args.n_labels })
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+M.elm = function (args)
+  local elm = require("santoku.learn.elm")
+  local ridge = require("santoku.learn.ridge")
+  local eval = require("santoku.learn.evaluator")
+  local dense = args.val_targets ~= nil
+  local k = not dense and (args.k or 32) or nil
+  local tiled = not dense
+  local tile_labels = tiled and (args.tile_labels or 1024) or nil
+  local want_decode, mode_decode = decode_mode(args, dense)
+  local do_search = args.search_trials and args.search_trials > 0
+  local mode_spec = args.mode or "rbf"
+  local modes = type(mode_spec) == "table" and mode_spec or { mode_spec }
+
+
+  if not do_search then modes = { modes[1] } end
+  local base = {
+    offsets = args.offsets, tokens = args.tokens, values = args.values,
+    n_tokens = args.n_tokens, n_samples = args.n_samples,
+    codes = args.codes, d_input = args.d_input,
+    n_hidden = args.n_hidden, seed = args.seed,
+    label_offsets = args.label_offsets, label_neighbors = args.label_neighbors,
+    n_labels = args.n_labels,
+    targets = args.targets, n_targets = args.n_targets,
+  }
+  if tiled then
+    base.tile_labels = tile_labels
+    base.tile_samples = args.tile_samples
+  end
+  local function val_encode (sp_enc)
+    if args.val_encode then return args.val_encode(sp_enc) end
+    return sp_enc:encode({
+      offsets = args.val_offsets, tokens = args.val_tokens,
+      values = args.val_values, n_samples = args.val_n_samples,
+    })
+  end
+
+  local function score_metrics (r, val_codes)
+    if want_decode then
+      local decider, metrics = bundle_decider(r, val_codes, args, mode_decode, k)
+      return decider, metrics, (metrics.f1 or metrics.macro_f1 or 0)
+    end
+    local stats = eval.regress_accuracy(r:regress(val_codes, args.val_n_samples), args.val_targets)
+    return nil, { mae = stats.mean, nmae = stats.nmae }, -stats.nmae
+  end
+
+  local function run_rbf ()
+    local gamma_def = { min = 1e-2, max = 4, log = true, def = 1.0 }
+    local saved_gamma = args.gamma
+    args.gamma = args.gamma == nil and gamma_def or spec_defaults(args.gamma, gamma_def)
+    local param_names = { "gamma" }
+    add_label_params(param_names, args, dense)
+    local samplers = build_samplers(args, param_names)
+    args.gamma = saved_gamma
+    local function trial (params, ctx)
+      collectgarbage("collect")
+      local ea = {}
+      for kk, vv in pairs(base) do ea[kk] = vv end
+      ea.mode = "rbf"
+      ea.gamma = params.gamma
+      ea.solve_lambda = params.lambda
+      if not dense then
+        ea.solve_propensity_a = params.propensity_a
+        ea.solve_propensity_b = params.propensity_b
+      end
+
+
+      local ok, ret1, ret2, ret3, ret4 = pcall(elm.encode, ea)
+      if not ok then
+        if ctx and not ctx.is_final then return -num.huge, {}, nil end
+        error(ret1, 0)
+      end
+
+      local sp_enc, W, intercept = ret2, ret3, ret4
+      local val_codes = val_encode(sp_enc)
+      local r = ridge.create({ W = W, intercept = intercept,
+        n_dims = args.n_hidden, n_labels = base.n_labels or base.n_targets })
+      local decider, metrics, score = score_metrics(r, val_codes)
+      if (ctx == nil or ctx.is_final) and args.each then
+        params.mode = "rbf"
+        args.each({ event = "done", params = params, emb_d = sp_enc:dims(),
+          solve = "cholesky", score = score, metrics = metrics })
+      end
+      return score, metrics, { sp_enc = sp_enc, r = r, val_codes = val_codes, params = params,
+        decider = decider, decider_metrics = metrics, score = score }
+    end
+    if not do_search then
+      local params = sample_params(samplers, param_names, nil, true)
+      local _, _, res = trial(params)
+      res.params.mode = "rbf"
+      return res
+    end
+    local best_result, best_params = search({
+      param_names = param_names, samplers = samplers,
+      trials = args.search_trials, trial_fn = trial, each = args.each,
+    })
+    best_result.params = best_params
+    best_result.params.mode = "rbf"
+    return best_result
+  end
+
+
+
+
+  local function run_eigen (mname)
+    collectgarbage("collect")
+    local inner_names = {}
+    add_label_params(inner_names, args, dense)
+    local inner_samplers = build_samplers(args, inner_names)
+    if not do_search then
+      local params = sample_params(inner_samplers, inner_names, nil, true)
+      local ea = {}
+      for kk, vv in pairs(base) do ea[kk] = vv end
+      ea.mode = mname
+      ea.solve_lambda = params.lambda
+      if not dense then
+        ea.solve_propensity_a = params.propensity_a
+        ea.solve_propensity_b = params.propensity_b
+      end
+      local _, sp_enc, W, intercept = elm.encode(ea)
+      local val_codes = val_encode(sp_enc)
+      local r = ridge.create({ W = W, intercept = intercept,
+        n_dims = args.n_hidden, n_labels = base.n_labels or base.n_targets })
+      local decider, metrics, score = score_metrics(r, val_codes)
+      params.mode = mname
+      if args.each then
+        args.each({ event = "done", params = params, emb_d = sp_enc:dims(),
+          solve = "cholesky", score = score, metrics = metrics })
+      end
+      return { sp_enc = sp_enc, r = r, val_codes = val_codes, params = params,
+        decider = decider, decider_metrics = metrics, score = score }
+    end
+    local ea = {}
+    for kk, vv in pairs(base) do ea[kk] = vv end
+    ea.mode = mname
+    local _, sp_enc, gram = elm.encode(ea)
+    local val_codes = val_encode(sp_enc)
+    gram:prepare(val_codes, args.val_n_samples)
+    local trial_fn = args.trial_fn
+      or default_trial_fn(args, dense, mode_decode == "multilabel" and "fmeasure" or mode_decode, k)
+    local kd = { gram = gram, val_codes = val_codes }
+    local _, best_params = search({
+      param_names = inner_names, samplers = inner_samplers, trials = args.search_trials,
+      trial_fn = function (p) return trial_fn(gram, p, kd) end, skip_final = true,
+    })
+    local r = ridge.create({ gram = gram, lambda = best_params.lambda,
+      propensity_a = not dense and best_params.propensity_a or nil,
+      propensity_b = not dense and best_params.propensity_b or nil })
+    local decider, metrics, score = score_metrics(r, val_codes)
+    best_params.mode = mname
+    if args.each then
+      args.each({ event = "done", params = best_params, emb_d = sp_enc:dims(),
+        solve = "eigen", score = score, metrics = metrics })
+    end
+    return { sp_enc = sp_enc, r = r, val_codes = val_codes, params = best_params,
+      decider = decider, decider_metrics = metrics, score = score }
+  end
+  local best
+  for _, mname in ipairs(modes) do
+    local res = (mname == "rbf") and run_rbf() or run_eigen(mname)
+    if best == nil or (res.score or -num.huge) > best.score then best = res end
+  end
+  return best.sp_enc, best.r, best.val_codes, best.params, best.decider, best.decider_metrics
+end
+
+
+
+
+
+
+
+
+
+M.decide = function (args)
+  local decide = require("santoku.learn.decide")
+  if args.val_cand_offsets ~= nil then
+    local g = decide.create({ n_labels = args.n_labels, span = true, reject = args.reject })
+    local f1, precision, recall = g:calibrate({
+      scores = args.val_scores, n_samples = args.val_n_samples,
+      cand_offsets = args.val_cand_offsets, cand_starts = args.val_cand_starts, cand_ends = args.val_cand_ends,
+      expected_offsets = args.val_expected_offsets, expected_starts = args.val_expected_starts,
+      expected_ends = args.val_expected_ends, expected_types = args.val_expected_types,
+    })
+    return g, { span_f1 = f1, precision = precision, recall = recall, f1 = f1 }
+  end
+  local single = args.val_offsets == nil
+  local g = decide.create({ n_labels = args.n_labels, single = single })
+  if single then
+    local macro_f1, accuracy = g:calibrate({
+      scores = args.val_scores,
+      n_samples = args.val_n_samples,
+      expected_offsets = args.val_expected_offsets,
+      expected_neighbors = args.val_expected_neighbors,
+    })
+    return g, { macro_f1 = macro_f1, accuracy = accuracy }
+  end
   local best_f1, precision, recall = g:calibrate({
     offsets = args.val_offsets,
     neighbors = args.val_neighbors,
@@ -620,111 +963,6 @@ M.gfm = function (args)
     expected_neighbors = args.val_expected_neighbors,
   })
   return g, { f1 = best_f1, precision = precision, recall = recall }
-end
-
-
-
-
-
-local function vit_transitions (off, lab, nl)
-  local T, S = {}, {}
-  for p = 0, nl - 1 do T[p] = {}; for c = 0, nl - 1 do T[p][c] = 0 end end
-  for c = 0, nl - 1 do S[c] = 0 end
-  local nd = off:size() - 1
-  for d = 0, nd - 1 do
-    local s, e = off:get(d), off:get(d + 1)
-    if e > s then
-      S[lab:get(s)] = S[lab:get(s)] + 1
-      for i = s, e - 2 do T[lab:get(i)][lab:get(i + 1)] = T[lab:get(i)][lab:get(i + 1)] + 1 end
-    end
-  end
-  local logT, logS = {}, {}
-  local stot = 0; for c = 0, nl - 1 do stot = stot + S[c] end
-  for c = 0, nl - 1 do logS[c] = S[c] > 0 and math.log(S[c] / stot) or -1e9 end
-  for p = 0, nl - 1 do
-    logT[p] = {}
-    local rt = 0; for c = 0, nl - 1 do rt = rt + T[p][c] end
-    for c = 0, nl - 1 do logT[p][c] = (T[p][c] > 0 and rt > 0) and math.log(T[p][c] / rt) or -1e9 end
-  end
-  return logT, logS
-end
-
-local function vit_decode (off, emit, n, logT, logS, w, nl)
-  local ivec = require("santoku.ivec")
-  local out = ivec.create(n)
-  local nd = off:size() - 1
-  for d = 0, nd - 1 do
-    local s, e = off:get(d), off:get(d + 1)
-    local len = e - s
-    if len > 0 then
-      local dp, bp = {}, {}
-      dp[0] = {}
-      for c = 0, nl - 1 do dp[0][c] = logS[c] + emit:get(s * nl + c) end
-      for i = 1, len - 1 do
-        dp[i] = {}; bp[i] = {}
-        local gi = s + i
-        for c = 0, nl - 1 do
-          local best, bestp = -1e30, 0
-          for pc = 0, nl - 1 do
-            local val = dp[i - 1][pc] + w * logT[pc][c]
-            if val > best then best = val; bestp = pc end
-          end
-          dp[i][c] = best + emit:get(gi * nl + c); bp[i][c] = bestp
-        end
-      end
-      local last = len - 1
-      local bc, bv = 0, -1e30
-      for c = 0, nl - 1 do if dp[last][c] > bv then bv = dp[last][c]; bc = c end end
-      local seq = {}; seq[last] = bc
-      for i = last, 1, -1 do seq[i - 1] = bp[i][seq[i]] end
-      for i = 0, len - 1 do out:set(s + i, seq[i]) end
-    end
-  end
-  return out
-end
-
-local vit_mt = {}
-vit_mt.__index = vit_mt
-
-function vit_mt:decode (off, emit, n, w)
-  return vit_decode(off, emit, n, self.logT, self.logS, w, self.n_labels)
-end
-
-
-
-function vit_mt:select_w (off, emit, n, spec, score_fn, each)
-  local lo, hi, tol = spec.min or 0, spec.max or 1, spec.tol or 0.01
-  local phi = (math.sqrt(5) - 1) / 2
-  local best_w, best_s = nil, -math.huge
-  local function eval (w)
-    local s = score_fn(self:decode(off, emit, n, w), w)
-    if each then each(w, s) end
-    if s > best_s then best_s, best_w = s, w end
-    return s
-  end
-  local c, d = hi - phi * (hi - lo), lo + phi * (hi - lo)
-  local fc, fd = eval(c), eval(d)
-  while (hi - lo) > tol do
-    if fc > fd then
-      hi, d, fd = d, c, fc
-      c = hi - phi * (hi - lo); fc = eval(c)
-    else
-      lo, c, fc = c, d, fd
-      d = lo + phi * (hi - lo); fd = eval(d)
-    end
-  end
-  return best_w, best_s
-end
-
-M.viterbi = function (args)
-  local nl = err.assert(args.n_labels, "viterbi: n_labels required")
-  local logT, logS = args.log_transitions, args.log_starts
-  if not (logT and logS) then
-    err.assert(args.train_offsets and args.train_neighbors,
-      "viterbi: need train_offsets+train_neighbors or log_transitions+log_starts")
-    logT, logS = vit_transitions(args.train_offsets, args.train_neighbors, nl)
-  end
-  return setmetatable({ logT = logT, logS = logS, n_labels = nl }, vit_mt)
 end
 
 return M
