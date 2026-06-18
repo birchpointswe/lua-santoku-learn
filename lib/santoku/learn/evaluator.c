@@ -2,6 +2,7 @@
 #include <santoku/pumap.h>
 #include <santoku/learn/centroid.h>
 #include <santoku/learn/csr.h>
+#include <santoku/learn/span.h>
 #include <santoku/ivec.h>
 #include <santoku/fvec.h>
 #include <santoku/cvec.h>
@@ -81,7 +82,10 @@ static inline int tm_regress_accuracy (lua_State *L)
 
 static inline tk_ivec_t *tk_pvec_dendro_cut(lua_State *L, tk_ivec_t *offsets, tk_pvec_t *merges, uint64_t step, tk_ivec_t *assignments);
 
-static inline int tm_label_accuracy (lua_State *L)
+// Per-sample oracle headroom: the best micro/macro F1 achievable if an oracle picked the optimal top-k
+// per sample (k sweeps 1..hood maximizing that sample's F1). An upper bound for diagnostics, NOT a
+// deployable decode (that is the decider's job). Returns the oracle per-sample k vector and metrics.
+static inline int tm_oracle_f1 (lua_State *L)
 {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
@@ -93,22 +97,11 @@ static inline int tm_label_accuracy (lua_State *L)
   tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
   lua_getfield(L, 1, "expected_neighbors");
   tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
-  lua_getfield(L, 1, "ks");
-  bool have_ks = !lua_isnil(L, -1);
-  bool scalar_ks = have_ks && lua_isnumber(L, -1);
-  int64_t scalar_k_val = scalar_ks ? (int64_t)lua_tointeger(L, -1) : 0;
-  tk_ivec_t *ks = (have_ks && !scalar_ks) ? tk_ivec_peek(L, -1, "ks") : NULL;
-  lua_pop(L, 5);
+  lua_pop(L, 4);
   uint64_t n_samples = pred_off->n - 1;
   if (exp_off->n != n_samples + 1)
     return luaL_error(L, "expected_offsets length must match sample count + 1");
-  if (scalar_ks) {
-    ks = tk_ivec_create(L, n_samples);
-    for (uint64_t i = 0; i < n_samples; i++) ks->a[i] = scalar_k_val;
-    have_ks = true;
-  } else if (!have_ks) {
-    ks = tk_ivec_create(L, n_samples);
-  }
+  tk_ivec_t *ks = tk_ivec_create(L, n_samples);
   uint64_t mi_tp = 0, mi_k = 0, mi_exp = 0, n_valid = 0;
   double ma_prec = 0, ma_rec = 0, ma_f1 = 0;
   #pragma omp parallel for reduction(+:mi_tp,mi_k,mi_exp,n_valid,ma_prec,ma_rec,ma_f1)
@@ -117,48 +110,21 @@ static inline int tm_label_accuracy (lua_State *L)
     uint64_t hood_size = (uint64_t)(pe - ps);
     int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
     uint64_t n_expected = (uint64_t)(ee - es);
-    if (n_expected == 0 || hood_size == 0) {
-      if (!have_ks) ks->a[s] = 0;
-      continue;
-    }
+    if (n_expected == 0 || hood_size == 0) { ks->a[s] = 0; continue; }
     int kha;
     tk_iuset_t *exp_set = tk_iuset_create(NULL, 0);
     for (int64_t i = es; i < ee; i++)
       tk_iuset_put(exp_set, exp_nbr->a[i], &kha);
-    uint64_t best_tp, best_k;
-    double best_f1;
-    if (have_ks) {
-      int64_t sk = ks->a[s];
-      if (sk < 1) sk = 1;
-      best_k = (uint64_t)sk;
-      if (best_k > hood_size) best_k = hood_size;
-      best_tp = 0;
-      for (uint64_t j = 0; j < best_k; j++)
-        if (tk_iuset_contains(exp_set, pred_nbr->a[ps + (int64_t)j]) != 0) best_tp++;
-      double prec = (double)best_tp / best_k;
-      double rec = (double)best_tp / n_expected;
-      best_f1 = (prec + rec > 0) ? 2.0 * prec * rec / (prec + rec) : 0;
-    } else {
-      double best_score = -1.0;
-      best_f1 = -1.0;
-      best_k = 1;
-      best_tp = 0;
-      uint64_t tp = 0;
-      for (uint64_t k = 1; k <= hood_size; k++) {
-        if (tk_iuset_contains(exp_set, pred_nbr->a[ps + (int64_t)(k - 1)]) != 0) tp++;
-        double prec = (double)tp / k;
-        double rec = (double)tp / n_expected;
-        double f1 = (prec + rec) > 0 ? 2.0 * prec * rec / (prec + rec) : 0.0;
-        double score = f1;
-        if (score > best_score) {
-          best_score = score;
-          best_f1 = f1;
-          best_k = k;
-          best_tp = tp;
-        }
-      }
-      ks->a[s] = (int64_t)best_k;
+    double best_f1 = -1.0;
+    uint64_t best_k = 1, best_tp = 0, tp = 0;
+    for (uint64_t k = 1; k <= hood_size; k++) {
+      if (tk_iuset_contains(exp_set, pred_nbr->a[ps + (int64_t)(k - 1)]) != 0) tp++;
+      double prec = (double)tp / k;
+      double rec = (double)tp / n_expected;
+      double f1 = (prec + rec) > 0 ? 2.0 * prec * rec / (prec + rec) : 0.0;
+      if (f1 > best_f1) { best_f1 = f1; best_k = k; best_tp = tp; }
     }
+    ks->a[s] = (int64_t)best_k;
     tk_iuset_destroy(exp_set);
     mi_tp += best_tp;
     mi_k += best_k;
@@ -168,10 +134,7 @@ static inline int tm_label_accuracy (lua_State *L)
     ma_f1 += best_f1;
     n_valid++;
   }
-  if (!have_ks)
-    lua_pushvalue(L, -1);
-  else
-    lua_pushnil(L);
+  lua_pushvalue(L, -1);
   lua_newtable(L);
   double mi_prec = mi_k > 0 ? (double)mi_tp / mi_k : 0;
   double mi_rec = mi_exp > 0 ? (double)mi_tp / mi_exp : 0;
@@ -1187,57 +1150,6 @@ static inline int tm_cluster (lua_State *L)
   return 1;
 }
 
-static inline int tm_label_ranking (lua_State *L)
-{
-  lua_settop(L, 1);
-  luaL_checktype(L, 1, LUA_TTABLE);
-  lua_getfield(L, 1, "pred_offsets");
-  tk_ivec_t *pred_off = tk_ivec_peek(L, -1, "pred_offsets");
-  lua_getfield(L, 1, "pred_neighbors");
-  tk_ivec_t *pred_nbr = tk_ivec_peek(L, -1, "pred_neighbors");
-  lua_getfield(L, 1, "pred_scores");
-  lua_getfield(L, 1, "expected_offsets");
-  tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
-  lua_getfield(L, 1, "expected_neighbors");
-  tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
-  lua_pop(L, 5);
-  uint64_t n_samples = pred_off->n - 1;
-  if (exp_off->n != n_samples + 1)
-    return luaL_error(L, "expected_offsets length must match sample count + 1");
-  double sum_ndcg = 0.0;
-  uint64_t n_valid = 0;
-  #pragma omp parallel for reduction(+:sum_ndcg,n_valid)
-  for (uint64_t s = 0; s < n_samples; s++) {
-    int64_t ps = pred_off->a[s], pe = pred_off->a[s + 1];
-    int64_t pred_k = pe - ps;
-    int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
-    int64_t n_exp = ee - es;
-    if (n_exp == 0 || pred_k == 0) continue;
-    int kha;
-    tk_iuset_t *exp_set = tk_iuset_create(NULL, 0);
-    for (int64_t j = es; j < ee; j++)
-      tk_iuset_put(exp_set, exp_nbr->a[j], &kha);
-    double dcg = 0.0;
-    for (int64_t j = 0; j < pred_k; j++)
-      if (tk_iuset_contains(exp_set, pred_nbr->a[ps + j]))
-        dcg += 1.0 / log2((double)(j + 2));
-    tk_iuset_destroy(exp_set);
-    int64_t ideal_n = n_exp < pred_k ? n_exp : pred_k;
-    double idcg = 0.0;
-    for (int64_t j = 0; j < ideal_n; j++)
-      idcg += 1.0 / log2((double)(j + 2));
-    if (idcg > 0.0)
-      sum_ndcg += dcg / idcg;
-    n_valid++;
-  }
-  lua_newtable(L);
-  lua_pushnumber(L, n_valid > 0 ? sum_ndcg / (double)n_valid : 0.0);
-  lua_setfield(L, -2, "ndcg");
-  lua_replace(L, 1);
-  lua_settop(L, 1);
-  return 1;
-}
-
 static inline int tk_pvec_dendro_cut_lua (lua_State *L)
 {
   lua_settop(L, 4);
@@ -1525,25 +1437,12 @@ static inline int tm_span_f1 (lua_State *L)
   int64_t n_docs = (int64_t) (po->n - 1);
   if ((int64_t) (go->n - 1) != n_docs)
     return luaL_error(L, "span_f1: pred and gold doc counts differ");
-  bool use_ty = pty && gty;
   int64_t tp = 0, npred = 0, ngold = 0;
-  for (int64_t d = 0; d < n_docs; d++) {
-    int64_t p0 = po->a[d], p1 = po->a[d + 1];
-    int64_t g0 = go->a[d], g1 = go->a[d + 1];
-    ngold += g1 - g0;
-    for (int64_t i = p0; i < p1; i++) {
-      npred++;
-      for (int64_t j = g0; j < g1; j++) {
-        if (ps->a[i] == gs->a[j] && pe->a[i] == ge->a[j] &&
-            (!use_ty || pty->a[i] == gty->a[j])) {
-          tp++; break;
-        }
-      }
-    }
-  }
+  tk_span_counts(po->a, ps->a, pe->a, pty ? pty->a : NULL,
+    go->a, gs->a, ge->a, gty ? gty->a : NULL, n_docs, &tp, &npred, &ngold);
   double p = npred > 0 ? (double) tp / (double) npred : 0.0;
   double r = ngold > 0 ? (double) tp / (double) ngold : 0.0;
-  double f1 = (p + r > 0.0) ? 2.0 * p * r / (p + r) : 0.0;
+  double f1 = tk_span_f1_of(tp, npred, ngold);
   lua_pushnumber(L, f1);
   lua_pushnumber(L, p);
   lua_pushnumber(L, r);
@@ -1553,9 +1452,8 @@ static inline int tm_span_f1 (lua_State *L)
 static luaL_Reg tm_evaluator_fns[] =
 {
   { "regress_accuracy", tm_regress_accuracy },
-  { "label_accuracy", tm_label_accuracy },
+  { "oracle_f1", tm_oracle_f1 },
   { "span_f1", tm_span_f1 },
-  { "label_ranking", tm_label_ranking },
   { "cluster", tm_cluster },
   { "dendro_cut", tk_pvec_dendro_cut_lua },
   { "dendro_each", tk_dendro_iter_lua },

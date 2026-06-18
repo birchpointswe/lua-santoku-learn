@@ -50,19 +50,8 @@ test("tokenizer", function ()
     assert(tk:n_tokens() > 0)
   end)
 
-  test("shapes=true derives a per-token shape skeleton (no spans passed)", function ()
-    local tk = tokenizer.create({ ngram_min = 3, ngram_max = 5, terminals = true, focus = true, shapes = true })
-    local off = tk:tokenize({
-      texts = { "Visit New York now" }, n_samples = 1,
-      focus = { offsets = iv(0, 1), starts = iv(6), ends = iv(14) }, grow = true,
-    })
-    assert(off:size() == 2)
-    assert(tk:n_tokens() > 0)
-  end)
-
   test("validity errors", function ()
     assert(not pcall(function () tokenizer.create({ ngram_min = 3, ngram_max = 5, normalize = true, types = true, n_types = 2 }) end))
-    assert(not pcall(function () tokenizer.create({ ngram_min = 3, ngram_max = 5, types = true, shapes = true, n_types = 2 }) end))   -- mutually exclusive
     assert(not pcall(function () tokenizer.create({ ngram_min = 3, ngram_max = 5, types = true }) end))   -- n_types required
   end)
 

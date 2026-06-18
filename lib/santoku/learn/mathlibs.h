@@ -151,8 +151,45 @@ static inline void cblas_dsyrk (enum CBLAS_ORDER order, enum CBLAS_UPLO uplo,
   }
 }
 
+static inline void cblas_ssyrk (enum CBLAS_ORDER order, enum CBLAS_UPLO uplo,
+    enum CBLAS_TRANSPOSE trans, int N, int K,
+    float alpha, const float *A, int lda, float beta, float *C, int ldc) {
+  for (int i = 0; i < N; i++) {
+    for (int j = (uplo == CblasUpper ? i : 0); j < (uplo == CblasUpper ? N : i + 1); j++) {
+      float s = 0;
+      for (int k = 0; k < K; k++) {
+        float ai, aj;
+        if (order == CblasColMajor) {
+          ai = (trans == CblasTrans) ? A[i * lda + k] : A[k * lda + i];
+          aj = (trans == CblasTrans) ? A[j * lda + k] : A[k * lda + j];
+        } else {
+          ai = (trans == CblasTrans) ? A[k * lda + i] : A[i * lda + k];
+          aj = (trans == CblasTrans) ? A[k * lda + j] : A[j * lda + k];
+        }
+        s += ai * aj;
+      }
+      if (order == CblasColMajor)
+        C[j * ldc + i] = alpha * s + beta * C[j * ldc + i];
+      else
+        C[i * ldc + j] = alpha * s + beta * C[i * ldc + j];
+    }
+  }
+}
+
 static inline void cblas_dsyr (enum CBLAS_ORDER order, enum CBLAS_UPLO uplo,
     int N, double alpha, const double *x, int incx, double *A, int lda) {
+  for (int i = 0; i < N; i++) {
+    for (int j = (uplo == CblasUpper ? i : 0); j < (uplo == CblasUpper ? N : i + 1); j++) {
+      if (order == CblasColMajor)
+        A[j * lda + i] += alpha * x[i * incx] * x[j * incx];
+      else
+        A[i * lda + j] += alpha * x[i * incx] * x[j * incx];
+    }
+  }
+}
+
+static inline void cblas_ssyr (enum CBLAS_ORDER order, enum CBLAS_UPLO uplo,
+    int N, float alpha, const float *x, int incx, float *A, int lda) {
   for (int i = 0; i < N; i++) {
     for (int j = (uplo == CblasUpper ? i : 0); j < (uplo == CblasUpper ? N : i + 1); j++) {
       if (order == CblasColMajor)
@@ -166,6 +203,18 @@ static inline void cblas_dsyr (enum CBLAS_ORDER order, enum CBLAS_UPLO uplo,
 static inline void cblas_dger (enum CBLAS_ORDER order,
     int M, int N, double alpha, const double *x, int incx,
     const double *y, int incy, double *A, int lda) {
+  for (int i = 0; i < M; i++)
+    for (int j = 0; j < N; j++) {
+      if (order == CblasRowMajor)
+        A[i * lda + j] += alpha * x[i * incx] * y[j * incy];
+      else
+        A[j * lda + i] += alpha * x[i * incx] * y[j * incy];
+    }
+}
+
+static inline void cblas_sger (enum CBLAS_ORDER order,
+    int M, int N, float alpha, const float *x, int incx,
+    const float *y, int incy, float *A, int lda) {
   for (int i = 0; i < M; i++)
     for (int j = 0; j < N; j++) {
       if (order == CblasRowMajor)
@@ -316,6 +365,47 @@ static inline int LAPACKE_dpotrs (int matrix_layout, char uplo, int n, int nrhs,
     }
     for (int i = n - 1; i >= 0; i--) {
       double s = b[i];
+      for (int k = i + 1; k < n; k++)
+        s -= A[i + k * lda] * b[k];
+      b[i] = s / A[i + i * lda];
+    }
+  }
+  return 0;
+}
+
+// Single-precision counterparts of LAPACKE_dpotrf / dpotrs (upper, column-major) for the float
+// Cholesky path (elm's gram solve). Same algorithm in float.
+static inline int LAPACKE_spotrf (int matrix_layout, char uplo, int n, float *A, int lda) {
+  (void)matrix_layout; (void)uplo;
+  for (int j = 0; j < n; j++) {
+    for (int i = 0; i <= j; i++) {
+      float s = A[i + j * lda];
+      for (int k = 0; k < i; k++)
+        s -= A[k + i * lda] * A[k + j * lda];
+      if (i == j) {
+        if (s <= 0.0f) return j + 1;
+        A[j + j * lda] = sqrtf(s);
+      } else {
+        A[i + j * lda] = s / A[i + i * lda];
+      }
+    }
+  }
+  return 0;
+}
+
+static inline int LAPACKE_spotrs (int matrix_layout, char uplo, int n, int nrhs,
+    const float *A, int lda, float *B, int ldb) {
+  (void)matrix_layout; (void)uplo;
+  for (int c = 0; c < nrhs; c++) {
+    float *b = B + c * ldb;
+    for (int i = 0; i < n; i++) {
+      float s = b[i];
+      for (int k = 0; k < i; k++)
+        s -= A[k + i * lda] * b[k];
+      b[i] = s / A[i + i * lda];
+    }
+    for (int i = n - 1; i >= 0; i--) {
+      float s = b[i];
       for (int k = i + 1; k < n; k++)
         s -= A[i + k * lda] * b[k];
       b[i] = s / A[i + i * lda];

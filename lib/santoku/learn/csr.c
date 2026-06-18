@@ -6,6 +6,7 @@
 #include <santoku/ivec/ext.h>
 #include <santoku/iumap/ext.h>
 #include <santoku/learn/mathlibs.h>
+#include <santoku/learn/span.h>
 #include <assert.h>
 #include <math.h>
 
@@ -414,12 +415,6 @@ static int tm_csr_type_labels (lua_State *L)
 // nms(cand_off, cand_s, cand_e, classes, scores, reject) -> keep mask (0/1): per doc, greedily keep the
 // highest-scoring non-reject candidate, suppress any candidate that overlaps a kept one (type-agnostic,
 // flat NER; [s1,e1) overlaps [s2,e2) iff s1<e2 && s2<e1), repeat. Reject candidates are never kept.
-typedef struct { int64_t s, e, oi; double w; } tk_wis_iv;
-static int tk_wis_cmp (const void *a, const void *b) {
-  int64_t ea = ((const tk_wis_iv *) a)->e, eb = ((const tk_wis_iv *) b)->e;
-  return (ea < eb) ? -1 : (ea > eb) ? 1 : 0;
-}
-
 // nms_dp(cand_off, cand_s, cand_e, labels, scores, k, reject) -> keep mask, argmax class: labels/scores are
 // ridge:label top-k output (k>=2). Per candidate the argmax class is labels[c*k] and the DP weight is the
 // margin scores[c*k]-scores[c*k+1] (>=0). Per doc this returns the max-total-margin set of NON-OVERLAPPING
@@ -440,40 +435,21 @@ static int tm_csr_nms_dp (lua_State *L)
   keep->n = (uint64_t) ncand;
   tk_ivec_t *cls = tk_ivec_create(L, (uint64_t) ncand);
   cls->n = (uint64_t) ncand;
-  for (int64_t c = 0; c < ncand; c++) { keep->a[c] = 0; cls->a[c] = lab->a[c * k]; }
-  int64_t maxn = 0;
-  for (int64_t d = 0; d < n_docs; d++) { int64_t n = co->a[d + 1] - co->a[d]; if (n > maxn) maxn = n; }
-  if (maxn == 0) return 2;
-  tk_wis_iv *iv = (tk_wis_iv *) malloc((size_t) maxn * sizeof(tk_wis_iv));
+  double *w = (double *) malloc((size_t) ncand * sizeof(double));
+  if (!w) return luaL_error(L, "nms_dp: alloc failed");
+  for (int64_t c = 0; c < ncand; c++) {
+    keep->a[c] = 0;
+    cls->a[c] = lab->a[c * k];
+    w[c] = (double) sco->a[c * k] - (double) sco->a[c * k + 1];
+  }
+  int64_t maxn = tk_span_max_doc(co->a, n_docs);
+  if (maxn == 0) { free(w); return 2; }
+  tk_span_iv *iv = (tk_span_iv *) malloc((size_t) maxn * sizeof(tk_span_iv));
   double *M = (double *) malloc((size_t) (maxn + 1) * sizeof(double));
   int64_t *P = (int64_t *) malloc((size_t) (maxn + 1) * sizeof(int64_t));
-  if (!iv || !M || !P) { free(iv); free(M); free(P); return luaL_error(L, "nms_dp: alloc failed"); }
-  for (int64_t d = 0; d < n_docs; d++) {
-    int64_t m = 0;
-    for (int64_t c = co->a[d]; c < co->a[d + 1]; c++) {
-      if (lab->a[c * k] == reject) continue;
-      iv[m].s = cs->a[c]; iv[m].e = ce->a[c]; iv[m].oi = c;
-      iv[m].w = (double) sco->a[c * k] - (double) sco->a[c * k + 1];
-      m++;
-    }
-    if (m == 0) continue;
-    qsort(iv, (size_t) m, sizeof(tk_wis_iv), tk_wis_cmp);
-    M[0] = 0.0;
-    for (int64_t i = 1; i <= m; i++) {
-      int64_t target = iv[i - 1].s, lo = 0, hi = i - 1;
-      while (lo < hi) { int64_t mid = (lo + hi) / 2; if (iv[mid].e <= target) lo = mid + 1; else hi = mid; }
-      P[i] = lo;
-      double take = iv[i - 1].w + M[P[i]];
-      M[i] = (take >= M[i - 1]) ? take : M[i - 1];
-    }
-    int64_t i = m;
-    while (i >= 1) {
-      double take = iv[i - 1].w + M[P[i]];
-      if (take >= M[i - 1]) { keep->a[iv[i - 1].oi] = 1; i = P[i]; }
-      else i = i - 1;
-    }
-  }
-  free(iv); free(M); free(P);
+  if (!iv || !M || !P) { free(w); free(iv); free(M); free(P); return luaL_error(L, "nms_dp: alloc failed"); }
+  tk_span_nms_dp(co->a, cs->a, ce->a, n_docs, cls->a, w, reject, keep->a, iv, M, P);
+  free(w); free(iv); free(M); free(P);
   return 2;
 }
 

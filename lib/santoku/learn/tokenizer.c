@@ -22,14 +22,13 @@
 #include <santoku/iumap/ext.h>
 
 #define TK_TOK_MT "tk_tokenizer_t"
-#define TK_TOK_MAXTYPES 64        // entity types ceiling (per instance)
-#define TK_TOK_NSHAPE   9         // {Xx, XX, xx, dd, punct, mix, X, Xp, an}
+#define TK_TOK_MAXTYPES 250       // entity types ceiling (per instance)
 
-typedef enum { TK_STREAM_TEXT = 0, TK_STREAM_TYPE = 1, TK_STREAM_SHAPE = 2 } tk_stream_t;
+typedef enum { TK_STREAM_TEXT = 0, TK_STREAM_TYPE = 1 } tk_stream_t;
 typedef enum { TK_FOCUS_NONE = 0, TK_FOCUS_TRUE = 1 } tk_focus_t;
 
 // Byte roles, assigned in this fixed order from the free-byte pool (terminals,
-// focus, type marks, UNK, shapes). UNK is the type-mark slot at index n_types+1
+// focus, type marks, UNK). UNK is the type-mark slot at index n_types+1
 // (slot n_types is the O role); they are standing roles of the type axis.
 typedef struct {
   // config
@@ -44,7 +43,6 @@ typedef struct {
   uint8_t b_bos, b_eos;                          // terminals
   uint8_t b_focus_open, b_focus_close;           // focus = true
   uint8_t b_type[TK_TOK_MAXTYPES + 2];           // type byte per {types, O, UNK}
-  uint8_t b_shape[TK_TOK_NSHAPE];                // shape classes
   int n_assigned;                                // count drawn from pool (for persist check)
 
   tk_iumap_t *ngram_map;                         // dense gram-id map (owned)
@@ -59,14 +57,19 @@ static int tk_tokenizer_gc (lua_State *L);
 
 // ---------------------------------------------------------------------------
 // Byte assigner: a deterministic-from-config draw over the free-byte pool.
-// Pool: 0x01-0x08, 0x0E-0x1F, 0x7F (27) always; + 'A'-'Z' and ws-controls
-// 0x09-0x0D when normalize (they can never appear in normalized literal text).
-// >= 0x80 is never used (UTF-8 passthrough). Roles drawn in fixed order.
+// TEXT stream pool: 0x01-0x08, 0x0E-0x1F, 0x7F (27) always; + 'A'-'Z' and ws-controls
+// 0x09-0x0D when normalize (they can never appear in normalized literal text); >= 0x80 avoided
+// (UTF-8 passthrough). The TYPE stream renders ONLY sentinel bytes (no literal text), so
+// nothing can collide -- they draw from the full 0x01-0xFF range. Roles drawn in fixed order.
 // ---------------------------------------------------------------------------
-typedef struct { uint8_t pool[64]; int n, i; } tk_assigner_t;
+typedef struct { uint8_t pool[256]; int n, i; } tk_assigner_t;
 
-static void tk_assigner_init (tk_assigner_t *a, int normalize) {
+static void tk_assigner_init (tk_assigner_t *a, int normalize, int full) {
   a->n = 0; a->i = 0;
+  if (full) {
+    for (int b = 0x01; b <= 0xFF; b++) a->pool[a->n++] = (uint8_t) b;
+    return;
+  }
   for (int b = 0x01; b <= 0x08; b++) a->pool[a->n++] = (uint8_t) b;
   for (int b = 0x0E; b <= 0x1F; b++) a->pool[a->n++] = (uint8_t) b;
   a->pool[a->n++] = 0x7F;
@@ -88,13 +91,12 @@ static uint8_t tk_assign (lua_State *L, tk_assigner_t *a, const char *role, int 
 // Run the assigner over the config's roles (fixed order). Returns total assigned.
 static int tk_tokenizer_assign (lua_State *L, tk_tokenizer_t *t) {
   tk_assigner_t a;
-  tk_assigner_init(&a, t->normalize);
+  tk_assigner_init(&a, t->normalize, t->stream != TK_STREAM_TEXT);
   int nt = t->n_types;
   // upper bound on roles, for the error message
   int need = (t->terminals ? 2 : 0)
            + (t->focus == TK_FOCUS_TRUE ? 2 : 0)
-           + (t->stream == TK_STREAM_TYPE ? (nt + 2) : 0)
-           + (t->stream == TK_STREAM_SHAPE ? TK_TOK_NSHAPE : 0);
+           + (t->stream == TK_STREAM_TYPE ? (nt + 2) : 0);
 
   if (t->terminals) {
     t->b_bos = tk_assign(L, &a, "terminals", need);
@@ -107,10 +109,6 @@ static int tk_tokenizer_assign (lua_State *L, tk_tokenizer_t *t) {
   if (t->stream == TK_STREAM_TYPE) {
     for (int k = 0; k < nt + 2; k++)
       t->b_type[k] = tk_assign(L, &a, "type", need);
-  }
-  if (t->stream == TK_STREAM_SHAPE) {
-    for (int k = 0; k < TK_TOK_NSHAPE; k++)
-      t->b_shape[k] = tk_assign(L, &a, "shape", need);
   }
   t->n_assigned = a.i;
   return a.i;
@@ -130,14 +128,10 @@ static int tk_tokenizer_create_lua (lua_State *L) {
   if (cfg.ngram_min < 1 || cfg.ngram_min > cfg.ngram_max)
     return luaL_error(L, "tokenizer: need 1 <= ngram_min <= ngram_max");
 
-  // types=true: replace token spans with the external tagger's type byte (skeleton).
-  // shapes=true: per-token shape byte, boundaries+class derived internally (no input).
-  // Mutually exclusive; neither => plain text stream.
+  // types=true: replace the provided cells with the external tagger's type byte (skeleton). Otherwise
+  // plain text stream.
   int want_types = tk_lua_foptboolean(L, 1, "tokenizer", "types", false);
-  int want_shapes = tk_lua_foptboolean(L, 1, "tokenizer", "shapes", false);
-  if (want_types && want_shapes)
-    return luaL_error(L, "tokenizer: types and shapes are mutually exclusive");
-  cfg.stream = want_types ? TK_STREAM_TYPE : (want_shapes ? TK_STREAM_SHAPE : TK_STREAM_TEXT);
+  cfg.stream = want_types ? TK_STREAM_TYPE : TK_STREAM_TEXT;
 
   cfg.normalize = tk_lua_foptboolean(L, 1, "tokenizer", "normalize", false);
   cfg.terminals = tk_lua_foptboolean(L, 1, "tokenizer", "terminals", false);
@@ -159,7 +153,7 @@ static int tk_tokenizer_create_lua (lua_State *L) {
 
   // VALIDITY hard errors
   if (cfg.normalize && cfg.stream != TK_STREAM_TEXT)
-    return luaL_error(L, "tokenizer: normalize only valid on the text stream (no types/shapes)");
+    return luaL_error(L, "tokenizer: normalize only valid on the text stream (not types)");
 
   tk_tokenizer_t *t = tk_lua_newuserdata(L, tk_tokenizer_t, TK_TOK_MT,
     tk_tokenizer_mt_fns, tk_tokenizer_gc);
@@ -226,11 +220,6 @@ static inline size_t tk_pack_row (const uint8_t *buf, size_t len, int nmin, int 
   return count;
 }
 
-static int tk_i64_cmp (const void *a, const void *b) {
-  int64_t x = *(const int64_t *) a, y = *(const int64_t *) b;
-  return (x > y) - (x < y);
-}
-
 // Marker-collision guard (DECIDED: scrub, not assert): fold any byte in the
 // assigner's non-normalize marker pool that appears in literal text to space, so
 // literal bytes can never alias an injected marker. normalize=true makes this moot
@@ -240,33 +229,6 @@ static int tk_i64_cmp (const void *a, const void *b) {
 static inline uint8_t tk_scrub (uint8_t b) {
   if ((b >= 0x01 && b <= 0x08) || (b >= 0x0E && b <= 0x1F) || b == 0x7F) return ' ';
   return b;
-}
-
-// shape class of one context span's ORIGINAL bytes (one single-byte symbol per token):
-//   0=Xx Titlecase   1=XX all-caps(>=2)   2=xx lowercase   3=dd digits   4=punct
-//   5=mix (fallback / non-ASCII / camelCase)   6=X single cap (initial)
-//   7=Xp caps + internal punct, no lower/digit (U.N., AT&T, J.)
-//   8=an alphanumeric: digit + letter (B2B, 3M, F1)
-static int tk_shape_class (const char *t, int64_t s, int64_t e) {
-  int up = 0, lo = 0, dig = 0, pun = 0, oth = 0, first_up = 0, n = 0;
-  for (int64_t i = s; i < e; i++) {
-    uint8_t c = (uint8_t) t[i];
-    if (n == 0 && c >= 'A' && c <= 'Z') first_up = 1;
-    if (c >= 'A' && c <= 'Z') up++;
-    else if (c >= 'a' && c <= 'z') lo++;
-    else if (c >= '0' && c <= '9') dig++;
-    else if (c < 0x80) pun++;
-    else oth++;
-    n++;
-  }
-  if (up && !lo && !dig && !pun && !oth) return (n == 1) ? 6 : 1;   // X (single cap) / XX
-  if (lo && !up && !dig && !pun && !oth) return 2;                  // xx
-  if (dig && !up && !lo && !pun && !oth) return 3;                  // dd
-  if (pun && !up && !lo && !dig && !oth) return 4;                  // punct
-  if (dig && (up || lo) && !oth) return 8;                          // an (alphanumeric)
-  if (up && pun && !lo && !dig && !oth) return 7;                   // Xp (dotted/amp caps)
-  if (first_up && lo && !dig && !oth) return 0;                     // Xx
-  return 5;                                                         // mix
 }
 
 // map a context_types value to the type-mark slot: types 0..n-1, O=n, UNK=n+1.
@@ -279,7 +241,7 @@ static inline int tk_type_slot (int t, int n_types) {
 
 // Row render context: unifies literal-append and marker-insert across normalize
 // modes. text stream may normalize (literal runs via the stream; prev_space carries,
-// markers reset it); type/shape are symbol streams (norm = 0, all writes are marks).
+// markers reset it); type is a symbol stream (norm = 0, all writes are marks).
 typedef struct { uint8_t *buf; size_t w; int norm; tk_norm_stream_t ns; } tk_render_t;
 static inline void tk_render_init (tk_render_t *r, uint8_t *buf, int norm) {
   r->buf = buf; r->w = 0; r->norm = norm;
@@ -336,21 +298,6 @@ static size_t tk_render_row (
       tk_render_content(&r, t->b_type[slot]);
     }
     if (efocus != TK_FOCUS_NONE && fo_done && !fc_done) tk_render_mark(&r, t->b_focus_close);
-
-  } else { // TK_STREAM_SHAPE: word tokens derived from whitespace (no external spans)
-    bool fo_done = false, fc_done = false;
-    size_t p = 0;
-    while (p < tlen) {
-      while (p < tlen && text[p] == ' ') p++;
-      if (p >= tlen) break;
-      size_t ws = p;
-      while (p < tlen && text[p] != ' ') p++;
-      int sc = tk_shape_class(text, (int64_t) ws, (int64_t) p);
-      if (efocus != TK_FOCUS_NONE && !fo_done && ws >= s) { tk_render_mark(&r, t->b_focus_open); fo_done = true; }
-      if (efocus != TK_FOCUS_NONE && fo_done && !fc_done && ws >= e) { tk_render_mark(&r, t->b_focus_close); fc_done = true; }
-      tk_render_content(&r, t->b_shape[sc]);
-    }
-    if (efocus != TK_FOCUS_NONE && fo_done && !fc_done) tk_render_mark(&r, t->b_focus_close);
   }
 
   if (t->terminals) tk_render_mark(&r, t->b_eos);
@@ -374,7 +321,7 @@ static int64_t tk_emit_row (
     uint32_t it = tk_iumap_get(map, packed[i]);
     if (it != mend) packed[nv++] = tk_iumap_val(map, it);
   }
-  qsort(packed, (size_t) nv, sizeof(int64_t), tk_i64_cmp);
+  ks_introsort(tk_ivec_asc, (size_t) nv, packed);
   int64_t nnz = 0;
   for (int64_t i = 0; i < nv; ) {
     int64_t tk = packed[i]; float c = 0.0f;
@@ -407,8 +354,7 @@ static int tk_tokenizer_tokenize_lua (lua_State *L) {
   luaL_checktype(L, -1, LUA_TTABLE);
   int texts_idx = lua_gettop(L);
   // focus = { offsets, starts, ends } -- which span to bracket (rows).
-  // types  = { offsets, starts, ends, types } -- token spans + tagger byte (skeleton).
-  // shapes need no input (boundaries + class derived from the text internally).
+  // types  = { offsets, starts, ends, types } -- cell spans + tagger byte (skeleton).
   tk_ivec_t *fo = NULL, *fs = NULL, *fe = NULL;
   lua_getfield(L, 2, "focus");
   if (!lua_isnil(L, -1)) {
@@ -449,8 +395,8 @@ static int tk_tokenizer_tokenize_lua (lua_State *L) {
 
   int64_t n_rows = per_span ? fo->a[(int64_t)(fo->n - 1)] : n_samples;
 
-  // worst-case row buffer: doc bytes (text/shape rows <= text+markers) OR the
-  // type-skeleton's one-byte-per-token count, whichever is larger, + markers.
+  // worst-case row buffer: doc bytes (text rows <= text+markers) OR the
+  // type-skeleton's one-byte-per-cell count, whichever is larger, + markers.
   size_t maxbuf = 8;
   for (int64_t d = 0; d < n_samples; d++) {
     size_t need = text_lens[d] + 8;
@@ -504,7 +450,7 @@ static int tk_tokenizer_tokenize_lua (lua_State *L) {
           co ? co->a[d] : 0, co ? co->a[d + 1] : 0, cs, ce, cty, 0);
         size_t count = tk_pack_row(rb, w, t->ngram_min, t->ngram_max, pk);
         for (size_t i = 0; i < count; i++) { int absent; tk_iumap_put(lmap, pk[i], &absent); }
-        qsort(pk, count, sizeof(int64_t), tk_i64_cmp);
+        ks_introsort(tk_ivec_asc, (size_t) count, pk);
         int64_t dc = 0;
         for (size_t i = 0; i < count; i++) if (i == 0 || pk[i] != pk[i - 1]) dc++;
         nnz[row] = dc;
@@ -521,7 +467,7 @@ static int tk_tokenizer_tokenize_lua (lua_State *L) {
     int64_t *keys = (int64_t *) malloc((size_t) (V > 0 ? V : 1) * sizeof(int64_t));
     int64_t ki = 0, k;
     tk_umap_foreach_keys(map, k, ({ keys[ki++] = k; }));
-    qsort(keys, (size_t) V, sizeof(int64_t), tk_i64_cmp);
+    ks_introsort(tk_ivec_asc, (size_t) V, keys);
     for (int64_t i = 0; i < V; i++) { uint32_t it = tk_iumap_get(map, keys[i]); tk_iumap_setval(map, it, i); }
     free(keys);
   }
@@ -591,7 +537,7 @@ static int tk_tokenizer_persist_lua (lua_State *L) {
   tk_tokenizer_t *t = tk_tokenizer_peek(L, 1);
   FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
   tk_lua_fwrite(L, "TKtk", 1, 4, fh);
-  uint8_t version = 5;   // v5 removed bpx from the config block
+  uint8_t version = 8;   // v8 removed the shape stream (b_shape) from the config block
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   size_t cfgsz = offsetof(tk_tokenizer_t, ngram_map);
   tk_lua_fwrite(L, t, 1, cfgsz, fh);
@@ -609,7 +555,7 @@ static int tk_tokenizer_load_lua (lua_State *L) {
   if (memcmp(magic, "TKtk", 4) != 0) { tk_lua_fclose(L, fh); return luaL_error(L, "tokenizer.load: bad magic"); }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 5) { tk_lua_fclose(L, fh);
+  if (version != 8) { tk_lua_fclose(L, fh);
     return luaL_error(L, "tokenizer.load: unsupported version %d (old layout; refit required)", (int) version); }
   tk_tokenizer_t cfg;
   memset(&cfg, 0, sizeof(cfg));
@@ -694,7 +640,7 @@ static int tk_tokenizer_tokenize_raw_lua (lua_State *L) {
     }
 
     size_t count = tk_pack_row(buf, blen, ngram_min, ngram_max, packed);
-    qsort(packed, count, sizeof(int64_t), tk_i64_cmp);
+    ks_introsort(tk_ivec_asc, (size_t) count, packed);
     for (size_t i = 0; i < count; ) {
       int64_t key = packed[i]; float c = 0.0f;
       while (i < count && packed[i] == key) { c += 1.0f; i++; }

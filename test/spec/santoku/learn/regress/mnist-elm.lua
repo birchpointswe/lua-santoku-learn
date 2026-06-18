@@ -2,7 +2,7 @@ local csr_m = require("santoku.csr")
 local csr = require("santoku.learn.csr")
 local ds = require("santoku.learn.dataset")
 local optimize = require("santoku.learn.optimize")
-local spectral = require("santoku.learn.spectral")
+local elm = require("santoku.learn.elm")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local util = require("santoku.learn.util")
@@ -15,19 +15,21 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   data = { ttr = 0.8, tvr = 0.1, max = nil, features = 784 },
-  -- emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = "rq" },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "expcos", "rq", "matern52", "cosine", "geolaplace", "arccos1" } },
+  emb = { n_hidden = 1024 * 8 },
   ridge = {
-    lambda = { min = 1e-4, max = 1e1, log = true, def = 1.6265e-03 },
-    propensity_a = { min = 0, max = 4, def = 3.1609 },
-    propensity_b = { min = 0, max = 8, def = 0.2904 },
+    mode = { "relu", "linear" },
+    -- mode = { "rbf" },
+    lambda = { def = 1.6772e-03 },
+    propensity_a = { def = 1.9288 },
+    propensity_b = { def = 7.8035 },
+    gamma = { def = 1.2 },
     classes = 10,
     search_trials = 0,
     k = 1,
   },
 }
 
-test("mnist classifier", function ()
+test("mnist-elm classifier", function ()
 
   local stopwatch = utc.stopwatch()
   local function sw()
@@ -53,24 +55,26 @@ test("mnist classifier", function ()
     dataset.problem_offsets, dataset.problem_neighbors, validate.ids)
   local val_p_val = csr.normalize(val_p_off)
 
-  str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
-  local sp_enc, ridge_obj, val_codes, _, decider = optimize.krr({
-    kernel = cfg.emb.kernel, offsets = train_p_off, tokens = train_p_nbr, values = train_p_val,
+  str.printf("[ELM] Encoding n_hidden=%d\n", cfg.emb.n_hidden)
+  local sp_enc, ridge_obj, val_codes, _, decider = optimize.elm({
+    offsets = train_p_off, tokens = train_p_nbr, values = train_p_val,
     n_samples = train.n, n_tokens = n_features,
-    n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
+    n_hidden = cfg.emb.n_hidden,
     label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
     val_offsets = val_p_off, val_tokens = val_p_nbr, val_values = val_p_val,
     val_n_samples = validate.n,
     val_expected_offsets = val_label_off, val_expected_neighbors = val_label_nbr,
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
     propensity_b = cfg.ridge.propensity_b,
+    gamma = cfg.ridge.gamma,
+    mode = cfg.ridge.mode,
     k = cfg.ridge.k, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
   do  -- persist/load parity: round-tripped encoder must produce identical codes
     local p = os.tmpname()
     sp_enc:persist(p)
-    local enc2 = spectral.load(p)
+    local enc2 = elm.load(p)
     os.remove(p)
     local vc2 = enc2:encode({ offsets = val_p_off, tokens = val_p_nbr, values = val_p_val, n_samples = validate.n })
     local nchk = val_codes:size()

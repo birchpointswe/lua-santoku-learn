@@ -879,14 +879,6 @@ static inline int tm_encode (lua_State *L) {
   uint64_t n_lm_req = tk_lua_foptunsigned(L, 1, "encode", "n_landmarks", 0);
   double trace_tol = tk_lua_foptnumber(L, 1, "encode", "trace_tol", 0.0);
 
-  lua_getfield(L, 1, "transform");
-  int transform_sign = 0, transform_codes = 0;
-  if (lua_isstring(L, -1) && strcmp(lua_tostring(L, -1), "sign") == 0)
-    transform_sign = 1;
-  else if (lua_toboolean(L, -1))
-    transform_codes = 1;
-  lua_pop(L, 1);
-
   lua_getfield(L, 1, "chol_buf");
   tk_fvec_t *chol_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "chol_buf");
   lua_pop(L, 1);
@@ -975,26 +967,6 @@ static inline int tm_encode (lua_State *L) {
   ctx->full_chol = full_chol;
   ctx->full_chol_external = (chol_buf != NULL);
 
-  tk_fvec_t *train_codes = NULL;
-  int train_codes_idx = 0;
-  tk_cvec_t *sign_cvec = NULL;
-  int sign_cvec_idx = 0;
-  uint64_t sign_row_bytes = 0;
-  uint8_t *sign_data = NULL;
-
-  if (transform_codes) {
-    train_codes = tk_fvec_create(L, nc * d);
-    train_codes->n = nc * d;
-    train_codes_idx = lua_gettop(L);
-  } else if (transform_sign) {
-    sign_row_bytes = TK_CVEC_BITS_BYTES(d);
-    sign_cvec = tk_cvec_create(L, nc * sign_row_bytes);
-    sign_cvec->n = nc * sign_row_bytes;
-    tk_cvec_zero(sign_cvec);
-    sign_cvec_idx = lua_gettop(L);
-    sign_data = (uint8_t *)sign_cvec->a;
-  }
-
   ctx->projection = (float *)calloc(m * m, sizeof(float));
   for (uint64_t i = 0; i < m; i++) ctx->projection[i * m + i] = 1.0f;
   cblas_strsm(CblasRowMajor, CblasLeft, CblasLower, CblasTrans, CblasNonUnit,
@@ -1004,66 +976,37 @@ static inline int tm_encode (lua_State *L) {
   int gram_result_idx = 0;
   if (build_gram_tiled) {
     uint64_t unl = (uint64_t)gram_nl;
-    double *XtX = (double *)calloc(d * d, sizeof(double));
+    // Float gram built directly on full_chol (column-major nc x d, lda=nc): one ssyrk, no tile_buf, no
+    // double widening. col_mean stays a double reduction (accuracy) -> cm_f for the float centering.
+    // Eigen XtX comes from the pool (it becomes evecs_f); the locked path's XtX is a transient malloc.
+    float *XtX = do_solve
+      ? (float *)malloc((uint64_t)d * d * sizeof(float))
+      : (float *)tk_gram_pool_get(L, (uint64_t)d * d * sizeof(float));
     double *col_mean = (double *)calloc(d, sizeof(double));
+    float *cm_f = (float *)malloc(d * sizeof(float));
     double *eigenvals = (double *)malloc(d * sizeof(double));
-    if (!XtX || !col_mean || !eigenvals) {
-      free(XtX); free(col_mean); free(eigenvals);
+    if (!XtX || !col_mean || !cm_f || !eigenvals) {
+      if (do_solve) free(XtX); else tk_gram_pool_put(L, XtX, (uint64_t)d * d * sizeof(float));
+      free(col_mean); free(cm_f); free(eigenvals);
       return luaL_error(L, "gram tiled: out of memory");
     }
-    int64_t tile_size = sample_tile_size;
-    double *tile_buf = (double *)malloc((uint64_t)tile_size * d * sizeof(double));
-    if (!tile_buf) {
-      free(XtX); free(col_mean); free(eigenvals);
-      return luaL_error(L, "gram tiled: out of memory (tile_buf)");
+    #pragma omp parallel for schedule(static)
+    for (int64_t j = 0; j < (int64_t)d; j++) {
+      double s = 0.0;
+      const float *src = full_chol + (uint64_t)j * nc;
+      for (uint64_t i = 0; i < nc; i++) s += (double)src[i];
+      col_mean[j] = s / (double)nc;
+      cm_f[j] = (float)col_mean[j];
     }
-    for (int64_t base = 0; base < (int64_t)nc; base += tile_size) {
-      int64_t bs = (base + tile_size <= (int64_t)nc) ? tile_size : (int64_t)nc - base;
-      uint64_t ubs = (uint64_t)bs;
-      if (transform_codes) {
-        for (uint64_t j = 0; j < d; j++) {
-          double *col = tile_buf + j * ubs;
-          float *src = full_chol + j * nc + base;
-          for (uint64_t i = 0; i < ubs; i++) {
-            double v = (double)src[i];
-            col[i] = v;
-            col_mean[j] += v;
-            train_codes->a[((uint64_t)base + i) * d + j] = src[i];
-          }
-        }
-      } else if (transform_sign) {
-        for (uint64_t j = 0; j < d; j++) {
-          double *col = tile_buf + j * ubs;
-          float *src = full_chol + j * nc + base;
-          for (uint64_t i = 0; i < ubs; i++) {
-            double v = (double)src[i];
-            col[i] = v;
-            col_mean[j] += v;
-            if (v >= 0.0)
-              sign_data[((uint64_t)base + i) * sign_row_bytes + j / 8] |= (1u << (j % 8));
-          }
-        }
-      } else {
-        for (uint64_t j = 0; j < d; j++) {
-          double *col = tile_buf + j * ubs;
-          float *src = full_chol + j * nc + base;
-          for (uint64_t i = 0; i < ubs; i++) {
-            double v = (double)src[i];
-            col[i] = v;
-            col_mean[j] += v;
-          }
-        }
-      }
-      cblas_dsyrk(CblasColMajor, CblasUpper, CblasTrans,
-        (int)d, (int)bs, 1.0, tile_buf, (int)bs, 1.0, XtX, (int)d);
-    }
-    for (uint64_t j = 0; j < d; j++)
-      col_mean[j] /= (double)nc;
+    cblas_ssyrk(CblasColMajor, CblasUpper, CblasTrans,
+      (int)d, (int)nc, 1.0f, full_chol, (int)nc, 0.0f, XtX, (int)d);
     double *label_counts = (double *)calloc(unl, sizeof(double));
     double *y_mean_arr = (double *)calloc(unl, sizeof(double));
-    if (!label_counts || !y_mean_arr) {
-      free(label_counts); free(y_mean_arr);
-      free(XtX); free(col_mean); free(eigenvals); free(tile_buf);
+    float *ym_f = (float *)malloc(unl * sizeof(float));
+    if (!label_counts || !y_mean_arr || !ym_f) {
+      free(label_counts); free(y_mean_arr); free(ym_f);
+      if (do_solve) free(XtX); else tk_gram_pool_put(L, XtX, (uint64_t)d * d * sizeof(float));
+      free(col_mean); free(cm_f); free(eigenvals);
       return luaL_error(L, "gram tiled: out of memory (label stats)");
     }
     for (uint64_t s = 0; s < nc; s++)
@@ -1072,32 +1015,30 @@ static inline int tm_encode (lua_State *L) {
         label_counts[lbl] += 1.0;
         y_mean_arr[lbl] += 1.0;
       }
-    for (int64_t l = 0; l < gram_nl; l++)
+    for (int64_t l = 0; l < gram_nl; l++) {
       y_mean_arr[l] /= (double)nc;
-    cblas_dsyr(CblasColMajor, CblasUpper, (int)d,
-      -(double)nc, col_mean, 1, XtX, (int)d);
+      ym_f[l] = (float)y_mean_arr[l];
+    }
+    cblas_ssyr(CblasColMajor, CblasUpper, (int)d, -(float)nc, cm_f, 1, XtX, (int)d);
     if (do_solve) {
       double mean_eig = 0.0;
-      for (uint64_t i = 0; i < d; i++) mean_eig += XtX[i * d + i];
+      for (uint64_t i = 0; i < d; i++) mean_eig += (double)XtX[i * d + i];
       mean_eig /= (double)d;
-      double mu = solve_lambda * mean_eig + mean_eig * 1e-7;
-      for (uint64_t i = 0; i < d; i++) XtX[i * d + i] += mu;
-      int info = LAPACKE_dpotrf(LAPACK_COL_MAJOR, 'U', (int)d, XtX, (int)d);
-      if (info != 0) {
-        free(label_counts); free(y_mean_arr);
-        free(XtX); free(col_mean); free(eigenvals); free(tile_buf);
-        return luaL_error(L, "gram tiled cholesky: dpotrf failed (info=%d)", info);
-      }
       free(eigenvals);
-      int64_t B = tile_labels;
+      if (tk_spotrf_escalate(XtX, (int64_t)d, solve_lambda, mean_eig) < 0.0) {
+        free(label_counts); free(y_mean_arr); free(ym_f);
+        free(XtX); free(col_mean); free(cm_f);
+        return luaL_error(L, "gram tiled cholesky: spotrf failed (singular after jitter escalation)");
+      }
+      int64_t B = tile_labels < gram_nl ? tile_labels : gram_nl;   // a tile is never wider than n_labels
       float *W_baked_f = (float *)malloc((uint64_t)d * unl * sizeof(float));
       double *intercept = (double *)malloc(unl * sizeof(double));
-      double *xty_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
-      double *Bcm = (double *)malloc(d * (uint64_t)B * sizeof(double));
+      float *xty_tile = (float *)malloc(d * (uint64_t)B * sizeof(float));
+      float *Bcm = (float *)malloc(d * (uint64_t)B * sizeof(float));
       if (!W_baked_f || !intercept || !xty_tile || !Bcm) {
         free(W_baked_f); free(intercept); free(xty_tile); free(Bcm);
-        free(label_counts); free(y_mean_arr);
-        free(XtX); free(col_mean); free(tile_buf);
+        free(label_counts); free(y_mean_arr); free(ym_f);
+        free(XtX); free(col_mean); free(cm_f);
         return luaL_error(L, "gram tiled cholesky: out of memory");
       }
       double C = 0.0;
@@ -1105,56 +1046,45 @@ static inline int tm_encode (lua_State *L) {
         C = (log((double)nc) - 1.0) * pow(solve_prop_b + 1.0, solve_prop_a);
       for (int64_t tl_start = 0; tl_start < gram_nl; tl_start += B) {
         int64_t actual_B = (tl_start + B <= gram_nl) ? B : gram_nl - tl_start;
-        memset(xty_tile, 0, d * (uint64_t)actual_B * sizeof(double));
-        for (int64_t base = 0; base < (int64_t)nc; base += tile_size) {
-          int64_t bs = (base + tile_size <= (int64_t)nc) ? tile_size : (int64_t)nc - base;
-          uint64_t ubs = (uint64_t)bs;
-          for (uint64_t j = 0; j < d; j++) {
-            double *col = tile_buf + j * ubs;
-            float *src = full_chol + j * nc + base;
-            for (uint64_t i = 0; i < ubs; i++)
-              col[i] = (double)src[i];
-          }
-          #pragma omp parallel for schedule(static)
-          for (int64_t k = 0; k < (int64_t)d; k++) {
-            double *col = tile_buf + (uint64_t)k * ubs;
-            for (uint64_t i = 0; i < ubs; i++) {
-              uint64_t si = (uint64_t)base + i;
-              for (int64_t j = gram_lbl_off->a[si]; j < gram_lbl_off->a[si + 1]; j++) {
-                int64_t lbl = gram_lbl_nbr->a[j];
-                if (lbl >= tl_start && lbl < tl_start + actual_B)
-                  xty_tile[k * actual_B + (lbl - tl_start)] += col[i];
-              }
+        memset(xty_tile, 0, d * (uint64_t)actual_B * sizeof(float));
+        #pragma omp parallel for schedule(static)
+        for (int64_t k = 0; k < (int64_t)d; k++) {
+          const float *src = full_chol + (uint64_t)k * nc;
+          for (uint64_t i = 0; i < nc; i++) {
+            for (int64_t j = gram_lbl_off->a[i]; j < gram_lbl_off->a[i + 1]; j++) {
+              int64_t lbl = gram_lbl_nbr->a[j];
+              if (lbl >= tl_start && lbl < tl_start + actual_B)
+                xty_tile[k * actual_B + (lbl - tl_start)] += src[i];
             }
           }
         }
-        cblas_dger(CblasRowMajor, (int)d, (int)actual_B,
-          -(double)nc, col_mean, 1, y_mean_arr + tl_start, 1, xty_tile, (int)actual_B);
+        cblas_sger(CblasRowMajor, (int)d, (int)actual_B,
+          -(float)nc, cm_f, 1, ym_f + tl_start, 1, xty_tile, (int)actual_B);
         if (solve_do_prop) {
           for (int64_t k = 0; k < (int64_t)d; k++)
             for (int64_t tl = 0; tl < actual_B; tl++)
               xty_tile[k * actual_B + tl] *=
-                (1.0 + C / pow(label_counts[tl_start + tl] + solve_prop_b, solve_prop_a));
+                (float)(1.0 + C / pow(label_counts[tl_start + tl] + solve_prop_b, solve_prop_a));
         }
         for (int64_t k = 0; k < (int64_t)d; k++)
           for (int64_t tl = 0; tl < actual_B; tl++)
             Bcm[(uint64_t)tl * d + (uint64_t)k] = xty_tile[k * actual_B + tl];
-        LAPACKE_dpotrs(LAPACK_COL_MAJOR, 'U', (int)d, (int)actual_B, XtX, (int)d, Bcm, (int)d);
+        LAPACKE_spotrs(LAPACK_COL_MAJOR, 'U', (int)d, (int)actual_B, XtX, (int)d, Bcm, (int)d);
         for (int64_t k = 0; k < (int64_t)d; k++)
           for (int64_t tl = 0; tl < actual_B; tl++)
             W_baked_f[(uint64_t)k * unl + (uint64_t)(tl_start + tl)] =
-              (float)Bcm[(uint64_t)tl * d + (uint64_t)k];
+              Bcm[(uint64_t)tl * d + (uint64_t)k];
         for (int64_t tl = 0; tl < actual_B; tl++) {
           double prop = solve_do_prop
             ? (1.0 + C / pow(label_counts[tl_start + tl] + solve_prop_b, solve_prop_a)) : 1.0;
           intercept[tl_start + tl] = prop * y_mean_arr[tl_start + tl]
-            - cblas_ddot((int)d, Bcm + (uint64_t)tl * d, 1, col_mean, 1);
+            - (double)cblas_sdot((int)d, Bcm + (uint64_t)tl * d, 1, cm_f, 1);
         }
       }
-      free(xty_tile); free(Bcm); free(tile_buf);
+      free(xty_tile); free(Bcm);
       if (!ctx->full_chol_external) free(full_chol);
       ctx->full_chol = NULL;
-      free(XtX);
+      free(XtX); free(cm_f); free(ym_f);
       tk_dvec_t *lc = tk_dvec_create(L, unl);
       lc->n = unl;
       int lc_idx = lua_gettop(L);
@@ -1164,10 +1094,19 @@ static inline int tm_encode (lua_State *L) {
         lc, lc_idx, mean_eig, (int64_t)nc, (int64_t)d, gram_nl, tile_labels);
       gram_result_idx = lua_gettop(L);
     } else {
-    LAPACKE_dsyevd(LAPACK_COL_MAJOR, 'V', 'U', (int)d, XtX, (int)d, eigenvals);
+    float *ef = (float *)malloc(d * sizeof(float));
+    if (!ef) {
+      free(label_counts); free(y_mean_arr); free(ym_f);
+      tk_gram_pool_put(L, XtX, (uint64_t)d * d * sizeof(float));
+      free(col_mean); free(cm_f); free(eigenvals);
+      return luaL_error(L, "gram tiled gram: out of memory (ef)");
+    }
+    LAPACKE_ssyevd(LAPACK_COL_MAJOR, 'V', 'U', (int)d, XtX, (int)d, ef);
+    for (uint64_t i = 0; i < d; i++) eigenvals[i] = (double)ef[i];
+    free(ef);
 
     {
-      int64_t B = tile_labels;
+      int64_t B = tile_labels < gram_nl ? tile_labels : gram_nl;   // a tile is never wider than n_labels
       lua_getfield(L, 1, "pqty_buf");
       tk_fvec_t *pqty_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "pqty_buf");
       int pqty_buf_idx = pqty_buf ? lua_gettop(L) : 0;
@@ -1180,58 +1119,49 @@ static inline int tm_encode (lua_State *L) {
       } else {
         pqty_f = (float *)calloc(d * unl, sizeof(float));
       }
-      double *xty_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
-      double *pqty_tile = (double *)malloc(d * (uint64_t)B * sizeof(double));
+      float *xty_tile = (float *)malloc(d * (uint64_t)B * sizeof(float));
+      float *pqty_tile = (float *)malloc(d * (uint64_t)B * sizeof(float));
       if (!xty_tile || !pqty_tile) {
         free(xty_tile); free(pqty_tile);
         if (!pqty_buf) free(pqty_f);
-        free(label_counts); free(y_mean_arr);
-        free(XtX); free(col_mean); free(eigenvals); free(tile_buf);
+        free(label_counts); free(y_mean_arr); free(ym_f);
+        tk_gram_pool_put(L, XtX, (uint64_t)d * d * sizeof(float));
+        free(col_mean); free(cm_f); free(eigenvals);
         return luaL_error(L, "gram tiled gram: out of memory");
       }
       for (int64_t tl_start = 0; tl_start < gram_nl; tl_start += B) {
         int64_t actual_B = (tl_start + B <= gram_nl) ? B : gram_nl - tl_start;
-        memset(xty_tile, 0, d * (uint64_t)actual_B * sizeof(double));
-        for (int64_t base = 0; base < (int64_t)nc; base += tile_size) {
-          int64_t bs = (base + tile_size <= (int64_t)nc) ? tile_size : (int64_t)nc - base;
-          uint64_t ubs = (uint64_t)bs;
-          for (uint64_t j = 0; j < d; j++) {
-            double *col = tile_buf + j * ubs;
-            float *src = full_chol + j * nc + base;
-            for (uint64_t i = 0; i < ubs; i++)
-              col[i] = (double)src[i];
-          }
-          #pragma omp parallel for schedule(static)
-          for (int64_t k = 0; k < (int64_t)d; k++) {
-            double *col = tile_buf + (uint64_t)k * ubs;
-            for (uint64_t i = 0; i < ubs; i++) {
-              uint64_t si = (uint64_t)base + i;
-              for (int64_t j = gram_lbl_off->a[si]; j < gram_lbl_off->a[si + 1]; j++) {
-                int64_t lbl = gram_lbl_nbr->a[j];
-                if (lbl >= tl_start && lbl < tl_start + actual_B)
-                  xty_tile[k * actual_B + (lbl - tl_start)] += col[i];
-              }
+        memset(xty_tile, 0, d * (uint64_t)actual_B * sizeof(float));
+        #pragma omp parallel for schedule(static)
+        for (int64_t k = 0; k < (int64_t)d; k++) {
+          const float *src = full_chol + (uint64_t)k * nc;
+          for (uint64_t i = 0; i < nc; i++) {
+            for (int64_t j = gram_lbl_off->a[i]; j < gram_lbl_off->a[i + 1]; j++) {
+              int64_t lbl = gram_lbl_nbr->a[j];
+              if (lbl >= tl_start && lbl < tl_start + actual_B)
+                xty_tile[k * actual_B + (lbl - tl_start)] += src[i];
             }
           }
         }
-        cblas_dger(CblasRowMajor, (int)d, (int)actual_B,
-          -(double)nc, col_mean, 1, y_mean_arr + tl_start, 1, xty_tile, (int)actual_B);
-        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-          (int)d, (int)actual_B, (int)d, 1.0, XtX, (int)d,
-          xty_tile, (int)actual_B, 0.0, pqty_tile, (int)actual_B);
+        cblas_sger(CblasRowMajor, (int)d, (int)actual_B,
+          -(float)nc, cm_f, 1, ym_f + tl_start, 1, xty_tile, (int)actual_B);
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+          (int)d, (int)actual_B, (int)d, 1.0f, XtX, (int)d,
+          xty_tile, (int)actual_B, 0.0f, pqty_tile, (int)actual_B);
         for (int64_t i = 0; i < (int64_t)d; i++)
           for (int64_t tl = 0; tl < actual_B; tl++)
-            pqty_f[i * gram_nl + tl_start + tl] = (float)pqty_tile[i * actual_B + tl];
+            pqty_f[i * gram_nl + tl_start + tl] = pqty_tile[i * actual_B + tl];
       }
-      free(xty_tile); free(pqty_tile); free(tile_buf);
+      free(xty_tile); free(pqty_tile);
       if (!ctx->full_chol_external) free(full_chol);
       ctx->full_chol = NULL;
+      free(cm_f); free(ym_f);
       tk_dvec_t *lc = tk_dvec_create(L, unl);
       lc->n = unl;
       int lc_idx = lua_gettop(L);
       memcpy(lc->a, label_counts, unl * sizeof(double));
       free(label_counts);
-      tk_gram_finalize_tiled(L, XtX, col_mean, y_mean_arr,
+      tk_gram_finalize_tiled_f_native(L, XtX, col_mean, y_mean_arr,
         eigenvals, pqty_f, pqty_buf != NULL, lc, lc_idx,
         (int64_t)nc, (int64_t)d, gram_nl, tile_labels);
       gram_result_idx = lua_gettop(L);
@@ -1245,113 +1175,59 @@ static inline int tm_encode (lua_State *L) {
     }
   } else if (build_gram) {
     uint64_t unl = (uint64_t)gram_nl;
-    double *XtX = (double *)calloc(d * d, sizeof(double));
-    double *xty = (double *)calloc(d * unl, sizeof(double));
+    // Float gram on full_chol (nc x d, lda=nc): one ssyrk + one sgemm for xty, no tile_buf. Targets are
+    // widened to a float Yf once. Eigen XtX -> pool (becomes evecs_f); locked XtX is a transient malloc.
+    float *XtX = do_solve
+      ? (float *)malloc((uint64_t)d * d * sizeof(float))
+      : (float *)tk_gram_pool_get(L, (uint64_t)d * d * sizeof(float));
+    float *xty = (float *)malloc((uint64_t)d * unl * sizeof(float));
     double *col_mean = (double *)calloc(d, sizeof(double));
+    float *cm_f = (float *)malloc(d * sizeof(float));
     double *y_mean_arr = (double *)malloc(unl * sizeof(double));
+    float *ym_f = (float *)malloc(unl * sizeof(float));
     double *eigenvals = (double *)malloc(d * sizeof(double));
-    if (!XtX || !xty || !col_mean || !y_mean_arr || !eigenvals) {
-      free(XtX); free(xty); free(col_mean); free(y_mean_arr); free(eigenvals);
+    float *Yf = (float *)malloc((uint64_t)nc * unl * sizeof(float));
+    if (!XtX || !xty || !col_mean || !cm_f || !y_mean_arr || !ym_f || !eigenvals || !Yf) {
+      if (do_solve) free(XtX); else tk_gram_pool_put(L, XtX, (uint64_t)d * d * sizeof(float));
+      free(xty); free(col_mean); free(cm_f); free(y_mean_arr); free(ym_f); free(eigenvals); free(Yf);
       return luaL_error(L, "gram fusion: out of memory");
     }
-    int64_t tile_size = sample_tile_size;
-    double *tile_buf = (double *)malloc((uint64_t)tile_size * d * sizeof(double));
-    if (!tile_buf) {
-      free(XtX); free(xty); free(col_mean); free(y_mean_arr); free(eigenvals);
-      return luaL_error(L, "gram fusion: out of memory (tile_buf)");
+    #pragma omp parallel for schedule(static)
+    for (int64_t j = 0; j < (int64_t)d; j++) {
+      double s = 0.0;
+      const float *src = full_chol + (uint64_t)j * nc;
+      for (uint64_t i = 0; i < nc; i++) s += (double)src[i];
+      col_mean[j] = s / (double)nc;
+      cm_f[j] = (float)col_mean[j];
     }
-    for (int64_t base = 0; base < (int64_t)nc; base += tile_size) {
-      int64_t bs = (base + tile_size <= (int64_t)nc) ? tile_size : (int64_t)nc - base;
-      uint64_t ubs = (uint64_t)bs;
-      if (transform_codes) {
-        for (uint64_t j = 0; j < d; j++) {
-          double *col = tile_buf + j * ubs;
-          float *src = full_chol + j * nc + base;
-          for (uint64_t i = 0; i < ubs; i++) {
-            double v = (double)src[i];
-            col[i] = v;
-            col_mean[j] += v;
-            train_codes->a[((uint64_t)base + i) * d + j] = src[i];
-          }
-        }
-      } else if (transform_sign) {
-        for (uint64_t j = 0; j < d; j++) {
-          double *col = tile_buf + j * ubs;
-          float *src = full_chol + j * nc + base;
-          for (uint64_t i = 0; i < ubs; i++) {
-            double v = (double)src[i];
-            col[i] = v;
-            col_mean[j] += v;
-            if (v >= 0.0)
-              sign_data[((uint64_t)base + i) * sign_row_bytes + j / 8] |= (1u << (j % 8));
-          }
-        }
-      } else {
-        for (uint64_t j = 0; j < d; j++) {
-          double *col = tile_buf + j * ubs;
-          float *src = full_chol + j * nc + base;
-          for (uint64_t i = 0; i < ubs; i++) {
-            double v = (double)src[i];
-            col[i] = v;
-            col_mean[j] += v;
-          }
-        }
-      }
-      cblas_dsyrk(CblasColMajor, CblasUpper, CblasTrans,
-        (int)d, (int)bs, 1.0, tile_buf, (int)bs, 1.0, XtX, (int)d);
-      cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-        (int)d, (int)gram_nl, (int)bs, 1.0, tile_buf, (int)bs,
-        gram_targets_dv->a + (uint64_t)base * unl, (int)gram_nl,
-        1.0, xty, (int)gram_nl);
-    }
-    free(tile_buf);
-    if (!ctx->full_chol_external) free(full_chol);
-    ctx->full_chol = NULL;
-    for (uint64_t j = 0; j < d; j++)
-      col_mean[j] /= (double)nc;
+    for (uint64_t i = 0; i < nc * unl; i++) Yf[i] = (float)gram_targets_dv->a[i];
     for (int64_t l = 0; l < gram_nl; l++) {
       double s = 0.0;
-      for (uint64_t i = 0; i < nc; i++)
-        s += gram_targets_dv->a[i * unl + (uint64_t)l];
+      for (uint64_t i = 0; i < nc; i++) s += gram_targets_dv->a[i * unl + (uint64_t)l];
       y_mean_arr[l] = s / (double)nc;
+      ym_f[l] = (float)y_mean_arr[l];
     }
+    cblas_ssyrk(CblasColMajor, CblasUpper, CblasTrans,
+      (int)d, (int)nc, 1.0f, full_chol, (int)nc, 0.0f, XtX, (int)d);
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+      (int)d, (int)gram_nl, (int)nc, 1.0f, full_chol, (int)nc,
+      Yf, (int)gram_nl, 0.0f, xty, (int)gram_nl);
+    free(Yf);
+    if (!ctx->full_chol_external) free(full_chol);
+    ctx->full_chol = NULL;
     if (do_solve) {
       free(eigenvals);
-      tk_gram_finalize_cholesky(L, XtX, xty, col_mean, y_mean_arr,
-        NULL, 0, (int64_t)nc, (int64_t)d, gram_nl,
-        solve_lambda, false, 0.0, 0.0);
+      tk_gram_finalize_cholesky_f_baked(L, XtX, xty, cm_f, ym_f, col_mean, y_mean_arr,
+        NULL, 0, (int64_t)nc, (int64_t)d, gram_nl, solve_lambda, false, 0.0, 0.0);
     } else {
-      tk_gram_finalize(L, XtX, xty, col_mean, y_mean_arr,
+      tk_gram_finalize_f_native(L, XtX, xty, cm_f, ym_f, col_mean, y_mean_arr,
         eigenvals, NULL, 0, (int64_t)nc, (int64_t)d, gram_nl);
     }
+    free(cm_f); free(ym_f);
     gram_result_idx = lua_gettop(L);
   }
 
   if (!build_gram && !build_gram_tiled) {
-    #define TK_TILE 32
-    if (transform_codes) {
-      #pragma omp parallel for schedule(static) collapse(2)
-      for (uint64_t jj = 0; jj < d; jj += TK_TILE)
-        for (uint64_t ii = 0; ii < nc; ii += TK_TILE) {
-          uint64_t je = jj + TK_TILE < d ? jj + TK_TILE : d;
-          uint64_t ie = ii + TK_TILE < nc ? ii + TK_TILE : nc;
-          for (uint64_t j = jj; j < je; j++)
-            for (uint64_t i = ii; i < ie; i++)
-              train_codes->a[i * d + j] = full_chol[j * nc + i];
-        }
-    } else if (transform_sign) {
-      #pragma omp parallel for schedule(static) collapse(2)
-      for (uint64_t jj = 0; jj < d; jj += TK_TILE)
-        for (uint64_t ii = 0; ii < nc; ii += TK_TILE) {
-          uint64_t je = jj + TK_TILE < d ? jj + TK_TILE : d;
-          uint64_t ie = ii + TK_TILE < nc ? ii + TK_TILE : nc;
-          for (uint64_t j = jj; j < je; j++)
-            for (uint64_t i = ii; i < ie; i++)
-              if (full_chol[j * nc + i] >= 0.0f)
-                sign_data[i * sign_row_bytes + j / 8] |= (1u << (j % 8));
-        }
-    }
-    #undef TK_TILE
     if (!ctx->full_chol_external) free(full_chol);
     ctx->full_chol = NULL;
   }
@@ -1446,12 +1322,7 @@ static inline int tm_encode (lua_State *L) {
   lua_setfield(L, -2, "landmark_ids");
   lua_setfenv(L, enc_idx);
 
-  if (transform_codes)
-    lua_pushvalue(L, train_codes_idx);
-  else if (transform_sign)
-    lua_pushvalue(L, sign_cvec_idx);
-  else
-    lua_pushnil(L);
+  lua_pushnil(L);
   lua_pushvalue(L, enc_idx);
   if (gram_result_idx > 0) {
     lua_pushvalue(L, gram_result_idx);

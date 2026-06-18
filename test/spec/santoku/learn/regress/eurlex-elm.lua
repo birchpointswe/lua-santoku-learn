@@ -12,9 +12,8 @@ local function tokenize (iter, n, ng, tok)
 end
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
-local fvec = require("santoku.fvec")
 local optimize = require("santoku.learn.optimize")
-local spectral = require("santoku.learn.spectral")
+local elm = require("santoku.learn.elm")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local util = require("santoku.learn.util")
@@ -22,22 +21,25 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
--- Reported metrics (search_trials=100; splits train=44999 dev=5999 test=5999; 4270 labels):
---   n_landmarks=8192:  miF1 dv-oracle=0.808 ts-oracle=0.791 ts-pred=0.732 (best: cosine, lambda=1.6012e-04, pa=0.03 pb=7.84)
+-- RFF variant of eurlex: deterministic cos/sin-pair random projection (elm.encode) instead of the
+-- Nystrom kernel embedding. No kernel/n_landmarks/trace_tol; the feature map is fixed by (gamma, seed,
+-- n_hidden, n_conn). Everything downstream (tiled gram, ridge, decider) is identical.
 
 local cfg = {
   data = { max = nil },
   tok = { ngram = 6 },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "cosine", "expcos", "geolaplace", "matern52", "rq", "arccos1" }, k = 256 },
+  emb = { n_hidden = 1024 * 8, k = 256 },
   ridge = {
-    lambda = { min = 1e-4, max = 1e1, log = true, def = 1.7559e-04 },
-    propensity_a = { min = 0, max = 4, def = 0.0520 },
-    propensity_b = { min = 0, max = 8, def = 6.8075 },
+    mode = { "linear", "relu" },
+    lambda = { def = 5.6112e-04 },
+    propensity_a = { def = 0.0806 },
+    propensity_b = { def = 1.2087 },
+    gamma = { def = 0.4588 },
     search_trials = 0,
   },
 }
 
-test("eurlex classifier", function ()
+test("eurlex-elm classifier", function ()
 
   local stopwatch = utc.stopwatch()
   local function sw()
@@ -70,35 +72,25 @@ test("eurlex classifier", function ()
   csr.apply_bns(val_off, val_tok, val_val, bns_scores)
   csr.normalize(val_off, val_val)
 
-  str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
-  local chol_path = "test/res/eurlex57k/chol_tmp"
-  local w_path = "test/res/eurlex57k/w_tmp"
-  local chol_buf = fvec.mmap_create(chol_path, cfg.emb.n_landmarks * train.n)
-  local w_buf = fvec.mmap_create(w_path, cfg.emb.n_landmarks * n_labels)
-  local pqty_path = "test/res/eurlex57k/pqty_tmp"
-  -- Per-kernel PQtY factory: the lazy kernel cache creates one mmap per kernel it builds.
-  local pqty_buf = cfg.ridge.search_trials > 0
-    and function (kname) return fvec.mmap_create(pqty_path .. "_" .. kname, cfg.emb.n_landmarks * n_labels) end
-    or nil
-  local sp_enc, ridge_obj, dev_codes, best_params, decider, dec_metrics = optimize.krr({
+  str.printf("[ELM] Encoding n_hidden=%d\n", cfg.emb.n_hidden)
+  local sp_enc, ridge_obj, dev_codes, best_params, decider, dec_metrics = optimize.elm({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
-    kernel = cfg.emb.kernel,
-    n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
+    n_hidden = cfg.emb.n_hidden,
     label_offsets = train_label_off, label_neighbors = train_label_nbr, n_labels = n_labels,
     val_offsets = val_off, val_tokens = val_tok, val_values = val_val,
     val_n_samples = dev.n,
     val_expected_offsets = dev_label_off, val_expected_neighbors = dev_label_nbr,
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
-    propensity_b = cfg.ridge.propensity_b,
-    k = k, search_trials = cfg.ridge.search_trials, tile_labels = 1024,
-    chol_buf = chol_buf, w_buf = w_buf, pqty_buf = pqty_buf,
+    propensity_b = cfg.ridge.propensity_b, gamma = cfg.ridge.gamma,
+    mode = cfg.ridge.mode,
+    k = k, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
   do  -- persist/load parity: round-tripped encoder must produce identical codes
     local pth = os.tmpname()
     sp_enc:persist(pth)
-    local enc2 = spectral.load(pth)
+    local enc2 = elm.load(pth)
     os.remove(pth)
     local vc2 = enc2:encode({ offsets = val_off, tokens = val_tok, values = val_val, n_samples = dev.n })
     local nchk = dev_codes:size()
@@ -109,12 +101,7 @@ test("eurlex classifier", function ()
     str.printf("[Persist] load parity OK (%d codes)\n", nchk)
   end
   offsets = nil; tokens = nil; values = nil -- luacheck: ignore
-  chol_buf = nil; w_buf = nil; pqty_buf = nil -- luacheck: ignore
   collectgarbage("collect")
-  os.remove(chol_path)
-  os.remove(w_path)
-  local kernels = type(cfg.emb.kernel) == "table" and cfg.emb.kernel or { cfg.emb.kernel }
-  for _, kn in ipairs(kernels) do os.remove(pqty_path .. "_" .. kn) end
   local function encode_texts(text_iter_fn, n)
     local _, off, tok, val =
       tokenize(text_iter_fn(), n, cfg.tok.ngram, ngram_map)
@@ -132,7 +119,7 @@ test("eurlex classifier", function ()
   })
   str.printf("[Oracle] dev %s %s\n", fmt_metrics(dv_oracle), sw())
 
-  -- krr bundled the multilabel decider (global score threshold calibrated on dev to maximize micro-F1).
+  -- elm bundled the multilabel decider (global score threshold calibrated on dev to maximize micro-F1).
   dev_codes = nil -- luacheck: ignore
   collectgarbage("collect")
 
@@ -147,8 +134,6 @@ test("eurlex classifier", function ()
   })
   str.printf("[Oracle] test %s %s\n", fmt_metrics(ts_oracle), sw())
 
-  -- decided prediction: the bundled decider decodes (threshold) and scores in one call. dec_metrics is
-  -- the same decider calibrated on dev (val), so [Decide] shows val | test.
   local _, ts_pred_m = decider:score({
     offsets = ts_off, neighbors = ts_nbr, scores = ts_sco,
     expected_offsets = test_label_off, expected_neighbors = test_label_nbr,

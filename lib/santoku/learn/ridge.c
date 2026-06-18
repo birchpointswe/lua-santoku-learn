@@ -484,39 +484,85 @@ static inline int tk_ridge_create_lua (lua_State *L) {
       C = (log((double)gram->n_samples) - 1.0) * pow(prop_b + 1.0, prop_a);
       lc = gram->label_counts->a;
     }
-    int64_t B = tile_labels;
-    double *W_tile = (double *)malloc((uint64_t)d * (uint64_t)B * sizeof(double));
-    double *W_d_tile = (double *)malloc((uint64_t)d * (uint64_t)B * sizeof(double));
-    if (!W_tile || !W_d_tile) {
-      free(W_tile); free(W_d_tile);
-      return luaL_error(L, "ridge create tiled: out of memory");
+    int64_t B = tile_labels < nl ? tile_labels : nl;   // a tile is never wider than n_labels
+    uint64_t tsz = (uint64_t)d * (uint64_t)B;
+    // Float-eigen grams (elm relu/linear, tk_gram_finalize_f_native) store only evecs_f -- no double
+    // evecs/PQtY. Two specialized paths: the double path is the spectral/M.krr original; the float path
+    // keeps everything in float (sgemm/sgemv, evecs_f), writing W_fvec directly and forming the intercept
+    // from a float col_mean -- no double scratch, no widen round-trips.
+    bool fgram = (gram->evecs == NULL);
+    double *W_tile = NULL, *W_d_tile = NULL;
+    float *W_tile_f = NULL, *W_d_tile_f = NULL, *cm_f = NULL, *ic_f = NULL;
+    if (fgram) {
+      W_tile_f = (float *)malloc(tsz * sizeof(float));
+      W_d_tile_f = (float *)malloc(tsz * sizeof(float));
+      if (intercept_dv) {
+        cm_f = (float *)malloc((uint64_t)d * sizeof(float));
+        ic_f = (float *)malloc((uint64_t)B * sizeof(float));
+        if (cm_f) for (int64_t i = 0; i < d; i++) cm_f[i] = (float)gram->col_mean[i];
+      }
+      if (!W_tile_f || !W_d_tile_f || (intercept_dv && (!cm_f || !ic_f))) {
+        free(W_tile_f); free(W_d_tile_f); free(cm_f); free(ic_f);
+        return luaL_error(L, "ridge create tiled: out of memory");
+      }
+    } else {
+      W_tile = (double *)malloc(tsz * sizeof(double));
+      W_d_tile = (double *)malloc(tsz * sizeof(double));
+      if (!W_tile || !W_d_tile) {
+        free(W_tile); free(W_d_tile);
+        return luaL_error(L, "ridge create tiled: out of memory");
+      }
     }
     for (int64_t tl_start = 0; tl_start < nl; tl_start += B) {
       int64_t aB = (tl_start + B <= nl) ? B : nl - tl_start;
-      for (int64_t i = 0; i < d; i++) {
-        double inv = 1.0 / (gram->eigenvals[i] + mu);
-        for (int64_t l = 0; l < aB; l++) {
-          double pqty = (double)gram->PQtY_f[i * nl + tl_start + l];
-          double prop = (lc) ? (1.0 + C / pow(lc[tl_start + l] + prop_b, prop_a)) : 1.0;
-          W_tile[i * aB + l] = pqty * prop * inv;
+      if (fgram) {
+        for (int64_t i = 0; i < d; i++) {
+          double inv = 1.0 / (gram->eigenvals[i] + mu);
+          for (int64_t l = 0; l < aB; l++) {
+            double prop = (lc) ? (1.0 + C / pow(lc[tl_start + l] + prop_b, prop_a)) : 1.0;
+            W_tile_f[i * aB + l] = (float)((double)gram->PQtY_f[i * nl + tl_start + l] * prop * inv);
+          }
         }
-      }
-      cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-        (int)d, (int)aB, (int)d, 1.0, gram->evecs, (int)d,
-        W_tile, (int)aB, 0.0, W_d_tile, (int)aB);
-      for (int64_t i = 0; i < d; i++)
-        for (int64_t l = 0; l < aB; l++)
-          W_fvec->a[i * nl + tl_start + l] = (float)W_d_tile[i * aB + l];
-      if (intercept_dv) {
-        for (int64_t l = 0; l < aB; l++) {
-          double prop = (lc) ? (1.0 + C / pow(lc[tl_start + l] + prop_b, prop_a)) : 1.0;
-          intercept_dv->a[tl_start + l] = prop * gram->y_mean[tl_start + l];
+        cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+          (int)d, (int)aB, (int)d, 1.0f, gram->evecs_f, (int)d,
+          W_tile_f, (int)aB, 0.0f, W_d_tile_f, (int)aB);
+        for (int64_t i = 0; i < d; i++)
+          for (int64_t l = 0; l < aB; l++)
+            W_fvec->a[i * nl + tl_start + l] = W_d_tile_f[i * aB + l];
+        if (intercept_dv) {
+          cblas_sgemv(CblasRowMajor, CblasTrans, (int)d, (int)aB,
+            -1.0f, W_d_tile_f, (int)aB, cm_f, 1, 0.0f, ic_f, 1);
+          for (int64_t l = 0; l < aB; l++) {
+            double prop = (lc) ? (1.0 + C / pow(lc[tl_start + l] + prop_b, prop_a)) : 1.0;
+            intercept_dv->a[tl_start + l] = prop * gram->y_mean[tl_start + l] + (double)ic_f[l];
+          }
         }
-        cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)aB,
-          -1.0, W_d_tile, (int)aB, gram->col_mean, 1, 1.0, intercept_dv->a + tl_start, 1);
+      } else {
+        for (int64_t i = 0; i < d; i++) {
+          double inv = 1.0 / (gram->eigenvals[i] + mu);
+          for (int64_t l = 0; l < aB; l++) {
+            double pqty = (double)gram->PQtY_f[i * nl + tl_start + l];
+            double prop = (lc) ? (1.0 + C / pow(lc[tl_start + l] + prop_b, prop_a)) : 1.0;
+            W_tile[i * aB + l] = pqty * prop * inv;
+          }
+        }
+        cblas_dgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+          (int)d, (int)aB, (int)d, 1.0, gram->evecs, (int)d,
+          W_tile, (int)aB, 0.0, W_d_tile, (int)aB);
+        for (int64_t i = 0; i < d; i++)
+          for (int64_t l = 0; l < aB; l++)
+            W_fvec->a[i * nl + tl_start + l] = (float)W_d_tile[i * aB + l];
+        if (intercept_dv) {
+          for (int64_t l = 0; l < aB; l++) {
+            double prop = (lc) ? (1.0 + C / pow(lc[tl_start + l] + prop_b, prop_a)) : 1.0;
+            intercept_dv->a[tl_start + l] = prop * gram->y_mean[tl_start + l];
+          }
+          cblas_dgemv(CblasRowMajor, CblasTrans, (int)d, (int)aB,
+            -1.0, W_d_tile, (int)aB, gram->col_mean, 1, 1.0, intercept_dv->a + tl_start, 1);
+        }
       }
     }
-    free(W_tile); free(W_d_tile);
+    free(W_tile); free(W_d_tile); free(W_tile_f); free(W_d_tile_f); free(cm_f); free(ic_f);
 
     tk_ridge_t *r = tk_lua_newuserdata(L, tk_ridge_t,
       TK_RIDGE_MT, tk_ridge_mt_fns, tk_ridge_gc);

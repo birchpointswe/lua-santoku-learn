@@ -1,8 +1,16 @@
 local csr = require("santoku.learn.csr")
 local tokenizer = require("santoku.learn.tokenizer")
+-- plain tokenize via a tokenizer object; the object threads as the old ngram_map
+-- (nil => create + grow the vocab; object => frozen).
+local function tokenize (texts, n, nmin, nmax, tok)
+  local grow = tok == nil
+  if grow then tok = tokenizer.create({ ngram_min = nmin, ngram_max = nmax }) end
+  local o, t, v = tok:tokenize({ texts = texts, n_samples = n, grow = grow })
+  return tok, o, t, v, tok:n_tokens()
+end
 local ds = require("santoku.learn.dataset")
 local optimize = require("santoku.learn.optimize")
-local spectral = require("santoku.learn.spectral")
+local elm = require("santoku.learn.elm")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local util = require("santoku.learn.util")
@@ -10,33 +18,27 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
--- Reported metrics (search_trials=100; splits train=22500 val=2500 test=25000; 1 class):
---   n_landmarks=8192:  F1 val=0.92 test=0.91  (best: arccos1, lambda=2.0497e-02)
+-- Reported metrics (search_trials=100; splits train=10183 val=1131 test=7532; 20 classes):
+--   n_landmarks=8192:  F1 val=0.91 test=0.83  (best: cosine, lambda=1.84e-01, pa=0.08 pb=0.81)
 
 local cfg = {
-  data = { max = nil, ttr = 0.5, tvr = 0.1 },
-  tok = { ngram_min = 5, ngram_max = 5, normalize = false },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "cosine", "arccos1", "expcos", "geolaplace", "matern52", "rq" } },
+  data = { max = nil, tvr = 0.1 },
+  tok = { ngram_min = 5, ngram_max = 5 },
+  emb = { n_hidden = 1024 * 8 },
   ridge = {
-    lambda = { min = 1e-4, max = 1e1, log = true, def = 1.4750e-01 },
-    classes = 1,
+    mode = { "linear", "relu" },
+    -- mode = { "rbf" },
+    lambda = { def = 4.7795e-01 },
+    propensity_a = { def = 7.6128 },
+    propensity_b = { def = 1.4265 },
+    gamma = { def = 0.209 },
+    classes = 20,
     search_trials = 0,
     k = 1,
   },
 }
 
--- plain tokenize via a tokenizer object; the object threads as the old ngram_map
--- (nil => create + grow the vocab; object => frozen). normalize from cfg.tok.
-local function tokenize (texts, n, nmin, nmax, tok)
-  local grow = tok == nil
-  if grow then tok = tokenizer.create({
-    ngram_min = nmin, ngram_max = nmax, normalize = cfg.tok.normalize })
-  end
-  local o, t, v = tok:tokenize({ texts = texts, n_samples = n, grow = grow })
-  return tok, o, t, v, tok:n_tokens()
-end
-
-test("imdb classifier", function ()
+test("newsgroups-elm classifier", function ()
 
   local stopwatch = utc.stopwatch()
   local function sw()
@@ -45,8 +47,10 @@ test("imdb classifier", function ()
   end
 
   str.printf("[Data] Loading\n")
-  local dataset = ds.read_imdb("test/res/imdb.50k", cfg.data.max)
-  local train, test_set, validate = ds.split_imdb(dataset, cfg.data.ttr, cfg.data.tvr)
+  local train, test_set, validate = ds.read_20newsgroups_split(
+    "test/res/20news-bydate-train",
+    "test/res/20news-bydate-test",
+    cfg.data.max, nil, cfg.data.tvr)
   local n_classes = cfg.ridge.classes
   local label_off, label_nbr = train.sol_offsets, train.sol_neighbors
   local val_label_off, val_label_nbr = validate.sol_offsets, validate.sol_neighbors
@@ -67,24 +71,26 @@ test("imdb classifier", function ()
   csr.apply_bns(val_off, val_tok, val_val, bns_scores)
   csr.normalize(val_off, val_val)
 
-  str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
-  local sp_enc, ridge_obj, val_codes, _, decider, dec_metrics = optimize.krr({
+  str.printf("[ELM] Encoding n_hidden=%d\n", cfg.emb.n_hidden)
+  local sp_enc, ridge_obj, val_codes, _, decider = optimize.elm({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
-    kernel = cfg.emb.kernel,
-    n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
+    n_hidden = cfg.emb.n_hidden,
     label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
     val_offsets = val_off, val_tokens = val_tok, val_values = val_val,
     val_n_samples = validate.n,
     val_expected_offsets = val_label_off, val_expected_neighbors = val_label_nbr,
-    lambda = cfg.ridge.lambda,
+    lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
+    propensity_b = cfg.ridge.propensity_b,
+    gamma = cfg.ridge.gamma,
+    mode = cfg.ridge.mode,
     k = cfg.ridge.k, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
   do  -- persist/load parity: round-tripped encoder must produce identical codes
     local p = os.tmpname()
     sp_enc:persist(p)
-    local enc2 = spectral.load(p)
+    local enc2 = elm.load(p)
     os.remove(p)
     local vc2 = enc2:encode({ offsets = val_off, tokens = val_tok, values = val_val, n_samples = validate.n })
     local nchk = val_codes:size()
@@ -108,21 +114,30 @@ test("imdb classifier", function ()
   end
 
   str.printf("[Eval] Labeling splits\n")
+  local val_scores = ridge_obj:regress(val_codes, validate.n)
   val_codes = nil -- luacheck: ignore
   local test_codes = encode_texts(test_set.problems, test_set.n)
   test_set.problems = nil
-  local test_off, test_nbr, test_sco = ridge_obj:label(test_codes, test_set.n, 1)
+  local test_scores = ridge_obj:regress(test_codes, test_set.n)
   test_codes = nil -- luacheck: ignore
   str.printf("[Eval] Labels done %s\n", sw())
 
-  -- krr bundled the multilabel decider (global score threshold calibrated on val to maximize micro-F1).
-  local _, test_stats = decider:score({
-    offsets = test_off, neighbors = test_nbr, scores = test_sco,
-    expected_offsets = test_set.sol_offsets, expected_neighbors = test_set.sol_neighbors,
-    n_samples = test_set.n,
-  })
-  str.printf("[Decide] val %s | test %s %s\n",
-    util.fmt_metrics(dec_metrics), util.fmt_metrics(test_stats), sw())
+  -- single-label decode is argmax(score - offset). `decider` carries the dev-calibrated offsets; a
+  -- zero-offset decider is plain argmax. Score both decoders on both splits: decide can only improve
+  -- dev (argmax is the offsets==0 special case it searched over), so test is where overfit would show.
+  local decide = require("santoku.learn.decide")
+  local argmax = decide.create({ n_labels = n_classes, single = true })
+  local function score_split (d, scores, n, sol)
+    local _, m = d:score({ scores = scores, n_samples = n,
+      expected_offsets = sol.sol_offsets, expected_neighbors = sol.sol_neighbors })
+    return m
+  end
+  str.printf("[Argmax] dev %s | test %s %s\n",
+    util.fmt_metrics(score_split(argmax, val_scores, validate.n, validate)),
+    util.fmt_metrics(score_split(argmax, test_scores, test_set.n, test_set)), sw())
+  str.printf("[Decide] dev %s | test %s %s\n",
+    util.fmt_metrics(score_split(decider, val_scores, validate.n, validate)),
+    util.fmt_metrics(score_split(decider, test_scores, test_set.n, test_set)), sw())
 
   local _, total = stopwatch()
   str.printf("\nTotal: %.1fs\n", total)

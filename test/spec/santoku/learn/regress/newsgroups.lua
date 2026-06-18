@@ -9,7 +9,6 @@ local function tokenize (texts, n, nmin, nmax, tok)
   return tok, o, t, v, tok:n_tokens()
 end
 local ds = require("santoku.learn.dataset")
-local eval = require("santoku.learn.evaluator")
 local optimize = require("santoku.learn.optimize")
 local spectral = require("santoku.learn.spectral")
 local str = require("santoku.string")
@@ -27,9 +26,9 @@ local cfg = {
   tok = { ngram_min = 5, ngram_max = 5 },
   emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "cosine", "expcos", "geolaplace", "matern52", "rq", "arccos1" } },
   ridge = {
-    lambda = { min = 1e-4, max = 1e1, log = true, def = 1.8408e-01 },
-    propensity_a = { min = 0, max = 4, def = 0.0847 },
-    propensity_b = { min = 0, max = 8, def = 0.8065 },
+    lambda = { min = 1e-4, max = 1e1, log = true, def = 2.1801e-02 },
+    propensity_a = { min = 0, max = 4, def = 0.4673 },
+    propensity_b = { min = 0, max = 8, def = 0.8029 },
     classes = 20,
     search_trials = 0,
     k = 1,
@@ -70,7 +69,7 @@ test("newsgroups classifier", function ()
   csr.normalize(val_off, val_val)
 
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
-  local sp_enc, ridge_obj, val_codes = optimize.krr({
+  local sp_enc, ridge_obj, val_codes, _, decider = optimize.krr({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
     kernel = cfg.emb.kernel,
@@ -111,26 +110,30 @@ test("newsgroups classifier", function ()
   end
 
   str.printf("[Eval] Labeling splits\n")
-  local val_off, val_nbr = ridge_obj:label(val_codes, validate.n, 1)
+  local val_scores = ridge_obj:regress(val_codes, validate.n)
   val_codes = nil -- luacheck: ignore
   local test_codes = encode_texts(test_set.problems, test_set.n)
   test_set.problems = nil
-  local test_off, test_nbr = ridge_obj:label(test_codes, test_set.n, 1)
+  local test_scores = ridge_obj:regress(test_codes, test_set.n)
   test_codes = nil -- luacheck: ignore
   str.printf("[Eval] Labels done %s\n", sw())
 
-  local _, val_stats = eval.label_accuracy({
-    pred_offsets = val_off, pred_neighbors = val_nbr,
-    expected_offsets = validate.sol_offsets, expected_neighbors = validate.sol_neighbors,
-    ks = 1,
-  })
-  local _, test_stats = eval.label_accuracy({
-    pred_offsets = test_off, pred_neighbors = test_nbr,
-    expected_offsets = test_set.sol_offsets, expected_neighbors = test_set.sol_neighbors,
-    ks = 1,
-  })
-  str.printf("[Class] F1: val=%.2f test=%.2f %s\n",
-    val_stats.micro_f1, test_stats.micro_f1, sw())
+  -- single-label decode is argmax(score - offset). `decider` carries the dev-calibrated offsets; a
+  -- zero-offset decider is plain argmax. Score both decoders on both splits: decide can only improve
+  -- dev (argmax is the offsets==0 special case it searched over), so test is where overfit would show.
+  local decide = require("santoku.learn.decide")
+  local argmax = decide.create({ n_labels = n_classes, single = true })
+  local function score_split (d, scores, n, sol)
+    local _, m = d:score({ scores = scores, n_samples = n,
+      expected_offsets = sol.sol_offsets, expected_neighbors = sol.sol_neighbors })
+    return m
+  end
+  str.printf("[Argmax] dev %s | test %s %s\n",
+    util.fmt_metrics(score_split(argmax, val_scores, validate.n, validate)),
+    util.fmt_metrics(score_split(argmax, test_scores, test_set.n, test_set)), sw())
+  str.printf("[Decide] dev %s | test %s %s\n",
+    util.fmt_metrics(score_split(decider, val_scores, validate.n, validate)),
+    util.fmt_metrics(score_split(decider, test_scores, test_set.n, test_set)), sw())
 
   local _, total = stopwatch()
   str.printf("\nTotal: %.1fs\n", total)

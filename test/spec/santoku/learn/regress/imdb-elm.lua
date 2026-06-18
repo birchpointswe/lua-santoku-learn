@@ -2,7 +2,7 @@ local csr = require("santoku.learn.csr")
 local tokenizer = require("santoku.learn.tokenizer")
 local ds = require("santoku.learn.dataset")
 local optimize = require("santoku.learn.optimize")
-local spectral = require("santoku.learn.spectral")
+local elm = require("santoku.learn.elm")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local util = require("santoku.learn.util")
@@ -16,9 +16,11 @@ io.stdout:setvbuf("line")
 local cfg = {
   data = { max = nil, ttr = 0.5, tvr = 0.1 },
   tok = { ngram_min = 5, ngram_max = 5, normalize = false },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "cosine", "arccos1", "expcos", "geolaplace", "matern52", "rq" } },
+  emb = { n_hidden = 1024 * 8 },
   ridge = {
-    lambda = { min = 1e-4, max = 1e1, log = true, def = 1.4750e-01 },
+    mode = { "linear", "relu" },
+    lambda = { def = 9.7880e-01 },
+    gamma = { def = 0.02683 },
     classes = 1,
     search_trials = 0,
     k = 1,
@@ -36,7 +38,7 @@ local function tokenize (texts, n, nmin, nmax, tok)
   return tok, o, t, v, tok:n_tokens()
 end
 
-test("imdb classifier", function ()
+test("imdb-elm classifier", function ()
 
   local stopwatch = utc.stopwatch()
   local function sw()
@@ -67,24 +69,24 @@ test("imdb classifier", function ()
   csr.apply_bns(val_off, val_tok, val_val, bns_scores)
   csr.normalize(val_off, val_val)
 
-  str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
-  local sp_enc, ridge_obj, val_codes, _, decider, dec_metrics = optimize.krr({
+  str.printf("[ELM] Encoding n_hidden=%d\n", cfg.emb.n_hidden)
+  local sp_enc, ridge_obj, val_codes, _, decider, dec_metrics = optimize.elm({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
-    kernel = cfg.emb.kernel,
-    n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
+    n_hidden = cfg.emb.n_hidden,
     label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
     val_offsets = val_off, val_tokens = val_tok, val_values = val_val,
     val_n_samples = validate.n,
     val_expected_offsets = val_label_off, val_expected_neighbors = val_label_nbr,
-    lambda = cfg.ridge.lambda,
+    lambda = cfg.ridge.lambda, gamma = cfg.ridge.gamma,
+    mode = cfg.ridge.mode,
     k = cfg.ridge.k, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
   do  -- persist/load parity: round-tripped encoder must produce identical codes
     local p = os.tmpname()
     sp_enc:persist(p)
-    local enc2 = spectral.load(p)
+    local enc2 = elm.load(p)
     os.remove(p)
     local vc2 = enc2:encode({ offsets = val_off, tokens = val_tok, values = val_val, n_samples = validate.n })
     local nchk = val_codes:size()

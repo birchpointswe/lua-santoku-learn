@@ -3,7 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <santoku/learn/mathlibs.h>
+#include <stdbool.h>
+#include <math.h>
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
 #include <santoku/svec.h>

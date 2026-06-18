@@ -4,6 +4,22 @@ local eval = require("santoku.learn.evaluator")
 
 local M = {}
 
+-- Uniform one-line formatting of a decode metrics table, across decode types:
+--   multilabel  (micro_f1/precision/recall, or the bundle's f1/precision/recall)  -> miF1/miP/miR
+--   single      (macro_f1/accuracy)                                               -> maF1/acc
+function M.fmt_metrics (m)
+  if m.micro_f1 ~= nil then
+    return str.format("miF1=%.4f miP=%.4f miR=%.4f", m.micro_f1, m.micro_precision, m.micro_recall)
+  elseif m.precision ~= nil and m.f1 ~= nil then
+    return str.format("miF1=%.4f miP=%.4f miR=%.4f", m.f1, m.precision, m.recall)
+  elseif m.macro_f1 ~= nil then
+    return str.format("maF1=%.4f acc=%.4f", m.macro_f1, m.accuracy or 0)
+  elseif m.span_f1 ~= nil then
+    return str.format("spF1=%.4f P=%.4f R=%.4f", m.span_f1, m.precision, m.recall)
+  end
+  return "?"
+end
+
 local function format_phase (ev)
   if ev.is_final then return "F" end
   local tag = ev.phase or "lhs"
@@ -26,18 +42,23 @@ function M.make_ridge_log (stopwatch, metric_fmt)
     if ev.event == "done" then
       local p = ev.params or {}
       local emb = ev.emb_d and str.format(" emb_d=%d", ev.emb_d) or ""
+      local md = p.mode and str.format(" mode=%s", p.mode) or ""
       local kern = p.kernel and str.format(" kernel=%s", p.kernel) or ""
+      local act = p.activation and str.format(" act=%s", p.activation) or ""
+      local gam = p.gamma and str.format(" gamma=%.4g", p.gamma) or ""
       local solve = ev.solve and str.format(" solve=%s", ev.solve) or ""
       local prop = ""
       if p.propensity_a then
         prop = str.format(" pa=%.4f pb=%.4f", p.propensity_a, p.propensity_b)
       end
+      local sc = ev.score and str.format(" score=%.4f", ev.score) or ""
       local timing = ""
       if stopwatch then
         local d, dd = stopwatch()
         timing = str.format(" (%.1fs +%.1fs)", d, dd)
       end
-      str.printf("[Ridge Done]%s%s%s lambda=%.4e%s%s\n", emb, kern, solve, p.lambda or 0, prop, timing)
+      str.printf("[Ridge Done]%s%s%s%s%s%s lambda=%.4e%s%s%s\n",
+        emb, md, kern, act, gam, solve, p.lambda or 0, prop, sc, timing)
       return
     end
     local phase = format_phase(ev)
@@ -65,13 +86,21 @@ function M.make_ridge_log (stopwatch, metric_fmt)
     local kern = ""
     if p.kernel then
       kern = str.format(" kernel=%s", p.kernel)
+    elseif p.activation then
+      kern = str.format(" act=%s", p.activation)
     end
+    local gam = p.gamma and str.format(" gamma=%.4g", p.gamma) or ""
+    -- In the nested elm BO the outer (gamma) trial carries lambda/propensity in its metrics (the inner
+    -- winner), not its params; fall back to metrics so the outer line shows the inner winner.
+    local lambda = p.lambda or m.lambda or 0
+    local pa = p.propensity_a or m.propensity_a
+    local pb = p.propensity_b or m.propensity_b
     local prop = ""
-    if p.propensity_a then
-      prop = str.format(" pa=%.2f pb=%.2f", p.propensity_a, p.propensity_b)
+    if pa then
+      prop = str.format(" pa=%.2f pb=%.2f", pa, pb)
     end
-    str.printf("[Ridge %s]%s lambda=%.4e%s score=%.4f%s%s%s\n",
-      phase, kern, p.lambda or 0, prop, score, detail, best, timing)
+    str.printf("[Ridge %s]%s%s lambda=%.4e%s score=%.4f%s%s%s\n",
+      phase, kern, gam, lambda, prop, score, detail, best, timing)
   end
 end
 

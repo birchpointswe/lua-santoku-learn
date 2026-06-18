@@ -4,7 +4,7 @@ local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
 local fvec = require("santoku.fvec")
 local optimize = require("santoku.learn.optimize")
-local spectral = require("santoku.learn.spectral")
+local elm = require("santoku.learn.elm")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local util = require("santoku.learn.util")
@@ -17,12 +17,16 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   data = { ttr = 0.8, tvr = 0.1, max = nil },
-  -- emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = "geolaplace" },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "geolaplace", "cosine", "expcos", "matern52", "rq", "arccos1" } },
-  ridge = { lambda = { min = 1e-4, max = 1e1, log = true, def = 7.7147e-02 }, search_trials = 0 },
+  emb = { n_hidden = 1024 * 8 },
+  ridge = {
+    mode = { "relu", "linear" },
+    lambda = { def = 4.6317e-03 },
+    gamma = { def = 2.502 },
+    search_trials = 0,
+  },
 }
 
-test("housing regressor", function ()
+test("housing-elm regressor", function ()
 
   local stopwatch = utc.stopwatch()
   local function sw()
@@ -71,25 +75,25 @@ test("housing regressor", function ()
   csr.standardize(val_off, val_tok, val_val, std_scores)
   csr.normalize(val_off, val_val)
 
-  str.printf("[KRR] Encoding n_landmarks=%d n_tokens=%d\n",
-    cfg.emb.n_landmarks, n_tokens)
-  local sp_enc, ridge_obj, val_codes = optimize.krr({
+  str.printf("[ELM] Encoding n_hidden=%d n_tokens=%d\n",
+    cfg.emb.n_hidden, n_tokens)
+  local sp_enc, ridge_obj, val_codes = optimize.elm({
     offsets = offsets, tokens = tokens, values = values, n_tokens = n_tokens,
     n_samples = train.n,
-    n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
-    kernel = cfg.emb.kernel,
+    n_hidden = cfg.emb.n_hidden,
     targets = train.targets, n_targets = 1,
     val_offsets = val_off, val_tokens = val_tok, val_values = val_val,
     val_n_samples = validate.n,
     val_targets = validate.targets,
-    lambda = cfg.ridge.lambda,
+    lambda = cfg.ridge.lambda, gamma = cfg.ridge.gamma,
+    mode = cfg.ridge.mode,
     search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
   do  -- persist/load parity: round-tripped encoder must produce identical codes
     local p = os.tmpname()
     sp_enc:persist(p)
-    local enc2 = spectral.load(p)
+    local enc2 = elm.load(p)
     os.remove(p)
     local vc2 = enc2:encode({ offsets = val_off, tokens = val_tok, values = val_val, n_samples = validate.n })
     local nchk = val_codes:size()

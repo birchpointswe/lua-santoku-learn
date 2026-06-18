@@ -13,6 +13,7 @@
 #include <santoku/fvec.h>
 #include <santoku/rvec.h>
 #include <santoku/learn/buf.h>
+#include <santoku/learn/fmeasure.h>
 
 #define TK_GRAM_MT "tk_gram_t"
 
@@ -103,10 +104,78 @@ static inline void tk_gram_ensure_gfm (tk_gram_t *g, int64_t cap) {
   g->gfm_cap = cap;
 }
 
+// Size-keyed buffer pool for the big eigenvector arrays (evecs: d*d doubles, evecs_f: d*d floats).
+// During a hyperparameter search the same-sized gram is built and discarded many times; pooling the
+// freed buffers lets the next same-sized build reuse them instead of reallocating + page-faulting +
+// zeroing ~d*d*12 bytes every trial (the memory "pulsing"). The slot array lives in the Lua registry
+// (string key) so get (in finalize) and put (in __gc) share ONE pool even when grams from different .so
+// modules share a single metatable -- a plain `static` would be per-TU and get/put could diverge.
+// Bounded to a few slots; excess is freed. Single-threaded at the Lua level, so no locking. The pooled
+// buffers are released to the OS only at process exit (bounded, continually reused -- not a real leak).
+#define TK_GRAM_POOL_SLOTS 4
+typedef struct { void *ptr; size_t size; } tk_gram_pool_slot_t;
+
+// Free the pooled buffers when the pool userdata itself is collected (at lua_close). Lua 5.1 finalizes
+// userdata in reverse creation order, so the pool -- created on the FIRST finalize -- is collected after
+// every gram __gc has deposited its buffer, so there is nothing left to orphan (clean under LeakSanitizer).
+static inline int tk_gram_pool_gc (lua_State *L) {
+  tk_gram_pool_slot_t *p = (tk_gram_pool_slot_t *)lua_touserdata(L, 1);
+  for (int i = 0; i < TK_GRAM_POOL_SLOTS; i++) { free(p[i].ptr); p[i].ptr = NULL; }
+  return 0;
+}
+
+static inline tk_gram_pool_slot_t *tk_gram_pool (lua_State *L) {
+  lua_pushliteral(L, "tk_gram_buf_pool_v1");
+  lua_rawget(L, LUA_REGISTRYINDEX);
+  tk_gram_pool_slot_t *p;
+  if (lua_isnil(L, -1)) {
+    lua_pop(L, 1);
+    p = (tk_gram_pool_slot_t *)lua_newuserdata(L,
+      TK_GRAM_POOL_SLOTS * sizeof(tk_gram_pool_slot_t));
+    memset(p, 0, TK_GRAM_POOL_SLOTS * sizeof(tk_gram_pool_slot_t));
+    lua_newtable(L);
+    lua_pushcfunction(L, tk_gram_pool_gc);
+    lua_setfield(L, -2, "__gc");
+    lua_setmetatable(L, -2);
+    lua_pushliteral(L, "tk_gram_buf_pool_v1");
+    lua_pushvalue(L, -2);
+    lua_rawset(L, LUA_REGISTRYINDEX);
+    lua_pop(L, 1);
+  } else {
+    p = (tk_gram_pool_slot_t *)lua_touserdata(L, -1);
+    lua_pop(L, 1);
+  }
+  return p;
+}
+
+static inline void *tk_gram_pool_get (lua_State *L, size_t size) {
+  tk_gram_pool_slot_t *pool = tk_gram_pool(L);
+  for (int i = 0; i < TK_GRAM_POOL_SLOTS; i++)
+    if (pool[i].ptr && pool[i].size == size) {
+      void *p = pool[i].ptr;
+      pool[i].ptr = NULL;
+      return p;
+    }
+  return malloc(size);
+}
+
+static inline void tk_gram_pool_put (lua_State *L, void *ptr, size_t size) {
+  if (!ptr) return;
+  tk_gram_pool_slot_t *pool = tk_gram_pool(L);
+  for (int i = 0; i < TK_GRAM_POOL_SLOTS; i++)
+    if (!pool[i].ptr) { pool[i].ptr = ptr; pool[i].size = size; return; }
+  // full: evict the oldest slot so the pool tracks the CURRENT working-set size (a differently-sized
+  // model -- e.g. a prior spec at another d -- doesn't pin large stale buffers forever).
+  free(pool[0].ptr);
+  for (int i = 1; i < TK_GRAM_POOL_SLOTS; i++) pool[i - 1] = pool[i];
+  pool[TK_GRAM_POOL_SLOTS - 1].ptr = ptr;
+  pool[TK_GRAM_POOL_SLOTS - 1].size = size;
+}
+
 static inline int tk_gram_gc (lua_State *L) {
   tk_gram_t *g = tk_gram_peek(L, 1);
-  free(g->evecs);
-  free(g->evecs_f);
+  tk_gram_pool_put(L, g->evecs, (size_t)g->n_dims * (size_t)g->n_dims * sizeof(double));
+  tk_gram_pool_put(L, g->evecs_f, (size_t)g->n_dims * (size_t)g->n_dims * sizeof(float));
   free(g->eigenvals);
   free(g->PQtY);
   if (!g->PQtY_f_external) free(g->PQtY_f);
@@ -181,7 +250,7 @@ static inline int tk_gram_finalize (
     (int)m, (int)nl, (int)m, 1.0, XtX, (int)m,
     xty, (int)nl, 0.0, PQtY, (int)nl);
   free(xty);
-  float *evecs_f = (float *)malloc(dd * sizeof(float));
+  float *evecs_f = (float *)tk_gram_pool_get(L, dd * sizeof(float));
   for (uint64_t i = 0; i < dd; i++)
     evecs_f[i] = (float)XtX[i];
   tk_gram_t *g = tk_lua_newuserdata(L, tk_gram_t,
@@ -200,6 +269,175 @@ static inline int tk_gram_finalize (
   g->val_ext = NULL;
   g->label_counts = lc;
   g->W_work = W_work;
+  g->W_work_f = NULL;
+  g->sbuf_f = NULL;
+  g->val_F_f = NULL;
+  g->col_mean = col_mean;
+  g->y_mean = y_mean_arr;
+  g->cm_proj = NULL;
+  g->intercept = NULL;
+  g->n_threads = 0;
+  g->thread_heaps = NULL;
+  g->thread_heap_cap = 0;
+  g->thread_bitmaps = NULL;
+  g->sample_heaps = NULL;
+  g->sample_heap_cap = 0;
+  g->gfm_labels = NULL;
+  g->gfm_scores = NULL;
+  g->gfm_pool = NULL;
+  g->gfm_cap = 0;
+  g->mean_eig = mean_eig;
+  g->n_dims = m;
+  g->n_labels = nl;
+  g->n_samples = nc;
+  g->tile_labels = 1024;
+  g->val_n = 0;
+  g->destroyed = false;
+  lua_newtable(L);
+  if (lc_idx > 0) {
+    lua_pushvalue(L, lc_idx);
+    lua_setfield(L, -2, "label_counts");
+  }
+  lua_setfenv(L, gram_idx);
+  lua_pushvalue(L, gram_idx);
+  return 1;
+}
+
+// Single-precision finalize for the elm path: same math as tk_gram_finalize, but the eigendecomposition
+// runs in float (ssyevd, ~2x faster than dsyevd) and the gram stores ONLY the float eigenvectors
+// (evecs_f) -- no 536MB double `evecs`, no double `PQtY`. The double moment matrix XtX is converted to
+// float, decomposed, and returned to the pool. The compute methods (prepare, solve_w) fall back to the
+// float arrays when evecs/PQtY are NULL, so spectral's double grams are untouched.
+static inline int tk_gram_finalize_f (
+  lua_State *L,
+  double *XtX,
+  double *xty,
+  double *col_mean,
+  double *y_mean_arr,
+  double *eigenvals,
+  tk_dvec_t *lc,
+  int lc_idx,
+  int64_t nc, int64_t m, int64_t nl)
+{
+  uint64_t um = (uint64_t)m;
+  uint64_t dd = um * um;
+  uint64_t dnl = um * (uint64_t)nl;
+  cblas_dsyr(CblasColMajor, CblasUpper, (int)m,
+    -(double)nc, col_mean, 1, XtX, (int)m);
+  cblas_dger(CblasRowMajor, (int)m, (int)nl,
+    -(double)nc, col_mean, 1, y_mean_arr, 1, xty, (int)nl);
+  float *Xf = (float *)tk_gram_pool_get(L, dd * sizeof(float));
+  for (uint64_t i = 0; i < dd; i++) Xf[i] = (float)XtX[i];
+  tk_gram_pool_put(L, XtX, dd * sizeof(double));
+  float *ef = (float *)malloc(um * sizeof(float));
+  LAPACKE_ssyevd(LAPACK_COL_MAJOR, 'V', 'U', (int)m, Xf, (int)m, ef);
+  double mean_eig = 0.0;
+  for (uint64_t i = 0; i < um; i++) { eigenvals[i] = (double)ef[i]; mean_eig += eigenvals[i]; }
+  mean_eig /= (double)m;
+  free(ef);
+  float *xty_f = (float *)malloc(dnl * sizeof(float));
+  for (uint64_t i = 0; i < dnl; i++) xty_f[i] = (float)xty[i];
+  free(xty);
+  float *PQtY_f = (float *)malloc(dnl * sizeof(float));
+  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    (int)m, (int)nl, (int)m, 1.0f, Xf, (int)m,
+    xty_f, (int)nl, 0.0f, PQtY_f, (int)nl);
+  free(xty_f);
+  tk_gram_t *g = tk_lua_newuserdata(L, tk_gram_t,
+    TK_GRAM_MT, tk_gram_mt_fns, tk_gram_gc);
+  int gram_idx = lua_gettop(L);
+  g->evecs = NULL;
+  g->evecs_f = Xf;
+  g->eigenvals = eigenvals;
+  g->PQtY = NULL;
+  g->PQtY_f = PQtY_f;
+  g->PQtY_f_external = false;
+  g->baked = false;
+  g->W_baked_f = NULL;
+  g->val_ext = NULL;
+  g->label_counts = lc;
+  g->W_work = (double *)malloc(dnl * sizeof(double));
+  g->W_work_f = NULL;
+  g->sbuf_f = NULL;
+  g->val_F_f = NULL;
+  g->col_mean = col_mean;
+  g->y_mean = y_mean_arr;
+  g->cm_proj = NULL;
+  g->intercept = NULL;
+  g->n_threads = 0;
+  g->thread_heaps = NULL;
+  g->thread_heap_cap = 0;
+  g->thread_bitmaps = NULL;
+  g->sample_heaps = NULL;
+  g->sample_heap_cap = 0;
+  g->gfm_labels = NULL;
+  g->gfm_scores = NULL;
+  g->gfm_pool = NULL;
+  g->gfm_cap = 0;
+  g->mean_eig = mean_eig;
+  g->n_dims = m;
+  g->n_labels = nl;
+  g->n_samples = nc;
+  g->tile_labels = 1024;
+  g->val_n = 0;
+  g->destroyed = false;
+  lua_newtable(L);
+  if (lc_idx > 0) {
+    lua_pushvalue(L, lc_idx);
+    lua_setfield(L, -2, "label_counts");
+  }
+  lua_setfenv(L, gram_idx);
+  lua_pushvalue(L, gram_idx);
+  return 1;
+}
+
+// Fully float-native eigen finalize for the elm relu/linear path: the moment matrix XtX and the
+// cross-moment xty are ALREADY float (accumulated via ssyrk/sger in elm), so there is no double
+// XtX to widen. Centering correction runs in float (ssyr/sger), ssyevd decomposes XtX in place
+// (it becomes evecs_f), and PQtY_f = V^T xty. Takes ownership of XtX (-> evecs_f, freed to pool in
+// gc), xty (freed here), col_mean/y_mean_arr/eigenvals (owned by gram). cm_f/ym_f are transient.
+static inline int tk_gram_finalize_f_native (
+  lua_State *L,
+  float *XtX,
+  float *xty,
+  const float *cm_f,
+  const float *ym_f,
+  double *col_mean,
+  double *y_mean_arr,
+  double *eigenvals,
+  tk_dvec_t *lc,
+  int lc_idx,
+  int64_t nc, int64_t m, int64_t nl)
+{
+  uint64_t um = (uint64_t)m;
+  uint64_t dnl = um * (uint64_t)nl;
+  cblas_ssyr(CblasColMajor, CblasUpper, (int)m, -(float)nc, cm_f, 1, XtX, (int)m);
+  cblas_sger(CblasRowMajor, (int)m, (int)nl, -(float)nc, cm_f, 1, ym_f, 1, xty, (int)nl);
+  float *ef = (float *)malloc(um * sizeof(float));
+  LAPACKE_ssyevd(LAPACK_COL_MAJOR, 'V', 'U', (int)m, XtX, (int)m, ef);
+  double mean_eig = 0.0;
+  for (uint64_t i = 0; i < um; i++) { eigenvals[i] = (double)ef[i]; mean_eig += eigenvals[i]; }
+  mean_eig /= (double)m;
+  free(ef);
+  float *PQtY_f = (float *)malloc(dnl * sizeof(float));
+  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    (int)m, (int)nl, (int)m, 1.0f, XtX, (int)m,
+    xty, (int)nl, 0.0f, PQtY_f, (int)nl);
+  free(xty);
+  tk_gram_t *g = tk_lua_newuserdata(L, tk_gram_t,
+    TK_GRAM_MT, tk_gram_mt_fns, tk_gram_gc);
+  int gram_idx = lua_gettop(L);
+  g->evecs = NULL;
+  g->evecs_f = XtX;
+  g->eigenvals = eigenvals;
+  g->PQtY = NULL;
+  g->PQtY_f = PQtY_f;
+  g->PQtY_f_external = false;
+  g->baked = false;
+  g->W_baked_f = NULL;
+  g->val_ext = NULL;
+  g->label_counts = lc;
+  g->W_work = (double *)malloc(dnl * sizeof(double));
   g->W_work_f = NULL;
   g->sbuf_f = NULL;
   g->val_F_f = NULL;
@@ -254,7 +492,7 @@ static inline int tk_gram_finalize_tiled (
   for (uint64_t i = 0; i < um; i++)
     mean_eig += eigenvals[i];
   mean_eig /= (double)m;
-  float *evecs_f = (float *)malloc(dd * sizeof(float));
+  float *evecs_f = (float *)tk_gram_pool_get(L, dd * sizeof(float));
   for (uint64_t i = 0; i < dd; i++)
     evecs_f[i] = (float)XtX[i];
   tk_gram_t *g = tk_lua_newuserdata(L, tk_gram_t,
@@ -262,6 +500,152 @@ static inline int tk_gram_finalize_tiled (
   int gram_idx = lua_gettop(L);
   g->evecs = XtX;
   g->evecs_f = evecs_f;
+  g->eigenvals = eigenvals;
+  g->PQtY = NULL;
+  g->PQtY_f = PQtY_f;
+  g->PQtY_f_external = pqty_external;
+  g->baked = false;
+  g->W_baked_f = NULL;
+  g->val_ext = NULL;
+  g->label_counts = lc;
+  g->W_work = NULL;
+  g->W_work_f = NULL;
+  g->sbuf_f = NULL;
+  g->val_F_f = NULL;
+  g->col_mean = col_mean;
+  g->y_mean = y_mean_arr;
+  g->cm_proj = NULL;
+  g->intercept = NULL;
+  g->n_threads = 0;
+  g->thread_heaps = NULL;
+  g->thread_heap_cap = 0;
+  g->thread_bitmaps = NULL;
+  g->sample_heaps = NULL;
+  g->sample_heap_cap = 0;
+  g->gfm_labels = NULL;
+  g->gfm_scores = NULL;
+  g->gfm_pool = NULL;
+  g->gfm_cap = 0;
+  g->mean_eig = mean_eig;
+  g->n_dims = m;
+  g->n_labels = nl;
+  g->n_samples = nc;
+  g->tile_labels = tile_labels;
+  g->val_n = 0;
+  g->destroyed = false;
+  lua_newtable(L);
+  if (lc_idx > 0) {
+    lua_pushvalue(L, lc_idx);
+    lua_setfield(L, -2, "label_counts");
+  }
+  lua_setfenv(L, gram_idx);
+  lua_pushvalue(L, gram_idx);
+  return 1;
+}
+
+// Float-only variant of tk_gram_finalize_tiled: the caller has already run the (double) eigendecomposition
+// and consumed the double eigenvectors to build PQtY_f, so the stored gram needs only the float evecs_f
+// (val projection) -- the double XtX is pure dead weight (~d*d*8 bytes = 512MB at d=8192). Copy it to
+// evecs_f, then free it; the downstream methods (solve_w/prepare/ridge.create) already fall back to the
+// float arrays when evecs/PQtY are NULL. Numerically identical to finalize_tiled (PQtY_f was built from
+// the same double evecs); only the resident gram shrinks.
+static inline int tk_gram_finalize_tiled_f (
+  lua_State *L,
+  double *XtX,
+  double *col_mean,
+  double *y_mean_arr,
+  double *eigenvals,
+  float *PQtY_f,
+  bool pqty_external,
+  tk_dvec_t *lc,
+  int lc_idx,
+  int64_t nc, int64_t m, int64_t nl,
+  int64_t tile_labels)
+{
+  uint64_t um = (uint64_t)m;
+  uint64_t dd = um * um;
+  double mean_eig = 0.0;
+  for (uint64_t i = 0; i < um; i++)
+    mean_eig += eigenvals[i];
+  mean_eig /= (double)m;
+  float *evecs_f = (float *)tk_gram_pool_get(L, dd * sizeof(float));
+  for (uint64_t i = 0; i < dd; i++)
+    evecs_f[i] = (float)XtX[i];
+  free(XtX);
+  tk_gram_t *g = tk_lua_newuserdata(L, tk_gram_t,
+    TK_GRAM_MT, tk_gram_mt_fns, tk_gram_gc);
+  int gram_idx = lua_gettop(L);
+  g->evecs = NULL;
+  g->evecs_f = evecs_f;
+  g->eigenvals = eigenvals;
+  g->PQtY = NULL;
+  g->PQtY_f = PQtY_f;
+  g->PQtY_f_external = pqty_external;
+  g->baked = false;
+  g->W_baked_f = NULL;
+  g->val_ext = NULL;
+  g->label_counts = lc;
+  g->W_work = NULL;
+  g->W_work_f = NULL;
+  g->sbuf_f = NULL;
+  g->val_F_f = NULL;
+  g->col_mean = col_mean;
+  g->y_mean = y_mean_arr;
+  g->cm_proj = NULL;
+  g->intercept = NULL;
+  g->n_threads = 0;
+  g->thread_heaps = NULL;
+  g->thread_heap_cap = 0;
+  g->thread_bitmaps = NULL;
+  g->sample_heaps = NULL;
+  g->sample_heap_cap = 0;
+  g->gfm_labels = NULL;
+  g->gfm_scores = NULL;
+  g->gfm_pool = NULL;
+  g->gfm_cap = 0;
+  g->mean_eig = mean_eig;
+  g->n_dims = m;
+  g->n_labels = nl;
+  g->n_samples = nc;
+  g->tile_labels = tile_labels;
+  g->val_n = 0;
+  g->destroyed = false;
+  lua_newtable(L);
+  if (lc_idx > 0) {
+    lua_pushvalue(L, lc_idx);
+    lua_setfield(L, -2, "label_counts");
+  }
+  lua_setfenv(L, gram_idx);
+  lua_pushvalue(L, gram_idx);
+  return 1;
+}
+
+// Fully-float tiled eigen finalize: the caller built the gram, centered, and ran ssyevd ALL in float, so
+// XtX already holds the float eigenvectors -- adopt it directly as evecs_f (no double XtX ever existed, no
+// copy). XtX must come from tk_gram_pool_get (gc returns evecs_f to the pool). eigenvals is the double
+// copy of ssyevd's float output. Numerics differ from the double path only by the float decomposition.
+static inline int tk_gram_finalize_tiled_f_native (
+  lua_State *L,
+  float *XtX,
+  double *col_mean,
+  double *y_mean_arr,
+  double *eigenvals,
+  float *PQtY_f,
+  bool pqty_external,
+  tk_dvec_t *lc,
+  int lc_idx,
+  int64_t nc, int64_t m, int64_t nl,
+  int64_t tile_labels)
+{
+  double mean_eig = 0.0;
+  for (uint64_t i = 0; i < (uint64_t)m; i++)
+    mean_eig += eigenvals[i];
+  mean_eig /= (double)m;
+  tk_gram_t *g = tk_lua_newuserdata(L, tk_gram_t,
+    TK_GRAM_MT, tk_gram_mt_fns, tk_gram_gc);
+  int gram_idx = lua_gettop(L);
+  g->evecs = NULL;
+  g->evecs_f = XtX;
   g->eigenvals = eigenvals;
   g->PQtY = NULL;
   g->PQtY_f = PQtY_f;
@@ -436,28 +820,192 @@ static inline int tk_gram_finalize_cholesky (
     lc, lc_idx, mean_eig, nc, m, nl, 1024);
 }
 
+// Factor (XtX + mu*I) in place via spotrf, escalating mu on failure. A float Cholesky of a near-low-rank
+// gram (e.g. a smooth RBF feature map at large n_hidden) can need far more jitter than the 1e-6 base, but
+// a fixed large floor would over-regularize the well-conditioned majority; instead start at the base and
+// multiply the jitter by 16 on each spotrf failure. Saves one backup copy of XtX to allow the re-attempts
+// (the factor is destructive); if that allocation fails, falls back to a single attempt. mu is folded into
+// the diagonal here. Returns the mu used, or -1.0 if still singular after the escalation budget.
+static inline double tk_spotrf_escalate (float *XtX, int64_t m, double lambda, double mean_eig) {
+  uint64_t um = (uint64_t)m;
+  uint64_t dd = um * um;
+  float *bak = (float *)malloc(dd * sizeof(float));
+  if (bak) memcpy(bak, XtX, dd * sizeof(float));
+  double jit = 1e-6, mu = 0.0;
+  int ok = 0;
+  for (int attempt = 0; attempt < 8; attempt++) {
+    if (attempt > 0) {
+      if (!bak) break;                 // no backup -> cannot re-attempt
+      memcpy(XtX, bak, dd * sizeof(float));
+    }
+    mu = lambda * mean_eig + mean_eig * jit;
+    for (uint64_t i = 0; i < um; i++) XtX[i * um + i] += (float)mu;
+    if (LAPACKE_spotrf(LAPACK_COL_MAJOR, 'U', (int)m, XtX, (int)m) == 0) { ok = 1; break; }
+    jit *= 16.0;
+  }
+  free(bak);
+  return ok ? mu : -1.0;
+}
+
+// Single-precision non-tiled cholesky that BAKES a gram (spectral's locked contract). Float mirror of
+// tk_gram_finalize_cholesky: center (ssyr/sger with cm_f/ym_f), factor via tk_spotrf_escalate (jitter-
+// escalating spotrf -- sturdier than the double path's fixed-mu dpotrf), spotrs, bake W_baked_f + intercept,
+// then make_baked. XtX/xty consumed (freed here); cm_f/ym_f caller-owned; col_mean/y_mean -> make_baked.
+static inline int tk_gram_finalize_cholesky_f_baked (
+  lua_State *L,
+  float *XtX,
+  float *xty,
+  const float *cm_f,
+  const float *ym_f,
+  double *col_mean,
+  double *y_mean_arr,
+  tk_dvec_t *lc,
+  int lc_idx,
+  int64_t nc, int64_t m, int64_t nl,
+  double lambda, bool do_prop, double prop_a, double prop_b)
+{
+  uint64_t um = (uint64_t)m;
+  uint64_t unl = (uint64_t)nl;
+  uint64_t dnl = um * unl;
+  cblas_ssyr(CblasColMajor, CblasUpper, (int)m, -(float)nc, cm_f, 1, XtX, (int)m);
+  cblas_sger(CblasRowMajor, (int)m, (int)nl, -(float)nc, cm_f, 1, ym_f, 1, xty, (int)nl);
+  double mean_eig = 0.0;
+  for (uint64_t i = 0; i < um; i++)
+    mean_eig += (double)XtX[i * um + i];
+  mean_eig /= (double)m;
+  double C = 0.0;
+  double *lca = NULL;
+  if (do_prop && lc) {
+    C = (log((double)nc) - 1.0) * pow(prop_b + 1.0, prop_a);
+    lca = lc->a;
+  }
+  if (lca) {
+    for (uint64_t k = 0; k < um; k++)
+      for (int64_t l = 0; l < nl; l++)
+        xty[k * unl + (uint64_t)l] *= (float)(1.0 + C / pow(lca[l] + prop_b, prop_a));
+  }
+  if (tk_spotrf_escalate(XtX, m, lambda, mean_eig) < 0.0) {
+    free(XtX); free(xty);
+    return luaL_error(L, "gram cholesky_f: spotrf failed (singular after jitter escalation)");
+  }
+  float *Bcm = (float *)malloc(dnl * sizeof(float));
+  float *W_baked_f = (float *)malloc(dnl * sizeof(float));
+  double *intercept = (double *)malloc(unl * sizeof(double));
+  if (!Bcm || !W_baked_f || !intercept) {
+    free(Bcm); free(W_baked_f); free(intercept); free(XtX); free(xty);
+    return luaL_error(L, "gram cholesky_f: out of memory");
+  }
+  for (uint64_t k = 0; k < um; k++)
+    for (uint64_t l = 0; l < unl; l++)
+      Bcm[l * um + k] = xty[k * unl + l];
+  LAPACKE_spotrs(LAPACK_COL_MAJOR, 'U', (int)m, (int)nl, XtX, (int)m, Bcm, (int)m);
+  for (uint64_t k = 0; k < um; k++)
+    for (uint64_t l = 0; l < unl; l++)
+      W_baked_f[k * unl + l] = Bcm[l * um + k];
+  for (int64_t l = 0; l < nl; l++) {
+    double prop = lca ? (1.0 + C / pow(lca[l] + prop_b, prop_a)) : 1.0;
+    intercept[l] = prop * y_mean_arr[l]
+      - (double)cblas_sdot((int)m, Bcm + (uint64_t)l * um, 1, cm_f, 1);
+  }
+  free(Bcm);
+  free(XtX);
+  free(xty);
+  return tk_gram_make_baked(L, W_baked_f, intercept, col_mean, y_mean_arr,
+    lc, lc_idx, mean_eig, nc, m, nl, 1024);
+}
+
+// Single-precision non-tiled cholesky SOLVE for the elm path. XtX (ColMajor/Upper), xty (RowMajor m×nl),
+// col_mean and y_mean_arr are all consumed (freed here); cm_f/ym_f are float copies of the centering means
+// for the float BLAS downdates (the caller owns + frees them). Solves W via Cholesky and pushes W (fvec,
+// d×nl) + intercept (dvec, nl) on the Lua stack -- the elm path consumes W directly (ridge.create
+// references it), so no gram userdata is built. Returns 2. Float math (ssyr/sger/spotrf/spotrs/sdot).
+static inline int tk_gram_finalize_cholesky_f (
+  lua_State *L,
+  float *XtX,
+  float *xty,
+  const float *cm_f,
+  const float *ym_f,
+  double *col_mean,
+  double *y_mean_arr,
+  tk_dvec_t *lc,
+  int64_t nc, int64_t m, int64_t nl,
+  double lambda, bool do_prop, double prop_a, double prop_b)
+{
+  uint64_t um = (uint64_t)m;
+  uint64_t unl = (uint64_t)nl;
+  uint64_t dnl = um * unl;
+  cblas_ssyr(CblasColMajor, CblasUpper, (int)m,
+    -(float)nc, cm_f, 1, XtX, (int)m);
+  cblas_sger(CblasRowMajor, (int)m, (int)nl,
+    -(float)nc, cm_f, 1, ym_f, 1, xty, (int)nl);
+  double mean_eig = 0.0;
+  for (uint64_t i = 0; i < um; i++)
+    mean_eig += (double)XtX[i * um + i];
+  mean_eig /= (double)m;
+  double C = 0.0;
+  double *lca = NULL;
+  if (do_prop && lc) {
+    C = (log((double)nc) - 1.0) * pow(prop_b + 1.0, prop_a);
+    lca = lc->a;
+  }
+  if (lca) {
+    for (uint64_t k = 0; k < um; k++)
+      for (int64_t l = 0; l < nl; l++)
+        xty[k * unl + (uint64_t)l] *= (float)(1.0 + C / pow(lca[l] + prop_b, prop_a));
+  }
+  if (tk_spotrf_escalate(XtX, m, lambda, mean_eig) < 0.0) {
+    free(XtX); free(xty); free(col_mean); free(y_mean_arr);
+    return luaL_error(L, "gram cholesky: spotrf failed (singular even after jitter escalation)");
+  }
+  float *Bcm = (float *)malloc(dnl * sizeof(float));
+  if (!Bcm) { free(XtX); free(xty); free(col_mean); free(y_mean_arr);
+    return luaL_error(L, "gram cholesky: out of memory"); }
+  for (uint64_t k = 0; k < um; k++)
+    for (uint64_t l = 0; l < unl; l++)
+      Bcm[l * um + k] = xty[k * unl + l];
+  LAPACKE_spotrs(LAPACK_COL_MAJOR, 'U', (int)m, (int)nl, XtX, (int)m, Bcm, (int)m);
+  tk_fvec_t *W_fv = tk_fvec_create(L, dnl); W_fv->n = dnl;
+  for (uint64_t k = 0; k < um; k++)
+    for (uint64_t l = 0; l < unl; l++)
+      W_fv->a[k * unl + l] = Bcm[l * um + k];
+  tk_dvec_t *int_dv = tk_dvec_create(L, unl); int_dv->n = unl;
+  for (int64_t l = 0; l < nl; l++) {
+    double prop = lca ? (1.0 + C / pow(lca[l] + prop_b, prop_a)) : 1.0;
+    int_dv->a[l] = prop * y_mean_arr[l]
+      - (double)cblas_sdot((int)m, Bcm + (uint64_t)l * um, 1, cm_f, 1);
+  }
+  free(Bcm); free(XtX); free(xty); free(col_mean); free(y_mean_arr);
+  return 2;   // W (fvec) then intercept (dvec) on the Lua stack
+}
+
 static inline void tk_gram_solve_w (
   tk_gram_t *g, double lambda_raw, bool do_prop, double prop_a, double prop_b)
 {
   int64_t d = g->n_dims, nl = g->n_labels;
   uint64_t dnl = (uint64_t)d * (uint64_t)nl;
   double mu = lambda_raw * g->mean_eig + g->mean_eig * 1e-7;
+  // Float-eigen grams (elm relu/linear) store PQtY_f only; spectral's double grams store PQtY.
+  const double *PQtY_d = g->PQtY;
+  const float *PQtY_f = g->PQtY_f;
   if (do_prop && g->label_counts) {
     double C = (log((double)g->n_samples) - 1.0) * pow(prop_b + 1.0, prop_a);
     double *lc = g->label_counts->a;
     #pragma omp parallel for schedule(static)
     for (int64_t i = 0; i < d; i++) {
       double inv = 1.0 / (g->eigenvals[i] + mu);
-      for (int64_t l = 0; l < nl; l++)
-        g->W_work[i * nl + l] = g->PQtY[i * nl + l] *
-          (1.0 + C / pow(lc[l] + prop_b, prop_a)) * inv;
+      for (int64_t l = 0; l < nl; l++) {
+        double pqty = PQtY_d ? PQtY_d[i * nl + l] : (double)PQtY_f[i * nl + l];
+        g->W_work[i * nl + l] = pqty * (1.0 + C / pow(lc[l] + prop_b, prop_a)) * inv;
+      }
     }
   } else {
     #pragma omp parallel for schedule(static)
     for (int64_t i = 0; i < d; i++) {
       double inv = 1.0 / (g->eigenvals[i] + mu);
-      for (int64_t l = 0; l < nl; l++)
-        g->W_work[i * nl + l] = g->PQtY[i * nl + l] * inv;
+      for (int64_t l = 0; l < nl; l++) {
+        double pqty = PQtY_d ? PQtY_d[i * nl + l] : (double)PQtY_f[i * nl + l];
+        g->W_work[i * nl + l] = pqty * inv;
+      }
     }
   }
   if (!g->W_work_f)
@@ -502,8 +1050,19 @@ static inline int tk_gram_prepare_val_lua (lua_State *L) {
   if (g->col_mean) {
     if (!g->cm_proj)
       g->cm_proj = (double *)malloc((uint64_t)d * sizeof(double));
-    cblas_dgemv(CblasRowMajor, CblasNoTrans, (int)d, (int)d,
-      1.0, g->evecs, (int)d, g->col_mean, 1, 0.0, g->cm_proj, 1);
+    if (g->evecs) {
+      cblas_dgemv(CblasRowMajor, CblasNoTrans, (int)d, (int)d,
+        1.0, g->evecs, (int)d, g->col_mean, 1, 0.0, g->cm_proj, 1);
+    } else {
+      // float-eigen gram (no double evecs): project col_mean through evecs_f in float.
+      float *cmf = (float *)malloc((uint64_t)d * sizeof(float));
+      float *cpf = (float *)malloc((uint64_t)d * sizeof(float));
+      for (int64_t i = 0; i < d; i++) cmf[i] = (float)g->col_mean[i];
+      cblas_sgemv(CblasRowMajor, CblasNoTrans, (int)d, (int)d,
+        1.0f, g->evecs_f, (int)d, cmf, 1, 0.0f, cpf, 1);
+      for (int64_t i = 0; i < d; i++) g->cm_proj[i] = (double)cpf[i];
+      free(cmf); free(cpf);
+    }
   }
   g->val_F_f = (float *)malloc(nd * sizeof(float));
   if (!g->val_F_f) return luaL_error(L, "prepare: out of memory");
@@ -539,7 +1098,7 @@ static inline int tk_gram_trial_label_tiled_lua (lua_State *L) {
   TK_FVEC_BUF(scores_out, 8, val_n * k);
   for (int64_t i = 0; i <= val_n; i++)
     offsets->a[i] = i * k;
-  int64_t B = g->tile_labels;
+  int64_t B = g->tile_labels < nl ? g->tile_labels : nl;   // a tile is never wider than n_labels
   double mu = lambda_raw * g->mean_eig + g->mean_eig * 1e-7;
   double C = 0.0;
   double *lc = NULL;
@@ -653,7 +1212,7 @@ static inline int tk_gram_label_accuracy_tiled_lua (lua_State *L) {
   } else if (lua_isstring(L, 8)) {
     mode = 2;
   }
-  int64_t B = g->tile_labels;
+  int64_t B = g->tile_labels < nl ? g->tile_labels : nl;   // a tile is never wider than n_labels
   double mu = lambda_raw * g->mean_eig + g->mean_eig * 1e-7;
   double C = 0.0;
   double *lc = NULL;
@@ -822,22 +1381,7 @@ static inline int tk_gram_label_accuracy_tiled_lua (lua_State *L) {
       for (int64_t j = exp_off->a[i]; j < exp_off->a[i + 1]; j++)
         if (exp_nbr->a[j] >= 0 && exp_nbr->a[j] < nl) bm[exp_nbr->a[j]] = 0;
     }
-    tk_rvec_desc(&pool, 0, pool.n);
-    uint64_t tp = 0, best_tp = 0;
-    int64_t best_pred = 0;
-    double best_f1 = 0.0;
-    for (size_t i = 0; i < pool.n; i++) {
-      tp += (uint64_t)pool.a[i].i;
-      double f1_val = 2.0 * (double)tp / ((double)(i + 1) + (double)total_expected);
-      if (f1_val > best_f1) {
-        best_f1 = f1_val;
-        best_tp = tp;
-        best_pred = (int64_t)(i + 1);
-      }
-    }
-    f1 = best_f1;
-    prec = best_pred > 0 ? (double)best_tp / (double)best_pred : 0.0;
-    rec = total_expected > 0 ? (double)best_tp / (double)total_expected : 0.0;
+    tk_fmeasure_sweep(pool.a, pool.n, total_expected, &f1, &prec, &rec, NULL);
   }
   free(sheaps);
   lua_pushnumber(L, f1);
@@ -848,71 +1392,6 @@ static inline int tk_gram_label_accuracy_tiled_lua (lua_State *L) {
 
 static inline int tk_gram_label_accuracy_lua (lua_State *L) {
   return tk_gram_label_accuracy_tiled_lua(L);
-}
-
-static inline int tk_gram_label_ranking_lua (lua_State *L) {
-  tk_gram_t *g = tk_gram_peek(L, 1);
-  if (!g->val_F_f) return luaL_error(L, "label_ranking: call prepare first");
-  int64_t d = g->n_dims, nl = g->n_labels, val_n = g->val_n;
-  double lambda_raw = luaL_checknumber(L, 2);
-  int64_t topk = (int64_t)luaL_checkinteger(L, 3);
-  if (topk > nl) topk = nl;
-  if (topk < 1) topk = 1;
-  bool do_prop = lua_isnumber(L, 4);
-  double prop_a = do_prop ? lua_tonumber(L, 4) : 0.0;
-  double prop_b = do_prop ? (lua_isnumber(L, 5) ? lua_tonumber(L, 5) : 1.5) : 0.0;
-  tk_ivec_t *exp_off = tk_ivec_peek(L, 6, "exp_off");
-  tk_ivec_t *exp_nbr = tk_ivec_peek(L, 7, "exp_nbr");
-  tk_gram_solve_w(g, lambda_raw, do_prop, prop_a, prop_b);
-  uint64_t need = (uint64_t)val_n * (uint64_t)nl;
-  if (!g->sbuf_f) {
-    g->sbuf_f = (float *)malloc(need * sizeof(float));
-    if (!g->sbuf_f) return luaL_error(L, "label_ranking: malloc failed");
-  }
-  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-    (int)val_n, (int)nl, (int)d, 1.0f, g->val_F_f, (int)d,
-    g->W_work_f, (int)nl, 0.0f, g->sbuf_f, (int)nl);
-  if (g->intercept)
-    tk_gram_add_intercept_f(g->sbuf_f, val_n, nl, g->intercept);
-  tk_gram_ensure_heaps(g, topk);
-  double sum_ndcg = 0.0;
-  uint64_t n_valid = 0;
-  #pragma omp parallel reduction(+:sum_ndcg,n_valid)
-  {
-    int tid = omp_get_thread_num();
-    tk_rvec_t heap = { .n = 0, .m = (size_t)topk, .lua_managed = false,
-                       .a = g->thread_heaps[tid] };
-    uint8_t *bm = g->thread_bitmaps[tid];
-    #pragma omp for schedule(static)
-    for (int64_t i = 0; i < val_n; i++) {
-      float *row = g->sbuf_f + i * nl;
-      int64_t es = exp_off->a[i], ee = exp_off->a[i + 1];
-      int64_t n_exp = ee - es;
-      if (n_exp == 0) continue;
-      heap.n = 0;
-      for (int64_t l = 0; l < nl; l++)
-        tk_rvec_hmin(&heap, (size_t)topk, tk_rank(l, (double)row[l]));
-      tk_rvec_desc(&heap, 0, heap.n);
-      for (int64_t j = es; j < ee; j++)
-        if (exp_nbr->a[j] >= 0 && exp_nbr->a[j] < nl) bm[exp_nbr->a[j]] = 1;
-      double dcg = 0.0;
-      for (size_t j = 0; j < heap.n; j++)
-        if (heap.a[j].i >= 0 && heap.a[j].i < nl && bm[heap.a[j].i])
-          dcg += 1.0 / log2((double)(j + 2));
-      for (int64_t j = es; j < ee; j++)
-        if (exp_nbr->a[j] >= 0 && exp_nbr->a[j] < nl) bm[exp_nbr->a[j]] = 0;
-      int64_t ideal_n = n_exp < (int64_t)heap.n ? n_exp : (int64_t)heap.n;
-      double idcg = 0.0;
-      for (int64_t j = 0; j < ideal_n; j++)
-        idcg += 1.0 / log2((double)(j + 2));
-      if (idcg > 0.0)
-        sum_ndcg += dcg / idcg;
-      n_valid++;
-    }
-  }
-  double ndcg = n_valid > 0 ? sum_ndcg / (double)n_valid : 0.0;
-  lua_pushnumber(L, ndcg);
-  return 1;
 }
 
 static inline int tk_gram_regress_accuracy_lua (lua_State *L) {
@@ -955,7 +1434,6 @@ __attribute__((unused)) static luaL_Reg tk_gram_mt_fns[] = {
   { "prepare", tk_gram_prepare_val_lua },
   { "label", tk_gram_trial_label_lua },
   { "label_accuracy", tk_gram_label_accuracy_lua },
-  { "label_ranking", tk_gram_label_ranking_lua },
   { "regress", tk_gram_regress_lua },
   { "regress_accuracy", tk_gram_regress_accuracy_lua },
   { NULL, NULL }
