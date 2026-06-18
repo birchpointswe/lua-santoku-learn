@@ -45,27 +45,30 @@ typedef enum {
   TK_SPECTRAL_MATERN52 = 3,
   TK_SPECTRAL_RQ = 4,
   TK_SPECTRAL_ARCCOS1 = 5,
+  TK_SPECTRAL_RBF = 6,
 } tk_spectral_kernel_t;
 
-static inline double tk_spectral_kernel_apply (tk_spectral_kernel_t k, double c) {
-  if (c > 1.0) c = 1.0;
-  if (c < -1.0) c = -1.0;
+static inline float tk_spectral_kernel_apply (tk_spectral_kernel_t k, float c, float gamma) {
+  if (c > 1.0f) c = 1.0f;
+  if (c < -1.0f) c = -1.0f;
+  if (k == TK_SPECTRAL_RBF)
+    return expf(-gamma * (1.0f - c));   // Gaussian RBF on chordal distance d2=2(1-c); expcos == gamma 1
   if (k == TK_SPECTRAL_EXPCOS)
-    return exp(c - 1.0);
+    return expf(c - 1.0f);
   if (k == TK_SPECTRAL_GEOLAPLACE) {
-    double d2 = 2.0 * (1.0 - c);
-    return exp(-sqrt(d2 > 0.0 ? d2 : 0.0));
+    float d2 = 2.0f * (1.0f - c);
+    return expf(-sqrtf(d2 > 0.0f ? d2 : 0.0f));
   }
   if (k == TK_SPECTRAL_MATERN52) {
-    double d2 = 2.0 * (1.0 - c);
-    double a = sqrt(5.0 * (d2 > 0.0 ? d2 : 0.0));
-    return (1.0 + a + (5.0 / 3.0) * d2) * exp(-a);
+    float d2 = 2.0f * (1.0f - c);
+    float a = sqrtf(5.0f * (d2 > 0.0f ? d2 : 0.0f));
+    return (1.0f + a + (5.0f / 3.0f) * d2) * expf(-a);
   }
   if (k == TK_SPECTRAL_RQ)
-    return 1.0 / (2.0 - c);
+    return 1.0f / (2.0f - c);
   if (k == TK_SPECTRAL_ARCCOS1) {
-    double t = acos(c);
-    return (sin(t) + (M_PI - t) * c) / M_PI;
+    float t = acosf(c);
+    return (sinf(t) + ((float)M_PI - t) * c) / (float)M_PI;
   }
   return c;
 }
@@ -105,15 +108,17 @@ static inline int tk_spectral_landmarks_ctx_gc (lua_State *L) {
   return 0;
 }
 
-#define TK_CHOL_BLOCK 64
+#define TK_CHOL_BLOCK 256   // compile-time max block (stack array dims; bounded by the uint8_t pivot index)
 
 static inline void tk_spectral_sample_landmarks (
   lua_State *L,
   tk_spectral_modality_t *mod,
   uint64_t n_samples,
   tk_spectral_kernel_t kernel,
+  float gamma,
   uint64_t n_landmarks,
   double trace_tol,
+  uint64_t chol_block,
   float *ext_chol,
   tk_ivec_t **ids_out,
   tk_fvec_t **chol_out,
@@ -123,6 +128,8 @@ static inline void tk_spectral_sample_landmarks (
   double *trace_ratio_out
 ) {
   uint64_t n_docs = n_samples;
+  if (chol_block == 0) chol_block = 128;
+  if (chol_block > TK_CHOL_BLOCK) chol_block = TK_CHOL_BLOCK;
 
   if (n_landmarks == 0 || n_landmarks > n_docs)
     n_landmarks = n_docs;
@@ -180,14 +187,14 @@ static inline void tk_spectral_sample_landmarks (
   double trace = 0.0;
   bool done = false;
 
-  float *kip_block = (float *)malloc(n_docs * TK_CHOL_BLOCK * sizeof(float));
-  float *cross_dots = (float *)malloc(n_docs * TK_CHOL_BLOCK * sizeof(float));
-  float *pivot_prev_L = (float *)malloc(TK_CHOL_BLOCK * n_landmarks * sizeof(float));
+  float *kip_block = (float *)malloc(n_docs * chol_block * sizeof(float));
+  float *cross_dots = (float *)malloc(n_docs * chol_block * sizeof(float));
+  float *pivot_prev_L = (float *)malloc(chol_block * n_landmarks * sizeof(float));
   int64_t max_d_input = 0;
   if (mod->type == TK_MOD_DENSE && mod->d_input > max_d_input)
     max_d_input = mod->d_input;
   double *pivot_dense_rows = max_d_input > 0
-    ? (double *)malloc(TK_CHOL_BLOCK * (uint64_t)max_d_input * sizeof(double)) : NULL;
+    ? (double *)malloc(chol_block * (uint64_t)max_d_input * sizeof(double)) : NULL;
   uint64_t blk_pivots[TK_CHOL_BLOCK];
 
   double *proposal = (double *)malloc(n_docs * sizeof(double));
@@ -207,14 +214,14 @@ static inline void tk_spectral_sample_landmarks (
       uint64_t nnz = (uint64_t)(mod->csr_offsets[i + 1] - mod->csr_offsets[i]);
       if (nnz > max_nnz) max_nnz = nnz;
     }
-    piv_csc_cap = TK_CHOL_BLOCK * max_nnz;
+    piv_csc_cap = chol_block * max_nnz;
     piv_csc_piv = (uint8_t *)malloc(piv_csc_cap);
     piv_csc_val = (float *)malloc(piv_csc_cap * sizeof(float));
   }
 
   double *dense_kip = NULL;
   if (mod->type == TK_MOD_DENSE)
-    dense_kip = (double *)malloc(n_docs * TK_CHOL_BLOCK * sizeof(double));
+    dense_kip = (double *)malloc(n_docs * chol_block * sizeof(double));
 
   if (!kip_block || !cross_dots || !pivot_prev_L
       || (max_d_input > 0 && !pivot_dense_rows)
@@ -285,10 +292,10 @@ static inline void tk_spectral_sample_landmarks (
     }
 
     uint64_t max_blk = n_landmarks - actual_landmarks;
-    if (max_blk > TK_CHOL_BLOCK) max_blk = TK_CHOL_BLOCK;
+    if (max_blk > chol_block) max_blk = chol_block;
 
     uint64_t n_propose = max_blk * 2;
-    if (n_propose > TK_CHOL_BLOCK) n_propose = TK_CHOL_BLOCK;
+    if (n_propose > chol_block) n_propose = chol_block;
     uint64_t np = 0;
     uint64_t n_valid = 0;
     for (uint64_t b = 0; b < n_propose && np < max_blk; b++) {
@@ -385,8 +392,8 @@ static inline void tk_spectral_sample_landmarks (
         #pragma omp parallel for schedule(static)
         for (uint64_t i = 0; i < n_docs; i++)
           for (uint64_t b = 0; b < np; b++)
-            kip_block[i * np + b] = (float)tk_spectral_kernel_apply(kernel,
-              (double)kip_block[i * np + b]);
+            kip_block[i * np + b] = tk_spectral_kernel_apply(kernel,
+              kip_block[i * np + b], gamma);
       }
 
     } else if (mod->type == TK_MOD_DENSE) {
@@ -405,8 +412,8 @@ static inline void tk_spectral_sample_landmarks (
         #pragma omp parallel for schedule(static)
         for (uint64_t i = 0; i < n_docs; i++)
           for (uint64_t b = 0; b < np; b++)
-            kip_block[i * np + b] = (float)tk_spectral_kernel_apply(kernel,
-              dense_kip[i * np + b]);
+            kip_block[i * np + b] = tk_spectral_kernel_apply(kernel,
+              (float)dense_kip[i * np + b], gamma);
       }
     }
 
@@ -524,12 +531,13 @@ typedef struct {
   uint64_t d;
   double trace_ratio;
   tk_spectral_kernel_t kernel;
+  float gamma;
   uint8_t mod_type;
   int64_t *csr_offsets;
   int32_t *csr_tokens;
   float *csr_values;
   int64_t *csc_offsets;
-  int64_t *csc_rows;
+  int16_t *csc_rows;   // landmark row indices (0..m-1); m capped at 32768 so int16 suffices
   float *csc_values;
   uint64_t csr_n_tokens;
   float *dense_vecs;
@@ -665,7 +673,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
       const int64_t *off_a = in_offsets->a;
       const int32_t *tok_a = in_tok_a;
       const int64_t *restrict csc_off = enc->csc_offsets;
-      const int64_t *restrict csc_rows_a = enc->csc_rows;
+      const int16_t *restrict csc_rows_a = enc->csc_rows;
       const float *restrict csc_vals = enc->csc_values;
       #pragma omp parallel
       {
@@ -683,7 +691,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
               row_buf[(uint64_t)csc_rows_a[c]] += val * csc_vals[c];
           }
           for (uint64_t j = 0; j < m; j++) {
-            sims_row[j] = (float)tk_spectral_kernel_apply(enc->kernel, (double)row_buf[j]);
+            sims_row[j] = tk_spectral_kernel_apply(enc->kernel, row_buf[j], enc->gamma);
             row_buf[j] = 0.0f;
           }
         }
@@ -710,8 +718,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
       #pragma omp parallel for schedule(static)
       for (uint64_t i = 0; i < blk; i++)
         for (uint64_t j = 0; j < m; j++)
-          sims_f[i * m + j] = (float)tk_spectral_kernel_apply(enc->kernel,
-            (double)sims_f[i * m + j]);
+          sims_f[i * m + j] = tk_spectral_kernel_apply(enc->kernel, sims_f[i * m + j], enc->gamma);
     }
 
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
@@ -740,10 +747,11 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
     return luaL_error(L, "cannot persist: projection released");
   FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
   tk_lua_fwrite(L, "TKny", 1, 4, fh);
-  uint8_t version = 24;
+  uint8_t version = 25;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   uint8_t kernel_byte = (uint8_t)enc->kernel;
   tk_lua_fwrite(L, &kernel_byte, sizeof(uint8_t), 1, fh);
+  tk_lua_fwrite(L, &enc->gamma, sizeof(float), 1, fh);
   tk_lua_fwrite(L, &enc->mod_type, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &enc->m, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, &enc->d, sizeof(uint64_t), 1, fh);
@@ -866,7 +874,9 @@ static inline int tm_encode (lua_State *L) {
   else if (strcmp(kernel_str, "matern52") == 0) kernel = TK_SPECTRAL_MATERN52;
   else if (strcmp(kernel_str, "rq") == 0) kernel = TK_SPECTRAL_RQ;
   else if (strcmp(kernel_str, "arccos1") == 0) kernel = TK_SPECTRAL_ARCCOS1;
+  else if (strcmp(kernel_str, "rbf") == 0) kernel = TK_SPECTRAL_RBF;
   else return luaL_error(L, "encode: unknown kernel '%s'", kernel_str);
+  float gamma = (float)tk_lua_foptnumber(L, 1, "encode", "gamma", 1.0);
 
   if (has_csr && !mod.csr_values) {
     uint64_t nnz = (uint64_t)(mod.csr_offsets[n_samples] - mod.csr_offsets[0]);
@@ -878,6 +888,7 @@ static inline int tm_encode (lua_State *L) {
 
   uint64_t n_lm_req = tk_lua_foptunsigned(L, 1, "encode", "n_landmarks", 0);
   double trace_tol = tk_lua_foptnumber(L, 1, "encode", "trace_tol", 0.0);
+  uint64_t chol_block = tk_lua_foptunsigned(L, 1, "encode", "chol_block", 128);
 
   lua_getfield(L, 1, "chol_buf");
   tk_fvec_t *chol_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "chol_buf");
@@ -889,8 +900,8 @@ static inline int tm_encode (lua_State *L) {
   uint64_t nc, m;
   double trace_ratio;
   tk_spectral_sample_landmarks(L,
-    &mod, n_samples, kernel,
-    n_lm_req, trace_tol,
+    &mod, n_samples, kernel, gamma,
+    n_lm_req, trace_tol, chol_block,
     chol_buf ? chol_buf->a : NULL,
     &lm_ids, &lm_chol, &full_chol, &nc, &m, &trace_ratio);
   int lm_ids_idx = lua_gettop(L);
@@ -954,6 +965,12 @@ static inline int tm_encode (lua_State *L) {
     lua_pushnil(L);
     lua_pushnil(L);
     return 2;
+  }
+  if (m > 32768) {   // csc_rows is int16 (landmark indices); enforce the documented ceiling
+    if (lm_chol) tk_fvec_destroy(lm_chol);
+    if (!chol_buf) free(full_chol);
+    free(csr_values_owned); free(dense_from_fvec);
+    return luaL_error(L, "encode: n_landmarks %d exceeds 32768 (int16 csc_rows ceiling)", (int)m);
   }
 
   tk_encode_nystrom_ctx_t *ctx = (tk_encode_nystrom_ctx_t *)
@@ -1242,6 +1259,7 @@ static inline int tm_encode (lua_State *L) {
   enc->trace_ratio = trace_ratio;
   enc->destroyed = false;
   enc->kernel = kernel;
+  enc->gamma = gamma;
   enc->mod_type = mod.type;
   enc->csr_offsets = NULL;
   enc->csr_tokens = NULL;
@@ -1287,7 +1305,7 @@ static inline int tm_encode (lua_State *L) {
       enc->csc_offsets[enc->csr_tokens[i] + 1]++;
     for (uint64_t t = 0; t < csr_nt; t++)
       enc->csc_offsets[t + 1] += enc->csc_offsets[t];
-    enc->csc_rows = (int64_t *)malloc(lm_total * sizeof(int64_t));
+    enc->csc_rows = (int16_t *)malloc(lm_total * sizeof(int16_t));
     enc->csc_values = (float *)malloc(lm_total * sizeof(float));
     int64_t *csc_pos = (int64_t *)malloc((csr_nt + 1) * sizeof(int64_t));
     memcpy(csc_pos, enc->csc_offsets, (csr_nt + 1) * sizeof(int64_t));
@@ -1295,7 +1313,7 @@ static inline int tm_encode (lua_State *L) {
       for (int64_t a = enc->csr_offsets[j]; a < enc->csr_offsets[j + 1]; a++) {
         int32_t tok = enc->csr_tokens[a];
         int64_t p = csc_pos[tok]++;
-        enc->csc_rows[p] = (int64_t)j;
+        enc->csc_rows[p] = (int16_t)j;
         enc->csc_values[p] = enc->csr_values[a];
       }
     }
@@ -1339,7 +1357,7 @@ static inline void tk_nystrom_build_csc (tk_nystrom_encoder_t *enc) {
     enc->csc_offsets[enc->csr_tokens[i] + 1]++;
   for (uint64_t t = 0; t < csr_nt; t++)
     enc->csc_offsets[t + 1] += enc->csc_offsets[t];
-  enc->csc_rows = (int64_t *)malloc(lm_total * sizeof(int64_t));
+  enc->csc_rows = (int16_t *)malloc(lm_total * sizeof(int16_t));
   enc->csc_values = (float *)malloc(lm_total * sizeof(float));
   int64_t *csc_pos = (int64_t *)malloc((csr_nt + 1) * sizeof(int64_t));
   memcpy(csc_pos, enc->csc_offsets, (csr_nt + 1) * sizeof(int64_t));
@@ -1347,7 +1365,7 @@ static inline void tk_nystrom_build_csc (tk_nystrom_encoder_t *enc) {
     for (int64_t a = enc->csr_offsets[j]; a < enc->csr_offsets[j + 1]; a++) {
       int32_t tok = enc->csr_tokens[a];
       int64_t p = csc_pos[tok]++;
-      enc->csc_rows[p] = (int64_t)j;
+      enc->csc_rows[p] = (int16_t)j;
       enc->csc_values[p] = enc->csr_values[a];
     }
   }
@@ -1366,7 +1384,7 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 24) {
+  if (version != 25) {
     tk_lua_fclose(L, fh);
     return luaL_error(L, "unsupported nystrom encoder version %d", (int)version);
   }
@@ -1386,6 +1404,7 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   uint8_t kernel_byte;
   tk_lua_fread(L, &kernel_byte, sizeof(uint8_t), 1, fh);
   enc->kernel = (tk_spectral_kernel_t)kernel_byte;
+  tk_lua_fread(L, &enc->gamma, sizeof(float), 1, fh);
   tk_lua_fread(L, &enc->mod_type, sizeof(uint8_t), 1, fh);
   tk_lua_fread(L, &enc->m, sizeof(uint64_t), 1, fh);
   tk_lua_fread(L, &enc->d, sizeof(uint64_t), 1, fh);

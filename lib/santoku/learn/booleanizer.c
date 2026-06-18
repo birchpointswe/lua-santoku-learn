@@ -349,52 +349,6 @@ static inline int64_t tk_booleanizer_features (
   return (int64_t) B->next_feature;
 }
 
-static inline tk_ivec_t *tk_booleanizer_bit_offsets (
-  lua_State *L,
-  tk_booleanizer_t *B
-) {
-  if (B->destroyed) {
-    tk_lua_verror(L, 2, "bit_offsets", "can't query a destroyed booleanizer");
-    return NULL;
-  }
-  if (!B->finalized) {
-    tk_lua_verror(L, 2, "bit_offsets", "finalize must be called before bit_offsets");
-    return NULL;
-  }
-  tk_ivec_t *offsets = tk_ivec_create(L, 0);
-  tk_iumap_t *cat_attr_starts = tk_iumap_create(0, 0);
-  tk_cat_bit_string_t cbs;
-  int64_t bit_id;
-  tk_umap_foreach(B->cat_bits_string, cbs, bit_id, ({
-    khint_t k = tk_iumap_get(cat_attr_starts, cbs.f);
-    if (k == tk_iumap_end(cat_attr_starts)) {
-      int kha;
-      k = tk_iumap_put(cat_attr_starts, cbs.f, &kha);
-      tk_iumap_setval(cat_attr_starts, k, bit_id);
-    } else if (bit_id < tk_iumap_val(cat_attr_starts, k)) {
-      tk_iumap_setval(cat_attr_starts, k, bit_id);
-    }
-  }));
-  tk_cat_bit_double_t cbd;
-  tk_umap_foreach(B->cat_bits_double, cbd, bit_id, ({
-    khint_t k = tk_iumap_get(cat_attr_starts, cbd.f);
-    if (k == tk_iumap_end(cat_attr_starts)) {
-      int kha;
-      k = tk_iumap_put(cat_attr_starts, cbd.f, &kha);
-      tk_iumap_setval(cat_attr_starts, k, bit_id);
-    } else if (bit_id < tk_iumap_val(cat_attr_starts, k)) {
-      tk_iumap_setval(cat_attr_starts, k, bit_id);
-    }
-  }));
-  int64_t attr_id, bit_start;
-  tk_umap_foreach(cat_attr_starts, attr_id, bit_start, ({
-    tk_ivec_push(offsets, bit_start);
-  }));
-  tk_iumap_destroy(cat_attr_starts);
-  tk_ivec_asc(offsets, 0, offsets->n);
-  tk_ivec_push(offsets, (int64_t) B->next_feature);
-  return offsets;
-}
 
 static inline void tk_booleanizer_restrict (
   lua_State *L,
@@ -665,12 +619,6 @@ static inline int tk_booleanizer_features_lua (lua_State *L)
   return 2;
 }
 
-static inline int tk_booleanizer_bit_offsets_lua (lua_State *L)
-{
-  tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
-  tk_booleanizer_bit_offsets(L, B);
-  return 1;
-}
 
 static inline int tk_booleanizer_restrict_lua (lua_State *L)
 {
@@ -762,71 +710,13 @@ static inline int tk_booleanizer_feature_lua (lua_State *L)
   return 0;
 }
 
-static inline int tk_booleanizer_index_lua (lua_State *L)
-{
-  lua_settop(L, 1);
-  tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
-  if (!B->finalized) {
-    tk_lua_verror(L, 2, "index", "finalize must be called before index");
-    return 0;
-  }
-
-  lua_newtable(L);
-
-  tk_cat_bit_string_t key_s;
-  int64_t bit_id;
-  tk_umap_foreach(B->cat_bits_string, key_s, bit_id, ({
-    lua_pushinteger(L, bit_id + 1);
-    lua_newtable(L);
-
-    const char *attr_name = NULL;
-    const char *z;
-    int64_t attr_id;
-    tk_umap_foreach(B->string_features, z, attr_id, ({
-      if (attr_id == key_s.f) {
-        attr_name = z;
-        break;
-      }
-    }));
-
-    lua_pushstring(L, "attribute");
-    lua_pushstring(L, attr_name ? attr_name : "");
-    lua_settable(L, -3);
-
-    lua_pushstring(L, "value");
-    lua_pushstring(L, key_s.v);
-    lua_settable(L, -3);
-
-    lua_settable(L, -3);
-  }));
-
-  tk_cat_bit_double_t key_d;
-  tk_umap_foreach(B->cat_bits_double, key_d, bit_id, ({
-    lua_pushinteger(L, bit_id + 1);
-    lua_newtable(L);
-
-    lua_pushstring(L, "attribute");
-    lua_pushinteger(L, key_d.f);
-    lua_settable(L, -3);
-
-    lua_pushstring(L, "value");
-    lua_pushnumber(L, key_d.v);
-    lua_settable(L, -3);
-
-    lua_settable(L, -3);
-  }));
-
-  return 1;
-}
 
 static luaL_Reg tk_booleanizer_mt_fns[] =
 {
   { "observe", tk_booleanizer_observe_lua },
   { "encode", tk_booleanizer_encode_lua },
   { "features", tk_booleanizer_features_lua },
-  { "bit_offsets", tk_booleanizer_bit_offsets_lua },
   { "feature", tk_booleanizer_feature_lua },
-  { "index", tk_booleanizer_index_lua },
   { "finalize", tk_booleanizer_finalize_lua },
   { "restrict", tk_booleanizer_restrict_lua },
   { "persist", tk_booleanizer_persist_lua },

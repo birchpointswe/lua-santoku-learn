@@ -10,20 +10,26 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
--- Reported metrics (search_trials=100; splits train=50400 val=5600 test=14000; 10 classes):
---   n_landmarks=8192:  F1 val=0.98 test=0.98  (best: matern52, lambda=5.258e-03, pa=0.45 pb=6.79)
-
 local cfg = {
-  data = { ttr = 0.8, tvr = 0.1, max = nil, features = 784 },
-  -- emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = "rq" },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "expcos", "rq", "matern52", "cosine", "geolaplace", "arccos1" } },
+  data = {
+    ttr = 0.8,
+    tvr = 0.1,
+    max = nil,
+    features = 784
+  },
+  emb = {
+    n_landmarks = 1024 * 8,
+    trace_tol = 0.01,
+    kernel = { "rbf", "rq", "expcos", "matern52", "cosine", "geolaplace", "arccos1" },
+    gamma = { def = 3.21 }
+  },
   ridge = {
-    lambda = { min = 1e-4, max = 1e1, log = true, def = 1.6265e-03 },
-    propensity_a = { min = 0, max = 4, def = 3.1609 },
-    propensity_b = { min = 0, max = 8, def = 0.2904 },
+    lambda = { def = 1.1289e-04 },
+    propensity_a = { def = 2.1277 },
+    propensity_b = { def = 2.6922 },
     classes = 10,
     search_trials = 0,
-    k = 1,
+    k = 1
   },
 }
 
@@ -55,7 +61,8 @@ test("mnist classifier", function ()
 
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
   local sp_enc, ridge_obj, val_codes, _, decider = optimize.krr({
-    kernel = cfg.emb.kernel, offsets = train_p_off, tokens = train_p_nbr, values = train_p_val,
+    kernel = cfg.emb.kernel, rbf_gamma = cfg.emb.gamma,
+    offsets = train_p_off, tokens = train_p_nbr, values = train_p_val,
     n_samples = train.n, n_tokens = n_features,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
@@ -67,7 +74,7 @@ test("mnist classifier", function ()
     k = cfg.ridge.k, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
-  do  -- persist/load parity: round-tripped encoder must produce identical codes
+  do
     local p = os.tmpname()
     sp_enc:persist(p)
     local enc2 = spectral.load(p)
@@ -99,9 +106,6 @@ test("mnist classifier", function ()
   test_codes = nil -- luacheck: ignore
   str.printf("[Eval] Labels done %s\n", sw())
 
-  -- single-label decode is argmax(score - offset). `decider` carries the dev-calibrated offsets; a
-  -- zero-offset decider is plain argmax. Score both decoders on both splits: decide can only improve
-  -- dev (argmax is the offsets==0 special case it searched over), so test is where overfit would show.
   local decide = require("santoku.learn.decide")
   local argmax = decide.create({ n_labels = n_classes, single = true })
   local function score_split (d, scores, n, sol)

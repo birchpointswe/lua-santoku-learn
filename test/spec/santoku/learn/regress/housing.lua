@@ -12,14 +12,24 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
--- Reported metrics (search_trials=200; splits train=16512 val=2064 test=2064):
---   n_landmarks=8192:  acc val=83.0% test=82.8%  (best: geolaplace, lambda=6.7149e-02)
-
 local cfg = {
-  data = { ttr = 0.8, tvr = 0.1, max = nil },
-  -- emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = "geolaplace" },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "geolaplace", "cosine", "expcos", "matern52", "rq", "arccos1" } },
-  ridge = { lambda = { min = 1e-4, max = 1e1, log = true, def = 7.7147e-02 }, search_trials = 0 },
+  data = {
+    ttr = 0.8,
+    tvr = 0.1,
+    max = nil
+  },
+  emb = {
+    n_landmarks = 1024 * 8,
+    trace_tol = 0.01,
+    -- Winner: geolaplace = exp(-d) over the chordal distance d = sqrt(2(1-cos)), i.e. the Matern kernel
+    -- with nu = 1/2 (the exponential / Ornstein-Uhlenbeck kernel) at unit length-scale (l = 1). Housing's
+    -- target is rough/non-smooth, so the least-smooth Matern member wins over the smoother rbf (nu = inf).
+    kernel = { "geolaplace", "cosine", "expcos", "matern52", "rq", "arccos1", "rbf" }
+  },
+  ridge = {
+    lambda = { def = 6.3981e-02 },
+    search_trials = 0
+  },
 }
 
 test("housing regressor", function ()
@@ -53,10 +63,6 @@ test("housing regressor", function ()
   local offsets, tokens, values = merge_features(
     train.bit_offsets, train.bit_neighbors, train.continuous, train.n)
   local std_scores = csr.standardize(offsets, tokens, values, nil, n_tokens)
-  -- Per-block normalization: scale each modality to unit mean per-row squared norm,
-  -- MEASURED on the standardized train matrix. This counts each block's actual
-  -- contribution (correct for sparse one-hot, where 1/sqrt(n_cols) is wrong since only
-  -- the active bits contribute). block_sumsq groups by token-block entirely in C.
   local ss = csr.block_sumsq(tokens, values, { 0, n_cat, n_tokens })
   local ss_cat, ss_cont = ss:get(0), ss:get(1)
   local block = fvec.create(n_tokens)
@@ -86,7 +92,7 @@ test("housing regressor", function ()
     search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
-  do  -- persist/load parity: round-tripped encoder must produce identical codes
+  do
     local p = os.tmpname()
     sp_enc:persist(p)
     local enc2 = spectral.load(p)

@@ -610,6 +610,12 @@ M.krr = function (args)
   local kernel_spec = args.kernel or "cosine"
   local kernels = type(kernel_spec) == "table" and kernel_spec or { kernel_spec }
   args.kernel = kernels
+  -- rbf carries a gamma bandwidth -- the only kernel whose embedding depends on a hyperparameter. Split it
+  -- out: the param-free kernels run once each; rbf runs last as a gamma BO (rbf_trials full rebuilds).
+  local has_rbf, pf_kernels = false, {}
+  for _, kn in ipairs(kernels) do
+    if kn == "rbf" then has_rbf = true else pf_kernels[#pf_kernels + 1] = kn end
+  end
   -- inner label-head params (lambda [+ propensity] [+ extra]); searched per kernel on a fixed gram.
   -- args.extra = ordered pass-through search dims { { name=, min=, max=, log=, def= }, ... }: GP-searched
   -- and handed to trial_fn in params, but ignored by the gram/kernel logic (e.g. a Viterbi weight).
@@ -636,6 +642,7 @@ M.krr = function (args)
     n_tokens = args.n_tokens, n_samples = args.n_samples,
     codes = args.codes, d_input = args.d_input,
     n_landmarks = args.n_landmarks, trace_tol = args.trace_tol,
+    chol_block = args.chol_block,
     label_offsets = args.label_offsets, label_neighbors = args.label_neighbors,
     n_labels = args.n_labels,
     targets = args.targets, n_targets = args.n_targets,
@@ -656,10 +663,12 @@ M.krr = function (args)
     })
   end
   -- Build one kernel's eigendecomposed gram (no solve_lambda, no cache -- the outer loop visits each
-  -- kernel exactly once). collectgarbage first so only ~one d x d gram (plus the running best) is resident.
-  local function build_kd (kname)
+  -- kernel exactly once). collectgarbage first so only ~one d x d gram is resident (we don't retain the
+  -- running best -- see the rebuild-from-params note at the end).
+  local function build_kd (kname, gamma)
     collectgarbage("collect")
     spectral_args.kernel = kname
+    spectral_args.gamma = gamma   -- nil for param-free kernels (C defaults gamma=1, unused by them)
     spectral_args.solve_lambda = nil
     spectral_args.solve_propensity_a = nil
     spectral_args.solve_propensity_b = nil
@@ -693,9 +702,13 @@ M.krr = function (args)
   -- eigendecomposition -- the gram is "baked" and ridge.create just copies W).
   if not do_search then
     local kname = kernels.def or kernels[1]
+    -- rbf carries a frozen gamma (args.rbf_gamma as a scalar or { def = }); other kernels ignore it.
+    local gamma = kname == "rbf"
+      and (type(args.rbf_gamma) == "table" and args.rbf_gamma.def or args.rbf_gamma) or nil
     local lp = sample_params(inner_samplers, inner_names, nil, true)
     collectgarbage("collect")
     spectral_args.kernel = kname
+    spectral_args.gamma = gamma
     spectral_args.solve_lambda = lp.lambda
     if not dense then
       spectral_args.solve_propensity_a = lp.propensity_a
@@ -708,7 +721,7 @@ M.krr = function (args)
     rand.fast_seed(seed)
     local _, sp_enc, gram = spectral.encode(spectral_args)
     local val_codes = val_encode(sp_enc)
-    local params = { kernel = kname }
+    local params = { kernel = kname, gamma = gamma }
     for _, n in ipairs(inner_names) do params[n] = lp[n] end
     return finish({ sp_enc = sp_enc, gram = gram, val_codes = val_codes }, params, "cholesky")
   end
@@ -719,9 +732,10 @@ M.krr = function (args)
   -- Outer: a simple loop over the discrete kernel list, tracking the running best ACROSS kernels. Inner:
   -- a SILENT GP/BO over lambda/propensity/extra on that kernel's fixed eigenbasis (cheap closed-form
   -- tests). One log line per kernel reports its best with the global-best marker (the inner trials are
-  -- hidden). The running-best kd is kept so the final reuses its gram without a rebuild.
-  local best_kd, best_params, best_score = nil, nil, -num.huge
-  for ki, kname in ipairs(kernels) do
+  -- hidden). We track only the winning params (kernel + gamma + label head) and rebuild its gram at the
+  -- end -- retaining the kd is unsafe when its gram aliases a shared pqty mmap that a later trial reuses.
+  local best_params, best_score = nil, -num.huge
+  for ki, kname in ipairs(pf_kernels) do
     local kd = build_kd(kname)
     local _, ib = search({
       param_names = inner_names, samplers = inner_samplers,
@@ -732,14 +746,48 @@ M.krr = function (args)
     ib.kernel = kname
     local sc, sm = trial_fn(kd.gram, ib, kd)
     if args.each then
-      args.each({ event = "trial", phase = "kernel", trial = ki, trials = #kernels,
+      args.each({ event = "trial", phase = "kernel", trial = ki, trials = #pf_kernels,
         params = ib, score = sc, metrics = sm,
         global_best_score = best_score, is_new_best = sc > best_score })
     end
     if sc > best_score then
-      best_score, best_params, best_kd = sc, ib, kd
+      best_score, best_params = sc, ib
     end
   end
+  -- rbf last: an outer BO over gamma (each gamma = a full rebuild + eigendecomp, since the embedding
+  -- depends on it), with the same inner lambda BO on each gamma's eigenbasis. The running param-free best
+  -- is the bar to beat. We keep only params, never the kd: every rbf trial reuses the same pqty mmap, so a
+  -- retained best kd would be silently overwritten by a later gamma -- hence the rebuild-from-params below.
+  if has_rbf then
+    args.rbf_gamma = spec_defaults(args.rbf_gamma, { min = 1e-2, max = 4, log = true, def = 1.0 })
+    local gamma_samplers = build_samplers(args, { "rbf_gamma" })
+    local rbf_trials = args.rbf_trials or 20
+    local gi = 0
+    search({
+      param_names = { "rbf_gamma" }, samplers = gamma_samplers, trials = rbf_trials, skip_final = true,
+      trial_fn = function (gp)
+        gi = gi + 1
+        local kd = build_kd("rbf", gp.rbf_gamma)
+        local _, ib = search({
+          param_names = inner_names, samplers = inner_samplers, trials = inner_trials,
+          trial_fn = function (p) return trial_fn(kd.gram, p, kd) end, skip_final = true,
+        })
+        ib.kernel = "rbf"; ib.gamma = gp.rbf_gamma
+        local sc, sm = trial_fn(kd.gram, ib, kd)
+        if args.each then
+          args.each({ event = "trial", phase = "kernel", trial = gi, trials = rbf_trials,
+            params = ib, score = sc, metrics = sm,
+            global_best_score = best_score, is_new_best = sc > best_score })
+        end
+        if sc > best_score then best_score, best_params = sc, ib end
+        return sc, sm
+      end,
+    })
+  end
+  -- Rebuild the winner from its params. build_kd reseeds the RNG to a fixed seed before encode, so this
+  -- reproduces the exact gram (landmarks + eigenbasis + pqty, now mutually consistent) the winner was
+  -- selected on -- without retaining a kd whose pqty may have been clobbered by a later trial.
+  local best_kd = build_kd(best_params.kernel, best_params.gamma)
   return finish(best_kd, best_params, "eigen")
 end
 

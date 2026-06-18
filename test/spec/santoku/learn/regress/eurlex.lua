@@ -1,7 +1,5 @@
 local csr = require("santoku.learn.csr")
 local tokenizer = require("santoku.learn.tokenizer")
--- materialize the streaming text iterator into a table, then tokenize via a tokenizer
--- object (object threads as the old ngram_map: nil => create+grow; object => frozen).
 local function tokenize (iter, n, ng, tok)
   local texts, x = {}, iter()
   while x do texts[#texts + 1] = x; x = iter() end
@@ -22,18 +20,25 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
--- Reported metrics (search_trials=100; splits train=44999 dev=5999 test=5999; 4270 labels):
---   n_landmarks=8192:  miF1 dv-oracle=0.808 ts-oracle=0.791 ts-pred=0.732 (best: cosine, lambda=1.6012e-04, pa=0.03 pb=7.84)
-
 local cfg = {
-  data = { max = nil },
-  tok = { ngram = 6 },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "cosine", "expcos", "geolaplace", "matern52", "rq", "arccos1" }, k = 256 },
+  data = {
+    max = nil
+  },
+  tok = {
+    ngram = 6
+  },
+  emb = {
+    n_landmarks = 1024 * 8,
+    trace_tol = 0.01,
+    kernel = { "rbf", "cosine", "expcos", "geolaplace", "matern52", "rq", "arccos1" },
+    gamma = { def = 0.3163 },
+    k = 256
+  },
   ridge = {
-    lambda = { min = 1e-4, max = 1e1, log = true, def = 1.7559e-04 },
-    propensity_a = { min = 0, max = 4, def = 0.0520 },
-    propensity_b = { min = 0, max = 8, def = 6.8075 },
-    search_trials = 0,
+    lambda = { def = 2.3652e-04 },
+    propensity_a = { def = 0.0536 },
+    propensity_b = { def = 13.1522 },
+    search_trials = 0
   },
 }
 
@@ -76,14 +81,13 @@ test("eurlex classifier", function ()
   local chol_buf = fvec.mmap_create(chol_path, cfg.emb.n_landmarks * train.n)
   local w_buf = fvec.mmap_create(w_path, cfg.emb.n_landmarks * n_labels)
   local pqty_path = "test/res/eurlex57k/pqty_tmp"
-  -- Per-kernel PQtY factory: the lazy kernel cache creates one mmap per kernel it builds.
   local pqty_buf = cfg.ridge.search_trials > 0
     and function (kname) return fvec.mmap_create(pqty_path .. "_" .. kname, cfg.emb.n_landmarks * n_labels) end
     or nil
   local sp_enc, ridge_obj, dev_codes, best_params, decider, dec_metrics = optimize.krr({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
-    kernel = cfg.emb.kernel,
+    kernel = cfg.emb.kernel, rbf_gamma = cfg.emb.gamma,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     label_offsets = train_label_off, label_neighbors = train_label_nbr, n_labels = n_labels,
     val_offsets = val_off, val_tokens = val_tok, val_values = val_val,
@@ -95,7 +99,7 @@ test("eurlex classifier", function ()
     chol_buf = chol_buf, w_buf = w_buf, pqty_buf = pqty_buf,
     each = util.make_ridge_log(stopwatch),
   })
-  do  -- persist/load parity: round-tripped encoder must produce identical codes
+  do
     local pth = os.tmpname()
     sp_enc:persist(pth)
     local enc2 = spectral.load(pth)
@@ -132,7 +136,6 @@ test("eurlex classifier", function ()
   })
   str.printf("[Oracle] dev %s %s\n", fmt_metrics(dv_oracle), sw())
 
-  -- krr bundled the multilabel decider (global score threshold calibrated on dev to maximize micro-F1).
   dev_codes = nil -- luacheck: ignore
   collectgarbage("collect")
 
@@ -147,8 +150,6 @@ test("eurlex classifier", function ()
   })
   str.printf("[Oracle] test %s %s\n", fmt_metrics(ts_oracle), sw())
 
-  -- decided prediction: the bundled decider decodes (threshold) and scores in one call. dec_metrics is
-  -- the same decider calibrated on dev (val), so [Decide] shows val | test.
   local _, ts_pred_m = decider:score({
     offsets = ts_off, neighbors = ts_nbr, scores = ts_sco,
     expected_offsets = test_label_off, expected_neighbors = test_label_nbr,

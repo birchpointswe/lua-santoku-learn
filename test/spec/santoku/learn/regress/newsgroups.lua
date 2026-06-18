@@ -1,7 +1,5 @@
 local csr = require("santoku.learn.csr")
 local tokenizer = require("santoku.learn.tokenizer")
--- plain tokenize via a tokenizer object; the object threads as the old ngram_map
--- (nil => create + grow the vocab; object => frozen).
 local function tokenize (texts, n, nmin, nmax, tok)
   local grow = tok == nil
   if grow then tok = tokenizer.create({ ngram_min = nmin, ngram_max = nmax }) end
@@ -18,20 +16,27 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
--- Reported metrics (search_trials=100; splits train=10183 val=1131 test=7532; 20 classes):
---   n_landmarks=8192:  F1 val=0.91 test=0.83  (best: cosine, lambda=1.84e-01, pa=0.08 pb=0.81)
-
 local cfg = {
-  data = { max = nil, tvr = 0.1 },
-  tok = { ngram_min = 5, ngram_max = 5 },
-  emb = { n_landmarks = 1024 * 8, trace_tol = 0.01, kernel = { "cosine", "expcos", "geolaplace", "matern52", "rq", "arccos1" } },
+  data = {
+    max = nil,
+    tvr = 0.1
+  },
+  tok = {
+    ngram_min = 5,
+    ngram_max = 5
+  },
+  emb = {
+    n_landmarks = 1024 * 8,
+    trace_tol = 0.01,
+    kernel = { "cosine", "expcos", "geolaplace", "matern52", "rq", "arccos1", "rbf" }
+  },
   ridge = {
-    lambda = { min = 1e-4, max = 1e1, log = true, def = 2.1801e-02 },
-    propensity_a = { min = 0, max = 4, def = 0.4673 },
-    propensity_b = { min = 0, max = 8, def = 0.8029 },
+    lambda = { def = 7.8376e-02 },
+    propensity_a = { def = 7.9786 },
+    propensity_b = { def = 8.1669 },
     classes = 20,
     search_trials = 0,
-    k = 1,
+    k = 1
   },
 }
 
@@ -83,7 +88,7 @@ test("newsgroups classifier", function ()
     k = cfg.ridge.k, search_trials = cfg.ridge.search_trials,
     each = util.make_ridge_log(stopwatch),
   })
-  do  -- persist/load parity: round-tripped encoder must produce identical codes
+  do
     local p = os.tmpname()
     sp_enc:persist(p)
     local enc2 = spectral.load(p)
@@ -118,9 +123,6 @@ test("newsgroups classifier", function ()
   test_codes = nil -- luacheck: ignore
   str.printf("[Eval] Labels done %s\n", sw())
 
-  -- single-label decode is argmax(score - offset). `decider` carries the dev-calibrated offsets; a
-  -- zero-offset decider is plain argmax. Score both decoders on both splits: decide can only improve
-  -- dev (argmax is the offsets==0 special case it searched over), so test is where overfit would show.
   local decide = require("santoku.learn.decide")
   local argmax = decide.create({ n_labels = n_classes, single = true })
   local function score_split (d, scores, n, sol)

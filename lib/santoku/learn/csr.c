@@ -1,5 +1,3 @@
-#include <santoku/learn/csr.h>
-#include <santoku/learn/normalize.h>
 #include <santoku/fvec.h>
 #include <santoku/svec.h>
 #include <santoku/cvec.h>
@@ -834,34 +832,7 @@ static int tm_csr_block_sumsq (lua_State *L)
   return 1;
 }
 
-// test surface for the streaming normalizer. normalize_runs(text [, bounds]) streams
-// the normalizer over the runs cut by `bounds` (ivec of offsets 0..len; nil => single
-// run); folds C0+0x7F to space. Used to assert run-splitting invariance.
-static int tm_csr_normalize_runs (lua_State *L)
-{
-  size_t len;
-  const char *text = luaL_checklstring(L, 1, &len);
-  tk_ivec_t *bounds = tk_ivec_peekopt(L, 2);
-  uint8_t *out = (uint8_t *) malloc(len + 1);
-  if (!out) return luaL_error(L, "normalize_runs: alloc failed");
-  tk_norm_stream_t s;
-  tk_norm_stream_init(&s, out);
-  if (bounds && bounds->n >= 2) {
-    for (uint64_t k = 0; k + 1 < bounds->n; k++) {
-      int64_t a = bounds->a[k], b = bounds->a[k + 1];
-      tk_norm_stream_run(&s, text + a, (size_t) (b - a));
-    }
-  } else {
-    tk_norm_stream_run(&s, text, len);
-  }
-  size_t nlen = tk_norm_stream_finish(&s);
-  lua_pushlstring(L, (const char *) out, nlen);
-  free(out);
-  return 1;
-}
-
 static luaL_Reg tm_csr_fns[] = {
-  { "normalize_runs", tm_csr_normalize_runs },
   { "sqrt", tm_csr_sqrt },
   { "apply_bns", tm_csr_apply_bns },
   { "apply_idf", tm_csr_apply_idf },
