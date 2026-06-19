@@ -15,6 +15,8 @@
 #include <santoku/fvec.h>
 #include <santoku/cvec.h>
 #include <santoku/iumap/ext.h>
+#include <santoku/csr.h>
+#include <santoku/spans.h>
 
 #define TK_TOK_MT "tk_tokenizer_t"
 #define TK_TOK_MAXTYPES 250
@@ -311,37 +313,34 @@ static int64_t tk_emit_row (
 //   frozen: FULLY PARALLEL -- read-only map makes rows independent; two passes (count then write to the
 //           prefix-summed offsets) keep memory at 1x and the output bit-identical to the serial path.
 // ---------------------------------------------------------------------------
-static int tk_tokenizer_tokenize_lua (lua_State *L) {
+static int tk_tokenize_core (lua_State *L, bool grow) {
   tk_tokenizer_t *t = tk_tokenizer_peek(L, 1);
   luaL_checktype(L, 2, LUA_TTABLE);
 
-  bool grow = tk_lua_foptboolean(L, 2, "tokenize", "grow", false);
-  int64_t n_samples = (int64_t) tk_lua_fcheckunsigned(L, 2, "tokenize", "n_samples");
-
-  // texts table + optional focus/context span arrays (peeks only; no allocation).
-  // INPUT IS TABLE-ONLY BY DESIGN: the old function-iterator path is retired;
-  // streaming callers (e.g. eurlex) materialize a table caller-side. checktype
-  // fails loud here so this is never an accident.
+  // texts table + optional focus/types SPANS objects (peeks only; no allocation).
+  // INPUT IS TABLE-ONLY BY DESIGN: streaming callers materialize a table caller-side.
+  // n_samples is #texts. fit grows the vocab; tokenize is frozen. Returns a csr X with
+  // i32 (svec) neighbors + f32 (fvec) values -- same hot-path layout as the loose form.
   lua_getfield(L, 2, "texts");
   luaL_checktype(L, -1, LUA_TTABLE);
   int texts_idx = lua_gettop(L);
+  int64_t n_samples = (int64_t) lua_objlen(L, texts_idx);
   tk_ivec_t *fo = NULL, *fs = NULL, *fe = NULL;
   lua_getfield(L, 2, "focus");
   if (!lua_isnil(L, -1)) {
-    luaL_checktype(L, -1, LUA_TTABLE);
-    lua_getfield(L, -1, "offsets"); fo = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
-    lua_getfield(L, -1, "starts");  fs = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
-    lua_getfield(L, -1, "ends");    fe = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
+    tk_spans_t *F = tk_spans_peek(L, -1, "focus");
+    int64_t is = tk_spans_colidx(F, "s"), ie = tk_spans_colidx(F, "e");
+    if (is < 0 || ie < 0) return luaL_error(L, "tokenizer: focus spans need columns \"s\" and \"e\"");
+    fo = F->offsets; fs = F->cols[is]; fe = F->cols[ie];
   }
   lua_pop(L, 1);
   tk_ivec_t *co = NULL, *cs = NULL, *ce = NULL, *cty = NULL;
   lua_getfield(L, 2, "types");
   if (!lua_isnil(L, -1)) {
-    luaL_checktype(L, -1, LUA_TTABLE);
-    lua_getfield(L, -1, "offsets"); co = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
-    lua_getfield(L, -1, "starts");  cs = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
-    lua_getfield(L, -1, "ends");    ce = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
-    lua_getfield(L, -1, "types");   cty = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
+    tk_spans_t *C = tk_spans_peek(L, -1, "types");
+    int64_t is = tk_spans_colidx(C, "s"), ie = tk_spans_colidx(C, "e"), it = tk_spans_colidx(C, "ty");
+    if (is < 0 || ie < 0 || it < 0) return luaL_error(L, "tokenizer: types spans need columns \"s\", \"e\", \"ty\"");
+    co = C->offsets; cs = C->cols[is]; ce = C->cols[ie]; cty = C->cols[it];
   }
   lua_pop(L, 1);
 
@@ -487,11 +486,16 @@ static int tk_tokenizer_tokenize_lua (lua_State *L) {
   }
 
   free(row_doc); free(text_ptrs); free(text_lens);
-  lua_pushvalue(L, lua_gettop(L) - 2);
-  lua_pushvalue(L, lua_gettop(L) - 2);
-  lua_pushvalue(L, lua_gettop(L) - 2);
-  return 3;
+  int iv = lua_gettop(L);        // vals (fvec, f32)
+  int in_ = iv - 1;              // toks (svec, i32 neighbors)
+  int io = iv - 2;               // offsets (ivec)
+  uint64_t vocab = (uint64_t) tk_iumap_size(map);
+  tk_csr_push(L, TK_TAG_F32, TK_TAG_I32, vocab, io, offsets, in_, toks, iv, vals);
+  return 1;
 }
+
+static int tk_tokenizer_fit_lua (lua_State *L) { return tk_tokenize_core(L, true); }
+static int tk_tokenizer_tokenize_lua (lua_State *L) { return tk_tokenize_core(L, false); }
 // Persist: "TKtk" + version + config-and-byte-table block + ngram map. The whole
 // config region [0, offsetof(ngram_map)) is dumped as a RAW STRUCT -- this is
 // ABI/padding/endianness-fragile and deviates from the field-wise house style;
@@ -620,6 +624,7 @@ static int tk_tokenizer_tokenize_raw_lua (lua_State *L) {
 }
 
 static luaL_Reg tk_tokenizer_mt_fns[] = {
+  { "fit", tk_tokenizer_fit_lua },
   { "tokenize", tk_tokenizer_tokenize_lua },
   { "n_tokens", tk_tokenizer_n_tokens_lua },
   { "persist", tk_tokenizer_persist_lua },
@@ -635,6 +640,7 @@ static luaL_Reg tk_tokenizer_fns[] = {
 };
 
 int luaopen_santoku_learn_tokenizer (lua_State *L) {
+  tk_lua_require_mod(L, "santoku.csr");
   lua_newtable(L);
   tk_lua_register(L, tk_tokenizer_fns, 0);
   return 1;

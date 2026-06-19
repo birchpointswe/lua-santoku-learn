@@ -1,5 +1,6 @@
 #include <santoku/iuset.h>
-#include <santoku/learn/span.h>
+#include <santoku/span.h>
+#include <santoku/csr.h>
 #include <santoku/ivec.h>
 #include <santoku/fvec.h>
 #include <math.h>
@@ -61,17 +62,26 @@ static inline int tm_regress_accuracy (lua_State *L)
 // deployable decode (that is the decider's job). Returns the oracle per-sample k vector and metrics.
 static inline int tm_oracle_f1 (lua_State *L)
 {
-  lua_settop(L, 1);
-  luaL_checktype(L, 1, LUA_TTABLE);
-  lua_getfield(L, 1, "pred_offsets");
-  tk_ivec_t *pred_off = tk_ivec_peek(L, -1, "pred_offsets");
-  lua_getfield(L, 1, "pred_neighbors");
-  tk_ivec_t *pred_nbr = tk_ivec_peek(L, -1, "pred_neighbors");
-  lua_getfield(L, 1, "expected_offsets");
-  tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
-  lua_getfield(L, 1, "expected_neighbors");
-  tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
-  lua_pop(L, 4);
+  tk_ivec_t *pred_off, *pred_nbr, *exp_off, *exp_nbr;
+  tk_csr_t *P = tk_csr_peekopt(L, 1);
+  if (P != NULL) {
+    // object form: oracle_f1(P_pred, E_expected) -- both csr (i64 label neighbors)
+    tk_csr_t *E = tk_csr_peek(L, 2, "expected");
+    pred_off = P->offsets; pred_nbr = (tk_ivec_t *) P->neighbors;
+    exp_off = E->offsets; exp_nbr = (tk_ivec_t *) E->neighbors;
+  } else {
+    lua_settop(L, 1);
+    luaL_checktype(L, 1, LUA_TTABLE);
+    lua_getfield(L, 1, "pred_offsets");
+    pred_off = tk_ivec_peek(L, -1, "pred_offsets");
+    lua_getfield(L, 1, "pred_neighbors");
+    pred_nbr = tk_ivec_peek(L, -1, "pred_neighbors");
+    lua_getfield(L, 1, "expected_offsets");
+    exp_off = tk_ivec_peek(L, -1, "expected_offsets");
+    lua_getfield(L, 1, "expected_neighbors");
+    exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
+    lua_pop(L, 4);
+  }
   uint64_t n_samples = pred_off->n - 1;
   if (exp_off->n != n_samples + 1)
     return luaL_error(L, "expected_offsets length must match sample count + 1");
@@ -161,6 +171,7 @@ static luaL_Reg tm_evaluator_fns[] =
 
 int luaopen_santoku_learn_evaluator (lua_State *L)
 {
+  tk_lua_require_mod(L, "santoku.csr");   // oracle_f1(P, E) object form
   lua_newtable(L);
   tk_lua_register(L, tm_evaluator_fns, 0);
   return 1;

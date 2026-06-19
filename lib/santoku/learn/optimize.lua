@@ -7,23 +7,17 @@ local rand = require("santoku.random")
 
 local M = {}
 
--- plateaus(curve, n, klo, khi): Jenks natural breaks (Fisher-Jenks). Partition the curve values over
--- [klo, khi] into n contiguous classes minimizing total within-class variance (exact O(n*m^2) DP), and
--- return the COARSEST k of each class (its start = smallest k = fewest clusters = most general). The curve
--- is monotone in k, so value-classes are k-contiguous. 1-indexed; default range [2, #curve] (k=1 is the
--- degenerate whole-doc point). Returns the n sorted cut indices.
 M.plateaus = function (curve, n, klo, khi)
   klo = klo or 2
   khi = khi or #curve
   local m = khi - klo + 1
   if n >= m then local out = {}; for k = klo, khi do out[#out + 1] = k end; return out end
-  local s1, s2 = { [0] = 0 }, { [0] = 0 }       -- prefix sums for O(1) within-range SSD
+  local s1, s2 = { [0] = 0 }, { [0] = 0 }
   for i = 1, m do local v = curve[klo + i - 1]; s1[i] = s1[i - 1] + v; s2[i] = s2[i - 1] + v * v end
-  local function ssd (a, b)                      -- sum of squared deviations from the mean over d[a..b]
+  local function ssd (a, b)
     local c = b - a + 1; local sm = s1[b] - s1[a - 1]
     return (s2[b] - s2[a - 1]) - sm * sm / c
   end
-  -- cost[c][i] = min total SSD partitioning d[1..i] into c classes; back[c][i] = start of the c-th class
   local cost, back = {}, {}
   for c = 1, n do cost[c] = {}; back[c] = {} end
   for i = 1, m do cost[1][i] = ssd(1, i); back[1][i] = 1 end
@@ -40,7 +34,7 @@ M.plateaus = function (curve, n, klo, khi)
   local cuts, i = {}, m
   for c = n, 1, -1 do
     local start = back[c][i]
-    cuts[#cuts + 1] = klo + start - 1            -- coarsest k of the class (class start)
+    cuts[#cuts + 1] = klo + start - 1
     i = start - 1
   end
   table.sort(cuts)
@@ -74,10 +68,6 @@ local function round_to_pow2 (x)
   return num.pow(2, num.floor(log2x + 0.5))
 end
 
--- Merge a (possibly partial) user spec over a defaults table. nil => the full defaults (the param is
--- omitted entirely); a scalar => passthrough (a fixed, non-searched value); a table => fill any missing
--- min/max/log/def from defs. This is what lets callers omit min/max -- or the whole param -- and still
--- get a sensible searched range, since every search dim here is dimensionless/portable.
 local function spec_defaults (spec, defs)
   if spec == nil then return defs end
   if type(spec) ~= "table" then return spec end
@@ -285,9 +275,6 @@ local search = function (args)
   local X_obs = n_dims > 0 and dvec.create() or nil
   local Y_obs = n_dims > 0 and dvec.create() or nil
 
-  -- A nested search (e.g. an inner lambda BO under an outer bandwidth BO) must NOT reseed the global
-  -- RNG: the outer seeds once, and the inner reseeding to a fixed value each call would make the outer's
-  -- candidate sampling identical every iteration. Pass reseed=false from the inner.
   if args.reseed ~= false then
     local seed = 2166136261
     for _, name in ipairs(param_names) do
@@ -422,13 +409,6 @@ local search = function (args)
 
 end
 
--- Default validation metric for a (gram, params) trial. The metric matches the decode that will be
--- applied, so model selection optimizes the real objective rather than a cheap proxy:
---   dense        -> MAE.
---   "single"     -> in-trial macro-F1 of argmax(score - per-label offset): solve a ridge at the trial's
---                   params, regress dense val scores, run the decide (single) calibration.
---   "fmeasure"   -> the multilabel micro-F1 global-threshold sweep.
---   nil          -> plain best-k label-F1 (the M.ridge default).
 local function default_trial_fn (args, dense, metric, k)
   if dense then
     return function (g, params)
@@ -441,8 +421,6 @@ local function default_trial_fn (args, dense, metric, k)
     local decide = require("santoku.learn.decide")
     local fvec = require("santoku.fvec")
     local nl, vn = args.n_labels, args.val_n_samples
-    -- Reused across trials: one dense val-score buffer + one scratch decider, recalibrated in place each
-    -- trial. The per-trial ridge solves W (carrying the intercept, so in-trial scores match the bundle).
     local scores = fvec.create(vn * nl)
     local sp = args.val_spans
     local probe = (metric == "span")
@@ -474,12 +452,7 @@ local function default_trial_fn (args, dense, metric, k)
   end
 end
 
--- Append the label-head search dims to param_names (in order) and fill their default specs in args:
--- lambda always; propensity only for true multi-label (n_labels > 1), where it's a tail-label
--- reweighting -- it's a rank-invariant no-op for a single label, so we don't waste search dims on it.
 local function add_label_params (param_names, args, dense)
-  -- lambda is mean-eigenvalue-relative (mu = lambda * mean_eig), hence dimensionless/portable -- a single
-  -- log range serves every dataset, so callers can omit it (or just override def).
   args.lambda = spec_defaults(args.lambda, { min = 1e-4, max = 16, log = true, def = 1.0 })
   param_names[#param_names + 1] = "lambda"
   if not dense and (args.n_labels or 0) > 1 then
@@ -490,11 +463,6 @@ local function add_label_params (param_names, args, dense)
   end
 end
 
--- Decide ownership + shape of the decode, inferred (no objective knob). We own the decode only when the
--- caller gave no custom trial_fn (a custom trial_fn means a bespoke decode). Returns want_decode + a mode:
---   "span"       -- caller passed val_spans (candidate geometry + gold spans): nms_dp + REJECT offset.
---   "single"     -- >1 labels and every val gold set has exactly one: argmax + per-label offsets.
---   "multilabel" -- otherwise: global score threshold.
 local function decode_mode (args, dense)
   if dense or args.trial_fn ~= nil then return false, nil end
   if args.val_spans then return true, "span" end
@@ -508,7 +476,6 @@ local function decode_mode (args, dense)
   return true, "multilabel"
 end
 
--- Calibrate the bundled decider on the final model's val predictions (one pass, not per-trial).
 local function bundle_decider (r, val_codes, args, mode, k)
   if mode == "span" then
     local sp = args.val_spans
@@ -536,8 +503,6 @@ end
 M.ridge = function (args)
   local ridge = require("santoku.learn.ridge")
   local dense = args.val_targets ~= nil
-  -- Linear ridge over caller-supplied codes (linear probing of frozen, possibly nonlinear embeddings).
-  -- No kernel / spectral embedding; otherwise parity with M.krr (auto-detected decode + bundled decider).
   local param_names = {}
   add_label_params(param_names, args, dense)
   local samplers = build_samplers(args, param_names)
@@ -556,7 +521,6 @@ M.ridge = function (args)
       n_labels = args.n_labels,
       targets = args.targets, n_targets = args.n_targets,
     }
-    -- Fixed lambda+propensity and we own the gram: bake W via Cholesky, skip eigendecomp.
     if locked then
       gram_args.solve_lambda = locked_params.lambda
       if not dense then
@@ -566,10 +530,7 @@ M.ridge = function (args)
     end
     gram = ridge.gram(gram_args)
   end
-  -- We bake (Cholesky) only when locked AND we built the gram ourselves; a caller-supplied gram is eigen.
   local baked = locked and args.gram == nil
-  -- Build the final head, bundle the calibrated decider (parity with M.krr), and return both. The bundle
-  -- runs r:label/r:regress once on the final ridge -- no gram:prepare needed for the locked path.
   local function finish (r, params, solve)
     if args.each then args.each({ event = "done", params = params, solve = solve }) end
     local decider, decider_metrics
@@ -606,16 +567,44 @@ end
 M.krr = function (args)
   local spectral = require("santoku.learn.spectral")
   local ridge = require("santoku.learn.ridge")
+  -- Object API: x/val_x (csr features or mtx codes), y/val_y (labels csr) unpack to the
+  -- internal loose args. Loose args remain accepted (transitional).
+  if args.x ~= nil then
+    local X = args.x
+    if X.neighbors then
+      local r, c = X:shape()
+      args.offsets, args.tokens, args.values = X:offsets(), X:neighbors(), X:values()
+      args.n_samples = args.n_samples or r
+      args.n_tokens = args.n_tokens or c
+    else
+      local r, c = X:shape()
+      args.codes = X:data()
+      args.n_samples = args.n_samples or r
+      args.d_input = args.d_input or c
+    end
+  end
+  if args.y ~= nil then
+    local _, c = args.y:shape()
+    args.label_offsets, args.label_neighbors = args.y:offsets(), args.y:neighbors()
+    args.n_labels = args.n_labels or c
+  end
+  if args.val_x ~= nil then
+    local V = args.val_x
+    if V.neighbors then
+      args.val_offsets, args.val_tokens, args.val_values = V:offsets(), V:neighbors(), V:values()
+      args.val_n_samples = args.val_n_samples or (V:shape())
+    else
+      args.val_codes = V:data()
+      args.val_n_samples = args.val_n_samples or (V:shape())
+    end
+  end
+  if args.val_y ~= nil then
+    args.val_expected_offsets, args.val_expected_neighbors = args.val_y:offsets(), args.val_y:neighbors()
+  end
   local dense = args.val_targets ~= nil
   local kernel_spec = args.kernel or "cosine"
   local kernels = type(kernel_spec) == "table" and kernel_spec or { kernel_spec }
   args.kernel = kernels
-  -- Three kernel families, all functions of the cosine c on L2-normalized inputs (self-sim 1):
-  --   cosine : k = c, the linear endpoint (param-free).
-  --   matern : stationary; nu in {inf,1/2,3/2,5/2} x length-scale gamma (gamma = 1/ell^2).
-  --   arccos : non-stationary; order x depth x tangent (NNGP/NTK) discrete grid.
-  -- The kernel list names which families to explore; legacy single-kernel names map in for the locked
-  -- path (rbf/expcos/geolaplace/matern52/rq -> matern, arccos1 -> arccos, cosine -> cosine).
   local families = {}
   for _, kn in ipairs(kernels) do
     if kn == "cosine" then families.cosine = true
@@ -627,9 +616,6 @@ M.krr = function (args)
     if v ~= nil then return v end
     return d
   end
-  -- inner label-head params (lambda [+ propensity] [+ extra]); searched per kernel on a fixed gram.
-  -- args.extra = ordered pass-through search dims { { name=, min=, max=, log=, def= }, ... }: GP-searched
-  -- and handed to trial_fn in params, but ignored by the gram/kernel logic (e.g. a Viterbi weight).
   local inner_names = {}
   add_label_params(inner_names, args, dense)
   if args.extra then
@@ -640,13 +626,9 @@ M.krr = function (args)
     end
   end
   local inner_samplers = build_samplers(args, inner_names)
-  -- Inner lambda/propensity BO budget per build (fixed; override via inner_trials).
   local inner_trials = args.inner_trials or 80
   local do_search = args.search_trials and args.search_trials > 0
   local k = not dense and (args.k or 32) or nil
-  -- Classification always runs through the tiled gram/ridge (one tile when n_labels is small); tiling is
-  -- purely a memory lever (tile_labels), decoupled from the decode. Dense regression is the only
-  -- non-tiled path. The tiled ridge still materializes a full W, so single-label dense regress works.
   local tiled = not dense
   local tile_labels = tiled and (args.tile_labels or 1024) or nil
   local want_decode, mode = decode_mode(args, dense)
@@ -665,8 +647,6 @@ M.krr = function (args)
     spectral_args.tile_samples = args.tile_samples
     spectral_args.chol_buf = args.chol_buf
   end
-  -- Deterministic landmark selection: reseed the global RNG to a fixed value before every spectral.encode
-  -- so a kernel's landmarks depend only on its inputs, not on build order / prior RNG state.
   local seed = args.seed or 1
   local function val_encode (sp_enc)
     if args.val_encode then return args.val_encode(sp_enc) end
@@ -675,9 +655,6 @@ M.krr = function (args)
       values = args.val_values, n_samples = args.val_n_samples,
     })
   end
-  -- Build one kernel's eigendecomposed gram from a spec { kernel=, gamma=, nu=, order=, depth=, tangent= }
-  -- (no solve_lambda, no cache). collectgarbage first so only ~one d x d gram is resident -- we never
-  -- retain the running best, we rebuild it from params at the end (see the note there).
   local function build_kd (spec)
     collectgarbage("collect")
     spectral_args.kernel = spec.kernel
@@ -716,11 +693,8 @@ M.krr = function (args)
     end
     return kd.sp_enc, r, kd.val_codes, params, decider, decider_metrics
   end
-  -- Locked path: first kernel + fixed lambda/propensity; bake W via Cholesky in spectral.encode (skip the
-  -- eigendecomposition -- the gram is "baked" and ridge.create just copies W).
   if not do_search then
     local kname = kernels.def or kernels[1]
-    -- Resolve the frozen kernel params (each a scalar or { def = }); matern aliases (rbf etc.) read gamma.
     local spec = { kernel = kname }
     if kname == "matern" then
       spec.nu = defval(args.nu, 3)
@@ -758,13 +732,6 @@ M.krr = function (args)
     return finish({ sp_enc = sp_enc, gram = gram, val_codes = val_codes }, params, "cholesky")
   end
   local trial_fn = args.trial_fn or default_trial_fn(args, dense, mode == "multilabel" and "fmeasure" or mode, k)
-  -- trial_fn(gram, params, kd): kd = { sp_enc, gram, val_codes } so a custom trial can solve a ridge at
-  -- the trial's (lambda, prop) and regress val_codes itself (e.g. to decode + score span-F1).
-  -- Exploration runs in a fixed family order regardless of list order: cosine (1 build), then a joint
-  -- matern BO (nu x gamma), then a joint arccos BO (order x depth x tangent). Each runs the SILENT inner
-  -- lambda/propensity BO (above) on its fixed eigenbasis; one log line per build, global-best marked. We
-  -- keep only the winning params and rebuild the gram at the end (retaining a kd that aliases a shared pqty
-  -- mmap is unsafe). Outer budget = search_trials for both families; override per-family if needed.
   local matern_trials = args.matern_trials or args.search_trials or 0
   local arccos_trials = args.arccos_trials or args.search_trials or 0
   local btot = (families.cosine and 1 or 0)
@@ -772,8 +739,6 @@ M.krr = function (args)
     + (families.arccos and arccos_trials or 0)
   local best_params, best_score = nil, -num.huge
   local bi = 0
-  -- Build's inner lambda BO + evaluate + record. reseed=false: the inner search must not reseed the
-  -- global RNG, or it would reset the outer family BO's candidate sampling every trial.
   local function eval_kd (kd, base)
     local _, ib = search({
       param_names = inner_names, samplers = inner_samplers, trials = inner_trials,
@@ -791,15 +756,11 @@ M.krr = function (args)
     if sc > best_score then best_score, best_params = sc, ib end
     return sc, sm
   end
-  -- Phase 1: cosine (single build).
   if families.cosine then
     eval_kd(build_kd({ kernel = "cosine", label = "cosine" }), { kernel = "cosine" })
   end
-  -- Phase 2: matern -- ONE GP/BO over the whole family (nu x gamma jointly), inner lambda BO each trial.
-  -- nu is a discrete dim (categorical sampler -> normalized index), gamma a log range warm-started from
-  -- the head's pinned length-scale (args.gamma). The BO spends its budget adaptively across nu.
   if families.matern then
-    args.matern_nu = args.matern_nu or { 3, 0, 1, 2 }       -- inf (center), 1/2, 3/2, 5/2
+    args.matern_nu = args.matern_nu or { 3, 0, 1, 2 }
     args.matern_gamma = spec_defaults(args.matern_gamma or args.gamma or args.rbf_gamma,
       { min = 1e-2, max = 16, log = true, def = 1.0 })
     local m_samplers = build_samplers(args, { "matern_nu", "matern_gamma" })
@@ -813,15 +774,10 @@ M.krr = function (args)
       end,
     })
   end
-  -- Phase 3: arccos -- a discrete grid (order x depth x tangent) that grows with higher orders, so search
-  -- it with a MEMOIZING GP/BO. Each cell builds+evaluates once and is cached; if the BO re-proposes a
-  -- visited cell we hand back the cached score (no rebuild) -- a noiseless repeat, which collapses the GP's
-  -- uncertainty there so it moves on. The order axis carries a monotone signal the GP can ride.
-  -- order=1/depth=1/tangent=0 (the centers) == the old arccos1.
   if families.arccos then
-    args.arccos_order = args.arccos_order or { 4, 1, 0, 2, 3, 5, 6 }   -- center=4 (best on mnist), then rest
-    args.arccos_depth = args.arccos_depth or { 1, 2, 3 }              -- depth 1 (center) won
-    args.arccos_tangent = args.arccos_tangent or { 0, 1 }            -- NNGP (center) won over NTK
+    args.arccos_order = args.arccos_order or { 4, 1, 0, 2, 3, 5, 6 }
+    args.arccos_depth = args.arccos_depth or { 1, 2, 3 }
+    args.arccos_tangent = args.arccos_tangent or { 0, 1 }
     local a_samplers = build_samplers(args, { "arccos_order", "arccos_depth", "arccos_tangent" })
     local seen = {}
     search({
@@ -840,21 +796,10 @@ M.krr = function (args)
       end,
     })
   end
-  -- Rebuild the winner from its params. build_kd reseeds the RNG to a fixed seed before encode, so this
-  -- reproduces the exact gram (landmarks + eigenbasis + pqty, mutually consistent) the winner was selected
-  -- on -- without retaining a kd whose pqty may have been clobbered by a later trial.
   local best_kd = build_kd(best_params)
   return finish(best_kd, best_params, "eigen")
 end
 
--- Decide what to do with ridge outputs. The decode is inferred from the input shape (no objective knob):
---   span: pass dense val_scores [n_cand*nl] + candidate geometry (val_cand_offsets/starts/ends) + gold
---     spans (val_expected_offsets/starts/ends/types) -> a REJECT decision offset fit by golden-section on
---     span-F1; decode is per-candidate argmax(score; REJECT-offset) resolved by nms_dp into typed spans.
---   multilabel: pass (val_offsets, val_neighbors, val_scores) from ridge:label -> one global score
---     threshold calibrated to maximize micro-F1; predict/score consume the same sparse ranked form.
---   single-label: pass dense val_scores [n*nl] from ridge:regress (no offsets) -> per-label additive
---     offsets fit by coordinate-ascent on macro-F1; decode is argmax(score_l - offset_l).
 M.decide = function (args)
   local decide = require("santoku.learn.decide")
   if args.val_cand_offsets ~= nil then

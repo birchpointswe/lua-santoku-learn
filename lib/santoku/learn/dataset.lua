@@ -1,7 +1,9 @@
 local serialize = require("santoku.serialize") -- luacheck: ignore
 local booleanizer = require("santoku.learn.booleanizer")
+local csr = require("santoku.csr")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
+local fvec = require("santoku.fvec")
 local fs = require("santoku.fs")
 local str = require("santoku.string")
 local arr = require("santoku.array")
@@ -38,8 +40,7 @@ M.read_binary_mnist = function (fp, n_features, max)
   ids:fill_indices()
   return {
     ids = ids,
-    problem_offsets = p_off,
-    problem_neighbors = p_nbr,
+    problems = csr.create({ offsets = p_off, neighbors = p_nbr, n_cols = n_features }),
     solutions = ss,
     n_labels = 10,
     n_features = n_features,
@@ -60,8 +61,7 @@ local function _split_binary_mnist (dataset, s, e)
   sol_off:push(n)
   return {
     ids = ids,
-    sol_offsets = sol_off,
-    sol_neighbors = sol_nbr,
+    labels = csr.create({ offsets = sol_off, neighbors = sol_nbr, n_cols = dataset.n_labels }),
     n_labels = dataset.n_labels,
     n_features = dataset.n_features,
     n = n,
@@ -127,8 +127,7 @@ local function _split_imdb (dataset, s, e)
   return {
     n = n,
     problems = ps,
-    sol_offsets = sol_off,
-    sol_neighbors = sol_nbr,
+    labels = csr.create({ offsets = sol_off, neighbors = sol_nbr, n_cols = 1 }),
   }
 end
 
@@ -230,8 +229,7 @@ M.read_20newsgroups = function (dir, max_per_class, remove, max)
     n_labels = n_cats,
     categories = categories,
     problems = shuffled_problems,
-    sol_offsets = sol_off,
-    sol_neighbors = sol_nbr,
+    labels = csr.create({ offsets = sol_off, neighbors = sol_nbr, n_cols = n_cats }),
   }
 end
 
@@ -243,27 +241,27 @@ M.read_20newsgroups_split = function (train_dir, test_dir, max, remove, tvr)
     n_labels = test_raw.n_labels,
     categories = test_raw.categories,
     problems = test_raw.problems,
-    sol_offsets = test_raw.sol_offsets,
-    sol_neighbors = test_raw.sol_neighbors,
+    labels = test_raw.labels,
   }
   if not tvr or tvr <= 0 then
     return all_train, test
   end
   local val_n = math.floor(all_train.n * tvr)
   local train_n = all_train.n - val_n
+  local all_nbr = all_train.labels:neighbors()
   local train_problems, val_problems = {}, {}
   local train_sol_off, train_sol_nbr = ivec.create(), ivec.create()
   local val_sol_off, val_sol_nbr = ivec.create(), ivec.create()
   for i = 1, train_n do
     train_problems[i] = all_train.problems[i]
     train_sol_off:push(i - 1)
-    train_sol_nbr:push(all_train.sol_neighbors:get(i - 1))
+    train_sol_nbr:push(all_nbr:get(i - 1))
   end
   train_sol_off:push(train_n)
   for i = train_n + 1, all_train.n do
     val_problems[i - train_n] = all_train.problems[i]
     val_sol_off:push(i - train_n - 1)
-    val_sol_nbr:push(all_train.sol_neighbors:get(i - 1))
+    val_sol_nbr:push(all_nbr:get(i - 1))
   end
   val_sol_off:push(val_n)
   local train = {
@@ -271,16 +269,14 @@ M.read_20newsgroups_split = function (train_dir, test_dir, max, remove, tvr)
     n_labels = all_train.n_labels,
     categories = all_train.categories,
     problems = train_problems,
-    sol_offsets = train_sol_off,
-    sol_neighbors = train_sol_nbr,
+    labels = csr.create({ offsets = train_sol_off, neighbors = train_sol_nbr, n_cols = all_train.n_labels }),
   }
   local validate = {
     n = val_n,
     n_labels = all_train.n_labels,
     categories = all_train.categories,
     problems = val_problems,
-    sol_offsets = val_sol_off,
-    sol_neighbors = val_sol_nbr,
+    labels = csr.create({ offsets = val_sol_off, neighbors = val_sol_nbr, n_cols = all_train.n_labels }),
   }
   return train, test, validate
 end
@@ -341,9 +337,12 @@ M.read_eurlex57k = function (dir, max)
   local train = read_file("train.jsonl")
   local dev = read_file("dev.jsonl")
   local test = read_file("test.jsonl")
-  train.n_labels = label_map.n_labels
-  dev.n_labels = label_map.n_labels
-  test.n_labels = label_map.n_labels
+  for _, d in ipairs({ train, dev, test }) do
+    d.n_labels = label_map.n_labels
+    d.labels = csr.create({ offsets = d.sol_offsets, neighbors = d.sol_neighbors, n_cols = d.n_labels })
+    d.sol_offsets = nil
+    d.sol_neighbors = nil
+  end
   return train, dev, test, label_map
 end
 
@@ -433,12 +432,12 @@ local function _encode_housing_split (dataset, rows)
     bit_off:push(bit_nbr:size())
     targets:push(tonumber(row[target_col]))
   end
+  local ones = fvec.create(bit_nbr:size()); ones:fill(1.0)
   return {
     n = #rows,
     n_features = n_features,
     n_continuous = n_cont,
-    bit_offsets = bit_off,
-    bit_neighbors = bit_nbr,
+    bits = csr.create({ offsets = bit_off, neighbors = bit_nbr, values = ones, n_cols = n_features }),
     continuous = continuous,
     targets = targets,
   }

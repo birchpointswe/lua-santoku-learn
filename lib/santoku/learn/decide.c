@@ -7,9 +7,82 @@
 #include <santoku/dvec.h>
 #include <santoku/fvec.h>
 #include <santoku/rvec.h>
+#include <santoku/csr.h>
+#include <santoku/spans.h>
 #include <santoku/learn/fmeasure.h>
-#include <santoku/learn/span.h>
+#include <santoku/span.h>
 #include <santoku/learn/decide.h>
+
+// Predictions: a `pred` csr (offsets/neighbors=labels/values=scores) OR loose offsets/neighbors/scores.
+static inline void tk_decide_read_pred (lua_State *L,
+  tk_ivec_t **off, tk_ivec_t **nbr, tk_fvec_t **sf, tk_dvec_t **sd)
+{
+  lua_getfield(L, 2, "pred");
+  tk_csr_t *P = tk_csr_peekopt(L, -1);
+  lua_pop(L, 1);
+  if (P != NULL) {
+    *off = P->offsets; *nbr = (tk_ivec_t *) P->neighbors;
+    *sf = P->tag == TK_TAG_F32 ? (tk_fvec_t *) P->values : NULL;
+    *sd = P->tag == TK_TAG_F64 ? (tk_dvec_t *) P->values : NULL;
+    return;
+  }
+  lua_getfield(L, 2, "offsets"); *off = tk_ivec_peek(L, -1, "offsets");
+  lua_getfield(L, 2, "neighbors"); *nbr = tk_ivec_peek(L, -1, "neighbors");
+  lua_getfield(L, 2, "scores"); *sf = tk_fvec_peekopt(L, -1); *sd = *sf ? NULL : tk_dvec_peek(L, -1, "scores");
+  lua_pop(L, 3);
+}
+
+// Expected labels: an `expected` csr OR loose expected_offsets/expected_neighbors.
+static inline void tk_decide_read_expected (lua_State *L, tk_ivec_t **eoff, tk_ivec_t **enbr)
+{
+  lua_getfield(L, 2, "expected");
+  tk_csr_t *E = tk_csr_peekopt(L, -1);
+  lua_pop(L, 1);
+  if (E != NULL) { *eoff = E->offsets; *enbr = (tk_ivec_t *) E->neighbors; return; }
+  lua_getfield(L, 2, "expected_offsets"); *eoff = tk_ivec_peek(L, -1, "expected_offsets");
+  lua_getfield(L, 2, "expected_neighbors"); *enbr = tk_ivec_peek(L, -1, "expected_neighbors");
+  lua_pop(L, 2);
+}
+
+// Candidate spans: a `cand` spans (cols s,e) OR loose cand_offsets/cand_starts/cand_ends.
+static inline void tk_decide_read_cand (lua_State *L, tk_ivec_t **co, tk_ivec_t **cs, tk_ivec_t **ce)
+{
+  lua_getfield(L, 2, "cand");
+  tk_spans_t *S = tk_spans_peekopt(L, -1);
+  lua_pop(L, 1);
+  if (S != NULL) {
+    *co = S->offsets;
+    *cs = S->cols[tk_spans_colidx(S, "s")];
+    *ce = S->cols[tk_spans_colidx(S, "e")];
+    return;
+  }
+  lua_getfield(L, 2, "cand_offsets"); *co = tk_ivec_peek(L, -1, "cand_offsets");
+  lua_getfield(L, 2, "cand_starts"); *cs = tk_ivec_peek(L, -1, "cand_starts");
+  lua_getfield(L, 2, "cand_ends"); *ce = tk_ivec_peek(L, -1, "cand_ends");
+  lua_pop(L, 3);
+}
+
+// Gold spans: a `gold` spans (cols s,e[,ty]) OR loose expected_offsets/starts/ends[/types].
+static inline void tk_decide_read_gold (lua_State *L,
+  tk_ivec_t **go, tk_ivec_t **gs, tk_ivec_t **ge, tk_ivec_t **gty)
+{
+  lua_getfield(L, 2, "gold");
+  tk_spans_t *S = tk_spans_peekopt(L, -1);
+  lua_pop(L, 1);
+  if (S != NULL) {
+    int64_t it = tk_spans_colidx(S, "ty");
+    *go = S->offsets;
+    *gs = S->cols[tk_spans_colidx(S, "s")];
+    *ge = S->cols[tk_spans_colidx(S, "e")];
+    *gty = it >= 0 ? S->cols[it] : NULL;
+    return;
+  }
+  lua_getfield(L, 2, "expected_offsets"); *go = tk_ivec_peek(L, -1, "expected_offsets");
+  lua_getfield(L, 2, "expected_starts"); *gs = tk_ivec_peek(L, -1, "expected_starts");
+  lua_getfield(L, 2, "expected_ends"); *ge = tk_ivec_peek(L, -1, "expected_ends");
+  lua_getfield(L, 2, "expected_types"); *gty = tk_ivec_peekopt(L, -1);
+  lua_pop(L, 4);
+}
 
 // single-label decode of one score row: argmax_l (score_l - offset_l), first index wins ties.
 static inline int64_t tk_decide_argmax (const float *row, const double *off, int64_t nl) {
@@ -85,18 +158,10 @@ static int tk_decide_create_lua (lua_State *L)
 
 static int tk_decide_calibrate_multi (lua_State *L, tk_decide_t *g)
 {
-  lua_getfield(L, 2, "offsets");
-  tk_ivec_t *offsets = tk_ivec_peek(L, -1, "offsets");
-  lua_getfield(L, 2, "neighbors");
-  tk_ivec_t *neighbors = tk_ivec_peek(L, -1, "neighbors");
-  lua_getfield(L, 2, "scores");
-  tk_fvec_t *sf = tk_fvec_peekopt(L, -1);
-  tk_dvec_t *sd = sf ? NULL : tk_dvec_peek(L, -1, "scores");
-  lua_getfield(L, 2, "expected_offsets");
-  tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
-  lua_getfield(L, 2, "expected_neighbors");
-  tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
-  lua_pop(L, 5);
+  tk_ivec_t *offsets, *neighbors, *exp_off, *exp_nbr;
+  tk_fvec_t *sf; tk_dvec_t *sd;
+  tk_decide_read_pred(L, &offsets, &neighbors, &sf, &sd);
+  tk_decide_read_expected(L, &exp_off, &exp_nbr);
   int64_t ns = (int64_t)tk_lua_fcheckunsigned(L, 2, "decide.calibrate", "n_samples");
   int64_t nl = g->nl;
 
@@ -144,11 +209,9 @@ static int tk_decide_calibrate_single (lua_State *L, tk_decide_t *g)
 {
   lua_getfield(L, 2, "scores");
   tk_fvec_t *sf = tk_fvec_peek(L, -1, "scores");
-  lua_getfield(L, 2, "expected_offsets");
-  tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
-  lua_getfield(L, 2, "expected_neighbors");
-  tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
-  lua_pop(L, 3);
+  lua_pop(L, 1);
+  tk_ivec_t *exp_off, *exp_nbr;
+  tk_decide_read_expected(L, &exp_off, &exp_nbr);
   int64_t n = (int64_t)tk_lua_fcheckunsigned(L, 2, "decide.calibrate", "n_samples");
   int64_t nl = g->nl;
   float *S = sf->a;
@@ -275,15 +338,10 @@ static void tk_decide_span_counts_at (
 
 static int tk_decide_calibrate_span (lua_State *L, tk_decide_t *g)
 {
-  lua_getfield(L, 2, "scores"); tk_fvec_t *sf = tk_fvec_peek(L, -1, "scores");
-  lua_getfield(L, 2, "cand_offsets"); tk_ivec_t *co = tk_ivec_peek(L, -1, "cand_offsets");
-  lua_getfield(L, 2, "cand_starts"); tk_ivec_t *cs = tk_ivec_peek(L, -1, "cand_starts");
-  lua_getfield(L, 2, "cand_ends"); tk_ivec_t *ce = tk_ivec_peek(L, -1, "cand_ends");
-  lua_getfield(L, 2, "expected_offsets"); tk_ivec_t *go = tk_ivec_peek(L, -1, "expected_offsets");
-  lua_getfield(L, 2, "expected_starts"); tk_ivec_t *gs = tk_ivec_peek(L, -1, "expected_starts");
-  lua_getfield(L, 2, "expected_ends"); tk_ivec_t *ge = tk_ivec_peek(L, -1, "expected_ends");
-  lua_getfield(L, 2, "expected_types"); tk_ivec_t *gty = tk_ivec_peekopt(L, -1);
-  lua_pop(L, 8);
+  lua_getfield(L, 2, "scores"); tk_fvec_t *sf = tk_fvec_peek(L, -1, "scores"); lua_pop(L, 1);
+  tk_ivec_t *co, *cs, *ce, *go, *gs, *ge, *gty;
+  tk_decide_read_cand(L, &co, &cs, &ce);
+  tk_decide_read_gold(L, &go, &gs, &ge, &gty);
   int64_t n_docs = (int64_t)tk_lua_fcheckunsigned(L, 2, "decide.calibrate", "n_samples");
   int64_t nl = g->nl, reject = g->reject;
   float *S = sf->a;
@@ -376,11 +434,9 @@ static int tk_decide_predict_lua (lua_State *L)
   luaL_checktype(L, 2, LUA_TTABLE);
   int64_t nl = g->nl;
   if (g->span) {
-    lua_getfield(L, 2, "scores"); tk_fvec_t *sf = tk_fvec_peek(L, -1, "scores");
-    lua_getfield(L, 2, "cand_offsets"); tk_ivec_t *co = tk_ivec_peek(L, -1, "cand_offsets");
-    lua_getfield(L, 2, "cand_starts"); tk_ivec_t *cs = tk_ivec_peek(L, -1, "cand_starts");
-    lua_getfield(L, 2, "cand_ends"); tk_ivec_t *ce = tk_ivec_peek(L, -1, "cand_ends");
-    lua_pop(L, 4);
+    lua_getfield(L, 2, "scores"); tk_fvec_t *sf = tk_fvec_peek(L, -1, "scores"); lua_pop(L, 1);
+    tk_ivec_t *co, *cs, *ce;
+    tk_decide_read_cand(L, &co, &cs, &ce);
     int64_t n_docs = (int64_t)tk_lua_fcheckunsigned(L, 2, "decide.predict", "n_samples");
     int64_t reject = g->reject, ncand = (int64_t)cs->n;
     float *S = sf->a;
@@ -422,14 +478,9 @@ static int tk_decide_predict_lua (lua_State *L)
       cls->a[i] = tk_decide_argmax(S + i * nl, off, nl);
     return 1;
   }
-  lua_getfield(L, 2, "offsets");
-  tk_ivec_t *offsets = tk_ivec_peek(L, -1, "offsets");
-  lua_getfield(L, 2, "neighbors");
-  tk_ivec_t *neighbors = tk_ivec_peek(L, -1, "neighbors");
-  lua_getfield(L, 2, "scores");
-  tk_fvec_t *sf = tk_fvec_peekopt(L, -1);
-  tk_dvec_t *sd = sf ? NULL : tk_dvec_peek(L, -1, "scores");
-  lua_pop(L, 3);
+  tk_ivec_t *offsets, *neighbors;
+  tk_fvec_t *sf; tk_dvec_t *sd;
+  tk_decide_read_pred(L, &offsets, &neighbors, &sf, &sd);
   int64_t ns = (int64_t)tk_lua_fcheckunsigned(L, 2, "decide.predict", "n_samples");
   double thr = g->threshold;
   tk_ivec_t *ks = tk_ivec_create(L, (uint64_t)ns);
@@ -455,15 +506,10 @@ static int tk_decide_score_lua (lua_State *L)
   luaL_checktype(L, 2, LUA_TTABLE);
   int64_t nl = g->nl;
   if (g->span) {
-    lua_getfield(L, 2, "scores"); tk_fvec_t *sf = tk_fvec_peek(L, -1, "scores");
-    lua_getfield(L, 2, "cand_offsets"); tk_ivec_t *co = tk_ivec_peek(L, -1, "cand_offsets");
-    lua_getfield(L, 2, "cand_starts"); tk_ivec_t *cs = tk_ivec_peek(L, -1, "cand_starts");
-    lua_getfield(L, 2, "cand_ends"); tk_ivec_t *ce = tk_ivec_peek(L, -1, "cand_ends");
-    lua_getfield(L, 2, "expected_offsets"); tk_ivec_t *go = tk_ivec_peek(L, -1, "expected_offsets");
-    lua_getfield(L, 2, "expected_starts"); tk_ivec_t *gs = tk_ivec_peek(L, -1, "expected_starts");
-    lua_getfield(L, 2, "expected_ends"); tk_ivec_t *ge = tk_ivec_peek(L, -1, "expected_ends");
-    lua_getfield(L, 2, "expected_types"); tk_ivec_t *gty = tk_ivec_peekopt(L, -1);
-    lua_pop(L, 8);
+    lua_getfield(L, 2, "scores"); tk_fvec_t *sf = tk_fvec_peek(L, -1, "scores"); lua_pop(L, 1);
+    tk_ivec_t *co, *cs, *ce, *go, *gs, *ge, *gty;
+    tk_decide_read_cand(L, &co, &cs, &ce);
+    tk_decide_read_gold(L, &go, &gs, &ge, &gty);
     int64_t n_docs = (int64_t)tk_lua_fcheckunsigned(L, 2, "decide.score", "n_samples");
     int64_t reject = g->reject, ncand = (int64_t)cs->n;
     float *S = sf->a;
@@ -497,11 +543,9 @@ static int tk_decide_score_lua (lua_State *L)
   if (g->single) {
     lua_getfield(L, 2, "scores");
     tk_fvec_t *sf = tk_fvec_peek(L, -1, "scores");
-    lua_getfield(L, 2, "expected_offsets");
-    tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
-    lua_getfield(L, 2, "expected_neighbors");
-    tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
-    lua_pop(L, 3);
+    lua_pop(L, 1);
+    tk_ivec_t *exp_off, *exp_nbr;
+    tk_decide_read_expected(L, &exp_off, &exp_nbr);
     int64_t n = (int64_t)tk_lua_fcheckunsigned(L, 2, "decide.score", "n_samples");
     float *S = sf->a;
     double *off = g->offsets;
@@ -533,18 +577,10 @@ static int tk_decide_score_lua (lua_State *L)
     lua_pushnumber(L, acc); lua_setfield(L, -2, "accuracy");
     return 2;
   }
-  lua_getfield(L, 2, "offsets");
-  tk_ivec_t *offsets = tk_ivec_peek(L, -1, "offsets");
-  lua_getfield(L, 2, "neighbors");
-  tk_ivec_t *neighbors = tk_ivec_peek(L, -1, "neighbors");
-  lua_getfield(L, 2, "scores");
-  tk_fvec_t *sf = tk_fvec_peekopt(L, -1);
-  tk_dvec_t *sd = sf ? NULL : tk_dvec_peek(L, -1, "scores");
-  lua_getfield(L, 2, "expected_offsets");
-  tk_ivec_t *exp_off = tk_ivec_peek(L, -1, "expected_offsets");
-  lua_getfield(L, 2, "expected_neighbors");
-  tk_ivec_t *exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
-  lua_pop(L, 5);
+  tk_ivec_t *offsets, *neighbors, *exp_off, *exp_nbr;
+  tk_fvec_t *sf; tk_dvec_t *sd;
+  tk_decide_read_pred(L, &offsets, &neighbors, &sf, &sd);
+  tk_decide_read_expected(L, &exp_off, &exp_nbr);
   int64_t ns = (int64_t)tk_lua_fcheckunsigned(L, 2, "decide.score", "n_samples");
   double thr = g->threshold;
   uint64_t tp = 0, predicted = 0, total_expected = 0;
@@ -675,6 +711,7 @@ static luaL_Reg tk_decide_fns[] = {
 
 int luaopen_santoku_learn_decide (lua_State *L)
 {
+  tk_lua_require_mod(L, "santoku.csr");   // pred=/expected= object forms
   lua_newtable(L);
   tk_lua_register(L, tk_decide_fns, 0);
   return 1;

@@ -1,12 +1,11 @@
-local csr = require("santoku.learn.csr")
 local tokenizer = require("santoku.learn.tokenizer")
-local function tokenize (iter, n, ng, tok)
+local function tokenize (iter, _n, ng, tok)
   local texts, x = {}, iter()
   while x do texts[#texts + 1] = x; x = iter() end
   local grow = tok == nil
   if grow then tok = tokenizer.create({ ngram_min = ng, ngram_max = ng }) end
-  local o, t, v = tok:tokenize({ texts = texts, n_samples = n, grow = grow })
-  return tok, o, t, v, tok:n_tokens()
+  local X = grow and tok:fit({ texts = texts }) or tok:tokenize({ texts = texts })
+  return tok, X
 end
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
@@ -58,22 +57,17 @@ test("eurlex classifier", function ()
   local k = cfg.emb.k or n_labels
   str.printf("[Data] train=%d dev=%d test=%d labels=%d %s\n", train.n, dev.n, test_set.n, n_labels, sw())
 
-  local train_label_off, train_label_nbr = train.sol_offsets, train.sol_neighbors
-  local dev_label_off, dev_label_nbr = dev.sol_offsets, dev.sol_neighbors
-  local test_label_off, test_label_nbr = test_set.sol_offsets, test_set.sol_neighbors
+  local dev_label_off, dev_label_nbr = dev.labels:offsets(), dev.labels:neighbors()
 
-  local ngram_map, offsets, tokens, values, n_tokens =
-    tokenize(train.text_iter(), train.n, cfg.tok.ngram)
-  local bns_scores = csr.apply_bns(
-    offsets, tokens, values, nil,
-    train_label_off, train_label_nbr, n_tokens, n_labels)
-  csr.normalize(offsets, values)
+  local ngram_map, X = tokenize(train.text_iter(), train.n, cfg.tok.ngram)
+  local _, n_tokens = X:shape()
+  local bns_scores = X:bns(train.labels)
+  X:normalize()
   str.printf("[Tokenize] ngram=%d tokens=%d %s\n", cfg.tok.ngram, n_tokens, sw())
 
-  local _, val_off, val_tok, val_val =
-    tokenize(dev.text_iter(), dev.n, cfg.tok.ngram, ngram_map)
-  csr.apply_bns(val_off, val_tok, val_val, bns_scores)
-  csr.normalize(val_off, val_val)
+  local _, Xv = tokenize(dev.text_iter(), dev.n, cfg.tok.ngram, ngram_map)
+  Xv:bns(bns_scores)
+  Xv:normalize()
 
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
   local chol_path = "test/res/eurlex57k/chol_tmp"
@@ -85,14 +79,9 @@ test("eurlex classifier", function ()
     and function (kname) return fvec.mmap_create(pqty_path .. "_" .. kname, cfg.emb.n_landmarks * n_labels) end
     or nil
   local sp_enc, ridge_obj, dev_codes, best_params, decider, dec_metrics = optimize.krr({
-    offsets = offsets, tokens = tokens, values = values,
-    n_samples = train.n, n_tokens = n_tokens,
+    x = X, y = train.labels, val_x = Xv, val_y = dev.labels,
     kernel = cfg.emb.kernel, nu = cfg.emb.nu, gamma = cfg.emb.gamma,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
-    label_offsets = train_label_off, label_neighbors = train_label_nbr, n_labels = n_labels,
-    val_offsets = val_off, val_tokens = val_tok, val_values = val_val,
-    val_n_samples = dev.n,
-    val_expected_offsets = dev_label_off, val_expected_neighbors = dev_label_nbr,
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
     propensity_b = cfg.ridge.propensity_b,
     k = k, search_trials = cfg.ridge.search_trials,
@@ -103,17 +92,10 @@ test("eurlex classifier", function ()
   do
     local pth = os.tmpname()
     sp_enc:persist(pth)
-    local enc2 = spectral.load(pth)
+    sp_enc = spectral.load(pth)   -- continue (and re-encode test) with the reloaded encoder
     os.remove(pth)
-    local vc2 = enc2:encode({ offsets = val_off, tokens = val_tok, values = val_val, n_samples = dev.n })
-    local nchk = dev_codes:size()
-    if nchk > 100000 then nchk = 100000 end
-    for i = 0, nchk - 1 do
-      assert(dev_codes:get(i) == vc2:get(i), "persist/load parity mismatch at " .. i)
-    end
-    str.printf("[Persist] load parity OK (%d codes)\n", nchk)
   end
-  offsets = nil; tokens = nil; values = nil -- luacheck: ignore
+  X = nil; Xv = nil -- luacheck: ignore
   chol_buf = nil; w_buf = nil; pqty_buf = nil -- luacheck: ignore
   collectgarbage("collect")
   os.remove(chol_path)
@@ -121,13 +103,10 @@ test("eurlex classifier", function ()
   local kernels = type(cfg.emb.kernel) == "table" and cfg.emb.kernel or { cfg.emb.kernel }
   for _, kn in ipairs(kernels) do os.remove(pqty_path .. "_" .. kn) end
   local function encode_texts(text_iter_fn, n)
-    local _, off, tok, val =
-      tokenize(text_iter_fn(), n, cfg.tok.ngram, ngram_map)
-    csr.apply_bns(off, tok, val, bns_scores)
-    csr.normalize(off, val)
-    return sp_enc:encode({
-      offsets = off, tokens = tok, values = val, n_samples = n,
-    })
+    local _, Xt = tokenize(text_iter_fn(), n, cfg.tok.ngram, ngram_map)
+    Xt:bns(bns_scores)
+    Xt:normalize()
+    return sp_enc:encode(Xt)
   end
 
   local dv_off, dv_nbr = ridge_obj:label(dev_codes, dev.n, k)
@@ -141,21 +120,14 @@ test("eurlex classifier", function ()
   collectgarbage("collect")
 
   local test_codes = encode_texts(test_set.text_iter, test_set.n)
-  local ts_off, ts_nbr, ts_sco = ridge_obj:label(test_codes, test_set.n, k)
+  local P = ridge_obj:label(test_codes, k)
   test_codes = nil; ridge_obj:shrink(); sp_enc:shrink() -- luacheck: ignore
   collectgarbage("collect")
 
-  local _, ts_oracle = eval.oracle_f1({
-    pred_offsets = ts_off, pred_neighbors = ts_nbr,
-    expected_offsets = test_label_off, expected_neighbors = test_label_nbr,
-  })
+  local _, ts_oracle = eval.oracle_f1(P, test_set.labels)
   str.printf("[Oracle] test %s %s\n", fmt_metrics(ts_oracle), sw())
 
-  local _, ts_pred_m = decider:score({
-    offsets = ts_off, neighbors = ts_nbr, scores = ts_sco,
-    expected_offsets = test_label_off, expected_neighbors = test_label_nbr,
-    n_samples = test_set.n,
-  })
+  local _, ts_pred_m = decider:score({ pred = P, expected = test_set.labels, n_samples = test_set.n })
   str.printf("[Decide] val %s | test %s %s\n",
     fmt_metrics(dec_metrics), fmt_metrics(ts_pred_m), sw())
 

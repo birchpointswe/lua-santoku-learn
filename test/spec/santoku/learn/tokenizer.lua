@@ -1,6 +1,7 @@
 require("santoku.error")
 local tokenizer = require("santoku.learn.tokenizer")
 local ivec = require("santoku.ivec")
+local spans = require("santoku.spans")
 local test = require("santoku.test")
 
 local function iv (...)
@@ -13,40 +14,35 @@ test("tokenizer", function ()
 
   test("plain text: grow then frozen", function ()
     local tk = tokenizer.create({ ngram_min = 3, ngram_max = 3 })
-    local off = tk:tokenize({ texts = { "hello", "world" }, n_samples = 2, grow = true })
-    assert(off:size() == 3)               -- one row per doc + 1
+    local X = tk:fit({ texts = { "hello", "world" } })
+    assert((X:shape()) == 2)              -- one row per doc
     local nt = tk:n_tokens()
     assert(nt > 0)
     -- frozen pass: unseen grams are dropped, vocab unchanged
-    local o2 = tk:tokenize({ texts = { "zzzzzzzz" }, n_samples = 1 })
+    local X2 = tk:tokenize({ texts = { "zzzzzzzz" } })
     assert(tk:n_tokens() == nt)
-    assert(o2:size() == 2)
+    assert((X2:shape()) == 1)
   end)
 
   test("frozen before any grow errors", function ()
     local tk = tokenizer.create({ ngram_min = 3, ngram_max = 3 })
-    assert(not pcall(function () tk:tokenize({ texts = { "x" }, n_samples = 1 }) end))
+    assert(not pcall(function () tk:tokenize({ texts = { "x" } }) end))
   end)
 
   test("focus brackets: one row per focus span", function ()
     local tk = tokenizer.create({ ngram_min = 3, ngram_max = 5, terminals = true, focus = true })
-    local off = tk:tokenize({
-      texts = { "abc def" }, n_samples = 1,
-      focus = { offsets = iv(0, 2), starts = iv(0, 4), ends = iv(3, 7) }, grow = true,
-    })
-    assert(off:size() == 3)               -- 2 focus spans -> 2 rows + 1
+    local F = spans.create({ offsets = iv(0, 2), s = iv(0, 4), e = iv(3, 7) })
+    local X = tk:fit({ texts = { "abc def" }, focus = F })
+    assert((X:shape()) == 2)              -- 2 focus spans -> 2 rows
     assert(tk:n_tokens() > 0)
   end)
 
   test("types=true renders a per-token type skeleton", function ()
     local tk = tokenizer.create({ ngram_min = 3, ngram_max = 5, n_types = 4, terminals = true, focus = true, types = true })
-    local off = tk:tokenize({
-      texts = { "the quick brown fox" }, n_samples = 1,
-      focus = { offsets = iv(0, 1), starts = iv(4), ends = iv(9) },
-      types = { offsets = iv(0, 4), starts = iv(0, 4, 10, 16), ends = iv(3, 9, 15, 19), types = iv(4, 0, 1, 4) },
-      grow = true,    -- O PER ORG O
-    })
-    assert(off:size() == 2)
+    local F = spans.create({ offsets = iv(0, 1), s = iv(4), e = iv(9) })
+    local T = spans.create({ offsets = iv(0, 4), s = iv(0, 4, 10, 16), e = iv(3, 9, 15, 19), ty = iv(4, 0, 1, 4) })
+    local X = tk:fit({ texts = { "the quick brown fox" }, focus = F, types = T })   -- O PER ORG O
+    assert((X:shape()) == 1)
     assert(tk:n_tokens() > 0)
   end)
 
@@ -57,17 +53,16 @@ test("tokenizer", function ()
 
   test("persist/load round-trips to an identical CSR", function ()
     local tk = tokenizer.create({ ngram_min = 3, ngram_max = 4, terminals = true, focus = true })
-    local focus = { offsets = iv(0, 1), starts = iv(0), ends = iv(5) }
-    tk:tokenize({ texts = { "hello world" }, n_samples = 1, focus = focus, grow = true })
+    local F = spans.create({ offsets = iv(0, 1), s = iv(0), e = iv(5) })
+    tk:fit({ texts = { "hello world" }, focus = F })
     local path = os.tmpname()
     tk:persist(path)
     local tk2 = tokenizer.load(path)
     os.remove(path)
     assert(tk2:n_tokens() == tk:n_tokens())
-    local o1, t1, v1 = tk:tokenize({ texts = { "hello world" }, n_samples = 1, focus = focus })
-    local o2, t2, v2 = tk2:tokenize({ texts = { "hello world" }, n_samples = 1, focus = focus })
-    assert(o1:size() == o2:size() and t1:size() == t2:size() and v1:size() == v2:size())
-    for i = 0, t1:size() - 1 do assert(t1:get(i) == t2:get(i)) end
+    local X1 = tk:tokenize({ texts = { "hello world" }, focus = F })
+    local X2 = tk2:tokenize({ texts = { "hello world" }, focus = F })
+    assert(X1:eq(X2))
   end)
 
 end)
