@@ -164,8 +164,6 @@ static inline void tk_gram_pool_put (lua_State *L, void *ptr, size_t size) {
   tk_gram_pool_slot_t *pool = tk_gram_pool(L);
   for (int i = 0; i < TK_GRAM_POOL_SLOTS; i++)
     if (!pool[i].ptr) { pool[i].ptr = ptr; pool[i].size = size; return; }
-
-
   free(pool[0].ptr);
   for (int i = 1; i < TK_GRAM_POOL_SLOTS; i++) pool[i - 1] = pool[i];
   pool[TK_GRAM_POOL_SLOTS - 1].ptr = ptr;

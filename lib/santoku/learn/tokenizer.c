@@ -1,8 +1,3 @@
-
-
-
-
-
 #include <lua.h>
 #include <lauxlib.h>
 #include <stdlib.h>
@@ -31,7 +26,6 @@ typedef enum { TK_FOCUS_NONE = 0, TK_FOCUS_TRUE = 1 } tk_focus_t;
 
 
 typedef struct {
-
   int ngram_min, ngram_max;
   int n_types;
   tk_stream_t stream;
@@ -79,7 +73,6 @@ static void tk_assigner_init (tk_assigner_t *a, int normalize, int full) {
   }
 }
 
-
 static uint8_t tk_assign (lua_State *L, tk_assigner_t *a, const char *role, int need_total) {
   if (a->i >= a->n)
     return (uint8_t) luaL_error(L,
@@ -88,12 +81,10 @@ static uint8_t tk_assign (lua_State *L, tk_assigner_t *a, const char *role, int 
   return a->pool[a->i++];
 }
 
-
 static int tk_tokenizer_assign (lua_State *L, tk_tokenizer_t *t) {
   tk_assigner_t a;
   tk_assigner_init(&a, t->normalize, t->stream != TK_STREAM_TEXT);
   int nt = t->n_types;
-
   int need = (t->terminals ? 2 : 0)
            + (t->focus == TK_FOCUS_TRUE ? 2 : 0)
            + (t->stream == TK_STREAM_TYPE ? (nt + 2) : 0);
@@ -114,9 +105,6 @@ static int tk_tokenizer_assign (lua_State *L, tk_tokenizer_t *t) {
   return a.i;
 }
 
-
-
-
 static int tk_tokenizer_create_lua (lua_State *L) {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
@@ -127,8 +115,6 @@ static int tk_tokenizer_create_lua (lua_State *L) {
   cfg.ngram_max = (int) tk_lua_fcheckunsigned(L, 1, "tokenizer", "ngram_max");
   if (cfg.ngram_min < 1 || cfg.ngram_min > cfg.ngram_max)
     return luaL_error(L, "tokenizer: need 1 <= ngram_min <= ngram_max");
-
-
 
   int want_types = tk_lua_foptboolean(L, 1, "tokenizer", "types", false);
   cfg.stream = want_types ? TK_STREAM_TYPE : TK_STREAM_TEXT;
@@ -142,7 +128,6 @@ static int tk_tokenizer_create_lua (lua_State *L) {
   else return luaL_error(L, "tokenizer: focus must be false|true");
   lua_pop(L, 1);
 
-
   lua_getfield(L, 1, "n_types");
   if (!lua_isnil(L, -1)) cfg.n_types = (int) lua_tointeger(L, -1);
   lua_pop(L, 1);
@@ -150,7 +135,6 @@ static int tk_tokenizer_create_lua (lua_State *L) {
     return luaL_error(L, "tokenizer: n_types required when types=true");
   if (cfg.n_types > TK_TOK_MAXTYPES)
     return luaL_error(L, "tokenizer: n_types exceeds ceiling %d", TK_TOK_MAXTYPES);
-
 
   if (cfg.normalize && cfg.stream != TK_STREAM_TEXT)
     return luaL_error(L, "tokenizer: normalize only valid on the text stream (not types)");
@@ -162,9 +146,6 @@ static int tk_tokenizer_create_lua (lua_State *L) {
   tk_tokenizer_assign(L, t);
   return 1;
 }
-
-
-
 
 static int tk_tokenizer_n_tokens_lua (lua_State *L) {
   tk_tokenizer_t *t = tk_tokenizer_peek(L, 1);
@@ -182,10 +163,6 @@ static int tk_tokenizer_gc (lua_State *L) {
   if (t->ngram_map) { tk_iumap_destroy(t->ngram_map); t->ngram_map = NULL; }
   return 0;
 }
-
-
-
-
 
 static inline size_t tk_pack_ngrams (const uint8_t *d, size_t n_elems, int n, int64_t *out) {
   if (n_elems < (size_t) n) return 0;
@@ -239,9 +216,6 @@ static inline int tk_type_slot (int t, int n_types) {
   return t;
 }
 
-
-
-
 typedef struct { uint8_t *buf; size_t w; int norm; tk_norm_stream_t ns; } tk_render_t;
 static inline void tk_render_init (tk_render_t *r, uint8_t *buf, int norm) {
   r->buf = buf; r->w = 0; r->norm = norm;
@@ -262,8 +236,6 @@ static inline size_t tk_render_finish (tk_render_t *r) {
   if (r->norm) r->w = tk_norm_stream_finish(&r->ns);
   return r->w;
 }
-
-
 
 static size_t tk_render_row (
   tk_tokenizer_t *t, uint8_t *rowbuf,
@@ -353,8 +325,6 @@ static int tk_tokenizer_tokenize_lua (lua_State *L) {
   lua_getfield(L, 2, "texts");
   luaL_checktype(L, -1, LUA_TTABLE);
   int texts_idx = lua_gettop(L);
-
-
   tk_ivec_t *fo = NULL, *fs = NULL, *fe = NULL;
   lua_getfield(L, 2, "focus");
   if (!lua_isnil(L, -1)) {
@@ -384,7 +354,6 @@ static int tk_tokenizer_tokenize_lua (lua_State *L) {
   if (t->focus != TK_FOCUS_NONE && !per_span)
     return luaL_error(L, "tokenizer: focus set at create but no focus spans passed");
 
-
   const char **text_ptrs = (const char **) malloc((size_t) n_samples * sizeof(char *));
   size_t *text_lens = (size_t *) malloc((size_t) n_samples * sizeof(size_t));
   for (int64_t d = 0; d < n_samples; d++) {
@@ -394,8 +363,6 @@ static int tk_tokenizer_tokenize_lua (lua_State *L) {
   }
 
   int64_t n_rows = per_span ? fo->a[(int64_t)(fo->n - 1)] : n_samples;
-
-
 
   size_t maxbuf = 8;
   for (int64_t d = 0; d < n_samples; d++) {
@@ -415,8 +382,6 @@ static int tk_tokenizer_tokenize_lua (lua_State *L) {
   if (!t->ngram_map) { free(text_ptrs); free(text_lens);
     return luaL_error(L, "tokenizer: frozen tokenize before any grow=true pass"); }
   tk_iumap_t *map = t->ngram_map;
-
-
 
   int64_t *row_doc = (int64_t *) malloc((size_t) (n_rows > 0 ? n_rows : 1) * sizeof(int64_t));
   if (per_span) {

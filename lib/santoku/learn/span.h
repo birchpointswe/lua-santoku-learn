@@ -4,17 +4,22 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <santoku/klib.h>
 
 
 
 
 typedef struct { int64_t s, e, oi; double w; } tk_span_iv;
 
+#define tk_span_iv_lt(a, b) ((a).e < (b).e)
+KSORT_INIT(tk_span_iv_s, tk_span_iv, tk_span_iv_lt)
 
-
-static inline int tk_span_iv_cmp (const void *a, const void *b) {
-  int64_t ea = ((const tk_span_iv *) a)->e, eb = ((const tk_span_iv *) b)->e;
-  return (ea < eb) ? -1 : (ea > eb) ? 1 : 0;
+static inline void tk_span_iv_suppress (void) {
+  (void) ks_mergesort_tk_span_iv_s;
+  (void) ks_heapmake_tk_span_iv_s;
+  (void) ks_heapsort_tk_span_iv_s;
+  (void) ks_ksmall_tk_span_iv_s;
+  (void) ks_shuffle_tk_span_iv_s;
 }
 
 
@@ -36,7 +41,7 @@ static inline void tk_span_nms_dp (
       m++;
     }
     if (m == 0) continue;
-    qsort(iv, (size_t) m, sizeof(tk_span_iv), tk_span_iv_cmp);
+    ks_introsort(tk_span_iv_s, (size_t) m, iv);
     M[0] = 0.0;
     for (int64_t i = 1; i <= m; i++) {
       int64_t target = iv[i - 1].s, lo = 0, hi = i - 1;

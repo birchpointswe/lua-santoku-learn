@@ -239,12 +239,6 @@ static int tm_csr_gather_rows (lua_State *L)
   return 3;
 }
 
-
-
-
-
-
-
 static int tm_csr_filter_spans (lua_State *L)
 {
   tk_ivec_t *doc_off = tk_ivec_peek(L, 1, "doc_offsets");
@@ -451,10 +445,6 @@ static int tm_csr_nms_dp (lua_State *L)
   return 2;
 }
 
-
-
-
-
 static int tm_csr_union_spans (lua_State *L)
 {
   luaL_checktype(L, 1, LUA_TTABLE);
@@ -531,7 +521,6 @@ static int tm_csr_span_miss_report (lua_State *L)
   lua_getfield(L, 1, "n_types");
   int64_t n_types = tk_lua_checkinteger(L, -1, "n_types");
   lua_pop(L, 1);
-
   tk_ivec_t *so[2] = { f[0], f[4] }, *ss[2] = { f[1], f[5] }, *se[2] = { f[2], f[6] }, *st[2] = { f[3], f[7] };
   tk_ivec_t *go = f[8], *gs = f[9], *ge = f[10], *gt = f[11];
   int64_t n_docs = (int64_t) (go->n - 1);
@@ -761,11 +750,6 @@ static int tm_csr_standardize (lua_State *L)
   tm_csr_gather_mul(values, tokens, scores);
   return 1;
 }
-
-
-
-
-
 
 static int tm_csr_normalize (lua_State *L)
 {

@@ -25,20 +25,23 @@ local cfg = {
   },
   emb = {
     n_landmarks = 1024 * 8,
-    trace_tol = 0.01
   },
   tag = {
-    kernel = { "rbf", "arccos1", "cosine", "expcos", "geolaplace", "matern52", "rq" },
-    gamma = { def = 0.1129 },
-    lambda = { def = 7.8706e-04 },
-    search_trials = 0
+    kernel = { "matern", "cosine", "arccos" },
+    nu = { def = 3 },
+    gamma = { def = 0.05076 },
+    lambda = { def = 6.3017e-04 },
+    search_trials = 12,
+    matern_trials = 1
   },
   type = {
-    kernel = { "expcos", "arccos1", "cosine", "geolaplace", "matern52", "rq", "rbf" },
+    kernel = { "matern", "cosine", "arccos" },
+    nu = { def = 3 },
+    gamma = { def = 1 },
     lambda = { def = 1.1338e-04 },
     propensity_a = { def = 0.4040 },
     propensity_b = { def = 15.5572 },
-    search_trials = 0
+    search_trials = 12
   },
   shape = {
     n_cuts = 5
@@ -293,13 +296,13 @@ test("conll", function ()
     str.printf("[%s] Encoding\n", label)
     local sp, rg, _, best, decider = optimize.krr({
       offsets = o, tokens = t, values = v, n_samples = n, n_tokens = ntok,
-      kernel = scfg.kernel, rbf_gamma = scfg.gamma,
+      kernel = scfg.kernel, nu = scfg.nu, gamma = scfg.gamma,
       n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
       label_offsets = loff, label_neighbors = lnbr, n_labels = nl,
       val_offsets = dvo, val_tokens = dvt, val_values = dvv, val_n_samples = dvn,
       val_expected_offsets = dloff, val_expected_neighbors = dlnbr,
       lambda = scfg.lambda,
-      k = 1, search_trials = scfg.search_trials,
+      k = 1, search_trials = scfg.search_trials, matern_trials = scfg.matern_trials,
       each = util.make_ridge_log(stopwatch),
     })
     str.printf("[%s] kernel=%s lambda=%.4e %s\n", label, best.kernel, best.lambda, sw())
@@ -482,7 +485,7 @@ test("conll", function ()
   str.printf("[Type] Encoding\n")
   local sp_ty, ridge_ty, _, _, decider_ty = optimize.krr({
     offsets = ty_off, tokens = ty_tok, values = ty_val, n_samples = n_trc, n_tokens = ty_ntok_all,
-    kernel = cfg.type.kernel, rbf_gamma = cfg.type.gamma,
+    kernel = cfg.type.kernel, nu = cfg.type.nu, gamma = cfg.type.gamma,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     label_offsets = tr_tloff, label_neighbors = tr_tlab, n_labels = N_TYPES + 1,
     val_offsets = ty_dvo, val_tokens = ty_dvt, val_values = ty_dvv, val_n_samples = n_dvc,

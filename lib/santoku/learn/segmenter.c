@@ -6,16 +6,6 @@
 #include <math.h>
 #include <limits.h>
 
-
-
-
-
-
-
-
-
-
-
 #define TK_SEGMENTER_MT "tk_segmenter_t"
 
 typedef struct {
@@ -35,7 +25,6 @@ static inline tk_segmenter_t *tk_segmenter_peek (lua_State *L, int i) {
 static luaL_Reg tk_segmenter_mt_fns[];
 static int tk_segmenter_gc (lua_State *L);
 
-
 static int tk_segmenter_create_lua (lua_State *L) {
   luaL_checktype(L, 1, LUA_TTABLE);
   tk_segmenter_t *s = tk_lua_newuserdata(L, tk_segmenter_t, TK_SEGMENTER_MT,
@@ -52,8 +41,6 @@ static int tk_segmenter_create_lua (lua_State *L) {
   return 1;
 }
 
-
-
 static int tk_cut_classmap (tk_segmenter_t *s, int S, uint8_t *out) {
   int rep[256];
   for (int v = 0; v < 256; v++) {
@@ -68,10 +55,6 @@ static int tk_cut_classmap (tk_segmenter_t *s, int S, uint8_t *out) {
   for (int v = 0; v < 256; v++) out[v] = s->seen[v] ? (uint8_t) id[rep[v]] : (uint8_t) k;
   return k + (has_absent ? 1 : 0);
 }
-
-
-
-
 
 static int tk_segmenter_train_lua (lua_State *L) {
   tk_segmenter_t *s = tk_segmenter_peek(L, 1);
@@ -124,7 +107,6 @@ static int tk_segmenter_train_lua (lua_State *L) {
       Cr[(size_t) aug[j] * NSYM + (size_t) aug[j + 1]] += 1.0;
   }
 
-
   double *rm = (double *) calloc(NSYM, sizeof(double)), *cmg = (double *) calloc(NSYM, sizeof(double)), tot = 0;
   for (size_t u = 0; u < NSYM; u++) for (size_t w = 0; w < NSYM; w++) { double c = Cr[u * NSYM + w]; rm[u] += c; cmg[w] += c; tot += c; }
   for (size_t u = 0; u < NSYM; u++) for (size_t w = 0; w < NSYM; w++) {
@@ -133,9 +115,6 @@ static int tk_segmenter_train_lua (lua_State *L) {
     Cr[idx] = pmi > 0 ? pmi : 0.0;
   }
   free(rm); free(cmg);
-
-
-
 
   size_t D = s->left_only ? NSYM : 2 * NSYM;
   double *E = (double *) calloc(256 * D, sizeof(double));
@@ -165,10 +144,6 @@ static int tk_segmenter_train_lua (lua_State *L) {
     if (eu[i] != 256 && ev[i] != 256 && eu[i] != ev[i]) { BB[eu[i] * 256 + ev[i]] += 1.0; BB[ev[i] * 256 + eu[i]] += 1.0; }
   }
 
-
-
-
-
   int nseen = 0; for (int i = 0; i < 256; i++) if (s->seen[i]) nseen++;
   s->nseen = nseen;
   free(s->coph); s->coph = (int *) calloc(256 * 256, sizeof(int));
@@ -193,7 +168,6 @@ static int tk_segmenter_train_lua (lua_State *L) {
     memcpy(mem[ba] + memn[ba], mem[bx], (size_t) memn[bx] * sizeof(int)); memn[ba] += memn[bx]; alive[bx] = 0;
   }
 
-
   int bestS = 0;
   for (int step = 0; step < nseen - 1; step++) { if (step_bb[step] <= 1e-9) bestS = step + 1; else break; }
   s->coarse_k = nseen - bestS;
@@ -208,7 +182,6 @@ static int tk_segmenter_train_lua (lua_State *L) {
     if (!s_bad && !e_bad) n_span_ok++;
   }
   double recall = nspan > 0 ? (double) n_span_ok / nspan : 1.0;
-
 
   int maxc = 0, p95 = 0;
   {
@@ -313,9 +286,6 @@ static int tk_segmenter_emit (lua_State *L, tk_segmenter_t *s, int k, int drop_s
   return 4;
 }
 
-
-
-
 static int tk_segmenter_segment_lua (lua_State *L) {
   tk_segmenter_t *s = tk_segmenter_peek(L, 1);
   if (!s->trained) return luaL_error(L, "segmenter: segment before train");
@@ -323,10 +293,6 @@ static int tk_segmenter_segment_lua (lua_State *L) {
   int drop_sep = tk_lua_foptboolean(L, 2, "segment", "drop_sep", 0);
   return tk_segmenter_emit(L, s, k, drop_sep);
 }
-
-
-
-
 
 static int tk_segmenter_compression_curve_lua (lua_State *L) {
   tk_segmenter_t *s = tk_segmenter_peek(L, 1);

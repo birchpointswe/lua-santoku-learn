@@ -83,8 +83,6 @@ static int tk_decide_create_lua (lua_State *L)
   return 1;
 }
 
-
-
 static int tk_decide_calibrate_multi (lua_State *L, tk_decide_t *g)
 {
   lua_getfield(L, 2, "offsets");
@@ -142,12 +140,6 @@ static int tk_decide_calibrate_multi (lua_State *L, tk_decide_t *g)
   return 3;
 }
 
-
-
-
-
-
-
 static int tk_decide_calibrate_single (lua_State *L, tk_decide_t *g)
 {
   lua_getfield(L, 2, "scores");
@@ -185,8 +177,6 @@ static int tk_decide_calibrate_single (lua_State *L, tk_decide_t *g)
   double prev_macro = -1.0;
   for (int pass = 0; pass < 50; pass++) {
     for (int64_t l = 0; l < nl; l++) {
-
-
       for (int64_t i = 0; i < n; i++) {
         const float *row = S + i * nl;
         double bo = -HUGE_VAL;
@@ -200,7 +190,6 @@ static int tk_decide_calibrate_single (lua_State *L, tk_decide_t *g)
         pool[i].i = i;
         pool[i].d = (double)row[l] - bo;
       }
-
       for (int64_t c = 0; c < nl; c++) { pc[c] = 0; tp[c] = 0; }
       for (int64_t i = 0; i < n; i++) {
         int64_t p = argother[i];
@@ -235,7 +224,6 @@ static int tk_decide_calibrate_single (lua_State *L, tk_decide_t *g)
       }
       off[l] = best_tau;
     }
-
     for (int64_t c = 0; c < nl; c++) { pc[c] = 0; tp[c] = 0; }
     correct = 0; counted = 0;
     for (int64_t i = 0; i < n; i++) {
@@ -259,7 +247,6 @@ static int tk_decide_calibrate_single (lua_State *L, tk_decide_t *g)
   lua_pushnumber(L, acc);
   return 2;
 }
-
 
 
 
@@ -318,8 +305,6 @@ static int tk_decide_calibrate_span (lua_State *L, tk_decide_t *g)
   tk_span_iv *iv = (tk_span_iv *)malloc((uint64_t)maxn * sizeof(tk_span_iv));
   double *M = (double *)malloc((uint64_t)(maxn + 1) * sizeof(double));
   int64_t *P = (int64_t *)malloc((uint64_t)(maxn + 1) * sizeof(int64_t));
-
-
 
   double dmin = HUGE_VAL, dmax = -HUGE_VAL;
   for (int64_t c = 0; c < ncand; c++) {
@@ -399,9 +384,9 @@ static int tk_decide_predict_lua (lua_State *L)
     int64_t n_docs = (int64_t)tk_lua_fcheckunsigned(L, 2, "decide.predict", "n_samples");
     int64_t reject = g->reject, ncand = (int64_t)cs->n;
     float *S = sf->a;
-    int64_t *cls = (int64_t *)malloc((uint64_t)ncand * sizeof(int64_t));
+    int64_t *cls = (int64_t *)calloc((uint64_t)ncand, sizeof(int64_t));
     int64_t *keep = (int64_t *)malloc((uint64_t)ncand * sizeof(int64_t));
-    double *w = (double *)malloc((uint64_t)ncand * sizeof(double));
+    double *w = (double *)calloc((uint64_t)ncand, sizeof(double));
     int64_t maxn = tk_span_max_doc(co->a, n_docs); if (maxn < 1) maxn = 1;
     tk_span_iv *iv = (tk_span_iv *)malloc((uint64_t)maxn * sizeof(tk_span_iv));
     double *M = (double *)malloc((uint64_t)(maxn + 1) * sizeof(double));

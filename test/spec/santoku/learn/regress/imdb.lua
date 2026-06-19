@@ -23,12 +23,12 @@ local cfg = {
   },
   emb = {
     n_landmarks = 1024 * 8,
-    trace_tol = 0.01,
-    kernel = { "rbf", "arccos1", "cosine", "expcos", "geolaplace", "matern52", "rq" },
-    gamma = { def = 0.2421 }
+    kernel = { "matern", "cosine", "arccos" },
+    nu = { def = 3 },
+    gamma = { def = 0.09435 }
   },
   ridge = {
-    lambda = { def = 1.1771e-01 },
+    lambda = { def = 1.0937e-01 },
     classes = 1,
     search_trials = 0,
     k = 1
@@ -79,7 +79,7 @@ test("imdb classifier", function ()
   local sp_enc, ridge_obj, val_codes, _, decider, dec_metrics = optimize.krr({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
-    kernel = cfg.emb.kernel, rbf_gamma = cfg.emb.gamma,
+    kernel = cfg.emb.kernel, nu = cfg.emb.nu, gamma = cfg.emb.gamma,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     label_offsets = label_off, label_neighbors = label_nbr, n_labels = n_classes,
     val_offsets = val_off, val_tokens = val_tok, val_values = val_val,

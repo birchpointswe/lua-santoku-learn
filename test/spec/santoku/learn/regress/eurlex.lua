@@ -29,9 +29,9 @@ local cfg = {
   },
   emb = {
     n_landmarks = 1024 * 8,
-    trace_tol = 0.01,
-    kernel = { "rbf", "cosine", "expcos", "geolaplace", "matern52", "rq", "arccos1" },
-    gamma = { def = 0.3163 },
+    kernel = { "matern", "cosine", "arccos" },
+    nu = { def = 3 },
+    gamma = { def = 0.06169 },
     k = 256
   },
   ridge = {
@@ -87,7 +87,7 @@ test("eurlex classifier", function ()
   local sp_enc, ridge_obj, dev_codes, best_params, decider, dec_metrics = optimize.krr({
     offsets = offsets, tokens = tokens, values = values,
     n_samples = train.n, n_tokens = n_tokens,
-    kernel = cfg.emb.kernel, rbf_gamma = cfg.emb.gamma,
+    kernel = cfg.emb.kernel, nu = cfg.emb.nu, gamma = cfg.emb.gamma,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     label_offsets = train_label_off, label_neighbors = train_label_nbr, n_labels = n_labels,
     val_offsets = val_off, val_tokens = val_tok, val_values = val_val,
@@ -95,7 +95,8 @@ test("eurlex classifier", function ()
     val_expected_offsets = dev_label_off, val_expected_neighbors = dev_label_nbr,
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
     propensity_b = cfg.ridge.propensity_b,
-    k = k, search_trials = cfg.ridge.search_trials, tile_labels = 1024,
+    k = k, search_trials = cfg.ridge.search_trials,
+    tile_labels = 1024,
     chol_buf = chol_buf, w_buf = w_buf, pqty_buf = pqty_buf,
     each = util.make_ridge_log(stopwatch),
   })
