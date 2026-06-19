@@ -20,14 +20,12 @@ local cfg = {
   },
   emb = {
     n_landmarks = 1024 * 8,
-    trace_tol = 0.01,
-    -- Winner: geolaplace = exp(-d) over the chordal distance d = sqrt(2(1-cos)), i.e. the Matern kernel
-    -- with nu = 1/2 (the exponential / Ornstein-Uhlenbeck kernel) at unit length-scale (l = 1). Housing's
-    -- target is rough/non-smooth, so the least-smooth Matern member wins over the smoother rbf (nu = inf).
-    kernel = { "geolaplace", "cosine", "expcos", "matern52", "rq", "arccos1", "rbf" }
+    kernel = { "matern", "cosine", "arccos" },
+    nu = { def = 1 },
+    gamma = { def = 3.872 }
   },
   ridge = {
-    lambda = { def = 6.3981e-02 },
+    lambda = { def = 7.0119e-02 },
     search_trials = 0
   },
 }
@@ -83,7 +81,7 @@ test("housing regressor", function ()
     offsets = offsets, tokens = tokens, values = values, n_tokens = n_tokens,
     n_samples = train.n,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
-    kernel = cfg.emb.kernel,
+    kernel = cfg.emb.kernel, nu = cfg.emb.nu, gamma = cfg.emb.gamma,
     targets = train.targets, n_targets = 1,
     val_offsets = val_off, val_tokens = val_tok, val_values = val_val,
     val_n_samples = validate.n,
@@ -116,7 +114,7 @@ test("housing regressor", function ()
     })
   end
 
-  str.printf("\n[Eval] Scoring splits\n")
+  str.printf("[Eval] Scoring splits\n")
   local regress_buf = fvec.create()
   local val_stats = eval.regress_accuracy(ridge_obj:regress(val_codes, validate.n, regress_buf), validate.targets)
   val_codes = nil -- luacheck: ignore

@@ -239,12 +239,6 @@ static int tm_csr_gather_rows (lua_State *L)
   return 3;
 }
 
-// binary_label_csr(lab) -> off, nbr
-// lab: ivec length n with 0/1 indicators. Builds the binary label CSR: off[n+1] is the
-// exclusive prefix count of positives, nbr[npos] is all zeros (single label 0 per positive).
-// filter_spans(doc_off, starts, ends, types, mask) -> coff, cs, ce, cty
-// Per doc d (span range [doc_off[d], doc_off[d+1])), keep spans where mask[j] != 0, emitting
-// their start/end/type compacted, with per-doc offsets coff[n_docs+1]. types is optional (0 when nil).
 static int tm_csr_filter_spans (lua_State *L)
 {
   tk_ivec_t *doc_off = tk_ivec_peek(L, 1, "doc_offsets");
@@ -451,10 +445,6 @@ static int tm_csr_nms_dp (lua_State *L)
   return 2;
 }
 
-// union_spans{ a_offsets,a_starts,a_ends,a_types, b_offsets,b_starts,b_ends,b_types,
-//   gold_offsets,gold_starts,gold_ends,gold_types } -> off, starts, ends, types, labels
-// Per doc, the deduped union of candidate sets A and B (matched on (start,end,type)), each candidate
-// labeled 1 if it matches a gold span in that doc else 0. Spans/doc are small, so a nested scan is fine.
 static int tm_csr_union_spans (lua_State *L)
 {
   luaL_checktype(L, 1, LUA_TTABLE);
@@ -531,7 +521,6 @@ static int tm_csr_span_miss_report (lua_State *L)
   lua_getfield(L, 1, "n_types");
   int64_t n_types = tk_lua_checkinteger(L, -1, "n_types");
   lua_pop(L, 1);
-  // [0]=gaz, [1]=bio for both candidate sources
   tk_ivec_t *so[2] = { f[0], f[4] }, *ss[2] = { f[1], f[5] }, *se[2] = { f[2], f[6] }, *st[2] = { f[3], f[7] };
   tk_ivec_t *go = f[8], *gs = f[9], *ge = f[10], *gt = f[11];
   int64_t n_docs = (int64_t) (go->n - 1);
@@ -548,7 +537,7 @@ static int tm_csr_span_miss_report (lua_State *L)
       for (int src = 0; src < 2 && !exact; src++) {
         for (int64_t c = so[src]->a[d]; c < so[src]->a[d + 1]; c++) {
           int64_t x = ss[src]->a[c], y = se[src]->a[c];
-          if (x >= b || a >= y) continue;          // no overlap
+          if (x >= b || a >= y) continue;
           if (x == a && y == b) {
             if (st[src]->a[c] == t) { exact = 1; break; }
             fwrong = 1;
@@ -762,11 +751,6 @@ static int tm_csr_standardize (lua_State *L)
   return 1;
 }
 
-// Per-row L2 normalize. normalize(offsets, [values]) -> values.
-// With a values fvec: scale each row's values by 1/sqrt(sum v^2) in place. Without values (binary
-// CSR, implicit 1.0): create and return an fvec[offsets[n]] holding 1/sqrt(nnz_row) per nonzero.
-// Empty / zero-norm rows are left at 0. After this, the per-row L2 norm is 1, so a cosine-family
-// kernel's similarity is just the sparse dot (no denom needed).
 static int tm_csr_normalize (lua_State *L)
 {
   tk_ivec_t *offsets = tk_ivec_peek(L, 1, "offsets");

@@ -164,8 +164,6 @@ static inline void tk_gram_pool_put (lua_State *L, void *ptr, size_t size) {
   tk_gram_pool_slot_t *pool = tk_gram_pool(L);
   for (int i = 0; i < TK_GRAM_POOL_SLOTS; i++)
     if (!pool[i].ptr) { pool[i].ptr = ptr; pool[i].size = size; return; }
-  // full: evict the oldest slot so the pool tracks the CURRENT working-set size (a differently-sized
-  // model -- e.g. a prior spec at another d -- doesn't pin large stale buffers forever).
   free(pool[0].ptr);
   for (int i = 1; i < TK_GRAM_POOL_SLOTS; i++) pool[i - 1] = pool[i];
   pool[TK_GRAM_POOL_SLOTS - 1].ptr = ptr;
@@ -600,7 +598,7 @@ static inline double tk_spotrf_escalate (float *XtX, int64_t m, double lambda, d
   int ok = 0;
   for (int attempt = 0; attempt < 8; attempt++) {
     if (attempt > 0) {
-      if (!bak) break;                 // no backup -> cannot re-attempt
+      if (!bak) break;
       memcpy(XtX, bak, dd * sizeof(float));
     }
     mu = lambda * mean_eig + mean_eig * jit;

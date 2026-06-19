@@ -19,14 +19,14 @@ local cfg = {
   },
   emb = {
     n_landmarks = 1024 * 8,
-    trace_tol = 0.01,
-    kernel = { "rbf", "rq", "expcos", "matern52", "cosine", "geolaplace", "arccos1" },
-    gamma = { def = 3.21 }
+    kernel = { "matern", "cosine", "arccos" },
+    nu = { def = 3 },
+    gamma = { def = 2.1 }
   },
   ridge = {
-    lambda = { def = 1.1289e-04 },
-    propensity_a = { def = 2.1277 },
-    propensity_b = { def = 2.6922 },
+    lambda = { def = 1.6260e-04 },
+    propensity_a = { def = 0.9448 },
+    propensity_b = { def = 8.8585 },
     classes = 10,
     search_trials = 0,
     k = 1
@@ -61,7 +61,7 @@ test("mnist classifier", function ()
 
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
   local sp_enc, ridge_obj, val_codes, _, decider = optimize.krr({
-    kernel = cfg.emb.kernel, rbf_gamma = cfg.emb.gamma,
+    kernel = cfg.emb.kernel, nu = cfg.emb.nu, gamma = cfg.emb.gamma,
     offsets = train_p_off, tokens = train_p_nbr, values = train_p_val,
     n_samples = train.n, n_tokens = n_features,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,

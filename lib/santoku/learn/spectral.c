@@ -27,49 +27,87 @@ static inline const int32_t *tk_peek_tokens (lua_State *L, int idx, uint64_t *ou
   return conv->a;
 }
 
-// All supported kernels are self-similarity=1: each is a function f of the cosine c only
-// (scale-invariant, ignores magnitude) with f(1)=1, so k(x,x)=1 always. Inputs are unit-L2-normalized
-// by the caller, so c is just the sparse/dense dot (no denom here). This keeps downstream well
-// behaved: the residual/trace diagonal is a constant 1, which leaves trace_tol invariant. Any
-// kernel added here MUST satisfy f(1)=1 and be PSD on the sphere. Norm-scaled kernels (e.g. nngp/ntk, where k(x,x)=||x||^2) were
-// removed for breaking these guarantees. The sphere identities: d^2 = 2(1-c) is the squared
-// chordal distance, so expcos = Gaussian (exp(-d^2/2)) and geolaplace = Laplacian/Matern-1/2
-// (exp(-d)); matern52 continues that smoothness ladder; arccos1 is arc-cosine order 1 normalized to
-// self-sim=1 (the old nngp with the ||x|| denom divided out); rq is the rational-quadratic (alpha=1)
-// heavy-tailed kernel. All at the natural scale (l=1). (The full-search-dominated angular and
-// matern32 were pruned: each was a never-winning interpolator between two retained kernels.)
+// Every kernel is a function f of the cosine c = <x,y> only, with f(1)=1 (self-similarity 1), so the
+// Nystrom diagonal is a constant 1 and trace_tol stays invariant. Inputs are unit-L2-normalized by the
+// caller, so c is just the sparse/dense dot. Three families, each f(1)=1 and PSD on the sphere:
+//   cosine : k = c                          -- the linear endpoint (ell -> inf limit).
+//   matern : stationary on chordal d2 = 2(1-c); smoothness nu in {1/2,3/2,5/2,inf}, length-scale
+//            gamma = 1/ell^2. nu=inf is the Gaussian RBF exp(-gamma(1-c)) (== the old expcos at
+//            gamma=1); nu=1/2 at gamma=1 == the old geolaplace; nu=5/2 at gamma=1 == the old matern52.
+//   arccos : non-stationary, function of the angle t = acos(c). order n in {0..6} (n=1 = ReLU),
+//            depth>=1 (iterated normalized forward map = deep NNGP), tangent 0/1 (NNGP vs NTK).
+//            order=1,depth=1,tangent=0 == the old arccos1 (single-layer ReLU NNGP).
 typedef enum {
   TK_SPECTRAL_COSINE = 0,
-  TK_SPECTRAL_EXPCOS = 1,
-  TK_SPECTRAL_GEOLAPLACE = 2,
-  TK_SPECTRAL_MATERN52 = 3,
-  TK_SPECTRAL_RQ = 4,
-  TK_SPECTRAL_ARCCOS1 = 5,
-  TK_SPECTRAL_RBF = 6,
+  TK_SPECTRAL_MATERN = 1,
+  TK_SPECTRAL_ARCCOS = 2,
+} tk_spectral_family_t;
+
+typedef struct {
+  uint8_t family;
+  uint8_t nu;       // matern smoothness: 0=1/2, 1=3/2, 2=5/2, 3=inf
+  uint8_t order;    // arccos activation order: 0..6
+  uint8_t depth;    // arccos depth: >=1
+  uint8_t tangent;  // arccos: 0=NNGP, 1=NTK
+  float gamma;      // matern length-scale: gamma = 1/ell^2
 } tk_spectral_kernel_t;
 
-static inline float tk_spectral_kernel_apply (tk_spectral_kernel_t k, float c, float gamma) {
+// raw arc-cosine kernel on the unit sphere: A_n(c) = (1/pi) J_n(acos c). Orders 0..6 (n=1 = ReLU);
+// J_n from Cho-Saul's recurrence, with diagonal A_n(1) = (2n-1)!! = 1,1,3,15,105,945,10395.
+static inline float tk_arccos_raw (int n, float c) {
   if (c > 1.0f) c = 1.0f;
   if (c < -1.0f) c = -1.0f;
-  if (k == TK_SPECTRAL_RBF)
-    return expf(-gamma * (1.0f - c));   // Gaussian RBF on chordal distance d2=2(1-c); expcos == gamma 1
-  if (k == TK_SPECTRAL_EXPCOS)
-    return expf(c - 1.0f);
-  if (k == TK_SPECTRAL_GEOLAPLACE) {
-    float d2 = 2.0f * (1.0f - c);
-    return expf(-sqrtf(d2 > 0.0f ? d2 : 0.0f));
+  float t = acosf(c), s = sinf(t), ch = cosf(t), P = (float)M_PI - t;
+  float c2 = ch * ch, c4 = c2 * c2, c6 = c4 * c2;
+  float j;
+  if (n <= 0)      j = P;
+  else if (n == 1) j = s + P * ch;
+  else if (n == 2) j = 3.0f * s * ch + P * (1.0f + 2.0f * c2);
+  else if (n == 3) j = s * (4.0f + 11.0f * c2) + P * ch * (9.0f + 6.0f * c2);
+  else if (n == 4) j = 5.0f * ch * s * (11.0f + 10.0f * c2) + 3.0f * P * (3.0f + 24.0f * c2 + 8.0f * c4);
+  else if (n == 5) j = s * (64.0f + 607.0f * c2 + 274.0f * c4)
+                       + 15.0f * P * ch * (15.0f + 40.0f * c2 + 8.0f * c4);
+  else             j = 21.0f * ch * s * (99.0f + 312.0f * c2 + 84.0f * c4)
+                       + 45.0f * P * (5.0f + 90.0f * c2 + 120.0f * c4 + 16.0f * c6);   // n >= 6
+  return j / (float)M_PI;
+}
+// normalized single-layer forward map M_n(c) = A_n(c)/A_n(1) (unit diagonal).
+static inline float tk_arccos_norm (int n, float c) {
+  static const float nrm[7] = { 1.0f, 1.0f, 3.0f, 15.0f, 105.0f, 945.0f, 10395.0f };
+  int i = n < 0 ? 0 : (n > 6 ? 6 : n);
+  return tk_arccos_raw(i, c) / nrm[i];
+}
+// normalized derivative kernel for activation order n: D_n = M_{n-1}. Order 0 has no true derivative
+// (Heaviside' = delta); fall back to M_0 so the order-0 NTK cell is still a defined PSD kernel.
+static inline float tk_arccos_deriv (int n, float c) {
+  return tk_arccos_norm(n > 0 ? n - 1 : 0, c);
+}
+// deep NNGP/NTK: iterate the normalized forward map; NTK adds the tangent recursion
+// Theta^l = Sigma^l + Theta^{l-1} * Sigma_dot^l, normalized by its unit-diagonal value (depth+1).
+static inline float tk_arccos_apply (int order, int depth, int tangent, float c) {
+  float sigma = c, ntk = c;
+  for (int l = 0; l < depth; l++) {
+    float dot = tk_arccos_deriv(order, sigma);
+    sigma = tk_arccos_norm(order, sigma);
+    ntk = sigma + ntk * dot;
   }
-  if (k == TK_SPECTRAL_MATERN52) {
-    float d2 = 2.0f * (1.0f - c);
-    float a = sqrtf(5.0f * (d2 > 0.0f ? d2 : 0.0f));
-    return (1.0f + a + (5.0f / 3.0f) * d2) * expf(-a);
-  }
-  if (k == TK_SPECTRAL_RQ)
-    return 1.0f / (2.0f - c);
-  if (k == TK_SPECTRAL_ARCCOS1) {
-    float t = acosf(c);
-    return (sinf(t) + ((float)M_PI - t) * c) / (float)M_PI;
-  }
+  return tangent ? ntk / (float)(depth + 1) : sigma;
+}
+static inline float tk_matern_apply (int nu, float gamma, float c) {
+  if (nu == 3) return expf(-gamma * (1.0f - c));            // nu=inf: Gaussian RBF
+  float d2 = 2.0f * (1.0f - c);
+  if (d2 < 0.0f) d2 = 0.0f;
+  float nuf = (nu == 0) ? 0.5f : (nu == 1 ? 1.5f : 2.5f);
+  float arg = sqrtf(2.0f * nuf * d2 * gamma);              // sqrt(2nu) * d * sqrt(gamma)
+  if (nu == 0) return expf(-arg);                          // 1/2
+  if (nu == 1) return (1.0f + arg) * expf(-arg);           // 3/2
+  return (1.0f + arg + arg * arg / 3.0f) * expf(-arg);     // 5/2
+}
+static inline float tk_spectral_kernel_apply (tk_spectral_kernel_t k, float c) {
+  if (c > 1.0f) c = 1.0f;
+  if (c < -1.0f) c = -1.0f;
+  if (k.family == TK_SPECTRAL_MATERN) return tk_matern_apply(k.nu, k.gamma, c);
+  if (k.family == TK_SPECTRAL_ARCCOS) return tk_arccos_apply(k.order, k.depth, k.tangent, c);
   return c;
 }
 
@@ -115,7 +153,6 @@ static inline void tk_spectral_sample_landmarks (
   tk_spectral_modality_t *mod,
   uint64_t n_samples,
   tk_spectral_kernel_t kernel,
-  float gamma,
   uint64_t n_landmarks,
   double trace_tol,
   uint64_t chol_block,
@@ -128,7 +165,7 @@ static inline void tk_spectral_sample_landmarks (
   double *trace_ratio_out
 ) {
   uint64_t n_docs = n_samples;
-  if (chol_block == 0) chol_block = 128;
+  if (chol_block == 0) chol_block = 64;
   if (chol_block > TK_CHOL_BLOCK) chol_block = TK_CHOL_BLOCK;
 
   if (n_landmarks == 0 || n_landmarks > n_docs)
@@ -393,7 +430,7 @@ static inline void tk_spectral_sample_landmarks (
         for (uint64_t i = 0; i < n_docs; i++)
           for (uint64_t b = 0; b < np; b++)
             kip_block[i * np + b] = tk_spectral_kernel_apply(kernel,
-              kip_block[i * np + b], gamma);
+              kip_block[i * np + b]);
       }
 
     } else if (mod->type == TK_MOD_DENSE) {
@@ -413,7 +450,7 @@ static inline void tk_spectral_sample_landmarks (
         for (uint64_t i = 0; i < n_docs; i++)
           for (uint64_t b = 0; b < np; b++)
             kip_block[i * np + b] = tk_spectral_kernel_apply(kernel,
-              (float)dense_kip[i * np + b], gamma);
+              (float)dense_kip[i * np + b]);
       }
     }
 
@@ -531,7 +568,6 @@ typedef struct {
   uint64_t d;
   double trace_ratio;
   tk_spectral_kernel_t kernel;
-  float gamma;
   uint8_t mod_type;
   int64_t *csr_offsets;
   int32_t *csr_tokens;
@@ -691,7 +727,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
               row_buf[(uint64_t)csc_rows_a[c]] += val * csc_vals[c];
           }
           for (uint64_t j = 0; j < m; j++) {
-            sims_row[j] = tk_spectral_kernel_apply(enc->kernel, row_buf[j], enc->gamma);
+            sims_row[j] = tk_spectral_kernel_apply(enc->kernel, row_buf[j]);
             row_buf[j] = 0.0f;
           }
         }
@@ -718,7 +754,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
       #pragma omp parallel for schedule(static)
       for (uint64_t i = 0; i < blk; i++)
         for (uint64_t j = 0; j < m; j++)
-          sims_f[i * m + j] = tk_spectral_kernel_apply(enc->kernel, sims_f[i * m + j], enc->gamma);
+          sims_f[i * m + j] = tk_spectral_kernel_apply(enc->kernel, sims_f[i * m + j]);
     }
 
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
@@ -747,11 +783,14 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
     return luaL_error(L, "cannot persist: projection released");
   FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
   tk_lua_fwrite(L, "TKny", 1, 4, fh);
-  uint8_t version = 25;
+  uint8_t version = 26;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
-  uint8_t kernel_byte = (uint8_t)enc->kernel;
-  tk_lua_fwrite(L, &kernel_byte, sizeof(uint8_t), 1, fh);
-  tk_lua_fwrite(L, &enc->gamma, sizeof(float), 1, fh);
+  tk_lua_fwrite(L, &enc->kernel.family, sizeof(uint8_t), 1, fh);
+  tk_lua_fwrite(L, &enc->kernel.nu, sizeof(uint8_t), 1, fh);
+  tk_lua_fwrite(L, &enc->kernel.order, sizeof(uint8_t), 1, fh);
+  tk_lua_fwrite(L, &enc->kernel.depth, sizeof(uint8_t), 1, fh);
+  tk_lua_fwrite(L, &enc->kernel.tangent, sizeof(uint8_t), 1, fh);
+  tk_lua_fwrite(L, &enc->kernel.gamma, sizeof(float), 1, fh);
   tk_lua_fwrite(L, &enc->mod_type, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &enc->m, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, &enc->d, sizeof(uint64_t), 1, fh);
@@ -867,16 +906,35 @@ static inline int tm_encode (lua_State *L) {
   lua_getfield(L, 1, "kernel");
   const char *kernel_str = lua_isnil(L, -1) ? "cosine" : lua_tostring(L, -1);
   lua_pop(L, 1);
-  tk_spectral_kernel_t kernel = TK_SPECTRAL_COSINE;
-  if (strcmp(kernel_str, "cosine") == 0) kernel = TK_SPECTRAL_COSINE;
-  else if (strcmp(kernel_str, "expcos") == 0) kernel = TK_SPECTRAL_EXPCOS;
-  else if (strcmp(kernel_str, "geolaplace") == 0) kernel = TK_SPECTRAL_GEOLAPLACE;
-  else if (strcmp(kernel_str, "matern52") == 0) kernel = TK_SPECTRAL_MATERN52;
-  else if (strcmp(kernel_str, "rq") == 0) kernel = TK_SPECTRAL_RQ;
-  else if (strcmp(kernel_str, "arccos1") == 0) kernel = TK_SPECTRAL_ARCCOS1;
-  else if (strcmp(kernel_str, "rbf") == 0) kernel = TK_SPECTRAL_RBF;
-  else return luaL_error(L, "encode: unknown kernel '%s'", kernel_str);
   float gamma = (float)tk_lua_foptnumber(L, 1, "encode", "gamma", 1.0);
+  tk_spectral_kernel_t kernel = { .family = TK_SPECTRAL_COSINE, .nu = 3,
+    .order = 1, .depth = 1, .tangent = 0, .gamma = gamma };
+  if (strcmp(kernel_str, "cosine") == 0) {
+    kernel.family = TK_SPECTRAL_COSINE;
+  } else if (strcmp(kernel_str, "matern") == 0) {
+    kernel.family = TK_SPECTRAL_MATERN;
+    kernel.nu = (uint8_t)tk_lua_foptunsigned(L, 1, "encode", "nu", 3);
+  } else if (strcmp(kernel_str, "arccos") == 0) {
+    kernel.family = TK_SPECTRAL_ARCCOS;
+    kernel.order = (uint8_t)tk_lua_foptunsigned(L, 1, "encode", "order", 1);
+    kernel.depth = (uint8_t)tk_lua_foptunsigned(L, 1, "encode", "depth", 1);
+    kernel.tangent = (uint8_t)tk_lua_foptunsigned(L, 1, "encode", "tangent", 0);
+  // legacy single-kernel aliases (map onto the three families).
+  } else if (strcmp(kernel_str, "rbf") == 0) {
+    kernel.family = TK_SPECTRAL_MATERN; kernel.nu = 3;
+  } else if (strcmp(kernel_str, "expcos") == 0) {
+    kernel.family = TK_SPECTRAL_MATERN; kernel.nu = 3; kernel.gamma = 1.0f;
+  } else if (strcmp(kernel_str, "geolaplace") == 0) {
+    kernel.family = TK_SPECTRAL_MATERN; kernel.nu = 0; kernel.gamma = 1.0f;
+  } else if (strcmp(kernel_str, "matern52") == 0) {
+    kernel.family = TK_SPECTRAL_MATERN; kernel.nu = 2; kernel.gamma = 1.0f;
+  } else if (strcmp(kernel_str, "arccos1") == 0) {
+    kernel.family = TK_SPECTRAL_ARCCOS; kernel.order = 1; kernel.depth = 1; kernel.tangent = 0;
+  } else {
+    return luaL_error(L, "encode: unknown kernel '%s'", kernel_str);
+  }
+  if (kernel.depth < 1) kernel.depth = 1;
+  if (kernel.order > 6) kernel.order = 6;
 
   if (has_csr && !mod.csr_values) {
     uint64_t nnz = (uint64_t)(mod.csr_offsets[n_samples] - mod.csr_offsets[0]);
@@ -887,8 +945,8 @@ static inline int tm_encode (lua_State *L) {
   }
 
   uint64_t n_lm_req = tk_lua_foptunsigned(L, 1, "encode", "n_landmarks", 0);
-  double trace_tol = tk_lua_foptnumber(L, 1, "encode", "trace_tol", 0.0);
-  uint64_t chol_block = tk_lua_foptunsigned(L, 1, "encode", "chol_block", 128);
+  double trace_tol = tk_lua_foptnumber(L, 1, "encode", "trace_tol", 0.001);
+  uint64_t chol_block = tk_lua_foptunsigned(L, 1, "encode", "chol_block", 64);
 
   lua_getfield(L, 1, "chol_buf");
   tk_fvec_t *chol_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "chol_buf");
@@ -900,7 +958,7 @@ static inline int tm_encode (lua_State *L) {
   uint64_t nc, m;
   double trace_ratio;
   tk_spectral_sample_landmarks(L,
-    &mod, n_samples, kernel, gamma,
+    &mod, n_samples, kernel,
     n_lm_req, trace_tol, chol_block,
     chol_buf ? chol_buf->a : NULL,
     &lm_ids, &lm_chol, &full_chol, &nc, &m, &trace_ratio);
@@ -1259,7 +1317,6 @@ static inline int tm_encode (lua_State *L) {
   enc->trace_ratio = trace_ratio;
   enc->destroyed = false;
   enc->kernel = kernel;
-  enc->gamma = gamma;
   enc->mod_type = mod.type;
   enc->csr_offsets = NULL;
   enc->csr_tokens = NULL;
@@ -1384,7 +1441,7 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 25) {
+  if (version != 26) {
     tk_lua_fclose(L, fh);
     return luaL_error(L, "unsupported nystrom encoder version %d", (int)version);
   }
@@ -1401,10 +1458,12 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   enc->sims_buf = NULL; enc->row_bufs = NULL; enc->dense_tile_buf = NULL;
   enc->tile = 0; enc->n_threads = 0;
 
-  uint8_t kernel_byte;
-  tk_lua_fread(L, &kernel_byte, sizeof(uint8_t), 1, fh);
-  enc->kernel = (tk_spectral_kernel_t)kernel_byte;
-  tk_lua_fread(L, &enc->gamma, sizeof(float), 1, fh);
+  tk_lua_fread(L, &enc->kernel.family, sizeof(uint8_t), 1, fh);
+  tk_lua_fread(L, &enc->kernel.nu, sizeof(uint8_t), 1, fh);
+  tk_lua_fread(L, &enc->kernel.order, sizeof(uint8_t), 1, fh);
+  tk_lua_fread(L, &enc->kernel.depth, sizeof(uint8_t), 1, fh);
+  tk_lua_fread(L, &enc->kernel.tangent, sizeof(uint8_t), 1, fh);
+  tk_lua_fread(L, &enc->kernel.gamma, sizeof(float), 1, fh);
   tk_lua_fread(L, &enc->mod_type, sizeof(uint8_t), 1, fh);
   tk_lua_fread(L, &enc->m, sizeof(uint64_t), 1, fh);
   tk_lua_fread(L, &enc->d, sizeof(uint64_t), 1, fh);

@@ -83,8 +83,6 @@ static int tk_decide_create_lua (lua_State *L)
   return 1;
 }
 
-// ===== multilabel: one global score threshold, micro-F1 sweep =====
-
 static int tk_decide_calibrate_multi (lua_State *L, tk_decide_t *g)
 {
   lua_getfield(L, 2, "offsets");
@@ -142,12 +140,6 @@ static int tk_decide_calibrate_multi (lua_State *L, tk_decide_t *g)
   return 3;
 }
 
-// ===== single-label: per-label additive offsets, decode argmax(score_l - offset_l) =====
-// Offsets are fit by coordinate ascent on macro-F1: holding the other offsets fixed, each label's
-// offset is the cut over the sorted decision margins that maximizes macro-F1 (sweep, no black-box
-// search). One global scalar would be a degenerate accuracy threshold here; macro-F1 rewards the
-// rare classes the offsets exist to rescue.
-
 static int tk_decide_calibrate_single (lua_State *L, tk_decide_t *g)
 {
   lua_getfield(L, 2, "scores");
@@ -169,15 +161,15 @@ static int tk_decide_calibrate_single (lua_State *L, tk_decide_t *g)
   }
 
   int64_t *gold = (int64_t *)malloc((uint64_t)n * sizeof(int64_t));
-  int64_t *gc = (int64_t *)calloc((uint64_t)nl, sizeof(int64_t));   // gold count per class
+  int64_t *gc = (int64_t *)calloc((uint64_t)nl, sizeof(int64_t));
   for (int64_t i = 0; i < n; i++) {
     int64_t gi = (exp_off->a[i] < exp_off->a[i + 1]) ? exp_nbr->a[exp_off->a[i]] : -1;
     gold[i] = gi;
     if (gi >= 0 && gi < nl) gc[gi]++;
   }
-  int64_t *argother = (int64_t *)malloc((uint64_t)n * sizeof(int64_t)); // argmax over classes != l
-  int64_t *pc = (int64_t *)malloc((uint64_t)nl * sizeof(int64_t));      // predicted count per class
-  int64_t *tp = (int64_t *)malloc((uint64_t)nl * sizeof(int64_t));      // true positives per class
+  int64_t *argother = (int64_t *)malloc((uint64_t)n * sizeof(int64_t));
+  int64_t *pc = (int64_t *)malloc((uint64_t)nl * sizeof(int64_t));
+  int64_t *tp = (int64_t *)malloc((uint64_t)nl * sizeof(int64_t));
   double *f1 = (double *)malloc((uint64_t)nl * sizeof(double));
   tk_rank_t *pool = (tk_rank_t *)malloc((uint64_t)n * sizeof(tk_rank_t));
   int64_t correct = 0, counted = 0;
@@ -185,8 +177,6 @@ static int tk_decide_calibrate_single (lua_State *L, tk_decide_t *g)
   double prev_macro = -1.0;
   for (int pass = 0; pass < 50; pass++) {
     for (int64_t l = 0; l < nl; l++) {
-      // per-sample margin d_i = score_il - max_{j!=l}(score_ij - off_j); turning off_l below d_i
-      // flips sample i's prediction from argother[i] to l.
       for (int64_t i = 0; i < n; i++) {
         const float *row = S + i * nl;
         double bo = -HUGE_VAL;
@@ -200,7 +190,6 @@ static int tk_decide_calibrate_single (lua_State *L, tk_decide_t *g)
         pool[i].i = i;
         pool[i].d = (double)row[l] - bo;
       }
-      // base state: off_l = +inf, l never predicted, every sample predicts argother[i]
       for (int64_t c = 0; c < nl; c++) { pc[c] = 0; tp[c] = 0; }
       for (int64_t i = 0; i < n; i++) {
         int64_t p = argother[i];
@@ -215,7 +204,7 @@ static int tk_decide_calibrate_single (lua_State *L, tk_decide_t *g)
       tk_rvec_t v = { .n = (size_t)n, .m = (size_t)n, .lua_managed = false, .a = pool };
       tk_rvec_desc(&v, 0, (size_t)n);
       double best_macro = macro_sum;
-      double best_tau = pool[0].d + 1.0;   // m = 0: offset above every margin, suppress l
+      double best_tau = pool[0].d + 1.0;
       for (int64_t m = 1; m <= n; m++) {
         int64_t i = pool[m - 1].i;
         int64_t oldc = argother[i];
@@ -235,7 +224,6 @@ static int tk_decide_calibrate_single (lua_State *L, tk_decide_t *g)
       }
       off[l] = best_tau;
     }
-    // macro-F1 (+ accuracy) with the committed offsets; the last pass's values are the final metrics.
     for (int64_t c = 0; c < nl; c++) { pc[c] = 0; tp[c] = 0; }
     correct = 0; counted = 0;
     for (int64_t i = 0; i < n; i++) {
@@ -260,7 +248,6 @@ static int tk_decide_calibrate_single (lua_State *L, tk_decide_t *g)
   return 2;
 }
 
-// ===== span: per-candidate argmax with a REJECT offset, resolved by nms_dp into non-overlapping spans =====
 // REJECT-class decision offset is the precision/recall knob: offset>0 suppresses REJECT -> more candidates
 // survive -> higher recall. Calibrated on dev by golden-section over span-F1 (unimodal in the offset).
 
@@ -319,8 +306,6 @@ static int tk_decide_calibrate_span (lua_State *L, tk_decide_t *g)
   double *M = (double *)malloc((uint64_t)(maxn + 1) * sizeof(double));
   int64_t *P = (int64_t *)malloc((uint64_t)(maxn + 1) * sizeof(int64_t));
 
-  // data-driven offset range: at offset > d_c = score[c,reject] - max_{l!=reject} score[c,l], candidate c
-  // stops being REJECT. Sweeping [min d_c, max d_c] covers every flip point.
   double dmin = HUGE_VAL, dmax = -HUGE_VAL;
   for (int64_t c = 0; c < ncand; c++) {
     const float *row = S + c * nl;
@@ -332,7 +317,7 @@ static int tk_decide_calibrate_span (lua_State *L, tk_decide_t *g)
     if (dc > dmax) dmax = dc;
   }
   int64_t tp, npred, ngold;
-  double pad = (dmax - dmin) * 0.01 + 1e-6;   // reach the keep-none / keep-all extremes past the ties
+  double pad = (dmax - dmin) * 0.01 + 1e-6;
   double lo = dmin - pad, hi = dmax + pad;
   double tol = (hi - lo) * 1e-3; if (tol <= 0) tol = 1e-6;
   const double phi = 0.6180339887498949;
@@ -399,9 +384,9 @@ static int tk_decide_predict_lua (lua_State *L)
     int64_t n_docs = (int64_t)tk_lua_fcheckunsigned(L, 2, "decide.predict", "n_samples");
     int64_t reject = g->reject, ncand = (int64_t)cs->n;
     float *S = sf->a;
-    int64_t *cls = (int64_t *)malloc((uint64_t)ncand * sizeof(int64_t));
+    int64_t *cls = (int64_t *)calloc((uint64_t)ncand, sizeof(int64_t));
     int64_t *keep = (int64_t *)malloc((uint64_t)ncand * sizeof(int64_t));
-    double *w = (double *)malloc((uint64_t)ncand * sizeof(double));
+    double *w = (double *)calloc((uint64_t)ncand, sizeof(double));
     int64_t maxn = tk_span_max_doc(co->a, n_docs); if (maxn < 1) maxn = 1;
     tk_span_iv *iv = (tk_span_iv *)malloc((uint64_t)maxn * sizeof(tk_span_iv));
     double *M = (double *)malloc((uint64_t)(maxn + 1) * sizeof(double));

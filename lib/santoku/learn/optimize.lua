@@ -610,11 +610,22 @@ M.krr = function (args)
   local kernel_spec = args.kernel or "cosine"
   local kernels = type(kernel_spec) == "table" and kernel_spec or { kernel_spec }
   args.kernel = kernels
-  -- rbf carries a gamma bandwidth -- the only kernel whose embedding depends on a hyperparameter. Split it
-  -- out: the param-free kernels run once each; rbf runs last as a gamma BO (rbf_trials full rebuilds).
-  local has_rbf, pf_kernels = false, {}
+  -- Three kernel families, all functions of the cosine c on L2-normalized inputs (self-sim 1):
+  --   cosine : k = c, the linear endpoint (param-free).
+  --   matern : stationary; nu in {inf,1/2,3/2,5/2} x length-scale gamma (gamma = 1/ell^2).
+  --   arccos : non-stationary; order x depth x tangent (NNGP/NTK) discrete grid.
+  -- The kernel list names which families to explore; legacy single-kernel names map in for the locked
+  -- path (rbf/expcos/geolaplace/matern52/rq -> matern, arccos1 -> arccos, cosine -> cosine).
+  local families = {}
   for _, kn in ipairs(kernels) do
-    if kn == "rbf" then has_rbf = true else pf_kernels[#pf_kernels + 1] = kn end
+    if kn == "cosine" then families.cosine = true
+    elseif kn == "arccos" or kn == "arccos1" then families.arccos = true
+    else families.matern = true end
+  end
+  local function defval (v, d)
+    if type(v) == "table" then return v.def end
+    if v ~= nil then return v end
+    return d
   end
   -- inner label-head params (lambda [+ propensity] [+ extra]); searched per kernel on a fixed gram.
   -- args.extra = ordered pass-through search dims { { name=, min=, max=, log=, def= }, ... }: GP-searched
@@ -629,6 +640,8 @@ M.krr = function (args)
     end
   end
   local inner_samplers = build_samplers(args, inner_names)
+  -- Inner lambda/propensity BO budget per build (fixed; override via inner_trials).
+  local inner_trials = args.inner_trials or 80
   local do_search = args.search_trials and args.search_trials > 0
   local k = not dense and (args.k or 32) or nil
   -- Classification always runs through the tiled gram/ridge (one tile when n_labels is small); tiling is
@@ -662,19 +675,24 @@ M.krr = function (args)
       values = args.val_values, n_samples = args.val_n_samples,
     })
   end
-  -- Build one kernel's eigendecomposed gram (no solve_lambda, no cache -- the outer loop visits each
-  -- kernel exactly once). collectgarbage first so only ~one d x d gram is resident (we don't retain the
-  -- running best -- see the rebuild-from-params note at the end).
-  local function build_kd (kname, gamma)
+  -- Build one kernel's eigendecomposed gram from a spec { kernel=, gamma=, nu=, order=, depth=, tangent= }
+  -- (no solve_lambda, no cache). collectgarbage first so only ~one d x d gram is resident -- we never
+  -- retain the running best, we rebuild it from params at the end (see the note there).
+  local function build_kd (spec)
     collectgarbage("collect")
-    spectral_args.kernel = kname
-    spectral_args.gamma = gamma   -- nil for param-free kernels (C defaults gamma=1, unused by them)
+    spectral_args.kernel = spec.kernel
+    spectral_args.gamma = spec.gamma
+    spectral_args.nu = spec.nu
+    spectral_args.order = spec.order
+    spectral_args.depth = spec.depth
+    spectral_args.tangent = spec.tangent
     spectral_args.solve_lambda = nil
     spectral_args.solve_propensity_a = nil
     spectral_args.solve_propensity_b = nil
     if tiled and args.pqty_buf then
+      local lbl = spec.label or spec.kernel
       spectral_args.pqty_buf = type(args.pqty_buf) == "function"
-        and args.pqty_buf(kname) or args.pqty_buf
+        and args.pqty_buf(lbl) or args.pqty_buf
     end
     rand.fast_seed(seed)
     local _, sp_enc, gram = spectral.encode(spectral_args)
@@ -702,13 +720,26 @@ M.krr = function (args)
   -- eigendecomposition -- the gram is "baked" and ridge.create just copies W).
   if not do_search then
     local kname = kernels.def or kernels[1]
-    -- rbf carries a frozen gamma (args.rbf_gamma as a scalar or { def = }); other kernels ignore it.
-    local gamma = kname == "rbf"
-      and (type(args.rbf_gamma) == "table" and args.rbf_gamma.def or args.rbf_gamma) or nil
+    -- Resolve the frozen kernel params (each a scalar or { def = }); matern aliases (rbf etc.) read gamma.
+    local spec = { kernel = kname }
+    if kname == "matern" then
+      spec.nu = defval(args.nu, 3)
+      spec.gamma = defval(args.gamma or args.rbf_gamma, 1.0)
+    elseif kname == "rbf" then
+      spec.gamma = defval(args.gamma or args.rbf_gamma, 1.0)
+    elseif kname == "arccos" then
+      spec.order = defval(args.order, 1)
+      spec.depth = defval(args.depth, 1)
+      spec.tangent = defval(args.tangent, 0)
+    end
     local lp = sample_params(inner_samplers, inner_names, nil, true)
     collectgarbage("collect")
     spectral_args.kernel = kname
-    spectral_args.gamma = gamma
+    spectral_args.gamma = spec.gamma
+    spectral_args.nu = spec.nu
+    spectral_args.order = spec.order
+    spectral_args.depth = spec.depth
+    spectral_args.tangent = spec.tangent
     spectral_args.solve_lambda = lp.lambda
     if not dense then
       spectral_args.solve_propensity_a = lp.propensity_a
@@ -721,73 +752,98 @@ M.krr = function (args)
     rand.fast_seed(seed)
     local _, sp_enc, gram = spectral.encode(spectral_args)
     local val_codes = val_encode(sp_enc)
-    local params = { kernel = kname, gamma = gamma }
+    local params = { kernel = kname, gamma = spec.gamma, nu = spec.nu,
+      order = spec.order, depth = spec.depth, tangent = spec.tangent }
     for _, n in ipairs(inner_names) do params[n] = lp[n] end
     return finish({ sp_enc = sp_enc, gram = gram, val_codes = val_codes }, params, "cholesky")
   end
   local trial_fn = args.trial_fn or default_trial_fn(args, dense, mode == "multilabel" and "fmeasure" or mode, k)
   -- trial_fn(gram, params, kd): kd = { sp_enc, gram, val_codes } so a custom trial can solve a ridge at
   -- the trial's (lambda, prop) and regress val_codes itself (e.g. to decode + score span-F1).
-  local inner_trials = args.inner_trials or args.search_trials or 30
-  -- Outer: a simple loop over the discrete kernel list, tracking the running best ACROSS kernels. Inner:
-  -- a SILENT GP/BO over lambda/propensity/extra on that kernel's fixed eigenbasis (cheap closed-form
-  -- tests). One log line per kernel reports its best with the global-best marker (the inner trials are
-  -- hidden). We track only the winning params (kernel + gamma + label head) and rebuild its gram at the
-  -- end -- retaining the kd is unsafe when its gram aliases a shared pqty mmap that a later trial reuses.
+  -- Exploration runs in a fixed family order regardless of list order: cosine (1 build), then a joint
+  -- matern BO (nu x gamma), then a joint arccos BO (order x depth x tangent). Each runs the SILENT inner
+  -- lambda/propensity BO (above) on its fixed eigenbasis; one log line per build, global-best marked. We
+  -- keep only the winning params and rebuild the gram at the end (retaining a kd that aliases a shared pqty
+  -- mmap is unsafe). Outer budget = search_trials for both families; override per-family if needed.
+  local matern_trials = args.matern_trials or args.search_trials or 0
+  local arccos_trials = args.arccos_trials or args.search_trials or 0
+  local btot = (families.cosine and 1 or 0)
+    + (families.matern and matern_trials or 0)
+    + (families.arccos and arccos_trials or 0)
   local best_params, best_score = nil, -num.huge
-  for ki, kname in ipairs(pf_kernels) do
-    local kd = build_kd(kname)
+  local bi = 0
+  -- Build's inner lambda BO + evaluate + record. reseed=false: the inner search must not reseed the
+  -- global RNG, or it would reset the outer family BO's candidate sampling every trial.
+  local function eval_kd (kd, base)
     local _, ib = search({
-      param_names = inner_names, samplers = inner_samplers,
-      trials = inner_trials,
+      param_names = inner_names, samplers = inner_samplers, trials = inner_trials,
       trial_fn = function (p) return trial_fn(kd.gram, p, kd) end,
-      skip_final = true,
+      skip_final = true, reseed = false,
     })
-    ib.kernel = kname
+    for kk, vv in pairs(base) do ib[kk] = vv end
     local sc, sm = trial_fn(kd.gram, ib, kd)
+    bi = bi + 1
     if args.each then
-      args.each({ event = "trial", phase = "kernel", trial = ki, trials = #pf_kernels,
-        params = ib, score = sc, metrics = sm,
+      args.each({ event = "trial", phase = "kernel", trial = bi, trials = btot,
+        params = ib, score = sc, metrics = sm, emb_d = kd.sp_enc:dims(),
         global_best_score = best_score, is_new_best = sc > best_score })
     end
-    if sc > best_score then
-      best_score, best_params = sc, ib
-    end
+    if sc > best_score then best_score, best_params = sc, ib end
+    return sc, sm
   end
-  -- rbf last: an outer BO over gamma (each gamma = a full rebuild + eigendecomp, since the embedding
-  -- depends on it), with the same inner lambda BO on each gamma's eigenbasis. The running param-free best
-  -- is the bar to beat. We keep only params, never the kd: every rbf trial reuses the same pqty mmap, so a
-  -- retained best kd would be silently overwritten by a later gamma -- hence the rebuild-from-params below.
-  if has_rbf then
-    args.rbf_gamma = spec_defaults(args.rbf_gamma, { min = 1e-2, max = 4, log = true, def = 1.0 })
-    local gamma_samplers = build_samplers(args, { "rbf_gamma" })
-    local rbf_trials = args.rbf_trials or 20
-    local gi = 0
+  -- Phase 1: cosine (single build).
+  if families.cosine then
+    eval_kd(build_kd({ kernel = "cosine", label = "cosine" }), { kernel = "cosine" })
+  end
+  -- Phase 2: matern -- ONE GP/BO over the whole family (nu x gamma jointly), inner lambda BO each trial.
+  -- nu is a discrete dim (categorical sampler -> normalized index), gamma a log range warm-started from
+  -- the head's pinned length-scale (args.gamma). The BO spends its budget adaptively across nu.
+  if families.matern then
+    args.matern_nu = args.matern_nu or { 3, 0, 1, 2 }       -- inf (center), 1/2, 3/2, 5/2
+    args.matern_gamma = spec_defaults(args.matern_gamma or args.gamma or args.rbf_gamma,
+      { min = 1e-2, max = 16, log = true, def = 1.0 })
+    local m_samplers = build_samplers(args, { "matern_nu", "matern_gamma" })
     search({
-      param_names = { "rbf_gamma" }, samplers = gamma_samplers, trials = rbf_trials, skip_final = true,
+      param_names = { "matern_nu", "matern_gamma" }, samplers = m_samplers,
+      trials = matern_trials, skip_final = true,
       trial_fn = function (gp)
-        gi = gi + 1
-        local kd = build_kd("rbf", gp.rbf_gamma)
-        local _, ib = search({
-          param_names = inner_names, samplers = inner_samplers, trials = inner_trials,
-          trial_fn = function (p) return trial_fn(kd.gram, p, kd) end, skip_final = true,
-        })
-        ib.kernel = "rbf"; ib.gamma = gp.rbf_gamma
-        local sc, sm = trial_fn(kd.gram, ib, kd)
-        if args.each then
-          args.each({ event = "trial", phase = "kernel", trial = gi, trials = rbf_trials,
-            params = ib, score = sc, metrics = sm,
-            global_best_score = best_score, is_new_best = sc > best_score })
-        end
-        if sc > best_score then best_score, best_params = sc, ib end
+        local kd = build_kd({ kernel = "matern", nu = gp.matern_nu, gamma = gp.matern_gamma,
+          label = "matern" })
+        return eval_kd(kd, { kernel = "matern", nu = gp.matern_nu, gamma = gp.matern_gamma })
+      end,
+    })
+  end
+  -- Phase 3: arccos -- a discrete grid (order x depth x tangent) that grows with higher orders, so search
+  -- it with a MEMOIZING GP/BO. Each cell builds+evaluates once and is cached; if the BO re-proposes a
+  -- visited cell we hand back the cached score (no rebuild) -- a noiseless repeat, which collapses the GP's
+  -- uncertainty there so it moves on. The order axis carries a monotone signal the GP can ride.
+  -- order=1/depth=1/tangent=0 (the centers) == the old arccos1.
+  if families.arccos then
+    args.arccos_order = args.arccos_order or { 4, 1, 0, 2, 3, 5, 6 }   -- center=4 (best on mnist), then rest
+    args.arccos_depth = args.arccos_depth or { 1, 2, 3 }              -- depth 1 (center) won
+    args.arccos_tangent = args.arccos_tangent or { 0, 1 }            -- NNGP (center) won over NTK
+    local a_samplers = build_samplers(args, { "arccos_order", "arccos_depth", "arccos_tangent" })
+    local seen = {}
+    search({
+      param_names = { "arccos_order", "arccos_depth", "arccos_tangent" }, samplers = a_samplers,
+      trials = arccos_trials, skip_final = true,
+      trial_fn = function (gp)
+        local sig = gp.arccos_order .. ":" .. gp.arccos_depth .. ":" .. gp.arccos_tangent
+        local hit = seen[sig]
+        if hit then return hit[1], hit[2] end
+        local kd = build_kd({ kernel = "arccos", order = gp.arccos_order, depth = gp.arccos_depth,
+          tangent = gp.arccos_tangent, label = "arccos" })
+        local sc, sm = eval_kd(kd, { kernel = "arccos", order = gp.arccos_order,
+          depth = gp.arccos_depth, tangent = gp.arccos_tangent })
+        seen[sig] = { sc, sm }
         return sc, sm
       end,
     })
   end
   -- Rebuild the winner from its params. build_kd reseeds the RNG to a fixed seed before encode, so this
-  -- reproduces the exact gram (landmarks + eigenbasis + pqty, now mutually consistent) the winner was
-  -- selected on -- without retaining a kd whose pqty may have been clobbered by a later trial.
-  local best_kd = build_kd(best_params.kernel, best_params.gamma)
+  -- reproduces the exact gram (landmarks + eigenbasis + pqty, mutually consistent) the winner was selected
+  -- on -- without retaining a kd whose pqty may have been clobbered by a later trial.
+  local best_kd = build_kd(best_params)
   return finish(best_kd, best_params, "eigen")
 end
 

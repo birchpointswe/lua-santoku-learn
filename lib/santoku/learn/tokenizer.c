@@ -1,8 +1,3 @@
-// santoku.learn.tokenizer -- fused render+ngram tokenizer (design v6.1).
-// One rendering block == one tokenizer instance (own byte alphabet + ngram map).
-// This file: config + byte assigner + object lifecycle + module wiring. The fused
-// scan (tokenize) and persist/load are added in the following units.
-
 #include <lua.h>
 #include <lauxlib.h>
 #include <stdlib.h>
@@ -22,7 +17,7 @@
 #include <santoku/iumap/ext.h>
 
 #define TK_TOK_MT "tk_tokenizer_t"
-#define TK_TOK_MAXTYPES 250       // entity types ceiling (per instance)
+#define TK_TOK_MAXTYPES 250
 
 typedef enum { TK_STREAM_TEXT = 0, TK_STREAM_TYPE = 1 } tk_stream_t;
 typedef enum { TK_FOCUS_NONE = 0, TK_FOCUS_TRUE = 1 } tk_focus_t;
@@ -31,7 +26,6 @@ typedef enum { TK_FOCUS_NONE = 0, TK_FOCUS_TRUE = 1 } tk_focus_t;
 // focus, type marks, UNK). UNK is the type-mark slot at index n_types+1
 // (slot n_types is the O role); they are standing roles of the type axis.
 typedef struct {
-  // config
   int ngram_min, ngram_max;
   int n_types;
   tk_stream_t stream;
@@ -40,10 +34,10 @@ typedef struct {
   tk_focus_t focus;
 
   // byte assignments (0 = unassigned)
-  uint8_t b_bos, b_eos;                          // terminals
-  uint8_t b_focus_open, b_focus_close;           // focus = true
+  uint8_t b_bos, b_eos;
+  uint8_t b_focus_open, b_focus_close;
   uint8_t b_type[TK_TOK_MAXTYPES + 2];           // type byte per {types, O, UNK}
-  int n_assigned;                                // count drawn from pool (for persist check)
+  int n_assigned;
 
   tk_iumap_t *ngram_map;                         // dense gram-id map (owned)
 } tk_tokenizer_t;
@@ -79,7 +73,6 @@ static void tk_assigner_init (tk_assigner_t *a, int normalize, int full) {
   }
 }
 
-// draw next free byte for `role` (name only used in the error message)
 static uint8_t tk_assign (lua_State *L, tk_assigner_t *a, const char *role, int need_total) {
   if (a->i >= a->n)
     return (uint8_t) luaL_error(L,
@@ -88,12 +81,10 @@ static uint8_t tk_assign (lua_State *L, tk_assigner_t *a, const char *role, int 
   return a->pool[a->i++];
 }
 
-// Run the assigner over the config's roles (fixed order). Returns total assigned.
 static int tk_tokenizer_assign (lua_State *L, tk_tokenizer_t *t) {
   tk_assigner_t a;
   tk_assigner_init(&a, t->normalize, t->stream != TK_STREAM_TEXT);
   int nt = t->n_types;
-  // upper bound on roles, for the error message
   int need = (t->terminals ? 2 : 0)
            + (t->focus == TK_FOCUS_TRUE ? 2 : 0)
            + (t->stream == TK_STREAM_TYPE ? (nt + 2) : 0);
@@ -114,9 +105,6 @@ static int tk_tokenizer_assign (lua_State *L, tk_tokenizer_t *t) {
   return a.i;
 }
 
-// ---------------------------------------------------------------------------
-// create
-// ---------------------------------------------------------------------------
 static int tk_tokenizer_create_lua (lua_State *L) {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
@@ -128,8 +116,6 @@ static int tk_tokenizer_create_lua (lua_State *L) {
   if (cfg.ngram_min < 1 || cfg.ngram_min > cfg.ngram_max)
     return luaL_error(L, "tokenizer: need 1 <= ngram_min <= ngram_max");
 
-  // types=true: replace the provided cells with the external tagger's type byte (skeleton). Otherwise
-  // plain text stream.
   int want_types = tk_lua_foptboolean(L, 1, "tokenizer", "types", false);
   cfg.stream = want_types ? TK_STREAM_TYPE : TK_STREAM_TEXT;
 
@@ -142,7 +128,6 @@ static int tk_tokenizer_create_lua (lua_State *L) {
   else return luaL_error(L, "tokenizer: focus must be false|true");
   lua_pop(L, 1);
 
-  // n_types: required by the type stream (sizes the external tagger's byte block)
   lua_getfield(L, 1, "n_types");
   if (!lua_isnil(L, -1)) cfg.n_types = (int) lua_tointeger(L, -1);
   lua_pop(L, 1);
@@ -151,7 +136,6 @@ static int tk_tokenizer_create_lua (lua_State *L) {
   if (cfg.n_types > TK_TOK_MAXTYPES)
     return luaL_error(L, "tokenizer: n_types exceeds ceiling %d", TK_TOK_MAXTYPES);
 
-  // VALIDITY hard errors
   if (cfg.normalize && cfg.stream != TK_STREAM_TEXT)
     return luaL_error(L, "tokenizer: normalize only valid on the text stream (not types)");
 
@@ -163,9 +147,6 @@ static int tk_tokenizer_create_lua (lua_State *L) {
   return 1;
 }
 
-// ---------------------------------------------------------------------------
-// lifecycle: n_tokens, shrink, gc
-// ---------------------------------------------------------------------------
 static int tk_tokenizer_n_tokens_lua (lua_State *L) {
   tk_tokenizer_t *t = tk_tokenizer_peek(L, 1);
   lua_pushinteger(L, t->ngram_map ? (lua_Integer) tk_iumap_size(t->ngram_map) : 0);
@@ -183,10 +164,6 @@ static int tk_tokenizer_gc (lua_State *L) {
   return 0;
 }
 
-// ---------------------------------------------------------------------------
-// ngram packing (byte n-grams; bit-concat for n<=8, rolling hash else) -- a
-// self-contained copy of the proven csr packer.
-// ---------------------------------------------------------------------------
 static inline size_t tk_pack_ngrams (const uint8_t *d, size_t n_elems, int n, int64_t *out) {
   if (n_elems < (size_t) n) return 0;
   size_t count = n_elems - (size_t) n + 1;
@@ -234,14 +211,11 @@ static inline uint8_t tk_scrub (uint8_t b) {
 // map a context_types value to the type-mark slot: types 0..n-1, O=n, UNK=n+1.
 // context_types uses -1 for UNK (no type provided == below-confidence downstream).
 static inline int tk_type_slot (int t, int n_types) {
-  if (t < 0) return n_types + 1;        // UNK
-  if (t >= n_types) return n_types;     // O (or out-of-range) -> O slot
+  if (t < 0) return n_types + 1;
+  if (t >= n_types) return n_types;
   return t;
 }
 
-// Row render context: unifies literal-append and marker-insert across normalize
-// modes. text stream may normalize (literal runs via the stream; prev_space carries,
-// markers reset it); type is a symbol stream (norm = 0, all writes are marks).
 typedef struct { uint8_t *buf; size_t w; int norm; tk_norm_stream_t ns; } tk_render_t;
 static inline void tk_render_init (tk_render_t *r, uint8_t *buf, int norm) {
   r->buf = buf; r->w = 0; r->norm = norm;
@@ -263,8 +237,6 @@ static inline size_t tk_render_finish (tk_render_t *r) {
   return r->w;
 }
 
-// Render one output row's byte stream into rowbuf. `s`,`e` are the focus span
-// (ignored when per_span==0).
 static size_t tk_render_row (
   tk_tokenizer_t *t, uint8_t *rowbuf,
   const char *text, size_t tlen, int per_span, size_t s, size_t e,
@@ -353,8 +325,6 @@ static int tk_tokenizer_tokenize_lua (lua_State *L) {
   lua_getfield(L, 2, "texts");
   luaL_checktype(L, -1, LUA_TTABLE);
   int texts_idx = lua_gettop(L);
-  // focus = { offsets, starts, ends } -- which span to bracket (rows).
-  // types  = { offsets, starts, ends, types } -- cell spans + tagger byte (skeleton).
   tk_ivec_t *fo = NULL, *fs = NULL, *fe = NULL;
   lua_getfield(L, 2, "focus");
   if (!lua_isnil(L, -1)) {
@@ -384,7 +354,6 @@ static int tk_tokenizer_tokenize_lua (lua_State *L) {
   if (t->focus != TK_FOCUS_NONE && !per_span)
     return luaL_error(L, "tokenizer: focus set at create but no focus spans passed");
 
-  // text pointers per doc
   const char **text_ptrs = (const char **) malloc((size_t) n_samples * sizeof(char *));
   size_t *text_lens = (size_t *) malloc((size_t) n_samples * sizeof(size_t));
   for (int64_t d = 0; d < n_samples; d++) {
@@ -395,8 +364,6 @@ static int tk_tokenizer_tokenize_lua (lua_State *L) {
 
   int64_t n_rows = per_span ? fo->a[(int64_t)(fo->n - 1)] : n_samples;
 
-  // worst-case row buffer: doc bytes (text rows <= text+markers) OR the
-  // type-skeleton's one-byte-per-cell count, whichever is larger, + markers.
   size_t maxbuf = 8;
   for (int64_t d = 0; d < n_samples; d++) {
     size_t need = text_lens[d] + 8;
@@ -416,8 +383,6 @@ static int tk_tokenizer_tokenize_lua (lua_State *L) {
     return luaL_error(L, "tokenizer: frozen tokenize before any grow=true pass"); }
   tk_iumap_t *map = t->ngram_map;
 
-  // flat row -> doc map (per-span: many rows per doc; else row == doc). Lets the passes run a flat
-  // parallel-for over rows; the focus span for a per-span row is fs->a[row]/fe->a[row].
   int64_t *row_doc = (int64_t *) malloc((size_t) (n_rows > 0 ? n_rows : 1) * sizeof(int64_t));
   if (per_span) {
     for (int64_t d = 0; d < n_samples; d++)
@@ -522,9 +487,9 @@ static int tk_tokenizer_tokenize_lua (lua_State *L) {
   }
 
   free(row_doc); free(text_ptrs); free(text_lens);
-  lua_pushvalue(L, lua_gettop(L) - 2);   // offsets
-  lua_pushvalue(L, lua_gettop(L) - 2);   // toks
-  lua_pushvalue(L, lua_gettop(L) - 2);   // vals
+  lua_pushvalue(L, lua_gettop(L) - 2);
+  lua_pushvalue(L, lua_gettop(L) - 2);
+  lua_pushvalue(L, lua_gettop(L) - 2);
   return 3;
 }
 // Persist: "TKtk" + version + config-and-byte-table block + ngram map. The whole
@@ -651,7 +616,7 @@ static int tk_tokenizer_tokenize_raw_lua (lua_State *L) {
   }
 
   free(buf); free(packed);
-  return 3;   // offsets, tokens, values (top 3 on the stack)
+  return 3;
 }
 
 static luaL_Reg tk_tokenizer_mt_fns[] = {

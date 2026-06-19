@@ -27,8 +27,7 @@ local cfg = {
   },
   emb = {
     n_landmarks = 1024 * 8,
-    trace_tol = 0.01,
-    kernel = { "cosine", "expcos", "geolaplace", "matern52", "rq", "arccos1", "rbf" }
+    kernel = { "cosine", "matern", "arccos" }
   },
   ridge = {
     lambda = { def = 7.8376e-02 },

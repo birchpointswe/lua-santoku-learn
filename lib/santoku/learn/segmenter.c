@@ -6,25 +6,15 @@
 #include <math.h>
 #include <limits.h>
 
-// Marker-enriched byte dendrogram with a JOINT lexicographic merge objective. train() builds a
-// PPMI co-occurrence embedding over 258 symbols (256 bytes + gold span markers [B]/[E]); the embedding
-// direction is set by create({context}): "both" = left(+)right halves, "left" = predecessors only.
-// then agglomerates the occurring bytes by a lexicographic cost: PRIMARY = gold boundaries the merge
-// would break (cluster boundary-count, summed), TIE-BREAK = cosine complete-linkage distance (the PPMI
-// shape-quality regularizer). Boundary-preserving (BB==0) merges run first, so the coarsest
-// PERFECT-RECALL cut sits exactly before the first boundary-breaking merge -> coarse_k. One tree, two
-// consumers: segment({drop_sep=true}) = the segmentation units (coarse_k, separators dropped),
-// segment({k=ortho_k}) = the ortho-class stream for the shape block.
-
 #define TK_SEGMENTER_MT "tk_segmenter_t"
 
 typedef struct {
   int trained;
   int left_only;         // embedding direction: 1 = predecessor distribution only, 0 = left(+)right
-  uint8_t seen[256];     // bytes occurring in train
+  uint8_t seen[256];
   int nseen;
-  int coarse_k;          // perfect-recall cut (segmentation)
-  int sep_class;         // learned separator class at coarse_k (lowest gold-insideness)
+  int coarse_k;
+  int sep_class;
   int *coph;             // 256*256 cophenetic merge steps (malloc'd)
 } tk_segmenter_t;
 
@@ -35,7 +25,6 @@ static inline tk_segmenter_t *tk_segmenter_peek (lua_State *L, int i) {
 static luaL_Reg tk_segmenter_mt_fns[];
 static int tk_segmenter_gc (lua_State *L);
 
-// create({ context = "both" | "left" }) -- embedding direction (default "both": left(+)right halves).
 static int tk_segmenter_create_lua (lua_State *L) {
   luaL_checktype(L, 1, LUA_TTABLE);
   tk_segmenter_t *s = tk_lua_newuserdata(L, tk_segmenter_t, TK_SEGMENTER_MT,
@@ -52,8 +41,6 @@ static int tk_segmenter_create_lua (lua_State *L) {
   return 1;
 }
 
-// class map at the cut after S merges: two seen bytes co-cluster iff coph<=S; rep = smallest such
-// member; clusters labelled by ascending representative; absent bytes share one catch-all class.
 static int tk_cut_classmap (tk_segmenter_t *s, int S, uint8_t *out) {
   int rep[256];
   for (int v = 0; v < 256; v++) {
@@ -69,10 +56,6 @@ static int tk_cut_classmap (tk_segmenter_t *s, int S, uint8_t *out) {
   return k + (has_absent ? 1 : 0);
 }
 
-// ---------------------------------------------------------------------------
-// train: marker embedding + lexicographic (boundary-broken, PPMI) agglomeration +
-// perfect-recall cut
-// ---------------------------------------------------------------------------
 static int tk_segmenter_train_lua (lua_State *L) {
   tk_segmenter_t *s = tk_segmenter_peek(L, 1);
   luaL_checktype(L, 2, LUA_TTABLE);
@@ -124,7 +107,6 @@ static int tk_segmenter_train_lua (lua_State *L) {
       Cr[(size_t) aug[j] * NSYM + (size_t) aug[j + 1]] += 1.0;
   }
 
-  // PPMI reweight
   double *rm = (double *) calloc(NSYM, sizeof(double)), *cmg = (double *) calloc(NSYM, sizeof(double)), tot = 0;
   for (size_t u = 0; u < NSYM; u++) for (size_t w = 0; w < NSYM; w++) { double c = Cr[u * NSYM + w]; rm[u] += c; cmg[w] += c; tot += c; }
   for (size_t u = 0; u < NSYM; u++) for (size_t w = 0; w < NSYM; w++) {
@@ -134,9 +116,6 @@ static int tk_segmenter_train_lua (lua_State *L) {
   }
   free(rm); free(cmg);
 
-  // position-aware embedding + cosine distance over the 256 byte rows: row[u] = Cr[u][v] = count of u
-  // preceding v (LEFT/predecessor distribution); when not left_only, row[NSYM+u] = Cr[v][u] = successors
-  // (RIGHT). left_only halves D and drops the right context (better case separation for the shape cut).
   size_t D = s->left_only ? NSYM : 2 * NSYM;
   double *E = (double *) calloc(256 * D, sizeof(double));
   for (size_t v = 0; v < 256; v++) {
@@ -165,10 +144,6 @@ static int tk_segmenter_train_lua (lua_State *L) {
     if (eu[i] != 256 && ev[i] != 256 && eu[i] != ev[i]) { BB[eu[i] * 256 + ev[i]] += 1.0; BB[ev[i] * 256 + eu[i]] += 1.0; }
   }
 
-  // lexicographic complete-linkage agglomeration: PRIMARY cost = gold boundaries broken by the merge
-  // (cluster BB, summed additively like Lance-Williams); TIE-BREAK = cosine complete-linkage distance
-  // (max). Boundary-preserving merges (BB==0) are exhausted first, so the coarsest perfect-recall cut
-  // sits exactly before the first BB>0 merge. PPMI/cosine only orders the boundary-indifferent merges.
   int nseen = 0; for (int i = 0; i < 256; i++) if (s->seen[i]) nseen++;
   s->nseen = nseen;
   free(s->coph); s->coph = (int *) calloc(256 * 256, sizeof(int));
@@ -193,7 +168,6 @@ static int tk_segmenter_train_lua (lua_State *L) {
     memcpy(mem[ba] + memn[ba], mem[bx], (size_t) memn[bx] * sizeof(int)); memn[ba] += memn[bx]; alive[bx] = 0;
   }
 
-  // coarsest perfect-recall cut = before the first boundary-breaking merge
   int bestS = 0;
   for (int step = 0; step < nseen - 1; step++) { if (step_bb[step] <= 1e-9) bestS = step + 1; else break; }
   s->coarse_k = nseen - bestS;
@@ -209,7 +183,6 @@ static int tk_segmenter_train_lua (lua_State *L) {
   }
   double recall = nspan > 0 ? (double) n_span_ok / nspan : 1.0;
 
-  // diagnostic: segments-per-gold at the coarse cut
   int maxc = 0, p95 = 0;
   {
     uint8_t cm[256]; tk_cut_classmap(s, bestS, cm);
@@ -313,9 +286,6 @@ static int tk_segmenter_emit (lua_State *L, tk_segmenter_t *s, int k, int drop_s
   return 4;
 }
 
-// segment({texts, n, k, drop_sep}) -> offsets, starts, ends, classes  (cut at k; default coarse_k;
-// drop_sep omits the coarse separator-class cells, default keep all). drop_sep at the default cut =
-// the byte-native content segmentation for L1.
 static int tk_segmenter_segment_lua (lua_State *L) {
   tk_segmenter_t *s = tk_segmenter_peek(L, 1);
   if (!s->trained) return luaL_error(L, "segmenter: segment before train");
@@ -324,10 +294,6 @@ static int tk_segmenter_segment_lua (lua_State *L) {
   return tk_segmenter_emit(L, s, k, drop_sep);
 }
 
-// compression_curve({texts, n}) -> ratios (Lua array, ratios[k] = avg over docs of bytes/RLE-cells at the
-// k-cluster cut), nseen. No re-segmentation: adjacent bytes share a run at the cut after S=nseen-k merges
-// iff their cophenetic level <= S, so per-doc RLE cells = 1 + #{adjacent pairs with coph > S}. One pass
-// per doc builds a local merge-level histogram; a suffix sum gives cells (hence ratio) at every cut.
 static int tk_segmenter_compression_curve_lua (lua_State *L) {
   tk_segmenter_t *s = tk_segmenter_peek(L, 1);
   if (!s->trained) return luaL_error(L, "segmenter: compression_curve before train");
@@ -349,13 +315,13 @@ static int tk_segmenter_compression_curve_lua (lua_State *L) {
     for (int l = 0; l <= nseen; l++) Hd[l] = 0;
     for (size_t i = 1; i < len; i++) {
       int a = b[i - 1], c = b[i], sa = s->seen[a], sc = s->seen[c], lvl;
-      if (sa && sc) lvl = (a == c) ? 0 : coph[a * 256 + c];   // same byte = same class at every cut
-      else if (!sa && !sc) lvl = 0;                            // both absent = the shared catch-all class
-      else lvl = nseen;                                        // absent vs seen = always a boundary
+      if (sa && sc) lvl = (a == c) ? 0 : coph[a * 256 + c];
+      else if (!sa && !sc) lvl = 0;
+      else lvl = nseen;
       Hd[lvl]++;
     }
     suf[nseen] = 0;
-    for (int S = nseen - 1; S >= 0; S--) suf[S] = suf[S + 1] + Hd[S + 1];   // suf[S] = #pairs with coph > S
+    for (int S = nseen - 1; S >= 0; S--) suf[S] = suf[S + 1] + Hd[S + 1];
     for (int k = 1; k <= nseen; k++) {
       int64_t cells = 1 + suf[nseen - k];
       rsum[k] += (double) len / (double) cells;

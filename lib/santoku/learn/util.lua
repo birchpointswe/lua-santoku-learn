@@ -35,15 +35,32 @@ local function format_best (best, current)
   end
 end
 
+local NU_NAME = { [0] = "1/2", [1] = "3/2", [2] = "5/2", [3] = "inf" }
+
+-- One-line descriptor for the kernel family + its params (matern nu/gamma, arccos order/depth/tangent).
+local function format_kernel (p)
+  if not p.kernel then
+    return p.activation and str.format(" act=%s", p.activation) or ""
+  end
+  if p.kernel == "matern" then
+    local nu = p.nu ~= nil and (NU_NAME[p.nu] or tostring(p.nu)) or "?"
+    local g = p.gamma and str.format(" gamma=%.4g", p.gamma) or ""
+    return str.format(" kernel=matern nu=%s%s", nu, g)
+  elseif p.kernel == "arccos" then
+    return str.format(" kernel=arccos n=%d depth=%d %s",
+      p.order or 1, p.depth or 1, (p.tangent == 1) and "ntk" or "nngp")
+  end
+  local g = p.gamma and str.format(" gamma=%.4g", p.gamma) or ""
+  return str.format(" kernel=%s%s", p.kernel, g)
+end
+
 function M.make_ridge_log (stopwatch, metric_fmt)
   return function (ev)
     if ev.event == "done" then
       local p = ev.params or {}
       local emb = ev.emb_d and str.format(" emb_d=%d", ev.emb_d) or ""
       local md = p.mode and str.format(" mode=%s", p.mode) or ""
-      local kern = p.kernel and str.format(" kernel=%s", p.kernel) or ""
-      local act = p.activation and str.format(" act=%s", p.activation) or ""
-      local gam = p.gamma and str.format(" gamma=%.4g", p.gamma) or ""
+      local kdesc = format_kernel(p)
       local solve = ev.solve and str.format(" solve=%s", ev.solve) or ""
       local prop = ""
       if p.propensity_a then
@@ -55,8 +72,8 @@ function M.make_ridge_log (stopwatch, metric_fmt)
         local d, dd = stopwatch()
         timing = str.format(" (%.1fs +%.1fs)", d, dd)
       end
-      str.printf("[Ridge Done]%s%s%s%s%s%s lambda=%.4e%s%s%s\n",
-        emb, md, kern, act, gam, solve, p.lambda or 0, prop, sc, timing)
+      str.printf("[Ridge Done]%s%s%s%s lambda=%.4e%s%s%s\n",
+        emb, md, kdesc, solve, p.lambda or 0, prop, sc, timing)
       return
     end
     local phase = format_phase(ev)
@@ -81,13 +98,8 @@ function M.make_ridge_log (stopwatch, metric_fmt)
       local d, dd = stopwatch()
       timing = str.format(" (%.1fs +%.1fs)", d, dd)
     end
-    local kern = ""
-    if p.kernel then
-      kern = str.format(" kernel=%s", p.kernel)
-    elseif p.activation then
-      kern = str.format(" act=%s", p.activation)
-    end
-    local gam = p.gamma and str.format(" gamma=%.4g", p.gamma) or ""
+    local kdesc = format_kernel(p)
+    local embd = ev.emb_d and str.format(" emb_d=%d", ev.emb_d) or ""
     -- In a nested BO the outer (kernel) trial carries lambda/propensity in its metrics (the inner
     -- winner), not its params; fall back to metrics so the outer line shows the inner winner.
     local lambda = p.lambda or m.lambda or 0
@@ -98,7 +110,7 @@ function M.make_ridge_log (stopwatch, metric_fmt)
       prop = str.format(" pa=%.2f pb=%.2f", pa, pb)
     end
     str.printf("[Ridge %s]%s%s lambda=%.4e%s score=%.4f%s%s%s\n",
-      phase, kern, gam, lambda, prop, score, detail, best, timing)
+      phase, kdesc, embd, lambda, prop, score, detail, best, timing)
   end
 end
 
