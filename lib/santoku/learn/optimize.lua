@@ -7,11 +7,6 @@ local rand = require("santoku.random")
 
 local M = {}
 
-
-
-
-
-
 M.plateaus = function (curve, n, klo, khi)
   klo = klo or 2
   khi = khi or #curve
@@ -23,7 +18,6 @@ M.plateaus = function (curve, n, klo, khi)
     local c = b - a + 1; local sm = s1[b] - s1[a - 1]
     return (s2[b] - s2[a - 1]) - sm * sm / c
   end
-
   local cost, back = {}, {}
   for c = 1, n do cost[c] = {}; back[c] = {} end
   for i = 1, m do cost[1][i] = ssd(1, i); back[1][i] = 1 end
@@ -73,10 +67,6 @@ local function round_to_pow2 (x)
   local log2x = num.log(x) / num.log(2)
   return num.pow(2, num.floor(log2x + 0.5))
 end
-
-
-
-
 
 local function spec_defaults (spec, defs)
   if spec == nil then return defs end
@@ -285,9 +275,6 @@ local search = function (args)
   local X_obs = n_dims > 0 and dvec.create() or nil
   local Y_obs = n_dims > 0 and dvec.create() or nil
 
-
-
-
   if args.reseed ~= false then
     local seed = 2166136261
     for _, name in ipairs(param_names) do
@@ -422,13 +409,6 @@ local search = function (args)
 
 end
 
-
-
-
-
-
-
-
 local function default_trial_fn (args, dense, metric, k)
   if dense then
     return function (g, params)
@@ -441,8 +421,6 @@ local function default_trial_fn (args, dense, metric, k)
     local decide = require("santoku.learn.decide")
     local fvec = require("santoku.fvec")
     local nl, vn = args.n_labels, args.val_n_samples
-
-
     local scores = fvec.create(vn * nl)
     local sp = args.val_spans
     local probe = (metric == "span")
@@ -474,12 +452,7 @@ local function default_trial_fn (args, dense, metric, k)
   end
 end
 
-
-
-
 local function add_label_params (param_names, args, dense)
-
-
   args.lambda = spec_defaults(args.lambda, { min = 1e-4, max = 16, log = true, def = 1.0 })
   param_names[#param_names + 1] = "lambda"
   if not dense and (args.n_labels or 0) > 1 then
@@ -489,11 +462,6 @@ local function add_label_params (param_names, args, dense)
     param_names[#param_names + 1] = "propensity_b"
   end
 end
-
-
-
-
-
 
 local function decode_mode (args, dense)
   if dense or args.trial_fn ~= nil then return false, nil end
@@ -507,7 +475,6 @@ local function decode_mode (args, dense)
   end
   return true, "multilabel"
 end
-
 
 local function bundle_decider (r, val_codes, args, mode, k)
   if mode == "span" then
@@ -536,8 +503,6 @@ end
 M.ridge = function (args)
   local ridge = require("santoku.learn.ridge")
   local dense = args.val_targets ~= nil
-
-
   local param_names = {}
   add_label_params(param_names, args, dense)
   local samplers = build_samplers(args, param_names)
@@ -556,7 +521,6 @@ M.ridge = function (args)
       n_labels = args.n_labels,
       targets = args.targets, n_targets = args.n_targets,
     }
-
     if locked then
       gram_args.solve_lambda = locked_params.lambda
       if not dense then
@@ -566,10 +530,7 @@ M.ridge = function (args)
     end
     gram = ridge.gram(gram_args)
   end
-
   local baked = locked and args.gram == nil
-
-
   local function finish (r, params, solve)
     if args.each then args.each({ event = "done", params = params, solve = solve }) end
     local decider, decider_metrics
@@ -606,16 +567,44 @@ end
 M.krr = function (args)
   local spectral = require("santoku.learn.spectral")
   local ridge = require("santoku.learn.ridge")
+
+
+  if args.x ~= nil then
+    local X = args.x
+    if X.neighbors then
+      local r, c = X:shape()
+      args.offsets, args.tokens, args.values = X:offsets(), X:neighbors(), X:values()
+      args.n_samples = args.n_samples or r
+      args.n_tokens = args.n_tokens or c
+    else
+      local r, c = X:shape()
+      args.codes = X:data()
+      args.n_samples = args.n_samples or r
+      args.d_input = args.d_input or c
+    end
+  end
+  if args.y ~= nil then
+    local _, c = args.y:shape()
+    args.label_offsets, args.label_neighbors = args.y:offsets(), args.y:neighbors()
+    args.n_labels = args.n_labels or c
+  end
+  if args.val_x ~= nil then
+    local V = args.val_x
+    if V.neighbors then
+      args.val_offsets, args.val_tokens, args.val_values = V:offsets(), V:neighbors(), V:values()
+      args.val_n_samples = args.val_n_samples or (V:shape())
+    else
+      args.val_codes = V:data()
+      args.val_n_samples = args.val_n_samples or (V:shape())
+    end
+  end
+  if args.val_y ~= nil then
+    args.val_expected_offsets, args.val_expected_neighbors = args.val_y:offsets(), args.val_y:neighbors()
+  end
   local dense = args.val_targets ~= nil
   local kernel_spec = args.kernel or "cosine"
   local kernels = type(kernel_spec) == "table" and kernel_spec or { kernel_spec }
   args.kernel = kernels
-
-
-
-
-
-
   local families = {}
   for _, kn in ipairs(kernels) do
     if kn == "cosine" then families.cosine = true
@@ -627,9 +616,6 @@ M.krr = function (args)
     if v ~= nil then return v end
     return d
   end
-
-
-
   local inner_names = {}
   add_label_params(inner_names, args, dense)
   if args.extra then
@@ -640,13 +626,9 @@ M.krr = function (args)
     end
   end
   local inner_samplers = build_samplers(args, inner_names)
-
   local inner_trials = args.inner_trials or 80
   local do_search = args.search_trials and args.search_trials > 0
   local k = not dense and (args.k or 32) or nil
-
-
-
   local tiled = not dense
   local tile_labels = tiled and (args.tile_labels or 1024) or nil
   local want_decode, mode = decode_mode(args, dense)
@@ -665,8 +647,6 @@ M.krr = function (args)
     spectral_args.tile_samples = args.tile_samples
     spectral_args.chol_buf = args.chol_buf
   end
-
-
   local seed = args.seed or 1
   local function val_encode (sp_enc)
     if args.val_encode then return args.val_encode(sp_enc) end
@@ -675,9 +655,6 @@ M.krr = function (args)
       values = args.val_values, n_samples = args.val_n_samples,
     })
   end
-
-
-
   local function build_kd (spec)
     collectgarbage("collect")
     spectral_args.kernel = spec.kernel
@@ -716,11 +693,8 @@ M.krr = function (args)
     end
     return kd.sp_enc, r, kd.val_codes, params, decider, decider_metrics
   end
-
-
   if not do_search then
     local kname = kernels.def or kernels[1]
-
     local spec = { kernel = kname }
     if kname == "matern" then
       spec.nu = defval(args.nu, 3)
@@ -758,13 +732,6 @@ M.krr = function (args)
     return finish({ sp_enc = sp_enc, gram = gram, val_codes = val_codes }, params, "cholesky")
   end
   local trial_fn = args.trial_fn or default_trial_fn(args, dense, mode == "multilabel" and "fmeasure" or mode, k)
-
-
-
-
-
-
-
   local matern_trials = args.matern_trials or args.search_trials or 0
   local arccos_trials = args.arccos_trials or args.search_trials or 0
   local btot = (families.cosine and 1 or 0)
@@ -772,8 +739,6 @@ M.krr = function (args)
     + (families.arccos and arccos_trials or 0)
   local best_params, best_score = nil, -num.huge
   local bi = 0
-
-
   local function eval_kd (kd, base)
     local _, ib = search({
       param_names = inner_names, samplers = inner_samplers, trials = inner_trials,
@@ -791,13 +756,9 @@ M.krr = function (args)
     if sc > best_score then best_score, best_params = sc, ib end
     return sc, sm
   end
-
   if families.cosine then
     eval_kd(build_kd({ kernel = "cosine", label = "cosine" }), { kernel = "cosine" })
   end
-
-
-
   if families.matern then
     args.matern_nu = args.matern_nu or { 3, 0, 1, 2 }
     args.matern_gamma = spec_defaults(args.matern_gamma or args.gamma or args.rbf_gamma,
@@ -813,11 +774,6 @@ M.krr = function (args)
       end,
     })
   end
-
-
-
-
-
   if families.arccos then
     args.arccos_order = args.arccos_order or { 4, 1, 0, 2, 3, 5, 6 }
     args.arccos_depth = args.arccos_depth or { 1, 2, 3 }
@@ -840,20 +796,9 @@ M.krr = function (args)
       end,
     })
   end
-
-
-
   local best_kd = build_kd(best_params)
   return finish(best_kd, best_params, "eigen")
 end
-
-
-
-
-
-
-
-
 
 M.decide = function (args)
   local decide = require("santoku.learn.decide")
