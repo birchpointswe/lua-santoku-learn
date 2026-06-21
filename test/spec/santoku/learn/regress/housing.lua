@@ -22,10 +22,10 @@ local cfg = {
     n_landmarks = 1024 * 8,
     kernel = { "matern", "cosine", "arccos" },
     nu = { def = 1 },
-    gamma = { def = 3.872 }
+    gamma = { def = 1.207 }
   },
   ridge = {
-    lambda = { def = 7.0119e-02 },
+    lambda = { def = 3.7026e-02 },
     search_trials = 0
   },
 }
@@ -102,7 +102,7 @@ test("housing regressor", function ()
 
   str.printf("[Eval] Scoring splits\n")
   local regress_buf = fvec.create()
-  local val_stats = eval.regress_accuracy(ridge_obj:regress(val_codes, validate.n, regress_buf), validate.targets)
+  local val_stats = eval.regress_accuracy(ridge_obj:regress(val_codes, regress_buf), validate.targets)
   val_codes = nil -- luacheck: ignore
   local test_codes = encode(test_set.bits, test_set.continuous, test_set.n)
   local test_stats = eval.regress_accuracy(ridge_obj:regress(test_codes, regress_buf), test_set.targets)

@@ -79,7 +79,7 @@ test("mnist classifier", function ()
   end
 
   str.printf("[Eval] Labeling splits\n")
-  local val_scores = ridge_obj:regress(val_codes, validate.n)
+  local val_scores = ridge_obj:regress(val_codes)
   val_codes = nil -- luacheck: ignore
   local test_codes = encode(test_set.ids)
   local test_scores = ridge_obj:regress(test_codes)

@@ -22,7 +22,7 @@ local cfg = {
   },
   emb = {
     n_landmarks = 1024 * 8,
-    kernel = { "matern", "cosine", "arccos" },
+    kernel = { "matern", "cosine" },
     nu = { def = 3 },
     gamma = { def = 0.09435 }
   },

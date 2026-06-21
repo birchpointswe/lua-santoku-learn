@@ -26,7 +26,7 @@ local cfg = {
   },
   emb = {
     n_landmarks = 1024 * 8,
-    kernel = { "cosine", "matern", "arccos" }
+    kernel = { "cosine", "matern" }
   },
   ridge = {
     lambda = { def = 7.8376e-02 },
@@ -93,7 +93,7 @@ test("newsgroups classifier", function ()
   end
 
   str.printf("[Eval] Labeling splits\n")
-  local val_scores = ridge_obj:regress(val_codes, validate.n)
+  local val_scores = ridge_obj:regress(val_codes)
   val_codes = nil -- luacheck: ignore
   local test_codes = encode_texts(test_set.problems)
   test_set.problems = nil

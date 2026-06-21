@@ -1,5 +1,4 @@
 #include <santoku/iuset.h>
-#include <santoku/span.h>
 #include <santoku/csr.h>
 #include <santoku/ivec.h>
 #include <santoku/fvec.h>
@@ -62,26 +61,11 @@ static inline int tm_regress_accuracy (lua_State *L)
 // deployable decode (that is the decider's job). Returns the oracle per-sample k vector and metrics.
 static inline int tm_oracle_f1 (lua_State *L)
 {
-  tk_ivec_t *pred_off, *pred_nbr, *exp_off, *exp_nbr;
-  tk_csr_t *P = tk_csr_peekopt(L, 1);
-  if (P != NULL) {
-    // object form: oracle_f1(P_pred, E_expected) -- both csr (i64 label neighbors)
-    tk_csr_t *E = tk_csr_peek(L, 2, "expected");
-    pred_off = P->offsets; pred_nbr = (tk_ivec_t *) P->neighbors;
-    exp_off = E->offsets; exp_nbr = (tk_ivec_t *) E->neighbors;
-  } else {
-    lua_settop(L, 1);
-    luaL_checktype(L, 1, LUA_TTABLE);
-    lua_getfield(L, 1, "pred_offsets");
-    pred_off = tk_ivec_peek(L, -1, "pred_offsets");
-    lua_getfield(L, 1, "pred_neighbors");
-    pred_nbr = tk_ivec_peek(L, -1, "pred_neighbors");
-    lua_getfield(L, 1, "expected_offsets");
-    exp_off = tk_ivec_peek(L, -1, "expected_offsets");
-    lua_getfield(L, 1, "expected_neighbors");
-    exp_nbr = tk_ivec_peek(L, -1, "expected_neighbors");
-    lua_pop(L, 4);
-  }
+  // oracle_f1(P_pred, E_expected) -- both csr (i64 label neighbors)
+  tk_csr_t *P = tk_csr_peek(L, 1, "pred");
+  tk_csr_t *E = tk_csr_peek(L, 2, "expected");
+  tk_ivec_t *pred_off = P->offsets, *pred_nbr = (tk_ivec_t *) P->neighbors;
+  tk_ivec_t *exp_off = E->offsets, *exp_nbr = (tk_ivec_t *) E->neighbors;
   uint64_t n_samples = pred_off->n - 1;
   if (exp_off->n != n_samples + 1)
     return luaL_error(L, "expected_offsets length must match sample count + 1");
@@ -132,40 +116,10 @@ static inline int tm_oracle_f1 (lua_State *L)
   return 2;
 }
 
-// span_f1(pred_off, pred_s, pred_e, pred_ty, gold_off, gold_s, gold_e, gold_ty) -> f1, p, r
-// Micro exact-match PRF over spans, matched per document. A predicted span counts as a hit if a
-// gold span in the same doc has the same (start, end[, type]). Types optional (nil on either side
-// => boundary-only match). Spans are unique per doc, so a simple nested scan suffices.
-static inline int tm_span_f1 (lua_State *L)
-{
-  tk_ivec_t *po = tk_ivec_peek(L, 1, "pred_offsets");
-  tk_ivec_t *ps = tk_ivec_peek(L, 2, "pred_starts");
-  tk_ivec_t *pe = tk_ivec_peek(L, 3, "pred_ends");
-  tk_ivec_t *pty = tk_ivec_peekopt(L, 4);
-  tk_ivec_t *go = tk_ivec_peek(L, 5, "gold_offsets");
-  tk_ivec_t *gs = tk_ivec_peek(L, 6, "gold_starts");
-  tk_ivec_t *ge = tk_ivec_peek(L, 7, "gold_ends");
-  tk_ivec_t *gty = tk_ivec_peekopt(L, 8);
-  int64_t n_docs = (int64_t) (po->n - 1);
-  if ((int64_t) (go->n - 1) != n_docs)
-    return luaL_error(L, "span_f1: pred and gold doc counts differ");
-  int64_t tp = 0, npred = 0, ngold = 0;
-  tk_span_counts(po->a, ps->a, pe->a, pty ? pty->a : NULL,
-    go->a, gs->a, ge->a, gty ? gty->a : NULL, n_docs, &tp, &npred, &ngold);
-  double p = npred > 0 ? (double) tp / (double) npred : 0.0;
-  double r = ngold > 0 ? (double) tp / (double) ngold : 0.0;
-  double f1 = tk_span_f1_of(tp, npred, ngold);
-  lua_pushnumber(L, f1);
-  lua_pushnumber(L, p);
-  lua_pushnumber(L, r);
-  return 3;
-}
-
 static luaL_Reg tm_evaluator_fns[] =
 {
   { "regress_accuracy", tm_regress_accuracy },
   { "oracle_f1", tm_oracle_f1 },
-  { "span_f1", tm_span_f1 },
   { NULL, NULL }
 };
 

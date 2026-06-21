@@ -409,45 +409,51 @@ local search = function (args)
 
 end
 
+-- All trials score through the SAME decide core used at deployment, fed by the gram's pure
+-- producers (regress -> dense scores; label -> tiled top-k P). No gram-internal metric, no
+-- per-trial ridge build. Dense regression has no decision, so it uses the nmae helper.
 local function default_trial_fn (args, dense, metric, k)
+  local fvec = require("santoku.fvec")
   if dense then
+    local eval = require("santoku.learn.evaluator")
+    local sbuf = fvec.create()
     return function (g, params)
-      local mae, nmae = g:regress_accuracy(params.lambda, nil, nil, args.val_targets)
-      return -mae, { mae = mae, nmae = nmae }
+      local s = g:regress(params.lambda, nil, nil, sbuf)
+      local m = eval.regress_accuracy(s, args.val_targets)
+      return -m.mean, { mae = m.mean, nmae = m.nmae }
     end
   end
-  if metric == "single" or metric == "span" then
-    local ridge = require("santoku.learn.ridge")
-    local decide = require("santoku.learn.decide")
-    local fvec = require("santoku.fvec")
-    local nl, vn = args.n_labels, args.val_n_samples
-    local scores = fvec.create(vn * nl)
-    local sp = args.val_spans
-    local probe = (metric == "span")
-      and decide.create({ n_labels = nl, span = true, reject = args.reject })
-      or decide.create({ n_labels = nl, single = true })
-    local n_docs = sp and (sp.cand_offsets:size() - 1) or nil
-    return function (g, params, kd)
-      local rt = ridge.create({ gram = g, lambda = params.lambda,
-        propensity_a = params.propensity_a, propensity_b = params.propensity_b })
-      rt:regress((kd and kd.val_codes) or args.val_codes, vn, scores)
-      if metric == "span" then
-        local f1 = probe:calibrate({ scores = scores, n_samples = n_docs,
-          cand_offsets = sp.cand_offsets, cand_starts = sp.cand_starts, cand_ends = sp.cand_ends,
-          expected_offsets = sp.gold_offsets, expected_starts = sp.gold_starts,
-          expected_ends = sp.gold_ends, expected_types = sp.gold_types })
-        return f1, { span_f1 = f1 }
-      end
-      local macro = probe:calibrate({ scores = scores, n_samples = vn,
-        expected_offsets = args.val_expected_offsets,
-        expected_neighbors = args.val_expected_neighbors })
+  local decide = require("santoku.learn.decide")
+  local nl, vn = args.n_labels, args.val_n_samples
+  if metric == "span" then
+    local cand, gold = args.val_cand, args.val_gold
+    local n_docs = cand:offsets():size() - 1
+    local sbuf = fvec.create()
+    local probe = decide.create({ n_labels = nl, span = true, reject = args.reject })
+    return function (g, params)
+      local s = g:regress(params.lambda, params.propensity_a, params.propensity_b, sbuf)
+      local f1 = probe:calibrate({ scores = s, n_samples = n_docs, cand = cand, gold = gold })
+      return f1, { span_f1 = f1 }
+    end
+  end
+  if metric == "single" then
+    local sbuf = fvec.create()
+    local probe = decide.create({ n_labels = nl, single = true })
+    return function (g, params)
+      local s = g:regress(params.lambda, params.propensity_a, params.propensity_b, sbuf)
+      local macro = probe:calibrate({ scores = s, n_samples = vn, expected = args.val_y })
       return macro, { macro_f1 = macro }
     end
   end
+  -- multilabel: gram tiled top-k producer -> P csr -> decide multilabel calibrate
+  local csr = require("santoku.csr")
+  local ivec = require("santoku.ivec")
+  local off, lbl, sco = ivec.create(), ivec.create(), fvec.create()
+  local probe = decide.create({ n_labels = nl })
   return function (g, params)
-    local f1, p, r = g:label_accuracy(params.lambda, k,
-      params.propensity_a, params.propensity_b,
-      args.val_expected_offsets, args.val_expected_neighbors, metric)
+    local o, l, s = g:label(params.lambda, k, params.propensity_a, params.propensity_b, off, lbl, sco)
+    local P = csr.create({ offsets = o, neighbors = l, values = s, n_cols = nl })
+    local f1, p, r = probe:calibrate({ pred = P, n_samples = vn, expected = args.val_y })
     return f1, { f1 = f1, precision = p, recall = r }
   end
 end
@@ -465,9 +471,9 @@ end
 
 local function decode_mode (args, dense)
   if dense or args.trial_fn ~= nil then return false, nil end
-  if args.val_spans then return true, "span" end
-  if (args.n_labels or 0) > 1 and args.val_expected_offsets then
-    local eo = args.val_expected_offsets
+  if args.val_cand then return true, "span" end
+  if (args.n_labels or 0) > 1 and args.val_y then
+    local eo = args.val_y:offsets()
     for i = 0, args.val_n_samples - 1 do
       if eo:get(i + 1) - eo:get(i) ~= 1 then return true, "multilabel" end
     end
@@ -478,30 +484,26 @@ end
 
 local function bundle_decider (r, val_codes, args, mode, k)
   if mode == "span" then
-    local sp = args.val_spans
-    local scores = r:regress(val_codes, args.val_n_samples)
+    local scores = r:regress(val_codes)
     return M.decide({ n_labels = args.n_labels, reject = args.reject, val_scores = scores,
-      val_n_samples = sp.cand_offsets:size() - 1,
-      val_cand_offsets = sp.cand_offsets, val_cand_starts = sp.cand_starts, val_cand_ends = sp.cand_ends,
-      val_expected_offsets = sp.gold_offsets, val_expected_starts = sp.gold_starts,
-      val_expected_ends = sp.gold_ends, val_expected_types = sp.gold_types })
+      val_n_samples = args.val_cand:offsets():size() - 1,
+      val_cand = args.val_cand, val_gold = args.val_gold })
   end
   if mode == "single" then
-    local scores = r:regress(val_codes, args.val_n_samples)
+    local scores = r:regress(val_codes)
     return M.decide({ n_labels = args.n_labels, val_scores = scores,
-      val_n_samples = args.val_n_samples,
-      val_expected_offsets = args.val_expected_offsets,
-      val_expected_neighbors = args.val_expected_neighbors })
+      val_n_samples = args.val_n_samples, val_expected = args.val_y })
   end
-  local voff, vnbr, vsco = r:label(val_codes, args.val_n_samples, k)
-  return M.decide({ n_labels = args.n_labels, val_offsets = voff, val_neighbors = vnbr,
-    val_scores = vsco, val_n_samples = args.val_n_samples,
-    val_expected_offsets = args.val_expected_offsets,
-    val_expected_neighbors = args.val_expected_neighbors })
+  local P = r:label(val_codes, k)
+  return M.decide({ n_labels = args.n_labels, val_pred = P,
+    val_n_samples = args.val_n_samples, val_expected = args.val_y })
 end
 
 M.ridge = function (args)
   local ridge = require("santoku.learn.ridge")
+  -- Object API: train_codes/val_codes are mtx codes, y is a labels csr, targets a dvec.
+  if args.y and not args.n_labels then args.n_labels = select(2, args.y:shape()) end
+  if args.val_codes and not args.val_n_samples then args.val_n_samples = (args.val_codes:shape()) end
   local dense = args.val_targets ~= nil
   local param_names = {}
   add_label_params(param_names, args, dense)
@@ -512,13 +514,9 @@ M.ridge = function (args)
   local locked_params = locked and sample_params(samplers, param_names, nil, true) or nil
   local gram = args.gram
   if not gram then
-    local train_codes = err.assert(args.train_codes, "train_codes required")
-    local n_samples = err.assert(args.n_samples, "n_samples required")
-    local n_dims = err.assert(args.n_dims, "n_dims required")
     local gram_args = {
-      codes = train_codes, n_samples = n_samples, n_dims = n_dims,
-      label_offsets = args.label_offsets, label_neighbors = args.label_neighbors,
-      n_labels = args.n_labels,
+      x = err.assert(args.train_codes, "train_codes (mtx) required"),
+      y = args.y,
       targets = args.targets, n_targets = args.n_targets,
     }
     if locked then
@@ -567,40 +565,22 @@ end
 M.krr = function (args)
   local spectral = require("santoku.learn.spectral")
   local ridge = require("santoku.learn.ridge")
-  -- Object API: x/val_x (csr features or mtx codes), y/val_y (labels csr) unpack to the
-  -- internal loose args. Loose args remain accepted (transitional).
+  -- Object API: x/val_x (csr features or mtx codes), y/val_y (labels csr) flow as objects;
+  -- spectral.encode and the decode helpers consume them directly. Only scalars are read here.
   if args.x ~= nil then
-    local X = args.x
-    if X.neighbors then
-      local r, c = X:shape()
-      args.offsets, args.tokens, args.values = X:offsets(), X:neighbors(), X:values()
-      args.n_samples = args.n_samples or r
-      args.n_tokens = args.n_tokens or c
-    else
-      local r, c = X:shape()
-      args.codes = X:data()
-      args.n_samples = args.n_samples or r
-      args.d_input = args.d_input or c
-    end
+    local r, c = args.x:shape()
+    args.n_samples = args.n_samples or r
+    if args.x.neighbors then args.n_tokens = args.n_tokens or c
+    else args.d_input = args.d_input or c end
   end
   if args.y ~= nil then
     local _, c = args.y:shape()
-    args.label_offsets, args.label_neighbors = args.y:offsets(), args.y:neighbors()
     args.n_labels = args.n_labels or c
   end
   if args.val_x ~= nil then
-    local V = args.val_x
-    if V.neighbors then
-      args.val_offsets, args.val_tokens, args.val_values = V:offsets(), V:neighbors(), V:values()
-      args.val_n_samples = args.val_n_samples or (V:shape())
-    else
-      args.val_codes = V:data()
-      args.val_n_samples = args.val_n_samples or (V:shape())
-    end
+    args.val_n_samples = args.val_n_samples or (args.val_x:shape())
   end
-  if args.val_y ~= nil then
-    args.val_expected_offsets, args.val_expected_neighbors = args.val_y:offsets(), args.val_y:neighbors()
-  end
+  -- val_y stays an object; decode helpers consume it directly (expected = args.val_y)
   local dense = args.val_targets ~= nil
   local kernel_spec = args.kernel or "cosine"
   local kernels = type(kernel_spec) == "table" and kernel_spec or { kernel_spec }
@@ -633,12 +613,11 @@ M.krr = function (args)
   local tile_labels = tiled and (args.tile_labels or 1024) or nil
   local want_decode, mode = decode_mode(args, dense)
   local spectral_args = {
-    offsets = args.offsets, tokens = args.tokens, values = args.values,
+    x = args.x, y = args.y,
     n_tokens = args.n_tokens, n_samples = args.n_samples,
-    codes = args.codes, d_input = args.d_input,
+    d_input = args.d_input,
     n_landmarks = args.n_landmarks, trace_tol = args.trace_tol,
     chol_block = args.chol_block,
-    label_offsets = args.label_offsets, label_neighbors = args.label_neighbors,
     n_labels = args.n_labels,
     targets = args.targets, n_targets = args.n_targets,
   }
@@ -650,10 +629,7 @@ M.krr = function (args)
   local seed = args.seed or 1
   local function val_encode (sp_enc)
     if args.val_encode then return args.val_encode(sp_enc) end
-    return sp_enc:encode({
-      offsets = args.val_offsets, tokens = args.val_tokens,
-      values = args.val_values, n_samples = args.val_n_samples,
-    })
+    return sp_enc:encode(args.val_x)
   end
   local function build_kd (spec)
     collectgarbage("collect")
@@ -775,8 +751,10 @@ M.krr = function (args)
     })
   end
   if families.arccos then
-    args.arccos_order = args.arccos_order or { 4, 1, 0, 2, 3, 5, 6 }
-    args.arccos_depth = args.arccos_depth or { 1, 2, 3 }
+    -- Pruned to the live region: order 0/5/6 and depth 3 never won anywhere (depth 3 collapses; order 0
+    -- = step is always worst; orders 5/6 plateau). 16-cell grid (4x2x2) so the BO covers it fully.
+    args.arccos_order = args.arccos_order or { 1, 2, 3, 4 }
+    args.arccos_depth = args.arccos_depth or { 1, 2 }
     args.arccos_tangent = args.arccos_tangent or { 0, 1 }
     local a_samplers = build_samplers(args, { "arccos_order", "arccos_depth", "arccos_tangent" })
     local seen = {}
@@ -802,34 +780,28 @@ end
 
 M.decide = function (args)
   local decide = require("santoku.learn.decide")
-  if args.val_cand_offsets ~= nil then
+  if args.val_cand ~= nil then
     local g = decide.create({ n_labels = args.n_labels, span = true, reject = args.reject })
     local f1, precision, recall = g:calibrate({
       scores = args.val_scores, n_samples = args.val_n_samples,
-      cand_offsets = args.val_cand_offsets, cand_starts = args.val_cand_starts, cand_ends = args.val_cand_ends,
-      expected_offsets = args.val_expected_offsets, expected_starts = args.val_expected_starts,
-      expected_ends = args.val_expected_ends, expected_types = args.val_expected_types,
+      cand = args.val_cand, gold = args.val_gold,
     })
     return g, { span_f1 = f1, precision = precision, recall = recall, f1 = f1 }
   end
-  local single = args.val_offsets == nil
+  local single = args.val_pred == nil
   local g = decide.create({ n_labels = args.n_labels, single = single })
   if single then
     local macro_f1, accuracy = g:calibrate({
       scores = args.val_scores,
       n_samples = args.val_n_samples,
-      expected_offsets = args.val_expected_offsets,
-      expected_neighbors = args.val_expected_neighbors,
+      expected = args.val_expected,
     })
     return g, { macro_f1 = macro_f1, accuracy = accuracy }
   end
   local best_f1, precision, recall = g:calibrate({
-    offsets = args.val_offsets,
-    neighbors = args.val_neighbors,
-    scores = args.val_scores,
+    pred = args.val_pred,
     n_samples = args.val_n_samples,
-    expected_offsets = args.val_expected_offsets,
-    expected_neighbors = args.val_expected_neighbors,
+    expected = args.val_expected,
   })
   return g, { f1 = best_f1, precision = precision, recall = recall }
 end

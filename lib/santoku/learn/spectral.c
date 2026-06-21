@@ -621,8 +621,7 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
   uint64_t d = enc->d;
   uint64_t m = enc->m;
 
-  // Object API (x is a csr | mtx, optional out mtx) -> returns mtx codes; loose table form
-  // (offsets/tokens/values/codes/n_samples[, output fvec]) -> returns fvec (transitional).
+  // Object API: x is a csr (sparse features) | mtx (dense codes), optional out mtx -> returns mtx codes.
   uint64_t n_samples;
   tk_ivec_t *in_offsets = NULL;
   const int32_t *in_tok_a = NULL; uint64_t in_tok_n = 0;
@@ -632,70 +631,33 @@ static inline int tk_nystrom_encode_lua (lua_State *L) {
   tk_fvec_t *out;
   int out_fv_idx;
   tk_csr_t *Xcsr = tk_csr_peekopt(L, 2);
-  tk_mtx_t *Xmtx = Xcsr ? NULL : tk_mtx_peekopt(L, 2);
-  if (Xcsr != NULL || Xmtx != NULL) {
-    // detect optional out mtx BEFORE any push (tk_eph_get below grows the stack)
-    tk_mtx_t *out_mtx = (lua_gettop(L) >= 3 && !lua_isnil(L, 3)) ? tk_mtx_peek(L, 3, "out") : NULL;
-    if (Xcsr != NULL) {
-      n_samples = tk_csr_rows(Xcsr);
-      in_offsets = Xcsr->offsets;
-      tk_eph_get(L, 2, Xcsr->neighbors);          // push neighbors child (stays on stack)
-      in_tok_a = tk_peek_tokens(L, -1, &in_tok_n);
-      if (Xcsr->tag == TK_TAG_F32) in_values_f = (tk_fvec_t *) Xcsr->values;
-      else if (Xcsr->tag == TK_TAG_F64) in_values_d = (tk_dvec_t *) Xcsr->values;
-    } else {
-      n_samples = Xmtx->n_rows;
-      if (Xmtx->tag == TK_TAG_F32) in_codes_fv = (tk_fvec_t *) Xmtx->v;
-      else if (Xmtx->tag == TK_TAG_F64) in_codes_dv = (tk_dvec_t *) Xmtx->v;
-      in_d_input_scalar = (int64_t) Xmtx->n_cols;
-    }
-    tk_mtx_t *M;
-    if (out_mtx != NULL) {
-      tk_mtx_reshape(L, out_mtx, n_samples, d);
-      M = out_mtx;
-      lua_pushvalue(L, 3);
-    } else {
-      M = tk_mtx_push_new(L, TK_TAG_F32, n_samples, d);
-    }
-    out = (tk_fvec_t *) M->v;
-    out->n = n_samples * d;
-    out_fv_idx = lua_gettop(L);
-  } else {
-    luaL_checktype(L, 2, LUA_TTABLE);
-    lua_getfield(L, 2, "n_samples");
-    n_samples = (uint64_t)luaL_checkinteger(L, -1);
-    lua_pop(L, 1);
-    lua_getfield(L, 2, "offsets");
-    in_offsets = tk_ivec_peekopt(L, -1);
-    lua_pop(L, 1);
-    lua_getfield(L, 2, "tokens");
+  tk_mtx_t *Xmtx = Xcsr ? NULL : tk_mtx_peek(L, 2, "x");
+  // detect optional out mtx BEFORE any push (tk_eph_get below grows the stack)
+  tk_mtx_t *out_mtx = (lua_gettop(L) >= 3 && !lua_isnil(L, 3)) ? tk_mtx_peek(L, 3, "out") : NULL;
+  if (Xcsr != NULL) {
+    n_samples = tk_csr_rows(Xcsr);
+    in_offsets = Xcsr->offsets;
+    tk_eph_get(L, 2, Xcsr->neighbors);          // push neighbors child (stays on stack)
     in_tok_a = tk_peek_tokens(L, -1, &in_tok_n);
-    lua_setfield(L, 2, "tokens");
-    lua_getfield(L, 2, "values");
-    in_values_f = tk_fvec_peekopt(L, -1);
-    in_values_d = in_values_f ? NULL : tk_dvec_peekopt(L, -1);
-    lua_pop(L, 1);
-    lua_getfield(L, 2, "codes");
-    in_codes_dv = tk_dvec_peekopt(L, -1);
-    in_codes_fv = in_codes_dv ? NULL : tk_fvec_peekopt(L, -1);
-    lua_pop(L, 1);
-    lua_getfield(L, 2, "d_input");
-    in_d_input_scalar = lua_isnumber(L, -1) ? (int64_t)lua_tointeger(L, -1) : 0;
-    lua_pop(L, 1);
-    lua_getfield(L, 2, "output");
-    tk_fvec_t *out_fv = tk_fvec_peekopt(L, -1);
-    out_fv_idx = out_fv ? lua_gettop(L) : 0;
-    if (!out_fv) lua_pop(L, 1);
-    if (out_fv) {
-      tk_fvec_ensure(out_fv, n_samples * d);
-      out_fv->n = n_samples * d;
-      out = out_fv;
-    } else {
-      out = tk_fvec_create(L, n_samples * d);
-      out->n = n_samples * d;
-      out_fv_idx = lua_gettop(L);
-    }
+    if (Xcsr->tag == TK_TAG_F32) in_values_f = (tk_fvec_t *) Xcsr->values;
+    else if (Xcsr->tag == TK_TAG_F64) in_values_d = (tk_dvec_t *) Xcsr->values;
+  } else {
+    n_samples = Xmtx->n_rows;
+    if (Xmtx->tag == TK_TAG_F32) in_codes_fv = (tk_fvec_t *) Xmtx->v;
+    else if (Xmtx->tag == TK_TAG_F64) in_codes_dv = (tk_dvec_t *) Xmtx->v;
+    in_d_input_scalar = (int64_t) Xmtx->n_cols;
   }
+  tk_mtx_t *M;
+  if (out_mtx != NULL) {
+    tk_mtx_reshape(L, out_mtx, n_samples, d);
+    M = out_mtx;
+    lua_pushvalue(L, 3);
+  } else {
+    M = tk_mtx_push_new(L, TK_TAG_F32, n_samples, d);
+  }
+  out = (tk_fvec_t *) M->v;
+  out->n = n_samples * d;
+  out_fv_idx = lua_gettop(L);
 
   if (!enc->sims_buf) {
     uint64_t tile = 4096;
@@ -875,6 +837,36 @@ static luaL_Reg tk_nystrom_encoder_mt_fns[] = {
 static inline int tm_encode (lua_State *L) {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
+
+  // Object inputs: x (csr features | mtx codes) and y (labels csr) supply the modality and gram
+  // labels; extract their child vecs onto the fields the body reads (no parallel-array args).
+  lua_getfield(L, 1, "x");
+  if (!lua_isnil(L, -1)) {
+    int xi = lua_gettop(L);
+    tk_csr_t *Xc = tk_csr_peekopt(L, xi);
+    if (Xc != NULL) {
+      tk_eph_get(L, xi, Xc->offsets); lua_setfield(L, 1, "offsets");
+      tk_eph_get(L, xi, Xc->neighbors); lua_setfield(L, 1, "tokens");
+      if (Xc->values != NULL) { tk_eph_get(L, xi, Xc->values); lua_setfield(L, 1, "values"); }
+      lua_pushinteger(L, (lua_Integer) Xc->n_cols); lua_setfield(L, 1, "n_tokens");
+      lua_pushinteger(L, (lua_Integer) tk_csr_rows(Xc)); lua_setfield(L, 1, "n_samples");
+    } else {
+      tk_mtx_t *Xm = tk_mtx_peek(L, xi, "x");
+      tk_eph_get(L, xi, Xm->v); lua_setfield(L, 1, "codes");
+      lua_pushinteger(L, (lua_Integer) Xm->n_cols); lua_setfield(L, 1, "d_input");
+      lua_pushinteger(L, (lua_Integer) Xm->n_rows); lua_setfield(L, 1, "n_samples");
+    }
+  }
+  lua_pop(L, 1);
+  lua_getfield(L, 1, "y");
+  if (!lua_isnil(L, -1)) {
+    int yi = lua_gettop(L);
+    tk_csr_t *Yc = tk_csr_peek(L, yi, "y");
+    tk_eph_get(L, yi, Yc->offsets); lua_setfield(L, 1, "label_offsets");
+    tk_eph_get(L, yi, Yc->neighbors); lua_setfield(L, 1, "label_neighbors");
+    lua_pushinteger(L, (lua_Integer) Yc->n_cols); lua_setfield(L, 1, "n_labels");
+  }
+  lua_pop(L, 1);
 
   uint64_t n_samples = tk_lua_fcheckunsigned(L, 1, "encode", "n_samples");
 

@@ -20,7 +20,6 @@ typedef struct {
   tk_dvec_t *intercept;
   int64_t n_dims;
   int64_t n_labels;
-  float *Wt;
   float *sbuf;
   uint64_t sbuf_size;
   tk_rank_t *heap_buf;
@@ -34,191 +33,78 @@ static inline tk_ridge_t *tk_ridge_peek (lua_State *L, int i) {
 
 static inline int tk_ridge_gc (lua_State *L) {
   tk_ridge_t *r = tk_ridge_peek(L, 1);
-  free(r->Wt);
   free(r->sbuf);
   free(r->heap_buf);
   r->W = NULL;
   r->intercept = NULL;
-  r->Wt = NULL;
   r->sbuf = NULL;
   r->heap_buf = NULL;
   r->destroyed = true;
   return 0;
 }
 
-static inline float *tk_ridge_get_wt (tk_ridge_t *r) {
-  if (r->Wt) return r->Wt;
-  int64_t d = r->n_dims, nl = r->n_labels;
-  r->Wt = (float *)malloc((uint64_t)nl * (uint64_t)d * sizeof(float));
-  for (int64_t i = 0; i < d; i++)
-    for (int64_t j = 0; j < nl; j++)
-      r->Wt[j * d + i] = r->W->a[i * nl + j];
-  return r->Wt;
-}
-
-
+// label(M, k) -> P csr (neighbors = top-k label ids, values = scores), dense scoring.
 static inline int tk_ridge_encode_lua (lua_State *L) {
   tk_ridge_t *r = tk_ridge_peek(L, 1);
-  tk_mtx_t *Mx = tk_mtx_peekopt(L, 2);
-  if (Mx != NULL) {
-    // object form: label(M, k) -> P csr (neighbors = top-k label ids, values = scores), dense
-    int64_t nl = r->n_labels, d = r->n_dims;
-    float *codes_a = ((tk_fvec_t *) Mx->v)->a;
-    int64_t n = (int64_t) Mx->n_rows;
-    int64_t k = (int64_t) luaL_checkinteger(L, 3);
-    if (k > nl) k = nl;
-    if (k < 1) k = 1;
-    tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t)(n + 1)); offsets->n = (uint64_t)(n + 1);
-    int offsets_idx = lua_gettop(L);
-    tk_ivec_t *labels = tk_ivec_create(L, (uint64_t)(n * k)); labels->n = (uint64_t)(n * k);
-    int labels_idx = lua_gettop(L);
-    tk_fvec_t *scores_out = tk_fvec_create(L, (uint64_t)(n * k)); scores_out->n = (uint64_t)(n * k);
-    int scores_out_idx = lua_gettop(L);
-    for (int64_t i = 0; i <= n; i++) offsets->a[i] = i * k;
-    int nt = omp_get_max_threads();
-    uint64_t heap_need = (uint64_t)nt * (uint64_t)k;
-    if (!r->heap_buf || r->heap_buf_size < heap_need) {
-      free(r->heap_buf);
-      r->heap_buf = (tk_rank_t *)malloc(heap_need * sizeof(tk_rank_t));
-      r->heap_buf_size = heap_need;
-    }
-    int64_t block = 256;
-    while (block > 1 && (uint64_t)block * (uint64_t)nl * sizeof(float) > 64ULL * 1024 * 1024)
-      block /= 2;
-    uint64_t need = (uint64_t)block * (uint64_t)nl;
-    if (!r->sbuf || r->sbuf_size < need) {
-      free(r->sbuf);
-      r->sbuf = (float *)malloc(need * sizeof(float));
-      r->sbuf_size = need;
-    }
-    for (int64_t base = 0; base < n; base += block) {
-      int64_t bs = (base + block <= n) ? block : n - base;
-      cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-        (int)bs, (int)nl, (int)d, 1.0f, codes_a + base * d, (int)d,
-        r->W->a, (int)nl, 0.0f, r->sbuf, (int)nl);
-      if (r->intercept)
-        tk_gram_add_intercept_f(r->sbuf, bs, nl, r->intercept->a);
-      #pragma omp parallel
-      {
-        tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
-                           .a = r->heap_buf + (uint64_t)omp_get_thread_num() * (uint64_t)k };
-        #pragma omp for schedule(static)
-        for (int64_t i = 0; i < bs; i++) {
-          float *row = r->sbuf + i * nl;
-          int64_t out_base = (base + i) * k;
-          heap.n = 0;
-          for (int64_t l = 0; l < nl; l++)
-            tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, (double)row[l]));
-          tk_rvec_desc(&heap, 0, heap.n);
-          for (int64_t j = 0; j < (int64_t)heap.n; j++) {
-            labels->a[out_base + j] = heap.a[j].i;
-            scores_out->a[out_base + j] = (float)heap.a[j].d;
-          }
-        }
-      }
-    }
-    tk_csr_push(L, TK_TAG_F32, TK_TAG_I64, (uint64_t) nl,
-      offsets_idx, offsets, labels_idx, (void *) labels, scores_out_idx, scores_out);
-    return 1;
-  }
+  tk_mtx_t *Mx = tk_mtx_peek(L, 2, "codes");
   int64_t nl = r->n_labels, d = r->n_dims;
-  int64_t n = (int64_t)luaL_checkinteger(L, 3);
-  tk_fvec_t *codes_fvec = tk_fvec_peek(L, 2, "codes");
-  float *codes_a = codes_fvec->a;
-  int64_t k = (int64_t)luaL_checkinteger(L, 4);
+  float *codes_a = ((tk_fvec_t *) Mx->v)->a;
+  int64_t n = (int64_t) Mx->n_rows;
+  int64_t k = (int64_t) luaL_checkinteger(L, 3);
   if (k > nl) k = nl;
   if (k < 1) k = 1;
-  int orig_top = lua_gettop(L);
-  bool sparse = orig_top >= 5 && !lua_isnil(L, 5);
-  int buf_base = sparse ? 7 : 5;
-  lua_settop(L, buf_base - 1);
-  TK_IVEC_BUF(offsets, buf_base, n + 1);
-  TK_IVEC_BUF(labels, buf_base + 1, n * k);
-  TK_FVEC_BUF(scores_out, buf_base + 2, n * k);
-  for (int64_t i = 0; i <= n; i++)
-    offsets->a[i] = i * k;
-  {
-    int nt = omp_get_max_threads();
-    uint64_t heap_need = (uint64_t)nt * (uint64_t)k;
-    if (!r->heap_buf || r->heap_buf_size < heap_need) {
-      free(r->heap_buf);
-      r->heap_buf = (tk_rank_t *)malloc(heap_need * sizeof(tk_rank_t));
-      r->heap_buf_size = heap_need;
-    }
+  tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t)(n + 1)); offsets->n = (uint64_t)(n + 1);
+  int offsets_idx = lua_gettop(L);
+  tk_ivec_t *labels = tk_ivec_create(L, (uint64_t)(n * k)); labels->n = (uint64_t)(n * k);
+  int labels_idx = lua_gettop(L);
+  tk_fvec_t *scores_out = tk_fvec_create(L, (uint64_t)(n * k)); scores_out->n = (uint64_t)(n * k);
+  int scores_out_idx = lua_gettop(L);
+  for (int64_t i = 0; i <= n; i++) offsets->a[i] = i * k;
+  int nt = omp_get_max_threads();
+  uint64_t heap_need = (uint64_t)nt * (uint64_t)k;
+  if (!r->heap_buf || r->heap_buf_size < heap_need) {
+    free(r->heap_buf);
+    r->heap_buf = (tk_rank_t *)malloc(heap_need * sizeof(tk_rank_t));
+    r->heap_buf_size = heap_need;
   }
-  if (sparse) {
-    tk_ivec_t *csr_off = tk_ivec_peek(L, 5, "csr_off");
-    tk_ivec_t *csr_nbr = tk_ivec_peek(L, 6, "csr_nbr");
-    float *wt = tk_ridge_get_wt(r);
-    double *intercept = r->intercept ? r->intercept->a : NULL;
+  int64_t block = 256;
+  while (block > 1 && (uint64_t)block * (uint64_t)nl * sizeof(float) > 64ULL * 1024 * 1024)
+    block /= 2;
+  uint64_t need = (uint64_t)block * (uint64_t)nl;
+  if (!r->sbuf || r->sbuf_size < need) {
+    free(r->sbuf);
+    r->sbuf = (float *)malloc(need * sizeof(float));
+    r->sbuf_size = need;
+  }
+  for (int64_t base = 0; base < n; base += block) {
+    int64_t bs = (base + block <= n) ? block : n - base;
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+      (int)bs, (int)nl, (int)d, 1.0f, codes_a + base * d, (int)d,
+      r->W->a, (int)nl, 0.0f, r->sbuf, (int)nl);
+    if (r->intercept)
+      tk_gram_add_intercept_f(r->sbuf, bs, nl, r->intercept->a);
     #pragma omp parallel
     {
       tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
                          .a = r->heap_buf + (uint64_t)omp_get_thread_num() * (uint64_t)k };
-      #pragma omp for schedule(dynamic, 64)
-      for (int64_t i = 0; i < n; i++) {
-        float *row = codes_a + i * d;
-        int64_t lo = csr_off->a[i], hi = csr_off->a[i + 1];
-        int64_t out_base = i * k;
+      #pragma omp for schedule(static)
+      for (int64_t i = 0; i < bs; i++) {
+        float *row = r->sbuf + i * nl;
+        int64_t out_base = (base + i) * k;
         heap.n = 0;
-        for (int64_t j = lo; j < hi; j++) {
-          int64_t label = csr_nbr->a[j];
-          double s = (double)cblas_sdot((int)d, row, 1, wt + label * d, 1);
-          if (intercept) s += intercept[label];
-          tk_rvec_hmin(&heap, (size_t)k, tk_rank(label, s));
-        }
+        for (int64_t l = 0; l < nl; l++)
+          tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, (double)row[l]));
         tk_rvec_desc(&heap, 0, heap.n);
         for (int64_t j = 0; j < (int64_t)heap.n; j++) {
           labels->a[out_base + j] = heap.a[j].i;
           scores_out->a[out_base + j] = (float)heap.a[j].d;
         }
-        for (int64_t j = (int64_t)heap.n; j < k; j++) {
-          labels->a[out_base + j] = 0;
-          scores_out->a[out_base + j] = -1e30f;
-        }
-      }
-    }
-  } else {
-    int64_t block = 256;
-    while (block > 1 && (uint64_t)block * (uint64_t)nl * sizeof(float) > 64ULL * 1024 * 1024)
-      block /= 2;
-    uint64_t need = (uint64_t)block * (uint64_t)nl;
-    if (!r->sbuf || r->sbuf_size < need) {
-      free(r->sbuf);
-      r->sbuf = (float *)malloc(need * sizeof(float));
-      r->sbuf_size = need;
-    }
-    for (int64_t base = 0; base < n; base += block) {
-      int64_t bs = (base + block <= n) ? block : n - base;
-      cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-        (int)bs, (int)nl, (int)d, 1.0f, codes_a + base * d, (int)d,
-        r->W->a, (int)nl, 0.0f, r->sbuf, (int)nl);
-      if (r->intercept)
-        tk_gram_add_intercept_f(r->sbuf, bs, nl, r->intercept->a);
-      #pragma omp parallel
-      {
-        tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
-                           .a = r->heap_buf + (uint64_t)omp_get_thread_num() * (uint64_t)k };
-        #pragma omp for schedule(static)
-        for (int64_t i = 0; i < bs; i++) {
-          float *row = r->sbuf + i * nl;
-          int64_t out_base = (base + i) * k;
-          heap.n = 0;
-          for (int64_t l = 0; l < nl; l++)
-            tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, (double)row[l]));
-          tk_rvec_desc(&heap, 0, heap.n);
-          for (int64_t j = 0; j < (int64_t)heap.n; j++) {
-            labels->a[out_base + j] = heap.a[j].i;
-            scores_out->a[out_base + j] = (float)heap.a[j].d;
-          }
-        }
       }
     }
   }
-  lua_pushvalue(L, offsets_idx);
-  lua_pushvalue(L, labels_idx);
-  lua_pushvalue(L, scores_out_idx);
-  return 3;
+  tk_csr_push(L, TK_TAG_F32, TK_TAG_I64, (uint64_t) nl,
+    offsets_idx, offsets, labels_idx, (void *) labels, scores_out_idx, scores_out);
+  return 1;
 }
 
 static inline int tk_ridge_persist_lua (lua_State *L) {
@@ -246,58 +132,18 @@ static inline int tk_ridge_persist_lua (lua_State *L) {
   return 0;
 }
 
+// regress(M[, buf]) -> fvec (n_samples x n_labels), dense scoring.
 static inline int tk_ridge_transform_lua (lua_State *L) {
   tk_ridge_t *r = tk_ridge_peek(L, 1);
   int64_t d = r->n_dims, nl = r->n_labels;
-  tk_mtx_t *Mx = tk_mtx_peekopt(L, 2);
-  if (Mx != NULL) {
-    // object form: regress(M[, buf]) -> fvec (n_samples x n_labels), dense
-    float *codes_a = ((tk_fvec_t *) Mx->v)->a;
-    int64_t n = (int64_t) Mx->n_rows;
-    tk_fvec_t *buf = (lua_gettop(L) >= 3 && !lua_isnil(L, 3)) ? tk_fvec_peek(L, 3, "buf") : NULL;
-    tk_fvec_t *out;
-    if (buf) { tk_fvec_ensure(buf, (uint64_t)(n * nl)); buf->n = (uint64_t)(n * nl); out = buf; lua_pushvalue(L, 3); }
-    else { out = tk_fvec_create(L, (uint64_t)(n * nl)); out->n = (uint64_t)(n * nl); }
-    int out_idx = lua_gettop(L);
-    int64_t block = 256;
-    while (block > 1 && (uint64_t)block * (uint64_t)nl * sizeof(float) > 64ULL * 1024 * 1024)
-      block /= 2;
-    for (int64_t base = 0; base < n; base += block) {
-      int64_t bs = (base + block <= n) ? block : n - base;
-      cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-        (int)bs, (int)nl, (int)d, 1.0f, codes_a + base * d, (int)d,
-        r->W->a, (int)nl, 0.0f, out->a + base * nl, (int)nl);
-      if (r->intercept)
-        tk_gram_add_intercept_f(out->a + base * nl, bs, nl, r->intercept->a);
-    }
-    lua_pushvalue(L, out_idx);
-    return 1;
-  }
-  int64_t n = (int64_t)luaL_checkinteger(L, 3);
-  tk_fvec_t *codes_fvec = tk_fvec_peek(L, 2, "codes");
-  float *codes_a = codes_fvec->a;
-  if (lua_gettop(L) >= 5 && !lua_isnil(L, 4)) {
-    tk_ivec_t *csr_off = tk_ivec_peek(L, 4, "csr_off");
-    tk_ivec_t *csr_nbr = tk_ivec_peek(L, 5, "csr_nbr");
-    int64_t total = csr_off->a[n];
-    TK_FVEC_BUF(out, 6, total);
-    float *wt = tk_ridge_get_wt(r);
-    double *intercept = r->intercept ? r->intercept->a : NULL;
-    #pragma omp parallel for schedule(dynamic, 64)
-    for (int64_t i = 0; i < n; i++) {
-      int64_t lo = csr_off->a[i], hi = csr_off->a[i + 1];
-      float *row = codes_a + i * d;
-      for (int64_t j = lo; j < hi; j++) {
-        int64_t label = csr_nbr->a[j];
-        double s = (double)cblas_sdot((int)d, row, 1, wt + label * d, 1);
-        if (intercept) s += intercept[label];
-        out->a[j] = (float)s;
-      }
-    }
-    lua_pushvalue(L, out_idx);
-    return 1;
-  }
-  TK_FVEC_BUF(out, 4, n * nl);
+  tk_mtx_t *Mx = tk_mtx_peek(L, 2, "codes");
+  float *codes_a = ((tk_fvec_t *) Mx->v)->a;
+  int64_t n = (int64_t) Mx->n_rows;
+  tk_fvec_t *buf = (lua_gettop(L) >= 3 && !lua_isnil(L, 3)) ? tk_fvec_peek(L, 3, "buf") : NULL;
+  tk_fvec_t *out;
+  if (buf) { tk_fvec_ensure(buf, (uint64_t)(n * nl)); buf->n = (uint64_t)(n * nl); out = buf; lua_pushvalue(L, 3); }
+  else { out = tk_fvec_create(L, (uint64_t)(n * nl)); out->n = (uint64_t)(n * nl); }
+  int out_idx = lua_gettop(L);
   int64_t block = 256;
   while (block > 1 && (uint64_t)block * (uint64_t)nl * sizeof(float) > 64ULL * 1024 * 1024)
     block /= 2;
@@ -315,7 +161,6 @@ static inline int tk_ridge_transform_lua (lua_State *L) {
 
 static inline int tk_ridge_shrink_lua (lua_State *L) {
   tk_ridge_t *r = tk_ridge_peek(L, 1);
-  free(r->Wt); r->Wt = NULL;
   free(r->sbuf); r->sbuf = NULL; r->sbuf_size = 0;
   free(r->heap_buf); r->heap_buf = NULL; r->heap_buf_size = 0;
   return 0;
@@ -332,29 +177,25 @@ static luaL_Reg tk_ridge_mt_fns[] = {
 static inline int tk_ridge_gram_lua (lua_State *L) {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
-  lua_getfield(L, 1, "codes");
-  tk_fvec_t *codes_fv = tk_fvec_peek(L, -1, "codes");
-  lua_pop(L, 1);
-  lua_getfield(L, 1, "n_samples");
-  int64_t nc = (int64_t)luaL_checkinteger(L, -1);
-  lua_pop(L, 1);
-  lua_getfield(L, 1, "n_dims");
-  int64_t m = (int64_t)luaL_checkinteger(L, -1);
+  // x: dense codes mtx (F32). y: labels csr (offsets/neighbors). targets: dvec for regression.
+  lua_getfield(L, 1, "x");
+  tk_mtx_t *Xm = tk_mtx_peek(L, -1, "x");
+  tk_fvec_t *codes_fv = (tk_fvec_t *) Xm->v;
+  int64_t nc = (int64_t) Xm->n_rows;
+  int64_t m = (int64_t) Xm->n_cols;
   lua_pop(L, 1);
 
-  lua_getfield(L, 1, "label_offsets");
+  lua_getfield(L, 1, "y");
   int has_labels = !lua_isnil(L, -1);
-  tk_ivec_t *lbl_off = has_labels ? tk_ivec_peek(L, -1, "label_offsets") : NULL;
-  lua_pop(L, 1);
-  lua_getfield(L, 1, "label_neighbors");
-  tk_ivec_t *lbl_nbr = has_labels ? tk_ivec_peek(L, -1, "label_neighbors") : NULL;
-  lua_pop(L, 1);
+  tk_ivec_t *lbl_off = NULL, *lbl_nbr = NULL;
   int64_t nl = 0;
   if (has_labels) {
-    lua_getfield(L, 1, "n_labels");
-    nl = (int64_t)luaL_checkinteger(L, -1);
-    lua_pop(L, 1);
+    tk_csr_t *Y = tk_csr_peek(L, -1, "y");
+    lbl_off = Y->offsets;
+    lbl_nbr = (tk_ivec_t *) Y->neighbors;
+    nl = (int64_t) Y->n_cols;
   }
+  lua_pop(L, 1);
   lua_getfield(L, 1, "targets");
   int has_targets = !lua_isnil(L, -1);
   tk_dvec_t *targets_dv = has_targets ? tk_dvec_peek(L, -1, "targets") : NULL;
@@ -365,7 +206,7 @@ static inline int tk_ridge_gram_lua (lua_State *L) {
     lua_pop(L, 1);
   }
   if (!has_labels && !has_targets)
-    return luaL_error(L, "gram: need label_offsets/label_neighbors or targets");
+    return luaL_error(L, "gram: need y (labels csr) or targets");
 
   uint64_t um = (uint64_t)m;
   uint64_t unc = (uint64_t)nc;
@@ -509,7 +350,6 @@ static inline int tk_ridge_create_lua (lua_State *L) {
       r->intercept = intercept_dv;
       r->n_dims = d;
       r->n_labels = nl;
-      r->Wt = NULL;
       r->sbuf = NULL;
       r->sbuf_size = 0;
       r->heap_buf = NULL;
@@ -660,7 +500,6 @@ static inline int tk_ridge_create_lua (lua_State *L) {
 
     r->n_dims = d;
     r->n_labels = nl;
-    r->Wt = NULL;
     r->sbuf = NULL;
     r->sbuf_size = 0;
     r->heap_buf = NULL;
@@ -705,7 +544,6 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     r->intercept = intercept_dv;
     r->n_dims = d;
     r->n_labels = nl;
-    r->Wt = NULL;
     r->sbuf = NULL;
     r->sbuf_size = 0;
     r->heap_buf = NULL;
@@ -784,7 +622,6 @@ static inline int tk_ridge_load_lua (lua_State *L) {
   r->intercept = intercept;
   r->n_dims = n_dims;
   r->n_labels = n_labels;
-  r->Wt = NULL;
   r->sbuf = NULL;
   r->sbuf_size = 0;
   r->heap_buf = NULL;

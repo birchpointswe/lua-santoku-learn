@@ -7,7 +7,10 @@
 #include <santoku/fvec.h>
 #include <santoku/pvec.h>
 #include <santoku/rvec.h>
+#include <santoku/cvec.h>
 #include <santoku/cvec/ext.h>
+#include <santoku/csr.h>
+#include <santoku/mtx.h>
 #include <santoku/learn/mathlibs.h>
 
 #define TK_ANN_SUBSTR_BITS 16
@@ -193,24 +196,31 @@ static inline void tk_ann_flat_query_csr (
   uint64_t max_radius,
   const float *query_codes,
   const float *corpus_codes,
-  uint64_t n_dims
+  uint64_t n_dims,
+  uint64_t oversample
 ) {
   uint64_t features = flat->features;
   bool rerank = (query_codes && corpus_codes && n_dims > 0);
+  // rerank reorders by exact dot, so fetch a wider Hamming pool (k*oversample) and keep the
+  // exact-dot top-k from it; without rerank the Hamming top-k is returned directly.
+  uint64_t fetch_k = rerank ? k * (oversample > 0 ? oversample : 1) : k;
 
   tk_ivec_t *off = tk_ivec_create(L, nq + 1);
   off->n = nq + 1;
+  int off_idx = lua_gettop(L);
   tk_ivec_t *nbr = tk_ivec_create(L, nq * k);
   nbr->n = nq * k;
+  int nbr_idx = lua_gettop(L);
   tk_dvec_t *wt = tk_dvec_create(L, nq * k);
   wt->n = nq * k;
+  int wt_idx = lua_gettop(L);
 
   int64_t *counts = tk_malloc(L, nq * sizeof(int64_t));
 
   #pragma omp parallel
   {
-    tk_pvec_t *heap = tk_pvec_create(NULL, k);
-    tk_rvec_t *rerank_buf = rerank ? tk_rvec_create(NULL, k) : NULL;
+    tk_pvec_t *heap = tk_pvec_create(NULL, fetch_k);
+    tk_rvec_t *rerank_buf = rerank ? tk_rvec_create(NULL, fetch_k) : NULL;
     uint64_t seen_bytes = (flat->N + 7) / 8;
     uint8_t *seen = (uint8_t *)calloc(1, seen_bytes);
 
@@ -218,26 +228,28 @@ static inline void tk_ann_flat_query_csr (
     for (uint64_t i = 0; i < nq; i++) {
       const char *vec = query_data + i * flat->bytes_per_vec;
       int64_t skip = skip_self ? (int64_t)i : -1;
-      tk_ann_flat_query(flat, vec, skip, k, max_radius, seen, heap);
-      uint64_t cnt = heap->n < k ? heap->n : k;
-      counts[i] = (int64_t)cnt;
+      tk_ann_flat_query(flat, vec, skip, fetch_k, max_radius, seen, heap);
       int64_t base = (int64_t)(i * k);
 
       if (rerank) {
         const float *qrow = query_codes + i * n_dims;
         rerank_buf->n = 0;
-        for (uint64_t j = 0; j < cnt; j++) {
+        for (uint64_t j = 0; j < heap->n; j++) {
           int64_t cand = heap->a[j].i;
           double dot = (double)cblas_sdot((int)n_dims, qrow, 1,
             corpus_codes + (uint64_t)cand * n_dims, 1);
           tk_rvec_push(rerank_buf, tk_rank(cand, dot));
         }
         tk_rvec_desc(rerank_buf, 0, rerank_buf->n);
+        uint64_t cnt = rerank_buf->n < k ? rerank_buf->n : k;
+        counts[i] = (int64_t)cnt;
         for (uint64_t j = 0; j < cnt; j++) {
           nbr->a[base + (int64_t)j] = rerank_buf->a[j].i;
           wt->a[base + (int64_t)j] = rerank_buf->a[j].d;
         }
       } else {
+        uint64_t cnt = heap->n < k ? heap->n : k;
+        counts[i] = (int64_t)cnt;
         for (uint64_t j = 0; j < cnt; j++) {
           nbr->a[base + (int64_t)j] = heap->a[j].i;
           wt->a[base + (int64_t)j] = 1.0 - (double)heap->a[j].p / (double)features;
@@ -275,45 +287,59 @@ static inline void tk_ann_flat_query_csr (
   }
 
   free(counts);
+
+  // P csr: row = query, neighbors = corpus ids (i64), values = similarity weights (f64).
+  tk_csr_push(L, TK_TAG_F64, TK_TAG_I64, flat->N,
+    off_idx, off, nbr_idx, (void *) nbr, wt_idx, wt);
 }
 
+// neighborhoods_by_vecs(Q mtx f32, k[, radius]) -> P csr. Q is sign-thresholded to the bit
+// signature internally; if the index retained codes, Q's float rows rerank by exact dot.
 static inline int tk_ann_flat_nbr_by_vecs_lua (lua_State *L)
 {
   lua_settop(L, 5);
   tk_ann_flat_t *flat = tk_ann_flat_peek(L, 1);
-  tk_cvec_t *query_vecs = tk_cvec_peek(L, 2, "vectors");
+  tk_mtx_t *Q = tk_mtx_peek(L, 2, "query");
   uint64_t k = tk_lua_checkunsigned(L, 3, "k");
-  uint64_t nq = query_vecs->n / flat->bytes_per_vec;
-  tk_fvec_t *qcodes = tk_fvec_peekopt(L, 4);
-  const float *query_codes = NULL;
-  const float *corpus_codes = flat->codes;
-  uint64_t n_dims = flat->n_dims;
-  uint64_t max_radius;
-  if (qcodes) {
-    query_codes = qcodes->a;
-    max_radius = tk_lua_optunsigned(L, 5, "radius", 3);
-  } else {
-    max_radius = tk_lua_optunsigned(L, 4, "radius", 3);
+  uint64_t max_radius = tk_lua_optunsigned(L, 4, "radius", 3);
+  uint64_t oversample = tk_lua_optunsigned(L, 5, "oversample", 16);
+  uint64_t nq = Q->n_rows;
+  uint64_t n_dims = Q->n_cols;
+  const float *qcodes = ((tk_fvec_t *) Q->v)->a;
+  size_t bpv = flat->bytes_per_vec;
+  tk_cvec_t *qbits = tk_cvec_create(L, nq * bpv);
+  qbits->n = nq * bpv;
+  memset(qbits->a, 0, nq * bpv);
+  for (uint64_t s = 0; s < nq; s++) {
+    const float *row = qcodes + s * n_dims;
+    unsigned char *bvec = (unsigned char *) (qbits->a + s * bpv);
+    for (uint64_t i = 0; i < n_dims && i < flat->features; i++)
+      if (row[i] >= 0.0f) bvec[i >> 3] |= (unsigned char) (1u << (i & 7));
   }
-  tk_ann_flat_query_csr(L, flat, query_vecs->a, nq, false, k, max_radius,
-    query_codes, corpus_codes, n_dims);
-  return 3;
+  const float *corpus_codes = flat->codes;
+  const float *query_codes = (corpus_codes && flat->n_dims == n_dims) ? qcodes : NULL;
+  tk_ann_flat_query_csr(L, flat, qbits->a, nq, false, k, max_radius,
+    query_codes, corpus_codes, flat->n_dims, oversample);
+  return 1;
 }
 
+// neighborhoods(k[, rerank][, radius]) -> P csr over the corpus vs itself (self excluded).
 static inline int tk_ann_flat_nbr_lua (lua_State *L)
 {
-  lua_settop(L, 4);
+  lua_settop(L, 5);
   tk_ann_flat_t *flat = tk_ann_flat_peek(L, 1);
   uint64_t k = tk_lua_checkunsigned(L, 2, "k");
   bool do_rerank = flat->codes != NULL;
   if (lua_isboolean(L, 3))
     do_rerank = lua_toboolean(L, 3);
-  uint64_t max_radius = tk_lua_optunsigned(L, lua_isboolean(L, 3) ? 4 : 3, "radius", 3);
+  int ai = lua_isboolean(L, 3) ? 4 : 3;
+  uint64_t max_radius = tk_lua_optunsigned(L, ai, "radius", 3);
+  uint64_t oversample = tk_lua_optunsigned(L, ai + 1, "oversample", 16);
   const float *corpus = do_rerank ? flat->codes : NULL;
   uint64_t n_dims = do_rerank ? flat->n_dims : 0;
   tk_ann_flat_query_csr(L, flat, flat->data, flat->N, true, k, max_radius,
-    corpus, corpus, n_dims);
-  return 3;
+    corpus, corpus, n_dims, oversample);
+  return 1;
 }
 
 static luaL_Reg tk_ann_flat_mt_fns[] =

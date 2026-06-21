@@ -9,6 +9,7 @@
 #include <santoku/ivec.h>
 #include <santoku/svec.h>
 #include <santoku/iuset.h>
+#include <santoku/spans.h>
 #include <santoku/learn/normalize.h>
 
 #define TK_AHO_MT "tk_aho_t"
@@ -628,11 +629,13 @@ static int tk_aho_predict_lua (lua_State *L)
 
   uint64_t mn = res.total > 0 ? (uint64_t)res.total : 1;
   tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t)(n_texts + 1));
+  int off_idx = lua_gettop(L);
+  offsets->n = (uint64_t)(n_texts + 1);
   memcpy(offsets->a, res.text_offsets, (uint64_t)(n_texts + 1) * sizeof(int64_t));
 
-  tk_ivec_t *out_ids = tk_ivec_create(L, mn);
-  tk_ivec_t *out_starts = tk_ivec_create(L, mn);
-  tk_ivec_t *out_ends = tk_ivec_create(L, mn);
+  tk_ivec_t *out_ids = tk_ivec_create(L, mn); int id_idx = lua_gettop(L);
+  tk_ivec_t *out_starts = tk_ivec_create(L, mn); int s_idx = lua_gettop(L);
+  tk_ivec_t *out_ends = tk_ivec_create(L, mn); int e_idx = lua_gettop(L);
   if (res.total == 0) {
     out_ids->n = 0;
     out_starts->n = 0;
@@ -645,15 +648,22 @@ static int tk_aho_predict_lua (lua_State *L)
     out_ends->a[i] = res.matches[i].end;
   }
 
-  tk_svec_t *out_exc_hits = NULL;
+  // matches as a spans object: per-text offsets + columns id (pattern id), s (start), e (end).
+  const char *names[3] = { "id", "s", "e" };
+  int icols[3] = { id_idx, s_idx, e_idx };
+  tk_ivec_t *cols[3] = { out_ids, out_starts, out_ends };
+  tk_spans_push(L, 3, names, off_idx, offsets, icols, cols);
+
   if (res.exclude_hits) {
-    out_exc_hits = tk_svec_create(L, res.n_exclude);
+    tk_svec_t *out_exc_hits = tk_svec_create(L, res.n_exclude);
     out_exc_hits->n = res.n_exclude;
     memcpy(out_exc_hits->a, res.exclude_hits, res.n_exclude * sizeof(int32_t));
+    tk_aho_scan_free(&res);
+    return 2;
   }
 
   tk_aho_scan_free(&res);
-  return out_exc_hits ? 5 : 4;
+  return 1;
 }
 
 static int tk_aho_tag_lua (lua_State *L)
@@ -1024,6 +1034,7 @@ static luaL_Reg tk_aho_fns[] = {
 
 int luaopen_santoku_learn_aho (lua_State *L)
 {
+  tk_lua_require_mod(L, "santoku.spans");   // predict -> matches spans {id,s,e}
   lua_newtable(L);
   tk_lua_register(L, tk_aho_fns, 0);
   return 1;

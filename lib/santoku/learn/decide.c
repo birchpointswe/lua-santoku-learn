@@ -13,75 +13,50 @@
 #include <santoku/span.h>
 #include <santoku/learn/decide.h>
 
-// Predictions: a `pred` csr (offsets/neighbors=labels/values=scores) OR loose offsets/neighbors/scores.
+// Predictions: a `pred` csr (offsets / neighbors = labels / values = scores).
 static inline void tk_decide_read_pred (lua_State *L,
   tk_ivec_t **off, tk_ivec_t **nbr, tk_fvec_t **sf, tk_dvec_t **sd)
 {
   lua_getfield(L, 2, "pred");
-  tk_csr_t *P = tk_csr_peekopt(L, -1);
+  tk_csr_t *P = tk_csr_peek(L, -1, "pred");
   lua_pop(L, 1);
-  if (P != NULL) {
-    *off = P->offsets; *nbr = (tk_ivec_t *) P->neighbors;
-    *sf = P->tag == TK_TAG_F32 ? (tk_fvec_t *) P->values : NULL;
-    *sd = P->tag == TK_TAG_F64 ? (tk_dvec_t *) P->values : NULL;
-    return;
-  }
-  lua_getfield(L, 2, "offsets"); *off = tk_ivec_peek(L, -1, "offsets");
-  lua_getfield(L, 2, "neighbors"); *nbr = tk_ivec_peek(L, -1, "neighbors");
-  lua_getfield(L, 2, "scores"); *sf = tk_fvec_peekopt(L, -1); *sd = *sf ? NULL : tk_dvec_peek(L, -1, "scores");
-  lua_pop(L, 3);
+  *off = P->offsets; *nbr = (tk_ivec_t *) P->neighbors;
+  *sf = P->tag == TK_TAG_F32 ? (tk_fvec_t *) P->values : NULL;
+  *sd = P->tag == TK_TAG_F64 ? (tk_dvec_t *) P->values : NULL;
 }
 
-// Expected labels: an `expected` csr OR loose expected_offsets/expected_neighbors.
+// Expected labels: an `expected` csr.
 static inline void tk_decide_read_expected (lua_State *L, tk_ivec_t **eoff, tk_ivec_t **enbr)
 {
   lua_getfield(L, 2, "expected");
-  tk_csr_t *E = tk_csr_peekopt(L, -1);
+  tk_csr_t *E = tk_csr_peek(L, -1, "expected");
   lua_pop(L, 1);
-  if (E != NULL) { *eoff = E->offsets; *enbr = (tk_ivec_t *) E->neighbors; return; }
-  lua_getfield(L, 2, "expected_offsets"); *eoff = tk_ivec_peek(L, -1, "expected_offsets");
-  lua_getfield(L, 2, "expected_neighbors"); *enbr = tk_ivec_peek(L, -1, "expected_neighbors");
-  lua_pop(L, 2);
+  *eoff = E->offsets; *enbr = (tk_ivec_t *) E->neighbors;
 }
 
-// Candidate spans: a `cand` spans (cols s,e) OR loose cand_offsets/cand_starts/cand_ends.
+// Candidate spans: a `cand` spans (cols s, e).
 static inline void tk_decide_read_cand (lua_State *L, tk_ivec_t **co, tk_ivec_t **cs, tk_ivec_t **ce)
 {
   lua_getfield(L, 2, "cand");
-  tk_spans_t *S = tk_spans_peekopt(L, -1);
+  tk_spans_t *S = tk_spans_peek(L, -1, "cand");
   lua_pop(L, 1);
-  if (S != NULL) {
-    *co = S->offsets;
-    *cs = S->cols[tk_spans_colidx(S, "s")];
-    *ce = S->cols[tk_spans_colidx(S, "e")];
-    return;
-  }
-  lua_getfield(L, 2, "cand_offsets"); *co = tk_ivec_peek(L, -1, "cand_offsets");
-  lua_getfield(L, 2, "cand_starts"); *cs = tk_ivec_peek(L, -1, "cand_starts");
-  lua_getfield(L, 2, "cand_ends"); *ce = tk_ivec_peek(L, -1, "cand_ends");
-  lua_pop(L, 3);
+  *co = S->offsets;
+  *cs = S->cols[tk_spans_colidx(S, "s")];
+  *ce = S->cols[tk_spans_colidx(S, "e")];
 }
 
-// Gold spans: a `gold` spans (cols s,e[,ty]) OR loose expected_offsets/starts/ends[/types].
+// Gold spans: a `gold` spans (cols s, e[, ty]).
 static inline void tk_decide_read_gold (lua_State *L,
   tk_ivec_t **go, tk_ivec_t **gs, tk_ivec_t **ge, tk_ivec_t **gty)
 {
   lua_getfield(L, 2, "gold");
-  tk_spans_t *S = tk_spans_peekopt(L, -1);
+  tk_spans_t *S = tk_spans_peek(L, -1, "gold");
   lua_pop(L, 1);
-  if (S != NULL) {
-    int64_t it = tk_spans_colidx(S, "ty");
-    *go = S->offsets;
-    *gs = S->cols[tk_spans_colidx(S, "s")];
-    *ge = S->cols[tk_spans_colidx(S, "e")];
-    *gty = it >= 0 ? S->cols[it] : NULL;
-    return;
-  }
-  lua_getfield(L, 2, "expected_offsets"); *go = tk_ivec_peek(L, -1, "expected_offsets");
-  lua_getfield(L, 2, "expected_starts"); *gs = tk_ivec_peek(L, -1, "expected_starts");
-  lua_getfield(L, 2, "expected_ends"); *ge = tk_ivec_peek(L, -1, "expected_ends");
-  lua_getfield(L, 2, "expected_types"); *gty = tk_ivec_peekopt(L, -1);
-  lua_pop(L, 4);
+  int64_t it = tk_spans_colidx(S, "ty");
+  *go = S->offsets;
+  *gs = S->cols[tk_spans_colidx(S, "s")];
+  *ge = S->cols[tk_spans_colidx(S, "e")];
+  *gty = it >= 0 ? S->cols[it] : NULL;
 }
 
 // single-label decode of one score row: argmax_l (score_l - offset_l), first index wins ties.

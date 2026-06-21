@@ -37,8 +37,8 @@ local cfg = {
     depth = { def = 1 },
     tangent = { def = 0 },
     lambda = { def = 8.4893e-04 },
-    arccos_order = { 1, 0, 2, 3, 4, 5, 6 },
-    arccos_depth = { 1, 2, 3 },
+    arccos_order = { 1, 2, 3, 4 },
+    arccos_depth = { 1, 2 },
     arccos_tangent = { 0, 1 },
     search_trials = 0
   },
@@ -52,8 +52,8 @@ local cfg = {
     lambda = { def = 8.2422e-04 },
     propensity_a = { def = 0.1159 },
     propensity_b = { def = 8.3703 },
-    arccos_order = { 3, 0, 1, 2, 4, 5, 6 },
-    arccos_depth = { 1, 2, 3 },
+    arccos_order = { 3, 1, 2, 4 },
+    arccos_depth = { 1, 2 },
     arccos_tangent = { 0, 1 },
     search_trials = 0
   },
@@ -78,8 +78,7 @@ local function build_gazetteer (train)
 end
 
 local function gaz_candidates (ac, split)
-  local off, _, starts, ends = ac:predict({ texts = split.texts, longest = true, boundary = boundary })
-  return off, starts, ends
+  return ac:predict({ texts = split.texts, longest = true, boundary = boundary })
 end
 
 local function build_typed_gaz (train)
@@ -104,6 +103,7 @@ local function char_ngrams (s, nmin, nmax)
   end
   return out
 end
+
 local function build_char_gaz (train, nmin, nmax)
   local gaz = {}
   for d = 1, train.n do
@@ -127,10 +127,12 @@ local function gold_spans (split)
     for _, e in ipairs(split.sent_ents[d]) do es:push(e.s); ee:push(e.e); ety:push(e.t) end
     eoff:push(es:size())
   end
-  return eoff, es, ee, ety
+  return spans.create({ offsets = eoff, s = es, e = ee, ty = ety })
 end
 
-local function is_inner_labels (soff, sstart, send, eoff, es, ee, n)
+local function is_inner_labels (S, G, n)
+  local soff, sstart, send = S:offsets(), S:col("s"), S:col("e")
+  local eoff, es, ee = G:offsets(), G:col("s"), G:col("e")
   local off, nbr = ivec.create(), ivec.create()
   off:push(0)
   for d = 1, n do
@@ -149,12 +151,15 @@ end
 
 local function build_segments (split, seg)
   local soff, sstart, send = seg:segment({ texts = split.texts, n = split.n, drop_sep = true })
-  local eoff, es, ee, ety = gold_spans(split)
-  local ioff, inbr = is_inner_labels(soff, sstart, send, eoff, es, ee, split.n)
-  return soff, sstart, send, sstart:size(), ioff, inbr, eoff, es, ee, ety
+  local S = spans.create({ offsets = soff, s = sstart, e = send })
+  local G = gold_spans(split)
+  local ioff, inbr = is_inner_labels(S, G, split.n)
+  return { n = split.n, seg = S, n_seg = sstart:size(),
+    inner_off = ioff, inner_nbr = inbr, gold = G }
 end
 
-local function enumerate_runs (soff, sstart, send, pred)
+local function enumerate_runs (S, pred)
+  local soff, sstart, send = S:offsets(), S:col("s"), S:col("e")
   local off, st, en = ivec.create(), ivec.create(), ivec.create()
   off:push(0)
   for d = 1, soff:size() - 1 do
@@ -172,7 +177,7 @@ local function enumerate_runs (soff, sstart, send, pred)
     end
     off:push(st:size())
   end
-  return off, st, en
+  return spans.create({ offsets = off, s = st, e = en })
 end
 
 local function inner_to_ctx (pred)
@@ -184,7 +189,9 @@ local function inner_to_ctx (pred)
   return out
 end
 
-local function seg_ceiling (soff, sstart, send, eoff, es, ee, n)
+local function seg_ceiling (S, G, n)
+  local soff, sstart, send = S:offsets(), S:col("s"), S:col("e")
+  local eoff, es, ee = G:offsets(), G:col("s"), G:col("e")
   local ok, tot = 0, 0
   for d = 1, n do
     local ss, se = {}, {}
@@ -197,7 +204,7 @@ local function seg_ceiling (soff, sstart, send, eoff, es, ee, n)
   return tot > 0 and ok / tot or 0
 end
 
-local function tokenize (split, off, starts, ends, _, tok)
+local function tokenize (split, F, tok)
   local grow = tok == nil
   if grow then
     tok = tokenizer.create({
@@ -205,13 +212,12 @@ local function tokenize (split, off, starts, ends, _, tok)
       terminals = true, focus = true, normalize = cfg.tok.normalize,
     })
   end
-  local F = spans.create({ offsets = off, s = starts, e = ends })
   local X = grow and tok:fit({ texts = split.texts, focus = F })
     or tok:tokenize({ texts = split.texts, focus = F })
   return tok, X
 end
 
-local function tokenize_ctx (split, off, starts, ends, coff, cs, ce, cty, tok)
+local function tokenize_ctx (split, F, T, tok)
   local grow = tok == nil
   if grow then
     tok = tokenizer.create({
@@ -219,14 +225,12 @@ local function tokenize_ctx (split, off, starts, ends, coff, cs, ce, cty, tok)
       n_types = 1, terminals = true, focus = true, types = true,
     })
   end
-  local F = spans.create({ offsets = off, s = starts, e = ends })
-  local T = spans.create({ offsets = coff, s = cs, e = ce, ty = cty })
   local X = grow and tok:fit({ texts = split.texts, focus = F, types = T })
     or tok:tokenize({ texts = split.texts, focus = F, types = T })
   return tok, X
 end
 
-local function tokenize_shape (split, off, starts, ends, shp, k, tok)
+local function tokenize_shape (split, F, T, k, tok)
   local grow = tok == nil
   if grow then
     tok = tokenizer.create({
@@ -234,8 +238,6 @@ local function tokenize_shape (split, off, starts, ends, shp, k, tok)
       n_types = k + 1, terminals = true, focus = true, types = true,
     })
   end
-  local F = spans.create({ offsets = off, s = starts, e = ends })
-  local T = spans.create({ offsets = shp.off, s = shp.st, e = shp.en, ty = shp.cl })
   local X = grow and tok:fit({ texts = split.texts, focus = F, types = T })
     or tok:tokenize({ texts = split.texts, focus = F, types = T })
   return tok, X
@@ -253,9 +255,9 @@ test("conll", function ()
   local seg = segmenter.create({ context = "left" })
   local coarse_k
   do
-    local g_off, g_s, g_e = gold_spans(train)
+    local G = gold_spans(train)
     local ck, rec, mx, p95, sep = seg:train({ texts = train.texts, n = train.n,
-      gold_offsets = g_off, gold_starts = g_s, gold_ends = g_e })
+      gold_offsets = G:offsets(), gold_starts = G:col("s"), gold_ends = G:col("e") })
     coarse_k = ck
     str.printf("[Seg] coarse_k=%d boundary-recall=%.4f segs/gold(max=%d p95=%d) sep=%d %s\n",
       ck, rec, mx, p95, sep, sw())
@@ -271,22 +273,21 @@ test("conll", function ()
       cfg.shape.n_cuts, table.concat(cfg.shape.ks, ","), sw())
   end
 
-  local tr_off, tr_s, tr_e, tr_n, tr_ioff, tr_inbr, tr_eoff, tr_es, tr_ee, tr_ety = build_segments(train, seg)
-  local dv_off, dv_s, dv_e, dv_n, dv_ioff, dv_inbr, dv_eoff, dv_es, dv_ee, dv_ety = build_segments(dev, seg)
-  local te_off, te_s, te_e, te_n, _, _, te_eoff, te_es, te_ee, te_ety = build_segments(test_set, seg)
+  local TR, DV, TE = build_segments(train, seg), build_segments(dev, seg), build_segments(test_set, seg)
   str.printf("[SegCeil] boundary-aligned gold (oracle recall): dev=%.4f test=%.4f %s\n",
-    seg_ceiling(dv_off, dv_s, dv_e, dv_eoff, dv_es, dv_ee, dev.n),
-    seg_ceiling(te_off, te_s, te_e, te_eoff, te_es, te_ee, test_set.n), sw())
+    seg_ceiling(DV.seg, DV.gold, DV.n),
+    seg_ceiling(TE.seg, TE.gold, TE.n), sw())
 
   local function shape_runs (split)
     local out = {}
     for i, k in ipairs(cfg.shape.ks) do
       local off, st, en, cl = seg:segment({ texts = split.texts, n = split.n, k = k })
-      out[i] = { off = off, st = st, en = en, cl = cl }
+      out[i] = spans.create({ offsets = off, s = st, e = en, ty = cl })
     end
     return out
   end
-  local tr_sh, dv_sh, te_sh = shape_runs(train), shape_runs(dev), shape_runs(test_set)
+
+  TR.sh, DV.sh, TE.sh = shape_runs(train), shape_runs(dev), shape_runs(test_set)
 
   local function tag_combine (X, Y, bns_in)
     local bns
@@ -325,54 +326,58 @@ test("conll", function ()
 
   local tr_inner, dv_inner, te_inner
   do
-    local ng, Xtr = tokenize(train, tr_off, tr_s, tr_e)
-    local _, Xdv = tokenize(dev, dv_off, dv_s, dv_e, nil, ng)
-    local Ytr = csr.create({ offsets = tr_ioff, neighbors = tr_inbr, n_cols = 1 })
-    local Ydv = csr.create({ offsets = dv_ioff, neighbors = dv_inbr, n_cols = 1 })
+    local ng, Xtr = tokenize(train, TR.seg)
+    local _, Xdv = tokenize(dev, DV.seg, ng)
+    local Ytr = csr.create({ offsets = TR.inner_off, neighbors = TR.inner_nbr, n_cols = 1 })
+    local Ydv = csr.create({ offsets = DV.inner_off, neighbors = DV.inner_nbr, n_cols = 1 })
     local sp, rg, bns, _, decider = train_head("Tag", cfg.tag, Xtr, Ytr, Xdv, Ydv)
-    local _, Xtr2 = tokenize(train, tr_off, tr_s, tr_e, nil, ng)
-    local _, Xdv2 = tokenize(dev, dv_off, dv_s, dv_e, nil, ng)
-    local _, Xte2 = tokenize(test_set, te_off, te_s, te_e, nil, ng)
-    tr_inner = head_decode(sp, rg, decider, bns, Xtr2, tr_n)
-    dv_inner = head_decode(sp, rg, decider, bns, Xdv2, dv_n)
-    te_inner = head_decode(sp, rg, decider, bns, Xte2, te_n)
+    local _, Xtr2 = tokenize(train, TR.seg, ng)
+    local _, Xdv2 = tokenize(dev, DV.seg, ng)
+    local _, Xte2 = tokenize(test_set, TE.seg, ng)
+    tr_inner = head_decode(sp, rg, decider, bns, Xtr2, TR.n_seg)
+    dv_inner = head_decode(sp, rg, decider, bns, Xdv2, DV.n_seg)
+    te_inner = head_decode(sp, rg, decider, bns, Xte2, TE.n_seg)
   end
 
-  local en_tro, en_trs, en_tre = enumerate_runs(tr_off, tr_s, tr_e, tr_inner)
-  local en_dvo, en_dvs, en_dve = enumerate_runs(dv_off, dv_s, dv_e, dv_inner)
-  local en_teo, en_tes, en_tee = enumerate_runs(te_off, te_s, te_e, te_inner)
+  local Sruns_tr = enumerate_runs(TR.seg, tr_inner)
+  local Sruns_dv = enumerate_runs(DV.seg, dv_inner)
+  local Sruns_te = enumerate_runs(TE.seg, te_inner)
 
-  local tr_cty, dv_cty, te_cty = inner_to_ctx(tr_inner), inner_to_ctx(dv_inner), inner_to_ctx(te_inner)
+  local function ctx_spans (S, pred)
+    return spans.create({ offsets = S:offsets(), s = S:col("s"), e = S:col("e"),
+      ty = inner_to_ctx(pred) })
+  end
+
+  local Sctx_tr = ctx_spans(TR.seg, tr_inner)
+  local Sctx_dv = ctx_spans(DV.seg, dv_inner)
+  local Sctx_te = ctx_spans(TE.seg, te_inner)
 
   local ac = build_gazetteer(train)
-  local function cand_union (split, eoff, es, ee, goff, gs, ge)
-    local g_off, g_s, g_e = gaz_candidates(ac, split)
-    local A = spans.create({ offsets = eoff, s = es, e = ee, ty = zeros(es:size()) })
-    local B = spans.create({ offsets = g_off, s = g_s, e = g_e, ty = zeros(g_s:size()) })
-    local G = spans.create({ offsets = goff, s = gs, e = ge, ty = zeros(gs:size()) })
-    return A:union(B, G)
+  local function cand_union (split, Sruns, G)
+    local Sg = gaz_candidates(ac, split)
+    local A = spans.create({ offsets = Sruns:offsets(), s = Sruns:col("s"), e = Sruns:col("e"),
+      ty = zeros(Sruns:col("s"):size()) })
+    local B = spans.create({ offsets = Sg:offsets(), s = Sg:col("s"), e = Sg:col("e"),
+      ty = zeros(Sg:col("s"):size()) })
+    local Gz = spans.create({ offsets = G:offsets(), s = G:col("s"), e = G:col("e"),
+      ty = zeros(G:col("s"):size()) })
+    return A:union(B, Gz)
   end
-  local Scand_tr = cand_union(train, en_tro, en_trs, en_tre, tr_eoff, tr_es, tr_ee)
-  local Scand_dv = cand_union(dev, en_dvo, en_dvs, en_dve, dv_eoff, dv_es, dv_ee)
-  local Scand_te = cand_union(test_set, en_teo, en_tes, en_tee, te_eoff, te_es, te_ee)
-  local tr_co, tr_cs, tr_ce = Scand_tr:offsets(), Scand_tr:col("s"), Scand_tr:col("e")
-  local dv_co, dv_cs, dv_ce = Scand_dv:offsets(), Scand_dv:col("s"), Scand_dv:col("e")
-  local te_co, te_cs, te_ce = Scand_te:offsets(), Scand_te:col("s"), Scand_te:col("e")
-  local n_trc, n_dvc, n_tec = tr_cs:size(), dv_cs:size(), te_cs:size()
+  local Scand_tr = cand_union(train, Sruns_tr, TR.gold)
+  local Scand_dv = cand_union(dev, Sruns_dv, DV.gold)
+  local Scand_te = cand_union(test_set, Sruns_te, TE.gold)
+  local n_trc, n_dvc, n_tec = Scand_tr:col("s"):size(), Scand_dv:col("s"):size(), Scand_te:col("s"):size()
 
-  local Sgold_tr = spans.create({ offsets = tr_eoff, s = tr_es, e = tr_ee, ty = tr_ety })
-  local Sgold_dv = spans.create({ offsets = dv_eoff, s = dv_es, e = dv_ee, ty = dv_ety })
-  local Sgold_te = spans.create({ offsets = te_eoff, s = te_es, e = te_ee, ty = te_ety })
-  local tr_tlab = Scand_tr:type_labels(Sgold_tr, N_TYPES)
-  local dv_tlab = Scand_dv:type_labels(Sgold_dv, N_TYPES)
+  local tr_tlab = Scand_tr:type_labels(TR.gold, N_TYPES)
+  local dv_tlab = Scand_dv:type_labels(DV.gold, N_TYPES)
   local tr_tloff = ivec.create(n_trc + 1); tr_tloff:fill_indices()
   local dv_tloff = ivec.create(n_dvc + 1); dv_tloff:fill_indices()
 
-  local te_gold = te_eoff:get(te_eoff:size() - 1)
-  local n_te_docs = te_off:size() - 1
+  local te_gold = TE.gold:col("s"):size()
+  local n_te_docs = TE.n
   local Sgaz_empty = spans.create({ offsets = zeros(n_te_docs + 1),
     s = ivec.create(0), e = ivec.create(0), ty = ivec.create(0) })
-  local miss = ner.miss_report({ gaz = Sgaz_empty, bio = Scand_te, gold = Sgold_te, n_types = N_TYPES })
+  local miss = ner.miss_report({ gaz = Sgaz_empty, bio = Scand_te, gold = TE.gold, n_types = N_TYPES })
   local ubt = miss.under_by_type
   str.printf("[Cands] train=%d dev=%d test=%d | test span-coverage=%.4f"
     .. " | miss over=%d under=%d cross=%d none=%d"
@@ -382,16 +387,16 @@ test("conll", function ()
     ubt[0], ubt[1], ubt[2], ubt[3], sw())
 
   local ty_ng1, ty_ng2, ty_ng3s, ty_ntok, ty_bns, ty_block, ty_bounds
-  local function type_feats (split, co, cs, ce, n, toff, ts, te, ttypes, shps, is_train)
-    local m1, X = tokenize(split, co, cs, ce, zeros(n), ty_ng1)
+  local function type_feats (split, Scand, Sctx, shps, is_train)
+    local m1, X = tokenize(split, Scand, ty_ng1)
     local _, k1 = X:shape()
-    local m2, X2 = tokenize_ctx(split, co, cs, ce, toff, ts, te, ttypes, ty_ng2)
+    local m2, X2 = tokenize_ctx(split, Scand, Sctx, ty_ng2)
     local _, k2 = X2:shape()
     X:hcat(X2)
     local ksum = k1 + k2
     local bnds, ng3 = { 0, k1, ksum }, {}
     for i, kk in ipairs(cfg.shape.ks) do
-      local mi, Xi = tokenize_shape(split, co, cs, ce, shps[i], kk, ty_ng3s and ty_ng3s[i])
+      local mi, Xi = tokenize_shape(split, Scand, shps[i], kk, ty_ng3s and ty_ng3s[i])
       local _, ki = Xi:shape()
       X:hcat(Xi)
       ksum = ksum + ki
@@ -405,7 +410,8 @@ test("conll", function ()
     return X
   end
   local gaz_counts = build_typed_gaz(train)
-  local function gaz_block (split, co, cs, ce, tlab)
+  local function gaz_block (split, S, tlab)
+    local co, cs, ce = S:offsets(), S:col("s"), S:col("e")
     local off, tok, val = ivec.create(), svec.create(), fvec.create()
     off:push(0)
     local nd = co:size() - 1
@@ -427,7 +433,8 @@ test("conll", function ()
     return csr.create({ offsets = off, neighbors = tok, values = val, n_cols = N_TYPES })
   end
   local char_gaz = build_char_gaz(train, cfg.tok.ngram_min, cfg.tok.ngram_max)
-  local function char_gaz_block (split, co, cs, ce, tlab)
+  local function char_gaz_block (split, S, tlab)
+    local co, cs, ce = S:offsets(), S:col("s"), S:col("e")
     local off, tok, val = ivec.create(), svec.create(), fvec.create()
     off:push(0)
     local nd = co:size() - 1
@@ -458,21 +465,21 @@ test("conll", function ()
     end
     return csr.create({ offsets = off, neighbors = tok, values = val, n_cols = N_TYPES })
   end
-  local function ty_apply (split, co, cs, ce, n, toff, ts, te, ttypes, shps)
-    local X = type_feats(split, co, cs, ce, n, toff, ts, te, ttypes, shps, false)
+  local function ty_apply (split, Scand, Sctx, shps)
+    local X = type_feats(split, Scand, Sctx, shps, false)
     X:bns(ty_bns)
-    X:hcat(gaz_block(split, co, cs, ce, nil))
-    X:hcat(char_gaz_block(split, co, cs, ce, nil))
+    X:hcat(gaz_block(split, Scand, nil))
+    X:hcat(char_gaz_block(split, Scand, nil))
     X:standardize(ty_block)
     X:normalize()
     return X
   end
 
-  local Xty = type_feats(train, tr_co, tr_cs, tr_ce, n_trc, tr_off, tr_s, tr_e, tr_cty, tr_sh, true)
+  local Xty = type_feats(train, Scand_tr, Sctx_tr, TR.sh, true)
   local Ytype = csr.create({ offsets = tr_tloff, neighbors = tr_tlab, n_cols = N_TYPES + 1 })
   ty_bns = Xty:bns(Ytype)
-  Xty:hcat(gaz_block(train, tr_co, tr_cs, tr_ce, tr_tlab))
-  Xty:hcat(char_gaz_block(train, tr_co, tr_cs, tr_ce, tr_tlab))
+  Xty:hcat(gaz_block(train, Scand_tr, tr_tlab))
+  Xty:hcat(char_gaz_block(train, Scand_tr, tr_tlab))
   local ty_ntok_all = ty_ntok + 2 * N_TYPES
   local bounds = {}
   for _, b in ipairs(ty_bounds) do bounds[#bounds + 1] = b end
@@ -486,7 +493,7 @@ test("conll", function ()
   end
   Xty:standardize(ty_block)
   Xty:normalize()
-  local Xdv_ty = ty_apply(dev, dv_co, dv_cs, dv_ce, n_dvc, dv_off, dv_s, dv_e, dv_cty, dv_sh)
+  local Xdv_ty = ty_apply(dev, Scand_dv, Sctx_dv, DV.sh)
 
   str.printf("[Type] Encoding\n")
   local sp_ty, ridge_ty, _, _, decider_ty = optimize.krr({
@@ -498,8 +505,7 @@ test("conll", function ()
     arccos_order = cfg.type.arccos_order, arccos_depth = cfg.type.arccos_depth,
     arccos_tangent = cfg.type.arccos_tangent,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
-    val_spans = { cand_offsets = dv_co, cand_starts = dv_cs, cand_ends = dv_ce,
-      gold_offsets = dv_eoff, gold_starts = dv_es, gold_ends = dv_ee, gold_types = dv_ety },
+    val_cand = Scand_dv, val_gold = DV.gold,
     lambda = cfg.type.lambda, propensity_a = cfg.type.propensity_a, propensity_b = cfg.type.propensity_b,
     k = 1, search_trials = cfg.type.search_trials,
     each = util.make_ridge_log(stopwatch),
@@ -507,26 +513,26 @@ test("conll", function ()
 
   local decide = require("santoku.learn.decide")
   local argmax_ty = decide.create({ n_labels = N_TYPES + 1, span = true })
-  local n_dv_docs = dv_co:size() - 1
+  local n_dv_docs = DV.n
   local function span_score (d, scores, ndocs, Scand, Sgold)
     local _, m = d:score({ scores = scores, n_samples = ndocs, cand = Scand, gold = Sgold })
     return m
   end
-  local Xte_ty = ty_apply(test_set, te_co, te_cs, te_ce, n_tec, te_off, te_s, te_e, te_cty, te_sh)
+  local Xte_ty = ty_apply(test_set, Scand_te, Sctx_te, TE.sh)
   local te_codes = sp_ty:encode(Xte_ty)
   local te_lab = ridge_ty:label(te_codes, 2):neighbors()
   local te_scores = ridge_ty:regress(te_codes)
   local dev_scores = ridge_ty:regress(sp_ty:encode(Xdv_ty))
   str.printf("[Span] argmax dev %s | test %s %s\n",
-    util.fmt_metrics(span_score(argmax_ty, dev_scores, n_dv_docs, Scand_dv, Sgold_dv)),
-    util.fmt_metrics(span_score(argmax_ty, te_scores, n_te_docs, Scand_te, Sgold_te)), sw())
+    util.fmt_metrics(span_score(argmax_ty, dev_scores, n_dv_docs, Scand_dv, DV.gold)),
+    util.fmt_metrics(span_score(argmax_ty, te_scores, n_te_docs, Scand_te, TE.gold)), sw())
   str.printf("[Span] decide dev %s | test %s %s\n",
-    util.fmt_metrics(span_score(decider_ty, dev_scores, n_dv_docs, Scand_dv, Sgold_dv)),
-    util.fmt_metrics(span_score(decider_ty, te_scores, n_te_docs, Scand_te, Sgold_te)), sw())
+    util.fmt_metrics(span_score(decider_ty, dev_scores, n_dv_docs, Scand_dv, DV.gold)),
+    util.fmt_metrics(span_score(decider_ty, te_scores, n_te_docs, Scand_te, TE.gold)), sw())
 
   local tdr = ner.decode_report({
     cand = Scand_te, pred = te_lab, pred_stride = 2,
-    gold = Sgold_te, n_types = N_TYPES,
+    gold = TE.gold, n_types = N_TYPES,
   })
   local rbt, mbt, cf = tdr.reject_by_type, tdr.mistype_by_type, tdr.confusion
   str.printf("[Type Decode] gold=%d in_pool=%d not_in_pool=%d | correct=%d false_reject=%d mistype=%d\n",

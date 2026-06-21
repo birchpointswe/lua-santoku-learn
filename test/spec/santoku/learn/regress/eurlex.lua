@@ -28,7 +28,7 @@ local cfg = {
   },
   emb = {
     n_landmarks = 1024 * 8,
-    kernel = { "matern", "cosine", "arccos" },
+    kernel = { "matern", "cosine" },
     nu = { def = 3 },
     gamma = { def = 0.06169 },
     k = 256
@@ -56,8 +56,6 @@ test("eurlex classifier", function ()
   local n_labels = train.n_labels
   local k = cfg.emb.k or n_labels
   str.printf("[Data] train=%d dev=%d test=%d labels=%d %s\n", train.n, dev.n, test_set.n, n_labels, sw())
-
-  local dev_label_off, dev_label_nbr = dev.labels:offsets(), dev.labels:neighbors()
 
   local ngram_map, X = tokenize(train.text_iter(), train.n, cfg.tok.ngram)
   local _, n_tokens = X:shape()
@@ -109,11 +107,8 @@ test("eurlex classifier", function ()
     return sp_enc:encode(Xt)
   end
 
-  local dv_off, dv_nbr = ridge_obj:label(dev_codes, dev.n, k)
-  local _, dv_oracle = eval.oracle_f1({
-    pred_offsets = dv_off, pred_neighbors = dv_nbr,
-    expected_offsets = dev_label_off, expected_neighbors = dev_label_nbr,
-  })
+  local dv_P = ridge_obj:label(dev_codes, k)
+  local _, dv_oracle = eval.oracle_f1(dv_P, dev.labels)
   str.printf("[Oracle] dev %s %s\n", fmt_metrics(dv_oracle), sw())
 
   dev_codes = nil -- luacheck: ignore
