@@ -3,7 +3,6 @@ local booleanizer = require("santoku.learn.booleanizer")
 local csr = require("santoku.csr")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
-local fvec = require("santoku.fvec")
 local fs = require("santoku.fs")
 local str = require("santoku.string")
 local arr = require("santoku.array")
@@ -407,37 +406,22 @@ end
 local function _encode_housing_split (dataset, rows)
   local bzr = dataset.booleanizer
   local feature_cols = dataset.feature_cols
-  local categorical_cols = dataset.categorical_cols
   local target_col = dataset.target_col
   local n_features = bzr:features()
   local n_cont = #feature_cols
-  local bit_off = ivec.create()
-  local bit_nbr = ivec.create()
   local targets = dvec.create()
   local continuous = dvec.create()
-  bit_off:push(0)
   for _, row in ipairs(rows) do
     for _, col in ipairs(feature_cols) do
       continuous:push(tonumber(row[col]) or 0)
     end
-    for _, col in ipairs(categorical_cols) do
-      local val = row[col]
-      if val then
-        local bit = bzr:feature(col, val)
-        if bit then
-          bit_nbr:push(bit)
-        end
-      end
-    end
-    bit_off:push(bit_nbr:size())
     targets:push(tonumber(row[target_col]))
   end
-  local ones = fvec.create(bit_nbr:size()); ones:fill(1.0)
   return {
     n = #rows,
     n_features = n_features,
     n_continuous = n_cont,
-    bits = csr.create({ offsets = bit_off, neighbors = bit_nbr, values = ones, n_cols = n_features }),
+    bits = bzr:encode({ samples = rows, cols = dataset.categorical_cols }),
     continuous = continuous,
     targets = targets,
   }

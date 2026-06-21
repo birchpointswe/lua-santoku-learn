@@ -256,10 +256,11 @@ test("annotation flow", function ()
     assert(text == "hello world foo bar baz")
     local ids = ivec.create({ 1, 2, 3 })
     local ac = aho.create({ ids = ids, patterns = { "world", "foo", "baz" }, names = { "w", "f", "b" } })
-    local _, mids, starts, ends = ac:predict({
+    local S = ac:predict({
       texts = { text }, longest = true,
       exclude = lp.html_spans(existing)
     })
+    local mids, starts, ends = S:col("id"), S:col("s"), S:col("e")
     assert(mids:size() == 2)
     local pred = lp.html_match_tags(mids, starts, ends, { [1] = "f", [2] = "b" }, "predicted ")
     for _, t in ipairs(pred) do existing[#existing + 1] = t end
