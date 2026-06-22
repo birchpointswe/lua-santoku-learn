@@ -31,14 +31,12 @@ local cfg = {
   },
   emb = {
     n_landmarks = 1024 * 8,
-    kernel = { "matern", "cosine" },
-    nu = { def = 2 },
-    gamma = { def = 0.01038 }
+    kernel = { "cosine", "matern" }
   },
   ridge = {
-    lambda = { def = 2.1147e-02 },
-    propensity_a = { def = 0.6715 },
-    propensity_b = { def = 11.2535 },
+    lambda = { def = 7.8376e-02 },
+    propensity_a = { def = 7.9786 },
+    propensity_b = { def = 8.1669 },
     classes = 20,
     search_trials = 0,
     k = 1
@@ -76,7 +74,7 @@ test("newsgroups classifier", function ()
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
   local sp_enc, ridge_obj, val_codes, _, decider = optimize.krr({
     x = X, y = train.labels, val_x = Xv, val_y = validate.labels,
-    kernel = cfg.emb.kernel, nu = cfg.emb.nu, gamma = cfg.emb.gamma,
+    kernel = cfg.emb.kernel,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
     propensity_b = cfg.ridge.propensity_b,
