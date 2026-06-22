@@ -1,7 +1,10 @@
 local tokenizer = require("santoku.learn.tokenizer")
+local boundary = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 local ds = require("santoku.learn.dataset")
 local optimize = require("santoku.learn.optimize")
 local spectral = require("santoku.learn.spectral")
+local ridge = require("santoku.learn.ridge")
+local decide = require("santoku.learn.decide")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local util = require("santoku.learn.util")
@@ -34,13 +37,16 @@ local cfg = {
   },
 }
 
-local function tokenize (texts, nmin, nmax, tok)
-  local grow = tok == nil
-  if grow then tok = tokenizer.create({
-    ngram_min = nmin, ngram_max = nmax, normalize = cfg.tok.normalize })
-  end
-  local X = grow and tok:fit({ texts = texts }) or tok:tokenize({ texts = texts })
-  return tok, X
+local function tokenize (texts, nmin, nmax, bundle)
+  local grow = bundle == nil
+  if grow then bundle = {
+    byte = tokenizer.create({ ngram_min = nmin, ngram_max = nmax,
+      normalize = cfg.tok.normalize, boundary = boundary }),
+    word = tokenizer.create({ ngram_min = 1, ngram_max = 3, boundary = boundary, words = true }),
+  } end
+  local Xb = grow and bundle.byte:fit({ texts = texts }) or bundle.byte:tokenize({ texts = texts })
+  local Xw = grow and bundle.word:fit({ texts = texts }) or bundle.word:tokenize({ texts = texts })
+  return bundle, Xb:hcat(Xw)
 end
 
 test("imdb classifier", function ()
@@ -79,9 +85,11 @@ test("imdb classifier", function ()
     each = util.make_ridge_log(stopwatch),
   })
   do
+    -- persist/load round-trip every model artifact, then continue with the reloaded objects
     local p = os.tmpname()
-    sp_enc:persist(p)
-    sp_enc = spectral.load(p)   -- continue (and re-encode test) with the reloaded encoder
+    sp_enc:persist(p); sp_enc = spectral.load(p)
+    ridge_obj:persist(p); ridge_obj = ridge.load(p)
+    decider:persist(p); decider = decide.load(p)
     os.remove(p)
   end
   X = nil; Xv = nil -- luacheck: ignore
