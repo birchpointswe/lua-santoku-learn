@@ -76,7 +76,7 @@ test("newsgroups classifier", function ()
   str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
   local sp_enc, ridge_obj, val_codes, _, decider = optimize.krr({
     x = X, y = train.labels, val_x = Xv, val_y = validate.labels,
-    kernel = cfg.emb.kernel,
+    kernel = cfg.emb.kernel, nu = cfg.emb.nu, gamma = cfg.emb.gamma,
     n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
     lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
     propensity_b = cfg.ridge.propensity_b,
