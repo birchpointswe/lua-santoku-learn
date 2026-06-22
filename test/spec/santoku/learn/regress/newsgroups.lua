@@ -1,9 +1,14 @@
 local tokenizer = require("santoku.learn.tokenizer")
-local function tokenize (texts, nmin, nmax, tok)
-  local grow = tok == nil
-  if grow then tok = tokenizer.create({ ngram_min = nmin, ngram_max = nmax }) end
-  local X = grow and tok:fit({ texts = texts }) or tok:tokenize({ texts = texts })
-  return tok, X
+local boundary = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+local function tokenize (texts, nmin, nmax, bundle)
+  local grow = bundle == nil
+  if grow then bundle = {
+    byte = tokenizer.create({ ngram_min = nmin, ngram_max = nmax, boundary = boundary }),
+    word = tokenizer.create({ ngram_min = 1, ngram_max = 3, boundary = boundary, words = true }),
+  } end
+  local Xb = grow and bundle.byte:fit({ texts = texts }) or bundle.byte:tokenize({ texts = texts })
+  local Xw = grow and bundle.word:fit({ texts = texts }) or bundle.word:tokenize({ texts = texts })
+  return bundle, Xb:hcat(Xw)
 end
 local ds = require("santoku.learn.dataset")
 local optimize = require("santoku.learn.optimize")
@@ -26,12 +31,14 @@ local cfg = {
   },
   emb = {
     n_landmarks = 1024 * 8,
-    kernel = { "cosine", "matern" }
+    kernel = { "matern", "cosine" },
+    nu = { def = 2 },
+    gamma = { def = 0.01038 }
   },
   ridge = {
-    lambda = { def = 7.8376e-02 },
-    propensity_a = { def = 7.9786 },
-    propensity_b = { def = 8.1669 },
+    lambda = { def = 2.1147e-02 },
+    propensity_a = { def = 0.6715 },
+    propensity_b = { def = 11.2535 },
     classes = 20,
     search_trials = 0,
     k = 1

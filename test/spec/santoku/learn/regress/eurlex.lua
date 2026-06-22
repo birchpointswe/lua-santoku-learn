@@ -1,11 +1,16 @@
 local tokenizer = require("santoku.learn.tokenizer")
-local function tokenize (iter, _n, ng, tok)
+local boundary = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+local function tokenize (iter, _n, ng, bundle)
   local texts, x = {}, iter()
   while x do texts[#texts + 1] = x; x = iter() end
-  local grow = tok == nil
-  if grow then tok = tokenizer.create({ ngram_min = ng, ngram_max = ng }) end
-  local X = grow and tok:fit({ texts = texts }) or tok:tokenize({ texts = texts })
-  return tok, X
+  local grow = bundle == nil
+  if grow then bundle = {
+    byte = tokenizer.create({ ngram_min = ng, ngram_max = ng, boundary = boundary }),
+    word = tokenizer.create({ ngram_min = 1, ngram_max = 3, boundary = boundary, words = true }),
+  } end
+  local Xb = grow and bundle.byte:fit({ texts = texts }) or bundle.byte:tokenize({ texts = texts })
+  local Xw = grow and bundle.word:fit({ texts = texts }) or bundle.word:tokenize({ texts = texts })
+  return bundle, Xb:hcat(Xw)
 end
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
@@ -30,7 +35,7 @@ local cfg = {
     n_landmarks = 1024 * 8,
     kernel = { "matern", "cosine" },
     nu = { def = 3 },
-    gamma = { def = 0.06169 },
+    gamma = { def = 0.3017 },
     k = 256
   },
   ridge = {
