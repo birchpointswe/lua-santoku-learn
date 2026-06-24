@@ -300,6 +300,22 @@ local search = function (args)
   local cand_flat = n_dims > 0 and dvec.create(n_candidates * n_dims) or nil
   local ei_buf
 
+  -- top up any params not covered by the search dims (fixed -> center, else fresh sample)
+  local function fill_rest (params)
+    for _, name in ipairs(param_names) do
+      if params[name] == nil then
+        local s = samplers[name]
+        if s then
+          if s.type == "fixed" then
+            params[name] = s.center
+          else
+            params[name] = s.sample()
+          end
+        end
+      end
+    end
+  end
+
   for t = 1, trials do
     local params
 
@@ -311,18 +327,7 @@ local search = function (args)
           params[name] = samplers[name].denormalize(pt[i])
         end
       end
-      for _, name in ipairs(param_names) do
-        if params[name] == nil then
-          local s = samplers[name]
-          if s then
-            if s.type == "fixed" then
-              params[name] = s.center
-            else
-              params[name] = s.sample()
-            end
-          end
-        end
-      end
+      fill_rest(params)
     else
       local cand_pts = lhs_sample(n_candidates, n_dims)
       for i = 1, n_candidates do
@@ -343,18 +348,7 @@ local search = function (args)
       for i, name in ipairs(search_dims) do
         params[name] = samplers[name].denormalize(cand_flat:get(best_c * n_dims + i - 1))
       end
-      for _, name in ipairs(param_names) do
-        if params[name] == nil then
-          local s = samplers[name]
-          if s then
-            if s.type == "fixed" then
-              params[name] = s.center
-            else
-              params[name] = s.sample()
-            end
-          end
-        end
-      end
+      fill_rest(params)
     end
 
     if constrain_fn then constrain_fn(params) end
@@ -591,11 +585,26 @@ M.krr = function (args)
     elseif kn == "arccos" or kn == "arccos1" then families.arccos = true
     else families.matern = true end
   end
-  local function defval (v, d)
-    if type(v) == "table" then return v.def end
-    if v ~= nil then return v end
-    return d
+  -- Canonical kernel hyperparam specs, shared by the locked and search paths. gamma is a log
+  -- range; nu/order/depth/tangent are categorical. In every case `def` only warm-starts the
+  -- search (the center), it does not lock; pass a scalar to lock or a list to prune/reorder.
+  local function cat_spec (v, deflist)
+    if v == nil then return deflist end
+    if type(v) ~= "table" then return v end
+    if #v > 0 then return v end
+    local s = {}
+    for i = 1, #deflist do s[i] = deflist[i] end
+    s.def = v.def
+    return s
   end
+  args.gamma = spec_defaults(args.gamma, { min = 1e-2, max = 16, log = true, def = 1.0 })
+  args.nu = cat_spec(args.nu, { 3, 0, 1, 2 })
+  -- arccos grid pruned to the live region: order 0/5/6 and depth 3 never won anywhere (depth 3
+  -- collapses; order 0 = step is always worst; orders 5/6 plateau). 16-cell grid (4x2x2).
+  args.order = cat_spec(args.order, { 1, 2, 3, 4 })
+  args.depth = cat_spec(args.depth, { 1, 2 })
+  args.tangent = cat_spec(args.tangent, { 0, 1 })
+  local kernel_samplers = build_samplers(args, { "nu", "gamma", "order", "depth", "tangent" })
   local inner_names = {}
   add_label_params(inner_names, args, dense)
   if args.extra then
@@ -631,7 +640,9 @@ M.krr = function (args)
     if args.val_encode then return args.val_encode(sp_enc) end
     return sp_enc:encode(args.val_x)
   end
-  local function build_kd (spec)
+  -- solve == nil: search path (gram left unsolved, prepared for per-trial scoring). solve set:
+  -- locked path (lambda/propensity baked into the cholesky during encode, no prepare needed).
+  local function build_kd (spec, solve)
     collectgarbage("collect")
     spectral_args.kernel = spec.kernel
     spectral_args.gamma = spec.gamma
@@ -639,9 +650,9 @@ M.krr = function (args)
     spectral_args.order = spec.order
     spectral_args.depth = spec.depth
     spectral_args.tangent = spec.tangent
-    spectral_args.solve_lambda = nil
-    spectral_args.solve_propensity_a = nil
-    spectral_args.solve_propensity_b = nil
+    spectral_args.solve_lambda = solve and solve.lambda or nil
+    spectral_args.solve_propensity_a = solve and not dense and solve.propensity_a or nil
+    spectral_args.solve_propensity_b = solve and not dense and solve.propensity_b or nil
     if tiled and args.pqty_buf then
       local lbl = spec.label or spec.kernel
       spectral_args.pqty_buf = type(args.pqty_buf) == "function"
@@ -650,7 +661,7 @@ M.krr = function (args)
     rand.fast_seed(seed)
     local _, sp_enc, gram = spectral.encode(spectral_args)
     local val_codes = val_encode(sp_enc)
-    gram:prepare(val_codes, args.val_n_samples)
+    if not solve then gram:prepare(val_codes, args.val_n_samples) end
     return { sp_enc = sp_enc, gram = gram, val_codes = val_codes }
   end
   local function finish (kd, params, solve)
@@ -673,43 +684,32 @@ M.krr = function (args)
     local kname = kernels.def or kernels[1]
     local spec = { kernel = kname }
     if kname == "matern" then
-      spec.nu = defval(args.nu, 3)
-      spec.gamma = defval(args.gamma or args.rbf_gamma, 1.0)
+      spec.nu = kernel_samplers.nu.center
+      spec.gamma = kernel_samplers.gamma.center
     elseif kname == "rbf" then
-      spec.gamma = defval(args.gamma or args.rbf_gamma, 1.0)
+      spec.gamma = kernel_samplers.gamma.center
     elseif kname == "arccos" then
-      spec.order = defval(args.order, 1)
-      spec.depth = defval(args.depth, 1)
-      spec.tangent = defval(args.tangent, 0)
+      spec.order = kernel_samplers.order.center
+      spec.depth = kernel_samplers.depth.center
+      spec.tangent = kernel_samplers.tangent.center
     end
     local lp = sample_params(inner_samplers, inner_names, nil, true)
-    collectgarbage("collect")
-    spectral_args.kernel = kname
-    spectral_args.gamma = spec.gamma
-    spectral_args.nu = spec.nu
-    spectral_args.order = spec.order
-    spectral_args.depth = spec.depth
-    spectral_args.tangent = spec.tangent
-    spectral_args.solve_lambda = lp.lambda
-    if not dense then
-      spectral_args.solve_propensity_a = lp.propensity_a
-      spectral_args.solve_propensity_b = lp.propensity_b
-    end
-    if tiled and args.pqty_buf then
-      spectral_args.pqty_buf = type(args.pqty_buf) == "function"
-        and args.pqty_buf(kname) or args.pqty_buf
-    end
-    rand.fast_seed(seed)
-    local _, sp_enc, gram = spectral.encode(spectral_args)
-    local val_codes = val_encode(sp_enc)
+    local kd = build_kd(spec, lp)
     local params = { kernel = kname, gamma = spec.gamma, nu = spec.nu,
       order = spec.order, depth = spec.depth, tangent = spec.tangent }
     for _, n in ipairs(inner_names) do params[n] = lp[n] end
-    return finish({ sp_enc = sp_enc, gram = gram, val_codes = val_codes }, params, "cholesky")
+    return finish(kd, params, "cholesky")
   end
   local trial_fn = args.trial_fn or default_trial_fn(args, dense, mode == "multilabel" and "fmeasure" or mode, k)
   local matern_trials = args.matern_trials or args.search_trials or 0
   local arccos_trials = args.arccos_trials or args.search_trials or 0
+  -- arccos is a small discrete grid (order x depth x tangent); never run (or count) more trials
+  -- than unique cells -- the rest are just dedup-cache hits.
+  if families.arccos then
+    local function grid_size (v) return type(v) == "table" and #v or 1 end
+    local cells = grid_size(args.order) * grid_size(args.depth) * grid_size(args.tangent)
+    if arccos_trials > cells then arccos_trials = cells end
+  end
   local btot = (families.cosine and 1 or 0)
     + (families.matern and matern_trials or 0)
     + (families.arccos and arccos_trials or 0)
@@ -736,39 +736,31 @@ M.krr = function (args)
     eval_kd(build_kd({ kernel = "cosine", label = "cosine" }), { kernel = "cosine" })
   end
   if families.matern then
-    args.matern_nu = args.matern_nu or { 3, 0, 1, 2 }
-    args.matern_gamma = spec_defaults(args.matern_gamma or args.gamma or args.rbf_gamma,
-      { min = 1e-2, max = 16, log = true, def = 1.0 })
-    local m_samplers = build_samplers(args, { "matern_nu", "matern_gamma" })
+    local m_samplers = { nu = kernel_samplers.nu, gamma = kernel_samplers.gamma }
     search({
-      param_names = { "matern_nu", "matern_gamma" }, samplers = m_samplers,
+      param_names = { "nu", "gamma" }, samplers = m_samplers,
       trials = matern_trials, skip_final = true,
       trial_fn = function (gp)
-        local kd = build_kd({ kernel = "matern", nu = gp.matern_nu, gamma = gp.matern_gamma,
-          label = "matern" })
-        return eval_kd(kd, { kernel = "matern", nu = gp.matern_nu, gamma = gp.matern_gamma })
+        local kd = build_kd({ kernel = "matern", nu = gp.nu, gamma = gp.gamma, label = "matern" })
+        return eval_kd(kd, { kernel = "matern", nu = gp.nu, gamma = gp.gamma })
       end,
     })
   end
   if families.arccos then
-    -- Pruned to the live region: order 0/5/6 and depth 3 never won anywhere (depth 3 collapses; order 0
-    -- = step is always worst; orders 5/6 plateau). 16-cell grid (4x2x2) so the BO covers it fully.
-    args.arccos_order = args.arccos_order or { 1, 2, 3, 4 }
-    args.arccos_depth = args.arccos_depth or { 1, 2 }
-    args.arccos_tangent = args.arccos_tangent or { 0, 1 }
-    local a_samplers = build_samplers(args, { "arccos_order", "arccos_depth", "arccos_tangent" })
+    local a_samplers = { order = kernel_samplers.order, depth = kernel_samplers.depth,
+      tangent = kernel_samplers.tangent }
     local seen = {}
     search({
-      param_names = { "arccos_order", "arccos_depth", "arccos_tangent" }, samplers = a_samplers,
+      param_names = { "order", "depth", "tangent" }, samplers = a_samplers,
       trials = arccos_trials, skip_final = true,
       trial_fn = function (gp)
-        local sig = gp.arccos_order .. ":" .. gp.arccos_depth .. ":" .. gp.arccos_tangent
+        local sig = gp.order .. ":" .. gp.depth .. ":" .. gp.tangent
         local hit = seen[sig]
         if hit then return hit[1], hit[2] end
-        local kd = build_kd({ kernel = "arccos", order = gp.arccos_order, depth = gp.arccos_depth,
-          tangent = gp.arccos_tangent, label = "arccos" })
-        local sc, sm = eval_kd(kd, { kernel = "arccos", order = gp.arccos_order,
-          depth = gp.arccos_depth, tangent = gp.arccos_tangent })
+        local kd = build_kd({ kernel = "arccos", order = gp.order, depth = gp.depth,
+          tangent = gp.tangent, label = "arccos" })
+        local sc, sm = eval_kd(kd, { kernel = "arccos", order = gp.order,
+          depth = gp.depth, tangent = gp.tangent })
         seen[sig] = { sc, sm }
         return sc, sm
       end,

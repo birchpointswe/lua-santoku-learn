@@ -88,7 +88,7 @@ test("housing regressor", function ()
   do
     local p = os.tmpname()
     sp_enc:persist(p)
-    sp_enc = spectral.load(p)   -- continue (and re-encode test) with the reloaded encoder
+    sp_enc = spectral.load(p)
     os.remove(p)
   end
   X = nil; Xv = nil -- luacheck: ignore
