@@ -150,6 +150,15 @@ static inline int tk_spectral_landmarks_ctx_gc (lua_State *L) {
 
 #define TK_CHOL_BLOCK 256
 
+
+
+static inline double tk_lm_drand (uint64_t *s) {
+  uint64_t x = *s;
+  unsigned int count = (unsigned int) (x >> 61);
+  *s = x * tk_fast_multiplier;
+  return ((double) ((uint32_t) ((x ^ x >> 22) >> (22 + count)))) / ((double) UINT32_MAX);
+}
+
 static inline void tk_spectral_sample_landmarks (
   lua_State *L,
   tk_spectral_modality_t *mod,
@@ -169,6 +178,13 @@ static inline void tk_spectral_sample_landmarks (
   uint64_t n_docs = n_samples;
   if (chol_block == 0) chol_block = 64;
   if (chol_block > TK_CHOL_BLOCK) chol_block = TK_CHOL_BLOCK;
+
+
+
+
+
+
+  uint64_t lm_state = tk_hash_mix(0x9E3779B97F4A7C15ull);
 
   if (n_landmarks == 0 || n_landmarks > n_docs)
     n_landmarks = n_docs;
@@ -293,7 +309,7 @@ static inline void tk_spectral_sample_landmarks (
   }
 
   #define SAMPLE_PROPOSAL() ({ \
-    double _r = tk_fast_drand() * proposal_total; \
+    double _r = tk_lm_drand(&lm_state) * proposal_total; \
     uint64_t _lo = 0, _hi = n_docs; \
     while (_lo < _hi) { \
       uint64_t _mid = _lo + (_hi - _lo) / 2; \
@@ -351,7 +367,7 @@ static inline void tk_spectral_sample_landmarks (
 
       if (proposal[pi] > 1e-15) {
         double accept_prob = residual[pi] / proposal[pi];
-        if (tk_fast_drand() > accept_prob) continue;
+        if (tk_lm_drand(&lm_state) > accept_prob) continue;
       } else {
         continue;
       }
