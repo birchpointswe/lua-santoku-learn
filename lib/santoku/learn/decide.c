@@ -92,7 +92,7 @@ static inline void tk_decide_span_topw (
 
 static inline int tk_decide_gc (lua_State *L) {
   tk_decide_t *g = tk_decide_peek(L, 1);
-  if (!g->destroyed) free(g->offsets);
+  if (!g->destroyed) { free(g->offsets); }
   g->offsets = NULL;
   g->destroyed = true;
   return 0;
