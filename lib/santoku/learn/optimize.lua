@@ -559,6 +559,7 @@ end
 M.krr = function (args)
   local spectral = require("santoku.learn.spectral")
   local ridge = require("santoku.learn.ridge")
+  local fvec = require("santoku.fvec")
   -- Object API: x/val_x (csr features or mtx codes), y/val_y (labels csr) flow as objects;
   -- spectral.encode and the decode helpers consume them directly. Only scalars are read here.
   if args.x ~= nil then
@@ -605,6 +606,7 @@ M.krr = function (args)
   args.depth = cat_spec(args.depth, { 1, 2 })
   args.tangent = cat_spec(args.tangent, { 0, 1 })
   local kernel_samplers = build_samplers(args, { "nu", "gamma", "order", "depth", "tangent" })
+  local do_search = args.search_trials and args.search_trials > 0
   local inner_names = {}
   add_label_params(inner_names, args, dense)
   if args.extra then
@@ -616,7 +618,6 @@ M.krr = function (args)
   end
   local inner_samplers = build_samplers(args, inner_names)
   local inner_trials = args.inner_trials or 80
-  local do_search = args.search_trials and args.search_trials > 0
   local k = not dense and (args.k or 32) or nil
   local tiled = not dense
   local tile_labels = tiled and (args.tile_labels or 1024) or nil
@@ -630,10 +631,17 @@ M.krr = function (args)
     n_labels = args.n_labels,
     targets = args.targets, n_targets = args.n_targets,
   }
+  -- Auto scratch: allocate the tiled buffers ONCE and reuse them across every build_kd, so a search does
+  -- not re-alloc (and the OS re-fault) the big n_landmarks*n_samples chol buffer per trial -- that churn,
+  -- not just the size, is what hurts. The caller passes chol_buf/pqty_buf/w_buf ONLY to control storage
+  -- (e.g. fvec.mmap_create to keep them off RAM, or to persist); nil => we reuse one RAM buffer here.
+  local pqty_auto, w_auto
   if tiled then
     spectral_args.tile_labels = tile_labels
     spectral_args.tile_samples = args.tile_samples
-    spectral_args.chol_buf = args.chol_buf
+    spectral_args.chol_buf = args.chol_buf or fvec.create(args.n_landmarks * args.n_samples)
+    pqty_auto = args.pqty_buf or fvec.create(args.n_landmarks * (args.n_labels or 1))
+    w_auto = args.w_buf or fvec.create(args.n_landmarks * (args.n_labels or 1))
   end
   local seed = args.seed or 1
   local function val_encode (sp_enc)
@@ -653,10 +661,10 @@ M.krr = function (args)
     spectral_args.solve_lambda = solve and solve.lambda or nil
     spectral_args.solve_propensity_a = solve and not dense and solve.propensity_a or nil
     spectral_args.solve_propensity_b = solve and not dense and solve.propensity_b or nil
-    if tiled and args.pqty_buf then
+    if tiled then
       local lbl = spec.label or spec.kernel
-      spectral_args.pqty_buf = type(args.pqty_buf) == "function"
-        and args.pqty_buf(lbl) or args.pqty_buf
+      spectral_args.pqty_buf = type(pqty_auto) == "function"
+        and pqty_auto(lbl) or pqty_auto
     end
     rand.fast_seed(seed)
     local _, sp_enc, gram = spectral.encode(spectral_args)
@@ -669,7 +677,7 @@ M.krr = function (args)
       gram = kd.gram, lambda = params.lambda,
       propensity_a = not dense and params.propensity_a or nil,
       propensity_b = not dense and params.propensity_b or nil,
-      w_buf = tiled and args.w_buf or nil,
+      w_buf = tiled and w_auto or nil,
       tile_labels = tiled and tile_labels or nil,
     })
     if args.each then args.each({ event = "done", params = params, emb_d = kd.sp_enc:dims(),
