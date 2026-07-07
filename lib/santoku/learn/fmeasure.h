@@ -6,11 +6,6 @@
 #include <stdbool.h>
 #include <santoku/rvec.h>
 
-// Find the score cutoff over a ranked pool that maximizes micro-F1.
-// Each pool entry: .i = 1 if it is a true positive (predicted label in gold), else 0; .d = score.
-// Sorts pool descending by score in place. total_expected = total gold-set size across samples.
-// f1/prec/rec receive the best micro metrics (any may be NULL). If threshold != NULL it receives the
-// score cut: the midpoint between the last kept and first dropped entry, +inf when nothing is kept.
 static inline void tk_fmeasure_sweep (
   tk_rank_t *pool,
   size_t n,

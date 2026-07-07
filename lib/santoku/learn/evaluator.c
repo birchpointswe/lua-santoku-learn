@@ -1,10 +1,18 @@
-#include <santoku/iuset.h>
-#include <santoku/csr.h>
+#include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
+#include <santoku/dvec.h>
 #include <santoku/fvec.h>
 #include <math.h>
 #include <float.h>
-#include <string.h>
+
+static inline double tm_eval_err (
+  tk_fvec_t *pf, tk_dvec_t *pd, tk_dvec_t *ed, tk_ivec_t *ei, uint64_t i, double *exp_out
+) {
+  double exp_val = ed ? ed->a[i] : (double) ei->a[i];
+  double pred_val = pf ? (double) pf->a[i] : pd->a[i];
+  if (exp_out) *exp_out = exp_val;
+  return fabs(pred_val - exp_val);
+}
 
 static inline int tm_regress_accuracy (lua_State *L)
 {
@@ -19,9 +27,8 @@ static inline int tm_regress_accuracy (lua_State *L)
   double total = 0.0, min_err = DBL_MAX, max_err = 0.0, sum_exp = 0.0;
   #pragma omp parallel for reduction(+:total,sum_exp) reduction(min:min_err) reduction(max:max_err)
   for (uint64_t i = 0; i < n; i++) {
-    double exp_val = expected_d ? expected_d->a[i] : (double)expected_i->a[i];
-    double pred_val = predicted_f ? (double)predicted_f->a[i] : predicted_d->a[i];
-    double err = fabs(pred_val - exp_val);
+    double exp_val;
+    double err = tm_eval_err(predicted_f, predicted_d, expected_d, expected_i, i, &exp_val);
     total += err;
     sum_exp += exp_val;
     if (err < min_err) min_err = err;
@@ -33,9 +40,7 @@ static inline int tm_regress_accuracy (lua_State *L)
   double var = 0.0;
   #pragma omp parallel for reduction(+:var)
   for (uint64_t i = 0; i < n; i++) {
-    double exp_val = expected_d ? expected_d->a[i] : (double)expected_i->a[i];
-    double pred_val = predicted_f ? (double)predicted_f->a[i] : predicted_d->a[i];
-    double err = fabs(pred_val - exp_val);
+    double err = tm_eval_err(predicted_f, predicted_d, expected_d, expected_i, i, NULL);
     var += (err - mean) * (err - mean);
   }
   double std = n > 1 ? sqrt(var / (n - 1)) : 0.0;
@@ -55,77 +60,14 @@ static inline int tm_regress_accuracy (lua_State *L)
   return 1;
 }
 
-
-// Per-sample oracle headroom: the best micro/macro F1 achievable if an oracle picked the optimal top-k
-// per sample (k sweeps 1..hood maximizing that sample's F1). An upper bound for diagnostics, NOT a
-// deployable decode (that is the decider's job). Returns the oracle per-sample k vector and metrics.
-static inline int tm_oracle_f1 (lua_State *L)
-{
-  // oracle_f1(P_pred, E_expected) -- both csr (i64 label neighbors)
-  tk_csr_t *P = tk_csr_peek(L, 1, "pred");
-  tk_csr_t *E = tk_csr_peek(L, 2, "expected");
-  tk_ivec_t *pred_off = P->offsets, *pred_nbr = (tk_ivec_t *) P->neighbors;
-  tk_ivec_t *exp_off = E->offsets, *exp_nbr = (tk_ivec_t *) E->neighbors;
-  uint64_t n_samples = pred_off->n - 1;
-  if (exp_off->n != n_samples + 1)
-    return luaL_error(L, "expected_offsets length must match sample count + 1");
-  tk_ivec_t *ks = tk_ivec_create(L, n_samples);
-  uint64_t mi_tp = 0, mi_k = 0, mi_exp = 0, n_valid = 0;
-  double ma_prec = 0, ma_rec = 0, ma_f1 = 0;
-  #pragma omp parallel for reduction(+:mi_tp,mi_k,mi_exp,n_valid,ma_prec,ma_rec,ma_f1)
-  for (uint64_t s = 0; s < n_samples; s++) {
-    int64_t ps = pred_off->a[s], pe = pred_off->a[s + 1];
-    uint64_t hood_size = (uint64_t)(pe - ps);
-    int64_t es = exp_off->a[s], ee = exp_off->a[s + 1];
-    uint64_t n_expected = (uint64_t)(ee - es);
-    if (n_expected == 0 || hood_size == 0) { ks->a[s] = 0; continue; }
-    int kha;
-    tk_iuset_t *exp_set = tk_iuset_create(NULL, 0);
-    for (int64_t i = es; i < ee; i++)
-      tk_iuset_put(exp_set, exp_nbr->a[i], &kha);
-    double best_f1 = -1.0;
-    uint64_t best_k = 1, best_tp = 0, tp = 0;
-    for (uint64_t k = 1; k <= hood_size; k++) {
-      if (tk_iuset_contains(exp_set, pred_nbr->a[ps + (int64_t)(k - 1)]) != 0) tp++;
-      double prec = (double)tp / k;
-      double rec = (double)tp / n_expected;
-      double f1 = (prec + rec) > 0 ? 2.0 * prec * rec / (prec + rec) : 0.0;
-      if (f1 > best_f1) { best_f1 = f1; best_k = k; best_tp = tp; }
-    }
-    ks->a[s] = (int64_t)best_k;
-    tk_iuset_destroy(exp_set);
-    mi_tp += best_tp;
-    mi_k += best_k;
-    mi_exp += n_expected;
-    ma_prec += (double)best_tp / best_k;
-    ma_rec += (double)best_tp / n_expected;
-    ma_f1 += best_f1;
-    n_valid++;
-  }
-  lua_pushvalue(L, -1);
-  lua_newtable(L);
-  double mi_prec = mi_k > 0 ? (double)mi_tp / mi_k : 0;
-  double mi_rec = mi_exp > 0 ? (double)mi_tp / mi_exp : 0;
-  double mi_f1v = (mi_prec + mi_rec) > 0 ? 2.0 * mi_prec * mi_rec / (mi_prec + mi_rec) : 0;
-  lua_pushnumber(L, mi_prec); lua_setfield(L, -2, "micro_precision");
-  lua_pushnumber(L, mi_rec); lua_setfield(L, -2, "micro_recall");
-  lua_pushnumber(L, mi_f1v); lua_setfield(L, -2, "micro_f1");
-  lua_pushnumber(L, n_valid > 0 ? ma_prec / n_valid : 0); lua_setfield(L, -2, "sample_precision");
-  lua_pushnumber(L, n_valid > 0 ? ma_rec / n_valid : 0); lua_setfield(L, -2, "sample_recall");
-  lua_pushnumber(L, n_valid > 0 ? ma_f1 / n_valid : 0); lua_setfield(L, -2, "sample_f1");
-  return 2;
-}
-
 static luaL_Reg tm_evaluator_fns[] =
 {
   { "regress_accuracy", tm_regress_accuracy },
-  { "oracle_f1", tm_oracle_f1 },
   { NULL, NULL }
 };
 
 int luaopen_santoku_learn_evaluator (lua_State *L)
 {
-  tk_lua_require_mod(L, "santoku.csr");   // oracle_f1(P, E) object form
   lua_newtable(L);
   tk_lua_register(L, tm_evaluator_fns, 0);
   return 1;

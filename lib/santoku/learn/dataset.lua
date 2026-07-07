@@ -1,16 +1,31 @@
-local serialize = require("santoku.serialize") -- luacheck: ignore
 local booleanizer = require("santoku.learn.booleanizer")
 local csr = require("santoku.csr")
+local mtx = require("santoku.mtx")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
 local fs = require("santoku.fs")
 local str = require("santoku.string")
 local arr = require("santoku.array")
 local num = require("santoku.num")
-local json = require("cjson") -- luacheck: ignore
 local lpeg_utils = require("santoku.lpeg")
 
 local M = {}
+
+local function single_label_csr (n, n_cols, get)
+  local off = ivec.create()
+  local nbr = ivec.create()
+  for i = 0, n - 1 do
+    off:push(i)
+    nbr:push(get(i))
+  end
+  off:push(n)
+  return csr.create({ offsets = off, neighbors = nbr, n_cols = n_cols })
+end
+
+local function split_ranges (n, ratio)
+  local n_train = num.floor(n * ratio)
+  return { 1, n_train, n_train + 1, n }
+end
 
 M.read_binary_mnist = function (fp, n_features, max)
   local p_off = ivec.create()
@@ -51,40 +66,25 @@ local function _split_binary_mnist (dataset, s, e)
   local ids = ivec.create()
   ids:copy(dataset.ids, s - 1, e, 0)
   local n = e - s + 1
-  local sol_off = ivec.create()
-  local sol_nbr = ivec.create()
-  for i = 0, n - 1 do
-    sol_off:push(i)
-    sol_nbr:push(dataset.solutions:get(s - 1 + i))
-  end
-  sol_off:push(n)
   return {
     ids = ids,
-    labels = csr.create({ offsets = sol_off, neighbors = sol_nbr, n_cols = dataset.n_labels }),
+    labels = single_label_csr(n, dataset.n_labels, function (i)
+      return dataset.solutions:get(s - 1 + i)
+    end),
     n_labels = dataset.n_labels,
     n_features = dataset.n_features,
     n = n,
   }
 end
 
-
-M.split_binary_mnist = function (dataset, ratio, tvr)
+M.split_binary_mnist = function (dataset, ratio)
   if ratio >= 1 then
     return _split_binary_mnist(dataset, 1, dataset.n)
-  else
-    local n_train_total = num.floor(dataset.n * ratio)
-    if not tvr or tvr <= 0 then
-      return
-        _split_binary_mnist(dataset, 1, n_train_total),
-        _split_binary_mnist(dataset, n_train_total + 1, dataset.n)
-    end
-    local n_val = num.floor(n_train_total * tvr)
-    local n_train = n_train_total - n_val
-    return
-      _split_binary_mnist(dataset, 1, n_train),
-      _split_binary_mnist(dataset, n_train_total + 1, dataset.n),
-      _split_binary_mnist(dataset, n_train + 1, n_train_total)
   end
+  local r = split_ranges(dataset.n, ratio)
+  return
+    _split_binary_mnist(dataset, r[1], r[2]),
+    _split_binary_mnist(dataset, r[3], r[4])
 end
 
 M.read_imdb = function (dir, max)
@@ -130,20 +130,14 @@ local function _split_imdb (dataset, s, e)
   }
 end
 
-M.split_imdb = function (dataset, ratio, tvr)
-  local n_train_total = num.floor(#dataset.problems * ratio)
-  if not tvr or tvr <= 0 then
-    return
-      _split_imdb(dataset, 1, n_train_total),
-      _split_imdb(dataset, n_train_total + 1, #dataset.problems)
-  end
-  local n_val = num.floor(n_train_total * tvr)
-  local n_train = n_train_total - n_val
+M.split_imdb = function (dataset, ratio)
+  local r = split_ranges(#dataset.problems, ratio)
   return
-    _split_imdb(dataset, 1, n_train),
-    _split_imdb(dataset, n_train_total + 1, #dataset.problems),
-    _split_imdb(dataset, n_train + 1, n_train_total)
+    _split_imdb(dataset, r[1], r[2]),
+    _split_imdb(dataset, r[3], r[4])
 end
+
+local scrub_tlds = { "edu", "com", "org", "net", "gov" }
 
 local function clean_newsgroup_text (text, remove)
   remove = remove or { headers = true, quotes = true, footers = true, emails = false }
@@ -165,11 +159,9 @@ local function clean_newsgroup_text (text, remove)
       else
         if remove.emails then
           line = str.gsub(line, "[%w%.%-_]+@[%w%.%-]+%.[%w]+", "")
-          line = str.gsub(line, "[%w%-]+%.[%w%-]+%.edu", "")
-          line = str.gsub(line, "[%w%-]+%.[%w%-]+%.com", "")
-          line = str.gsub(line, "[%w%-]+%.[%w%-]+%.org", "")
-          line = str.gsub(line, "[%w%-]+%.[%w%-]+%.net", "")
-          line = str.gsub(line, "[%w%-]+%.[%w%-]+%.gov", "")
+          for _, tld in ipairs(scrub_tlds) do
+            line = str.gsub(line, "[%w%-]+%.[%w%-]+%." .. tld, "")
+          end
         end
         lines[#lines + 1] = line
       end
@@ -216,23 +208,18 @@ M.read_20newsgroups = function (dir, max_per_class, remove, max)
     shuffled_solutions = ss
   end
   local n_cats = #categories
-  local sol_off = ivec.create()
-  local sol_nbr = ivec.create()
-  for i = 1, total do
-    sol_off:push(i - 1)
-    sol_nbr:push(shuffled_solutions[i])
-  end
-  sol_off:push(total)
   return {
     n = total,
     n_labels = n_cats,
     categories = categories,
     problems = shuffled_problems,
-    labels = csr.create({ offsets = sol_off, neighbors = sol_nbr, n_cols = n_cats }),
+    labels = single_label_csr(total, n_cats, function (i)
+      return shuffled_solutions[i + 1]
+    end),
   }
 end
 
-M.read_20newsgroups_split = function (train_dir, test_dir, max, remove, tvr)
+M.read_20newsgroups_split = function (train_dir, test_dir, max, remove)
   local all_train = M.read_20newsgroups(train_dir, nil, remove, max)
   local test_raw = M.read_20newsgroups(test_dir, nil, remove, max)
   local test = {
@@ -242,42 +229,7 @@ M.read_20newsgroups_split = function (train_dir, test_dir, max, remove, tvr)
     problems = test_raw.problems,
     labels = test_raw.labels,
   }
-  if not tvr or tvr <= 0 then
-    return all_train, test
-  end
-  local val_n = math.floor(all_train.n * tvr)
-  local train_n = all_train.n - val_n
-  local all_nbr = all_train.labels:neighbors()
-  local train_problems, val_problems = {}, {}
-  local train_sol_off, train_sol_nbr = ivec.create(), ivec.create()
-  local val_sol_off, val_sol_nbr = ivec.create(), ivec.create()
-  for i = 1, train_n do
-    train_problems[i] = all_train.problems[i]
-    train_sol_off:push(i - 1)
-    train_sol_nbr:push(all_nbr:get(i - 1))
-  end
-  train_sol_off:push(train_n)
-  for i = train_n + 1, all_train.n do
-    val_problems[i - train_n] = all_train.problems[i]
-    val_sol_off:push(i - train_n - 1)
-    val_sol_nbr:push(all_nbr:get(i - 1))
-  end
-  val_sol_off:push(val_n)
-  local train = {
-    n = train_n,
-    n_labels = all_train.n_labels,
-    categories = all_train.categories,
-    problems = train_problems,
-    labels = csr.create({ offsets = train_sol_off, neighbors = train_sol_nbr, n_cols = all_train.n_labels }),
-  }
-  local validate = {
-    n = val_n,
-    n_labels = all_train.n_labels,
-    categories = all_train.categories,
-    problems = val_problems,
-    labels = csr.create({ offsets = val_sol_off, neighbors = val_sol_nbr, n_cols = all_train.n_labels }),
-  }
-  return train, test, validate
+  return all_train, test
 end
 
 M.read_eurlex57k = function (dir, max)
@@ -422,34 +374,25 @@ local function _encode_housing_split (dataset, rows)
     n_features = n_features,
     n_continuous = n_cont,
     bits = bzr:encode({ samples = rows, cols = dataset.categorical_cols }),
-    continuous = continuous,
+    -- F32 (to_fvec): block CSR values are read as float by the encoder, so an F64-backed mtx would be
+    -- misread byte-for-byte and poison the gram with NaN.
+    continuous = mtx.create({ data = continuous:to_fvec(), n_rows = #rows, n_cols = n_cont }),
     targets = targets,
   }
 end
 
-M.split_california_housing = function (dataset, ttr, tvr)
+M.split_california_housing = function (dataset, ttr)
   local n = dataset.n
   local data = dataset.data
-  local n_train_total = num.floor(n * ttr)
-  local n_val = tvr and num.floor(n * tvr) or 0
-  local n_train = n_train_total
-  local train_rows, val_rows, test_rows = {}, {}, {}
+  local n_train = num.floor(n * ttr)
+  local train_rows, test_rows = {}, {}
   for i = 1, n_train do
     train_rows[#train_rows + 1] = data[i]
   end
-  for i = n_train + 1, n_train + n_val do
-    val_rows[#val_rows + 1] = data[i]
-  end
-  for i = n_train + n_val + 1, n do
+  for i = n_train + 1, n do
     test_rows[#test_rows + 1] = data[i]
   end
-  local train = _encode_housing_split(dataset, train_rows)
-  local test = _encode_housing_split(dataset, test_rows)
-  if n_val > 0 then
-    local validate = _encode_housing_split(dataset, val_rows)
-    return train, test, validate
-  end
-  return train, test
+  return _encode_housing_split(dataset, train_rows), _encode_housing_split(dataset, test_rows)
 end
 
 local conll_types = { PER = 0, ORG = 1, LOC = 2, MISC = 3 }

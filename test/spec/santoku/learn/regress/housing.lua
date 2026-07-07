@@ -1,116 +1,65 @@
-local mtx = require("santoku.mtx")
-local ivec = require("santoku.ivec")
+local optimize = require("santoku.learn.optimize")
 local ds = require("santoku.learn.dataset")
 local eval = require("santoku.learn.evaluator")
-local fvec = require("santoku.fvec")
-local optimize = require("santoku.learn.optimize")
-local spectral = require("santoku.learn.spectral")
+local util = require("santoku.learn.util")
 local str = require("santoku.string")
 local test = require("santoku.test")
-local util = require("santoku.learn.util")
 local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
 local cfg = {
-  data = {
-    ttr = 0.8,
-    tvr = 0.1,
-    max = nil
-  },
-  emb = {
-    n_landmarks = 1024 * 8,
-    kernel = { "matern", "cosine", "arccos" },
-    nu = { def = 1 },
-    gamma = { def = 1.207 }
-  },
-  ridge = {
-    lambda = { def = 3.7026e-02 },
-    search_trials = 0
-  },
+  verbose = false,
+  search_landmarks = 2048,
+  data = { ttr = 0.8 },
+  n_landmarks = 1024 * 8,
+  kernel = { "matern" },
+  nu = { def = 0 },
+  gamma = { def = 0.165325 },
+  lambda = { def = 0.000112317 },
+  scales = { def = {68.1108,98.6092,0.24483,0.528534,0.031906,0.469059,0.0100795,1.13818,99.2109} },
+  search_trials = 0,
+  folds = 5,
 }
 
-test("housing regressor", function ()
-
+test("housing CV", function ()
   local stopwatch = utc.stopwatch()
-  local function sw()
-    local d, dd = stopwatch()
-    return str.format("(%.1fs +%.1fs)", d, dd)
-  end
-
   str.printf("[Data] Loading\n")
-  local dataset = ds.read_california_housing("test/res/california-housing.csv", {
-    max = cfg.data.max,
-  })
-  local train, test_set, validate = ds.split_california_housing(dataset, cfg.data.ttr, cfg.data.tvr)
-  local n_cat = dataset.n_features
+  local dataset = ds.read_california_housing("test/res/california-housing.csv", {})
+  local train, test_set = ds.split_california_housing(dataset, cfg.data.ttr)
   local n_cont = train.n_continuous
-  local cont_mean = mtx.create({ data = train.continuous, n_rows = train.n, n_cols = n_cont }):center()
-  mtx.create({ data = validate.continuous, n_rows = validate.n, n_cols = n_cont }):center(cont_mean)
-  mtx.create({ data = test_set.continuous, n_rows = test_set.n, n_cols = n_cont }):center(cont_mean)
-  str.printf("[Data] train=%d val=%d test=%d cat=%d cont=%d target=%.0f-%.0f %s\n",
-    train.n, validate.n, test_set.n, n_cat, n_cont,
-    train.targets:min(), train.targets:max(), sw())
 
-  local function features(bits, continuous, n)
-    local cont = mtx.create({ data = continuous:to_fvec(), n_rows = n, n_cols = n_cont }):to_sparse()
-    return bits:hcat(cont)
-  end
+  local cont_mean = train.continuous:center()
+  test_set.continuous:center(cont_mean)
+  local pool_blocks = util.columns_as_blocks(train.continuous)
+  local test_blocks = util.columns_as_blocks(test_set.continuous)
+  for j = 1, n_cont do local sp = pool_blocks[j]:standardize(); test_blocks[j]:standardize(sp) end
+  local bits = train.bits:i32(); local bits_std = bits:standardize()
+  local bits_t = test_set.bits:i32(); bits_t:standardize(bits_std)
+  pool_blocks[#pool_blocks + 1] = bits; test_blocks[#test_blocks + 1] = bits_t
+  local nblk = #pool_blocks
+  str.printf("[Data] pool=%d test=%d blocks=%d folds=%d trials=%d\n",
+    train.n, test_set.n, nblk, cfg.folds, cfg.search_trials)
 
-  local n_tokens = n_cat + n_cont
-  local X = features(train.bits, train.continuous, train.n)
-  local std_scores = X:standardize()
-  local ss = X:sumsq_cols(ivec.create({ 0, n_cat, n_tokens }))
-  local ss_cat, ss_cont = ss:get(0), ss:get(1)
-  local block = fvec.create(n_tokens)
-  block:fill(ss_cat > 0 and math.sqrt(train.n / ss_cat) or 0.0, 0, n_cat)
-  block:fill(ss_cont > 0 and math.sqrt(train.n / ss_cont) or 0.0, n_cat, n_tokens)
-  X:standardize(block)
-  std_scores:scalev(block)
-  X:normalize()
-
-  local Xv = features(validate.bits, validate.continuous, validate.n)
-  Xv:standardize(std_scores)
-  Xv:normalize()
-
-  str.printf("[KRR] Encoding n_landmarks=%d n_tokens=%d\n",
-    cfg.emb.n_landmarks, n_tokens)
-  local sp_enc, ridge_obj, val_codes = optimize.krr({
-    x = X, val_x = Xv,
-    n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
-    kernel = cfg.emb.kernel, nu = cfg.emb.nu, gamma = cfg.emb.gamma,
-    targets = train.targets, n_targets = 1,
-    val_targets = validate.targets,
-    lambda = cfg.ridge.lambda,
-    search_trials = cfg.ridge.search_trials,
+  local _, ridge_obj, deploy = optimize.krr({
+    pool_blocks = pool_blocks,
+    pool_targets = train.targets,
+    n_targets = 1,
+    pool_n = train.n,
+    scales = cfg.scales,
+    folds = cfg.folds,
+    kernel = cfg.kernel,
+    nu = cfg.nu,
+    gamma = cfg.gamma,
+    lambda = cfg.lambda,
+    n_landmarks = cfg.n_landmarks,
+    search_landmarks = cfg.search_landmarks,
+    search_trials = cfg.search_trials,
+    verbose = cfg.verbose,
     each = util.make_ridge_log(stopwatch),
   })
-  do
-    local p = os.tmpname()
-    sp_enc:persist(p)
-    sp_enc = spectral.load(p)
-    os.remove(p)
-  end
-  X = nil; Xv = nil -- luacheck: ignore
-  collectgarbage("collect")
-  local function encode(bits, continuous, n)
-    local Xt = features(bits, continuous, n)
-    Xt:standardize(std_scores)
-    Xt:normalize()
-    return sp_enc:encode(Xt)
-  end
 
-  str.printf("[Eval] Scoring splits\n")
-  local regress_buf = fvec.create()
-  local val_stats = eval.regress_accuracy(ridge_obj:regress(val_codes, regress_buf), validate.targets)
-  val_codes = nil -- luacheck: ignore
-  local test_codes = encode(test_set.bits, test_set.continuous, test_set.n)
-  local test_stats = eval.regress_accuracy(ridge_obj:regress(test_codes, regress_buf), test_set.targets)
-  test_codes = nil -- luacheck: ignore
-  str.printf("[Eval] Accuracy: val=%.1f%% test=%.1f%% %s\n",
-    (1 - val_stats.nmae) * 100, (1 - test_stats.nmae) * 100, sw())
-
+  local ts = eval.regress_accuracy(ridge_obj:regress(deploy(test_blocks)), test_set.targets)
   local _, total = stopwatch()
-  str.printf("\nTotal: %.1fs\n", total)
-
+  str.printf("[Result] test=%.4f\nTotal: %.1fs\n", 1 - ts.nmae, total)
 end)

@@ -1,9 +1,6 @@
 #include <santoku/lua/utils.h>
 #include <santoku/learn/ann.h>
 
-// ann.create({ codes = M (mtx f32), [rerank = true] }) -> ann index.
-// The bit signature is the sign of each code dimension (features = n_dims), baked now. With
-// rerank (default), the float codes are retained so search can rerank candidates by exact dot.
 static inline int tk_ann_create_lua (lua_State *L)
 {
   lua_settop(L, 1);
@@ -24,13 +21,7 @@ static inline int tk_ann_create_lua (lua_State *L)
   tk_cvec_t *bits = tk_cvec_create(L, N * bpv);
   bits->n = N * bpv;
   int bits_idx = lua_gettop(L);
-  memset(bits->a, 0, N * bpv);
-  for (uint64_t s = 0; s < N; s++) {
-    const float *row = codes_a + s * n_dims;
-    unsigned char *bvec = (unsigned char *) (bits->a + s * bpv);
-    for (uint64_t i = 0; i < n_dims; i++)
-      if (row[i] >= 0.0f) bvec[i >> 3] |= (unsigned char) (1u << (i & 7));
-  }
+  tk_ann_sign_pack(codes_a, N, n_dims, features, bits->a, bpv);
 
   tk_ann_flat_t *flat = tk_ann_flat_create(L, bits->a, N, features);
   int flat_idx = lua_gettop(L);
@@ -58,8 +49,8 @@ static luaL_Reg tk_ann_fns[] =
 
 int luaopen_santoku_learn_ann (lua_State *L)
 {
-  tk_lua_require_mod(L, "santoku.csr");   // search -> P csr
-  tk_lua_require_mod(L, "santoku.mtx");   // create/query take mtx codes
+  tk_lua_require_mod(L, "santoku.csr");
+  tk_lua_require_mod(L, "santoku.mtx");
   lua_newtable(L);
   tk_lua_register(L, tk_ann_fns, 0);
   return 1;

@@ -58,6 +58,9 @@ test("ann spectral idf retrieval", function ()
 
   -- mode 3: self-neighborhoods (corpus vs itself, self excluded) -> csr smoke check
   local P_self = idx:neighborhoods(k)
+  -- explicit boolean rerank arg: true matches the default (codes retained), false is Hamming-only
+  local P_self_rr = idx:neighborhoods(k, true)
+  local P_self_bin = idx:neighborhoods(k, false)
 
   str.printf("[ANN] recall@%d  rerank=%.4f  hamming=%.4f\n", k, r_rr, r_bin)
 
@@ -65,6 +68,9 @@ test("ann spectral idf retrieval", function ()
   assert(P_rr:offsets():size() == nq + 1)
   assert(P_bin:offsets():size() == nq + 1)
   assert(P_self:offsets():size() == nq + 1)
+  assert(P_self_rr:offsets():size() == nq + 1)
+  assert(P_self_bin:offsets():size() == nq + 1)
+  assert(recall(P_self_rr, P_self, nq) == 1 and recall(P_self, P_self_rr, nq) == 1)
   -- rerank pulls a wider Hamming pool then keeps the exact-dot top-k, so it dominates Hamming-only
   assert(r_rr >= r_bin)
   -- sanity floor: cosine-aligned codes recover well above random (random recall@10 ~ 0.01)

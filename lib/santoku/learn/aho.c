@@ -4,11 +4,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdbool.h>
-#include <math.h>
 #include <santoku/lua/utils.h>
 #include <santoku/ivec.h>
 #include <santoku/svec.h>
-#include <santoku/iuset.h>
 #include <santoku/spans.h>
 #include <santoku/learn/normalize.h>
 
@@ -26,23 +24,35 @@ typedef struct {
   int64_t n_patterns;
   int64_t max_output_len;
   bool normalize;
+} tk_aho_trie_t;
+
+typedef struct {
+  tk_aho_trie_t trie;
   tk_svec_t *goto_svec;
   bool destroyed;
 } tk_aho_t;
 
 typedef struct {
-  int32_t *goto_base;
-  int32_t *fail;
-  int64_t *output_id;
-  int64_t *output_pri;
-  int64_t *output_len;
-  int32_t *output_link;
-  int64_t n_states;
-  int64_t n_patterns;
-  int64_t max_output_len;
-  bool normalize;
+  tk_aho_trie_t trie;
   bool consumed;
 } tk_aho_builder_t;
+
+static inline void tk_aho_trie_free (tk_aho_trie_t *t, bool free_goto) {
+  if (free_goto)
+    free(t->goto_base);
+  free(t->fail);
+  free(t->output_id);
+  free(t->output_pri);
+  free(t->output_len);
+  free(t->output_link);
+}
+
+static inline int64_t tk_aho_max_output_len (const int64_t *output_len, int64_t n_states) {
+  int64_t max_ol = 0;
+  for (int64_t s = 0; s < n_states; s++)
+    if (output_len[s] > max_ol) max_ol = output_len[s];
+  return max_ol;
+}
 
 static inline tk_aho_t *tk_aho_peek (lua_State *L, int i) {
   return (tk_aho_t *)luaL_checkudata(L, i, TK_AHO_MT);
@@ -50,15 +60,8 @@ static inline tk_aho_t *tk_aho_peek (lua_State *L, int i) {
 
 static inline int tk_aho_gc (lua_State *L) {
   tk_aho_t *a = tk_aho_peek(L, 1);
-  if (!a->destroyed) {
-    if (!a->goto_svec)
-      free(a->goto_base);
-    free(a->fail);
-    free(a->output_id);
-    free(a->output_pri);
-    free(a->output_len);
-    free(a->output_link);
-  }
+  if (!a->destroyed)
+    tk_aho_trie_free(&a->trie, !a->goto_svec);
   a->destroyed = true;
   return 0;
 }
@@ -69,14 +72,8 @@ static inline tk_aho_builder_t *tk_aho_builder_peek (lua_State *L, int i) {
 
 static inline int tk_aho_builder_gc (lua_State *L) {
   tk_aho_builder_t *b = tk_aho_builder_peek(L, 1);
-  if (!b->consumed) {
-    free(b->goto_base);
-    free(b->fail);
-    free(b->output_id);
-    free(b->output_pri);
-    free(b->output_len);
-    free(b->output_link);
-  }
+  if (!b->consumed)
+    tk_aho_trie_free(&b->trie, true);
   b->consumed = true;
   return 0;
 }
@@ -123,15 +120,36 @@ typedef struct {
   uint64_t n_exclude;
 } tk_aho_scan_result_t;
 
+static inline void tk_aho_emit_match (
+  tk_aho_match_t **m, int64_t *m_n, int64_t *cap, const uint8_t *wbound,
+  const char *text, size_t tlen, int64_t id, int64_t pri, int64_t os, int64_t oe
+) {
+  if (wbound) {
+    if (os > 0 && wbound[(uint8_t)text[os - 1]])
+      return;
+    if ((size_t)oe < tlen && wbound[(uint8_t)text[oe]])
+      return;
+  }
+  if (*m_n >= *cap) {
+    *cap *= 2;
+    *m = (tk_aho_match_t *)realloc(*m, (uint64_t)*cap * sizeof(tk_aho_match_t));
+  }
+  (*m)[*m_n].id = id;
+  (*m)[*m_n].start = os;
+  (*m)[*m_n].end = oe;
+  (*m)[*m_n].priority = pri;
+  (*m_n)++;
+}
+
 static tk_aho_scan_result_t tk_aho_scan (
-  tk_aho_t *a, const char **texts, size_t *tlens,
-  int n_texts, bool longest, tk_pvec_t *exc, tk_iuset_t *inc,
-  const uint8_t *wbound
+  tk_aho_trie_t *a, const char **texts, size_t *tlens,
+  int n_texts, bool longest, tk_pvec_t *exc,
+  const uint8_t *wbound, bool want_exclude_hits
 ) {
   tk_aho_match_t **pt_matches = (tk_aho_match_t **)calloc((uint64_t)n_texts, sizeof(tk_aho_match_t *));
   int64_t *pt_counts = (int64_t *)calloc((uint64_t)n_texts, sizeof(int64_t));
   uint64_t n_exc = exc ? exc->n : 0;
-  int32_t *exc_hits = n_exc > 0 ? (int32_t *)calloc(n_exc, sizeof(int32_t)) : NULL;
+  int32_t *exc_hits = (want_exclude_hits && n_exc > 0) ? (int32_t *)calloc(n_exc, sizeof(int32_t)) : NULL;
 
   #pragma omp parallel
   {
@@ -168,24 +186,8 @@ static tk_aho_scan_result_t tk_aho_scan (
                   else
                     break;
                 }
-                int skip = 0;
-                if (wbound) {
-                  if (os > 0 && wbound[(uint8_t)texts[ti][os - 1]])
-                    skip = 1;
-                  if (!skip && (size_t)oe < tlen && wbound[(uint8_t)texts[ti][oe]])
-                    skip = 1;
-                }
-                if (!skip) {
-                  if (m_n >= local_cap) {
-                    local_cap *= 2;
-                    local_m = (tk_aho_match_t *)realloc(local_m, (uint64_t)local_cap * sizeof(tk_aho_match_t));
-                  }
-                  local_m[m_n].id = a->output_id[tmp];
-                  local_m[m_n].start = os;
-                  local_m[m_n].end = oe;
-                  local_m[m_n].priority = a->output_pri[tmp];
-                  m_n++;
-                }
+                tk_aho_emit_match(&local_m, &m_n, &local_cap, wbound, texts[ti], tlen,
+                  a->output_id[tmp], a->output_pri[tmp], os, oe);
               }
               tmp = a->output_link[tmp];
             }
@@ -201,37 +203,12 @@ static tk_aho_scan_result_t tk_aho_scan (
             if (a->output_id[tmp] >= 0) {
               int64_t os = (int64_t)i - a->output_len[tmp] + 1;
               int64_t oe = (int64_t)(i + 1);
-              int skip = 0;
-              if (wbound) {
-                if (os > 0 && wbound[(uint8_t)texts[ti][os - 1]])
-                  skip = 1;
-                if (!skip && (size_t)oe < tlen && wbound[(uint8_t)texts[ti][oe]])
-                  skip = 1;
-              }
-              if (!skip) {
-                if (m_n >= local_cap) {
-                  local_cap *= 2;
-                  local_m = (tk_aho_match_t *)realloc(local_m, (uint64_t)local_cap * sizeof(tk_aho_match_t));
-                }
-                local_m[m_n].id = a->output_id[tmp];
-                local_m[m_n].start = os;
-                local_m[m_n].end = oe;
-                local_m[m_n].priority = a->output_pri[tmp];
-                m_n++;
-              }
+              tk_aho_emit_match(&local_m, &m_n, &local_cap, wbound, texts[ti], tlen,
+                a->output_id[tmp], a->output_pri[tmp], os, oe);
             }
             tmp = a->output_link[tmp];
           }
         }
-      }
-
-      if (inc && m_n > 0) {
-        int64_t write = 0;
-        for (int64_t j = 0; j < m_n; j++) {
-          if (tk_iuset_contains(inc, local_m[j].id))
-            local_m[write++] = local_m[j];
-        }
-        m_n = write;
       }
 
       if (exc && exc->n > 0 && m_n > 0) {
@@ -327,7 +304,6 @@ static void tk_aho_build_trie (lua_State *L)
   luaL_checktype(L, -1, LUA_TTABLE);
   int ptab = lua_gettop(L);
 
-  // A match reports the pattern index (0-based); callers own the index->meaning mapping.
   int64_t n_patterns = (int64_t)lua_objlen(L, ptab);
 
   int64_t total_chars = 0;
@@ -446,23 +422,19 @@ static void tk_aho_build_trie (lua_State *L)
 
   lua_pop(L, 1);
 
-  int64_t max_ol = 0;
-  for (int64_t s = 0; s < n_states; s++)
-    if (output_len[s] > max_ol) max_ol = output_len[s];
-
   tk_aho_builder_t *b = tk_lua_newuserdata(L, tk_aho_builder_t,
     TK_AHO_BUILDER_MT, tk_aho_builder_mt_fns, tk_aho_builder_gc);
   int bi = lua_gettop(L);
-  b->goto_base = goto_base;
-  b->fail = fail;
-  b->output_id = output_id;
-  b->output_pri = output_pri;
-  b->output_len = output_len;
-  b->output_link = output_link;
-  b->n_states = n_states;
-  b->n_patterns = n_patterns;
-  b->max_output_len = max_ol;
-  b->normalize = do_normalize;
+  b->trie.goto_base = goto_base;
+  b->trie.fail = fail;
+  b->trie.output_id = output_id;
+  b->trie.output_pri = output_pri;
+  b->trie.output_len = output_len;
+  b->trie.output_link = output_link;
+  b->trie.n_states = n_states;
+  b->trie.n_patterns = n_patterns;
+  b->trie.max_output_len = tk_aho_max_output_len(output_len, n_states);
+  b->trie.normalize = do_normalize;
   b->consumed = false;
 
   lua_newtable(L);
@@ -489,26 +461,19 @@ static int tk_aho_finalize (lua_State *L, int builder_idx, int svec_idx)
 
   tk_svec_t *sv = svec_idx ? tk_svec_peek(L, svec_idx, "goto_buf") : NULL;
   if (sv) {
-    uint64_t need = (uint64_t)b->n_states * 256;
+    uint64_t need = (uint64_t)b->trie.n_states * 256;
     if (sv->n < need)
       return luaL_error(L, "build: svec too small (%d < %d)", (int)sv->n, (int)need);
-    memcpy(sv->a, b->goto_base, need * sizeof(int32_t));
-    free(b->goto_base);
+    memcpy(sv->a, b->trie.goto_base, need * sizeof(int32_t));
+    free(b->trie.goto_base);
   }
 
   tk_aho_t *a = tk_lua_newuserdata(L, tk_aho_t,
     TK_AHO_MT, tk_aho_mt_fns, tk_aho_gc);
   int gi = lua_gettop(L);
-  a->goto_base = sv ? sv->a : b->goto_base;
-  a->fail = b->fail;
-  a->output_id = b->output_id;
-  a->output_pri = b->output_pri;
-  a->output_len = b->output_len;
-  a->output_link = b->output_link;
-  a->n_states = b->n_states;
-  a->n_patterns = b->n_patterns;
-  a->max_output_len = b->max_output_len;
-  a->normalize = b->normalize;
+  a->trie = b->trie;
+  if (sv)
+    a->trie.goto_base = sv->a;
   a->goto_svec = sv;
   a->destroyed = false;
 
@@ -527,12 +492,7 @@ static int tk_aho_finalize (lua_State *L, int builder_idx, int svec_idx)
   lua_pop(L, 1);
   lua_setfenv(L, gi);
 
-  b->goto_base = NULL;
-  b->fail = NULL;
-  b->output_id = NULL;
-  b->output_pri = NULL;
-  b->output_len = NULL;
-  b->output_link = NULL;
+  memset(&b->trie, 0, sizeof(b->trie));
   b->consumed = true;
 
   return 1;
@@ -541,7 +501,7 @@ static int tk_aho_finalize (lua_State *L, int builder_idx, int svec_idx)
 static int tk_aho_builder_n_states_lua (lua_State *L)
 {
   tk_aho_builder_t *b = tk_aho_builder_peek(L, 1);
-  lua_pushinteger(L, (lua_Integer)b->n_states);
+  lua_pushinteger(L, (lua_Integer)b->trie.n_states);
   return 1;
 }
 
@@ -565,67 +525,66 @@ static int tk_aho_create_lua (lua_State *L)
   return tk_aho_finalize(L, 2, 0);
 }
 
+static void tk_aho_parse_scan_opts (
+  lua_State *L, int i, char *name,
+  bool *longest, tk_pvec_t **exc, uint8_t **wbound
+) {
+  *longest = tk_lua_foptboolean(L, i, name, "longest", false);
+  *exc = NULL;
+  lua_getfield(L, i, "exclude");
+  if (lua_type(L, -1) == LUA_TUSERDATA)
+    *exc = tk_pvec_peek(L, -1, "exclude");
+  lua_pop(L, 1);
+  *wbound = NULL;
+  lua_getfield(L, i, "word_characters");
+  if (lua_type(L, -1) == LUA_TSTRING) {
+    size_t blen;
+    const char *bs = lua_tolstring(L, -1, &blen);
+    *wbound = (uint8_t *)calloc(256, 1);
+    for (size_t j = 0; j < blen; j++)
+      (*wbound)[(uint8_t)bs[j]] = 1;
+  }
+  lua_pop(L, 1);
+}
+
+static const char **tk_aho_collect_texts (
+  lua_State *L, int i, int *n_texts, size_t **tlens
+) {
+  lua_getfield(L, i, "texts");
+  luaL_checktype(L, -1, LUA_TTABLE);
+  int ttab = lua_gettop(L);
+  int n = (int)lua_objlen(L, ttab);
+  const char **texts = (const char **)malloc((uint64_t)n * sizeof(const char *));
+  size_t *tl = (size_t *)malloc((uint64_t)n * sizeof(size_t));
+  for (int ti = 0; ti < n; ti++) {
+    lua_rawgeti(L, ttab, ti + 1);
+    texts[ti] = luaL_checklstring(L, -1, &tl[ti]);
+    lua_pop(L, 1);
+  }
+  lua_pop(L, 1);
+  *n_texts = n;
+  *tlens = tl;
+  return texts;
+}
+
 static int tk_aho_predict_lua (lua_State *L)
 {
   tk_aho_t *a = tk_aho_peek(L, 1);
   luaL_checktype(L, 2, LUA_TTABLE);
 
-  lua_getfield(L, 2, "texts");
-  luaL_checktype(L, -1, LUA_TTABLE);
-  int ttab = lua_gettop(L);
-  int n_texts = (int)lua_objlen(L, ttab);
+  bool longest;
+  tk_pvec_t *exc;
+  uint8_t *wbound;
+  tk_aho_parse_scan_opts(L, 2, "aho.predict", &longest, &exc, &wbound);
 
-  bool longest = tk_lua_foptboolean(L, 2, "aho.predict", "longest", false);
+  int n_texts;
+  size_t *tlens;
+  const char **texts = tk_aho_collect_texts(L, 2, &n_texts, &tlens);
 
-  tk_pvec_t *exc = NULL;
-  lua_getfield(L, 2, "exclude");
-  if (lua_type(L, -1) == LUA_TUSERDATA)
-    exc = tk_pvec_peek(L, -1, "exclude");
-  lua_pop(L, 1);
-
-  tk_iuset_t *inc = NULL;
-  int inc_allocated = 0;
-  lua_getfield(L, 2, "include");
-  if (lua_type(L, -1) == LUA_TUSERDATA) {
-    inc = tk_iuset_peekopt(L, -1);
-    if (!inc) {
-      tk_ivec_t *iv = tk_ivec_peekopt(L, -1);
-      if (iv) {
-        inc = tk_iuset_create(NULL, (uint32_t)iv->n);
-        inc_allocated = 1;
-        for (uint64_t i = 0; i < iv->n; i++) {
-          int absent;
-          tk_iuset_put(inc, iv->a[i], &absent);
-        }
-      }
-    }
-  }
-  lua_pop(L, 1);
-
-  uint8_t *wbound = NULL;
-  lua_getfield(L, 2, "boundary");
-  if (lua_type(L, -1) == LUA_TSTRING) {
-    size_t blen;
-    const char *bs = lua_tolstring(L, -1, &blen);
-    wbound = (uint8_t *)calloc(256, 1);
-    for (size_t i = 0; i < blen; i++)
-      wbound[(uint8_t)bs[i]] = 1;
-  }
-  lua_pop(L, 1);
-
-  const char **texts = (const char **)malloc((uint64_t)n_texts * sizeof(const char *));
-  size_t *tlens = (size_t *)malloc((uint64_t)n_texts * sizeof(size_t));
-  for (int ti = 0; ti < n_texts; ti++) {
-    lua_rawgeti(L, ttab, ti + 1);
-    texts[ti] = luaL_checklstring(L, -1, &tlens[ti]);
-    lua_pop(L, 1);
-  }
-
-  tk_aho_scan_result_t res = tk_aho_scan(a, texts, tlens, n_texts, longest, exc, inc, wbound);
+  tk_aho_scan_result_t res = tk_aho_scan(&a->trie, texts, tlens, n_texts, longest, exc, wbound, true);
   free(texts);
   free(tlens);
   free(wbound);
-  if (inc_allocated) { tk_iuset_destroy(inc); }
 
   uint64_t mn = res.total > 0 ? (uint64_t)res.total : 1;
   tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t)(n_texts + 1));
@@ -648,7 +607,6 @@ static int tk_aho_predict_lua (lua_State *L)
     out_ends->a[i] = res.matches[i].end;
   }
 
-  // matches as a spans object: per-text offsets + columns id (pattern id), s (start), e (end).
   const char *names[3] = { "id", "s", "e" };
   int icols[3] = { id_idx, s_idx, e_idx };
   tk_ivec_t *cols[3] = { out_ids, out_starts, out_ends };
@@ -671,68 +629,26 @@ static int tk_aho_tag_lua (lua_State *L)
   tk_aho_t *a = tk_aho_peek(L, 1);
   luaL_checktype(L, 2, LUA_TTABLE);
 
-  lua_getfield(L, 2, "texts");
-  luaL_checktype(L, -1, LUA_TTABLE);
-  int ttab = lua_gettop(L);
-  int n_texts = (int)lua_objlen(L, ttab);
-
   lua_getfield(L, 2, "fmt");
   size_t fmt_len;
   const char *fmt = luaL_checklstring(L, -1, &fmt_len);
   lua_pop(L, 1);
 
-  bool longest = tk_lua_foptboolean(L, 2, "aho.tag", "longest", false);
-
-  tk_pvec_t *exc = NULL;
-  lua_getfield(L, 2, "exclude");
-  if (lua_type(L, -1) == LUA_TUSERDATA)
-    exc = tk_pvec_peek(L, -1, "exclude");
-  lua_pop(L, 1);
-
-  tk_iuset_t *inc = NULL;
-  int inc_allocated = 0;
-  lua_getfield(L, 2, "include");
-  if (lua_type(L, -1) == LUA_TUSERDATA) {
-    inc = tk_iuset_peekopt(L, -1);
-    if (!inc) {
-      tk_ivec_t *iv = tk_ivec_peekopt(L, -1);
-      if (iv) {
-        inc = tk_iuset_create(NULL, (uint32_t)iv->n);
-        inc_allocated = 1;
-        for (uint64_t i = 0; i < iv->n; i++) {
-          int absent;
-          tk_iuset_put(inc, iv->a[i], &absent);
-        }
-      }
-    }
-  }
-  lua_pop(L, 1);
-
-  uint8_t *wbound = NULL;
-  lua_getfield(L, 2, "boundary");
-  if (lua_type(L, -1) == LUA_TSTRING) {
-    size_t blen;
-    const char *bs = lua_tolstring(L, -1, &blen);
-    wbound = (uint8_t *)calloc(256, 1);
-    for (size_t i = 0; i < blen; i++)
-      wbound[(uint8_t)bs[i]] = 1;
-  }
-  lua_pop(L, 1);
+  bool longest;
+  tk_pvec_t *exc;
+  uint8_t *wbound;
+  tk_aho_parse_scan_opts(L, 2, "aho.tag", &longest, &exc, &wbound);
 
   lua_getfenv(L, 1);
   lua_getfield(L, -1, "names");
   int names_idx = lua_gettop(L);
   bool has_names = lua_type(L, names_idx) == LUA_TTABLE;
 
-  const char **texts = (const char **)malloc((uint64_t)n_texts * sizeof(const char *));
-  size_t *tlens = (size_t *)malloc((uint64_t)n_texts * sizeof(size_t));
-  for (int ti = 0; ti < n_texts; ti++) {
-    lua_rawgeti(L, ttab, ti + 1);
-    texts[ti] = luaL_checklstring(L, -1, &tlens[ti]);
-    lua_pop(L, 1);
-  }
+  int n_texts;
+  size_t *tlens;
+  const char **texts = tk_aho_collect_texts(L, 2, &n_texts, &tlens);
 
-  tk_aho_scan_result_t res = tk_aho_scan(a, texts, tlens, n_texts, longest, exc, inc, wbound);
+  tk_aho_scan_result_t res = tk_aho_scan(&a->trie, texts, tlens, n_texts, longest, exc, wbound, false);
 
   lua_newtable(L);
   int result_idx = lua_gettop(L);
@@ -821,7 +737,6 @@ static int tk_aho_tag_lua (lua_State *L)
   free(texts);
   free(tlens);
   free(wbound);
-  if (inc_allocated) { tk_iuset_destroy(inc); }
   tk_aho_scan_free(&res);
 
   lua_pushvalue(L, result_idx);
@@ -834,24 +749,24 @@ static int tk_aho_persist_lua (lua_State *L) {
   tk_lua_fwrite(L, "TKac", 1, 4, fh);
   uint8_t version = 4;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
-  tk_lua_fwrite(L, &a->n_states, sizeof(int64_t), 1, fh);
-  tk_lua_fwrite(L, &a->n_patterns, sizeof(int64_t), 1, fh);
-  uint8_t norm_byte = a->normalize ? 1 : 0;
+  tk_lua_fwrite(L, &a->trie.n_states, sizeof(int64_t), 1, fh);
+  tk_lua_fwrite(L, &a->trie.n_patterns, sizeof(int64_t), 1, fh);
+  uint8_t norm_byte = a->trie.normalize ? 1 : 0;
   tk_lua_fwrite(L, &norm_byte, sizeof(uint8_t), 1, fh);
   uint8_t goto_ext_byte = (a->goto_svec && a->goto_svec->lua_managed == 2) ? 1 : 0;
   tk_lua_fwrite(L, &goto_ext_byte, sizeof(uint8_t), 1, fh);
   if (goto_ext_byte) {
 #if !defined(__EMSCRIPTEN__)
-    msync(a->goto_base, (size_t)(a->n_states * 256) * sizeof(int32_t), MS_SYNC);
+    msync(a->trie.goto_base, (size_t)(a->trie.n_states * 256) * sizeof(int32_t), MS_SYNC);
 #endif
   } else {
-    tk_lua_fwrite(L, a->goto_base, sizeof(int32_t), (size_t)(a->n_states * 256), fh);
+    tk_lua_fwrite(L, a->trie.goto_base, sizeof(int32_t), (size_t)(a->trie.n_states * 256), fh);
   }
-  tk_lua_fwrite(L, a->fail, sizeof(int32_t), (size_t)a->n_states, fh);
-  tk_lua_fwrite(L, a->output_id, sizeof(int64_t), (size_t)a->n_states, fh);
-  tk_lua_fwrite(L, a->output_pri, sizeof(int64_t), (size_t)a->n_states, fh);
-  tk_lua_fwrite(L, a->output_len, sizeof(int64_t), (size_t)a->n_states, fh);
-  tk_lua_fwrite(L, a->output_link, sizeof(int32_t), (size_t)a->n_states, fh);
+  tk_lua_fwrite(L, a->trie.fail, sizeof(int32_t), (size_t)a->trie.n_states, fh);
+  tk_lua_fwrite(L, a->trie.output_id, sizeof(int64_t), (size_t)a->trie.n_states, fh);
+  tk_lua_fwrite(L, a->trie.output_pri, sizeof(int64_t), (size_t)a->trie.n_states, fh);
+  tk_lua_fwrite(L, a->trie.output_len, sizeof(int64_t), (size_t)a->trie.n_states, fh);
+  tk_lua_fwrite(L, a->trie.output_link, sizeof(int32_t), (size_t)a->trie.n_states, fh);
 
   lua_getfenv(L, 1);
   lua_getfield(L, -1, "names");
@@ -973,19 +888,16 @@ static int tk_aho_load_lua (lua_State *L)
   tk_aho_t *a = tk_lua_newuserdata(L, tk_aho_t,
     TK_AHO_MT, tk_aho_mt_fns, tk_aho_gc);
   int gi = lua_gettop(L);
-  a->goto_base = goto_base;
-  a->fail = fail;
-  a->output_id = output_id;
-  a->output_pri = output_pri;
-  a->output_len = output_len;
-  a->output_link = output_link;
-  a->n_states = n_states;
-  a->n_patterns = n_patterns;
-  int64_t max_ol = 0;
-  for (int64_t s = 0; s < n_states; s++)
-    if (output_len[s] > max_ol) max_ol = output_len[s];
-  a->max_output_len = max_ol;
-  a->normalize = do_normalize;
+  a->trie.goto_base = goto_base;
+  a->trie.fail = fail;
+  a->trie.output_id = output_id;
+  a->trie.output_pri = output_pri;
+  a->trie.output_len = output_len;
+  a->trie.output_link = output_link;
+  a->trie.n_states = n_states;
+  a->trie.n_patterns = n_patterns;
+  a->trie.max_output_len = tk_aho_max_output_len(output_len, n_states);
+  a->trie.normalize = do_normalize;
   a->goto_svec = goto_buf;
   a->destroyed = false;
 
@@ -1034,7 +946,7 @@ static luaL_Reg tk_aho_fns[] = {
 
 int luaopen_santoku_learn_aho (lua_State *L)
 {
-  tk_lua_require_mod(L, "santoku.spans");   // predict -> matches spans {id,s,e}
+  tk_lua_require_mod(L, "santoku.spans");
   lua_newtable(L);
   tk_lua_register(L, tk_aho_fns, 0);
   return 1;

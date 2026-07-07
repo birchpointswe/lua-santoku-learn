@@ -1,125 +1,86 @@
-local tokenizer = require("santoku.learn.tokenizer")
-local boundary = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-local function tokenize (texts, nmin, nmax, bundle)
-  local grow = bundle == nil
-  if grow then bundle = {
-    byte = tokenizer.create({ ngram_min = nmin, ngram_max = nmax, boundary = boundary }),
-    word = tokenizer.create({ ngram_min = 1, ngram_max = 3, boundary = boundary, words = true }),
-  } end
-  local Xb = grow and bundle.byte:fit({ texts = texts }) or bundle.byte:tokenize({ texts = texts })
-  local Xw = grow and bundle.word:fit({ texts = texts }) or bundle.word:tokenize({ texts = texts })
-  return bundle, Xb:hcat(Xw)
-end
-local ds = require("santoku.learn.dataset")
 local optimize = require("santoku.learn.optimize")
-local spectral = require("santoku.learn.spectral")
+local ds = require("santoku.learn.dataset")
+local util = require("santoku.learn.util")
 local str = require("santoku.string")
 local test = require("santoku.test")
-local util = require("santoku.learn.util")
 local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
+local word_characters = util.WORD_CHARACTERS
+
 local cfg = {
-  data = {
-    max = nil,
-    tvr = 0.1
+  verbose = false,
+  search_landmarks = 2048,
+  data = { max = nil },
+  blocks = {
+    { ngram_min = 1, ngram_max = 5, word_characters = word_characters },
+    { ngram_min = 1, ngram_max = 3, word_characters = word_characters, words = true },
   },
-  tok = {
-    ngram_min = 5,
-    ngram_max = 5
-  },
-  emb = {
-    n_landmarks = 1024 * 8,
-    kernel = { "cosine", "matern" }
-  },
-  ridge = {
-    lambda = { def = 7.8376e-02 },
-    propensity_a = { def = 7.9786 },
-    propensity_b = { def = 8.1669 },
-    classes = 20,
-    search_trials = 0,
-    k = 1
-  },
+  relevance = { "bns", "bns" },
+  scales = { def = {1.04515,0.956801} },
+  exponent = { def = {1.27927,3.40488} },
+  n_landmarks = 1024 * 8,
+  kernel = { "cosine" },
+  lambda = { def = 1.30765e-06 },
+  classes = 20,
+  k = 1,
+  search_trials = 0,
+  folds = 5,
 }
 
-test("newsgroups classifier", function ()
-
+test("newsgroups CV", function ()
   local stopwatch = utc.stopwatch()
-  local function sw()
-    local d, dd = stopwatch()
-    return str.format("(%.1fs +%.1fs)", d, dd)
-  end
-
   str.printf("[Data] Loading\n")
-  local train, test_set, validate = ds.read_20newsgroups_split(
-    "test/res/20news-bydate-train",
-    "test/res/20news-bydate-test",
-    cfg.data.max, nil, cfg.data.tvr)
-  local n_classes = cfg.ridge.classes
-  str.printf("[Data] train=%d val=%d test=%d classes=%d %s\n",
-    train.n, validate.n, test_set.n, n_classes, sw())
+  local pool = ds.read_20newsgroups("test/res/20news-bydate-train", nil, nil, cfg.data.max)
+  local test_set = ds.read_20newsgroups("test/res/20news-bydate-test")
+  str.printf("[Data] pool=%d test=%d classes=%d folds=%d trials=%d\n",
+    pool.n, test_set.n, cfg.classes, cfg.folds, cfg.search_trials)
 
-  local ngram_map, X = tokenize(train.problems, cfg.tok.ngram_min, cfg.tok.ngram_max)
-  local _, n_tokens = X:shape()
-  local bns_scores = X:bns(train.labels)
-  X:normalize()
-  str.printf("[Tokenize] ngram_min=%d ngram_max=%d tokens=%d %s\n",
-    cfg.tok.ngram_min, cfg.tok.ngram_max, n_tokens, sw())
+  local toks, pool_blocks = util.tokenize_blocks(cfg.blocks, pool.problems)
+  local _, test_blocks = util.tokenize_blocks(cfg.blocks, test_set.problems, toks)
 
-  local _, Xv = tokenize(validate.problems, cfg.tok.ngram_min, cfg.tok.ngram_max, ngram_map)
-  Xv:bns(bns_scores)
-  Xv:normalize()
-
-  str.printf("[KRR] Encoding n_landmarks=%d\n", cfg.emb.n_landmarks)
-  local sp_enc, ridge_obj, val_codes, _, decider = optimize.krr({
-    x = X, y = train.labels, val_x = Xv, val_y = validate.labels,
-    kernel = cfg.emb.kernel,
-    n_landmarks = cfg.emb.n_landmarks, trace_tol = cfg.emb.trace_tol,
-    lambda = cfg.ridge.lambda, propensity_a = cfg.ridge.propensity_a,
-    propensity_b = cfg.ridge.propensity_b,
-    k = cfg.ridge.k, search_trials = cfg.ridge.search_trials,
+  local sp_enc, ridge_obj, deploy, best, decider, _, bake = optimize.krr({
+    pool_blocks = pool_blocks,
+    pool_labels = pool.labels,
+    pool_class = pool.labels:neighbors(),
+    n_labels = cfg.classes,
+    folds = cfg.folds,
+    relevance = cfg.relevance,
+    scales = cfg.scales,
+    exponent = cfg.exponent,
+    kernel = cfg.kernel,
+    lambda = cfg.lambda,
+    n_landmarks = cfg.n_landmarks,
+    search_landmarks = cfg.search_landmarks,
+    k = cfg.k,
+    search_trials = cfg.search_trials,
+    verbose = cfg.verbose,
     each = util.make_ridge_log(stopwatch),
   })
-  do
-    local p = os.tmpname()
-    sp_enc:persist(p)
-    sp_enc = spectral.load(p)   -- continue (and re-encode test) with the reloaded encoder
-    os.remove(p)
-  end
-  X = nil; Xv = nil -- luacheck: ignore
-  validate.problems = nil
-  collectgarbage("collect")
-  local function encode_texts(texts)
-    local _, Xt = tokenize(texts, cfg.tok.ngram_min, cfg.tok.ngram_max, ngram_map)
-    Xt:bns(bns_scores)
-    Xt:normalize()
-    return sp_enc:encode(Xt)
-  end
 
-  str.printf("[Eval] Labeling splits\n")
-  local val_scores = ridge_obj:regress(val_codes)
-  val_codes = nil -- luacheck: ignore
-  local test_codes = encode_texts(test_set.problems)
-  test_set.problems = nil
-  local test_scores = ridge_obj:regress(test_codes)
-  test_codes = nil -- luacheck: ignore
-  str.printf("[Eval] Labels done %s\n", sw())
-
-  local decide = require("santoku.learn.decide")
-  local argmax = decide.create({ n_labels = n_classes, single = true })
-  local function score_split (d, scores, n, sol)
-    local _, m = d:score({ scores = scores, n_samples = n, expected = sol.labels })
-    return m
-  end
-  str.printf("[Argmax] dev %s | test %s %s\n",
-    util.fmt_metrics(score_split(argmax, val_scores, validate.n, validate)),
-    util.fmt_metrics(score_split(argmax, test_scores, test_set.n, test_set)), sw())
-  str.printf("[Decide] dev %s | test %s %s\n",
-    util.fmt_metrics(score_split(decider, val_scores, validate.n, validate)),
-    util.fmt_metrics(score_split(decider, test_scores, test_set.n, test_set)), sw())
-
+  local test_codes = deploy(test_blocks)
+  local _, m = decider:score({ scores = ridge_obj:regress(test_codes),
+    n_samples = test_set.n, expected = test_set.labels })
   local _, total = stopwatch()
-  str.printf("\nTotal: %.1fs\n", total)
+  str.printf("[Result] scales=%s lambda=%.4g | test %s\nTotal: %.1fs\n",
+    util.vecstr(best.scales), best.lambda or 0, util.fmt_metrics(m), total)
 
+  local baked = bake(test_blocks)
+  local bundle = require("santoku.learn.bundle")
+  local bdir = os.tmpname() .. ".bundle"
+  bundle.persist({ dir = bdir, tokenizers = toks, encoder = sp_enc, ridge = ridge_obj,
+    decider = decider, blocks = baked })
+  local b = bundle.load(bdir)
+  local _, test_blocks_b = util.tokenize_blocks(cfg.blocks, test_set.problems, b.tokenizers)
+  local test_codes_b = b.encode(test_blocks_b)
+  assert(test_codes:eq(test_codes_b), "bundle deploy codes diverge")
+  assert(ridge_obj:regress(test_codes):eq(b.ridge:regress(test_codes_b)), "bundle scores diverge")
+  assert(b.decider:offset() == decider:offset(), "bundle decider diverges")
+  str.printf("[Bundle] round-trip bit-identical\n")
+  for _, f in ipairs({ "tokenizer_1.bin", "tokenizer_2.bin", "encoder.bin", "ridge.bin",
+      "decider.bin", "colscale_1.bin", "colscale_2.bin", "manifest.lua" }) do
+    os.remove(bdir .. "/" .. f)
+  end
+  os.remove(bdir)
 end)

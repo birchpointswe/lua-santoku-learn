@@ -1,23 +1,44 @@
+#include <santoku/lua/utils.h>
 #include <santoku/spans.h>
 #include <santoku/ivec.h>
+#include <santoku/svec.h>
+#include <santoku/fvec.h>
+#include <santoku/csr.h>
+#include <santoku/klib.h>
 #include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
 
-// Span-level NER diagnostics + the type-stage label assignment, registered against the
-// matrix-owned spans type. type_labels is a spans method; the two reports are module fns
-// (they consume multiple span sets). All spans are [start,end) with columns "s","e"[,"ty"].
+static inline void tk_ner_cols3 (
+  lua_State *L, tk_spans_t *S, int64_t *s, int64_t *e, int64_t *ty, const char *msg
+) {
+  *s = tk_spans_colidx(S, "s");
+  *e = tk_spans_colidx(S, "e");
+  if (ty) *ty = tk_spans_colidx(S, "ty");
+  if (*s < 0 || *e < 0 || (ty && *ty < 0))
+    tk_lua_verror(L, 2, "ner", msg);
+}
 
-// cand:type_labels(gold, n_types) -> ivec[ncand]: per candidate, the gold type if its
-// (s,e) exactly matches a gold span in the same doc, else reject (= n_types).
+static inline void tk_ner_push_int_array (
+  lua_State *L, const int64_t *a, int64_t n, const char *field
+) {
+  lua_newtable(L);
+  for (int64_t i = 0; i < n; i ++) {
+    lua_pushinteger(L, (lua_Integer) a[i]);
+    lua_rawseti(L, -2, (int) i);
+  }
+  lua_setfield(L, -2, field);
+}
+
 static int tk_ner_type_labels (lua_State *L)
 {
   lua_settop(L, 3);
   tk_spans_t *C = tk_spans_peek(L, 1, "cand");
   tk_spans_t *G = tk_spans_peek(L, 2, "gold");
   int64_t n_types = luaL_checkinteger(L, 3);
-  int64_t cs = tk_spans_colidx(C, "s"), ce = tk_spans_colidx(C, "e");
-  int64_t gs = tk_spans_colidx(G, "s"), ge = tk_spans_colidx(G, "e"), gt = tk_spans_colidx(G, "ty");
-  if (cs < 0 || ce < 0 || gs < 0 || ge < 0 || gt < 0)
-    return tk_lua_verror(L, 2, "ner", "type_labels requires cand{s,e} gold{s,e,ty}");
+  int64_t cs, ce, gs, ge, gt;
+  tk_ner_cols3(L, C, &cs, &ce, NULL, "type_labels requires cand{s,e} gold{s,e,ty}");
+  tk_ner_cols3(L, G, &gs, &ge, &gt, "type_labels requires cand{s,e} gold{s,e,ty}");
   int64_t n_docs = (int64_t) tk_spans_docs(C);
   int64_t ncand = (int64_t) tk_spans_n(C);
   tk_ivec_t *out = tk_ivec_create(L, (uint64_t) ncand);
@@ -42,11 +63,6 @@ static inline tk_spans_t *tk_ner_field_spans (lua_State *L, int t, const char *n
   return S;
 }
 
-// ner.miss_report{ gaz, bio, gold, n_types } -> table: decomposes why each gold span is/isn't
-// recovered by the candidate pool (gaz UNION bio). Per missed gold the highest-priority relation
-// to any same-doc candidate is counted: covered (exact s,e,ty) / wrong_type (exact s,e) / over
-// (gold inside a candidate) / under (candidate inside gold) / cross (overlap) / none. For under,
-// which source(s) supplied the inside candidate, plus per-gold-type counts.
 static int tk_ner_miss_report (lua_State *L)
 {
   luaL_checktype(L, 1, LUA_TTABLE);
@@ -58,16 +74,10 @@ static int tk_ner_miss_report (lua_State *L)
   lua_pop(L, 1);
   tk_spans_t *src[2] = { GZ, BI };
   int64_t scs[2], sce[2], sct[2];
-  for (int s = 0; s < 2; s ++) {
-    scs[s] = tk_spans_colidx(src[s], "s");
-    sce[s] = tk_spans_colidx(src[s], "e");
-    sct[s] = tk_spans_colidx(src[s], "ty");
-    if (scs[s] < 0 || sce[s] < 0 || sct[s] < 0)
-      return tk_lua_verror(L, 2, "ner", "miss_report sources require {s,e,ty}");
-  }
-  int64_t gcs = tk_spans_colidx(GO, "s"), gce = tk_spans_colidx(GO, "e"), gct = tk_spans_colidx(GO, "ty");
-  if (gcs < 0 || gce < 0 || gct < 0)
-    return tk_lua_verror(L, 2, "ner", "miss_report gold requires {s,e,ty}");
+  for (int s = 0; s < 2; s ++)
+    tk_ner_cols3(L, src[s], &scs[s], &sce[s], &sct[s], "miss_report sources require {s,e,ty}");
+  int64_t gcs, gce, gct;
+  tk_ner_cols3(L, GO, &gcs, &gce, &gct, "miss_report gold requires {s,e,ty}");
   int64_t *go = GO->offsets->a, *gs = GO->cols[gcs]->a, *ge = GO->cols[gce]->a, *gt = GO->cols[gct]->a;
   int64_t n_docs = (int64_t) tk_spans_docs(GO);
   int64_t n_gold = 0, covered = 0, wrong = 0, over = 0, under = 0, cross = 0, none = 0;
@@ -124,20 +134,11 @@ static int tk_ner_miss_report (lua_State *L)
   lua_pushinteger(L, (lua_Integer) under_gaz); lua_setfield(L, -2, "under_gaz");
   lua_pushinteger(L, (lua_Integer) under_bio); lua_setfield(L, -2, "under_bio");
   lua_pushinteger(L, (lua_Integer) under_both); lua_setfield(L, -2, "under_both");
-  lua_newtable(L);
-  for (int64_t i = 0; i < n_types; i ++) {
-    lua_pushinteger(L, (lua_Integer) under_ty[i]);
-    lua_rawseti(L, -2, (int) i);
-  }
-  lua_setfield(L, -2, "under_by_type");
+  tk_ner_push_int_array(L, under_ty, n_types, "under_by_type");
   free(under_ty);
   return 1;
 }
 
-// ner.decode_report{ cand, pred, pred_stride, gold, n_types } -> table: for each gold span finds the
-// candidate with exact (s,e) and inspects the TYPE head's top-1 (pred[c*pred_stride]; == n_types means
-// REJECT). Splits conversion loss (golds in the pool not emitted correctly) into false_reject vs mistype,
-// with a gold->pred confusion matrix. Golds with no exact candidate are not_in_pool.
 static int tk_ner_decode_report (lua_State *L)
 {
   luaL_checktype(L, 1, LUA_TTABLE);
@@ -152,10 +153,9 @@ static int tk_ner_decode_report (lua_State *L)
   lua_getfield(L, 1, "n_types");
   int64_t n_types = tk_lua_checkinteger(L, -1, "n_types");
   lua_pop(L, 1);
-  int64_t cs = tk_spans_colidx(C, "s"), ce = tk_spans_colidx(C, "e");
-  int64_t gs = tk_spans_colidx(GO, "s"), ge = tk_spans_colidx(GO, "e"), gt = tk_spans_colidx(GO, "ty");
-  if (cs < 0 || ce < 0 || gs < 0 || ge < 0 || gt < 0)
-    return tk_lua_verror(L, 2, "ner", "decode_report requires cand{s,e} gold{s,e,ty}");
+  int64_t cs, ce, gs, ge, gt;
+  tk_ner_cols3(L, C, &cs, &ce, NULL, "decode_report requires cand{s,e} gold{s,e,ty}");
+  tk_ner_cols3(L, GO, &gs, &ge, &gt, "decode_report requires cand{s,e} gold{s,e,ty}");
   int64_t *co = C->offsets->a, *Cs = C->cols[cs]->a, *Ce = C->cols[ce]->a;
   int64_t *go = GO->offsets->a, *Gs = GO->cols[gs]->a, *Ge = GO->cols[ge]->a, *Gt = GO->cols[gt]->a;
   int64_t n_docs = (int64_t) tk_spans_docs(GO);
@@ -197,21 +197,193 @@ static int tk_ner_decode_report (lua_State *L)
   lua_pushinteger(L, (lua_Integer) correct); lua_setfield(L, -2, "correct");
   lua_pushinteger(L, (lua_Integer) freject); lua_setfield(L, -2, "false_reject");
   lua_pushinteger(L, (lua_Integer) mistype); lua_setfield(L, -2, "mistype");
-  lua_newtable(L);
-  for (int64_t i = 0; i < n_types; i ++) { lua_pushinteger(L, (lua_Integer) corr_ty[i]); lua_rawseti(L, -2, (int) i); }
-  lua_setfield(L, -2, "correct_by_type");
-  lua_newtable(L);
-  for (int64_t i = 0; i < n_types; i ++) { lua_pushinteger(L, (lua_Integer) rej_ty[i]); lua_rawseti(L, -2, (int) i); }
-  lua_setfield(L, -2, "reject_by_type");
-  lua_newtable(L);
-  for (int64_t i = 0; i < n_types; i ++) { lua_pushinteger(L, (lua_Integer) mis_ty[i]); lua_rawseti(L, -2, (int) i); }
-  lua_setfield(L, -2, "mistype_by_type");
-  lua_newtable(L);
-  for (int64_t i = 0; i < n_types * n_types; i ++) { lua_pushinteger(L, (lua_Integer) conf[i]); lua_rawseti(L, -2, (int) i); }
-  lua_setfield(L, -2, "confusion");
+  tk_ner_push_int_array(L, corr_ty, n_types, "correct_by_type");
+  tk_ner_push_int_array(L, rej_ty, n_types, "reject_by_type");
+  tk_ner_push_int_array(L, mis_ty, n_types, "mistype_by_type");
+  tk_ner_push_int_array(L, conf, n_types * n_types, "confusion");
   free(corr_ty); free(rej_ty); free(mis_ty); free(conf);
   return 1;
 }
+
+KHASH_MAP_INIT_STR(tk_gazmap, int64_t)
+
+#define TK_GAZ_MT "tk_gaz_t"
+
+typedef struct {
+  int64_t n_types, is_char, nmin, nmax, nkeys, cap;
+  int64_t *data;
+  khash_t(tk_gazmap) *map;
+} tk_gaz_t;
+
+static inline tk_gaz_t *tk_gaz_peek (lua_State *L, int i) {
+  return (tk_gaz_t *) luaL_checkudata(L, i, TK_GAZ_MT);
+}
+
+static int tk_gaz_gc (lua_State *L) {
+  tk_gaz_t *G = (tk_gaz_t *) luaL_checkudata(L, 1, TK_GAZ_MT);
+  if (G->map != NULL) {
+    for (khint_t k = kh_begin(G->map); k != kh_end(G->map); k ++)
+      if (kh_exist(G->map, k)) free((void *) kh_key(G->map, k));
+    kh_destroy(tk_gazmap, G->map);
+    free(G->map);
+    G->map = NULL;
+  }
+  free(G->data); G->data = NULL;
+  return 0;
+}
+
+static luaL_Reg tk_gaz_mt_fns[];
+
+static inline int64_t *tk_gaz_rowptr (tk_gaz_t *G, int64_t idx) {
+  return G->data + idx * (G->n_types + 1);
+}
+
+static inline char *tk_gaz_lower (char *tmp, const char *key, size_t len) {
+  for (size_t i = 0; i < len; i ++) tmp[i] = (char) tolower((unsigned char) key[i]);
+  tmp[len] = 0;
+  return tmp;
+}
+
+static int64_t tk_gaz_row (tk_gaz_t *G, const char *key, size_t len) {
+  char *tmp = tk_gaz_lower((char *) malloc(len + 1), key, len);
+  int ret;
+  khint_t k = kh_put(tk_gazmap, G->map, tmp, &ret);
+  if (ret == 0) { free(tmp); return kh_val(G->map, k); }
+  int64_t idx = G->nkeys ++;
+  if (G->nkeys > G->cap) {
+    G->cap = G->cap ? G->cap * 2 : 1024;
+    G->data = (int64_t *) realloc(G->data,
+      (size_t) G->cap * (size_t) (G->n_types + 1) * sizeof(int64_t));
+  }
+  memset(tk_gaz_rowptr(G, idx), 0, (size_t) (G->n_types + 1) * sizeof(int64_t));
+  kh_val(G->map, k) = idx;
+  return idx;
+}
+
+static int64_t tk_gaz_find (tk_gaz_t *G, const char *key, size_t len, char *sb, size_t sbcap) {
+  char *tmp = tk_gaz_lower((len + 1 <= sbcap) ? sb : (char *) malloc(len + 1), key, len);
+  khint_t k = kh_get(tk_gazmap, G->map, tmp);
+  int64_t idx = (k == kh_end(G->map)) ? -1 : kh_val(G->map, k);
+  if (tmp != sb) free(tmp);
+  return idx;
+}
+
+static int tk_gaz_build (lua_State *L, int is_char) {
+  luaL_checktype(L, 1, LUA_TTABLE);
+  lua_getfield(L, 1, "texts");
+  luaL_checktype(L, -1, LUA_TTABLE);
+  int texts = lua_gettop(L);
+  tk_spans_t *G = tk_ner_field_spans(L, 1, "gold");
+  lua_getfield(L, 1, "n_types");
+  int64_t n_types = tk_lua_checkinteger(L, -1, "n_types");
+  lua_pop(L, 1);
+  int64_t nmin = 0, nmax = 0;
+  if (is_char) {
+    lua_getfield(L, 1, "ngram_min"); nmin = tk_lua_checkinteger(L, -1, "ngram_min"); lua_pop(L, 1);
+    lua_getfield(L, 1, "ngram_max"); nmax = tk_lua_checkinteger(L, -1, "ngram_max"); lua_pop(L, 1);
+  }
+  int64_t gs, ge, gt;
+  tk_ner_cols3(L, G, &gs, &ge, &gt, "build gaz requires gold{s,e,ty}");
+  tk_gaz_t *Z = tk_lua_newuserdata(L, tk_gaz_t, TK_GAZ_MT, tk_gaz_mt_fns, tk_gaz_gc);
+  memset(Z, 0, sizeof(*Z));
+  Z->n_types = n_types; Z->is_char = is_char; Z->nmin = nmin; Z->nmax = nmax;
+  Z->map = (khash_t(tk_gazmap) *) malloc(sizeof(khash_t(tk_gazmap)));
+  kh_init(tk_gazmap, Z->map, 0);
+  int64_t *Gs = G->cols[gs]->a, *Ge = G->cols[ge]->a, *Gt = G->cols[gt]->a, *Go = G->offsets->a;
+  int64_t nd = (int64_t) tk_spans_docs(G);
+  for (int64_t d = 0; d < nd; d ++) {
+    lua_rawgeti(L, texts, (int) (d + 1));
+    size_t tl; const char *t = lua_tolstring(L, -1, &tl);
+    for (int64_t g = Go[d]; g < Go[d + 1]; g ++) {
+      int64_t a = Gs[g], b = Ge[g], ty = Gt[g];
+      const char *surf = t + a; size_t sl = (size_t) (b - a);
+      if (ty < 0 || ty >= n_types) continue;
+      if (!is_char) {
+        int64_t *row = tk_gaz_rowptr(Z, tk_gaz_row(Z, surf, sl));
+        row[0] ++; row[1 + ty] ++;
+      } else {
+        for (int64_t n = nmin; n <= nmax; n ++)
+          for (size_t i = 0; i + (size_t) n <= sl; i ++) {
+            int64_t *row = tk_gaz_rowptr(Z, tk_gaz_row(Z, surf + i, (size_t) n));
+            row[0] ++; row[1 + ty] ++;
+          }
+      }
+    }
+    lua_pop(L, 1);
+  }
+  return 1;
+}
+
+static int tk_gaz_build_typed_lua (lua_State *L) { return tk_gaz_build(L, 0); }
+static int tk_gaz_build_char_lua (lua_State *L) { return tk_gaz_build(L, 1); }
+
+static int tk_gaz_block (lua_State *L) {
+  lua_settop(L, 4);
+  tk_gaz_t *Z = tk_gaz_peek(L, 1);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  int texts = 2;
+  tk_spans_t *S = tk_spans_peek(L, 3, "cand");
+  tk_ivec_t *tlab = lua_isnil(L, 4) ? NULL : tk_ivec_peek(L, 4, "tlab");
+  int64_t nt = Z->n_types;
+  int64_t cs, ce;
+  tk_ner_cols3(L, S, &cs, &ce, NULL, "gaz:block requires cand{s,e}");
+  int64_t *Cs = S->cols[cs]->a, *Ce = S->cols[ce]->a, *Co = S->offsets->a;
+  int64_t nd = (int64_t) tk_spans_docs(S);
+  tk_ivec_t *off = tk_ivec_create(L, 0); int off_idx = lua_gettop(L); tk_ivec_push(off, 0);
+  tk_svec_t *nbr = tk_svec_create(L, 0); int nbr_idx = lua_gettop(L);
+  tk_fvec_t *val = tk_fvec_create(L, 0); int val_idx = lua_gettop(L);
+  double *acc = (double *) malloc((size_t) (nt > 0 ? nt : 1) * sizeof(double));
+  char sb[256];
+  for (int64_t d = 0; d < nd; d ++) {
+    lua_rawgeti(L, texts, (int) (d + 1));
+    size_t tl; const char *t = lua_tolstring(L, -1, &tl);
+    for (int64_t ci = Co[d]; ci < Co[d + 1]; ci ++) {
+      int64_t a = Cs[ci], b = Ce[ci];
+      const char *surf = t + a; size_t sl = (size_t) (b - a);
+      int64_t g = tlab ? tlab->a[ci] : nt;
+      int64_t own = (g >= 0 && g < nt) ? 1 : 0;
+      if (!Z->is_char) {
+        int64_t r = tk_gaz_find(Z, surf, sl, sb, sizeof sb);
+        if (r >= 0) {
+          int64_t *row = tk_gaz_rowptr(Z, r);
+          int64_t den = row[0] - own;
+          if (den > 0)
+            for (int64_t ty = 0; ty < nt; ty ++) {
+              int64_t cnt = row[1 + ty] - ((ty == g) ? own : 0);
+              if (cnt > 0) { tk_svec_push(nbr, (int32_t) ty); tk_fvec_push(val, (float) ((double) cnt / (double) den)); }
+            }
+        }
+      } else {
+        for (int64_t ty = 0; ty < nt; ty ++) acc[ty] = 0.0;
+        for (int64_t n = Z->nmin; n <= Z->nmax; n ++)
+          for (size_t i = 0; i + (size_t) n <= sl; i ++) {
+            int64_t r = tk_gaz_find(Z, surf + i, (size_t) n, sb, sizeof sb);
+            if (r < 0) continue;
+            int64_t *row = tk_gaz_rowptr(Z, r);
+            int64_t den = row[0] - own;
+            if (den <= 0) continue;
+            for (int64_t ty = 0; ty < nt; ty ++) {
+              int64_t cnt = row[1 + ty] - ((ty == g) ? own : 0);
+              if (cnt > 0) acc[ty] += (double) cnt / (double) den;
+            }
+          }
+        for (int64_t ty = 0; ty < nt; ty ++)
+          if (acc[ty] > 0.0) { tk_svec_push(nbr, (int32_t) ty); tk_fvec_push(val, (float) acc[ty]); }
+      }
+      tk_ivec_push(off, (int64_t) nbr->n);
+    }
+    lua_pop(L, 1);
+  }
+  free(acc);
+  tk_csr_push(L, TK_TAG_F32, TK_TAG_I32, (uint64_t) nt,
+    off_idx, off, nbr_idx, (void *) nbr, val_idx, (void *) val);
+  return 1;
+}
+
+static luaL_Reg tk_gaz_mt_fns[] = {
+  { "block", tk_gaz_block },
+  { NULL, NULL }
+};
 
 static luaL_Reg tk_ner_spans_mt_fns[] = {
   { "type_labels", tk_ner_type_labels },
@@ -221,6 +393,8 @@ static luaL_Reg tk_ner_spans_mt_fns[] = {
 static luaL_Reg tk_ner_module_fns[] = {
   { "miss_report", tk_ner_miss_report },
   { "decode_report", tk_ner_decode_report },
+  { "build_typed_gaz", tk_gaz_build_typed_lua },
+  { "build_char_gaz", tk_gaz_build_char_lua },
   { NULL, NULL }
 };
 

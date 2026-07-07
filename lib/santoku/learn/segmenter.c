@@ -10,12 +10,12 @@
 
 typedef struct {
   int trained;
-  int left_only;         // embedding direction: 1 = predecessor distribution only, 0 = left(+)right
+  int left_only;
   uint8_t seen[256];
   int nseen;
   int coarse_k;
   int sep_class;
-  int *coph;             // 256*256 cophenetic merge steps (malloc'd)
+  int *coph;
 } tk_segmenter_t;
 
 static inline tk_segmenter_t *tk_segmenter_peek (lua_State *L, int i) {
@@ -24,6 +24,13 @@ static inline tk_segmenter_t *tk_segmenter_peek (lua_State *L, int i) {
 
 static luaL_Reg tk_segmenter_mt_fns[];
 static int tk_segmenter_gc (lua_State *L);
+
+static void tk_seg_load_texts (lua_State *L, int ti, int n, const char ***tpp, size_t **tlp) {
+  const char **tp = (const char **) malloc((size_t) n * sizeof(char *));
+  size_t *tl = (size_t *) malloc((size_t) n * sizeof(size_t));
+  for (int d = 0; d < n; d++) { lua_rawgeti(L, ti, d + 1); tp[d] = lua_tolstring(L, -1, &tl[d]); lua_pop(L, 1); }
+  *tpp = tp; *tlp = tl;
+}
 
 static int tk_segmenter_create_lua (lua_State *L) {
   luaL_checktype(L, 1, LUA_TTABLE);
@@ -66,9 +73,8 @@ static int tk_segmenter_train_lua (lua_State *L) {
   lua_getfield(L, 2, "gold_starts");  tk_ivec_t *gst = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
   lua_getfield(L, 2, "gold_ends");    tk_ivec_t *gen = tk_ivec_peekopt(L, -1); lua_pop(L, 1);
 
-  const char **tp = (const char **) malloc((size_t) n * sizeof(char *));
-  size_t *tl = (size_t *) malloc((size_t) n * sizeof(size_t));
-  for (int d = 0; d < n; d++) { lua_rawgeti(L, ti, d + 1); tp[d] = lua_tolstring(L, -1, &tl[d]); lua_pop(L, 1); }
+  const char **tp; size_t *tl;
+  tk_seg_load_texts(L, ti, n, &tp, &tl);
 
   const size_t NSYM = 258, B_MARK = 256, E_MARK = 257;
   double *Cr = (double *) calloc(NSYM * NSYM, sizeof(double));
@@ -134,10 +140,6 @@ static int tk_segmenter_train_lua (lua_State *L) {
     size_t lo = a <= b ? a : b, hi = a <= b ? b : a;
     dist[a * 256 + b] = 1.0 - G[lo * 256 + hi];
   }
-
-  // boundary-breaking matrix BB[a][b] = # gold edges whose two flanking byte VALUES are a and b.
-  // self (su==sv) and doc-edge (==256) flanks are excluded: a byte->class map can never separate a
-  // byte from itself, so those boundaries are inherently unpreservable and must not gate the cut.
   double *BB = (double *) calloc(256 * 256, sizeof(double));
   for (int i = 0; i < nspan; i++) {
     if (su[i] != 256 && sv[i] != 256 && su[i] != sv[i]) { BB[su[i] * 256 + sv[i]] += 1.0; BB[sv[i] * 256 + su[i]] += 1.0; }
@@ -173,8 +175,6 @@ static int tk_segmenter_train_lua (lua_State *L) {
   s->coarse_k = nseen - bestS;
   s->trained = 1;
 
-  // both-edges span-recall ceiling at the cut: a span is recoverable unless one edge is a self-flank
-  // (same byte value both sides, unseparable by any byte->class map). Doc-edge flanks are preserved.
   int n_span_ok = 0;
   for (int i = 0; i < nspan; i++) {
     int s_bad = (su[i] != 256 && su[i] == sv[i]);
@@ -183,9 +183,11 @@ static int tk_segmenter_train_lua (lua_State *L) {
   }
   double recall = nspan > 0 ? (double) n_span_ok / nspan : 1.0;
 
+  uint8_t cm[256];
+  tk_cut_classmap(s, bestS, cm);
+
   int maxc = 0, p95 = 0;
   {
-    uint8_t cm[256]; tk_cut_classmap(s, bestS, cm);
     int hist[1024]; memset(hist, 0, sizeof(hist)); int nsp = 0;
     for (int d = 0; d < n; d++) {
       const unsigned char *b = (const unsigned char *) tp[d]; size_t len = tl[d];
@@ -203,12 +205,8 @@ static int tk_segmenter_train_lua (lua_State *L) {
     for (int i = 0; i < 1024; i++) { cum += hist[i]; if (cum >= thr) { p95 = i; break; } }
   }
 
-  // learned separator class: the coarse-cut class with the lowest gold-insideness fraction (its byte
-  // occurrences sit mostly between/around entities). drop_sep omits its cells -- the byte-native,
-  // charclass-free replacement for a whitespace test. (smark reused as the inside-gold mask.)
   int sep_class = 0;
   {
-    uint8_t cm[256]; tk_cut_classmap(s, bestS, cm);
     int ncl = 0; for (int v = 0; v < 256; v++) if (cm[v] + 1 > ncl) ncl = cm[v] + 1;
     double *ins = (double *) calloc((size_t) (ncl > 0 ? ncl : 1), sizeof(double));
     double *tot = (double *) calloc((size_t) (ncl > 0 ? ncl : 1), sizeof(double));
@@ -240,12 +238,6 @@ static int tk_segmenter_train_lua (lua_State *L) {
   return 5;
 }
 
-// ---------------------------------------------------------------------------
-// shared emit: cut at k, run-length-encode each doc's byte-class stream into (offsets, starts, ends,
-// classes). When drop_sep, cells whose bytes belong to the learned separator class AT THE COARSE CUT are
-// omitted (the dendrogram is hierarchical, so a finer k-class sits within one coarse class -> sampling
-// the run's first byte's coarse class suffices). At k == coarse_k this equals the old rc == sep_class
-// test. Reads texts/n from the table at stack index 2; returns the 4 ivecs.
 static int tk_segmenter_emit (lua_State *L, tk_segmenter_t *s, int k, int drop_sep) {
   luaL_checktype(L, 2, LUA_TTABLE);
   int n = (int) tk_lua_fcheckunsigned(L, 2, "segment", "n");
@@ -254,12 +246,15 @@ static int tk_segmenter_emit (lua_State *L, tk_segmenter_t *s, int k, int drop_s
   lua_getfield(L, 2, "texts"); luaL_checktype(L, -1, LUA_TTABLE);
   int ti = lua_gettop(L);
 
-  const char **tp = (const char **) malloc((size_t) n * sizeof(char *));
-  size_t *tl = (size_t *) malloc((size_t) n * sizeof(size_t));
-  for (int d = 0; d < n; d++) { lua_rawgeti(L, ti, d + 1); tp[d] = lua_tolstring(L, -1, &tl[d]); lua_pop(L, 1); }
+  const char **tp; size_t *tl;
+  tk_seg_load_texts(L, ti, n, &tp, &tl);
 
   uint8_t cm[256]; tk_cut_classmap(s, s->nseen - k, cm);
-  uint8_t cmc[256]; if (drop_sep) tk_cut_classmap(s, s->nseen - s->coarse_k, cmc);
+  uint8_t cmc[256];
+  if (drop_sep) {
+    if (k == s->coarse_k) memcpy(cmc, cm, sizeof(cmc));
+    else tk_cut_classmap(s, s->nseen - s->coarse_k, cmc);
+  }
 
   tk_ivec_t *off = tk_ivec_create(L, 0), *st = tk_ivec_create(L, 0),
             *en = tk_ivec_create(L, 0), *cl = tk_ivec_create(L, 0);
@@ -301,15 +296,15 @@ static int tk_segmenter_compression_curve_lua (lua_State *L) {
   int n = (int) tk_lua_fcheckunsigned(L, 2, "compression_curve", "n");
   lua_getfield(L, 2, "texts"); luaL_checktype(L, -1, LUA_TTABLE);
   int ti = lua_gettop(L);
+  const char **tp; size_t *tl;
+  tk_seg_load_texts(L, ti, n, &tp, &tl);
   int nseen = s->nseen; int *coph = s->coph;
   double *rsum = (double *) calloc((size_t) (nseen + 1), sizeof(double));
   int64_t *Hd = (int64_t *) malloc((size_t) (nseen + 1) * sizeof(int64_t));
   int64_t *suf = (int64_t *) malloc((size_t) (nseen + 1) * sizeof(int64_t));
   int64_t ndoc = 0;
   for (int d = 0; d < n; d++) {
-    lua_rawgeti(L, ti, d + 1);
-    size_t len; const unsigned char *b = (const unsigned char *) lua_tolstring(L, -1, &len);
-    lua_pop(L, 1);
+    const unsigned char *b = (const unsigned char *) tp[d]; size_t len = tl[d];
     if (len < 1) continue;
     ndoc++;
     for (int l = 0; l <= nseen; l++) Hd[l] = 0;
@@ -332,7 +327,7 @@ static int tk_segmenter_compression_curve_lua (lua_State *L) {
     lua_pushnumber(L, ndoc > 0 ? rsum[k] / (double) ndoc : 0.0);
     lua_rawseti(L, -2, k);
   }
-  free(rsum); free(Hd); free(suf);
+  free(tp); free(tl); free(rsum); free(Hd); free(suf);
   lua_pushinteger(L, nseen);
   return 2;
 }
