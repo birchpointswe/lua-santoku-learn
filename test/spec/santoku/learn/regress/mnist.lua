@@ -20,7 +20,7 @@ local cfg = {
   exponent = { { def = 0.238789 } },
   classes = 10,
   k = 1,
-  search_trials = 0,
+  search_trials = 40,
   folds = 5,
 }
 

@@ -365,7 +365,8 @@ function M.fold_dense (a)
   local n = a.pool_n or select(1, a.pool_codes:shape())
   local reg = a.pool_targets ~= nil
   local use_folds = (a.search_trials or 0) > 0 and K > 1
-  local rel = a.relevance == "auc" and (a.pool_labels ~= nil or a.pool_targets ~= nil)
+  local rel_metric = type(a.relevance) == "table" and a.relevance[1] or a.relevance
+  local rel = rel_metric == "auc" and (a.pool_labels ~= nil or a.pool_targets ~= nil)
   local is_csr = a.pool_codes.neighbors ~= nil
   local F = {}
   local fy, fvy, fvn, ft, fvt = {}, {}, {}, {}, {}
@@ -388,6 +389,7 @@ function M.fold_dense (a)
   end
   local rel_slot, cs_cache = {}, {}
   local function dense_colscale (slot, e)
+    if type(e) == "table" then e = e[1] end
     if not rel or e == nil or e == false then return nil end
     local key = slot .. ":" .. tostring(e)
     local hit = cs_cache[key]
