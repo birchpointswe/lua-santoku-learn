@@ -251,15 +251,40 @@ static const char tk_text_e2_80[64] = {
    0, '\'','\'', 0,  0,  0,  0,  0
 };
 
+
+
+static const char *const tk_text_pages2[16] = {
+  tk_text_c6, tk_text_c7, tk_text_c8, tk_text_c9,
+  0, 0, 0, 0, 0, 0, 0, 0,
+  tk_text_d2, tk_text_d3, tk_text_d4, tk_text_d5
+};
+
+
+static const char *const tk_text_e1_pages[4] = {
+  tk_text_e1_b8, tk_text_e1_b9, tk_text_e1_ba, tk_text_e1_bb
+};
+
 typedef struct {
   uint8_t bytes[4];
   int n_out;
   int n_in;
 } tk_norm_result_t;
 
+static inline void tk_norm_emit2 (tk_norm_result_t *r, uint8_t a, uint8_t b) {
+  r->bytes[0] = a; r->bytes[1] = b; r->n_out = 2;
+}
 
+static inline void tk_norm_page2 (tk_norm_result_t *r, const char *tbl, uint8_t c, uint8_t c2) {
+  char base = tbl[c2 - 0x80];
+  if (base) { r->bytes[0] = (uint8_t)base; r->n_out = 1; }
+  else tk_norm_emit2(r, c, c2);
+}
 
-
+static inline void tk_norm_page3 (tk_norm_result_t *r, const char *tbl, uint8_t c, uint8_t c2, uint8_t c3) {
+  char base = tbl[c3 - 0x80];
+  if (base) { r->bytes[0] = (uint8_t)base; r->n_out = 1; }
+  else { r->bytes[0] = c; r->bytes[1] = c2; r->bytes[2] = c3; r->n_out = 3; }
+}
 
 static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t pos, size_t len) {
   tk_norm_result_t r = {0};
@@ -291,62 +316,26 @@ static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t po
         case 0xB5: r.bytes[0] = 'u'; r.n_out = 1; break;
         case 0xB9: r.bytes[0] = '1'; r.n_out = 1; break;
         case 0xBA: r.bytes[0] = 'o'; r.n_out = 1; break;
-        default: r.bytes[0] = c; r.bytes[1] = c2; r.n_out = 2; break;
+        default: tk_norm_emit2(&r, c, c2); break;
       }
 
     } else if (c == 0xC3) {
 
       if (c2 == 0x86) { r.bytes[0] = 'a'; r.bytes[1] = 'e'; r.n_out = 2; }
       else if (c2 == 0xA6) { r.bytes[0] = 'a'; r.bytes[1] = 'e'; r.n_out = 2; }
-      else {
-        char base = tk_text_c3[c2 - 0x80];
-        if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-        else { r.bytes[0] = c; r.bytes[1] = c2; r.n_out = 2; }
-      }
+      else tk_norm_page2(&r, tk_text_c3, c, c2);
 
     } else if (c == 0xC4) {
 
       if (c2 == 0xB2) { r.bytes[0] = 'i'; r.bytes[1] = 'j'; r.n_out = 2; }
       else if (c2 == 0xB3) { r.bytes[0] = 'i'; r.bytes[1] = 'j'; r.n_out = 2; }
-      else {
-        char base = tk_text_c4[c2 - 0x80];
-        if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-        else { r.bytes[0] = c; r.bytes[1] = c2; r.n_out = 2; }
-      }
+      else tk_norm_page2(&r, tk_text_c4, c, c2);
 
     } else if (c == 0xC5) {
 
       if (c2 == 0x92) { r.bytes[0] = 'o'; r.bytes[1] = 'e'; r.n_out = 2; }
       else if (c2 == 0x93) { r.bytes[0] = 'o'; r.bytes[1] = 'e'; r.n_out = 2; }
-      else {
-        char base = tk_text_c5[c2 - 0x80];
-        if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-        else { r.bytes[0] = c; r.bytes[1] = c2; r.n_out = 2; }
-      }
-
-    } else if (c == 0xC6) {
-
-      char base = tk_text_c6[c2 - 0x80];
-      if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-      else { r.bytes[0] = c; r.bytes[1] = c2; r.n_out = 2; }
-
-    } else if (c == 0xC7) {
-
-      char base = tk_text_c7[c2 - 0x80];
-      if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-      else { r.bytes[0] = c; r.bytes[1] = c2; r.n_out = 2; }
-
-    } else if (c == 0xC8) {
-
-      char base = tk_text_c8[c2 - 0x80];
-      if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-      else { r.bytes[0] = c; r.bytes[1] = c2; r.n_out = 2; }
-
-    } else if (c == 0xC9) {
-
-      char base = tk_text_c9[c2 - 0x80];
-      if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-      else { r.bytes[0] = c; r.bytes[1] = c2; r.n_out = 2; }
+      else tk_norm_page2(&r, tk_text_c5, c, c2);
 
     } else if (c == 0xCC) {
 
@@ -360,20 +349,12 @@ static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t po
 
       if (c2 == 0x98 || c2 == 0xB8) { r.bytes[0] = 't'; r.bytes[1] = 'h'; r.n_out = 2; }
       else if (c2 == 0x9E || c2 == 0xBE) { r.bytes[0] = 'k'; r.bytes[1] = 's'; r.n_out = 2; }
-      else {
-        char base = tk_text_ce[c2 - 0x80];
-        if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-        else { r.bytes[0] = c; r.bytes[1] = c2; r.n_out = 2; }
-      }
+      else tk_norm_page2(&r, tk_text_ce, c, c2);
 
     } else if (c == 0xCF) {
 
       if (c2 == 0x88) { r.bytes[0] = 'p'; r.bytes[1] = 's'; r.n_out = 2; }
-      else {
-        char base = tk_text_cf[c2 - 0x80];
-        if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-        else { r.bytes[0] = c; r.bytes[1] = c2; r.n_out = 2; }
-      }
+      else tk_norm_page2(&r, tk_text_cf, c, c2);
 
     } else if (c == 0xD0) {
 
@@ -388,12 +369,7 @@ static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t po
         case 0xAE: r.bytes[0] = 'y'; r.bytes[1] = 'u'; r.n_out = 2; break;
         case 0xAF: r.bytes[0] = 'y'; r.bytes[1] = 'a'; r.n_out = 2; break;
         case 0xB6: r.bytes[0] = 'z'; r.bytes[1] = 'h'; r.n_out = 2; break;
-        default: {
-          char base = tk_text_d0[c2 - 0x80];
-          if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-          else { r.bytes[0] = c; r.bytes[1] = c2; r.n_out = 2; }
-          break;
-        }
+        default: tk_norm_page2(&r, tk_text_d0, c, c2); break;
       }
 
     } else if (c == 0xD1) {
@@ -407,43 +383,16 @@ static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t po
         case 0x8C: r.n_out = 0; break;
         case 0x8E: r.bytes[0] = 'y'; r.bytes[1] = 'u'; r.n_out = 2; break;
         case 0x8F: r.bytes[0] = 'y'; r.bytes[1] = 'a'; r.n_out = 2; break;
-        default: {
-          char base = tk_text_d1[c2 - 0x80];
-          if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-          else { r.bytes[0] = c; r.bytes[1] = c2; r.n_out = 2; }
-          break;
-        }
+        default: tk_norm_page2(&r, tk_text_d1, c, c2); break;
       }
 
-    } else if (c == 0xD2) {
+    } else if (c >= 0xC6 && c <= 0xD5 && tk_text_pages2[c - 0xC6]) {
 
-      char base = tk_text_d2[c2 - 0x80];
-      if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-      else { r.bytes[0] = c; r.bytes[1] = c2; r.n_out = 2; }
-
-    } else if (c == 0xD3) {
-
-      char base = tk_text_d3[c2 - 0x80];
-      if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-      else { r.bytes[0] = c; r.bytes[1] = c2; r.n_out = 2; }
-
-    } else if (c == 0xD4) {
-
-      char base = tk_text_d4[c2 - 0x80];
-      if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-      else { r.bytes[0] = c; r.bytes[1] = c2; r.n_out = 2; }
-
-    } else if (c == 0xD5) {
-
-      char base = tk_text_d5[c2 - 0x80];
-      if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-      else { r.bytes[0] = c; r.bytes[1] = c2; r.n_out = 2; }
+      tk_norm_page2(&r, tk_text_pages2[c - 0xC6], c, c2);
 
     } else {
 
-      r.bytes[0] = c;
-      r.bytes[1] = c2;
-      r.n_out = 2;
+      tk_norm_emit2(&r, c, c2);
 
     }
 
@@ -453,29 +402,9 @@ static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t po
     uint8_t c3 = (uint8_t)in[pos + 2];
     r.n_in = 3;
 
-    if (c == 0xE1 && c2 == 0xB8 && (c3 & 0xC0) == 0x80) {
+    if (c == 0xE1 && c2 >= 0xB8 && c2 <= 0xBB && (c3 & 0xC0) == 0x80) {
 
-      char base = tk_text_e1_b8[c3 - 0x80];
-      if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-      else { r.bytes[0] = c; r.bytes[1] = c2; r.bytes[2] = c3; r.n_out = 3; }
-
-    } else if (c == 0xE1 && c2 == 0xB9 && (c3 & 0xC0) == 0x80) {
-
-      char base = tk_text_e1_b9[c3 - 0x80];
-      if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-      else { r.bytes[0] = c; r.bytes[1] = c2; r.bytes[2] = c3; r.n_out = 3; }
-
-    } else if (c == 0xE1 && c2 == 0xBA && (c3 & 0xC0) == 0x80) {
-
-      char base = tk_text_e1_ba[c3 - 0x80];
-      if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-      else { r.bytes[0] = c; r.bytes[1] = c2; r.bytes[2] = c3; r.n_out = 3; }
-
-    } else if (c == 0xE1 && c2 == 0xBB && (c3 & 0xC0) == 0x80) {
-
-      char base = tk_text_e1_bb[c3 - 0x80];
-      if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-      else { r.bytes[0] = c; r.bytes[1] = c2; r.bytes[2] = c3; r.n_out = 3; }
+      tk_norm_page3(&r, tk_text_e1_pages[c2 - 0xB8], c, c2, c3);
 
     } else if (c == 0xE1 && (c2 == 0xAA || c2 == 0xAB)) {
 
@@ -487,9 +416,7 @@ static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t po
 
     } else if (c == 0xE2 && c2 == 0x80 && (c3 & 0xC0) == 0x80) {
 
-      char base = tk_text_e2_80[c3 - 0x80];
-      if (base) { r.bytes[0] = (uint8_t)base; r.n_out = 1; }
-      else { r.bytes[0] = c; r.bytes[1] = c2; r.bytes[2] = c3; r.n_out = 3; }
+      tk_norm_page3(&r, tk_text_e2_80, c, c2, c3);
 
     } else if (c == 0xEF && (c2 == 0xBC || c2 == 0xBD)) {
 
@@ -528,13 +455,6 @@ static inline tk_norm_result_t tk_text_normalize_next (const char *in, size_t po
   return r;
 }
 
-
-
-
-
-
-
-
 typedef struct {
   uint8_t *out;
   size_t nlen;
@@ -546,7 +466,6 @@ static inline void tk_norm_stream_init (tk_norm_stream_t *s, uint8_t *out) {
   s->nlen = 0;
   s->prev_space = 1;
 }
-
 
 static inline void tk_norm_stream_run (tk_norm_stream_t *s, const char *in, size_t len) {
   size_t i = 0;
@@ -568,14 +487,10 @@ static inline void tk_norm_stream_run (tk_norm_stream_t *s, const char *in, size
   }
 }
 
-
-
-
 static inline void tk_norm_stream_mark (tk_norm_stream_t *s, uint8_t byte) {
   s->out[s->nlen++] = byte;
   s->prev_space = 0;
 }
-
 
 static inline size_t tk_norm_stream_finish (tk_norm_stream_t *s) {
   if (s->nlen > 0 && s->out[s->nlen - 1] == ' ') s->nlen--;

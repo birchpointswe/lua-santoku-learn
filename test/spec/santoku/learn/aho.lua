@@ -165,6 +165,32 @@ test("aho", function ()
     assert(ends:get(2) == 8)
   end)
 
+  test("word_characters filters embedded matches", function ()
+    local ac = aho.create({ patterns = { "cat" } })
+    local S = ac:predict({ texts = { "cat concatenate cat." } })
+    assert(S:col("id"):size() == 3)
+    S = ac:predict({
+      texts = { "cat concatenate cat." },
+      word_characters = "abcdefghijklmnopqrstuvwxyz"
+    })
+    local mids, starts, ends = S:col("id"), S:col("s"), S:col("e")
+    assert(mids:size() == 2)
+    assert(starts:get(0) == 0)
+    assert(ends:get(0) == 3)
+    assert(starts:get(1) == 16)
+    assert(ends:get(1) == 19)
+  end)
+
+  test("tag with word_characters", function ()
+    local ac = aho.create({ patterns = { "cat" } })
+    local result = ac:tag({
+      texts = { "cat concatenate cat" },
+      fmt = "[%match]",
+      word_characters = "abcdefghijklmnopqrstuvwxyz"
+    })
+    assert(result[1] == "[cat] concatenate [cat]")
+  end)
+
   test("tag basic", function ()
     local ac = aho.create({ patterns = { "foo", "bar" } })
     local result = ac:tag({ texts = { "foo and bar" }, fmt = "[%match:%id]" })

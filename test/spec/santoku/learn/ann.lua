@@ -59,12 +59,18 @@ test("ann spectral idf retrieval", function ()
 
   local P_self = idx:neighborhoods(k)
 
+  local P_self_rr = idx:neighborhoods(k, true)
+  local P_self_bin = idx:neighborhoods(k, false)
+
   str.printf("[ANN] recall@%d  rerank=%.4f  hamming=%.4f\n", k, r_rr, r_bin)
 
 
   assert(P_rr:offsets():size() == nq + 1)
   assert(P_bin:offsets():size() == nq + 1)
   assert(P_self:offsets():size() == nq + 1)
+  assert(P_self_rr:offsets():size() == nq + 1)
+  assert(P_self_bin:offsets():size() == nq + 1)
+  assert(recall(P_self_rr, P_self, nq) == 1 and recall(P_self, P_self_rr, nq) == 1)
 
   assert(r_rr >= r_bin)
 

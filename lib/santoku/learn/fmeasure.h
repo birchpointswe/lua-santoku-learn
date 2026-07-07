@@ -6,11 +6,6 @@
 #include <stdbool.h>
 #include <santoku/rvec.h>
 
-
-
-
-
-
 static inline void tk_fmeasure_sweep (
   tk_rank_t *pool,
   size_t n,

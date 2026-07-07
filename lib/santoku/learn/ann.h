@@ -33,6 +33,19 @@ static inline tk_ann_flat_t *tk_ann_flat_peek (lua_State *L, int i)
   return (tk_ann_flat_t *) luaL_checkudata(L, i, TK_ANN_MT);
 }
 
+static inline void tk_ann_sign_pack (
+  const float *codes, uint64_t n, uint64_t n_dims, uint64_t features,
+  char *bits, size_t bpv
+) {
+  memset(bits, 0, n * bpv);
+  for (uint64_t s = 0; s < n; s++) {
+    const float *row = codes + s * n_dims;
+    unsigned char *bvec = (unsigned char *) (bits + s * bpv);
+    for (uint64_t i = 0; i < n_dims && i < features; i++)
+      if (row[i] >= 0.0f) bvec[i >> 3] |= (unsigned char) (1u << (i & 7));
+  }
+}
+
 static inline uint32_t tk_ann_flat_substring (
   const char *vec, uint64_t features, uint64_t ti
 ) {
@@ -201,8 +214,6 @@ static inline void tk_ann_flat_query_csr (
 ) {
   uint64_t features = flat->features;
   bool rerank = (query_codes && corpus_codes && n_dims > 0);
-
-
   uint64_t fetch_k = rerank ? k * (oversample > 0 ? oversample : 1) : k;
 
   tk_ivec_t *off = tk_ivec_create(L, nq + 1);
@@ -288,12 +299,9 @@ static inline void tk_ann_flat_query_csr (
 
   free(counts);
 
-
   tk_csr_push(L, TK_TAG_F64, TK_TAG_I64, flat->N,
     off_idx, off, nbr_idx, (void *) nbr, wt_idx, wt);
 }
-
-
 
 static inline int tk_ann_flat_nbr_by_vecs_lua (lua_State *L)
 {
@@ -309,20 +317,13 @@ static inline int tk_ann_flat_nbr_by_vecs_lua (lua_State *L)
   size_t bpv = flat->bytes_per_vec;
   tk_cvec_t *qbits = tk_cvec_create(L, nq * bpv);
   qbits->n = nq * bpv;
-  memset(qbits->a, 0, nq * bpv);
-  for (uint64_t s = 0; s < nq; s++) {
-    const float *row = qcodes + s * n_dims;
-    unsigned char *bvec = (unsigned char *) (qbits->a + s * bpv);
-    for (uint64_t i = 0; i < n_dims && i < flat->features; i++)
-      if (row[i] >= 0.0f) bvec[i >> 3] |= (unsigned char) (1u << (i & 7));
-  }
+  tk_ann_sign_pack(qcodes, nq, n_dims, flat->features, qbits->a, bpv);
   const float *corpus_codes = flat->codes;
   const float *query_codes = (corpus_codes && flat->n_dims == n_dims) ? qcodes : NULL;
   tk_ann_flat_query_csr(L, flat, qbits->a, nq, false, k, max_radius,
     query_codes, corpus_codes, flat->n_dims, oversample);
   return 1;
 }
-
 
 static inline int tk_ann_flat_nbr_lua (lua_State *L)
 {
@@ -348,9 +349,6 @@ static luaL_Reg tk_ann_flat_mt_fns[] =
   { "neighborhoods", tk_ann_flat_nbr_lua },
   { NULL, NULL }
 };
-
-static inline void tk_ann_flat_suppress_unused (void)
-  { (void) tk_ann_flat_mt_fns; }
 
 static inline tk_ann_flat_t *tk_ann_flat_create (
   lua_State *L, const char *data, uint64_t N, uint64_t features

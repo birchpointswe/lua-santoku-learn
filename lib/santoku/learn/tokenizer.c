@@ -4,7 +4,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
-#include <math.h>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -13,7 +12,6 @@
 #include <santoku/ivec/ext.h>
 #include <santoku/svec.h>
 #include <santoku/fvec.h>
-#include <santoku/cvec.h>
 #include <santoku/iumap/ext.h>
 #include <santoku/csr.h>
 #include <santoku/spans.h>
@@ -24,9 +22,6 @@
 typedef enum { TK_STREAM_TEXT = 0, TK_STREAM_TYPE = 1 } tk_stream_t;
 typedef enum { TK_FOCUS_NONE = 0, TK_FOCUS_TRUE = 1 } tk_focus_t;
 
-
-
-
 typedef struct {
   int ngram_min, ngram_max;
   int n_types;
@@ -35,7 +30,6 @@ typedef struct {
   int terminals;
   tk_focus_t focus;
   int words;
-
 
   uint8_t b_bos, b_eos;
   uint8_t b_focus_open, b_focus_close;
@@ -53,13 +47,6 @@ static inline tk_tokenizer_t *tk_tokenizer_peek (lua_State *L, int i) {
 
 static luaL_Reg tk_tokenizer_mt_fns[];
 static int tk_tokenizer_gc (lua_State *L);
-
-
-
-
-
-
-
 
 typedef struct { uint8_t pool[256]; int n, i; } tk_assigner_t;
 
@@ -121,7 +108,7 @@ static int tk_tokenizer_create_lua (lua_State *L) {
 
   tk_tokenizer_t cfg;
   memset(&cfg, 0, sizeof(cfg));
-  cfg.ngram_min = (int) tk_lua_fcheckunsigned(L, 1, "tokenizer", "ngram_min");
+  cfg.ngram_min = (int) tk_lua_foptunsigned(L, 1, "tokenizer", "ngram_min", 1);
   cfg.ngram_max = (int) tk_lua_fcheckunsigned(L, 1, "tokenizer", "ngram_max");
   if (cfg.ngram_min < 1 || cfg.ngram_min > cfg.ngram_max)
     return luaL_error(L, "tokenizer: need 1 <= ngram_min <= ngram_max");
@@ -134,14 +121,14 @@ static int tk_tokenizer_create_lua (lua_State *L) {
   cfg.words = tk_lua_foptboolean(L, 1, "tokenizer", "words", false);
 
   int has_boundary = 0;
-  lua_getfield(L, 1, "boundary");
+  lua_getfield(L, 1, "word_characters");
   if (!lua_isnil(L, -1)) {
     size_t blen; const char *bs = lua_tolstring(L, -1, &blen);
     for (size_t i = 0; i < blen; i++) { cfg.content[(uint8_t) bs[i]] = 1; has_boundary = 1; }
   }
   lua_pop(L, 1);
   if (cfg.words && !has_boundary)
-    return luaL_error(L, "tokenizer: words=true requires a boundary");
+    return luaL_error(L, "tokenizer: words=true requires word_characters");
 
   lua_getfield(L, 1, "focus");
   if (lua_isnil(L, -1) || (lua_isboolean(L, -1) && !lua_toboolean(L, -1))) cfg.focus = TK_FOCUS_NONE;
@@ -174,16 +161,24 @@ static int tk_tokenizer_n_tokens_lua (lua_State *L) {
   return 1;
 }
 
-static int tk_tokenizer_shrink_lua (lua_State *L) {
-  tk_tokenizer_peek(L, 1);
-  return 0;
-}
-
 static int tk_tokenizer_gc (lua_State *L) {
   tk_tokenizer_t *t = (tk_tokenizer_t *) luaL_checkudata(L, 1, TK_TOK_MT);
   if (t->ngram_map) { tk_iumap_destroy(t->ngram_map); t->ngram_map = NULL; }
   return 0;
 }
+
+#define tk_pack_roll(a, n, count, out) do { \
+  const uint64_t P = 0x9E3779B97F4A7C15ULL; \
+  uint64_t p_pow_n = 1; \
+  for (int j = 0; j < n - 1; j++) p_pow_n *= P; \
+  uint64_t h = 0; \
+  for (int j = 0; j < n; j++) h = h * P + (uint64_t) a[j]; \
+  out[0] = (int64_t) h; \
+  for (size_t i = 1; i < count; i++) { \
+    h = (h - (uint64_t) a[i - 1] * p_pow_n) * P + (uint64_t) a[i + (size_t) n - 1]; \
+    out[i] = (int64_t) h; \
+  } \
+} while (0)
 
 static inline size_t tk_pack_ngrams (const uint8_t *d, size_t n_elems, int n, int64_t *out) {
   if (n_elems < (size_t) n) return 0;
@@ -197,16 +192,7 @@ static inline size_t tk_pack_ngrams (const uint8_t *d, size_t n_elems, int n, in
       out[i] = (int64_t) id;
     }
   } else {
-    const uint64_t P = 0x9E3779B97F4A7C15ULL;
-    uint64_t p_pow_n = 1;
-    for (int j = 0; j < n - 1; j++) p_pow_n *= P;
-    uint64_t h = 0;
-    for (int j = 0; j < n; j++) h = h * P + d[j];
-    out[0] = (int64_t) h;
-    for (size_t i = 1; i < count; i++) {
-      h = (h - d[i - 1] * p_pow_n) * P + d[i + (size_t) n - 1];
-      out[i] = (int64_t) h;
-    }
+    tk_pack_roll(d, n, count, out);
   }
   return count;
 }
@@ -218,22 +204,10 @@ static inline size_t tk_pack_row (const uint8_t *buf, size_t len, int nmin, int 
   return count;
 }
 
-
-
-
 static inline size_t tk_pack_symbols_ng (const int64_t *sym, size_t n_elems, int n, int64_t *out) {
   if (n_elems < (size_t) n) return 0;
   size_t count = n_elems - (size_t) n + 1;
-  const uint64_t P = 0x9E3779B97F4A7C15ULL;
-  uint64_t p_pow_n = 1;
-  for (int j = 0; j < n - 1; j++) p_pow_n *= P;
-  uint64_t h = 0;
-  for (int j = 0; j < n; j++) h = h * P + (uint64_t) sym[j];
-  out[0] = (int64_t) h;
-  for (size_t i = 1; i < count; i++) {
-    h = (h - (uint64_t) sym[i - 1] * p_pow_n) * P + (uint64_t) sym[i + (size_t) n - 1];
-    out[i] = (int64_t) h;
-  }
+  tk_pack_roll(sym, n, count, out);
   return count;
 }
 
@@ -243,8 +217,6 @@ static inline size_t tk_pack_symbols (const int64_t *sym, size_t len, int nmin, 
     count += tk_pack_symbols_ng(sym, len, ng, out + count);
   return count;
 }
-
-
 
 static inline size_t tk_boundary_flatten (uint8_t *buf, size_t w,
     const uint8_t *content, const uint8_t *is_marker, uint8_t b_sep) {
@@ -256,9 +228,6 @@ static inline size_t tk_boundary_flatten (uint8_t *buf, size_t w,
   }
   return o;
 }
-
-
-
 
 static inline size_t tk_parse_symbols (const uint8_t *buf, size_t w,
     const uint8_t *content, const uint8_t *is_marker, int64_t *out) {
@@ -277,18 +246,10 @@ static inline size_t tk_parse_symbols (const uint8_t *buf, size_t w,
   return o;
 }
 
-
-
-
-
-
-
 static inline uint8_t tk_scrub (uint8_t b) {
   if ((b >= 0x01 && b <= 0x08) || (b >= 0x0E && b <= 0x1F) || b == 0x7F) return ' ';
   return b;
 }
-
-
 
 static inline int tk_type_slot (int t, int n_types) {
   if (t < 0) return n_types + 1;
@@ -310,8 +271,6 @@ static inline void tk_render_byte (tk_render_t *r, uint8_t byte) {
   if (r->norm) { tk_norm_stream_mark(&r->ns, byte); r->w = r->ns.nlen; }
   else r->buf[r->w++] = byte;
 }
-static inline void tk_render_mark (tk_render_t *r, uint8_t byte) { tk_render_byte(r, byte); }
-static inline void tk_render_content (tk_render_t *r, uint8_t byte) { tk_render_byte(r, byte); }
 static inline size_t tk_render_finish (tk_render_t *r) {
   if (r->norm) r->w = tk_norm_stream_finish(&r->ns);
   return r->w;
@@ -319,24 +278,25 @@ static inline size_t tk_render_finish (tk_render_t *r) {
 
 static size_t tk_render_row (
   tk_tokenizer_t *t, uint8_t *rowbuf,
-  const char *text, size_t tlen, int per_span, size_t s, size_t e,
-  int64_t c0, int64_t c1,
-  tk_ivec_t *cs, tk_ivec_t *ce, tk_ivec_t *cty, int suppress_focus)
+  const char *text, size_t tlen, size_t s, size_t e,
+  int64_t c0, int64_t c1, tk_ivec_t *cs, tk_ivec_t *cty)
 {
-  (void) per_span;
-  tk_focus_t efocus = suppress_focus ? TK_FOCUS_NONE : t->focus;
+  if (s > tlen) s = tlen;
+  if (e > tlen) e = tlen;
+  if (s > e) s = e;
+  tk_focus_t efocus = t->focus;
   tk_render_t r;
   tk_render_init(&r, rowbuf, (t->stream == TK_STREAM_TEXT && t->normalize));
-  if (t->terminals) tk_render_mark(&r, t->b_bos);
+  if (t->terminals) tk_render_byte(&r, t->b_bos);
 
   if (t->stream == TK_STREAM_TEXT) {
     if (efocus == TK_FOCUS_NONE) {
       tk_render_lit(&r, text, 0, tlen);
     } else {
       tk_render_lit(&r, text, 0, s);
-      tk_render_mark(&r, t->b_focus_open);
+      tk_render_byte(&r, t->b_focus_open);
       tk_render_lit(&r, text, s, e);
-      tk_render_mark(&r, t->b_focus_close);
+      tk_render_byte(&r, t->b_focus_close);
       tk_render_lit(&r, text, e, tlen);
     }
 
@@ -345,37 +305,53 @@ static size_t tk_render_row (
     for (int64_t cj = c0; cj < c1; cj++) {
       size_t cstart = (size_t) cs->a[cj];
       int slot = tk_type_slot(cty ? (int) cty->a[cj] : t->n_types, t->n_types);
-      if (efocus != TK_FOCUS_NONE && !fo_done && cstart >= s) { tk_render_mark(&r, t->b_focus_open); fo_done = true; }
-      if (efocus != TK_FOCUS_NONE && fo_done && !fc_done && cstart >= e) { tk_render_mark(&r, t->b_focus_close); fc_done = true; }
-      tk_render_content(&r, t->b_type[slot]);
+      if (efocus != TK_FOCUS_NONE && !fo_done && cstart >= s) { tk_render_byte(&r, t->b_focus_open); fo_done = true; }
+      if (efocus != TK_FOCUS_NONE && fo_done && !fc_done && cstart >= e) { tk_render_byte(&r, t->b_focus_close); fc_done = true; }
+      tk_render_byte(&r, t->b_type[slot]);
     }
-    if (efocus != TK_FOCUS_NONE && fo_done && !fc_done) tk_render_mark(&r, t->b_focus_close);
+    if (efocus != TK_FOCUS_NONE && fo_done && !fc_done) tk_render_byte(&r, t->b_focus_close);
   }
 
-  if (t->terminals) tk_render_mark(&r, t->b_eos);
+  if (t->terminals) tk_render_byte(&r, t->b_eos);
   return tk_render_finish(&r);
 }
 
+typedef struct { uint8_t *rb; int64_t *pk; int64_t *sm; } tk_scratch_t;
 
+static inline void tk_scratch_init (tk_scratch_t *sc, size_t maxbuf, size_t packed_cap, int word_mode) {
+  sc->rb = (uint8_t *) malloc(maxbuf);
+  sc->pk = (int64_t *) malloc(packed_cap * sizeof(int64_t));
+  sc->sm = word_mode ? (int64_t *) malloc(maxbuf * sizeof(int64_t)) : NULL;
+}
 
+static inline void tk_scratch_free (tk_scratch_t *sc) {
+  free(sc->rb); free(sc->pk); free(sc->sm);
+}
 
+static size_t tk_render_pack (
+  tk_tokenizer_t *t, const char *text, size_t tlen, size_t s, size_t e,
+  int64_t c0, int64_t c1, tk_ivec_t *cs, tk_ivec_t *cty,
+  int word_mode, int flatten_mode, const uint8_t *is_marker, tk_scratch_t *sc)
+{
+  size_t w = tk_render_row(t, sc->rb, text, tlen, s, e, c0, c1, cs, cty);
+  if (word_mode) {
+    size_t ns = tk_parse_symbols(sc->rb, w, t->content, is_marker, sc->sm);
+    return tk_pack_symbols(sc->sm, ns, t->ngram_min, t->ngram_max, sc->pk);
+  }
+  if (flatten_mode) w = tk_boundary_flatten(sc->rb, w, t->content, is_marker, t->b_sep);
+  return tk_pack_row(sc->rb, w, t->ngram_min, t->ngram_max, sc->pk);
+}
 
 static int64_t tk_emit_row (
   tk_tokenizer_t *t, tk_iumap_t *map, uint32_t mend,
-  const char *text, size_t tlen, int per_span, size_t s, size_t e, int64_t c0, int64_t c1,
-  tk_ivec_t *cs, tk_ivec_t *ce, tk_ivec_t *cty,
-  int word_mode, int flatten_mode, const uint8_t *is_marker, int64_t *sym,
-  uint8_t *rowbuf, int64_t *packed, int32_t *otok, float *oval)
+  const char *text, size_t tlen, size_t s, size_t e, int64_t c0, int64_t c1,
+  tk_ivec_t *cs, tk_ivec_t *cty,
+  int word_mode, int flatten_mode, const uint8_t *is_marker,
+  tk_scratch_t *sc, int32_t *otok, float *oval)
 {
-  size_t w = tk_render_row(t, rowbuf, text, tlen, per_span, s, e, c0, c1, cs, ce, cty, 0);
-  size_t count;
-  if (word_mode) {
-    size_t ns = tk_parse_symbols(rowbuf, w, t->content, is_marker, sym);
-    count = tk_pack_symbols(sym, ns, t->ngram_min, t->ngram_max, packed);
-  } else {
-    if (flatten_mode) w = tk_boundary_flatten(rowbuf, w, t->content, is_marker, t->b_sep);
-    count = tk_pack_row(rowbuf, w, t->ngram_min, t->ngram_max, packed);
-  }
+  size_t count = tk_render_pack(t, text, tlen, s, e, c0, c1, cs, cty,
+    word_mode, flatten_mode, is_marker, sc);
+  int64_t *packed = sc->pk;
   int64_t nv = 0;
   for (size_t i = 0; i < count; i++) {
     uint32_t it = tk_iumap_get(map, packed[i]);
@@ -391,13 +367,6 @@ static int64_t tk_emit_row (
   }
   return nnz;
 }
-
-
-
-
-
-
-
 
 static int tk_tokenize_core (lua_State *L, bool grow) {
   tk_tokenizer_t *t = tk_tokenizer_peek(L, 1);
@@ -415,10 +384,6 @@ static int tk_tokenize_core (lua_State *L, bool grow) {
     if (t->b_sep) is_marker[t->b_sep] = 1;
     for (int k = 0; k < t->n_types + 2; k++) if (t->b_type[k]) is_marker[t->b_type[k]] = 1;
   }
-
-
-
-
 
   lua_getfield(L, 2, "texts");
   luaL_checktype(L, -1, LUA_TTABLE);
@@ -442,7 +407,6 @@ static int tk_tokenize_core (lua_State *L, bool grow) {
     co = C->offsets; cs = C->cols[is]; ce = C->cols[ie]; cty = C->cols[it];
   }
   lua_pop(L, 1);
-
 
   bool per_span = (fo != NULL);
   if (per_span && (!fs || !fe))
@@ -491,39 +455,24 @@ static int tk_tokenize_core (lua_State *L, bool grow) {
 
   int64_t *nnz = (int64_t *) malloc((size_t) (n_rows > 0 ? n_rows : 1) * sizeof(int64_t));
 
-
-
-
-
-
-
-
   if (grow) {
     #pragma omp parallel
     {
       tk_iumap_t *lmap = tk_iumap_create(NULL, 0);
-      uint8_t *rb = (uint8_t *) malloc(maxbuf);
-      int64_t *pk = (int64_t *) malloc(packed_cap * sizeof(int64_t));
-      int64_t *sm = word_mode ? (int64_t *) malloc(maxbuf * sizeof(int64_t)) : NULL;
+      tk_scratch_t sc;
+      tk_scratch_init(&sc, maxbuf, packed_cap, word_mode);
       #pragma omp for schedule(dynamic, 64)
       for (int64_t row = 0; row < n_rows; row++) {
         int64_t d = row_doc[row]; size_t tlen = text_lens[d];
         size_t s = per_span ? (size_t) fs->a[row] : 0;
         size_t e = per_span ? (size_t) fe->a[row] : tlen;
-        size_t w = tk_render_row(t, rb, text_ptrs[d], tlen, per_span, s, e,
-          co ? co->a[d] : 0, co ? co->a[d + 1] : 0, cs, ce, cty, 0);
-        size_t count;
-        if (word_mode) {
-          size_t ns = tk_parse_symbols(rb, w, t->content, is_marker, sm);
-          count = tk_pack_symbols(sm, ns, t->ngram_min, t->ngram_max, pk);
-        } else {
-          if (flatten_mode) w = tk_boundary_flatten(rb, w, t->content, is_marker, t->b_sep);
-          count = tk_pack_row(rb, w, t->ngram_min, t->ngram_max, pk);
-        }
-        for (size_t i = 0; i < count; i++) { int absent; tk_iumap_put(lmap, pk[i], &absent); }
-        ks_introsort(tk_ivec_asc, (size_t) count, pk);
+        size_t count = tk_render_pack(t, text_ptrs[d], tlen, s, e,
+          co ? co->a[d] : 0, co ? co->a[d + 1] : 0, cs, cty,
+          word_mode, flatten_mode, is_marker, &sc);
+        for (size_t i = 0; i < count; i++) { int absent; tk_iumap_put(lmap, sc.pk[i], &absent); }
+        ks_introsort(tk_ivec_asc, (size_t) count, sc.pk);
         int64_t dc = 0;
-        for (size_t i = 0; i < count; i++) if (i == 0 || pk[i] != pk[i - 1]) dc++;
+        for (size_t i = 0; i < count; i++) if (i == 0 || sc.pk[i] != sc.pk[i - 1]) dc++;
         nnz[row] = dc;
       }
       #pragma omp critical (tk_grow_merge)
@@ -532,7 +481,7 @@ static int tk_tokenize_core (lua_State *L, bool grow) {
         tk_umap_foreach_keys(lmap, lk, ({ int absent; tk_iumap_put(map, lk, &absent); }));
       }
       tk_iumap_destroy(lmap);
-      free(rb); free(pk); free(sm);
+      tk_scratch_free(&sc);
     }
     int64_t V = (int64_t) tk_iumap_size(map);
     int64_t *keys = (int64_t *) malloc((size_t) (V > 0 ? V : 1) * sizeof(int64_t));
@@ -548,27 +497,22 @@ static int tk_tokenize_core (lua_State *L, bool grow) {
   offsets->n = (uint64_t) (n_rows + 1); offsets->a[0] = 0;
   tk_svec_t *toks = NULL; tk_fvec_t *vals = NULL;
 
-
-
-
-
   {
     if (!grow) {
       #pragma omp parallel
       {
-        uint8_t *rb = (uint8_t *) malloc(maxbuf);
-        int64_t *pk = (int64_t *) malloc(packed_cap * sizeof(int64_t));
-        int64_t *sm = word_mode ? (int64_t *) malloc(maxbuf * sizeof(int64_t)) : NULL;
+        tk_scratch_t sc;
+        tk_scratch_init(&sc, maxbuf, packed_cap, word_mode);
         #pragma omp for schedule(dynamic, 64)
         for (int64_t row = 0; row < n_rows; row++) {
           int64_t d = row_doc[row]; size_t tlen = text_lens[d];
           size_t s = per_span ? (size_t) fs->a[row] : 0;
           size_t e = per_span ? (size_t) fe->a[row] : tlen;
-          nnz[row] = tk_emit_row(t, map, mend, text_ptrs[d], tlen, per_span, s, e,
-            co ? co->a[d] : 0, co ? co->a[d + 1] : 0, cs, ce, cty,
-            word_mode, flatten_mode, is_marker, sm, rb, pk, NULL, NULL);
+          nnz[row] = tk_emit_row(t, map, mend, text_ptrs[d], tlen, s, e,
+            co ? co->a[d] : 0, co ? co->a[d + 1] : 0, cs, cty,
+            word_mode, flatten_mode, is_marker, &sc, NULL, NULL);
         }
-        free(rb); free(pk); free(sm);
+        tk_scratch_free(&sc);
       }
     }
     int64_t acc = 0;
@@ -577,21 +521,20 @@ static int tk_tokenize_core (lua_State *L, bool grow) {
     vals = tk_fvec_create(L, (uint64_t) acc); vals->n = (uint64_t) acc;
     #pragma omp parallel
     {
-      uint8_t *rb = (uint8_t *) malloc(maxbuf);
-      int64_t *pk = (int64_t *) malloc(packed_cap * sizeof(int64_t));
-      int64_t *sm = word_mode ? (int64_t *) malloc(maxbuf * sizeof(int64_t)) : NULL;
+      tk_scratch_t sc;
+      tk_scratch_init(&sc, maxbuf, packed_cap, word_mode);
       #pragma omp for schedule(dynamic, 64)
       for (int64_t row = 0; row < n_rows; row++) {
         int64_t d = row_doc[row]; size_t tlen = text_lens[d];
         size_t s = per_span ? (size_t) fs->a[row] : 0;
         size_t e = per_span ? (size_t) fe->a[row] : tlen;
         int64_t off = offsets->a[row];
-        tk_emit_row(t, map, mend, text_ptrs[d], tlen, per_span, s, e,
-          co ? co->a[d] : 0, co ? co->a[d + 1] : 0, cs, ce, cty,
-          word_mode, flatten_mode, is_marker, sm, rb, pk,
+        tk_emit_row(t, map, mend, text_ptrs[d], tlen, s, e,
+          co ? co->a[d] : 0, co ? co->a[d + 1] : 0, cs, cty,
+          word_mode, flatten_mode, is_marker, &sc,
           toks->a + off, vals->a + off);
       }
-      free(rb); free(pk); free(sm);
+      tk_scratch_free(&sc);
     }
     free(nnz);
   }
@@ -607,12 +550,6 @@ static int tk_tokenize_core (lua_State *L, bool grow) {
 
 static int tk_tokenizer_fit_lua (lua_State *L) { return tk_tokenize_core(L, true); }
 static int tk_tokenizer_tokenize_lua (lua_State *L) { return tk_tokenize_core(L, false); }
-
-
-
-
-
-
 static int tk_tokenizer_persist_lua (lua_State *L) {
   tk_tokenizer_t *t = tk_tokenizer_peek(L, 1);
   FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
@@ -643,21 +580,13 @@ static int tk_tokenizer_load_lua (lua_State *L) {
   tk_lua_fread(L, &cfg, 1, cfgsz, fh);
   uint8_t has_map;
   tk_lua_fread(L, &has_map, sizeof(uint8_t), 1, fh);
-
-
-
   tk_iumap_t *map = has_map ? tk_iumap_load(NULL, fh) : NULL;
   tk_lua_fclose(L, fh);
-
-
-
 
   tk_tokenizer_t *t = tk_lua_newuserdata(L, tk_tokenizer_t, TK_TOK_MT,
     tk_tokenizer_mt_fns, tk_tokenizer_gc);
   *t = cfg;
   t->ngram_map = map;
-
-
 
   tk_tokenizer_t chk = cfg; chk.ngram_map = NULL;
   tk_tokenizer_assign(L, &chk);
@@ -666,16 +595,10 @@ static int tk_tokenizer_load_lua (lua_State *L) {
   return 1;
 }
 
-
-
-
-
-
-
 static int tk_tokenizer_tokenize_raw_lua (lua_State *L) {
   luaL_checktype(L, 1, LUA_TTABLE);
   int64_t n_samples = (int64_t) tk_lua_fcheckunsigned(L, 1, "tokenize_raw", "n_samples");
-  int ngram_min = (int) tk_lua_fcheckunsigned(L, 1, "tokenize_raw", "ngram_min");
+  int ngram_min = (int) tk_lua_foptunsigned(L, 1, "tokenize_raw", "ngram_min", 1);
   int ngram_max = (int) tk_lua_fcheckunsigned(L, 1, "tokenize_raw", "ngram_max");
   if (ngram_min < 1 || ngram_min > ngram_max)
     return luaL_error(L, "tokenize_raw: need 1 <= ngram_min <= ngram_max");
@@ -739,7 +662,6 @@ static luaL_Reg tk_tokenizer_mt_fns[] = {
   { "tokenize", tk_tokenizer_tokenize_lua },
   { "n_tokens", tk_tokenizer_n_tokens_lua },
   { "persist", tk_tokenizer_persist_lua },
-  { "shrink", tk_tokenizer_shrink_lua },
   { NULL, NULL }
 };
 
