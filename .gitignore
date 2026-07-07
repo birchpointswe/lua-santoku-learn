@@ -21,3 +21,4 @@ test/res/mnist.70k.txt.gz
 test/res/aclImdb/
 test/res.bak/
 tmp*
+.claude
