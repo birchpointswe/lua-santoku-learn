@@ -11,18 +11,18 @@ local word_characters = util.WORD_CHARACTERS
 
 local cfg = {
   verbose = false,
-  search_landmarks = 2048,
+  search_landmarks = 1024 * 2,
   data = { max = nil },
   blocks = {
     { ngram_min = 1, ngram_max = 5, word_characters = word_characters },
     { ngram_min = 1, ngram_max = 3, word_characters = word_characters, words = true },
   },
   relevance = { "bns", "bns" },
-  scales = { def = {1.04515,0.956801} },
-  exponent = { def = {1.27927,3.40488} },
+  scales = { def = { 0.762539, 1.31141 } },
+  exponent = { def = { 1.41983, 3.88377 } },
   n_landmarks = 1024 * 8,
   kernel = { "cosine" },
-  lambda = { def = 1.30765e-06 },
+  lambda = { def = 8.05697e-06 },
   classes = 20,
   k = 1,
   search_trials = 0,

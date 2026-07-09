@@ -23,6 +23,9 @@ typedef struct {
   float *xty;
   bool xty_external;
   float *factor;
+  bool factor_external;
+  float *factor_ext;
+  uint64_t factor_ext_cap;
   float *Bcm;
   float *cm_f;
   double *y_mean;
@@ -45,7 +48,9 @@ static inline void tk_gram_release_prepared (tk_gram_t *g) {
   g->XtX = NULL;
   if (!g->xty_external) free(g->xty);
   g->xty = NULL;
-  free(g->factor); g->factor = NULL;
+  if (!g->factor_external) free(g->factor);
+  g->factor = NULL;
+  g->factor_external = false;
   free(g->Bcm); g->Bcm = NULL;
   free(g->cm_f); g->cm_f = NULL;
   free(g->y_mean); g->y_mean = NULL;
@@ -76,6 +81,7 @@ static inline int tk_gram_make_prepared (
   lua_State *L,
   float *XtX, bool XtX_external,
   float *xty, bool xty_external,
+  float *factor_ext, uint64_t factor_ext_cap,
   float *cm_f, double *y_mean, double mean_eig,
   int64_t nc, int64_t d, int64_t nl, int64_t tile_labels)
 {
@@ -92,6 +98,9 @@ static inline int tk_gram_make_prepared (
   g->xty = xty;
   g->xty_external = xty_external;
   g->factor = NULL;
+  g->factor_external = false;
+  g->factor_ext = factor_ext;
+  g->factor_ext_cap = factor_ext_cap;
   g->Bcm = NULL;
   g->cm_f = cm_f;
   g->y_mean = y_mean;
@@ -134,9 +143,15 @@ static inline int tk_gram_solve_impl (
       return luaL_error(L, "gram solve: out of memory (intercept)");
   }
   if (!g->factor) {
-    g->factor = (float *)malloc(dd * sizeof(float));
-    if (!g->factor)
-      return luaL_error(L, "gram solve: out of memory (factor)");
+    if (g->factor_ext && g->factor_ext_cap >= dd) {
+      g->factor = g->factor_ext;
+      g->factor_external = true;
+    } else {
+      g->factor = (float *)malloc(dd * sizeof(float));
+      g->factor_external = false;
+      if (!g->factor)
+        return luaL_error(L, "gram solve: out of memory (factor)");
+    }
   }
   int64_t B = g->tile_labels < nl ? g->tile_labels : nl;
   if (!g->Bcm) {

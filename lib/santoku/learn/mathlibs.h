@@ -4,9 +4,15 @@
 #if defined(_OPENMP) && !defined(__EMSCRIPTEN__)
 #include <omp.h>
 #else
+#include <time.h>
 #define omp_get_max_threads() 1
 #define omp_get_num_threads() 1
 #define omp_get_thread_num() 0
+static inline double omp_get_wtime (void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double) ts.tv_sec + (double) ts.tv_nsec * 1e-9;
+}
 #endif
 
 #if !defined(__EMSCRIPTEN__)
