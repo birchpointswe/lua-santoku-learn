@@ -13,7 +13,7 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   verbose = false,
-  search_landmarks = 2048,
+  search_landmarks = 1024 * 2,
   data = { dir = "test/res/conll2003", max = nil },
   blocks = {
     { ngram_min = 1, ngram_max = 5, normalize = false },
@@ -23,12 +23,12 @@ local cfg = {
   head = {
     kernel = { "matern" },
     nu = { def = 3 },
-    gamma = { def = 0.479501 },
-    lambda = { def = 0.000413843 },
+    gamma = { def = 0.97975 },
+    lambda = { def = 1.98531e-07 },
     relevance = { "bns", "bns" },
-    scales = { def = {0.46742,2.1394} },
-    exponent = { def = {1.55251,3.56176} },
-    decode_offset = { def = -0.494324 },
+    scales = { def = { 0.262435, 3.81047 } },
+    exponent = { def = { 1.75619, 7.98983 } },
+    decode_offset = { def = -0.537464 },
     search_trials = 0,
     folds = 5,
   },
@@ -81,29 +81,13 @@ end
 
 local function candidates (ac, pat_type, split)
   local S = ac:predict({ texts = split.texts, longest = true, word_characters = word_characters })
-  local id, ty = S:col("id"), ivec.create()
-  for i = 0, id:size() - 1 do ty:push(pat_type:get(id:get(i))) end
+  local id = S:col("id")
+  local ty = ivec.create(id:size()):copy(pat_type, id)
   return spans.create({ offsets = S:offsets(), s = S:col("s"), e = S:col("e"), ty = ty })
 end
 
-local function gold_keys (S, d)
-  local o, s, e, t = S:offsets(), S:col("s"), S:col("e"), S:col("ty")
-  local k = {}
-  for i = o:get(d), o:get(d + 1) - 1 do k[s:get(i) .. ":" .. e:get(i) .. ":" .. t:get(i)] = true end
-  return k
-end
-
 local function cand_labels (Scand, Sgold)
-  local co, cs, ce, cty = Scand:offsets(), Scand:col("s"), Scand:col("e"), Scand:col("ty")
-  local off, nbr = ivec.create(), ivec.create(); off:push(0)
-  for d = 0, co:size() - 2 do
-    local g = gold_keys(Sgold, d)
-    for ci = co:get(d), co:get(d + 1) - 1 do
-      if g[cs:get(ci) .. ":" .. ce:get(ci) .. ":" .. cty:get(ci)] then nbr:push(0) end
-      off:push(nbr:size())
-    end
-  end
-  return csr.create({ offsets = off, neighbors = nbr, n_cols = 1 })
+  return csr.from_mask(Scand:match_labels(Sgold))
 end
 
 test("conll-gaz CV", function ()
@@ -147,8 +131,9 @@ test("conll-gaz CV", function ()
     each = util.make_ridge_log(stopwatch),
   })
 
-  local test_codes = deploy(Xte)
-  local _, m = decider:score({ scores = rg:regress(test_codes),
+  local _, test_scores = util.predict_tiled({ deploy = deploy, ridge = rg,
+    blocks = Xte, n = n_test, scores = true, n_labels = 1 })
+  local _, m = decider:score({ scores = test_scores,
     n_samples = test_set.n, cand = Cte, gold = Gte })
   local _, total = stopwatch()
   str.printf("[Span] lambda=%.4g offset=%.6g | test %s\nTotal: %.1fs\n",

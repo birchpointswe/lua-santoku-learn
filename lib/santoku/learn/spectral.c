@@ -123,27 +123,33 @@ typedef struct {
 } tk_spectral_modality_t;
 
 typedef struct {
-  int64_t *sid_map;
-  double *residual;
-  float *L_mat;
-  int L_mat_external;
-  int64_t *landmark_sids;
-  int64_t *landmark_idx_map;
-} tk_spectral_landmarks_ctx_t;
+  int64_t *off[TK_MAX_MOD];
+  int32_t *tok[TK_MAX_MOD];
+  float *val[TK_MAX_MOD];
+  float *rs;
+  float *dense;
+  float *kip_block;
+  float *pivot_dense_rows;
+  int64_t *piv_csc_off;
+  int64_t *piv_csc_pos;
+  uint16_t *piv_csc_piv;
+  float *piv_csc_val;
+} tk_spectral_kss_ctx_t;
 
-static inline int tk_spectral_landmarks_ctx_gc (lua_State *L) {
-  tk_spectral_landmarks_ctx_t *ctx = (tk_spectral_landmarks_ctx_t *)lua_touserdata(L, 1);
-  if (ctx->sid_map) { free(ctx->sid_map); ctx->sid_map = NULL; }
-  if (ctx->residual) { free(ctx->residual); ctx->residual = NULL; }
-  if (ctx->L_mat && !ctx->L_mat_external) { free(ctx->L_mat); ctx->L_mat = NULL; }
-  if (ctx->landmark_sids) { free(ctx->landmark_sids); ctx->landmark_sids = NULL; }
-  if (ctx->landmark_idx_map) { free(ctx->landmark_idx_map); ctx->landmark_idx_map = NULL; }
+static inline int tk_spectral_kss_ctx_gc (lua_State *L) {
+  tk_spectral_kss_ctx_t *c = (tk_spectral_kss_ctx_t *)lua_touserdata(L, 1);
+  for (int b = 0; b < TK_MAX_MOD; b++) {
+    free(c->off[b]); free(c->tok[b]); free(c->val[b]);
+  }
+  free(c->rs); free(c->dense);
+  free(c->kip_block); free(c->pivot_dense_rows);
+  free(c->piv_csc_off); free(c->piv_csc_pos);
+  free(c->piv_csc_piv); free(c->piv_csc_val);
+  memset(c, 0, sizeof(*c));
   return 0;
 }
 
-#define TK_CHOL_BLOCK 64
 #define TK_SIMS_CHUNK 512
-#define TK_SIMS_CHUNK_MEM (256ull << 20)
 
 static inline double tk_lm_drand (uint64_t *s) {
   uint64_t x = *s;
@@ -170,8 +176,6 @@ static inline int tk_spectral_pivot_sims (
   float *piv_csc_val = *piv_csc_val_p;
   uint64_t piv_csc_cap = *piv_csc_cap_p;
 
-  // no upfront memset: block 0 (multi-block CSR) writes through, plain-CSR assigns, dense sgemm
-  // has beta=0, so kip_block is fully overwritten by every path
   if (mod->type == TK_MOD_CSR && mod->n_blocks > 0) {
     int64_t plo_arr[TK_SIMS_CHUNK], phi_arr[TK_SIMS_CHUNK];
     for (int bl = 0; bl < mod->n_blocks; bl++) {
@@ -368,449 +372,174 @@ static inline int tk_spectral_pivot_sims (
   return 0;
 }
 
-static inline void tk_spectral_sample_landmarks (
+// Raw landmark kernel matrix K(S,S) (m x m, row-major), computed by gathering the m landmark rows
+// (raw values) into a small modality and running the pivot-sims machinery over just those rows.
+// The full-pool K(:,S) is never materialized.
+static inline void tk_spectral_landmark_kss (
   lua_State *L,
   tk_spectral_modality_t *mod,
-  uint64_t n_samples,
+  const int64_t *S,
+  uint64_t m,
   tk_spectral_kernel_t kernel,
-  uint64_t n_landmarks,
-  double trace_tol,
-  uint64_t chol_block,
-  float *ext_chol,
-  // optional external buffer for the m x m Cholesky factor (proj_buf, search path only): forced
-  // mode factors K_SS directly into it, so tm_encode skips the fvec alloc + m^2 memcpy. When used,
-  // *chol_out is NULL and *chol_ext_out points here (caller-owned, not freed).
-  float *ext_kss,
-  uint64_t ext_kss_cap,
-  tk_ivec_t **ids_out,
-  tk_fvec_t **chol_out,
-  float **chol_ext_out,
-  float **full_chol_out,
-  uint64_t *n_docs_out,
-  uint64_t *actual_landmarks_out,
-  double *trace_ratio_out,
-  const int64_t *forced,
-  uint64_t forced_n,
-  uint64_t *backstop_out
+  float *kss
 ) {
-  uint64_t n_docs = n_samples;
-  if (chol_block == 0) chol_block = 64;
-  if (chol_block > TK_CHOL_BLOCK) chol_block = TK_CHOL_BLOCK;
-
-  uint64_t lm_state = tk_hash_mix(0x9E3779B97F4A7C15ull);
-
-  if (n_landmarks == 0 || n_landmarks > n_docs)
-    n_landmarks = n_docs;
-  if (forced && forced_n < n_landmarks)
-    n_landmarks = forced_n;
-  if (n_landmarks == 0) {
-    *ids_out = tk_ivec_create(L, 0);
-    *chol_out = NULL;
-    *full_chol_out = NULL;
-    *n_docs_out = 0;
-    *actual_landmarks_out = 0;
-    *trace_ratio_out = 0.0;
-    return;
-  }
-
-  tk_spectral_landmarks_ctx_t *ctx = (tk_spectral_landmarks_ctx_t *)
-    lua_newuserdata(L, sizeof(tk_spectral_landmarks_ctx_t));
-  memset(ctx, 0, sizeof(tk_spectral_landmarks_ctx_t));
+  tk_spectral_kss_ctx_t *ctx = (tk_spectral_kss_ctx_t *)
+    lua_newuserdata(L, sizeof(tk_spectral_kss_ctx_t));
+  memset(ctx, 0, sizeof(*ctx));
   lua_newtable(L);
-  lua_pushcfunction(L, tk_spectral_landmarks_ctx_gc);
+  lua_pushcfunction(L, tk_spectral_kss_ctx_gc);
   lua_setfield(L, -2, "__gc");
   lua_setmetatable(L, -2);
   int ctx_idx = lua_gettop(L);
 
-  ctx->sid_map = (int64_t *)malloc(n_docs * sizeof(int64_t));
-  ctx->residual = (double *)malloc(n_docs * sizeof(double));
-  if (ext_chol) {
-    ctx->L_mat = ext_chol;
-    ctx->L_mat_external = 1;
-    // forced mode fully overwrites rows [0,m0) via the sims transpose then strsm-in-place, and
-    // never reads rows [m0,n_landmarks); adaptive needs the zeros (unwritten cols read as 0)
-    if (!forced)
-      memset(ext_chol, 0, n_landmarks * n_docs * sizeof(float));
-  } else {
-    ctx->L_mat = (float *)calloc(n_landmarks * n_docs, sizeof(float));
-    ctx->L_mat_external = 0;
-  }
-  ctx->landmark_sids = (int64_t *)malloc(n_landmarks * sizeof(int64_t));
-  ctx->landmark_idx_map = (int64_t *)malloc(n_landmarks * sizeof(int64_t));
-  if (!ctx->sid_map || !ctx->residual || !ctx->L_mat || !ctx->landmark_sids ||
-      !ctx->landmark_idx_map) {
-    luaL_error(L, "sample_landmarks: out of memory");
-    return;
-  }
+  tk_spectral_modality_t mg;
+  memset(&mg, 0, sizeof(mg));
+  mg.type = mod->type;
 
-  int64_t *sid_map = ctx->sid_map;
-  double *residual = ctx->residual;
-  float *L_mat = ctx->L_mat;
-  int64_t *landmark_sids = ctx->landmark_sids;
-  int64_t *landmark_idx_map = ctx->landmark_idx_map;
-
-  for (uint64_t i = 0; i < n_docs; i++)
-    sid_map[i] = (int64_t)i;
-
-  memset(residual, 0, n_docs * sizeof(double));
-  memset(landmark_idx_map, -1, n_landmarks * sizeof(int64_t));
-
-  uint64_t actual_landmarks = 0;
-  double initial_trace = 0.0;
-  double trace = 0.0;
-  bool done = false;
-
-  uint64_t sims_chunk = chol_block;
-  if (forced) {
-    sims_chunk = TK_SIMS_CHUNK;
-    while (sims_chunk > chol_block && n_docs * sims_chunk * sizeof(float) > TK_SIMS_CHUNK_MEM)
-      sims_chunk >>= 1;
-    if (sims_chunk < chol_block) sims_chunk = chol_block;
-  }
-  float *kip_block = (float *)malloc(n_docs * sims_chunk * sizeof(float));
-  float *cross_dots = (float *)malloc(n_docs * chol_block * sizeof(float));
-  float *pivot_prev_L = (float *)malloc(chol_block * n_landmarks * sizeof(float));
-  int64_t max_d_input = 0;
-  if (mod->type == TK_MOD_DENSE && mod->d_input > max_d_input)
-    max_d_input = mod->d_input;
-  float *pivot_dense_rows = max_d_input > 0
-    ? (float *)malloc(sims_chunk * (uint64_t)max_d_input * sizeof(float)) : NULL;
-  uint64_t blk_pivots[TK_CHOL_BLOCK];
-
-  double *proposal = (double *)malloc(n_docs * sizeof(double));
-  double *proposal_cdf = (double *)malloc(n_docs * sizeof(double));
-
-  int64_t *piv_csc_off = NULL;
-  uint16_t *piv_csc_piv = NULL;
-  float *piv_csc_val = NULL;
-  int64_t *piv_csc_pos = NULL;
-  uint64_t piv_csc_cap = 0;
-  if (mod->type == TK_MOD_CSR) {
-    uint64_t csr_n_tokens = mod->csr_n_tokens;
-    piv_csc_off = (int64_t *)calloc(csr_n_tokens + 1, sizeof(int64_t));
-    piv_csc_pos = (int64_t *)malloc(csr_n_tokens * sizeof(int64_t));
-    uint64_t max_nnz = 0;
-    if (mod->n_blocks > 0) {
-      for (int bl = 0; bl < mod->n_blocks; bl++) {
-        const int64_t *off = mod->blk_off[bl];
-        for (uint64_t i = 0; i < n_docs; i++) {
-          uint64_t nnz = (uint64_t)(off[i + 1] - off[i]);
-          if (nnz > max_nnz) max_nnz = nnz;
-        }
-      }
-    } else {
-      for (uint64_t i = 0; i < n_docs; i++) {
-        uint64_t nnz = (uint64_t)(mod->csr_offsets[i + 1] - mod->csr_offsets[i]);
-        if (nnz > max_nnz) max_nnz = nnz;
-      }
-    }
-    piv_csc_cap = sims_chunk * max_nnz;
-    piv_csc_piv = (uint16_t *)malloc(piv_csc_cap * sizeof(uint16_t));
-    piv_csc_val = (float *)malloc(piv_csc_cap * sizeof(float));
-  }
-
-  if (!kip_block || !cross_dots || !pivot_prev_L
-      || (max_d_input > 0 && !pivot_dense_rows)
-      || !proposal || !proposal_cdf
-      || (mod->type == TK_MOD_CSR && (!piv_csc_off || !piv_csc_piv || !piv_csc_val || !piv_csc_pos))) {
-    free(kip_block); free(cross_dots);
-    free(pivot_prev_L);
-    free(pivot_dense_rows);
-    free(proposal); free(proposal_cdf);
-    free(piv_csc_off); free(piv_csc_piv); free(piv_csc_val); free(piv_csc_pos);
-    luaL_error(L, "sample_landmarks: out of memory (buffers)");
-    return;
-  }
-
-  #pragma omp parallel for
-  for (uint64_t i = 0; i < n_docs; i++)
-    residual[i] = 1.0;
-  initial_trace = (double)n_docs;
-
-  double proposal_total = initial_trace;
-  tk_fvec_t *chol = NULL;
-  float *chol_ext = NULL;   // set when the factor is written into ext_kss instead of an fvec
-
-  if (forced) {
-    uint64_t *S = (uint64_t *) malloc(n_landmarks * sizeof(uint64_t));
-    if (!S) {
-      free(kip_block); free(cross_dots); free(pivot_prev_L); free(pivot_dense_rows);
-      free(proposal); free(proposal_cdf);
-      free(piv_csc_off); free(piv_csc_piv); free(piv_csc_val); free(piv_csc_pos);
-      luaL_error(L, "sample_landmarks: out of memory (forced ids)");
-      return;
-    }
-    uint64_t m0 = 0;
-    for (uint64_t i = 0; i < forced_n && m0 < n_landmarks; i++) {
-      uint64_t pi = (uint64_t) forced[i];
-      if (pi < n_docs) S[m0++] = pi;
-    }
-    for (uint64_t base = 0; base < m0; base += sims_chunk) {
-      uint64_t np = m0 - base;
-      if (np > sims_chunk) np = sims_chunk;
-      if (tk_spectral_pivot_sims(mod, kernel, n_docs, S + base, np, kip_block,
-          pivot_dense_rows, piv_csc_off, piv_csc_pos,
-          &piv_csc_piv, &piv_csc_val, &piv_csc_cap) != 0) {
-        free(S);
-        free(kip_block); free(cross_dots); free(pivot_prev_L); free(pivot_dense_rows);
-        free(proposal); free(proposal_cdf);
-        free(piv_csc_off); free(piv_csc_piv); free(piv_csc_val); free(piv_csc_pos);
-        luaL_error(L, "sample_landmarks: out of memory (csc)");
+  if (mod->type == TK_MOD_CSR && mod->n_blocks > 0) {
+    mg.n_blocks = mod->n_blocks;
+    mg.csr_n_tokens = mod->csr_n_tokens;
+    for (int b = 0; b < mod->n_blocks; b++) {
+      mg.blk_start[b] = mod->blk_start[b];
+      mg.blk_s[b] = mod->blk_s[b];
+      mg.blk_cs[b] = mod->blk_cs[b];
+      const int64_t *off = mod->blk_off[b];
+      uint64_t tot = 0;
+      for (uint64_t j = 0; j < m; j++)
+        tot += (uint64_t)(off[S[j] + 1] - off[S[j]]);
+      ctx->off[b] = (int64_t *)malloc((m + 1) * sizeof(int64_t));
+      ctx->tok[b] = (int32_t *)malloc((tot ? tot : 1) * sizeof(int32_t));
+      ctx->val[b] = (float *)malloc((tot ? tot : 1) * sizeof(float));
+      if (!ctx->off[b] || !ctx->tok[b] || !ctx->val[b]) {
+        luaL_error(L, "landmark kss: out of memory (gather)");
         return;
       }
-      const float *kb = kip_block;
-      float *dst = L_mat + base * n_docs;
-      #pragma omp parallel for schedule(static)
-      for (uint64_t i = 0; i < n_docs; i++)
-        for (uint64_t b = 0; b < np; b++)
-          dst[b * n_docs + i] = kb[i * np + b];
-    }
-    if (m0 > 0) {
-      for (uint64_t k = 0; k < m0; k++) {
-        landmark_sids[k] = sid_map[S[k]];
-        landmark_idx_map[k] = (int64_t) S[k];
+      const int32_t *tokv = mod->blk_tok[b];
+      const float *valv = mod->blk_val[b];
+      int64_t dst = 0;
+      ctx->off[b][0] = 0;
+      for (uint64_t j = 0; j < m; j++) {
+        int64_t lo = off[S[j]], hi = off[S[j] + 1];
+        uint64_t rn = (uint64_t)(hi - lo);
+        memcpy(ctx->tok[b] + dst, tokv + lo, rn * sizeof(int32_t));
+        if (valv)
+          memcpy(ctx->val[b] + dst, valv + lo, rn * sizeof(float));
+        else
+          for (uint64_t k2 = 0; k2 < rn; k2++)
+            ctx->val[b][dst + (int64_t)k2] = 1.0f;
+        dst += (int64_t)rn;
+        ctx->off[b][j + 1] = dst;
       }
-      float *kss;
-      if (ext_kss && ext_kss_cap >= m0 * m0) {
-        kss = ext_kss;         // factor straight into proj_buf: no fvec alloc, no m^2 memcpy
-        chol_ext = ext_kss;
-      } else {
-        chol = tk_fvec_create(NULL, m0 * m0);
-        kss = chol->a;
-      }
-      double jitter = 1e-6;
-      for (;;) {
-        #pragma omp parallel for schedule(static)
-        for (uint64_t r = 0; r < m0; r++) {
-          uint64_t sr = S[r];
-          for (uint64_t c = 0; c < m0; c++)
-            kss[r * m0 + c] = L_mat[c * n_docs + sr];
-          if (jitter > 0.0)
-            kss[r * m0 + r] += (float) jitter;
-        }
-        if (LAPACKE_spotrf(LAPACK_COL_MAJOR, 'U', (int) m0, kss, (int) m0) == 0)
-          break;
-        if (jitter > 1e-1) {
-          if (chol) tk_fvec_destroy(chol);
-          free(S);
-          free(kip_block); free(cross_dots); free(pivot_prev_L); free(pivot_dense_rows);
-          free(proposal); free(proposal_cdf);
-          free(piv_csc_off); free(piv_csc_piv); free(piv_csc_val); free(piv_csc_pos);
-          luaL_error(L, "sample_landmarks: forced spotrf failed after jitter escalation");
-          return;
-        }
-        jitter *= 10.0;
-        if (backstop_out) (*backstop_out) ++;
-      }
-      #pragma omp parallel for schedule(static)
-      for (uint64_t r = 0; r < m0; r++)
-        for (uint64_t c = r + 1; c < m0; c++)
-          kss[r * m0 + c] = 0.0f;
-      if (chol) chol->n = m0 * m0;
-      cblas_strsm(CblasRowMajor, CblasLeft, CblasLower, CblasNoTrans, CblasNonUnit,
-        (int) m0, (int) n_docs, 1.0f, kss, (int) m0, L_mat, (int) n_docs);
-      double covered = 0.0;
-      #pragma omp parallel for reduction(+:covered)
-      for (uint64_t k = 0; k < m0 * n_docs; k++)
-        covered += (double) L_mat[k] * (double) L_mat[k];
-      trace = (double) n_docs - covered;
-      if (trace < 0.0) trace = 0.0;
-      actual_landmarks = m0;
+      mg.blk_off[b] = ctx->off[b];
+      mg.blk_tok[b] = ctx->tok[b];
+      mg.blk_val[b] = ctx->val[b];
     }
-    free(S);
-    done = true;
-  }
-
-  if (!forced) {
-    memcpy(proposal, residual, n_docs * sizeof(double));
-    double cum = 0.0;
-    for (uint64_t i = 0; i < n_docs; i++) {
-      cum += proposal[i];
-      proposal_cdf[i] = cum;
-    }
-  }
-
-  #define SAMPLE_PROPOSAL() ({ \
-    double _r = tk_lm_drand(&lm_state) * proposal_total; \
-    uint64_t _lo = 0, _hi = n_docs; \
-    while (_lo < _hi) { \
-      uint64_t _mid = _lo + (_hi - _lo) / 2; \
-      if (proposal_cdf[_mid] < _r) _lo = _mid + 1; else _hi = _mid; \
-    } \
-    _lo < n_docs ? _lo : n_docs - 1; \
-  })
-
-  uint64_t total_proposed = 0;
-  uint64_t total_accepted = 0;
-
-  while (actual_landmarks < n_landmarks && !done) {
-
-    trace = 0.0;
-    #pragma omp parallel for reduction(+:trace)
-    for (uint64_t i = 0; i < n_docs; i++)
-      if (residual[i] > 0.0) trace += residual[i];
-    if (trace < 1e-15 ||
-        (trace_tol > 0.0 && initial_trace > 0.0 &&
-         trace / initial_trace < trace_tol)) {
-      done = true;
-      break;
-    }
-
-    if (total_proposed > 0 && total_accepted * 4 < total_proposed) {
-      memcpy(proposal, residual, n_docs * sizeof(double));
-      proposal_total = trace;
-      double cum = 0.0;
-      for (uint64_t i = 0; i < n_docs; i++) {
-        cum += proposal[i];
-        proposal_cdf[i] = cum;
-      }
-      total_proposed = 0;
-      total_accepted = 0;
-    }
-
-    uint64_t max_blk = n_landmarks - actual_landmarks;
-    if (max_blk > chol_block) max_blk = chol_block;
-
-    uint64_t np = 0;
-    uint64_t n_propose = max_blk * 2;
-    if (n_propose > chol_block) n_propose = chol_block;
-    uint64_t n_valid = 0;
-    for (uint64_t b = 0; b < n_propose && np < max_blk; b++) {
-      uint64_t pi = SAMPLE_PROPOSAL();
-      if (residual[pi] < 1.2e-6) continue;
-      int dup = 0;
-      for (uint64_t k = 0; k < np; k++)
-        if (blk_pivots[k] == pi) { dup = 1; break; }
-      if (dup) continue;
-      n_valid++;
-      if (proposal[pi] > 1e-15) {
-        double accept_prob = residual[pi] / proposal[pi];
-        if (tk_lm_drand(&lm_state) > accept_prob) continue;
-      } else {
-        continue;
-      }
-      blk_pivots[np] = pi;
-      np++;
-    }
-    total_proposed += n_propose;
-    total_accepted += np;
-    if (n_valid == 0) { done = true; break; }
-    if (np == 0) continue;
-
-    if (tk_spectral_pivot_sims(mod, kernel, n_docs, blk_pivots, np, kip_block,
-        pivot_dense_rows, piv_csc_off, piv_csc_pos,
-        &piv_csc_piv, &piv_csc_val, &piv_csc_cap) != 0) {
-      free(kip_block); free(cross_dots); free(pivot_prev_L); free(pivot_dense_rows);
-      free(proposal); free(proposal_cdf);
-      free(piv_csc_off); free(piv_csc_piv); free(piv_csc_val); free(piv_csc_pos);
-      luaL_error(L, "sample_landmarks: out of memory (csc)");
+  } else if (mod->type == TK_MOD_CSR) {
+    mg.csr_n_tokens = mod->csr_n_tokens;
+    const int64_t *off = mod->csr_offsets;
+    uint64_t tot = 0;
+    for (uint64_t j = 0; j < m; j++)
+      tot += (uint64_t)(off[S[j] + 1] - off[S[j]]);
+    ctx->off[0] = (int64_t *)malloc((m + 1) * sizeof(int64_t));
+    ctx->tok[0] = (int32_t *)malloc((tot ? tot : 1) * sizeof(int32_t));
+    ctx->val[0] = (float *)malloc((tot ? tot : 1) * sizeof(float));
+    if (!ctx->off[0] || !ctx->tok[0] || !ctx->val[0]) {
+      luaL_error(L, "landmark kss: out of memory (gather)");
       return;
     }
-
-    uint64_t jb = actual_landmarks;
-    if (jb > 0) {
-      for (uint64_t k = 0; k < jb; k++)
-        for (uint64_t b = 0; b < np; b++)
-          pivot_prev_L[b * jb + k] = L_mat[k * n_docs + blk_pivots[b]];
-      cblas_sgemm(CblasColMajor, CblasNoTrans, CblasNoTrans,
-        (int)n_docs, (int)np, (int)jb, 1.0f,
-        L_mat, (int)n_docs,
-        pivot_prev_L, (int)jb,
-        0.0f, cross_dots, (int)n_docs);
+    int64_t dst = 0;
+    ctx->off[0][0] = 0;
+    for (uint64_t j = 0; j < m; j++) {
+      int64_t lo = off[S[j]], hi = off[S[j] + 1];
+      uint64_t rn = (uint64_t)(hi - lo);
+      memcpy(ctx->tok[0] + dst, mod->csr_tokens + lo, rn * sizeof(int32_t));
+      if (mod->csr_values)
+        memcpy(ctx->val[0] + dst, mod->csr_values + lo, rn * sizeof(float));
+      else
+        for (uint64_t k2 = 0; k2 < rn; k2++)
+          ctx->val[0][dst + (int64_t)k2] = 1.0f;
+      dst += (int64_t)rn;
+      ctx->off[0][j + 1] = dst;
     }
-
-    uint64_t within_accepted = 0;
-    for (uint64_t b = 0; b < np && actual_landmarks < n_landmarks; b++) {
-      uint64_t pi = blk_pivots[b];
-      uint64_t col = actual_landmarks;
-      double sc_sq = residual[pi];
-      if (sc_sq < 1.2e-6)
-        continue;
-      double sc = sqrt(sc_sq);
-
-      landmark_sids[col] = sid_map[pi];
-      landmark_idx_map[col] = (int64_t)pi;
-
-      double within_pi[TK_CHOL_BLOCK];
-      for (uint64_t k = 0; k < within_accepted; k++)
-        within_pi[k] = L_mat[(jb + k) * n_docs + pi];
-      #pragma omp parallel for schedule(static)
-      for (uint64_t i = 0; i < n_docs; i++) {
-        double raw = kip_block[i * np + b];
-        double cross = (jb > 0) ? cross_dots[b * n_docs + i] : 0.0;
-        double within = 0.0;
-        for (uint64_t k = 0; k < within_accepted; k++)
-          within += L_mat[(jb + k) * n_docs + i] * within_pi[k];
-        double lij = (i == pi) ? sc : (raw - cross - within) / sc;
-        float fij = (float)lij;
-        L_mat[col * n_docs + i] = fij;
-        residual[i] -= (double)fij * (double)fij;
-        if (residual[i] < 0.0) residual[i] = 0.0;
-      }
-      residual[pi] = 0.0;
-
-      actual_landmarks++;
-      within_accepted++;
+    mg.csr_offsets = ctx->off[0];
+    mg.csr_tokens = ctx->tok[0];
+    mg.csr_values = ctx->val[0];
+  } else {
+    int64_t di = mod->d_input;
+    mg.d_input = di;
+    mg.dense_cs2 = mod->dense_cs2;
+    ctx->dense = (float *)malloc(m * (uint64_t)di * sizeof(float));
+    if (!ctx->dense) {
+      luaL_error(L, "landmark kss: out of memory (gather)");
+      return;
     }
+    for (uint64_t j = 0; j < m; j++)
+      memcpy(ctx->dense + j * (uint64_t)di,
+             mod->dense + (uint64_t)S[j] * (uint64_t)di,
+             (uint64_t)di * sizeof(float));
+    mg.dense = ctx->dense;
+  }
+  if (mod->rowscale) {
+    ctx->rs = (float *)malloc(m * sizeof(float));
+    if (!ctx->rs) {
+      luaL_error(L, "landmark kss: out of memory (rowscale)");
+      return;
+    }
+    for (uint64_t j = 0; j < m; j++)
+      ctx->rs[j] = mod->rowscale[S[j]];
+    mg.rowscale = ctx->rs;
   }
 
-  free(kip_block);
-  free(cross_dots);
-  free(pivot_prev_L);
-  free(pivot_dense_rows);
-  free(proposal);
-  free(proposal_cdf);
-  free(piv_csc_off);
-  free(piv_csc_piv);
-  free(piv_csc_val);
-  free(piv_csc_pos);
+  uint64_t chunk = TK_SIMS_CHUNK;
+  if (chunk > m) chunk = m;
+  ctx->kip_block = (float *)malloc(m * chunk * sizeof(float));
+  if (mg.type == TK_MOD_DENSE)
+    ctx->pivot_dense_rows = (float *)malloc(chunk * (uint64_t)mg.d_input * sizeof(float));
+  uint64_t piv_csc_cap = 0;
+  if (mg.type == TK_MOD_CSR) {
+    ctx->piv_csc_off = (int64_t *)calloc(mg.csr_n_tokens + 1, sizeof(int64_t));
+    ctx->piv_csc_pos = (int64_t *)malloc((mg.csr_n_tokens + 1) * sizeof(int64_t));
+  }
+  if (!ctx->kip_block
+      || (mg.type == TK_MOD_DENSE && !ctx->pivot_dense_rows)
+      || (mg.type == TK_MOD_CSR && (!ctx->piv_csc_off || !ctx->piv_csc_pos))) {
+    luaL_error(L, "landmark kss: out of memory (buffers)");
+    return;
+  }
 
-  tk_ivec_t *landmark_ids = tk_ivec_create(L, actual_landmarks);
-  for (uint64_t i = 0; i < actual_landmarks; i++)
-    landmark_ids->a[i] = landmark_sids[i];
-  landmark_ids->n = actual_landmarks;
-
-  if (!chol && !chol_ext) {
-    chol = tk_fvec_create(NULL, actual_landmarks * actual_landmarks);
+  uint64_t pivots[TK_SIMS_CHUNK];
+  for (uint64_t base = 0; base < m; base += chunk) {
+    uint64_t np = m - base;
+    if (np > chunk) np = chunk;
+    for (uint64_t b = 0; b < np; b++) pivots[b] = base + b;
+    if (tk_spectral_pivot_sims(&mg, kernel, m, pivots, np, ctx->kip_block,
+        ctx->pivot_dense_rows, ctx->piv_csc_off, ctx->piv_csc_pos,
+        &ctx->piv_csc_piv, &ctx->piv_csc_val, &piv_csc_cap) != 0) {
+      luaL_error(L, "landmark kss: out of memory (csc)");
+      return;
+    }
+    const float *kb = ctx->kip_block;
     #pragma omp parallel for schedule(static)
-    for (uint64_t li = 0; li < actual_landmarks; li++) {
-      uint64_t doc_idx = (uint64_t)landmark_idx_map[li];
-      for (uint64_t k = 0; k < actual_landmarks; k++)
-        chol->a[li * actual_landmarks + k] = L_mat[k * n_docs + doc_idx];
-    }
-    chol->n = actual_landmarks * actual_landmarks;
+    for (uint64_t i = 0; i < m; i++)
+      for (uint64_t b = 0; b < np; b++)
+        kss[i * m + base + b] = kb[i * np + b];
   }
 
-  if (!ext_chol && actual_landmarks > 0 && actual_landmarks < n_landmarks) {
-    float *shrunk = realloc(L_mat, actual_landmarks * n_docs * sizeof(float));
-    if (shrunk) L_mat = shrunk;
+  // free the transient gather now; the ctx gc becomes a no-op
+  for (int b = 0; b < TK_MAX_MOD; b++) {
+    free(ctx->off[b]); ctx->off[b] = NULL;
+    free(ctx->tok[b]); ctx->tok[b] = NULL;
+    free(ctx->val[b]); ctx->val[b] = NULL;
   }
-
-  float *full_chol = L_mat;
-  ctx->L_mat = NULL;
-
+  free(ctx->rs); ctx->rs = NULL;
+  free(ctx->dense); ctx->dense = NULL;
+  free(ctx->kip_block); ctx->kip_block = NULL;
+  free(ctx->pivot_dense_rows); ctx->pivot_dense_rows = NULL;
+  free(ctx->piv_csc_off); ctx->piv_csc_off = NULL;
+  free(ctx->piv_csc_pos); ctx->piv_csc_pos = NULL;
+  free(ctx->piv_csc_piv); ctx->piv_csc_piv = NULL;
+  free(ctx->piv_csc_val); ctx->piv_csc_val = NULL;
   lua_remove(L, ctx_idx);
-
-  *ids_out = landmark_ids;
-  *chol_out = chol;
-  *chol_ext_out = chol_ext;
-  *full_chol_out = full_chol;
-  *n_docs_out = n_docs;
-  *actual_landmarks_out = actual_landmarks;
-  *trace_ratio_out = (initial_trace > 0.0) ? (trace / initial_trace) : 0.0;
-}
-
-typedef struct {
-  tk_fvec_t *lm_chol;
-  float *full_chol;
-  int full_chol_external;
-} tk_encode_nystrom_ctx_t;
-
-static inline int tk_encode_nystrom_ctx_gc (lua_State *L) {
-  tk_encode_nystrom_ctx_t *c = (tk_encode_nystrom_ctx_t *)lua_touserdata(L, 1);
-  if (c->lm_chol) tk_fvec_destroy(c->lm_chol);
-  if (!c->full_chol_external) free(c->full_chol);
-  return 0;
 }
 
 #define TK_NYSTROM_ENCODER_MT "tk_nystrom_encoder_t"
@@ -820,7 +549,6 @@ typedef struct {
   tk_fvec_t *chol_f;
   uint64_t m;
   uint64_t d;
-  double trace_ratio;
   tk_spectral_kernel_t kernel;
   uint8_t mod_type;
   int64_t *csr_offsets;
@@ -997,6 +725,208 @@ static inline void tk_nystrom_csr_tiles (
     cblas_strsm(CblasRowMajor, CblasRight, CblasLower, CblasTrans, CblasNonUnit,
       (int) blk, (int) m, 1.0f, enc->chol, (int) m, dst, (int) d);
   }
+}
+
+// Streamed gram accumulation: encode the pool tile-by-tile through the fitted encoder and
+// accumulate XtX (uncentered, col-major upper), xty (d x nl row-major) and column sums.
+// The full n x d code matrix never exists; peak extra memory is one tile (tile x m).
+static inline int tk_nystrom_gram_tiles (
+  tk_nystrom_encoder_t *enc,
+  tk_spectral_modality_t *mod,
+  uint64_t n_samples,
+  const int64_t *rep,
+  const float *kss_raw,
+  const int64_t *lbl_off,
+  const int64_t *lbl_nbr,
+  const double *targets,
+  int64_t nl,
+  float *XtX,
+  float *xty,
+  float *cm_f
+) {
+  uint64_t m = enc->m, d = enc->d;
+  uint64_t unl = (uint64_t)nl;
+  if (tk_nystrom_ensure_sims(enc, m) != 0)
+    return -1;
+  int is_csr = mod->type == TK_MOD_CSR;
+  if (is_csr && tk_nystrom_ensure_row_bufs(enc, m) != 0)
+    return -1;
+  int nth = omp_get_max_threads();
+  double *cs_part = (double *)calloc((uint64_t)nth * d, sizeof(double));
+  if (!cs_part)
+    return -1;
+  uint64_t tile = enc->tile;
+  if (tile > n_samples) tile = n_samples;
+  if (tile == 0) tile = 1;
+  // labels: densify + gemm when nl is small relative to labels/row (BLAS blocking wins);
+  // otherwise dim-blocked scatter sized so the xty write window stays cache-resident
+  int use_dense_y = 0;
+  uint64_t kbs = 0;
+  if (!targets && lbl_off) {
+    double avg_l = (double)lbl_off[n_samples] / (double)n_samples;
+    use_dense_y = (double)unl <= 32.0 * (avg_l + 1.0);
+    if (!use_dense_y) {
+      kbs = (256 * 1024) / (unl * sizeof(float));
+      if (kbs < 8) kbs = 8;
+      if (kbs > 512) kbs = 512;
+    }
+  }
+  float *Yf_tile = NULL;
+  if (targets || use_dense_y) {
+    Yf_tile = (float *)malloc(tile * unl * sizeof(float));
+    if (!Yf_tile) {
+      free(cs_part);
+      return -1;
+    }
+  }
+  memset(XtX, 0, d * d * sizeof(float));
+  memset(xty, 0, d * unl * sizeof(float));
+  int nb = 0;
+  const int64_t *boff[TK_MAX_MOD]; const int32_t *btok[TK_MAX_MOD]; const float *bval[TK_MAX_MOD];
+  const int64_t *bstart = NULL;
+  if (is_csr) {
+    if (mod->n_blocks > 0) {
+      nb = mod->n_blocks;
+      for (int b = 0; b < nb; b++) {
+        boff[b] = mod->blk_off[b];
+        btok[b] = mod->blk_tok[b];
+        bval[b] = mod->blk_val[b];
+      }
+      bstart = mod->blk_start;
+    } else {
+      nb = 1;
+      boff[0] = mod->csr_offsets;
+      btok[0] = mod->csr_tokens;
+      bval[0] = mod->csr_values;
+    }
+  }
+  const float *rs = mod->rowscale;
+  float *sims_f = enc->sims_buf;
+  float *row_bufs = enc->row_bufs;
+  const int64_t *restrict csc_off = enc->csc_offsets;
+  const int16_t *restrict csc_rows_a = enc->csc_rows;
+  const float *restrict csc_vals = enc->csc_values;
+  int all_cov = rep != NULL && kss_raw != NULL;
+  if (all_cov)
+    for (uint64_t i = 0; i < n_samples; i++)
+      if (rep[i] < 0) { all_cov = 0; break; }
+  for (uint64_t base = 0; base < n_samples; base += tile) {
+    uint64_t blk = base + tile <= n_samples ? tile : n_samples - base;
+    if (is_csr) {
+      #pragma omp parallel
+      {
+        float *row_buf = row_bufs + (uint64_t) omp_get_thread_num() * m;
+        #pragma omp for schedule(static)
+        for (uint64_t i = 0; i < blk; i++) {
+          float *restrict sims_row = sims_f + i * m;
+          uint64_t si = base + i;
+          if (rep && kss_raw && rep[si] >= 0) {
+            memcpy(sims_row, kss_raw + (uint64_t) rep[si] * m, m * sizeof(float));
+            continue;
+          }
+          for (int b = 0; b < nb; b++) {
+            int64_t bs0 = bstart ? bstart[b] : 0;
+            const int64_t *off = boff[b]; const int32_t *tok = btok[b];
+            const float *val = bval[b];
+            int64_t jlo = off[si], jhi = off[si + 1];
+            for (int64_t j = jlo; j < jhi; j++) {
+              int32_t gt = (int32_t) (bs0 + tok[j]);
+              float v = val ? val[j] : 1.0f;
+              int64_t clo = csc_off[gt], chi = csc_off[gt + 1];
+              for (int64_t c = clo; c < chi; c++)
+                row_buf[(uint64_t) csc_rows_a[c]] += v * csc_vals[c];
+            }
+          }
+          double rsi = rs ? (double) rs[si] : 1.0;
+          for (uint64_t j = 0; j < m; j++) {
+            sims_row[j] = tk_spectral_kernel_apply(enc->kernel, (float) (row_buf[j] * rsi));
+            row_buf[j] = 0.0f;
+          }
+        }
+      }
+    } else if (all_cov) {
+      #pragma omp parallel for schedule(static)
+      for (uint64_t i = 0; i < blk; i++)
+        memcpy(sims_f + i * m, kss_raw + (uint64_t) rep[base + i] * m, m * sizeof(float));
+    } else {
+      int64_t di = mod->d_input;
+      cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+        (int) blk, (int) m, (int) di, 1.0f,
+        mod->dense + base * (uint64_t) di, (int) di,
+        enc->dense_vecs, (int) di,
+        0.0f, sims_f, (int) m);
+      #pragma omp parallel for schedule(static)
+      for (uint64_t i = 0; i < blk; i++) {
+        if (rep && kss_raw && rep[base + i] >= 0) {
+          memcpy(sims_f + i * m, kss_raw + (uint64_t) rep[base + i] * m, m * sizeof(float));
+          continue;
+        }
+        double rsi = rs ? (double) rs[base + i] : 1.0;
+        for (uint64_t j = 0; j < m; j++)
+          sims_f[i * m + j] = tk_spectral_kernel_apply(enc->kernel,
+            (float) ((double) sims_f[i * m + j] * rsi));
+      }
+    }
+    cblas_strsm(CblasRowMajor, CblasRight, CblasLower, CblasTrans, CblasNonUnit,
+      (int) blk, (int) m, 1.0f, enc->chol, (int) m, sims_f, (int) d);
+    #pragma omp parallel
+    {
+      double *part = cs_part + (uint64_t) omp_get_thread_num() * d;
+      #pragma omp for schedule(static)
+      for (uint64_t i = 0; i < blk; i++) {
+        const float *row = sims_f + i * d;
+        for (uint64_t j = 0; j < d; j++) part[j] += (double) row[j];
+      }
+    }
+    cblas_ssyrk(CblasColMajor, CblasUpper, CblasNoTrans,
+      (int) d, (int) blk, 1.0f, sims_f, (int) d, 1.0f, XtX, (int) d);
+    if (targets) {
+      for (uint64_t i = 0; i < blk * unl; i++)
+        Yf_tile[i] = (float) targets[base * unl + i];
+      cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+        (int) d, (int) nl, (int) blk, 1.0f,
+        sims_f, (int) d, Yf_tile, (int) nl,
+        1.0f, xty, (int) nl);
+    } else if (use_dense_y) {
+      memset(Yf_tile, 0, blk * unl * sizeof(float));
+      for (uint64_t i = 0; i < blk; i++) {
+        uint64_t si = base + i;
+        for (int64_t j = lbl_off[si]; j < lbl_off[si + 1]; j++)
+          Yf_tile[i * unl + (uint64_t) lbl_nbr[j]] = 1.0f;
+      }
+      cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+        (int) d, (int) nl, (int) blk, 1.0f,
+        sims_f, (int) d, Yf_tile, (int) nl,
+        1.0f, xty, (int) nl);
+    } else {
+      uint64_t nkb = (d + kbs - 1) / kbs;
+      #pragma omp parallel for schedule(static)
+      for (uint64_t b = 0; b < nkb; b++) {
+        uint64_t klo = b * kbs;
+        uint64_t khi = klo + kbs <= d ? klo + kbs : d;
+        for (uint64_t i = 0; i < blk; i++) {
+          uint64_t si = base + i;
+          int64_t jlo = lbl_off[si], jhi = lbl_off[si + 1];
+          if (jlo == jhi) continue;
+          const float *phi = sims_f + i * d;
+          for (int64_t j = jlo; j < jhi; j++) {
+            float *dst = xty + (uint64_t) lbl_nbr[j];
+            for (uint64_t k = klo; k < khi; k++)
+              dst[k * unl] += phi[k];
+          }
+        }
+      }
+    }
+  }
+  #pragma omp parallel for schedule(static)
+  for (uint64_t j = 0; j < d; j++) {
+    double s = 0.0;
+    for (int t = 0; t < nth; t++) s += cs_part[(uint64_t) t * d + j];
+    cm_f[j] = (float) (s / (double) n_samples);
+  }
+  free(cs_part);
+  free(Yf_tile);
+  return 0;
 }
 
 static inline int tk_nystrom_encode_blocks (lua_State *L, tk_nystrom_encoder_t *enc) {
@@ -1232,7 +1162,6 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
   tk_lua_fwrite(L, &enc->mod_type, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &enc->m, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, &enc->d, sizeof(uint64_t), 1, fh);
-  tk_lua_fwrite(L, &enc->trace_ratio, sizeof(double), 1, fh);
   tk_lua_fwrite(L, &chol_external, sizeof(uint8_t), 1, fh);
   if (chol_external) {
 #if !defined(__EMSCRIPTEN__)
@@ -1245,8 +1174,24 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
     tk_lua_fwrite(L, &enc->csr_n_tokens, sizeof(uint64_t), 1, fh);
     uint64_t total_csr = (uint64_t)enc->csr_offsets[enc->m];
     tk_lua_fwrite(L, enc->csr_offsets, sizeof(int64_t), enc->m + 1, fh);
-    tk_lua_fwrite(L, enc->csr_tokens, sizeof(int32_t), total_csr, fh);
-    tk_lua_fwrite(L, enc->csr_values, sizeof(float), total_csr, fh);
+    // csr tokens/values freed after csc build; reconstruct rows transiently from the csc
+    int32_t *toks = (int32_t *)malloc(total_csr * sizeof(int32_t));
+    float *vals = (float *)malloc(total_csr * sizeof(float));
+    int64_t *pos = (int64_t *)malloc(enc->m * sizeof(int64_t));
+    if (!toks || !vals || !pos) {
+      free(toks); free(vals); free(pos);
+      return luaL_error(L, "persist: out of memory (csr reconstruction)");
+    }
+    memcpy(pos, enc->csr_offsets, enc->m * sizeof(int64_t));
+    for (uint64_t t = 0; t < enc->csr_n_tokens; t++)
+      for (int64_t c = enc->csc_offsets[t]; c < enc->csc_offsets[t + 1]; c++) {
+        int64_t p = pos[enc->csc_rows[c]]++;
+        toks[p] = (int32_t)t;
+        vals[p] = enc->csc_values[c];
+      }
+    tk_lua_fwrite(L, toks, sizeof(int32_t), total_csr, fh);
+    tk_lua_fwrite(L, vals, sizeof(float), total_csr, fh);
+    free(toks); free(vals); free(pos);
     tk_lua_fwrite(L, &enc->n_blocks, sizeof(int), 1, fh);
     if (enc->n_blocks > 0) {
       tk_lua_fwrite(L, enc->blk_start, sizeof(int64_t), (size_t) enc->n_blocks, fh);
@@ -1275,6 +1220,11 @@ static luaL_Reg tk_nystrom_encoder_mt_fns[] = {
   { "persist", tk_nystrom_encoder_persist_lua },
   { NULL, NULL }
 };
+
+static inline uint64_t *tk_spectral_row_fps (lua_State *L, uint64_t *n_rows_out);
+static inline tk_ivec_t *tk_spectral_uniform_ids (
+  lua_State *L, uint64_t *fp, uint64_t n_rows, uint64_t m, uint64_t seedv,
+  const int64_t *strata);
 
 static inline int tm_encode (lua_State *L) {
   lua_settop(L, 1);
@@ -1507,12 +1457,6 @@ static inline int tm_encode (lua_State *L) {
   }
 
   uint64_t n_lm_req = tk_lua_foptunsigned(L, 1, "encode", "n_landmarks", 0);
-  double trace_tol = tk_lua_foptnumber(L, 1, "encode", "trace_tol", 0.001);
-  uint64_t chol_block = tk_lua_foptunsigned(L, 1, "encode", "chol_block", 64);
-
-  lua_getfield(L, 1, "chol_buf");
-  tk_fvec_t *chol_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "chol_buf");
-  lua_pop(L, 1);
 
   lua_getfield(L, 1, "xtx_buf");
   tk_fvec_t *xtx_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "xtx_buf");
@@ -1538,28 +1482,32 @@ static inline int tm_encode (lua_State *L) {
   tk_fvec_t *row_buf_arg = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "row_buf");
   lua_pop(L, 1);
 
-  tk_ivec_t *lm_ids = NULL;
-  tk_fvec_t *lm_chol = NULL;
-  float *lm_chol_ext = NULL;
-  float *full_chol = NULL;
-  uint64_t nc, m;
-  double trace_ratio;
+  uint64_t nc = n_samples;
   lua_getfield(L, 1, "landmarks");
   tk_ivec_t *lm_forced = lua_isnil(L, -1) ? NULL : tk_ivec_peek(L, -1, "landmarks");
   lua_pop(L, 1);
-  uint64_t lm_backstop = 0;
-  double tp_t = omp_get_wtime();
-  tk_spectral_sample_landmarks(L,
-    &mod, n_samples, kernel,
-    n_lm_req, trace_tol, chol_block,
-    chol_buf ? chol_buf->a : NULL,
-    proj_buf ? proj_buf->a : NULL, proj_buf ? proj_buf->m : 0,
-    &lm_ids, &lm_chol, &lm_chol_ext, &full_chol, &nc, &m, &trace_ratio,
-    lm_forced ? lm_forced->a : NULL, lm_forced ? lm_forced->n : 0, &lm_backstop);
-  tp_lm = omp_get_wtime() - tp_t;
-  lua_pushinteger(L, (lua_Integer) lm_backstop);
-  lua_setfield(L, 1, "lm_backstop");
+  if (!lm_forced) {
+    uint64_t fn = 0;
+    uint64_t *ffp = tk_spectral_row_fps(L, &fn);
+    if (!ffp) return luaL_error(L, "encode: cannot fingerprint rows for landmark selection");
+    uint64_t lseed = tk_lua_foptunsigned(L, 1, "encode", "landmark_seed", 1);
+    lua_getfield(L, 1, "strata");
+    tk_ivec_t *st = lua_isnil(L, -1) ? NULL : tk_ivec_peek(L, -1, "strata");
+    lua_pop(L, 1);
+    lm_forced = tk_spectral_uniform_ids(L, ffp, fn, n_lm_req, lseed,
+      (st && st->n == fn) ? st->a : NULL);
+  }
+  tk_ivec_t *lm_ids = tk_ivec_create(L, lm_forced ? (lm_forced->n ? lm_forced->n : 1) : 1);
   int lm_ids_idx = lua_gettop(L);
+  uint64_t m = 0;
+  if (lm_forced) {
+    uint64_t cap = lm_forced->n > nc ? nc : lm_forced->n;
+    for (uint64_t i = 0; i < lm_forced->n && m < cap; i++) {
+      uint64_t pi = (uint64_t) lm_forced->a[i];
+      if (pi < nc) lm_ids->a[m++] = (int64_t) pi;
+    }
+  }
+  lm_ids->n = m;
 
   uint64_t d = m;
 
@@ -1596,164 +1544,26 @@ static inline int tm_encode (lua_State *L) {
   lua_pop(L, 1);
 
   if (m == 0) {
-    if (lm_chol) tk_fvec_destroy(lm_chol);
-    if (!chol_buf) free(full_chol);
     free(csr_values_owned); free(dense_owned);
     free(dense_rowscale); free(dense_cs2);
+    free(blk_rowscale);
     lua_pushnil(L);
     lua_pushnil(L);
     return 2;
   }
   if (m > 32768) {
-    if (lm_chol) tk_fvec_destroy(lm_chol);
-    if (!chol_buf) free(full_chol);
     free(csr_values_owned); free(dense_owned);
     free(dense_rowscale); free(dense_cs2);
+    free(blk_rowscale);
     return luaL_error(L, "encode: n_landmarks %d exceeds 32768 (int16 csc_rows ceiling)", (int)m);
   }
-
-  tk_encode_nystrom_ctx_t *ctx = (tk_encode_nystrom_ctx_t *)
-    lua_newuserdata(L, sizeof(tk_encode_nystrom_ctx_t));
-  memset(ctx, 0, sizeof(*ctx));
-  lua_newtable(L);
-  lua_pushcfunction(L, tk_encode_nystrom_ctx_gc);
-  lua_setfield(L, -2, "__gc");
-  lua_setmetatable(L, -2);
-  ctx->lm_chol = lm_chol;
-  ctx->full_chol = full_chol;
-  ctx->full_chol_external = (chol_buf != NULL);
-
-  double tp_t2 = omp_get_wtime();
-  float *chol_store = NULL;
-  int chol_external = 0;
-  if (lm_chol_ext) {
-    // sampler factored K_SS straight into proj_buf; nothing to copy
-    chol_store = lm_chol_ext;
-    chol_external = 1;
-  } else if (proj_buf && proj_buf->m >= (uint64_t)m * m) {
-    memcpy(proj_buf->a, lm_chol->a, (uint64_t)m * m * sizeof(float));
-    chol_store = proj_buf->a;
-    chol_external = 1;
-    tk_fvec_destroy(lm_chol); ctx->lm_chol = NULL; lm_chol = NULL;
-  }
-  tp_pj = omp_get_wtime() - tp_t2;
-
-  double tp_t3 = omp_get_wtime();
-  int gram_result_idx = 0;
-  int build_prepared = has_gram_labels || has_gram_targets;
-  if (build_prepared) {
-    uint64_t unl = (uint64_t)gram_nl;
-    uint64_t dd = (uint64_t)d * d;
-    uint64_t dnl = (uint64_t)d * unl;
-    bool XtX_external = xtx_buf && xtx_buf->m >= dd;
-    bool xty_external = xty_buf && xty_buf->m >= dnl;
-    float *XtX = XtX_external ? xtx_buf->a : (float *)malloc(dd * sizeof(float));
-    float *xty = xty_external ? xty_buf->a : (float *)malloc(dnl * sizeof(float));
-    float *cm_f = (float *)malloc(d * sizeof(float));
-    double *y_mean = (double *)calloc(unl, sizeof(double));
-    float *ym_f = (float *)malloc(unl * sizeof(float));
-    if (!XtX || !xty || !cm_f || !y_mean || !ym_f) {
-      if (!XtX_external) free(XtX);
-      if (!xty_external) free(xty);
-      free(cm_f); free(y_mean); free(ym_f);
-      return luaL_error(L, "gram prepare: out of memory");
-    }
-    #pragma omp parallel for schedule(static)
-    for (int64_t j = 0; j < (int64_t)d; j++) {
-      double s = 0.0;
-      const float *src = full_chol + (uint64_t)j * nc;
-      for (uint64_t i = 0; i < nc; i++) s += (double)src[i];
-      cm_f[j] = (float)(s / (double)nc);
-    }
-    cblas_ssyrk(CblasColMajor, CblasUpper, CblasTrans,
-      (int)d, (int)nc, 1.0f, full_chol, (int)nc, 0.0f, XtX, (int)d);
-    if (has_gram_targets) {
-      float *Yf = (float *)malloc((uint64_t)nc * unl * sizeof(float));
-      if (!Yf) {
-        if (!XtX_external) free(XtX);
-        if (!xty_external) free(xty);
-        free(cm_f); free(y_mean); free(ym_f);
-        return luaL_error(L, "gram prepare: out of memory (targets)");
-      }
-      for (uint64_t i = 0; i < nc * unl; i++) Yf[i] = (float)gram_targets_dv->a[i];
-      for (int64_t l = 0; l < gram_nl; l++) {
-        double s = 0.0;
-        for (uint64_t i = 0; i < nc; i++) s += gram_targets_dv->a[i * unl + (uint64_t)l];
-        y_mean[l] = s / (double)nc;
-      }
-      cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-        (int)d, (int)gram_nl, (int)nc, 1.0f, full_chol, (int)nc,
-        Yf, (int)gram_nl, 0.0f, xty, (int)gram_nl);
-      free(Yf);
-    } else {
-      const int64_t *lbl_off = gram_lbl_off->a;
-      const int64_t *lbl_nbr = gram_lbl_nbr->a;
-      for (uint64_t i = 0; i < nc; i++)
-        for (int64_t j = lbl_off[i]; j < lbl_off[i + 1]; j++)
-          y_mean[lbl_nbr[j]] += 1.0;
-      for (int64_t l = 0; l < gram_nl; l++) y_mean[l] /= (double)nc;
-      memset(xty, 0, dnl * sizeof(float));
-      #pragma omp parallel for schedule(static)
-      for (int64_t kk = 0; kk < (int64_t)d; kk++) {
-        const float *src = full_chol + (uint64_t)kk * nc;
-        float *dst = xty + (uint64_t)kk * unl;
-        for (uint64_t i = 0; i < nc; i++) {
-          float v = src[i];
-          for (int64_t j = lbl_off[i]; j < lbl_off[i + 1]; j++)
-            dst[lbl_nbr[j]] += v;
-        }
-      }
-    }
-    cblas_ssyr(CblasColMajor, CblasUpper, (int)d, -(float)nc, cm_f, 1, XtX, (int)d);
-    for (int64_t l = 0; l < gram_nl; l++) ym_f[l] = (float)y_mean[l];
-    cblas_sger(CblasRowMajor, (int)d, (int)gram_nl, -(float)nc, cm_f, 1, ym_f, 1, xty, (int)gram_nl);
-    free(ym_f);
-    double mean_eig = 0.0;
-    for (uint64_t i = 0; i < d; i++) mean_eig += (double)XtX[i * d + i];
-    mean_eig /= (double)d;
-    if (!ctx->full_chol_external) free(full_chol);
-    ctx->full_chol = NULL;
-    tk_gram_make_prepared(L, XtX, XtX_external, xty, xty_external, cm_f, y_mean, mean_eig,
-      (int64_t)nc, (int64_t)d, gram_nl, tile_labels);
-    gram_result_idx = lua_gettop(L);
-    lua_getfenv(L, gram_result_idx);
-    lua_getfield(L, 1, "xtx_buf");
-    lua_setfield(L, -2, "xtx_buf");
-    lua_getfield(L, 1, "xty_buf");
-    lua_setfield(L, -2, "xty_buf");
-    lua_pop(L, 1);
-    if (do_solve) {
-      tk_gram_t *g = tk_gram_peek(L, gram_result_idx);
-      tk_gram_solve_impl(L, g, solve_lambda, w_buf);
-      if (g->W_baked_external && w_buf) {
-        lua_getfenv(L, gram_result_idx);
-        lua_getfield(L, 1, "w_buf");
-        lua_setfield(L, -2, "w_buf");
-        lua_pop(L, 1);
-      }
-      tk_gram_release_prepared(g);
-    }
-  }
-  if (!build_prepared) {
-    if (!ctx->full_chol_external) free(full_chol);
-    ctx->full_chol = NULL;
-  }
-  tp_gr = omp_get_wtime() - tp_t3;
 
   tk_nystrom_encoder_t *enc = (tk_nystrom_encoder_t *)tk_lua_newuserdata(L, tk_nystrom_encoder_t,
     TK_NYSTROM_ENCODER_MT, tk_nystrom_encoder_mt_fns, tk_nystrom_encoder_gc);
   int enc_idx = lua_gettop(L);
   tk_nystrom_encoder_zero(enc);
-  if (chol_external) {
-    enc->chol = chol_store;
-  } else {
-    enc->chol_f = lm_chol;
-    enc->chol = lm_chol->a;
-    ctx->lm_chol = NULL;
-  }
   enc->m = m;
   enc->d = d;
-  enc->trace_ratio = trace_ratio;
   enc->kernel = kernel;
   enc->mod_type = mod.type;
   if (sims_buf_arg && sims_buf_arg->m >= m) {
@@ -1840,7 +1650,6 @@ static inline int tm_encode (lua_State *L) {
       free(csr_values_owned);
       return luaL_error(L, "encode: out of memory (csc)");
     }
-    free(csr_values_owned);
   }
 
   if (has_dense) {
@@ -1867,9 +1676,176 @@ static inline int tm_encode (lua_State *L) {
       enc->dense_cs2 = dense_cs2;
       dense_cs2 = NULL;
     }
-    free(dense_owned);
   }
 
+  // landmark kernel matrix + factorization (the encoder's chol); the pristine K(S,S) is kept as
+  // the gram's factor scratch when a gram is built
+  double tp_t = omp_get_wtime();
+  uint64_t mm = (uint64_t)m * m;
+  float *chol_store;
+  int chol_external = 0;
+  if (proj_buf && proj_buf->m >= mm) {
+    chol_store = proj_buf->a;
+    chol_external = 1;
+  } else {
+    tk_fvec_t *cf = tk_fvec_create(NULL, mm);
+    if (!cf)
+      return luaL_error(L, "encode: out of memory (chol)");
+    cf->n = mm;
+    enc->chol_f = cf;
+    chol_store = cf->a;
+  }
+  tk_fvec_t *kss_raw = tk_fvec_create(L, mm);
+  kss_raw->n = mm;
+  int kss_idx = lua_gettop(L);
+  tk_spectral_landmark_kss(L, &mod, lm_ids->a, m, kernel, kss_raw->a);
+  {
+    double jitter = 1e-6;
+    for (;;) {
+      memcpy(chol_store, kss_raw->a, mm * sizeof(float));
+      for (uint64_t r = 0; r < m; r++)
+        chol_store[r * m + r] += (float) jitter;
+      if (LAPACKE_spotrf(LAPACK_COL_MAJOR, 'U', (int) m, chol_store, (int) m) == 0)
+        break;
+      if (jitter > 1e-1)
+        return luaL_error(L, "encode: spotrf failed after jitter escalation");
+      jitter *= 10.0;
+    }
+    #pragma omp parallel for schedule(static)
+    for (uint64_t r = 0; r < m; r++)
+      for (uint64_t c = r + 1; c < m; c++)
+        chol_store[r * m + c] = 0.0f;
+  }
+  enc->chol = chol_store;
+  tp_lm = omp_get_wtime() - tp_t;
+
+  // gram: stream doc tiles through the encoder; the full n x d code matrix never exists
+  double tp_t3 = omp_get_wtime();
+  int gram_result_idx = 0;
+  int build_prepared = has_gram_labels || has_gram_targets;
+  if (build_prepared) {
+    uint64_t unl = (uint64_t)gram_nl;
+    uint64_t dd = (uint64_t)d * d;
+    uint64_t dnl = (uint64_t)d * unl;
+    bool XtX_external = xtx_buf && xtx_buf->m >= dd;
+    bool xty_external = xty_buf && xty_buf->m >= dnl;
+    float *XtX = XtX_external ? xtx_buf->a : (float *)malloc(dd * sizeof(float));
+    float *xty = xty_external ? xty_buf->a : (float *)malloc(dnl * sizeof(float));
+    float *cm_f = (float *)malloc(d * sizeof(float));
+    double *y_mean = (double *)calloc(unl, sizeof(double));
+    float *ym_f = (float *)malloc(unl * sizeof(float));
+    if (!XtX || !xty || !cm_f || !y_mean || !ym_f) {
+      if (!XtX_external) free(XtX);
+      if (!xty_external) free(xty);
+      free(cm_f); free(y_mean); free(ym_f);
+      return luaL_error(L, "gram prepare: out of memory");
+    }
+    if (has_gram_targets) {
+      for (int64_t l = 0; l < gram_nl; l++) {
+        double s = 0.0;
+        for (uint64_t i = 0; i < nc; i++) s += gram_targets_dv->a[i * unl + (uint64_t)l];
+        y_mean[l] = s / (double)nc;
+      }
+    } else {
+      const int64_t *lbl_off = gram_lbl_off->a;
+      const int64_t *lbl_nbr = gram_lbl_nbr->a;
+      for (uint64_t i = 0; i < nc; i++)
+        for (int64_t j = lbl_off[i]; j < lbl_off[i + 1]; j++)
+          y_mean[lbl_nbr[j]] += 1.0;
+      for (int64_t l = 0; l < gram_nl; l++) y_mean[l] /= (double)nc;
+    }
+    // doc -> landmark-representative map (by row fingerprint): rows whose content matches a
+    // landmark gather their K(i,S) row from kss_raw in the tile pass instead of recomputing.
+    // Savings scale with m/n; at m >= n_canonical the gram pass does no kernel work at all.
+    // Best-effort: any allocation/fingerprint failure just disables the gather.
+    int64_t *rep = NULL;
+    {
+      uint64_t gfn = 0;
+      uint64_t *gfp = tk_spectral_row_fps(L, &gfn);
+      if (gfp && gfn == nc) {
+        uint64_t hcap = 1;
+        while (hcap < m * 2) hcap <<= 1;
+        uint64_t *hk = (uint64_t *)malloc(hcap * sizeof(uint64_t));
+        int64_t *hv = (int64_t *)malloc(hcap * sizeof(int64_t));
+        rep = (int64_t *)malloc(nc * sizeof(int64_t));
+        if (hk && hv && rep) {
+          for (uint64_t i = 0; i < hcap; i++) hv[i] = -1;
+          for (uint64_t j = 0; j < m; j++) {
+            uint64_t h = gfp[(uint64_t) lm_ids->a[j]];
+            uint64_t p = tk_hash_mix(h) & (hcap - 1);
+            for (;;) {
+              if (hv[p] < 0) { hv[p] = (int64_t) j; hk[p] = h; break; }
+              if (hk[p] == h) break;
+              p = (p + 1) & (hcap - 1);
+            }
+          }
+          #pragma omp parallel for schedule(static)
+          for (uint64_t i = 0; i < nc; i++) {
+            uint64_t h = gfp[i];
+            uint64_t p = tk_hash_mix(h) & (hcap - 1);
+            int64_t r = -1;
+            for (;;) {
+              if (hv[p] < 0) break;
+              if (hk[p] == h) { r = hv[p]; break; }
+              p = (p + 1) & (hcap - 1);
+            }
+            rep[i] = r;
+          }
+        } else {
+          free(rep); rep = NULL;
+        }
+        free(hk); free(hv);
+      }
+      free(gfp);
+    }
+    if (tk_nystrom_gram_tiles(enc, &mod, nc, rep, kss_raw->a,
+        has_gram_labels ? gram_lbl_off->a : NULL,
+        has_gram_labels ? gram_lbl_nbr->a : NULL,
+        has_gram_targets ? gram_targets_dv->a : NULL,
+        gram_nl, XtX, xty, cm_f) != 0) {
+      free(rep);
+      if (!XtX_external) free(XtX);
+      if (!xty_external) free(xty);
+      free(cm_f); free(y_mean); free(ym_f);
+      return luaL_error(L, "gram prepare: out of memory (tiles)");
+    }
+    free(rep);
+    cblas_ssyr(CblasColMajor, CblasUpper, (int)d, -(float)nc, cm_f, 1, XtX, (int)d);
+    for (int64_t l = 0; l < gram_nl; l++) ym_f[l] = (float)y_mean[l];
+    cblas_sger(CblasRowMajor, (int)d, (int)gram_nl, -(float)nc, cm_f, 1, ym_f, 1, xty, (int)gram_nl);
+    free(ym_f);
+    double mean_eig = 0.0;
+    for (uint64_t i = 0; i < d; i++) mean_eig += (double)XtX[i * d + i];
+    mean_eig /= (double)d;
+    tk_gram_make_prepared(L, XtX, XtX_external, xty, xty_external,
+      kss_raw->a, kss_raw->m,
+      cm_f, y_mean, mean_eig,
+      (int64_t)nc, (int64_t)d, gram_nl, tile_labels);
+    gram_result_idx = lua_gettop(L);
+    lua_getfenv(L, gram_result_idx);
+    lua_getfield(L, 1, "xtx_buf");
+    lua_setfield(L, -2, "xtx_buf");
+    lua_getfield(L, 1, "xty_buf");
+    lua_setfield(L, -2, "xty_buf");
+    lua_pushvalue(L, kss_idx);
+    lua_setfield(L, -2, "factor_buf");
+    lua_pop(L, 1);
+    if (do_solve) {
+      tk_gram_t *g = tk_gram_peek(L, gram_result_idx);
+      tk_gram_solve_impl(L, g, solve_lambda, w_buf);
+      if (g->W_baked_external && w_buf) {
+        lua_getfenv(L, gram_result_idx);
+        lua_getfield(L, 1, "w_buf");
+        lua_setfield(L, -2, "w_buf");
+        lua_pop(L, 1);
+      }
+      tk_gram_release_prepared(g);
+    }
+  }
+  tp_gr = omp_get_wtime() - tp_t3;
+
+  free(csr_values_owned);
+  free(dense_owned);
   free(blk_rowscale);
   free(dense_rowscale);
 
@@ -1926,6 +1902,9 @@ static inline int tk_nystrom_build_csc (tk_nystrom_encoder_t *enc) {
     }
   }
   free(csc_pos);
+  // encode only reads the csc; keep offsets (persist header + reconstruction cursors), drop the rest
+  free(enc->csr_tokens); enc->csr_tokens = NULL;
+  free(enc->csr_values); enc->csr_values = NULL;
   return 0;
 }
 
@@ -1960,7 +1939,6 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   tk_lua_fread(L, &enc->mod_type, sizeof(uint8_t), 1, fh);
   tk_lua_fread(L, &enc->m, sizeof(uint64_t), 1, fh);
   tk_lua_fread(L, &enc->d, sizeof(uint64_t), 1, fh);
-  tk_lua_fread(L, &enc->trace_ratio, sizeof(double), 1, fh);
   uint8_t chol_external;
   tk_lua_fread(L, &chol_external, sizeof(uint8_t), 1, fh);
   uint64_t mm = enc->m * enc->m;
@@ -2148,21 +2126,16 @@ static inline uint64_t *tk_spectral_row_fps (lua_State *L, uint64_t *n_rows_out)
   return out;
 }
 
-static inline int tm_uniform_landmarks (lua_State *L) {
-  lua_settop(L, 3);
-  luaL_checktype(L, 1, LUA_TTABLE);
-  uint64_t m = tk_lua_checkunsigned(L, 2, "m");
-  uint64_t seedv = (uint64_t) luaL_optnumber(L, 3, 1);
-  uint64_t n_rows = 0;
-  uint64_t *fp = tk_spectral_row_fps(L, &n_rows);
-  if (!fp)
-    return luaL_error(L, "uniform_landmarks: expected blocks or x (or oom)");
+static inline tk_ivec_t *tk_spectral_uniform_ids (
+  lua_State *L, uint64_t *fp, uint64_t n_rows, uint64_t m, uint64_t seedv,
+  const int64_t *strata
+) {
   if (m > n_rows) m = n_rows;
   if (n_rows == 0 || m == 0) {
     free(fp);
     tk_ivec_t *out = tk_ivec_create(L, 0);
     out->n = 0;
-    return 1;
+    return out;
   }
   uint64_t cap = 1;
   while (cap < n_rows * 2) cap <<= 1;
@@ -2172,7 +2145,8 @@ static inline int tm_uniform_landmarks (lua_State *L) {
   int64_t *perm = (int64_t *) malloc(n_rows * sizeof(int64_t));
   if (!keys || !used || !canon || !perm) {
     free(fp); free(keys); free(used); free(canon); free(perm);
-    return luaL_error(L, "uniform_landmarks: out of memory");
+    luaL_error(L, "uniform_landmarks: out of memory");
+    return NULL;
   }
   for (uint64_t i = 0; i < n_rows; i ++) {
     uint64_t h = fp[i];
@@ -2191,14 +2165,100 @@ static inline int tm_uniform_landmarks (lua_State *L) {
     if (j > i) j = i;
     int64_t t = perm[i]; perm[i] = perm[j]; perm[j] = t;
   }
+  uint64_t ncanon = 0;
+  for (uint64_t i = 0; i < n_rows; i ++) if (canon[i]) ncanon ++;
+  if (!strata || m >= ncanon) {
+    tk_ivec_t *out = tk_ivec_create(L, m);
+    uint64_t taken = 0;
+    for (uint64_t i = 0; i < n_rows && taken < m; i ++) {
+      int64_t r = perm[i];
+      if (canon[r]) out->a[taken ++] = r;
+    }
+    out->n = taken;
+    free(perm); free(canon);
+    return out;
+  }
+  uint64_t scap = 1;
+  while (scap < n_rows * 2) scap <<= 1;
+  int64_t *skey = (int64_t *) malloc(scap * sizeof(int64_t));
+  int64_t *sid = (int64_t *) malloc(scap * sizeof(int64_t));
+  uint64_t *cnt = (uint64_t *) calloc(ncanon, sizeof(uint64_t));
+  if (!skey || !sid || !cnt) {
+    free(perm); free(canon); free(skey); free(sid); free(cnt);
+    luaL_error(L, "uniform_landmarks: out of memory");
+    return NULL;
+  }
+  for (uint64_t i = 0; i < scap; i ++) sid[i] = -1;
+  uint64_t D = 0;
+  for (uint64_t i = 0; i < n_rows; i ++) {
+    if (!canon[i]) continue;
+    int64_t g = strata[i];
+    uint64_t p = tk_hash_mix((uint64_t) g) & (scap - 1);
+    for (;;) {
+      if (sid[p] < 0) { sid[p] = (int64_t) D; skey[p] = g; cnt[D] = 1; D ++; break; }
+      if (skey[p] == g) { cnt[sid[p]] ++; break; }
+      p = (p + 1) & (scap - 1);
+    }
+  }
+  uint64_t *alloc = (uint64_t *) calloc(D, sizeof(uint64_t));
+  double *rem = (double *) malloc(D * sizeof(double));
+  uint64_t *taken_g = (uint64_t *) calloc(D, sizeof(uint64_t));
+  if (!alloc || !rem || !taken_g) {
+    free(perm); free(canon); free(skey); free(sid); free(cnt);
+    free(alloc); free(rem); free(taken_g);
+    luaL_error(L, "uniform_landmarks: out of memory");
+    return NULL;
+  }
+  uint64_t assigned = 0;
+  for (uint64_t g = 0; g < D; g ++) {
+    double q = (double) m * (double) cnt[g] / (double) ncanon;
+    uint64_t a = (uint64_t) q;
+    if (a > cnt[g]) a = cnt[g];
+    alloc[g] = a; rem[g] = q - (double) a; assigned += a;
+  }
+  while (assigned < m) {
+    int64_t best = -1;
+    for (uint64_t g = 0; g < D; g ++)
+      if (alloc[g] < cnt[g] && (best < 0 || rem[g] > rem[best])) best = (int64_t) g;
+    if (best < 0) break;
+    alloc[best] ++; rem[best] = -1.0; assigned ++;
+  }
   tk_ivec_t *out = tk_ivec_create(L, m);
   uint64_t taken = 0;
   for (uint64_t i = 0; i < n_rows && taken < m; i ++) {
     int64_t r = perm[i];
-    if (canon[r]) out->a[taken ++] = r;
+    if (!canon[r]) continue;
+    int64_t g = strata[r];
+    uint64_t p = tk_hash_mix((uint64_t) g) & (scap - 1);
+    int64_t gid = -1;
+    for (;;) {
+      if (sid[p] < 0) break;
+      if (skey[p] == g) { gid = sid[p]; break; }
+      p = (p + 1) & (scap - 1);
+    }
+    if (gid < 0) continue;
+    if (taken_g[gid] < alloc[gid]) { out->a[taken ++] = r; taken_g[gid] ++; }
   }
   out->n = taken;
-  free(perm); free(canon);
+  free(perm); free(canon); free(skey); free(sid); free(cnt);
+  free(alloc); free(rem); free(taken_g);
+  return out;
+}
+
+static inline int tm_uniform_landmarks (lua_State *L) {
+  lua_settop(L, 3);
+  luaL_checktype(L, 1, LUA_TTABLE);
+  uint64_t m = tk_lua_checkunsigned(L, 2, "m");
+  uint64_t seedv = (uint64_t) luaL_optnumber(L, 3, 1);
+  uint64_t n_rows = 0;
+  uint64_t *fp = tk_spectral_row_fps(L, &n_rows);
+  if (!fp)
+    return luaL_error(L, "uniform_landmarks: expected blocks or x (or oom)");
+  lua_getfield(L, 1, "strata");
+  tk_ivec_t *st = lua_isnil(L, -1) ? NULL : tk_ivec_peek(L, -1, "strata");
+  lua_pop(L, 1);
+  tk_spectral_uniform_ids(L, fp, n_rows, m, seedv,
+    (st && st->n == n_rows) ? st->a : NULL);
   return 1;
 }
 

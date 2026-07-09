@@ -11,20 +11,18 @@ local word_characters = util.WORD_CHARACTERS
 
 local cfg = {
   verbose = false,
-  search_landmarks = 2048,
+  search_landmarks = 1024 * 2,
   blocks = {
     { ngram_min = 1, ngram_max = 5, word_characters = word_characters },
     -- { ngram_min = 1, ngram_max = 3, word_characters = word_characters, words = true },
   },
   relevance = { "bns"--[[, "bns"]] },
   -- scales = { def = { 81.8926, 0.0122111 } },
-  exponent = { def = { 2.1663--[[, 0.111451]] } },
-  decode_offset = { def = 0.347063 },
+  exponent = { def = { 3.18132 } },
+  decode_offset = { def = 0.342598 },
   n_landmarks = 1024 * 8,
   kernel = { "cosine" },
-  -- nu = { def = 3 },
-  -- gamma = { def = 0.3017 },
-  lambda = { def = 1.09853e-07 },
+  lambda = { def = 2.27949e-07 },
   k = 256,
   search_trials = 0,
   folds = 5,
@@ -48,7 +46,6 @@ test("eurlex CV", function ()
   local toks, pool_blocks = util.tokenize_blocks(cfg.blocks, pool_texts)
   local _, test_blocks = util.tokenize_blocks(cfg.blocks, test_texts, toks)
 
-  local buf = "test/res/eurlex57k/cv_"
   local _, ridge_obj, deploy, best, decider = optimize.krr({
     pool_blocks = pool_blocks,
     pool_labels = train.labels,
@@ -64,15 +61,14 @@ test("eurlex CV", function ()
     n_landmarks = cfg.n_landmarks,
     search_landmarks = cfg.search_landmarks,
     k = cfg.k,
-    cv_buf_path = buf,
     decode_offset = cfg.decode_offset,
     search_trials = cfg.search_trials,
     verbose = cfg.verbose,
     each = util.make_ridge_log(stopwatch),
   })
 
-  local test_codes = deploy(test_blocks)
-  local P = ridge_obj:label(test_codes, cfg.k)
+  local P = util.predict_tiled({ deploy = deploy, ridge = ridge_obj,
+    blocks = test_blocks, n = test_set.n, k = cfg.k })
   local _, m = decider:score({ pred = P, expected = test_set.labels, n_samples = test_set.n })
   local _, total = stopwatch()
   str.printf("[Result] scales=%s offset=%.6g | test %s\nTotal: %.1fs\n",

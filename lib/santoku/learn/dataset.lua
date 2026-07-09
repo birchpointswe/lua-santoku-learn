@@ -11,15 +11,8 @@ local lpeg_utils = require("santoku.lpeg")
 
 local M = {}
 
-local function single_label_csr (n, n_cols, get)
-  local off = ivec.create()
-  local nbr = ivec.create()
-  for i = 0, n - 1 do
-    off:push(i)
-    nbr:push(get(i))
-  end
-  off:push(n)
-  return csr.create({ offsets = off, neighbors = nbr, n_cols = n_cols })
+local function single_label_csr (cls, n_cols)
+  return csr.from_classes(cls, n_cols)
 end
 
 local function split_ranges (n, ratio)
@@ -66,11 +59,11 @@ local function _split_binary_mnist (dataset, s, e)
   local ids = ivec.create()
   ids:copy(dataset.ids, s - 1, e, 0)
   local n = e - s + 1
+  local cls = ivec.create(n)
+  cls:copy(dataset.solutions, s - 1, e, 0)
   return {
     ids = ids,
-    labels = single_label_csr(n, dataset.n_labels, function (i)
-      return dataset.solutions:get(s - 1 + i)
-    end),
+    labels = single_label_csr(cls, dataset.n_labels),
     n_labels = dataset.n_labels,
     n_features = dataset.n_features,
     n = n,
@@ -208,14 +201,14 @@ M.read_20newsgroups = function (dir, max_per_class, remove, max)
     shuffled_solutions = ss
   end
   local n_cats = #categories
+  local cls = ivec.create(total)
+  for i = 0, total - 1 do cls:set(i, shuffled_solutions[i + 1]) end
   return {
     n = total,
     n_labels = n_cats,
     categories = categories,
     problems = shuffled_problems,
-    labels = single_label_csr(total, n_cats, function (i)
-      return shuffled_solutions[i + 1]
-    end),
+    labels = single_label_csr(cls, n_cats),
   }
 end
 

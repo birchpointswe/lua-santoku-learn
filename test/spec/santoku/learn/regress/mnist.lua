@@ -9,18 +9,18 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   verbose = false,
-  search_landmarks = 2048,
+  search_landmarks = 1024 * 2,
   data = { ttr = 0.8, features = 784 },
   n_landmarks = 1024 * 8,
   kernel = { "matern" },
   nu = { def = 3 },
-  gamma = { def = 2.84937 },
-  lambda = { def = 9.11332e-07 },
+  gamma = { def = 2.91919 },
+  lambda = { def = 2.13137e-07 },
   relevance = { "auc" },
-  exponent = { { def = 0.238789 } },
+  exponent = { def = { 0.278601 } },
   classes = 10,
   k = 1,
-  search_trials = 40,
+  search_trials = 0,
   folds = 5,
 }
 
@@ -54,7 +54,9 @@ test("mnist CV", function ()
     each = util.make_ridge_log(stopwatch),
   })
 
-  local _, m = decider:score({ scores = ridge_obj:regress(deploy({ test_codes:i32() })),
+  local _, test_scores = util.predict_tiled({ deploy = deploy, ridge = ridge_obj,
+    blocks = { test_codes:i32() }, n = test_set.n, scores = true, n_labels = cfg.classes })
+  local _, m = decider:score({ scores = test_scores,
     n_samples = test_set.n, expected = test_set.labels })
   local _, total = stopwatch()
   str.printf("[Result] lambda=%.4g | test %s\nTotal: %.1fs\n", best.lambda or 0, util.fmt_metrics(m), total)

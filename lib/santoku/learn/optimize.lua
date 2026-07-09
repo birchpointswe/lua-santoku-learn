@@ -23,15 +23,12 @@ local function make_gp_model (n_dims, cap, restarts)
   local state, ls = dvec.create(), dvec.create()
   local ei = nil
   local n, ls_ready = 0, false
-  -- the O(n^3) refit is capped at best-K/2 + recent-K/2 observations.
   local function subset ()
     if n <= cap then return X, Y, N end
     local half = num.floor(cap / 2)
-    local order = {}
-    for i = 0, n - 1 do order[i + 1] = i end
-    table.sort(order, function (a, b) return Y:get(a) > Y:get(b) end)
+    local order = Y:argsort_desc()
     local keep, seen = {}, {}
-    for i = 1, half do local ix = order[i]; keep[#keep + 1] = ix; seen[ix] = true end
+    for i = 0, half - 1 do local ix = order:get(i); keep[#keep + 1] = ix; seen[ix] = true end
     local i = n - 1
     while #keep < cap and i >= 0 do
       if not seen[i] then keep[#keep + 1] = i; seen[i] = true end
@@ -59,7 +56,6 @@ local function make_gp_model (n_dims, cap, restarts)
     lengthscales = function () return ls_ready and ls or nil end,
   }
 end
-
 
 M.plateaus = function (curve, n, klo, khi)
   klo = klo or 2
@@ -237,7 +233,7 @@ local build_sampler = function (spec, global_dev)
     end
     return {
       type = "range",
-      center = spec.def or spec[1],
+      center = spec.def,
       normalize = function (x)
         local idx = val_to_idx[x] or 0
         return (idx + 0.5) / k
@@ -257,10 +253,56 @@ local build_sampler = function (spec, global_dev)
   err.error("Bad hyper-parameter specification", spec)
 end
 
-local build_samplers = function (args, param_names, global_dev)
+local DEF_DRAW_OFFSET = 1013904223
+local function def_uniform (seed, name)
+  local s = (seed + DEF_DRAW_OFFSET) % 2147483647
+  if s == 0 then s = 1 end
+  for i = 1, #name do
+    s = (s + name:byte(i)) % 2147483647
+    s = (s * 48271) % 2147483647
+  end
+  s = (s * 48271) % 2147483647
+  return s / 2147483647
+end
+
+local function seed_center (s, name, seed)
+  if s and s.type == "range" and s.center == nil and s.denormalize then
+    s.center = s.denormalize(def_uniform(seed, name))
+  end
+end
+
+-- Helmert ILR (isometric log-ratio): N log-values on the zero-sum hyperplane <-> N-1 orthonormal
+-- coords. Used for gauge (scales) so the search drops the redundant uniform-scale direction (killed
+-- by L2-norm) and works in a full-rank, geomean-1 space.
+local function ilr_forward (y)
+  local N = #y
+  local z = {}
+  for k = 1, N - 1 do
+    local m = 0
+    for i = 1, k do m = m + y[i] end
+    z[k] = math.sqrt(k / (k + 1)) * (m / k - y[k + 1])
+  end
+  return z
+end
+
+local function ilr_inverse (z, N)
+  local y = {}
+  for i = 1, N do y[i] = 0 end
+  for k = 1, N - 1 do
+    local a = math.sqrt(1 / (k * (k + 1)))
+    local zk = z[k]
+    for i = 1, k do y[i] = y[i] + zk * a end
+    y[k + 1] = y[k + 1] - zk * math.sqrt(k / (k + 1))
+  end
+  return y
+end
+
+local build_samplers = function (args, param_names, global_dev, seed)
   local samplers = {}
   for _, pname in ipairs(param_names) do
-    samplers[pname] = build_sampler(args[pname], global_dev)
+    local s = build_sampler(args[pname], global_dev)
+    if seed ~= nil then seed_center(s, pname, seed) end
+    samplers[pname] = s
   end
   return samplers
 end
@@ -354,7 +396,7 @@ local search = function (args)
     local def_pt = {}
     for i, name in ipairs(search_dims) do
       local s = samplers[name]
-      def_pt[i] = s.center ~= nil and s.normalize(s.center) or 0.5
+      def_pt[i] = s.normalize(s.center)
     end
     table.insert(lhs_pts, 1, def_pt)
     n_initial = n_initial + 1
@@ -534,8 +576,6 @@ local function default_trial_fn (args, dense, metric, k)
       local r = mk_ridge(kd)
       local tr = tick("regress"); local s = r:regress(kd.val_codes); tock(tr)
       local td = tick("decide"); local m = eval.regress_accuracy(s, args.val_targets); tock(td)
-      -- score is 1 - nmae (a clean 0..1 "higher is better" figure like F1, and normalized per fold so
-      -- folds are comparable), monotone with -MAE so the search ranking is unchanged.
       return 1 - m.nmae, { nmae = m.nmae }
     end
   end
@@ -589,8 +629,8 @@ local function decode_mode (args, dense)
 end
 
 local REBUILD_KNOBS = {
-  { key = "scales", defaults = { min = 0.01, max = 100, log = true, def = 1 }, gauge = true },
-  { key = "exponent", defaults = { min = 0, max = 8, def = 1 } },
+  { key = "scales", defaults = { min = 0.01, max = 100, log = true }, gauge = true },
+  { key = "exponent", defaults = { min = 0, max = 8 } },
 }
 
 M.krr = function (args)
@@ -616,14 +656,17 @@ M.krr = function (args)
       local v = {}
       for i = 1, veclen(spec) do
         local e = spec[i]
-        v[i] = (e == nil) and false or ((type(e) == "table") and (e.def or e.max or e.min) or e)
+        if e == nil or e == true then v[i] = false
+        elseif type(e) == "table" then v[i] = e.def or e.max or e.min
+        else v[i] = e end
       end
       return v
     end
     if type(spec.def) == "table" then
       local v = {}
       for i = 1, veclen(spec.def) do
-        v[i] = (spec.def[i] == nil) and false or spec.def[i]
+        local d = spec.def[i]
+        if d == nil or d == true then v[i] = false else v[i] = d end
       end
       return v
     end
@@ -674,26 +717,27 @@ M.krr = function (args)
     s.def = v.def
     return s
   end
-  args.gamma = spec_defaults(args.gamma, { min = 1e-2, max = 16, log = true, def = 1.0 })
+  args.gamma = spec_defaults(args.gamma, { min = 1e-2, max = 16, log = true })
   args.nu = cat_spec(args.nu, { 3, 0, 1, 2 })
   args.order = cat_spec(args.order, { 1, 2, 3, 4 })
   args.depth = cat_spec(args.depth, { 1, 2 })
   args.tangent = cat_spec(args.tangent, { 0, 1 })
-  local kernel_samplers = build_samplers(args, { "nu", "gamma", "order", "depth", "tangent" })
+  local seed = args.seed or 3
+  local kernel_samplers = build_samplers(args, { "nu", "gamma", "order", "depth", "tangent" }, nil, seed)
   local do_search = args.search_trials and args.search_trials > 0
   local lcb_kappa = args.lcb_kappa or 1
   local decode_offset = args.decode_offset
   if type(decode_offset) == "table" then decode_offset = (not do_search) and decode_offset.def or nil end
-  args.lambda = spec_defaults(args.lambda, { min = 1e-7, max = 8, log = true, def = 1e-4 })
+  args.lambda = spec_defaults(args.lambda, { min = 1e-7, max = 8, log = true })
   local label_names = { "lambda" }
   if args.extra then
     for _, e in ipairs(args.extra) do
       label_names[#label_names + 1] = e.name
       args[e.name] = spec_defaults({ min = e.min, max = e.max, log = e.log, def = e.def },
-        { min = 0, max = 1, def = 0.5 })
+        { min = 0, max = 1 })
     end
   end
-  local label_samplers = build_samplers(args, label_names)
+  local label_samplers = build_samplers(args, label_names, nil, seed)
   local k = not dense and (args.k or 32) or nil
   local tiled = not dense
   local tile_labels = tiled and (args.tile_labels or 1024) or nil
@@ -703,14 +747,11 @@ M.krr = function (args)
     blocks = args.blocks,
     n_tokens = args.n_tokens, n_samples = args.n_samples,
     d_input = args.d_input,
-    n_landmarks = args.n_landmarks, trace_tol = args.trace_tol,
-    chol_block = args.chol_block,
     n_labels = args.n_labels,
     targets = args.targets, n_targets = args.n_targets,
   }
   local w_auto
   local cv_folds = (args.folds or 1) > 1
-  local cv_tmpfiles = {}
   local nl_cap = args.n_labels or args.n_targets or 1
   local xtx_shared = args.xtx_buf or fvec.create(args.n_landmarks * args.n_landmarks)
   local xty_shared = args.xty_buf or fvec.create(args.n_landmarks * nl_cap)
@@ -718,35 +759,28 @@ M.krr = function (args)
   spectral_args.xty_buf = xty_shared
   local w_shared = args.spectral_w_buf or fvec.create(args.n_landmarks * nl_cap)
   spectral_args.w_buf = w_shared
-  local chol_shared
-  if args.chol_buf then
-    chol_shared = args.chol_buf
-  elseif args.cv_buf_path then
-    local cp = args.cv_buf_path .. "chol"
-    chol_shared = fvec.mmap_create(cp, args.n_landmarks * args.n_samples)
-    cv_tmpfiles[#cv_tmpfiles + 1] = cp
-  else
-    chol_shared = fvec.create(args.n_landmarks * args.n_samples)
-  end
-  spectral_args.chol_buf = chol_shared
   if tiled then
     spectral_args.tile_labels = tile_labels
-    w_auto = args.w_buf or fvec.create(args.n_landmarks * (args.n_labels or 1))
+    w_auto = args.w_buf
   end
-  args.ridge_w_buf = args.ridge_w_buf or fvec.create(args.n_landmarks * (args.n_labels or 1))
-  local proj_shared = fvec.create(args.n_landmarks * args.n_landmarks)
-  local sims_shared = fvec.create(4096 * args.n_landmarks)
-  local row_shared = fvec.create(128 * args.n_landmarks)
-  spectral_args.proj_buf = proj_shared
-  spectral_args.sims_buf = sims_shared
-  spectral_args.row_buf = row_shared
+  local proj_shared, sims_shared, row_shared
+  if do_search then
+    args.ridge_w_buf = args.ridge_w_buf or fvec.create(args.n_landmarks * (args.n_labels or 1))
+    proj_shared = fvec.create(args.n_landmarks * args.n_landmarks)
+    sims_shared = fvec.create(4096 * args.n_landmarks)
+    row_shared = fvec.create(128 * args.n_landmarks)
+    spectral_args.proj_buf = proj_shared
+    spectral_args.sims_buf = sims_shared
+    spectral_args.row_buf = row_shared
+  end
   local val_out_shared, val_out_reuse = {}, true
   local fixed_lms = do_search
   local search_m = args.search_landmarks or args.n_landmarks
   local lm_slots = {}
   local xtx_slots, xty_slots = {}, {}
   local function release_enc_scratch ()
-    spectral_args.proj_buf = nil; spectral_args.sims_buf = nil; spectral_args.row_buf = nil
+    spectral_args.proj_buf = args.enc_chol_buf
+    spectral_args.sims_buf = nil; spectral_args.row_buf = nil
     proj_shared = nil; sims_shared = nil; row_shared = nil -- luacheck: ignore
     val_out_shared = nil; val_out_reuse = false
     fixed_lms = false; lm_slots = {}
@@ -756,10 +790,10 @@ M.krr = function (args)
     spectral_args.xty_buf = xty_shared
     collectgarbage("collect")
   end
-  local seed = args.seed or 2
-  local build_counter = 0
-  -- cur_val_blocks / cur_val_x = the current fold's held-out (CV); nil at finalize/frozen. blocks =
-  -- tokenized (fold_blocks) or csr-dense; x = a dense matrix (fold_dense, non-csr embeddings).
+  local function release_cv ()
+    if not args.xtx_buf then xtx_shared:destroy() end
+    if not args.xty_buf then xty_shared:destroy() end
+  end
   local cur_val_blocks, cur_val_x = nil, nil
   local function val_encode (sp_enc, slot)
     if not (cur_val_blocks or cur_val_x) then return nil end
@@ -788,6 +822,7 @@ M.krr = function (args)
     spectral_args.depth = spec.depth
     spectral_args.tangent = spec.tangent
     spectral_args.solve_lambda = solve and solve.lambda or nil
+    spectral_args.strata = (fold and args.fold_strata) and args.fold_strata[fold] or args.pool_strata
     if fixed_lms then
       local slot = fold or 0
       if lm_slots[slot] == nil then
@@ -801,18 +836,13 @@ M.krr = function (args)
       spectral_args.xtx_buf = xtx_slots[slot]
       spectral_args.xty_buf = xty_slots[slot]
     else
-      spectral_args.landmarks = nil
+      -- final: random (uniform) landmarks at full n_landmarks (matches the random-trial regime)
+      spectral_args.landmarks = spectral.uniform_landmarks(spectral_args, args.n_landmarks, seed + 1000 * ((fold or 0) + 1))
     end
-    build_counter = build_counter + 1
-    rand.fast_seed(fixed_lms and (seed + build_counter) or (seed + 1000 * ((fold or 0) + 1)))
     local tse = tick("spectral.encode"); local _, sp_enc, gram = spectral.encode(spectral_args); tock(tse)
     if tt and spectral_args.enc_phases then
       for name, dt in pairs(spectral_args.enc_phases) do prof_add_raw("~spectral/" .. name, dt) end
       spectral_args.enc_phases = nil
-    end
-    if tt and (spectral_args.lm_backstop or 0) > 0 then
-      for _ = 1, spectral_args.lm_backstop do prof_add_raw("~lm_backstop", 0) end
-      spectral_args.lm_backstop = nil
     end
     local tve = tick("val_encode"); local val_codes = val_encode(sp_enc, fold or 0); tock(tve)
     return { sp_enc = sp_enc, gram = gram, val_codes = val_codes }
@@ -868,33 +898,24 @@ M.krr = function (args)
       end
       return decider, m, scs, fms
     end
-    local csr = require("santoku.csr")
-    local poff, pnbr, pval = ivec.create(), ivec.create(), fvec.create()
-    local yoff, ynbr = ivec.create(), ivec.create()
-    poff:push(0); yoff:push(0)
-    local pbase, ybase = 0, 0
     local fold_P = {}
+    local P, Y
     for f = 1, nf do
       local kd = fold_kd(f)
       local r = ridge.create({ gram = kd.gram })
       local tr = tick("regress")
-      local P = r:label(kd.val_codes, k)
+      local Pf = r:label(kd.val_codes, k)
       tock(tr)
-      fold_P[f] = P
-      local o, l, s = P:offsets(), P:neighbors(), P:values()
-      pnbr:copy(l); pval:copy(s)
-      for i = 1, o:size() - 1 do poff:push(pbase + o:get(i)) end
-      pbase = pbase + o:get(o:size() - 1)
-      local fy = args.fold_val_y[f]
-      local yo, yn = fy:offsets(), fy:neighbors()
-      ynbr:copy(yn)
-      for i = 1, yo:size() - 1 do yoff:push(ybase + yo:get(i)) end
-      ybase = ybase + yo:get(yo:size() - 1)
+      fold_P[f] = Pf
+      local Yf = args.fold_val_y[f]
+      if f == 1 then
+        P, Y = Pf:clone(), Yf:clone()
+      else
+        P:append(Pf); Y:append(Yf)
+      end
     end
-    local P = csr.create({ offsets = poff, neighbors = pnbr, values = pval, n_cols = args.n_labels })
-    local Y = csr.create({ offsets = yoff, neighbors = ynbr, n_cols = args.n_labels })
-    local decider, m = M.decide({ n_labels = args.n_labels, val_pred = P, val_n_samples = yoff:size() - 1,
-      val_expected = Y })
+    local decider, m = M.decide({ n_labels = args.n_labels, val_pred = P,
+      val_n_samples = select(1, Y:shape()), val_expected = Y })
     local scs, fms
     if kds then
       scs, fms = {}, {}
@@ -927,13 +948,11 @@ M.krr = function (args)
     local codes_or_deploy, bake_blocks
     if args.bake_external then
       bake_blocks = function (ext) return args.bake_external(ext, params) end
-      codes_or_deploy = function (ext)
-        return kd.sp_enc:encode({ blocks = bake_blocks(ext) })
+      codes_or_deploy = function (ext, out)
+        return kd.sp_enc:encode({ blocks = bake_blocks(ext) }, out)
       end
     else
-      -- dense-input path (fold_dense): the encoder bakes colscale (dense_cs2), so deploy just encodes
-      -- the test matrix. deploy(x) -> codes.
-      codes_or_deploy = function (x) return kd.sp_enc:encode(x) end
+      codes_or_deploy = function (x, out) return kd.sp_enc:encode(x, out) end
     end
     return kd.sp_enc, r, codes_or_deploy, params, decider, decider_metrics, bake_blocks
   end
@@ -967,7 +986,7 @@ M.krr = function (args)
     if rparams then for kk, vv in pairs(rparams) do params[kk] = vv end end
     for _, n in ipairs(label_names) do params[n] = lp[n] end
     local sp_enc, r, vcodes, params_out, decider, dmetrics, bake = finish(kd, params, "cholesky")
-    for _, f in ipairs(cv_tmpfiles) do os.remove(f) end
+    release_cv()
     prof_emit()
     return sp_enc, r, vcodes, params_out, decider, dmetrics, bake
   end
@@ -998,9 +1017,6 @@ M.krr = function (args)
     local ts = tick("~fold_solve")
     local mean, agg, scs = 0.0, {}, {}
     if decode_offset == nil and nfolds > 1 and (mode == "span" or mode == "multilabel") then
-      -- pooled-OOF: score is the mean of per-fold scores at the single shared (deploy) offset; the
-      -- displayed metrics are the fold-AVERAGE of the per-fold tables (same aggregation as every other
-      -- head), not the pooled numbers -- so "the metrics" mean one thing everywhere.
       for f = 1, nfolds do kds[f].gram:solve(lam) end
       local decider, m, foldsc, foldms = oof_decider(nil, kds)
       for f = 1, nfolds do scs[f] = foldsc[f]; mean = mean + scs[f] end
@@ -1060,40 +1076,44 @@ M.krr = function (args)
         spec = vec
         args[kdef.key] = vec
       end
-      if type(spec) == "table" and spec[1] ~= nil then
+      if type(spec) == "table" and spec[1] ~= nil and kdef.gauge then
+        knob.kind = "gauge"
+        knob.n = #spec
+        knob.active = {}
+        local defs, all_def = {}, true
+        for i = 1, #spec do
+          if spec[i] ~= false then
+            knob.active[#knob.active + 1] = i
+            local sd = spec_defaults(spec[i], kdef.defaults)
+            local d = (type(sd) == "table" and sd.def) or (type(sd) == "number" and sd) or nil
+            defs[#knob.active] = d
+            if type(d) ~= "number" then all_def = false end
+          end
+        end
+        local M = #knob.active
+        knob.box_min = kdef.defaults.min
+        knob.box_max = kdef.defaults.max
+        -- box that matches the original independent per-scale log-uniform spread (Var(log s)=L^2/3),
+        -- so the gauge-free prior isn't wider than what the per-block box implied.
+        local c = math.log(kdef.defaults.max or 100) / math.sqrt(1 - 1 / math.max(M, 2))
+        local centers
+        if all_def and M > 1 then
+          local y = {}
+          for j = 1, M do y[j] = math.log(defs[j]) end
+          centers = ilr_forward(y)
+        end
+        for k = 1, M - 1 do
+          local nm = kdef.key .. "_z" .. k
+          args[nm] = { min = -c, max = c, def = centers and centers[k] }
+          knob.names[#knob.names + 1] = nm
+          knob.samplers[nm] = build_samplers(args, { nm }, nil, seed)[nm]
+        end
+      elseif type(spec) == "table" and spec[1] ~= nil then
         knob.kind = "vector"
         knob.layout = {}
         local sds = {}
         for i = 1, #spec do
-          if spec[i] ~= false then
-            sds[i] = spec_defaults(spec[i], kdef.defaults)
-            if type(sds[i]) == "table" then
-              knob.bmin = knob.bmin or sds[i].min
-              knob.bmax = knob.bmax or sds[i].max
-            end
-          end
-        end
-        if kdef.gauge and knob.bmin and knob.bmax and knob.bmin > 0 then
-          local lo, hi, mixed
-          for i = 1, #spec do
-            local sd = sds[i]
-            if type(sd) == "number" then mixed = true
-            elseif sd and type(sd.def) == "number" and sd.def > 0 then
-              lo = (lo == nil or sd.def < lo) and sd.def or lo
-              hi = (hi == nil or sd.def > hi) and sd.def or hi
-            end
-          end
-          if hi and not mixed and (hi > knob.bmax or lo < knob.bmin) then
-            local c = math.sqrt((hi * lo) / (knob.bmax * knob.bmin))
-            if hi / c <= knob.bmax and lo / c >= knob.bmin then
-              for i = 1, #spec do
-                local sd = sds[i]
-                if sd and type(sd) == "table" and type(sd.def) == "number" and sd.def > 0 then
-                  sd.def = sd.def / c
-                end
-              end
-            end
-          end
+          if spec[i] ~= false then sds[i] = spec_defaults(spec[i], kdef.defaults) end
         end
         for i = 1, #spec do
           if spec[i] == false then
@@ -1103,14 +1123,14 @@ M.krr = function (args)
             args[nm] = sds[i]
             knob.layout[i] = nm
             knob.names[#knob.names + 1] = nm
-            knob.samplers[nm] = build_samplers(args, { nm })[nm]
+            knob.samplers[nm] = build_samplers(args, { nm }, nil, seed)[nm]
           end
         end
       else
         knob.kind = "scalar"
         args[kdef.key] = spec_defaults(spec, kdef.defaults)
         knob.names[1] = kdef.key
-        knob.samplers[kdef.key] = build_samplers(args, { kdef.key })[kdef.key]
+        knob.samplers[kdef.key] = build_samplers(args, { kdef.key }, nil, seed)[kdef.key]
       end
       rebuild_knobs[#rebuild_knobs + 1] = knob
     end
@@ -1118,6 +1138,24 @@ M.krr = function (args)
   local has_knobs = #rebuild_knobs > 0
   local function knob_value (knob, gp)
     if knob.kind == "scalar" then return gp[knob.key] end
+    if knob.kind == "gauge" then
+      local v = {}
+      for i = 1, knob.n do v[i] = false end
+      local M = #knob.active
+      if M == 1 then
+        v[knob.active[1]] = 1.0
+      elseif M > 1 then
+        local z = {}
+        for k = 1, M - 1 do z[k] = gp[knob.names[k]] end
+        local y = ilr_inverse(z, M)
+        for j = 1, M do
+          local s = math.exp(y[j])
+          if s < knob.box_min then s = knob.box_min elseif s > knob.box_max then s = knob.box_max end
+          v[knob.active[j]] = s
+        end
+      end
+      return v
+    end
     local v = {}
     for i = 1, #knob.layout do
       local nm = knob.layout[i]
@@ -1210,10 +1248,6 @@ M.krr = function (args)
     else
       worst_score = worst_score and num.min(worst_score, sc) or sc
     end
-    -- per-config lower-confidence-bound: penalize the fold mean by the standard error of that mean
-    -- (fold_var is SE^2 of the mean). Stateless -- a config's LCB depends ONLY on its own folds, so
-    -- the running incumbent is durable: a new best supersedes forever, and it is the deployed pin.
-    -- No accumulated pareto -- best_params IS the last ++, set the instant it happens.
     local lcb = sc - lcb_kappa * math.sqrt((sm and sm.fold_var) or 0)
     local dt = utc.time(true) - t0
     bi = bi + 1
@@ -1239,7 +1273,7 @@ M.krr = function (args)
     args.kfam = kfam_vals
     fam_runs[#fam_runs + 1] = {
       names = { "kfam", "nu", "gamma" },
-      samplers = { kfam = build_samplers(args, { "kfam" }).kfam,
+      samplers = { kfam = build_samplers(args, { "kfam" }, nil, seed).kfam,
         nu = kernel_samplers.nu, gamma = kernel_samplers.gamma },
       trials = matern_trials, tag = "kernel",
       base_of = function (gp)
@@ -1298,8 +1332,6 @@ M.krr = function (args)
   end
   tock(t_ks)
   if not best_params then
-    -- no trial produced a config (all-fixed / no search dims): evaluate the center once so best_params
-    -- (the running incumbent) is set.
     local _, base = center_spec()
     local gp = {}
     for _, n in ipairs(label_names) do local s = label_samplers[n]; gp[n] = s and s.center end
@@ -1315,7 +1347,7 @@ M.krr = function (args)
   local best_kd = build_kd(best_params, best_params)
   local sp_enc, r, vcodes, params_out, decider, dmetrics, bake = finish(best_kd, best_params, "cholesky")
   tock(t_fin)
-  for _, f in ipairs(cv_tmpfiles) do os.remove(f) end
+  release_cv()
   prof_emit()
   return sp_enc, r, vcodes, params_out, decider, dmetrics, bake
 end

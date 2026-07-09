@@ -226,11 +226,9 @@ end
 -- partition, which leaves fold means at the mercy of any ordering in the data and inflates cross-fold
 -- variance (the noise the search overfits). Continuous-target analogue of class stratification.
 local function fold_assign_reg (targets, n, K)
-  local order = {}
-  for i = 0, n - 1 do order[i + 1] = i end
-  table.sort(order, function (a, b) return targets:get(a) < targets:get(b) end)
+  local order = targets:argsort()
   local foldof = ivec.create(n)
-  for r = 1, n do foldof:set(order[r], (r - 1) % K) end
+  for r = 0, n - 1 do foldof:set(order:get(r), r % K) end
   return foldof
 end
 
@@ -280,6 +278,28 @@ local function doc_strata (gold, ndocs)
     b[#b + 1] = d
   end
   return buckets, order
+end
+
+-- Per-row landmark stratum id, mirroring the fold-stratification target logic so uniform landmark
+-- selection can guarantee representation of every target class/bin (not just proportional-in-expectation):
+--   span (cand) -> candidate type; regression -> quantile bin; else -> derive_class (single/multilabel).
+-- Returns nil when there is no target signal (caller selects landmarks unstratified).
+local REG_STRATA_BINS = 16
+local function reg_strata (targets, _n, B)
+  return targets:quantile_bins(B)
+end
+
+local function pool_strata (a, n)
+  if a.cand then
+    local ty = a.cand:col("ty")
+    local s = ivec.create(n)
+    for i = 0, n - 1 do s:set(i, ty:get(i)) end
+    return s
+  elseif a.pool_targets then
+    return reg_strata(a.pool_targets, n, REG_STRATA_BINS)
+  else
+    return derive_class(a.pool_labels, n)
+  end
 end
 
 local function weight_fit (blocks, y, metrics, is_targets)
@@ -334,6 +354,42 @@ function M.build_blocks (blocks, scale, exponent, n, w, pcs)
   return bl
 end
 
+-- Encode + predict in row tiles so deploy never materializes an n x emb_d code matrix.
+-- o: { deploy, ridge, n, blocks = {csr,...} (or x = csr), k = top-k labels (optional),
+--      scores = true (optional; requires n_labels), n_labels, tile = rows per tile (default 4096) }
+-- Returns pred csr (when k), scores fvec (n x n_labels, when scores).
+function M.predict_tiled (o)
+  local mtx = require("santoku.mtx")
+  local n = o.n
+  local tile = o.tile or 4096
+  local out = mtx.create({ n_rows = 1, n_cols = 1, type = "f32" })
+  local pred, scores, sbuf
+  if o.scores then scores = fvec.create(n * o.n_labels) end
+  for base = 0, n - 1, tile do
+    local bs = math.min(tile, n - base)
+    local idx = ivec.create(bs)
+    for i = 0, bs - 1 do idx:set(i, base + i) end
+    local codes
+    if o.blocks then
+      local ext = {}
+      for bi = 1, #o.blocks do ext[bi] = o.blocks[bi]:rows(idx) end
+      codes = o.deploy(ext, out)
+    else
+      codes = o.deploy(o.x:rows(idx), out)
+    end
+    if o.k then
+      local p = o.ridge:label(codes, o.k)
+      if pred then pred:append(p) else pred = p end
+    end
+    if scores then
+      sbuf = o.ridge:regress(codes, sbuf)
+      scores:copy(sbuf, 0, bs * o.n_labels, base * o.n_labels)
+    end
+    collectgarbage("collect")
+  end
+  return pred, scores
+end
+
 function M.columns_as_blocks (m)
   local _, n_cols = m:shape()
   local blks = {}
@@ -346,9 +402,12 @@ function M.columns_as_blocks (m)
 end
 
 local function slice_targets (t, idx)
-  local o = dvec.create(idx:size())
-  for j = 0, idx:size() - 1 do o:set(j, t:get(idx:get(j))) end
-  return o
+  return (dvec.create(idx:size()):copy(t, idx))
+end
+
+local function slice_ivec (s, idx)
+  if not s then return nil end
+  return (ivec.create(idx:size()):copy(s, idx))
 end
 
 local function split_fold (foldof, f, n)
@@ -369,7 +428,8 @@ function M.fold_dense (a)
   local rel = rel_metric == "auc" and (a.pool_labels ~= nil or a.pool_targets ~= nil)
   local is_csr = a.pool_codes.neighbors ~= nil
   local F = {}
-  local fy, fvy, fvn, ft, fvt = {}, {}, {}, {}, {}
+  local fy, fvy, fvn, ft, fvt, fs = {}, {}, {}, {}, {}, {}
+  a.pool_strata = pool_strata(a, n)
   if use_folds then
     local foldof = a.fold_assign
       or ((reg and a.pool_targets) and fold_assign_reg(a.pool_targets, n, K))
@@ -380,6 +440,7 @@ function M.fold_dense (a)
         n = tr_idx:size(), vn = va_idx:size() }
       if reg then e.t = slice_targets(a.pool_targets, tr_idx); e.vt = slice_targets(a.pool_targets, va_idx)
       else e.y = a.pool_labels:rows(tr_idx); e.vy = a.pool_labels:rows(va_idx) end
+      fs[f + 1] = slice_ivec(a.pool_strata, tr_idx)
       F[f + 1] = e
     end
     for f = 1, K do
@@ -437,19 +498,8 @@ function M.fold_dense (a)
   a.targets = a.pool_targets
   a.fold_y = reg and nil or fy; a.fold_val_y = reg and nil or fvy; a.fold_val_n = fvn
   a.fold_targets = reg and ft or nil; a.fold_val_targets = reg and fvt or nil
+  a.fold_strata = fs
   return a
-end
-
-local function slice_spans_by_docs (S, docs)
-  local spans = require("santoku.spans")
-  local o, s, e, ty = S:offsets(), S:col("s"), S:col("e"), S:col("ty")
-  local noff, ns, ne, nty = ivec.create(), ivec.create(), ivec.create(), ivec.create()
-  noff:push(0)
-  for _, d in ipairs(docs) do
-    for i = o:get(d), o:get(d + 1) - 1 do ns:push(s:get(i)); ne:push(e:get(i)); nty:push(ty:get(i)) end
-    noff:push(ns:size())
-  end
-  return spans.create({ offsets = noff, s = ns, e = ne, ty = nty })
 end
 
 function M.fold_blocks (a)
@@ -467,6 +517,8 @@ function M.fold_blocks (a)
     or (off == nil and (a.val_cand or a.cand
       or (not reg and label_is_multilabel(a.pool_labels, n, a.n_labels)))))
   local F = {}
+  local fs = {}
+  a.pool_strata = pool_strata(a, n)
   if use_folds then
     local foldof
     if a.cand then
@@ -474,21 +526,19 @@ function M.fold_blocks (a)
       local ndocs = co:size() - 1
       -- doc->fold via gold-count-stratified round-robin (balances dense/sparse docs across folds)
       local buckets, order = doc_strata(a.gold, ndocs)
-      local docfold = {}
+      local docfold = ivec.create(ndocs)
       for _, gc in ipairs(order) do
         local docs = buckets[gc]
-        for j = 1, #docs do docfold[docs[j]] = (j - 1) % K end
+        for j = 1, #docs do docfold:set(docs[j], (j - 1) % K) end
       end
       foldof = ivec.create(n)
-      for d = 0, ndocs - 1 do
-        for c = co:get(d), co:get(d + 1) - 1 do foldof:set(c, docfold[d]) end
-      end
+      foldof:fill_segments(co, docfold)
       local fvc, fvg = {}, {}
       for f = 0, K - 1 do
-        local docs = {}
-        for d = 0, ndocs - 1 do if docfold[d] == f then docs[#docs + 1] = d end end
-        fvc[f + 1] = slice_spans_by_docs(a.cand, docs)
-        fvg[f + 1] = slice_spans_by_docs(a.gold, docs)
+        local docs = ivec.create()
+        for d = 0, ndocs - 1 do if docfold:get(d) == f then docs:push(d) end end
+        fvc[f + 1] = a.cand:docs(docs)
+        fvg[f + 1] = a.gold:docs(docs)
       end
       a.fold_val_cand, a.fold_val_gold = fvc, fvg
     else
@@ -498,8 +548,10 @@ function M.fold_blocks (a)
     end
     for f = 0, K - 1 do
       local tr_idx, va_idx = split_fold(foldof, f, n)
-      local trb, vab = {}, {}
-      for i = 1, #pool do trb[i] = pool[i]:rows(tr_idx); vab[i] = pool[i]:rows(va_idx) end
+      -- slices are transient here (w/pcs fit only); rebuild() re-slices lazily per call so at most
+      -- one fold's copies are live at a time instead of all K held for the whole search
+      local trb = {}
+      for i = 1, #pool do trb[i] = pool[i]:rows(tr_idx) end
       local ty = a.pool_labels and a.pool_labels:rows(tr_idx)
       local vy = a.pool_labels and a.pool_labels:rows(va_idx)
       local ft, fvt
@@ -507,30 +559,46 @@ function M.fold_blocks (a)
       local w_f = weight_fit(trb, ty or (wtargets and ft), metrics, wtargets)
       local pcs_f = {}
       for i = 1, #trb do pcs_f[i] = trb[i]:sumsq_cols() end
-      local e = { trb = trb, vab = vab, w = w_f, pcs = pcs_f,
+      trb = nil -- luacheck: ignore
+      local e = { tr_idx = tr_idx, va_idx = va_idx, w = w_f, pcs = pcs_f,
         n = tr_idx:size(), vn = va_idx:size(), y = ty, vy = vy, t = ft, vt = fvt }
+      fs[f + 1] = slice_ivec(a.pool_strata, tr_idx)
       F[f + 1] = e
+      collectgarbage("collect")
     end
   end
   local p_w = weight_fit(pool, a.pool_labels or (wtargets and a.pool_targets), metrics, wtargets)
   local p_pcs = {}
   for i = 1, #pool do p_pcs[i] = pool[i]:sumsq_cols() end
-  if a.exponent and a.exponent[1] ~= nil then
+  local exp_tbl
+  if a.exponent then
+    if a.exponent[1] ~= nil then exp_tbl = a.exponent
+    elseif type(a.exponent.def) == "table" then exp_tbl = a.exponent.def end
+  end
+  if exp_tbl then
     for i = 1, #pool do
-      if not p_w[i] or select(2, pool[i]:shape()) <= 1 then a.exponent[i] = false end
+      if not p_w[i] or select(2, pool[i]:shape()) <= 1 then exp_tbl[i] = false end
     end
   end
   a.bake_external = function (ext, params)
     return (M.build_blocks(ext, params.scales, params.exponent, n, p_w, p_pcs))
   end
   a.rebuild = function (params, f)
-    -- f = a CV fold (train on F[f].trb, encode held-out F[f].vab); f = nil = finalize on the full pool
-    -- (no held-out -- deploy encodes the caller's test set outside krr).
-    local d = f and F[f] or { trb = pool, w = p_w, pcs = p_pcs, n = n }
-    local out = { blocks = M.build_blocks(d.trb, params.scales, params.exponent, d.n, d.w, d.pcs),
+    -- f = a CV fold (train on the fold's row slices, encode the held-out slice); f = nil = finalize on
+    -- the full pool (no held-out -- deploy encodes the caller's test set outside krr). Fold slices are
+    -- materialized here per call and dropped with the previous trial's garbage.
+    local d = f and F[f] or { w = p_w, pcs = p_pcs, n = n }
+    local trb, vab
+    if f then
+      trb, vab = {}, {}
+      for i = 1, #pool do trb[i] = pool[i]:rows(d.tr_idx); vab[i] = pool[i]:rows(d.va_idx) end
+    else
+      trb = pool
+    end
+    local out = { blocks = M.build_blocks(trb, params.scales, params.exponent, d.n, d.w, d.pcs),
       n_samples = d.n }
-    if d.vab then
-      out.val_blocks = M.build_blocks(d.vab, params.scales, params.exponent, d.n, d.w, d.pcs)
+    if vab then
+      out.val_blocks = M.build_blocks(vab, params.scales, params.exponent, d.n, d.w, d.pcs)
       out.val_n_samples = d.vn
     end
     return out
@@ -545,6 +613,7 @@ function M.fold_blocks (a)
   a.targets = a.pool_targets
   a.fold_y = reg and nil or fy; a.fold_val_y = reg and nil or fvy; a.fold_val_n = fvn
   a.fold_targets = reg and ft or nil; a.fold_val_targets = reg and fvt or nil
+  a.fold_strata = fs
   return a
 end
 

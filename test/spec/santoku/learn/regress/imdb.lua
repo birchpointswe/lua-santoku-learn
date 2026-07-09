@@ -11,19 +11,19 @@ local word_characters = util.WORD_CHARACTERS
 
 local cfg = {
   verbose = false,
-  search_landmarks = 2048,
+  search_landmarks = 1024 * 2,
   data = { ttr = 0.5 },
   blocks = {
     { ngram_min = 1, ngram_max = 5, word_characters = word_characters },
     { ngram_min = 1, ngram_max = 3, word_characters = word_characters, words = true },
   },
   relevance = { "bns", "bns" },
-  scales = { def = {2.20435,0.453649} },
-  exponent = { def = {2.50189,1.73248} },
-  decode_offset = { def = 0.467859 },
+  scales = { def = { 1.79449, 0.557262 } },
+  exponent = { def = { 1.10434, 2.33549 } },
+  decode_offset = { def = 0.463388 },
   n_landmarks = 1024 * 8,
   kernel = { "cosine" },
-  lambda = { def = 0.0104708 },
+  lambda = { def = 0.038778 },
   classes = 1,
   k = 1,
   search_trials = 0,
@@ -62,8 +62,8 @@ test("imdb CV", function ()
     each = util.make_ridge_log(stopwatch),
   })
 
-  local test_codes = deploy(test_blocks)
-  local P = ridge_obj:label(test_codes, 1)
+  local P = util.predict_tiled({ deploy = deploy, ridge = ridge_obj,
+    blocks = test_blocks, n = test_set.n, k = 1 })
   local _, m = decider:score({ pred = P, expected = test_set.labels, n_samples = test_set.n })
   local _, total = stopwatch()
   str.printf("[Result] scales=%s lambda=%.4g offset=%.6g | test %s\nTotal: %.1fs\n",

@@ -57,7 +57,7 @@ when you don't need searchable assembly. See the `regress/` suite: `conll-gaz.lu
 | Module | Role | Anchor test |
 |--------|------|-------------|
 | `tokenizer` | text → n-gram features (`csr`); `focus`/`types` are `spans` | `tokenizer.lua` |
-| `spectral`  | kernel Nyström / RP-Cholesky embedding (`csr`\|`mtx` → `mtx` codes) | regress suite |
+| `spectral`  | kernel Nyström embedding (uniform landmarks; `csr`\|`mtx` → `mtx` codes) | regress suite |
 | `ridge`     | ridge solve; `:label`→P csr, `:regress`→fvec, `:gram` | regress suite |
 | `decide`    | the sole decision layer: `calibrate`/`predict`/`score` (single \| multilabel \| span) | `regress/mnist.lua`, `regress/conll-full.lua` |
 | `optimize`  | `krr`: GP-BO search + encode/solve/decide over a **baked** representation (`x`/`blocks`/`rebuild`); folds via `fold_y`/`rebuild(p,fold)` | regress suite |

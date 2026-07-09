@@ -237,18 +237,31 @@ static inline int tk_ridge_create_lua (lua_State *L) {
       w_buf->n = dnl;
       memcpy(w_buf->a, gram->W_baked_f, dnl * sizeof(float));
       tk_ridge_push(L, w_buf, w_buf_idx, intercept_dv, intercept_idx, d, nl);
-    } else {
-      tk_ridge_t *r = tk_ridge_push(L, NULL, 0, intercept_dv, intercept_idx, d, nl);
-      r->W_view.n = dnl;
-      r->W_view.m = dnl;
-      r->W_view.a = gram->W_baked_f;
-      r->W_view.lua_managed = 0;
-      r->W = &r->W_view;
-      lua_getfenv(L, -1);
-      lua_pushvalue(L, gram_idx);
-      lua_setfield(L, -2, "gram");
-      lua_pop(L, 1);
+      return 1;
     }
+    // adopt the gram's external w_buf when W was baked into it (keeps mmap-ness for persist)
+    if (gram->W_baked_external) {
+      lua_getfenv(L, gram_idx);
+      lua_getfield(L, -1, "w_buf");
+      tk_fvec_t *gwb = tk_fvec_peekopt(L, -1);
+      if (gwb && gwb->a == gram->W_baked_f) {
+        int gwb_idx = lua_gettop(L);
+        gwb->n = dnl;
+        tk_ridge_push(L, gwb, gwb_idx, intercept_dv, intercept_idx, d, nl);
+        return 1;
+      }
+      lua_pop(L, 2);
+    }
+    tk_ridge_t *r = tk_ridge_push(L, NULL, 0, intercept_dv, intercept_idx, d, nl);
+    r->W_view.n = dnl;
+    r->W_view.m = dnl;
+    r->W_view.a = gram->W_baked_f;
+    r->W_view.lua_managed = 0;
+    r->W = &r->W_view;
+    lua_getfenv(L, -1);
+    lua_pushvalue(L, gram_idx);
+    lua_setfield(L, -2, "gram");
+    lua_pop(L, 1);
     return 1;
   }
   lua_pop(L, 1);

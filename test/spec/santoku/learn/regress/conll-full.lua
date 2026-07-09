@@ -16,7 +16,7 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   verbose = false,
-  search_landmarks = 2048,
+  search_landmarks = 1024 * 2,
   data = {
     dir = "test/res/conll2003",
     max = nil
@@ -25,29 +25,29 @@ local cfg = {
   emb = { n_landmarks = 1024 * 8, },
   tag = {
     kernel = { "matern" },
-    nu = { def = 2 },
-    gamma = { def = 0.0324322 },
-    lambda = { def = 0.000676847 },
+    nu = { def = 3 },
+    gamma = { def = 0.204383 },
+    lambda = { def = 3.42591e-07 },
     blocks = {
       { ngram_min = 1, ngram_max = 5, normalize = false },
       { ngram_min = 1, ngram_max = 3, words = true, word_characters = util.WORD_CHARACTERS, normalize = false },
     },
     relevance = { "bns", "bns" },
-    scales = { def = { 0.492386, 2.03093 } },
-    exponent = { def = { 3.48892, 4.10881 } },
-    decode_offset = { def = 0.489454 },
+    scales = { def = { 0.88421, 1.13095 } },
+    exponent = { def = { 2.70215, 2.51321 } },
+    decode_offset = { def = 0.449798 },
     search_trials = 0,
     folds = 5,
   },
   type = {
     kernel = { "arccos" },
-    order = { def = 2 },
+    order = { def = 3 },
     depth = { def = 1 },
     tangent = { def = 0 },
-    lambda = { def = 5.36224e-06 },
-    scales = { def = { 13.4525, 7.14652, 0.0434604, 0.0281398, 0.0653057, 2.03616, 4.33692, 4.58321, 3.21792 } },
-    exponent = { def = { 5.78839, 4.49708, 0.071323, 3.7165, 7.86543, 2.85348, 3.14215, 0.39562, 0.000953421 } },
-    decode_offset = { def = -0.00797415 },
+    lambda = { def = 1.01664e-06 },
+    scales = { def = { 0.0359756, 15.4337, 0.758772, 0.0238879, 0.38103, 0.246448, 13.6188, 10.1314, 7.66903 } },
+    exponent = { def = { 0.0381765, 6.21477, 7.8169, 0.413125, 3.19355, 5.73126, 3.97563, 0.0670846, 0.383293 } },
+    decode_offset = { def = 0.0554 },
     search_trials = 0,
     folds = 5,
   },
@@ -95,32 +95,12 @@ local function gold_spans (split)
   return spans.create({ offsets = eoff, s = es, e = ee, ty = ety })
 end
 
-local function is_inner_labels (S, G, n)
-  local soff, sstart, send = S:offsets(), S:col("s"), S:col("e")
-  local eoff, es, ee = G:offsets(), G:col("s"), G:col("e")
-  local off, nbr = ivec.create(), ivec.create()
-  off:push(0)
-  for d = 1, n do
-    for si = soff:get(d - 1), soff:get(d) - 1 do
-      local ss, se = sstart:get(si), send:get(si)
-      local inner = false
-      for gi = eoff:get(d - 1), eoff:get(d) - 1 do
-        if ss >= es:get(gi) and se <= ee:get(gi) then inner = true; break end
-      end
-      if inner then nbr:push(0) end
-      off:push(nbr:size())
-    end
-  end
-  return off, nbr
-end
-
 local function build_segments (split, seg)
   local soff, sstart, send = seg:segment({ texts = split.texts, n = split.n, drop_sep = true })
   local S = spans.create({ offsets = soff, s = sstart, e = send })
   local G = gold_spans(split)
-  local ioff, inbr = is_inner_labels(S, G, split.n)
   return { n = split.n, seg = S, n_seg = sstart:size(),
-    inner_off = ioff, inner_nbr = inbr, gold = G }
+    inner_mask = S:contained_labels(G), gold = G }
 end
 
 local function inner_to_ctx (pred)
@@ -238,7 +218,7 @@ test("conll-full", function ()
   local tr_inner, te_inner
   do
     local toks, Xtr = util.tokenize_focus_blocks(cfg.tag.blocks, train.texts, TR.seg)
-    local Ytr = csr.create({ offsets = TR.inner_off, neighbors = TR.inner_nbr, n_cols = 1 })
+    local Ytr = csr.from_mask(TR.inner_mask)
     str.printf("[Tag] Encoding\n")
     local _, rg, deploy, best, decider = optimize.krr({
       pool_blocks = Xtr,
@@ -257,7 +237,6 @@ test("conll-full", function ()
       search_landmarks = cfg.search_landmarks,
       k = 1,
       search_trials = cfg.tag.search_trials,
-      cv_buf_path = cfg.data.dir .. "/cv_tag_",
       decode_offset = cfg.tag.decode_offset,
       verbose = cfg.verbose,
       each = util.make_ridge_log(stopwatch),
@@ -266,7 +245,8 @@ test("conll-full", function ()
       best.kernel, best.lambda, decider:offset(), sw())
     local function tag_decode (split, seg, n)
       local _, X = util.tokenize_focus_blocks(cfg.tag.blocks, split.texts, seg, toks)
-      return decider:predict({ pred = rg:label(deploy(X), 1), n_samples = n })
+      local P = util.predict_tiled({ deploy = deploy, ridge = rg, blocks = X, n = n, k = 1 })
+      return decider:predict({ pred = P, n_samples = n })
     end
     tr_inner = tag_decode(train, TR.seg, TR.n_seg)
     te_inner = tag_decode(test_set, TE.seg, TE.n_seg)
@@ -326,45 +306,38 @@ test("conll-full", function ()
     [n_sparse + 2] = cgaz:block(test_set.texts, Scand_te, nil) }
   util.rms_scale_blocks(ty_all_tr, { ty_all_te, te_gaz_r }, n_sparse + 1)
   local edef = (cfg.type.exponent or {}).def
-  local ty_relevance, ty_exponent_spec = {}, {}
+  local ty_relevance, ty_exp_def = {}, {}
   for b = 1, n_ty_blocks do
     ty_relevance[b] = (b > n_sparse) and "auc" or "bns"
-    local d = edef
-    if type(edef) == "table" then d = edef[b] end
-    ty_exponent_spec[b] = { def = (d ~= nil and d ~= false) and d or 1 }
+    local d = type(edef) == "table" and edef[b] or edef
+    ty_exp_def[b] = (d ~= nil and d ~= false) and d or 1
   end
-  local sty = cfg.type.scales or {}
-  local sdef = sty.def
-  local ty_scales_spec = {}
+  local sdef = (cfg.type.scales or {}).def
+  local ty_sc_def = {}
   for j = 1, n_ty_blocks do
-    local d = sdef
-    if type(sdef) == "table" then d = sdef[j] end
-    if d == nil or d == false then
-      ty_scales_spec[j] = false
-    else
-      ty_scales_spec[j] = { def = (type(d) == "number") and d or 1 }
-    end
+    local d = type(sdef) == "table" and sdef[j] or sdef
+    if d == nil or d == false then ty_sc_def[j] = false else ty_sc_def[j] = d end
   end
   local K = cfg.type.folds
   str.printf("[Type] CV folds=%d trials=%d\n", K, cfg.type.search_trials)
-  local cv_buf = cfg.data.dir .. "/cv_type_"
   local _, ridge_ty, deploy, _, ty_decider = optimize.krr({
     pool_blocks = ty_all_tr, pool_labels = Ytype, pool_n = n_trc,
     folds = K, cand = Scand_tr, gold = TR.gold,
-    relevance = ty_relevance, scales = ty_scales_spec,
-    exponent = ty_exponent_spec,
+    relevance = ty_relevance,
+    scales = { min = 0.01, max = 100, log = true, def = ty_sc_def },
+    exponent = { min = 0, max = 8, def = ty_exp_def },
     n_labels = N_TYPES + 1,
     kernel = cfg.type.kernel, nu = cfg.type.nu, gamma = cfg.type.gamma,
     order = cfg.type.order, depth = cfg.type.depth, tangent = cfg.type.tangent,
     lambda = cfg.type.lambda,
-    n_landmarks = cfg.emb.n_landmarks, search_landmarks = cfg.search_landmarks, k = 1, cv_buf_path = cv_buf, decode_offset = cfg.type.decode_offset,
+    n_landmarks = cfg.emb.n_landmarks, search_landmarks = cfg.search_landmarks, k = 1, decode_offset = cfg.type.decode_offset,
     search_trials = cfg.type.search_trials, verbose = cfg.verbose, each = util.make_ridge_log(stopwatch),
   })
   collectgarbage("collect")
 
-  local te_codes = deploy(ty_all_te)
-  local te_scores = ridge_ty:regress(te_codes)
-  local te_lab = ridge_ty:label(te_codes, 2):neighbors()
+  local te_lab_csr, te_scores = util.predict_tiled({ deploy = deploy, ridge = ridge_ty,
+    blocks = ty_all_te, n = n_tec, k = 2, scores = true, n_labels = N_TYPES + 1 })
+  local te_lab = te_lab_csr:neighbors()
   local _, te_m = ty_decider:score({ scores = te_scores, n_samples = n_te_docs, cand = Scand_te, gold = TE.gold })
   str.printf("[Span] test %s offset=%.6g %s\n", util.fmt_metrics(te_m), ty_decider:offset(), sw())
 

@@ -10,14 +10,14 @@ io.stdout:setvbuf("line")
 
 local cfg = {
   verbose = false,
-  search_landmarks = 2048,
+  search_landmarks = 1024 * 2,
   data = { ttr = 0.8 },
   n_landmarks = 1024 * 8,
   kernel = { "matern" },
   nu = { def = 0 },
-  gamma = { def = 0.165325 },
-  lambda = { def = 0.000112317 },
-  scales = { def = {68.1108,98.6092,0.24483,0.528534,0.031906,0.469059,0.0100795,1.13818,99.2109} },
+  gamma = { def = 0.0457602 },
+  lambda = { def = 5.67531e-05 },
+  scales = { def = { 32.1917, 56.7434, 0.109014, 0.155122, 0.0464034, 0.166772, 0.0694406, 0.602507, 99.9855 } },
   search_trials = 0,
   folds = 5,
 }
@@ -59,7 +59,9 @@ test("housing CV", function ()
     each = util.make_ridge_log(stopwatch),
   })
 
-  local ts = eval.regress_accuracy(ridge_obj:regress(deploy(test_blocks)), test_set.targets)
+  local _, test_scores = util.predict_tiled({ deploy = deploy, ridge = ridge_obj,
+    blocks = test_blocks, n = test_set.n, scores = true, n_labels = 1 })
+  local ts = eval.regress_accuracy(test_scores, test_set.targets)
   local _, total = stopwatch()
   str.printf("[Result] test=%.4f\nTotal: %.1fs\n", 1 - ts.nmae, total)
 end)

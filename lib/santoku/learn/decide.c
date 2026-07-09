@@ -311,6 +311,14 @@ typedef struct { double dc; int64_t idx; } tk_decide_bp;
 #define tk_decide_bp_lt(a, b) ((a).dc < (b).dc)
 KSORT_INIT(tk_decide_bp, tk_decide_bp, tk_decide_bp_lt)
 
+static inline void tk_decide_bp_suppress (void) {
+  (void) ks_mergesort_tk_decide_bp;
+  (void) ks_heapmake_tk_decide_bp;
+  (void) ks_heapsort_tk_decide_bp;
+  (void) ks_ksmall_tk_decide_bp;
+  (void) ks_shuffle_tk_decide_bp;
+}
+
 static void tk_decide_span_doc_at (
   int64_t reject, double v, double theta,
   const int64_t *top1cls, const double *top1, const double *s2, const double *sr, const double *dcv,
@@ -709,6 +717,7 @@ static luaL_Reg tk_decide_fns[] = {
 
 int luaopen_santoku_learn_decide (lua_State *L)
 {
+  tk_decide_bp_suppress();
   tk_lua_require_mod(L, "santoku.csr");
   lua_newtable(L);
   tk_lua_register(L, tk_decide_fns, 0);
