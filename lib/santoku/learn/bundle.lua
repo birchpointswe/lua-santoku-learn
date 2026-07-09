@@ -67,12 +67,12 @@ M.load = function (dir)
     blocks[i] = { n_tokens = b.n_tokens,
       colscale = b.colscale and fvec.load(dir .. "/colscale_" .. i .. ".bin") or nil }
   end
-  local function encode (ext)
+  local function encode (ext, out)
     local bl = {}
     for i = 1, #ext do
       bl[i] = { x = ext[i], n_tokens = blocks[i].n_tokens, colscale = blocks[i].colscale }
     end
-    return encoder:encode({ blocks = bl })
+    return encoder:encode({ blocks = bl }, out)
   end
   return { tokenizers = toks, encoder = encoder, ridge = r, decider = decider,
     blocks = blocks, encode = encode }
