@@ -372,9 +372,6 @@ static inline int tk_spectral_pivot_sims (
   return 0;
 }
 
-// Raw landmark kernel matrix K(S,S) (m x m, row-major), computed by gathering the m landmark rows
-// (raw values) into a small modality and running the pivot-sims machinery over just those rows.
-// The full-pool K(:,S) is never materialized.
 static inline void tk_spectral_landmark_kss (
   lua_State *L,
   tk_spectral_modality_t *mod,
@@ -525,7 +522,6 @@ static inline void tk_spectral_landmark_kss (
         kss[i * m + base + b] = kb[i * np + b];
   }
 
-  // free the transient gather now; the ctx gc becomes a no-op
   for (int b = 0; b < TK_MAX_MOD; b++) {
     free(ctx->off[b]); ctx->off[b] = NULL;
     free(ctx->tok[b]); ctx->tok[b] = NULL;
@@ -727,9 +723,6 @@ static inline void tk_nystrom_csr_tiles (
   }
 }
 
-// Streamed gram accumulation: encode the pool tile-by-tile through the fitted encoder and
-// accumulate XtX (uncentered, col-major upper), xty (d x nl row-major) and column sums.
-// The full n x d code matrix never exists; peak extra memory is one tile (tile x m).
 static inline int tk_nystrom_gram_tiles (
   tk_nystrom_encoder_t *enc,
   tk_spectral_modality_t *mod,
@@ -758,8 +751,6 @@ static inline int tk_nystrom_gram_tiles (
   uint64_t tile = enc->tile;
   if (tile > n_samples) tile = n_samples;
   if (tile == 0) tile = 1;
-  // labels: densify + gemm when nl is small relative to labels/row (BLAS blocking wins);
-  // otherwise dim-blocked scatter sized so the xty write window stays cache-resident
   int use_dense_y = 0;
   uint64_t kbs = 0;
   if (!targets && lbl_off) {
@@ -1174,7 +1165,6 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
     tk_lua_fwrite(L, &enc->csr_n_tokens, sizeof(uint64_t), 1, fh);
     uint64_t total_csr = (uint64_t)enc->csr_offsets[enc->m];
     tk_lua_fwrite(L, enc->csr_offsets, sizeof(int64_t), enc->m + 1, fh);
-    // csr tokens/values freed after csc build; reconstruct rows transiently from the csc
     int32_t *toks = (int32_t *)malloc(total_csr * sizeof(int32_t));
     float *vals = (float *)malloc(total_csr * sizeof(float));
     int64_t *pos = (int64_t *)malloc(enc->m * sizeof(int64_t));
@@ -1678,8 +1668,6 @@ static inline int tm_encode (lua_State *L) {
     }
   }
 
-  // landmark kernel matrix + factorization (the encoder's chol); the pristine K(S,S) is kept as
-  // the gram's factor scratch when a gram is built
   double tp_t = omp_get_wtime();
   uint64_t mm = (uint64_t)m * m;
   float *chol_store;
@@ -1719,7 +1707,6 @@ static inline int tm_encode (lua_State *L) {
   enc->chol = chol_store;
   tp_lm = omp_get_wtime() - tp_t;
 
-  // gram: stream doc tiles through the encoder; the full n x d code matrix never exists
   double tp_t3 = omp_get_wtime();
   int gram_result_idx = 0;
   int build_prepared = has_gram_labels || has_gram_targets;
@@ -1754,10 +1741,6 @@ static inline int tm_encode (lua_State *L) {
           y_mean[lbl_nbr[j]] += 1.0;
       for (int64_t l = 0; l < gram_nl; l++) y_mean[l] /= (double)nc;
     }
-    // doc -> landmark-representative map (by row fingerprint): rows whose content matches a
-    // landmark gather their K(i,S) row from kss_raw in the tile pass instead of recomputing.
-    // Savings scale with m/n; at m >= n_canonical the gram pass does no kernel work at all.
-    // Best-effort: any allocation/fingerprint failure just disables the gather.
     int64_t *rep = NULL;
     {
       uint64_t gfn = 0;
@@ -1902,7 +1885,6 @@ static inline int tk_nystrom_build_csc (tk_nystrom_encoder_t *enc) {
     }
   }
   free(csc_pos);
-  // encode only reads the csc; keep offsets (persist header + reconstruction cursors), drop the rest
   free(enc->csr_tokens); enc->csr_tokens = NULL;
   free(enc->csr_values); enc->csr_values = NULL;
   return 0;

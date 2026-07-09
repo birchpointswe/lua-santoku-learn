@@ -8,6 +8,9 @@ local utc = require("santoku.utc")
 
 local M = {}
 
+local SEARCH = setmetatable({}, { __tostring = function () return "optimize.SEARCH" end })
+M.SEARCH = SEARCH
+
 local tt
 local function tick (name) return tt and tt(name) or nil end
 local function tock (stop) if stop then stop() end end
@@ -119,7 +122,7 @@ local function round_to_pow2 (x)
 end
 
 local function spec_defaults (spec, defs)
-  if spec == nil then return defs end
+  if spec == nil or spec == SEARCH then return defs end
   if type(spec) ~= "table" then return spec end
   local s = {}
   for k, v in pairs(defs) do s[k] = v end
@@ -651,12 +654,13 @@ M.krr = function (args)
     elseif args.pool_codes then args = require("santoku.learn.util").fold_dense(args) end
   end
   local function resolve_knob (spec)
+    if spec == SEARCH then return nil end
     if type(spec) ~= "table" then return spec end
     if spec[1] ~= nil then
       local v = {}
       for i = 1, veclen(spec) do
         local e = spec[i]
-        if e == nil or e == true then v[i] = false
+        if e == nil or e == SEARCH then v[i] = false
         elseif type(e) == "table" then v[i] = e.def or e.max or e.min
         else v[i] = e end
       end
@@ -666,7 +670,7 @@ M.krr = function (args)
       local v = {}
       for i = 1, veclen(spec.def) do
         local d = spec.def[i]
-        if d == nil or d == true then v[i] = false else v[i] = d end
+        if d == nil or d == SEARCH then v[i] = false else v[i] = d end
       end
       return v
     end
@@ -709,7 +713,7 @@ M.krr = function (args)
     else families.matern = true end
   end
   local function cat_spec (v, deflist)
-    if v == nil then return deflist end
+    if v == nil or v == SEARCH then return deflist end
     if type(v) ~= "table" then return v end
     if #v > 0 then return v end
     local s = {}
@@ -727,7 +731,8 @@ M.krr = function (args)
   local do_search = args.search_trials and args.search_trials > 0
   local lcb_kappa = args.lcb_kappa or 1
   local decode_offset = args.decode_offset
-  if type(decode_offset) == "table" then decode_offset = (not do_search) and decode_offset.def or nil end
+  if decode_offset == SEARCH then decode_offset = nil
+  elseif type(decode_offset) == "table" then decode_offset = (not do_search) and decode_offset.def or nil end
   args.lambda = spec_defaults(args.lambda, { min = 1e-7, max = 8, log = true })
   local label_names = { "lambda" }
   if args.extra then
@@ -1056,18 +1061,25 @@ M.krr = function (args)
     or (families.cosine and (args.search_trials or 30) or 0)
   local btot = (km_trials or 0)
     + (families.arccos and arccos_trials or 0)
+  local n_blocks = (args.pool_blocks and #args.pool_blocks) or 1
   local rebuild_knobs = {}
   for _, kdef in ipairs(REBUILD_KNOBS) do
     local spec = args[kdef.key]
     if spec ~= nil then
       local knob = { key = kdef.key, gauge = kdef.gauge, names = {}, samplers = {} }
+      if spec == SEARCH then
+        local dv = {}
+        for i = 1, n_blocks do dv[i] = SEARCH end
+        spec = { def = dv }
+        args[kdef.key] = spec
+      end
       if type(spec) == "table" and spec[1] == nil and type(spec.def) == "table" then
         local vec = {}
         for i = 1, veclen(spec.def) do
           local d = spec.def[i]
           if d == nil or d == false then
             vec[i] = false
-          elseif d == true then
+          elseif d == SEARCH then
             vec[i] = { min = spec.min, max = spec.max, log = spec.log, pow2 = spec.pow2 }
           else
             vec[i] = { min = spec.min, max = spec.max, log = spec.log, pow2 = spec.pow2, def = d }

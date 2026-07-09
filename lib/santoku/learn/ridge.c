@@ -239,7 +239,6 @@ static inline int tk_ridge_create_lua (lua_State *L) {
       tk_ridge_push(L, w_buf, w_buf_idx, intercept_dv, intercept_idx, d, nl);
       return 1;
     }
-    // adopt the gram's external w_buf when W was baked into it (keeps mmap-ness for persist)
     if (gram->W_baked_external) {
       lua_getfenv(L, gram_idx);
       lua_getfield(L, -1, "w_buf");
