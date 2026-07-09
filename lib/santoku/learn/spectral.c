@@ -372,9 +372,6 @@ static inline int tk_spectral_pivot_sims (
   return 0;
 }
 
-
-
-
 static inline void tk_spectral_landmark_kss (
   lua_State *L,
   tk_spectral_modality_t *mod,
@@ -524,7 +521,6 @@ static inline void tk_spectral_landmark_kss (
       for (uint64_t b = 0; b < np; b++)
         kss[i * m + base + b] = kb[i * np + b];
   }
-
 
   for (int b = 0; b < TK_MAX_MOD; b++) {
     free(ctx->off[b]); ctx->off[b] = NULL;
@@ -727,9 +723,6 @@ static inline void tk_nystrom_csr_tiles (
   }
 }
 
-
-
-
 static inline int tk_nystrom_gram_tiles (
   tk_nystrom_encoder_t *enc,
   tk_spectral_modality_t *mod,
@@ -758,8 +751,6 @@ static inline int tk_nystrom_gram_tiles (
   uint64_t tile = enc->tile;
   if (tile > n_samples) tile = n_samples;
   if (tile == 0) tile = 1;
-
-
   int use_dense_y = 0;
   uint64_t kbs = 0;
   if (!targets && lbl_off) {
@@ -1174,7 +1165,6 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
     tk_lua_fwrite(L, &enc->csr_n_tokens, sizeof(uint64_t), 1, fh);
     uint64_t total_csr = (uint64_t)enc->csr_offsets[enc->m];
     tk_lua_fwrite(L, enc->csr_offsets, sizeof(int64_t), enc->m + 1, fh);
-
     int32_t *toks = (int32_t *)malloc(total_csr * sizeof(int32_t));
     float *vals = (float *)malloc(total_csr * sizeof(float));
     int64_t *pos = (int64_t *)malloc(enc->m * sizeof(int64_t));
@@ -1678,8 +1668,6 @@ static inline int tm_encode (lua_State *L) {
     }
   }
 
-
-
   double tp_t = omp_get_wtime();
   uint64_t mm = (uint64_t)m * m;
   float *chol_store;
@@ -1719,7 +1707,6 @@ static inline int tm_encode (lua_State *L) {
   enc->chol = chol_store;
   tp_lm = omp_get_wtime() - tp_t;
 
-
   double tp_t3 = omp_get_wtime();
   int gram_result_idx = 0;
   int build_prepared = has_gram_labels || has_gram_targets;
@@ -1754,10 +1741,6 @@ static inline int tm_encode (lua_State *L) {
           y_mean[lbl_nbr[j]] += 1.0;
       for (int64_t l = 0; l < gram_nl; l++) y_mean[l] /= (double)nc;
     }
-
-
-
-
     int64_t *rep = NULL;
     {
       uint64_t gfn = 0;
@@ -1902,7 +1885,6 @@ static inline int tk_nystrom_build_csc (tk_nystrom_encoder_t *enc) {
     }
   }
   free(csc_pos);
-
   free(enc->csr_tokens); enc->csr_tokens = NULL;
   free(enc->csr_values); enc->csr_values = NULL;
   return 0;
