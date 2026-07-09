@@ -726,7 +726,7 @@ M.krr = function (args)
   args.order = cat_spec(args.order, { 1, 2, 3, 4 })
   args.depth = cat_spec(args.depth, { 1, 2 })
   args.tangent = cat_spec(args.tangent, { 0, 1 })
-  local seed = args.seed or 3
+  local seed = args.seed or 4
   local kernel_samplers = build_samplers(args, { "nu", "gamma", "order", "depth", "tangent" }, nil, seed)
   local do_search = args.search_trials and args.search_trials > 0
   local lcb_kappa = args.lcb_kappa or 1
@@ -766,7 +766,7 @@ M.krr = function (args)
   spectral_args.w_buf = w_shared
   if tiled then
     spectral_args.tile_labels = tile_labels
-    w_auto = args.w_buf
+    w_auto = args.w_buf or fvec.create(args.n_landmarks * (args.n_labels or 1))
   end
   local proj_shared, sims_shared, row_shared
   if do_search then
