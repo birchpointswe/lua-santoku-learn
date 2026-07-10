@@ -60,40 +60,6 @@ local function make_gp_model (n_dims, cap, restarts)
   }
 end
 
-M.plateaus = function (curve, n, klo, khi)
-  klo = klo or 2
-  khi = khi or #curve
-  local m = khi - klo + 1
-  if n >= m then local out = {}; for k = klo, khi do out[#out + 1] = k end; return out end
-  local s1, s2 = { [0] = 0 }, { [0] = 0 }
-  for i = 1, m do local v = curve[klo + i - 1]; s1[i] = s1[i - 1] + v; s2[i] = s2[i - 1] + v * v end
-  local function ssd (a, b)
-    local c = b - a + 1; local sm = s1[b] - s1[a - 1]
-    return (s2[b] - s2[a - 1]) - sm * sm / c
-  end
-  local cost, back = {}, {}
-  for c = 1, n do cost[c] = {}; back[c] = {} end
-  for i = 1, m do cost[1][i] = ssd(1, i); back[1][i] = 1 end
-  for c = 2, n do
-    for i = c, m do
-      local bc, bj = math.huge, c
-      for j = c - 1, i - 1 do
-        local cc = cost[c - 1][j] + ssd(j + 1, i)
-        if cc < bc then bc, bj = cc, j + 1 end
-      end
-      cost[c][i], back[c][i] = bc, bj
-    end
-  end
-  local cuts, i = {}, m
-  for c = n, 1, -1 do
-    local start = back[c][i]
-    cuts[#cuts + 1] = klo + start - 1
-    i = start - 1
-  end
-  table.sort(cuts)
-  return cuts
-end
-
 local function lhs_sample (n, d)
   local grid = {}
   for j = 1, d do

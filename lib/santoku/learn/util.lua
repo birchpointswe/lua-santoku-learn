@@ -15,7 +15,7 @@ function M.vecstr (v)
   return "[" .. table.concat(p, ",") .. "]"
 end
 
-function M.build_type_blocks (st, split, Scand, Sctx, shps, is_train, gaz, cgaz, tlab)
+function M.build_type_blocks (st, split, Scand, Sctx, is_train, gaz, cgaz, tlab)
   local blocks = {}
   local m1, X1 = st.tok(split, Scand, st.models[1])
   if is_train then st.models[1] = m1 end
@@ -23,12 +23,6 @@ function M.build_type_blocks (st, split, Scand, Sctx, shps, is_train, gaz, cgaz,
   local m2, X2 = st.tok_ctx(split, Scand, Sctx, st.models[2])
   if is_train then st.models[2] = m2 end
   blocks[2] = X2
-  for i, kk in ipairs(st.shape_ks) do
-    local bi = 2 + i
-    local mi, Xi = st.tok_shape(split, Scand, shps[i], kk, st.models[bi])
-    if is_train then st.models[bi] = mi end
-    blocks[bi] = Xi
-  end
   local n_sparse = #blocks
   blocks[#blocks + 1] = gaz:block(split.texts, Scand, tlab)
   blocks[#blocks + 1] = cgaz:block(split.texts, Scand, tlab)
