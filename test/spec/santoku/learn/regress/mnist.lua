@@ -10,6 +10,8 @@ io.stdout:setvbuf("line")
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
+  landmark_rounds = 32,
+  search_landmark_rounds = 1,
   data = { ttr = 0.8, features = 784 },
   n_landmarks = 1024 * 8,
   kernel = { "matern" },
@@ -48,6 +50,8 @@ test("mnist CV", function ()
     exponent = cfg.exponent,
     n_landmarks = cfg.n_landmarks,
     search_landmarks = cfg.search_landmarks,
+    landmark_rounds = cfg.landmark_rounds,
+    search_landmark_rounds = cfg.search_landmark_rounds,
     k = cfg.k,
     search_trials = cfg.search_trials,
     verbose = cfg.verbose,

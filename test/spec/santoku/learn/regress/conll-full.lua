@@ -17,6 +17,8 @@ io.stdout:setvbuf("line")
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
+  landmark_rounds = 32,
+  search_landmark_rounds = 1,
   data = {
     dir = "test/res/conll2003",
     max = nil
@@ -26,16 +28,16 @@ local cfg = {
   tag = {
     kernel = { "matern" },
     nu = { def = 3 },
-    gamma = { def = 0.204383 },
-    lambda = { def = 3.42591e-07 },
+    gamma = { def = 0.822823 },
+    lambda = { def = 8.55722e-06 },
     blocks = {
       { ngram_min = 1, ngram_max = 5, normalize = false },
       { ngram_min = 1, ngram_max = 3, words = true, word_characters = util.WORD_CHARACTERS, normalize = false },
     },
     relevance = { "bns", "bns" },
-    scales = { def = { 0.88421, 1.13095 } },
-    exponent = { def = { 2.70215, 2.51321 } },
-    decode_offset = { def = 0.449798 },
+    scales = { def = { 0.873886, 1.14431 } },
+    exponent = { def = { 2.76845, 2.5849 } },
+    decode_offset = { def = 0.432553 },
     search_trials = 0,
     folds = 5,
   },
@@ -47,7 +49,7 @@ local cfg = {
     lambda = { def = 1.01664e-06 },
     scales = { def = { 0.0359756, 15.4337, 0.758772, 0.0238879, 0.38103, 0.246448, 13.6188, 10.1314, 7.66903 } },
     exponent = { def = { 0.0381765, 6.21477, 7.8169, 0.413125, 3.19355, 5.73126, 3.97563, 0.0670846, 0.383293 } },
-    decode_offset = { def = 0.0554 },
+    decode_offset = { def = -0.107305 },
     search_trials = 0,
     folds = 5,
   },
@@ -235,6 +237,8 @@ test("conll-full", function ()
       lambda = cfg.tag.lambda,
       n_landmarks = cfg.emb.n_landmarks,
       search_landmarks = cfg.search_landmarks,
+      landmark_rounds = cfg.landmark_rounds,
+      search_landmark_rounds = cfg.search_landmark_rounds,
       k = 1,
       search_trials = cfg.tag.search_trials,
       decode_offset = cfg.tag.decode_offset,
@@ -331,6 +335,7 @@ test("conll-full", function ()
     order = cfg.type.order, depth = cfg.type.depth, tangent = cfg.type.tangent,
     lambda = cfg.type.lambda,
     n_landmarks = cfg.emb.n_landmarks, search_landmarks = cfg.search_landmarks, k = 1, decode_offset = cfg.type.decode_offset,
+    landmark_rounds = cfg.landmark_rounds, search_landmark_rounds = cfg.search_landmark_rounds,
     search_trials = cfg.type.search_trials, verbose = cfg.verbose, each = util.make_ridge_log(stopwatch),
   })
   collectgarbage("collect")

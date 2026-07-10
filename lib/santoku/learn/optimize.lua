@@ -768,6 +768,30 @@ M.krr = function (args)
     spectral_args.tile_labels = tile_labels
     w_auto = args.w_buf or fvec.create(args.n_landmarks * (args.n_labels or 1))
   end
+  local lm_bufs, lm_bufs_created
+  if math.max(args.landmark_rounds or 1, args.search_landmark_rounds or 1) > 1 then
+    lm_bufs = args.landmark_bufs
+    if not lm_bufs then
+      local pn = args.n_samples or args.pool_n
+      err.assert(pn, "krr: landmark rounds > 1 requires n_samples")
+      local kn = args.n_landmarks * pn
+      local fn = args.n_landmarks * args.n_landmarks
+      if args.landmark_buf_path then
+        local pfx = args.landmark_buf_path
+        lm_bufs = {
+          k = fvec.mmap_create(pfx .. ".lmk.bin", kn),
+          y = fvec.mmap_create(pfx .. ".lmy.bin", kn),
+          fac = fvec.mmap_create(pfx .. ".lmfac.bin", fn),
+        }
+      else
+        lm_bufs = { k = fvec.create(kn), y = fvec.create(kn), fac = fvec.create(fn) }
+      end
+      lm_bufs_created = true
+    end
+    spectral_args.lmk_buf = lm_bufs.k
+    spectral_args.lmy_buf = lm_bufs.y
+    spectral_args.lmfac_buf = lm_bufs.fac
+  end
   local proj_shared, sims_shared, row_shared
   if do_search then
     args.ridge_w_buf = args.ridge_w_buf or fvec.create(args.n_landmarks * (args.n_labels or 1))
@@ -798,6 +822,9 @@ M.krr = function (args)
   local function release_cv ()
     if not args.xtx_buf then xtx_shared:destroy() end
     if not args.xty_buf then xty_shared:destroy() end
+    if lm_bufs_created then
+      lm_bufs.k:destroy(); lm_bufs.y:destroy(); lm_bufs.fac:destroy()
+    end
   end
   local cur_val_blocks, cur_val_x = nil, nil
   local function val_encode (sp_enc, slot)
@@ -830,10 +857,19 @@ M.krr = function (args)
     spectral_args.strata = (fold and args.fold_strata) and args.fold_strata[fold] or args.pool_strata
     if fixed_lms then
       local slot = fold or 0
-      if lm_slots[slot] == nil then
-        lm_slots[slot] = spectral.uniform_landmarks(spectral_args, search_m, seed + 1000 * (slot + 1))
+      local rounds = args.search_landmark_rounds or 1
+      if rounds > 1 then
+        spectral_args.landmarks = nil
+        spectral_args.n_landmarks = search_m
+        spectral_args.landmark_rounds = rounds
+        spectral_args.landmark_seed = seed + 1000 * (slot + 1)
+      else
+        if lm_slots[slot] == nil then
+          lm_slots[slot] = spectral.uniform_landmarks(spectral_args, search_m, seed + 1000 * (slot + 1))
+        end
+        spectral_args.landmarks = lm_slots[slot]
+        spectral_args.landmark_rounds = nil
       end
-      spectral_args.landmarks = lm_slots[slot]
       if xtx_slots[slot] == nil then
         xtx_slots[slot] = fvec.create(search_m * search_m)
         xty_slots[slot] = fvec.create(search_m * nl_cap)
@@ -841,8 +877,17 @@ M.krr = function (args)
       spectral_args.xtx_buf = xtx_slots[slot]
       spectral_args.xty_buf = xty_slots[slot]
     else
-      -- final: random (uniform) landmarks at full n_landmarks (matches the random-trial regime)
-      spectral_args.landmarks = spectral.uniform_landmarks(spectral_args, args.n_landmarks, seed + 1000 * ((fold or 0) + 1))
+      local rounds = args.landmark_rounds or 1
+      if rounds > 1 then
+        spectral_args.landmarks = nil
+        spectral_args.n_landmarks = args.n_landmarks
+        spectral_args.landmark_rounds = rounds
+        spectral_args.landmark_seed = seed + 1000 * ((fold or 0) + 1)
+      else
+        -- final: random (uniform) landmarks at full n_landmarks (matches the random-trial regime)
+        spectral_args.landmarks = spectral.uniform_landmarks(spectral_args, args.n_landmarks, seed + 1000 * ((fold or 0) + 1))
+        spectral_args.landmark_rounds = nil
+      end
     end
     local tse = tick("spectral.encode"); local _, sp_enc, gram = spectral.encode(spectral_args); tock(tse)
     if tt and spectral_args.enc_phases then
@@ -887,7 +932,7 @@ M.krr = function (args)
         pooled_s:copy(s)
         local fc, fg = args.fold_val_cand[f], args.fold_val_gold[f]
         if not pooled_cand then pooled_cand, pooled_gold = clone_spans(fc), clone_spans(fg)
-        else pooled_cand:append(fc); pooled_gold:append(fg) end
+        else pooled_cand:append(clone_spans(fc)); pooled_gold:append(clone_spans(fg)) end
       end
       local decider, m = M.decide({ n_labels = args.n_labels, reject = args.reject, val_scores = pooled_s,
         val_n_samples = pooled_cand:offsets():size() - 1, val_cand = pooled_cand, val_gold = pooled_gold })

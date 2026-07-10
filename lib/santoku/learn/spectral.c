@@ -1215,6 +1215,11 @@ static inline uint64_t *tk_spectral_row_fps (lua_State *L, uint64_t *n_rows_out)
 static inline tk_ivec_t *tk_spectral_uniform_ids (
   lua_State *L, uint64_t *fp, uint64_t n_rows, uint64_t m, uint64_t seedv,
   const int64_t *strata);
+static inline tk_ivec_t *tk_spectral_refine_ids (
+  lua_State *L, tk_spectral_modality_t *mod, uint64_t n_docs,
+  tk_spectral_kernel_t kernel, uint64_t m, uint64_t rounds, uint64_t seedv,
+  uint64_t *fp, uint64_t fp_n, const int64_t *strata,
+  tk_fvec_t *kbuf, tk_fvec_t *ybuf, tk_fvec_t *fbuf);
 
 static inline int tm_encode (lua_State *L) {
   lua_settop(L, 1);
@@ -1472,6 +1477,18 @@ static inline int tm_encode (lua_State *L) {
   tk_fvec_t *row_buf_arg = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "row_buf");
   lua_pop(L, 1);
 
+  lua_getfield(L, 1, "lmk_buf");
+  tk_fvec_t *lmk_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "lmk_buf");
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "lmy_buf");
+  tk_fvec_t *lmy_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "lmy_buf");
+  lua_pop(L, 1);
+
+  lua_getfield(L, 1, "lmfac_buf");
+  tk_fvec_t *lmfac_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "lmfac_buf");
+  lua_pop(L, 1);
+
   uint64_t nc = n_samples;
   lua_getfield(L, 1, "landmarks");
   tk_ivec_t *lm_forced = lua_isnil(L, -1) ? NULL : tk_ivec_peek(L, -1, "landmarks");
@@ -1481,11 +1498,16 @@ static inline int tm_encode (lua_State *L) {
     uint64_t *ffp = tk_spectral_row_fps(L, &fn);
     if (!ffp) return luaL_error(L, "encode: cannot fingerprint rows for landmark selection");
     uint64_t lseed = tk_lua_foptunsigned(L, 1, "encode", "landmark_seed", 1);
+    uint64_t lrounds = tk_lua_foptunsigned(L, 1, "encode", "landmark_rounds", 1);
     lua_getfield(L, 1, "strata");
     tk_ivec_t *st = lua_isnil(L, -1) ? NULL : tk_ivec_peek(L, -1, "strata");
     lua_pop(L, 1);
-    lm_forced = tk_spectral_uniform_ids(L, ffp, fn, n_lm_req, lseed,
-      (st && st->n == fn) ? st->a : NULL);
+    if (lrounds <= 1)
+      lm_forced = tk_spectral_uniform_ids(L, ffp, fn, n_lm_req, lseed,
+        (st && st->n == fn) ? st->a : NULL);
+    else
+      lm_forced = tk_spectral_refine_ids(L, &mod, nc, kernel, n_lm_req, lrounds, lseed,
+        ffp, fn, (st && st->n == fn) ? st->a : NULL, lmk_buf, lmy_buf, lmfac_buf);
   }
   tk_ivec_t *lm_ids = tk_ivec_create(L, lm_forced ? (lm_forced->n ? lm_forced->n : 1) : 1);
   int lm_ids_idx = lua_gettop(L);
@@ -2224,6 +2246,361 @@ static inline tk_ivec_t *tk_spectral_uniform_ids (
   out->n = taken;
   free(perm); free(canon); free(skey); free(sid); free(cnt);
   free(alloc); free(rem); free(taken_g);
+  return out;
+}
+
+// block RPCholesky with a few giant blocks: round 0 draws a uniform chunk (fingerprint-deduped,
+// stratified); each later round computes every row's Nystrom residual w.r.t. the selected prefix
+// (tiled; no n x m factor is ever materialized) and draws the next chunk proportional to residual.
+static inline tk_ivec_t *tk_spectral_refine_ids (
+  lua_State *L, tk_spectral_modality_t *mod, uint64_t n_docs,
+  tk_spectral_kernel_t kernel, uint64_t m, uint64_t rounds, uint64_t seedv,
+  uint64_t *fp, uint64_t fp_n, const int64_t *strata,
+  tk_fvec_t *kbuf, tk_fvec_t *ybuf, tk_fvec_t *fbuf
+) {
+  if (m > n_docs) m = n_docs;
+  if (rounds < 1) rounds = 1;
+  if (m > 0 && rounds > m) rounds = m;
+  uint64_t chunk = rounds > 0 ? m / rounds : 0;
+  uint64_t m0 = m - (rounds - 1) * chunk;
+  tk_ivec_t *ids0 = tk_spectral_uniform_ids(L, fp, fp_n, m0, seedv, strata);
+  if (rounds <= 1 || m == 0)
+    return ids0;
+  if (kbuf && kbuf->n < m * n_docs) {
+    luaL_error(L, "refine_ids: lmk_buf too small");
+    return NULL;
+  }
+  if (ybuf && ybuf->n < m * n_docs) {
+    luaL_error(L, "refine_ids: lmy_buf too small");
+    return NULL;
+  }
+  if (fbuf && fbuf->n < m * m) {
+    luaL_error(L, "refine_ids: lmfac_buf too small");
+    return NULL;
+  }
+  uint64_t T = TK_SIMS_CHUNK;
+  if (T > n_docs) T = n_docs;
+  int nb = mod->n_blocks;
+  int64_t di = mod->d_input;
+  int64_t *sel = (int64_t *) malloc(m * sizeof(int64_t));
+  uint8_t *selmask = (uint8_t *) calloc(n_docs, 1);
+  double *acc2 = (double *) calloc(n_docs, sizeof(double));
+  double *dres = (double *) malloc(n_docs * sizeof(double));
+  double *cdf = (double *) malloc(n_docs * sizeof(double));
+  float *K = kbuf ? kbuf->a : (float *) malloc(m * n_docs * sizeof(float));
+  float *Y = ybuf ? ybuf->a : (float *) malloc(m * n_docs * sizeof(float));
+  float *F = fbuf ? fbuf->a : (float *) malloc(m * m * sizeof(float));
+  float *kip = (float *) malloc((m + T) * T * sizeof(float));
+  float *pdr = mod->type == TK_MOD_DENSE
+    ? (float *) malloc(T * (uint64_t) di * sizeof(float)) : NULL;
+  int64_t *pcs_off = NULL, *pcs_pos = NULL;
+  uint16_t *pcs_piv = NULL; float *pcs_val = NULL;
+  uint64_t pcs_cap = 0;
+  int oom = (!sel || !selmask || !acc2 || !dres || !cdf || !K || !Y || !F || !kip
+    || (mod->type == TK_MOD_DENSE && !pdr));
+  if (!oom && mod->type == TK_MOD_CSR) {
+    pcs_off = (int64_t *) calloc(mod->csr_n_tokens + 1, sizeof(int64_t));
+    pcs_pos = (int64_t *) malloc((mod->csr_n_tokens + 1) * sizeof(int64_t));
+    pcs_cap = T * 64;
+    pcs_piv = (uint16_t *) malloc(pcs_cap * sizeof(uint16_t));
+    pcs_val = (float *) malloc(pcs_cap * sizeof(float));
+    if (!pcs_off || !pcs_pos || !pcs_piv || !pcs_val) oom = 1;
+  }
+  if (oom) {
+    if (!kbuf) free(K);
+    if (!ybuf) free(Y);
+    if (!fbuf) free(F);
+    free(sel); free(selmask); free(acc2); free(dres); free(cdf);
+    free(kip); free(pdr); free(pcs_off); free(pcs_pos); free(pcs_piv); free(pcs_val);
+    luaL_error(L, "refine_ids: out of memory");
+    return NULL;
+  }
+  uint64_t n_sel = 0;
+  for (uint64_t i = 0; i < ids0->n && n_sel < m; i ++) {
+    int64_t pi = ids0->a[i];
+    if (pi >= 0 && (uint64_t) pi < n_docs && !selmask[pi]) { selmask[pi] = 1; sel[n_sel ++] = pi; }
+  }
+  lua_pop(L, 1);
+  uint64_t lm_state = tk_hash_mix(seedv ? seedv : 1);
+  double jitter = 1e-6;
+  double y_jit = -1.0;
+  uint64_t covered = 0;
+  uint64_t pivots[TK_SIMS_CHUNK];
+  for (uint64_t r = 1; r < rounds && n_sel < m; r ++) {
+    uint64_t mp = n_sel;
+    if (mp == 0) break;
+    uint64_t delta = mp - covered;
+    if (delta > 0) {
+      const int64_t *nsel = sel + covered;
+      tk_spectral_modality_t mg;
+      memset(&mg, 0, sizeof(mg));
+      mg.type = mod->type;
+      int64_t *goff[TK_MAX_MOD]; int32_t *gtok[TK_MAX_MOD]; float *gval[TK_MAX_MOD];
+      for (int b = 0; b < TK_MAX_MOD; b ++) { goff[b] = NULL; gtok[b] = NULL; gval[b] = NULL; }
+      float *grs = NULL, *gdense = NULL;
+      if (mod->type == TK_MOD_CSR && nb > 0) {
+        mg.n_blocks = nb;
+        mg.csr_n_tokens = mod->csr_n_tokens;
+        for (int b = 0; b < nb && !oom; b ++) {
+          mg.blk_start[b] = mod->blk_start[b];
+          mg.blk_s[b] = mod->blk_s[b];
+          mg.blk_cs[b] = mod->blk_cs[b];
+          const int64_t *off = mod->blk_off[b];
+          uint64_t ptot = 0;
+          for (uint64_t j = 0; j < delta; j ++)
+            ptot += (uint64_t) (off[nsel[j] + 1] - off[nsel[j]]);
+          uint64_t mx = 0;
+          for (uint64_t i = 0; i < n_docs; i ++) {
+            uint64_t rn = (uint64_t) (off[i + 1] - off[i]);
+            if (rn > mx) mx = rn;
+          }
+          uint64_t cap = ptot + T * mx;
+          goff[b] = (int64_t *) malloc((delta + T + 1) * sizeof(int64_t));
+          gtok[b] = (int32_t *) malloc((cap ? cap : 1) * sizeof(int32_t));
+          gval[b] = (float *) malloc((cap ? cap : 1) * sizeof(float));
+          if (!goff[b] || !gtok[b] || !gval[b]) { oom = 1; break; }
+          const int32_t *tokv = mod->blk_tok[b];
+          const float *valv = mod->blk_val[b];
+          int64_t dst = 0;
+          goff[b][0] = 0;
+          for (uint64_t j = 0; j < delta; j ++) {
+            int64_t lo = off[nsel[j]], hi = off[nsel[j] + 1];
+            uint64_t rn = (uint64_t) (hi - lo);
+            memcpy(gtok[b] + dst, tokv + lo, rn * sizeof(int32_t));
+            if (valv)
+              memcpy(gval[b] + dst, valv + lo, rn * sizeof(float));
+            else
+              for (uint64_t k2 = 0; k2 < rn; k2 ++)
+                gval[b][dst + (int64_t) k2] = 1.0f;
+            dst += (int64_t) rn;
+            goff[b][j + 1] = dst;
+          }
+          mg.blk_off[b] = goff[b];
+          mg.blk_tok[b] = gtok[b];
+          mg.blk_val[b] = gval[b];
+        }
+      } else if (mod->type == TK_MOD_CSR) {
+        mg.csr_n_tokens = mod->csr_n_tokens;
+        const int64_t *off = mod->csr_offsets;
+        uint64_t ptot = 0;
+        for (uint64_t j = 0; j < delta; j ++)
+          ptot += (uint64_t) (off[nsel[j] + 1] - off[nsel[j]]);
+        uint64_t mx = 0;
+        for (uint64_t i = 0; i < n_docs; i ++) {
+          uint64_t rn = (uint64_t) (off[i + 1] - off[i]);
+          if (rn > mx) mx = rn;
+        }
+        uint64_t cap = ptot + T * mx;
+        goff[0] = (int64_t *) malloc((delta + T + 1) * sizeof(int64_t));
+        gtok[0] = (int32_t *) malloc((cap ? cap : 1) * sizeof(int32_t));
+        gval[0] = (float *) malloc((cap ? cap : 1) * sizeof(float));
+        if (!goff[0] || !gtok[0] || !gval[0]) oom = 1;
+        else {
+          const int32_t *tokv = mod->csr_tokens;
+          const float *valv = mod->csr_values;
+          int64_t dst = 0;
+          goff[0][0] = 0;
+          for (uint64_t j = 0; j < delta; j ++) {
+            int64_t lo = off[nsel[j]], hi = off[nsel[j] + 1];
+            uint64_t rn = (uint64_t) (hi - lo);
+            memcpy(gtok[0] + dst, tokv + lo, rn * sizeof(int32_t));
+            if (valv)
+              memcpy(gval[0] + dst, valv + lo, rn * sizeof(float));
+            else
+              for (uint64_t k2 = 0; k2 < rn; k2 ++)
+                gval[0][dst + (int64_t) k2] = 1.0f;
+            dst += (int64_t) rn;
+            goff[0][j + 1] = dst;
+          }
+          mg.csr_offsets = goff[0];
+          mg.csr_tokens = gtok[0];
+          mg.csr_values = gval[0];
+        }
+      } else {
+        mg.d_input = di;
+        mg.dense_cs2 = mod->dense_cs2;
+        gdense = (float *) malloc((delta + T) * (uint64_t) di * sizeof(float));
+        if (!gdense) oom = 1;
+        else {
+          for (uint64_t j = 0; j < delta; j ++)
+            memcpy(gdense + j * (uint64_t) di,
+                   mod->dense + (uint64_t) nsel[j] * (uint64_t) di,
+                   (uint64_t) di * sizeof(float));
+          mg.dense = gdense;
+        }
+      }
+      if (!oom && mod->rowscale) {
+        grs = (float *) malloc((delta + T) * sizeof(float));
+        if (!grs) oom = 1;
+        else {
+          for (uint64_t j = 0; j < delta; j ++) grs[j] = mod->rowscale[nsel[j]];
+          mg.rowscale = grs;
+        }
+      }
+      for (uint64_t base = 0; base < n_docs && !oom; base += T) {
+        uint64_t tn = n_docs - base;
+        if (tn > T) tn = T;
+        if (mod->type == TK_MOD_CSR && nb > 0) {
+          for (int b = 0; b < nb; b ++) {
+            const int64_t *off = mod->blk_off[b];
+            const int32_t *tokv = mod->blk_tok[b];
+            const float *valv = mod->blk_val[b];
+            int64_t dst = goff[b][delta];
+            for (uint64_t t = 0; t < tn; t ++) {
+              int64_t lo = off[base + t], hi = off[base + t + 1];
+              uint64_t rn = (uint64_t) (hi - lo);
+              memcpy(gtok[b] + dst, tokv + lo, rn * sizeof(int32_t));
+              if (valv)
+                memcpy(gval[b] + dst, valv + lo, rn * sizeof(float));
+              else
+                for (uint64_t k2 = 0; k2 < rn; k2 ++)
+                  gval[b][dst + (int64_t) k2] = 1.0f;
+              dst += (int64_t) rn;
+              goff[b][delta + t + 1] = dst;
+            }
+          }
+        } else if (mod->type == TK_MOD_CSR) {
+          const int64_t *off = mod->csr_offsets;
+          const int32_t *tokv = mod->csr_tokens;
+          const float *valv = mod->csr_values;
+          int64_t dst = goff[0][delta];
+          for (uint64_t t = 0; t < tn; t ++) {
+            int64_t lo = off[base + t], hi = off[base + t + 1];
+            uint64_t rn = (uint64_t) (hi - lo);
+            memcpy(gtok[0] + dst, tokv + lo, rn * sizeof(int32_t));
+            if (valv)
+              memcpy(gval[0] + dst, valv + lo, rn * sizeof(float));
+            else
+              for (uint64_t k2 = 0; k2 < rn; k2 ++)
+                gval[0][dst + (int64_t) k2] = 1.0f;
+            dst += (int64_t) rn;
+            goff[0][delta + t + 1] = dst;
+          }
+        } else {
+          for (uint64_t t = 0; t < tn; t ++)
+            memcpy(gdense + (delta + t) * (uint64_t) di,
+                   mod->dense + (base + t) * (uint64_t) di,
+                   (uint64_t) di * sizeof(float));
+        }
+        if (mod->rowscale)
+          for (uint64_t t = 0; t < tn; t ++) grs[delta + t] = mod->rowscale[base + t];
+        if (delta <= T) {
+          for (uint64_t b2 = 0; b2 < delta; b2 ++) pivots[b2] = b2;
+          if (tk_spectral_pivot_sims(&mg, kernel, delta + tn, pivots, delta, kip, pdr,
+              pcs_off, pcs_pos, &pcs_piv, &pcs_val, &pcs_cap) != 0) { oom = 1; break; }
+          #pragma omp parallel for schedule(static)
+          for (uint64_t j = 0; j < tn; j ++)
+            for (uint64_t b2 = 0; b2 < delta; b2 ++)
+              K[(base + j) * m + covered + b2] = kip[(delta + j) * delta + b2];
+        } else {
+          for (uint64_t b2 = 0; b2 < tn; b2 ++) pivots[b2] = delta + b2;
+          if (tk_spectral_pivot_sims(&mg, kernel, delta + tn, pivots, tn, kip, pdr,
+              pcs_off, pcs_pos, &pcs_piv, &pcs_val, &pcs_cap) != 0) { oom = 1; break; }
+          #pragma omp parallel for schedule(static)
+          for (uint64_t j = 0; j < tn; j ++)
+            for (uint64_t i = 0; i < delta; i ++)
+              K[(base + j) * m + covered + i] = kip[i * tn + j];
+        }
+      }
+      for (int b = 0; b < TK_MAX_MOD; b ++) { free(goff[b]); free(gtok[b]); free(gval[b]); }
+      free(grs); free(gdense);
+      if (oom) {
+        if (!kbuf) free(K);
+        if (!ybuf) free(Y);
+        if (!fbuf) free(F);
+        free(sel); free(selmask); free(acc2); free(dres); free(cdf);
+        free(kip); free(pdr); free(pcs_off); free(pcs_pos); free(pcs_piv); free(pcs_val);
+        luaL_error(L, "refine_ids: out of memory (round)");
+        return NULL;
+      }
+      for (;;) {
+        #pragma omp parallel for schedule(static)
+        for (uint64_t j = 0; j < mp; j ++) {
+          memcpy(F + j * m, K + (uint64_t) sel[j] * m, (j + 1) * sizeof(float));
+          F[j * m + j] += (float) jitter;
+        }
+        if (LAPACKE_spotrf(LAPACK_COL_MAJOR, 'U', (int) mp, F, (int) m) == 0) break;
+        if (jitter > 1e-1) {
+          if (!kbuf) free(K);
+          if (!ybuf) free(Y);
+          if (!fbuf) free(F);
+          free(sel); free(selmask); free(acc2); free(dres); free(cdf);
+          free(kip); free(pdr); free(pcs_off); free(pcs_pos); free(pcs_piv); free(pcs_val);
+          luaL_error(L, "refine_ids: spotrf failed after jitter escalation");
+          return NULL;
+        }
+        jitter *= 10.0;
+      }
+      uint64_t ylo = (covered > 0 && y_jit == jitter) ? covered : 0;
+      uint64_t dn = mp - ylo;
+      for (uint64_t base = 0; base < n_docs; base += T) {
+        uint64_t tn = n_docs - base;
+        if (tn > T) tn = T;
+        #pragma omp parallel for schedule(static)
+        for (uint64_t j = 0; j < tn; j ++)
+          memcpy(Y + (base + j) * m + ylo, K + (base + j) * m + ylo, dn * sizeof(float));
+        if (ylo > 0)
+          cblas_sgemm(CblasColMajor, CblasTrans, CblasNoTrans,
+            (int) dn, (int) tn, (int) ylo,
+            -1.0f, F + ylo * m, (int) m,
+            Y + base * m, (int) m,
+            1.0f, Y + base * m + ylo, (int) m);
+        cblas_strsm(CblasColMajor, CblasLeft, CblasUpper, CblasTrans, CblasNonUnit,
+          (int) dn, (int) tn, 1.0f, F + ylo * m + ylo, (int) m,
+          Y + base * m + ylo, (int) m);
+        #pragma omp parallel for schedule(static)
+        for (uint64_t j = 0; j < tn; j ++) {
+          const float *col = Y + (base + j) * m;
+          double a = ylo > 0 ? acc2[base + j] : 0.0;
+          for (uint64_t c = ylo; c < mp; c ++) a += (double) col[c] * (double) col[c];
+          acc2[base + j] = a;
+        }
+      }
+      y_jit = jitter;
+      covered = mp;
+    }
+    #pragma omp parallel for schedule(static)
+    for (uint64_t i = 0; i < n_docs; i ++) {
+      double dd = 1.0 - acc2[i];
+      if (dd < 0.0) dd = 0.0;
+      dres[i] = selmask[i] ? 0.0 : dd;
+    }
+    double cum = 0.0;
+    for (uint64_t i = 0; i < n_docs; i ++) { cum += dres[i]; cdf[i] = cum; }
+    if (cum < 1e-12) break;
+    uint64_t want = chunk;
+    if (n_sel + want > m) want = m - n_sel;
+    uint64_t attempts = 0, cap_att = 64 * want + 64;
+    while (want > 0 && attempts < cap_att) {
+      attempts ++;
+      double rr = tk_lm_drand(&lm_state) * cum;
+      uint64_t lo = 0, hi = n_docs;
+      while (lo < hi) {
+        uint64_t mid = lo + (hi - lo) / 2;
+        if (cdf[mid] < rr) lo = mid + 1; else hi = mid;
+      }
+      if (lo >= n_docs) lo = n_docs - 1;
+      if (selmask[lo] || dres[lo] < 1.2e-6) continue;
+      selmask[lo] = 1;
+      sel[n_sel ++] = (int64_t) lo;
+      want --;
+    }
+    for (uint64_t i = 0; i < n_docs && want > 0; i ++)
+      if (!selmask[i] && dres[i] >= 1.2e-6) {
+        selmask[i] = 1;
+        sel[n_sel ++] = (int64_t) i;
+        want --;
+      }
+  }
+  if (!kbuf) free(K);
+  if (!ybuf) free(Y);
+  if (!fbuf) free(F);
+  free(selmask); free(acc2); free(dres); free(cdf);
+  free(kip); free(pdr); free(pcs_off); free(pcs_pos); free(pcs_piv); free(pcs_val);
+  tk_ivec_t *out = tk_ivec_create(L, n_sel ? n_sel : 1);
+  memcpy(out->a, sel, n_sel * sizeof(int64_t));
+  out->n = n_sel;
+  free(sel);
   return out;
 }
 

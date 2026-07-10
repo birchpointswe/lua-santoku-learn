@@ -12,6 +12,9 @@ local word_characters = util.WORD_CHARACTERS
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
+  landmark_rounds = 32,
+  search_landmark_rounds = 1,
+  landmark_buf_path = "test/res/eurlex-lm",
   blocks = {
     { ngram_min = 1, ngram_max = 5, word_characters = word_characters },
     -- { ngram_min = 1, ngram_max = 3, word_characters = word_characters, words = true },
@@ -60,6 +63,9 @@ test("eurlex CV", function ()
     lambda = cfg.lambda,
     n_landmarks = cfg.n_landmarks,
     search_landmarks = cfg.search_landmarks,
+    landmark_rounds = cfg.landmark_rounds,
+    search_landmark_rounds = cfg.search_landmark_rounds,
+    landmark_buf_path = cfg.landmark_buf_path,
     k = cfg.k,
     decode_offset = cfg.decode_offset,
     search_trials = cfg.search_trials,
