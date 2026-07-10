@@ -4,7 +4,6 @@ local spans = require("santoku.spans")
 local ner = require("santoku.learn.ner")
 local tokenizer = require("santoku.learn.tokenizer")
 local aho = require("santoku.learn.aho")
-local segmenter = require("santoku.learn.segmenter")
 local optimize = require("santoku.learn.optimize")
 local ivec = require("santoku.ivec")
 local util = require("santoku.learn.util")
@@ -38,23 +37,20 @@ local cfg = {
     scales = { def = { 0.873886, 1.14431 } },
     exponent = { def = { 2.76845, 2.5849 } },
     decode_offset = { def = 0.432553 },
-    search_trials = 0,
+    search_trials = 200,
     folds = 5,
   },
   type = {
     kernel = { "arccos" },
-    order = { def = 3 },
+    order = { def = 1 },
     depth = { def = 1 },
     tangent = { def = 0 },
-    lambda = { def = 1.01664e-06 },
-    scales = { def = { 0.0359756, 15.4337, 0.758772, 0.0238879, 0.38103, 0.246448, 13.6188, 10.1314, 7.66903 } },
-    exponent = { def = { 0.0381765, 6.21477, 7.8169, 0.413125, 3.19355, 5.73126, 3.97563, 0.0670846, 0.383293 } },
-    decode_offset = { def = -0.107305 },
-    search_trials = 0,
+    lambda = { def = 2.79245e-05 },
+    scales = { def = { 0.914452, 5.72097, 0.530832, 0.360091 } },
+    exponent = { def = { 6.54207, 4.39285, 0.518003, 6.49875 } },
+    decode_offset = { def = -0.16255 },
+    search_trials = 200,
     folds = 5,
-  },
-  shape = {
-    n_cuts = 5
   },
 }
 
@@ -97,8 +93,9 @@ local function gold_spans (split)
   return spans.create({ offsets = eoff, s = es, e = ee, ty = ety })
 end
 
-local function build_segments (split, seg)
-  local soff, sstart, send = seg:segment({ texts = split.texts, n = split.n, drop_sep = true })
+local function build_segments (split)
+  local soff, sstart, send = tokenizer.words({ texts = split.texts, n = split.n,
+    word_characters = word_characters, punctuation = true })
   local S = spans.create({ offsets = soff, s = sstart, e = send })
   local G = gold_spans(split)
   return { n = split.n, seg = S, n_seg = sstart:size(),
@@ -155,19 +152,6 @@ local function tokenize_ctx (split, F, T, tok)
   return tok, X
 end
 
-local function tokenize_shape (split, F, T, k, tok)
-  local grow = tok == nil
-  if grow then
-    tok = tokenizer.create({
-      ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max,
-      n_types = k + 1, terminals = true, focus = true, types = true,
-    })
-  end
-  local X = grow and tok:fit({ texts = split.texts, focus = F, types = T })
-    or tok:tokenize({ texts = split.texts, focus = F, types = T })
-  return tok, X
-end
-
 test("conll-full", function ()
 
   local stopwatch = utc.stopwatch()
@@ -179,41 +163,9 @@ test("conll-full", function ()
   train = merge_splits(train, dev)
   str.printf("[Data] pool=%d (train=%d + dev=%d) test=%d %s\n", train.n, n_train, n_dev, test_set.n, sw())
 
-  local seg = segmenter.create({ context = "left" })
-  local coarse_k
-  do
-    local G = gold_spans(train)
-    local ck, rec, mx, p95, sep = seg:train({ texts = train.texts, n = train.n,
-      gold_offsets = G:offsets(), gold_starts = G:col("s"), gold_ends = G:col("e") })
-    coarse_k = ck
-    str.printf("[Seg] coarse_k=%d boundary-recall=%.4f segs/gold(max=%d p95=%d) sep=%d %s\n",
-      ck, rec, mx, p95, sep, sw())
-  end
-
-  do
-    local curve, nseen = seg:compression_curve({ texts = train.texts, n = train.n })
-    cfg.shape.ks = optimize.plateaus(curve, cfg.shape.n_cuts, coarse_k + 1)
-    local parts = {}
-    for k = 1, nseen do parts[#parts + 1] = str.format("%d=%.2f", k, curve[k]) end
-    str.printf("[Comp] train avg bytes/cells by k(clusters): %s\n", table.concat(parts, " "))
-    str.printf("[Comp] jenks SHAPE cuts (n=%d): %s %s\n",
-      cfg.shape.n_cuts, table.concat(cfg.shape.ks, ","), sw())
-  end
-
-  local TR, TE = build_segments(train, seg), build_segments(test_set, seg)
-  str.printf("[SegCeil] boundary-aligned gold (oracle recall): test=%.4f %s\n",
-    seg_ceiling(TE.seg, TE.gold, TE.n), sw())
-
-  local function shape_runs (split)
-    local out = {}
-    for i, k in ipairs(cfg.shape.ks) do
-      local off, st, en, cl = seg:segment({ texts = split.texts, n = split.n, k = k })
-      out[i] = spans.create({ offsets = off, s = st, e = en, ty = cl })
-    end
-    return out
-  end
-
-  TR.sh, TE.sh = shape_runs(train), shape_runs(test_set)
+  local TR, TE = build_segments(train), build_segments(test_set)
+  str.printf("[SegCeil] boundary-aligned gold (oracle recall): test=%.4f | n_seg train=%d test=%d %s\n",
+    seg_ceiling(TE.seg, TE.gold, TE.n), TR.n_seg, TE.n_seg, sw())
 
   local function zeros (n) local z = ivec.create(n); z:zero(); return z end
 
@@ -239,6 +191,7 @@ test("conll-full", function ()
       search_landmarks = cfg.search_landmarks,
       landmark_rounds = cfg.landmark_rounds,
       search_landmark_rounds = cfg.search_landmark_rounds,
+      landmark_buf_path = "test/res/conll-full-tag-lm",
       k = 1,
       search_trials = cfg.tag.search_trials,
       decode_offset = cfg.tag.decode_offset,
@@ -297,30 +250,20 @@ test("conll-full", function ()
     miss.over, miss.under, miss.cross, miss.none,
     ubt[0], ubt[1], ubt[2], ubt[3], sw())
 
-  local ty = { models = {},
-    tok = tokenize, tok_ctx = tokenize_ctx, tok_shape = tokenize_shape, shape_ks = cfg.shape.ks }
+  local ty = { models = {}, tok = tokenize, tok_ctx = tokenize_ctx }
   local gaz = ner.build_typed_gaz({ texts = train.texts, gold = TR.gold, n_types = N_TYPES })
   local cgaz = ner.build_char_gaz({ texts = train.texts, gold = TR.gold, n_types = N_TYPES,
     ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max })
   local Ytype = csr.create({ offsets = tr_tloff, neighbors = tr_tlab, n_cols = N_TYPES + 1 })
-  local ty_all_tr, n_sparse = util.build_type_blocks(ty, train, Scand_tr, Sctx_tr, TR.sh, true, gaz, cgaz, tr_tlab)
-  local ty_all_te = util.build_type_blocks(ty, test_set, Scand_te, Sctx_te, TE.sh, false, gaz, cgaz, nil)
+  local ty_all_tr, n_sparse = util.build_type_blocks(ty, train, Scand_tr, Sctx_tr, true, gaz, cgaz, tr_tlab)
+  local ty_all_te = util.build_type_blocks(ty, test_set, Scand_te, Sctx_te, false, gaz, cgaz, nil)
   local n_ty_blocks = #ty_all_tr
   local te_gaz_r = { [n_sparse + 1] = gaz:block(test_set.texts, Scand_te, nil),
     [n_sparse + 2] = cgaz:block(test_set.texts, Scand_te, nil) }
   util.rms_scale_blocks(ty_all_tr, { ty_all_te, te_gaz_r }, n_sparse + 1)
-  local edef = (cfg.type.exponent or {}).def
-  local ty_relevance, ty_exp_def = {}, {}
+  local ty_relevance = {}
   for b = 1, n_ty_blocks do
     ty_relevance[b] = (b > n_sparse) and "auc" or "bns"
-    local d = type(edef) == "table" and edef[b] or edef
-    ty_exp_def[b] = (d ~= nil and d ~= false) and d or 1
-  end
-  local sdef = (cfg.type.scales or {}).def
-  local ty_sc_def = {}
-  for j = 1, n_ty_blocks do
-    local d = type(sdef) == "table" and sdef[j] or sdef
-    if d == nil or d == false then ty_sc_def[j] = false else ty_sc_def[j] = d end
   end
   local K = cfg.type.folds
   str.printf("[Type] CV folds=%d trials=%d\n", K, cfg.type.search_trials)
@@ -328,14 +271,15 @@ test("conll-full", function ()
     pool_blocks = ty_all_tr, pool_labels = Ytype, pool_n = n_trc,
     folds = K, cand = Scand_tr, gold = TR.gold,
     relevance = ty_relevance,
-    scales = { min = 0.01, max = 100, log = true, def = ty_sc_def },
-    exponent = { min = 0, max = 8, def = ty_exp_def },
+    scales = cfg.type.scales,
+    exponent = cfg.type.exponent,
     n_labels = N_TYPES + 1,
     kernel = cfg.type.kernel, nu = cfg.type.nu, gamma = cfg.type.gamma,
     order = cfg.type.order, depth = cfg.type.depth, tangent = cfg.type.tangent,
     lambda = cfg.type.lambda,
     n_landmarks = cfg.emb.n_landmarks, search_landmarks = cfg.search_landmarks, k = 1, decode_offset = cfg.type.decode_offset,
     landmark_rounds = cfg.landmark_rounds, search_landmark_rounds = cfg.search_landmark_rounds,
+    landmark_buf_path = "test/res/conll-full-type-lm",
     search_trials = cfg.type.search_trials, verbose = cfg.verbose, each = util.make_ridge_log(stopwatch),
   })
   collectgarbage("collect")

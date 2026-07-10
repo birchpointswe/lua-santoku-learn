@@ -10,6 +10,14 @@ local function iv (...)
   return v
 end
 
+local function iveq (a, b)
+  if a:size() ~= b:size() then return false end
+  for i = 0, a:size() - 1 do
+    if a:get(i) ~= b:get(i) then return false end
+  end
+  return true
+end
+
 test("tokenizer", function ()
 
   test("plain text: grow then frozen", function ()
@@ -63,6 +71,21 @@ test("tokenizer", function ()
     local X1 = tk:tokenize({ texts = { "hello world" }, focus = F })
     local X2 = tk2:tokenize({ texts = { "hello world" }, focus = F })
     assert(X1:eq(X2))
+  end)
+
+  test("words: raw byte spans, both modes", function ()
+    local W = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    local off, st, en = tokenizer.words({ n = 2,
+      texts = { "U.N. official", "" }, word_characters = W })
+    assert(iveq(off, iv(0, 3, 3)))
+    assert(iveq(st, iv(0, 2, 5)))
+    assert(iveq(en, iv(1, 3, 13)))
+    local off2, st2, en2 = tokenizer.words({ n = 1,
+      texts = { "U.N. official" }, word_characters = W, punctuation = true })
+    assert(iveq(off2, iv(0, 5)))
+    assert(iveq(st2, iv(0, 1, 2, 3, 5)))
+    assert(iveq(en2, iv(1, 2, 3, 4, 13)))
+    assert(not pcall(function () tokenizer.words({ n = 1, texts = { "x" } }) end))
   end)
 
 end)

@@ -657,6 +657,45 @@ static int tk_tokenizer_tokenize_raw_lua (lua_State *L) {
   return 3;
 }
 
+static int tk_tokenizer_words_lua (lua_State *L) {
+  luaL_checktype(L, 1, LUA_TTABLE);
+  int n = (int) tk_lua_fcheckunsigned(L, 1, "words", "n");
+  int punct = tk_lua_foptboolean(L, 1, "words", "punctuation", 0);
+  uint8_t cls[256];
+  memset(cls, 0, 256);
+  lua_getfield(L, 1, "word_characters");
+  size_t wlen; const char *wc = lua_tolstring(L, -1, &wlen);
+  if (!wc || wlen == 0)
+    return luaL_error(L, "words: word_characters required");
+  for (size_t i = 0; i < wlen; i++) cls[(uint8_t) wc[i]] = 1;
+  lua_pop(L, 1);
+  if (punct)
+    for (int b = 0; b < 256; b++)
+      if (!cls[b] && b != 0x20 && !(b >= 0x09 && b <= 0x0D)) cls[b] = 2;
+  lua_getfield(L, 1, "texts");
+  luaL_checktype(L, -1, LUA_TTABLE);
+  int ti = lua_gettop(L);
+  tk_ivec_t *off = tk_ivec_create(L, 0), *st = tk_ivec_create(L, 0), *en = tk_ivec_create(L, 0);
+  tk_ivec_push(off, 0);
+  for (int d = 0; d < n; d++) {
+    lua_rawgeti(L, ti, d + 1);
+    size_t len; const unsigned char *b = (const unsigned char *) lua_tolstring(L, -1, &len);
+    lua_pop(L, 1);
+    size_t i = 0;
+    while (i < len) {
+      uint8_t c = cls[b[i]];
+      if (!c) { i++; continue; }
+      size_t j = i + 1;
+      while (j < len && cls[b[j]] == c) j++;
+      tk_ivec_push(st, (int64_t) i);
+      tk_ivec_push(en, (int64_t) j);
+      i = j;
+    }
+    tk_ivec_push(off, (int64_t) st->n);
+  }
+  return 3;
+}
+
 static luaL_Reg tk_tokenizer_mt_fns[] = {
   { "fit", tk_tokenizer_fit_lua },
   { "tokenize", tk_tokenizer_tokenize_lua },
@@ -669,6 +708,7 @@ static luaL_Reg tk_tokenizer_fns[] = {
   { "create", tk_tokenizer_create_lua },
   { "load", tk_tokenizer_load_lua },
   { "tokenize_raw", tk_tokenizer_tokenize_raw_lua },
+  { "words", tk_tokenizer_words_lua },
   { NULL, NULL }
 };
 
