@@ -1,6 +1,8 @@
 require("santoku.error")
 local aho = require("santoku.learn.aho")
 local pvec = require("santoku.pvec")
+local spans = require("santoku.spans")
+local ivec = require("santoku.ivec")
 local test = require("santoku.test")
 
 
@@ -165,28 +167,14 @@ test("aho", function ()
     assert(ends:get(2) == 8)
   end)
 
-  test("word_characters filters embedded matches", function ()
+  test("tag with tokens", function ()
     local ac = aho.create({ patterns = { "cat" } })
-    local S = ac:predict({ texts = { "cat concatenate cat." } })
-    assert(S:col("id"):size() == 3)
-    S = ac:predict({
-      texts = { "cat concatenate cat." },
-      word_characters = "abcdefghijklmnopqrstuvwxyz"
-    })
-    local mids, starts, ends = S:col("id"), S:col("s"), S:col("e")
-    assert(mids:size() == 2)
-    assert(starts:get(0) == 0)
-    assert(ends:get(0) == 3)
-    assert(starts:get(1) == 16)
-    assert(ends:get(1) == 19)
-  end)
-
-  test("tag with word_characters", function ()
-    local ac = aho.create({ patterns = { "cat" } })
+    local T = spans.create({ offsets = ivec.create({ 0, 3 }),
+      s = ivec.create({ 0, 4, 16 }), e = ivec.create({ 3, 15, 19 }) })
     local result = ac:tag({
       texts = { "cat concatenate cat" },
       fmt = "[%match]",
-      word_characters = "abcdefghijklmnopqrstuvwxyz"
+      tokens = T
     })
     assert(result[1] == "[cat] concatenate [cat]")
   end)
@@ -370,6 +358,30 @@ test("aho", function ()
     assert(exc_hits:get(0) == 1)
     assert(exc_hits:get(1) == 0)
     assert(exc_hits:get(2) == 1)
+  end)
+
+  test("tokens filter: matches must align to token boundaries", function ()
+    local ac = aho.create({ patterns = { "cat" } })
+    local texts = { "cat concatenate cat.", "cat" }
+    -- token spans: doc1 words [0,3) [4,15) [16,19); doc2 [0,3)
+    local T = spans.create({ offsets = ivec.create({ 0, 3, 4 }),
+      s = ivec.create({ 0, 4, 16, 0 }), e = ivec.create({ 3, 15, 19, 3 }) })
+    local S = ac:predict({ texts = texts })
+    assert(S:col("id"):size() == 4)          -- embedded "cat"s included
+    S = ac:predict({ texts = texts, tokens = T })
+    local starts, ends = S:col("s"), S:col("e")
+    assert(S:col("id"):size() == 3)          -- embedded "cat" in concatenate dropped
+    assert(starts:get(0) == 0 and ends:get(0) == 3)
+    assert(starts:get(1) == 16 and ends:get(1) == 19)
+    assert(starts:get(2) == 0 and ends:get(2) == 3)
+    -- multi-token surface: start on one token, end on another
+    local ac2 = aho.create({ patterns = { "new york" } })
+    local T2 = spans.create({ offsets = ivec.create({ 0, 3 }),
+      s = ivec.create({ 0, 4, 9 }), e = ivec.create({ 3, 8, 13 }) })
+    local S2 = ac2:predict({ texts = { "new york city" }, tokens = T2 })
+    assert(S2:col("id"):size() == 1)
+    -- doc-count mismatch errors
+    assert(not pcall(function () ac:predict({ texts = { "cat" }, tokens = T }) end))
   end)
 
   test("persist/load roundtrip", function ()

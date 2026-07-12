@@ -33,15 +33,18 @@ test("housing CV", function ()
 
   local cont_mean = train.continuous:center()
   test_set.continuous:center(cont_mean)
-  local pool_blocks = util.columns_as_blocks(train.continuous)
-  local test_blocks = util.columns_as_blocks(test_set.continuous)
-  for j = 1, n_cont do local sp = pool_blocks[j]:standardize(); test_blocks[j]:standardize(sp) end
+  local Xc = train.continuous:to_sparse():i32()
+  local sp = Xc:standardize()
+  local Xt = test_set.continuous:to_sparse():i32()
+  Xt:standardize(sp)
   local bits = train.bits:i32(); local bits_std = bits:standardize()
   local bits_t = test_set.bits:i32(); bits_t:standardize(bits_std)
-  pool_blocks[#pool_blocks + 1] = bits; test_blocks[#test_blocks + 1] = bits_t
-  local nblk = #pool_blocks
-  str.printf("[Data] pool=%d test=%d blocks=%d folds=%d trials=%d\n",
-    train.n, test_set.n, nblk, cfg.folds, cfg.search_trials)
+  local go = {}
+  for g = 0, n_cont do go[g + 1] = g end
+  local pool_blocks = { { x = Xc, group_offsets = go }, bits }
+  local test_blocks = { { x = Xt, group_offsets = go }, bits_t }
+  str.printf("[Data] pool=%d test=%d gauge_dims=%d folds=%d trials=%d\n",
+    train.n, test_set.n, n_cont + 1, cfg.folds, cfg.search_trials)
 
   local _, ridge_obj, deploy = optimize.krr({
     pool_blocks = pool_blocks,

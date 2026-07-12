@@ -121,15 +121,9 @@ typedef struct {
 } tk_aho_scan_result_t;
 
 static inline void tk_aho_emit_match (
-  tk_aho_match_t **m, int64_t *m_n, int64_t *cap, const uint8_t *wbound,
-  const char *text, size_t tlen, int64_t id, int64_t pri, int64_t os, int64_t oe
+  tk_aho_match_t **m, int64_t *m_n, int64_t *cap,
+  int64_t id, int64_t pri, int64_t os, int64_t oe
 ) {
-  if (wbound) {
-    if (os > 0 && wbound[(uint8_t)text[os - 1]])
-      return;
-    if ((size_t)oe < tlen && wbound[(uint8_t)text[oe]])
-      return;
-  }
   if (*m_n >= *cap) {
     *cap *= 2;
     *m = (tk_aho_match_t *)realloc(*m, (uint64_t)*cap * sizeof(tk_aho_match_t));
@@ -141,10 +135,21 @@ static inline void tk_aho_emit_match (
   (*m_n)++;
 }
 
+// sorted-membership: does x appear in ascending a[0..n)?
+static inline int tk_aho_span_has (const int64_t *a, int64_t n, int64_t x) {
+  int64_t lo = 0, hi = n;
+  while (lo < hi) {
+    int64_t mid = (lo + hi) / 2;
+    if (a[mid] < x) lo = mid + 1; else hi = mid;
+  }
+  return lo < n && a[lo] == x;
+}
+
 static tk_aho_scan_result_t tk_aho_scan (
   tk_aho_trie_t *a, const char **texts, size_t *tlens,
   int n_texts, bool longest, tk_pvec_t *exc,
-  const uint8_t *wbound, bool want_exclude_hits
+  const int64_t *tko, const int64_t *tks, const int64_t *tke,
+  bool want_exclude_hits
 ) {
   tk_aho_match_t **pt_matches = (tk_aho_match_t **)calloc((uint64_t)n_texts, sizeof(tk_aho_match_t *));
   int64_t *pt_counts = (int64_t *)calloc((uint64_t)n_texts, sizeof(int64_t));
@@ -186,7 +191,7 @@ static tk_aho_scan_result_t tk_aho_scan (
                   else
                     break;
                 }
-                tk_aho_emit_match(&local_m, &m_n, &local_cap, wbound, texts[ti], tlen,
+                tk_aho_emit_match(&local_m, &m_n, &local_cap,
                   a->output_id[tmp], a->output_pri[tmp], os, oe);
               }
               tmp = a->output_link[tmp];
@@ -203,12 +208,24 @@ static tk_aho_scan_result_t tk_aho_scan (
             if (a->output_id[tmp] >= 0) {
               int64_t os = (int64_t)i - a->output_len[tmp] + 1;
               int64_t oe = (int64_t)(i + 1);
-              tk_aho_emit_match(&local_m, &m_n, &local_cap, wbound, texts[ti], tlen,
+              tk_aho_emit_match(&local_m, &m_n, &local_cap,
                 a->output_id[tmp], a->output_pri[tmp], os, oe);
             }
             tmp = a->output_link[tmp];
           }
         }
+      }
+
+      if (tko && m_n > 0) {
+        // tokens filter: keep matches whose [start,end) aligns with a token start AND a token end
+        const int64_t *ds = tks + tko[ti], *de = tke + tko[ti];
+        int64_t dn = tko[ti + 1] - tko[ti];
+        int64_t write = 0;
+        for (int64_t j = 0; j < m_n; j++)
+          if (tk_aho_span_has(ds, dn, local_m[j].start)
+            && tk_aho_span_has(de, dn, local_m[j].end))
+            local_m[write++] = local_m[j];
+        m_n = write;
       }
 
       if (exc && exc->n > 0 && m_n > 0) {
@@ -527,7 +544,7 @@ static int tk_aho_create_lua (lua_State *L)
 
 static void tk_aho_parse_scan_opts (
   lua_State *L, int i, char *name,
-  bool *longest, tk_pvec_t **exc, uint8_t **wbound
+  bool *longest, tk_pvec_t **exc, tk_spans_t **tok
 ) {
   *longest = tk_lua_foptboolean(L, i, name, "longest", false);
   *exc = NULL;
@@ -535,16 +552,33 @@ static void tk_aho_parse_scan_opts (
   if (lua_type(L, -1) == LUA_TUSERDATA)
     *exc = tk_pvec_peek(L, -1, "exclude");
   lua_pop(L, 1);
-  *wbound = NULL;
-  lua_getfield(L, i, "word_characters");
-  if (lua_type(L, -1) == LUA_TSTRING) {
-    size_t blen;
-    const char *bs = lua_tolstring(L, -1, &blen);
-    *wbound = (uint8_t *)calloc(256, 1);
-    for (size_t j = 0; j < blen; j++)
-      (*wbound)[(uint8_t)bs[j]] = 1;
-  }
+  *tok = NULL;
+  lua_getfield(L, i, "tokens");
+  if (!lua_isnil(L, -1))
+    *tok = tk_spans_peek(L, -1, "tokens");
   lua_pop(L, 1);
+}
+
+// Resolve the optional tokens spans into per-doc start/end arrays for the scan filter.
+static void tk_aho_token_arrays (
+  lua_State *L, char *name, tk_spans_t *T, int n_texts,
+  const int64_t **tko, const int64_t **tks, const int64_t **tke
+) {
+  *tko = NULL; *tks = NULL; *tke = NULL;
+  if (T == NULL)
+    return;
+  int64_t is = tk_spans_colidx(T, "s"), ie = tk_spans_colidx(T, "e");
+  if (is < 0 || ie < 0) {
+    tk_lua_verror(L, 2, name, "tokens spans need columns \"s\" and \"e\"");
+    return;
+  }
+  if ((int64_t) tk_spans_docs(T) != (int64_t) n_texts) {
+    tk_lua_verror(L, 2, name, "tokens doc count does not match texts");
+    return;
+  }
+  *tko = T->offsets->a;
+  *tks = T->cols[is]->a;
+  *tke = T->cols[ie]->a;
 }
 
 static const char **tk_aho_collect_texts (
@@ -574,17 +608,19 @@ static int tk_aho_predict_lua (lua_State *L)
 
   bool longest;
   tk_pvec_t *exc;
-  uint8_t *wbound;
-  tk_aho_parse_scan_opts(L, 2, "aho.predict", &longest, &exc, &wbound);
+  tk_spans_t *tok;
+  tk_aho_parse_scan_opts(L, 2, "aho.predict", &longest, &exc, &tok);
 
   int n_texts;
   size_t *tlens;
   const char **texts = tk_aho_collect_texts(L, 2, &n_texts, &tlens);
+  const int64_t *tko, *tks, *tke;
+  tk_aho_token_arrays(L, "aho.predict", tok, n_texts, &tko, &tks, &tke);
 
-  tk_aho_scan_result_t res = tk_aho_scan(&a->trie, texts, tlens, n_texts, longest, exc, wbound, true);
+  tk_aho_scan_result_t res = tk_aho_scan(&a->trie, texts, tlens, n_texts, longest, exc,
+    tko, tks, tke, true);
   free(texts);
   free(tlens);
-  free(wbound);
 
   uint64_t mn = res.total > 0 ? (uint64_t)res.total : 1;
   tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t)(n_texts + 1));
@@ -636,8 +672,8 @@ static int tk_aho_tag_lua (lua_State *L)
 
   bool longest;
   tk_pvec_t *exc;
-  uint8_t *wbound;
-  tk_aho_parse_scan_opts(L, 2, "aho.tag", &longest, &exc, &wbound);
+  tk_spans_t *tok;
+  tk_aho_parse_scan_opts(L, 2, "aho.tag", &longest, &exc, &tok);
 
   lua_getfenv(L, 1);
   lua_getfield(L, -1, "names");
@@ -647,8 +683,11 @@ static int tk_aho_tag_lua (lua_State *L)
   int n_texts;
   size_t *tlens;
   const char **texts = tk_aho_collect_texts(L, 2, &n_texts, &tlens);
+  const int64_t *tko, *tks, *tke;
+  tk_aho_token_arrays(L, "aho.tag", tok, n_texts, &tko, &tks, &tke);
 
-  tk_aho_scan_result_t res = tk_aho_scan(&a->trie, texts, tlens, n_texts, longest, exc, wbound, false);
+  tk_aho_scan_result_t res = tk_aho_scan(&a->trie, texts, tlens, n_texts, longest, exc,
+    tko, tks, tke, false);
 
   lua_newtable(L);
   int result_idx = lua_gettop(L);
@@ -736,7 +775,6 @@ static int tk_aho_tag_lua (lua_State *L)
 
   free(texts);
   free(tlens);
-  free(wbound);
   tk_aho_scan_free(&res);
 
   lua_pushvalue(L, result_idx);

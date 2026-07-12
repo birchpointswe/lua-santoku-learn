@@ -7,8 +7,6 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
-local word_characters = util.WORD_CHARACTERS
-
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
@@ -16,8 +14,8 @@ local cfg = {
   search_landmark_rounds = 1,
   landmark_buf_path = "test/res/eurlex-lm",
   blocks = {
-    { ngram_min = 1, ngram_max = 5, word_characters = word_characters },
-    -- { ngram_min = 1, ngram_max = 3, word_characters = word_characters, words = true },
+    { ngram_min = 1, ngram_max = 5, mode = "flat" },
+    -- { ngram_min = 1, ngram_max = 3, mode = "words" },
   },
   relevance = { "bns"--[[, "bns"]] },
   -- scales = { def = { 81.8926, 0.0122111 } },
@@ -46,8 +44,10 @@ test("eurlex CV", function ()
   str.printf("[Data] pool=%d test=%d labels=%d folds=%d trials=%d\n",
     train.n, test_set.n, n_labels, cfg.folds, cfg.search_trials)
 
-  local toks, pool_blocks = util.tokenize_blocks(cfg.blocks, pool_texts)
-  local _, test_blocks = util.tokenize_blocks(cfg.blocks, test_texts, toks)
+  local Wtr = util.word_spans(pool_texts, train.n)
+  local Wte = util.word_spans(test_texts, test_set.n)
+  local toks, pool_blocks = util.tokenize_blocks(cfg.blocks, pool_texts, { tokens = Wtr })
+  local _, test_blocks = util.tokenize_blocks(cfg.blocks, test_texts, { toks = toks, tokens = Wte })
 
   local _, ridge_obj, deploy, best, decider = optimize.krr({
     pool_blocks = pool_blocks,
@@ -77,6 +77,6 @@ test("eurlex CV", function ()
     blocks = test_blocks, n = test_set.n, k = cfg.k })
   local _, m = decider:score({ pred = P, expected = test_set.labels, n_samples = test_set.n })
   local _, total = stopwatch()
-  str.printf("[Result] scales=%s offset=%.6g | test %s\nTotal: %.1fs\n",
+  str.printf("[Result] scales=%s offset=%.8g | test %s\nTotal: %.1fs\n",
     util.vecstr(best.scales), decider:offset(), util.fmt_metrics(m), total)
 end)

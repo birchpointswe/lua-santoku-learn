@@ -240,9 +240,6 @@ local function seed_center (s, name, seed)
   end
 end
 
--- Helmert ILR (isometric log-ratio): N log-values on the zero-sum hyperplane <-> N-1 orthonormal
--- coords. Used for gauge (scales) so the search drops the redundant uniform-scale direction (killed
--- by L2-norm) and works in a full-rank, geomean-1 space.
 local function ilr_forward (y)
   local N = #y
   local z = {}
@@ -598,7 +595,7 @@ local function decode_mode (args, dense)
 end
 
 local REBUILD_KNOBS = {
-  { key = "scales", defaults = { min = 0.01, max = 100, log = true }, gauge = true },
+  { key = "scales", defaults = { min = 0.01, max = 1000, log = true }, gauge = true },
   { key = "exponent", defaults = { min = 0, max = 8 } },
 }
 
@@ -850,7 +847,6 @@ M.krr = function (args)
         spectral_args.landmark_rounds = rounds
         spectral_args.landmark_seed = seed + 1000 * ((fold or 0) + 1)
       else
-        -- final: random (uniform) landmarks at full n_landmarks (matches the random-trial regime)
         spectral_args.landmarks = spectral.uniform_landmarks(spectral_args, args.n_landmarks, seed + 1000 * ((fold or 0) + 1))
         spectral_args.landmark_rounds = nil
       end
@@ -1072,7 +1068,7 @@ M.krr = function (args)
     or (families.cosine and (args.search_trials or 30) or 0)
   local btot = (km_trials or 0)
     + (families.arccos and arccos_trials or 0)
-  local n_blocks = (args.pool_blocks and #args.pool_blocks) or 1
+  local n_blocks = args.gauge_dims or (args.pool_blocks and #args.pool_blocks) or 1
   local rebuild_knobs = {}
   for _, kdef in ipairs(REBUILD_KNOBS) do
     local spec = args[kdef.key]
@@ -1116,8 +1112,6 @@ M.krr = function (args)
         local M = #knob.active
         knob.box_min = kdef.defaults.min
         knob.box_max = kdef.defaults.max
-        -- box that matches the original independent per-scale log-uniform spread (Var(log s)=L^2/3),
-        -- so the gauge-free prior isn't wider than what the per-block box implied.
         local c = math.log(kdef.defaults.max or 100) / math.sqrt(1 - 1 / math.max(M, 2))
         local centers
         if all_def and M > 1 then

@@ -7,8 +7,6 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
-local word_characters = util.WORD_CHARACTERS
-
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
@@ -16,8 +14,8 @@ local cfg = {
   search_landmark_rounds = 1,
   data = { max = nil },
   blocks = {
-    { ngram_min = 1, ngram_max = 5, word_characters = word_characters },
-    { ngram_min = 1, ngram_max = 3, word_characters = word_characters, words = true },
+    { ngram_min = 1, ngram_max = 5, mode = "flat" },
+    { ngram_min = 1, ngram_max = 3, mode = "words" },
   },
   relevance = { "bns", "bns" },
   scales = { def = { 0.875402, 1.14233 } },
@@ -39,8 +37,10 @@ test("newsgroups CV", function ()
   str.printf("[Data] pool=%d test=%d classes=%d folds=%d trials=%d\n",
     pool.n, test_set.n, cfg.classes, cfg.folds, cfg.search_trials)
 
-  local toks, pool_blocks = util.tokenize_blocks(cfg.blocks, pool.problems)
-  local _, test_blocks = util.tokenize_blocks(cfg.blocks, test_set.problems, toks)
+  local Wtr = util.word_spans(pool.problems, pool.n)
+  local Wte = util.word_spans(test_set.problems, test_set.n)
+  local toks, pool_blocks = util.tokenize_blocks(cfg.blocks, pool.problems, { tokens = Wtr })
+  local _, test_blocks = util.tokenize_blocks(cfg.blocks, test_set.problems, { toks = toks, tokens = Wte })
 
   local sp_enc, ridge_obj, deploy, best, decider, _, bake = optimize.krr({
     pool_blocks = pool_blocks,
@@ -67,7 +67,7 @@ test("newsgroups CV", function ()
   local _, m = decider:score({ scores = ridge_obj:regress(test_codes),
     n_samples = test_set.n, expected = test_set.labels })
   local _, total = stopwatch()
-  str.printf("[Result] scales=%s lambda=%.4g | test %s\nTotal: %.1fs\n",
+  str.printf("[Result] scales=%s lambda=%.8g | test %s\nTotal: %.1fs\n",
     util.vecstr(best.scales), best.lambda or 0, util.fmt_metrics(m), total)
 
   local baked = bake(test_blocks)
@@ -76,15 +76,17 @@ test("newsgroups CV", function ()
   bundle.persist({ dir = bdir, tokenizers = toks, encoder = sp_enc, ridge = ridge_obj,
     decider = decider, blocks = baked })
   local b = bundle.load(bdir)
-  local _, test_blocks_b = util.tokenize_blocks(cfg.blocks, test_set.problems, b.tokenizers)
+  local _, test_blocks_b = util.tokenize_blocks(cfg.blocks, test_set.problems, { toks = b.tokenizers, tokens = Wte })
   local test_codes_b = b.encode(test_blocks_b)
   assert(test_codes:eq(test_codes_b), "bundle deploy codes diverge")
   assert(ridge_obj:regress(test_codes):eq(b.ridge:regress(test_codes_b)), "bundle scores diverge")
   assert(b.decider:offset() == decider:offset(), "bundle decider diverges")
   str.printf("[Bundle] round-trip bit-identical\n")
-  for _, f in ipairs({ "tokenizer_1.bin", "tokenizer_2.bin", "encoder.bin", "ridge.bin",
-      "decider.bin", "colscale_1.bin", "colscale_2.bin", "manifest.lua" }) do
-    os.remove(bdir .. "/" .. f)
+  local files = { "encoder.bin", "ridge.bin", "decider.bin", "manifest.lua" }
+  for i = 1, #cfg.blocks do
+    files[#files + 1] = "tokenizer_" .. i .. ".bin"
+    files[#files + 1] = "colscale_" .. i .. ".bin"
   end
+  for _, f in ipairs(files) do os.remove(bdir .. "/" .. f) end
   os.remove(bdir)
 end)

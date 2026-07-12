@@ -7,8 +7,6 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
-local word_characters = util.WORD_CHARACTERS
-
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
@@ -16,8 +14,8 @@ local cfg = {
   search_landmark_rounds = 1,
   data = { ttr = 0.5 },
   blocks = {
-    { ngram_min = 1, ngram_max = 5, word_characters = word_characters },
-    { ngram_min = 1, ngram_max = 3, word_characters = word_characters, words = true },
+    { ngram_min = 1, ngram_max = 5, mode = "flat" },
+    { ngram_min = 1, ngram_max = 3, mode = "words" },
   },
   relevance = { "bns", "bns" },
   scales = { def = { 1.844, 0.542301 } },
@@ -40,8 +38,10 @@ test("imdb CV", function ()
   str.printf("[Data] pool=%d test=%d folds=%d trials=%d\n",
     train.n, test_set.n, cfg.folds, cfg.search_trials)
 
-  local toks, pool_blocks = util.tokenize_blocks(cfg.blocks, train.problems)
-  local _, test_blocks = util.tokenize_blocks(cfg.blocks, test_set.problems, toks)
+  local Wtr = util.word_spans(train.problems, train.n)
+  local Wte = util.word_spans(test_set.problems, test_set.n)
+  local toks, pool_blocks = util.tokenize_blocks(cfg.blocks, train.problems, { tokens = Wtr })
+  local _, test_blocks = util.tokenize_blocks(cfg.blocks, test_set.problems, { toks = toks, tokens = Wte })
 
   local _, ridge_obj, deploy, best, decider = optimize.krr({
     pool_blocks = pool_blocks,
@@ -70,6 +70,6 @@ test("imdb CV", function ()
     blocks = test_blocks, n = test_set.n, k = 1 })
   local _, m = decider:score({ pred = P, expected = test_set.labels, n_samples = test_set.n })
   local _, total = stopwatch()
-  str.printf("[Result] scales=%s lambda=%.4g offset=%.6g | test %s\nTotal: %.1fs\n",
+  str.printf("[Result] scales=%s lambda=%.8g offset=%.8g | test %s\nTotal: %.1fs\n",
     util.vecstr(best.scales), best.lambda or 0, decider:offset(), util.fmt_metrics(m), total)
 end)

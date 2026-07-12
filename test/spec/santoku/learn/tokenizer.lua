@@ -1,26 +1,23 @@
 require("santoku.error")
 local tokenizer = require("santoku.learn.tokenizer")
+local re = require("santoku.re")
 local ivec = require("santoku.ivec")
 local spans = require("santoku.spans")
 local test = require("santoku.test")
 
-local function iv (...)
-  local v = ivec.create()
-  for _, x in ipairs({ ... }) do v:push(x) end
-  return v
-end
+local word_prog = re.prog("[A-Za-z0-9]+")
 
-local function iveq (a, b)
-  if a:size() ~= b:size() then return false end
-  for i = 0, a:size() - 1 do
-    if a:get(i) ~= b:get(i) then return false end
-  end
-  return true
+local texts = { "Hello, w\195\182rld 42!", "a.b c-d  x", "", "  lead trail  ", "one" }
+local n = #texts
+
+local function word_tokens ()
+  local woff, ws, we = tokenizer.extract({ n = n, texts = texts, pattern = word_prog })
+  return spans.create({ offsets = woff, s = ws, e = we })
 end
 
 test("tokenizer", function ()
 
-  test("plain text: grow then frozen", function ()
+  test("chars: grow then frozen", function ()
     local tk = tokenizer.create({ ngram_min = 3, ngram_max = 3 })
     local X = tk:fit({ texts = { "hello", "world" } })
     assert((X:shape()) == 2)              -- one row per doc
@@ -39,53 +36,68 @@ test("tokenizer", function ()
 
   test("focus brackets: one row per focus span", function ()
     local tk = tokenizer.create({ ngram_min = 3, ngram_max = 5, terminals = true, focus = true })
-    local F = spans.create({ offsets = iv(0, 2), s = iv(0, 4), e = iv(3, 7) })
+    local F = spans.create({ offsets = ivec.create({ 0, 2 }), s = ivec.create({ 0, 4 }), e = ivec.create({ 3, 7 }) })
     local X = tk:fit({ texts = { "abc def" }, focus = F })
     assert((X:shape()) == 2)              -- 2 focus spans -> 2 rows
     assert(tk:n_tokens() > 0)
   end)
 
-  test("types=true renders a per-token type skeleton", function ()
-    local tk = tokenizer.create({ ngram_min = 3, ngram_max = 5, n_types = 4, terminals = true, focus = true, types = true })
-    local F = spans.create({ offsets = iv(0, 1), s = iv(4), e = iv(9) })
-    local T = spans.create({ offsets = iv(0, 4), s = iv(0, 4, 10, 16), e = iv(3, 9, 15, 19), ty = iv(4, 0, 1, 4) })
-    local X = tk:fit({ texts = { "the quick brown fox" }, focus = F, types = T })   -- O PER ORG O
-    assert((X:shape()) == 1)
+  test("mode=words/flat: extract-fed, grow==frozen", function ()
+    local T = word_tokens()
+    local F = spans.create({ offsets = ivec.create({ 0, 1, 3, 3, 4, 5 }),
+      s = ivec.create({ 2, 1, 4, 3, 0 }), e = ivec.create({ 9, 3, 9, 8, 3 }) })
+    local w = tokenizer.create({ ngram_min = 1, ngram_max = 3, mode = "words",
+      terminals = true, focus = true })
+    local X = w:fit({ texts = texts, focus = F, tokens = T })
+    assert((X:shape()) == 5)              -- one row per focus span
+    assert(w:n_tokens() > 0)
+    assert(X:eq(w:tokenize({ texts = texts, focus = F, tokens = T })))
+    local f = tokenizer.create({ ngram_min = 1, ngram_max = 4, mode = "flat",
+      terminals = true })
+    local Y = f:fit({ texts = texts, tokens = T })
+    assert((Y:shape()) == 5)              -- one row per doc
+    assert(f:n_tokens() > 0)
+    assert(Y:eq(f:tokenize({ texts = texts, tokens = T })))
+  end)
+
+  test("mode=tags: tokens carry the ty column", function ()
+    local F = spans.create({ offsets = ivec.create({ 0, 1, 3, 3, 4, 5 }),
+      s = ivec.create({ 2, 1, 4, 3, 0 }), e = ivec.create({ 9, 3, 9, 8, 3 }) })
+    local C = spans.create({ offsets = ivec.create({ 0, 2, 4, 4, 5, 6 }),
+      s = ivec.create({ 0, 7, 0, 4, 2, 0 }), e = ivec.create({ 5, 12, 3, 7, 6, 3 }),
+      ty = ivec.create({ 0, 2, 1, 0, 2, 1 }) })
+    local tk = tokenizer.create({ ngram_min = 1, ngram_max = 3, mode = "tags",
+      n_tags = 3, terminals = true, focus = true })
+    local Z = tk:fit({ texts = texts, focus = F, tokens = C })
+    assert((Z:shape()) == 5)
     assert(tk:n_tokens() > 0)
+    assert(Z:eq(tk:tokenize({ texts = texts, focus = F, tokens = C })))
   end)
 
   test("validity errors", function ()
-    assert(not pcall(function () tokenizer.create({ ngram_min = 3, ngram_max = 5, normalize = true, types = true, n_types = 2 }) end))
-    assert(not pcall(function () tokenizer.create({ ngram_min = 3, ngram_max = 5, types = true }) end))   -- n_types required
+    -- mode=tags requires n_tags; normalize is chars-only
+    assert(not pcall(function () tokenizer.create({ ngram_max = 3, mode = "tags" }) end))
+    assert(not pcall(function () tokenizer.create({ ngram_max = 3, mode = "flat", normalize = true }) end))
+    assert(not pcall(function () tokenizer.create({ ngram_max = 3, mode = "tags", n_tags = 2, normalize = true }) end))
+    -- flat/words/tags tokenize without tokens spans
+    local f = tokenizer.create({ ngram_max = 3, mode = "flat" })
+    assert(not pcall(function () f:fit({ texts = { "x y" } }) end))
   end)
 
   test("persist/load round-trips to an identical CSR", function ()
-    local tk = tokenizer.create({ ngram_min = 3, ngram_max = 4, terminals = true, focus = true })
-    local F = spans.create({ offsets = iv(0, 1), s = iv(0), e = iv(5) })
-    tk:fit({ texts = { "hello world" }, focus = F })
+    local T = word_tokens()
+    local tk = tokenizer.create({ ngram_min = 1, ngram_max = 3, mode = "words",
+      terminals = true, focus = true })
+    local F = spans.create({ offsets = ivec.create({ 0, 1, 1, 1, 1, 1 }), s = ivec.create({ 0 }), e = ivec.create({ 8 }) })
+    tk:fit({ texts = texts, focus = F, tokens = T })
     local path = os.tmpname()
     tk:persist(path)
     local tk2 = tokenizer.load(path)
     os.remove(path)
     assert(tk2:n_tokens() == tk:n_tokens())
-    local X1 = tk:tokenize({ texts = { "hello world" }, focus = F })
-    local X2 = tk2:tokenize({ texts = { "hello world" }, focus = F })
+    local X1 = tk:tokenize({ texts = texts, focus = F, tokens = T })
+    local X2 = tk2:tokenize({ texts = texts, focus = F, tokens = T })
     assert(X1:eq(X2))
-  end)
-
-  test("words: raw byte spans, both modes", function ()
-    local W = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-    local off, st, en = tokenizer.words({ n = 2,
-      texts = { "U.N. official", "" }, word_characters = W })
-    assert(iveq(off, iv(0, 3, 3)))
-    assert(iveq(st, iv(0, 2, 5)))
-    assert(iveq(en, iv(1, 3, 13)))
-    local off2, st2, en2 = tokenizer.words({ n = 1,
-      texts = { "U.N. official" }, word_characters = W, punctuation = true })
-    assert(iveq(off2, iv(0, 5)))
-    assert(iveq(st2, iv(0, 1, 2, 3, 5)))
-    assert(iveq(en2, iv(1, 2, 3, 4, 13)))
-    assert(not pcall(function () tokenizer.words({ n = 1, texts = { "x" } }) end))
   end)
 
 end)

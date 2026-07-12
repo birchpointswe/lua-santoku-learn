@@ -2,31 +2,87 @@ local str = require("santoku.string")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
 local fvec = require("santoku.fvec")
+local spans = require("santoku.spans")
+local re = require("santoku.re")
 
 local M = {}
 
-M.WORD_CHARACTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+local word_prog = re.prog("[A-Za-z0-9]+")
+
+local SHAPE_PATTERN = table.concat({
+  '{:caps: [A-Z][A-Z]+ :} ![A-Za-z0-9]',
+  '{:icap: [A-Z][a-z]+ [A-Z] [A-Za-z]* :} ![A-Za-z0-9]',
+  '{:cap: [A-Z][a-z]+ :} ![A-Za-z0-9]',
+  '{:u1: [A-Z] :} ![A-Za-z0-9]',
+  '{:low: [a-z]+ :} ![A-Za-z0-9]',
+  '{:d4: [0-9][0-9][0-9][0-9] :} ![A-Za-z0-9]',
+  '{:d2: [0-9][0-9] :} ![A-Za-z0-9]',
+  '{:num: [0-9]+ :} ![A-Za-z0-9]',
+  '{:dsuf: [0-9]+ [a-z]+ :} ![A-Za-z0-9]',
+  '{:alnum: [A-Za-z0-9]+ :}',
+  '{:dot: "."+ :} ![^A-Za-z0-9%s]',
+  '{:comma: ","+ :} ![^A-Za-z0-9%s]',
+  '{:hyph: "-"+ :} ![^A-Za-z0-9%s]',
+  '{:apos: "\'"+ :} ![^A-Za-z0-9%s]',
+  '{:quot: ["`]+ :} ![^A-Za-z0-9%s]',
+  '{:paren: [()]+ :} ![^A-Za-z0-9%s]',
+  '{:amp: "&"+ :} ![^A-Za-z0-9%s]',
+  '{:slash: "/"+ :} ![^A-Za-z0-9%s]',
+  '{:punct: [^A-Za-z0-9%s]+ :}',
+}, " / ")
+local shape_prog = re.prog(SHAPE_PATTERN)
+
+M.SHAPE_TAGS = re.tags(SHAPE_PATTERN)
+M.N_SHAPES = 0
+for _ in pairs(M.SHAPE_TAGS) do M.N_SHAPES = M.N_SHAPES + 1 end
+
+function M.word_spans (texts, n)
+  local tokenizer = require("santoku.learn.tokenizer")
+  local off, s, e = tokenizer.extract({ n = n, texts = texts, pattern = word_prog })
+  return spans.create({ offsets = off, s = s, e = e })
+end
+
+function M.shape_spans (texts, n)
+  local tokenizer = require("santoku.learn.tokenizer")
+  local off, s, e, ty = tokenizer.extract({ n = n, texts = texts, pattern = shape_prog })
+  return spans.create({ offsets = off, s = s, e = e, ty = ty })
+end
+
+function M.surface_gaz (splits, n_types, normalize)
+  local aho = require("santoku.learn.aho")
+  local counts = {}
+  for _, sp in ipairs(splits) do
+    local go, gs, ge, gt = sp.gold:offsets(), sp.gold:col("s"), sp.gold:col("e"), sp.gold:col("ty")
+    for d = 1, sp.n do
+      local text = sp.texts[d]
+      for j = go:get(d - 1), go:get(d) - 1 do
+        local surf = text:sub(gs:get(j) + 1, ge:get(j))
+        local c = counts[surf]
+        if not c then c = {}; counts[surf] = c end
+        local ty = gt:get(j)
+        c[ty] = (c[ty] or 0) + 1
+      end
+    end
+  end
+  local patterns, pat_type = {}, ivec.create()
+  for surf, c in pairs(counts) do
+    patterns[#patterns + 1] = surf
+    local bt, bc = 0, -1
+    for ty = 0, n_types - 1 do
+      local k = c[ty] or 0
+      if k > bc then bc, bt = k, ty end
+    end
+    pat_type:push(bt)
+  end
+  return aho.create({ patterns = patterns, normalize = normalize }), pat_type
+end
 
 function M.vecstr (v)
   if type(v) ~= "table" then v = { v } end
   local p = {}
   for i = 1, #v do local x = v[i]
-    p[i] = (x == math.floor(x)) and str.format("%d", x) or str.format("%.6g", x) end
+    p[i] = (x == math.floor(x)) and str.format("%d", x) or str.format("%.8g", x) end
   return "[" .. table.concat(p, ",") .. "]"
-end
-
-function M.build_type_blocks (st, split, Scand, Sctx, is_train, gaz, cgaz, tlab)
-  local blocks = {}
-  local m1, X1 = st.tok(split, Scand, st.models[1])
-  if is_train then st.models[1] = m1 end
-  blocks[1] = X1
-  local m2, X2 = st.tok_ctx(split, Scand, Sctx, st.models[2])
-  if is_train then st.models[2] = m2 end
-  blocks[2] = X2
-  local n_sparse = #blocks
-  blocks[#blocks + 1] = gaz:block(split.texts, Scand, tlab)
-  blocks[#blocks + 1] = cgaz:block(split.texts, Scand, tlab)
-  return blocks, n_sparse
 end
 
 function M.fmt_metrics (m)
@@ -57,23 +113,23 @@ local function format_kernel (p)
   end
   if p.kernel == "matern" then
     local nu = p.nu ~= nil and (NU_NAME[p.nu] or tostring(p.nu)) or "?"
-    local g = p.gamma and str.format(" gamma=%.6g", p.gamma) or ""
+    local g = p.gamma and str.format(" gamma=%.8g", p.gamma) or ""
     return str.format(" kernel=matern nu=%s%s", nu, g)
   elseif p.kernel == "arccos" then
     return str.format(" kernel=arccos n=%d depth=%d %s",
       p.order or 1, p.depth or 1, (p.tangent == 1) and "ntk" or "nngp")
   end
-  local g = p.gamma and str.format(" gamma=%.6g", p.gamma) or ""
+  local g = p.gamma and str.format(" gamma=%.8g", p.gamma) or ""
   return str.format(" kernel=%s%s", p.kernel, g)
 end
 
 local function fmt_exponent (ex)
-  if type(ex) == "number" then return str.format(" exp=%.6g", ex) end
+  if type(ex) == "number" then return str.format(" exp=%.8g", ex) end
   if type(ex) ~= "table" then return "" end
   local parts, any = {}, false
   for i = 1, #ex do
     if ex[i] == false or ex[i] == nil then parts[i] = ""
-    else parts[i] = str.format("%.6g", ex[i]); any = true end
+    else parts[i] = str.format("%.8g", ex[i]); any = true end
   end
   if not any then return "" end
   return " exp=[" .. table.concat(parts, ",") .. "]"
@@ -83,10 +139,10 @@ local function fmt_scales (sc)
   if sc == nil then return "" end
   if type(sc) == "table" then
     local parts = {}
-    for i = 1, #sc do parts[i] = sc[i] == false and "1" or str.format("%.6g", sc[i]) end
+    for i = 1, #sc do parts[i] = sc[i] == false and "1" or str.format("%.8g", sc[i]) end
     return " scales=[" .. table.concat(parts, ",") .. "]"
   end
-  return str.format(" scales=%.6g", sc)
+  return str.format(" scales=%.8g", sc)
 end
 
 function M.make_ridge_log (stopwatch, metric_fmt)
@@ -105,7 +161,7 @@ function M.make_ridge_log (stopwatch, metric_fmt)
         local d, dd = stopwatch()
         timing = str.format(" (%.1fs +%.1fs)", d, dd)
       end
-      str.printf("[Ridge Done]%s%s%s%s%s%s lambda=%.6g%s%s\n",
+      str.printf("[Ridge Done]%s%s%s%s%s%s lambda=%.8g%s%s\n",
         emb, md, kdesc, scl, exf, solve, p.lambda or 0, sc, timing)
       return
     end
@@ -137,8 +193,6 @@ function M.make_ridge_log (stopwatch, metric_fmt)
     local p = ev.params or {}
     local m = ev.metrics or {}
     local score = ev.score or 0
-    -- best = the running-best per-config LCB (durable incumbent; ++ = new best); score = this trial's
-    -- raw fold-aggregated CV. detail = the fold-averaged metrics behind that score.
     local best = (ev.best and ev.best ~= -math.huge)
       and str.format(" (best=%.6f%s)", ev.best, ev.is_new_best and " ++" or "") or ""
     local md = metric_fmt and metric_fmt(m) or M.fmt_metrics(m)
@@ -159,38 +213,85 @@ function M.make_ridge_log (stopwatch, metric_fmt)
     local scl = fmt_scales(p.scales)
     local exf = fmt_exponent(p.exponent)
     local lambda = p.lambda or m.lambda or 0
-    local off = (m.offset ~= nil) and str.format(" offset=%.4g", m.offset) or ""
-    str.printf("[Ridge %s]%s%s%s%s lambda=%.6g score=%.6f%s%s%s%s\n",
+    local off = (m.offset ~= nil) and str.format(" offset=%.8g", m.offset) or ""
+    str.printf("[Ridge %s]%s%s%s%s lambda=%.8g score=%.6f%s%s%s%s\n",
       phase, kdesc, embd, scl, exf, lambda, score, detail, off, best, timing)
   end
 end
 
-local function tokenize_block_list (specs, texts, toks, focus, extra)
+function M.tokenize_blocks (specs, texts, o)
+  o = o or {}
   local tokenizer = require("santoku.learn.tokenizer")
+  local toks = o.toks
   local grow = toks == nil
   if grow then
     toks = {}
     for i, b in ipairs(specs) do
-      local cfg = { ngram_min = b.ngram_min, ngram_max = b.ngram_max,
-        word_characters = b.word_characters, words = b.words, normalize = b.normalize }
-      if extra then for kk, vv in pairs(extra) do cfg[kk] = vv end end
-      toks[i] = tokenizer.create(cfg)
+      toks[i] = tokenizer.create({ ngram_min = b.ngram_min, ngram_max = b.ngram_max,
+        mode = b.mode, n_tags = b.n_tags, normalize = b.normalize,
+        terminals = o.focus ~= nil, focus = o.focus ~= nil, regions = b.regions })
     end
   end
   local X = {}
   for i = 1, #specs do
-    local targs = { texts = texts, focus = focus }
-    X[i] = grow and toks[i]:fit(targs) or toks[i]:tokenize(targs)
+    local tk = o.tokens
+    if type(tk) == "table" then tk = tk[i] end
+    local targs = { texts = texts, focus = o.focus, tokens = tk }
+    local csr = grow and toks[i]:fit(targs) or toks[i]:tokenize(targs)
+    -- region tokenizers return group_offsets -> wrap as an ARD-grouped block for optimize.krr
+    local go = specs[i].regions and toks[i]:group_offsets() or nil
+    X[i] = go and { x = csr, group_offsets = go } or csr
   end
   return toks, X
 end
 
-function M.tokenize_blocks (specs, texts, toks)
-  return tokenize_block_list(specs, texts, toks)
+-- Out-of-fold stitch: partition rows by row_fold, build a feature block per fold on its own rows via
+-- per_fold_fn(f, row_ivec) -> csr, then reassemble into row order. The reusable core of any cross-fit
+-- / stacked feature (each row's feature derived from data that excludes its own fold).
+function M.oof_stitch (row_fold, K, per_fold_fn)
+  local fold_rows = {}
+  for f = 0, K - 1 do fold_rows[f] = ivec.create() end
+  for r = 0, row_fold:size() - 1 do fold_rows[row_fold:get(r)]:push(r) end
+  local concat, order = nil, ivec.create()
+  for f = 0, K - 1 do
+    local sub = per_fold_fn(f, fold_rows[f])
+    if concat then concat:append(sub) else concat = sub end
+    order:copy(fold_rows[f])
+  end
+  local inv = ivec.create(order:size())
+  for r = 0, order:size() - 1 do inv:set(order:get(r), r) end
+  return concat:rows(inv)
 end
 
-function M.tokenize_focus_blocks (specs, texts, F, toks)
-  return tokenize_block_list(specs, texts, toks, F, { terminals = true, focus = true })
+local function gold_excluding_fold (G, f, K)
+  local spans = require("santoku.spans")
+  local go, gs, ge, gt = G:offsets(), G:col("s"), G:col("e"), G:col("ty")
+  local noff, ns, ne, nt = ivec.create(), ivec.create(), ivec.create(), ivec.create()
+  noff:push(0)
+  for d = 0, go:size() - 2 do
+    if d % K ~= f then
+      for g = go:get(d), go:get(d + 1) - 1 do ns:push(gs:get(g)); ne:push(ge:get(g)); nt:push(gt:get(g)) end
+    end
+    noff:push(ns:size())
+  end
+  return spans.create({ offsets = noff, s = ns, e = ne, ty = nt })
+end
+
+-- Cross-fit a per-document gazetteer feature over candidate spans: assign doc d -> fold d%K; for each
+-- fold build a gaz from the OTHER folds' gold (o.build(gold_subset) -> obj) and block the candidates,
+-- stitched back into candidate order. o.build's obj must support obj:block(texts, cand, nil). Fixes
+-- the within-document self/repetition leak; the caller uses the full-gold gaz for held-out/test data.
+function M.gaz_block_oof (o)
+  local K, texts, cand, gold = o.folds, o.texts, o.cand, o.gold
+  local co = cand:offsets()
+  local ndocs = co:size() - 1
+  local cand_fold = ivec.create(co:get(ndocs))
+  for d = 0, ndocs - 1 do
+    for c = co:get(d), co:get(d + 1) - 1 do cand_fold:set(c, d % K) end
+  end
+  return M.oof_stitch(cand_fold, K, function (f, rows)
+    return o.build(gold_excluding_fold(gold, f, K)):block(texts, cand, nil):rows(rows)
+  end)
 end
 
 local function label_is_multilabel (labels, n, n_labels)
@@ -215,10 +316,6 @@ local function fold_assign (class, n, K)
   return foldof
 end
 
--- regression folds: interleave by target rank (fold = rank % K over targets sorted ascending) so each
--- fold spans the whole target distribution -- quantile stratification. Replaces the arbitrary i%K index
--- partition, which leaves fold means at the mercy of any ordering in the data and inflates cross-fold
--- variance (the noise the search overfits). Continuous-target analogue of class stratification.
 local function fold_assign_reg (targets, n, K)
   local order = targets:argsort()
   local foldof = ivec.create(n)
@@ -226,12 +323,6 @@ local function fold_assign_reg (targets, n, K)
   return foldof
 end
 
--- Per-row stratum id from a labels csr, for classification fold stratification (fed to fold_assign):
---   single-label (every row has exactly one label) -> that label id.
---   multilabel/presence -> the RAREST label present in the row (its least-frequent label globally).
--- The rarest-label proxy is the greedy core of iterative multilabel stratification: balancing the
--- scarcest labels across folds is what dominates multilabel CV variance. Rows with no labels get their
--- own stratum (-1). Returns nil when there are no labels (caller falls back to i%K).
 local function derive_class (labels, n)
   if not labels then return nil end
   local off, nbr = labels:offsets(), labels:neighbors()
@@ -259,8 +350,6 @@ local function derive_class (labels, n)
   return cls
 end
 
--- span-mode doc stratum: bucket docs by gold-span count (capped), so folds get a balanced share of
--- dense vs sparse documents rather than an arbitrary doc-index round-robin.
 local SPAN_STRAT_CAP = 8
 local function doc_strata (gold, ndocs)
   local go = gold:offsets()
@@ -274,10 +363,6 @@ local function doc_strata (gold, ndocs)
   return buckets, order
 end
 
--- Per-row landmark stratum id, mirroring the fold-stratification target logic so uniform landmark
--- selection can guarantee representation of every target class/bin (not just proportional-in-expectation):
---   span (cand) -> candidate type; regression -> quantile bin; else -> derive_class (single/multilabel).
--- Returns nil when there is no target signal (caller selects landmarks unstratified).
 local REG_STRATA_BINS = 16
 local function reg_strata (targets, _n, B)
   return targets:quantile_bins(B)
@@ -326,32 +411,46 @@ function M.rms_scale_blocks (train_blocks, eval_block_lists, from, to)
 end
 
 local WEIGHT_FLOOR = 1e-6
-function M.build_blocks (blocks, scale, exponent, n, w, pcs)
+function M.build_blocks (blocks, scale, exponent, n, w, pcs, groups)
   local bl = {}
+  local g0 = 0
   for i = 1, #blocks do
     local nc = select(2, blocks[i]:shape())
-    local sc = scale and scale[i] or 1.0
+    local go = groups and groups[i]
     local wi = w and w[i]
-    local cs, wssq
-    if wi and pcs and pcs[i] then
-      local e = exponent and exponent[i]
-      if e == nil or e == false then e = 1.0 end
-      cs, wssq = wi:colscale(pcs[i], e, WEIGHT_FLOOR)
-    elseif pcs and pcs[i] then
-      wssq = pcs[i]:sum()
+    if go then
+      local ng = go:size() - 1
+      local scs, exs = {}, {}
+      for g = 1, ng do
+        local s = scale and scale[g0 + g]
+        scs[g] = type(s) == "number" and s or 1.0
+        local e = exponent and exponent[g0 + g]
+        exs[g] = type(e) == "number" and e or 1.0
+      end
+      local cs = pcs[i]:group_gauge(go, scs, n,
+        { w = wi, exps = wi and exs or nil, floor = WEIGHT_FLOOR })
+      bl[i] = { x = blocks[i], n_tokens = nc, scale = 1.0, colscale = cs }
+      g0 = g0 + ng
+    else
+      local sc = scale and scale[g0 + 1] or 1.0
+      local cs, wssq
+      if wi and pcs and pcs[i] then
+        local e = exponent and exponent[g0 + 1]
+        if e == nil or e == false then e = 1.0 end
+        cs, wssq = wi:colscale(pcs[i], e, WEIGHT_FLOOR)
+      elseif pcs and pcs[i] then
+        wssq = pcs[i]:sum()
+      end
+      if wssq then
+        sc = (wssq > 0) and (math.sqrt(n / wssq) * sc) or 0
+      end
+      bl[i] = { x = blocks[i], n_tokens = nc, scale = sc, colscale = cs }
+      g0 = g0 + 1
     end
-    if wssq then
-      sc = (wssq > 0) and (math.sqrt(n / wssq) * sc) or 0
-    end
-    bl[i] = { x = blocks[i], n_tokens = nc, scale = sc, colscale = cs }
   end
   return bl
 end
 
--- Encode + predict in row tiles so deploy never materializes an n x emb_d code matrix.
--- o: { deploy, ridge, n, blocks = {csr,...} (or x = csr), k = top-k labels (optional),
---      scores = true (optional; requires n_labels), n_labels, tile = rows per tile (default 4096) }
--- Returns pred csr (when k), scores fvec (n x n_labels, when scores).
 function M.predict_tiled (o)
   local mtx = require("santoku.mtx")
   local n = o.n
@@ -366,7 +465,11 @@ function M.predict_tiled (o)
     local codes
     if o.blocks then
       local ext = {}
-      for bi = 1, #o.blocks do ext[bi] = o.blocks[bi]:rows(idx) end
+      for bi = 1, #o.blocks do
+        local b = o.blocks[bi]
+        if type(b) == "table" then ext[bi] = { x = b.x:rows(idx), group_offsets = b.group_offsets }
+        else ext[bi] = b:rows(idx) end
+      end
       codes = o.deploy(ext, out)
     else
       codes = o.deploy(o.x:rows(idx), out)
@@ -384,17 +487,6 @@ function M.predict_tiled (o)
   return pred, scores
 end
 
-function M.columns_as_blocks (m)
-  local _, n_cols = m:shape()
-  local blks = {}
-  local id = ivec.create(); id:push(0)
-  for j = 0, n_cols - 1 do
-    id:set(0, j)
-    blks[j + 1] = m:cols(id):to_sparse():i32()
-  end
-  return blks
-end
-
 local function slice_targets (t, idx)
   return (dvec.create(idx:size()):copy(t, idx))
 end
@@ -410,9 +502,6 @@ local function split_fold (foldof, f, n)
   return tr_idx, va_idx
 end
 
--- Dense-input CV path (pass pool_codes -- a dense feature/embedding matrix or code CSR -- instead of
--- tokenized pool_blocks). Row-slices the codes into K folds; AUC-based per-slot colscale; all-CV, no
--- external dev set (finalize builds on the full pool; the caller deploys via the returned closure).
 function M.fold_dense (a)
   local K = a.folds or 1
   local n = a.pool_n or select(1, a.pool_codes:shape())
@@ -472,7 +561,6 @@ function M.fold_dense (a)
     return cs
   end
   a.rebuild = function (p, f)
-    -- f = CV fold (encode held-out d.va); f = nil = finalize on full pool (no held-out).
     local d = f and F[f] or { tr = a.pool_codes, n = n }
     local cs = dense_colscale(f or 0, p and p.exponent)
     local nc = is_csr and select(2, a.pool_codes:shape()) or nil
@@ -498,7 +586,24 @@ end
 
 function M.fold_blocks (a)
   local K = a.folds or 1
-  local pool = a.pool_blocks
+  local pool, groups = {}, nil
+  for i, b in ipairs(a.pool_blocks) do
+    if type(b) == "table" then
+      local go = b.group_offsets
+      if go and not go.size then
+        local iv = ivec.create(#go)
+        for j = 1, #go do iv:set(j - 1, go[j]) end
+        go = iv
+      end
+      pool[i] = b.x
+      if go then groups = groups or {}; groups[i] = go end
+    else
+      pool[i] = b
+    end
+  end
+  local gd = 0
+  for i = 1, #pool do gd = gd + ((groups and groups[i]) and (groups[i]:size() - 1) or 1) end
+  a.gauge_dims = gd
   local reg = a.pool_targets ~= nil
   local n = a.pool_n or select(1, pool[1]:shape())
   local metrics = a.relevance
@@ -518,7 +623,6 @@ function M.fold_blocks (a)
     if a.cand then
       local co = a.cand:offsets()
       local ndocs = co:size() - 1
-      -- doc->fold via gold-count-stratified round-robin (balances dense/sparse docs across folds)
       local buckets, order = doc_strata(a.gold, ndocs)
       local docfold = ivec.create(ndocs)
       for _, gc in ipairs(order) do
@@ -542,8 +646,6 @@ function M.fold_blocks (a)
     end
     for f = 0, K - 1 do
       local tr_idx, va_idx = split_fold(foldof, f, n)
-      -- slices are transient here (w/pcs fit only); rebuild() re-slices lazily per call so at most
-      -- one fold's copies are live at a time instead of all K held for the whole search
       local trb = {}
       for i = 1, #pool do trb[i] = pool[i]:rows(tr_idx) end
       local ty = a.pool_labels and a.pool_labels:rows(tr_idx)
@@ -570,17 +672,23 @@ function M.fold_blocks (a)
     elseif type(a.exponent.def) == "table" then exp_tbl = a.exponent.def end
   end
   if exp_tbl then
+    local g0 = 0
     for i = 1, #pool do
-      if not p_w[i] or select(2, pool[i]:shape()) <= 1 then exp_tbl[i] = false end
+      local go = groups and groups[i]
+      local ng = go and (go:size() - 1) or 1
+      for g = 1, ng do
+        local cols = go and (go:get(g) - go:get(g - 1)) or select(2, pool[i]:shape())
+        if not p_w[i] or cols <= 1 then exp_tbl[g0 + g] = false end
+      end
+      g0 = g0 + ng
     end
   end
   a.bake_external = function (ext, params)
-    return (M.build_blocks(ext, params.scales, params.exponent, n, p_w, p_pcs))
+    local xs = {}
+    for i, b in ipairs(ext) do xs[i] = type(b) == "table" and b.x or b end
+    return (M.build_blocks(xs, params.scales, params.exponent, n, p_w, p_pcs, groups))
   end
   a.rebuild = function (params, f)
-    -- f = a CV fold (train on the fold's row slices, encode the held-out slice); f = nil = finalize on
-    -- the full pool (no held-out -- deploy encodes the caller's test set outside krr). Fold slices are
-    -- materialized here per call and dropped with the previous trial's garbage.
     local d = f and F[f] or { w = p_w, pcs = p_pcs, n = n }
     local trb, vab
     if f then
@@ -589,10 +697,10 @@ function M.fold_blocks (a)
     else
       trb = pool
     end
-    local out = { blocks = M.build_blocks(trb, params.scales, params.exponent, d.n, d.w, d.pcs),
+    local out = { blocks = M.build_blocks(trb, params.scales, params.exponent, d.n, d.w, d.pcs, groups),
       n_samples = d.n }
     if vab then
-      out.val_blocks = M.build_blocks(vab, params.scales, params.exponent, d.n, d.w, d.pcs)
+      out.val_blocks = M.build_blocks(vab, params.scales, params.exponent, d.n, d.w, d.pcs, groups)
       out.val_n_samples = d.vn
     end
     return out

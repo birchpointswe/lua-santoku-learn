@@ -2,8 +2,6 @@ local ds = require("santoku.learn.dataset")
 local csr = require("santoku.csr")
 local spans = require("santoku.spans")
 local ner = require("santoku.learn.ner")
-local tokenizer = require("santoku.learn.tokenizer")
-local aho = require("santoku.learn.aho")
 local optimize = require("santoku.learn.optimize")
 local ivec = require("santoku.ivec")
 local util = require("santoku.learn.util")
@@ -12,6 +10,9 @@ local test = require("santoku.test")
 local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
+
+local N_TYPES = 4
+local MAX_SPAN = 1000000000
 
 local cfg = {
   verbose = false,
@@ -22,84 +23,55 @@ local cfg = {
     dir = "test/res/conll2003",
     max = nil
   },
-  tok = { ngram_min = 1, ngram_max = 5, normalize = false },
+  tok = { ngram_min = 1, ngram_max = 5 },
   emb = { n_landmarks = 1024 * 8, },
   tag = {
+    -- boundary/inner detection: shapes (caps) is genuine signal here (not the type-stage overfit
+    -- trap), so keep the pinned 3-block config -> stable candidate pool (coverage ~0.938).
     kernel = { "matern" },
-    nu = { def = 3 },
-    gamma = { def = 0.822823 },
-    lambda = { def = 8.55722e-06 },
+    nu = { def = 2 },
+    gamma = { def = 0.13353758 },
+    lambda = { def = 6.007982e-05 },
     blocks = {
       { ngram_min = 1, ngram_max = 5, normalize = false },
-      { ngram_min = 1, ngram_max = 3, words = true, word_characters = util.WORD_CHARACTERS, normalize = false },
+      { ngram_min = 1, ngram_max = 3, mode = "words", normalize = false },
+      { ngram_min = 1, ngram_max = 5, mode = "tags", n_tags = util.N_SHAPES, normalize = false },
     },
-    relevance = { "bns", "bns" },
-    scales = { def = { 0.873886, 1.14431 } },
-    exponent = { def = { 2.76845, 2.5849 } },
-    decode_offset = { def = 0.432553 },
-    search_trials = 200,
+    relevance = { "bns", "bns", "bns" },
+    scales = { def = { 0.63372141, 1.7943648, 0.87940895 } },
+    exponent = { def = { 1.952315, 2.9091197, 1.9694619 } },
+    decode_offset = { def = 0.39830977 },
+    search_trials = 0,
     folds = 5,
   },
   type = {
-    kernel = { "arccos" },
-    order = { def = 1 },
-    depth = { def = 1 },
-    tangent = { def = 0 },
-    lambda = { def = 2.79245e-05 },
-    scales = { def = { 0.914452, 5.72097, 0.530832, 0.360091 } },
-    exponent = { def = { 6.54207, 4.39285, 0.518003, 6.49875 } },
-    decode_offset = { def = -0.16255 },
-    search_trials = 200,
+    -- type head: chars + shapes over candidate focus (words dropped). Region-injected: each block's
+    -- ids are laid out region-blocked (left / left-cross / inner / right-cross / right) and the
+    -- tokenizer returns group_offsets so optimize.krr's auto-ARD gauges each region independently.
+    kernel = { "matern" },
+    nu = { def = 1 },
+    gamma = { def = 0.25167383 },
+    lambda = { def = 5.0504876e-07 },
+    blocks = {
+      { ngram_min = 1, ngram_max = 5, normalize = false, regions = true },
+      { ngram_min = 1, ngram_max = 5, mode = "tags", n_tags = util.N_SHAPES, normalize = false, regions = true },
+    },
+    relevance = { "bns", "bns" },
+    -- 11 gauge groups: chars[L,Lx,in,Rx,R], shapes[same], + cross-fit char-gaz. test spF1 0.819078
+    scales = { def = { 0.092287882, 218.93552, 0.062408218, 0.0061606095, 0.16168002,
+      0.0061606095, 148.90598, 0.0061606095, 111.57553, 5.6344307, 224.09841 } },
+    exponent = { def = { 7.8667185, 1.7654517, 0.061309796, 2.723828, 7.8079375,
+      0.60015254, 0.46696708, 0.37386575, 0.93609761, 0.2395548, 4.0810145 } },
+    decode_offset = { def = 0.36016867 },
+    search_trials = 0,
     folds = 5,
   },
 }
 
-local N_TYPES = 4
-local MAX_SPAN = 1000000000
-local word_characters = util.WORD_CHARACTERS
-
-local function merge_splits (a, b)
-  local m = { n = a.n + b.n, texts = {}, sent_tokens = {}, sent_ents = {},
-    n_pos = a.n_pos, pos_names = a.pos_names, n_types = a.n_types, type_names = a.type_names }
-  for i = 1, a.n do m.texts[i] = a.texts[i]; m.sent_tokens[i] = a.sent_tokens[i]; m.sent_ents[i] = a.sent_ents[i] end
-  for i = 1, b.n do local j = a.n + i
-    m.texts[j] = b.texts[i]; m.sent_tokens[j] = b.sent_tokens[i]; m.sent_ents[j] = b.sent_ents[i] end
-  return m
-end
-
-local function build_gazetteer (train)
-  local seen, patterns = {}, {}
-  for d = 1, train.n do
-    local text = train.texts[d]
-    for _, e in ipairs(train.sent_ents[d]) do
-      local surf = text:sub(e.s + 1, e.e)
-      if not seen[surf] then seen[surf] = true; patterns[#patterns + 1] = surf end
-    end
-  end
-  return aho.create({ patterns = patterns, normalize = true })
-end
-
-local function gaz_candidates (ac, split)
-  return ac:predict({ texts = split.texts, longest = true, word_characters = word_characters })
-end
-
-local function gold_spans (split)
-  local eoff, es, ee, ety = ivec.create(), ivec.create(), ivec.create(), ivec.create()
-  eoff:push(0)
-  for d = 1, split.n do
-    for _, e in ipairs(split.sent_ents[d]) do es:push(e.s); ee:push(e.e); ety:push(e.t) end
-    eoff:push(es:size())
-  end
-  return spans.create({ offsets = eoff, s = es, e = ee, ty = ety })
-end
-
 local function build_segments (split)
-  local soff, sstart, send = tokenizer.words({ texts = split.texts, n = split.n,
-    word_characters = word_characters, punctuation = true })
-  local S = spans.create({ offsets = soff, s = sstart, e = send })
-  local G = gold_spans(split)
-  return { n = split.n, seg = S, n_seg = sstart:size(),
-    inner_mask = S:contained_labels(G), gold = G }
+  local S = util.shape_spans(split.texts, split.n)
+  return { n = split.n, seg = S, n_seg = S:col("s"):size(),
+    inner_mask = S:contained_labels(split.gold), gold = split.gold }
 end
 
 local function inner_to_ctx (pred)
@@ -126,32 +98,6 @@ local function seg_ceiling (S, G, n)
   return tot > 0 and ok / tot or 0
 end
 
-local function tokenize (split, F, tok)
-  local grow = tok == nil
-  if grow then
-    tok = tokenizer.create({
-      ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max,
-      terminals = true, focus = true, normalize = cfg.tok.normalize,
-    })
-  end
-  local X = grow and tok:fit({ texts = split.texts, focus = F })
-    or tok:tokenize({ texts = split.texts, focus = F })
-  return tok, X
-end
-
-local function tokenize_ctx (split, F, T, tok)
-  local grow = tok == nil
-  if grow then
-    tok = tokenizer.create({
-      ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max,
-      n_types = 1, terminals = true, focus = true, types = true,
-    })
-  end
-  local X = grow and tok:fit({ texts = split.texts, focus = F, types = T })
-    or tok:tokenize({ texts = split.texts, focus = F, types = T })
-  return tok, X
-end
-
 test("conll-full", function ()
 
   local stopwatch = utc.stopwatch()
@@ -160,7 +106,7 @@ test("conll-full", function ()
   str.printf("[Data] Loading\n")
   local train, dev, test_set = ds.read_conll2003(cfg.data.dir, cfg.data.max)
   local n_train, n_dev = train.n, dev.n
-  train = merge_splits(train, dev)
+  train = ds.merge_conll2003(train, dev)
   str.printf("[Data] pool=%d (train=%d + dev=%d) test=%d %s\n", train.n, n_train, n_dev, test_set.n, sw())
 
   local TR, TE = build_segments(train), build_segments(test_set)
@@ -171,7 +117,8 @@ test("conll-full", function ()
 
   local tr_inner, te_inner
   do
-    local toks, Xtr = util.tokenize_focus_blocks(cfg.tag.blocks, train.texts, TR.seg)
+    local toks, Xtr = util.tokenize_blocks(cfg.tag.blocks, train.texts,
+      { focus = TR.seg, tokens = TR.seg })
     local Ytr = csr.from_mask(TR.inner_mask)
     str.printf("[Tag] Encoding\n")
     local _, rg, deploy, best, decider = optimize.krr({
@@ -198,15 +145,16 @@ test("conll-full", function ()
       verbose = cfg.verbose,
       each = util.make_ridge_log(stopwatch),
     })
-    str.printf("[Tag] kernel=%s lambda=%.4e offset=%.6g %s\n",
+    str.printf("[Tag] kernel=%s lambda=%.8g offset=%.8g %s\n",
       best.kernel, best.lambda, decider:offset(), sw())
-    local function tag_decode (split, seg, n)
-      local _, X = util.tokenize_focus_blocks(cfg.tag.blocks, split.texts, seg, toks)
-      local P = util.predict_tiled({ deploy = deploy, ridge = rg, blocks = X, n = n, k = 1 })
-      return decider:predict({ pred = P, n_samples = n })
+    local function tag_decode (split, B)
+      local _, X = util.tokenize_blocks(cfg.tag.blocks, split.texts,
+        { toks = toks, focus = B.seg, tokens = B.seg })
+      local P = util.predict_tiled({ deploy = deploy, ridge = rg, blocks = X, n = B.n_seg, k = 1 })
+      return decider:predict({ pred = P, n_samples = B.n_seg })
     end
-    tr_inner = tag_decode(train, TR.seg, TR.n_seg)
-    te_inner = tag_decode(test_set, TE.seg, TE.n_seg)
+    tr_inner = tag_decode(train, TR)
+    te_inner = tag_decode(test_set, TE)
   end
 
   local function ctx_spans (S, pred)
@@ -219,19 +167,19 @@ test("conll-full", function ()
   local Sruns_tr = Sctx_tr:enumerate_subspans(MAX_SPAN, 1)
   local Sruns_te = Sctx_te:enumerate_subspans(MAX_SPAN, 1)
 
-  local ac = build_gazetteer(train)
-  local function cand_union (split, Sruns, G)
-    local Sg = gaz_candidates(ac, split)
+  local ac = util.surface_gaz({ train }, N_TYPES, true)
+  local Sg_tr = ac:predict({ texts = train.texts, longest = true, tokens = TR.seg })
+  local Sg_te = ac:predict({ texts = test_set.texts, longest = true, tokens = TE.seg })
+
+  local function cand_union (Sruns, Sg)
     local A = spans.create({ offsets = Sruns:offsets(), s = Sruns:col("s"), e = Sruns:col("e"),
       ty = zeros(Sruns:col("s"):size()) })
     local B = spans.create({ offsets = Sg:offsets(), s = Sg:col("s"), e = Sg:col("e"),
       ty = zeros(Sg:col("s"):size()) })
-    local Gz = spans.create({ offsets = G:offsets(), s = G:col("s"), e = G:col("e"),
-      ty = zeros(G:col("s"):size()) })
-    return A:union(B, Gz)
+    return A:union(B)
   end
-  local Scand_tr = cand_union(train, Sruns_tr, TR.gold)
-  local Scand_te = cand_union(test_set, Sruns_te, TE.gold)
+  local Scand_tr = cand_union(Sruns_tr, Sg_tr)
+  local Scand_te = cand_union(Sruns_te, Sg_te)
   local n_trc, n_tec = Scand_tr:col("s"):size(), Scand_te:col("s"):size()
 
   local tr_tlab = Scand_tr:type_labels(TR.gold, N_TYPES)
@@ -250,23 +198,35 @@ test("conll-full", function ()
     miss.over, miss.under, miss.cross, miss.none,
     ubt[0], ubt[1], ubt[2], ubt[3], sw())
 
-  local ty = { models = {}, tok = tokenize, tok_ctx = tokenize_ctx }
-  local gaz = ner.build_typed_gaz({ texts = train.texts, gold = TR.gold, n_types = N_TYPES })
-  local cgaz = ner.build_char_gaz({ texts = train.texts, gold = TR.gold, n_types = N_TYPES,
-    ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max })
   local Ytype = csr.create({ offsets = tr_tloff, neighbors = tr_tlab, n_cols = N_TYPES + 1 })
-  local ty_all_tr, n_sparse = util.build_type_blocks(ty, train, Scand_tr, Sctx_tr, true, gaz, cgaz, tr_tlab)
-  local ty_all_te = util.build_type_blocks(ty, test_set, Scand_te, Sctx_te, false, gaz, cgaz, nil)
-  local n_ty_blocks = #ty_all_tr
-  local te_gaz_r = { [n_sparse + 1] = gaz:block(test_set.texts, Scand_te, nil),
-    [n_sparse + 2] = cgaz:block(test_set.texts, Scand_te, nil) }
-  util.rms_scale_blocks(ty_all_tr, { ty_all_te, te_gaz_r }, n_sparse + 1)
-  local ty_relevance = {}
-  for b = 1, n_ty_blocks do
-    ty_relevance[b] = (b > n_sparse) and "auc" or "bns"
+  local n_sparse = #cfg.type.blocks
+  local ty_toks
+  local function type_blocks (split, Scand, B)
+    local toks, X = util.tokenize_blocks(cfg.type.blocks, split.texts,
+      { toks = ty_toks, focus = Scand, tokens = B.seg })
+    ty_toks = toks
+    return X
   end
+  local ty_all_tr = type_blocks(train, Scand_tr, TR)
+  local ty_all_te = type_blocks(test_set, Scand_te, TE)
+
+  -- CROSS-FIT char-gaz: each train candidate's gaz comes from a gaz built on the OTHER document-folds'
+  -- gold (so its own doc's gold is never in its own feature -> train seen-surface stats match test's,
+  -- fixing the within-document self/repetition leak). Test uses the full-gold gaz.
   local K = cfg.type.folds
-  str.printf("[Type] CV folds=%d trials=%d\n", K, cfg.type.search_trials)
+  local function build_cgaz (g)
+    return ner.build_char_gaz({ texts = train.texts, gold = g, n_types = N_TYPES,
+      ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max })
+  end
+  ty_all_tr[#ty_all_tr + 1] = util.gaz_block_oof({
+    folds = K, texts = train.texts, cand = Scand_tr, gold = TR.gold, build = build_cgaz })
+  ty_all_te[#ty_all_te + 1] = build_cgaz(TR.gold):block(test_set.texts, Scand_te, nil)
+
+  util.rms_scale_blocks(ty_all_tr, { ty_all_te }, n_sparse + 1)
+  local ty_relevance = {}
+  for i = 1, n_sparse do ty_relevance[i] = cfg.type.relevance[i] end
+  ty_relevance[n_sparse + 1] = "auc"
+  str.printf("[Type] CV folds=%d trials=%d (cross-fit gaz)\n", K, cfg.type.search_trials)
   local _, ridge_ty, deploy, _, ty_decider = optimize.krr({
     pool_blocks = ty_all_tr, pool_labels = Ytype, pool_n = n_trc,
     folds = K, cand = Scand_tr, gold = TR.gold,
@@ -275,7 +235,6 @@ test("conll-full", function ()
     exponent = cfg.type.exponent,
     n_labels = N_TYPES + 1,
     kernel = cfg.type.kernel, nu = cfg.type.nu, gamma = cfg.type.gamma,
-    order = cfg.type.order, depth = cfg.type.depth, tangent = cfg.type.tangent,
     lambda = cfg.type.lambda,
     n_landmarks = cfg.emb.n_landmarks, search_landmarks = cfg.search_landmarks, k = 1, decode_offset = cfg.type.decode_offset,
     landmark_rounds = cfg.landmark_rounds, search_landmark_rounds = cfg.search_landmark_rounds,
@@ -288,7 +247,7 @@ test("conll-full", function ()
     blocks = ty_all_te, n = n_tec, k = 2, scores = true, n_labels = N_TYPES + 1 })
   local te_lab = te_lab_csr:neighbors()
   local _, te_m = ty_decider:score({ scores = te_scores, n_samples = n_te_docs, cand = Scand_te, gold = TE.gold })
-  str.printf("[Span] test %s offset=%.6g %s\n", util.fmt_metrics(te_m), ty_decider:offset(), sw())
+  str.printf("[Span] test %s offset=%.8g %s\n", util.fmt_metrics(te_m), ty_decider:offset(), sw())
 
   local tdr = ner.decode_report({
     cand = Scand_te, pred = te_lab, pred_stride = 2,
