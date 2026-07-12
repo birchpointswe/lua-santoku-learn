@@ -40,7 +40,7 @@ local cfg = {
     relevance = { "bns", "bns", "bns" },
     scales = { def = { 0.63372141, 1.7943648, 0.87940895 } },
     exponent = { def = { 1.952315, 2.9091197, 1.9694619 } },
-    decode_offset = { def = 0.39830977 },
+    decode_offset = { def = 0.4050678 },
     search_trials = 0,
     folds = 5,
   },
@@ -49,20 +49,20 @@ local cfg = {
     -- ids are laid out region-blocked (left / left-cross / inner / right-cross / right) and the
     -- tokenizer returns group_offsets so optimize.krr's auto-ARD gauges each region independently.
     kernel = { "matern" },
-    nu = { def = 1 },
-    gamma = { def = 0.25167383 },
-    lambda = { def = 5.0504876e-07 },
+    nu = { def = 2 },
+    gamma = { def = 0.67920774 },
+    lambda = { def = 2.4482122e-07 },
     blocks = {
       { ngram_min = 1, ngram_max = 5, normalize = false, regions = true },
       { ngram_min = 1, ngram_max = 5, mode = "tags", n_tags = util.N_SHAPES, normalize = false, regions = true },
     },
     relevance = { "bns", "bns" },
-    -- 11 gauge groups: chars[L,Lx,in,Rx,R], shapes[same], + cross-fit char-gaz. test spF1 0.819078
-    scales = { def = { 0.092287882, 218.93552, 0.062408218, 0.0061606095, 0.16168002,
-      0.0061606095, 148.90598, 0.0061606095, 111.57553, 5.6344307, 224.09841 } },
-    exponent = { def = { 7.8667185, 1.7654517, 0.061309796, 2.723828, 7.8079375,
-      0.60015254, 0.46696708, 0.37386575, 0.93609761, 0.2395548, 4.0810145 } },
-    decode_offset = { def = 0.36016867 },
+    -- 11 gauge groups: chars[L,Lx,in,Rx,R], shapes[same], + cross-fit char-gaz. test spF1 0.820074
+    scales = { def = { 0.02743892, 556.6777, 0.005566777, 0.005566777, 5.2923249,
+      0.005566777, 91.966028, 0.017674851, 76.462583, 4.1211133, 139.99885 } },
+    exponent = { def = { 4.7762554, 2.3313325, 2.7983615, 7.3266628, 0.38468605,
+      0.7784287, 0.97172925, 0.12706431, 0.69330865, 0.032329143, 0.31840376 } },
+    decode_offset = { def = 0.25278902 },
     search_trials = 0,
     folds = 5,
   },

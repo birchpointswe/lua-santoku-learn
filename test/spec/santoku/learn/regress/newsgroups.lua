@@ -18,7 +18,7 @@ local cfg = {
     { ngram_min = 1, ngram_max = 3, mode = "words" },
   },
   relevance = { "bns", "bns" },
-  scales = { def = { 0.875402, 1.14233 } },
+  scales = { def = { 0.87540289, 1.1423312 } },
   exponent = { def = { 1.68339, 3.44989 } },
   n_landmarks = 1024 * 8,
   kernel = { "cosine" },
