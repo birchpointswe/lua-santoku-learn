@@ -795,6 +795,73 @@ static int tk_tokenizer_extract_lua (lua_State *L) {
   return ty ? 4 : 3;
 }
 
+// Stateless raw n-gram hashing (no fitted vocabulary): normalize each text,
+// hash its [ngram_min, ngram_max] byte-n-grams to int64 keys, dedup-count per
+// row, and return CSR-style (offsets, tokens, values). regions=0 keeps the
+// plain hashes (no region tagging). Consumed by callers that build their own
+// hashed index over the keys (e.g. an encrypted search index).
+static int tk_tokenizer_tokenize_raw_lua (lua_State *L) {
+  luaL_checktype(L, 1, LUA_TTABLE);
+  int64_t n_samples = (int64_t) tk_lua_fcheckunsigned(L, 1, "tokenize_raw", "n_samples");
+  int ngram_min = (int) tk_lua_foptunsigned(L, 1, "tokenize_raw", "ngram_min", 1);
+  int ngram_max = (int) tk_lua_fcheckunsigned(L, 1, "tokenize_raw", "ngram_max");
+  if (ngram_min < 1 || ngram_min > ngram_max)
+    return luaL_error(L, "tokenize_raw: need 1 <= ngram_min <= ngram_max");
+  int normalize = tk_lua_foptboolean(L, 1, "tokenize_raw", "normalize", false);
+
+  lua_getfield(L, 1, "texts");
+  luaL_checktype(L, -1, LUA_TTABLE);
+  int texts_idx = lua_gettop(L);
+
+  size_t maxlen = 0;
+  for (int64_t d = 0; d < n_samples; d++) {
+    lua_rawgeti(L, texts_idx, (int) (d + 1));
+    size_t len = 0; lua_tolstring(L, -1, &len);
+    if (len > maxlen) maxlen = len;
+    lua_pop(L, 1);
+  }
+
+  size_t nrange = (size_t) (ngram_max - ngram_min + 1);
+  uint8_t *buf = (uint8_t *) malloc(maxlen + 1);
+  int64_t *packed = (int64_t *) malloc(nrange * (maxlen + 1) * sizeof(int64_t));
+  if (!buf || !packed) { free(buf); free(packed); return luaL_error(L, "tokenize_raw: out of memory"); }
+
+  tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t) (n_samples + 1));
+  offsets->n = (uint64_t) (n_samples + 1); offsets->a[0] = 0;
+  tk_ivec_t *tokens = tk_ivec_create(L, 0);
+  tk_fvec_t *values = tk_fvec_create(L, 0);
+
+  for (int64_t d = 0; d < n_samples; d++) {
+    lua_rawgeti(L, texts_idx, (int) (d + 1));
+    size_t tlen; const char *text = lua_tolstring(L, -1, &tlen);
+    lua_pop(L, 1);
+
+    size_t blen;
+    if (normalize) {
+      tk_norm_stream_t ns;
+      tk_norm_stream_init(&ns, buf);
+      tk_norm_stream_run(&ns, text, tlen);
+      blen = tk_norm_stream_finish(&ns);
+    } else {
+      memcpy(buf, text, tlen);
+      blen = tlen;
+    }
+
+    size_t count = tk_pack_row(buf, blen, ngram_min, ngram_max, packed, 0, 0, 0);
+    ks_introsort(tk_ivec_asc, (size_t) count, packed);
+    for (size_t i = 0; i < count; ) {
+      int64_t key = packed[i]; float c = 0.0f;
+      while (i < count && packed[i] == key) { c += 1.0f; i++; }
+      tk_ivec_push(tokens, key);
+      tk_fvec_push(values, c);
+    }
+    offsets->a[d + 1] = (int64_t) tokens->n;
+  }
+
+  free(buf); free(packed);
+  return 3;
+}
+
 static luaL_Reg tk_tokenizer_mt_fns[] = {
   { "fit", tk_tokenizer_fit_lua },
   { "tokenize", tk_tokenizer_tokenize_lua },
@@ -808,6 +875,7 @@ static luaL_Reg tk_tokenizer_fns[] = {
   { "create", tk_tokenizer_create_lua },
   { "load", tk_tokenizer_load_lua },
   { "extract", tk_tokenizer_extract_lua },
+  { "tokenize_raw", tk_tokenizer_tokenize_raw_lua },
   { NULL, NULL }
 };
 
