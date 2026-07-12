@@ -63,5 +63,5 @@ test("mnist CV", function ()
   local _, m = decider:score({ scores = test_scores,
     n_samples = test_set.n, expected = test_set.labels })
   local _, total = stopwatch()
-  str.printf("[Result] lambda=%.4g | test %s\nTotal: %.1fs\n", best.lambda or 0, util.fmt_metrics(m), total)
+  str.printf("[Result] lambda=%.8g | test %s\nTotal: %.1fs\n", best.lambda or 0, util.fmt_metrics(m), total)
 end)
