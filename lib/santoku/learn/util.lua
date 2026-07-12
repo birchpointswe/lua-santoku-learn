@@ -395,7 +395,11 @@ local function weight_fit (blocks, y, metrics, is_targets)
   return w
 end
 
+
+
+
 function M.rms_scale_blocks (train_blocks, eval_block_lists, from, to)
+  local weights = {}
   for i = from or 1, to or #train_blocks do
     local X = train_blocks[i]
     local n, nc = X:shape()
@@ -407,7 +411,9 @@ function M.rms_scale_blocks (train_blocks, eval_block_lists, from, to)
     end
     X:bns(w)
     for _, ebl in ipairs(eval_block_lists) do ebl[i]:bns(w) end
+    weights[i] = w
   end
+  return weights
 end
 
 local WEIGHT_FLOOR = 1e-6
