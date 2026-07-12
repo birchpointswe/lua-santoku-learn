@@ -4,6 +4,7 @@ local assert = err.assert
 local spans = require("santoku.spans")
 local ivec = require("santoku.ivec")
 local ner = require("santoku.learn.ner")
+require("santoku.csr")  -- installs csr metatable (__index) for the gaz:block round-trip below
 local tbl = require("santoku.table")
 local teq = tbl.equals
 
@@ -41,4 +42,22 @@ test("ner: decode_report", function ()
   assert(r.gold == 2 and r.in_pool == 2 and r.not_in_pool == 0)
   assert(r.correct == 1 and r.false_reject == 1 and r.mistype == 0)
   assert(r.reject_by_type[2] == 1)
+end)
+
+test("ner: char gaz persist round-trip", function ()
+  local texts = { "Barack Obama visited Paris", "Paris Hilton and Obama" }
+  local gold = spans.create({ "s", "e", "ty" })
+  gold:push(7, 12, 0):push(21, 26, 1):doc()  -- doc1: Obama(PER=0), Paris(LOC=1)
+  gold:push(0, 5, 1):push(17, 22, 0):doc()   -- doc2: Paris(LOC=1), Obama(PER=0)
+  local gaz = ner.build_char_gaz({ texts = texts, gold = gold,
+    n_types = 2, ngram_min = 3, ngram_max = 5 })
+  local cand = spans.create({ "s", "e" })
+  cand:push(7, 12):push(21, 26):doc()
+  cand:push(0, 5):push(17, 22):doc()
+  local A = gaz:block(texts, cand, nil)
+  local path = os.tmpname() .. ".gaz"
+  gaz:persist(path)
+  local B = ner.load_gaz(path):block(texts, cand, nil)
+  os.remove(path)
+  assert(A:eq(B), "gaz block diverges after persist/load")
 end)

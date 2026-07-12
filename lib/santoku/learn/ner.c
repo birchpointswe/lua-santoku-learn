@@ -380,8 +380,71 @@ static int tk_gaz_block (lua_State *L) {
   return 1;
 }
 
+// Embedded persist: header scalars, then data rows (nkeys x n_types+1 int64) in row order, then each
+// key (int64 len + bytes) in row order. Load rebuilds the string map by re-inserting key i at row i.
+static int tk_gaz_persist (lua_State *L) {
+  tk_gaz_t *Z = tk_gaz_peek(L, 1);
+  FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
+  tk_lua_fwrite(L, "TKgz", 1, 4, fh);
+  uint8_t version = 1;
+  tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
+  int64_t hdr[5] = { Z->n_types, Z->is_char, Z->nmin, Z->nmax, Z->nkeys };
+  tk_lua_fwrite(L, hdr, sizeof(int64_t), 5, fh);
+  int64_t width = Z->n_types + 1;
+  if (Z->nkeys > 0)
+    tk_lua_fwrite(L, Z->data, sizeof(int64_t), (size_t) (Z->nkeys * width), fh);
+  const char **keys = (const char **) calloc((size_t) (Z->nkeys > 0 ? Z->nkeys : 1), sizeof(char *));
+  for (khint_t k = kh_begin(Z->map); k != kh_end(Z->map); k ++)
+    if (kh_exist(Z->map, k)) keys[kh_val(Z->map, k)] = kh_key(Z->map, k);
+  for (int64_t i = 0; i < Z->nkeys; i ++) {
+    int64_t len = (int64_t) strlen(keys[i]);
+    tk_lua_fwrite(L, &len, sizeof(int64_t), 1, fh);
+    if (len > 0) tk_lua_fwrite(L, (void *) keys[i], 1, (size_t) len, fh);
+  }
+  free(keys);
+  tk_lua_fclose(L, fh);
+  return 0;
+}
+
+static int tk_gaz_load_lua (lua_State *L) {
+  FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 1), "r");
+  char magic[4];
+  tk_lua_fread(L, magic, 1, 4, fh);
+  if (memcmp(magic, "TKgz", 4) != 0) { tk_lua_fclose(L, fh); return luaL_error(L, "ner.load_gaz: bad magic"); }
+  uint8_t version;
+  tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
+  if (version != 1) { tk_lua_fclose(L, fh);
+    return luaL_error(L, "ner.load_gaz: unsupported version %d", (int) version); }
+  int64_t hdr[5];
+  tk_lua_fread(L, hdr, sizeof(int64_t), 5, fh);
+  tk_gaz_t *Z = tk_lua_newuserdata(L, tk_gaz_t, TK_GAZ_MT, tk_gaz_mt_fns, tk_gaz_gc);
+  memset(Z, 0, sizeof(*Z));
+  Z->n_types = hdr[0]; Z->is_char = hdr[1]; Z->nmin = hdr[2]; Z->nmax = hdr[3]; Z->nkeys = hdr[4];
+  Z->cap = Z->nkeys;
+  int64_t width = Z->n_types + 1;
+  if (Z->nkeys > 0) {
+    Z->data = (int64_t *) malloc((size_t) (Z->nkeys * width) * sizeof(int64_t));
+    tk_lua_fread(L, Z->data, sizeof(int64_t), (size_t) (Z->nkeys * width), fh);
+  }
+  Z->map = (khash_t(tk_gazmap) *) malloc(sizeof(khash_t(tk_gazmap)));
+  kh_init(tk_gazmap, Z->map, 0);
+  for (int64_t i = 0; i < Z->nkeys; i ++) {
+    int64_t len;
+    tk_lua_fread(L, &len, sizeof(int64_t), 1, fh);
+    char *key = (char *) malloc((size_t) len + 1);
+    if (len > 0) tk_lua_fread(L, key, 1, (size_t) len, fh);
+    key[len] = 0;
+    int ret;
+    khint_t k = kh_put(tk_gazmap, Z->map, key, &ret);
+    kh_val(Z->map, k) = i;
+  }
+  tk_lua_fclose(L, fh);
+  return 1;
+}
+
 static luaL_Reg tk_gaz_mt_fns[] = {
   { "block", tk_gaz_block },
+  { "persist", tk_gaz_persist },
   { NULL, NULL }
 };
 
@@ -395,6 +458,7 @@ static luaL_Reg tk_ner_module_fns[] = {
   { "decode_report", tk_ner_decode_report },
   { "build_typed_gaz", tk_gaz_build_typed_lua },
   { "build_char_gaz", tk_gaz_build_char_lua },
+  { "load_gaz", tk_gaz_load_lua },
   { NULL, NULL }
 };
 

@@ -15,6 +15,9 @@ M.persist = function (opts)
   if opts.decider then
     opts.decider:persist(dir .. "/decider.bin")
   end
+  if opts.gaz then
+    opts.gaz:persist(dir .. "/gaz.bin")
+  end
   local blocks = opts.blocks or {}
   local parts = {}
   for i = 1, #blocks do
@@ -27,9 +30,10 @@ M.persist = function (opts)
   end
   local fh = assert(io.open(dir .. "/manifest.lua", "w"))
   fh:write(str.format(
-    "return {\n  version = 1,\n  n_tokenizers = %d,\n  has_decider = %s,\n  w_external = %s,\n  w_path = %s,\n  chol_external = %s,\n  chol_path = %s,\n  blocks = { %s },\n}\n",
+    "return {\n  version = 1,\n  n_tokenizers = %d,\n  has_decider = %s,\n  has_gaz = %s,\n  w_external = %s,\n  w_path = %s,\n  chol_external = %s,\n  chol_path = %s,\n  blocks = { %s },\n}\n",
     #toks,
     opts.decider and "true" or "false",
+    opts.gaz and "true" or "false",
     opts.w_path and "true" or "false",
     opts.w_path and str.format("%q", opts.w_path) or "nil",
     opts.chol_path and "true" or "false",
@@ -62,6 +66,7 @@ M.load = function (dir)
     r = ridge.load(dir .. "/ridge.bin")
   end
   local decider = manifest.has_decider and decide.load(dir .. "/decider.bin") or nil
+  local gaz = manifest.has_gaz and require("santoku.learn.ner").load_gaz(dir .. "/gaz.bin") or nil
   local blocks = {}
   for i, b in ipairs(manifest.blocks) do
     blocks[i] = { n_tokens = b.n_tokens,
@@ -75,7 +80,7 @@ M.load = function (dir)
     return encoder:encode({ blocks = bl }, out)
   end
   return { tokenizers = toks, encoder = encoder, ridge = r, decider = decider,
-    blocks = blocks, encode = encode }
+    gaz = gaz, blocks = blocks, encode = encode }
 end
 
 return M

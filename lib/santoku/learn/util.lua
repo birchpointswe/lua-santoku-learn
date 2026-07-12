@@ -395,7 +395,11 @@ local function weight_fit (blocks, y, metrics, is_targets)
   return w
 end
 
+-- Unit-RMS column scaling derived from the train block; applied to train + eval blocks in place.
+-- Returns the per-block weight vectors { [i] = w } (train-derived) so callers can fold them into the
+-- persisted colscale for serving (serve reproduces train exactly since auc relevance is scale-invariant).
 function M.rms_scale_blocks (train_blocks, eval_block_lists, from, to)
+  local weights = {}
   for i = from or 1, to or #train_blocks do
     local X = train_blocks[i]
     local n, nc = X:shape()
@@ -407,7 +411,9 @@ function M.rms_scale_blocks (train_blocks, eval_block_lists, from, to)
     end
     X:bns(w)
     for _, ebl in ipairs(eval_block_lists) do ebl[i]:bns(w) end
+    weights[i] = w
   end
+  return weights
 end
 
 local WEIGHT_FLOOR = 1e-6
