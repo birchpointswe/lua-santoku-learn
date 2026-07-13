@@ -144,3 +144,33 @@ test("colscale fold: prescaled block + c == raw block + (c .* w)", function ()
   local cA, cB = codes_for(blA, lms), codes_for(blB, lms)
   assert_codes_close(cA, cB, "colscale-fold")
 end)
+
+local function ignores_colscale (kernel_args, scale2, tag)
+  local vals = make_vals()
+  math.randomseed(13)
+  local c1, c2, garbage = fvec.create(4), fvec.create(4), fvec.create(4)
+  for i = 0, 3 do
+    c1:set(i, math.random() + 0.1)
+    c2:set(i, math.random() + 0.1)
+    garbage:set(i, math.random() * 20 + 0.1)
+  end
+  local blA = { { x = range_csr(vals, 0, 4), n_tokens = 4, scale = 1.0, colscale = c1 },
+                { x = range_csr(vals, 4, 8), n_tokens = 4, scale = scale2, colscale = c2 } }
+  local lms = landmarks(6)
+  local fit = { blocks = blA, landmarks = lms, n_landmarks = lms:size() }
+  for k, v in pairs(kernel_args) do fit[k] = v end
+  local _, enc = spectral.encode(fit)
+  local A = enc:encode({ blocks = blA })
+  local blG = { { x = range_csr(vals, 0, 4), colscale = garbage },
+                { x = range_csr(vals, 4, 8), colscale = garbage } }
+  local blN = { { x = range_csr(vals, 0, 4) }, { x = range_csr(vals, 4, 8) } }
+  assert_codes_close(A, enc:encode({ blocks = blG }), tag .. " (garbage colscale ignored)")
+  assert_codes_close(A, enc:encode({ blocks = blN }), tag .. " (no colscale ignored)")
+end
+
+test("enc:encode ignores the encode-time colscale (fit colscale is authoritative)", function ()
+  ignores_colscale({ kernel = "cosine" }, 1.0, "cosine scale=1")
+  ignores_colscale({ kernel = "cosine" }, 22.0, "cosine scale=22")
+  ignores_colscale({ kernel = "matern", nu = 2, gamma = 0.25 }, 1.0, "matern scale=1")
+  ignores_colscale({ kernel = "matern", nu = 2, gamma = 0.25 }, 22.0, "matern scale=22")
+end)

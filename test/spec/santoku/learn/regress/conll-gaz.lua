@@ -31,12 +31,10 @@ local cfg = {
     gamma = { def = 0.53607869 },
     lambda = { def = 2.9299902e-05 },
     relevance = { "bns", "bns", "auc" },
-    scales = { def = { 0.0045204084, 0.0045204084, 0.49983253, 15.168852, 0.0045204084,
-      0.0045204084, 20.022861, 56.54299, 44.639002, 14.48332, 431.54347 } },
-    exponent = { def = { 3.2694916, 6.8227349, 7.5514373, 1.0992432, 1.4892054,
-      7.9947992, 1.5709097, 5.3751002, 0.79283053, 5.7866596, 5.2936447 } },
+    scales = { def = { 0.0045204084, 0.0045204084, 0.49983253, 15.168852, 0.0045204084, 0.0045204084, 20.022861, 56.54299, 44.639002, 14.48332, 431.54347 } },
+    exponent = { def = { 3.2694916, 6.8227349, 7.5514373, 1.0992432, 1.4892054, 7.9947992, 1.5709097, 5.3751002, 0.79283053, 5.7866596, 5.2936447 } },
     decode_offset = { def = -0.46597821 },
-    search_trials = 200,
+    search_trials = 0,
     folds = 5,
   },
 }
@@ -71,18 +69,19 @@ test("conll-gaz CV", function ()
   local n_sparse = #cfg.blocks
 
   local K = cfg.head.folds
-  local df = util.doc_folds(Ctr, Gtr, K)  -- shared with krr so the cross-fit aligns to CV
+  local df = util.doc_folds(Ctr, Gtr, K)
   local function build_cgaz (g)
     return ner.build_char_gaz({ texts = pool.texts, gold = g, n_types = N_TYPES,
       ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max })
   end
-  Xtr[n_sparse + 1] = util.gaz_block_oof({ folds = K, doc_fold = df, texts = pool.texts, cand = Ctr, gold = Gtr, build = build_cgaz })
-  Xte[n_sparse + 1] = build_cgaz(Gtr):block(test_set.texts, Cte, nil)
-  util.rms_scale_blocks(Xtr, { Xte }, n_sparse + 1)
+  local serve_gaz = build_cgaz(Gtr)
+  Xtr[n_sparse + 1] = serve_gaz:block(pool.texts, Ctr, Ctr:type_labels(Gtr, N_TYPES))
+  Xte[n_sparse + 1] = serve_gaz:block(test_set.texts, Cte, nil)
+  local rms_w = util.rms_scale_blocks(Xtr, { Xte }, n_sparse + 1)
 
   local Ytr = cand_labels(Ctr, Gtr)
 
-  local _, rg, deploy, best, decider = optimize.krr({
+  local enc, rg, deploy, best, decider = optimize.krr({
     pool_blocks = Xtr,
     pool_labels = Ytr,
     pool_n = n_pool,
@@ -117,4 +116,28 @@ test("conll-gaz CV", function ()
   local _, total = stopwatch()
   str.printf("[Span] lambda=%.8g offset=%.8g | test %s\nTotal: %.1fs\n",
     best.lambda or 0, decider:offset(), util.fmt_metrics(m), total)
+
+  local bundle = require("santoku.learn.bundle")
+  local bdir = os.tmpname() .. ".bundle"
+  bundle.persist({ dir = bdir, tokenizers = toks, gaz = serve_gaz, gaz_rms = rms_w[n_sparse + 1],
+    encoder = enc, ridge = rg, decider = decider })
+  local b = bundle.load(bdir)
+  local _, Xte_b = util.tokenize_blocks(cfg.blocks, test_set.texts,
+    { toks = b.tokenizers, focus = Cte, tokens = Tte })
+  Xte_b[n_sparse + 1] = b.gaz:block(test_set.texts, Cte, nil)
+  Xte_b[n_sparse + 1]:bns(b.gaz_rms)
+  local _, sb = util.predict_tiled({ deploy = b.encode, ridge = b.ridge,
+    blocks = Xte_b, n = n_test, scores = true, n_labels = 1 })
+  local maxd = 0
+  for i = 0, n_test - 1 do
+    local d = math.abs(test_scores:get(i) - sb:get(i))
+    if d > maxd then maxd = d end
+  end
+  str.printf("[Bundle] serve-vs-deploy max score diff = %.3e\n", maxd)
+  assert(maxd < 1e-3, str.format("bundle serve path diverges from deploy (%.3e)", maxd))
+  for _, f in ipairs({ "tokenizer_1.bin", "tokenizer_2.bin", "encoder.bin", "ridge.bin",
+      "decider.bin", "gaz.bin", "gaz_rms.bin", "manifest.lua" }) do
+    os.remove(bdir .. "/" .. f)
+  end
+  os.remove(bdir)
 end)

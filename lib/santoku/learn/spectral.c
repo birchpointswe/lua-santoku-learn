@@ -557,6 +557,7 @@ typedef struct {
   int n_blocks;
   int64_t blk_start[TK_MAX_MOD];
   float blk_s[TK_MAX_MOD];
+  float *blk_cs_flat;
   float *dense_vecs;
   float *dense_cs2;
   int64_t d_input;
@@ -589,6 +590,7 @@ static inline int tk_nystrom_encoder_gc (lua_State *L) {
       free(enc->csc_offsets);
       free(enc->csc_rows);
       free(enc->csc_values);
+      free(enc->blk_cs_flat);
     } else if (enc->mod_type == TK_MOD_DENSE) {
       free(enc->dense_vecs);
       free(enc->dense_cs2);
@@ -608,6 +610,7 @@ static inline void tk_nystrom_encoder_zero (tk_nystrom_encoder_t *enc) {
   enc->csc_offsets = NULL; enc->csc_rows = NULL; enc->csc_values = NULL;
   enc->csr_n_tokens = 0;
   enc->n_blocks = 0;
+  enc->blk_cs_flat = NULL;
   enc->dense_vecs = NULL;
   enc->dense_cs2 = NULL;
   enc->d_input = 0;
@@ -952,14 +955,7 @@ static inline int tk_nystrom_encode_blocks (lua_State *L, tk_nystrom_encoder_t *
     btok[b] = (const int32_t *) tk_csr_nbr_ptr(Xb);
     bval[b] = Xb->values ? ((tk_fvec_t *) Xb->values)->a : NULL;
     lua_pop(L, 1);
-    lua_getfield(L, bt, "colscale");
-    if (lua_isnil(L, -1)) bcs[b] = NULL;
-    else {
-      tk_fvec_t *cv = tk_fvec_peekopt(L, -1);
-      if (!cv) return luaL_error(L, "encode: colscale must be an fvec");
-      bcs[b] = cv->a;
-    }
-    lua_pop(L, 1);
+    bcs[b] = enc->blk_cs_flat + enc->blk_start[b];
     lua_pop(L, 1);
   }
 
@@ -1142,7 +1138,7 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
   lua_pop(L, 2);
   FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
   tk_lua_fwrite(L, "TKny", 1, 4, fh);
-  uint8_t version = 29;
+  uint8_t version = 30;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &enc->kernel.family, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &enc->kernel.nu, sizeof(uint8_t), 1, fh);
@@ -1186,6 +1182,7 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
     if (enc->n_blocks > 0) {
       tk_lua_fwrite(L, enc->blk_start, sizeof(int64_t), (size_t) enc->n_blocks, fh);
       tk_lua_fwrite(L, enc->blk_s, sizeof(float), (size_t) enc->n_blocks, fh);
+      tk_lua_fwrite(L, enc->blk_cs_flat, sizeof(float), (size_t) enc->csr_n_tokens, fh);
     }
   } else if (enc->mod_type == TK_MOD_DENSE) {
     tk_lua_fwrite(L, &enc->d_input, sizeof(int64_t), 1, fh);
@@ -1595,6 +1592,18 @@ static inline int tm_encode (lua_State *L) {
       enc->blk_start[b] = mod.blk_start[b];
       enc->blk_s[b] = mod.blk_s[b];
     }
+    enc->blk_cs_flat = (float *) malloc((csr_nt > 0 ? csr_nt : 1) * sizeof(float));
+    if (!enc->blk_cs_flat)
+      return luaL_error(L, "encode: out of memory (blk_cs)");
+    for (uint64_t t = 0; t < csr_nt; t++) enc->blk_cs_flat[t] = 1.0f;
+    for (int b = 0; b < mod.n_blocks; b++) {
+      const float *cs = mod.blk_cs[b];
+      if (cs) {
+        int64_t bstart = mod.blk_start[b];
+        int64_t bend = (b + 1 < mod.n_blocks) ? mod.blk_start[b + 1] : (int64_t) csr_nt;
+        for (int64_t c = 0; c < bend - bstart; c++) enc->blk_cs_flat[bstart + c] = cs[c];
+      }
+    }
     uint64_t lm_total = 0;
     for (uint64_t j = 0; j < m; j++) {
       uint64_t si = (uint64_t) lm_ids->a[j];
@@ -1924,7 +1933,7 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 29) {
+  if (version != 30) {
     tk_lua_fclose(L, fh);
     return luaL_error(L, "unsupported nystrom encoder version %d (old layout; re-persist required)", (int)version);
   }
@@ -1996,6 +2005,12 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
     if (enc->n_blocks > 0) {
       tk_lua_fread(L, enc->blk_start, sizeof(int64_t), (size_t) enc->n_blocks, fh);
       tk_lua_fread(L, enc->blk_s, sizeof(float), (size_t) enc->n_blocks, fh);
+      enc->blk_cs_flat = (float *) malloc((enc->csr_n_tokens > 0 ? enc->csr_n_tokens : 1) * sizeof(float));
+      if (!enc->blk_cs_flat) {
+        tk_lua_fclose(L, fh);
+        return luaL_error(L, "load: out of memory (blk_cs)");
+      }
+      tk_lua_fread(L, enc->blk_cs_flat, sizeof(float), (size_t) enc->csr_n_tokens, fh);
     }
     if (tk_nystrom_build_csc(enc) != 0) {
       tk_lua_fclose(L, fh);
@@ -2249,9 +2264,6 @@ static inline tk_ivec_t *tk_spectral_uniform_ids (
   return out;
 }
 
-// block RPCholesky with a few giant blocks: round 0 draws a uniform chunk (fingerprint-deduped,
-// stratified); each later round computes every row's Nystrom residual w.r.t. the selected prefix
-// (tiled; no n x m factor is ever materialized) and draws the next chunk proportional to residual.
 static inline tk_ivec_t *tk_spectral_refine_ids (
   lua_State *L, tk_spectral_modality_t *mod, uint64_t n_docs,
   tk_spectral_kernel_t kernel, uint64_t m, uint64_t rounds, uint64_t seedv,
