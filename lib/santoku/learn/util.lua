@@ -238,60 +238,10 @@ function M.tokenize_blocks (specs, texts, o)
     if type(tk) == "table" then tk = tk[i] end
     local targs = { texts = texts, focus = o.focus, tokens = tk }
     local csr = grow and toks[i]:fit(targs) or toks[i]:tokenize(targs)
-
     local go = specs[i].regions and toks[i]:group_offsets() or nil
     X[i] = go and { x = csr, group_offsets = go } or csr
   end
   return toks, X
-end
-
-
-
-
-function M.oof_stitch (row_fold, K, per_fold_fn)
-  local fold_rows = {}
-  for f = 0, K - 1 do fold_rows[f] = ivec.create() end
-  for r = 0, row_fold:size() - 1 do fold_rows[row_fold:get(r)]:push(r) end
-  local concat, order = nil, ivec.create()
-  for f = 0, K - 1 do
-    local sub = per_fold_fn(f, fold_rows[f])
-    if concat then concat:append(sub) else concat = sub end
-    order:copy(fold_rows[f])
-  end
-  local inv = ivec.create(order:size())
-  for r = 0, order:size() - 1 do inv:set(order:get(r), r) end
-  return concat:rows(inv)
-end
-
-local function gold_excluding_fold (G, f, doc_fold)
-  local spans = require("santoku.spans")
-  local go, gs, ge, gt = G:offsets(), G:col("s"), G:col("e"), G:col("ty")
-  local noff, ns, ne, nt = ivec.create(), ivec.create(), ivec.create(), ivec.create()
-  noff:push(0)
-  for d = 0, go:size() - 2 do
-    if doc_fold:get(d) ~= f then
-      for g = go:get(d), go:get(d + 1) - 1 do ns:push(gs:get(g)); ne:push(ge:get(g)); nt:push(gt:get(g)) end
-    end
-    noff:push(ns:size())
-  end
-  return spans.create({ offsets = noff, s = ns, e = ne, ty = nt })
-end
-
-
-
-
-
-
-
-function M.gaz_block_oof (o)
-  local K, texts, cand, gold = o.folds, o.texts, o.cand, o.gold
-  local doc_fold = o.doc_fold or M.doc_folds(cand, gold, K)
-  local co = cand:offsets()
-  local cand_fold = ivec.create(co:get(co:size() - 1))
-  cand_fold:fill_segments(co, doc_fold)
-  return M.oof_stitch(cand_fold, K, function (f, rows)
-    return o.build(gold_excluding_fold(gold, f, doc_fold)):block(texts, cand, nil):rows(rows)
-  end)
 end
 
 local function label_is_multilabel (labels, n, n_labels)
@@ -363,9 +313,6 @@ local function doc_strata (gold, ndocs)
   return buckets, order
 end
 
-
-
-
 function M.doc_folds (cand, gold, K)
   local co = cand:offsets()
   local ndocs = co:size() - 1
@@ -409,9 +356,6 @@ local function weight_fit (blocks, y, metrics, is_targets)
   end
   return w
 end
-
-
-
 
 function M.rms_scale_blocks (train_blocks, eval_block_lists, from, to)
   local weights = {}

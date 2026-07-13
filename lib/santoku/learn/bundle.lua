@@ -18,27 +18,20 @@ M.persist = function (opts)
   if opts.gaz then
     opts.gaz:persist(dir .. "/gaz.bin")
   end
-  local blocks = opts.blocks or {}
-  local parts = {}
-  for i = 1, #blocks do
-    local cs = blocks[i].colscale
-    if cs then
-      cs:persist(dir .. "/colscale_" .. i .. ".bin")
-    end
-    parts[i] = str.format("{ n_tokens = %d, colscale = %s }",
-      blocks[i].n_tokens, cs and "true" or "false")
+  if opts.gaz_rms then
+    opts.gaz_rms:persist(dir .. "/gaz_rms.bin")
   end
   local fh = assert(io.open(dir .. "/manifest.lua", "w"))
   fh:write(str.format(
-    "return {\n  version = 1,\n  n_tokenizers = %d,\n  has_decider = %s,\n  has_gaz = %s,\n  w_external = %s,\n  w_path = %s,\n  chol_external = %s,\n  chol_path = %s,\n  blocks = { %s },\n}\n",
+    "return {\n  version = 2,\n  n_tokenizers = %d,\n  has_decider = %s,\n  has_gaz = %s,\n  has_gaz_rms = %s,\n  w_external = %s,\n  w_path = %s,\n  chol_external = %s,\n  chol_path = %s,\n}\n",
     #toks,
     opts.decider and "true" or "false",
     opts.gaz and "true" or "false",
+    opts.gaz_rms and "true" or "false",
     opts.w_path and "true" or "false",
     opts.w_path and str.format("%q", opts.w_path) or "nil",
     opts.chol_path and "true" or "false",
-    opts.chol_path and str.format("%q", opts.chol_path) or "nil",
-    table.concat(parts, ", ")))
+    opts.chol_path and str.format("%q", opts.chol_path) or "nil"))
   fh:close()
 end
 
@@ -67,20 +60,14 @@ M.load = function (dir)
   end
   local decider = manifest.has_decider and decide.load(dir .. "/decider.bin") or nil
   local gaz = manifest.has_gaz and require("santoku.learn.ner").load_gaz(dir .. "/gaz.bin") or nil
-  local blocks = {}
-  for i, b in ipairs(manifest.blocks) do
-    blocks[i] = { n_tokens = b.n_tokens,
-      colscale = b.colscale and fvec.load(dir .. "/colscale_" .. i .. ".bin") or nil }
-  end
+  local gaz_rms = manifest.has_gaz_rms and fvec.load(dir .. "/gaz_rms.bin") or nil
   local function encode (ext, out)
     local bl = {}
-    for i = 1, #ext do
-      bl[i] = { x = ext[i], n_tokens = blocks[i].n_tokens, colscale = blocks[i].colscale }
-    end
+    for i = 1, #ext do bl[i] = { x = ext[i] } end
     return encoder:encode({ blocks = bl }, out)
   end
   return { tokenizers = toks, encoder = encoder, ridge = r, decider = decider,
-    gaz = gaz, blocks = blocks, encode = encode }
+    gaz = gaz, gaz_rms = gaz_rms, encode = encode }
 end
 
 return M

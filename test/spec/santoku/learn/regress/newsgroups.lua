@@ -42,7 +42,7 @@ test("newsgroups CV", function ()
   local toks, pool_blocks = util.tokenize_blocks(cfg.blocks, pool.problems, { tokens = Wtr })
   local _, test_blocks = util.tokenize_blocks(cfg.blocks, test_set.problems, { toks = toks, tokens = Wte })
 
-  local sp_enc, ridge_obj, deploy, best, decider, _, bake = optimize.krr({
+  local sp_enc, ridge_obj, deploy, best, decider = optimize.krr({
     pool_blocks = pool_blocks,
     pool_labels = pool.labels,
     pool_class = pool.labels:neighbors(),
@@ -70,11 +70,10 @@ test("newsgroups CV", function ()
   str.printf("[Result] scales=%s lambda=%.8g | test %s\nTotal: %.1fs\n",
     util.vecstr(best.scales), best.lambda or 0, util.fmt_metrics(m), total)
 
-  local baked = bake(test_blocks)
   local bundle = require("santoku.learn.bundle")
   local bdir = os.tmpname() .. ".bundle"
   bundle.persist({ dir = bdir, tokenizers = toks, encoder = sp_enc, ridge = ridge_obj,
-    decider = decider, blocks = baked })
+    decider = decider })
   local b = bundle.load(bdir)
   local _, test_blocks_b = util.tokenize_blocks(cfg.blocks, test_set.problems, { toks = b.tokenizers, tokens = Wte })
   local test_codes_b = b.encode(test_blocks_b)
@@ -85,7 +84,6 @@ test("newsgroups CV", function ()
   local files = { "encoder.bin", "ridge.bin", "decider.bin", "manifest.lua" }
   for i = 1, #cfg.blocks do
     files[#files + 1] = "tokenizer_" .. i .. ".bin"
-    files[#files + 1] = "colscale_" .. i .. ".bin"
   end
   for _, f in ipairs(files) do os.remove(bdir .. "/" .. f) end
   os.remove(bdir)

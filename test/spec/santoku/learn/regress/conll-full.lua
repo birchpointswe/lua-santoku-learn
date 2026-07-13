@@ -52,10 +52,8 @@ local cfg = {
       { ngram_min = 1, ngram_max = 5, mode = "tags", n_tags = util.N_SHAPES, normalize = false, regions = true },
     },
     relevance = { "bns", "bns" },
-    scales = { def = { 0.02743892, 556.6777, 0.005566777, 0.005566777, 5.2923249,
-      0.005566777, 91.966028, 0.017674851, 76.462583, 4.1211133, 139.99885 } },
-    exponent = { def = { 4.7762554, 2.3313325, 2.7983615, 7.3266628, 0.38468605,
-      0.7784287, 0.97172925, 0.12706431, 0.69330865, 0.032329143, 0.31840376 } },
+    scales = { def = { 0.02743892, 556.6777, 0.005566777, 0.005566777, 5.2923249, 0.005566777, 91.966028, 0.017674851, 76.462583, 4.1211133, 139.99885 } },
+    exponent = { def = { 4.7762554, 2.3313325, 2.7983615, 7.3266628, 0.38468605, 0.7784287, 0.97172925, 0.12706431, 0.69330865, 0.032329143, 0.31840376 } },
     decode_offset = { def = 0.25278902 },
     search_trials = 0,
     folds = 5,
@@ -210,16 +208,16 @@ test("conll-full", function ()
     return ner.build_char_gaz({ texts = train.texts, gold = g, n_types = N_TYPES,
       ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max })
   end
-  ty_all_tr[#ty_all_tr + 1] = util.gaz_block_oof({
-    folds = K, doc_fold = df, texts = train.texts, cand = Scand_tr, gold = TR.gold, build = build_cgaz })
-  ty_all_te[#ty_all_te + 1] = build_cgaz(TR.gold):block(test_set.texts, Scand_te, nil)
+  local ty_serve_gaz = build_cgaz(TR.gold)
+  ty_all_tr[#ty_all_tr + 1] = ty_serve_gaz:block(train.texts, Scand_tr, tr_tlab)
+  ty_all_te[#ty_all_te + 1] = ty_serve_gaz:block(test_set.texts, Scand_te, nil)
 
-  util.rms_scale_blocks(ty_all_tr, { ty_all_te }, n_sparse + 1)
+  local ty_rms_w = util.rms_scale_blocks(ty_all_tr, { ty_all_te }, n_sparse + 1)
   local ty_relevance = {}
   for i = 1, n_sparse do ty_relevance[i] = cfg.type.relevance[i] end
   ty_relevance[n_sparse + 1] = "auc"
-  str.printf("[Type] CV folds=%d trials=%d (cross-fit gaz)\n", K, cfg.type.search_trials)
-  local _, ridge_ty, deploy, _, ty_decider = optimize.krr({
+  str.printf("[Type] CV folds=%d trials=%d (full-gold + LOO gaz)\n", K, cfg.type.search_trials)
+  local ty_enc, ridge_ty, deploy, _, ty_decider = optimize.krr({
     pool_blocks = ty_all_tr, pool_labels = Ytype, pool_n = n_trc,
     folds = K, doc_fold = df, cand = Scand_tr, gold = TR.gold,
     relevance = ty_relevance,
@@ -240,6 +238,30 @@ test("conll-full", function ()
   local te_lab = te_lab_csr:neighbors()
   local _, te_m = ty_decider:score({ scores = te_scores, n_samples = n_te_docs, cand = Scand_te, gold = TE.gold })
   str.printf("[Span] test %s offset=%.8g %s\n", util.fmt_metrics(te_m), ty_decider:offset(), sw())
+
+  local bundle = require("santoku.learn.bundle")
+  local bdir = os.tmpname() .. ".bundle"
+  bundle.persist({ dir = bdir, tokenizers = ty_toks, gaz = ty_serve_gaz, gaz_rms = ty_rms_w[n_sparse + 1],
+    encoder = ty_enc, ridge = ridge_ty, decider = ty_decider })
+  local b = bundle.load(bdir)
+  local _, Xte_b = util.tokenize_blocks(cfg.type.blocks, test_set.texts,
+    { toks = b.tokenizers, focus = Scand_te, tokens = TE.seg })
+  Xte_b[n_sparse + 1] = b.gaz:block(test_set.texts, Scand_te, nil)
+  Xte_b[n_sparse + 1]:bns(b.gaz_rms)
+  local _, sb = util.predict_tiled({ deploy = b.encode, ridge = b.ridge,
+    blocks = Xte_b, n = n_tec, k = 2, scores = true, n_labels = N_TYPES + 1 })
+  local maxd = 0
+  for i = 0, n_tec * (N_TYPES + 1) - 1 do
+    local d = math.abs(te_scores:get(i) - sb:get(i))
+    if d > maxd then maxd = d end
+  end
+  str.printf("[Bundle] serve-vs-deploy max score diff = %.3e\n", maxd)
+  assert(maxd < 1e-3, str.format("bundle serve path diverges from deploy (%.3e)", maxd))
+  for _, f in ipairs({ "tokenizer_1.bin", "tokenizer_2.bin", "encoder.bin", "ridge.bin",
+      "decider.bin", "gaz.bin", "gaz_rms.bin", "manifest.lua" }) do
+    os.remove(bdir .. "/" .. f)
+  end
+  os.remove(bdir)
 
   local tdr = ner.decode_report({
     cand = Scand_te, pred = te_lab, pred_stride = 2,
