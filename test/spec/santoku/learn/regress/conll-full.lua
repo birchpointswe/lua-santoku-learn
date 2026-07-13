@@ -26,8 +26,6 @@ local cfg = {
   tok = { ngram_min = 1, ngram_max = 5 },
   emb = { n_landmarks = 1024 * 8, },
   tag = {
-    -- boundary/inner detection: shapes (caps) is genuine signal here (not the type-stage overfit
-    -- trap), so keep the pinned 3-block config -> stable candidate pool (coverage ~0.938).
     kernel = { "matern" },
     nu = { def = 2 },
     gamma = { def = 0.13353758 },
@@ -45,9 +43,6 @@ local cfg = {
     folds = 5,
   },
   type = {
-    -- type head: chars + shapes over candidate focus (words dropped). Region-injected: each block's
-    -- ids are laid out region-blocked (left / left-cross / inner / right-cross / right) and the
-    -- tokenizer returns group_offsets so optimize.krr's auto-ARD gauges each region independently.
     kernel = { "matern" },
     nu = { def = 2 },
     gamma = { def = 0.67920774 },
@@ -57,7 +52,6 @@ local cfg = {
       { ngram_min = 1, ngram_max = 5, mode = "tags", n_tags = util.N_SHAPES, normalize = false, regions = true },
     },
     relevance = { "bns", "bns" },
-    -- 11 gauge groups: chars[L,Lx,in,Rx,R], shapes[same], + cross-fit char-gaz. test spF1 0.820074
     scales = { def = { 0.02743892, 556.6777, 0.005566777, 0.005566777, 5.2923249,
       0.005566777, 91.966028, 0.017674851, 76.462583, 4.1211133, 139.99885 } },
     exponent = { def = { 4.7762554, 2.3313325, 2.7983615, 7.3266628, 0.38468605,
@@ -210,16 +204,14 @@ test("conll-full", function ()
   local ty_all_tr = type_blocks(train, Scand_tr, TR)
   local ty_all_te = type_blocks(test_set, Scand_te, TE)
 
-  -- CROSS-FIT char-gaz: each train candidate's gaz comes from a gaz built on the OTHER document-folds'
-  -- gold (so its own doc's gold is never in its own feature -> train seen-surface stats match test's,
-  -- fixing the within-document self/repetition leak). Test uses the full-gold gaz.
   local K = cfg.type.folds
+  local df = util.doc_folds(Scand_tr, TR.gold, K)  -- shared with krr so the cross-fit aligns to CV
   local function build_cgaz (g)
     return ner.build_char_gaz({ texts = train.texts, gold = g, n_types = N_TYPES,
       ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max })
   end
   ty_all_tr[#ty_all_tr + 1] = util.gaz_block_oof({
-    folds = K, texts = train.texts, cand = Scand_tr, gold = TR.gold, build = build_cgaz })
+    folds = K, doc_fold = df, texts = train.texts, cand = Scand_tr, gold = TR.gold, build = build_cgaz })
   ty_all_te[#ty_all_te + 1] = build_cgaz(TR.gold):block(test_set.texts, Scand_te, nil)
 
   util.rms_scale_blocks(ty_all_tr, { ty_all_te }, n_sparse + 1)
@@ -229,7 +221,7 @@ test("conll-full", function ()
   str.printf("[Type] CV folds=%d trials=%d (cross-fit gaz)\n", K, cfg.type.search_trials)
   local _, ridge_ty, deploy, _, ty_decider = optimize.krr({
     pool_blocks = ty_all_tr, pool_labels = Ytype, pool_n = n_trc,
-    folds = K, cand = Scand_tr, gold = TR.gold,
+    folds = K, doc_fold = df, cand = Scand_tr, gold = TR.gold,
     relevance = ty_relevance,
     scales = cfg.type.scales,
     exponent = cfg.type.exponent,

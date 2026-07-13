@@ -56,12 +56,6 @@ local function landmarks (m)
   return lms
 end
 
--- Codes are equal only up to fp noise: the encoder accumulates per-block partial dots into a
--- FLOAT buffer (spectral.c kip_block, one rounding per block), so 8 blocks vs 1 grouped block
--- round differently (~1e-6 on K_LL), and chol+trsm amplify that. The exact contract lives at
--- the baked-multiplier level; codes get a graduated tolerance report + a 1e-3 gate.
--- m must stay BELOW the feature rank (C=8): with m > rank, K_LL is rank-deficient, the chol
--- null space is jitter-determined, and cross-representation code comparison is meaningless.
 local function assert_codes_close (cA, cB, tag)
   local level = "none"
   for _, tol in ipairs({ 1e-4, 1e-5, 1e-6 }) do
@@ -96,7 +90,6 @@ test("identity groups == columns-as-blocks (no relevance)", function ()
   local blA = util.build_blocks(blocksA, scales, nil, N, nil, pcsA)
   local blB = util.build_blocks({ Xall }, scales, nil, N, nil, { Xall:sumsq_cols() },
     { offsets(0, 1, 2, 3, 4, 5, 6, 7, 8) })
-  -- the exact contract: baked per-column multipliers identical to the per-block scales
   local baked = blB[1].colscale
   for j = 1, C do
     local a, b = baked:get(j - 1), blA[j].scale
@@ -122,8 +115,6 @@ test("two 4-col groups == two blocks (relevance + exponent)", function ()
     { w1, w2 }, { B1:sumsq_cols(), B2:sumsq_cols() })
   local blB = util.build_blocks({ Xall }, scales, exps, N,
     { wall }, { Xall:sumsq_cols() }, { offsets(0, 4, 8) })
-  -- effective per-column multiplier parity (old: scale x colscale; new: baked); 1-ulp-level
-  -- differences expected from the different rounding points, hence relative 1e-5
   local baked = blB[1].colscale
   for g = 1, 2 do
     for c = 0, 3 do
@@ -136,4 +127,20 @@ test("two 4-col groups == two blocks (relevance + exponent)", function ()
   local lms = landmarks(6)
   local cA, cB = codes_for(blA, lms), codes_for(blB, lms)
   assert_codes_close(cA, cB, "grouped-relevance")
+end)
+
+test("colscale fold: prescaled block + c == raw block + (c .* w)", function ()
+  local vals = make_vals()
+  math.randomseed(11)
+  local w, c = fvec.create(C), fvec.create(C)
+  for i = 0, C - 1 do w:set(i, math.random() * 2 + 0.1); c:set(i, math.random() * 2 + 0.1) end
+  local Xa = range_csr(vals, 0, C); Xa:bns(w)
+  local blA = { { x = Xa, n_tokens = C, scale = 1.0, colscale = c } }
+  local cw = fvec.create(C)
+  for i = 0, C - 1 do cw:set(i, c:get(i)) end
+  cw:scalev(w)
+  local blB = { { x = range_csr(vals, 0, C), n_tokens = C, scale = 1.0, colscale = cw } }
+  local lms = landmarks(6)
+  local cA, cB = codes_for(blA, lms), codes_for(blB, lms)
+  assert_codes_close(cA, cB, "colscale-fold")
 end)

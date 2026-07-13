@@ -1,5 +1,6 @@
 local ds = require("santoku.learn.dataset")
 local optimize = require("santoku.learn.optimize")
+local ner = require("santoku.learn.ner")
 local csr = require("santoku.csr")
 local spans = require("santoku.spans")
 local ivec = require("santoku.ivec")
@@ -10,33 +11,35 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
+local N_TYPES = 4
+
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
   landmark_rounds = 32,
   search_landmark_rounds = 1,
   data = { dir = "test/res/conll2003", max = nil },
+  tok = { ngram_min = 1, ngram_max = 5 },
   blocks = {
-    { ngram_min = 1, ngram_max = 5, normalize = false },
-    { ngram_min = 1, ngram_max = 3, mode = "words", normalize = false },
-    { ngram_min = 1, ngram_max = 5, mode = "tags", n_tags = util.N_SHAPES, normalize = false },
+    { ngram_min = 1, ngram_max = 5, normalize = false, regions = true },
+    { ngram_min = 1, ngram_max = 5, mode = "tags", n_tags = util.N_SHAPES, normalize = false, regions = true },
   },
   emb = { n_landmarks = 1024 * 8 },
   head = {
     kernel = { "matern" },
-    nu = { def = 2 },
-    gamma = { def = 0.010122331 },
-    lambda = { def = 1.0077999e-07 },
-    relevance = { "bns", "bns", "bns" },
-    scales = { def = { 1.8005359, 0.0064432119, 86.197726 } },
-    exponent = { def = { 2.3480414, 7.3683571, 6.2093163 } },
-    decode_offset = { def = -0.44393253 },
-    search_trials = 0,
+    nu = { def = 1 },
+    gamma = { def = 0.53607869 },
+    lambda = { def = 2.9299902e-05 },
+    relevance = { "bns", "bns", "auc" },
+    scales = { def = { 0.0045204084, 0.0045204084, 0.49983253, 15.168852, 0.0045204084,
+      0.0045204084, 20.022861, 56.54299, 44.639002, 14.48332, 431.54347 } },
+    exponent = { def = { 3.2694916, 6.8227349, 7.5514373, 1.0992432, 1.4892054,
+      7.9947992, 1.5709097, 5.3751002, 0.79283053, 5.7866596, 5.2936447 } },
+    decode_offset = { def = -0.46597821 },
+    search_trials = 200,
     folds = 5,
   },
 }
-
-local N_TYPES = 4
 
 local function candidates (ac, pat_type, split, T)
   local S = ac:predict({ texts = split.texts, longest = true, tokens = T })
@@ -65,6 +68,18 @@ test("conll-gaz CV", function ()
 
   local toks, Xtr = util.tokenize_blocks(cfg.blocks, pool.texts, { focus = Ctr, tokens = Ttr })
   local _, Xte = util.tokenize_blocks(cfg.blocks, test_set.texts, { toks = toks, focus = Cte, tokens = Tte })
+  local n_sparse = #cfg.blocks
+
+  local K = cfg.head.folds
+  local df = util.doc_folds(Ctr, Gtr, K)  -- shared with krr so the cross-fit aligns to CV
+  local function build_cgaz (g)
+    return ner.build_char_gaz({ texts = pool.texts, gold = g, n_types = N_TYPES,
+      ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max })
+  end
+  Xtr[n_sparse + 1] = util.gaz_block_oof({ folds = K, doc_fold = df, texts = pool.texts, cand = Ctr, gold = Gtr, build = build_cgaz })
+  Xte[n_sparse + 1] = build_cgaz(Gtr):block(test_set.texts, Cte, nil)
+  util.rms_scale_blocks(Xtr, { Xte }, n_sparse + 1)
+
   local Ytr = cand_labels(Ctr, Gtr)
 
   local _, rg, deploy, best, decider = optimize.krr({
@@ -74,6 +89,7 @@ test("conll-gaz CV", function ()
     n_labels = 1,
     reject = N_TYPES,
     folds = cfg.head.folds,
+    doc_fold = df,
     cand = Ctr,
     gold = Gtr,
     relevance = cfg.head.relevance,

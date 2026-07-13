@@ -2,6 +2,7 @@ require("santoku.error")
 local tokenizer = require("santoku.learn.tokenizer")
 local re = require("santoku.re")
 local ivec = require("santoku.ivec")
+require("santoku.fvec")  -- installs fvec metatable for tokenize_raw's returned values vec
 local spans = require("santoku.spans")
 local test = require("santoku.test")
 
@@ -98,6 +99,56 @@ test("tokenizer", function ()
     local X1 = tk:tokenize({ texts = texts, focus = F, tokens = T })
     local X2 = tk2:tokenize({ texts = texts, focus = F, tokens = T })
     assert(X1:eq(X2))
+  end)
+
+  -- tokenize_raw: stateless, fit-free byte char-ngrams -> (offsets, raw 64-bit hash keys, counts).
+  -- No vocab/fit, no modes/focus/regions/terminals/persist -- just the raw hashing bag (littlelist).
+  test("tokenize_raw: raw ngram-hash csr, counts", function ()
+    local off, tok, val = tokenizer.tokenize_raw({
+      texts = { "hello" }, n_samples = 1, ngram_min = 3, ngram_max = 3 })
+    assert(off:size() == 2 and off:get(0) == 0 and off:get(1) == 3)   -- 5-3+1 = 3 trigrams
+    assert(tok:size() == 3 and val:size() == 3)
+    assert(val:sum() == 3)                                            -- hel/ell/llo distinct -> each 1
+  end)
+
+  test("tokenize_raw: dedups repeated ngrams into counts", function ()
+    local _, tok, val = tokenizer.tokenize_raw({
+      texts = { "ababab" }, n_samples = 1, ngram_min = 2, ngram_max = 2 })
+    assert(tok:size() == 2)                    -- "ab", "ba"
+    assert(val:sum() == 5)                     -- 6-2+1 = 5 bigrams
+    assert(val:max() == 3 and val:min() == 2)  -- ab x3, ba x2
+  end)
+
+  test("tokenize_raw: shared ngram -> shared column id across docs", function ()
+    local off, tok, val = tokenizer.tokenize_raw({
+      texts = { "abc", "abc" }, n_samples = 2, ngram_min = 3, ngram_max = 3 })
+    assert(off:size() == 3 and off:get(1) == 1 and off:get(2) == 2)
+    assert(tok:get(0) == tok:get(1))           -- same hash for the shared trigram
+    assert(val:get(0) == 1 and val:get(1) == 1)
+  end)
+
+  test("tokenize_raw: ngram range unions sizes", function ()
+    local _, tok, val = tokenizer.tokenize_raw({
+      texts = { "abc" }, n_samples = 1, ngram_min = 1, ngram_max = 2 })
+    assert(tok:size() == 5)                     -- a,b,c + ab,bc, all distinct
+    assert(val:sum() == 5)
+  end)
+
+  test("tokenize_raw: normalize collapses whitespace", function ()
+    local _, a = tokenizer.tokenize_raw({
+      texts = { "a  b" }, n_samples = 1, ngram_min = 1, ngram_max = 3, normalize = true })
+    local _, b = tokenizer.tokenize_raw({
+      texts = { "a b" }, n_samples = 1, ngram_min = 1, ngram_max = 3, normalize = true })
+    assert(a:eq(b))                             -- "a  b" -> "a b" under normalize
+    local _, c = tokenizer.tokenize_raw({
+      texts = { "a  b" }, n_samples = 1, ngram_min = 1, ngram_max = 3, normalize = false })
+    assert(not a:eq(c))                         -- raw keeps the double space -> different ngrams
+  end)
+
+  test("tokenize_raw: bad ngram range errors", function ()
+    assert(not pcall(function ()
+      tokenizer.tokenize_raw({ texts = { "x" }, n_samples = 1, ngram_min = 3, ngram_max = 2 })
+    end))
   end)
 
 end)
