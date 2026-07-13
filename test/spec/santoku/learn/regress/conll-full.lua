@@ -205,7 +205,7 @@ test("conll-full", function ()
   local ty_all_te = type_blocks(test_set, Scand_te, TE)
 
   local K = cfg.type.folds
-  local df = util.doc_folds(Scand_tr, TR.gold, K)  -- shared with krr so the cross-fit aligns to CV
+  local df = util.doc_folds(Scand_tr, TR.gold, K)
   local function build_cgaz (g)
     return ner.build_char_gaz({ texts = train.texts, gold = g, n_types = N_TYPES,
       ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max })
