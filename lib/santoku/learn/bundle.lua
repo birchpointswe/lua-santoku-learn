@@ -25,9 +25,8 @@ M.persist = function (opts)
     if cs then
       cs:persist(dir .. "/colscale_" .. i .. ".bin")
     end
-    parts[i] = str.format("{ n_tokens = %d, colscale = %s, scale = %s }",
-      blocks[i].n_tokens, cs and "true" or "false",
-      str.format("%.17g", blocks[i].scale or 1.0))
+    parts[i] = str.format("{ n_tokens = %d, colscale = %s }",
+      blocks[i].n_tokens, cs and "true" or "false")
   end
   local fh = assert(io.open(dir .. "/manifest.lua", "w"))
   fh:write(str.format(
@@ -71,14 +70,12 @@ M.load = function (dir)
   local blocks = {}
   for i, b in ipairs(manifest.blocks) do
     blocks[i] = { n_tokens = b.n_tokens,
-      colscale = b.colscale and fvec.load(dir .. "/colscale_" .. i .. ".bin") or nil,
-      scale = b.scale }
+      colscale = b.colscale and fvec.load(dir .. "/colscale_" .. i .. ".bin") or nil }
   end
   local function encode (ext, out)
     local bl = {}
     for i = 1, #ext do
-      bl[i] = { x = ext[i], n_tokens = blocks[i].n_tokens,
-        colscale = blocks[i].colscale, scale = blocks[i].scale }
+      bl[i] = { x = ext[i], n_tokens = blocks[i].n_tokens, colscale = blocks[i].colscale }
     end
     return encoder:encode({ blocks = bl }, out)
   end
