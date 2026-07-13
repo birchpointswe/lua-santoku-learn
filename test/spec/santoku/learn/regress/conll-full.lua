@@ -26,8 +26,6 @@ local cfg = {
   tok = { ngram_min = 1, ngram_max = 5 },
   emb = { n_landmarks = 1024 * 8, },
   tag = {
-
-
     kernel = { "matern" },
     nu = { def = 2 },
     gamma = { def = 0.13353758 },
@@ -45,9 +43,6 @@ local cfg = {
     folds = 5,
   },
   type = {
-
-
-
     kernel = { "matern" },
     nu = { def = 2 },
     gamma = { def = 0.67920774 },
@@ -57,7 +52,6 @@ local cfg = {
       { ngram_min = 1, ngram_max = 5, mode = "tags", n_tags = util.N_SHAPES, normalize = false, regions = true },
     },
     relevance = { "bns", "bns" },
-
     scales = { def = { 0.02743892, 556.6777, 0.005566777, 0.005566777, 5.2923249,
       0.005566777, 91.966028, 0.017674851, 76.462583, 4.1211133, 139.99885 } },
     exponent = { def = { 4.7762554, 2.3313325, 2.7983615, 7.3266628, 0.38468605,
@@ -210,16 +204,14 @@ test("conll-full", function ()
   local ty_all_tr = type_blocks(train, Scand_tr, TR)
   local ty_all_te = type_blocks(test_set, Scand_te, TE)
 
-
-
-
   local K = cfg.type.folds
+  local df = util.doc_folds(Scand_tr, TR.gold, K)
   local function build_cgaz (g)
     return ner.build_char_gaz({ texts = train.texts, gold = g, n_types = N_TYPES,
       ngram_min = cfg.tok.ngram_min, ngram_max = cfg.tok.ngram_max })
   end
   ty_all_tr[#ty_all_tr + 1] = util.gaz_block_oof({
-    folds = K, texts = train.texts, cand = Scand_tr, gold = TR.gold, build = build_cgaz })
+    folds = K, doc_fold = df, texts = train.texts, cand = Scand_tr, gold = TR.gold, build = build_cgaz })
   ty_all_te[#ty_all_te + 1] = build_cgaz(TR.gold):block(test_set.texts, Scand_te, nil)
 
   util.rms_scale_blocks(ty_all_tr, { ty_all_te }, n_sparse + 1)
@@ -229,7 +221,7 @@ test("conll-full", function ()
   str.printf("[Type] CV folds=%d trials=%d (cross-fit gaz)\n", K, cfg.type.search_trials)
   local _, ridge_ty, deploy, _, ty_decider = optimize.krr({
     pool_blocks = ty_all_tr, pool_labels = Ytype, pool_n = n_trc,
-    folds = K, cand = Scand_tr, gold = TR.gold,
+    folds = K, doc_fold = df, cand = Scand_tr, gold = TR.gold,
     relevance = ty_relevance,
     scales = cfg.type.scales,
     exponent = cfg.type.exponent,

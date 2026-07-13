@@ -2,6 +2,7 @@ require("santoku.error")
 local tokenizer = require("santoku.learn.tokenizer")
 local re = require("santoku.re")
 local ivec = require("santoku.ivec")
+require("santoku.fvec")
 local spans = require("santoku.spans")
 local test = require("santoku.test")
 
@@ -98,6 +99,56 @@ test("tokenizer", function ()
     local X1 = tk:tokenize({ texts = texts, focus = F, tokens = T })
     local X2 = tk2:tokenize({ texts = texts, focus = F, tokens = T })
     assert(X1:eq(X2))
+  end)
+
+
+
+  test("tokenize_raw: raw ngram-hash csr, counts", function ()
+    local off, tok, val = tokenizer.tokenize_raw({
+      texts = { "hello" }, n_samples = 1, ngram_min = 3, ngram_max = 3 })
+    assert(off:size() == 2 and off:get(0) == 0 and off:get(1) == 3)
+    assert(tok:size() == 3 and val:size() == 3)
+    assert(val:sum() == 3)
+  end)
+
+  test("tokenize_raw: dedups repeated ngrams into counts", function ()
+    local _, tok, val = tokenizer.tokenize_raw({
+      texts = { "ababab" }, n_samples = 1, ngram_min = 2, ngram_max = 2 })
+    assert(tok:size() == 2)
+    assert(val:sum() == 5)
+    assert(val:max() == 3 and val:min() == 2)
+  end)
+
+  test("tokenize_raw: shared ngram -> shared column id across docs", function ()
+    local off, tok, val = tokenizer.tokenize_raw({
+      texts = { "abc", "abc" }, n_samples = 2, ngram_min = 3, ngram_max = 3 })
+    assert(off:size() == 3 and off:get(1) == 1 and off:get(2) == 2)
+    assert(tok:get(0) == tok:get(1))
+    assert(val:get(0) == 1 and val:get(1) == 1)
+  end)
+
+  test("tokenize_raw: ngram range unions sizes", function ()
+    local _, tok, val = tokenizer.tokenize_raw({
+      texts = { "abc" }, n_samples = 1, ngram_min = 1, ngram_max = 2 })
+    assert(tok:size() == 5)
+    assert(val:sum() == 5)
+  end)
+
+  test("tokenize_raw: normalize collapses whitespace", function ()
+    local _, a = tokenizer.tokenize_raw({
+      texts = { "a  b" }, n_samples = 1, ngram_min = 1, ngram_max = 3, normalize = true })
+    local _, b = tokenizer.tokenize_raw({
+      texts = { "a b" }, n_samples = 1, ngram_min = 1, ngram_max = 3, normalize = true })
+    assert(a:eq(b))
+    local _, c = tokenizer.tokenize_raw({
+      texts = { "a  b" }, n_samples = 1, ngram_min = 1, ngram_max = 3, normalize = false })
+    assert(not a:eq(c))
+  end)
+
+  test("tokenize_raw: bad ngram range errors", function ()
+    assert(not pcall(function ()
+      tokenizer.tokenize_raw({ texts = { "x" }, n_samples = 1, ngram_min = 3, ngram_max = 2 })
+    end))
   end)
 
 end)

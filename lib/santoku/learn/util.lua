@@ -263,13 +263,13 @@ function M.oof_stitch (row_fold, K, per_fold_fn)
   return concat:rows(inv)
 end
 
-local function gold_excluding_fold (G, f, K)
+local function gold_excluding_fold (G, f, doc_fold)
   local spans = require("santoku.spans")
   local go, gs, ge, gt = G:offsets(), G:col("s"), G:col("e"), G:col("ty")
   local noff, ns, ne, nt = ivec.create(), ivec.create(), ivec.create(), ivec.create()
   noff:push(0)
   for d = 0, go:size() - 2 do
-    if d % K ~= f then
+    if doc_fold:get(d) ~= f then
       for g = go:get(d), go:get(d + 1) - 1 do ns:push(gs:get(g)); ne:push(ge:get(g)); nt:push(gt:get(g)) end
     end
     noff:push(ns:size())
@@ -281,16 +281,16 @@ end
 
 
 
+
+
 function M.gaz_block_oof (o)
   local K, texts, cand, gold = o.folds, o.texts, o.cand, o.gold
+  local doc_fold = o.doc_fold or M.doc_folds(cand, gold, K)
   local co = cand:offsets()
-  local ndocs = co:size() - 1
-  local cand_fold = ivec.create(co:get(ndocs))
-  for d = 0, ndocs - 1 do
-    for c = co:get(d), co:get(d + 1) - 1 do cand_fold:set(c, d % K) end
-  end
+  local cand_fold = ivec.create(co:get(co:size() - 1))
+  cand_fold:fill_segments(co, doc_fold)
   return M.oof_stitch(cand_fold, K, function (f, rows)
-    return o.build(gold_excluding_fold(gold, f, K)):block(texts, cand, nil):rows(rows)
+    return o.build(gold_excluding_fold(gold, f, doc_fold)):block(texts, cand, nil):rows(rows)
   end)
 end
 
@@ -361,6 +361,21 @@ local function doc_strata (gold, ndocs)
     b[#b + 1] = d
   end
   return buckets, order
+end
+
+
+
+
+function M.doc_folds (cand, gold, K)
+  local co = cand:offsets()
+  local ndocs = co:size() - 1
+  local buckets, order = doc_strata(gold, ndocs)
+  local docfold = ivec.create(ndocs)
+  for _, gc in ipairs(order) do
+    local docs = buckets[gc]
+    for j = 1, #docs do docfold:set(docs[j], (j - 1) % K) end
+  end
+  return docfold
 end
 
 local REG_STRATA_BINS = 16
@@ -629,12 +644,7 @@ function M.fold_blocks (a)
     if a.cand then
       local co = a.cand:offsets()
       local ndocs = co:size() - 1
-      local buckets, order = doc_strata(a.gold, ndocs)
-      local docfold = ivec.create(ndocs)
-      for _, gc in ipairs(order) do
-        local docs = buckets[gc]
-        for j = 1, #docs do docfold:set(docs[j], (j - 1) % K) end
-      end
+      local docfold = a.doc_fold or M.doc_folds(a.cand, a.gold, K)
       foldof = ivec.create(n)
       foldof:fill_segments(co, docfold)
       local fvc, fvg = {}, {}
