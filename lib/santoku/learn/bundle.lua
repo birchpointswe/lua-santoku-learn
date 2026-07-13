@@ -63,7 +63,10 @@ M.load = function (dir)
   local gaz_rms = manifest.has_gaz_rms and fvec.load(dir .. "/gaz_rms.bin") or nil
   local function encode (ext, out)
     local bl = {}
-    for i = 1, #ext do bl[i] = { x = ext[i] } end
+    for i = 1, #ext do
+      local e = ext[i]
+      bl[i] = { x = type(e) == "table" and e.x or e }
+    end
     return encoder:encode({ blocks = bl }, out)
   end
   return { tokenizers = toks, encoder = encoder, ridge = r, decider = decider,
