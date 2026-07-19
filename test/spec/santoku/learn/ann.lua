@@ -2,6 +2,8 @@ local tokenizer = require("santoku.learn.tokenizer")
 local spectral = require("santoku.learn.spectral")
 local ann = require("santoku.learn.ann")
 local ds = require("santoku.learn.dataset")
+local ivec = require("santoku.ivec")
+local cvec = require("santoku.cvec")
 local str = require("santoku.string")
 local test = require("santoku.test")
 
@@ -80,11 +82,12 @@ test("ann spectral idf retrieval", function ()
   local tmp = os.tmpname() .. ".ann"
   idx:persist(tmp)
 
-  local idx_m = ann.load(tmp, C)
+  local idx_m = ann.load(tmp, C,
+    ivec.mmap_open(tmp .. ".sids"), ivec.mmap_open(tmp .. ".buckets"), cvec.mmap_open(tmp .. ".bits"))
   local P_m = idx_m:neighborhoods_by_vecs(C, k, radius)
   assert(recall(P_m, P_rr, nq) == 1 and recall(P_rr, P_m, nq) == 1)
 
-  local idx_r = ann.load(tmp, C, false)
+  local idx_r = ann.load(tmp, C)
   local P_r = idx_r:neighborhoods_by_vecs(C, k, radius)
   assert(recall(P_r, P_rr, nq) == 1 and recall(P_rr, P_r, nq) == 1)
 
