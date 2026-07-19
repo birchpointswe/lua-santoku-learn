@@ -9,6 +9,7 @@
 #include <santoku/learn/mathlibs.h>
 #include <santoku/lua/utils.h>
 #include <santoku/fvec.h>
+#include <santoku/dvec.h>
 
 #define TK_GRAM_MT "tk_gram_t"
 
@@ -168,7 +169,10 @@ static inline int tk_gram_solve_impl (
     double add = lambda * g->mean_eig + g->mean_eig * jit + jit;
     for (uint64_t i = 0; i < d; i++)
       factor[i * d + i] += (float)add;
-    if (LAPACKE_spotrf(LAPACK_COL_MAJOR, 'U', (int)d, factor, (int)d) == 0) { ok = 1; break; }
+    if (LAPACKE_spotrf(LAPACK_COL_MAJOR, 'U', (int)d, factor, (int)d) == 0) {
+      ok = 1;
+      break;
+    }
     jit *= 16.0;
   }
   if (!ok)
@@ -193,6 +197,138 @@ static inline int tk_gram_solve_impl (
   return 0;
 }
 
+
+
+
+static inline int tk_gram_attach_lua (lua_State *L) {
+  tk_gram_t *g = tk_gram_peek(L, 1);
+  tk_fvec_t *fv = tk_fvec_peek(L, 2, "factor");
+  if (g->factor_external) {
+    g->factor = NULL;
+    g->factor_external = false;
+  } else if (g->factor) {
+    free(g->factor);
+    g->factor = NULL;
+  }
+  g->factor_ext = fv->a;
+  g->factor_ext_cap = fv->m;
+  lua_getfenv(L, 1);
+  lua_pushvalue(L, 2);
+  lua_setfield(L, -2, "factor_ext");
+  lua_pop(L, 1);
+  return 0;
+}
+
+
+
+
+
+
+
+
+
+static inline int tk_gram_fold_lua (lua_State *L) {
+  tk_gram_t *g = tk_gram_peek(L, 1);
+  tk_fvec_t *xtx_slot = tk_fvec_peek(L, 2, "xtx_slot");
+  tk_fvec_t *xty_slot = tk_fvec_peek(L, 3, "xty_slot");
+  tk_fvec_t *sv = tk_fvec_peek(L, 4, "sv");
+  tk_dvec_t *tv = tk_dvec_peek(L, 5, "tv");
+  int64_t vcount = luaL_checkinteger(L, 6);
+  if (!g->prepared || !g->cm_f || !g->y_mean)
+    return luaL_error(L, "gram fold: requires a prepared gram");
+  uint64_t d = (uint64_t)g->n_dims;
+  int64_t nl = g->n_labels;
+  uint64_t unl = (uint64_t)nl;
+  int64_t n = g->n_samples;
+  int64_t t = n - vcount;
+  if (vcount < 1 || t < 1)
+    return luaL_error(L, "gram fold: degenerate fold sizes");
+  if (xtx_slot->m < d * d || xty_slot->m < d * unl || sv->m < d || tv->m < unl)
+    return luaL_error(L, "gram fold: slot too small");
+  float *X = xtx_slot->a, *Y = xty_slot->a;
+  const float *XF = g->XtX, *YF = g->xty;
+  float *cm_t = (float *)malloc(d * sizeof(float));
+  double *ym_t = (double *)malloc(unl * sizeof(double));
+  float *ymf = (float *)malloc(unl * sizeof(float));
+  float *ymtf = (float *)malloc(unl * sizeof(float));
+  if (!cm_t || !ym_t || !ymf || !ymtf) {
+    free(cm_t); free(ym_t); free(ymf); free(ymtf);
+    return luaL_error(L, "gram fold: out of memory");
+  }
+  for (uint64_t j = 0; j < d; j++)
+    cm_t[j] = (float)(((double)n * (double)g->cm_f[j] - (double)sv->a[j]) / (double)t);
+  for (int64_t l = 0; l < nl; l++) {
+    ym_t[l] = ((double)n * g->y_mean[l] - tv->a[l]) / (double)t;
+    ymf[l] = (float)g->y_mean[l];
+    ymtf[l] = (float)ym_t[l];
+  }
+  #pragma omp parallel for schedule(static)
+  for (uint64_t i = 0; i < d * d; i++)
+    X[i] = XF[i] - X[i];
+  cblas_ssyr(CblasColMajor, CblasUpper, (int)d, (float)n, g->cm_f, 1, X, (int)d);
+  cblas_ssyr(CblasColMajor, CblasUpper, (int)d, -(float)t, cm_t, 1, X, (int)d);
+  #pragma omp parallel for schedule(static)
+  for (uint64_t i = 0; i < d * unl; i++)
+    Y[i] = YF[i] - Y[i];
+  cblas_sger(CblasRowMajor, (int)d, (int)nl, (float)n, g->cm_f, 1, ymf, 1, Y, (int)nl);
+  cblas_sger(CblasRowMajor, (int)d, (int)nl, -(float)t, cm_t, 1, ymtf, 1, Y, (int)nl);
+  free(ymf); free(ymtf);
+  double mean_eig = 0.0;
+  for (uint64_t i = 0; i < d; i++) mean_eig += (double)X[i * d + i];
+  mean_eig /= (double)d;
+  tk_gram_make_prepared(L, X, true, Y, true,
+    NULL, 0,
+    cm_t, ym_t, mean_eig,
+    t, (int64_t)d, nl, g->tile_labels);
+  lua_getfenv(L, -1);
+  lua_pushvalue(L, 2);
+  lua_setfield(L, -2, "xtx_slot");
+  lua_pushvalue(L, 3);
+  lua_setfield(L, -2, "xty_slot");
+  lua_pop(L, 1);
+  return 1;
+}
+
+static inline int tk_gram_release_lua (lua_State *L) {
+  tk_gram_t *g = tk_gram_peek(L, 1);
+  tk_gram_release_prepared(g);
+
+
+
+
+
+  g->factor_ext = NULL;
+  g->factor_ext_cap = 0;
+  lua_getfenv(L, 1);
+  if (!lua_isnil(L, -1)) {
+    lua_pushnil(L);
+    lua_setfield(L, -2, "factor_buf");
+  }
+  lua_pop(L, 1);
+  return 0;
+}
+
+
+
+
+
+static inline int tk_gram_destroy_lua (lua_State *L) {
+  tk_gram_t *g = tk_gram_peek(L, 1);
+  if (!g->destroyed) {
+    tk_gram_release_prepared(g);
+    if (!g->W_baked_external) free(g->W_baked_f);
+    g->W_baked_f = NULL;
+    free(g->intercept);
+    g->intercept = NULL;
+    g->factor_ext = NULL;
+    g->factor_ext_cap = 0;
+    g->destroyed = true;
+  }
+  lua_newtable(L);
+  lua_setfenv(L, 1);
+  return 0;
+}
+
 static inline int tk_gram_solve_lua (lua_State *L) {
   tk_gram_t *g = tk_gram_peek(L, 1);
   double lambda = luaL_checknumber(L, 2);
@@ -212,6 +348,10 @@ static inline int tk_gram_solve_lua (lua_State *L) {
 
 __attribute__((unused)) static luaL_Reg tk_gram_mt_fns[] = {
   { "solve", tk_gram_solve_lua },
+  { "attach", tk_gram_attach_lua },
+  { "fold", tk_gram_fold_lua },
+  { "release", tk_gram_release_lua },
+  { "destroy", tk_gram_destroy_lua },
   { NULL, NULL }
 };
 

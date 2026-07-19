@@ -76,4 +76,21 @@ test("ann spectral idf retrieval", function ()
 
   assert(r_rr > 0.3)
 
+
+  local tmp = os.tmpname() .. ".ann"
+  idx:persist(tmp)
+
+  local idx_m = ann.load(tmp, C)
+  local P_m = idx_m:neighborhoods_by_vecs(C, k, radius)
+  assert(recall(P_m, P_rr, nq) == 1 and recall(P_rr, P_m, nq) == 1)
+
+  local idx_r = ann.load(tmp, C, false)
+  local P_r = idx_r:neighborhoods_by_vecs(C, k, radius)
+  assert(recall(P_r, P_rr, nq) == 1 and recall(P_rr, P_r, nq) == 1)
+
+  local idx_h = ann.load(tmp)
+  local P_h = idx_h:neighborhoods_by_vecs(C, k, radius)
+  assert(recall(P_h, P_bin, nq) == 1 and recall(P_bin, P_h, nq) == 1)
+  for _, sfx in ipairs({ "", ".sids", ".buckets", ".bits" }) do os.remove(tmp .. sfx) end
+
 end)
