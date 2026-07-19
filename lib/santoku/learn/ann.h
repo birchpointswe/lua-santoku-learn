@@ -413,6 +413,9 @@ static inline int tk_ann_load_lua (lua_State *L)
   tk_mtx_t *Mc = lua_isnoneornil(L, 2) ? NULL : tk_mtx_peek(L, 2, "codes");
   int codes_idx = Mc ? 2 : 0;
   bool use_mmap = lua_isnoneornil(L, 3) ? true : lua_toboolean(L, 3);
+#if defined(__EMSCRIPTEN__)
+  use_mmap = false; // emscripten has no usable mmap; read the sidecars into RAM
+#endif
 
   FILE *fh = tk_lua_fopen(L, path, "r");
   char magic[4];
@@ -455,6 +458,7 @@ static inline int tk_ann_load_lua (lua_State *L)
   tk_ivec_t *buckets;
   tk_cvec_t *bits;
   if (use_mmap) {
+#if !defined(__EMSCRIPTEN__)
     char *ps = tk_ann_sidecar_path(L, path, ".sids");
     sids = tk_ivec_mmap_open(L, ps);
     free(ps);
@@ -464,6 +468,7 @@ static inline int tk_ann_load_lua (lua_State *L)
     char *pd = tk_ann_sidecar_path(L, path, ".bits");
     bits = tk_cvec_mmap_open(L, pd);
     free(pd);
+#endif
   } else {
     sids = tk_ivec_create(L, sids_n);
     sids->n = sids_n;
