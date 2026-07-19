@@ -404,18 +404,16 @@ static luaL_Reg tk_ann_flat_mt_fns[] =
   { NULL, NULL }
 };
 
-// ann.load(path, [codes_mtx], [mmap])
+// ann.load(path, [codes_mtx], [sids], [buckets], [bits])
 //   codes_mtx: external float codes for exact-dot rerank (nil => Hamming-only)
-//   mmap (default true): mmap-open the sidecars (RAM-lean); false => read into RAM
+//   sids/buckets/bits: optional pre-loaded index arrays (e.g. ivec.mmap_open(path..".sids"));
+//     any left nil is read from its sidecar file into RAM. mmap is the CALLER's choice --
+//     ann never mmaps internally (same convention as ridge's external W).
 static inline int tk_ann_load_lua (lua_State *L)
 {
   const char *path = luaL_checkstring(L, 1);
   tk_mtx_t *Mc = lua_isnoneornil(L, 2) ? NULL : tk_mtx_peek(L, 2, "codes");
   int codes_idx = Mc ? 2 : 0;
-  bool use_mmap = lua_isnoneornil(L, 3) ? true : lua_toboolean(L, 3);
-#if defined(__EMSCRIPTEN__)
-  use_mmap = false; // emscripten has no usable mmap; read the sidecars into RAM
-#endif
 
   FILE *fh = tk_lua_fopen(L, path, "r");
   char magic[4];
@@ -454,53 +452,43 @@ static inline int tk_ann_load_lua (lua_State *L)
   flat->codes = NULL;
   flat->n_dims = 0;
 
-  tk_ivec_t *sids;
-  tk_ivec_t *buckets;
+  // Index arrays: use a caller-provided vec (arg 3/4/5, possibly ivec.mmap_open'd) if given,
+  // else read the sidecar file into RAM. ann never mmaps internally -- the caller owns that.
+  tk_ivec_t *sids, *buckets;
   tk_cvec_t *bits;
-  if (use_mmap) {
-#if !defined(__EMSCRIPTEN__)
-    char *ps = tk_ann_sidecar_path(L, path, ".sids");
-    sids = tk_ivec_mmap_open(L, ps);
-    free(ps);
-    char *pb = tk_ann_sidecar_path(L, path, ".buckets");
-    buckets = tk_ivec_mmap_open(L, pb);
-    free(pb);
-    char *pd = tk_ann_sidecar_path(L, path, ".bits");
-    bits = tk_cvec_mmap_open(L, pd);
-    free(pd);
-#endif
+  int sids_idx, buckets_idx, bits_idx;
+  if (!lua_isnoneornil(L, 3)) {
+    sids = tk_ivec_peek(L, 3, "sids"); sids_idx = 3;
   } else {
-    sids = tk_ivec_create(L, sids_n);
-    sids->n = sids_n;
+    sids = tk_ivec_create(L, sids_n); sids->n = sids_n; sids_idx = lua_gettop(L);
     char *ps = tk_ann_sidecar_path(L, path, ".sids");
     FILE *f1 = tk_lua_fopen(L, ps, "r");
     tk_lua_fread(L, sids->a, sizeof(int64_t), sids_n, f1);
-    tk_lua_fclose(L, f1);
-    free(ps);
-    buckets = tk_ivec_create(L, buckets_n);
-    buckets->n = buckets_n;
+    tk_lua_fclose(L, f1); free(ps);
+  }
+  if (!lua_isnoneornil(L, 4)) {
+    buckets = tk_ivec_peek(L, 4, "buckets"); buckets_idx = 4;
+  } else {
+    buckets = tk_ivec_create(L, buckets_n); buckets->n = buckets_n; buckets_idx = lua_gettop(L);
     char *pb = tk_ann_sidecar_path(L, path, ".buckets");
     FILE *f2 = tk_lua_fopen(L, pb, "r");
     tk_lua_fread(L, buckets->a, sizeof(int64_t), buckets_n, f2);
-    tk_lua_fclose(L, f2);
-    free(pb);
-    bits = tk_cvec_create(L, bits_n);
-    bits->n = bits_n;
+    tk_lua_fclose(L, f2); free(pb);
+  }
+  if (!lua_isnoneornil(L, 5)) {
+    bits = tk_cvec_peek(L, 5, "bits"); bits_idx = 5;
+  } else {
+    bits = tk_cvec_create(L, bits_n); bits->n = bits_n; bits_idx = lua_gettop(L);
     char *pd = tk_ann_sidecar_path(L, path, ".bits");
     FILE *f3 = tk_lua_fopen(L, pd, "r");
     tk_lua_fread(L, bits->a, 1, bits_n, f3);
-    tk_lua_fclose(L, f3);
-    free(pd);
+    tk_lua_fclose(L, f3); free(pd);
   }
-  int sids_idx = 0, buckets_idx = 0, bits_idx = 0;
   if (sids->n != sids_n || buckets->n != buckets_n || bits->n != bits_n)
-    return luaL_error(L, "ann load: sidecar size mismatch (corrupt or wrong dims)");
+    return luaL_error(L, "ann load: index array size mismatch (corrupt, wrong dims, or wrong buffer)");
   flat->sorted_sids = sids->a;
   flat->bucket_off = buckets->a;
   flat->data = bits->a;
-  bits_idx = lua_gettop(L);
-  buckets_idx = bits_idx - 1;
-  sids_idx = bits_idx - 2;
 
   if (Mc) {
     flat->codes = ((tk_fvec_t *) Mc->v)->a;
