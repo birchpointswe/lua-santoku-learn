@@ -33,6 +33,16 @@ static inline tk_ann_flat_t *tk_ann_flat_peek (lua_State *L, int i)
   return (tk_ann_flat_t *) luaL_checkudata(L, i, TK_ANN_MT);
 }
 
+static inline char *tk_ann_sidecar_path (lua_State *L, const char *path, const char *suffix)
+{
+  size_t pl = strlen(path), sl = strlen(suffix);
+  char *buf = tk_malloc(L, pl + sl + 1);
+  memcpy(buf, path, pl);
+  memcpy(buf + pl, suffix, sl);
+  buf[pl + sl] = 0;
+  return buf;
+}
+
 static inline void tk_ann_sign_pack (
   const float *codes, uint64_t n, uint64_t n_dims, uint64_t features,
   char *bits, size_t bpv
@@ -61,8 +71,10 @@ static inline uint32_t tk_ann_flat_substring (
   return h;
 }
 
+// sorted_sids (size m*N) and bucket_off (size m*(TK_ANN_BUCKETS+1)) must be
+// pre-allocated by the caller; this only fills them via a counting sort over data.
 static inline void tk_ann_flat_build (
-  lua_State *L, tk_ann_flat_t *flat, const char *data, uint64_t N, uint64_t features
+  tk_ann_flat_t *flat, const char *data, uint64_t N, uint64_t features
 ) {
   uint64_t m = (features + TK_ANN_SUBSTR_BITS - 1) / TK_ANN_SUBSTR_BITS;
   if (m == 0) m = 1;
@@ -72,8 +84,6 @@ static inline void tk_ann_flat_build (
   flat->data = data;
   flat->bytes_per_vec = TK_CVEC_BITS_BYTES(features);
 
-  flat->sorted_sids = tk_malloc(L, m * N * sizeof(int64_t));
-  flat->bucket_off = tk_malloc(L, m * ((uint64_t)TK_ANN_BUCKETS + 1) * sizeof(int64_t));
   uint64_t stride = (uint64_t)TK_ANN_BUCKETS + 1;
 
   for (uint64_t ti = 0; ti < m; ti++) {
@@ -190,12 +200,13 @@ static inline void tk_ann_flat_query (
 
 static inline int tk_ann_flat_gc (lua_State *L)
 {
+  // sorted_sids / bucket_off / data / codes are all backed by vec (or mtx)
+  // userdata anchored in this flat's fenv; they free themselves. Just detach.
   tk_ann_flat_t *flat = tk_ann_flat_peek(L, 1);
-  free(flat->sorted_sids);
-  free(flat->bucket_off);
   flat->sorted_sids = NULL;
   flat->bucket_off = NULL;
   flat->data = NULL;
+  flat->codes = NULL;
   return 0;
 }
 
@@ -343,24 +354,170 @@ static inline int tk_ann_flat_nbr_lua (lua_State *L)
   return 1;
 }
 
+// Writes a small manifest to `path` plus three raw, mmap-compatible sidecars:
+// <path>.sids (int64, m*N), <path>.buckets (int64, m*(TK_ANN_BUCKETS+1)),
+// <path>.bits (bytes, N*bytes_per_vec). The rerank codes are external and are
+// NOT written here (they are passed back in at load, like ridge's W).
+static inline int tk_ann_persist_lua (lua_State *L)
+{
+  tk_ann_flat_t *flat = tk_ann_flat_peek(L, 1);
+  const char *path = luaL_checkstring(L, 2);
+  uint64_t stride = (uint64_t)TK_ANN_BUCKETS + 1;
+
+  FILE *fh = tk_lua_fopen(L, path, "w");
+  tk_lua_fwrite(L, "TKan", 1, 4, fh);
+  uint8_t version = 1;
+  tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
+  int64_t N = (int64_t) flat->N, m = (int64_t) flat->m;
+  int64_t features = (int64_t) flat->features, bpv = (int64_t) flat->bytes_per_vec;
+  tk_lua_fwrite(L, &N, sizeof(int64_t), 1, fh);
+  tk_lua_fwrite(L, &m, sizeof(int64_t), 1, fh);
+  tk_lua_fwrite(L, &features, sizeof(int64_t), 1, fh);
+  tk_lua_fwrite(L, &bpv, sizeof(int64_t), 1, fh);
+  tk_lua_fclose(L, fh);
+
+  char *ps = tk_ann_sidecar_path(L, path, ".sids");
+  FILE *f1 = tk_lua_fopen(L, ps, "w");
+  tk_lua_fwrite(L, (char *) flat->sorted_sids, sizeof(int64_t), flat->m * flat->N, f1);
+  tk_lua_fclose(L, f1);
+  free(ps);
+
+  char *pb = tk_ann_sidecar_path(L, path, ".buckets");
+  FILE *f2 = tk_lua_fopen(L, pb, "w");
+  tk_lua_fwrite(L, (char *) flat->bucket_off, sizeof(int64_t), flat->m * stride, f2);
+  tk_lua_fclose(L, f2);
+  free(pb);
+
+  char *pd = tk_ann_sidecar_path(L, path, ".bits");
+  FILE *f3 = tk_lua_fopen(L, pd, "w");
+  tk_lua_fwrite(L, (char *) flat->data, 1, flat->N * flat->bytes_per_vec, f3);
+  tk_lua_fclose(L, f3);
+  free(pd);
+  return 0;
+}
+
 static luaL_Reg tk_ann_flat_mt_fns[] =
 {
   { "neighborhoods_by_vecs", tk_ann_flat_nbr_by_vecs_lua },
   { "neighborhoods", tk_ann_flat_nbr_lua },
+  { "persist", tk_ann_persist_lua },
   { NULL, NULL }
 };
 
-static inline tk_ann_flat_t *tk_ann_flat_create (
-  lua_State *L, const char *data, uint64_t N, uint64_t features
-) {
+// ann.load(path, [codes_mtx], [mmap])
+//   codes_mtx: external float codes for exact-dot rerank (nil => Hamming-only)
+//   mmap (default true): mmap-open the sidecars (RAM-lean); false => read into RAM
+static inline int tk_ann_load_lua (lua_State *L)
+{
+  const char *path = luaL_checkstring(L, 1);
+  tk_mtx_t *Mc = lua_isnoneornil(L, 2) ? NULL : tk_mtx_peek(L, 2, "codes");
+  int codes_idx = Mc ? 2 : 0;
+  bool use_mmap = lua_isnoneornil(L, 3) ? true : lua_toboolean(L, 3);
+
+  FILE *fh = tk_lua_fopen(L, path, "r");
+  char magic[4];
+  tk_lua_fread(L, magic, 1, 4, fh);
+  if (memcmp(magic, "TKan", 4) != 0) {
+    tk_lua_fclose(L, fh);
+    return luaL_error(L, "invalid ann file (bad magic)");
+  }
+  uint8_t version;
+  tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
+  if (version != 1) {
+    tk_lua_fclose(L, fh);
+    return luaL_error(L, "unsupported ann version %d", (int) version);
+  }
+  int64_t N, m, features, bpv;
+  tk_lua_fread(L, &N, sizeof(int64_t), 1, fh);
+  tk_lua_fread(L, &m, sizeof(int64_t), 1, fh);
+  tk_lua_fread(L, &features, sizeof(int64_t), 1, fh);
+  tk_lua_fread(L, &bpv, sizeof(int64_t), 1, fh);
+  tk_lua_fclose(L, fh);
+
+  uint64_t stride = (uint64_t)TK_ANN_BUCKETS + 1;
+  uint64_t sids_n = (uint64_t)(m * N);
+  uint64_t buckets_n = (uint64_t) m * stride;
+  uint64_t bits_n = (uint64_t)(N * bpv);
+
   tk_ann_flat_t *flat = tk_lua_newuserdata(L, tk_ann_flat_t, TK_ANN_MT, tk_ann_flat_mt_fns, tk_ann_flat_gc);
+  int flat_idx = lua_gettop(L);
+  flat->N = (uint64_t) N;
+  flat->m = (uint64_t) m;
+  flat->features = (uint64_t) features;
+  flat->bytes_per_vec = (size_t) bpv;
   flat->sorted_sids = NULL;
   flat->bucket_off = NULL;
   flat->data = NULL;
   flat->codes = NULL;
   flat->n_dims = 0;
-  tk_ann_flat_build(L, flat, data, N, features);
-  return flat;
+
+  tk_ivec_t *sids;
+  tk_ivec_t *buckets;
+  tk_cvec_t *bits;
+  if (use_mmap) {
+    char *ps = tk_ann_sidecar_path(L, path, ".sids");
+    sids = tk_ivec_mmap_open(L, ps);
+    free(ps);
+    char *pb = tk_ann_sidecar_path(L, path, ".buckets");
+    buckets = tk_ivec_mmap_open(L, pb);
+    free(pb);
+    char *pd = tk_ann_sidecar_path(L, path, ".bits");
+    bits = tk_cvec_mmap_open(L, pd);
+    free(pd);
+  } else {
+    sids = tk_ivec_create(L, sids_n);
+    sids->n = sids_n;
+    char *ps = tk_ann_sidecar_path(L, path, ".sids");
+    FILE *f1 = tk_lua_fopen(L, ps, "r");
+    tk_lua_fread(L, sids->a, sizeof(int64_t), sids_n, f1);
+    tk_lua_fclose(L, f1);
+    free(ps);
+    buckets = tk_ivec_create(L, buckets_n);
+    buckets->n = buckets_n;
+    char *pb = tk_ann_sidecar_path(L, path, ".buckets");
+    FILE *f2 = tk_lua_fopen(L, pb, "r");
+    tk_lua_fread(L, buckets->a, sizeof(int64_t), buckets_n, f2);
+    tk_lua_fclose(L, f2);
+    free(pb);
+    bits = tk_cvec_create(L, bits_n);
+    bits->n = bits_n;
+    char *pd = tk_ann_sidecar_path(L, path, ".bits");
+    FILE *f3 = tk_lua_fopen(L, pd, "r");
+    tk_lua_fread(L, bits->a, 1, bits_n, f3);
+    tk_lua_fclose(L, f3);
+    free(pd);
+  }
+  int sids_idx = 0, buckets_idx = 0, bits_idx = 0;
+  if (sids->n != sids_n || buckets->n != buckets_n || bits->n != bits_n)
+    return luaL_error(L, "ann load: sidecar size mismatch (corrupt or wrong dims)");
+  flat->sorted_sids = sids->a;
+  flat->bucket_off = buckets->a;
+  flat->data = bits->a;
+  bits_idx = lua_gettop(L);
+  buckets_idx = bits_idx - 1;
+  sids_idx = bits_idx - 2;
+
+  if (Mc) {
+    flat->codes = ((tk_fvec_t *) Mc->v)->a;
+    flat->n_dims = Mc->n_cols;
+  }
+
+  lua_newtable(L);
+  int eph = lua_gettop(L);
+  lua_pushvalue(L, sids_idx);
+  lua_setfield(L, eph, "sids");
+  lua_pushvalue(L, buckets_idx);
+  lua_setfield(L, eph, "buckets");
+  lua_pushvalue(L, bits_idx);
+  lua_setfield(L, eph, "data");
+  if (codes_idx) {
+    lua_pushvalue(L, codes_idx);
+    lua_setfield(L, eph, "codes");
+  }
+  lua_pushvalue(L, eph);
+  lua_setfenv(L, flat_idx);
+  lua_settop(L, flat_idx);
+  return 1;
 }
 
 #endif

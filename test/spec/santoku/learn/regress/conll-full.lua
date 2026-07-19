@@ -14,11 +14,12 @@ io.stdout:setvbuf("line")
 local N_TYPES = 4
 local MAX_SPAN = 1000000000
 
+-- oracle: test spF1=0.819637 (P=0.832664 R=0.807011)
+-- tag:  matern nu=5/2 (def=2) gamma=0.13353758 lambda=6.007982e-05 decode_offset=0.4050678
+-- type: matern nu=5/2 (def=2) gamma=0.67920774 lambda=2.4482122e-07 decode_offset=0.25278902
 local cfg = {
   verbose = false,
-  search_landmarks = 1024 * 2,
-  landmark_rounds = 32,
-  search_landmark_rounds = 1,
+  search_landmarks = 1024 * 4,
   data = {
     dir = "test/res/conll2003",
     max = nil
@@ -40,6 +41,7 @@ local cfg = {
     exponent = { def = { 1.952315, 2.9091197, 1.9694619 } },
     decode_offset = { def = 0.4050678 },
     search_trials = 0,
+    scratch_path = "test/res/conll-tag-scratch",
     folds = 5,
   },
   type = {
@@ -56,6 +58,7 @@ local cfg = {
     exponent = { def = { 4.7762554, 2.3313325, 2.7983615, 7.3266628, 0.38468605, 0.7784287, 0.97172925, 0.12706431, 0.69330865, 0.032329143, 0.31840376 } },
     decode_offset = { def = 0.25278902 },
     search_trials = 0,
+    scratch_path = "test/res/conll-type-scratch",
     folds = 5,
   },
 }
@@ -113,30 +116,17 @@ test("conll-full", function ()
       { focus = TR.seg, tokens = TR.seg })
     local Ytr = csr.from_mask(TR.inner_mask)
     str.printf("[Tag] Encoding\n")
-    local _, rg, deploy, best, decider = optimize.krr({
+    local _, rg, deploy, best, decider = optimize.krr(util.merged(cfg.tag, {
       pool_blocks = Xtr,
       pool_labels = Ytr,
       pool_n = TR.n_seg,
       n_labels = 1,
-      folds = cfg.tag.folds,
-      relevance = cfg.tag.relevance,
-      scales = cfg.tag.scales,
-      exponent = cfg.tag.exponent,
-      kernel = cfg.tag.kernel,
-      nu = cfg.tag.nu,
-      gamma = cfg.tag.gamma,
-      lambda = cfg.tag.lambda,
       n_landmarks = cfg.emb.n_landmarks,
       search_landmarks = cfg.search_landmarks,
-      landmark_rounds = cfg.landmark_rounds,
-      search_landmark_rounds = cfg.search_landmark_rounds,
-      landmark_buf_path = "test/res/conll-full-tag-lm",
       k = 1,
-      search_trials = cfg.tag.search_trials,
-      decode_offset = cfg.tag.decode_offset,
       verbose = cfg.verbose,
       each = util.make_ridge_log(stopwatch),
-    })
+    }))
     str.printf("[Tag] kernel=%s lambda=%.8g offset=%.8g %s\n",
       best.kernel, best.lambda, decider:offset(), sw())
     local function tag_decode (split, B)
@@ -217,20 +207,14 @@ test("conll-full", function ()
   for i = 1, n_sparse do ty_relevance[i] = cfg.type.relevance[i] end
   ty_relevance[n_sparse + 1] = "auc"
   str.printf("[Type] CV folds=%d trials=%d (full-gold + LOO gaz)\n", K, cfg.type.search_trials)
-  local ty_enc, ridge_ty, deploy, _, ty_decider = optimize.krr({
+  local ty_enc, ridge_ty, deploy, _, ty_decider = optimize.krr(util.merged(cfg.type, {
     pool_blocks = ty_all_tr, pool_labels = Ytype, pool_n = n_trc,
     folds = K, doc_fold = df, cand = Scand_tr, gold = TR.gold,
     relevance = ty_relevance,
-    scales = cfg.type.scales,
-    exponent = cfg.type.exponent,
     n_labels = N_TYPES + 1,
-    kernel = cfg.type.kernel, nu = cfg.type.nu, gamma = cfg.type.gamma,
-    lambda = cfg.type.lambda,
-    n_landmarks = cfg.emb.n_landmarks, search_landmarks = cfg.search_landmarks, k = 1, decode_offset = cfg.type.decode_offset,
-    landmark_rounds = cfg.landmark_rounds, search_landmark_rounds = cfg.search_landmark_rounds,
-    landmark_buf_path = "test/res/conll-full-type-lm",
-    search_trials = cfg.type.search_trials, verbose = cfg.verbose, each = util.make_ridge_log(stopwatch),
-  })
+    n_landmarks = cfg.emb.n_landmarks, search_landmarks = cfg.search_landmarks, k = 1,
+    verbose = cfg.verbose, each = util.make_ridge_log(stopwatch),
+  }))
   collectgarbage("collect")
 
   local te_lab_csr, te_scores = util.predict_tiled({ deploy = deploy, ridge = ridge_ty,

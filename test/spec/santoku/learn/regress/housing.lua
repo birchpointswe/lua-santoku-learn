@@ -8,19 +8,20 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
+-- oracle: test 1-nmae=0.8723
+-- best: matern nu=1/2 (def=0) gamma=0.76712244 lambda=2.8855702e-05
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
-  landmark_rounds = 32,
-  search_landmark_rounds = 1,
   data = { ttr = 0.8 },
   n_landmarks = 1024 * 8,
   kernel = { "matern" },
   nu = { def = 0 },
-  gamma = { def = 0.059538 },
-  lambda = { def = 8.30506e-05 },
-  scales = { def = { 34.6414, 45.6015, 0.25601, 0.358376, 0.0384308, 0.290168, 0.00997914, 0.688452, 90.0605 } },
+  gamma = { def = 0.76712244 },
+  lambda = { def = 2.8855702e-05 },
+  scales = { def = { 46.730698, 86.018174, 0.22594685, 0.18898657, 0.18423806, 0.032513615, 0.0093888282, 0.76511539, 135.39024 } },
   search_trials = 0,
+  scratch_path = "test/res/housing-scratch",
   folds = 5,
 }
 
@@ -46,25 +47,13 @@ test("housing CV", function ()
   str.printf("[Data] pool=%d test=%d gauge_dims=%d folds=%d trials=%d\n",
     train.n, test_set.n, n_cont + 1, cfg.folds, cfg.search_trials)
 
-  local _, ridge_obj, deploy = optimize.krr({
+  local _, ridge_obj, deploy = optimize.krr(util.merged(cfg, {
     pool_blocks = pool_blocks,
     pool_targets = train.targets,
     n_targets = 1,
     pool_n = train.n,
-    scales = cfg.scales,
-    folds = cfg.folds,
-    kernel = cfg.kernel,
-    nu = cfg.nu,
-    gamma = cfg.gamma,
-    lambda = cfg.lambda,
-    n_landmarks = cfg.n_landmarks,
-    search_landmarks = cfg.search_landmarks,
-    landmark_rounds = cfg.landmark_rounds,
-    search_landmark_rounds = cfg.search_landmark_rounds,
-    search_trials = cfg.search_trials,
-    verbose = cfg.verbose,
     each = util.make_ridge_log(stopwatch),
-  })
+  }))
 
   local _, test_scores = util.predict_tiled({ deploy = deploy, ridge = ridge_obj,
     blocks = test_blocks, n = test_set.n, scores = true, n_labels = 1 })

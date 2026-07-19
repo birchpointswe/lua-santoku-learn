@@ -36,6 +36,15 @@ M.SHAPE_TAGS = re.tags(SHAPE_PATTERN)
 M.N_SHAPES = 0
 for _ in pairs(M.SHAPE_TAGS) do M.N_SHAPES = M.N_SHAPES + 1 end
 
+function M.merged (...)
+  local out = {}
+  for i = 1, select("#", ...) do
+    local t = select(i, ...)
+    if t then for k, v in pairs(t) do out[k] = v end end
+  end
+  return out
+end
+
 function M.word_spans (texts, n)
   local tokenizer = require("santoku.learn.tokenizer")
   local off, s, e = tokenizer.extract({ n = n, texts = texts, pattern = word_prog })
@@ -200,13 +209,7 @@ function M.make_ridge_log (stopwatch, metric_fmt)
     local timing = ""
     if stopwatch then
       local d, dd = stopwatch()
-      if ev.gpbo then
-        local chol = d - ev.gpbo
-        if chol < 0 then chol = 0 end
-        timing = str.format(" (%.1fs %.1fs +%.1fs)", chol, ev.gpbo, dd)
-      else
-        timing = str.format(" (%.1fs +%.1fs)", d, dd)
-      end
+      timing = str.format(" (%.1fs +%.1fs)", d, dd)
     end
     local kdesc = format_kernel(p)
     local embd = ev.emb_d and str.format(" emb_d=%d", ev.emb_d) or ""
@@ -242,16 +245,6 @@ function M.tokenize_blocks (specs, texts, o)
     X[i] = go and { x = csr, group_offsets = go } or csr
   end
   return toks, X
-end
-
-local function label_is_multilabel (labels, n, n_labels)
-  if (n_labels or 0) <= 1 then return true end
-  if not labels then return false end
-  local eo = labels:offsets()
-  for i = 0, n - 1 do
-    if eo:get(i + 1) - eo:get(i) ~= 1 then return true end
-  end
-  return false
 end
 
 local function fold_assign (class, n, K)
@@ -343,6 +336,17 @@ local function pool_strata (a, n)
   end
 end
 
+-- never-val stratum size: rows that no fold validates on serve two roles -- leak-free
+-- weight-fit set and CV landmark basis -- so the count is driven by the CV landmark
+-- budget (search_landmarks) with ~1.3x headroom, capped at 40% of the pool so the folds
+-- keep enough training mass. No dependence on fold count (K); the stratum is orthogonal.
+local STRAT_HEADROOM = 1.3
+local STRAT_CAP = 0.4
+local function strat_size (a, n)
+  local m = a.search_landmarks or a.n_landmarks or math.floor(n / 3)
+  return math.max(1, math.min(math.ceil(m * STRAT_HEADROOM), math.floor(n * STRAT_CAP)))
+end
+
 local function weight_fit (blocks, y, metrics, is_targets)
   local w = {}
   for i = 1, #blocks do
@@ -376,7 +380,18 @@ function M.rms_scale_blocks (train_blocks, eval_block_lists, from, to)
 end
 
 local WEIGHT_FLOOR = 1e-6
-function M.build_blocks (blocks, scale, exponent, n, w, pcs, groups)
+-- cs_cache (optional): pool the non-grouped colscale fvec across trials. For a non-grouped
+-- weighted block, colscale = (wi:colscale(pcs, e, floor)) depends ONLY on the fixed weights
+-- wi, fixed sumsq pcs[i], and the exponent e (the per-group `scale` feeds the scalar `sc`,
+-- never the colscale vector), so it is safe to memoize by (block index, e) -- identical to
+-- fold_dense's cs_cache.
+-- gg_cache (optional): pool the GROUPED colscale fvec across trials. group_gauge's output is a
+-- per-column vector sized to the block's group column span (trial-invariant), and every entry
+-- is rewritten in place each call, so we keep one persistent fvec per grouped block and pass it
+-- as the group_gauge out-buffer -- fully overwritten => bit-identical, and no per-trial fvec
+-- churn. The grouped VALUES still vary per trial (scales/exps), so this is a buffer pool, not a
+-- value memoization. encode only READS colscale, so sharing one fvec across trials is safe.
+function M.build_blocks (blocks, scale, exponent, n, w, pcs, groups, cs_cache, gg_cache)
   local bl = {}
   local g0 = 0
   for i = 1, #blocks do
@@ -392,8 +407,10 @@ function M.build_blocks (blocks, scale, exponent, n, w, pcs, groups)
         local e = exponent and exponent[g0 + g]
         exs[g] = type(e) == "number" and e or 1.0
       end
+      local out = gg_cache and gg_cache[i]
       local cs = pcs[i]:group_gauge(go, scs, n,
-        { w = wi, exps = wi and exs or nil, floor = WEIGHT_FLOOR })
+        { w = wi, exps = wi and exs or nil, floor = WEIGHT_FLOOR }, out)
+      if gg_cache and not out then gg_cache[i] = cs end
       bl[i] = { x = blocks[i], n_tokens = nc, scale = 1.0, colscale = cs }
       g0 = g0 + ng
     else
@@ -402,7 +419,18 @@ function M.build_blocks (blocks, scale, exponent, n, w, pcs, groups)
       if wi and pcs and pcs[i] then
         local e = exponent and exponent[g0 + 1]
         if e == nil or e == false then e = 1.0 end
-        cs, wssq = wi:colscale(pcs[i], e, WEIGHT_FLOOR)
+        -- single-slot-per-block cache: reuse the pooled colscale when e is unchanged
+        -- (fixed-exponent search = every-trial hit), else recompute IN PLACE into the pooled
+        -- fvec (out-buffer). Bounded to one fvec per block regardless of trial count -- without
+        -- the out-buffer a searched exponent misses every trial and leaks a fresh vocab-sized
+        -- fvec each time (finalizer-only; the flat Lua heap means GC never reclaims it).
+        local slot = cs_cache and cs_cache[i]
+        if slot and slot.e == e then
+          cs, wssq = slot.cs, slot.wssq
+        else
+          cs, wssq = wi:colscale(pcs[i], e, WEIGHT_FLOOR, slot and slot.cs)
+          if cs_cache then cs_cache[i] = { e = e, cs = cs, wssq = wssq } end
+        end
       elseif pcs and pcs[i] then
         wssq = pcs[i]:sum()
       end
@@ -456,11 +484,6 @@ local function slice_targets (t, idx)
   return (dvec.create(idx:size()):copy(t, idx))
 end
 
-local function slice_ivec (s, idx)
-  if not s then return nil end
-  return (ivec.create(idx:size()):copy(s, idx))
-end
-
 local function split_fold (foldof, f, n)
   local tr_idx, va_idx = ivec.create(), ivec.create()
   for i = 0, n - 1 do if foldof:get(i) == f then va_idx:push(i) else tr_idx:push(i) end end
@@ -471,45 +494,62 @@ function M.fold_dense (a)
   local K = a.folds or 1
   local n = a.pool_n or select(1, a.pool_codes:shape())
   local reg = a.pool_targets ~= nil
-  local use_folds = (a.search_trials or 0) > 0 and K > 1
+  local use_folds = (a.search_trials or 0) >= 1 and K > 1
   local rel_metric = type(a.relevance) == "table" and a.relevance[1] or a.relevance
   local rel = rel_metric == "auc" and (a.pool_labels ~= nil or a.pool_targets ~= nil)
   local is_csr = a.pool_codes.neighbors ~= nil
-  local F = {}
-  local fy, fvy, fvn, ft, fvt, fs = {}, {}, {}, {}, {}, {}
   a.pool_strata = pool_strata(a, n)
-  if use_folds then
-    local foldof = a.fold_assign
-      or ((reg and a.pool_targets) and fold_assign_reg(a.pool_targets, n, K))
-      or fold_assign(a.pool_class or derive_class(a.pool_labels, n), n, K)
-    for f = 0, K - 1 do
-      local tr_idx, va_idx = split_fold(foldof, f, n)
-      local e = { tr = a.pool_codes:rows(tr_idx), va = a.pool_codes:rows(va_idx),
-        n = tr_idx:size(), vn = va_idx:size() }
-      if reg then e.t = slice_targets(a.pool_targets, tr_idx); e.vt = slice_targets(a.pool_targets, va_idx)
-      else e.y = a.pool_labels:rows(tr_idx); e.vy = a.pool_labels:rows(va_idx) end
-      fs[f + 1] = slice_ivec(a.pool_strata, tr_idx)
-      F[f + 1] = e
-    end
-    for f = 1, K do
-      fvn[f] = F[f].vn
-      if reg then ft[f] = F[f].t; fvt[f] = F[f].vt else fy[f] = F[f].y; fvy[f] = F[f].vy end
-    end
+  -- never-val stratum (fold id -1): leak-free rows that no fold validates on, serving as
+  -- both the leak-free relevance-weight fit set and the CV landmark basis. Sized to the CV
+  -- landmark budget (strat_size), picked by even index spread so it is identical across
+  -- fold seeds/sets/regimes. Fold grams are assembled by moment subtraction from the one
+  -- full-pool encode (gram:fold), so no train-side X slicing exists.
+  local strat_idx = ivec.create()
+  local instrat = {}
+  local ssize = strat_size(a, n)
+  for i = 0, ssize - 1 do
+    local r = math.floor(i * n / ssize)
+    if not instrat[r] then instrat[r] = true; strat_idx:push(r) end
   end
-  local rel_slot, cs_cache = {}, {}
-  local function dense_colscale (slot, e)
+  a.stratum_rows = strat_idx
+  local function make_split (Kn, user_foldof)
+    local foldof0 = user_foldof
+      or ((reg and a.pool_targets) and fold_assign_reg(a.pool_targets, n, Kn))
+      or fold_assign(a.pool_class or derive_class(a.pool_labels, n), n, Kn)
+    local foldof = ivec.create()
+    foldof:copy(foldof0)
+    for r = 0, n - 1 do if instrat[r] then foldof:set(r, -1) end end
+    local fvy, fvn, fvt = {}, {}, {}
+    for f = 0, Kn - 1 do
+      local _, va_idx = split_fold(foldof, f, n)
+      fvn[f + 1] = va_idx:size()
+      if reg then fvt[f + 1] = slice_targets(a.pool_targets, va_idx)
+      else fvy[f + 1] = a.pool_labels:rows(va_idx) end
+    end
+    return { assign = foldof, val_y = reg and nil or fvy, val_n = fvn,
+      val_targets = reg and fvt or nil }
+  end
+  local rel_w, cs_cache = {}, {}
+  local function rel_weights (cv)
+    local key = cv and "c" or "f"
+    local hit = rel_w[key]; if hit then return hit end
+    local xs = cv and a.pool_codes:rows(strat_idx) or a.pool_codes
+    local wy
+    if a.pool_labels then wy = cv and a.pool_labels:rows(strat_idx) or a.pool_labels
+    else wy = cv and slice_targets(a.pool_targets, strat_idx) or a.pool_targets end
+    local w = is_csr and xs:auc(wy) or xs:to_sparse():auc(wy)
+    rel_w[key] = w
+    return w
+  end
+  -- CV/cal builds fit relevance weights on the never-val stratum (leak-free); the deploy
+  -- build fits on the full pool (no held-out set, nothing to leak into)
+  local function dense_colscale (e, cv)
     if type(e) == "table" then e = e[1] end
     if not rel or e == nil or e == false then return nil end
-    local key = slot .. ":" .. tostring(e)
+    local key = (cv and "c" or "f") .. tostring(e)
     local hit = cs_cache[key]
     if hit then return hit end
-    local w = rel_slot[slot]
-    if not w then
-      local codes = slot == 0 and a.pool_codes or F[slot].tr
-      local y = slot == 0 and (a.pool_labels or a.pool_targets) or (F[slot].y or F[slot].t)
-      w = is_csr and codes:auc(y) or codes:to_sparse():auc(y)
-      rel_slot[slot] = w
-    end
+    local w = rel_weights(cv)
     local nc = w:size()
     local logsum = 0
     for c = 0, nc - 1 do
@@ -525,27 +565,21 @@ function M.fold_dense (a)
     cs_cache[key] = cs
     return cs
   end
-  a.rebuild = function (p, f)
-    local d = f and F[f] or { tr = a.pool_codes, n = n }
-    local cs = dense_colscale(f or 0, p and p.exponent)
+  a.rebuild = function (p, cv)
+    local cs = dense_colscale(p and p.exponent, cv)
     local nc = is_csr and select(2, a.pool_codes:shape()) or nil
-    local out = cs and is_csr
-      and { blocks = { { x = d.tr, colscale = cs, n_tokens = nc } }, n_samples = d.n }
-      or { x = d.tr, n_samples = d.n, colscale = cs }
-    if d.va then
-      if cs and is_csr then out.val_blocks = { { x = d.va, colscale = cs, n_tokens = nc } }
-      else out.val_x = d.va end
-      out.val_n_samples = d.vn
+    if cs and is_csr then
+      return { blocks = { { x = a.pool_codes, colscale = cs, n_tokens = nc } }, n_samples = n }
     end
-    return out
+    return { x = a.pool_codes, n_samples = n, colscale = cs }
   end
   a.folds = use_folds and K or 1
   a.n_samples = a.n_samples or n
   a.y = a.pool_labels
   a.targets = a.pool_targets
-  a.fold_y = reg and nil or fy; a.fold_val_y = reg and nil or fvy; a.fold_val_n = fvn
-  a.fold_targets = reg and ft or nil; a.fold_val_targets = reg and fvt or nil
-  a.fold_strata = fs
+  if use_folds then
+    a.fold_split = make_split(K, a.fold_assign)
+  end
   return a
 end
 
@@ -574,56 +608,84 @@ function M.fold_blocks (a)
   local metrics = a.relevance
   local wtargets = a.pool_labels == nil and reg
   if metrics and not (a.pool_labels or reg) then metrics = nil end
-  local searching = (a.search_trials or 0) > 0
-  local off = a.decode_offset
-  if type(off) == "table" then off = (not searching) and off.def or nil end
-  local use_folds = K > 1 and (searching
-    or (off == nil and (a.val_cand or a.cand
-      or (not reg and label_is_multilabel(a.pool_labels, n, a.n_labels)))))
-  local F = {}
-  local fs = {}
+  local use_folds = K > 1 and (a.search_trials or 0) >= 1
   a.pool_strata = pool_strata(a, n)
-  if use_folds then
-    local foldof
+  -- never-val weight stratum: label-supervised relevance weights are fit ONLY on rows no
+  -- fold ever validates on (fold id -1 in every fold set), so fold-CV scores cannot be
+  -- inflated through the weights (the full-pool weight leak let 400-trial searches walk
+  -- away from test-good configs). The same rows are the CV landmark basis, so the count is
+  -- sized to the CV landmark budget (strat_size): span picks whole docs at an even stride,
+  -- dense picks rows at an even index spread; identical across fold seeds/sets/regimes.
+  local strat_idx = ivec.create()
+  local instrat = {}
+  local ssize = strat_size(a, n)
+  if a.cand then
+    local co = a.cand:offsets()
+    local ndocs = co:size() - 1
+    local target_docs = math.max(1, math.min(math.ceil(ssize * ndocs / n), math.floor(ndocs * STRAT_CAP)))
+    local stride = math.max(1, math.floor(ndocs / target_docs + 0.5))
+    for dd = 0, ndocs - 1 do
+      if dd % stride == 0 then
+        instrat[dd] = true
+        for r = co:get(dd), co:get(dd + 1) - 1 do strat_idx:push(r) end
+      end
+    end
+  else
+    for i = 0, ssize - 1 do
+      local r = math.floor(i * n / ssize)
+      if not instrat[r] then instrat[r] = true; strat_idx:push(r) end
+    end
+  end
+  a.stratum_rows = strat_idx
+  -- CV downdate: one fold split = an assignment vector + val-side slices; fold grams are
+  -- assembled by moment subtraction from the one full-pool encode (gram:fold). The 1/3
+  -- never-val stratum (fold id -1) is both leak-free weight rows and the CV landmark basis.
+  local function make_split (Kn, user_docfold, user_foldof)
+    local foldof, fvc, fvg
     if a.cand then
       local co = a.cand:offsets()
       local ndocs = co:size() - 1
-      local docfold = a.doc_fold or M.doc_folds(a.cand, a.gold, K)
+      local docfold0 = user_docfold or M.doc_folds(a.cand, a.gold, Kn)
+      local docfold = ivec.create()
+      docfold:copy(docfold0)
+      for dd = 0, ndocs - 1 do
+        if instrat[dd] then docfold:set(dd, -1) end
+      end
       foldof = ivec.create(n)
       foldof:fill_segments(co, docfold)
-      local fvc, fvg = {}, {}
-      for f = 0, K - 1 do
+      fvc, fvg = {}, {}
+      for f = 0, Kn - 1 do
         local docs = ivec.create()
-        for d = 0, ndocs - 1 do if docfold:get(d) == f then docs:push(d) end end
+        for dd = 0, ndocs - 1 do if docfold:get(dd) == f then docs:push(dd) end end
         fvc[f + 1] = a.cand:docs(docs)
         fvg[f + 1] = a.gold:docs(docs)
       end
-      a.fold_val_cand, a.fold_val_gold = fvc, fvg
     else
-      foldof = a.fold_assign
-        or ((reg and a.pool_targets) and fold_assign_reg(a.pool_targets, n, K))
-        or fold_assign(a.pool_class or derive_class(a.pool_labels, n), n, K)
+      local foldof0 = user_foldof
+        or ((reg and a.pool_targets) and fold_assign_reg(a.pool_targets, n, Kn))
+        or fold_assign(a.pool_class or derive_class(a.pool_labels, n), n, Kn)
+      foldof = ivec.create()
+      foldof:copy(foldof0)
+      for r = 0, n - 1 do if instrat[r] then foldof:set(r, -1) end end
     end
-    for f = 0, K - 1 do
-      local tr_idx, va_idx = split_fold(foldof, f, n)
-      local trb = {}
-      for i = 1, #pool do trb[i] = pool[i]:rows(tr_idx) end
-      local ty = a.pool_labels and a.pool_labels:rows(tr_idx)
-      local vy = a.pool_labels and a.pool_labels:rows(va_idx)
-      local ft, fvt
-      if reg then ft = slice_targets(a.pool_targets, tr_idx); fvt = slice_targets(a.pool_targets, va_idx) end
-      local w_f = weight_fit(trb, ty or (wtargets and ft), metrics, wtargets)
-      local pcs_f = {}
-      for i = 1, #trb do pcs_f[i] = trb[i]:sumsq_cols() end
-      trb = nil -- luacheck: ignore
-      local e = { tr_idx = tr_idx, va_idx = va_idx, w = w_f, pcs = pcs_f,
-        n = tr_idx:size(), vn = va_idx:size(), y = ty, vy = vy, t = ft, vt = fvt }
-      fs[f + 1] = slice_ivec(a.pool_strata, tr_idx)
-      F[f + 1] = e
-      collectgarbage("collect")
+    local fvy, fvn, fvt = {}, {}, {}
+    for f = 0, Kn - 1 do
+      local _, va_idx = split_fold(foldof, f, n)
+      fvn[f + 1] = va_idx:size()
+      if reg then fvt[f + 1] = slice_targets(a.pool_targets, va_idx)
+      else fvy[f + 1] = a.pool_labels:rows(va_idx) end
     end
+    return { assign = foldof, val_y = reg and nil or fvy, val_n = fvn,
+      val_targets = reg and fvt or nil, val_cand = fvc, val_gold = fvg }
   end
-  local p_w = weight_fit(pool, a.pool_labels or (wtargets and a.pool_targets), metrics, wtargets)
+  -- relevance weights: CV/cal fit on the never-val stratum (leak-free), deploy fits on the
+  -- full pool (no held-out set, nothing to leak into)
+  local sy = a.pool_labels and a.pool_labels:rows(strat_idx)
+    or (wtargets and slice_targets(a.pool_targets, strat_idx)) or nil
+  local spool = {}
+  for i = 1, #pool do spool[i] = pool[i]:rows(strat_idx) end
+  local p_w = weight_fit(spool, sy, metrics, wtargets)
+  local p_w_full = weight_fit(pool, a.pool_labels or (wtargets and a.pool_targets), metrics, wtargets)
   local p_pcs = {}
   for i = 1, #pool do p_pcs[i] = pool[i]:sumsq_cols() end
   local exp_tbl
@@ -638,7 +700,7 @@ function M.fold_blocks (a)
       local ng = go and (go:size() - 1) or 1
       for g = 1, ng do
         local cols = go and (go:get(g) - go:get(g - 1)) or select(2, pool[i]:shape())
-        if not p_w[i] or cols <= 1 then exp_tbl[g0 + g] = false end
+        if not p_w_full[i] or cols <= 1 then exp_tbl[g0 + g] = false end
       end
       g0 = g0 + ng
     end
@@ -646,36 +708,27 @@ function M.fold_blocks (a)
   a.bake_external = function (ext, params)
     local xs = {}
     for i, b in ipairs(ext) do xs[i] = type(b) == "table" and b.x or b end
-    return (M.build_blocks(xs, params.scales, params.exponent, n, p_w, p_pcs, groups))
+    return (M.build_blocks(xs, params.scales, params.exponent, n, p_w_full, p_pcs, groups))
   end
-  a.rebuild = function (params, f)
-    local d = f and F[f] or { w = p_w, pcs = p_pcs, n = n }
-    local trb, vab
-    if f then
-      trb, vab = {}, {}
-      for i = 1, #pool do trb[i] = pool[i]:rows(d.tr_idx); vab[i] = pool[i]:rows(d.va_idx) end
-    else
-      trb = pool
-    end
-    local out = { blocks = M.build_blocks(trb, params.scales, params.exponent, d.n, d.w, d.pcs, groups),
-      n_samples = d.n }
-    if vab then
-      out.val_blocks = M.build_blocks(vab, params.scales, params.exponent, d.n, d.w, d.pcs, groups)
-      out.val_n_samples = d.vn
-    end
-    return out
+  -- separate caches per weight regime (never-val stratum vs full pool) since the pooled
+  -- non-grouped colscale is a function of the fit weights. gg caches pool the grouped colscale
+  -- OUT-buffer per regime (one persistent fvec per grouped block, fully overwritten each trial)
+  -- so the grouped path no longer allocates a fresh fvec every trial.
+  local cs_cache_cv, cs_cache_full = {}, {}
+  local gg_cache_cv, gg_cache_full = {}, {}
+  a.rebuild = function (params, cv)
+    local w = cv and p_w or p_w_full
+    local cache = cv and cs_cache_cv or cs_cache_full
+    local ggc = cv and gg_cache_cv or gg_cache_full
+    return { blocks = M.build_blocks(pool, params.scales, params.exponent, n, w, p_pcs, groups, cache, ggc),
+      n_samples = n }
   end
-  local fy, fvy, fvn, ft, fvt = {}, {}, {}, {}, {}
-  if use_folds then for f = 1, K do
-    fvn[f] = F[f].vn
-    if reg then ft[f] = F[f].t; fvt[f] = F[f].vt else fy[f] = F[f].y; fvy[f] = F[f].vy end
-  end end
   a.folds = use_folds and K or 1
   a.y = a.pool_labels
   a.targets = a.pool_targets
-  a.fold_y = reg and nil or fy; a.fold_val_y = reg and nil or fvy; a.fold_val_n = fvn
-  a.fold_targets = reg and ft or nil; a.fold_val_targets = reg and fvt or nil
-  a.fold_strata = fs
+  if use_folds then
+    a.fold_split = make_split(K, a.doc_fold, a.fold_assign)
+  end
   return a
 end
 

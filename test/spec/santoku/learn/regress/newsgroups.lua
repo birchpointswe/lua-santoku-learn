@@ -7,25 +7,26 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
+-- oracle: test acc=0.848779 maF1=0.843584
+-- best: cosine lambda=0.00082752091
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
-  landmark_rounds = 32,
-  search_landmark_rounds = 1,
   data = { max = nil },
   blocks = {
     { ngram_min = 1, ngram_max = 5, mode = "flat" },
     { ngram_min = 1, ngram_max = 3, mode = "words" },
   },
   relevance = { "bns", "bns" },
-  scales = { def = { 0.87540289, 1.1423312 } },
-  exponent = { def = { 1.68339, 3.44989 } },
+  scales = { def = { 1.3708485, 0.72947521 } },
+  exponent = { def = { 2.2721587, 2.4204458 } },
   n_landmarks = 1024 * 8,
   kernel = { "cosine" },
-  lambda = { def = 1.58158e-06 },
+  lambda = { def = 0.00082752091 },
   classes = 20,
   k = 1,
   search_trials = 0,
+  scratch_path = "test/res/newsgroups-scratch",
   folds = 5,
 }
 
@@ -42,26 +43,13 @@ test("newsgroups CV", function ()
   local toks, pool_blocks = util.tokenize_blocks(cfg.blocks, pool.problems, { tokens = Wtr })
   local _, test_blocks = util.tokenize_blocks(cfg.blocks, test_set.problems, { toks = toks, tokens = Wte })
 
-  local sp_enc, ridge_obj, deploy, best, decider = optimize.krr({
+  local sp_enc, ridge_obj, deploy, best, decider = optimize.krr(util.merged(cfg, {
     pool_blocks = pool_blocks,
     pool_labels = pool.labels,
     pool_class = pool.labels:neighbors(),
     n_labels = cfg.classes,
-    folds = cfg.folds,
-    relevance = cfg.relevance,
-    scales = cfg.scales,
-    exponent = cfg.exponent,
-    kernel = cfg.kernel,
-    lambda = cfg.lambda,
-    n_landmarks = cfg.n_landmarks,
-    search_landmarks = cfg.search_landmarks,
-    landmark_rounds = cfg.landmark_rounds,
-    search_landmark_rounds = cfg.search_landmark_rounds,
-    k = cfg.k,
-    search_trials = cfg.search_trials,
-    verbose = cfg.verbose,
     each = util.make_ridge_log(stopwatch),
-  })
+  }))
 
   local test_codes = deploy(test_blocks)
   local _, m = decider:score({ scores = ridge_obj:regress(test_codes),

@@ -174,3 +174,74 @@ test("enc:encode ignores the encode-time colscale (fit colscale is authoritative
   ignores_colscale({ kernel = "matern", nu = 2, gamma = 0.25 }, 1.0, "matern scale=1")
   ignores_colscale({ kernel = "matern", nu = 2, gamma = 0.25 }, 22.0, "matern scale=22")
 end)
+
+-- CV-downdate anchor: a fold gram assembled by gram:fold (full-pool moments minus the
+-- fold's val moments, re-centered) must match a gram prepared directly on the fold's
+-- training rows with the SAME landmarks, through solve (regress parity on shared codes),
+-- and the scattered val codes must equal directly-encoded val rows.
+test("gram:fold downdate == direct fold prepare", function ()
+  local mtx = require("santoku.mtx")
+  local ridge = require("santoku.learn.ridge")
+  local vals = make_vals()
+  local X = range_csr(vals, 0, C)
+  local yoff, ynbr = ivec.create(), ivec.create()
+  yoff:push(0)
+  for r = 0, N - 1 do
+    if vals[r * C + 1] + vals[r * C + 2] > 0 then ynbr:push(0) end
+    yoff:push(ynbr:size())
+  end
+  local Y = csr.create({ offsets = yoff, neighbors = ynbr, n_cols = 1 })
+  local bl = { { x = X, n_tokens = C } }
+  local lms = landmarks(6)
+  local nf = 2
+  -- landmark rows get fold id -1 (val of no fold -> train everywhere), so the direct
+  -- comparison encoder can use the identical landmark basis
+  local assign = ivec.create(N)
+  local counts = {}
+  for f = 1, nf do counts[f] = 0 end
+  for r = 0, N - 1 do
+    if r < 36 then assign:set(r, -1)
+    else
+      local f = r % nf
+      assign:set(r, f)
+      counts[f + 1] = counts[f + 1] + 1
+    end
+  end
+  local mcap = lms:size()
+  local fxtx, fxty, fsv, ftv, fcodes = {}, {}, {}, {}, {}
+  for f = 1, nf do
+    fxtx[f] = fvec.create(mcap * mcap)
+    fxty[f] = fvec.create(mcap)
+    fsv[f] = fvec.create(mcap)
+    ftv[f] = dvec.create(1)
+    fcodes[f] = mtx.create({ n_rows = counts[f], n_cols = mcap, type = "f32" })
+  end
+  local _, enc, g = spectral.encode({ blocks = bl, landmarks = lms, n_landmarks = lms:size(),
+    kernel = "cosine", y = Y, n_labels = 1,
+    fold_assign = assign, fold_xtx = fxtx, fold_xty = fxty, fold_sv = fsv, fold_tv = ftv,
+    fold_codes = fcodes })
+  for f = 1, nf do
+    local tr_idx, va_idx = ivec.create(), ivec.create()
+    for r = 0, N - 1 do
+      if assign:get(r) == f - 1 then va_idx:push(r) else tr_idx:push(r) end
+    end
+    local gf = g:fold(fxtx[f], fxty[f], fsv[f], ftv[f], counts[f])
+    local Xtr = X:rows(tr_idx)
+    local Ytr = Y:rows(tr_idx)
+    local _, _, gd = spectral.encode({ blocks = { { x = Xtr, n_tokens = C } },
+      landmarks = lms, n_landmarks = lms:size(), kernel = "cosine", y = Ytr, n_labels = 1 })
+    gf:solve(1e-2)
+    gd:solve(1e-2)
+    local rf = ridge.create({ gram = gf })
+    local rd = ridge.create({ gram = gd })
+    local codes = enc:encode({ blocks = bl })
+    local sf = rf:regress(codes)
+    local sd = rd:regress(codes)
+    assert(sf:eq(sd, 1e-2), "downdated fold gram deviates from direct fold prepare")
+    local Xva = X:rows(va_idx)
+    local vc = enc:encode({ blocks = { { x = Xva, n_tokens = C } } })
+    local sv1 = rf:regress(fcodes[f])
+    local sv2 = rf:regress(vc)
+    assert(sv1:eq(sv2, 1e-3), "scattered fold val codes deviate from direct val encode")
+  end
+end)

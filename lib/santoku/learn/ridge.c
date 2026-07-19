@@ -19,6 +19,7 @@ typedef struct {
   tk_fvec_t *W;
   tk_fvec_t W_view;
   tk_dvec_t *intercept;
+  tk_dvec_t intercept_view;
   int64_t n_dims;
   int64_t n_labels;
   float *sbuf;
@@ -62,21 +63,33 @@ static inline void tk_ridge_scores_block (
     tk_gram_add_intercept_f(out, bs, nl, r->intercept->a);
 }
 
-static inline int tk_ridge_encode_lua (lua_State *L) {
-  tk_ridge_t *r = tk_ridge_peek(L, 1);
-  tk_mtx_t *Mx = tk_mtx_peek(L, 2, "codes");
+static inline int tk_ridge_label_core (
+  lua_State *L, tk_ridge_t *r, const float *codes_a, int64_t n, int64_t k,
+  tk_csr_t *out, int out_idx)
+{
   int64_t nl = r->n_labels;
-  float *codes_a = ((tk_fvec_t *) Mx->v)->a;
-  int64_t n = (int64_t) Mx->n_rows;
-  int64_t k = (int64_t) luaL_checkinteger(L, 3);
   if (k > nl) k = nl;
   if (k < 1) k = 1;
-  tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t)(n + 1)); offsets->n = (uint64_t)(n + 1);
-  int offsets_idx = lua_gettop(L);
-  tk_ivec_t *labels = tk_ivec_create(L, (uint64_t)(n * k)); labels->n = (uint64_t)(n * k);
-  int labels_idx = lua_gettop(L);
-  tk_fvec_t *scores_out = tk_fvec_create(L, (uint64_t)(n * k)); scores_out->n = (uint64_t)(n * k);
-  int scores_out_idx = lua_gettop(L);
+  tk_ivec_t *offsets, *labels;
+  tk_fvec_t *scores_out;
+  int offsets_idx = 0, labels_idx = 0, scores_out_idx = 0;
+  if (out) {
+    /* reuse the caller's pooled CSR children in place (shape n+1 / n*k fixed per fold) */
+    offsets = out->offsets;
+    tk_ivec_ensure(offsets, (uint64_t)(n + 1)); offsets->n = (uint64_t)(n + 1);
+    labels = (tk_ivec_t *) out->neighbors;
+    tk_ivec_ensure(labels, (uint64_t)(n * k)); labels->n = (uint64_t)(n * k);
+    scores_out = (tk_fvec_t *) out->values;
+    tk_fvec_ensure(scores_out, (uint64_t)(n * k)); scores_out->n = (uint64_t)(n * k);
+    out->n_cols = (uint64_t) nl;
+  } else {
+    offsets = tk_ivec_create(L, (uint64_t)(n + 1)); offsets->n = (uint64_t)(n + 1);
+    offsets_idx = lua_gettop(L);
+    labels = tk_ivec_create(L, (uint64_t)(n * k)); labels->n = (uint64_t)(n * k);
+    labels_idx = lua_gettop(L);
+    scores_out = tk_fvec_create(L, (uint64_t)(n * k)); scores_out->n = (uint64_t)(n * k);
+    scores_out_idx = lua_gettop(L);
+  }
   for (int64_t i = 0; i <= n; i++) offsets->a[i] = i * k;
   int nt = omp_get_max_threads();
   uint64_t heap_need = (uint64_t)nt * (uint64_t)k;
@@ -114,9 +127,29 @@ static inline int tk_ridge_encode_lua (lua_State *L) {
       }
     }
   }
-  tk_csr_push(L, TK_TAG_F32, TK_TAG_I64, (uint64_t) nl,
-    offsets_idx, offsets, labels_idx, (void *) labels, scores_out_idx, scores_out);
+  if (out) {
+    lua_pushvalue(L, out_idx);
+  } else {
+    tk_csr_push(L, TK_TAG_F32, TK_TAG_I64, (uint64_t) nl,
+      offsets_idx, offsets, labels_idx, (void *) labels, scores_out_idx, scores_out);
+  }
   return 1;
+}
+
+static inline int tk_ridge_encode_lua (lua_State *L) {
+  tk_ridge_t *r = tk_ridge_peek(L, 1);
+  tk_mtx_t *Mx = tk_mtx_peek(L, 2, "codes");
+  float *codes_a = ((tk_fvec_t *) Mx->v)->a;
+  int64_t n = (int64_t) Mx->n_rows;
+  int64_t k = (int64_t) luaL_checkinteger(L, 3);
+  tk_csr_t *out = NULL; int out_idx = 0;
+  if (lua_gettop(L) >= 4 && !lua_isnil(L, 4)) {
+    out = tk_csr_peek(L, 4, "out");
+    out_idx = 4;
+    if (out->ntag != TK_TAG_I64 || out->tag != TK_TAG_F32)
+      return luaL_error(L, "ridge label: out buffer must be an i64/f32 csr");
+  }
+  return tk_ridge_label_core(L, r, codes_a, n, k, out, out_idx);
 }
 
 static inline int tk_ridge_persist_lua (lua_State *L) {
@@ -224,39 +257,53 @@ static inline int tk_ridge_create_lua (lua_State *L) {
     tk_fvec_t *w_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "w_buf");
     int w_buf_idx = w_buf ? lua_gettop(L) : 0;
     if (!w_buf) lua_pop(L, 1);
-    tk_dvec_t *intercept_dv = NULL;
-    int intercept_idx = 0;
-    if (gram->intercept) {
-      intercept_dv = tk_dvec_create(L, (uint64_t)nl);
-      intercept_dv->n = (uint64_t)nl;
-      memcpy(intercept_dv->a, gram->intercept, (uint64_t)nl * sizeof(double));
-      intercept_idx = lua_gettop(L);
-    }
     if (w_buf) {
+      /* serving copy: W and intercept decoupled from the gram */
+      tk_dvec_t *intercept_dv = NULL;
+      int intercept_idx = 0;
+      if (gram->intercept) {
+        intercept_dv = tk_dvec_create(L, (uint64_t)nl);
+        intercept_dv->n = (uint64_t)nl;
+        memcpy(intercept_dv->a, gram->intercept, (uint64_t)nl * sizeof(double));
+        intercept_idx = lua_gettop(L);
+      }
       tk_fvec_ensure(w_buf, dnl);
       w_buf->n = dnl;
       memcpy(w_buf->a, gram->W_baked_f, dnl * sizeof(float));
       tk_ridge_push(L, w_buf, w_buf_idx, intercept_dv, intercept_idx, d, nl);
       return 1;
     }
+    /* adopt: W and intercept are VIEWS into the gram, so the ridge tracks re-solves
+    ** (one ridge per fold survives an entire lambda BO); the gram is anchored in the
+    ** ridge fenv to keep both alive */
+    tk_ridge_t *r;
+    tk_fvec_t *gwb = NULL;
+    int gwb_idx = 0;
     if (gram->W_baked_external) {
       lua_getfenv(L, gram_idx);
       lua_getfield(L, -1, "w_buf");
-      tk_fvec_t *gwb = tk_fvec_peekopt(L, -1);
-      if (gwb && gwb->a == gram->W_baked_f) {
-        int gwb_idx = lua_gettop(L);
-        gwb->n = dnl;
-        tk_ridge_push(L, gwb, gwb_idx, intercept_dv, intercept_idx, d, nl);
-        return 1;
-      }
-      lua_pop(L, 2);
+      gwb = tk_fvec_peekopt(L, -1);
+      if (gwb && gwb->a == gram->W_baked_f) gwb_idx = lua_gettop(L);
+      else { gwb = NULL; lua_pop(L, 2); }
     }
-    tk_ridge_t *r = tk_ridge_push(L, NULL, 0, intercept_dv, intercept_idx, d, nl);
-    r->W_view.n = dnl;
-    r->W_view.m = dnl;
-    r->W_view.a = gram->W_baked_f;
-    r->W_view.lua_managed = 0;
-    r->W = &r->W_view;
+    if (gwb) {
+      gwb->n = dnl;
+      r = tk_ridge_push(L, gwb, gwb_idx, NULL, 0, d, nl);
+    } else {
+      r = tk_ridge_push(L, NULL, 0, NULL, 0, d, nl);
+      r->W_view.n = dnl;
+      r->W_view.m = dnl;
+      r->W_view.a = gram->W_baked_f;
+      r->W_view.lua_managed = 0;
+      r->W = &r->W_view;
+    }
+    if (gram->intercept) {
+      r->intercept_view.n = (uint64_t)nl;
+      r->intercept_view.m = (uint64_t)nl;
+      r->intercept_view.a = gram->intercept;
+      r->intercept_view.lua_managed = 0;
+      r->intercept = &r->intercept_view;
+    }
     lua_getfenv(L, -1);
     lua_pushvalue(L, gram_idx);
     lua_setfield(L, -2, "gram");

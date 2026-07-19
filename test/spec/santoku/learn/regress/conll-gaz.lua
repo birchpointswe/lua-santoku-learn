@@ -8,16 +8,18 @@ local util = require("santoku.learn.util")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local utc = require("santoku.utc")
+local fvec = require("santoku.fvec")
+local fs = require("santoku.fs")
 
 io.stdout:setvbuf("line")
 
 local N_TYPES = 4
 
+-- oracle: test spF1=0.969541 (P=0.969713 R=0.969370)
+-- best: matern nu=5/2 (def=2) gamma=0.033925952 lambda=3.7829147e-05 decode_offset=-0.49673414
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
-  landmark_rounds = 32,
-  search_landmark_rounds = 1,
   data = { dir = "test/res/conll2003", max = nil },
   tok = { ngram_min = 1, ngram_max = 5 },
   blocks = {
@@ -27,14 +29,15 @@ local cfg = {
   emb = { n_landmarks = 1024 * 8 },
   head = {
     kernel = { "matern" },
-    nu = { def = 1 },
-    gamma = { def = 0.53607869 },
-    lambda = { def = 2.9299902e-05 },
+    nu = { def = 2 },
+    gamma = { def = 0.033925952 },
+    lambda = { def = 3.7829147e-05 },
     relevance = { "bns", "bns", "auc" },
-    scales = { def = { 0.0045204084, 0.0045204084, 0.49983253, 15.168852, 0.0045204084, 0.0045204084, 20.022861, 56.54299, 44.639002, 14.48332, 431.54347 } },
-    exponent = { def = { 3.2694916, 6.8227349, 7.5514373, 1.0992432, 1.4892054, 7.9947992, 1.5709097, 5.3751002, 0.79283053, 5.7866596, 5.2936447 } },
-    decode_offset = { def = -0.46597821 },
+    scales = { def = { 0.16700725, 750.25667, 0.022722455, 285.64255, 0.012953823, 0.0075025667, 0.0075025667, 0.058747138, 246.25134, 0.19469259, 598.74823 } },
+    exponent = { def = { 1.3153303, 1.7915035, 3.0779086, 0.84781049, 6.1936501, 7.0719099, 7.8323064, 0.51783619, 2.3249964, 0.21921147, 7.9105983 } },
+    decode_offset = { def = -0.49673414 },
     search_trials = 0,
+    scratch_path = "test/res/conll-gaz-scratch",
     folds = 5,
   },
 }
@@ -81,33 +84,29 @@ test("conll-gaz CV", function ()
 
   local Ytr = cand_labels(Ctr, Gtr)
 
-  local enc, rg, deploy, best, decider = optimize.krr({
+  local bdir = os.tmpname() .. ".bundle"
+  fs.mkdirp(bdir)
+  local w_path, chol_path = bdir .. "/w.mmap", bdir .. "/chol.mmap"
+  local w_buf = fvec.mmap_create(w_path, cfg.emb.n_landmarks)
+  local enc_chol_buf = fvec.mmap_create(chol_path, cfg.emb.n_landmarks * cfg.emb.n_landmarks)
+
+  local enc, rg, deploy, best, decider = optimize.krr(util.merged(cfg.head, {
     pool_blocks = Xtr,
     pool_labels = Ytr,
     pool_n = n_pool,
     n_labels = 1,
     reject = N_TYPES,
-    folds = cfg.head.folds,
     doc_fold = df,
     cand = Ctr,
     gold = Gtr,
-    relevance = cfg.head.relevance,
-    scales = cfg.head.scales,
-    exponent = cfg.head.exponent,
-    kernel = cfg.head.kernel,
-    nu = cfg.head.nu,
-    gamma = cfg.head.gamma,
-    lambda = cfg.head.lambda,
     n_landmarks = cfg.emb.n_landmarks,
+    w_buf = w_buf,
+    enc_chol_buf = enc_chol_buf,
     search_landmarks = cfg.search_landmarks,
-    landmark_rounds = cfg.landmark_rounds,
-    search_landmark_rounds = cfg.search_landmark_rounds,
     k = 1,
-    decode_offset = cfg.head.decode_offset,
-    search_trials = cfg.head.search_trials,
     verbose = cfg.verbose,
     each = util.make_ridge_log(stopwatch),
-  })
+  }))
 
   local _, test_scores = util.predict_tiled({ deploy = deploy, ridge = rg,
     blocks = Xte, n = n_test, scores = true, n_labels = 1 })
@@ -118,9 +117,8 @@ test("conll-gaz CV", function ()
     best.lambda or 0, decider:offset(), util.fmt_metrics(m), total)
 
   local bundle = require("santoku.learn.bundle")
-  local bdir = os.tmpname() .. ".bundle"
   bundle.persist({ dir = bdir, tokenizers = toks, gaz = serve_gaz, gaz_rms = rms_w[n_sparse + 1],
-    encoder = enc, ridge = rg, decider = decider })
+    encoder = enc, ridge = rg, decider = decider, w_path = w_path, chol_path = chol_path })
   local b = bundle.load(bdir)
   local _, Xte_b = util.tokenize_blocks(cfg.blocks, test_set.texts,
     { toks = b.tokenizers, focus = Cte, tokens = Tte })
@@ -136,7 +134,7 @@ test("conll-gaz CV", function ()
   str.printf("[Bundle] serve-vs-deploy max score diff = %.3e\n", maxd)
   assert(maxd < 1e-3, str.format("bundle serve path diverges from deploy (%.3e)", maxd))
   for _, f in ipairs({ "tokenizer_1.bin", "tokenizer_2.bin", "encoder.bin", "ridge.bin",
-      "decider.bin", "gaz.bin", "gaz_rms.bin", "manifest.lua" }) do
+      "decider.bin", "gaz.bin", "gaz_rms.bin", "w.mmap", "chol.mmap", "manifest.lua" }) do
     os.remove(bdir .. "/" .. f)
   end
   os.remove(bdir)

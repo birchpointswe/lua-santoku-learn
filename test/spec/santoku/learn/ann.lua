@@ -76,4 +76,21 @@ test("ann spectral idf retrieval", function ()
   -- sanity floor: cosine-aligned codes recover well above random (random recall@10 ~ 0.01)
   assert(r_rr > 0.3)
 
+  -- persist -> reload reproduces the index exactly (raw mmap-compatible sidecars)
+  local tmp = os.tmpname() .. ".ann"
+  idx:persist(tmp)
+  -- mmap sidecars + external rerank codes: identical to the in-memory rerank index
+  local idx_m = ann.load(tmp, C)
+  local P_m = idx_m:neighborhoods_by_vecs(C, k, radius)
+  assert(recall(P_m, P_rr, nq) == 1 and recall(P_rr, P_m, nq) == 1)
+  -- RAM sidecars (mmap = false): same result, internally-managed buffers
+  local idx_r = ann.load(tmp, C, false)
+  local P_r = idx_r:neighborhoods_by_vecs(C, k, radius)
+  assert(recall(P_r, P_rr, nq) == 1 and recall(P_rr, P_r, nq) == 1)
+  -- no codes passed -> Hamming-only, matches the create-time binarize path
+  local idx_h = ann.load(tmp)
+  local P_h = idx_h:neighborhoods_by_vecs(C, k, radius)
+  assert(recall(P_h, P_bin, nq) == 1 and recall(P_bin, P_h, nq) == 1)
+  for _, sfx in ipairs({ "", ".sids", ".buckets", ".bits" }) do os.remove(tmp .. sfx) end
+
 end)

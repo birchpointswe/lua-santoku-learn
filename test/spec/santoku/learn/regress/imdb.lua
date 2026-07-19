@@ -7,11 +7,11 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
+-- oracle: test miF1=0.913670 (miP=0.895707 miR=0.932369)
+-- best: cosine lambda=0.15053999 decode_offset=0.47083597
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
-  landmark_rounds = 32,
-  search_landmark_rounds = 1,
   data = { ttr = 0.5 },
   blocks = {
     { ngram_min = 1, ngram_max = 5, mode = "flat" },
@@ -20,13 +20,14 @@ local cfg = {
   relevance = { "bns", "bns" },
   scales = { def = { 2.1061338, 0.47480364 } },
   exponent = { def = { 2.3789142, 1.4690152 } },
-  decode_offset = { def = 0.46600865 },
+  decode_offset = { def = 0.47083597 },
   n_landmarks = 1024 * 8,
   kernel = { "cosine" },
-  lambda = { def = 0.025166622 },
+  lambda = { def = 0.15053999 },
   classes = 1,
   k = 1,
   search_trials = 0,
+  scratch_path = "test/res/imdb-scratch",
   folds = 5,
 }
 
@@ -43,28 +44,12 @@ test("imdb CV", function ()
   local toks, pool_blocks = util.tokenize_blocks(cfg.blocks, train.problems, { tokens = Wtr })
   local _, test_blocks = util.tokenize_blocks(cfg.blocks, test_set.problems, { toks = toks, tokens = Wte })
 
-  local _, ridge_obj, deploy, best, decider = optimize.krr({
+  local _, ridge_obj, deploy, best, decider = optimize.krr(util.merged(cfg, {
     pool_blocks = pool_blocks,
     pool_labels = train.labels,
     n_labels = cfg.classes,
-    folds = cfg.folds,
-    relevance = cfg.relevance,
-    scales = cfg.scales,
-    exponent = cfg.exponent,
-    kernel = cfg.kernel,
-    nu = cfg.nu,
-    gamma = cfg.gamma,
-    lambda = cfg.lambda,
-    n_landmarks = cfg.n_landmarks,
-    search_landmarks = cfg.search_landmarks,
-    landmark_rounds = cfg.landmark_rounds,
-    search_landmark_rounds = cfg.search_landmark_rounds,
-    k = cfg.k,
-    search_trials = cfg.search_trials,
-    decode_offset = cfg.decode_offset,
-    verbose = cfg.verbose,
     each = util.make_ridge_log(stopwatch),
-  })
+  }))
 
   local P = util.predict_tiled({ deploy = deploy, ridge = ridge_obj,
     blocks = test_blocks, n = test_set.n, k = 1 })
