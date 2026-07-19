@@ -239,7 +239,8 @@ function M.tokenize_blocks (specs, texts, o)
   for i = 1, #specs do
     local tk = o.tokens
     if type(tk) == "table" then tk = tk[i] end
-    local targs = { texts = texts, focus = o.focus, tokens = tk }
+    local targs = { texts = texts, focus = o.focus, tokens = tk,
+      out_path = o.scratch and (o.scratch .. "." .. i) or nil }
     local csr = grow and toks[i]:fit(targs) or toks[i]:tokenize(targs)
     local go = specs[i].regions and toks[i]:group_offsets() or nil
     X[i] = go and { x = csr, group_offsets = go } or csr

@@ -101,6 +101,27 @@ test("tokenizer", function ()
     assert(X1:eq(X2))
   end)
 
+  test("out_path mmaps the CSR to disk, bit-identical to the RAM path", function ()
+    local T = word_tokens()
+    local F = spans.create({ offsets = ivec.create({ 0, 1, 1, 1, 1, 1 }), s = ivec.create({ 0 }), e = ivec.create({ 8 }) })
+    local function mk () return tokenizer.create({ ngram_min = 1, ngram_max = 3,
+      mode = "words", terminals = true, focus = true }) end
+
+
+    local Xram = mk():fit({ texts = texts, focus = F, tokens = T })
+    local tmp = os.tmpname()
+    local base, base2 = tmp .. ".a", tmp .. ".b"
+    local tkm = mk()
+    assert(tkm:fit({ texts = texts, focus = F, tokens = T, out_path = base }):eq(Xram))
+
+    assert(tkm:tokenize({ texts = texts, focus = F, tokens = T, out_path = base2 })
+      :eq(tkm:tokenize({ texts = texts, focus = F, tokens = T })))
+    os.remove(tmp)
+    for _, b in ipairs({ base, base2 }) do
+      for _, sfx in ipairs({ ".off", ".toks", ".vals" }) do os.remove(b .. sfx) end
+    end
+  end)
+
 
 
   test("tokenize_raw: raw ngram-hash csr, counts", function ()
