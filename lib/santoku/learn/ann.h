@@ -412,6 +412,8 @@ static luaL_Reg tk_ann_flat_mt_fns[] =
 static inline int tk_ann_load_lua (lua_State *L)
 {
   const char *path = luaL_checkstring(L, 1);
+  lua_settop(L, 5);  // fix arg count so optional sids/buckets/bits (3/4/5) stay nil-or-value
+                     // even after we push the flat userdata (else absent args read as the flat)
   tk_mtx_t *Mc = lua_isnoneornil(L, 2) ? NULL : tk_mtx_peek(L, 2, "codes");
   int codes_idx = Mc ? 2 : 0;
 

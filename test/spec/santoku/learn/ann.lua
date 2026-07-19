@@ -2,6 +2,8 @@ local tokenizer = require("santoku.learn.tokenizer")
 local spectral = require("santoku.learn.spectral")
 local ann = require("santoku.learn.ann")
 local ds = require("santoku.learn.dataset")
+local ivec = require("santoku.ivec")
+local cvec = require("santoku.cvec")
 local str = require("santoku.string")
 local test = require("santoku.test")
 
@@ -79,12 +81,13 @@ test("ann spectral idf retrieval", function ()
   -- persist -> reload reproduces the index exactly (raw mmap-compatible sidecars)
   local tmp = os.tmpname() .. ".ann"
   idx:persist(tmp)
-  -- mmap sidecars + external rerank codes: identical to the in-memory rerank index
-  local idx_m = ann.load(tmp, C)
+  -- caller-mmapped sidecars + external rerank codes: identical to the in-memory rerank index
+  local idx_m = ann.load(tmp, C,
+    ivec.mmap_open(tmp .. ".sids"), ivec.mmap_open(tmp .. ".buckets"), cvec.mmap_open(tmp .. ".bits"))
   local P_m = idx_m:neighborhoods_by_vecs(C, k, radius)
   assert(recall(P_m, P_rr, nq) == 1 and recall(P_rr, P_m, nq) == 1)
-  -- RAM sidecars (mmap = false): same result, internally-managed buffers
-  local idx_r = ann.load(tmp, C, false)
+  -- no index buffers passed -> ann reads the sidecars into RAM: same result
+  local idx_r = ann.load(tmp, C)
   local P_r = idx_r:neighborhoods_by_vecs(C, k, radius)
   assert(recall(P_r, P_rr, nq) == 1 and recall(P_rr, P_r, nq) == 1)
   -- no codes passed -> Hamming-only, matches the create-time binarize path
