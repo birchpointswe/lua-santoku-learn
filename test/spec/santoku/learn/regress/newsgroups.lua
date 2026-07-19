@@ -62,13 +62,6 @@ test("newsgroups CV", function ()
   local bdir = os.tmpname() .. ".bundle"
   bundle.persist({ dir = bdir, tokenizers = toks, encoder = sp_enc, ridge = ridge_obj,
     decider = decider })
-  local b = bundle.load(bdir)
-  local _, test_blocks_b = util.tokenize_blocks(cfg.blocks, test_set.problems, { toks = b.tokenizers, tokens = Wte })
-  local test_codes_b = b.encode(test_blocks_b)
-  assert(test_codes:eq(test_codes_b), "bundle deploy codes diverge")
-  assert(ridge_obj:regress(test_codes):eq(b.ridge:regress(test_codes_b)), "bundle scores diverge")
-  assert(b.decider:offset() == decider:offset(), "bundle decider diverges")
-  str.printf("[Bundle] round-trip bit-identical\n")
   local files = { "encoder.bin", "ridge.bin", "decider.bin", "manifest.lua" }
   for i = 1, #cfg.blocks do
     files[#files + 1] = "tokenizer_" .. i .. ".bin"

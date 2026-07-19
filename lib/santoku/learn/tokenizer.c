@@ -433,6 +433,15 @@ static int64_t tk_emit_row (
   return nnz;
 }
 
+// build "<base><suffix>" for an out_path sidecar; caller frees.
+static inline char *tk_tok_path (lua_State *L, const char *base, const char *suffix) {
+  size_t bl = strlen(base), sl = strlen(suffix);
+  char *buf = (char *) malloc(bl + sl + 1);
+  if (!buf) { luaL_error(L, "tokenizer: out of memory (out_path)"); return NULL; }
+  memcpy(buf, base, bl); memcpy(buf + bl, suffix, sl); buf[bl + sl] = 0;
+  return buf;
+}
+
 static int tk_tokenize_core (lua_State *L, bool grow) {
   tk_tokenizer_t *t = tk_tokenizer_peek(L, 1);
   luaL_checktype(L, 2, LUA_TTABLE);
@@ -472,6 +481,12 @@ static int tk_tokenize_core (lua_State *L, bool grow) {
     int64_t it = tk_spans_colidx(T, "ty");
     if (it >= 0) tkty = T->cols[it];
   }
+  lua_pop(L, 1);
+  // optional out_path: mmap the output CSR (offsets/toks/vals) to disk instead of
+  // RAM. The string stays anchored by the opts table (arg 2), so the pointer is
+  // valid after the pop. Absent => RAM (default), which is the A/B toggle.
+  lua_getfield(L, 2, "out_path");
+  const char *out_path = lua_isnil(L, -1) ? NULL : lua_tostring(L, -1);
   lua_pop(L, 1);
 
   bool per_span = (fo != NULL);
@@ -580,7 +595,15 @@ static int tk_tokenize_core (lua_State *L, bool grow) {
   }
   uint32_t mend = tk_iumap_end(map);
 
-  tk_ivec_t *offsets = tk_ivec_create(L, (uint64_t) (n_rows + 1));
+  tk_ivec_t *offsets;
+#if !defined(__EMSCRIPTEN__)
+  if (out_path) {
+    char *p = tk_tok_path(L, out_path, ".off");
+    offsets = tk_ivec_mmap_create(L, p, (uint64_t) (n_rows + 1));
+    free(p);
+  } else
+#endif
+  offsets = tk_ivec_create(L, (uint64_t) (n_rows + 1));
   offsets->n = (uint64_t) (n_rows + 1); offsets->a[0] = 0;
   tk_svec_t *toks = NULL; tk_fvec_t *vals = NULL;
 
@@ -607,8 +630,17 @@ static int tk_tokenize_core (lua_State *L, bool grow) {
     }
     int64_t acc = 0;
     for (int64_t row = 0; row < n_rows; row++) { acc += nnz[row]; offsets->a[row + 1] = acc; }
-    toks = tk_svec_create(L, (uint64_t) acc); toks->n = (uint64_t) acc;
-    vals = tk_fvec_create(L, (uint64_t) acc); vals->n = (uint64_t) acc;
+#if !defined(__EMSCRIPTEN__)
+    if (out_path) {
+      char *pt = tk_tok_path(L, out_path, ".toks");
+      toks = tk_svec_mmap_create(L, pt, (uint64_t) acc); free(pt);
+      char *pv = tk_tok_path(L, out_path, ".vals");
+      vals = tk_fvec_mmap_create(L, pv, (uint64_t) acc); free(pv);
+    } else
+#endif
+    { toks = tk_svec_create(L, (uint64_t) acc);
+      vals = tk_fvec_create(L, (uint64_t) acc); }
+    toks->n = (uint64_t) acc; vals->n = (uint64_t) acc;
     #pragma omp parallel
     {
       tk_scratch_t sc;

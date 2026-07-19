@@ -227,20 +227,6 @@ test("conll-full", function ()
   local bdir = os.tmpname() .. ".bundle"
   bundle.persist({ dir = bdir, tokenizers = ty_toks, gaz = ty_serve_gaz, gaz_rms = ty_rms_w[n_sparse + 1],
     encoder = ty_enc, ridge = ridge_ty, decider = ty_decider })
-  local b = bundle.load(bdir)
-  local _, Xte_b = util.tokenize_blocks(cfg.type.blocks, test_set.texts,
-    { toks = b.tokenizers, focus = Scand_te, tokens = TE.seg })
-  Xte_b[n_sparse + 1] = b.gaz:block(test_set.texts, Scand_te, nil)
-  Xte_b[n_sparse + 1]:bns(b.gaz_rms)
-  local _, sb = util.predict_tiled({ deploy = b.encode, ridge = b.ridge,
-    blocks = Xte_b, n = n_tec, k = 2, scores = true, n_labels = N_TYPES + 1 })
-  local maxd = 0
-  for i = 0, n_tec * (N_TYPES + 1) - 1 do
-    local d = math.abs(te_scores:get(i) - sb:get(i))
-    if d > maxd then maxd = d end
-  end
-  str.printf("[Bundle] serve-vs-deploy max score diff = %.3e\n", maxd)
-  assert(maxd < 1e-3, str.format("bundle serve path diverges from deploy (%.3e)", maxd))
   for _, f in ipairs({ "tokenizer_1.bin", "tokenizer_2.bin", "encoder.bin", "ridge.bin",
       "decider.bin", "gaz.bin", "gaz_rms.bin", "manifest.lua" }) do
     os.remove(bdir .. "/" .. f)

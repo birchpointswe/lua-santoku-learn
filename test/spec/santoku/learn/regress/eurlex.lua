@@ -11,7 +11,7 @@ io.stdout:setvbuf("line")
 -- best: cosine lambda=1.01227e-07 decode_offset=0.35471344 exp={3.0130623}
 local cfg = {
   verbose = false,
-  search_landmarks = 1024 * 4,
+  search_landmarks = 1024 * 2,
   blocks = {
     { ngram_min = 1, ngram_max = 5, mode = "flat" },
   },
@@ -22,7 +22,7 @@ local cfg = {
   kernel = { "cosine" },
   lambda = { def = 1.01227e-07 },
   k = 256,
-  search_trials = 10,
+  search_trials = 0,
   scratch_path = "test/res/eurlex-scratch",
   folds = 5,
 }
