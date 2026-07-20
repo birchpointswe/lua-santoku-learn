@@ -37,7 +37,7 @@ test("mnist CV", function ()
   str.printf("[Data] pool=%d test=%d features=%d classes=%d folds=%d trials=%d\n",
     train.n, test_set.n, cfg.data.features, cfg.classes, cfg.folds, cfg.search_trials)
 
-  local _, ridge_obj, deploy, best, decider = optimize.krr(util.merged(cfg, {
+  local sp_enc, ridge_obj, deploy, best, decider = optimize.krr(util.merged(cfg, {
     pool_blocks = { pool_codes:i32() },
     pool_labels = train.labels,
     pool_class = train.labels:neighbors(),
@@ -51,4 +51,21 @@ test("mnist CV", function ()
     n_samples = test_set.n, expected = test_set.labels })
   local _, total = stopwatch()
   str.printf("[Result] lambda=%.8g | test %s\nTotal: %.1fs\n", best.lambda or 0, util.fmt_metrics(m), total)
+
+  local bundle = require("santoku.learn.bundle")
+  local bdir = os.tmpname() .. ".bundle"
+  bundle.persist({ dir = bdir, encoder = sp_enc, ridge = ridge_obj, decider = decider })
+  local dep = util.fmt_metrics(m)
+  sp_enc, ridge_obj, deploy, decider, test_scores, pool_codes = nil -- luacheck: ignore
+  collectgarbage("collect")
+  local b = bundle.load(bdir)
+  local _, sb = util.predict_tiled({ deploy = b.encode, ridge = b.ridge,
+    blocks = { test_codes:i32() }, n = test_set.n, scores = true, n_labels = cfg.classes })
+  local _, mb = b.decider:score({ scores = sb, n_samples = test_set.n, expected = test_set.labels })
+  str.printf("[Bundle] reload test %s (deploy %s)\n", util.fmt_metrics(mb), dep)
+  assert(util.fmt_metrics(mb) == dep, "reloaded bundle metrics diverge from deploy")
+  for _, f in ipairs({ "encoder.bin", "ridge.bin", "decider.bin", "manifest.lua" }) do
+    os.remove(bdir .. "/" .. f)
+  end
+  os.remove(bdir)
 end)

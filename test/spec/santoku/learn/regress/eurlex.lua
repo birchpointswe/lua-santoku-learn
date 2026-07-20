@@ -47,7 +47,7 @@ test("eurlex CV", function ()
   local toks, pool_blocks = util.tokenize_blocks(cfg.blocks, pool_texts, { tokens = Wtr })
   local _, test_blocks = util.tokenize_blocks(cfg.blocks, test_texts, { toks = toks, tokens = Wte })
 
-  local _, ridge_obj, deploy, best, decider = optimize.krr(util.merged(cfg, {
+  local sp_enc, ridge_obj, deploy, best, decider = optimize.krr(util.merged(cfg, {
     pool_blocks = pool_blocks,
     pool_labels = train.labels,
     n_labels = n_labels,
@@ -60,4 +60,21 @@ test("eurlex CV", function ()
   local _, total = stopwatch()
   str.printf("[Result] scales=%s offset=%.8g | test %s\nTotal: %.1fs\n",
     util.vecstr(best.scales), decider:offset(), util.fmt_metrics(m), total)
+
+  local bundle = require("santoku.learn.bundle")
+  local bdir = os.tmpname() .. ".bundle"
+  bundle.persist({ dir = bdir, tokenizers = toks, encoder = sp_enc, ridge = ridge_obj, decider = decider })
+  local dep = util.fmt_metrics(m)
+  sp_enc, ridge_obj, deploy, decider, toks, pool_blocks, test_blocks, P = nil -- luacheck: ignore
+  collectgarbage("collect")
+  local b = bundle.load(bdir)
+  local _, Xb = util.tokenize_blocks(cfg.blocks, test_texts, { toks = b.tokenizers, tokens = Wte })
+  local Pb = util.predict_tiled({ deploy = b.encode, ridge = b.ridge, blocks = Xb, n = test_set.n, k = cfg.k })
+  local _, mb = b.decider:score({ pred = Pb, expected = test_set.labels, n_samples = test_set.n })
+  str.printf("[Bundle] reload test %s (deploy %s)\n", util.fmt_metrics(mb), dep)
+  assert(util.fmt_metrics(mb) == dep, "reloaded bundle metrics diverge from deploy")
+  local files = { "encoder.bin", "ridge.bin", "decider.bin", "manifest.lua" }
+  for i = 1, #cfg.blocks do files[#files + 1] = "tokenizer_" .. i .. ".bin" end
+  for _, f in ipairs(files) do os.remove(bdir .. "/" .. f) end
+  os.remove(bdir)
 end)

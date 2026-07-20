@@ -123,6 +123,18 @@ test("conll-gaz CV", function ()
   local bundle = require("santoku.learn.bundle")
   bundle.persist({ dir = bdir, tokenizers = toks, gaz = serve_gaz, gaz_rms = rms_w[n_sparse + 1],
     encoder = enc, ridge = rg, decider = decider, w_path = w_path, chol_path = chol_path })
+  local dep = util.fmt_metrics(m)
+  enc, rg, deploy, decider, toks, serve_gaz, Xtr, Xte, test_scores, rms_w = nil -- luacheck: ignore
+  collectgarbage("collect")
+  local b = bundle.load(bdir)
+  local _, Xb = util.tokenize_blocks(cfg.blocks, test_set.texts, { toks = b.tokenizers, focus = Cte, tokens = Tte })
+  Xb[n_sparse + 1] = b.gaz:block(test_set.texts, Cte, nil)
+  Xb[n_sparse + 1]:bns(b.gaz_rms)
+  local _, sb = util.predict_tiled({ deploy = b.encode, ridge = b.ridge,
+    blocks = Xb, n = n_test, scores = true, n_labels = 1 })
+  local _, mb = b.decider:score({ scores = sb, n_samples = test_set.n, cand = Cte, gold = Gte })
+  str.printf("[Bundle] reload test %s (deploy %s)\n", util.fmt_metrics(mb), dep)
+  assert(util.fmt_metrics(mb) == dep, "reloaded bundle metrics diverge from deploy")
   for _, f in ipairs({ "tokenizer_1.bin", "tokenizer_2.bin", "encoder.bin", "ridge.bin",
       "decider.bin", "gaz.bin", "gaz_rms.bin", "w.mmap", "chol.mmap", "manifest.lua" }) do
     os.remove(bdir .. "/" .. f)
