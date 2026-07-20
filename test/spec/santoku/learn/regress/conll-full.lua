@@ -227,6 +227,18 @@ test("conll-full", function ()
   local bdir = os.tmpname() .. ".bundle"
   bundle.persist({ dir = bdir, tokenizers = ty_toks, gaz = ty_serve_gaz, gaz_rms = ty_rms_w[n_sparse + 1],
     encoder = ty_enc, ridge = ridge_ty, decider = ty_decider })
+  local dep = util.fmt_metrics(te_m)
+  ty_enc, ridge_ty, deploy, ty_decider, ty_toks, ty_serve_gaz, te_scores, ty_all_tr, ty_all_te, ty_rms_w = nil -- luacheck: ignore
+  collectgarbage("collect")
+  local b = bundle.load(bdir)
+  local _, Xb = util.tokenize_blocks(cfg.type.blocks, test_set.texts, { toks = b.tokenizers, focus = Scand_te, tokens = TE.seg })
+  Xb[n_sparse + 1] = b.gaz:block(test_set.texts, Scand_te, nil)
+  Xb[n_sparse + 1]:bns(b.gaz_rms)
+  local _, sb = util.predict_tiled({ deploy = b.encode, ridge = b.ridge,
+    blocks = Xb, n = n_tec, k = 2, scores = true, n_labels = N_TYPES + 1 })
+  local _, mb = b.decider:score({ scores = sb, n_samples = n_te_docs, cand = Scand_te, gold = TE.gold })
+  str.printf("[Bundle] reload test %s (deploy %s)\n", util.fmt_metrics(mb), dep)
+  assert(util.fmt_metrics(mb) == dep, "reloaded bundle metrics diverge from deploy")
   for _, f in ipairs({ "tokenizer_1.bin", "tokenizer_2.bin", "encoder.bin", "ridge.bin",
       "decider.bin", "gaz.bin", "gaz_rms.bin", "manifest.lua" }) do
     os.remove(bdir .. "/" .. f)

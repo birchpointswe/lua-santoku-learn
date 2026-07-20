@@ -62,6 +62,15 @@ test("newsgroups CV", function ()
   local bdir = os.tmpname() .. ".bundle"
   bundle.persist({ dir = bdir, tokenizers = toks, encoder = sp_enc, ridge = ridge_obj,
     decider = decider })
+  local dep = util.fmt_metrics(m)
+  sp_enc, ridge_obj, deploy, decider, toks, test_codes, test_blocks = nil -- luacheck: ignore
+  collectgarbage("collect")
+  local b = bundle.load(bdir)
+  local _, Xb = util.tokenize_blocks(cfg.blocks, test_set.problems, { toks = b.tokenizers, tokens = Wte })
+  local _, mb = b.decider:score({ scores = b.ridge:regress(b.encode(Xb)),
+    n_samples = test_set.n, expected = test_set.labels })
+  str.printf("[Bundle] reload test %s (deploy %s)\n", util.fmt_metrics(mb), dep)
+  assert(util.fmt_metrics(mb) == dep, "reloaded bundle metrics diverge from deploy")
   local files = { "encoder.bin", "ridge.bin", "decider.bin", "manifest.lua" }
   for i = 1, #cfg.blocks do
     files[#files + 1] = "tokenizer_" .. i .. ".bin"

@@ -47,7 +47,7 @@ test("housing CV", function ()
   str.printf("[Data] pool=%d test=%d gauge_dims=%d folds=%d trials=%d\n",
     train.n, test_set.n, n_cont + 1, cfg.folds, cfg.search_trials)
 
-  local _, ridge_obj, deploy = optimize.krr(util.merged(cfg, {
+  local sp_enc, ridge_obj, deploy = optimize.krr(util.merged(cfg, {
     pool_blocks = pool_blocks,
     pool_targets = train.targets,
     n_targets = 1,
@@ -60,4 +60,21 @@ test("housing CV", function ()
   local ts = eval.regress_accuracy(test_scores, test_set.targets)
   local _, total = stopwatch()
   str.printf("[Result] test=%.4f\nTotal: %.1fs\n", 1 - ts.nmae, total)
+
+  local bundle = require("santoku.learn.bundle")
+  local bdir = os.tmpname() .. ".bundle"
+  bundle.persist({ dir = bdir, encoder = sp_enc, ridge = ridge_obj })
+  local dep = str.format("%.4f", 1 - ts.nmae)
+  sp_enc, ridge_obj, deploy, test_scores, pool_blocks = nil -- luacheck: ignore
+  collectgarbage("collect")
+  local b = bundle.load(bdir)
+  local _, sb = util.predict_tiled({ deploy = b.encode, ridge = b.ridge,
+    blocks = test_blocks, n = test_set.n, scores = true, n_labels = 1 })
+  local tsb = eval.regress_accuracy(sb, test_set.targets)
+  str.printf("[Bundle] reload test=%.4f (deploy %s)\n", 1 - tsb.nmae, dep)
+  assert(str.format("%.4f", 1 - tsb.nmae) == dep, "reloaded bundle metric diverges from deploy")
+  for _, f in ipairs({ "encoder.bin", "ridge.bin", "manifest.lua" }) do
+    os.remove(bdir .. "/" .. f)
+  end
+  os.remove(bdir)
 end)
