@@ -2,8 +2,10 @@ local str = require("santoku.string")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
 local fvec = require("santoku.fvec")
+local svec = require("santoku.svec")
 local spans = require("santoku.spans")
 local re = require("santoku.re")
+local fs = require("santoku.fs")
 
 local M = {}
 
@@ -35,6 +37,11 @@ local shape_prog = re.prog(SHAPE_PATTERN)
 M.SHAPE_TAGS = re.tags(SHAPE_PATTERN)
 M.N_SHAPES = 0
 for _ in pairs(M.SHAPE_TAGS) do M.N_SHAPES = M.N_SHAPES + 1 end
+
+function M.rmbundle (dir)
+  for f in fs.files(dir) do fs.rm(f) end
+  fs.rmdirs(dir)
+end
 
 function M.merged (...)
   local out = {}
@@ -155,6 +162,10 @@ local function fmt_scales (sc)
 end
 
 function M.make_ridge_log (stopwatch, metric_fmt)
+  -- accumulate every trial's CV score so [Ridge Done] can report the plateau width:
+  -- how many configs are CV-indistinguishable from the winner (selection is a draw from
+  -- that plateau, so a pin's last decimals are noise, not signal).
+  local scores = {}
   return function (ev)
     if ev.event == "done" then
       local p = ev.params or {}
@@ -163,6 +174,7 @@ function M.make_ridge_log (stopwatch, metric_fmt)
       local kdesc = format_kernel(p)
       local solve = ev.solve and str.format(" solve=%s", ev.solve) or ""
       local sc = ev.score and str.format(" score=%.6f", ev.score) or ""
+      local fsd = ev.fold_std and str.format(" fold_std=%.6f", ev.fold_std) or ""
       local scl = fmt_scales(p.scales)
       local exf = fmt_exponent(p.exponent)
       local timing = ""
@@ -170,8 +182,21 @@ function M.make_ridge_log (stopwatch, metric_fmt)
         local d, dd = stopwatch()
         timing = str.format(" (%.1fs +%.1fs)", d, dd)
       end
-      str.printf("[Ridge Done]%s%s%s%s%s%s lambda=%.8g%s%s\n",
-        emb, md, kdesc, scl, exf, solve, p.lambda or 0, sc, timing)
+      str.printf("[Ridge Done]%s%s%s%s%s%s lambda=%.8g%s%s%s\n",
+        emb, md, kdesc, scl, exf, solve, p.lambda or 0, sc, fsd, timing)
+      if #scores > 1 then
+        table.sort(scores, function (a, b) return a > b end)
+        local n = #scores
+        local best = scores[1]
+        local band = best - scores[math.min(32, n)]
+        local w1, w5 = 0, 0
+        for i = 1, n do
+          if scores[i] >= best - 0.001 then w1 = w1 + 1 end
+          if scores[i] >= best - 0.005 then w5 = w5 + 1 end
+        end
+        str.printf("[Plateau] trials=%d best=%.6f band32=%.6f within1e-3=%d(%.0f%%) within5e-3=%d\n",
+          n, best, band, w1, 100 * w1 / n, w5)
+      end
       return
     end
     if ev.event == "profile" then
@@ -202,6 +227,7 @@ function M.make_ridge_log (stopwatch, metric_fmt)
     local p = ev.params or {}
     local m = ev.metrics or {}
     local score = ev.score or 0
+    if ev.event == "trial" and not m.failed then scores[#scores + 1] = score end
     local best = (ev.best and ev.best ~= -math.huge)
       and str.format(" (best=%.6f%s)", ev.best, ev.is_new_best and " ++" or "") or ""
     local md = metric_fmt and metric_fmt(m) or M.fmt_metrics(m)
@@ -222,6 +248,14 @@ function M.make_ridge_log (stopwatch, metric_fmt)
   end
 end
 
+-- Buffer factory the tokenizer leaf calls to materialize its output CSR (off/toks/vals). The
+-- mid layer owns the RAM-vs-mmap choice: with a scratch base -> mmap_create to disk (RAM-lean),
+-- else the leaf plain-creates in RAM. Keeps the C leaf buffer-pure (it never mmaps a path).
+local TOK_VEC = { off = ivec, toks = svec, vals = fvec }
+local function mmap_alloc (base)
+  return function (kind, n) return TOK_VEC[kind].mmap_create(base .. "." .. kind, n) end
+end
+
 function M.tokenize_blocks (specs, texts, o)
   o = o or {}
   local tokenizer = require("santoku.learn.tokenizer")
@@ -239,8 +273,9 @@ function M.tokenize_blocks (specs, texts, o)
   for i = 1, #specs do
     local tk = o.tokens
     if type(tk) == "table" then tk = tk[i] end
-    local targs = { texts = texts, focus = o.focus, tokens = tk,
-      out_path = o.scratch and (o.scratch .. "." .. i) or nil }
+    -- ivec.mmap_create is nil on WASM (no mmap) -> alloc stays nil -> RAM everywhere
+    local alloc = (o.scratch and ivec.mmap_create) and mmap_alloc(o.scratch .. "." .. i) or nil
+    local targs = { texts = texts, focus = o.focus, tokens = tk, alloc = alloc }
     local csr = grow and toks[i]:fit(targs) or toks[i]:tokenize(targs)
     local go = specs[i].regions and toks[i]:group_offsets() or nil
     X[i] = go and { x = csr, group_offsets = go } or csr
@@ -449,36 +484,61 @@ function M.predict_tiled (o)
   local mtx = require("santoku.mtx")
   local n = o.n
   local tile = o.tile or 4096
-  local out = mtx.create({ n_rows = 1, n_cols = 1, type = "f32" })
-  local pred, scores, sbuf
-  if o.scores then scores = fvec.create(n * o.n_labels) end
-  for base = 0, n - 1, tile do
-    local bs = math.min(tile, n - base)
-    local idx = ivec.create(bs)
-    for i = 0, bs - 1 do idx:set(i, base + i) end
-    local codes
-    if o.blocks then
-      local ext = {}
-      for bi = 1, #o.blocks do
-        local b = o.blocks[bi]
-        if type(b) == "table" then ext[bi] = { x = b.x:rows(idx), group_offsets = b.group_offsets }
-        else ext[bi] = b:rows(idx) end
+  local nl = o.n_labels
+  -- single-model tiled prediction. deploy = encode fn, ridge = ridge.
+  local function predict_one (deploy, ridge, want_label, want_scores)
+    local out = mtx.create({ n_rows = 1, n_cols = 1, type = "f32" })
+    local pred, scores, sbuf
+    if want_scores then scores = fvec.create(n * nl) end
+    for base = 0, n - 1, tile do
+      local bs = math.min(tile, n - base)
+      local idx = ivec.create(bs)
+      for i = 0, bs - 1 do idx:set(i, base + i) end
+      local codes
+      if o.blocks then
+        local ext = {}
+        for bi = 1, #o.blocks do
+          local b = o.blocks[bi]
+          if type(b) == "table" then ext[bi] = { x = b.x:rows(idx), group_offsets = b.group_offsets }
+          else ext[bi] = b:rows(idx) end
+        end
+        codes = deploy(ext, out)
+      else
+        codes = deploy(o.x:rows(idx), out)
       end
-      codes = o.deploy(ext, out)
-    else
-      codes = o.deploy(o.x:rows(idx), out)
+      if want_label then
+        local p = ridge:label(codes, o.k)
+        if pred then pred:append(p) else pred = p end
+      end
+      if want_scores then
+        sbuf = ridge:regress(codes, sbuf)
+        scores:copy(sbuf, 0, bs * nl, base * nl)
+      end
+      collectgarbage("collect")
     end
-    if o.k then
-      local p = o.ridge:label(codes, o.k)
-      if pred then pred:append(p) else pred = p end
-    end
-    if scores then
-      sbuf = o.ridge:regress(codes, sbuf)
-      scores:copy(sbuf, 0, bs * o.n_labels, base * o.n_labels)
-    end
-    collectgarbage("collect")
+    return pred, scores
   end
-  return pred, scores
+  -- seed-ensemble path: E.build(s) -> (deploy, ridge) for base s; predict scores over the
+  -- full test, average across K bases, then top-k the average for the label heads. Models
+  -- are built-predicted-discarded one at a time (peak = 1 model + accumulator + one score
+  -- matrix). E is passed as o.ridge (o.ridge.is_ensemble) so specs stay transparent.
+  local E = (o.ridge and type(o.ridge) == "table" and o.ridge.is_ensemble) and o.ridge or o.ensemble
+  if E then
+    nl = nl or E.n_labels -- label heads pass only k; E carries n_labels from krr args
+    local S, topk_ridge
+    for s = 0, E.K - 1 do
+      local deploy, ridge = E.build(s)
+      topk_ridge = ridge
+      local _, sc = predict_one(deploy, ridge, false, true)
+      if not S then S = sc else S:addv(sc) end
+      E.release(s)
+    end
+    S:scale(1.0 / E.K)
+    local pred
+    if o.k then pred = topk_ridge:topk(S, n, o.k) end
+    return pred, (o.scores and S or nil)
+  end
+  return predict_one(o.deploy, o.ridge, o.k ~= nil, o.scores ~= nil)
 end
 
 local function slice_targets (t, idx)

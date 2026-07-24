@@ -33,16 +33,6 @@ static inline tk_ann_flat_t *tk_ann_flat_peek (lua_State *L, int i)
   return (tk_ann_flat_t *) luaL_checkudata(L, i, TK_ANN_MT);
 }
 
-static inline char *tk_ann_sidecar_path (lua_State *L, const char *path, const char *suffix)
-{
-  size_t pl = strlen(path), sl = strlen(suffix);
-  char *buf = tk_malloc(L, pl + sl + 1);
-  memcpy(buf, path, pl);
-  memcpy(buf + pl, suffix, sl);
-  buf[pl + sl] = 0;
-  return buf;
-}
-
 static inline void tk_ann_sign_pack (
   const float *codes, uint64_t n, uint64_t n_dims, uint64_t features,
   char *bits, size_t bpv
@@ -354,19 +344,25 @@ static inline int tk_ann_flat_nbr_lua (lua_State *L)
   return 1;
 }
 
-// Writes a small manifest to `path` plus three raw, mmap-compatible sidecars:
-// <path>.sids (int64, m*N), <path>.buckets (int64, m*(TK_ANN_BUCKETS+1)),
-// <path>.bits (bytes, N*bytes_per_vec). The rerank codes are external and are
-// NOT written here (they are passed back in at load, like ridge's W).
+// Manifest at `path` (dims + a per-member "external" flag). Each big member (bits/sids/buckets)
+// is EMBEDDED inline here if it is a RAM vec, or left in its own caller-owned mmap file (flag =
+// external, msync only) if it was mmap-backed -- exactly like ridge's W. Rerank codes are always
+// external (passed back at load). No ann-written sidecars: the mid layer owns any mmap paths.
 static inline int tk_ann_persist_lua (lua_State *L)
 {
   tk_ann_flat_t *flat = tk_ann_flat_peek(L, 1);
   const char *path = luaL_checkstring(L, 2);
   uint64_t stride = (uint64_t)TK_ANN_BUCKETS + 1;
+  uint64_t sids_bytes = flat->m * flat->N * sizeof(int64_t);
+  uint64_t buckets_bytes = flat->m * stride * sizeof(int64_t);
+  uint64_t bits_bytes = flat->N * flat->bytes_per_vec;
+
+  lua_getfenv(L, 1);
+  int eph = lua_gettop(L);
 
   FILE *fh = tk_lua_fopen(L, path, "w");
   tk_lua_fwrite(L, "TKan", 1, 4, fh);
-  uint8_t version = 1;
+  uint8_t version = 2;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   int64_t N = (int64_t) flat->N, m = (int64_t) flat->m;
   int64_t features = (int64_t) flat->features, bpv = (int64_t) flat->bytes_per_vec;
@@ -374,25 +370,38 @@ static inline int tk_ann_persist_lua (lua_State *L)
   tk_lua_fwrite(L, &m, sizeof(int64_t), 1, fh);
   tk_lua_fwrite(L, &features, sizeof(int64_t), 1, fh);
   tk_lua_fwrite(L, &bpv, sizeof(int64_t), 1, fh);
+
+  lua_getfield(L, eph, "data");
+  tk_cvec_t *bv = tk_cvec_peek(L, -1, "data");
+  uint8_t ext = (bv->lua_managed == 2) ? 1 : 0;
+  tk_lua_fwrite(L, &ext, sizeof(uint8_t), 1, fh);
+#if !defined(__EMSCRIPTEN__)
+  if (ext) msync(bv->a, bits_bytes, MS_SYNC); else
+#endif
+  tk_lua_fwrite(L, bv->a, 1, bits_bytes, fh);
+  lua_pop(L, 1);
+
+  lua_getfield(L, eph, "sids");
+  tk_ivec_t *sv = tk_ivec_peek(L, -1, "sids");
+  ext = (sv->lua_managed == 2) ? 1 : 0;
+  tk_lua_fwrite(L, &ext, sizeof(uint8_t), 1, fh);
+#if !defined(__EMSCRIPTEN__)
+  if (ext) msync(sv->a, sids_bytes, MS_SYNC); else
+#endif
+  tk_lua_fwrite(L, (char *) sv->a, 1, sids_bytes, fh);
+  lua_pop(L, 1);
+
+  lua_getfield(L, eph, "buckets");
+  tk_ivec_t *kv = tk_ivec_peek(L, -1, "buckets");
+  ext = (kv->lua_managed == 2) ? 1 : 0;
+  tk_lua_fwrite(L, &ext, sizeof(uint8_t), 1, fh);
+#if !defined(__EMSCRIPTEN__)
+  if (ext) msync(kv->a, buckets_bytes, MS_SYNC); else
+#endif
+  tk_lua_fwrite(L, (char *) kv->a, 1, buckets_bytes, fh);
+  lua_pop(L, 1);
+
   tk_lua_fclose(L, fh);
-
-  char *ps = tk_ann_sidecar_path(L, path, ".sids");
-  FILE *f1 = tk_lua_fopen(L, ps, "w");
-  tk_lua_fwrite(L, (char *) flat->sorted_sids, sizeof(int64_t), flat->m * flat->N, f1);
-  tk_lua_fclose(L, f1);
-  free(ps);
-
-  char *pb = tk_ann_sidecar_path(L, path, ".buckets");
-  FILE *f2 = tk_lua_fopen(L, pb, "w");
-  tk_lua_fwrite(L, (char *) flat->bucket_off, sizeof(int64_t), flat->m * stride, f2);
-  tk_lua_fclose(L, f2);
-  free(pb);
-
-  char *pd = tk_ann_sidecar_path(L, path, ".bits");
-  FILE *f3 = tk_lua_fopen(L, pd, "w");
-  tk_lua_fwrite(L, (char *) flat->data, 1, flat->N * flat->bytes_per_vec, f3);
-  tk_lua_fclose(L, f3);
-  free(pd);
   return 0;
 }
 
@@ -406,9 +415,9 @@ static luaL_Reg tk_ann_flat_mt_fns[] =
 
 // ann.load(path, [codes_mtx], [sids], [buckets], [bits])
 //   codes_mtx: external float codes for exact-dot rerank (nil => Hamming-only)
-//   sids/buckets/bits: optional pre-loaded index arrays (e.g. ivec.mmap_open(path..".sids"));
-//     any left nil is read from its sidecar file into RAM. mmap is the CALLER's choice --
-//     ann never mmaps internally (same convention as ridge's external W).
+//   sids/buckets/bits: for members persist wrote as EXTERNAL, pass the caller-mmap_open'd vec
+//     here (required); for members it EMBEDDED, leave nil (read from the main file into RAM).
+//     ann never mmaps a path itself -- the mid layer owns that (same convention as ridge's W).
 static inline int tk_ann_load_lua (lua_State *L)
 {
   const char *path = luaL_checkstring(L, 1);
@@ -426,7 +435,7 @@ static inline int tk_ann_load_lua (lua_State *L)
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 1) {
+  if (version != 2) {
     tk_lua_fclose(L, fh);
     return luaL_error(L, "unsupported ann version %d", (int) version);
   }
@@ -435,7 +444,7 @@ static inline int tk_ann_load_lua (lua_State *L)
   tk_lua_fread(L, &m, sizeof(int64_t), 1, fh);
   tk_lua_fread(L, &features, sizeof(int64_t), 1, fh);
   tk_lua_fread(L, &bpv, sizeof(int64_t), 1, fh);
-  tk_lua_fclose(L, fh);
+  // embedded members (if any) follow inline -- keep fh open until they're read.
 
   uint64_t stride = (uint64_t)TK_ANN_BUCKETS + 1;
   uint64_t sids_n = (uint64_t)(m * N);
@@ -454,38 +463,46 @@ static inline int tk_ann_load_lua (lua_State *L)
   flat->codes = NULL;
   flat->n_dims = 0;
 
-  // Index arrays: use a caller-provided vec (arg 3/4/5, possibly ivec.mmap_open'd) if given,
-  // else read the sidecar file into RAM. ann never mmaps internally -- the caller owns that.
-  tk_ivec_t *sids, *buckets;
+  // Per member, read the "external" flag persist wrote: external => data lives in the caller's
+  // mmap file, which must be passed in (arg 5/3/4); embedded => read the bytes from this file
+  // into a RAM vec (and no buffer may be passed). File order matches persist: bits, sids, buckets.
+  int bits_idx, sids_idx, buckets_idx;
+  uint8_t ext;
+
+  tk_lua_fread(L, &ext, sizeof(uint8_t), 1, fh);
   tk_cvec_t *bits;
-  int sids_idx, buckets_idx, bits_idx;
-  if (!lua_isnoneornil(L, 3)) {
-    sids = tk_ivec_peek(L, 3, "sids"); sids_idx = 3;
-  } else {
-    sids = tk_ivec_create(L, sids_n); sids->n = sids_n; sids_idx = lua_gettop(L);
-    char *ps = tk_ann_sidecar_path(L, path, ".sids");
-    FILE *f1 = tk_lua_fopen(L, ps, "r");
-    tk_lua_fread(L, sids->a, sizeof(int64_t), sids_n, f1);
-    tk_lua_fclose(L, f1); free(ps);
-  }
-  if (!lua_isnoneornil(L, 4)) {
-    buckets = tk_ivec_peek(L, 4, "buckets"); buckets_idx = 4;
-  } else {
-    buckets = tk_ivec_create(L, buckets_n); buckets->n = buckets_n; buckets_idx = lua_gettop(L);
-    char *pb = tk_ann_sidecar_path(L, path, ".buckets");
-    FILE *f2 = tk_lua_fopen(L, pb, "r");
-    tk_lua_fread(L, buckets->a, sizeof(int64_t), buckets_n, f2);
-    tk_lua_fclose(L, f2); free(pb);
-  }
-  if (!lua_isnoneornil(L, 5)) {
+  if (ext) {
+    if (lua_isnoneornil(L, 5)) { tk_lua_fclose(L, fh); return luaL_error(L, "ann load: bits is external; pass its mmap as arg 5"); }
     bits = tk_cvec_peek(L, 5, "bits"); bits_idx = 5;
   } else {
+    if (!lua_isnoneornil(L, 5)) { tk_lua_fclose(L, fh); return luaL_error(L, "ann load: bits is embedded; do not pass arg 5"); }
     bits = tk_cvec_create(L, bits_n); bits->n = bits_n; bits_idx = lua_gettop(L);
-    char *pd = tk_ann_sidecar_path(L, path, ".bits");
-    FILE *f3 = tk_lua_fopen(L, pd, "r");
-    tk_lua_fread(L, bits->a, 1, bits_n, f3);
-    tk_lua_fclose(L, f3); free(pd);
+    tk_lua_fread(L, bits->a, 1, bits_n, fh);
   }
+
+  tk_lua_fread(L, &ext, sizeof(uint8_t), 1, fh);
+  tk_ivec_t *sids;
+  if (ext) {
+    if (lua_isnoneornil(L, 3)) { tk_lua_fclose(L, fh); return luaL_error(L, "ann load: sids is external; pass its mmap as arg 3"); }
+    sids = tk_ivec_peek(L, 3, "sids"); sids_idx = 3;
+  } else {
+    if (!lua_isnoneornil(L, 3)) { tk_lua_fclose(L, fh); return luaL_error(L, "ann load: sids is embedded; do not pass arg 3"); }
+    sids = tk_ivec_create(L, sids_n); sids->n = sids_n; sids_idx = lua_gettop(L);
+    tk_lua_fread(L, sids->a, sizeof(int64_t), sids_n, fh);
+  }
+
+  tk_lua_fread(L, &ext, sizeof(uint8_t), 1, fh);
+  tk_ivec_t *buckets;
+  if (ext) {
+    if (lua_isnoneornil(L, 4)) { tk_lua_fclose(L, fh); return luaL_error(L, "ann load: buckets is external; pass its mmap as arg 4"); }
+    buckets = tk_ivec_peek(L, 4, "buckets"); buckets_idx = 4;
+  } else {
+    if (!lua_isnoneornil(L, 4)) { tk_lua_fclose(L, fh); return luaL_error(L, "ann load: buckets is embedded; do not pass arg 4"); }
+    buckets = tk_ivec_create(L, buckets_n); buckets->n = buckets_n; buckets_idx = lua_gettop(L);
+    tk_lua_fread(L, buckets->a, sizeof(int64_t), buckets_n, fh);
+  }
+  tk_lua_fclose(L, fh);
+
   if (sids->n != sids_n || buckets->n != buckets_n || bits->n != bits_n)
     return luaL_error(L, "ann load: index array size mismatch (corrupt, wrong dims, or wrong buffer)");
   flat->sorted_sids = sids->a;

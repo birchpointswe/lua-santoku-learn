@@ -78,15 +78,10 @@ test("ann spectral idf retrieval", function ()
   -- sanity floor: cosine-aligned codes recover well above random (random recall@10 ~ 0.01)
   assert(r_rr > 0.3)
 
-  -- persist -> reload reproduces the index exactly (raw mmap-compatible sidecars)
+  -- (A) RAM-built index: persist EMBEDS all three members in the single .ann file; reload with
+  -- no member buffers reads them back. External rerank codes are still passed in.
   local tmp = os.tmpname() .. ".ann"
   idx:persist(tmp)
-  -- caller-mmapped sidecars + external rerank codes: identical to the in-memory rerank index
-  local idx_m = ann.load(tmp, C,
-    ivec.mmap_open(tmp .. ".sids"), ivec.mmap_open(tmp .. ".buckets"), cvec.mmap_open(tmp .. ".bits"))
-  local P_m = idx_m:neighborhoods_by_vecs(C, k, radius)
-  assert(recall(P_m, P_rr, nq) == 1 and recall(P_rr, P_m, nq) == 1)
-  -- no index buffers passed -> ann reads the sidecars into RAM: same result
   local idx_r = ann.load(tmp, C)
   local P_r = idx_r:neighborhoods_by_vecs(C, k, radius)
   assert(recall(P_r, P_rr, nq) == 1 and recall(P_rr, P_r, nq) == 1)
@@ -94,6 +89,25 @@ test("ann spectral idf retrieval", function ()
   local idx_h = ann.load(tmp)
   local P_h = idx_h:neighborhoods_by_vecs(C, k, radius)
   assert(recall(P_h, P_bin, nq) == 1 and recall(P_bin, P_h, nq) == 1)
-  for _, sfx in ipairs({ "", ".sids", ".buckets", ".bits" }) do os.remove(tmp .. sfx) end
+
+  -- (B) mmap-built index: the mid layer sizes (ann.sizes) + mmap_creates the three members and
+  -- passes them to create (disk-backed build == RAM build); persist msyncs + flags them external;
+  -- reload passes the caller-mmap_open'd vecs back in. All must equal the RAM rerank index.
+  local nb, ns, nk = ann.sizes(C)
+  local base = os.tmpname()
+  local idx_mm = ann.create({ codes = C, rerank = true,
+    bits = cvec.mmap_create(base .. ".bits", nb),
+    sids = ivec.mmap_create(base .. ".sids", ns),
+    buckets = ivec.mmap_create(base .. ".buckets", nk) })
+  assert(recall(idx_mm:neighborhoods_by_vecs(C, k, radius), P_rr, nq) == 1)
+  local tmp2 = os.tmpname() .. ".ann"
+  idx_mm:persist(tmp2)
+  local idx_m = ann.load(tmp2, C,
+    ivec.mmap_open(base .. ".sids"), ivec.mmap_open(base .. ".buckets"), cvec.mmap_open(base .. ".bits"))
+  local P_m = idx_m:neighborhoods_by_vecs(C, k, radius)
+  assert(recall(P_m, P_rr, nq) == 1 and recall(P_rr, P_m, nq) == 1)
+
+  os.remove(tmp); os.remove(tmp2)
+  for _, sfx in ipairs({ ".bits", ".sids", ".buckets" }) do os.remove(base .. sfx) end
 
 end)

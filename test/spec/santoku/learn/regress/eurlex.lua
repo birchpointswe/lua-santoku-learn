@@ -7,8 +7,10 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
--- oracle: test miF1=0.730021 (miP=0.775239 miR=0.689788)
--- best: cosine lambda=1.01227e-07 decode_offset=0.35471344 exp={3.0130623}
+-- oracle: test miF1=0.727846 (miP=0.718533 miR=0.737404) (cold mint config, 0/0-verified seed=5)
+-- best: cosine lambda=1.6840634e-06 decode_offset=0.29009448 exp={1.9500131}
+-- footnote: warm champion tested miF1=0.729856 (+0.0020, not cold-reachable)
+-- seed_ensemble: K=1 miF1=0.727846, K=8 miF1=0.730649
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
@@ -16,13 +18,14 @@ local cfg = {
     { ngram_min = 1, ngram_max = 5, mode = "flat" },
   },
   relevance = { "bns" },
-  exponent = { def = { 3.0130623 } },
-  decode_offset = { def = 0.35471344 },
+  exponent = { def = { 1.9500131 } },
+  decode_offset = { def = 0.29009448 },
   n_landmarks = 1024 * 8,
   kernel = { "cosine" },
-  lambda = { def = 1.01227e-07 },
+  lambda = { def = 1.6840634e-06 },
   k = 256,
   search_trials = 0,
+  seed_ensemble = 1,
   scratch_path = "test/res/eurlex-scratch",
   folds = 5,
 }
@@ -73,8 +76,5 @@ test("eurlex CV", function ()
   local _, mb = b.decider:score({ pred = Pb, expected = test_set.labels, n_samples = test_set.n })
   str.printf("[Bundle] reload test %s (deploy %s)\n", util.fmt_metrics(mb), dep)
   assert(util.fmt_metrics(mb) == dep, "reloaded bundle metrics diverge from deploy")
-  local files = { "encoder.bin", "ridge.bin", "decider.bin", "manifest.lua" }
-  for i = 1, #cfg.blocks do files[#files + 1] = "tokenizer_" .. i .. ".bin" end
-  for _, f in ipairs(files) do os.remove(bdir .. "/" .. f) end
-  os.remove(bdir)
+  util.rmbundle(bdir)
 end)

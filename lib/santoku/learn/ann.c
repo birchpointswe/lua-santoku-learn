@@ -21,7 +21,16 @@ static inline int tk_ann_create_lua (lua_State *L)
   if (m == 0) m = 1;
   uint64_t stride = (uint64_t)TK_ANN_BUCKETS + 1;
 
-  tk_cvec_t *bits = tk_cvec_create(L, N * bpv);
+  // Index buffers: use a caller-provided (mmap_create'd by the mid layer, or RAM) vec of the
+  // known size if given, else allocate RAM here. Filled in place -- disk-backed when mmapped.
+  lua_getfield(L, 1, "bits");
+  tk_cvec_t *bits;
+  if (lua_isnil(L, -1)) {
+    lua_pop(L, 1); bits = tk_cvec_create(L, N * bpv);
+  } else {
+    bits = tk_cvec_peek(L, -1, "bits");
+    if (bits->m < N * bpv) return luaL_error(L, "ann create: bits buffer too small");
+  }
   bits->n = N * bpv;
   int bits_idx = lua_gettop(L);
   tk_ann_sign_pack(codes_a, N, n_dims, features, bits->a, bpv);
@@ -34,10 +43,24 @@ static inline int tk_ann_create_lua (lua_State *L)
   flat->codes = NULL;
   flat->n_dims = 0;
 
-  tk_ivec_t *sids = tk_ivec_create(L, m * N);
+  lua_getfield(L, 1, "sids");
+  tk_ivec_t *sids;
+  if (lua_isnil(L, -1)) {
+    lua_pop(L, 1); sids = tk_ivec_create(L, m * N);
+  } else {
+    sids = tk_ivec_peek(L, -1, "sids");
+    if (sids->m < m * N) return luaL_error(L, "ann create: sids buffer too small");
+  }
   sids->n = m * N;
   int sids_idx = lua_gettop(L);
-  tk_ivec_t *buckets = tk_ivec_create(L, m * stride);
+  lua_getfield(L, 1, "buckets");
+  tk_ivec_t *buckets;
+  if (lua_isnil(L, -1)) {
+    lua_pop(L, 1); buckets = tk_ivec_create(L, m * stride);
+  } else {
+    buckets = tk_ivec_peek(L, -1, "buckets");
+    if (buckets->m < m * stride) return luaL_error(L, "ann create: buckets buffer too small");
+  }
   buckets->n = m * stride;
   int buckets_idx = lua_gettop(L);
 
@@ -65,9 +88,26 @@ static inline int tk_ann_create_lua (lua_State *L)
   return 1;
 }
 
+// ann.sizes(codes) -> n_bits, n_sids, n_buckets  (element counts for the three index vecs, so
+// the mid layer can mmap_create them at the right size to pass into ann.create).
+static inline int tk_ann_sizes_lua (lua_State *L)
+{
+  tk_mtx_t *M = tk_mtx_peek(L, 1, "codes");
+  uint64_t N = M->n_rows, features = M->n_cols;
+  size_t bpv = TK_CVEC_BITS_BYTES(features);
+  uint64_t m = (features + TK_ANN_SUBSTR_BITS - 1) / TK_ANN_SUBSTR_BITS;
+  if (m == 0) m = 1;
+  uint64_t stride = (uint64_t) TK_ANN_BUCKETS + 1;
+  lua_pushinteger(L, (lua_Integer) (N * bpv));
+  lua_pushinteger(L, (lua_Integer) (m * N));
+  lua_pushinteger(L, (lua_Integer) (m * stride));
+  return 3;
+}
+
 static luaL_Reg tk_ann_fns[] =
 {
   { "create", tk_ann_create_lua },
+  { "sizes", tk_ann_sizes_lua },
   { "load", tk_ann_load_lua },
   { NULL, NULL }
 };

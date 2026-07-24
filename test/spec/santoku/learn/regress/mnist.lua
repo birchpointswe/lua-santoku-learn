@@ -7,8 +7,9 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
--- oracle: test acc=0.982143 maF1=0.982017
--- best: matern nu=inf (def=3) gamma=2.91919 lambda=2.13137e-07 exp={0.278601}
+-- oracle: test acc=0.981214 maF1=0.981120 (cold mint 2048/8192/1200 seed=5)
+-- best: matern nu=inf (def=3) gamma=2.1044873 lambda=0.00040531156 exp={0.20658551}
+-- seed_ensemble: K=1 acc=0.981214, K=8 acc=0.982071
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
@@ -16,13 +17,14 @@ local cfg = {
   n_landmarks = 1024 * 8,
   kernel = { "matern" },
   nu = { def = 3 },
-  gamma = { def = 2.91919 },
-  lambda = { def = 2.13137e-07 },
+  gamma = { def = 2.1044873 },
+  lambda = { def = 0.00040531156 },
   relevance = { "auc" },
-  exponent = { def = { 0.278601 } },
+  exponent = { def = { 0.20658551 } },
   classes = 10,
   k = 1,
   search_trials = 0,
+  seed_ensemble = 1,
   scratch_path = "test/res/mnist-scratch",
   folds = 5,
 }
@@ -64,8 +66,5 @@ test("mnist CV", function ()
   local _, mb = b.decider:score({ scores = sb, n_samples = test_set.n, expected = test_set.labels })
   str.printf("[Bundle] reload test %s (deploy %s)\n", util.fmt_metrics(mb), dep)
   assert(util.fmt_metrics(mb) == dep, "reloaded bundle metrics diverge from deploy")
-  for _, f in ipairs({ "encoder.bin", "ridge.bin", "decider.bin", "manifest.lua" }) do
-    os.remove(bdir .. "/" .. f)
-  end
-  os.remove(bdir)
+  util.rmbundle(bdir)
 end)

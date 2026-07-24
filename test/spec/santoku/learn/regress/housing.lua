@@ -8,8 +8,9 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
--- oracle: test 1-nmae=0.8723
--- best: matern nu=1/2 (def=0) gamma=0.76712244 lambda=2.8855702e-05
+-- oracle: test 1-nmae=0.8710 (cold mint 2048/8192/1200 seed=5)
+-- best: matern nu=1/2 (def=0) gamma=0.94471917 lambda=0.00020409608
+-- seed_ensemble: K=1 test=0.8710, K=8 test=0.8748
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
@@ -17,10 +18,11 @@ local cfg = {
   n_landmarks = 1024 * 8,
   kernel = { "matern" },
   nu = { def = 0 },
-  gamma = { def = 0.76712244 },
-  lambda = { def = 2.8855702e-05 },
-  scales = { def = { 46.730698, 86.018174, 0.22594685, 0.18898657, 0.18423806, 0.032513615, 0.0093888282, 0.76511539, 135.39024 } },
+  gamma = { def = 0.94471917 },
+  lambda = { def = 0.00020409608 },
+  scales = { def = { 38.400037, 55.697265, 0.25857085, 0.20780899, 0.044250118, 0.12342444, 0.017418369, 0.72738569, 125.74848 } },
   search_trials = 0,
+  seed_ensemble = 1,
   scratch_path = "test/res/housing-scratch",
   folds = 5,
 }
@@ -73,8 +75,5 @@ test("housing CV", function ()
   local tsb = eval.regress_accuracy(sb, test_set.targets)
   str.printf("[Bundle] reload test=%.4f (deploy %s)\n", 1 - tsb.nmae, dep)
   assert(str.format("%.4f", 1 - tsb.nmae) == dep, "reloaded bundle metric diverges from deploy")
-  for _, f in ipairs({ "encoder.bin", "ridge.bin", "manifest.lua" }) do
-    os.remove(bdir .. "/" .. f)
-  end
-  os.remove(bdir)
+  util.rmbundle(bdir)
 end)

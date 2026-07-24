@@ -2,7 +2,8 @@ require("santoku.error")
 local tokenizer = require("santoku.learn.tokenizer")
 local re = require("santoku.re")
 local ivec = require("santoku.ivec")
-require("santoku.fvec")  -- installs fvec metatable for tokenize_raw's returned values vec
+local fvec = require("santoku.fvec")  -- fvec metatable for tokenize_raw + the alloc closure
+local svec = require("santoku.svec")
 local spans = require("santoku.spans")
 local test = require("santoku.test")
 
@@ -101,20 +102,26 @@ test("tokenizer", function ()
     assert(X1:eq(X2))
   end)
 
-  test("out_path mmaps the CSR to disk, bit-identical to the RAM path", function ()
+  test("alloc callback mmaps the CSR to disk, bit-identical to the RAM path", function ()
     local T = word_tokens()
     local F = spans.create({ offsets = ivec.create({ 0, 1, 1, 1, 1, 1 }), s = ivec.create({ 0 }), e = ivec.create({ 8 }) })
     local function mk () return tokenizer.create({ ngram_min = 1, ngram_max = 3,
       mode = "words", terminals = true, focus = true }) end
-    -- fit path: fresh tokenizers assign the same vocab deterministically, so the
-    -- mmap-backed CSR (offsets/toks/vals to <out_path>.{off,toks,vals}) must equal RAM
+    -- the leaf calls alloc(kind, n); here the closure mmap_creates <base>.{off,toks,vals} to disk.
+    -- fresh tokenizers assign the same vocab deterministically, so it must equal the RAM path.
+    local V = { off = ivec, toks = svec, vals = fvec }
+    local function mk_alloc (b) return function (kind, n) return V[kind].mmap_create(b .. "." .. kind, n) end end
     local Xram = mk():fit({ texts = texts, focus = F, tokens = T })
     local tmp = os.tmpname()
     local base, base2 = tmp .. ".a", tmp .. ".b"
     local tkm = mk()
-    assert(tkm:fit({ texts = texts, focus = F, tokens = T, out_path = base }):eq(Xram))
+    assert(tkm:fit({ texts = texts, focus = F, tokens = T, alloc = mk_alloc(base) }):eq(Xram))
+    -- prove the alloc closure actually fired (not a stale-binary RAM fallback): sidecars exist
+    for _, sfx in ipairs({ ".off", ".toks", ".vals" }) do
+      local f = io.open(base .. sfx, "r"); assert(f, "alloc not invoked: " .. base .. sfx .. " missing"); f:close()
+    end
     -- frozen tokenize path mmaps identically too
-    assert(tkm:tokenize({ texts = texts, focus = F, tokens = T, out_path = base2 })
+    assert(tkm:tokenize({ texts = texts, focus = F, tokens = T, alloc = mk_alloc(base2) })
       :eq(tkm:tokenize({ texts = texts, focus = F, tokens = T })))
     os.remove(tmp)
     for _, b in ipairs({ base, base2 }) do

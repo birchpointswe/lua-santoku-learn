@@ -15,8 +15,10 @@ io.stdout:setvbuf("line")
 
 local N_TYPES = 4
 
--- oracle: test spF1=0.969541 (P=0.969713 R=0.969370)
--- best: matern nu=5/2 (def=2) gamma=0.033925952 lambda=3.7829147e-05 decode_offset=-0.49673414
+-- oracle: test spF1=0.966330 (P=0.967187 R=0.965475) (cold mint config, 0/0-verified seed=5)
+-- best: matern nu=1/2 (def=0) gamma=0.20602912 lambda=1.6712232e-05 decode_offset=-0.56368208
+-- footnote: warm champion tested spF1=0.968011 (+0.0008, upper-tail, not cold-reachable)
+-- seed_ensemble: K=1 spF1=0.966330, K=8 spF1=0.966955
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
@@ -29,14 +31,15 @@ local cfg = {
   emb = { n_landmarks = 1024 * 8 },
   head = {
     kernel = { "matern" },
-    nu = { def = 2 },
-    gamma = { def = 0.033925952 },
-    lambda = { def = 3.7829147e-05 },
+    nu = { def = 0 },
+    gamma = { def = 0.20602912 },
+    lambda = { def = 1.6712232e-05 },
     relevance = { "bns", "bns", "auc" },
-    scales = { def = { 0.16700725, 750.25667, 0.022722455, 285.64255, 0.012953823, 0.0075025667, 0.0075025667, 0.058747138, 246.25134, 0.19469259, 598.74823 } },
-    exponent = { def = { 1.3153303, 1.7915035, 3.0779086, 0.84781049, 6.1936501, 7.0719099, 7.8323064, 0.51783619, 2.3249964, 0.21921147, 7.9105983 } },
-    decode_offset = { def = -0.49673414 },
+    scales = { def = { 0.17283993, 58.126236, 2.557732, 0.26508607, 0.028053508, 0.72071547, 0.14748457, 0.92141463, 5.4495301, 0.017593886, 557.27326 } },
+    exponent = { def = { 7.92257, 3.678052, 1.3781166, 6.7906309, 4.8926748, 6.2641423, 2.3517682, 4.7486136, 6.459379, 4.0679645, 2.3755379 } },
+    decode_offset = { def = -0.56368208 },
     search_trials = 0,
+    seed_ensemble = 1,
     scratch_path = "test/res/conll-gaz-scratch",
     folds = 5,
   },
@@ -135,11 +138,7 @@ test("conll-gaz CV", function ()
   local _, mb = b.decider:score({ scores = sb, n_samples = test_set.n, cand = Cte, gold = Gte })
   str.printf("[Bundle] reload test %s (deploy %s)\n", util.fmt_metrics(mb), dep)
   assert(util.fmt_metrics(mb) == dep, "reloaded bundle metrics diverge from deploy")
-  for _, f in ipairs({ "tokenizer_1.bin", "tokenizer_2.bin", "encoder.bin", "ridge.bin",
-      "decider.bin", "gaz.bin", "gaz_rms.bin", "w.mmap", "chol.mmap", "manifest.lua" }) do
-    os.remove(bdir .. "/" .. f)
-  end
-  os.remove(bdir)
+  util.rmbundle(bdir)
   for _, base in ipairs({ "test/res/conll-gaz-blocks", "test/res/conll-gaz-blocks.te" }) do
     for i = 1, n_sparse do
       for _, sfx in ipairs({ ".off", ".toks", ".vals" }) do os.remove(base .. "." .. i .. sfx) end

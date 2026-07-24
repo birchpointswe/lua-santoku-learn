@@ -197,6 +197,82 @@ static inline int tk_ridge_transform_lua (lua_State *L) {
   return 1;
 }
 
+/* top-k over a PRE-COMPUTED scores matrix (n x n_labels, row-major), returning a
+** k-per-row CSR. Same heap top-k as tk_ridge_label_core but on given scores rather than
+** codes -- used by the seed-ensemble deploy, which averages per-model regress scores and
+** then needs labels from that average. */
+static inline int tk_ridge_topk_lua (lua_State *L) {
+  tk_ridge_t *r = tk_ridge_peek(L, 1);
+  tk_fvec_t *S = tk_fvec_peek(L, 2, "scores");
+  int64_t n = (int64_t) luaL_checkinteger(L, 3);
+  int64_t k = (int64_t) luaL_checkinteger(L, 4);
+  int64_t nl = r->n_labels;
+  if (k > nl) k = nl;
+  if (k < 1) k = 1;
+  if ((int64_t) S->n < n * nl)
+    return luaL_error(L, "ridge topk: scores buffer too small");
+  tk_csr_t *out = NULL; int out_idx = 0;
+  if (lua_gettop(L) >= 5 && !lua_isnil(L, 5)) {
+    out = tk_csr_peek(L, 5, "out");
+    out_idx = 5;
+    if (out->ntag != TK_TAG_I64 || out->tag != TK_TAG_F32)
+      return luaL_error(L, "ridge topk: out buffer must be an i64/f32 csr");
+  }
+  tk_ivec_t *offsets, *labels;
+  tk_fvec_t *scores_out;
+  int offsets_idx = 0, labels_idx = 0, scores_out_idx = 0;
+  if (out) {
+    offsets = out->offsets;
+    tk_ivec_ensure(offsets, (uint64_t)(n + 1)); offsets->n = (uint64_t)(n + 1);
+    labels = (tk_ivec_t *) out->neighbors;
+    tk_ivec_ensure(labels, (uint64_t)(n * k)); labels->n = (uint64_t)(n * k);
+    scores_out = (tk_fvec_t *) out->values;
+    tk_fvec_ensure(scores_out, (uint64_t)(n * k)); scores_out->n = (uint64_t)(n * k);
+    out->n_cols = (uint64_t) nl;
+  } else {
+    offsets = tk_ivec_create(L, (uint64_t)(n + 1)); offsets->n = (uint64_t)(n + 1);
+    offsets_idx = lua_gettop(L);
+    labels = tk_ivec_create(L, (uint64_t)(n * k)); labels->n = (uint64_t)(n * k);
+    labels_idx = lua_gettop(L);
+    scores_out = tk_fvec_create(L, (uint64_t)(n * k)); scores_out->n = (uint64_t)(n * k);
+    scores_out_idx = lua_gettop(L);
+  }
+  for (int64_t i = 0; i <= n; i++) offsets->a[i] = i * k;
+  int nt = omp_get_max_threads();
+  uint64_t heap_need = (uint64_t)nt * (uint64_t)k;
+  if (!r->heap_buf || r->heap_buf_size < heap_need) {
+    free(r->heap_buf);
+    r->heap_buf = (tk_rank_t *)malloc(heap_need * sizeof(tk_rank_t));
+    r->heap_buf_size = heap_need;
+  }
+  float *sc = S->a;
+  #pragma omp parallel
+  {
+    tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
+                       .a = r->heap_buf + (uint64_t)omp_get_thread_num() * (uint64_t)k };
+    #pragma omp for schedule(static)
+    for (int64_t i = 0; i < n; i++) {
+      float *row = sc + i * nl;
+      int64_t out_base = i * k;
+      heap.n = 0;
+      for (int64_t l = 0; l < nl; l++)
+        tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, (double)row[l]));
+      tk_rvec_desc(&heap, 0, heap.n);
+      for (int64_t j = 0; j < (int64_t)heap.n; j++) {
+        labels->a[out_base + j] = heap.a[j].i;
+        scores_out->a[out_base + j] = (float)heap.a[j].d;
+      }
+    }
+  }
+  if (out) {
+    lua_pushvalue(L, out_idx);
+  } else {
+    tk_csr_push(L, TK_TAG_F32, TK_TAG_I64, (uint64_t) nl,
+      offsets_idx, offsets, labels_idx, (void *) labels, scores_out_idx, scores_out);
+  }
+  return 1;
+}
+
 static inline int tk_ridge_shrink_lua (lua_State *L) {
   tk_ridge_t *r = tk_ridge_peek(L, 1);
   free(r->sbuf); r->sbuf = NULL; r->sbuf_size = 0;
@@ -208,6 +284,7 @@ static luaL_Reg tk_ridge_mt_fns[] = {
   { "label", tk_ridge_encode_lua },
   { "persist", tk_ridge_persist_lua },
   { "regress", tk_ridge_transform_lua },
+  { "topk", tk_ridge_topk_lua },
   { "shrink", tk_ridge_shrink_lua },
   { NULL, NULL }
 };

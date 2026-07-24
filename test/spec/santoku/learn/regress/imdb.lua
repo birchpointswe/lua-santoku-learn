@@ -7,8 +7,10 @@ local utc = require("santoku.utc")
 
 io.stdout:setvbuf("line")
 
--- oracle: test miF1=0.913670 (miP=0.895707 miR=0.932369)
--- best: cosine lambda=0.15053999 decode_offset=0.47083597
+-- oracle: test miF1=0.897999 (miP=0.886629 miR=0.909665) (cold mint 2048/8192/1200 seed=5)
+-- best: cosine lambda=0.025471643 decode_offset=0.49393576 scales={0.082008995,12.193784} exp={6.6175246,1.1081682}
+-- footnote: the 0.9127 config is achievable but CV-unselectable (gauge-blind); see project_selectability_gauge
+-- seed_ensemble: K=1 miF1=0.897999, K=8 miF1=0.903856
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
@@ -18,15 +20,16 @@ local cfg = {
     { ngram_min = 1, ngram_max = 3, mode = "words" },
   },
   relevance = { "bns", "bns" },
-  scales = { def = { 2.1061338, 0.47480364 } },
-  exponent = { def = { 2.3789142, 1.4690152 } },
-  decode_offset = { def = 0.47083597 },
+  scales = { def = { 0.082008995, 12.193784 } },
+  exponent = { def = { 6.6175246, 1.1081682 } },
+  decode_offset = { def = 0.49393576 },
   n_landmarks = 1024 * 8,
   kernel = { "cosine" },
-  lambda = { def = 0.15053999 },
+  lambda = { def = 0.025471643 },
   classes = 1,
   k = 1,
   search_trials = 0,
+  seed_ensemble = 1,
   scratch_path = "test/res/imdb-scratch",
   folds = 5,
 }
@@ -70,8 +73,5 @@ test("imdb CV", function ()
   local _, mb = b.decider:score({ pred = Pb, expected = test_set.labels, n_samples = test_set.n })
   str.printf("[Bundle] reload test %s (deploy %s)\n", util.fmt_metrics(mb), dep)
   assert(util.fmt_metrics(mb) == dep, "reloaded bundle metrics diverge from deploy")
-  local files = { "encoder.bin", "ridge.bin", "decider.bin", "manifest.lua" }
-  for i = 1, #cfg.blocks do files[#files + 1] = "tokenizer_" .. i .. ".bin" end
-  for _, f in ipairs(files) do os.remove(bdir .. "/" .. f) end
-  os.remove(bdir)
+  util.rmbundle(bdir)
 end)

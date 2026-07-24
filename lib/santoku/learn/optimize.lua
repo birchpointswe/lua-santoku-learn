@@ -2,11 +2,21 @@ local num = require("santoku.num")
 local err = require("santoku.error")
 local rand = require("santoku.random")
 local utc = require("santoku.utc")
+local capi = require("santoku.learn.optimize.capi")
 
 local M = {}
 
 local SEARCH = setmetatable({}, { __tostring = function () return "optimize.SEARCH" end })
 M.SEARCH = SEARCH
+
+-- sample std of a config's per-fold CV scores: the intra-run noise floor for that
+-- config (surfaced on [Ridge Done] so a pin delta can be read against its own scatter).
+local function fold_std (scores, mean, nf)
+  if nf < 2 then return 0.0 end
+  local s2 = 0.0
+  for f = 1, nf do local d = scores[f] - mean; s2 = s2 + d * d end
+  return num.sqrt(s2 / (nf - 1))
+end
 
 local tt
 local function tick (name) return tt and tt(name) or nil end
@@ -221,82 +231,6 @@ local all_fixed = function (samplers)
   return true
 end
 
--- Cyclic Jacobi eigensolver for a symmetric n x n matrix (n small, <= ~15).
--- Input C is a flat row-major array of length n*n (assumed already symmetrized by caller).
--- Returns ev (eigenvalues, 1-based array of length n) and B (eigenvectors as columns:
--- B[(i-1)*n + j] is row i, column j; column j is the eigenvector for ev[j]).
-local function jacobi_eigen (C, n)
-  local a = {}
-  for i = 1, n * n do a[i] = C[i] end
-  local V = {}
-  for i = 1, n do
-    for j = 1, n do
-      V[(i - 1) * n + j] = (i == j) and 1.0 or 0.0
-    end
-  end
-  local function off_norm ()
-    local s = 0.0
-    for p = 1, n - 1 do
-      for q = p + 1, n do
-        local v = a[(p - 1) * n + q]
-        s = s + v * v
-      end
-    end
-    return num.sqrt(2.0 * s)
-  end
-  local function frob ()
-    local s = 0.0
-    for i = 1, n * n do s = s + a[i] * a[i] end
-    return num.sqrt(s)
-  end
-  local tol = 1e-12 * frob()
-  if tol <= 0 then tol = 1e-300 end
-  for _ = 1, 100 do
-    if off_norm() < tol then break end
-    for p = 1, n - 1 do
-      for q = p + 1, n do
-        local apq = a[(p - 1) * n + q]
-        if apq ~= 0.0 then
-          local app = a[(p - 1) * n + p]
-          local aqq = a[(q - 1) * n + q]
-          local theta = (aqq - app) / (2.0 * apq)
-          local t
-          if theta >= 0 then
-            t = 1.0 / (theta + num.sqrt(theta * theta + 1.0))
-          else
-            t = -1.0 / (-theta + num.sqrt(theta * theta + 1.0))
-          end
-          local c = 1.0 / num.sqrt(t * t + 1.0)
-          local s = t * c
-          -- rotate rows/cols p,q of a
-          for k = 1, n do
-            local akp = a[(k - 1) * n + p]
-            local akq = a[(k - 1) * n + q]
-            a[(k - 1) * n + p] = c * akp - s * akq
-            a[(k - 1) * n + q] = s * akp + c * akq
-          end
-          for k = 1, n do
-            local apk = a[(p - 1) * n + k]
-            local aqk = a[(q - 1) * n + k]
-            a[(p - 1) * n + k] = c * apk - s * aqk
-            a[(q - 1) * n + k] = s * apk + c * aqk
-          end
-          -- accumulate eigenvectors
-          for k = 1, n do
-            local vkp = V[(k - 1) * n + p]
-            local vkq = V[(k - 1) * n + q]
-            V[(k - 1) * n + p] = c * vkp - s * vkq
-            V[(k - 1) * n + q] = s * vkp + c * vkq
-          end
-        end
-      end
-    end
-  end
-  local ev = {}
-  for j = 1, n do ev[j] = a[(j - 1) * n + j] end
-  return ev, V
-end
-
 local cmaes_search = function (args)
 
   local param_names = err.assert(args.param_names, "param_names required")
@@ -343,6 +277,9 @@ local cmaes_search = function (args)
         seed = (seed * 48271) % 2147483647
       end
     end
+    -- Seed both streams from the same value: capi drives the CMA sampling, rand still
+    -- drives s.sample() for non-search dims (fill_rest). Both deterministic per config.
+    capi.seed(seed)
     rand.fast_seed(seed)
   end
 
@@ -361,8 +298,7 @@ local cmaes_search = function (args)
     end
   end
 
-  local rmax = rand.fast_max + 1
-  local function uniform () return rand.fast_random() / rmax end
+  local function uniform () return capi.uniform() end
 
   -- Trivial case: no searchable dims -> single center eval (mirrors search's t=1 path).
   if n == 0 then
@@ -440,54 +376,18 @@ local cmaes_search = function (args)
   -- One CMA-ES run. m0: n-vec start mean; lambda; sigma0; run_cap: this run's eval cap.
   -- Returns evals consumed by this run.
   local function cma_run (m0, lambda, sigma0, run_cap, eval_mean)
-    local mu = num.floor(lambda / 2)
-    if mu < 1 then mu = 1 end
-    -- recombination weights (positive, sum to 1)
-    local w = {}
-    local wsum = 0.0
-    local lhalf = num.log(lambda / 2 + 0.5)
-    for i = 1, mu do
-      local wi = lhalf - num.log(i)
-      w[i] = wi
-      wsum = wsum + wi
-    end
-    local w2 = 0.0
-    for i = 1, mu do w[i] = w[i] / wsum; w2 = w2 + w[i] * w[i] end
-    local mu_eff = 1.0 / w2
-    local c_sig = (mu_eff + 2) / (n + mu_eff + 5)
-    local d_sig = 1 + 2 * num.max(0, num.sqrt((mu_eff - 1) / (n + 1)) - 1) + c_sig
-    local c_c = (4 + mu_eff / n) / (n + 4 + 2 * mu_eff / n)
-    local c_1 = 2 / ((n + 1.3) * (n + 1.3) + mu_eff)
-    local c_mu = num.min(1 - c_1, 2 * (mu_eff - 2 + 1 / mu_eff) / ((n + 2) * (n + 2) + mu_eff))
-    local chiN = num.sqrt(n) * (1 - 1 / (4 * n) + 1 / (21 * n * n))
-
-    local m = {}
-    for i = 1, n do m[i] = m0[i] end
-    local sigma = sigma0
-    -- C flat row-major (length n*n), init identity
-    local C = {}
-    for i = 1, n do
-      for j = 1, n do C[(i - 1) * n + j] = (i == j) and 1.0 or 0.0 end
-    end
-    local p_sig = {}
-    local p_c = {}
-    for i = 1, n do p_sig[i] = 0.0; p_c[i] = 0.0 end
-    local B, D
-    local g = 0
+    -- All CMA-ES linear algebra (eigensolve, sampling, path/covariance/sigma updates,
+    -- stopping tests) lives in the C core; this drives it via ask/tell. Lua keeps the
+    -- objective callback, budget accounting, and the BIPOP restart policy.
+    local cma = capi.cma(n, lambda, sigma0, m0)
     local run_evals = 0
-
-    -- stopping-history of per-gen best f
-    local histlen = num.max(10, 10 + num.floor(30 * n / lambda))
-    local best_hist = {}
-
-    local safety_cap = 100 + num.floor(50 * n * n / lambda)
 
     -- Evaluate the exact mean (the incumbent/pin) as a real trial before sampling, so a
     -- warm/refine restart holds >= its seed by genuine evaluation (not a clamp). Standard
     -- CMA never evaluates its mean; we do, only when asked.
     if eval_mean and eval_idx < trials then
       local u0 = {}
-      for i = 1, n do u0[i] = m[i] end
+      for i = 1, n do u0[i] = m0[i] end
       evaluate(u0)
       run_evals = run_evals + 1
     end
@@ -497,163 +397,19 @@ local cmaes_search = function (args)
       -- CMA update over a full lambda-population and never overshoots `trials`).
       if eval_idx + lambda > trials then break end
       if run_evals + lambda > run_cap then break end
-      -- 1. eigendecompose C (every generation)
-      -- symmetrize
-      for i = 1, n do
-        for j = i + 1, n do
-          local avg = 0.5 * (C[(i - 1) * n + j] + C[(j - 1) * n + i])
-          C[(i - 1) * n + j] = avg
-          C[(j - 1) * n + i] = avg
-        end
-      end
-      local ev, V = jacobi_eigen(C, n)
-      B = V
-      D = {}
-      for j = 1, n do
-        local e = ev[j]
-        if e < 1e-30 then e = 1e-30 end
-        D[j] = num.sqrt(e)
-      end
-
-      -- 2-3. sample and evaluate lambda offspring
-      local ys = {}   -- ys[k][i]
-      local fs = {}   -- ys f-values
-      local viols = {}
-      local feas = {}
+      local cand = cma:ask()
+      local fs, feas, viols = {}, {}, {}
       for k = 1, lambda do
-        local z = {}
-        for j = 1, n do z[j] = rand.fast_normal(0, 1) end
-        -- y = B * (D .* z)
-        local dz = {}
-        for j = 1, n do dz[j] = D[j] * z[j] end
-        local y = {}
-        for i = 1, n do
-          local acc = 0.0
-          for j = 1, n do acc = acc + B[(i - 1) * n + j] * dz[j] end
-          y[i] = acc
-        end
-        local x = {}
-        for i = 1, n do x[i] = m[i] + sigma * y[i] end
-        local f, viol, feasible = evaluate(x)
-        ys[k] = y
+        local f, viol, feasible = evaluate(cand[k])
         fs[k] = f
         viols[k] = viol
         feas[k] = feasible
         run_evals = run_evals + 1
       end
-
-      -- 4. rank-based sort: feasible first (by f asc), then infeasible (by viol asc, then f asc)
-      local idx = {}
-      for k = 1, lambda do idx[k] = k end
-      table.sort(idx, function (a2, b2)
-        local fa, fb = feas[a2], feas[b2]
-        if fa ~= fb then return fa end
-        if fa then
-          return fs[a2] < fs[b2]
-        else
-          if viols[a2] ~= viols[b2] then return viols[a2] < viols[b2] end
-          return fs[a2] < fs[b2]
-        end
-      end)
-
-      -- track per-gen best f
-      local gen_best_f = fs[idx[1]]
-      best_hist[#best_hist + 1] = gen_best_f
-
-      -- 5. y_w = sum w_i * y_{idx[i]}
-      local y_w = {}
-      for i = 1, n do y_w[i] = 0.0 end
-      for r = 1, mu do
-        local yk = ys[idx[r]]
-        local wr = w[r]
-        for i = 1, n do y_w[i] = y_w[i] + wr * yk[i] end
-      end
-
-      -- 6. p_sig = (1-c_sig) p_sig + sqrt(c_sig (2-c_sig) mu_eff) * Cinvhalf(y_w)
-      -- Cinvhalf(v) = B * ((1./D) .* (B^T v))
-      local bt = {}
-      for j = 1, n do
-        local acc = 0.0
-        for i = 1, n do acc = acc + B[(i - 1) * n + j] * y_w[i] end
-        bt[j] = acc / D[j]
-      end
-      local cinv = {}
-      for i = 1, n do
-        local acc = 0.0
-        for j = 1, n do acc = acc + B[(i - 1) * n + j] * bt[j] end
-        cinv[i] = acc
-      end
-      local ps_coef = num.sqrt(c_sig * (2 - c_sig) * mu_eff)
-      for i = 1, n do
-        p_sig[i] = (1 - c_sig) * p_sig[i] + ps_coef * cinv[i]
-      end
-
-      -- ||p_sig||
-      local ps_norm = 0.0
-      for i = 1, n do ps_norm = ps_norm + p_sig[i] * p_sig[i] end
-      ps_norm = num.sqrt(ps_norm)
-
-      -- 7. h_sig
-      local denom = num.sqrt(1 - (1 - c_sig) ^ (2 * (g + 1)))
-      local h_sig = 0
-      if (ps_norm / denom) < (1.4 + 2 / (n + 1)) * chiN then h_sig = 1 end
-
-      -- 8. p_c
-      local pc_coef = h_sig * num.sqrt(c_c * (2 - c_c) * mu_eff)
-      for i = 1, n do
-        p_c[i] = (1 - c_c) * p_c[i] + pc_coef * y_w[i]
-      end
-
-      -- 9. C update
-      local delta = (1 - h_sig) * c_c * (2 - c_c)
-      local c_scale = 1 - c_1 - c_mu
-      for i = 1, n do
-        for j = 1, n do
-          local rank1 = p_c[i] * p_c[j] + delta * C[(i - 1) * n + j]
-          local rankmu = 0.0
-          for r = 1, mu do
-            local yk = ys[idx[r]]
-            rankmu = rankmu + w[r] * yk[i] * yk[j]
-          end
-          C[(i - 1) * n + j] = c_scale * C[(i - 1) * n + j] + c_1 * rank1 + c_mu * rankmu
-        end
-      end
-
-      -- 10. sigma update (capture pre-update sigma for the step-5 mean move)
-      local sigma_pre = sigma
-      sigma = sigma * num.exp((c_sig / d_sig) * (ps_norm / chiN - 1))
-
-      -- 11. m = m_new; g += 1  (m_new = m + sigma_pre * y_w, c_m = 1)
-      for i = 1, n do m[i] = m[i] + sigma_pre * y_w[i] end
-      g = g + 1
-
-      -- stopping criteria
+      local stop = cma:tell(fs, feas, viols)
+      if stop then break end
       if run_evals >= run_cap then break end
       if eval_idx >= trials then break end
-      -- TolX
-      local maxD = D[1]
-      for j = 2, n do if D[j] > maxD then maxD = D[j] end end
-      if sigma * maxD < 1e-11 then break end
-      -- Condition
-      local maxD2, minD2 = D[1] * D[1], D[1] * D[1]
-      for j = 2, n do
-        local d2 = D[j] * D[j]
-        if d2 > maxD2 then maxD2 = d2 end
-        if d2 < minD2 then minD2 = d2 end
-      end
-      if minD2 > 0 and (maxD2 / minD2) > 1e14 then break end
-      -- Safety cap
-      if g >= safety_cap then break end
-      -- TolFun stagnation
-      if #best_hist >= histlen then
-        local lo, hi = num.huge, -num.huge
-        for t2 = #best_hist - histlen + 1, #best_hist do
-          local v = best_hist[t2]
-          if v < lo then lo = v end
-          if v > hi then hi = v end
-        end
-        if (hi - lo) < 1e-12 then break end
-      end
     end
 
     return run_evals
@@ -710,9 +466,11 @@ local cmaes_search = function (args)
     if used == 0 then break end
   end
 
-  -- Phase 2 (refinement): restart CMA from the best-so-far with a small, shrinking sigma,
-  -- evaluating the incumbent each time so `best` never decreases. This is the automatic
-  -- "iterated restart-from-best" that polishes the located basin to its optimum.
+  -- Phase 2 (refinement): restart CMA from the best-so-far with a small, shrinking sigma.
+  -- `best` never decreases (global monotone incumbent); the seed is by definition the
+  -- already-evaluated incumbent and trials are deterministic per config, so re-evaluating
+  -- the mean here would be a pure duplicate -- eval_mean stays false (run 0's warm-pin
+  -- eval is the only meaningful mean eval).
   local sigma_ref = 0.1
   while eval_idx < trials do
     if not best_params then break end
@@ -720,7 +478,7 @@ local cmaes_search = function (args)
     for i, name in ipairs(search_dims) do
       seed[i] = samplers[name].normalize(best_params[name])
     end
-    local used = cma_run(seed, lambda0, sigma_ref, trials, true)
+    local used = cma_run(seed, lambda0, sigma_ref, trials, false)
     sigma_ref = sigma_ref * 0.5
     if used == 0 or sigma_ref < 1e-3 then break end
   end
@@ -893,7 +651,7 @@ M.krr = function (args)
   end
   args.gamma = spec_defaults(args.gamma, { min = 1e-2, max = 16, log = true })
   args.nu = cat_spec(args.nu, { 3, 0, 1, 2 })
-  local seed = args.seed or 4
+  local seed = args.seed or 5
   local kernel_samplers = build_samplers(args, { "nu", "gamma" }, nil, seed)
   -- search_trials is the sole regime knob: 0 = frozen (pinned config+lambda+offset);
   -- 1 = calibrate (no search, use defs/pins, derive offset at deploy rank); >1 = search
@@ -921,6 +679,13 @@ M.krr = function (args)
   local tiled = not dense
   local tile_labels = tiled and (args.tile_labels or 1024) or nil
   local want_decode, mode = decode_mode(args, dense)
+  local use_oof = decode_offset == nil and (mode == "span" or mode == "multilabel")
+  -- seed_ensemble=K: deploy the winning config as the average of K independent Nystrom
+  -- bases (different landmark seeds). Purely deploy-time; search/selection unchanged.
+  -- lm_seed_offset perturbs ONLY the deployed full-pool landmark draw (0 => byte-identical
+  -- to the single-basis deploy, so the frozen pins are untouched).
+  local seed_ensemble = args.seed_ensemble or 1
+  local lm_seed_offset = 0
   local spectral_args = {
     x = args.x, y = args.y,
     blocks = args.blocks,
@@ -955,6 +720,10 @@ M.krr = function (args)
     spectral_args.row_buf = row_shared
   end
   local search_m = args.search_landmarks or args.n_landmarks
+  -- fast path: when search draws the deploy rank, the winning trial's OOF fold calibration
+  -- (same stratum landmarks/seed/split/lambda) is bit-identical to calibrate_and_deploy's --
+  -- retain the winner's decider and skip the redundant deploy-rank calibration encode.
+  local fastpath_cal = use_oof and (search_m == args.n_landmarks)
   local lm_slot
   local xtx_slot, xty_slot, factor_slot
   local enc_slot
@@ -981,7 +750,6 @@ M.krr = function (args)
     if xty_shared then xty_shared:destroy() end
   end
   local function build_kd (spec, at_search)
-    -- A/B perf test: per-trial GC disabled -- local tgc = tick("gc"); collectgarbage("collect"); tock(tgc)
     if args.rebuild and spec.params ~= nil then
       local trb = tick("rebuild"); local rb = args.rebuild(spec.params, at_search ~= nil); tock(trb)
       spectral_args.x = rb.x
@@ -1024,7 +792,7 @@ M.krr = function (args)
       spectral_args.factor_buf = nil
       spectral_args.encoder = nil
     else
-      spectral_args.landmarks = spectral.uniform_landmarks(spectral_args, args.n_landmarks, seed + 1000)
+      spectral_args.landmarks = spectral.uniform_landmarks(spectral_args, args.n_landmarks, seed + 1000 + lm_seed_offset)
       spectral_args.xtx_buf = xtx_shared
       spectral_args.xty_buf = xty_shared
       spectral_args.factor_buf = nil
@@ -1200,13 +968,20 @@ M.krr = function (args)
   -- decider when the offset is being derived (span/multilabel, fns == nil), per-fold trial
   -- fns otherwise -- and aggregate mean/metrics. Used by both the search trials
   -- and the final-explore lambda trials.
-  local function eval_folds (kds, lam, fns, split)
+  -- Fold racing (fns path only; the OOF path needs all folds for the pooled decider):
+  -- `race` accumulates, over completed trials, the residual full-mean - prefix-mean_f per
+  -- prefix f (Welford). A trial is abandoned after fold f >= 2 when even its predicted
+  -- full mean (prefix + residual mean) plus a 3-sigma margin cannot reach `best_hint` --
+  -- a statistically-live config is never dropped. Abandoned trials return raced = true
+  -- with the predicted mean as their ordering score.
+  local function eval_folds (kds, lam, fns, split, race, best_hint)
     local nf = #kds
-    local mean, agg, decider = 0.0, {}, nil
+    local mean, agg, decider, pooled_m = 0.0, {}, nil, nil
     if not fns then
       for f = 1, nf do kds[f].gram:solve(lam) end
       local dec, m, foldsc, foldms = oof_decider(kds, split)
       decider = dec
+      pooled_m = m
       for f = 1, nf do mean = mean + foldsc[f] end
       mean = mean / nf
       if foldms then
@@ -1219,17 +994,47 @@ M.krr = function (args)
         agg = m
       end
       agg.offset = dec:offset()
+      agg.fold_std = fold_std(foldsc, mean, nf)
     else
+      local pfx = {}
+      local folds_sc = {}
       for f = 1, nf do
         kds[f].gram:solve(lam)
         local sc, m = fns[f](kds[f])
         mean = mean + sc
+        folds_sc[f] = sc
+        pfx[f] = mean / f
         if m then for kk, vv in pairs(m) do if type(vv) == "number" then agg[kk] = (agg[kk] or 0) + vv end end end
+        if race and best_hint and f >= 2 and f < nf and race.count >= 8 then
+          local st = race.stats[f]
+          if st and st.n >= 8 then
+            local sd = math.sqrt(st.m2 / (st.n - 1))
+            if sd < 1e-4 then sd = 1e-4 end
+            local predicted = pfx[f] + st.mean
+            if predicted + 3 * sd < best_hint then
+              for kk, vv in pairs(agg) do agg[kk] = vv / f end
+              return predicted, agg, nil, nil, true
+            end
+          end
+        end
       end
       mean = mean / nf
       for kk, vv in pairs(agg) do agg[kk] = vv / nf end
+      agg.fold_std = fold_std(folds_sc, mean, nf)
+      if race then
+        for f = 2, nf - 1 do
+          local st = race.stats[f]
+          if not st then st = { n = 0, mean = 0.0, m2 = 0.0 }; race.stats[f] = st end
+          local r = mean - pfx[f]
+          st.n = st.n + 1
+          local d = r - st.mean
+          st.mean = st.mean + d / st.n
+          st.m2 = st.m2 + d * (r - st.mean)
+        end
+        race.count = race.count + 1
+      end
     end
-    return mean, agg, decider
+    return mean, agg, decider, pooled_m
   end
   -- Finalize = deploy-rank OOF offset calibration (span/multilabel only) + the deployed
   -- fit. The calibration folds use the STRATUM basis (never-val landmarks -> no val-landmark
@@ -1258,14 +1063,14 @@ M.krr = function (args)
     tock(tsv)
     return kd, fin
   end
-  local function finish (kd, params, solve, fin)
+  local function finish (kd, params, solve, fin, fold_sd)
     local r = ridge.create({
       gram = kd.gram,
       w_buf = tiled and w_auto or nil,
     })
     kd.gram:release()
     if args.each then args.each({ event = "done", params = params, emb_d = kd.sp_enc:dims(),
-      solve = solve }) end
+      solve = solve, fold_std = fold_sd }) end
     local decider, decider_metrics
     if want_decode then
       if decode_offset ~= nil and mode ~= "single" then
@@ -1287,6 +1092,56 @@ M.krr = function (args)
       codes_or_deploy = function (x, out) return kd.sp_enc:encode(x, out) end
     end
     return kd.sp_enc, r, codes_or_deploy, params, decider, decider_metrics, bake_blocks
+  end
+  -- seed_ensemble deploy: return an ensemble object (E) in place of the single ridge. E is
+  -- consumed by util.predict_tiled (o.ridge.is_ensemble): build model s (own landmark seed),
+  -- predict the full test, average across K, top-k the average for label heads. Models are
+  -- built-predicted-discarded one at a time (E.build/E.release). No search change; deploy-only.
+  local function finish_ensemble (build_spec, params, fin)
+    -- build-predict-discard: one base at a time through the NORMAL deploy build path
+    -- (build_kd's else branch redraws landmarks per call; shared xtx/xty survive via the
+    -- gated release_cv; w_shared is overwritten per build, safe because each base finishes
+    -- predicting before the next build). Peak = 1 model. The deploy closure MUST mirror
+    -- finish's bake_external wrap -- raw ext blocks (bare csr) have no .x field.
+    -- K models cannot share the caller's single external chol (enc_chol_buf): persist marks
+    -- an mmap-backed chol external and skips embedding, which would alias all K encoders to
+    -- one file. Own the chol per build instead (transient, one model alive at a time).
+    spectral_args.proj_buf = nil
+    local cur_kd
+    local E = { is_ensemble = true, K = seed_ensemble, n_labels = args.n_labels }
+    E.build = function (s)
+      lm_seed_offset = s * 7919
+      local kd = build_kd(build_spec)
+      kd.gram:solve(params.lambda, w_shared)
+      cur_kd = kd
+      local r = ridge.create({ gram = kd.gram })
+      if args.bake_external then
+        return (function (ext, out)
+          return kd.sp_enc:encode({ blocks = args.bake_external(ext, params) }, out)
+        end), r, kd.sp_enc
+      end
+      return (function (x, out) return kd.sp_enc:encode(x, out) end), r, kd.sp_enc
+    end
+    E.release = function ()
+      lm_seed_offset = 0
+      if cur_kd then cur_kd.gram:release(); cur_kd = nil end
+      collectgarbage("collect")
+    end
+    local decider, decider_metrics
+    if want_decode then
+      local decide = require("santoku.learn.decide")
+      if decode_offset ~= nil and mode ~= "single" then
+        decider = decide.create({ n_labels = args.n_labels, span = mode == "span",
+          reject = args.reject, offset = decode_offset })
+      elseif fin and fin.decider then
+        decider, decider_metrics = fin.decider, fin.metrics
+      elseif mode == "single" then
+        decider = decide.create({ n_labels = args.n_labels, single = true })
+      end
+    end
+    if args.each then args.each({ event = "done", params = params,
+      emb_d = args.n_landmarks, solve = "ensemble", fold_std = nil }) end
+    return E, E, (function (x) return x end), params, decider, decider_metrics, nil
   end
   local function center_spec ()
     local kname = kernels.def or kernels[1]
@@ -1455,16 +1310,26 @@ M.krr = function (args)
     if frozen then
       err.assert(not (want_decode and decode_offset == nil and (mode == "span" or mode == "multilabel")),
         "krr: frozen (search_trials=0) span/multilabel decode requires a pinned decode_offset; use search_trials=1 to calibrate")
-      kd = build_kd(spec)
-      kd.gram:solve(params.lambda, w_shared)
+      if seed_ensemble <= 1 then
+        kd = build_kd(spec)
+        kd.gram:solve(params.lambda, w_shared)
+      end
       sstr = "cholesky"
     else
       -- search_trials=1: no search; deploy the def config, calibrate offset at deploy rank
       kd, fin = calibrate_and_deploy(spec, params)
       sstr = "calibrate"
     end
-    local sp_enc, r, vcodes, params_out, decider, dmetrics, bake = finish(kd, params, sstr, fin)
-    release_cv()
+    local sp_enc, r, vcodes, params_out, decider, dmetrics, bake
+    if seed_ensemble > 1 then
+      if kd then kd.gram:release() end -- calibrate path's kd is only needed for fin
+      sp_enc, r, vcodes, params_out, decider, dmetrics, bake = finish_ensemble(spec, params, fin)
+    else
+      sp_enc, r, vcodes, params_out, decider, dmetrics, bake = finish(kd, params, sstr, fin)
+    end
+    -- seed_ensemble builds its K bases lazily at predict time, so the shared deploy buffers
+    -- (xtx/xty) must survive krr's return -- the ensemble closure owns them until GC.
+    if seed_ensemble <= 1 then release_cv() end
     prof_emit()
     return sp_enc, r, vcodes, params_out, decider, dmetrics, bake
   end
@@ -1486,7 +1351,9 @@ M.krr = function (args)
       }, dense, mode == "multilabel" and "fmeasure" or mode, k)
     end
   end
-  local function run_folds (spec, lam)
+  -- racing state persists across all trials of the search (fns path only)
+  local race_state = (not use_oof) and nfolds > 1 and { stats = {}, count = 0 } or nil
+  local function run_folds (spec, lam, best_hint)
     if not search_fb then
       search_fb = fold_bufs(nfolds, search_m, args.fold_split, nil)
     end
@@ -1494,9 +1361,8 @@ M.krr = function (args)
     local meta = { dims = kd.sp_enc:dims() }
     kd.gram:release()
     local ts = tick("~fold_solve")
-    local use_oof = decode_offset == nil and (mode == "span" or mode == "multilabel")
-    local mean, agg = eval_folds(kds, lam, (not use_oof) and fold_trial_fns or nil,
-      args.fold_split)
+    local mean, agg, dec, pooled_m, raced = eval_folds(kds, lam, (not use_oof) and fold_trial_fns or nil,
+      args.fold_split, race_state, best_hint)
     tock(ts)
     -- search pooling: the per-trial gram shells are dead here. eval_folds has finished all
     -- fold regress/label reads (the fold ridges view the fold grams' W, so this must come
@@ -1509,7 +1375,7 @@ M.krr = function (args)
     -- once at end-of-search in release_enc_scratch.
     for f = 1, #kds do kds[f].ridge = nil; kds[f].gram:destroy() end
     kd.gram:destroy()
-    return mean, agg, meta
+    return mean, agg, meta, dec, pooled_m, raced
   end
   local btot = args.search_trials or 0
   local function base_with (base, p)
@@ -1536,31 +1402,41 @@ M.krr = function (args)
     return base
   end
   local best_params, best_score = nil, -num.huge
+  local best_fin = nil
+  local best_fold_std = nil
   local worst_score = nil
   local bi = 0
   local function eval_kd (spec, base, gp)
     local ib = {}
     for kk, vv in pairs(base) do ib[kk] = vv end
     for _, n in ipairs(label_names) do ib[n] = gp[n] end
-    local ok, sc, sm, meta = pcall(run_folds, spec, gp.lambda)
+    local ok, sc, sm, meta, dec, pooled_m, raced = pcall(run_folds, spec, gp.lambda, best_score)
     local failed = not ok or sc == nil
     if failed then
       sc, sm, meta = (worst_score or -1e18), { failed = true }, meta or {}
+    elseif raced then
+      -- abandoned by fold racing: predicted score orders it for CMA, but it feeds tell
+      -- like a failed trial (infeasible) and can never become the incumbent
+      sm.failed = true
+      sm.raced = true
     else
       worst_score = worst_score and num.min(worst_score, sc) or sc
     end
-    -- failed trials (e.g. degenerate gauges with singular landmark kernels) keep a finite
-    -- score but must NEVER become the incumbent
-    local sel = failed and -num.huge or sc
+    -- failed/raced trials (e.g. degenerate gauges with singular landmark kernels) keep a
+    -- finite score but must NEVER become the incumbent
+    local sel = (failed or raced) and -num.huge or sc
     bi = bi + 1
     local improved = sel > best_score
-    if improved then best_score = sel; best_params = ib end
+    if improved then
+      best_score = sel; best_params = ib
+      best_fold_std = sm and sm.fold_std
+      if fastpath_cal and dec then best_fin = { decider = dec, metrics = pooled_m } end
+    end
     if args.each then
       args.each({ event = "trial", phase = "kernel", trial = bi, trials = btot,
         params = ib, score = sc, metrics = sm, emb_d = meta.dims,
         best = best_score, is_new_best = improved })
     end
-    -- A/B perf test: per-trial GC disabled -- collectgarbage("collect")
     return sc, sm
   end
   local t_ks = tick("~kernel_search")
@@ -1625,10 +1501,31 @@ M.krr = function (args)
   local t_fin = tick("~finalize")
   release_enc_scratch()
   -- deploy the search winner at its search lambda, offset calibrated at deploy rank
-  local best_kd, fin = calibrate_and_deploy(best_params, best_params)
-  local sp_enc, r, vcodes, params_out, decider, dmetrics, bake = finish(best_kd, best_params, "calibrate", fin)
+  local best_kd, fin, solve_tag
+  if best_fin then
+    -- fast path: reuse the winner's OOF decider (search rank == deploy rank), do only the
+    -- deployed full-pool fit -- the calibration encode would recompute best_fin bit-for-bit
+    if seed_ensemble <= 1 then
+      best_kd = build_kd(best_params)
+      local tsv = tick("~final_solve")
+      best_kd.gram:solve(best_params.lambda, w_shared)
+      tock(tsv)
+    end
+    fin = best_fin
+    solve_tag = "calibrate"
+  else
+    best_kd, fin = calibrate_and_deploy(best_params, best_params)
+    solve_tag = "calibrate"
+  end
+  local sp_enc, r, vcodes, params_out, decider, dmetrics, bake
+  if seed_ensemble > 1 then
+    if best_kd then best_kd.gram:release() end -- calibrate path's kd is only needed for fin
+    sp_enc, r, vcodes, params_out, decider, dmetrics, bake = finish_ensemble(best_params, best_params, fin)
+  else
+    sp_enc, r, vcodes, params_out, decider, dmetrics, bake = finish(best_kd, best_params, solve_tag, fin, best_fold_std)
+  end
   tock(t_fin)
-  release_cv()
+  if seed_ensemble <= 1 then release_cv() end
   prof_emit()
   return sp_enc, r, vcodes, params_out, decider, dmetrics, bake
 end
