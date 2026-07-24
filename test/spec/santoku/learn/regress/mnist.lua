@@ -9,6 +9,7 @@ io.stdout:setvbuf("line")
 
 
 
+
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
@@ -16,13 +17,14 @@ local cfg = {
   n_landmarks = 1024 * 8,
   kernel = { "matern" },
   nu = { def = 3 },
-  gamma = { def = 2.91919 },
-  lambda = { def = 2.13137e-07 },
+  gamma = { def = 2.1044873 },
+  lambda = { def = 0.00040531156 },
   relevance = { "auc" },
-  exponent = { def = { 0.278601 } },
+  exponent = { def = { 0.20658551 } },
   classes = 10,
   k = 1,
   search_trials = 0,
+  seed_ensemble = 1,
   scratch_path = "test/res/mnist-scratch",
   folds = 5,
 }
@@ -64,8 +66,5 @@ test("mnist CV", function ()
   local _, mb = b.decider:score({ scores = sb, n_samples = test_set.n, expected = test_set.labels })
   str.printf("[Bundle] reload test %s (deploy %s)\n", util.fmt_metrics(mb), dep)
   assert(util.fmt_metrics(mb) == dep, "reloaded bundle metrics diverge from deploy")
-  for _, f in ipairs({ "encoder.bin", "ridge.bin", "decider.bin", "manifest.lua" }) do
-    os.remove(bdir .. "/" .. f)
-  end
-  os.remove(bdir)
+  util.rmbundle(bdir)
 end)

@@ -9,6 +9,14 @@ io.stdout:setvbuf("line")
 
 
 
+
+
+
+
+
+
+
+
 local cfg = {
   verbose = false,
   search_landmarks = 1024 * 2,
@@ -18,14 +26,15 @@ local cfg = {
     { ngram_min = 1, ngram_max = 3, mode = "words" },
   },
   relevance = { "bns", "bns" },
-  scales = { def = { 1.3708485, 0.72947521 } },
-  exponent = { def = { 2.2721587, 2.4204458 } },
+  scales = { def = { 0.94523942, 1.057933 } },
+  exponent = { def = { 1.7400224, 5.625631 } },
   n_landmarks = 1024 * 8,
   kernel = { "cosine" },
-  lambda = { def = 0.00082752091 },
+  lambda = { def = 1.5092313e-06 },
   classes = 20,
   k = 1,
   search_trials = 0,
+  seed_ensemble = 1,
   scratch_path = "test/res/newsgroups-scratch",
   folds = 5,
 }
@@ -51,8 +60,9 @@ test("newsgroups CV", function ()
     each = util.make_ridge_log(stopwatch),
   }))
 
-  local test_codes = deploy(test_blocks)
-  local _, m = decider:score({ scores = ridge_obj:regress(test_codes),
+  local _, test_scores = util.predict_tiled({ deploy = deploy, ridge = ridge_obj,
+    blocks = test_blocks, n = test_set.n, scores = true, n_labels = cfg.classes })
+  local _, m = decider:score({ scores = test_scores,
     n_samples = test_set.n, expected = test_set.labels })
   local _, total = stopwatch()
   str.printf("[Result] scales=%s lambda=%.8g | test %s\nTotal: %.1fs\n",
@@ -63,18 +73,15 @@ test("newsgroups CV", function ()
   bundle.persist({ dir = bdir, tokenizers = toks, encoder = sp_enc, ridge = ridge_obj,
     decider = decider })
   local dep = util.fmt_metrics(m)
-  sp_enc, ridge_obj, deploy, decider, toks, test_codes, test_blocks = nil -- luacheck: ignore
+  sp_enc, ridge_obj, deploy, decider, toks, test_scores, test_blocks = nil -- luacheck: ignore
   collectgarbage("collect")
   local b = bundle.load(bdir)
   local _, Xb = util.tokenize_blocks(cfg.blocks, test_set.problems, { toks = b.tokenizers, tokens = Wte })
-  local _, mb = b.decider:score({ scores = b.ridge:regress(b.encode(Xb)),
+  local _, sb = util.predict_tiled({ deploy = b.encode, ridge = b.ridge,
+    blocks = Xb, n = test_set.n, scores = true, n_labels = cfg.classes })
+  local _, mb = b.decider:score({ scores = sb,
     n_samples = test_set.n, expected = test_set.labels })
   str.printf("[Bundle] reload test %s (deploy %s)\n", util.fmt_metrics(mb), dep)
   assert(util.fmt_metrics(mb) == dep, "reloaded bundle metrics diverge from deploy")
-  local files = { "encoder.bin", "ridge.bin", "decider.bin", "manifest.lua" }
-  for i = 1, #cfg.blocks do
-    files[#files + 1] = "tokenizer_" .. i .. ".bin"
-  end
-  for _, f in ipairs(files) do os.remove(bdir .. "/" .. f) end
-  os.remove(bdir)
+  util.rmbundle(bdir)
 end)

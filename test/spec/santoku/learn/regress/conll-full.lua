@@ -17,9 +17,11 @@ local MAX_SPAN = 1000000000
 
 
 
+
+
 local cfg = {
   verbose = false,
-  search_landmarks = 1024 * 4,
+  search_landmarks = 1024 * 2,
   data = {
     dir = "test/res/conll2003",
     max = nil
@@ -28,36 +30,38 @@ local cfg = {
   emb = { n_landmarks = 1024 * 8, },
   tag = {
     kernel = { "matern" },
-    nu = { def = 2 },
-    gamma = { def = 0.13353758 },
-    lambda = { def = 6.007982e-05 },
+    nu = { def = 3 },
+    gamma = { def = 0.79742469 },
+    lambda = { def = 5.9753931e-07 },
     blocks = {
       { ngram_min = 1, ngram_max = 5, normalize = false },
       { ngram_min = 1, ngram_max = 3, mode = "words", normalize = false },
       { ngram_min = 1, ngram_max = 5, mode = "tags", n_tags = util.N_SHAPES, normalize = false },
     },
     relevance = { "bns", "bns", "bns" },
-    scales = { def = { 0.63372141, 1.7943648, 0.87940895 } },
-    exponent = { def = { 1.952315, 2.9091197, 1.9694619 } },
-    decode_offset = { def = 0.4050678 },
+    scales = { def = { 7.6690343, 0.0067839924, 19.220911 } },
+    exponent = { def = { 4.9334456, 4.6089473, 1.4923638 } },
+    decode_offset = { def = 0.52165604 },
     search_trials = 0,
+    seed_ensemble = 1,
     scratch_path = "test/res/conll-tag-scratch",
     folds = 5,
   },
   type = {
     kernel = { "matern" },
-    nu = { def = 2 },
-    gamma = { def = 0.67920774 },
-    lambda = { def = 2.4482122e-07 },
+    nu = { def = 3 },
+    gamma = { def = 1.652384 },
+    lambda = { def = 9.0469132e-07 },
     blocks = {
       { ngram_min = 1, ngram_max = 5, normalize = false, regions = true },
       { ngram_min = 1, ngram_max = 5, mode = "tags", n_tags = util.N_SHAPES, normalize = false, regions = true },
     },
     relevance = { "bns", "bns" },
-    scales = { def = { 0.02743892, 556.6777, 0.005566777, 0.005566777, 5.2923249, 0.005566777, 91.966028, 0.017674851, 76.462583, 4.1211133, 139.99885 } },
-    exponent = { def = { 4.7762554, 2.3313325, 2.7983615, 7.3266628, 0.38468605, 0.7784287, 0.97172925, 0.12706431, 0.69330865, 0.032329143, 0.31840376 } },
-    decode_offset = { def = 0.25278902 },
+    scales = { def = { 0.027032086, 12.111778, 0.066024415, 99.018754, 0.13420805, 0.0030055239, 25.498869, 0.040503204, 180.79393, 0.072337035, 85.750553 } },
+    exponent = { def = { 4.6987127, 0.042934613, 3.4189395, 3.9041192, 4.5004177, 3.0824886, 0.90713743, 4.9708287, 5.4551861, 3.394801, 1.8496327 } },
+    decode_offset = { def = 0.18440428 },
     search_trials = 0,
+    seed_ensemble = 1,
     scratch_path = "test/res/conll-type-scratch",
     folds = 5,
   },
@@ -239,11 +243,7 @@ test("conll-full", function ()
   local _, mb = b.decider:score({ scores = sb, n_samples = n_te_docs, cand = Scand_te, gold = TE.gold })
   str.printf("[Bundle] reload test %s (deploy %s)\n", util.fmt_metrics(mb), dep)
   assert(util.fmt_metrics(mb) == dep, "reloaded bundle metrics diverge from deploy")
-  for _, f in ipairs({ "tokenizer_1.bin", "tokenizer_2.bin", "encoder.bin", "ridge.bin",
-      "decider.bin", "gaz.bin", "gaz_rms.bin", "manifest.lua" }) do
-    os.remove(bdir .. "/" .. f)
-  end
-  os.remove(bdir)
+  util.rmbundle(bdir)
 
   local tdr = ner.decode_report({
     cand = Scand_te, pred = te_lab, pred_stride = 2,
@@ -262,6 +262,6 @@ test("conll-full", function ()
   end
 
   local _, total = stopwatch()
-  str.printf("\nTotal: %.1fs\n", total)
+  str.printf("Total: %.1fs\n", total)
 
 end)
