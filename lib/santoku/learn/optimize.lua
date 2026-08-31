@@ -9,8 +9,6 @@ local M = {}
 local SEARCH = setmetatable({}, { __tostring = function () return "optimize.SEARCH" end })
 M.SEARCH = SEARCH
 
-
-
 local function fold_std (scores, mean, nf)
   if nf < 2 then return 0.0 end
   local s2 = 0.0
@@ -278,9 +276,9 @@ local cmaes_search = function (args)
       end
     end
 
-
     capi.seed(seed)
     rand.fast_seed(seed)
+    rand.seed(seed)
   end
 
   local function fill_rest (params)
@@ -299,7 +297,6 @@ local cmaes_search = function (args)
   end
 
   local function uniform () return capi.uniform() end
-
 
   if n == 0 then
     local params = {}
@@ -326,13 +323,10 @@ local cmaes_search = function (args)
     return best_result, best_params, best_metrics
   end
 
-
   local def_pt = {}
   for i, name in ipairs(search_dims) do
     def_pt[i] = samplers[name].normalize(samplers[name].center)
   end
-
-
 
   local eval_idx = 0
   local function evaluate (u)
@@ -373,17 +367,10 @@ local cmaes_search = function (args)
     return -score, viol, feasible
   end
 
-
-
   local function cma_run (m0, lambda, sigma0, run_cap, eval_mean)
-
-
 
     local cma = capi.cma(n, lambda, sigma0, m0)
     local run_evals = 0
-
-
-
 
     if eval_mean and eval_idx < trials then
       local u0 = {}
@@ -393,7 +380,6 @@ local cmaes_search = function (args)
     end
 
     while true do
-
 
       if eval_idx + lambda > trials then break end
       if run_evals + lambda > run_cap then break end
@@ -415,7 +401,6 @@ local cmaes_search = function (args)
     return run_evals
   end
 
-
   local lambda0 = 4 + num.floor(3 * num.log(n))
   if lambda0 < 4 then lambda0 = 4 end
   local sigma0 = 0.3
@@ -428,9 +413,6 @@ local cmaes_search = function (args)
     for i = 1, n do mm[i] = uniform() end
     return mm
   end
-
-
-
 
   local explore_cap = num.floor(trials / 2)
   if explore_cap < lambda0 then explore_cap = trials end
@@ -465,11 +447,6 @@ local cmaes_search = function (args)
     end
     if used == 0 then break end
   end
-
-
-
-
-
 
   local sigma_ref = 0.1
   while eval_idx < trials do
@@ -604,7 +581,6 @@ M.krr = function (args)
     return spec.def or spec.max or spec.min
   end
 
-
   local function resolve_params ()
     local p, any = {}, false
     for _, kdef in ipairs(REBUILD_KNOBS) do
@@ -654,9 +630,6 @@ M.krr = function (args)
   local seed = args.seed or 5
   local kernel_samplers = build_samplers(args, { "nu", "gamma" }, nil, seed)
 
-
-
-
   local strials = args.search_trials or 0
   local do_search = strials > 1
   local frozen = strials == 0
@@ -668,8 +641,6 @@ M.krr = function (args)
   elseif not frozen then decode_offset = nil end
   args.lambda = spec_defaults(args.lambda, { min = 1e-7, max = 8, log = true })
 
-
-
   if do_search and type(args.lambda) == "table" and args.lambda.search ~= nil then
     args.lambda.def = args.lambda.search  -- luacheck: ignore
   end
@@ -680,9 +651,6 @@ M.krr = function (args)
   local tile_labels = tiled and (args.tile_labels or 1024) or nil
   local want_decode, mode = decode_mode(args, dense)
   local use_oof = decode_offset == nil and (mode == "span" or mode == "multilabel")
-
-
-
 
   local seed_ensemble = args.seed_ensemble or 1
   local lm_seed_offset = 0
@@ -696,7 +664,6 @@ M.krr = function (args)
   }
   local w_auto
   local nl_cap = args.n_labels or args.n_targets or 1
-
 
   local xtx_shared, xty_shared
   local function ensure_shared_bufs ()
@@ -721,8 +688,6 @@ M.krr = function (args)
   end
   local search_m = args.search_landmarks or args.n_landmarks
 
-
-
   local fastpath_cal = use_oof and (search_m == args.n_landmarks)
   local lm_slot
   local xtx_slot, xty_slot, factor_slot
@@ -736,8 +701,6 @@ M.krr = function (args)
     proj_shared = nil; sims_shared = nil; row_shared = nil -- luacheck: ignore
     lm_slot = nil
     xtx_slot = nil; xty_slot = nil; factor_slot = nil
-
-
 
     if enc_slot then enc_slot:destroy(); enc_slot = nil end
     search_fb = nil
@@ -763,16 +726,11 @@ M.krr = function (args)
     spectral_args.nu = spec.nu
     spectral_args.strata = args.pool_strata
 
-
-
-
     if at_search == "search" then
       if lm_slot == nil then
         lm_slot = spectral.uniform_landmarks(spectral_args, search_m, seed + 1000, args.stratum_rows)
         xtx_slot = fvec.create(search_m * search_m)
         xty_slot = fvec.create(search_m * nl_cap)
-
-
 
         factor_slot = fvec.create(search_m * search_m)
       end
@@ -780,9 +738,6 @@ M.krr = function (args)
       spectral_args.xtx_buf = xtx_slot
       spectral_args.xty_buf = xty_slot
       spectral_args.factor_buf = factor_slot
-
-
-
 
       spectral_args.encoder = enc_slot
     elseif at_search == "cal" then
@@ -806,12 +761,6 @@ M.krr = function (args)
     end
     return { sp_enc = sp_enc, gram = gram }
   end
-
-
-
-
-
-
 
   local function build_folds (spec, fb, at_search)
     spectral_args.fold_assign = fb.assign
@@ -874,8 +823,6 @@ M.krr = function (args)
     if fb.factor_path then os.remove(fb.factor_path) end
   end
 
-
-
   local function oof_decider (kds, split)
     local ivec = require("santoku.ivec")
     local nf = #kds
@@ -922,9 +869,6 @@ M.krr = function (args)
       return decider, m, scs, fms
     end
 
-
-
-
     local ml = split._oof_ml
     if not ml then
       ml = { foldP = {} }
@@ -964,15 +908,6 @@ M.krr = function (args)
     end
     return decider, m, scs, fms
   end
-
-
-
-
-
-
-
-
-
 
   local function eval_folds (kds, lam, fns, split, race, best_hint)
     local nf = #kds
@@ -1037,9 +972,6 @@ M.krr = function (args)
     return mean, agg, decider, pooled_m
   end
 
-
-
-
   local function calibrate_and_deploy (spec, params)
     local fin = nil
     if want_decode and (mode == "span" or mode == "multilabel") then
@@ -1094,17 +1026,7 @@ M.krr = function (args)
     return kd.sp_enc, r, codes_or_deploy, params, decider, decider_metrics, bake_blocks
   end
 
-
-
-
   local function finish_ensemble (build_spec, params, fin)
-
-
-
-
-
-
-
 
     spectral_args.proj_buf = nil
     local cur_kd
@@ -1253,10 +1175,6 @@ M.krr = function (args)
         for k = 1, M - 1 do z[k] = gp[knob.names[k]] end
         local y = ilr_inverse(z, M)
 
-
-
-
-
         for j = 1, M do
           v[knob.active[j]] = math.exp(y[j])
         end
@@ -1291,9 +1209,6 @@ M.krr = function (args)
   if not do_search then
     local _, base = center_spec()
 
-
-
-
     local rk = {}
     for _, knob in ipairs(rebuild_knobs) do
       for _, nm in ipairs(knob.names) do local sm = knob.samplers[nm]; rk[nm] = sm and sm.center end
@@ -1327,7 +1242,6 @@ M.krr = function (args)
     else
       sp_enc, r, vcodes, params_out, decider, dmetrics, bake = finish(kd, params, sstr, fin)
     end
-
 
     if seed_ensemble <= 1 then release_cv() end
     prof_emit()
@@ -1364,14 +1278,6 @@ M.krr = function (args)
     local mean, agg, dec, pooled_m, raced = eval_folds(kds, lam, (not use_oof) and fold_trial_fns or nil,
       args.fold_split, race_state, best_hint)
     tock(ts)
-
-
-
-
-
-
-
-
 
     for f = 1, #kds do kds[f].ridge = nil; kds[f].gram:destroy() end
     kd.gram:destroy()
@@ -1416,13 +1322,11 @@ M.krr = function (args)
       sc, sm, meta = (worst_score or -1e18), { failed = true }, meta or {}
     elseif raced then
 
-
       sm.failed = true
       sm.raced = true
     else
       worst_score = worst_score and num.min(worst_score, sc) or sc
     end
-
 
     local sel = (failed or raced) and -num.huge or sc
     bi = bi + 1
@@ -1503,7 +1407,6 @@ M.krr = function (args)
 
   local best_kd, fin, solve_tag
   if best_fin then
-
 
     if seed_ensemble <= 1 then
       best_kd = build_kd(best_params)
