@@ -1,5 +1,6 @@
 local booleanizer = require("santoku.learn.booleanizer")
 local test = require("santoku.test")
+local fs = require("santoku.fs")
 
 test("booleanizer", function ()
 
@@ -99,10 +100,10 @@ test("booleanizer", function ()
       for d = 0, dims - 1 do bzr:observe(d, data[s * dims + d + 1]) end
     end
     bzr:finalize()
-    local tmp = os.tmpname()
+    local tmp = fs.tmpname()
     bzr:persist(tmp)
     local bzr2 = booleanizer.load(tmp)
-    os.remove(tmp)
+    fs.rm(tmp, true)
     local n_bits, n_dense = bzr:features()
     local n_bits2, n_dense2 = bzr2:features()
     assert(n_bits == n_bits2 and n_dense == n_dense2)

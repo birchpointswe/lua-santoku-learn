@@ -4,7 +4,7 @@ local pvec = require("santoku.pvec")
 local spans = require("santoku.spans")
 local ivec = require("santoku.ivec")
 local test = require("santoku.test")
-
+local fs = require("santoku.fs")
 
 test("aho", function ()
 
@@ -123,7 +123,6 @@ test("aho", function ()
     assert(offsets:get(0) == 0)
     assert(offsets:get(1) == 0)
   end)
-
 
   test("latin extended-a", function ()
     local ac = aho.create({ patterns = { "scev" }, normalize = true })
@@ -264,7 +263,6 @@ test("aho", function ()
     assert(result[1] == "<span title='it&#39;s'>it</span> works")
   end)
 
-
   test("predict with exclude", function ()
     local ac = aho.create({ patterns = { "foo", "bar", "baz" } })
     local exc = pvec.create()
@@ -386,10 +384,10 @@ test("aho", function ()
 
   test("persist/load roundtrip", function ()
     local ac = aho.create({ patterns = { "foo", "bar", "baz" } })
-    local tmp = os.tmpname()
+    local tmp = fs.tmpname()
     ac:persist(tmp)
     local ac2 = aho.load(tmp)
-    os.remove(tmp)
+    fs.rm(tmp, true)
     local S = ac2:predict({ texts = { "foo bar baz" } })
     local mids, starts, ends = S:col("id"), S:col("s"), S:col("e")
     assert(mids:size() == 3)

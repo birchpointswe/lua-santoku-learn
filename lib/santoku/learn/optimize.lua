@@ -1,4 +1,5 @@
 local num = require("santoku.num")
+local fs = require("santoku.fs")
 local err = require("santoku.error")
 local rand = require("santoku.random")
 local utc = require("santoku.utc")
@@ -173,7 +174,7 @@ local function ilr_forward (y)
   for k = 1, N - 1 do
     local m = 0
     for i = 1, k do m = m + y[i] end
-    z[k] = math.sqrt(k / (k + 1)) * (m / k - y[k + 1])
+    z[k] = num.sqrt(k / (k + 1)) * (m / k - y[k + 1])
   end
   return z
 end
@@ -182,10 +183,10 @@ local function ilr_inverse (z, N)
   local y = {}
   for i = 1, N do y[i] = 0 end
   for k = 1, N - 1 do
-    local a = math.sqrt(1 / (k * (k + 1)))
+    local a = num.sqrt(1 / (k * (k + 1)))
     local zk = z[k]
     for i = 1, k do y[i] = y[i] + zk * a end
-    y[k + 1] = y[k + 1] - zk * math.sqrt(k / (k + 1))
+    y[k + 1] = y[k + 1] - zk * num.sqrt(k / (k + 1))
   end
   return y
 end
@@ -816,11 +817,11 @@ M.krr = function (args)
       fb.xtx[f]:destroy(); fb.xty[f]:destroy()
       if fb.paths[f] then
         fb.codes[f]:data():destroy()
-        os.remove(fb.paths[f])
+        fs.rm(fb.paths[f], true)
       end
     end
     fb.factor:destroy()
-    if fb.factor_path then os.remove(fb.factor_path) end
+    if fb.factor_path then fs.rm(fb.factor_path, true) end
   end
 
   local function oof_decider (kds, split)
@@ -943,7 +944,7 @@ M.krr = function (args)
         if race and best_hint and f >= 2 and f < nf and race.count >= 8 then
           local st = race.stats[f]
           if st and st.n >= 8 then
-            local sd = math.sqrt(st.m2 / (st.n - 1))
+            local sd = num.sqrt(st.m2 / (st.n - 1))
             if sd < 1e-4 then sd = 1e-4 end
             local predicted = pfx[f] + st.mean
             if predicted + 3 * sd < best_hint then
@@ -1121,11 +1122,11 @@ M.krr = function (args)
           end
         end
         local M = #knob.active
-        local c = math.log(kdef.defaults.max or 100) / math.sqrt(1 - 1 / math.max(M, 2))
+        local c = num.log(kdef.defaults.max or 100) / num.sqrt(1 - 1 / num.max(M, 2))
         local centers
         if all_def and M > 1 then
           local y = {}
-          for j = 1, M do y[j] = math.log(defs[j]) end
+          for j = 1, M do y[j] = num.log(defs[j]) end
           centers = ilr_forward(y)
         end
         for k = 1, M - 1 do
@@ -1176,7 +1177,7 @@ M.krr = function (args)
         local y = ilr_inverse(z, M)
 
         for j = 1, M do
-          v[knob.active[j]] = math.exp(y[j])
+          v[knob.active[j]] = num.exp(y[j])
         end
       end
       return v
@@ -1196,10 +1197,10 @@ M.krr = function (args)
         local v = p[knob.key]
         local logsum, cnt = 0, 0
         for i = 1, #v do
-          if type(v[i]) == "number" and v[i] > 0 then logsum = logsum + math.log(v[i]); cnt = cnt + 1 end
+          if type(v[i]) == "number" and v[i] > 0 then logsum = logsum + num.log(v[i]); cnt = cnt + 1 end
         end
         if cnt > 0 then
-          local gm = math.exp(logsum / cnt)
+          local gm = num.exp(logsum / cnt)
           for i = 1, #v do if type(v[i]) == "number" then v[i] = v[i] / gm end end
         end
       end

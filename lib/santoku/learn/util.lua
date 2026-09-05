@@ -1,4 +1,6 @@
 local str = require("santoku.string")
+local num = require("santoku.num")
+local arr = require("santoku.array")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
 local fvec = require("santoku.fvec")
@@ -11,7 +13,7 @@ local M = {}
 
 local word_prog = re.prog("[A-Za-z0-9]+")
 
-local SHAPE_PATTERN = table.concat({
+local SHAPE_PATTERN = arr.concat({
   '{:caps: [A-Z][A-Z]+ :} ![A-Za-z0-9]',
   '{:icap: [A-Z][a-z]+ [A-Z] [A-Za-z]* :} ![A-Za-z0-9]',
   '{:cap: [A-Z][a-z]+ :} ![A-Za-z0-9]',
@@ -97,8 +99,8 @@ function M.vecstr (v)
   if type(v) ~= "table" then v = { v } end
   local p = {}
   for i = 1, #v do local x = v[i]
-    p[i] = (x == math.floor(x)) and str.format("%d", x) or str.format("%.8g", x) end
-  return "[" .. table.concat(p, ",") .. "]"
+    p[i] = (x == num.floor(x)) and str.format("%d", x) or str.format("%.8g", x) end
+  return "[" .. arr.concat(p, ",") .. "]"
 end
 
 function M.fmt_metrics (m)
@@ -119,7 +121,6 @@ local function format_phase (ev)
   local tag = ev.phase or "lhs"
   return str.format("%s %d/%d", tag, ev.trial or 1, ev.trials or 1)
 end
-
 
 local NU_NAME = { [0] = "1/2", [1] = "3/2", [2] = "5/2", [3] = "inf" }
 
@@ -148,7 +149,7 @@ local function fmt_exponent (ex)
     else parts[i] = str.format("%.8g", ex[i]); any = true end
   end
   if not any then return "" end
-  return " exp=[" .. table.concat(parts, ",") .. "]"
+  return " exp=[" .. arr.concat(parts, ",") .. "]"
 end
 
 local function fmt_scales (sc)
@@ -156,14 +157,12 @@ local function fmt_scales (sc)
   if type(sc) == "table" then
     local parts = {}
     for i = 1, #sc do parts[i] = sc[i] == false and "1" or str.format("%.8g", sc[i]) end
-    return " scales=[" .. table.concat(parts, ",") .. "]"
+    return " scales=[" .. arr.concat(parts, ",") .. "]"
   end
   return str.format(" scales=%.8g", sc)
 end
 
 function M.make_ridge_log (stopwatch, metric_fmt)
-
-
 
   local scores = {}
   return function (ev)
@@ -185,10 +184,10 @@ function M.make_ridge_log (stopwatch, metric_fmt)
       str.printf("[Ridge Done]%s%s%s%s%s%s lambda=%.8g%s%s%s\n",
         emb, md, kdesc, scl, exf, solve, p.lambda or 0, sc, fsd, timing)
       if #scores > 1 then
-        table.sort(scores, function (a, b) return a > b end)
+        arr.sort(scores, function (a, b) return a > b end)
         local n = #scores
         local best = scores[1]
-        local band = best - scores[math.min(32, n)]
+        local band = best - scores[num.min(32, n)]
         local w1, w5 = 0, 0
         for i = 1, n do
           if scores[i] >= best - 0.001 then w1 = w1 + 1 end
@@ -205,8 +204,8 @@ function M.make_ridge_log (stopwatch, metric_fmt)
       for kk in pairs(ev.stats) do
         if kk:sub(1, 1) == "~" then spans[#spans + 1] = kk else leaves[#leaves + 1] = kk end
       end
-      table.sort(leaves, function (a, b) return ev.stats[a].time > ev.stats[b].time end)
-      table.sort(spans, function (a, b) return ev.stats[a].time > ev.stats[b].time end)
+      arr.sort(leaves, function (a, b) return ev.stats[a].time > ev.stats[b].time end)
+      arr.sort(spans, function (a, b) return ev.stats[a].time > ev.stats[b].time end)
       str.printf("[Profile] total=%.2fs\n", total)
       local leafsum = 0
       for _, kk in ipairs(leaves) do
@@ -228,7 +227,7 @@ function M.make_ridge_log (stopwatch, metric_fmt)
     local m = ev.metrics or {}
     local score = ev.score or 0
     if ev.event == "trial" and not m.failed then scores[#scores + 1] = score end
-    local best = (ev.best and ev.best ~= -math.huge)
+    local best = (ev.best and ev.best ~= -num.huge)
       and str.format(" (best=%.6f%s)", ev.best, ev.is_new_best and " ++" or "") or ""
     local md = metric_fmt and metric_fmt(m) or M.fmt_metrics(m)
     local detail = (md ~= "") and (" " .. md) or ""
@@ -247,9 +246,6 @@ function M.make_ridge_log (stopwatch, metric_fmt)
       phase, kdesc, embd, scl, exf, lambda, score, detail, off, best, timing)
   end
 end
-
-
-
 
 local TOK_VEC = { off = ivec, toks = svec, vals = fvec }
 local function mmap_alloc (base)
@@ -372,15 +368,11 @@ local function pool_strata (a, n)
   end
 end
 
-
-
-
-
 local STRAT_HEADROOM = 1.3
 local STRAT_CAP = 0.4
 local function strat_size (a, n)
-  local m = a.search_landmarks or a.n_landmarks or math.floor(n / 3)
-  return math.max(1, math.min(math.ceil(m * STRAT_HEADROOM), math.floor(n * STRAT_CAP)))
+  local m = a.search_landmarks or a.n_landmarks or num.floor(n / 3)
+  return num.max(1, num.min(num.ceil(m * STRAT_HEADROOM), num.floor(n * STRAT_CAP)))
 end
 
 local function weight_fit (blocks, y, metrics, is_targets)
@@ -406,7 +398,7 @@ function M.rms_scale_blocks (train_blocks, eval_block_lists, from, to)
     local w = fvec.create(nc)
     for c = 0, nc - 1 do
       local s = ssq:get(c)
-      w:set(c, s > 0 and math.sqrt(n / s) or 0)
+      w:set(c, s > 0 and num.sqrt(n / s) or 0)
     end
     X:bns(w)
     for _, ebl in ipairs(eval_block_lists) do ebl[i]:bns(w) end
@@ -416,16 +408,6 @@ function M.rms_scale_blocks (train_blocks, eval_block_lists, from, to)
 end
 
 local WEIGHT_FLOOR = 1e-6
-
-
-
-
-
-
-
-
-
-
 
 function M.build_blocks (blocks, scale, exponent, n, w, pcs, groups, cs_cache, gg_cache)
   local bl = {}
@@ -456,10 +438,6 @@ function M.build_blocks (blocks, scale, exponent, n, w, pcs, groups, cs_cache, g
         local e = exponent and exponent[g0 + 1]
         if e == nil or e == false then e = 1.0 end
 
-
-
-
-
         local slot = cs_cache and cs_cache[i]
         if slot and slot.e == e then
           cs, wssq = slot.cs, slot.wssq
@@ -471,7 +449,7 @@ function M.build_blocks (blocks, scale, exponent, n, w, pcs, groups, cs_cache, g
         wssq = pcs[i]:sum()
       end
       if wssq then
-        sc = (wssq > 0) and (math.sqrt(n / wssq) * sc) or 0
+        sc = (wssq > 0) and (num.sqrt(n / wssq) * sc) or 0
       end
       bl[i] = { x = blocks[i], n_tokens = nc, scale = sc, colscale = cs }
       g0 = g0 + 1
@@ -491,7 +469,7 @@ function M.predict_tiled (o)
     local pred, scores, sbuf
     if want_scores then scores = fvec.create(n * nl) end
     for base = 0, n - 1, tile do
-      local bs = math.min(tile, n - base)
+      local bs = num.min(tile, n - base)
       local idx = ivec.create(bs)
       for i = 0, bs - 1 do idx:set(i, base + i) end
       local codes
@@ -518,9 +496,6 @@ function M.predict_tiled (o)
     end
     return pred, scores
   end
-
-
-
 
   local E = (o.ridge and type(o.ridge) == "table" and o.ridge.is_ensemble) and o.ridge or o.ensemble
   if E then
@@ -561,15 +536,11 @@ function M.fold_dense (a)
   local is_csr = a.pool_codes.neighbors ~= nil
   a.pool_strata = pool_strata(a, n)
 
-
-
-
-
   local strat_idx = ivec.create()
   local instrat = {}
   local ssize = strat_size(a, n)
   for i = 0, ssize - 1 do
-    local r = math.floor(i * n / ssize)
+    local r = num.floor(i * n / ssize)
     if not instrat[r] then instrat[r] = true; strat_idx:push(r) end
   end
   a.stratum_rows = strat_idx
@@ -603,7 +574,6 @@ function M.fold_dense (a)
     return w
   end
 
-
   local function dense_colscale (e, cv)
     if type(e) == "table" then e = e[1] end
     if not rel or e == nil or e == false then return nil end
@@ -615,9 +585,9 @@ function M.fold_dense (a)
     local logsum = 0
     for c = 0, nc - 1 do
       local v = w:get(c); if v < WEIGHT_FLOOR then v = WEIGHT_FLOOR end
-      logsum = logsum + math.log(v)
+      logsum = logsum + num.log(v)
     end
-    local g = math.exp(logsum / nc)
+    local g = num.exp(logsum / nc)
     local cs = fvec.create(nc)
     for c = 0, nc - 1 do
       local v = w:get(c); if v < WEIGHT_FLOOR then v = WEIGHT_FLOOR end
@@ -672,19 +642,14 @@ function M.fold_blocks (a)
   local use_folds = K > 1 and (a.search_trials or 0) >= 1
   a.pool_strata = pool_strata(a, n)
 
-
-
-
-
-
   local strat_idx = ivec.create()
   local instrat = {}
   local ssize = strat_size(a, n)
   if a.cand then
     local co = a.cand:offsets()
     local ndocs = co:size() - 1
-    local target_docs = math.max(1, math.min(math.ceil(ssize * ndocs / n), math.floor(ndocs * STRAT_CAP)))
-    local stride = math.max(1, math.floor(ndocs / target_docs + 0.5))
+    local target_docs = num.max(1, num.min(num.ceil(ssize * ndocs / n), num.floor(ndocs * STRAT_CAP)))
+    local stride = num.max(1, num.floor(ndocs / target_docs + 0.5))
     for dd = 0, ndocs - 1 do
       if dd % stride == 0 then
         instrat[dd] = true
@@ -693,13 +658,11 @@ function M.fold_blocks (a)
     end
   else
     for i = 0, ssize - 1 do
-      local r = math.floor(i * n / ssize)
+      local r = num.floor(i * n / ssize)
       if not instrat[r] then instrat[r] = true; strat_idx:push(r) end
     end
   end
   a.stratum_rows = strat_idx
-
-
 
   local function make_split (Kn, user_docfold, user_foldof)
     local foldof, fvc, fvg
@@ -740,7 +703,6 @@ function M.fold_blocks (a)
       val_targets = reg and fvt or nil, val_cand = fvc, val_gold = fvg }
   end
 
-
   local sy = a.pool_labels and a.pool_labels:rows(strat_idx)
     or (wtargets and slice_targets(a.pool_targets, strat_idx)) or nil
   local spool = {}
@@ -771,9 +733,6 @@ function M.fold_blocks (a)
     for i, b in ipairs(ext) do xs[i] = type(b) == "table" and b.x or b end
     return (M.build_blocks(xs, params.scales, params.exponent, n, p_w_full, p_pcs, groups))
   end
-
-
-
 
   local cs_cache_cv, cs_cache_full = {}, {}
   local gg_cache_cv, gg_cache_full = {}, {}

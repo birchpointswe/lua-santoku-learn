@@ -6,9 +6,9 @@ local ivec = require("santoku.ivec")
 local cvec = require("santoku.cvec")
 local str = require("santoku.string")
 local test = require("santoku.test")
+local fs = require("santoku.fs")
 
-io.stdout:setvbuf("line")
-
+fs.stdout:setvbuf("line")
 
 local function recall (Pa, Pd, nq)
   local oa, na = Pa:offsets(), Pa:neighbors()
@@ -27,7 +27,6 @@ end
 
 test("ann spectral idf retrieval", function ()
 
-
   local dataset = ds.read_imdb("test/res/imdb.50k", 500)
   local texts = dataset.problems
   local tok = tokenizer.create({ ngram_min = 4, ngram_max = 4, normalize = true })
@@ -42,22 +41,17 @@ test("ann spectral idf retrieval", function ()
 
   local k = 10
 
-
   local radius = 6
 
-
   local P_exact = C:topk(C, k)
-
 
   local idx = ann.create({ codes = C })
   local P_rr = idx:neighborhoods_by_vecs(C, k, radius)
   local r_rr = recall(P_rr, P_exact, nq)
 
-
   local idx_bin = ann.create({ codes = C, rerank = false })
   local P_bin = idx_bin:neighborhoods_by_vecs(C, k, radius)
   local r_bin = recall(P_bin, P_exact, nq)
-
 
   local P_self = idx:neighborhoods(k)
 
@@ -65,7 +59,6 @@ test("ann spectral idf retrieval", function ()
   local P_self_bin = idx:neighborhoods(k, false)
 
   str.printf("[ANN] recall@%d  rerank=%.4f  hamming=%.4f\n", k, r_rr, r_bin)
-
 
   assert(P_rr:offsets():size() == nq + 1)
   assert(P_bin:offsets():size() == nq + 1)
@@ -78,9 +71,7 @@ test("ann spectral idf retrieval", function ()
 
   assert(r_rr > 0.3)
 
-
-
-  local tmp = os.tmpname() .. ".ann"
+  local tmp = fs.tmpname() .. ".ann"
   idx:persist(tmp)
   local idx_r = ann.load(tmp, C)
   local P_r = idx_r:neighborhoods_by_vecs(C, k, radius)
@@ -90,24 +81,21 @@ test("ann spectral idf retrieval", function ()
   local P_h = idx_h:neighborhoods_by_vecs(C, k, radius)
   assert(recall(P_h, P_bin, nq) == 1 and recall(P_bin, P_h, nq) == 1)
 
-
-
-
   local nb, ns, nk = ann.sizes(C)
-  local base = os.tmpname()
+  local base = fs.tmpname()
   local idx_mm = ann.create({ codes = C, rerank = true,
     bits = cvec.mmap_create(base .. ".bits", nb),
     sids = ivec.mmap_create(base .. ".sids", ns),
     buckets = ivec.mmap_create(base .. ".buckets", nk) })
   assert(recall(idx_mm:neighborhoods_by_vecs(C, k, radius), P_rr, nq) == 1)
-  local tmp2 = os.tmpname() .. ".ann"
+  local tmp2 = fs.tmpname() .. ".ann"
   idx_mm:persist(tmp2)
   local idx_m = ann.load(tmp2, C,
     ivec.mmap_open(base .. ".sids"), ivec.mmap_open(base .. ".buckets"), cvec.mmap_open(base .. ".bits"))
   local P_m = idx_m:neighborhoods_by_vecs(C, k, radius)
   assert(recall(P_m, P_rr, nq) == 1 and recall(P_rr, P_m, nq) == 1)
 
-  os.remove(tmp); os.remove(tmp2)
-  for _, sfx in ipairs({ ".bits", ".sids", ".buckets" }) do os.remove(base .. sfx) end
+  fs.rm(tmp, true); fs.rm(tmp2, true)
+  for _, sfx in ipairs({ ".bits", ".sids", ".buckets" }) do fs.rm(base .. sfx, true) end
 
 end)

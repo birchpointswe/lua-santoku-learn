@@ -6,6 +6,7 @@ local ivec = require("santoku.ivec")
 local ner = require("santoku.learn.ner")
 require("santoku.csr")
 local tbl = require("santoku.table")
+local fs = require("santoku.fs")
 local teq = tbl.equals
 
 test("ner: type_labels", function ()
@@ -55,9 +56,9 @@ test("ner: char gaz persist round-trip", function ()
   cand:push(7, 12):push(21, 26):doc()
   cand:push(0, 5):push(17, 22):doc()
   local A = gaz:block(texts, cand, nil)
-  local path = os.tmpname() .. ".gaz"
+  local path = fs.tmpname() .. ".gaz"
   gaz:persist(path)
   local B = ner.load_gaz(path):block(texts, cand, nil)
-  os.remove(path)
+  fs.rm(path, true)
   assert(A:eq(B), "gaz block diverges after persist/load")
 end)

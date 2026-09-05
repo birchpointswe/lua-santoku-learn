@@ -166,7 +166,7 @@ local function clean_newsgroup_text (text, remove)
       lines[i] = nil
     end
   end
-  return table.concat(lines, "\n")
+  return arr.concat(lines, "\n")
 end
 
 M.read_20newsgroups = function (dir, max_per_class, remove, max)
@@ -176,7 +176,7 @@ M.read_20newsgroups = function (dir, max_per_class, remove, max)
   for cat_dir in fs.dirs(dir) do
     categories[#categories + 1] = { name = fs.basename(cat_dir), path = cat_dir }
   end
-  table.sort(categories, function (a, b) return a.name < b.name end)
+  arr.sort(categories, function (a, b) return a.name < b.name end)
   for cat_idx, cat in ipairs(categories) do
     categories[cat_idx] = cat.name
     local n = 0
@@ -242,7 +242,7 @@ M.read_eurlex57k = function (dir, max)
       for s, e in lpeg_utils.json_fields(line, text_fields) do
         parts[#parts + 1] = line:sub(s, e)
       end
-      return table.concat(parts, "\n")
+      return arr.concat(parts, "\n")
     end
   end
   local function read_file(fname)
@@ -265,7 +265,7 @@ M.read_eurlex57k = function (dir, max)
         end
         doc_labels[#doc_labels + 1] = idx
       end
-      table.sort(doc_labels)
+      arr.sort(doc_labels)
       for _, idx in ipairs(doc_labels) do sol_nbr:push(idx) end
       label_counts:push(#doc_labels)
       n = n + 1
@@ -369,7 +369,6 @@ local function _encode_housing_split (dataset, rows)
     n_continuous = n_cont,
     bits = bzr:encode({ samples = rows, cols = dataset.categorical_cols }),
 
-
     continuous = mtx.create({ data = continuous:to_fvec(), n_rows = #rows, n_cols = n_cont }),
     targets = targets,
   }
@@ -390,7 +389,6 @@ M.split_california_housing = function (dataset, ttr)
 end
 
 local conll_types = { PER = 0, ORG = 1, LOC = 2, MISC = 3 }
-
 
 local function read_conll_file (fp, max)
   local texts = {}
@@ -427,7 +425,7 @@ local function read_conll_file (fp, max)
     if ct then gold:push(cs, ce, ct) end
     gold:doc()
     n = n + 1
-    texts[n] = table.concat(parts)
+    texts[n] = arr.concat(parts)
     words, ners = {}, {}
   end
   for line in fs.lines(fp) do

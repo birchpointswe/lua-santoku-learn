@@ -8,16 +8,12 @@ local util = require("santoku.learn.util")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local utc = require("santoku.utc")
+local fs = require("santoku.fs")
 
-io.stdout:setvbuf("line")
+fs.stdout:setvbuf("line")
 
 local N_TYPES = 4
 local MAX_SPAN = 1000000000
-
-
-
-
-
 
 local cfg = {
   verbose = false,
@@ -228,7 +224,7 @@ test("conll-full", function ()
   str.printf("[Span] test %s offset=%.8g %s\n", util.fmt_metrics(te_m), ty_decider:offset(), sw())
 
   local bundle = require("santoku.learn.bundle")
-  local bdir = os.tmpname() .. ".bundle"
+  local bdir = fs.tmpname() .. ".bundle"
   bundle.persist({ dir = bdir, tokenizers = ty_toks, gaz = ty_serve_gaz, gaz_rms = ty_rms_w[n_sparse + 1],
     encoder = ty_enc, ridge = ridge_ty, decider = ty_decider })
   local dep = util.fmt_metrics(te_m)

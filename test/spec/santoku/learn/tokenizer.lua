@@ -6,6 +6,7 @@ local fvec = require("santoku.fvec")
 local svec = require("santoku.svec")
 local spans = require("santoku.spans")
 local test = require("santoku.test")
+local fs = require("santoku.fs")
 
 local word_prog = re.prog("[A-Za-z0-9]+")
 
@@ -92,10 +93,10 @@ test("tokenizer", function ()
       terminals = true, focus = true })
     local F = spans.create({ offsets = ivec.create({ 0, 1, 1, 1, 1, 1 }), s = ivec.create({ 0 }), e = ivec.create({ 8 }) })
     tk:fit({ texts = texts, focus = F, tokens = T })
-    local path = os.tmpname()
+    local path = fs.tmpname()
     tk:persist(path)
     local tk2 = tokenizer.load(path)
-    os.remove(path)
+    fs.rm(path, true)
     assert(tk2:n_tokens() == tk:n_tokens())
     local X1 = tk:tokenize({ texts = texts, focus = F, tokens = T })
     local X2 = tk2:tokenize({ texts = texts, focus = F, tokens = T })
@@ -108,28 +109,25 @@ test("tokenizer", function ()
     local function mk () return tokenizer.create({ ngram_min = 1, ngram_max = 3,
       mode = "words", terminals = true, focus = true }) end
 
-
     local V = { off = ivec, toks = svec, vals = fvec }
     local function mk_alloc (b) return function (kind, n) return V[kind].mmap_create(b .. "." .. kind, n) end end
     local Xram = mk():fit({ texts = texts, focus = F, tokens = T })
-    local tmp = os.tmpname()
+    local tmp = fs.tmpname()
     local base, base2 = tmp .. ".a", tmp .. ".b"
     local tkm = mk()
     assert(tkm:fit({ texts = texts, focus = F, tokens = T, alloc = mk_alloc(base) }):eq(Xram))
 
     for _, sfx in ipairs({ ".off", ".toks", ".vals" }) do
-      local f = io.open(base .. sfx, "r"); assert(f, "alloc not invoked: " .. base .. sfx .. " missing"); f:close()
+      assert(fs.exists(base .. sfx), "alloc not invoked: " .. base .. sfx .. " missing")
     end
 
     assert(tkm:tokenize({ texts = texts, focus = F, tokens = T, alloc = mk_alloc(base2) })
       :eq(tkm:tokenize({ texts = texts, focus = F, tokens = T })))
-    os.remove(tmp)
+    fs.rm(tmp, true)
     for _, b in ipairs({ base, base2 }) do
-      for _, sfx in ipairs({ ".off", ".toks", ".vals" }) do os.remove(b .. sfx) end
+      for _, sfx in ipairs({ ".off", ".toks", ".vals" }) do fs.rm(b .. sfx, true) end
     end
   end)
-
-
 
   test("tokenize_raw: raw ngram-hash csr, counts", function ()
     local off, tok, val = tokenizer.tokenize_raw({

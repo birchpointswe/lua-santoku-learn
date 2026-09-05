@@ -11,13 +11,9 @@ local utc = require("santoku.utc")
 local fvec = require("santoku.fvec")
 local fs = require("santoku.fs")
 
-io.stdout:setvbuf("line")
+fs.stdout:setvbuf("line")
 
 local N_TYPES = 4
-
-
-
-
 
 local cfg = {
   verbose = false,
@@ -70,8 +66,6 @@ test("conll-gaz CV", function ()
   str.printf("[Cands] pool=%d test=%d | test coverage=%.4f folds=%d trials=%d\n",
     n_pool, n_test, Cte:coverage(Gte), cfg.head.folds, cfg.head.search_trials)
 
-
-
   local toks, Xtr = util.tokenize_blocks(cfg.blocks, pool.texts,
     { focus = Ctr, tokens = Ttr, scratch = "test/res/conll-gaz-blocks" })
   local _, Xte = util.tokenize_blocks(cfg.blocks, test_set.texts,
@@ -91,7 +85,7 @@ test("conll-gaz CV", function ()
 
   local Ytr = cand_labels(Ctr, Gtr)
 
-  local bdir = os.tmpname() .. ".bundle"
+  local bdir = fs.tmpname() .. ".bundle"
   fs.mkdirp(bdir)
   local w_path, chol_path = bdir .. "/w.mmap", bdir .. "/chol.mmap"
   local w_buf = fvec.mmap_create(w_path, cfg.emb.n_landmarks)
@@ -141,7 +135,7 @@ test("conll-gaz CV", function ()
   util.rmbundle(bdir)
   for _, base in ipairs({ "test/res/conll-gaz-blocks", "test/res/conll-gaz-blocks.te" }) do
     for i = 1, n_sparse do
-      for _, sfx in ipairs({ ".off", ".toks", ".vals" }) do os.remove(base .. "." .. i .. sfx) end
+      for _, sfx in ipairs({ ".off", ".toks", ".vals" }) do fs.rm(base .. "." .. i .. sfx, true) end
     end
   end
 end)

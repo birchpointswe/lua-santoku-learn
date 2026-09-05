@@ -5,6 +5,8 @@ local decide = require("santoku.learn.decide")
 local fvec = require("santoku.fvec")
 local ivec = require("santoku.ivec")
 local csr = require("santoku.csr")
+local fs = require("santoku.fs")
+local num = require("santoku.num")
 
 local function mkscores (rows, nl)
   local f = fvec.create(#rows * nl)
@@ -19,11 +21,10 @@ local function mkexpected (labels, nl)
 end
 
 local function argmax (r)
-  local bi, bv = 0, -math.huge
+  local bi, bv = 0, -num.huge
   for c = 1, #r do if r[c] > bv then bv = r[c]; bi = c - 1 end end
   return bi
 end
-
 
 test("decide single: predict == argmax", function ()
   local nl = 3
@@ -32,7 +33,6 @@ test("decide single: predict == argmax", function ()
   local pred = g:predict({ scores = mkscores(rows, nl), n_samples = #rows })
   for i = 1, #rows do assert(pred:get(i - 1) == argmax(rows[i]), "row " .. i) end
 end)
-
 
 test("decide single: separable scores perfect", function ()
   local nl = 3
@@ -49,16 +49,15 @@ test("decide single: separable scores perfect", function ()
   assert(macro > 0.999 and m.accuracy > 0.999, "expected perfect, got macro=" .. macro .. " acc=" .. m.accuracy)
 end)
 
-
 test("decide single: persist/load round-trip", function ()
   local nl = 3
   local rows = { { 5, 0, 0 }, { 0, 5, 0 }, { 0.50, 0, 0.49 }, { 1, 3, 2 } }
   local g = decide.create({ n_labels = nl, single = true })
   local l1 = g:predict({ scores = mkscores(rows, nl), n_samples = #rows })
-  local path = os.tmpname()
+  local path = fs.tmpname()
   g:persist(path)
   local h = decide.load(path)
-  os.remove(path)
+  fs.rm(path, true)
   local l2 = h:predict({ scores = mkscores(rows, nl), n_samples = #rows })
   for i = 1, #rows do assert(l1:get(i - 1) == l2:get(i - 1), "row " .. i) end
 end)

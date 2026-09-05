@@ -4,18 +4,9 @@ local util = require("santoku.learn.util")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local utc = require("santoku.utc")
+local fs = require("santoku.fs")
 
-io.stdout:setvbuf("line")
-
-
-
-
-
-
-
-
-
-
+fs.stdout:setvbuf("line")
 
 local cfg = {
   verbose = false,
@@ -69,7 +60,7 @@ test("newsgroups CV", function ()
     util.vecstr(best.scales), best.lambda or 0, util.fmt_metrics(m), total)
 
   local bundle = require("santoku.learn.bundle")
-  local bdir = os.tmpname() .. ".bundle"
+  local bdir = fs.tmpname() .. ".bundle"
   bundle.persist({ dir = bdir, tokenizers = toks, encoder = sp_enc, ridge = ridge_obj,
     decider = decider })
   local dep = util.fmt_metrics(m)

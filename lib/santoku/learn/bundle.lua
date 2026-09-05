@@ -13,7 +13,6 @@ M.persist = function (opts)
   local E = (type(opts.encoder) == "table" and opts.encoder.is_ensemble) and opts.encoder or nil
   if E then
 
-
     for s = 0, E.K - 1 do
       local _, r, enc = E.build(s)
       enc:persist(dir .. "/encoder_" .. s .. ".bin")
@@ -35,8 +34,7 @@ M.persist = function (opts)
   end
   local w_ext = not E and opts.w_path or nil
   local chol_ext = not E and opts.chol_path or nil
-  local fh = assert(io.open(dir .. "/manifest.lua", "w"))
-  fh:write(str.format(
+  fs.writefile(dir .. "/manifest.lua", str.format(
     "return {\n  version = 2,\n  n_tokenizers = %d,\n  seed_ensemble = %s,\n  n_labels = %s,\n  has_decider = %s,\n  has_gaz = %s,\n  has_gaz_rms = %s,\n  w_external = %s,\n  w_path = %s,\n  chol_external = %s,\n  chol_path = %s,\n}\n",
     #toks,
     E and tostring(E.K) or "nil",
@@ -48,7 +46,6 @@ M.persist = function (opts)
     w_ext and str.format("%q", w_ext) or "nil",
     chol_ext and "true" or "false",
     chol_ext and str.format("%q", chol_ext) or "nil"))
-  fh:close()
 end
 
 M.load = function (dir)
@@ -72,7 +69,6 @@ M.load = function (dir)
   end
   local encoder, r, encode
   if manifest.seed_ensemble then
-
 
     local E = { is_ensemble = true, K = manifest.seed_ensemble, n_labels = manifest.n_labels }
     E.build = function (s)

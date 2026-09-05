@@ -6,15 +6,18 @@ local dvec = require("santoku.dvec")
 local fvec = require("santoku.fvec")
 local str = require("santoku.string")
 local test = require("santoku.test")
+local fs = require("santoku.fs")
+local num = require("santoku.num")
+local random = require("santoku.random")
 
-io.stdout:setvbuf("line")
+fs.stdout:setvbuf("line")
 
 local N, C = 256, 8
 
 local function make_vals ()
-  math.randomseed(42)
+  random.seed(42)
   local vals = {}
-  for i = 1, N * C do vals[i] = math.random() * 2 - 1 end
+  for i = 1, N * C do vals[i] = random.num() * 2 - 1 end
   return vals
 end
 
@@ -67,16 +70,16 @@ local function assert_codes_close (cA, cB, tag)
 end
 
 test("group_gauge matches colscale on a single group", function ()
-  math.randomseed(7)
+  random.seed(7)
   local pcs, w = dvec.create(C), fvec.create(C)
-  for c = 0, C - 1 do pcs:set(c, math.random() * 5 + 0.1); w:set(c, math.random()) end
+  for c = 0, C - 1 do pcs:set(c, random.num() * 5 + 0.1); w:set(c, random.num()) end
   local e, s = 2.5, 1.3
   local cs, wssq = w:colscale(pcs, e, 1e-6)
   local baked = pcs:group_gauge(offsets(0, C), { s }, N, { w = w, exps = { e } })
-  local mult = s * math.sqrt(N / wssq)
+  local mult = s * num.sqrt(N / wssq)
   for c = 0, C - 1 do
     local a, b = baked:get(c), cs:get(c) * mult
-    assert(math.abs(a - b) <= 1e-5 * math.max(1, math.abs(b)), "group_gauge deviates at col " .. c)
+    assert(num.abs(a - b) <= 1e-5 * num.max(1, num.abs(b)), "group_gauge deviates at col " .. c)
   end
 end)
 
@@ -93,7 +96,7 @@ test("identity groups == columns-as-blocks (no relevance)", function ()
   local baked = blB[1].colscale
   for j = 1, C do
     local a, b = baked:get(j - 1), blA[j].scale
-    assert(math.abs(a - b) <= 1e-6 * math.max(1, math.abs(b)),
+    assert(num.abs(a - b) <= 1e-6 * num.max(1, num.abs(b)),
       "baked multiplier deviates at col " .. j)
   end
   local lms = landmarks(6)
@@ -103,9 +106,9 @@ end)
 
 test("two 4-col groups == two blocks (relevance + exponent)", function ()
   local vals = make_vals()
-  math.randomseed(9)
+  random.seed(9)
   local wall = fvec.create(C)
-  for c = 0, C - 1 do wall:set(c, math.random()) end
+  for c = 0, C - 1 do wall:set(c, random.num()) end
   local w1, w2 = fvec.create(4), fvec.create(4)
   for c = 0, 3 do w1:set(c, wall:get(c)); w2:set(c, wall:get(4 + c)) end
   local scales, exps = { 1.9, 0.4 }, { 2.1, 0.7 }
@@ -120,7 +123,7 @@ test("two 4-col groups == two blocks (relevance + exponent)", function ()
     for c = 0, 3 do
       local a = baked:get((g - 1) * 4 + c)
       local b = blA[g].scale * blA[g].colscale:get(c)
-      assert(math.abs(a - b) <= 1e-5 * math.max(1, math.abs(b)),
+      assert(num.abs(a - b) <= 1e-5 * num.max(1, num.abs(b)),
         "baked multiplier deviates at group " .. g .. " col " .. c)
     end
   end
@@ -131,9 +134,9 @@ end)
 
 test("colscale fold: prescaled block + c == raw block + (c .* w)", function ()
   local vals = make_vals()
-  math.randomseed(11)
+  random.seed(11)
   local w, c = fvec.create(C), fvec.create(C)
-  for i = 0, C - 1 do w:set(i, math.random() * 2 + 0.1); c:set(i, math.random() * 2 + 0.1) end
+  for i = 0, C - 1 do w:set(i, random.num() * 2 + 0.1); c:set(i, random.num() * 2 + 0.1) end
   local Xa = range_csr(vals, 0, C); Xa:bns(w)
   local blA = { { x = Xa, n_tokens = C, scale = 1.0, colscale = c } }
   local cw = fvec.create(C)
@@ -147,12 +150,12 @@ end)
 
 local function ignores_colscale (kernel_args, scale2, tag)
   local vals = make_vals()
-  math.randomseed(13)
+  random.seed(13)
   local c1, c2, garbage = fvec.create(4), fvec.create(4), fvec.create(4)
   for i = 0, 3 do
-    c1:set(i, math.random() + 0.1)
-    c2:set(i, math.random() + 0.1)
-    garbage:set(i, math.random() * 20 + 0.1)
+    c1:set(i, random.num() + 0.1)
+    c2:set(i, random.num() + 0.1)
+    garbage:set(i, random.num() * 20 + 0.1)
   end
   local blA = { { x = range_csr(vals, 0, 4), n_tokens = 4, scale = 1.0, colscale = c1 },
                 { x = range_csr(vals, 4, 8), n_tokens = 4, scale = scale2, colscale = c2 } }
@@ -175,10 +178,6 @@ test("enc:encode ignores the encode-time colscale (fit colscale is authoritative
   ignores_colscale({ kernel = "matern", nu = 2, gamma = 0.25 }, 22.0, "matern scale=22")
 end)
 
-
-
-
-
 test("gram:fold downdate == direct fold prepare", function ()
   local mtx = require("santoku.mtx")
   local ridge = require("santoku.learn.ridge")
@@ -194,7 +193,6 @@ test("gram:fold downdate == direct fold prepare", function ()
   local bl = { { x = X, n_tokens = C } }
   local lms = landmarks(6)
   local nf = 2
-
 
   local assign = ivec.create(N)
   local counts = {}

@@ -5,11 +5,9 @@ local util = require("santoku.learn.util")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local utc = require("santoku.utc")
+local fs = require("santoku.fs")
 
-io.stdout:setvbuf("line")
-
-
-
+fs.stdout:setvbuf("line")
 
 local cfg = {
   verbose = false,
@@ -64,7 +62,7 @@ test("housing CV", function ()
   str.printf("[Result] test=%.4f\nTotal: %.1fs\n", 1 - ts.nmae, total)
 
   local bundle = require("santoku.learn.bundle")
-  local bdir = os.tmpname() .. ".bundle"
+  local bdir = fs.tmpname() .. ".bundle"
   bundle.persist({ dir = bdir, encoder = sp_enc, ridge = ridge_obj })
   local dep = str.format("%.4f", 1 - ts.nmae)
   sp_enc, ridge_obj, deploy, test_scores, pool_blocks = nil -- luacheck: ignore
