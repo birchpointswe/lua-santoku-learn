@@ -2,7 +2,7 @@ local rock = require("santoku.make.rock")
 
 local env = {
   name = "santoku-learn",
-  version = "3.0.0-1",
+  version = "3.1.0-1",
   variable_prefix = "TK_LEARN",
   license = "MIT",
   public = true,
