@@ -26,7 +26,6 @@ local cfg = {
   classes = 1,
   k = 1,
   search_trials = 0,
-  seed_ensemble = 1,
   folds = 5,
 }
 

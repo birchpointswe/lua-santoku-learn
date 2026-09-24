@@ -472,42 +472,23 @@ function M.predict_tiled (o)
     blocks[bi] = type(b) == "table" and b or { x = b }
   end
 
-  local function predict_one (deploy, ridge, want_label, want_scores)
-    local out = mtx.create({ n_rows = 1, n_cols = 1, type = "f32" })
-    local pred, scores, sbuf, pbuf
-    if want_scores then scores = fvec.create(n * nl) end
-    for base = 0, n - 1, tile do
-      local bs = num.min(tile, n - base)
-      local codes = deploy(blocks, out, base, bs)
-      if want_label then
-        pbuf = ridge:label(codes, o.k, pbuf)
-        if pred then pred:append(pbuf) else pred = pbuf:clone() end
-      end
-      if want_scores then
-        sbuf = ridge:regress(codes, sbuf)
-        scores:copy(sbuf, 0, bs * nl, base * nl)
-      end
+  local ridge = o.ridge
+  local out = mtx.create({ n_rows = 1, n_cols = 1, type = "f32" })
+  local pred, scores, sbuf, pbuf
+  if o.scores then scores = fvec.create(n * nl) end
+  for base = 0, n - 1, tile do
+    local bs = num.min(tile, n - base)
+    local codes = o.deploy(blocks, out, base, bs)
+    if o.k then
+      pbuf = ridge:label(codes, o.k, pbuf)
+      if pred then pred:append(pbuf) else pred = pbuf:clone() end
     end
-    return pred, scores
-  end
-
-  local E = (o.ridge and type(o.ridge) == "table" and o.ridge.is_ensemble) and o.ridge or o.ensemble
-  if E then
-    nl = nl or E.n_labels
-    local S, topk_ridge
-    for s = 0, E.K - 1 do
-      local deploy, ridge = E.build(s)
-      topk_ridge = ridge
-      local _, sc = predict_one(deploy, ridge, false, true)
-      if not S then S = sc else S:addv(sc) end
-      E.release(s)
+    if o.scores then
+      sbuf = ridge:regress(codes, sbuf)
+      scores:copy(sbuf, 0, bs * nl, base * nl)
     end
-    S:scale(1.0 / E.K)
-    local pred
-    if o.k then pred = topk_ridge:topk(S, n, o.k) end
-    return pred, (o.scores and S or nil)
   end
-  return predict_one(o.deploy, o.ridge, o.k ~= nil, o.scores ~= nil)
+  return pred, scores
 end
 
 local function free_csr (X)

@@ -39,7 +39,6 @@ local cfg = {
     exponent = { def = { 4.9334456, 4.6089473, 1.4923638 } },
     decode_offset = { def = 0.52165604 },
     search_trials = 0,
-    seed_ensemble = 1,
     folds = 5,
   },
   type = {
@@ -56,7 +55,6 @@ local cfg = {
     exponent = { def = { 4.6987127, 0.042934613, 3.4189395, 3.9041192, 4.5004177, 3.0824886, 0.90713743, 4.9708287, 5.4551861, 3.394801, 1.8496327 } },
     decode_offset = { def = 0.18440428 },
     search_trials = 0,
-    seed_ensemble = 1,
     folds = 5,
   },
 }

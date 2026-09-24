@@ -651,8 +651,6 @@ M.krr = function (args)
   local want_decode, mode = decode_mode(args, dense)
   local use_oof = decode_offset == nil and (mode == "span" or mode == "multilabel")
 
-  local seed_ensemble = args.seed_ensemble or 1
-  local lm_seed_offset = 0
   local spectral_args = {
     x = args.x, y = args.y,
     blocks = args.blocks,
@@ -750,7 +748,7 @@ M.krr = function (args)
       spectral_args.factor_buf = nil
       spectral_args.encoder = nil
     else
-      spectral_args.landmarks = spectral.uniform_landmarks(spectral_args, args.n_landmarks, seed + 1000 + lm_seed_offset)
+      spectral_args.landmarks = spectral.uniform_landmarks(spectral_args, args.n_landmarks, seed + 1000)
       spectral_args.xtx_buf = xtx_shared
       spectral_args.xty_buf = xty_shared
       spectral_args.factor_buf = nil
@@ -1017,39 +1015,6 @@ M.krr = function (args)
     return kd.sp_enc, r, deploy_of(kd.sp_enc), params, decider, decider_metrics
   end
 
-  local function finish_ensemble (build_spec, params, fin)
-
-    spectral_args.proj_buf = nil
-    local cur_kd
-    local E = { is_ensemble = true, K = seed_ensemble, n_labels = args.n_labels }
-    E.build = function (s)
-      lm_seed_offset = s * 7919
-      local kd = build_kd(build_spec)
-      kd.gram:solve(params.lambda, w_shared)
-      cur_kd = kd
-      local r = ridge.create({ gram = kd.gram })
-      return deploy_of(kd.sp_enc), r, kd.sp_enc
-    end
-    E.release = function ()
-      lm_seed_offset = 0
-      if cur_kd then cur_kd.gram:release(); cur_kd.sp_enc:destroy(); cur_kd = nil end
-    end
-    local decider, decider_metrics
-    if want_decode then
-      local decide = require("santoku.learn.decide")
-      if decode_offset ~= nil and mode ~= "single" then
-        decider = decide.create({ n_labels = args.n_labels, span = mode == "span",
-          reject = args.reject, offset = decode_offset })
-      elseif fin and fin.decider then
-        decider, decider_metrics = fin.decider, fin.metrics
-      elseif mode == "single" then
-        decider = decide.create({ n_labels = args.n_labels, single = true })
-      end
-    end
-    if args.each then args.each({ event = "done", params = params,
-      emb_d = args.n_landmarks, solve = "ensemble", fold_std = nil }) end
-    return E, E, (function (x) return x end), params, decider, decider_metrics, nil
-  end
   local function center_spec ()
     local kname = kernels.def or kernels[1]
     local base = { kernel = kname }
@@ -1210,27 +1175,18 @@ M.krr = function (args)
     if frozen then
       err.assert(not (want_decode and decode_offset == nil and (mode == "span" or mode == "multilabel")),
         "krr: frozen (search_trials=0) span/multilabel decode requires a pinned decode_offset; use search_trials=1 to calibrate")
-      if seed_ensemble <= 1 then
-        kd = build_kd(spec)
-        kd.gram:solve(params.lambda, w_shared)
-      end
+      kd = build_kd(spec)
+      kd.gram:solve(params.lambda, w_shared)
       sstr = "cholesky"
     else
 
       kd, fin = calibrate_and_deploy(spec, params)
       sstr = "calibrate"
     end
-    local sp_enc, r, vcodes, params_out, decider, dmetrics
-    if seed_ensemble > 1 then
-      if kd then kd.gram:release() end
-      sp_enc, r, vcodes, params_out, decider, dmetrics = finish_ensemble(spec, params, fin)
-    else
-      sp_enc, r, vcodes, params_out, decider, dmetrics = finish(kd, params, sstr, fin)
-    end
-
-    if seed_ensemble <= 1 then release_cv() end
+    local sp_enc, r, vcodes, params_out, decider, dmetrics = finish(kd, params, sstr, fin)
+    release_cv()
     prof_emit()
-    if seed_ensemble <= 1 and args.release then args.release() end
+    if args.release then args.release() end
     return sp_enc, r, vcodes, params_out, decider, dmetrics
   end
   local nfolds = args.folds or 1
@@ -1393,30 +1349,22 @@ M.krr = function (args)
 
   local best_kd, fin, solve_tag
   if best_fin then
-
-    if seed_ensemble <= 1 then
-      best_kd = build_kd(best_params)
-      local tsv = tick("~final_solve")
-      best_kd.gram:solve(best_params.lambda, w_shared)
-      tock(tsv)
-    end
+    best_kd = build_kd(best_params)
+    local tsv = tick("~final_solve")
+    best_kd.gram:solve(best_params.lambda, w_shared)
+    tock(tsv)
     fin = best_fin
     solve_tag = "calibrate"
   else
     best_kd, fin = calibrate_and_deploy(best_params, best_params)
     solve_tag = "calibrate"
   end
-  local sp_enc, r, vcodes, params_out, decider, dmetrics
-  if seed_ensemble > 1 then
-    if best_kd then best_kd.gram:release() end
-    sp_enc, r, vcodes, params_out, decider, dmetrics = finish_ensemble(best_params, best_params, fin)
-  else
-    sp_enc, r, vcodes, params_out, decider, dmetrics = finish(best_kd, best_params, solve_tag, fin, best_fold_std)
-  end
+  local sp_enc, r, vcodes, params_out, decider, dmetrics =
+    finish(best_kd, best_params, solve_tag, fin, best_fold_std)
   tock(t_fin)
-  if seed_ensemble <= 1 then release_cv() end
+  release_cv()
   prof_emit()
-  if seed_ensemble <= 1 and args.release then args.release() end
+  if args.release then args.release() end
   return sp_enc, r, vcodes, params_out, decider, dmetrics
 end
 

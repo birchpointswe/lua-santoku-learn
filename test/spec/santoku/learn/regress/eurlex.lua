@@ -22,7 +22,6 @@ local cfg = {
   lambda = { def = 1.6840634e-06 },
   k = 256,
   search_trials = 0,
-  seed_ensemble = 1,
   folds = 5,
 }
 
