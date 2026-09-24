@@ -57,11 +57,11 @@ When you don't need searchable assembly, pass `x`/`val_x` directly instead of `r
 sort) and builds that fold split with a `util` helper that returns the engine args (incl. the per-fold
 `rebuild`), so the call reads `optimize.krr(util.fold_blocks({ ... }))`:
 
-- `util.fold_blocks` — baked per-family `pool_blocks`/`test_blocks` (weights per fold, per-block
+- `util.fold_blocks`: baked per-family `pool_blocks`/`test_blocks` (weights per fold, per-block
   thresh/scales/exponent knobs).
-- `util.fold_dense` — a dense `pool_codes`/`test_codes` matrix (no bns).
+- `util.fold_dense`: a dense `pool_codes`/`test_codes` matrix (no bns).
 - anything more custom (e.g. conll-full's 9-block type head) builds `fold_y`/`rebuild` itself and calls
-  `optimize.krr` directly — that's the base interface the helpers above just emit.
+  `optimize.krr` directly; that's the base interface the helpers above just emit.
 
 CV engages only when `search_trials>0` and `K>1`; otherwise a single full-pool/test fit. Either way
 `optimize.krr` returns `enc, ridge, val_codes, best, decider`. Read any `regress/*.lua` for the harness.
@@ -78,14 +78,15 @@ CV engages only when `search_trials>0` and `K>1`; otherwise a single full-pool/t
   `ridge:regress(codes)` → dense scores → `decider:score({ scores = ..., expected = ... })`.
   Report **both** an uncalibrated argmax (`decide.create({ n_labels, single = true })`) and the
   calibrated decider; argmax often wins on test.
-- **Extreme multi-label / XMLC** (`regress/eurlex.lua`): multi-label `y`; set `k` (top-k per row)
-  and pass mmap buffers (`chol_buf`/`xtx_buf`/`xty_buf`/`w_buf`) to bound RAM.
+- **Extreme multi-label / XMLC** (`regress/eurlex.lua`): multi-label `y`; set `k` (top-k per row).
+  Buffers that grow with the dataset (corpus CSRs, fold codes) spill to disk automatically.
 - **Regression** (`regress/housing.lua`): pass `targets`/`val_targets` (dvec) instead of `y`/`val_y`;
   score with `eval.regress_accuracy(ridge:regress(codes), targets)`. Mixed cat+continuous features
   are assembled with matrix ops (`bits:hcat(continuous:to_sparse())`, block standardize).
-- **Retrieval / ANN** (`ann.lua`): encode a corpus to codes (mtx), `ann.create({ codes = M })`
-  (signs internally), then `idx:neighborhoods_by_vecs(Q, k)` → P csr. Compare to exact
-  `corpus:topk(Q, k)` (matrix) for ground truth.
+- **Retrieval** (`retrieval.lua`): weight the corpus CSR with `X:bm25()`, encode to codes (mtx),
+  center and row-normalize, fit `W = C:itq()` (matrix), then pack `C:multiply(W):sign()` into a bits
+  mtx and search with exhaustive Hamming `bits:topk(query_bits, k)`. Exact `C:topk(Q, k)` is the
+  float reference.
 - **Span NER** (`regress/conll-full.lua`, `regress/conll-gaz.lua`): a two-stage pipeline:
   `segmenter` learns byte-class segments, `aho` adds gazetteer candidates (→ spans), stage 1 tags
   inner tokens, candidates are enumerated/unioned (spans ops), stage 2 types them; `decide` runs
@@ -99,7 +100,7 @@ The front door. Inputs are matrix objects:
   bns/select/hcat/standardize/L2). `y`, `val_y`: label `csr` (or `targets`/`val_targets` dvec for
   regression).
 - `kernel` (list to search over: `cosine`/`matern`/`arccos`), `n_landmarks`, `lambda`, `k`,
-  `search_trials`, optional mmap `chol_buf`/`xtx_buf`/`xty_buf`/`w_buf`,
+  `search_trials`,
   `each` (progress callback via `util.make_ridge_log`).
 - **Rebuild knobs** (the `params` bundle): `thresh` (per-block relevance floor), `scales`
   (per-block energy, gauge-normalized), `exponent` (per-block weight sharpening). Forms: scalar
@@ -135,5 +136,5 @@ baseline: single → pure argmax, span → reject_offset 0. Multilabel has no ar
 
 Save the tokenizer(s), the encoder (`spectral`), the ridge, the decider, and any fit weights
 (`bns`/`idf`/`standardize`). On load, re-encode new text through the same tokenizer + weights, then
-`ridge:label`/`:regress` + `decider`. For large corpora, encode straight into an mmap `mtx`
-(`enc:encode(X, out)`) to bound RAM.
+`ridge:label`/`:regress` + `decider`. For large corpora, encode into an `mtx` backed by a disk
+`santoku.store` view (`enc:encode(X, out)`) to bound RAM.

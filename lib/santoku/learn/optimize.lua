@@ -1,5 +1,4 @@
 local num = require("santoku.num")
-local fs = require("santoku.fs")
 local err = require("santoku.error")
 local rand = require("santoku.random")
 local utc = require("santoku.utc")
@@ -583,11 +582,10 @@ M.krr = function (args)
   end
 
   local function resolve_params ()
-    local p, any = {}, false
+    local p = {}
     for _, kdef in ipairs(REBUILD_KNOBS) do
-      if args[kdef.key] ~= nil then p[kdef.key] = resolve_knob(args[kdef.key]); any = true end
+      if args[kdef.key] ~= nil then p[kdef.key] = resolve_knob(args[kdef.key]) end
     end
-    if not any then return nil end
     return p
   end
   if args.rebuild and args.x == nil then
@@ -663,7 +661,6 @@ M.krr = function (args)
     n_labels = args.n_labels,
     targets = args.targets, n_targets = args.n_targets,
   }
-  local w_auto
   local nl_cap = args.n_labels or args.n_targets or 1
 
   local xtx_shared, xty_shared
@@ -676,7 +673,6 @@ M.krr = function (args)
   local w_shared = fvec.create(args.n_landmarks * nl_cap)
   if tiled then
     spectral_args.tile_labels = tile_labels
-    w_auto = args.w_buf
   end
   local proj_shared, sims_shared, row_shared
   if do_search then
@@ -694,20 +690,26 @@ M.krr = function (args)
   local xtx_slot, xty_slot, factor_slot
   local enc_slot
   local search_fb
+  local fold_bufs_release
   local function release_enc_scratch ()
-    spectral_args.proj_buf = args.enc_chol_buf
+    spectral_args.proj_buf = nil
     spectral_args.sims_buf = nil; spectral_args.row_buf = nil
     spectral_args.factor_buf = nil
     spectral_args.encoder = nil
+    if enc_slot then enc_slot:destroy(); enc_slot = nil end
+    if proj_shared then proj_shared:destroy() end
+    if sims_shared then sims_shared:destroy() end
+    if row_shared then row_shared:destroy() end
+    if lm_slot then lm_slot:destroy() end
+    if xtx_slot then xtx_slot:destroy() end
+    if xty_slot then xty_slot:destroy() end
+    if factor_slot then factor_slot:destroy() end
     proj_shared = nil; sims_shared = nil; row_shared = nil -- luacheck: ignore
     lm_slot = nil
     xtx_slot = nil; xty_slot = nil; factor_slot = nil
-
-    if enc_slot then enc_slot:destroy(); enc_slot = nil end
-    search_fb = nil
+    if search_fb then fold_bufs_release(search_fb); search_fb = nil end
     spectral_args.landmarks = nil
     ensure_shared_bufs()
-    collectgarbage("collect")
   end
   local function release_cv ()
     if xtx_shared then xtx_shared:destroy() end
@@ -785,43 +787,34 @@ M.krr = function (args)
     end
     return kd, kds
   end
-  local function fold_bufs (nf, m, split, scratch)
+  local function fold_bufs (nf, m, split)
     local mtx = require("santoku.mtx")
     local dvec = require("santoku.dvec")
+    local store = require("santoku.store")
     local counts = split.val_n
     local fb = { n = nf, counts = counts, assign = split.assign,
-      xtx = {}, xty = {}, sv = {}, tv = {}, codes = {}, paths = {} }
+      xtx = {}, xty = {}, sv = {}, tv = {}, codes = {}, store = store.create({ disk = true }) }
+    local views = {}
     for f = 1, nf do
       fb.xtx[f] = fvec.create(m * m)
       fb.xty[f] = fvec.create(m * nl_cap)
       fb.sv[f] = fvec.create(m)
       fb.tv[f] = dvec.create(nl_cap)
-      if scratch then
-        fb.paths[f] = scratch .. ".fval" .. f .. ".bin"
-        fb.codes[f] = mtx.create({ data = fvec.mmap_create(fb.paths[f], counts[f] * m),
-          n_rows = counts[f], n_cols = m })
-      else
-        fb.codes[f] = mtx.create({ n_rows = counts[f], n_cols = m, type = "f32" })
-      end
+      views[f] = fb.store:fvec(counts[f] * m)
     end
-    if scratch then
-      fb.factor_path = scratch .. ".ffac.bin"
-      fb.factor = fvec.mmap_create(fb.factor_path, m * m)
-    else
-      fb.factor = fvec.create(m * m)
+    fb.store:open()
+    for f = 1, nf do
+      fb.codes[f] = mtx.create({ data = views[f], n_rows = counts[f], n_cols = m })
     end
+    fb.factor = fvec.create(m * m)
     return fb
   end
-  local function fold_bufs_release (fb)
+  fold_bufs_release = function (fb)
     for f = 1, fb.n do
       fb.xtx[f]:destroy(); fb.xty[f]:destroy()
-      if fb.paths[f] then
-        fb.codes[f]:data():destroy()
-        fs.rm(fb.paths[f], true)
-      end
     end
+    fb.store:close()
     fb.factor:destroy()
-    if fb.factor_path then fs.rm(fb.factor_path, true) end
   end
 
   local function oof_decider (kds, split)
@@ -976,17 +969,17 @@ M.krr = function (args)
   local function calibrate_and_deploy (spec, params)
     local fin = nil
     if want_decode and (mode == "span" or mode == "multilabel") then
-      local fb = fold_bufs(args.folds, args.n_landmarks, args.fold_split, args.scratch_path)
+      local fb = fold_bufs(args.folds, args.n_landmarks, args.fold_split)
       local cal_kd, kds = build_folds(spec, fb, "cal")
       cal_kd.gram:release()
+      cal_kd.sp_enc:destroy()
       cal_kd = nil -- luacheck: ignore
-      collectgarbage("collect")
       local tc = tick("~calibrate")
       for f = 1, args.folds do kds[f].gram:solve(params.lambda) end
       local decider, metrics = oof_decider(kds, args.fold_split)
       tock(tc)
+      for f = 1, args.folds do kds[f].gram:release() end
       kds = nil -- luacheck: ignore
-      collectgarbage("collect")
       fold_bufs_release(fb)
       fin = { decider = decider, metrics = metrics }
     end
@@ -996,11 +989,17 @@ M.krr = function (args)
     tock(tsv)
     return kd, fin
   end
+  local function deploy_of (enc)
+    if spectral_args.blocks then
+      return function (ext, out, start, count)
+        return enc:encode({ blocks = ext, start = start, count = count }, out)
+      end
+    end
+    return function (x, out) return enc:encode(x, out) end
+  end
+
   local function finish (kd, params, solve, fin, fold_sd)
-    local r = ridge.create({
-      gram = kd.gram,
-      w_buf = tiled and w_auto or nil,
-    })
+    local r = ridge.create({ gram = kd.gram })
     kd.gram:release()
     if args.each then args.each({ event = "done", params = params, emb_d = kd.sp_enc:dims(),
       solve = solve, fold_std = fold_sd }) end
@@ -1015,16 +1014,7 @@ M.krr = function (args)
         decider = require("santoku.learn.decide").create({ n_labels = args.n_labels, single = true })
       end
     end
-    local codes_or_deploy, bake_blocks
-    if args.bake_external then
-      bake_blocks = function (ext) return args.bake_external(ext, params) end
-      codes_or_deploy = function (ext, out)
-        return kd.sp_enc:encode({ blocks = bake_blocks(ext) }, out)
-      end
-    else
-      codes_or_deploy = function (x, out) return kd.sp_enc:encode(x, out) end
-    end
-    return kd.sp_enc, r, codes_or_deploy, params, decider, decider_metrics, bake_blocks
+    return kd.sp_enc, r, deploy_of(kd.sp_enc), params, decider, decider_metrics
   end
 
   local function finish_ensemble (build_spec, params, fin)
@@ -1038,17 +1028,11 @@ M.krr = function (args)
       kd.gram:solve(params.lambda, w_shared)
       cur_kd = kd
       local r = ridge.create({ gram = kd.gram })
-      if args.bake_external then
-        return (function (ext, out)
-          return kd.sp_enc:encode({ blocks = args.bake_external(ext, params) }, out)
-        end), r, kd.sp_enc
-      end
-      return (function (x, out) return kd.sp_enc:encode(x, out) end), r, kd.sp_enc
+      return deploy_of(kd.sp_enc), r, kd.sp_enc
     end
     E.release = function ()
       lm_seed_offset = 0
-      if cur_kd then cur_kd.gram:release(); cur_kd = nil end
-      collectgarbage("collect")
+      if cur_kd then cur_kd.gram:release(); cur_kd.sp_enc:destroy(); cur_kd = nil end
     end
     local decider, decider_metrics
     if want_decode then
@@ -1236,17 +1220,18 @@ M.krr = function (args)
       kd, fin = calibrate_and_deploy(spec, params)
       sstr = "calibrate"
     end
-    local sp_enc, r, vcodes, params_out, decider, dmetrics, bake
+    local sp_enc, r, vcodes, params_out, decider, dmetrics
     if seed_ensemble > 1 then
       if kd then kd.gram:release() end
-      sp_enc, r, vcodes, params_out, decider, dmetrics, bake = finish_ensemble(spec, params, fin)
+      sp_enc, r, vcodes, params_out, decider, dmetrics = finish_ensemble(spec, params, fin)
     else
-      sp_enc, r, vcodes, params_out, decider, dmetrics, bake = finish(kd, params, sstr, fin)
+      sp_enc, r, vcodes, params_out, decider, dmetrics = finish(kd, params, sstr, fin)
     end
 
     if seed_ensemble <= 1 then release_cv() end
     prof_emit()
-    return sp_enc, r, vcodes, params_out, decider, dmetrics, bake
+    if seed_ensemble <= 1 and args.release then args.release() end
+    return sp_enc, r, vcodes, params_out, decider, dmetrics
   end
   local nfolds = args.folds or 1
   err.assert(not do_search or nfolds > 1, "krr: search requires folds > 1 (all-CV; no external dev set)")
@@ -1270,7 +1255,7 @@ M.krr = function (args)
   local race_state = (not use_oof) and nfolds > 1 and { stats = {}, count = 0 } or nil
   local function run_folds (spec, lam, best_hint)
     if not search_fb then
-      search_fb = fold_bufs(nfolds, search_m, args.fold_split, nil)
+      search_fb = fold_bufs(nfolds, search_m, args.fold_split)
     end
     local kd, kds = build_folds(spec, search_fb, "search")
     local meta = { dims = kd.sp_enc:dims() }
@@ -1421,17 +1406,18 @@ M.krr = function (args)
     best_kd, fin = calibrate_and_deploy(best_params, best_params)
     solve_tag = "calibrate"
   end
-  local sp_enc, r, vcodes, params_out, decider, dmetrics, bake
+  local sp_enc, r, vcodes, params_out, decider, dmetrics
   if seed_ensemble > 1 then
     if best_kd then best_kd.gram:release() end
-    sp_enc, r, vcodes, params_out, decider, dmetrics, bake = finish_ensemble(best_params, best_params, fin)
+    sp_enc, r, vcodes, params_out, decider, dmetrics = finish_ensemble(best_params, best_params, fin)
   else
-    sp_enc, r, vcodes, params_out, decider, dmetrics, bake = finish(best_kd, best_params, solve_tag, fin, best_fold_std)
+    sp_enc, r, vcodes, params_out, decider, dmetrics = finish(best_kd, best_params, solve_tag, fin, best_fold_std)
   end
   tock(t_fin)
   if seed_ensemble <= 1 then release_cv() end
   prof_emit()
-  return sp_enc, r, vcodes, params_out, decider, dmetrics, bake
+  if seed_ensemble <= 1 and args.release then args.release() end
+  return sp_enc, r, vcodes, params_out, decider, dmetrics
 end
 
 M.decide = function (args)

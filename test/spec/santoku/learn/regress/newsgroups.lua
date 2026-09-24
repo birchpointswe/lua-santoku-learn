@@ -26,7 +26,6 @@ local cfg = {
   k = 1,
   search_trials = 0,
   seed_ensemble = 1,
-  scratch_path = "test/res/newsgroups-scratch",
   folds = 5,
 }
 

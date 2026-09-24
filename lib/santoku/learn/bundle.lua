@@ -32,20 +32,14 @@ M.persist = function (opts)
   if opts.gaz_rms then
     opts.gaz_rms:persist(dir .. "/gaz_rms.bin")
   end
-  local w_ext = not E and opts.w_path or nil
-  local chol_ext = not E and opts.chol_path or nil
   fs.writefile(dir .. "/manifest.lua", str.format(
-    "return {\n  version = 2,\n  n_tokenizers = %d,\n  seed_ensemble = %s,\n  n_labels = %s,\n  has_decider = %s,\n  has_gaz = %s,\n  has_gaz_rms = %s,\n  w_external = %s,\n  w_path = %s,\n  chol_external = %s,\n  chol_path = %s,\n}\n",
+    "return {\n  version = 3,\n  n_tokenizers = %d,\n  seed_ensemble = %s,\n  n_labels = %s,\n  has_decider = %s,\n  has_gaz = %s,\n  has_gaz_rms = %s,\n}\n",
     #toks,
     E and tostring(E.K) or "nil",
     E and E.n_labels and tostring(E.n_labels) or "nil",
     opts.decider and "true" or "false",
     opts.gaz and "true" or "false",
-    opts.gaz_rms and "true" or "false",
-    w_ext and "true" or "false",
-    w_ext and str.format("%q", w_ext) or "nil",
-    chol_ext and "true" or "false",
-    chol_ext and str.format("%q", chol_ext) or "nil"))
+    opts.gaz_rms and "true" or "false"))
 end
 
 M.load = function (dir)
@@ -71,27 +65,21 @@ M.load = function (dir)
   if manifest.seed_ensemble then
 
     local E = { is_ensemble = true, K = manifest.seed_ensemble, n_labels = manifest.n_labels }
+    local cur
     E.build = function (s)
       local enc = spectral.load(dir .. "/encoder_" .. s .. ".bin")
       local rr = ridge.load(dir .. "/ridge_" .. s .. ".bin")
-      return (function (ext, out) return enc:encode({ blocks = wrap(ext) }, out) end), rr, enc
+      cur = enc
+      return (function (ext, out, start, count) return enc:encode({ blocks = wrap(ext), start = start, count = count }, out) end), rr, enc
     end
-    E.release = function () collectgarbage("collect") end
+    E.release = function () if cur then cur:destroy(); cur = nil end end
     encoder, r = E, E
     encode = function (x) return x end
   else
-    if manifest.chol_external then
-      encoder = spectral.load(dir .. "/encoder.bin", fvec.mmap_open(manifest.chol_path))
-    else
-      encoder = spectral.load(dir .. "/encoder.bin")
-    end
-    if manifest.w_external then
-      r = ridge.load(dir .. "/ridge.bin", fvec.mmap_open(manifest.w_path))
-    else
-      r = ridge.load(dir .. "/ridge.bin")
-    end
-    encode = function (ext, out)
-      return encoder:encode({ blocks = wrap(ext) }, out)
+    encoder = spectral.load(dir .. "/encoder.bin")
+    r = ridge.load(dir .. "/ridge.bin")
+    encode = function (ext, out, start, count)
+      return encoder:encode({ blocks = wrap(ext), start = start, count = count }, out)
     end
   end
   local decider = manifest.has_decider and decide.load(dir .. "/decider.bin") or nil

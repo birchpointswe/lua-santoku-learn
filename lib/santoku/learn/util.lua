@@ -4,7 +4,6 @@ local arr = require("santoku.array")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
 local fvec = require("santoku.fvec")
-local svec = require("santoku.svec")
 local spans = require("santoku.spans")
 local re = require("santoku.re")
 local fs = require("santoku.fs")
@@ -247,9 +246,13 @@ function M.make_ridge_log (stopwatch, metric_fmt)
   end
 end
 
-local TOK_VEC = { off = ivec, toks = svec, vals = fvec }
-local function mmap_alloc (base)
-  return function (kind, n) return TOK_VEC[kind].mmap_create(base .. "." .. kind, n) end
+local TOK_VEC = { off = "ivec", toks = "svec", vals = "fvec" }
+local function spill_alloc (kind, n)
+  local store = require("santoku.store")
+  local s = store.create({ disk = true })
+  local v = s[TOK_VEC[kind]](s, n)
+  s:open()
+  return v
 end
 
 function M.tokenize_blocks (specs, texts, o)
@@ -270,7 +273,7 @@ function M.tokenize_blocks (specs, texts, o)
     local tk = o.tokens
     if type(tk) == "table" then tk = tk[i] end
 
-    local alloc = (o.scratch and ivec.mmap_create) and mmap_alloc(o.scratch .. "." .. i) or nil
+    local alloc = spill_alloc
     local targs = { texts = texts, focus = o.focus, tokens = tk, alloc = alloc }
     local csr = grow and toks[i]:fit(targs) or toks[i]:tokenize(targs)
     local go = specs[i].regions and toks[i]:group_offsets() or nil
@@ -463,36 +466,27 @@ function M.predict_tiled (o)
   local n = o.n
   local tile = o.tile or 4096
   local nl = o.n_labels
+  local blocks = {}
+  for bi = 1, #o.blocks do
+    local b = o.blocks[bi]
+    blocks[bi] = type(b) == "table" and b or { x = b }
+  end
 
   local function predict_one (deploy, ridge, want_label, want_scores)
     local out = mtx.create({ n_rows = 1, n_cols = 1, type = "f32" })
-    local pred, scores, sbuf
+    local pred, scores, sbuf, pbuf
     if want_scores then scores = fvec.create(n * nl) end
     for base = 0, n - 1, tile do
       local bs = num.min(tile, n - base)
-      local idx = ivec.create(bs)
-      for i = 0, bs - 1 do idx:set(i, base + i) end
-      local codes
-      if o.blocks then
-        local ext = {}
-        for bi = 1, #o.blocks do
-          local b = o.blocks[bi]
-          if type(b) == "table" then ext[bi] = { x = b.x:rows(idx), group_offsets = b.group_offsets }
-          else ext[bi] = b:rows(idx) end
-        end
-        codes = deploy(ext, out)
-      else
-        codes = deploy(o.x:rows(idx), out)
-      end
+      local codes = deploy(blocks, out, base, bs)
       if want_label then
-        local p = ridge:label(codes, o.k)
-        if pred then pred:append(p) else pred = p end
+        pbuf = ridge:label(codes, o.k, pbuf)
+        if pred then pred:append(pbuf) else pred = pbuf:clone() end
       end
       if want_scores then
         sbuf = ridge:regress(codes, sbuf)
         scores:copy(sbuf, 0, bs * nl, base * nl)
       end
-      collectgarbage("collect")
     end
     return pred, scores
   end
@@ -514,6 +508,13 @@ function M.predict_tiled (o)
     return pred, (o.scores and S or nil)
   end
   return predict_one(o.deploy, o.ridge, o.k ~= nil, o.scores ~= nil)
+end
+
+local function free_csr (X)
+  X:offsets():destroy()
+  X:neighbors():destroy()
+  local v = X:values()
+  if v then v:destroy() end
 end
 
 local function slice_targets (t, idx)
@@ -703,11 +704,15 @@ function M.fold_blocks (a)
       val_targets = reg and fvt or nil, val_cand = fvc, val_gold = fvg }
   end
 
-  local sy = a.pool_labels and a.pool_labels:rows(strat_idx)
-    or (wtargets and slice_targets(a.pool_targets, strat_idx)) or nil
-  local spool = {}
-  for i = 1, #pool do spool[i] = pool[i]:rows(strat_idx) end
-  local p_w = weight_fit(spool, sy, metrics, wtargets)
+  local p_w
+  if use_folds then
+    local sy = a.pool_labels and a.pool_labels:rows(strat_idx)
+      or (wtargets and slice_targets(a.pool_targets, strat_idx)) or nil
+    local spool = {}
+    for i = 1, #pool do spool[i] = pool[i]:rows(strat_idx) end
+    p_w = weight_fit(spool, sy, metrics, wtargets)
+    for i = 1, #spool do free_csr(spool[i]) end
+  end
   local p_w_full = weight_fit(pool, a.pool_labels or (wtargets and a.pool_targets), metrics, wtargets)
   local p_pcs = {}
   for i = 1, #pool do p_pcs[i] = pool[i]:sumsq_cols() end
@@ -728,12 +733,6 @@ function M.fold_blocks (a)
       g0 = g0 + ng
     end
   end
-  a.bake_external = function (ext, params)
-    local xs = {}
-    for i, b in ipairs(ext) do xs[i] = type(b) == "table" and b.x or b end
-    return (M.build_blocks(xs, params.scales, params.exponent, n, p_w_full, p_pcs, groups))
-  end
-
   local cs_cache_cv, cs_cache_full = {}, {}
   local gg_cache_cv, gg_cache_full = {}, {}
   a.rebuild = function (params, cv)
@@ -742,6 +741,21 @@ function M.fold_blocks (a)
     local ggc = cv and gg_cache_cv or gg_cache_full
     return { blocks = M.build_blocks(pool, params.scales, params.exponent, n, w, p_pcs, groups, cache, ggc),
       n_samples = n }
+  end
+  a.release = function ()
+    for i = 1, #pool do
+      if p_w and p_w[i] then p_w[i]:destroy() end
+      if p_w_full[i] then p_w_full[i]:destroy() end
+      p_pcs[i]:destroy()
+    end
+    for _, c in ipairs({ cs_cache_cv, cs_cache_full }) do
+      for _, slot in pairs(c) do slot.cs:destroy() end
+    end
+    for _, c in ipairs({ gg_cache_cv, gg_cache_full }) do
+      for _, cs in pairs(c) do cs:destroy() end
+    end
+    p_w, p_w_full, p_pcs = nil, nil, nil
+    cs_cache_cv, cs_cache_full, gg_cache_cv, gg_cache_full = {}, {}, {}, {}
   end
   a.folds = use_folds and K or 1
   a.y = a.pool_labels

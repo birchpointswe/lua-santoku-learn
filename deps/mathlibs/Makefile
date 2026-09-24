@@ -1,4 +1,4 @@
-results.mk:
+results.mk: Makefile
 	@{ \
 	  if [ -n "$$TK_MATHLIBS_CFLAGS" ]; then \
 	    cflags="$$TK_MATHLIBS_CFLAGS"; \

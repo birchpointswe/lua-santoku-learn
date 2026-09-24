@@ -8,7 +8,6 @@ local util = require("santoku.learn.util")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local utc = require("santoku.utc")
-local fvec = require("santoku.fvec")
 local fs = require("santoku.fs")
 
 fs.stdout:setvbuf("line")
@@ -36,7 +35,6 @@ local cfg = {
     decode_offset = { def = -0.56368208 },
     search_trials = 0,
     seed_ensemble = 1,
-    scratch_path = "test/res/conll-gaz-scratch",
     folds = 5,
   },
 }
@@ -67,9 +65,9 @@ test("conll-gaz CV", function ()
     n_pool, n_test, Cte:coverage(Gte), cfg.head.folds, cfg.head.search_trials)
 
   local toks, Xtr = util.tokenize_blocks(cfg.blocks, pool.texts,
-    { focus = Ctr, tokens = Ttr, scratch = "test/res/conll-gaz-blocks" })
+    { focus = Ctr, tokens = Ttr })
   local _, Xte = util.tokenize_blocks(cfg.blocks, test_set.texts,
-    { toks = toks, focus = Cte, tokens = Tte, scratch = "test/res/conll-gaz-blocks.te" })
+    { toks = toks, focus = Cte, tokens = Tte })
   local n_sparse = #cfg.blocks
 
   local K = cfg.head.folds
@@ -86,10 +84,6 @@ test("conll-gaz CV", function ()
   local Ytr = cand_labels(Ctr, Gtr)
 
   local bdir = fs.tmpname() .. ".bundle"
-  fs.mkdirp(bdir)
-  local w_path, chol_path = bdir .. "/w.mmap", bdir .. "/chol.mmap"
-  local w_buf = fvec.mmap_create(w_path, cfg.emb.n_landmarks)
-  local enc_chol_buf = fvec.mmap_create(chol_path, cfg.emb.n_landmarks * cfg.emb.n_landmarks)
 
   local enc, rg, deploy, best, decider = optimize.krr(util.merged(cfg.head, {
     pool_blocks = Xtr,
@@ -101,8 +95,6 @@ test("conll-gaz CV", function ()
     cand = Ctr,
     gold = Gtr,
     n_landmarks = cfg.emb.n_landmarks,
-    w_buf = w_buf,
-    enc_chol_buf = enc_chol_buf,
     search_landmarks = cfg.search_landmarks,
     k = 1,
     verbose = cfg.verbose,
@@ -119,7 +111,7 @@ test("conll-gaz CV", function ()
 
   local bundle = require("santoku.learn.bundle")
   bundle.persist({ dir = bdir, tokenizers = toks, gaz = serve_gaz, gaz_rms = rms_w[n_sparse + 1],
-    encoder = enc, ridge = rg, decider = decider, w_path = w_path, chol_path = chol_path })
+    encoder = enc, ridge = rg, decider = decider })
   local dep = util.fmt_metrics(m)
   enc, rg, deploy, decider, toks, serve_gaz, Xtr, Xte, test_scores, rms_w = nil -- luacheck: ignore
   collectgarbage("collect")
@@ -133,9 +125,4 @@ test("conll-gaz CV", function ()
   str.printf("[Bundle] reload test %s (deploy %s)\n", util.fmt_metrics(mb), dep)
   assert(util.fmt_metrics(mb) == dep, "reloaded bundle metrics diverge from deploy")
   util.rmbundle(bdir)
-  for _, base in ipairs({ "test/res/conll-gaz-blocks", "test/res/conll-gaz-blocks.te" }) do
-    for i = 1, n_sparse do
-      for _, sfx in ipairs({ ".off", ".toks", ".vals" }) do fs.rm(base .. "." .. i .. sfx, true) end
-    end
-  end
 end)

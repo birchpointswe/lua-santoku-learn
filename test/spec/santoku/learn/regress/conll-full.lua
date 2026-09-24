@@ -40,7 +40,6 @@ local cfg = {
     decode_offset = { def = 0.52165604 },
     search_trials = 0,
     seed_ensemble = 1,
-    scratch_path = "test/res/conll-tag-scratch",
     folds = 5,
   },
   type = {
@@ -58,7 +57,6 @@ local cfg = {
     decode_offset = { def = 0.18440428 },
     search_trials = 0,
     seed_ensemble = 1,
-    scratch_path = "test/res/conll-type-scratch",
     folds = 5,
   },
 }

@@ -23,7 +23,6 @@ local cfg = {
   k = 256,
   search_trials = 0,
   seed_ensemble = 1,
-  scratch_path = "test/res/eurlex-scratch",
   folds = 5,
 }
 

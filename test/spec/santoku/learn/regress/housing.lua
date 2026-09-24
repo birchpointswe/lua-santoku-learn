@@ -21,7 +21,6 @@ local cfg = {
   scales = { def = { 38.400037, 55.697265, 0.25857085, 0.20780899, 0.044250118, 0.12342444, 0.017418369, 0.72738569, 125.74848 } },
   search_trials = 0,
   seed_ensemble = 1,
-  scratch_path = "test/res/housing-scratch",
   folds = 5,
 }
 

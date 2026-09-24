@@ -1,6 +1,8 @@
+local rock = require("santoku.make.rock")
+
 local env = {
   name = "santoku-learn",
-  version = "2.0.6-1",
+  version = "3.0.0-1",
   variable_prefix = "TK_LEARN",
   license = "MIT",
   public = true,
@@ -8,9 +10,9 @@ local env = {
     "-std=gnu11", "-D_GNU_SOURCE", "-Wall", "-Wextra",
     "-Wsign-compare", "-Wsign-conversion", "-Wstrict-overflow",
     "-Wpointer-sign", "-Wno-unused-parameter", "-Wno-unused-but-set-variable",
-    "-I$(shell luarocks show santoku --rock-dir)/include/",
-    "-I$(shell luarocks show santoku-matrix --rock-dir)/include/",
-    "-I$(shell luarocks show santoku-lpeg --rock-dir)/include/",
+    rock.include("santoku"),
+    rock.include("santoku-matrix"),
+    rock.include("santoku-lpeg"),
   },
   ldflags = {
     "-lm",
@@ -43,7 +45,7 @@ local env = {
   dependencies = {
     "lua == 5.1",
     "santoku >= 2.0.0, < 3.0.0",
-    "santoku-matrix >= 2.0.0, < 3.0.0",
+    "santoku-matrix >= 2.2.0, < 3.0.0",
     "santoku-fs >= 2.0.0, < 3.0.0",
     "santoku-lpeg >= 2.0.0, < 3.0.0",
   },

@@ -579,6 +579,21 @@ static inline void tk_nystrom_encoder_zero (tk_nystrom_encoder_t *enc) {
   enc->destroyed = false;
 }
 
+static inline void tk_nystrom_account (lua_State *L, tk_nystrom_encoder_t *enc, uint64_t extra)
+{
+  uint64_t b = extra;
+  if (enc->chol_f) b += enc->m * enc->m * sizeof(float);
+  if (enc->csr_offsets) b += (uint64_t) enc->csr_offsets[enc->m] * (sizeof(int32_t) + sizeof(float)) * 2;
+  if (enc->dense_vecs) b += enc->m * (uint64_t) enc->d_input * sizeof(float);
+  if (!enc->sims_buf_external) b += enc->sims_buf_cap * sizeof(float);
+  if (!enc->row_bufs_external) b += enc->row_bufs_cap * sizeof(float);
+  uint64_t kb = b >> 10;
+  if (kb > (uint64_t) lua_gc(L, LUA_GCCOUNT, 0))
+    lua_gc(L, LUA_GCCOLLECT, 0);
+  else if (kb > 0)
+    lua_gc(L, LUA_GCSTEP, (int) kb);
+}
+
 static inline int tk_spectral_block_rowscale (
   int nb, const int64_t *const *boff, const int32_t *const *btok,
   const float *const *bval, const float *const *bcs,
@@ -682,9 +697,6 @@ static inline void tk_nystrom_csr_tiles (
       (int) blk, (int) m, 1.0f, enc->chol, (int) m, dst, (int) d);
   }
 }
-
-
-
 
 typedef struct {
   int64_t n;
@@ -1012,6 +1024,13 @@ static inline int tk_nystrom_encode_blocks (lua_State *L, tk_nystrom_encoder_t *
   const int64_t *boff[TK_MAX_MOD]; const int32_t *btok[TK_MAX_MOD];
   const float *bval[TK_MAX_MOD];
   const float *bcs[TK_MAX_MOD];
+  lua_getfield(L, 2, "start");
+  uint64_t r_start = lua_isnil(L, -1) ? 0 : (uint64_t) luaL_checkinteger(L, -1);
+  lua_pop(L, 1);
+  lua_getfield(L, 2, "count");
+  bool has_count = !lua_isnil(L, -1);
+  uint64_t r_count = has_count ? (uint64_t) luaL_checkinteger(L, -1) : 0;
+  lua_pop(L, 1);
   uint64_t n_samples = 0;
   for (int b = 0; b < nb; b++) {
     lua_rawgeti(L, blk_idx, b + 1);
@@ -1022,8 +1041,13 @@ static inline int tk_nystrom_encode_blocks (lua_State *L, tk_nystrom_encoder_t *
       return luaL_error(L, "encode: block neighbors must be i32");
     if (Xb->values && Xb->tag != TK_TAG_F32)
       return luaL_error(L, "encode: block values must be f32 (got an f64/other-typed csr; convert to_fvec)");
-    if (b == 0) n_samples = tk_csr_rows(Xb);
-    boff[b] = Xb->offsets->a;
+    uint64_t rows_b = tk_csr_rows(Xb);
+    if (r_start > rows_b)
+      return luaL_error(L, "encode: start beyond block rows");
+    if (b == 0) n_samples = has_count ? r_count : rows_b - r_start;
+    if (r_start + n_samples > rows_b)
+      return luaL_error(L, "encode: row range beyond block rows");
+    boff[b] = Xb->offsets->a + r_start;
     btok[b] = (const int32_t *) tk_csr_nbr_ptr(Xb);
     bval[b] = Xb->values ? ((tk_fvec_t *) Xb->values)->a : NULL;
     lua_pop(L, 1);
@@ -1196,10 +1220,6 @@ static inline int tk_nystrom_dims_lua (lua_State *L) {
   return 1;
 }
 
-
-
-
-
 static inline int tk_nystrom_encoder_destroy_lua (lua_State *L) {
   tk_nystrom_encoder_gc(L);
   lua_newtable(L);
@@ -1213,15 +1233,15 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
     return luaL_error(L, "cannot persist a destroyed encoder");
   if (!enc->chol)
     return luaL_error(L, "cannot persist: chol released");
-  uint8_t chol_external = 0;
-  lua_getfenv(L, 1);
-  lua_getfield(L, -1, "chol");
-  tk_fvec_t *cfv = tk_fvec_peekopt(L, -1);
-  if (cfv && cfv->lua_managed == 2) chol_external = 1;
-  lua_pop(L, 2);
-  FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
+  const char *path = luaL_checkstring(L, 2);
+  lua_pushfstring(L, "%s.chol", path);
+  FILE *ch = tk_lua_fopen(L, lua_tostring(L, -1), "w");
+  tk_lua_fwrite(L, (char *) enc->chol, sizeof(float), (uint64_t)enc->m * enc->m, ch);
+  tk_lua_fclose(L, ch);
+  lua_pop(L, 1);
+  FILE *fh = tk_lua_fopen(L, path, "w");
   tk_lua_fwrite(L, "TKny", 1, 4, fh);
-  uint8_t version = 31;
+  uint8_t version = 32;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &enc->kernel.family, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &enc->kernel.nu, sizeof(uint8_t), 1, fh);
@@ -1229,14 +1249,6 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
   tk_lua_fwrite(L, &enc->mod_type, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &enc->m, sizeof(uint64_t), 1, fh);
   tk_lua_fwrite(L, &enc->d, sizeof(uint64_t), 1, fh);
-  tk_lua_fwrite(L, &chol_external, sizeof(uint8_t), 1, fh);
-  if (chol_external) {
-#if !defined(__EMSCRIPTEN__)
-    msync(enc->chol, (uint64_t)enc->m * enc->m * sizeof(float), MS_SYNC);
-#endif
-  } else {
-    tk_lua_fwrite(L, enc->chol, sizeof(float), (uint64_t)enc->m * enc->m, fh);
-  }
   if (enc->mod_type == TK_MOD_CSR) {
     tk_lua_fwrite(L, &enc->csr_n_tokens, sizeof(uint64_t), 1, fh);
     uint64_t total_csr = (uint64_t)enc->csr_offsets[enc->m];
@@ -1525,7 +1537,6 @@ static inline int tm_encode (lua_State *L) {
   tk_fvec_t *xty_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "xty_buf");
   lua_pop(L, 1);
 
-
   lua_getfield(L, 1, "proj_buf");
   tk_fvec_t *proj_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "proj_buf");
   lua_pop(L, 1);
@@ -1538,19 +1549,9 @@ static inline int tm_encode (lua_State *L) {
   tk_fvec_t *row_buf_arg = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "row_buf");
   lua_pop(L, 1);
 
-
-
-
-
   lua_getfield(L, 1, "factor_buf");
   tk_fvec_t *factor_buf_arg = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "factor_buf");
   lua_pop(L, 1);
-
-
-
-
-
-
 
   lua_getfield(L, 1, "encoder");
   tk_nystrom_encoder_t *enc_reuse =
@@ -1629,10 +1630,6 @@ static inline int tm_encode (lua_State *L) {
     return luaL_error(L, "encode: n_landmarks %d exceeds 32768 (int16 csc_rows ceiling)", (int)m);
   }
 
-
-
-
-
   int reuse = 0;
   if (enc_reuse && !enc_reuse->destroyed
       && enc_reuse->m == m && enc_reuse->d == d
@@ -1646,9 +1643,6 @@ static inline int tm_encode (lua_State *L) {
   if (reuse) {
     enc = enc_reuse;
     enc_idx = enc_reuse_idx;
-
-
-
 
     enc->kernel = kernel;
   } else {
@@ -1679,7 +1673,6 @@ static inline int tm_encode (lua_State *L) {
       enc->blk_s[b] = mod.blk_s[b];
     }
 
-
     if (!enc->blk_cs_flat)
       enc->blk_cs_flat = (float *) malloc((csr_nt > 0 ? csr_nt : 1) * sizeof(float));
     if (!enc->blk_cs_flat)
@@ -1701,8 +1694,6 @@ static inline int tm_encode (lua_State *L) {
         lm_total += (uint64_t) (off[si + 1] - off[si]);
       }
     }
-
-
 
     if (!enc->csr_offsets)
       enc->csr_offsets = (int64_t *) malloc((m + 1) * sizeof(int64_t));
@@ -1771,7 +1762,6 @@ static inline int tm_encode (lua_State *L) {
     int64_t di = mod.d_input;
     enc->d_input = di;
 
-
     if (!enc->dense_vecs)
       enc->dense_vecs = (float *)malloc(m * (uint64_t)di * sizeof(float));
     if (!enc->dense_vecs) {
@@ -1791,7 +1781,6 @@ static inline int tm_encode (lua_State *L) {
       }
     }
 
-
     if (dense_cs2) {
       free(enc->dense_cs2);
       enc->dense_cs2 = dense_cs2;
@@ -1808,7 +1797,6 @@ static inline int tm_encode (lua_State *L) {
     chol_external = 1;
   } else if (enc->chol_f && enc->chol_f->m >= mm) {
 
-
     enc->chol_f->n = mm;
     chol_store = enc->chol_f->a;
   } else {
@@ -1820,7 +1808,8 @@ static inline int tm_encode (lua_State *L) {
     chol_store = cf->a;
   }
   tk_fvec_t *kss_raw;
-  if (factor_buf_arg && factor_buf_arg->m >= mm) {
+  bool kss_owned = !(factor_buf_arg && factor_buf_arg->m >= mm);
+  if (!kss_owned) {
     lua_getfield(L, 1, "factor_buf");
     kss_raw = factor_buf_arg;
     kss_raw->n = mm;
@@ -2028,8 +2017,10 @@ static inline int tm_encode (lua_State *L) {
     lua_getfield(L, 1, "xty_buf");
     lua_setfield(L, -2, "xty_buf");
     lua_pushvalue(L, kss_idx);
-    lua_setfield(L, -2, "factor_buf");
+    lua_setfield(L, -2, kss_owned ? "factor_own" : "factor_buf");
     lua_pop(L, 1);
+  } else if (kss_owned) {
+    tk_fvec_destroy(kss_raw);
   }
   tp_gr = omp_get_wtime() - tp_t3;
 
@@ -2057,6 +2048,7 @@ static inline int tm_encode (lua_State *L) {
   }
   lua_setfenv(L, enc_idx);
 
+  tk_nystrom_account(L, enc, gram_result_idx > 0 ? enc->m * enc->m * sizeof(float) : 0);
   lua_pushnil(L);
   lua_pushvalue(L, enc_idx);
   if (gram_result_idx > 0) {
@@ -2069,9 +2061,6 @@ static inline int tm_encode (lua_State *L) {
 static inline int tk_nystrom_build_csc (tk_nystrom_encoder_t *enc) {
   uint64_t csr_nt = enc->csr_n_tokens;
   uint64_t lm_total = (uint64_t)enc->csr_offsets[enc->m];
-
-
-
 
   if (!enc->csc_offsets)
     enc->csc_offsets = (int64_t *)calloc(csr_nt + 1, sizeof(int64_t));
@@ -2106,8 +2095,11 @@ static inline int tk_nystrom_build_csc (tk_nystrom_encoder_t *enc) {
 }
 
 static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
-  lua_settop(L, 2);
+  lua_settop(L, 1);
   const char *data = luaL_checkstring(L, 1);
+  lua_pushfstring(L, "%s.chol", data);
+  tk_fvec_t *chol_f = tk_fvec_map(L, lua_tostring(L, -1));
+  int chol_arg_idx = lua_gettop(L);
   FILE *fh = tk_lua_fopen(L, data, "r");
   char magic[4];
   tk_lua_fread(L, magic, 1, 4, fh);
@@ -2117,7 +2109,7 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 31) {
+  if (version != 32) {
     tk_lua_fclose(L, fh);
     return luaL_error(L, "unsupported nystrom encoder version %d (old layout; re-persist required)", (int)version);
   }
@@ -2133,38 +2125,12 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   tk_lua_fread(L, &enc->mod_type, sizeof(uint8_t), 1, fh);
   tk_lua_fread(L, &enc->m, sizeof(uint64_t), 1, fh);
   tk_lua_fread(L, &enc->d, sizeof(uint64_t), 1, fh);
-  uint8_t chol_external;
-  tk_lua_fread(L, &chol_external, sizeof(uint8_t), 1, fh);
   uint64_t mm = enc->m * enc->m;
-  int chol_arg_idx = 0;
-  bool have_arg = !lua_isnil(L, 2);
-  if (chol_external) {
-    if (!have_arg) {
-      tk_lua_fclose(L, fh);
-      return luaL_error(L, "load: external chol requires fvec arg 2");
-    }
-    tk_fvec_t *cf = tk_fvec_peek(L, 2, "chol");
-    if (cf->n < mm) {
-      tk_lua_fclose(L, fh);
-      return luaL_error(L, "load: chol buffer too small");
-    }
-    enc->chol = cf->a;
-    chol_arg_idx = 2;
-  } else {
-    if (have_arg) {
-      tk_lua_fclose(L, fh);
-      return luaL_error(L, "load: file embeds chol; do not pass a buffer");
-    }
-    tk_fvec_t *cf = tk_fvec_create(NULL, mm);
-    if (!cf) {
-      tk_lua_fclose(L, fh);
-      return luaL_error(L, "load: out of memory (chol)");
-    }
-    cf->n = mm;
-    enc->chol_f = cf;
-    enc->chol = cf->a;
-    tk_lua_fread(L, cf->a, sizeof(float), mm, fh);
+  if (chol_f->n < mm) {
+    tk_lua_fclose(L, fh);
+    return luaL_error(L, "load: chol file too small");
   }
+  enc->chol = chol_f->a;
   if (enc->mod_type == TK_MOD_CSR) {
     tk_lua_fread(L, &enc->csr_n_tokens, sizeof(uint64_t), 1, fh);
     enc->csr_offsets = (int64_t *)malloc((enc->m + 1) * sizeof(int64_t));
@@ -2228,6 +2194,7 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
     lua_setfield(L, -2, "chol");
   }
   lua_setfenv(L, enc_idx);
+  tk_nystrom_account(L, enc, 0);
   lua_pushvalue(L, enc_idx);
   return 1;
 }
@@ -2444,9 +2411,6 @@ static inline tk_ivec_t *tk_spectral_uniform_ids (
   free(alloc); free(rem); free(taken_g);
   return out;
 }
-
-
-
 
 static inline int tm_uniform_landmarks (lua_State *L) {
   lua_settop(L, 4);

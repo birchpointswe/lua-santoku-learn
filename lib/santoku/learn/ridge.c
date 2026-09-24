@@ -154,26 +154,22 @@ static inline int tk_ridge_encode_lua (lua_State *L) {
 
 static inline int tk_ridge_persist_lua (lua_State *L) {
   tk_ridge_t *r = tk_ridge_peek(L, 1);
-  FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
+  const char *path = luaL_checkstring(L, 2);
+  FILE *fh = tk_lua_fopen(L, path, "w");
   tk_lua_fwrite(L, "TKri", 1, 4, fh);
-  uint8_t version = 4;
+  uint8_t version = 5;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &r->n_dims, sizeof(int64_t), 1, fh);
   tk_lua_fwrite(L, &r->n_labels, sizeof(int64_t), 1, fh);
-  uint8_t w_external = (r->W->lua_managed == 2) ? 1 : 0;
-  tk_lua_fwrite(L, &w_external, sizeof(uint8_t), 1, fh);
-  if (w_external) {
-#if !defined(__EMSCRIPTEN__)
-    msync(r->W->a, r->W->n * sizeof(float), MS_SYNC);
-#endif
-  } else {
-    tk_fvec_persist(L, r->W, fh);
-  }
   uint8_t has_intercept = r->intercept ? 1 : 0;
   tk_lua_fwrite(L, &has_intercept, sizeof(uint8_t), 1, fh);
   if (r->intercept)
     tk_dvec_persist(L, r->intercept, fh);
   tk_lua_fclose(L, fh);
+  lua_pushfstring(L, "%s.W", path);
+  FILE *wh = tk_lua_fopen(L, lua_tostring(L, -1), "w");
+  tk_lua_fwrite(L, (char *) r->W->a, sizeof(float), (size_t) r->n_dims * (size_t) r->n_labels, wh);
+  tk_lua_fclose(L, wh);
   return 0;
 }
 
@@ -196,10 +192,6 @@ static inline int tk_ridge_transform_lua (lua_State *L) {
   lua_pushvalue(L, out_idx);
   return 1;
 }
-
-
-
-
 
 static inline int tk_ridge_topk_lua (lua_State *L) {
   tk_ridge_t *r = tk_ridge_peek(L, 1);
@@ -351,8 +343,6 @@ static inline int tk_ridge_create_lua (lua_State *L) {
       return 1;
     }
 
-
-
     tk_ridge_t *r;
     tk_fvec_t *gwb = NULL;
     int gwb_idx = 0;
@@ -414,8 +404,9 @@ static inline int tk_ridge_create_lua (lua_State *L) {
 }
 
 static inline int tk_ridge_load_lua (lua_State *L) {
-  const char *data = luaL_checkstring(L, 1);
-  FILE *fh = tk_lua_fopen(L, data, "r");
+  lua_settop(L, 1);
+  const char *path = luaL_checkstring(L, 1);
+  FILE *fh = tk_lua_fopen(L, path, "r");
   char magic[4];
   tk_lua_fread(L, magic, 1, 4, fh);
   if (memcmp(magic, "TKri", 4) != 0) {
@@ -424,39 +415,14 @@ static inline int tk_ridge_load_lua (lua_State *L) {
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 3 && version != 4) {
+  if (version != 5) {
     tk_lua_fclose(L, fh);
-    return luaL_error(L, "unsupported ridge version %d", (int)version);
+    return luaL_error(L, "unsupported ridge version %d (re-persist required)", (int)version);
   }
   int64_t n_dims, n_labels;
   tk_lua_fread(L, &n_dims, sizeof(int64_t), 1, fh);
   tk_lua_fread(L, &n_labels, sizeof(int64_t), 1, fh);
   uint64_t dnl = (uint64_t)n_dims * (uint64_t)n_labels;
-  tk_fvec_t *W = NULL;
-  int W_idx = 0;
-  bool have_arg_w = lua_gettop(L) >= 2 && !lua_isnil(L, 2);
-  uint8_t w_external = 0;
-  if (version == 4)
-    tk_lua_fread(L, &w_external, sizeof(uint8_t), 1, fh);
-  if (w_external) {
-    if (!have_arg_w) {
-      tk_lua_fclose(L, fh);
-      return luaL_error(L, "ridge load: external W requires fvec arg 2");
-    }
-    W = tk_fvec_peek(L, 2, "W");
-    if (W->n < dnl) {
-      tk_lua_fclose(L, fh);
-      return luaL_error(L, "ridge load: W buffer too small");
-    }
-    W_idx = 2;
-  } else {
-    if (have_arg_w) {
-      tk_lua_fclose(L, fh);
-      return luaL_error(L, "ridge load: file embeds W; do not pass a W buffer");
-    }
-    W = tk_fvec_load(L, fh);
-    W_idx = lua_gettop(L);
-  }
   tk_dvec_t *intercept = NULL;
   int b_idx = 0;
   uint8_t has_intercept;
@@ -466,6 +432,11 @@ static inline int tk_ridge_load_lua (lua_State *L) {
     b_idx = lua_gettop(L);
   }
   tk_lua_fclose(L, fh);
+  lua_pushfstring(L, "%s.W", path);
+  tk_fvec_t *W = tk_fvec_map(L, lua_tostring(L, -1));
+  int W_idx = lua_gettop(L);
+  if (W->n < dnl)
+    return luaL_error(L, "ridge load: W file too small");
   tk_ridge_push(L, W, W_idx, intercept, b_idx, n_dims, n_labels);
   return 1;
 }

@@ -9,8 +9,23 @@ local str = require("santoku.string")
 local arr = require("santoku.array")
 local num = require("santoku.num")
 local lpeg_utils = require("santoku.lpeg")
+local rand = require("santoku.random")
 
 local M = {}
+
+local SHUFFLE_SEED = 1
+
+local function sorted_files (dir)
+  local out = {}
+  for fp in fs.files(dir) do out[#out + 1] = fp end
+  arr.sort(out)
+  return out
+end
+
+local function shuffled_range (n)
+  rand.seed(SHUFFLE_SEED)
+  return arr.shuffle(arr.range(1, n))
+end
 
 local function single_label_csr (cls, n_cols)
   return csr.from_classes(cls, n_cols)
@@ -85,20 +100,20 @@ M.read_imdb = function (dir, max)
   local problems = {}
   local solutions = {}
   local n = 0
-  for fp in fs.files(dir .. "/pos") do
+  for _, fp in ipairs(sorted_files(dir .. "/pos")) do
     if max and n >= max then break end
     solutions[#solutions + 1] = 1
     problems[#problems + 1] = fs.readfile(fp)
     n = n + 1
   end
   n = 0
-  for fp in fs.files(dir .. "/neg") do
+  for _, fp in ipairs(sorted_files(dir .. "/neg")) do
     if max and n >= max then break end
     solutions[#solutions + 1] = 0
     problems[#problems + 1] = fs.readfile(fp)
     n = n + 1
   end
-  local idxs = arr.shuffle(arr.range(1, #problems))
+  local idxs = shuffled_range(#problems)
   return {
     n = #problems,
     problems = arr.lookup(idxs, problems, {}),
@@ -180,7 +195,7 @@ M.read_20newsgroups = function (dir, max_per_class, remove, max)
   for cat_idx, cat in ipairs(categories) do
     categories[cat_idx] = cat.name
     local n = 0
-    for fp in fs.files(cat.path) do
+    for _, fp in ipairs(sorted_files(cat.path)) do
       if max_per_class and n >= max_per_class then break end
       solutions[#solutions + 1] = cat_idx - 1
       local raw = fs.readfile(fp)
@@ -188,7 +203,7 @@ M.read_20newsgroups = function (dir, max_per_class, remove, max)
       n = n + 1
     end
   end
-  local idxs = arr.shuffle(arr.range(1, #problems))
+  local idxs = shuffled_range(#problems)
   local shuffled_problems = arr.lookup(idxs, problems, {})
   local shuffled_solutions = arr.lookup(idxs, solutions, {})
   local total = max and num.min(#shuffled_problems, max) or #shuffled_problems
@@ -271,7 +286,6 @@ M.read_eurlex57k = function (dir, max)
       n = n + 1
       sol_off:push(sol_nbr:size())
     end
-    collectgarbage("collect")
     return {
       n = n,
       text_iter = function () return make_text_iter(fp, max) end,
@@ -333,7 +347,7 @@ M.read_california_housing = function (fp, opts)
     end
   end
   bzr:finalize()
-  local idxs = arr.shuffle(arr.range(1, #data))
+  local idxs = shuffled_range(#data)
   local shuffled = {}
   for i, idx in ipairs(idxs) do
     shuffled[i] = data[idx]

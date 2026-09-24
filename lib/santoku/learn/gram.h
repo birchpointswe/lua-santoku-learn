@@ -197,9 +197,6 @@ static inline int tk_gram_solve_impl (
   return 0;
 }
 
-
-
-
 static inline int tk_gram_attach_lua (lua_State *L) {
   tk_gram_t *g = tk_gram_peek(L, 1);
   tk_fvec_t *fv = tk_fvec_peek(L, 2, "factor");
@@ -218,14 +215,6 @@ static inline int tk_gram_attach_lua (lua_State *L) {
   lua_pop(L, 1);
   return 0;
 }
-
-
-
-
-
-
-
-
 
 static inline int tk_gram_fold_lua (lua_State *L) {
   tk_gram_t *g = tk_gram_peek(L, 1);
@@ -289,16 +278,26 @@ static inline int tk_gram_fold_lua (lua_State *L) {
   return 1;
 }
 
+static inline void tk_gram_drop_own (lua_State *L, int i) {
+  lua_getfenv(L, i);
+  if (!lua_isnil(L, -1)) {
+    lua_getfield(L, -1, "factor_own");
+    if (!lua_isnil(L, -1))
+      tk_fvec_destroy(tk_fvec_peek(L, -1, "factor_own"));
+    lua_pop(L, 1);
+    lua_pushnil(L);
+    lua_setfield(L, -2, "factor_own");
+  }
+  lua_pop(L, 1);
+}
+
 static inline int tk_gram_release_lua (lua_State *L) {
   tk_gram_t *g = tk_gram_peek(L, 1);
   tk_gram_release_prepared(g);
 
-
-
-
-
   g->factor_ext = NULL;
   g->factor_ext_cap = 0;
+  tk_gram_drop_own(L, 1);
   lua_getfenv(L, 1);
   if (!lua_isnil(L, -1)) {
     lua_pushnil(L);
@@ -307,10 +306,6 @@ static inline int tk_gram_release_lua (lua_State *L) {
   lua_pop(L, 1);
   return 0;
 }
-
-
-
-
 
 static inline int tk_gram_destroy_lua (lua_State *L) {
   tk_gram_t *g = tk_gram_peek(L, 1);
@@ -324,6 +319,7 @@ static inline int tk_gram_destroy_lua (lua_State *L) {
     g->factor_ext_cap = 0;
     g->destroyed = true;
   }
+  tk_gram_drop_own(L, 1);
   lua_newtable(L);
   lua_setfenv(L, 1);
   return 0;
