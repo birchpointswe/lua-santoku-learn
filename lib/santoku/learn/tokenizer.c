@@ -45,9 +45,6 @@ typedef struct {
   tk_iumap_t *ngram_map;
 } tk_tokenizer_t;
 
-
-
-
 #define TK_REGION_BITS 60
 static inline int tk_region_of (size_t i, int n, size_t fo, size_t fc) {
   size_t end = i + (size_t) n;
@@ -166,7 +163,7 @@ static int tk_tokenizer_create_lua (lua_State *L) {
     if (cfg.normalize)
       return luaL_error(L, "tokenizer: normalize only valid on the text stream (not tags)");
   } else if (cfg.normalize && cfg.mode != TK_MODE_CHARS) {
-    return luaL_error(L, "tokenizer: normalize with flat/words token spans is unsupported");
+    return luaL_error(L, "tokenizer: normalize with flat/words token spans is unsupported; call tokenizer.normalize(texts) and extract spans from its output");
   }
 
   tk_tokenizer_t *t = tk_lua_newuserdata(L, tk_tokenizer_t, TK_TOK_MT,
@@ -248,8 +245,6 @@ static inline size_t tk_pack_symbols (const int64_t *sym, size_t len, int nmin, 
     count += tk_pack_symbols_ng(sym, len, ng, out + count);
   return count;
 }
-
-
 
 static inline size_t tk_boundary_flatten (uint8_t *buf, const uint8_t *itok, size_t w,
     const uint8_t *is_marker, uint8_t b_sep) {
@@ -565,7 +560,6 @@ static int tk_tokenize_core (lua_State *L, bool grow) {
     for (int64_t i = 0; i < V; i++) { uint32_t it = tk_iumap_get(map, keys[i]); tk_iumap_setval(map, it, i); }
     if (t->regions) {
 
-
       int64_t cnt5[5]; for (int r = 0; r < 5; r++) cnt5[r] = 0;
       for (int64_t i = 0; i < V; i++) {
         int r = (int) (((uint64_t) keys[i]) >> TK_REGION_BITS);
@@ -579,9 +573,6 @@ static int tk_tokenize_core (lua_State *L, bool grow) {
     free(keys);
   }
   uint32_t mend = tk_iumap_end(map);
-
-
-
 
   tk_ivec_t *offsets;
   lua_getfield(L, 2, "alloc");
@@ -673,8 +664,6 @@ static int tk_tokenize_core (lua_State *L, bool grow) {
 static int tk_tokenizer_fit_lua (lua_State *L) { return tk_tokenize_core(L, true); }
 static int tk_tokenizer_tokenize_lua (lua_State *L) { return tk_tokenize_core(L, false); }
 
-
-
 static int tk_tokenizer_group_offsets_lua (lua_State *L) {
   tk_tokenizer_t *t = tk_tokenizer_peek(L, 1);
   if (t->n_groups <= 0) { lua_pushnil(L); return 1; }
@@ -728,7 +717,6 @@ static int tk_tokenizer_load_lua (lua_State *L) {
   return 1;
 }
 
-
 static inline int64_t tk_extract_tag (const tk_re_prog_t *prog, const tk_re_scratch_t *sc) {
   for (int c = 0; c < sc->ncaps; c++) {
     int t = tk_re_cap_tag(prog, &sc->caps[c]);
@@ -736,10 +724,6 @@ static inline int64_t tk_extract_tag (const tk_re_prog_t *prog, const tk_re_scra
   }
   return prog->ntags;
 }
-
-
-
-
 
 static int64_t tk_extract_scan (
   tk_re_prog_t *prog, const char *text, size_t len, tk_re_scratch_t *sc,
@@ -749,6 +733,8 @@ static int64_t tk_extract_scan (
   size_t i = 0;
   while (i < len) {
     int64_t r = tk_re_match(prog, text, len, i, sc);
+    if (sc->status != TK_RE_OK)
+      return -1 - (int64_t) sc->status;
     if (r > (int64_t) i) {
       if (os) {
         os[cnt] = (int64_t) i;
@@ -764,10 +750,6 @@ static int64_t tk_extract_scan (
   return cnt;
 }
 
-
-
-
-
 static int tk_tokenizer_extract_lua (lua_State *L) {
   luaL_checktype(L, 1, LUA_TTABLE);
   int64_t n = (int64_t) tk_lua_fcheckunsigned(L, 1, "extract", "n");
@@ -779,24 +761,33 @@ static int tk_tokenizer_extract_lua (lua_State *L) {
   lua_getfield(L, 1, "texts");
   luaL_checktype(L, -1, LUA_TTABLE);
   int texts_idx = lua_gettop(L);
-  const char **tp = (const char **) malloc((size_t) (n > 0 ? n : 1) * sizeof(char *));
-  size_t *tl = (size_t *) malloc((size_t) (n > 0 ? n : 1) * sizeof(size_t));
+  size_t nb = (size_t) (n > 0 ? n : 1);
+  const char **tp = (const char **) lua_newuserdata(L, nb * sizeof(char *));
+  size_t *tl = (size_t *) lua_newuserdata(L, nb * sizeof(size_t));
+  int64_t *cnt = (int64_t *) lua_newuserdata(L, nb * sizeof(int64_t));
   for (int64_t d = 0; d < n; d++) {
     lua_rawgeti(L, texts_idx, (int) (d + 1));
     tp[d] = lua_tolstring(L, -1, &tl[d]);
     lua_pop(L, 1);
   }
 
-  int64_t *cnt = (int64_t *) malloc((size_t) (n > 0 ? n : 1) * sizeof(int64_t));
+  int64_t err = 0;
   #pragma omp parallel
   {
     tk_re_scratch_t sc;
     tk_re_scratch_init(&sc);
     #pragma omp for schedule(dynamic, 64)
-    for (int64_t d = 0; d < n; d++)
+    for (int64_t d = 0; d < n; d++) {
       cnt[d] = tk_extract_scan(prog, tp[d], tl[d], &sc, NULL, NULL, NULL);
+      if (cnt[d] < 0) {
+        #pragma omp atomic write
+        err = cnt[d];
+      }
+    }
     tk_re_scratch_free(&sc);
   }
+  if (err < 0)
+    return luaL_error(L, "extract: pattern match failed (re status %d)", (int) (-1 - err));
 
   tk_ivec_t *off = tk_ivec_create(L, (uint64_t) (n + 1));
   off->n = (uint64_t) (n + 1); off->a[0] = 0;
@@ -814,20 +805,20 @@ static int tk_tokenizer_extract_lua (lua_State *L) {
     #pragma omp for schedule(dynamic, 64)
     for (int64_t d = 0; d < n; d++) {
       int64_t o = off->a[d];
-      tk_extract_scan(prog, tp[d], tl[d], &sc,
+      int64_t r = tk_extract_scan(prog, tp[d], tl[d], &sc,
         s->a + o, e->a + o, ty ? ty->a + o : NULL);
+      if (r < 0) {
+        #pragma omp atomic write
+        err = r;
+      }
     }
     tk_re_scratch_free(&sc);
   }
+  if (err < 0)
+    return luaL_error(L, "extract: pattern match failed (re status %d)", (int) (-1 - err));
 
-  free(cnt); free(tp); free(tl);
   return ty ? 4 : 3;
 }
-
-
-
-
-
 
 static int tk_tokenizer_tokenize_raw_lua (lua_State *L) {
   luaL_checktype(L, 1, LUA_TTABLE);
@@ -891,6 +882,37 @@ static int tk_tokenizer_tokenize_raw_lua (lua_State *L) {
   return 3;
 }
 
+static int tk_tokenizer_normalize_lua (lua_State *L) {
+  luaL_checktype(L, 1, LUA_TTABLE);
+  int n = (int) lua_objlen(L, 1);
+  size_t maxlen = 0;
+  for (int d = 1; d <= n; d++) {
+    lua_rawgeti(L, 1, d);
+    size_t len = 0;
+    if (!lua_isstring(L, -1))
+      return luaL_error(L, "normalize: texts[%d] is not a string", d);
+    lua_tolstring(L, -1, &len);
+    if (len > maxlen) maxlen = len;
+    lua_pop(L, 1);
+  }
+  uint8_t *buf = (uint8_t *) malloc(maxlen + 1);
+  if (!buf) return luaL_error(L, "normalize: out of memory");
+  lua_createtable(L, n, 0);
+  for (int d = 1; d <= n; d++) {
+    lua_rawgeti(L, 1, d);
+    size_t tlen; const char *text = lua_tolstring(L, -1, &tlen);
+    tk_norm_stream_t ns;
+    tk_norm_stream_init(&ns, buf);
+    tk_norm_stream_run(&ns, text, tlen);
+    size_t blen = tk_norm_stream_finish(&ns);
+    lua_pop(L, 1);
+    lua_pushlstring(L, (const char *) buf, blen);
+    lua_rawseti(L, -2, d);
+  }
+  free(buf);
+  return 1;
+}
+
 static luaL_Reg tk_tokenizer_mt_fns[] = {
   { "fit", tk_tokenizer_fit_lua },
   { "tokenize", tk_tokenizer_tokenize_lua },
@@ -905,6 +927,7 @@ static luaL_Reg tk_tokenizer_fns[] = {
   { "load", tk_tokenizer_load_lua },
   { "extract", tk_tokenizer_extract_lua },
   { "tokenize_raw", tk_tokenizer_tokenize_raw_lua },
+  { "normalize", tk_tokenizer_normalize_lua },
   { NULL, NULL }
 };
 

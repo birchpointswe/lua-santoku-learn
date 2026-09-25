@@ -111,7 +111,7 @@ The front door. Inputs are matrix objects:
 - Returns `enc, ridge, val_codes, params, decider, dec_metrics`.
 
 **Locked vs search:** `search_trials = 0` runs locked at the `{ def = ... }` values (fast,
-reproducible), the deployment mode. `search_trials > 0` runs GP-BO over kernel + `lambda`
+reproducible), the deployment mode. `search_trials > 0` runs BIPOP-CMA-ES over kernel + `lambda`
 + any declared rebuild knobs; take the printed best and write it back as the new `def`s.
 
 ## The decide layer
@@ -135,6 +135,6 @@ baseline: single → pure argmax, span → reject_offset 0. Multilabel has no ar
 ## Deploy / persistence checklist
 
 Save the tokenizer(s), the encoder (`spectral`), the ridge, the decider, and any fit weights
-(`bns`/`idf`/`standardize`). On load, re-encode new text through the same tokenizer + weights, then
+(`bns`/`bm25`/`standardize`). On load, re-encode new text through the same tokenizer + weights, then
 `ridge:label`/`:regress` + `decider`. For large corpora, encode into an `mtx` backed by a disk
 `santoku.store` view (`enc:encode(X, out)`) to bound RAM.
