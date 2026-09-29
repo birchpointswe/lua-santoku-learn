@@ -1,3 +1,9 @@
+local env = require("santoku.env")
+if env.var("TK_LEARN_REGRESS", nil) ~= "1" then
+  print("TK_LEARN_REGRESS not set. Skipping.")
+  return
+end
+
 local ds = require("santoku.learn.dataset")
 local retrieval = require("santoku.learn.retrieval")
 local optimize = require("santoku.learn.optimize")
