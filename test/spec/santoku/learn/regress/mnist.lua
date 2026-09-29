@@ -9,7 +9,6 @@ local fs = require("santoku.fs")
 fs.stdout:setvbuf("line")
 
 local cfg = {
-  verbose = false,
   search_landmarks = 1024 * 2,
   data = { ttr = 0.8, features = 784 },
   n_landmarks = 1024 * 8,

@@ -3,6 +3,7 @@ local csr = require("santoku.csr")
 local mtx = require("santoku.mtx")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
+local fvec = require("santoku.fvec")
 local spans = require("santoku.spans")
 local fs = require("santoku.fs")
 local str = require("santoku.string")
@@ -402,6 +403,51 @@ M.split_california_housing = function (dataset, ttr)
   return _encode_housing_split(dataset, train_rows), _encode_housing_split(dataset, test_rows)
 end
 
+local ADULT_COLS = {
+  "age", "workclass", "fnlwgt", "education", "education_num", "marital_status",
+  "occupation", "relationship", "race", "sex", "capital_gain", "capital_loss",
+  "hours_per_week", "native_country",
+}
+local ADULT_CONTINUOUS = {
+  age = true, fnlwgt = true, education_num = true,
+  capital_gain = true, capital_loss = true, hours_per_week = true,
+}
+
+local function read_adult_file (fp)
+  local rows, cls = {}, ivec.create()
+  for line in fs.lines(fp) do
+    local f = str.splits(line, ",")
+    if #f == #ADULT_COLS + 1 then
+      local row = {}
+      for j, col in ipairs(ADULT_COLS) do
+        local v = str.trim(f[j])
+        row[col] = ADULT_CONTINUOUS[col] and tonumber(v) or v
+      end
+      rows[#rows + 1] = row
+      cls:push(str.find(f[#f], ">50K", 1, true) and 1 or 0)
+    end
+  end
+  return rows, cls
+end
+
+M.read_adult = function (dir)
+  local train_rows, train_cls = read_adult_file(dir .. "/adult.data")
+  local test_rows, test_cls = read_adult_file(dir .. "/adult.test")
+  local bzr = booleanizer.create()
+  for _, row in ipairs(train_rows) do
+    for _, col in ipairs(ADULT_COLS) do bzr:observe(col, row[col]) end
+  end
+  bzr:finalize()
+  local function encode (rows, cls)
+    local bits, dense = bzr:encode({ samples = rows, cols = ADULT_COLS })
+    return { n = #rows, bits = bits, dense = dense, labels = single_label_csr(cls, 2) }
+  end
+  local n_bits, n_dense = bzr:features()
+  return encode(train_rows, train_cls), encode(test_rows, test_cls), {
+    booleanizer = bzr, n_bits = n_bits, n_dense = n_dense,
+  }
+end
+
 local conll_types = { PER = 0, ORG = 1, LOC = 2, MISC = 3 }
 
 local function read_conll_file (fp, max)
@@ -472,6 +518,62 @@ M.merge_conll2003 = function (a, b)
   m.gold:append(a.gold)
   m.gold:append(b.gold)
   return m
+end
+
+local function json_first (line, field)
+  local s, e = lpeg_utils.json_fields(line, { field })()
+  return s and str.sub(line, s, e) or ""
+end
+
+M.read_beir = function (dir, split)
+  local ids, texts, index = {}, {}, {}
+  for line in fs.lines(dir .. "/corpus.jsonl") do
+    local id = json_first(line, "_id")
+    local title, text = json_first(line, "title"), json_first(line, "text")
+    local n = #ids
+    ids[n + 1] = id
+    texts[n + 1] = title == "" and text or (title .. "\n" .. text)
+    index[id] = n
+  end
+  local qtext = {}
+  for line in fs.lines(dir .. "/queries.jsonl") do
+    qtext[json_first(line, "_id")] = json_first(line, "text")
+  end
+  local qids, qtexts, qrow = {}, {}, {}
+  local rows = {}
+  local first = true
+  for line in fs.lines(dir .. "/qrels/" .. split .. ".tsv") do
+    if first then
+      first = false
+    elseif line ~= "" then
+      local f = str.splits(line, "\t")
+      local q, d, g = f[1], f[2], tonumber(f[3])
+      local di = index[d]
+      if di and qtext[q] then
+        local r = qrow[q]
+        if not r then
+          r = #qids
+          qids[r + 1] = q
+          qtexts[r + 1] = qtext[q]
+          qrow[q] = r
+          rows[r + 1] = {}
+        end
+        local row = rows[r + 1]
+        row[#row + 1] = { di, g }
+      end
+    end
+  end
+  local off, nbr, val = ivec.create(), ivec.create(), fvec.create()
+  off:push(0)
+  for r = 1, #rows do
+    for _, p in ipairs(rows[r]) do nbr:push(p[1]); val:push(p[2]) end
+    off:push(nbr:size())
+  end
+  return {
+    corpus_ids = ids, corpus_texts = texts, n_corpus = #ids,
+    query_ids = qids, query_texts = qtexts, n_queries = #qids,
+    qrels = csr.create({ offsets = off, neighbors = nbr, values = val, n_cols = #ids }),
+  }
 end
 
 return M

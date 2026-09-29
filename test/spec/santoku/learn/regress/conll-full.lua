@@ -16,7 +16,6 @@ local N_TYPES = 4
 local MAX_SPAN = 1000000000
 
 local cfg = {
-  verbose = false,
   search_landmarks = 1024 * 2,
   data = {
     dir = "test/res/conll2003",
@@ -120,7 +119,6 @@ test("conll-full", function ()
       n_landmarks = cfg.emb.n_landmarks,
       search_landmarks = cfg.search_landmarks,
       k = 1,
-      verbose = cfg.verbose,
       each = util.make_ridge_log(stopwatch),
     }))
     str.printf("[Tag] kernel=%s lambda=%.8g offset=%.8g %s\n",
@@ -209,7 +207,7 @@ test("conll-full", function ()
     relevance = ty_relevance,
     n_labels = N_TYPES + 1,
     n_landmarks = cfg.emb.n_landmarks, search_landmarks = cfg.search_landmarks, k = 1,
-    verbose = cfg.verbose, each = util.make_ridge_log(stopwatch),
+    each = util.make_ridge_log(stopwatch),
   }))
   collectgarbage("collect")
 
@@ -229,7 +227,7 @@ test("conll-full", function ()
   local b = bundle.load(bdir)
   local _, Xb = util.tokenize_blocks(cfg.type.blocks, test_set.texts, { toks = b.tokenizers, focus = Scand_te, tokens = TE.seg })
   Xb[n_sparse + 1] = b.gaz:block(test_set.texts, Scand_te, nil)
-  Xb[n_sparse + 1]:bns(b.gaz_rms)
+  Xb[n_sparse + 1]:scale_cols(b.gaz_rms)
   local _, sb = util.predict_tiled({ deploy = b.encode, ridge = b.ridge,
     blocks = Xb, n = n_tec, k = 2, scores = true, n_labels = N_TYPES + 1 })
   local _, mb = b.decider:score({ scores = sb, n_samples = n_te_docs, cand = Scand_te, gold = TE.gold })

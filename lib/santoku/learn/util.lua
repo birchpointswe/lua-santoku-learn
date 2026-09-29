@@ -116,24 +116,17 @@ function M.fmt_metrics (m)
 end
 
 local function format_phase (ev)
-  if ev.is_final then return "F" end
-  local tag = ev.phase or "lhs"
-  return str.format("%s %d/%d", tag, ev.trial or 1, ev.trials or 1)
+  return str.format("%s %d/%d", ev.phase, ev.trial, ev.trials)
 end
 
 local NU_NAME = { [0] = "1/2", [1] = "3/2", [2] = "5/2", [3] = "inf" }
 
 local function format_kernel (p)
-  if not p.kernel then
-    return p.activation and str.format(" act=%s", p.activation) or ""
-  end
+  if not p.kernel then return "" end
   if p.kernel == "matern" then
     local nu = p.nu ~= nil and (NU_NAME[p.nu] or tostring(p.nu)) or "?"
     local g = p.gamma and str.format(" gamma=%.8g", p.gamma) or ""
     return str.format(" kernel=matern nu=%s%s", nu, g)
-  elseif p.kernel == "arccos" then
-    return str.format(" kernel=arccos n=%d depth=%d %s",
-      p.order or 1, p.depth or 1, (p.tangent == 1) and "ntk" or "nngp")
   end
   local g = p.gamma and str.format(" gamma=%.8g", p.gamma) or ""
   return str.format(" kernel=%s%s", p.kernel, g)
@@ -194,30 +187,6 @@ function M.make_ridge_log (stopwatch, metric_fmt)
         end
         str.printf("[Plateau] trials=%d best=%.6f band32=%.6f within1e-3=%d(%.0f%%) within5e-3=%d\n",
           n, best, band, w1, 100 * w1 / n, w5)
-      end
-      return
-    end
-    if ev.event == "profile" then
-      local total = ev.total or 0
-      local leaves, spans = {}, {}
-      for kk in pairs(ev.stats) do
-        if kk:sub(1, 1) == "~" then spans[#spans + 1] = kk else leaves[#leaves + 1] = kk end
-      end
-      arr.sort(leaves, function (a, b) return ev.stats[a].time > ev.stats[b].time end)
-      arr.sort(spans, function (a, b) return ev.stats[a].time > ev.stats[b].time end)
-      str.printf("[Profile] total=%.2fs\n", total)
-      local leafsum = 0
-      for _, kk in ipairs(leaves) do
-        local e = ev.stats[kk]; leafsum = leafsum + e.time
-        str.printf("  %-20s %9.2fs %5.1f%%  n=%-8d avg=%.4gms\n",
-          kk, e.time, total > 0 and 100 * e.time / total or 0, e.count, e.count > 0 and 1000 * e.time / e.count or 0)
-      end
-      str.printf("  %-20s %9.2fs %5.1f%%\n", "(unaccounted)",
-        total - leafsum, total > 0 and 100 * (total - leafsum) / total or 0)
-      for _, kk in ipairs(spans) do
-        local e = ev.stats[kk]
-        str.printf("  [span] %-13s %9.2fs %5.1f%%  n=%d\n",
-          kk:sub(2), e.time, total > 0 and 100 * e.time / total or 0, e.count)
       end
       return
     end
@@ -395,16 +364,8 @@ end
 function M.rms_scale_blocks (train_blocks, eval_block_lists, from, to)
   local weights = {}
   for i = from or 1, to or #train_blocks do
-    local X = train_blocks[i]
-    local n, nc = X:shape()
-    local ssq = X:sumsq_cols()
-    local w = fvec.create(nc)
-    for c = 0, nc - 1 do
-      local s = ssq:get(c)
-      w:set(c, s > 0 and num.sqrt(n / s) or 0)
-    end
-    X:bns(w)
-    for _, ebl in ipairs(eval_block_lists) do ebl[i]:bns(w) end
+    local w = train_blocks[i]:standardize("rms")
+    for _, ebl in ipairs(eval_block_lists) do ebl[i]:scale_cols(w) end
     weights[i] = w
   end
   return weights
@@ -526,9 +487,8 @@ function M.fold_dense (a)
     if not instrat[r] then instrat[r] = true; strat_idx:push(r) end
   end
   a.stratum_rows = strat_idx
-  local function make_split (Kn, user_foldof)
-    local foldof0 = user_foldof
-      or ((reg and a.pool_targets) and fold_assign_reg(a.pool_targets, n, Kn))
+  local function make_split (Kn)
+    local foldof0 = ((reg and a.pool_targets) and fold_assign_reg(a.pool_targets, n, Kn))
       or fold_assign(a.pool_class or derive_class(a.pool_labels, n), n, Kn)
     local foldof = ivec.create()
     foldof:copy(foldof0)
@@ -591,7 +551,7 @@ function M.fold_dense (a)
   a.y = a.pool_labels
   a.targets = a.pool_targets
   if use_folds then
-    a.fold_split = make_split(K, a.fold_assign)
+    a.fold_split = make_split(K)
   end
   return a
 end
@@ -613,9 +573,6 @@ function M.fold_blocks (a)
       pool[i] = b
     end
   end
-  local gd = 0
-  for i = 1, #pool do gd = gd + ((groups and groups[i]) and (groups[i]:size() - 1) or 1) end
-  a.gauge_dims = gd
   local reg = a.pool_targets ~= nil
   local n = a.pool_n or select(1, pool[1]:shape())
   local metrics = a.relevance
@@ -646,7 +603,7 @@ function M.fold_blocks (a)
   end
   a.stratum_rows = strat_idx
 
-  local function make_split (Kn, user_docfold, user_foldof)
+  local function make_split (Kn, user_docfold)
     local foldof, fvc, fvg
     if a.cand then
       local co = a.cand:offsets()
@@ -667,8 +624,7 @@ function M.fold_blocks (a)
         fvg[f + 1] = a.gold:docs(docs)
       end
     else
-      local foldof0 = user_foldof
-        or ((reg and a.pool_targets) and fold_assign_reg(a.pool_targets, n, Kn))
+      local foldof0 = ((reg and a.pool_targets) and fold_assign_reg(a.pool_targets, n, Kn))
         or fold_assign(a.pool_class or derive_class(a.pool_labels, n), n, Kn)
       foldof = ivec.create()
       foldof:copy(foldof0)
@@ -742,7 +698,7 @@ function M.fold_blocks (a)
   a.y = a.pool_labels
   a.targets = a.pool_targets
   if use_folds then
-    a.fold_split = make_split(K, a.doc_fold, a.fold_assign)
+    a.fold_split = make_split(K, a.doc_fold)
   end
   return a
 end

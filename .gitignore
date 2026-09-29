@@ -19,6 +19,9 @@ test/res/eurlex57k.tar.gz
 test/res/imdb.50k.tar.gz
 test/res/mnist.70k.txt.gz
 test/res/aclImdb/
+test/res/scifact/
+test/res/scifact.zip
+test/res/adult/
 test/res.bak/
 tmp*
 .claude

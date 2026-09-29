@@ -40,13 +40,6 @@ static inline float cblas_sdot (int n, const float *x, int incx, const float *y,
   return s;
 }
 
-static inline double cblas_dnrm2 (int n, const double *x, int incx) {
-  double s = 0;
-  for (int i = 0; i < n; i++)
-    s += x[i * incx] * x[i * incx];
-  return sqrt(s);
-}
-
 static inline void cblas_sgemm (enum CBLAS_ORDER order, enum CBLAS_TRANSPOSE transA,
     enum CBLAS_TRANSPOSE transB, int M, int N, int K,
     float alpha, const float *A, int lda, const float *B, int ldb,
@@ -69,31 +62,6 @@ static inline void cblas_sgemm (enum CBLAS_ORDER order, enum CBLAS_TRANSPOSE tra
         C[i * ldc + j] = alpha * s + beta * C[i * ldc + j];
       else
         C[j * ldc + i] = alpha * s + beta * C[j * ldc + i];
-    }
-  }
-}
-
-static inline void cblas_dsyrk (enum CBLAS_ORDER order, enum CBLAS_UPLO uplo,
-    enum CBLAS_TRANSPOSE trans, int N, int K,
-    double alpha, const double *A, int lda, double beta, double *C, int ldc) {
-  for (int i = 0; i < N; i++) {
-    for (int j = (uplo == CblasUpper ? i : 0); j < (uplo == CblasUpper ? N : i + 1); j++) {
-      double s = 0;
-      for (int k = 0; k < K; k++) {
-        double ai, aj;
-        if (order == CblasColMajor) {
-          ai = (trans == CblasTrans) ? A[i * lda + k] : A[k * lda + i];
-          aj = (trans == CblasTrans) ? A[j * lda + k] : A[k * lda + j];
-        } else {
-          ai = (trans == CblasTrans) ? A[k * lda + i] : A[i * lda + k];
-          aj = (trans == CblasTrans) ? A[k * lda + j] : A[j * lda + k];
-        }
-        s += ai * aj;
-      }
-      if (order == CblasColMajor)
-        C[j * ldc + i] = alpha * s + beta * C[j * ldc + i];
-      else
-        C[i * ldc + j] = alpha * s + beta * C[i * ldc + j];
     }
   }
 }

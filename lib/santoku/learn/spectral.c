@@ -1284,11 +1284,6 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
     if (has_cs)
       tk_lua_fwrite(L, enc->dense_cs2, sizeof(float), (uint64_t)enc->d_input, fh);
   }
-  lua_getfenv(L, 1);
-  lua_getfield(L, -1, "landmark_ids");
-  tk_ivec_t *lm_ids = tk_ivec_peek(L, -1, "landmark_ids");
-  tk_ivec_persist(L, lm_ids, fh);
-  lua_pop(L, 2);
   tk_lua_fclose(L, fh);
   return 0;
 }
@@ -1309,7 +1304,6 @@ static inline tk_ivec_t *tk_spectral_uniform_ids (
 static inline int tm_encode (lua_State *L) {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
-  double tp_enc0 = omp_get_wtime(), tp_lm = 0.0, tp_pj = 0.0, tp_gr = 0.0;
 
   lua_getfield(L, 1, "x");
   if (!lua_isnil(L, -1)) {
@@ -1380,9 +1374,6 @@ static inline int tm_encode (lua_State *L) {
     mod.csr_tokens = tok_a;
     mod.csr_values = val_fv ? val_fv->a : NULL;
     mod.type = TK_MOD_CSR;
-    lua_getfield(L, 1, "rowscale");
-    if (!lua_isnil(L, -1)) { tk_fvec_t *rs = tk_fvec_peekopt(L, -1); if (rs) mod.rowscale = rs->a; }
-    lua_pop(L, 1);
   } else {
     lua_pop(L, 1);
   }
@@ -1567,15 +1558,13 @@ static inline int tm_encode (lua_State *L) {
     uint64_t fn = 0;
     uint64_t *ffp = tk_spectral_row_fps(L, &fn);
     if (!ffp) return luaL_error(L, "encode: cannot fingerprint rows for landmark selection");
-    uint64_t lseed = tk_lua_foptunsigned(L, 1, "encode", "landmark_seed", 1);
     lua_getfield(L, 1, "strata");
     tk_ivec_t *st = lua_isnil(L, -1) ? NULL : tk_ivec_peek(L, -1, "strata");
     lua_pop(L, 1);
-    lm_forced = tk_spectral_uniform_ids(L, ffp, fn, n_lm_req, lseed,
+    lm_forced = tk_spectral_uniform_ids(L, ffp, fn, n_lm_req, 1,
       (st && st->n == fn) ? st->a : NULL);
   }
   tk_ivec_t *lm_ids = tk_ivec_create(L, lm_forced ? (lm_forced->n ? lm_forced->n : 1) : 1);
-  int lm_ids_idx = lua_gettop(L);
   uint64_t m = 0;
   if (lm_forced) {
     uint64_t cap = lm_forced->n > nc ? nc : lm_forced->n;
@@ -1788,7 +1777,6 @@ static inline int tm_encode (lua_State *L) {
     }
   }
 
-  double tp_t = omp_get_wtime();
   uint64_t mm = (uint64_t)m * m;
   float *chol_store;
   int chol_external = 0;
@@ -1837,9 +1825,7 @@ static inline int tm_encode (lua_State *L) {
         chol_store[r * m + c] = 0.0f;
   }
   enc->chol = chol_store;
-  tp_lm = omp_get_wtime() - tp_t;
 
-  double tp_t3 = omp_get_wtime();
   int gram_result_idx = 0;
   int build_prepared = has_gram_labels || has_gram_targets;
   if (build_prepared) {
@@ -2022,26 +2008,13 @@ static inline int tm_encode (lua_State *L) {
   } else if (kss_owned) {
     tk_fvec_destroy(kss_raw);
   }
-  tp_gr = omp_get_wtime() - tp_t3;
 
   free(csr_values_owned);
   free(dense_owned);
   free(blk_rowscale);
   free(dense_rowscale);
 
-  {
-    double tp_setup = (omp_get_wtime() - tp_enc0) - tp_lm - tp_pj - tp_gr;
-    lua_newtable(L);
-    lua_pushnumber(L, tp_setup > 0.0 ? tp_setup : 0.0); lua_setfield(L, -2, "setup");
-    lua_pushnumber(L, tp_lm); lua_setfield(L, -2, "landmarks");
-    lua_pushnumber(L, tp_pj); lua_setfield(L, -2, "project");
-    lua_pushnumber(L, tp_gr); lua_setfield(L, -2, "gram");
-    lua_setfield(L, 1, "enc_phases");
-  }
-
   lua_newtable(L);
-  lua_pushvalue(L, lm_ids_idx);
-  lua_setfield(L, -2, "landmark_ids");
   if (chol_external) {
     lua_getfield(L, 1, "proj_buf");
     lua_setfield(L, -2, "chol");
@@ -2183,12 +2156,8 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
     }
   }
 
-  tk_ivec_load(L, fh);
-  int lm_ids_idx = lua_gettop(L);
   tk_lua_fclose(L, fh);
   lua_newtable(L);
-  lua_pushvalue(L, lm_ids_idx);
-  lua_setfield(L, -2, "landmark_ids");
   if (chol_arg_idx) {
     lua_pushvalue(L, chol_arg_idx);
     lua_setfield(L, -2, "chol");

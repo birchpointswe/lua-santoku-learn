@@ -28,8 +28,8 @@ local function recall (Pa, Pd, nq, k)
 end
 
 local function bits (M)
-  local r, c = M:shape()
-  return mtx.create({ data = M:sign(), n_rows = r, n_cols = c, bits = true })
+  local _, c = M:shape()
+  return M:sign(), c
 end
 
 test("retrieval: bm25 spectral codes, itq bits, exhaustive hamming", function ()
@@ -41,9 +41,9 @@ test("retrieval: bm25 spectral codes, itq bits, exhaustive hamming", function ()
   X:normalize()
   local _, enc = spectral.encode({ x = X, n_landmarks = 256, kernel = "cosine" })
   local C = enc:encode(X)
-  C:normalize("row")
+  C:normalize()
   local mu = C:center()
-  C:normalize("row")
+  C:normalize()
   local n, dim = C:shape()
   local k = 10
 
@@ -53,14 +53,14 @@ test("retrieval: bm25 spectral codes, itq bits, exhaustive hamming", function ()
   for i = 1, obj:size() - 1 do
     assert(obj:get(i) <= obj:get(i - 1) + 1e-6 * obj:get(i - 1))
   end
-  local B_itq = bits(C:multiply(W))
-  local B_sign = bits(C)
-  local r_itq = recall(B_itq:topk(B_itq, k + 1), P_exact, n, k + 1)
-  local r_sign = recall(B_sign:topk(B_sign, k + 1), P_exact, n, k + 1)
+  local B_itq, nb_itq = bits(C:multiply(W))
+  local B_sign, nb_sign = bits(C)
+  local r_itq = recall(B_itq:bits_topk(B_itq, nb_itq, k + 1), P_exact, n, k + 1)
+  local r_sign = recall(B_sign:bits_topk(B_sign, nb_sign, k + 1), P_exact, n, k + 1)
 
   local W64, _, _, kept64 = C:itq({ bits = 64, iterations = 30 })
-  local B64 = bits(C:multiply(W64))
-  local r_64 = recall(B64:topk(B64, k + 1), P_exact, n, k + 1)
+  local B64, nb64 = bits(C:multiply(W64))
+  local r_64 = recall(B64:bits_topk(B64, nb64, k + 1), P_exact, n, k + 1)
 
   str.printf("[Retrieval] docs=%d dim=%d recall@%d itq=%.4f sign=%.4f itq64=%.4f kept64=%.4f\n",
     n, dim, k + 1, r_itq, r_sign, r_64, kept64)
@@ -74,10 +74,10 @@ test("retrieval: bm25 spectral codes, itq bits, exhaustive hamming", function ()
   Y:bm25(w, avgdl)
   Y:normalize()
   local Q = enc:encode(Y)
-  Q:normalize("row")
+  Q:normalize()
   Q:center(mu)
-  Q:normalize("row")
-  local Pq = B_itq:topk(bits(Q:multiply(W)), 1)
+  Q:normalize()
+  local Pq = B_itq:bits_topk((bits(Q:multiply(W))), nb_itq, 1)
   assert(Pq:neighbors():get(0) == 0 and Pq:neighbors():get(1) == 1)
 
   local tmp = fs.tmpname() .. ".mtx"
@@ -85,7 +85,7 @@ test("retrieval: bm25 spectral codes, itq bits, exhaustive hamming", function ()
   local W2 = mtx.load(tmp)
   fs.rm(tmp, true)
   local B2 = bits(C:multiply(W2))
-  local P1, P2 = B_itq:topk(B_itq, k), B2:topk(B2, k)
+  local P1, P2 = B_itq:bits_topk(B_itq, nb_itq, k), B2:bits_topk(B2, nb_itq, k)
   assert(recall(P1, P2, n, k) == 1)
 
 end)

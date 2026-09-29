@@ -92,13 +92,6 @@ static inline void tk_booleanizer_eph_add (lua_State *L, int eph)
   lua_rawset(L, eph);
 }
 
-static inline void tk_booleanizer_eph_del (lua_State *L, int eph, void *p)
-{
-  lua_pushlightuserdata(L, p);
-  lua_pushnil(L);
-  lua_rawset(L, eph);
-}
-
 #define tk_booleanizer_own(L, eph, expr) ({ \
   __typeof__(expr) _o = (expr); \
   tk_booleanizer_eph_add(L, eph); \
@@ -345,66 +338,6 @@ static inline int64_t tk_booleanizer_features (
   return (int64_t) B->next_feature;
 }
 
-
-static inline void tk_booleanizer_restrict (
-  lua_State *L,
-  tk_booleanizer_t *B,
-  tk_ivec_t *bit_ids,
-  int Bi
-) {
-  if (B->destroyed) {
-    tk_lua_verror(L, 2, "restrict", "can't restrict a destroyed booleanizer");
-    return;
-  }
-  if (!B->finalized) {
-    tk_lua_verror(L, 2, "restrict", "finalize must be called before restrict");
-    return;
-  }
-  uint64_t old_n_bits = B->next_feature;
-  bool *sel = (bool *) calloc(old_n_bits, sizeof(bool));
-  if (!sel) {
-    tk_lua_verror(L, 2, "restrict", "allocation failed");
-    return;
-  }
-  for (uint64_t i = 0; i < bit_ids->n; i++) {
-    int64_t b = bit_ids->a[i];
-    if (b >= 0 && (uint64_t) b < old_n_bits)
-      sel[b] = true;
-  }
-  int kha;
-  khint_t khi;
-  int eph = tk_booleanizer_eph(L, Bi);
-  tk_cat_bits_string_t *new_cat_bits_string = tk_booleanizer_own(L, eph, tk_cat_bits_string_create(L, 0));
-  tk_cat_bits_double_t *new_cat_bits_double = tk_booleanizer_own(L, eph, tk_cat_bits_double_create(L, 0));
-  int64_t next_bit = 0;
-  tk_cat_bit_string_t cbs;
-  int64_t v;
-  tk_umap_foreach(B->cat_bits_string, cbs, v, ({
-    if (v >= 0 && (uint64_t) v < old_n_bits && sel[v]) {
-      tk_cat_bit_string_t new_key = { .f = cbs.f, .v = tk_booleanizer_intern(L, eph, cbs.v, strlen(cbs.v)) };
-      khi = tk_cat_bits_string_put(new_cat_bits_string, new_key, &kha);
-      tk_cat_bits_string_setval(new_cat_bits_string, khi, next_bit ++);
-    }
-  }));
-  tk_cat_bit_double_t cbd;
-  tk_umap_foreach(B->cat_bits_double, cbd, v, ({
-    if (v >= 0 && (uint64_t) v < old_n_bits && sel[v]) {
-      tk_cat_bit_double_t new_key = { .f = cbd.f, .v = cbd.v };
-      khi = tk_cat_bits_double_put(new_cat_bits_double, new_key, &kha);
-      tk_cat_bits_double_setval(new_cat_bits_double, khi, next_bit ++);
-    }
-  }));
-  tk_booleanizer_eph_del(L, eph, B->cat_bits_string);
-  tk_cat_bits_string_destroy(B->cat_bits_string);
-  tk_booleanizer_eph_del(L, eph, B->cat_bits_double);
-  tk_cat_bits_double_destroy(B->cat_bits_double);
-  lua_pop(L, 1);
-  B->cat_bits_string = new_cat_bits_string;
-  B->cat_bits_double = new_cat_bits_double;
-  B->next_feature = (uint64_t) next_bit;
-  free(sel);
-}
-
 static inline void tk_booleanizer_destroy (
   tk_booleanizer_t *B
 ) {
@@ -646,16 +579,6 @@ static inline int tk_booleanizer_features_lua (lua_State *L)
   return 2;
 }
 
-
-static inline int tk_booleanizer_restrict_lua (lua_State *L)
-{
-  tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
-  tk_ivec_t *ids = tk_ivec_peek(L, 2, "bit_ids");
-  tk_booleanizer_restrict(L, B, ids, 1);
-  lua_pushinteger(L, (lua_Integer) B->next_feature);
-  return 1;
-}
-
 static inline int tk_booleanizer_persist_lua (lua_State *L)
 {
   tk_booleanizer_t *B = tk_booleanizer_peek(L, 1);
@@ -671,7 +594,6 @@ static luaL_Reg tk_booleanizer_mt_fns[] =
   { "encode", tk_booleanizer_encode_lua },
   { "features", tk_booleanizer_features_lua },
   { "finalize", tk_booleanizer_finalize_lua },
-  { "restrict", tk_booleanizer_restrict_lua },
   { "persist", tk_booleanizer_persist_lua },
   { NULL, NULL }
 };

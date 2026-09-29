@@ -22,7 +22,7 @@ M.persist = function (opts)
     opts.gaz_rms:persist(dir .. "/gaz_rms.bin")
   end
   fs.writefile(dir .. "/manifest.lua", str.format(
-    "return {\n  version = 3,\n  n_tokenizers = %d,\n  has_decider = %s,\n  has_gaz = %s,\n  has_gaz_rms = %s,\n}\n",
+    "return {\n  n_tokenizers = %d,\n  has_decider = %s,\n  has_gaz = %s,\n  has_gaz_rms = %s,\n}\n",
     #toks,
     opts.decider and "true" or "false",
     opts.gaz and "true" or "false",

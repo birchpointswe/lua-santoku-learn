@@ -137,7 +137,7 @@ test("colscale fold: prescaled block + c == raw block + (c .* w)", function ()
   random.seed(11)
   local w, c = fvec.create(C), fvec.create(C)
   for i = 0, C - 1 do w:set(i, random.num() * 2 + 0.1); c:set(i, random.num() * 2 + 0.1) end
-  local Xa = range_csr(vals, 0, C); Xa:bns(w)
+  local Xa = range_csr(vals, 0, C); Xa:scale_cols(w)
   local blA = { { x = Xa, n_tokens = C, scale = 1.0, colscale = c } }
   local cw = fvec.create(C)
   for i = 0, C - 1 do cw:set(i, c:get(i)) end

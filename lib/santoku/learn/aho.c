@@ -135,7 +135,6 @@ static inline void tk_aho_emit_match (
   (*m_n)++;
 }
 
-
 static inline int tk_aho_span_has (const int64_t *a, int64_t n, int64_t x) {
   int64_t lo = 0, hi = n;
   while (lo < hi) {
@@ -559,7 +558,6 @@ static void tk_aho_parse_scan_opts (
   lua_pop(L, 1);
 }
 
-
 static void tk_aho_token_arrays (
   lua_State *L, char *name, tk_spans_t *T, int n_texts,
   const int64_t **tko, const int64_t **tks, const int64_t **tke
@@ -850,7 +848,7 @@ static int tk_aho_load_lua (lua_State *L)
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 3 && version != 4) {
+  if (version != 4) {
     tk_lua_fclose(L, fh);
     return luaL_error(L, "unsupported aho version %d", (int)version);
   }
@@ -861,12 +859,9 @@ static int tk_aho_load_lua (lua_State *L)
   tk_lua_fread(L, &norm_byte, sizeof(uint8_t), 1, fh);
   bool do_normalize = norm_byte != 0;
 
-  bool goto_external = false;
-  if (version >= 4) {
-    uint8_t goto_ext_byte;
-    tk_lua_fread(L, &goto_ext_byte, sizeof(uint8_t), 1, fh);
-    goto_external = goto_ext_byte != 0;
-  }
+  uint8_t goto_ext_byte;
+  tk_lua_fread(L, &goto_ext_byte, sizeof(uint8_t), 1, fh);
+  bool goto_external = goto_ext_byte != 0;
 
   int32_t *goto_base;
   if (goto_external) {

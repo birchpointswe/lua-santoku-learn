@@ -9,7 +9,6 @@ local fs = require("santoku.fs")
 fs.stdout:setvbuf("line")
 
 local cfg = {
-  verbose = false,
   search_landmarks = 1024 * 2,
   blocks = {
     { ngram_min = 1, ngram_max = 5, mode = "flat" },

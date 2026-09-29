@@ -6,8 +6,7 @@
 
 A kernel ridge regression toolkit for text. Turn documents into sparse ngram features,
 project them into a spectral (Nystrom) embedding, fit ridge regression over it, and make
-calibrated decisions for binary, multiclass, extreme multi-label, regression, span NER,
-and approximate nearest neighbour retrieval.
+calibrated decisions for binary, multiclass, extreme multi-label, regression and span NER.
 
 ## Documentation
 

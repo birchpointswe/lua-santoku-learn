@@ -18,10 +18,12 @@ URL_MNIST_TEST         := https://pjreddie.com/media/files/mnist_test.csv
 URL_IMDB               := https://ai.stanford.edu/~amaas/data/sentiment/aclImdb_v1.tar.gz
 URL_CALIFORNIA_HOUSING := https://raw.githubusercontent.com/ageron/handson-ml/master/datasets/housing/housing.tgz
 URL_EURLEX57K          := https://archive.org/download/EURLEX57K
+URL_SCIFACT            := https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip
+URL_ADULT              := https://archive.ics.uci.edu/ml/machine-learning-databases/adult
 
-.PHONY: all conll2003 20news mnist imdb eurlex57k california-housing
+.PHONY: all conll2003 20news mnist imdb eurlex57k california-housing scifact adult
 
-all: conll2003 20news mnist imdb eurlex57k california-housing
+all: conll2003 20news mnist imdb eurlex57k california-housing scifact adult
 
 conll2003:
 	$(CURL) $(URL_CONLL2003) -o conll2003.zip
@@ -64,3 +66,15 @@ california-housing:
 	tar -xzf housing.tgz
 	mv -f housing.csv california-housing.csv
 	rm -f housing.tgz
+
+# BEIR SciFact as published: corpus.jsonl, queries.jsonl, qrels/{train,test}.tsv.
+scifact:
+	$(CURL) $(URL_SCIFACT) -o scifact.zip
+	rm -rf scifact && unzip -q scifact.zip
+	rm -f scifact.zip
+
+# UCI Adult (census income) as published: adult.data (train), adult.test (test).
+adult:
+	rm -rf adult && mkdir -p adult
+	$(CURL) $(URL_ADULT)/adult.data -o adult/adult.data
+	$(CURL) $(URL_ADULT)/adult.test -o adult/adult.test

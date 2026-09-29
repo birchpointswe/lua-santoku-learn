@@ -15,7 +15,6 @@ fs.stdout:setvbuf("line")
 local N_TYPES = 4
 
 local cfg = {
-  verbose = false,
   search_landmarks = 1024 * 2,
   data = { dir = "test/res/conll2003", max = nil },
   tok = { ngram_min = 1, ngram_max = 5 },
@@ -96,7 +95,6 @@ test("conll-gaz CV", function ()
     n_landmarks = cfg.emb.n_landmarks,
     search_landmarks = cfg.search_landmarks,
     k = 1,
-    verbose = cfg.verbose,
     each = util.make_ridge_log(stopwatch),
   }))
 
@@ -117,7 +115,7 @@ test("conll-gaz CV", function ()
   local b = bundle.load(bdir)
   local _, Xb = util.tokenize_blocks(cfg.blocks, test_set.texts, { toks = b.tokenizers, focus = Cte, tokens = Tte })
   Xb[n_sparse + 1] = b.gaz:block(test_set.texts, Cte, nil)
-  Xb[n_sparse + 1]:bns(b.gaz_rms)
+  Xb[n_sparse + 1]:scale_cols(b.gaz_rms)
   local _, sb = util.predict_tiled({ deploy = b.encode, ridge = b.ridge,
     blocks = Xb, n = n_test, scores = true, n_labels = 1 })
   local _, mb = b.decider:score({ scores = sb, n_samples = test_set.n, cand = Cte, gold = Gte })

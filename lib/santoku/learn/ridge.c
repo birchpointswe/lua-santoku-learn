@@ -193,78 +193,6 @@ static inline int tk_ridge_transform_lua (lua_State *L) {
   return 1;
 }
 
-static inline int tk_ridge_topk_lua (lua_State *L) {
-  tk_ridge_t *r = tk_ridge_peek(L, 1);
-  tk_fvec_t *S = tk_fvec_peek(L, 2, "scores");
-  int64_t n = (int64_t) luaL_checkinteger(L, 3);
-  int64_t k = (int64_t) luaL_checkinteger(L, 4);
-  int64_t nl = r->n_labels;
-  if (k > nl) k = nl;
-  if (k < 1) k = 1;
-  if ((int64_t) S->n < n * nl)
-    return luaL_error(L, "ridge topk: scores buffer too small");
-  tk_csr_t *out = NULL; int out_idx = 0;
-  if (lua_gettop(L) >= 5 && !lua_isnil(L, 5)) {
-    out = tk_csr_peek(L, 5, "out");
-    out_idx = 5;
-    if (out->ntag != TK_TAG_I64 || out->tag != TK_TAG_F32)
-      return luaL_error(L, "ridge topk: out buffer must be an i64/f32 csr");
-  }
-  tk_ivec_t *offsets, *labels;
-  tk_fvec_t *scores_out;
-  int offsets_idx = 0, labels_idx = 0, scores_out_idx = 0;
-  if (out) {
-    offsets = out->offsets;
-    tk_ivec_ensure(offsets, (uint64_t)(n + 1)); offsets->n = (uint64_t)(n + 1);
-    labels = (tk_ivec_t *) out->neighbors;
-    tk_ivec_ensure(labels, (uint64_t)(n * k)); labels->n = (uint64_t)(n * k);
-    scores_out = (tk_fvec_t *) out->values;
-    tk_fvec_ensure(scores_out, (uint64_t)(n * k)); scores_out->n = (uint64_t)(n * k);
-    out->n_cols = (uint64_t) nl;
-  } else {
-    offsets = tk_ivec_create(L, (uint64_t)(n + 1)); offsets->n = (uint64_t)(n + 1);
-    offsets_idx = lua_gettop(L);
-    labels = tk_ivec_create(L, (uint64_t)(n * k)); labels->n = (uint64_t)(n * k);
-    labels_idx = lua_gettop(L);
-    scores_out = tk_fvec_create(L, (uint64_t)(n * k)); scores_out->n = (uint64_t)(n * k);
-    scores_out_idx = lua_gettop(L);
-  }
-  for (int64_t i = 0; i <= n; i++) offsets->a[i] = i * k;
-  int nt = omp_get_max_threads();
-  uint64_t heap_need = (uint64_t)nt * (uint64_t)k;
-  if (!r->heap_buf || r->heap_buf_size < heap_need) {
-    free(r->heap_buf);
-    r->heap_buf = (tk_rank_t *)malloc(heap_need * sizeof(tk_rank_t));
-    r->heap_buf_size = heap_need;
-  }
-  float *sc = S->a;
-  #pragma omp parallel
-  {
-    tk_rvec_t heap = { .n = 0, .m = (size_t)k, .lua_managed = false,
-                       .a = r->heap_buf + (uint64_t)omp_get_thread_num() * (uint64_t)k };
-    #pragma omp for schedule(static)
-    for (int64_t i = 0; i < n; i++) {
-      float *row = sc + i * nl;
-      int64_t out_base = i * k;
-      heap.n = 0;
-      for (int64_t l = 0; l < nl; l++)
-        tk_rvec_hmin(&heap, (size_t)k, tk_rank(l, (double)row[l]));
-      tk_rvec_desc(&heap, 0, heap.n);
-      for (int64_t j = 0; j < (int64_t)heap.n; j++) {
-        labels->a[out_base + j] = heap.a[j].i;
-        scores_out->a[out_base + j] = (float)heap.a[j].d;
-      }
-    }
-  }
-  if (out) {
-    lua_pushvalue(L, out_idx);
-  } else {
-    tk_csr_push(L, TK_TAG_F32, TK_TAG_I64, (uint64_t) nl,
-      offsets_idx, offsets, labels_idx, (void *) labels, scores_out_idx, scores_out);
-  }
-  return 1;
-}
-
 static inline int tk_ridge_shrink_lua (lua_State *L) {
   tk_ridge_t *r = tk_ridge_peek(L, 1);
   free(r->sbuf); r->sbuf = NULL; r->sbuf_size = 0;
@@ -276,7 +204,6 @@ static luaL_Reg tk_ridge_mt_fns[] = {
   { "label", tk_ridge_encode_lua },
   { "persist", tk_ridge_persist_lua },
   { "regress", tk_ridge_transform_lua },
-  { "topk", tk_ridge_topk_lua },
   { "shrink", tk_ridge_shrink_lua },
   { NULL, NULL }
 };
@@ -315,92 +242,45 @@ static inline int tk_ridge_create_lua (lua_State *L) {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
   lua_getfield(L, 1, "gram");
-  if (!lua_isnil(L, -1)) {
-    int gram_idx = lua_gettop(L);
-    tk_gram_t *gram = tk_gram_peek(L, gram_idx);
-    int64_t d = gram->n_dims, nl = gram->n_labels;
-    uint64_t dnl = (uint64_t)d * (uint64_t)nl;
-    if (!gram->baked)
-      return luaL_error(L, "ridge create: gram must be baked (cholesky-only)");
-    lua_getfield(L, 1, "w_buf");
-    tk_fvec_t *w_buf = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "w_buf");
-    int w_buf_idx = w_buf ? lua_gettop(L) : 0;
-    if (!w_buf) lua_pop(L, 1);
-    if (w_buf) {
-
-      tk_dvec_t *intercept_dv = NULL;
-      int intercept_idx = 0;
-      if (gram->intercept) {
-        intercept_dv = tk_dvec_create(L, (uint64_t)nl);
-        intercept_dv->n = (uint64_t)nl;
-        memcpy(intercept_dv->a, gram->intercept, (uint64_t)nl * sizeof(double));
-        intercept_idx = lua_gettop(L);
-      }
-      tk_fvec_ensure(w_buf, dnl);
-      w_buf->n = dnl;
-      memcpy(w_buf->a, gram->W_baked_f, dnl * sizeof(float));
-      tk_ridge_push(L, w_buf, w_buf_idx, intercept_dv, intercept_idx, d, nl);
-      return 1;
-    }
-
-    tk_ridge_t *r;
-    tk_fvec_t *gwb = NULL;
-    int gwb_idx = 0;
-    if (gram->W_baked_external) {
-      lua_getfenv(L, gram_idx);
-      lua_getfield(L, -1, "w_buf");
-      gwb = tk_fvec_peekopt(L, -1);
-      if (gwb && gwb->a == gram->W_baked_f) gwb_idx = lua_gettop(L);
-      else { gwb = NULL; lua_pop(L, 2); }
-    }
-    if (gwb) {
-      gwb->n = dnl;
-      r = tk_ridge_push(L, gwb, gwb_idx, NULL, 0, d, nl);
-    } else {
-      r = tk_ridge_push(L, NULL, 0, NULL, 0, d, nl);
-      r->W_view.n = dnl;
-      r->W_view.m = dnl;
-      r->W_view.a = gram->W_baked_f;
-      r->W_view.lua_managed = 0;
-      r->W = &r->W_view;
-    }
-    if (gram->intercept) {
-      r->intercept_view.n = (uint64_t)nl;
-      r->intercept_view.m = (uint64_t)nl;
-      r->intercept_view.a = gram->intercept;
-      r->intercept_view.lua_managed = 0;
-      r->intercept = &r->intercept_view;
-    }
-    lua_getfenv(L, -1);
-    lua_pushvalue(L, gram_idx);
-    lua_setfield(L, -2, "gram");
-    lua_pop(L, 1);
-    return 1;
+  int gram_idx = lua_gettop(L);
+  tk_gram_t *gram = tk_gram_peek(L, gram_idx);
+  int64_t d = gram->n_dims, nl = gram->n_labels;
+  uint64_t dnl = (uint64_t)d * (uint64_t)nl;
+  if (!gram->baked)
+    return luaL_error(L, "ridge create: gram must be baked (cholesky-only)");
+  tk_ridge_t *r;
+  tk_fvec_t *gwb = NULL;
+  int gwb_idx = 0;
+  if (gram->W_baked_external) {
+    lua_getfenv(L, gram_idx);
+    lua_getfield(L, -1, "w_buf");
+    gwb = tk_fvec_peekopt(L, -1);
+    if (gwb && gwb->a == gram->W_baked_f) gwb_idx = lua_gettop(L);
+    else { gwb = NULL; lua_pop(L, 2); }
   }
+  if (gwb) {
+    gwb->n = dnl;
+    r = tk_ridge_push(L, gwb, gwb_idx, NULL, 0, d, nl);
+  } else {
+    r = tk_ridge_push(L, NULL, 0, NULL, 0, d, nl);
+    r->W_view.n = dnl;
+    r->W_view.m = dnl;
+    r->W_view.a = gram->W_baked_f;
+    r->W_view.lua_managed = 0;
+    r->W = &r->W_view;
+  }
+  if (gram->intercept) {
+    r->intercept_view.n = (uint64_t)nl;
+    r->intercept_view.m = (uint64_t)nl;
+    r->intercept_view.a = gram->intercept;
+    r->intercept_view.lua_managed = 0;
+    r->intercept = &r->intercept_view;
+  }
+  lua_getfenv(L, -1);
+  lua_pushvalue(L, gram_idx);
+  lua_setfield(L, -2, "gram");
   lua_pop(L, 1);
-  lua_getfield(L, 1, "W");
-  if (!lua_isnil(L, -1)) {
-    tk_fvec_t *W_fvec = tk_fvec_peek(L, -1, "W");
-    int W_idx = lua_gettop(L);
-    lua_getfield(L, 1, "n_dims");
-    int64_t d = (int64_t)luaL_checkinteger(L, -1);
-    lua_pop(L, 1);
-    lua_getfield(L, 1, "n_labels");
-    int64_t nl = (int64_t)luaL_checkinteger(L, -1);
-    lua_pop(L, 1);
-    tk_dvec_t *intercept_dv = NULL;
-    int intercept_idx = 0;
-    lua_getfield(L, 1, "intercept");
-    if (!lua_isnil(L, -1)) {
-      intercept_dv = tk_dvec_peek(L, -1, "intercept");
-      intercept_idx = lua_gettop(L);
-    } else {
-      lua_pop(L, 1);
-    }
-    tk_ridge_push(L, W_fvec, W_idx, intercept_dv, intercept_idx, d, nl);
-    return 1;
-  }
-  return luaL_error(L, "ridge create: gram or W required");
+  return 1;
 }
 
 static inline int tk_ridge_load_lua (lua_State *L) {

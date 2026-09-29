@@ -1,13 +1,8 @@
 local num = require("santoku.num")
 local err = require("santoku.error")
-local rand = require("santoku.random")
-local utc = require("santoku.utc")
 local capi = require("santoku.learn.optimize.capi")
 
 local M = {}
-
-local SEARCH = setmetatable({}, { __tostring = function () return "optimize.SEARCH" end })
-M.SEARCH = SEARCH
 
 local function fold_std (scores, mean, nf)
   if nf < 2 then return 0.0 end
@@ -16,18 +11,8 @@ local function fold_std (scores, mean, nf)
   return num.sqrt(s2 / (nf - 1))
 end
 
-local tt
-local function tick (name) return tt and tt(name) or nil end
-local function tock (stop) if stop then stop() end end
-local function prof_add_raw (name, dt)
-  if not tt then return end
-  local stats = tt()
-  local e = stats[name]; if not e then e = { time = 0, count = 0 }; stats[name] = e end
-  e.time = e.time + dt; e.count = e.count + 1
-end
-
 local function spec_defaults (spec, defs)
-  if spec == nil or spec == SEARCH then return defs end
+  if spec == nil then return defs end
   if type(spec) ~= "table" then return spec end
   local s = {}
   for k, v in pairs(defs) do s[k] = v end
@@ -41,31 +26,18 @@ local function veclen (t)
   return n
 end
 
-local build_sampler = function (spec, global_dev)
+local build_sampler = function (spec)
   if spec == nil then
     return nil
   end
   if type(spec) == "number" or type(spec) == "boolean" or type(spec) == "string" then
-    return {
-      type = "fixed",
-      center = spec,
-      sample = function ()
-        return spec
-      end
-    }
+    return { type = "fixed", center = spec }
   end
   if type(spec) == "table" and spec.min ~= nil and spec.max ~= nil then
     local minv, maxv = spec.min, spec.max
-    local is_int = not not spec.int
     local is_log = not not spec.log
-    local shift = (is_log and minv <= 0) and (1 - minv) or 0
-    local smin = minv + shift
-    local smax = maxv + shift
-    local span = is_log and (num.log(smax) - num.log(smin)) or (maxv - minv)
-    local init_jitter = (spec.dev or global_dev or 1.0) * span
-    local jitter = init_jitter
-    local log_smin = is_log and num.log(smin) or 0
-    local log_span = is_log and (num.log(smax) - num.log(smin)) or 0
+    local log_smin = is_log and num.log(minv) or 0
+    local log_span = is_log and (num.log(maxv) - num.log(minv)) or 0
     local lin_span = maxv - minv
     return {
       type = "range",
@@ -73,9 +45,7 @@ local build_sampler = function (spec, global_dev)
       normalize = function (x)
         if lin_span == 0 then return 0.5 end
         if is_log then
-          return (num.log(x + shift) - log_smin) / log_span
-        elseif is_int then
-          return (x - minv + 0.5) / (maxv - minv + 1)
+          return (num.log(x) - log_smin) / log_span
         else
           return (x - minv) / lin_span
         end
@@ -83,39 +53,10 @@ local build_sampler = function (spec, global_dev)
       denormalize = function (u)
         local x
         if is_log then
-          x = num.exp(u * log_span + log_smin) - shift
-          if is_int then x = num.floor(x + 0.5) end
-        elseif is_int then
-          x = num.floor(u * (maxv - minv + 1) + minv)
+          x = num.exp(u * log_span + log_smin)
         else
           x = u * lin_span + minv
         end
-        if x < minv then x = minv elseif x > maxv then x = maxv end
-        return x
-      end,
-      sample = function (center)
-        local x
-        if center then
-          local c = is_log and num.log(center + shift) or center
-          local lo = is_log and num.log(smin) or minv
-          local hi = is_log and num.log(smax) or maxv
-          local half_j = jitter * 0.5
-          if c - half_j < lo then c = lo + half_j end
-          if c + half_j > hi then c = hi - half_j end
-          x = rand.fast_normal(c, jitter * jitter)
-          if is_log then x = num.exp(x) - shift end
-        else
-          local r = rand.fast_random() / (rand.fast_max + 1)
-          if is_log then
-            x = num.exp(r * span + num.log(smin)) - shift
-          else
-            x = r * span + minv
-          end
-        end
-        if x > maxv then x = 2 * maxv - x end
-        if x < minv then x = 2 * minv - x end
-        if x < minv then x = minv elseif x > maxv then x = maxv end
-        if is_int then x = num.floor(x + 0.5) end
         if x < minv then x = minv elseif x > maxv then x = maxv end
         return x
       end,
@@ -139,10 +80,6 @@ local build_sampler = function (spec, global_dev)
         if idx < 0 then idx = 0 end
         if idx >= k then idx = k - 1 end
         return spec[idx + 1]
-      end,
-      sample = function ()
-        local idx = num.floor(rand.fast_random() / (rand.fast_max + 1) * k) + 1
-        return spec[idx]
       end,
     }
   end
@@ -190,32 +127,21 @@ local function ilr_inverse (z, N)
   return y
 end
 
-local build_samplers = function (args, param_names, global_dev, seed)
+local build_samplers = function (args, param_names, seed)
   local samplers = {}
   for _, pname in ipairs(param_names) do
-    local s = build_sampler(args[pname], global_dev)
-    if seed ~= nil then seed_center(s, pname, seed) end
+    local s = build_sampler(args[pname])
+    seed_center(s, pname, seed)
     samplers[pname] = s
   end
   return samplers
 end
 
-local sample_params = function (samplers, param_names, base_cfg, use_exact_defaults)
+local center_params = function (samplers, param_names)
   local p = {}
-  if base_cfg then
-    for k, v in pairs(base_cfg) do
-      p[k] = v
-    end
-  end
   for _, name in ipairs(param_names) do
     local s = samplers[name]
-    if s then
-      if use_exact_defaults and s.center ~= nil then
-        p[name] = s.center
-      else
-        p[name] = s.sample()
-      end
-    end
+    if s then p[name] = s.center end
   end
   return p
 end
@@ -235,37 +161,23 @@ local cmaes_search = function (args)
   local samplers = err.assert(args.samplers, "samplers required")
   local trial_fn = err.assert(args.trial_fn, "trial_fn required")
   local trials = args.trials or 120
-  local each_cb = args.each
-  local skip_final = args.skip_final
-  local constrain_fn = args.constrain
   local best_score = -num.huge
   local best_params = nil
-  local best_result = nil
-  local best_metrics = nil
 
   if all_fixed(samplers) or trials <= 0 then
-    best_params = sample_params(samplers, param_names, nil, true)
-    if constrain_fn then
-      constrain_fn(best_params)
-    end
-    if skip_final then
-      return nil, best_params, nil
-    else
-      local _, metrics, result = trial_fn(best_params, { is_final = true })
-      return result, best_params, metrics
-    end
+    return center_params(samplers, param_names)
   end
 
   local search_dims = {}
   for _, name in ipairs(param_names) do
     local s = samplers[name]
-    if s and s.type == "range" and s.normalize then
+    if s and s.type == "range" then
       search_dims[#search_dims + 1] = name
     end
   end
   local n = #search_dims
 
-  if args.reseed ~= false then
+  do
     local seed = 2166136261 % 2147483647
     for _, name in ipairs(param_names) do
       local s = samplers[name]
@@ -275,53 +187,17 @@ local cmaes_search = function (args)
         seed = (seed * 48271) % 2147483647
       end
     end
-
     capi.seed(seed)
-    rand.fast_seed(seed)
-    rand.seed(seed)
   end
 
   local function fill_rest (params)
     for _, name in ipairs(param_names) do
-      if params[name] == nil then
-        local s = samplers[name]
-        if s then
-          if s.type == "fixed" then
-            params[name] = s.center
-          else
-            params[name] = s.sample()
-          end
-        end
-      end
+      local s = samplers[name]
+      if s and s.type == "fixed" then params[name] = s.center end
     end
   end
 
   local function uniform () return capi.uniform() end
-
-  if n == 0 then
-    local params = {}
-    fill_rest(params)
-    if constrain_fn then constrain_fn(params) end
-    local score, metrics, result = trial_fn(params, {
-      trial = 1, trials = trials, is_final = false,
-      global_best_score = best_score, phase = "cmaes",
-    })
-    local new_best = not (metrics and metrics.failed)
-    if new_best then
-      best_score = score; best_params = params
-      best_result = result; best_metrics = metrics
-    end
-    if each_cb then
-      each_cb({ event = "trial", trial = 1, trials = trials, params = params,
-        score = score, metrics = metrics, global_best_score = best_score,
-        is_new_best = new_best, phase = "cmaes" })
-    end
-    if not skip_final and best_params then
-      local _, final_metrics, final_result = trial_fn(best_params, { is_final = true })
-      best_result = final_result; best_metrics = final_metrics
-    end
-    return best_result, best_params, best_metrics
-  end
 
   local def_pt = {}
   for i, name in ipairs(search_dims) do
@@ -341,28 +217,15 @@ local cmaes_search = function (args)
       params[name] = samplers[name].denormalize(ci)
     end
     fill_rest(params)
-    if constrain_fn then constrain_fn(params) end
     eval_idx = eval_idx + 1
-    local score, metrics, result = trial_fn(params, {
-      trial = eval_idx, trials = trials, is_final = false,
-      global_best_score = best_score, phase = "cmaes",
+    local score, metrics = trial_fn(params, {
+      trial = eval_idx, trials = trials, global_best_score = best_score, phase = "cmaes",
     })
     local failed = metrics and metrics.failed
     local feasible = (viol == 0.0) and not failed
-
-    local new_best = (not failed) and (score > best_score)
-    if new_best then
+    if (not failed) and (score > best_score) then
       best_score = score
       best_params = params
-      best_result = result
-      best_metrics = metrics
-    end
-    if each_cb then
-      each_cb({
-        event = "trial", trial = eval_idx, trials = trials, params = params,
-        score = score, metrics = metrics, global_best_score = best_score,
-        is_new_best = new_best, phase = "cmaes",
-      })
     end
     return -score, viol, feasible
   end
@@ -460,13 +323,7 @@ local cmaes_search = function (args)
     if used == 0 or sigma_ref < 1e-3 then break end
   end
 
-  if not skip_final and best_params then
-    local _, final_metrics, final_result = trial_fn(best_params, { is_final = true })
-    best_result = final_result
-    best_metrics = final_metrics
-  end
-
-  return best_result, best_params, best_metrics
+  return best_params
 
 end
 
@@ -480,8 +337,8 @@ local function default_trial_fn (args, dense, metric, k)
     local eval = require("santoku.learn.evaluator")
     return function (kd)
       local r = mk_ridge(kd)
-      local tr = tick("regress"); local s = r:regress(kd.val_codes); tock(tr)
-      local td = tick("decide"); local m = eval.regress_accuracy(s, args.val_targets); tock(td)
+      local s = r:regress(kd.val_codes)
+      local m = eval.regress_accuracy(s, args.val_targets)
       return 1 - m.nmae, { nmae = m.nmae }
     end
   end
@@ -492,10 +349,8 @@ local function default_trial_fn (args, dense, metric, k)
     local probe = decide.create({ n_labels = nl, span = true, reject = args.reject })
     return function (kd)
       local r = mk_ridge(kd)
-      local tr = tick("regress"); local s = r:regress(kd.val_codes); tock(tr)
-      local td = tick("decide")
+      local s = r:regress(kd.val_codes)
       local f1 = probe:calibrate({ scores = s, n_samples = cand:offsets():size() - 1, cand = cand, gold = gold })
-      tock(td)
       return f1, { span_f1 = f1, offset = probe:offset() }
     end
   end
@@ -503,18 +358,16 @@ local function default_trial_fn (args, dense, metric, k)
     local probe = decide.create({ n_labels = nl, single = true })
     return function (kd)
       local r = mk_ridge(kd)
-      local tr = tick("regress"); local s = r:regress(kd.val_codes); tock(tr)
-      local td = tick("decide"); local _, m = probe:score({ scores = s, n_samples = vn, expected = args.val_y }); tock(td)
+      local s = r:regress(kd.val_codes)
+      local _, m = probe:score({ scores = s, n_samples = vn, expected = args.val_y })
       return m.accuracy, { macro_f1 = m.macro_f1, accuracy = m.accuracy }
     end
   end
   local probe = decide.create({ n_labels = nl })
   return function (kd)
     local r = mk_ridge(kd)
-    local tr = tick("regress"); local P = r:label(kd.val_codes, k); tock(tr)
-    local td = tick("decide")
+    local P = r:label(kd.val_codes, k)
     local f1, p, rc = probe:calibrate({ pred = P, n_samples = vn, expected = args.val_y })
-    tock(td)
     return f1, { f1 = f1, precision = p, recall = rc, offset = probe:offset() }
   end
 end
@@ -544,27 +397,18 @@ M.krr = function (args)
   local ridge = require("santoku.learn.ridge")
   local fvec = require("santoku.fvec")
   err.assert(args.n_landmarks, "n_landmarks required")
-  tt = args.verbose and utc.ticktock() or nil
-  local function prof_emit ()
-    if tt and args.each then
-      local stats, total = tt()
-      args.each({ event = "profile", stats = stats, total = total })
-    end
-    tt = nil
-  end
   args.folds = args.folds or 5
   if not args.rebuild then
     if args.pool_blocks then args = require("santoku.learn.util").fold_blocks(args)
     elseif args.pool_codes then args = require("santoku.learn.util").fold_dense(args) end
   end
   local function resolve_knob (spec)
-    if spec == SEARCH then return nil end
     if type(spec) ~= "table" then return spec end
     if spec[1] ~= nil then
       local v = {}
       for i = 1, veclen(spec) do
         local e = spec[i]
-        if e == nil or e == SEARCH then v[i] = false
+        if e == nil then v[i] = false
         elseif type(e) == "table" then v[i] = e.def or e.max or e.min
         else v[i] = e end
       end
@@ -574,7 +418,7 @@ M.krr = function (args)
       local v = {}
       for i = 1, veclen(spec.def) do
         local d = spec.def[i]
-        if d == nil or d == SEARCH then v[i] = false else v[i] = d end
+        if d == nil then v[i] = false else v[i] = d end
       end
       return v
     end
@@ -615,8 +459,9 @@ M.krr = function (args)
     if kn == "cosine" then families.cosine = true
     else families.matern = true end
   end
+  err.assert(not (families.cosine and families.matern), "krr: kernel mixes cosine and matern; pick one family")
   local function cat_spec (v, deflist)
-    if v == nil or v == SEARCH then return deflist end
+    if v == nil then return deflist end
     if type(v) ~= "table" then return v end
     if #v > 0 then return v end
     local s = {}
@@ -626,16 +471,15 @@ M.krr = function (args)
   end
   args.gamma = spec_defaults(args.gamma, { min = 1e-2, max = 16, log = true })
   args.nu = cat_spec(args.nu, { 3, 0, 1, 2 })
-  local seed = args.seed or 5
-  local kernel_samplers = build_samplers(args, { "nu", "gamma" }, nil, seed)
+  local seed = 5
+  local kernel_samplers = build_samplers(args, { "nu", "gamma" }, seed)
 
   local strials = args.search_trials or 0
   local do_search = strials > 1
   local frozen = strials == 0
 
   local decode_offset = args.decode_offset
-  if decode_offset == SEARCH then decode_offset = nil
-  elseif type(decode_offset) == "table" then
+  if type(decode_offset) == "table" then
     decode_offset = frozen and decode_offset.def or nil
   elseif not frozen then decode_offset = nil end
   args.lambda = spec_defaults(args.lambda, { min = 1e-7, max = 8, log = true })
@@ -644,10 +488,9 @@ M.krr = function (args)
     args.lambda.def = args.lambda.search  -- luacheck: ignore
   end
   local label_names = { "lambda" }
-  local label_samplers = build_samplers(args, label_names, nil, seed)
+  local label_samplers = build_samplers(args, label_names, seed)
   local k = not dense and (args.k or 32) or nil
   local tiled = not dense
-  local tile_labels = tiled and (args.tile_labels or 1024) or nil
   local want_decode, mode = decode_mode(args, dense)
   local use_oof = decode_offset == nil and (mode == "span" or mode == "multilabel")
 
@@ -670,7 +513,7 @@ M.krr = function (args)
   end
   local w_shared = fvec.create(args.n_landmarks * nl_cap)
   if tiled then
-    spectral_args.tile_labels = tile_labels
+    spectral_args.tile_labels = 1024
   end
   local proj_shared, sims_shared, row_shared
   if do_search then
@@ -715,7 +558,7 @@ M.krr = function (args)
   end
   local function build_kd (spec, at_search)
     if args.rebuild and spec.params ~= nil then
-      local trb = tick("rebuild"); local rb = args.rebuild(spec.params, at_search ~= nil); tock(trb)
+      local rb = args.rebuild(spec.params, at_search ~= nil)
       spectral_args.x = rb.x
       spectral_args.blocks = rb.blocks
       spectral_args.colscale = rb.colscale
@@ -754,12 +597,8 @@ M.krr = function (args)
       spectral_args.factor_buf = nil
       spectral_args.encoder = nil
     end
-    local tse = tick("spectral.encode"); local _, sp_enc, gram = spectral.encode(spectral_args); tock(tse)
+    local _, sp_enc, gram = spectral.encode(spectral_args)
     if at_search == "search" then enc_slot = sp_enc end
-    if tt and spectral_args.enc_phases then
-      for name, dt in pairs(spectral_args.enc_phases) do prof_add_raw("~spectral/" .. name, dt) end
-      spectral_args.enc_phases = nil
-    end
     return { sp_enc = sp_enc, gram = gram }
   end
 
@@ -843,9 +682,7 @@ M.krr = function (args)
       for f = 1, nf do
         local r = kds[f].ridge or ridge.create({ gram = kds[f].gram })
         kds[f].ridge = r
-        local tr = tick("regress")
         local s = r:regress(kds[f].val_codes)
-        tock(tr)
         fold_s[f] = s
         pooled_s:copy(s)
       end
@@ -876,9 +713,7 @@ M.krr = function (args)
     for f = 1, nf do
       local r = kds[f].ridge or ridge.create({ gram = kds[f].gram })
       kds[f].ridge = r
-      local tr = tick("regress")
       fold_P[f] = r:label(kds[f].val_codes, k, fold_P[f])
-      tock(tr)
       r:shrink()
     end
     local P = ml.P
@@ -972,19 +807,15 @@ M.krr = function (args)
       cal_kd.gram:release()
       cal_kd.sp_enc:destroy()
       cal_kd = nil -- luacheck: ignore
-      local tc = tick("~calibrate")
       for f = 1, args.folds do kds[f].gram:solve(params.lambda) end
       local decider, metrics = oof_decider(kds, args.fold_split)
-      tock(tc)
       for f = 1, args.folds do kds[f].gram:release() end
       kds = nil -- luacheck: ignore
       fold_bufs_release(fb)
       fin = { decider = decider, metrics = metrics }
     end
     local kd = build_kd(spec)
-    local tsv = tick("~final_solve")
     kd.gram:solve(params.lambda, w_shared)
-    tock(tsv)
     return kd, fin
   end
   local function deploy_of (enc)
@@ -1016,7 +847,7 @@ M.krr = function (args)
   end
 
   local function center_spec ()
-    local kname = kernels.def or kernels[1]
+    local kname = kernels[1]
     local base = { kernel = kname }
     if kname == "matern" then
       base.nu = kernel_samplers.nu.center
@@ -1029,26 +860,17 @@ M.krr = function (args)
     for kk, vv in pairs(base) do spec[kk] = vv end
     return spec
   end
-  local n_blocks = args.gauge_dims or (args.pool_blocks and #args.pool_blocks) or 1
   local rebuild_knobs = {}
   for _, kdef in ipairs(REBUILD_KNOBS) do
     local spec = args[kdef.key]
     if spec ~= nil then
       local knob = { key = kdef.key, gauge = kdef.gauge, names = {}, samplers = {} }
-      if spec == SEARCH then
-        local dv = {}
-        for i = 1, n_blocks do dv[i] = SEARCH end
-        spec = { def = dv }
-        args[kdef.key] = spec
-      end
       if type(spec) == "table" and spec[1] == nil and type(spec.def) == "table" then
         local vec = {}
         for i = 1, veclen(spec.def) do
           local d = spec.def[i]
           if d == nil or d == false then
             vec[i] = false
-          elseif d == SEARCH then
-            vec[i] = { min = spec.min, max = spec.max, log = spec.log }
           else
             vec[i] = { min = spec.min, max = spec.max, log = spec.log, def = d }
           end
@@ -1082,7 +904,7 @@ M.krr = function (args)
           local nm = kdef.key .. "_z" .. k
           args[nm] = { min = -c, max = c, def = centers and centers[k] }
           knob.names[#knob.names + 1] = nm
-          knob.samplers[nm] = build_samplers(args, { nm }, nil, seed)[nm]
+          knob.samplers[nm] = build_samplers(args, { nm }, seed)[nm]
         end
       elseif type(spec) == "table" and spec[1] ~= nil then
         knob.kind = "vector"
@@ -1099,14 +921,14 @@ M.krr = function (args)
             args[nm] = sds[i]
             knob.layout[i] = nm
             knob.names[#knob.names + 1] = nm
-            knob.samplers[nm] = build_samplers(args, { nm }, nil, seed)[nm]
+            knob.samplers[nm] = build_samplers(args, { nm }, seed)[nm]
           end
         end
       else
         knob.kind = "scalar"
         args[kdef.key] = spec_defaults(spec, kdef.defaults)
         knob.names[1] = kdef.key
-        knob.samplers[kdef.key] = build_samplers(args, { kdef.key }, nil, seed)[kdef.key]
+        knob.samplers[kdef.key] = build_samplers(args, { kdef.key }, seed)[kdef.key]
       end
       rebuild_knobs[#rebuild_knobs + 1] = knob
     end
@@ -1165,7 +987,7 @@ M.krr = function (args)
     end
     local rparams = has_knobs and params_of(rk) or nil
     local spec = spec_with(base, rparams)
-    local lp = sample_params(label_samplers, label_names, nil, true)
+    local lp = center_params(label_samplers, label_names)
     release_enc_scratch()
     local params = {}
     for kk, vv in pairs(base) do params[kk] = vv end
@@ -1185,7 +1007,6 @@ M.krr = function (args)
     end
     local sp_enc, r, vcodes, params_out, decider, dmetrics = finish(kd, params, sstr, fin)
     release_cv()
-    prof_emit()
     if args.release then args.release() end
     return sp_enc, r, vcodes, params_out, decider, dmetrics
   end
@@ -1216,10 +1037,8 @@ M.krr = function (args)
     local kd, kds = build_folds(spec, search_fb, "search")
     local meta = { dims = kd.sp_enc:dims() }
     kd.gram:release()
-    local ts = tick("~fold_solve")
     local mean, agg, dec, pooled_m, raced = eval_folds(kds, lam, (not use_oof) and fold_trial_fns or nil,
       args.fold_split, race_state, best_hint)
-    tock(ts)
 
     for f = 1, #kds do kds[f].ridge = nil; kds[f].gram:destroy() end
     kd.gram:destroy()
@@ -1285,54 +1104,29 @@ M.krr = function (args)
     end
     return sc, sm
   end
-  local t_ks = tick("~kernel_search")
-  local fam_runs = {}
-  if families.matern and families.cosine then
-    local kfam_vals, kseen = {}, {}
-    for _, kn in ipairs(kernels) do
-      local fam
-      if kn == "cosine" then fam = "cosine"
-      else fam = "matern" end
-      if fam and not kseen[fam] then kseen[fam] = true; kfam_vals[#kfam_vals + 1] = fam end
-    end
-    args.kfam = kfam_vals
-    fam_runs[#fam_runs + 1] = {
-      names = { "kfam", "nu", "gamma" },
-      samplers = { kfam = build_samplers(args, { "kfam" }, nil, seed).kfam,
-        nu = kernel_samplers.nu, gamma = kernel_samplers.gamma },
-      trials = args.search_trials or 0, tag = "kernel",
-      base_of = function (gp)
-        if gp.kfam == "cosine" then return { kernel = "cosine" } end
-        return { kernel = "matern", nu = gp.nu, gamma = gp.gamma }
-      end,
-    }
-  elseif families.matern then
-    fam_runs[#fam_runs + 1] = {
+  local run
+  if families.matern then
+    run = {
       names = { "nu", "gamma" },
       samplers = { nu = kernel_samplers.nu, gamma = kernel_samplers.gamma },
-      trials = args.search_trials or 0, tag = "kernel",
       base_of = function (gp) return { kernel = "matern", nu = gp.nu, gamma = gp.gamma } end,
     }
-  elseif families.cosine then
-    fam_runs[#fam_runs + 1] = {
+  else
+    run = {
       names = {},
       samplers = {},
-      trials = args.search_trials or 0, tag = "kernel",
       base_of = function () return { kernel = "cosine" } end,
     }
   end
-  for _, run in ipairs(fam_runs) do
-    cmaes_search({
-      param_names = with_knobs(run.names), samplers = merge_knob_samplers(run.samplers),
-      trials = run.trials, skip_final = true, prof_tag = run.tag,
-      trial_fn = function (gp)
-        local p = params_of(gp)
-        local base = run.base_of(gp)
-        return eval_kd(spec_with(base, p), base_with(base, p), gp)
-      end,
-    })
-  end
-  tock(t_ks)
+  cmaes_search({
+    param_names = with_knobs(run.names), samplers = merge_knob_samplers(run.samplers),
+    trials = args.search_trials or 0,
+    trial_fn = function (gp)
+      local p = params_of(gp)
+      local base = run.base_of(gp)
+      return eval_kd(spec_with(base, p), base_with(base, p), gp)
+    end,
+  })
   if not best_params then
     local _, base = center_spec()
     local gp = {}
@@ -1344,15 +1138,12 @@ M.krr = function (args)
     local p = params_of(rk)
     eval_kd(spec_with(base, p), base_with(base, p), gp)
   end
-  local t_fin = tick("~finalize")
   release_enc_scratch()
 
   local best_kd, fin, solve_tag
   if best_fin then
     best_kd = build_kd(best_params)
-    local tsv = tick("~final_solve")
     best_kd.gram:solve(best_params.lambda, w_shared)
-    tock(tsv)
     fin = best_fin
     solve_tag = "calibrate"
   else
@@ -1361,44 +1152,121 @@ M.krr = function (args)
   end
   local sp_enc, r, vcodes, params_out, decider, dmetrics =
     finish(best_kd, best_params, solve_tag, fin, best_fold_std)
-  tock(t_fin)
   release_cv()
-  prof_emit()
   if args.release then args.release() end
   return sp_enc, r, vcodes, params_out, decider, dmetrics
+end
+
+M.retrieval = function (args)
+  local retrieval = require("santoku.learn.retrieval")
+  local sets = err.assert(args.datasets, "datasets required")
+  local downside = args.downside or 0
+  local names = { "alpha" }
+  args.alpha = spec_defaults(args.alpha, { min = 0, max = 1, def = 0.96 })
+  local samplers = build_samplers(args, names, 1)
+  local base = {}
+  for _, s in ipairs(sets) do
+    local _, b = s.candidates:ndcg(s.qrels, 10)
+    s.base = b
+    base[s.name] = b
+  end
+  local function evaluate (p, per)
+    local obj = 0
+    for _, s in ipairs(sets) do
+      local R = retrieval.rerank({ candidates = s.candidates, query_codes = s.query_codes,
+        doc_codes = s.doc_codes, alpha = p.alpha })
+      local _, nd = R:ndcg(s.qrels, 10)
+      local r = nd / s.base
+      obj = obj + r - downside * (r < 1 and 1 - r or 0)
+      per[s.name] = nd
+    end
+    return obj / #sets
+  end
+  local best = cmaes_search({
+    param_names = names, samplers = samplers, trials = args.search_trials or 0,
+    trial_fn = function (p, info)
+      local per = {}
+      local sc = evaluate(p, per)
+      if args.each then args.each({ event = "trial", params = p, score = sc, per = per, info = info }) end
+      return sc, per
+    end,
+  })
+  return best, base
+end
+
+M.lexical = function (args)
+  local retrieval = require("santoku.learn.retrieval")
+  local sets = err.assert(args.datasets, "datasets required")
+  local downside = args.downside or 0
+  local depth = args.depth or 100
+  local names = { "k1", "b", "ngram" }
+  args.k1 = spec_defaults(args.k1, { min = 0.1, max = 4, log = true, def = 1.2 })
+  args.b = spec_defaults(args.b, { min = 0, max = 1, def = 0.75 })
+  args.ngram = args.ngram or { 1, 2, def = 1 }
+  local samplers = build_samplers(args, names, 1)
+  local function ranker (s, ng)
+    local r = s.rankers[ng]
+    if not r then
+      local X, Q = retrieval.lexical({ corpus_texts = s.corpus_texts, query_texts = s.query_texts, ngram_max = ng })
+      r = retrieval.bm25_ranker(X, Q)
+      s.rankers[ng] = r
+    end
+    return r
+  end
+  local base = {}
+  for _, s in ipairs(sets) do
+    s.rankers = {}
+    local _, nd = ranker(s, 1)(1.2, 0.75, depth):ndcg(s.qrels, 10)
+    s.base = nd
+    base[s.name] = nd
+  end
+  local function evaluate (p, per)
+    local obj = 0
+    for _, s in ipairs(sets) do
+      local _, nd = ranker(s, p.ngram)(p.k1, p.b, depth):ndcg(s.qrels, 10)
+      local r = nd / s.base
+      obj = obj + r - downside * (r < 1 and 1 - r or 0)
+      per[s.name] = nd
+    end
+    return obj / #sets
+  end
+  local best = cmaes_search({
+    param_names = names, samplers = samplers, trials = args.search_trials or 0,
+    trial_fn = function (p, info)
+      local per = {}
+      local sc = evaluate(p, per)
+      if args.each then args.each({ event = "trial", params = p, score = sc, per = per, info = info }) end
+      return sc, per
+    end,
+  })
+  return best, base
 end
 
 M.decide = function (args)
   local decide = require("santoku.learn.decide")
   if args.val_cand ~= nil then
     local g = decide.create({ n_labels = args.n_labels, span = true, reject = args.reject })
-    local td = tick("decide")
     local f1, precision, recall = g:calibrate({
       scores = args.val_scores, n_samples = args.val_n_samples,
       cand = args.val_cand, gold = args.val_gold,
     })
-    tock(td)
     return g, { span_f1 = f1, precision = precision, recall = recall, f1 = f1 }
   end
   local single = args.val_pred == nil
   local g = decide.create({ n_labels = args.n_labels, single = single })
   if single then
-    local td = tick("decide")
     local macro_f1, accuracy = g:calibrate({
       scores = args.val_scores,
       n_samples = args.val_n_samples,
       expected = args.val_expected,
     })
-    tock(td)
     return g, { macro_f1 = macro_f1, accuracy = accuracy }
   end
-  local td = tick("decide")
   local best_f1, precision, recall = g:calibrate({
     pred = args.val_pred,
     n_samples = args.val_n_samples,
     expected = args.val_expected,
   })
-  tock(td)
   return g, { f1 = best_f1, precision = precision, recall = recall }
 end
 

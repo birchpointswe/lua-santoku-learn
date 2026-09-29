@@ -210,7 +210,7 @@ KHASH_MAP_INIT_STR(tk_gazmap, int64_t)
 #define TK_GAZ_MT "tk_gaz_t"
 
 typedef struct {
-  int64_t n_types, is_char, nmin, nmax, nkeys, cap;
+  int64_t n_types, nmin, nmax, nkeys, cap;
   int64_t *data;
   khash_t(tk_gazmap) *map;
 } tk_gaz_t;
@@ -268,7 +268,7 @@ static int64_t tk_gaz_find (tk_gaz_t *G, const char *key, size_t len, char *sb, 
   return idx;
 }
 
-static int tk_gaz_build (lua_State *L, int is_char) {
+static int tk_gaz_build_char_lua (lua_State *L) {
   luaL_checktype(L, 1, LUA_TTABLE);
   lua_getfield(L, 1, "texts");
   luaL_checktype(L, -1, LUA_TTABLE);
@@ -277,16 +277,13 @@ static int tk_gaz_build (lua_State *L, int is_char) {
   lua_getfield(L, 1, "n_types");
   int64_t n_types = tk_lua_checkinteger(L, -1, "n_types");
   lua_pop(L, 1);
-  int64_t nmin = 0, nmax = 0;
-  if (is_char) {
-    lua_getfield(L, 1, "ngram_min"); nmin = tk_lua_checkinteger(L, -1, "ngram_min"); lua_pop(L, 1);
-    lua_getfield(L, 1, "ngram_max"); nmax = tk_lua_checkinteger(L, -1, "ngram_max"); lua_pop(L, 1);
-  }
+  lua_getfield(L, 1, "ngram_min"); int64_t nmin = tk_lua_checkinteger(L, -1, "ngram_min"); lua_pop(L, 1);
+  lua_getfield(L, 1, "ngram_max"); int64_t nmax = tk_lua_checkinteger(L, -1, "ngram_max"); lua_pop(L, 1);
   int64_t gs, ge, gt;
   tk_ner_cols3(L, G, &gs, &ge, &gt, "build gaz requires gold{s,e,ty}");
   tk_gaz_t *Z = tk_lua_newuserdata(L, tk_gaz_t, TK_GAZ_MT, tk_gaz_mt_fns, tk_gaz_gc);
   memset(Z, 0, sizeof(*Z));
-  Z->n_types = n_types; Z->is_char = is_char; Z->nmin = nmin; Z->nmax = nmax;
+  Z->n_types = n_types; Z->nmin = nmin; Z->nmax = nmax;
   Z->map = (khash_t(tk_gazmap) *) malloc(sizeof(khash_t(tk_gazmap)));
   kh_init(tk_gazmap, Z->map, 0);
   int64_t *Gs = G->cols[gs]->a, *Ge = G->cols[ge]->a, *Gt = G->cols[gt]->a, *Go = G->offsets->a;
@@ -298,24 +295,16 @@ static int tk_gaz_build (lua_State *L, int is_char) {
       int64_t a = Gs[g], b = Ge[g], ty = Gt[g];
       const char *surf = t + a; size_t sl = (size_t) (b - a);
       if (ty < 0 || ty >= n_types) continue;
-      if (!is_char) {
-        int64_t *row = tk_gaz_rowptr(Z, tk_gaz_row(Z, surf, sl));
-        row[0] ++; row[1 + ty] ++;
-      } else {
-        for (int64_t n = nmin; n <= nmax; n ++)
-          for (size_t i = 0; i + (size_t) n <= sl; i ++) {
-            int64_t *row = tk_gaz_rowptr(Z, tk_gaz_row(Z, surf + i, (size_t) n));
-            row[0] ++; row[1 + ty] ++;
-          }
-      }
+      for (int64_t n = nmin; n <= nmax; n ++)
+        for (size_t i = 0; i + (size_t) n <= sl; i ++) {
+          int64_t *row = tk_gaz_rowptr(Z, tk_gaz_row(Z, surf + i, (size_t) n));
+          row[0] ++; row[1 + ty] ++;
+        }
     }
     lua_pop(L, 1);
   }
   return 1;
 }
-
-static int tk_gaz_build_typed_lua (lua_State *L) { return tk_gaz_build(L, 0); }
-static int tk_gaz_build_char_lua (lua_State *L) { return tk_gaz_build(L, 1); }
 
 static int tk_gaz_block (lua_State *L) {
   lua_settop(L, 4);
@@ -342,34 +331,21 @@ static int tk_gaz_block (lua_State *L) {
       const char *surf = t + a; size_t sl = (size_t) (b - a);
       int64_t g = tlab ? tlab->a[ci] : nt;
       int64_t own = (g >= 0 && g < nt) ? 1 : 0;
-      if (!Z->is_char) {
-        int64_t r = tk_gaz_find(Z, surf, sl, sb, sizeof sb);
-        if (r >= 0) {
+      for (int64_t ty = 0; ty < nt; ty ++) acc[ty] = 0.0;
+      for (int64_t n = Z->nmin; n <= Z->nmax; n ++)
+        for (size_t i = 0; i + (size_t) n <= sl; i ++) {
+          int64_t r = tk_gaz_find(Z, surf + i, (size_t) n, sb, sizeof sb);
+          if (r < 0) continue;
           int64_t *row = tk_gaz_rowptr(Z, r);
           int64_t den = row[0] - own;
-          if (den > 0)
-            for (int64_t ty = 0; ty < nt; ty ++) {
-              int64_t cnt = row[1 + ty] - ((ty == g) ? own : 0);
-              if (cnt > 0) { tk_svec_push(nbr, (int32_t) ty); tk_fvec_push(val, (float) ((double) cnt / (double) den)); }
-            }
-        }
-      } else {
-        for (int64_t ty = 0; ty < nt; ty ++) acc[ty] = 0.0;
-        for (int64_t n = Z->nmin; n <= Z->nmax; n ++)
-          for (size_t i = 0; i + (size_t) n <= sl; i ++) {
-            int64_t r = tk_gaz_find(Z, surf + i, (size_t) n, sb, sizeof sb);
-            if (r < 0) continue;
-            int64_t *row = tk_gaz_rowptr(Z, r);
-            int64_t den = row[0] - own;
-            if (den <= 0) continue;
-            for (int64_t ty = 0; ty < nt; ty ++) {
-              int64_t cnt = row[1 + ty] - ((ty == g) ? own : 0);
-              if (cnt > 0) acc[ty] += (double) cnt / (double) den;
-            }
+          if (den <= 0) continue;
+          for (int64_t ty = 0; ty < nt; ty ++) {
+            int64_t cnt = row[1 + ty] - ((ty == g) ? own : 0);
+            if (cnt > 0) acc[ty] += (double) cnt / (double) den;
           }
-        for (int64_t ty = 0; ty < nt; ty ++)
-          if (acc[ty] > 0.0) { tk_svec_push(nbr, (int32_t) ty); tk_fvec_push(val, (float) acc[ty]); }
-      }
+        }
+      for (int64_t ty = 0; ty < nt; ty ++)
+        if (acc[ty] > 0.0) { tk_svec_push(nbr, (int32_t) ty); tk_fvec_push(val, (float) acc[ty]); }
       tk_ivec_push(off, (int64_t) nbr->n);
     }
     lua_pop(L, 1);
@@ -380,16 +356,14 @@ static int tk_gaz_block (lua_State *L) {
   return 1;
 }
 
-
-
 static int tk_gaz_persist (lua_State *L) {
   tk_gaz_t *Z = tk_gaz_peek(L, 1);
   FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
   tk_lua_fwrite(L, "TKgz", 1, 4, fh);
-  uint8_t version = 1;
+  uint8_t version = 2;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
-  int64_t hdr[5] = { Z->n_types, Z->is_char, Z->nmin, Z->nmax, Z->nkeys };
-  tk_lua_fwrite(L, hdr, sizeof(int64_t), 5, fh);
+  int64_t hdr[4] = { Z->n_types, Z->nmin, Z->nmax, Z->nkeys };
+  tk_lua_fwrite(L, hdr, sizeof(int64_t), 4, fh);
   int64_t width = Z->n_types + 1;
   if (Z->nkeys > 0)
     tk_lua_fwrite(L, Z->data, sizeof(int64_t), (size_t) (Z->nkeys * width), fh);
@@ -413,13 +387,13 @@ static int tk_gaz_load_lua (lua_State *L) {
   if (memcmp(magic, "TKgz", 4) != 0) { tk_lua_fclose(L, fh); return luaL_error(L, "ner.load_gaz: bad magic"); }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 1) { tk_lua_fclose(L, fh);
-    return luaL_error(L, "ner.load_gaz: unsupported version %d", (int) version); }
-  int64_t hdr[5];
-  tk_lua_fread(L, hdr, sizeof(int64_t), 5, fh);
+  if (version != 2) { tk_lua_fclose(L, fh);
+    return luaL_error(L, "ner.load_gaz: unsupported version %d (re-persist required)", (int) version); }
+  int64_t hdr[4];
+  tk_lua_fread(L, hdr, sizeof(int64_t), 4, fh);
   tk_gaz_t *Z = tk_lua_newuserdata(L, tk_gaz_t, TK_GAZ_MT, tk_gaz_mt_fns, tk_gaz_gc);
   memset(Z, 0, sizeof(*Z));
-  Z->n_types = hdr[0]; Z->is_char = hdr[1]; Z->nmin = hdr[2]; Z->nmax = hdr[3]; Z->nkeys = hdr[4];
+  Z->n_types = hdr[0]; Z->nmin = hdr[1]; Z->nmax = hdr[2]; Z->nkeys = hdr[3];
   Z->cap = Z->nkeys;
   int64_t width = Z->n_types + 1;
   if (Z->nkeys > 0) {
@@ -456,7 +430,6 @@ static luaL_Reg tk_ner_spans_mt_fns[] = {
 static luaL_Reg tk_ner_module_fns[] = {
   { "miss_report", tk_ner_miss_report },
   { "decode_report", tk_ner_decode_report },
-  { "build_typed_gaz", tk_gaz_build_typed_lua },
   { "build_char_gaz", tk_gaz_build_char_lua },
   { "load_gaz", tk_gaz_load_lua },
   { NULL, NULL }

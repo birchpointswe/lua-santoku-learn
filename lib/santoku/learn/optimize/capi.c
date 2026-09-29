@@ -38,10 +38,6 @@ typedef struct {
   bool destroyed;
 } tk_cma_t;
 
-
-
-
-
 static inline int tk_cma_eigh (double *A, int n, double *w)
 {
 #if !defined(__EMSCRIPTEN__)
@@ -134,7 +130,6 @@ static luaL_Reg tk_cma_mt_fns[] = {
   { NULL, NULL }
 };
 
-
 static inline int tk_cma_create_lua (lua_State *L)
 {
   int n = (int) luaL_checkinteger(L, 1);
@@ -168,7 +163,6 @@ static inline int tk_cma_create_lua (lua_State *L)
   c->bt = (double *) malloc((size_t) n * sizeof(double));
   c->cinv = (double *) malloc((size_t) n * sizeof(double));
 
-
   double wsum = 0.0;
   double lhalf = log((double) lambda / 2.0 + 0.5);
   for (int i = 0; i < mu; i++) {
@@ -187,7 +181,6 @@ static inline int tk_cma_create_lua (lua_State *L)
   c->c_1 = 2.0 / ((dn + 1.3) * (dn + 1.3) + me);
   c->c_mu = fmin(1.0 - c->c_1, 2.0 * (me - 2.0 + 1.0 / me) / ((dn + 2.0) * (dn + 2.0) + me));
   c->chiN = sqrt(dn) * (1.0 - 1.0 / (4.0 * dn) + 1.0 / (21.0 * dn * dn));
-
 
   for (int i = 0; i < n; i++) {
     lua_rawgeti(L, 4, i + 1);
@@ -214,12 +207,10 @@ static inline int tk_cma_create_lua (lua_State *L)
   return 1;
 }
 
-
 static inline int tk_cma_ask_lua (lua_State *L)
 {
   tk_cma_t *c = tk_cma_peek(L, 1);
   int n = c->n, lambda = c->lambda;
-
 
   for (int i = 0; i < n; i++) {
     for (int j = 0; j < n; j++) {
@@ -263,8 +254,6 @@ static inline int tk_cma_less (tk_cma_t *c, int a, int b)
   return c->fs[a] < c->fs[b];
 }
 
-
-
 static inline int tk_cma_tell_lua (lua_State *L)
 {
   tk_cma_t *c = tk_cma_peek(L, 1);
@@ -278,14 +267,12 @@ static inline int tk_cma_tell_lua (lua_State *L)
     lua_rawgeti(L, 4, k + 1); c->viols[k] = lua_tonumber(L, -1); lua_pop(L, 1);
   }
 
-
   for (int k = 0; k < lambda; k++) c->idx[k] = k;
   for (int i = 1; i < lambda; i++) {
     int key = c->idx[i], j = i - 1;
     while (j >= 0 && tk_cma_less(c, key, c->idx[j])) { c->idx[j + 1] = c->idx[j]; j--; }
     c->idx[j + 1] = key;
   }
-
 
   double gen_best_f = c->fs[c->idx[0]];
   if (c->hist_count < c->hist_len) {
@@ -296,14 +283,12 @@ static inline int tk_cma_tell_lua (lua_State *L)
     c->hist_head = (c->hist_head + 1) % c->hist_len;
   }
 
-
   for (int i = 0; i < n; i++) c->y_w[i] = 0.0;
   for (int r = 0; r < mu; r++) {
     double *yk = c->Y + c->idx[r] * n;
     double wr = c->w[r];
     for (int i = 0; i < n; i++) c->y_w[i] += wr * yk[i];
   }
-
 
   for (int j = 0; j < n; j++) {
     double acc = 0.0;
@@ -349,7 +334,6 @@ static inline int tk_cma_tell_lua (lua_State *L)
   for (int i = 0; i < n; i++) c->m[i] += sigma_pre * c->y_w[i];
   c->g += 1;
 
-
   int stop = 0;
   double maxD = c->D[0];
   for (int j = 1; j < n; j++) if (c->D[j] > maxD) maxD = c->D[j];
@@ -382,40 +366,23 @@ static inline int tk_cma_seed_lua (lua_State *L)
   return 0;
 }
 
-static inline int tk_cma_random_lua (lua_State *L)
-{
-  lua_pushinteger(L, (lua_Integer) tk_fast_random());
-  return 1;
-}
-
 static inline int tk_cma_uniform_lua (lua_State *L)
 {
   lua_pushnumber(L, (double) tk_fast_random() / ((double) UINT32_MAX + 1.0));
   return 1;
 }
 
-static inline int tk_cma_normal_lua (lua_State *L)
-{
-  double mean = luaL_checknumber(L, 1);
-  double variance = luaL_checknumber(L, 2);
-  lua_pushnumber(L, tk_fast_normal(mean, variance));
-  return 1;
-}
-
 static luaL_Reg tk_cma_fns[] = {
   { "cma", tk_cma_create_lua },
   { "seed", tk_cma_seed_lua },
-  { "random", tk_cma_random_lua },
   { "uniform", tk_cma_uniform_lua },
-  { "normal", tk_cma_normal_lua },
   { NULL, NULL }
 };
 
 int luaopen_santoku_learn_optimize_capi (lua_State *L)
 {
+  tk_fast_bind(L);
   lua_newtable(L);
   tk_lua_register(L, tk_cma_fns, 0);
-  lua_pushinteger(L, (lua_Integer) UINT32_MAX);
-  lua_setfield(L, -2, "fast_max");
   return 1;
 }

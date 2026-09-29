@@ -10,7 +10,6 @@ local fs = require("santoku.fs")
 fs.stdout:setvbuf("line")
 
 local cfg = {
-  verbose = false,
   search_landmarks = 1024 * 2,
   data = { ttr = 0.8 },
   n_landmarks = 1024 * 8,
@@ -35,9 +34,9 @@ test("housing CV", function ()
   local Xc = train.continuous:to_sparse():i32()
   local sp = Xc:standardize()
   local Xt = test_set.continuous:to_sparse():i32()
-  Xt:standardize(sp)
+  Xt:scale_cols(sp)
   local bits = train.bits:i32(); local bits_std = bits:standardize()
-  local bits_t = test_set.bits:i32(); bits_t:standardize(bits_std)
+  local bits_t = test_set.bits:i32(); bits_t:scale_cols(bits_std)
   local go = {}
   for g = 0, n_cont do go[g + 1] = g end
   local pool_blocks = { { x = Xc, group_offsets = go }, bits }
