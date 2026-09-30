@@ -402,6 +402,9 @@ M.krr = function (args)
     if args.pool_blocks then args = require("santoku.learn.util").fold_blocks(args)
     elseif args.pool_codes then args = require("santoku.learn.util").fold_dense(args) end
   end
+  if args.each == nil then
+    args.each = require("santoku.learn.util").make_ridge_log(require("santoku.utc").stopwatch())
+  end
   local function resolve_knob (spec)
     if type(spec) ~= "table" then return spec end
     if spec[1] ~= nil then

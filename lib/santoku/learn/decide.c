@@ -20,7 +20,6 @@ typedef struct {
   bool single;
   bool span;
   double threshold;
-  double *offsets;
   double reject_offset;
   int64_t reject;
   bool destroyed;
@@ -75,11 +74,11 @@ static inline void tk_decide_read_gold (lua_State *L,
   *gty = it >= 0 ? S->cols[it] : NULL;
 }
 
-static inline int64_t tk_decide_argmax (const float *row, const double *off, int64_t nl) {
+static inline int64_t tk_decide_argmax (const float *row, int64_t nl) {
   double bv = -HUGE_VAL;
   int64_t bc = 0;
   for (int64_t l = 0; l < nl; l++) {
-    double vv = (double)row[l] - off[l];
+    double vv = (double)row[l];
     if (vv > bv) { bv = vv; bc = l; }
   }
   return bc;
@@ -113,8 +112,6 @@ static inline void tk_decide_span_topw (
 
 static inline int tk_decide_gc (lua_State *L) {
   tk_decide_t *g = tk_decide_peek(L, 1);
-  if (!g->destroyed) { free(g->offsets); }
-  g->offsets = NULL;
   g->destroyed = true;
   return 0;
 }
@@ -141,7 +138,6 @@ static int tk_decide_create_lua (lua_State *L)
   g->single = single;
   g->span = span;
   g->threshold = HUGE_VAL;
-  g->offsets = NULL;
   g->reject_offset = 0.0;
   g->reject = reject;
   lua_getfield(L, 1, "offset");
@@ -150,10 +146,6 @@ static int tk_decide_create_lua (lua_State *L)
     if (span) g->reject_offset = off; else g->threshold = off;
   }
   lua_pop(L, 1);
-  if (single) {
-    g->offsets = (double *)malloc((uint64_t)nl * sizeof(double));
-    for (int64_t l = 0; l < nl; l++) g->offsets[l] = 0.0;
-  }
   g->destroyed = false;
   return 1;
 }
@@ -223,7 +215,7 @@ static tk_fvec_t *tk_decide_read_scores (lua_State *L)
 }
 
 static int tk_decide_single_prf (
-  const float *S, const double *off, const tk_ivec_t *exp_off, const tk_ivec_t *exp_nbr,
+  const float *S, const tk_ivec_t *exp_off, const tk_ivec_t *exp_nbr,
   int64_t n, int64_t nl, double *macro_out, double *acc_out)
 {
   int64_t *gc = (int64_t *)calloc((uint64_t)nl, sizeof(int64_t));
@@ -236,7 +228,7 @@ static int tk_decide_single_prf (
   int64_t correct = 0, counted = 0;
   for (int64_t i = 0; i < n; i++) {
     int64_t gi = (exp_off->a[i] < exp_off->a[i + 1]) ? exp_nbr->a[exp_off->a[i]] : -1;
-    int64_t bc = tk_decide_argmax(S + i * nl, off, nl);
+    int64_t bc = tk_decide_argmax(S + i * nl, nl);
     pc[bc]++;
     if (gi >= 0 && gi < nl) {
       gc[gi]++;
@@ -262,15 +254,13 @@ static int tk_decide_calibrate_single (lua_State *L, tk_decide_t *g)
   tk_decide_read_expected(L, &exp_off, &exp_nbr);
   int64_t n = (int64_t)tk_lua_fcheckunsigned(L, 2, "decide.calibrate", "n_samples");
   int64_t nl = g->nl;
-  double *off = g->offsets;
-  for (int64_t l = 0; l < nl; l++) off[l] = 0.0;
   if (n <= 0 || nl <= 0) {
     lua_pushnumber(L, 0.0);
     lua_pushnumber(L, 0.0);
     return 2;
   }
   double macro, acc;
-  if (tk_decide_single_prf(sf->a, off, exp_off, exp_nbr, n, nl, &macro, &acc) != 0)
+  if (tk_decide_single_prf(sf->a, exp_off, exp_nbr, n, nl, &macro, &acc) != 0)
     return tk_lua_verror(L, 2, "decide.calibrate", "alloc failed");
   lua_pushnumber(L, macro);
   lua_pushnumber(L, acc);
@@ -498,11 +488,10 @@ static int tk_decide_predict_lua (lua_State *L)
     tk_fvec_t *sf = tk_decide_read_scores(L);
     int64_t n = (int64_t)tk_lua_fcheckunsigned(L, 2, "decide.predict", "n_samples");
     float *S = sf->a;
-    double *off = g->offsets;
     tk_ivec_t *cls = tk_ivec_create(L, (uint64_t)n);
     #pragma omp parallel for schedule(static)
     for (int64_t i = 0; i < n; i++)
-      cls->a[i] = tk_decide_argmax(S + i * nl, off, nl);
+      cls->a[i] = tk_decide_argmax(S + i * nl, nl);
     return 1;
   }
   tk_ivec_t *offsets, *neighbors;
@@ -574,7 +563,7 @@ static int tk_decide_score_lua (lua_State *L)
     tk_decide_read_expected(L, &exp_off, &exp_nbr);
     int64_t n = (int64_t)tk_lua_fcheckunsigned(L, 2, "decide.score", "n_samples");
     double macro, acc;
-    if (tk_decide_single_prf(sf->a, g->offsets, exp_off, exp_nbr, n, nl, &macro, &acc) != 0)
+    if (tk_decide_single_prf(sf->a, exp_off, exp_nbr, n, nl, &macro, &acc) != 0)
       return tk_lua_verror(L, 2, "decide.score", "alloc failed");
     lua_pushnumber(L, macro);
     lua_newtable(L);
@@ -640,7 +629,7 @@ static int tk_decide_persist_lua (lua_State *L)
   tk_decide_t *g = tk_decide_peek(L, 1);
   FILE *fh = tk_lua_fopen(L, luaL_checkstring(L, 2), "w");
   tk_lua_fwrite(L, "TKde", 1, 4, fh);
-  uint8_t version = 2;
+  uint8_t version = 3;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
   uint8_t mode = g->span ? 2 : (g->single ? 1 : 0);
   tk_lua_fwrite(L, &mode, sizeof(uint8_t), 1, fh);
@@ -648,9 +637,7 @@ static int tk_decide_persist_lua (lua_State *L)
   if (g->span) {
     tk_lua_fwrite(L, &g->reject, sizeof(int64_t), 1, fh);
     tk_lua_fwrite(L, &g->reject_offset, sizeof(double), 1, fh);
-  } else if (g->single) {
-    tk_lua_fwrite(L, g->offsets, sizeof(double), (size_t)g->nl, fh);
-  } else {
+  } else if (!g->single) {
     tk_lua_fwrite(L, &g->threshold, sizeof(double), 1, fh);
   }
   tk_lua_fclose(L, fh);
@@ -669,9 +656,9 @@ static int tk_decide_load_lua (lua_State *L)
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 2) {
+  if (version != 3) {
     tk_lua_fclose(L, fh);
-    return luaL_error(L, "unsupported decide version %d", (int)version);
+    return luaL_error(L, "unsupported decide version %d (re-persist required)", (int)version);
   }
   uint8_t mode;
   tk_lua_fread(L, &mode, sizeof(uint8_t), 1, fh);
@@ -683,16 +670,12 @@ static int tk_decide_load_lua (lua_State *L)
   g->single = (mode == 1);
   g->span = (mode == 2);
   g->threshold = HUGE_VAL;
-  g->offsets = NULL;
   g->reject_offset = 0.0;
   g->reject = nl - 1;
   if (g->span) {
     tk_lua_fread(L, &g->reject, sizeof(int64_t), 1, fh);
     tk_lua_fread(L, &g->reject_offset, sizeof(double), 1, fh);
-  } else if (g->single) {
-    g->offsets = (double *)malloc((uint64_t)nl * sizeof(double));
-    tk_lua_fread(L, g->offsets, sizeof(double), (size_t)nl, fh);
-  } else {
+  } else if (!g->single) {
     tk_lua_fread(L, &g->threshold, sizeof(double), 1, fh);
   }
   tk_lua_fclose(L, fh);

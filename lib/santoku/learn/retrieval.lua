@@ -1,5 +1,6 @@
 local tokenizer = require("santoku.learn.tokenizer")
 local csr = require("santoku.csr")
+local ivec = require("santoku.ivec")
 
 local M = {}
 
@@ -41,8 +42,15 @@ M.bm25_ranker = function (X, Q)
 end
 
 M.rerank = function (o)
+  if not o.doc_codes then return o.candidates end
   local lex = o.candidates:clone():normalize("max")
-  local sem = o.candidates:clone():dots(o.query_codes, o.doc_codes)
+  local sem = o.candidates:clone()
+  local n_docs = o.doc_codes:shape()
+  local hi = sem:neighbors():max()
+  if hi and hi >= n_docs then
+    sem = sem:cols(ivec.create(n_docs):fill_indices())
+  end
+  sem:dots(o.query_codes, o.doc_codes)
   return csr.fuse(lex, sem, { weights = { 1 - o.alpha, o.alpha } })
 end
 

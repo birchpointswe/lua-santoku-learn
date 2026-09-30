@@ -1,6 +1,11 @@
 local tokenizer = require("santoku.learn.tokenizer")
 local spectral = require("santoku.learn.spectral")
 local ds = require("santoku.learn.dataset")
+local retrieval = require("santoku.learn.retrieval")
+local csr = require("santoku.csr")
+local ivec = require("santoku.ivec")
+local fvec = require("santoku.fvec")
+local num = require("santoku.num")
 local mtx = require("santoku.mtx")
 local str = require("santoku.string")
 local test = require("santoku.test")
@@ -87,5 +92,28 @@ test("retrieval: bm25 spectral codes, itq bits, exhaustive hamming", function ()
   local B2 = bits(C:multiply(W2))
   local P1, P2 = B_itq:bits_topk(B_itq, nb_itq, k), B2:bits_topk(B2, nb_itq, k)
   assert(recall(P1, P2, n, k) == 1)
+
+end)
+
+test("retrieval: rerank without embeddings and with missing embedding rows", function ()
+
+  local R = csr.create({
+    offsets = ivec.create({ 0, 3 }),
+    neighbors = ivec.create({ 0, 1, 2 }),
+    values = fvec.create({ 1, 3, 2 }),
+    n_cols = 3,
+  })
+  assert(retrieval.rerank({ candidates = R, alpha = 0.96 }) == R, "no embeddings must return the bm25 candidates")
+
+  local Qc = mtx.create({ data = fvec.create({ 1, 0 }), n_rows = 1, n_cols = 2 })
+  local D = mtx.create({ data = fvec.create({ 1, 0, 0, 1 }), n_rows = 2, n_cols = 2 })
+  local F = retrieval.rerank({ candidates = R, query_codes = Qc, doc_codes = D, alpha = 0.96 })
+  local nb, vs = F:neighbors(), F:values()
+  assert(nb:size() == 3, "every candidate must survive rerank")
+  local got = {}
+  for j = 0, nb:size() - 1 do got[nb:get(j)] = vs:get(j) end
+  assert(num.abs(got[0] - (0.04 / 3 + 0.96)) < 1e-6)
+  assert(num.abs(got[1] - 0.04) < 1e-6)
+  assert(num.abs(got[2] - 0.04 * 2 / 3) < 1e-6, "a candidate with no embedding row keeps its bm25 term")
 
 end)

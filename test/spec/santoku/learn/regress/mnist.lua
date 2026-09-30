@@ -45,7 +45,6 @@ test("mnist CV", function ()
     pool_labels = train.labels,
     pool_class = train.labels:neighbors(),
     n_labels = cfg.classes,
-    each = util.make_ridge_log(stopwatch),
   }))
 
   local _, test_scores = util.predict_tiled({ deploy = deploy, ridge = ridge_obj,
