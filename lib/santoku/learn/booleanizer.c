@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2024 Birch Point SWE
 #include <santoku/learn/mathlibs.h>
 #include <santoku/lua/utils.h>
 #include <santoku/iuset.h>

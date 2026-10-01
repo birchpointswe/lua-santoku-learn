@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: MIT
+-- SPDX-FileCopyrightText: 2024 Birch Point SWE
 local tokenizer = require("santoku.learn.tokenizer")
 local re = require("santoku.re")
 local tbl = require("santoku.table")

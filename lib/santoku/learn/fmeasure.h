@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2024 Birch Point SWE
 #ifndef TK_LEARN_FMEASURE_H
 #define TK_LEARN_FMEASURE_H
 

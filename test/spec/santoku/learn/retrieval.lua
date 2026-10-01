@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: MIT
+-- SPDX-FileCopyrightText: 2024 Birch Point SWE
 local tokenizer = require("santoku.learn.tokenizer")
 local spectral = require("santoku.learn.spectral")
 local ds = require("santoku.learn.dataset")

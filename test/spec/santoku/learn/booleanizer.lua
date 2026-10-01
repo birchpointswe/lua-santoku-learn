@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: MIT
+-- SPDX-FileCopyrightText: 2024 Birch Point SWE
 local booleanizer = require("santoku.learn.booleanizer")
 local test = require("santoku.test")
 local fs = require("santoku.fs")

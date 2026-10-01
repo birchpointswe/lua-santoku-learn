@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2024 Birch Point SWE
 #ifndef TK_TEXT_NORMALIZE_H
 #define TK_TEXT_NORMALIZE_H
 
 #include <stdint.h>
 #include <stddef.h>
-
 
 static const char tk_text_c3[64] = {
   'a','a','a','a','a','a','a','c',
@@ -16,7 +17,6 @@ static const char tk_text_c3[64] = {
   'o','u','u','u','u','y', 0, 'y'
 };
 
-
 static const char tk_text_c4[64] = {
   'a','a','a','a','a','a','c','c',
   'c','c','c','c','c','c','d','d',
@@ -27,7 +27,6 @@ static const char tk_text_c4[64] = {
   'i','i', 0,  0, 'j','j','k','k',
   'k','l','l','l','l','l','l','l'
 };
-
 
 static const char tk_text_c5[64] = {
   'l','l','l','n','n','n','n','n',
@@ -40,7 +39,6 @@ static const char tk_text_c5[64] = {
   'y','z','z','z','z','z','z','s'
 };
 
-
 static const char tk_text_c6[64] = {
   'b', 0,  'b','b', 0,  0,  0,  'c',
    0,  'd','d', 0,  0,  0,  0,  0,
@@ -51,7 +49,6 @@ static const char tk_text_c6[64] = {
   'u', 0,  'y','y', 'z','z', 0,  0,
    0,  0,  0,  0,  0,  0,  0,  0
 };
-
 
 static const char tk_text_c7[64] = {
    0,  0,  0,  0,  0,  0,  0,  0,
@@ -64,7 +61,6 @@ static const char tk_text_c7[64] = {
   'a','o','o','a','a', 0,  0,  0
 };
 
-
 static const char tk_text_c8[64] = {
   'a','a','a','a','e','e','e','e',
   'i','i','i','i','o','o','o','o',
@@ -75,7 +71,6 @@ static const char tk_text_c8[64] = {
    0,  0,  0, 'y','y', 0,  0,  0,
    0,  0,  0,  0,  0,  0,  0,  0
 };
-
 
 static const char tk_text_c9[64] = {
    0,  0,  0,  0,  0,  0,  0,  0,
@@ -88,8 +83,6 @@ static const char tk_text_c9[64] = {
    0, 'r','r','r', 0,  0,  0,  0
 };
 
-
-
 static const char tk_text_ce[64] = {
    0,  0,  0,  0,  0,  0, 'a', 0,
   'e','e','i', 0, 'o', 0, 'y','o',
@@ -100,8 +93,6 @@ static const char tk_text_ce[64] = {
   'a','b','g','d','e','z','e', 0,
   'i','k','l','m','n', 0, 'o', 0
 };
-
-
 
 static const char tk_text_cf[64] = {
   'p','r','s','s','t','y','f','x',
@@ -114,8 +105,6 @@ static const char tk_text_cf[64] = {
    0,  0,  0,  0,  0,  0,  0,  0
 };
 
-
-
 static const char tk_text_d0[64] = {
   'e', 0,  0,  0,  0,  0,  0,  0,
    0,  0,  0,  0,  0,  0,  0,  0,
@@ -126,8 +115,6 @@ static const char tk_text_d0[64] = {
   'a','b','v','g','d','e', 0, 'z',
   'i','y','k','l','m','n','o','p'
 };
-
-
 
 static const char tk_text_d1[64] = {
   'r','s','t','u','f','h', 0,  0,
@@ -140,7 +127,6 @@ static const char tk_text_d1[64] = {
    0,  0,  0,  0,  0,  0,  0,  0
 };
 
-
 static const char tk_text_d2[64] = {
    0,  0,  0,  0,  0,  0,  0,  0,
    0,  0,  0,  0,  0,  0,  0,  0,
@@ -151,7 +137,6 @@ static const char tk_text_d2[64] = {
    0, 'n', 0, 'n', 0,  0,  0,  0,
    0,  0,  0,  0,  0,  0,  0,  0
 };
-
 
 static const char tk_text_d3[64] = {
    0,  0,  0,  0,  0,  0,  0,  0,
@@ -164,8 +149,6 @@ static const char tk_text_d3[64] = {
   'h','h', 0,  0,  0,  0,  0,  0
 };
 
-
-
 static const char tk_text_d4[64] = {
    0,  0,  0,  0,  0,  0,  0,  0,
    0,  0,  0,  0,  0,  0,  0,  0,
@@ -176,9 +159,6 @@ static const char tk_text_d4[64] = {
    0, 'a','b','g','d','e','z','e',
   'y','t','z','i','l','x','t','k'
 };
-
-
-
 
 static const char tk_text_d5[64] = {
   'h','d','g','c','m','y','n','s',
@@ -191,7 +171,6 @@ static const char tk_text_d5[64] = {
   'o','c','p','j','r','s','v','t'
 };
 
-
 static const char tk_text_e1_b8[64] = {
   'a','a','b','b','b','b','b','b',
   'c','c','d','d','d','d','d','d',
@@ -202,7 +181,6 @@ static const char tk_text_e1_b8[64] = {
   'k','k','k','k','l','l','l','l',
   'l','l','l','l','m','m','m','m'
 };
-
 
 static const char tk_text_e1_b9[64] = {
   'm','m','n','n','n','n','n','n',
@@ -215,7 +193,6 @@ static const char tk_text_e1_b9[64] = {
   'v','v','v','v','w','w','w','w'
 };
 
-
 static const char tk_text_e1_ba[64] = {
   'w','w','w','w','w','w','x','x',
   'x','x','y','y','y','y','z','z',
@@ -226,7 +203,6 @@ static const char tk_text_e1_ba[64] = {
   'e','e','e','e','e','e','e','e',
   'i','i','o','o','o','o','o','o'
 };
-
 
 static const char tk_text_e1_bb[64] = {
   'o','o','o','o','o','o','o','o',
@@ -239,7 +215,6 @@ static const char tk_text_e1_bb[64] = {
    0,  0,  0,  0,  0,  0,  0,  0
 };
 
-
 static const char tk_text_e2_80[64] = {
   ' ',' ',' ',' ',' ',' ',' ',' ',
   ' ',' ',' ', 0,  0,  0,  0,  0,
@@ -251,14 +226,11 @@ static const char tk_text_e2_80[64] = {
    0, '\'','\'', 0,  0,  0,  0,  0
 };
 
-
-
 static const char *const tk_text_pages2[16] = {
   tk_text_c6, tk_text_c7, tk_text_c8, tk_text_c9,
   0, 0, 0, 0, 0, 0, 0, 0,
   tk_text_d2, tk_text_d3, tk_text_d4, tk_text_d5
 };
-
 
 static const char *const tk_text_e1_pages[4] = {
   tk_text_e1_b8, tk_text_e1_b9, tk_text_e1_ba, tk_text_e1_bb

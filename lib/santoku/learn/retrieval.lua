@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: MIT
+-- SPDX-FileCopyrightText: 2024 Birch Point SWE
 local tokenizer = require("santoku.learn.tokenizer")
 local csr = require("santoku.csr")
 local ivec = require("santoku.ivec")

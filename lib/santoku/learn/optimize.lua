@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: MIT
+-- SPDX-FileCopyrightText: 2024 Birch Point SWE
 local num = require("santoku.num")
 local err = require("santoku.error")
 local capi = require("santoku.learn.optimize.capi")

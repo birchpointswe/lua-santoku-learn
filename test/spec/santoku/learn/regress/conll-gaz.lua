@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: MIT
+-- SPDX-FileCopyrightText: 2024 Birch Point SWE
 local env = require("santoku.env")
 if env.var("TK_LEARN_REGRESS", nil) ~= "1" then
   print("TK_LEARN_REGRESS not set. Skipping.")

@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: MIT
+-- SPDX-FileCopyrightText: 2024 Birch Point SWE
 local fs = require("santoku.fs")
 
 local src, dst = arg[1], arg[2]

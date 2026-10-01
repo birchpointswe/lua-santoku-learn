@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: MIT
+-- SPDX-FileCopyrightText: 2024 Birch Point SWE
 require("santoku.error")
 local aho = require("santoku.learn.aho")
 local pvec = require("santoku.pvec")

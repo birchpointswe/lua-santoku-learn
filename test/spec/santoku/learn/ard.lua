@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: MIT
+-- SPDX-FileCopyrightText: 2024 Birch Point SWE
 local spectral = require("santoku.learn.spectral")
 local util = require("santoku.learn.util")
 local csr = require("santoku.csr")

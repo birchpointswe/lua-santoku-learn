@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: MIT
+-- SPDX-FileCopyrightText: 2024 Birch Point SWE
 local arr = require("santoku.array")
 local fs = require("santoku.fs")
 local err = require("santoku.error")
@@ -5,26 +7,6 @@ local env = require("santoku.env")
 local str = require("santoku.string")
 local sys = require("santoku.system")
 local base = fs.runfile("make.common.lua")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 local symbolizer = sys.sh({ "sh", "-c", "command -v llvm-symbolizer 2>/dev/null || command -v llvm-symbolizer-10 2>/dev/null || true" })()
 local symbolizer_opt = ""
