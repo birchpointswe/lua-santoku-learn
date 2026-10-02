@@ -32,7 +32,6 @@ local cfg = {
   },
   emb = { n_landmarks = 1024 * 8 },
   head = {
-    kernel = { "matern" },
     nu = { def = 0 },
     gamma = { def = 0.20602912 },
     lambda = { def = 1.6712232e-05 },

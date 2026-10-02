@@ -6,6 +6,8 @@ local csr = require("santoku.csr")
 local ivec = require("santoku.ivec")
 local dvec = require("santoku.dvec")
 local fvec = require("santoku.fvec")
+local mtx = require("santoku.mtx")
+local err = require("santoku.error")
 local str = require("santoku.string")
 local test = require("santoku.test")
 local fs = require("santoku.fs")
@@ -51,7 +53,7 @@ local function offsets (...)
 end
 
 local function codes_for (bl, lms)
-  local _, enc = spectral.encode({ blocks = bl, landmarks = lms, n_landmarks = lms:size(), kernel = "cosine" })
+  local _, enc = spectral.encode({ blocks = bl, landmarks = lms, n_landmarks = lms:size() })
   return enc:encode({ blocks = bl })
 end
 
@@ -70,6 +72,31 @@ local function assert_codes_close (cA, cB, tag)
   str.printf("[ard] %s codes agree to: %s\n", tag, level)
   assert(cA:eq(cB, 1e-3), tag .. ": grouped codes deviate beyond fp-noise tolerance")
 end
+
+test("dense mtx block is centered by the encoder at fit, encode and reload", function ()
+  local vals = make_vals()
+  local data = fvec.create(N * C)
+  data:setn(N * C)
+  for i = 1, N * C do data:set(i - 1, vals[i] + 3) end
+  local Xm = mtx.create({ data = data, n_rows = N, n_cols = C })
+  local Xc = Xm:clone()
+  Xc:center()
+  local blA = { { x = Xm, n_tokens = C } }
+  local blB = { { x = Xc:to_sparse():i32(), n_tokens = C } }
+  local lms = landmarks(6)
+  local _, enc = spectral.encode({ blocks = blA, landmarks = lms, n_landmarks = lms:size() })
+  local cA = enc:encode({ blocks = blA })
+  assert_codes_close(cA, codes_for(blB, lms), "dense-centered")
+  local ids = ivec.create()
+  for i = 10, 29 do ids:push(i) end
+  assert(enc:encode({ blocks = blA, start = 10, count = 20 }):eq(cA:rows(ids)), "dense start/count deviates")
+  local path = fs.tmpname()
+  enc:persist(path)
+  assert(spectral.load(path):encode({ blocks = blA }):eq(cA), "reloaded dense encoder deviates")
+  fs.rm(path)
+  fs.rm(path .. ".chol")
+  assert(not err.pcall(function () enc:encode({ blocks = blB }) end), "csr accepted for a dense-fit block")
+end)
 
 test("group_gauge matches colscale on a single group", function ()
   random.seed(7)
@@ -174,10 +201,10 @@ local function ignores_colscale (kernel_args, scale2, tag)
 end
 
 test("enc:encode ignores the encode-time colscale (fit colscale is authoritative)", function ()
-  ignores_colscale({ kernel = "cosine" }, 1.0, "cosine scale=1")
-  ignores_colscale({ kernel = "cosine" }, 22.0, "cosine scale=22")
-  ignores_colscale({ kernel = "matern", nu = 2, gamma = 0.25 }, 1.0, "matern scale=1")
-  ignores_colscale({ kernel = "matern", nu = 2, gamma = 0.25 }, 22.0, "matern scale=22")
+  ignores_colscale({ nu = 4 }, 1.0, "cosine scale=1")
+  ignores_colscale({ nu = 4 }, 22.0, "cosine scale=22")
+  ignores_colscale({ nu = 2, gamma = 0.25 }, 1.0, "matern scale=1")
+  ignores_colscale({ nu = 2, gamma = 0.25 }, 22.0, "matern scale=22")
 end)
 
 test("gram:fold downdate == direct fold prepare", function ()
@@ -217,7 +244,7 @@ test("gram:fold downdate == direct fold prepare", function ()
     fcodes[f] = mtx.create({ n_rows = counts[f], n_cols = mcap, type = "f32" })
   end
   local _, enc, g = spectral.encode({ blocks = bl, landmarks = lms, n_landmarks = lms:size(),
-    kernel = "cosine", y = Y, n_labels = 1,
+    y = Y, n_labels = 1,
     fold_assign = assign, fold_xtx = fxtx, fold_xty = fxty, fold_sv = fsv, fold_tv = ftv,
     fold_codes = fcodes })
   for f = 1, nf do
@@ -229,7 +256,7 @@ test("gram:fold downdate == direct fold prepare", function ()
     local Xtr = X:rows(tr_idx)
     local Ytr = Y:rows(tr_idx)
     local _, _, gd = spectral.encode({ blocks = { { x = Xtr, n_tokens = C } },
-      landmarks = lms, n_landmarks = lms:size(), kernel = "cosine", y = Ytr, n_labels = 1 })
+      landmarks = lms, n_landmarks = lms:size(), y = Ytr, n_labels = 1 })
     gf:solve(1e-2)
     gd:solve(1e-2)
     local rf = ridge.create({ gram = gf })

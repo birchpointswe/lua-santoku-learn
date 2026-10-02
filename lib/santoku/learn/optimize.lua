@@ -456,15 +456,7 @@ M.krr = function (args)
     args.n_labels = args.n_labels or c
   end
   local dense = args.pool_targets ~= nil
-  local kernel_spec = args.kernel or "cosine"
-  local kernels = type(kernel_spec) == "table" and kernel_spec or { kernel_spec }
-  args.kernel = kernels
-  local families = {}
-  for _, kn in ipairs(kernels) do
-    if kn == "cosine" then families.cosine = true
-    else families.matern = true end
-  end
-  err.assert(not (families.cosine and families.matern), "krr: kernel mixes cosine and matern; pick one family")
+  err.assert(args.kernel == nil, "krr: kernel was removed; pick the kernel with nu (0-3 matern, 4 cosine)")
   local function cat_spec (v, deflist)
     if v == nil then return deflist end
     if type(v) ~= "table" then return v end
@@ -475,9 +467,12 @@ M.krr = function (args)
     return s
   end
   args.gamma = spec_defaults(args.gamma, { min = 1e-2, max = 16, log = true })
-  args.nu = cat_spec(args.nu, { 3, 0, 1, 2 })
+  args.nu = cat_spec(args.nu, { 3, 0, 1, 2, 4 })
   local seed = 5
   local kernel_samplers = build_samplers(args, { "nu", "gamma" }, seed)
+  if kernel_samplers.nu.type == "fixed" and kernel_samplers.nu.center == 4 then
+    kernel_samplers.gamma = { type = "fixed", center = 1 }
+  end
 
   local strials = args.search_trials or 0
   local do_search = strials > 1
@@ -570,7 +565,6 @@ M.krr = function (args)
     end
     spectral_args.y = args.y
     spectral_args.targets = args.targets
-    spectral_args.kernel = spec.kernel
     spectral_args.gamma = spec.gamma
     spectral_args.nu = spec.nu
     spectral_args.strata = args.pool_strata
@@ -852,13 +846,7 @@ M.krr = function (args)
   end
 
   local function center_spec ()
-    local kname = kernels[1]
-    local base = { kernel = kname }
-    if kname == "matern" then
-      base.nu = kernel_samplers.nu.center
-      base.gamma = kernel_samplers.gamma.center
-    end
-    return kname, base
+    return { nu = kernel_samplers.nu.center, gamma = kernel_samplers.gamma.center }
   end
   local function spec_with (base, p)
     local spec = { params = p }
@@ -984,7 +972,7 @@ M.krr = function (args)
     return p
   end
   if not do_search then
-    local _, base = center_spec()
+    local base = center_spec()
 
     local rk = {}
     for _, knob in ipairs(rebuild_knobs) do
@@ -1109,31 +1097,18 @@ M.krr = function (args)
     end
     return sc, sm
   end
-  local run
-  if families.matern then
-    run = {
-      names = { "nu", "gamma" },
-      samplers = { nu = kernel_samplers.nu, gamma = kernel_samplers.gamma },
-      base_of = function (gp) return { kernel = "matern", nu = gp.nu, gamma = gp.gamma } end,
-    }
-  else
-    run = {
-      names = {},
-      samplers = {},
-      base_of = function () return { kernel = "cosine" } end,
-    }
-  end
   cmaes_search({
-    param_names = with_knobs(run.names), samplers = merge_knob_samplers(run.samplers),
+    param_names = with_knobs({ "nu", "gamma" }),
+    samplers = merge_knob_samplers({ nu = kernel_samplers.nu, gamma = kernel_samplers.gamma }),
     trials = args.search_trials or 0,
     trial_fn = function (gp)
       local p = params_of(gp)
-      local base = run.base_of(gp)
+      local base = { nu = gp.nu, gamma = gp.gamma }
       return eval_kd(spec_with(base, p), base_with(base, p), gp)
     end,
   })
   if not best_params then
-    local _, base = center_spec()
+    local base = center_spec()
     local gp = {}
     for _, n in ipairs(label_names) do local s = label_samplers[n]; gp[n] = s and s.center end
     local rk = {}

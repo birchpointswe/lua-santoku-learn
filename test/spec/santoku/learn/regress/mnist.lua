@@ -20,7 +20,6 @@ local cfg = {
   search_landmarks = 1024 * 2,
   data = { ttr = 0.8, features = 784 },
   n_landmarks = 1024 * 8,
-  kernel = { "matern" },
   nu = { def = 3 },
   gamma = { def = 2.1044873 },
   lambda = { def = 0.00040531156 },

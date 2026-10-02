@@ -56,7 +56,7 @@ test("scifact retrieval", function ()
   assert(lex.k1 == 1.2 and lex.b == 0.75 and lex.ngram == 1)
 
   local f = retrieval.featurizer({ ngram_min = 4, ngram_max = 4, texts = d.corpus_texts })
-  local _, enc = spectral.encode({ x = f.X, n_landmarks = cfg.n_landmarks, kernel = "cosine" })
+  local _, enc = spectral.encode({ x = f.X, n_landmarks = cfg.n_landmarks })
   local D, mu = codes(enc, f.X)
   local Qc = codes(enc, f.transform(d.query_texts), mu)
 

@@ -20,7 +20,6 @@ fs.stdout:setvbuf("line")
 local cfg = {
   search_landmarks = 1024 * 2,
   n_landmarks = 1024 * 8,
-  kernel = { "matern" },
   nu = { def = 0 },
   gamma = { def = 0.3388427688745787 },
   lambda = { def = 0.004413229477195137 },

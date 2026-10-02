@@ -1,6 +1,7 @@
 -- SPDX-License-Identifier: MIT
 -- SPDX-FileCopyrightText: 2024 Birch Point SWE
 local str = require("santoku.string")
+local err = require("santoku.error")
 local num = require("santoku.num")
 local arr = require("santoku.array")
 local ivec = require("santoku.ivec")
@@ -121,17 +122,14 @@ local function format_phase (ev)
   return str.format("%s %d/%d", ev.phase, ev.trial, ev.trials)
 end
 
-local NU_NAME = { [0] = "1/2", [1] = "3/2", [2] = "5/2", [3] = "inf" }
+local NU_NAME = { [0] = "matern1/2", [1] = "matern3/2", [2] = "matern5/2", [3] = "rbf", [4] = "cosine" }
 
 local function format_kernel (p)
-  if not p.kernel then return "" end
-  if p.kernel == "matern" then
-    local nu = p.nu ~= nil and (NU_NAME[p.nu] or tostring(p.nu)) or "?"
-    local g = p.gamma and str.format(" gamma=%.8g", p.gamma) or ""
-    return str.format(" kernel=matern nu=%s%s", nu, g)
-  end
+  if p.nu == nil then return "" end
+  local name = NU_NAME[p.nu] or tostring(p.nu)
+  if p.nu == 4 then return str.format(" kernel=%s", name) end
   local g = p.gamma and str.format(" gamma=%.8g", p.gamma) or ""
-  return str.format(" kernel=%s%s", p.kernel, g)
+  return str.format(" kernel=%s%s", name, g)
 end
 
 local function fmt_exponent (ex)
@@ -351,8 +349,8 @@ end
 
 local function weight_fit (blocks, y, metrics, is_targets)
   local w = {}
-  for i = 1, #blocks do
-    local m = metrics and metrics[i]
+  for i = 1, metrics and #metrics or 0 do
+    local m = metrics[i]
     if m and y then
       if is_targets and m ~= "auc" then
         error("weight_fit: continuous targets require the auc metric")
@@ -643,18 +641,35 @@ function M.fold_blocks (a)
       val_targets = reg and fvt or nil, val_cand = fvc, val_gold = fvg }
   end
 
+  local dense = {}
+  for i = 1, #pool do
+    dense[i] = pool[i].neighbors == nil
+    err.assert(not (dense[i] and metrics and metrics[i]), "fold_blocks: relevance needs a csr block, block " .. i .. " is a dense mtx")
+  end
   local p_w
   if use_folds then
     local sy = a.pool_labels and a.pool_labels:rows(strat_idx)
       or (wtargets and slice_targets(a.pool_targets, strat_idx)) or nil
     local spool = {}
-    for i = 1, #pool do spool[i] = pool[i]:rows(strat_idx) end
+    for i = 1, #pool do
+      if metrics and metrics[i] then spool[i] = pool[i]:rows(strat_idx) end
+    end
     p_w = weight_fit(spool, sy, metrics, wtargets)
-    for i = 1, #spool do free_csr(spool[i]) end
+    for _, s in pairs(spool) do free_csr(s) end
   end
   local p_w_full = weight_fit(pool, a.pool_labels or (wtargets and a.pool_targets), metrics, wtargets)
   local p_pcs = {}
-  for i = 1, #pool do p_pcs[i] = pool[i]:sumsq_cols() end
+  for i = 1, #pool do
+    if dense[i] then
+      local c = pool[i]:clone()
+      c:center()
+      local cs = c:to_sparse():i32()
+      p_pcs[i] = cs:sumsq_cols()
+      free_csr(cs)
+    else
+      p_pcs[i] = pool[i]:sumsq_cols()
+    end
+  end
   local exp_tbl
   if a.exponent then
     if a.exponent[1] ~= nil then exp_tbl = a.exponent

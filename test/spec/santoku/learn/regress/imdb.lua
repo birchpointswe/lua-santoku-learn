@@ -28,7 +28,7 @@ local cfg = {
   exponent = { def = { 6.6175246, 1.1081682 } },
   decode_offset = { def = 0.49393576 },
   n_landmarks = 1024 * 8,
-  kernel = { "cosine" },
+  nu = { def = 4 },
   lambda = { def = 0.025471643 },
   classes = 1,
   k = 1,

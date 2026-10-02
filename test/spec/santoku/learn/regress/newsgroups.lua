@@ -27,7 +27,7 @@ local cfg = {
   scales = { def = { 0.94523942, 1.057933 } },
   exponent = { def = { 1.7400224, 5.625631 } },
   n_landmarks = 1024 * 8,
-  kernel = { "cosine" },
+  nu = { def = 4 },
   lambda = { def = 1.5092313e-06 },
   classes = 20,
   k = 1,

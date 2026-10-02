@@ -30,18 +30,15 @@ static inline const int32_t *tk_peek_tokens (lua_State *L, int idx, uint64_t *ou
   return conv->a;
 }
 
-typedef enum {
-  TK_SPECTRAL_COSINE = 0,
-  TK_SPECTRAL_MATERN = 1,
-} tk_spectral_family_t;
+#define TK_SPECTRAL_NU_COSINE 4
 
 typedef struct {
-  uint8_t family;
   uint8_t nu;
   float gamma;
 } tk_spectral_kernel_t;
 
 static inline float tk_matern_apply (int nu, float gamma, float c) {
+  if (nu == TK_SPECTRAL_NU_COSINE) return c;
   if (nu == 3) return expf(-gamma * (1.0f - c));
   float d2 = 2.0f * (1.0f - c);
   if (d2 < 0.0f) d2 = 0.0f;
@@ -54,8 +51,7 @@ static inline float tk_matern_apply (int nu, float gamma, float c) {
 static inline float tk_spectral_kernel_apply (tk_spectral_kernel_t k, float c) {
   if (c > 1.0f) c = 1.0f;
   if (c < -1.0f) c = -1.0f;
-  if (k.family == TK_SPECTRAL_MATERN) return tk_matern_apply(k.nu, k.gamma, c);
-  return c;
+  return tk_matern_apply(k.nu, k.gamma, c);
 }
 
 #define TK_MOD_CSR   0
@@ -517,6 +513,8 @@ typedef struct {
   int64_t blk_start[TK_MAX_MOD];
   float blk_s[TK_MAX_MOD];
   float *blk_cs_flat;
+  float *blk_mean_flat;
+  uint8_t blk_dense[TK_MAX_MOD];
   float *dense_vecs;
   float *dense_cs2;
   int64_t d_input;
@@ -550,6 +548,7 @@ static inline int tk_nystrom_encoder_gc (lua_State *L) {
       free(enc->csc_rows);
       free(enc->csc_values);
       free(enc->blk_cs_flat);
+      free(enc->blk_mean_flat);
     } else if (enc->mod_type == TK_MOD_DENSE) {
       free(enc->dense_vecs);
       free(enc->dense_cs2);
@@ -570,6 +569,8 @@ static inline void tk_nystrom_encoder_zero (tk_nystrom_encoder_t *enc) {
   enc->csr_n_tokens = 0;
   enc->n_blocks = 0;
   enc->blk_cs_flat = NULL;
+  enc->blk_mean_flat = NULL;
+  memset(enc->blk_dense, 0, sizeof(enc->blk_dense));
   enc->dense_vecs = NULL;
   enc->dense_cs2 = NULL;
   enc->d_input = 0;
@@ -1009,6 +1010,135 @@ static inline int tk_nystrom_gram_tiles (
   return 0;
 }
 
+static inline int tk_spectral_densify (
+  lua_State *L, int list_idx, tk_nystrom_encoder_t *enc, int fit,
+  uint64_t r_start, int has_count, uint64_t r_count)
+{
+  int nb = (int) lua_objlen(L, list_idx);
+  if (nb > TK_MAX_MOD)
+    return luaL_error(L, "encode: too many blocks (max %d)", TK_MAX_MOD);
+  uint8_t dense[TK_MAX_MOD];
+  uint64_t total = 0;
+  int any = 0;
+  for (int b = 0; b < nb; b++) {
+    lua_rawgeti(L, list_idx, b + 1);
+    int bt = lua_gettop(L);
+    lua_getfield(L, bt, "x");
+    dense[b] = tk_csr_peekopt(L, -1) == NULL;
+    lua_pop(L, 1);
+    if (enc && b < enc->n_blocks && enc->blk_dense[b] != dense[b])
+      return luaL_error(L, enc->blk_dense[b]
+        ? "encode: block %d was fit as a dense matrix; pass an mtx"
+        : "encode: block %d was fit as a csr; pass a csr", b + 1);
+    if (fit) total += tk_lua_fcheckunsigned(L, bt, "encode", "n_tokens");
+    any |= dense[b];
+    lua_pop(L, 1);
+  }
+  if (!any) {
+    if (fit) {
+      lua_pushnil(L);
+      lua_pushnil(L);
+      lua_pushvalue(L, list_idx);
+      return 3;
+    }
+    return 0;
+  }
+  float *mean = NULL;
+  if (fit) {
+    tk_fvec_t *mv = tk_fvec_create(L, total ? total : 1);
+    mv->n = total;
+    memset(mv->a, 0, (total ? total : 1) * sizeof(float));
+    tk_ivec_t *dv = tk_ivec_create(L, (size_t) nb);
+    dv->n = (size_t) nb;
+    for (int b = 0; b < nb; b++) dv->a[b] = dense[b];
+    mean = mv->a;
+  } else if (enc) {
+    mean = enc->blk_mean_flat;
+  }
+  lua_newtable(L);
+  int out_idx = lua_gettop(L);
+  uint64_t tok_base = 0;
+  for (int b = 0; b < nb; b++) {
+    lua_rawgeti(L, list_idx, b + 1);
+    int bt = lua_gettop(L);
+    uint64_t ntok = fit ? tk_lua_fcheckunsigned(L, bt, "encode", "n_tokens") : 0;
+    if (enc && b < enc->n_blocks) tok_base = (uint64_t) enc->blk_start[b];
+    lua_newtable(L);
+    int nt = lua_gettop(L);
+    lua_pushnil(L);
+    while (lua_next(L, bt)) {
+      lua_pushvalue(L, -2);
+      lua_pushvalue(L, -2);
+      lua_settable(L, nt);
+      lua_pop(L, 1);
+    }
+    if (dense[b]) {
+      lua_getfield(L, bt, "x");
+      tk_mtx_t *X = tk_mtx_peek(L, -1, "blocks[].x");
+      uint64_t d = X->n_cols, rows = X->n_rows;
+      if (fit && d != ntok)
+        return luaL_error(L, "encode: block %d n_tokens %d differs from its mtx width %d",
+          b + 1, (int) ntok, (int) d);
+      if (enc && b < enc->n_blocks) {
+        uint64_t w = (b + 1 < enc->n_blocks ? (uint64_t) enc->blk_start[b + 1] : enc->csr_n_tokens)
+          - (uint64_t) enc->blk_start[b];
+        if (d != w)
+          return luaL_error(L, "encode: block %d mtx width %d differs from the fit width %d",
+            b + 1, (int) d, (int) w);
+      }
+      if (r_start > rows)
+        return luaL_error(L, "encode: start beyond block rows");
+      uint64_t n = has_count ? r_count : rows - r_start;
+      if (r_start + n > rows)
+        return luaL_error(L, "encode: row range beyond block rows");
+      float *mu = mean ? mean + tok_base : NULL;
+      if (fit) {
+        for (uint64_t c = 0; c < d; c++) {
+          double s = 0.0;
+          for (uint64_t i = 0; i < rows; i++) s += tk_mtx_get1(X, i * d + c);
+          mu[c] = (float) (s / (double) (rows ? rows : 1));
+        }
+      }
+      tk_ivec_t *off = tk_ivec_create(L, r_start + n + 1);
+      int oi = lua_gettop(L);
+      off->n = r_start + n + 1;
+      tk_svec_t *tok = tk_svec_create(L, n * d ? n * d : 1);
+      int ti = lua_gettop(L);
+      tok->n = n * d;
+      tk_fvec_t *val = tk_fvec_create(L, n * d ? n * d : 1);
+      int vi = lua_gettop(L);
+      val->n = n * d;
+      for (uint64_t i = 0; i <= r_start; i++) off->a[i] = 0;
+      for (uint64_t i = 0; i < n; i++) {
+        off->a[r_start + i + 1] = (int64_t) ((i + 1) * d);
+        uint64_t src = (r_start + i) * d;
+        for (uint64_t c = 0; c < d; c++) {
+          tok->a[i * d + c] = (int32_t) c;
+          val->a[i * d + c] = (float) (tk_mtx_get1(X, src + c) - (mu ? (double) mu[c] : 0.0));
+        }
+      }
+      tk_csr_push(L, TK_TAG_F32, TK_TAG_I32, d, oi, off, ti, tok, vi, val);
+      lua_setfield(L, nt, "x");
+      lua_pop(L, 4);
+    }
+    lua_rawseti(L, out_idx, b + 1);
+    lua_pop(L, 1);
+    tok_base += ntok;
+  }
+  return fit ? 3 : 1;
+}
+
+static inline void tk_spectral_restore_blocks (lua_State *L) {
+  lua_getfield(L, 1, "blocks_src");
+  if (!lua_isnil(L, -1)) {
+    lua_setfield(L, 1, "blocks");
+    lua_pushnil(L);
+    lua_setfield(L, 1, "blocks_src");
+  } else {
+    lua_pop(L, 1);
+  }
+}
+
 static inline int tk_nystrom_encode_blocks (lua_State *L, tk_nystrom_encoder_t *enc) {
   if (!enc->chol)
     return luaL_error(L, "encode: chol released");
@@ -1033,6 +1163,8 @@ static inline int tk_nystrom_encode_blocks (lua_State *L, tk_nystrom_encoder_t *
   bool has_count = !lua_isnil(L, -1);
   uint64_t r_count = has_count ? (uint64_t) luaL_checkinteger(L, -1) : 0;
   lua_pop(L, 1);
+  if (tk_spectral_densify(L, blk_idx, enc, 0, r_start, has_count, r_count))
+    blk_idx = lua_gettop(L);
   uint64_t n_samples = 0;
   for (int b = 0; b < nb; b++) {
     lua_rawgeti(L, blk_idx, b + 1);
@@ -1243,9 +1375,8 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
   lua_pop(L, 1);
   FILE *fh = tk_lua_fopen(L, path, "w");
   tk_lua_fwrite(L, "TKny", 1, 4, fh);
-  uint8_t version = 32;
+  uint8_t version = 33;
   tk_lua_fwrite(L, &version, sizeof(uint8_t), 1, fh);
-  tk_lua_fwrite(L, &enc->kernel.family, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &enc->kernel.nu, sizeof(uint8_t), 1, fh);
   tk_lua_fwrite(L, &enc->kernel.gamma, sizeof(float), 1, fh);
   tk_lua_fwrite(L, &enc->mod_type, sizeof(uint8_t), 1, fh);
@@ -1277,6 +1408,11 @@ static inline int tk_nystrom_encoder_persist_lua (lua_State *L) {
       tk_lua_fwrite(L, enc->blk_start, sizeof(int64_t), (size_t) enc->n_blocks, fh);
       tk_lua_fwrite(L, enc->blk_s, sizeof(float), (size_t) enc->n_blocks, fh);
       tk_lua_fwrite(L, enc->blk_cs_flat, sizeof(float), (size_t) enc->csr_n_tokens, fh);
+      tk_lua_fwrite(L, enc->blk_dense, sizeof(uint8_t), (size_t) enc->n_blocks, fh);
+      uint8_t has_mean = enc->blk_mean_flat ? 1 : 0;
+      tk_lua_fwrite(L, &has_mean, sizeof(uint8_t), 1, fh);
+      if (has_mean)
+        tk_lua_fwrite(L, enc->blk_mean_flat, sizeof(float), (size_t) enc->csr_n_tokens, fh);
     }
   } else if (enc->mod_type == TK_MOD_DENSE) {
     tk_lua_fwrite(L, &enc->d_input, sizeof(int64_t), 1, fh);
@@ -1306,6 +1442,20 @@ static inline tk_ivec_t *tk_spectral_uniform_ids (
 static inline int tm_encode (lua_State *L) {
   lua_settop(L, 1);
   luaL_checktype(L, 1, LUA_TTABLE);
+
+  lua_getfield(L, 1, "blocks");
+  if (!lua_isnil(L, -1)) {
+    tk_spectral_densify(L, lua_gettop(L), NULL, 1, 0, 0, 0);
+    lua_setfield(L, 1, "blocks");
+    lua_setfield(L, 1, "block_dense");
+    lua_setfield(L, 1, "block_means");
+  } else {
+    lua_pushnil(L);
+    lua_setfield(L, 1, "block_dense");
+    lua_pushnil(L);
+    lua_setfield(L, 1, "block_means");
+  }
+  lua_setfield(L, 1, "blocks_src");
 
   lua_getfield(L, 1, "x");
   if (!lua_isnil(L, -1)) {
@@ -1500,18 +1650,14 @@ static inline int tm_encode (lua_State *L) {
     return luaL_error(L, "encode: provide exactly one modality (csr, blocks, or dense)");
 
   lua_getfield(L, 1, "kernel");
-  const char *kernel_str = lua_isnil(L, -1) ? "cosine" : lua_tostring(L, -1);
+  if (!lua_isnil(L, -1))
+    return luaL_error(L, "encode: kernel was removed; pick the kernel with nu (0-3 matern, 4 cosine)");
   lua_pop(L, 1);
   float gamma = (float)tk_lua_foptnumber(L, 1, "encode", "gamma", 1.0);
-  tk_spectral_kernel_t kernel = { .family = TK_SPECTRAL_COSINE, .nu = 3, .gamma = gamma };
-  if (strcmp(kernel_str, "cosine") == 0) {
-    kernel.family = TK_SPECTRAL_COSINE;
-  } else if (strcmp(kernel_str, "matern") == 0) {
-    kernel.family = TK_SPECTRAL_MATERN;
-    kernel.nu = (uint8_t)tk_lua_foptunsigned(L, 1, "encode", "nu", 3);
-  } else {
-    return luaL_error(L, "encode: unknown kernel '%s'", kernel_str);
-  }
+  uint64_t nu = tk_lua_foptunsigned(L, 1, "encode", "nu", TK_SPECTRAL_NU_COSINE);
+  if (nu > TK_SPECTRAL_NU_COSINE)
+    return luaL_error(L, "encode: nu must be 0-3 (matern) or 4 (cosine)");
+  tk_spectral_kernel_t kernel = { .nu = (uint8_t) nu, .gamma = gamma };
 
   if (has_csr && !mod.csr_values) {
     uint64_t nnz = (uint64_t)(mod.csr_offsets[n_samples] - mod.csr_offsets[0]);
@@ -1610,6 +1756,7 @@ static inline int tm_encode (lua_State *L) {
     free(csr_values_owned); free(dense_owned);
     free(dense_rowscale); free(dense_cs2);
     free(blk_rowscale);
+    tk_spectral_restore_blocks(L);
     lua_pushnil(L);
     lua_pushnil(L);
     return 2;
@@ -1677,6 +1824,25 @@ static inline int tm_encode (lua_State *L) {
         for (int64_t c = 0; c < bend - bstart; c++) enc->blk_cs_flat[bstart + c] = cs[c];
       }
     }
+    lua_getfield(L, 1, "block_dense");
+    tk_ivec_t *bdv = lua_isnil(L, -1) ? NULL : tk_ivec_peek(L, -1, "block_dense");
+    lua_getfield(L, 1, "block_means");
+    tk_fvec_t *bmv = lua_isnil(L, -1) ? NULL : tk_fvec_peek(L, -1, "block_means");
+    for (int b = 0; b < mod.n_blocks; b++)
+      enc->blk_dense[b] = (bdv && (uint64_t) b < bdv->n) ? (uint8_t) bdv->a[b] : 0;
+    if (bmv) {
+      if (bmv->n != csr_nt)
+        return luaL_error(L, "encode: block means length differs from n_tokens");
+      if (!enc->blk_mean_flat)
+        enc->blk_mean_flat = (float *) malloc((csr_nt > 0 ? csr_nt : 1) * sizeof(float));
+      if (!enc->blk_mean_flat)
+        return luaL_error(L, "encode: out of memory (blk_mean)");
+      memcpy(enc->blk_mean_flat, bmv->a, csr_nt * sizeof(float));
+    } else {
+      free(enc->blk_mean_flat);
+      enc->blk_mean_flat = NULL;
+    }
+    lua_pop(L, 2);
     uint64_t lm_total = 0;
     for (uint64_t j = 0; j < m; j++) {
       uint64_t si = (uint64_t) lm_ids->a[j];
@@ -2015,6 +2181,7 @@ static inline int tm_encode (lua_State *L) {
   free(dense_owned);
   free(blk_rowscale);
   free(dense_rowscale);
+  tk_spectral_restore_blocks(L);
 
   lua_newtable(L);
   if (chol_external) {
@@ -2084,7 +2251,7 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   }
   uint8_t version;
   tk_lua_fread(L, &version, sizeof(uint8_t), 1, fh);
-  if (version != 32) {
+  if (version != 33) {
     tk_lua_fclose(L, fh);
     return luaL_error(L, "unsupported nystrom encoder version %d (old layout; re-persist required)", (int)version);
   }
@@ -2094,7 +2261,6 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
   int enc_idx = lua_gettop(L);
   tk_nystrom_encoder_zero(enc);
 
-  tk_lua_fread(L, &enc->kernel.family, sizeof(uint8_t), 1, fh);
   tk_lua_fread(L, &enc->kernel.nu, sizeof(uint8_t), 1, fh);
   tk_lua_fread(L, &enc->kernel.gamma, sizeof(float), 1, fh);
   tk_lua_fread(L, &enc->mod_type, sizeof(uint8_t), 1, fh);
@@ -2133,6 +2299,17 @@ static inline int tk_nystrom_encoder_load_lua (lua_State *L) {
         return luaL_error(L, "load: out of memory (blk_cs)");
       }
       tk_lua_fread(L, enc->blk_cs_flat, sizeof(float), (size_t) enc->csr_n_tokens, fh);
+      tk_lua_fread(L, enc->blk_dense, sizeof(uint8_t), (size_t) enc->n_blocks, fh);
+      uint8_t has_mean = 0;
+      tk_lua_fread(L, &has_mean, sizeof(uint8_t), 1, fh);
+      if (has_mean) {
+        enc->blk_mean_flat = (float *) malloc((enc->csr_n_tokens > 0 ? enc->csr_n_tokens : 1) * sizeof(float));
+        if (!enc->blk_mean_flat) {
+          tk_lua_fclose(L, fh);
+          return luaL_error(L, "load: out of memory (blk_mean)");
+        }
+        tk_lua_fread(L, enc->blk_mean_flat, sizeof(float), (size_t) enc->csr_n_tokens, fh);
+      }
     }
     if (tk_nystrom_build_csc(enc) != 0) {
       tk_lua_fclose(L, fh);
@@ -2390,7 +2567,16 @@ static inline int tm_uniform_landmarks (lua_State *L) {
   uint64_t seedv = (uint64_t) luaL_optnumber(L, 3, 1);
   tk_ivec_t *cands = lua_isnil(L, 4) ? NULL : tk_ivec_peek(L, 4, "candidates");
   uint64_t n_rows = 0;
+  lua_getfield(L, 1, "blocks");
+  int src_idx = lua_gettop(L);
+  int conv = !lua_isnil(L, src_idx) && tk_spectral_densify(L, src_idx, NULL, 0, 0, 0, 0);
+  if (conv) lua_setfield(L, 1, "blocks");
   uint64_t *fp = tk_spectral_row_fps(L, &n_rows);
+  if (conv) {
+    lua_pushvalue(L, src_idx);
+    lua_setfield(L, 1, "blocks");
+  }
+  lua_pop(L, 1);
   if (!fp)
     return luaL_error(L, "uniform_landmarks: expected blocks or x (or oom)");
   lua_getfield(L, 1, "strata");

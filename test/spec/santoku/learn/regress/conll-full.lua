@@ -32,7 +32,6 @@ local cfg = {
   tok = { ngram_min = 1, ngram_max = 5 },
   emb = { n_landmarks = 1024 * 8, },
   tag = {
-    kernel = { "matern" },
     nu = { def = 3 },
     gamma = { def = 0.79742469 },
     lambda = { def = 5.9753931e-07 },
@@ -49,7 +48,6 @@ local cfg = {
     folds = 5,
   },
   type = {
-    kernel = { "matern" },
     nu = { def = 3 },
     gamma = { def = 1.652384 },
     lambda = { def = 9.0469132e-07 },
@@ -129,8 +127,8 @@ test("conll-full", function ()
       k = 1,
       each = util.make_ridge_log(stopwatch),
     }))
-    str.printf("[Tag] kernel=%s lambda=%.8g offset=%.8g %s\n",
-      best.kernel, best.lambda, decider:offset(), sw())
+    str.printf("[Tag] nu=%d gamma=%.8g lambda=%.8g offset=%.8g %s\n",
+      best.nu, best.gamma, best.lambda, decider:offset(), sw())
     local function tag_decode (split, B)
       local _, X = util.tokenize_blocks(cfg.tag.blocks, split.texts,
         { toks = toks, focus = B.seg, tokens = B.seg })
